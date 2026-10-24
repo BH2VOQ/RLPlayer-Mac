@@ -25,9 +25,16 @@ if(MSVC)
 elseif(APPLE)
   # macOS：分发基线是 Apple Silicon + Intel 通用二进制。x86-64-v2 这种 -march 在
   # arm64 上会直接报错，所以这里按架构给基线（armv8 / x86-64-v2 各自成立）。
+  # ⚠️ -ffp-contract=off（PLATFORM.md §13.11，2026-10-24）：Windows 基线 x86-64-v2
+  #   无 FMA 指令（乘/加各自舍入），arm64 有 FMA 且 -ffast-math 会把 a*b+c 收缩成
+  #   fmadd（一次舍入）。1-bit SDM 环路对轨迹比特级敏感：实测一个收缩差异就足以
+  #   让 65536 样本中翻转 1 个 ±1，无窗相干 FFT 分析把它摊成全带 -60.7 dB 平地板，
+  #   SNR 从 86.5 掉到 51.6（test_modulator FAIL）。关闭收缩 = 与 Windows 基线同一套
+  #   算术。需要 FMA 的热点以后用显式 std::fma（跨平台确定性）补回。
   add_compile_options(-Wall -Wextra -Wno-unused-parameter)
   add_compile_options(-O3 -ffast-math -fno-finite-math-only
-                      -fhonor-nans -fhonor-infinities -fno-math-errno)
+                      -fhonor-nans -fhonor-infinities -fno-math-errno
+                      -ffp-contract=off)
   add_compile_options(-fno-strict-aliasing)
   add_compile_options($<$<CONFIG:Release>:-DNDEBUG>)
 else()

@@ -29,6 +29,7 @@
 //      - 带外噪声积分从 1-bit 的 -0.6 dB 降至 -37~-49 dB，极大减轻后级模拟滤波负担。
 #pragma once
 #include "kaiser.h"
+#include "hp_real.h"
 #include <vector>
 #include <complex>
 #include <cmath>
@@ -36,6 +37,12 @@
 #include <string>
 #include <algorithm>
 #include <cstddef>
+
+// ⚠️ NTF 设计精度（PLATFORM.md §13.11）：design_ntf_poly / design_chebyshev_ntf_poly /
+//    design_ec_ntf_poly 一律用 hp::DD（double-double，~106 位尾数），不用 long double。
+//    原因：macOS arm64 与 MSVC x64 的 long double 都是 double（53 位），1-bit 5 阶带内
+//    SNR 掉到 51.6 dB；x87 的 80 位才够。dd 在所有平台给出同一套更精确的系数。
+//    逐样本 process() 仍是 double——设计期精度与运行期无关。
 
 namespace rta::dsp {
 
@@ -88,18 +95,19 @@ struct NtfPoly {
 
 // 经典数字 Butterworth 高通 NTF
 inline NtfPoly design_ntf_poly(int order, double fcHz, double fs) {
-    const long double wc = 2.0L * (long double)kPi * (long double)fcHz / (long double)fs;
-    const long double Wc = std::tan(wc / 2.0L);
+    const hp::DD PI = hp::pi();
+    const hp::DD wc = hp::DD(2.0) * PI * hp::DD(fcHz) / hp::DD(fs);
+    const hp::DD Wc = hp::tan(wc / hp::DD(2.0));
 
-    const std::complex<long double> ONE(1.0L, 0.0L);
-    std::vector<std::complex<long double>> den(1, ONE);
+    const hp::CDD ONE(1.0, 0.0);
+    std::vector<hp::CDD> den(1, ONE);
     for (int k = 0; k < order; ++k) {
-        const long double theta = (long double)kPi * (2.0L * k + order + 1.0L) / (2.0L * order);
-        const std::complex<long double> p_lp(std::cos(theta), std::sin(theta));
-        const std::complex<long double> a = Wc / p_lp;
-        const std::complex<long double> f0 = ONE - a;
-        const std::complex<long double> f1 = -(ONE + a);
-        std::vector<std::complex<long double>> nd(den.size() + 1, std::complex<long double>(0.0L, 0.0L));
+        const hp::DD theta = PI * hp::DD(2.0 * k + order + 1) / hp::DD(2.0 * order);
+        const hp::CDD p_lp(hp::cos(theta), hp::sin(theta));
+        const hp::CDD a = Wc / p_lp;
+        const hp::CDD f0 = ONE - a;
+        const hp::CDD f1 = -(ONE + a);
+        std::vector<hp::CDD> nd(den.size() + 1, hp::CDD(0.0, 0.0));
         for (size_t i = 0; i < den.size(); ++i) {
             nd[i]     += den[i] * f0;
             nd[i + 1] += den[i] * f1;
@@ -109,10 +117,10 @@ inline NtfPoly design_ntf_poly(int order, double fcHz, double fs) {
 
     NtfPoly out;
     out.order = order;
+    // 归一化在 dd 域做完再转 double（原版先转 double 再除，多一次 53 位舍入）
+    const hp::DD d0 = den[0].re;
     out.d.resize(den.size());
-    for (size_t i = 0; i < den.size(); ++i) out.d[i] = (double)den[i].real();
-    const double d0 = out.d[0];
-    for (auto& v : out.d) v /= d0;
+    for (size_t i = 0; i < den.size(); ++i) out.d[i] = (den[i].re / d0).to_double();
 
     out.b.assign((size_t)order + 1, 0.0);
     double binom = 1.0;
@@ -128,8 +136,9 @@ inline NtfPoly design_ntf_poly(int order, double fcHz, double fs) {
 
 // 7 阶 Chebyshev NTF：极点按椭圆分布，提供可控的带外增益与更陡峭的高通滚降
 inline NtfPoly design_chebyshev_ntf_poly(int order, double fcHz, double fs, double oobGainDb = 4.5) {
-    const long double wc = 2.0L * (long double)kPi * (long double)fcHz / (long double)fs;
-    const long double Wc = std::tan(wc / 2.0L);
+    const hp::DD PI = hp::pi();
+    const hp::DD wc = hp::DD(2.0) * PI * hp::DD(fcHz) / hp::DD(fs);
+    const hp::DD Wc = hp::tan(wc / hp::DD(2.0));
 
     double rip = (oobGainDb - 4.0) * 0.4;
     if (rip < 0.01) rip = 0.01;
@@ -137,18 +146,18 @@ inline NtfPoly design_chebyshev_ntf_poly(int order, double fcHz, double fs, doub
 
     double eps = std::sqrt(std::pow(10.0, rip / 10.0) - 1.0);
     double gamma = std::pow(1.0 / eps + std::sqrt(1.0 / (eps * eps) + 1.0), 1.0 / (double)order);
-    long double r1 = 0.5L * (long double)(gamma - 1.0 / gamma);
-    long double r2 = 0.5L * (long double)(gamma + 1.0 / gamma);
+    const hp::DD r1 = hp::DD(0.5) * hp::DD(gamma - 1.0 / gamma);
+    const hp::DD r2 = hp::DD(0.5) * hp::DD(gamma + 1.0 / gamma);
 
-    const std::complex<long double> ONE(1.0L, 0.0L);
-    std::vector<std::complex<long double>> den(1, ONE);
+    const hp::CDD ONE(1.0, 0.0);
+    std::vector<hp::CDD> den(1, ONE);
     for (int k = 0; k < order; ++k) {
-        const long double theta = (long double)kPi * (2.0L * k + 1.0L) / (2.0L * (long double)order);
-        const std::complex<long double> p_lp(-r1 * std::sin(theta), r2 * std::cos(theta));
-        const std::complex<long double> a = Wc / p_lp;
-        const std::complex<long double> f0 = ONE - a;
-        const std::complex<long double> f1 = -(ONE + a);
-        std::vector<std::complex<long double>> nd(den.size() + 1, std::complex<long double>(0.0L, 0.0L));
+        const hp::DD theta = PI * hp::DD(2.0 * k + 1.0) / hp::DD(2.0 * order);
+        const hp::CDD p_lp(-r1 * hp::sin(theta), r2 * hp::cos(theta));
+        const hp::CDD a = Wc / p_lp;
+        const hp::CDD f0 = ONE - a;
+        const hp::CDD f1 = -(ONE + a);
+        std::vector<hp::CDD> nd(den.size() + 1, hp::CDD(0.0, 0.0));
         for (size_t i = 0; i < den.size(); ++i) {
             nd[i]     += den[i] * f0;
             nd[i + 1] += den[i] * f1;
@@ -158,10 +167,9 @@ inline NtfPoly design_chebyshev_ntf_poly(int order, double fcHz, double fs, doub
 
     NtfPoly out;
     out.order = order;
+    const hp::DD d0 = den[0].re;
     out.d.resize(den.size());
-    for (size_t i = 0; i < den.size(); ++i) out.d[i] = (double)den[i].real();
-    const double d0 = out.d[0];
-    for (auto& v : out.d) v /= d0;
+    for (size_t i = 0; i < den.size(); ++i) out.d[i] = (den[i].re / d0).to_double();
 
     out.b.assign((size_t)order + 1, 0.0);
     double binom = 1.0;
@@ -177,18 +185,19 @@ inline NtfPoly design_chebyshev_ntf_poly(int order, double fcHz, double fs, doub
 
 // EC 变体：通带内分布 Chebyshev 零点，实现音频带内的扩展误差消除
 inline NtfPoly design_ec_ntf_poly(int order, double fcHz, double fs, double fBandHz = 20000.0) {
-    const long double wc = 2.0L * (long double)kPi * (long double)fcHz / (long double)fs;
-    const long double Wc = std::tan(wc / 2.0L);
+    const hp::DD PI = hp::pi();
+    const hp::DD wc = hp::DD(2.0) * PI * hp::DD(fcHz) / hp::DD(fs);
+    const hp::DD Wc = hp::tan(wc / hp::DD(2.0));
 
-    const std::complex<long double> ONE(1.0L, 0.0L);
-    std::vector<std::complex<long double>> den(1, ONE);
+    const hp::CDD ONE(1.0, 0.0);
+    std::vector<hp::CDD> den(1, ONE);
     for (int k = 0; k < order; ++k) {
-        const long double theta = (long double)kPi * (2.0L * k + order + 1.0L) / (2.0L * order);
-        const std::complex<long double> p_lp(std::cos(theta), std::sin(theta));
-        const std::complex<long double> a = Wc / p_lp;
-        const std::complex<long double> f0 = ONE - a;
-        const std::complex<long double> f1 = -(ONE + a);
-        std::vector<std::complex<long double>> nd(den.size() + 1, std::complex<long double>(0.0L, 0.0L));
+        const hp::DD theta = PI * hp::DD(2.0 * k + order + 1) / hp::DD(2.0 * order);
+        const hp::CDD p_lp(hp::cos(theta), hp::sin(theta));
+        const hp::CDD a = Wc / p_lp;
+        const hp::CDD f0 = ONE - a;
+        const hp::CDD f1 = -(ONE + a);
+        std::vector<hp::CDD> nd(den.size() + 1, hp::CDD(0.0, 0.0));
         for (size_t i = 0; i < den.size(); ++i) {
             nd[i]     += den[i] * f0;
             nd[i + 1] += den[i] * f1;
@@ -198,10 +207,9 @@ inline NtfPoly design_ec_ntf_poly(int order, double fcHz, double fs, double fBan
 
     NtfPoly out;
     out.order = order;
+    const hp::DD d0 = den[0].re;
     out.d.resize(den.size());
-    for (size_t i = 0; i < den.size(); ++i) out.d[i] = (double)den[i].real();
-    const double d0 = out.d[0];
-    for (auto& v : out.d) v /= d0;
+    for (size_t i = 0; i < den.size(); ++i) out.d[i] = (den[i].re / d0).to_double();
 
     std::vector<double> zero_w;
     const double wB = 2.0 * kPi * fBandHz / fs;
@@ -213,20 +221,20 @@ inline NtfPoly design_ec_ntf_poly(int order, double fcHz, double fs, double fBan
         zero_w = { 0.0 };
     }
 
-    std::vector<long double> num = { 1.0L, -1.0L };
+    std::vector<hp::DD> num = { hp::DD(1.0), hp::DD(-1.0) };
     for (size_t i = 1; i < zero_w.size(); ++i) {
-        long double c = std::cos((long double)zero_w[i]);
-        std::vector<long double> next(num.size() + 2, 0.0L);
+        const hp::DD c = hp::cos(hp::DD(zero_w[i]));
+        std::vector<hp::DD> next(num.size() + 2, hp::DD(0.0));
         for (size_t j = 0; j < num.size(); ++j) {
-            next[j]     += num[j] * 1.0L;
-            next[j + 1] += num[j] * (-2.0L * c);
-            next[j + 2] += num[j] * 1.0L;
+            next[j]     += num[j] * hp::DD(1.0);
+            next[j + 1] += num[j] * (hp::DD(-2.0) * c);
+            next[j + 2] += num[j] * hp::DD(1.0);
         }
         num.swap(next);
     }
 
     out.b.resize(num.size());
-    for (size_t i = 0; i < num.size(); ++i) out.b[i] = (double)num[i];
+    for (size_t i = 0; i < num.size(); ++i) out.b[i] = num[i].to_double();
 
     const size_t n = (size_t)order + 1;
     out.p.assign(n, 0.0);
@@ -323,6 +331,17 @@ public:
     // （实测 arm64 上 100 万样本差 21 万个点）。加 noinline 让两条路径走同一份代码。
     // 这是可移植性修复，不影响数值本身（-O0/-O2 下本来就一致）。
     __attribute__((noinline)) double process(double x) {
+#if defined(__clang__)
+        // ⚠️ 关闭 FMA 收缩（PLATFORM.md §13.11，2026-10-24 定位）：
+        //   acc += c*x 在 arm64 的 -O3 -ffast-math 下会被收缩成 fmadd（乘加一次舍入）；
+        //   Windows 基线 x86-64-v2 无 FMA 指令，乘/加各自舍入。1-bit 环路是混沌系统，
+        //   轨迹的比特级差异会把带内底噪从 -95 dB 抬到 -61 dB（idle tones），
+        //   实测 SNR 51.6 dB（fail）vs 关闭收缩 86.5 dB（pass）。
+        //   注意：这不是【设计精度】问题——NTF 系数在 53 位就已收敛（hp::DD 106 位
+        //   设计与 53 位设计系数仅差第 15 位有效数字，SNR 不动）；是【运行期算术形态】
+        //   问题。与上方 noinline 同属一类：让所有路径/平台走同一套算术。
+        #pragma clang fp contract(off)
+#endif
         const size_t sz = (size_t)effectiveOrder_ + 1;
 
         // w[n]：只用到 e[n-1..] 与 w[n-1..]
