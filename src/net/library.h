@@ -178,7 +178,10 @@ private:
     Library() = default;
 
     void saveRootsLocked();
-    void saveIndexLocked();
+    // 索引落盘拆成两步（2026-10-25）：buildIndexLocked() 在锁内构造快照字符串，
+    // writeIndex() 在锁外写盘 —— 否则整份索引（实测 12000 首 1.28 MB）写盘期间持锁，HTTP 单线程服务整个卡住。
+    std::string buildIndexLocked() const;
+    void writeIndex(const std::string& snapshot);
     const std::vector<LibAlbum>& albumVecLocked() const;
     static std::string readFile(const std::string& p);
     static void writeFile(const std::string& p, const std::string& s);
@@ -360,13 +363,20 @@ inline std::string Library::confLeaf(const char* base) {
     if (!port.empty() && port != "8899") name += ".p" + port;
     return name;
 }
+// 2026-10-25 修「重打包会静默删掉用户曲库索引」：
+//   旧实现硬编码 '\\' 拼路径。'\\' 只是 Windows 的分隔符；macOS/Linux 上它是**合法文件名字符**，
+//   于是索引实际落在 `<exe 目录的父目录>` 下、文件名是 `MacOS\rlplayer-index.tsv`
+//   （实测产物：RLPlayer.app/Contents/MacOS\rlplayer-index.tsv，看着像目录其实是一个文件）。
+//   读写都走同一个错路径，所以运行时从不报错，只有在重新打包 rm -rf Contents/* 时才暴露 ——
+//   用户曲库索引被静默删掉，下次启动全量重扫。
+//   改用平台层唯一的拼接入口 rta::platform::join（platform/path.h:41，自动用 native_separator()）。
 inline std::string Library::confPath() {
     const std::string d = libDataDir(), leaf = confLeaf("rlplayer-library.conf");
-    return d.empty() ? leaf : d + "\\" + leaf;
+    return d.empty() ? leaf : rta::platform::join(d, leaf);
 }
 inline std::string Library::indexPath() {
     const std::string d = libDataDir(), leaf = confLeaf("rlplayer-index.tsv");
-    return d.empty() ? leaf : d + "\\" + leaf;
+    return d.empty() ? leaf : rta::platform::join(d, leaf);
 }
 inline std::string Library::readFile(const std::string& p) {
     std::ifstream f(p, std::ios::binary);
@@ -508,7 +518,11 @@ inline void Library::saveRootsLocked() {
     writeFile(confPath(), s);
 }
 
-inline void Library::saveIndexLocked() {
+// 2026-10-25 修「扫描完成时整个服务卡住」：索引格式化 + 写盘（实测 12000 首 1.28 MB）原先在持 mtx_ 时做，
+//   写盘期间所有查询（albums/search/trackAt）全部排队，HTTP 单线程服务直接失去响应。
+//   现在拆成两步：锁内只把 tracks_ 快照格式化成字符串（纯内存，微秒级），锁外再落盘。
+//   调用方约定：本函数**不再自己加锁**，必须在已持 mtx_ 的临界区里调用（旧名带 Locked 就是这个意思）。
+inline std::string Library::buildIndexLocked() const {
     std::string s;
     s.reserve(tracks_.size() * 160 + 64);
     // 索引格式版本：改动「扫描产出字段」时必须 +1，否则旧索引会因为 mtime+size 未变而被整份复用，
@@ -530,33 +544,61 @@ inline void Library::saveIndexLocked() {
         s += lib_clean_field(t.genre);
         s += '\n';
     }
-    writeFile(indexPath(), s);
+    return s;
+}
+// 锁外落盘（调用方持锁时构造好的快照）。writeFile 自己走 tmp+rename，原子性由它保证。
+inline void Library::writeIndex(const std::string& snapshot) {
+    writeFile(indexPath(), snapshot);
 }
 
 inline const std::vector<LibAlbum>& Library::albumVecLocked() const {
     if (!albumsDirty_) return albums_;
     albums_.clear();
+    // 2026-10-25 修「扫描时整个服务卡死 / Failed to fetch / 几分钟才出声 / 切标签数据消失」的根因：
+    //   旧实现把「碟号推断」放在 std::sort 的比较器里（每个比较都比两次目录扫描），
+    //   比较器被调用 O(n log n) 次，而 albumVecLocked 全程持着 mtx_。
+    //   entity_find_album_dir_for_track → entity_dir_is_album → entity_scan_dir →
+    //   fs::directory_iterator（整目录扫描），于是 12000 首 / 1000 张专辑（disc=0 的绝大多数 FLAC）
+    //   冷 albums() 实测 555 ms；HTTP 服务是单线程（webui.h），这期间所有请求排队
+    //   → 前端 fetch 超时（Failed to fetch）、播放请求排在后面（几分钟才出声）、切标签取数失败。
+    //   修法：① 按「父目录」缓存目录推断结果，同一张专辑的 12 首只扫一次目录；
+    //        ② 排序前把每首曲目的 discForSort 一次性算好，比较器只读这个 vector，零文件系统调用。
+    //   （entity_find_album_dir_for_track 的输入只有 trackPath.parent_path()，所以按父目录缓存是等价的。）
+    std::map<std::string, std::pair<std::string, int>> dirCache;   // 父目录 -> {专辑目录, 推断碟号}
+    std::vector<int> discForSort(tracks_.size(), 0);              // 排序用碟号（比较器只读）
+    auto albumDirFor = [&dirCache](const std::string& trackPath) -> const std::pair<std::string, int>& {
+        const std::string parent = u8s(p8(trackPath).parent_path().u8string());
+        auto it = dirCache.find(parent);
+        if (it == dirCache.end()) {
+            int inferred = 0;
+            const auto albDir = rta::meta::entity_find_album_dir_for_track(p8(trackPath), &inferred);
+            const std::string albStr = albDir.empty() ? std::string() : u8s(albDir.u8string());
+            it = dirCache.emplace(parent, std::make_pair(albStr, inferred)).first;
+        }
+        return it->second;
+    };
     std::map<std::string, size_t> byKey;
     for (size_t i = 0; i < tracks_.size(); ++i) {
         const auto& t = tracks_[i];
         std::string aName = t.album;
         std::string aArtist = t.albumArtist.empty() ? t.artist : t.albumArtist;
-        int discForSort = t.discNo;
-        if (aName.empty() || discForSort == 0) {
-            int inferredDisc = 0;
-            const auto albDir = rta::meta::entity_find_album_dir_for_track(p8(t.path), &inferredDisc);
-            if (!albDir.empty()) {
+        int discForSortVal = t.discNo;
+        if (aName.empty() || discForSortVal == 0) {
+            const auto& ad = albumDirFor(t.path);
+            if (!ad.first.empty()) {
                 if (aName.empty()) {
                     std::string a, c;
-                    rta::meta::entity_parse_album_circle(u8s(albDir.filename().u8string()), a, c);
-                    aName = a.empty() ? u8s(albDir.filename().u8string()) : a;
+                    const std::string dirName = u8s(p8(ad.first).filename().u8string());
+                    rta::meta::entity_parse_album_circle(dirName, a, c);
+                    aName = a.empty() ? dirName : a;
                 }
-                if (discForSort == 0 && inferredDisc > 0) discForSort = inferredDisc;
+                if (discForSortVal == 0 && ad.second > 0) discForSortVal = ad.second;
             } else if (aName.empty()) {
                 std::string dn = u8s(p8(t.path).parent_path().filename().u8string());
                 aName = dn.empty() ? "未知专辑" : dn;
             }
         }
+        discForSort[i] = discForSortVal;
         const std::string rawKey = aArtist + "\x1f" + aName;
         auto it = byKey.find(rawKey);
         if (it == byKey.end()) {
@@ -572,12 +614,11 @@ inline const std::vector<LibAlbum>& Library::albumVecLocked() const {
         if (t.hasCover) a.hasCover = true;
         if (a.year == 0) a.year = t.year;
     }
+    // 比较器只读 discForSort / tracks_，【绝不允许】在这里出现任何文件系统调用（见上面的根因说明）
     for (auto& a : albums_) {
         std::sort(a.idx.begin(), a.idx.end(), [&](size_t x, size_t y) {
             const auto& p = tracks_[x]; const auto& q = tracks_[y];
-            int pDisc = p.discNo, qDisc = q.discNo;
-            if (pDisc == 0) rta::meta::entity_find_album_dir_for_track(p8(p.path), &pDisc);
-            if (qDisc == 0) rta::meta::entity_find_album_dir_for_track(p8(q.path), &qDisc);
+            const int pDisc = discForSort[x], qDisc = discForSort[y];
             if (pDisc != qDisc) return pDisc < qDisc;
             if (p.trackNo != q.trackNo) return p.trackNo < q.trackNo;
             return p.path < q.path;
@@ -684,14 +725,18 @@ inline void Library::startScan(bool forceFull) {
         if (n == 0) {
             const auto tEnd = std::chrono::steady_clock::now();
             const double durMs = std::chrono::duration<double, std::milli>(tEnd - tStart).count();
-            std::lock_guard<std::mutex> lk(mtx_);
-            tracks_.clear();
-            albumsDirty_ = true;
-            lastScanMs_ = durMs;
-            lastScanProbed_ = 0;
-            lastScanCached_ = 0;
-            scanMsg_ = "完成：0 首";
-            saveIndexLocked();
+            std::string snap;
+            {
+                std::lock_guard<std::mutex> lk(mtx_);
+                tracks_.clear();
+                albumsDirty_ = true;
+                lastScanMs_ = durMs;
+                lastScanProbed_ = 0;
+                lastScanCached_ = 0;
+                scanMsg_ = "完成：0 首";
+                snap = buildIndexLocked();   // 锁内只构造快照（见 buildIndexLocked 注释）
+            }
+            writeIndex(snap);                // 锁外写盘
             scanning_.store(false);
             return;
         }
@@ -769,6 +814,7 @@ inline void Library::startScan(bool forceFull) {
         const auto tEnd = std::chrono::steady_clock::now();
         const double durMs = std::chrono::duration<double, std::milli>(tEnd - tStart).count();
 
+        std::string snap;
         {
             std::lock_guard<std::mutex> lk(mtx_);
             tracks_.swap(fresh);
@@ -778,8 +824,11 @@ inline void Library::startScan(bool forceFull) {
             lastScanCached_ = cachedCount.load();
             const size_t nt = tracks_.size();
             scanMsg_ = "完成：" + std::to_string(nt) + " 首 (" + std::to_string((int)(durMs + 0.5)) + " ms)";
-            saveIndexLocked();
+            // 锁内只构造快照：tracks_ 已 swap 完，这份字符串就是那一刻的完整索引，
+            // 出锁后再写盘不会破坏原子性（writeFile 内部 tmp + rename 是原子的）。
+            snap = buildIndexLocked();
         }
+        writeIndex(snap);   // 锁外写盘：整份索引落盘期间不再阻塞任何查询
         scanning_.store(false);
     });
 }

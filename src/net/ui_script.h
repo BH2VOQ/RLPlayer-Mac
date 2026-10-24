@@ -114,9 +114,89 @@ function nam(p) {
 }
 function base(p) { return String(p || '').replace(/[/\\]+$/, ''); }
 function join(a, b) { return base(a) + SEP + b; }
+// 261025-01 #7/#10：api() 必须自己兜住网络失败，不能把 rejection 甩给上百个调用点。
+// 为什么修在这一层：全文件 api(...) 调用 99 处，绝大多数只写 .then 不写 .catch。服务端是单线程，
+// 冷算曲库时（实测 12000 首的 /api/lib/albums 要 625ms，期间并发打进来的 /api/lib/stats
+// 从 20ms 被拖到 594ms）fetch 会超时/连接重置 → promise reject → 没有接管者 → 界面永远停在
+// 「加载中…」或一片空白。用户报的「Failed to fetch」和「切标签数据消失」是同一个根因。
+// 契约：本函数**永不 reject**。成功返回后端 JSON；失败返回 {ok:false,_err,error} 兜底对象，
+// 保证所有既有 .then 拿到的都是对象而不是 rejection。
+// 兜底对象**故意不填** albums/tracks/items/roots 这些集合字段：填 [] 会让 loadLibStats 把
+// S.roots 清空、把「曲目数」显示成 0 —— 那正是用户说的「数据消失」本身。改成由各 loader
+// 用 j._err 显式分支（见 loadAlbums / loadTracks / loadLibStats / loadQ）。
+var API_FAIL_TOAST_AT = 0;      // 上次「网络错误」toast 的时间戳；0 = 还没提示过（哨兵）
+function apiFail(msg) {
+  return { ok: false, _err: msg, error: msg };
+}
+function apiFailNote(msg) {
+  // 节流 5 秒：tick 是 400ms 节奏的轮询，断线时每条失败都弹 toast 等于刷屏，
+  // 反而盖住底栏状态。只报第一声，之后静默（恢复后自动继续）。
+  // 用「0 = 还没提示过」这个显式哨兵，而不是靠 `now - 0` 恰好很大：
+  // 后者在时钟起点为 0 的环境（测试注入的假时钟、或某些单调时钟起点）里会退化成每次都弹。
+  var now = Date.now();
+  if (API_FAIL_TOAST_AT !== 0 && now - API_FAIL_TOAST_AT < 5000) return;
+  API_FAIL_TOAST_AT = now || 1;   // 时钟恰好为 0 时也要留下"已提示过"的痕迹，别退回哨兵
+  toast(msg);
+}
 function api(u, body) {
   var opt = body === undefined ? {} : { method: 'POST', body: body };
-  return fetch(u, opt).then(function (r) { return r.json(); });
+  // 两个阶段都可能失败：① fetch 本身（超时 / 连接重置 / 服务没起来）；
+  // ② r.json()（响应被截断，或拿到的是 HTML 错误页而不是 JSON）。一次 .catch 同时覆盖两者。
+  return fetch(u, opt).then(function (r) { return r.json(); }).then(function (j) {
+    if (!j || typeof j !== 'object') { apiFailNote('后端响应格式异常'); return apiFail('后端响应格式异常'); }
+    return j;
+  }).catch(function (e) {
+    // 面向用户的话**不能**带浏览器的英文原文：用户报的那串「Failed to fetch」正是它，
+    // 原样回显等于把同一句抱怨还给他，而且没有任何可操作的下一步。
+    // 统一成中文动作提示；原始信息只留在 _raw 里给排查用（不参与任何界面渲染）。
+    var raw = (e && e.message) ? String(e.message) : '请求失败';
+    apiFailNote('无法连接后端（服务正忙或已退出），稍后重试');
+    var o = apiFail('无法连接后端（服务正忙或已退出），稍后重试');
+    o._raw = raw;
+    return o;
+  });
+}
+
+/* ---------------- 视图短时缓存（261025-01 #5/#10） ----------------
+   /api/lib/albums 在 12000 首库冷算要 625ms（主控实测），而 .nav 的 onclick 每次点标签都无条件
+   loadAlbums('')/loadArtists()/loadTracks('')；「艺术家」页更是把同一份 /api/lib/albums 再算一遍。
+   来回点两次标签 = 两次全库重算，单线程后端被自己的前端堵住，后面的请求排队超时 → 用户说的
+   「切标签重复扫描」+「切标签数据消失」。
+   规则：
+     * 同 key 且 5 秒内重复进入 → 直接复用上次的 JSON 重渲染，不发请求；
+     * 带搜索词（q 非空）的请求**永不缓存**：搜索是用户主动查询，结果必须新鲜；
+     * 扫描完成（S.scanning true→false）、请求扫描、添加/移除库根 → viewCacheClear() 全部失效。
+   为什么缓存 JSON 而不是缓存 HTML：S.albums / S.currentTracks 是别的视图的输入（艺术家页、
+   「播放全部」、右键入队都读它们），只缓存 HTML 会让画面与状态脱节，出现"看得见却点不动"。 */
+var VIEWC = { TTL: 5000, m: {} };
+function viewCacheGet(k) {
+  if (!k) return null;
+  var e = VIEWC.m[k];
+  if (!e) return null;
+  if (Date.now() - e.t > VIEWC.TTL) { delete VIEWC.m[k]; return null; }
+  return e.v;
+}
+function viewCachePut(k, v) { if (k) VIEWC.m[k] = { t: Date.now(), v: v }; }
+function viewCacheClear() { VIEWC.m = {}; }
+
+// 曲库结构变了（添加/移除库根、请求扫描）：缓存必须立刻失效 + 轮询立刻切到扫描节奏。
+// 为什么合成一个入口：这些动作散在 6 个地方（快捷面板、设置页、队列页的移除按钮…），
+// 历史上"两处各写一份"必然漏一处 —— 漏掉的那一处就是"新加的目录扫完了却看不见"。
+function libChanged() {
+  viewCacheClear();
+  pollKick();
+}
+
+// 统一的「取数失败」占位。比留一片空白、或把「没有匹配的曲目」当成结果顶上来更诚实
+// （后者会让用户以为搜索确实没命中，实际是后端没响应），并给一个明确的重试入口。
+function listErrorBox(what, retryFn) {
+  var box = D('list'); if (!box) return;
+  box.innerHTML = '<div class="card empty-card" style="max-width:520px;margin:clamp(24px,10vh,90px) auto 0;padding:24px 26px;background:var(--phbg);border:1px solid var(--line);border-radius:12px;text-align:center">' +
+    '<div style="font-size:14px;font-weight:650;margin-bottom:6px">' + esc(what || '读取失败') + '</div>' +
+    '<div style="color:var(--mut);font-size:12.5px;line-height:1.7;margin-bottom:14px">' +
+    '后端没有响应或连接被重置（服务可能正在扫描 / 冷算曲库）。数据没有丢失，稍后重试即可。</div>' +
+    '<button class="btn pri" id=lstRetry>重试</button></div>';
+  if (D('lstRetry')) D('lstRetry').onclick = function () { if (retryFn) retryFn(); };
 }
 function params() {
   var dv = D('sDSD').value;              // 0 | dop64 | dop128 | dop256 | nat64 | nat128 | nat256
@@ -310,33 +390,44 @@ function albumCardHtml(a, i) {
 }
 function loadAlbums(q, title) {
   S.view = 'albums';
+  // 只有「不带搜索词」的整库视图才进缓存：带 q 的是用户主动查询，必须每次新鲜（261025-01 #5）。
+  var ck = (q ? '' : 'albums|');
+  var hit = viewCacheGet(ck);
+  if (hit) { renderAlbumsFrom(hit, q, title); return; }
   head(title || '专辑', '加载中…', '');
   api('/api/lib/albums?q=' + encodeURIComponent(q || '')).then(function (j) {
-    S.albums = j.albums || [];
-    if (!S.albums.length) {
-      head(title || '专辑', '0 张', '');
-      D('list').innerHTML = '<div class=empty>' +
-        (S.roots.length ? '库里还没有音乐<br><span style="font-size:11.5px">在右侧「设置」里添加音乐目录，然后点重新扫描</span>'
-                        : '还没有设置音乐目录<br><span style="font-size:11.5px">打开右侧「设置」→ 添加目录 → 重新扫描</span>') +
-        '</div>';
-      return;
-    }
-    head(title || '专辑', S.albums.length + ' 张专辑', '');
-    var h = '<div class=grid>';
-    S.albums.forEach(function (a, i) {
-      h += albumCardHtml(a, i);
-    });
-    h += '</div>';
-    D('list').innerHTML = h;
-    Array.prototype.forEach.call(D('list').querySelectorAll('.card'), function (e) {
-      var a = S.albums[+e.dataset.i];
-      e.onclick = function (ev) {
-        if (ev.target.closest && ev.target.closest('.pl')) { playAlbum(a.k, 0); ev.stopPropagation(); return; }
-        openAlbum(a.k);
-      };
-      e.oncontextmenu = function (ev) { ev.preventDefault(); enqueueAlbum(a.k); };
-    });
-  }).catch(function (e) { D('list').innerHTML = '<div class=empty>' + esc(e) + '</div>'; });
+    if (S.view !== 'albums') return;   // 已切走 → 丢弃，别覆写当前页面（与 loadTracks 同一类守卫）
+    if (j && j._err) { head(title || '专辑', '读取失败', ''); listErrorBox('专辑列表读取失败', function () { loadAlbums(q, title); }); return; }
+    if (ck) viewCachePut(ck, j);
+    renderAlbumsFrom(j, q, title);
+  }).catch(function (e) { listErrorBox('专辑列表读取失败', function () { loadAlbums(q, title); }); });
+}
+
+function renderAlbumsFrom(j, q, title) {
+  S.albums = (j && j.albums) || [];
+  if (!S.albums.length) {
+    head(title || '专辑', '0 张', '');
+    D('list').innerHTML = '<div class=empty>' +
+      (S.roots.length ? '库里还没有音乐<br><span style="font-size:11.5px">在右侧「设置」里添加音乐目录，然后点重新扫描</span>'
+                      : '还没有设置音乐目录<br><span style="font-size:11.5px">打开右侧「设置」→ 添加目录 → 重新扫描</span>') +
+      '</div>';
+    return;
+  }
+  head(title || '专辑', S.albums.length + ' 张专辑', '');
+  var h = '<div class=grid>';
+  S.albums.forEach(function (a, i) {
+    h += albumCardHtml(a, i);
+  });
+  h += '</div>';
+  D('list').innerHTML = h;
+  Array.prototype.forEach.call(D('list').querySelectorAll('.card'), function (e) {
+    var a = S.albums[+e.dataset.i];
+    e.onclick = function (ev) {
+      if (ev.target.closest && ev.target.closest('.pl')) { playAlbum(a.k, 0); ev.stopPropagation(); return; }
+      openAlbum(a.k);
+    };
+    e.oncontextmenu = function (ev) { ev.preventDefault(); enqueueAlbum(a.k); };
+  });
 }
 
 /* ---------------- 收藏（心形喜好标记 / 261023-03 第5条） ---------------- */
@@ -830,37 +921,50 @@ function enqueueAlbum(k) {
 /* ---------------- 艺术家 ---------------- */
 function loadArtists() {
   S.view = 'artists';
+  // 艺术家页是**纯派生视图**：数据源就是 /api/lib/albums 那一份（后端没有独立端点）。
+  // 所以它跟专辑页共用同一个缓存键 —— 先点「专辑」再点「艺术家」不该再全库重算一次，
+  // 这正是用户说的「切标签重复扫描」（261025-01 #5）。
+  var ck = 'albums|';
+  var hit = viewCacheGet(ck);
+  if (hit) { renderArtistsFrom(hit); return; }
   head('艺术家', '加载中…', '');
   api('/api/lib/albums').then(function (j) {
-    var m = {}, order = [];
-    (j.albums || []).forEach(function (a) {
-      var k = a.artist || '未知艺术家';
-      if (!m[k]) { m[k] = { n: 0, d: 0, cv: false, key: a.k }; order.push(k); }
-      m[k].n++; m[k].d += a.dur;
-      if (a.cv) m[k].cv = true, m[k].key = a.k;
-    });
-    order.sort(function (x, y) { return x.localeCompare(y, 'zh'); });
-    head('艺术家', order.length + ' 位', '');
-    if (!order.length) { D('list').innerHTML = '<div class=empty>库里还没有音乐</div>'; return; }
-    var h = '<div class=grid style="grid-template-columns:repeat(auto-fill,minmax(150px,1fr))">';
-    order.forEach(function (k) {
-      var v = m[k];
-      // 头像统一圆形（评审 #4）：占位字母**始终**渲染在底层，封面用 <img> 覆盖并 onerror 自隐。
-      // 以前用 background-image：封面文件缺失时整块纯黑、连首字母都没有（Irotas/RØSE 就是这样）。
-      var phChar = (String(k).trim().slice(0, 1) || '?').toUpperCase();
-      h += '<div class=card data-a="' + esc(k) + '"><div class=cv style="border-radius:50%;overflow:hidden">' +
-           '<div class=ph style="border-radius:50%">' + esc(phChar) + '</div>' +
-           (v.cv ? '<img src="/api/lib/cover?k=' + v.key + '" loading=lazy alt="" style="position:absolute;inset:0;width:100%;height:100%;object-fit:cover;border-radius:50%" onerror="this.style.display=\'none\'">' : '') + '</div>' +
-           '<div class=nm>' + esc(k) + '</div><div class=ar>' + v.n + ' 张专辑</div></div>';
-    });
-    h += '</div>';
-    D('list').innerHTML = h;
-    Array.prototype.forEach.call(D('list').querySelectorAll('.card'), function (e) {
-      e.onclick = function () {
-        var who = e.dataset.a;
-        openArtistProfile(who);
-      };
-    });
+    if (S.view !== 'artists') return;   // 已切走 → 丢弃，别覆写当前页面
+    if (j && j._err) { head('艺术家', '读取失败', ''); listErrorBox('艺术家列表读取失败', loadArtists); return; }
+    viewCachePut(ck, j);
+    renderArtistsFrom(j);
+  }).catch(function () { listErrorBox('艺术家列表读取失败', loadArtists); });
+}
+
+function renderArtistsFrom(j) {
+  var m = {}, order = [];
+  ((j && j.albums) || []).forEach(function (a) {
+    var k = a.artist || '未知艺术家';
+    if (!m[k]) { m[k] = { n: 0, d: 0, cv: false, key: a.k }; order.push(k); }
+    m[k].n++; m[k].d += a.dur;
+    if (a.cv) m[k].cv = true, m[k].key = a.k;
+  });
+  order.sort(function (x, y) { return x.localeCompare(y, 'zh'); });
+  head('艺术家', order.length + ' 位', '');
+  if (!order.length) { D('list').innerHTML = '<div class=empty>库里还没有音乐</div>'; return; }
+  var h = '<div class=grid style="grid-template-columns:repeat(auto-fill,minmax(150px,1fr))">';
+  order.forEach(function (k) {
+    var v = m[k];
+    // 头像统一圆形（评审 #4）：占位字母**始终**渲染在底层，封面用 <img> 覆盖并 onerror 自隐。
+    // 以前用 background-image：封面文件缺失时整块纯黑、连首字母都没有（Irotas/RØSE 就是这样）。
+    var phChar = (String(k).trim().slice(0, 1) || '?').toUpperCase();
+    h += '<div class=card data-a="' + esc(k) + '"><div class=cv style="border-radius:50%;overflow:hidden">' +
+         '<div class=ph style="border-radius:50%">' + esc(phChar) + '</div>' +
+         (v.cv ? '<img src="/api/lib/cover?k=' + v.key + '" loading=lazy alt="" style="position:absolute;inset:0;width:100%;height:100%;object-fit:cover;border-radius:50%" onerror="this.style.display=\'none\'">' : '') + '</div>' +
+         '<div class=nm>' + esc(k) + '</div><div class=ar>' + v.n + ' 张专辑</div></div>';
+  });
+  h += '</div>';
+  D('list').innerHTML = h;
+  Array.prototype.forEach.call(D('list').querySelectorAll('.card'), function (e) {
+    e.onclick = function () {
+      var who = e.dataset.a;
+      openArtistProfile(who);
+    };
   });
 }
 function renderAlbumSubset(who) {
@@ -1369,25 +1473,58 @@ function renderWorkVersions(workTitle, composer, j) {
     };
   });
 }
-function loadTracks(q) {
+// 261025-01 #6：以前这里把「只显示 300」当成后端的天花板，前端一句话都不说 —— 用户搜一首歌，
+// 明明库里有 1200 个命中，界面上只有 300 行，也没有任何「还有更多」的提示，看起来就是"丢歌"。
+// 现在：① 后端支持 ?limit= 且回报 total（真实命中总数）；② 前端按 total 与已加载条数对比，
+// 显示「共 N 条，当前显示前 M 条」并给「加载更多」（limit 翻倍）。
+// 前端**不硬编码任何上限**：首屏不发 limit（用后端默认），翻倍时以"已加载条数 ×2"为准。
+function loadTracks(q, moreLimit) {
   S.view = 'tracks';
   S.tracksQuery = q || '';
   // 评审：搜索结果页顶栏搜索框不回显当前关键词 → 这里同步（用户正在输入时值本来就相同，不会打断输入）
   if (D('q') && String(D('q').value) !== String(q || '')) D('q').value = q || '';
+  // 缓存只管「曲目」整库视图；带搜索词的一律现取（用户主动查询，结果必须新鲜）。
+  var ck = (q ? '' : 'tracks|');
+  if (!moreLimit) {
+    S.tracksLimit = 0;   // 新的查询/新的进入 → 上限归零，下次「加载更多」从"已加载条数"重新翻倍
+    var hit = viewCacheGet(ck);
+    if (hit) { S.currentTracks = hit.tracks || []; S.tracksTotal = hit.total; renderTracksView(); return; }
+  }
   head(q ? ('搜索：' + q) : '曲目', '搜索中…', '');
-  api('/api/lib/search?q=' + encodeURIComponent(q || '')).then(function (j) {
+  var u = '/api/lib/search?q=' + encodeURIComponent(q || '');
+  if (moreLimit) u += '&limit=' + moreLimit;   // 只有「加载更多」才带 limit，首屏用后端默认
+  api(u).then(function (j) {
     if (S.view !== 'tracks') return;   // 已切走（261023-01 #4 同类问题）→ 丢弃，别覆写当前页面
+    if (j && j._err) { head(q ? ('搜索：' + q) : '曲目', '读取失败', ''); listErrorBox('曲目读取失败', function () { loadTracks(q, moreLimit); }); return; }
     var t = j.tracks || [];
+    // total = 后端回报的真实命中总数。老后端没有这个字段时回退 j.n（= 本次返回条数），
+    // 此时 total 必然等于已加载条数 ⟹ 不显示「加载更多」，而不是假装还有更多。
+    var total = (typeof j.total === 'number') ? j.total : ((typeof j.n === 'number') ? j.n : t.length);
     S.currentTracks = t;
+    S.tracksTotal = total;
+    if (ck) viewCachePut(ck, { tracks: t, total: total });
     renderTracksView();
-  });
+  }).catch(function () { listErrorBox('曲目读取失败', function () { loadTracks(q, moreLimit); }); });
+}
+
+// 「加载更多」：把上限翻倍重新请求。为什么是翻倍而不是 +300：
+// 后端没有承诺固定页大小，翻倍对任意初始上限都成立，也不会出现"翻倍后仍不够、要连点十次"。
+function loadMoreTracks() {
+  var loaded = (S.currentTracks || []).length;
+  var cur = S.tracksLimit || loaded || 1;
+  S.tracksLimit = cur * 2;
+  loadTracks(S.tracksQuery || '', S.tracksLimit);
 }
 
 function renderTracksView() {
   if (S.view !== 'tracks') return;
   var t = S.currentTracks || [];
   var q = S.tracksQuery || '';
-  head(q ? ('搜索：' + q) : '曲目', t.length + ' 首', '');
+  var total = (typeof S.tracksTotal === 'number' && S.tracksTotal >= t.length) ? S.tracksTotal : t.length;
+  var hasMore = total > t.length;
+  // 标题上的数字口径：还有没加载完的时候写成「M / N 首」，让"被截断"这件事在第一眼就成立，
+  // 而不是等用户滚到底才发现少了一半（261025-01 #6）。
+  head(q ? ('搜索：' + q) : '曲目', hasMore ? (t.length + ' / ' + total + ' 首') : (t.length + ' 首'), '');
   if (!t.length) { D('list').innerHTML = '<div class=empty>没有匹配的曲目</div>'; return; }
 
   var sortMode = S.trackSort || 'default';
@@ -1436,7 +1573,20 @@ function renderTracksView() {
          '<div class=du>' + fmt(x.dur) + '</div></div>';
   });
   h += '</div>';
+  // 「共 N 条，当前显示前 M 条」+「加载更多」（261025-01 #6）。
+  // 只在真的被截断时出现：没截断时不占任何垂直空间，避免每页都挂一条无意义的提示。
+  if (hasMore) {
+    h += '<div class=morebar style="display:flex;flex-direction:column;align-items:center;gap:8px;padding:8px 20px 32px">' +
+         '<div style="font-size:12px;color:var(--mut2)">共 ' + total + ' 条，当前显示前 ' + t.length + ' 条</div>' +
+         '<button class="btn pri" id=trMore>加载更多</button></div>';
+  }
   D('list').innerHTML = h;
+
+  if (D('trMore')) D('trMore').onclick = function () {
+    D('trMore').disabled = true;
+    D('trMore').textContent = '加载中…';
+    loadMoreTracks();
+  };
 
   if (D('trackSort')) {
     D('trackSort').onchange = function () {
@@ -1569,7 +1719,10 @@ function playRemote(it) {
 
 /* ---------------- 队列 ---------------- */
 function loadQ() {
-  api('/api/queue').then(function (j) {
+  // return 出去：pollSchedule 靠它做 in-flight 互斥（上一发没回来就跳过这一拍）。
+  return api('/api/queue').then(function (j) {
+    // 兜底对象没有 items/index：原地不动，保住上一次真实队列（清空队列 = 用户看得见的"数据消失"）。
+    if (j && j._err) return;
     S.q = { items: j.items || [], index: j.index || 0 };
     if (D('sShuf')) D('sShuf').checked = !!j.shuffle;
     if (D('sRep') && j.repeat !== undefined) { D('sRep').value = String(j.repeat); applyRep(j.repeat); }
@@ -1642,7 +1795,15 @@ function loadMeta(f) {
 
 /* ---------------- 状态 ---------------- */
 function tick() {
-  api('/api/status').then(function (j) {
+  // return 出去：pollSchedule 靠它做 in-flight 互斥（见 pollSchedule 的注释）。
+  return api('/api/status').then(function (j) {
+    // 兜底对象没有任何播放字段：若照常往下写，S.playing/S.dur/S.pos 会全部变 undefined，
+    // 底栏进度条归零、按钮变成"停止"——断线时看起来像"播放自己停了"。直接丢弃这一次即可，
+    // 下一个 tick 恢复后自然接上（进度条本来就是靠绝对 pos 重算，不需要补帧）。
+    if (j && j._err) return;
+    // 播放状态翻转（开始/暂停/停止）要**立刻**重排轮询节奏：否则按下播放后要等空闲档的
+    // 2.5 秒才切到 400ms，进度条像卡住；反之停止后还在 400ms 空转就是白烧后端。
+    if (S.playing !== !!j.playing || S.paused !== !!j.paused) pollKick();
     S.playing = !!j.playing; S.paused = !!j.paused; S.dur = j.dur; S.pos = j.pos;
     // 2026-10-23 #1：底栏 bit-perfect 徽标的数据源（后端权威判定，见 /api/status 的 bitPerfect 字段）
     S.bpState = j.bitPerfect || ""; S.bpWhy = j.bitPerfectWhy || "";
@@ -2016,8 +2177,19 @@ function renderLibStats(j) {
   box.innerHTML = h;
 }
 function loadLibStats() {
-  api('/api/lib/stats').then(function (j) {
+  // return 出去：pollSchedule 靠它做 in-flight 互斥。
+  return api('/api/lib/stats').then(function (j) {
+    // 兜底对象（api() 的失败返回）**没有** scanning/roots/tracks 字段：这时必须原地不动。
+    // 以前若把失败当成功处理，S.roots 会被清成 []、曲目数会显示 0，正是用户说的「数据消失」。
+    // 直接 return 即可：界面保留上一次的真实数据，只由 api() 那一层弹一次 toast 说明断线。
+    if (j && j._err) return;
+    var wasScanning = S.scanning;
     S.scanning = !!j.scanning;
+    // 扫描结束（true→false）必须让视图缓存失效：否则用户点回「专辑」看到的还是扫描前那份
+    // 5 秒内的旧快照，新扫出来的歌"看不见"（261025-01 #5 的显式失效条件之一）。
+    if (wasScanning && !S.scanning) { viewCacheClear(); }
+    // 扫描开始/结束都影响 stats 与 queue 的节奏（扫描中 stats 要 2 秒看进度），立刻重排。
+    if (wasScanning !== S.scanning) pollKick();
     S.roots = j.roots || [];
     renderLibStats(j);
     if (S.scanning) {
@@ -2038,7 +2210,7 @@ function loadLibStats() {
       D('roots2').innerHTML = h || '<div style="font-size:11.5px;color:#5b6478">还没有添加目录</div>';
       Array.prototype.forEach.call(D('roots2').querySelectorAll('button'), function (b) {
         b.onclick = function () {
-          api('/api/lib/roots', 'remove=' + encodeURIComponent(b.dataset.r)).then(function () { loadLibStats(); toast('已移除'); });
+          api('/api/lib/roots', 'remove=' + encodeURIComponent(b.dataset.r)).then(function () { libChanged(); loadLibStats(); toast('已移除'); });
         };
       });
     }
@@ -2050,6 +2222,9 @@ function loadLibStats() {
 function loadRemote(id) {
   S.view = 'remote';
   api('/api/src/browse?id=' + encodeURIComponent(id || '')).then(function (j) {
+    // 兜底对象的字段名是 error 而不是 err，不先拦就会掉进"正常分支"渲染成空列表，
+    // 看起来像"服务器里什么都没有"（实际是后端没响应）。
+    if (j && j._err) { head('流媒体', '读取失败', ''); listErrorBox('流媒体目录读取失败', function () { loadRemote(id || ''); }); return; }
     if (j.err && !(j.items || []).length) {
       // 评审 #7：以前错误态整屏只留一行裸文本，像"页面坏了"。改成带说明 + 去配置入口的空态卡。
       head('流媒体', '', '');
@@ -2416,6 +2591,8 @@ D('vol').addEventListener('change', saveSettings);
 D('bUpnp').onclick = function () {
   D('upnpList').innerHTML = '<div style="font-size:11px;color:#5b6478">正在搜索（约 2 秒）…</div>';
   api('/api/upnp').then(function (j) {
+    // 断线时报「没发现 DLNA 渲染器」是错的结论（用户会去查数播），必须区分"没发现"和"没问到"。
+    if (j && j._err) { D('upnpList').innerHTML = '<div style="font-size:11px;color:#e8654b">搜索失败：后端无响应</div>'; return; }
     if (!j.devices || !j.devices.length) {
       D('upnpList').innerHTML = '<div style="font-size:11px;color:#5b6478">没发现 DLNA 渲染器</div>';
       return;
@@ -2432,6 +2609,8 @@ D('bUpnp').onclick = function () {
 };
 D('bNet').onclick = function () {
   api('/api/net').then(function (j) {
+    // 兜底对象没有 port：不拦的话这里会渲染成「http://127.0.0.1:undefined/」，比空白更误导。
+    if (j && j._err) { D('netMsg').textContent = '网络信息读取失败，稍后重试'; return; }
     D('netMsg').innerHTML = '本机：http://127.0.0.1:' + j.port + '/<br>' +
       (j.lan ? ('局域网：http://' + esc(j.ip) + ':' + j.port + '/（已开启）')
              : ('局域网访问：未开启（用 <code>--lan</code> 启动即可以 http://' + esc(j.ip) + ':' + j.port + '/ 访问）'));
@@ -2465,17 +2644,17 @@ D('seek').onclick = function (e) {
   doSeek((e.clientX - r.left) / r.width);
 };
 D('bScan').onclick = function () {
-  api('/api/lib/scan', '').then(function () { toast('开始扫描音乐库'); loadLibStats(); });
+  api('/api/lib/scan', '').then(function () { toast('开始扫描音乐库'); libChanged(); loadLibStats(); });
 };
 D('bRescan').onclick = function () {
-  api('/api/lib/scan', 'full=1').then(function () { toast('重新读取全部标签'); loadLibStats(); });
+  api('/api/lib/scan', 'full=1').then(function () { toast('重新读取全部标签'); libChanged(); loadLibStats(); });
 };
 D('bAddRoot').onclick = function () {
   var d = D('sRoot').value.trim();
   if (!d) { toast('请填写目录'); return; }
   api('/api/lib/roots', 'add=' + encodeURIComponent(d)).then(function (j) {
     if (!j.ok) { toast(j.error || '添加失败'); return; }
-    D('sRoot').value = ''; toast('已添加，正在建立索引'); loadLibStats();
+    D('sRoot').value = ''; toast('已添加，正在建立索引'); libChanged(); loadLibStats();
     api('/api/lib/scan', '');
   });
 };
@@ -4289,6 +4468,8 @@ function renderSettingsPage() {
   loadDeviceList();
   // GPU 后端：把 AMD 标成本机真实状态（哪块卡、后端有没有编出来）
   api('/api/gpu').then(function (j) {
+    // 断线时不能报成「本目录无 rtagpu.dll / 无 CUDA」——那是会让用户去重装包的假结论。
+    if (j && j._err) return;
     var sg = D('sp_gpu');
     if (sg) {
       Array.prototype.forEach.call(sg.options, function (o) {
@@ -4314,6 +4495,8 @@ function renderSettingsPage() {
   }).catch(function () { });
   // ASIO 驱动列表（Native DSD 需要 ASIO 后端）
   api('/api/asio').then(function (j) {
+    // 同理：断线不能报成「本机未检测到 ASIO 驱动」，那是会误导用户去装驱动的假结论。
+    if (j && j._err) { var am = D('sp_asiomsg'); if (am) am.textContent = 'ASIO 驱动清单读取失败'; return; }
     var d = j.drivers || [];
     ASIO_DRIVERS = d;
     backendHint();
@@ -4348,10 +4531,10 @@ function renderSettingsPage() {
     if (!d) { toast('请填目录'); return; }
     api('/api/lib/roots', 'add=' + encodeURIComponent(d)).then(function (j) {
       if (!j.ok) { toast(j.error || '添加失败'); return; }
-      toast('已添加，正在扫描'); loadLibStats(); api('/api/lib/scan', '');
+      toast('已添加，正在扫描'); libChanged(); loadLibStats(); api('/api/lib/scan', '');
     });
   };
-  D('sp_rescan').onclick = function () { api('/api/lib/scan', 'full=1').then(function () { toast('开始重新扫描'); loadLibStats(); }); };
+  D('sp_rescan').onclick = function () { api('/api/lib/scan', 'full=1').then(function () { toast('开始重新扫描'); libChanged(); loadLibStats(); }); };
   if (D('sp_scanthreads')) {
     D('sp_scanthreads').onchange = function () {
       ADV.scanThreads = parseInt(this.value, 10) || 0;
@@ -5427,7 +5610,7 @@ function drawRoots() {
   box.innerHTML = h || '<div style="font-size:11.5px;color:var(--mut2)">还没有添加目录</div>';
   Array.prototype.forEach.call(box.querySelectorAll('button'), function (b) {
     b.onclick = function () {
-      api('/api/lib/roots', 'remove=' + encodeURIComponent(b.dataset.r)).then(function () { loadLibStats(); toast('已移除'); });
+      api('/api/lib/roots', 'remove=' + encodeURIComponent(b.dataset.r)).then(function () { libChanged(); loadLibStats(); toast('已移除'); });
     };
   });
 }
@@ -5529,6 +5712,8 @@ function renderQueuePage() {
   head('播放队列', '', '');
   api('/api/queue').then(function (j) {
     if (S.view !== 'queue') return;   // 已切走 → 丢弃，别覆写当前页面
+    // 兜底对象没有 items：原地不动（否则队列页会显示"队列是空的"，看起来像被清空了）。
+    if (j && j._err) { listErrorBox('队列读取失败', renderQueuePage); return; }
     S.q = { items: j.items || [], index: j.index || 0 };
     var n = S.q.items.length;
     head('播放队列', n ? (n + ' 首') : '', n ? '<button class=btn id=qClrAll>清空队列</button>' : '');
@@ -6250,6 +6435,94 @@ D('bRep').onclick = cycleRep;
 // 快捷面板 #sRep 被别处改动（如设置页保存）时，图标状态也要跟上
 if (D('sRep')) D('sRep').addEventListener('change', function () { applyRep(this.value); });
 
+/* ---------------- 自适应轮询（261025-01 缺陷 3） ----------------
+   改之前是三条**固定**定时器（用 setInterval 挂的，永不停止也永不降频）：
+     tick         每 400ms  → /api/status，每秒 2.5 个请求
+     loadQ        每 3000ms → /api/queue，每秒 0.33 个
+     loadLibStats 每 2000ms → /api/lib/stats，每秒 0.5 个
+   合计**空闲时也有约 3.3 请求/秒**。后端是单线程 accept：主控实测 12000 首库冷算
+   /api/lib/albums 要 625ms，这期间并发打进来的 /api/lib/stats 从 20ms 被拖到 **594ms**。
+   只要阻塞超过一个轮询周期，请求就开始堆积 → 队列越滚越长 → fetch 超时 →
+   用户看到的就是「Failed to fetch」。所以轮询必须**跟着状态走**，而不是一直全速跑。
+
+   三档节奏（改后）：
+     播放中（S.playing && !S.paused）：status 400ms / queue 3s / stats 30s
+     扫描中（S.scanning）：            status 2.5s / queue 15s / stats 2s（进度条靠 stats 喂）
+     空闲（停止或暂停）：               status 2.5s / queue 15s / stats 30s
+     页面隐藏（document.hidden）：      全部暂停；可见时立刻各补一次再按当时状态恢复
+   两条口径说明：
+     * status 只有**播放中**才需要 400ms（进度条要顺）；扫描进度由 stats 提供，不靠 status。
+     * stats 只有**扫描中**才需要 2s；播放中它没有任何快速变化的内容，30s 足够。
+
+   为什么用 setTimeout 链而不是 setInterval：只有链式才能**每次重新算间隔**，
+   而且不会在上一发还没回来时叠上去（见下面的 in-flight 互斥）——那正是堆积的来源。
+   注意 status 在「暂停」时也降到慢档：暂停后 pos 不再变化，没有理由 400ms 去问一次。 */
+var POLL = {
+  playStatus: 400, playQueue: 3000,   // 播放中：只有这两条需要快
+  scanStats: 2000, scanQueue: 15000,  // 扫描中：只有 stats（进度）需要快
+  idleStatus: 2500, idleQueue: 15000, idleStats: 30000,   // 空闲/暂停
+  t1: 0, t2: 0, t3: 0,
+  busy: { status: false, queue: false, stats: false },   // 上一发还在路上就不再发（防堆积）
+  started: false
+};
+function pollHidden() { return !!(document.hidden || document.visibilityState === 'hidden'); }
+// 当前该用哪一档。两个维度：**是否在播**（决定 status/queue）与**是否在扫**（决定 stats）。
+// 分开判断而不是"三选一档"：扫描中也可能同时在播，那时 status 仍要 400ms、stats 仍要 2s。
+function pollGap(kind) {
+  var playing = S.playing && !S.paused;
+  if (kind === 'status') return playing ? POLL.playStatus : POLL.idleStatus;
+  if (kind === 'queue') return playing ? POLL.playQueue : (S.scanning ? POLL.scanQueue : POLL.idleQueue);
+  return S.scanning ? POLL.scanStats : POLL.idleStats;
+}
+// 一次「发请求 → 回来后 → 再排下一次」。间隔从**上一次完成时刻**起算（不是从发起时刻），
+// 所以后端慢的时候自然拉长间隔、不会叠加 —— 这才是"请求不再堆积"的真正机制。
+// fn 需要返回 promise 才能让 in-flight 互斥生效；tick/loadQ/loadLibStats 都 return api(...)。
+function pollSchedule(kind, fn) {
+  var timerKey = kind === 'status' ? 't1' : (kind === 'queue' ? 't2' : 't3');
+  if (pollHidden()) { POLL[timerKey] = 0; return; }   // 隐藏时不排下一发
+  var gap = pollGap(kind);
+  POLL[timerKey] = setTimeout(function () {
+    if (pollHidden()) { POLL[timerKey] = 0; return; }
+    if (POLL.busy[kind]) { pollSchedule(kind, fn); return; }   // 上一发没回来：跳过这一拍，别叠加
+    POLL.busy[kind] = true;
+    var done = function () { POLL.busy[kind] = false; pollSchedule(kind, fn); };
+    try {
+      var r = fn();
+      if (r && typeof r.then === 'function') r.then(done, done);
+      // 三个轮询函数都必须 return api(...)，否则这里会同步走 done()，in-flight 互斥形同虚设：
+      // 那正是改前"上一发没回来又发下一发"的堆积路径。保留这个 else 只是防御未来有人改了返回值。
+      else done();
+    } catch (e) { done(); }
+  }, gap);
+}
+function pollStart() {
+  if (POLL.started) return;
+  POLL.started = true;
+  pollSchedule('status', tick);
+  pollSchedule('queue', loadQ);
+  pollSchedule('stats', loadLibStats);
+}
+// 状态变化（开始播放 / 暂停 / 扫描开始或结束）时**立即重排**，否则用户按下播放后
+// 要等最多 30 秒（空闲档）才切到 400ms 档，进度条会像卡住。重排 = 清掉旧定时器再排一次。
+function pollKick() {
+  ['t1', 't2', 't3'].forEach(function (k) { if (POLL[k]) { clearTimeout(POLL[k]); POLL[k] = 0; } });
+  if (!POLL.started) return;
+  if (pollHidden()) return;   // 隐藏中：等 visibilitychange 再恢复
+  pollSchedule('status', tick);
+  pollSchedule('queue', loadQ);
+  pollSchedule('stats', loadLibStats);
+}
+document.addEventListener('visibilitychange', function () {
+  if (pollHidden()) {
+    // 隐藏：立刻停掉所有定时器。为什么要显式清：隐藏时已经排上的那一次还会烧掉，
+    // 而且用户切回前台前不该有任何请求（后台标签页白烧后端，正是"卡顿"的隐形来源）。
+    ['t1', 't2', 't3'].forEach(function (k) { if (POLL[k]) { clearTimeout(POLL[k]); POLL[k] = 0; } });
+    return;
+  }
+  // 可见：**立刻各补一次**（用户切回来要看到的是最新状态，不是几十秒前的），再按当时状态恢复节奏。
+  if (POLL.started) { tick(); loadQ(); loadLibStats(); pollKick(); }
+});
+
 /* ---------------- 启动 ---------------- */
 initFavs();
 if (D('npFavBtn')) D('npFavBtn').onclick = function (ev) { if (S.lastCur) toggleFav(S.lastCur, ev); };
@@ -6262,9 +6535,7 @@ loadAlbums('');
 loadQ();
 loadSrcConfig();
 tick();
-setInterval(tick, 400);
-setInterval(loadQ, 3000);
-setInterval(loadLibStats, 2000);
+pollStart();
 )JSEOF";
 }
 

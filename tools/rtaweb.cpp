@@ -117,6 +117,7 @@ using rta::render::SinkOpenOpts;
 #include <map>
 #include <ctime>
 #include <csignal>
+#include <cstdlib>                 // strtol：--port 严格解析（2026-10-25 等号形式）
 
 namespace fs = std::filesystem;
 using namespace rta;
@@ -388,8 +389,45 @@ struct PlayerState {
     std::atomic<long long> dspTotalUs{0};   // 累计 DSP 处理耗时 (微秒)
     std::atomic<long long> dspChunks{0};    // 处理的 DSP 块数
 
+    // ---- 播放线程生命周期（2026-10-25 并发化配套）----
+    // 旧版 HTTP 是单线程串行，ps.th 的「停→join→重新起线程」天然互斥。
+    // 改成每连接一个工作线程后，多个请求可能同时点播放/停止/切歌，于是出现两个真 UB：
+    //   ① 对 joinable 的 std::thread 赋值 = std::terminate（整个进程消失）；
+    //   ② 两个线程同时 join 同一个 thread 也是 UB。
+    // 修法：所有「停/join/起线程」都在这把 ctlMtx 下串行（锁序固定 ctlMtx → g_q.mtx，
+    // 播放线程自身只拿 g_q.mtx，不会反向，因此没有死锁环）。
+    std::mutex ctlMtx;
+
     void joinIfDone() {
+        std::lock_guard<std::mutex> lk(ctlMtx);
+        joinIfDoneLocked();
+    }
+    // 调用方已持有 ctlMtx 时用这个（避免同一把锁重入）
+    void joinIfDoneLocked() {
         if (th.joinable()) th.join();
+    }
+    // 起新播放线程：同样必须在 ctlMtx 下，先 join 掉旧的再接管 th
+    void startLocked(std::thread t) {
+        if (th.joinable()) th.join();
+        th = std::move(t);
+    }
+    // 一次原子操作：停旧播放线程 → join → 清 stop → 起新的。
+    // 三个播放入口（/api/play、/api/lib/play、/api/skip）都走这里，
+    // 保证并发点播放时不会出现「两个线程都在写 ps.current」或 thread 赋值 terminate。
+    template <class Fn>
+    void restart(Fn&& makeThread) {
+        std::lock_guard<std::mutex> lk(ctlMtx);
+        stop.store(true);
+        joinIfDoneLocked();
+        stop.store(false);
+        startLocked(std::thread(std::forward<Fn>(makeThread)));
+    }
+    // 只停不启（/api/stop、/api/clear、转投投放会话前）：同样原子，避免与并发播放请求撞车
+    void stopJoin() {
+        std::lock_guard<std::mutex> lk(ctlMtx);
+        stop.store(true);
+        joinIfDoneLocked();
+        stop.store(false);
     }
 };
 static PlayerState g_ps;
@@ -4129,16 +4167,49 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
             return j.str();
         }
         if (rq.path.rfind("/api/lib/search", 0) == 0) {
-            std::string q;
-            const size_t p = rq.path.find("?q=");
-            if (p != std::string::npos) q = urlDecode(rq.path.substr(p + 3));
-            const auto hits = lib.search(q, 300);
+            // 搜索（2026-10-25 修用户 bug #6「列表只显示 300」）：
+            //   旧版把上限硬编码成 300 —— 库里命中再多也只返回前 300 条，用户看到的就是
+            //   "搜索列表只有 300 首"，且没有任何字段告诉他还有多少。
+            //   现在：?limit= 可调（默认 300，上限 5000，非法值回落默认），并新增 "total"
+            //   报告真实命中总数，前端才能显示"共 N 条 / 已显示 M 条"。
+            // 取参数到 '&' 为止：旧代码 q 用 substr 一路吃到结尾，?q=a&limit=1000 会把
+            // "&limit=1000" 当成关键词的一部分（那样 limit 永远拿不到）。
+            auto qs_val = [&](const char* key) -> std::string {
+                const std::string pat = std::string(key) + "=";
+                size_t p = rq.path.find("?" + pat);
+                if (p == std::string::npos) p = rq.path.find("&" + pat);
+                if (p == std::string::npos) return std::string();
+                p += 1 + pat.size();
+                const size_t e = rq.path.find('&', p);
+                return urlDecode(rq.path.substr(p, e == std::string::npos ? std::string::npos : e - p));
+            };
+            const std::string q = qs_val("q");
+            size_t limit = 300;
+            {
+                const std::string ls = qs_val("limit");
+                if (!ls.empty()) {
+                    bool digits = true;
+                    for (char ch : ls) if (ch < '0' || ch > '9') { digits = false; break; }
+                    const long long v = digits ? atoll(ls.c_str()) : 0;
+                    if (digits && v >= 1) limit = (v > 5000) ? 5000 : (size_t)v;
+                    // 非数字 / 0 / 越界一律保持默认 300（绝不因为一个坏参数把整个列表变空）
+                }
+            }
+            const auto hits = lib.search(q, limit);
+            // total = 真实命中总数。lib.search 的 limit 只是截断，拿总数只能再扫一遍
+            // （12000 首线性扫两次可接受）；hits 没打满 limit 时它就是总数，省掉第二次扫描。
+            size_t total = hits.size();
+            if (hits.size() >= limit) total = lib.search(q, (size_t)-1).size();
             std::ostringstream j;
-            j << "{\"ok\":true,\"q\":\"" << jesc(q) << "\",\"n\":" << hits.size() << ",\"tracks\":[";
+            j << "{\"ok\":true,\"q\":\"" << jesc(q) << "\",\"n\":" << hits.size()
+              << ",\"limit\":" << limit << ",\"total\":" << total << ",\"tracks\":[";
+            // 用 first 而不是循环下标：trackAt 失败被 continue 跳过时，下标判断会在开头多吐一个逗号
+            bool firstHit = true;
             for (size_t i = 0; i < hits.size(); ++i) {
                 rta::net::LibTrack t;
                 if (!lib.trackAt(hits[i], t)) continue;
-                if (i) j << ",";
+                if (!firstHit) j << ",";
+                firstHit = false;
                 j << "{\"title\":\"" << jesc(t.title) << "\",\"artist\":\"" << jesc(t.artist)
                   << "\",\"album\":\"" << jesc(t.album) << "\",\"dur\":" << t.duration
                   << ",\"sr\":" << t.sampleRate << ",\"bits\":" << t.bits
@@ -4191,14 +4262,12 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
             }
             queue_save();
             g_params = p;
-            ps.stop.store(true);
-            ps.joinIfDone();
-            ps.stop.store(false);
+            // 停旧线程 + join + 起新线程 = 一次原子操作（并发点播放不再撞 thread 赋值 terminate）
+            ps.restart([p, start] { return queue_thread(p, start); });
             { std::lock_guard<std::mutex> lk(ps.mtx); ps.error.clear(); ps.current = paths[start]; }
             ps.played.store(0);
             ps.total.store(0);
             ps.playing.store(true);
-            ps.th = std::thread(queue_thread, p, start);
             return "{\"ok\":true,\"count\":" + std::to_string(paths.size()) + "}";
         }
         // 整张专辑加入队列（不打断当前播放）
@@ -4443,10 +4512,8 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
         if (!valid_utf8(p.file)) return utf8_path_reject(p.file);
         g_params = p;
 
-        // 先停掉上一次
-        ps.stop.store(true);
-        ps.joinIfDone();
-        ps.stop.store(false);
+        // 先停掉上一次（原子：并发点播放时不会撞 thread 赋值 terminate）
+        ps.stopJoin();
         // 一条会话原则（261024-01 #9）：开始新的本地播放时，停掉可能还在跑的投放会话，
         // 避免本机声卡与网络渲染器同时出声（两套控制互相打架）。
         g_upnpPlayer.store(false);
@@ -4488,7 +4555,8 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
         }
         ps.playing.store(true);
         const size_t st0 = g_q.index;
-        ps.th = std::thread(queue_thread, p, st0);
+        // restart 内部会 join 旧线程（上一步 stopJoin 已把它停掉），再接管新线程
+        ps.restart([p, st0] { return queue_thread(p, st0); });
         return "{\"ok\":true}";
     }
 
@@ -5372,9 +5440,7 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
 
     if (rq.path.rfind("/api/clear", 0) == 0) {
         ct = "application/json; charset=utf-8";
-        ps.stop.store(true);
-        ps.joinIfDone();
-        ps.stop.store(false);
+        ps.stopJoin();          // 原子停线程（并发请求下不再撞 thread 赋值 terminate）
         ps.playing.store(false);
         // 清空队列同时结束投放会话（否则渲染器还会继续播上一首）
         g_upnpPlayer.store(false);
@@ -5411,9 +5477,7 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
         const size_t q = rq.path.find("?dir=");
         if (q != std::string::npos) dir = atoi(rq.path.c_str() + q + 5);
 
-        ps.stop.store(true);
-        ps.joinIfDone();
-        ps.stop.store(false);
+        ps.stopJoin();          // 原子停线程
 
         PlayParams p = g_params;
         size_t target = 0;
@@ -5455,7 +5519,7 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
             return "{\"ok\":true,\"index\":" + std::to_string(target) + ",\"upnp\":true}";
         }
         ps.playing.store(true);
-        ps.th = std::thread(queue_thread, p, target);
+        ps.restart([p, target] { return queue_thread(p, target); });
         return "{\"ok\":true,\"index\":" + std::to_string(target) + "}";
     }
 
@@ -5544,9 +5608,7 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
             if (p.port == 0) p.port = 8912;
             // 一条会话原则（261024-01 #9）：手动「开始投放」先停本地播放，
             // 避免本机声卡与网络渲染器同时出声；播放器状态交给投放会话接管前先清零。
-            ps.stop.store(true);
-            ps.joinIfDone();
-            ps.stop.store(false);
+            ps.stopJoin();      // 原子停线程
             ps.playing.store(false);
             ps.paused.store(false);
             g_upnpPlayer.store(false);
@@ -6928,11 +6990,9 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
 
     if (rq.path.rfind("/api/stop", 0) == 0) {
         ct = "application/json; charset=utf-8";
-        ps.stop.store(true);
+        ps.stopJoin();          // 原子停线程（stop 标志已在其中置位并复位）
         ps.pauseReq.store(false);
         ps.seekReq.store(-1.0);
-        ps.joinIfDone();
-        ps.stop.store(false);
         ps.paused.store(false);
         ps.playing.store(false);
         {
@@ -7085,9 +7145,32 @@ int main(int argc, char** argv) {
     uint16_t port = 8899;
     bool lan = false;
     bool noBrowser = false;
+    // 端口解析（2026-10-25 修）：macOS 壳 tools/mac_host.mm:62 传的是 "--port=%u"（等号形式），
+    // 旧代码只认 "--port N"（空格形式）→ 等号形式被静默忽略、永远绑 8899，
+    // 于是壳里 8899..8910 的端口回退全是死代码（8899 被占时只能报「无法启动播放服务」）。
+    // 现在两种形式都认；非法/越界值一律回落到默认 8899，绝不静默绑到 0（= 随机端口）。
+    auto parse_port = [](const std::string& s, uint16_t& out) -> bool {
+        if (s.empty()) return false;
+        for (char ch : s) if (ch < '0' || ch > '9') return false;   // 只接受纯十进制（不接受 "-1"/"89x"）
+        const long v = strtol(s.c_str(), nullptr, 10);
+        if (v < 1 || v > 65535) return false;
+        out = (uint16_t)v;
+        return true;
+    };
     for (int i = 1; i < argc; ++i) {
         const std::string k = argv[i];
-        if (k == "--port" && i + 1 < argc) port = (uint16_t)atoi(argv[++i]);
+        if (k == "--port" && i + 1 < argc) {
+            uint16_t v = 0;
+            if (parse_port(argv[++i], v)) port = v;
+            else printf("!! --port 的值 \"%s\" 不是合法端口（1..65535），回落到默认 %u\n",
+                        argv[i], (unsigned)port);
+        }
+        else if (k.rfind("--port=", 0) == 0) {
+            uint16_t v = 0;
+            if (parse_port(k.substr(7), v)) port = v;
+            else printf("!! --port= 的值 \"%s\" 不是合法端口（1..65535），回落到默认 %u\n",
+                        k.c_str() + 7, (unsigned)port);
+        }
         else if (k == "--lan") lan = true;
         else if (k == "--no-browser") noBrowser = true;   // macOS .app 模式：界面已自动打开
     }
@@ -7222,13 +7305,15 @@ int main(int argc, char** argv) {
     printf("  按 Ctrl+C 退出\n");
 #endif
     while (!g_exitReq.load()) std::this_thread::sleep_for(std::chrono::milliseconds(50));
-    g_ps.stop.store(true);
-    g_ps.joinIfDone();
+    // 退出顺序（2026-10-25 并发化配套）：
+    //   先停 HTTP 控制面 —— handler 现在跑在工作线程里，stop() 会 shutdown 活跃连接并等
+    //   连接表清空；然后才拆播放线程 / 库扫描线程。否则在途请求会访问正在析构的单例。
+    ui.stop();
+    g_ps.stopJoin();        // 原子停播放线程
     g_inputSession.stop();
     // 库扫描线程必须在 exit() 的静态析构前收掉（th_ joinable 的析构 = terminate；
     // mac .app 实测 SIGABRT，2026-10-25）。Library 析构里还有兜底，这里保证顺序。
     Library::instance().stopScan();
     Library::instance().joinScan();
-    ui.stop();
     return 0;
 }

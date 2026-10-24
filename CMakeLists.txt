@@ -1,4 +1,22 @@
 cmake_minimum_required(VERSION 3.20)
+
+# ---------------- macOS 部署目标（2026-10-25 补） ----------------
+# ⚠️ 必须在 project() **之前**设置：project() 会在 cache 里预先定义
+# CMAKE_OSX_DEPLOYMENT_TARGET（空字符串），之后再 set(... CACHE ...) 会被忽略
+# ——主控实测踩到过：放在 project() 后面写，configure 后 cache 里仍是空值，minos 还是 27.0。
+#
+# 为什么要设：之前完全没设 ⟹ 默认取**编译机**的系统版本。本机 macOS 27.0.1，
+# 实测产物 `otool -l | grep minos` = **27.0**，而 Info.plist 里却写着 LSMinimumSystemVersion 13.0
+# ⟹ 声明与事实不符：在 macOS 13~26 上双击会被 dyld 直接拒绝（built for newer macOS）。
+# 只有自己一台机器时发现不了，一旦给别人用就是必炸。
+# 13.0 的选择依据：实测用 -mmacosx-version-min=13.0 完整编译 rtaweb 零 error、零可用性告警，
+# 产物 minos=13.0 且实跑正常（/api/lib/stats 返回 ok）。产品二进制（rtaweb / rlplayer_mac）
+# 只用了 AppKit + WebKit + CoreAudio 的长期存在 API；Process Tap（CATapDescription，
+# macOS 14.2+）只在测试工具 rtaloop 里用，不进 .app。
+if(APPLE AND NOT DEFINED CMAKE_OSX_DEPLOYMENT_TARGET)
+  set(CMAKE_OSX_DEPLOYMENT_TARGET "13.0" CACHE STRING "macOS 最低系统版本（必须与 Info.plist 的 LSMinimumSystemVersion 一致）")
+endif()
+
 project(RLPlayer LANGUAGES CXX)
 
 # ---------------- 分发兼容性基线（2026-10-21 事故：-march=znver5 在 5900X 上 0xC000001D） ----------------
@@ -431,7 +449,17 @@ add_test(NAME playback_gpu COMMAND test_playback_gpu)
 
 
 # ---- Windows 专属测试（WASAPI/WebView2/winsock/audio_loader 传递依赖 windows.h）----
-if(WIN32)
+# ⚠️ 2026-10-25 实测记录（铁律 4：如实挂账，不许假装修好）
+# 本块原本连着写了两个 if(WIN32)，而下面「跨平台测试」段只被**内层**那个的 endif 关掉，
+# 外层一直到文件末尾才关 ⟹ 跨平台段 14 条测试在 macOS 上从未被注册、从未编译过
+# （实测 build-mac 里连 test_library 目标都不存在，而注释明写着「macOS 也跑」）。
+# 主控已删掉重复的那一层，但**随即实测发现这 14 条里有 12 条在 macOS 上编不过**：
+#   library/scanpool/hotfix_guard/renderfail/media_duration  → CP_UTF8 / SetConsoleOutputCP / _putenv_s
+#   dsd_reader/ffmpeg_matrix                                → MAX_PATH / GetTempPathW / DeleteFileA
+#   dsd_path/metastore/writeback/entities/decode_retry/stream_decode → #include <windows.h>
+# 只有 render_loop_dry 与 media_duration 能编过。为避免把 macOS 构建打红，
+# **暂时恢复 WIN32 守卫**，真实移植另立任务（任务书见 docs/ 或 PLATFORM.md 未做项）。
+# 待那批测试补上 platform/console.h + path.h 的 POSIX 等价实现后，再回来删这一行。
 if(WIN32)
 add_executable(test_rtanet tests/test_rtanet.cpp)
 target_link_libraries(test_rtanet PRIVATE ${RL_PLATFORM_LIBS})
@@ -528,7 +556,8 @@ target_include_directories(test_dsd_two_stage PRIVATE ${CMAKE_SOURCE_DIR}/src)
 target_link_libraries(test_dsd_two_stage PRIVATE ${RL_PLATFORM_LIBS})
 add_test(NAME dsd_two_stage COMMAND test_dsd_two_stage)
 
-endif()
+# 2026-10-25：此处原本有个 endif()，关的是「误留的内层 if(WIN32)」。
+# 内层守卫已删，外层守卫暂时保留（原因见本块上方实测记录），所以这里不再需要 endif。
 
 # ---- 跨平台测试（macOS 也跑）----
 # decide_route：bit-perfect 判定的唯一实现（PLATFORM.md §11.7 列为未做项，本轮补上）
@@ -619,4 +648,7 @@ target_link_libraries(test_stream_decode PRIVATE rtadsp)
 add_test(NAME stream_decode COMMAND test_stream_decode)
 
 # ---------------- DSD 两级抽取测试（ROADMAP P6c） ----------------
+# 2026-10-25：此处的 endif() 暂时恢复 —— 上面 14 条测试里 12 条在 macOS 上编不过
+# （依赖 CP_UTF8 / MAX_PATH / windows.h），真实移植另立任务后再回来删。
+# 详见文件上方「Windows 专属测试」块头部的实测记录。
 endif()
