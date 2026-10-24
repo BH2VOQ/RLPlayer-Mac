@@ -2,11 +2,11 @@
 // 用途：证明"比特完美"主张（源文件 vs 经过完整链路后的输出）
 // 用法：wavcmp <a.wav> <b.wav>
 // 退出码：0 = 逐位相同；1 = 有差异；2 = 无法读取
+#include "platform/console.h"
 #include "audio/wav.h"
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
-#include <windows.h>
 #include <cstdio>
 #include <cstring>
 #include <string>
@@ -29,7 +29,7 @@ static std::vector<uint8_t> raw_bytes(const AudioBuffer& a) {
 
 int main(int argc, char** argv) {
     setvbuf(stdout, nullptr, _IONBF, 0);
-    SetConsoleOutputCP(CP_UTF8);
+    rta::platform::enable_utf8_console();
     // --prefix：只要求 B 的**前缀**与 A 逐位相同，允许 B 更长。
     // 用于 DoP 直通：播放器在末尾最多补一个周期的合法静音帧，长度会比源多一点点。
     bool prefix = false;

@@ -1,5 +1,6 @@
 // mockemby.cpp — 模拟 Emby 服务器，用于集成测试
 // 用法: mockemby <port> <audiofile>
+#include "platform/console.h"
 #include "net/webui.h"
 #include <cstdio>
 #include <string>
@@ -18,7 +19,7 @@ static std::string read_all(const std::string& p) {
 }
 
 int main(int argc, char** argv) {
-    SetConsoleOutputCP(CP_UTF8);
+    rta::platform::enable_utf8_console();
     setvbuf(stdout, nullptr, _IONBF, 0);
     if (argc < 3) { printf("用法: mockemby <port> <audiofile>\n"); return 2; }
     const uint16_t port = (uint16_t)atoi(argv[1]);

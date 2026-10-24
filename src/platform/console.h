@@ -15,6 +15,9 @@ bool enable_utf8_console();
 
 #if defined(_WIN32)
 #include "platform/windows/console_win32.h"
+#elif defined(__APPLE__)
+// macOS 实现（PLATFORM.md §9）
+#include "platform/macos/console_posix.h"
 #else
-#error "platform/console.h: 本平台尚无实现（POSIX 下控制台本来就是 UTF-8，可直接 return true）"
+#error "platform/console.h: 本平台尚无实现（已支持 Windows 与 macOS）。新平台请按 PLATFORM.md §9 在 src/platform/<平台>/ 下实现同名头文件。"
 #endif

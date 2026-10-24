@@ -16,6 +16,8 @@ rta-*.conf
 
 # ---------- 2. 构建产物 ----------
 /build/
+/build-mac/
+/build-*/
 /buildwebview2/
 /dist/
 /out/

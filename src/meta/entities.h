@@ -27,6 +27,7 @@
 #pragma once
 #include "meta/store.h"          // MetaStore::hashOf / MetaValue / meta_path_of / meta_jesc
 #include "meta/year.h"           // E-14：年份清洗复用统一纯函数 pv_year4
+#include <algorithm>   // std::sort/std::unique：libc++ 不经 <vector> 间接提供，必须显式包含
 #include <cmath>
 #include <cstdio>
 #include <filesystem>

@@ -317,7 +317,12 @@ public:
     long long overload() const { return overload_; }   // 环路限幅器触发次数（输入过载）
     long long nonFinite() const { return nonFinite_; } // 非有限输入次数（防御性清零）
 
-    double process(double x) {
+    // ⚠️ noinline：本函数是逐样本的强状态递推（wBuf_/eBuf_ 环形缓冲），
+    // 运算顺序改变会改变 1-bit 判决点。Apple clang 在 -O3 下若把它内联进外层循环，
+    // 会做循环展开+向量化重排，导致"并行路径"与"串行路径"得到不同的浮点结果
+    // （实测 arm64 上 100 万样本差 21 万个点）。加 noinline 让两条路径走同一份代码。
+    // 这是可移植性修复，不影响数值本身（-O0/-O2 下本来就一致）。
+    __attribute__((noinline)) double process(double x) {
         const size_t sz = (size_t)effectiveOrder_ + 1;
 
         // w[n]：只用到 e[n-1..] 与 w[n-1..]

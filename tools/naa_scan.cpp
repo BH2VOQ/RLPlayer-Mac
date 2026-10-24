@@ -6,6 +6,7 @@
 // 为什么用端口扫描而不是协议发现：见 docs/NAA发现纪要.md /
 // docs/NAA对接探测纪要.md —— NAA 发现报文格式未公开，但 networkaudiod 固定监听
 // TCP/UDP 43210，端口是否开放是可靠判据。全程只读，不涉及任何音频输出。
+#include "platform/console.h"
 #include "naa_discover.h"
 
 #include <cstdio>
@@ -13,7 +14,7 @@
 #include <vector>
 
 int main(int argc, char** argv) {
-    SetConsoleOutputCP(CP_UTF8);
+    rta::platform::enable_utf8_console();
     setvbuf(stdout, nullptr, _IONBF, 0);
 
     std::string subnet;            // 空 = 自动枚举本机所有 /24

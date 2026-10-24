@@ -7,9 +7,6 @@
 //   * 损坏 JSON 用乱码/截断/空文件三种形态，判据是 load 返回 false 而非不崩溃。
 // 不依赖网络，不碰真实的 rlplayer-meta/（baseDir 切到临时目录）。
 #define WIN32_LEAN_AND_MEAN
-#ifndef NOMINMAX
-#define NOMINMAX
-#endif
 #include <windows.h>
 #include "meta/store.h"
 #include "net/library.h"   // 仅测试用：校验 hashOf 与 fnv_hex 同常数同算法

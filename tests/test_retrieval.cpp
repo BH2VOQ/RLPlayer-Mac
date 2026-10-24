@@ -9,9 +9,7 @@
 //   5. 缓存：round-trip / TTL 判定 / 离线回退 / 损坏容错
 //   6. 真实网络用例 opt-in（RTA_NET_TESTS=1 开启，默认 [SKIP] exit 0）
 #define WIN32_LEAN_AND_MEAN
-#ifndef NOMINMAX
-#define NOMINMAX
-#endif
+#include "platform/console.h"
 #include "meta/retrieval.h"
 #include <chrono>
 #include <cstdio>
@@ -20,7 +18,6 @@
 #include <fstream>
 #include <string>
 #include <vector>
-#include <windows.h>
 
 using namespace rta::meta;
 namespace fsx = std::filesystem;
@@ -117,7 +114,7 @@ static const char* kFixtureSynthesisValid = R"json({
 // ---------------------------------------------------------------------------
 
 int main() {
-    SetConsoleOutputCP(CP_UTF8);
+    rta::platform::enable_utf8_console();
     std::printf("== meta/retrieval.h 检索层单元测试 ==\n");
 
     // ---------------- 1) filter_hits 过滤纯函数 ----------------

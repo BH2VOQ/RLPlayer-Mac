@@ -20,9 +20,6 @@
 // 与 test_metastore.cpp 同一写法：先压掉 windows.h 的 min/max 宏，否则 net/library.h
 // 拉进来的 dsp 头里 std::max 会被宏吃掉（clang 报 "expected unqualified-id"）。
 #define WIN32_LEAN_AND_MEAN
-#ifndef NOMINMAX
-#define NOMINMAX
-#endif
 #include <windows.h>
 #include "meta/entities.h"
 #include "net/library.h"      // 仅测试用：确认 entity id 与 fnv_hex 同算法同常数

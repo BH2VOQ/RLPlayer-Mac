@@ -75,6 +75,9 @@ inline std::string percent_encode_path(const std::string& s) {
 
 #if defined(_WIN32)
 #include "platform/windows/http_winhttp.h"
+#elif defined(__APPLE__)
+// macOS 实现（PLATFORM.md §9）
+#include "platform/macos/http_posix.h"
 #else
-#error "platform/http.h: 本平台尚无实现。Mac 组请按 PLATFORM.md §9（Mac 实现清单）用 NSURLSession 实现 http_request"
+#error "platform/http.h: 本平台尚无实现（已支持 Windows 与 macOS）。新平台请按 PLATFORM.md §9 在 src/platform/<平台>/ 下实现同名头文件。"
 #endif

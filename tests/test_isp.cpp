@@ -5,10 +5,7 @@
 //   fs/4 的正弦、相位 45°，采样点只有 ±0.7071，但两个采样点之间的真实波形峰值是 1.0。
 //   检测器必须报出 ≈1.0（而不是 0.707）—— 这才证明它真的在插值，而不是在看采样值。
 #define WIN32_LEAN_AND_MEAN
-#ifndef NOMINMAX
-#define NOMINMAX
-#endif
-#include <windows.h>
+#include "platform/console.h"
 #include "dsp/oversample_peak.h"
 #include <cstdio>
 #include <cmath>
@@ -25,7 +22,7 @@ static void ck(bool ok, const char* what, const std::string& detail = "") {
 }
 
 int main() {
-    SetConsoleOutputCP(CP_UTF8);
+    rta::platform::enable_utf8_console();
     std::printf("== 过采样峰值检测验证 ==\n");
 
     // 1) 插值核自身

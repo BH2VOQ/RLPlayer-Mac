@@ -22,6 +22,14 @@ if(MSVC)
   # UTF-8，所以 /utf-8 是让两个编译器行为对齐，不是给 MSVC 开特例。
   add_compile_options(/W4 /permissive- /Zc:__cplusplus /utf-8)
   add_compile_options($<$<CONFIG:Release>:/O2>)
+elseif(APPLE)
+  # macOS：分发基线是 Apple Silicon + Intel 通用二进制。x86-64-v2 这种 -march 在
+  # arm64 上会直接报错，所以这里按架构给基线（armv8 / x86-64-v2 各自成立）。
+  add_compile_options(-Wall -Wextra -Wno-unused-parameter)
+  add_compile_options(-O3 -ffast-math -fno-finite-math-only
+                      -fhonor-nans -fhonor-infinities -fno-math-errno)
+  add_compile_options(-fno-strict-aliasing)
+  add_compile_options($<$<CONFIG:Release>:-DNDEBUG>)
 else()
   add_compile_options(-Wall -Wextra -Wno-unused-parameter)
   # 分发基线：不要改成 native/znver5 —— 那会把 AVX-512 编进产物，老 CPU 直接非法指令崩溃
@@ -34,7 +42,21 @@ else()
   add_compile_options($<$<CONFIG:Release>:-DNDEBUG>)
 endif()
 
+# ---------------- 平台库清单 ----------------
+if(WIN32)
+  set(RL_PLATFORM_LIBS winhttp ws2_32 winmm avrt dbghelp iphlpapi ole32 uuid mmdevapi)
+elseif(APPLE)
+  # libcurl：http.h 的 macOS 实现（系统自带，零第三方依赖）
+  # CoreAudio/AudioToolbox/CoreFoundation：audio_out_coreaudio.h
+  set(RL_PLATFORM_LIBS curl
+      "-framework CoreAudio" "-framework AudioToolbox" "-framework CoreFoundation")
+else()
+  set(RL_PLATFORM_LIBS curl)
+endif()
+
 # ---------------- 工具：WASAPI 能力探针 ----------------
+# ---- Windows 专属工具（WASAPI/WebView2/ASIO/WinHTTP 直连）----
+if(WIN32)
 add_executable(wasapi_probe tools/wasapi_probe.cpp)
 target_link_libraries(wasapi_probe PRIVATE ole32 uuid mmdevapi)
 
@@ -70,26 +92,6 @@ target_include_directories(rtacast PRIVATE ${CMAKE_SOURCE_DIR}/src)
 target_link_libraries(rtacast PRIVATE rtadsp winhttp ws2_32)
 
 # ---------------- GPU 升频核验证 ----------------
-add_executable(gpu_resample_test tools/gpu_resample_test.cpp)
-target_include_directories(gpu_resample_test PRIVATE ${CMAKE_SOURCE_DIR}/src)   # dsp/gpu_pref.h：候选 DLL 顺序与管线同源
-target_link_libraries(gpu_resample_test PRIVATE ws2_32)
-
-# ---------------- 模拟 Navidrome（集成测试用）----------------
-add_executable(mockemby tools/mockemby.cpp)
-target_include_directories(mockemby PRIVATE ${CMAKE_SOURCE_DIR}/src)
-target_link_libraries(mockemby PRIVATE winhttp ws2_32)
-
-add_executable(mocksub tools/mocksub.cpp)
-target_include_directories(mocksub PRIVATE ${CMAKE_SOURCE_DIR}/src)
-target_link_libraries(mocksub PRIVATE winhttp ws2_32)
-
-# ---------------- HTTP 客户端自检 ----------------
-add_executable(httptest tools/httptest.cpp)
-target_include_directories(httptest PRIVATE ${CMAKE_SOURCE_DIR}/src)
-target_link_libraries(httptest PRIVATE winhttp ws2_32)
-
-# ---------------- 桌面启动器（Win32 GUI，双击即用）----------------
-# 产品名：RLPlayer
 add_executable(rta_launcher WIN32 tools/launcher.cpp)
 set_target_properties(rta_launcher PROPERTIES OUTPUT_NAME "RLPlayer")
 # ole32/uuid/mmdevapi:启动横幅只读枚举输出端点(wasapi_out.h);dbghelp:崩溃转储(crash_dump.h)
@@ -133,52 +135,117 @@ else()
 endif()
 
 # ---------------- 多格式解码验证 ----------------
-add_executable(aidecode tools/aidecode.cpp)
-target_link_libraries(aidecode PRIVATE rtadsp)
-
-# ---------------- 网页播放器 ----------------
-# dbghelp:崩溃转储(crash_dump.h,SetUnhandledExceptionFilter + MiniDumpWriteDump)
 add_executable(rtaweb tools/rtaweb.cpp)
 # iphlpapi: /api/naa/discover 通过 tools/naa_discover.h 枚举本机网卡（自动选网段）
 target_link_libraries(rtaweb PRIVATE rtadsp ws2_32 winmm avrt dbghelp iphlpapi)
 
 # ---------------- NAA 端点发现 ----------------
-add_executable(naa_scan tools/naa_scan.cpp)
-# iphlpapi: tools/naa_discover.h 用 GetAdaptersAddresses 枚举本机网卡（自动选网段）
-target_link_libraries(naa_scan PRIVATE ws2_32 iphlpapi)
-
-# NAA 控制通道黑盒探针（只做 TCP 交换，不发音频）
 add_executable(naa_probe tools/naa_probe.cpp)
 target_link_libraries(naa_probe PRIVATE ws2_32)
 
 # ---------------- 元数据工具（ffprobe 标签 + 文件名/LLM 解析 + MetaBase 存取；不发声音，
 # parse 不带 --llm 时除本地 ffprobe 外零网络请求） ----------------
-add_executable(rtatag tools/rtatag.cpp)
-target_link_libraries(rtatag PRIVATE rtadsp)
-
-# ---------------- DoP 校验工具 ----------------
-add_executable(dopinfo tools/dopinfo.cpp)
-target_link_libraries(dopinfo PRIVATE rtadsp)
-
-# ---------------- 逐位比对工具 ----------------
-add_executable(wavcmp tools/wavcmp.cpp)
-target_link_libraries(wavcmp PRIVATE rtadsp)
-
-# ---------------- 滤波器变体对比报告生成器（ROADMAP P2） ----------------
-add_executable(filter_report tools/filter_report.cpp)
-target_link_libraries(filter_report PRIVATE rtadsp)
-
-# ---------------- RTANet 端点（跑在接 DAC 的机器上） ----------------
 add_executable(rtanet_rx tools/rtanet_rx.cpp)
 target_link_libraries(rtanet_rx PRIVATE rtadsp ole32 uuid mmdevapi ws2_32)
 
 # ---------------- DSP 核心（头文件库） ----------------
+endif()
+
+# ---- 跨平台工具（macOS 也构建）----
+# Windows 用 winhttp/ws2_32 等系统库；macOS 用 libcurl + CoreAudio 等框架。
+# 具体清单在下方 RL_PLATFORM_LIBS 里按平台定义。
+add_executable(httptest tools/httptest.cpp)
+target_include_directories(httptest PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(httptest PRIVATE ${RL_PLATFORM_LIBS})
+
+# ---------------- 桌面启动器（Win32 GUI，双击即用）----------------
+# 产品名：RLPlayer
+add_executable(dopinfo tools/dopinfo.cpp)
+target_include_directories(dopinfo PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(dopinfo PRIVATE ${RL_PLATFORM_LIBS})
+
+# ---------------- 逐位比对工具 ----------------
+add_executable(wavcmp tools/wavcmp.cpp)
+target_include_directories(wavcmp PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(wavcmp PRIVATE ${RL_PLATFORM_LIBS})
+
+# ---------------- 滤波器变体对比报告生成器（ROADMAP P2） ----------------
+add_executable(filter_report tools/filter_report.cpp)
+target_include_directories(filter_report PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(filter_report PRIVATE ${RL_PLATFORM_LIBS})
+
+# ---------------- RTANet 端点（跑在接 DAC 的机器上） ----------------
+
+# ---- 依赖 Windows 专属头的工具（audio_loader/webui/naa_discover/media_info）----
+if(WIN32)
+add_executable(gpu_resample_test tools/gpu_resample_test.cpp)
+target_include_directories(gpu_resample_test PRIVATE ${CMAKE_SOURCE_DIR}/src)   # dsp/gpu_pref.h：候选 DLL 顺序与管线同源
+target_link_libraries(gpu_resample_test PRIVATE ${RL_PLATFORM_LIBS})
+
+# ---------------- 模拟 Navidrome（集成测试用）----------------
+add_executable(mockemby tools/mockemby.cpp)
+target_include_directories(mockemby PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(mockemby PRIVATE ${RL_PLATFORM_LIBS})
+
+add_executable(mocksub tools/mocksub.cpp)
+target_include_directories(mocksub PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(mocksub PRIVATE ${RL_PLATFORM_LIBS})
+
+# ---------------- HTTP 客户端自检 ----------------
+add_executable(aidecode tools/aidecode.cpp)
+target_link_libraries(aidecode PRIVATE ${RL_PLATFORM_LIBS})
+
+# ---------------- 网页播放器 ----------------
+# dbghelp:崩溃转储(crash_dump.h,SetUnhandledExceptionFilter + MiniDumpWriteDump)
+add_executable(naa_scan tools/naa_scan.cpp)
+# iphlpapi: tools/naa_discover.h 用 GetAdaptersAddresses 枚举本机网卡（自动选网段）
+target_link_libraries(naa_scan PRIVATE ${RL_PLATFORM_LIBS})
+
+# NAA 控制通道黑盒探针（只做 TCP 交换，不发音频）
+add_executable(rtatag tools/rtatag.cpp)
+target_link_libraries(rtatag PRIVATE ${RL_PLATFORM_LIBS})
+
+# ---------------- DoP 校验工具 ----------------
+endif()
+
 add_library(rtadsp INTERFACE)
 target_include_directories(rtadsp INTERFACE ${CMAKE_CURRENT_SOURCE_DIR}/src)
 
 # ---------------- 测试 ----------------
 enable_testing()
-# 261024-02 #2：宿主 postMessage 协议 + 外链协议白名单（纯函数，可单测）
+
+# ---- 跨平台测试（macOS 也跑）----
+add_executable(test_knowledge tests/test_knowledge.cpp)
+target_include_directories(test_knowledge PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(test_knowledge PRIVATE ${RL_PLATFORM_LIBS})
+add_test(NAME knowledge COMMAND test_knowledge)
+
+# P3 资料层③ 检索层：DeepSeek search/fetch + rerank/authority/白名单过滤 + 引用纪律
+add_executable(test_retrieval tests/test_retrieval.cpp)
+target_include_directories(test_retrieval PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(test_retrieval PRIVATE ${RL_PLATFORM_LIBS})
+add_test(NAME retrieval COMMAND test_retrieval)
+
+# 2026-10-24（用户 261024-04 #6/#4 后端侧）：实体资料缓存是否**共用**、第二次是否**零 LLM 调用**、
+# 命中是否 ≤300ms。全离线：L2 材料直接写缓存，chat/search/fetch 走计数型 mock transport
+# （LlmConfig::transport 钩子），判据是"调用计数不变"而不是"耗时不抖"。
+add_executable(test_metacache tests/test_metacache.cpp)
+target_include_directories(test_metacache PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(test_metacache PRIVATE ${RL_PLATFORM_LIBS})
+add_test(NAME metacache COMMAND test_metacache)
+
+# 2026-10-24（用户 261024-04 #8）：/api/status 的 gpu（可用性）与 gpuUsed（本次真的参与）
+# 组合语义真值表。纯函数（src/meta/statusflags.h），不碰 GPU、不开设备。
+add_executable(test_opra_eq tests/test_opra_eq.cpp)
+target_include_directories(test_opra_eq PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(test_opra_eq PRIVATE ${RL_PLATFORM_LIBS})
+add_test(NAME opra_eq COMMAND test_opra_eq)
+
+# P3 资料层④b：Discogs L4 古典作品版本推荐（令牌桶/熔断 + 缓存 + 版本推荐列表）
+add_executable(test_decide_route tests/test_decide_route.cpp)
+target_include_directories(test_decide_route PRIVATE ${CMAKE_SOURCE_DIR}/src)
+add_test(NAME decide_route COMMAND test_decide_route)
+
 add_executable(test_host_msg tests/test_host_msg.cpp)
 target_link_libraries(test_host_msg PRIVATE rtadsp)
 add_test(NAME host_msg COMMAND test_host_msg)
@@ -225,14 +292,6 @@ add_executable(test_chain tests/test_chain.cpp)
 target_link_libraries(test_chain PRIVATE rtadsp)
 add_test(NAME chain COMMAND test_chain)
 
-add_executable(test_rtanet tests/test_rtanet.cpp)
-target_link_libraries(test_rtanet PRIVATE rtadsp ws2_32)
-add_test(NAME rtanet COMMAND test_rtanet)
-
-add_executable(test_rtanet_e2e tests/test_rtanet_e2e.cpp)
-target_link_libraries(test_rtanet_e2e PRIVATE rtadsp ws2_32)
-add_test(NAME rtanet_e2e COMMAND test_rtanet_e2e)
-
 add_executable(test_drift tests/test_drift.cpp)
 target_link_libraries(test_drift PRIVATE rtadsp)
 add_test(NAME drift COMMAND test_drift)
@@ -248,16 +307,6 @@ add_test(NAME status COMMAND test_status)
 add_executable(test_loudness tests/test_loudness.cpp)
 target_link_libraries(test_loudness PRIVATE rtadsp)
 add_test(NAME loudness COMMAND test_loudness)
-
-add_executable(test_emby tests/test_emby.cpp)
-target_include_directories(test_emby PRIVATE ${CMAKE_SOURCE_DIR}/src)
-target_link_libraries(test_emby PRIVATE winhttp ws2_32)
-add_test(NAME emby COMMAND test_emby)
-
-add_executable(test_subsonic tests/test_subsonic.cpp)
-target_include_directories(test_subsonic PRIVATE ${CMAKE_SOURCE_DIR}/src)
-target_link_libraries(test_subsonic PRIVATE winhttp ws2_32)
-add_test(NAME subsonic COMMAND test_subsonic)
 
 add_executable(test_md5 tests/test_md5.cpp)
 target_include_directories(test_md5 PRIVATE ${CMAKE_SOURCE_DIR}/src)
@@ -283,14 +332,6 @@ add_executable(test_isp tests/test_isp.cpp)
 target_link_libraries(test_isp PRIVATE rtadsp)
 add_test(NAME isp COMMAND test_isp)
 
-add_executable(test_library tests/test_library.cpp)
-target_include_directories(test_library PRIVATE ${CMAKE_SOURCE_DIR}/src)
-add_test(NAME library COMMAND test_library)
-
-add_executable(test_scanpool tests/test_scanpool.cpp)
-target_include_directories(test_scanpool PRIVATE ${CMAKE_SOURCE_DIR}/src)
-add_test(NAME scanpool COMMAND test_scanpool)
-
 add_executable(test_stream_baseline tests/test_stream_baseline.cpp)
 target_link_libraries(test_stream_baseline PRIVATE rtadsp)
 add_test(NAME stream_baseline COMMAND test_stream_baseline)
@@ -306,16 +347,166 @@ target_link_libraries(test_gpu_bridge PRIVATE rtadsp)
 add_test(NAME gpu_bridge COMMAND test_gpu_bridge)
 
 # DSF / DFF 原生读取（ROADMAP P0-1）：写回读逐位一致 + 文件布局独立校验
-add_executable(test_dsd_reader tests/test_dsd_reader.cpp)
-target_link_libraries(test_dsd_reader PRIVATE rtadsp)
-add_test(NAME dsd_reader COMMAND test_dsd_reader)
-
-# 满幅 PCM 走完整管线的稳定性（2026-10-21 现场"播几秒变噪音"回归）
 add_executable(test_fullscale tests/test_fullscale.cpp)
 target_link_libraries(test_fullscale PRIVATE rtadsp)
 add_test(NAME fullscale COMMAND test_fullscale)
 
 # DSD 通路（P0-2 素材生成 / P0-3 DirectSDM / P0-4 抽取器）
+add_executable(test_metaparse tests/test_metaparse.cpp)
+target_include_directories(test_metaparse PRIVATE ${CMAKE_SOURCE_DIR}/src)
+add_test(NAME metaparse COMMAND test_metaparse)
+
+add_executable(test_metamatch tests/test_metamatch.cpp)
+target_include_directories(test_metamatch PRIVATE ${CMAKE_SOURCE_DIR}/src)
+add_test(NAME metamatch COMMAND test_metamatch)
+
+add_executable(test_buffer_policy tests/test_buffer_policy.cpp)
+target_link_libraries(test_buffer_policy PRIVATE rtadsp)
+add_test(NAME buffer_policy COMMAND test_buffer_policy)
+
+add_executable(test_ratepick tests/test_ratepick.cpp)
+target_include_directories(test_ratepick PRIVATE ${CMAKE_SOURCE_DIR}/src)
+add_test(NAME ratepick COMMAND test_ratepick)
+
+# 最小 ZIP（STORE）打包结构（2026-10-22 功能3「导出诊断 = 一个压缩包」）。
+# 纯内存、零外部依赖、不调 PowerShell（理由见 src/net/zipstore.h 头注）。
+add_executable(test_zipstore tests/test_zipstore.cpp)
+target_include_directories(test_zipstore PRIVATE ${CMAKE_SOURCE_DIR}/src)
+add_test(NAME zipstore COMMAND test_zipstore)
+
+# P3① 实体模型（schema/归一化/显式边/落盘）：全离线，不调任何网络 API ——
+# 归一化与 id 是纯函数；落盘到 %TEMP%；真实曲库样本只读 D:\RLPlayer\MUSIC
+#（缺失时打 [SKIP]，不伪造成通过）。铁律 3：断言「全半角不折叠必然 FAIL」有反向验证。
+add_executable(test_year tests/test_year.cpp)
+target_include_directories(test_year PRIVATE ${CMAKE_SOURCE_DIR}/src)
+add_test(NAME year COMMAND test_year)
+
+# probe_media 的 duration 字段（2026-10-22 跨模块缺陷）：ffprobe 原参数只有 format_tags，
+# MediaInfo::duration 恒 0 → enrich 的 fileSec 恒 0 → match 的「时长差 ±3s」强信号从未生效。
+# 本测试需要环境里的 ffprobe（工具缺失即失败，不跳过，与 writeback 同类门禁）；
+# 已知时长的合成 WAV 落在 %TEMP%，不碰 MUSIC；真实 FLAC 素材缺失时打 [SKIP]。
+add_executable(test_playback_gpu tests/test_playback_gpu.cpp)
+target_include_directories(test_playback_gpu PRIVATE ${CMAKE_SOURCE_DIR}/src)
+add_test(NAME playback_gpu COMMAND test_playback_gpu)
+
+# OPRA 耳机 EQ 适配门禁（离线纯函数 + RTA_NET_TESTS=1 真网 opt-in）
+
+
+# ---- Windows 专属测试（WASAPI/WebView2/winsock/audio_loader 传递依赖 windows.h）----
+if(WIN32)
+if(WIN32)
+add_executable(test_rtanet tests/test_rtanet.cpp)
+target_link_libraries(test_rtanet PRIVATE ${RL_PLATFORM_LIBS})
+add_test(NAME rtanet COMMAND test_rtanet)
+
+add_executable(test_rtanet_e2e tests/test_rtanet_e2e.cpp)
+target_link_libraries(test_rtanet_e2e PRIVATE ${RL_PLATFORM_LIBS})
+add_test(NAME rtanet_e2e COMMAND test_rtanet_e2e)
+
+add_executable(test_emby tests/test_emby.cpp)
+target_include_directories(test_emby PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(test_emby PRIVATE ${RL_PLATFORM_LIBS})
+add_test(NAME emby COMMAND test_emby)
+
+add_executable(test_subsonic tests/test_subsonic.cpp)
+target_include_directories(test_subsonic PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(test_subsonic PRIVATE ${RL_PLATFORM_LIBS})
+add_test(NAME subsonic COMMAND test_subsonic)
+
+add_executable(test_metallm tests/test_metallm.cpp)
+target_include_directories(test_metallm PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(test_metallm PRIVATE ${RL_PLATFORM_LIBS})
+add_test(NAME metallm COMMAND test_metallm)
+
+# 元数据 P1：providers / match / enrich —— 全离线（providers 只喂写死报文，enrich 只测纯函数）
+add_executable(test_metaproviders tests/test_metaproviders.cpp)
+target_include_directories(test_metaproviders PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(test_metaproviders PRIVATE ${RL_PLATFORM_LIBS})   # provider.h → http_client.h
+add_test(NAME metaproviders COMMAND test_metaproviders)
+
+add_executable(test_enrich tests/test_enrich.cpp)
+target_include_directories(test_enrich PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(test_enrich PRIVATE ${RL_PLATFORM_LIBS})          # enrich.h → provider.h → http_client.h
+add_test(NAME enrich COMMAND test_enrich)
+
+# dizzylab 源（同人曲目第一优先，provider.h「dizzylab」节）：离线为主，喂 2026-10-22 真实
+# 抓取的页面切片；真网用例只在 RTA_NET_TESTS=1 时跑（默认断网也必须全绿）
+add_executable(test_dizzylab tests/test_dizzylab.cpp)
+target_include_directories(test_dizzylab PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(test_dizzylab PRIVATE ${RL_PLATFORM_LIBS})        # provider.h → http_client.h
+add_test(NAME dizzylab COMMAND test_dizzylab)
+
+# P2 写回 PCM 逐位门禁(writeback.h):需要环境里有 ffmpeg/ffprobe —— 工具缺失即测试
+# 失败,不跳过(门禁就是要在有 ffmpeg 的环境跑)。素材现场生成于 %TEMP%,不碰 MUSIC。
+add_executable(test_wasapi_shared tests/test_wasapi_shared.cpp)
+target_include_directories(test_wasapi_shared PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(test_wasapi_shared PRIVATE ${RL_PLATFORM_LIBS})
+add_test(NAME wasapi_shared COMMAND test_wasapi_shared)
+
+# 渲染主循环 RENDERFAIL 归因回归（VM 事故：write_available 恒 0 静默 break → error=""）
+# 用 mock 假死 sink 真跑 src/audio/render_loop.h 的循环 —— rtaweb 与测试共用同一份实现
+add_executable(test_classical_e2e tests/test_classical_e2e.cpp)
+target_include_directories(test_classical_e2e PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(test_classical_e2e PRIVATE ${RL_PLATFORM_LIBS})
+add_test(NAME classical_e2e COMMAND test_classical_e2e)
+
+# E-14 年份清洗纯函数（统一窗口 [1000, 2100] 与清洗规则）：全离线
+add_executable(test_discogs tests/test_discogs.cpp)
+target_include_directories(test_discogs PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(test_discogs PRIVATE ${RL_PLATFORM_LIBS})
+add_test(NAME discogs COMMAND test_discogs)
+
+# 测试素材生成器：调制器 -> DSF/DFF（本机原本一个 DSD 文件都没有）
+add_executable(test_capture tests/test_capture.cpp)
+target_include_directories(test_capture PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(test_capture PRIVATE ${RL_PLATFORM_LIBS})
+target_compile_definitions(test_capture PRIVATE RTA_CAPTURE_EXE="$<TARGET_FILE:rtacapture>")
+add_test(NAME capture COMMAND test_capture)
+
+# ---------------- UPnP 投放控制面与 HTTP 供源测试（ROADMAP P5a） ----------------
+add_executable(test_upnp_control tests/test_upnp_control.cpp)
+target_include_directories(test_upnp_control PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(test_upnp_control PRIVATE ${RL_PLATFORM_LIBS})
+add_test(NAME upnp_control COMMAND test_upnp_control)
+
+# WebView2 双轨版本护栏纯逻辑门禁（P3 双轨运行库护栏）
+add_executable(test_wv2_version tests/test_wv2_version.cpp)
+target_include_directories(test_wv2_version PRIVATE
+    ${CMAKE_SOURCE_DIR}/tools
+    ${CMAKE_SOURCE_DIR}/third_party/webview2/include
+)
+target_link_libraries(test_wv2_version PRIVATE ${RL_PLATFORM_LIBS})
+add_test(NAME wv2_version COMMAND test_wv2_version)
+
+# ---------------- UPnP 投放后台服务与编排测试（ROADMAP P5b） ----------------
+add_executable(test_cast_service tests/test_cast_service.cpp)
+target_include_directories(test_cast_service PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(test_cast_service PRIVATE ${RL_PLATFORM_LIBS})
+add_test(NAME cast_service COMMAND test_cast_service)
+
+# ---------------- 解码免临时 WAV（流式读 ffmpeg 输出，ROADMAP P6b） ----------------
+add_executable(test_dsd_two_stage tests/test_dsd_two_stage.cpp)
+target_include_directories(test_dsd_two_stage PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(test_dsd_two_stage PRIVATE ${RL_PLATFORM_LIBS})
+add_test(NAME dsd_two_stage COMMAND test_dsd_two_stage)
+
+endif()
+
+# ---- 跨平台测试（macOS 也跑）----
+# decide_route：bit-perfect 判定的唯一实现（PLATFORM.md §11.7 列为未做项，本轮补上）
+add_executable(test_library tests/test_library.cpp)
+target_include_directories(test_library PRIVATE ${CMAKE_SOURCE_DIR}/src)
+add_test(NAME library COMMAND test_library)
+
+add_executable(test_scanpool tests/test_scanpool.cpp)
+target_include_directories(test_scanpool PRIVATE ${CMAKE_SOURCE_DIR}/src)
+add_test(NAME scanpool COMMAND test_scanpool)
+
+add_executable(test_dsd_reader tests/test_dsd_reader.cpp)
+target_link_libraries(test_dsd_reader PRIVATE rtadsp)
+add_test(NAME dsd_reader COMMAND test_dsd_reader)
+
+# 满幅 PCM 走完整管线的稳定性（2026-10-21 现场"播几秒变噪音"回归）
 add_executable(test_dsd_path tests/test_dsd_path.cpp)
 target_link_libraries(test_dsd_path PRIVATE rtadsp)
 add_test(NAME dsd_path COMMAND test_dsd_path)
@@ -325,39 +516,6 @@ add_executable(test_metastore tests/test_metastore.cpp)
 target_include_directories(test_metastore PRIVATE ${CMAKE_SOURCE_DIR}/src)
 add_test(NAME metastore COMMAND test_metastore)
 
-add_executable(test_metaparse tests/test_metaparse.cpp)
-target_include_directories(test_metaparse PRIVATE ${CMAKE_SOURCE_DIR}/src)
-add_test(NAME metaparse COMMAND test_metaparse)
-
-add_executable(test_metallm tests/test_metallm.cpp)
-target_include_directories(test_metallm PRIVATE ${CMAKE_SOURCE_DIR}/src)
-target_link_libraries(test_metallm PRIVATE winhttp)
-add_test(NAME metallm COMMAND test_metallm)
-
-# 元数据 P1：providers / match / enrich —— 全离线（providers 只喂写死报文，enrich 只测纯函数）
-add_executable(test_metaproviders tests/test_metaproviders.cpp)
-target_include_directories(test_metaproviders PRIVATE ${CMAKE_SOURCE_DIR}/src)
-target_link_libraries(test_metaproviders PRIVATE winhttp)   # provider.h → http_client.h
-add_test(NAME metaproviders COMMAND test_metaproviders)
-
-add_executable(test_metamatch tests/test_metamatch.cpp)
-target_include_directories(test_metamatch PRIVATE ${CMAKE_SOURCE_DIR}/src)
-add_test(NAME metamatch COMMAND test_metamatch)
-
-add_executable(test_enrich tests/test_enrich.cpp)
-target_include_directories(test_enrich PRIVATE ${CMAKE_SOURCE_DIR}/src)
-target_link_libraries(test_enrich PRIVATE winhttp)          # enrich.h → provider.h → http_client.h
-add_test(NAME enrich COMMAND test_enrich)
-
-# dizzylab 源（同人曲目第一优先，provider.h「dizzylab」节）：离线为主，喂 2026-10-22 真实
-# 抓取的页面切片；真网用例只在 RTA_NET_TESTS=1 时跑（默认断网也必须全绿）
-add_executable(test_dizzylab tests/test_dizzylab.cpp)
-target_include_directories(test_dizzylab PRIVATE ${CMAKE_SOURCE_DIR}/src)
-target_link_libraries(test_dizzylab PRIVATE winhttp)        # provider.h → http_client.h
-add_test(NAME dizzylab COMMAND test_dizzylab)
-
-# P2 写回 PCM 逐位门禁(writeback.h):需要环境里有 ffmpeg/ffprobe —— 工具缺失即测试
-# 失败,不跳过(门禁就是要在有 ffmpeg 的环境跑)。素材现场生成于 %TEMP%,不碰 MUSIC。
 add_executable(test_writeback tests/test_writeback.cpp)
 target_include_directories(test_writeback PRIVATE ${CMAKE_SOURCE_DIR}/src)
 add_test(NAME writeback COMMAND test_writeback)
@@ -379,61 +537,23 @@ add_test(NAME hotfix_guard COMMAND test_hotfix_guard)
 
 # WASAPI 共享后端（2026-10-22 VM 事故）：§1 纯离线（int32→float32 边界 / 可写帧数钳制），
 # §2 设备 smoke 只写【数字静音】≤1 秒（输出先打印醒目横幅，铁律 1）
-add_executable(test_wasapi_shared tests/test_wasapi_shared.cpp)
-target_include_directories(test_wasapi_shared PRIVATE ${CMAKE_SOURCE_DIR}/src)
-target_link_libraries(test_wasapi_shared PRIVATE ole32 uuid mmdevapi)
-add_test(NAME wasapi_shared COMMAND test_wasapi_shared)
-
-# 渲染主循环 RENDERFAIL 归因回归（VM 事故：write_available 恒 0 静默 break → error=""）
-# 用 mock 假死 sink 真跑 src/audio/render_loop.h 的循环 —— rtaweb 与测试共用同一份实现
 add_executable(test_renderfail tests/test_renderfail.cpp)
 target_include_directories(test_renderfail PRIVATE ${CMAKE_SOURCE_DIR}/src)
 add_test(NAME renderfail COMMAND test_renderfail)
 
 # 2026-10-24（N300 欠载方案 C4）：C1 缓冲策略 + C2/C3 遥测/端点消失，全部 mock 驱动，
 # 绝不打开音频设备（铁律 1）。被测实现：src/audio/buffer_policy.h、src/audio/render_loop.h。
-add_executable(test_buffer_policy tests/test_buffer_policy.cpp)
-target_link_libraries(test_buffer_policy PRIVATE rtadsp)
-add_test(NAME buffer_policy COMMAND test_buffer_policy)
-
 add_executable(test_render_loop_dry tests/test_render_loop_dry.cpp)
 target_link_libraries(test_render_loop_dry PRIVATE rtadsp)
 add_test(NAME render_loop_dry COMMAND test_render_loop_dry)
 
 # 输出采样率选择纯逻辑（2026-10-22 事故：第二首 44.1k 按 44100 开流，因 rate=max 探测瞬时为空
 # 被当成「跟随源率」）—— 全离线，不开设备（铁律 1）
-add_executable(test_ratepick tests/test_ratepick.cpp)
-target_include_directories(test_ratepick PRIVATE ${CMAKE_SOURCE_DIR}/src)
-add_test(NAME ratepick COMMAND test_ratepick)
-
-# 最小 ZIP（STORE）打包结构（2026-10-22 功能3「导出诊断 = 一个压缩包」）。
-# 纯内存、零外部依赖、不调 PowerShell（理由见 src/net/zipstore.h 头注）。
-add_executable(test_zipstore tests/test_zipstore.cpp)
-target_include_directories(test_zipstore PRIVATE ${CMAKE_SOURCE_DIR}/src)
-add_test(NAME zipstore COMMAND test_zipstore)
-
-# P3① 实体模型（schema/归一化/显式边/落盘）：全离线，不调任何网络 API ——
-# 归一化与 id 是纯函数；落盘到 %TEMP%；真实曲库样本只读 D:\RLPlayer\MUSIC
-#（缺失时打 [SKIP]，不伪造成通过）。铁律 3：断言「全半角不折叠必然 FAIL」有反向验证。
 add_executable(test_entities tests/test_entities.cpp)
 target_include_directories(test_entities PRIVATE ${CMAKE_SOURCE_DIR}/src)
 add_test(NAME entities COMMAND test_entities)
 
 # E-15: 古典 COMPOSER→Work 四层端到端（合成样本 + 真实批量入口）
-add_executable(test_classical_e2e tests/test_classical_e2e.cpp)
-target_include_directories(test_classical_e2e PRIVATE ${CMAKE_SOURCE_DIR}/src)
-target_link_libraries(test_classical_e2e PRIVATE winhttp)
-add_test(NAME classical_e2e COMMAND test_classical_e2e)
-
-# E-14 年份清洗纯函数（统一窗口 [1000, 2100] 与清洗规则）：全离线
-add_executable(test_year tests/test_year.cpp)
-target_include_directories(test_year PRIVATE ${CMAKE_SOURCE_DIR}/src)
-add_test(NAME year COMMAND test_year)
-
-# probe_media 的 duration 字段（2026-10-22 跨模块缺陷）：ffprobe 原参数只有 format_tags，
-# MediaInfo::duration 恒 0 → enrich 的 fileSec 恒 0 → match 的「时长差 ±3s」强信号从未生效。
-# 本测试需要环境里的 ffprobe（工具缺失即失败，不跳过，与 writeback 同类门禁）；
-# 已知时长的合成 WAV 落在 %TEMP%，不碰 MUSIC；真实 FLAC 素材缺失时打 [SKIP]。
 add_executable(test_media_duration tests/test_media_duration.cpp)
 target_include_directories(test_media_duration PRIVATE ${CMAKE_SOURCE_DIR}/src)
 add_test(NAME media_duration COMMAND test_media_duration)
@@ -447,44 +567,6 @@ target_include_directories(test_decode_retry PRIVATE ${CMAKE_SOURCE_DIR}/src)
 add_test(NAME decode_retry COMMAND test_decode_retry)
 
 # P3 资料层② 直连层：实体 -> 权威文本材料（维基/萌娘百科 + 缓存/离线回退 + 令牌桶限频/熔断）
-add_executable(test_knowledge tests/test_knowledge.cpp)
-target_include_directories(test_knowledge PRIVATE ${CMAKE_SOURCE_DIR}/src)
-target_link_libraries(test_knowledge PRIVATE winhttp)
-add_test(NAME knowledge COMMAND test_knowledge)
-
-# P3 资料层③ 检索层：DeepSeek search/fetch + rerank/authority/白名单过滤 + 引用纪律
-add_executable(test_retrieval tests/test_retrieval.cpp)
-target_include_directories(test_retrieval PRIVATE ${CMAKE_SOURCE_DIR}/src)
-target_link_libraries(test_retrieval PRIVATE winhttp)
-add_test(NAME retrieval COMMAND test_retrieval)
-
-# 2026-10-24（用户 261024-04 #6/#4 后端侧）：实体资料缓存是否**共用**、第二次是否**零 LLM 调用**、
-# 命中是否 ≤300ms。全离线：L2 材料直接写缓存，chat/search/fetch 走计数型 mock transport
-# （LlmConfig::transport 钩子），判据是"调用计数不变"而不是"耗时不抖"。
-add_executable(test_metacache tests/test_metacache.cpp)
-target_include_directories(test_metacache PRIVATE ${CMAKE_SOURCE_DIR}/src)
-target_link_libraries(test_metacache PRIVATE winhttp)
-add_test(NAME metacache COMMAND test_metacache)
-
-# 2026-10-24（用户 261024-04 #8）：/api/status 的 gpu（可用性）与 gpuUsed（本次真的参与）
-# 组合语义真值表。纯函数（src/meta/statusflags.h），不碰 GPU、不开设备。
-add_executable(test_playback_gpu tests/test_playback_gpu.cpp)
-target_include_directories(test_playback_gpu PRIVATE ${CMAKE_SOURCE_DIR}/src)
-add_test(NAME playback_gpu COMMAND test_playback_gpu)
-
-# OPRA 耳机 EQ 适配门禁（离线纯函数 + RTA_NET_TESTS=1 真网 opt-in）
-add_executable(test_opra_eq tests/test_opra_eq.cpp)
-target_include_directories(test_opra_eq PRIVATE ${CMAKE_SOURCE_DIR}/src)
-target_link_libraries(test_opra_eq PRIVATE rtadsp winhttp ws2_32)
-add_test(NAME opra_eq COMMAND test_opra_eq)
-
-# P3 资料层④b：Discogs L4 古典作品版本推荐（令牌桶/熔断 + 缓存 + 版本推荐列表）
-add_executable(test_discogs tests/test_discogs.cpp)
-target_include_directories(test_discogs PRIVATE ${CMAKE_SOURCE_DIR}/src)
-target_link_libraries(test_discogs PRIVATE winhttp)
-add_test(NAME discogs COMMAND test_discogs)
-
-# 测试素材生成器：调制器 -> DSF/DFF（本机原本一个 DSD 文件都没有）
 add_executable(make_dsd tools/make_dsd.cpp)
 target_link_libraries(make_dsd PRIVATE rtadsp)
 
@@ -493,42 +575,10 @@ add_executable(dsdconv tools/dsdconv.cpp)
 target_link_libraries(dsdconv PRIVATE rtadsp)
 
 # WASAPI 采集核心（ROADMAP P4a）：环形缓冲 / 格式转换 / 离线分析 / --src null 门禁
-add_executable(test_capture tests/test_capture.cpp)
-target_include_directories(test_capture PRIVATE ${CMAKE_SOURCE_DIR}/src)
-target_link_libraries(test_capture PRIVATE rtadsp ole32 uuid mmdevapi ws2_32)
-target_compile_definitions(test_capture PRIVATE RTA_CAPTURE_EXE="$<TARGET_FILE:rtacapture>")
-add_test(NAME capture COMMAND test_capture)
-
-# ---------------- UPnP 投放控制面与 HTTP 供源测试（ROADMAP P5a） ----------------
-add_executable(test_upnp_control tests/test_upnp_control.cpp)
-target_include_directories(test_upnp_control PRIVATE ${CMAKE_SOURCE_DIR}/src)
-target_link_libraries(test_upnp_control PRIVATE rtadsp winhttp ws2_32)
-add_test(NAME upnp_control COMMAND test_upnp_control)
-
-# WebView2 双轨版本护栏纯逻辑门禁（P3 双轨运行库护栏）
-add_executable(test_wv2_version tests/test_wv2_version.cpp)
-target_include_directories(test_wv2_version PRIVATE
-    ${CMAKE_SOURCE_DIR}/tools
-    ${CMAKE_SOURCE_DIR}/third_party/webview2/include
-)
-target_link_libraries(test_wv2_version PRIVATE version user32 ole32 advapi32)
-add_test(NAME wv2_version COMMAND test_wv2_version)
-
-# ---------------- UPnP 投放后台服务与编排测试（ROADMAP P5b） ----------------
-add_executable(test_cast_service tests/test_cast_service.cpp)
-target_include_directories(test_cast_service PRIVATE ${CMAKE_SOURCE_DIR}/src)
-target_link_libraries(test_cast_service PRIVATE rtadsp winhttp ws2_32)
-add_test(NAME cast_service COMMAND test_cast_service)
-
-# ---------------- 解码免临时 WAV（流式读 ffmpeg 输出，ROADMAP P6b） ----------------
 add_executable(test_stream_decode tests/test_stream_decode.cpp)
 target_include_directories(test_stream_decode PRIVATE ${CMAKE_SOURCE_DIR}/src)
 target_link_libraries(test_stream_decode PRIVATE rtadsp)
 add_test(NAME stream_decode COMMAND test_stream_decode)
 
 # ---------------- DSD 两级抽取测试（ROADMAP P6c） ----------------
-add_executable(test_dsd_two_stage tests/test_dsd_two_stage.cpp)
-target_include_directories(test_dsd_two_stage PRIVATE ${CMAKE_SOURCE_DIR}/src)
-target_link_libraries(test_dsd_two_stage PRIVATE rtadsp psapi)
-add_test(NAME dsd_two_stage COMMAND test_dsd_two_stage)
-
+endif()

@@ -43,6 +43,9 @@ inline bool atomic_replace(const std::filesystem::path& from, const std::filesys
 
 #if defined(_WIN32)
 #include "platform/windows/fs_win32.h"
+#elif defined(__APPLE__)
+// macOS 实现（PLATFORM.md §9）
+#include "platform/macos/fs_posix.h"
 #else
-#error "platform/fs.h: 本平台尚无实现。Mac 组请按 PLATFORM.md §9（Mac 实现清单）实现 src/platform/posix/fs_posix.h"
+#error "platform/fs.h: 本平台尚无实现（已支持 Windows 与 macOS）。新平台请按 PLATFORM.md §9 在 src/platform/<平台>/ 下实现同名头文件。"
 #endif

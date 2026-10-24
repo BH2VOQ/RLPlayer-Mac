@@ -9,9 +9,7 @@
 //   6. complete 判定（>= 5 且全带 url 为 true；不足 5 条如实 false）
 //   7. 真实网络用例 opt-in（RTA_NET_TESTS=1 开启，默认 [SKIP] exit 0）
 #define WIN32_LEAN_AND_MEAN
-#ifndef NOMINMAX
-#define NOMINMAX
-#endif
+#include "platform/console.h"
 #include "meta/discogs.h"
 #include <chrono>
 #include <cstdio>
@@ -20,7 +18,6 @@
 #include <fstream>
 #include <string>
 #include <vector>
-#include <windows.h>
 
 using namespace rta::meta;
 namespace fsx = std::filesystem;
@@ -218,7 +215,7 @@ static const char* kFixtureLegacyVersionsCache = R"json({
 })json";
 
 int main() {
-    SetConsoleOutputCP(CP_UTF8);
+    rta::platform::enable_utf8_console();
     std::printf("== meta/discogs.h Discogs L4 版本推荐单元测试 ==\n");
 
     // 1. search/versions JSON 解析

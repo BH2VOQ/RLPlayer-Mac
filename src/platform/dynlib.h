@@ -38,6 +38,9 @@ private:
 
 #if defined(_WIN32)
 #include "platform/windows/dynlib_win32.h"
+#elif defined(__APPLE__)
+// macOS 实现（PLATFORM.md §9）
+#include "platform/macos/dynlib_posix.h"
 #else
-#error "platform/dynlib.h: 本平台尚无实现。Mac 组请按 PLATFORM.md §9（Mac 实现清单）用 dlopen/dlsym 实现"
+#error "platform/dynlib.h: 本平台尚无实现（已支持 Windows 与 macOS）。新平台请按 PLATFORM.md §9 在 src/platform/<平台>/ 下实现同名头文件。"
 #endif

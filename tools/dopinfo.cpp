@@ -1,11 +1,8 @@
 // dopinfo.cpp — 校验一个 WAV 是否为合法 DoP，并还原其 1-bit 流做统计
 // 用途：验证 DSD 输出链路的端到端正确性（纯离线，不打开音频设备）
+#include "platform/console.h"
 #include "audio/wav.h"
 #include "dsp/dop.h"
-#ifndef NOMINMAX
-#define NOMINMAX
-#endif
-#include <windows.h>
 #include <cstdio>
 #include <cstring>
 #include <vector>
@@ -18,7 +15,7 @@ using rta::dsp::DOP_MARKER_A;
 
 int main(int argc, char** argv) {
     setvbuf(stdout, nullptr, _IONBF, 0);
-    SetConsoleOutputCP(CP_UTF8);
+    rta::platform::enable_utf8_console();
     if (argc < 2) { printf("用法: dopinfo <file.wav>\n"); return 2; }
 
     audio::AudioBuffer a;

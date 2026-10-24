@@ -6,6 +6,7 @@
 //   3. 文件布局独立验证：按 DSF 规范手工计算偏移，确认「每声道 blockSize 块交错、
 //      LSB-first」——不能用读函数自己验证自己。
 //   4. 坏文件必须抛异常并说清原因（截断 / 魔数错 / DST 压缩）。
+#include "platform/console.h"
 #include "audio/dsd_reader.h"
 #include <cstdio>
 #include <cstring>
@@ -13,10 +14,6 @@
 #include <string>
 #include <vector>
 
-#ifndef NOMINMAX
-#define NOMINMAX
-#endif
-#include <windows.h>
 
 using namespace rta::audio;
 
@@ -151,7 +148,7 @@ static bool throws(const std::string& path, const char* kind, std::string* msg) 
 
 int main() {
     setvbuf(stdout, nullptr, _IONBF, 0);
-    SetConsoleOutputCP(CP_UTF8);
+    rta::platform::enable_utf8_console();
     const std::string pDsf = temp_path("rta_dsd_reader_test.dsf");
     const std::string pDff = temp_path("rta_dsd_reader_test.dff");
 

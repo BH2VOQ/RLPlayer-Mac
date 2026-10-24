@@ -11,6 +11,10 @@
 #include <vector>
 #include <atomic>
 #include <cstddef>
+// <exception> 必须显式包含：本文件用到 std::exception_ptr / std::current_exception。
+// libstdc++（GCC）会经 <thread>/<functional> 间接带进来，libc++（macOS clang）不会，
+// 于是 macOS 上报 "incomplete type 'std::exception_ptr'"。显式包含才是可移植写法。
+#include <exception>
 
 namespace rta::dsp {
 

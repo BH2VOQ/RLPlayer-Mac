@@ -1,13 +1,13 @@
 // aidecode.cpp — 把任意音频格式经 read_any 解码并写成 WAV，用于验证解码无损
+#include "platform/console.h"
 #include "audio/audio_loader.h"
 #include <cstdio>
 #include <string>
-#include <windows.h>
 
 using namespace rta::audio;
 
 int main(int argc, char** argv) {
-    SetConsoleOutputCP(CP_UTF8);
+    rta::platform::enable_utf8_console();
     setvbuf(stdout, nullptr, _IONBF, 0);
     if (argc < 3) { printf("用法: aidecode <输入> <输出.wav>\n"); return 2; }
     try {

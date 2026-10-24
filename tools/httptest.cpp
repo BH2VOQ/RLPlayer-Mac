@@ -1,4 +1,6 @@
 // httptest.cpp — HTTP 客户端自检：拉取 URL 并报告大小/状态码
+#include "platform/console.h"
+#include "platform/time.h"
 #include "net/http_client.h"
 #include <cstdio>
 #include <string>
@@ -12,15 +14,15 @@ static unsigned long long fnv1a(const std::vector<unsigned char>& b) {
 }
 
 int main(int argc, char** argv) {
-    SetConsoleOutputCP(CP_UTF8);
+    rta::platform::enable_utf8_console();
     setvbuf(stdout, nullptr, _IONBF, 0);
     if (argc < 2) { printf("用法: httptest <url> [附加头]\n"); return 2; }
     std::vector<std::string> hdrs;
     for (int i = 2; i < argc; ++i) hdrs.push_back(argv[i]);
 
-    auto t0 = GetTickCount64();
+    auto t0 = rta::platform::monotonic_ms();
     HttpResponse r = http_get(argv[1], hdrs);
-    auto ms = GetTickCount64() - t0;
+    auto ms = rta::platform::monotonic_ms() - t0;
 
     printf("URL  : %s\n", argv[1]);
     printf("状态 : %d  (%s)\n", r.status, r.ok ? "OK" : r.error.c_str());

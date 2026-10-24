@@ -23,6 +23,7 @@
 //       中文路径会变成 GBK 字节，下游按 UTF-8 解释时 MSVC 的 fs::path(u8string) 直接
 //       抛 invalid_argument（未捕获异常，退出码 127）——因此这里必须用宽字符入口。
 //       工具链证据：wv2_probe.cpp 同样用 wmain，本项目的 clang++/lld-link 能正确选择入口。
+#include "platform/console.h"
 #include "meta/store.h"
 #include "meta/parse.h"
 #include "meta/llm.h"
@@ -686,7 +687,7 @@ static int cmd_summary(const int argc, char** argv) {
 
 int wmain(int argc, wchar_t** argv) {
     setvbuf(stdout, nullptr, _IONBF, 0);
-    SetConsoleOutputCP(CP_UTF8);
+    rta::platform::enable_utf8_console();
 
     // 命令行参数：宽字符 -> UTF-8（不经 ANSI 代码页），之后全部按 UTF-8 字节串处理
     std::vector<std::string> u8arg((size_t)argc);
