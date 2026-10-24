@@ -249,12 +249,17 @@ public:
         bits_ = spec.bits;
         channels_ = spec.channels;
         buffer_ms_ = spec.bufferMs;
+        shared_ = spec.shared;
 
         // 1) 抢占 Hog Mode（独占）。失败不致命，但要如实降级为"非 bit-perfect"。
-        hogged_ = detail::set_hog_mode(device_, true) && detail::is_hogged_by_us(device_);
+        //    共享模式（OpenSpec::shared）不抢 —— 系统混音器留在路径上。
+        hogged_ = false;
+        if (!shared_) hogged_ = detail::set_hog_mode(device_, true) && detail::is_hogged_by_us(device_);
 
-        // 2) 按源格式设置设备物理格式 —— 这是 bit-perfect 的关键
-        if (!detail::set_device_format(device_, rate_, bits_, channels_)) {
+        // 2) 按源格式设置设备物理格式 —— 这是 bit-perfect 的关键。
+        //    共享模式跳过（设备可能被其它客户端占用，物理格式归系统管）；
+        //    AUHAL 会按需做 int<->float32 换算（|v|<2^24 时精确）。
+        if (!shared_ && !detail::set_device_format(device_, rate_, bits_, channels_)) {
             // 回滚 hog
             if (hogged_) { detail::set_hog_mode(device_, false); hogged_ = false; }
             const DeviceCaps c = caps(spec.deviceId);
@@ -430,7 +435,9 @@ public:
         // bit-perfect 的充分必要条件（PLATFORM.md §5.1）：
         //   独占(Hog) + 设备物理格式 == 源格式 + 增益 1.0 + 无任何 DSP
         // 本层只能保证前三项；DSP 是否启用由引擎层决定并另行显示。
-        return opened_ && hogged_ && gain_ == 1.0;
+        // 共享模式下系统混音器在路径上，不构成 bit-perfect（数值仍可逐位精确，
+        // 但那是 rtaloop 回环测试去证明的事，不是本标志的承诺）。
+        return opened_ && !shared_ && hogged_ && gain_ == 1.0;
     }
 
     OutputError last_error_class() const override { return err_class_; }
@@ -546,6 +553,7 @@ private:
         initialized_ = false;
         running_ = false;
         paused_ = false;
+        shared_ = false;
         write_pos_ = read_pos_ = 0;
         ring_.clear();
         ring_frames_ = 0;
@@ -568,6 +576,7 @@ private:
     bool running_ = false;
     bool paused_ = false;
     bool hogged_ = false;
+    bool shared_ = false;
     size_t buffer_frames_ = 0;
     size_t frames_written_ = 0;
 

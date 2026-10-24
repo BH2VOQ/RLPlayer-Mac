@@ -91,6 +91,13 @@ struct OpenSpec {
     int      bits = 0;
     int      channels = 2;
     double   bufferMs = 100.0;   // 缓冲时长（独占模式下必须等于周期，见 PLATFORM.md §8）
+    // 共享模式（等价 Windows 侧 WASAPI 共享语义）：不抢 Hog、不改设备物理格式，
+    // 系统混音器在路径上（int -> float32 混音），采样【数值】在 |v| < 2^24 时仍逐位
+    // 精确（整数到 float32 的换算是精确的），但不构成完整的 bit-perfect 承诺：
+    // 后端的 bit_perfect() 在共享模式下必须返回 false。
+    // 用途：① 设备被其它客户端占用时的回退；② 回环逐位比对（tools/rtaloop，
+    // 抓录端与播放端必须共存，独占模式会互相排斥）。
+    bool shared = false;
 };
 
 // ---------------------------------------------------------------------------

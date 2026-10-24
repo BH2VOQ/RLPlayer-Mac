@@ -222,6 +222,14 @@ if(APPLE)
   target_include_directories(test_coreaudio PRIVATE ${CMAKE_SOURCE_DIR}/src)
   target_link_libraries(test_coreaudio PRIVATE ${RL_PLATFORM_LIBS})
   add_test(NAME coreaudio COMMAND test_coreaudio --no-open)
+
+  # 回环逐位比对工具（Aggregate Tap / 虚拟设备输入侧；默认电平 -60 dBFS）
+  # rtaloop_tap.mm：CATapDescription/AudioHardwareCreateProcessTap 是 ObjC++ 门控，
+  # 拆成薄包装给纯 C++ 主文件用（见该文件头注）
+  enable_language(OBJCXX)
+  add_executable(rtaloop tools/rtaloop.cpp tools/rtaloop_tap.mm)
+  target_include_directories(rtaloop PRIVATE ${CMAKE_SOURCE_DIR}/src)
+  target_link_libraries(rtaloop PRIVATE ${RL_PLATFORM_LIBS} "-framework Foundation")
 endif()
 
 add_executable(test_knowledge tests/test_knowledge.cpp)

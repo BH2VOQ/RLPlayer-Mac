@@ -19,11 +19,14 @@
 //   * 欠载计数作为可观测指标打印；稳态下要求为 0
 //   * 格式协商：设备不支持的格式必须 open 失败且 last_error 非空（§5.3 拒绝而非静默替换）
 //
-// ⚠️ 未解决项（铁律 4）：
-//   1) 逐位比对（bit-perfect 的最终证明）需要"设备侧回环录制"，本机没有
-//      回环虚拟设备，所以本测试只证明"帧确实被设备消费了"，**不证明样本值未被改动**。
-//   2) Hog Mode 是否真的抢到独占，只在 open 后读 bit_perfect() 间接反映，
-//      没有独立探针验证"其它进程确实被挡在外面"。
+// ⚠️ 未解决项（铁律 4；2026-10-24 第二轮更新，见 PLATFORM.md §13.10）：
+//   1) ~~逐位比对需要设备侧回环录制，本机没有回环设备~~ 已解决：
+//      macOS 14.2+ 有官方 Aggregate Tap（rtaloop record-tap），在 Pocket Master 上
+//      实测 16/24/32 bit 三种位深 0 LSB 偏差、100% 覆盖（含 24 bit 三字节打包）。
+//      本测试仍只证明"帧被消费"——逐位证据在 rtaloop，两者互补不重复。
+//   2) Hog Mode 已有跨进程独立探针（rtaloop hogprobe）：owner 归属全局可见 ✓。
+//      但实测发现 Hog **不阻止**其它进程 IO（第三进程 IOProc 照常运行）——
+//      macOS 的 Hog 语义弱于 WASAPI 独占，bit-perfect 的实际保障是物理格式锁定。
 #include "platform/audio_out_factory.h"
 
 #include <atomic>
