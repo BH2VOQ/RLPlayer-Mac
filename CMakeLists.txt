@@ -225,6 +225,11 @@ if(APPLE)
   add_executable(rtaweb tools/rtaweb.cpp)
   target_include_directories(rtaweb PRIVATE ${CMAKE_SOURCE_DIR}/src)
   target_link_libraries(rtaweb PRIVATE ${RL_PLATFORM_LIBS})
+
+  # macOS 原生壳（§9 第 9 条 / §10 契约）：NSWindow + WKWebView + postMessage 垫片，
+  # spawn rtaweb 子进程。对齐 Windows 的 launcher.cpp + WebView2 形态。
+  add_executable(rlplayer_mac tools/mac_host.mm)
+  target_link_libraries(rlplayer_mac PRIVATE "-framework AppKit" "-framework WebKit")
 endif()
 
 # ---------------- 测试 ----------------

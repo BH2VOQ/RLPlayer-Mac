@@ -4,10 +4,10 @@
 # 用法：tools/make_app_mac.sh [构建目录=build-mac]
 # 产物：dist-mac/RLPlayer.app
 #
-# 形态（mac 首版）：
-#   * 可执行 = rtaweb（HTTP 服务 + CoreAudio 输出；浏览器界面，§10 契约不变）
-#   * 双击启动 → 起服务 → 自动用默认浏览器打开界面（--no-browser 可关）
-#   * 退出 = Dock 图标右键 → 退出（SIGTERM 优雅收尾）或 Ctrl+C
+# 形态（§9 第 9 条原生壳版，2026-10-25）：
+#   * 主可执行 = rlplayer_mac（NSWindow + WKWebView 原生壳，§10 postMessage 契约）
+#   * 服务 = rtaweb 子进程（壳 spawn，--no-browser；界面加载进 WKWebView）
+#   * 退出 = 关窗 / Cmd+Q / Dock 右键退出（壳 SIGTERM 服务，优雅收尾）
 #   * 图标从 res/rlplayer-256.png 生成 icns
 #   * ffmpeg：若 PATH 上有可用 ffmpeg/ffprobe，拷进 bundle（与 exe 同目录，find_tool 先看这里）
 #     ⚠️ 本机 Homebrew ffmpeg 8.1.2 链接损坏（libx265.216.dylib 缺失）——脚本会先跑 -version 验证
@@ -19,14 +19,15 @@ BUILD="${1:-$ROOT/build-mac}"
 OUT="$ROOT/dist-mac"
 APP="$OUT/RLPlayer.app"
 
-[[ -x "$BUILD/rtaweb" ]] || { echo "!! $BUILD/rtaweb 不存在，先构建"; exit 1; }
+[[ -x "$BUILD/rtaweb" && -x "$BUILD/rlplayer_mac" ]] || { echo "!! rtaweb / rlplayer_mac 不存在，先构建"; exit 1; }
 
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 
-# 1) 可执行（服务本体）
-cp "$BUILD/rtaweb" "$APP/Contents/MacOS/RLPlayer"
-chmod +x "$APP/Contents/MacOS/RLPlayer"
+# 1) 主可执行 = 原生壳；服务 = rtaweb（同目录，壳按 bundle 布局 spawn）
+cp "$BUILD/rlplayer_mac" "$APP/Contents/MacOS/RLPlayer"
+cp "$BUILD/rtaweb"       "$APP/Contents/MacOS/rtaweb"
+chmod +x "$APP/Contents/MacOS/RLPlayer" "$APP/Contents/MacOS/rtaweb"
 
 # 2) 数据（OPRA 耳机 EQ 索引；path_in_exe_dir 约定 = exe 同目录）
 mkdir -p "$APP/Contents/MacOS/data"
@@ -66,6 +67,11 @@ cat > "$APP/Contents/Info.plist" <<PLIST
     <key>LSApplicationCategoryType</key> <string>public.app-category.music</string>
     <!-- 常规 Dock 应用：图标常驻、右键可退出（SIGTERM 优雅收尾）。界面在默认浏览器。 -->
     <key>LSUIElement</key>              <false/>
+    <!-- 界面是 http://127.0.0.1 本地服务：显式放行 loopback（ATS 默认应允许，明确写出防 SDK 行为漂移） -->
+    <key>NSAppTransportSecurity</key>
+    <dict>
+        <key>NSAllowsLocalNetworking</key> <true/>
+    </dict>
     <!-- 音频输出不涉麦克风；若将来移植采集需补 NSMicrophoneUsageDescription -->
 </dict>
 </plist>
@@ -84,4 +90,4 @@ done
 
 echo "✓ $APP"
 echo "  双击运行（首次 Gatekeeper 拦截时：右键 → 打开）"
-echo "  退出：Dock 图标右键 → 退出"
+echo "  独立 App 窗口（WKWebView 内嵌界面）；退出：关窗 / Cmd+Q / Dock 右键"
