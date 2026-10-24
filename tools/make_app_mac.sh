@@ -72,19 +72,27 @@ cat > "$APP/Contents/Info.plist" <<PLIST
     <dict>
         <key>NSAllowsLocalNetworking</key> <true/>
     </dict>
-    <!-- 音频输出不涉麦克风；若将来移植采集需补 NSMicrophoneUsageDescription -->
+    <!-- 输入采集（§13.13）：CoreAudio 输入设备采集需要 TCC 授权 -->
+    <key>NSMicrophoneUsageDescription</key>
+    <string>RLPlayer 的输入采集功能用于录音与电平监测，仅在您于设置页显式开启时访问麦克风。</string>
 </dict>
 </plist>
 PLIST
 
-# 5) ffmpeg / ffprobe（先验证可用再拷；Homebrew 的坏链接会当场暴露）
+# 5) ffmpeg / ffprobe：优先自建精简静态版（tools/build_ffmpeg_lite_mac.sh，无任何外部
+#    依赖——Homebrew 版曾因 x265 soname 断裂 dyld 崩溃，退出码 134）；其次 PATH（验证后收）
 for tool in ffmpeg ffprobe; do
+    if [[ -x "$ROOT/build-mac/ffmpeg-lite/$tool" ]] && "$ROOT/build-mac/ffmpeg-lite/$tool" -version >/dev/null 2>&1; then
+        cp "$ROOT/build-mac/ffmpeg-lite/$tool" "$APP/Contents/MacOS/"
+        echo "已内置 $tool：自建精简静态版（$(du -h "$ROOT/build-mac/ffmpeg-lite/$tool" | cut -f1)）"
+        continue
+    fi
     p="$(command -v $tool 2>/dev/null || true)"
     if [[ -n "$p" ]] && "$p" -version >/dev/null 2>&1; then
         cp "$p" "$APP/Contents/MacOS/"
-        echo "已内置 $tool：$(basename $p)"
+        echo "已内置 $tool：$p（系统版）"
     else
-        echo "⚠ $tool 不可用（PATH 无或链接损坏）——FLAC/MP3 等非 WAV/DSD 格式无法解码；WAV/DSF/DFF 原生支持不受影响"
+        echo "⚠ $tool 不可用——FLAC/MP3 等非 WAV/DSD 格式无法解码；可运行 tools/build_ffmpeg_lite_mac.sh 自建"
     fi
 done
 

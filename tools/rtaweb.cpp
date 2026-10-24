@@ -69,6 +69,7 @@ class CoreAudioSink;   // 本文件后部定义；render_loop 的 mac 遥测分�
 #else
 #include "platform/path.h"
 #include "platform/audio_out_factory.h"   // macOS：CoreAudioOutput（PLATFORM.md §13.9/§13.10）
+#include "platform/macos/audio_in_coreaudio.h"   // 输入采集（AUHAL input；§13.13）
 #endif
 
 // 渲染主循环迁到 rta::render 后，本文件的各后端实现继续用短名（历史上就是全局名）
@@ -3236,6 +3237,100 @@ static void input_worker_func(std::shared_ptr<rta::audio::WasapiCapture> cap,
 }
 #endif // _WIN32
 
+#if !defined(_WIN32)
+// ---------------- macOS 采集 worker（§13.13）----------------
+// 主体逻辑与 Windows 的 input_worker_func 同构（读取/统计/状态上报/结束写 WAV）；
+// 差异只有直通监听：mac 用 CoreAudioSink（int32 低位对齐语义），float→int32 转换后写入
+// ——监听本就声明非 bit-perfect（§10 语义），float32 域承载 -144 dB 级转换噪声。
+static void input_worker_mac(std::shared_ptr<rta::platform::CoreAudioInput> cap,
+                             std::shared_ptr<CoreAudioSink> monitorOut,
+                             std::string mode, std::string outFile, double maxSeconds) {
+    const uint32_t rate = cap->rate();
+    const int channels = cap->channels();
+    const size_t totalTargetFrames = (maxSeconds > 0.0) ? (size_t)(maxSeconds * (double)rate) : 0;
+
+    std::vector<float> recorded;
+    if (mode == "record" && totalTargetFrames > 0)
+        recorded.reserve(totalTargetFrames * (size_t)channels);
+
+    std::vector<float> chunk(2048 * (size_t)channels);
+    std::vector<int32_t> mon;
+    size_t recordedFrames = 0;
+
+    while (!g_inputSession.stopFlag.load()) {
+        if (totalTargetFrames > 0 && recordedFrames >= totalTargetFrames) break;
+        size_t want = 2048;
+        if (totalTargetFrames > 0 && recordedFrames + want > totalTargetFrames)
+            want = totalTargetFrames - recordedFrames;
+
+        const size_t n = cap->read_available(chunk.data(), want);
+        if (n > 0) {
+            if (mode == "record")
+                recorded.insert(recorded.end(), chunk.begin(), chunk.begin() + n * (size_t)channels);
+            recordedFrames += n;
+
+            double sumSq = 0.0, maxPeak = 0.0;
+            const size_t totalSamples = n * (size_t)channels;
+            for (size_t i = 0; i < totalSamples; ++i) {
+                const double a = std::fabs((double)chunk[i]);
+                if (a > maxPeak) maxPeak = a;
+                sumSq += (double)chunk[i] * (double)chunk[i];
+            }
+            const double rms = std::sqrt(sumSq / (double)(totalSamples ? totalSamples : 1));
+            const double rmsDb = (rms > 1e-12) ? 20.0 * std::log10(rms) : -999.0;
+            const double peakDb = (maxPeak > 1e-12) ? 20.0 * std::log10(maxPeak) : -999.0;
+
+            if (monitorOut) {
+                mon.resize(n * (size_t)channels);
+                for (size_t i = 0; i < mon.size(); ++i)
+                    mon[i] = (int32_t)std::lround((double)chunk[i] * 2147483647.0);
+                size_t fed = 0;
+                while (fed < n)
+                    fed += monitorOut->write_one_period(mon.data() + fed * (size_t)channels, n - fed);
+            }
+
+            {
+                std::lock_guard<std::mutex> lk(g_inputSession.mtx);
+                g_inputSession.frames = recordedFrames;
+                g_inputSession.seconds = (double)recordedFrames / (double)rate;
+                g_inputSession.water = cap->water_level();
+                g_inputSession.overflow = cap->overflow_count();
+                g_inputSession.underflow = cap->underflow_count();
+                g_inputSession.rmsDb = rmsDb;
+                g_inputSession.peakDb = peakDb;
+            }
+        } else {
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        }
+    }
+    if (mode == "record" && !recorded.empty()) {
+        if (outFile.empty()) outFile = default_recording_path();
+        FILE* f = std::fopen(outFile.c_str(), "wb");
+        if (f) {
+            const uint32_t dataBytes = (uint32_t)(recorded.size() * sizeof(float));
+            const uint32_t byteRate = rate * (uint32_t)channels * 4;
+            std::vector<char> h(44);
+            h[0]='R';h[1]='I';h[2]='F';h[3]='F'; h[8]='W';h[9]='A';h[10]='V';h[11]='E';
+            h[12]='f';h[13]='m';h[14]='t';h[15]=' ';
+            h[16]=16; h[20]=3; h[36]='d';h[37]='a';h[38]='t';h[39]='a';
+            *(uint16_t*)&h[22] = (uint16_t)channels;   // nChannels（曾经写死 1：stereo 数据配 mono 头）
+            *(uint32_t*)&h[4]  = 36 + dataBytes;
+            *(uint32_t*)&h[24] = rate;
+            *(uint32_t*)&h[28] = byteRate;
+            *(uint16_t*)&h[32] = (uint16_t)channels * 4;   // blockAlign（2 字节！写 4 字节会盖掉 bitsPerSample）
+            *(uint16_t*)&h[34] = 32;                        // wBitsPerSample（float32）
+            *(uint32_t*)&h[40] = dataBytes;
+            std::fwrite(h.data(), 1, h.size(), f);
+            std::fwrite(recorded.data(), sizeof(float), recorded.size(), f);
+            std::fclose(f);
+            std::lock_guard<std::mutex> lk(g_inputSession.mtx);
+            g_inputSession.outFile = outFile;
+        }
+    }
+    g_inputSession.running.store(false);
+}
+#endif
+
 // rlplayer-llm.conf 的可选 proxy= 行(P1.5 后备代理)。llm.h 的 LlmConfig 不带该字段
 // (llm.h 不在本轮可改清单),rtaweb 侧自行解析同一文件:键名 proxy,值形如
 // http://127.0.0.1:7897;# 注释/空行/trim 规则与 llm_config_load 一致。没有该行 → 空。
@@ -6102,7 +6197,23 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
     if (rq.path.rfind("/api/input/devices", 0) == 0 || rq.path.rfind("/api/indevices", 0) == 0) {
         ct = "application/json; charset=utf-8";
 #if !defined(_WIN32)
-        return "{\"ok\":true,\"devices\":[],\"note\":\"macOS 版暂不支持输入采集（WASAPI 专属）\"}";
+        // macOS：CoreAudio 输入设备（§13.13）。loopback（Process Tap）首版不提供，如实注明。
+        std::ostringstream j;
+        j << R"({"ok":true,"devices":[)";
+        bool first = true;
+        for (const auto& d : rta::platform::CoreAudioInput::enumerate_capture(false)) {
+            if (!first) j << ",";
+            first = false;
+            j << R"({"id":")" << jesc(d.id) << R"(",)"
+              << R"("name":")" << jesc(d.name) << R"(",)"
+              << R"("default":)" << (d.isDefault ? "true" : "false")
+              << R"(,"loopback":false)"
+              << R"(,"mixRate":)" << d.mixRate
+              << R"(,"mixChannels":)" << d.mixChannels
+              << R"(,"mixBits":)" << d.mixBits << "}";
+        }
+        j << R"(],"note":"macOS 采集走 CoreAudio 输入；系统混音回环(loopback)首版未提供"})";
+        return j.str();
 #else
         std::ostringstream j;
         j << R"({"ok":true,"devices":[)";
@@ -6152,15 +6263,10 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
         return j.str();
     }
 
-    // 启动采集：POST /api/input/start
-    // 参数：mode=record|monitor、dev=<子串或 id>、loopback=1、out=<wav>、seconds=<上限>；
-    // 测试用：src=null&inject=1000:0.001 走模拟源（不开设备、不发声），用于自动化门禁
+    // 启动采集：POST /api/input/start（macOS §13.13：CoreAudioInput）
+    // 参数语义与 Windows 版一致：mode=record|monitor|null、dev、seconds、out、inject、src=null
     if (rq.path.rfind("/api/input/start", 0) == 0) {
         ct = "application/json; charset=utf-8";
-#if !defined(_WIN32)
-        // macOS：WASAPI 采集未移植（PLATFORM.md §13.12 挂账）；模拟源自检一并不可用
-        return "{\"ok\":false,\"error\":\"macOS 版暂不支持输入采集（WASAPI 专属，未移植）\"}";
-#else
         auto parseParams = [](const rta::net::HttpRequest& req) {
             std::map<std::string, std::string> m;
             auto trim = [](std::string s) {
@@ -6176,11 +6282,8 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
                     tok = trim(tok);
                     if (tok.empty()) continue;
                     const size_t e = tok.find('=');
-                    if (e == std::string::npos) {
-                        m[trim(urlDecode(tok))] = "1";
-                    } else {
-                        m[trim(urlDecode(tok.substr(0, e)))] = trim(urlDecode(tok.substr(e + 1)));
-                    }
+                    if (e == std::string::npos) m[trim(urlDecode(tok))] = "1";
+                    else m[trim(urlDecode(tok.substr(0, e)))] = trim(urlDecode(tok.substr(e + 1)));
                 }
             };
             const size_t q = req.path.find('?');
@@ -6188,148 +6291,94 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
             if (!req.body.empty()) parseStr(req.body);
             return m;
         };
-
-        auto params = parseParams(rq);
-        if (g_inputSession.running.load()) {
+        auto params = parseParams(rq);   // 非 const：operator[] 按语义需要
+        if (g_inputSession.running.load())
             return R"({"ok":false,"error":"设备忙：采集已在运行中"})";
-        }
         g_inputSession.reap();
 
         std::string mode = "record";
         if (params.count("mode")) mode = params["mode"];
         std::string src = params.count("src") ? params["src"] : "";
-        if (src == "null" && (!params.count("mode") || params["mode"] == "null")) {
-            mode = "null";
-        }
-        if (mode != "record" && mode != "monitor" && mode != "null") {
-            return R"({"ok":false,"error":"不支持的采集模式: )" + jesc(mode) + R"EOF( (仅支持 record/monitor/null)"})EOF";
-        }
-
-        // 2026-10-23 真机踩到：传 device=Widget+B（少个 v）被静默忽略 → 回落到默认端点，
-        // 用户会以为"指定了设备却没生效"。这里对已知集合之外的键直接报错，别让它悄悄变默认。
-        {
-            static const char* kKnown[] = { "mode", "src", "dev", "loopback", "seconds", "out", "inject", "inbuf", "monitor" };
-            for (const auto& kv : params) {
-                bool known = false;
-                for (const char* k : kKnown) if (kv.first == k) { known = true; break; }
-                if (known) continue;
-                // 允许 UI 附带的无害键（面板回传），但不允许"看起来像设备名"的键被忽略
-                if (kv.first == "device" || kv.first == "deviceId" || kv.first == "devid") {
-                    return R"({"ok":false,"error":"参数名应为 dev（不是 )" + jesc(kv.first) +
-                           R"()；收到但未生效会静默回落默认设备，已拒绝以免误导"})";
-                }
-            }
+        if (src == "null" && (!params.count("mode") || params["mode"] == "null")) mode = "null";
+        if (mode != "record" && mode != "monitor" && mode != "null")
+            return R"({"ok":false,"error":"不支持的采集模式（仅支持 record/monitor/null）"})";
+        // 参数名防呆（与 Windows 版同规：形似设备的键名收到但未生效会静默回落，拒绝）
+        for (const auto& kv : params) {
+            if (kv.first == "device" || kv.first == "deviceId" || kv.first == "devid")
+                return R"({"ok":false,"error":"参数名应为 dev（不是 )" + jesc(kv.first) + R"()；已拒绝以免静默回落默认设备"})";
         }
         std::string dev = params.count("dev") ? params["dev"] : "";
-        bool loopback = (params.count("loopback") && (params["loopback"] == "1" || params["loopback"] == "true"));
+        const bool loopback = (params.count("loopback") && (params["loopback"] == "1" || params["loopback"] == "true"));
+        if (loopback)
+            return R"({"ok":false,"error":"macOS 首版不支持系统混音回环（Process Tap 未接入采集路径）"})";
         double seconds = params.count("seconds") ? std::strtod(params["seconds"].c_str(), nullptr) : 0.0;
         if (seconds < 0.0 || std::isnan(seconds)) seconds = 0.0;
         if (seconds > 86400.0) seconds = 86400.0;
         std::string outFile = params.count("out") ? params["out"] : "";
-        if (!outFile.empty() && !valid_utf8(outFile)) {
-            return utf8_path_reject(outFile);
-        }
-
-        double injectFreq = 1000.0;
-        double injectAmp = 0.001;
+        if (!outFile.empty() && !valid_utf8(outFile)) return utf8_path_reject(outFile);
+        double injectFreq = 1000.0, injectAmp = 0.001;
         if (params.count("inject")) {
-            std::string inj = params["inject"];
-            size_t colon = inj.find(':');
+            const std::string inj = params["inject"];
+            const size_t colon = inj.find(':');
             if (colon != std::string::npos) {
                 injectFreq = std::strtod(inj.substr(0, colon).c_str(), nullptr);
                 injectAmp = std::strtod(inj.substr(colon + 1).c_str(), nullptr);
-            } else {
-                injectFreq = std::strtod(inj.c_str(), nullptr);
-            }
+            } else injectFreq = std::strtod(inj.c_str(), nullptr);
         }
 
-        // 若选择回环设备且未显式指定 loopback 标志，自动识别
-        if (!loopback && !dev.empty()) {
-            auto allDevs = rta::audio::WasapiCapture::enumerate_capture(true);
-            for (const auto& d : allDevs) {
-                if (d.id == dev || d.name == dev || d.name.find(dev) != std::string::npos) {
-                    if (d.isLoopback) loopback = true;
-                    break;
-                }
-            }
-        }
-
-        if (src != "null" && mode != "null" && !dev.empty() && dev[0] != '{') {
-            auto allDevs = rta::audio::WasapiCapture::enumerate_capture(loopback);
+        if (src != "null" && mode != "null" && !dev.empty()) {
             bool found = false;
-            for (const auto& d : allDevs) {
+            for (const auto& d : rta::platform::CoreAudioInput::enumerate_capture(false)) {
                 if (d.id == dev || d.name == dev || d.name.find(dev) != std::string::npos) {
                     found = true;
+                    if (dev != d.id && dev != d.name) dev = d.id;   // 子串命中归一成精确 id
                     break;
                 }
             }
-            if (!found) {
-                return R"({"ok":false,"error":"打开采集端点失败: 未找到指定的设备 [)" + jesc(dev) + R"(]"})";
-            }
+            if (!found)
+                return R"({"ok":false,"error":"打开采集端点失败: 未找到指定的输入设备 [)" + jesc(dev) + R"(]"})";
         }
 
-        rta::audio::CaptureConfig cfg;
+        rta::platform::MacCaptureConfig cfg;
         cfg.deviceId = dev;
-        cfg.loopback = loopback;
-        cfg.bufferMs = 100.0;
-        cfg.eventDriven = true;
         cfg.srcNull = (src == "null" || mode == "null");
         cfg.injectFreq = injectFreq;
         cfg.injectAmp = injectAmp;
         cfg.paced = true;
-        if (cfg.srcNull && seconds > 0.0) {
-            cfg.targetFrames = (size_t)(seconds * 48000.0);
-        }
+        cfg.bufferMs = 200.0;
+        if (cfg.srcNull && seconds > 0.0) cfg.targetFrames = (size_t)(seconds * 48000.0);
 
-        auto cap = std::make_shared<rta::audio::WasapiCapture>();
+        auto cap = std::make_shared<rta::platform::CoreAudioInput>();
         if (!cap->open(cfg)) {
             std::string err = cap->last_error();
-            if (err.empty()) err = "打开采集端点失败: 无法打开目标采集设备或端点不存在";
+            if (err.empty()) err = "打开采集端点失败: 无法打开目标采集设备或设备无输入流";
             return R"({"ok":false,"error":")" + jesc(err) + R"("})";
         }
-
-        std::shared_ptr<rta::audio::WasapiSharedOutput> sharedOut;
+        std::shared_ptr<CoreAudioSink> monitorOut;
         if (mode == "monitor" && !cfg.srcNull) {
-            // 直通监听（非 bit-perfect）：送往默认共享输出端点
-            sharedOut = std::make_shared<rta::audio::WasapiSharedOutput>();
-            if (!sharedOut->open("", cap->rate(), cap->channels(), 32)) {
+            monitorOut = std::make_shared<CoreAudioSink>();
+            SinkOpenOpts mo;
+            mo.bufferMs = 120;                     // 空 device = 系统默认输出
+            if (!monitorOut->open(mo, cap->rate(), cap->channels(), 24)) {
+                monitorOut.reset();
                 cap->close();
-                return R"({"ok":false,"error":"直通监听打开输出端点失败: )" + jesc(sharedOut->last_error()) + R"("})";
+                return R"({"ok":false,"error":"直通监听打开输出设备失败（默认输出不可用）"})";
             }
-            if (!sharedOut->start()) {
+            if (!monitorOut->start()) {
+                monitorOut.reset();
                 cap->close();
-                return R"({"ok":false,"error":"直通监听启动输出失败: )" + jesc(sharedOut->last_error()) + R"("})";
+                return R"({"ok":false,"error":"直通监听启动输出失败"})";
             }
         }
-
         if (!cap->start()) {
-            if (sharedOut) sharedOut->close();
+            if (monitorOut) monitorOut->close();
             cap->close();
-            std::string err = cap->last_error();
-            if (err.empty()) err = "启动采集流失败";
-            return R"({"ok":false,"error":"启动采集流失败: )" + jesc(err) + R"("})";
+            return R"({"ok":false,"error":"启动采集流失败: ")" + jesc(cap->last_error()) + R"("})";
         }
-
-        if (mode == "record" && outFile.empty()) {
-            outFile = default_recording_path();
-        }
-
-        std::string devName = dev.empty() ? "(默认端点)" : dev;
-        if (cfg.srcNull) {
-            devName = "模拟源 (48k/2ch)";
-        } else {
-            for (const auto& d : rta::audio::WasapiCapture::enumerate_capture(loopback)) {
-                if (d.id == dev || d.name.find(dev) != std::string::npos) {
-                    devName = d.name;
-                    break;
-                }
-            }
-        }
-
         {
             std::lock_guard<std::mutex> lk(g_inputSession.mtx);
             g_inputSession.mode = mode;
-            g_inputSession.device = devName;
+            g_inputSession.device = dev.empty() ? "默认输入设备" : dev;
             g_inputSession.rate = cap->rate();
             g_inputSession.channels = cap->channels();
             g_inputSession.seconds = 0.0;
@@ -6346,13 +6395,11 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
             g_inputSession.stopFlag.store(false);
             g_inputSession.running.store(true);
         }
-
         {
             std::lock_guard<std::mutex> lk(g_inputSession.joinMtx);
-            g_inputSession.th = std::thread(input_worker_func, cap, sharedOut, mode, outFile, seconds);
+            g_inputSession.th = std::thread(input_worker_mac, cap, monitorOut, mode, outFile, seconds);
         }
         return R"({"ok":true})";
-#endif
     }
 
     // 停止采集：POST /api/input/stop
