@@ -218,6 +218,15 @@ endif()
 add_library(rtadsp INTERFACE)
 target_include_directories(rtadsp INTERFACE ${CMAKE_CURRENT_SOURCE_DIR}/src)
 
+# ---------------- macOS：网页播放器服务 rtaweb（PLATFORM.md §13.12）----------------
+# Windows 版 rtaweb 在上方 if(WIN32) 块里（ws2_32/winmm/avrt/dbghelp/iphlpapi）。
+# mac 版走平台层（CoreAudio/libcurl/posix_spawn），Windows 专属后端在源内 #ifdef 门控。
+if(APPLE)
+  add_executable(rtaweb tools/rtaweb.cpp)
+  target_include_directories(rtaweb PRIVATE ${CMAKE_SOURCE_DIR}/src)
+  target_link_libraries(rtaweb PRIVATE ${RL_PLATFORM_LIBS})
+endif()
+
 # ---------------- 测试 ----------------
 enable_testing()
 

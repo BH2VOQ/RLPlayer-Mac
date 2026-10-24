@@ -13,6 +13,12 @@
 // 位深处理：先探测源的真实位深，再用 pcm_s16le / pcm_s24le / pcm_s32le 请求，
 //   避免把 24-bit 素材降成 16-bit，也避免把 16-bit 素材无谓地抬成 24-bit。
 #pragma once
+// ---------------- macOS 移植（2026-10-25，PLATFORM.md §13.12）----------------
+// 本头历史上直连 Win32（windows.h + CreateProcessW + wstring 命令行）。macOS 侧不重写
+// 调用点：保持 run_hidden(wstring)/widen 等【签名不变】，wstring 仅作命令行载体——
+// POSIX 分支把 wchar_t 串按"保序字节"还原成 UTF-8 后交给 platform::run_hidden
+// （posix_spawn，PLATFORM.md §9.6）。widen/wide_to_utf8 在 POSIX 上是保序恒等。
+#if defined(_WIN32)
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
@@ -20,6 +26,13 @@
 #define NOMINMAX
 #endif
 #include <windows.h>
+#else
+#include "platform/process.h"
+#include "platform/path.h"
+#include <unistd.h>
+#include <cerrno>
+#include <sys/stat.h>
+#endif
 #include "audio/wav.h"
 #include "audio/dsd_reader.h"
 #include "dsp/dsd_integrator.h"
@@ -32,9 +45,19 @@
 #include <chrono>
 #include <thread>
 #include <cstring>
+#include <atomic>
 
 namespace rta::audio {
 
+inline std::string lowerExt(const std::string& p) {
+    const size_t d = p.find_last_of('.');
+    if (d == std::string::npos) return "";
+    std::string e = p.substr(d);
+    std::transform(e.begin(), e.end(), e.begin(), [](unsigned char c) { return (char)std::tolower(c); });
+    return e;
+}
+
+#if defined(_WIN32)
 // 不弹窗地跑一个命令，返回进程退出码（-1 表示启动失败）
 inline int run_hidden(const std::wstring& cmdline, std::string* captured = nullptr) {
     SECURITY_ATTRIBUTES sa{ sizeof(sa), nullptr, TRUE };
@@ -84,13 +107,6 @@ inline std::wstring widen(const std::string& s) {
     return w;
 }
 
-inline std::string lowerExt(const std::string& p) {
-    const size_t d = p.find_last_of('.');
-    if (d == std::string::npos) return "";
-    std::string e = p.substr(d);
-    std::transform(e.begin(), e.end(), e.begin(), [](unsigned char c) { return (char)std::tolower(c); });
-    return e;
-}
 
 // 播放器所在目录（分发时把 ffmpeg.exe / ffprobe.exe 放在这里就能自带解码器，
 // 不需要改 PATH）。这也是"环境齐全"的关键：程序能找到它，用户不用配环境变量。
@@ -126,6 +142,49 @@ inline std::string find_tool(const char* name) {
     if (n == 0 || n >= 4096) return "";
     return wide_to_utf8(std::wstring(buf, n));
 }
+
+// 删临时文件（两平台同名；失败静默——清理动作不该掩盖主流程错误）
+inline void remove_temp(const std::string& p) { DeleteFileW(widen(p).c_str()); }
+#else
+// ---------------- POSIX 桥接（wstring 只是命令行载体，见文件头注）----------------
+inline std::wstring widen(const std::string& s) {
+    return std::wstring(s.begin(), s.end());    // UTF-8 字节保序进 wchar_t（不转码）
+}
+inline std::string narrow(const std::wstring& w) {
+    std::string s;
+    s.reserve(w.size());
+    for (wchar_t c : w) s += (char)(c & 0xFF);  // 保序还原 UTF-8 字节
+    return s;
+}
+inline std::string wide_to_utf8(const std::wstring& w) { return narrow(w); }
+inline int run_hidden(const std::wstring& cmdline, std::string* captured = nullptr) {
+    const rta::platform::ProcessResult r =
+        rta::platform::run_hidden(narrow(cmdline), captured != nullptr);
+    if (captured) *captured = r.output;
+    return r.started ? r.exit_code : -1;
+}
+inline std::wstring exe_dir_w() {
+    const std::string d = rta::platform::module_dir_utf8();
+    return std::wstring(d.begin(), d.end());
+}
+inline std::string find_tool(const char* name) {
+    return rta::platform::find_executable(name);   // exe 同目录（无 .exe 后缀）→ PATH
+}
+// 删临时文件（两平台同名；失败静默——清理动作不该掩盖主流程错误）
+inline void remove_temp(const std::string& p) { std::remove(p.c_str()); }
+// 源文件可读性自检的 POSIX 版（Windows 版语义见下方注释）：
+// 用 access(R_OK) 问 errno 要人话原因，与 Win32 探针同一返回约定（空=可读）。
+inline std::string source_read_probe(const std::string& path) {
+    if (::access(path.c_str(), R_OK) == 0) return "";
+    switch (errno) {
+        case ENOENT:  return "源文件此刻不存在（可能正在被移动/标签写回/删除，或刚被改名）";
+        case EACCES:  return "没有读取权限（ACL / 只读介质 / 受保护目录）";
+        default:      return "无法打开，errno " + std::to_string(errno);
+    }
+}
+#endif
+
+#if defined(_WIN32)
 
 // 源文件「当下能不能被读」自检（2026-10-22 现场 BUG：ffmpeg 报 Illegal byte sequence / -42）
 //
@@ -166,6 +225,7 @@ inline std::string source_read_probe(const std::string& path) {
     CloseHandle(h);
     return "";
 }
+#endif // _WIN32
 
 // 用 ffprobe 探测源文件的真实位深，返回 16/24/32；失败返回 24
 inline int probe_bit_depth(const std::string& ffprobe, const std::string& file) {
@@ -210,6 +270,7 @@ struct StreamDecodeSettings {
 };
 inline StreamDecodeSettings& stream_decode_settings() { static StreamDecodeSettings s; return s; }
 inline bool is_stream_decode_enabled() {
+#if defined(_WIN32)
     const char* env = std::getenv("RLPLAYER_STREAM_DECODE");
     if (env && env[0] != '\0') {
         if (std::strcmp(env, "0") == 0 || std::strcmp(env, "false") == 0 || std::strcmp(env, "off") == 0)
@@ -218,12 +279,17 @@ inline bool is_stream_decode_enabled() {
             return true;
     }
     return stream_decode_settings().enabled;
+#else
+    (void)std::getenv("RLPLAYER_STREAM_DECODE");  // POSIX：设置键保留但暂不生效
+    return false; // POSIX 首版：流式管道未移植，统一走临时 WAV 回退（PLATFORM.md §13.12）
+#endif
 }
 inline void set_stream_decode_enabled(bool en) {
     stream_decode_settings().enabled = en;
 }
 
 // 从匿名管道句柄读取 WAV 音频流并填充到 AudioBuffer（非阻塞读、分块拼装、逐位精确）
+#if defined(_WIN32)   // 流式管道读取（Win32 管道实现；POSIX 走临时 WAV 回退路径）
 inline bool read_wav_stream_pipe(HANDLE hPipe, HANDLE hProcess, AudioBuffer& ab, std::string* errOut = nullptr) {
     std::vector<uint8_t> hbuf;
     WavHeaderInfo hdr{};
@@ -364,6 +430,7 @@ inline bool read_wav_stream_pipe(HANDLE hPipe, HANDLE hProcess, AudioBuffer& ab,
     }
     return true;
 }
+#endif // _WIN32
 
 // DSD 源：原生读取 + 我们的抽取器（ROADMAP P0-1/P0-4/P0-5）
 //
@@ -420,6 +487,7 @@ inline AudioBuffer read_via_ffmpeg_file(const std::string& path, LoadNote* note 
     const int bits = probe_bit_depth(ffprobe, path);
     const char* codec = (bits <= 16) ? "pcm_s16le" : (bits <= 24 ? "pcm_s24le" : "pcm_s32le");
 
+    #if defined(_WIN32)
     wchar_t tmpDir[MAX_PATH] = {0};
     if (GetTempPathW(MAX_PATH, tmpDir) == 0)
         throw std::runtime_error("取临时目录失败（GetTempPathW 返回 0），无法解码 " + path);
@@ -434,10 +502,16 @@ inline AudioBuffer read_via_ffmpeg_file(const std::string& path, LoadNote* note 
         const int m = WideCharToMultiByte(CP_UTF8, 0, tmpName, -1, nullptr, 0, nullptr, nullptr);
         tmpPath.resize((size_t)m);
         WideCharToMultiByte(CP_UTF8, 0, tmpName, -1, tmpPath.data(), m, nullptr, nullptr);
-        if (!tmpPath.empty() && tmpPath.back() == '\0') tmpPath.pop_back();
+        if (!tmpPath.empty() && tmpPath.back() == 0) tmpPath.pop_back();
     }
-
-    const std::wstring cmd = L"\"" + widen(ffmpeg) + L"\" -v error -y -i \"" + widen(path) +
+#else
+    // POSIX：临时目录用 platform 层（含尾分隔符契约）；文件名用 pid+原子计数保证并发唯一
+    static std::atomic<unsigned long long> seq{0};
+    std::string tmpPath = rta::platform::temp_dir_utf8() + "rta" +
+                          std::to_string((unsigned long)::getpid()) + "-" +
+                          std::to_string(seq.fetch_add(1)) + ".wav";
+#endif
+const std::wstring cmd = L"\"" + widen(ffmpeg) + L"\" -v error -y -i \"" + widen(path) +
                              L"\" -vn -c:a " + widen(codec) + L" -f wav \"" + widen(tmpPath) + L"\"";
 
     // ---- 瞬时故障重试（2026-10-22 现场 BUG：FLAC 间歇性 -42 Illegal byte sequence）----
@@ -464,8 +538,13 @@ inline AudioBuffer read_via_ffmpeg_file(const std::string& path, LoadNote* note 
         fflog.clear();
         if (i > 0) {
             // 上一轮可能留下半成品；清掉再让 ffmpeg 重建，避免把半截 WAV 当产物
+#if defined(_WIN32)
             DeleteFileW(widen(tmpPath).c_str());
             Sleep(120u * (DWORD)i);        // 退避 120ms / 240ms，等占用方松手
+#else
+            std::remove(tmpPath.c_str());
+            std::this_thread::sleep_for(std::chrono::milliseconds(120 * i));  // 退避语义一致
+#endif
         }
         const auto t_ff_0 = std::chrono::steady_clock::now();
         rc = run_hidden(cmd, &fflog);
@@ -495,12 +574,21 @@ inline AudioBuffer read_via_ffmpeg_file(const std::string& path, LoadNote* note 
 
     // HF-03：ffmpeg 退出后先检查临时 WAV 存在与大小，再交给 read_wav。
     // 产物缺失/过小说明 ffmpeg 解码异常，直接报「ffmpeg 解码产物异常」并带路径与字节数。
+#if defined(_WIN32)
     auto size_of = [](const std::wstring& p) -> long long {
         WIN32_FILE_ATTRIBUTE_DATA fa{};
         if (!GetFileAttributesExW(p.c_str(), GetFileExInfoStandard, &fa)) return -1;
         return ((long long)fa.nFileSizeHigh << 32) | (long long)fa.nFileSizeLow;
     };
     const long long tmpBytes = size_of(widen(tmpPath));
+#else
+    auto size_of = [](const std::string& p) -> long long {
+        struct ::stat st{};
+        if (::stat(p.c_str(), &st) != 0) return -1;
+        return (long long)st.st_size;
+    };
+    const long long tmpBytes = size_of(tmpPath);
+#endif
     const std::string tmpBytesTxt = (tmpBytes < 0) ? "未知(文件不存在)" : (std::to_string(tmpBytes) + " 字节");
 
     AudioBuffer buf;
@@ -534,10 +622,10 @@ inline AudioBuffer read_via_ffmpeg_file(const std::string& path, LoadNote* note 
         const auto t_wav_1 = std::chrono::steady_clock::now();
         wav_ms = std::chrono::duration<double, std::milli>(t_wav_1 - t_wav_0).count();
     } catch (...) {
-        DeleteFileW(widen(tmpPath).c_str());
+        remove_temp(tmpPath);
         throw;
     }
-    DeleteFileW(widen(tmpPath).c_str());
+    remove_temp(tmpPath);
 
     const auto t_total_1 = std::chrono::steady_clock::now();
     if (note) {
@@ -550,6 +638,7 @@ inline AudioBuffer read_via_ffmpeg_file(const std::string& path, LoadNote* note 
 }
 
 // ffmpeg 流式解码路径（ROADMAP P6b：直接读管道输出，不落临时 WAV 文件）
+#if defined(_WIN32)   // Win32 管道流式解码；POSIX 无此路径（is_stream_decode_enabled 恒 false）
 inline AudioBuffer read_via_ffmpeg_stream(const std::string& path, LoadNote* note = nullptr) {
     const std::string ext = lowerExt(path);
     const std::string ffmpeg  = find_tool("ffmpeg");
@@ -710,10 +799,12 @@ inline AudioBuffer read_via_ffmpeg_stream(const std::string& path, LoadNote* not
     }
     return buf;
 }
+#endif // _WIN32
 
 // ffmpeg 解码统一入口（非 WAV / 非 DSD，或 DSD 原生读取失败时的回退路径）
 // 优先走流式管道读取（免落临时 WAV 文件）；对需要 seek 的特殊容器或设置关闭时自动回退临时文件。
 inline AudioBuffer read_via_ffmpeg(const std::string& path, LoadNote* note = nullptr) {
+#if defined(_WIN32)
     if (!is_stream_decode_enabled()) {
         return read_via_ffmpeg_file(path, note);
     }
@@ -738,6 +829,10 @@ inline AudioBuffer read_via_ffmpeg(const std::string& path, LoadNote* note = nul
         }
         return b;
     }
+#else
+    // POSIX：流式管道未移植（is_stream_decode_enabled 恒 false），统一走临时文件路径
+    return read_via_ffmpeg_file(path, note);
+#endif
 }
 
 // 统一读取：WAV 原生，DSD 原生（失败回退 ffmpeg），其他格式经 ffmpeg

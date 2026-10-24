@@ -79,3 +79,6 @@ desktop.ini
 docs/shots-ui03/
 %SystemDrive%/
 *SystemDrive*
+# macOS 产物目录（RLPlayer.app 为 make_app_mac.sh 生成物）
+dist-mac/
+.DS_Store

@@ -8,6 +8,7 @@
 // 迁移原则：循环体逐行照搬，仅把外部引用（ps.* / RQ / g_dbg* / in.* / play_log / dlog）
 // 换成 RenderHost 的指针/钩子；唯一的逻辑增量为超时 break 前的 RENDERFAIL 遥测。
 #pragma once
+#if defined(_WIN32)
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
@@ -15,6 +16,7 @@
 #define NOMINMAX
 #endif
 #include <windows.h>
+#endif
 #include <atomic>
 #include <chrono>
 #include <cmath>
@@ -27,6 +29,7 @@
 #include <string>
 #include <utility>
 #include <vector>
+#include <thread>
 #include "wav.h"   // rta::audio::AudioBuffer
 
 namespace rta::render {
@@ -153,7 +156,9 @@ struct RenderHost {
     std::function<void(const std::string&)> dlogFn; // 运行日志（跳转等）
 
     // ---- RENDERFAIL 归因材料（由调用方填）----
-    std::string deviceLabel;        // 设备友好名
+    std::string deviceLabel;
+    // 平台扩展诊断（RENDERFAIL 文本末尾追加；Windows 侧留空，行为不变）
+    std::function<std::string()> extraDiag;        // 设备友好名
     std::string deviceIdDesc;       // 端点 id（空 = 默认端点）
     bool fallbackEligible = false;  // 独占 RENDERFAIL 时是否允许自动回退共享
     bool dop = false;               // DoP/DSD 输出（不能回退共享）
@@ -340,7 +345,7 @@ inline void render_loop(OutSink& sink, RenderHost& h) {
                 winWritten = 0; winShould = 0.0; starveAcc = 0.0; winFirst = true;
             }
         }
-        if (pausedNow) { Sleep(30); continue; }
+        if (pausedNow) { std::this_thread::sleep_for(std::chrono::milliseconds(30)); continue; }
 
         // 响应跳转：Reset 清空设备缓冲，让生产者从新位置重建管线
         const double sk = h.seekReq->exchange(-1.0);
@@ -543,6 +548,7 @@ inline void render_loop(OutSink& sink, RenderHost& h) {
                 fs << " last_pad=" << sink.last_pad()
                    << " 缓冲=" << period << "帧"
                    << " GetBuffer HRESULT=" << sink.last_gb_hr()
+                   << (h.extraDiag ? (" " + h.extraDiag()) : std::string())
                    << " device=\"" << h.deviceLabel << "\""
                    << " id=" << (h.deviceIdDesc.empty() ? "(默认)" : h.deviceIdDesc);
                 if (h.fallbackEligible)

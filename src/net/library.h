@@ -12,6 +12,10 @@
 //     对外用 16 位十六进制哈希，避免 URL 里出现任意字符
 //   * 扫描在后台线程做，查询永远不阻塞（读的是上一份完整的索引）
 #pragma once
+// _strtoi64 是 MSVC 名；POSIX/clang 用标准 strtoll（语义一致：十进制 64 位解析）
+#if !defined(_WIN32)
+#define _strtoi64 strtoll
+#endif
 // （原 WIN32_LEAN_AND_MEAN / NOMINMAX 前导已删：include 链下方的平台头自己会在 windows.h
 //   之前定义它们，行为不变；留着只会让"这个头依赖 Windows"看起来像真的。）
 #include "audio/audio_loader.h"
@@ -163,6 +167,13 @@ public:
     }
     void joinScan();
 
+    // 退出兜底（mac .app 实测崩溃 2026-10-25：库空时启动自动扫描，进程退出时 th_ 仍
+    // joinable，std::thread 析构 ⟹ std::terminate ⟹ SIGABRT 弹系统崩溃报告）。
+    // stopScan 已有（cancel_ + pool cancel），joinScan 收线程；幂等，正常路径零影响。
+    ~Library() {
+        try { stopScan(); joinScan(); } catch (...) {}
+    }
+
 private:
     Library() = default;
 
@@ -210,7 +221,16 @@ inline std::string lib_clean_field(const std::string& s) {
 
 // Windows 上 fs::path 的窄字符串构造按 ANSI（GBK）解释，UTF-8 路径必须先转宽字符
 inline std::string u8s(const std::u8string& s) { return std::string((const char*)s.data(), s.size()); }
-inline fsx::path p8(const std::string& s) { return fsx::path(rta::audio::widen(s)); }
+inline fsx::path p8(const std::string& s) {
+#if defined(_WIN32)
+    return fsx::path(rta::audio::widen(s));
+#else
+    // POSIX：路径原生 UTF-8。绝不能走 fs::path(wstring)——macOS 27 的 libc++ 对
+    // wstring 转换走 codecvt facet，该 facet 不存在时直接抛 "locale not supported"
+    //（实测：Library::load() 启动即崩，lldb 栈帧 __narrow_to_utf8<32>）。
+    return fsx::u8path(s);
+#endif
+}
 
 // 同目录是否存在独立封面文件（与 get_cover 的候选顺序/扩展名保持一致；只 stat）
 inline bool lib_has_cover_file(const std::string& trackPath) {

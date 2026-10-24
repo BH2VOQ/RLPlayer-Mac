@@ -6,14 +6,39 @@
 //   * API 用 JSON，界面用一个自包含 HTML（无外部资源）
 //   * 显式声明 UTF-8，避免中文乱码
 #pragma once
-#ifndef WIN32_LEAN_AND_MEAN
-#define WIN32_LEAN_AND_MEAN
+// 跨平台 socket 薄层（2026-10-25 mac 移植）：winsock 与 BSD socket 的差异收敛在
+// 类型/关闭/初始化三点；语义（阻塞 accept 循环、SO_REUSEADDR、回环监听）完全一致。
+// ⚠️ POSIX 的 stop()：close() 不保证唤醒阻塞中的 accept（Linux/mac 均无此承诺），
+//    必须先 shutdown(SHUT_RDWR) 让 accept 返回错误，再 close + join，否则退出挂死。
+#if defined(_WIN32)
+  #ifndef WIN32_LEAN_AND_MEAN
+  #define WIN32_LEAN_AND_MEAN
+  #endif
+  #ifndef NOMINMAX
+  #define NOMINMAX
+  #endif
+  #include <winsock2.h>
+  #include <ws2tcpip.h>
+  using socket_t = SOCKET;
+  #define RL_SOCK_INVALID INVALID_SOCKET
+  inline int   sock_close(socket_t s) { return ::closesocket(s); }
+  inline void  sock_shutdown(socket_t s) { ::shutdown(s, SD_BOTH); }
+  inline bool  sock_init() { WSADATA w; return ::WSAStartup(MAKEWORD(2, 2), &w) == 0; }
+  inline void  sock_cleanup() { ::WSACleanup(); }
+  using socklen_t_ = int;
+#else
+  #include <sys/socket.h>
+  #include <sys/types.h>
+  #include <netinet/in.h>
+  #include <unistd.h>
+  using socket_t = int;
+  #define RL_SOCK_INVALID (-1)
+  inline int   sock_close(socket_t s) { return ::close(s); }
+  inline void  sock_shutdown(socket_t s) { ::shutdown(s, SHUT_RDWR); }
+  inline bool  sock_init() { return true; }
+  inline void  sock_cleanup() {}
+  using socklen_t_ = socklen_t;
 #endif
-#ifndef NOMINMAX
-#define NOMINMAX
-#endif
-#include <winsock2.h>
-#include <ws2tcpip.h>
 #include <string>
 #include <functional>
 #include <thread>
@@ -36,13 +61,13 @@ public:
 
 private:
     void loop();
-    void handle(SOCKET c);
+    void handle(socket_t c);
     static std::string trim(std::string s) {
         while (!s.empty() && (s.back() == '\r' || s.back() == '\n' || s.back() == ' ')) s.pop_back();
         size_t i = 0; while (i < s.size() && s[i] == ' ') ++i;
         return s.substr(i);
     }
-    SOCKET listen_ = INVALID_SOCKET;
+    socket_t listen_ = RL_SOCK_INVALID;
     uint16_t port_ = 0;
     std::atomic<bool> stop_{true};
     std::thread thread_;
@@ -51,19 +76,18 @@ private:
 
 inline bool WebUi::start(uint16_t port, Handler h, bool loopbackOnly) {
     handler_ = std::move(h);
-    WSADATA w;
-    if (WSAStartup(MAKEWORD(2, 2), &w) != 0) return false;
+    if (!sock_init()) return false;
     listen_ = ::socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-    if (listen_ == INVALID_SOCKET) return false;
+    if (listen_ == RL_SOCK_INVALID) return false;
     int yes = 1;
     ::setsockopt(listen_, SOL_SOCKET, SO_REUSEADDR, (const char*)&yes, sizeof(yes));
     sockaddr_in a{};
     a.sin_family = AF_INET;
     a.sin_port = htons(port);
     a.sin_addr.s_addr = loopbackOnly ? htonl(INADDR_LOOPBACK) : htonl(INADDR_ANY);
-    if (::bind(listen_, (sockaddr*)&a, sizeof(a)) != 0) { ::closesocket(listen_); listen_ = INVALID_SOCKET; return false; }
-    if (::listen(listen_, 8) != 0) { ::closesocket(listen_); listen_ = INVALID_SOCKET; return false; }
-    sockaddr_in got{}; int gl = sizeof(got);
+    if (::bind(listen_, (sockaddr*)&a, sizeof(a)) != 0) { sock_close(listen_); listen_ = RL_SOCK_INVALID; return false; }
+    if (::listen(listen_, 8) != 0) { sock_close(listen_); listen_ = RL_SOCK_INVALID; return false; }
+    sockaddr_in got{}; socklen_t_ gl = sizeof(got);
     ::getsockname(listen_, (sockaddr*)&got, &gl);
     port_ = ntohs(got.sin_port);
     stop_.store(false);
@@ -73,21 +97,21 @@ inline bool WebUi::start(uint16_t port, Handler h, bool loopbackOnly) {
 
 inline void WebUi::stop() {
     stop_.store(true);
-    if (listen_ != INVALID_SOCKET) { ::closesocket(listen_); listen_ = INVALID_SOCKET; }
+    if (listen_ != RL_SOCK_INVALID) { sock_shutdown(listen_); sock_close(listen_); listen_ = RL_SOCK_INVALID; }
     if (thread_.joinable()) thread_.join();
-    WSACleanup();
+    sock_cleanup();
 }
 
 inline void WebUi::loop() {
     while (!stop_.load()) {
-        SOCKET c = ::accept(listen_, nullptr, nullptr);
-        if (c == INVALID_SOCKET) { if (stop_.load()) break; continue; }
+        socket_t c = ::accept(listen_, nullptr, nullptr);
+        if (c == RL_SOCK_INVALID) { if (stop_.load()) break; continue; }
         handle(c);
-        ::closesocket(c);
+        sock_close(c);
     }
 }
 
-inline void WebUi::handle(SOCKET c) {
+inline void WebUi::handle(socket_t c) {
     std::string buf; char tmp[4096];
     while (buf.find("\r\n\r\n") == std::string::npos && buf.size() < 65536) {
         const int r = ::recv(c, tmp, sizeof(tmp), 0);
