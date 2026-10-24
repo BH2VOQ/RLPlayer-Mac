@@ -267,6 +267,14 @@ public:
     virtual size_t buffer_frames() const = 0;
     virtual size_t frames_written() const = 0;
 
+    // ---------------- 只读观测（诊断/测试用；不参与音频路径）----------------
+    // 设备侧实际渲染的帧数（由设备回调计数，而不是我们 write 进去多少）。
+    // 用途：① 区分"写进去了但设备没在跑"；② 端到端吞吐核对（§8 真实时间纪律）。
+    // 默认返回 0 = 本后端不提供该观测；调用方不得据此判定失败。
+    virtual size_t frames_rendered() const { return 0; }
+    // 欠载次数（设备要数据但环形缓冲不够 → 补静音）。默认 0 = 不提供观测。
+    virtual uint64_t underruns() const { return 0; }
+
     // 补偿增益（用户拖音量滑块）。⚠️ 任何 != 1.0 的增益都会破坏 bit-perfect，
     // 后端必须如实反映：bit_perfect() 变 false，并在 UI 上显示"已施加音量/非 bit-perfect"。
     virtual void set_gain(double /*linear*/) {}

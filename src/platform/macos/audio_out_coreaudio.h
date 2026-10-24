@@ -326,6 +326,15 @@ public:
                                kAudioUnitScope_Global, 0, &frames, sizeof(frames));
         buffer_frames_ = frames;
 
+        // 6b) 分配环形缓冲（容量 = 设备缓冲的 4 倍，留调度抖动余量）。
+        // ⚠️ 这一步曾经漏掉：ring_ 只有 clear() 从没分配过，write() 直接对空
+        // vector 做 memcpy ⟹ 段错误（实测 Pocket Master 上 SIGSEGV @ write）。
+        // 只测 caps() 不会暴露这个缺陷，必须真的 open+write 才能抓到。
+        ring_frames_ = (size_t)frames * 4u;
+        if (ring_frames_ < 1024) ring_frames_ = 1024;
+        ring_.assign(ring_frames_ * (size_t)channels_, 0);
+        write_pos_ = read_pos_ = 0;
+
         // 7) 设置渲染回调（拉模式：设备来要数据，我们从队列取）
         AURenderCallbackStruct cb{};
         cb.inputProc = &CoreAudioOutput::render_trampoline;
@@ -373,8 +382,13 @@ public:
         if (!interleaved || frames == 0) return 0;
 
         std::lock_guard<std::mutex> lk(mu_);
-        // 环形缓冲剩余空间（帧）
+        // 环形缓冲剩余空间（帧）。capacity 为 0 说明 open 没走完 —— 防御性返回 0，
+        // 绝不能让下面的 % capacity 触发除零（铁律 3：判据要能证明自己没崩）。
         const size_t capacity = ring_frames_;
+        if (capacity == 0) {
+            fail(OutputError::NotOpened, "环形缓冲未初始化（open 未完成）");
+            return 0;
+        }
         const size_t used = (write_pos_ + capacity - read_pos_) % capacity;
         size_t space = capacity - used - 1;
         if (space == 0) return 0;                       // 满：部分写语义，返回 0 让调用方稍后重试
@@ -407,6 +421,8 @@ public:
 
     size_t buffer_frames() const override { return buffer_frames_; }
     size_t frames_written() const override { return frames_written_; }
+    size_t frames_rendered() const override { return frames_rendered_.load(); }
+    uint64_t underruns() const override { return underruns_.load(); }
 
     void set_gain(double linear) override { gain_ = linear; }
 
@@ -459,18 +475,45 @@ private:
         const size_t avail = (write_pos_ + capacity - read_pos_) % capacity;
         const size_t take = frames < avail ? frames : avail;
 
-        auto* out = static_cast<int32_t*>(io->mBuffers[0].mData);
-        const UInt32 out_frames = io->mBuffers[0].mDataByteSize / (UInt32)(sizeof(int32_t) * ch);
+        // ⚠️ 设备要的是【按请求位深打包】的交错样本，而环形缓冲里是 int32 满量程。
+        //    这里必须逐样本重打包，不能直接把 int32 内存拷过去：
+        //      bits=16 -> 取 int32 的低 16 位（低位对齐语义，见 audio_out.h 头注）
+        //      bits=24 -> 取低 24 位，按 3 字节小端打包
+        //      bits=32 -> 原样 4 字节
+        //    曾经这里直接 memcpy(sizeof(int32_t)*ch)，16bit 时会把 8 字节/帧写进
+        //    设备要的 4 字节/帧缓冲 —— 既越界又全是噪声。
+        auto* out = static_cast<uint8_t*>(io->mBuffers[0].mData);
+        const size_t bytes_per_sample = (size_t)(bits_ / 8);
+        const size_t frame_bytes = bytes_per_sample * ch;
+        // 设备请求的帧数 = 字节数 / 每帧字节数（不能用 int32 宽度反推！）
+        const size_t out_frames = frame_bytes ? (io->mBuffers[0].mDataByteSize / frame_bytes) : 0;
 
-        for (size_t i = 0; i < take && i < out_frames; ++i) {
-            std::memcpy(out + i * ch, &ring_[(read_pos_ + i) % capacity * ch], sizeof(int32_t) * ch);
+        size_t i = 0;
+        for (; i < take && i < out_frames; ++i) {
+            const int32_t* src = &ring_[((read_pos_ + i) % capacity) * ch];
+            uint8_t* dst = out + i * frame_bytes;
+            for (size_t c = 0; c < ch; ++c) {
+                const int32_t s = src[c];
+                if (bytes_per_sample == 2) {
+                    const uint16_t v = (uint16_t)(s & 0xFFFF);          // 低 16 位
+                    std::memcpy(dst + c * 2, &v, 2);
+                } else if (bytes_per_sample == 3) {
+                    const uint32_t v = (uint32_t)s & 0xFFFFFFu;          // 低 24 位
+                    dst[c * 3 + 0] = (uint8_t)(v & 0xFF);
+                    dst[c * 3 + 1] = (uint8_t)((v >> 8) & 0xFF);
+                    dst[c * 3 + 2] = (uint8_t)((v >> 16) & 0xFF);
+                } else {
+                    std::memcpy(dst + c * 4, &s, 4);
+                }
+            }
         }
-        // 不足补静音（真静音 = 0，不是噪声），并记一次欠载
-        if (take < out_frames) {
-            std::memset(out + take * ch, 0, sizeof(int32_t) * ch * (out_frames - take));
+        // 不足补静音（真静音 = 0），并记一次欠载
+        if (i < out_frames) {
+            std::memset(out + i * frame_bytes, 0, frame_bytes * (out_frames - i));
             underruns_.fetch_add(1);
         }
         read_pos_ = (read_pos_ + take) % capacity;
+        frames_rendered_.fetch_add(out_frames);
     }
 
     void fail(OutputError e, std::string text) {
@@ -507,6 +550,8 @@ private:
         ring_.clear();
         ring_frames_ = 0;
         frames_written_ = 0;
+        frames_rendered_.store(0);
+        underruns_.store(0);
         buffer_frames_ = 0;
     }
 
@@ -532,6 +577,7 @@ private:
     size_t write_pos_ = 0;
     size_t read_pos_ = 0;
     std::atomic<uint64_t> underruns_{0};
+    std::atomic<size_t> frames_rendered_{0};
 
     OutputError err_class_ = OutputError::None;
     std::string err_text_;

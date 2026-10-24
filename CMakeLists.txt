@@ -215,6 +215,15 @@ target_include_directories(rtadsp INTERFACE ${CMAKE_CURRENT_SOURCE_DIR}/src)
 enable_testing()
 
 # ---- 跨平台测试（macOS 也跑）----
+# CoreAudio 后端端到端（macOS 真机；铁律 1：默认 -60 dBFS，几乎不可闻）
+# 必须显式传 --device 才碰物理声卡；不带参数时只跑只读能力查询。
+if(APPLE)
+  add_executable(test_coreaudio tests/test_coreaudio.cpp)
+  target_include_directories(test_coreaudio PRIVATE ${CMAKE_SOURCE_DIR}/src)
+  target_link_libraries(test_coreaudio PRIVATE ${RL_PLATFORM_LIBS})
+  add_test(NAME coreaudio COMMAND test_coreaudio --no-open)
+endif()
+
 add_executable(test_knowledge tests/test_knowledge.cpp)
 target_include_directories(test_knowledge PRIVATE ${CMAKE_SOURCE_DIR}/src)
 target_link_libraries(test_knowledge PRIVATE ${RL_PLATFORM_LIBS})
