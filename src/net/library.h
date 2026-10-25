@@ -493,9 +493,26 @@ inline std::string Library::readFile(const std::string& p) {
 }
 inline void Library::writeFile(const std::string& p, const std::string& s) {
     std::string tmp = p + ".tmp";
-    { std::ofstream f(tmp, std::ios::binary | std::ios::trunc); if (!f) return; f.write(s.data(), (std::streamsize)s.size()); }
+    {
+        std::ofstream f(tmp, std::ios::binary | std::ios::trunc);
+        if (!f) return;
+        f.write(s.data(), (std::streamsize)s.size());
+        // ★ 2026-10-25（索引一致性审查）：必须在 flush 之后才能 rename。
+        //   旧实现出了作用域才析构 → 析构时才 flush；写盘出错时剩下的只有"截断的 tmp"，
+        //   而 rename 不看内容。这里把"写失败"变成"绝不替换旧索引"，并在 rename 前检查。
+        f.flush();
+        if (!f.good()) { f.close(); std::error_code e2; fsx::remove(tmp, e2); return; }
+    }
     std::error_code ec;
     fsx::rename(tmp, p, ec);
+    // rename 不能覆盖已存在文件时（个别网络盘/杀软占用），退化为"删旧再改名"；
+    // 仍然失败就保留 tmp（不回滚旧索引 —— 旧索引比没有索引好）。
+    if (ec) {
+        std::error_code e2;
+        fsx::remove(p, e2);
+        ec.clear();
+        fsx::rename(tmp, p, ec);
+    }
 }
 
 inline void Library::load() {

@@ -224,7 +224,12 @@ function apiFailNote(msg) {
   toast(msg);
 }
 function api(u, body) {
-  var opt = body === undefined ? {} : { method: 'POST', body: body };
+  // 2026-10-25（安全加固后）：/api/ 下的一律用 POST —— 后端现在把副作用端点限制为 POST
+  // （GET 一律 405，防 <img src="/api/quit"> 这类 CSRF）。读端点 POST 也照常工作（handler 不看 method），
+  // 所以这里统一 POST 既修好「无 body 的 api('/api/fav?...') 变成 GET 被拒」，也不用逐个调用点改。
+  var isApi = u.indexOf('/api/') === 0;
+  var opt = (body === undefined && !isApi) ? {} : { method: 'POST' };
+  if (body !== undefined) opt.body = body;
   // 两个阶段都可能失败：① fetch 本身（超时 / 连接重置 / 服务没起来）；
   // ② r.json()（响应被截断，或拿到的是 HTML 错误页而不是 JSON）。一次 .catch 同时覆盖两者。
   return fetch(u, opt).then(function (r) { return r.json(); }).then(function (j) {
