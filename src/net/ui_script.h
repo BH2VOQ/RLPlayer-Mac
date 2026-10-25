@@ -28,6 +28,54 @@ if (WV) document.documentElement.classList.add('webview2');
 var IS_MAC_HOST = !!(window.webkit && window.webkit.messageHandlers);
 if (IS_MAC_HOST) document.documentElement.classList.add('machost');
 function wcmd(c) { try { if (WV) WV.postMessage(c); } catch (e) { } }
+
+/* ---------------- 原生「选择文件夹」（2026-10-25 用户要求） ----------------
+   用户原话：「还需要更改一下选择目录的方法，要让用户可以通过点击文件夹来选择」。
+   实现走宿主 NSOpenPanel（WKWebView 里 <input type=file webkitdirectory> 选不了空目录、
+   也拿不到 macOS 原生目录体验）。协议见 platform/host_msg.h 的 HostAction::PickDir：
+     页面 → 宿主：  pickdir        或  pickdir:<初始目录>
+     宿主 → 页面：  pickdir:ok:<绝对路径>   或   pickdir:cancel
+   宿主通过 evaluateJavaScript 调 window.chrome.webview.__emit(...)，所以这里挂 __emit。
+   浏览器直开（无宿主）时 IS_MAC_HOST 为 false，调用方应隐藏按钮而不是假装能选。 */
+var PICKDIR = { pending: null };
+function pickDirectory(initial, onDone) {
+  if (!IS_MAC_HOST) {
+    // 没有宿主通道：如实告知，不假装弹了面板
+    if (onDone) onDone(null);
+    return false;
+  }
+  PICKDIR.pending = onDone || null;
+  var init = String(initial || '').trim();
+  wcmd(init ? ('pickdir:' + init) : 'pickdir');
+  return true;
+}
+// 宿主回传入口（__emit 由 mac_host.mm 的 shim 提供）
+(function () {
+  function handleEmit(msg) {
+    var m = String(msg || '');
+    if (m === 'pickdir:cancel') {
+      var cb0 = PICKDIR.pending; PICKDIR.pending = null;
+      if (cb0) cb0(null);
+      return;
+    }
+    if (m.indexOf('pickdir:ok:') === 0) {
+      var path = m.slice('pickdir:ok:'.length);
+      var cb = PICKDIR.pending; PICKDIR.pending = null;
+      if (cb) cb(path);
+      return;
+    }
+    // max/normal 等其它消息沿用既有处理（如果有）
+    if (m === 'max' || m === 'normal') {
+      try { document.documentElement.classList.toggle('zoommax', m === 'max'); } catch (e) { }
+    }
+  }
+  if (WV) {
+    // 垫片通常把 __emit 挂在 window.chrome.webview 上；这里补一层，避免宿主先于页面注入
+    try { WV.__emit = handleEmit; } catch (e) { }
+  }
+  // 双保险：宿主直接调 window.__dshEmit 也能收到（mac_host 用 __emit，保持一致）
+  window.__dshEmit = handleEmit;
+})();
 // 261024-02 #2：资料里的 URL 一律交给**系统浏览器**打开（绝不把 WebView 自己导航走）。
 // 协议白名单只放 http/https（file: / javascript: / data: 一律拒绝，避免本机文件被页面打开）。
 // 宿主（launcher）收到 'openurl:<url>' 后 ShellExecuteW 打开；浏览器直开（没有 WebView2）时 window.open 兜底。
@@ -474,6 +522,91 @@ function loadAlbums(q, title) {
      · 绝不发明后端/路由，绝不新增 API；
      · 只有在目标元素**实际存在**时才绑 onclick（bindEmptyState 里逐个判空）。
    注意：这里**不**删任何旧入口，只是把空态的版式换成海报形态。 */
+/* ---------------- 音频工作站（2026-10-25 用户要求独立成导航页） ----------------
+   用户原话：「这部分功能我感觉可以单做一个导航菜单」。
+   原来这三张海报卡 + 四格快捷入口挤在**专辑页的空态**里，问题是：
+     · 只有「曲库为空」时才看得到 —— 一旦导入音乐，这些功能入口就永远消失了；
+     · 语义混乱：专辑页应该是「浏览专辑」，却塞了输出设备 / EQ / 输入采集的入口。
+   现在改为左导航「音频引擎 → 音频工作站」独立一页，**任何曲库状态下都能进**。
+   约束（沿用原实现，一条没放松）：
+     · 只复用已有入口 —— setView / openSettingsTab 全是既有函数，不新增 API、不新增路由；
+     · 绑定前逐个判空（bindWorkstation），元素不存在时静默跳过，不抛错。 */
+function workstationHtml() {
+  var validRoots = (S.roots || []).filter(function (r) {
+    if (!r) return false;
+    r = String(r).trim();
+    if (SEP === '/' && /^[A-Za-z]:[\\/]/.test(r)) return false;
+    return true;
+  });
+  var hasRoots = validRoots.length > 0;
+  var rootPath = hasRoots ? String(validRoots[0] || '') : '';
+
+  var h = '<div class=am-home>';
+  h += '<div class=am-sec-hdr>精选功能 · 音频工作站</div>';
+  h += '<div class=am-hero-grid>';
+
+  h += '<div class="am-card c1" id=amCardAdd>';
+  h += '<div class=am-card-badge>\uf8ff Hi-Fi Library</div>';
+  h += '<div class=am-card-mid><div class=am-card-title>无损音乐库</div></div>';
+  h += '<div class=am-card-bottom>';
+  h += '<div class=am-card-desc>' + (hasRoots
+        ? '目录已就绪 · 点击重新扫描建立专辑与封面索引'
+        : '支持 FLAC · DSD (DSF/DFF) · ALAC · WAV · APE · 多碟盒装自动聚合') + '</div>';
+  h += '<button class="am-pill-btn" id=emptyGoAdd>' + (hasRoots ? '重新扫描音乐库' : '添加音乐目录') + '</button>';
+  h += '</div></div>';
+
+  h += '<div class="am-card c2" id=amCardSet>';
+  h += '<div class=am-card-badge>CoreAudio · Hog Mode</div>';
+  h += '<div class=am-card-mid><div class=am-card-title>独占直通引擎</div></div>';
+  h += '<div class=am-card-bottom>';
+  h += '<div class=am-card-desc>Bit-Perfect 硬件独占 · 自动跟随源采样率 · DoP / SDM 调制器</div>';
+  h += '<button class="am-pill-btn" id=emptyGoSet>配置输出设备</button>';
+  h += '</div></div>';
+
+  h += '<div class="am-card c3" id=amCardEq>';
+  h += '<div class=am-card-badge>DSP · 64-Bit Float</div>';
+  h += '<div class=am-card-mid><div class=am-card-title>20 段 PEQ 与 OPRA</div></div>';
+  h += '<div class=am-card-bottom>';
+  h += '<div class=am-card-desc>内置 6200+ 款耳机 OPRA 目标曲线 · 卷积房间校正 IR · 响度分析</div>';
+  h += '<button class="am-pill-btn" id=emptyGoEq>打开均衡与校正</button>';
+  h += '</div></div>';
+
+  h += '</div>'; // .am-hero-grid
+
+  h += '<div class=am-sec-hdr style="margin-top:14px">快速开始</div>';
+  h += '<div class=am-quick-row>';
+
+  h += '<div class=am-quick-item id=amGoFiles>';
+  h += '<div class=am-qico><svg viewBox="0 0 24 24" fill=none stroke="currentColor" stroke-width=2><path d="M3 7.5a2 2 0 012-2h4l1.8 2H19a2 2 0 012 2v8a2 2 0 01-2 2H5a2 2 0 01-2-2z"/></svg></div>';
+  h += '<div class=am-qtext><div class=am-qtitle>浏览本地文件夹</div><div class=am-qdesc>直接访问本地存储目录与音频文件</div></div>';
+  h += '</div>';
+
+  h += '<div class=am-quick-item id=amGoRemote>';
+  h += '<div class=am-qico><svg viewBox="0 0 24 24" fill=none stroke="currentColor" stroke-width=2><path d="M7 18a4.5 4.5 0 010-9 6 6 0 0111.6 1.6A3.7 3.7 0 0118 18z"/></svg></div>';
+  h += '<div class=am-qtext><div class=am-qtitle>挂载流媒体服务</div><div class=am-qdesc>Subsonic / Navidrome / WebDAV / UPnP</div></div>';
+  h += '</div>';
+
+  h += '<div class=am-quick-item id=amGoMeta>';
+  h += '<div class=am-qico><svg viewBox="0 0 24 24" fill=none stroke="currentColor" stroke-width=2><path d="M12 2v4m0 12v4M4.93 4.93l2.83 2.83m8.48 8.48l2.83 2.83M2 12h4m12 0h4M4.93 19.07l2.83-2.83m8.48-8.48l2.83-2.83"/></svg></div>';
+  h += '<div class=am-qtext><div class=am-qtitle>AI 资料与封面补全</div><div class=am-qdesc>自动匹配高精度唱片元数据与插画</div></div>';
+  h += '</div>';
+
+  h += '<div class=am-quick-item id=amGoIn>';
+  h += '<div class=am-qico><svg viewBox="0 0 24 24" fill=none stroke="currentColor" stroke-width=2><path d="M12 1a3 3 0 00-3 3v8a3 3 0 006 0V4a3 3 0 00-3-3z"/><path d="M19 10v2a7 7 0 01-14 0v-2M12 19v4M8 23h8"/></svg></div>';
+  h += '<div class=am-qtext><div class=am-qtitle>音频输入采集</div><div class=am-qdesc>低延迟实时流式监听与分析</div></div>';
+  h += '</div>';
+
+  h += '</div>'; // .am-quick-row
+
+  if (hasRoots && rootPath) {
+    h += '<div class=am-rootline><svg width=12 height=12 viewBox="0 0 24 24" fill=none stroke=currentColor stroke-width=2>'
+       +   '<path d="M3 7.5a2 2 0 012-2h4l1.8 2H19a2 2 0 012 2v8a2 2 0 01-2 2H5a2 2 0 01-2-2z"/></svg>'
+       +   '<span title="' + esc(rootPath) + '">&nbsp;当前音乐目录: ' + esc(rootPath) + '</span></div>';
+  }
+  h += '</div>'; // .am-home
+  return h;
+}
+
 function emptyStateHtml() {
   var validRoots = (S.roots || []).filter(function (r) {
     if (!r) return false;
@@ -498,83 +631,103 @@ function emptyStateHtml() {
     hc += '</div></div>';
     return hc;
   }
-  var h = '<div class=am-home>';
-
-  // ---- 第一部分：小标题 + 三张并排 Apple Music 风格大海报卡 ----
-  h += '<div class=am-sec-hdr>精选功能 · 音频工作站</div>';
-  h += '<div class=am-hero-grid>';
-
-  // 卡片 1（珊瑚红-洋红渐变背景 am-card c1，点击或点按钮触发 #emptyGoAdd）
-  h += '<div class="am-card c1" id=amCardAdd>';
-  h += '<div class=am-card-badge> Hi-Fi Library</div>';
-  h += '<div class=am-card-mid><div class=am-card-title>无损音乐库</div></div>';
-  h += '<div class=am-card-bottom>';
-  h += '<div class=am-card-desc>' + (hasRoots
-        ? '目录已就绪 · 点击重新扫描建立专辑与封面索引'
-        : '支持 FLAC · DSD (DSF/DFF) · ALAC · WAV · APE · 多碟盒装自动聚合') + '</div>';
-  h += '<button class="am-pill-btn" id=emptyGoAdd>' + (hasRoots ? '重新扫描音乐库' : '添加音乐目录') + '</button>';
+  // ---- 专辑页空态（2026-10-25 拆分）：只讲「曲库为空」这一件事 ----
+  // 工作站那三张海报卡 + 四格快捷入口已搬到独立导航页「音频工作站」
+  // （用户要求「这部分功能我感觉可以单做一个导航菜单」）。
+  // 这里保留最必要的两件事：说明 + 添加/扫描入口 + 去工作站的引导。
+  var h = '<div class=emptystate><div class=ecard>';
+  h += '<div class=eic><svg width=22 height=22 viewBox="0 0 24 24" fill=none stroke=currentColor stroke-width=1.8>'
+     + '<path d="M4 5.5h16M4 12h16M4 18.5h10"/><circle cx="19" cy="18" r="2.6"/></svg></div>';
+  h += '<div class=ettl>' + (hasRoots ? '库里还没有音乐' : '还没有添加音乐目录') + '</div>';
+  h += '<div class=ehint>' + (hasRoots
+        ? '目录已经配好，但索引里还没有曲目。点下面的按钮重新扫描，或换一个目录。'
+        : '添加一个包含音频文件的本地目录，RLPlayer 会建立索引并显示专辑。') + '</div>';
+  h += '<div class=eacts>'
+     + '<button class="btn pri" id=emptyGoAdd>' + (hasRoots ? '重新扫描音乐库' : '添加音乐目录') + '</button>'
+     + '<button class=btn id=emptyGoStation>打开音频工作站</button></div>';
+  if (hasRoots && rootPath) h += '<div class=eroot><span title="' + esc(rootPath) + '">' + esc(rootPath) + '</span></div>';
   h += '</div></div>';
-
-  // 卡片 2（深邃蓝紫渐变背景 am-card c2，点击触发 #emptyGoSet -> openSettingsTab('out')）
-  h += '<div class="am-card c2" id=amCardSet>';
-  h += '<div class=am-card-badge>CoreAudio · Hog Mode</div>';
-  h += '<div class=am-card-mid><div class=am-card-title>独占直通引擎</div></div>';
-  h += '<div class=am-card-bottom>';
-  h += '<div class=am-card-desc>Bit-Perfect 硬件独占 · 自动跟随源采样率 · DoP / SDM 调制器</div>';
-  h += '<button class="am-pill-btn" id=emptyGoSet>配置输出设备</button>';
-  h += '</div></div>';
-
-  // 卡片 3（青碧极光渐变背景 am-card c3，点击触发 id=emptyGoEq -> openSettingsTab('eq')）
-  h += '<div class="am-card c3" id=amCardEq>';
-  h += '<div class=am-card-badge>DSP · 64-Bit Float</div>';
-  h += '<div class=am-card-mid><div class=am-card-title>20 段 PEQ 与 OPRA</div></div>';
-  h += '<div class=am-card-bottom>';
-  h += '<div class=am-card-desc>内置 6200+ 款耳机 OPRA 目标曲线 · 卷积房间校正 IR · 响度分析</div>';
-  h += '<button class="am-pill-btn" id=emptyGoEq>打开均衡与校正</button>';
-  h += '</div></div>';
-
-  h += '</div>'; // .am-hero-grid
-
-  // ---- 第二部分：下方快速开始 + 四格快捷入口行 ----
-  h += '<div class=am-sec-hdr style="margin-top:14px">快速开始</div>';
-  h += '<div class=am-quick-row>';
-
-  // 1: 浏览本地文件夹
-  h += '<div class=am-quick-item id=amGoFiles>';
-  h += '<div class=am-qico><svg viewBox="0 0 24 24" fill=none stroke="currentColor" stroke-width=2><path d="M3 7.5a2 2 0 012-2h4l1.8 2H19a2 2 0 012 2v8a2 2 0 01-2 2H5a2 2 0 01-2-2z"/></svg></div>';
-  h += '<div class=am-qtext><div class=am-qtitle>浏览本地文件夹</div><div class=am-qdesc>直接访问本地存储目录与音频文件</div></div>';
-  h += '</div>';
-
-  // 2: 挂载 Subsonic/WebDAV 流媒体
-  h += '<div class=am-quick-item id=amGoRemote>';
-  h += '<div class=am-qico><svg viewBox="0 0 24 24" fill=none stroke="currentColor" stroke-width=2><path d="M7 18a4.5 4.5 0 010-9 6 6 0 0111.6 1.6A3.7 3.7 0 0118 18z"/></svg></div>';
-  h += '<div class=am-qtext><div class=am-qtitle>挂载流媒体服务</div><div class=am-qdesc>Subsonic / Navidrome / WebDAV / UPnP</div></div>';
-  h += '</div>';
-
-  // 3: AI 资料与封面补全
-  h += '<div class=am-quick-item id=amGoMeta>';
-  h += '<div class=am-qico><svg viewBox="0 0 24 24" fill=none stroke="currentColor" stroke-width=2><path d="M12 2v4m0 12v4M4.93 4.93l2.83 2.83m8.48 8.48l2.83 2.83M2 12h4m12 0h4M4.93 19.07l2.83-2.83m8.48-8.48l2.83-2.83"/></svg></div>';
-  h += '<div class=am-qtext><div class=am-qtitle>AI 资料与封面补全</div><div class=am-qdesc>自动匹配高精度唱片元数据与插画</div></div>';
-  h += '</div>';
-
-  // 4: 音频输入采集
-  h += '<div class=am-quick-item id=amGoIn>';
-  h += '<div class=am-qico><svg viewBox="0 0 24 24" fill=none stroke="currentColor" stroke-width=2><path d="M12 1a3 3 0 00-3 3v8a3 3 0 006 0V4a3 3 0 00-3-3z"/><path d="M19 10v2a7 7 0 01-14 0v-2M12 19v4M8 23h8"/></svg></div>';
-  h += '<div class=am-qtext><div class=am-qtitle>音频输入采集</div><div class=am-qdesc>低延迟实时流式监听与分析</div></div>';
-  h += '</div>';
-
-  h += '</div>'; // .am-quick-row
-
-  // 已配置的根目录（保留原有信息，放在最底部一行）
-  if (hasRoots && rootPath) {
-    h += '<div class=am-rootline><svg width=12 height=12 viewBox="0 0 24 24" fill=none stroke=currentColor stroke-width=2>'
-       +   '<path d="M3 7.5a2 2 0 012-2h4l1.8 2H19a2 2 0 012 2v8a2 2 0 01-2 2H5a2 2 0 01-2-2z"/></svg>'
-       +   '<span title="' + esc(rootPath) + '">&nbsp;当前音乐目录: ' + esc(rootPath) + '</span></div>';
-  }
-  h += '</div>'; // .emptystate
   return h;
 }
+/* ---------------- 音频工作站页（2026-10-25 独立成导航页） ----------------
+   渲染 + 绑定。绑定全部复用既有入口（setView / openSettingsTab / #bScan），
+   不新增任何 API 或路由；每个元素判空后才绑，元素不存在时静默跳过。 */
+function renderStation() {
+  head('音频工作站', '', '');
+  var list = D('list');
+  if (!list) return;
+  list.innerHTML = workstationHtml();
+  bindWorkstation();
+}
+
+function bindWorkstation() {
+  // 主 CTA（卡 1）：没有目录 → 进设置「高级」并聚焦目录输入框；已有目录 → 触发已有 #bScan
+  var add = D('emptyGoAdd');
+  if (add) add.onclick = function (ev) {
+    if (ev && ev.stopPropagation) ev.stopPropagation();
+    var validRoots = (S.roots || []).filter(function (r) {
+      if (!r) return false;
+      r = String(r).trim();
+      if (SEP === '/' && /^[A-Za-z]:[\\/]/.test(r)) return false;
+      return true;
+    });
+    if (validRoots.length > 0) {
+      if (D('bScan')) D('bScan').click();
+      else toast('请到设置页点「重新扫描全部」');
+    } else {
+      openSettingsTab('adv');
+      var r = D('sp_root'); if (r) { try { r.focus(); } catch (e) { } }
+    }
+  };
+  var c1 = D('amCardAdd');
+  if (c1) c1.onclick = function (ev) {
+    if (ev.target && ev.target.id === 'emptyGoAdd') return;
+    var b = D('emptyGoAdd'); if (b) b.click();
+  };
+
+  // 卡 2：输出设备 = 设置「输出」页签
+  var set = D('emptyGoSet');
+  if (set) set.onclick = function (ev) {
+    if (ev && ev.stopPropagation) ev.stopPropagation();
+    openSettingsTab('out');
+  };
+  var c2 = D('amCardSet');
+  if (c2) c2.onclick = function (ev) {
+    if (ev.target && ev.target.id === 'emptyGoSet') return;
+    openSettingsTab('out');
+  };
+
+  // 卡 3：均衡与校正 = 设置「EQ」页签
+  var eq = D('emptyGoEq');
+  if (eq) eq.onclick = function (ev) {
+    if (ev && ev.stopPropagation) ev.stopPropagation();
+    openSettingsTab('eq');
+  };
+  var c3 = D('amCardEq');
+  if (c3) c3.onclick = function (ev) {
+    if (ev.target && ev.target.id === 'emptyGoEq') return;
+    openSettingsTab('eq');
+  };
+
+  // 快速开始四格：全部复用既有导航/设置入口
+  var goFiles = D('amGoFiles');
+  if (goFiles) goFiles.onclick = function () { setView('files'); loadFiles(S.dir || ''); };
+  var goRemote = D('amGoRemote');
+  if (goRemote) goRemote.onclick = function () { setView('remote'); loadRemote(''); };
+  var goMeta = D('amGoMeta');
+  if (goMeta) goMeta.onclick = function () { openSettingsTab('meta'); };
+  var goIn = D('amGoIn');
+  if (goIn) goIn.onclick = function () { openSettingsTab('in'); };
+}
+
 function bindEmptyState() {
+  // 2026-10-25：专辑空态只留「添加/扫描」+「去音频工作站」两个入口
+  var goStation = D('emptyGoStation');
+  if (goStation) goStation.onclick = function (ev) {
+    if (ev && ev.stopPropagation) ev.stopPropagation();
+    setView('station');
+    renderStation();
+  };
   // 主 CTA（卡 1）：没有目录 → 直接进设置页「高级」（那里有添加目录输入框）；
   //               已有目录但索引为空 → 直接触发已有的 #bScan（重新扫描）按钮。
   var add = D('emptyGoAdd');
@@ -2909,6 +3062,8 @@ Array.prototype.forEach.call(document.querySelectorAll('.nav'), function (e) {
     else if (v === 'remote') loadRemote('');
     else if (v === 'queue') { renderQueuePage(); }
     else if (v === 'recent') loadRecent();
+    // 2026-10-25：音频工作站独立页（原来挤在专辑空态里，导入音乐后就看不到）
+    else if (v === 'station') { renderStation(); }
   };
 });
 
@@ -2990,7 +3145,17 @@ function syncVolUi() {
     if (e && Math.abs(parseFloat(e.value) - S.vol) > 1e-9) e.value = S.vol;
   });
   var lab = D('npVolLab');
-  if (lab) lab.textContent = (S.vol > 0 ? '+' : '') + S.vol.toFixed(1) + ' dB';
+  if (lab) {
+    // 2026-10-25（DoP 音量保护配套）：DSD/DoP 输出时软件音量被强制 0 dB（保护 DoP 标记字节，
+    // 否则 DAC 会当普通 PCM 播、输出白噪音）。数字照常显示用户请求值，但必须如实标注
+    // 「不生效」—— 否则用户拉音量条看到数字变、实际不变，会以为又是 bug（那正是本轮修的东西）。
+    var dopMode = (typeof outModeOf === 'function') && outModeOf() === 'dsd';
+    lab.textContent = (S.vol > 0 ? '+' : '') + S.vol.toFixed(1) + ' dB' +
+                      (dopMode ? '（DSD 输出：不生效）' : '');
+    lab.title = dopMode
+      ? 'DSD / DoP 输出时软件音量被强制为 0 dB：任何增益都会破坏 DoP 标记字节（0x05/0xFA），导致 DAC 把 DSD 当普通 PCM 播放、输出刺耳白噪音。请在 DAC 端调音量。'
+      : '';
+  }
 }
 if (D('npRep')) D('npRep').onclick = cycleRep;
 if (D('npVol')) {
@@ -4591,8 +4756,11 @@ function renderSettingsPage() {
      //   ③ 原组里的「发现 DLNA 设备」与结果区搬去「流媒体」页（DLNA 归流媒体）。
      + sgroup('本地音乐库', '本地目录扫描入索引；DLNA / UPnP 在「流媒体」页',
          '<div class="sfld wide libstats" id=sp_libstats></div>'
-       + txt('sp_root', '添加音乐目录', '', '填好后点「添加目录」', (SEP === '/' ? '/Users/你的用户名/Music' : 'D:\\Music'))
+       + txt('sp_root', '添加音乐目录', '', '可以点「浏览…」直接选文件夹，也可以手填路径', (SEP === '/' ? '/Users/你的用户名/Music' : 'D:\\Music'))
        + '<div class="sfld wide" style="display:flex;gap:8px;flex-wrap:wrap">'
+       // 2026-10-25（用户要求「要让用户可以通过点击文件夹来选择」）：原生目录选择面板。
+       // 只有 machost（WKWebView 壳）才有宿主通道；浏览器直开时按钮隐藏，避免点了没反应。
+       + '<button class="btn" id=sp_browseRoot style="display:none">浏览…</button>'
        + '<button class="btn" id=sp_addroot>添加目录</button> <button class="btn" id=sp_rescan>重新扫描全部</button></div>'
        + num({id:'sp_scanthreads', label:'扫描线程数'}, ADV.scanThreads || 0, 0, 32, 1, '0 = 自动（默认 min(CPU, 8)）')
        + '<div class="sfld wide"><div id=sp_roots class=rootlist></div></div>')
@@ -4869,6 +5037,8 @@ function renderSettingsPage() {
         toast('输出模式已切到 DSD（SDM）');
       }
       applyDsd(); saveSettings(); applyDsdState();
+      // 2026-10-25：输出模式切到/切离 DSD 时，音量标签的「DSD 输出：不生效」标注要跟着变
+      if (typeof syncVolUi === 'function') syncVolUi();
     };
   });
   ['sp_sdmo1', 'sp_sdmoNx'].forEach(function (id) {
@@ -5001,6 +5171,27 @@ function renderSettingsPage() {
     setUiStyle(this.value);
     toast('已切换界面风格：' + (this.value === 'classic' ? '经典 Hi-Fi 工作台' : 'Apple Music 风格'));
   };
+  // 2026-10-25（用户要求「要让用户可以通过点击文件夹来选择」）：原生目录选择
+  if (D('sp_browseRoot')) {
+    var bb = D('sp_browseRoot');
+    if (IS_MAC_HOST) {
+      bb.style.display = '';                 // 有宿主通道才显示，否则保持隐藏
+      bb.onclick = function () {
+        var cur = (D('sp_root') && D('sp_root').value || '').trim();
+        pickDirectory(cur, function (path) {
+          if (!path) return;                 // 用户取消
+          if (D('sp_root')) D('sp_root').value = path;
+          // 选完直接加入并扫描 —— 少一步点击，符合「点文件夹就选好」的直觉
+          api('/api/lib/roots', 'add=' + encodeURIComponent(path)).then(function (j) {
+            if (!j.ok) { toast(j.error || '添加失败'); return; }
+            toast('已添加：' + path);
+            libChanged(); loadLibStats(); api('/api/lib/scan', '');
+            if (D('sp_root')) D('sp_root').value = '';
+          });
+        });
+      };
+    }
+  }
   D('sp_addroot').onclick = function () {
     var d = (D('sp_root').value || '').trim();
     if (!d) { toast('请填目录'); return; }

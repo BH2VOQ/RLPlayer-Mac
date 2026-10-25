@@ -23,6 +23,7 @@
 
 #include <atomic>
 #include <cstring>
+#include <cmath>      // ldexp / llround（音量定标）
 #include <mutex>
 #include <string>
 #include <vector>
@@ -118,6 +119,112 @@ inline int device_bit_depth(AudioDeviceID dev) {
     UInt32 size = sizeof(asbd);
     if (::AudioObjectGetPropertyData(dev, &addr, 0, nullptr, &size, &asbd) != noErr) return 0;
     return (int)asbd.mBitsPerChannel;
+}
+
+// ---------------- 设备硬件音量（2026-10-25 用户报「接管之后音量被锁死」）----------------
+//
+// 问题现象：独占模式接管设备后，**最高音量 = 接管前系统设置的那个值**，而且改不了。
+//
+// 根因（实测确认）：本项目**从未读写过设备硬件音量**（全仓 grep 零命中）。
+//   * 独占(Hog)模式下系统音量 UI 被挡住，用户改不了；
+//   * 而设备的硬件音量标量停留在接管那一刻的旧值（本机实测 0.152，即 -16 dB 左右）；
+//   * 播放器只做**软件增益**（在旧硬件音量之上再乘）⟹ 天花板就是那个陈旧值。
+//
+// 设计选择（用户明确要求「要接管设备就全接管，要用系统的音量级别」）：
+//   接管时把设备硬件音量**置满 (1.0)**，并解除静音，然后**全部**用软件增益控制。
+//   这样：① 软件增益 0 dB 就是设备满幅（真正的 bit-perfect 前提）；
+//        ② 用户拉音量条能到 100%，不再被旧值卡住；
+//        ③ 退出/关闭时**恢复**接管前的硬件音量，不污染用户的系统设置。
+//   为什么不用硬件音量来做音量控制：每次调音量都要发 CoreAudio 属性写，
+//   实时拖动会有延迟与爆音风险；软件增益在写环时做，零延迟且可精确到样本。
+//   代价：软件增益 < 0 dB 时不再是 bit-perfect —— 这是音频工程共识，UI 已如实标注。
+struct HwVolumeState {
+    bool      saved = false;      // 是否保存过原值（有原值才恢复）
+    Float32   scalar = 1.0f;      // 原音量标量
+    bool      muteSaved = false;
+    Boolean   mute = false;
+    // 2026-10-25（用户安全要求）：接管时把「原硬件音量」换算成等效 dB，
+    // 作为软件增益的**初始值**，保证接管瞬间响度不变（不会突然满幅）。
+    // scalar→dB 用 20*log10；scalar==0 视为静音（-120 dB）。
+    double    equivalentDb = 0.0;
+    bool      valid = false;      // 是否成功读到了原值（否则不做响度保持）
+};
+
+inline bool hw_volume_supported(AudioDeviceID dev) {
+    AudioObjectPropertyAddress a{kAudioDevicePropertyVolumeScalar,
+                                 kAudioDevicePropertyScopeOutput, kAudioObjectPropertyElementMain};
+    return ::AudioObjectHasProperty(dev, &a) != 0;
+}
+
+inline bool hw_volume_get(AudioDeviceID dev, Float32& out) {
+    AudioObjectPropertyAddress a{kAudioDevicePropertyVolumeScalar,
+                                 kAudioDevicePropertyScopeOutput, kAudioObjectPropertyElementMain};
+    if (!::AudioObjectHasProperty(dev, &a)) return false;
+    UInt32 sz = sizeof(out);
+    return ::AudioObjectGetPropertyData(dev, &a, 0, nullptr, &sz, &out) == noErr;
+}
+
+inline bool hw_volume_set(AudioDeviceID dev, Float32 v) {
+    AudioObjectPropertyAddress a{kAudioDevicePropertyVolumeScalar,
+                                 kAudioDevicePropertyScopeOutput, kAudioObjectPropertyElementMain};
+    if (!::AudioObjectHasProperty(dev, &a)) return false;
+    Boolean settable = false;
+    if (::AudioObjectIsPropertySettable(dev, &a, &settable) != noErr || !settable) return false;
+    return ::AudioObjectSetPropertyData(dev, &a, 0, nullptr, sizeof(v), &v) == noErr;
+}
+
+inline bool hw_mute_get(AudioDeviceID dev, Boolean& out) {
+    AudioObjectPropertyAddress a{kAudioDevicePropertyMute,
+                                 kAudioDevicePropertyScopeOutput, kAudioObjectPropertyElementMain};
+    if (!::AudioObjectHasProperty(dev, &a)) return false;
+    UInt32 sz = sizeof(out);
+    return ::AudioObjectGetPropertyData(dev, &a, 0, nullptr, &sz, &out) == noErr;
+}
+
+inline bool hw_mute_set(AudioDeviceID dev, Boolean m) {
+    AudioObjectPropertyAddress a{kAudioDevicePropertyMute,
+                                 kAudioDevicePropertyScopeOutput, kAudioObjectPropertyElementMain};
+    if (!::AudioObjectHasProperty(dev, &a)) return false;
+    Boolean settable = false;
+    if (::AudioObjectIsPropertySettable(dev, &a, &settable) != noErr || !settable) return false;
+    return ::AudioObjectSetPropertyData(dev, &a, 0, nullptr, sizeof(m), &m) == noErr;
+}
+
+// 接管：存原值 → 硬件音量置满 → 解除静音。返回 false 表示设备不支持（不致命）。
+//
+// ⚠️ 安全要求（用户 2026-10-25 明确）：「接管的情况下，默认音量要与之前系统设置的音量相同，
+//    防止音量过大」。所以这里必须把原硬件音量换算成等效 dB 交给调用方，由它把软件增益
+//    初始化到同一个响度 —— **绝不能**硬件置满后软件还停在 0 dB（那等于瞬间满幅）。
+inline bool hw_volume_takeover(AudioDeviceID dev, HwVolumeState& st) {
+    st = HwVolumeState{};
+    if (!hw_volume_supported(dev)) return false;
+    Float32 cur = 1.0f;
+    if (hw_volume_get(dev, cur)) {
+        st.saved = true;
+        st.scalar = cur;
+        st.valid = true;
+        // scalar → dB：0 → 静音；否则 20*log10。夹在 [-120, 0]（硬件音量不会 > 0 dB）。
+        if (cur <= 0.000001f) st.equivalentDb = -120.0;
+        else {
+            double db = 20.0 * std::log10((double)cur);
+            if (db > 0.0) db = 0.0;
+            if (db < -120.0) db = -120.0;
+            st.equivalentDb = db;
+        }
+    }
+    Boolean m = 0;
+    if (hw_mute_get(dev, m)) { st.muteSaved = true; st.mute = m; }
+    // 置满并解除静音：之后音量完全由软件增益控制
+    const bool okVol = hw_volume_set(dev, 1.0f);
+    if (st.muteSaved && st.mute) hw_mute_set(dev, 0);
+    return okVol;
+}
+
+// 归还：把接管前的硬件音量/静音写回去（幂等；失败不抛）
+inline void hw_volume_restore(AudioDeviceID dev, const HwVolumeState& st) {
+    if (!st.saved) return;
+    hw_volume_set(dev, st.scalar);
+    if (st.muteSaved) hw_mute_set(dev, st.mute);
 }
 
 // 设置设备物理格式（等价于"按源格式开独占"）。失败说明该格式不被接受。
@@ -307,6 +414,31 @@ public:
             return false;
         }
 
+        // 2b) 接管设备硬件音量（2026-10-25 用户报「接管后最高音量被锁死在旧值」）。
+        //     独占模式下系统音量 UI 被挡住，而硬件音量标量会停在接管那一刻的旧值
+        //     （本机实测 0.152 ≈ −16 dB），播放器只做软件增益 ⟹ 天花板就是那个陈旧值。
+        //     用户要求「要接管设备就全接管，要用系统的音量级别」⟹ 这里把硬件音量置满、
+        //     解除静音，音量完全交给软件增益；close() 时恢复原值，不污染系统设置。
+        //     共享模式不接管（系统混音器在路径上，音量归系统管）。
+        hwVol_ = detail::HwVolumeState{};
+        if (!shared_) {
+            detail::hw_volume_takeover(device_, hwVol_);
+            // 2026-10-25（用户安全要求）：接管把硬件音量置满后，必须立刻把软件增益
+            // 初始化到「原硬件音量的等效 dB」，否则会从接管前的响度**瞬间跳到满幅**。
+            // 例：接管前硬件 0.15（≈ −16.4 dB）→ 软件增益也设 −16.4 dB ⟹ 响度不变。
+            // 之后用户拖音量条时，render_loop 会以 startDb 为基准做增量，语义自洽。
+            if (hwVol_.valid) {
+                const double lin = (hwVol_.equivalentDb <= -120.0)
+                                   ? 0.0 : std::pow(10.0, hwVol_.equivalentDb / 20.0);
+                gain_ = lin;
+                // 告诉上层「接管后应该把音量条起点定在哪」—— 由 hw_takeover_db() 读取
+                hwStartDb_ = hwVol_.equivalentDb;
+                hwStartDbValid_ = true;
+            } else {
+                hwStartDbValid_ = false;
+            }
+        }
+
         // 3) 建 AUHAL 输出单元
         AudioComponentDescription desc{};
         desc.componentType = kAudioUnitType_Output;
@@ -444,10 +576,39 @@ public:
         const size_t n = frames < space ? frames : space;
         zero_.classify(n, space, frames, io_period_frames_);
 
-        for (size_t i = 0; i < n; ++i) {
-            std::memcpy(&ring_[(write_pos_ + i) % capacity * (size_t)channels_],
-                        interleaved + i * (size_t)channels_,
-                        sizeof(int32_t) * (size_t)channels_);
+        // 2026-10-25（音量修复，真 BUG）：此前这里直接 memcpy 原始 PCM，**从不应用 gain_**。
+        // gain_ 只被 bit_perfect() 读过（判「增益是否 1.0」），于是：
+        //   * 上层拖动音量条 → set_gain() 改了 gain_ → 但音频数据一个字节都没变
+        //     ⟹ 音量功能完全失效（用户报「音量不好使」的直接根因）；
+        //   * 更矛盾的是 bit_perfect() 会因 gain_ != 1.0 报「非 bit-perfect」——
+        //     即「音量变了但声音没变、bit-perfect 却没了」两个症状并存。
+        // 现在在写环时按 gain_ 缩放。增益 == 1.0 时走原路径（逐位不变，bit-perfect 语义保住）。
+        const double g = gain_;
+        if (g == 1.0) {
+            for (size_t i = 0; i < n; ++i) {
+                std::memcpy(&ring_[(write_pos_ + i) % capacity * (size_t)channels_],
+                            interleaved + i * (size_t)channels_,
+                            sizeof(int32_t) * (size_t)channels_);
+            }
+        } else {
+            // 定点缩放：样本是 int32 容器（有效位由 bits_ 决定），先按 2^(32-bits_) 归一，
+            // 乘增益后四舍五入回整数。g == 0 时直接写 0（真静音，不做无用乘法）。
+            const int shift = (bits_ >= 1 && bits_ <= 32) ? (32 - bits_) : 0;
+            const double scale = std::ldexp(1.0, shift);
+            for (size_t i = 0; i < n; ++i) {
+                int32_t* dst = &ring_[(write_pos_ + i) % capacity * (size_t)channels_];
+                const int32_t* src = interleaved + i * (size_t)channels_;
+                for (int c = 0; c < channels_; ++c) {
+                    if (g == 0.0) { dst[c] = 0; continue; }
+                    const double v = (double)src[c] / scale * g;
+                    // 限幅到该位深的合法范围，避免溢出成反相爆音
+                    const double lim = (double)((1LL << (bits_ - 1)) - 1);
+                    double cl = v;
+                    if (cl >  lim) cl =  lim;
+                    if (cl < -lim) cl = -lim;
+                    dst[c] = (int32_t)std::llround(cl * scale);
+                }
+            }
         }
         write_pos_ = (write_pos_ + n) % capacity;
         frames_written_ += n;
@@ -483,6 +644,15 @@ public:
     std::string last_zero_reason() const { return zero_.reason(); }
 
     void set_gain(double linear) override { gain_ = linear; }
+
+    // 2026-10-25：接管后「音量条的起点 dB」。
+    // 独占接管时硬件音量被置满、软件增益接管；为了让用户看到/拖动的音量值与
+    // 实际响度一致，上层（rtaweb）需要知道这个起点。返回 false = 没接管/没读到原值。
+    bool hw_takeover_db(double& outDb) const {
+        if (!hwStartDbValid_) return false;
+        outDb = hwStartDb_;
+        return true;
+    }
 
     bool bit_perfect() const override {
         // bit-perfect 的充分必要条件（PLATFORM.md §5.1）：
@@ -594,6 +764,10 @@ private:
     }
 
     void close_locked() {
+        // 2026-10-25：先归还设备硬件音量（接管时存的旧值），再关单元/放 hog。
+        // 顺序重要：hog 释放后设备可能被别的进程立刻接管，那时再写音量就晚了。
+        if (!shared_) detail::hw_volume_restore(device_, hwVol_);
+        hwVol_ = detail::HwVolumeState{};
         if (unit_) {
             if (running_) ::AudioOutputUnitStop(unit_);
             if (initialized_) ::AudioUnitUninitialize(unit_);
@@ -624,6 +798,9 @@ private:
     int channels_ = 0;
     double buffer_ms_ = 100.0;
     double gain_ = 1.0;
+    detail::HwVolumeState hwVol_{};   // 接管前的设备硬件音量（close 时恢复）
+    double hwStartDb_ = 0.0;          // 接管后音量条的起点 dB（原硬件音量的等效值）
+    bool   hwStartDbValid_ = false;
     bool opened_ = false;
     bool initialized_ = false;
     bool running_ = false;

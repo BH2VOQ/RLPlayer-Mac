@@ -551,9 +551,24 @@ h += "#npPage .npedge{display:none}";
     h += ".npdwork .wy{font-family:ui-monospace,Consolas,monospace;color:var(--mut);width:38px;flex:none}";
     h += ".npdwork .wt{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}";
     h += ".npdwork .wp{color:var(--mut2);flex:none;max-width:34%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}";
-    h += ".npclose{position:absolute;top:16px;left:16px;width:36px;height:36px;border-radius:50%;background:rgba(255,255,255,.12);display:flex;align-items:center;justify-content:center;color:var(--txt);z-index:4}";
-    h += ".npclose:hover{background:rgba(255,255,255,.16)}";
-    h += "html.machost .npclose{top:46px;left:18px}";
+    // 2026-10-25（用户报「就是这个按钮的问题」）：返回按钮原来用 rgba(255,255,255,.12)
+    // 半透明底 + 无边框，而单曲页是全屏**浅色渐变**覆盖层 ⟹ 按钮几乎看不见（截图里只剩
+    // 一个淡淡的箭头，被误认为压在红绿灯上）。同时 machost 的 top:46px 紧贴红绿灯下沿。
+    // 修法：改成**实底 + 描边 + 阴影**，浅/深主题各自有明确对比；machost 下再下移，
+    // 与红绿灯留出清晰间隙。位置仍贴左上（返回语义一致），不改成别的位置。
+    h += ".npclose{position:absolute;top:16px;left:16px;width:38px;height:38px;border-radius:50%;";
+    h += "background:rgba(255,255,255,.92);border:1px solid rgba(15,23,42,.14);";
+    h += "box-shadow:0 1px 3px rgba(15,23,42,.16);";
+    h += "display:flex;align-items:center;justify-content:center;color:var(--txt);z-index:6;";
+    h += "transition:background .15s,transform .12s}";
+    h += ".npclose:hover{background:#fff;transform:scale(1.04)}";
+    h += ".npclose:active{transform:scale(.97)}";
+    // 深色主题下改用深底，避免白色圆盘在暗背景上刺眼
+    h += "html[data-theme=dark] .npclose{background:rgba(30,32,38,.92);border-color:rgba(255,255,255,.16);";
+    h += "box-shadow:0 1px 3px rgba(0,0,0,.4)}";
+    h += "html[data-theme=dark] .npclose:hover{background:rgba(48,50,58,.96)}";
+    // machost：红绿灯占顶部约 8..30px，这里从 46 下移到 52，留出明确间隙
+    h += "html.machost .npclose{top:52px;left:18px}";
     // 窄/矮窗口（用户 261023-04 #6 的 1024x640）：压缩行高与留白，但行间距不小于 12px
     h += "@media (max-height:720px){.npgrid{padding:36px 24px 10px;gap:12px}.nphero{gap:16px}.npcover{height:clamp(108px,22vh,164px)}.npkind{margin-bottom:5px}.nptit{font-size:19px}.npsub{font-size:11.5px;margin-top:5px}.npmline{margin-top:6px;min-height:20px}.npctl2{gap:8px}.npdbody{font-size:12px;line-height:1.6}}";
     h += "@media (max-width:1120px){.npgrid{padding:38px 24px 12px}.nphero{gap:16px}.npcover{height:clamp(108px,20vh,180px)}}";
@@ -562,8 +577,10 @@ h += "#npPage .npedge{display:none}";
     h += "html[data-theme=light] .npbg,html[data-theme=blue] .npbg{filter:blur(64px) saturate(1.05) brightness(1.12)}";
     h += "html[data-theme=light] .npveil{background:linear-gradient(180deg,rgba(244,246,249,.62),rgba(244,246,249,.95))}";
     h += "html[data-theme=blue] .npveil{background:linear-gradient(180deg,rgba(233,242,255,.64),rgba(233,242,255,.96))}";
-    h += "html[data-theme=light] .npclose,html[data-theme=blue] .npclose{background:rgba(15,23,42,.08);color:var(--txt)}";
-    h += "html[data-theme=light] .npclose:hover,html[data-theme=blue] .npclose:hover{background:rgba(15,23,42,.15)}";
+    // 2026-10-25：原来这两行会把浅色/蓝色主题的 .npclose 又改回 rgba(15,23,42,.08) 半透明
+    // （等于把上面刚修好的实底样式覆盖掉，按钮重新变得几乎看不见）。
+    // 浅色主题本来就该用上面那套白底+描边，所以这里只保留一个略深的 hover，不再改底色。
+    h += "html[data-theme=light] .npclose:hover,html[data-theme=blue] .npclose:hover{background:rgba(15,23,42,.06)}";
     h += "html[data-theme=light] .npseek,html[data-theme=blue] .npseek{background:rgba(15,23,42,.16)}";
     h += "html[data-theme=light] .npcover img,html[data-theme=blue] .npcover img{box-shadow:0 24px 70px rgba(15,23,42,.22)}";
     h += "html[data-theme=light] .nprailcard,html[data-theme=blue] .nprailcard{background:rgba(15,23,42,.04);border-color:rgba(15,23,42,.10)}";
@@ -820,6 +837,11 @@ h += "#npPage .npedge{display:none}";
     h += "<div class=nav data-v=queue><svg viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='1.8'><path d='M4 6h10M4 12h10M4 18h7'/><path d='M17 15.5V7l4-1v8.5'/><circle cx='16' cy='16.5' r='1.6' fill='currentColor' stroke='none'/><circle cx='20' cy='15' r='1.6' fill='currentColor' stroke='none'/></svg>播放队列</div>";
     h += "<div class=nav data-v=recent><svg viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='1.8'><circle cx='12' cy='12' r='8.5'/><path d='M12 7.2V12l3.2 2'/></svg>最近播放</div>";
     h += "<div class=sec>音频引擎</div>";
+    // 2026-10-25（用户要求「这部分功能我感觉可以单做一个导航菜单」）：
+    // 原来三张海报卡（无损音乐库 / 独占直通引擎 / PEQ 与 OPRA）+ 四格快捷入口
+    // 挤在**专辑页的空态**里 —— 一旦导入音乐就永远看不到了，而且专辑页不该塞输出设备/EQ 入口。
+    // 现在独立成「音频工作站」导航页，任何曲库状态下都能进。
+    h += "<div class=nav data-v=station><svg viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='1.8'><rect x='3' y='4' width='18' height='12' rx='2'/><path d='M7 20h10M12 16v4'/><path d='M7 11l2.5-2.5L12 11l2.5-2.5L17 11'/></svg>音频工作站</div>";
     h += "<div class=nav data-v=settings><svg viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='1.8'><circle cx='12' cy='12' r='3.2'/><path d='M12 3.5v2.2M12 18.3v2.2M4.4 7.9l1.9 1.1M17.7 15l1.9 1.1M4.4 16.1l1.9-1.1M17.7 9l1.9-1.1'/></svg>设置</div>";
     h += "<div class=sp></div>";
     // 品牌徽标栏：贴侧栏最底（像 Apple Music 左下角个人徽标）

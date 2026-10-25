@@ -236,6 +236,49 @@ add_executable(test_volume_eq tests/test_volume_eq.cpp)
 target_link_libraries(test_volume_eq PRIVATE rtadsp)
 add_test(NAME volume_eq COMMAND test_volume_eq)
 
+# ---------------- 2026-10-25：设备输出层增益应用门禁（音量失效事故回归）----------------
+# 事故：用户报「音量不好使」。根因是两处叠加：
+#   ① render_loop 每 tick 调 OutSink::set_live_gain_db()，但基类是**空实现**
+#      （render_loop.h:43），没有任何 sink 覆盖它 ⟹ 音量请求被静默丢弃；
+#   ② 即使接通，CoreAudioOutput::write() 也直接 memcpy 原始 PCM、**从不读 gain_**
+#      （gain_ 只被 bit_perfect() 用来判「增益是否 1.0」）⟹ 数据一个字节都没变。
+# 症状还自相矛盾：声音没变，但 bit_perfect() 因 gain_!=1 报「非位完美」。
+#
+# 原 tests/test_volume_eq 只覆盖 DSP 层（浮点域乘增益），**设备输出层从来没测过** ——
+# 这就是 bug 藏身之处。本测试补上设备输出层（与 audio_out_coreaudio.h::write() 的
+# 缩放分支逐行同构），判据含「4 档增益输出严格递减」+「不得全部相等」的反证，
+# 纯离线不碰设备（铁律 1）。红→绿演示见测试文件末尾注释。
+add_executable(test_output_gain tests/test_output_gain.cpp)
+target_include_directories(test_output_gain PRIVATE ${CMAKE_SOURCE_DIR}/src)
+add_test(NAME output_gain COMMAND test_output_gain)
+
+# ---------------- 2026-10-25：DoP/DSD 输出时软件音量必须锁 0 dB ----------------
+# 为什么是硬门禁而不是"记得别动"：
+#   DoP 把 DSD 位流装进 24-bit PCM 容器，靠高 8 位交替的 0x05/0xFA 标记让 DAC 识别。
+#   任何软件增益都会改写这些字节 ⟹ 标记失效 ⟹ DAC 把 DSD 当普通 PCM 播
+#   ⟹ 输出**刺耳白噪音**（不是"声音变小"，是彻底坏掉）。
+#   修音量失效时发现 render_loop 无条件调 set_live_gain_db，DoP 路径没有保护 ——
+#   音量一旦真的生效，DoP + 非 0 dB 就会炸。两者必须同时存在。
+# 本测试用**真实 render_loop**（mock sink 记录增益），不打开设备（铁律 1）。
+# 判据含对照（PCM 路径必须正常应用 -20 dB），防止"一律清零"也能过。
+add_executable(test_dop_gain_guard tests/test_dop_gain_guard.cpp)
+target_include_directories(test_dop_gain_guard PRIVATE ${CMAKE_SOURCE_DIR}/src)
+add_test(NAME dop_gain_guard COMMAND test_dop_gain_guard)
+
+# ---------------- 2026-10-25：设备硬件音量接管/归还 ----------------
+# 事故：用户报「要接管设备就全接管，要用系统的音量级别，现在接管之后最高音量是之前
+#       系统设置的最高音量，还无法修改」。
+# 根因：本项目**从未读写过设备硬件音量**（全仓 grep 零命中）。独占(Hog)模式下系统音量 UI
+#       被挡住，硬件音量标量停在接管那一刻的旧值（本机实测 0.152 ≈ −16 dB），播放器只做
+#       软件增益 ⟹ 天花板就是这个陈旧值，且用户无法修改。
+# 修复：接管时存原值 → 硬件音量置满 1.0 → 解除静音；close() 时恢复原值。
+# 门禁默认**只读**（零副作用）；真实读写需手动 `test_hw_volume --allow-hw-touch`
+# （会短暂改动默认输出设备音量，但**不播放任何声音** —— 铁律 1）。
+add_executable(test_hw_volume tests/test_hw_volume.cpp)
+target_include_directories(test_hw_volume PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(test_hw_volume PRIVATE ${RL_PLATFORM_LIBS})
+add_test(NAME hw_volume COMMAND test_hw_volume)
+
 # ---------------- 20 段参数均衡 PEQ（261024-02 #6）：0dB 直通 / 6dB@fc / Q 带宽 /
 #                  采样率重建 / 满幅过载恢复 / 热更新交叉淡入（铁律 7）----------------
 add_executable(test_peq tests/test_peq.cpp)

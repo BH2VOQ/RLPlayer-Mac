@@ -360,7 +360,17 @@ inline void render_loop(OutSink& sink, RenderHost& h) {
 
         // 实时音量：只把「当前请求 - 起播时已应用的」这个差值交给设备层，
         // 差值为 0 时完全走原路径（逐位不变）
-        sink.set_live_gain_db(h.volDb->load() - h.startDb->load());
+        //
+        // 2026-10-25（DSD 音量保护）：DoP/DSD 输出时**绝对不能**做软件音量。
+        // 原因：DoP 把 DSD 位流装进 24-bit PCM 容器，靠高 8 位交替的 0x05/0xFA 标记
+        // 让 DAC 识别。任何软件增益都会改写这些字节 ⟹ 标记失效 ⟹ DAC 把 DSD 当普通
+        // PCM 播 ⟹ 输出刺耳白噪音（不是「声音变小」，是「彻底坏掉」）。
+        // 所以 dop 时强制 0 dB，绝不静默忽略用户的音量请求（调用方应在 UI 说明原因）。
+        if (h.dop) {
+            sink.set_live_gain_db(0.0);
+        } else {
+            sink.set_live_gain_db(h.volDb->load() - h.startDb->load());
+        }
 
         // 先把待写缓冲填到至少一个周期（最多预攒 3 个周期，避免占内存）
         while (pendFrames < period * 3 && !eos) {

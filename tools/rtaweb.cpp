@@ -672,6 +672,18 @@ public:
         const size_t w = ao_->write(pcm, frames);
         return w;
     }
+    // 2026-10-25（音量修复，真 BUG）：render_loop 每 tick 调用 set_live_gain_db()
+    // 把「当前请求音量 − 起播时已应用音量」交给设备层，但**此前没有任何 sink 覆盖它**
+    // （基类 render_loop.h:43 是空实现）⟹ 音量请求被静默丢弃，拖动音量条毫无反应。
+    // 而 CoreAudioOutput 明明有 set_gain()，只是从来没人调用过。
+    // 这里把两者接上：dB → 线性增益 → ao_->set_gain()。
+    void set_live_gain_db(double db) override {
+        // 限幅 [-120, +12] dB：≤−120 视为静音（线性 0）；>+12 不允许（避免削波被当成"更响"）
+        if (db < -120.0) db = -120.0;
+        if (db > 12.0) db = 12.0;
+        const double linear = (db <= -120.0) ? 0.0 : std::pow(10.0, db / 20.0);
+        ao_->set_gain(linear);
+    }
     void pause() override { ao_->pause(); }
     void resume() override { ao_->resume(); }
     void close() override { ao_->close(); }
@@ -2310,6 +2322,37 @@ static void migrate_legacy_state_files() {
     const std::string newDir = runtime_state_dir();
     const std::string oldDir = rta::platform::module_dir_utf8();
     if (newDir.empty() || oldDir.empty() || newDir == oldDir) return;
+
+    // 2026-10-25（用户报「改完文件夹重启又回归」的第二个根因，实测已复现）：
+    // 开发机上 exe 目录是 build-mac/ —— 那里残留的旧配置会被当成「老用户数据」搬进
+    // 正式配置目录，把用户刚改的设置**覆盖回去**。日志里抓到过：
+    //   MIGRATE 旧位置 → config_dir：3 项；from=/Users/august/Downloads/DQ/RLPlayer/build-mac
+    // 而且每次重新编译，build-mac 里又会产生新的旧文件 ⟹ 用户感觉「一直在被重置」。
+    //
+    // 判据：**只有"看起来像正式安装目录"才做迁移**。开发构建目录一律跳过：
+    //   * 路径里含 /build（build、build-mac、build-*）
+    //   * 路径以 /Debug 或 /Release 结尾（Xcode 产物）
+    //   * 可执行文件同目录存在 CMakeCache.txt（CMake 构建树的铁证）
+    // 跳过迁移不影响功能：正式 .app 的 module_dir 是 .../Contents/MacOS，不会被这些规则命中。
+    {
+        std::string od = oldDir;
+        for (char& ch : od) ch = (char)std::tolower((unsigned char)ch);
+        const bool isBuildDir =
+            od.find("/build") != std::string::npos ||
+            (od.size() >= 8 && od.compare(od.size() - 8, 8, "/release") == 0) ||
+            (od.size() >= 6 && od.compare(od.size() - 6, 6, "/debug") == 0) ||
+            std::ifstream(oldDir + "/CMakeCache.txt").good();
+        if (isBuildDir) {
+            // 只记一次日志，避免每次启动刷屏
+            static bool warned = false;
+            if (!warned) {
+                warned = true;
+                play_log("MIGRATE 跳过：exe 目录是开发构建目录（" + oldDir +
+                         "），不搬它的配置以免覆盖用户设置");
+            }
+            return;
+        }
+    }
 
     // 注意：rlplayer-library.conf / rlplayer-index.tsv 在非默认实例上带 ".p<port>" 后缀
     // （Library::confLeaf）。这里用前缀扫描把带后缀的一并搬，否则多实例的老索引读不到。

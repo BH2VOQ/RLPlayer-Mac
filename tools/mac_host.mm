@@ -727,6 +727,46 @@ static NSString *const kShim = @
                 }
             }
             break;
+        case HostAction::PickDir: {
+            // 2026-10-25（用户要求「要让用户可以通过点击文件夹来选择」）：
+            // 弹原生 NSOpenPanel 选**目录**（canChooseDirectories=YES / canChooseFiles=NO）。
+            // 为什么不在页面里用 <input type=file webkitdirectory>：
+            //   它只能选"包含文件的目录"，**选不了空目录**，而且拿不到 macOS 原生目录选择体验。
+            // 结果通过 emitToPage 回传：页面监听 pickdir:ok:<path> / pickdir:cancel。
+            // 注意：必须在主线程弹（WKScriptMessageHandler 回调已在主线程，这里直接调）。
+            NSOpenPanel *panel = [NSOpenPanel openPanel];
+            panel.canChooseFiles = NO;
+            panel.canChooseDirectories = YES;
+            panel.allowsMultipleSelection = NO;
+            panel.canCreateDirectories = YES;
+            panel.prompt = @"选择";
+            panel.message = @"选择音乐目录";
+            // 初始目录：页面传进来的 arg（不存在就忽略，用系统默认）
+            if (!hm.arg.empty()) {
+                NSString *startPath = [NSString stringWithUTF8String:hm.arg.c_str()];
+                if (startPath && startPath.length) {
+                    BOOL isDir = NO;
+                    if ([[NSFileManager defaultManager] fileExistsAtPath:startPath isDirectory:&isDir] && isDir) {
+                        panel.directoryURL = [NSURL fileURLWithPath:startPath isDirectory:YES];
+                    }
+                }
+            }
+            NSModalResponse resp = [panel runModal];
+            if (resp == NSModalResponseOK && panel.URL) {
+                NSString *chosen = [panel.URL path];
+                if (chosen && chosen.length) {
+                    // 路径里可能有冒号（极罕见）与换行：换成安全形式再回传，
+                    // 页面侧按 "pickdir:ok:" 前缀切第一个冒号之后的全部内容，所以冒号无碍。
+                    NSString *safe = [chosen stringByReplacingOccurrencesOfString:@"\n" withString:@" "];
+                    [self emitToPage:[NSString stringWithFormat:@"pickdir:ok:%@", safe]];
+                } else {
+                    [self emitToPage:@"pickdir:cancel"];
+                }
+            } else {
+                [self emitToPage:@"pickdir:cancel"];
+            }
+            break;
+        }
         case HostAction::Resize: {
             // 窗口边缘拉伸：页面在最外 5px 铺 8 条热区发起 resize:<dir>
             // 宿主跟踪鼠标拖拽更新窗口 frame（方向对齐 platform/host_msg.h 白名单）

@@ -17,7 +17,8 @@ enum class HostAction {
     Drag,
     Theme,
     OpenUrl,
-    Resize        // arg: left/right/top/bottom/topleft/topright/bottomleft/bottomright
+    Resize,       // arg: left/right/top/bottom/topleft/topright/bottomleft/bottomright
+    PickDir       // 2026-10-25：打开原生「选择文件夹」面板（用户要求可点击选目录）
 };
 
 struct HostMessage {
@@ -57,6 +58,16 @@ inline HostMessage parse_host_message(const std::string& m) {
     if (m == "max") { r.action = HostAction::Maximize; return r; }
     if (m == "close") { r.action = HostAction::Close; return r; }
     if (m == "drag") { r.action = HostAction::Drag; return r; }
+    // 2026-10-25（用户要求「要让用户可以通过点击文件夹来选择」）：
+    // 页面请求宿主弹原生「选择文件夹」面板。可选参数 = 初始目录。
+    // 为什么必须走宿主：WKWebView 里 <input type=file webkitdirectory> 只能选**文件**
+    // 不能选空目录，也拿不到 macOS 的原生目录选择体验；NSOpenPanel 才是正解。
+    if (m == "pickdir") { r.action = HostAction::PickDir; return r; }
+    if (m.rfind("pickdir:", 0) == 0) {
+        r.action = HostAction::PickDir;
+        r.arg = m.substr(8);          // 初始目录（空 = 用默认位置）
+        return r;
+    }
     if (m.rfind("theme:", 0) == 0) {
         r.action = HostAction::Theme;
         r.arg = m.substr(6);

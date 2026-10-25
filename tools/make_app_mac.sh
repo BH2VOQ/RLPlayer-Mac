@@ -85,7 +85,7 @@ PLIST
 for tool in ffmpeg ffprobe; do
     src_tool="$BUILD/ffmpeg-lite/$tool"
     if [[ ! -x "$src_tool" ]]; then
-        echo "✗ 致命错误：未找到 $src_tool。请先执行 tools/build_ffmpeg_lite_mac.sh 构建 arm64 精简静态版"
+        echo "✗ 致命错误：未找到 ${src_tool}。请先执行 tools/build_ffmpeg_lite_mac.sh 构建 arm64 精简静态版"
         exit 1
     fi
     if ! "$src_tool" -version >/dev/null 2>&1; then
@@ -100,7 +100,7 @@ for tool in ffmpeg ffprobe; do
     fi
     cp "$src_tool" "$APP/Contents/MacOS/$tool"
     chmod +x "$APP/Contents/MacOS/$tool"
-    echo "✓ 已内置 $tool：自建 arm64 精简静态版（$(du -h "$src_tool" | cut -f1)）"
+    echo "✓ 已内置 ${tool}：自建 arm64 精简静态版（$(du -h "$src_tool" | cut -f1)）"
 done
 
 # 6) 单进程与纯 arm64 门禁校验
@@ -139,7 +139,7 @@ if command -v otool >/dev/null 2>&1; then
         exit 1
     fi
     if [[ "$BIN_MINOS" != "$PLIST_MINOS" ]]; then
-        echo "✗ 致命错误：部署目标不一致：二进制 minos=$BIN_MINOS，Info.plist LSMinimumSystemVersion=$PLIST_MINOS"
+        echo "✗ 致命错误：部署目标不一致：二进制 minos=${BIN_MINOS}，Info.plist LSMinimumSystemVersion=$PLIST_MINOS"
         echo "  请检查 CMakeLists.txt 是否已设置 CMAKE_OSX_DEPLOYMENT_TARGET=13.0 并重新配置构建目录。"
         exit 1
     fi
