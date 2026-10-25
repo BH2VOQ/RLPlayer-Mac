@@ -84,11 +84,7 @@ struct BufferLearnEntry {
 inline std::string buffer_today() {
     const std::time_t t = std::time(nullptr);
     std::tm tmv{};
-#ifdef _WIN32
-    localtime_s(&tmv, &t);
-#else
     localtime_r(&t, &tmv);
-#endif
     char b[32] = {0};
     std::strftime(b, sizeof(b), "%Y-%m-%d", &tmv);
     return std::string(b);

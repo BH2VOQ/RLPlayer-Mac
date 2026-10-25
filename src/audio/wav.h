@@ -176,75 +176,25 @@ inline int parse_wav_header(const uint8_t* data, size_t size, WavHeaderInfo& out
 
 namespace detail {
 
-// F5（2026-10-22）：Windows 窄 fopen 按 ANSI 代码页（ACP，本机 936/GBK）解释路径，
-// UTF-8 中文路径打不开（实证）。wav.h 不含 windows.h，用不了 MultiByteToWideChar，
-// 这里自带一个纯标准库的 UTF-8 → UTF-16 转换（逐码点，>BMP 走代理对），配合 _wfopen。
-// 非法 UTF-8 返回空串 → _wfopen 打不开 → 走既有的「无法打开文件: …」报错路径。
-inline bool wav_utf8_next(const std::string& s, size_t& i, uint32_t& cp) {
-    const unsigned char c = (unsigned char)s[i];
-    int cont;
-    if      (c < 0x80)                 { cp = c;        cont = 0; }
-    else if (c >= 0xC2 && c <= 0xDF)   { cp = c & 0x1Fu;  cont = 1; }
-    else if (c >= 0xE0 && c <= 0xEF)   { cp = c & 0x0Fu;  cont = 2; }
-    else if (c >= 0xF0 && c <= 0xF4)   { cp = c & 0x07u;  cont = 3; }
-    else return false;                                   // C0/C1、F5..FF、错位的续字节
-    if (i + (size_t)cont >= s.size()) return false;      // 截断
-    for (int k = 1; k <= cont; ++k) {
-        const unsigned char cc = (unsigned char)s[i + (size_t)k];
-        if ((cc & 0xC0) != 0x80) return false;           // 续字节必须 10xxxxxx
-        cp = (cp << 6) | (uint32_t)(cc & 0x3Fu);
-    }
-    if ((cont == 1 && cp < 0x80) || (cont == 2 && cp < 0x800) || (cont == 3 && cp < 0x10000))
-        return false;                                    // 过短编码
-    if (cp > 0x10FFFF || (cp >= 0xD800 && cp <= 0xDFFF)) return false;   // 越界/代理区
-    i += (size_t)cont + 1;
-    return true;
-}
-inline std::wstring wav_widen(const std::string& s) {
-    std::wstring w; w.reserve(s.size());
-    size_t i = 0;
-    while (i < s.size()) {
-        uint32_t cp = 0;
-        if (!wav_utf8_next(s, i, cp)) return std::wstring();             // 非法 UTF-8：交上层报错
-        if (cp < 0x10000) w.push_back((wchar_t)cp);
-        else {                                                           // 代理对
-            const uint32_t t = cp - 0x10000;
-            w.push_back((wchar_t)(0xD800 + (t >> 10)));
-            w.push_back((wchar_t)(0xDC00 + (t & 0x3FF)));
-        }
-    }
-    return w;
-}
-// 按平台打开文件：Windows 走宽字符（UTF-8 路径不再经 ANSI 代码页）；
-// 非 Windows 窄路径行为不变。
+// 按平台打开文件：POSIX 一律窄路径 fopen（macOS 路径原生 UTF-8，不经代码页转换）。
+// wmode 仅为保持既有调用点签名（两平台共用一份 wav_open 声明）。
 inline FILE* wav_open(const std::string& path, const wchar_t* wmode, const char* nmode) {
-#if defined(_WIN32)
-    (void)nmode;
-    return ::_wfopen(wav_widen(path).c_str(), wmode);
-#else
     (void)wmode;
     return std::fopen(path.c_str(), nmode);
-#endif
 }
 }
 
 inline AudioBuffer read_wav(const std::string& path) {
-    FILE* f = detail::wav_open(path, L"rb", "rb");   // F5：Windows 用宽字符打开（UTF-8 中文路径实证打不开窄 fopen）
+    FILE* f = detail::wav_open(path, L"rb", "rb");   // F5：POSIX 走窄 fopen（路径本身即 UTF-8）
     if (!f) throw std::runtime_error("无法打开文件: " + path);
 
     // HF-03：Windows 上 long 是 32 位。旧代码对 >2GB 的文件（长曲目/高码率解码的
     // 临时 WAV 可达）ftell 返回 -1，随后 buf.resize((size_t)-1) 直接抛裸的
     // "vector too long"（2.log 症状之一）。改用 64 位定位并显式检查，杜绝该路径。
     long long fsize = -1;
-#if defined(_WIN32)
-    ::_fseeki64(f, 0, SEEK_END);
-    fsize = ::_ftelli64(f);
-    ::_fseeki64(f, 0, SEEK_SET);
-#else
     std::fseek(f, 0, SEEK_END);
     fsize = (long long)std::ftell(f);
     std::fseek(f, 0, SEEK_SET);
-#endif
     if (fsize < 0) { std::fclose(f); throw std::runtime_error("无法确定文件大小(文件=" + path + ")"); }
     if (fsize == 0) { std::fclose(f); throw std::runtime_error("文件为空(文件=" + path + ", 大小=0 字节)"); }
     constexpr long long kMaxFileBytes = 1LL << 32;   // 4 GiB 防御上限：真音乐文件到不了，
@@ -410,7 +360,7 @@ inline void write_wav(const std::string& path, const AudioBuffer& ab) {
             detail::wr32(o, (uint32_t)v);
         }
     }
-    FILE* f = detail::wav_open(path, L"wb", "wb");   // F5：与 read_wav 同一宽字符路径
+    FILE* f = detail::wav_open(path, L"wb", "wb");   // F5：与 read_wav 同一打开路径
     if (!f) throw std::runtime_error("无法写入: " + path);
     const size_t w = std::fwrite(o.data(), 1, o.size(), f);
     std::fclose(f);

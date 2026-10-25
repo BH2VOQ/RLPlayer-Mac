@@ -21,7 +21,9 @@
 // 本测试不覆盖（铁律 1：不接管听音设备）；另 rtaweb 的 WasapiSink 尚未转发这 4 个接口，
 // 详见 反馈和开发\debug\20261022-02\分析.md「未完成项」。
 #include "audio/render_loop.h"
-#include "audio/wasapi_out.h"   // ZeroAttrib：「写不进去」的归因分类（真机接线不在本文件）
+#include "audio/write_attrib.h"   // ZeroAttrib：「写不进去」的归因分类（2026-10-25 从 wasapi_out.h 提取，跨平台）
+#include "platform/audio_out.h"                   // AudioOutput 契约（CoreAudioOutput 的基类）
+#include "platform/macos/audio_out_coreaudio.h"   // 平台后端：钉住 zero_pad_full 等归因接口签名
 #include <cstdio>
 #include <string>
 #include <type_traits>
@@ -46,16 +48,21 @@ static bool contains(const std::string& hay, const char* needle) {
 using rta::render::OutSink;
 using rta::render::SinkOpenOpts;
 
-// 真机 STAT 的 zp/zs/zr 依赖 WasapiOutput 的这几个接口（由 rtaweb 的 WasapiSink 转发）。
+// 真机 STAT 的 zp/zs/zr 依赖平台输出后端的这几个接口（由 rtaweb 的 sink 转发）。
 // 这里钉住签名：后续重构若把接口改掉，本测试在【编译期】就红（不发声、不开设备）。
-static_assert(std::is_same_v<decltype(&rta::audio::WasapiOutput::zero_pad_full),
-                             long long (rta::audio::WasapiOutput::*)() const>,
+//
+// 2026-10-25：项目转 macOS 单平台后，被钉的对象从 WasapiOutput 换成 CoreAudioOutput。
+// 这不是放水——**判据强度完全不变**，仍然是「后端必须暴露这三个 const 接口」这个能力契约；
+// 只是被钉的具体类随平台变了。ZeroAttrib 本体已提取到 audio/write_attrib.h（跨平台），
+// CoreAudioOutput 在 src/platform/macos/audio_out_coreaudio.h 里提供同名同义实现。
+static_assert(std::is_same_v<decltype(&rta::platform::CoreAudioOutput::zero_pad_full),
+                             long long (rta::platform::CoreAudioOutput::*)() const>,
               "zero_pad_full() 必须保持 const 返回 long long（STAT zp 用）");
-static_assert(std::is_same_v<decltype(&rta::audio::WasapiOutput::zero_starved),
-                             long long (rta::audio::WasapiOutput::*)() const>,
+static_assert(std::is_same_v<decltype(&rta::platform::CoreAudioOutput::zero_starved),
+                             long long (rta::platform::CoreAudioOutput::*)() const>,
               "zero_starved() 必须保持 const 返回 long long（STAT zs 用）");
-static_assert(std::is_same_v<decltype(&rta::audio::WasapiOutput::last_zero_reason),
-                             std::string (rta::audio::WasapiOutput::*)() const>,
+static_assert(std::is_same_v<decltype(&rta::platform::CoreAudioOutput::last_zero_reason),
+                             std::string (rta::platform::CoreAudioOutput::*)() const>,
               "last_zero_reason() 必须保持 const 返回 std::string（STAT zr 用）");
 
 // ---- mock：write_available 恒 0（VM 独占流假死形态），wait_event 立即返回（测试提速）----

@@ -109,14 +109,8 @@ inline void wrTag(std::vector<uint8_t>& o, const char* t) {
 }
 
 inline FILE* dsd_fopen(const std::string& path, const wchar_t* wmode, const char* nmode) {
-#if defined(_WIN32)
-    (void)nmode;
-    const std::filesystem::path p(std::u8string(reinterpret_cast<const char8_t*>(path.data()), path.size()));
-    return ::_wfopen(p.c_str(), wmode);
-#else
     (void)wmode;
     return std::fopen(path.c_str(), nmode);
-#endif
 }
 
 inline std::vector<uint8_t> read_file_bytes(const std::string& path) {

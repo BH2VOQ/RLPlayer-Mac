@@ -9,7 +9,9 @@
 #define NOMINMAX
 #include "audio/wav.h"
 #include "audio/audio_loader.h"
+#if defined(_WIN32)   // 2026-10-25 转 macOS 单平台：本文件是 Windows 工具，mac 构建无目标（CMakeLists 已剔除），守卫保留供 Windows 侧回归
 #include "audio/wasapi_out.h"
+#endif
 #include "net/rtanet_stream.h"
 #include "net/clock_loop.h"
 #include "net/rtanet_status.h"

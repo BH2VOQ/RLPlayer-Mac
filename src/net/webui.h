@@ -18,23 +18,6 @@
 //    做法：① shutdown 每条活跃连接（阻塞中的 recv/send 立刻返回）；
 //         ② 等工作线程全部摘表退出。工作线程只持有 shared_ptr 的连接表 + handler 副本，
 //            不持有 this —— 即使线程比对象活得久也不会踩到已析构成员。
-#if defined(_WIN32)
-  #ifndef WIN32_LEAN_AND_MEAN
-  #define WIN32_LEAN_AND_MEAN
-  #endif
-  #ifndef NOMINMAX
-  #define NOMINMAX
-  #endif
-  #include <winsock2.h>
-  #include <ws2tcpip.h>
-  using socket_t = SOCKET;
-  #define RL_SOCK_INVALID INVALID_SOCKET
-  inline int   sock_close(socket_t s) { return ::closesocket(s); }
-  inline void  sock_shutdown(socket_t s) { ::shutdown(s, SD_BOTH); }
-  inline bool  sock_init() { WSADATA w; return ::WSAStartup(MAKEWORD(2, 2), &w) == 0; }
-  inline void  sock_cleanup() { ::WSACleanup(); }
-  using socklen_t_ = int;
-#else
   #include <sys/socket.h>
   #include <sys/types.h>
   #include <netinet/in.h>
@@ -46,7 +29,6 @@
   inline bool  sock_init() { return true; }
   inline void  sock_cleanup() {}
   using socklen_t_ = socklen_t;
-#endif
 #include <string>
 #include <functional>
 #include <thread>

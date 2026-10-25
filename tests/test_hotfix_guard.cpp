@@ -14,7 +14,10 @@
 #include "audio/wav.h"
 #include "audio/audio_loader.h"
 #include "dsp/resampler.h"
-#include "audio/wasapi_out.h"
+#include "test_compat_posix.h"   // GetCurrentProcessId 等 Win32 夹具垫片（真实实现）
+#include "platform/audio_out.h"                   // AudioOutput 契约（CoreAudioOutput 基类）
+#include "platform/macos/audio_out_coreaudio.h"   // 平台后端：钉住 probe_formats / open 签名
+#include "audio/write_attrib.h"   // FormatProbe/OpenFail（2026-10-25 从 wasapi_out.h 提取，跨平台）
 #include <cstdio>
 #include <cstdint>
 #include <cstring>
@@ -204,14 +207,14 @@ int main() {
     std::printf("- 2 合法 WAV 写读回归（write_wav -> read_wav 位精确）\n");
     {
         auto roundtrip = [&](int bits, bool isFloat, const std::vector<int32_t>& raw, const char* what) {
-            AudioBuffer a;
+            rta::audio::AudioBuffer a;
             a.rate = 44100; a.channels = 2; a.bits = bits; a.isFloat = isFloat; a.raw = raw;
             const std::string f = tmp_name((std::string("ok") + std::to_string(bits)).c_str());
             bool wrote = false;
             try { write_wav(f, a); wrote = true; } catch (const std::exception& e) { ck(false, what, std::string("写入异常: ") + e.what()); }
             if (wrote) {
                 try {
-                    const AudioBuffer b = read_wav(f);
+                    const rta::audio::AudioBuffer b = read_wav(f);
                     ck(b.rate == 44100 && b.channels == 2 && b.bits == bits && b.isFloat == isFloat && b.raw == raw,
                        what, "回读字段/样本不一致");
                 } catch (const std::exception& e) { ck(false, what, std::string("回读异常: ") + e.what()); }
@@ -234,13 +237,13 @@ int main() {
     {
         // read_any 对合法 .wav 走原生路径（不依赖 ffmpeg）
         const std::string f = tmp_name("okany");
-        AudioBuffer a;
+        rta::audio::AudioBuffer a;
         a.rate = 48000; a.channels = 2; a.bits = 16; a.isFloat = false;
         a.raw.assign(100, 0);   // 50 帧
         write_wav(f, a);
         try {
             rta::audio::LoadNote note;
-            const AudioBuffer b = rta::audio::read_any(f, &note);
+            const rta::audio::AudioBuffer b = rta::audio::read_any(f, &note);
             ck(b.rate == 48000 && b.channels == 2 && b.frames() == 50, "read_any 合法 .wav 正常读出",
                "frames=" + std::to_string(b.frames()));
         } catch (const std::exception& e) { ck(false, "read_any 合法 .wav 正常读出", e.what()); }
@@ -296,7 +299,7 @@ int main() {
     {
         using rta::audio::FormatProbe;
         using rta::audio::OpenFail;
-        using rta::audio::WasapiOutput;
+        using rta::platform::CoreAudioOutput;
         static_assert(std::is_same_v<decltype(FormatProbe::rates16), std::vector<uint32_t>>, "rates16");
         static_assert(std::is_same_v<decltype(FormatProbe::rates24), std::vector<uint32_t>>, "rates24");
         static_assert(std::is_same_v<decltype(FormatProbe::rates32), std::vector<uint32_t>>, "rates32");
@@ -307,20 +310,28 @@ int main() {
         static_assert(std::is_same_v<decltype(OpenFail::supportedList), std::string>, "OpenFail::supportedList");
         static_assert(std::is_same_v<decltype(OpenFail::hresultText), std::string>, "OpenFail::hresultText");
         static_assert(std::is_same_v<decltype(OpenFail::deviceId), std::string>, "OpenFail::deviceId");
-        static_assert(std::is_same_v<decltype(&WasapiOutput::probe_formats),
+        static_assert(std::is_same_v<decltype(&CoreAudioOutput::probe_formats),
                                      FormatProbe (*)(const std::string&)>, "probe_formats 静态签名");
-        // 旧 5 参 open() 调用仍成立（decltype 内是 unevaluated 操作数，不会真正打开设备）
-        static_assert(std::is_same_v<decltype(std::declval<WasapiOutput&>().open(
-                          std::declval<const std::string&>(), std::declval<uint32_t>(),
-                          std::declval<int>(), std::declval<int>(), std::declval<double>())), bool>,
-                      "open() 旧 5 参签名兼容");
-        // 新 6 参（OpenFail* 出参）签名成立
-        static_assert(std::is_same_v<decltype(std::declval<WasapiOutput&>().open(
-                          std::declval<const std::string&>(), std::declval<uint32_t>(),
-                          std::declval<int>(), std::declval<int>(), std::declval<double>(),
-                          std::declval<OpenFail*>())), bool>,
-                      "open() 新 6 参(OpenFail*)签名可用");
-        ck(true, "probe/OpenFail 全部 static_assert 通过（含旧签名兼容）");
+        // 2026-10-25：open() 的**形态**随平台契约变了（WASAPI 的 5/6 参重载 →
+        // audio_out.h 的 rta::platform::OpenSpec 结构）。但判据要证明的**能力**没变：
+        // 「用 rate/bits/channels/bufferMs + 指定设备 + 共享/独占 这几个要素能开流，
+        //   且失败时能拿到结构化原因」。所以断言 rta::platform::OpenSpec 覆盖这些要素，
+        // 并断言 open(const rta::platform::OpenSpec&) 的签名成立——强度不降。
+        static_assert(std::is_same_v<decltype(rta::platform::OpenSpec::deviceId), std::string>, "rta::platform::OpenSpec::deviceId");
+        static_assert(std::is_same_v<decltype(rta::platform::OpenSpec::rate), uint32_t>, "rta::platform::OpenSpec::rate");
+        static_assert(std::is_same_v<decltype(rta::platform::OpenSpec::bits), int>, "rta::platform::OpenSpec::bits");
+        static_assert(std::is_same_v<decltype(rta::platform::OpenSpec::channels), int>, "rta::platform::OpenSpec::channels");
+        static_assert(std::is_same_v<decltype(rta::platform::OpenSpec::bufferMs), double>, "rta::platform::OpenSpec::bufferMs");
+        static_assert(std::is_same_v<decltype(rta::platform::OpenSpec::shared), bool>, "rta::platform::OpenSpec::shared（等价 WASAPI 共享语义）");
+        static_assert(std::is_same_v<decltype(std::declval<CoreAudioOutput&>().open(
+                          std::declval<const rta::platform::OpenSpec&>())), bool>,
+                      "open(const rta::platform::OpenSpec&) 签名成立");
+        // 失败归因的出参形态：平台层用 set_error/last_error 暴露结构化原因
+        static_assert(std::is_same_v<decltype(std::declval<CoreAudioOutput&>().last_error()),
+                                     const std::string&>, "last_error() 返回结构化原因文本");
+        static_assert(std::is_same_v<decltype(std::declval<CoreAudioOutput&>().last_error_class()),
+                                     rta::platform::OutputError>, "last_error_class() 返回错误分类");
+        ck(true, "probe/OpenFail/rta::platform::OpenSpec 全部 static_assert 通过（能力契约，形态随平台）");
         FormatProbe p{};
         ck(!p.endpointAlive && p.rates16.empty() && p.rates24.empty() && p.rates32.empty() &&
            p.deviceId.empty() && p.friendlyName.empty(), "FormatProbe 默认构造全空/false（找不到端点时如实返回的形态）");
@@ -360,7 +371,7 @@ int main() {
         ck(placed, "中文文件名 WAV 按真名落盘（filesystem 宽路径写入）", why);
         if (placed) {
             try {
-                const AudioBuffer b = read_wav(u8name);
+                const rta::audio::AudioBuffer b = read_wav(u8name);
                 ck(b.rate == 44100 && b.channels == 2 && b.frames() == 4 && b.raw.size() == 8,
                    "read_wav 打得开 UTF-8 中文文件名且 rate/ch/样本数对",
                    "rate=" + std::to_string(b.rate) + " ch=" + std::to_string(b.channels) +

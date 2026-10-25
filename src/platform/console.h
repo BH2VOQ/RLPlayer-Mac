@@ -13,11 +13,5 @@ bool enable_utf8_console();
 
 } // namespace rta::platform
 
-#if defined(_WIN32)
-#include "platform/windows/console_win32.h"
-#elif defined(__APPLE__)
-// macOS 实现（PLATFORM.md §9）
+// macOS 实现（PLATFORM.md §9）。2026-10-25 项目转 macOS 单平台：Windows 分派支与 #else/#error 兜底已删除。
 #include "platform/macos/console_posix.h"
-#else
-#error "platform/console.h: 本平台尚无实现（已支持 Windows 与 macOS）。新平台请按 PLATFORM.md §9 在 src/platform/<平台>/ 下实现同名头文件。"
-#endif

@@ -9,6 +9,7 @@
 //   6. complete 判定（>= 5 且全带 url 为 true；不足 5 条如实 false）
 //   7. 真实网络用例 opt-in（RTA_NET_TESTS=1 开启，默认 [SKIP] exit 0）
 #define WIN32_LEAN_AND_MEAN
+#include "test_compat_posix.h"   // POSIX 垫片：_dupenv_s（macOS 门禁）
 #include "platform/console.h"
 #include "meta/discogs.h"
 #include <chrono>

@@ -2,8 +2,14 @@
 
 本目录有两类东西：
 
-1. **随发布包分发的 CLI**（`make_dist.ps1` 会把这 17 个 .exe 打进 `tools\`）——用户可直接用；
-2. **开发/验收脚本**（`.ps1` / `.js` / `.py`）——只在源码仓库里，用于构建、门禁与界面验收。
+1. **随发布包分发的 CLI**（`tools/make_app_mac.sh` 会把可执行文件打进 `RLPlayer.app/Contents/MacOS/`）——用户可直接用；
+2. **开发/验收脚本**（`.js` / `.py` / `.sh`）——只在源码仓库里，用于构建、门禁与界面验收。
+
+> **2026-10-25 平台变更**：项目已从「Windows + macOS 双平台」转为 **macOS 单平台**。
+> 所有 `.ps1` 脚本、Windows 专属工具（`launcher` / `wasapi_probe` / `wasapi_ex_probe` /
+> `asio_probe` / `wv2_probe` / `pxprobe` / `gpu_resample_test`）与 WebView2 SDK 已删除。
+> 删的是**平台实现**，不是能力：Windows 上存在过的功能已在 macOS 侧有等价实现
+> （详见 `PLATFORM.md` §13.15）。仍未移植的项在那里如实挂账。
 
 > 所有会出声的工具默认电平 ≤ −60 dBFS；链路验证优先 `--analyze`（不打开设备）。
 > 见 [AGENTS.md](../AGENTS.md) 铁律 1。
@@ -28,9 +34,6 @@
 
 | 工具 | 作用 |
 |---|---|
-| `wasapi_probe.exe` | 列出音频端点 + 独占模式支持的采样率/位深矩阵（只读，不开流） |
-| `wasapi_ex_probe.exe` | 独占格式阶梯探测：24 紧凑 / float32 / 32 容器 / 32 int |
-| `asio_probe.exe` | ASIO 驱动预检（子进程里试开 0.7 s，崩溃结果写缓存） |
 | `upnp_scan.exe` | UPnP/DLNA 渲染器发现 |
 | `naa_scan.exe` | NAA 端点发现（只发现，握手未实现） |
 | `naa_probe.exe` | NAA 控制通道只读探测 |
@@ -51,12 +54,6 @@
 
 | 脚本 | 作用 |
 |---|---|
-| `make_dist.ps1` | 出正式发布包：构建 → GPU 核 → 兼容门禁 → PATH=System32 的 GPU smoke → 打包 → sha256 |
-| `build_gpu.ps1` / `build_gpu_cuda.ps1` | 编 AMD HIP / NVIDIA CUDA 核（CUDA 脚本会校验 cubin 与导出符号） |
-| `build_ffmpeg_lite.ps1` / `verify_ffmpeg_lite.ps1` | 自建精简 ffmpeg / 出包前守卫（缺解码器就拒绝出包） |
-| `check_compat.ps1` | 分发兼容门禁（静态 CRT / subsystem ≤ 6.1 / 无 AVX-512） |
-| `check_platform_boundary.ps1` | 平台边界检查（src/ 不许出现 win32 头，platform/ 才允许） |
-| `restart-launcher.ps1` / `restart-servers.ps1` | 开发时重启本机实例（只停自己的 pid） |
 
 ---
 
@@ -69,10 +66,8 @@
 | `npcheck.js` | 单曲页专项验收 | `node tools/npcheck.js <url> <out>` |
 | `lyr_dpr.js` | 歌词跟随两档视口验收（893×587 / 1340×880，DPR 1.5） | `node tools/lyr_dpr.js <url> <out> 893 587 1.5` |
 | `peqcheck.js` | PEQ 对齐 + 拖拽/键盘/自动前级验收 | `node tools/peqcheck.js <url> <out>` |
-| `bordercheck.ps1` | **无边框**逐状态取证：结构判据（WebView2 子窗口必须与客户区重合）+ 像素判据 + 四角 + 最大化 + 缩放热区 | `powershell -File tools/bordercheck.ps1 -Exe <RLPlayer.exe> -Theme dark -Out <dir>` |
 | `uishots.js` / `uiprobe.js` | 批量截图 / 页面探针 | — |
 | `mock_t25.js` / `mock_upnp_renderer.js` | 页面契约 mock / 假 UPnP 渲染器（不出声、不碰真设备） | — |
-| `pxgrab.ps1` / `pxmeasure.py` / `pxprobe.cpp` | 逐像素取证（窗口边缘、DPI、缩放热区） | — |
 
 **这些脚本的共同前提**：测试实例必须无声（`backend=null`、`volume=-60`），
 脚本会在起播前断言；不通过就拒绝继续。

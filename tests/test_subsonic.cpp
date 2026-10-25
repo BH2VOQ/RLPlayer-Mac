@@ -4,6 +4,7 @@
 //   * 校验 token = md5(password + salt)
 //   * 校验 ping / browse / search 的解析
 //   * 校验 download 拿回的是【逐字节相同】的原始文件
+#include "test_compat_posix.h"   // POSIX 垫片：SetConsoleOutputCP/CP_UTF8（macOS 门禁）
 #include "net/webui.h"
 #include "net/subsonic.h"
 #include "net/md5.h"

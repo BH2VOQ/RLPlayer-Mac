@@ -5,6 +5,7 @@
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
+#include "test_compat_posix.h"   // POSIX 垫片：取代 <windows.h>（控制台/临时目录/删文件）
 #include "audio/media_info.h"
 #include "meta/enrich.h"
 #include "meta/entities.h"
@@ -16,7 +17,6 @@
 #include <filesystem>
 #include <string>
 #include <vector>
-#include <windows.h>
 
 using namespace rta::meta;
 namespace fs_std = std::filesystem;

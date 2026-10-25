@@ -27,6 +27,12 @@
 #include <string>
 #include <vector>
 
+// 2026-10-25：欠载归因（ZeroAttrib / quantize_period_write）从被移除的 wasapi_out.h
+// 提取到跨平台头 audio/write_attrib.h。功能不能删、只做全量移植 ——「写不进去」的
+// 成因分解是 RENDERFAIL 判据本体（tests/test_renderfail.cpp 直接驱动它），
+// macOS 侧必须继续提供同一套可观测性，否则等于把该能力弄丢而不是"删掉平台实现"。
+#include "audio/write_attrib.h"
+
 namespace rta::platform {
 namespace detail {
 
@@ -230,6 +236,34 @@ public:
         return c;
     }
 
+    // ---------------- 结构化格式探测（HF-01/02 地基，2026-10-25 从 WasapiOutput 移植）----------------
+    // 原 WasapiOutput::probe_formats 返回 FormatProbe：按 16/24/32-bit 分别列出该位深下
+    // 独占支持的采样率，外加端点是否存活与友好名。这是**用户可见能力**——
+    // 设置页的能力提示、开流失败时的 supportedList 都读它，所以平台换了也要有。
+    // macOS 等价物：caps() 已经拿到了 rates 与 bitDepths（CoreAudio 对 16/24/32 都报可请求），
+    // 这里做纯映射，不额外开流、不接管设备（与原实现同为只读探测）。
+    static rta::audio::FormatProbe probe_formats(const std::string& deviceId) {
+        rta::audio::FormatProbe p;
+        p.deviceId = deviceId;
+        CoreAudioOutput probe;          // 仅用于调 caps()；构造不打开设备
+        const DeviceCaps c = probe.caps(deviceId);
+        // 端点存活：caps 能拿到采样率列表即说明设备在（resolve_device 失败会返回空 caps）
+        p.endpointAlive = !c.rates.empty();
+        if (!p.endpointAlive) return p;  // 端点不在：如实返回空，与原实现一致
+        // 友好名
+        const AudioDeviceID dev = resolve_device(deviceId);
+        if (dev != kAudioObjectUnknown) p.friendlyName = detail::device_name(dev);
+        // 位深 → 采样率列表：CoreAudio 侧 16/24/32 共享同一套硬件采样率
+        // （HAL 负责把 int32 重打包成设备物理位深），所以三者同源。
+        // ⚠️ 如实标注：这是「可请求」而非「已逐位实测」——与 caps() 的既有口径一致。
+        for (int bd : c.bitDepths) {
+            if (bd == 16) p.rates16 = c.rates;
+            else if (bd == 24) p.rates24 = c.rates;
+            else if (bd == 32) p.rates32 = c.rates;
+        }
+        return p;
+    }
+
     // ---------------- 开流 ----------------
     bool open(const OpenSpec& spec) override {
         std::lock_guard<std::mutex> lk(mu_);
@@ -330,6 +364,9 @@ public:
         ::AudioUnitSetProperty(unit_, kAudioDevicePropertyBufferFrameSize,
                                kAudioUnitScope_Global, 0, &frames, sizeof(frames));
         buffer_frames_ = frames;
+        // 2026-10-25：IO 周期帧数 = 设备的 buffer frame size。ZeroAttrib 用它判
+        // 「供料不足一个周期」（等价 WASAPI 的 per）。
+        io_period_frames_ = (size_t)frames;
 
         // 6b) 分配环形缓冲（容量 = 设备缓冲的 4 倍，留调度抖动余量）。
         // ⚠️ 这一步曾经漏掉：ring_ 只有 clear() 从没分配过，write() 直接对空
@@ -396,8 +433,16 @@ public:
         }
         const size_t used = (write_pos_ + capacity - read_pos_) % capacity;
         size_t space = capacity - used - 1;
-        if (space == 0) return 0;                       // 满：部分写语义，返回 0 让调用方稍后重试
+        // 2026-10-25：接入欠载归因（与 WASAPI 侧同构）。
+        // 环形缓冲满 ⟹ 等价 WASAPI 的「设备缓冲满」(pad=full)；
+        // 空间不足一个 IO 周期 ⟹ 等价「供料不足一个周期」(avail<period)；
+        // 其余归 other。这三个计数由 STAT/WFAIL/RENDERFAIL 直接打印。
+        if (space == 0) {
+            zero_.classify(0, 0, frames, io_period_frames_);
+            return 0;                       // 满：部分写语义，返回 0 让调用方稍后重试
+        }
         const size_t n = frames < space ? frames : space;
+        zero_.classify(n, space, frames, io_period_frames_);
 
         for (size_t i = 0; i < n; ++i) {
             std::memcpy(&ring_[(write_pos_ + i) % capacity * (size_t)channels_],
@@ -428,6 +473,14 @@ public:
     size_t frames_written() const override { return frames_written_; }
     size_t frames_rendered() const override { return frames_rendered_.load(); }
     uint64_t underruns() const override { return underruns_.load(); }
+
+    // ---------------- 欠载归因（与 WASAPI 侧同名同义，2026-10-25 移植）----------------
+    // 对应原来 WasapiOutput::zero_pad_full / zero_starved / last_zero_reason。
+    // 调用方（rtaweb 的 STAT/WFAIL、tests/test_renderfail）无需区分平台。
+    long long zero_pad_full() const { return zero_.padFull; }
+    long long zero_starved() const { return zero_.starved; }
+    long long zero_other() const { return zero_.other; }
+    std::string last_zero_reason() const { return zero_.reason(); }
 
     void set_gain(double linear) override { gain_ = linear; }
 
@@ -587,6 +640,12 @@ private:
     size_t read_pos_ = 0;
     std::atomic<uint64_t> underruns_{0};
     std::atomic<size_t> frames_rendered_{0};
+
+    // 欠载归因（2026-10-25 从 wasapi_out.h 移植过来，见文件上方 include 处的说明）。
+    // io_period_frames_ 是 CoreAudio 的 IO 缓冲帧数（= HAL 的 kAudioDevicePropertyBufferFrameSize），
+    // open() 时确定；0 表示未知，此时 ZeroAttrib 不做「供料不足」判定（退化为 pad/other 二分）。
+    rta::audio::ZeroAttrib zero_;
+    size_t io_period_frames_ = 0;
 
     OutputError err_class_ = OutputError::None;
     std::string err_text_;

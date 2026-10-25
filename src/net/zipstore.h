@@ -71,11 +71,7 @@ inline void put32(std::vector<unsigned char>& v, uint32_t x) {
 inline void dos_time_date(uint16_t& dosTime, uint16_t& dosDate) {
     std::time_t t = std::time(nullptr);
     std::tm lt{};
-#ifdef _WIN32
-    localtime_s(&lt, &t);
-#else
     lt = *std::localtime(&t);
-#endif
     if (lt.tm_year < 80) { dosTime = 0; dosDate = 0x21; return; }   // 1980-01-01
     dosTime = (uint16_t)((lt.tm_hour << 11) | (lt.tm_min << 5) | (lt.tm_sec / 2));
     dosDate = (uint16_t)(((lt.tm_year - 80) << 9) | ((lt.tm_mon + 1) << 5) | lt.tm_mday);

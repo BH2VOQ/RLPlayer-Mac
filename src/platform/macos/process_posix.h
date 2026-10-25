@@ -142,6 +142,119 @@ inline ProcessResult run_hidden(const std::string& command_line_utf8, bool captu
     return out;
 }
 
+// ---------------- 管道子进程（流式解码用，PLATFORM.md §13.12）----------------
+// 为什么要单独一个 API：run_hidden 的语义是「跑完 → 收全部输出 → 返回退出码」，
+// 而流式解码要的是「一边跑一边读 stdout」。一首 5 分钟 24/96 的歌解出来是
+// 数百 MB，先收完再解析等于把内存当磁盘用，起播延迟一点没改善 —— 那就白移植了。
+//
+// 与 Win32 逐条对齐（原实现见 git HEAD:src/audio/audio_loader.h 的 read_via_ffmpeg_stream）：
+//   CreatePipe(&rd,&wr)          -> ::pipe()
+//   si.hStdOutput = wr / hStdError-> posix_spawn_file_actions_adddup2()
+//   PeekNamedPipe 轮询可用字节    -> fcntl(O_NONBLOCK) + ::poll()（由调用方驱动）
+//   WaitForSingleObject + GetExit-> ::waitpid() + WIFEXITED/WEXITSTATUS
+//   被信号杀死                    -> 128 + WTERMSIG（沿用 run_hidden 的 shell 惯例）
+//
+// ⚠️ 铁律 2：本类只负责"启动/读/等待"，不做任何 kill。
+struct PipeProcess {
+    pid_t pid   = -1;
+    int   out_fd = -1;      // 子进程 stdout 的读端（父进程持有）
+    int   err_fd = -1;      // 子进程 stderr 的读端（父进程持有）
+    bool  started = false;
+    // 被「非阻塞探测退出」路径回收时，原始 waitpid status 落在这里（调用方判退出码用）。
+    // -1 = 还没被探测到退出。这样 read_wav_stream_pipe 可以先知道进程已退出、继续排空管道，
+    // 而调用方仍然拿得到真实退出码 —— Windows 侧是 WaitForSingleObject + GetExitCodeProcess
+    // 两步完成的同一件事。
+    int   exit_status_ = -1;
+
+    // 启动子进程：stdout/stderr 各接一个独立管道。失败返回 false（errno 已置位）。
+    bool start(const std::string& command_line_utf8) {
+        std::vector<std::string> parts = detail::split_command_line(command_line_utf8);
+        if (parts.empty()) return false;
+
+        std::vector<char*> argv;
+        argv.reserve(parts.size() + 1);
+        for (std::string& s : parts) argv.push_back(s.data());
+        argv.push_back(nullptr);
+
+        int op[2] = {-1, -1};
+        int ep[2] = {-1, -1};
+        if (::pipe(op) != 0) return false;
+        if (::pipe(ep) != 0) { ::close(op[0]); ::close(op[1]); return false; }
+
+        posix_spawn_file_actions_t actions;
+        ::posix_spawn_file_actions_init(&actions);
+        ::posix_spawn_file_actions_adddup2(&actions, op[1], STDOUT_FILENO);
+        ::posix_spawn_file_actions_adddup2(&actions, ep[1], STDERR_FILENO);
+        // 不读我们的 stdin（与 run_hidden 同一处理：子进程拿 /dev/null）
+        ::posix_spawn_file_actions_addopen(&actions, STDIN_FILENO, "/dev/null", O_RDONLY, 0);
+        // 子进程里把管道原 fd 关掉：dup2 已经复制到 0/1/2，留着只是多一份写端副本。
+        ::posix_spawn_file_actions_addclose(&actions, op[0]);
+        ::posix_spawn_file_actions_addclose(&actions, ep[0]);
+        ::posix_spawn_file_actions_addclose(&actions, op[1]);
+        ::posix_spawn_file_actions_addclose(&actions, ep[1]);
+
+        pid_t child = 0;
+        const int rc = ::posix_spawn(&child, parts[0].c_str(), &actions, nullptr,
+                                     argv.data(), environ);
+        ::posix_spawn_file_actions_destroy(&actions);
+
+        if (rc != 0) {
+            ::close(op[0]); ::close(op[1]);
+            ::close(ep[0]); ::close(ep[1]);
+            errno = rc;
+            return false;
+        }
+        // ★ 父进程必须立刻关掉写端。否则子进程退出后读端永远收不到 EOF，
+        //   poll 会一直挂到超时（Win32 的 CloseHandle(outWr) 是同一件事）。
+        ::close(op[1]);
+        ::close(ep[1]);
+
+        pid = child;
+        out_fd = op[0];
+        err_fd = ep[0];
+        started = true;
+        return true;
+    }
+
+    // 把 stdout 读端设为非阻塞 —— 这是 PeekNamedPipe 的等价物：
+    // 有数据就立刻返回，没数据返回 EAGAIN，绝不阻塞在读上。
+    bool set_stdout_nonblocking() {
+        if (out_fd < 0) return false;
+        const int fl = ::fcntl(out_fd, F_GETFL, 0);
+        if (fl < 0) return false;
+        return ::fcntl(out_fd, F_SETFL, fl | O_NONBLOCK) == 0;
+    }
+
+    // 关掉父进程持有的读端（幂等）。调用方接管 err_fd 时应先把成员置 -1。
+    void close_fds() {
+        if (out_fd >= 0) { ::close(out_fd); out_fd = -1; }
+        if (err_fd >= 0) { ::close(err_fd); err_fd = -1; }
+    }
+
+    // 阻塞等待退出码。返回 WEXITSTATUS；被信号杀死返回 128+WTERMSIG；失败 -1。
+    // 若进程已被调用方的非阻塞探测（WNOHANG）回收，直接用记下的 status —— 不能再 waitpid
+    // 一次（那会等到 ECHILD 并丢失真实退出码）。
+    int wait() {
+        if (exit_status_ >= 0) {
+            const int status = exit_status_;
+            exit_status_ = -1;
+            return WIFEXITED(status) ? WEXITSTATUS(status)
+                                     : (WIFSIGNALED(status) ? 128 + WTERMSIG(status) : -1);
+        }
+        if (!started || pid <= 0) return -1;
+        int status = 0;
+        while (::waitpid(pid, &status, 0) < 0) {
+            if (errno != EINTR) { pid = -1; return -1; }
+        }
+        pid = -1;
+        if (WIFEXITED(status)) return WEXITSTATUS(status);
+        if (WIFSIGNALED(status)) return 128 + WTERMSIG(status);
+        return -1;
+    }
+
+    ~PipeProcess() { close_fds(); }
+};
+
 inline std::string find_executable(const char* name) {
     if (!name || !*name) return "";
     const std::string base(name);

@@ -6,6 +6,7 @@
 //   3. 文件布局独立验证：按 DSF 规范手工计算偏移，确认「每声道 blockSize 块交错、
 //      LSB-first」——不能用读函数自己验证自己。
 //   4. 坏文件必须抛异常并说清原因（截断 / 魔数错 / DST 压缩）。
+#include "test_compat_posix.h"   // POSIX 垫片：MAX_PATH/GetTempPathA/DeleteFileA（macOS 门禁）
 #include "platform/console.h"
 #include "audio/dsd_reader.h"
 #include <cstdio>

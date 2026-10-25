@@ -8,6 +8,7 @@
 //   4. THD+N：三种抽取器与 4001 抽头参考 FIR 的带内结果一致（差 < 0.3 dB），
 //      且都优于 80 dB（DSD64 / 5 阶 1-bit / −6 dBFS 素材）。
 //   5. 素材闭环：调制器 → DSF → 读回 → 抽取 → THD+N 有明确数值，且读回的位流逐位一致。
+#include "test_compat_posix.h"   // POSIX 垫片：取代 <windows.h>（控制台/临时目录/删文件）
 #include "audio/dsd_reader.h"
 #include "audio/audio_loader.h"
 #include "dsp/direct_sdm.h"
@@ -25,7 +26,6 @@
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
-#include <windows.h>
 
 using namespace rta::dsp;
 using rta::audio::DsdStream;

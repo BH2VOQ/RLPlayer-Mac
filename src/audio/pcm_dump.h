@@ -12,28 +12,12 @@
 #include <cstdio>
 #include <string>
 
-#ifdef _WIN32
-#include <windows.h>
-#endif
 
 namespace rta::audio::detail {
 
 inline const std::string& pcm_dump_dir() {
     static std::string d = []() -> std::string {
-#ifdef _WIN32
-        wchar_t buf[MAX_PATH] = {0};
-        if (!GetModuleFileNameW(nullptr, buf, MAX_PATH)) return {};
-        std::wstring w(buf);
-        const size_t p = w.find_last_of(L"\\/");
-        if (p == std::wstring::npos) return {};
-        w.resize(p);
-        if (GetFileAttributesW((w + L"\\rlplayer-pcmdump.on").c_str()) == INVALID_FILE_ATTRIBUTES) return {};
-        char a[MAX_PATH * 3] = {0};
-        WideCharToMultiByte(CP_UTF8, 0, w.c_str(), -1, a, sizeof(a) - 1, nullptr, nullptr);
-        return std::string(a);
-#else
         return {};
-#endif
     }();
     return d;
 }

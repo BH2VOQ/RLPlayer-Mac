@@ -37,6 +37,8 @@ var S = {
   gpuOn: false, gpuUsed: false
 };
 // 高级参数（设置页里改，params() 统一带上）。默认值与后端一致。
+// 2026-10-25（task-12）：ASIO 后端已删除（macOS 用 CoreAudio，无需绕过系统音频引擎）。
+// 老用户的 conf 里可能还留着 backend=asio —— 由 migrateRemovedBackend() 在加载时优雅降级。
 var ADV = {
   device: '', bits: 0, taps: 0, atten: 0, transition: 0, phase: '',
   modcut: 0, moddith: -1, ir: '', irgpu: 0, ramp: 0, theme: 'dark',
@@ -60,7 +62,15 @@ var ADV = {
 var META = { on: 1, llm: 1, summary: 0, hasLlmKey: null, summaryEnabled: null };
 var META_PROVIDERS = null;   // /api/providers 的 items（启动时拉取；null = 还没到）
 var META_SRC = {};           // id → 0/1（源开关状态，随 /api/providers 到达而填充）
-var SEP = String.fromCharCode(92);
+// 路径分隔符：**按运行平台判定**，不再硬编码反斜杠。
+// 旧实现写死 String.fromCharCode(92)（"\"），macOS 上 join('/tmp/libtest','A') 会得到
+// "/tmp/libtest\A" —— 这是个不存在的路径，于是「文件夹」视图点进去就是空白/报错，
+// 右键「加入队列」拿到的是坏路径。反馈 #4 的删除目录按钮同样要靠它拼出真实路径。
+var SEP = (function () {
+  var p = '';
+  try { p = String((navigator && (navigator.platform || navigator.userAgent)) || ''); } catch (e) { }
+  return /win/i.test(p) ? String.fromCharCode(92) : '/';
+})();
 
 // 先按本地记忆应用主题（不等 /api/settings 返回，避免启动瞬间闪一下）
 (function () {
@@ -185,6 +195,20 @@ function viewCacheClear() { VIEWC.m = {}; }
 function libChanged() {
   viewCacheClear();
   pollKick();
+}
+// 反馈 #3d：移除库根后**当前视图必须重画**。
+// 旧实现只调 libChanged()（清缓存 + 重排轮询）+ loadLibStats()，这两个都不重绘 #list
+// ⟹ 用户移除目录后，界面上那批歌还在，只有手动切一次标签才消失（"移除没生效"的观感）。
+// 这里按当前视图重新取一次数据；视图不认识（设置页等）就什么都不做，绝不乱改页面。
+function refreshCurrentView() {
+  var v = S.view;
+  if (v === 'albums') loadAlbums('');
+  else if (v === 'artists') loadArtists();
+  else if (v === 'tracks') loadTracks(S.tracksQuery || '');
+  else if (v === 'files') loadFiles(S.dir || '');
+  else if (v === 'recent') loadRecent();
+  else if (v === 'queue') renderQueuePage();
+  else if (v === 'album' && S.album && S.album.k) openAlbum(S.album.k);
 }
 
 // 统一的「取数失败」占位。比留一片空白、或把「没有匹配的曲目」当成结果顶上来更诚实
@@ -1615,6 +1639,56 @@ function renderTracksView() {
 }
 
 /* ---------------- 文件夹 ---------------- */
+// 反馈 #4：「从库中移除」与「删除磁盘目录」是两件事，用户必须能分清。
+// 本函数只负责**删磁盘**那一条，并且确认弹窗必须写明：将删除 N 个文件、路径原文、不可恢复。
+// 数字来自 /api/lib/rmdirinfo（只统计不删除，与真删共用同一套安全判据），
+// 拿不到数字时**不允许**继续 —— 宁可让用户重试，也不给他一个「不知道要删多少」的确认框。
+function confirmRemoveDir(dir, onDone) {
+  if (!dir) return;
+  var busy = toast;   // 只是别名，保持行短
+  busy('正在统计要删除的文件…');
+  api('/api/lib/rmdirinfo', 'dir=' + encodeURIComponent(dir)).then(function (j) {
+    if (!j || j.ok !== true) {
+      // 后端拒绝（库外 / 库根本身 / 含软链 / 不存在）—— 把原因原样告诉用户，绝不吞掉
+      toast((j && j.error) ? j.error : '无法统计该目录，已取消');
+      return;
+    }
+    var nf = (typeof j.files === 'number') ? j.files : 0;
+    var nd = (typeof j.dirs === 'number') ? j.dirs : 0;
+    var h = '<div style="font-size:12.5px;line-height:1.85;color:var(--txt)">' +
+            '<div style="margin-bottom:10px">即将<b style="color:var(--danger)">从磁盘永久删除</b>下面这个目录：</div>' +
+            '<div style="font-family:ui-monospace,Consolas,monospace;font-size:11.5px;word-break:break-all;' +
+                 'background:var(--phbg);border:1px solid var(--line);border-radius:7px;padding:9px 11px;margin-bottom:10px">' +
+                 esc(dir) + '</div>' +
+            '<div style="margin-bottom:10px">将删除 <b>' + nf + '</b> 个文件' +
+                 (nd ? ('、<b>' + nd + '</b> 个子目录') : '') + '。</div>' +
+            '<div style="color:var(--danger);font-weight:600;margin-bottom:4px">此操作不可恢复（不进废纸篓）。</div>' +
+            '<div style="color:var(--mut);font-size:11.5px;margin-bottom:16px">' +
+                 '只想让它不出现在曲库里？用设置里的「移除」即可，那个不碰磁盘。</div>' +
+            '<div style="display:flex;gap:9px;justify-content:flex-end">' +
+              '<button class=btn id=rmdCancel>取消</button>' +
+              '<button class="btn pri" id=rmdGo style="background:var(--danger);border-color:var(--danger)">' +
+                '删除 ' + nf + ' 个文件</button>' +
+            '</div></div>';
+    openModal('删除磁盘目录（不可恢复）', h);
+    if (D('rmdCancel')) D('rmdCancel').onclick = function () { D('modal').classList.remove('on'); };
+    if (D('rmdGo')) D('rmdGo').onclick = function () {
+      D('rmdGo').disabled = true;
+      D('rmdGo').textContent = '删除中…';
+      api('/api/lib/rmdir', 'dir=' + encodeURIComponent(dir)).then(function (r) {
+        D('modal').classList.remove('on');
+        if (!r || r.ok !== true) { toast((r && r.error) ? r.error : '删除失败'); return; }
+        var extra = (typeof r.removedTracks === 'number' && r.removedTracks > 0)
+          ? ('，同时清掉 ' + r.removedTracks + ' 首索引记录') : '';
+        toast('已删除 ' + (r.files || 0) + ' 个文件' + extra);
+        libChanged();          // 曲库结构变了 → 视图缓存失效 + 轮询切扫描节奏
+        loadLibStats();
+        if (onDone) onDone();
+      });
+    };
+  });
+}
+
 function loadFiles(d) {
   S.view = 'files';
   api('/api/files?dir=' + encodeURIComponent(d || '')).then(function (j) {
@@ -1644,10 +1718,15 @@ function loadFiles(d) {
     rows.forEach(function (r, i) {
       var isd = (r.k === 'dir' || r.k === 'up');
       var ic = (r.k === 'up') ? '\u2191' : (isd ? '\u{1F4C1}' : '\u266B');
+      // 反馈 #4c：每个目录行给一个删除按钮（只对真目录，不含「返回上一级」与文件）。
+      // 按钮上写清它是**删磁盘**，与「从库中移除」不是一回事。
+      var delBtn = (r.k === 'dir')
+        ? '<button class=fdel data-i=' + i + ' title="从磁盘删除此目录（不可恢复）">\u00d7</button>'
+        : '';
       h += '<div class="row' + (isd ? ' rowdir' : '') + '" data-i=' + i + '>' +
            '<span class=ico>' + ic + '</span>' +
            '<span class="nm' + (isd ? ' dir' : '') + '">' + esc(r.n) + '</span>' +
-           '<span class=meta>' + esc(r.m) + '</span></div>';
+           '<span class=meta>' + esc(r.m) + '</span>' + delBtn + '</div>';
     });
     h += '</div>';
     D('list').innerHTML = rows.length ? h : h + '<div class=empty>此目录没有音频文件</div>';
@@ -1666,7 +1745,9 @@ function loadFiles(d) {
     Array.prototype.forEach.call(D('list').querySelectorAll('.row'), function (e) {
       if (e.dataset.i === undefined) return;
       var r = S.files[+e.dataset.i];
-      e.onclick = function () {
+      e.onclick = function (ev) {
+        // 删除按钮自己处理点击，别让行点击把用户带进目录
+        if (ev.target.closest && ev.target.closest('.fdel')) return;
         if (r.k === 'up') {
           var parts = base(S.dir).split(SEP); parts.pop();
           loadFiles(parts.join(SEP) + SEP);
@@ -1674,6 +1755,16 @@ function loadFiles(d) {
         else playPath(join(S.dir, r.n));
       };
       e.oncontextmenu = function (ev) { if (r.k === 'file') { ev.preventDefault(); addPath(join(S.dir, r.n)); } };
+    });
+    // 反馈 #4c：目录行的「删除磁盘目录」。走二次确认弹窗（写明文件数 / 路径原文 / 不可恢复），
+    // 确认后才 POST /api/lib/rmdir；成功后刷新当前目录视图。
+    Array.prototype.forEach.call(D('list').querySelectorAll('.fdel'), function (b) {
+      b.onclick = function (ev) {
+        ev.stopPropagation(); ev.preventDefault();
+        var r = S.files[+b.dataset.i];
+        if (!r || r.k !== 'dir') return;
+        confirmRemoveDir(join(S.dir, r.n), function () { loadFiles(S.dir || ''); });
+      };
     });
   }).catch(function (e) { D('list').innerHTML = '<div class=empty>' + esc(e) + '</div>'; });
 }
@@ -1740,9 +1831,13 @@ function loadQ() {
     Array.prototype.forEach.call(D('qlist').children, function (e) {
       if (e.dataset.i === undefined) return;
       e.onclick = function () { playPath(S.q.items[+e.dataset.i]); };
-      e.oncontextmenu = function (ev) {          // 右键从队列移除
+      // 反馈 #9「右击丢行」的真身就在这里：旧实现右击**立刻** /api/qdel 把这一行从队列删掉。
+      // 用户只是想看看右键能干什么，行就从界面上消失了（无确认、无撤销，和"加入队列"完全相反）。
+      // 现在：右击**只弹菜单**，删除必须在菜单里显式再点一次。
+      e.oncontextmenu = function (ev) {
         ev.preventDefault();
-        api('/api/qdel?i=' + e.dataset.i, '').then(function () { toast('已移除'); loadQ(); });
+        ev.stopPropagation();
+        showQueueRowMenu(e.dataset.i, ev);
       };
       e.ondragstart = function (ev) { ev.dataTransfer.setData('text/plain', e.dataset.i); };
       e.ondragover = function (ev) { ev.preventDefault(); };
@@ -1756,6 +1851,61 @@ function loadQ() {
     });
   }).catch(function () { });
 }
+
+/* ---------------- 右键菜单（反馈 #9）----------------
+   背景：右击丢行有两个来源，都是「右击直接执行破坏性动作」：
+     ① 右侧队列抽屉 #qlist 的 .qi：右击立刻 qdel，行当场消失（**已实测复现：5 行 → 4 行**）；
+     ② 队列页 .qrow / 曲目行没有可用的右键菜单，浏览器原生菜单弹出来盖住行，
+        用户以为行没了（数据其实还在，是观感丢行）。
+   本轮规则：右击**永不**直接改数据；破坏性动作必须经过菜单里的显式第二次点击。
+   菜单要能被 Esc / 点空白 / 滚动关掉，且关掉时不重排列表（重排会让用户失去位置）。 */
+var QMENU = { el: null, i: -1 };
+function closeQueueRowMenu() {
+  if (QMENU.el && QMENU.el.parentNode) QMENU.el.parentNode.removeChild(QMENU.el);
+  QMENU.el = null; QMENU.i = -1;
+}
+function showQueueRowMenu(i, ev) {
+  closeQueueRowMenu();
+  var items = (S.q && S.q.items) || [];
+  var f = items[+i];
+  if (f === undefined) return;
+  QMENU.i = +i;
+  var box = document.createElement('div');
+  box.className = 'qmenu';
+  box.style.left = Math.max(4, Math.min((ev && ev.clientX) || 0, (window.innerWidth || 800) - 230)) + 'px';
+  box.style.top  = Math.max(4, Math.min((ev && ev.clientY) || 0, (window.innerHeight || 600) - 96)) + 'px';
+  box.innerHTML =
+    '<div class=qmt title="' + esc(f) + '">' + esc(nam(f)) + '</div>' +
+    '<button class=qm data-a=play>播放这首</button>' +
+    '<button class=qm data-a=del>从队列移除</button>';
+  document.body.appendChild(box);
+  QMENU.el = box;
+  Array.prototype.forEach.call(box.querySelectorAll('.qm'), function (b) {
+    b.onclick = function (ev2) {
+      ev2.stopPropagation();
+      var a = b.dataset.a;
+      var idx = QMENU.i;
+      closeQueueRowMenu();
+      if (a === 'play') { playPath(items[idx]); return; }
+      // 移除：只有走到这里才真的改数据（右击本身不会）
+      api('/api/qdel?i=' + idx, '').then(function () {
+        toast('已从队列移除');
+        loadQ();
+        if (S.view === 'queue') renderQueuePage();
+      });
+    };
+  });
+}
+// 菜单关闭：点空白 / Esc / 滚动。全部走 closeQueueRowMenu（幂等）。
+document.addEventListener('mousedown', function (ev) {
+  if (!QMENU.el) return;
+  if (QMENU.el.contains && QMENU.el.contains(ev.target)) return;
+  closeQueueRowMenu();
+}, true);
+document.addEventListener('keydown', function (ev) {
+  if (ev.key === 'Escape' && QMENU.el) closeQueueRowMenu();
+});
+window.addEventListener('scroll', function () { if (QMENU.el) closeQueueRowMenu(); }, true);
 
 /* ---------------- 元数据 / 封面 ---------------- */
 // 正在播放整页的补全信息芯片（底栏不加，避免拥挤）。
@@ -1880,6 +2030,43 @@ function tick() {
 }
 
 /* ---------------- 播放设置持久化 ---------------- */
+// 2026-10-25（task-12）：已删除的后端值 → 优雅降级。
+// 为什么需要：ASIO 是 Windows 专有驱动协议，macOS 的 CoreAudio 从内核层就是低延迟 / bit-perfect，
+// 没有需要绕过的东西 ⟹ ASIO 在 macOS 不是「做不到」而是「不需要」。后端删了，但老用户的 conf
+// 里可能还留着 backend=asio，直接沿用会让播放失败、下拉也选不中（白屏级别的体验事故）。
+// 处置：落回默认后端（wasapi = CoreAudio 独占），并明确 toast 告知原因，绝不静默改。
+var REMOVED_BACKENDS = { asio: 'ASIO 已移除（macOS 使用 CoreAudio）' };
+var _removedBackendNotified = {};
+function migrateRemovedBackend(v) {
+  var k = String(v || '').toLowerCase();
+  if (REMOVED_BACKENDS.hasOwnProperty(k)) {
+    // 每次页面生命周期只提示一次，避免多处调用把 toast 刷成复读机。
+    if (!_removedBackendNotified[k]) {
+      _removedBackendNotified[k] = true;
+      // 稍等一拍：启动期还有别的 toast，立刻弹会被盖掉，用户就看不到原因了。
+      setTimeout(function () { toast(REMOVED_BACKENDS[k]); }, 1200);
+    }
+    return 'wasapi';
+  }
+  return v || 'wasapi';
+}
+
+// 2026-10-25（用户指令「A1 隐藏」）：老配置里若存过 dsdpack=nat，加载时降级到 dop 并提示一次。
+// 为什么降级而不是报错：Native 在 macOS 上永远不可用（CoreAudio 只有 PCM 管线），
+// 用户当年选它多半是因为 Windows 版能工作；现在直接切到 DoP 是**无损**的
+// （DoP 不是转 PCM，DAC 端剥壳后仍是 bit-perfect DSD），不需要让用户手动去改。
+var _dsdPackNotified = false;
+function migrateDsdPack(v) {
+  var s = (v || '').toString().toLowerCase();
+  if (s.indexOf('nat') !== 0) return 'dop';
+  if (!_dsdPackNotified) {
+    _dsdPackNotified = true;
+    setTimeout(function () {
+      toast('macOS 不支持 Native DSD，已切到 DoP（bit-perfect，音质不受影响）');
+    }, 1400);
+  }
+  return 'dop';
+}
 var SET_KEYS = [['sRate','rate'], ['sFilt','filter'], ['sFiltNx','filterNx'], ['sShap','shaper'],
                 ['sDSD','dsd'], ['sBuf','buffer'], ['sIsp','isp'], ['s2s','twostage'], ['sGpu','gpuvendor']];
 function saveSettings(immediate) {
@@ -1942,6 +2129,7 @@ function loadSettings() {
     SET_KEYS.forEach(function (p) {
       var e = D(p[0]); if (!e || kv[p[1]] === undefined) return;
       if (e.type === 'checkbox') e.checked = (kv[p[1]] === '1');
+      else if (p[1] === 'dsd') e.value = migrateDsdPack(kv[p[1]]);   // A1 隐藏：nat* → dop*
       else e.value = kv[p[1]];
     });
     // ---- 老用户配置迁移（功能1 的红线：不许悄悄改老用户行为）----
@@ -1971,7 +2159,7 @@ function loadSettings() {
     if (kv.irgpu !== undefined) ADV.irgpu = (kv.irgpu === '1') ? 1 : 0;
     if (kv.ramp !== undefined) ADV.ramp = parseFloat(kv.ramp) || 0;
     if (kv.gpuvendor !== undefined) { ADV.gpuvendor = kv.gpuvendor || 'auto'; if (D('sGpu')) D('sGpu').value = ADV.gpuvendor; }
-    if (kv.backend !== undefined) ADV.backend = kv.backend || 'wasapi';
+    if (kv.backend !== undefined) ADV.backend = migrateRemovedBackend(kv.backend);
     if (kv.channels !== undefined) ADV.channels = parseInt(kv.channels, 10) || 0;
     if (kv.naahost !== undefined) ADV.naaHost = kv.naahost || '127.0.0.1:43210';
     if (kv.upnpdev !== undefined) ADV.upnpDev = kv.upnpdev || '';
@@ -2108,14 +2296,12 @@ function wbApply() {
 
 function loadDeviceList() {
   var bk = ADV.backend || 'wasapi';
-  var url = (bk === 'asio') ? '/api/asiodevices' : '/api/devices';
-  api(url).then(function (j) {
+  api('/api/devices').then(function (j) {
     var sel2 = D('sp_device'); if (!sel2) return;
     var h = '<option value="">' +
-      (bk === 'asio' ? '（第一个可用驱动）'
-                     : (bk === 'wasapi' || bk === 'wasapi-shared' ? '默认设备' : '（此后端没有本地设备）')) +
+      ((bk === 'wasapi' || bk === 'wasapi-shared') ? '默认设备' : '（此后端没有本地设备）') +
       '</option>';
-    var list = j.devices || j.drivers || [];
+    var list = j.devices || [];
     list.forEach(function (d) {
       h += '<option value="' + esc(d.id) + '">' + esc(d.name) + (d.default ? '（默认）' : '') + '</option>';
     });
@@ -2210,7 +2396,16 @@ function loadLibStats() {
       D('roots2').innerHTML = h || '<div style="font-size:11.5px;color:#5b6478">还没有添加目录</div>';
       Array.prototype.forEach.call(D('roots2').querySelectorAll('button'), function (b) {
         b.onclick = function () {
-          api('/api/lib/roots', 'remove=' + encodeURIComponent(b.dataset.r)).then(function () { libChanged(); loadLibStats(); toast('已移除'); });
+          api('/api/lib/roots', 'remove=' + encodeURIComponent(b.dataset.r)).then(function (j) {
+            if (j && j.ok === false) { toast(j.error || '移除失败'); return; }
+            // 反馈 #3：后端会连带清掉该目录下的曲目，这里必须把结果如实说出来 +
+            // 立刻重画当前视图（否则歌还挂在界面上，看起来像没移除成功）。
+            var n = (j && typeof j.removedTracks === 'number') ? j.removedTracks : 0;
+            libChanged();
+            toast(n > 0 ? ('已移除，清理 ' + n + ' 首') : '已移除');
+            refreshCurrentView();
+            loadLibStats();
+          });
         };
       });
     }
@@ -3045,7 +3240,6 @@ function txt(id, label, val, hint, ph) {
 }
 
 /* ---------------- 输出后端 / 输入设备 ---------------- */
-var ASIO_DRIVERS = null;   // 由 /api/asio 填充
 function backendHint() {
   var m = D('sp_backendmsg'); if (!m) return;
   var bk = (D('sp_backend') && D('sp_backend').value) || 'wasapi';
@@ -3072,10 +3266,6 @@ function backendHint() {
     }
     m.textContent = 'UPnP / DLNA 投放：播放 / 切歌 / 暂停 / 拖动进度都会作用到渲染器 ' +
       (devName || '（未选择渲染器）') + '。按源文件原采样率供源，不经本机 DSP。';
-  } else if (bk === 'asio') {
-    if (ASIO_DRIVERS === null) m.textContent = 'ASIO：正在检测本机驱动…';
-    else if (!ASIO_DRIVERS.length) m.textContent = 'ASIO：本机未检测到 ASIO 驱动。';
-    else m.textContent = 'ASIO：本机驱动 ' + ASIO_DRIVERS.join('、') + '。';
   }
 }
 
@@ -3713,7 +3903,9 @@ function dsdRateOf() {
   var m = /([0-9]+)$/.exec(v);
   return m ? m[1] : '256';
 }
-function dsdPackOf() { return ((D('sDSD') && D('sDSD').value) || '').indexOf('nat') === 0 ? 'nat' : 'dop'; }
+// 2026-10-25（A1 隐藏）：Native DSD 在 macOS 上无法实现，选项已从界面移除。
+// 本函数恒返回 'dop'；老 conf 里存过 'nat' 的，由 migrateDsdPack() 在加载时降级并提示。
+function dsdPackOf() { return 'dop'; }
 // 三个控件合成隐藏的 sDSD（params()/saveSettings 仍然只认这一个状态）
 // 2026-10-24（用户 261024-01 #12）：这里的 disabled 逻辑整个删掉。
 // 「SDM 的比特率和封装为什么灰了无法选？」—— 根因就是这一句：只在输出模式已经是 DSD 时才允许改，
@@ -3909,7 +4101,6 @@ function renderSettingsPage() {
        + '<select id=sp_backend>'
        +   opt('wasapi', 'WASAPI（独占 · 事件驱动）', BK)
        +   opt('wasapi-shared', 'WASAPI 共享（兼容虚拟机 / 远程桌面）', BK)
-       +   opt('asio', 'ASIO', BK)
        +   opt('naa', 'NetworkAudioAdapter（NAA / RTANet）', BK)
        +   opt('upnp', 'UPnP / DLNA 投放（局域网渲染器）', BK)
        +   opt('null', 'Null output（只跑 DSP，不出声）', BK)
@@ -4005,10 +4196,21 @@ function renderSettingsPage() {
              opt('256', 'DSD256（11.2896 MHz）', dsdRateOf()) + opt('512', 'DSD512（22.5792 MHz）', dsdRateOf()) +
              opt('1024', 'DSD1024（45.1584 MHz）', dsdRateOf()),
              'DSD512 / 1024 的 DoP 载波是 1411.2 / 2822.4 kHz，绝大多数设备不支持')
+       // 2026-10-25（用户指令「A1 隐藏」）：Native DSD 直通在 macOS 上**无法实现**，
+       // 不是「还没做」。依据（联网核实，2026-10-25）：
+       //   * XMOS 官方：「macOS incorporates a USB driver that only supports PCM, this is
+       //     also true of the central audio engine, CoreAudio. It is therefore not possible
+       //     to use the "Native" scheme using the built in driver of macOS.」
+       //   * Roon 官方：「macOS CoreAudio does not support native DSD playback; it's as
+       //     simple as that.」
+       // ⟹ 界面上不再呈现这个**永远无法工作**的选项（呈现它等于骗用户）。
+       // **能力本身没删**：后端 caps().nativeDsdRate 探测逻辑保留，如实返回 0；
+       // 老配置里存过的 nat 会在加载时降级到 dop（见 migrateDsdPack）。
+       // 完整说明与替代方案见 PLATFORM.md「Native DSD 在 macOS 上为何不可用」。
        + sel('sp_dsdpk', '封装',
-             opt('dop', 'DoP（WASAPI / ASIO 均可）', dsdPackOf()) +
-             opt('nat', 'Native（仅 ASIO）', dsdPackOf()),
-             '两者数值等价，差别只在传输方式；Native 只能走 ASIO')
+             opt('dop', 'DoP（DSD over PCM，bit-perfect）', dsdPackOf()),
+             'DSD 位流装进 24-bit PCM 容器（DAC 端剥壳，全程 bit-perfect）；' +
+             'macOS 的 CoreAudio 只提供 PCM 管线，这是本平台唯一能走通的原生 DSD 传输方式')
        // 2026-10-24（用户 261024-01 #12）：这两个控件不再灰掉（见 applyDsdState）。
        // 当前输出是 PCM 时，改这里会自动把输出模式联动到 DSD —— 一句常驻说明交代清楚。
        + '<div class="sfld wide" id=sp_dsdmodenote style="display:none"><div class=hint>' +
@@ -4095,8 +4297,7 @@ function renderSettingsPage() {
              opt('off', '关闭（纯 CPU）', ADV.gpuvendor || 'auto'),
              '自动 = 依次尝试 AMD HIP → DX12 → NVIDIA CUDA，选第一个真正能跑起来的后端；' +
              '后端缺失或 kernel 不可执行时自动退回 CPU 分块 FFT')
-       + '<div class="sfld wide"><div id=sp_gpumsg class=hint></div></div>'
-       + '<div class="sfld wide"><div id=sp_asiomsg class=hint></div></div>')
+       + '<div class="sfld wide"><div id=sp_gpumsg class=hint></div></div>')
      // 2026-10-24（用户 261024-01 #5/#6）：
      //   ① 「流媒体服务器」整组搬去新增的「流媒体」页签（这里不再保留副本，避免重复 id）；
      //   ② 「音乐库与网络」改名「本地音乐库」—— 只放本地库根目录 / 扫描 / 线程；
@@ -4306,7 +4507,7 @@ function renderSettingsPage() {
     saveSettings();
     backendHint();
     applyBackendState();
-    loadDeviceList();        // ASIO 列驱动，WASAPI 列端点，NAA/Null 没有本地设备
+    loadDeviceList();        // WASAPI 列端点，NAA/Null 没有本地设备
     // 261024-01 #9/#11：切到 NAA / UPnP 时自动发现目标（用户不用手填端点 / 设备地址）
     if (this.value === 'naa') discoverNaa(true);
     else if (this.value === 'upnp') scanCastDevices(true);
@@ -4492,20 +4693,6 @@ function renderSettingsPage() {
                 '，AMD HIP 运行库=' + (j.hip ? '有' : '无') +
                 '；厂商偏好=' + (j.vendor || 'auto');
     }
-  }).catch(function () { });
-  // ASIO 驱动列表（Native DSD 需要 ASIO 后端）
-  api('/api/asio').then(function (j) {
-    // 同理：断线不能报成「本机未检测到 ASIO 驱动」，那是会误导用户去装驱动的假结论。
-    if (j && j._err) { var am = D('sp_asiomsg'); if (am) am.textContent = 'ASIO 驱动清单读取失败'; return; }
-    var d = j.drivers || [];
-    ASIO_DRIVERS = d;
-    backendHint();
-    var m = D('sp_asiomsg'); if (!m) return;
-    // 2026-10-24 #7：驱动清单收进 title，页面只留结论。
-    m.textContent = d.length
-      ? ('本机 ASIO 驱动 ' + d.length + ' 个 · Native DSD 尚未实现（选 Native 不会出声）')
-      : '本机未检测到 ASIO 驱动 · Native DSD 不可用';
-    m.title = d.length ? d.join('、') : '';
   }).catch(function () { });
   if (ADV.inBackend === 'wasapi') loadInputDevices();
   // 流媒体页（用户 261024-01 #5）：列表 / 添加 / 编辑 / 删除 / 启用 / 测试 —— 全部即时落盘
@@ -5610,7 +5797,16 @@ function drawRoots() {
   box.innerHTML = h || '<div style="font-size:11.5px;color:var(--mut2)">还没有添加目录</div>';
   Array.prototype.forEach.call(box.querySelectorAll('button'), function (b) {
     b.onclick = function () {
-      api('/api/lib/roots', 'remove=' + encodeURIComponent(b.dataset.r)).then(function () { libChanged(); loadLibStats(); toast('已移除'); });
+      api('/api/lib/roots', 'remove=' + encodeURIComponent(b.dataset.r)).then(function (j) {
+        if (j && j.ok === false) { toast(j.error || '移除失败'); return; }
+        // 反馈 #3：后端会连带清掉该目录下的曲目，这里必须把结果如实说出来 +
+        // 立刻重画当前视图（否则歌还挂在界面上，看起来像没移除成功）。
+        var n = (j && typeof j.removedTracks === 'number') ? j.removedTracks : 0;
+        libChanged();
+        toast(n > 0 ? ('已移除，清理 ' + n + ' 首') : '已移除');
+        refreshCurrentView();
+        loadLibStats();
+      });
     };
   });
 }
@@ -6522,6 +6718,32 @@ document.addEventListener('visibilitychange', function () {
   // 可见：**立刻各补一次**（用户切回来要看到的是最新状态，不是几十秒前的），再按当时状态恢复节奏。
   if (POLL.started) { tick(); loadQ(); loadLibStats(); pollKick(); }
 });
+
+/* ---------------- 本轮新增样式（反馈 #4c / #9） ----------------
+   为什么不写进 ui_page.h：那个文件不在本轮可改路径白名单里（改动会与别人冲突）。
+   这里是纯新增规则、不改任何既有选择器，插一个 <style> 即可；
+   规则里用的都是既有 CSS 变量（--mut2/--danger/--toast/--shadow/--line/--hov），三套主题自动跟随。 */
+(function injectRoundCss() {
+  if (document.getElementById('roundCss')) return;
+  var css = '' +
+    // #4c：文件夹视图每行的「从磁盘删除」按钮（悬停才显形，避免每行常驻一个红叉）
+    '.row .fdel{width:24px;height:24px;border-radius:6px;color:var(--mut2);flex:none;opacity:0;' +
+      'transition:.12s;font-size:15px;line-height:1;background:none;border:0;cursor:pointer}' +
+    '.row:hover .fdel{opacity:1}.row .fdel:hover{background:var(--hov2);color:var(--danger)}' +
+    // #9：右击队列行的菜单（右击只弹菜单，不再直接删行）
+    '.qmenu{position:fixed;z-index:95;min-width:190px;max-width:300px;background:var(--toast);' +
+      'border:1px solid var(--line);border-radius:9px;box-shadow:0 10px 30px var(--shadow);padding:5px;font-size:12.5px}' +
+    '.qmenu .qmt{color:var(--mut2);font-size:11px;padding:5px 9px 7px;white-space:nowrap;' +
+      'overflow:hidden;text-overflow:ellipsis;border-bottom:1px solid var(--line);margin-bottom:4px}' +
+    '.qmenu .qm{display:block;width:100%;text-align:left;padding:7px 10px;border-radius:6px;' +
+      'color:var(--txt);font-size:12.5px;background:none;border:0;cursor:pointer}' +
+    '.qmenu .qm:hover{background:var(--hov)}' +
+    '.qmenu .qm[data-a=del]:hover{background:var(--hov2);color:var(--danger)}';
+  var st = document.createElement('style');
+  st.id = 'roundCss';
+  st.appendChild(document.createTextNode(css));
+  document.head.appendChild(st);
+})();
 
 /* ---------------- 启动 ---------------- */
 initFavs();

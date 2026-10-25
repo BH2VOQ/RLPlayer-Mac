@@ -28,13 +28,9 @@ inline std::string to_utf8(const NativePath& p) {
     return std::string(reinterpret_cast<const char*>(u.data()), u.size());
 }
 
-// 平台路径分隔符（Windows '\\'，POSIX '/'）
+// 平台路径分隔符（macOS 单平台 = '/'；2026-10-25 删掉 Windows '\\' 分支）
 inline char native_separator() {
-#if defined(_WIN32)
-    return '\\';
-#else
     return '/';
-#endif
 }
 
 // UTF-8 路径拼接：dir 末尾已有分隔符则不重复加
@@ -70,11 +66,5 @@ std::string data_dir_utf8();
 
 } // namespace rta::platform
 
-#if defined(_WIN32)
-#include "platform/windows/path_win32.h"
-#elif defined(__APPLE__)
-// macOS 实现（PLATFORM.md §9）
+// macOS 实现（PLATFORM.md §9）。2026-10-25 项目转 macOS 单平台：Windows 分派支与 #else/#error 兜底已删除。
 #include "platform/macos/path_posix.h"
-#else
-#error "platform/path.h: 本平台尚无实现（已支持 Windows 与 macOS）。新平台请按 PLATFORM.md §9 在 src/platform/<平台>/ 下实现同名头文件。"
-#endif

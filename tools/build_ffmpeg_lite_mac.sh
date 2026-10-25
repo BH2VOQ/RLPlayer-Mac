@@ -35,7 +35,19 @@ DEMUXERS=$(echo "$DEMUXERS" | tr ',' '\n' | grep -v '?x$' | paste -sd, -)
 PARSERS="flac,aac,ac3,dca,mpegaudio,opus,vorbis,xma,vorbis_alias?x"
 PARSERS=$(echo "$PARSERS" | tr ',' '\n' | grep -v '?x$' | paste -sd, -)
 
-echo "== configure（音频解码专用，无任何外部库）=="
+# 2026-10-25：原配置只编了 wav 一个 muxer（纯解码用途），但「写回元数据」功能
+# （src/meta/writeback.h）需要 **ffmpeg remux**：把音频流原样重新封装并写入新标签。
+# 实测缺 muxer 时 ffmpeg 报 "Requested output format 'flac' is not known"（退出码 234），
+# 导致 tests/test_writeback.cpp 全红。flac/alac/aac/vorbis/opus 编码器都是 ffmpeg
+# 内置实现，零外部库依赖，体积增量很小。
+# 这不是「新增功能」，是补齐写回能力本就需要的东西（铁律：功能不能删）。
+# ⚠️ MP3 编码：FFmpeg 8.x 已**移除原生 mp3 编码器**，只剩 libmp3lame 一途。
+#   但本机 /usr/local 的 lame 4.0 是 **x86_64**（Rosetta Homebrew），arm64 原生构建链不上
+#   （实测 configure 报 `Undefined symbols: _lame_set_VBR_quality`）。
+#   ⟹ 本版**不含 MP3 编码能力**。这不影响播放（解码器在，MP3 照常播），
+#     只影响「把元数据写回 MP3 文件」这一条路径（写回其它格式不受影响）。
+#   要做 MP3 写回需要：arm64 原生 lame（brew install lame 于 /opt/homebrew），或自带源码编。
+echo "== configure（解码 + 元数据写回，零外部库）=="
 ./configure \
   --cc=clang --objcc=clang --disable-shared --enable-static \
   --disable-debug --disable-doc --disable-programs \
@@ -46,9 +58,9 @@ echo "== configure（音频解码专用，无任何外部库）=="
   --enable-demuxer="$DEMUXERS" \
   --enable-decoder="$DECODERS" \
   --enable-parser="$PARSERS" \
-  --enable-muxer=wav \
-  --enable-encoder=pcm_s16le,pcm_s24le,pcm_s32le,pcm_f32le \
-  --enable-bsf=pcm_rechunk \
+  --enable-muxer=wav,flac,mp3,ipod,ogg,opus,matroska,aiff,caf \
+  --enable-encoder=pcm_s16le,pcm_s24le,pcm_s32le,pcm_f32le,flac,alac,aac,vorbis,opus \
+  --enable-bsf=pcm_rechunk,flac_picture,aac_adtstoasc \
   --enable-filter=aresample,anull,aformat \
   > configure.log 2>&1 || { tail -20 configure.log; exit 1; }
 

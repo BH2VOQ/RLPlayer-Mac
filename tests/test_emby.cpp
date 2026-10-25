@@ -1,4 +1,5 @@
 // test_emby.cpp — Emby 客户端端到端测试（内置模拟 Emby 服务器）
+#include "test_compat_posix.h"   // POSIX 垫片：SetConsoleOutputCP/CP_UTF8（macOS 门禁）
 #include "net/webui.h"
 #include "net/emby.h"
 #include <cstdio>

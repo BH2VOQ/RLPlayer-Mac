@@ -27,6 +27,7 @@
 #ifndef _SILENCE_CXX20_U8PATH_DEPRECATION_WARNING
 #define _SILENCE_CXX20_U8PATH_DEPRECATION_WARNING
 #endif
+#include "test_compat_posix.h"   // POSIX 垫片：MAX_PATH/DWORD/GetTempPathW/SearchPathW（macOS 门禁）
 #include "audio/audio_loader.h"
 #include "audio/media_info.h"
 #include "meta/writeback.h"

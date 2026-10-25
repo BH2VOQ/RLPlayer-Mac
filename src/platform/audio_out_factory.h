@@ -4,11 +4,11 @@
 // 一旦在里面 #include CoreAudio 或 windows.h，任何只想用 decide_route 纯函数的测试
 // 都会被拖进平台 SDK。契约与实现分开，纯函数才真正可离线测（PLATFORM.md §11.7 的要求）。
 //
-// 现状（如实记录，铁律 4）：
-//   * macOS ：CoreAudioOutput 已实现（AUHAL + Hog Mode）。
-//   * Windows：仍走既有 rta::render::OutSink（wasapi_out.h / wasapi_shared.h / asio_out.h），
-//     没有 platform::AudioOutput 适配器（PLATFORM.md §11.3 已登记为未做项）。
-//     因此 Windows 上 create_audio_output() 返回 nullptr，调用方必须继续用 OutSink。
+// 现状（2026-10-25 更新：项目已转 macOS 单平台）：
+//   * macOS ：CoreAudioOutput 已实现（AUHAL + Hog Mode + 欠载归因），本平台唯一后端。
+//   * Windows：平台层（wasapi_out / wasapi_shared / asio_out）已随平台删除；
+//     对应能力在 macOS 上由 CoreAudioOutput 承接（独占=Hog Mode、共享=shared 标志、
+//     欠载归因=ZeroAttrib 移植到 audio/write_attrib.h）。详见 PLATFORM.md §13.15。
 #pragma once
 #include <memory>
 

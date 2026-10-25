@@ -34,8 +34,17 @@
 #include "audio/audio_loader.h"
 #include "audio/wav.h"
 
-#include <windows.h>
-#include <tlhelp32.h>
+// 2026-10-25：项目转 macOS 单平台。原来这里 #include <windows.h> + <tlhelp32.h>，
+// 用 CreateFileW(不共享) 造「源文件被独占占用」故障态。但 macOS 的 flock 是**建议锁**
+// （advisory）——不参与加锁的读者照常能读，实测 access(R_OK)=0 且 cat 成功，
+// 所以「共享冲突」这个具体形态在 POSIX 上没有等价物。
+// 但本测试要证明的**能力**没变：「源文件读不了时，错误必须说出真原因，而不是只报 -42 掩码」。
+// macOS 上真实存在且可稳定构造的同类故障是 EACCES（chmod 000，实测稳定触发），
+// 所以第 2 段改用权限拒绝构造故障态，判据强度不变（仍是「真原因 + 原始退出码 + 不当成编码问题」）。
+#include "test_compat_posix.h"   // SetConsoleOutputCP / CP_UTF8 / GetCurrentProcessId 等
+#include <sys/stat.h>
+#include <sys/sysctl.h>   // sysctl KERN_PROC_ALL（POSIX 进程快照等价物）
+#include <unistd.h>
 #include <cstdio>
 #include <string>
 #include <vector>
@@ -60,39 +69,100 @@ static void ck(bool cond, const char* what, const std::string& detail = "") {
 }
 
 // 探测本进程拉起的 ffmpeg 子进程是否已就绪（用于时序解耦的精确释放）
+// 2026-10-25：原实现用 CreateToolhelp32Snapshot + PROCESSENTRY32W 遍历进程树。
+// POSIX 等价物：macOS 提供 proc_listchildpids（libproc），可直接列出本进程的直接子进程，
+// 再按进程名判断是否 ffmpeg —— 能力等价（都是「我拉起的 ffmpeg 起来了吗」），无副作用。
 static bool is_child_ffmpeg_running() {
-    HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
-    if (snap == INVALID_HANDLE_VALUE) return false;
-    PROCESSENTRY32W pe;
-    pe.dwSize = sizeof(pe);
-    bool found = false;
-    const DWORD myPid = GetCurrentProcessId();
-    if (Process32FirstW(snap, &pe)) {
-        do {
-            if (_wcsicmp(pe.szExeFile, L"ffmpeg.exe") == 0 && pe.th32ParentProcessID == myPid) {
-                found = true;
-                break;
-            }
-        } while (Process32NextW(snap, &pe));
+    // 实测（macOS 27.0.1）：proc_listchildpids 返回 1 字节但解析出 0 个 pid（不可靠），
+    // 改用 sysctl KERN_PROC_ALL 全量扫描 + 按 ppid 过滤 —— 实测能正确找到子进程。
+    int mib[4] = {CTL_KERN, KERN_PROC, KERN_PROC_ALL, 0};
+    size_t sz = 0;
+    if (::sysctl(mib, 4, nullptr, &sz, nullptr, 0) != 0 || sz == 0) return false;
+    std::vector<struct kinfo_proc> procs(sz / sizeof(struct kinfo_proc));
+    if (::sysctl(mib, 4, procs.data(), &sz, nullptr, 0) != 0) return false;
+    const int cnt = (int)(sz / sizeof(struct kinfo_proc));
+    const pid_t me = ::getpid();
+    for (int i = 0; i < cnt; ++i) {
+        if (procs[(size_t)i].kp_eproc.e_ppid != me) continue;
+        if (std::strstr(procs[(size_t)i].kp_proc.p_comm, "ffmpeg") != nullptr) return true;
     }
-    CloseHandle(snap);
-    return found;
+    return false;
 }
 
 // 日文名素材：用 UTF-8 字节字面量，不受编译器 source/execution charset 影响。
 // "翼を広げて" = E7 BF BC E3 82 92 E5 BA 83 E3 81 92 E3 81 A6
 static const char* kCjkName = "ZARD - 02.\xE7\xBF\xBC\xE3\x82\x92\xE5\xBA\x83\xE3\x81\x92\xE3\x81\xA6.flac";
 
+// 2026-10-25：原夹具用硬编码 "\\" 拼路径。macOS 上 "\\" 不是分隔符而是合法文件名
+// 字符，实测导致素材落到 "<tmp>\ZARD - ..."（一个名字里带反斜杠的文件），
+// 后续 ffmpeg 一律 No such file or directory，全部用例假失败。
+// 这不是判据问题，是夹具路径写法问题 —— 统一走 platform::join()。
+static std::string sbpath(const std::string& dir, const std::string& leaf) {
+    return rta::platform::join(dir, leaf);
+}
+
 static fs::path u8path_of(const std::string& s) {
     return fs::path(std::u8string(reinterpret_cast<const char8_t*>(s.data()), s.size()));
 }
 
 // 用包内/环境 ffmpeg 现场生成一个真 FLAC（不依赖 MUSIC）
-static bool make_flac(const std::string& ffmpeg, const std::string& dst) {
-    const std::wstring cmd = L"\"" + rta::audio::widen(ffmpeg) +
-        L"\" -v error -y -f lavfi -i \"anullsrc=r=44100:cl=stereo\" -t 1 -c:a flac \"" +
-        rta::audio::widen(dst) + L"\"";
-    return rta::audio::run_hidden(cmd) == 0;
+// 2026-10-25 平台移植：原实现用 ffmpeg 的 lavfi + flac 编码器现场合成素材。
+// 但本项目的 build_ffmpeg_lite_mac.sh 是**解码专用**精简版（实测 -encoders 里无 flac、
+// -devices 里无 lavfi），系统 Homebrew ffmpeg 又因 x265 soname 断裂起不来（退出码 134）。
+// 素材生成不该成为门禁前提 —— 改为**直接写一个合法的单帧 FLAC 文件**（零依赖）。
+// 实测：ffprobe 报 duration=1.000000、ffmpeg 能正常解码成 WAV，与真实素材等价。
+// 这样本测试在任何有 ffmpeg（哪怕只有解码能力）的环境里都能跑。
+static bool make_flac(const std::string& /*ffmpeg*/, const std::string& dst) {
+    // 单帧 FLAC：44.1kHz / 16bit / 立体声 / blocksize=44100 ⟹ 恰好 1.0 秒 44100 帧
+    // （用 44100 而非 8000：产品侧对输出采样率有断言，且 8kHz 素材会被当成异常源）
+    const uint32_t sr = 44100;
+    const int ch = 2, bits = 16;
+    const uint32_t blocksize = 44100;
+    auto crc8 = [](const std::vector<uint8_t>& d) {
+        uint8_t c = 0;
+        for (uint8_t b : d) { c ^= b; for (int i = 0; i < 8; ++i) c = (c & 0x80) ? uint8_t((c << 1) ^ 0x07) : uint8_t(c << 1); }
+        return c;
+    };
+    auto crc16 = [](const std::vector<uint8_t>& d) {
+        uint16_t c = 0;
+        for (uint8_t b : d) { c ^= (uint16_t)(b << 8); for (int i = 0; i < 8; ++i) c = (c & 0x8000) ? uint16_t((c << 1) ^ 0x8005) : uint16_t(c << 1); }
+        return c;
+    };
+    std::vector<uint8_t> out = {'f', 'L', 'a', 'C'};
+    // STREAMINFO（34 字节）
+    std::vector<uint8_t> si;
+    auto be16 = [&](std::vector<uint8_t>& v, uint16_t x) { v.push_back(uint8_t(x >> 8)); v.push_back(uint8_t(x)); };
+    be16(si, (uint16_t)blocksize); be16(si, (uint16_t)blocksize);
+    si.insert(si.end(), {0,0,0, 0,0,0});
+    const uint64_t packed = ((uint64_t)sr << 44) | ((uint64_t)(ch - 1) << 41) |
+                            ((uint64_t)(bits - 1) << 36) | (uint64_t)blocksize;
+    for (int i = 7; i >= 0; --i) si.push_back(uint8_t(packed >> (i * 8)));
+    si.insert(si.end(), 16, 0);                 // md5 未知
+    out.push_back(0x80);                        // last-metadata-block + type=0
+    out.push_back(uint8_t(si.size() >> 16)); out.push_back(uint8_t(si.size() >> 8)); out.push_back(uint8_t(si.size()));
+    out.insert(out.end(), si.begin(), si.end());
+    // 帧头
+    std::vector<uint8_t> fh = {0xFF, 0xF8, 0b0111'1001, 0b0001'1000, 0x00};  // sr code 9 = 44.1kHz
+    be16(fh, (uint16_t)(blocksize - 1));        // blocksize code 7 ⟹ 16 位值
+    fh.push_back(crc8(fh));
+    // ⚠️ 这里**不要**把 fh 单独插进 out：下面 frame = fh + 子帧 会整体插入一次，
+    // 单独插会导致帧头重复 8 字节（实测 176462 vs 正确 176454，ffmpeg 报 frames=0）。
+    // 两个 VERBATIM 子帧（全零）；CRC16 覆盖「帧头 + 全部子帧」
+    std::vector<uint8_t> frame = fh;
+    for (int c = 0; c < ch; ++c) {
+        frame.push_back(0x02);                              // VERBATIM 子帧头
+        frame.insert(frame.end(), (size_t)blocksize * 2, 0); // 全零样本
+    }
+    const uint16_t fcrc = crc16(frame);
+    out.insert(out.end(), frame.begin(), frame.end());
+    out.push_back(uint8_t(fcrc >> 8));
+    out.push_back(uint8_t(fcrc));
+
+    std::ofstream f(dst, std::ios::binary);
+    if (!f) return false;
+    f.write((const char*)out.data(), (std::streamsize)out.size());
+    f.close();
+    return f.good();
 }
 
 int main() {
@@ -108,14 +178,19 @@ int main() {
     // ---- 沙箱目录（%TEMP% 下，进程唯一，绝不碰 MUSIC / 用户数据）----
     wchar_t tmpW[MAX_PATH] = {0};
     GetTempPathW(MAX_PATH, tmpW);
-    const std::string sandbox =
-        rta::audio::wide_to_utf8(tmpW) + "rta_decode_retry_" + std::to_string((unsigned long)GetCurrentProcessId());
+    // 2026-10-25：GetTempPathW 的契约是「返回带尾分隔符的目录」（Win32 语义，垫片如实保留）。
+    // 原代码直接字符串相加 ⟹ macOS 上 tmp_directory_path() 本就带 "/" ⟹ 拼出 "<tmp>//rta_..."，
+    // 双斜杠路径在 macOS 上 exists()==false（实测），素材写不进沙箱，后续全部用例假失败。
+    // 改用 platform::join 归一化分隔符（这是夹具问题，不是判据问题）。
+    const std::string sandbox = rta::platform::join(
+        rta::audio::wide_to_utf8(tmpW),
+        "rta_decode_retry_" + std::to_string((unsigned long)GetCurrentProcessId()));
     std::error_code ec0;
     fs::create_directories(u8path_of(sandbox), ec0);
     std::printf("  沙箱: %s\n", sandbox.c_str());
 
-    const std::string cjk = sandbox + "\\" + kCjkName;
-    const std::string ascii = sandbox + "\\ascii_probe.flac";
+    const std::string cjk = sbpath(sandbox, kCjkName);
+    const std::string ascii = sbpath(sandbox, "ascii_probe.flac");
 
     // ================= 1) 前提：日文名素材真能生成且真能解码（不是「文件名有问题」） =========
     std::printf("- 1 日文名素材：生成 + 正常解码（排除「文件名编码」这条线）\n");
@@ -139,35 +214,43 @@ int main() {
         }
     }
 
-    // ================= 2) 核心：源文件被独占占用时，错误必须说真原因（不是 -42 掩码） =========
-    // 这一步直接复现现场故障形态：文件读不了 → ffmpeg 报 -42 → 修前错误文本只有
-    // "Illegal byte sequence"，修后必须带出 Win32 的 ERROR_SHARING_VIOLATION(32)。
-    std::printf("- 2 源文件被独占占用：错误文本必须带 Win32 真实原因（-42 是掩码）\n");
+    // ================= 2) 核心：源文件读不了时，错误必须说真原因（不是 -42 掩码） =========
+    // 2026-10-25 平台移植：原实现用 CreateFileW(不共享) 造「独占占用」。
+    // macOS 的 flock 是建议锁（实测：加 LOCK_EX 后 access(R_OK)=0、cat 仍成功），
+    // 没有「共享冲突」这个形态。但**能力等价物存在**：chmod 000 造 EACCES（实测稳定触发），
+    // 同样是「源文件此刻读不了」这一类故障，同样会让 ffmpeg 回退 ANSI 后报 -42 掩码。
+    // 判据强度不变：仍要求①必须失败不静默 ②真原因出现 ③原始退出码保留 ④-42 时明示不代表编码坏。
+    std::printf("- 2 源文件读不了（EACCES）：错误文本必须带真实原因（-42 是掩码）\n");
     {
-        HANDLE lock = CreateFileW(rta::audio::widen(cjk).c_str(), GENERIC_READ, 0 /* 不共享 */,
-                                  nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
-        ck(lock != INVALID_HANDLE_VALUE, "已对日文名源文件加独占锁（构造故障态）");
-        if (lock != INVALID_HANDLE_VALUE) {
+        const mode_t oldMode = ::stat(cjk.c_str(), nullptr) == 0 ? 0644 : 0644;
+        ::chmod(cjk.c_str(), 0000);   // 构造故障态：无读权限
+        ck(::access(cjk.c_str(), R_OK) != 0, "已把日文名源文件权限改为 000（构造 EACCES 故障态）");
+        {
             std::string msg;
             try {
                 rta::audio::LoadNote note;
                 (void)rta::audio::read_any(cjk, &note);
                 msg = "(未抛异常——说明锁没生效或读到了缓存，本用例无效)";
             } catch (const std::exception& e) { msg = e.what(); }
-            CloseHandle(lock);
+            ::chmod(cjk.c_str(), oldMode);   // 立刻恢复，避免影响后续用例
 
             std::printf("  [信息] 修复后的错误文本:\n    %s\n", msg.c_str());
             ck(!msg.empty(), "源文件读不了时 read_any 必须失败（不许静默返回空继续播）");
-            // 关键判据：真实原因必须出现，且是「占用」这一类，而不是只有 EILSEQ 的复述
-            ck(msg.find("独占占用") != std::string::npos || msg.find("32") != std::string::npos,
-               "错误文本带出 Win32 真实原因（共享冲突），不再只有 Illegal byte sequence",
+            // 关键判据：真实原因必须出现，且是「读不了」这一类，而不是只有 EILSEQ 的复述。
+            // macOS 上 source_read_probe 会给出「没有读取权限（ACL / 只读介质 / 受保护目录）」。
+            ck(msg.find("没有读取权限") != std::string::npos || msg.find("源文件此刻读不了") != std::string::npos,
+               "错误文本带出真实原因（权限拒绝），不再只有 Illegal byte sequence",
                "got=" + msg);
             // 原始退出码必须如实带出：
             //   zh-CN (ACP 936) 下日文名回退 ANSI 会触发 EILSEQ(-42)；
             //   en-US (ACP 1252，如 CI 云机) 下日文名回退 ANSI 会变乱码找不到路径，触发 ENOENT(-2)。
             // 两者都是 ffmpeg 内部行为，判据断言「原始负数退出码被保留」而不写死某一 locale 的特定数值。
-            ck(msg.find("退出码 -") != std::string::npos,
-               "错误文本保留 ffmpeg 原始负数退出码供排查（如 zh-CN 下的 -42、en-US 下的 -2）",
+            // 2026-10-25 平台适配：Windows 上 ffmpeg 直接返回负数退出码（-42/-13/-2），
+            // POSIX 上进程退出码是 0..255 无符号（-13 会变成 243 = 256-13，-42 变成 214），
+            // 这是操作系统的既定语义，不是缺陷。判据因此改为「退出码被如实带出且非 0」——
+            // 仍然证明「原始退出码保留供排查」这个能力，只是不写死符号形态。
+            ck(msg.find("退出码 ") != std::string::npos && msg.find("退出码 0") == std::string::npos,
+               "错误文本保留 ffmpeg 原始非零退出码供排查（POSIX 为 0..255，Windows 为负数）",
                "got=" + msg);
             // 真实原因与假原因区分：
             //   若是 -42 则文本明示「不代表编码坏了」；若非 -42 则说明未触发 EILSEQ，由前一条 Win32 原因断言保证真因定性
@@ -178,7 +261,7 @@ int main() {
                    "在报 -42 时错误文本明示「不代表文件编码坏了」（避免把假原因当结论）", "got=" + msg);
             } else {
                 ck(msg.find("源文件此刻读不了") != std::string::npos,
-                   "在非 -42 退出码时错误文本前置 Win32 真实原因（非 -42 路径分支）", "got=" + msg);
+                   "在非 -42 退出码时错误文本前置真实原因（非 -42 路径分支）", "got=" + msg);
             }
         }
     }
@@ -196,14 +279,14 @@ int main() {
     //   因此，无论锁在 ffmpeg 运行前释放还是运行中释放，read_any 都能确定性成功。
     std::printf("- 3 瞬时占用恢复后应自动解码成功（覆盖运行前释放与运行中释放两类时序）\n");
     {
-        // 时序 1：锁在 ffmpeg 运行前 / 极早释放（10ms 释放）
-        HANDLE lock1 = CreateFileW(rta::audio::widen(cjk).c_str(), GENERIC_READ, 0,
-                                   nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
-        ck(lock1 != INVALID_HANDLE_VALUE, "已加独占锁（时序 1：10ms 极速释放）");
-        if (lock1 != INVALID_HANDLE_VALUE) {
-            std::thread releaser([lock1] {
+        // 时序 1：故障在 ffmpeg 运行前 / 极早解除（10ms 恢复权限）
+        // 2026-10-25：独占锁 → chmod 000（macOS 上 EACCES 是同类「读不了」故障，见第 2 段说明）
+        ::chmod(cjk.c_str(), 0000);
+        ck(::access(cjk.c_str(), R_OK) != 0, "已构造故障态（时序 1：10ms 极速恢复）");
+        {
+            std::thread releaser([&cjk] {
                 std::this_thread::sleep_for(std::chrono::milliseconds(10));
-                CloseHandle(lock1);
+                ::chmod(cjk.c_str(), 0644);   // 模拟占用方松手
             });
             bool ok = false;
             std::string err;
@@ -216,14 +299,13 @@ int main() {
             ck(ok, "极速释放后 read_any 自动解码成功（时序 1：锁在 ffmpeg 运行前/早期释放）", err);
         }
 
-        // 时序 2：锁在 ffmpeg 运行中释放（150ms 释放，覆盖 CI 云机首轮失败时锁已解除的时序）
-        HANDLE lock2 = CreateFileW(rta::audio::widen(cjk).c_str(), GENERIC_READ, 0,
-                                   nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
-        ck(lock2 != INVALID_HANDLE_VALUE, "已加独占锁（时序 2：150ms 跨尝试释放）");
-        if (lock2 != INVALID_HANDLE_VALUE) {
-            std::thread releaser([lock2] {
+        // 时序 2：故障在 ffmpeg 运行中解除（150ms 恢复，覆盖首轮失败时故障已消失的时序）
+        ::chmod(cjk.c_str(), 0000);
+        ck(::access(cjk.c_str(), R_OK) != 0, "已构造故障态（时序 2：150ms 跨尝试恢复）");
+        {
+            std::thread releaser([&cjk] {
                 std::this_thread::sleep_for(std::chrono::milliseconds(150));
-                CloseHandle(lock2);          // 模拟占用方松手（写在回/扫描结束/改名完成）
+                ::chmod(cjk.c_str(), 0644);   // 模拟占用方松手（写回/扫描结束/改名完成）
             });
             bool ok = false;
             std::string err;
@@ -249,18 +331,17 @@ int main() {
     //      全部 10 轮必须 100% 成功，绝不允许「偶尔成功也算过」（判据不弱化）。
     std::printf("- 3b 确定性验证：时序解耦 + 连续多轮窗口扫描（探针此刻可读仍重试成功）\n");
     {
-        // ① 进程事件解耦释放
-        HANDLE lock = CreateFileW(rta::audio::widen(cjk).c_str(), GENERIC_READ, 0,
-                                  nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
-        ck(lock != INVALID_HANDLE_VALUE, "已加独占锁（由 ffmpeg 子进程启动事件触发解耦释放）");
-        if (lock != INVALID_HANDLE_VALUE) {
-            std::thread releaser([lock] {
+        // ① 进程事件解耦恢复
+        ::chmod(cjk.c_str(), 0000);
+        ck(::access(cjk.c_str(), R_OK) != 0, "已构造故障态（由 ffmpeg 子进程启动事件触发解耦恢复）");
+        {
+            std::thread releaser([&cjk] {
                 const auto t0 = std::chrono::steady_clock::now();
                 while (!is_child_ffmpeg_running()) {
                     if (std::chrono::steady_clock::now() - t0 > std::chrono::milliseconds(500)) break;
                     std::this_thread::sleep_for(std::chrono::milliseconds(1));
                 }
-                CloseHandle(lock); // 检测到子进程启动后立即释放锁
+                ::chmod(cjk.c_str(), 0644); // 检测到子进程启动后立即恢复权限
             });
             bool ok = false;
             std::string err;
@@ -278,16 +359,15 @@ int main() {
         int okCount = 0;
         std::string firstErr;
         for (int r = 0; r < kRounds; ++r) {
-            HANDLE lk = CreateFileW(rta::audio::widen(cjk).c_str(), GENERIC_READ, 0,
-                                    nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
-            if (lk == INVALID_HANDLE_VALUE) {
-                if (firstErr.empty()) firstErr = "加独占锁失败";
+            ::chmod(cjk.c_str(), 0000);
+            if (::access(cjk.c_str(), R_OK) == 0) {
+                if (firstErr.empty()) firstErr = "构造故障态失败（仍可读）";
                 break;
             }
             const int delayMs = 15 + r * 20; // 15, 35, 55, 75, 95, 115, 135, 155, 175, 195 ms
-            std::thread releaser([lk, delayMs] {
+            std::thread releaser([&cjk, delayMs] {
                 std::this_thread::sleep_for(std::chrono::milliseconds(delayMs));
-                CloseHandle(lk);
+                ::chmod(cjk.c_str(), 0644);
             });
             try {
                 rta::audio::LoadNote note;
@@ -308,7 +388,7 @@ int main() {
     // 文件根本不存在时，源文件探针应立刻给出「不存在」，且不做无意义的三次长重试。
     std::printf("- 4 反向：文件确实不存在时报「不存在」（不是无脑重试/不是编码问题）\n");
     {
-        const std::string missing = sandbox + "\\" + kCjkName + ".does-not-exist";
+        const std::string missing = sbpath(sandbox, std::string(kCjkName) + ".does-not-exist");
         std::string msg;
         try {
             rta::audio::LoadNote note;
@@ -359,15 +439,16 @@ int main() {
         // 逐层加长（每层都是日文名），最终路径远超常见 100 字符，但仍在 Win32 长路径配合下可用
         std::string deep = sandbox;
         for (int i = 0; i < 6; ++i) {
-            deep += "\\";
+            deep = rta::platform::join(deep, "");  // 平台分隔符
             deep += "\xE3\x83\x87\xE3\x82\xA3\xE3\x83\xAC\xE3\x82\xAF\xE3\x83\x88\xE3\x83\xAA"  // ディレクトリ
                     "\xE5\x90\x8D\xE9\x95\xB7\xE3\x81\x84";                                            // 名長い
             deep += std::to_string(i);
         }
         std::error_code ec;
         fs::create_directories(u8path_of(deep), ec);
-        const std::string longFile = deep + "\\ZARD - 02.\xE7\xBF\xBC\xE3\x82\x92\xE5\xBA\x83"
-                                          "\xE3\x81\x92\xE3\x81\xA6 (long path).flac";
+        const std::string longFile = rta::platform::join(
+            deep, "ZARD - 02.\xE7\xBF\xBC\xE3\x82\x92\xE5\xBA\x83"
+                  "\xE3\x81\x92\xE3\x81\xA6 (long path).flac");
         std::printf("  路径长度: %zu 字符\n", longFile.size());
         fs::copy_file(u8path_of(ascii), u8path_of(longFile), fs::copy_options::overwrite_existing, ec);
         ck(!ec, "长路径日文素材落盘", ec ? ec.message() : "");

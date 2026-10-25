@@ -19,27 +19,17 @@
 #include <string>
 #include <algorithm>
 
-#ifdef _WIN32
-  #ifndef WIN32_LEAN_AND_MEAN
-  #define WIN32_LEAN_AND_MEAN
-  #endif
-  #ifndef NOMINMAX
-  #define NOMINMAX
-  #endif
-  #include <winsock2.h>
-  #include <ws2tcpip.h>
-  using sock_t = SOCKET;
-  #define RTA_INVALID_SOCK INVALID_SOCKET
-  #define rta_close_sock closesocket
-#else
   #include <sys/socket.h>
   #include <netinet/in.h>
   #include <arpa/inet.h>
   #include <unistd.h>
   using sock_t = int;
   #define RTA_INVALID_SOCK (-1)
-  #define rta_close_sock close
-#endif
+  // 2026-10-25 修：原来是 `#define rta_close_sock close`，但本头里有个成员函数就叫 close()
+  // （第 278 行），宏会在预处理阶段把那个成员函数名也替换掉，展开成 close(s_) ⟹
+  // 编译报 "too many arguments to function call"。加 :: 限定到全局作用域即可，
+  // 因为预处理后的 `::close(s_)` 里 `close` 已经不会再被当作成员函数名。
+  #define rta_close_sock ::close
 
 namespace rta::net {
 
@@ -277,10 +267,6 @@ private:
 class UdpSocket {
 public:
     bool open(uint16_t bindPort = 0) {
-#ifdef _WIN32
-        static bool wsaDone = false;
-        if (!wsaDone) { WSADATA w; if (WSAStartup(MAKEWORD(2, 2), &w) != 0) return false; wsaDone = true; }
-#endif
         s_ = ::socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
         if (s_ == RTA_INVALID_SOCK) return false;
         // 必须始终 bind：bindPort==0 时由系统分配临时端口。
@@ -301,12 +287,8 @@ public:
         ::setsockopt(s_, SOL_SOCKET, SO_RCVBUF, (const char*)&b, sizeof(b));
     }
     void set_recv_timeout_ms(int ms) {
-#ifdef _WIN32
-        DWORD t = (DWORD)ms; ::setsockopt(s_, SOL_SOCKET, SO_RCVTIMEO, (const char*)&t, sizeof(t));
-#else
         timeval tv{}; tv.tv_sec = ms / 1000; tv.tv_usec = (ms % 1000) * 1000;
         ::setsockopt(s_, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
-#endif
     }
     bool send_to(const void* data, size_t n, const std::string& host, uint16_t port) {
         sockaddr_in a{}; a.sin_family = AF_INET; a.sin_port = htons(port);
@@ -314,7 +296,9 @@ public:
         return ::sendto(s_, (const char*)data, (int)n, 0, (sockaddr*)&a, sizeof(a)) == (int)n;
     }
     int recv_from(void* buf, size_t cap, std::string* fromHost = nullptr, uint16_t* fromPort = nullptr) {
-        sockaddr_in a{}; int alen = sizeof(a);
+        // 2026-10-25 修：POSIX 的 recvfrom 第 6 参是 socklen_t*，传 int* 是类型不符
+        // （同文件第 305 行的 getsockname 一直用的就是 socklen_t，这里是不一致漏改）。
+        sockaddr_in a{}; socklen_t alen = sizeof(a);
         const int r = ::recvfrom(s_, (char*)buf, (int)cap, 0, (sockaddr*)&a, &alen);
         if (r > 0) {
             if (fromHost) { char ip[64]{}; ::inet_ntop(AF_INET, &a.sin_addr, ip, sizeof(ip)); *fromHost = ip; }
@@ -324,11 +308,7 @@ public:
     }
     uint16_t local_port() const {
         sockaddr_in a{}; 
-#ifdef _WIN32
-        int alen = sizeof(a);
-#else
         socklen_t alen = sizeof(a);
-#endif
         ::getsockname(s_, (sockaddr*)&a, &alen);
         return ntohs(a.sin_port);
     }

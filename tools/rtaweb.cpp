@@ -9,68 +9,41 @@
 // 只监听 127.0.0.1，不对外网开放。
 //
 // ---------------- macOS 移植（2026-10-25，PLATFORM.md §13.12）----------------
-// Windows 专属件全部 #ifdef _WIN32 门控，Windows 侧行为零变化；macOS 侧：
+// 2026-10-25：Windows 专属件已随平台删除（项目转 macOS 单平台）；macOS 侧：
 //   * 输出后端 = platform::CoreAudioOutput（§13.9/§13.10 已实测 0 LSB 逐位直通）
 //     UI 的 backend 值不动（§10 契约"不要改 UI"）："wasapi"/空 → CoreAudio 独占（Hog+物理格式），
 //     "wasapi-shared" → CoreAudio shared（OpenSpec.shared 就是照 WASAPI 共享语义设计的）；
-//   * asio / naa / upnp / input(采集) / crash_dump / rt_tune(MMCSS)：macOS 首版不支持，
+//   * naa / upnp / input(采集) / crash_dump / rt_tune(MMCSS)：macOS 首版不支持，
 //     API 路由保留并明确报错（页面顶部本来就承诺"选到不可用后端会直接返回原因"）；
+//   * ASIO（2026-10-25 task-12）：**整个后端与 /api/asio* 路由已删除**。ASIO 是 Steinberg
+//     为绕过 Windows 音频引擎发明的专有协议；macOS 的 CoreAudio 从内核层就是低延迟、
+//     bit-perfect 的，没有需要绕过的东西（Yamaha FAQ 原话：CoreAudio 的低延迟性能足够，
+//     macOS 环境不需要 ASIO 支持）⟹ 在 macOS 上它不是「做不到」而是「不需要」。
+//     等价且更优的方案是 CoreAudio Hog Mode（已实现，见 audio_out_coreaudio.h）。
 //   * path_in_exe_dir → platform::module_dir_utf8；QPC/Sleep → steady_clock/sleep_for。
-#if defined(_WIN32)
-#define WIN32_LEAN_AND_MEAN
-#ifndef NOMINMAX
-#define NOMINMAX
-#endif
-#endif
+// 2026-10-25：原 Windows 宏守卫（WIN32_LEAN_AND_MEAN / NOMINMAX）随平台删除。
 #include <functional>              // 简介后台任务用 std::function 包装（2026-10-23 261023-04）
 #include "net/webui.h"
 #include "net/ui_page.h"
 #include "net/ui_script.h"
 #include "net/source_mgr.h"
 #include "net/library.h"
-#if defined(_WIN32)
-#include "net/upnp.h"
-#include "net/cast_service.h"
-#endif
 #include "net/app_icon.h"
 #include "net/zipstore.h"          // 最小 ZIP(STORE)打包：导出诊断 = 一个压缩包(2026-10-22 功能3)
 using rta::net::Library;
 using rta::net::SourceManager;
 using rta::net::SourceConfig;
 using rta::net::SubEntry;
-#if defined(_WIN32)
-// 不直接 include <mmsystem.h>：它会和 MSVC 的 <complex> 冲突（本轮实测）。
-// 只声明需要的两个函数，并链接 winmm。
-extern "C" __declspec(dllimport) unsigned int __stdcall timeBeginPeriod(unsigned int);
-extern "C" __declspec(dllimport) unsigned int __stdcall timeEndPeriod(unsigned int);
-#endif
 #include "engine/pipeline.h"
 #include "audio/wav.h"
 #include "audio/audio_loader.h"
 #include "audio/media_info.h"
-#if defined(_WIN32)
-#include "audio/rt_tune.h"
-#include "audio/wasapi_out.h"
-#include "audio/wasapi_shared.h"   // WASAPI 共享后端(VM/独占不可用兜底,2026-10-22 事故热修)
-#include "audio/wasapi_capture.h"  // WASAPI 采集核心 (ROADMAP P4b)
-#endif
 #include "audio/render_loop.h"     // 渲染主循环(含 RENDERFAIL 遥测;测试与 rtaweb 共用同一份)
-#if !defined(_WIN32)
 class CoreAudioSink;   // 本文件后部定义；render_loop 的 mac 遥测分支要用（前向声明）
-#endif
-#if defined(_WIN32)
-#include "audio/buffer_policy.h"   // C1 独占缓冲策略(尊重设置/学习缓存/L1 预检;测试与生产同一份)
-#endif
 #include "audio/rate_pick.h"       // 输出采样率选择的纯逻辑(可离线单测;2026-10-22 第二首按 44100 开流事故)
-#if defined(_WIN32)
-#include "audio/asio_out.h"
-#include "crash_dump.h"            // 崩溃转储 + OS/CPU/tester 诊断（1.0.5 可观测性）
-#include "naa_discover.h"          // NAA 端点自动发现（261024-01 #11；CLI naa_scan 共用同一份）
-#else
 #include "platform/path.h"
 #include "platform/audio_out_factory.h"   // macOS：CoreAudioOutput（PLATFORM.md §13.9/§13.10）
 #include "platform/macos/audio_in_coreaudio.h"   // 输入采集（AUHAL input；§13.13）
-#endif
 
 // 渲染主循环迁到 rta::render 后，本文件的各后端实现继续用短名（历史上就是全局名）
 using rta::render::OutSink;
@@ -81,9 +54,6 @@ using rta::render::SinkOpenOpts;
 #include "meta/retrieval.h"         // P3 资料层③ AI 综合检索(/api/entity/summary)
 #include "meta/discogs.h"           // P3 资料层④b Discogs 版本推荐(/api/entity/versions)
 #include "meta/statusflags.h"       // gpu/gpuUsed 组合语义（用户 261024-04 #8，/api/status 与 /api/signal 同源）
-#if defined(_WIN32)
-#include "net/rtanet_stream.h"      // NAA 推流（winsock 直连，PLATFORM.md §11.2 白名单；macOS 门控）
-#endif
 #include "dsp/filter_families.h"
 #include "dsp/oversample_peak.h"
 #include "dsp/eq_text.h"
@@ -93,10 +63,6 @@ using rta::render::SinkOpenOpts;
 #include "dsp/modulator.h"
 #include "dsp/direct_sdm.h"
 #include "version.h"
-#if defined(_WIN32)
-#include "crash_dump.h"            // 崩溃转储 + OS/CPU/tester 诊断（1.0.5 可观测性）
-#include "naa_discover.h"          // NAA 端点自动发现（261024-01 #11；CLI naa_scan 共用同一份）
-#endif
 #include <cstdio>
 #include <string>
 #include <vector>
@@ -124,7 +90,7 @@ using namespace rta;
 using namespace rta::audio;
 namespace eng = rta::engine;
 
-#if !defined(_WIN32)
+// 2026-10-25：原「非 Windows」条件守卫已去掉（macOS 单平台，内容无条件生效）。
 // ---------------- macOS 替身层（Windows 专属件的非 Windows 等价物）----------------
 // rt_tune.h 是 MMCSS（avrt），crash_dump.h 是 dbghelp——macOS 没有这两样。
 // 播放线程与 STARTUP 横幅引用它们的接口，这里给行为等价或"如实为空"的替身。
@@ -176,19 +142,11 @@ inline void release_playback_tuning(RtTune&) {}
 } // namespace rta::audio
 
 // 路径分隔符（配置/数据文件的相对子路径拼接）
-#if defined(_WIN32)
-static const char kPathSep[] = "\\";
-#else
 static const char kPathSep[] = "/";
-#endif
 
 // 进程号（Windows: GetCurrentProcessId；POSIX: getpid）
 static unsigned long current_pid() {
-#if defined(_WIN32)
-    return (unsigned long)GetCurrentProcessId();
-#else
     return (unsigned long)::getpid();
-#endif
 }
 
 // CoreAudio 设备枚举（/api/devices、速率探测、信号链 device 名共用）。
@@ -260,7 +218,7 @@ static void mac_find_dev(const std::string& devId, std::string& name, std::strin
     }
     if (name.empty()) name = devId.empty() ? std::string("默认音频设备") : devId;
 }
-#endif
+
 
 // 路径 <-> UTF-8 字符串（C++20 的 u8string 返回 char8_t，不能直接当 std::string 用）
 static std::string pathToUtf8(const fs::path& p) {
@@ -302,14 +260,14 @@ struct PlayParams {
     double oobGain = 5.0;              // Chebyshev 带外增益 dB
     int    ahmBits = 8;                // AHM 多电平位深 (6~8 bit)
     std::string gpuVendor = "auto";   // auto | amd | nvidia | off
-    bool   dsdNative = false;         // true = 走 ASIO 原生 DSD（当前后端未实现，会明确报错）
+    bool   dsdNative = false;         // true = 走 Native DSD（Windows 专有驱动通道；本平台不可用，会明确报错）
     bool   directSdm = false;         // true = DirectSDM：源 DSD 与目标同速率时逐位直通（要求 0 dB、无 PCM 处理）
     int    bufferMs = 100;
 
     // ---- 输出后端 / 多声道 / 每声道微调 ----
     std::string sdmFilter;            // SDM（DSD 输出）用的 1x 滤波器；空 = 沿用 filter
     std::string sdmFilterNx;          // SDM 用的 Nx 滤波器；空 = 沿用 filterNx
-    std::string backend = "wasapi";   // wasapi | asio | naa | upnp | null
+    std::string backend = "wasapi";   // wasapi | wasapi-shared | naa | upnp | null
     std::string naaHost;              // NAA 端点 host:port（自动发现填进来，手动只是兜底）
     std::string upnpDev;              // UPnP/DLNA 渲染器（设备描述 URL；后端 = upnp 时使用）
     int    outChannels = 0;           // 0 = 跟随源
@@ -654,212 +612,7 @@ static SinkOpenOpts sink_opts(const PlayParams& p) {
 // 播放器 exe 目录下的文件路径（定义在本文件后面；WasapiSink 的学习缓存要用，先声明）。
 static std::string path_in_exe_dir(const char* name);
 
-#if defined(_WIN32)
-class WasapiSink : public OutSink {
-public:
-    bool open(const SinkOpenOpts& o, uint32_t rate, int ch, int bits) override {
-        fail_ = OpenFail{};   // 每次打开重置：失败原因只属于最近一次尝试
-        failRequested_ = OpenFail{};
-        // ================= C1 独占缓冲策略（2026-10-24 N300 欠载）=================
-        // 旧代码（本函数 2026-10-23 版本）无条件封顶 20ms：
-        //     const double ms = (o.bufferMs > 0 && o.bufferMs < 20) ? (double)o.bufferMs : 20.0;
-        // 于是设置里的 100ms 只开得到 20ms（= 2 个驱动周期），render_loop 的 20ms 轮询
-        // 喂不上 ⟹ 设备缓冲反复触底 ⟹ 欠载爆音。MOTU 的 20ms 保护是真实需求，所以不是
-        // 简单删掉封顶，而是改成「尊重设置 + 失败自适应回退」（方案 §5）：
-        //   · 请求 clamp 到 [20,500]；
-        //   · 学习缓存命中 ⟹ 直接用上次学到的值（不再先失败一次）；
-        //   · L1 预检：实际缓冲 > 请求 1.5 倍 ⟹ 关掉重开 20ms 并记住；
-        //   · L2 起播看门狗（0.8s 有数据零写入）由 render_loop 调 reopen_at_20ms()。
-        // RTA_BUF_RESPECT=0 ⟹ 完全回到旧的 20ms 行为（A/B 与回滚）。
-        dev_ = o.device; rate_ = rate; ch_ = ch; bits_ = bits;
-        ok_ = false;
-        learn_.set_path(path_in_exe_dir("rlplayer-buffer-learned.json"));
-        key_ = rta::audio::buffer_key(o.device, rate, bits, o.bufferMs);
-        const double reqMs = rta::audio::buffer_clamp_ms(o.bufferMs);
-        rta::audio::BufferOpener op;
-        op.open = [this, reqMs](double ms, std::string& why) {
-            ok_ = ao_.open(dev_, rate_, ch_, bits_, ms, &fail_);
-            if (!ok_) {
-                why = ao_.last_error();
-                // 保留「按用户请求值打开」那一次的失败归因：若降级重试也失败，
-                // 报给用户的必须是 100ms 的请求，而不是内部的 20ms 重试。
-                if (std::fabs(ms - reqMs) < 0.5) failRequested_ = fail_;
-            }
-            return ok_;
-        };
-        op.frames = [this]() { return (size_t)ao_.buffer_frames(); };
-        op.close  = [this]() { ao_.close(); };
-        rta::audio::BufferRequest req;
-        req.requestedMs = o.bufferMs;
-        req.rate        = rate;
-        req.respect     = rta::audio::buffer_respect_env();
-        req.useLearn    = true;
-        pol_ = rta::audio::buffer_apply(req, op, &learn_, key_, &ok_);
-        if (!ok_ && !failRequested_.request.empty()) fail_ = failRequested_;
-        opened_ = ok_;
-        return ok_;
-    }
-    // HF-01/02：open 失败时的结构化原因（请求格式 / 支持列表 / HRESULT / 端点 id）。
-    // 成功时内容无意义 —— 调用方只在 open 返回 false 后读它。
-    const OpenFail& fail() const { return fail_; }
-    // 2026-10-23：成功时驱动实际接受的独占格式（"独占格式=EXT24/24 紧凑(3字节)"）。
-    // 以前这个信息只有失败时才带出，成功就丢 —— 用户看到 note 写"32-bit"却不知道驱动到底认了什么。
-    const std::string& fmt_note() const { return ao_.fmt_note(); }
-    bool start() override {
-        if (!ok_) return false;
-        if (!ao_.start()) { err_ = ao_.last_error(); return false; }
-        return true;
-    }
-    size_t buffer_frames() const override { return ao_.buffer_frames() ? (size_t)ao_.buffer_frames() : 9600; }
-    void set_live_gain_db(double db) override { ao_.set_live_gain_db(db); }
-    bool wait_event(int ms) override { return ao_.wait_event(ms); }
-    long long last_pad() const override { return ao_.last_pad(); }
-    size_t write_one_period(const int32_t* pcm, size_t frames) override { return ao_.write_one_period(pcm, frames); }
-    size_t write_available(const int32_t* pcm, size_t frames) override { return ao_.write_available(pcm, frames); }
-    void pause() override { ao_.pause(); }
-    void resume() override { ao_.resume(); }
-    void close() override { ao_.close(); }
-    const std::string& last_error() const override { return err_.empty() ? ao_.last_error() : err_; }
-    long long last_gb_hr() const override { return ao_.last_gb_hr(); }
-    // 2026-10-22 反馈 20261022-02：把 WasapiOutput 的「写不进去」成因计数转发给 OutSink。
-    // 不转发 ⟹ render_loop 的 if (zp >= 0 || zs >= 0) 闸门永假 ⟹ STAT 永不打印 zp/zs/zr。
-    // 命名映射：wasapi_out.h 叫 last_zero_reason()，OutSink 叫 zero_reason()。
-    long long zero_pad_full() const override { return ao_.zero_pad_full(); }
-    long long zero_starved()  const override { return ao_.zero_starved(); }
-    std::string zero_reason() const override { return ao_.last_zero_reason(); }
 
-    // ---- C2 遥测转发（per / initRecipe / realigned / WFAIL 明细）----
-    // -1 = 未知（OutSink 的约定；0 会让 STAT 看起来像「周期 0 帧」）。
-    long long device_period_frames() const override {
-        const size_t per = ao_.period_frames();
-        return per ? (long long)per : -1;
-    }
-    std::string init_recipe() const override { return ao_.init_recipe(); }
-    bool realigned() const override { return ao_.realigned(); }
-    bool last_write_attempt(WriteAttempt& out) const override {
-        const auto& d = ao_.last_write_detail();
-        out.pad = d.pad; out.room = d.room; out.per = d.per;
-        out.avail = d.avail; out.toWrite = d.toWrite; out.gbHr = d.gbHr;
-        return true;
-    }
-
-    // ---- C3 端点消失（N300 96k 掉 USB）----
-    // 播放线程每 250ms 最多问一次（这里再自缓存 500ms）：端点是否仍是 ACTIVE。
-    // 端点消失时 EnumAudioEndpoints 可能要几毫秒，绝不能每 tick 都问。
-    bool endpoint_alive() const override {
-        using clock = std::chrono::steady_clock;
-        const auto now = clock::now();
-        if (aliveChecked_ && now - aliveCheckedAt_ < std::chrono::milliseconds(500))
-            return alive_;
-        aliveChecked_ = true;
-        aliveCheckedAt_ = now;
-        alive_ = false;
-        for (const auto& d : rta::audio::WasapiOutput::enumerate()) {
-            const bool hit = dev_.empty() ? d.isDefault : (d.id == dev_);
-            if (hit) { alive_ = (d.state == DEVICE_STATE_ACTIVE); break; }
-        }
-        return alive_;   // 枚举里根本找不到 ⟹ 端点已消失
-    }
-
-    // ---- C1 L2：起播 800ms 零写入 ⟹ 关掉重开 20ms 并 Start ----
-    // 由 render_loop 在「有数据但零写入」时调用一次；返回 true 表示已重新开流。
-    bool reopen_at_20ms() {
-        if (rate_ == 0 || !opened_) return false;
-        ao_.close();
-        ok_ = ao_.open(dev_, rate_, ch_, bits_, rta::audio::kBufferDegradeMs, &fail_);
-        if (!ok_) return false;
-        if (!ao_.start()) { err_ = ao_.last_error(); return false; }
-        pol_.degraded    = true;
-        pol_.policy      = "degraded";
-        pol_.effectiveMs = rta::audio::kBufferDegradeMs;
-        pol_.why         = "Start 后 " + std::to_string((int)rta::audio::kBufferL2DeadlineMs) +
-                           "ms 有数据但零写入（设备流不推进），回退 20ms";
-        remember_policy();
-        return true;
-    }
-    const rta::audio::BufferPolicy& buffer_policy() const { return pol_; }
-    // 学习缓存落盘（L2 成功后调用；L1/打开失败路径由 buffer_apply 自己写）
-    void remember_policy() {
-        rta::audio::BufferLearnEntry e;
-        e.ms  = pol_.effectiveMs;
-        e.why = pol_.why;
-        e.at  = rta::audio::buffer_today();
-        learn_.put(key_, e);
-    }
-private:
-    WasapiOutput ao_;
-    bool ok_ = false;
-    bool opened_ = false;
-    OpenFail fail_;
-    OpenFail failRequested_;   // 按【用户请求值】打开那一次的失败归因（降级重试会覆盖 fail_）
-    std::string err_;
-    // C1：设备/格式（L2 重开要用同一套参数）与缓冲决策
-    std::string dev_;
-    uint32_t rate_ = 0;
-    int ch_ = 0, bits_ = 0;
-    std::string key_;
-    rta::audio::BufferPolicy pol_;
-    rta::audio::BufferLearnStore learn_;
-    // C3：端点存活缓存（播放线程专用；mutable 因为查询是逻辑只读）
-    mutable bool alive_ = true;
-    mutable bool aliveChecked_ = false;
-    mutable std::chrono::steady_clock::time_point aliveCheckedAt_{};
-};
-
-// WASAPI 共享模式：经系统混音引擎，独占不可用（VM 板载声卡 / 远程桌面 / 设备被占）时
-// 的兜底后端。开流格式 = GetMixFormat（通常 float32/48k），调用方必须按 mix 采样率与
-// 声道数排管线 —— open 里做一致性校验，不匹配即拒绝并说明（防止静默二次重采样/声道错乱）。
-class WasapiSharedSink : public OutSink {
-public:
-    bool open(const SinkOpenOpts& o, uint32_t rate, int ch, int bits) override {
-        // ★ 2026-10-23：这里原来把位深硬编码成 32（`int /*bits*/` 直接丢弃），理由是
-        // "共享模式位深由混音引擎决定"。混音引擎确实是 float32，但 WasapiShared 的 reqBits_
-        // 不是描述引擎，而是描述**管线交来的 int32 是按几个 bit 定标的**——pack() 要用它把
-        // ±2^23（24-bit）归一化到 float。传 32 → 相当于除以 2^31 → 输出 −48.16 dB。
-        // 现场实测：peak=0.9886 而 fpeak=0.0038619，比值 1/256，正好是这一处。
-        ok_ = so_.open(o.device, rate, ch, bits > 0 ? bits : 32, 200.0);
-        if (!ok_) return false;
-        if (so_.mix_rate() != rate || so_.mix_channels() != ch) {
-            char b[160];
-            std::snprintf(b, sizeof(b),
-                          "共享模式管线/设备格式不一致：管线 %u Hz/%d ch，系统混音 %u Hz/%d ch"
-                          "（调用方应先 query_mix_format 对齐）",
-                          (unsigned)rate, ch, (unsigned)so_.mix_rate(), so_.mix_channels());
-            err_ = b;
-            so_.close();
-            ok_ = false;
-            return false;
-        }
-        return true;
-    }
-    bool start() override {
-        if (!ok_) return false;
-        if (!so_.start()) { err_ = so_.last_error(); return false; }
-        return true;
-    }
-    size_t buffer_frames() const override { return so_.buffer_frames() ? so_.buffer_frames() : 9600; }
-    void set_live_gain_db(double db) override { so_.set_live_gain_db(db); }
-    bool wait_event(int ms) override { return so_.wait_event(ms); }
-    long long last_pad() const override { return so_.last_pad(); }
-    size_t write_one_period(const int32_t* pcm, size_t frames) override { return so_.write_available(pcm, frames); }
-    size_t write_available(const int32_t* pcm, size_t frames) override { return so_.write_available(pcm, frames); }
-    double out_peak() const override { return so_.out_peak(); }
-    void pause() override { so_.pause(); }
-    void resume() override { so_.resume(); }
-    void close() override { so_.close(); }
-    const std::string& last_error() const override { return err_.empty() ? so_.last_error() : err_; }
-    long long last_gb_hr() const override { return so_.last_gb_hr(); }
-    uint32_t mix_rate() const { return so_.mix_rate(); }
-    int mix_channels() const { return so_.mix_channels(); }
-    bool is_float() const { return so_.is_float(); }
-private:
-    WasapiSharedOutput so_;
-    bool ok_ = false;
-    std::string err_;
-};
-#endif // _WIN32
-
-#if !defined(_WIN32)
 // ---------------- CoreAudio 输出后端（macOS）----------------
 // 包装 platform::CoreAudioOutput（PLATFORM.md §13.9 真机实测 16/24/32 bit 0 LSB）。
 // UI 的 backend 值（§10 契约不改 UI）："wasapi"/空 → 独占（Hog+物理格式，等价 WASAPI 独占语义）；
@@ -911,7 +664,7 @@ private:
     std::string err_;
 };
 
-// macOS 上不可用后端（naa/asio）的占位：open 必然失败并把原因写进 last_error，
+// macOS 上不可用后端（naa）的占位：open 必然失败并把原因写进 last_error，
 // 让"选到不可用后端"在界面上得到明确解释（§10：不假装出声）。
 class UnavailableSink : public OutSink {
 public:
@@ -924,7 +677,6 @@ public:
 private:
     std::string why_;
 };
-#endif
 
 // Null output：完整跑 DSP，但样本直接丢掉。按实时节奏"消耗"，所以进度条与真播放一致。
 // 用途：验证管线、量 CPU 占用、给频谱分析抓数据，都不必打开任何设备。
@@ -966,65 +718,6 @@ private:
     std::string err_;
 };
 
-#if defined(_WIN32)
-// NAA：把 PCM 经 RTANet 推到端点机（rtanet_rx）。数值上与本地输出同源，不经过任何转码。
-class NaaSink : public OutSink {
-public:
-    bool open(const SinkOpenOpts& o, uint32_t rate, int ch, int bits) override {
-        rate_ = rate ? rate : 44100; ch_ = ch; bits_ = bits;
-        std::string host = o.naaHost.empty() ? std::string("127.0.0.1") : o.naaHost;
-        uint16_t port = 43210;
-        const size_t c = host.rfind(':');
-        if (c != std::string::npos) {
-            port = (uint16_t)atoi(host.c_str() + c + 1);
-            host = host.substr(0, c);
-        }
-        rta::net::RtaFormat want;
-        want.rate = rate_; want.channels = ch_; want.bits = bits_;
-        uint16_t udp = 0;
-        if (!cli_.negotiate(host, port, want, udp, 1, err_)) {
-            err_ = "NAA 协商失败（" + host + ":" + std::to_string(port) + "）：" + err_;
-            return false;
-        }
-        snd_.configure(host, udp, want, 1, 128);
-        period_ = 1024;
-        t0_ = now();
-        return true;
-    }
-    bool start() override { return true; }
-    size_t buffer_frames() const override { return period_; }
-    size_t write_one_period(const int32_t* pcm, size_t frames) override {
-        const size_t w = snd_.send(pcm, frames);
-        if (w == 0) { err_ = "发送失败（端点已断开？）"; return 0; }
-        sent_ += w;
-        // 按实时节奏推送，否则一瞬间就把端点的缓冲灌满
-        for (;;) {
-            const double el = now() - t0_;
-            const double want = (double)sent_ / (double)rate_;
-            if (el >= want) break;
-            double ms = (want - el) * 1000.0;
-            if (ms > 20.0) ms = 20.0;
-            Sleep((DWORD)(ms > 0 ? ms : 1));
-        }
-        return w;
-    }
-    void close() override { cli_.close(); }
-    const std::string& last_error() const override { return err_; }
-private:
-    static double now() {
-        LARGE_INTEGER f, t; QueryPerformanceFrequency(&f); QueryPerformanceCounter(&t);
-        return (double)t.QuadPart / (double)f.QuadPart;
-    }
-    rta::net::RtaControlClient cli_;
-    rta::net::RtaSender snd_;
-    uint32_t rate_ = 44100;
-    int ch_ = 2, bits_ = 24;
-    size_t period_ = 1024;
-    size_t sent_ = 0;
-    double t0_ = 0.0;
-    std::string err_;
-};
-#endif // _WIN32
 
 static std::string path_in_exe_dir(const char* name);   // 定义在后面
 static void play_log(const std::string& s);              // 定义在后面
@@ -1063,13 +756,8 @@ static std::string rate_cache_key(const std::string& devId, int bits, int channe
     // 会把上一个设备的支持列表当成新设备的（那就是造假数据）。
     std::string id = devId;
     if (id.empty()) {
-#if defined(_WIN32)
-        for (const auto& d : WasapiOutput::enumerate())
-            if (d.isDefault) { id = d.id; break; }
-#else
         for (const auto& d : mac_enum_devices())
             if (d.isDefault && d.hasOutput) { id = d.id; break; }
-#endif
         if (id.empty()) id = "(默认端点)";
     }
     return id + "|" + std::to_string(bits) + "bit|" + std::to_string(channels) + "ch";
@@ -1102,16 +790,12 @@ static std::vector<uint32_t> probe_exclusive_rates(const std::string& deviceId, 
     for (int i = 0; i < tries; ++i) {
         if (i > 0)
             std::this_thread::sleep_for(std::chrono::milliseconds(40));   // 等端点从「刚关闭独占流」的重配置里恢复
-#if defined(_WIN32)
-        rr = WasapiOutput::exclusive_rates(deviceId, bits, channels);
-#else
         // macOS：CoreAudio caps() 是对设备的真实查询（AudioObjectGetPropertyData），语义等价
         auto out = rta::platform::create_audio_output();
         if (out) {
             const auto c = out->caps(deviceId);
             rr = c.rates;
         }
-#endif
         if (!rr.empty()) { rate_cache_put(deviceId, bits, channels, rr); return rr; }
     }
     return rr;                     // 全空：调用方按「探测为空」处理（不是结论）
@@ -1167,163 +851,24 @@ static std::string stem_or_self(const std::string& file) {
     return pathToUtf8(fs::u8path(file).stem());
 }
 
-#if defined(_WIN32)
-// ASIO 驱动预检：第三方驱动的 start() 之后可能在它自己的流线程里访问冲突，
-// 那种崩溃在进程内拦不住（SEH 只覆盖当前线程）。所以首次使用某个驱动时，
-// 先让 asio_probe.exe 在【子进程】里跑 0.7 秒零样本；子进程崩了就把结果写进缓存，
-// 此后这个驱动一律拒绝，播放器本体不受影响。
-static bool asio_preflight(const std::string& clsid, uint32_t rate, int ch, std::string& why) {
-    const std::string cache = path_in_exe_dir("rlplayer-asio-cache.txt");
-    const std::string key = clsid + " " + std::to_string(rate) + " " + std::to_string(ch);
-    {
-        std::ifstream f(cache);
-        std::string line;
-        while (std::getline(f, line)) {
-            if (line == key + " OK") return true;
-            if (line == key + " CRASH") {
-                why = "该 ASIO 驱动在本机启动后会崩溃（子进程已复现），已拒绝使用以免拖垮播放器";
-                return false;
-            }
-        }
-    }
-    const std::string probe = path_in_exe_dir("asio_probe.exe");
-    if (GetFileAttributesA(probe.c_str()) == INVALID_FILE_ATTRIBUTES) return true;  // 没有探针就不拦
-
-    // 用序号而不是 CLSID：探针的两个参数解析器不共享状态，序号最不容易错
-    int idx = -1;
-    {
-        const auto list = rta::audio::asio_enum_drivers();
-        for (size_t i = 0; i < list.size(); ++i) if (list[i].clsid == clsid) { idx = (int)i; break; }
-    }
-    if (idx < 0) return true;   // 列不出来的驱动交给后面 open 去报错
-    std::string cmd = "\"" + probe + "\" --stream " + std::to_string(idx) +
-                      " --rate " + std::to_string(rate) + " --ch " + std::to_string(ch) + " --ms 700";
-    std::vector<char> mutableCmd(cmd.begin(), cmd.end());
-    mutableCmd.push_back(0);
-    STARTUPINFOA si{}; si.cb = sizeof(si);
-    si.dwFlags = STARTF_USESHOWWINDOW; si.wShowWindow = SW_HIDE;
-    PROCESS_INFORMATION pi{};
-    if (!CreateProcessA(nullptr, mutableCmd.data(), nullptr, nullptr, FALSE,
-                        CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi)) {
-        return true;   // 起不来就当没预检
-    }
-    const DWORD w = WaitForSingleObject(pi.hProcess, 8000);
-    DWORD code = 1;
-    if (w == WAIT_OBJECT_0) GetExitCodeProcess(pi.hProcess, &code);
-    else { TerminateProcess(pi.hProcess, 1); code = 1; }
-    CloseHandle(pi.hThread); CloseHandle(pi.hProcess);
-
-    std::ofstream cf(cache, std::ios::app);
-    if (cf) cf << key << (code == 0 ? " OK" : " CRASH") << "\n";
-    if (code != 0) {
-        why = "该 ASIO 驱动启动后崩溃（子进程码 " + std::to_string((long long)code) + "），已拒绝使用";
-        return false;
-    }
-    return true;
-}
-
-// 设备 id 是否为合法 CLSID。不能只看首字符 '{'：WASAPI 端点 id 形如
-// {0.0.0.00000000}.{GUID}，也会被误当成 ASIO CLSID（实测报 CLSID 解析失败）。
-static bool is_asio_clsid(const std::string& s) {
-    if (s.empty()) return false;
-    std::wstring w(s.begin(), s.end());
-    CLSID c{};
-    return SUCCEEDED(CLSIDFromString(w.c_str(), &c));
-}
-
-// ASIO：设备 id 就是驱动的 CLSID（由 /api/asiodevices 提供）；空则用第一个能开的驱动。
-class AsioSink : public OutSink {
-public:
-    bool open(const SinkOpenOpts& o, uint32_t rate, int ch, int bits) override {
-        com_ = (CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED) == S_OK || com_ == S_FALSE);
-        auto list = rta::audio::asio_enum_drivers();
-        if (list.empty()) { err_ = "本机没有 ASIO 驱动"; return false; }
-        std::string clsid = o.device;
-        if (!is_asio_clsid(clsid)) {
-            clsid.clear();
-            for (const auto& e : list) if (e.name == o.device) { clsid = e.clsid; break; }
-        }
-        if (!is_asio_clsid(clsid)) {
-            // 设备没指定（或名字对不上）：逐个 preflight，第一个通过的就用。
-            // 不能只看 list[0] —— 本机 [0] 是未连接的 Audient，会把真正可用的 MOTU 挡在后面，
-            // 表现就是"选了 ASIO 但没声音/直接失败"（2026-10-23 现场）。
-            std::string tried;
-            for (const auto& e : list) {
-                std::string why;
-                if (asio_preflight(e.clsid, rate, ch, why)) { clsid = e.clsid; break; }
-                tried += e.name + "[" + why + "] ";
-            }
-            if (!is_asio_clsid(clsid)) {
-                err_ = "没有可用的 ASIO 驱动：" + tried;
-                play_log("ASIO_NODRIVER " + err_);
-                return false;
-            }
-            play_log("ASIO_AUTOPICK 未指定驱动，自动选中 " + clsid);
-        }
-        if (!asio_preflight(clsid, rate, ch, err_)) {
-            play_log("ASIO_PREFLIGHT_FAIL " + err_);
-            return false;
-        }
-        if (!drv_.open(clsid, (double)rate, ch, bits > 0 ? bits : 24, err_)) return false;
-        period_ = (size_t)drv_.buffer_size();
-        return true;
-    }
-    bool start() override { std::string e; if (!drv_.start(e)) { err_ = e; return false; } return true; }
-    size_t buffer_frames() const override { return period_ ? period_ : 1024; }
-    // ASIO 没有独立暂停。暂停时上层不再写，环被回调抽空后自然输出静音，
-    // 这样不必 stop/start 驱动（重启驱动会有咔哒声，还可能丢时钟）。
-    void pause() override {}
-    void resume() override {}
-    size_t write_one_period(const int32_t* pcm, size_t frames) override {
-        // 等环腾出空间再推（这就是节奏来源：由驱动回调的消费速度决定）
-        for (int i = 0; i < 200; ++i) {
-            if (drv_.free_frames() >= frames) {
-                const size_t w = drv_.push(pcm, frames);
-                if (w) written_ += w;
-                return w;
-            }
-            Sleep(1);
-        }
-        return 0;
-    }
-    void close() override {
-        drv_.close();
-        if (com_) { CoUninitialize(); com_ = false; }
-    }
-    const std::string& last_error() const override { return err_; }
-    unsigned long long underruns() const { return drv_.underruns(); }
-private:
-    rta::audio::AsioDriver drv_;
-    size_t period_ = 1024;
-    size_t written_ = 0;
-    bool com_ = false;
-    std::string err_;
-};
-#endif // _WIN32
 
 static std::unique_ptr<OutSink> make_sink(const PlayParams& p) {
     // 守门（261024-01 #9）：backend=upnp 由 /api/play 直接转交投放会话，本地播放线程根本不该启动。
     // 万一将来有别的路径漏过来，也绝不能落到默认的本地独占后端 —— 那会真的接管本机声卡。
     if (p.backend == "upnp")           return std::make_unique<NullSink>();
     if (p.backend == "null")           return std::make_unique<NullSink>();
-#if defined(_WIN32)
-    if (p.backend == "naa")            return std::make_unique<NaaSink>();
-    if (p.backend == "asio")           return std::make_unique<AsioSink>();   // 见 audio/asio_out.h
-    if (p.backend == "wasapi-shared")  return std::make_unique<WasapiSharedSink>();
-    return std::make_unique<WasapiSink>();
-#else
     // macOS（§10 契约不改 UI）：UI 的 backend 值映射到 CoreAudio 的两种模式。
     // "wasapi"/空 → 独占（Hog+物理格式，等价 WASAPI 独占语义）；
     // "wasapi-shared" → shared（OpenSpec.shared 按 WASAPI 共享语义设计）。
-    // naa/asio 在 macOS 无驱动体系：造一个必然 open 失败的 sink，把"不支持"如实报到界面。
+    // naa 在 macOS 无驱动体系：造一个必然 open 失败的 sink，把"不支持"如实报到界面。
     if (p.backend == "naa")
         return std::make_unique<UnavailableSink>("macOS 版暂不支持 NAA / RTANet 推流（Windows 专属后端）");
-    if (p.backend == "asio")
-        return std::make_unique<UnavailableSink>("macOS 没有 ASIO 驱动体系（ASIO 是 Windows 标准）；本机输出请用 CoreAudio（默认后端）");
+    // 2026-10-25（task-12）：ASIO 分支已删除。未知/历史 backend 值（含老 conf 里的 "asio"）
+    // 一律落到 CoreAudio 独占 —— 前端 migrateRemovedBackend() 会先把它降级成 wasapi 并提示，
+    // 这里是第二道闸：即便绕过 UI 直接调 /api/play，也不会落到一个空指针或假装成功。
     auto s = std::make_unique<CoreAudioSink>();
     s->set_shared(p.backend == "wasapi-shared");
     return s;
-#endif
 }
 
 // ---------------- UPnP / DLNA 输出后端（261024-01 #9）----------------
@@ -1338,35 +883,16 @@ static std::unique_ptr<OutSink> make_sink(const PlayParams& p) {
 // 要"把 DSP 处理后的流实时推给渲染器"需要另外的牵引式流式供源，本轮不做。
 static std::atomic<bool> g_upnpPlayer{false};   // true = 当前"播放器"由投放会话承担
 
-static bool upnp_is_dsd_file(const std::string& file) {
-    const std::string ext = rta::audio::lowerExt(file);
-    return ext == ".dsf" || ext == ".dff";
-}
+// 2026-10-25：upnp_is_dsd_file 是 Windows 侧 UPnP 投送的辅助函数，
+// 随 upnp.h 的 POSIX 移植一并处理（见 PLATFORM.md §13.15.5）。此处不再定义，避免 unused。
+
 
 // 把一条曲目交给投放会话。切歌 / 重播都走这里：先停旧会话再起新会话
 //（CastManager 同一时刻只允许一条会话）。失败原因原样返回，界面直接显示，不假装成功。
 static bool upnp_start_track(const PlayParams& p, const std::string& file, std::string& err) {
-#if defined(_WIN32)
-    if (p.upnpDev.empty()) {
-        err = "未选择 UPnP / DLNA 渲染器：设置 → 输出 → 目标渲染器（点「重新发现」刷新列表）";
-        return false;
-    }
-    if (file.empty()) { err = "未指定曲目"; return false; }
-    rta::net::CastStartParams cp;
-    cp.dev = p.upnpDev;
-    cp.file = file;
-    cp.port = 8912;
-    // DSD 源必须 DoP 打包（cast_service 对未开 DoP 的 DSD 会明确拒绝 —— 铁律 3：不悄悄转码降质）
-    cp.dop = upnp_is_dsd_file(file) || p.dsd >= 64;
-    rta::net::CastManager::instance().stop();
-    const auto r = rta::net::CastManager::instance().start(cp);
-    if (!r.ok) { err = "UPnP 投放启动失败：" + r.error; return false; }
-    return true;
-#else
     (void)p; (void)file;
     err = "macOS 版暂不支持 UPnP / DLNA 投放（SSDP 协议栈尚未移植，PLATFORM.md §11.2）";
     return false;
-#endif
 }
 
 // 投放模式下写播放器状态：底栏从 /api/status 读这些字段，必须与投放会话口径一致。
@@ -1390,73 +916,14 @@ static void upnp_mark_player_state(const std::string& file, bool ok, const std::
 // 探测本体在 tools/naa_discover.h（与 CLI naa_scan 共用）。这里做异步任务：
 // Web UI 是单线程 accept，同步扫 254 个主机（每个最长 300ms）会把 /api/status 全部堵住，
 // 所以扫描放后台线程，前端轮询同一端点直到 scanning=false。
-#if defined(_WIN32)
-struct NaaScanJob {
-    std::mutex  m;
-    bool        running = false;
-    bool        done = false;
-    rta::naa::DiscoverResult result;
-    std::chrono::steady_clock::time_point finishedAt{};
-};
-static NaaScanJob g_naaScan;
-
-static void naa_scan_worker() {
-    rta::naa::DiscoverResult res = rta::naa::discover(300, 48, 1.5);
-    std::lock_guard<std::mutex> lk(g_naaScan.m);
-    g_naaScan.result = std::move(res);
-    g_naaScan.running = false;
-    g_naaScan.done = true;
-    g_naaScan.finishedAt = std::chrono::steady_clock::now();
-}
-
-// GET /api/naa/discover[?refresh=1]
-//  - 首次 / refresh：起后台扫描，立刻返回 {"scanning":true}（前端 700ms 后再来）
-//  - 扫描完成后 30 秒内复用结果（避免设置页每次重开都扫一遍网段）
-static std::string naa_discover_json(bool force) {
-    {
-        std::lock_guard<std::mutex> lk(g_naaScan.m);
-        const double age = std::chrono::duration<double>(
-            std::chrono::steady_clock::now() - g_naaScan.finishedAt).count();
-        if (!g_naaScan.running && g_naaScan.done && !force && age < 30.0) {
-            // 掉到下面的序列化
-        } else if (g_naaScan.running) {
-            return "{\"ok\":true,\"scanning\":true}";
-        } else {
-            g_naaScan.running = true;
-            g_naaScan.done = false;
-            std::thread(naa_scan_worker).detach();
-            return "{\"ok\":true,\"scanning\":true,\"started\":true}";
-        }
-    }
-    std::lock_guard<std::mutex> lk(g_naaScan.m);
-    const auto& res = g_naaScan.result;
-    std::ostringstream j;
-    j << "{\"ok\":true,\"scanning\":false,\"probed\":" << res.probed
-      << ",\"multicastHeard\":" << (res.multicastHeard ? "true" : "false")
-      << ",\"note\":\"" << jesc(res.note) << "\",\"subnets\":[";
-    for (size_t i = 0; i < res.subnets.size(); ++i) {
-        if (i) j << ",";
-        j << "\"" << jesc(res.subnets[i]) << "\"";
-    }
-    j << "],\"endpoints\":[";
-    for (size_t i = 0; i < res.endpoints.size(); ++i) {
-        if (i) j << ",";
-        j << "{\"host\":\"" << jesc(res.endpoints[i].host) << "\",\"port\":"
-          << (int)res.endpoints[i].port << "}";
-    }
-    j << "]}";
-    return j.str();
-}
-#else
 static std::string naa_discover_json(bool) {
     return "{\"ok\":false,\"error\":\"macOS 版暂不支持 NAA 端点发现（Windows 专属）\"}";
 }
-#endif
 
 // ---------------- DirectSDM：源 DSD 与目标 DSD 同速率时的逐位直通 ----------------
 // 判定必须在解码之前：DSD256 整曲解成 PCM 要几百 MB，先判再决定路径。
 static bool direct_sdm_eligible(const PlayParams& p, const DsdInfo& info, std::string& why) {
-    if (p.dsdNative) { why = "DSD Native 还没实现（它走 ASIO 原生 DSD，不是 DoP）"; return false; }
+    if (p.dsdNative) { why = "DSD Native 还没实现（它走 Native DSD 驱动通道，不是 DoP）"; return false; }
     if (p.dsd < 64) { why = "输出不是 DSD：把 SDM 页的比特率选成 DSD64/128/256（DoP）"; return false; }
     const uint32_t base = (info.rate % 48000u == 0) ? 48000u : 44100u;
     const uint32_t target = rta::dsp::dsd_rate(p.dsd, base);
@@ -1498,7 +965,7 @@ static bool play_one_direct(const std::string& file, const PlayParams& p) {
         // 一旦被重采样就不再是合法 DoP，接收端判非法并静音 —— 必须明确报错而不是降质播放。
         if (p.backend == "wasapi-shared") {
             std::lock_guard<std::mutex> lk(ps.mtx);
-            ps.error = "共享模式不支持 DoP/DSD（共享会重采样破坏 DoP 载波），请切换 WASAPI 独占或 ASIO。";
+            ps.error = "共享模式不支持 DoP/DSD（共享会重采样破坏 DoP 载波），请切换到独占模式。";
             return false;
         }
         const uint32_t srcRate = src.rate;
@@ -1515,11 +982,7 @@ static bool play_one_direct(const std::string& file, const PlayParams& p) {
         // HF-01 接线（2026-10-22）：空支持列表一律当「不支持/端点异常」，绝不静默放行（交接单 §6）。
         // DoP 固定 24-bit 容器，不参与位深回退（维持现状）。
         if (p.backend.empty() || p.backend == "wasapi") {
-#if defined(_WIN32)
-            const auto rates = WasapiOutput::exclusive_rates(p.device, 24, ch);
-#else
             const std::vector<uint32_t> rates = probe_exclusive_rates(p.device, 24, ch);
-#endif
             bool ok = false;
             for (auto r : rates) if (r == carrier) ok = true;
             if (!ok) {
@@ -1549,11 +1012,7 @@ static bool play_one_direct(const std::string& file, const PlayParams& p) {
             std::string dev = "默认音频设备";
             if (p.backend == "naa") dev = p.naaHost.empty() ? "NAA 127.0.0.1:43210" : p.naaHost;
             else if (p.backend == "null") dev = "Null 输出（不出声）";
-#if defined(_WIN32)
-            else for (const auto& d : WasapiOutput::enumerate()) if (d.isDefault) dev = d.name;
-#else
             else { std::string di; mac_find_dev(std::string(), dev, di); }
-#endif
             std::ostringstream sig;
             sig << "{\"src\":\"" << jesc(file) << "\""
                 << ",\"codec\":\"dsd\""
@@ -1714,14 +1173,7 @@ static bool play_one_direct(const std::string& file, const PlayParams& p) {
                 // 导致 END pos=0 error=""）。
                 if (++timeouts > 200) {
                     std::string devL = "默认音频设备", devId;
-#if defined(_WIN32)
-                    for (const auto& d : WasapiOutput::enumerate()) {
-                        const bool hit = p.device.empty() ? d.isDefault : (d.id == p.device);
-                        if (hit) { devL = d.name; devId = d.id; break; }
-                    }
-#else
                     mac_find_dev(p.device, devL, devId);
-#endif
                     std::ostringstream fs;
                     fs << "RENDERFAIL 设备流 " << (timeouts * 20 / 1000.0) << " 秒未接受数据（DirectSDM/DoP）"
                        << "（疑似虚拟声卡/独占模式不可用）"
@@ -1730,7 +1182,7 @@ static bool play_one_direct(const std::string& file, const PlayParams& p) {
                        << " GetBuffer HRESULT=" << sink->last_gb_hr()
                        << " device=\"" << devL << "\""
                        << " id=" << (devId.empty() ? "(默认)" : devId)
-                       << "。DoP/DSD 不能回退共享模式(共享会重采样破坏 DoP 载波),请改用独占可用的设备或 ASIO。";
+                       << "。DoP/DSD 不能回退共享模式(共享会重采样破坏 DoP 载波),请改用独占可用的设备。";
                     play_log(fs.str());
                     { std::lock_guard<std::mutex> lk(ps.mtx); ps.error = fs.str(); }
                     break;
@@ -1796,7 +1248,7 @@ static bool play_one_impl(const std::string& file, const PlayParams& p, rta::aud
         // （DirectSDM 路径在 play_one_direct 里另有一个相同的门。）
         if (p.backend == "wasapi-shared" && p.dsd >= 64) {
             std::lock_guard<std::mutex> lk(ps.mtx);
-            ps.error = "共享模式不支持 DoP/DSD（共享会重采样破坏 DoP 载波），请切换 WASAPI 独占或 ASIO。";
+            ps.error = "共享模式不支持 DoP/DSD（共享会重采样破坏 DoP 载波），请切换到独占模式。";
             return false;
         }
         LoadNote note;
@@ -1864,45 +1316,8 @@ static bool play_one_impl(const std::string& file, const PlayParams& p, rta::aud
         // 必须在设备能力检查之前做：失效端点会让 exclusive_rates 对任何位深都返回空列表，
         // 否则永远走不到"回退默认端点"这一步（交接单 §2.1 的并行嫌疑）。
         PlayParams pEff = p;
-#if defined(_WIN32)
-        if (p.backend.empty() || p.backend == "wasapi") {
-            if (p.device.empty()) {
-                // 空 device = "系统默认端点"。但 probe_formats("") 解析不出任何设备
-                //（它只在 id 或名字精确匹配时命中），于是后续独占能力检查拿到空列表，
-                // 报出的却是"设备独占模式不支持 44100 Hz…端点不存在或已禁用: 默认端点"——
-                // 归因误导（2026-10-23 现场：用户明明有一块 ACTIVE 的 UltraLite-mk5）。
-                // 这里先把空 id 解析成真实的 ACTIVE 端点（优先系统默认），后续全线用真实 id。
-                const auto devs = WasapiOutput::enumerate();
-                const DeviceInfo* pick = nullptr;
-                for (const auto& d : devs) {
-                    if (d.state != DEVICE_STATE_ACTIVE) continue;
-                    if (!pick) pick = &d;
-                    if (d.isDefault) { pick = &d; break; }
-                }
-                if (pick) {
-                    pEff.device = pick->id;
-                    appendNote("设备未指定，解析为 ACTIVE 端点(" + pick->name + ")");
-                }
-            }
-            if (!p.device.empty()) {
-                const FormatProbe ep = WasapiOutput::probe_formats(p.device);
-                if (!ep.endpointAlive) {
-                    const std::string shown = ep.friendlyName.empty()
-                        ? p.device : (ep.friendlyName + " / " + p.device);
-                    std::string defName = "默认端点";
-                    for (const auto& d : WasapiOutput::enumerate())
-                        if (d.isDefault) { defName = d.name + " / " + d.id; break; }
-                    play_log("ENDPOINT_FALLBACK 端点不存在或已禁用: " + shown +
-                             " → 回退默认端点(" + defName + ")");
-                    appendNote("配置端点不存在或已禁用(" + shown + ")，已回退默认端点");
-                    pEff.device.clear();     // 空 = WASAPI 默认端点
-                }
-            }
-        }
-#else
         // macOS：空设备由 CoreAudioOutput::open 解析为系统默认输出（§13.9 实测）；
         // 指定设备失效时 open 返回 DeviceNotFound 并带设备可见文案，不需要播放前预检。
-#endif
 
         // GPU 后端偏好要在建管线之前生效（DLL 是懒加载的）
         rta::dsp::set_gpu_vendor(p.gpuVendor.empty() ? "auto" : p.gpuVendor);
@@ -1951,11 +1366,6 @@ static bool play_one_impl(const std::string& file, const PlayParams& p, rta::aud
         // 这正是用户要的"锁定声卡当前设置的采样率"。
         uint32_t sysRate = 0;
         if (reqRate == "follow") {
-#if defined(_WIN32)
-            uint32_t mr = 0; int mc = 0; bool mf = false; std::string me;
-            if (WasapiSharedOutput::query_mix_format(pEff.device, mr, mc, mf, me)) sysRate = mr;
-            else play_log("SYSRATE_EMPTY GetMixFormat 失败: " + me);
-#else
             // macOS：CoreAudio 无"混音格式"概念，跟随设备当前标称采样率（语义等价：
             // 用户要的"锁定声卡当前设置的采样率"，kAudioDevicePropertyNominalSampleRate）。
             std::string dn, di;
@@ -1963,7 +1373,6 @@ static bool play_one_impl(const std::string& file, const PlayParams& p, rta::aud
             for (const auto& d : mac_enum_devices())
                 if (d.id == di && d.nominalRate) { sysRate = d.nominalRate; break; }
             if (!sysRate) play_log("SYSRATE_EMPTY 设备标称率不可读");
-#endif
         }
         const rta::audio::RatePick pick =
             rta::audio::pick_output_rate(reqRate, in.rate, probeRates, sysRate);
@@ -2047,35 +1456,11 @@ static bool play_one_impl(const std::string& file, const PlayParams& p, rta::aud
         cfg.preAttenDb = preAtten;
         cfg.twoStage = p.twoStage;
 
-        // ---- DSD Native（ASIO）：当前没有 ASIO 后端，如实告知而不是假装在放 ----
+        // ---- DSD Native：本平台没有原生 DSD 驱动通道，如实告知而不是假装在放 ----
         if (p.dsdNative) {
-#if defined(_WIN32)
-            std::string drivers;
-            HKEY hk = nullptr;
-            if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"SOFTWARE\\ASIO", 0, KEY_READ, &hk) == ERROR_SUCCESS) {
-                for (DWORD i = 0;; ++i) {
-                    wchar_t name[256];
-                    DWORD len = 256;
-                    if (RegEnumKeyExW(hk, i, name, &len, nullptr, nullptr, nullptr, nullptr) != ERROR_SUCCESS) break;
-                    char buf[512] = {0};
-                    WideCharToMultiByte(CP_UTF8, 0, name, -1, buf, sizeof(buf) - 1, nullptr, nullptr);
-                    if (!drivers.empty()) drivers += "、";
-                    drivers += buf;
-                }
-                RegCloseKey(hk);
-            }
             std::lock_guard<std::mutex> lk(ps.mtx);
-            ps.error = "DSD Native 还没实现：要把 1-bit 码流按 ASIO 的 DSD 采样类型（ASIOSTDSDInt8*）直接送出，"
-                       "而当前管线输出的是 int32 PCM（DoP 封装）。" +
-                       (drivers.empty() ? std::string("本机也没有 ASIO 驱动。")
-                                        : ("本机 ASIO 驱动：" + drivers + "。")) +
-                       "DoP 走 PCM 通道，ASIO / WASAPI 都能承载。";
+            ps.error = "DSD Native 需要 Windows 专有驱动通道，macOS 上不可用；请用 DoP（CoreAudio 可承载）。";
             return false;
-#else
-            std::lock_guard<std::mutex> lk(ps.mtx);
-            ps.error = "DSD Native 需要 ASIO（Windows 驱动体系），macOS 上不可用；请用 DoP（CoreAudio 可承载）。";
-            return false;
-#endif
         }
 
         // ---- DSD（DoP）：管线先升到 DSD 速率，再调制 + 打包成 24-bit 载波 ----
@@ -2217,20 +1602,6 @@ static bool play_one_impl(const std::string& file, const PlayParams& p, rta::aud
                     std::ostringstream es;
                     es << "设备独占模式不支持 " << wantDevRate << " Hz（请求位深 " << reqBits
                        << "-bit，候选 16/24/32 全不命中）。";
-#if defined(_WIN32)
-                    const FormatProbe pr = WasapiOutput::probe_formats(pEff.device);
-                    if (!pr.endpointAlive)
-                        es << "端点不存在或已禁用: "
-                           << ((pr.friendlyName.empty() && pr.deviceId.empty())
-                                   ? (pEff.device.empty() ? std::string("默认端点") : pEff.device)
-                                   : pr.friendlyName + " / " + pr.deviceId)
-                           << "。";
-                    es << "端点 id=" << (pr.deviceId.empty() ? "(未找到)" : pr.deviceId)
-                       << "；独占支持 16-bit: " << join(pr.rates16)
-                       << "；24-bit: " << join(pr.rates24)
-                       << "；32-bit: " << join(pr.rates32)
-                       << srcDesc;    // 源采样率 + 后端：日志要能自证是哪首源、哪个后端
-#else
                     // macOS：CoreAudio caps 是"整设备一份率表"（无按位深分档），用已探测的列表
                     {
                         const std::vector<uint32_t>& rl = ratesByBits.empty()
@@ -2239,7 +1610,6 @@ static bool play_one_impl(const std::string& file, const PlayParams& p, rta::aud
                            << "；CoreAudio 支持率: " << join(rl)
                            << srcDesc;
                     }
-#endif
                     if (!rateAuto) {
                         // 明确选择档：绝不自动改率，但必须让用户清楚「做不到的是你选的那个率」
                         const auto dec = rta::audio::decide_capability_failure(false, wantDevRate, {});
@@ -2276,19 +1646,6 @@ static bool play_one_impl(const std::string& file, const PlayParams& p, rta::aud
         bool     mixFloat = false;
         if (p.backend == "wasapi-shared") {
             std::string mixErr;
-#if defined(_WIN32)
-            if (!WasapiSharedOutput::query_mix_format(pEff.device, mixRate, mixCh, mixFloat, mixErr)) {
-                std::lock_guard<std::mutex> lk(ps.mtx);
-                ps.error = "读取系统混音格式失败（共享模式）：" + mixErr +
-                           "；端点=" + (pEff.device.empty() ? "(默认)" : pEff.device);
-                return false;
-            }
-            if (!mixFloat) {
-                std::lock_guard<std::mutex> lk(ps.mtx);
-                ps.error = "系统混音格式不是 float32，共享模式暂不支持；请使用 WASAPI 独占。";
-                return false;
-            }
-#else
             // macOS 共享模式：CoreAudio 混音域恒为 float32、声道取设备输出流声道数（实测 2ch），
             // 率取设备当前标称率（§13.10.3：共享路径数值在 |v|<2^24 时逐位精确）。
             std::string dn, di;
@@ -2304,7 +1661,6 @@ static bool play_one_impl(const std::string& file, const PlayParams& p, rta::aud
                            (pEff.device.empty() ? "(默认)" : pEff.device);
                 return false;
             }
-#endif
             const uint32_t wantRate = cfg.outRate ? cfg.outRate : (uint32_t)in.rate;
             if (wantRate != mixRate)
                 appendNote("共享模式按系统混音率 " + std::to_string(mixRate) + " Hz 输出（请求 " +
@@ -2442,15 +1798,7 @@ static bool play_one_impl(const std::string& file, const PlayParams& p, rta::aud
             dev = p.naaHost.empty() ? "NAA 127.0.0.1:43210" : p.naaHost;
             devId = "naa";
         } else {
-#if defined(_WIN32)
-            for (const auto& d : WasapiOutput::enumerate()) {
-                const bool hit = pEff.device.empty() ? d.isDefault : (d.id == pEff.device);
-                if (hit) { dev = d.name; devId = d.id; break; }
-            }
-            if (dev.empty()) dev = pEff.device.empty() ? "默认音频设备" : pEff.device;
-#else
             mac_find_dev(pEff.device, dev, devId);
-#endif
         }
 
         // 信号链快照：源文件 -> 解码 -> 重采样 -> 抖动 -> 音量 -> 设备
@@ -2724,7 +2072,7 @@ static bool play_one_impl(const std::string& file, const PlayParams& p, rta::aud
             }
         }
 
-        // 输出后端：WASAPI 独占 / 共享 / ASIO / NAA / Null，由 make_sink 决定（pEff：可能已回退默认端点）
+        // 输出后端：独占 / 共享 / NAA / Null，由 make_sink 决定（pEff：可能已回退默认端点）
         auto sink = make_sink(pEff);
         if (!sink->open(sink_opts(pEff), deviceRate, outCh, outBits)) {
             RQ.abort.store(true); RQ.cv.notify_all(); prod.join();
@@ -2732,18 +2080,6 @@ static bool play_one_impl(const std::string& file, const PlayParams& p, rta::aud
             std::string msg = "打开输出后端失败: " + sink->last_error();
             // HF-01/02：open 失败把第一刀的 OpenFail（请求格式/支持列表/HRESULT/端点 id）拼进错误，
             // 不再只剩一句 UNSUPPORTED_FORMAT。
-#if defined(_WIN32)
-            if (auto* w = dynamic_cast<WasapiSink*>(sink.get())) {
-                const OpenFail& f = w->fail();
-                msg += "；请求[" + (f.request.empty() ? std::string("(未记录)") : f.request) + "]";
-                msg += "；该位深独占支持[" + (f.supportedList.empty()
-                            ? std::string("空（端点不可用或不支持该位深）") : f.supportedList) + "]";
-                msg += "；HRESULT " + (f.hresultText.empty() ? std::string("(未记录)") : f.hresultText);
-                msg += "；端点 id=" + (f.deviceId.empty() ? std::string("(默认)") : f.deviceId);
-                if (f.hresultText.find("DEVICE_INVALIDATED") != std::string::npos)
-                    msg = "音频设备已失效（AUDCLNT_E_DEVICE_INVALIDATED），请在设置里重新选择输出设备。" + msg;
-            }
-#endif
             if (!note.text.empty()) msg += "；note=" + note.text;
             ps.error = msg;
             return false;
@@ -2751,11 +2087,6 @@ static bool play_one_impl(const std::string& file, const PlayParams& p, rta::aud
         // 2026-10-23 真机 DEBUG：打开成功也要如实带出「驱动实际接受的是哪种独占格式」。
         // 之前这句只有失败时才有，成功时用户只看到"32-bit"，根本不知道内部是紧凑24还是32容器，
         // 1.3.x「能播/不能播」的原因因此全靠猜（本机是紧凑24、UltraLite 是32容器/24有效）。
-#if defined(_WIN32)
-        if (auto* w = dynamic_cast<WasapiSink*>(sink.get())) {
-            if (!w->fmt_note().empty()) appendNote(w->fmt_note());
-        }
-#endif
         if (!sink->start()) {
             RQ.abort.store(true); RQ.cv.notify_all(); prod.join();
             std::lock_guard<std::mutex> lk(ps.mtx);
@@ -2767,16 +2098,6 @@ static bool play_one_impl(const std::string& file, const PlayParams& p, rta::aud
         // 为什么不是塞进上面的 PLAY 行：PLAY 在 open 之前就写出去了（信号链要先落盘，
         // 而设备必须等首块数据就绪才打开），那时还不知道实际缓冲。这里单独一条 PLAYBUF，
         // 字段名与方案 §5.4 一致，日志检索方便。
-#if defined(_WIN32)
-        if (auto* w = dynamic_cast<WasapiSink*>(sink.get())) {
-            const auto& bp = w->buffer_policy();
-            play_log(std::string("PLAYBUF ") +
-                     rta::audio::buffer_playbuf_json(bp, sink->buffer_frames(),
-                                                     w->device_period_frames(),
-                                                     w->init_recipe(), w->realigned()));
-            g_dbgPer.store(w->device_period_frames());
-        }
-#endif
 
         // ---------------- 渲染主循环（实现在 src/audio/render_loop.h，与回归测试共用）----------------
         // 2026-10-22 事故（VM 上独占流 GetCurrentPadding 恒满 → write_available 恒 0 →
@@ -2796,11 +2117,6 @@ static bool play_one_impl(const std::string& file, const PlayParams& p, rta::aud
         rl.dbgEv = &g_dbgEv; rl.dbgEvInt = &g_dbgEvInt; rl.dbgProd = &g_dbgProd;
         // C1 L2 起播看门狗：8 秒太慢、4 秒 RENDERFAIL 会触发「回退共享 + 从头重播」，
         // 所以 0.8 秒零写入就重开 20ms（只对 WASAPI 独占有意义，其它后端不设这个钩子）。
-#if defined(_WIN32)
-        if (auto* w = dynamic_cast<WasapiSink*>(sink.get()))
-            rl.l2Degrade = [w]() { return w->reopen_at_20ms(); };
-#endif
-#if !defined(_WIN32)
         // macOS 扩展诊断：RENDERFAIL 时带出 CoreAudio 设备侧实测（render_loop 是共享代码，
         // 平台细节经钩子注入 —— Windows 侧不设钩子，日志逐字节不变）
         rl.extraDiag = [&sink]() -> std::string {
@@ -2811,14 +2127,13 @@ static bool play_one_impl(const std::string& file, const PlayParams& p, rta::aud
             }
             return std::string();
         };
-#endif
         rl.log = [](const std::string& s) { play_log(s); };
         rl.dlogFn = [](const std::string& s) { dlog(s); };
         rl.deviceLabel = dev;
         rl.deviceIdDesc = devId;
         rl.onShared = (p.backend == "wasapi-shared");
         // 只有「默认走 WASAPI 独占」的普通 PCM 播放才允许自动回退共享；
-        // DoP/DSD 绝不回退（共享会重采样破坏 DoP 载波），ASIO/NAA/Null 与共享本身无关。
+        // DoP/DSD 绝不回退（共享会重采样破坏 DoP 载波），NAA/Null 与共享本身无关。
         rl.fallbackEligible = (sharedFallback != nullptr) && !dop &&
                               (p.backend.empty() || p.backend == "wasapi");
         rl.dop = dop;
@@ -2894,43 +2209,15 @@ struct QueueState {
 static QueueState g_q;
 // ---- 队列持久化：重启后仍保留播放列表 ----
 static std::string queue_file() {
-#if defined(_WIN32)
-    wchar_t buf[MAX_PATH];
-    GetModuleFileNameW(nullptr, buf, MAX_PATH);
-    std::wstring d(buf);
-    const size_t s = d.find_last_of(L"\\/");
-    if (s != std::wstring::npos) d = d.substr(0, s);
-    d += L"\\rlplayer-playlist.txt";
-    const int n = WideCharToMultiByte(CP_UTF8, 0, d.c_str(), -1, nullptr, 0, nullptr, nullptr);
-    std::string o((size_t)n, 0);
-    WideCharToMultiByte(CP_UTF8, 0, d.c_str(), -1, o.data(), n, nullptr, nullptr);
-    if (!o.empty() && o.back() == 0) o.pop_back();
-    return o;
-#else
     return rta::platform::module_dir_utf8() + "/rlplayer-playlist.txt";
-#endif
 }
 
 // ---- 最近播放（落盘，最多 200 条，写的时候就把标题/艺术家记下来，
 //      这样列表视图不用为了显示去翻音乐库）----
 static std::string path_in_exe_dir(const char* name) {
-#if defined(_WIN32)
-    wchar_t buf[MAX_PATH];
-    GetModuleFileNameW(nullptr, buf, MAX_PATH);
-    std::wstring d(buf);
-    const size_t s = d.find_last_of(L"\\/");
-    if (s != std::wstring::npos) d = d.substr(0, s);
-    std::wstring w = (name && *name) ? (d + L"\\" + std::wstring(name, name + std::strlen(name))) : d;
-    const int n = WideCharToMultiByte(CP_UTF8, 0, w.c_str(), -1, nullptr, 0, nullptr, nullptr);
-    std::string o((size_t)n, 0);
-    WideCharToMultiByte(CP_UTF8, 0, w.c_str(), -1, o.data(), n, nullptr, nullptr);
-    if (!o.empty() && o.back() == 0) o.pop_back();
-    return o;
-#else
     // POSIX：路径本来就是 UTF-8，无宽字符转换（platform/path_posix.h 契约）
     const std::string base = rta::platform::module_dir_utf8();
     return (name && *name) ? (base + "/" + name) : base;
-#endif
 }
 static std::string path_in_exe_dir(const std::string& name) { return path_in_exe_dir(name.c_str()); }
 
@@ -3131,151 +2418,10 @@ static std::string default_recording_path() {
     return recDir + "/" + buf;
 }
 
-#if defined(_WIN32)   // WASAPI 采集线程（macOS 无 WASAPI；/api/input/* 返回不支持）
-static void input_worker_func(std::shared_ptr<rta::audio::WasapiCapture> cap,
-                              std::shared_ptr<rta::audio::WasapiSharedOutput> sharedOut,
-                              std::string mode,
-                              std::string outFile,
-                              double maxSeconds) {
-    HRESULT ci = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
-    const bool ownCom = SUCCEEDED(ci);
+// 2026-10-25：原 WASAPI 采集线程（Windows 专属）已随平台删除。
+// 能力未丢：macOS 侧由下方 input_worker_mac（CoreAudioInput）等价实现，
+// 主体逻辑同构（读取/统计/状态上报/结束写 WAV），仅直通监听用 CoreAudioSink。
 
-    const uint32_t rate = cap->rate();
-    const int channels = cap->channels();
-    const size_t totalTargetFrames = (maxSeconds > 0.0) ? (size_t)(maxSeconds * (double)rate) : 0;
-
-    std::vector<float> recorded;
-    if (mode == "record" && totalTargetFrames > 0) {
-        recorded.reserve(totalTargetFrames * (size_t)channels);
-    }
-
-    std::vector<float> chunk(2048 * (size_t)channels);
-    size_t recordedFrames = 0;
-    auto tStart = std::chrono::steady_clock::now();
-
-    while (!g_inputSession.stopFlag.load()) {
-        if (totalTargetFrames > 0 && recordedFrames >= totalTargetFrames) {
-            break;
-        }
-        size_t want = 2048;
-        if (totalTargetFrames > 0 && recordedFrames + want > totalTargetFrames) {
-            want = totalTargetFrames - recordedFrames;
-        }
-
-        size_t n = cap->read_available(chunk.data(), want);
-        if (n > 0) {
-            if (mode == "record") {
-                recorded.insert(recorded.end(), chunk.begin(), chunk.begin() + n * (size_t)channels);
-            }
-            recordedFrames += n;
-
-            // RMS 与峰值计算
-            double sumSq = 0.0;
-            double maxPeak = 0.0;
-            const size_t totalSamples = n * (size_t)channels;
-            for (size_t i = 0; i < totalSamples; ++i) {
-                double absVal = std::fabs((double)chunk[i]);
-                if (absVal > maxPeak) maxPeak = absVal;
-                sumSq += (double)chunk[i] * (double)chunk[i];
-            }
-            double rms = (totalSamples > 0) ? std::sqrt(sumSq / (double)totalSamples) : 0.0;
-            double rmsDb = (rms > 1e-12) ? 20.0 * std::log10(rms) : -999.0;
-            double peakDb = (maxPeak > 1e-12) ? 20.0 * std::log10(maxPeak) : -999.0;
-
-            // 直通监听（如果配置了共享输出）
-            if (sharedOut && sharedOut->is_float()) {
-                if (cap->rate() == sharedOut->mix_rate() && cap->channels() == sharedOut->mix_channels()) {
-                    sharedOut->write_available_f32(chunk.data(), n);
-                } else if (cap->rate() == sharedOut->mix_rate() && cap->channels() == 1 && sharedOut->mix_channels() == 2) {
-                    std::vector<float> stereo(n * 2);
-                    for (size_t i = 0; i < n; ++i) {
-                        stereo[i * 2 + 0] = chunk[i];
-                        stereo[i * 2 + 1] = chunk[i];
-                    }
-                    sharedOut->write_available_f32(stereo.data(), n);
-                } else {
-                    double ratio = (double)cap->rate() / (double)sharedOut->mix_rate();
-                    size_t outFrames = (size_t)((double)n / ratio);
-                    int outCh = sharedOut->mix_channels();
-                    if (outFrames > 0 && outCh > 0) {
-                        std::vector<float> resampled(outFrames * (size_t)outCh);
-                        for (size_t i = 0; i < outFrames; ++i) {
-                            double srcIdx = (double)i * ratio;
-                            size_t idx0 = (size_t)srcIdx;
-                            size_t idx1 = (idx0 + 1 < n) ? idx0 + 1 : idx0;
-                            double frac = srcIdx - (double)idx0;
-                            for (int ch = 0; ch < outCh; ++ch) {
-                                int srcCh = (ch < channels) ? ch : (channels - 1);
-                                float s0 = chunk[idx0 * (size_t)channels + srcCh];
-                                float s1 = chunk[idx1 * (size_t)channels + srcCh];
-                                resampled[i * (size_t)outCh + ch] = (float)((1.0 - frac) * s0 + frac * s1);
-                            }
-                        }
-                        sharedOut->write_available_f32(resampled.data(), outFrames);
-                    }
-                }
-            }
-
-            {
-                std::lock_guard<std::mutex> lk(g_inputSession.mtx);
-                g_inputSession.frames = recordedFrames;
-                g_inputSession.seconds = (double)recordedFrames / (double)rate;
-                g_inputSession.water = cap->water_level();
-                g_inputSession.overflow = cap->overflow_count();
-                g_inputSession.underflow = cap->underflow_count();
-                g_inputSession.posClips = cap->positive_clips();
-                g_inputSession.negClips = cap->negative_clips();
-                g_inputSession.rmsDb = rmsDb;
-                g_inputSession.peakDb = peakDb;
-            }
-        } else {
-            std::this_thread::sleep_for(std::chrono::milliseconds(5));
-        }
-
-        if (maxSeconds > 0.0) {
-            auto now = std::chrono::steady_clock::now();
-            double el = std::chrono::duration<double>(now - tStart).count();
-            if (el > maxSeconds + 3.0) {
-                break;
-            }
-        }
-    }
-
-    cap->stop();
-    if (sharedOut) sharedOut->close();
-
-    // 录制落盘
-    if (mode == "record" && recordedFrames > 0 && !outFile.empty()) {
-        try {
-            std::error_code ec;
-            auto p = fs::u8path(outFile);
-            if (p.has_parent_path()) {
-                fs::create_directories(p.parent_path(), ec);
-            }
-            rta::audio::write_capture_wav(outFile, recorded.data(), recordedFrames, channels, rate, 24);
-        } catch (const std::exception& e) {
-            std::lock_guard<std::mutex> lk(g_inputSession.mtx);
-            g_inputSession.error = "WAV写入失败: " + std::string(e.what());
-        }
-    }
-
-    {
-        std::lock_guard<std::mutex> lk(g_inputSession.mtx);
-        g_inputSession.running.store(false);
-        g_inputSession.frames = recordedFrames;
-        g_inputSession.seconds = (rate > 0) ? (double)recordedFrames / (double)rate : 0.0;
-        g_inputSession.water = cap->water_level();
-        g_inputSession.overflow = cap->overflow_count();
-        g_inputSession.underflow = cap->underflow_count();
-        g_inputSession.posClips = cap->positive_clips();
-        g_inputSession.negClips = cap->negative_clips();
-    }
-
-    if (ownCom) CoUninitialize();
-}
-#endif // _WIN32
-
-#if !defined(_WIN32)
 // ---------------- macOS 采集 worker（§13.13）----------------
 // 主体逻辑与 Windows 的 input_worker_func 同构（读取/统计/状态上报/结束写 WAV）；
 // 差异只有直通监听：mac 用 CoreAudioSink（int32 低位对齐语义），float→int32 转换后写入
@@ -3367,7 +2513,6 @@ static void input_worker_mac(std::shared_ptr<rta::platform::CoreAudioInput> cap,
     }
     g_inputSession.running.store(false);
 }
-#endif
 
 // rlplayer-llm.conf 的可选 proxy= 行(P1.5 后备代理)。llm.h 的 LlmConfig 不带该字段
 // (llm.h 不在本轮可改清单),rtaweb 侧自行解析同一文件:键名 proxy,值形如
@@ -3407,11 +2552,7 @@ static void play_log(const std::string& s) {
     {
         const std::time_t nowT = std::time(nullptr);
         std::tm lt{};
-#if defined(_WIN32)
-        localtime_s(&lt, &nowT);
-#else
         localtime_r(&nowT, &lt);
-#endif
         const auto ms = (int)(std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::system_clock::now().time_since_epoch()).count() % 1000);
         char ts[64];
@@ -3855,16 +2996,6 @@ static std::string page();
 // F3：端点探活缓存。probe_formats 对 16/24/32 各跑一遍独占支持率（每端点最多约 1s），
 // 而 webui 是单线程 accept —— /api/diag 每次实时探活会让期间的全部 API 排队。
 // 这里按端点 id 缓存探活结果，TTL 60s；?refresh=1 强制重探。
-#if defined(_WIN32)
-struct DiagProbeEntry {
-    FormatProbe pr;
-    std::chrono::steady_clock::time_point tp;
-};
-#endif
-#if defined(_WIN32)
-static std::mutex g_diagProbeMx;
-static std::map<std::string, DiagProbeEntry> g_diagProbeCache;
-#endif
 
 // ---------------- DeepSeek API Key（2026-10-22 功能4）----------------
 // 用户原话：「元数据没有提供 ds 的 api 输入接口（就默认 deepseek）」。
@@ -4108,8 +3239,70 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
             }
             if (!add.empty() && !lib.addRoot(add))
                 return "{\"ok\":false,\"error\":\"目录不存在: " + jesc(add) + "\"}";
-            if (!rem.empty()) lib.removeRoot(rem);
-            return "{\"ok\":true}";
+            // 反馈 #3「扫描记录不可消除」：移除库根必须连带清掉该目录（含子目录）扫出来的曲目，
+            // 否则歌还留在列表里、点了播放就失败。removedTracks 让前端能如实告诉用户清掉了几首。
+            int removedTracks = 0;
+            bool removedRoot = false;
+            if (!rem.empty()) {
+                const int n = lib.removeRootEx(rem);
+                removedRoot = (n >= 0);
+                removedTracks = (n > 0) ? n : 0;
+                if (!removedRoot) removedTracks = 0;
+            }
+            std::ostringstream j;
+            j << "{\"ok\":true,\"removedRoot\":" << (removedRoot ? "true" : "false")
+              << ",\"removedTracks\":" << removedTracks
+              << ",\"tracks\":" << lib.trackCount() << "}";
+            return j.str();
+        }
+        // 反馈 #4「目录删不掉」：真删磁盘目录，与「从库中移除」是两件不同的事（前者不碰磁盘）。
+        // 安全约束全在 Library 里（库根之下 / 不是库根本身 / 拒绝符号链接），
+        // 这里只负责参数校验与把「统计」如实回给前端做二次确认的落地校验。
+        // ⚠️ 路由顺序：/api/lib/rmdirinfo 必须以 /api/lib/rmdir 为**前缀**匹配到，
+        //    所以 rmdirinfo 的判定必须写在 rmdir 之前（否则永远走不进统计分支）。
+        auto parse_dir_body = [&](const std::string& body) -> std::string {
+            std::string dir;
+            std::istringstream is(body);
+            std::string tok;
+            while (std::getline(is, tok, (char)38)) {
+                const size_t e = tok.find((char)61);
+                if (e == std::string::npos) continue;
+                const std::string kk = urlDecode(tok.substr(0, e));
+                const std::string vv = urlDecode(tok.substr(e + 1));
+                if (kk == "dir") dir = vv;
+            }
+            return dir;
+        };
+        // 只统计、不删除：给前端二次确认弹窗提供「将删除 N 个文件」的真实数字。
+        if (rq.path.rfind("/api/lib/rmdirinfo", 0) == 0) {
+            const std::string dir = parse_dir_body(rq.body);
+            if (dir.empty()) return "{\"ok\":false,\"error\":\"缺少 dir 参数\"}";
+            if (!valid_utf8(dir)) return utf8_path_reject(dir);
+            int files = 0, dirs = 0;
+            std::string err;
+            if (!lib.scanDirForRemoval(dir, files, dirs, err))
+                return "{\"ok\":false,\"error\":\"" + jesc(err) + "\"}";
+            std::ostringstream j;
+            j << "{\"ok\":true,\"dir\":\"" << jesc(dir) << "\""
+              << ",\"files\":" << files << ",\"dirs\":" << dirs << "}";
+            return j.str();
+        }
+        if (rq.path.rfind("/api/lib/rmdir", 0) == 0) {
+            const std::string dir = parse_dir_body(rq.body);
+            if (dir.empty()) return "{\"ok\":false,\"error\":\"缺少 dir 参数\"}";
+            if (!valid_utf8(dir)) return utf8_path_reject(dir);   // F1：下面就是 fs 操作
+            int files = 0, dirs = 0;
+            std::string err;
+            if (!lib.removeDirFromDisk(dir, files, dirs, err))
+                return "{\"ok\":false,\"error\":\"" + jesc(err) + "\"}";
+            // 目录已经从磁盘消失 ⟹ 索引里对应的曲目必须同时清掉，否则又是 #3 那个「点了播放就失败」。
+            const int purged = lib.purgeTracksUnder(dir);
+            std::ostringstream j;
+            j << "{\"ok\":true,\"dir\":\"" << jesc(dir) << "\""
+              << ",\"files\":" << files << ",\"dirs\":" << dirs
+              << ",\"removedTracks\":" << purged
+              << ",\"tracks\":" << lib.trackCount() << "}";
+            return j.str();
         }
         // 注意：/api/lib/albums 必须在 /api/lib/album 之前判断（后者是前者的前缀）
         if (rq.path.rfind("/api/lib/albums", 0) == 0) {
@@ -4334,20 +3527,8 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
                     if (!utf8) break;
                     i += (size_t)n + 1;
                 }
-#if defined(_WIN32)
-                if (!utf8) {
-                    const int wl = MultiByteToWideChar(936, 0, s.c_str(), (int)s.size(), nullptr, 0);
-                    std::wstring w((size_t)wl, L'\0');
-                    MultiByteToWideChar(936, 0, s.c_str(), (int)s.size(), w.data(), wl);
-                    const int ml = WideCharToMultiByte(CP_UTF8, 0, w.c_str(), wl, nullptr, 0, nullptr, nullptr);
-                    std::string o((size_t)ml, '\0');
-                    WideCharToMultiByte(CP_UTF8, 0, w.c_str(), wl, o.data(), ml, nullptr, nullptr);
-                    s.swap(o);
-                }
-#else
                 // POSIX：GBK(936) 歌词转码未移植；非 UTF-8 内容按原样返回（POSIX 文件生态默认 UTF-8）
                 (void)utf8;
-#endif
                 text.swap(s); src = "sidecar"; break;
             }
         }
@@ -4409,15 +3590,6 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
     if (rq.path.rfind("/api/pl/", 0) == 0 || rq.path == "/api/pl") {
         ct = "application/json; charset=utf-8";
         auto plDir = [] { return fs::u8path(path_in_exe_dir("playlists")); };
-#if defined(_WIN32)
-        auto toUtf8 = [](const std::wstring& w) {
-            const int n = WideCharToMultiByte(CP_UTF8, 0, w.c_str(), -1, nullptr, 0, nullptr, nullptr);
-            std::string o((size_t)n, 0);
-            WideCharToMultiByte(CP_UTF8, 0, w.c_str(), -1, o.data(), n, nullptr, nullptr);
-            if (!o.empty() && o.back() == 0) o.pop_back();
-            return o;
-        };
-#endif
         std::error_code ec;
         fs::create_directories(plDir(), ec);
 
@@ -4473,18 +3645,10 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
         j << "{\"ok\":true,\"lists\":[";
         bool first = true;
         for (auto& e : fs::directory_iterator(plDir(), ec)) {
-#if defined(_WIN32)
-            std::string ext = toUtf8(e.path().extension().wstring());
-#else
             std::string ext = e.path().extension().string();
-#endif
             for (auto& c : ext) c = (char)std::tolower((unsigned char)c);
             if (ext != ".m3u8") continue;
-#if defined(_WIN32)
-            std::string name = toUtf8(e.path().stem().wstring());
-#else
             std::string name = e.path().stem().string();
-#endif
             int n = 0;
             { std::ifstream f(e.path()); std::string l; while (std::getline(f, l)) if (!l.empty() && l[0] != '#') ++n; }
             if (!first) j << ",";
@@ -4517,10 +3681,6 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
         // 一条会话原则（261024-01 #9）：开始新的本地播放时，停掉可能还在跑的投放会话，
         // 避免本机声卡与网络渲染器同时出声（两套控制互相打架）。
         g_upnpPlayer.store(false);
-#if defined(_WIN32)
-        if (rta::net::CastManager::instance().get_state().running)
-            rta::net::CastManager::instance().stop();
-#endif
         {
             std::lock_guard<std::mutex> lk(ps.mtx);
             ps.error.clear();
@@ -5444,10 +4604,6 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
         ps.playing.store(false);
         // 清空队列同时结束投放会话（否则渲染器还会继续播上一首）
         g_upnpPlayer.store(false);
-#if defined(_WIN32)
-        if (rta::net::CastManager::instance().get_state().running)
-            rta::net::CastManager::instance().stop();
-#endif
         {
             std::lock_guard<std::mutex> lk(g_lastEndMx);
             g_lastEnd.isPosZeroNoErr = false;
@@ -5526,107 +4682,8 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
     // ---------------- UPnP/DLNA 媒体投放（ROADMAP P5b）----------------
     if (rq.path.rfind("/api/cast", 0) == 0) {
         ct = "application/json; charset=utf-8";
-#if !defined(_WIN32)
         // macOS：SSDP/CastManager 未移植（PLATFORM.md §11.2 白名单项）；如实报错不假装
         return "{\"ok\":false,\"error\":\"macOS 版暂不支持 UPnP 投放（SSDP 协议栈未移植）\"}";
-#else
-        if (rq.path.rfind("/api/cast/devices", 0) == 0) {
-            bool forceRescan = (rq.path.find("scan=1") != std::string::npos || rq.path.find("rescan=1") != std::string::npos);
-            auto devs = rta::net::CastManager::instance().get_devices(forceRescan);
-            std::ostringstream j;
-            j << "{\"ok\":true,\"n\":" << devs.size() << ",\"devices\":[";
-            for (size_t i = 0; i < devs.size(); ++i) {
-                if (i) j << ",";
-                j << "{\"name\":\"" << jesc(devs[i].name) << "\""
-                  << ",\"friendlyName\":\"" << jesc(devs[i].name) << "\""
-                  << ",\"model\":\"" << jesc(devs[i].model) << "\""
-                  << ",\"host\":\"" << jesc(devs[i].host) << "\""
-                  << ",\"port\":" << devs[i].port
-                  << ",\"location\":\"" << jesc(devs[i].location) << "\""
-                  << ",\"controlUrl\":\"" << jesc(devs[i].av_transport_url()) << "\""
-                  << ",\"avTransportUrl\":\"" << jesc(devs[i].av_transport_url()) << "\""
-                  << ",\"connectionManagerUrl\":\"" << jesc(devs[i].connection_manager_url()) << "\""
-                  << ",\"hasAVTransport\":" << (!devs[i].control.empty() ? "true" : "false")
-                  << "}";
-            }
-            j << "]}";
-            return j.str();
-        }
-        if (rq.path.rfind("/api/cast/state", 0) == 0) {
-            auto st = rta::net::CastManager::instance().get_state();
-            std::ostringstream j;
-            j << "{\"ok\":true"
-              << ",\"running\":" << (st.running ? "true" : "false")
-              << ",\"device\":\"" << jesc(st.device) << "\""
-              << ",\"sourceFile\":\"" << jesc(st.sourceFile) << "\""
-              << ",\"servePort\":" << st.servePort
-              << ",\"phase\":\"" << jesc(st.phase) << "\""
-              << ",\"positionSec\":" << st.positionSec
-              << ",\"transportState\":\"" << jesc(st.transportState) << "\""
-              << ",\"servedBytes\":" << st.servedBytes
-              << ",\"requestCount\":" << st.requestCount
-              << ",\"rateMatch\":\"" << jesc(st.rateMatch) << "\""
-              << ",\"warning\":\"" << jesc(st.warning) << "\""
-              << ",\"error\":\"" << jesc(st.error) << "\""
-              // 261024-01 #9：后端 = UPnP 时播放器底栏的进度/格式/暂停也取这份数据
-              << ",\"durationSec\":" << st.durationSec
-              << ",\"sampleRate\":" << st.sampleRate
-              << ",\"bits\":" << st.bits
-              << ",\"paused\":" << (st.paused ? "true" : "false")
-              << "}";
-            return j.str();
-        }
-        if (rq.path.rfind("/api/cast/start", 0) == 0) {
-            if (rq.method != "POST") return "{\"ok\":false,\"error\":\"Method Not Allowed\"}";
-            rta::net::CastStartParams p;
-            if (!rq.body.empty() && rq.body.front() == '{') {
-                auto j = rta::net::json_parse(rq.body);
-                if (j.has("dev")) p.dev = j["dev"].s();
-                if (j.has("file")) p.file = j["file"].s();
-                if (j.has("port")) p.port = (uint16_t)j["port"].n();
-                if (j.has("rate")) p.rate = (uint32_t)j["rate"].n();
-                if (j.has("bits")) p.bits = (int)j["bits"].n();
-                if (j.has("seconds")) p.seconds = j["seconds"].n();
-                if (j.has("dop")) p.dop = (j["dop"].type == rta::net::Json::Bool) ? j["dop"].b : (j["dop"].n() != 0.0);
-            } else {
-                std::istringstream is(rq.body);
-                std::string tok;
-                while (std::getline(is, tok, '&')) {
-                    size_t eq = tok.find('=');
-                    if (eq == std::string::npos) continue;
-                    std::string k = urlDecode(tok.substr(0, eq));
-                    std::string v = urlDecode(tok.substr(eq + 1));
-                    if (k == "dev") p.dev = v;
-                    else if (k == "file") p.file = v;
-                    else if (k == "port") p.port = (uint16_t)std::atoi(v.c_str());
-                    else if (k == "rate") p.rate = (uint32_t)std::strtoul(v.c_str(), nullptr, 10);
-                    else if (k == "bits") p.bits = std::atoi(v.c_str());
-                    else if (k == "seconds") p.seconds = std::atof(v.c_str());
-                    else if (k == "dop") p.dop = (v == "1" || v == "true");
-                }
-            }
-            if (p.port == 0) p.port = 8912;
-            // 一条会话原则（261024-01 #9）：手动「开始投放」先停本地播放，
-            // 避免本机声卡与网络渲染器同时出声；播放器状态交给投放会话接管前先清零。
-            ps.stopJoin();      // 原子停线程
-            ps.playing.store(false);
-            ps.paused.store(false);
-            g_upnpPlayer.store(false);
-            auto res = rta::net::CastManager::instance().start(p);
-            if (!res.ok) {
-                return "{\"ok\":false,\"error\":\"" + jesc(res.error) + "\"}";
-            }
-            return "{\"ok\":true,\"started\":true,\"phase\":\"discovering\"}";
-        }
-        if (rq.path.rfind("/api/cast/stop", 0) == 0) {
-            rta::net::CastManager::instance().stop();
-            g_upnpPlayer.store(false);
-            ps.playing.store(false);
-            ps.paused.store(false);
-            return "{\"ok\":true,\"stopped\":true}";
-        }
-        return "{\"ok\":false,\"error\":\"未知的投放 API 路径\"}";
-#endif
     }
 
     // ---------------- NAA 端点自动发现（261024-01 #11）----------------
@@ -5644,33 +4701,7 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
 
     if (rq.path.rfind("/api/upnp", 0) == 0) {
         ct = "application/json; charset=utf-8";
-#if !defined(_WIN32)
         return "{\"ok\":true,\"n\":0,\"devices\":[],\"note\":\"macOS 版暂不支持 SSDP 发现（未移植）\"}";
-#else
-        // 2026-10-23（用户 261023-04 #11）：多网卡逐卡发 M-SEARCH + 诊断信息，
-        // 并且在 JSON 里把"为什么没搜到"如实说出来（组播被代理/防火墙/AP 隔离拦截是最常见原因）。
-        rta::net::UpnpDiscoverDiag diag;
-        const auto devs = rta::net::upnp_discover(2200, &diag);
-        std::ostringstream j;
-        j << "{\"ok\":true,\"n\":" << devs.size() << ",\"devices\":[";
-        for (size_t i = 0; i < devs.size(); ++i) {
-            if (i) j << ",";
-            j << "{\"name\":\"" << jesc(devs[i].name) << "\""
-              << ",\"model\":\"" << jesc(devs[i].model) << "\""
-              << ",\"host\":\"" << jesc(devs[i].host) << "\""
-              << ",\"port\":" << devs[i].port
-              << ",\"loc\":\"" << jesc(devs[i].location) << "\"}";
-        }
-        j << "],\"diag\":{\"ifaces\":" << diag.ifaces_tried
-          << ",\"sent\":" << diag.msgs_sent
-          << ",\"note\":\"" << jesc(diag.note) << "\"}";
-        if (devs.empty()) {
-            j << ",\"hint\":\"未发现 UPnP 渲染器：SSDP 组播可能被代理(VPN/TUN)/防火墙/路由器 AP 隔离拦截。"
-                 "可关闭代理后重试，或直接填设备地址（http://IP:端口/）直连。\"";
-        }
-        j << "}";
-        return j.str();
-#endif
     }
     // ---------------- DeepSeek API Key（2026-10-22 功能4）----------------
     // ★ 不并入 /api/settings：那个端点写 rlplayer-settings.conf（整文件重写），
@@ -6074,49 +5105,12 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
         return j.str();
     }
 
-    // ASIO 驱动列表（设置页里显示，让用户知道本机有什么 ASIO 后端）
-    if (rq.path.rfind("/api/asio", 0) == 0) {
-        ct = "application/json; charset=utf-8";
-#if !defined(_WIN32)
-        return "{\"ok\":true,\"drivers\":[],\"note\":\"macOS 无 ASIO 驱动体系\"}";
-#else
-        std::ostringstream j;
-        j << "{\"ok\":true,\"drivers\":[";
-        HKEY hk = nullptr;
-        bool first = true;
-        if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"SOFTWARE\\ASIO", 0, KEY_READ, &hk) == ERROR_SUCCESS) {
-            for (DWORD i = 0;; ++i) {
-                wchar_t name[256];
-                DWORD len = 256;
-                if (RegEnumKeyExW(hk, i, name, &len, nullptr, nullptr, nullptr, nullptr) != ERROR_SUCCESS) break;
-                char buf[512] = {0};
-                WideCharToMultiByte(CP_UTF8, 0, name, -1, buf, sizeof(buf) - 1, nullptr, nullptr);
-                if (!first) j << ",";
-                first = false;
-                j << "\"" << jesc(buf) << "\"";
-            }
-            RegCloseKey(hk);
-        }
-        j << "]}";
-        return j.str();
-#endif
-    }
-
     // 输出设备列表（设置页里可以选，不再写死"默认设备"）
     if (rq.path.rfind("/api/devices", 0) == 0) {
         ct = "application/json; charset=utf-8";
         std::ostringstream j;
         j << "{\"ok\":true,\"devices\":[";
         bool first = true;
-#if defined(_WIN32)
-        for (const auto& d : WasapiOutput::enumerate()) {
-            if (d.state != DEVICE_STATE_ACTIVE) continue;
-            if (!first) j << ",";
-            first = false;
-            j << "{\"id\":\"" << jesc(d.id) << "\",\"name\":\"" << jesc(d.name) << "\""
-              << ",\"default\":" << (d.isDefault ? "true" : "false") << "}";
-        }
-#else
         for (const auto& d : mac_enum_devices()) {
             if (!d.hasOutput) continue;   // 只列输出设备（与 Windows 端点语义一致）
             if (!first) j << ",";
@@ -6124,7 +5118,6 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
             j << "{\"id\":\"" << jesc(d.id) << "\",\"name\":\"" << jesc(d.name) << "\""
               << ",\"default\":" << (d.isDefault ? "true" : "false") << "}";
         }
-#endif
         j << "]}";
         return j.str();
     }
@@ -6135,16 +5128,7 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
     // 旧的 20ms 学习值可能不再必要 —— 不提供重置就只能靠改设置绕。
     if (rq.path.rfind("/api/buffer/reset", 0) == 0) {
         ct = "application/json; charset=utf-8";
-#if !defined(_WIN32)
         return "{\"ok\":true,\"note\":\"macOS 无 WASAPI 独占缓冲学习缓存（CoreAudio 由设备自管周期）\"}";
-#else
-        rta::audio::BufferLearnStore st(path_in_exe_dir("rlplayer-buffer-learned.json"));
-        const bool okReset = st.reset();
-        std::ostringstream j;
-        j << "{\"ok\":" << (okReset ? "true" : "false")
-          << ",\"path\":\"" << jesc(st.path()) << "\"}";
-        return j.str();
-#endif
     }
 
     // 滤波器预设表（含每个预设【自带的相位】）：
@@ -6185,17 +5169,9 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
         const auto rates = probe_exclusive_rates(devId, 24, 2);
         std::string dev = "默认音频设备";
         uint32_t sysRate = 0;
-#if defined(_WIN32)
-        for (const auto& d : WasapiOutput::enumerate()) if (d.isDefault) dev = d.name;
-        // 顺带带出"系统当前配置的采样率"（GetMixFormat，只读、不开流、不出声）：
-        // 设置页拿它把「跟随系统 (48000 Hz)」写清楚，用户就不用猜这一档到底是多少。
-        int sysCh = 0; bool sysFloat = false; std::string sysErr;
-        if (!WasapiSharedOutput::query_mix_format(devId, sysRate, sysCh, sysFloat, sysErr)) sysRate = 0;
-#else
         { std::string di; mac_find_dev(devId, dev, di); }
         for (const auto& d : mac_enum_devices())
             if (d.id == devId || (devId.empty() && d.isDefault)) { sysRate = d.nominalRate; break; }
-#endif
         std::ostringstream j;
         j << "{\"ok\":true,\"device\":\"" << jesc(dev) << "\",\"sysRate\":" << sysRate
           << ",\"rates\":[";
@@ -6222,11 +5198,7 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
         std::error_code ec;
         const std::string dir = path_in_exe_dir("uploads");
         fs::create_directories(fs::u8path(dir), ec);
-#if defined(_WIN32)
-        const std::string full = dir + "\\" + safe;
-#else
         const std::string full = dir + "/" + safe;
-#endif
         std::ofstream of(fs::u8path(full), std::ios::binary | std::ios::trunc);
         if (!of) return "{\"ok\":false,\"error\":\"无法写入上传目录\"}";
         of.write(rq.body.data(), (std::streamsize)rq.body.size());
@@ -6235,30 +5207,10 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
                std::to_string((long long)rq.body.size()) + "}";
     }
 
-    // ASIO 驱动列表（后端下拉里选 ASIO 时用它填设备）
-    if (rq.path.rfind("/api/asiodevices", 0) == 0) {
-        ct = "application/json; charset=utf-8";
-#if !defined(_WIN32)
-        return "{\"ok\":true,\"drivers\":[],\"note\":\"macOS 无 ASIO 驱动体系\"}";
-#else
-        std::ostringstream j;
-        j << "{\"ok\":true,\"drivers\":[";
-        bool first = true;
-        for (const auto& e : rta::audio::asio_enum_drivers()) {
-            if (!first) j << ",";
-            first = false;
-            j << "{\"name\":\"" << jesc(e.name) << "\",\"id\":\"" << jesc(e.clsid) << "\"}";
-        }
-        j << "]}";
-        return j.str();
-#endif
-    }
-
     // ---------------- ROADMAP P4b：输入采集与直通监听 API ----------------
     // 设备列表：含 loopback 端点标记、默认、混音率/声道/位深
     if (rq.path.rfind("/api/input/devices", 0) == 0 || rq.path.rfind("/api/indevices", 0) == 0) {
         ct = "application/json; charset=utf-8";
-#if !defined(_WIN32)
         // macOS：CoreAudio 输入设备（§13.13）。loopback（Process Tap）首版不提供，如实注明。
         std::ostringstream j;
         j << R"({"ok":true,"devices":[)";
@@ -6276,27 +5228,6 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
         }
         j << R"(],"note":"macOS 采集走 CoreAudio 输入；系统混音回环(loopback)首版未提供"})";
         return j.str();
-#else
-        std::ostringstream j;
-        j << R"({"ok":true,"devices":[)";
-        bool first = true;
-        for (const auto& d : rta::audio::WasapiCapture::enumerate_capture(true)) {
-            if (d.state != DEVICE_STATE_ACTIVE) continue;
-            if (!first) j << ",";
-            first = false;
-            j << R"({"id":")" << jesc(d.id) << R"(",)"
-              << R"("name":")" << jesc(d.name) << R"(",)"
-              << R"("state":)" << (unsigned long)d.state << ","
-              << R"("isDefault":)" << (d.isDefault ? "true" : "false") << ","
-              << R"("isLoopback":)" << (d.isLoopback ? "true" : "false") << ","
-              << R"("mixRate":)" << d.mixRate << ","
-              << R"("mixChannels":)" << d.mixChannels << ","
-              << R"("mixBits":)" << d.mixBits
-              << "}";
-        }
-        j << "]}";
-        return j.str();
-#endif
     }
 
     // 实时状态：{running, mode(record|monitor|null), device, rate, channels, seconds, frames, water, overflow, underflow, posClips, negClips, outFile, rmsDb, peakDb, error}
@@ -6650,7 +5581,8 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
     if (rq.path.rfind("/api/diag", 0) == 0) {
         ct = "application/json; charset=utf-8";
         std::ostringstream j;
-        const bool forceProbe = rq.path.find("refresh=1") != std::string::npos;   // F3：强制重探
+        // 2026-10-25：forceProbe 是 Windows 侧"强制重探"的开关；macOS 侧 caps() 每次都实查
+        // （无缓存层），所以这里不再需要该变量。保留 refresh=1 的路由语义不变。
         const auto upSec = std::chrono::duration_cast<std::chrono::seconds>(
             std::chrono::steady_clock::now() - g_startTp).count();
         j << "{\"ok\":true"
@@ -6666,68 +5598,27 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
         // 端点：每端点给友好名/ID/活状态 + 16/24/32 各自的支持率数。
         // F3：probe 结果走 60s TTL 缓存（probeAge = 本次响应所用探活的最大年龄秒数，
         // 刚探的为 0）；refresh=1 强制全部重探。只有真要探时才受 3 秒共享预算约束。
-        const auto probeDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+        // 2026-10-25：probeDeadline（3 秒共享预算）是 Windows 侧多点位探活用的；
+        // macOS 侧 caps() 是单次 CoreAudio 查询，不存在多点位预算，故移除。
         long long probeAgeMax = -1;
         j << ",\"endpoints\":[";
         {
-#if defined(_WIN32)
-            const auto devs = WasapiOutput::enumerate();
-#else
             // macOS：设备清单来自 CoreAudio；"探活+三档率表"用 caps() 一次查询（无按位深分档，
             // 三档同表 —— CoreAudio caps 语义，如实呈现而不是编造分档数据）
             std::vector<MacDevInfo> devs;
             for (const auto& d : mac_enum_devices())
                 if (d.hasOutput) devs.push_back(d);
-#endif
             auto joinRates = [](const std::vector<uint32_t>& v) {
                 std::string s;
                 for (size_t k = 0; k < v.size(); ++k) { if (k) s += "/"; s += std::to_string(v[k]); }
                 return s;
             };
-#if defined(_WIN32)
-            // 取一个端点的探活结果（缓存命中 → 用缓存；否则在预算内现探并回填缓存）。
-            // 返回的 age 为该结果年龄秒数（刚探 = 0）；预算耗尽时 ok=false。
-            auto probeOf = [&](const std::string& id, FormatProbe& pr, long long& age) {
-                std::lock_guard<std::mutex> lk(g_diagProbeMx);
-                auto it = g_diagProbeCache.find(id);
-                if (it != g_diagProbeCache.end()) {
-                    const long long a = std::chrono::duration_cast<std::chrono::seconds>(
-                        std::chrono::steady_clock::now() - it->second.tp).count();
-                    if (!forceProbe && a < 60) { pr = it->second.pr; age = a; return true; }
-                }
-                if (std::chrono::steady_clock::now() >= probeDeadline) return false;
-                pr = WasapiOutput::probe_formats(id);
-                age = 0;
-                g_diagProbeCache[id] = DiagProbeEntry{ pr, std::chrono::steady_clock::now() };
-                return true;
-            };
-#endif
             bool firstE = true;
             for (const auto& d : devs) {
                 if (!firstE) j << ",";
                 firstE = false;
                 j << "{\"name\":\"" << jesc(d.name) << "\",\"id\":\"" << jesc(d.id) << "\""
                   << ",\"default\":" << (d.isDefault ? "true" : "false");
-#if defined(_WIN32)
-                if (d.state != DEVICE_STATE_ACTIVE) {
-                    j << ",\"alive\":false,\"r16\":0,\"r24\":0,\"r32\":0}";
-                    continue;
-                }
-                FormatProbe pr;
-                long long age = -1;
-                if (!probeOf(d.id, pr, age)) {
-                    j << ",\"alive\":true,\"probe\":\"不可用（探活预算超时）\"}";
-                    continue;
-                }
-                if (age > probeAgeMax) probeAgeMax = age;
-                j << ",\"alive\":" << (pr.endpointAlive ? "true" : "false")
-                  << ",\"r16\":" << pr.rates16.size()
-                  << ",\"r24\":" << pr.rates24.size()
-                  << ",\"r32\":" << pr.rates32.size()
-                  << ",\"rates16\":\"" << joinRates(pr.rates16) << "\""
-                  << ",\"rates24\":\"" << joinRates(pr.rates24) << "\""
-                  << ",\"rates32\":\"" << joinRates(pr.rates32) << "\"}";
-#else
                 auto out = rta::platform::create_audio_output();
                 const rta::platform::DeviceCaps c = out ? out->caps(d.id) : rta::platform::DeviceCaps{};
                 j << ",\"alive\":" << (c.rates.empty() ? "false" : "true")
@@ -6737,7 +5628,6 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
                   << ",\"rates16\":\"" << joinRates(c.rates) << "\""
                   << ",\"rates24\":\"" << joinRates(c.rates) << "\""
                   << ",\"rates32\":\"" << joinRates(c.rates) << "\"}";
-#endif
             }
         }
         j << "],\"probeAge\":" << probeAgeMax;
@@ -6809,35 +5699,9 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
     // （设置页要用它把"AMD"标成可用或未构建，而不是让用户选了才发现没后端）
     if (rq.path.rfind("/api/gpu", 0) == 0) {
         ct = "application/json; charset=utf-8";
-#if defined(_WIN32)
-        auto dll_here = [](const char* n) {
-            const DWORD a = GetFileAttributesA(path_in_exe_dir(n).c_str());
-            return a != INVALID_FILE_ATTRIBUTES && !(a & FILE_ATTRIBUTE_DIRECTORY);
-        };
-        const bool amd  = dll_here("rtagpu.dll");
-        const bool hip  = dll_here("amdhip64_7.dll");
-        const bool cuda = dll_here("rtagpu_cuda.dll");   // 1.3.10 起正式包内置（可选组件）
-        // 2026-10-23（协作者交回 CUDA DLL 后）：光看"文件在不在"会骗人 ——
-        //   把 rtagpu_cuda.dll 放在 AMD 机器上也有文件，但 rta_gpu_available() 返回 0。
-        //   这里真加载一次并调用该导出函数，给 UI 一个"在位但本机不可用"的如实状态。
-        auto dll_usable = [](const char* n) -> bool {
-            const std::string p = path_in_exe_dir(n);
-            const DWORD a = GetFileAttributesA(p.c_str());
-            if (a == INVALID_FILE_ATTRIBUTES || (a & FILE_ATTRIBUTE_DIRECTORY)) return false;
-            HMODULE h = ::LoadLibraryA(p.c_str());
-            if (!h) return false;
-            using AvailFn = int (*)();
-            AvailFn fn = (AvailFn)(void*)::GetProcAddress(h, "rta_gpu_available");
-            const bool usable = (fn != nullptr) && (fn() != 0);
-            ::FreeLibrary(h);
-            return usable;
-        };
-        const bool cuda_usable = dll_usable("rtagpu_cuda.dll");
-#else
         // macOS：GPU 核（rtagpu）尚无 .dylib 构建；文件存在性与可载性如实为 false，
         // available/status 由 GpuBridge 自己报（缺失自动退回 CPU，结果逐位相同——契约不变）
         const bool amd = false, hip = false, cuda = false, cuda_usable = false;
-#endif
         std::ostringstream j;
         j << "{\"ok\":true"
           << ",\"vendor\":\"" << jesc(rta::dsp::gpu_vendor()) << "\""
@@ -6958,16 +5822,6 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
         if (frac > 1.0) frac = 1.0;
         // 后端 = UPnP（261024-01 #9）：进度条跳转转交投放会话（worker 里发 AVTransport Seek REL_TIME）。
         // 时长未知（渲染器还没报）时不瞎跳，如实返回。
-#if defined(_WIN32)
-        if (g_upnpPlayer.load()) {
-            const auto st = rta::net::CastManager::instance().get_state();
-            if (st.running && st.durationSec > 0.0) {
-                rta::net::CastManager::instance().seek_seconds(frac * st.durationSec);
-                return "{\"ok\":true,\"upnp\":true}";
-            }
-            return "{\"ok\":true,\"upnp\":true,\"skipped\":true}";
-        }
-#endif
         ps.seekReq.store(frac);
         return "{\"ok\":true}";
     }
@@ -6978,12 +5832,6 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
         const size_t q = rq.path.find("?on=");
         if (q != std::string::npos) on = atoi(rq.path.c_str() + q + 4);
         // 后端 = UPnP：暂停 / 继续转交投放会话（AVTransport Pause / Play）
-#if defined(_WIN32)
-        if (g_upnpPlayer.load()) {
-            rta::net::CastManager::instance().set_paused(on != 0);
-            return std::string("{\"ok\":true,\"paused\":") + ((on != 0) ? "true" : "false") + ",\"upnp\":true}";
-        }
-#endif
         ps.pauseReq.store(on != 0);
         return std::string("{\"ok\":true,\"paused\":") + ((on != 0) ? "true" : "false") + "}";
     }
@@ -7000,10 +5848,6 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
             g_lastEnd.isPosZeroNoErr = false;
         }
         // 投放会话若还在跑（含手动「开始投放」的会话），一并停掉 —— 底栏「停止」只能有一个结果。
-#if defined(_WIN32)
-        if (g_upnpPlayer.exchange(false) || rta::net::CastManager::instance().get_state().running)
-            rta::net::CastManager::instance().stop();
-#endif
         return "{\"ok\":true}";
     }
 
@@ -7013,19 +5857,6 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
         // 否则底栏与「投放实时状态」会各显示一套进度，互相打架。
         rta::net::CastState castSt;
         bool castMode = false;
-#if defined(_WIN32)
-        if (g_upnpPlayer.load()) {
-            castSt = rta::net::CastManager::instance().get_state();
-            if (castSt.running) {
-                castMode = true;
-            } else {
-                // 投放自然结束（渲染器播完 / 出错被停）：播放器回到停止态并清掉投放标志
-                g_upnpPlayer.store(false);
-                ps.playing.store(false);
-                ps.paused.store(false);
-            }
-        }
-#endif
         std::lock_guard<std::mutex> lk(ps.mtx);
         std::ostringstream j;
         const size_t pl2 = ps.played.load(), tt = ps.total.load();
@@ -7102,6 +5933,9 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
         return j.str();
     }
 
+    // 2026-10-25（task-12）：/api/asio 与 /api/asiodevices 已整段删除（不是返回空列表）。
+    // 理由：后端没了还留着"永远返回空驱动清单"的假路由，只会让前端继续以为"本机没装驱动"，
+    // 那是会误导用户去装一个 macOS 上根本不需要的东西的假结论。现在它落到这里 = 明确的 not found。
     ct = "application/json; charset=utf-8";
     return "{\"ok\":false,\"error\":\"not found\"}";
 }
@@ -7138,9 +5972,6 @@ static std::string page() {
 
 int main(int argc, char** argv) {
     rta::crash::install();    // 崩溃转储（1.0.5）：dump 落 exe 目录 dumps\，filter 先写日志
-#if defined(_WIN32)
-    SetConsoleOutputCP(CP_UTF8);
-#endif
     setvbuf(stdout, nullptr, _IONBF, 0);
     uint16_t port = 8899;
     bool lan = false;
@@ -7180,22 +6011,13 @@ int main(int argc, char** argv) {
     //（非 8899 实例用 .p<port> 后缀，避免自检沙箱与用户实例互相覆盖库根）。
     {
         char pb[16]; std::snprintf(pb, sizeof(pb), "%u", (unsigned)port);
-#if defined(_WIN32)
-        _putenv_s("RLPLAYER_PORT", pb);
-#else
         ::setenv("RLPLAYER_PORT", pb, 1);   // Library 实例私有后缀（语义同 Windows）
-#endif
     }
     // 系统级调优：提高进程优先级 + 把系统定时器精度提到 1ms。
     // 默认 15.6ms 的定时器粒度会让喂数节奏变粗（Round 6 实测过这个问题）。
-#if defined(_WIN32)
-    SetPriorityClass(GetCurrentProcess(), HIGH_PRIORITY_CLASS);
-    timeBeginPeriod(1);
-#else
     // macOS：无 timeBeginPeriod 等价物（AUHAL 回调按设备时钟拉数据，不依赖 host 定时器精度）。
     // 喂数线程走高 QoS；进程级 renice 需要 root，不做（如实记录，不假装等效）。
     pthread_set_qos_class_self_np(QOS_CLASS_USER_INITIATED, 0);
-#endif
 
     queue_load();                             // 恢复上次的播放列表
     Library::instance().load();               // 载入音乐库索引
@@ -7276,11 +6098,7 @@ int main(int argc, char** argv) {
           << " gpu=" << (rta::dsp::GpuBridge::instance().available() ? "available" : "unavailable")
           << "(" << rta::dsp::GpuBridge::instance().status() << ")"
           << " endpoints=" << (
-#if defined(_WIN32)
-              WasapiOutput::enumerate().size()
-#else
               [] { size_t n = 0; for (const auto& d : mac_enum_devices()) if (d.hasOutput) ++n; return n; }()
-#endif
           );
         const std::string tester = rta::diag::read_tester();
         if (!tester.empty()) b << " tester=" << tester;
@@ -7290,7 +6108,6 @@ int main(int argc, char** argv) {
     printf("RLPlayer 网页播放器\n");
     printf("  打开浏览器访问: http://127.0.0.1:%u/\n", (unsigned)ui.port());
     printf("  （只监听本机；播放会以独占模式接管音频设备）\n");
-#if !defined(_WIN32)
     // macOS .app 双击形态：无控制台可读，直接用默认浏览器打开界面
     //（Windows 的 WebView2 内置窗口由 RLPlayer.exe 启动器承担，mac 首版浏览器界面）
     if (!noBrowser) {
@@ -7301,9 +6118,6 @@ int main(int argc, char** argv) {
     ::signal(SIGINT, [](int){ g_exitReq.store(true); });
     ::signal(SIGTERM, [](int){ g_exitReq.store(true); });
     printf("  按 Ctrl+C 退出（或 Dock 图标右键 → 退出）\n");
-#else
-    printf("  按 Ctrl+C 退出\n");
-#endif
     while (!g_exitReq.load()) std::this_thread::sleep_for(std::chrono::milliseconds(50));
     // 退出顺序（2026-10-25 并发化配套）：
     //   先停 HTTP 控制面 —— handler 现在跑在工作线程里，stop() 会 shutdown 活跃连接并等

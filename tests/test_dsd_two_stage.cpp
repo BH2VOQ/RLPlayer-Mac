@@ -8,6 +8,7 @@
 //   5. 单级回退：关闭设置 (twoStage=false) 时行为与既有单级完全一致（逐位相同）；
 //   6. 性能：合成 DSD256 5 分钟素材，单级 vs 两级 的抽取耗时与峰值内存，报告加速比与处理体积；
 //   7. 端到端：音频读取器集成验证（read_dsd_native 输出正确）。
+#include "test_compat_posix.h"   // POSIX 垫片：取代 <windows.h>（控制台/临时目录/删文件）
 #include "audio/dsd_reader.h"
 #include "audio/audio_loader.h"
 #include "dsp/dsd_integrator.h"
@@ -26,8 +27,6 @@
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
-#include <windows.h>
-#include <psapi.h>
 
 using namespace rta::dsp;
 using rta::audio::DsdStream;
@@ -39,11 +38,21 @@ static void check(bool ok, const std::string& what, const std::string& detail = 
 }
 
 static size_t get_peak_rss_bytes() {
+#if defined(_WIN32)
     PROCESS_MEMORY_COUNTERS info{};
     if (GetProcessMemoryInfo(GetCurrentProcess(), &info, sizeof(info))) {
         return (size_t)info.PeakWorkingSetSize;
     }
     return 0;
+#else
+    // POSIX：ru_maxrss 是**进程启动以来**的峰值 RSS，单位在 Linux 是 KB、在 macOS 是字节
+    //（本项目只跑 macOS）。这里如实换算成字节，与 Win32 的 PeakWorkingSetSize 同量纲。
+    struct rusage ru{};
+    if (::getrusage(RUSAGE_SELF, &ru) == 0) {
+        return (size_t)ru.ru_maxrss;   // macOS: 已是字节
+    }
+    return 0;
+#endif
 }
 
 // 调制器生成 DSD 1-bit 测试流

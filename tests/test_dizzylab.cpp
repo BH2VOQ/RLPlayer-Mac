@@ -25,6 +25,7 @@
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
+#include "test_compat_posix.h"   // POSIX 垫片：SetConsoleOutputCP/CP_UTF8（macOS 门禁）
 #include "meta/provider.h"
 #include "meta/enrich.h"
 #include <cstdio>

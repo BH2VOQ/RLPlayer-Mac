@@ -12,12 +12,9 @@
 //     对外用 16 位十六进制哈希，避免 URL 里出现任意字符
 //   * 扫描在后台线程做，查询永远不阻塞（读的是上一份完整的索引）
 #pragma once
-// _strtoi64 是 MSVC 名；POSIX/clang 用标准 strtoll（语义一致：十进制 64 位解析）
-#if !defined(_WIN32)
+// _strtoi64 是 MSVC 名；macOS 单平台下统一映射到标准 strtoll（语义一致：十进制 64 位解析）。
+// 2026-10-25 转 macOS 单平台：原 Windows 条件守卫已去掉，别名改为无条件定义。
 #define _strtoi64 strtoll
-#endif
-// （原 WIN32_LEAN_AND_MEAN / NOMINMAX 前导已删：include 链下方的平台头自己会在 windows.h
-//   之前定义它们，行为不变；留着只会让"这个头依赖 Windows"看起来像真的。）
 #include "audio/audio_loader.h"
 #include "audio/media_info.h"
 #include "net/scan_pool.h"
@@ -39,6 +36,14 @@
 namespace rta::net {
 
 namespace fsx = std::filesystem;
+
+// 前置声明：class Library 的内联成员（removeRootEx / removeDirFromDisk）要用到下面这几个
+// 路径工具，而它们的定义在类之后（p8 的注释解释了为什么不能用 fs::path(wstring)）。
+inline std::string u8s(const std::u8string& s);
+inline fsx::path p8(const std::string& s);
+inline fsx::path lib_norm_path(const std::string& s);
+inline bool lib_path_within(const std::string& child, const fsx::path& rootNorm);
+inline bool lib_norm_equal(const std::string& a, const fsx::path& bNorm);
 
 // 16 位十六进制哈希（FNV-1a）
 inline std::string fnv_hex(const std::string& s) {
@@ -87,13 +92,66 @@ public:
         saveRootsLocked();
         return true;
     }
-    bool removeRoot(const std::string& dir) {
-        std::lock_guard<std::mutex> lk(mtx_);
-        auto it = std::find(roots_.begin(), roots_.end(), dir);
-        if (it == roots_.end()) return false;
-        roots_.erase(it);
-        saveRootsLocked();
+    // 移除库根。旧实现只从 roots_ 删目录：tracks_ 里该目录扫出来的曲目还在、索引文件也不清理
+    // ⟹ 用户移除目录后歌还在列表里，点播放就失败（反馈 #3「扫描记录不可消除」）。
+    // 现在同步清理该根（含子目录）下的曲目并重新落盘索引。
+    // ★ 边界：移除 /Music/A 不能误删 /Music/AB 的歌 —— 判定走 fs 路径分量比较
+    //   （lib_path_within），不是字符串前缀（"/Music/AB" 以 "/Music/A" 为字符串前缀）。
+    // 保留 bool 返回（tests/test_library.cpp 依赖）；需要曲目数用 removeRootEx。
+    bool removeRoot(const std::string& dir) { return removeRootEx(dir) >= 0; }
+
+    // 移除库根并返回被清理的曲目数；-1 = 该目录不是库根（什么都没改）。
+    int removeRootEx(const std::string& dir) {
+        std::string snap;
+        int removed = 0;
+        {
+            std::lock_guard<std::mutex> lk(mtx_);
+            auto it = std::find(roots_.begin(), roots_.end(), dir);
+            if (it == roots_.end()) return -1;
+            roots_.erase(it);
+            saveRootsLocked();
+            removed = purgeTracksUnderLocked(lib_norm_path(dir), &snap);
+        }
+        if (removed > 0) writeIndex(snap);   // 锁外落盘：与扫描完成同一约定（见 buildIndexLocked 注释）
+        return removed;
+    }
+
+    // 磁盘目录已被删除后清理索引（#4 的收尾）：否则和 #3 一样会留下点不动的行。
+    int purgeTracksUnder(const std::string& dir) {
+        std::string snap;
+        int removed = 0;
+        {
+            std::lock_guard<std::mutex> lk(mtx_);
+            removed = purgeTracksUnderLocked(lib_norm_path(dir), &snap);
+        }
+        if (removed > 0) writeIndex(snap);
+        return removed;
+    }
+
+    // 真删磁盘目录（反馈 #4「目录删不掉」）：与「从库中移除」是两件事，这里只做删文件。
+    // 返回 false 时 err 是给人看的中文原因；成功时 files/dirs 是删除前的统计（根目录本身不计入 dirs）。
+    bool removeDirFromDisk(const std::string& dir, int& files, int& dirs, std::string& err) {
+        files = 0; dirs = 0;
+        const fsx::path target = lib_norm_path(dir);
+        if (!checkRemovableDirLocked(dir, target, err)) return false;
+        if (!scanTreeForRemoval(target, files, dirs, err)) return false;
+        std::error_code ec;
+        const std::uintmax_t n = fsx::remove_all(target, ec);
+        if (ec || n == (std::uintmax_t)-1) {
+            err = "删除失败：" + (ec ? ec.message() : std::string("未知错误"));
+            return false;
+        }
         return true;
+    }
+
+    // 只统计、不删除：给前端二次确认弹窗提供「将删除 N 个文件」的真实数字（反馈 #4）。
+    // 安全判据与 removeDirFromDisk 完全一致（同一份 checkRemovableDirLocked），
+    // 所以弹窗里能显示数字的目录，就是真删时会被允许的目录 —— 不会出现「确认了才被拒绝」。
+    bool scanDirForRemoval(const std::string& dir, int& files, int& dirs, std::string& err) {
+        files = 0; dirs = 0;
+        const fsx::path target = lib_norm_path(dir);
+        if (!checkRemovableDirLocked(dir, target, err)) return false;
+        return scanTreeForRemoval(target, files, dirs, err);
     }
 
     // ---- 状态 ----
@@ -182,6 +240,14 @@ private:
     // writeIndex() 在锁外写盘 —— 否则整份索引（实测 12000 首 1.28 MB）写盘期间持锁，HTTP 单线程服务整个卡住。
     std::string buildIndexLocked() const;
     void writeIndex(const std::string& snapshot);
+    // 删除 tracks_ 中位于 rootNorm 之下（含该目录自身）的曲目，返回删除数。
+    // 调用方必须已持 mtx_；返回 >0 时 *snapOut 是重算好的索引快照，由调用方在锁外落盘。
+    int purgeTracksUnderLocked(const fsx::path& rootNorm, std::string* snapOut);
+    // #4 删目录的三条安全判据（① 库根之下 ② 不是库根本身 ③ 不是符号链接）。
+    // removeDirFromDisk 与 scanDirForRemoval 共用，保证「弹窗能显示数字」与「真删被允许」同一判据。
+    bool checkRemovableDirLocked(const std::string& dir, const fsx::path& target, std::string& err);
+    // 递归统计 files/dirs，且树内出现任何 symlink 一律拒绝（不跟随）。
+    static bool scanTreeForRemoval(const fsx::path& target, int& files, int& dirs, std::string& err);
     const std::vector<LibAlbum>& albumVecLocked() const;
     static std::string readFile(const std::string& p);
     static void writeFile(const std::string& p, const std::string& s);
@@ -222,17 +288,13 @@ inline std::string lib_clean_field(const std::string& s) {
     return o;
 }
 
-// Windows 上 fs::path 的窄字符串构造按 ANSI（GBK）解释，UTF-8 路径必须先转宽字符
+// 路径构造：macOS 上路径原生 UTF-8（2026-10-25 删掉 Windows 的 ANSI/宽字符分支）
 inline std::string u8s(const std::u8string& s) { return std::string((const char*)s.data(), s.size()); }
 inline fsx::path p8(const std::string& s) {
-#if defined(_WIN32)
-    return fsx::path(rta::audio::widen(s));
-#else
     // POSIX：路径原生 UTF-8。绝不能走 fs::path(wstring)——macOS 27 的 libc++ 对
     // wstring 转换走 codecvt facet，该 facet 不存在时直接抛 "locale not supported"
     //（实测：Library::load() 启动即崩，lldb 栈帧 __narrow_to_utf8<32>）。
     return fsx::u8path(s);
-#endif
 }
 
 // 同目录是否存在独立封面文件（与 get_cover 的候选顺序/扩展名保持一致；只 stat）
@@ -245,6 +307,35 @@ inline bool lib_has_cover_file(const std::string& trackPath) {
         for (const char* e : kExts)
             if (fsx::exists(dir / (std::string(n) + e), ec)) return true;
     return false;
+}
+
+// ---- 路径包含判定（#3 移除库根 / #4 删目录的安全判据共用）----
+// 为什么不用字符串前缀："/Music/AB" 以 "/Music/A" 为字符串前缀，会把 AB 的歌一起删掉，
+// 也可能被 "../" 穿越绕过。这里统一走 fs::path 的**路径分量**比较：
+//   lib_norm_path()   = lexically_normal（吃掉 "." / ".." / 重复分隔符 / 结尾分隔符）
+//   lib_path_within() = child 的每个分量前缀都等于 root 的分量（root 自身算"在其内"）
+//   lib_norm_equal()  = 规范化后分量完全相等
+inline fsx::path lib_norm_path(const std::string& s) {
+    std::error_code ec;
+    fsx::path p = p8(s);
+    fsx::path n = p.lexically_normal();
+    if (n.empty()) return p;
+    // 结尾分隔符会让最后一个分量变成空串（实测 "/Music/A/" 分量 = </> <Music> <A> <>），
+    // 会让「相等」判定失真 ⟹ 统一去掉尾分隔符（根 "/" 除外）。
+    while (n.has_relative_path() && n.filename().empty()) n = n.parent_path();
+    return n;
+}
+inline bool lib_path_within(const std::string& child, const fsx::path& rootNorm) {
+    const fsx::path c = lib_norm_path(child);
+    auto ci = c.begin();
+    for (auto ri = rootNorm.begin(); ri != rootNorm.end(); ++ri, ++ci) {
+        if (ci == c.end()) return false;
+        if (*ci != *ri) return false;
+    }
+    return true;
+}
+inline bool lib_norm_equal(const std::string& a, const fsx::path& bNorm) {
+    return lib_norm_path(a) == bNorm;
 }
 
 inline bool lib_is_audio(const fsx::path& p) {
@@ -516,6 +607,76 @@ inline void Library::saveRootsLocked() {
     std::string s = "# RLPlayer 音乐库根目录，每行一个\n";
     for (auto& r : roots_) s += r + "\n";
     writeFile(confPath(), s);
+}
+
+// 删除 tracks_ 中位于 rootNorm 之下的曲目（反馈 #3）。
+// 调用方已持 mtx_。判据是路径分量包含（lib_path_within），因此：
+//   root=/Music/A  ⟹  /Music/A/t1 删；/Music/AB/t1 **不删**（分量 <AB> ≠ <A>）。
+// 返回删除数；>0 时顺手把 albumsDirty_ 置脏，并在 *snapOut 里留下重算后的索引快照
+// （锁内只构造字符串，锁外由调用方 writeIndex 落盘 —— 与扫描完成同一约定）。
+inline int Library::purgeTracksUnderLocked(const fsx::path& rootNorm, std::string* snapOut) {
+    std::vector<LibTrack> keep;
+    keep.reserve(tracks_.size());
+    int removed = 0;
+    for (auto& t : tracks_) {
+        if (lib_path_within(t.path, rootNorm)) { ++removed; continue; }
+        keep.push_back(std::move(t));
+    }
+    if (removed == 0) return 0;
+    tracks_.swap(keep);
+    albumsDirty_ = true;
+    if (snapOut) *snapOut = buildIndexLocked();
+    return removed;
+}
+
+// #4 的三条安全判据。dir 是用户给的原始串（未规范化），target 是 lib_norm_path(dir)。
+// ① 必须落在某个库根之下 —— 用**路径分量**包含判定（lib_path_within），不是字符串前缀：
+//    "/lib/../etc" 规范化后是 "/etc"，分量前缀对不上任何库根 ⟹ 拒绝，穿越无效。
+// ② 库根本身拒绝（只能删根里面的子目录）。
+// ③ 目标自身不能是符号链接：symlink_status 不跟随，能看出真身；
+//    若跟随（status）就会把 /lib/link -> /Users/x 当成库内目录，递归删掉库外内容。
+inline bool Library::checkRemovableDirLocked(const std::string& dir, const fsx::path& target,
+                                            std::string& err) {
+    {
+        std::lock_guard<std::mutex> lk(mtx_);
+        bool insideRoot = false, isRoot = false;
+        for (const auto& r : roots_) {
+            const fsx::path rn = lib_norm_path(r);
+            if (!lib_path_within(dir, rn)) continue;
+            insideRoot = true;
+            if (lib_norm_equal(dir, rn)) { isRoot = true; break; }
+        }
+        if (!insideRoot) { err = "只能删除音乐库根目录之下的子目录"; return false; }
+        if (isRoot)      { err = "不能删除音乐库根目录本身（请用「从库中移除」）"; return false; }
+    }
+    std::error_code ec;
+    const fsx::file_status st = fsx::symlink_status(target, ec);
+    if (ec || !fsx::exists(st)) { err = "目录不存在"; return false; }
+    if (fsx::is_symlink(st)) { err = "拒绝删除符号链接（可能指向库外）"; return false; }
+    if (!fsx::is_directory(st)) { err = "不是目录"; return false; }
+    return true;
+}
+
+// 递归预扫：统计 files/dirs，且树内任何 symlink 直接拒绝。
+// 为什么在删除**之前**扫：删一半再报错会留下半残目录树，比直接拒绝更糟。
+inline bool Library::scanTreeForRemoval(const fsx::path& target, int& files, int& dirs,
+                                       std::string& err) {
+    std::error_code ec;
+    for (auto it = fsx::recursive_directory_iterator(
+             target, fsx::directory_options::skip_permission_denied, ec);
+         it != fsx::recursive_directory_iterator(); it.increment(ec)) {
+        if (ec) { err = "遍历目录失败：" + ec.message(); return false; }
+        const fsx::file_status s = it->symlink_status(ec);
+        if (ec) { err = "读取目录项失败：" + ec.message(); return false; }
+        if (fsx::is_symlink(s)) {
+            err = "目录内含符号链接，拒绝删除（可能指向库外）：" +
+                  u8s(it->path().filename().u8string());
+            return false;
+        }
+        if (fsx::is_directory(s)) ++dirs;
+        else ++files;
+    }
+    return true;
 }
 
 // 2026-10-25 修「扫描完成时整个服务卡住」：索引格式化 + 写盘（实测 12000 首 1.28 MB）原先在持 mtx_ 时做，

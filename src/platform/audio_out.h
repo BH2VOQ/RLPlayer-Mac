@@ -1,9 +1,11 @@
 // audio_out.h — 音频输出后端【契约】（平台层，跨平台纯接口）
 //
 // 谁实现
-//   Windows：src/audio/wasapi_out.h（WASAPI 独占）、src/audio/wasapi_shared.h（共享/回退）、
-//            src/audio/asio_out.h（ASIO）。三者经 rta::render::OutSink（src/audio/render_loop.h）
-//            暴露给渲染循环；本契约是它们共同语义的正式化描述（映射表见 PLATFORM.md §4）。
+//   Windows：src/audio/wasapi_out.h（WASAPI 独占）、src/audio/wasapi_shared.h（共享/回退）。
+//            两者经 rta::render::OutSink（src/audio/render_loop.h）暴露给渲染循环；
+//            本契约是它们共同语义的正式化描述（映射表见 PLATFORM.md §4）。
+//            （ASIO 曾作为第三个 Windows 后端存在，2026-10-25 随 macOS 单平台改造删除：
+//             CoreAudio Hog Mode 是等价且更优的方案，macOS 没有需要绕过的系统音频引擎。）
 //   macOS  ：CoreAudio（另组实现），必须实现本文件的 AudioOutput 语义。
 // 谁调用
 //   引擎渲染循环 / 平台工厂。调用次序固定：open -> start -> (write)* -> pause/resume -> close

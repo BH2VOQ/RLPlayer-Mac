@@ -8,15 +8,6 @@
 // 迁移原则：循环体逐行照搬，仅把外部引用（ps.* / RQ / g_dbg* / in.* / play_log / dlog）
 // 换成 RenderHost 的指针/钩子；唯一的逻辑增量为超时 break 前的 RENDERFAIL 遥测。
 #pragma once
-#if defined(_WIN32)
-#ifndef WIN32_LEAN_AND_MEAN
-#define WIN32_LEAN_AND_MEAN
-#endif
-#ifndef NOMINMAX
-#define NOMINMAX
-#endif
-#include <windows.h>
-#endif
 #include <atomic>
 #include <chrono>
 #include <cmath>
@@ -40,7 +31,7 @@ namespace rta::render {
 // open 的参数收拢为 SinkOpenOpts：PlayParams 属于 rtaweb，接口层只消费其中
 // 与设备相关的三个字段（mock sink 也无须知道完整播放参数）。
 struct SinkOpenOpts {
-    std::string device;      // WASAPI 端点 id / ASIO 驱动名或 CLSID（空 = 默认）
+    std::string device;      // 设备标识（macOS: CoreAudio 设备 uid；空 = 系统默认设备）
     std::string naaHost;     // NAA 端点 host:port
     int bufferMs = 100;      // 缓冲毫秒
 };
@@ -75,7 +66,7 @@ struct OutSink {
     virtual std::string zero_reason() const { return "-"; }  // 最近一次成因
 
     // ---------------- C2 遥测（2026-10-24 N300 欠载；纯观测，全部带默认值）----------------
-    // 为什么默认 -1 / "-" / false：Null / NAA / ASIO 等后端不参与这些统计，UTF-8 打印 "-1" 即
+    // 为什么默认 -1 / "-" / false：Null / NAA 等后端不参与这些统计，UTF-8 打印 "-1" 即
     // 「该后端不报」。渲染循环侧的 dry/dryms/ev/evint/prod 是 STAT 的权威来源（见 §6.3），
     // 这里的同名访问器留给「后端自己在更底层计数」的场景（当前 WASAPI 不覆盖）。
     virtual long long device_period_frames() const { return -1; }        // per：设备周期帧数
@@ -88,7 +79,7 @@ struct OutSink {
     virtual bool        realigned() const { return false; }
 
     // ---------------- C3 端点消失（N300 96k 掉 USB）----------------
-    // 默认 true：Null / NAA / ASIO 与 WASAPI 端点枚举无关，不参与该判据。
+    // 默认 true：Null / NAA 与 WASAPI 端点枚举无关，不参与该判据。
     // WASAPI 独占实现按「端点是否仍在 DEVICE_STATE_ACTIVE」回答（内部自带 ≥0.5s 缓存，
     // 因为端点消失时 EnumAudioEndpoints 可能要几毫秒）。
     virtual bool endpoint_alive() const { return true; }
@@ -554,11 +545,11 @@ inline void render_loop(OutSink& sink, RenderHost& h) {
                 if (h.fallbackEligible)
                     fs << "。设备独占流持续不接受数据,已自动回退 WASAPI 共享模式(非 bit-perfect)。";
                 else if (h.dop)
-                    fs << "。DoP/DSD 不能回退共享模式(共享会重采样破坏 DoP 载波),请改用独占可用的设备或 ASIO。";
+                    fs << "。DoP/DSD 不能回退共享模式(共享会重采样破坏 DoP 载波),请改用独占可用的设备。";
                 else if (h.onShared)
-                    fs << "。共享模式也未接受数据(设备/系统混音异常),请检查音频设备状态,或在设置中改用 ASIO/独占。";
+                    fs << "。共享模式也未接受数据(设备/系统混音异常),请检查音频设备状态,或改用独占模式。";
                 else
-                    fs << "。建议在设置中切换「WASAPI 共享」(兼容虚拟机/独占不可用,非 bit-perfect)或改用 ASIO。";
+                    fs << "。建议在设置中切换「WASAPI 共享」(兼容虚拟机/独占不可用,非 bit-perfect)或改用独占。";
                 h.failMsg = fs.str();
                 h.renderFail = true;
                 if (h.log) h.log(h.failMsg);
@@ -635,7 +626,7 @@ inline void render_loop(OutSink& sink, RenderHost& h) {
                         // 所以处置建议不同 —— 优先怀疑缓冲/周期配置与实时优先级，而非设备不可用。
                         ss << "。设备流仍在工作但供给不足："
                               "请把设置里的缓冲调大（如 100ms→200ms），关闭其它独占该设备的程序，"
-                              "或在设置中切换 WASAPI 共享 / ASIO 以绕开独占周期约束。";
+                              "或在设置中切换 WASAPI 共享以绕开独占周期约束。";
                         h.failMsg = ss.str();
                         h.failThroughput = got;
                         h.renderFail = true;

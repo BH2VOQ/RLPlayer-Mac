@@ -13,10 +13,16 @@
 #include <vector>
 #include <filesystem>
 #include <fstream>
-#include <direct.h>
+#include "test_compat_posix.h"   // POSIX 垫片：SetConsoleOutputCP/_putenv_s（macOS 门禁）
 
 namespace fs = std::filesystem;
 using rta::net::Library;
+
+// fs::path -> UTF-8 窄串（不经 ANSI 代码页；索引里存的就是 UTF-8）
+static std::string u8str(const fs::path& p) {
+    const std::u8string u = p.u8string();
+    return std::string(reinterpret_cast<const char*>(u.data()), u.size());
+}
 
 static int g_fail = 0;
 static void ck(bool cond, const char* what, const std::string& detail = "") {
@@ -29,6 +35,11 @@ int main() {
     std::printf("== 音乐库索引验证 ==\n");
 
     const fs::path tmp = fs::temp_directory_path() / "rta_lib_test";
+    // 2026-10-25（macOS 单平台）：索引里的路径原来是 Windows 盘符字面量（D:\\Music\\...）。
+    // 在 POSIX 上 fs::path(u8str(fixtureRoot / "Loose" / "solo.wav")).parent_path() 会退化，
+    // 「无专辑标签 -> 用父目录名当专辑名」这条判据就会假失败（主控已踩过）。
+    // 因此夹具路径改为 <tmp>/music/... 的真实层级——**判据与阈值不变**，只是让路径真有父目录。
+    const fs::path fixtureRoot = tmp / "music";
     std::error_code ec;
     fs::remove_all(tmp, ec);
     fs::create_directories(tmp, ec);
@@ -53,15 +64,15 @@ int main() {
               << "\t" << trk << "\t" << disc << "\t" << yr << "\t" << sr << "\t" << bits
               << "\t" << ch << "\t" << dur << "\t" << cov << "\tRock\n";
         };
-        row("D:\\Music\\Beatles\\Abbey Road\\02.flac", "Abbey Road", "The Beatles", "The Beatles", "Something", 2, 1, 1969, 44100, 16, 2, 182.0, 1);
-        row("D:\\Music\\Beatles\\Abbey Road\\01.flac", "Abbey Road", "The Beatles", "The Beatles", "Come Together", 1, 1, 1969, 44100, 16, 2, 259.0, 1);
+        row(u8str(fixtureRoot / "Beatles" / "Abbey Road" / "02.flac"), "Abbey Road", "The Beatles", "The Beatles", "Something", 2, 1, 1969, 44100, 16, 2, 182.0, 1);
+        row(u8str(fixtureRoot / "Beatles" / "Abbey Road" / "01.flac"), "Abbey Road", "The Beatles", "The Beatles", "Come Together", 1, 1, 1969, 44100, 16, 2, 259.0, 1);
         // 同专辑名、不同专辑艺术家 -> 必须分成两张，不能合并
-        row("D:\\Music\\Other\\Abbey Road\\01.flac", "Abbey Road", "Someone Else", "Someone Else", "Track A", 1, 1, 2001, 96000, 24, 2, 100.0, 0);
+        row(u8str(fixtureRoot / "Other" / "Abbey Road" / "01.flac"), "Abbey Road", "Someone Else", "Someone Else", "Track A", 1, 1, 2001, 96000, 24, 2, 100.0, 0);
         // 多碟：第 2 碟应排在第 1 碟之后
-        row("D:\\Music\\Big\\Live\\d2t1.flac", "Live Box", "Big Band", "Big Band", "Encore", 1, 2, 1990, 48000, 16, 2, 300.0, 0);
-        row("D:\\Music\\Big\\Live\\d1t1.flac", "Live Box", "Big Band", "Big Band", "Overture", 1, 1, 1990, 48000, 16, 2, 200.0, 0);
+        row(u8str(fixtureRoot / "Big" / "Live" / "d2t1.flac"), "Live Box", "Big Band", "Big Band", "Encore", 1, 2, 1990, 48000, 16, 2, 300.0, 0);
+        row(u8str(fixtureRoot / "Big" / "Live" / "d1t1.flac"), "Live Box", "Big Band", "Big Band", "Overture", 1, 1, 1990, 48000, 16, 2, 200.0, 0);
         // 无专辑标签 -> 用父目录名当专辑名
-        row("D:\\Music\\Loose\\solo.wav", "", "", "无名氏", "即兴", 0, 0, 0, 44100, 16, 1, 60.0, 0);
+        row(u8str(fixtureRoot / "Loose" / "solo.wav"), "", "", "无名氏", "即兴", 0, 0, 0, 44100, 16, 1, 60.0, 0);
     }
 
     Library& lib = Library::instance();
@@ -124,7 +135,7 @@ int main() {
     bool has = false;
     for (auto& r : lib.roots()) if (r == rootDir) has = true;
     ck(has, "根目录已记录");
-    ck(!lib.addRoot("Z:\\不存在的目录"), "添加不存在的目录被拒绝");
+    ck(!lib.addRoot(u8str(tmp / "不存在的目录")), "添加不存在的目录被拒绝");
     ck(lib.removeRoot(rootDir), "可移除库根目录");
     ck(fs::exists("rlplayer-library.conf"), "根目录落盘为 rlplayer-library.conf");
 

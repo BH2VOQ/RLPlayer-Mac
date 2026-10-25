@@ -5,18 +5,7 @@
 //
 // 封面走磁盘缓存，避免每次请求都重新解码。
 #pragma once
-#ifndef WIN32_LEAN_AND_MEAN
-#define WIN32_LEAN_AND_MEAN
-#endif
-#ifndef NOMINMAX
-#define NOMINMAX
-#endif
 #include "audio/audio_loader.h"   // widen/run_hidden/temp 清理已按平台桥接（§13.12）
-#if !defined(_WIN32)
-#include "platform/path.h"
-#include <unistd.h>
-#include <atomic>
-#endif
 #include "audio/dsd_reader.h"
 #include "net/json.h"
 #include <string>
@@ -291,18 +280,6 @@ struct CoverCache {
 inline CoverCache& cover_cache() { static CoverCache c; return c; }
 
 inline std::string temp_path(const wchar_t* ext) {
-#if defined(_WIN32)
-    wchar_t dir[MAX_PATH]; GetTempPathW(MAX_PATH, dir);
-    wchar_t name[MAX_PATH] = {0};
-    GetTempFileNameW(dir, L"rta", 0, name);
-    std::wstring w(name);
-    w += ext;                                   // 保持既有行为：全名后追加调用方扩展名
-    const int m = WideCharToMultiByte(CP_UTF8, 0, w.c_str(), -1, nullptr, 0, nullptr, nullptr);
-    std::string s((size_t)m, '\0');
-    WideCharToMultiByte(CP_UTF8, 0, w.c_str(), -1, s.data(), m, nullptr, nullptr);
-    if (!s.empty() && s.back() == '\0') s.pop_back();
-    return s;
-#else
     // POSIX：wchar_t 入参按保序字节还原（调用点只传 ASCII 扩展名）
     std::string ex;
     for (const wchar_t* p = ext; p && *p; ++p) ex += (char)(*p & 0xFF);
@@ -310,7 +287,6 @@ inline std::string temp_path(const wchar_t* ext) {
     return rta::platform::temp_dir_utf8() + "rta" +
            std::to_string((unsigned long)::getpid()) + "-" +
            std::to_string(seq.fetch_add(1)) + ex;
-#endif
 }
 
 // 返回封面字节；同时把 mime 写进 outMime

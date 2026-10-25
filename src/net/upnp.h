@@ -1,4 +1,4 @@
-// upnp.h — UPnP/DLNA 媒体渲染器发现与本地 HTTP WAV 供源（winsock2 直连，平台白名单豁免）
+// upnp.h — UPnP/DLNA 媒体渲染器发现与本地 HTTP WAV 供源（BSD socket 直连）
 //
 // 契约要点（ROADMAP P5a）：
 //   1) SSDP M-SEARCH 发现 MediaRenderer 设备与解析 AVTransport / ConnectionManager 控制地址；
@@ -6,10 +6,16 @@
 //      路由 /stream/<token>.wav，随机 token 防目录遍历；
 //      支持 Range 请求（bytes=start-end / bytes=start-），渲染器普遍需要 seek；
 //      记录访问日志（谁取、取了多少字节）。
+//
+// 平台（2026-10-25 补全 POSIX 分支）：
+//   Windows 走 winsock2，macOS/POSIX 走 BSD socket。两平台差异全部收进下面的
+//   upnp_os 别名层，实现体只有一份 —— 避免"双份逻辑各自漂移"这种老坑。
+//   Windows 分支保留（铁律：功能不能删除），POSIX 分支与它语义等价。
 #pragma once
 #ifndef _CRT_SECURE_NO_WARNINGS
 #define _CRT_SECURE_NO_WARNINGS
 #endif
+#if defined(_WIN32)
 #ifndef _WINSOCK_DEPRECATED_NO_WARNINGS
 #define _WINSOCK_DEPRECATED_NO_WARNINGS
 #endif
@@ -21,6 +27,22 @@
 #endif
 #include <winsock2.h>
 #include <ws2tcpip.h>
+#else
+// POSIX / macOS：BSD socket 全套
+#include <sys/types.h>
+#include <sys/socket.h>
+#include <sys/select.h>
+#include <sys/time.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
+#include <netdb.h>
+#include <unistd.h>
+#include <fcntl.h>
+#include <poll.h>
+#include <ifaddrs.h>        // getifaddrs()：POSIX 枚举本机网卡的规范做法（见 upnp_local_ipv4）
+#include <cerrno>
+#include "platform/time.h"   // 单调毫秒（语义 = GetTickCount64）
+#endif
 #include "net/upnp_control.h"
 #include <string>
 #include <vector>
@@ -33,7 +55,193 @@
 #include <algorithm>
 #include <cstdio>
 #include <cstring>
+#include <cctype>       // std::tolower —— winsock2.h 在 Windows 上顺带引了，POSIX 必须显式
+#include <sstream>      // std::istringstream —— 同上
+#include <functional>   // std::function（accessCallback_）—— 同上
+#include <cstdint>
 #include <fstream>
+
+// ---------------- 平台别名层（Windows winsock2 / POSIX BSD socket） ----------------
+//
+// 目标：实现体只有一份。下面每个名字在两平台上语义一致，
+// 所以 http_get / upnp_discover / UpnpHttpServer 的代码不再出现 #if。
+namespace rta::net::upnp_os {
+
+#if defined(_WIN32)
+
+using socket_t = SOCKET;
+inline constexpr socket_t kInvalidSocket = INVALID_SOCKET;
+
+inline bool   wsa_init()   { WSADATA w; return WSAStartup(MAKEWORD(2, 2), &w) == 0; }
+inline void   wsa_cleanup() { WSACleanup(); }
+inline int    last_error() { return (int)WSAGetLastError(); }
+inline bool   would_block(int e) { return e == WSAEWOULDBLOCK; }
+inline void   close_socket(socket_t s) { ::closesocket(s); }
+
+inline bool set_nonblocking(socket_t s) {
+    u_long mode = 1;
+    return ::ioctlsocket(s, FIONBIO, &mode) == 0;
+}
+
+// 平台把 setsockopt 的 optval 声明成 (const char*)；用这个函数抹平签名差异
+inline int set_opt(socket_t s, int level, int opt, const void* val, int len) {
+    return ::setsockopt(s, level, opt, (const char*)val, len);
+}
+inline int set_timeout(socket_t s, int opt, int ms) {
+    DWORD tv = (DWORD)ms;
+    return ::setsockopt(s, SOL_SOCKET, opt, (const char*)&tv, (int)sizeof(tv));
+}
+
+inline int  io_send(socket_t s, const char* p, int n) { return ::send(s, p, n, 0); }
+inline int  io_recv(socket_t s, char* p, int n)       { return ::recv(s, p, n, 0); }
+inline int  io_sendto(socket_t s, const char* p, int n, const sockaddr* to, int tolen) {
+    return ::sendto(s, p, n, 0, to, tolen);
+}
+inline int  io_recvfrom(socket_t s, char* p, int n, sockaddr* from, int* fromlen) {
+    return ::recvfrom(s, p, n, 0, from, fromlen);
+}
+inline int  io_accept(socket_t s, sockaddr* a, int* alen) { return ::accept(s, a, alen); }
+inline int  io_bind(socket_t s, const sockaddr* a, int alen) { return ::bind(s, a, alen); }
+inline int  io_connect(socket_t s, const sockaddr* a, int alen) { return ::connect(s, a, alen); }
+inline int  io_listen(socket_t s, int backlog) { return ::listen(s, backlog); }
+inline int  io_getsockname(socket_t s, sockaddr* a, int* alen) { return ::getsockname(s, a, alen); }
+
+// 加入 SSDP 组播组 239.255.255.250。ifaddr 为 nullptr 表示让内核选接口。
+inline bool join_multicast(socket_t s, const in_addr* ifaddr) {
+    ip_mreq mreq{};
+    mreq.imr_multiaddr.s_addr = ::inet_addr("239.255.255.250");
+    mreq.imr_interface = ifaddr ? *ifaddr : in_addr{ htonl(INADDR_ANY) };
+    return ::setsockopt(s, IPPROTO_IP, IP_ADD_MEMBERSHIP, (const char*)&mreq, sizeof(mreq)) == 0;
+}
+
+// 等待一组 socket 中任意一个可读，返回可读者的下标。超时单位微秒（与 select 的 timeval 一致）。
+// Windows 用 select（FD_SETSIZE=64 够用，且 winsock 的 select 本来就是这个用法）。
+inline std::vector<size_t> wait_readable(const std::vector<socket_t>& socks, int timeoutUs) {
+    std::vector<size_t> ready;
+    if (socks.empty()) return ready;
+    fd_set rf;
+    FD_ZERO(&rf);
+    for (socket_t s : socks) FD_SET(s, &rf);
+    timeval tv{ timeoutUs / 1000000, timeoutUs % 1000000 };
+    if (::select(0, &rf, nullptr, nullptr, &tv) <= 0) return ready;
+    for (size_t i = 0; i < socks.size(); ++i) if (FD_ISSET(socks[i], &rf)) ready.push_back(i);
+    return ready;
+}
+
+// 64 位文件偏移：Windows 是 _fseeki64/_ftelli64
+inline int    file_seek(FILE* f, int64_t off) { return _fseeki64(f, off, SEEK_SET); }
+inline int64_t file_tell(FILE* f)            { return _ftelli64(f); }
+// 量文件长度并把游标复位到开头（原实现的三行内联，收进别名层以便两平台共用）
+inline int64_t file_size(FILE* f) {
+    if (!f) return 0;
+    if (_fseeki64(f, 0, SEEK_END) != 0) return 0;
+    const int64_t n = _ftelli64(f);
+    _fseeki64(f, 0, SEEK_SET);
+    return n;
+}
+
+inline uint64_t monotonic_ms() { return (uint64_t)GetTickCount64(); }
+
+#else  // ---------------- POSIX / macOS ----------------
+
+using socket_t = int;
+inline constexpr socket_t kInvalidSocket = -1;
+
+// Windows 的 WSAStartup/WSACleanup 在 POSIX 上没有对应物：空操作，调用点不用改。
+inline bool   wsa_init()   { return true; }
+inline void   wsa_cleanup() {}
+inline int    last_error() { return errno; }
+inline bool   would_block(int e) { return e == EWOULDBLOCK || e == EAGAIN; }
+inline void   close_socket(socket_t s) { ::close(s); }
+
+inline bool set_nonblocking(socket_t s) {
+    const int fl = ::fcntl(s, F_GETFL, 0);
+    if (fl < 0) return false;
+    return ::fcntl(s, F_SETFL, fl | O_NONBLOCK) == 0;
+}
+
+inline int set_opt(socket_t s, int level, int opt, const void* val, socklen_t len) {
+    return ::setsockopt(s, level, opt, val, len);
+}
+inline int set_timeout(socket_t s, int opt, int ms) {
+    struct timeval tv{};
+    tv.tv_sec  = ms / 1000;
+    tv.tv_usec = (ms % 1000) * 1000;
+    return ::setsockopt(s, SOL_SOCKET, opt, &tv, sizeof(tv));
+}
+
+inline int  io_send(socket_t s, const char* p, int n) { return (int)::send(s, p, (size_t)n, 0); }
+inline int  io_recv(socket_t s, char* p, int n)       { return (int)::recv(s, p, (size_t)n, 0); }
+inline int  io_sendto(socket_t s, const char* p, int n, const sockaddr* to, int tolen) {
+    return (int)::sendto(s, p, (size_t)n, 0, to, (socklen_t)tolen);
+}
+inline int  io_recvfrom(socket_t s, char* p, int n, sockaddr* from, int* fromlen) {
+    socklen_t sl = fromlen ? (socklen_t)*fromlen : 0;
+    const int r = (int)::recvfrom(s, p, (size_t)n, 0, from, fromlen ? &sl : nullptr);
+    if (fromlen) *fromlen = (int)sl;
+    return r;
+}
+inline int  io_accept(socket_t s, sockaddr* a, int* alen) {
+    socklen_t sl = alen ? (socklen_t)*alen : 0;
+    const int r = (int)::accept(s, a, alen ? &sl : nullptr);
+    if (alen) *alen = (int)sl;
+    return r;
+}
+inline int  io_bind(socket_t s, const sockaddr* a, int alen)    { return ::bind(s, a, (socklen_t)alen); }
+inline int  io_connect(socket_t s, const sockaddr* a, int alen) { return ::connect(s, a, (socklen_t)alen); }
+inline int  io_listen(socket_t s, int backlog) { return ::listen(s, backlog); }
+inline int  io_getsockname(socket_t s, sockaddr* a, int* alen) {
+    socklen_t sl = alen ? (socklen_t)*alen : 0;
+    const int r = ::getsockname(s, a, alen ? &sl : nullptr);
+    if (alen) *alen = (int)sl;
+    return r;
+}
+
+// 加入 SSDP 组播组 239.255.255.250。ifaddr 为 nullptr 表示让内核选接口。
+// macOS/POSIX 上这是收到"回给组播地址的应答"的必要条件（Linux 的默认行为更宽松，
+// 但显式加入在两平台都正确且无害）。
+inline bool join_multicast(socket_t s, const in_addr* ifaddr) {
+    ip_mreq mreq{};
+    mreq.imr_multiaddr.s_addr = ::inet_addr("239.255.255.250");
+    mreq.imr_interface = ifaddr ? *ifaddr : in_addr{ htonl(INADDR_ANY) };
+    return ::setsockopt(s, IPPROTO_IP, IP_ADD_MEMBERSHIP, &mreq, sizeof(mreq)) == 0;
+}
+
+// 等待一组 socket 中任意一个可读，返回可读者的下标；超时单位微秒。
+// POSIX 上用 poll()：不受 FD_SETSIZE(1024) 限制，也不要求"最大 fd + 1"。
+inline std::vector<size_t> wait_readable(const std::vector<socket_t>& socks, int timeoutUs) {
+    std::vector<size_t> ready;
+    if (socks.empty()) return ready;
+    std::vector<struct pollfd> pfds(socks.size());
+    for (size_t i = 0; i < socks.size(); ++i) {
+        pfds[i].fd = socks[i];
+        pfds[i].events = POLLIN;
+        pfds[i].revents = 0;
+    }
+    const int rc = ::poll(pfds.data(), (nfds_t)pfds.size(), timeoutUs / 1000);
+    if (rc <= 0) return ready;
+    for (size_t i = 0; i < pfds.size(); ++i) if (pfds[i].revents & POLLIN) ready.push_back(i);
+    return ready;
+}
+
+// POSIX 上 64 位偏移就是 fseeko/ftello（macOS 的 off_t 已是 64 位）
+inline int    file_seek(FILE* f, int64_t off) { return ::fseeko(f, (off_t)off, SEEK_SET); }
+inline int64_t file_tell(FILE* f)            { return (int64_t)::ftello(f); }
+inline int64_t file_size(FILE* f) {
+    if (!f) return 0;
+    if (::fseeko(f, 0, SEEK_END) != 0) return 0;
+    const int64_t n = (int64_t)::ftello(f);
+    ::fseeko(f, 0, SEEK_SET);
+    return n;
+}
+
+// 用平台层的单调时钟（platform/macos/time_posix.h），语义 = GetTickCount64()：
+// 开机以来毫秒、单调、不回退。不偷换 std::chrono::steady_clock（epoch 由实现定义）。
+inline uint64_t monotonic_ms() { return rta::platform::monotonic_ms(); }
+
+#endif
+
+} // namespace rta::net::upnp_os
 
 namespace rta::net {
 
@@ -94,42 +302,40 @@ inline std::string extract_service_control_url(const std::string& xml, const cha
 }
 
 inline bool http_get(const std::string& host, int port, const std::string& path, std::string& out) {
-    WSADATA w;
-    bool wsaInit = (WSAStartup(MAKEWORD(2, 2), &w) == 0);
-    SOCKET s = ::socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-    if (s == INVALID_SOCKET) {
-        if (wsaInit) WSACleanup();
+    const bool wsaInit = upnp_os::wsa_init();
+    upnp_os::socket_t s = ::socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    if (s == upnp_os::kInvalidSocket) {
+        if (wsaInit) upnp_os::wsa_cleanup();
         return false;
     }
-    DWORD tv = 1500;
-    ::setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, (const char*)&tv, sizeof(tv));
+    upnp_os::set_timeout(s, SO_RCVTIMEO, 1500);
     sockaddr_in a{};
     a.sin_family = AF_INET;
     a.sin_port = htons((u_short)port);
     a.sin_addr.s_addr = ::inet_addr(host.c_str());
-    if (::connect(s, (sockaddr*)&a, sizeof(a)) != 0) {
-        ::closesocket(s);
-        if (wsaInit) WSACleanup();
+    if (upnp_os::io_connect(s, (sockaddr*)&a, sizeof(a)) != 0) {
+        upnp_os::close_socket(s);
+        if (wsaInit) upnp_os::wsa_cleanup();
         return false;
     }
     char req[512];
     std::snprintf(req, sizeof(req),
                   "GET %s HTTP/1.1\r\nHost: %s:%d\r\nConnection: close\r\nUser-Agent: RLPlayer/1\r\n\r\n",
                   path.c_str(), host.c_str(), port);
-    if (::send(s, req, (int)std::strlen(req), 0) <= 0) {
-        ::closesocket(s);
-        if (wsaInit) WSACleanup();
+    if (upnp_os::io_send(s, req, (int)std::strlen(req)) <= 0) {
+        upnp_os::close_socket(s);
+        if (wsaInit) upnp_os::wsa_cleanup();
         return false;
     }
     char buf[8192];
     int r;
     out.clear();
-    while ((r = ::recv(s, buf, sizeof(buf), 0)) > 0) {
+    while ((r = upnp_os::io_recv(s, buf, sizeof(buf))) > 0) {
         out.append(buf, (size_t)r);
         if (out.size() > 524288) break;
     }
-    ::closesocket(s);
-    if (wsaInit) WSACleanup();
+    upnp_os::close_socket(s);
+    if (wsaInit) upnp_os::wsa_cleanup();
     return !out.empty();
 }
 } // namespace upnp_detail
@@ -149,6 +355,7 @@ struct UpnpDiscoverDiag {
 
 inline std::vector<std::string> upnp_local_ipv4(std::vector<std::string>* skipped = nullptr) {
     std::vector<std::string> out;
+#if defined(_WIN32)
     char host[256] = {0};
     if (::gethostname(host, sizeof(host)) != 0) return out;
     addrinfo hints{};
@@ -169,6 +376,28 @@ inline std::vector<std::string> upnp_local_ipv4(std::vector<std::string>* skippe
         if (std::find(out.begin(), out.end(), s) == out.end()) out.push_back(s);
     }
     ::freeaddrinfo(res);
+#else
+    // POSIX/macOS：不能用 getaddrinfo(gethostname())。
+    // macOS 的 gethostname() 返回 "Mac.local" 之类的 mDNS 名，getaddrinfo 对它的
+    // AF_INET 查询通常只回 127.0.0.1（甚至直接失败），结果就是 ips 里只剩 127.x 被过滤掉
+    // → 退回 "0.0.0.0" → 组播只从默认路由出去，正是 2026-10-23 那个「UPnP 搜不到设备」
+    // 的同一个坑。getifaddrs() 直接遍历内核的网卡地址表，才是 POSIX 的等价做法。
+    struct ifaddrs* ifs = nullptr;
+    if (::getifaddrs(&ifs) != 0) return out;
+    for (struct ifaddrs* p = ifs; p; p = p->ifa_next) {
+        if (!p->ifa_addr || p->ifa_addr->sa_family != AF_INET) continue;
+        char ip[64] = {0};
+        const sockaddr_in* sa = (const sockaddr_in*)p->ifa_addr;
+        if (::inet_ntop(AF_INET, &sa->sin_addr, ip, sizeof(ip)) == nullptr) continue;
+        const std::string s(ip);
+        if (s.rfind("127.", 0) == 0 || s.rfind("169.254.", 0) == 0) continue;
+        // 与 Windows 分支同一条规则：代理 TUN 的 fake-IP 段跳过但记录
+        const bool virtual_like = (s.rfind("198.18.", 0) == 0 || s.rfind("198.19.", 0) == 0);
+        if (virtual_like) { if (skipped) skipped->push_back(s + "(代理 TUN)"); continue; }
+        if (std::find(out.begin(), out.end(), s) == out.end()) out.push_back(s);
+    }
+    ::freeifaddrs(ifs);
+#endif
     return out;
 }
 
@@ -176,8 +405,8 @@ inline std::vector<UpnpDevice> upnp_discover(int timeoutMs = 1800, UpnpDiscoverD
     using namespace upnp_detail;
     std::vector<UpnpDevice> out;
 
-    WSADATA w;
-    if (WSAStartup(MAKEWORD(2, 2), &w) != 0) return out;
+    const bool wsaOk = upnp_os::wsa_init();
+    if (!wsaOk) return out;
 
     std::vector<std::string> skipped;
     std::vector<std::string> ips = upnp_local_ipv4(&skipped);
@@ -195,10 +424,10 @@ inline std::vector<UpnpDevice> upnp_discover(int timeoutMs = 1800, UpnpDiscoverD
     to.sin_port = htons(1900);
     to.sin_addr.s_addr = ::inet_addr("239.255.255.250");
 
-    std::vector<SOCKET> socks;
+    std::vector<upnp_os::socket_t> socks;
     for (const auto& ip : ips) {
-        SOCKET s = ::socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
-        if (s == INVALID_SOCKET) continue;
+        upnp_os::socket_t s = ::socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+        if (s == upnp_os::kInvalidSocket) continue;
         in_addr ifaddr{};
         ifaddr.s_addr = ::inet_addr(ip.c_str());
         if (ip != "0.0.0.0") {
@@ -207,11 +436,15 @@ inline std::vector<UpnpDevice> upnp_discover(int timeoutMs = 1800, UpnpDiscoverD
             local.sin_port = htons(0);
             local.sin_addr = ifaddr;
             // bind 失败也继续（退回任意地址绑定），但组播出口仍按该网卡设置
-            (void)::bind(s, (sockaddr*)&local, sizeof(local));
-            ::setsockopt(s, IPPROTO_IP, IP_MULTICAST_IF, (const char*)&ifaddr, sizeof(ifaddr));
+            (void)upnp_os::io_bind(s, (sockaddr*)&local, sizeof(local));
+            upnp_os::set_opt(s, IPPROTO_IP, IP_MULTICAST_IF, &ifaddr, sizeof(ifaddr));
         }
+        // 加入 SSDP 组播组：POSIX/macOS 上必须显式 IP_ADD_MEMBERSHIP，
+        // 否则收不到渲染器回给 239.255.255.250:1900 的应答（Windows 上不强制，
+        // 加了也无害 —— 语义统一，两平台走同一条代码）。
+        upnp_os::join_multicast(s, ip == "0.0.0.0" ? nullptr : &ifaddr);
         for (int rep = 0; rep < 2; ++rep) {
-            ::sendto(s, msg, (int)std::strlen(msg), 0, (sockaddr*)&to, sizeof(to));
+            upnp_os::io_sendto(s, msg, (int)std::strlen(msg), (sockaddr*)&to, sizeof(to));
             if (diag) diag->msgs_sent++;
             std::this_thread::sleep_for(std::chrono::milliseconds(60));
         }
@@ -224,21 +457,16 @@ inline std::vector<UpnpDevice> upnp_discover(int timeoutMs = 1800, UpnpDiscoverD
         diag->note = "已跳过虚拟/代理网卡: " + sk;
     }
 
-    const ULONGLONG t0 = GetTickCount64();
+    const uint64_t t0 = upnp_os::monotonic_ms();
     std::vector<std::string> seen_locations;
-    while (GetTickCount64() - t0 < (ULONGLONG)timeoutMs && !socks.empty()) {
-        fd_set rf;
-        FD_ZERO(&rf);
-        for (SOCKET s : socks) FD_SET(s, &rf);
-        timeval tv{0, 150000};
-        const int rc = ::select(0, &rf, nullptr, nullptr, &tv);
-        if (rc <= 0) continue;
-        for (size_t si = 0; si < socks.size(); ++si) {
-            if (!FD_ISSET(socks[si], &rf)) continue;
+    while (upnp_os::monotonic_ms() - t0 < (uint64_t)timeoutMs && !socks.empty()) {
+        const std::vector<size_t> ready = upnp_os::wait_readable(socks, 150000);
+        if (ready.empty()) continue;
+        for (size_t si : ready) {
             char buf[4096];
             sockaddr_in from{};
             int fl = sizeof(from);
-            const int n = ::recvfrom(socks[si], buf, sizeof(buf), 0, (sockaddr*)&from, &fl);
+            const int n = upnp_os::io_recvfrom(socks[si], buf, sizeof(buf), (sockaddr*)&from, &fl);
             if (n <= 0) continue;
             const std::string resp(buf, (size_t)n);
             std::string loc = header_of(resp, "LOCATION");
@@ -279,18 +507,18 @@ inline std::vector<UpnpDevice> upnp_discover(int timeoutMs = 1800, UpnpDiscoverD
             out.push_back(dev);
         }
     }
-    for (SOCKET s : socks) ::closesocket(s);
-    WSACleanup();
+    for (upnp_os::socket_t s : socks) upnp_os::close_socket(s);
+    upnp_os::wsa_cleanup();
     return out;
 }
 
 // 查找本机面向指定目标主机的首选局域网 IP
 inline std::string upnp_local_ip_for(const std::string& targetHost, uint16_t targetPort = 80) {
-    WSADATA w;
-    if (WSAStartup(MAKEWORD(2, 2), &w) != 0) return "127.0.0.1";
+    const bool wsaOk = upnp_os::wsa_init();
+    if (!wsaOk) return "127.0.0.1";
 
-    SOCKET s = ::socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
-    if (s == INVALID_SOCKET) { WSACleanup(); return "127.0.0.1"; }
+    upnp_os::socket_t s = ::socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    if (s == upnp_os::kInvalidSocket) { upnp_os::wsa_cleanup(); return "127.0.0.1"; }
 
     sockaddr_in dst{};
     dst.sin_family = AF_INET;
@@ -298,10 +526,11 @@ inline std::string upnp_local_ip_for(const std::string& targetHost, uint16_t tar
     dst.sin_addr.s_addr = ::inet_addr(targetHost.c_str());
 
     std::string out = "127.0.0.1";
-    if (::connect(s, (sockaddr*)&dst, sizeof(dst)) == 0) {
+    // 注意：UDP connect 不发包，只让内核完成路由选路 —— 正是这里要的语义。
+    if (upnp_os::io_connect(s, (sockaddr*)&dst, sizeof(dst)) == 0) {
         sockaddr_in local{};
         int len = sizeof(local);
-        if (::getsockname(s, (sockaddr*)&local, &len) == 0) {
+        if (upnp_os::io_getsockname(s, (sockaddr*)&local, &len) == 0) {
             char buf[64]{};
             ::inet_ntop(AF_INET, &local.sin_addr, buf, sizeof(buf));
             if (std::strlen(buf) > 0 && std::strcmp(buf, "0.0.0.0") != 0) {
@@ -309,8 +538,8 @@ inline std::string upnp_local_ip_for(const std::string& targetHost, uint16_t tar
             }
         }
     }
-    ::closesocket(s);
-    WSACleanup();
+    upnp_os::close_socket(s);
+    upnp_os::wsa_cleanup();
     return out;
 }
 
@@ -333,15 +562,14 @@ public:
 
     bool start(uint16_t port = 8912, const std::string& bindIp = "0.0.0.0") {
         stop();
-        WSADATA w;
-        if (WSAStartup(MAKEWORD(2, 2), &w) != 0) return false;
+        if (!upnp_os::wsa_init()) return false;
         wsaStarted_ = true;
 
         listen_ = ::socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-        if (listen_ == INVALID_SOCKET) { cleanup_wsa(); return false; }
+        if (listen_ == upnp_os::kInvalidSocket) { cleanup_wsa(); return false; }
 
         int yes = 1;
-        ::setsockopt(listen_, SOL_SOCKET, SO_REUSEADDR, (const char*)&yes, sizeof(yes));
+        upnp_os::set_opt(listen_, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(yes));
 
         sockaddr_in a{};
         a.sin_family = AF_INET;
@@ -349,15 +577,15 @@ public:
         a.sin_addr.s_addr = (bindIp == "0.0.0.0" || bindIp.empty())
                             ? htonl(INADDR_ANY) : ::inet_addr(bindIp.c_str());
 
-        if (::bind(listen_, (sockaddr*)&a, sizeof(a)) != 0) {
-            ::closesocket(listen_); listen_ = INVALID_SOCKET; cleanup_wsa(); return false;
+        if (upnp_os::io_bind(listen_, (sockaddr*)&a, sizeof(a)) != 0) {
+            upnp_os::close_socket(listen_); listen_ = upnp_os::kInvalidSocket; cleanup_wsa(); return false;
         }
-        if (::listen(listen_, 16) != 0) {
-            ::closesocket(listen_); listen_ = INVALID_SOCKET; cleanup_wsa(); return false;
+        if (upnp_os::io_listen(listen_, 16) != 0) {
+            upnp_os::close_socket(listen_); listen_ = upnp_os::kInvalidSocket; cleanup_wsa(); return false;
         }
 
         sockaddr_in got{}; int gl = sizeof(got);
-        ::getsockname(listen_, (sockaddr*)&got, &gl);
+        upnp_os::io_getsockname(listen_, (sockaddr*)&got, &gl);
         port_ = ntohs(got.sin_port);
 
         stop_.store(false);
@@ -367,9 +595,9 @@ public:
 
     void stop() {
         stop_.store(true);
-        if (listen_ != INVALID_SOCKET) {
-            ::closesocket(listen_);
-            listen_ = INVALID_SOCKET;
+        if (listen_ != upnp_os::kInvalidSocket) {
+            upnp_os::close_socket(listen_);
+            listen_ = upnp_os::kInvalidSocket;
         }
         if (acceptThread_.joinable()) {
             acceptThread_.join();
@@ -440,7 +668,7 @@ private:
 
     void cleanup_wsa() {
         if (wsaStarted_) {
-            WSACleanup();
+            upnp_os::wsa_cleanup();
             wsaStarted_ = false;
         }
     }
@@ -449,9 +677,14 @@ private:
         while (!stop_.load()) {
             sockaddr_in clientAddr{};
             int addrLen = sizeof(clientAddr);
-            SOCKET c = ::accept(listen_, (sockaddr*)&clientAddr, &addrLen);
-            if (c == INVALID_SOCKET) {
+            upnp_os::socket_t c = upnp_os::io_accept(listen_, (sockaddr*)&clientAddr, &addrLen);
+            if (c == upnp_os::kInvalidSocket) {
                 if (stop_.load()) break;
+                // 2026-10-25 POSIX 补丁：stop() 里 close(listen_) 会让阻塞中的 accept()
+                // 立刻返回 EBADF/EINVAL（Windows 是 WSAENOTSOCK），这里同样直接退出，
+                // 否则会变成一个"空转线程"，join() 永远等不到。
+                const int e = upnp_os::last_error();
+                if (e == EBADF || e == EINVAL || e == ENOTSOCK) break;
                 continue;
             }
             char ipBuf[64]{};
@@ -467,20 +700,19 @@ private:
         }
     }
 
-    void handle_client(SOCKET c, const std::string& clientIp, uint16_t clientPort) {
-        DWORD tv = 4000;
-        ::setsockopt(c, SOL_SOCKET, SO_RCVTIMEO, (const char*)&tv, sizeof(tv));
-        ::setsockopt(c, SOL_SOCKET, SO_SNDTIMEO, (const char*)&tv, sizeof(tv));
+    void handle_client(upnp_os::socket_t c, const std::string& clientIp, uint16_t clientPort) {
+        upnp_os::set_timeout(c, SO_RCVTIMEO, 4000);
+        upnp_os::set_timeout(c, SO_SNDTIMEO, 4000);
 
         std::string reqBuf;
         char tmp[4096];
         while (reqBuf.find("\r\n\r\n") == std::string::npos && reqBuf.size() < 65536) {
-            int r = ::recv(c, tmp, sizeof(tmp), 0);
+            int r = upnp_os::io_recv(c, tmp, sizeof(tmp));
             if (r <= 0) break;
             reqBuf.append(tmp, (size_t)r);
         }
         if (reqBuf.empty()) {
-            ::closesocket(c);
+            upnp_os::close_socket(c);
             return;
         }
 
@@ -519,9 +751,9 @@ private:
         // 校验 token 与防目录遍历
         if (!found || !validate_stream_token(path, entry.token)) {
             const char* notFoundResp = "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
-            ::send(c, notFoundResp, (int)std::strlen(notFoundResp), 0);
+            upnp_os::io_send(c, notFoundResp, (int)std::strlen(notFoundResp));
             record_log(clientIp, clientPort, method, path, rangeHeader, 404, 0);
-            ::closesocket(c);
+            upnp_os::close_socket(c);
             return;
         }
 
@@ -531,14 +763,13 @@ private:
             fileHandle = std::fopen(entry.filePath.c_str(), "rb");
             if (!fileHandle) {
                 const char* notFoundResp = "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
-                ::send(c, notFoundResp, (int)std::strlen(notFoundResp), 0);
+                upnp_os::io_send(c, notFoundResp, (int)std::strlen(notFoundResp));
                 record_log(clientIp, clientPort, method, path, rangeHeader, 404, 0);
-                ::closesocket(c);
+                upnp_os::close_socket(c);
                 return;
             }
-            _fseeki64(fileHandle, 0, SEEK_END);
-            totalSize = _ftelli64(fileHandle);
-            _fseeki64(fileHandle, 0, SEEK_SET);
+            totalSize = upnp_os::file_size(fileHandle);
+            upnp_os::file_seek(fileHandle, 0);
         } else {
             totalSize = (int64_t)entry.buffer.size();
         }
@@ -546,19 +777,19 @@ private:
         HttpRange range = parse_http_range(rangeHeader, totalSize);
         StreamResponseHeaders respHeaders = build_stream_response_headers(range, totalSize, entry.mimeType);
 
-        ::send(c, respHeaders.headerString.data(), (int)respHeaders.headerString.size(), 0);
+        upnp_os::io_send(c, respHeaders.headerString.data(), (int)respHeaders.headerString.size());
 
         int64_t sent = 0;
         if (method == "GET" && (respHeaders.statusCode == 200 || respHeaders.statusCode == 206)) {
             int64_t toSend = respHeaders.contentLength;
             if (entry.isFile && fileHandle) {
-                _fseeki64(fileHandle, respHeaders.rangeStart, SEEK_SET);
+                upnp_os::file_seek(fileHandle, respHeaders.rangeStart);
                 std::vector<uint8_t> chunk(65536);
                 while (toSend > 0 && !stop_.load()) {
                     size_t readLen = (size_t)std::min<int64_t>(toSend, (int64_t)chunk.size());
                     size_t nRead = std::fread(chunk.data(), 1, readLen, fileHandle);
                     if (nRead == 0) break;
-                    int nSend = ::send(c, (const char*)chunk.data(), (int)nRead, 0);
+                    int nSend = upnp_os::io_send(c, (const char*)chunk.data(), (int)nRead);
                     if (nSend <= 0) break;
                     sent += nSend;
                     toSend -= nSend;
@@ -567,7 +798,7 @@ private:
                 const uint8_t* p = entry.buffer.data() + respHeaders.rangeStart;
                 while (toSend > 0 && !stop_.load()) {
                     int chunkLen = (int)std::min<int64_t>(toSend, 65536);
-                    int nSend = ::send(c, (const char*)p + sent, chunkLen, 0);
+                    int nSend = upnp_os::io_send(c, (const char*)p + sent, chunkLen);
                     if (nSend <= 0) break;
                     sent += nSend;
                     toSend -= nSend;
@@ -579,7 +810,7 @@ private:
         totalBytesServed_ += sent;
         totalRequestsServed_++;
         record_log(clientIp, clientPort, method, path, rangeHeader, respHeaders.statusCode, sent);
-        ::closesocket(c);
+        upnp_os::close_socket(c);
     }
 
     void record_log(const std::string& clientIp, uint16_t clientPort,
@@ -598,7 +829,7 @@ private:
         if (accessCallback_) accessCallback_(entry);
     }
 
-    SOCKET listen_ = INVALID_SOCKET;
+    upnp_os::socket_t listen_ = upnp_os::kInvalidSocket;
     uint16_t port_ = 0;
     bool wsaStarted_ = false;
     std::atomic<bool> stop_{true};

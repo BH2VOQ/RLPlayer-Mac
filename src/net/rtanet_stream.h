@@ -72,11 +72,7 @@ public:
         timeval tv{}; tv.tv_sec = timeoutMs / 1000; tv.tv_usec = (timeoutMs % 1000) * 1000;
         if (::select((int)(s_ + 1), &fds, nullptr, nullptr, &tv) <= 0) return false;
         sockaddr_in a{}; 
-#ifdef _WIN32
-        int alen = sizeof(a);
-#else
         socklen_t alen = sizeof(a);
-#endif
         out.s_ = ::accept(s_, (sockaddr*)&a, &alen);
         return out.s_ != RTA_INVALID_SOCK;
     }
@@ -114,23 +110,16 @@ public:
     }
     uint16_t local_port() const {
         sockaddr_in a{};
-#ifdef _WIN32
-        int alen = sizeof(a);
-#else
         socklen_t alen = sizeof(a);
-#endif
         if (::getsockname(s_, (sockaddr*)&a, &alen) != 0) return 0;
         return ntohs(a.sin_port);
     }
     void close() { if (s_ != RTA_INVALID_SOCK) { rta_close_sock(s_); s_ = RTA_INVALID_SOCK; } listening_ = false; }
     ~TcpSocket() { close(); }
 private:
-    static void ensure_wsa() {
-#ifdef _WIN32
-        static bool done = false;
-        if (!done) { WSADATA w; WSAStartup(MAKEWORD(2, 2), &w); done = true; }
-#endif
-    }
+    // 2026-10-25 转 macOS 单平台：原 WSAStartup 初始化（Windows socket 库）已删除；
+    // 保留同名空函数只为不动三处调用点（connect_to / listen_on / accept_one）。
+    static void ensure_wsa() {}
     sock_t s_ = RTA_INVALID_SOCK;
     bool listening_ = false;
     std::string buf_;
