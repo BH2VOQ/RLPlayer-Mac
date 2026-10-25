@@ -15,7 +15,9 @@
 #
 # Usage: powershell -File tools/make_dist.ps1 [-Version 1.0.2] [-SkipGpuBuild]
 param(
-    [string]$Version = "1.3.13",
+    # 2026-10-26：版本号不再手写默认值（这里曾硬编码 1.3.13，导致 1.5.x 的包被命名成 1.3.13）。
+# 单一来源 = src/version.h 的 RLPLAYER_VERSION（铁律 10.4）。
+[string]$Version = "",
     [switch]$SkipGpuBuild
 )
 
@@ -71,6 +73,14 @@ $ffPath = Join-Path $liteDir 'ffmpeg.exe'
 $fpPath = Join-Path $liteDir 'ffprobe.exe'
 if (-not (Test-Path $ffPath) -or -not (Test-Path $fpPath)) { Fail "精简版产物缺失：$liteDir" }
 
+if (-not $Version) {
+    $vh = Join-Path $PSScriptRoot '..\src\version.h'
+    if (-not (Test-Path $vh)) { throw "找不到 $vh，无法读取版本号" }
+    $m = Select-String -Path $vh -Pattern 'RLPLAYER_VERSION\s+"([0-9.]+)"' | Select-Object -First 1
+    if (-not $m) { throw "src/version.h 里没找到 RLPLAYER_VERSION" }
+    $Version = $m.Matches[0].Groups[1].Value
+    Write-Host "版本号（读自 src/version.h）: $Version"
+}
 $name = "RLPlayer-$Version-win64"
 $out = Join-Path $dist $name
 if (Test-Path $out) { Remove-Item $out -Recurse -Force }
