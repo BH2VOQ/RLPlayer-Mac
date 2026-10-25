@@ -615,6 +615,14 @@ target_include_directories(test_dsd_stream_decode PRIVATE ${CMAKE_SOURCE_DIR}/sr
 target_link_libraries(test_dsd_stream_decode PRIVATE rtadsp ${RL_PLATFORM_LIBS})
 add_test(NAME dsd_stream_decode COMMAND test_dsd_stream_decode)
 
+# ---------------- 三档官方推荐预设的决策纯函数（2026-10-25）----------------
+# 只 include engine/preset_profiles.h：不开设备、不读文件 ⟹ 无声卡/无驱动也能跑。
+# 探测侧（CoreAudio caps / DoP 载波推算）在 rtaweb 里，
+# 由 GET /api/preset/caps 的实测输出验证 —— 探针与决策分开测，判据才不互相污染。
+add_executable(test_preset_profiles tests/test_preset_profiles.cpp)
+target_include_directories(test_preset_profiles PRIVATE ${CMAKE_SOURCE_DIR}/src)
+add_test(NAME preset_profiles COMMAND test_preset_profiles)
+
 option(RTA_BUILD_LEGACY_TESTS "构建尚未移植到 macOS 的旧测试（缺 POSIX 垫片，默认关闭）" OFF)
 if(RTA_BUILD_LEGACY_TESTS)
 

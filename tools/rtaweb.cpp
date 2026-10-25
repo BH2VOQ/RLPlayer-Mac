@@ -36,6 +36,8 @@ using rta::net::SourceManager;
 using rta::net::SourceConfig;
 using rta::net::SubEntry;
 #include "engine/pipeline.h"
+#include "engine/preset_profiles.h"   // 三档官方推荐预设的纯决策层（2026-10-25；离线单测 tests/test_preset_profiles.cpp）
+
 #include "audio/wav.h"
 #include "audio/audio_loader.h"
 #include "audio/media_info.h"
@@ -1498,6 +1500,348 @@ static void apply_stream_settings() {
                   (int)s.enabled, s.thresholdMb, s.ispPrescanSec);
     play_log(b);
 }
+
+// ============================================================================
+// 三档官方推荐预设（2026-10-25 用户钦定）：自动探测硬件能力 → 一键把设置调到对应目标
+//
+// 三条硬纪律：
+//   ① **只读探测**：macOS 走 probe_rates_cached（CoreAudio AudioObjectGetPropertyData，
+//      不开流、不接管设备、不抢占 Hog mode）。日志留一行 PRESET_CAPS 自证"只读"。
+//   ② 决策全在 engine/preset_profiles.h 的纯函数里（离线单测 tests/test_preset_profiles.cpp）；
+//      本块只做「探测 → 落盘 → JSON」，一行决策逻辑都不重复写，避免两处口径漂移。
+//   ③ 探测失败/未知一律保守降级，并把原因写进 notes（绝不静默假装支持）。
+//   ⚠️ macOS 事实：mac 没有原生 DSD 驱动通道（ASIO/WASAPI 专属），DSD 档走 DoP；
+//      无 DoP 载波能力时明确降级为 PCM 并在 notes 里说明（上游同款语义）。
+// ============================================================================
+
+// 探测当前设置下的输出设备能力（只读）。
+// macOS 统一走 CoreAudio 设备能力查询，dsdNative 恒为 false（macOS 没有 ASIO 原生 DSD 驱动通路）。
+// DSD 支持完全取决于设备是否有足够高的 PCM 采样率以承载 DoP（DSD64: 176.4k, DSD128: 352.8k, DSD256: 705.6k, DSD512: 1.4112M）。
+static rta::engine::DeviceCaps preset_probe_caps() {
+    using rta::engine::DeviceCaps;
+    DeviceCaps c;
+    const std::string savedBackend = conf_get("backend", "");
+    int ch = std::atoi(conf_get("channels", "0").c_str());
+    if (ch <= 0) ch = 2;
+    int bits = std::atoi(conf_get("bits", "0").c_str());
+    if (bits <= 0) bits = 24;
+    c.channels = ch;
+    c.bits = bits;
+    const std::string devId = conf_get("device", "");
+
+    c.backend = savedBackend.empty() ? "coreaudio" : savedBackend;
+    const auto rates = probe_rates_cached(devId, bits, ch, "PRESET_CAPS");
+    c.rates = rates;
+    c.maxRate = rates.empty() ? 0u : rates.back();
+    c.exclusive = !rates.empty();
+    c.dopMax = rta::engine::preset_dop_max_from_rates(rates);
+    c.dop = !c.dopMax.empty();
+    c.dsdNative = false;                       // macOS 没有 ASIO 原生 DSD 驱动通路
+    c.dsdNativeMax.clear();
+
+    for (const auto& d : mac_enum_devices()) {
+        if (devId.empty() ? d.isDefault : d.id == devId) {
+            c.deviceName = d.name;
+            break;
+        }
+    }
+    if (c.deviceName.empty()) c.deviceName = devId.empty() ? std::string("默认音频设备") : devId;
+    if (rates.empty()) {
+        c.probeNote = "CoreAudio 独占/支持率探测为空（端点被占用/禁用/不支持所选位深）：按能力未知处理";
+    }
+    if (!savedBackend.empty() && savedBackend != "coreaudio" && savedBackend != "wasapi" && savedBackend != "wasapi-shared") {
+        c.probeNote += (c.probeNote.empty() ? std::string() : std::string("；")) +
+                       "当前后端是「" + savedBackend + "」（非本地独占设备）：能力按 CoreAudio 默认端点报，"
+                       "原生 DSD 恒为 false";
+    }
+    return c;
+}
+
+// 一行 PRESET_CAPS：探测结果必须能自证（后端/驱动/支持率/DSD 档/是否只读/降级原因）
+static std::string preset_caps_line(const rta::engine::DeviceCaps& c) {
+    std::string rates;
+    for (size_t i = 0; i < c.rates.size(); ++i) {
+        if (i) rates += ",";
+        rates += std::to_string((unsigned long long)c.rates[i]);
+    }
+    std::string s = "PRESET_CAPS backend=" + c.backend + " device=\"" + c.deviceName + "\"" +
+                    " rates=[" + rates + "]" +
+                    " maxRate=" + std::to_string((unsigned long long)c.maxRate) +
+                    " dsdNative=" + (c.dsdNative ? "1" : "0") +
+                    " dsdNativeMax=" + (c.dsdNativeMax.empty() ? std::string("-") : c.dsdNativeMax) +
+                    " dop=" + (c.dop ? "1" : "0") +
+                    " dopMax=" + (c.dopMax.empty() ? std::string("-") : c.dopMax) +
+                    " exclusive=" + (c.exclusive ? "1" : "0") +
+                    " ch=" + std::to_string(c.channels) +
+                    " bits=" + std::to_string(c.bits) +
+                    " readonly=1";      // 只读：没有开流、没有建缓冲、没有改设备状态
+    if (!c.probeNote.empty()) s += " note=\"" + c.probeNote + "\"";
+    return s;
+}
+
+// 查询串 → k/v（GET/POST 的 path 都带 ?a=b&c=d）
+static std::map<std::string, std::string> preset_query(const std::string& path) {
+    std::map<std::string, std::string> kv;
+    const size_t q = path.find('?');
+    if (q == std::string::npos) return kv;
+    std::istringstream is(path.substr(q + 1));
+    std::string tok;
+    while (std::getline(is, tok, '&')) {
+        const size_t e = tok.find('=');
+        if (e == std::string::npos) { kv[urlDecode(tok)] = std::string(); continue; }
+        kv[urlDecode(tok.substr(0, e))] = urlDecode(tok.substr(e + 1));
+    }
+    return kv;
+}
+
+// 源信息：显式参数优先（?src=dsd&dsdlevel=256 / ?src=pcm&srcrate=96000&srcbits=24），
+// 否则用"当前正在播的曲目 → 最近一次播放的文件"，都没有就按 PCM 44.1k/16bit 规划并写明。
+// 为什么 PCM 不去跑 ffprobe：为一个说明文字要几百毫秒，而 PCM 源只影响 note 与位深判据。
+static rta::engine::SourceInfo preset_source_info(const std::map<std::string, std::string>& q,
+                                                  std::string& note) {
+    using rta::engine::SourceInfo;
+    SourceInfo s;
+    auto get = [&q](const std::string& k) -> std::string {
+        const auto it = q.find(k);
+        return it == q.end() ? std::string() : it->second;
+    };
+    const std::string kind = get("src");
+    const std::string dsdLevel = get("dsdlevel");
+    const std::string srcRate = get("srcrate");
+    const std::string srcBits = get("srcbits");
+    s.isStream = (get("stream") == "1" || get("stream") == "true");
+
+    if (kind == "dsd" || !dsdLevel.empty() || get("dsd") == "1") {
+        s.isDsd = true;
+        s.srcBits = 1;
+        int lvl = rta::engine::dsd_level_from_name(dsdLevel);
+        if (lvl == 0 && !srcRate.empty()) {
+            lvl = rta::engine::dsd_level_of_bitrate((uint32_t)std::atoll(srcRate.c_str()));
+        }
+        s.srcRate = (lvl > 0) ? (uint32_t)(44100 * lvl) : 2822400u;
+        note = "源按参数指定为 DSD（" + std::to_string((unsigned long long)s.srcRate) + " Hz）";
+        return s;
+    }
+    if (kind == "pcm") {
+        s.isDsd = false;
+        s.srcRate = srcRate.empty() ? 44100u : (uint32_t)std::atoll(srcRate.c_str());
+        if (s.srcRate == 0) s.srcRate = 44100u;
+        s.srcBits = srcBits.empty() ? 16 : std::atoi(srcBits.c_str());
+        if (s.srcBits <= 0) s.srcBits = 16;
+        note = "源按参数指定为 PCM（" + std::to_string((unsigned long long)s.srcRate) + " Hz / " +
+               std::to_string(s.srcBits) + " bit）";
+        return s;
+    }
+
+    std::string file;
+    {
+        std::lock_guard<std::mutex> lk(g_ps.mtx);
+        file = g_ps.current;
+    }
+    if (file.empty()) file = g_params.file;
+    if (!file.empty()) {
+        const std::string ext = rta::audio::lowerExt(file);
+        if (ext == ".dsf" || ext == ".dff") {
+            try {
+                const DsdInfo info = probe_dsd(file);
+                if (info.rate > 0) {
+                    s.isDsd = true;
+                    s.srcBits = 1;
+                    s.srcRate = info.rate;
+                    note = "源取自当前曲目（" + ext + "，DSD " +
+                           std::to_string((unsigned long long)info.rate) + " Hz）";
+                    return s;
+                }
+            } catch (...) {
+                // 读不了文件头就按 DSD64 —— 下面统一写 note
+            }
+            s.isDsd = true;
+            s.srcBits = 1;
+            s.srcRate = 2822400u;
+            note = "源取自当前曲目（" + ext + "），但位率读取失败：按 DSD64 处理";
+            return s;
+        }
+        s.isDsd = false;
+        s.srcRate = 44100u;
+        s.srcBits = 16;
+        note = "源取自当前曲目（PCM：" + ext + "），未重解码：按 44.1k/16bit 规划（只影响说明文字）";
+        return s;
+    }
+    s.isDsd = false;
+    s.srcRate = 44100u;
+    s.srcBits = 16;
+    note = "未指定源（无 ?src= 参数、也没有当前曲目）：按 PCM 44.1k/16bit 规划";
+    return s;
+}
+
+// 合并写 rlplayer-settings.conf（与 /api/settings 的 POST 同一套语义：先读全量、覆盖本次的键、
+// 再整体写回）。绝不 trunc + 只写本次的键 —— 那样会把 backend/device 等其余设置清空
+//（2026-10-23 的真实事故，见 /api/settings 处的注释）。
+static bool preset_write_conf(const std::map<std::string, std::string>& kv, std::string& err) {
+    const std::string sp = path_in_exe_dir("rlplayer-settings.conf");
+    std::map<std::string, std::string> merged;
+    std::vector<std::string> order;
+    {
+        std::ifstream in(sp);
+        std::string line;
+        while (std::getline(in, line)) {
+            if (!line.empty() && line.back() == '\r') line.pop_back();
+            const size_t e = line.find('=');
+            if (e == std::string::npos) continue;
+            const std::string k = line.substr(0, e);
+            if (merged.find(k) == merged.end()) order.push_back(k);
+            merged[k] = line.substr(e + 1);
+        }
+    }
+    for (const auto& p : kv) {
+        const auto it = merged.find(p.first);
+        if (it == merged.end()) {
+            order.push_back(p.first);
+            merged[p.first] = p.second;
+        } else {
+            it->second = p.second;
+        }
+    }
+    std::ofstream f(sp, std::ios::trunc);
+    if (!f) { err = "无法写入 " + sp; return false; }
+    for (const auto& k : order) {
+        const auto it = merged.find(k);
+        if (it == merged.end()) continue;
+        f << k << "=" << it->second << (char)10;
+    }
+    if (!f.good()) { err = "写入未完成"; return false; }
+    return true;
+}
+
+// GET /api/preset/caps → 设备能力（字段与界面约定一致，多带 notes 便于排查）
+static std::string preset_caps_json() {
+    const rta::engine::DeviceCaps c = preset_probe_caps();
+    play_log(preset_caps_line(c));
+    std::ostringstream j;
+    j << "{\"ok\":true,\"device\":{\"name\":\"" << jesc(c.deviceName) << "\""
+      << ",\"backend\":\"" << jesc(c.backend) << "\""
+      << ",\"rates\":[";
+    for (size_t i = 0; i < c.rates.size(); ++i) {
+        if (i) j << ",";
+        j << c.rates[i];
+    }
+    j << "]"
+      << ",\"maxRate\":" << c.maxRate
+      << ",\"dsdNative\":" << (c.dsdNative ? "true" : "false")
+      << ",\"dsdNativeMax\":\"" << jesc(c.dsdNativeMax) << "\""
+      << ",\"dop\":" << (c.dop ? "true" : "false")
+      << ",\"dopMax\":\"" << jesc(c.dopMax) << "\""
+      << ",\"exclusive\":" << (c.exclusive ? "true" : "false")
+      << ",\"channels\":" << c.channels
+      << ",\"bits\":" << c.bits
+      << "},\"readonly\":true,\"notes\":[";
+    if (!c.probeNote.empty()) j << "\"" << jesc(c.probeNote) << "\"";
+    j << "]}";
+    return j.str();
+}
+
+// POST /api/preset/apply?profile=bitperfect|pcm|dsd
+// 成功：{"ok":true,"profile":…,"applied":{…},"notes":[…]}；参数非法或写盘失败：400 + {"ok":false,"error":…}
+static std::string preset_apply_json(const std::string& path) {
+    using namespace rta::engine;
+    const std::map<std::string, std::string> q = preset_query(path);
+    const auto itProf = q.find("profile");
+    const std::string profStr = (itProf == q.end()) ? std::string() : itProf->second;
+    PresetProfile prof = PresetProfile::Pcm;
+    if (!preset_profile_parse(profStr, prof)) {
+        rta::net::webui_set_status(400);
+        return std::string("{\"ok\":false,\"error\":\"profile 非法（只接受 bitperfect / pcm / dsd）：") +
+               jesc(profStr) + "\"}";
+    }
+    const DeviceCaps caps = preset_probe_caps();
+    play_log(preset_caps_line(caps));
+    std::string srcNote;
+    const SourceInfo src = preset_source_info(q, srcNote);
+    PresetSettings s = plan_preset(prof, caps, src);
+
+    // ---- 落盘（键名与 /api/play 的请求键名一致）----
+    std::map<std::string, std::string> kv;
+    kv["volume"]   = "0";                        // 官方推荐链路：0 dB（预衰减交给 DSP 的余量逻辑）
+    kv["rate"]     = s.rate;
+    kv["shaper"]   = s.shaper;
+    kv["filter"]   = s.filter;
+    // 1x 与 Nx 用同一个滤波器：否则 88.2k 以上的源会走另一套（用户以为预设生效了，其实没有）
+    kv["filterNx"] = "";
+    kv["sdmfilt"]  = "";
+    kv["sdmfiltnx"] = "";
+    // ★ taps 写 0（= 不手动覆盖）：minTapsPerInput=512 由 poly-sinc-tight-lp 预设自带
+    //（filter_families.h:314 的 tapsPerInput=512，rtaweb 的 cfg.minTapsPerInput=fp->tapsPerInput）。
+    // 写 512 反而会被 /api/play 当成"总抽头预算"覆盖成 max(1024,512)=1024，是错的旋钮。
+    kv["taps"]     = "0";
+    kv["dsd"]      = std::to_string(s.dsd);
+    kv["directsdm"] = s.directSdm ? "1" : "0";
+    if (!s.modFamily.empty()) kv["modfamily"] = s.modFamily;
+    if (s.modOrder > 0)       kv["modorder"] = std::to_string(s.modOrder);
+    if (prof != PresetProfile::BitPerfect) {
+        kv["twostage"] = "0";                    // poly-sinc-tight-lp 自带 twoStage=false
+    }
+    if (s.clearEqIr) {
+        kv["eq"]         = "";
+        kv["ir"]         = "";
+        kv["irgpu"]      = "0";
+        kv["loudness"]   = "0";
+        kv["atten"]      = "0";                  // 手动阻带衰减覆盖（以预设值为准）
+        kv["transition"] = "0";
+        kv["phase"]      = "";
+        kv["trim"]       = "0,0,0,0,0,0,0,0";
+        // 预衰减：只有原音直通关掉 ISP 扫描（否则 ④预衰减一条永远不成立）；
+        // 升频/DSD 档保留 ISP —— 它挡的是过采样峰值削波，与"清空 EQ/IR"是两件事。
+        kv["isp"]        = (prof == PresetProfile::BitPerfect) ? "0" : "1";
+    }
+    std::string werr;
+    if (!preset_write_conf(kv, werr)) {
+        rta::net::webui_set_status(400);
+        return std::string("{\"ok\":false,\"error\":\"写入设置失败：") + jesc(werr) + "\"}";
+    }
+
+    // ---- 说明（决策 notes + 落盘事实）----
+    std::vector<std::string> notes;
+    if (!srcNote.empty()) notes.push_back(srcNote);
+    for (const auto& n : s.notes) notes.push_back(n);
+    if (s.minTapsPerInput > 0) {
+        notes.push_back("minTapsPerInput=" + std::to_string(s.minTapsPerInput) +
+                        " 由 poly-sinc-tight-lp 预设自带（手动 taps 覆盖已清 0，避免被当成总抽头预算）");
+    }
+    if (s.clearEqIr) notes.push_back("已清空 EQ/IR/等响度/每声道增益" +
+                                     std::string(prof == PresetProfile::BitPerfect
+                                                 ? "，并关闭 ISP 预衰减" : ""));
+
+    play_log("PRESET_APPLY profile=" + std::string(preset_profile_name(prof)) +
+             " rate=" + s.rate + " filter=" + (s.filter.empty() ? std::string("-") : s.filter) +
+             " tapsPerInput=" + std::to_string(s.minTapsPerInput) +
+             " dsd=" + std::to_string(s.dsd) +
+             " modfamily=" + (s.modFamily.empty() ? std::string("-") : s.modFamily) +
+             " modorder=" + std::to_string(s.modOrder) +
+             " shaper=" + s.shaper + " volume=0 directsdm=" + std::to_string(s.directSdm) +
+             " src=" + (src.isDsd ? "dsd" : "pcm") + "/" +
+             std::to_string((unsigned long long)src.srcRate) +
+             " notes=" + std::to_string(notes.size()));
+
+    std::ostringstream j;
+    j << "{\"ok\":true,\"profile\":\"" << preset_profile_name(prof) << "\",\"applied\":{"
+      << "\"rate\":\"" << jesc(s.rate) << "\""
+      << ",\"filter\":\"" << jesc(s.filter) << "\""
+      << ",\"minTapsPerInput\":" << s.minTapsPerInput
+      << ",\"dsd\":\"" << s.dsd << "\""
+      << ",\"modfamily\":\"" << jesc(s.modFamily) << "\""
+      << ",\"modorder\":" << s.modOrder
+      << ",\"shaper\":\"" << jesc(s.shaper) << "\""
+      << ",\"volume\":" << (long long)std::llround(s.volumeDb)
+      << ",\"directsdm\":" << s.directSdm
+      << "},\"notes\":[";
+    for (size_t i = 0; i < notes.size(); ++i) {
+        if (i) j << ",";
+        j << "\"" << jesc(notes[i]) << "\"";
+    }
+    j << "]}";
+    return j.str();
+}
+
 
 // 块级过采样峰值扫描（4 相 × 8 抽头，与 dsp::detect_isp 同一个核、同一套边界规则）。
 // 为什么不用 dsp::detect_isp(整曲 planes)：那要 2 声道 × 8 字节 × 帧数（384 s DSD64 = 1034 MB）。
@@ -3875,6 +4219,8 @@ static bool is_side_effect_path(const std::string& p) {
         "/api/writeback", "/api/enrich", "/api/peq", "/api/opra/apply", "/api/cast/start",
         "/api/cast/stop", "/api/upnp", "/api/src", "/api/input/start", "/api/input/stop",
         "/api/buffer/reset", "/api/upload",
+        // 三档预设的 apply 会写 rlplayer-settings.conf（副作用）；caps 是只读查询，不进这张表
+        "/api/preset/apply",
     };
     for (const char* k : kNeedPost) {
         const size_t n = std::strlen(k);
@@ -6188,6 +6534,19 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
         for (size_t i = 0; i < rates.size(); ++i) { if (i) j << ","; j << rates[i]; }
         j << "]}";
         return j.str();
+    }
+
+    // ---------------- 三档官方推荐预设（2026-10-25）----------------
+    // GET  /api/preset/caps                     → 设备能力（只读探测：不开流、不抢设备）
+    // POST /api/preset/apply?profile=…          → 探测 + 决策 + 落盘；返回 applied 与 notes
+    // 决策细节全在 engine/preset_profiles.h（纯函数、离线单测），这里只做 IO 与 JSON。
+    if (rq.path.rfind("/api/preset", 0) == 0) {
+        ct = "application/json; charset=utf-8";
+        if (rq.path.rfind("/api/preset/caps", 0) == 0) return preset_caps_json();
+        if (rq.path.rfind("/api/preset/apply", 0) == 0) return preset_apply_json(rq.path);
+        rta::net::webui_set_status(400);
+        return std::string("{\"ok\":false,\"error\":\"未知的预设端点：只支持 /api/preset/caps 与 "
+                           "/api/preset/apply\"}");
     }
 
     // 拖拽兜底：浏览器拿不到真实路径时，把文件内容传上来，落到 exe 目录下的 uploads
