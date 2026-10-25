@@ -16,6 +16,11 @@
 //
 // 构建：tools/build_gpu_cuda.ps1（nvcc -shared，多 arch fatbin + PTX）
 //
+// 2026-10-26 D1：设备缓冲复用（static 池 + 按需扩容）——与 gpu_conv_hip.cpp 逐行同构。
+// 原因与策略见 HIP 版文件头（A 包实测：每调用 hipMalloc/hipFree 使生产粒度下
+// GPU 比 CPU 慢 3.0~3.3 倍）。⚠️ 本次只做同构修改，本机无 N 卡：CUDA 侧
+// 未编译未实测，待协作者 N 卡机构建验证（铁律 4，见 docs/WIP-D.md）。
+//
 // ★ 铁律 5 在 CUDA 侧的对应事实（不是照抄，是同一类陷阱的两个形态）：
 //   1. arch 不匹配时 CUDA 会报 cudaErrorNoKernelImageForDevice，**但 fatbin 里带 PTX
 //      时驱动会 JIT，于是"跑得起来"**——所以不能只看编译开关，要真跑真读回。
@@ -123,10 +128,30 @@ RTA_EXPORT int rta_gpu_convolve(const double* in, long long n,
         for (size_t k = 0; k < fftN; ++k) X[b * fftN + k] = make_float2((float)buf[k].real(), (float)buf[k].imag());
     }
 
-    float2 *dH = nullptr, *dX = nullptr, *dY = nullptr;
-    if (cudaMalloc(&dH, H.size() * sizeof(float2)) != cudaSuccess) return 2;
-    if (cudaMalloc(&dX, X.size() * sizeof(float2)) != cudaSuccess) { cudaFree(dH); return 2; }
-    if (cudaMalloc(&dY, Y.size() * sizeof(float2)) != cudaSuccess) { cudaFree(dH); cudaFree(dX); return 2; }
+    // 设备缓冲池：static + 按需扩容（与 HIP 版逐行同构，策略见该文件头 D1 说明）。
+    // cudaFree(nullptr) 是无害空操作。扩容失败（已 free 旧、malloc 新失败）时指针为空
+    // 但 cap 还是旧值，条件里的 !dH 保证后续调用持续重试，而不是拿空缓冲往下走。
+    // 线程前提与 HIP 版相同：单一生产者线程串行调用。
+    static float2* dH = nullptr, *dX = nullptr, *dY = nullptr;
+    static size_t capH = 0, capX = 0, capY = 0;
+    if (!dH || H.size() > capH) {
+        if (dH) cudaFree(dH);
+        dH = nullptr;   // 置空防悬垂：malloc 失败时下次调用可安全重试
+        if (cudaMalloc(&dH, H.size() * sizeof(float2)) != cudaSuccess) return 2;
+        capH = H.size();
+    }
+    if (X.size() > capX) {
+        if (dX) cudaFree(dX);
+        dX = nullptr;
+        if (cudaMalloc(&dX, X.size() * sizeof(float2)) != cudaSuccess) return 2;
+        capX = X.size();
+    }
+    if (Y.size() > capY) {
+        if (dY) cudaFree(dY);
+        dY = nullptr;
+        if (cudaMalloc(&dY, Y.size() * sizeof(float2)) != cudaSuccess) return 2;
+        capY = Y.size();
+    }
 
     int rc = 0;
     if (cudaMemcpy(dH, H.data(), H.size() * sizeof(float2), cudaMemcpyHostToDevice) != cudaSuccess) rc = 3;
@@ -139,7 +164,7 @@ RTA_EXPORT int rta_gpu_convolve(const double* in, long long n,
     }
     if (!rc && cudaMemcpy(Y.data(), dY, Y.size() * sizeof(float2), cudaMemcpyDeviceToHost) != cudaSuccess) rc = 5;
 
-    cudaFree(dH); cudaFree(dX); cudaFree(dY);
+    // 缓冲留在池里不 free（复用的前提）；rc 时同样保留，调用方退 CPU 后下次调用可重试
     if (rc) return rc;
 
     std::vector<double> ola(B, 0.0);

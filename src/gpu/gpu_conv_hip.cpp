@@ -3,6 +3,18 @@
 //
 // 供管线通过 LoadLibrary 动态调用：没有这个 DLL 时管线自动退回 CPU 卷积，
 // 因此不会形成链接期依赖，普通构建照常工作。
+//
+// 2026-10-26 D1：设备缓冲复用（static 池 + 按需扩容，仿 gpu_resample_hip.cpp）。
+// 原因：原先每次调用都 hipMalloc/hipFree 三块设备缓冲，固定开销远超计算本身——
+// A 包实测（docs/WIP-A.md §4）生产粒度（4096 样/块）下 GPU 比 CPU 慢 3.0~3.3 倍
+// （9.3 vs 30.8 ms @IR=65536）。策略：三块缓冲只增不减，仅需求超容量时重分配；
+// 重分配选「先 free 旧再 malloc 新」而非「先 malloc 新再 free 旧」——长 IR 时
+// H 一块就是 MB 量级，两份瞬时并存会把显存占用翻倍；分配失败返回 2，
+// 调用方（gpu_bridge.h）退回 CPU 卷积。线程前提与 resample 相同：生产管线里
+// 卷积只在单一生产者线程串行调用，池无并发访问，static 不需要加锁。
+// 复测结论（docs/WIP-D.md）：复用后生产粒度耗时与复用前持平（差在运行噪声内）——
+// 本驱动上 hipMalloc/hipFree 有缓存、本就廉价，剩余固定开销是每调用的 H 频谱上传
+// （IR=65536 时约 1 MB）与同步；4096 样块粒度仍应走 CPU，A 包建议不变。
 #include "dsp/fft.h"
 #include <hip/hip_runtime.h>
 #include <vector>
@@ -91,10 +103,29 @@ RTA_EXPORT int rta_gpu_convolve(const double* in, long long n,
         for (size_t k = 0; k < fftN; ++k) X[b * fftN + k] = make_float2((float)buf[k].real(), (float)buf[k].imag());
     }
 
-    float2 *dH = nullptr, *dX = nullptr, *dY = nullptr;
-    if (hipMalloc(&dH, H.size() * sizeof(float2)) != hipSuccess) return 2;
-    if (hipMalloc(&dX, X.size() * sizeof(float2)) != hipSuccess) { hipFree(dH); return 2; }
-    if (hipMalloc(&dY, Y.size() * sizeof(float2)) != hipSuccess) { hipFree(dH); hipFree(dX); return 2; }
+    // 设备缓冲池：static + 按需扩容（策略见文件头 D1 说明）。hipFree(nullptr) 是无害空操作。
+    // 扩容失败（已 free 旧、malloc 新失败）时指针为空但 cap 还是旧值，条件里的 !dH
+    // 保证后续调用持续重试，而不是拿着空缓冲往下走。
+    static float2* dH = nullptr, *dX = nullptr, *dY = nullptr;
+    static size_t capH = 0, capX = 0, capY = 0;
+    if (!dH || H.size() > capH) {
+        if (dH) hipFree(dH);
+        dH = nullptr;   // 置空防悬垂：malloc 失败时下次调用可安全重试
+        if (hipMalloc(&dH, H.size() * sizeof(float2)) != hipSuccess) return 2;
+        capH = H.size();
+    }
+    if (X.size() > capX) {
+        if (dX) hipFree(dX);
+        dX = nullptr;
+        if (hipMalloc(&dX, X.size() * sizeof(float2)) != hipSuccess) return 2;
+        capX = X.size();
+    }
+    if (Y.size() > capY) {
+        if (dY) hipFree(dY);
+        dY = nullptr;
+        if (hipMalloc(&dY, Y.size() * sizeof(float2)) != hipSuccess) return 2;
+        capY = Y.size();
+    }
 
     int rc = 0;
     if (hipMemcpy(dH, H.data(), H.size() * sizeof(float2), hipMemcpyHostToDevice) != hipSuccess) rc = 3;
@@ -107,7 +138,7 @@ RTA_EXPORT int rta_gpu_convolve(const double* in, long long n,
     }
     if (!rc && hipMemcpy(Y.data(), dY, Y.size() * sizeof(float2), hipMemcpyDeviceToHost) != hipSuccess) rc = 5;
 
-    hipFree(dH); hipFree(dX); hipFree(dY);
+    // 缓冲留在池里不 free（复用的前提）；rc 时同样保留，调用方退 CPU 后下次调用可重试
     if (rc) return rc;
 
     std::vector<double> ola(B, 0.0);

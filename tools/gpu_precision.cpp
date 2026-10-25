@@ -192,6 +192,30 @@ int main() { setvbuf(stdout, nullptr, _IONBF, 0);
                irLen, tc, tg, wall);
     }
 
+    // ---- 1c. 生产粒度耗时（D1 复测）：IR=65536、块 4096，串 64 块 ----
+    // 64 块让缓冲复用后的缓存/稳态效果稳定（前 16 块行保留作 A 包对照）。
+    // 跑到这里时上面矩阵已把最大 (P·fftN, Nb·fftN) 缓冲养到稳态容量，本节不再触发重分配。
+    printf("\n[生产粒度耗时·D1] 每块 4096 样，IR=65536，串 64 块（稳态）：\n");
+    {
+        const std::vector<double> ir0 = room_like_ir(65536);
+        StreamingConvolver cpuP(ir0, 1024);
+        std::vector<double> chunk(4096), yP(4096);
+        auto& gbP = GpuBridge::instance();
+        double tc = 0.0, tg = 0.0;
+        const double tA = now_ms();
+        for (int rep = 0; rep < 64; ++rep) {
+            double t0 = now_ms();
+            cpuP.process(chunk.data(), yP.data(), 4096);
+            tc += now_ms() - t0;
+            t0 = now_ms();
+            gbP.convolve(chunk.data(), 4096, ir0.data(), ir0.size(), yP.data(), 1024);
+            tg += now_ms() - t0;
+        }
+        const double wall = now_ms() - tA;
+        printf("  IR=%6zu: CPU 合计 %6.1f ms | GPU 合计 %6.1f ms | 64 块墙钟 %.1f ms\n",
+               (size_t)65536, tc, tg, wall);
+    }
+
     // ---- 2. 升频 CPU vs GPU 逐样本差异（FP64 路径）----
     printf("\n[升频 A/B] 同一重采样器、同一相位表，GPU=on/off 各跑一遍（44.1k→352.8k 与 →384k）\n");
     for (uint32_t outR : { 352800u, 384000u }) {
