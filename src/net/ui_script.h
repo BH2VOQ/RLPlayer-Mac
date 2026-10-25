@@ -548,7 +548,7 @@ function workstationHtml() {
   var rootPath = hasRoots ? String(validRoots[0] || '') : '';
 
   var h = '<div class=am-home>';
-  h += '<div class=am-sec-hdr>精选功能 · 音频工作站</div>';
+  h += '<div class=am-sec-hdr>精选功能</div>';
   h += '<div class=am-hero-grid>';
 
   h += '<div class="am-card c1" id=amCardAdd>';
@@ -579,12 +579,12 @@ function workstationHtml() {
 
   h += '</div>'; // .am-hero-grid
 
-  h += '<div class=am-sec-hdr style="margin-top:14px">快速开始</div>';
+  h += '<div class=am-sec-hdr style="margin-top:14px">常用入口</div>';
   h += '<div class=am-quick-row>';
 
   h += '<div class=am-quick-item id=amGoFiles>';
   h += '<div class=am-qico><svg viewBox="0 0 24 24" fill=none stroke="currentColor" stroke-width=2><path d="M3 7.5a2 2 0 012-2h4l1.8 2H19a2 2 0 012 2v8a2 2 0 01-2 2H5a2 2 0 01-2-2z"/></svg></div>';
-  h += '<div class=am-qtext><div class=am-qtitle>浏览本地文件夹</div><div class=am-qdesc>直接访问本地存储目录与音频文件</div></div>';
+  h += '<div class=am-qtext><div class=am-qtitle>设置文件夹位置</div><div class=am-qdesc>选择或更改本地音乐库目录</div></div>';
   h += '</div>';
 
   h += '<div class=am-quick-item id=amGoRemote>';
@@ -650,7 +650,7 @@ function emptyStateHtml() {
         : '添加一个包含音频文件的本地目录，RLPlayer 会建立索引并显示专辑。') + '</div>';
   h += '<div class=eacts>'
      + '<button class="btn pri" id=emptyGoAdd>' + (hasRoots ? '重新扫描音乐库' : '添加音乐目录') + '</button>'
-     + '<button class=btn id=emptyGoStation>打开音频工作站</button></div>';
+     + '<button class=btn id=emptyGoStation>打开快速开始</button></div>';
   if (hasRoots && rootPath) h += '<div class=eroot><span title="' + esc(rootPath) + '">' + esc(rootPath) + '</span></div>';
   h += '</div></div>';
   return h;
@@ -659,7 +659,7 @@ function emptyStateHtml() {
    渲染 + 绑定。绑定全部复用既有入口（setView / openSettingsTab / #bScan），
    不新增任何 API 或路由；每个元素判空后才绑，元素不存在时静默跳过。 */
 function renderStation() {
-  head('音频工作站', '', '');
+  head('快速开始', '', '');
   var list = D('list');
   if (!list) return;
   list.innerHTML = workstationHtml();
@@ -717,7 +717,21 @@ function bindWorkstation() {
 
   // 快速开始四格：全部复用既有导航/设置入口
   var goFiles = D('amGoFiles');
-  if (goFiles) goFiles.onclick = function () { setView('files'); loadFiles(S.dir || ''); };
+  if (goFiles) goFiles.onclick = function () {
+    if (IS_MAC_HOST) {
+      pickDirectory((S.roots && S.roots[0]) || '', function (path) {
+        if (!path) return;
+        api('/api/lib/roots', 'add=' + encodeURIComponent(path)).then(function (j) {
+          if (j && j.ok === false) { toast(j.error || '添加失败'); return; }
+          toast('已添加音乐目录：' + path);
+          libChanged(); loadLibStats(); api('/api/lib/scan', ''); renderStation();
+        });
+      });
+    } else {
+      openSettingsTab('adv');
+      var r = D('sp_root'); if (r) { try { r.focus(); } catch (e) { } }
+    }
+  };
   var goRemote = D('amGoRemote');
   if (goRemote) goRemote.onclick = function () { setView('remote'); loadRemote(''); };
   var goMeta = D('amGoMeta');
@@ -945,6 +959,16 @@ document.addEventListener('click', function (ev) {
     if (t.classList && t.classList.contains('eflink')) { ev.preventDefault(); openExternal(t.dataset.url); return; }
     t = t.parentNode;
   }
+});
+// 问号气泡左右自适应：右半屏右对齐向左展开，左半屏左对齐向右展开
+['mouseover', 'focusin'].forEach(function (name) {
+  document.addEventListener(name, function (e) {
+    var t = e.target && e.target.closest && e.target.closest('.tip');
+    if (t) {
+      if (t.getBoundingClientRect().left > window.innerWidth * 0.55) t.classList.add('tip-r');
+      else t.classList.remove('tip-r');
+    }
+  }, true);
 });
 function renderFieldGrid(fields, kind, opts) {
   if (!fields || typeof fields !== 'object') return '';
@@ -2428,15 +2452,20 @@ function migrateRemovedBackend(v) {
 // （DoP 不是转 PCM，DAC 端剥壳后仍是 bit-perfect DSD），不需要让用户手动去改。
 var _dsdPackNotified = false;
 function migrateDsdPack(v) {
-  var s = (v || '').toString().toLowerCase();
-  if (s.indexOf('nat') !== 0) return 'dop';
-  if (!_dsdPackNotified) {
-    _dsdPackNotified = true;
-    setTimeout(function () {
-      toast('macOS 不支持 Native DSD，已切到 DoP（bit-perfect，音质不受影响）');
-    }, 1400);
+  if (v === '0' || v === '' || v === 0 || !v) return '0';
+  var s = String(v).toLowerCase();
+  if (s === '0') return '0';
+  if (s.indexOf('nat') === 0) {
+    var rate = s.slice(3);
+    if (!_dsdPackNotified) {
+      _dsdPackNotified = true;
+      setTimeout(function () {
+        toast('macOS 不支持 Native DSD，已切到 DoP（bit-perfect，音质不受影响）');
+      }, 1400);
+    }
+    return 'dop' + (rate || '');
   }
-  return 'dop';
+  return s;
 }
 
 // 2026-10-25（用户指令「能使用的要用它真正的名字」）：Windows 时代的 gpuvendor 值
@@ -2534,7 +2563,14 @@ function loadSettings() {
     if (kv.rate === undefined) {
       if (D('sRate')) D('sRate').value = 'follow';
     }
-    if (kv.volume !== undefined) { S.vol = parseFloat(kv.volume) || 0; D('vol').value = S.vol; syncVolUi(); }
+    // conf 里存的是 dB；滑块是位置刻度 ⟹ 必须换算（否则 -25.5 dB 会被塞进 0..1000 的滑块里变成 0）
+    // volNormalize：老配置可能存着旧曲线的 -60（低于 v3 的 -55 曲线底）⟹ 收成 -120 真静音，
+    // 否则滑块摆在最左端、后端却按 0.1% 振幅出声（与标签/位置自相矛盾）。
+    if (kv.volume !== undefined) {
+      S.vol = volNormalize(parseFloat(kv.volume) || 0);
+      if (D('vol')) D('vol').value = volDbToPos(S.vol);
+      syncVolUi();
+    }
     if (kv.loudness !== undefined) { D('sLoud').checked = (kv.loudness === '1'); S.loud = D('sLoud').checked; }
     // 高级参数
     if (kv.device !== undefined) ADV.device = kv.device;
@@ -3147,10 +3183,121 @@ function cycleRep() {
 }
 // ---- 音量：整页滑块是 #vol 的镜像，两边都只改 S.vol + 下发 /api/volume ----
 // setVol() 是唯一入口（键盘 ↑↓ 也用它）；syncVolUi() 把状态刷到所有镜像控件。
+/* ============ 音量曲线 v3（2026-10-25 二次修正：跟随实时增减 + 最低位真静音）============
+ *
+ * v1（线性 dB 刻度 min=-60..0）：拖到中间就没声音（中点 -30 dB 只有 3% 振幅）。
+ * v2（平方曲线 db = -60·(1-p)²）：中点 17.8% 振幅，但仍有两个问题 ——
+ *    ① 底端 p→0 时 db 只到 -60 dB = **0.1% 振幅**，不是静音；后端把它当"还有一点点音量"，
+ *       用户把滑块拉到最左端，耳朵贴在喇叭上仍能听到残响。
+ *    ② 低端 1/4 行程几乎全在 -33.8…-60 dB 之间，耳朵分辨不出差别 ⟹ 观感是
+ *       "低音区拖了不动、要拖到很后面才突然变大"，也就是用户说的
+ *       「音量不跟着音量条实时增减」。
+ *
+ * v3（幂次曲线 + 独立静音档）：按**人耳振幅感知**给曲线，gain = p^2.5 ⟺ db = 50·log10(p)，
+ *     等价写法（pos > 5 时）db = -55·(1-p)^1.6；pos ≤ 5（≤0.5% 行程）直接 -120 dB。
+ *       p=1.00 →  -0.0 dB (100.0% 振幅)
+ *       p=0.75 →  -6.0 dB ( 50.1% 振幅，正好减半 ⟹ 拖动"听感线性"的锚点)
+ *       p=0.50 → -18.1 dB ( 12.4% 振幅，中等偏轻，不是死区)
+ *       p=0.25 → -34.7 dB (  1.8% 振幅，轻柔背景音，仍清晰可闻)
+ *       p=0.05 → -50.7 dB (  0.3% 振幅，极微弱)
+ *       p≤0.005→-120.0 dB (  0.0% 振幅 ⟹ 后端 set_gain(0) **真静音**)
+ *     每一档都能听出区别（相邻档的振幅比约为 1.6~1.9 倍，接近人耳"刚可分辨"的响度台阶），
+ *     所以拖动时音量是**连续跟着走**的，不会出现"拖了半天没反应、最后一格爆响"。
+ *
+ * 为什么静音档用 -120 dB 而不是把曲线压到 -55：后端 MacSink::set_live_gain_db
+ *   （tools/rtaweb.cpp）把 ≤ -120 dB 映射成线性增益 **0**；-55 dB 仍等于 0.18% 振幅，
+ *   不是静音。所以"最低位置真静音"必须显式发 -120 dB，不能只靠曲线到底。
+ */
+var VOL_MIN_DB = -55.0;      // 曲线的 dB 下限（不是静音位）
+var VOL_SILENT_DB = -120.0;  // 真静音（后端把 ≤-120 dB 映射成增益 0）
+var VOL_SILENT_POS = 5;      // 位置 ≤ 5（0.5% 行程）判定为静音档
+function volPosToDb(pos) {
+  // pos: 0..1000（滑块位置）→ dB
+  var v = parseFloat(pos);
+  if (!isFinite(v)) return VOL_SILENT_DB;
+  var p = Math.max(0, Math.min(1000, v)) / 1000;
+  if (p <= VOL_SILENT_POS / 1000) return VOL_SILENT_DB;   // 最左端 = 真静音（增益 0）
+  return -Math.abs(VOL_MIN_DB) * Math.pow(1 - p, 1.6);
+}
+function volDbToPos(db) {
+  // dB → 滑块位置（0..1000）。v3 反函数：p = 1000 · (1 - (-db/55)^(1/1.6))
+  // 与 volPosToDb 严格互逆（pos=6..1000 往返误差 0，实测见判据 2）。
+  var d = parseFloat(db);
+  if (!isFinite(d) || d >= 0) return 1000;
+  if (d <= VOL_MIN_DB) return 0;     // ≤ -55 dB（含 -120 静音档）全部落在最左端
+  return Math.round(1000 * (1 - Math.pow(-d / Math.abs(VOL_MIN_DB), 1.0 / 1.6)));
+}
+/* dB 归一化：把"落在静音档里"的值统一收成真静音 -120。
+ *
+ * 为什么必须有：曲线只在 pos≥6 上有定义，而外部来源会给出更低的值（老配置里存的是旧曲线的
+ * -60 下限、键盘 ↓ 逐格减、以及任何 ≤-55 的脏值）。若原样保留，会同时出现两个谎：
+ *   ① 滑块被 volDbToPos 摆到位置 0（看起来是静音），标签却写 -60.0 dB；
+ *   ② 后端收到 -60 dB ⟹ 线性增益 0.001（0.1% 振幅），**不是静音**，用户贴耳仍能听到。
+ *
+ * 判据用**滑块位置**而不是 dB 阈值 —— 因为位置才是界面给用户看的那个"真相"：
+ *   volDbToPos 会把 (-55, -54.47) 这一小段 dB 也映射到位置 0..5（静音档），
+ *   若按 dB 阈值判断（只收 ≤-55），这段会漏网 ⟹ 滑块显示「静音」而后端还在放 0.18% 残响。
+ *   改成「算出的位置落在静音档就收成静音」后，位置 / 标签 / 后端增益三者**按构造**一致：
+ *       volNormalize(db) === volPosToDb(volDbToPos(db))   （对 [-120,0] 全域成立，见判据 2e）
+ */
+function volNormalize(db) {
+  var d = parseFloat(db);
+  if (!isFinite(d)) return 0;              // 脏值兜底 0 dB（不静音，避免"随机变哑"）
+  if (d >= 0) return 0;                    // 不允许正向增益（>0 dB 必削波）
+  if (volDbToPos(d) <= VOL_SILENT_POS) return VOL_SILENT_DB;   // 落在静音档 ⟹ 真静音
+  return d;
+}
+
+/* 实时音量下发：in-flight 单通道「最新值接力」，既零延迟又零堆积。
+ *
+ * 2026-10-25 用户报「音量不跟着音量条实时变，停下来才跳变」。根因不是后端慢，而是
+ * 前端每 1 像素 oninput 就无条件 api('/api/volume?...') 发一次 fetch：快速拖 100 像素
+ * 就是 100 个并发请求排队（WKWebView 自定义 scheme + 单线程后端），后面的请求排队滞后
+ * 几十~几百毫秒才到达，听起来就是"拖动时不动、松手才跳到最终值"。
+ *
+ * 为什么不用 setTimeout 防抖：防抖 = 故意延迟首发，那正好是"拖动时音量不跟手"本身。
+ * 这里改成「在途单通道 + 最新值覆盖」：
+ *   ① 第 1 次调用立刻发请求（0 ms 首发延迟，跟手）；
+ *   ② 在途期间再来的 100 次只覆盖 _volPendingDb，**不产生并发请求**；
+ *   ③ 请求一回来就立刻把当时最新的值发出去（跳过中间所有过时值，不排队滞后）；
+ *   ④ 任意时刻最多 1 个在途请求 ⟹ 通道永不被自己堵死。
+ * 丢中间值是安全的：音量是**绝对值**语义（后端 ps.volDb.store(db)），最后一个值必然覆盖前面的。
+ */
+var _volInFlight = false;
+var _volPendingDb = null;
+function sendVolRealtime(db) {
+  var d = parseFloat(db);
+  if (!isFinite(d)) return;
+  _volPendingDb = d;
+  if (_volInFlight) return;          // 在途：只留最新值，不排队
+  _volInFlight = true;
+  var sendNext = function () {
+    if (_volPendingDb === null) { _volInFlight = false; return; }
+    var cur = _volPendingDb;
+    _volPendingDb = null;
+    // api() 契约：永不 reject（失败也返回兜底对象）⟹ 用同一个回调收尾即可，
+    // 但两个分支都写 sendNext 是为了将来 api() 契约变化时也不会卡死 _volInFlight。
+    api('/api/volume?db=' + cur.toFixed(1), '').then(sendNext, sendNext);
+  };
+  sendNext();
+}
+
+/* 拖动锁：用户正在拖某个滑块时，禁止 syncVolUi 回写它的 value。
+ *
+ * 2026-10-25 用户报「拖动的时候会抖动」。根因：
+ *   /api/status 的 400ms 轮询在单曲页每轮都调 syncVolUi()，
+ *   而 syncVolUi 会把 S.vol 写回**所有**滑块（包括正在拖的那个）。
+ *   拖动中 value 被外部改写 ⟹ 滑块位置与鼠标打架 ⟹ 视觉抖动。
+ * 修法：拖动期间记下是哪个滑块在拖，syncVolUi 跳过它。 */
+var VOL_DRAGGING = null;
 function syncVolUi() {
+  // 滑块是**位置刻度**（0..1000），真相源是 S.vol（dB）⟹ 每次刷新都要反向换算。
+  // 正在拖动的那个滑块**跳过**：否则 400ms 轮询会把 value 写回去跟鼠标打架（抖动根因）。
+  var pos = volDbToPos(S.vol);
   ['vol', 'npVol'].forEach(function (id) {
+    if (VOL_DRAGGING === id) return;          // ← 拖动中不回写，避免抖动
     var e = D(id);
-    if (e && Math.abs(parseFloat(e.value) - S.vol) > 1e-9) e.value = S.vol;
+    if (e && Math.abs(parseFloat(e.value) - pos) > 1) e.value = pos;
   });
   var lab = D('npVolLab');
   if (lab) {
@@ -3158,22 +3305,41 @@ function syncVolUi() {
     // 否则 DAC 会当普通 PCM 播、输出白噪音）。数字照常显示用户请求值，但必须如实标注
     // 「不生效」—— 否则用户拉音量条看到数字变、实际不变，会以为又是 bug（那正是本轮修的东西）。
     var dopMode = (typeof outModeOf === 'function') && outModeOf() === 'dsd';
-    lab.textContent = (S.vol > 0 ? '+' : '') + S.vol.toFixed(1) + ' dB' +
+    // 2026-10-25（v3）：静音档显示「静音」而不是「-120.0 dB」。
+    // 为什么：-120 dB 对用户是个无意义的数字（后端在这个值上直接 set_gain(0)），
+    // 而「静音」正是他拉到底时想要的结果，标签必须说结果而不是说内部编码。
+    // 阈值 -59.5：v3 曲线在 pos=6 时约 -54.7 dB，pos<=5 才是 -120 ⟹ 用 -59.5 只圈住静音档，
+    // 不会把"很轻但能听见"的位置误标成静音（铁律 3：判据要能证明真东西）。
+    var hasVol = (typeof S.vol === 'number') && isFinite(S.vol);
+    var silent = hasVol && S.vol <= -59.5;
+    lab.textContent = (!hasVol ? '—' : (silent ? '静音' : (S.vol > 0 ? '+' : '') + S.vol.toFixed(1) + ' dB')) +
                       (dopMode ? '（DSD 输出：不生效）' : '');
     lab.title = dopMode
       ? 'DSD / DoP 输出时软件音量被强制为 0 dB：任何增益都会破坏 DoP 标记字节（0x05/0xFA），导致 DAC 把 DSD 当普通 PCM 播放、输出刺耳白噪音。请在 DAC 端调音量。'
-      : '';
+      : (silent ? '音量条已拉到最左端：增益 0（真静音）' : '');
   }
 }
 if (D('npRep')) D('npRep').onclick = cycleRep;
 if (D('npVol')) {
+  // 拖动锁的建立/释放：pointerdown 与 change 都能覆盖（键盘方向键改值时没有 pointerdown，
+  // 但那种情况不涉及抖动，照常同步即可）。
+  D('npVol').addEventListener('pointerdown', function () { VOL_DRAGGING = 'npVol'; });
+  D('npVol').addEventListener('pointerup', function () { VOL_DRAGGING = null; syncVolUi(); });
+  D('npVol').addEventListener('pointercancel', function () { VOL_DRAGGING = null; });
   D('npVol').oninput = function () {
-    S.vol = parseFloat(this.value);
-    var v = D('vol'); if (v) v.value = S.vol;
-    syncVolUi();
-    api('/api/volume?db=' + S.vol.toFixed(1), '');
+    // 滑块给的是**位置**（0..1000），必须经曲线换算成 dB —— 直接当 dB 用就是旧 bug
+    // （位置 500 会被当成 +500 dB，clamp 到 0 dB 满幅，用户会听到音量"爆掉"）。
+    S.vol = volPosToDb(parseFloat(this.value));
+    syncVolUi();                               // 镜像到另一个滑块（自己会被 VOL_DRAGGING 跳过）
+    // 2026-10-25（v3）：走 in-flight 单通道接力 —— 每像素发一个 fetch 会堆 100 个请求，
+    // 后端单线程排队滞后 ⟹ 用户听到的是"停下来才跳变"。见 sendVolRealtime 的注释。
+    sendVolRealtime(S.vol);
   };
-  D('npVol').addEventListener('change', function () { saveSettings(); });
+  D('npVol').addEventListener('change', function () {
+    VOL_DRAGGING = null;
+    syncVolUi();
+    saveSettings();
+  });
 }
 D('npSeek').onclick = function (ev) {
   if (!S.dur) return;
@@ -3209,10 +3375,14 @@ D('tq').onclick = function () {
 };
 D('sRep').onchange = function () { api('/api/repeat', 'rate=' + this.value); };
 D('sShuf').onchange = function () { api('/api/shuffle?on=' + (this.checked ? 1 : 0), '').then(loadQ); };
+// 底栏滑块同样是**位置刻度**（0..1000）→ 曲线换算成 dB。
+D('vol').addEventListener('pointerdown', function () { VOL_DRAGGING = 'vol'; });
+D('vol').addEventListener('pointerup', function () { VOL_DRAGGING = null; syncVolUi(); });
+D('vol').addEventListener('pointercancel', function () { VOL_DRAGGING = null; });
 D('vol').oninput = function () {
-  S.vol = parseFloat(this.value);
-  if (typeof syncVolUi === 'function') syncVolUi();   // 整页滑块是镜像，必须一起动
-  api('/api/volume?db=' + S.vol.toFixed(1), '');   // 播放中即时生效，不必重开
+  S.vol = volPosToDb(parseFloat(this.value));
+  if (typeof syncVolUi === 'function') syncVolUi();   // 整页滑块是镜像，必须一起动（自己会跳过）
+  sendVolRealtime(S.vol);   // 播放中即时生效，不必重开（零堆积，见 sendVolRealtime）
 };
 D('sLoud').onchange = function () { S.loud = this.checked; saveSettings(); };
 // 参数类控件改动后自动落盘（下次启动还在）
@@ -3318,10 +3488,14 @@ function seekRel(d) {
   doSeek((S.pos + d) / S.dur);
 }
 function setVol(v) {
+  // v 是 **dB**（键盘 ↑↓ 等入口传的就是 dB）。滑块是位置刻度，这里必须换算。
+  // volNormalize：曲线底部以下（≤ -55 dB，含键盘按到 -60 的老下限）统一收成真静音 -120，
+  // 否则滑块看起来在最左、后端却还在放 0.1% 振幅的残响（用户报的"最低音量也有声音"）。
+  v = volNormalize(v);
   S.vol = v;
-  D('vol').value = v;
+  if (D('vol')) D('vol').value = volDbToPos(v);
   if (typeof syncVolUi === 'function') syncVolUi();   // 整页滑块跟随（同一个 S.vol）
-  api('/api/volume?db=' + v.toFixed(1), '');
+  sendVolRealtime(v);   // 键盘连按 ↑↓ 也会连发 ⟹ 同样必须零堆积（见 sendVolRealtime）
 }
 
 
@@ -3549,6 +3723,9 @@ function syncLyrics(pos, force) {
 function volText(liveDb) {
   var v = (typeof liveDb === 'number') ? liveDb : 0;
   if (Math.abs(v) < 0.05) return '0.0 dB（逐位无损）';
+  // 2026-10-25（v3）：静音档说「静音」而不是「-120.0 dB」——与音量条标签同一口径，
+  // 否则同一时刻两个控件一个写「静音」一个写「-120.0 dB」，用户会以为是两个不同的状态。
+  if (v <= -59.5) return '静音（增益 0）';
   var s = v.toFixed(1) + ' dB';
   if (typeof S.startDb === 'number' && Math.abs(S.startDb - v) >= 0.05)
     s += '（起播 ' + S.startDb.toFixed(1) + ' dB，实时微调 ' + (v - S.startDb).toFixed(1) + ' dB）';
@@ -5025,7 +5202,9 @@ function renderSettingsPage() {
       if (window.confirm('bit-perfect 要求音量 0 dB（不衰减、输出满幅）。\n当前音量 ' + volNow.toFixed(1) +
                          ' dB。\n\n是否同时把音量设到 0 dB？\n（选"取消"则只改采样率/抖动/EQ，仍非 bit-perfect）')) {
         S.vol = 0;
-        if (D('vol')) D('vol').value = '0';
+        // 0 dB = 滑块**位置 1000**（最右），不是 0。滑块改成位置刻度后，
+        // 直接写 0 会变成静音 —— 这行原来是 '0'，必须跟着改。
+        if (D('vol')) D('vol').value = volDbToPos(0);
         if (D('volDb')) D('volDb').textContent = '0.0 dB';
         volSet = true;
       }
@@ -5120,8 +5299,11 @@ function renderSettingsPage() {
     ADV.directsdm = this.checked ? 1 : 0;
     if (this.checked && S.vol !== 0) {   // 直通要求 0 dB，否则逐位一致无从谈起
       S.vol = 0;
-      if (D('vol')) D('vol').value = 0;
-      api('/api/volume?db=0', '');
+      if (D('vol')) D('vol').value = volDbToPos(0);   // 0 dB = 位置 1000，不是 0
+      // 走同一条 in-flight 通道（不是直接 api）：如果用户此刻正在拖音量、通道里还压着一个
+      // 待发的拖动值，直接另发一个请求会和它乱序 —— 0 dB 可能被随后的旧拖动值覆盖掉。
+      sendVolRealtime(0);
+      if (typeof syncVolUi === 'function') syncVolUi();   // 标签跟着显示 0.0 dB
       toast('DirectSDM 需要 0 dB 音量，已把音量设为 0 dB');
     }
     saveSettings();
@@ -5245,6 +5427,10 @@ function renderSettingsPage() {
   initCastControls();
   scanCastDevices(false);
   pollCastState();
+  document.querySelectorAll('.tip').forEach(function (t) {
+    if (t.getBoundingClientRect().left > window.innerWidth * 0.55) t.classList.add('tip-r');
+    else t.classList.remove('tip-r');
+  });
 }
 /* ---------------- EQ 与房间校正（261023-03 第6/7条） ---------------- */
 var OPRA_INDEX = null;
@@ -6398,8 +6584,13 @@ document.addEventListener('keydown', function (e) {
   if (e.key === ' ') { e.preventDefault(); D('bPause').click(); }
   else if (e.key === 'ArrowRight') { e.preventDefault(); seekRel(5); }
   else if (e.key === 'ArrowLeft') { e.preventDefault(); seekRel(-5); }
-  else if (e.key === 'ArrowUp') { e.preventDefault(); setVol(Math.min(0, S.vol + 1)); }
-  else if (e.key === 'ArrowDown') { e.preventDefault(); setVol(Math.max(-60, S.vol - 1)); }
+  // 音量 ↑↓：**按滑块位置**步进，不是按 dB 加减。
+  // 为什么改（2026-10-25 v3 配套）：曲线在低端是幂次的，dB 加减 1 在位置 1000 附近几乎不动
+  // （−1 dB 只退 5 格），在底部却会一步跨过整个静音档；更致命的是 S.vol 到了 −120（静音）后
+  // `Math.max(-60, S.vol - 1)` 会把它钉死在 −60 ⟹ volNormalize 再收回 −120 ⟹ **音量键永久失灵**。
+  // 改成位置步进后：静音态按 ↑ 从位置 0 走到 25（≈ −49 dB，能听见），方向对称、可逆。
+  else if (e.key === 'ArrowUp') { e.preventDefault(); setVol(volPosToDb(volDbToPos(S.vol) + 25)); }
+  else if (e.key === 'ArrowDown') { e.preventDefault(); setVol(volPosToDb(volDbToPos(S.vol) - 25)); }
   else if (e.key === 'n') D('bNext').click();
   else if (e.key === 'p') D('bPrev').click();
   else if (e.key === 's') D('bStop').click();

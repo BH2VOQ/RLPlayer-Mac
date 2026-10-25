@@ -312,6 +312,15 @@ struct PlayParams {
     std::string remoteId;        // 远程曲目 id（Subsonic）
     std::string remoteSuffix;    // 远程文件后缀，决定缓存文件名
     std::string remoteTitle;
+
+    // ---- 2026-10-25（耳机 EQ 切换"没变化" 修复）：起播即定位 ----
+    // 为什么必须有这个字段：播放中切换 OPRA 预设时 EQ 链变了，Pipeline 必须重建；
+    // 而"重建 + 从第 0 帧重播"等于把用户刚听到的位置丢掉 —— 用户会听到"从头开始"，
+    // 于是判定"EQ 切换把播放搞乱了"而不是"EQ 变了"。用这个比例让新管线直接从
+    // 原采样帧继续输出：听感上只有 EQ 的差别，没有跳回开头。
+    //   取值域：(-1, 0] = 不定位（正常从头播）；(0, 1) = 从 frac 处起播。
+    //   消费点：play_one_impl 里生产者线程的 pos 起点 + ps.played 起点（同源，见那里的注释）。
+    double initialSeekFrac = -1.0;
 };
 
 // ---------------- 播放状态 ----------------
@@ -447,6 +456,19 @@ static void dlog(const std::string& s) {
     g_log.push_back(s);
 }
 static PlayParams  g_params;      // 最近一次播放参数，跳曲时沿用
+// 2026-10-25（耳机 EQ 热重载）：g_params 从"只在播放入口写、跳曲时读"变成
+// **HTTP 设置线程也会写**（/api/settings 同步 eq/ir/irgpu）。而 /api/skip 与
+// prefetch_start 会同时读它 —— 一个 std::string 被边写边读就是真 UB（可能读到
+// 半改的指针 ⟹ 崩溃或读到乱码路径）。这把锁只护 g_params 本身，粒度极细。
+static std::mutex   g_paramsMtx;
+static PlayParams params_snapshot() {
+    std::lock_guard<std::mutex> lk(g_paramsMtx);
+    return g_params;
+}
+static void params_store(const PlayParams& p) {
+    std::lock_guard<std::mutex> lk(g_paramsMtx);
+    g_params = p;
+}
 
 // ---------------- 可观测性（1.0.5）：运行时长 / 构建时间 ----------------
 static const std::chrono::steady_clock::time_point g_startTp = std::chrono::steady_clock::now();
@@ -704,7 +726,8 @@ public:
         // 硬限幅：不允许正向增益（>0 dB 必削波），下限 -120 dB 视为静音
         if (absDb > 0.0) absDb = 0.0;
         if (absDb < -120.0) absDb = -120.0;
-        const double linear = (absDb <= -120.0) ? 0.0 : std::pow(10.0, absDb / 20.0);
+        // 滑块最左端是 -60 dB：<= -59.5 dB 一律视为真静音（linear = 0.0），解决「最低音量还有声音」
+        const double linear = (absDb <= -59.5) ? 0.0 : std::pow(10.0, absDb / 20.0);
         ao_->set_gain(linear);
     }
     // 起播时调用：把"用户请求的绝对音量"设为基准（render_loop 之后只发 delta）
@@ -712,7 +735,7 @@ public:
         if (absDb > 0.0) absDb = 0.0;
         if (absDb < -120.0) absDb = -120.0;
         baseDb_ = absDb;
-        const double linear = (absDb <= -120.0) ? 0.0 : std::pow(10.0, absDb / 20.0);
+        const double linear = (absDb <= -59.5) ? 0.0 : std::pow(10.0, absDb / 20.0);
         ao_->set_gain(linear);
     }
     void pause() override { ao_->pause(); }
@@ -808,6 +831,20 @@ private:
     std::string err_;
 };
 
+// ---------------- 当前活跃输出端点指针与 DoP 标记（/api/volume 实时直通透传）----------------
+static std::atomic<OutSink*> g_activeSink{nullptr};
+static std::atomic<bool>     g_activeDop{false};
+
+struct ActiveSinkGuard {
+    ActiveSinkGuard(OutSink* s, bool dop) {
+        g_activeDop.store(dop);
+        g_activeSink.store(s);
+    }
+    ~ActiveSinkGuard() {
+        g_activeSink.store(nullptr);
+        g_activeDop.store(false);
+    }
+};
 
 static std::string path_in_exe_dir(const char* name);   // 定义在后面
 static void play_log(const std::string& s);              // 定义在后面
@@ -1171,6 +1208,7 @@ static bool play_one_direct(const std::string& file, const PlayParams& p) {
             ps.error = "打开输出后端失败: " + sink->last_error();
             return false;
         }
+        ActiveSinkGuard sinkGuard(sink.get(), true);
         if (!sink->start()) {
             std::lock_guard<std::mutex> lk(ps.mtx);
             ps.error = "启动输出失败: " + sink->last_error();
@@ -1304,6 +1342,7 @@ static bool play_one_direct(const std::string& file, const PlayParams& p) {
 
         ps.paused.store(false);
         std::this_thread::sleep_for(std::chrono::milliseconds(std::max(10, p.bufferMs)));   // 让设备把缓冲里最后一点放完
+        g_activeSink.store(nullptr); g_activeDop.store(false);
         sink->close();
         // error 非空 = 上面的 RENDERFAIL/渲染失败路径，绝不能当"正常播完"返回 true
         //（否则队列线程会自动续播下一曲，把设备故障掩盖成正常切歌）。
@@ -1318,6 +1357,51 @@ static bool play_one_direct(const std::string& file, const PlayParams& p) {
     return false;
 }
 
+// ---------------- 设置文件里的 EQ/IR 兜底（2026-10-25 耳机 EQ "切了没变化" 修复 · 根因 3）----------------
+// 为什么需要：前端 ADV.eq 来自 /api/settings 的**异步**加载。用户在它落地之前就点播放时，
+// params() 带上来的是 eq= 空串 —— 于是"设置里明明选了 OPRA 预设，这一首却完全没上 EQ"，
+// 用户听到的自然就是"切了没变化"。起播时按 rlplayer-settings.conf 兜底一次即可闭合这个窗口。
+// 只读文件、只在 p.eqFile 为空时调用（正常路径零开销、零行为变化）。
+static std::string settings_conf_value(const char* wantKey) {
+    if (!wantKey || !*wantKey) return std::string();
+    std::ifstream f(path_in_exe_dir("rlplayer-settings.conf"));
+    if (!f) return std::string();
+    std::string line;
+    while (std::getline(f, line)) {
+        if (!line.empty() && line.back() == '\r') line.pop_back();
+        const size_t e = line.find('=');
+        if (e == std::string::npos) continue;
+        if (line.compare(0, e, wantKey) != 0) continue;
+        return line.substr(e + 1);
+    }
+    return std::string();
+}
+
+// EQ 路径"可用吗"：空串 = 明确不要 EQ（合法）；非空但读不到 = 用户还在逐字符输入 / 写错了。
+// 用途只有一个：决定【要不要为它热重启播放】。少了这道闸，用户在设置页手打路径时
+// 每敲一个字符都会 POST /api/settings，把正在播的歌反复重启 —— 那比"没变化"更糟。
+static bool eq_path_usable(const std::string& path) {
+    if (path.empty()) return true;
+    { std::ifstream f(path); if (f) return true; }
+    { std::ifstream f(path_in_exe_dir(path.c_str())); if (f) return true; }
+    return false;
+}
+
+// ---------------- 起播定位（EQ 热重载用）----------------
+// 把「从哪开始播」的比例翻译成 (生产者起点帧, 播放计数起点)。
+// 纯函数（无 I/O、无全局状态）⟹ 可以被离线单测精确钉住（铁律 3：判据要能证明真东西）。
+// 两者必须同源：只设 pos 不设 played 会变成"声音从 50% 起、进度条从 0 起"的自相矛盾。
+struct StartPos { size_t pos = 0; size_t played = 0; };
+static StartPos start_pos_for(double frac, size_t inFrames, size_t totalOut) {
+    StartPos r;
+    if (!(frac > 0.0) || frac >= 1.0 || inFrames == 0) return r;   // 默认：从头播
+    r.pos = (size_t)(frac * (double)inFrames);
+    if (r.pos >= inFrames) r.pos = inFrames - 1;
+    r.played = (size_t)(frac * (double)totalOut);
+    if (r.played > totalOut) r.played = totalOut;
+    return r;
+}
+
 // ---------------- 播放单曲 ----------------
 // buf 若已含数据则直接使用（预解码命中），否则现场解码。
 // 返回 true = 正常播完；false = 被打断或出错。
@@ -1325,13 +1409,34 @@ static bool play_one_direct(const std::string& file, const PlayParams& p) {
 // sharedFallback（可选出参）：独占流 RENDERFAIL（设备持续不接受数据）且允许回退时置 true，
 // 由 play_one 包装层决定是否以 wasapi-shared 重开整条播放；extraNote：回退重入时追加到
 // note/ps.info/信号链的说明（"独占流无响应,已回退 WASAPI 共享"）。
-static bool play_one_impl(const std::string& file, const PlayParams& p, rta::audio::AudioBuffer& buf,
+// 参数名用 pIn 而不是 p：函数体里会先做一次「EQ/IR 配置兜底」得到 pE，
+// 然后 `const PlayParams& p = pE;` —— 让下面几百行原有的 p.* 全部自动用上兜底结果，
+// 一个字符都不用改（改动面最小 = 回归面最小）。
+static bool play_one_impl(const std::string& file, const PlayParams& pIn, rta::audio::AudioBuffer& buf,
                           bool* sharedFallback, const std::string& extraNote) {
     auto& ps = g_ps;
     play_log_rotate();
     g_dbgPeak.store(0.0);
     g_dbgClip.store(0);
-    apply_dsd_src_settings(p);
+    apply_dsd_src_settings(pIn);
+    // ---- 2026-10-25（耳机 EQ "切了没变化" · 根因 3）：EQ/IR 的配置兜底 ----
+    // 只在 pIn 里为空时补，正常路径（前端已带上来）逐字节不变。
+    // 为什么要兜底：见 settings_conf_value 的注释 —— ADV.eq 是异步加载的，
+    // 起播早于它落地时本曲就会"完全没上 EQ"，用户听起来就是"切了没变化"。
+    PlayParams pE = pIn;
+    if (pE.eqFile.empty()) {
+        const std::string confEq = settings_conf_value("eq");
+        if (!confEq.empty() && eq_path_usable(confEq)) pE.eqFile = confEq;
+    }
+    if (pE.convIr.empty()) {
+        const std::string confIr = settings_conf_value("ir");
+        if (!confIr.empty() && eq_path_usable(confIr)) {
+            pE.convIr = confIr;
+            const std::string g = settings_conf_value("irgpu");
+            if (!g.empty()) pE.convGpu = (g == "1");
+        }
+    }
+    const PlayParams& p = pE;
     // ---- DirectSDM 判定：必须在解码之前（DSD256 整曲解成 PCM 要几百 MB）----
     // 不满足条件时把原因带到信号链里（不能只写 ps.info —— 紧接着 read_any 会覆盖它）
     std::string directNote;
@@ -1342,7 +1447,10 @@ static bool play_one_impl(const std::string& file, const PlayParams& p, rta::aud
             try {
                 const DsdInfo info = probe_dsd(file);
                 std::string why;
-                if (direct_sdm_eligible(p, info, why)) return play_one_direct(file, p);
+                // ★ 必须用 pE：EQ 是否启用直接决定 DirectSDM 能不能直通（anyProc 判据）。
+                //   用 p 的话，"设置里有 EQ 但本次请求没带"会被误判成"无处理" ⟹ 绕过 EQ 直通，
+                //   那正是"切了预设声音不变"的另一条路径。
+                if (direct_sdm_eligible(pE, info, why)) return play_one_direct(file, pE);
                 directNote = "DirectSDM 未启用：" + why;
             } catch (const std::exception& e) {
                 directNote = std::string("DirectSDM 判定失败（回退普通路径）：") + e.what();
@@ -1439,8 +1547,11 @@ static bool play_one_impl(const std::string& file, const PlayParams& p, rta::aud
         eng::PipelineConfig cfg;
         cfg.outBits = (p.bits > 0) ? p.bits : 24;
         if (!p.shaper.empty()) cfg.shaper = parse_shaper(p.shaper);
-        cfg.volumeEnabled = true;
-        cfg.volumeDb = p.volume;
+        // 2026-10-25（消除双重衰减与死锁）：
+        // 音量由设备输出层（CoreAudioOutput::render）通过原子变量毫秒级实时应用。
+        // Pipeline 软件音量固定不衰减（0.0 dB），消除"低音量起播后无法拉大"及"双重衰减"。
+        cfg.volumeEnabled = false;
+        cfg.volumeDb = 0.0;
         cfg.loudnessEnabled = p.loudness;
         if (p.volRamp > 0.0) cfg.volumeRampMs = p.volRamp;
         // GPU：升频与卷积都走显卡（rtagpu.dll 缺失时自动退回 CPU，结果逐位相同）
@@ -1901,6 +2012,21 @@ static bool play_one_impl(const std::string& file, const PlayParams& p, rta::aud
         ps.outRate = deviceRate; ps.outBits = outBits;
         ps.total.store(totalOut);
 
+        // ---- 2026-10-25（耳机 EQ 热重载）：起播定位 ----
+        // initialSeekFrac 只由「播放中切换 EQ/IR」这条路径设置（见 /api/settings 的 eqChanged 分支）。
+        // 正常播放恒为 -1 ⟹ startPos 全 0 ⟹ 与旧行为逐字节相同。
+        const StartPos startPos = start_pos_for(p.initialSeekFrac, in.frames(), totalOut);
+        if (startPos.pos > 0 || startPos.played > 0) {
+            ps.played.store(startPos.played);
+            std::ostringstream ss;
+            ss.setf(std::ios::fixed); ss.precision(4);
+            ss << "EQ_RELOAD_SEEK frac=" << p.initialSeekFrac
+               << " pos=" << startPos.pos << "/" << in.frames()
+               << " played=" << startPos.played << "/" << totalOut
+               << " eq=" << (p.eqFile.empty() ? "(none)" : p.eqFile);
+            play_log(ss.str());
+        }
+
         // 实际端点名称/id：信号链 JSON 与 RENDERFAIL 遥测共用同一来源（HF-02 + 本轮事故归因）
         std::string dev, devId;
         if (p.backend == "null") {
@@ -1985,7 +2111,7 @@ static bool play_one_impl(const std::string& file, const PlayParams& p, rta::aud
                 << ",\"bitPerfect\":\"" << ([&] {
                        if (p.directSdm && directNote.empty()) return std::string("direct");
                        if (outRate != in.rate) return std::string("no");
-                       if (cfg.volumeEnabled && std::fabs(cfg.volumeDb) > 1e-9) return std::string("no");
+                       if (std::fabs(p.volume) > 1e-9) return std::string("no");
                        if (cfg.shaper != rta::dsp::Shaper::None) return std::string("no");
                        // 2026-10-24（261024-02 #8）：attenDb 是**滤波器阻带衰减设计值**（如 120 dB），
                        // 不是信号增益！以前拿它判"衰减"⟹ 只要选了滤波器预设就永远非 bit-perfect（误报）。
@@ -1999,7 +2125,7 @@ static bool play_one_impl(const std::string& file, const PlayParams& p, rta::aud
                        if (p.directSdm && directNote.empty()) return std::string("DirectSDM：1-bit 直通，跳过 PCM 与调制");
                        std::vector<std::string> why;
                        if (outRate != in.rate) why.push_back("重采样 " + std::to_string(in.rate) + "→" + std::to_string(outRate) + " Hz");
-                       if (cfg.volumeEnabled && std::fabs(cfg.volumeDb) > 1e-9) why.push_back("音量 " + std::to_string((int)std::lround(cfg.volumeDb)) + " dB");
+                       if (std::fabs(p.volume) > 1e-9) why.push_back("音量 " + std::to_string((int)std::lround(p.volume)) + " dB");
                        if (cfg.shaper != rta::dsp::Shaper::None) why.push_back("抖动/整形");
                        if (cfg.preAttenDb > 1e-9) why.push_back("预衰减");
                        if (eqLoaded) why.push_back("EQ");
@@ -2024,7 +2150,7 @@ static bool play_one_impl(const std::string& file, const PlayParams& p, rta::aud
                 else {
                     std::vector<std::string> why;
                     if (outRate != in.rate) why.push_back("重采样 " + std::to_string(in.rate) + "→" + std::to_string(outRate) + " Hz");
-                    if (cfg.volumeEnabled && std::fabs(cfg.volumeDb) > 1e-9) why.push_back("音量 " + std::to_string((int)std::lround(cfg.volumeDb)) + " dB");
+                    if (std::fabs(p.volume) > 1e-9) why.push_back("音量 " + std::to_string((int)std::lround(p.volume)) + " dB");
                     if (cfg.shaper != rta::dsp::Shaper::None) why.push_back("抖动/整形");
                     if (cfg.preAttenDb > 1e-9) why.push_back("预衰减");   // 见上方口径注：attenDb 是滤波设计值
                     if (eqLoaded) why.push_back("EQ");
@@ -2050,7 +2176,7 @@ static bool play_one_impl(const std::string& file, const PlayParams& p, rta::aud
             ps.gpu = false;
             ps.gpuConvUsed.store(false);
         }
-        ps.startDb.store(p.volume);
+        ps.startDb.store(0.0);
         dlog("stage sig-ok");
         // ★ 必须无条件重置：旧代码只在 p.volume != 0 时写 volDb，导致上一曲
         //   拖过音量后，下一曲的实时增益 = 旧 volDb - 新 startDb（凭空多减几十 dB）。
@@ -2196,16 +2322,16 @@ static bool play_one_impl(const std::string& file, const PlayParams& p, rta::aud
             ps.error = msg;
             return false;
         }
+        ActiveSinkGuard sinkGuard(sink.get(), dop);
         // 2026-10-23 真机 DEBUG：打开成功也要如实带出「驱动实际接受的是哪种独占格式」。
         // 之前这句只有失败时才有，成功时用户只看到"32-bit"，根本不知道内部是紧凑24还是32容器，
         // 1.3.x「能播/不能播」的原因因此全靠猜（本机是紧凑24、UltraLite 是32容器/24有效）。
 
-        // 2026-10-25（音量语义）：起播时把「用户请求的绝对音量」设为设备层基准。
-        // render_loop 之后每 tick 只发 delta（volDb − startDb），设备层用 base + delta
-        // 还原绝对值。不设这一步的话 baseDb_ 恒为 0，音量条会完全失灵。
-        // 注意 ps.startDb 已经是 p.volume（见上方），两者保持同一个绝对音量口径。
+        // 2026-10-25（音量语义）：基准恒为 0.0 dB，起播初始增益直接调 set_live_gain_db(p.volume)！
+        // render_loop 之后每 tick 传入的 delta（volDb - startDb）恒等于用户当前请求的绝对音量 volDb。
         if (auto* ca = dynamic_cast<CoreAudioSink*>(sink.get())) {
-            ca->set_base_gain_db(p.volume);
+            ca->set_base_gain_db(0.0);
+            ca->set_live_gain_db(p.volume);
         }
         if (!sink->start()) {
             RQ.abort.store(true); RQ.cv.notify_all(); prod.join();
@@ -2266,12 +2392,14 @@ static bool play_one_impl(const std::string& file, const PlayParams& p, rta::aud
             // C3（N300 掉线）：端点已消失时绝不回退共享、也不从头重播 —— 用户要 bit-perfect，
             // 静默降级比报错更有害（方案 §7）。ps.error 已在 render_loop 里写成「输出设备已断开」。
             if (sharedFallback && rl.fallbackEligible && !rl.deviceLost) *sharedFallback = true;
+            g_activeSink.store(nullptr); g_activeDop.store(false);
             sink->close();
             { std::lock_guard<std::mutex> lk(ps.mtx); ps.error = rl.failMsg; }
             return false;
         }
         ps.paused.store(false);
         std::this_thread::sleep_for(std::chrono::milliseconds(std::max(10, p.bufferMs)));      // 让设备把缓冲里的尾音放完（RENDERFAIL 路径已提前 return，不睡）
+        g_activeSink.store(nullptr); g_activeDop.store(false);
         sink->close();
         if (rl.normalEnd) {
             // 显式「正常结束」语义：此后 END 的 error="" 只可能是正常播完（有 RENDER_DONE 为证）
@@ -3183,7 +3311,7 @@ static void prefetch_start(const std::string& path) {
     { std::lock_guard<std::mutex> lk(g_pre.mtx); g_pre.buf = rta::audio::AudioBuffer{}; }
     g_pre.th = std::thread([path]() {
         try {
-            apply_dsd_src_settings(g_params);      // 预解码也按当前设置（否则会解码出另一套滤波器）
+            apply_dsd_src_settings(params_snapshot());   // 预解码也按当前设置（否则会解码出另一套滤波器）
             rta::audio::AudioBuffer b = read_any(path, nullptr);
             std::lock_guard<std::mutex> lk(g_pre.mtx);
             if (g_pre.path == path) g_pre.buf = std::move(b);
@@ -3259,6 +3387,69 @@ static void queue_thread(PlayParams p, size_t start) {
         break;
     }
     ps.playing = false;
+}
+
+// ---------------- 播放中切换 EQ/IR 的热重载（2026-10-25「耳机 EQ 切了没变化」核心修复）----------------
+// 为什么必须有这一步（用户原话「耳机 EQ 切换之后，感觉没什么变化」）：
+//   EQ 链是在 play_one 开头**一次性**从 p.eqFile 建进 Pipeline 的，之后播放线程再也不会看它。
+//   所以用户在设置页点「应用到 EQ」换预设时，正在播的这一首 100% 不会有任何变化 ——
+//   这不是听感玄学，是代码里根本没有热更新路径。用户在「边听边对比」这个最自然的用法下，
+//   得到的就是"切了没变化"。
+//
+// 修法：换 EQ = 换一条管线。停旧线程 → 用新 eqFile 从**同一位置**起重播。
+//   * 位置用 frac（played/total）算，由 start_pos_for 同时定 pos 与 played，
+//     进度条与声音不会互相矛盾；
+//   * frac 太靠近开头/结尾（<0.5% / >99%）时直接从头播 —— 那种位置"从头"与"接着播"
+//     听不出差别，反而不该为它多写一条路径。
+// 返回 true = 真的重启了播放线程（调用方据此在 JSON 里回 hotReload）。
+static bool eq_hot_reload(const PlayParams& pNew, double frac, const char* why) {
+    auto& ps = g_ps;
+    // 只有「本地播放中」才热重载：UPnP 投放由渲染器解码，本机管线根本没参与；
+    // 没在播就什么都不用做（下次起播自然会读到新设置）。
+    if (!ps.playing.load() || g_upnpPlayer.load()) return false;
+    size_t curIdx = 0;
+    bool haveItem = false;
+    {
+        std::lock_guard<std::mutex> lk(g_q.mtx);
+        if (!g_q.items.empty()) {
+            curIdx = (g_q.index < g_q.items.size()) ? g_q.index : 0;
+            haveItem = true;
+        }
+    }
+    if (!haveItem) return false;
+
+    PlayParams p = pNew;
+    const bool keepPos = (frac > 0.005 && frac < 0.99);
+    p.initialSeekFrac = keepPos ? frac : -1.0;
+
+    // 停旧管线（协作：置 stop 让 queue_thread 自己退，绝不 force-kill —— 铁律 2）
+    ps.stopJoin();
+    // 重启期间的瞬态必须是"可解释的"，否则前端会把这一刻读成"播完了/出错了"
+    // ★ seekReq 同时承担两件事，缺一不可：
+    //   ① 旧管线残留的跳转请求必须作废（-1），否则新管线一起来就先跳一次；
+    //   ② 保留位置时**必须**再置一次 frac —— render_loop 内部的 played 是它自己的局部量
+    //      （从 0 开始数，每次写设备就 ps.played.store(局部值)），不喂 seekReq 的话
+    //      它会把刚设好的"从 50% 起"覆盖成"从 0 起" ⟹ 声音在 50%、进度条在 0%，自相矛盾。
+    //      seekReq 的处理恰好就是 played = frac*totalOut + seekFrame = frac*inFrames，
+    //      与 start_pos_for 同一口径（render_loop.h 在别的子代理手上，这里不去改它）。
+    ps.seekReq.store(keepPos ? frac : -1.0);
+    ps.pauseReq.store(false);
+    ps.paused.store(false);
+    ps.played.store(0);
+    ps.total.store(0);
+    ps.playing.store(true);
+    {
+        std::ostringstream es;
+        es.setf(std::ios::fixed); es.precision(4);
+        es << "EQ_RELOAD reason=" << (why ? why : "eq-changed")
+           << " idx=" << curIdx
+           << " frac=" << p.initialSeekFrac
+           << " eq=" << (p.eqFile.empty() ? "(none)" : p.eqFile)
+           << " ir=" << (p.convIr.empty() ? "(none)" : p.convIr);
+        play_log(es.str());
+    }
+    ps.restart([p, curIdx] { return queue_thread(p, curIdx); });
+    return true;
 }
 
 // ---------------- HTTP 处理 ----------------
@@ -3739,7 +3930,7 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
                 g_q.index = start;
             }
             queue_save();
-            g_params = p;
+            params_store(p);
             // 停旧线程 + join + 起新线程 = 一次原子操作（并发点播放不再撞 thread 赋值 terminate）
             ps.restart([p, start] { return queue_thread(p, start); });
             { std::lock_guard<std::mutex> lk(ps.mtx); ps.error.clear(); ps.current = paths[start]; }
@@ -3959,7 +4150,7 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
         // F1：file 会进队列 → 播放线程 recent_add/meta_on_play/fs::u8path 全链消费，
         // 非法字节在这里挡下（播放线程里抛异常没有兜底，等于整进程退出）。
         if (!valid_utf8(p.file)) return utf8_path_reject(p.file);
-        g_params = p;
+        params_store(p);
 
         // 先停掉上一次（原子：并发点播放时不会撞 thread 赋值 terminate）
         ps.stopJoin();
@@ -4922,7 +5113,7 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
 
         ps.stopJoin();          // 原子停线程
 
-        PlayParams p = g_params;
+        PlayParams p = params_snapshot();
         size_t target = 0;
         bool ok = false;
         {
@@ -5398,7 +5589,14 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
         std::ostringstream j;
         j << "{\"ok\":true,\"path\":\"" << jesc(outRelPath) << "\""
           << ",\"productId\":\"" << jesc(productId) << "\""
-          << ",\"presetId\":\"" << jesc(presetId) << "\"}";
+          << ",\"presetId\":\"" << jesc(presetId) << "\""
+          // 2026-10-25（耳机 EQ 热重载时序）：这里**故意不写 g_params.eqFile**。
+          // 前端 applyOpraPreset 紧接着一定会发 saveSettings(true) → POST /api/settings
+          // （body 里带 eq=<这个 path>），热重载统一在那边按 "g_params.eqFile != clean" 触发。
+          // 如果这里先把 g_params.eqFile 改成同样的值，那边就会判成"没变化" ⟹ 永不热重载。
+          // 也正因如此，只有一处重启点：不会因为 apply + save 而重启两次（那会让用户听两遍卡顿）。
+          << ",\"hotReload\":\"pending-settings\""
+          << "}";
         return j.str();
     }
 
@@ -5416,6 +5614,11 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
             // 现在改为**合并写**：先读全量 kv，覆盖本次提交的白名单键，再整体写回；文件不可读时按空处理。
             std::map<std::string, std::string> merged;
             std::vector<std::string> order;
+            // 2026-10-25（耳机 EQ 热重载）：本次提交里 eq/ir/irgpu 是否真的变了。
+            // 只在这里记「变没变」，写盘之后再统一决定要不要热重启（保证只重启一次）。
+            bool eqChanged = false, irChanged = false, irgpuChanged = false;
+            std::string eqNew, irNew;
+            bool irgpuNew = false;
             {
                 std::set<std::string> seen_keys;
                 std::ifstream in(sp);
@@ -5469,6 +5672,21 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
                 if (k == "streamdecode") {
                     rta::audio::set_stream_decode_enabled(clean != "0" && clean != "false");
                 }
+                // ---- 2026-10-25（耳机 EQ "切了没变化" · 根因 1）：同步内存里的 g_params ----
+                // 旧实现只把键值写进 conf，g_params 完全不动 —— 于是"设置页选了 EQ"这件事
+                // 对正在播的这一首、对下一次 /api/skip，都是不存在的（g_params 里还是旧值/空值）。
+                // 这里只记"变了没变"，真正的热重载放到写完 conf 之后统一做（只重启一次）。
+                if (k == "eq") {
+                    const PlayParams cur = params_snapshot();
+                    if (cur.eqFile != clean) { eqChanged = true; eqNew = clean; }
+                } else if (k == "ir") {
+                    const PlayParams cur = params_snapshot();
+                    if (cur.convIr != clean) { irChanged = true; irNew = clean; }
+                } else if (k == "irgpu") {
+                    const PlayParams cur = params_snapshot();
+                    const bool g = (clean == "1");
+                    if (cur.convGpu != g) { irgpuChanged = true; irgpuNew = g; }
+                }
                 if (merged.find(k) == merged.end()) order.push_back(k);
                 merged[k] = clean;
             }
@@ -5481,7 +5699,46 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
                 f << kk << "=" << itv->second << (char)10;
             }
             if (!f.good()) return "{\"ok\":false,\"error\":\"写入未完成\"}";
-            return "{\"ok\":true,\"merged\":true}";
+            f.close();
+
+            // ---- 2026-10-25（耳机 EQ "切了没变化" · 根因 1+2）：同步 g_params + 播放中热重载 ----
+            // 顺序很重要：先把新值落进 g_params（跳曲/预解码/下次起播立刻用新的），
+            // 再判断要不要为"正在播的这一首"重启管线。两件事都只在真的变了时做。
+            const bool anyChange = eqChanged || irChanged || irgpuChanged;
+            bool hotReloaded = false;
+            if (anyChange) {
+                PlayParams gp = params_snapshot();
+                if (eqChanged)  gp.eqFile = eqNew;
+                if (irChanged)  gp.convIr = irNew;
+                if (irgpuChanged) gp.convGpu = irgpuNew;
+                gp.initialSeekFrac = -1.0;      // 这个是"本次起播"的一次性参数，绝不留在 g_params 里
+                params_store(gp);
+
+                // 只在「真的要重建管线」时热重载：
+                //   * 路径可读（或为空 = 明确不要 EQ）—— 用户还在手打路径时不要每字符重启；
+                //   * 新 EQ/IR 与"本次播放实际用的那一个"确实不同。
+                // 后者防止"用户反复保存同一个预设"把播放反复重启。
+                PlayParams active = params_snapshot();
+                const bool eqOk = eq_path_usable(active.eqFile);
+                const bool irOk = eq_path_usable(active.convIr);
+                if (eqOk && irOk) {
+                    // 播放进度：用 played/total 的比例（两者都是输出帧，口径一致）
+                    const size_t plNow = ps.played.load(), ttNow = ps.total.load();
+                    const double frac = (ttNow > 0 && plNow < ttNow)
+                                        ? (double)plNow / (double)ttNow : 0.0;
+                    hotReloaded = eq_hot_reload(active, frac,
+                                                eqChanged ? "eq-changed" : "ir-changed");
+                }
+            }
+            {
+                std::ostringstream j;
+                j << "{\"ok\":true,\"merged\":true";
+                if (anyChange) j << ",\"eqChanged\":" << (eqChanged ? "true" : "false")
+                                 << ",\"irChanged\":" << (irChanged ? "true" : "false");
+                if (hotReloaded) j << ",\"hotReload\":true";
+                j << "}";
+                return j.str();
+            }
         }
         std::ifstream f(sp);
         std::ostringstream j;
@@ -6247,6 +6504,15 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
         if (db > 0.0) db = 0.0;
         if (db < -120.0) db = -120.0;
         ps.volDb.store(db);
+        {
+            std::lock_guard<std::mutex> lk(g_paramsMtx);
+            g_params.volume = db;
+        }
+        if (!g_activeDop.load()) {
+            if (OutSink* s = g_activeSink.load()) {
+                s->set_live_gain_db(db - ps.startDb.load());
+            }
+        }
         return "{\"ok\":true,\"db\":" + std::to_string(db) + "}";
     }
 
@@ -6654,7 +6920,9 @@ void rlapp::stop_embedded() {
 int rlapp::cli_main(int argc, char** argv) {
     uint16_t port = 8899;
     bool lan = false;
-    bool noBrowser = false;
+    // 2026-10-25（单进程原生化收口）：macOS 已全面采用 WKWebView 单进程应用（RLPlayer.app），
+    // 不再使用浏览器端。CLI 入口 rtaweb 仅作无头测试工具，默认绝不自动 open 系统浏览器。
+    bool noBrowser = true;
     // 端口解析（2026-10-25 修）：macOS 壳 tools/mac_host.mm:62 传的是 "--port=%u"（等号形式），
     // 旧代码只认 "--port N"（空格形式）→ 等号形式被静默忽略、永远绑 8899，
     // 于是壳里 8899..8910 的端口回退全是死代码（8899 被占时只能报「无法启动播放服务」）。

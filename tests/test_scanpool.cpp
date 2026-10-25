@@ -158,6 +158,14 @@ int main() {
         fs::remove_all(tmpDir, ec);
         fs::create_directories(tmpDir, ec);
 
+        // 2026-10-25：库配置/索引默认落 ~/Library/Application Support/RLPlayer。测试必须显式改到临时目录，
+        // 否则会读写真实配置目录里的 rlplayer-library.conf / rlplayer-index.tsv，污染用户库并篡改曲库。
+#if defined(_WIN32)
+        _putenv_s("RLPLAYER_LIBRARY_DIR", tmpDir.string().c_str());
+#else
+        setenv("RLPLAYER_LIBRARY_DIR", tmpDir.string().c_str(), 1);
+#endif
+
         const std::string oldCwd = fs::current_path().string();
         fs::current_path(tmpDir, ec);
 

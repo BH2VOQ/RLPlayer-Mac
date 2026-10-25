@@ -299,6 +299,12 @@ target_include_directories(test_hog_exclusive PRIVATE ${CMAKE_SOURCE_DIR}/src)
 target_link_libraries(test_hog_exclusive PRIVATE ${RL_PLATFORM_LIBS})
 add_test(NAME hog_exclusive COMMAND test_hog_exclusive)
 
+# ---------------- 2026-10-25：耳机 EQ（OPRA 预设）切换实时生效与热重载回归 ----------------
+add_executable(test_eq_reload tests/test_eq_reload.cpp ${RL_LOOPBACK_SRC})
+target_include_directories(test_eq_reload PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tools)
+target_link_libraries(test_eq_reload PRIVATE rtadsp ${RL_PLATFORM_LIBS} "-framework Foundation")
+add_test(NAME eq_reload COMMAND test_eq_reload)
+
 # ---------------- 20 段参数均衡 PEQ（261024-02 #6）：0dB 直通 / 6dB@fc / Q 带宽 /
 #                  采样率重建 / 满幅过载恢复 / 热更新交叉淡入（铁律 7）----------------
 add_executable(test_peq tests/test_peq.cpp)

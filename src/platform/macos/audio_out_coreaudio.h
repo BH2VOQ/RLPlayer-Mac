@@ -602,39 +602,13 @@ public:
         const size_t n = frames < space ? frames : space;
         zero_.classify(n, space, frames, io_period_frames_);
 
-        // 2026-10-25（音量修复，真 BUG）：此前这里直接 memcpy 原始 PCM，**从不应用 gain_**。
-        // gain_ 只被 bit_perfect() 读过（判「增益是否 1.0」），于是：
-        //   * 上层拖动音量条 → set_gain() 改了 gain_ → 但音频数据一个字节都没变
-        //     ⟹ 音量功能完全失效（用户报「音量不好使」的直接根因）；
-        //   * 更矛盾的是 bit_perfect() 会因 gain_ != 1.0 报「非 bit-perfect」——
-        //     即「音量变了但声音没变、bit-perfect 却没了」两个症状并存。
-        // 现在在写环时按 gain_ 缩放。增益 == 1.0 时走原路径（逐位不变，bit-perfect 语义保住）。
-        const double g = gain_;
-        if (g == 1.0) {
-            for (size_t i = 0; i < n; ++i) {
-                std::memcpy(&ring_[(write_pos_ + i) % capacity * (size_t)channels_],
-                            interleaved + i * (size_t)channels_,
-                            sizeof(int32_t) * (size_t)channels_);
-            }
-        } else {
-            // 定点缩放：样本是 int32 容器（有效位由 bits_ 决定），先按 2^(32-bits_) 归一，
-            // 乘增益后四舍五入回整数。g == 0 时直接写 0（真静音，不做无用乘法）。
-            const int shift = (bits_ >= 1 && bits_ <= 32) ? (32 - bits_) : 0;
-            const double scale = std::ldexp(1.0, shift);
-            for (size_t i = 0; i < n; ++i) {
-                int32_t* dst = &ring_[(write_pos_ + i) % capacity * (size_t)channels_];
-                const int32_t* src = interleaved + i * (size_t)channels_;
-                for (int c = 0; c < channels_; ++c) {
-                    if (g == 0.0) { dst[c] = 0; continue; }
-                    const double v = (double)src[c] / scale * g;
-                    // 限幅到该位深的合法范围，避免溢出成反相爆音
-                    const double lim = (double)((1LL << (bits_ - 1)) - 1);
-                    double cl = v;
-                    if (cl >  lim) cl =  lim;
-                    if (cl < -lim) cl = -lim;
-                    dst[c] = (int32_t)std::llround(cl * scale);
-                }
-            }
+        // 2026-10-25（实时音量改造）：原始 PCM 原样写入 ring_，不在此处乘 gain_。
+        // 音量缩放在 render() 硬件回调出环打包时实时应用（scale_sample_i32），
+        // 彻底消除 400ms 环形缓冲排空延迟，拖动音量条毫秒级即时跟手。
+        for (size_t i = 0; i < n; ++i) {
+            std::memcpy(&ring_[(write_pos_ + i) % capacity * (size_t)channels_],
+                        interleaved + i * (size_t)channels_,
+                        sizeof(int32_t) * (size_t)channels_);
         }
         write_pos_ = (write_pos_ + n) % capacity;
         frames_written_ += n;
@@ -669,7 +643,24 @@ public:
     long long zero_other() const { return zero_.other; }
     std::string last_zero_reason() const { return zero_.reason(); }
 
-    void set_gain(double linear) override { gain_ = linear; }
+    // ---------------- 实时音量定点缩放辅助函数 ----------------
+    // g == 1.0 时逐位不变（100% bit-perfect 保证）；
+    // g <= 0.0 时直接返回 0（真静音）；
+    // 其余按 bits 归一后乘增益、四舍五入并限幅。
+    static inline int32_t scale_sample_i32(int32_t s, int bits, double g) {
+        if (g == 1.0) return s;
+        if (g <= 0.0) return 0;
+        const int shift = (bits >= 1 && bits <= 32) ? (32 - bits) : 0;
+        const double scale = std::ldexp(1.0, shift);
+        const double v = (double)s / scale * g;
+        const double lim = (double)((1LL << (bits - 1)) - 1);
+        double cl = v;
+        if (cl > lim) cl = lim;
+        if (cl < -lim) cl = -lim;
+        return (int32_t)std::llround(cl * scale);
+    }
+
+    void set_gain(double linear) override { gain_.store(linear, std::memory_order_relaxed); }
 
     // 2026-10-25：接管后「音量条的起点 dB」。
     // 独占接管时硬件音量被置满、软件增益接管；为了让用户看到/拖动的音量值与
@@ -691,7 +682,7 @@ public:
         // 这也是 macOS 上 bit-perfect 的通行判定（Roon / Audirvana 同）。
         //
         // 反过来，抢了 Hog 但走了 DSP/增益，依然不是 bit-perfect —— 那个由引擎层判。
-        return opened_ && !shared_ && gain_ == 1.0;
+        return opened_ && !shared_ && (gain_.load(std::memory_order_relaxed) == 1.0);
     }
 
     OutputError last_error_class() const override { return err_class_; }
@@ -749,12 +740,13 @@ private:
         // 设备请求的帧数 = 字节数 / 每帧字节数（不能用 int32 宽度反推！）
         const size_t out_frames = frame_bytes ? (io->mBuffers[0].mDataByteSize / frame_bytes) : 0;
 
+        const double g = gain_.load(std::memory_order_relaxed);
         size_t i = 0;
         for (; i < take && i < out_frames; ++i) {
             const int32_t* src = &ring_[((read_pos_ + i) % capacity) * ch];
             uint8_t* dst = out + i * frame_bytes;
             for (size_t c = 0; c < ch; ++c) {
-                const int32_t s = src[c];
+                const int32_t s = scale_sample_i32(src[c], bits_, g);
                 if (bytes_per_sample == 2) {
                     const uint16_t v = (uint16_t)(s & 0xFFFF);          // 低 16 位
                     std::memcpy(dst + c * 2, &v, 2);
@@ -818,6 +810,7 @@ private:
         frames_written_ = 0;
         frames_rendered_.store(0);
         underruns_.store(0);
+        gain_.store(1.0, std::memory_order_relaxed);
         buffer_frames_ = 0;
     }
 
@@ -828,7 +821,7 @@ private:
     int bits_ = 0;
     int channels_ = 0;
     double buffer_ms_ = 100.0;
-    double gain_ = 1.0;
+    std::atomic<double> gain_{1.0};
     detail::HwVolumeState hwVol_{};   // 接管前的设备硬件音量（close 时恢复）
     double hwStartDb_ = 0.0;          // 接管后音量条的起点 dB（原硬件音量的等效值）
     bool   hwStartDbValid_ = false;

@@ -8,6 +8,7 @@
 // 这是本轮加主题时定的规矩。
 #pragma once
 #include <string>
+#include "../version.h"
 
 namespace rta::net {
 
@@ -163,6 +164,7 @@ inline std::string rta_ui_page() {
     h += ".side-brand{display:flex;align-items:center;gap:10px;padding:10px 10px 2px;margin-top:6px;border-top:1px solid var(--line);flex:none;box-sizing:border-box;-webkit-user-select:none;user-select:none}";
     h += ".logo{width:28px;height:28px;border-radius:50%;background:linear-gradient(135deg,var(--acc),var(--acc2));display:grid;place-items:center;font-weight:700;font-size:12.5px;color:#fff;flex:none}";
     h += ".ttl{font-size:12.5px;font-weight:600;color:var(--txt);line-height:1.25}";
+    h += ".ttl .ver-badge{display:inline-block;margin-left:6px;padding:1px 6px;border-radius:6px;font-size:10px;font-weight:600;color:var(--mut);background:var(--hov);border:1px solid var(--line);vertical-align:1px;font-variant-numeric:tabular-nums}";
     h += ".ttl small{display:block;font-size:9px;font-weight:500;color:var(--mut);letter-spacing:.6px;margin-top:1px}";
     h += ".nav{display:flex;align-items:center;gap:10px;padding:8px 11px;border-radius:8px;color:var(--txt);cursor:pointer;font-weight:450;transition:background .12s;white-space:nowrap;overflow:hidden;font-size:13px}";
     h += ".nav:hover{background:var(--hov)}";
@@ -487,7 +489,7 @@ h += "#npPage .npedge{display:none}";
     // 整页音量（用户 UI2：单曲播放页缺音量调节；261024-01 #3b ①：并入控制行，不再单独占底部一行）
     h += ".npvol{display:flex;align-items:center;gap:8px;color:var(--mut);width:auto;min-width:150px}";
     h += ".npvol input[type=range]{width:104px;accent-color:var(--acc)}";
-    h += ".npvol .vlab{font-size:11px;min-width:46px;text-align:right;font-variant-numeric:tabular-nums;color:var(--txt2)}";
+    h += ".npvol .vlab{font-size:11px;min-width:58px;white-space:nowrap;text-align:right;font-variant-numeric:tabular-nums;color:var(--txt2)}";
     // 行3：歌词区（独立滚动，min-height:0 保证网格行真的能压缩 —— 这是 1024x640 下
     // 歌词压到进度条上的根因：旧实现 .nplyric 固定 58vh 且控件绝对定位，二者必然重叠）
     h += ".nplyric2{--nppad:0px;min-height:0;overflow:auto;text-align:center;scrollbar-width:none;padding:2px 0;-webkit-mask-image:linear-gradient(180deg,transparent 0,#000 26px,#000 calc(100% - 26px),transparent 100%);mask-image:linear-gradient(180deg,transparent 0,#000 26px,#000 calc(100% - 26px),transparent 100%)}";
@@ -556,7 +558,10 @@ h += "#npPage .npedge{display:none}";
     // 一个淡淡的箭头，被误认为压在红绿灯上）。同时 machost 的 top:46px 紧贴红绿灯下沿。
     // 修法：改成**实底 + 描边 + 阴影**，浅/深主题各自有明确对比；machost 下再下移，
     // 与红绿灯留出清晰间隙。位置仍贴左上（返回语义一致），不改成别的位置。
-    h += ".npclose{position:absolute;top:16px;left:16px;width:38px;height:38px;border-radius:50%;";
+    // 2026-10-25（用户第三轮反馈）：原来放左上角、还要靠 padding 给它让位，
+    // 结果孤零零飘在封面左边。用户要求「右上角放一个缩小图标，圆形里带俩箭头」——
+    // 也就是 macOS 全屏窗口那个「退出全屏/缩小」的视觉语义，放右上角不占内容区。
+    h += ".npclose{position:absolute;top:16px;right:18px;width:38px;height:38px;border-radius:50%;";
     h += "background:rgba(255,255,255,.92);border:1px solid rgba(15,23,42,.14);";
     h += "box-shadow:0 1px 3px rgba(15,23,42,.16);";
     h += "display:flex;align-items:center;justify-content:center;color:var(--txt);z-index:6;";
@@ -577,9 +582,9 @@ h += "#npPage .npedge{display:none}";
     //   · 红绿灯占 y≈8..30，按钮放在 y=34（36px 高 → 占 34..70）
     //   · npgrid 的 padding-top 抬到 78px（按钮底部 70 + 8px 间隙）⟹ 封面从 78 开始
     // 非 machost（浏览器直开）没有红绿灯，保持原来的 16px 不变。
-    h += "html.machost .npclose{top:34px;left:18px;width:36px;height:36px}";
-    h += "html.machost .npgrid{padding-top:78px}";
-    h += "@media (max-height:720px){html.machost .npgrid{padding-top:70px}}";
+    // 按钮已移到右上角，那里没有红绿灯 ⟹ 不需要纵向让位，也不需要再给内容加 padding-top
+    // （之前为左上按钮加的 78px 会让封面整体下移，视觉上很空，现在恢复原布局）。
+    h += "html.machost .npclose{top:16px;right:20px}";
     // 窄/矮窗口（用户 261023-04 #6 的 1024x640）：压缩行高与留白，但行间距不小于 12px
     h += "@media (max-height:720px){.npgrid{padding:36px 24px 10px;gap:12px}.nphero{gap:16px}.npcover{height:clamp(108px,22vh,164px)}.npkind{margin-bottom:5px}.nptit{font-size:19px}.npsub{font-size:11.5px;margin-top:5px}.npmline{margin-top:6px;min-height:20px}.npctl2{gap:8px}.npdbody{font-size:12px;line-height:1.6}}";
     h += "@media (max-width:1120px){.npgrid{padding:38px 24px 12px}.nphero{gap:16px}.npcover{height:clamp(108px,20vh,180px)}}";
@@ -733,7 +738,8 @@ h += "#npPage .npedge{display:none}";
     // 2026-10-24（用户 261024-01 #7）：长说明不再铺在页面上 —— 收进 (?) 图标，hover/focus 才显示。
     h += ".tip{display:inline-flex;align-items:center;justify-content:center;width:15px;height:15px;margin-left:5px;border-radius:50%;border:1px solid var(--line2,var(--line));color:var(--mut2);font-size:9.5px;font-weight:700;line-height:1;cursor:help;vertical-align:1px;position:relative;user-select:none;flex:none}";
     h += ".tip:hover,.tip:focus{border-color:var(--acc);color:var(--acc);outline:0}";
-    h += ".tip::after{content:attr(data-tip);position:absolute;left:50%;bottom:calc(100% + 8px);transform:translateX(-50%);width:max-content;max-width:290px;background:var(--bg3);color:var(--txt2);border:1px solid var(--line);border-radius:9px;padding:8px 10px;font-size:11px;line-height:1.6;font-weight:400;white-space:normal;text-align:left;box-shadow:0 10px 28px var(--shadow);opacity:0;visibility:hidden;transition:opacity .12s,transform .12s;z-index:40;pointer-events:none}";
+    h += ".tip::after{content:attr(data-tip);position:absolute;left:-10px;bottom:calc(100% + 8px);transform:none;width:max-content;max-width:290px;background:var(--bg3);color:var(--txt2);border:1px solid var(--line);border-radius:9px;padding:8px 10px;font-size:11px;line-height:1.6;font-weight:400;white-space:normal;text-align:left;box-shadow:0 10px 28px var(--shadow);opacity:0;visibility:hidden;transition:opacity .12s,transform .12s;z-index:40;pointer-events:none}";
+    h += ".tip.tip-r::after{left:auto;right:-10px;transform:none}";
     h += ".tip:hover::after,.tip:focus::after{opacity:1;visibility:visible}";
     // 分组标题的 (?) 改成向下展开：向上会被吸顶的页签条盖住（实测第一个分组就是这样）。
     h += ".sghead .tip::after{bottom:auto;top:calc(100% + 8px)}";
@@ -852,11 +858,11 @@ h += "#npPage .npedge{display:none}";
     // 原来三张海报卡（无损音乐库 / 独占直通引擎 / PEQ 与 OPRA）+ 四格快捷入口
     // 挤在**专辑页的空态**里 —— 一旦导入音乐就永远看不到了，而且专辑页不该塞输出设备/EQ 入口。
     // 现在独立成「音频工作站」导航页，任何曲库状态下都能进。
-    h += "<div class=nav data-v=station><svg viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='1.8'><rect x='3' y='4' width='18' height='12' rx='2'/><path d='M7 20h10M12 16v4'/><path d='M7 11l2.5-2.5L12 11l2.5-2.5L17 11'/></svg>音频工作站</div>";
+    h += "<div class=nav data-v=station><svg viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='1.8'><rect x='3' y='4' width='18' height='12' rx='2'/><path d='M7 20h10M12 16v4'/><path d='M7 11l2.5-2.5L12 11l2.5-2.5L17 11'/></svg>快速开始</div>";
     h += "<div class=nav data-v=settings><svg viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='1.8'><circle cx='12' cy='12' r='3.2'/><path d='M12 3.5v2.2M12 18.3v2.2M4.4 7.9l1.9 1.1M17.7 15l1.9 1.1M4.4 16.1l1.9-1.1M17.7 9l1.9-1.1'/></svg>设置</div>";
     h += "<div class=sp></div>";
-    // 品牌徽标栏：贴侧栏最底（像 Apple Music 左下角个人徽标）
-    h += "<div class=side-brand id=sideBrand><div class=logo>R</div><div class=ttl>RLPlayer<small>HI-FI AUDIO ENGINE</small></div></div>";
+    // 品牌徽标栏：贴侧栏最底（像 Apple Music 左下角个人徽标），常驻显示当前版本号（单一真相源 RLPLAYER_VERSION）
+    h += "<div class=side-brand id=sideBrand><div class=logo>R</div><div class=ttl>RLPlayer<span class=ver-badge id=appVer>v" RLPLAYER_VERSION "</span><small>HI-FI AUDIO ENGINE</small></div></div>";
     h += "</div>";
 
     // ---------- 顶栏（位于第 2 列起，品牌移至侧栏） ----------
@@ -949,7 +955,10 @@ h += "#npPage .npedge{display:none}";
     // 261024-02 #5：投放中的底栏徽标（与单曲页按钮、流媒体页推送区块同源 /api/cast/state）
     h += "<span class=badge id=castBadge style='display:none' title='正在投放'>UPnP</span>";
     h += "<svg width=14 height=14 viewBox='0 0 24 24' fill=none stroke=currentColor stroke-width=2 opacity=.55><path d='M3 10v4h4l5 4V6L7 10H3z'/><path d='M16.5 8.5a5 5 0 010 7'/></svg>";
-    h += "<input id=vol type=range min=-60 max=0 step=0.5 value=0></div></div>";
+    // 2026-10-25（音量曲线修复）：滑块改成**位置刻度** 0..1000（整数），
+    // 由 JS 的 volPosToDb()/volDbToPos() 映射到 dB。原来 min=-60 max=0 是线性 dB 刻度，
+    // 导致"拖到中间就没声音"（中点 -30 dB 只有 3% 振幅）。详见 ui_script.h 的曲线注释。
+    h += "<input id=vol type=range min=0 max=1000 step=1 value=1000></div></div>";
     // ---------- 正在播放（点封面/曲名打开） ----------
     // 布局：CSS Grid 四行（2026-10-23 用户 261023-04 #6）——
     //   .nphero 封面+标题区 / .npdata 资料区 / #npLyric 歌词区 / .npctl2 进度控制区。
@@ -963,7 +972,16 @@ h += "#npPage .npedge{display:none}";
     //   这里加一条覆盖层自己的拖拽条：透明、贴顶、高度 34px，鼠标按下时通过
     //   chrome.webview.postMessage("drag") 交给 launcher 的 WM_NCLBUTTONDOWN/HTCAPTION。
     h += "<div class=npgrip id=npGrip title='拖拽移动窗口'></div>";
-    h += "<button class=npclose id=npClose title='返回'><svg width=16 height=16 viewBox='0 0 24 24' fill=none stroke=currentColor stroke-width=2><path d='M15 5l-7 7 7 7'/></svg></button>";
+    // 图标语义：双箭头指向中心 = 「缩小 / 退出全屏」，与 macOS 全屏窗口右上角一致。
+    // 两条对角线，箭头尖都朝内：
+    //   左上箭头：主线 (4,4)→(10,10)，箭头头从 (10,10) 向左、向上各一条
+    //   右下箭头：主线 (20,20)→(14,14)，箭头头从 (14,14) 向右、向下各一条
+    h += "<button class=npclose id=npClose title='返回（Esc）' aria-label='返回'>"
+         "<svg width=18 height=18 viewBox='0 0 24 24' fill=none stroke=currentColor "
+         "stroke-width=2 stroke-linecap=round stroke-linejoin=round>"
+         "<path d='M4 4l6 6M10 10H5.5M10 10V5.5'/>"
+         "<path d='M20 20l-6-6M14 14h4.5M14 14v4.5'/>"
+         "</svg></button>";
     h += "<div class=npgrid id=npGrid>";
     // 行1：封面 + 标题区（标题/副题/元数据芯片/EQ 芯片）
     h += "<div class=nphero>";
@@ -1009,7 +1027,8 @@ h += "#npPage .npedge{display:none}";
     h += "</div>";   // .npkeys —— 音量必须和 npkeys 同级，才是"同一行"
     // 音量并入同一控制行（#3b ①）；滑块本身是 #vol 的镜像（同一个 S.vol 真相源，见 setVol）
     h += "<div class=npvol><svg width='14' height='14' viewBox='0 0 24 24' fill=none stroke='currentColor' stroke-width='2' opacity=.6><path d='M3 10v4h4l5 4V6L7 10H3z'/><path d='M16.5 8.5a5 5 0 010 7'/></svg>";
-    h += "<input id=npVol type=range min=-60 max=0 step=0.5 value=0 title='音量（dB）'>";
+    // 同上：位置刻度 0..1000，由 JS 曲线换算成 dB
+    h += "<input id=npVol type=range min=0 max=1000 step=1 value=1000 title='音量（dB）'>";
     h += "<span class=vlab id=npVolLab>0.0 dB</span></div>";
     h += "</div>";   // .npctlrow
     h += "</div>";   // .npctl2
