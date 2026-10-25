@@ -86,6 +86,42 @@ int main(int argc, char** argv) {
         std::printf("  → 该设备不暴露硬件音量（纯数字输出常见），接管应优雅跳过\n");
     }
 
+    // ---- 1b) 响度保持（用户安全要求，纯计算，任何模式都跑）----
+    // 用户原话：「接管的情况下，默认音量要与之前系统设置的音量相同，防止音量过大」。
+    // 接管把硬件音量置满后，必须把软件增益初始化到「原硬件音量的等效 dB」，
+    // 否则会从接管前的响度瞬间跳到满幅（很危险，尤其是耳机）。
+    std::printf("\n-- 1b. 接管后响度必须不变（纯计算，零副作用）--\n");
+    {
+        // 与 audio_out_coreaudio.h 的 takeover 同构：scalar → dB → 线性
+        auto scalarToDb = [](float sc) -> double {
+            if (sc <= 0.000001f) return -120.0;
+            double db = 20.0 * std::log10((double)sc);
+            if (db > 0.0) db = 0.0;
+            if (db < -120.0) db = -120.0;
+            return db;
+        };
+        const float samples[] = { 0.151659f, 1.0f, 0.5f, 0.25f, 0.0f };
+        bool allOk = true;
+        for (float hw : samples) {
+            const double db = scalarToDb(hw);
+            const double sw = (db <= -120.0) ? 0.0 : std::pow(10.0, db / 20.0);
+            // 接管后：硬件 = 1.0，软件 = sw ⟹ 合成响度必须等于原 hw
+            if (std::fabs(sw - (double)hw) > 1e-5) allOk = false;
+        }
+        ck(allOk, "各档硬件音量 → 等效 dB → 软件增益，合成响度与原值一致");
+        // 最危险的一条：接管前是小音量时，绝不能变成满幅
+        const double smallDb = scalarToDb(0.151659f);
+        const double smallSw = std::pow(10.0, smallDb / 20.0);
+        ck(smallSw < 0.2, "接管前 0.15 的小音量不会突然变成满幅（防音量过大）",
+           "swGain=" + std::to_string(smallSw));
+        ck(std::fabs(smallSw - 0.151659) < 1e-5, "小音量档的合成响度与原硬件音量严格一致",
+           "swGain=" + std::to_string(smallSw));
+        // 硬件静音 → 接管后仍静音（不能"接管后突然出声"）
+        ck(scalarToDb(0.0f) <= -120.0, "硬件静音 → 接管后仍静音");
+        // 硬件满幅 → 软件 1.0（bit-perfect 场景不受影响）
+        ck(std::fabs(scalarToDb(1.0f)) < 1e-9, "硬件满幅 → 软件增益 1.0（bit-perfect）");
+    }
+
     if (!touch) {
         std::printf("\n[INFO] 只读模式结束（未改动任何设备状态）。\n");
         std::printf("       真实读写请手动跑：test_hw_volume --allow-hw-touch\n");

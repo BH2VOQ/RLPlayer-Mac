@@ -673,15 +673,37 @@ public:
         return w;
     }
     // 2026-10-25（音量修复，真 BUG）：render_loop 每 tick 调用 set_live_gain_db()
-    // 把「当前请求音量 − 起播时已应用音量」交给设备层，但**此前没有任何 sink 覆盖它**
-    // （基类 render_loop.h:43 是空实现）⟹ 音量请求被静默丢弃，拖动音量条毫无反应。
-    // 而 CoreAudioOutput 明明有 set_gain()，只是从来没人调用过。
-    // 这里把两者接上：dB → 线性增益 → ao_->set_gain()。
-    void set_live_gain_db(double db) override {
-        // 限幅 [-120, +12] dB：≤−120 视为静音（线性 0）；>+12 不允许（避免削波被当成"更响"）
-        if (db < -120.0) db = -120.0;
-        if (db > 12.0) db = 12.0;
-        const double linear = (db <= -120.0) ? 0.0 : std::pow(10.0, db / 20.0);
+    // 但**此前没有任何 sink 覆盖它**（基类 render_loop.h:43 是空实现）
+    // ⟹ 音量请求被静默丢弃，拖动音量条毫无反应。
+    //
+    // ⚠️ 语义关键（2026-10-25 二次修复，曾因此产生爆音）：
+    //   render_loop 传进来的 db 是 **delta**（当前请求 − 起播时已应用），**不是绝对值**！
+    //   源码：sink.set_live_gain_db(h.volDb->load() - h.startDb->load());
+    //   所以这里必须做 base × 10^(delta/20)，其中 base = 起播时的基准增益。
+    //   我第一版把 delta 直接当绝对值用（linear = 10^(delta/20)），再叠加
+    //   「接管后 startDb = 硬件等效 dB」⟹ 滑块拉到 0 dB 时 delta = +16.4 dB
+    //   ⟹ 3.98 倍增益 ⟹ 削波爆音。这就是"音量爆炸"的直接原因。
+    //
+    // 正确模型：
+    //   * baseDb_ = 起播时用户请求的绝对音量（= startDb），设备层用它作为基准；
+    //   * 每次收到 delta，绝对音量 = baseDb_ + delta，再换算线性增益；
+    //   * 硬件音量已被接管置满（见 hw_volume_takeover），所以绝对增益完全由这里决定；
+    //   * 限幅到 [-120, 0]：>0 dB 会削波，绝不允许（这是爆音的另一道闸）。
+    void set_live_gain_db(double deltaDb) override {
+        // 绝对音量 = 基准 + 增量（delta 语义）
+        double absDb = baseDb_ + deltaDb;
+        // 硬限幅：不允许正向增益（>0 dB 必削波），下限 -120 dB 视为静音
+        if (absDb > 0.0) absDb = 0.0;
+        if (absDb < -120.0) absDb = -120.0;
+        const double linear = (absDb <= -120.0) ? 0.0 : std::pow(10.0, absDb / 20.0);
+        ao_->set_gain(linear);
+    }
+    // 起播时调用：把"用户请求的绝对音量"设为基准（render_loop 之后只发 delta）
+    void set_base_gain_db(double absDb) {
+        if (absDb > 0.0) absDb = 0.0;
+        if (absDb < -120.0) absDb = -120.0;
+        baseDb_ = absDb;
+        const double linear = (absDb <= -120.0) ? 0.0 : std::pow(10.0, absDb / 20.0);
         ao_->set_gain(linear);
     }
     void pause() override { ao_->pause(); }
@@ -700,11 +722,22 @@ public:
     size_t frames_rendered() const { return ao_->frames_rendered(); }
     uint64_t underruns() const { return ao_->underruns(); }
     bool bit_perfect() const { return ao_->bit_perfect(); }
+    // 2026-10-25：接管后音量条的起点 dB（原硬件音量的等效值）。
+    // render_loop 的实时增益是「volDb − startDb」的**增量**，而接管已经把设备硬件音量
+    // 置满并把等效增益写进设备层 ⟹ startDb 必须同步成这个等效值，否则会二次叠加：
+    //   例：原硬件 0.15（−16.4 dB）→ 设备层已含 −16.4 dB，若 startDb 仍为 0，
+    //   用户把音量条拉到 0 dB 时增量 = 0−0 = 0 ⟹ 实际响度还是 −16.4 dB，看起来"调不动"。
+    bool hw_takeover_db(double& outDb) const {
+        if (auto* p = dynamic_cast<rta::platform::CoreAudioOutput*>(ao_.get()))
+            return p->hw_takeover_db(outDb);
+        return false;
+    }
     // out_peak/underruns 遥测走 OutSink 之外的直接查询（STAT 行用）
     void set_shared(bool sh) { shared_ = sh; }
 private:
     std::unique_ptr<rta::platform::AudioOutput> ao_ = rta::platform::create_audio_output();
     bool shared_ = false;
+    double baseDb_ = 0.0;   // 起播时的绝对音量基准（set_live_gain_db 收到的是相对它的 delta）
     std::string err_;
 };
 
@@ -2151,6 +2184,14 @@ static bool play_one_impl(const std::string& file, const PlayParams& p, rta::aud
         // 2026-10-23 真机 DEBUG：打开成功也要如实带出「驱动实际接受的是哪种独占格式」。
         // 之前这句只有失败时才有，成功时用户只看到"32-bit"，根本不知道内部是紧凑24还是32容器，
         // 1.3.x「能播/不能播」的原因因此全靠猜（本机是紧凑24、UltraLite 是32容器/24有效）。
+
+        // 2026-10-25（音量语义）：起播时把「用户请求的绝对音量」设为设备层基准。
+        // render_loop 之后每 tick 只发 delta（volDb − startDb），设备层用 base + delta
+        // 还原绝对值。不设这一步的话 baseDb_ 恒为 0，音量条会完全失灵。
+        // 注意 ps.startDb 已经是 p.volume（见上方），两者保持同一个绝对音量口径。
+        if (auto* ca = dynamic_cast<CoreAudioSink*>(sink.get())) {
+            ca->set_base_gain_db(p.volume);
+        }
         if (!sink->start()) {
             RQ.abort.store(true); RQ.cv.notify_all(); prod.join();
             std::lock_guard<std::mutex> lk(ps.mtx);

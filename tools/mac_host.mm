@@ -60,7 +60,7 @@ int cli_main(int argc, char** argv);
 #include "platform/host_msg.h"
 #else
 namespace rta::platform {
-enum class HostAction { None, Minimize, Maximize, Close, Drag, Theme, OpenUrl, Resize };
+enum class HostAction { None, Minimize, Maximize, Close, Drag, Theme, OpenUrl, Resize, PickDir };
 struct HostMessage {
     HostAction action = HostAction::None;
     std::string arg;
@@ -105,6 +105,13 @@ inline HostMessage parse_host_message(const std::string& m) {
         r.action = HostAction::OpenUrl;
         r.arg = m.substr(8);
         r.allowed = external_url_allowed(r.arg);
+        return r;
+    }
+    // 2026-10-25：原生「选择文件夹」（与 platform/host_msg.h 保持同步）
+    if (m == "pickdir") { r.action = HostAction::PickDir; return r; }
+    if (m.rfind("pickdir:", 0) == 0) {
+        r.action = HostAction::PickDir;
+        r.arg = m.substr(8);
         return r;
     }
     return r;
@@ -835,8 +842,22 @@ static NSString *const kShim = @
 }
 
 // 宿主 → UI：max/normal 在窗口尺寸变化时发（PLATFORM.md §10.2）
+//
+// 2026-10-25（安全）：原来用 @"...__emit('%@')" 直接插字符串。这对 "max"/"normal" 没问题，
+// 但本轮新增的 pickdir:ok:<路径> 带**用户可控的绝对路径** —— 路径里只要有一个单引号
+// （例如 /Users/o'brien/Music）就会破坏 JS 字面量、轻则消息丢失、重则执行注入代码。
+// 改为走 JSON 序列化（NSJSONSerialization 会正确转义引号/反斜杠/控制字符），
+// 页面侧 JSON.parse 回来。参数用数组包一层，保证任意字符串都安全。
 - (void)emitToPage:(NSString *)s {
-    NSString *js = [NSString stringWithFormat:@"window.chrome.webview && window.chrome.webview.__emit('%@');", s];
+    NSArray *arr = @[ s ?: @"" ];
+    NSData *d = [NSJSONSerialization dataWithJSONObject:arr options:0 error:nil];
+    if (!d) return;
+    NSString *json = [[NSString alloc] initWithData:d encoding:NSUTF8StringEncoding];
+    if (!json) return;
+    // json 形如 ["..."]；取出第一个元素作为字符串参数
+    NSString *js = [NSString stringWithFormat:
+        @"(function(){try{var a=%@;if(window.chrome.webview&&window.chrome.webview.__emit)window.chrome.webview.__emit(a[0]);}catch(e){}})();",
+        json];
     [self.web evaluateJavaScript:js completionHandler:nil];
 }
 

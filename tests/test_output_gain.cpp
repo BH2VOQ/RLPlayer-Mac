@@ -137,6 +137,41 @@ int main() {
            "got=" + std::to_string(ring[0]) + " lim=" + std::to_string((long long)lim));
     }
 
+    // ---- 5b) 爆音回归判据（2026-10-25 真实事故）----
+    // 事故：把 render_loop 的 delta 当绝对值用 + 把 startDb 设成硬件等效 dB
+    // ⟹ 滑块拉到 0 dB 时 delta = +16.4 dB ⟹ 3.98 倍增益 ⟹ 削波爆音。
+    // 这里钉住正确语义：绝对音量 = base + delta，且**绝不允许 > 0 dB**。
+    std::printf("\n-- 5b. 爆音回归：delta 语义 + 硬限幅 0 dB --\n");
+    {
+        auto absGain = [](double baseDb, double deltaDb) -> double {
+            double absDb = baseDb + deltaDb;
+            if (absDb > 0.0) absDb = 0.0;          // 硬限幅：>0 dB 必削波
+            if (absDb < -120.0) absDb = -120.0;
+            return (absDb <= -120.0) ? 0.0 : std::pow(10.0, absDb / 20.0);
+        };
+        // 正常路径：base=0，delta 就是用户请求
+        const double g0   = absGain(0.0,   0.0);
+        const double gm6  = absGain(0.0,  -6.0);
+        const double gm20 = absGain(0.0, -20.0);
+        ck(std::fabs(g0 - 1.0) < 1e-9, "0 dB → 增益 1.0（满幅，不超）",
+           "g=" + std::to_string(g0));
+        ck(std::fabs(gm6 - 0.5012) < 1e-3, "-6 dB → 增益 ≈0.5", "g=" + std::to_string(gm6));
+        ck(std::fabs(gm20 - 0.1) < 1e-6, "-20 dB → 增益 0.1", "g=" + std::to_string(gm20));
+        ck(g0 > gm6 && gm6 > gm20, "增益随音量单调递减（音量条真的有效）");
+
+        // 爆音场景复现：base = 硬件等效 -16.38，delta = +16.38（滑块 0 dB − startDb）
+        // 正确实现下 abs = 0 dB → 增益 1.0（不爆）；错误实现会给 3.98 倍
+        const double boom = absGain(-16.38, +16.38);
+        ck(std::fabs(boom - 1.0) < 1e-3, "接管场景 base=-16.38 + delta=+16.38 → 恰好 1.0（不爆音）",
+           "g=" + std::to_string(boom));
+        ck(boom <= 1.0 + 1e-9, "任何组合都不得产生 >1.0 的增益（防削波爆音）");
+
+        // 极端越界：人为给 +40 dB delta，必须被限到 0 dB
+        const double huge = absGain(0.0, 40.0);
+        ck(std::fabs(huge - 1.0) < 1e-9, "delta=+40 dB 被限幅到 0 dB（绝不放大）",
+           "g=" + std::to_string(huge));
+    }
+
     std::printf("\n-- 6. dB → 线性换算 --\n");
     {
         ck(std::fabs(dbToLinear(0.0) - 1.0) < 1e-12, "0 dB → 1.0");

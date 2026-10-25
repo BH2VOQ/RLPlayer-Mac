@@ -69,11 +69,15 @@ function pickDirectory(initial, onDone) {
       try { document.documentElement.classList.toggle('zoommax', m === 'max'); } catch (e) { }
     }
   }
-  if (WV) {
-    // 垫片通常把 __emit 挂在 window.chrome.webview 上；这里补一层，避免宿主先于页面注入
-    try { WV.__emit = handleEmit; } catch (e) { }
+  // ⚠️ 不要覆盖 WV.__emit —— 那是宿主垫片自己的派发器，覆盖会让既有的
+  // max/normal 等消息全部失联。正确做法是用标准的 addEventListener('message')，
+  // 垫片的 emit() 会把消息派发给所有监听器（见 mac_host.mm 的 kShim）。
+  if (WV && typeof WV.addEventListener === 'function') {
+    WV.addEventListener('message', function (ev) {
+      handleEmit(ev && ev.data !== undefined ? ev.data : ev);
+    });
   }
-  // 双保险：宿主直接调 window.__dshEmit 也能收到（mac_host 用 __emit，保持一致）
+  // 双保险：宿主也可以直接调 window.__dshEmit（便于将来换传输层）
   window.__dshEmit = handleEmit;
 })();
 // 261024-02 #2：资料里的 URL 一律交给**系统浏览器**打开（绝不把 WebView 自己导航走）。
