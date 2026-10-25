@@ -436,12 +436,21 @@ inline std::string Library::exeDirOrEmpty() {
 }
 // 配置/索引落点：
 //   1) 环境变量 RLPLAYER_LIBRARY_DIR（测试 / 多实例 / 便携部署用；测试必须用它，否则会读到真实库配置）
-//   2) 否则用 exe 目录（与 rlplayer-settings.conf 一致，避免 8899 实例与自检沙箱看到两份不同的库）
-//   3) 再取不到 exe 目录才退回相对名（老行为）
+//   2) 否则用 platform::data_dir_utf8()（macOS = ~/Library/Application Support/RLPlayer）
+//   3) 再取不到才退回 exe 目录（老行为 / 便携兜底）
+//
+// 2026-10-25（默认目录纠正）：第 2 档原来是「exe 目录」。在 macOS 上那是
+// RLPlayer.app/Contents/MacOS/ —— 应用包是只读签名体，配置与曲库索引写进去会在
+// 正式签名/公证后失败，且随 .app 升级被静默丢弃（用户表现为「升级后曲库变空」）。
+// 改为按 macOS 规范落 ~/Library/Application Support/RLPlayer。
+// 注意：**多实例后缀 confLeaf() 仍然生效**（.p<port>），所以自检沙箱与用户实例
+// 即使共用同一个目录也不会互相覆盖。
 inline std::string Library::libDataDir() {
     if (const char* env = std::getenv("RLPLAYER_LIBRARY_DIR")) {
         if (*env) { std::string s(env); while (!s.empty() && (s.back() == '\\' || s.back() == '/')) s.pop_back(); if (!s.empty()) return s; }
     }
+    const std::string dataDir = rta::platform::data_dir_utf8();
+    if (!dataDir.empty()) return dataDir;
     return exeDirOrEmpty();
 }
 // 文件名区分实例：默认实例（8899）用原名；--port 指定的其它实例加 ".p<端口>" 后缀。
@@ -506,7 +515,27 @@ inline void Library::load() {
         }
         if (roots_.empty()) {
             // 首次运行：探一遍常见位置，别一打开就是空的（RLPlayer 被诟病的就是这个）
+            //
+            // 2026-10-25（默认目录纠正）：本项目已改为 macOS 单平台，但这里仍留着
+            // Windows 盘符探测（D:\Music / E:\音乐 / C:\Users\Public\Music …），
+            // 在 macOS 上**永远不可能命中** ⟹ 首次启动必定落进最后的兜底
+            // "C:\Users\Public\Music"（一个 macOS 上不存在的路径），曲库恒为空。
+            // 现在按平台分支：macOS 用 HOME 下的 Music / 音乐 / Downloads/Music 等真实位置。
             std::vector<std::string> cands;
+#if defined(__APPLE__)
+            if (const char* home = std::getenv("HOME")) {
+                const std::string h(home);
+                // 顺序即优先级：先 Apple 默认音乐目录，再中文目录名（本机常见），
+                // 再下载目录（用户常把音乐丢这里），最后 iCloud Drive。
+                for (const char* sub : { "/Music", "/音乐", "/Downloads/Music",
+                                         "/Downloads/音乐",
+                                         "/Library/Mobile Documents/com~apple~CloudDocs/Music" })
+                    cands.push_back(h + sub);
+            }
+            // 系统级共享音乐目录（对应 Windows 的 Public\Music）
+            cands.push_back("/Users/Shared/Music");
+            cands.push_back("/Users/Shared/音乐");
+#else
             if (const char* up = std::getenv("USERPROFILE")) {
                 cands.push_back(std::string(up) + "\\Music");
                 cands.push_back(std::string(up) + "\\音乐");
@@ -514,6 +543,7 @@ inline void Library::load() {
             for (const char* d : { "D:\\Music", "E:\\Music", "D:\\音乐", "E:\\音乐",
                                    "D:\\MUSIC", "E:\\MUSIC", "C:\\Users\\Public\\Music" })
                 cands.push_back(d);
+#endif
             std::error_code ec;
             for (const auto& c : cands) {
                 if (!fsx::is_directory(p8(c), ec)) continue;
@@ -522,7 +552,10 @@ inline void Library::load() {
                 if (!dup) roots_.push_back(c);
                 if (roots_.size() >= 4) break;
             }
-            if (roots_.empty()) roots_.push_back("C:\\Users\\Public\\Music");
+            // 兜底：一个都没探到就【留空】而不是塞一个不存在的路径。
+            // 塞假路径的后果是界面上显示一个根目录、扫描永远 0 首、用户以为程序坏了；
+            // 留空则界面显示「未添加音乐目录」，用户知道该自己点「添加目录」。
+            // （2026-10-25 修正：原代码兜底 push "C:\Users\Public\Music"，macOS 上必错。）
         }
     }
     // 索引

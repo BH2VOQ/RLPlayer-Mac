@@ -62,7 +62,10 @@ var ADV = {
   // 输出后端与多声道
   // 261024-01 #9/#11：upnpDev = UPnP/DLNA 渲染器（设备描述 URL）；naaHost 自动发现填，
   // 手动框只是折叠兜底（用户原话：NAA 端点这个选项不应该出现，应该自动获取）。
-  backend: 'wasapi', channels: 0, naaHost: '127.0.0.1:43210', upnpDev: '',
+  // 2026-10-25（默认值纠正）：NAA 已从界面移除，naaHost 不再给 127.0.0.1:43210 这种
+  // 永远连不上的假默认值（macOS 无 NAA 驱动体系）。字段保留以兼容老 conf 与后端契约，
+  // 默认置空 = 未选择，语义诚实。
+  backend: 'wasapi', channels: 0, naaHost: '', upnpDev: '',
   trim0: 0, trim1: 0, trim2: 0, trim3: 0, trim4: 0, trim5: 0, trim6: 0, trim7: 0,
   // 输入
   inBackend: 'none', inDev: '', inOffset: 0, inBuf: 100, inMonitor: 0, inSeconds: 0, inOut: '',
@@ -1915,7 +1918,7 @@ function loadFiles(d) {
     var h = '<div class=pathbar>' +
             '<button class=pb id=fUp title="上一级">\u2191</button>' +
             (opts ? '<select class=psel id=fRoot><option value="">音乐库…</option>' + opts + '</select>' : '') +
-            '<input class=pin id=fPath value="' + esc(j.dir) + '" spellcheck=false placeholder="输入目录后回车，例如 D:\\Music">' +
+            '<input class=pin id=fPath value="' + esc(j.dir) + '" spellcheck=false placeholder="输入目录后回车，例如 ' + (SEP === '/' ? '/Users/你的用户名/Music' : 'D:\\Music') + '">' +
             '<button class=pb id=fGo title="转到">\u21b5</button></div>';
     h += '<div class=frows>';
     rows.forEach(function (r, i) {
@@ -2399,7 +2402,7 @@ function loadSettings() {
     }
     if (kv.backend !== undefined) ADV.backend = migrateRemovedBackend(kv.backend);
     if (kv.channels !== undefined) ADV.channels = parseInt(kv.channels, 10) || 0;
-    if (kv.naahost !== undefined) ADV.naaHost = kv.naahost || '127.0.0.1:43210';
+    if (kv.naahost !== undefined) ADV.naaHost = kv.naahost || '';
     if (kv.upnpdev !== undefined) ADV.upnpDev = kv.upnpdev || '';
     if (kv.trim !== undefined) {
       var tv = String(kv.trim).split(',');
@@ -2878,8 +2881,10 @@ function setView(v) {
   // 走 #app.noq 这套已有的网格规则，否则网格会留一个空列。
   // 2026-10-23（UI 评审 #8）：播放队列页自己就是队列，右侧抽屉再显示一份同样的队列是重复信息
   D('app').classList.toggle('noq', isSet || S.queueHidden || v === 'queue');
+  if (isSet || v === 'queue') D('app').classList.remove('qopen');
   D('app').classList.toggle('setmode', isSet);   // 设置页隐藏 crumb，页签自己吸顶
   applyRTab(isSet);
+  if (typeof syncRightDrawerBtn === 'function') setTimeout(syncRightDrawerBtn, 0);
   if (D('setpage')) D('setpage').classList.toggle('on', isSet);
   // 2026-10-23 用户反馈「切到作品栏后无法切回其它栏位」：干净环境下三种路径都复现不出来，
   // 但这里确实存在一类残留风险 —— 只要有任何路径把 #list 置为 display:none（设置页就会），
@@ -3382,54 +3387,45 @@ function showChain() {
   api('/api/signal').then(function (j) {
     if (!j.ok) { D('mbody').innerHTML = '<div class=empty>还没有开始播放</div>'; return; }
     var p = j.path;
+    var bp = p.bitPerfect || '';
+    var why = p.bitPerfectWhy || '（本次未记录）';
+    var heroCls = '', heroTitle = 'BIT-PERFECT · 全链路逐位无损', heroIcon = '\u2713';
+    if (bp === 'direct') { heroCls = ' direct'; heroTitle = 'BIT-PERFECT · 1-bit DSD 直通'; heroIcon = '\u25c6'; }
+    else if (bp === 'yes') { heroCls = ''; heroTitle = 'BIT-PERFECT · 全链路逐位无损'; heroIcon = '\u2713'; }
+    else if (bp === 'no') { heroCls = ' warn'; heroTitle = '非 Bit-Perfect · 信号经过 DSP 处理'; heroIcon = '!'; }
+    else { heroCls = ' warn'; heroTitle = 'Bit-Perfect 状态未知'; heroIcon = '?'; }
+
     var nodes = [];
-    // 2026-10-23（用户 261023-02 #1）：把「本次是否 bit-perfect」放在**最显眼的位置**（第一条），
-    // 并且结论来自后端的权威判定（/api/signal 的 bitPerfect 字段），不再让用户自己从一堆字段里推。
-    // 三态配色：direct=紫（DirectSDM 1-bit 直通）/ yes=绿 / no=黄（附具体原因）。
-    (function () {
-      var bp = p.bitPerfect || '';
-      var why = p.bitPerfectWhy || '';
-      var label, color, icon;
-      if (bp === 'direct') { label = 'BIT-PERFECT · 1-bit 直通'; color = '#a78bfa'; icon = '\u25c6'; }
-      else if (bp === 'yes') { label = 'BIT-PERFECT'; color = '#34d399'; icon = '\u2713'; }
-      else if (bp === 'no') { label = '非 bit-perfect'; color = '#fbbf24'; icon = '!'; }
-      else { label = 'BIT-PERFECT 状态未知'; color = '#94a3b8'; icon = '?'; }
-      nodes.push({ k: icon + ' ' + label, v: why || '（本次未记录）', _bp: bp, _color: color });
-    }());
-    nodes.push({ k: '源文件', v: nam(p.src) + (p.codec ? '  \u00b7  ' + p.codec.toUpperCase() : '') });
-    nodes.push({ k: '解码', v: (p.note || '原生无损解码') + '  \u00b7  ' + p.inRate + ' Hz / ' + p.inBits + ' bit / ' + p.inCh + ' ch' });
-    // 261024-04 #8：绿色节点 = 本次**真的**由 GPU 参与计算的那一环。
-    // 旧实现给「采样率转换」无条件加 gpu:true ⟹ 只要开了升频，信号链就永远有一个绿色节点，
-    // 用户看到的"GPU"其实和本次播放是否用 GPU 无关。
-    // 后端字段：/api/signal 的 p.gpuUsed（本次播放 GPU 是否参与）/ p.convGpu（卷积是否走 GPU）。
-    // ⚠️ 未解决项：这两个字段后端还没加进 JSON（现在卷积开关叫 irGpu），所以先用
-    //    p.convGpu ?? p.irGpu 兜底；后端加好后本兜底自动失效（新字段优先），到时候可以删掉兜底。
+    nodes.push({ k: '源文件', v: nam(p.src) + (p.codec ? '  \u00b7  ' + p.codec.toUpperCase() : ''), badge: '无损源', kind: 'lossless' });
+    nodes.push({ k: '解码', v: (p.note || '原生无损解码') + '  \u00b7  ' + p.inRate + ' Hz / ' + p.inBits + ' bit / ' + p.inCh + ' ch', badge: '无损解码', kind: 'lossless' });
     var convGpu = (typeof p.convGpu === 'boolean') ? p.convGpu : (p.irGpu === true);
     var sigGpuUsed = (typeof p.gpuUsed === 'boolean') ? p.gpuUsed : !!S.gpuUsed;
-    if (p.resample) nodes.push({ k: '采样率转换', v: (p.filter || 'Kaiser sinc') + '  \u00b7  ' + p.phase + '  \u00b7  ' + p.taps + ' 抽头' + (p.twoStage ? '  \u00b7  两段式' : '') + '  \u2192  ' + p.outRate + ' Hz' + (sigGpuUsed ? '  \u00b7  GPU' : ''), gpu: !!sigGpuUsed });
-    else nodes.push({ k: '采样率转换', v: '旁路（源采样率与输出一致，逐位直通）' });
-    // 261024-04 #8：EQ / 卷积单独成一环，并且**只有卷积真的走 GPU 时**才标绿（后端 convGpu 字段）
+    if (p.resample) nodes.push({ k: '采样率转换', v: (p.filter || 'Kaiser sinc') + '  \u00b7  ' + p.phase + '  \u00b7  ' + p.taps + ' 抽头' + (p.twoStage ? '  \u00b7  两段式' : '') + '  \u2192  ' + p.outRate + ' Hz' + (sigGpuUsed ? '  \u00b7  GPU' : ''), gpu: !!sigGpuUsed, badge: sigGpuUsed ? 'GPU 升频' : '64-Bit 升频', kind: sigGpuUsed ? 'gpu' : 'dsp' });
+    else nodes.push({ k: '采样率转换', v: '旁路（源采样率与输出一致，逐位直通）', badge: '逐位旁路', kind: 'lossless' });
     if (p.eq || p.conv) {
       var eqParts = [];
       if (p.eq) eqParts.push('参数 EQ' + (ADV.eq ? (' ' + nam(ADV.eq)) : ''));
       if (p.conv) eqParts.push('FIR 卷积' + (ADV.ir ? (' ' + nam(ADV.ir)) : ''));
-      nodes.push({ k: 'EQ / 卷积', v: eqParts.join('  \u00b7  ') + '  \u00b7  ' + (convGpu ? 'GPU 计算' : 'CPU 计算'), gpu: convGpu });
+      nodes.push({ k: 'EQ / 卷积', v: eqParts.join('  \u00b7  ') + '  \u00b7  ' + (convGpu ? 'GPU 计算' : 'CPU 计算'), gpu: convGpu, badge: convGpu ? 'GPU 卷积' : 'DSP 均衡', kind: convGpu ? 'gpu' : 'dsp' });
     }
     if (p.dsd) {
-      nodes.push({ k: 'DSD 调制', v: 'DSD' + p.dsd + '（' + (p.dsdRate / 1000000).toFixed(4) + ' MHz）\u00b7 1-bit \u00b7 ' + (p.modOrder || 5) + ' 阶 SDM' });
-      nodes.push({ k: 'DoP 封装', v: '24-bit 载波 ' + p.outRate + ' Hz \u00b7 标记 0x05/0xFA 交替' });
+      nodes.push({ k: 'DSD 调制', v: 'DSD' + p.dsd + '（' + (p.dsdRate / 1000000).toFixed(4) + ' MHz）\u00b7 1-bit \u00b7 ' + (p.modOrder || 5) + ' 阶 SDM', badge: 'SDM 调制', kind: 'dsp' });
+      nodes.push({ k: 'DoP 封装', v: '24-bit 载波 ' + p.outRate + ' Hz \u00b7 标记 0x05/0xFA 交替', badge: 'DoP 1.1', kind: 'lossless' });
     } else {
-      nodes.push({ k: '抖动 / 噪声整形', v: (p.shaper && p.shaper !== 'none') ? p.shaper : '无（逐位）' });
+      var isNoShap = (!p.shaper || p.shaper === 'none');
+      nodes.push({ k: '抖动 / 噪声整形', v: !isNoShap ? p.shaper : '无（逐位）', badge: isNoShap ? '逐位直通' : '噪声整形', kind: isNoShap ? 'lossless' : 'dsp' });
     }
     if (p.preAtten && p.preAtten < 0) {
       nodes.push({ k: '峰值保护', v: '检测到过采样峰值 ' + (p.ispPeak * 100).toFixed(1) + '%（' + p.ispOver +
-        ' 个点超出满幅）→ 预衰减 ' + p.preAtten.toFixed(1) + ' dB' });
+        ' 个点超出满幅）→ 预衰减 ' + p.preAtten.toFixed(1) + ' dB', badge: 'ISP 保护', kind: 'dsp' });
     }
-    if (p.loudness) nodes.push({ k: '等响度补偿', v: '开启' });
-    nodes.push({ k: '音量', v: volText(p.volume), id: 'chainVol' });
+    if (p.loudness) nodes.push({ k: '等响度补偿', v: '开启', badge: 'DSP 响度', kind: 'dsp' });
+    var isUnitVol = (typeof p.volume !== 'number') || Math.abs(p.volume) < 0.05;
+    nodes.push({ k: '音量', v: volText(p.volume), id: 'chainVol', badge: isUnitVol ? '逐位无损' : '数字衰减', kind: isUnitVol ? 'lossless' : 'dsp' });
+    var isSharedOut = (ADV.backend === 'wasapi-shared');
     nodes.push({ k: '输出', v: p.device + '  \u00b7  ' + p.outRate + ' Hz / ' + p.outBits + ' bit / ' + p.outCh +
-      ' ch  \u00b7  ' + ((ADV.backend === 'wasapi-shared') ? '共享模式（非 bit-perfect）' : '独占模式') +
-      '  \u00b7  缓冲 ' + p.buffer + ' ms' });
+      ' ch  \u00b7  ' + (isSharedOut ? '共享模式（非 bit-perfect）' : '独占模式') +
+      '  \u00b7  缓冲 ' + p.buffer + ' ms', badge: isSharedOut ? '系统混音' : '硬件独占', kind: isSharedOut ? 'dsp' : 'lossless' });
 
     var tDec = (typeof p.decodeMs === 'number' && p.decodeMs > 0)
       ? (p.decodeMs >= 1000 ? (p.decodeMs / 1000).toFixed(2) + ' s' : p.decodeMs.toFixed(1) + ' ms')
@@ -3455,22 +3451,24 @@ function showChain() {
     nodes.push({
       k: '耗时统计',
       v: '解码 ' + tDec + '  \u00b7  临时WAV ' + tWav + '  \u00b7  DSP ' + tDsp + '  \u00b7  库扫描 ' + tScan,
-      id: 'chainTiming'
+      id: 'chainTiming',
+      badge: '实时遥测',
+      kind: 'tel'
     });
-    var h = '<div class=chain>';
+    var h = '<div class="chain-hero' + heroCls + '">'
+          + '<div class=ch-ic>' + esc(heroIcon) + '</div>'
+          + '<div class=ch-tx><div class=ch-tt>' + esc(heroTitle) + '</div>'
+          + '<div class=ch-sub>' + esc(why) + '</div></div></div>';
+    h += '<div class=chain>';
     nodes.forEach(function (n, i) {
-      // _bp 节点是「本次是否 bit-perfect」横幅：整块高亮 + 左侧色条，要一眼能看到
-      var isBp = !!n._bp;
-      var style = isBp
-        ? ' style="border-left:3px solid ' + n._color + ';background:rgba(255,255,255,.04);padding-left:10px;border-radius:6px"'
-        : '';
-      var kStyle = isBp ? ' style="color:' + n._color + ';font-weight:700;letter-spacing:.3px"' : '';
-      h += '<div class="cnode' + (n.gpu ? ' gpu' : '') + '"' + style + '><div class=dot></div><div><div class=k' + kStyle + '>' + esc(n.k) + '</div>' +
-           '<div class=v' + (n.id ? ' id=' + n.id : '') + '>' + esc(n.v) + '</div></div></div>';
+      var cls = 'cnode' + (n.gpu ? ' gpu' : '') + (n.kind ? (' ' + n.kind) : '');
+      h += '<div class="' + cls + '"><div class=dot></div><div><div class=k><span>' + esc(n.k) + '</span>'
+         + (n.badge ? '<span class=cbadge>' + esc(n.badge) + '</span>' : '')
+         + '</div><div class=v' + (n.id ? ' id=' + n.id : '') + '>' + esc(n.v) + '</div></div></div>';
       if (i !== nodes.length - 1) h += '<div class=cline></div>';
     });
     h += '</div>';
-    h += '<div style="margin-top:14px;font-size:11px;color:#5b6478;line-height:1.7">绿色节点表示该环节本次由 GPU 实际参与计算（没参与就不标绿）。<br>只要每一环都不做多余处理，输出就是逐位（bit-perfect）的。</div>';
+    h += '<div class=chain-foot><span>绿色节点 = 逐位无损或 GPU 参与计算；蓝色节点 = 64-Bit DSP 处理</span><span>Bit-Perfect 音频管线</span></div>';
     D('mbody').innerHTML = h;
   }).catch(function () { D('mbody').innerHTML = '<div class=empty>读取失败</div>'; });
 }
@@ -4540,8 +4538,8 @@ function renderSettingsPage() {
        + num({ id: 'sp_inseconds', label: '录制时长（秒，0 为不限）' }, ADV.inSeconds || 0, 0, 86400, 1,
              '达到指定时长自动停止；0 = 持续采集直到手动停止')
        + '<div class="sfld wide"><label>输出文件路径（WAV）' +
-           tip('仅录制模式生效；留空自动保存在程序目录 recordings 下') + '</label><input type=text id=sp_inout value="' +
-             esc(ADV.inOut || '') + '" placeholder="留空自动存至 recordings' + SEP + 'cap-时间戳.wav"></div>'
+           tip('仅录制模式生效；留空自动保存在 ~/Library/Application Support/RLPlayer/recordings（不可用时退回临时目录）') + '</label><input type=text id=sp_inout value="' +
+             esc(ADV.inOut || '') + '" placeholder="留空自动存至 Application Support/RLPlayer/recordings' + SEP + 'cap-时间戳.wav"></div>'
        + '<div class="sfld wide" style="display:flex;align-items:center;gap:10px;margin-top:2px">'
        + '<button class="btn pri" id=sp_instart>开始采集</button>'
        + '<button class=btn id=sp_instop disabled>停止采集</button>'
@@ -4988,7 +4986,7 @@ function renderSettingsPage() {
   D('sp_reset').onclick = function () {
     if (!confirm('把所有参数恢复成默认值？')) return;
     ADV = { device: '', bits: 0, taps: 0, atten: 0, transition: 0, phase: '', modcut: 0, moddith: -1, ir: '', irgpu: 0, ramp: 0, theme: S.theme, modorder: 5, modfamily: 'dsd', directsdm: 0, dsdKind: 'fir', dsdConv: 'narrow',
-            backend: 'wasapi', channels: 0, naaHost: '127.0.0.1:43210',
+            backend: 'wasapi', channels: 0, naaHost: '',
             inBackend: 'none', inDev: '', inOffset: 0, inBuf: 100, inMonitor: 0, inSeconds: 0, inOut: '' };
     // 元数据两键的默认：自动补全开；AI 增强关（联网计费项默认关，避免「恢复默认」反而产生费用）。
     // 源开关随注册表一并全开。
@@ -5276,11 +5274,11 @@ function eqSettingsHtml() {
   // 2. EQ 文件（REW / AutoEq 文本）
   h += sgroup('EQ 文件（REW / AutoEq 文本）', '按文件里的 Filter 行生成双二阶滤波器组',
       '<div class="sfld wide"><label>EQ 文件路径' + tip('每行形如 Filter 1: ON PK Fc 1000 Hz Gain -3.0 dB Q 1.41') + '</label>'
-    + '<input type=text id=sp_eq value="' + esc(ADV.eq || '') + '" placeholder="D:\\Music\\headphone-eq.txt"></div>');
+    + '<input type=text id=sp_eq value="' + esc(ADV.eq || '') + '" placeholder="' + (SEP === '/' ? '/Users/你的用户名/Music/headphone-eq.txt' : 'D:\\Music\\headphone-eq.txt') + '"></div>');
   // 3. 房间校正 IR（WAV 路径 + GPU 卷积开关）
   h += sgroup('房间校正 IR（WAV 脉冲响应）', '把房间 / 耳机脉冲响应用 FIR 卷积叠进播放链路',
       '<div class="sfld wide"><label>IR 脉冲响应卷积文件（WAV）' + tip('留空 = 不做卷积；支持立体声 / 多声道 FIR 房间校正') + '</label>'
-    + '<input type=text id=sp_ir value="' + esc(ADV.ir || '') + '" placeholder="D:\\Music\\room.wav"></div>'
+    + '<input type=text id=sp_ir value="' + esc(ADV.ir || '') + '" placeholder="' + (SEP === '/' ? '/Users/你的用户名/Music/room.wav' : 'D:\\Music\\room.wav') + '"></div>'
     + chk('sp_irgpu', '卷积走 GPU 硬件加速（需要 librtagpu.dylib 就位）', ADV.irgpu == 1,
           '房间 / 耳机 FIR 卷积交给 Apple Metal；没有可用后端时自动退回 CPU（输出逐位相同）')
     // 评审 #11：这里原来还有一个「保存 EQ 与房间校正设置」按钮，与底部全局「保存设置」重复 → 移除；

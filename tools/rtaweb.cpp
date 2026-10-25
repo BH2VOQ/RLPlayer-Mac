@@ -263,14 +263,21 @@ struct PlayParams {
     // ---- 输出后端 / 多声道 / 每声道微调 ----
     std::string sdmFilter;            // SDM（DSD 输出）用的 1x 滤波器；空 = 沿用 filter
     std::string sdmFilterNx;          // SDM 用的 Nx 滤波器；空 = 沿用 filterNx
-    std::string backend = "wasapi";   // wasapi | wasapi-shared | naa | upnp | null
-    std::string naaHost;              // NAA 端点 host:port（自动发现填进来，手动只是兜底）
+    // 2026-10-25（默认值纠正）：这些 value 名是 UI 契约（前端下拉的 value 未变），
+    // 但 macOS 上的真实语义已经不同 —— 注释必须说清，否则后来者会以为还在用 WASAPI。
+    //   "wasapi"        → CoreAudio 独占（AUHAL + Hog Mode）
+    //   "wasapi-shared" → CoreAudio 共享（系统混音）
+    //   "naa"           → macOS 不可用（make_sink 返回必然 open 失败的 sink；UI 已移除该项）
+    //   "upnp"          → UPnP/DLNA 投放（CastManager）
+    //   "null"          → 只跑 DSP 不出声
+    std::string backend = "wasapi";   // 默认 = CoreAudio 独占（等价 WASAPI 独占语义）
+    std::string naaHost;              // NAA 端点 host:port（macOS 不可用，仅老 conf 兼容）
     std::string upnpDev;              // UPnP/DLNA 渲染器（设备描述 URL；后端 = upnp 时使用）
     int    outChannels = 0;           // 0 = 跟随源
     double trim[8] = {0,0,0,0,0,0,0,0};   // 每声道增益 dB
 
     // ---- 输入 ----
-    std::string inBackend = "none";   // none | wasapi
+    std::string inBackend = "none";   // none | wasapi（macOS 上 "wasapi" = CoreAudio 输入）
     std::string inDevice;
     int    inOffset = 0;
     int    inBufferMs = 100;
@@ -2254,14 +2261,117 @@ struct QueueState {
 static QueueState g_q;
 // ---- 队列持久化：重启后仍保留播放列表 ----
 static std::string queue_file() {
-    return rta::platform::module_dir_utf8() + "/rlplayer-playlist.txt";
+    // 2026-10-25（默认目录纠正）：播放队列是运行期状态，不许写进应用包。
+    return path_in_exe_dir("rlplayer-playlist.txt");
 }
 
-// ---- 最近播放（落盘，最多 200 条，写的时候就把标题/艺术家记下来，
-//      这样列表视图不用为了显示去翻音乐库）----
+// ---- 运行期状态文件（配置 / 日志 / 缓存）的落盘位置 ----
+//
+// 2026-10-25（默认目录纠正，重要）：
+//   原实现 `path_in_exe_dir(name)` 把**所有**运行期文件都写在可执行文件同目录。
+//   在 Windows 便携版上这是合理设计（拷走整个目录就带走配置），但在 macOS 上：
+//     * 独立 CLI（build-mac/rtaweb）跑在仓库里 —— 还行；
+//     * **RLPlayer.app** 的可执行文件在 Contents/MacOS/ —— 应用包是只读签名体，
+//       `codesign` 之后（尤其公证/正式签名）往里写会失败或被 Gatekeeper 拒绝；
+//       即使 ad-hoc 签名下能写，配置也会随 .app 被替换/升级而丢失。
+//   证据：dist-mac/RLPlayer.app/Contents/MacOS/data/opra_index.json ——
+//   配置确实被写进了应用包。
+//
+//   正确做法（macOS 规范）：配置/日志/缓存落 ~/Library/Application Support/RLPlayer
+//   （platform::config_dir_utf8() / data_dir_utf8()，path_posix.h 已实现）。
+//   只有在 config_dir 不可用（极端环境）时才退回 exe 目录，保持便携语义的兜底。
+//
+// 命名保留 path_in_exe_dir 以减小改动面，但语义已变为「运行期状态文件目录」。
+// 需要"真的在 exe 旁边"的东西（例如 ffmpeg/ffprobe 的定位）不走这个函数。
+static const std::string& runtime_state_dir() {
+    static const std::string dir = [] {
+        const std::string cfg = rta::platform::config_dir_utf8();
+        if (!cfg.empty()) return cfg;
+        return rta::platform::module_dir_utf8();
+    }();
+    return dir;
+}
+
+// 老用户数据迁移（2026-10-25，与「落点改为 config_dir」配套；缺了它等于把用户配置丢掉）。
+//
+// 背景：本轮之前所有运行期文件都写在 exe 目录。现在新落点是 config_dir，
+// 老用户的配置仍躺在旧位置 —— 不搬的话，升级后启动读不到 settings/library/PEQ/收藏，
+// 用户看到的就是「我的设置和曲库全没了」。
+//
+// 迁移策略（保守，绝不覆盖、绝不删）：
+//   * 只搬「新位置不存在」且「旧位置存在」的项 —— 新位置已有说明用户已在新版本写过，不动；
+//   * **不删旧文件**（留作回滚；磁盘代价可接受）；
+//   * 逐项搬，任一失败不影响其它（失败只跳过，不阻塞启动）；
+//   * exe 目录 == config_dir 时不搬（便携兜底场景本来就是同一处）。
+//
+// 注意：**不要**搬 data/opra_index.json 之类只读资源 —— 那是随包分发的安装产物，
+// 由 make_app_mac.sh 复制，不属于用户状态。这里只列用户状态文件。
+static void migrate_legacy_state_files() {
+    const std::string newDir = runtime_state_dir();
+    const std::string oldDir = rta::platform::module_dir_utf8();
+    if (newDir.empty() || oldDir.empty() || newDir == oldDir) return;
+
+    // 注意：rlplayer-library.conf / rlplayer-index.tsv 在非默认实例上带 ".p<port>" 后缀
+    // （Library::confLeaf）。这里用前缀扫描把带后缀的一并搬，否则多实例的老索引读不到。
+    static const char* kFiles[] = {
+        "rlplayer-settings.conf", "rlplayer-library.conf", "rlplayer-index.tsv",
+        "rlplayer-playlist.txt", "rlplayer-favs.json", "rlplayer-recent.txt",
+        "rlplayer-peq.txt", "rlplayer-peq-presets.txt", "rlplayer-sources.conf",
+        "rlplayer-llm.conf", "rlplayer-playback.log", "launcher.log",
+    };
+    // 带实例后缀的家族：前缀匹配 + 原样搬（含 .p<port> 变体）
+    static const char* kPrefixes[] = {
+        "rlplayer-library.conf", "rlplayer-index.tsv",
+    };
+    static const char* kDirs[] = { "rlplayer-meta", "recordings", "playlists", "uploads" };
+
+    std::error_code ec;
+    int moved = 0;
+    for (const char* n : kFiles) {
+        const std::string from = oldDir + "/" + n;
+        const std::string to   = newDir + "/" + n;
+        if (!fs::exists(fs::u8path(from), ec) || ec) { ec.clear(); continue; }
+        if (fs::exists(fs::u8path(to), ec) && !ec) { ec.clear(); continue; }   // 新位置已有 → 不动
+        ec.clear();
+        fs::copy_file(fs::u8path(from), fs::u8path(to),
+                      fs::copy_options::overwrite_existing, ec);
+        if (!ec) ++moved;
+        ec.clear();
+    }
+    // 前缀家族（含 .p<port> 变体）
+    for (const char* pre : kPrefixes) {
+        const std::string prefix(pre);
+        for (auto& e : fs::directory_iterator(fs::u8path(oldDir),
+                 fs::directory_options::skip_permission_denied, ec)) {
+            if (ec) { ec.clear(); break; }
+            const std::string nm = pathToUtf8(e.path().filename());
+            if (nm.size() < prefix.size() || nm.compare(0, prefix.size(), prefix) != 0) continue;
+            const std::string to = newDir + "/" + nm;
+            if (fs::exists(fs::u8path(to), ec) && !ec) { ec.clear(); continue; }
+            ec.clear();
+            fs::copy_file(e.path(), fs::u8path(to), fs::copy_options::overwrite_existing, ec);
+            if (!ec) ++moved;
+            ec.clear();
+        }
+    }
+    for (const char* n : kDirs) {
+        const std::string from = oldDir + "/" + n;
+        const std::string to   = newDir + "/" + n;
+        if (!fs::is_directory(fs::u8path(from), ec) || ec) { ec.clear(); continue; }
+        if (fs::exists(fs::u8path(to), ec) && !ec) { ec.clear(); continue; }
+        ec.clear();
+        fs::copy(fs::u8path(from), fs::u8path(to),
+                 fs::copy_options::recursive | fs::copy_options::skip_existing, ec);
+        if (!ec) ++moved;
+        ec.clear();
+    }
+    if (moved > 0)
+        play_log("MIGRATE 旧位置 → config_dir：" + std::to_string(moved) +
+                 " 项（旧文件保留未删，可回滚）；from=" + oldDir + " to=" + newDir);
+}
+
 static std::string path_in_exe_dir(const char* name) {
-    // POSIX：路径本来就是 UTF-8，无宽字符转换（platform/path_posix.h 契约）
-    const std::string base = rta::platform::module_dir_utf8();
+    const std::string& base = runtime_state_dir();
     return (name && *name) ? (base + "/" + name) : base;
 }
 static std::string path_in_exe_dir(const std::string& name) { return path_in_exe_dir(name.c_str()); }
@@ -2453,9 +2563,24 @@ struct InputSessionState {
 static InputSessionState g_inputSession;
 
 static std::string default_recording_path() {
-    std::string recDir = path_in_exe_dir("recordings");
+    // 2026-10-25（默认目录纠正）：原来固定写 path_in_exe_dir("recordings")，
+    // 在 macOS 上就是 RLPlayer.app/Contents/MacOS/recordings —— **包内不可写**
+    // （应用包是只读签名体，SIP 与代码签名都会拒绝写入），录制必然失败。
+    // 现在优先落到 data_dir（~/Library/Application Support/RLPlayer/recordings），
+    // 那是 macOS 上唯一正确的位置；只有在 data_dir 不可用时才退回 exe 目录（便携场景）。
+    std::string recDir;
+    const std::string dataDir = rta::platform::data_dir_utf8();
+    if (!dataDir.empty()) recDir = dataDir + "/recordings";
+    if (recDir.empty()) recDir = path_in_exe_dir("recordings");
+
     std::error_code ec;
     fs::create_directories(fs::u8path(recDir), ec);
+    if (ec || !fs::is_directory(fs::u8path(recDir), ec)) {
+        // 建不出来就退回临时目录，绝不返回一个写不进去的路径（否则用户录完才发现全丢）。
+        const std::string tmp = rta::platform::temp_dir_utf8();
+        recDir = tmp + "rlplayer-recordings";
+        fs::create_directories(fs::u8path(recDir), ec);
+    }
     auto t = std::time(nullptr);
     auto tm = *std::localtime(&t);
     char buf[64];
@@ -3215,7 +3340,17 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
             const auto roots = Library::instance().roots();
             if (!roots.empty()) dir = roots.front();
         }
-        if (dir.empty()) dir = "C:\\Users";
+        if (dir.empty()) {
+            // 2026-10-25（默认目录纠正）：原来兜底写死 "C:\Users"，macOS 上这个路径
+            // 不存在 ⟹ 文件浏览器打开就报「目录不存在」。
+            // 现在按平台：macOS 落到 $HOME（用户主目录，一定有），Windows 保留原语义。
+#if defined(__APPLE__)
+            if (const char* home = std::getenv("HOME")) dir = home;
+            if (dir.empty()) dir = "/Users";
+#else
+            dir = "C:\\Users";
+#endif
+        }
         if (!valid_utf8(dir)) return utf8_path_reject(dir);   // F1：目录名进 fs 前先校验
 
         std::error_code ec;
@@ -5042,7 +5177,7 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
     // ---------------- 耳机 EQ（OPRA 预设管理）----------------
     if (rq.path.rfind("/api/opra/index", 0) == 0) {
         ct = "application/json; charset=utf-8";
-        rta::dsp::OpraService::instance().init(path_in_exe_dir(std::string("data") + kPathSep + "opra_index.json"), path_in_exe_dir(""));
+        rta::dsp::OpraService::instance().init(rta::platform::module_dir_utf8() + "/data/opra_index.json", rta::platform::module_dir_utf8());
         const auto& index = rta::dsp::OpraService::instance().index();
         // 261023-03 第6条：显式带 ?q= 但值为空 → 返回空列表。
         // 用户抱怨「什么都没输入就匹配到 100 个」：旧逻辑 q 为空时会走「全量索引」分支。
@@ -5091,7 +5226,7 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
     }
     if (rq.path.rfind("/api/opra/presets", 0) == 0) {
         ct = "application/json; charset=utf-8";
-        rta::dsp::OpraService::instance().init(path_in_exe_dir(std::string("data") + kPathSep + "opra_index.json"), path_in_exe_dir(""));
+        rta::dsp::OpraService::instance().init(rta::platform::module_dir_utf8() + "/data/opra_index.json", rta::platform::module_dir_utf8());
         std::string productId;
         bool forceRefresh = false;
         const size_t qpos = rq.path.find('?');
@@ -5139,7 +5274,7 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
     }
     if (rq.path.rfind("/api/opra/apply", 0) == 0) {
         ct = "application/json; charset=utf-8";
-        rta::dsp::OpraService::instance().init(path_in_exe_dir(std::string("data") + kPathSep + "opra_index.json"), path_in_exe_dir(""));
+        rta::dsp::OpraService::instance().init(rta::platform::module_dir_utf8() + "/data/opra_index.json", rta::platform::module_dir_utf8());
         std::string productId, presetId;
         std::istringstream is(rq.body);
         std::string tok;
@@ -6247,6 +6382,11 @@ static void core_init_common() {
     // 喂数线程走高 QoS；进程级 renice 需要 root，不做（如实记录，不假装等效）。
     pthread_set_qos_class_self_np(QOS_CLASS_USER_INITIATED, 0);
 
+    // 2026-10-25（默认目录纠正配套）：**必须**在任何 load() 之前搬旧数据。
+    // 顺序敏感：queue_load / Library::load / SourceManager::load 都从 path_in_exe_dir()
+    // （= 新的 config_dir）读，先搬后读才不会让老用户"设置和曲库全没了"。
+    migrate_legacy_state_files();
+
     queue_load();                             // 恢复上次的播放列表
     Library::instance().load();               // 载入音乐库索引
     // 2026-10-24（用户 261024-01 #5）：流媒体服务器配置必须开机载入。
@@ -6283,7 +6423,7 @@ static void core_init_common() {
         rta::meta::MetaStore::instance().setBaseDir(metaBase);
         rta::meta::EntityStore::instance().setBaseDir(metaBase);
     }
-    rta::dsp::OpraService::instance().init(path_in_exe_dir(std::string("data") + kPathSep + "opra_index.json"), path_in_exe_dir(""));
+    rta::dsp::OpraService::instance().init(rta::platform::module_dir_utf8() + "/data/opra_index.json", rta::platform::module_dir_utf8());
     // 20 段参数均衡 PEQ（261024-02 #6）：开机载入用户当前设置；文件不存在 = Flat（20 段 0dB）
     peq_load_current();
     {
