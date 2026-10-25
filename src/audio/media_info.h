@@ -225,6 +225,12 @@ inline MediaInfo probe_parse_json(const std::string& raw_text, bool dsdHeaderOk 
     const auto merged = merge_tags(format_tags, stream_tags);
     apply_tags_to_media_info(mi, merged);
 
+    // format.duration 只对真正的音频文件有意义。ffprobe 对图片/纯视频容器也会给出
+    // format duration（实测 1x1 PNG = 0.04s），若照单全收，音乐库会把图片当音频并向
+    // enrich 报一个假的“时长”。DSD 时长由 header 提供；其余情况必须有音频流才采信。
+    const bool has_audio_stream = mi.sampleRate > 0 || mi.channels > 0 || !mi.codec.empty();
+    if (!dsdHeaderOk && !has_audio_stream) mi.duration = 0.0;
+
     if (mi.bits <= 0) mi.bits = dsdHeaderOk ? 1 : 16;
     return mi;
 }

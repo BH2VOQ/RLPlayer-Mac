@@ -41,10 +41,12 @@ private:
         if (cands.empty()) { status_ = "GPU 已关闭（使用 CPU 卷积）"; return; }
         // 逐个候选尝试；某个 DLL 存在但 kernel 跑不起来（例如 NVIDIA 机器上
         // 残留的 HIP 版 rtagpu.dll）时必须继续试下一个，而不是直接退回 CPU。
+        // 候选名现在是 std::string（gpu_pref.h 会把基名映射成平台文件名，
+        // 拼接产生的临时字符串不能以 const char* 返回 —— 见 gpu_pref.h 注释）。
         std::string tried;
-        for (const char* nm : cands) {
+        for (const auto& nm : cands) {
             rta::platform::SharedLib lib;
-            if (!lib.open(nm)) { if (!tried.empty()) tried += " / "; tried += nm; continue; }
+            if (!lib.open(nm.c_str())) { if (!tried.empty()) tried += " / "; tried += nm; continue; }
             auto avail = (int (*)())lib.symbol("rta_gpu_available");
             auto conv  = (int (*)(const double*, long long, const double*, long long, double*, int))
                          lib.symbol("rta_gpu_convolve");

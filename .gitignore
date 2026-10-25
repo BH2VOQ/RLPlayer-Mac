@@ -29,6 +29,10 @@ rta-*.conf
 *.ilk
 *.exe
 *.dll
+# macOS 动态库构建产物（2026-10-25 Apple Metal GPU 后端）
+#   librtagpu.dylib 由 tools/build_gpu_metal_mac.sh 从 src/gpu/gpu_metal.mm 现场构建，
+#   不进版本库（与 *.dll 同理：二进制不进仓库）。正式发布包由出包脚本内置它。
+*.dylib
 # CUDA 构建产物
 *.cubin
 *.fatbin

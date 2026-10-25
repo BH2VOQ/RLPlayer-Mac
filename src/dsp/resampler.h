@@ -333,11 +333,12 @@ private:
         if (gpuTried_) return;
         gpuTried_ = true;
         // 按 GPU 后端偏好找 DLL：AMD=rtagpu.dll，NVIDIA=rtagpu_cuda.dll，自动两个都试
-        // 逐个候选尝试：HIP → D3D12 → CUDA。某个 DLL 存在但 kernel 不可执行时
-        // 必须继续试下一个（NVIDIA 机器上可能残留 HIP 版 rtagpu.dll）。
-        for (const char* nm : gpu_dll_candidates()) {
+        // 逐个候选尝试：HIP → D3D12 → CUDA（macOS 上只有一个 Metal 候选）。
+        // 某个库存在但 kernel 不可执行时必须继续试下一个。
+        // 候选名是 std::string（平台文件名映射的结果，见 gpu_pref.h）。
+        for (const auto& nm : gpu_dll_candidates()) {
             rta::platform::SharedLib lib;
-            if (!lib.open(nm)) continue;
+            if (!lib.open(nm.c_str())) continue;
             auto avail = (int (*)())lib.symbol("rta_gpu_available");
             if (avail && avail() != 1) { lib.close(); continue; }
             auto res = (GpuResampleFn)lib.symbol("rta_gpu_resample");

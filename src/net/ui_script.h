@@ -7,10 +7,26 @@
 namespace rta::net {
 
 inline const char* rta_ui_script() {
-    return R"JSEOF(
+    return R"JS(
 var D = function (i) { return document.getElementById(i); };
 var WV = (window.chrome && window.chrome.webview) ? window.chrome.webview : null;
 if (WV) document.documentElement.classList.add('webview2');
+// 2026-10-25（mac 控件协调）——**页面侧的 mac 原生壳判定**，不依赖宿主垫片。
+//
+// 为什么需要它（实测真 BUG，不是防御性冗余）：
+//   tools/mac_host.mm 的 kShim 是一串相邻 @"..." 字面量，而 ObjC 拼接**不插入换行**；
+//   shim 第一行是 `// …` 行注释 ⟹ 整段 shim 变成一条注释，`document.documentElement
+//   .classList.add('machost')` 与 `window.chrome.webview` 垫片**都没有执行**（从运行中的
+//   二进制 dump 注入串，前 1400 字符里换行数 = 0，已复现）。
+//   后果：WV 为 null ⟹ 9 条宿主消息全失效；machost 永不出现 ⟹ 红绿灯安全区与隐藏重复
+//   窗口按钮的 CSS 全部不命中（1180x760 实测：右上无按钮、Logo 仍在 x=16px 被红绿灯压住）。
+//
+// 这里的判定用 **WKWebView 独有**的 window.webkit.messageHandlers（WebView2 / 浏览器都没有），
+// 所以不会把 Windows 形态误判成 mac。幂等：宿主垫片修好后 classList.add 重复调用无副作用。
+// 注意：WV 仍为 null 时 wcmd() 是空操作（消息发不出去），那是宿主侧要修的事；
+// 本函数只负责**让版面正确**，不假装消息能通。
+var IS_MAC_HOST = !!(window.webkit && window.webkit.messageHandlers);
+if (IS_MAC_HOST) document.documentElement.classList.add('machost');
 function wcmd(c) { try { if (WV) WV.postMessage(c); } catch (e) { } }
 // 261024-02 #2：资料里的 URL 一律交给**系统浏览器**打开（绝不把 WebView 自己导航走）。
 // 协议白名单只放 http/https（file: / javascript: / data: 一律拒绝，避免本机文件被页面打开）。
@@ -32,7 +48,7 @@ var S = {
   view: 'albums', albums: [], album: null, files: [], remote: [],
   q: { items: [], index: 0 }, cur: '', playing: false, paused: false,
   vol: 0, loud: false, lastCur: '', roots: [], scanning: false, dur: 0, pos: 0,
-  volDb: 0, startDb: 0, theme: 'dark', queueHidden: false,
+  volDb: 0, startDb: 0, theme: 'dark', uiStyle: 'apple', queueHidden: false,
   // 261024-04 #8：GUP 相关的两个运行时状态（gpuOn = 有 GPU；gpuUsed = 本次播放真的用了 GPU）
   gpuOn: false, gpuUsed: false
 };
@@ -41,7 +57,7 @@ var S = {
 // 老用户的 conf 里可能还留着 backend=asio —— 由 migrateRemovedBackend() 在加载时优雅降级。
 var ADV = {
   device: '', bits: 0, taps: 0, atten: 0, transition: 0, phase: '',
-  modcut: 0, moddith: -1, ir: '', irgpu: 0, ramp: 0, theme: 'dark',
+  modcut: 0, moddith: -1, ir: '', irgpu: 0, ramp: 0, theme: 'dark', uiStyle: 'apple',
   eq: '', modorder: 5, modfamily: 'dsd', gpuvendor: 'auto', directsdm: 0, dsdKind: 'fir', dsdConv: 'narrow',
   // 输出后端与多声道
   // 261024-01 #9/#11：upnpDev = UPnP/DLNA 渲染器（设备描述 URL）；naaHost 自动发现填，
@@ -72,11 +88,14 @@ var SEP = (function () {
   return /win/i.test(p) ? String.fromCharCode(92) : '/';
 })();
 
-// 先按本地记忆应用主题（不等 /api/settings 返回，避免启动瞬间闪一下）
+// 先按本地记忆应用主题与界面风格（不等 /api/settings 返回，避免启动瞬间闪一下）
 (function () {
-  var t = null;
-  try { t = localStorage.getItem('rta-theme'); } catch (e) { }
+  var t = null, u = null;
+  try { t = localStorage.getItem('rta-theme'); u = localStorage.getItem('rta-uistyle'); } catch (e) { }
   if (t === 'light' || t === 'blue') document.documentElement.dataset.theme = t;
+  document.documentElement.dataset.uistyle = (u === 'classic') ? 'classic' : 'apple';
+  S.uiStyle = document.documentElement.dataset.uistyle;
+  ADV.uiStyle = S.uiStyle;
 })();
 
 function toast(m) {
@@ -229,7 +248,7 @@ function params() {
   else if (dv.indexOf('dop') === 0) { dsdN = parseInt(dv.slice(3), 10) || 0; }
   else dsdN = parseInt(dv, 10) || 0;
   return 'dsd=' + dsdN + '&dsdnative=' + native +
-         '&gpuvendor=' + ((D('sGpu') && D('sGpu').value) || 'auto') +
+         '&gpuvendor=' + encodeURIComponent(ADV.gpuvendor || (D('sGpu') && D('sGpu').value) || 'auto') +
          '&rate=' + D('sRate').value +
          '&filter=' + encodeURIComponent(D('sFilt').value) +
          '&filterNx=' + encodeURIComponent(D('sFiltNx').value) +
@@ -275,7 +294,9 @@ function setTheme(t, persist) {
   });
   if (D('sp_theme')) D('sp_theme').value = t;   // 设置页里的下拉框跟着同步
   // 标题栏配色跟着主题走（Edge 应用窗口用 theme-color 画标题栏）
-  var tc = { dark: '#0c0e13', light: '#ffffff', blue: '#eef4fb' }[t] || '#0c0e13';
+  // 2026-10-25（Apple Music 风格重构）：取值必须与 ui_page.h 的 --bg 逐字节一致 ——
+  //   旧值 #0c0e13 是深色主题改版前的底色，留着会让 Windows 标题栏与页面本体出现一道色差。
+  var tc = { dark: '#161618', light: '#ffffff', blue: '#f8faff' }[t] || '#161618';
   var meta = document.querySelector('meta[name=theme-color]');
   if (!meta) { meta = document.createElement('meta'); meta.setAttribute('name', 'theme-color'); document.head.appendChild(meta); }
   meta.setAttribute('content', tc);
@@ -286,6 +307,18 @@ function setTheme(t, persist) {
 Array.prototype.forEach.call(document.querySelectorAll('.sw'), function (e) {
   e.onclick = function () { setTheme(e.dataset.theme); };
 });
+function setUiStyle(u, persist) {
+  u = (u === 'classic') ? 'classic' : 'apple';
+  document.documentElement.dataset.uistyle = u;
+  S.uiStyle = u; ADV.uiStyle = u;
+  if (D('sp_uistyle')) D('sp_uistyle').value = u;
+  try { localStorage.setItem('rta-uistyle', u); } catch (e) { }
+  if (persist !== false) saveSettings();
+  if (S.view === 'albums' && (!S.albums || !S.albums.length) && D('list')) {
+    D('list').innerHTML = emptyStateHtml();
+    bindEmptyState();
+  }
+}
 
 // ---------- 无边框窗口：拖动 / 最小化 / 最大化 / 关闭 ----------
 (function bindWindowChrome() {
@@ -301,18 +334,19 @@ Array.prototype.forEach.call(document.querySelectorAll('.sw'), function (e) {
     if (ev.data === 'max') setMaxIcon(true);
     else if (ev.data === 'normal') setMaxIcon(false);
   });
-  var top = D('topbar');
-  if (top) {
-    top.addEventListener('mousedown', function (e) {
+  ['topbar', 'sideTop', 'sideBrand'].forEach(function (id) {
+    var el = D(id);
+    if (!el) return;
+    el.addEventListener('mousedown', function (e) {
       if (e.button !== 0) return;
       if (e.target.closest('button,input,select,a,.search,.themes,.wctl')) return;
       wcmd('drag');
     });
-    top.addEventListener('dblclick', function (e) {
+    el.addEventListener('dblclick', function (e) {
       if (e.target.closest('button,input,select,a,.search,.themes,.wctl')) return;
       wcmd('max');
     });
-  }
+  });
   // 2026-10-23 用户反馈「单曲播放页面无法拖动窗口」：npPage 是全屏覆盖层，把 topbar 的拖拽热区盖住了。
   // 这里给覆盖层自己的拖拽条（#npGrip）绑同一套行为：左键按下 → launcher 走 HTCAPTION 拖窗；双击 → 最大化切换。
   if (D('npGrip')) {
@@ -427,14 +461,183 @@ function loadAlbums(q, title) {
   }).catch(function (e) { listErrorBox('专辑列表读取失败', function () { loadAlbums(q, title); }); });
 }
 
+/* ---------------- 空库首页（2026-10-25 Apple Music「专属精选推荐」风格） ----------------
+   用户反馈「mac 的控件在这个程序上不协调」的一部分：空库时主区只有一行灰字浮在裸背景上。
+   上一版改成了一张居中卡片；本轮按 Apple Music 主页的版式重做：
+     · 上方「专属精选推荐」= 三张并排大海报卡（渐变底 + 右上角技术徽标 + 中部大标题 + 底部说明 + 白色药丸 CTA）；
+     · 下方「快速开始」= 四格快捷入口（图标 + 名称 + 一行说明）。
+   约束（沿用上一轮，一条都没放松）：
+     · 只复用已有入口 —— setView/loadFiles/loadRemote/openSettingsTab('#bScan') 全是既有函数；
+     · 绝不发明后端/路由，绝不新增 API；
+     · 只有在目标元素**实际存在**时才绑 onclick（bindEmptyState 里逐个判空）。
+   注意：这里**不**删任何旧入口，只是把空态的版式换成海报形态。 */
+function emptyStateHtml() {
+  var validRoots = (S.roots || []).filter(function (r) {
+    if (!r) return false;
+    r = String(r).trim();
+    if (SEP === '/' && /^[A-Za-z]:[\\/]/.test(r)) return false;
+    return true;
+  });
+  var hasRoots = validRoots.length > 0;
+  var rootPath = hasRoots ? String(validRoots[0] || '') : '';
+  if (S.uiStyle === 'classic') {
+    var hc = '<div class=emptystate><div class=ecard>';
+    hc += '<div class=eic><svg width=22 height=22 viewBox="0 0 24 24" fill=none stroke=currentColor stroke-width=1.8>'
+       + '<path d="M4 5.5h16M4 12h16M4 18.5h10"/><circle cx="19" cy="18" r="2.6"/></svg></div>';
+    hc += '<div class=ettl>' + (hasRoots ? '库里还没有音乐' : '还没有添加音乐目录') + '</div>';
+    hc += '<div class=ehint>' + (hasRoots
+          ? '目录已经配好，但索引里还没有曲目。点下面的按钮重新扫描，或换一个目录。'
+          : '添加一个包含音频文件的本地目录，RLPlayer 会建立索引并显示专辑。') + '</div>';
+    hc += '<div class=eacts>'
+       + '<button class="btn pri" id=emptyGoAdd>' + (hasRoots ? '重新扫描音乐库' : '添加音乐目录') + '</button>'
+       + '<button class=btn id=emptyGoSet>打开设置</button></div>';
+    if (hasRoots && rootPath) hc += '<div class=eroot><span title="' + esc(rootPath) + '">' + esc(rootPath) + '</span></div>';
+    hc += '</div></div>';
+    return hc;
+  }
+  var h = '<div class=am-home>';
+
+  // ---- 第一部分：小标题 + 三张并排 Apple Music 风格大海报卡 ----
+  h += '<div class=am-sec-hdr>精选功能 · 音频工作站</div>';
+  h += '<div class=am-hero-grid>';
+
+  // 卡片 1（珊瑚红-洋红渐变背景 am-card c1，点击或点按钮触发 #emptyGoAdd）
+  h += '<div class="am-card c1" id=amCardAdd>';
+  h += '<div class=am-card-badge> Hi-Fi Library</div>';
+  h += '<div class=am-card-mid><div class=am-card-title>无损音乐库</div></div>';
+  h += '<div class=am-card-bottom>';
+  h += '<div class=am-card-desc>' + (hasRoots
+        ? '目录已就绪 · 点击重新扫描建立专辑与封面索引'
+        : '支持 FLAC · DSD (DSF/DFF) · ALAC · WAV · APE · 多碟盒装自动聚合') + '</div>';
+  h += '<button class="am-pill-btn" id=emptyGoAdd>' + (hasRoots ? '重新扫描音乐库' : '添加音乐目录') + '</button>';
+  h += '</div></div>';
+
+  // 卡片 2（深邃蓝紫渐变背景 am-card c2，点击触发 #emptyGoSet -> openSettingsTab('out')）
+  h += '<div class="am-card c2" id=amCardSet>';
+  h += '<div class=am-card-badge>CoreAudio · Hog Mode</div>';
+  h += '<div class=am-card-mid><div class=am-card-title>独占直通引擎</div></div>';
+  h += '<div class=am-card-bottom>';
+  h += '<div class=am-card-desc>Bit-Perfect 硬件独占 · 自动跟随源采样率 · DoP / SDM 调制器</div>';
+  h += '<button class="am-pill-btn" id=emptyGoSet>配置输出设备</button>';
+  h += '</div></div>';
+
+  // 卡片 3（青碧极光渐变背景 am-card c3，点击触发 id=emptyGoEq -> openSettingsTab('eq')）
+  h += '<div class="am-card c3" id=amCardEq>';
+  h += '<div class=am-card-badge>DSP · 64-Bit Float</div>';
+  h += '<div class=am-card-mid><div class=am-card-title>20 段 PEQ 与 OPRA</div></div>';
+  h += '<div class=am-card-bottom>';
+  h += '<div class=am-card-desc>内置 6200+ 款耳机 OPRA 目标曲线 · 卷积房间校正 IR · 响度分析</div>';
+  h += '<button class="am-pill-btn" id=emptyGoEq>打开均衡与校正</button>';
+  h += '</div></div>';
+
+  h += '</div>'; // .am-hero-grid
+
+  // ---- 第二部分：下方快速开始 + 四格快捷入口行 ----
+  h += '<div class=am-sec-hdr style="margin-top:14px">快速开始</div>';
+  h += '<div class=am-quick-row>';
+
+  // 1: 浏览本地文件夹
+  h += '<div class=am-quick-item id=amGoFiles>';
+  h += '<div class=am-qico><svg viewBox="0 0 24 24" fill=none stroke="currentColor" stroke-width=2><path d="M3 7.5a2 2 0 012-2h4l1.8 2H19a2 2 0 012 2v8a2 2 0 01-2 2H5a2 2 0 01-2-2z"/></svg></div>';
+  h += '<div class=am-qtext><div class=am-qtitle>浏览本地文件夹</div><div class=am-qdesc>直接访问本地存储目录与音频文件</div></div>';
+  h += '</div>';
+
+  // 2: 挂载 Subsonic/WebDAV 流媒体
+  h += '<div class=am-quick-item id=amGoRemote>';
+  h += '<div class=am-qico><svg viewBox="0 0 24 24" fill=none stroke="currentColor" stroke-width=2><path d="M7 18a4.5 4.5 0 010-9 6 6 0 0111.6 1.6A3.7 3.7 0 0118 18z"/></svg></div>';
+  h += '<div class=am-qtext><div class=am-qtitle>挂载流媒体服务</div><div class=am-qdesc>Subsonic / Navidrome / WebDAV / UPnP</div></div>';
+  h += '</div>';
+
+  // 3: AI 资料与封面补全
+  h += '<div class=am-quick-item id=amGoMeta>';
+  h += '<div class=am-qico><svg viewBox="0 0 24 24" fill=none stroke="currentColor" stroke-width=2><path d="M12 2v4m0 12v4M4.93 4.93l2.83 2.83m8.48 8.48l2.83 2.83M2 12h4m12 0h4M4.93 19.07l2.83-2.83m8.48-8.48l2.83-2.83"/></svg></div>';
+  h += '<div class=am-qtext><div class=am-qtitle>AI 资料与封面补全</div><div class=am-qdesc>自动匹配高精度唱片元数据与插画</div></div>';
+  h += '</div>';
+
+  // 4: 音频输入采集
+  h += '<div class=am-quick-item id=amGoIn>';
+  h += '<div class=am-qico><svg viewBox="0 0 24 24" fill=none stroke="currentColor" stroke-width=2><path d="M12 1a3 3 0 00-3 3v8a3 3 0 006 0V4a3 3 0 00-3-3z"/><path d="M19 10v2a7 7 0 01-14 0v-2M12 19v4M8 23h8"/></svg></div>';
+  h += '<div class=am-qtext><div class=am-qtitle>音频输入采集</div><div class=am-qdesc>低延迟实时流式监听与分析</div></div>';
+  h += '</div>';
+
+  h += '</div>'; // .am-quick-row
+
+  // 已配置的根目录（保留原有信息，放在最底部一行）
+  if (hasRoots && rootPath) {
+    h += '<div class=am-rootline><svg width=12 height=12 viewBox="0 0 24 24" fill=none stroke=currentColor stroke-width=2>'
+       +   '<path d="M3 7.5a2 2 0 012-2h4l1.8 2H19a2 2 0 012 2v8a2 2 0 01-2 2H5a2 2 0 01-2-2z"/></svg>'
+       +   '<span title="' + esc(rootPath) + '">&nbsp;当前音乐目录: ' + esc(rootPath) + '</span></div>';
+  }
+  h += '</div>'; // .emptystate
+  return h;
+}
+function bindEmptyState() {
+  // 主 CTA（卡 1）：没有目录 → 直接进设置页「高级」（那里有添加目录输入框）；
+  //               已有目录但索引为空 → 直接触发已有的 #bScan（重新扫描）按钮。
+  var add = D('emptyGoAdd');
+  if (add) add.onclick = function (ev) {
+    if (ev && ev.stopPropagation) ev.stopPropagation();
+    var validRoots = (S.roots || []).filter(function (r) {
+      if (!r) return false;
+      r = String(r).trim();
+      if (SEP === '/' && /^[A-Za-z]:[\\/]/.test(r)) return false;
+      return true;
+    });
+    if (validRoots.length > 0) {
+      if (D('bScan')) D('bScan').click();
+      else toast('请到设置页点「重新扫描全部」');
+    } else {
+      openSettingsTab('adv');
+      var r = D('sp_root'); if (r) { try { r.focus(); } catch (e) { } }
+    }
+  };
+  var c1 = D('amCardAdd');
+  if (c1) c1.onclick = function (ev) {
+    if (ev.target && ev.target.id === 'emptyGoAdd') return;
+    var b = D('emptyGoAdd'); if (b) b.click();
+  };
+
+  // 卡 2：输出设备在设置页「输出」页签（data-g=out）
+  var set = D('emptyGoSet');
+  if (set) set.onclick = function (ev) {
+    if (ev && ev.stopPropagation) ev.stopPropagation();
+    openSettingsTab('out');
+  };
+  var c2 = D('amCardSet');
+  if (c2) c2.onclick = function (ev) {
+    if (ev.target && ev.target.id === 'emptyGoSet') return;
+    openSettingsTab('out');
+  };
+
+  // 卡 3：均衡与校正 = 设置页「EQ」页签（data-g=eq）
+  var eq = D('emptyGoEq');
+  if (eq) eq.onclick = function (ev) {
+    if (ev && ev.stopPropagation) ev.stopPropagation();
+    openSettingsTab('eq');
+  };
+  var c3 = D('amCardEq');
+  if (c3) c3.onclick = function (ev) {
+    if (ev.target && ev.target.id === 'emptyGoEq') return;
+    openSettingsTab('eq');
+  };
+
+  // 快速开始四格：全部复用既有导航/设置入口，不新增任何路由。
+  var goFiles = D('amGoFiles') || D('amQuickFiles');
+  if (goFiles) goFiles.onclick = function () { setView('files'); loadFiles(S.dir || ''); };
+  var goRemote = D('amGoRemote') || D('amQuickRemote');
+  if (goRemote) goRemote.onclick = function () { setView('remote'); loadRemote(''); };
+  var goMeta = D('amGoMeta') || D('amQuickMeta');
+  if (goMeta) goMeta.onclick = function () { openSettingsTab('meta'); };
+  var goIn = D('amGoIn') || D('amQuickIn');
+  if (goIn) goIn.onclick = function () { openSettingsTab('in'); };
+}
+
 function renderAlbumsFrom(j, q, title) {
   S.albums = (j && j.albums) || [];
   if (!S.albums.length) {
     head(title || '专辑', '0 张', '');
-    D('list').innerHTML = '<div class=empty>' +
-      (S.roots.length ? '库里还没有音乐<br><span style="font-size:11.5px">在右侧「设置」里添加音乐目录，然后点重新扫描</span>'
-                      : '还没有设置音乐目录<br><span style="font-size:11.5px">打开右侧「设置」→ 添加目录 → 重新扫描</span>') +
-      '</div>';
+    D('list').innerHTML = emptyStateHtml();
+    bindEmptyState();
     return;
   }
   head(title || '专辑', S.albums.length + ' 张专辑', '');
@@ -2035,7 +2238,13 @@ function tick() {
 // 没有需要绕过的东西 ⟹ ASIO 在 macOS 不是「做不到」而是「不需要」。后端删了，但老用户的 conf
 // 里可能还留着 backend=asio，直接沿用会让播放失败、下拉也选不中（白屏级别的体验事故）。
 // 处置：落回默认后端（wasapi = CoreAudio 独占），并明确 toast 告知原因，绝不静默改。
-var REMOVED_BACKENDS = { asio: 'ASIO 已移除（macOS 使用 CoreAudio）' };
+var REMOVED_BACKENDS = {
+  asio: 'ASIO 已移除（macOS 使用 CoreAudio）',
+  // 2026-10-25（用户指令「不可用的要隐藏」）：NAA / RTANet 在 macOS 上没有驱动体系，
+  // make_sink() 对它返回必然 open 失败的 sink。老 conf 里存过 naa 的必须降级，
+  // 否则下拉选不中（该 option 已不存在）+ 播放直接失败，是白屏级别的体验事故。
+  naa: 'macOS 不支持 NAA 推流，已切到 CoreAudio 独占'
+};
 var _removedBackendNotified = {};
 function migrateRemovedBackend(v) {
   var k = String(v || '').toLowerCase();
@@ -2067,6 +2276,22 @@ function migrateDsdPack(v) {
   }
   return 'dop';
 }
+
+// 2026-10-25（用户指令「能使用的要用它真正的名字」）：Windows 时代的 gpuvendor 值
+// （amd / nvidia / cuda / dx12）在 macOS 上没有任何对应后端，老 conf 载入时降级为 auto。
+function migrateGpuVendor(v) {
+  var s = String(v || '').toLowerCase();
+  if (s === 'amd' || s === 'nvidia' || (s !== 'metal' && s !== 'off' && s !== 'auto')) return 'auto';
+  return s || 'auto';
+}
+function ensureGpuOption(val) {
+  var e = D('sGpu');
+  if (e && val && !e.querySelector('option[value="' + val + '"]')) {
+    var o = document.createElement('option');
+    o.value = val; o.text = val;
+    e.appendChild(o);
+  }
+}
 var SET_KEYS = [['sRate','rate'], ['sFilt','filter'], ['sFiltNx','filterNx'], ['sShap','shaper'],
                 ['sDSD','dsd'], ['sBuf','buffer'], ['sIsp','isp'], ['s2s','twostage'], ['sGpu','gpuvendor']];
 function saveSettings(immediate) {
@@ -2079,6 +2304,7 @@ function saveSettings(immediate) {
   });
   body += '&volume=' + S.vol + '&loudness=' + (D('sLoud').checked ? '1' : '0');
   body += '&theme=' + encodeURIComponent(S.theme || 'dark');
+  body += '&uistyle=' + encodeURIComponent(S.uiStyle || 'apple');
   body += '&device=' + encodeURIComponent(ADV.device || '') + '&bits=' + (ADV.bits || 0)
         + '&taps=' + (ADV.taps || 0) + '&atten=' + (ADV.atten || 0)
         + '&transition=' + (ADV.transition || 0) + '&phase=' + encodeURIComponent(ADV.phase || '')
@@ -2130,6 +2356,11 @@ function loadSettings() {
       var e = D(p[0]); if (!e || kv[p[1]] === undefined) return;
       if (e.type === 'checkbox') e.checked = (kv[p[1]] === '1');
       else if (p[1] === 'dsd') e.value = migrateDsdPack(kv[p[1]]);   // A1 隐藏：nat* → dop*
+      else if (p[1] === 'gpuvendor') {
+        var gv = migrateGpuVendor(kv[p[1]]);
+        ensureGpuOption(gv);
+        e.value = gv;
+      }
       else e.value = kv[p[1]];
     });
     // ---- 老用户配置迁移（功能1 的红线：不许悄悄改老用户行为）----
@@ -2158,7 +2389,14 @@ function loadSettings() {
     if (kv.ir !== undefined) ADV.ir = kv.ir;
     if (kv.irgpu !== undefined) ADV.irgpu = (kv.irgpu === '1') ? 1 : 0;
     if (kv.ramp !== undefined) ADV.ramp = parseFloat(kv.ramp) || 0;
-    if (kv.gpuvendor !== undefined) { ADV.gpuvendor = kv.gpuvendor || 'auto'; if (D('sGpu')) D('sGpu').value = ADV.gpuvendor; }
+    // 2026-10-25（用户指令「能使用的要用它真正的名字」）：Windows 时代的 gpuvendor 值
+    // （amd / nvidia / cuda / dx12）在 macOS 上没有任何对应后端，老 conf 载入时必须降级，
+    // 否则下拉选不中（这些 option 已移除）且 /api/gpu 会收到无法识别的值。
+    if (kv.gpuvendor !== undefined) {
+      ADV.gpuvendor = migrateGpuVendor(kv.gpuvendor);
+      ensureGpuOption(ADV.gpuvendor);
+      if (D('sGpu')) D('sGpu').value = ADV.gpuvendor;
+    }
     if (kv.backend !== undefined) ADV.backend = migrateRemovedBackend(kv.backend);
     if (kv.channels !== undefined) ADV.channels = parseInt(kv.channels, 10) || 0;
     if (kv.naahost !== undefined) ADV.naaHost = kv.naahost || '127.0.0.1:43210';
@@ -2186,10 +2424,11 @@ function loadSettings() {
     if (kv.metaon !== undefined) META.on = (kv.metaon === '1') ? 1 : 0;
     if (kv.metallm !== undefined) META.llm = (kv.metallm === '1') ? 1 : 0;
     if (kv.metasummary !== undefined) META.summary = (kv.metasummary === '1') ? 1 : 0;
-    // 主题：本地优先（避免闪一下），否则用服务端保存的
-    var t = null;
-    try { t = localStorage.getItem('rta-theme'); } catch (e) { }
+    // 主题与界面风格：本地优先（避免闪一下），否则用服务端保存的
+    var t = null, u = null;
+    try { t = localStorage.getItem('rta-theme'); u = localStorage.getItem('rta-uistyle'); } catch (e) { }
     setTheme(t || kv.theme || 'dark', false);
+    setUiStyle(u || kv.uistyle || 'apple', false);
     // 用户 261023-04 #4：EQ/IR 芯片读的是上面刚填好的 ADV.eq / ADV.ir ——
     // 设置页保存后立刻重绘单曲页（清空 EQ 后芯片要马上消失，不用重开页面）。
     if (D('npPage') && D('npPage').classList.contains('on')) renderNp();
@@ -2309,7 +2548,7 @@ function loadDeviceList() {
     sel2.value = ADV.device || '';
     sel2.onchange = function () {
       ADV.device = this.value;
-      if (bk === 'wasapi') loadRates();   // 只有 WASAPI 能查设备支持的采样率
+      if (bk === 'wasapi') loadRates();   // 只有 CoreAudio 独占能查设备支持的采样率
       saveSettings();
       toast('输出设备已选择，下次播放生效');
     };
@@ -2763,9 +3002,32 @@ D('npSeek').onclick = function (ev) {
   var r = this.getBoundingClientRect();
   doSeek((ev.clientX - r.left) / Math.max(1, r.width));
 };
+function isRightDrawerVisible() {
+  var r = D('right');
+  if (!r) return false;
+  try { return window.getComputedStyle(r).display !== 'none'; } catch (e) { return false; }
+}
+function syncRightDrawerBtn() {
+  var b = D('tq');
+  if (b) b.classList.toggle('on', isRightDrawerVisible());
+}
 D('tq').onclick = function () {
-  S.queueHidden = !S.queueHidden;
-  D('app').classList.toggle('noq', S.queueHidden || S.view === 'settings');
+  if (S.view === 'settings' || S.view === 'queue') {
+    setView('queue');
+    renderQueuePage();
+    return;
+  }
+  var vis = isRightDrawerVisible();
+  if (vis) {
+    S.queueHidden = true;
+    D('app').classList.add('noq');
+    D('app').classList.remove('qopen');
+  } else {
+    S.queueHidden = false;
+    D('app').classList.remove('noq');
+    D('app').classList.add('qopen');
+  }
+  syncRightDrawerBtn();
 };
 D('sRep').onchange = function () { api('/api/repeat', 'rate=' + this.value); };
 D('sShuf').onchange = function () { api('/api/shuffle?on=' + (this.checked ? 1 : 0), '').then(loadQ); };
@@ -2811,7 +3073,17 @@ D('bNet').onclick = function () {
              : ('局域网访问：未开启（用 <code>--lan</code> 启动即可以 http://' + esc(j.ip) + ':' + j.port + '/ 访问）'));
   });
 };
-D('bLyric').onclick = function () { setRTab(RTAB === 'l' ? 'q' : 'l'); };
+D('bLyric').onclick = function () {
+  if (!isRightDrawerVisible()) {
+    S.queueHidden = false;
+    D('app').classList.remove('noq');
+    D('app').classList.add('qopen');
+    setRTab('l');
+  } else {
+    setRTab(RTAB === 'l' ? 'q' : 'l');
+  }
+  syncRightDrawerBtn();
+};
 D('bChain').onclick = showChain;
 D('bHelp').onclick = function () {
   D('mtitle').textContent = '快捷键与提示';
@@ -3244,19 +3516,16 @@ function backendHint() {
   var m = D('sp_backendmsg'); if (!m) return;
   var bk = (D('sp_backend') && D('sp_backend').value) || 'wasapi';
   if (bk === 'wasapi') {
-    m.textContent = '独占 · 事件驱动 · bit-perfect；播放期间会静音系统其他声音。';
+    m.textContent = 'CoreAudio 独占（Hog Mode）· bit-perfect；播放期间接管硬件音频流。';
   } else if (bk === 'wasapi-shared') {
-    m.textContent = '共享：经系统混音，非 bit-perfect；不支持 DoP / DSD。';
+    m.textContent = 'CoreAudio 共享：经系统混音，非 bit-perfect；不支持 DoP / DSD。';
   } else if (bk === 'null') {
     m.textContent = 'Null output：跑完整 DSP，不出声。';
   } else if (bk === 'naa') {
-    // 261024-01 #11：端点来自自动发现，手动框只是折叠兜底。
-    // 注意：自动发现没找到时**不能**回落到手动框里的历史默认值（127.0.0.1:43210），
-    // 那会让界面宣称"推到 127.0.0.1"而其实根本没发现端点（本轮截图自检抓到）。
-    var epSel = D('sp_naa_dev');
-    var ep = (epSel && epSel.value) || '';
-    // 未发现时的原因已经写在黄色结论行（sp_naa_msg）里，这里不再重复，避免同一屏两遍同样的话。
-    m.textContent = 'NAA：把 PCM 按 RTANet 协议推到 ' + (ep || '端点（尚未发现）') + '（端点机需运行 rtanet_rx）。';
+    // 2026-10-25（用户指令「不可用的要隐藏」）：NAA 已从后端下拉移除，正常路径走不到这里。
+    // 保留分支只为兜底老 conf（migrateRemovedBackend 已把它降级为 wasapi）与直接调 API 的
+    // 场景，如实说明不可用，而不是静默给一句看似正常的提示。
+    m.textContent = 'NAA / RTANet 在 macOS 上不可用（无驱动体系），已回退 CoreAudio 独占。';
   } else if (bk === 'upnp') {
     // 261024-01 #9：后端下拉新增「UPnP / DLNA 投放」。提示用渲染器**名字**，不回显整条描述 URL。
     var devSel = D('sp_upnp_dev');
@@ -3275,14 +3544,28 @@ var _inPollTimer = null;
 function loadInputDevices() {
   return api('/api/input/devices').then(function (j) {
     var s = D('sp_indev'); if (!s) return;
+    if (j && j.ok === false) {
+      s.innerHTML = '<option value="">（读取设备列表失败）</option>';
+      if (D('sp_inmsg')) D('sp_inmsg').textContent = j.error || '输入设备列表读取失败';
+      return;
+    }
     var list = (j && j.devices) || [];
+    if (!list.length) {
+      s.innerHTML = '<option value="">（本机未检测到可用输入设备）</option>';
+      if (D('sp_inmsg')) D('sp_inmsg').textContent = '本机未检测到可用输入设备';
+      return;
+    }
     var hh = '<option value="">（未选择 / 默认设备）</option>';
     list.forEach(function (d) {
       var name = d.name || '';
-      if (d.isLoopback && name.indexOf('[Loopback]') !== 0 && name.indexOf('[回环]') !== 0) {
-        name = '[回环] ' + name;
+      // 2026-10-25（系统混音回环）：后端 /api/input/devices 的字段名是 loopback，
+      // 契约包含伪设备 __system_loopback__ 与普通回环设备。追加「 · 回环」标注。
+      var isLb = !!(d.loopback === true || d.isLoopback === true);
+      if (isLb && name.indexOf(' · 回环') < 0 && name.indexOf('[回环]') < 0 && name.indexOf('[Loopback]') < 0) {
+        name += ' · 回环';
       }
-      if (d.isDefault) {
+      var isDef = !!(d.default === true || d.isDefault === true);
+      if (isDef && name.indexOf('（默认）') < 0) {
         name += '（默认）';
       }
       hh += '<option value="' + esc(d.id) + '">' + esc(name) + '</option>';
@@ -3291,10 +3574,12 @@ function loadInputDevices() {
     if (ADV.inDev) s.value = ADV.inDev;
     s.onchange = function () { ADV.inDev = this.value; saveSettings(); };
     if (D('sp_inmsg')) {
-      D('sp_inmsg').textContent = list.length ? '' : '本机未检测到可用输入设备';
+      D('sp_inmsg').textContent = '';
     }
-  }).catch(function () {
-    if (D('sp_inmsg')) D('sp_inmsg').textContent = '输入设备列表读取失败';
+  }).catch(function (e) {
+    var s = D('sp_indev');
+    if (s) s.innerHTML = '<option value="">（输入设备列表读取失败）</option>';
+    if (D('sp_inmsg')) D('sp_inmsg').textContent = '输入设备列表读取失败' + (e && e.message ? ('：' + e.message) : '');
   });
 }
 
@@ -3645,10 +3930,9 @@ function scanCastDevices(force) {
 /* ---------------- NAA 端点自动发现（261024-01 #11） ---------------- */
 var _naaPollTimer = null;
 function renderNaaEndpoints(res) {
-  var s = D('sp_naa_dev');
-  var m = D('sp_naa_msg');
   var eps = (res && res.endpoints) || [];
-  if (s) {
+  var s;
+  if ((s = D('sp_naa_dev'))) {
     if (!eps.length) {
       s.innerHTML = '<option value="">（未发现 NAA 端点）</option>';
     } else {
@@ -3672,17 +3956,17 @@ function renderNaaEndpoints(res) {
       }
     }
   }
-  if (m) {
+  var m;
+  if ((m = D('sp_naa_msg'))) {
     m.textContent = (res && res.note) || '';
     m.style.color = eps.length ? 'var(--mut2)' : 'var(--warn, #eab308)';
   }
 }
 function discoverNaa(force) {
-  var m = D('sp_naa_msg');
-  var btn = D('sp_naa_scan');
   clearTimeout(_naaPollTimer);
-  if (btn) btn.disabled = true;
-  if (m) {
+  if (D('sp_naa_scan')) D('sp_naa_scan').disabled = true;
+  var m;
+  if ((m = D('sp_naa_msg'))) {
     m.textContent = '正在自动发现 NAA 端点（只读扫描本机网段的 TCP 43210）…';
     m.style.color = 'var(--mut2)';
   }
@@ -3691,12 +3975,16 @@ function discoverNaa(force) {
       _naaPollTimer = setTimeout(function () { discoverNaa(false); }, 700);
       return;
     }
-    if (btn) btn.disabled = false;
+    if (D('sp_naa_scan')) D('sp_naa_scan').disabled = false;
     renderNaaEndpoints(j);
     backendHint();
   }).catch(function () {
-    if (btn) btn.disabled = false;
-    if (m) { m.textContent = '自动发现失败：/api/naa/discover 无响应'; m.style.color = 'var(--err)'; }
+    if (D('sp_naa_scan')) D('sp_naa_scan').disabled = false;
+    var em;
+    if ((em = D('sp_naa_msg'))) {
+      em.textContent = '自动发现失败：/api/naa/discover 无响应';
+      em.style.color = 'var(--err)';
+    }
   });
 }
 
@@ -3714,11 +4002,12 @@ function _setFieldVisible(id, on) {
 }
 function applyBackendState() {
   var bk = (D('sp_backend') && D('sp_backend').value) || 'wasapi';
-  var naaBox = D('sp_naawrap'); if (naaBox) naaBox.style.display = (bk === 'naa') ? '' : 'none';
+  // 2026-10-25（用户指令「不可用的要隐藏」）：NAA 端点块已从设置页移除，保留存在性守卫。
+  if (D('sp_naawrap')) D('sp_naawrap').style.display = 'none';
   var upnpBox = D('sp_upnpwrap'); if (upnpBox) upnpBox.style.display = (bk === 'upnp') ? '' : 'none';
   _UPNP_IRRELEVANT.forEach(function (id) { _setFieldVisible(id, bk !== 'upnp'); });
-  // NAA 下"输出设备"没有意义（声音走 RTANet），但采样率/位深/声道/缓冲仍影响 DSP 输出，保留。
-  _setFieldVisible('sp_device', bk !== 'naa' && bk !== 'upnp');
+  // 2026-10-25：NAA 已移除，「输出设备」只在 UPnP 投放时无意义。
+  _setFieldVisible('sp_device', bk !== 'upnp');
   var tw = D('sp_trimwrap'); if (tw) tw.style.display = (bk === 'upnp') ? 'none' : '';
   // 261024-02 #5：投放区块已整体搬到「流媒体」页（输出页不再有它），这里不再联动隐藏。
 }
@@ -4099,30 +4388,22 @@ function renderSettingsPage() {
        + '<div style="flex:1 1 auto;min-width:180px">'
        + '<label>后端' + tip('选到当前不可用的后端时，播放会直接返回原因，不会假装出声') + '</label>'
        + '<select id=sp_backend>'
-       +   opt('wasapi', 'WASAPI（独占 · 事件驱动）', BK)
-       +   opt('wasapi-shared', 'WASAPI 共享（兼容虚拟机 / 远程桌面）', BK)
-       +   opt('naa', 'NetworkAudioAdapter（NAA / RTANet）', BK)
+       // 2026-10-25（用户指令「能使用的要用它真正的名字」）：macOS 单平台，UI 的 value
+       // 仍是 wasapi / wasapi-shared（rtaweb.cpp 的 make_sink() 靠这两个字符串分派），
+       // 但它们背后已不是 WASAPI —— 是 CoreAudio 的两种模式。面向用户的标签必须是真名。
+       +   opt('wasapi', 'CoreAudio（独占 · Hog Mode）', BK)
+       +   opt('wasapi-shared', 'CoreAudio 共享（系统混音）', BK)
+       // 2026-10-25（用户指令「不可用的要隐藏」）：NAA / RTANet 在 macOS 上没有驱动体系，
+       // make_sink() 对 backend=="naa" 直接返回必然 open 失败的 UnavailableSink。
+       // 呈现一个永远不可能工作的选项 = 骗用户，故整项移除（后端拒绝分支保留）。
        +   opt('upnp', 'UPnP / DLNA 投放（局域网渲染器）', BK)
        +   opt('null', 'Null output（只跑 DSP，不出声）', BK)
        + '</select></div>'
        + '<button class="btn pri" id=sp_bpfix style="flex:none;white-space:nowrap" ' +
-         'title="判据：输出采样率 = 源 / 抖动 = none / 音量 0 dB / 无 EQ·IR / 独占 WASAPI">切到 bit-perfect 直通</button>'
+         'title="判据：输出采样率 = 源 / 抖动 = none / 音量 0 dB / 无 EQ·IR / 独占 CoreAudio">切到 bit-perfect 直通</button>'
        + '</div>'
-       // 261024-01 #11：用户原话「NAA 端点（host:port）这个选项不应该出现啊，应该是自动获取的」。
-      // 默认自动发现（下拉列出扫到的端点），手动输入收进折叠的「兜底」里，默认不展开。
-      + '<div class="sfld wide" id=sp_naawrap style="display:none">'
-      + '<label>NAA 端点（自动发现）</label>'
-      + '<div style="display:flex;gap:8px">'
-      + '<select id=sp_naa_dev style="flex:1"><option value="">（正在发现…）</option></select>'
-      + '<button class=btn id=sp_naa_scan style="white-space:nowrap">重新发现</button>'
-      + '</div>'
-      + '<div class=hint id=sp_naa_msg></div>'
-      + '<details style="margin-top:8px">'
-      + '<summary class=hint style="cursor:pointer;color:var(--mut2)">手动指定端点（自动发现不可用时）</summary>'
-      + '<input type=text id=sp_naahost value="' +
-           esc(ADV.naaHost || '127.0.0.1:43210') + '" style="margin-top:6px">'
-      + '<div class=hint>host:port，端口默认 43210；端点机需运行 rtanet_rx（真正的 networkaudiod 协议尚未逆向）</div>'
-      + '</details></div>'
+       // 2026-10-25（用户指令「不可用的要隐藏」）：NAA 端点自动发现 + 手动兜底输入整块移除。
+       // 对应 NAA 端点 DOM 已移除，下方事件绑定与 discoverNaa() 调用点全部有存在性守卫。
       // 261024-01 #9：后端下拉新增「UPnP / DLNA 投放」。选中后这里直接选目标渲染器，
       // 与下方「投放」区块共用同一份发现结果、同一个选择、同一条会话（不出现两套打架的控制）。
       + '<div class="sfld wide" id=sp_upnpwrap style="display:none">'
@@ -4244,10 +4525,12 @@ function renderSettingsPage() {
      + '</div>';
   // ---------- 输入 ----------
   h += '<div class="spane on" data-g=in>'
-     + sgroup('输入设备与采集', 'WASAPI 共享模式采集 / 录制与直通监听',
-         sel('sp_inbackend', '输入后端', opt('none', '[none]', ADV.inBackend || 'none') + opt('wasapi', 'WASAPI', ADV.inBackend || 'none'),
-             '选 WASAPI 后可以采集线路输入 / 麦克风 / 系统回环')
-       + sel('sp_indev', '输入设备', '<option value="">（未选择 / 默认设备）</option>', '包含物理采集设备与 [Loopback] 系统混音回环端点')
+     + sgroup('输入设备与采集', 'CoreAudio 采集 / 录制与直通监听',
+         // 2026-10-25（用户指令「能使用的要用它真正的名字」）：value 仍是 wasapi
+         // （rtaweb.cpp 的输入采集分派靠它），但实际后端已是 CoreAudio 的 AUHAL 输入侧。
+         sel('sp_inbackend', '输入后端', opt('none', '[none]', ADV.inBackend || 'none') + opt('wasapi', 'CoreAudio', ADV.inBackend || 'none'),
+             '选 CoreAudio 后可以采集线路输入 / 麦克风 / 系统混音回环')
+       + sel('sp_indev', '输入设备', '<option value="">（未选择 / 默认设备）</option>', '包含物理采集设备与系统混音回环端点（标注「回环」的那一项）')
        + sel('sp_inch', '声道偏移', opt('0', '0', ADV.inOffset || 0) + opt('1', '1', ADV.inOffset || 0) +
              opt('2', '2', ADV.inOffset || 0) + opt('4', '4', ADV.inOffset || 0),
              '多声道接口只取其中几路时用')
@@ -4287,16 +4570,22 @@ function renderSettingsPage() {
   // ---------- 高级 ----------
   h += '<div class=spane data-g=adv>'
      + sgroup('外观',
-         '<div class=sfld><label>主题' + tip('顶栏右侧的小圆点也可以快速切换主题') + '</label><select id=sp_theme>'
+         '<div class=sfld><label>界面风格' + tip('在 Apple Music 风格（通顶侧栏 + 悬浮毛玻璃播放胶囊 + 精选海报）与经典 Hi-Fi 工作台（DSH / Roon 布局）之间实时切换') + '</label><select id=sp_uistyle>'
+       + opt('apple', 'Apple Music 风格（默认）', S.uiStyle || 'apple') + opt('classic', '经典 Hi-Fi 工作台（DSH / Roon）', S.uiStyle || 'apple')
+       + '</select></div>'
+       + '<div class=sfld><label>主题' + tip('顶栏右侧的小圆点也可以快速切换主题') + '</label><select id=sp_theme>'
        + opt('dark', '深色（默认）', S.theme) + opt('light', '白色', S.theme) + opt('blue', '浅蓝色', S.theme)
        + '</select></div>')
      + sgroup('GPU',
          sel('sp_gpu', 'GPU 后端',
-             opt('auto', '自动', ADV.gpuvendor || 'auto') + opt('amd', 'AMD（HIP）', ADV.gpuvendor || 'auto') +
-             opt('nvidia', 'NVIDIA（CUDA）', ADV.gpuvendor || 'auto') +
+             // 2026-10-25（用户指令「能使用的要用它真正的名字」/「不可用的要隐藏」）：
+             // Windows 的 AMD HIP / NVIDIA CUDA / DX12 在 macOS 上全部不存在（平台层已删）。
+             // macOS 唯一正确的 GPU 路径是 Apple Metal。可用性不在这里写死 ——
+             // 由 /api/gpu 返回的 metal / metalUsable 字段决定，缺失即按不可用处理。
+             opt('auto', '自动', ADV.gpuvendor || 'auto') +
+             opt('metal', 'Apple Metal（GPU 加速）', ADV.gpuvendor || 'auto') +
              opt('off', '关闭（纯 CPU）', ADV.gpuvendor || 'auto'),
-             '自动 = 依次尝试 AMD HIP → DX12 → NVIDIA CUDA，选第一个真正能跑起来的后端；' +
-             '后端缺失或 kernel 不可执行时自动退回 CPU 分块 FFT')
+             '自动 = 优先 Apple Metal，不可用时自动退回纯 CPU（NEON 向量）分块 FFT，输出逐位相同')
        + '<div class="sfld wide"><div id=sp_gpumsg class=hint></div></div>')
      // 2026-10-24（用户 261024-01 #5/#6）：
      //   ① 「流媒体服务器」整组搬去新增的「流媒体」页签（这里不再保留副本，避免重复 id）；
@@ -4304,7 +4593,7 @@ function renderSettingsPage() {
      //   ③ 原组里的「发现 DLNA 设备」与结果区搬去「流媒体」页（DLNA 归流媒体）。
      + sgroup('本地音乐库', '本地目录扫描入索引；DLNA / UPnP 在「流媒体」页',
          '<div class="sfld wide libstats" id=sp_libstats></div>'
-       + txt('sp_root', '添加音乐目录', '', '填好后点「添加目录」', 'D:\\Music')
+       + txt('sp_root', '添加音乐目录', '', '填好后点「添加目录」', (SEP === '/' ? '/Users/你的用户名/Music' : 'D:\\Music'))
        + '<div class="sfld wide" style="display:flex;gap:8px;flex-wrap:wrap">'
        + '<button class="btn" id=sp_addroot>添加目录</button> <button class="btn" id=sp_rescan>重新扫描全部</button></div>'
        + num({id:'sp_scanthreads', label:'扫描线程数'}, ADV.scanThreads || 0, 0, 32, 1, '0 = 自动（默认 min(CPU, 8)）')
@@ -4492,7 +4781,6 @@ function renderSettingsPage() {
         applyBackendState();
         // 只有"输出后端 = UPnP"时才需要渲染器列表（目标设备下拉在输出页里）
         if (((D('sp_backend') && D('sp_backend').value) || 'wasapi') === 'upnp') scanCastDevices(false);
-        if (((D('sp_backend') && D('sp_backend').value) || 'wasapi') === 'naa') discoverNaa(false);
       } else if (b.dataset.g === 'stream') {
         loadSrcConfig();
         scanCastDevices(false);   // 推送区块的设备列表
@@ -4507,10 +4795,11 @@ function renderSettingsPage() {
     saveSettings();
     backendHint();
     applyBackendState();
-    loadDeviceList();        // WASAPI 列端点，NAA/Null 没有本地设备
-    // 261024-01 #9/#11：切到 NAA / UPnP 时自动发现目标（用户不用手填端点 / 设备地址）
-    if (this.value === 'naa') discoverNaa(true);
-    else if (this.value === 'upnp') scanCastDevices(true);
+    loadDeviceList();        // CoreAudio 列端点，UPnP/Null 没有本地设备
+    // 261024-01 #9/#11：切到 UPnP 时自动发现目标（用户不用手填设备地址）
+    // 2026-10-25（用户指令「不可用的要隐藏」）：NAA 已从后端下拉移除，对应分支一并删除；
+    // discoverNaa() 本体保留（无副作用），但不再有 UI 入口。
+    if (this.value === 'upnp') scanCastDevices(true);
   };
   if (D('sp_naahost')) D('sp_naahost').oninput = function () { ADV.naaHost = this.value; saveSettings(); backendHint(); };
   // 261024-01 #11：NAA 端点下拉 = 自动发现结果（手动框只是折叠兜底）
@@ -4667,31 +4956,28 @@ function renderSettingsPage() {
 
   // 事件
   loadDeviceList();
-  // GPU 后端：把 AMD 标成本机真实状态（哪块卡、后端有没有编出来）
+  // GPU 后端：把 Apple Metal 标成本机真实状态（后端有没有编出来、能不能真跑）
   api('/api/gpu').then(function (j) {
-    // 断线时不能报成「本目录无 rtagpu.dll / 无 CUDA」——那是会让用户去重装包的假结论。
+    // 断线时不能报成「本目录无 librtagpu.dylib」——那是会让用户去重装包的假结论。
     if (j && j._err) return;
     var sg = D('sp_gpu');
     if (sg) {
       Array.prototype.forEach.call(sg.options, function (o) {
-        if (o.value === 'amd') o.text = j.amd ? 'AMD（HIP）· 后端已就位' : 'AMD（HIP）· 本目录无 rtagpu.dll';
-        // 2026-10-23：CUDA DLL 自 1.3.10 起随包内置 → 还分「有文件」和「本机真的能用」两种状态，
-        // 否则 AMD 机器会看到"NVIDIA 后端已就位"的假象（cudaUsable=false）。
-        if (o.value === 'nvidia') {
-          o.text = !j.cuda ? 'NVIDIA（CUDA）· 本目录无 rtagpu_cuda.dll'
-                 : (j.cudaUsable === false ? 'NVIDIA（CUDA）· 已内置，本机未检测到可用 NVIDIA 显卡（会自动回退）'
-                                           : 'NVIDIA（CUDA）· 后端已就位');
+        // 2026-10-25（用户指令「能使用的要用它真正的名字」）：macOS 只有 Metal 一条 GPU 路径。
+        // metalUsable 才是「真的能跑」（动态库在 + rta_gpu_available() 返回 1）；
+        // 只有 metal 而没有 metalUsable = 文件在但本机跑不起来（例如核函数编译失败）。
+        if (o.value === 'metal') {
+          o.text = !(j && j.metal) ? 'Apple Metal（GPU 加速）· 后端库未就位'
+                 : (j.metalUsable === false ? 'Apple Metal（GPU 加速）· 已就位，本机未检测到可用 Metal 设备（会自动回退）'
+                                            : 'Apple Metal（GPU 加速）· 后端已就位');
         }
       });
     }
     var m = D('sp_gpumsg');
     if (m) {
-      // 2026-10-24 #7：只在页面上留一句结论，DLL 明细收进 (?) 提示（动态内容写 title）。
-      m.textContent = '当前状态：' + (j.available ? 'GPU 可用' : '走 CPU（未找到可执行的 GPU 后端）');
-      m.title = 'rtagpu.dll=' + (j.amd ? '有' : '无') +
-                '，rtagpu_cuda.dll=' + (j.cuda ? (j.cudaUsable === false ? '有（本机不可用）' : '有（可用）') : '无') +
-                '，AMD HIP 运行库=' + (j.hip ? '有' : '无') +
-                '；厂商偏好=' + (j.vendor || 'auto');
+      m.textContent = '当前状态：' + (j && j.available ? 'GPU 可用' : '走 CPU（未找到可执行的 GPU 后端）');
+      var metalInfo = (j && j.metal) ? ((j.metalUsable === false ? '已就位（本机不可用）' : '已就位（可用）')) : '未就位';
+      m.title = 'Apple Metal=' + metalInfo + '；厂商偏好=' + ((j && j.vendor) || 'auto');
     }
   }).catch(function () { });
   if (ADV.inBackend === 'wasapi') loadInputDevices();
@@ -4713,6 +4999,10 @@ function renderSettingsPage() {
     saveSettings(); renderSettingsPage(); toast('已恢复默认');
   };
   D('sp_theme').onchange = function () { setTheme(this.value); };
+  if (D('sp_uistyle')) D('sp_uistyle').onchange = function () {
+    setUiStyle(this.value);
+    toast('已切换界面风格：' + (this.value === 'classic' ? '经典 Hi-Fi 工作台' : 'Apple Music 风格'));
+  };
   D('sp_addroot').onclick = function () {
     var d = (D('sp_root').value || '').trim();
     if (!d) { toast('请填目录'); return; }
@@ -4991,8 +5281,8 @@ function eqSettingsHtml() {
   h += sgroup('房间校正 IR（WAV 脉冲响应）', '把房间 / 耳机脉冲响应用 FIR 卷积叠进播放链路',
       '<div class="sfld wide"><label>IR 脉冲响应卷积文件（WAV）' + tip('留空 = 不做卷积；支持立体声 / 多声道 FIR 房间校正') + '</label>'
     + '<input type=text id=sp_ir value="' + esc(ADV.ir || '') + '" placeholder="D:\\Music\\room.wav"></div>'
-    + chk('sp_irgpu', '卷积走 GPU 硬件加速（需要 rtagpu.dll 就位）', ADV.irgpu == 1,
-          '房间 / 耳机 FIR 卷积交给 GPU；没有可用后端时自动退回 CPU')
+    + chk('sp_irgpu', '卷积走 GPU 硬件加速（需要 librtagpu.dylib 就位）', ADV.irgpu == 1,
+          '房间 / 耳机 FIR 卷积交给 Apple Metal；没有可用后端时自动退回 CPU（输出逐位相同）')
     // 评审 #11：这里原来还有一个「保存 EQ 与房间校正设置」按钮，与底部全局「保存设置」重复 → 移除；
     // sp_eq / sp_ir / sp_irgpu 的值本来就会随 saveSettings 一起提交，不需要第二个主操作。
     );
@@ -5825,7 +6115,8 @@ function collectSettings() {
   if (D('sp_ir')) ADV.ir = (D('sp_ir').value || '').trim();
   if (D('sp_irgpu')) ADV.irgpu = D('sp_irgpu').checked ? 1 : 0;
   ADV.ramp = parseFloat(D('sp_ramp').value) || 0;
-  ADV.gpuvendor = D('sp_gpu').value || 'auto';
+  ADV.gpuvendor = (D('sp_gpu') && D('sp_gpu').value) || 'auto';
+  ensureGpuOption(ADV.gpuvendor);
   if (D('sGpu')) D('sGpu').value = ADV.gpuvendor;
   // 输出后端 / 声道 / 每声道微调
   if (D('sp_backend')) ADV.backend = D('sp_backend').value || 'wasapi';
@@ -6758,7 +7049,7 @@ loadQ();
 loadSrcConfig();
 tick();
 pollStart();
-)JSEOF";
+)JS";
 }
 
 } // namespace rta::net

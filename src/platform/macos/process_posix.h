@@ -255,23 +255,13 @@ struct PipeProcess {
     ~PipeProcess() { close_fds(); }
 };
 
-// 2026-10-25：本机架构。用于「同一工具备了多套架构时优先选原生的那套」。
-// 为什么用编译期宏而不是 uname/hw.optional.arm64 运行时探测：
-//   * 我们分发的二进制本身就是按架构编译的，编译期就能确定；
-//   * 运行时探测反而会出错——x86_64 二进制跑在 Rosetta 下时，uname 仍报 arm64，
-//     于是会去选 arm64 的 ffmpeg，再被 exec 成 arm64 进程（多绕一层且可能失败）。
-inline constexpr bool host_is_arm64() {
-#if defined(__arm64__) || defined(__aarch64__)
-    return true;
-#else
-    return false;
+#if !defined(__arm64__) && !defined(__aarch64__)
+#error "RLPlayer macOS target only supports arm64 architecture"
 #endif
-}
 
-// 架构后缀：arm64 主机优先找 "name"（原生），x86_64 主机优先找 "name-x86_64"。
-// 两者互为回退 —— 万一包内只带了一套，另一套架构的机器也能靠 Rosetta 跑起来。
-inline const char* host_arch_suffix() {
-    return host_is_arm64() ? "" : "-x86_64";
+// 2026-10-25：纯 arm64 架构支持。
+inline constexpr bool host_is_arm64() {
+    return true;
 }
 
 inline std::string find_executable(const char* name) {
@@ -280,34 +270,14 @@ inline std::string find_executable(const char* name) {
     const bool has_sep = base.find('/') != std::string::npos;
 
     // 1) 先看 exe 同目录（分发版把 ffmpeg 放这里）—— 与 Windows 侧顺序一致
-    //    2026-10-25：同目录下若备了多套架构（如 ffmpeg 与 ffmpeg-x86_64），
-    //    先按本机架构选原生那套；原生缺失时回退另一套（Rosetta 可跑）。
+    //    纯 arm64 架构：直接查找原始可执行文件名，不带多架构或 x86 后缀，不设 Rosetta 回退。
     const std::string dir = module_dir_utf8();
     if (!dir.empty()) {
-        auto try_one = [&](const std::string& leaf) -> std::string {
-            const std::string cand = join(dir, leaf);
-            struct stat st{};
-            if (::stat(cand.c_str(), &st) == 0 && S_ISREG(st.st_mode) &&
-                ::access(cand.c_str(), X_OK) == 0)
-                return cand;
-            return "";
-        };
-        const std::string suffix = host_arch_suffix();
-        // 1a) 原生架构优先
-        if (!suffix.empty()) {
-            const std::string got = try_one(base + suffix);
-            if (!got.empty()) return got;
-        }
-        // 1b) 无后缀的那个（arm64 主机上就是原生；x86_64 主机上是回退）
-        {
-            const std::string got = try_one(base);
-            if (!got.empty()) return got;
-        }
-        // 1c) 另一套架构（仅当本机不是 arm64 时才有意义：arm64 主机上 base 已是原生）
-        if (suffix.empty()) {
-            const std::string got = try_one(base + "-x86_64");
-            if (!got.empty()) return got;
-        }
+        const std::string cand = join(dir, base);
+        struct stat st{};
+        if (::stat(cand.c_str(), &st) == 0 && S_ISREG(st.st_mode) &&
+            ::access(cand.c_str(), X_OK) == 0)
+            return cand;
     }
     if (has_sep) return "";
 

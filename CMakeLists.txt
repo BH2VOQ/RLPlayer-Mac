@@ -17,6 +17,18 @@ if(APPLE AND NOT DEFINED CMAKE_OSX_DEPLOYMENT_TARGET)
   set(CMAKE_OSX_DEPLOYMENT_TARGET "13.0" CACHE STRING "macOS 最低系统版本（必须与 Info.plist 的 LSMinimumSystemVersion 一致）")
 endif()
 
+# 单进程 / Apple Silicon 分发基线（2026-10-25 用户明确）：主程序、壳与工具均只出
+# arm64，不做 Universal，也不在 Intel/Rosetta 上继续承诺支持。缓存里若残留旧架构
+# 设置，configure 直接失败，防止无声地重新产出双架构包。
+if(NOT APPLE)
+  message(FATAL_ERROR "RLPlayer 当前只支持 macOS arm64")
+endif()
+if(DEFINED CMAKE_OSX_ARCHITECTURES AND NOT CMAKE_OSX_ARCHITECTURES STREQUAL "" AND
+   NOT CMAKE_OSX_ARCHITECTURES STREQUAL "arm64")
+  message(FATAL_ERROR "只支持 CMAKE_OSX_ARCHITECTURES=arm64，当前='${CMAKE_OSX_ARCHITECTURES}'")
+endif()
+set(CMAKE_OSX_ARCHITECTURES "arm64" CACHE STRING "仅 Apple Silicon（无 x86_64 / Universal）" FORCE)
+
 project(RLPlayer LANGUAGES CXX)
 
 
@@ -85,19 +97,36 @@ target_link_libraries(filter_report PRIVATE ${RL_PLATFORM_LIBS})
 add_library(rtadsp INTERFACE)
 target_include_directories(rtadsp INTERFACE ${CMAKE_CURRENT_SOURCE_DIR}/src)
 
-# ---------------- macOS：网页播放器服务 rtaweb（PLATFORM.md §13.12）----------------
-# 原文件这里还写着一句「Windows 版 rtaweb 在上方 if(WIN32) 块里」——那个块已随 Windows
-# 平台层整体删除（winhttp/ws2_32/winmm/avrt/dbghelp/iphlpapi 全部不再需要），现在只剩这一个 rtaweb。
-# mac 版走平台层（CoreAudio/libcurl/posix_spawn）。
+# ---------------- macOS：单进程 App + 保留独立 CLI（PLATFORM.md §13.12）----------------
+# 2026-10-25 用户立项：单进程合并（保留程序内多线程），只留 arm64。
+#   * rlapp_core = rtaweb.cpp 的库构建形态（同一个 handle()，同一份播放/扫描/网络线程）；
+#   * rlplayer_mac = NSWindow + WKWebView + 进程内 WKURLSchemeHandler，**不再 posix_spawn**；
+#   * rtaweb = 原有独立 HTTP/浏览器 CLI，功能不删；只是不再被 .app 打包或启动。
+# 只编译一份业务代码：rtaweb 目标直接编 rtaweb.cpp；App 目标链接 rlapp_core（其 TU
+# 用 RLPLAYER_EMBEDDED_LIBRARY 屏蔽 main）。两个目标互不依赖，可并行构建。
 if(APPLE)
-  add_executable(rtaweb tools/rtaweb.cpp)
-  target_include_directories(rtaweb PRIVATE ${CMAKE_SOURCE_DIR}/src)
-  target_link_libraries(rtaweb PRIVATE ${RL_PLATFORM_LIBS})
+  # 2026-10-25（系统混音回环）：Process Tap 是 ObjC++ 门控（CATapDescription /
+  # AudioHardwareCreateProcessTap 只在 __OBJC__ 下可见），拆成薄包装给纯 C++ 的
+  # audio_in_coreaudio.h 用。rlapp_core 通过 #include "rtaweb.cpp" 共享同一份业务代码，
+  # 所以这个 .mm 必须进 rlapp_core 的源列表，否则 App 侧会缺符号。
+  enable_language(OBJCXX)
+  set(RL_LOOPBACK_SRC src/platform/macos/process_tap_bridge.mm)
+  set_source_files_properties(${RL_LOOPBACK_SRC} PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
 
-  # macOS 原生壳（§9 第 9 条 / §10 契约）：NSWindow + WKWebView + postMessage 垫片，
-  # spawn rtaweb 子进程。对齐 Windows 的 launcher.cpp + WebView2 形态。
+  add_library(rlapp_core STATIC tools/rlapp_core.cpp ${RL_LOOPBACK_SRC})
+  target_include_directories(rlapp_core PUBLIC ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tools)
+  target_link_libraries(rlapp_core PUBLIC ${RL_PLATFORM_LIBS} "-framework Foundation")
+
+  add_executable(rtaweb tools/rtaweb.cpp ${RL_LOOPBACK_SRC})
+  target_include_directories(rtaweb PRIVATE ${CMAKE_SOURCE_DIR}/src)
+  target_link_libraries(rtaweb PRIVATE ${RL_PLATFORM_LIBS} "-framework Foundation")
+
+  # macOS 原生壳（§9 第 9 条 / §10 契约）：单进程内直连 |rlapp::dispatch|。
+  # mac_host.mm 用 ARC 语义（WKURLSchemeTask/block 对象生命周期不能被 MRR 误释放）。
+  # 实测未开 ARC 时在 startURLSchemeTask 的 objc_msgSend 崩 SIGSEGV，开 ARC 后同场景通过。
   add_executable(rlplayer_mac tools/mac_host.mm)
-  target_link_libraries(rlplayer_mac PRIVATE "-framework AppKit" "-framework WebKit")
+  set_source_files_properties(tools/mac_host.mm PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
+  target_link_libraries(rlplayer_mac PRIVATE rlapp_core "-framework AppKit" "-framework WebKit")
 endif()
 
 # ---------------- 测试 ----------------
@@ -119,6 +148,25 @@ if(APPLE)
   add_executable(rtaloop tools/rtaloop.cpp tools/rtaloop_tap.mm)
   target_include_directories(rtaloop PRIVATE ${CMAKE_SOURCE_DIR}/src)
   target_link_libraries(rtaloop PRIVATE ${RL_PLATFORM_LIBS} "-framework Foundation")
+
+  # 单进程 transport 离线门禁：WKURLSchemeHandler 的二进制安全/并发语义，以及
+  # 壳的 HostMessage 9 条契约。测试文件自己 include mac_host.mm 并定义独立 rlapp mock，
+  # 不链接真实核心，不会初始化曲库、不会触碰音频设备。
+  add_executable(test_mac_transport tests/test_mac_transport.mm)
+  set_source_files_properties(tests/test_mac_transport.mm PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
+  target_include_directories(test_mac_transport PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tools)
+  target_compile_options(test_mac_transport PRIVATE -DGL_SILENCE_DEPRECATION)
+  target_link_libraries(test_mac_transport PRIVATE "-framework AppKit" "-framework WebKit" "-framework JavaScriptCore")
+  add_test(NAME mac_transport COMMAND test_mac_transport)
+
+  # 进程内核心门禁：真实 rlapp::start_embedded/dispatch/stop_embedded。
+  # 曲库/配置由测试写入临时目录；不监听端口、不开设备；并发判据是 handle 内峰值探针。
+  add_executable(test_embedded_api tests/test_embedded_api.cpp)
+  target_include_directories(test_embedded_api PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tools)
+  target_link_libraries(test_embedded_api PRIVATE rlapp_core)
+  add_test(NAME embedded_api COMMAND test_embedded_api)
+  set_tests_properties(embedded_api PROPERTIES
+    ENVIRONMENT "PATH=${CMAKE_SOURCE_DIR}/build-mac/ffmpeg-lite:/usr/bin:/bin:/usr/sbin:/sbin")
 endif()
 
 add_executable(test_knowledge tests/test_knowledge.cpp)
@@ -406,6 +454,61 @@ add_test(NAME ffmpeg_matrix COMMAND test_ffmpeg_matrix)
 add_executable(test_writeback tests/test_writeback.cpp)
 target_include_directories(test_writeback PRIVATE ${CMAKE_SOURCE_DIR}/src)
 add_test(NAME writeback COMMAND test_writeback)
+
+# 2026-10-25（门禁基线修正）：这 4 条测试依赖 ffmpeg 造/解素材，而本机 PATH 里的
+# Homebrew ffmpeg 是坏链（缺 libx265.216.dylib，`ffmpeg -version` 退出码 134），
+# 导致它们长期假红（AGENTS.md §1 已记录该环境事实）。
+# 项目自建的 build-mac/ffmpeg-lite/ffmpeg 是可用的（实测 8.1.2，rc=0）。
+# 用 ENVIRONMENT 把 ffmpeg-lite 放到 PATH 最前 —— 与 embedded_api 的既有手法一致，
+# 不改变测试判据本身（判据强度不动，只修环境）。实测 4/4 全绿。
+set(RL_FFMPEG_LITE_PATH "${CMAKE_SOURCE_DIR}/build-mac/ffmpeg-lite:/usr/bin:/bin:/usr/sbin:/sbin")
+set_tests_properties(decode_retry stream_decode media_duration writeback PROPERTIES
+  ENVIRONMENT "PATH=${RL_FFMPEG_LITE_PATH}")
+
+
+# ---------------- 2026-10-25：UPnP / DLNA 投放（macOS 已全量 POSIX 移植）----------------
+# 这两条原先被删掉的「Windows 专属测试段」注释里点名过（test_upnp_control / test_cast_service）。
+# 按用户铁律「功能不能删除，只做全量移植」：upnp.h / upnp_control.h / cast_service.h 已完整
+# POSIX 化（winsock→BSD socket、WinHTTP→libcurl），本轮实测两条在 macOS 上独立编译运行全绿：
+#   test_upnp_control —— 含真实本地 HTTP 供源回环实测（端口 8910，Range 200/206/416 逐字节校验）
+#   test_cast_service —— 投放会话编排 + 安全门禁（DSD 未开 DoP 必须拒绝）
+# 真网 SSDP 探测仍是 opt-in（RTA_NET_TESTS=1），默认跳过，不打扰局域网。
+add_executable(test_upnp_control tests/test_upnp_control.cpp)
+target_include_directories(test_upnp_control PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(test_upnp_control PRIVATE ${RL_PLATFORM_LIBS})
+add_test(NAME upnp_control COMMAND test_upnp_control)
+
+add_executable(test_cast_service tests/test_cast_service.cpp)
+target_include_directories(test_cast_service PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(test_cast_service PRIVATE ${RL_PLATFORM_LIBS})
+add_test(NAME cast_service COMMAND test_cast_service)
+
+# ---------------- 2026-10-25：系统混音回环（Process Tap）----------------
+# macOS 没有 WASAPI Loopback 那样的系统混音回环端点，官方机制是 macOS 14.2+ 的
+# Process Tap（CATapDescription → AudioHardwareCreateProcessTap → private 聚合设备）。
+# 纯 C++ 的 audio_in_coreaudio.h 无法直接 include ObjC 头，故拆出 process_tap_bridge.mm 薄包装。
+# 判据（铁律 1：默认不碰任何物理设备，只做只读 enumerate）：
+#   * enumerate_capture(false) 不含回环条目；enumerate_capture(true) 含且仅含一条
+#   * 回环条目排在物理设备之前，id/name/mixRate/mixChannels/mixBits 契约正确
+#   * open() 不存在的 deviceId 必须失败且 last_error() 非空（错误路径不许假装成功）
+#   * 真开回环采集默认跳过，仅 RTA_LOOPBACK_TESTS=1 时执行
+add_executable(test_loopback_capture tests/test_loopback_capture.cpp src/platform/macos/process_tap_bridge.mm)
+target_include_directories(test_loopback_capture PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(test_loopback_capture PRIVATE ${RL_PLATFORM_LIBS} "-framework Foundation")
+add_test(NAME loopback_capture COMMAND test_loopback_capture)
+
+# ---------------- 2026-10-25：Apple Metal GPU 加速（librtagpu.dylib）----------------
+# Windows 时代的 AMD HIP / NVIDIA CUDA / DX12 在 macOS 上都不存在；Apple Silicon 唯一的
+# 通用计算接口是 Metal。本测试用 dlopen 加载 librtagpu.dylib（不链接），缺库时 [SKIP]。
+# 判据：4 个导出符号齐全、rta_gpu_available()==1、卷积/升频与 CPU 双精度参考的
+# 最大相对误差 < 1e-6、invalidate 前后结果严格一致。
+# 构建 dylib：bash tools/build_gpu_metal_mac.sh（产物在仓库根 librtagpu.dylib）
+add_executable(test_gpu_metal tests/test_gpu_metal.cpp)
+target_include_directories(test_gpu_metal PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(test_gpu_metal PRIVATE ${CMAKE_DL_LIBS})
+add_test(NAME gpu_metal COMMAND test_gpu_metal)
+# dylib 定位：测试自己用 __FILE__ 反推仓库根（ctest 的 cwd 是 build-mac，不是仓库根），
+# 不需要额外环境变量；也可 `test_gpu_metal <path-to-librtagpu.dylib>` 显式指定。
 
 option(RTA_BUILD_LEGACY_TESTS "构建尚未移植到 macOS 的旧测试（缺 POSIX 垫片，默认关闭）" OFF)
 if(RTA_BUILD_LEGACY_TESTS)

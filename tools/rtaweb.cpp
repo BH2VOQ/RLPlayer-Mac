@@ -28,6 +28,7 @@
 #include "net/ui_script.h"
 #include "net/source_mgr.h"
 #include "net/library.h"
+#include "net/cast_service.h"      // UPnP/DLNA 投放会话编排（CastManager / CastState / CastStartParams）
 #include "net/app_icon.h"
 #include "net/zipstore.h"          // 最小 ZIP(STORE)打包：导出诊断 = 一个压缩包(2026-10-22 功能3)
 using rta::net::Library;
@@ -63,6 +64,11 @@ using rta::render::SinkOpenOpts;
 #include "dsp/modulator.h"
 #include "dsp/direct_sdm.h"
 #include "version.h"
+// 2026-10-25（单进程合并）：本文件同时是「独立 CLI 的全部实现」和「进程内 embedded 核心」。
+// rlapp_core.h 声明 start_embedded/dispatch/exit_requested/stop_embedded/cli_main，
+// 实现放在本文件末尾（同一翻译单元，绝不复制业务代码）。mac 壳 tools/mac_host.mm 只包含
+// 这个头文件 + 链接 rlapp_core.cpp（后者 = 本文件的库构建形态）。
+#include "rlapp_core.h"
 #include <cstdio>
 #include <string>
 #include <vector>
@@ -121,18 +127,8 @@ inline std::string read_tester() {   // Windows 版读 exe 同目录 tester 文�
 }
 } // namespace rta::diag
 
-// CastState 替身（Windows 的 cast_service.h 类型）：mac 上 UPnP 投放不可用
-// （upnp_start_track 恒失败），此结构仅让 /api/status 的成员访问编译通过，恒为零值。
-namespace rta::net {
-struct CastState {
-    bool running = false;
-    double positionSec = 0.0, durationSec = 0.0;
-    bool paused = false;
-    std::string sourceFile, error;
-    uint32_t sampleRate = 0;
-    int bits = 0;
-};
-} // namespace rta::net
+// 2026-10-25：CastState 替身已删除 —— UPnP/DLNA 投放已在 macOS 打通（cast_service.h 真实现，
+// SSDP 发现 + 本地 HTTP 供源 + AVTransport 全链 POSIX 移植），/api/status 直接用真实 CastState。
 
 // RtTune 替身：macOS 的实时调度由 AUDIOUNIT/线程 QoS 承接，播放线程不需要显式 MMCSS。
 struct RtTune {};
@@ -402,6 +398,35 @@ static std::atomic<double> g_dbgPeak{0.0};    // 最近一个写入周期的峰�
 static std::atomic<long long> g_dbgClip{0};   // 本次播放的满幅样本数（诊断削波/噪音）
 static uint16_t g_uiPort = 8899;
 static bool     g_lanOn  = false;
+// 2026-10-25（单进程合并）：本进程**当前是否真的有一个本地 HTTP 监听**在服务。
+//   * 独立 CLI（rtaweb 可执行文件）：main() 里 WebUi::start 成功后置 true；
+//   * 进程内 embedded（rlapp_core，WKURLSchemeHandler 直连 dispatch）：恒 false。
+// 存在理由：/api/net 原来无条件回 "port":8899，界面就照着渲染「本机：http://127.0.0.1:8899/」。
+// 单进程之后那个端口**根本没人监听**，再这么说就是让用户去点一个死链接（铁律 4：不许假装）。
+static std::atomic<bool> g_httpListening{false};
+
+// ---- 后台 detached 任务追踪（元数据补全 / 资料整理）----
+// 2026-10-25（单进程合并）：这两类任务原来是纯 detached 线程，进程退出时没人等它们。
+// CLI 形态下进程直接消失，系统一并收走；但 embedded 形态是**壳进程继续活着**，这些线程
+// 还在摸 MetaStore/Library 单例 —— 所以 stop_embedded 必须给它们一个有界的收尾窗口
+// （协作等待，绝不 force-kill；超时就如实记日志，不假装收干净了）。
+// 声明放在这里（文件靠前）：两个 detach 点（meta_on_play / summary_job_start_fn）都在下方。
+static std::atomic<int> g_bgJobs{0};
+static std::mutex g_bgMx;
+static std::condition_variable g_bgCv;
+
+static void bg_job_begin() { g_bgJobs.fetch_add(1); }
+static void bg_job_end() {
+    g_bgJobs.fetch_sub(1);
+    { std::lock_guard<std::mutex> lk(g_bgMx); }   // 与 wait_for 的谓词检查配对（避免丢唤醒）
+    g_bgCv.notify_all();
+}
+
+// ---- dispatch 并发观测（诊断/测试用；全部 relaxed 原子，不进任何临界区）----
+// 见 rlapp_core.h 的说明：用来证明「dispatch 没有被串行化」，而不是靠代码审查自证。
+static std::atomic<int>       g_inFlight{0};
+static std::atomic<int>       g_peakConcurrent{0};
+static std::atomic<long long> g_dispatchCount{0};
 static std::mutex g_logMx;
 static std::deque<std::string> g_log;
 static void dlog(const std::string& s) {
@@ -883,16 +908,36 @@ static std::unique_ptr<OutSink> make_sink(const PlayParams& p) {
 // 要"把 DSP 处理后的流实时推给渲染器"需要另外的牵引式流式供源，本轮不做。
 static std::atomic<bool> g_upnpPlayer{false};   // true = 当前"播放器"由投放会话承担
 
-// 2026-10-25：upnp_is_dsd_file 是 Windows 侧 UPnP 投送的辅助函数，
-// 随 upnp.h 的 POSIX 移植一并处理（见 PLATFORM.md §13.15.5）。此处不再定义，避免 unused。
-
+// DSD 源（.dsf/.dff）必须走 DoP 打包：cast_service 对未开 DoP 的 DSD 会明确拒绝，
+// 而不是悄悄转码成 PCM 降质输出（铁律 3）。
+static bool upnp_is_dsd_file(const std::string& file) {
+    const std::string ext = rta::audio::lowerExt(file);
+    return ext == ".dsf" || ext == ".dff";
+}
 
 // 把一条曲目交给投放会话。切歌 / 重播都走这里：先停旧会话再起新会话
 //（CastManager 同一时刻只允许一条会话）。失败原因原样返回，界面直接显示，不假装成功。
 static bool upnp_start_track(const PlayParams& p, const std::string& file, std::string& err) {
-    (void)p; (void)file;
-    err = "macOS 版暂不支持 UPnP / DLNA 投放（SSDP 协议栈尚未移植，PLATFORM.md §11.2）";
-    return false;
+    if (p.upnpDev.empty()) {
+        err = "未选择 UPnP / DLNA 渲染器：设置 → 输出 → 目标渲染器（点「重新发现」刷新列表）";
+        return false;
+    }
+    if (file.empty()) { err = "未指定曲目"; return false; }
+    rta::net::CastStartParams cp;
+    cp.dev  = p.upnpDev;
+    cp.file = file;
+    cp.port = 8912;
+    cp.rate = 0;              // 0 = 按源文件原采样率供源
+    // bits 必须留 0：cast_service 只在 rate==0 && bits==0 时走「源 WAV 原文件直供」的
+    // 逐位直通分支；传了非 0 位深会落进重采样/位深转换分支，等于悄悄降质。
+    cp.bits = 0;
+    cp.seconds = 0.0;
+    // DSD 源必须 DoP 打包（cast_service 对未开 DoP 的 DSD 会明确拒绝 —— 铁律 3：不悄悄转码降质）
+    cp.dop = upnp_is_dsd_file(file) || p.dsd >= 64;
+    rta::net::CastManager::instance().stop();
+    const auto r = rta::net::CastManager::instance().start(cp);
+    if (!r.ok) { err = "UPnP 投放启动失败：" + r.error; return false; }
+    return true;
 }
 
 // 投放模式下写播放器状态：底栏从 /api/status 读这些字段，必须与投放会话口径一致。
@@ -2642,12 +2687,14 @@ static void meta_on_play(const std::string& file) {
         if (s_inFlight.count(file) != 0) return;    // 在途:本曲已在补全,不重复
         s_inFlight.insert(file);
     }
+    bg_job_begin();     // 登记：stop_embedded 会等它收完（有界，超时如实记日志）
     std::thread([file, ms] {
         rta::meta::EnrichOpts o;
         o.srcOn = ms.srcOn; o.llm = ms.llm;
         o.llmConfPath = path_in_exe_dir("rlplayer-llm.conf");
         rta::meta::enrich_track(file, false, o);
         { std::lock_guard<std::mutex> lk(s_metaMx); s_inFlight.erase(file); }
+        bg_job_end();
     }).detach();
 }
 
@@ -3105,6 +3152,7 @@ static std::map<std::string, SummaryJob> g_summ_jobs;
 static void summary_job_start_fn(const std::string& key, const std::string& kindStr,
                                  const std::string& label,
                                  std::function<rta::meta::SummaryResult()> work) {
+    bg_job_begin();     // 登记：stop_embedded 会等它收完（有界，超时如实记日志）
     std::thread([key, kindStr, label, work]() {
         const rta::meta::SummaryResult sr = work();
         std::string body;
@@ -3120,13 +3168,16 @@ static void summary_job_start_fn(const std::string& key, const std::string& kind
                      (sr.diag.empty() ? std::string() : (" diag=" + sr.diag)));
             body = summary_json_with_flags(sr, kindStr, sr.from_cache);
         }
-        std::lock_guard<std::mutex> lk(g_summ_mu);
-        auto& job = g_summ_jobs[key];
-        job.running = false;
-        job.done = true;
-        job.ok = sr.ok;
-        job.body = body;
-        job.finished_at = (long long)std::time(nullptr);
+        {
+            std::lock_guard<std::mutex> lk(g_summ_mu);
+            auto& job = g_summ_jobs[key];
+            job.running = false;
+            job.done = true;
+            job.ok = sr.ok;
+            job.body = body;
+            job.finished_at = (long long)std::time(nullptr);
+        }   // 锁必须先放，再登记结束（否则 bg_job_end 里的 g_bgMx 与 g_summ_mu 顺序无保证）
+        bg_job_end();
     }).detach();
 }
 
@@ -4604,6 +4655,8 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
         ps.playing.store(false);
         // 清空队列同时结束投放会话（否则渲染器还会继续播上一首）
         g_upnpPlayer.store(false);
+        if (rta::net::CastManager::instance().get_state().running)
+            rta::net::CastManager::instance().stop();
         {
             std::lock_guard<std::mutex> lk(g_lastEndMx);
             g_lastEnd.isPosZeroNoErr = false;
@@ -4680,10 +4733,114 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
     }
 
     // ---------------- UPnP/DLNA 媒体投放（ROADMAP P5b）----------------
+    // 2026-10-25：SSDP 协议栈已 POSIX 移植（src/net/upnp.h / upnp_control.h），
+    // 四个子路由全部接真实 CastManager，不再有桩。
     if (rq.path.rfind("/api/cast", 0) == 0) {
         ct = "application/json; charset=utf-8";
-        // macOS：SSDP/CastManager 未移植（PLATFORM.md §11.2 白名单项）；如实报错不假装
-        return "{\"ok\":false,\"error\":\"macOS 版暂不支持 UPnP 投放（SSDP 协议栈未移植）\"}";
+        if (rq.path.rfind("/api/cast/devices", 0) == 0) {
+            const bool forceRescan = (rq.path.find("scan=1") != std::string::npos ||
+                                      rq.path.find("rescan=1") != std::string::npos);
+            auto devs = rta::net::CastManager::instance().get_devices(forceRescan);
+            std::ostringstream j;
+            j << "{\"ok\":true,\"n\":" << devs.size() << ",\"devices\":[";
+            for (size_t i = 0; i < devs.size(); ++i) {
+                if (i) j << ",";
+                // WebUI 的 castDevValue() 取 location 作为下拉 value（直连描述 URL 比按名字匹配可靠），
+                // castDevLabel() 读 friendlyName + model；npPickCastDevice 读 friendlyName/name/host/model。
+                j << "{\"name\":\"" << jesc(devs[i].name) << "\""
+                  << ",\"friendlyName\":\"" << jesc(devs[i].name) << "\""
+                  << ",\"model\":\"" << jesc(devs[i].model) << "\""
+                  << ",\"host\":\"" << jesc(devs[i].host) << "\""
+                  << ",\"port\":" << devs[i].port
+                  << ",\"location\":\"" << jesc(devs[i].location) << "\""
+                  << ",\"controlUrl\":\"" << jesc(devs[i].av_transport_url()) << "\""
+                  << ",\"avTransportUrl\":\"" << jesc(devs[i].av_transport_url()) << "\""
+                  << ",\"connectionManagerUrl\":\"" << jesc(devs[i].connection_manager_url()) << "\""
+                  << ",\"hasAVTransport\":" << (!devs[i].control.empty() ? "true" : "false")
+                  << "}";
+            }
+            j << "]}";
+            return j.str();
+        }
+        if (rq.path.rfind("/api/cast/state", 0) == 0) {
+            auto st = rta::net::CastManager::instance().get_state();
+            std::ostringstream j;
+            j << "{\"ok\":true"
+              << ",\"running\":" << (st.running ? "true" : "false")
+              << ",\"device\":\"" << jesc(st.device) << "\""
+              << ",\"sourceFile\":\"" << jesc(st.sourceFile) << "\""
+              << ",\"servePort\":" << st.servePort
+              << ",\"phase\":\"" << jesc(st.phase) << "\""
+              << ",\"positionSec\":" << st.positionSec
+              << ",\"transportState\":\"" << jesc(st.transportState) << "\""
+              << ",\"servedBytes\":" << st.servedBytes
+              << ",\"requestCount\":" << st.requestCount
+              << ",\"rateMatch\":\"" << jesc(st.rateMatch) << "\""
+              << ",\"warning\":\"" << jesc(st.warning) << "\""
+              << ",\"error\":\"" << jesc(st.error) << "\""
+              // 261024-01 #9：后端 = UPnP 时播放器底栏的进度/时长/格式/暂停也取这份数据
+              //（一条会话、一个状态源，避免底栏与投放面板各显示一套进度）
+              << ",\"durationSec\":" << st.durationSec
+              << ",\"sampleRate\":" << st.sampleRate
+              << ",\"bits\":" << st.bits
+              << ",\"paused\":" << (st.paused ? "true" : "false")
+              << "}";
+            return j.str();
+        }
+        if (rq.path.rfind("/api/cast/start", 0) == 0) {
+            if (rq.method != "POST") return "{\"ok\":false,\"error\":\"Method Not Allowed\"}";
+            rta::net::CastStartParams p;
+            // body 同时支持 JSON 与 k=v&k=v（照历史实现；WebUI 用空 body 表单风格）
+            if (!rq.body.empty() && rq.body.front() == '{') {
+                auto j = rta::net::json_parse(rq.body);
+                if (j.has("dev")) p.dev = j["dev"].s();
+                if (j.has("file")) p.file = j["file"].s();
+                if (j.has("port")) p.port = (uint16_t)j["port"].n();
+                if (j.has("rate")) p.rate = (uint32_t)j["rate"].n();
+                if (j.has("bits")) p.bits = (int)j["bits"].n();
+                if (j.has("seconds")) p.seconds = j["seconds"].n();
+                if (j.has("dop")) p.dop = (j["dop"].type == rta::net::Json::Bool) ? j["dop"].b : (j["dop"].n() != 0.0);
+            } else {
+                std::istringstream is(rq.body);
+                std::string tok;
+                while (std::getline(is, tok, '&')) {
+                    size_t eq = tok.find('=');
+                    if (eq == std::string::npos) continue;
+                    std::string k = urlDecode(tok.substr(0, eq));
+                    std::string v = urlDecode(tok.substr(eq + 1));
+                    if (k == "dev") p.dev = v;
+                    else if (k == "file") p.file = v;
+                    else if (k == "port") p.port = (uint16_t)std::atoi(v.c_str());
+                    else if (k == "rate") p.rate = (uint32_t)std::strtoul(v.c_str(), nullptr, 10);
+                    else if (k == "bits") p.bits = std::atoi(v.c_str());
+                    else if (k == "seconds") p.seconds = std::atof(v.c_str());
+                    else if (k == "dop") p.dop = (v == "1" || v == "true");
+                }
+            }
+            if (p.port == 0) p.port = 8912;
+            // 一条会话原则（261024-01 #9）：手动「开始投放」先停本地播放，
+            // 避免本机声卡与网络渲染器同时出声；播放器状态交给投放会话接管前先清零。
+            ps.stopJoin();      // 原子停线程
+            ps.playing.store(false);
+            ps.paused.store(false);
+            g_upnpPlayer.store(false);
+            auto res = rta::net::CastManager::instance().start(p);
+            if (!res.ok) {
+                // 铁律：不假装成功 —— 真实原因原样透给前端
+                return "{\"ok\":false,\"error\":\"" + jesc(res.error) + "\"}";
+            }
+            g_upnpPlayer.store(true);
+            upnp_mark_player_state(p.file, true, "");
+            return "{\"ok\":true,\"started\":true,\"phase\":\"discovering\"}";
+        }
+        if (rq.path.rfind("/api/cast/stop", 0) == 0) {
+            rta::net::CastManager::instance().stop();
+            g_upnpPlayer.store(false);
+            ps.playing.store(false);
+            ps.paused.store(false);
+            return "{\"ok\":true,\"stopped\":true}";
+        }
+        return "{\"ok\":false,\"error\":\"未知的投放 API 路径\"}";
     }
 
     // ---------------- NAA 端点自动发现（261024-01 #11）----------------
@@ -4701,7 +4858,35 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
 
     if (rq.path.rfind("/api/upnp", 0) == 0) {
         ct = "application/json; charset=utf-8";
-        return "{\"ok\":true,\"n\":0,\"devices\":[],\"note\":\"macOS 版暂不支持 SSDP 发现（未移植）\"}";
+        // 2026-10-23（用户 261023-04 #11）：多网卡逐卡发 M-SEARCH + 诊断信息，
+        // 并且在 JSON 里把"为什么没搜到"如实说出来（组播被代理/防火墙/AP 隔离拦截是最常见原因）。
+        // 2026-10-25：macOS 侧 upnp.h 已 POSIX 移植，走同一份实现。
+        rta::net::UpnpDiscoverDiag diag;
+        const auto devs = rta::net::upnp_discover(1800, &diag);
+        std::ostringstream j;
+        j << "{\"ok\":true,\"n\":" << devs.size() << ",\"devices\":[";
+        for (size_t i = 0; i < devs.size(); ++i) {
+            if (i) j << ",";
+            // WebUI（discoverDlna / bUpnp）读 name / model / host / port / loc
+            j << "{\"name\":\"" << jesc(devs[i].name) << "\""
+              << ",\"friendlyName\":\"" << jesc(devs[i].name) << "\""
+              << ",\"model\":\"" << jesc(devs[i].model) << "\""
+              << ",\"host\":\"" << jesc(devs[i].host) << "\""
+              << ",\"port\":" << devs[i].port
+              << ",\"loc\":\"" << jesc(devs[i].location) << "\""
+              << ",\"location\":\"" << jesc(devs[i].location) << "\""
+              << ",\"udn\":\"" << jesc(devs[i].udn) << "\""
+              << "}";
+        }
+        j << "],\"diag\":{\"ifaces\":" << diag.ifaces_tried
+          << ",\"sent\":" << diag.msgs_sent
+          << ",\"note\":\"" << jesc(diag.note) << "\"}";
+        if (devs.empty()) {
+            j << ",\"hint\":\"未发现 UPnP 渲染器：SSDP 组播可能被代理(VPN/TUN)/防火墙/路由器 AP 隔离拦截。"
+                 "可关闭代理后重试，或直接填设备地址（http://IP:端口/）直连。\"";
+        }
+        j << "}";
+        return j.str();
     }
     // ---------------- DeepSeek API Key（2026-10-22 功能4）----------------
     // ★ 不并入 /api/settings：那个端点写 rlplayer-settings.conf（整文件重写），
@@ -5022,7 +5207,7 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
                 for (const char* allow : { "rate", "filter", "filterNx", "shaper", "dsd", "modorder",
                                            "buffer", "volume", "loudness", "isp", "twostage",
                                            "device", "bits", "taps", "atten", "transition", "phase",
-                                           "modfamily", "oobgain", "ahmbits", "modcut", "moddith", "ir", "irgpu", "ramp", "theme", "eq",
+                                           "modfamily", "oobgain", "ahmbits", "modcut", "moddith", "ir", "irgpu", "ramp", "theme", "uistyle", "eq",
                                            "gpuvendor", "dsdnative", "directsdm", "dsdkind", "dsdconv", "dsd2stage",
                                            "backend", "naahost", "upnpdev", "channels", "trim",
                                            "inbackend", "indev", "inoffset", "inbuf", "inmon",
@@ -5211,22 +5396,23 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
     // 设备列表：含 loopback 端点标记、默认、混音率/声道/位深
     if (rq.path.rfind("/api/input/devices", 0) == 0 || rq.path.rfind("/api/indevices", 0) == 0) {
         ct = "application/json; charset=utf-8";
-        // macOS：CoreAudio 输入设备（§13.13）。loopback（Process Tap）首版不提供，如实注明。
+        // macOS：CoreAudio 输入设备（§13.13）。includeLoopback=true 时把回环端点一并列出，
+        // loopback 字段如实反映设备属性（不再硬编码 false）。
         std::ostringstream j;
         j << R"({"ok":true,"devices":[)";
         bool first = true;
-        for (const auto& d : rta::platform::CoreAudioInput::enumerate_capture(false)) {
+        for (const auto& d : rta::platform::CoreAudioInput::enumerate_capture(true)) {
             if (!first) j << ",";
             first = false;
             j << R"({"id":")" << jesc(d.id) << R"(",)"
               << R"("name":")" << jesc(d.name) << R"(",)"
               << R"("default":)" << (d.isDefault ? "true" : "false")
-              << R"(,"loopback":false)"
+              << R"(,"loopback":)" << (d.isLoopback ? "true" : "false")
               << R"(,"mixRate":)" << d.mixRate
               << R"(,"mixChannels":)" << d.mixChannels
               << R"(,"mixBits":)" << d.mixBits << "}";
         }
-        j << R"(],"note":"macOS 采集走 CoreAudio 输入；系统混音回环(loopback)首版未提供"})";
+        j << R"(],"note":"macOS 采集走 CoreAudio 输入；loopback=true 的端点表示系统混音回环端点，其可用性取决于 Process Tap 是否已接入采集路径"})";
         return j.str();
     }
 
@@ -5535,7 +5721,7 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
             std::string line;
             static const char* kAllow[] = {"rate", "filter", "filterNx", "shaper", "dsd", "modorder",
                                            "modfamily", "buffer", "isp", "twostage", "backend", "bits", "device",
-                                           "theme", "taps", "atten", "transition", "phase", "directsdm",
+                                           "theme", "uistyle", "taps", "atten", "transition", "phase", "directsdm",
                                            "dsdkind", "dsdconv", "dsd2stage", "channels", "metaon", "metallm"};
             while (std::getline(f, line)) {
                 if (!line.empty() && line.back() == '\r') line.pop_back();
@@ -5699,17 +5885,29 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
     // （设置页要用它把"AMD"标成可用或未构建，而不是让用户选了才发现没后端）
     if (rq.path.rfind("/api/gpu", 0) == 0) {
         ct = "application/json; charset=utf-8";
-        // macOS：GPU 核（rtagpu）尚无 .dylib 构建；文件存在性与可载性如实为 false，
-        // available/status 由 GpuBridge 自己报（缺失自动退回 CPU，结果逐位相同——契约不变）
-        const bool amd = false, hip = false, cuda = false, cuda_usable = false;
+        // 2026-10-25（Apple Metal GPU 加速落地）：macOS 唯一的 GPU 后端是 Metal，
+        // 产物是 librtagpu.dylib（tools/build_gpu_metal_mac.sh 构建，随包内置）。
+        //
+        // 两个字段必须分开报，不能合成一个（用户 261024-01 #7 的教训：把"文件在不在"
+        // 和"本机真能不能跑"混成一个字段，会让用户看到「后端已就位」却实际走 CPU）：
+        //   metal       = 动态库存在且加载成功
+        //   metalUsable = 真跑过一次平凡 kernel（rta_gpu_available()==1），真的能跑
+        // 注意 GpuBridge::available() 本身就是"加载成功 && rta_gpu_available()==1"，
+        // 所以这里两者同值；保留两个字段是为了让前端语义清晰、且将来若要区分
+        // "文件在但 kernel 编不出来"时不必改契约。
+        // amd/cuda/hip 保留为恒 false：本平台没有对应后端，但字段不能删 ——
+        // 老前端仍在读，删字段会让它们拿到 undefined 而误判。
+        const bool metal = rta::dsp::GpuBridge::instance().available();
         std::ostringstream j;
         j << "{\"ok\":true"
           << ",\"vendor\":\"" << jesc(rta::dsp::gpu_vendor()) << "\""
-          << ",\"amd\":" << (amd ? "true" : "false")
-          << ",\"cuda\":" << (cuda ? "true" : "false")
-          << ",\"cudaUsable\":" << (cuda_usable ? "true" : "false")
-          << ",\"hip\":" << (hip ? "true" : "false")
-          << ",\"available\":" << (rta::dsp::GpuBridge::instance().available() ? "true" : "false")
+          << ",\"metal\":" << (metal ? "true" : "false")
+          << ",\"metalUsable\":" << (metal ? "true" : "false")
+          << ",\"amd\":false"
+          << ",\"cuda\":false"
+          << ",\"cudaUsable\":false"
+          << ",\"hip\":false"
+          << ",\"available\":" << (metal ? "true" : "false")
           << ",\"status\":\"" << jesc(rta::dsp::GpuBridge::instance().status()) << "\"}";
         return j.str();
     }
@@ -5724,9 +5922,14 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
             in_addr a; std::memcpy(&a, he->h_addr_list[0], 4);
             ip = inet_ntoa(a);
         }
+        // 2026-10-25（单进程合并）：多一个 http 字段如实告诉界面「这个端口到底有没有人在听」。
+        // 单进程 embedded 形态下是 false —— 界面据此显示「进程内直连（无本地端口）」，
+        // 而不是渲染一个连不上的 http://127.0.0.1:8899/ 。port 字段保留（配置/诊断仍要看它）。
+        const bool httpOn = g_httpListening.load();
         std::ostringstream j;
         j << "{\"ok\":true,\"port\":" << g_uiPort << ",\"ip\":\"" << jesc(ip) << "\""
-          << ",\"lan\":" << (g_lanOn ? "true" : "false") << "}";
+          << ",\"lan\":" << (g_lanOn ? "true" : "false")
+          << ",\"http\":" << (httpOn ? "true" : "false") << "}";
         return j.str();
     }
 
@@ -5822,6 +6025,14 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
         if (frac > 1.0) frac = 1.0;
         // 后端 = UPnP（261024-01 #9）：进度条跳转转交投放会话（worker 里发 AVTransport Seek REL_TIME）。
         // 时长未知（渲染器还没报）时不瞎跳，如实返回。
+        if (g_upnpPlayer.load()) {
+            const auto st = rta::net::CastManager::instance().get_state();
+            if (st.running && st.durationSec > 0.0) {
+                rta::net::CastManager::instance().seek_seconds(frac * st.durationSec);
+                return "{\"ok\":true,\"upnp\":true}";
+            }
+            return "{\"ok\":true,\"upnp\":true,\"skipped\":true}";
+        }
         ps.seekReq.store(frac);
         return "{\"ok\":true}";
     }
@@ -5832,6 +6043,10 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
         const size_t q = rq.path.find("?on=");
         if (q != std::string::npos) on = atoi(rq.path.c_str() + q + 4);
         // 后端 = UPnP：暂停 / 继续转交投放会话（AVTransport Pause / Play）
+        if (g_upnpPlayer.load()) {
+            rta::net::CastManager::instance().set_paused(on != 0);
+            return std::string("{\"ok\":true,\"paused\":") + ((on != 0) ? "true" : "false") + ",\"upnp\":true}";
+        }
         ps.pauseReq.store(on != 0);
         return std::string("{\"ok\":true,\"paused\":") + ((on != 0) ? "true" : "false") + "}";
     }
@@ -5848,6 +6063,8 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
             g_lastEnd.isPosZeroNoErr = false;
         }
         // 投放会话若还在跑（含手动「开始投放」的会话），一并停掉 —— 底栏「停止」只能有一个结果。
+        if (g_upnpPlayer.exchange(false) || rta::net::CastManager::instance().get_state().running)
+            rta::net::CastManager::instance().stop();
         return "{\"ok\":true}";
     }
 
@@ -5857,6 +6074,17 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
         // 否则底栏与「投放实时状态」会各显示一套进度，互相打架。
         rta::net::CastState castSt;
         bool castMode = false;
+        if (g_upnpPlayer.load()) {
+            castSt = rta::net::CastManager::instance().get_state();
+            if (castSt.running) {
+                castMode = true;
+            } else {
+                // 投放自然结束（渲染器播完 / 出错被停）：播放器回到停止态并清掉投放标志
+                g_upnpPlayer.store(false);
+                ps.playing.store(false);
+                ps.paused.store(false);
+            }
+        }
         std::lock_guard<std::mutex> lk(ps.mtx);
         std::ostringstream j;
         const size_t pl2 = ps.played.load(), tt = ps.total.load();
@@ -5970,49 +6198,49 @@ static std::string page() {
     return h;
 }
 
-int main(int argc, char** argv) {
+// ===========================================================================
+// 单进程合并（2026-10-25）：CLI 与进程内 embedded 共用同一份初始化 / 收尾。
+//
+// 为什么抽出来而不是复制：初始化顺序有强约束（库索引 → 源配置 → 代理 → MetaStore →
+// OPRA → PEQ → 设置 → 空库首扫），收尾顺序也有强约束（先停控制面 → 停播放 → 停采集 →
+// 收预解码 → 停扫描 → 等后台任务）。任何一处顺序错了都是 SIGABRT 或悬垂线程。
+// 两条形态只允许在「有没有 HTTP 监听」和「要不要开浏览器」这两点上不同。
+// ===========================================================================
+
+// ---- 后台 detached 任务追踪：g_bgJobs/g_bgCv 的声明已上移到文件前部（g_httpListening 附近）----
+// 返回 true = 全部收完；false = 超出预算（调用方必须如实记录，不许假装收干净了）
+static bool bg_jobs_wait(std::chrono::milliseconds budget) {
+    std::unique_lock<std::mutex> lk(g_bgMx);
+    return g_bgCv.wait_for(lk, budget, [] { return g_bgJobs.load() == 0; });
+}
+
+// ---- 启动横幅（1.0.5 可观测性）----
+// 版本/构建时间/PID/端口/OS/CPU/GPU/端点数/内测标识 —— 现场排查第一眼就有的信息。
+static void core_log_startup_banner(unsigned port, bool embedded) {
+    std::ostringstream b;
+    b << "STARTUP v" << RLPLAYER_VERSION
+      << " build=" << g_buildTime
+      << " pid=" << current_pid()
+      << " port=" << port
+      << " os=" << rta::diag::os_version_string()
+      << " cpu=" << rta::diag::cpu_brand()
+      << " gpu=" << (rta::dsp::GpuBridge::instance().available() ? "available" : "unavailable")
+      << "(" << rta::dsp::GpuBridge::instance().status() << ")"
+      << " endpoints=" << (
+          [] { size_t n = 0; for (const auto& d : mac_enum_devices()) if (d.hasOutput) ++n; return n; }()
+      );
+    const std::string tester = rta::diag::read_tester();
+    if (!tester.empty()) b << " tester=" << tester;
+    // embedded 明确标注：这个进程没有本地 HTTP 端口（port=0 会被误读成"随机端口"）
+    if (embedded) b << " mode=embedded";
+    play_log(b.str());
+    printf("%s\n", b.str().c_str());
+}
+
+// ---- 共享初始化（不含 HTTP 监听、不含开浏览器）----
+static void core_init_common() {
     rta::crash::install();    // 崩溃转储（1.0.5）：dump 落 exe 目录 dumps\，filter 先写日志
     setvbuf(stdout, nullptr, _IONBF, 0);
-    uint16_t port = 8899;
-    bool lan = false;
-    bool noBrowser = false;
-    // 端口解析（2026-10-25 修）：macOS 壳 tools/mac_host.mm:62 传的是 "--port=%u"（等号形式），
-    // 旧代码只认 "--port N"（空格形式）→ 等号形式被静默忽略、永远绑 8899，
-    // 于是壳里 8899..8910 的端口回退全是死代码（8899 被占时只能报「无法启动播放服务」）。
-    // 现在两种形式都认；非法/越界值一律回落到默认 8899，绝不静默绑到 0（= 随机端口）。
-    auto parse_port = [](const std::string& s, uint16_t& out) -> bool {
-        if (s.empty()) return false;
-        for (char ch : s) if (ch < '0' || ch > '9') return false;   // 只接受纯十进制（不接受 "-1"/"89x"）
-        const long v = strtol(s.c_str(), nullptr, 10);
-        if (v < 1 || v > 65535) return false;
-        out = (uint16_t)v;
-        return true;
-    };
-    for (int i = 1; i < argc; ++i) {
-        const std::string k = argv[i];
-        if (k == "--port" && i + 1 < argc) {
-            uint16_t v = 0;
-            if (parse_port(argv[++i], v)) port = v;
-            else printf("!! --port 的值 \"%s\" 不是合法端口（1..65535），回落到默认 %u\n",
-                        argv[i], (unsigned)port);
-        }
-        else if (k.rfind("--port=", 0) == 0) {
-            uint16_t v = 0;
-            if (parse_port(k.substr(7), v)) port = v;
-            else printf("!! --port= 的值 \"%s\" 不是合法端口（1..65535），回落到默认 %u\n",
-                        k.c_str() + 7, (unsigned)port);
-        }
-        else if (k == "--lan") lan = true;
-        else if (k == "--no-browser") noBrowser = true;   // macOS .app 模式：界面已自动打开
-    }
-    g_uiPort = port;
-    g_lanOn  = lan;
-    // 2026-10-23：把端口写进环境，供 Library 选择实例私有的库配置/索引文件名
-    //（非 8899 实例用 .p<port> 后缀，避免自检沙箱与用户实例互相覆盖库根）。
-    {
-        char pb[16]; std::snprintf(pb, sizeof(pb), "%u", (unsigned)port);
-        ::setenv("RLPLAYER_PORT", pb, 1);   // Library 实例私有后缀（语义同 Windows）
-    }
     // 系统级调优：提高进程优先级 + 把系统定时器精度提到 1ms。
     // 默认 15.6ms 的定时器粒度会让喂数节奏变粗（Round 6 实测过这个问题）。
     // macOS：无 timeBeginPeriod 等价物（AUHAL 回调按设备时钟拉数据，不依赖 host 定时器精度）。
@@ -6080,31 +6308,162 @@ int main(int argc, char** argv) {
         printf("音乐库为空，开始首次扫描（根目录见 rlplayer-library.conf）…\n");
         Library::instance().startScan();
     }
+}
+
+// ---- 共享收尾（调用方必须已经停掉「新请求入口」）----
+// 顺序不能动：播放线程可能还在 prefetch/写 ps，采集线程可能还在摸 CoreAudio，
+// 扫描线程持有 Library 的 th_（joinable 的析构 = terminate → mac .app 实测 SIGABRT）。
+static void core_shutdown_common() {
+    g_ps.stopJoin();        // 原子停播放线程（协作：置 stop 让 queue_thread 自己退）
+    g_inputSession.stop();  // 停采集（同样协作）
+    // 预解码槽：只在播放线程停掉之后才安全 join（queue_thread 是唯一会起它的地方）
+    if (g_pre.th.joinable()) g_pre.th.join();
+    // 库扫描线程必须在 exit() 的静态析构前收掉（th_ joinable 的析构 = terminate；
+    // mac .app 实测 SIGABRT，2026-10-25）。Library 析构里还有兜底，这里保证顺序。
+    Library::instance().stopScan();
+    Library::instance().joinScan();
+    // 写回批任务：**不可取消**（writeback_library 没有 cancel 钩子），只能等它跑完。
+    // 绝不 detach —— 它全程摸 MetaStore 单例，detach 之后壳进程继续活着 = 悬垂访问。
+    {
+        std::thread prev;
+        {
+            std::lock_guard<std::mutex> lk(g_wb.mtx);
+            if (g_wb.th.joinable()) prev = std::move(g_wb.th);
+        }
+        if (prev.joinable()) prev.join();
+    }
+    // detached 的后台任务（元数据补全 / 资料整理）：有界等待，收不完就如实记日志。
+    if (!bg_jobs_wait(std::chrono::milliseconds(5000))) {
+        const int left = g_bgJobs.load();
+        play_log("SHUTDOWN 后台任务未在 5s 内收完，剩余 " + std::to_string(left) + " 个");
+        printf("!! 退出时仍有 %d 个后台任务未收完（已在日志记录）\n", left);
+    }
+}
+
+// ===========================================================================
+// rlapp —— 进程内 embedded 接口（给 tools/mac_host.mm 用；契约见 rlapp_core.h）
+// ===========================================================================
+
+bool rlapp::start_embedded() {
+    static std::once_flag once;
+    std::call_once(once, [] {
+        // 单进程形态：**不** bind/listen 任何本地端口，**不** fork/open 浏览器。
+        // RLPLAYER_PORT 仍固定 "8899" —— Library::confLeaf 据此走「默认实例」分支，
+        // 沿用用户既有的 rlplayer-library.conf / rlplayer-index.tsv 文件名，
+        // 绝不因为改造而让用户的曲库"变空"（那是 1.3.x 已经踩过一次的事故）。
+        ::setenv("RLPLAYER_PORT", "8899", 1);
+        // g_uiPort = 0：/api/net 与 /api/diagzip 里的 port 字段不再冒充一个真实端口。
+        // 真正的"有没有在监听"由 g_httpListening 单独表达（embedded 恒 false）。
+        g_uiPort = 0;
+        g_lanOn = false;
+        g_httpListening.store(false);
+        core_init_common();
+        core_log_startup_banner(0, /*embedded=*/true);
+        play_log("MODE embedded（进程内直连，无本地 HTTP 监听，无浏览器 fork）");
+    });
+    return true;
+}
+
+std::string rlapp::dispatch(const rta::net::HttpRequest& request, std::string& contentType) {
+    // 与旧 WebUi::handle 逐字一致的默认值：handler 自己改 ct（图片/JS/HTML/文本/zip）。
+    contentType = "application/json; charset=utf-8";
+    // 这里【绝不】加全局请求锁：WKURLSchemeHandler 用多个工作线程并发回调，
+    // 加锁就把旧 WebUi「每连接一个工作线程」的并行能力退化回串行（那是本轮明确禁止的）。
+    // 线程安全由 handle() 内部原有的 per-endpoint 锁（ps.mtx / g_q.mtx / g_logMx …）保证，
+    // 与旧路径完全相同 —— 旧路径本来就是在任意工作线程上跑同一个 handle()。
+    //
+    // 并发观测（无锁）：进入 +1，更新峰值，离开 -1。全是 relaxed 原子操作，不进临界区，
+    // 因此这个探针本身不会成为「隐形的串行化」——否则它就是在测自己。
+    struct InFlight {
+        InFlight() {
+            g_dispatchCount.fetch_add(1, std::memory_order_relaxed);
+            const int now = g_inFlight.fetch_add(1, std::memory_order_relaxed) + 1;
+            int peak = g_peakConcurrent.load(std::memory_order_relaxed);
+            while (now > peak &&
+                   !g_peakConcurrent.compare_exchange_weak(peak, now, std::memory_order_relaxed)) {}
+        }
+        ~InFlight() { g_inFlight.fetch_sub(1, std::memory_order_relaxed); }
+    } inFlight;
+    try {
+        return handle(request, contentType);
+    } catch (...) {
+        // 旧 WebUi::handle 也是 try/catch 吞掉异常后关连接；这里等价，绝不把异常抛回 ObjC++。
+        contentType = "application/json; charset=utf-8";
+        play_log("DISPATCH 异常已拦截（请求 " + request.path + "）");
+        return "{\"ok\":false,\"error\":\"internal error\"}";
+    }
+}
+
+int       rlapp::max_concurrent_dispatches() { return g_peakConcurrent.load(); }
+long long rlapp::dispatch_count()            { return g_dispatchCount.load(); }
+void      rlapp::reset_dispatch_probe() {
+    g_peakConcurrent.store(g_inFlight.load());
+    g_dispatchCount.store(0);
+}
+
+bool rlapp::exit_requested() {
+    return g_exitReq.load();
+}
+
+void rlapp::stop_embedded() {
+    // 幂等：壳可能因为「用户点退出」和「窗口关闭」各调一次。
+    static std::atomic<bool> stopped{false};
+    if (stopped.exchange(true)) return;
+    core_shutdown_common();
+}
+
+int rlapp::cli_main(int argc, char** argv) {
+    uint16_t port = 8899;
+    bool lan = false;
+    bool noBrowser = false;
+    // 端口解析（2026-10-25 修）：macOS 壳 tools/mac_host.mm:62 传的是 "--port=%u"（等号形式），
+    // 旧代码只认 "--port N"（空格形式）→ 等号形式被静默忽略、永远绑 8899，
+    // 于是壳里 8899..8910 的端口回退全是死代码（8899 被占时只能报「无法启动播放服务」）。
+    // 现在两种形式都认；非法/越界值一律回落到默认 8899，绝不静默绑到 0（= 随机端口）。
+    auto parse_port = [](const std::string& s, uint16_t& out) -> bool {
+        if (s.empty()) return false;
+        for (char ch : s) if (ch < '0' || ch > '9') return false;   // 只接受纯十进制（不接受 "-1"/"89x"）
+        const long v = strtol(s.c_str(), nullptr, 10);
+        if (v < 1 || v > 65535) return false;
+        out = (uint16_t)v;
+        return true;
+    };
+    for (int i = 1; i < argc; ++i) {
+        const std::string k = argv[i];
+        if (k == "--port" && i + 1 < argc) {
+            uint16_t v = 0;
+            if (parse_port(argv[++i], v)) port = v;
+            else printf("!! --port 的值 \"%s\" 不是合法端口（1..65535），回落到默认 %u\n",
+                        argv[i], (unsigned)port);
+        }
+        else if (k.rfind("--port=", 0) == 0) {
+            uint16_t v = 0;
+            if (parse_port(k.substr(7), v)) port = v;
+            else printf("!! --port= 的值 \"%s\" 不是合法端口（1..65535），回落到默认 %u\n",
+                        k.c_str() + 7, (unsigned)port);
+        }
+        else if (k == "--lan") lan = true;
+        else if (k == "--no-browser") noBrowser = true;   // macOS .app 模式：界面已自动打开
+    }
+    g_uiPort = port;
+    g_lanOn  = lan;
+    // 2026-10-23：把端口写进环境，供 Library 选择实例私有的库配置/索引文件名
+    //（非 8899 实例用 .p<port> 后缀，避免自检沙箱与用户实例互相覆盖库根）。
+    {
+        char pb[16]; std::snprintf(pb, sizeof(pb), "%u", (unsigned)port);
+        ::setenv("RLPLAYER_PORT", pb, 1);   // Library 实例私有后缀（语义同 Windows）
+    }
+    // 与 embedded 完全相同的初始化（库/配置/OPRA/代理/MetaStore/PEQ/设置/空库首扫）
+    core_init_common();
+
     rta::net::WebUi ui;
     if (!ui.start(port, handle, !lan)) {
         printf("!! 端口 %u 启动失败（被占用？）\n", (unsigned)port);
         return 1;
     }
-    // 启动横幅（1.0.5 可观测性）：版本/构建时间/PID/端口/OS/CPU/GPU/端点数/内测标识。
-    // 现场排查第一眼就有的信息：日志里的 v 字样只能说明版本，说明不了"跑在谁的哪台机器上"。
-    {
-        std::ostringstream b;
-        b << "STARTUP v" << RLPLAYER_VERSION
-          << " build=" << g_buildTime
-           << " pid=" << current_pid()
-          << " port=" << (unsigned)ui.port()
-          << " os=" << rta::diag::os_version_string()
-          << " cpu=" << rta::diag::cpu_brand()
-          << " gpu=" << (rta::dsp::GpuBridge::instance().available() ? "available" : "unavailable")
-          << "(" << rta::dsp::GpuBridge::instance().status() << ")"
-          << " endpoints=" << (
-              [] { size_t n = 0; for (const auto& d : mac_enum_devices()) if (d.hasOutput) ++n; return n; }()
-          );
-        const std::string tester = rta::diag::read_tester();
-        if (!tester.empty()) b << " tester=" << tester;
-        play_log(b.str());
-        printf("%s\n", b.str().c_str());
-    }
+    // CLI 形态：真的有本地监听在服务 → /api/net 可以如实说 http:true
+    g_httpListening.store(true);
+    core_log_startup_banner((unsigned)ui.port(), /*embedded=*/false);
     printf("RLPlayer 网页播放器\n");
     printf("  打开浏览器访问: http://127.0.0.1:%u/\n", (unsigned)ui.port());
     printf("  （只监听本机；播放会以独占模式接管音频设备）\n");
@@ -6123,11 +6482,19 @@ int main(int argc, char** argv) {
     //   先停 HTTP 控制面 —— handler 现在跑在工作线程里，stop() 会 shutdown 活跃连接并等
     //   连接表清空；然后才拆播放线程 / 库扫描线程。否则在途请求会访问正在析构的单例。
     ui.stop();
-    g_ps.stopJoin();        // 原子停播放线程
-    g_inputSession.stop();
-    // 库扫描线程必须在 exit() 的静态析构前收掉（th_ joinable 的析构 = terminate；
-    // mac .app 实测 SIGABRT，2026-10-25）。Library 析构里还有兜底，这里保证顺序。
-    Library::instance().stopScan();
-    Library::instance().joinScan();
+    g_httpListening.store(false);
+    // 控制面已停 → 与 embedded 完全相同的协作收尾（播放/采集/预解码/扫描/写回/后台任务）
+    core_shutdown_common();
     return 0;
 }
+
+// ---------------------------------------------------------------------------
+// 独立 CLI 入口：rtaweb 可执行文件（add_executable(rtaweb tools/rtaweb.cpp)）用这个。
+// 库构建形态（rlapp_core.cpp：#define RLPLAYER_EMBEDDED_LIBRARY）里屏蔽掉，
+// 否则会和 rlapp_cli.cpp 的 main() 重复定义 —— 那是链接错误，不是"两个入口"。
+// ---------------------------------------------------------------------------
+#ifndef RLPLAYER_EMBEDDED_LIBRARY
+int main(int argc, char** argv) {
+    return rlapp::cli_main(argc, argv);
+}
+#endif

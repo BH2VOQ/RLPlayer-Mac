@@ -13,58 +13,68 @@ namespace rta::net {
 
 inline std::string rta_ui_page() {
     std::string h;
-    h += "<!doctype html><html lang=zh data-theme=dark><head><meta charset=utf-8>";
+    h += "<!doctype html><html lang=zh data-theme=dark data-uistyle=apple><head><meta charset=utf-8>";
     h += "<meta name=viewport content='width=device-width,initial-scale=1'>";
     h += "<title>RLPlayer</title>";
     // theme-color 决定 Edge「应用窗口」标题栏/边框的颜色；不设就是系统白，跟深色本体割裂。
-    h += "<meta name=theme-color content='#0c0e13'>";
+    h += "<meta name=theme-color content='#161618'>";
     h += "<link rel=icon type='image/png' href='/favicon.png'>";
     h += "<style>";
     // ---------- 主题变量 ----------
+    // 2026-10-25（Apple Music 风格重构）：三套配色整体换成 Apple Music 体系 ——
+    //   Dark  = Apple Music 深色（近黑底 #161618 + 珊瑚红 #fa2d48 强调）
+    //   Light = Apple Music 浅色（纯白底 + 极轻灰分层，对标用户截图）
+    //   Blue  = Hi-Fi 冰蓝（保留原有冰蓝取向，但补齐毛玻璃边框/阴影变量）
+    // 组件里【仍然不许出现硬编码颜色】—— 全部走这里的变量。
     h += ":root{color-scheme:dark;"
-         "--bg:#08090c;--bg2:#0c0e13;--bg3:#11141b;"
-         "--topbg:linear-gradient(180deg,#12151c,#0b0d11);"
-         "--barbg:linear-gradient(180deg,#11141b,#0a0c10);"
-         "--line:rgba(255,255,255,.075);"
-         "--hov:rgba(255,255,255,.055);--hov2:rgba(255,255,255,.11);"
-         "--field:rgba(6,8,11,.9);--crumb:rgba(8,9,12,.94);"
-         "--txt:#e9edf5;--txt2:#c3ccdb;--mut:#828ea3;--mut2:#5b6478;"
-         "--acc:#3b82f6;--acc2:#8b5cf6;--acc-weak:rgba(59,130,246,.16);--acc-text:#9dc0ff;"
-         "--nav-on:linear-gradient(90deg,rgba(59,130,246,.24),rgba(59,130,246,.04));--nav-on-text:#cfe0ff;"
-         "--cvbg:#151a24;--phbg:linear-gradient(135deg,#1a2233,#12161f);--ph-txt:rgba(255,255,255,.14);"
-         "--shadow:rgba(0,0,0,.45);--track:rgba(255,255,255,.09);--toast:rgba(22,28,38,.97);"
-         "--ok:#34d399;--ok-bg:rgba(52,211,153,.14);--ok-line:rgba(52,211,153,.3);--ok-text:#6ee7b7;"
-         "--warn:#fbbf24;--danger:#e8654b;--bp-direct:#a78bfa;"
+         "--bg:#161618;--bg2:#1e1e22;--bg3:#26262b;"
+         "--topbg:rgba(22,22,24,.82);"
+         "--barbg:rgba(40,40,46,.78);--bar-border:rgba(255,255,255,.12);--bar-shadow:0 16px 44px rgba(0,0,0,.55),0 2px 10px rgba(0,0,0,.30);"
+         "--line:rgba(255,255,255,.08);--line2:rgba(255,255,255,.13);"
+         "--hov:rgba(255,255,255,.06);--hov2:rgba(255,255,255,.11);"
+         "--field:rgba(255,255,255,.07);--crumb:rgba(22,22,24,.92);"
+         "--txt:#f5f5f7;--txt2:#d2d2d7;--mut:#86868b;--mut2:#6e6e73;"
+         "--acc:#fa2d48;--acc2:#ff375f;--acc-weak:rgba(250,45,72,.16);--acc-text:#ff697d;"
+         "--nav-on:rgba(255,255,255,.10);--nav-on-text:#ffffff;"
+         "--cvbg:#242429;--phbg:linear-gradient(135deg,#2a2a30,#1c1c20);--ph-txt:rgba(255,255,255,.16);"
+         "--shadow:rgba(0,0,0,.42);--track:rgba(255,255,255,.12);--toast:rgba(32,32,36,.96);"
+         "--ok:#30d158;--ok-bg:rgba(48,209,88,.14);--ok-line:rgba(48,209,88,.32);--ok-text:#66e384;"
+         "--warn:#ffd60a;--danger:#ff453a;--bp-direct:#bf5af2;"
+         // 圆角 / 阴影 / 侧栏宽度：只定义在 :root。light/blue 覆盖的是**颜色**变量，
+         // 下面这些引用 --line/--shadow/--acc-weak，它们本身就是主题变量 ⟹ 三套主题自动跟随。
+         "--r-lg:14px;--r-md:10px;--r-sm:8px;"
+         "--sh1:0 1px 2px var(--shadow);--sh2:0 12px 32px -18px var(--shadow);"
+         "--sidew:226px;"
          "}";
-    // 白色主题
+    // Apple Music 浅色主题（对标用户截图：白底 + 灰分层 + 珊瑚红强调）
     h += "html[data-theme=light]{color-scheme:light;"
-         "--bg:#f4f6f9;--bg2:#ffffff;--bg3:#eef1f6;"
-         "--topbg:linear-gradient(180deg,#ffffff,#f3f5f9);"
-         "--barbg:linear-gradient(180deg,#ffffff,#f0f3f8);"
-         "--line:rgba(15,23,42,.10);"
-         "--hov:rgba(15,23,42,.05);--hov2:rgba(15,23,42,.09);"
-         "--field:#ffffff;--crumb:rgba(244,246,249,.94);"
-         "--txt:#0f172a;--txt2:#334155;--mut:#5a6b82;--mut2:#8794a8;"
-         "--acc:#2563eb;--acc2:#7c3aed;--acc-weak:rgba(37,99,235,.12);--acc-text:#1d4ed8;"
-         "--nav-on:linear-gradient(90deg,rgba(37,99,235,.13),rgba(37,99,235,.02));--nav-on-text:#1e40af;"
-         "--cvbg:#e6ecf5;--phbg:linear-gradient(135deg,#e6ecf6,#dae2ee);--ph-txt:rgba(15,23,42,.20);"
-         "--shadow:rgba(15,23,42,.13);--track:rgba(15,23,42,.10);--toast:rgba(255,255,255,.98);"
-         "--ok:#059669;--ok-bg:rgba(5,150,105,.10);--ok-line:rgba(5,150,105,.25);--ok-text:#047857;"
-         "--warn:#b45309;--danger:#dc2626;--bp-direct:#6d28d9;"
+         "--bg:#ffffff;--bg2:#f2f2f6;--bg3:#f7f7fa;"
+         "--topbg:rgba(255,255,255,.85);"
+         "--barbg:rgba(246,246,249,.84);--bar-border:rgba(0,0,0,.085);--bar-shadow:0 12px 38px rgba(0,0,0,.13),0 2px 8px rgba(0,0,0,.05);"
+         "--line:rgba(0,0,0,.08);--line2:rgba(0,0,0,.13);"
+         "--hov:rgba(0,0,0,.045);--hov2:rgba(0,0,0,.08);"
+         "--field:rgba(0,0,0,.05);--crumb:rgba(255,255,255,.92);"
+         "--txt:#1d1d1f;--txt2:#3a3a3c;--mut:#6e6e73;--mut2:#86868b;"
+         "--acc:#fa2d48;--acc2:#ff375f;--acc-weak:rgba(250,45,72,.11);--acc-text:#d71935;"
+         "--nav-on:rgba(0,0,0,.068);--nav-on-text:#1d1d1f;"
+         "--cvbg:#ededf2;--phbg:linear-gradient(135deg,#f2f2f7,#e5e5ea);--ph-txt:rgba(0,0,0,.18);"
+         "--shadow:rgba(0,0,0,.10);--track:rgba(0,0,0,.10);--toast:rgba(255,255,255,.96);"
+         "--ok:#248a3d;--ok-bg:rgba(36,138,61,.10);--ok-line:rgba(36,138,61,.25);--ok-text:#1e7033;"
+         "--warn:#b25000;--danger:#d70015;--bp-direct:#8944ab;"
          "}";
-    // 浅蓝主题
+    // Hi-Fi 冰蓝主题
     h += "html[data-theme=blue]{color-scheme:light;"
-         "--bg:#e9f2ff;--bg2:#f7fbff;--bg3:#dcebfe;"
-         "--topbg:linear-gradient(180deg,#ffffff,#e9f4ff);"
-         "--barbg:linear-gradient(180deg,#f7fbff,#e4f0ff);"
-         "--line:rgba(12,60,120,.13);"
-         "--hov:rgba(12,60,120,.06);--hov2:rgba(12,60,120,.11);"
-         "--field:#ffffff;--crumb:rgba(233,242,255,.94);"
-         "--txt:#0b2545;--txt2:#1e3a5f;--mut:#4a6b93;--mut2:#7d97b8;"
-         "--acc:#0d6efd;--acc2:#3b9bff;--acc-weak:rgba(13,110,253,.13);--acc-text:#0b5ed7;"
-         "--nav-on:linear-gradient(90deg,rgba(13,110,253,.16),rgba(13,110,253,.02));--nav-on-text:#0a58ca;"
-         "--cvbg:#d9e9ff;--phbg:linear-gradient(135deg,#dbeafe,#cde2ff);--ph-txt:rgba(11,37,69,.20);"
-         "--shadow:rgba(11,37,69,.15);--track:rgba(11,37,69,.10);--toast:rgba(255,255,255,.98);"
+         "--bg:#f8faff;--bg2:#ecf2fc;--bg3:#f1f6fe;"
+         "--topbg:rgba(248,250,255,.85);"
+         "--barbg:rgba(242,247,255,.85);--bar-border:rgba(15,60,130,.10);--bar-shadow:0 12px 36px rgba(15,50,110,.13),0 2px 8px rgba(15,50,110,.05);"
+         "--line:rgba(15,55,115,.09);--line2:rgba(15,55,115,.15);"
+         "--hov:rgba(15,55,115,.05);--hov2:rgba(15,55,115,.09);"
+         "--field:rgba(15,55,115,.055);--crumb:rgba(248,250,255,.92);"
+         "--txt:#0d203b;--txt2:#253d5b;--mut:#556f92;--mut2:#7a92b2;"
+         "--acc:#0066cc;--acc2:#2b84ea;--acc-weak:rgba(0,102,204,.12);--acc-text:#0052a3;"
+         "--nav-on:rgba(0,75,165,.085);--nav-on-text:#0d203b;"
+         "--cvbg:#e1ecfc;--phbg:linear-gradient(135deg,#e6f0ff,#d5e5ff);--ph-txt:rgba(13,32,59,.18);"
+         "--shadow:rgba(13,32,59,.12);--track:rgba(13,32,59,.10);--toast:rgba(255,255,255,.97);"
          "--ok:#0f766e;--ok-bg:rgba(15,118,110,.10);--ok-line:rgba(15,118,110,.25);--ok-text:#0b5f59;"
          "--warn:#b45309;--danger:#c2410c;--bp-direct:#4338ca;"
          "}";
@@ -83,36 +93,40 @@ inline std::string rta_ui_page() {
     // 其余选项统一 bg2/txt，深色 16:1 / 浅色 14:1，菜单怎么弹都读得清。
     h += "select option:checked{background-color:var(--acc-weak);color:var(--acc-text)}";
     h += "select option:disabled{color:var(--mut2)}";
-    h += "#app{display:grid;grid-template-columns:212px 1fr 378px;grid-template-rows:52px 1fr 88px;height:100vh}";
-    h += "#app.noq{grid-template-columns:212px 1fr 0}#app.noq #right{display:none}";
-    // 2026-10-23（UI 评审 #1/#3/#9/#18）：窄窗口（≤1240px）右侧队列/歌词抽屉会吃掉 378px，
-    // 把主区挤到 434px → 曲目名被压成 0 宽、专辑网格只剩 2 列。窄窗默认收起抽屉，主区优先。
-    h += "@media (max-width:1240px){#app{grid-template-columns:200px minmax(0,1fr) 0}#app #right{display:none}}";
+    // 2026-10-25（mac 控件协调）：macOS 原生壳是 NSWindow + FullSizeContentView，
+    // 左栏通顶（grid-row: 1/3），顶部预留 42px 红绿灯安全区，品牌区紧接在下方。
+    // 2026-10-25（Apple Music 风格重构）：外壳网格改成「通顶侧栏 + 大字报顶栏 + 悬浮播放胶囊」。
+    //   · 播放胶囊 .bar 改为 position:fixed 悬浮 ⟹ #app 只需 2 行：60px 顶栏 + 1fr 主内容区。
+    //   · 侧栏 .side 用 grid-row:1/3 跨全高（从 y=0 到 y=100vh，绝不被底栏切断）。
+    h += "#app{display:grid;grid-template-columns:var(--sidew) 1fr 340px;grid-template-rows:60px 1fr;height:100vh;background:var(--bg);position:relative}";
+    h += "#app.noq{grid-template-columns:var(--sidew) 1fr 0}#app.noq #right{display:none}";
+    // 2026-10-23（UI 评审 #1/#3/#9/#18）：窄窗口（≤1240px）右侧队列/歌词抽屉会吃掉 340px，
+    // 把主区挤到窄窗 → 曲目名被压成 0 宽、专辑网格只剩 2 列。窄窗默认收起抽屉，主区优先。
+    // 2026-10-25（修复左侧栏伸缩跳动）：@media(max-width:1240px) 原来把第一列写成 200px，
+    // 而 #app.noq 写的是 var(--sidew)(226px) 且选择器权重更高（1 ID + 1 class > 1 ID）⟹
+    // 开关右侧队列抽屉（切换 .noq）时，左侧边栏会在 226px 与 200px 之间来回跳动 26px！
+    // 修法：第一列在所有断点下恒用 var(--sidew)，右侧抽屉在 <=1240px 下以 Apple Music 悬浮毛玻璃卡片弹出。
+    h += "@media (max-width:1240px){#app{grid-template-columns:var(--sidew) minmax(0,1fr) 0}#app #right{display:none}#app.qopen:not(.noq):not(.setmode) #right{display:flex;position:fixed;top:68px;right:18px;bottom:92px;width:320px;z-index:20;border-radius:14px;border:1px solid var(--bar-border,var(--line2));background:var(--barbg);backdrop-filter:blur(32px) saturate(190%);-webkit-backdrop-filter:blur(32px) saturate(190%);box-shadow:var(--bar-shadow)}}";
     // 窄窗口下曲目行按「歌名 > 艺术家 > 规格」优先级收列，绝不把歌名压成 0 宽（评审 #3/#18 的根因兜底）
     h += ".trow-track .ar,.trow-track .bd{overflow:hidden}";
     h += "@media (max-width:1400px){.trow-track{grid-template-columns:28px 24px minmax(120px,1.8fr) minmax(0,1fr) 0px 58px!important}}";
     h += "@media (max-width:1120px){.trow-track{grid-template-columns:28px 24px minmax(0,1fr) minmax(0,.9fr) 0px 58px!important}}";
     
-    // 顶栏
-    // 顶栏与内容同底色、无分隔线：整块界面连成一片（QQ 音乐式一体化）。
-    h += ".top{grid-column:1/-1;display:flex;align-items:center;gap:10px;padding:0 10px 0 16px;background:var(--bg);border-bottom:0;position:relative;z-index:9;min-width:0}";
-    h += ".hsep{width:1px;height:18px;background:var(--line);margin:0 2px;flex:none}";
-    h += ".ptitle{font-weight:650;font-size:14px;color:var(--txt);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:220px;flex:none}";
-    h += ".pcnt{font-size:11px;color:var(--mut2);white-space:nowrap;flex:none}";
+    // 顶栏（第 2 列起，右侧通底，左侧与主内容对齐）
+    // 2026-10-25（Apple Music 风格重构）：顶栏变成半透明毛玻璃大字报
+    h += ".top{grid-column:2/-1;grid-row:1;display:flex;align-items:center;gap:12px;height:60px;padding:0 24px 0 28px;background:var(--topbg);backdrop-filter:blur(20px);-webkit-backdrop-filter:blur(20px);border-bottom:1px solid var(--line);position:relative;z-index:9;min-width:0;box-sizing:border-box}";
+    h += ".ptitle{font-weight:750;font-size:24px;letter-spacing:-0.5px;color:var(--txt);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:260px;flex:0 1 auto;line-height:1.2}";
+    h += ".pcnt{font-size:12px;font-weight:500;color:var(--mut);white-space:nowrap;flex:none;margin-top:4px}";
     h += ".ptools{display:flex;align-items:center;gap:4px;flex:none}";
     h += ".wctl{display:none;align-items:center;margin-left:2px;margin-right:-10px;flex:none}";
     h += "html.webview2 .wctl{display:flex}";
+    // 2026-10-25（mac 控件协调）：machost 下隐藏 Windows 的 min/max/close
+    h += "html.machost .wctl{display:none!important}";
     h += ".wbtn{width:44px;height:52px;border-radius:0;display:grid;place-items:center;color:var(--mut);transition:.12s}";
     h += ".wbtn:hover{background:var(--hov);color:var(--txt)}";
     h += ".wbtn.close:hover{background:#e81123;color:#fff}";
     h += ".wbtn svg{width:12px;height:12px}";
     // ---------- 261024-04 #1：窗口边缘拉伸热区（页面发起 resize） ----------
-    // 背景：WebView2 的 3 个子窗口属于别的进程，宿主无法 subclass，鼠标事件全被它们吃掉 ⟹
-    // 原生的边缘 hit-test 收不到鼠标。改成「页面发起 resize」：页面在最外 5px 铺 8 条不可见热区，
-    // mousedown 时 postMessage('resize:<方向>')，宿主（launcher.cpp）据此走 WM_NCLBUTTONDOWN。
-    // 这里只负责**光标形状**与命中区域；真正的判定在 ui_script 的 document 捕获阶段按坐标做
-    //（这样 CDP 的合成 mousedown 派给 document 也能触发，与真实鼠标行为一致）。
-    // z-index 取最大：必须盖在弹层 / 单曲页 / 设置页之上，否则在那些页面上又拖不动窗口。
     h += "html.webview2 #rzHot{position:fixed;inset:0;z-index:2147483000;pointer-events:none}";
     h += "html.webview2 #rzHot i{position:fixed;display:block;pointer-events:auto;background:transparent}";
     h += "html.webview2 #rzHot .rz-l{left:0;top:0;bottom:0;width:5px;cursor:ew-resize}";
@@ -123,33 +137,41 @@ inline std::string rta_ui_page() {
     h += "html.webview2 #rzHot .rz-tr{right:0;top:0;width:10px;height:10px;cursor:nesw-resize}";
     h += "html.webview2 #rzHot .rz-bl{left:0;bottom:0;width:10px;height:10px;cursor:nesw-resize}";
     h += "html.webview2 #rzHot .rz-br{right:0;bottom:0;width:10px;height:10px;cursor:nwse-resize}";
-    h += ".logo{width:27px;height:27px;border-radius:8px;background:linear-gradient(135deg,var(--acc),var(--acc2));display:grid;place-items:center;font-weight:800;font-size:13px;color:#fff;box-shadow:0 2px 14px var(--acc-weak);flex:none}";
-    h += ".ttl{font-weight:650;letter-spacing:.2px;flex:none}.ttl small{display:block;font-size:9px;font-weight:500;color:var(--mut2);letter-spacing:1.3px;margin-top:-3px}";
-    h += ".search{flex:1;max-width:460px;margin-left:14px;position:relative}";
-    h += ".search input{width:100%;padding:8px 12px 8px 32px;border-radius:9px;border:1px solid var(--line);background:var(--field);transition:.15s;font-size:12.5px}";
+    // 搜索框：flex:0 1 320px
+    h += ".search{flex:0 1 320px;min-width:140px;margin-left:12px;position:relative;display:flex;align-items:center}";
+    h += ".search input{width:100%;height:32px;padding:0 12px 0 32px;border-radius:8px;border:1px solid var(--line);background:var(--field);transition:.15s;font-size:12.5px;box-sizing:border-box;color:var(--txt)}";
     h += ".search input:focus{outline:0;border-color:var(--acc);box-shadow:0 0 0 3px var(--acc-weak)}";
-    h += ".search svg{position:absolute;left:10px;top:9px;opacity:.4}";
-    h += ".sp{flex:1}.ibtn{width:32px;height:32px;border-radius:8px;display:grid;place-items:center;color:var(--mut);transition:.15s}";
-    h += ".ibtn:hover{background:var(--hov2);color:var(--txt)}";
+    h += ".search svg{position:absolute;left:10px;top:50%;margin-top:-7px;opacity:.4;pointer-events:none}";
+    h += ".sp{flex:1}.ibtn{width:32px;height:32px;border-radius:var(--r-sm);display:grid;place-items:center;color:var(--mut);transition:.15s;flex:none}";
+    h += ".ibtn:hover{background:var(--hov2);color:var(--txt)}.ibtn.on{background:var(--acc-weak);color:var(--acc)}";
     // 主题切换
-    h += ".themes{display:flex;gap:6px;align-items:center;margin-right:4px}";
+    h += ".themes{display:flex;gap:6px;align-items:center;margin-right:4px;flex:none}";
     h += ".sw{width:18px;height:18px;border-radius:50%;border:1px solid var(--line);cursor:pointer;transition:.15s;position:relative}";
     h += ".sw:hover{transform:scale(1.12)}";
     h += ".sw.on{box-shadow:0 0 0 2px var(--acc)}";
-    h += ".sw[data-theme=dark]{background:linear-gradient(135deg,#1b2130,#0a0b0e)}";
-    h += ".sw[data-theme=light]{background:linear-gradient(135deg,#ffffff,#e6e9ef)}";
-    h += ".sw[data-theme=blue]{background:linear-gradient(135deg,#e9f2ff,#bcd9ff)}";
-    // 侧栏
-    h += ".side{background:var(--bg2);border-right:1px solid var(--line);padding:10px 8px;overflow:auto;display:flex;flex-direction:column}";
+    h += ".sw[data-theme=light]{background:linear-gradient(135deg,#ffffff,#e2e2e7);border-color:rgba(0,0,0,.15)}";
+    h += ".sw[data-theme=dark]{background:linear-gradient(135deg,#2c2c2e,#161618);border-color:rgba(255,255,255,.2)}";
+    h += ".sw[data-theme=blue]{background:linear-gradient(135deg,#cce0ff,#0066cc);border-color:rgba(0,102,204,.3)}";
+    // 侧栏（左侧全高 0..100vh，宽度锁死 var(--sidew)，绝不随右侧抽屉或内容伸缩）
+    h += ".side{grid-column:1;grid-row:1/3;width:var(--sidew);min-width:var(--sidew);max-width:var(--sidew);background:var(--bg2);border-right:1px solid var(--line);padding:12px 12px 14px;overflow-y:auto;display:flex;flex-direction:column;gap:2px;-webkit-user-select:none;user-select:none;box-sizing:border-box}";
     h += ".side .sp{flex:1;min-height:12px}";
-    h += ".side .nav svg{width:16px;height:16px;flex:none}";
-    h += ".nav{display:flex;align-items:center;gap:10px;padding:9px 12px;border-radius:9px;color:var(--mut);cursor:pointer;font-weight:500;transition:.13s;white-space:nowrap;overflow:hidden;font-size:12.5px}";
-    h += ".nav:hover{background:var(--hov);color:var(--txt)}";
-    h += ".nav.on{background:var(--nav-on);color:var(--nav-on-text)}";
-    h += ".nav svg{flex:none}.sec{margin:16px 12px 6px;font-size:10px;letter-spacing:1.2px;color:var(--mut2);font-weight:600}";
+    // 导航图标着 Apple Music 强调色（--acc）
+    h += ".side .nav svg{width:17px;height:17px;flex:none;color:var(--acc)}";
+    h += ".side-top{display:none}";
+    h += "html.machost .side-top{display:block;height:38px;flex:none;margin:-12px -12px 4px;padding:0 14px}";
+    // 侧栏底部左下角品牌徽标
+    h += ".side-brand{display:flex;align-items:center;gap:10px;padding:10px 10px 2px;margin-top:6px;border-top:1px solid var(--line);flex:none;box-sizing:border-box;-webkit-user-select:none;user-select:none}";
+    h += ".logo{width:28px;height:28px;border-radius:50%;background:linear-gradient(135deg,var(--acc),var(--acc2));display:grid;place-items:center;font-weight:700;font-size:12.5px;color:#fff;flex:none}";
+    h += ".ttl{font-size:12.5px;font-weight:600;color:var(--txt);line-height:1.25}";
+    h += ".ttl small{display:block;font-size:9px;font-weight:500;color:var(--mut);letter-spacing:.6px;margin-top:1px}";
+    h += ".nav{display:flex;align-items:center;gap:10px;padding:8px 11px;border-radius:8px;color:var(--txt);cursor:pointer;font-weight:450;transition:background .12s;white-space:nowrap;overflow:hidden;font-size:13px}";
+    h += ".nav:hover{background:var(--hov)}";
+    h += ".nav.on{background:var(--nav-on);color:var(--nav-on-text);font-weight:600}";
+    h += ".sec{margin:14px 11px 5px;font-size:11px;letter-spacing:0.5px;color:var(--mut);font-weight:600;text-transform:none}";
+    h += ".side-brand + .sec{margin-top:6px}";
     // 主区
     h += "#app.setmode .crumb{display:none}";
-    h += ".main{overflow:auto;position:relative}";
+    h += ".main{grid-column:2;grid-row:2;overflow:auto;position:relative;display:flex;flex-direction:column;padding-bottom:92px;box-sizing:border-box}";
     h += ".main>.pad{padding:18px}";
     h += ".btn{padding:6px 13px;border-radius:8px;background:var(--hov);border:1px solid var(--line);font-size:12px;transition:.14s;white-space:nowrap}";
     h += ".btn:hover{background:var(--hov2)}";
@@ -209,7 +231,52 @@ inline std::string rta_ui_page() {
     h += ".row:hover{background:var(--hov)}.row .ico{width:20px;text-align:center;flex:none;opacity:.75}";
     h += ".row .nm{flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.row .meta{font-size:11px;color:var(--mut2);flex:none}";
     h += ".rowdir .nm{color:var(--acc-text)}";
+    // ---------- 空态（2026-10-25 Apple Music「专属精选推荐」风格首页 + Classic 居中卡片）----------
+    h += "#list{flex:1;display:flex;flex-direction:column;min-height:0}";
+    h += ".emptystate{flex:1;display:flex;align-items:center;justify-content:center;box-sizing:border-box;padding:28px 24px}";
+    h += ".emptystate .ecard{width:100%;max-width:440px;display:flex;flex-direction:column;align-items:center;text-align:center;padding:34px 34px 28px;border:1px solid var(--line);border-radius:16px;background:linear-gradient(180deg,var(--bg2),var(--bg3));box-shadow:0 18px 44px -18px var(--shadow)}";
+    h += ".emptystate .eic{width:50px;height:50px;border-radius:12px;display:grid;place-items:center;background:var(--acc-weak);color:var(--acc-text);margin-bottom:14px;flex:none}";
+    h += ".emptystate .ettl{font-size:15px;font-weight:650;color:var(--txt);letter-spacing:.2px;line-height:1.5}";
+    h += ".emptystate .ehint{font-size:12px;line-height:1.75;color:var(--mut);margin-top:7px;max-width:330px}";
+    h += ".emptystate .eacts{display:flex;gap:8px;flex-wrap:wrap;justify-content:center;margin-top:16px}";
+    h += ".emptystate .eroot{display:flex;align-items:center;gap:6px;margin-top:14px;padding-top:12px;border-top:1px solid var(--line);width:100%;font-size:11px;color:var(--mut2);min-width:0}";
+    h += ".emptystate .eroot span{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;text-align:left}";
+    h += ".am-home{flex:1;display:flex;flex-direction:column;width:100%;max-width:1140px;margin:0 auto;padding:20px 28px 24px;box-sizing:border-box;gap:16px}";
+    h += ".am-sec-hdr{display:flex;align-items:baseline;justify-content:space-between;gap:12px;margin-bottom:2px}";
+    h += ".am-sec-hdr h2{font-size:17px;font-weight:750;letter-spacing:-0.3px;color:var(--txt);margin:0}";
+    h += ".am-sec-hdr .sub{font-size:11.5px;color:var(--mut);font-weight:450}";
+    h += ".am-hero-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:16px;width:100%}";
+    h += "@media (max-width:920px){.am-hero-grid{grid-template-columns:1fr}}";
+    h += ".am-card{min-height:248px;border-radius:14px;padding:20px 22px;color:#fff;display:flex;flex-direction:column;justify-content:space-between;position:relative;overflow:hidden;box-shadow:0 10px 28px var(--shadow);cursor:pointer;transition:transform .18s ease,box-shadow .18s ease;-webkit-user-select:none;user-select:none;box-sizing:border-box;border:1px solid rgba(255,255,255,.12)}";
+    h += ".am-card:hover{transform:translateY(-3px);box-shadow:0 16px 36px var(--shadow)}";
+    h += ".am-card.c1{background:linear-gradient(145deg,#fa2d48 0%,#d81b60 55%,#8e1850 100%)}";
+    h += ".am-card.c2{background:linear-gradient(145deg,#3b4cca 0%,#262a7a 52%,#141747 100%)}";
+    h += ".am-card.c3{background:linear-gradient(145deg,#059669 0%,#0d9488 52%,#115e59 100%)}";
+    h += ".am-card-badge,.am-card .am-kicker{align-self:flex-end;font-size:10.5px;font-weight:700;letter-spacing:0.7px;text-transform:uppercase;color:rgba(255,255,255,.86);display:flex;align-items:center;gap:4px}";
+    h += ".am-card-mid{margin:auto 0;padding:8px 0}";
+    h += ".am-card-title,.am-card h3{font-size:28px;font-weight:800;letter-spacing:-0.5px;line-height:1.18;color:#ffffff;text-shadow:0 2px 8px rgba(0,0,0,.22);margin:0}";
+    h += ".am-card-bottom{display:flex;flex-direction:column;align-items:flex-start;gap:10px}";
+    h += ".am-card-desc,.am-card p{font-size:11.5px;line-height:1.55;color:rgba(255,255,255,.88);text-shadow:0 1px 3px rgba(0,0,0,.25);margin:0 0 12px}";
+    h += ".am-foot{display:flex;align-items:center;justify-content:space-between;gap:8px;width:100%}";
+    h += ".am-badge{font-size:10px;font-weight:600;padding:3px 9px;border-radius:12px;background:rgba(0,0,0,.22);color:rgba(255,255,255,.88);white-space:nowrap}";
+    h += ".am-pill-btn{display:inline-flex;align-items:center;justify-content:center;padding:7px 16px;border-radius:20px;background:rgba(255,255,255,.94);color:#111114;font-size:12px;font-weight:650;cursor:pointer;transition:background .14s,transform .12s;box-shadow:0 4px 12px rgba(0,0,0,.18)}";
+    h += ".am-pill-btn:hover{background:#ffffff;transform:scale(1.02)}";
+    h += ".am-pill-btn:active{transform:scale(0.98)}";
+    h += ".am-quick-row{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;width:100%}";
+    h += "@media (max-width:1060px){.am-quick-row{grid-template-columns:repeat(2,minmax(0,1fr))}}";
+    h += "@media (max-width:640px){.am-quick-row{grid-template-columns:1fr}}";
+    h += ".am-quick-item,.am-quick{display:flex;align-items:center;gap:11px;padding:12px 14px;border-radius:12px;background:var(--bg2);border:1px solid var(--line);cursor:pointer;transition:background .13s,border-color .13s,transform .13s;box-shadow:0 2px 8px var(--shadow);box-sizing:border-box;text-align:left}";
+    h += ".am-quick-item:hover,.am-quick:hover{background:var(--hov2);border-color:var(--line2);transform:translateY(-1px)}";
+    h += ".am-qico,.am-quick .ic{width:34px;height:34px;border-radius:8px;background:var(--acc-weak);color:var(--acc);display:grid;place-items:center;flex:none}";
+    h += ".am-qico svg,.am-quick .ic svg{width:17px;height:17px;stroke:currentColor}";
+    h += ".am-qtext,.am-quick .tx{min-width:0;flex:1}";
+    h += ".am-qtitle,.am-quick .nm{font-size:12.5px;font-weight:650;color:var(--txt);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;display:block}";
+    h += ".am-qdesc,.am-quick .ds{font-size:11px;color:var(--mut);margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;display:block}";
+    h += ".am-rootline{display:flex;align-items:center;gap:6px;font-size:11px;color:var(--mut2);padding-top:4px}";
     h += ".empty{padding:44px 20px;text-align:center;color:var(--mut2);font-size:12.5px;line-height:2}";
+    h += "#list:has(> .empty){display:flex;align-items:center;justify-content:center;box-sizing:border-box;padding:28px}";
+    // 内容区在宽屏下有可读性上限，避免列表/空态被拉到屏幕最右形成空旷感；网格自身仍自适应列数。
+    h += ".main>.pad,#list>.grid,#setpage>.pad{max-width:1180px;margin-left:auto;margin-right:auto;box-sizing:border-box}";
     // 文件夹：地址栏
     h += ".pathbar{display:flex;gap:8px;align-items:center;padding:12px 18px;border-bottom:1px solid var(--line);position:sticky;top:0;background:var(--bg);z-index:4}";
     h += ".pb{width:30px;height:30px;border-radius:8px;border:1px solid var(--line);background:var(--hov);font-size:13px;flex:none}";
@@ -234,7 +301,7 @@ inline std::string rta_ui_page() {
     h += "#dropmask.on{display:flex}";
     h += "#dropmask>div{border:2px dashed var(--acc);border-radius:16px;padding:42px 64px;font-size:16px;color:var(--acc-text);background:rgba(59,130,246,.08)}";
     // 右侧
-    h += "#right{background:var(--bg2);border-left:1px solid var(--line);display:flex;flex-direction:column;overflow:hidden}";
+    h += "#right{grid-column:3;grid-row:2;background:var(--bg2);border-left:1px solid var(--line);display:flex;flex-direction:column;overflow:hidden}";
     h += ".rhead{display:flex;align-items:center;gap:8px;padding:10px 14px;border-bottom:1px solid var(--line);font-size:12px;font-weight:600;color:var(--txt2);flex:none;min-height:42px}";
     h += ".rhead .cnt{font-weight:400;color:var(--mut2);font-size:11px}.rbody{flex:1;overflow:auto}";
     h += ".qi{display:flex;gap:9px;padding:8px 14px;cursor:pointer;border-left:3px solid transparent;font-size:12.5px;align-items:center}";
@@ -260,21 +327,55 @@ inline std::string rta_ui_page() {
     //   ① 三列改为 minmax(0,1fr) | auto | minmax(0,1fr)：左右两列严格等宽 ⟹ 中间控制组水平居中；
     //   ② bit-perfect 状态改为紧凑 chip（#bpBadge），收进右侧状态簇，不再占中间列；
     //   ③ 窄屏压缩音量条/隐藏格式徽标，但歌词、信号链、音量三件套始终保留。
-    h += ".bar{grid-column:1/-1;display:grid;grid-template-columns:minmax(0,1fr) auto minmax(0,1fr);align-items:center;gap:14px;padding:0 16px;background:var(--barbg);border-top:1px solid var(--line)}";
-    h += ".np{display:flex;align-items:center;gap:11px;min-width:0;max-width:340px;justify-self:start;cursor:pointer;border-radius:10px;padding:4px 6px;margin-left:-6px;transition:.14s}";
+    // 2026-10-25（排版协调）：底栏原来**贴死在窗口最底**（只有左右 padding，底部 0），
+    // 内容在 88px 行里垂直居中后离下沿只有几像素，观感像被裁掉一截。
+    // 现在把整条底栏**上移**并做成浮动条：左右下各留 10px（8~12px 区间），圆角 + 细边框 + 低饱和阴影，
+    // 与 mac 原生窗口的"内容不贴边"观感一致；三列仍是 minmax(0,1fr)|auto|minmax(0,1fr) ⟹ 横向绝不溢出。
+    // 2026-10-25（Apple Music 风格重构）：底栏从"贴底满宽条"改成**悬浮毛玻璃播放胶囊**——
+    //   · position:fixed 悬浮在内容之上（不再占网格行 ⟹ 侧栏可以真正通顶到底）；
+    //   · left 从侧栏右缘 +24px 起、right 24px 止，max-width 1080px 居中 ⟹ 与内容区同宽；
+    //   · backdrop-filter:blur(32px) saturate(190%) + 半透明 --barbg ⟹ 专辑封面滚过去会被柔化成色块；
+    //   · 三列 minmax 模板：左（封面+曲名）/ 中（控制组，天然居中）/ 右（状态+音量），
+    //     左右两列等权 ⟹ 中间控制组始终在胶囊正中（沿用 261023-04 #1 的判据）。
+    h += ".bar{position:fixed;left:calc(var(--sidew) + 24px);right:24px;bottom:14px;height:66px;max-width:1120px;margin:0 auto;z-index:15;display:grid;grid-template-columns:minmax(180px,1.1fr) minmax(280px,1.6fr) minmax(180px,1.1fr);align-items:center;gap:14px;padding:0 18px;border-radius:16px;background:var(--barbg);backdrop-filter:blur(32px) saturate(190%);-webkit-backdrop-filter:blur(32px) saturate(190%);border:1px solid var(--bar-border);box-shadow:var(--bar-shadow);box-sizing:border-box;min-width:0}";
+    h += ".np{display:flex;align-items:center;gap:11px;min-width:0;justify-self:start;cursor:pointer;border-radius:10px;padding:4px 6px;margin-left:-6px;transition:.14s}";
     h += ".np:hover{background:var(--hov)}";
-    h += ".cv2{width:56px;height:56px;border-radius:9px;flex:none;background:var(--cvbg) center/cover no-repeat;border:1px solid var(--line);box-shadow:0 3px 14px var(--shadow)}";
-    h += ".np .tx{min-width:0}.np .t1{font-size:12.5px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}";
-    h += ".np .t2{font-size:10.5px;color:var(--mut2);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-top:2px}";
-    h += ".ctr{display:flex;flex-direction:column;align-items:center;gap:7px;width:clamp(300px,34vw,540px);flex:none}.keys{display:flex;align-items:center;gap:6px}";
+    // Apple Music 的迷你封面是 44px 圆角方图（不是 56px）
+    h += ".cv2{width:44px;height:44px;border-radius:8px;flex:none;background:var(--cvbg) center/cover no-repeat;border:1px solid var(--line);box-shadow:0 3px 12px var(--shadow)}";
+    h += ".np .tx{min-width:0}.np .t1{font-size:13px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:var(--txt)}";
+    h += ".np .t2{font-size:11px;color:var(--mut);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-top:2px}";
+    // 中间控制+进度：display: flex; flex-direction: column; align-items: center; gap: 3px; width: 100%; max-width: 440px; justify-self: center;
+    h += ".ctr{display:flex;flex-direction:column;align-items:center;gap:3px;width:100%;max-width:440px;justify-self:center}.keys{display:flex;align-items:center;gap:6px}";
     // bit-perfect 状态 chip（#bpBadge）：紧凑小标签，颜色区分三态；空态不占位。
     // 颜色全部走主题变量：--ok-text / --warn / --bp-direct（三套主题各一份，浅色底也够对比度）。
     h += "#bpBadge{display:none;align-items:center;font-size:9.5px;font-weight:700;letter-spacing:.4px;padding:2px 7px;border-radius:5px;border:1px solid var(--line);background:var(--hov);white-space:nowrap;line-height:1.5}";
     h += "#bpBadge.bp-yes{display:inline-flex;color:var(--ok-text);border-color:var(--ok-line);background:var(--ok-bg)}";
     h += "#bpBadge.bp-no{display:inline-flex;color:var(--warn);border-color:currentColor;background:var(--hov)}";
     h += "#bpBadge.bp-direct{display:inline-flex;color:var(--bp-direct);border-color:currentColor;background:var(--hov)}";
-    // 窄屏（1024 级）：中间控制组收窄、右侧只压缩音量条与格式徽标 —— 歌词/信号链/音量必须还在。
-    h += "@media (max-width:1180px){.bar{gap:10px;padding:0 12px}.ctr{width:300px}.np{max-width:260px}.np .cv2{width:48px;height:48px}.vol{gap:6px}.vol input[type=range]{width:64px}#fmt{display:none}}";
+    // 窄屏：胶囊的左右起点跟着侧栏一起收（1240px 档侧栏是 200px），控制组只压缩不隐藏 ——
+    // 歌词/信号链/音量三件套必须始终在（261023-04 #1 的判据）。
+    h += "@media (max-width:1400px){.bar{gap:12px}.vol{gap:6px}.vol input[type=range]{width:76px;min-width:48px;flex:0 1 auto}}";
+    h += "@media (max-width:1240px){.bar{left:calc(var(--sidew) + 18px);right:18px}}";
+    h += "@media (max-width:1180px){.bar{gap:10px;padding:0 14px}.vol{gap:6px}.vol input[type=range]{width:64px}#fmt{display:none}}";
+    h += ".rbody{padding-bottom:92px}";
+    // ---------- 界面风格切换：classic（经典 Hi-Fi 工作台 / DSH-Roon 布局） ----------
+    // 用户 2026-10-25：「可以在设置里切换 ui」。
+    // 默认 data-uistyle=apple 为 Apple Music 风格（通顶侧栏 + 珊瑚红图标 + 底部徽标 + 悬浮播放胶囊 + 海报推荐页）；
+    // 切到 data-uistyle=classic 时恢复经典工作台风格（蓝紫强调色 + 侧栏顶部品牌区 + 沉底贯通播放栏 + 经典居中卡片）。
+    h += "html[data-uistyle=classic]{--bg:#08090c;--bg2:#0c0e13;--bg3:#11141b;--topbg:#08090c;--barbg:linear-gradient(180deg,#11141b,#0a0c10);--acc:#3b82f6;--acc2:#8b5cf6;--acc-weak:rgba(59,130,246,.16);--acc-text:#9dc0ff;--nav-on:linear-gradient(90deg,rgba(59,130,246,.24),rgba(59,130,246,.04));--nav-on-text:#cfe0ff}";
+    h += "html[data-uistyle=classic][data-theme=light]{--bg:#f4f6f9;--bg2:#ffffff;--bg3:#eef1f6;--topbg:#f4f6f9;--barbg:linear-gradient(180deg,#ffffff,#f0f3f8);--acc:#2563eb;--acc2:#7c3aed;--acc-weak:rgba(37,99,235,.12);--acc-text:#1d4ed8;--nav-on:linear-gradient(90deg,rgba(37,99,235,.13),rgba(37,99,235,.02));--nav-on-text:#1e40af}";
+    h += "html[data-uistyle=classic][data-theme=blue]{--bg:#e9f2ff;--bg2:#f7fbff;--bg3:#dcebfe;--topbg:#e9f2ff;--barbg:linear-gradient(180deg,#f7fbff,#e4f0ff);--acc:#0d6efd;--acc2:#3b9bff;--acc-weak:rgba(13,110,253,.13);--acc-text:#0b5ed7;--nav-on:linear-gradient(90deg,rgba(13,110,253,.16),rgba(13,110,253,.02));--nav-on-text:#0a58ca}";
+    h += "html[data-uistyle=classic] #app{grid-template-rows:52px minmax(0,1fr) 86px}";
+    h += "html[data-uistyle=classic] .side{grid-row:1/3}";
+    h += "html[data-uistyle=classic] .side-top{order:-2}";
+    h += "html[data-uistyle=classic] .side-brand{order:-1;margin-top:0;margin-bottom:6px;padding:6px 10px 12px;border-top:0;border-bottom:1px solid var(--line)}";
+    h += "html[data-uistyle=classic] .side-brand .logo{border-radius:9px}";
+    h += "html[data-uistyle=classic] .side .nav svg{color:currentColor}";
+    h += "html[data-uistyle=classic] .top{height:52px;padding:0 18px 0 22px}";
+    h += "html[data-uistyle=classic] .ptitle{font-size:15px;font-weight:650;letter-spacing:0}";
+    h += "html[data-uistyle=classic] .main{padding-bottom:0}";
+    h += "html[data-uistyle=classic] .bar{position:static;grid-column:1/-1;grid-row:3;max-width:none;height:86px;margin:0;border-radius:0;border:0;border-top:1px solid var(--line);box-shadow:none;padding:0 18px 8px}";
+    h += "html[data-uistyle=classic] .cv2{width:52px;height:52px;border-radius:9px}";
     h += "#bRep{position:relative}";
     // 正在播放整页（2026-10-23 用户 261023-04 #5：仍有黑边框）
     // 根因更正：1.3.8 的「负 inset + padding 补偿」在几何上不可能盖住那条缝 ——
@@ -452,6 +553,7 @@ h += "#npPage .npedge{display:none}";
     h += ".npdwork .wp{color:var(--mut2);flex:none;max-width:34%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}";
     h += ".npclose{position:absolute;top:16px;left:16px;width:36px;height:36px;border-radius:50%;background:rgba(255,255,255,.12);display:flex;align-items:center;justify-content:center;color:var(--txt);z-index:4}";
     h += ".npclose:hover{background:rgba(255,255,255,.16)}";
+    h += "html.machost .npclose{top:46px;left:18px}";
     // 窄/矮窗口（用户 261023-04 #6 的 1024x640）：压缩行高与留白，但行间距不小于 12px
     h += "@media (max-height:720px){.npgrid{padding:36px 24px 10px;gap:12px}.nphero{gap:16px}.npcover{height:clamp(108px,22vh,164px)}.npkind{margin-bottom:5px}.nptit{font-size:19px}.npsub{font-size:11.5px;margin-top:5px}.npmline{margin-top:6px;min-height:20px}.npctl2{gap:8px}.npdbody{font-size:12px;line-height:1.6}}";
     h += "@media (max-width:1120px){.npgrid{padding:38px 24px 12px}.nphero{gap:16px}.npcover{height:clamp(108px,20vh,180px)}}";
@@ -468,10 +570,15 @@ h += "#npPage .npedge{display:none}";
     h += "html[data-theme=light] .npdwork,html[data-theme=blue] .npdwork{border-bottom-color:var(--line)}";
     h += ".k{width:32px;height:32px;border-radius:9px;display:grid;place-items:center;color:var(--mut);transition:.13s}";
     h += ".k:hover{background:var(--hov2);color:var(--txt)}";
-    h += ".k.big{width:40px;height:40px;border-radius:50%;background:linear-gradient(180deg,var(--acc),var(--acc2));color:#fff;box-shadow:0 3px 16px var(--acc-weak)}";
-    h += ".k.big:hover{filter:brightness(1.1)}";
-    h += ".prog{width:100%;display:flex;align-items:center;gap:9px;font-size:10.5px;color:var(--mut2);font-variant-numeric:tabular-nums;max-width:560px}";
-    h += ".track{flex:1;height:5px;border-radius:3px;background:var(--track);overflow:hidden;cursor:pointer;position:relative}";
+    // Apple Music 的主播放键是 34px 珊瑚红实心圆
+    h += ".k.big{width:34px;height:34px;border-radius:50%;background:var(--acc);color:#fff;box-shadow:0 2px 10px var(--acc-weak)}";
+    h += ".k.big:hover{filter:brightness(1.08)}";
+    // 2026-10-25（排版协调）：进度条一行与上面的控制键行**共用同一条中轴**，时间标签定宽
+    // （等宽数字 + 固定 min-width）⟹ 进度条两端与时间基线稳定，不会随 "0:07"→"1:02:33" 抖动。
+    h += ".prog{width:100%;display:flex;align-items:center;gap:8px;font-size:10.5px;color:var(--mut2);font-variant-numeric:tabular-nums;max-width:560px;min-width:0}";
+    h += ".prog>#tpos,.prog>#tdur{flex:none;min-width:34px;line-height:1.4}";
+    h += ".prog>#tpos{text-align:right}.prog>#tdur{text-align:left}";
+    h += ".track{flex:1 1 auto;height:5px;border-radius:3px;background:var(--track);overflow:hidden;cursor:pointer;position:relative;min-width:0}";
     h += ".track i{display:block;height:100%;border-radius:3px;background:linear-gradient(90deg,var(--acc),var(--acc2));transition:width .18s linear;width:0}";
     h += ".vol{display:flex;align-items:center;gap:8px;justify-content:flex-end;justify-self:end;min-width:0}.vol input[type=range]{width:88px;accent-color:var(--acc)}";
     h += ".badge{font-size:9.5px;padding:2px 7px;border-radius:5px;background:var(--acc-weak);color:var(--acc-text);border:1px solid var(--acc-weak);font-weight:600;letter-spacing:.3px;white-space:nowrap}";
@@ -501,20 +608,40 @@ h += "#npPage .npedge{display:none}";
     h += ".plrow .n{font-size:11px;color:var(--mut2)}";
     h += ".plrow button{color:var(--mut2);font-size:14px;padding:0 5px}";
     h += ".plrow button:hover{color:var(--danger)}";
-    // 弹层
-    h += "#modal{position:fixed;inset:0;z-index:40;background:rgba(0,0,0,.45);backdrop-filter:blur(3px);display:none;place-items:center;padding:12px;box-sizing:border-box;overflow:auto}";
+    // 弹层与信号链（2026-10-25 Apple Music / Roon 高保真信号链重构）
+    //   根因修复：之前 .cnode .k 与播放控制键 .k（width:32px;height:32px;display:grid）撞类名，
+    //   导致信号链每个小标题都被撑成 32x32 的方块！且顶部 BIT-PERFECT 横幅也被画了红色圆点。
+    h += "#modal{position:fixed;inset:0;z-index:40;background:rgba(0,0,0,.42);backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px);display:none;place-items:center;padding:16px;box-sizing:border-box;overflow:auto}";
     h += "#modal.on{display:grid}";
-    h += ".mcard{width:min(600px,92vw);max-height:calc(100vh - 56px);display:flex;flex-direction:column;overflow:hidden;background:var(--bg2);border:1px solid var(--line);border-radius:14px;box-shadow:0 24px 70px var(--shadow)}";
-    h += ".mhead{display:flex;align-items:center;gap:9px;padding:14px 18px;border-bottom:1px solid var(--line);font-weight:650;flex:none}";
-    h += ".mbody{padding:16px 18px 22px;flex:1;min-height:0;overflow:auto}";
-    h += ".chain{display:flex;flex-direction:column;gap:0}";
-    h += ".cnode{display:flex;gap:12px;align-items:flex-start;padding:9px 0}";
-    h += ".cnode .dot{width:9px;height:9px;border-radius:50%;background:var(--acc);margin-top:6px;flex:none;box-shadow:0 0 12px var(--acc-weak)}";
-    h += ".cnode.gpu .dot{background:var(--ok);box-shadow:0 0 12px var(--ok-line)}";
-    h += ".cnode .k{font-size:10px;letter-spacing:1.1px;color:var(--mut2);font-weight:600;white-space:nowrap}";
-    h += ".cnode > div:last-child{min-width:0}";
-    h += ".cnode .v{font-size:12.5px;color:var(--txt);margin-top:1px}";
-    h += ".cline{width:1px;height:14px;background:var(--line);margin-left:4px}";
+    h += ".mcard{width:min(560px,92vw);max-height:calc(100vh - 48px);display:flex;flex-direction:column;overflow:hidden;background:var(--bg2);border:1px solid var(--line2,var(--line));border-radius:18px;box-shadow:0 28px 80px rgba(0,0,0,.35)}";
+    h += ".mhead{display:flex;align-items:center;gap:10px;padding:15px 20px;border-bottom:1px solid var(--line);font-size:15px;font-weight:700;letter-spacing:-.2px;flex:none;background:var(--bg2)}";
+    h += ".mbody{padding:16px 20px 18px;flex:1;min-height:0;overflow:auto}";
+    h += ".chain-hero{display:flex;align-items:center;gap:13px;padding:12px 15px;border-radius:12px;border:1px solid var(--ok-line);background:var(--ok-bg);margin-bottom:12px}";
+    h += ".chain-hero.direct{border-color:rgba(191,90,242,.35);background:rgba(191,90,242,.11)}";
+    h += ".chain-hero.warn{border-color:rgba(245,158,11,.35);background:rgba(245,158,11,.10)}";
+    h += ".chain-hero .ch-ic{width:32px;height:32px;border-radius:50%;display:grid;place-items:center;font-size:14px;font-weight:800;color:#fff;background:var(--ok);flex:none;box-shadow:0 3px 10px var(--ok-line)}";
+    h += ".chain-hero.direct .ch-ic{background:var(--bp-direct);box-shadow:0 3px 10px rgba(191,90,242,.35)}";
+    h += ".chain-hero.warn .ch-ic{background:var(--warn);box-shadow:0 3px 10px rgba(245,158,11,.35)}";
+    h += ".chain-hero .ch-tx{min-width:0;flex:1}";
+    h += ".chain-hero .ch-tt{font-size:13px;font-weight:750;letter-spacing:.3px;color:var(--ok-text);line-height:1.25}";
+    h += ".chain-hero.direct .ch-tt{color:var(--bp-direct)}";
+    h += ".chain-hero.warn .ch-tt{color:var(--warn)}";
+    h += ".chain-hero .ch-sub{font-size:11.5px;color:var(--txt2);margin-top:2px;line-height:1.4}";
+    h += ".chain{display:flex;flex-direction:column;gap:0;background:var(--bg);border:1px solid var(--line);border-radius:13px;padding:6px 14px}";
+    h += ".cnode{display:flex;gap:12px;align-items:flex-start;padding:8px 0;position:relative}";
+    h += ".cnode .dot{width:9px;height:9px;border-radius:50%;background:var(--ok);margin-top:5px;flex:none;box-shadow:0 0 0 3px var(--ok-bg);position:relative;z-index:2}";
+    h += ".cnode.dsp .dot{background:#3b82f6;box-shadow:0 0 0 3px rgba(59,130,246,.16)}";
+    h += ".cnode.gpu .dot{background:var(--ok);box-shadow:0 0 0 3px var(--ok-bg),0 0 10px var(--ok)}";
+    h += ".cnode.tel .dot{background:var(--mut2);box-shadow:0 0 0 3px var(--hov)}";
+    h += ".cnode .k{width:auto;height:auto;border-radius:0;display:flex;align-items:center;justify-content:space-between;gap:8px;place-items:unset;font-size:11px;letter-spacing:.3px;color:var(--mut);font-weight:650;white-space:nowrap;line-height:1.3}";
+    h += ".cnode .cbadge{font-size:9.5px;font-weight:650;padding:1px 7px;border-radius:10px;background:var(--hov);color:var(--mut);letter-spacing:.2px}";
+    h += ".cnode.lossless .cbadge{background:var(--ok-bg);color:var(--ok-text)}";
+    h += ".cnode.gpu .cbadge{background:var(--ok-bg);color:var(--ok-text);border:1px solid var(--ok-line)}";
+    h += ".cnode.dsp .cbadge{background:rgba(59,130,246,.12);color:#3b82f6}";
+    h += ".cnode > div:last-child{min-width:0;flex:1}";
+    h += ".cnode .v{font-size:12.5px;font-weight:500;color:var(--txt);margin-top:2px;line-height:1.4;word-break:break-word}";
+    h += ".cline{width:1.5px;height:8px;background:var(--line2,var(--line));margin:-3px 0 -3px 3.75px}";
+    h += ".chain-foot{margin-top:10px;font-size:11px;color:var(--mut);line-height:1.6;display:flex;align-items:center;justify-content:space-between;gap:8px}";
     // 设置页
     h += "#setpage{display:none;padding:20px 24px 104px}";   // 底部留出 sticky 保存栏的高度 + 呼吸位（UI 评审：窄窗底栏压字）
     h += "#setpage.on{display:block}";
@@ -673,24 +800,13 @@ h += "#npPage .npedge{display:none}";
     h += "::-webkit-scrollbar-track{background:transparent}";
     h += "</style></head><body>";
     h += "<div id=app>";
-
-    // ---------- 顶栏 ----------
-    h += "<div class=top id=topbar><div class=logo>R</div><div class=ttl>RLPlayer<small>HIGH-FIDELITY ENGINE</small></div>";
-    h += "<span class=hsep></span><b id=pth class=ptitle>专辑</b><span id=cnt class=pcnt></span>";
-    h += "<div class=search><svg width=14 height=14 viewBox='0 0 24 24' fill=none stroke=currentColor stroke-width=2><circle cx='11' cy='11' r='7'/><path d='M20 20l-3.5-3.5'/></svg>";
-    h += "<input id=q placeholder='搜索专辑 / 艺术家 / 曲目…' autocomplete=off spellcheck=false></div><div class=sp></div>";
-    h += "<span id=tools class=ptools></span>";
-    h += "<div class=themes><button class='sw on' data-theme=dark title='深色'></button>";
-    h += "<button class=sw data-theme=light title='白色'></button><button class=sw data-theme=blue title='浅蓝'></button></div>";
-    h += "<button class=ibtn id=bHelp title='快捷键与技巧'><svg width=16 height=16 viewBox='0 0 24 24' fill=none stroke=currentColor stroke-width=2><circle cx='12' cy='12' r='9'/><path d='M9.5 9a2.5 2.5 0 015 .5c0 1.5-2.5 2-2.5 3.5'/><circle cx='12' cy='17' r='.7' fill='currentColor'/></svg></button>";
-    h += "<button class=ibtn id=bScan title='重新扫描音乐库'><svg width=16 height=16 viewBox='0 0 24 24' fill=none stroke=currentColor stroke-width=2><path d='M21 12a9 9 0 1 1-3-6.7'/><path d='M21 4v5h-5'/></svg></button>";
-    h += "<button class=ibtn id=tq title='显示或隐藏队列'><svg width=17 height=17 viewBox='0 0 24 24' fill=none stroke=currentColor stroke-width=2><path d='M4 6h16M4 12h16M4 18h10'/></svg></button>";
-    h += "<div class=wctl><button class=wbtn id=wMin title='最小化'><svg viewBox='0 0 24 24' fill=none stroke=currentColor stroke-width=2><path d='M5 12h14'/></svg></button>";
-    h += "<button class=wbtn id=wMax title='最大化'><svg viewBox='0 0 24 24' fill=none stroke=currentColor stroke-width=2><rect x='6' y='6' width='12' height='12' rx='1.5'/></svg></button>";
-    h += "<button class='wbtn close' id=wClose title='关闭'><svg viewBox='0 0 24 24' fill=none stroke=currentColor stroke-width=2><path d='M6 6l12 12M18 6L6 18'/></svg></button></div></div>";
-
-    // ---------- 侧栏（只保留真正的入口；播放列表就用播放队列） ----------
+    // ---------- 侧栏（Apple Music 风格：通顶全高 · 图标着珊瑚红 · 品牌徽标贴底） ----------
+    // 结构顺序：side-top（红绿灯安全区）→ 曲库分组 → 播放分组 → 弹性占位 → 系统分组 → 品牌徽标。
+    // 品牌区从**顶部移到最底部**（Apple Music 左下角的个人徽标就在最底下），
+    // 这样侧栏顶部只留导航，视觉重心与 Apple Music 一致。
     h += "<div class=side>";
+    h += "<div class=side-top id=sideTop></div>";
+    h += "<div class=sec>资料库</div>";
     h += "<div class='nav on' data-v=albums><svg viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='1.8'><circle cx='12' cy='12' r='9'/><circle cx='12' cy='12' r='2.5'/></svg>专辑</div>";
     h += "<div class=nav data-v=artists><svg viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='1.8'><circle cx='12' cy='8' r='3.6'/><path d='M4.5 20.5c0-4.1 3.4-6.8 7.5-6.8s7.5 2.7 7.5 6.8'/></svg>艺术家</div>";
     // 2026-10-23 用户 261023-04 #9：「古典作品」不再占左导航（作品/版本推荐入口移到单曲页「作品」tab）。
@@ -700,13 +816,30 @@ h += "#npPage .npedge{display:none}";
     h += "<div class=nav data-v=remote><svg viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='1.8'><path d='M7 18a4.5 4.5 0 010-9 6 6 0 0111.6 1.6A3.7 3.7 0 0118 18z'/></svg>流媒体</div>";
     // 2026-10-23 用户 261023-04 #2：EQ 与房间校正**不再留在左导航**，改为设置页的一个页签（data-g=eq）。
     // （261023-03 曾把它做成独立主导航页；本轮用户明确要求「放到设置里面单开一页，不是放到主页里面」。）
-    h += "<div class=sec>播放</div>";
+    h += "<div class=sec>播放列表</div>";
     h += "<div class=nav data-v=queue><svg viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='1.8'><path d='M4 6h10M4 12h10M4 18h7'/><path d='M17 15.5V7l4-1v8.5'/><circle cx='16' cy='16.5' r='1.6' fill='currentColor' stroke='none'/><circle cx='20' cy='15' r='1.6' fill='currentColor' stroke='none'/></svg>播放队列</div>";
     h += "<div class=nav data-v=recent><svg viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='1.8'><circle cx='12' cy='12' r='8.5'/><path d='M12 7.2V12l3.2 2'/></svg>最近播放</div>";
-    h += "<div class=sp></div>";
-    h += "<div class=sec>系统</div>";
+    h += "<div class=sec>音频引擎</div>";
     h += "<div class=nav data-v=settings><svg viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='1.8'><circle cx='12' cy='12' r='3.2'/><path d='M12 3.5v2.2M12 18.3v2.2M4.4 7.9l1.9 1.1M17.7 15l1.9 1.1M4.4 16.1l1.9-1.1M17.7 9l1.9-1.1'/></svg>设置</div>";
+    h += "<div class=sp></div>";
+    // 品牌徽标栏：贴侧栏最底（像 Apple Music 左下角个人徽标）
+    h += "<div class=side-brand id=sideBrand><div class=logo>R</div><div class=ttl>RLPlayer<small>HI-FI AUDIO ENGINE</small></div></div>";
     h += "</div>";
+
+    // ---------- 顶栏（位于第 2 列起，品牌移至侧栏） ----------
+    h += "<div class=top id=topbar>";
+    h += "<b id=pth class=ptitle>专辑</b><span id=cnt class=pcnt></span>";
+    h += "<div class=search><svg width=14 height=14 viewBox='0 0 24 24' fill=none stroke=currentColor stroke-width=2><circle cx='11' cy='11' r='7'/><path d='M20 20l-3.5-3.5'/></svg>";
+    h += "<input id=q placeholder='搜索专辑 / 艺术家 / 曲目…' autocomplete=off spellcheck=false></div><div class=sp></div>";
+    h += "<span id=tools class=ptools></span>";
+    h += "<div class=themes><button class=sw data-theme=light title='浅色'></button>";
+    h += "<button class='sw on' data-theme=dark title='深色'></button><button class=sw data-theme=blue title='浅蓝'></button></div>";
+    h += "<button class=ibtn id=bHelp title='快捷键与技巧'><svg width=16 height=16 viewBox='0 0 24 24' fill=none stroke=currentColor stroke-width=2><circle cx='12' cy='12' r='9'/><path d='M9.5 9a2.5 2.5 0 015 .5c0 1.5-2.5 2-2.5 3.5'/><circle cx='12' cy='17' r='.7' fill='currentColor'/></svg></button>";
+    h += "<button class=ibtn id=bScan title='重新扫描音乐库'><svg width=16 height=16 viewBox='0 0 24 24' fill=none stroke=currentColor stroke-width=2><path d='M21 12a9 9 0 1 1-3-6.7'/><path d='M21 4v5h-5'/></svg></button>";
+    h += "<button class=ibtn id=tq title='显示或隐藏队列'><svg width=17 height=17 viewBox='0 0 24 24' fill=none stroke=currentColor stroke-width=2><path d='M4 6h16M4 12h16M4 18h10'/></svg></button>";
+    h += "<div class=wctl><button class=wbtn id=wMin title='最小化'><svg viewBox='0 0 24 24' fill=none stroke=currentColor stroke-width=2><path d='M5 12h14'/></svg></button>";
+    h += "<button class=wbtn id=wMax title='最大化'><svg viewBox='0 0 24 24' fill=none stroke=currentColor stroke-width=2><rect x='6' y='6' width='12' height='12' rx='1.5'/></svg></button>";
+    h += "<button class='wbtn close' id=wClose title='关闭'><svg viewBox='0 0 24 24' fill=none stroke=currentColor stroke-width=2><path d='M6 6l12 12M18 6L6 18'/></svg></button></div></div>";
 
     // ---------- 主区 ----------
     h += "<div class=main>";
