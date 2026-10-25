@@ -374,6 +374,11 @@ add_executable(test_fullscale tests/test_fullscale.cpp)
 target_link_libraries(test_fullscale PRIVATE rtadsp)
 add_test(NAME fullscale COMMAND test_fullscale)
 
+add_executable(test_playback_edges tests/test_playback_edges.cpp)
+target_link_libraries(test_playback_edges PRIVATE rtadsp)
+target_include_directories(test_playback_edges PRIVATE ${CMAKE_SOURCE_DIR}/src)
+add_test(NAME playback_edges COMMAND test_playback_edges)
+
 # DSD 通路（P0-2 素材生成 / P0-3 DirectSDM / P0-4 抽取器）
 add_executable(test_metaparse tests/test_metaparse.cpp)
 target_include_directories(test_metaparse PRIVATE ${CMAKE_SOURCE_DIR}/src)
