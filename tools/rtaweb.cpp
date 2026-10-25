@@ -270,6 +270,11 @@ struct PlayParams {
     //   "naa"           → macOS 不可用（make_sink 返回必然 open 失败的 sink；UI 已移除该项）
     //   "upnp"          → UPnP/DLNA 投放（CastManager）
     //   "null"          → 只跑 DSP 不出声
+    // 2026-10-25（方案 C，用户选择）：Hog 独占做成独立开关。
+    //   默认 false = 不抢 Hog ⟹ **系统音量条 / 音量键全程可用**（用户明确要求）；
+    //   true      = 抢 Hog ⟹ 真独占（其他 App 声音被屏蔽），但系统音量失效 ——
+    //               这是 macOS Hog Mode 的机制限制（实测：Hog 中其它进程改音量无效）。
+    bool hogExclusive = false;
     std::string backend = "wasapi";   // 默认 = CoreAudio 独占（等价 WASAPI 独占语义）
     std::string naaHost;              // NAA 端点 host:port（macOS 不可用，仅老 conf 兼容）
     std::string upnpDev;              // UPnP/DLNA 渲染器（设备描述 URL；后端 = upnp 时使用）
@@ -574,6 +579,7 @@ static PlayParams parseForm(const std::string& body) {
         else if (k == "shaper")   p.shaper = v;
         else if (k == "rate")     p.rate = v;
         else if (k == "volume")   p.volume = atof(v.c_str());
+        else if (k == "hogexcl")  p.hogExclusive = (v == "1" || v == "true");
         else if (k == "gpu")      p.gpu = (v == "1");
         else if (k == "isp")      p.isp = (v == "1");
         else if (k == "twostage") p.twoStage = (v == "1");
@@ -659,6 +665,9 @@ public:
         sp.channels = ch;
         sp.bufferMs = o.bufferMs > 0 ? (double)o.bufferMs : 100.0;
         sp.shared = shared_;
+        // 2026-10-25（方案 C）：Hog 独占由独立开关控制，不再与 shared 绑定。
+        // exclusive_ 由 make_sink 依据 PlayParams::hogExclusive 设置。
+        sp.exclusive = exclusive_;
         if (!ao_->open(sp)) {
             err_ = std::string(rta::platform::output_error_text(ao_->last_error_class()));
             if (!ao_->last_error().empty()) err_ += "：" + ao_->last_error();
@@ -734,9 +743,13 @@ public:
     }
     // out_peak/underruns 遥测走 OutSink 之外的直接查询（STAT 行用）
     void set_shared(bool sh) { shared_ = sh; }
+    // 2026-10-25（方案 C）：严格独占开关。true = 抢 Hog（系统音量失效、其他 App 静音）；
+    // false = 不抢 Hog（系统音量可用，默认）。见 OpenSpec::exclusive 的注释。
+    void set_exclusive(bool ex) { exclusive_ = ex; }
 private:
     std::unique_ptr<rta::platform::AudioOutput> ao_ = rta::platform::create_audio_output();
     bool shared_ = false;
+    bool exclusive_ = false;   // 严格独占（抢 Hog）；默认 false = 系统音量可用
     double baseDb_ = 0.0;   // 起播时的绝对音量基准（set_live_gain_db 收到的是相对它的 delta）
     std::string err_;
 };
@@ -945,6 +958,8 @@ static std::unique_ptr<OutSink> make_sink(const PlayParams& p) {
     // 这里是第二道闸：即便绕过 UI 直接调 /api/play，也不会落到一个空指针或假装成功。
     auto s = std::make_unique<CoreAudioSink>();
     s->set_shared(p.backend == "wasapi-shared");
+    // 2026-10-25（方案 C）：Hog 独占开关。共享模式本来就不该抢 Hog。
+    s->set_exclusive(p.hogExclusive && p.backend != "wasapi-shared");
     return s;
 }
 

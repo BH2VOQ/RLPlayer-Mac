@@ -117,7 +117,8 @@ var ADV = {
   // 2026-10-25（默认值纠正）：NAA 已从界面移除，naaHost 不再给 127.0.0.1:43210 这种
   // 永远连不上的假默认值（macOS 无 NAA 驱动体系）。字段保留以兼容老 conf 与后端契约，
   // 默认置空 = 未选择，语义诚实。
-  backend: 'wasapi', channels: 0, naaHost: '', upnpDev: '',
+  // 2026-10-25（方案 C）：Hog 独占开关，默认 0 = 不抢（系统音量可用）
+  backend: 'wasapi', hogExclusive: 0, channels: 0, naaHost: '', upnpDev: '',
   trim0: 0, trim1: 0, trim2: 0, trim3: 0, trim4: 0, trim5: 0, trim6: 0, trim7: 0,
   // 输入
   inBackend: 'none', inDev: '', inOffset: 0, inBuf: 100, inMonitor: 0, inSeconds: 0, inOut: '',
@@ -308,6 +309,7 @@ function params() {
          '&filter=' + encodeURIComponent(D('sFilt').value) +
          '&filterNx=' + encodeURIComponent(D('sFiltNx').value) +
          '&shaper=' + encodeURIComponent(D('sShap').value) +
+         '&hogexcl=' + (ADV.hogExclusive ? 1 : 0) +
          '&volume=' + S.vol +
          '&loudness=' + (S.loud ? 1 : 0) +
          '&isp=' + (D('sIsp').checked ? 1 : 0) +
@@ -2558,6 +2560,8 @@ function loadSettings() {
       if (D('sGpu')) D('sGpu').value = ADV.gpuvendor;
     }
     if (kv.backend !== undefined) ADV.backend = migrateRemovedBackend(kv.backend);
+    // 2026-10-25（方案 C）：Hog 独占开关（老 conf 无此键 = 0，即不抢 Hog，安全默认）
+    if (kv.hogexcl !== undefined) ADV.hogExclusive = (kv.hogexcl === '1') ? 1 : 0;
     if (kv.channels !== undefined) ADV.channels = parseInt(kv.channels, 10) || 0;
     if (kv.naahost !== undefined) ADV.naaHost = kv.naahost || '';
     if (kv.upnpdev !== undefined) ADV.upnpDev = kv.upnpdev || '';
@@ -3683,7 +3687,11 @@ function backendHint() {
   var m = D('sp_backendmsg'); if (!m) return;
   var bk = (D('sp_backend') && D('sp_backend').value) || 'wasapi';
   if (bk === 'wasapi') {
-    m.textContent = 'CoreAudio 独占（Hog Mode）· bit-perfect；播放期间接管硬件音频流。';
+    // 2026-10-25（方案 C）：如实说明当前是否真的抢 Hog，而不是笼统说"独占/接管"。
+    var hog = (typeof ADV !== 'undefined' && ADV.hogExclusive == 1);
+    m.textContent = hog
+      ? '硬件直通 + 严格独占（Hog）：播放期间屏蔽其它 App 声音；系统音量条会失效，请用本程序音量条调音量。'
+      : '硬件直通 · bit-perfect；不抢 Hog ⟹ 系统音量条 / 音量键全程可用。如需彻底独占（屏蔽其它 App 声音），请勾选「严格独占」。';
   } else if (bk === 'wasapi-shared') {
     m.textContent = 'CoreAudio 共享：经系统混音，非 bit-perfect；不支持 DoP / DSD。';
   } else if (bk === 'null') {
@@ -4558,7 +4566,9 @@ function renderSettingsPage() {
        // 2026-10-25（用户指令「能使用的要用它真正的名字」）：macOS 单平台，UI 的 value
        // 仍是 wasapi / wasapi-shared（rtaweb.cpp 的 make_sink() 靠这两个字符串分派），
        // 但它们背后已不是 WASAPI —— 是 CoreAudio 的两种模式。面向用户的标签必须是真名。
-       +   opt('wasapi', 'CoreAudio（独占 · Hog Mode）', BK)
+       // 2026-10-25（方案 C）：Hog 独占已拆成独立开关（sp_hogexcl），
+       // 后端标签不能再写「Hog Mode」—— 否则用户会以为选了后端就等于独占。
+       +   opt('wasapi', 'CoreAudio（硬件直通）', BK)
        +   opt('wasapi-shared', 'CoreAudio 共享（系统混音）', BK)
        // 2026-10-25（用户指令「不可用的要隐藏」）：NAA / RTANet 在 macOS 上没有驱动体系，
        // make_sink() 对 backend=="naa" 直接返回必然 open 失败的 UnavailableSink。
@@ -4584,6 +4594,13 @@ function renderSettingsPage() {
        // 2026-10-24（261024-02 #8）：一键直通预设（源采样率 + 无抖动 + 0 dB + 无 EQ/IR + 独占）。
        // 261024-04 #2：按钮已挪到「后端」下拉右侧的同一行（见上），这里不再占一行。
        + sel('sp_device', '输出设备', '<option value="">默认设备</option>', '独占模式会接管这个设备；共享模式经系统混音，不接管')
+       // 2026-10-25（方案 C，用户选择）：Hog 独占开关。
+       // 诚实说明副作用 —— 实测确认 Hog 会阻断其它进程改硬件音量（系统音量条失效），
+       // 这是 macOS 机制限制，不是本程序的 bug，所以必须写清楚让用户自己权衡。
+       + chk('sp_hogexcl', '严格独占（抢 Hog Mode）', ADV.hogExclusive == 1,
+             '勾选 = 真独占：屏蔽其它 App 声音、设备所有权归本程序；' +
+             '**但系统音量条 / 音量键会失效**（macOS Hog 机制限制，实测确认），' +
+             '音量只能用本程序的音量条调。不勾 = 系统音量全程可用（默认）。', true)
        + sel('sp_outmode', '输出模式',
              opt('pcm', 'PCM', outModeOf()) + opt('dsd', 'DSD（SDM）', outModeOf()),
              'DSD 的比特率与封装（DoP / Native）在 SDM 页设置')
@@ -5195,6 +5212,16 @@ function renderSettingsPage() {
         });
       };
     }
+  }
+  // 2026-10-25（方案 C）：Hog 独占开关
+  if (D('sp_hogexcl')) {
+    D('sp_hogexcl').onchange = function () {
+      ADV.hogExclusive = this.checked ? 1 : 0;
+      saveSettings();
+      toast(this.checked
+        ? '已开启严格独占：系统音量条将失效，请用本程序音量条调音量'
+        : '已关闭严格独占：系统音量可正常调节');
+    };
   }
   D('sp_addroot').onclick = function () {
     var d = (D('sp_root').value || '').trim();
@@ -6313,6 +6340,7 @@ function collectSettings() {
   if (D('sGpu')) D('sGpu').value = ADV.gpuvendor;
   // 输出后端 / 声道 / 每声道微调
   if (D('sp_backend')) ADV.backend = D('sp_backend').value || 'wasapi';
+  if (D('sp_hogexcl')) ADV.hogExclusive = D('sp_hogexcl').checked ? 1 : 0;
   // 261024-01 #11：NAA 端点优先取自动发现的下拉；手动框（折叠兜底）有值则以它为准
   if (D('sp_naa_dev') && D('sp_naa_dev').value) ADV.naaHost = D('sp_naa_dev').value;
   if (D('sp_naahost') && (D('sp_naahost').value || '').trim()) ADV.naaHost = (D('sp_naahost').value || '').trim();

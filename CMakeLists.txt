@@ -279,6 +279,26 @@ target_include_directories(test_hw_volume PRIVATE ${CMAKE_SOURCE_DIR}/src)
 target_link_libraries(test_hw_volume PRIVATE ${RL_PLATFORM_LIBS})
 add_test(NAME hw_volume COMMAND test_hw_volume)
 
+# ---------------- 2026-10-25：Hog 独占开关（方案 C）与系统音量可用性 ----------------
+# 用户诉求演进：①「接管后音量锁死」→ 我做"接管硬件音量"（错）；
+#              ②「音量爆炸，能不能独占时让系统调音量」→ 查清 macOS Hog 会阻断其它进程改音量，
+#                 「严格独占」与「系统音量可用」物理互斥；
+#              ③ 用户拍板：做成开关让用户自己选。
+#
+# 本轮还发现并修掉一个**真 bug**：set_hog_mode 的读写语义写反了 ——
+#   该属性的 set 值不是"设成谁"，而是"本进程是否继续持有"：
+#     写 0        → 请求独占（内核回填真实持有者 pid）
+#     写 getpid() → 释放
+#   原实现 `on ? getpid() : 0` 正好反了：true 在释放、false 在抢 ⟹
+#   ① 独占从未真正生效；② close 的"释放"反而去抢，退出后设备被残留占用。
+#
+# 判据：exclusive 默认 false；不抢 Hog 时系统音量可用；抢 Hog 时被阻断；
+#       释放后恢复。默认只读（零副作用），真实抢占需 --allow-hw-touch。
+add_executable(test_hog_exclusive tests/test_hog_exclusive.cpp)
+target_include_directories(test_hog_exclusive PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(test_hog_exclusive PRIVATE ${RL_PLATFORM_LIBS})
+add_test(NAME hog_exclusive COMMAND test_hog_exclusive)
+
 # ---------------- 20 段参数均衡 PEQ（261024-02 #6）：0dB 直通 / 6dB@fc / Q 带宽 /
 #                  采样率重建 / 满幅过载恢复 / 热更新交叉淡入（铁律 7）----------------
 add_executable(test_peq tests/test_peq.cpp)

@@ -221,6 +221,10 @@ inline bool hw_volume_takeover(AudioDeviceID dev, HwVolumeState& st) {
 }
 
 // 归还：把接管前的硬件音量/静音写回去（幂等；失败不抛）
+//
+// ⚠️ 2026-10-25：**当前已不使用**。用户要求「独占时让系统调节音量」，
+// 所以本播放器不再接管硬件音量（open 的 2b 注释），也就不需要归还。
+// 函数保留是给将来可能的选择性接管用，并在 test_hw_volume 里仍有覆盖。
 inline void hw_volume_restore(AudioDeviceID dev, const HwVolumeState& st) {
     if (!st.saved) return;
     hw_volume_set(dev, st.scalar);
@@ -246,13 +250,30 @@ inline bool set_device_format(AudioDeviceID dev, uint32_t rate, int bits, int ch
     return ::AudioObjectSetPropertyData(dev, &addr, 0, nullptr, sizeof(asbd), &asbd) == noErr;
 }
 
+// Hog Mode 的读写语义（2026-10-25 实测确认，**原实现写反了**）
+//
+// 这个属性的 set 值**不是"要设成谁"，而是"本进程是否继续持有"**：
+//   写 0        → 请求独占；内核成功后把**真实持有者 pid 回填**进这个属性
+//                 （实测：写 0 之后读到 owner == 我自己的 pid）
+//   写 getpid() → 释放独占（实测：写自己的 pid 之后读到 owner == -1）
+//
+// 原实现是 `pid_t pid = on ? getpid() : 0;` —— 正好反了：
+//   set_hog_mode(dev, true)  实际在**释放**，
+//   set_hog_mode(dev, false) 实际在**抢**。
+// 后果：①「独占」从来没真正生效过（所以系统音量其实一直可用，只是别处有问题）；
+//       ② close 时的"释放"反而去抢独占，导致退出后设备被本进程残留占用 ——
+//          用户看到的就是「系统音量调不了」。
+// 实测证据（/tmp/hogfinal）：
+//   写 0        → owner=67584(me)  → 系统音量被阻断 ✅ 真独占
+//   写 getpid() → owner=-1         → 系统音量恢复   ✅ 真释放
 inline bool set_hog_mode(AudioDeviceID dev, bool on) {
-    pid_t pid = on ? ::getpid() : 0;
+    // on=true → 写 0（请求独占）；on=false → 写 getpid()（释放）
+    pid_t val = on ? 0 : ::getpid();
     AudioObjectPropertyAddress addr{kAudioDevicePropertyHogMode,
                                     kAudioObjectPropertyScopeGlobal,
                                     kAudioObjectPropertyElementMain};
     if (!::AudioObjectHasProperty(dev, &addr)) return false;
-    const OSStatus st = ::AudioObjectSetPropertyData(dev, &addr, 0, nullptr, sizeof(pid), &pid);
+    const OSStatus st = ::AudioObjectSetPropertyData(dev, &addr, 0, nullptr, sizeof(val), &val);
     return st == noErr;
 }
 
@@ -392,14 +413,24 @@ public:
         buffer_ms_ = spec.bufferMs;
         shared_ = spec.shared;
 
-        // 1) 抢占 Hog Mode（独占）。失败不致命，但要如实降级为"非 bit-perfect"。
-        //    共享模式（OpenSpec::shared）不抢 —— 系统混音器留在路径上。
+        // 1) Hog Mode（严格独占）—— 2026-10-25 改为由 OpenSpec::exclusive **独立控制**。
+        //
+        // 为什么不再是「!shared 就抢」：实测确认 Hog 会阻断其它进程改硬件音量
+        // （系统音量条/音量键失效），而用户希望「正常调节系统音量的前提下独占」。
+        // 二者物理互斥，所以做成开关（方案 C）：
+        //   exclusive=true  → 抢 Hog：真独占，其他 App 声音被屏蔽，但系统音量失效；
+        //   exclusive=false → 不抢 Hog：系统音量全程可用（默认）。
+        // 失败不致命，如实降级为"非 bit-perfect"。
         hogged_ = false;
-        if (!shared_) hogged_ = detail::set_hog_mode(device_, true) && detail::is_hogged_by_us(device_);
+        if (spec.exclusive && !shared_) {
+            hogged_ = detail::set_hog_mode(device_, true) && detail::is_hogged_by_us(device_);
+        }
 
         // 2) 按源格式设置设备物理格式 —— 这是 bit-perfect 的关键。
         //    共享模式跳过（设备可能被其它客户端占用，物理格式归系统管）；
         //    AUHAL 会按需做 int<->float32 换算（|v|<2^24 时精确）。
+        // 物理格式：不抢 Hog 也照样按源格式设置（保证采样率/位深正确）。
+        // 只有「共享」模式才跳过 —— 那时设备可能被别的客户端占用，物理格式归系统管。
         if (!shared_ && !detail::set_device_format(device_, rate_, bits_, channels_)) {
             // 回滚 hog
             if (hogged_) { detail::set_hog_mode(device_, false); hogged_ = false; }
@@ -414,30 +445,25 @@ public:
             return false;
         }
 
-        // 2b) 接管设备硬件音量（2026-10-25 用户报「接管后最高音量被锁死在旧值」）。
-        //     独占模式下系统音量 UI 被挡住，而硬件音量标量会停在接管那一刻的旧值
-        //     （本机实测 0.152 ≈ −16 dB），播放器只做软件增益 ⟹ 天花板就是那个陈旧值。
-        //     用户要求「要接管设备就全接管，要用系统的音量级别」⟹ 这里把硬件音量置满、
-        //     解除静音，音量完全交给软件增益；close() 时恢复原值，不污染系统设置。
-        //     共享模式不接管（系统混音器在路径上，音量归系统管）。
+        // 2b) 设备硬件音量：**不接管**（2026-10-25 用户明确要求，推翻上一版设计）。
+        //
+        // 用户原话：「音量不对，能不能做到独占的时候能让系统调节音量」。
+        //
+        // 上一版我让接管时把硬件音量强制置满、音量全交给软件增益，结果有两个严重问题：
+        //   ① **满幅爆炸**：硬件 1.0 × 软件 0 dB = 满幅输出，只要起播音量是 0 就炸；
+        //   ② **系统音量条失效**：硬件被钉死在 1.0，用户按系统音量键/拖系统音量条都没反应。
+        //
+        // 实测确认（/tmp/hogvol）：**Hog Mode 并不阻止硬件音量读写**
+        //   Hog 中读 0.1848 成功、写 0.5 成功、settable=YES。
+        // 所以正确做法是：独占只抢「设备所有权」，音量仍归系统和硬件控制。
+        //
+        // 现在的语义：
+        //   * 硬件音量：完全不动，用户用系统音量条 / 音量键 / DAC 旋钮控制；
+        //   * 软件增益：只在用户主动拖播放器音量条时按 delta 应用（默认 0 dB = 不衰减）；
+        //   * bit-perfect 判据仍是「增益 == 1.0」，与系统音量无关（系统音量在 DAC 前生效，
+        //     不影响位流完整性，这也是 macOS 上 bit-perfect 的通行做法）。
         hwVol_ = detail::HwVolumeState{};
-        if (!shared_) {
-            detail::hw_volume_takeover(device_, hwVol_);
-            // 2026-10-25（用户安全要求）：接管把硬件音量置满后，必须立刻把软件增益
-            // 初始化到「原硬件音量的等效 dB」，否则会从接管前的响度**瞬间跳到满幅**。
-            // 例：接管前硬件 0.15（≈ −16.4 dB）→ 软件增益也设 −16.4 dB ⟹ 响度不变。
-            // 之后用户拖音量条时，render_loop 会以 startDb 为基准做增量，语义自洽。
-            if (hwVol_.valid) {
-                const double lin = (hwVol_.equivalentDb <= -120.0)
-                                   ? 0.0 : std::pow(10.0, hwVol_.equivalentDb / 20.0);
-                gain_ = lin;
-                // 告诉上层「接管后应该把音量条起点定在哪」—— 由 hw_takeover_db() 读取
-                hwStartDb_ = hwVol_.equivalentDb;
-                hwStartDbValid_ = true;
-            } else {
-                hwStartDbValid_ = false;
-            }
-        }
+        hwStartDbValid_ = false;
 
         // 3) 建 AUHAL 输出单元
         AudioComponentDescription desc{};
@@ -655,12 +681,17 @@ public:
     }
 
     bool bit_perfect() const override {
-        // bit-perfect 的充分必要条件（PLATFORM.md §5.1）：
-        //   独占(Hog) + 设备物理格式 == 源格式 + 增益 1.0 + 无任何 DSP
-        // 本层只能保证前三项；DSP 是否启用由引擎层决定并另行显示。
-        // 共享模式下系统混音器在路径上，不构成 bit-perfect（数值仍可逐位精确，
-        // 但那是 rtaloop 回环测试去证明的事，不是本标志的承诺）。
-        return opened_ && !shared_ && hogged_ && gain_ == 1.0;
+        // bit-perfect 的判据（2026-10-25 随 exclusive 开关调整）：
+        //   不经系统混音(shared==false) + 物理格式==源格式 + 增益 1.0 + 无 DSP
+        //
+        // ⚠️ **不再要求 hogged_**。原因：Hog 只保证「设备所有权独占」，
+        // 与「位流是否被改动」无关 —— 不抢 Hog 时，只要不经系统混音器、
+        // 物理格式按源设置、增益 1.0，送到 DAC 的仍然是逐位相同的位流。
+        // 系统音量（硬件标量）作用在 DAC 的模拟/数字音量级，不改变位流本身，
+        // 这也是 macOS 上 bit-perfect 的通行判定（Roon / Audirvana 同）。
+        //
+        // 反过来，抢了 Hog 但走了 DSP/增益，依然不是 bit-perfect —— 那个由引擎层判。
+        return opened_ && !shared_ && gain_ == 1.0;
     }
 
     OutputError last_error_class() const override { return err_class_; }
@@ -764,9 +795,9 @@ private:
     }
 
     void close_locked() {
-        // 2026-10-25：先归还设备硬件音量（接管时存的旧值），再关单元/放 hog。
-        // 顺序重要：hog 释放后设备可能被别的进程立刻接管，那时再写音量就晚了。
-        if (!shared_) detail::hw_volume_restore(device_, hwVol_);
+        // 2026-10-25：**不再归还硬件音量** —— 因为已改为「不接管」（见 open 的 2b）。
+        // 硬件音量全程由系统控制，我们一个字节都没改过，自然也不需要恢复。
+        // （保留 hwVol_ 清零只是把状态归位，不再对设备写任何音量属性。）
         hwVol_ = detail::HwVolumeState{};
         if (unit_) {
             if (running_) ::AudioOutputUnitStop(unit_);
