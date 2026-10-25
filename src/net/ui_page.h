@@ -140,18 +140,27 @@ inline std::string rta_ui_page() {
     h += "html.webview2 #rzHot{position:fixed;inset:0;z-index:2147483000;pointer-events:none}";
     h += "html.webview2 #rzHot i{position:fixed;display:block;pointer-events:auto;background:transparent}";
     h += "html.webview2 #rzHot .rz-l{left:0;top:0;bottom:0;width:5px;cursor:ew-resize}";
-    h += "html.webview2 #rzHot .rz-r{right:0;top:0;bottom:0;width:5px;cursor:ew-resize}";
+    h += "html.webview2 #rzHot .rz-r{right:0;top:0;bottom:0;width:var(--rzband,5px);cursor:ew-resize}";
     h += "html.webview2 #rzHot .rz-t{left:0;right:0;top:0;height:5px;cursor:ns-resize}";
     h += "html.webview2 #rzHot .rz-b{left:0;right:0;bottom:0;height:5px;cursor:ns-resize}";
     h += "html.webview2 #rzHot .rz-tl{left:0;top:0;width:10px;height:10px;cursor:nwse-resize}";
     h += "html.webview2 #rzHot .rz-tr{right:0;top:0;width:10px;height:10px;cursor:nesw-resize}";
     h += "html.webview2 #rzHot .rz-bl{left:0;bottom:0;width:10px;height:10px;cursor:nesw-resize}";
     h += "html.webview2 #rzHot .rz-br{right:0;bottom:0;width:10px;height:10px;cursor:nwse-resize}";
+    h += "html.webview2 .rz-edge-inset{border-right:var(--rzband,5px) solid transparent!important}";
     // 搜索框：flex:0 1 320px
     h += ".search{flex:0 1 320px;min-width:140px;margin-left:12px;position:relative;display:flex;align-items:center}";
-    h += ".search input{width:100%;height:32px;padding:0 12px 0 32px;border-radius:8px;border:1px solid var(--line);background:var(--field);transition:.15s;font-size:12.5px;box-sizing:border-box;color:var(--txt)}";
+    h += ".search input{width:100%;height:32px;padding:0 32px 0 32px;border-radius:8px;border:1px solid var(--line);background:var(--field);transition:.15s;font-size:12.5px;box-sizing:border-box;color:var(--txt)}";
     h += ".search input:focus{outline:0;border-color:var(--acc);box-shadow:0 0 0 3px var(--acc-weak)}";
     h += ".search svg{position:absolute;left:10px;top:50%;margin-top:-7px;opacity:.4;pointer-events:none}";
+    h += ".search .q-clear{position:absolute;right:8px;top:50%;transform:translateY(-50%);background:none;border:none;color:var(--mut2);font-size:16px;line-height:1;cursor:pointer;padding:2px 6px;border-radius:50%;display:inline-flex;align-items:center;justify-content:center;transition:.15s}";
+    h += ".search .q-clear:hover{color:var(--txt);background:var(--hov)}";
+    h += ".nav-badge{position:absolute;top:2px;right:2px;background:var(--acc);color:#fff;border-radius:10px;font-size:9.5px;padding:0 5px;line-height:14px;font-weight:600;pointer-events:none}";
+    h += ".t2.t-next{color:var(--mut2);font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;margin-top:2px}";
+    h += "@keyframes spin{from{transform:rotate(0deg)}to{transform:rotate(360deg)}}";
+    h += ".spinning svg{animation:spin 1s linear infinite}";
+    h += ".btn:focus-visible,.ibtn:focus-visible,.k:focus-visible{outline:2px solid var(--acc);outline-offset:2px}";
+    h += "button:disabled,.btn:disabled{opacity:.45;cursor:not-allowed}";
     h += ".sp{flex:1}.ibtn{width:32px;height:32px;border-radius:var(--r-sm);display:grid;place-items:center;color:var(--mut);transition:.15s;flex:none}";
     h += ".ibtn:hover{background:var(--hov2);color:var(--txt)}.ibtn.on{background:var(--acc-weak);color:var(--acc)}";
     // 主题切换
@@ -209,7 +218,7 @@ inline std::string rta_ui_page() {
     h += ".ahead .cv{position:relative;overflow:hidden}";
     h += ".ahead .cv .ph{position:absolute;inset:0;display:grid;place-items:center;font-size:46px;font-weight:800;color:var(--ph-txt);background:var(--phbg)}";
     h += ".ahead .kind{font-size:10px;letter-spacing:1.4px;color:var(--mut2);font-weight:600}";
-    h += ".ahead h1{font-size:26px;line-height:1.2;font-weight:750;letter-spacing:-.4px;margin:5px 0 7px;word-break:break-word}";
+    h += ".ahead h1{font-size:26px;line-height:1.2;font-weight:750;letter-spacing:-.4px;margin:5px 0 7px;word-break:break-word;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:100%}";
         h += ".ahead .sub{font-size:12.5px;color:var(--mut);margin-bottom:13px}";
     h += ".bio-box{font-size:13px;line-height:1.75;color:var(--txt2);white-space:pre-wrap;word-break:break-word}";
     h += ".bio-box.collapsed{max-height:140px;overflow:hidden;-webkit-mask-image:linear-gradient(180deg,#000 65%,transparent)}";
@@ -328,6 +337,12 @@ inline std::string rta_ui_page() {
     h += ".qi.on{background:var(--acc-weak);border-left-color:var(--acc);color:var(--acc-text)}";
     h += ".qi .n{color:var(--mut2);width:20px;flex:none;text-align:right;font-variant-numeric:tabular-nums;font-size:11px}";
     h += ".qi .t{flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}";
+    h += ".qi .qdel{width:20px;height:20px;border-radius:4px;color:var(--mut2);opacity:0;transition:.12s;background:none;border:none;cursor:pointer;font-size:14px;line-height:1;display:flex;align-items:center;justify-content:center;flex:none}";
+    h += ".qi:hover .qdel{opacity:1}.qi .qdel:hover{background:var(--hov2);color:var(--danger)}";
+    h += ".ctx-menu,.qmenu{position:fixed;z-index:9999;background:var(--bg2);border:1px solid var(--line);border-radius:8px;box-shadow:0 8px 24px var(--shadow);padding:4px 0;min-width:130px;user-select:none}";
+    h += ".ctx-item,.qm{padding:7px 14px;cursor:pointer;font-size:12.5px;color:var(--txt);display:flex;align-items:center;gap:8px;transition:background .1s;width:100%;text-align:left;border:none;background:none;box-sizing:border-box}";
+    h += ".ctx-item:hover,.qm:hover{background:var(--hov)}.ctx-item.danger:hover,.qm[data-a=del]:hover{color:var(--danger);background:var(--hov2)}";
+    h += ".qmt{padding:6px 14px 4px;font-size:11px;color:var(--mut2);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;border-bottom:1px solid var(--line);margin-bottom:2px}";
     // 右栏快速设置
     h += ".set{padding:14px;display:none}.set.on{display:block}.fld{margin-bottom:14px}";
     h += ".fld label{display:block;font-size:11px;color:var(--mut);margin-bottom:5px;font-weight:500}";
@@ -900,13 +915,14 @@ h += "#npPage .npedge{display:none}";
     h += "<div class=top id=topbar>";
     h += "<b id=pth class=ptitle>专辑</b><span id=cnt class=pcnt></span>";
     h += "<div class=search><svg width=14 height=14 viewBox='0 0 24 24' fill=none stroke=currentColor stroke-width=2><circle cx='11' cy='11' r='7'/><path d='M20 20l-3.5-3.5'/></svg>";
-    h += "<input id=q placeholder='搜索专辑 / 艺术家 / 曲目…' autocomplete=off spellcheck=false></div><div class=sp></div>";
+    h += "<input id=q placeholder='搜索专辑 / 艺术家 / 曲目…' autocomplete=off spellcheck=false>";
+    h += "<button id=qClear class=q-clear title='清空搜索' style='display:none'>&times;</button></div><div class=sp></div>";
     h += "<span id=tools class=ptools></span>";
     h += "<div class=themes><button class=sw data-theme=light title='浅色'></button>";
     h += "<button class='sw on' data-theme=dark title='深色'></button><button class=sw data-theme=blue title='浅蓝'></button></div>";
     h += "<button class=ibtn id=bHelp title='快捷键与技巧'><svg width=16 height=16 viewBox='0 0 24 24' fill=none stroke=currentColor stroke-width=2><circle cx='12' cy='12' r='9'/><path d='M9.5 9a2.5 2.5 0 015 .5c0 1.5-2.5 2-2.5 3.5'/><circle cx='12' cy='17' r='.7' fill='currentColor'/></svg></button>";
     h += "<button class=ibtn id=bScan title='重新扫描音乐库'><svg width=16 height=16 viewBox='0 0 24 24' fill=none stroke=currentColor stroke-width=2><path d='M21 12a9 9 0 1 1-3-6.7'/><path d='M21 4v5h-5'/></svg></button>";
-    h += "<button class=ibtn id=tq title='显示或隐藏队列'><svg width=17 height=17 viewBox='0 0 24 24' fill=none stroke=currentColor stroke-width=2><path d='M4 6h16M4 12h16M4 18h10'/></svg></button>";
+    h += "<button class=ibtn id=tq title='显示或隐藏队列' style='position:relative'><svg width=17 height=17 viewBox='0 0 24 24' fill=none stroke=currentColor stroke-width=2><path d='M4 6h16M4 12h16M4 18h10'/></svg><span id=tqBadge class=nav-badge style='display:none'></span></button>";
     h += "<div class=wctl><button class=wbtn id=wMin title='最小化'><svg viewBox='0 0 24 24' fill=none stroke=currentColor stroke-width=2><path d='M5 12h14'/></svg></button>";
     h += "<button class=wbtn id=wMax title='最大化'><svg viewBox='0 0 24 24' fill=none stroke=currentColor stroke-width=2><rect x='6' y='6' width='12' height='12' rx='1.5'/></svg></button>";
     h += "<button class='wbtn close' id=wClose title='关闭'><svg viewBox='0 0 24 24' fill=none stroke=currentColor stroke-width=2><path d='M6 6l12 12M18 6L6 18'/></svg></button></div></div>";
@@ -965,7 +981,8 @@ h += "#npPage .npedge{display:none}";
     // ---------- 播放条 ----------
     h += "<div class=bar><div class='np' id=npOpen title='打开正在播放'>";
     h += "<div class=cv2 id=cv></div><div class=tx><div class=t1 id=npt>未播放</div><div class=t2 id=npart></div>";
-    h += "<div class=t2 id=nps>选择一个专辑开始</div></div></div>";
+    h += "<div class=t2 id=nps>选择一个专辑开始</div>";
+    h += "<div class='t2 t-next' id=npNextTrack style='display:none' title='下一首'></div></div></div>";
     // 2026-10-23（用户 261023-02 #1）：底栏常驻 bit-perfect 徽标。
     // 2026-10-23（用户 261023-04 #1）：它**不能**再作为底栏 grid 的第 4 个子项（那会把控制组挤到最右、
     // 把右侧状态簇挤到第二行）。现在作为紧凑 chip 收进 .vol 状态簇，由 CSS 控制显隐与配色。
@@ -1022,6 +1039,7 @@ h += "#npPage .npedge{display:none}";
     h += "<div class=nptitleline><div class=nptit id=npTitle>未播放</div>";
     h += "<button class=fav-btn id=npFavBtn title='收藏' style='padding:4px;display:none'><svg width=20 height=20 viewBox='0 0 24 24' fill=none stroke='currentColor' stroke-width=2><path d='M20.84 4.61a5.5 5.5 0 00-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 00-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 000-7.78z'/></svg></button></div>";
     h += "<div class=npsub id=npSub></div>";
+    h += "<div class=npnext id=npNextTrackHero style='display:none;font-size:12px;color:var(--mut2);margin-top:4px'></div>";
     // npMeta：元数据补全芯片（year/genre/albumArtist/已补全）+ 当前 EQ/IR 芯片，由 renderNp 填充
     h += "<div class=npmline id=npMeta></div>";
     h += "</div></div>";
