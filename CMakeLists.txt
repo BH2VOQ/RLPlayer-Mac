@@ -609,6 +609,12 @@ target_include_directories(test_metallm PRIVATE ${CMAKE_SOURCE_DIR}/src)
 target_link_libraries(test_metallm PRIVATE ${RL_PLATFORM_LIBS})
 add_test(NAME metallm COMMAND test_metallm)
 
+# ---------------- 大 DSD 流式解码（261024-06 #2 / B-5）----------------
+add_executable(test_dsd_stream_decode tests/test_dsd_stream_decode.cpp)
+target_include_directories(test_dsd_stream_decode PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(test_dsd_stream_decode PRIVATE rtadsp ${RL_PLATFORM_LIBS})
+add_test(NAME dsd_stream_decode COMMAND test_dsd_stream_decode)
+
 option(RTA_BUILD_LEGACY_TESTS "构建尚未移植到 macOS 的旧测试（缺 POSIX 垫片，默认关闭）" OFF)
 if(RTA_BUILD_LEGACY_TESTS)
 

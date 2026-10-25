@@ -104,6 +104,9 @@ namespace eng = rta::engine;
 #include <unistd.h>
 #include <netdb.h>
 #include <arpa/inet.h>
+#if defined(__APPLE__)
+#include <mach/mach.h>
+#endif
 
 namespace rta::crash {
 inline void install() {}   // macOS 无 MiniDump；信号崩溃由系统 .crash 报告承接
@@ -410,6 +413,35 @@ static PlayerState g_ps;
 // 20 段参数均衡 PEQ（261024-02 #6）：全局单例。播放线程处理音频，HTTP 线程改参数（热更新）。
 static std::shared_ptr<rta::dsp::PeqEngine> g_peq;
 static std::atomic<bool> g_exitReq{false};
+
+// ---------------- 进程内存遥测（2026-10-25 大 DSD 文件"卡死"取证） ----------------
+// 为什么必须自己量：外部按秒采样会漏掉解码阶段的瞬时峰值（整曲解成 double 平面只在几秒内存在），
+// 而"峰值内存"正是本次事故的核心判据之一。这里既给 /api/status 用，也写进 MEM 日志行。
+struct ProcMemInfo { double wsMb = 0.0; double peakMb = 0.0; };
+static ProcMemInfo proc_mem() {
+    static std::mutex m;
+    static double peak = 0.0;
+    double ws = 0.0;
+#if defined(__APPLE__)
+    mach_task_basic_info info;
+    mach_msg_type_number_t count = MACH_TASK_BASIC_INFO_COUNT;
+    if (task_info(mach_task_self(), MACH_TASK_BASIC_INFO, (task_info_t)&info, &count) == KERN_SUCCESS)
+        ws = (double)info.resident_size / (1024.0 * 1024.0);
+#endif
+    std::lock_guard<std::mutex> lk(m);
+    if (ws > peak) peak = ws;
+    ProcMemInfo r; r.wsMb = ws; r.peakMb = peak;
+    return r;
+}
+// MEM 行：播放各阶段的内存快照。格式固定，便于 grep / 出报告。
+static std::string mem_line(const std::string& stage, const std::string& extra = std::string()) {
+    const ProcMemInfo m = proc_mem();
+    char b[320];
+    std::snprintf(b, sizeof(b), "MEM stage=%s ws=%.1fMB peak=%.1fMB", stage.c_str(), m.wsMb, m.peakMb);
+    std::string s = b;
+    if (!extra.empty()) s += " " + extra;
+    return s;
+}
 // 播放线程诊断计数（出问题时第一手证据，比猜快得多）
 static std::atomic<long long> g_dbgW0{0}, g_dbgPulls{0}, g_dbgWf{0}, g_dbgWr{0}, g_dbgPer{0};
 // C2 遥测（2026-10-24 N300 欠载）：dry/dryms/ev/evint/prod 由 render_loop 计数并导出，
@@ -1402,6 +1434,131 @@ static StartPos start_pos_for(double frac, size_t inFrames, size_t totalOut) {
     return r;
 }
 
+// ---------------- 大文件流式播放：数据源 + 块级过采样峰值扫描 ----------------
+//
+// 背景（2026-10-25 用户实测 user_ginshoku.dsf，384 s DSD64 / 271 MB）：
+//   整曲预解码 read_dsd_native：4910 ms、PCM 缓冲 517 MB、解码瞬时峰值 1813 MB；
+//   再叠加"整曲过采样峰值扫描"的 double 平面 1034 MB 与 2887 ms 扫描 ⟹ 起播前 8 s 无声音、峰值 2071 MB。
+//   而管线本身的首块只要 18 ms（96k 输出 / GPU 升频）—— 卡的是解码与扫描，不是 DSP。
+//
+// 因此：解码后超过阈值（默认 200 MB，可配置）的 DSD 文件改走流式解码（DsdPcmStream），
+// 峰值扫描改为逐块扫描（只保留一块的平面）；小文件仍走原来的整曲路径（行为不变）。
+struct PlaySource {
+    const rta::audio::AudioBuffer* mem = nullptr;                      // 非空 = 整曲在内存
+    std::unique_ptr<rta::audio::DsdPcmStream> stream;      // 非空 = 流式解码
+    uint32_t rate = 0;
+    int      channels = 0;
+    int      bits = 0;
+    bool     isFloat = false;
+    size_t   frames = 0;
+
+    bool streaming() const { return stream != nullptr; }
+
+    // 读 [pos, pos+n) 帧。整曲路径与原实现逐字节相同；流式路径向 DsdPcmStream 要。
+    size_t read(size_t pos, size_t n, rta::audio::AudioBuffer& out) const {
+        if (stream) return stream->read(pos, n, out);
+        out.rate = mem->rate; out.channels = mem->channels; out.bits = mem->bits; out.isFloat = mem->isFloat;
+        out.raw.clear();
+        if (!mem || pos >= frames || n == 0) return 0;
+        if (n > frames - pos) n = frames - pos;
+        const size_t ch = (size_t)channels;
+        out.raw.assign(mem->raw.begin() + (long long)(pos * ch),
+                       mem->raw.begin() + (long long)((pos + n) * ch));
+        return n;
+    }
+};
+
+// 读 rlplayer-settings.conf 的单键（缺失返回 def）
+static std::string conf_get(const std::string& key, const std::string& def = std::string()) {
+    std::ifstream f(path_in_exe_dir("rlplayer-settings.conf"));
+    if (!f) return def;
+    std::string line;
+    while (std::getline(f, line)) {
+        if (!line.empty() && line.back() == '\r') line.pop_back();
+        const size_t e = line.find('=');
+        if (e == std::string::npos) continue;
+        if (line.substr(0, e) == key) return line.substr(e + 1);
+    }
+    return def;
+}
+
+// 每次播放开始时把「大文件流式」策略刷成配置值：
+//   stream_threshold_mb  解码后超过多少 MB 走流式（0 = 关闭流式，回到整曲预解码）
+//   isp_prescan_sec      流式播放的峰值预扫窗口（秒）—— 整曲扫描等于再解一遍，不划算
+static void apply_stream_settings() {
+    auto& s = rta::audio::big_file_stream_settings();
+    const double mb = std::atof(conf_get("stream_threshold_mb", "200").c_str());
+    const double win = std::atof(conf_get("isp_prescan_sec", "20").c_str());
+    s.enabled = (mb > 0.0);
+    s.thresholdMb = (mb > 0.0) ? mb : 200.0;
+    s.ispPrescanSec = (win > 0.0) ? win : 20.0;
+    // 每次播放都落一行：出问题时"这次用的是哪套阈值"不该靠猜（阈值可配置，必须能自证）
+    char b[200];
+    std::snprintf(b, sizeof(b), "STREAMCFG enabled=%d threshold_mb=%.0f isp_prescan_sec=%.0f",
+                  (int)s.enabled, s.thresholdMb, s.ispPrescanSec);
+    play_log(b);
+}
+
+// 块级过采样峰值扫描（4 相 × 8 抽头，与 dsp::detect_isp 同一个核、同一套边界规则）。
+// 为什么不用 dsp::detect_isp(整曲 planes)：那要 2 声道 × 8 字节 × 帧数（384 s DSD64 = 1034 MB）。
+// 这里按 256K 帧一块读源，块与块之间带 TAPS/2-1 = 3 帧真样本重叠，因此块内样本的插值
+// 与整曲扫描逐位相同（块边界不用"复制端点"，只有文件首尾才钳位）。
+struct BigIspScan {
+    double peak = 0.0;
+    double srcPeak = 0.0;
+    long long over = 0;
+    size_t scannedFrames = 0;
+    bool   partial = false;
+};
+static BigIspScan scan_isp_blocks(PlaySource& src, size_t limitFrames, bool partial) {
+    BigIspScan r;
+    r.partial = partial;
+    const auto& K = rta::dsp::isp_kernel();
+    const int TAPS = (int)K[0].size();
+    const int half = TAPS / 2 - 1;
+    const int PH = (int)K.size();
+    const size_t BLK = 1u << 18;          // 262144 帧/块
+    const size_t total = src.frames;
+    if (limitFrames == 0 || limitFrames > total) limitFrames = total;
+    for (size_t a = 0; a < limitFrames; a += BLK) {
+        const size_t b = std::min(limitFrames, a + BLK);
+        const size_t lo = (a > (size_t)half) ? a - (size_t)half : 0;
+        const size_t hi = std::min(total, b + (size_t)half);
+        rta::audio::AudioBuffer chunk;
+        const size_t got = src.read(lo, hi - lo, chunk);
+        if (got == 0) break;
+        const int chn = chunk.channels;
+        const size_t n = chunk.frames();
+        std::vector<std::vector<double>> planes((size_t)chn, std::vector<double>(n));
+        for (size_t i = 0; i < n; ++i)
+            for (int c = 0; c < chn; ++c) {
+                const double v = chunk.sample(i, c);
+                planes[(size_t)c][i] = v;
+                if (std::fabs(v) > r.srcPeak) r.srcPeak = std::fabs(v);
+            }
+        const size_t endInChunk = std::min(n, b - lo);
+        for (size_t i = a - lo; i < endInChunk; ++i) {
+            for (int c = 0; c < chn; ++c) {
+                const auto& x = planes[(size_t)c];
+                for (int p = 0; p < PH; ++p) {
+                    double acc = 0.0;
+                    for (int k = 0; k < TAPS; ++k) {
+                        long long idx = (long long)i + k - half;
+                        if (idx < 0) idx = 0;                       // 全局首端钳位（与整曲扫描一致）
+                        if (idx >= (long long)n) idx = (long long)n - 1;
+                        acc += K[(size_t)p][(size_t)k] * x[(size_t)idx];
+                    }
+                    const double v = std::fabs(acc);
+                    if (v > r.peak) r.peak = v;
+                    if (v > 1.0) ++r.over;
+                }
+            }
+        }
+        r.scannedFrames += (b - a);
+    }
+    return r;
+}
+
 // ---------------- 播放单曲 ----------------
 // buf 若已含数据则直接使用（预解码命中），否则现场解码。
 // 返回 true = 正常播完；false = 被打断或出错。
@@ -1492,9 +1649,42 @@ static bool play_one_impl(const std::string& file, const PlayParams& pIn, rta::a
             }
         }
         play_log("START file=" + file);
+        play_log(mem_line("pre-decode"));
+        apply_stream_settings();
         const auto t_dec_0 = std::chrono::steady_clock::now();
-        if (buf.raw.empty()) buf = read_any(file, &note);
-        else note.text = "预解码命中（整曲已在内存）";
+        // 大文件不整曲预解码（2026-10-25 大 DSD 卡死）：先只读文件头，解码后 > 阈值就流式。
+        // 判据是"解码后 PCM 字节数"（DSD64 的 271 MB 文件解出来是 517 MB），见 audio_loader.h。
+        PlaySource src;
+        double streamMb = 0.0;
+        {
+            std::string why;
+            if (buf.raw.empty() && rta::audio::should_stream_decode(file, &streamMb, &why)) {
+                auto st = std::make_unique<rta::audio::DsdPcmStream>();
+                std::string serr;
+                if (st->open(file, rta::audio::dsd_pcm_settings(), &serr)) {
+                    src.rate = st->rate();
+                    src.channels = st->channels();
+                    src.bits = 32;
+                    src.isFloat = false;
+                    src.frames = st->totalFrames();
+                    src.stream = std::move(st);
+                    char b[240];
+                    std::snprintf(b, sizeof(b),
+                                  "流式解码（解码后 %.0f MB > 阈值 %.0f MB）：不整曲预解码，边读边解",
+                                  streamMb, rta::audio::big_file_stream_settings().thresholdMb);
+                    note.text = b;
+                    play_log(std::string("STREAM_BEGIN ") + b + " file=" + file);
+                } else {
+                    play_log("STREAM_SKIP open failed: " + serr + " file=" + file);   // 宁可慢，也不能不出声
+                }
+            } else if (!why.empty()) {
+                play_log("STREAM_NOT_USED " + why + " file=" + file);
+            }
+        }
+        if (!src.stream) {
+            if (buf.raw.empty()) buf = read_any(file, &note);
+            else note.text = "预解码命中（整曲已在内存）";
+        }
         const auto t_dec_1 = std::chrono::steady_clock::now();
         if (note.totalMs <= 0.0) {
             note.totalMs = std::chrono::duration<double, std::milli>(t_dec_1 - t_dec_0).count();
@@ -1502,12 +1692,31 @@ static bool play_one_impl(const std::string& file, const PlayParams& pIn, rta::a
         ps.decodeMs.store((long long)(note.totalMs + 0.5));
         ps.ffmpegMs.store((long long)(note.ffmpegMs + 0.5));
         ps.wavReadMs.store((long long)(note.wavReadMs + 0.5));
-        rta::audio::AudioBuffer& in = buf;
+        // 流式时 buf 是空的：用只有元数据的 AudioBuffer 顶替 in 的元数据用途（raw 不参与）
+        rta::audio::AudioBuffer inMeta;
+        if (src.stream) {
+            inMeta.rate = src.rate; inMeta.channels = src.channels;
+            inMeta.bits = src.bits; inMeta.isFloat = src.isFloat;
+        } else {
+            src.mem = &buf;
+            src.rate = buf.rate; src.channels = buf.channels; src.bits = buf.bits;
+            src.isFloat = buf.isFloat; src.frames = buf.frames();
+        }
+        const rta::audio::AudioBuffer& in = src.stream ? inMeta : buf;
+        const size_t srcFrames = src.frames;
+        {
+            char b[240];
+            std::snprintf(b, sizeof(b), "stream=%d decodedMb=%.0f inBufMb=%.0f",
+                          (int)src.streaming(),
+                          src.streaming() ? streamMb : (double)buf.raw.size() * 4.0 / (1024.0 * 1024.0),
+                          (double)buf.raw.size() * 4.0 / (1024.0 * 1024.0));
+            play_log(mem_line("decoded", b));
+        }
         if (!note.text.empty()) { std::lock_guard<std::mutex> lk(ps.mtx); ps.info = note.text; }
         if (!directNote.empty()) { std::lock_guard<std::mutex> lk(ps.mtx); ps.info += " ｜ " + directNote; }
         if (ps.stop.load()) return false;
         // 空解码结果不要再往下走到"设备不支持 0 Hz"——那是误导性的错误。
-        if (in.rate == 0 || in.frames() == 0) {
+        if (in.rate == 0 || srcFrames == 0) {
             std::lock_guard<std::mutex> lk(ps.mtx);
             ps.error = "解码结果为空（文件损坏、格式不支持，或 ffmpeg 解码失败）：" + file;
             return false;
@@ -1517,7 +1726,9 @@ static bool play_one_impl(const std::string& file, const PlayParams& pIn, rta::a
             std::ostringstream ds;
             ds << "DECODE file=" << file
                << " rate=" << in.rate << " ch=" << in.channels << " bits=" << in.bits
-               << " frames=" << in.frames();
+               << " frames=" << srcFrames
+               << " stream=" << (src.streaming() ? 1 : 0)
+               << " decodeMs=" << (long long)(note.totalMs + 0.5);
             if (!note.text.empty()) ds << " note=\"" << note.text << "\"";
             play_log(ds.str());
         }
@@ -1637,29 +1848,35 @@ static bool play_one_impl(const std::string& file, const PlayParams& pIn, rta::a
                                     : rta::dsp::Shaper::None;
         }
 
-        // 过采样峰值（ISP）检测：一次性扫全曲，插值 4 倍取峰值。
-        // ★ 必须用 in.sample() 而不是直接读 in.raw：float WAV 的 raw 是 float 的
-        //   位模式，按整数解释会得到天文数字的"峰值"（旧代码会因此永远预衰减 3 dB）。
+        // 过采样峰值（ISP）检测：逐块扫描（4 相 × 8 抽头）。
+        // ★ 旧实现把整曲铺成 double 平面（2 声道 × 8 字节 × 帧数）：384 s DSD64 就是 1034 MB，
+        //   而且 detect_isp 全曲扫描要 2887 ms —— 这正是"点播放后 7 秒没声音"的一半原因。
+        //   改为块级扫描后：内存只占一块（256K 帧 ≈ 4 MB），数学与整曲扫描逐位相同。
+        // ★ 必须用 sample() 而不是直接读 raw：float WAV 的 raw 是 float 的位模式。
         double preAtten = 0.0;
         double ispPeak = 0.0;
         double srcPeak = 0.0;
         long long ispOver = 0;
-        std::vector<std::vector<double>> planes;
+        std::string ispScan = "off";
         if (p.isp || p.dsd >= 64) {
-            planes.resize((size_t)in.channels, std::vector<double>(in.frames()));
-            for (size_t n = 0; n < in.frames(); ++n) {
-                for (int c = 0; c < in.channels; ++c) {
-                    const double v = in.sample(n, c);
-                    planes[(size_t)c][n] = v;
-                    if (std::fabs(v) > srcPeak) srcPeak = std::fabs(v);
-                }
-            }
-        }
-        if (p.isp && !planes.empty()) {
-            const auto rep = rta::dsp::detect_isp(planes);
-            ispPeak = rep.peak; ispOver = rep.overCount;
-            if (rep.peak > 1.0) {
-                preAtten = std::max(-3.0, -std::ceil(rep.peakDb * 10.0) / 10.0 - 0.1);
+            const auto t_isp_0 = std::chrono::steady_clock::now();
+            const double winSec = rta::audio::big_file_stream_settings().ispPrescanSec;
+            const bool partial = src.streaming() && (double)srcFrames > winSec * (double)in.rate;
+            const size_t limit = partial ? (size_t)(winSec * (double)in.rate) : srcFrames;
+            const BigIspScan sc = scan_isp_blocks(src, limit, partial);
+            ispPeak = sc.peak;
+            srcPeak = sc.srcPeak;
+            ispOver = sc.over;
+            ispScan = partial ? "partial" : "full";
+            const double ispMs = std::chrono::duration<double, std::milli>(
+                                     std::chrono::steady_clock::now() - t_isp_0).count();
+            char b[240];
+            std::snprintf(b, sizeof(b), "ispScan=%s ms=%.0f limitFrames=%zu peak=%.4f srcPeak=%.4f over=%lld",
+                          ispScan.c_str(), ispMs, limit, sc.peak, sc.srcPeak, sc.over);
+            play_log(mem_line("isp", b));
+            if (p.isp && sc.peak > 1.0) {
+                const double peakDb = 20.0 * std::log10(sc.peak);
+                preAtten = std::max(-3.0, -std::ceil(peakDb * 10.0) / 10.0 - 0.1);
             }
         }
         dlog("stage isp-ok");
@@ -1670,7 +1887,14 @@ static bool play_one_impl(const std::string& file, const PlayParams& pIn, rta::a
         // 只要选了 DSD 输出，播到第一个大动态就会"突然变噪音"。
         double modHeadroomDb = 0.0;
         if (p.dsd >= 64) {
-            const double peak = std::max(std::max(srcPeak, ispPeak), 1e-9);
+            double peak = std::max(std::max(srcPeak, ispPeak), 1e-9);
+            // 流式文件的峰值只扫了开头 isp_prescan_sec 秒：若后面出现更大的峰值而余量按前面算，
+            // 1-bit 调制器会过载锁死（0.70 起环路锁死，见 dsd_integrator/modulator 注释）。
+            // 所以流式 + DSD 输出时按满幅保守取值（代价约 -4.4 dB，换来"任何曲目都不会锁死"）。
+            if (src.streaming() && peak < 1.0) {
+                peak = 1.0;
+                play_log("MODHEADROOM stream_partial_peak=1.0（流式峰值预扫只覆盖开头，按满幅保守取值）");
+            }
             const double afterIsp = peak * std::pow(10.0, preAtten / 20.0);
             modHeadroomDb = rta::dsp::sdm_headroom_db(afterIsp);
             if (modHeadroomDb < 0.0) preAtten += modHeadroomDb;
@@ -1716,7 +1940,7 @@ static bool play_one_impl(const std::string& file, const PlayParams& pIn, rta::a
                 char eb[256];
                 std::snprintf(eb, sizeof(eb),
                               "输出采样率解析为 0（防御，拒绝开流）：inRate=%u frames=%zu rate=%s dsd=%d",
-                              (unsigned)in.rate, in.frames(), p.rate.c_str(), p.dsd);
+                              (unsigned)in.rate, srcFrames, p.rate.c_str(), p.dsd);
                 ps.error = eb;
                 return false;
             }
@@ -2008,20 +2232,20 @@ static bool play_one_impl(const std::string& file, const PlayParams& pIn, rta::a
         // 元数据带下来）。解码器容器位深（flac 恒为 32）会把 16bit 源 → 24bit 输出误判成"位深降低"。
         const int srcBitsEff = p.srcBits > 0 ? p.srcBits
                               : ((in.bits > 0 && in.bits <= 24) ? in.bits : 0);
-        const size_t   totalOut = (size_t)((double)in.frames() * (double)deviceRate / (double)in.rate + 0.5);
+        const size_t   totalOut = (size_t)((double)srcFrames * (double)deviceRate / (double)in.rate + 0.5);
         ps.outRate = deviceRate; ps.outBits = outBits;
         ps.total.store(totalOut);
 
         // ---- 2026-10-25（耳机 EQ 热重载）：起播定位 ----
         // initialSeekFrac 只由「播放中切换 EQ/IR」这条路径设置（见 /api/settings 的 eqChanged 分支）。
         // 正常播放恒为 -1 ⟹ startPos 全 0 ⟹ 与旧行为逐字节相同。
-        const StartPos startPos = start_pos_for(p.initialSeekFrac, in.frames(), totalOut);
+        const StartPos startPos = start_pos_for(p.initialSeekFrac, srcFrames, totalOut);
         if (startPos.pos > 0 || startPos.played > 0) {
             ps.played.store(startPos.played);
             std::ostringstream ss;
             ss.setf(std::ios::fixed); ss.precision(4);
             ss << "EQ_RELOAD_SEEK frac=" << p.initialSeekFrac
-               << " pos=" << startPos.pos << "/" << in.frames()
+               << " pos=" << startPos.pos << "/" << srcFrames
                << " played=" << startPos.played << "/" << totalOut
                << " eq=" << (p.eqFile.empty() ? "(none)" : p.eqFile);
             play_log(ss.str());
@@ -2054,7 +2278,7 @@ static bool play_one_impl(const std::string& file, const PlayParams& pIn, rta::a
                 << ",\"inRate\":" << in.rate
                 << ",\"inBits\":" << in.bits
                 << ",\"inCh\":" << in.channels
-                << ",\"dur\":" << (double)in.frames() / (double)in.rate
+                << ",\"dur\":" << (double)srcFrames / (double)in.rate
                 << ",\"note\":\"" << jesc(note.text) << "\""
             << ",\"outRate\":" << outRate
             << ",\"outBits\":" << outBits
@@ -2090,6 +2314,11 @@ static bool play_one_impl(const std::string& file, const PlayParams& pIn, rta::a
                  << ",\"modOrder\":" << (dop ? (p.modOrder > 0 ? p.modOrder : 5) : 0)
                 << ",\"ispPeak\":" << ispPeak
                 << ",\"ispOver\":" << ispOver
+                // ispScan: full（整曲扫描）/ partial（流式文件只扫开头 isp_prescan_sec 秒）/ off
+                << ",\"ispScan\":\"" << ispScan << "\""
+                // stream: 本次是否走流式解码（大文件）；inBufMb = 整曲缓冲大小（流式时为 0）
+                << ",\"stream\":" << (src.streaming() ? "true" : "false")
+                << ",\"inBufMb\":" << ((double)buf.raw.size() * 4.0 / (1024.0 * 1024.0))
                 << ",\"srcPeak\":" << srcPeak
                 << ",\"modHeadroom\":" << modHeadroomDb
                 << ",\"preAtten\":" << preAtten
@@ -2186,7 +2415,7 @@ static bool play_one_impl(const std::string& file, const PlayParams& pIn, rta::a
             const size_t kChunk = 4096;
             uint64_t myEpoch = RQ.epoch.load();
             auto pl = std::make_unique<eng::Pipeline>(cfg);
-            size_t pos = 0, skipOut = 0;
+            size_t pos = 0, skipOut = 0, blocksDone = 0;
 
             // ---- DSD：每声道一个调制器（状态必须跨块保持）+ DoP 打包残样 ----
             std::vector<std::unique_ptr<rta::dsp::SdmModulator>> mods;
@@ -2221,19 +2450,27 @@ static bool play_one_impl(const std::string& file, const PlayParams& pIn, rta::a
                         myEpoch = RQ.epoch.load();
                         RQ.cv.notify_all();
                     }
-                    if (pos >= in.frames()) break;
-                    const size_t n = std::min(kChunk, in.frames() - pos);
+                    if (pos >= srcFrames) break;
+                    const size_t n = std::min(kChunk, srcFrames - pos);
                     rta::audio::AudioBuffer c;
-                    c.rate = in.rate; c.channels = in.channels; c.bits = in.bits; c.isFloat = in.isFloat;
-                    c.raw.assign(in.raw.begin() + (long long)(pos * (size_t)in.channels),
-                                 in.raw.begin() + (long long)((pos + n) * (size_t)in.channels));
-                    pos += n;
+                    // ★ 流式：向源要这一块（整曲路径下与旧代码逐字节相同）
+                    const size_t gotFrames = src.read(pos, n, c);
+                    pos += gotFrames;
+                    if (gotFrames == 0) break;
                     const auto t_dsp_0 = std::chrono::steady_clock::now();
                     // 2026-10-24（用户 261024-04 #8）：把 PipelineStats 收下来，才能回答
                     // 「本次卷积到底走没走 GPU」—— 旧代码传 nullptr，这个事实被直接丢掉，
                     // 于是 /api/signal 的 irGpu 只能是"用户勾了开关"（设置项），不是实测。
                     eng::PipelineStats pst;
                     rta::audio::AudioBuffer o = pl->process(c, &pst);
+                    if (blocksDone++ == 0) {
+                        // 首块成本 = 重采样器设计（26 万抽头）+ 一块 DSP。这是"起播延迟"里
+                        // 除解码/扫描之外的第三项，必须能单独量出来（2026-10-25 大文件卡死取证）。
+                        char b[200];
+                        std::snprintf(b, sizeof(b), "prepareMs=%.0f coeffMb=%.1f outFrames=%zu",
+                                      pst.prepareMs, (double)pst.coeffBytes / (1024.0 * 1024.0), o.frames());
+                        play_log(mem_line("dsp-first-block", b));
+                    }
                     if (pst.usedGpuConvolution) ps.gpuConvUsed.store(true);
                     if (!RQ.gpu.load()) RQ.gpu.store(pl->gpuResampleActive());
                     if (skipOut > 0 && !o.raw.empty()) {
@@ -2355,7 +2592,7 @@ static bool play_one_impl(const std::string& file, const PlayParams& pIn, rta::a
         rl.volDb = &ps.volDb; rl.startDb = &ps.startDb; rl.dbgPad = &ps.dbgPad; rl.gpuOut = &ps.gpu;
         rl.rq = &RQ;
         rl.deviceRate = deviceRate; rl.outBits = outBits; rl.outCh = outCh;
-        rl.inRate = in.rate; rl.inFrames = in.frames(); rl.totalOut = totalOut;
+        rl.inRate = in.rate; rl.inFrames = srcFrames; rl.totalOut = totalOut;
         rl.dbgW0 = &g_dbgW0; rl.dbgWr = &g_dbgWr; rl.dbgPulls = &g_dbgPulls;
         rl.dbgClip = &g_dbgClip; rl.dbgPeak = &g_dbgPeak;
         // C2 遥测导出（/api/status 用；STAT 行本身由 render_loop 直接打印）
@@ -3301,6 +3538,15 @@ static PreSlot g_pre;
 
 static void prefetch_start(const std::string& path) {
     if (path.empty() || g_pre.busy.load()) return;
+    // 大文件不预解码（2026-10-25）：这类文件在播放时走流式，预先把整曲塞进内存正好是
+    // 要修的那个病（517 MB + 1 GB 峰值）。判据与播放路径同一个函数，不会出现两套口径。
+    {
+        double mb = 0.0;
+        if (rta::audio::should_stream_decode(path, &mb, nullptr)) {
+            play_log("PREFETCH_SKIP stream file=" + path);
+            return;
+        }
+    }
     if (g_pre.th.joinable()) g_pre.th.join();
     {
         std::lock_guard<std::mutex> lk(g_pre.mtx);
@@ -5734,6 +5980,8 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
                                            "inbackend", "indev", "inoffset", "inbuf", "inmon",
                                            "inseconds", "inout",
                                            "sdmfilt", "sdmfiltnx", "streamdecode",
+                                           // 大文件流式播放（2026-10-25）：阈值与峰值预扫窗口
+                                           "stream_threshold_mb", "isp_prescan_sec",
                                            // 耳机 EQ (OPRA)
                                            "opraproduct", "oprapreset", "opravendor",
                                            // 元数据补全(P1.5):总开关与 LLM 固定两键;
@@ -5855,6 +6103,8 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
         injectKv("metasummary", "0");
         injectKv("llmmonthlycap", "0");
         injectKv("streamdecode", "1");
+        injectKv("stream_threshold_mb", "200");
+        injectKv("isp_prescan_sec", "20");
         for (const rta::meta::ProviderDesc& pd : rta::meta::provider_registry()) {
             const std::string nk = std::string("metasrc_") + pd.id;
             if (seen.count(nk) != 0) continue;
@@ -6694,7 +6944,10 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
         gpuIn.resampleGpu  = castMode ? false : ps.gpu;
         gpuIn.convGpu      = castMode ? false : ps.gpuConvUsed.load();
         const rta::meta::PlaybackGpuFlags gpuF = rta::meta::playback_gpu_flags(gpuIn);
+        const ProcMemInfo memNow = proc_mem();   // 内存遥测（大文件卡死判据：峰值内存）
         j << "{\"ok\":true"
+          << ",\"wsMb\":" << memNow.wsMb
+          << ",\"wsPeakMb\":" << memNow.peakMb
           << ",\"playing\":" << (playingStat ? "true" : "false")
           << ",\"current\":\"" << jesc(curStat) << "\""
           << ",\"error\":\"" << jesc(errStat) << "\""
