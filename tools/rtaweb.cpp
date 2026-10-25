@@ -297,6 +297,7 @@ struct PlayParams {
     std::string device;          // 输出设备 id，空 = 默认设备
     int    bits = 0;             // 0 = 24（或 DSD 时固定 24）
     int    taps = 0;             // 0 = 用滤波器预设的抽头数
+    int    minTapsPerInput = 0;  // 0 = 用滤波器预设的每相位地板；>0 手动覆盖
     double atten = 0.0;          // 0 = 用预设的阻带衰减
     double transition = 0.0;     // 0 = 用预设的过渡带
     std::string phase;           // "" = 预设 | "linear" | "minimum"
@@ -655,6 +656,7 @@ static PlayParams parseForm(const std::string& body) {
         else if (k == "device")   p.device = v;
         else if (k == "bits")     p.bits = atoi(v.c_str());
         else if (k == "taps")     p.taps = atoi(v.c_str());
+        else if (k == "mintapsperinput") p.minTapsPerInput = atoi(v.c_str());
         else if (k == "atten")    p.atten = atof(v.c_str());
         else if (k == "transition") p.transition = atof(v.c_str());
         else if (k == "phase")    p.phase = v;
@@ -2480,12 +2482,17 @@ static bool play_one_impl(const std::string& file, const PlayParams& pIn, rta::a
                 cfg.taps = fp->taps; cfg.transition = fp->transition; cfg.attenDb = fp->attenDb;
                 cfg.filterWindow = fp->window; cfg.filterPhase = fp->phase;
                 cfg.twoStage = fp->twoStage;
+                // 2026-10-25（音质线）：每相位抽头地板 —— 新预设（*-tight）靠它把「每相位抽头数 T」与
+                // 插值因子 L 解耦；否则 44.1→384k（L=1280）时 4095 抽头的预设只剩 4 抽头/相位
+                // （20 kHz 掉 5 dB、THD+N 只剩 -29 dBFS）。既有预设 tapsPerInput=0，逐位不变。
+                cfg.minTapsPerInput = fp->tapsPerInput;
                 if (fp->twoStage && fp->stage2Taps > 0) cfg.stage2Taps = fp->stage2Taps;
             }
         }
 
         // ---- 手动覆盖（设置页里可以逐项调，不再受预设限制）----
         if (p.taps > 0)       cfg.taps = std::max(1024, p.taps);
+        if (p.minTapsPerInput > 0) cfg.minTapsPerInput = p.minTapsPerInput;
         if (p.atten > 0.0)    cfg.attenDb = std::min(300.0, std::max(60.0, p.atten));
         if (p.transition > 0.0) cfg.transition = std::min(0.45, std::max(0.005, p.transition));
         if (p.phase == "minimum") cfg.filterPhase = rta::dsp::PhaseKind::Minimum;
@@ -4356,26 +4363,90 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
         ct = "application/json; charset=utf-8";
         auto& lib = Library::instance();
 
+        // ---- 状态查询（261025-01 一.1：扫描期间必须 <50ms 返回）----
+        // 两个端点共用无锁快照（Library::snapshot()）：只读原子量 + 一次短锁读进度文本，
+        // 绝不触发专辑整理、绝不排队等扫描线程持有的 mtx_。
+        // /api/lib/status 是给"轮询进度"用的窄端点；/api/lib/stats 保留原字段（含 roots）。
+        if (rq.path.rfind("/api/lib/status", 0) == 0) {
+            const auto s = lib.snapshot();
+            std::ostringstream j;
+            j << "{\"ok\":true"
+              << ",\"scanning\":" << (s.scanning ? "true" : "false")
+              << ",\"scanned\":" << s.scanned
+              << ",\"total\":" << s.total
+              << ",\"tracks\":" << s.tracks
+              << ",\"albums\":" << s.albums
+              << ",\"lastScanMs\":" << s.lastScanMs
+              << ",\"probed\":" << s.probed
+              << ",\"cached\":" << s.cached
+              << ",\"removed\":" << s.removed
+              << ",\"msg\":\"" << jesc(s.msg) << "\"}";
+            return j.str();
+        }
         if (rq.path.rfind("/api/lib/stats", 0) == 0) {
             std::ostringstream j;
             const auto roots = lib.roots();
-            j << "{\"ok\":true,\"tracks\":" << lib.trackCount()
-              << ",\"albums\":" << lib.albumCount()
-              << ",\"scanning\":" << (lib.scanning() ? "true" : "false")
-              << ",\"scanned\":" << lib.scanned()
-              << ",\"total\":" << lib.scanTotal()
+            const auto s = lib.snapshot();
+            const size_t albums = (s.albums > 0 || s.scanning) ? s.albums : lib.albumCount();
+            j << "{\"ok\":true,\"tracks\":" << s.tracks
+              << ",\"albums\":" << albums
+              << ",\"scanning\":" << (s.scanning ? "true" : "false")
+              << ",\"scanned\":" << s.scanned
+              << ",\"total\":" << s.total
               << ",\"scanThreads\":" << lib.scanThreads()
-              << ",\"lastScanMs\":" << lib.lastScanMs()
-              << ",\"probed\":" << lib.lastScanProbed()
-              << ",\"cached\":" << lib.lastScanCached()
-              << ",\"msg\":\"" << jesc(lib.scanMsg()) << "\",\"roots\":[";
+              << ",\"lastScanMs\":" << s.lastScanMs
+              << ",\"probed\":" << s.probed
+              << ",\"cached\":" << s.cached
+              << ",\"removed\":" << s.removed
+              << ",\"msg\":\"" << jesc(s.msg) << "\",\"roots\":[";
             for (size_t i = 0; i < roots.size(); ++i) { if (i) j << ","; j << "\"" << jesc(roots[i]) << "\""; }
             j << "]}";
             return j.str();
         }
         if (rq.path.rfind("/api/lib/scan", 0) == 0 || rq.path.rfind("/api/rescan", 0) == 0) {
-            lib.startScan(rq.body.find("full=1") != std::string::npos || rq.path.rfind("/api/rescan", 0) == 0);
+            const bool full = rq.body.find("full=1") != std::string::npos || rq.path.rfind("/api/rescan", 0) == 0;
+            static std::atomic<int> s_scanSeq{0};
+            const std::string lg = "LIBSCAN req #" + std::to_string(s_scanSeq.fetch_add(1) + 1) +
+                     std::string(" full=") + (full ? "1" : "0");
+            play_log(lg);
+            dlog(lg);
+            lib.startScan(full);
             return "{\"ok\":true}";
+        }
+        // ---- 清理（261025-01 一.3：删掉的文件的记录必须能清掉）----
+        if (rq.path.rfind("/api/lib/prune", 0) == 0) {
+            const auto r = lib.pruneMissing();
+            dlog("LIBSCAN prune removed=" + std::to_string(r.removed) + " tracks=" + std::to_string(r.tracks));
+            return "{\"ok\":true,\"removed\":" + std::to_string(r.removed) +
+                   ",\"tracks\":" + std::to_string(r.tracks) + "}";
+        }
+        if (rq.path.rfind("/api/lib/remove", 0) == 0) {
+            std::string p;
+            size_t q = rq.path.find("?path=");
+            if (q == std::string::npos) q = rq.path.find("&path=");
+            if (q != std::string::npos) {
+                p = rq.path.substr(q + 6);
+                const size_t amp = p.find('&');
+                if (amp != std::string::npos) p = p.substr(0, amp);
+                p = urlDecode(p);
+            }
+            if (p.empty()) {
+                // 也接受表单体 path=<dir>（POST 时更稳，避免超长 URL）
+                std::istringstream is(rq.body);
+                std::string tok;
+                while (std::getline(is, tok, (char)38)) {
+                    const size_t e = tok.find((char)61);
+                    if (e == std::string::npos) continue;
+                    if (urlDecode(tok.substr(0, e)) == "path") p = urlDecode(tok.substr(e + 1));
+                }
+            }
+            if (p.empty()) return "{\"ok\":false,\"error\":\"未指定 path\"}";
+            if (!valid_utf8(p)) return utf8_path_reject(p);
+            const auto r = lib.removeUnder(p);
+            dlog("LIBSCAN remove path=" + p + " removed=" + std::to_string(r.removed) +
+                 " tracks=" + std::to_string(r.tracks));
+            return "{\"ok\":true,\"removed\":" + std::to_string(r.removed) +
+                   ",\"tracks\":" + std::to_string(r.tracks) + "}";
         }
         if (rq.path.rfind("/api/lib/roots", 0) == 0) {
             std::string add, rem;
@@ -7450,6 +7521,7 @@ static void core_init_common() {
 
     queue_load();                             // 恢复上次的播放列表
     Library::instance().load();               // 载入音乐库索引
+    (void)Library::instance().albumCount();   // 整理并缓存初始专辑数（让 snapshot 的 albumCountFast 有初值）
     // 2026-10-24（用户 261024-01 #5）：流媒体服务器配置必须开机载入。
     // 旧版从未调用过 SourceManager::load() —— 填过的服务器重启后就"消失"，只能重填。
     SourceManager::instance().load(path_in_exe_dir("rlplayer-sources.conf"));

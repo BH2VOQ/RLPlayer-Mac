@@ -263,6 +263,11 @@ int main() {
         ck(contains(stats, "\"tracks\":2"), "/api/lib/stats tracks=2（真索引被载入）", stats);
         ck(contains(stats, "\"albums\":1"), "/api/lib/stats albums=1", stats);
 
+        const std::string status = call("/api/lib/status", &ct);
+        ck(contains(status, "\"ok\":true"), "/api/lib/status 返回 ok:true", status);
+        ck(contains(status, "\"tracks\":2"), "/api/lib/status tracks=2", status);
+        ck(contains(status, "\"albums\":1"), "/api/lib/status albums=1", status);
+
         const std::string albums = call("/api/lib/albums");
         ck(contains(albums, "Embedded Album"), "/api/lib/albums 含夹具专辑名", albums);
 
@@ -270,6 +275,14 @@ int main() {
         ck(contains(search, "First Track"), "/api/lib/search 命中夹具曲目", search);
         const std::string miss = call("/api/lib/search?q=zzz_nonexistent_zzz");
         ck(!contains(miss, "First Track"), "/api/lib/search 不误命中", miss);
+
+        // 405 副作用断言与 POST prune/remove 测试
+        const std::string pruneGet = call("/api/lib/prune", &ct, "GET");
+        ck(contains(pruneGet, "Method Not Allowed"), "GET /api/lib/prune 拒收并报 405", pruneGet);
+
+        const std::string prunePost = call("/api/lib/prune", &ct, "POST");
+        ck(contains(prunePost, "\"ok\":true") && contains(prunePost, "\"removed\":"),
+           "POST /api/lib/prune 正常返回 ok:true", prunePost);
     }
 
     // 2d method/body 原样进入：POST /api/peq 这类端点靠 body 传参。
