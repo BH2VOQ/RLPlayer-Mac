@@ -99,15 +99,24 @@ inline std::string rta_ui_page() {
     // 2026-10-25（Apple Music 风格重构）：外壳网格改成「通顶侧栏 + 大字报顶栏 + 悬浮播放胶囊」。
     //   · 播放胶囊 .bar 改为 position:fixed 悬浮 ⟹ #app 只需 2 行：60px 顶栏 + 1fr 主内容区。
     //   · 侧栏 .side 用 grid-row:1/3 跨全高（从 y=0 到 y=100vh，绝不被底栏切断）。
-    h += "#app{display:grid;grid-template-columns:var(--sidew) 1fr 340px;grid-template-rows:60px 1fr;height:100vh;background:var(--bg);position:relative}";
-    h += "#app.noq{grid-template-columns:var(--sidew) 1fr 0}#app.noq #right{display:none}";
+    h += "#app{display:grid;grid-template-columns:var(--sidew) 1fr;grid-template-rows:60px 1fr;height:100vh;background:var(--bg);position:relative}";
+    // 2026-10-26（C-1 修复，debug/20261026-01）：右侧队列/歌词抽屉改为「全尺寸悬浮圆角卡片」。
+    // 旧版：>1240px 时 #right 占网格第三列 340px（直角、非悬浮，最大化时退化为贴边直角窗）；
+    //       ≤1240px 才走 position:fixed 悬浮毛玻璃卡片 —— 悬浮/占位的适用范围做反了。
+    // 新版：网格不再保留第三列（#app 两列布局，主区吃满剩余宽度）；#right 在**所有**尺寸下
+    //       都是 position:fixed 悬浮圆角毛玻璃卡片（Apple Music 风格，用户 2026-10-26 拍板方案 1）。
+    // #right 永不占位 ⟹ 网格定义里不再有 340px 第三列，旧 #app.noq 的三列切换也随之失效，
+    // 改由 #right 自身的 display 控制显隐。
+    h += "#app.noq #right{display:none}";
     // 2026-10-23（UI 评审 #1/#3/#9/#18）：窄窗口（≤1240px）右侧队列/歌词抽屉会吃掉 340px，
     // 把主区挤到窄窗 → 曲目名被压成 0 宽、专辑网格只剩 2 列。窄窗默认收起抽屉，主区优先。
     // 2026-10-25（修复左侧栏伸缩跳动）：@media(max-width:1240px) 原来把第一列写成 200px，
     // 而 #app.noq 写的是 var(--sidew)(226px) 且选择器权重更高（1 ID + 1 class > 1 ID）⟹
     // 开关右侧队列抽屉（切换 .noq）时，左侧边栏会在 226px 与 200px 之间来回跳动 26px！
-    // 修法：第一列在所有断点下恒用 var(--sidew)，右侧抽屉在 <=1240px 下以 Apple Music 悬浮毛玻璃卡片弹出。
-    h += "@media (max-width:1240px){#app{grid-template-columns:var(--sidew) minmax(0,1fr) 0}#app #right{display:none}#app.qopen:not(.noq):not(.setmode) #right{display:flex;position:fixed;top:68px;right:18px;bottom:92px;width:320px;z-index:20;border-radius:14px;border:1px solid var(--bar-border,var(--line2));background:var(--barbg);backdrop-filter:blur(32px) saturate(190%);-webkit-backdrop-filter:blur(32px) saturate(190%);box-shadow:var(--bar-shadow)}}";
+    // 修法：第一列在所有断点下恒用 var(--sidew)，右侧抽屉以 Apple Music 悬浮毛玻璃卡片弹出。
+    // 2026-10-26（C-1）：悬浮卡片样式从媒体查询提升为全尺寸默认 —— 任何窗口宽度（含最大化）
+    // 下 #right 都是同一张悬浮圆角卡片，只有窄窗（≤1240px）默认收起以保护主区可读性。
+    h += "#app.qopen:not(.noq):not(.setmode) #right{display:flex;position:fixed;top:68px;right:18px;bottom:92px;width:320px;z-index:20;border-radius:14px;border:1px solid var(--bar-border,var(--line2));background:var(--barbg);backdrop-filter:blur(32px) saturate(190%);-webkit-backdrop-filter:blur(32px) saturate(190%);box-shadow:var(--bar-shadow)}";
     // 窄窗口下曲目行按「歌名 > 艺术家 > 规格」优先级收列，绝不把歌名压成 0 宽（评审 #3/#18 的根因兜底）
     h += ".trow-track .ar,.trow-track .bd{overflow:hidden}";
     h += "@media (max-width:1400px){.trow-track{grid-template-columns:28px 24px minmax(120px,1.8fr) minmax(0,1fr) 0px 58px!important}}";
@@ -278,7 +287,14 @@ inline std::string rta_ui_page() {
     h += ".empty{padding:44px 20px;text-align:center;color:var(--mut2);font-size:12.5px;line-height:2}";
     h += "#list:has(> .empty){display:flex;align-items:center;justify-content:center;box-sizing:border-box;padding:28px}";
     // 内容区在宽屏下有可读性上限，避免列表/空态被拉到屏幕最右形成空旷感；网格自身仍自适应列数。
-    h += ".main>.pad,#list>.grid,#setpage>.pad{max-width:1180px;margin-left:auto;margin-right:auto;box-sizing:border-box}";
+    // 2026-10-26（C-2 修复，debug/20261026-01）：专辑网格 #list>.grid 放开限宽 —— 用户要求
+    // 「根据窗口大小自动排列，不要固定窗口大小往里铺专辑封面」。外层 max-width:1180px 把内层
+    // repeat(auto-fill,minmax(152px,1fr)) 的响应式列数框死了：宽屏下两侧留白、封面数不再增长。
+    // 现在：#list>.grid 不限宽（.grid 自身的 auto-fill 列数随窗口宽度自动增减）；
+    //       .main>.pad（曲目列表）与 #setpage>.pad（设置页表单）**保留** 1180px 限宽——
+    //       行式内容拉到超宽会严重损害可读性（一行文字横跨 2000px 扫视不动）。
+    h += "#list>.grid{box-sizing:border-box}";
+    h += ".main>.pad,#setpage>.pad{max-width:1180px;margin-left:auto;margin-right:auto;box-sizing:border-box}";
     // 文件夹：地址栏
     h += ".pathbar{display:flex;gap:8px;align-items:center;padding:12px 18px;border-bottom:1px solid var(--line);position:sticky;top:0;background:var(--bg);z-index:4}";
     h += ".pb{width:30px;height:30px;border-radius:8px;border:1px solid var(--line);background:var(--hov);font-size:13px;flex:none}";
@@ -302,8 +318,9 @@ inline std::string rta_ui_page() {
     h += "#dropmask{position:fixed;inset:0;z-index:90;display:none;align-items:center;justify-content:center;background:rgba(8,9,12,.72);backdrop-filter:blur(2px)}";
     h += "#dropmask.on{display:flex}";
     h += "#dropmask>div{border:2px dashed var(--acc);border-radius:16px;padding:42px 64px;font-size:16px;color:var(--acc-text);background:rgba(59,130,246,.08)}";
-    // 右侧
-    h += "#right{grid-column:3;grid-row:2;background:var(--bg2);border-left:1px solid var(--line);display:flex;flex-direction:column;overflow:hidden}";
+    // 右侧（2026-10-26 C-1：#right 不再占网格第三列 —— 网格已改两列，悬浮态见上方 #app.qopen 规则；
+    // 此处只是非悬浮（隐藏/兜底）时的基础样式，border-left/grid-column:3 已随三列布局一并作废）
+    h += "#right{grid-row:2;background:var(--bg2);border-left:1px solid var(--line);display:flex;flex-direction:column;overflow:hidden}";
     h += ".rhead{display:flex;align-items:center;gap:8px;padding:10px 14px;border-bottom:1px solid var(--line);font-size:12px;font-weight:600;color:var(--txt2);flex:none;min-height:42px}";
     h += ".rhead .cnt{font-weight:400;color:var(--mut2);font-size:11px}.rbody{flex:1;overflow:auto}";
     h += ".qi{display:flex;gap:9px;padding:8px 14px;cursor:pointer;border-left:3px solid transparent;font-size:12.5px;align-items:center}";
