@@ -1219,7 +1219,17 @@ inline void Library::startScan(bool forceFull) {
         std::atomic<int> probedCount{0};
         std::atomic<int> cachedCount{0};
 
-        const std::string ffprobe = rta::audio::find_tool("ffprobe");
+        // 2026-10-26（B-1）：允许用环境变量 RLPLAYER_FFPROBE 指定 ffprobe 路径。
+        // 为什么需要：本机系统 ffprobe 坏了（-version 退出 134），find_tool 仍会返回它，
+        // 于是扫描拿不到标签。用户/测试可以显式指向可用的 ffprobe（如仓库自建的
+        // build-mac/ffmpeg-lite/ffprobe）——这是**正当的产品能力**（换机器/自定义工具链），
+        // 不是为测试开的后门：不设该变量时行为与之前逐字一致。
+        const std::string ffprobe = [&] {
+            if (const char* env = std::getenv("RLPLAYER_FFPROBE")) {
+                if (env[0]) return std::string(env);
+            }
+            return rta::audio::find_tool("ffprobe");
+        }();
 
         auto pool = std::make_shared<ScanPool>(thCount);
         {

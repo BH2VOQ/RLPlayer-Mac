@@ -608,10 +608,11 @@ struct AbResult {
 static AbResult abOne(const std::string& f) {
     AbResult r;
     setNative(false);
-    r.ff = rta::net::lib_probe_one(f);
+    // 显式传自检通过的 ffprobe（系统版可能坏，见 g_ffprobePath 注释）
+    r.ff = rta::net::lib_probe_one(f, g_ffprobePath);
     setNative(true);
     const unsigned long long before = rta::meta::native::stats().parsed.load();
-    r.nt = rta::net::lib_probe_one(f);
+    r.nt = rta::net::lib_probe_one(f, g_ffprobePath);
     r.hit = rta::meta::native::stats().parsed.load() != before;
     if (!r.hit) {
         TagInfo tmp;
@@ -1231,7 +1232,7 @@ static void throughputAndRegression(const fs::path& root) {
         auto timeIt = [&](bool native) {
             setNative(native);
             const auto t0 = std::chrono::steady_clock::now();
-            for (auto& f : files) { LibTrack x = rta::net::lib_probe_one(f); (void)x; }
+            for (auto& f : files) { LibTrack x = rta::net::lib_probe_one(f, g_ffprobePath); (void)x; }
             return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
         };
         const double ffMs = timeIt(false), natMs = timeIt(true);
@@ -1406,12 +1407,23 @@ int main(int argc, char** argv) {
     // ffprobe 可用性自检（A/B 与回退判据都要它；「找到」不等于「能跑」——见 g_ffprobeOk 注释）
     std::string ffprobe = rta::audio::find_tool("ffprobe");
     g_ffprobeOk = ffprobeRunnable(ffprobe) && ffprobeCanReadWavTags(ffprobe);
-    // 2026-10-26（B-1 收口）：**不回退 ffmpeg-lite**。
-    //   lite 是精简构建：-version 通过、甚至能读我自检用的小 WAV，但对测试夹具里
-    //   「LIST 块在 data 之后」「bext 块」「APIC 帧」这些真实变体读不出标签
-    //   ⟹ 拿它当 oracle 会把 17 项判据变成假红（判据与事实脱钩，铁律 3）。
-    //   lite 的定位是解码/转码，不是标签 oracle。系统 ffprobe 不可用时就明确 SKIP。
+    if (!g_ffprobeOk) {
+        // 2026-10-26（B-1 收口）：系统 ffprobe 坏（本机 -version 退出 134）时退到仓库自建
+        //   build-mac/ffmpeg-lite/ffprobe —— 它是**精简音频构建**，标签读取能力完好
+        //   （实测能正确解析 WAV 的 LIST/INFO、bext、APIC 与 FLAC/MP3/OGG 标签）。
+        //   ⚠️ 必须用**绝对路径**：ctest 的工作目录就是 build-mac/，用相对路径
+        //   "build-mac/ffmpeg-lite/ffprobe" 会拼成 build-mac/build-mac/... → 退出 127 →
+        //   命令失败 → 所有对比判据拿到空标签 → 17 项假红（2026-10-26 踩过）。
+        const std::string lite = (root / "build-mac" / "ffmpeg-lite" / "ffprobe").string();
+        if (ffprobeRunnable(lite) && ffprobeCanReadWavTags(lite)) {
+            ffprobe = lite; g_ffprobeOk = true;
+            std::printf("  [INFO] 系统 ffprobe 不可用，改用 %s\n", lite.c_str());
+        }
+    }
     g_ffprobePath = ffprobe;
+    // Library::startScan 内部取 ffprobe 走 find_tool；用产品既有的 RLPLAYER_FFPROBE
+    // 覆盖机制把自检通过的路径注入（不设时行为不变，不是测试后门）。
+    if (!ffprobe.empty()) ::setenv("RLPLAYER_FFPROBE", ffprobe.c_str(), 1);
     ck(!ffprobe.empty(), "ffprobe 路径非空（回退路径的前提）", ffprobe);
     if (!g_ffprobeOk) {
         std::printf("  [SKIP] ffprobe 不可执行（-version 非 0）⟹ 所有「与 ffprobe 逐字段一致」\n"
