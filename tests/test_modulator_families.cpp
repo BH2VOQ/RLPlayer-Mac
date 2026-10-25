@@ -114,11 +114,31 @@ int main() {
         check(db20k < -20.0, "Chebyshev 7阶 20kHz 带边抑制 (< -20 dB)");
         check(dbNyq >= 4.0 && dbNyq <= 7.0, "Chebyshev 7阶 出带增益符合设定 (4~7 dB)");
 
-        // 1.2 EC 变体 NTF（通带内分布 Chebyshev 零点）
+        // 1.2 EC 变体 NTF（2026-10-25 重做：H∞ 受控 + 带内零点数值优化）
         auto ntfEc = design_ec_ntf_poly(5, 100000.0, fs);
         double dbEc20k = ntf_poly_response_db(ntfEc, 20000.0 / (fs / 2.0));
-        printf("  EC 5阶 (优化零点分布): 20kHz=%.1f dB\n", dbEc20k);
-        check(dbEc20k < -20.0, "EC 5阶 20kHz 抑制达标");
+        printf("  EC 5阶 (H∞=1.5 受控综合): 20kHz=%.1f dB\n", dbEc20k);
+        // 旧手调设计实测 -20.9 dB；新设计实测 -89.6 dB（2026-10-25），门槛只升不降
+        check(dbEc20k < -40.0, "EC 5阶 20kHz 抑制达标 (< -40 dB，实测远优)");
+
+        // 1.2b 任意阶无越界回归（评审 P1#5：旧实现在 order∉{5,7} 越界读 out.b）
+        for (int ord : { 1, 2, 3, 4, 6, 8 }) {
+            NtfPoly p = design_ec_ntf_poly(ord, 100000.0, fs);
+            const size_t want = (size_t)ord + 1;
+            bool sizesOk = p.b.size() == want && p.d.size() == want && p.p.size() == want;
+            bool finiteOk = true;
+            for (double v : p.b) if (!std::isfinite(v)) finiteOk = false;
+            for (double v : p.p) if (!std::isfinite(v)) finiteOk = false;
+            check(sizesOk && finiteOk, "EC " + std::to_string(ord) + " 阶 B/D/P 长度=" +
+                  std::to_string(want) + " 且系数有限（越界回归）");
+        }
+        // 1.2c H∞ 命中精度：综合结果的最大增益必须落在预算上（±0.05）
+        for (int ord : { 5, 7 }) {
+            NtfPoly p = synthesize_ntf(ord, fs, 20000.0, 1.35);
+            const double g = ntf_hinf_lin(p);
+            check(g > 1.30 && g <= 1.40, "EC " + std::to_string(ord) + " 阶 H∞ 命中 1.35±0.05",
+                  "实测=" + std::to_string(g));
+        }
 
         // 1.3 7 阶降阶保护（1-bit 在低采样率或 Chebyshev 下退回 5 阶保护）
         SdmConfig cfgCheb64;
@@ -172,6 +192,7 @@ int main() {
             {  2822400.0, "DSD64 " },
             {  5644800.0, "DSD128" },
             { 11289600.0, "DSD256" },
+            { 22579200.0, "DSD512" },
         };
 
         for (const auto& r : rates) {
@@ -248,9 +269,30 @@ int main() {
                 //   ① 触碰率必须极低（< 万分之一，85536 样本 ≤ 8 次）；
                 //   ② 无持续限幅由下面的 SNR>40 断言把关（持续限幅会摧毁 SNR）；
                 //   ③ 误差钳位（发散信号）必须为 0（上面的断言）。
-                check(m6.overload() <= 8, item + " -6 dBFS 限幅仅瞬态触碰（无持续限幅）");
+                check(m6.overload() <= 8, item + " -6 dBFS 限幅仅瞬态触碰（无持续限幅）", "实测 overload=" + std::to_string(m6.overload()));
                 check(std::isfinite(s6.snrDb) && s6.snrDb > 40.0, item + " -6 dBFS 带内 SNR 正常 (> 40 dB)");
-                check(std::isfinite(s60.snrDb) && s60.snrDb >= 20.0, item + " -60 dBFS 小信号 SNR 达标 (>= 20 dB)");
+                // 小信号门槛（2026-10-26 修正，用户铁律：debug 不能影响功能）：
+                //   一律 20 dB，**不因 AHM 多电平在 DSD512 的实测偏低而降低门槛**。
+                //   原实现（子代理版）把它降成 15 dB，属于「为让测试变绿改判据」，已回滚。
+                //   AHM-6bit@DSD512 实测 76.8 dB，远高于 20 dB，本来就不需要降门槛。
+                const double smallBar = 20.0;
+                check(std::isfinite(s60.snrDb) && s60.snrDb >= smallBar,
+                      item + " -60 dBFS 小信号 SNR 达标 (>= " + std::to_string((int)smallBar) + " dB)");
+                // 2026-10-25（抖动注入点修复 + H∞ 受控综合后）EC 族门槛只升不降：
+                // 旧基线（抖动未整形泄漏）全部 1-bit 族卡在 ~86 dB；修复后实测
+                // EC-5@DSD64≈79~105 / EC-7@DSD256≈104~116 / EC-7@DSD512≈114+ dB，
+                // 门槛按最保守实测值 −5 dB 设置。
+                if (f.family == ModulatorFamily::Ec && f.levels == 2) {
+                    // EC 族门槛按「实测值 −5 dB」但**只升不降**（原基线 75 dB）：
+                    //   EC-7@DSD512 实测 105.6 dB ⟹ 门槛 100 dB（不是贴着实测设 105）。
+                    const double ecBar = (f.order == 7 && r.fs >= 22579200.0) ? 100.0 : 75.0;
+                    check(std::isfinite(s6.snrDb) && s6.snrDb > ecBar,
+                          item + " EC 族带内 SNR 达标 (> " + std::to_string((int)ecBar) + " dB)",
+                          "实测 SNR=" + std::to_string(s6.snrDb) + " dB");
+                    check(m6.ntf_hinf_used() > 0.0 && m6.ntf_hinf_used() <= 1.40,
+                          item + " EC 族 H∞ 命中预算 1.35（实测 " +
+                          std::to_string(m6.ntf_hinf_used()) + "）");
+                }
 
                 if (f.levels > 2) {
                     check(s6.outBandDb < -30.0, item + " AHM 多电平带外噪声积分深度抑制 (< -30 dB)");
@@ -276,6 +318,7 @@ int main() {
             {  5644800.0, ModulatorFamily::Chebyshev, 7,   2, 0, "Chebyshev7 @DSD128"},
             {  2822400.0, ModulatorFamily::Ec,        5,   2, 0, "EC5 @DSD64"        },
             { 11289600.0, ModulatorFamily::Ec,        7,   2, 0, "EC7 @DSD256"       },
+            { 22579200.0, ModulatorFamily::Ec,        7,   2, 0, "EC7 @DSD512"       },
             {  2822400.0, ModulatorFamily::Ahm,       7, 256, 8, "AHM8 @DSD64"       },
         };
 
@@ -345,6 +388,33 @@ int main() {
     // -------------------------------------------------------------------------
     printf("\n=== 4. 长跑稳定性（模拟 >= 10 分钟样点数 快进验证）===\n");
     {
+        // 2026-10-25 增补：EC-7@DSD256（H∞ 受控综合后的主力配置）同样跑 26.46M。
+        // 判据与下方 Chebyshev 用例完全相同：无 NaN、无发散、稳态零限幅。
+        {
+            SdmConfig cfgEc;
+            cfgEc.fs = 11289600.0;
+            cfgEc.family = ModulatorFamily::Ec;
+            cfgEc.order = 7;
+            cfgEc.levels = 2;
+            cfgEc.ditherLsb = 0.0005;   // ntfHinf 默认 1.35
+            SdmModulator m(cfgEc);
+            const size_t totalSamples = 26460000;
+            const double fin = 1000.0;
+            bool hadNan = false;
+            long long steadyOv = 0;
+            for (size_t i = 0; i < totalSamples; ++i) {
+                double x = 0.4 * std::sin(2.0 * kPi * fin * (double)i / cfgEc.fs);
+                double v = m.process(x);
+                if (!std::isfinite(v)) hadNan = true;
+                if (i > 100000 && m.overload() > steadyOv) steadyOv = m.overload();
+            }
+            printf("  [EC-7 @DSD256 长跑] nonFinite=%lld, clamped=%lld, steadyOverload=%lld\n",
+                   m.nonFinite(), m.clamped(), steadyOv);
+            check(!hadNan, "EC-7@DSD256 长跑全过程无 NaN/Inf 输出");
+            check(m.clamped() == 0, "EC-7@DSD256 长跑误差累加器未发散");
+            check(steadyOv == 0, "EC-7@DSD256 长跑稳态零限幅触发");
+        }
+
         SdmConfig cfg;
         cfg.fs = 2822400.0;
         cfg.family = ModulatorFamily::Chebyshev;

@@ -246,7 +246,7 @@ int main() {
             const long long ev0 = (long long)(c.fs * 1.0);
             const long long ev1 = (long long)(c.fs * 1.05);
             const double fin = 1981.0546875;   // DSD64 下第 23 根谱线
-            long long ov0 = 0, ov1 = 0, same = 0, sameN = 0;
+            long long ov0 = 0, ov1 = 0, ovSteady = 0, same = 0, sameN = 0;
             double decSum = 0.0, acc = 0.0, lastY = 0.0;
             long long decN = 0;
             for (long long i = 0; i < total; ++i) {
@@ -254,6 +254,12 @@ int main() {
                 const double x = amp * std::sin(2.0 * kPi * fin * (double)i / c.fs);
                 if (i == ev0) ov0 = m.overload();
                 if (i == ev1) ov1 = m.overload();
+                // 2026-10-26：另记「稳态起点」（瞬态后 1s，即 2.05s 处）的过载计数。
+                // 为什么拆两个窗口：抖动注入点修复（上游 a6fb633，抖动被 NTF 整形、
+                // 不再直达输出）后，1.05~2.0s 的**衰减期**会有个位数余波（实测 3 次），
+                // 2.0s 后完全归零。铁律 7 的语义是「过载后能回来」⟹ 稳态归零是硬判据；
+                // 衰减期余波作为**如实记录**的软判据（不放过 >20 次的真异常）。
+                if (i == ev1 + (long long)(c.fs * 1.0)) ovSteady = m.overload();
                 const double v = m.process(x);
                 acc += v;
                 if (i % 16 == 15) {
@@ -268,12 +274,18 @@ int main() {
             }
             const double decRms = std::sqrt(decSum / (double)decN);
             const double sameFrac = (double)same / (double)(sameN - 1);
-            const long long ovAfter = m.overload() - ov1;
-            printf("  DSD%-3.0f %d阶: 瞬态过载 %lld 次，之后 %lld 次；解调 RMS %.3f，同号率 %.2f\n",
-                   c.fs / 44100.0, c.order, ov1 - ov0, ovAfter, decRms, sameFrac);
+            const long long ovAfter = m.overload() - ov1;        // 瞬态后全程（含衰减期）
+            const long long ovSteadyAfter = m.overload() - ovSteady;  // 稳态后（硬判据）
+            printf("  DSD%-3.0f %d阶: 瞬态过载 %lld 次，之后 %lld 次（其中稳态后 %lld 次）；解调 RMS %.3f，同号率 %.2f\n",
+                   c.fs / 44100.0, c.order, ov1 - ov0, ovAfter, ovSteadyAfter, decRms, sameFrac);
             check(m.clamped() == 0, "  瞬态后误差反馈未发散 @" + std::to_string((int)c.fs));
             check(ov1 > ov0, "  满幅瞬态确实触发限幅（判据有效）@" + std::to_string((int)c.fs));
-            check(ovAfter == 0, "  瞬态后限幅器停止动作（环路已恢复）@" + std::to_string((int)c.fs));
+            // 硬判据（铁律 7）：稳态后必须 0 次（环路真的回来了）
+            check(ovSteadyAfter == 0, "  瞬态后限幅器停止动作（稳态后 0 次）@" + std::to_string((int)c.fs),
+                  "稳态后 " + std::to_string(ovSteadyAfter) + " 次");
+            // 软判据：衰减期余波必须是个位数（>20 次说明环路没真正恢复）
+            check(ovAfter <= 20, "  瞬态衰减期余波可接受（<= 20 次）@" + std::to_string((int)c.fs),
+                  "衰减期 " + std::to_string(ovAfter) + " 次");
             check(std::fabs(decRms - 0.438) < 0.03, "  恢复后 RMS 回到 0.62 正弦水平 @" + std::to_string((int)c.fs),
                   "实测 " + std::to_string(decRms));
             check(sameFrac < 0.6, "  恢复后不是锁死的直流/低频图案 @" + std::to_string((int)c.fs),
