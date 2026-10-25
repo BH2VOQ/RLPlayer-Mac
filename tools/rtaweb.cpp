@@ -315,6 +315,18 @@ struct PlayParams {
     // 2026-10-24（261024-02 #8）：源文件真实位深（16/24/32）。解码器给的是容器位深（flac 一律 32），
     // 用容器位深判"位深降低"会误报（16bit 源 → 24bit 输出明明没降低）。
     int    srcBits = 0;
+    // ---- CUE 分轨播放区间（2026-10-25）----
+    // 一张 .cue 把整轨文件切成 N 首：库里这 N 条的 path 完全相同，位置由 cueOff/cueLen 给出
+    //（见 src/net/library.h 的 LibTrack）。播放侧只认"秒"，所以这里用 cueStart/cueEnd 两个浮点：
+    //   cueStart < 0  ⟹ 整首（旧行为，负向对照就是这一档）
+    //   cueEnd   < 0  ⟹ 到文件末尾
+    // 语义（三条都不能含糊）：
+    //   · 区间是**播放区间**：前 cueStart 帧一个都不写给设备，到 cueEnd 正常结束；
+    //   · ps.total 按 (cueEnd-cueStart) 算 ⟹ 进度条/时长是本轨的，不是整轨的；
+    //   · seek 的 pos 语义落在本区间内（0 = 本轨开头）。
+    // 给了 cueStart 却读不了/越界 ⟹ **明确报错**，绝不静默从头播（那样用户只会以为 cue 没生效）。
+    double cueStart = -1.0;
+    double cueEnd   = -1.0;
     std::string remoteId;        // 远程曲目 id（Subsonic）
     std::string remoteSuffix;    // 远程文件后缀，决定缓存文件名
     std::string remoteTitle;
@@ -683,11 +695,23 @@ static PlayParams parseForm(const std::string& body) {
         else if (k == "inbuf")    p.inBufferMs = std::max(10, atoi(v.c_str()));
         else if (k == "inmon")    p.inMonitor = (v == "1");
         else if (k == "srcbits") p.srcBits = atoi(v.c_str());
+        // CUE 分轨区间（秒，浮点）。不带 cue_start ⟹ 整首（cueStart 保持 -1）。
+        else if (k == "cue_start") p.cueStart = atof(v.c_str());
+        else if (k == "cue_end")   p.cueEnd   = atof(v.c_str());
         else if (k == "rid")     p.remoteId = v;
         else if (k == "rsuffix") p.remoteSuffix = v;
         else if (k == "rtitle")  p.remoteTitle = v;
     }
     return p;
+}
+
+// CUE 分轨区间在日志/信号链里的统一写法（"4.000..8.000" / "4.000..end"）。
+// 单独抽出来是因为 START / END / PLAY 三处都要写同一个东西 —— 三处各写一遍迟早写成三种格式。
+static std::string cue_range_text(double cs, double ce) {
+    char b[96];
+    if (ce < 0.0) std::snprintf(b, sizeof(b), "%.3f..end", cs);
+    else          std::snprintf(b, sizeof(b), "%.3f..%.3f", cs, ce);
+    return std::string(b);
 }
 
 static void recent_add(const std::string& file, const std::string& title,
@@ -1162,6 +1186,44 @@ static bool play_one_direct(const std::string& file, const PlayParams& p) {
             ps.error = "DSD 数据不足一个 DoP 帧（16 位）";
             return false;
         }
+        // ---- CUE 分轨（2026-10-25）：1-bit 直通（DirectSDM / DoP 回落）同样按区间播 ----
+        // 换算：totalFrames 是 DoP 帧（= 1-bit 样点/16），区间是"秒" ⟹
+        //   帧号 = 秒 × srcRate / 16（srcRate 就是 1-bit 位率）。
+        // 不实现这一档的代价很实在：SACD 整轨 .dsf + cue 在 DirectSDM 下会从文件头开播，
+        // 用户听到的是第 1 首而进度条显示第 5 首 —— 静默错位比报错更难查。
+        size_t frameBase = 0, frameCount = totalFrames;
+        if (p.cueStart >= 0.0) {
+            const double fileSec = (double)totalFrames / (double)carrier;
+            const double framesPerSec = (double)srcRate / 16.0;   // DoP 帧/秒
+            auto cueFail = [&](const std::string& why) {
+                play_log("CUE_REJECT " + why + " cue=" + cue_range_text(p.cueStart, p.cueEnd) +
+                         " file=" + file);
+                std::lock_guard<std::mutex> lk(ps.mtx);
+                ps.error = why;
+                return false;
+            };
+            if (p.cueEnd >= 0.0 && p.cueEnd <= p.cueStart)
+                return cueFail("CUE 分轨区间非法：终点 " + std::to_string(p.cueEnd) +
+                               "s 不大于起点 " + std::to_string(p.cueStart) + "s（文件 " +
+                               std::to_string(fileSec) + "s）：" + file);
+            const long long b = (long long)std::llround(p.cueStart * framesPerSec);
+            if (b < 0 || (size_t)b >= totalFrames)
+                return cueFail("CUE 分轨起点越界：起点 " + std::to_string(p.cueStart) +
+                               "s ≥ 文件时长 " + std::to_string(fileSec) + "s：" + file);
+            long long e = (p.cueEnd >= 0.0) ? (long long)std::llround(p.cueEnd * framesPerSec)
+                                            : (long long)totalFrames;
+            if (e > (long long)totalFrames) e = (long long)totalFrames;
+            if (e <= b)
+                return cueFail("CUE 分轨区间越界：" + cue_range_text(p.cueStart, p.cueEnd) +
+                               " 落在文件时长 " + std::to_string(fileSec) + "s 之外：" + file);
+            frameBase  = (size_t)b;
+            frameCount = (size_t)(e - (long long)b);
+            play_log("CUE_RANGE cue=" + cue_range_text(p.cueStart, p.cueEnd) +
+                     " base=" + std::to_string(frameBase) + " frames=" + std::to_string(frameCount) +
+                     " carrier=" + std::to_string(carrier) + " fileSec=" + std::to_string(fileSec) +
+                     " path=direct-sdm file=" + file);
+        }
+        const size_t   frameEnd = frameBase + frameCount;
 
         // 设备能力：DoP 载波率是源 DSD/16，本机 DAC 不一定支持（DSD256 要 705.6 kHz）。
         // HF-01 接线（2026-10-22）：空支持列表一律当「不支持/端点异常」，绝不静默放行（交接单 §6）。
@@ -1185,7 +1247,7 @@ static bool play_one_direct(const std::string& file, const PlayParams& p) {
 
         ps.outRate = carrier;
         ps.outBits = 24;
-        ps.total.store(totalFrames);
+        ps.total.store(frameCount);   // CUE 分轨：本区间的 DoP 帧数（不是整轨）
         ps.played.store(0);
         ps.startDb.store(0.0);
         ps.volDb.store(0.0);
@@ -1204,8 +1266,11 @@ static bool play_one_direct(const std::string& file, const PlayParams& p) {
                 << ",\"inRate\":" << srcRate
                 << ",\"inBits\":1"
                 << ",\"inCh\":" << ch
-                << ",\"dur\":" << (double)src.bits / (double)srcRate
-                << ",\"note\":\"DirectSDM：1-bit 直通，跳过 PCM 与调制\""
+                << ",\"dur\":" << (double)frameCount / (double)carrier   // CUE：本区间时长
+                << ",\"cueStart\":" << p.cueStart
+                << ",\"cueEnd\":" << p.cueEnd
+                << ",\"fileDur\":" << (double)totalFrames / (double)carrier
+                << ",\"note\":\"" << jesc(std::string("DirectSDM：1-bit 直通，跳过 PCM 与调制")) << "\""
                 << ",\"outRate\":" << srcRate
                 << ",\"outBits\":24"
                 << ",\"outCh\":" << ch
@@ -1254,7 +1319,7 @@ static bool play_one_direct(const std::string& file, const PlayParams& p) {
 
         const size_t period = sink->buffer_frames() ? sink->buffer_frames() : 4096;
         std::vector<int32_t> pend;
-        size_t pendFrames = 0, posFrames = 0, played = 0;
+        size_t pendFrames = 0, posFrames = frameBase, played = 0;
         bool pausedNow = false, eos = false;
         int  timeouts = 0;
         auto lastLog = std::chrono::steady_clock::now();
@@ -1262,8 +1327,8 @@ static bool play_one_direct(const std::string& file, const PlayParams& p) {
 
         // 从 posFrames 处切 n 个 DoP 帧（n 个 16 位组）打包
         auto append = [&](size_t want) -> bool {
-            if (posFrames >= totalFrames) return false;
-            const size_t n = std::min(want, totalFrames - posFrames);
+            if (posFrames >= frameEnd) return false;
+            const size_t n = std::min(want, frameEnd - posFrames);
             DsdStream chunk;
             chunk.rate = srcRate;
             chunk.channels = ch;
@@ -1303,16 +1368,18 @@ static bool play_one_direct(const std::string& file, const PlayParams& p) {
 
             const double sk = ps.seekReq.exchange(-1.0);
             if (sk >= 0.0) {
-                posFrames = std::min(totalFrames, (size_t)(sk * (double)totalFrames + 0.5));
+                // CUE 分轨：seek 比例是**区间内**的（0 = 本轨开头）⟹ 先算区间内偏移再加 frameBase
+                const size_t rel = std::min(frameCount, (size_t)(sk * (double)frameCount + 0.5));
+                posFrames = frameBase + rel;
                 pend.clear(); pendFrames = 0; eos = false; timeouts = 0;
-                played = posFrames;
+                played = rel;
                 ps.played.store(played);
                 continue;
             }
 
             while (!eos && pendFrames < period * 3) {
                 if (!append(period)) { eos = true; break; }
-                if (posFrames >= totalFrames) { eos = true; break; }
+                if (posFrames >= frameEnd) { eos = true; break; }
             }
             if (eos && pendFrames > 0 && pendFrames < period)
                 append_silence(period - pendFrames);
@@ -1856,7 +1923,12 @@ struct BigIspScan {
     size_t scannedFrames = 0;
     bool   partial = false;
 };
-static BigIspScan scan_isp_blocks(PlaySource& src, size_t limitFrames, bool partial) {
+// fromFrame/limitFrames（2026-10-25 CUE 分轨）：只扫 [fromFrame, fromFrame+limitFrames)。
+// 为什么必须带起点：cue 的每首虚拟曲目都该按**本轨**的峰值算预衰减，而不是拿整轨（可能 40 分钟）
+// 的最高峰值去压一首 2 分钟的小品；顺带也把扫描耗时从"整轨"降到"本轨"。
+// ⚠️ 边界代价（如实标注）：块内 4 相 8 抽头会读到区间首尾外各 half=3 帧的样本（与整曲扫描的
+//    端点钳位同一规则），因此极值估计可能有 <3 帧的"越界取样"，对预衰减结论无实际影响。
+static BigIspScan scan_isp_blocks(PlaySource& src, size_t fromFrame, size_t limitFrames, bool partial) {
     BigIspScan r;
     r.partial = partial;
     const auto& K = rta::dsp::isp_kernel();
@@ -1865,9 +1937,12 @@ static BigIspScan scan_isp_blocks(PlaySource& src, size_t limitFrames, bool part
     const int PH = (int)K.size();
     const size_t BLK = 1u << 18;          // 262144 帧/块
     const size_t total = src.frames;
-    if (limitFrames == 0 || limitFrames > total) limitFrames = total;
-    for (size_t a = 0; a < limitFrames; a += BLK) {
-        const size_t b = std::min(limitFrames, a + BLK);
+    if (fromFrame > total) fromFrame = total;
+    const size_t avail = total - fromFrame;
+    if (limitFrames == 0 || limitFrames > avail) limitFrames = avail;
+    const size_t endFrame = fromFrame + limitFrames;
+    for (size_t a = fromFrame; a < endFrame; a += BLK) {
+        const size_t b = std::min(endFrame, a + BLK);
         const size_t lo = (a > (size_t)half) ? a - (size_t)half : 0;
         const size_t hi = std::min(total, b + (size_t)half);
         rta::audio::AudioBuffer chunk;
@@ -1994,7 +2069,9 @@ static bool play_one_impl(const std::string& file, const PlayParams& pIn, rta::a
                 g_lastEnd.isPosZeroNoErr = false;
             }
         }
-        play_log("START file=" + file);
+        play_log(p.cueStart >= 0.0
+                     ? ("START file=" + file + " cue=" + cue_range_text(p.cueStart, p.cueEnd))
+                     : ("START file=" + file));
         play_log(mem_line("pre-decode"));
         apply_stream_settings();
         const auto t_dec_0 = std::chrono::steady_clock::now();
@@ -2075,8 +2152,49 @@ static bool play_one_impl(const std::string& file, const PlayParams& pIn, rta::a
                << " frames=" << srcFrames
                << " stream=" << (src.streaming() ? 1 : 0)
                << " decodeMs=" << (long long)(note.totalMs + 0.5);
+            if (p.cueStart >= 0.0) ds << " cue=" << cue_range_text(p.cueStart, p.cueEnd);
             if (!note.text.empty()) ds << " note=\"" << note.text << "\"";
             play_log(ds.str());
+        }
+        // ---------------- CUE 分轨（2026-10-25）：把 [cueStart, cueEnd) 变成一个"虚拟文件" ----------------
+        // 为什么卡在这里：此刻已经解出 in.rate / srcFrames，而下游一切（totalOut、seek 基准、
+        // ISP 扫描范围、信号链 dur）都还没定 —— 这里是"本区间"能成为唯一真相源的最后一个位置。
+        // 口径（与本文件 PlayParams::cueStart 的注释一致）：
+        //   · srcBase/srcCount = 本轨在**解码结果**里的起点/长度（源采样率帧）；
+        //   · 前 srcBase 帧永远不写设备（生产者从 srcBase 起读，不是"读出来再丢"）；
+        //   · 到 srcBase+srcCount 就正常结束（eos），不是"整轨播到 40 分钟"。
+        // 失败必须明确：给了 cue_start 却越界/读不了 ⟹ 报错（绝不静默从头播）。
+        size_t srcBase = 0, srcCount = srcFrames;
+        const bool cueOn = (p.cueStart >= 0.0);
+        if (cueOn) {
+            const double fileSec = (double)srcFrames / (double)in.rate;
+            auto cueFail = [&](const std::string& why) {
+                play_log("CUE_REJECT " + why + " cue=" + cue_range_text(p.cueStart, p.cueEnd) +
+                         " file=" + file);
+                std::lock_guard<std::mutex> lk(ps.mtx);
+                ps.error = why;
+                return false;
+            };
+            if (p.cueEnd >= 0.0 && p.cueEnd <= p.cueStart)
+                return cueFail("CUE 分轨区间非法：终点 " + std::to_string(p.cueEnd) +
+                               "s 不大于起点 " + std::to_string(p.cueStart) + "s（文件 " +
+                               std::to_string(fileSec) + "s）：" + file);
+            const long long b = (long long)std::llround(p.cueStart * (double)in.rate);
+            if (b < 0 || (size_t)b >= srcFrames)
+                return cueFail("CUE 分轨起点越界：起点 " + std::to_string(p.cueStart) +
+                               "s ≥ 文件时长 " + std::to_string(fileSec) + "s：" + file);
+            long long e = (p.cueEnd >= 0.0) ? (long long)std::llround(p.cueEnd * (double)in.rate)
+                                            : (long long)srcFrames;
+            if (e > (long long)srcFrames) e = (long long)srcFrames;
+            if (e <= b)
+                return cueFail("CUE 分轨区间越界：" + cue_range_text(p.cueStart, p.cueEnd) +
+                               " 落在文件时长 " + std::to_string(fileSec) + "s 之外：" + file);
+            srcBase  = (size_t)b;
+            srcCount = (size_t)(e - (long long)b);
+            play_log("CUE_RANGE cue=" + cue_range_text(p.cueStart, p.cueEnd) +
+                     " base=" + std::to_string(srcBase) + " frames=" + std::to_string(srcCount) +
+                     " inRate=" + std::to_string(in.rate) + " fileSec=" + std::to_string(fileSec) +
+                     " file=" + file);
         }
         // 位深回退 / 端点回退等"不能悄悄变"的说明都汇进 note（进 ps.info 与信号链 JSON 的 note）
         auto appendNote = [&](const std::string& s) {
@@ -2207,18 +2325,19 @@ static bool play_one_impl(const std::string& file, const PlayParams& pIn, rta::a
         if (p.isp || p.dsd >= 64) {
             const auto t_isp_0 = std::chrono::steady_clock::now();
             const double winSec = rta::audio::big_file_stream_settings().ispPrescanSec;
-            const bool partial = src.streaming() && (double)srcFrames > winSec * (double)in.rate;
-            const size_t limit = partial ? (size_t)(winSec * (double)in.rate) : srcFrames;
-            const BigIspScan sc = scan_isp_blocks(src, limit, partial);
+            // 扫描范围按**本区间**（cue 分轨时不是整轨）：partial 判据也用 srcCount
+            const bool partial = src.streaming() && (double)srcCount > winSec * (double)in.rate;
+            const size_t limit = partial ? (size_t)(winSec * (double)in.rate) : srcCount;
+            const BigIspScan sc = scan_isp_blocks(src, srcBase, limit, partial);
             ispPeak = sc.peak;
             srcPeak = sc.srcPeak;
             ispOver = sc.over;
             ispScan = partial ? "partial" : "full";
             const double ispMs = std::chrono::duration<double, std::milli>(
                                      std::chrono::steady_clock::now() - t_isp_0).count();
-            char b[240];
-            std::snprintf(b, sizeof(b), "ispScan=%s ms=%.0f limitFrames=%zu peak=%.4f srcPeak=%.4f over=%lld",
-                          ispScan.c_str(), ispMs, limit, sc.peak, sc.srcPeak, sc.over);
+            char b[260];
+            std::snprintf(b, sizeof(b), "scan=%s ms=%.0f frames=%zu/%zu peak=%.4f over=%lld srcPeak=%.4f base=%zu",
+                          ispScan.c_str(), ispMs, sc.scannedFrames, srcCount, ispPeak, ispOver, srcPeak, srcBase);
             play_log(mem_line("isp", b));
             if (p.isp && sc.peak > 1.0) {
                 const double peakDb = 20.0 * std::log10(sc.peak);
@@ -2583,20 +2702,22 @@ static bool play_one_impl(const std::string& file, const PlayParams& pIn, rta::a
         // 元数据带下来）。解码器容器位深（flac 恒为 32）会把 16bit 源 → 24bit 输出误判成"位深降低"。
         const int srcBitsEff = p.srcBits > 0 ? p.srcBits
                               : ((in.bits > 0 && in.bits <= 24) ? in.bits : 0);
-        const size_t   totalOut = (size_t)((double)srcFrames * (double)deviceRate / (double)in.rate + 0.5);
+        // ★ CUE 分轨：总长按**本区间**（srcCount）算，不是整轨 —— 否则 /api/status 的 dur 与
+        //   进度条都会是"整轨"的（实测会看到 dur=10s 而实际只播 4s）。
+        const size_t   totalOut = (size_t)((double)srcCount * (double)deviceRate / (double)in.rate + 0.5);
         ps.outRate = deviceRate; ps.outBits = outBits;
         ps.total.store(totalOut);
 
         // ---- 2026-10-25（耳机 EQ 热重载）：起播定位 ----
         // initialSeekFrac 只由「播放中切换 EQ/IR」这条路径设置（见 /api/settings 的 eqChanged 分支）。
         // 正常播放恒为 -1 ⟹ startPos 全 0 ⟹ 与旧行为逐字节相同。
-        const StartPos startPos = start_pos_for(p.initialSeekFrac, srcFrames, totalOut);
+        const StartPos startPos = start_pos_for(p.initialSeekFrac, srcCount, totalOut);
         if (startPos.pos > 0 || startPos.played > 0) {
             ps.played.store(startPos.played);
             std::ostringstream ss;
             ss.setf(std::ios::fixed); ss.precision(4);
             ss << "EQ_RELOAD_SEEK frac=" << p.initialSeekFrac
-               << " pos=" << startPos.pos << "/" << srcFrames
+               << " pos=" << startPos.pos << "/" << srcCount
                << " played=" << startPos.played << "/" << totalOut
                << " eq=" << (p.eqFile.empty() ? "(none)" : p.eqFile);
             play_log(ss.str());
@@ -2629,7 +2750,12 @@ static bool play_one_impl(const std::string& file, const PlayParams& pIn, rta::a
                 << ",\"inRate\":" << in.rate
                 << ",\"inBits\":" << in.bits
                 << ",\"inCh\":" << in.channels
-                << ",\"dur\":" << (double)srcFrames / (double)in.rate
+                << ",\"dur\":" << (double)srcCount / (double)in.rate
+                // CUE 分轨：本曲在整轨文件里的区间（秒；cueStart<0 = 整首）。
+                // 界面据此显示"本轨 0:04/0:04"而不是"整轨 10:00"。
+                << ",\"cueStart\":" << p.cueStart
+                << ",\"cueEnd\":" << p.cueEnd
+                << ",\"fileDur\":" << (double)srcFrames / (double)in.rate
                 << ",\"note\":\"" << jesc(note.text) << "\""
             << ",\"outRate\":" << outRate
             << ",\"outBits\":" << outBits
@@ -2766,7 +2892,14 @@ static bool play_one_impl(const std::string& file, const PlayParams& pIn, rta::a
             const size_t kChunk = 4096;
             uint64_t myEpoch = RQ.epoch.load();
             auto pl = std::make_unique<eng::Pipeline>(cfg);
-            size_t pos = 0, skipOut = 0, blocksDone = 0;
+            // ---- CUE 分轨（2026-10-25）：生产者在 [srcBase, srcBase+srcCount) 里跑 ----
+            // 为什么用"从 srcBase 起读"而不是"整轨读出来再丢"：两者对设备完全等价（区间之前的
+            // 帧一个都不会进 RQ），但前者不为前 4 秒付解码/DSP 的代价，40 分钟的 cue 第 12 首
+            // 也不会先把前 30 分钟跑一遍。
+            // seek：render_loop 给的 seekFrame 是**区间内**的帧号（h.inFrames=srcCount），
+            // 所以这里加回 srcBase —— 0 = 本轨开头，这是"暂停/跳转相对本节区间"的落点。
+            const size_t segEnd = srcBase + srcCount;
+            size_t pos = srcBase + startPos.pos, skipOut = 0, blocksDone = 0;
 
             // ---- DSD：每声道一个调制器（状态必须跨块保持）+ DoP 打包残样 ----
             std::vector<std::unique_ptr<rta::dsp::SdmModulator>> mods;
@@ -2790,8 +2923,11 @@ static bool play_one_impl(const std::string& file, const PlayParams& pIn, rta::a
                     if (RQ.abort.load()) break;
                     const long long sf = RQ.seekFrame.exchange(-1);
                     if (sf >= 0) {
-                        const size_t target  = (size_t)sf;
-                        const size_t preroll = std::min<size_t>(target, (size_t)(0.5 * (double)in.rate));
+                        // sf 是区间内的帧号（0 = 本轨开头）⟹ 先夹到 srcCount，再加 srcBase
+                        size_t rel = (size_t)sf;
+                        if (rel > srcCount) rel = srcCount;
+                        const size_t target  = srcBase + rel;
+                        const size_t preroll = std::min<size_t>(rel, (size_t)(0.5 * (double)in.rate));
                         pos = target - preroll;
                         skipOut = (size_t)((double)preroll * (double)outRate / (double)in.rate + 0.5);
                         // 清空滤波历史（不是重建管线：重建要重新设计 26 万抽头滤波器，秒级卡顿）
@@ -2801,8 +2937,8 @@ static bool play_one_impl(const std::string& file, const PlayParams& pIn, rta::a
                         myEpoch = RQ.epoch.load();
                         RQ.cv.notify_all();
                     }
-                    if (pos >= srcFrames) break;
-                    const size_t n = std::min(kChunk, srcFrames - pos);
+                    if (pos >= segEnd) break;
+                    const size_t n = std::min(kChunk, segEnd - pos);
                     rta::audio::AudioBuffer c;
                     // ★ 流式：向源要这一块（整曲路径下与旧代码逐字节相同）
                     const size_t gotFrames = src.read(pos, n, c);
@@ -2943,7 +3079,9 @@ static bool play_one_impl(const std::string& file, const PlayParams& pIn, rta::a
         rl.volDb = &ps.volDb; rl.startDb = &ps.startDb; rl.dbgPad = &ps.dbgPad; rl.gpuOut = &ps.gpu;
         rl.rq = &RQ;
         rl.deviceRate = deviceRate; rl.outBits = outBits; rl.outCh = outCh;
-        rl.inRate = in.rate; rl.inFrames = srcFrames; rl.totalOut = totalOut;
+        // inFrames/totalOut 必须是**本区间**的：render_loop 的 seek 用 inFrames 算 seekFrame，
+        // 用 totalOut 换算 played 比例 —— 这两个数一旦还是整轨的，跳转就会落到文件别处。
+        rl.inRate = in.rate; rl.inFrames = srcCount; rl.totalOut = totalOut;
         rl.dbgW0 = &g_dbgW0; rl.dbgWr = &g_dbgWr; rl.dbgPulls = &g_dbgPulls;
         rl.dbgClip = &g_dbgClip; rl.dbgPeak = &g_dbgPeak;
         // C2 遥测导出（/api/status 用；STAT 行本身由 render_loop 直接打印）
@@ -3034,13 +3172,40 @@ static bool play_one(const std::string& file, const PlayParams& p, rta::audio::A
 
 // ---------------- 播放队列 ----------------
 
+// 队列项：路径 + 可选 CUE 分轨区间（秒）。
+// 为什么队列项必须自带区间：cue 把整轨展开成 N 首，这 N 条的 **path 完全相同**，
+// 只按路径排队的话「下一首 / 点队列项 / 单曲循环」都会退化成「整个文件从头播」
+//（这正是本轮要修的那个 bug 在队列侧的翻版）。
+struct QItem {
+    std::string path;
+    double      cs = -1.0;   // CUE 起点（秒）；<0 = 整首
+    double      ce = -1.0;   // CUE 终点（秒）；<0 = 文件末尾
+    QItem() {}
+    QItem(std::string p, double a = -1.0, double b = -1.0)
+        : path(std::move(p)), cs(a), ce(b) {}
+    bool isCue() const { return cs >= 0.0; }
+    // 同一首的判定：路径 + 区间都要相等（同一 path 的不同 cue 轨是不同曲目）
+    bool same(const QItem& o) const {
+        if (path != o.path) return false;
+        if (isCue() != o.isCue()) return false;
+        if (!isCue()) return true;
+        return std::fabs(cs - o.cs) < 0.001 && std::fabs(ce - o.ce) < 0.001;
+    }
+};
+
+// 库里的一条曲目 → 播放侧区间（秒）。非 cue 曲目返回 false（cs/ce 不动）。
+// 唯一口径来源是 library.h 的 lib_cue_range_sec（本文件不重算，避免两套算法漂移）。
+static bool lib_track_cue_sec(const rta::net::LibTrack& t, double& cs, double& ce) {
+    return rta::net::lib_cue_range_sec(t, cs, ce);
+}
+
 struct QueueState {
     std::mutex mtx;
-    std::vector<std::string> items;
+    std::vector<QItem> items;
     size_t index = 0;
     int    repeat = 0;      // 0=关 1=列表循环 2=单曲循环
     bool   shuffle = false; // 随机播放
-    std::vector<std::string> base;   // 随机前的原始顺序（关掉随机时还原）
+    std::vector<QItem> base;   // 随机前的原始顺序（关掉随机时还原）
 };
 static QueueState g_q;
 // ---- 队列持久化：重启后仍保留播放列表 ----
@@ -3859,7 +4024,17 @@ static void queue_save() {
     f << "index=" << g_q.index << "\n";
     f << "repeat=" << g_q.repeat << "\n";
     f << "shuffle=" << (g_q.shuffle ? 1 : 0) << "\n";
-    for (const auto& it : g_q.items) f << "item=" << it << "\n";
+    // 队列项落盘格式：item=<路径>，CUE 分轨项再跟两个 TAB 分隔的秒数（cs/ce）。
+    // 普通曲目**逐字节与旧格式相同** ⟹ 老队列文件照旧可读（读侧只在有 TAB 时才当 cue 解析）。
+    for (const auto& it : g_q.items) {
+        f << "item=" << it.path;
+        if (it.isCue()) {
+            char cb[80];
+            std::snprintf(cb, sizeof(cb), "\t%.6f\t%.6f", it.cs, it.ce);
+            f << cb;
+        }
+        f << "\n";
+    }
 }
 
 static void queue_load() {
@@ -3872,7 +4047,21 @@ static void queue_load() {
         if (line.rfind("index=", 0) == 0) g_q.index = (size_t)atoi(line.c_str() + 6);
         else if (line.rfind("repeat=", 0) == 0) g_q.repeat = atoi(line.c_str() + 7);
         else if (line.rfind("shuffle=", 0) == 0) g_q.shuffle = (atoi(line.c_str() + 8) != 0);
-        else if (line.rfind("item=", 0) == 0) g_q.items.push_back(line.substr(5));
+        else if (line.rfind("item=", 0) == 0) {
+            // item=<路径>[	<cs>	<ce>]：没有 TAB = 普通曲目（旧格式）
+            const std::string rest = line.substr(5);
+            const size_t t1 = rest.find('\t');
+            if (t1 == std::string::npos) {
+                g_q.items.emplace_back(rest);
+            } else {
+                QItem it;
+                it.path = rest.substr(0, t1);
+                const size_t t2 = rest.find('\t', t1 + 1);
+                it.cs = std::atof(rest.c_str() + t1 + 1);
+                if (t2 != std::string::npos) it.ce = std::atof(rest.c_str() + t2 + 1);
+                g_q.items.push_back(std::move(it));
+            }
+        }
     }
     if (g_q.index >= g_q.items.size()) g_q.index = 0;
 }
@@ -3934,7 +4123,8 @@ static void queue_thread(PlayParams p, size_t start) {
     for (;;) {
         if (ps.stop.load()) break;
 
-        std::string cur, nextPath;
+        QItem cur;
+        std::string nextPath;
         {
             std::lock_guard<std::mutex> lk(g_q.mtx);
             if (g_q.items.empty()) break;
@@ -3944,27 +4134,33 @@ static void queue_thread(PlayParams p, size_t start) {
             }
             cur = g_q.items[idx];
             g_q.index = idx;
-            if (idx + 1 < g_q.items.size()) nextPath = g_q.items[idx + 1];
+            if (idx + 1 < g_q.items.size()) nextPath = g_q.items[idx + 1].path;
         }
 
-        { std::lock_guard<std::mutex> lk(ps.mtx); ps.current = cur; ps.error.clear(); }
+        { std::lock_guard<std::mutex> lk(ps.mtx); ps.current = cur.path; ps.error.clear(); }
         ps.played.store(0);
         ps.total.store(0);
 
         if (!nextPath.empty()) prefetch_start(nextPath);   // 后台预解码下一曲
 
-        rta::audio::AudioBuffer buf = prefetch_take(cur);
-        const bool done = play_one(cur, p, buf);
+        rta::audio::AudioBuffer buf = prefetch_take(cur.path);
+        // ★ 本曲的播放区间**只来自队列项**：绝不沿用上一曲的 cueStart/cueEnd。
+        //   （p 是"最近一次播放参数"，同专辑内切到非 cue 曲目时必须归零，否则会少播一段。）
+        PlayParams pit = p;
+        pit.cueStart = cur.cs;
+        pit.cueEnd   = cur.ce;
+        const bool done = play_one(cur.path, pit, buf);
         const double endPos = (ps.outRate > 0 ? (double)ps.played.load() / (double)ps.outRate : 0.0);
         const size_t endPlayed = ps.played.load();
-        const std::string endErr = ps.error;
-        const std::string endCur = cur;
+        std::string endErr = ps.error;
+        const std::string endCur = cur.path;
         {
             std::ostringstream es;
             es << "END pos=" << endPos
                << " played=" << endPlayed << " total=" << ps.total.load()
                << " clip=" << g_dbgClip.load()
                << " error=\"" << endErr << "\""
+               << " cue=" << (cur.isCue() ? cue_range_text(cur.cs, cur.ce) : std::string("-"))
                << " file=" << endCur
                << " v" << RLPLAYER_VERSION;
             play_log(es.str());
@@ -4573,11 +4769,20 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
                 rta::net::LibTrack t;
                 if (!lib.trackAt(a.idx[i], t)) continue;
                 if (i) j << ",";
+                // ---- CUE 分轨字段（2026-10-25）----
+                // cs/ce = 本曲在整轨文件里的起止秒（与 /api/play 的 cue_start/cue_end 同一口径）；
+                // 非 cue 曲目一律 -1（前端判 >=0 才带参数，负向对照"整首播"就靠这一档）。
+                // 为什么不复用 dur：cue 虚拟曲目的 dur 已经是"本轨时长"，但播放侧还需要**起点**，
+                // 只给时长等于少了一半信息（起点 4s 还是 8s 决定听到的是哪一首）。
+                double cs = -1.0, ce = -1.0;
+                const bool isCue = lib_track_cue_sec(t, cs, ce);
                 j << "{\"i\":" << i << ",\"n\":" << t.trackNo << ",\"d\":" << t.discNo
                   << ",\"title\":\"" << jesc(t.title) << "\",\"artist\":\"" << jesc(t.artist)
                   << "\",\"dur\":" << t.duration << ",\"sr\":" << t.sampleRate
                   << ",\"bits\":" << t.bits << ",\"ch\":" << t.channels
-                  << ",\"codec\":\"" << jesc(t.codec) << "\",\"path\":\"" << jesc(t.path) << "\"}";
+                  << ",\"codec\":\"" << jesc(t.codec) << "\",\"path\":\"" << jesc(t.path) << "\""
+                  << ",\"cs\":" << (isCue ? cs : -1.0)
+                  << ",\"ce\":" << (isCue ? ce : -1.0) << "}";
             }
             j << "]}";
             return j.str();
@@ -4664,27 +4869,40 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
             }
             rta::net::LibAlbum a;
             if (!lib.album(key, a)) return "{\"ok\":false,\"error\":\"专辑不存在\"}";
-            std::vector<std::string> paths;
+            // 队列项带上每首的 CUE 区间：这张专辑是"整轨 + cue"时，N 首的 path 完全相同，
+            // 只有区间能区分。不带区间的旧实现 ⟹ 整张专辑每一首都从文件头开播。
+            std::vector<QItem> items;
             for (size_t ix : a.idx) {
                 rta::net::LibTrack t;
-                if (lib.trackAt(ix, t)) paths.push_back(t.path);
+                if (!lib.trackAt(ix, t)) continue;
+                double cs = -1.0, ce = -1.0;
+                const bool isCue = lib_track_cue_sec(t, cs, ce);
+                items.emplace_back(t.path, isCue ? cs : -1.0, isCue ? ce : -1.0);
             }
-            if (paths.empty()) return "{\"ok\":false,\"error\":\"专辑为空\"}";
-            if (start >= paths.size()) start = 0;
+            if (items.empty()) return "{\"ok\":false,\"error\":\"专辑为空\"}";
+            if (start >= items.size()) start = 0;
+            // 可选 cue_start/cue_end（前端点某一轨时显式带上）：覆盖起始曲目的区间。
+            // 用途是"前端与库必须说同一句话"：库读不出区间（例如索引来自旧版）时，前端仍能播对。
+            if (p.cueStart >= 0.0) {
+                if (p.cueEnd >= 0.0 && p.cueEnd <= p.cueStart)
+                    return "{\"ok\":false,\"error\":\"cue_start/cue_end 区间非法\"}";
+                items[start].cs = p.cueStart;
+                items[start].ce = p.cueEnd;
+            }
             {
                 std::lock_guard<std::mutex> lk(g_q.mtx);
-                g_q.items = paths;
+                g_q.items = items;
                 g_q.index = start;
             }
             queue_save();
             params_store(p);
             // 停旧线程 + join + 起新线程 = 一次原子操作（并发点播放不再撞 thread 赋值 terminate）
             ps.restart([p, start] { return queue_thread(p, start); });
-            { std::lock_guard<std::mutex> lk(ps.mtx); ps.error.clear(); ps.current = paths[start]; }
+            { std::lock_guard<std::mutex> lk(ps.mtx); ps.error.clear(); ps.current = items[start].path; }
             ps.played.store(0);
             ps.total.store(0);
             ps.playing.store(true);
-            return "{\"ok\":true,\"count\":" + std::to_string(paths.size()) + "}";
+            return "{\"ok\":true,\"count\":" + std::to_string(items.size()) + "}";
         }
         // 整张专辑加入队列（不打断当前播放）
         if (rq.path.rfind("/api/lib/enqueue", 0) == 0) {
@@ -4698,7 +4916,11 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
                 std::lock_guard<std::mutex> lk(g_q.mtx);
                 for (size_t ix : a.idx) {
                     rta::net::LibTrack t;
-                    if (lib.trackAt(ix, t)) { g_q.items.push_back(t.path); ++cnt; }
+                    if (!lib.trackAt(ix, t)) continue;
+                    double cs = -1.0, ce = -1.0;
+                    const bool isCue = lib_track_cue_sec(t, cs, ce);
+                    g_q.items.emplace_back(t.path, isCue ? cs : -1.0, isCue ? ce : -1.0);
+                    ++cnt;
                 }
                 cnt = g_q.items.size();
             }
@@ -4827,12 +5049,14 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
             }
             if (name.empty()) name = "未命名播放列表";
             for (auto& c : name) if (c == '\\' || c == '/' || c == ':' || c == '*' || c == '?' || c == '"' || c == '<' || c == '>' || c == '|') c = '_';
-            std::vector<std::string> items;
+            std::vector<QItem> items;
             { std::lock_guard<std::mutex> lk(g_q.mtx); items = g_q.items; }
             std::ofstream f(plDir() / (name + ".m3u8"), std::ios::binary | std::ios::trunc);
             if (!f) return "{\"ok\":false,\"error\":\"写文件失败\"}";
             f << "#EXTM3U\n";
-            for (auto& it : items) f << it << "\n";
+            // ⚠️ 已知限制（如实标注）：m3u8 没有"文件内区间"这一概念，CUE 分轨项只写路径。
+            //    载入播放列表后这些曲目会按整首播（区间信息在队列文件 rlplayer-playlist.txt 里才保留）。
+            for (auto& it : items) f << it.path << "\n";
             return "{\"ok\":true,\"count\":" + std::to_string(items.size()) + "}";
         }
         if (rq.path.rfind("/api/pl/load", 0) == 0) {
@@ -4841,12 +5065,12 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
             if (q != std::string::npos) name = urlDecode(rq.path.substr(q + 6));
             std::ifstream f(plDir() / (name + ".m3u8"));
             if (!f) return "{\"ok\":false,\"error\":\"播放列表不存在\"}";
-            std::vector<std::string> items;
+            std::vector<QItem> items;
             std::string line;
             while (std::getline(f, line)) {
                 if (!line.empty() && line.back() == '\r') line.pop_back();
                 if (line.empty() || line[0] == '#') continue;
-                items.push_back(line);
+                items.emplace_back(line);      // m3u8 只有路径 ⟹ 按整首播（见 pl/save 的限制注）
             }
             {
                 std::lock_guard<std::mutex> lk(g_q.mtx);
@@ -4897,6 +5121,30 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
         // F1：file 会进队列 → 播放线程 recent_add/meta_on_play/fs::u8path 全链消费，
         // 非法字节在这里挡下（播放线程里抛异常没有兜底，等于整进程退出）。
         if (!valid_utf8(p.file)) return utf8_path_reject(p.file);
+
+        // CUE 分轨（2026-10-25）：参数在 HTTP 层先挡一道。
+        // 这里只判"能不能自洽"（区间合法/后端适不适合），**不判越界** ——
+        // 文件真实时长要解码后才知道，那一条在 play_one 里报（越界也绝不放行成"从头播"）。
+        if (p.cueStart >= 0.0) {
+            if (!(p.cueEnd >= 0.0) && p.cueEnd != -1.0)
+                return "{\"ok\":false,\"error\":\"cue_end 非法（必须是 >=0 的秒数，或省略）\"}";
+            if (p.cueEnd >= 0.0 && p.cueEnd <= p.cueStart)
+                return "{\"ok\":false,\"error\":\"cue_start/cue_end 区间非法：cue_end 必须大于 cue_start\"}";
+            if (p.backend == "upnp")
+                return "{\"ok\":false,\"error\":\"UPnP 投放不支持 CUE 分轨（渲染器只能播整个文件），请切到本地后端\"}";
+            // 越界尽量**同步**报（能判就判）：ffprobe 给不出时长（duration=0 = 未知）时不判，
+            // 由 play_one 在解码后报 CUE_REJECT —— 两条路都必须报错，绝无"静默从头播"。
+            const rta::audio::MediaInfo mi = rta::audio::probe_media(p.file);
+            if (mi.duration > 0.0 && p.cueStart >= mi.duration)
+                return std::string("{\"ok\":false,\"error\":\"") +
+                       jesc("CUE 分轨起点越界：起点 " + std::to_string(p.cueStart) +
+                            "s ≥ 文件时长 " + std::to_string(mi.duration) + "s") + "\"}";
+            if (mi.duration > 0.0 && p.cueEnd > mi.duration + 0.5)
+                return std::string("{\"ok\":false,\"error\":\"") +
+                       jesc("CUE 分轨终点越界：终点 " + std::to_string(p.cueEnd) +
+                            "s > 文件时长 " + std::to_string(mi.duration) + "s") + "\"}";
+            play_log("PLAY_CUE cue=" + cue_range_text(p.cueStart, p.cueEnd) + " file=" + p.file);
+        }
         params_store(p);
 
         // 先停掉上一次（原子：并发点播放时不会撞 thread 赋值 terminate）
@@ -4911,11 +5159,14 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
         }
         {
             std::lock_guard<std::mutex> lk(g_q.mtx);
-            // 如果点的文件已在队列里，就从它开始播；否则把队列换成它
+            // 如果点的文件已在队列里，就从它开始播；否则把队列换成它。
+            // CUE 分轨（2026-10-25）：匹配必须带区间 —— 同一路径在一张 cue 专辑里出现 N 次，
+            // 只按路径找会永远命中第 1 首（点第 3 轨听到第 1 轨）。
+            const QItem want(p.file, p.cueStart, p.cueEnd);
             bool found = false;
             for (size_t i = 0; i < g_q.items.size(); ++i)
-                if (g_q.items[i] == p.file) { g_q.index = i; found = true; break; }
-            if (!found) { g_q.items.clear(); g_q.items.push_back(p.file); g_q.index = 0; }
+                if (g_q.items[i].same(want)) { g_q.index = i; found = true; break; }
+            if (!found) { g_q.items.clear(); g_q.items.push_back(want); g_q.index = 0; }
         }
         ps.played.store(0);
         ps.total.store(0);
@@ -4970,7 +5221,7 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
         {
             std::lock_guard<std::mutex> lk(g_q.mtx);
             if (from < g_q.items.size() && to < g_q.items.size() && from != to) {
-                std::string v = g_q.items[from];
+                QItem v = g_q.items[from];
                 g_q.items.erase(g_q.items.begin() + (long long)from);
                 g_q.items.insert(g_q.items.begin() + (long long)to, v);
             }
@@ -5018,7 +5269,7 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
             // 注意：必须用独立作用域释放锁 —— queue_save() 内部会再次加锁，
             // 若在持锁状态下调用就会死锁（本轮踩到：服务端直接挂住，连接被关闭）。
             std::lock_guard<std::mutex> lk(g_q.mtx);
-            for (const auto& f : addList) g_q.items.push_back(f);
+            for (const auto& f : addList) g_q.items.emplace_back(f);
             cnt = g_q.items.size();
         }
         queue_save();
@@ -5786,7 +6037,8 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
             std::lock_guard<std::mutex> lk(g_q.mtx);
             // 记住"正在播的那首"，重排后要让 index 仍然指向它，
             // 否则一按随机就会跳歌（这是最容易被用户当成 bug 的细节）
-            const std::string cur = (g_q.index < g_q.items.size()) ? g_q.items[g_q.index] : std::string();
+            // 记住整项（不是只记路径）：cue 专辑里同一路径有 N 项，只按路径还原会跳到第 1 首
+            const QItem cur = (g_q.index < g_q.items.size()) ? g_q.items[g_q.index] : QItem();
             const bool want = (on != 0);
             if (want && !g_q.shuffle) {
                 g_q.base = g_q.items;                 // 保存原顺序，关掉时能还原
@@ -5798,9 +6050,9 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
                 if (!g_q.base.empty()) g_q.items = g_q.base;   // 还原原始顺序
             }
             g_q.shuffle = want;
-            if (!cur.empty()) {
+            if (!cur.path.empty()) {
                 for (size_t i = 0; i < g_q.items.size(); ++i)
-                    if (g_q.items[i] == cur) { g_q.index = i; break; }
+                    if (g_q.items[i].same(cur)) { g_q.index = i; break; }
             }
         }
         queue_save();
@@ -5815,7 +6067,15 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
           << ",\"shuffle\":" << (g_q.shuffle ? "true" : "false") << ",\"items\":[";
         for (size_t i = 0; i < g_q.items.size(); ++i) {
             if (i) j << ",";
-            j << "\"" << jesc(g_q.items[i]) << "\"";
+            j << "\"" << jesc(g_q.items[i].path) << "\"";
+        }
+        // cues：与 items **逐项对齐**的 [起, 止] 秒数组（-1,-1 = 整首）。
+        // 为什么不做成 items 里的对象：这个端点的 items 一直是"路径字符串数组"，界面/脚本
+        // 大量按字符串消费；加一个平行数组既不改旧契约，又让前端能把区间带进 /api/play。
+        j << "],\"cues\":[";
+        for (size_t i = 0; i < g_q.items.size(); ++i) {
+            if (i) j << ",";
+            j << "[" << g_q.items[i].cs << "," << g_q.items[i].ce << "]";
         }
         j << "]}";
         return j.str();
@@ -5883,7 +6143,7 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
             std::string targetFile;
             {
                 std::lock_guard<std::mutex> lk(g_q.mtx);
-                targetFile = g_q.items[target];
+                targetFile = g_q.items[target].path;
             }
             std::string err;
             if (!upnp_start_track(p, targetFile, err)) {
