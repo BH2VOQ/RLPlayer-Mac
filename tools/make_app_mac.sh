@@ -87,11 +87,22 @@ PLIST
 # 2026-10-25 修：这里原本硬编码 "$ROOT/build-mac/ffmpeg-lite"，绕过了上面第 18 行的 $BUILD
 # 变量 ⟹ 传 `make_app_mac.sh build-mac2` 时会静默跳过自建版、退回系统版（就是会 134 崩的那个）。
 for tool in ffmpeg ffprobe; do
+    # 2026-10-25：双架构方案。arm64 版放 ffmpeg / ffprobe（原生优先），
+    # x86_64 版放 ffmpeg-x86_64 / ffprobe-x86_64。运行时由
+    # platform::find_executable 按本机架构挑原生那套（缺失则回退另一套）。
+    # 这样 Apple Silicon 永远跑 arm64 原生，Intel Mac 也能直接用。
+    copied=0
     if [[ -x "$BUILD/ffmpeg-lite/$tool" ]] && "$BUILD/ffmpeg-lite/$tool" -version >/dev/null 2>&1; then
         cp "$BUILD/ffmpeg-lite/$tool" "$APP/Contents/MacOS/"
         echo "已内置 $tool：自建精简静态版（$(du -h "$BUILD/ffmpeg-lite/$tool" | cut -f1)）"
-        continue
+        copied=1
     fi
+    if [[ -x "$BUILD/ffmpeg-lite/$tool-x86_64" ]] && "$BUILD/ffmpeg-lite/$tool-x86_64" -version >/dev/null 2>&1; then
+        cp "$BUILD/ffmpeg-lite/$tool-x86_64" "$APP/Contents/MacOS/"
+        echo "已内置 $tool-x86_64：自建精简静态版（Intel Mac 用，$(du -h "$BUILD/ffmpeg-lite/$tool-x86_64" | cut -f1)）"
+        copied=1
+    fi
+    [[ "$copied" == "1" ]] && continue
     p="$(command -v $tool 2>/dev/null || true)"
     if [[ -n "$p" ]] && "$p" -version >/dev/null 2>&1; then
         cp "$p" "$APP/Contents/MacOS/"
