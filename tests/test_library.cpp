@@ -8,6 +8,9 @@
 #define NOMINMAX
 #endif
 #include "net/library.h"
+#if !defined(_WIN32)
+#include <iconv.h>
+#endif
 #include <cstdio>
 #include <string>
 #include <vector>
@@ -55,14 +58,15 @@ int main() {
         std::ofstream f("rlplayer-index.tsv", std::ios::binary);
         // 2026-10-23：索引多了格式版本头（Library 会校验，不匹配就整份丢弃重建）。
         // 测试夹具必须与真实 saveIndexLocked() 的输出格式保持一致，否则加载后为空。
-        f << "#libIndexV\t3\n";
-        f << "#path\tmtime\tsize\talbum\talbumArtist\tartist\ttitle\ttrack\tdisc\tyear\tsr\tbits\tch\tdur\thasCover\tgenre\n";
+        f << "#libIndexV\t4\n";
+        f << "#path\tmtime\tsize\talbum\talbumArtist\tartist\ttitle\ttrack\tdisc\tyear\tsr\tbits\tch\tdur\thasCover\tgenre"
+             "\tcue\tcueN\tcueOff\tcueLen\n";
         auto row = [&](const std::string& path, const std::string& alb, const std::string& aa,
                        const std::string& art, const std::string& ttl, int trk, int disc,
                        int yr, int sr, int bits, int ch, double dur, int cov) {
             f << path << "\t111\t222\t" << alb << "\t" << aa << "\t" << art << "\t" << ttl
               << "\t" << trk << "\t" << disc << "\t" << yr << "\t" << sr << "\t" << bits
-              << "\t" << ch << "\t" << dur << "\t" << cov << "\tRock\n";
+              << "\t" << ch << "\t" << dur << "\t" << cov << "\tRock" << "\t\t0\t0\t0\n";
         };
         row(u8str(fixtureRoot / "Beatles" / "Abbey Road" / "02.flac"), "Abbey Road", "The Beatles", "The Beatles", "Something", 2, 1, 1969, 44100, 16, 2, 182.0, 1);
         row(u8str(fixtureRoot / "Beatles" / "Abbey Road" / "01.flac"), "Abbey Road", "The Beatles", "The Beatles", "Come Together", 1, 1, 1969, 44100, 16, 2, 259.0, 1);
@@ -215,13 +219,15 @@ int main() {
         _putenv_s("RLPLAYER_LIBRARY_DIR", p2u(tmp5).c_str());
         {
             std::ofstream f(tmp5 / "rlplayer-index.tsv", std::ios::binary);
-            f << "#libIndexV\t3\n";
-            f << "#path\tmtime\tsize\talbum\talbumArtist\tartist\ttitle\ttrack\tdisc\tyear\tsr\tbits\tch\tdur\thasCover\tgenre\n";
+            f << "#libIndexV\t4\n";
+            f << "#path\tmtime\tsize\talbum\talbumArtist\tartist\ttitle\ttrack\tdisc\tyear\tsr\tbits\tch\tdur\thasCover\tgenre"
+                 "\tcue\tcueN\tcueOff\tcueLen\n";
             for (int d = 0; d < 300; ++d)
                 for (int t = 0; t < 10; ++t) {
                     char row[512];
                     std::snprintf(row, sizeof(row),
-                        "/fake/Album%04d/t%d.flac\t111\t222\t\t\tArtist%03d\tTitle%d\t%d\t0\t0\t44100\t16\t2\t60.0\t0\tRock\n",
+                        "/fake/Album%04d/t%d.flac\t111\t222\t\t\tArtist%03d\tTitle%d\t%d\t0\t0\t44100\t16\t2\t60.0\t0\tRock"
+                        "\t\t0\t0\t0\n",
                         d, t, d, t, t + 1);
                     f << row;
                 }
@@ -288,7 +294,360 @@ int main() {
         fs::remove_all(tmp7, ec);
     }
 
-    fs::current_path(oldCwd, ec);
+
+    // =======================================================================
+    // [5] CUE 整轨分轨（2026-10-25 第二里程碑）：v4 索引 / 迁移 / 真实扫描 / 删 cue 回归
+    // =======================================================================
+    std::printf("\n== [5] CUE 整轨分轨（真实扫描） ==\n");
+    {
+        // 优先使用环境变量或 build-mac/ffmpeg-lite 提供的 ffprobe
+        std::string ffprobe = rta::audio::find_tool("ffprobe");
+        if (const char* env = std::getenv("RLPLAYER_FFPROBE")) {
+            if (env[0]) ffprobe = std::string(env);
+        }
+        if (ffprobe.empty()) {
+            const fs::path lite = fs::current_path() / "build-mac" / "ffmpeg-lite" / "ffprobe";
+            if (fs::exists(lite)) ffprobe = lite.string();
+        }
+        ck(!ffprobe.empty(),
+           "ffprobe 可用（末轨长度必须知道文件总时长；本仓同类门禁：writeback / media_duration）", ffprobe);
+
+        auto u8_to_gbk = [](const std::string& u8) {
+#if defined(_WIN32)
+            const int n = ::MultiByteToWideChar(CP_UTF8, 0, u8.c_str(), (int)u8.size(), nullptr, 0);
+            if (n <= 0) return std::string();
+            std::wstring w((size_t)n, L'\0');
+            ::MultiByteToWideChar(CP_UTF8, 0, u8.c_str(), (int)u8.size(), w.data(), n);
+            const int m = ::WideCharToMultiByte(936, 0, w.c_str(), (int)w.size(), nullptr, 0, nullptr, nullptr);
+            if (m <= 0) return std::string();
+            std::string s((size_t)m, '\0');
+            ::WideCharToMultiByte(936, 0, w.c_str(), (int)w.size(), s.data(), m, nullptr, nullptr);
+            return s;
+#else
+            if (u8.empty()) return std::string();
+            iconv_t cd = iconv_open("GBK", "UTF-8");
+            if (cd == (iconv_t)-1) return std::string();
+            size_t inbytesleft = u8.size();
+            char* inbuf = const_cast<char*>(u8.data());
+            size_t outbufsize = u8.size() * 2 + 16;
+            std::string out;
+            out.resize(outbufsize);
+            char* outbuf = &out[0];
+            size_t outbytesleft = outbufsize;
+            size_t res = iconv(cd, &inbuf, &inbytesleft, &outbuf, &outbytesleft);
+            iconv_close(cd);
+            if (res == (size_t)-1) return std::string();
+            out.resize(outbufsize - outbytesleft);
+            return out;
+#endif
+        };
+        auto writeText = [](const fs::path& p, const std::string& s) {
+            std::ofstream f(p, std::ios::binary | std::ios::trunc);
+            f.write(s.data(), (std::streamsize)s.size());
+        };
+        // 真正可探测的 WAV（RIFF + fmt16 + data；全零 = 数字静音，不打开任何设备、不出声）
+        auto writeWav = [](const fs::path& p, int sr, int ch, int seconds) {
+            const int bits = 16;
+            const long long frames = (long long)sr * seconds;
+            const long long dataBytes = frames * ch * (bits / 8);
+            std::ofstream f(p, std::ios::binary | std::ios::trunc);
+            auto le = [&](long long v, int n) { for (int i = 0; i < n; ++i) f.put((char)((v >> (8 * i)) & 0xFF)); };
+            f.write("RIFF", 4); le(36 + dataBytes, 4); f.write("WAVE", 4);
+            f.write("fmt ", 4); le(16, 4); le(1, 2); le(ch, 2); le(sr, 4);
+            le((long long)sr * ch * (bits / 8), 4); le(ch * (bits / 8), 2); le(bits, 2);
+            f.write("data", 4); le(dataBytes, 4);
+            std::vector<char> zero(65536, 0);
+            for (long long left = dataBytes; left > 0; ) {
+                const long long k = std::min<long long>(left, (long long)zero.size());
+                f.write(zero.data(), (std::streamsize)k);
+                left -= k;
+            }
+        };
+        // 换库目录 + 换根 + 全量/增量扫描（与 /api/lib/scan 同一个 Library 实现）
+        auto scanLib = [&](const fs::path& root, const fs::path& libDir, bool full) {
+            fs::create_directories(libDir, ec);
+            _putenv_s("RLPLAYER_LIBRARY_DIR", p2u(libDir).c_str());
+            _putenv_s("RLPLAYER_PORT", "");
+            for (auto r : lib.roots()) lib.removeRoot(r);
+            const auto ar = lib.addRootEx(p2u(root));
+            lib.load();
+            lib.startScan(full);
+            lib.joinScan();
+            return ar;
+        };
+        auto trackOf = [&](size_t i) { rta::net::LibTrack t; lib.trackAt(i, t); return t; };
+        auto albumNamed = [&](const std::string& name) {
+            rta::net::LibAlbum a;
+            for (auto& x : lib.albums()) if (x.name == name) { a = x; return a; }
+            return a;
+        };
+        auto countIn = [&](const std::string& dirName) {
+            int c = 0;
+            for (size_t i = 0; i < lib.trackCount(); ++i) {
+                rta::net::LibTrack t; lib.trackAt(i, t);
+                if (t.path.find(dirName) != std::string::npos) ++c;
+            }
+            return c;
+        };
+        auto readIdx = [&](const fs::path& dir, fs::path& out) {
+            out.clear();
+            std::error_code e;
+            for (auto& de : fs::directory_iterator(dir, e))
+                if (de.path().filename().string().rfind("rlplayer-index", 0) == 0) out = de.path();
+        };
+
+        const fs::path tmp6 = fs::temp_directory_path() / "rta_lib_cue";
+        fs::remove_all(tmp6, ec);
+        const long long SEC = 44100;   // 1 秒的采样数（44.1k）
+
+        // ---------------- ① 端到端扫描：10 秒整轨 + 3 轨 GBK cue ----------------
+        {
+            const fs::path libA = tmp6 / "libA";
+            const fs::path rootA = tmp6 / U("音乐库A");
+            const fs::path albA = rootA / U("整轨专辑");
+            fs::create_directories(albA, ec);
+            const fs::path wavA = albA / U("album.wav");
+            writeWav(wavA, 44100, 2, 10);
+            const std::string cueA =
+                "TITLE \"整轨测试专辑\"\r\nPERFORMER \"测试艺术家\"\r\n"
+                "REM GENRE \"Classical\"\r\nREM DATE 2019\r\n"
+                "FILE \"album.wav\" WAVE\r\n"
+                "  TRACK 01 AUDIO\r\n    TITLE \"第一首 四秒\"\r\n    INDEX 01 00:00:00\r\n"
+                "  TRACK 02 AUDIO\r\n    TITLE \"第二首 四秒\"\r\n    INDEX 01 00:04:00\r\n"
+                "  TRACK 03 AUDIO\r\n    TITLE \"第三首 两秒\"\r\n    INDEX 01 00:08:00\r\n";
+            const std::string gbkA = u8_to_gbk(cueA);
+            ck(!gbkA.empty() && gbkA != cueA, "GBK 编码成功且与 UTF-8 不同（真的走了 CP936 存盘）");
+            writeText(albA / U("album.cue"), gbkA);
+
+            const auto arA = scanLib(rootA, libA, true);
+            ck(arA.ok, "CUE 夹具：库根可加", arA.why);
+            ck(lib.trackCount() == 3, "10 秒整轨 + 3 轨 cue ⟹ 库里 3 首（整轨不再单独出现）",
+               std::to_string(lib.trackCount()) + " msg=" + lib.scanMsg());
+            const std::string wavU8 = p2u(wavA);
+            const std::string cueU8 = p2u(albA / U("album.cue"));
+            const rta::net::LibAlbum aa = albumNamed("整轨测试专辑");
+            ck(aa.nTracks == 3, "专辑名 = cue 的全局 TITLE（GBK 中文逐字相等），3 首",
+               std::to_string(aa.nTracks));
+            ck(aa.artist == "测试艺术家", "专辑艺术家 = cue 的 PERFORMER", aa.artist);
+            ck(std::abs(aa.duration - 10.0) < 1e-6,
+               "专辑总时长 = 10 秒 = 整轨时长（不是 3×10）", std::to_string(aa.duration));
+            if (aa.idx.size() == 3) {
+                const rta::net::LibTrack v0 = trackOf(aa.idx[0]);
+                const rta::net::LibTrack v1 = trackOf(aa.idx[1]);
+                const rta::net::LibTrack v2 = trackOf(aa.idx[2]);
+                ck(v0.title == "第一首 四秒" && v1.title == "第二首 四秒" && v2.title == "第三首 两秒",
+                   "3 个中文曲名逐字相等（GBK cue → 库 → 专辑视图）",
+                   v0.title + " | " + v1.title + " | " + v2.title);
+                ck(v0.path == wavU8 && v1.path == wavU8 && v2.path == wavU8,
+                   "3 首的 path 是同一个物理文件（播放器照旧能吃）", v2.path);
+                ck(v0.trackNo == 1 && v1.trackNo == 2 && v2.trackNo == 3, "专辑内曲目号 1/2/3");
+                ck(v0.cueNo == 1 && v1.cueNo == 2 && v2.cueNo == 3, "cueNo 保留 cue 里的 TRACK 号");
+                ck(v0.isCueTrack() && v1.isCueTrack() && v2.isCueTrack(), "3 首都带 isCueTrack()");
+                ck(v0.sampleRate == 44100 && v0.channels == 2 && v0.bits == 16,
+                   "采样率/声道/位深来自物理文件（ffprobe 透传）", std::to_string(v0.sampleRate));
+                ck(v0.cuePath == cueU8 && v1.cuePath == cueU8, "cuePath 回填成 .cue 的绝对路径");
+                ck(v0.cueOff == 0 && v1.cueOff == 4 * SEC && v2.cueOff == 8 * SEC,
+                   "cueOff = 0 / 176400 / 352800（4 秒 @44100）",
+                   std::to_string(v0.cueOff) + "/" + std::to_string(v1.cueOff) + "/" + std::to_string(v2.cueOff));
+                ck(v0.cueLen == 4 * SEC && v1.cueLen == 4 * SEC && v2.cueLen == 2 * SEC,
+                   "cueLen = 4/4/2 秒（末轨 = 文件总时长 10s - 8s，靠 ffprobe 的总时长）",
+                   std::to_string(v0.cueLen) + "/" + std::to_string(v1.cueLen) + "/" + std::to_string(v2.cueLen));
+                ck(std::abs(v0.duration - 4.0) < 1e-6 && std::abs(v1.duration - 4.0) < 1e-6 &&
+                   std::abs(v2.duration - 2.0) < 1e-6,
+                   "dur = 4 / 4 / 2（= /api/lib/album 的 d.dur 字段）",
+                   std::to_string(v0.duration) + "/" + std::to_string(v1.duration) + "/" + std::to_string(v2.duration));
+                double s = -1, e = -1;
+                ck(rta::net::lib_cue_range_sec(v1, s, e) &&
+                   std::abs(s - 4.0) < 1e-9 && std::abs(e - 8.0) < 1e-9,
+                   "lib_cue_range_sec(第 2 首) = 4.0..8.0 秒（播放侧要用的区间）",
+                   std::to_string(s) + ".." + std::to_string(e));
+            }
+
+            // ---- 认领的整轨每次扫描都重探（不靠 mtime+size 缓存）----
+            lib.startScan(false);
+            lib.joinScan();
+            ck(lib.lastScanProbed() == 1 && lib.lastScanCached() == 0,
+               "cue 认领的整轨在增量扫描里仍被重探（1 次 ffprobe、0 次缓存复用）",
+               std::to_string(lib.lastScanProbed()) + " probed / " + std::to_string(lib.lastScanCached()) + " cached");
+            ck(lib.trackCount() == 3, "空跑一次增量扫描后仍是 3 首", std::to_string(lib.trackCount()));
+
+            // ---- ② 落盘索引：v4 + 前 16 列原样 + 末尾 4 列 ----
+            fs::path idxA;
+            readIdx(libA, idxA);
+            ck(!idxA.empty(), "v4 索引已落盘");
+            auto readAll = [](const fs::path& p) -> std::string {
+                std::ifstream f(p, std::ios::binary);
+                return std::string((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+            };
+            auto splitTsv = [](const std::string& line) {
+                std::vector<std::string> f; size_t s = 0;
+                for (size_t k = 0; k <= line.size(); ++k)
+                    if (k == line.size() || line[k] == '\t') { f.push_back(line.substr(s, k - s)); s = k + 1; }
+                return f;
+            };
+            const std::string textA = readAll(idxA);
+            ck(textA.find("#libIndexV\t4") != std::string::npos, "落盘版本头 = #libIndexV 4");
+            std::string headA;
+            std::vector<std::vector<std::string>> rowsA;
+            {
+                std::string line;
+                for (size_t i = 0; i <= textA.size(); ++i) {
+                    if (i == textA.size() || textA[i] == '\n') {
+                        if (!line.empty() && line[0] != '#') rowsA.push_back(splitTsv(line));
+                        else if (line.rfind("#path\t", 0) == 0) headA = line;
+                        line.clear();
+                    } else line += textA[i];
+                }
+            }
+            const std::string kV3Head =
+                "#path\tmtime\tsize\talbum\talbumArtist\tartist\ttitle\ttrack\tdisc\tyear\tsr\tbits\tch\tdur\thasCover\tgenre";
+            ck(headA == kV3Head + "\tcue\tcueN\tcueOff\tcueLen",
+               "表头 = v3 的 16 列逐字不变 + 末尾 4 列 cue/cueN/cueOff/cueLen", headA);
+            ck(rowsA.size() == 3, "索引 3 行（3 条虚拟曲目，没有整轨那一行）", std::to_string(rowsA.size()));
+            bool rows20 = rowsA.size() == 3;
+            for (auto& r : rowsA) if (r.size() != 20) rows20 = false;
+            ck(rows20, "每行 20 列");
+            bool cueCols = rowsA.size() == 3;
+            for (size_t i = 0; cueCols && i < rowsA.size(); ++i) {
+                if (rowsA[i][16] != cueU8) cueCols = false;
+                if (atoi(rowsA[i][17].c_str()) != (int)i + 1) cueCols = false;
+                if (_strtoi64(rowsA[i][18].c_str(), nullptr, 10) != (long long)i * 4 * SEC) cueCols = false;
+                if (_strtoi64(rowsA[i][19].c_str(), nullptr, 10) <= 0) cueCols = false;
+            }
+            ck(cueCols, "落盘 cue 列 = 绝对路径 / cueN=1,2,3 / cueOff=0,176400,352800 / cueLen>0");
+
+            // ---- 重启回读：cue 字段必须真的从索引里回来 ----
+            lib.load();
+            ck(lib.trackCount() == 3, "重启后仍是 3 首（v4 索引可读）", std::to_string(lib.trackCount()));
+            const rta::net::LibAlbum ab2 = albumNamed("整轨测试专辑");
+            ck(ab2.nTracks == 3, "重启后专辑仍 3 首", std::to_string(ab2.nTracks));
+            if (ab2.idx.size() == 3) {
+                const rta::net::LibTrack t2 = trackOf(ab2.idx[1]);
+                ck(t2.isCueTrack() && t2.cueNo == 2 && t2.cueOff == 4 * SEC && t2.cueLen == 4 * SEC,
+                   "重启后第 2 首的 cueNo/cueOff/cueLen 仍在（真的落盘了，不是内存巧合）",
+                   std::to_string(t2.cueOff) + "/" + std::to_string(t2.cueLen));
+            }
+
+            // ---- ③ 迁移：v3 索引整份丢弃，一次全量重建 ----
+            {
+                const std::string v3 = "#libIndexV\t3\n" + kV3Head + "\n" +
+                    wavU8 + "\t1\t222\t整轨测试专辑\t测试艺术家\t测试艺术家\talbum\t1\t0\t0\t44100\t16\t2\t10.0\t0\tClassical\n";
+                writeText(idxA, v3);
+                lib.load();
+                ck(lib.trackCount() == 0, "v3 索引被整份丢弃（不迁移旧行，否则整轨曲目会被复用）",
+                   std::to_string(lib.trackCount()));
+                lib.startScan(false);
+                lib.joinScan();
+                ck(lib.trackCount() == 3, "v3 → v4 迁移后重新扫出 3 首虚拟曲目（cue 生效）",
+                   std::to_string(lib.trackCount()));
+            }
+
+            // ---- ④ 删 cue 回归：删掉 .cue 后增量扫描必须回到 1 首整轨 ----
+            fs::remove(albA / U("album.cue"), ec);
+            lib.startScan(false);
+            lib.joinScan();
+            ck(lib.trackCount() == 1, "删掉 .cue 后回到 1 首整轨（旧索引里的虚拟曲目不能被缓存命中）",
+               std::to_string(lib.trackCount()) + " msg=" + lib.scanMsg());
+            if (lib.trackCount() == 1) {
+                const rta::net::LibTrack t = trackOf(0);
+                ck(t.path == wavU8 && !t.isCueTrack() && t.cueNo == 0 && t.cueOff == 0,
+                   "整轨曲目：path 不变、cue 字段清零", t.path);
+                ck(t.title == "album", "曲名回退到文件名（不再是 cue 第 3 轨的标题）", t.title);
+                ck(std::abs(t.duration - 10.0) < 1e-6, "整轨时长 = 10 秒", std::to_string(t.duration));
+            }
+        }
+
+        // ---------------- ⑤ 大小写不一致：cue 写 ALBUM.WAV、磁盘 album.wav ----------------
+        {
+            const fs::path libC = tmp6 / "libC";
+            const fs::path rootC = tmp6 / U("音乐库C");
+            const fs::path albC = rootC / U("大小写");
+            fs::create_directories(albC, ec);
+            const fs::path wavC = albC / U("album.wav");
+            writeWav(wavC, 44100, 2, 10);
+            writeText(albC / U("case.cue"),
+                      "TITLE \"大小写专辑\"\nPERFORMER \"P\"\nFILE \"ALBUM.WAV\" WAVE\n"
+                      "  TRACK 01 AUDIO\n    TITLE \"c1\"\n    INDEX 01 00:00:00\n"
+                      "  TRACK 02 AUDIO\n    TITLE \"c2\"\n    INDEX 01 00:06:00\n");
+            const auto arC = scanLib(rootC, libC, true);
+            ck(arC.ok, "大小写夹具：库根可加");
+            ck(lib.trackCount() == 2, "cue 的 FILE 与磁盘大小写不一致 ⟹ 仍展开 2 首",
+               std::to_string(lib.trackCount()));
+            bool pathReal = lib.trackCount() == 2;
+            for (size_t i = 0; pathReal && i < lib.trackCount(); ++i) {
+                const rta::net::LibTrack t = trackOf(i);
+                if (t.path != p2u(wavC)) pathReal = false;
+            }
+            ck(pathReal, "path = 磁盘真名（album.wav，不是 cue 里的 ALBUM.WAV）");
+            bool lenOk = lib.trackCount() == 2;
+            for (size_t i = 0; lenOk && i < lib.trackCount(); ++i) {
+                const rta::net::LibTrack t = trackOf(i);
+                if (i == 0 && t.cueLen != 6 * SEC) lenOk = false;
+                if (i == 1 && t.cueLen != 4 * SEC) lenOk = false;
+            }
+            ck(lenOk, "长度按索引换算：轨 1 = 6 秒、轨 2 = 10-6 = 4 秒");
+        }
+
+        // ---------------- ⑥ 退回整轨：坏 cue / 全数据轨 / 整轨不存在 / 被抢 ----------------
+        {
+            const fs::path libD = tmp6 / "libD";
+            const fs::path rootD = tmp6 / U("音乐库D");
+            auto mk = [&](const char* dir, const char* wavName, int sec) {
+                const fs::path d = rootD / U(dir);
+                fs::create_directories(d, ec);
+                writeWav(d / U(wavName), 44100, 2, sec);
+                return d;
+            };
+            const fs::path d1 = mk("broken", "album.wav", 10);
+            writeText(d1 / U("broken.cue"),
+                      "TITLE \"坏\"\nFILE \"album.wav\" WAVE\n  TRACK 01 AUDIO\n    TITLE \"x\"\n");
+            const fs::path d2 = mk("dataonly", "album.wav", 10);
+            writeText(d2 / U("data.cue"),
+                      "FILE \"album.wav\" WAVE\n  TRACK 01 MODE1/2352\n    INDEX 01 00:00:00\n");
+            const fs::path d3 = mk("ghost", "ghost.wav", 10);
+            writeText(d3 / U("ghost.cue"),
+                      "TITLE \"幽灵\"\nFILE \"gone.wav\" WAVE\n  TRACK 01 AUDIO\n    INDEX 01 00:00:00\n");
+            const fs::path d4 = mk("dup", "album.wav", 10);
+            writeText(d4 / U("a.cue"),
+                      "TITLE \"抢A\"\nFILE \"album.wav\" WAVE\n"
+                      "  TRACK 01 AUDIO\n    TITLE \"A1\"\n    INDEX 01 00:00:00\n"
+                      "  TRACK 02 AUDIO\n    TITLE \"A2\"\n    INDEX 01 00:05:00\n");
+            writeText(d4 / U("b.cue"),
+                      "TITLE \"抢B\"\nFILE \"album.wav\" WAVE\n"
+                      "  TRACK 01 AUDIO\n    TITLE \"B1\"\n    INDEX 01 00:00:00\n"
+                      "  TRACK 02 AUDIO\n    TITLE \"B2\"\n    INDEX 01 00:05:00\n");
+            const auto arD = scanLib(rootD, libD, true);
+            ck(arD.ok, "退回整轨夹具：库根可加");
+            ck(lib.trackCount() == 5,
+               "坏 cue / 数据轨 / 整轨缺失 各退回 1 首整轨 + 被抢的只展开一次 = 5 首",
+               std::to_string(lib.trackCount()) + " msg=" + lib.scanMsg());
+            ck(countIn("broken") == 1, "坏 cue ⟹ 退回 1 首整轨（不丢歌）", std::to_string(countIn("broken")));
+            ck(countIn("dataonly") == 1, "全是数据轨的 cue ⟹ 退回 1 首整轨",
+               std::to_string(countIn("dataonly")));
+            ck(countIn("ghost") == 1, "cue 指向的整轨不存在 ⟹ 不产生幽灵曲目，同目录音频照旧整轨",
+               std::to_string(countIn("ghost")));
+            ck(countIn("dup") == 2, "两张 cue 抢同一整轨 ⟹ 只展开一次（先到先得，不重复）",
+               std::to_string(countIn("dup")));
+            bool fallbackClean = true;
+            std::string fbTitles;
+            for (size_t i = 0; i < lib.trackCount(); ++i) {
+                const rta::net::LibTrack t = trackOf(i);
+                if (t.path.find("dup") != std::string::npos) continue;
+                if (t.isCueTrack()) fallbackClean = false;
+                fbTitles += t.title + " ";
+            }
+            ck(fallbackClean, "退回整轨的 3 首没有 cue 字段（不假装自己是虚拟曲目）", fbTitles);
+            std::string dupTitles;
+            for (size_t i = 0; i < lib.trackCount(); ++i) {
+                const rta::net::LibTrack t = trackOf(i);
+                if (t.path.find("dup") != std::string::npos) dupTitles += t.title + " ";
+            }
+            ck(dupTitles == "A1 A2 ", "被抢后只用先到的 a.cue 展开（B1/B2 不重复出现）", dupTitles);
+        }
+        fs::remove_all(tmp6, ec);
+    }
+
+        fs::current_path(oldCwd, ec);
     fs::remove_all(tmp, ec);
 
     std::printf("\n%s\n", g_fail == 0 ? "全部通过" : (std::to_string(g_fail) + " 项失败").c_str());

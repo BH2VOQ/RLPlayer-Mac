@@ -67,7 +67,7 @@ add_compile_options($<$<CONFIG:Release>:-DNDEBUG>)
 # （这些库在 macOS 上不存在，留着只会让 configure 报错）；通用 else() 的 curl 兜底也删除。
 # libcurl：http.h 的 macOS 实现（系统自带，零第三方依赖）
 # CoreAudio/AudioToolbox/CoreFoundation：audio_out_coreaudio.h
-set(RL_PLATFORM_LIBS curl
+set(RL_PLATFORM_LIBS curl iconv
     "-framework CoreAudio" "-framework AudioToolbox" "-framework CoreFoundation")
 
 # ---- 跨平台工具 ----
@@ -512,9 +512,22 @@ target_include_directories(test_entities PRIVATE ${CMAKE_SOURCE_DIR}/src)
 add_test(NAME entities COMMAND test_entities)
 add_executable(test_library tests/test_library.cpp)
 target_include_directories(test_library PRIVATE ${CMAKE_SOURCE_DIR}/src)
+if(APPLE)
+    target_link_libraries(test_library PRIVATE iconv)
+endif()
 add_test(NAME library COMMAND test_library)
+
+add_executable(test_cue tests/test_cue.cpp)
+target_include_directories(test_cue PRIVATE ${CMAKE_SOURCE_DIR}/src)
+if(APPLE)
+    target_link_libraries(test_cue PRIVATE iconv)
+endif()
+add_test(NAME cue COMMAND test_cue)
 add_executable(test_tags_native tests/test_tags_native.cpp)
 target_include_directories(test_tags_native PRIVATE ${CMAKE_SOURCE_DIR}/src)
+if(APPLE)
+    target_link_libraries(test_tags_native PRIVATE iconv)
+endif()
 add_test(NAME tags_native COMMAND test_tags_native)
 add_executable(test_metastore tests/test_metastore.cpp)
 target_include_directories(test_metastore PRIVATE ${CMAKE_SOURCE_DIR}/src)
@@ -524,6 +537,9 @@ target_link_libraries(test_render_loop_dry PRIVATE rtadsp)
 add_test(NAME render_loop_dry COMMAND test_render_loop_dry)
 add_executable(test_scanpool tests/test_scanpool.cpp)
 target_include_directories(test_scanpool PRIVATE ${CMAKE_SOURCE_DIR}/src)
+if(APPLE)
+    target_link_libraries(test_scanpool PRIVATE iconv)
+endif()
 add_test(NAME scanpool COMMAND test_scanpool)
 add_executable(test_media_duration tests/test_media_duration.cpp)
 target_include_directories(test_media_duration PRIVATE ${CMAKE_SOURCE_DIR}/src)

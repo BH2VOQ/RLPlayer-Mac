@@ -161,14 +161,15 @@ int main() {
     fs::create_directories(musicRoot, ec);
     {
         std::ofstream f((tmp / "rlplayer-index.tsv").string(), std::ios::binary);
-        f << "#libIndexV\t3\n";
-        f << "#path\tmtime\tsize\talbum\talbumArtist\tartist\ttitle\ttrack\tdisc\tyear\tsr\tbits\tch\tdur\thasCover\tgenre\n";
+        f << "#libIndexV\t4\n";
+        f << "#path\tmtime\tsize\talbum\talbumArtist\tartist\ttitle\ttrack\tdisc\tyear\tsr\tbits\tch\tdur\thasCover\tgenre"
+             "\tcue\tcueN\tcueOff\tcueLen\n";
         auto row = [&](const std::string& path, const std::string& alb, const std::string& aa,
                        const std::string& art, const std::string& ttl, int trk, int disc,
                        int yr, int sr, int bits, int ch, double dur, int cov) {
             f << path << "\t111\t222\t" << alb << "\t" << aa << "\t" << art << "\t" << ttl
               << "\t" << trk << "\t" << disc << "\t" << yr << "\t" << sr << "\t" << bits
-              << "\t" << ch << "\t" << dur << "\t" << cov << "\tRock\n";
+              << "\t" << ch << "\t" << dur << "\t" << cov << "\tRock" << "\t\t0\t0\t0\n";
         };
         row(u8str(musicRoot / "AlbumA" / "01.flac"), "Embedded Album", "Test Artist",
             "Test Artist", "First Track", 1, 1, 2024, 44100, 16, 2, 180.0, 0);

@@ -19,6 +19,8 @@
 #include "audio/media_info.h"
 #include "net/scan_pool.h"
 #include "meta/entities.h"
+#include "meta/cue.h"          // CUE 整轨分轨解析
+#include <cmath>
 #include "meta/tags_native.h"   // 原生标签快速通道（FLAC/WAV/MP3/OGG；lib_probe_one 的原生分支）
 #include <memory>
 #include <string>
@@ -104,6 +106,14 @@ struct LibTrack {
     double duration = 0;
     long long mtime = 0, size = 0;
     int    hasCover = 0;
+
+    // ---- CUE 整轨分轨（2026-10-25 第二里程碑）----
+    // 一张 .cue 把「一个整轨音频文件」切成 N 首：path 仍然是物理音频路径
+    std::string cuePath;      // 所属 .cue 的绝对路径（UTF-8）；空 = 普通（非 cue）曲目
+    int         cueNo  = 0;
+    long long   cueOff = 0;
+    long long   cueLen = 0;
+    bool isCueTrack() const { return !cuePath.empty(); }
 };
 
 struct LibAlbum {
@@ -451,6 +461,129 @@ inline bool lib_is_audio(const fsx::path& p) {
     return false;
 }
 
+// ---------------------------------------------------------------------------
+// CUE 整轨分轨 —— library 侧（2026-10-25 第二里程碑）
+// ---------------------------------------------------------------------------
+
+// 路径比较键：大小写不敏感 + '/' 统一成 '\' + 去掉尾分隔符。
+inline std::string lib_path_key(const std::string& p) {
+    std::string k = p;
+    for (auto& c : k) {
+        if (c == '/') c = '\\';
+        else if (c >= 'A' && c <= 'Z') c = (char)(c - 'A' + 'a');
+    }
+    while (!k.empty() && k.back() == '\\') k.pop_back();
+    return k;
+}
+
+// .cue 扩展名识别（大小写不敏感）
+inline bool lib_is_cue(const fsx::path& p) {
+    std::string ext = u8s(p.extension().u8string());
+    for (auto& c : ext) c = (char)std::tolower((unsigned char)c);
+    return ext == ".cue";
+}
+
+// cue 的 FILE 指向的音频此刻是否真的在磁盘上
+inline bool lib_cue_audio_exists(const std::string& p) {
+    if (p.empty() || !lib_valid_utf8(p)) return false;
+    std::error_code ec;
+    try {
+        const fsx::path wp = p8(p);
+        if (!fsx::is_regular_file(wp, ec)) return false;
+        return lib_is_audio(wp);
+    } catch (const std::exception&) { return false; }
+}
+
+// 纯函数：一份已解析的 cue + 物理文件探测表 → N 条虚拟曲目。
+inline std::vector<LibTrack> lib_cue_expand(const rta::meta::CueSheet& sh,
+                                            const std::map<std::string, LibTrack>& probes) {
+    std::vector<LibTrack> out;
+    if (sh.tracks.empty() || probes.empty()) return out;
+
+    std::map<std::string, const LibTrack*> probeByKey;
+    for (const auto& kv : probes) probeByKey[lib_path_key(kv.first)] = &kv.second;
+
+    std::vector<std::string> fileOrder;
+    std::map<std::string, std::vector<const rta::meta::CueTrack*>> byFile;
+    for (const auto& ct : sh.tracks) {
+        if (!ct.audio || ct.index1 < 0) continue;          // 数据轨 / 没有 INDEX 的轨不产生曲目
+        const std::string k = lib_path_key(ct.file);
+        if (byFile.find(k) == byFile.end()) fileOrder.push_back(k);
+        byFile[k].push_back(&ct);
+    }
+
+    std::string albArtist = sh.performer;
+    if (albArtist.empty()) {
+        for (const auto& ct : sh.tracks)
+            if (ct.audio && !ct.performer.empty()) { albArtist = ct.performer; break; }
+    }
+    const int year = atoi(sh.date.c_str());
+
+    for (const auto& fk : fileOrder) {
+        auto pit = probeByKey.find(fk);
+        if (pit == probeByKey.end()) continue;             // 该文件不存在/没探测到 → 跳过（降级）
+        const LibTrack& probe = *pit->second;
+        std::vector<const rta::meta::CueTrack*> trs = byFile[fk];
+        std::stable_sort(trs.begin(), trs.end(),
+                         [](const rta::meta::CueTrack* a, const rta::meta::CueTrack* b) {
+                             return a->index1 < b->index1;
+                         });
+        const int sr = probe.sampleRate;
+        for (size_t i = 0; i < trs.size(); ++i) {
+            const rta::meta::CueTrack& ct = *trs[i];
+            LibTrack t = probe;                            // 采样率/位深/声道/封面/mtime/size 透传
+            t.path = probe.path.empty() ? ct.file : probe.path;   // 用磁盘真名，不用 cue 里的拼写
+            t.title = ct.title;
+            if (t.title.empty()) t.title = ct.performer;
+            if (t.title.empty()) {
+                std::string stem = u8s(p8(ct.file).stem().u8string());
+                if (stem.empty()) stem = ct.file;
+                char b[32];
+                std::snprintf(b, sizeof(b), " #%02d", ct.number);
+                t.title = stem + b;
+            }
+            t.artist      = ct.performer.empty() ? albArtist : ct.performer;
+            t.album       = sh.albumTitle.empty() ? ct.albumTitle : sh.albumTitle;
+            t.albumArtist = albArtist;
+            t.genre       = sh.genre;
+            t.year        = year;
+            t.trackNo     = (int)out.size() + 1;           // 专辑内连续 1..N
+            t.discNo      = 0;
+            t.cuePath     = sh.cuePath;
+            t.cueNo       = ct.number;
+            t.cueOff      = rta::meta::cue_frames_to_samples(ct.index1, sr);
+            long long lenSamples = -1;
+            if (t.cueOff >= 0) {
+                long long endSamples = -1;
+                if (i + 1 < trs.size())
+                    endSamples = rta::meta::cue_frames_to_samples(trs[i + 1]->index1, sr);
+                else if (probe.duration > 0.0)
+                    endSamples = (long long)std::llround(probe.duration * (double)sr);
+                if (endSamples >= t.cueOff) lenSamples = endSamples - t.cueOff;
+            }
+            t.cueLen = lenSamples;
+            if (t.cueLen >= 0 && sr > 0) t.duration = (double)t.cueLen / (double)sr;
+            else if (i + 1 < trs.size())  t.duration = rta::meta::cue_frames_to_sec(trs[i + 1]->index1 - ct.index1);
+            else if (probe.duration > 0.0) {
+                t.duration = probe.duration - (double)ct.index1 / 75.0;
+                if (t.duration < 0.0) t.duration = 0.0;
+            } else t.duration = 0.0;
+            out.push_back(std::move(t));
+        }
+    }
+    return out;
+}
+
+// 虚拟曲目在整轨里的播放区间（秒）。
+inline bool lib_cue_range_sec(const LibTrack& t, double& startSec, double& endSec) {
+    startSec = 0.0;
+    endSec   = 0.0;
+    if (!t.isCueTrack() || t.cueOff < 0 || t.cueLen <= 0 || t.sampleRate <= 0) return false;
+    startSec = (double)t.cueOff / (double)t.sampleRate;
+    endSec   = (double)(t.cueOff + t.cueLen) / (double)t.sampleRate;
+    return endSec > startSec;
+}
+
 
 // 判据给一首曲目推出的专辑名与碟号（只依赖父目录，故同一目录的结果必然相同）
 struct LibDirAlbum {
@@ -778,7 +911,7 @@ inline void Library::load() {
     // 本次扫描会全量重建 —— 否则升级后「扫描逻辑改了但旧索引被复用」，修复永远不生效。
     // 代价：升级后首次启动会全量扫一遍（653 首约 10 秒，并行 8 线程），之后照旧增量。
     {
-        const bool fresh = (idx.find("#libIndexV\t3") != std::string::npos);
+        const bool fresh = (idx.find("#libIndexV\t4") != std::string::npos);
         if (!fresh && !idx.empty()) idx.clear();
     }
     std::vector<LibTrack> loaded;
@@ -810,6 +943,13 @@ inline void Library::load() {
                         t.duration    = atof(f[13].c_str());
                         t.hasCover    = atoi(f[14].c_str());
                         t.genre       = f[15];
+                        // v4 追加列（v3 只有 16 列；前 16 列的读取路径与 v3 逐字相同）
+                        if (f.size() >= 20) {
+                            t.cuePath = f[16];
+                            t.cueNo   = atoi(f[17].c_str());
+                            t.cueOff  = _strtoi64(f[18].c_str(), nullptr, 10);
+                            t.cueLen  = _strtoi64(f[19].c_str(), nullptr, 10);
+                        }
                         if (!t.path.empty()) loaded.push_back(t);
                     }
                 }
@@ -933,8 +1073,9 @@ inline std::string Library::buildIndexLocked() const {
     // 索引格式版本：改动「扫描产出字段」时必须 +1，否则旧索引会因为 mtime+size 未变而被整份复用，
     // 新逻辑永远不生效（2026-10-23 真机踩到：加了内嵌封面判定，用户那首 cv 仍是 false）。
     // v2 = 2026-10-23 起 hasCover 同时覆盖「内嵌封面流」与「同目录封面文件」。
-    s += "#libIndexV\t3\n";   // v3 = 2026-10-23 起「音频流字段不再被封面流覆盖」(24-bit 不再变 8)
-    s += "#path\tmtime\tsize\talbum\talbumArtist\tartist\ttitle\ttrack\tdisc\tyear\tsr\tbits\tch\tdur\thasCover\tgenre\n";
+    s += "#libIndexV\t4\n";   // v4 = 2026-10-25 起 CUE 虚拟分轨：前 16 列不变 + 末尾 4 列
+    s += "#path\tmtime\tsize\talbum\talbumArtist\tartist\ttitle\ttrack\tdisc\tyear\tsr\tbits\tch\tdur\thasCover\tgenre"
+         "\tcue\tcueN\tcueOff\tcueLen\n";
     char buf[256];
     for (auto& t : tracks_) {
         s += lib_clean_field(t.path); s += '\t';
@@ -946,8 +1087,10 @@ inline std::string Library::buildIndexLocked() const {
         std::snprintf(buf, sizeof(buf), "%d\t%d\t%d\t%d\t%d\t%d\t%.3f\t%d\t", t.trackNo, t.discNo, t.year,
                       t.sampleRate, t.bits, t.channels, t.duration, t.hasCover);
         s += buf;
-        s += lib_clean_field(t.genre);
-        s += '\n';
+        s += lib_clean_field(t.genre);     s += '\t';
+        s += lib_clean_field(t.cuePath);   s += '\t';
+        std::snprintf(buf, sizeof(buf), "%d\t%lld\t%lld\n", t.cueNo, t.cueOff, t.cueLen);
+        s += buf;
     }
     return s;
 }
@@ -1132,6 +1275,7 @@ inline void Library::startScan(bool forceFull) {
 
         std::vector<LibTrack> fresh;
         std::vector<std::string> walked;
+        std::vector<std::string> cueWalked;
         std::vector<std::string> badRoots;   // 打不开的根（例如离线外接盘）
         std::error_code ec;
         size_t seen = 0;
@@ -1156,6 +1300,8 @@ inline void Library::startScan(bool forceFull) {
                 if (lib_is_audio(ep)) {
                     walked.push_back(u8s(ep.u8string()));
                     total_.store((int)walked.size());
+                } else if (lib_is_cue(ep)) {
+                    cueWalked.push_back(u8s(ep.u8string()));
                 }
                 // ---- 分片让出（261025-01 一.1：大库扫描不能把机器/界面拖死）----
                 // 每 64 个目录项让出一次时间片，并且每 150ms 汇报一次「已发现多少首」，
@@ -1176,7 +1322,7 @@ inline void Library::startScan(bool forceFull) {
 
         const int n = (int)walked.size();
         total_.store(n);
-        if (n == 0) {
+        if (n == 0 && cueWalked.empty()) {
             const auto tEnd = std::chrono::steady_clock::now();
             const double durMs = std::chrono::duration<double, std::milli>(tEnd - tStart).count();
             // ★ 防"库被清空"：有坏根就保留这些根下的老记录，只在真没有坏根时清空。
@@ -1214,6 +1360,45 @@ inline void Library::startScan(bool forceFull) {
             return;
         }
 
+        // =====================================================================
+        // CUE 认领判定
+        // =====================================================================
+        struct CueJob {
+            std::string cuePath;
+            rta::meta::CueSheet sh;
+            std::map<std::string, LibTrack> slots;   // key = lib_path_key(FILE 路径)，value.path = 磁盘真名
+        };
+        std::vector<CueJob> cueJobs;
+        std::unordered_map<std::string, char> cueCand;   // 候选认领（决定哪些文件必须重探）
+        if (!cueWalked.empty()) {
+            std::unordered_map<std::string, std::string> walkedByKey;
+            walkedByKey.reserve(walked.size() * 2 + 8);
+            for (const auto& w : walked) walkedByKey.emplace(lib_path_key(w), w);
+            std::sort(cueWalked.begin(), cueWalked.end());
+            for (const auto& cf : cueWalked) {
+                if (cancel_.load()) break;
+                CueJob job;
+                job.cuePath = cf;
+                job.sh = rta::meta::cue_parse_file(cf);
+                if (job.sh.tracks.empty()) continue;
+                for (const auto& ct : job.sh.tracks) {
+                    if (!ct.audio || ct.index1 < 0) continue;
+                    const std::string k = lib_path_key(ct.file);
+                    if (cueCand.count(k) || job.slots.count(k)) continue;
+                    auto wit = walkedByKey.find(k);
+                    const std::string real = (wit != walkedByKey.end()) ? wit->second : ct.file;
+                    if (wit == walkedByKey.end() && !lib_cue_audio_exists(real)) continue;
+                    LibTrack slot;
+                    slot.path = real;
+                    job.slots.emplace(k, std::move(slot));
+                    cueCand[k] = 1;
+                }
+                if (!job.slots.empty()) cueJobs.push_back(std::move(job));
+            }
+        }
+        std::mutex cueProbeMtx;
+        std::map<std::string, LibTrack> cueProbeMap;
+
         fresh.resize((size_t)n);
         std::atomic<int> completed{0};
         std::atomic<int> probedCount{0};
@@ -1242,7 +1427,8 @@ inline void Library::startScan(bool forceFull) {
         for (int i = 0; i < n; ++i) {
             if (cancel_.load()) break;
             const bool submitted = pool->submit([this, i, n, &walked, &oldByPath, &old, forceFull, &ffprobe,
-                                                 &fresh, &completed, &probedCount, &cachedCount, &lastMsg]() {
+                                                 &fresh, &completed, &probedCount, &cachedCount, &lastMsg,
+                                                 &cueCand, &cueProbeMtx, &cueProbeMap]() {
                 if (cancel_.load()) return;
                 const std::string& p = walked[(size_t)i];
                 long long mt = 0, sz = 0;
@@ -1254,10 +1440,12 @@ inline void Library::startScan(bool forceFull) {
                     auto s = fsx::file_size(wp, e2);
                     if (!e2) sz = (long long)s;
                 }
+                const std::string pkey = lib_path_key(p);
+                const bool cueOwned = (cueCand.count(pkey) != 0);
                 auto oit = oldByPath.find(p);
-                if (!forceFull && oit != oldByPath.end()) {
+                if (!forceFull && !cueOwned && oit != oldByPath.end()) {
                     const LibTrack& o = old[oit->second];
-                    if (o.mtime == mt && o.size == sz) {
+                    if (!o.isCueTrack() && o.mtime == mt && o.size == sz) {
                         fresh[(size_t)i] = o;
                         cachedCount.fetch_add(1, std::memory_order_relaxed);
                         const int c = completed.fetch_add(1, std::memory_order_relaxed) + 1;
@@ -1271,6 +1459,10 @@ inline void Library::startScan(bool forceFull) {
                 if (t.title.empty()) {
                     std::string sn = u8s(p8(p).stem().u8string());
                     t.title = sn.empty() ? p : sn;
+                }
+                if (cueOwned) {
+                    std::lock_guard<std::mutex> lk(cueProbeMtx);
+                    cueProbeMap[pkey] = t;
                 }
                 fresh[(size_t)i] = std::move(t);
                 probedCount.fetch_add(1, std::memory_order_relaxed);
@@ -1300,6 +1492,48 @@ inline void Library::startScan(bool forceFull) {
             return;
         }
 
+        // ---- CUE 展开（整轨 → N 条虚拟曲目）----
+        std::vector<LibTrack> cueTracks;
+        std::unordered_map<std::string, char> cueClaimed;   // 最终认领（整轨从 fresh 里摘掉）
+        int cueOk = 0, cueLost = 0;
+        for (auto& job : cueJobs) {
+            std::map<std::string, LibTrack> probes;
+            for (auto& kv : job.slots) {
+                LibTrack pr;
+                auto pit = cueProbeMap.find(kv.first);
+                if (pit != cueProbeMap.end()) pr = pit->second;
+                else {
+                    pr = lib_probe_one(kv.second.path, ffprobe);
+                    if (pr.path.empty()) pr.path = kv.second.path;
+                    std::error_code e2;
+                    const fsx::path wp = p8(kv.second.path);
+                    auto ft = fsx::last_write_time(wp, e2);
+                    if (!e2) pr.mtime = (long long)ft.time_since_epoch().count();
+                    auto fsz = fsx::file_size(wp, e2);
+                    if (!e2) pr.size = (long long)fsz;
+                }
+                if (pr.sampleRate <= 0) continue;    // 探测失败 → 该文件退回整轨
+                probes.emplace(kv.first, std::move(pr));
+            }
+            if (probes.empty()) { ++cueLost; continue; }
+            std::vector<LibTrack> vt = lib_cue_expand(job.sh, probes);
+            if (vt.empty()) { ++cueLost; continue; }
+            for (const auto& kv : probes) cueClaimed[kv.first] = 1;
+            for (auto& t : vt) cueTracks.push_back(std::move(t));
+            ++cueOk;
+        }
+        if (!cueTracks.empty()) {
+            std::vector<LibTrack> kept;
+            kept.reserve(fresh.size() + cueTracks.size());
+            for (auto& t : fresh) {
+                if (t.path.empty()) continue;
+                if (cueClaimed.count(lib_path_key(t.path))) continue;
+                kept.push_back(std::move(t));
+            }
+            for (auto& t : cueTracks) kept.push_back(std::move(t));
+            fresh.swap(kept);
+        }
+
         const auto tEnd = std::chrono::steady_clock::now();
         const double durMs = std::chrono::duration<double, std::milli>(tEnd - tStart).count();
 
@@ -1315,6 +1549,7 @@ inline void Library::startScan(bool forceFull) {
             }();
             for (auto& o : old) {
                 if (freshByPath.count(o.path)) continue;
+                if (cueClaimed.count(lib_path_key(o.path))) continue;
                 for (auto& br : badRoots) {
                     if (lib_path_under(o.path, br)) {
                         if (lib_file_exists(o.path)) {
@@ -1353,6 +1588,9 @@ inline void Library::startScan(bool forceFull) {
             }
             const int gone = removedMissing_.load();
             if (gone > 0) m += "；已剔除 " + std::to_string(gone) + " 条不存在的文件";
+            if (!cueWalked.empty())
+                m += "；CUE 展开 " + std::to_string(cueOk) + " 张/" + std::to_string(cueTracks.size()) +
+                     " 首" + (cueLost > 0 ? "（" + std::to_string(cueLost) + " 张退回整轨）" : "");
             scanMsg_ = m;
         }
         scanning_.store(false);
