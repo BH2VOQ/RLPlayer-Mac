@@ -224,6 +224,10 @@ add_executable(test_filters tests/test_filters.cpp)
 target_link_libraries(test_filters PRIVATE rtadsp)
 add_test(NAME filters COMMAND test_filters)
 
+# PCM 回放质量量测报告工具（离线客观量测，不打开音频设备）
+add_executable(pcm_quality_report tests/pcm_quality_report.cpp)
+target_link_libraries(pcm_quality_report PRIVATE rtadsp)
+
 add_executable(test_pipeline tests/test_pipeline.cpp)
 target_link_libraries(test_pipeline PRIVATE rtadsp)
 add_test(NAME pipeline COMMAND test_pipeline)

@@ -42,6 +42,11 @@ struct ResamplerConfig {
     WindowKind window       = WindowKind::Kaiser;   // Kaiser = 原有行为，完全等价
     PhaseKind  phase        = PhaseKind::Linear;
 
+    // ---- 切趾滤波（Apodizing）----
+    bool   apodizing   = false;
+    double apodF1      = 0.0;   // 滚降起始相对输入 Nyquist 比例（例如 18.4k / 22.05k）
+    double apodF2      = 0.0;   // 滚降终止相对输入 Nyquist 比例（例如 21.8k / 22.05k）
+
     // ---- 两段式升频 ----
     // 大比率（如 44.1k -> 705.6k 是 16 倍）单级做时，每输出样本要做 totalTaps/L 次乘加，
     // 而输出样本数是 L 倍 ⟹ 总运算量 ∝ totalTaps × 输出率，非常贵。
@@ -50,6 +55,21 @@ struct ResamplerConfig {
     // 实测同参数下 CPU 运算量降到约 1/4，声音在可听带内一致。
     bool twoStage   = false;
     int  stage2Taps = 64;      // 第二级每相位抽头数（过渡带很宽，不需要长）
+
+    // ---- 每输入样本内核长度（tapsPerInput）----
+    // 0（默认）= 关闭：抽头预算仍按 totalTaps 解释，行为与历史逐位一致。
+    //
+    // 为什么需要它：原型是在【内插域】设计的，每相位抽头数 T = totalTaps / L。
+    // 同一个 totalTaps，L 越大 T 越小 —— 44.1k->192k 的 L=640、44.1k->384k 的
+    // L=1280 时，4095 抽头的预设只剩 6 / 4 个抽头，通带在 10 kHz 处就掉 1 dB，
+    // 滤波器退化成缓坡（实测见 docs/PCM回放质量-实测与改进.md）。而 44.1k->705.6k
+    // 的 L=16，同样预设却有 255 个抽头。也就是说"抽头数"这个预算单位本身与
+    // 输出采样率耦合，导致同一预设在不同输出率下质量天差地别。
+    // >0 时：T 直接取该值（内核长度 = 每输入样本的抽头数），原型长度 = T × L，
+    // 于是频响与输出采样率解耦。内存与每输出样本的乘加次数均为 O(T)。
+    int minTapsPerInput = 0;
+    // 内核长度 × L 的上限（防御：L 很大时系数表会膨胀）。0 = 不限制。
+    int maxPrototypeTaps = 1 << 20;
 };
 
 // 把 FilterPreset 的全部参数应用到 ResamplerConfig
@@ -60,6 +80,10 @@ inline void apply_preset(ResamplerConfig& cfg, const FilterPreset& fp) {
     cfg.window     = fp.window;
     cfg.phase      = fp.phase;
     cfg.twoStage   = fp.twoStage;
+    cfg.apodizing  = fp.apodizing;
+    cfg.apodF1     = fp.apodF1;
+    cfg.apodF2     = fp.apodF2;
+    cfg.minTapsPerInput = fp.tapsPerInput;
     if (fp.twoStage && fp.stage2Taps > 0) cfg.stage2Taps = fp.stage2Taps;
 }
 
@@ -96,7 +120,9 @@ public:
                     throw std::runtime_error("重采样器构造失败: 两段式倍率计算溢出/退化 (inRate=" +
                                              std::to_string(cfg.inRate) + ", outRate=" +
                                              std::to_string(cfg.outRate) + ", F=" + std::to_string(F) + ")");
-                const int T1 = std::max(4, cfg.totalTaps / L_);      // 每相位抽头数（决定过渡带陡度）
+                // 每相位抽头数（决定过渡带陡度）：tapsPerInput 模式下由内核长度直接给
+                const int T1 = (cfg.minTapsPerInput > 0) ? cfg.minTapsPerInput
+                                                        : std::max(4, cfg.totalTaps / L_);
                 ResamplerConfig c1 = cfg;
                 c1.twoStage   = false;
                 c1.inRate     = cfg.inRate;
@@ -125,11 +151,17 @@ public:
         // 原型长度取 L 的整数倍
         int total = cfg.totalTaps;
         T_ = total / L_;                       // 每相位抽头数
+        if (cfg.minTapsPerInput > 0) {
+            // 内核长度模式：抽头预算与 L 解耦（默认关闭时这一支永不执行 ⟹ 逐位不变）
+            T_ = cfg.minTapsPerInput;
+            if (cfg.maxPrototypeTaps > 0 && (long long)T_ * (long long)L_ > (long long)cfg.maxPrototypeTaps)
+                T_ = (int)std::max<long long>(4, (long long)cfg.maxPrototypeTaps / (long long)L_);
+        }
         if (T_ < 4) { T_ = 4; }
         total = T_ * L_;
 
         std::vector<double> proto;
-        if (cfg.window == WindowKind::Kaiser && cfg.phase == PhaseKind::Linear) {
+        if (cfg.window == WindowKind::Kaiser && cfg.phase == PhaseKind::Linear && !cfg.apodizing) {
             // 原有路径：参数化 Kaiser sinc（保持逐位不变）
             LowpassSpec spec;
             spec.taps    = total;
@@ -145,6 +177,12 @@ public:
             fs.cutoff     = cutoff;
             fs.attenDb    = cfg.attenDb;
             fs.window     = cfg.window;
+            fs.apodizing  = cfg.apodizing;
+            if (cfg.apodizing) {
+                // idealCutoff 为输入 Nyquist 在内插域的位置（1.0 / L）
+                fs.apodF1 = cfg.apodF1 * idealCutoff;
+                fs.apodF2 = cfg.apodF2 * idealCutoff;
+            }
             proto = design_fir(fs);
             // 最小相位是独立一步（倒谱法），不是 design_fir 的参数
             if (cfg.phase == PhaseKind::Minimum) {
@@ -182,6 +220,16 @@ public:
 
     bool passthrough() const { return passthrough_; }
     int  tapsPerPhase() const { return T_; }
+
+    // 量测/回归钩子：把相位表还原成【内插域原型】(含 ×L 直流增益，与 process()
+    // 逐位同源的同一批系数)。用于频响/群延迟/振铃与"既有预设逐位不变"回归；
+    // 不参与任何信号路径，也不额外占用内存（按需展开到调用方缓冲）。
+    void prototype_into(std::vector<double>& out) const {
+        out.assign((size_t)T_ * (size_t)L_, 0.0);
+        for (int p = 0; p < L_; ++p)
+            for (int u = 0; u < T_; ++u)
+                out[(size_t)(p + u * L_)] = phases_[(size_t)p][(size_t)u];
+    }
 
     // 是否用 GPU 做多相相乘加（需要 rtagpu.dll；不可用则自动回退 CPU）
     void set_use_gpu(bool on) {
