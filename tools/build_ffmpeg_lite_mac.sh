@@ -13,6 +13,22 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 WORK="$ROOT/build-mac/ffmpeg-lite-build"
 OUT="$ROOT/build-mac/ffmpeg-lite"
+# 自建 arm64 静态 lame（见文件上方说明）。不存在时自动降级为「不含 MP3 编码」。
+LAME_DIR="$ROOT/third_party/lame-arm64"
+if [ -f "$LAME_DIR/lib/libmp3lame.a" ]; then
+  # ⚠️ 不要把 flags 拼进变量再 $VAR 展开：shell 的 word-splitting 会把
+  # `--extra-cflags=-I<path>` 当成两个参数，塞错位置（实测 configure 报
+  # "syntax error near unexpected token"）。改为在 configure 行里直接写两个独立参数。
+  LAME_ENABLE="--enable-libmp3lame"
+  LAME_CFLAGS="-I$LAME_DIR/include"
+  LAME_LDFLAGS="-L$LAME_DIR/lib"
+  echo "== 使用自建 arm64 lame: $LAME_DIR =="
+else
+  LAME_ENABLE=""
+  LAME_CFLAGS=""
+  LAME_LDFLAGS=""
+  echo "⚠ 未找到 $LAME_DIR/lib/libmp3lame.a ⟹ 本次构建不含 MP3 编码能力（播放不受影响）"
+fi
 VER="8.1.2"
 SRC="$WORK/ffmpeg-$VER"
 
@@ -41,12 +57,11 @@ PARSERS=$(echo "$PARSERS" | tr ',' '\n' | grep -v '?x$' | paste -sd, -)
 # 导致 tests/test_writeback.cpp 全红。flac/alac/aac/vorbis/opus 编码器都是 ffmpeg
 # 内置实现，零外部库依赖，体积增量很小。
 # 这不是「新增功能」，是补齐写回能力本就需要的东西（铁律：功能不能删）。
-# ⚠️ MP3 编码：FFmpeg 8.x 已**移除原生 mp3 编码器**，只剩 libmp3lame 一途。
-#   但本机 /usr/local 的 lame 4.0 是 **x86_64**（Rosetta Homebrew），arm64 原生构建链不上
-#   （实测 configure 报 `Undefined symbols: _lame_set_VBR_quality`）。
-#   ⟹ 本版**不含 MP3 编码能力**。这不影响播放（解码器在，MP3 照常播），
-#     只影响「把元数据写回 MP3 文件」这一条路径（写回其它格式不受影响）。
-#   要做 MP3 写回需要：arm64 原生 lame（brew install lame 于 /opt/homebrew），或自带源码编。
+# MP3 编码：FFmpeg 8.x 已**移除原生 mp3 编码器**，只剩 libmp3lame 一途。
+#   本机 /usr/local 的 lame 4.0 是 **x86_64**（Rosetta Homebrew），arm64 原生构建链不上。
+#   ⟹ 用自建的 arm64 静态 lame：third_party/lame-arm64/（LAME 3.100 源码编译，
+#     --enable-static --disable-shared --host=aarch64-apple-darwin，423K）。
+#     含 COPYING（LGPL-2.1）。构建方法见 third_party/lame-arm64/README.md。
 echo "== configure（解码 + 元数据写回，零外部库）=="
 ./configure \
   --cc=clang --objcc=clang --disable-shared --enable-static \
@@ -59,7 +74,8 @@ echo "== configure（解码 + 元数据写回，零外部库）=="
   --enable-decoder="$DECODERS" \
   --enable-parser="$PARSERS" \
   --enable-muxer=wav,flac,mp3,ipod,ogg,opus,matroska,aiff,caf \
-  --enable-encoder=pcm_s16le,pcm_s24le,pcm_s32le,pcm_f32le,flac,alac,aac,vorbis,opus \
+  $LAME_ENABLE --extra-cflags="$LAME_CFLAGS" --extra-ldflags="$LAME_LDFLAGS" \
+  --enable-encoder=pcm_s16le,pcm_s24le,pcm_s32le,pcm_f32le,flac,alac,aac,vorbis,opus${LAME_ENABLE:+\,libmp3lame} \
   --enable-bsf=pcm_rechunk,flac_picture,aac_adtstoasc \
   --enable-filter=aresample,anull,aformat \
   > configure.log 2>&1 || { tail -20 configure.log; exit 1; }

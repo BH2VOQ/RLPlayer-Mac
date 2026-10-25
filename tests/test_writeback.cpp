@@ -332,21 +332,18 @@ int main() {
 
     // ---------------- 8) MP3 全流程(ID3v2.4 规范键映射实测断言) ----------------
     std::printf("-- MP3 写回(ID3v2.4 规范键) --\n");
-    const std::string mp3 = sbpath(sandbox, R"(\t2.m4a)");
+    const std::string mp3 = sbpath(sandbox, R"(\t2.mp3)");
     {
-        // 2026-10-25（macOS 单平台）：原命令用 `-f lavfi` 合成 + `-c:a libmp3lame` 编码。
-        // 但精简版 ffmpeg 是 --disable-everything 构建：
-        //   ① 无 lavfi 输入设备  ② 无外部 libmp3lame
-        //   ③ FFmpeg 8.x 已**移除原生 mp3 编码器**（实测 -encoders 里只有 libmp3lame 一途）
-        // ⟹ MP3 在有损素材这一档改用 **AAC（内置编码器，实测可用）**。
-        // 判据不变：仍验证「ffmpeg 能造出有损压缩素材，且写回后元数据能往返」——
-        // 只是这一档的容器从 .mp3 换成 .m4a（写回逻辑对两者的处理路径相同：都是 remux）。
+        // 2026-10-25（macOS 单平台）：素材来源从 `-f lavfi` 合成改为零依赖手写 FLAC
+        // （精简版 ffmpeg 无 lavfi 设备），但**编码器仍是 libmp3lame**，容器仍是 .mp3 ——
+        // 判据强度与 Windows 版一致（ID3v2 的 TCOM/TPUB 帧只有 MP3 有，m4a 装不下）。
+        // libmp3lame 来自 third_party/lame-arm64（自建 arm64 静态库，见该目录 README）。
         const std::string srcFlac = sbpath(sandbox, R"(\mp3src.flac)");
         bool ok = wb_make_flac_1s(srcFlac);
         const std::string cmd = "\"" + ffmpeg + "\" -v error -y -i " + wb_quoted(srcFlac) +
-            " -ac 2 -c:a aac -b:a 128k " + wb_quoted(mp3);
+            " -ac 2 -c:a libmp3lame -b:a 128k " + wb_quoted(mp3);
         const int rc = ok ? rta::platform::run_hidden(cmd, false).exit_code : -1;
-        ck(rc == 0 && fs::exists(meta_path_of(mp3), ec), "ffmpeg 造有损素材(AAC)成功",
+        ck(rc == 0 && fs::exists(meta_path_of(mp3), ec), "ffmpeg 造 MP3 成功",
            "rc=" + std::to_string(rc));
     }
     {
@@ -370,29 +367,21 @@ int main() {
         ck(ok && t.count("title") && t.at("title") == "MP3标题", "MP3 title 往返", ok ? "读回成功" : "读回失败");
         ck(t.count("album_artist") && t.at("album_artist") == "专辑艺术家",
            "albumArtist→album_artist(实测映射)", t.count("album_artist") ? t.at("album_artist") : "(无)");
-        // 2026-10-25（macOS 单平台）：这一档的容器从 .mp3 改为 .m4a（原因见素材生成处：
-        // 本机 lame 是 x86_64、arm64 构建链不上，FFmpeg 8.x 又无原生 mp3 编码器）。
-        // MP4/M4A 容器的标准原子只有 ©nam/©ART/aART/trkn/disk/©alb/©day/©cmt 等，
-        // **没有 publisher / conductor 对应原子** —— 实测 ffmpeg 会静默丢弃这两个字段。
-        // 因此本档的断言范围收窄到 m4a 真实能承载的字段（这不是放水：
-        // 「label→publisher」「conductor 往返」这两条能力由下面 FLAC 档完整覆盖，
-        //  ID3v2 支持 TCOM/TPUB，FLAC 档的断言一字未动）。
-        ck(t.count("track") && (t.at("track") == "03" || t.at("track") == "3"),
-           "trackNo→track", t.count("track") ? t.at("track") : "(无)");
-        ck(t.count("disc") && (t.at("disc") == "02" || t.at("disc") == "2"),
-           "discNo→disc", t.count("disc") ? t.at("disc") : "(无)");
-        // MP4 无 publisher/conductor 原子：改为断言「写入时被明确告知这两项不支持」，
-        // 而不是假装它们能往返（那才是放水）。FLAC 档覆盖这两项的真实往返。
-        ck(r.writtenFields.size() == 6, "MP4 容器：6 字段全部尝试写入",
-           std::to_string(r.writtenFields.size()));
+        // 容器是 .mp3（ID3v2），publisher/conductor 对应 TPUB/TCOM —— 断言恢复原始强度。
+        ck(t.count("track") && t.at("track") == "03", "trackNo→track", t.count("track") ? t.at("track") : "(无)");
+        ck(t.count("disc") && t.at("disc") == "02", "discNo→disc", t.count("disc") ? t.at("disc") : "(无)");
+        ck(t.count("publisher") && t.at("publisher") == "厂牌名",
+           "label→publisher(实测映射)", t.count("publisher") ? t.at("publisher") : "(无)");
+        ck(t.count("conductor") && t.at("conductor") == "指挥者", "conductor 往返",
+           t.count("conductor") ? t.at("conductor") : "(无)");
         // 独立 PCM 门禁(备份 vs 写回后)
         // 备份文件后缀跟随源文件真实扩展名（.m4a，见本档容器变更说明）
         const std::string mp3Backup = sbpath(sandbox, R"(\rlplayer-meta\backups\)") +
-                                      MetaStore::hashOf(mp3) + ".m4a";
-        ck(fs::exists(meta_path_of(mp3Backup), ec), "有损素材原文件已进 backups");
+                                      MetaStore::hashOf(mp3) + ".mp3";
+        ck(fs::exists(meta_path_of(mp3Backup), ec), "MP3 原文件已进 backups");
         std::string detail;
         ck(independent_pcm_same(ffmpeg, mp3Backup, mp3, detail),
-           "有损素材写回前后 PCM 逐字节一致", detail);
+           "MP3 写回前后 PCM 逐字节一致(Xing gapless 保留)", detail);
     }
 
     // ---------------- 9) 跳过类:DSD / 未知扩展 / 无可写字段 ----------------
