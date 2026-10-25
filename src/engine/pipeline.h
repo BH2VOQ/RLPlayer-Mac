@@ -315,7 +315,13 @@ public:
             if (!cp.ir.empty()) {
                 // 优先走 GPU（整块卷积）；不可用或失败则自动退回 CPU 分块 FFT
                 bool done = false;
-                if (cp.useGpu) {
+                // 2026-10-26（A/D 包实测，docs/WIP-A.md §7 + WIP-D.md）：GPU 卷积只在 IR 足够长时才划算。
+                // 实测（262144 样输入）：IR=1024 时 CPU 10ms / GPU 11ms（GPU 略慢）；
+                // IR=16384 CPU 21/GPU 18；IR=65536 CPU 67/GPU 12；IR=262144 CPU 241/GPU 17。
+                // 所以按 IR 长度门控：短 IR 一律走 CPU（省一次 H 频谱上传 + 同步），长 IR 才交给 GPU。
+                // 注：这个门限只影响"选哪条路"，两条路输出在 −127.6~−147.8 dB 内等价（见 WIP-A）。
+                const bool gpuWorth = cp.ir.size() >= 65536;
+                if (cp.useGpu && gpuWorth) {
                     auto& gb = dsp::GpuBridge::instance();
                     st.gpuStatus = gb.status();
                     if (gb.available()) {
