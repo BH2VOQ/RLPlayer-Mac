@@ -509,6 +509,9 @@ add_test(NAME entities COMMAND test_entities)
 add_executable(test_library tests/test_library.cpp)
 target_include_directories(test_library PRIVATE ${CMAKE_SOURCE_DIR}/src)
 add_test(NAME library COMMAND test_library)
+add_executable(test_tags_native tests/test_tags_native.cpp)
+target_include_directories(test_tags_native PRIVATE ${CMAKE_SOURCE_DIR}/src)
+add_test(NAME tags_native COMMAND test_tags_native)
 add_executable(test_metastore tests/test_metastore.cpp)
 target_include_directories(test_metastore PRIVATE ${CMAKE_SOURCE_DIR}/src)
 add_test(NAME metastore COMMAND test_metastore)
@@ -536,7 +539,7 @@ add_test(NAME writeback COMMAND test_writeback)
 # 用 ENVIRONMENT 把 ffmpeg-lite 放到 PATH 最前 —— 与 embedded_api 的既有手法一致，
 # 不改变测试判据本身（判据强度不动，只修环境）。实测 4/4 全绿。
 set(RL_FFMPEG_LITE_PATH "${CMAKE_SOURCE_DIR}/build-mac/ffmpeg-lite:/usr/bin:/bin:/usr/sbin:/sbin")
-set_tests_properties(decode_retry stream_decode media_duration writeback PROPERTIES
+set_tests_properties(decode_retry stream_decode media_duration writeback tags_native PROPERTIES
   ENVIRONMENT "PATH=${RL_FFMPEG_LITE_PATH}")
 
 
