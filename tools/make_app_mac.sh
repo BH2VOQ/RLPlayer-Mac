@@ -33,6 +33,36 @@ chmod +x "$APP/Contents/MacOS/RLPlayer"
 mkdir -p "$APP/Contents/MacOS/data"
 cp "$ROOT/data/opra_index.json" "$APP/Contents/MacOS/data/"
 
+# 2b) Metal GPU 后端（librtagpu.dylib）
+#
+# 2026-10-25（用户报「显示后端库未就位」）：这个库以前**从来没被打进 .app**。
+# 后果：设置里 GPU 下拉永远显示「后端库未就位」，Metal 加速实际不可用 ——
+# 而 src/dsp/gpu_pref.h 的搜索路径正是 @executable_path/librtagpu.dylib。
+#
+# 它由 tools/build_gpu_metal_mac.sh 生成（gitignore 掉了，属于构建产物），
+# 所以这里做「有就打包、没有就明确警告」而不是静默跳过：
+#   有库 → 复制到 Contents/MacOS/ 并校验 arm64
+#   无库 → 打印 ⚠ 说明 GPU 加速不可用、怎么构建；**不中断打包**
+#          （GPU 是可选加速，缺它 CPU 卷积照常工作，不该因此出不了包）
+GPU_LIB=""
+for cand in "$BUILD/librtagpu.dylib" "$ROOT/librtagpu.dylib"; do
+    if [[ -f "$cand" ]]; then GPU_LIB="$cand"; break; fi
+done
+if [[ -n "$GPU_LIB" ]]; then
+    cp "$GPU_LIB" "$APP/Contents/MacOS/librtagpu.dylib"
+    chmod +x "$APP/Contents/MacOS/librtagpu.dylib"
+    # 架构校验：必须含 arm64（发布版只留 arm64，见工作区记忆 single-process-merge-plan.md）
+    if ! lipo -archs "$APP/Contents/MacOS/librtagpu.dylib" 2>/dev/null | grep -q arm64; then
+        echo "⚠ librtagpu.dylib 不含 arm64 架构，GPU 加速可能不可用"
+    else
+        echo "✓ 已打包 Metal GPU 后端：librtagpu.dylib"
+    fi
+else
+    echo "⚠ 未找到 librtagpu.dylib（GPU 加速不可用，CPU 卷积照常）"
+    echo "  构建方法：bash tools/build_gpu_metal_mac.sh"
+    echo "  搜索过：$BUILD/librtagpu.dylib 和 $ROOT/librtagpu.dylib"
+fi
+
 # 3) 图标（256 PNG → 全尺寸 iconset → icns）
 ICONSET="$(mktemp -d)/RLPlayer.iconset"
 mkdir -p "$ICONSET"

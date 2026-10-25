@@ -568,7 +568,18 @@ h += "#npPage .npedge{display:none}";
     h += "box-shadow:0 1px 3px rgba(0,0,0,.4)}";
     h += "html[data-theme=dark] .npclose:hover{background:rgba(48,50,58,.96)}";
     // machost：红绿灯占顶部约 8..30px，这里从 46 下移到 52，留出明确间隙
-    h += "html.machost .npclose{top:52px;left:18px}";
+    // 2026-10-25（用户第二次反馈「按钮还在这」）：上一版把 top 从 46 挪到 52 没用 ——
+    // 因为 .npgrid 的 padding-top 是 44px，封面从 y=44 开始，而按钮占 52..90
+    // ⟹ 仍然压住封面 46px（截图红框正是这个）。
+    //
+    // 正确做法：machost 下把「按钮」和「内容」一起下移，让按钮待在红绿灯右侧的空白带里，
+    // 且内容（封面）从按钮下方开始，两者不再重叠：
+    //   · 红绿灯占 y≈8..30，按钮放在 y=34（36px 高 → 占 34..70）
+    //   · npgrid 的 padding-top 抬到 78px（按钮底部 70 + 8px 间隙）⟹ 封面从 78 开始
+    // 非 machost（浏览器直开）没有红绿灯，保持原来的 16px 不变。
+    h += "html.machost .npclose{top:34px;left:18px;width:36px;height:36px}";
+    h += "html.machost .npgrid{padding-top:78px}";
+    h += "@media (max-height:720px){html.machost .npgrid{padding-top:70px}}";
     // 窄/矮窗口（用户 261023-04 #6 的 1024x640）：压缩行高与留白，但行间距不小于 12px
     h += "@media (max-height:720px){.npgrid{padding:36px 24px 10px;gap:12px}.nphero{gap:16px}.npcover{height:clamp(108px,22vh,164px)}.npkind{margin-bottom:5px}.nptit{font-size:19px}.npsub{font-size:11.5px;margin-top:5px}.npmline{margin-top:6px;min-height:20px}.npctl2{gap:8px}.npdbody{font-size:12px;line-height:1.6}}";
     h += "@media (max-width:1120px){.npgrid{padding:38px 24px 12px}.nphero{gap:16px}.npcover{height:clamp(108px,20vh,180px)}}";
