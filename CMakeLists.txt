@@ -584,6 +584,24 @@ add_test(NAME gpu_metal COMMAND test_gpu_metal)
 # dylib 定位：测试自己用 __FILE__ 反推仓库根（ctest 的 cwd 是 build-mac，不是仓库根），
 # 不需要额外环境变量；也可 `test_gpu_metal <path-to-librtagpu.dylib>` 显式指定。
 
+# ---------------- 2026-10-26：WebUi 传输层安全加固测试 ----------------
+add_executable(test_webui_hardening tests/test_webui_hardening.cpp)
+target_include_directories(test_webui_hardening PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(test_webui_hardening PRIVATE ${RL_PLATFORM_LIBS})
+add_test(NAME webui_hardening COMMAND test_webui_hardening)
+
+# ---------------- 2026-10-26：副作用端点 405 验证测试 ----------------
+add_executable(test_net_405 tests/test_net_405.cpp)
+target_include_directories(test_net_405 PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(test_net_405 PRIVATE ${RL_PLATFORM_LIBS})
+add_test(NAME net_405 COMMAND test_net_405)
+
+# ---------------- 2026-10-26：DeepSeek 客户端及用量并发记账测试 (A-4) ----------------
+add_executable(test_metallm tests/test_metallm.cpp)
+target_include_directories(test_metallm PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(test_metallm PRIVATE ${RL_PLATFORM_LIBS})
+add_test(NAME metallm COMMAND test_metallm)
+
 option(RTA_BUILD_LEGACY_TESTS "构建尚未移植到 macOS 的旧测试（缺 POSIX 垫片，默认关闭）" OFF)
 if(RTA_BUILD_LEGACY_TESTS)
 

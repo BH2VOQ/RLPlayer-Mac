@@ -28,6 +28,7 @@
 //      但实测发现 Hog **不阻止**其它进程 IO（第三进程 IOProc 照常运行）——
 //      macOS 的 Hog 语义弱于 WASAPI 独占，bit-perfect 的实际保障是物理格式锁定。
 #include "platform/audio_out_factory.h"
+#include "platform/macos/audio_out_coreaudio.h"
 
 #include <atomic>
 #include <chrono>
@@ -199,6 +200,135 @@ int main(int argc, char** argv) {
         std::printf("   源 11025/8 -> 路由=%d  理由=%s\n", (int)d2.kind, d2.reason.c_str());
         check(d2.kind == RouteKind::Refused, "设备不支持的格式必须拒绝，不静默替换");
         check(!d2.reason.empty(), "拒绝时理由必须非空");
+    }
+
+    // ---------- 2b. 纯离线：CoreAudio 容器电平与量化往返核对（2026-10-25 移植 3496d46）----------
+    std::printf("\n[2b] 容器电平与量化往返核对（16/24/32 位逐码值与 0.00 dBFS 偏差）\n");
+    {
+        using rta::platform::detail::scale_sample_i32;
+        using rta::platform::detail::pack_sample_i32;
+        using rta::platform::detail::unpack_sample_i32;
+
+        auto calc_dbfs = [](double v, double full) {
+            const double norm = std::fabs(v) / full;
+            return 20.0 * std::log10(norm > 0.0 ? norm : 1e-30);
+        };
+
+        // 1) 16-bit 容器核对
+        {
+            const int bits = 16;
+            const int32_t s_pos = 32767;
+            const int32_t s_neg = -32768;
+            const int32_t s_half = 16384;
+            uint8_t b[4]{};
+
+            pack_sample_i32(b, s_pos, bits);
+            const int32_t r_pos = unpack_sample_i32(b, bits);
+            const double db_pos = calc_dbfs((double)r_pos, 32767.0);
+
+            pack_sample_i32(b, s_neg, bits);
+            const int32_t r_neg = unpack_sample_i32(b, bits);
+            const double db_neg = calc_dbfs((double)r_neg, 32768.0);
+
+            pack_sample_i32(b, s_half, bits);
+            const int32_t r_half = unpack_sample_i32(b, bits);
+            const double db_half = calc_dbfs((double)r_half, 32768.0);
+
+            std::printf("   16-bit 容器: 满幅正 = %d (%.4f dBFS), 负满幅 = %d (%.4f dBFS), 半幅 = %d (%.4f dBFS)\n",
+                        r_pos, db_pos, r_neg, db_neg, r_half, db_half);
+
+            check(r_pos == 32767, "16-bit 满幅正样本往返一致 (+32767)");
+            check(r_neg == -32768, "16-bit 负满幅样本往返一致 (-32768)");
+            check(r_half == 16384, "16-bit 半幅样本往返一致 (16384)");
+            check(std::fabs(db_pos - 0.0) < 0.001, "16-bit 满幅电平偏差 = 0.00 dBFS (无 -48dB 错位)");
+            check(std::fabs(db_half - (-6.0206)) < 0.01, "16-bit 半幅电平 = -6.02 dBFS");
+
+            // 全域 65536 码值扫描
+            int diff_count = 0;
+            for (int32_t v = -32768; v <= 32767; ++v) {
+                pack_sample_i32(b, v, bits);
+                if (unpack_sample_i32(b, bits) != v) ++diff_count;
+            }
+            check(diff_count == 0, "16-bit 全域 65536 码值往返 100% 逐码值吻合");
+        }
+
+        // 2) 24-bit 容器核对（3 字节小端 packed）
+        {
+            const int bits = 24;
+            const int32_t s_pos = 8388607;
+            const int32_t s_neg = -8388608;
+            const int32_t s_half = 4194304;
+            uint8_t b[4]{};
+
+            pack_sample_i32(b, s_pos, bits);
+            const int32_t r_pos = unpack_sample_i32(b, bits);
+            const double db_pos = calc_dbfs((double)r_pos, 8388607.0);
+
+            pack_sample_i32(b, s_neg, bits);
+            const int32_t r_neg = unpack_sample_i32(b, bits);
+            const double db_neg = calc_dbfs((double)r_neg, 8388608.0);
+
+            pack_sample_i32(b, s_half, bits);
+            const int32_t r_half = unpack_sample_i32(b, bits);
+            const double db_half = calc_dbfs((double)r_half, 8388608.0);
+
+            std::printf("   24-bit 容器: 满幅正 = %d (%.4f dBFS), 负满幅 = %d (%.4f dBFS), 半幅 = %d (%.4f dBFS)\n",
+                        r_pos, db_pos, r_neg, db_neg, r_half, db_half);
+
+            check(r_pos == 8388607, "24-bit 满幅正样本往返一致 (+8388607)");
+            check(r_neg == -8388608, "24-bit 负满幅样本往返一致 (-8388608)");
+            check(r_half == 4194304, "24-bit 半幅样本往返一致 (4194304)");
+            check(std::fabs(db_pos - 0.0) < 0.001, "24-bit 满幅电平偏差 = 0.00 dBFS (无 -48dB 错位)");
+            check(std::fabs(db_half - (-6.0206)) < 0.01, "24-bit 半幅电平 = -6.02 dBFS");
+
+            // 抽样 + 边界扫描
+            int diff_count = 0;
+            for (int32_t step = -8388608; step <= 8388607; step += 127) {
+                pack_sample_i32(b, step, bits);
+                if (unpack_sample_i32(b, bits) != step) ++diff_count;
+            }
+            check(diff_count == 0, "24-bit 抽样扫描往返 100% 逐码值吻合");
+        }
+
+        // 3) 32-bit 容器核对
+        {
+            const int bits = 32;
+            const int32_t s_pos = 2147483647;
+            const int32_t s_neg = (int32_t)(-2147483647L - 1L); // INT32_MIN
+            const int32_t s_half = 1073741824;
+            uint8_t b[4]{};
+
+            pack_sample_i32(b, s_pos, bits);
+            const int32_t r_pos = unpack_sample_i32(b, bits);
+            const double db_pos = calc_dbfs((double)r_pos, 2147483647.0);
+
+            pack_sample_i32(b, s_neg, bits);
+            const int32_t r_neg = unpack_sample_i32(b, bits);
+            const double db_neg = calc_dbfs((double)r_neg, 2147483648.0);
+
+            pack_sample_i32(b, s_half, bits);
+            const int32_t r_half = unpack_sample_i32(b, bits);
+            const double db_half = calc_dbfs((double)r_half, 2147483648.0);
+
+            std::printf("   32-bit 容器: 满幅正 = %d (%.4f dBFS), 负满幅 = %d (%.4f dBFS), 半幅 = %d (%.4f dBFS)\n",
+                        r_pos, db_pos, r_neg, db_neg, r_half, db_half);
+
+            check(r_pos == 2147483647, "32-bit 满幅正样本往返一致 (+2147483647)");
+            check(r_neg == (int32_t)(-2147483647L - 1L), "32-bit 负满幅样本往返一致 (INT32_MIN)");
+            check(r_half == 1073741824, "32-bit 半幅样本往返一致 (1073741824)");
+            check(std::fabs(db_pos - 0.0) < 0.001, "32-bit 满幅电平偏差 = 0.00 dBFS (无 -48dB 错位)");
+            check(std::fabs(db_half - (-6.0206)) < 0.01, "32-bit 半幅电平 = -6.02 dBFS");
+        }
+
+        // 4) scale_sample_i32 增益定标核对（非 1.0 增益时）
+        {
+            // 16 bit
+            check(scale_sample_i32(16384, 16, 1.0) == 16384, "scale_sample_i32(gain=1.0) 保持原值");
+            check(scale_sample_i32(16384, 16, 0.5) == 8192, "scale_sample_i32(gain=0.5) 16-bit 半幅衰减");
+            check(scale_sample_i32(32767, 16, 2.0) == 32767, "scale_sample_i32 饱和不溢出 (16-bit 满幅)");
+            // 24 bit
+            check(scale_sample_i32(4194304, 24, 0.5) == 2097152, "scale_sample_i32(gain=0.5) 24-bit 半幅衰减");
+        }
     }
 
     if (no_open) {

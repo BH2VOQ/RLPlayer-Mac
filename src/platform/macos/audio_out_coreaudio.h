@@ -1,4 +1,5 @@
 // platform/macos/audio_out_coreaudio.h — audio_out.h 的 CoreAudio 实现
+#pragma once
 //
 // 设计要点（对应 PLATFORM.md §4/§5/§7/§8）：
 //   * 用 AUHAL（kAudioUnitSubType_HALOutput）输出单元：它是 macOS 上唯一能
@@ -320,6 +321,61 @@ inline AudioDeviceID default_output_device() {
     return dev;
 }
 
+// 实时音量定点缩放辅助函数（暴露给测试做量化核对，见 CoreAudioOutput::scale_sample_i32）
+// 管线输入 s 为低位对齐到 bits 位的有符号整数：
+//   bits=16: [-32768, 32767]
+//   bits=24: [-8388608, 8388607]
+//   bits=32: [INT32_MIN, INT32_MAX]
+// g == 1.0 时逐位不变（100% bit-perfect 保证）；
+// g <= 0.0 时直接返回 0（真静音）；
+// 其余按 bits 限幅并四舍五入。
+inline int32_t scale_sample_i32(int32_t s, int bits, double g) {
+    if (g == 1.0) return s;
+    if (g <= 0.0) return 0;
+    const double v = (double)s * g;
+    const double lim_pos = (bits >= 32) ? 2147483647.0 : (double)((1LL << (bits - 1)) - 1);
+    const double lim_neg = (bits >= 32) ? -2147483648.0 : (double)(-(1LL << (bits - 1)));
+    if (v > lim_pos) return (int32_t)lim_pos;
+    if (v < lim_neg) return (int32_t)lim_neg;
+    return (int32_t)std::llround(v);
+}
+
+// 容器解包辅助函数（用于验证打包进 AudioBuffer 的字节流）：
+// 从小端整型容器还原为 int32_t（低位对齐到 bits）
+inline int32_t unpack_sample_i32(const uint8_t* p, int bits) {
+    if (!p) return 0;
+    if (bits == 16) {
+        int16_t v;
+        std::memcpy(&v, p, 2);
+        return (int32_t)v;
+    }
+    if (bits == 24) {
+        uint32_t u = (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16);
+        if (u & 0x800000u) u |= 0xFF000000u; // 符号扩展
+        return (int32_t)u;
+    }
+    if (bits == 32) {
+        int32_t v;
+        std::memcpy(&v, p, 4);
+        return v;
+    }
+    return 0;
+}
+
+// 模拟 render() 中的打包逻辑（单样本）
+inline void pack_sample_i32(uint8_t* dst, int32_t s, int bits) {
+    if (bits == 16) {
+        const uint16_t v = (uint16_t)(s & 0xFFFF);
+        std::memcpy(dst, &v, 2);
+    } else if (bits == 24) {
+        const uint32_t v = (uint32_t)s & 0xFFFFFFu;
+        dst[0] = (uint8_t)(v & 0xFF);
+        dst[1] = (uint8_t)((v >> 8) & 0xFF);
+        dst[2] = (uint8_t)((v >> 16) & 0xFF);
+    } else {
+        std::memcpy(dst, &s, 4);
+    }
+}
 } // namespace detail
 
 class CoreAudioOutput final : public AudioOutput {
@@ -648,16 +704,7 @@ public:
     // g <= 0.0 时直接返回 0（真静音）；
     // 其余按 bits 归一后乘增益、四舍五入并限幅。
     static inline int32_t scale_sample_i32(int32_t s, int bits, double g) {
-        if (g == 1.0) return s;
-        if (g <= 0.0) return 0;
-        const int shift = (bits >= 1 && bits <= 32) ? (32 - bits) : 0;
-        const double scale = std::ldexp(1.0, shift);
-        const double v = (double)s / scale * g;
-        const double lim = (double)((1LL << (bits - 1)) - 1);
-        double cl = v;
-        if (cl > lim) cl = lim;
-        if (cl < -lim) cl = -lim;
-        return (int32_t)std::llround(cl * scale);
+        return detail::scale_sample_i32(s, bits, g);
     }
 
     void set_gain(double linear) override { gain_.store(linear, std::memory_order_relaxed); }
