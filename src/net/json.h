@@ -19,14 +19,17 @@ struct Json {
     std::map<std::string, Json> obj;
 
     bool has(const std::string& k) const { return type == Obj && obj.count(k) > 0; }
+    // ⚠️ 这里的空值变量**不能叫 nil**（2026-10-26 踩过）：Objective-C++ 里 `nil` 是
+    // 内建的 __null 标识符，作为变量名会报 "expected unqualified-id"，导致任何 .mm
+    // 包含本头都无法编译。改名 kNullJson 后 C++/ObjC++ 两边都正常。
     const Json& operator[](const std::string& k) const {
-        static const Json nil;
+        static const Json kNullJson;
         auto it = obj.find(k);
-        return (type == Obj && it != obj.end()) ? it->second : nil;
+        return (type == Obj && it != obj.end()) ? it->second : kNullJson;
     }
     const Json& at(size_t i) const {
-        static const Json nil;
-        return (type == Arr && i < arr.size()) ? arr[i] : nil;
+        static const Json kNullJson;
+        return (type == Arr && i < arr.size()) ? arr[i] : kNullJson;
     }
     size_t size() const { return type == Arr ? arr.size() : 0; }
     std::string s() const { return type == Str ? str : (type == Num ? std::to_string((long long)num) : std::string()); }

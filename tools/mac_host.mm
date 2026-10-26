@@ -56,11 +56,38 @@ int cli_main(int argc, char** argv);
 }
 #endif
 
+// F-4 自动更新原生执行层（tools/mac_update.mm）。用 __has_include 保护：
+// tests/test_mac_transport.mm 以 #include "../tools/mac_host.mm" 的方式复用本文件的
+// scheme handler 与消息表，但它不链接 mac_update.mm，因此这里必须可缺省。
+// ⚠️ 用**构建宏**而不是 __has_include 作为门控（2026-10-26 踩过）：
+//   tests/test_mac_transport.mm 以 #include "../tools/mac_host.mm" 复用本文件，
+//   而它的 include 路径里也有 tools/ ⟹ __has_include("mac_update.h") 会命中，
+//   于是编译期认为"有引擎"、链接期却没有 mac_update.o，报 undefined symbols。
+//   现在只在 CMake 给 rlplayer_mac 定义 RL_WITH_UPDATE 时才启用真引擎。
+#if defined(RL_WITH_UPDATE) && __has_include("mac_update.h")
+#define RL_HAVE_MAC_UPDATE 1
+#include "mac_update.h"
+#else
+// tests/test_mac_transport.mm 复用本文件但不链接 mac_update.mm ⟹ 这条回退让
+// 「更新」两条消息在没有更新模块时也**编译通过**，运行时回 unsupported（不静默）。
+namespace rta::update {
+struct NativeProgress { std::string stage, detail; int percent = -1; };
+struct CheckResult {
+    std::string remoteVersion, notes, error;
+    int status = 0;
+    bool available() const { return false; }
+    bool up_to_date() const { return false; }
+    const char* code() const { return "unsupported"; }
+};
+}
+#endif
+
 #if __has_include("platform/host_msg.h")
 #include "platform/host_msg.h"
 #else
 namespace rta::platform {
-enum class HostAction { None, Minimize, Maximize, Close, Drag, Theme, OpenUrl, Resize, PickDir };
+enum class HostAction { None, Minimize, Maximize, Close, Drag, Theme, OpenUrl, Resize, PickDir,
+                        UpdateCheck, UpdateInstall };
 struct HostMessage {
     HostAction action = HostAction::None;
     std::string arg;
@@ -571,6 +598,10 @@ static NSString *const kShim = @
 @property (nonatomic, strong) NSTimer *exitPollTimer;
 @property (nonatomic) NSRect savedFrame;       // max 前的窗口 frame（还原用）
 @property (nonatomic) bool zoomed;
+// F-4：最近一次「检查更新」的结果，作为「一键更新」的安装计划。
+// 为什么不接受页面传计划：页面若能把 download_url/sha256 塞进来，就等于让网页决定
+// 宿主去下载并安装什么 —— sha256 由页面给的那一版等于没有闸门。
+@property (nonatomic) rta::update::CheckResult lastUpdatePlan;
 @end
 
 @implementation HostAppDelegate
@@ -836,6 +867,47 @@ static NSString *const kShim = @
             }
             break;
         }
+        // ---------------- F-4 自动更新（2026-10-26）----------------
+        // 设计取舍：这里**不做任何判定**，只把动作转给 rta::update::begin_check/begin_install。
+        // 版本比较/清单解析/sha256/白名单/失败分支全在 src/net/update_check.h（有离线单测）。
+        // 这样壳层写错最多"装不上"，不会变成"误报已是最新"或"装了被篡改的包"。
+        case HostAction::UpdateCheck: {
+#ifdef RL_HAVE_MAC_UPDATE
+            rta::update::begin_check(
+                ^(const rta::update::NativeProgress& p) {
+                    [self emitUpdateProgress:p];
+                },
+                ^(const rta::update::CheckResult& r) {
+                    [self emitUpdateResult:r];
+                });
+#else
+            [self emitToPage:@"update:status:{\"stage\":\"failed\",\"code\":\"unsupported\","
+                             "\"message\":\"\u672c\u6784\u5efa\u672a\u542f\u7528\u66f4\u65b0\u6a21\u5757\"}"];
+#endif
+            break;
+        }
+        case HostAction::UpdateInstall: {
+#ifdef RL_HAVE_MAC_UPDATE
+            // 用最近一次 check 的结果作为安装计划（避免安装时被页面塞新的 URL）
+            if (!self.lastUpdatePlan.available()) {
+                [self emitToPage:@"update:status:{\"stage\":\"failed\",\"code\":\"no-plan\","
+                                 "\"message\":\"\u8bf7\u5148\u68c0\u67e5\u66f4\u65b0\"}"];
+                break;
+            }
+            rta::update::begin_install(
+                self.lastUpdatePlan,
+                ^(const rta::update::NativeProgress& p) { [self emitUpdateProgress:p]; },
+                ^(bool ok, NSString* msg) {
+                    NSDictionary* d = @{ @"stage": ok ? @"installed" : @"failed",
+                                         @"code": ok ? @"ok" : @"install-failed",
+                                         @"message": msg ?: @"" };
+                    [self emitUpdateJson:d];
+                });
+#else
+            [self emitToPage:@"update:status:{\"stage\":\"failed\",\"code\":\"unsupported\"}"];
+#endif
+            break;
+        }
         case HostAction::None:
             break;
     }
@@ -859,6 +931,47 @@ static NSString *const kShim = @
         @"(function(){try{var a=%@;if(window.chrome.webview&&window.chrome.webview.__emit)window.chrome.webview.__emit(a[0]);}catch(e){}})();",
         json];
     [self.web evaluateJavaScript:js completionHandler:nil];
+}
+
+// ---------------- F-4：更新进度/结果 → 页面 ----------------
+// 统一出口：所有回传都序列化成 JSON，再走与 emitToPage 相同的安全通道
+// （NSString 由 NSJSONSerialization 产出，引号/反斜杠/控制字符都已转义）。
+- (void)emitUpdateJson:(NSDictionary *)dict {
+    if (!dict) return;
+    NSData *d = [NSJSONSerialization dataWithJSONObject:dict options:0 error:nil];
+    if (!d) return;
+    NSString *json = [[NSString alloc] initWithData:d encoding:NSUTF8StringEncoding];
+    if (!json) return;
+    [self emitToPage:[@"update:status:" stringByAppendingString:json]];
+}
+
+- (void)emitUpdateProgress:(const rta::update::NativeProgress &)p {
+    NSMutableDictionary *d = [NSMutableDictionary dictionary];
+    d[@"stage"] = [NSString stringWithUTF8String:p.stage.c_str()] ?: @"";
+    d[@"message"] = [NSString stringWithUTF8String:p.detail.c_str()] ?: @"";
+    if (p.percent >= 0) d[@"percent"] = @(p.percent);
+    // 进度是高频事件：直接下发，不额外做别的处理
+    dispatch_async(dispatch_get_main_queue(), ^{
+        [self emitUpdateJson:d];
+    });
+}
+
+- (void)emitUpdateResult:(const rta::update::CheckResult &)r {
+    // 记下安装计划（只有 UpdateAvailable 才会被 begin_install 接受）
+    self.lastUpdatePlan = r;
+
+    NSMutableDictionary *d = [NSMutableDictionary dictionary];
+    d[@"stage"]  = r.up_to_date() ? @"up-to-date" : (r.available() ? @"available" : @"failed");
+    d[@"code"]   = [NSString stringWithUTF8String:r.code()] ?: @"unknown";
+    d[@"message"] = [NSString stringWithUTF8String:r.error.c_str()] ?: @"";
+    if (!r.remoteVersion.empty())
+        d[@"version"] = [NSString stringWithUTF8String:r.remoteVersion.c_str()];
+    if (!r.notes.empty())
+        d[@"notes"] = [NSString stringWithUTF8String:r.notes.c_str()];
+    if (r.status > 0) d[@"status"] = @(r.status);
+    dispatch_async(dispatch_get_main_queue(), ^{
+        [self emitUpdateJson:d];
+    });
 }
 
 - (void)windowDidResize:(NSNotification *)n {

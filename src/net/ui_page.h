@@ -439,6 +439,9 @@ inline std::string rta_ui_page() {
     // 2026-10-26（用户截图：底栏 4 行文字挤成一团）：Apple Music 的底栏左侧只有**两行**
     //（曲名 + 艺术家），技术信息不放这里。nps / npNextTrack 的 DOM 与赋值逻辑全部保留
     //（大量代码在写它们），只用 CSS 隐藏，不再占行。采样率仍由右侧 #fmt 显示，信息不丢。
+    // 2026-10-26 F-4：更新徽标配色走主题变量（三套主题 × apple/classic 都可读）
+    h += "#updateBadge{color:var(--warn);border-color:var(--warn);background:transparent;font-weight:600}";
+    h += "#updateBadge:hover{background:var(--hov)}";
     h += ".np .boring{display:none!important}";
     // .tx 必须是可收缩的 flex 列，否则长曲名会把整列撑开、把封面挤出卡片
     // ⚠️ flex:1 不可省：.np 是 flex 行，.tx 若没有 flex-grow 会缩到 min-content（实测只有 244px，
@@ -1146,6 +1149,10 @@ h += "#npPage .npedge{display:none}";
     h += "<div class=vol><button class=ibtn id=bLyric title='歌词'><svg width=16 height=16 viewBox='0 0 24 24' fill=none stroke=currentColor stroke-width=1.8><path d='M4 5h16M4 10h16M4 15h10'/><circle cx='18' cy='17' r='2.5'/></svg></button>";
     h += "<button class=ibtn id=bChain title='信号链'><svg width=16 height=16 viewBox='0 0 24 24' fill=none stroke=currentColor stroke-width=1.8><path d='M9 12a3 3 0 016 0'/><path d='M6 12H3M21 12h-3'/><circle cx=12 cy=12 r=3'/></svg></button>";
     h += "<span id=bpBadge title=''></span>";
+    // 2026-10-26 F-4：有新版时的常驻徽标（用户要求「自动提示用户更新」）。
+    //   放右簇而不是中间：不打断听歌；点击去「设置 → 诊断」的更新卡片。
+    //   默认 display:none —— 没查到新版本时绝不占位（空 chip 会让人以为坏了）。
+    h += "<span class='badge' id=updateBadge style='display:none;cursor:pointer' title=''></span>";
     h += "<span class=badge id=fmt>--</span><span class='badge g' id=gpub style='display:none'>GPU</span>";
     // 261024-02 #5：投放中的底栏徽标（与单曲页按钮、流媒体页推送区块同源 /api/cast/state）
     h += "<span class=badge id=castBadge style='display:none' title='正在投放'>UPnP</span>";

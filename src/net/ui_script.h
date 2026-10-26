@@ -64,6 +64,16 @@ function pickDirectory(initial, onDone) {
       if (cb) cb(path);
       return;
     }
+    // 2026-10-26 F-4：自动更新。宿主把所有回传统一成
+    //   "update:status:<JSON>"，JSON 由 NSJSONSerialization 生成（引号/反斜杠已转义），
+    //   所以这里只做一次 JSON.parse，绝不自己切字符串。
+    if (m.indexOf('update:status:') === 0) {
+      var payload = m.slice('update:status:'.length);
+      var obj = null;
+      try { obj = JSON.parse(payload); } catch (e) { return; }   // 解析失败就当没收到，绝不抛给页面
+      if (obj) onUpdateStatus(obj);
+      return;
+    }
     // max/normal 等其它消息沿用既有处理（如果有）
     if (m === 'max' || m === 'normal') {
       try { document.documentElement.classList.toggle('zoommax', m === 'max'); } catch (e) { }
@@ -236,6 +246,145 @@ function mqMount() {
     }
   }
   window._mqRecs = live;
+}
+
+// ============================================================================
+// 2026-10-26 F-4 自动更新（用户要求「云端发布更新 → 自动提示 → 一键更新」）
+//
+// 分工（这是硬边界，不是风格选择）：
+//   · **页面只负责显示与发命令**：wcmd('update:check') / wcmd('update:install')。
+//   · 下载、sha256 校验、挂载 dmg、替换 /Applications 里的 .app 全在原生壳
+//     （tools/mac_update.mm）。网页沙箱做不了这些，也不该做。
+//   · 页面**绝不传 URL / token 给宿主**：update.conf 与白名单都在壳侧，
+//     否则页面里任何一段脚本都能命令宿主下载任意文件。
+//
+// 失败语义（用户明确要求：网络失败不许写「已是最新」）：
+//   stage === 'up-to-date'  ⟹ 确实是最新（只有这一种能这么显示）
+//   stage === 'available'   ⟹ 有新版本，显示版本号 + 「立即更新」
+//   stage === 'failed'      ⟹ 检查失败（网络/鉴权/解析），如实说失败，绝不冒充最新
+// ============================================================================
+var UPD = { stage: '', info: null, busy: false };
+
+function updMsg(t, kind) {
+  var el = D('sp_updmsg');
+  if (!el) return;
+  el.textContent = t || '';
+  // 用主题变量而不是写死颜色：三套主题 × apple/classic 都要能读
+  el.style.color = kind === 'err' ? 'var(--danger)'
+                 : kind === 'ok' ? 'var(--ok-text)'
+                 : kind === 'warn' ? 'var(--warn)' : 'var(--mut2)';
+}
+function updBar(pct) {
+  var bar = D('sp_updbar'), fill = D('sp_updfill');
+  if (!bar || !fill) return;
+  if (pct === null || pct === undefined || pct < 0) { bar.style.display = 'none'; return; }
+  bar.style.display = 'block';
+  fill.style.width = Math.max(0, Math.min(100, pct)) + '%';
+}
+function updInstallBtn(show, label) {
+  var b = D('sp_updinstall');
+  if (!b) return;
+  b.style.display = show ? '' : 'none';
+  if (label) b.textContent = label;
+}
+// 宿主回传的唯一入口（由 handleEmit 里 "update:status:<json>" 分支调用）
+function onUpdateStatus(obj) {
+  if (!obj || typeof obj !== 'object') return;
+  var stage = String(obj.stage || '');
+  // 进度事件：有 percent 但 stage 还是 checking/downloading 等，先刷进度条
+  if (obj.percent !== undefined && obj.percent !== null) {
+    updBar(Number(obj.percent));
+    if (obj.message) updMsg(String(obj.message));
+    return;
+  }
+  UPD.stage = stage;
+  UPD.info = obj;
+  if (stage === 'up-to-date') {
+    UPD.busy = false;
+    updBar(null);
+    updInstallBtn(false);
+    updMsg('已是最新版本' + (obj.code ? '' : ''), 'ok');
+    setUpdateBadge('');
+  } else if (stage === 'available') {
+    UPD.busy = false;
+    updBar(null);
+    var v = obj.version ? ('v' + obj.version) : '新版本';
+    updInstallBtn(true, '立即更新');
+    updMsg('发现新版本 ' + v, 'warn');
+    // 主动提示（用户要的「自动提示」）：底栏徽标 + 轻提示，不弹模态框打断听歌
+    setUpdateBadge(v);
+    try { toast('有新版 ' + v + '，设置 → 诊断 里可一键更新'); } catch (e) { }
+  } else if (stage === 'failed') {
+    UPD.busy = false;
+    updBar(null);
+    updInstallBtn(false);
+    // ⚠️ 绝不说「已是最新」：网络/鉴权/解析失败就是失败
+    updMsg('检查失败：' + (obj.message || obj.code || '未知原因'), 'err');
+  } else if (stage === 'installing') {
+    UPD.busy = true;
+    updMsg(obj.message || '正在更新…');
+  } else if (stage === 'installed') {
+    UPD.busy = false;
+    updBar(100);
+    updInstallBtn(false);
+    updMsg(obj.message || '已更新，请手动重启应用以完成', 'ok');
+  } else {
+    // 未知 stage（宿主升级/降级）⟹ 如实显示，不猜
+    updMsg(obj.message || ('未知状态：' + stage));
+  }
+}
+// 底栏/顶栏的「有新版」徽标。空串 = 隐藏。
+function setUpdateBadge(text) {
+  var b = D('updateBadge');
+  if (!b) return;
+  if (!text) { b.style.display = 'none'; b.textContent = ''; return; }
+  b.style.display = '';
+  b.textContent = text;
+  b.title = '发现新版本 ' + text + '，点这里去更新';
+}
+function updCheck(manual) {
+  if (!IS_MAC_HOST) {
+    updMsg('浏览器里不支持一键更新（需要桌面客户端）', 'err');
+    return false;
+  }
+  UPD.busy = true;
+  updBar(null);
+  updInstallBtn(false);
+  updMsg(manual ? '正在检查…' : '启动检查更新…');
+  wcmd('update:check');
+  return true;
+}
+function updInstall() {
+  if (!IS_MAC_HOST) { updMsg('浏览器里不支持一键更新（需要桌面客户端）', 'err'); return false; }
+  if (UPD.stage !== 'available') { updMsg('当前没有可安装的新版本', 'err'); return false; }
+  UPD.busy = true;
+  updInstallBtn(false);
+  updMsg('开始更新…');
+  updBar(0);
+  wcmd('update:install');
+  return true;
+}
+// 绑定：设置页每次重建都会重跑，所以这里要能重复调用且不重复挂监听
+function bindUpdateCard() {
+  // 当前版本号：从侧栏品牌徽标的 #appVer 取（它是 C++ 侧用 RLPLAYER_VERSION 拼好的，
+  // 是"单一真相源"的唯一出口）。
+  // ⚠️ 这里绝不能写 RLPLAYER_VERSION —— 它是 C++ 宏，只在 C++ 字符串拼接时展开，
+  //    直接写进 JS raw string 会变成未定义变量（我第一版就这么错了，
+  //    实测 renderSettingsPage 抛 ReferenceError，整个设置页渲染不出来）。
+  var ver = D('sp_vercur');
+  if (ver) {
+    var src = D('appVer');
+    ver.textContent = (src && src.textContent) ? src.textContent : 'v?';
+  }
+  var c = D('sp_updcheck');
+  if (c) c.onclick = function () { updCheck(true); };
+  var i = D('sp_updinstall');
+  if (i) i.onclick = function () { updInstall(); };
+  var b = D('updateBadge');
+  if (b) b.onclick = function () {
+    // 点徽标 = 直接去「诊断」页看更新卡片（不静默装，装之前要让用户看见版本号与说明）
+    try { openSettingsTab('diag'); } catch (e) { }
+  };
 }
 
 // 261024-02 #3：长时长格式（专辑总时长用 1:05:24，单曲用 4:24；都用本地曲库真实数据，不用 AI 猜）
@@ -5941,6 +6090,20 @@ function renderSettingsPage() {
              'api_key / token / password 一律脱敏为 ***，rlplayer-llm.conf 本体不会被打进包。')
        + '<span style="font-size:11.5px;color:var(--mut2);margin-left:2px" id=sp_diagmsg></span></div>'
        + '<div class=hint>一个 zip 打包全部日志 / 系统信息 / 设置摘要（已脱敏），不用再到处找日志文件</div>')
+     // 2026-10-26 F-4 自动更新（用户要求：「云端发布更新 → 自动提示 → 客户端一键更新」）
+     // 放在「诊断」页而不是主界面：更新是低频操作，弹窗打扰比省一次点击更烦；
+     // 真正有新版本时由底栏徽标（updateBadge）主动提示，点这里进来装。
+     // 浏览器直开（无宿主）时整块隐藏 —— 装了也没法替换 .app，不能假装能装。
+     + sgroup('软件更新', '检查新版本，一键更新',
+         '<div class="sfld wide" style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">'
+       + '<span style="font-size:11.5px;color:var(--mut)">当前版本</span>'
+       + '<b style="font-size:12.5px" id=sp_vercur></b>'
+       + '<button class=btn id=sp_updcheck>检查更新</button>'
+       + '<button class="btn pri" id=sp_updinstall style="display:none">立即更新</button>'
+       + '<span id=sp_updmsg style="font-size:11.5px;color:var(--mut2)"></span></div>'
+       + '<div id=sp_updbar style="display:none;height:6px;border-radius:3px;background:var(--track);overflow:hidden;margin:10px 0 2px">'
+       + '<i id=sp_updfill style="display:block;height:100%;width:0;background:linear-gradient(90deg,var(--acc),var(--acc2));transition:width .2s"></i></div>'
+       + '<div class=hint id=sp_updnote>更新会下载安装包并校验 sha256；校验不通过一律丢弃，绝不安装被篡改的内容。装完需要你手动重启一次（系统不允许应用自己替换正在运行的自己）。</div>')
      + '</div>';
 
   // ---------- 元数据补全（排在「高级」之后）----------
@@ -6007,6 +6170,20 @@ function renderSettingsPage() {
   // P1.5：源开关的绑定不在上面的静态清单里 —— 重建 HTML 后逐源重新绑定
   //（/api/providers 已到则用缓存渲染+绑定；没到则等 fillMetaProviders 到达时补填）。
   renderMetaSrcRows();
+
+  // 2026-10-26 F-4：更新卡片的两个按钮。设置页每次重建都会重跑这里，
+  //   bindUpdateCard() 是纯赋值 onclick，重复调用无副作用。
+  //   如果之前已经查到过"有新版本"，重建后要把「立即更新」按钮恢复出来，
+  //   否则切一下页签按钮就没了（用户会以为更新消失了）。
+  bindUpdateCard();
+  if (UPD.stage === 'available' && UPD.info) {
+    updInstallBtn(true, '立即更新');
+    updMsg('发现新版本 ' + (UPD.info.version ? ('v' + UPD.info.version) : ''), 'warn');
+  } else if (UPD.stage === 'up-to-date') {
+    updMsg('已是最新版本', 'ok');
+  } else if (UPD.stage === 'failed' && UPD.info) {
+    updMsg('检查失败：' + (UPD.info.message || UPD.info.code || '未知原因'), 'err');
+  }
 
   // 设置页里的下拉是复制的快捷面板 HTML，重建后浏览器会退回第一项。
   // 不同步回来，打开设置页再点保存就会把用户的选择悄悄改成第一项。
@@ -8404,6 +8581,13 @@ if (D('npFavBtn')) D('npFavBtn').onclick = function (ev) { if (S.lastCur) toggle
 // 2026-10-26 F-1/B-3：底栏跑马灯。必须在 DOM 就绪后挂，且失败绝不能影响启动 —
 // 页面结构变了（缺 #mqTitle）时 mqMount() 会自己静默返回。
 try { mqMount(); } catch (e) { }
+// 2026-10-26 F-4：启动后自动查一次更新（用户要求「自动提示用户更新」）。
+//   延迟 4s：让首屏专辑与播放状态先出来，别让更新检查跟首屏抢带宽。
+//   只在原生壳里发；浏览器直开时 updCheck 会如实说明不支持，不产生网络请求。
+//   失败只在「诊断」页里如实显示，**不弹窗打断**（听歌的人不该被网络错误打扰）。
+setTimeout(function () {
+  try { if (IS_MAC_HOST) updCheck(false); } catch (e) { }
+}, 4000);
 loadLibStats();
 loadSettings();
 loadFilterPhases();   // 功能2：相位预设真相源（/api/filters）
