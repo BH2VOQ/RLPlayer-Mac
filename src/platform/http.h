@@ -29,6 +29,8 @@ struct HttpRequest {
     std::string contentType = "application/json";  // 仅 POST，作为 Content-Type 头
     int timeoutMs = 20000;
     std::string proxy;                             // 空 = 直连；"host:port" 或 "http://host:port"
+                                                   // 空时**自动回退系统代理**（见下方 SystemProxySettings）
+    std::string noProxy;                           // CURLOPT_NOPROXY（系统代理的例外表）；空 = 不过滤
 };
 
 struct HttpResult {
@@ -53,6 +55,56 @@ inline std::string normalize_proxy(const std::string& proxy) {
     const size_t slash = hp.find('/');
     if (slash != std::string::npos) hp = hp.substr(0, slash);
     return hp;
+}
+
+// ---------------- 系统代理（2026-10-26 修「检查更新永远是网络不可用」）----------------
+//
+// 背景（真机实测，不是猜测）：
+//   macOS 上 libcurl **不读系统代理**，它只认 CURLOPT_PROXY / http_proxy 等环境变量。
+//   用户机器上 GitHub 必须走系统代理（scutil --proxy: HTTPSProxy=127.0.0.1:7897）才通，
+//   而 .app 双击启动时环境里没有任何 proxy 变量 ⟹ 更新检查必然超时，
+//   界面还只说「网络不可用」，连是 DNS、TLS 还是超时都看不到。
+//
+// 语义（用户 2026-10-26 明确）：**有代理走代理，没代理直连**，不需要用户手工配任何东西。
+//   * 显式 req.proxy 非空 ⟹ 用它（rlplayer-llm.conf 的 proxy= 仍然有效，优先级最高）
+//   * 否则读系统代理：https 请求看 HTTPSProxy/HTTPSPort，http 请求看 HTTPProxy/HTTPPort
+//   * 系统里没开代理（或端口非法）⟹ 返回空串 ⟹ 直连（行为与以前完全一致）
+//   * 系统 ExceptionsList（127.0.0.1 / 10/8 / 192.168/16 / 172.16/12 / *.local …）
+//     原样交给 libcurl 的 CURLOPT_NOPROXY ⟹ **局域网 Navidrome/Emby/UPnP 不会被绕进代理**
+//     （CIDR 匹配 libcurl 7.86+ 原生支持，本机 8.7.1 实测可用）
+//
+// 下面这个结构体是**纯数据**，pick_proxy_for_url 是**纯函数**，
+// 所以「选不选代理、用哪个端口」这件事可以离线单测，不依赖本机是否真的开着代理。
+struct SystemProxySettings {
+    bool        httpEnabled  = false;
+    std::string httpHost;
+    int         httpPort     = 0;
+    bool        httpsEnabled = false;
+    std::string httpsHost;
+    int         httpsPort    = 0;
+    std::string exceptions;        // 逗号分隔，直接喂 CURLOPT_NOPROXY
+};
+
+// 按 URL 的 scheme 选出该用的代理，返回 "host:port"；空串 = 直连。
+// 端口必须落在 1..65535，否则视为「配了但不完整」⟹ 直连（不猜默认端口，猜错更糟）。
+inline std::string pick_proxy_for_url(const SystemProxySettings& s, const std::string& url) {
+    auto starts_ci = [&](const char* pre) {
+        const size_t n = std::char_traits<char>::length(pre);
+        if (url.size() < n) return false;
+        for (size_t i = 0; i < n; ++i) {
+            const char a = (char)((url[i] >= 'A' && url[i] <= 'Z') ? url[i] + 32 : url[i]);
+            if (a != pre[i]) return false;
+        }
+        return true;
+    };
+    const bool isHttps = starts_ci("https://");
+    const bool isHttp  = starts_ci("http://");
+    if (!isHttps && !isHttp) return std::string();      // 其它 scheme 不代理
+    const bool    enabled = isHttps ? s.httpsEnabled : s.httpEnabled;
+    const std::string& host = isHttps ? s.httpsHost : s.httpHost;
+    const int     port    = isHttps ? s.httpsPort : s.httpPort;
+    if (!enabled || host.empty() || port <= 0 || port > 65535) return std::string();
+    return host + ":" + std::to_string(port);
 }
 
 // URL 里非 ASCII 的路径/查询部分做百分号编码（已编码的 % 不再编 —— 防双重编码）

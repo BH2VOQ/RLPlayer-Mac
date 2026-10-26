@@ -406,6 +406,34 @@ inline bool IsDirectory(const std::string& p) {
     return !p.empty() && ::stat(p.c_str(), &st) == 0 && S_ISDIR(st.st_mode);
 }
 
+// ---------------- 更新诊断日志（2026-10-26）----------------
+// 为什么必须落盘：GUI 双击启动的 .app **没有终端**，stderr 无人接收 ⟹ 写了也看不到。
+// 用户报「检查失败：网络不可用 / 下载失败」时，唯一能拿到的现场就是这个文件。
+// 位置与其它状态文件一致（config_dir），单文件超 256KB 轮转一次，最多留 .1 一份。
+// 只写状态码/URL/错误串，**绝不写 token**（调用方已在拼串前过 redact_token）。
+inline void AppendUpdateLog(const std::string& line) {
+    const std::string dir = rta::platform::config_dir_utf8();
+    if (dir.empty() || line.empty()) return;
+    const std::string path = rta::platform::join(dir, "rlplayer-update.log");
+
+    struct stat st {};
+    if (::stat(path.c_str(), &st) == 0 && st.st_size > 256 * 1024) {
+        const std::string old = path + ".1";
+        ::unlink(old.c_str());
+        ::rename(path.c_str(), old.c_str());          // 轮转失败也无所谓，继续写新内容
+    }
+
+    char ts[32] = {0};
+    const std::time_t now = ::time(nullptr);
+    struct tm tmv {};
+    if (::localtime_r(&now, &tmv)) std::strftime(ts, sizeof ts, "%Y-%m-%d %H:%M:%S", &tmv);
+
+    std::ofstream f(path, std::ios::binary | std::ios::app);
+    if (!f) return;
+    f << ts << ' ' << line;
+    if (line.empty() || line.back() != '\n') f << '\n';
+}
+
 // ---------------- 仅测试用的 loopback 放行 ----------------
 // 默认关闭；打开后只放行**本机** http 地址（127.0.0.1 / localhost），外部主机仍被白名单拒。
 inline std::atomic<bool>& LoopbackTestFlag() {
@@ -518,6 +546,33 @@ void begin_check(ProgressFn progress, DoneFn done) {
         // ---- 取清单（公开路径：匿名；私有路径：仍要带 token，因为内容在私有仓库里）----
         const auto man = detail_native::Fetch(manifestUrl, token, 15000);
         result = evaluate_update_check(RLPLAYER_VERSION, man.ok, man.status, man.body);
+        // 2026-10-26（用户实测反馈「检查失败：网络不可用」，但界面上看不到到底为什么）：
+        //   原来的 transport 错误串完全没有出口，用户只能看到一句笼统的"网络不可用"，
+        //   连是 DNS、TLS、超时还是被拦都不知道 —— 排查时唯一能做的就是再点一次。
+        //
+        // ⚠️ 2026-10-26 二次修正：第一版只写 stderr，**GUI 双击启动时 stderr 没人接**
+        //   （既没有终端，也没有重定向）⟹ 等于没写。现在同时落盘到
+        //   <config_dir>/rlplayer-update.log，用户发诊断包/截图时能直接看到原因。
+        //   两件事：
+        //     ① 失败时写一行可诊断信息（含底层错误与最终 URL）；
+        //     ② 把底层原因拼进给用户的 error 文案（过 redact_token，绝不含凭据）。
+        if (!result.available() && !result.up_to_date()) {
+            const std::string why = redact_token(man.error, token);
+            char line[1024];
+            std::snprintf(line, sizeof line,
+                          "UPDATE_CHECK_FAIL status=%d decision=%s url=%s err=%s\n",
+                          man.status, result.code(), manifestUrl.c_str(), why.c_str());
+            fprintf(stderr, "RLPlayer: 更新检查失败 %s", line);
+            detail_native::AppendUpdateLog(line);
+            if (result.decision == Decision::FailedNetwork && !man.error.empty()) {
+                result.error += "：" + why;
+            }
+        } else if (result.available()) {
+            char line[512];
+            std::snprintf(line, sizeof line, "UPDATE_CHECK_OK remote=%s local=%s\n",
+                          result.remoteVersion.c_str(), RLPLAYER_VERSION);
+            detail_native::AppendUpdateLog(line);
+        }
         if (done) done(result);
     });
 }
@@ -865,6 +920,17 @@ bool run_install_pipeline(const CheckResult& plan, ProgressFn progress, CancelTo
                               : "下载失败（可重试）";
         if (dl.status > 0) msg += " HTTP " + std::to_string(dl.status);
         if (!dl.error.empty()) msg += "：" + dl.error;
+        // 2026-10-26：下载失败也必须留痕。用户截图只给了「下载地址不在白名单」，
+        // 而这句话只在 download_to_file 的白名单闸门里出现 —— 不把**当时的 URL**
+        // 记下来，就无法判断到底是哪一版二进制、哪一份清单给出的地址。
+        {
+            char line[1200];
+            std::snprintf(line, sizeof line,
+                          "UPDATE_DOWNLOAD_FAIL status=%d bytes=%lld url=[%s] err=%s\n",
+                          dl.status, (long long)dl.bytes, plan.downloadUrl.c_str(),
+                          redact_token(dl.error, token).c_str());
+            detail_native::AppendUpdateLog(line);
+        }
         ::unlink(dmgPath.c_str());
         outErr = redact_token(msg, token);
         return false;
@@ -934,7 +1000,19 @@ void begin_install(const CheckResult& plan, ProgressFn progress, InstallFn done,
         if (done) done(false, @"没有可用的更新计划");
         return;
     }
+    // 2026-10-26 诊断：用户实测「下载地址不在白名单」，但日志里 url=[] 是空的。
+    // 这行记录**入口看到的**原始值，用来区分"plan 本来就是空的"与"后面被改坏了"。
+    {
+        char line[1200];
+        std::snprintf(line, sizeof line,
+                      "BEGIN_INSTALL_ENTER decision=%s url=[%s] sha_len=%zu size=%lld\n",
+                      plan.code(), plan.downloadUrl.c_str(), plan.sha256.size(), plan.size);
+        detail_native::AppendUpdateLog(line);
+    }
     if (!update_download_url_allowed(plan.downloadUrl)) {
+        char line[1200];
+        std::snprintf(line, sizeof line, "BEGIN_INSTALL_REJECT url=[%s]\n", plan.downloadUrl.c_str());
+        detail_native::AppendUpdateLog(line);
         if (done) done(false, @"下载地址不在白名单，已拒绝");
         return;
     }
@@ -947,10 +1025,19 @@ void begin_install(const CheckResult& plan, ProgressFn progress, InstallFn done,
         return;
     }
 
+    // ⚠️ 2026-10-26 修的真 BUG（用户实测「下载地址不在白名单」，日志里 url=[] 为空）：
+    //   plan 是 **const 引用参数**，而下面的 dispatch_async 是**异步**执行。
+    //   调用方 mac_host.mm 传的是 `self.lastUpdatePlan`（结构体属性）⟹ 取值得临时对象，
+    //   begin_install 一返回临时对象就析构，block 里那个引用立刻悬垂；
+    //   等后台队列真跑起来，读到的 downloadUrl 是被回收的内存（实测就是空串）。
+    //   症状极具迷惑性：**入口检查通过**（临时对象那时还活着），异步下载时才变空
+    //   ⟹ 白名单闸门拒绝空串，UI 显示「下载地址不在白名单」，看起来像白名单配错了。
+    //   修法：进 block 前做**值拷贝**，block 按值捕获这份拷贝，生命周期与 block 一致。
+    const CheckResult planCopy = plan;
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
         InstallPipelineOptions opts;      // 生产默认：目标=当前 .app，自动重启=开
         std::string err, backup;
-        const bool ok = run_install_pipeline(plan, progress, cancel, opts, err, backup);
+        const bool ok = run_install_pipeline(planCopy, progress, cancel, opts, err, backup);
 
         // outErr 以 "installed-but-needs-manual-restart:" 开头 = 装好了但没重启成 ⟹ 走兜底
         const bool installedButNoRestart =
@@ -968,7 +1055,7 @@ void begin_install(const CheckResult& plan, ProgressFn progress, InstallFn done,
                 a.informativeText = [NSString stringWithFormat:
                     @"RLPlayer %s 已安装，但**自动重启没能启动**。\n\n"
                     @"请手动退出并重新打开 RLPlayer 以完成更新。",
-                    plan.remoteVersion.c_str()];
+                    planCopy.remoteVersion.c_str()];
                 [a addButtonWithTitle:@"好"];
                 [a runModal];
                 if (done) done(true, @"更新已安装，请手动重启");
