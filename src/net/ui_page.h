@@ -119,8 +119,11 @@ inline std::string rta_ui_page() {
     h += "#app.qopen:not(.noq):not(.setmode) #right{display:flex;position:fixed;top:68px;right:18px;bottom:92px;width:320px;z-index:20;border-radius:14px;border:1px solid var(--bar-border,var(--line2));background:var(--barbg);backdrop-filter:blur(32px) saturate(190%);-webkit-backdrop-filter:blur(32px) saturate(190%);box-shadow:var(--bar-shadow)}";
     // 窄窗口下曲目行按「歌名 > 艺术家 > 规格」优先级收列，绝不把歌名压成 0 宽（评审 #3/#18 的根因兜底）
     h += ".trow-track .ar,.trow-track .bd{overflow:hidden}";
-    h += "@media (max-width:1400px){.trow-track{grid-template-columns:28px 24px minmax(120px,1.8fr) minmax(0,1fr) 0px 58px!important}}";
-    h += "@media (max-width:1120px){.trow-track{grid-template-columns:28px 24px minmax(0,1fr) minmax(0,.9fr) 0px 58px!important}}";
+    // 2026-10-26（B-3 配套）：这两条 `!important` 会**整条覆盖**行内 grid ⟹ 必须同步加上第 7 列 26px，
+    // 否则窄窗下「+」被挤成 0 宽，B-3 的入口在 1400px 以下就消失了（等于修了又坏）。
+    // 收列顺序保持原口径：先收「规格」列（0px），「+」列始终保留。
+    h += "@media (max-width:1400px){.trow-track{grid-template-columns:28px 24px minmax(120px,1.8fr) minmax(0,1fr) 0px 58px 26px!important}}";
+    h += "@media (max-width:1120px){.trow-track{grid-template-columns:28px 24px minmax(0,1fr) minmax(0,.9fr) 0px 58px 26px!important}}";
     
     // 顶栏（第 2 列起，右侧通底，左侧与主内容对齐）
     // 2026-10-25（Apple Music 风格重构）：顶栏变成半透明毛玻璃大字报
@@ -217,6 +220,10 @@ inline std::string rta_ui_page() {
     // 无封面艺术家的首字母占位必须居中在圆形/方形头像内（261024-01 顺带修：以前字母跑到圆外左上角）
     h += ".ahead .cv{position:relative;overflow:hidden}";
     h += ".ahead .cv .ph{position:absolute;inset:0;display:grid;place-items:center;font-size:46px;font-weight:800;color:var(--ph-txt);background:var(--phbg)}";
+    // 2026-10-26（F-7）：艺术家头像的封面 <img> 覆盖层。
+    // 以前 artistHeroHtml 用 background-image 且**不渲染 .ph** ⟹ 命中 1x1 占位图时是纯色空圆。
+    // 现在 .ph 恒在底层，<img> 铺在上面、onerror 自隐（内联 display:none）⟹ 露回首字母。
+    h += ".ahead .cv img{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;display:block;border-radius:50%}";
     h += ".ahead .kind{font-size:10px;letter-spacing:1.4px;color:var(--mut2);font-weight:600}";
     h += ".ahead h1{font-size:26px;line-height:1.2;font-weight:750;letter-spacing:-.4px;margin:5px 0 7px;word-break:break-word;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:100%}";
         h += ".ahead .sub{font-size:12.5px;color:var(--mut);margin-bottom:13px}";
@@ -420,12 +427,18 @@ inline std::string rta_ui_page() {
     h += ".np .t2{font-size:11px;color:var(--mut);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-top:2px}";
     // 中间控制+进度：display: flex; flex-direction: column; align-items: center; gap: 3px; width: 100%; max-width: 440px; justify-self: center;
     h += ".ctr{display:flex;flex-direction:column;align-items:center;gap:3px;width:100%;max-width:440px;justify-self:center}.keys{display:flex;align-items:center;gap:6px}";
-    // bit-perfect 状态 chip（#bpBadge）：紧凑小标签，颜色区分三态；空态不占位。
-    // 颜色全部走主题变量：--ok-text / --warn / --bp-direct（三套主题各一份，浅色底也够对比度）。
+    // bit-perfect 状态 chip（#bpBadge）：紧凑小标签，颜色区分态；空态不占位。
+    // 颜色全部走主题变量：--ok-text / --warn / --bp-direct / --acc（三套主题各一份，浅色底也够对比度）。
+    // 2026-10-26 B-4：两态 → 六态，新增 .bp-up（三种升频方向共用一套冷色）。
+    //   为什么升频不按方向分三种颜色：底栏本来就挤，而且"升频"这件事用户只关心
+    //   「有没有动数据」—— 动的方向写在文本里（PCM-PCM / PCM-DSD / DSD-DSD），不靠颜色记。
+    //   绿（bp-yes）= 逐位一致、橙（bp-no）= 有改动但没升频、紫（bp-direct）= 1-bit 直通、
+    //   主题色（bp-up）= 升频。四类互不撞色。
     h += "#bpBadge{display:none;align-items:center;font-size:9.5px;font-weight:700;letter-spacing:.4px;padding:2px 7px;border-radius:5px;border:1px solid var(--line);background:var(--hov);white-space:nowrap;line-height:1.5}";
     h += "#bpBadge.bp-yes{display:inline-flex;color:var(--ok-text);border-color:var(--ok-line);background:var(--ok-bg)}";
     h += "#bpBadge.bp-no{display:inline-flex;color:var(--warn);border-color:currentColor;background:var(--hov)}";
     h += "#bpBadge.bp-direct{display:inline-flex;color:var(--bp-direct);border-color:currentColor;background:var(--hov)}";
+    h += "#bpBadge.bp-up{display:inline-flex;color:var(--acc);border-color:currentColor;background:var(--hov)}";
     // 窄屏：胶囊的左右起点跟着侧栏一起收（1240px 档侧栏是 200px），控制组只压缩不隐藏 ——
     // 歌词/信号链/音量三件套必须始终在（261023-04 #1 的判据）。
     h += "@media (max-width:1400px){.bar{gap:12px}.vol{gap:6px}.vol input[type=range]{width:76px;min-width:48px;flex:0 1 auto}}";
@@ -912,6 +925,15 @@ h += "#npPage .npedge{display:none}";
     h += ".fav-btn:hover{color:#e05666;transform:scale(1.15)}";
     h += ".fav-btn.on{color:#e05666}";
     h += ".fav-btn.on svg{fill:#e05666;stroke:#e05666}";
+    // 2026-10-26（B-3）：曲目行「+」入队按钮。
+    // 默认**不是** opacity:0 —— 本轮判据要求入口"看得见"：只有右键、没有任何视觉提示，
+    // 等于没有入口（用户不会去右键试）。这里用低对比度常显 + hover 变亮：
+    // 47 行的专辑列表里既一眼能发现，又不抢走曲名的注意力。
+    h += ".add-btn{display:inline-flex;align-items:center;justify-content:center;width:22px;height:22px;border-radius:6px;border:1px solid var(--line);background:transparent;color:var(--mut);font-size:15px;font-weight:600;line-height:1;cursor:pointer;padding:0;opacity:.62;transition:opacity .12s,color .12s,border-color .12s,background .12s}";
+    h += ".trow:hover .add-btn{opacity:1}";
+    h += ".add-btn:hover{color:var(--acc);border-color:var(--acc);background:var(--hov);opacity:1}";
+    h += ".add-btn:active{transform:scale(.92)}";
+    h += ".add-btn:focus-visible{opacity:1;outline:2px solid var(--acc);outline-offset:1px}";
     h += ".model-card{background:var(--card);border:1px solid var(--line);border-radius:8px;padding:12px 14px;cursor:pointer;transition:all .15s ease}";
     h += ".model-card:hover{border-color:var(--acc);background:var(--hov)}";
     h += ".model-card.active{border-color:var(--acc);box-shadow:0 0 0 1.5px var(--acc);background:var(--hov)}";

@@ -174,6 +174,53 @@ inline std::string lower_ascii(std::string k) {
     return k;
 }
 
+// ---------------------------------------------------------------------------
+// tag_is_placeholder —— 「这个标签值只是一个占位符，等于没有」
+//
+// 判据（261026-02 B-2，来自上游 v1.5.2 `fb77a0b` 的实测诊断，本机同构复现）：
+//   把值里的**数字与空白**剔掉之后，**只剩 '?'（含全角 '？'）且至少有一个 '?'** ⟹ 占位。
+//   出现任何一个别的字符就**不是**占位（立刻 return false）。
+//
+// 为什么需要它（WAV 真实事故）：部分 WAV 的 `LIST/INFO` 的 `INAM` 原始字节就是
+//   `3F 3F 3F …`（字面问号 —— 写盘工具把非 ASCII 文本整段替换掉了），而文件尾部
+//   `id3 ` 块的 `TIT2` 是**正确**的 UTF-16 名字。ffprobe 两条都打，而 lib_probe_one
+//   只取第一个非空值（段标记因 CRLF 匹配不上，见本文件 TagValues/TagMerger 的实测说明）
+//   ⟹ 稳定选中坏的那条。修法是让「纯占位」**不占位**，把后面的好值让进来。
+//
+// ⚠️ 负向判据（铁律 3：这条判据必须能被单独否定）——下面这些**合法**名字里本来就带 '?'，
+//   一个字都不许改，必须原样保留：
+//       "Kokoro no Ame ~???~"        （句中的 ~???~ 是标题的一部分）
+//       "????? (Chinese Tea)"        （混合型：CJK 段被替换，ASCII 尾巴是原文）
+//       "U.N.オーエンは彼女なのか？"  （末尾一个全角问号）
+//       "May I May I？" / "Who?" / "7PM?" / "???"
+//   前两条里有字母/括号/波浪号 ⟹ 本判据判「不是占位」（保留原值）；
+//   最后一条 "???" 判「是占位」—— 它本来就不可读，丢掉不亏。
+//
+// 上游口径（如实沿用，不擅自放宽）：**混合型问号**（`????? (Chinese Tea)`，问号与实义字符
+//   同量级但并非全是问号）本判据修不了，因为它与「本来就带问号的合法名字」在纯字节层面
+//   无法区分。上游实测 16 首里只救回 6 首、混合型 10/16 挂账；mac 沿用「宁可留 '?'，
+//   不给错名」——不做猜测性拼接，不靠长度比、不靠文件名反推。
+//
+// 作用域：只在 `TagMerger::absorb`（WAV 的**跨块**合并）里用。MP3/OGG 没有「同键双来源」
+//   这个结构，套上去反而会改变它们与 ffprobe 逐字段一致的结果（A/B 会红）。
+// ---------------------------------------------------------------------------
+inline bool tag_is_placeholder(const std::string& s) {
+    bool sawQ = false;
+    for (size_t i = 0; i < s.size();) {
+        const unsigned char c = (unsigned char)s[i];
+        if (c == '?') { sawQ = true; ++i; continue; }                             // ASCII 问号
+        if (c == ' ' || c == '\t' || c == '\r' || c == '\n') { ++i; continue; }   // 空白
+        if (c >= '0' && c <= '9') { ++i; continue; }                              // 数字（"??? 1" 这种）
+        // 全角问号 U+FF1F = EF BC 9F（3 字节）
+        if (c == 0xEF && i + 2 < s.size() &&
+            (unsigned char)s[i + 1] == 0xBC && (unsigned char)s[i + 2] == 0x9F) {
+            sawQ = true; i += 3; continue;
+        }
+        return false;                       // 出现任何一个别的码点 ⟹ 不是纯占位
+    }
+    return sawQ;                            // 全是问号/数字/空白，且至少一个问号
+}
+
 // UTF-16（LE/BE）→ UTF-8。失败（非法代理对外的超长/截断）返回 false ⟹ 调用方回退。
 inline bool utf16_to_utf8(const unsigned char* p, size_t n, bool big, std::string* out) {
     out->clear();
@@ -559,19 +606,46 @@ struct TagValues {
 };
 
 // 跨块合并：把一块里读到的值「先到先得」地吃进去（槽空着且值非空才吃）。
+//
+// ★ 261026-02 B-2：**纯占位值（tag_is_placeholder）不占位**。
+//   这是唯一一处偏离「先到先得」的地方，且只对「等于没有」的值生效：
+//     * 纯占位（去掉数字/空白后全是 '?'）⟹ 视为空，让后面的块上位；
+//     * 其它任何值（包括 "Kokoro no Ame ~???~" / "????? (Chinese Tea)" 这类**句中带问号
+//       的合法名字**）⟹ 行为**逐字节不变**，照旧先到先得。
+//   为什么不做「残缺值择优/拼接」：那需要判断「哪份更可信」，而 mac 沿用上游「宁可留 '?'，
+//   不给错名」的口径 —— 猜测性拼接会把两个来源的字节混成一个谁都没写过的名字。
+//
+// ⚠️ 这条会让原生通道**故意**与 ffprobe 不同（ffprobe 给 '???'，我们给真名）。
+//   tests/test_tags_native.cpp 已把这类夹具登记为「已知且期望的差异」，A/B 判据对它们
+//   断言的是「差异方向正确」，不是「两边相等」。
 struct TagMerger {
     TagValues acc;                 // 已入库的（每个键的第一个非空值）
     bool genreNumeric = false;     // 已入库的 genre 来自 ID3 的数字流派引用 ⟹ 需要回退
     void absorb(const TagValues& v, bool vGenreNumeric = false) {
+        // 占位值按「空」处理。用一个拷贝而不是逐字段判空，是为了让下面 8 行判断**保持原样**
+        // （「先到先得」的语义一个字都没改，改的只是"什么算空"）。
+        TagValues vv = v;
+        auto killPlaceholder = [](std::string& dst) {
+            if (!dst.empty() && tag_is_placeholder(dst)) dst.clear();
+        };
+        killPlaceholder(vv.title);
+        killPlaceholder(vv.artist);
+        killPlaceholder(vv.album);
+        killPlaceholder(vv.albumArtist);
+        killPlaceholder(vv.genre);
+        killPlaceholder(vv.date);
+        killPlaceholder(vv.track);
+        killPlaceholder(vv.disc);
+
         bool tookGenre = false;
-        if (!acc.hasTitle && !v.title.empty())             { acc.title = v.title; acc.hasTitle = true; }
-        if (!acc.hasArtist && !v.artist.empty())           { acc.artist = v.artist; acc.hasArtist = true; }
-        if (!acc.hasAlbum && !v.album.empty())             { acc.album = v.album; acc.hasAlbum = true; }
-        if (!acc.hasAlbumArtist && !v.albumArtist.empty()) { acc.albumArtist = v.albumArtist; acc.hasAlbumArtist = true; }
-        if (!acc.hasGenre && !v.genre.empty())             { acc.genre = v.genre; acc.hasGenre = true; tookGenre = true; }
-        if (!acc.hasDate && !v.date.empty())               { acc.date = v.date; acc.hasDate = true; }
-        if (!acc.hasTrack && !v.track.empty())             { acc.track = v.track; acc.hasTrack = true; }
-        if (!acc.hasDisc && !v.disc.empty())               { acc.disc = v.disc; acc.hasDisc = true; }
+        if (!acc.hasTitle && !vv.title.empty())             { acc.title = vv.title; acc.hasTitle = true; }
+        if (!acc.hasArtist && !vv.artist.empty())           { acc.artist = vv.artist; acc.hasArtist = true; }
+        if (!acc.hasAlbum && !vv.album.empty())             { acc.album = vv.album; acc.hasAlbum = true; }
+        if (!acc.hasAlbumArtist && !vv.albumArtist.empty()) { acc.albumArtist = vv.albumArtist; acc.hasAlbumArtist = true; }
+        if (!acc.hasGenre && !vv.genre.empty())             { acc.genre = vv.genre; acc.hasGenre = true; tookGenre = true; }
+        if (!acc.hasDate && !vv.date.empty())               { acc.date = vv.date; acc.hasDate = true; }
+        if (!acc.hasTrack && !vv.track.empty())             { acc.track = vv.track; acc.hasTrack = true; }
+        if (!acc.hasDisc && !vv.disc.empty())               { acc.disc = vv.disc; acc.hasDisc = true; }
         if (tookGenre) genreNumeric = vGenreNumeric;
     }
 };

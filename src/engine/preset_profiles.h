@@ -1,13 +1,14 @@
-// src/engine/preset_profiles.h — 「三档官方推荐预设」的纯决策层
+// src/engine/preset_profiles.h — 「官方推荐预设」的纯决策层（2026-10-26 起四档）
 //
-// 用户 2026-10-25 钦定：三档官方推荐（原音直通 / PCM 升频 / DSD 升频）都要**自动探测硬件能力**，
-// 一键把设置调到对应目标。本文件只做「能力 + 源信息 → 设置」的纯函数决策：
+// 用户 2026-10-25 钦定：官方推荐（原音直通 / PCM 升频 / DSD 升频）都要**自动探测硬件能力**，
+// 一键把设置调到对应目标。2026-10-26 追加第 4 档 PCM→DSD（上游 7d49a12，按 mac 口径重做）。
+// 本文件只做「能力 + 源信息 → 设置」的纯函数决策：
 //   * 不碰设备、不读文件、不做 IO ⟹ 可以在没有声卡的机器上离线单测（tests/test_preset_profiles.cpp）；
 //   * 探测本身在 tools/rtaweb.cpp（WASAPI IsFormatSupported / ASIO canSampleRate 与
 //     kAsioCanDoIoFormat 都是**查询**，不开流、不建缓冲、不抢占设备）；
 //   * 探测失败/未知一律**保守降级**，并把原因写进 notes —— 绝不静默假装支持。
 //
-// 三档口径（字段名就是 /api/play 的请求键名，也是 /api/preset/apply 的 applied 字段）：
+// 四档口径（字段名就是 /api/play 的请求键名，也是 /api/preset/apply 的 applied 字段）：
 //   bitperfect（原音直通）：完全不动数据
 //       rate=follow（跟随源，不重采样）· volume=0 dB · shaper=none · 无 EQ/IR/等响度/每声道增益/ISP 预衰减
 //       源是 PCM ⟹ dsd=0；源是 DSD 且设备能承载 ⟹ dsd=<源位率>，同速率 ⟹ directSdm=1（1-bit 直通）
@@ -21,6 +22,14 @@
 //       dsd = 设备原生支持的最高 DSD 档（没有原生则退 DoP 的最高档）· modfamily=ec · modorder=7
 //       filter=poly-sinc-tight-lp · tapsPerInput=512 · rate=follow · shaper=none（DoP 强制无抖动）
 //       源 DSD 与目标同速率 ⟹ directSdm=1
+//   pcm2dsd（PCM → DSD，2026-10-26 第 4 档）：
+//       **mac 口径：只走 DoP**。macOS 没有 ASIO 原生 DSD 驱动通路，rtaweb 的 c.dsdNative
+//       是硬编码 false（tools/rtaweb.cpp 的 preset_probe_caps），所以本档**绝不允许**出现
+//       「设备原生支持 DSD / 1-bit 直送」这类虚构通路（2026-10-26 A-5 事故的教训：
+//       虚构公共 API + 测虚构语义 = 假通过）。notes 只写「走 DoP，载波 X Hz」。
+//       dsd = DoP 能承载的最高档 · modfamily=ec · modorder=7
+//       filter=poly-sinc-tight-lp · tapsPerInput=512 · rate=follow · shaper=none · directSdm=0
+//       无 DoP 能力 ⟹ 明确降级为 PCM 升频并在 notes 里说明原因（与 dsd 档同口径）。
 //
 // 为什么 shaper 在 dsd 档写 none：DoP 路径在 rtaweb 里是 `cfg.shaper = Shaper::None`
 // （抖动交给调制器之后的 1-bit 量化），写 auto 只是好看、实际不生效 —— 宁可写真实值。
@@ -42,19 +51,25 @@ constexpr uint32_t kPresetRateCap = 384000u;
 // 只能说明它对采样率不做校验，不能当成真能力 —— 一律按 DSD512 封顶并记 note。
 constexpr int kPresetDsdMaxLevel = 512;
 
-enum class PresetProfile { BitPerfect, Pcm, Dsd };
+enum class PresetProfile {
+    BitPerfect,   // 原音直通（PCM 直出 / DSD 直通）
+    Pcm,          // PCM → PCM 升频
+    Dsd,          // DSD → DSD 升频（异速率经解码 + 重新调制）
+    PcmToDsd      // PCM → DSD（SDM 调制后走 DoP 承载），2026-10-26 第 4 档
+};
 
 inline const char* preset_profile_name(PresetProfile p) {
     switch (p) {
         case PresetProfile::BitPerfect: return "bitperfect";
         case PresetProfile::Pcm:        return "pcm";
         case PresetProfile::Dsd:        return "dsd";
+        case PresetProfile::PcmToDsd:   return "pcm2dsd";
     }
     return "pcm";
 }
 
 // 解析 /api/preset/apply?profile=… 的取值。接受几个等价写法（bit-perfect / bp / sdmod），
-// 但输出的规范名永远是 preset_profile_name() 的三个之一 —— 界面上只显示规范名。
+// 但输出的规范名永远是 preset_profile_name() 的四个之一 —— 界面上只显示规范名。
 inline bool preset_profile_parse(const std::string& s, PresetProfile& out) {
     std::string v;
     v.reserve(s.size());
@@ -62,6 +77,13 @@ inline bool preset_profile_parse(const std::string& s, PresetProfile& out) {
     if (v == "bitperfect" || v == "bit-perfect" || v == "bp") { out = PresetProfile::BitPerfect; return true; }
     if (v == "pcm" || v == "pcm-upsample" || v == "upsample") { out = PresetProfile::Pcm; return true; }
     if (v == "dsd" || v == "sdmod" || v == "dsd-upsample") { out = PresetProfile::Dsd; return true; }
+    // 2026-10-26 第 4 档：PCM → DSD。三个等价写法都认（上游 7d49a12 同口径）。
+    // ⚠️ 必须放在 dsd 那条**之后**且用全等比较（v == …），不是前缀匹配 ——
+    //    "dsd" 前缀匹配会顺带吃掉 "dsd-upsample"，"pcm" 前缀匹配会吃掉 "pcm2dsd"
+    //   （这正是 B-6 记录的端点前缀吞噬缺陷的同一类写法）。
+    if (v == "pcm2dsd" || v == "pcm-dsd" || v == "pcm_dsd" || v == "pcm-to-dsd") {
+        out = PresetProfile::PcmToDsd; return true;
+    }
     return false;
 }
 
@@ -290,6 +312,72 @@ inline PresetSettings plan_preset(PresetProfile prof, const DeviceCaps& caps, co
         if (src.isDsd) {
             s.notes.push_back("源是 DSD：本档先把 DSD 解成 PCM 再升频（要 1-bit 直通请用原音直通档）");
         }
+        s.notes.push_back("已清空 EQ/IR/等响度/每声道增益（官方推荐链路的基线）");
+        return s;
+    }
+
+    // ---------------- ④ PCM → DSD（SDM 调制 + DoP 承载）----------------
+    // ⚠️ 位置说明：本块**必须**放在 ③ 之前。③「DSD 升频」没有 `if (prof == …)` 守卫，
+    //    它是 BitPerfect/Pcm 都不命中时的 fall-through 分支；放到 ③ 之后就永远走不到。
+    // 2026-10-26 第 4 档（上游 7d49a12 的 pcm2dsd，**按 mac 前提重做**）。
+    //
+    // 与上游的三处实质差异（不是抄注释，是抄不了）：
+    //   ① 上游 notes 写「设备原生支持 DSD（封装选「原生」可 1-bit 直送）」—— mac 上这是
+    //      **虚构通路**：rtaweb 的 preset_probe_caps 把 c.dsdNative 硬编码成 false
+    //      （macOS 没有 ASIO 原生 DSD 驱动通路，Native DSD 在 /api/play 直接被拒）。
+    //      所以本档**只认 DoP**，notes 只写「走 DoP，载波 X Hz」，绝不出现「原生 / 1-bit 直送」。
+    //   ② 上游用 capLevel（原生优先），mac 用 dopLvl（**只有 DoP 才算能力**）。
+    //   ③ 上游无能力时降级 PCM；mac 同口径，但必须说明「mac 没有原生 DSD 通路」这一前提。
+    if (prof == PresetProfile::PcmToDsd) {
+        s.filter = "poly-sinc-tight-lp";
+        s.minTapsPerInput = 512;
+        s.shaper = "none";            // 抖动交给调制器之后的 1-bit 量化（与 DSD 档一致）
+        s.rate = "follow";            // DoP 忽略 rate：载波率由 dsd 档决定，不是由 rate 决定
+        s.directSdm = 0;              // PCM 源没有"直通"可言
+        // mac 口径：只有 DoP 才算 DSD 通路。dsdNative 即便被填成 true 也不采信 ——
+        // 采信它就会写出「原生 1-bit 直送」这种本平台不存在的通路（A-5 事故的同款错误）。
+        int targetLevel = (caps.dop && dopLvl > 0) ? dopLvl : 0;
+        if (targetLevel > kPresetDsdMaxLevel) targetLevel = kPresetDsdMaxLevel;
+        if (targetLevel == 0) {
+            // 无 DoP 能力 ⟹ 明确降级为 PCM 升频（让声音出来），并把事实写清
+            const uint32_t target = preset_max_pcm_rate(caps.rates, kPresetRateCap);
+            s.dsd = 0;
+            s.modFamily.clear();
+            s.modOrder = 0;
+            if (target == 0) {
+                s.rate = "follow";
+                s.shaper = "none";
+            } else {
+                s.rate = detail::num(target);
+                s.shaper = "auto";
+            }
+            s.notes.push_back("✗ mac 没有原生 DSD 驱动通路，本档只能走 DoP；而本设备的 DoP 承载能力为" +
+                              (caps.dopMax.empty() ? std::string("无") : caps.dopMax) +
+                              " ⟹ PCM→DSD 档无法兑现，已降级为 PCM 升频（" +
+                              (target == 0 ? std::string("跟随源") : (detail::num(target) + " Hz")) + "）");
+            if (target == 0) {
+                s.notes.push_back("设备 PCM 支持率探测为空：降级后连升频也不做，跟随源（不假装支持）");
+            }
+            s.notes.push_back("已清空 EQ/IR/等响度/每声道增益（官方推荐链路的基线）");
+            return s;
+        }
+        s.dsd = targetLevel;
+        s.modFamily = "ec";
+        s.modOrder = 7;
+        // 本档的 notes 只有这一条讲通路，且**只讲 DoP**：mac 没有原生 DSD，写「原生」就是撒谎。
+        s.notes.push_back("PCM → DSD" + detail::numi(targetLevel) + "：走 DoP，载波 " +
+                          detail::num(dop_carrier_for_level(targetLevel)) + " Hz（mac 无原生 DSD 通路）");
+        if (dopLvl > kPresetDsdMaxLevel) {
+            s.notes.push_back("设备 DoP 能承载高于 DSD512 的档位：本档按 DSD" +
+                              detail::numi(kPresetDsdMaxLevel) + " 封顶（不对超规格档位打包票）");
+        }
+        if (src.isDsd) {
+            s.notes.push_back("源是 DSD：本档先解成 PCM 再调制回 DSD（等效 DSD→DSD 重调制；"
+                              "要 1-bit 直通请用原音直通档）");
+        } else {
+            s.notes.push_back("源是 PCM：解码 → poly-sinc-tight-lp 过采样 → EC-7 SDM 调制 → DoP 打包");
+        }
+        s.notes.push_back("EC-7 调制器（实测 DSD64/128/256 稳定；预衰减由 DSP 的调制器余量自动给）");
         s.notes.push_back("已清空 EQ/IR/等响度/每声道增益（官方推荐链路的基线）");
         return s;
     }

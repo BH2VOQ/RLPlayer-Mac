@@ -21,6 +21,12 @@
 //       （改动前 19/71，差的 52 个就是 51 个 "id3 " 块 + 1 个 bext），并把整个 MUSIC 曲库
 //       用 Library 全量扫两遍（RLPLAYER_NATIVE_TAGS=0/1）比索引字节。
 //
+//   [6] 问号占位标题（261026-02 B-2，上游 v1.5.2 `fb77a0b` 的同构缺陷）：LIST/INFO 的
+//       INAM 原始字节是字面 `3F 3F 3F…` 时**不占位**，让文件尾部 `id3 ` 块的 TIT2 真名上位。
+//       判据分三层：① 纯函数 tag_is_placeholder 的正例/负例；② 真实 WAV 夹具（INAM="???" +
+//       id3 TIT2="不由己"）修前得 ???、修后得 不由己；③ **负向对照** —— 句中本来就带 '?' 的
+//       合法名字（"Kokoro no Ame ~???~" / "????? (Chinese Tea)"）必须原样保留。
+//
 // ⚠️ 未解决项（铁律 4）：
 //   1) WAV 的 iXML/axml 仍**主动回退** ffprobe：XML 字段到 ffprobe 键的映射没实测过，
 //      本库 71 个 WAV 里 0 个样本。同理 "id3 " 块里的 ID3v2.2/unsynchronisation/帧标志位，
@@ -28,6 +34,12 @@
 //   2) MUSIC 不存在时 [2]/[5] 只用 build/testdata 的文件并如实打印「真实文件数不足」，不假装覆盖。
 //   3) [5] 的全库扫描要起 655 次 ffprobe（一遍），ctest 里约多花 15~20 s；这是"索引逐字节"这条
 //      判据的成本，不能靠抽查代替。
+//   4) [6] 的**混合型问号**（"????? (Chinese Tea)" 这种问号与实义字符同量级、但并非全是问号的）
+//      本判据**修不了** —— 它在纯字节层面与"本来就带问号的合法名字"无法区分。上游实测 16 首
+//      只救回 6 首、混合型 10/16 挂账；mac 沿用「宁可留 '?'，不给错名」，不做猜测性拼接。
+//   5) [6] 让原生通道与 ffprobe **故意不同**（ffprobe 给 '???'，我们给真名）。这类夹具在 A/B
+//      里登记为「已知且期望的差异」，断言的是差异方向（ff != nt）而不是相等；若有人把修复去掉，
+//      那条断言会立刻变红。
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
 #ifndef NOMINMAX
@@ -1100,6 +1112,111 @@ static void unitTests(const fs::path& dir) {
         writeFile(q, trunc);
         TagInfo t2; std::string why2;
         ck(!probeNative(q, t2, why2), "OGG 末页被截断 ⟹ 回退 ffprobe", why2);
+    }
+
+    // ---- WAV：LIST/INFO 的字面 '?' 占位标题**不占位**（261026-02 B-2）----
+    // 上游 v1.5.2 `fb77a0b` 的实测诊断：部分 WAV 的 `LIST/INFO` 的 INAM 原始字节就是
+    // `3F 3F 3F …`（写盘工具把非 ASCII 文本整段替换成问号），而文件尾部 `id3 ` 块的 TIT2
+    // 是**正确**的 UTF-16 名字。ffprobe 两条都打，lib_probe_one 只取第一个非空值
+    // ⟹ 稳定选中坏的那条。修法：纯占位值在 TagMerger::absorb 里**不占位**。
+    //
+    // ⚠️ 这条修复**故意**让原生结果与 ffprobe 不同（ffprobe 给 '???'，我们给真名）。
+    //    所以下面的 A/B **不能**再断言「逐字段相等」——见每组末尾的「已知且期望的差异」断言。
+    {
+        // --- [纯函数] 判据本身：正例与负例都必须单独可否定 ---
+        using rta::meta::native::detail::tag_is_placeholder;
+        ck(tag_is_placeholder("???"), "B-2 判据：\"???\" 判占位");
+        ck(tag_is_placeholder(std::string(25, '?')), "B-2 判据：25 个 '?' 判占位（本库真实坏值的形态）");
+        ck(tag_is_placeholder("? ? ?"), "B-2 判据：问号之间夹空格仍判占位");
+        ck(tag_is_placeholder("??? 1"), "B-2 判据：问号+数字判占位（数字要剔除）");
+        ck(tag_is_placeholder("\xEF\xBC\x9F\xEF\xBC\x9F"), "B-2 判据：两个全角 '？' 判占位");
+        ck(!tag_is_placeholder(""), "B-2 判据：空串**不**判占位（空值另有口径）");
+        ck(!tag_is_placeholder("123"), "B-2 判据：纯数字不判占位（没有 '?'）");
+        ck(!tag_is_placeholder("   "), "B-2 判据：纯空白不判占位（没有 '?'）");
+        // ★ 负向对照（任务书点名要求的两个样本，一个字都不许改）
+        ck(!tag_is_placeholder("Kokoro no Ame ~???~"),
+           "B-2 负向：\"Kokoro no Ame ~???~\"（句中的 ~???~）**不**判占位");
+        ck(!tag_is_placeholder("????? (Chinese Tea)"),
+           "B-2 负向：\"????? (Chinese Tea)\"（混合型）**不**判占位");
+        ck(!tag_is_placeholder("U.N.\xE3\x82\xAA\xE3\x83\xBC\xE3\x82\xA8\xE3\x83\xB3\xE3\x81\xAF"
+                               "\xE5\xBD\xBC\xE5\xA5\xB3\xE3\x81\xAA\xE3\x81\xAE\xE3\x81\x8B"
+                               "\xEF\xBC\x9F"),
+           "B-2 负向：日文标题末尾一个全角 '？' **不**判占位");
+        ck(!tag_is_placeholder("Who?"), "B-2 负向：\"Who?\" **不**判占位");
+        ck(!tag_is_placeholder("7PM?"), "B-2 负向：\"7PM?\" **不**判占位");
+
+        // --- [真实容器] LIST/INFO INAM="???" + 尾部 id3 TIT2="不由己" ---
+        WavSpec s;
+        s.frames = 441;                                  // 10 ms，够解析就行
+        s.info = { {"INAM", "???"}, {"IART", "?????"} }; // 两条坏值：标题与艺术家都要被救回
+        s.id3chunk = true;
+        s.id3Title = "不由己";
+        s.id3Artist = "真艺术家";
+        const fs::path p = dir / "qm_inam_id3.wav";
+        writeFile(p, buildWav(s));
+
+        TagInfo t; std::string why;
+        const bool okNat = probeNative(p, t, why);
+        std::printf("     [B-2] native -> title=[%s] artist=[%s] (hit=%d %s)\n",
+                    t.title.c_str(), t.artist.c_str(), (int)okNat, why.c_str());
+        ck(okNat, "B-2 WAV(INAM=\"???\" + id3 TIT2=\"不由己\")：原生解析成功", why);
+        ck(t.title == "不由己", "B-2 修后 title = 不由己（修前是 ???）", "得到 [" + t.title + "]");
+        ck(t.artist == "真艺术家", "B-2 修后 artist = 真艺术家（同一规则作用于所有键）",
+           "得到 [" + t.artist + "]");
+
+        // --- 已知且期望的差异：ffprobe 给 '???'，我们给真名 ---
+        const AbResult r = abOne(U8(p));
+        std::printf("     [B-2] ffprobe title=[%s]  native title=[%s]  diffs=%zu\n",
+                    r.ff.title.c_str(), r.nt.title.c_str(), r.diffs.size());
+        ck(r.hit, "B-2 该夹具由原生通道解析（没有偷偷回退 ffprobe）", r.why);
+        ck(r.ff.title == "???", "B-2 证据：ffprobe 这条路径给出的是坏值 ???（缺陷确实存在）",
+           "ffprobe=[" + r.ff.title + "]");
+        ck(r.nt.title == "不由己", "B-2 证据：原生路径给出真名 不由己（修复生效）",
+           "native=[" + r.nt.title + "]");
+        // 这里**故意**断言「不相等」，并把它登记为已知且期望的差异。
+        // 如果有人把修复去掉让两边重新相等，这条会立刻变红 —— 这正是它存在的意义。
+        ck(r.ff.title != r.nt.title,
+           "B-2 已知且期望的差异：ffprobe(???) != native(不由己) —— 本次修复的**目的**就是不同");
+
+        // --- 负向对照（真实容器）：句中带 '?' 的合法名字必须原样保留 ---
+        for (const auto& kv : std::vector<std::pair<std::string, std::string>>{
+                 { "qm_mixed_info", "Kokoro no Ame ~???~" },
+                 { "qm_mixed_paren", "????? (Chinese Tea)" } }) {
+            WavSpec q;
+            q.frames = 441;
+            q.info = { {"INAM", kv.second} };
+            q.id3chunk = true;
+            q.id3Title = "ID3 不该赢";
+            const fs::path fp = dir / (kv.first + ".wav");
+            writeFile(fp, buildWav(q));
+            TagInfo tq; std::string whyq;
+            ck(probeNative(fp, tq, whyq), "B-2 负向容器夹具解析成功（" + kv.first + "）", whyq);
+            ck(tq.title == kv.second,
+               "B-2 负向：INAM=[" + kv.second + "] 原样保留（先到先得，后面的 ID3 不许覆盖）",
+               "得到 [" + tq.title + "]");
+            // 与 ffprobe 一致（这条**不该**有差异：值本身合法，规则不生效）
+            const AbResult rq = abOne(U8(fp));
+            ckFf(rq.diffs.empty(),
+                 "B-2 负向：合法问号名与 ffprobe 逐字段一致（规则没有误伤）",
+                 rq.diffs.empty() ? "" : rq.diffs[0]);
+        }
+
+        // --- 对照：**非**占位的 INAM 仍然先到先得（防止有人把规则写成"ID3 一律赢"）---
+        WavSpec u;
+        u.frames = 441;
+        u.info = { {"INAM", "正常的 INFO 标题"} };
+        u.id3chunk = true;
+        u.id3Title = "ID3 标题";
+        const fs::path up = dir / "qm_normal_info.wav";
+        writeFile(up, buildWav(u));
+        TagInfo tu; std::string whyu;
+        ck(probeNative(up, tu, whyu), "B-2 对照：正常 INAM 夹具解析成功", whyu);
+        ck(tu.title == "正常的 INFO 标题",
+           "B-2 对照：非占位的 INAM 仍然先到先得（占位规则没有扩大成\"后者覆盖\"）",
+           "得到 [" + tu.title + "]");
+        const AbResult ru = abOne(U8(up));
+        ckFf(ru.diffs.empty(), "B-2 对照：正常 INAM 与 ffprobe 逐字段一致",
+             ru.diffs.empty() ? "" : ru.diffs[0]);
     }
 }
 

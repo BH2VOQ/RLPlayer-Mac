@@ -36,7 +36,7 @@ using rta::net::SourceManager;
 using rta::net::SourceConfig;
 using rta::net::SubEntry;
 #include "engine/pipeline.h"
-#include "engine/preset_profiles.h"   // 三档官方推荐预设的纯决策层（2026-10-25；离线单测 tests/test_preset_profiles.cpp）
+#include "engine/preset_profiles.h"   // 官方推荐预设的纯决策层（2026-10-25 三档 → 2026-10-26 四档；离线单测 tests/test_preset_profiles.cpp）
 
 #include "audio/wav.h"
 #include "audio/audio_loader.h"
@@ -360,6 +360,29 @@ struct PlayerState {
     // 在信号链 JSON 生成处一并写入，/api/status 直接带出，供底栏常驻徽标使用。
     std::string bpState;
     std::string bpWhy;
+    // ---- 输出格式自证（2026-10-26，debug/20261026-02 F-5）----
+    // 为什么必须由后端给：底栏只拿到 outRate，而 **DoP 的 outRate 是载波率**
+    // （DSD128 / 48k 族 = 6144000/16 = 384000），和"PCM 升频到 384k"的数字一模一样。
+    // 用户看到 384000 会判断"选了 DSD 却变成 PCM 升频"（上游踩过这个坑）；
+    // 后端不把 dsdRate 交出来，这个误解永远无法自证。
+    //   outMode     输出通道模式：coreaudio（独占）/ shared（共享）/ null / upnp
+    //               ★ mac **没有** wasapi / asio / native 这些值（ASIO 整段已删；
+    //                 Native DSD 在 mac 不存在，/api/play 直接拒绝 dsdnative=1）。
+    //               "" = 本进程还没播过任何东西（未知，不是"pcm"）
+    //   dsd         实际输出的 DSD 档位（64/128/256/512；PCM = 0）
+    //   dsdRate     实际 1-bit **有效码率**（DSD128 = 6144000；PCM = 0）
+    //   carrierRate DoP 的 **PCM 载波率** = dsdRate/16（就是 ps.outRate 那个数；
+    //               DSD128 = 384000；PCM = 0）。两个数都给，用户才不会把载波当 PCM 降级
+    //   modFamily   调制器族（PCM / DirectSDM 直通 = 空，因为没有调制器参与）
+    //   modOrder    **实际生效**的阶数（stable_sdm_order 可能按稳定性下调，不是用户填的）
+    //   fallbackWhy 非空 = 本次实际输出与用户请求不一致的**中文**原因（空 = 没降级）
+    std::string outMode;
+    int         outDsdLevel    = 0;
+    uint32_t    outDsdRate     = 0;
+    uint32_t    outCarrierRate = 0;
+    std::string outModFamily;
+    int         outModOrder    = 0;
+    std::string outFallbackWhy;
     double outRate = 0;
     int    outBits = 0;
     // 2026-10-24（用户 261024-04 #8：bit-perfect 时信号链没绿点、右下角 GPU 图标还亮着）：
@@ -424,6 +447,29 @@ struct PlayerState {
     }
 };
 static PlayerState g_ps;
+
+// 写"输出格式自证"字段（2026-10-26 F-5）。**唯一入口**：字段成组更新，
+// 且必须持 ps.mtx —— /api/status 的读线程在同一把锁下取值。
+// 调用点不得已经持有 ps.mtx（否则死锁）。
+// 分成两个函数：① 每曲起播先 reset 成"未知/PCM"，② 真正走 DSD 的分支再覆盖。
+static void set_out_format_state(const char* mode, int dsdLevel, uint32_t dsdBitRate,
+                                 uint32_t carrierRate, const std::string& family,
+                                 int order, const std::string& fallbackWhy) {
+    std::lock_guard<std::mutex> lk(g_ps.mtx);
+    g_ps.outMode        = mode ? mode : "";
+    g_ps.outDsdLevel    = dsdLevel;
+    g_ps.outDsdRate     = dsdBitRate;
+    g_ps.outCarrierRate = carrierRate;
+    g_ps.outModFamily   = family;
+    g_ps.outModOrder    = order;
+    g_ps.outFallbackWhy = fallbackWhy;
+}
+// 起播前复位：不复位的话 /api/status 会把**上一曲**的 outMode 当成本次事实
+// （与 ps.gpu 每曲复位同一个教训，见 261024-04 #8）。
+// mode 传实际后端模式，dsd/调制字段归零（本曲还没决定是否走 DSD）。
+static void reset_out_format_state(const char* mode) {
+    set_out_format_state(mode, 0, 0, 0, std::string(), 0, std::string());
+}
 
 // 20 段参数均衡 PEQ（261024-02 #6）：全局单例。播放线程处理音频，HTTP 线程改参数（热更新）。
 static std::shared_ptr<rta::dsp::PeqEngine> g_peq;
@@ -1040,6 +1086,19 @@ static std::string stem_or_self(const std::string& file) {
     return pathToUtf8(fs::u8path(file).stem());
 }
 
+// 输出通道模式（F-5 的 outMode 取值）—— **mac 口径**，不是上游的 pcm|dop|native。
+//   上游 outMode 表达的是"1-bit 通路怎么走"；mac 没有 ASIO 原生 DSD 通道，
+//   Native DSD 在 /api/play 就被明确拒绝（见那里的 dsdnative 门），
+//   所以这里表达的是**输出通道的独占/共享语义**，DSD 与否由 dsd/dsdRate 单独表达。
+//   ★ 绝不允许出现 "wasapi" / "asio" / "native"：那是 Windows 的虚构通路（A-5 事故教训）。
+static std::string out_mode_of_backend(const std::string& backend) {
+    if (backend == "wasapi-shared") return "shared";   // CoreAudio 共享（系统混音）
+    if (backend == "null")          return "null";     // 只跑 DSP 不出声
+    if (backend == "upnp")          return "upnp";     // 投放：格式由远端渲染器决定
+    // 空 / "wasapi" / 未知历史值（含老 conf 的 "asio"）一律落到 CoreAudio 独占 ——
+    // 与 make_sink 的第二道闸完全同一口径（那边也是 else → CoreAudioSink 独占）。
+    return "coreaudio";
+}
 
 static std::unique_ptr<OutSink> make_sink(const PlayParams& p) {
     // 守门（261024-01 #9）：backend=upnp 由 /api/play 直接转交投放会话，本地播放线程根本不该启动。
@@ -1115,6 +1174,17 @@ static void upnp_mark_player_state(const std::string& file, bool ok, const std::
         ps.error.clear();
         ps.bpState = "no";
         ps.bpWhy = "UPnP 投放：源文件按原采样率供源，渲染器侧是否重采样由对方决定（本机 DSP 未介入）";
+        // F-5：投放模式下输出格式由**远端渲染器**决定，本机无从自证 ⟹
+        //   dsd/dsdRate/carrierRate/modFamily/modOrder 一律归零（绝不许拿上一首本地播放的
+        //   残留值冒充远程事实，与 ps.gpu 在投放模式归零是同一条纪律），
+        //   fallbackWhy 如实说明"无法自证"而不是留空（留空 = 声称"没降级"，那是假话）。
+        ps.outMode        = "upnp";
+        ps.outDsdLevel    = 0;
+        ps.outDsdRate     = 0;
+        ps.outCarrierRate = 0;
+        ps.outModFamily.clear();
+        ps.outModOrder    = 0;
+        ps.outFallbackWhy = "UPnP 投放：输出格式与采样率由远端渲染器决定（本机 DSP 未介入，无法自证）";
     } else {
         ps.error = err;
         ps.bpState = "no";
@@ -1309,6 +1379,20 @@ static bool play_one_direct(const std::string& file, const PlayParams& p) {
             ps.signal = sig.str();
             ps.info = "DirectSDM：DSD 源 " + std::to_string(srcRate) + " Hz → DoP " +
                       std::to_string(carrier) + " Hz（跳过调制，逐位直通）";
+        }
+        // F-5 自证（DirectSDM 分支）：1-bit 直通**没有调制器参与** ⟹ modFamily 必须为空、
+        // modOrder = 0（上游 261025-02 #5 同款口径：native 直通 modOrder=0）。
+        // ★ 这里刻意不写 "native"：mac 的 DirectSDM 仍然是 DoP 装箱送 CoreAudio，
+        //   不是 ASIO 原生 1-bit 通道（那种通路在 mac 不存在，见 /api/play 的 dsdnative 门）。
+        // dsd 档位按源 1-bit 位率反推（srcRate / 44100 或 /48000），dsdRate = 源位率本身，
+        // carrierRate = DoP 载波 = srcRate/16 —— 三个数一起给，用户才能分辨"384000 是载波"。
+        {
+            uint32_t lvl = 0;
+            if (srcRate && srcRate % 48000u == 0) lvl = srcRate / 48000u;
+            else if (srcRate && srcRate % 44100u == 0) lvl = srcRate / 44100u;
+            set_out_format_state(out_mode_of_backend(p.backend).c_str(),
+                                 (int)lvl, srcRate, carrier,
+                                 std::string(), 0, std::string());
         }
 
         auto sink = make_sink(p);
@@ -1579,7 +1663,7 @@ static void apply_stream_settings() {
 }
 
 // ============================================================================
-// 三档官方推荐预设（2026-10-25 用户钦定）：自动探测硬件能力 → 一键把设置调到对应目标
+// 官方推荐预设（2026-10-25 用户钦定，2026-10-26 扩为四档）：自动探测硬件能力 → 一键把设置调到对应目标
 //
 // 三条硬纪律：
 //   ① **只读探测**：macOS 走 probe_rates_cached（CoreAudio AudioObjectGetPropertyData，
@@ -1817,7 +1901,7 @@ static std::string preset_caps_json() {
     return j.str();
 }
 
-// POST /api/preset/apply?profile=bitperfect|pcm|dsd
+// POST /api/preset/apply?profile=bitperfect|pcm|dsd|pcm2dsd
 // 成功：{"ok":true,"profile":…,"applied":{…},"notes":[…]}；参数非法或写盘失败：400 + {"ok":false,"error":…}
 static std::string preset_apply_json(const std::string& path) {
     using namespace rta::engine;
@@ -1827,7 +1911,8 @@ static std::string preset_apply_json(const std::string& path) {
     PresetProfile prof = PresetProfile::Pcm;
     if (!preset_profile_parse(profStr, prof)) {
         rta::net::webui_set_status(400);
-        return std::string("{\"ok\":false,\"error\":\"profile 非法（只接受 bitperfect / pcm / dsd）：") +
+        // 2026-10-26 第 4 档：错误文案必须把 pcm2dsd 列出来，否则前端只能猜
+        return std::string("{\"ok\":false,\"error\":\"profile 非法（只接受 bitperfect / pcm / dsd / pcm2dsd）：") +
                jesc(profStr) + "\"}";
     }
     const DeviceCaps caps = preset_probe_caps();
@@ -2005,6 +2090,12 @@ static bool play_one_impl(const std::string& file, const PlayParams& pIn, rta::a
     g_dbgPeak.store(0.0);
     g_dbgClip.store(0);
     apply_dsd_src_settings(pIn);
+    // F-5（2026-10-26）：每次本地播放先把"输出格式自证"复位成本曲的**已知起点**。
+    // 不复位的话 /api/status 会把上一曲的 outMode/dsdRate 当成本次事实（同 ps.gpu 的教训）。
+    // 起点 = 该后端对应的通道模式 + DSD/调制全零（本曲还没决定是否走 DSD）；
+    // 真正走 DoP 的分支会在确定 dsdRate 与**实际生效阶数**之后再覆盖一次。
+    // ⚠️ 这里在 DirectSDM 分支**之前**执行 —— play_one_direct 自己会再写一次更精确的值。
+    reset_out_format_state(out_mode_of_backend(pIn.backend).c_str());
     // ---- 2026-10-25（耳机 EQ "切了没变化" · 根因 3）：EQ/IR 的配置兜底 ----
     // 只在 pIn 里为空时补，正常路径（前端已带上来）逐字节不变。
     // 为什么要兜底：见 settings_conf_value 的注释 —— ADV.eq 是异步加载的，
@@ -2027,6 +2118,15 @@ static bool play_one_impl(const std::string& file, const PlayParams& pIn, rta::a
     // 不满足条件时把原因带到信号链里（不能只写 ps.info —— 紧接着 read_any 会覆盖它）
     std::string directNote;
     std::string bitNote;   // HF-01：位深回退说明（进信号链 JSON，PLAY 日志随之带出）
+    // F-5：本次"实际输出 ≠ 用户请求"的中文原因汇总（进 /api/status 的 fallbackWhy）。
+    // 与 bitNote 分开：bitNote 只记位深，这里记**所有**降级（共享混音率改写、换采样率、
+    // 降位深、独占→共享回退），空串 = 没降级。appendFallback 保证多原因不互相覆盖。
+    std::string fallbackWhy;
+    auto appendFallback = [&](const std::string& s) {
+        if (s.empty()) return;
+        if (!fallbackWhy.empty()) fallbackWhy += "；";
+        fallbackWhy += s;
+    };
     if (p.directSdm) {
         const std::string ext = lowerExt(file);
         if (ext == ".dsf" || ext == ".dff") {
@@ -2214,7 +2314,7 @@ static bool play_one_impl(const std::string& file, const PlayParams& pIn, rta::a
             ps.info += s;
         };
         // 独占 RENDERFAIL 回退共享后的重入：把回退原因带进 note/ps.info/信号链
-        if (!extraNote.empty()) appendNote(extraNote);
+        if (!extraNote.empty()) { appendNote(extraNote); appendFallback(extraNote); }
         // ---- HF-02：open 前先核对端点状态。找不到/禁用/拔出 → 日志写明，并回退默认端点 ----
         // 必须在设备能力检查之前做：失效端点会让 exclusive_rates 对任何位深都返回空列表，
         // 否则永远走不到"回退默认端点"这一步（交接单 §2.1 的并行嫌疑）。
@@ -2394,6 +2494,17 @@ static bool play_one_impl(const std::string& file, const PlayParams& pIn, rta::a
             cfg.outRate = dsdRate;
             cfg.outBits = 24;                         // DoP 固定 24-bit 容器
             cfg.shaper  = rta::dsp::Shaper::None;     // 抖动交给调制器之后的 1-bit 量化
+            // F-5 自证：先把**请求值**写出去（level/有效码率/载波/族/请求阶数）。
+            // 真正的**生效阶数**由生产者在 stable_sdm_order() 之后覆盖（见下方调制器创建处）——
+            // 用户填 7 阶、按位率被降成 5 阶时，/api/status 的 modOrder 必须是实际值，
+            // 否则"我选了 EC-7"永远无法证伪（上游 261025-02 #5 同款口径）。
+            // ★ carrierRate 单独给：DoP 的 PCM 载波率（= dsdRate/16，也就是 ps.outRate）
+            //   与 DSD 有效码率是两个数，只给一个必然被误读成"PCM 降级"。
+            set_out_format_state(out_mode_of_backend(p.backend).c_str(),
+                                 p.dsd, dsdRate, deviceRate,
+                                 p.modFamily.empty() ? std::string("dsd") : p.modFamily,
+                                 p.modOrder > 0 ? p.modOrder : 5,
+                                 std::string());
         }
 
         // 设备能力检查（仅 WASAPI）。HF-01/02/04 接线（2026-10-22）：
@@ -2506,6 +2617,7 @@ static bool play_one_impl(const std::string& file, const PlayParams& pIn, rta::a
                                           : pickedWhy;
                         appendNote(why);
                         bitNote = bitNote.empty() ? why : (bitNote + "；" + why);
+                        appendFallback(why);   // F-5：换采样率也是"与请求不一致"
                         play_log("RATEFALLBACK " + why + " bits=" + std::to_string(effBitsFB) +
                                  " device=" + (pEff.device.empty() ? std::string("默认端点") : pEff.device));
                         // 走到这里说明已选定位深与采样率，跳过下面的硬失败
@@ -2546,6 +2658,7 @@ static bool play_one_impl(const std::string& file, const PlayParams& pIn, rta::a
                     appendNote(bn);
                     // 追加而不是覆盖：上面可能已经写过换采样的 RATEFALLBACK 说明，不能丢掉
                     bitNote = bitNote.empty() ? bn : (bitNote + "；" + bn);
+                    appendFallback(bn);   // F-5：降位深同样是"与请求不一致"
                 }
                 cfg.outBits = effBits;
                 if (p.shaper == "auto") {
@@ -2582,9 +2695,13 @@ static bool play_one_impl(const std::string& file, const PlayParams& pIn, rta::a
                 return false;
             }
             const uint32_t wantRate = cfg.outRate ? cfg.outRate : (uint32_t)in.rate;
-            if (wantRate != mixRate)
-                appendNote("共享模式按系统混音率 " + std::to_string(mixRate) + " Hz 输出（请求 " +
-                           std::to_string(wantRate) + " Hz，非 bit-perfect）");
+            if (wantRate != mixRate) {
+                const std::string shareWhy = "共享模式按系统混音率 " + std::to_string(mixRate) +
+                                             " Hz 输出（请求 " + std::to_string(wantRate) +
+                                             " Hz，非 bit-perfect）";
+                appendNote(shareWhy);
+                appendFallback(shareWhy);   // F-5：共享模式改采样率是**必然**的降级路径
+            }
             cfg.outRate = mixRate;                     // 下方 outRate/deviceRate 随之取 mixRate
             if (p.outChannels > 0 && p.outChannels != mixCh)
                 appendNote("共享模式输出声道按系统混音 " + std::to_string(mixCh) + " ch（请求 " +
@@ -2714,6 +2831,23 @@ static bool play_one_impl(const std::string& file, const PlayParams& pIn, rta::a
         //   进度条都会是"整轨"的（实测会看到 dur=10s 而实际只播 4s）。
         const size_t   totalOut = (size_t)((double)srcCount * (double)deviceRate / (double)in.rate + 0.5);
         ps.outRate = deviceRate; ps.outBits = outBits;
+        // F-5：把本曲**最终的**输出格式自证写进 ps（PCM 路径）。
+        // 走 DoP 的分支上面已经写过一次（含 level/码率/族）；这里补的是：
+        //   * PCM 路径：dsd=0 / dsdRate=0 / carrierRate=0 / modFamily 空 / modOrder=0
+        //     （**没有调制器参与**，写个非零阶数就是虚构事实）
+        //   * fallbackWhy：本次所有降级原因（换采样率/降位深/共享混音率改写/独占→共享回退）
+        // ★ 必须在这里统一写，而不是各分支各写一次：漏一处就会出现"降级了但 fallbackWhy 空"，
+        //   那比没有这个字段更糟（用户会以为没降级）。
+        {
+            const std::string mode = out_mode_of_backend(p.backend);
+            if (dop) {
+                // DoP：只补 fallbackWhy，其余字段保持上面写好的实际值
+                std::lock_guard<std::mutex> lk(ps.mtx);
+                ps.outFallbackWhy = fallbackWhy;
+            } else {
+                set_out_format_state(mode.c_str(), 0, 0, 0, std::string(), 0, fallbackWhy);
+            }
+        }
         ps.total.store(totalOut);
 
         // ---- 2026-10-25（耳机 EQ 热重载）：起播定位 ----
@@ -2919,6 +3053,24 @@ static bool play_one_impl(const std::string& file, const PlayParams& pIn, rta::a
                 mcfg.family = rta::dsp::parse_modulator_family(p.modFamily);
                 mcfg.levels = 2;                 // 1-bit (DoP)
                 mcfg.order = rta::dsp::stable_sdm_order(p.modOrder > 0 ? p.modOrder : 5, mcfg.fs, mcfg.levels, mcfg.family);
+                // F-5 自证：**生效阶数**如实上报（261025-02 #5 口径）。
+                // stable_sdm_order 会按位率/族把 7 阶降到 5 阶（1-bit 下 7 阶 Chebyshev NTF
+                // 极点阻尼比过低会极限环失稳）；若这里不覆盖，/api/status 永远显示用户填的 7，
+                // "我选了 EC-7 声音不对"就永远无法从数据上证伪。
+                {
+                    const int effOrder = (int)mcfg.order;
+                    const int reqOrder = p.modOrder > 0 ? p.modOrder : 5;
+                    std::string why;
+                    if (effOrder != reqOrder) {
+                        why = "调制器阶数由 " + std::to_string(reqOrder) + " 阶降为 " +
+                              std::to_string(effOrder) + " 阶（" + std::to_string(dsdRate) +
+                              " Hz 1-bit 下高阶 NTF 不稳定，自动降阶保护）";
+                    }
+                    set_out_format_state(out_mode_of_backend(p.backend).c_str(),
+                                         p.dsd, dsdRate, deviceRate,
+                                         p.modFamily.empty() ? std::string("dsd") : p.modFamily,
+                                         effOrder, why);
+                }
                 mcfg.cutoffHz = (p.modCutoff > 0.0) ? (p.modCutoff * 1000.0) : 100000.0;
                 // 默认 0.0005：1-bit 的量化步长是 2.0，旧默认 0.01 等于注入 -34 dBFS 白噪，
                 // 实测把 DSD64 的带内 SNR 从 89 dB 砍到 54 dB（听感：持续嘶声）。
@@ -4430,7 +4582,7 @@ static bool is_side_effect_path(const std::string& p) {
         "/api/writeback", "/api/enrich", "/api/peq", "/api/opra/apply", "/api/cast/start",
         "/api/cast/stop", "/api/upnp", "/api/src", "/api/input/start", "/api/input/stop",
         "/api/buffer/reset", "/api/upload",
-        // 三档预设的 apply 会写 rlplayer-settings.conf（副作用）；caps 是只读查询，不进这张表
+        // 预设的 apply 会写 rlplayer-settings.conf（副作用）；caps 是只读查询，不进这张表
         "/api/preset/apply",
     };
     for (const char* k : kNeedPost) {
@@ -4510,12 +4662,25 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
     if (rq.path.rfind("/api/files", 0) == 0) {
         ct = "application/json; charset=utf-8";
         // 默认位置：音乐库的第一个根目录（而不是磁盘根 —— 那样打开就是空的）
+        //
+        // 2026-10-26 BUG 修复（根因 c，用户截图「点文件夹显示目录不存在」的最后一环）：
+        //   原来无脑取 roots().front()，拿到就直接 exists 判定，不存在就报「目录不存在」。
+        //   conf 里一旦存了相对根（./data），.app 双击启动 cwd=/ ⟹ ./data 解析成 /data ⟹
+        //   永远不存在 ⟹ 用户点「文件夹」永远看到「目录不存在」，而曲库照样能播（索引里
+        //   69 首都在），现象极其割裂。
+        //   现在：不带 ?dir= 时按 roots 顺序挑**第一个真实存在**的根；一个都不存在才回退
+        //   $HOME（见下）。用户**显式**传了 ?dir=X 而 X 不存在时仍然如实报错（不偷换目录），
+        //   否则用户会以为自己的目录被打开了，实际看的是别处。
         std::string dir;
         const size_t q = rq.path.find("?dir=");
         if (q != std::string::npos) dir = urlDecode(rq.path.substr(q + 5));
         if (dir.empty()) {
             const auto roots = Library::instance().roots();
-            if (!roots.empty()) dir = roots.front();
+            std::error_code rec;
+            for (const auto& r : roots) {
+                // 坏根（相对路径 / 已删除 / 外接盘掉线）跳过，继续找下一个真实存在的
+                if (fs::is_directory(r, rec)) { dir = r; break; }
+            }
         }
         if (dir.empty()) {
             // 2026-10-25（默认目录纠正）：原来兜底写死 "C:\Users"，macOS 上这个路径
@@ -4531,8 +4696,11 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
         if (!valid_utf8(dir)) return utf8_path_reject(dir);   // F1：目录名进 fs 前先校验
 
         std::error_code ec;
-        if (!fs::exists(dir, ec)) {
-            return "{\"ok\":false,\"error\":\"目录不存在\"}";
+        // 2026-10-26：错误信息必须**带上路径**。原来只说「目录不存在」，把根因藏起来 ——
+        //   用户/我们根本看不出是哪个目录坏了（本 BUG 里真正坏的是 conf 里的相对根
+        //   "./data"，但界面只显示一句没有主语的「目录不存在」，所以一直排查不动）。
+        if (!fs::is_directory(dir, ec)) {
+            return "{\"ok\":false,\"error\":\"" + jesc("目录不存在: " + dir) + "\"}";
         }
         std::vector<std::string> dirs, files;
         for (auto& e : fs::directory_iterator(dir, fs::directory_options::skip_permission_denied, ec)) {
@@ -4664,8 +4832,16 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
                 if (kk == "add") add = vv;
                 else if (kk == "remove") rem = vv;
             }
-            if (!add.empty() && !lib.addRoot(add))
-                return "{\"ok\":false,\"error\":\"目录不存在: " + jesc(add) + "\"}";
+            // 2026-10-26：addRoot 失败的原因不再一律说「目录不存在」。
+            //   addRootEx 现在会因「非绝对路径 / 编码非 UTF-8 / 路径无法解析」而拒，
+            //   把它们统统回成「目录不存在」会把用户引向错误的排查方向（本 BUG 就是这么被藏住的）。
+            //   直接回传 ar.why，让前端 toast 出真正的原因。
+            if (!add.empty()) {
+                const auto ar = lib.addRootEx(add);
+                if (!ar.ok) {
+                    return "{\"ok\":false,\"error\":\"" + jesc(ar.why) + "\"}";
+                }
+            }
             // 反馈 #3「扫描记录不可消除」：移除库根必须连带清掉该目录（含子目录）扫出来的曲目，
             // 否则歌还留在列表里、点了播放就失败。removedTracks 让前端能如实告诉用户清掉了几首。
             int removedTracks = 0;
@@ -6891,10 +7067,13 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
         return j.str();
     }
 
-    // ---------------- 三档官方推荐预设（2026-10-25）----------------
+    // ---------------- 官方推荐预设（2026-10-25 三档 → 2026-10-26 四档）----------------
     // GET  /api/preset/caps                     → 设备能力（只读探测：不开流、不抢设备）
     // POST /api/preset/apply?profile=…          → 探测 + 决策 + 落盘；返回 applied 与 notes
+    //   profile ∈ {bitperfect, pcm, dsd, pcm2dsd}（pcm2dsd 是 2026-10-26 第 4 档）
     // 决策细节全在 engine/preset_profiles.h（纯函数、离线单测），这里只做 IO 与 JSON。
+    // ⚠️ mac 事实：本平台的 DSD 通路**只有 DoP**（preset_probe_caps 的 dsdNative 恒 false），
+    //    所以 pcm2dsd 档的 notes 只写 DoP 载波率，绝不出现「原生 / 1-bit 直送」。
     if (rq.path.rfind("/api/preset", 0) == 0) {
         ct = "application/json; charset=utf-8";
         if (rq.path.rfind("/api/preset/caps", 0) == 0) return preset_caps_json();
@@ -7705,7 +7884,27 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
           // 2026-10-23（用户 261023-02 #1）：status 也带上 bit-perfect 结论，
           // 让底栏徽标不用额外请求 /api/signal 就能显示（轮询已经是 400ms 一次）。
           << ",\"bitPerfect\":\"" << jesc(ps.bpState) << "\""
-          << ",\"bitPerfectWhy\":\"" << jesc(ps.bpWhy) << "\"";
+          << ",\"bitPerfectWhy\":\"" << jesc(ps.bpWhy) << "\""
+          // ---- 输出格式自证（2026-10-26 F-5，mac 口径）----
+          // 为什么底栏只拿到 outRate 会误判：DoP 的 outRate 是**载波率**
+          // （DSD128/48k 族 = 6144000/16 = 384000），和"PCM 升频到 384k"数字完全一样。
+          // 所以这里必须同时给 dsdRate（1-bit 有效码率）与 carrierRate（PCM 载波率），
+          // 三个数一起才自证得清"到底是真 DSD 还是 PCM 降级"。
+          //   outMode      coreaudio | shared | null | upnp | ""（未播过）
+          //                ★ 绝不出现 wasapi/asio/native：mac 无 ASIO、无 Native DSD 通路
+          //   dsd          实际 DSD 档位（64/128/256/512；PCM = 0）
+          //   dsdRate      1-bit 有效码率（DSD128 = 6144000；PCM = 0）
+          //   carrierRate  DoP 的 PCM 载波率 = dsdRate/16（DSD128 = 384000；PCM = 0）
+          //   modFamily    调制器族（PCM / DirectSDM 直通 = 空）
+          //   modOrder     **实际生效**阶数（降阶保护后的值，不是用户填的值）
+          //   fallbackWhy  非空 = 与用户请求不一致的中文原因（空 = 没降级）
+          << ",\"outMode\":\"" << jesc(ps.outMode) << "\""
+          << ",\"dsd\":" << ps.outDsdLevel
+          << ",\"dsdRate\":" << ps.outDsdRate
+          << ",\"carrierRate\":" << ps.outCarrierRate
+          << ",\"modFamily\":\"" << jesc(ps.outModFamily) << "\""
+          << ",\"modOrder\":" << ps.outModOrder
+          << ",\"fallbackWhy\":\"" << jesc(ps.outFallbackWhy) << "\"";
         const MetaSettings msStat = meta_settings_load();
         bool hasKeyStat = false;
         {
@@ -8016,10 +8215,36 @@ int rlapp::cli_main(int argc, char** argv) {
         else if (k == "--music-dir" && i + 1 < argc) musicDir = argv[++i];
         else if (k.rfind("--music-dir=", 0) == 0) musicDir = k.substr(12);
     }
+    // 2026-10-23：把端口写进环境，供 Library 选择实例私有的库配置/索引文件名
+    //（非 8899 实例用 .p<port> 后缀，避免自检沙箱与用户实例互相覆盖库根）。
+    // ★ 2026-10-26 BUG 修复（用户截图：点侧栏「文件夹」显示「目录不存在」）的根因 (a)：
+    //   本块原在 --music-dir 处理块**之后**。Library::confLeaf() 靠 RLPLAYER_PORT 决定
+    //   文件名后缀，setenv 晚于 --music-dir ⟹ 后缀不生效 ⟹ 不管 --port 是多少，
+    //   --music-dir 都会写进**默认实例**的 rlplayer-library.conf（用户真实那份），
+    //   把用户的库根改掉。**必须**在任何 Library 写盘动作之前设好，别再把本块往下挪。
+    {
+        char pb[16]; std::snprintf(pb, sizeof(pb), "%u", (unsigned)port);
+        ::setenv("RLPLAYER_PORT", pb, 1);   // Library 实例私有后缀（语义同 Windows）
+    }
     // --music-dir：**替换**音乐库扫描根（不是数据目录 —— RLPLAYER_LIBRARY_DIR 是
     // 配置/索引的存放目录，语义不同，别混用）。这样 `rtaweb --music-dir X` 扫的就是 X，
     // 不会再去扫配置文件里遗留的旧根（2026-10-26 二次 DEBUG 实测：之前会叠加）。
     if (!musicDir.empty()) {
+        // 2026-10-26 BUG 修复（根因 b/c 的入口侧）：先把用户给的值绝对化，再进库。
+        //   Library::addRootEx() 现在**拒绝**相对路径（不变量），而 `--music-dir ./data`
+        //   这种写法本身是合理的；这里转成绝对路径 ⟹ 从任何 cwd 启动都能工作，且存进
+        //   conf 的是稳定绝对路径（不再随 .app 双击 cwd=/ 而漂移）。
+        //   转换失败就保持原值，让 addRootEx 去拒并给出明确原因（不静默兜底）。
+        {
+            std::error_code ec;
+            const fs::path abs = fs::absolute(fs::path(musicDir), ec);
+            if (!ec) {
+                std::error_code ec2;
+                const fs::path norm = abs.lexically_normal();
+                const std::string s = pathToUtf8(norm);
+                if (!s.empty()) musicDir = s;
+            }
+        }
         auto& lib = Library::instance();
         for (auto r : lib.roots()) lib.removeRoot(r);
         const auto ar = lib.addRootEx(musicDir);
@@ -8028,12 +8253,6 @@ int rlapp::cli_main(int argc, char** argv) {
     }
     g_uiPort = port;
     g_lanOn  = lan;
-    // 2026-10-23：把端口写进环境，供 Library 选择实例私有的库配置/索引文件名
-    //（非 8899 实例用 .p<port> 后缀，避免自检沙箱与用户实例互相覆盖库根）。
-    {
-        char pb[16]; std::snprintf(pb, sizeof(pb), "%u", (unsigned)port);
-        ::setenv("RLPLAYER_PORT", pb, 1);   // Library 实例私有后缀（语义同 Windows）
-    }
     // 与 embedded 完全相同的初始化（库/配置/OPRA/代理/MetaStore/PEQ/设置/空库首扫）
     core_init_common();
 

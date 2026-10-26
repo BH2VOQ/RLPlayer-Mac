@@ -95,6 +95,33 @@ static constexpr int kRecvTimeoutMs = 500;
 static constexpr size_t kMaxHeadBytes = 64 * 1024;     // 请求行 + 头（含 URL）
 static constexpr size_t kMaxBodyBytes = 16 * 1024 * 1024;
 
+// 2026-10-26（debug/20261026-02 B-5）：**/api/upload 必须单独放宽** ——
+// 拖一首无损进队列（30~200 MB 的 FLAC/DSD）走的就是这条上传通道；16 MB 的全局上限
+// 会让它直接失败，而且客户端拿到的是**断连**而不是可读的 413（服务端在读 body 之前
+// 就 fail 早退，客户端还在写，于是 send 侧看到 EPIPE）⟹ 前端 dropFiles 连准确提示
+// 都给不出。
+// ★ 刻意**不**把 kMaxBodyBytes 调大：那会让所有端点（/api/add、/api/settings …）
+//   都能收 2 GB，是实打实的安全退化。上限必须**按路径**给。
+// ★ 前缀匹配的坑（上游 1df66ac 的教训）：这里只认 "/api/upload"，且要求前缀后紧跟
+//   '/'、'?' 或串尾，否则 "/api/uploads" 之类的兄弟端点会被顺带放宽。
+//   （mac 现有路径里没有 /api/upload* 的兄弟端点，但口径必须先立住，见 B-6。）
+static constexpr size_t kMaxUploadBytes = (size_t)2 * 1024 * 1024 * 1024;   // 2 GB（上游口径）
+
+// 某条请求路径的 body 上限：只有上传端点放宽，其余一律 16 MB。
+// 单独抽成 inline 函数是为了让「Content-Length 预检」与「413 文案」两处用**同一个**
+// 判定（两处各写一遍前缀匹配，迟早会漂移）。
+inline size_t webui_body_cap_for(const std::string& path) {
+    static constexpr const char* kUpload = "/api/upload";
+    const size_t n = std::strlen(kUpload);
+    if (path.compare(0, n, kUpload) == 0) {
+        // 整段命中：串尾、或后面紧跟 / ? &（不能把 /api/uploads 也吃进来）
+        if (path.size() == n) return kMaxUploadBytes;
+        const char c = path[n];
+        if (c == '/' || c == '?' || c == '&') return kMaxUploadBytes;
+    }
+    return kMaxBodyBytes;
+}
+
 inline std::string http_status_text(int code) {
     switch (code) {
         case 200: return "OK";
@@ -298,6 +325,35 @@ inline void WebUi::handle(socket_t c, const Handler& h, bool lan, const std::str
                 if (trim(line.substr(0, colon)) == "Host") { req.host = trim(line.substr(colon + 1)); break; }
             }
         }
+        // ---- Expect: 100-continue ----
+        // 2026-10-26（debug/20261026-02 实测发现的既有缺陷，不是本轮引入）：
+        //   curl / Invoke-WebRequest 对 >1MB 的请求体默认带 `Expect: 100-continue`，然后**先等
+        //   服务器回 `100 Continue`（等 1s）再发 body**。本服务器从不回这个状态行，于是它空等
+        //   1s；而下面的 body 读循环用 SO_RCVTIMEO=500ms（kRecvTimeoutMs），**先超时**，读到 0
+        //   字节 ⟹ 稳定回 400「请求体不完整」。
+        //   实测（同一份 40MB 文件）：
+        //     curl --data-binary（默认 Expect）  → 400
+        //     curl -H "Expect:"（不发 Expect）   → 200，落盘 41943040 字节逐字节一致
+        //   基线二进制在 2MB/8MB 上就已经 400，只是以前上限 16MB、大文件本来就过不去，没人注意。
+        //   现在 /api/upload 放宽到 2GB，这条路**必须**通，否则命令行/脚本上传全废（浏览器不
+        //   发 Expect，所以 UI 拖拽一直是好的 —— 这正是它一直没被发现的原因）。
+        //   修法：解析到 Expect: 100-continue 且确有 body 要收时，先回一个空的 `100 Continue`。
+        //   注意必须是「整行 HTTP/1.1 100 Continue\r\n\r\n」，且必须在读 body **之前**发。
+        bool wants100 = false;
+        {
+            std::istringstream hs(head); std::string line; bool first = true;
+            while (std::getline(hs, line)) {
+                if (first) { first = false; continue; }
+                if (!line.empty() && line.back() == '\r') line.pop_back();
+                const size_t colon = line.find(':');
+                if (colon == std::string::npos) continue;
+                if (trim(line.substr(0, colon)) != "Expect") continue;
+                std::string v;
+                for (char ch : line.substr(colon + 1)) v.push_back((char)std::tolower((unsigned char)ch));
+                if (v.find("100-continue") != std::string::npos) wants100 = true;
+                break;
+            }
+        }
         // ---- Content-Length：先判上限再分配 ----
         size_t want = 0;
         bool clBad = false;
@@ -312,13 +368,17 @@ inline void WebUi::handle(socket_t c, const Handler& h, bool lan, const std::str
                 const std::string v = trim(line.substr(colon + 1));
                 if (v.empty() || v.find_first_not_of("0123456789") != std::string::npos) { clBad = true; break; }
                 want = (size_t)strtoull(v.c_str(), nullptr, 10);
-                if (want > kMaxBodyBytes) { clBad = true; break; }
+                // 按路径取上限（见 webui_body_cap_for 注释）：/api/upload 2GB，其余 16MB
+                if (want > webui_body_cap_for(req.path)) { clBad = true; break; }
             }
         }
         if (req.method.empty() || req.path.empty()) {
             fail(400, "请求行无法解析");
-        } else if (clBad && want > kMaxBodyBytes) {
-            fail(413, "请求体过大（上限 16MB）");
+        } else if (clBad && want > webui_body_cap_for(req.path)) {
+            // 文案必须区分两条路径：用户看到「上限 16MB」却在上传 40MB 的歌，会去查错地方
+            fail(413, webui_body_cap_for(req.path) > kMaxBodyBytes
+                        ? "请求体过大（上传上限 2GB）"
+                        : "请求体过大（上限 16MB）");
         } else if (clBad) {
             fail(400, "Content-Length 非法");
         } else if (lan && !webui_host_allowed_impl(req.host, allowedHost)) {
@@ -328,6 +388,17 @@ inline void WebUi::handle(socket_t c, const Handler& h, bool lan, const std::str
             // Host 必须是我们自己的名字/地址之一。curl/PowerShell 默认都带 Host，本机 UI 也不受影响。
             fail(403, "Host 不被允许：--lan 只接受 127.0.0.1 / localhost / 本机名");
         } else {
+            // 客户端在等 `100 Continue` 才肯发 body（见上方 Expect 注释）：先把状态行发出去，
+            // 否则它会空等 1s、我们先超时。只在**确有 body** 要收时发（want==0 时客户端不会等）。
+            if (wants100 && want > 0) {
+                static const char kContinue[] = "HTTP/1.1 100 Continue\r\n\r\n";
+                size_t csent = 0;
+                while (csent < sizeof(kContinue) - 1) {
+                    const int n = ::send(c, kContinue + csent, (int)(sizeof(kContinue) - 1 - csent), 0);
+                    if (n <= 0) break;              // 对端已关：下面的读循环自然会读到 0 并回 400
+                    csent += (size_t)n;
+                }
+            }
             while (body.size() < want) {
                 const int r = ::recv(c, tmp, sizeof(tmp), 0);
                 if (r <= 0) break;
