@@ -418,13 +418,19 @@ inline std::string rta_ui_page() {
     //   · backdrop-filter:blur(32px) saturate(190%) + 半透明 --barbg ⟹ 专辑封面滚过去会被柔化成色块；
     //   · 三列 minmax 模板：左（封面+曲名）/ 中（控制组，天然居中）/ 右（状态+音量），
     //     左右两列等权 ⟹ 中间控制组始终在胶囊正中（沿用 261023-04 #1 的判据）。
-    h += ".bar{position:fixed;left:calc(var(--sidew) + 24px);right:24px;bottom:14px;height:66px;max-width:1120px;margin:0 auto;z-index:15;display:grid;grid-template-columns:minmax(180px,1.1fr) minmax(280px,1.6fr) minmax(180px,1.1fr);align-items:center;gap:14px;padding:0 18px;border-radius:16px;background:var(--barbg);backdrop-filter:blur(32px) saturate(190%);-webkit-backdrop-filter:blur(32px) saturate(190%);border:1px solid var(--bar-border);box-shadow:var(--bar-shadow);box-sizing:border-box;min-width:0}";
+    h += ".bar{position:fixed;left:calc(var(--sidew) + 24px);right:24px;bottom:14px;height:66px;max-width:1120px;margin:0 auto;z-index:15;display:grid;grid-template-columns:minmax(230px,1.5fr) minmax(280px,1.6fr) minmax(180px,1.1fr);align-items:center;gap:14px;padding:0 18px;border-radius:16px;background:var(--barbg);backdrop-filter:blur(32px) saturate(190%);-webkit-backdrop-filter:blur(32px) saturate(190%);border:1px solid var(--bar-border);box-shadow:var(--bar-shadow);box-sizing:border-box;min-width:0}";
     h += ".np{display:flex;align-items:center;gap:11px;min-width:0;justify-self:start;cursor:pointer;border-radius:10px;padding:4px 6px;margin-left:-6px;transition:.14s}";
     h += ".np:hover{background:var(--hov)}";
     // Apple Music 的迷你封面是 44px 圆角方图（不是 56px）
     h += ".cv2{width:44px;height:44px;border-radius:8px;flex:none;background:var(--cvbg) center/cover no-repeat;border:1px solid var(--line);box-shadow:0 3px 12px var(--shadow)}";
     h += ".np .tx{min-width:0}.np .t1{font-size:13px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:var(--txt)}";
     h += ".np .t2{font-size:11px;color:var(--mut);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-top:2px}";
+    // 2026-10-26（用户截图：底栏 4 行文字挤成一团）：Apple Music 的底栏左侧只有**两行**
+    //（曲名 + 艺术家），技术信息不放这里。nps / npNextTrack 的 DOM 与赋值逻辑全部保留
+    //（大量代码在写它们），只用 CSS 隐藏，不再占行。采样率仍由右侧 #fmt 显示，信息不丢。
+    h += ".np .boring{display:none!important}";
+    // .tx 必须是可收缩的 flex 列，否则长曲名会把整列撑开、把封面挤出卡片
+    h += ".np .tx{display:flex;flex-direction:column;justify-content:center;min-width:0;overflow:hidden}";
     // 中间控制+进度：display: flex; flex-direction: column; align-items: center; gap: 3px; width: 100%; max-width: 440px; justify-self: center;
     h += ".ctr{display:flex;flex-direction:column;align-items:center;gap:3px;width:100%;max-width:440px;justify-self:center}.keys{display:flex;align-items:center;gap:6px}";
     // bit-perfect 状态 chip（#bpBadge）：紧凑小标签，颜色区分态；空态不占位。
@@ -449,9 +455,9 @@ inline std::string rta_ui_page() {
     // 用户 2026-10-25：「可以在设置里切换 ui」。
     // 默认 data-uistyle=apple 为 Apple Music 风格（通顶侧栏 + 珊瑚红图标 + 底部徽标 + 悬浮播放胶囊 + 海报推荐页）；
     // 切到 data-uistyle=classic 时恢复经典工作台风格（蓝紫强调色 + 侧栏顶部品牌区 + 沉底贯通播放栏 + 经典居中卡片）。
-    h += "html[data-uistyle=classic]{--bg:#08090c;--bg2:#0c0e13;--bg3:#11141b;--topbg:#08090c;--barbg:linear-gradient(180deg,#11141b,#0a0c10);--acc:#3b82f6;--acc2:#8b5cf6;--acc-weak:rgba(59,130,246,.16);--acc-text:#9dc0ff;--nav-on:linear-gradient(90deg,rgba(59,130,246,.24),rgba(59,130,246,.04));--nav-on-text:#cfe0ff}";
-    h += "html[data-uistyle=classic][data-theme=light]{--bg:#f4f6f9;--bg2:#ffffff;--bg3:#eef1f6;--topbg:#f4f6f9;--barbg:linear-gradient(180deg,#ffffff,#f0f3f8);--acc:#2563eb;--acc2:#7c3aed;--acc-weak:rgba(37,99,235,.12);--acc-text:#1d4ed8;--nav-on:linear-gradient(90deg,rgba(37,99,235,.13),rgba(37,99,235,.02));--nav-on-text:#1e40af}";
-    h += "html[data-uistyle=classic][data-theme=blue]{--bg:#e9f2ff;--bg2:#f7fbff;--bg3:#dcebfe;--topbg:#e9f2ff;--barbg:linear-gradient(180deg,#f7fbff,#e4f0ff);--acc:#0d6efd;--acc2:#3b9bff;--acc-weak:rgba(13,110,253,.13);--acc-text:#0b5ed7;--nav-on:linear-gradient(90deg,rgba(13,110,253,.16),rgba(13,110,253,.02));--nav-on-text:#0a58ca}";
+    h += "html[data-uistyle=classic]{--line:rgba(255,255,255,.07);--line2:rgba(255,255,255,.12);--hov:rgba(255,255,255,.05);--hov2:rgba(255,255,255,.10);--field:rgba(255,255,255,.06);--crumb:rgba(8,9,12,.94);--txt:#e8ecf4;--txt2:#c3cad6;--mut:#8b94a3;--mut2:#6b7482;--cvbg:#141821;--phbg:linear-gradient(135deg,#1a2030,#0d111a);--ph-txt:rgba(255,255,255,.14);--shadow:rgba(0,0,0,.55);--track:rgba(255,255,255,.10);--toast:rgba(14,17,24,.97);--bar-border:rgba(255,255,255,.09);--bar-shadow:0 10px 30px rgba(0,0,0,.5),0 1px 6px rgba(0,0,0,.35);--ok:#22c55e;--ok-bg:rgba(34,197,94,.14);--ok-line:rgba(34,197,94,.30);--ok-text:#4ade80;--warn:#f59e0b;--danger:#ef4444;--bp-direct:#a78bfa;--r-lg:12px;--r-md:9px;--r-sm:7px;--sh1:0 1px 2px var(--shadow);--sh2:0 12px 30px -18px var(--shadow);--sidew:226px;--bg:#08090c;--bg2:#0c0e13;--bg3:#11141b;--topbg:#08090c;--barbg:linear-gradient(180deg,#11141b,#0a0c10);--acc:#3b82f6;--acc2:#8b5cf6;--acc-weak:rgba(59,130,246,.16);--acc-text:#9dc0ff;--nav-on:linear-gradient(90deg,rgba(59,130,246,.24),rgba(59,130,246,.04));--nav-on-text:#cfe0ff}";
+    h += "html[data-uistyle=classic][data-theme=light]{--line:rgba(15,23,42,.10);--line2:rgba(15,23,42,.16);--hov:rgba(15,23,42,.04);--hov2:rgba(15,23,42,.08);--field:rgba(15,23,42,.035);--crumb:rgba(244,246,249,.96);--txt:#111827;--txt2:#374151;--mut:#6b7280;--mut2:#9ca3af;--cvbg:#e8ecf2;--phbg:linear-gradient(135deg,#e6ebf3,#d3dae5);--ph-txt:rgba(15,23,42,.14);--shadow:rgba(15,23,42,.14);--track:rgba(15,23,42,.10);--toast:rgba(255,255,255,.98);--bar-border:rgba(15,23,42,.10);--bar-shadow:0 10px 28px rgba(15,23,42,.10),0 1px 5px rgba(15,23,42,.06);--ok:#16a34a;--ok-bg:rgba(22,163,74,.12);--ok-line:rgba(22,163,74,.28);--ok-text:#15803d;--warn:#d97706;--danger:#dc2626;--bp-direct:#7c3aed;--bg:#f4f6f9;--bg2:#ffffff;--bg3:#eef1f6;--topbg:#f4f6f9;--barbg:linear-gradient(180deg,#ffffff,#f0f3f8);--acc:#2563eb;--acc2:#7c3aed;--acc-weak:rgba(37,99,235,.12);--acc-text:#1d4ed8;--nav-on:linear-gradient(90deg,rgba(37,99,235,.13),rgba(37,99,235,.02));--nav-on-text:#1e40af}";
+    h += "html[data-uistyle=classic][data-theme=blue]{--line:rgba(13,110,253,.14);--line2:rgba(13,110,253,.22);--hov:rgba(13,110,253,.06);--hov2:rgba(13,110,253,.12);--field:rgba(13,110,253,.045);--crumb:rgba(233,242,255,.96);--txt:#0b2545;--txt2:#1e3a5f;--mut:#5b7189;--mut2:#8aa0b8;--cvbg:#dbe9fc;--phbg:linear-gradient(135deg,#d8e8fd,#c2d8f5);--ph-txt:rgba(11,37,69,.14);--shadow:rgba(13,58,120,.16);--track:rgba(13,110,253,.12);--toast:rgba(247,251,255,.98);--bar-border:rgba(13,110,253,.16);--bar-shadow:0 10px 28px rgba(13,58,120,.12),0 1px 5px rgba(13,58,120,.06);--ok:#0d9488;--ok-bg:rgba(13,148,136,.12);--ok-line:rgba(13,148,136,.28);--ok-text:#0f766e;--warn:#b45309;--danger:#dc2626;--bp-direct:#6d28d9;--bg:#e9f2ff;--bg2:#f7fbff;--bg3:#dcebfe;--topbg:#e9f2ff;--barbg:linear-gradient(180deg,#f7fbff,#e4f0ff);--acc:#0d6efd;--acc2:#3b9bff;--acc-weak:rgba(13,110,253,.13);--acc-text:#0b5ed7;--nav-on:linear-gradient(90deg,rgba(13,110,253,.16),rgba(13,110,253,.02));--nav-on-text:#0a58ca}";
     h += "html[data-uistyle=classic] #app{grid-template-rows:52px minmax(0,1fr) 86px}";
     h += "html[data-uistyle=classic] .side{grid-row:1/3}";
     h += "html[data-uistyle=classic] .side-top{order:-2}";
@@ -780,7 +786,15 @@ h += "#npPage .npedge{display:none}";
     // 为什么弃 table：th/td 的列宽由内容撑开，表头与输入框天生不同宽（用户看到的"文字没对齐"）。
     // 现在表头与每一行共用同一个【内容无关】的列模板（px + fr，没有 auto）⟹ 列位置逐像素一致。
     // 表格与曲线同宽（720px）：列宽不至于被拉成"一大片空白输入框"，也不会跟上面的曲线错位
-    h += ".peqwrap{--peqcols:36px minmax(0,1.3fr) minmax(0,1fr) minmax(0,.9fr) 96px 40px;max-width:720px}";
+    //
+    // 2026-10-26 BUG（用户截图：第 10 段「800 赫兹」与右侧「1.41」重叠、最右列「峰值 PK」被压窄）：
+    //   ① 列模板用 minmax(0, Xfr) —— 下限是 **0**，grid 可以把列压到比内容还窄，
+    //      输入框（width:100%）里的数字直接溢出到相邻列 ⟹ 视觉上「叠字」。
+    //   ② max-width:720px 而设置页内容区宽 1180px ⟹ 6 列挤在左半边，放大问题①。
+    //   修法：每列给**内容下界**（不是 0），并让表格吃掉可用宽度（保留上限，避免超宽屏拉散）。
+    //   下界按实际内容取：序号 36 / 频率 112（"20.00 kHz" + 微调箭头）/ 增益 88（"-12.0 dB"）/
+    //   Q 76（"0.71"）/ 类型 104（"峰值 PK" 四字 + 下拉箭头）/ 开关 40。
+    h += ".peqwrap{--peqcols:36px minmax(112px,1.25fr) minmax(88px,1fr) minmax(76px,.9fr) minmax(104px,1.1fr) 40px;max-width:920px}";
     h += ".peqhd,.peqr{display:grid;grid-template-columns:var(--peqcols);gap:0 8px;align-items:center}";
     // 表头必须跟数据行【同一个滚动容器、同一个内容宽度】：否则滚动条宽度 + 表头自带边框
     // 会让两边的可用宽度差 8~10px，fr 列随之变宽，逐列中心偏差线性放大到 9px（实测 1.7/4.9/7.7/9.0）。
@@ -799,7 +813,9 @@ h += "#npPage .npedge{display:none}";
     h += ".peqc{padding:0 6px;min-width:0}";
     // 覆盖 .sfld input 的 31px 高 / 7px 内边距（特异性 0,3,1 > 0,2,1）
     h += ".peqwrap .peqc input[type=text],.peqwrap .peqc input[type=number],.peqwrap .peqc select{width:100%;height:24px;min-height:24px;box-sizing:border-box;padding:0 6px;border-radius:5px;border:1px solid var(--line);background:var(--field);color:var(--txt);font-size:11.5px;font-family:inherit;line-height:22px;font-variant-numeric:tabular-nums}";
-    h += ".peqwrap .peqc input[type=text],.peqwrap .peqc input[type=number]{text-align:right}";
+    // 2026-10-26：防「数字溢出到相邻列」—— 即使列宽够，超长内容（如手输 12345.6789）也会撑破。
+    //   min-width:0 + text-overflow:ellipsis 让它在自己的框里被截断，绝不越界。
+    h += ".peqwrap .peqc input[type=text],.peqwrap .peqc input[type=number]{text-align:right;min-width:0;text-overflow:ellipsis}";
     h += ".peqwrap .peqc input:focus,.peqwrap .peqc select:focus{outline:0;border-color:var(--acc);box-shadow:0 0 0 2px var(--acc-weak)}";
     h += ".peqwrap .peqc input[type=checkbox]{width:14px;height:14px;min-height:0;margin:0;accent-color:var(--acc)}";
     h += ".peqcv{position:relative;max-width:720px;background:var(--field);border:1px solid var(--line);border-radius:8px;padding:6px 10px 2px;user-select:none}";
@@ -1055,10 +1071,20 @@ h += "#npPage .npedge{display:none}";
     h += "</div>";
 
     // ---------- 播放条 ----------
+    // 2026-10-26 BUG（用户截图：底栏「正在播放」红框里 4 行文字挤成一团、溢出卡片）：
+    //   .tx 里原本有 **4 个 div**（npt 曲名 / npart 艺术家·专辑 / nps 播放状态+采样率 / npNextTrack 下一首），
+    //   但 .bar 只有 66px 高、.cv2 封面 44px ⟹ 13px+11px+11px+11px 的行高必然溢出。
+    //   Apple Music 的底栏左侧**只有两行**：曲名 + 艺术家，技术信息不放底栏。
+    //   修法：
+    //     · 视觉上只留 2 行 —— npt（曲名）/ npart（艺术家）；
+    //     · nps（播放中·44100Hz/24bit）与 npNextTrack（队列末尾·共N首）**保留 DOM 与赋值逻辑**
+    //       （大量代码在写它们，删了会连带改一堆调用点），但用 CSS 隐藏，不再占行；
+    //     · 采样率改由右侧已有的 #fmt（"44.1k/24"）承载，不丢信息；
+    //     · 播放/暂停状态由中间那颗播放键的图标本身表达。
     h += "<div class=bar><div class='np' id=npOpen title='打开正在播放'>";
     h += "<div class=cv2 id=cv></div><div class=tx><div class=t1 id=npt>未播放</div><div class=t2 id=npart></div>";
-    h += "<div class=t2 id=nps>选择一个专辑开始</div>";
-    h += "<div class='t2 t-next' id=npNextTrack style='display:none' title='下一首'></div></div></div>";
+    h += "<div class='t2 boring' id=nps>选择一个专辑开始</div>";
+    h += "<div class='t2 t-next boring' id=npNextTrack style='display:none' title='下一首'></div></div></div>";
     // 2026-10-23（用户 261023-02 #1）：底栏常驻 bit-perfect 徽标。
     // 2026-10-23（用户 261023-04 #1）：它**不能**再作为底栏 grid 的第 4 个子项（那会把控制组挤到最右、
     // 把右侧状态簇挤到第二行）。现在作为紧凑 chip 收进 .vol 状态簇，由 CSS 控制显隐与配色。
