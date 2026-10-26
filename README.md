@@ -1,266 +1,197 @@
+<p align="center"><img src="docs/images/logo.png" width="112" alt="RLPlayer"></p>
+
 # RLPlayer
 
-**macOS 上的高保真播放引擎 + 播放器**（RLPlayer 同类）。核心目标只有一个：**不计代价提升本地播放音质**，并且把每一步都变成可测量的数字。
+macOS 上的高保真播放引擎：升频、噪声整形、SDM/DSD 调制、卷积与 20 段 PEQ 全链路自研，每一步都给出可复现的实测数字。
 
-- 输出链路完全自研：升频 → 抖动/噪声整形 → SDM/DSD 调制 → 卷积 → 20 段 PEQ → **CoreAudio 独占（Hog）/ 共享 / UPnP / 网络端点**
-- **不追求"听起来更好"，追求"能测出来好"**：升频阻带 −189 dB、DSD 源抽取 THD+N 99.2 dB、网络传输端到端逐位相同
-- **单进程原生应用**：`.app` 内嵌 WKWebView 渲染界面，业务逻辑**静态链进同一进程**——不占端口、不起子进程、不需要任何浏览器
-- 单包自包含：内置 ffmpeg/ffprobe、Metal GPU 内核，用户机上**不需要装任何运行库**
+[![Platform](https://img.shields.io/badge/platform-macOS%2013%2B%20%C2%B7%20arm64-lightgrey)](#系统要求)
+[![Version](https://img.shields.io/github/v/release/BH2VOQ/RLPlayer-Mac?label=version)](https://github.com/BH2VOQ/RLPlayer-Mac/releases)
+[![Tests](https://img.shields.io/badge/ctest-87%2F87-brightgreen)](#测试)
 
-> 当前版本 **1.0.4**（2026-10-26）。逐轮实测数字与已知限制见 [STATUS.md](STATUS.md)。
+![RLPlayer 主界面：专辑网格与底栏播放控制](docs/images/ui-albums.png)
 
----
-
-## 这是独立分支
-
-本仓库是 **macOS 独立产品线**，与上游 `github.com/okhuoyanyan/RLPlayer`（Windows）**不再合并**。
-
-| | 上游 | 本仓库 |
-|---|---|---|
-| 平台 | Windows x64 | macOS 13.0+ / arm64 |
-| 输出 | WASAPI 独占/共享、ASIO | **CoreAudio 独占（Hog）/ 共享** |
-| GPU | HIP（AMD）/ CUDA（NVIDIA） | **Metal** |
-| 界面 | WebView2 + 托盘 | **WKWebView + 原生 NSWindow** |
-| 进程 | 独立 HTTP 服务 + 客户端 | **单进程**（`WKURLSchemeHandler` 桥接内置核心） |
-| DSD 输出 | Native DSD（ASIO）+ DoP | **仅 DoP**（macOS 无 ASIO 原生 DSD 驱动通路） |
-
-> 因此 `#ifdef _WIN32` 分支在本仓库是死代码，Windows 平台层（WASAPI / ASIO / WebView2 / WinHTTP / MMCSS / dbghelp / CUDA / HIP）**已全部删除**。
-
----
-
-## 最近更新（1.0.4）
-
-对比上游 v1.5.2，本轮修了 6 个 mac 可复现 BUG，并在 mac 架构上重做了 7 组功能：
-
-| 项 | 内容 |
-|---|---|
-| **专辑封面** | 只问首曲 + 1x1 占位图当封面缓存 ⟹ 首曲无图时整张专辑空白。改为 cv=1 曲目优先（≤3）+ 其余（≤3）、`<1KB` 或 1x1 继续试、占位写负缓存 |
-| **WAV 占位标题** | RIFF `INFO` 的字面 `0x3F`（`???`）压过 ID3 真名。新增 `tag_is_placeholder()`，**只限 WAV 跨块合并**（MP3/OGG 套上会让 A/B 变红） |
-| **单曲入队** | 专辑页曲目行**零入口**（连右键都没绑）。加可见「+」按钮 + 行右键，列表页同步 |
-| **底栏徽标** | 两态 → **六态**（直通 / PCM-PCM / PCM-DSD / DSD-DSD × bit-perfect 与否），带降级原因 `title` |
-| **上传上限** | `/api/upload` 被 16MB 全局 body 上限挡死。按路径给上限（上传 2GB，其余 16MB） |
-| **`Expect: 100-continue`** | curl 对 >1MB 请求体默认带该头并等 `100 Continue`（等 1s），而服务器从不回、body 读循环 500ms 先超时 ⟹ 稳定 400。**基线 2MB 就失败**，被 16MB 上限掩盖至今 |
-| **在线封面** | 新增抓取 + 进度。断网 `fail` 不写负缓存（只有服务器明确说没有才写）；Dice 系数比对拒绝「名字都不像就拿第一张」 |
-| **音频体检** | DR / BS.1770 LUFS / LRA + 假无损检测（频谱截止 + 陡沿 + 24bit LSB），新增 `rtahealth` CLI |
-| **房间校正** | Farina 扫频 / 正则化反卷积 / 心理声学平滑 / 最小相位校正 IR / 超低对齐 / 多声道布局 |
-| **第 4 档预设** | PCM→DSD（`pcm2dsd`，EC-7 + tight + 512 抽头）。**mac 口径：只走 DoP**，无 DoP 能力时明确降级并说明原因 |
-| **status 自证字段** | 新增 `outMode`/`dsd`/`dsdRate`/`carrierRate`/`modFamily`/`modOrder`/`fallbackWhy` |
-| **GPU 精度实测** | 卷积最差 −126.5 dB、升频 max\|Δ\|/峰 8.3e-06（Apple GPU 无 double，与 CUDA 差 9~10 个数量级） |
-| **GPU 卷积真 BUG** | 逐块调用无状态 API ⟹ **IR 拖尾丢失**（实测 65410/65536 样点错、−1.63 dB）。改 overlap-save 后 0/65536、−150.12 dB |
+原生 `.app`：不是 Electron，主进程不起本地 HTTP 服务。界面由 WKWebView 渲染，业务逻辑**静态链进同一个进程**——开一个窗口就是一个播放器。
 
 ---
 
 ## 特性
 
-### DSP 链路
+### 信号链
 
-| 能力 | 说明 |
-|---|---|
-| **多相 sinc 升频** | 任意有理比率；阻带 **−189 dB**，通带纹波 **0.0000 dB** |
-| **滤波器家族** | 16 个预设 + 倒谱法最小相位、混合相位；可指定抽头数；tight 变体（512 抽头/相位） |
-| **抖动 / 噪声整形** | 10 项：NS1/NS4/NS5/NS9/LNS15 + RPDF/TPDF/Gauss1/shaped |
-| **SDM 调制器** | DSD5 / DSD7、多电平 AHM、EC 族（H∞ 受控 NTF）；1-bit 带内 SNR 86.2 dB，8-bit 118.8 dB |
-| **DSD 原生读取** | DSF/DFF 直接读；抽取器 FIR/IIR/CIC；**DirectSDM 逐位直通**；大 DSD 流式解码（首帧 4.3×、内存 17.5×） |
-| **卷积引擎** | 零延迟均匀分块 FFT；支持 Metal GPU（**注意：mac 上 GPU 卷积比 CPU 慢，见下方「GPU」**） |
-| **20 段参数均衡 PEQ** | RBJ 双二阶（PK/LS/HS）、1/3 倍频程、曲线可拖拽节点、自动前级（防削波）、预设 |
-| **房间校正** | IR 卷积 + 测量编排（扫频/反卷积/校正集导出） |
-| **音频体检** | TT DR / LUFS / LRA / 假无损检测，可缓存 |
-| **Matrix / EQ** | 声道路由 + 双二阶 IIR EQ + 延迟插件 + REW/AutoEq 文本解析 + OPRA 耳机预设 |
-| **多声道** | 5.1 / 7.1（WAVEFORMATEXTENSIBLE 声道掩码）+ 每声道增益微调 |
-| **保护** | 过采样峰值检测（ISP）自动预衰减、音量渐变、响度补偿；满幅/瞬态/恢复都有回归测试 |
+- **多相 sinc 升频** — 任意有理比率，52 个命名预设；实测阻带 **−189.1 dB**、通带纹波 **0.0000 dB**
+- **滤波器家族** — Kaiser / Gaussian / Blackman-Harris 三种窗，线性 / 最小 / 混合相位，tight 变体；抽头数与截止可调
+- **抖动与噪声整形** — NS1/NS4/NS5/NS9/LNS15 + RPDF/TPDF/Gauss1/Shaped；NS9 相对 TPDF 的带内收益在 44.1k→705.6k 为 **3.5→86.5 dB**
+- **SDM 调制器** — 四族：Butterworth（DSD5/DSD7）、7 阶 Chebyshev、EC 误差反馈、AHM 多电平；EC-5 在 DSD256 带内 SNR **113.5 dB**
+- **DSD 原生读取** — DSF/DFF 直接解析，不经 ffmpeg；DirectSDM 同速率逐位直通，大文件分块流式解码（1764000 帧逐样本一致）
+- **卷积引擎** — 零延迟均匀分块 FFT，分块结果与直接卷积相对误差 **≤6.1e-14**
+- **20 段 PEQ** — RBJ 双二阶、1/3 倍频程、节点可拖、自动前级防削波；单段 +6 dB 实测 **6.0000 dB**（44.1/48/96/192 kHz）
+- **过载保护** — 过采样峰值检测（ISP）自动预衰减、音量渐变、DoP 音量锁 0 dB；满幅 / 瞬态 / 恢复三段都有回归
 
-### 输出后端
+### 输出
 
-| 后端 | 用途 |
-|---|---|
-| **CoreAudio 独占（Hog）** | bit-perfect 直通；Hog Mode 抢设备避免系统混音器重采样；自动协商采样率/位深，设备不支持时**如实报错不静默替换** |
-| **CoreAudio 共享** | 独占不可用时的兜底（非 bit-perfect，会明确告知；不支持 DoP/DSD） |
-| **DoP（DSD over PCM）** | 24-bit 载波封装 DSD；**mac 唯一的 DSD 输出路径** |
-| **UPnP / DLNA** | 一键推送到局域网渲染器 |
-| **NAA / RTANet** | 两机网络音频：RTANet 端到端逐位相同 + 时钟漂移检测；标准 NAA 只做发现 |
-| **Null** | 离线/自动化测试，不开任何设备 |
-
-> **Native DSD**：macOS 没有 ASIO 原生 DSD 驱动通路，`/api/play` 收到 `dsdnative=1` 会**明确报错**而不是静默降级。
+- **CoreAudio 独占（Hog）** — AUHAL + Hog 抢占 + 物理格式锁定，避免系统混音器重采样；设备不支持目标格式时**如实报错，不静默替换**
+- **CoreAudio 共享** — 独占不可用时的兜底，`bit_perfect()` 明确返回 false 并告知；16/24/32 bit 三种位深实测 **0 LSB** 偏差
+- **DoP** — 24-bit 载波封装 DSD，macOS 上唯一的 DSD 输出路径；DoP 模式下绝不静默回退到共享
+- **UPnP / DLNA** — 真实 SSDP 发现 + AVTransport 控制 + 本地供源，实测供源字节数与文件**逐字节相同**
+- **Null** — 只跑 DSP 不开设备，所有离线测试与自动化验证都走它
+- **三档官方预设** — 原音直通 / PCM 升频 / DSD 升频，按当前设备能力实时算出推荐档位并标注降级原因；后端另支持第四档 PCM→DSD（`profile=pcm2dsd`）
 
 ### 界面
 
-WKWebView 内嵌、**单进程**、完全无边框（四边可拉伸，6px 边缘热区）：
-专辑网格 / 艺术家 / 曲目 / 文件夹 / 流媒体 / 单曲整页（歌词跟随 + 资料抽屉 + 推送）/ 播放队列 / 设置页（输出·PCM·SDM·高级·EQ·元数据·流媒体·诊断）。
-三套主题（深 / 浅 / 浅蓝），标题栏与窗口边随主题即时切换。
+- **单进程原生壳** — NSWindow + WKWebView，页面走自定义 `rlplayer://app/` scheme 交给进程内核心，**主进程不监听端口**（只有 UPnP 投放期间临时起一个本地供源服务）
+- **三套主题 × 两套布局** — 深色 / 白色 / 浅蓝色，Apple Music 风与 Hi-Fi 工作台风各一套
+- **九个设置页签** — 输入 / 输出 / PCM / SDM / 高级 / EQ / 元数据 / 流媒体 / 诊断；页签条固定、只有内容滚动
+- **六态位完美徽标** — 直通、PCM→PCM、PCM→DSD、DSD→DSD 各自区分是否 bit-perfect，并给出降级原因
+- **通栏窗口** — 隐藏标题栏 + FullSizeContentView 内容铺满，四边 5px 热区可拉伸
 
-### 元数据与 AI
+### 资料与工具
 
-- 播放时自动补全标签/封面/歌词：QQ 音乐 / 网易云 / iTunes / lrclib / Discogs；
-- 在线封面抓取（内嵌图 → 网图 → 负缓存 7 天），请求线程**零网络**；
-- DeepSeek 负责疑难文件名解析、歧义裁决与「资料整理」（**防幻觉**：无来源时标注「AI 整理」，有来源时强制引用）；
-- 实体级缓存（person/release/track），命中即秒回；单曲页与艺术家页**共用同一份 person 缓存**；
-- 可选写回文件标签（`rtatag`），失败不动原文件。
+- **原生标签解析** — FLAC / WAV / MP3 / OGG 直接读，比走 ffprobe 快 **60×~250×**
+- **CUE 整轨分轨** — UTF-16 / UTF-8 / GBK 编码与 1/75 帧索引
+- **元数据补全** — QQ 音乐 / 网易云 / iTunes / lrclib / dizzylab 五源；播放时自动补标签、封面、歌词
+- **在线封面抓取** — 内嵌图 → 网图 → 负缓存 7 天；断网不写负缓存，只有服务器明确说没有才记缺失
+- **OPRA 耳机 EQ** — 内置 **6230** 款耳机目标曲线，一键写入 EQ 链
+- **音频体检 CLI** — `rtahealth` 输出 TT DR / BS.1770 LUFS / LRA / 假无损检测（需从源码构建，不随 `.app` 分发）
+- **自动更新** — 检查、下载、sha256 校验、安装、失败回滚；通道是公开的 GitHub 仓库，客户端零 token
+- **一键反馈** — 设置 → 诊断里填问题描述，附诊断包直接提交；未配置时明确说"未配置"，不假装发送成功
 
 ---
 
-## 快速开始
+## 界面
 
-### 用 DMG 安装包
+<table>
+  <tr>
+    <td width="50%"><img src="docs/images/ui-quickstart.png" alt="快速开始：无损音乐库、独占直通引擎、20 段 PEQ 与 OPRA 三张卡片，下面是官方推荐预设"></td>
+    <td width="50%"><img src="docs/images/ui-album-detail.png" alt="专辑详情：封面、曲目列表、每行的收藏与入队按钮，顶部有播放整张与随机播放"></td>
+  </tr>
+  <tr>
+    <td><b>快速开始</b> — 三张能力卡片 + 三档官方预设，按当前设备能力实时算出推荐档位。</td>
+    <td><b>专辑详情</b> — 68 首整轨列表，每行可收藏、可单独入队，顶部直接播放整张。</td>
+  </tr>
+  <tr>
+    <td><img src="docs/images/ui-artists.png" alt="艺术家视图：圆形封面网格，每位艺术家标注专辑数量"></td>
+    <td><img src="docs/images/ui-tracks.png" alt="曲目视图：扁平列表，显示所属专辑、时长与收藏按钮"></td>
+  </tr>
+  <tr>
+    <td><b>艺术家</b> — 圆形封面网格，卡片上标注专辑数量。</td>
+    <td><b>曲目</b> — 全库扁平列表，右上角可选排序方式，右侧「+」单曲入队。</td>
+  </tr>
+  <tr>
+    <td><img src="docs/images/ui-output.png" alt="设置 · 输出：CoreAudio 硬件直通后端、严格独占 Hog Mode 开关、输出模式与采样率协商"></td>
+    <td><img src="docs/images/ui-peq.png" alt="设置 · EQ：20 段参数均衡曲线，节点可拖拽，下方是逐段频率、增益、Q 与类型表格"></td>
+  </tr>
+  <tr>
+    <td><b>设置 · 输出</b> — Hog 模式一键切换，采样率与位深跟着设备协商，失败会报错。</td>
+    <td><b>设置 · EQ</b> — 20 段曲线节点可拖，自动前级防削波，可存预设。</td>
+  </tr>
+</table>
 
-1. 下载 `RLPlayer-v<版本>-macOS-arm64.dmg`
-2. 双击挂载，把 `RLPlayer` 拖进 `Applications`
-3. 首次打开若提示「无法验证开发者」：右键 →「打开」，或 `系统设置 → 隐私与安全性 → 仍要打开`
+---
 
-> ad-hoc 签名，未做 Apple 公证（notarization）。自用/内部分发没有问题。
+## 安装
 
-**系统要求**：macOS 13.0+ / Apple Silicon（arm64）。**不支持 Intel Mac。**
+1. 到 [Releases](https://github.com/BH2VOQ/RLPlayer-Mac/releases) 下载 `RLPlayer-v<版本>-macOS-arm64.dmg`
+2. 双击挂载，把 `RLPlayer` 拖进「应用程序」
+3. 首次打开若提示「无法验证开发者」：右键 →「打开」，或到 `系统设置 → 隐私与安全性 → 仍要打开`
 
-### 从源码构建
+ad-hoc 签名，未做 Apple 公证。自用与内部分发没有问题。
+
+### 系统要求
+
+| | |
+|---|---|
+| 系统 | macOS 13.0 及以上 |
+| 芯片 | Apple Silicon（arm64）**只支持 arm64**，不支持 Intel Mac |
+| 依赖 | 无。`.app` 自带 ffmpeg / ffprobe 与 Metal 内核 |
+
+---
+
+## 从源码构建
 
 ```bash
 # 前置：CMake ≥ 3.20、Xcode Command Line Tools
-cd RLPlayer
-
 cmake -S . -B build-mac -DCMAKE_BUILD_TYPE=Release
 cmake --build build-mac -j8
-ctest --test-dir build-mac --output-on-failure     # 82/82
+ctest --test-dir build-mac --output-on-failure     # 87/87
 
-# 出 .app（会自动做架构/部署目标/签名门禁）
+# 出 .app（脚本内做架构 / 部署目标 / 签名门禁，不达标直接失败）
 bash tools/make_app_mac.sh
 # → dist-mac/RLPlayer.app
-
-# 出 DMG
-hdiutil create -volname "RLPlayer" -srcfolder <staging> -format UDZO RLPlayer.dmg
 ```
-
-> **本机 CMake 不在 PATH**：`/private/tmp/cmake-3.31.6-macos-universal/CMake.app/Contents/bin`
-
-### 用 CLI（开发/调试用）
-
-`rtaweb` 是**开发/测试用 HTTP CLI**（`.app` 不打包它，`make_app_mac.sh` 有门禁：出现即致命错误）。
-它的端点与产品内部 `handle()` 是**同一份代码**，所以适合验证端点语义：
-
-```bash
-# 完全隔离的测试实例（绝不碰用户配置）
-RLPLAYER_STATE_DIR=/tmp/xxx RLPLAYER_LIBRARY_DIR=/tmp/xxx/lib \
-  ./build-mac/rtaweb --port 8960
-
-# 音频体检
-./build-mac/rtahealth 曲目.flac --json
-
-# GPU 精度实测（纯离线，不开设备）
-./build-mac/gpu_precision
-```
-
-> ⚠️ **端口 8899 是用户实例，绝不碰**。测试用 8960+，用完 `kill -TERM`（不 force-kill）。
 
 ---
 
-## GPU
+## 测试
 
-mac 用 `librtagpu.dylib`（Metal，运行时编译 MSL），**动态加载**：dlopen 不到就自动退回 CPU。
+```bash
+ctest --test-dir build-mac --output-on-failure
+```
 
-### ⚠️ 卷积：mac 上不建议开 GPU
+**87 套测试，实测 87/87 通过。** 覆盖 DSP 数值、输出路径、网络、元数据、UI 判定层与更新安装逻辑。
 
-实测（Apple M4，`docs/GPU卷积与升频效率细查.md`）：
+验证默认**不打开音频设备**：优先离线分析与 Null 后端；需要出声的用例电平一律 ≤ −60 dBFS。
 
-| IR | 每块 n | GPU | CPU | 结论 |
-|---:|---:|---:|---:|---|
-| 16384 | 4096（**生产**） | 0.891 ms | 0.264 ms | **慢 3.37×** |
-| 16384 | 65536 | 4.108 | 4.332 | 快 5% |
-| 65536 | 4096（**生产**） | 2.088 | 0.520 | **慢 4.02×** |
-| 65536 | 32768 | 3.351 | 4.487 | 快 25% |
-
-**根因**：mac 的 GPU 后端把 FFT 留在 CPU、只做逐点复数乘加；生产每块只有 4096 样，
-远低于 GPU 的盈亏平衡点（实测需 **n ≥ 32768** 才翻盘）。
-即使缓存 IR 频谱（目前每块重算，IR=262144 时占 91.3%）仍慢 3.7~8.3×。
-
-⟹ **`irgpu` 默认关闭，UI 已标注不建议开启**。功能保留可用（数值正确），但 mac 上是净亏。
-
-### ✅ 升频：值得开 GPU
-
-| 转换 | CPU | GPU | 加速 |
-|---|---:|---:|---:|
-| 44.1k → 352800 | 597.9 ms | 16.8 ms | **29×** |
-| 44.1k → 384000 | 21.2 ms | 4.1 ms | **5.5×** |
-
-升频每输出样要做 512~32768 次乘加，是纯算力活，块小也不怕。
-
-### 精度
-
-| 项 | 实测 |
-|---|---|
-| 卷积（最差格） | **−126.5 dB** 相对 RMS |
-| 卷积（最好格） | −148.4 dB |
-| 升频 | max\|Δ\|/峰 **8.3e-06**（Apple GPU 无 double，与 CUDA 的 ≤8e-16 差 9~10 个数量级） |
+部分指标不在 ctest 里（GPU 性能表、GPU 精度全矩阵、房间校正与体检的具体数值），那些由 `gpu_precision` 等探针手动跑，结果记在 `docs/`。
 
 ---
 
 ## 客观指标
 
-全部由 `ctest` 自动验证（**82 套**），不是估算：
+以下数字全部来自本机实测（Apple M4 / macOS 27.0.1），不是估算。
 
 | 项 | 实测 |
 |---|---|
-| 升频阻带衰减 | **−189 dB** |
+| 升频阻带衰减（44.1k → 384k） | **−189.10 dB** |
 | 升频通带纹波 | **0.0000 dB** |
-| NS9 带内噪声 vs TPDF | 低 **45.4 dB** |
-| DSD5 1-bit 带内 SNR | **86.2 dB** |
-| 8-bit SDM 带内 SNR | **118.8 dB** |
-| DSD 源抽取 THD+N（DSD64→176.4k） | **99.2 dB** |
-| 双二阶 10 种设计（解析 vs 实测） | 偏差 **0.0000 dB** |
-| 20 段 PEQ 单段 +6 dB | **6.0000 dB**（44.1/48/96/192k） |
-| 网络传输（回环 690 包） | **逐位相同** |
-| GPU 卷积修 IR 拖尾后 | 0/65536 样点错、**−150.12 dB** |
-| 专辑封面多曲重试 | 28/28 判据（修前 19 过 9 败） |
-| WAV 占位标题 | 138/138（含 6 条负向对照） |
+| 升频最大谐波 | **−134.54 dBc** |
+| DSD 源抽取 THD+N（DSD64 → 176.4k） | **99.37 dB** |
+| EC-5 带内 SNR（DSD256） | **113.5 dB** |
+| AHM-8bit 带内 SNR（DSD256） | **131.6 dB** |
+| 20 段 PEQ 单段 +6 dB | **6.0000 dB** |
+| 分块 FFT 卷积 vs 直接卷积 | 相对误差 **≤6.1e-14** |
+| CoreAudio 共享路径逐位比对 | 16/24/32 bit 全部 **0 LSB** |
+| UPnP 供源字节数 | 与源文件**逐字节相同** |
 
 ---
 
-## 项目结构
+## GPU
 
-```
-src/
-  dsp/         DSP 核心：升频/滤波器/量化器/调制器/卷积/EQ/PEQ/房间校正（头文件库）
-  analysis/    音频体检：动态测量（DR/LUFS/LRA）/ 假无损检测 / 体检编排
-  audio/       WAV 读写、DSD 原生读取、渲染循环、缓冲策略
-  platform/    平台层（macos/ 下是 CoreAudio / path / process / http 的 POSIX 实现）
-  net/         RTANet 协议、UPnP 投放、Web 界面（ui_page.h / ui_script.h）
-  engine/      播放管线（信号链整合）、预设决策层
-  gpu/         Metal 内核（卷积 / 重采样）——唯一 GPU 后端
-  meta/        元数据补全（实体模型 / 数据源 / 缓存 / LLM 综合）
-tools/         mac_host.mm（原生壳）、rtaweb（测试 CLI）、rtahealth、gpu_precision、打包脚本
-tests/        ctest 门禁（82 套）
-docs/         各模块实测纪要与调研
-AGENTS.md     开发铁律（动手前必读）
-STATUS.md     逐轮状态与实测数字（最新事实在这里）
-```
+Metal 内核（`librtagpu.dylib`，运行时编译 MSL）**动态加载**：`dlopen` 失败就退回 CPU，不影响功能。
 
----
+- **升频：值得开** — 44.1k → 352.8k 快 **29×**，44.1k → 384k 快 **5.5×**
+- **卷积：默认关闭** — 生产形态每块只有 4096 样，远低于 GPU 盈亏平衡点（实测需 n ≥ 32768 才翻盘），任何 IR 长度下都比 CPU 慢 **2.2×~3.5×**
 
-## 测试与验证
-
-```bash
-CM=/private/tmp/cmake-3.31.6-macos-universal/CMake.app/Contents/bin
-
-$CM/ctest --test-dir build-mac --output-on-failure     # 82/82
-```
-
-**验证不打开音频设备**：所有链路验证优先离线（`--analyze`）或 Null 后端。
-需要出声的测试默认电平 ≤ −60 dBFS（见 [AGENTS.md](AGENTS.md) 铁律 1）。
-
-**Windows 侧门禁**（`verify.ps1` / `check_compat.ps1`）本机跑不了 —— 本仓库已无 Windows 平台层，不再需要。
+功能保留可用、数值正确（卷积最差 **−126.5 dB** 相对 RMS），但 mac 上开它只是净亏。UI 已标注不建议开启。完整实测见 [docs/GPU卷积与升频效率细查.md](docs/GPU卷积与升频效率细查.md)。
 
 ---
 
 ## 已知限制
 
-- **Native DSD**：macOS 无 ASIO 原生 DSD 驱动通路，**只支持 DoP**；`dsdnative=1` 会明确报错
-- **GPU 卷积**：任何 IR 长度下都比 CPU 慢（见上方「GPU」），默认关闭
-- **输入采集**：设备枚举与设置页已有，采集→DSP→输出通路未实现
-- **标准 NAA**：只做发现，握手未实现；两机方案请用 RTANet
-- **DSD 域重采样**：同速率 DirectSDM 逐位直通可用；**速率不同时的 DSD→DSD 重采样未做**
-- **7 阶 1-bit 调制器**：只在 DSD128 以上稳定
-- **假无损检测**：AAC ≥128k 检不出（阈值「宁可漏报不可误报」的设计取舍）
-- **AI 资料**：首次生成耗时主要来自 LLM（中位 ~12 s）；缓存命中 6~7 ms
-- **Intel Mac**：不支持（只构建 arm64）
+- **Native DSD 不可用** — CoreAudio 只定义 PCM，没有原生 DSD 通路；`dsdnative=1` 会明确报错而不是静默降级。DSD 只能走 DoP
+- **Hog 不是独占式内核音频** — Hog 只抢设备、不阻止其它进程 IO，bit-perfect 的实际保障来自物理格式锁定
+- **独占路径无法自证逐位** — 设备侧回环 tap 与 Hog 互斥，独占路径目前只有间接证据
+- **GPU 卷积在生产形态下更慢** — 见上一节
+- **GPU 升频非逐位** — Apple GPU 无 double，走 float 路径，与 CPU 的差值在 −132.6 dB 量级
+- **7 阶 1-bit 调制器** — DSD128 以下自动降为 5 阶；Chebyshev 族恒降 5 阶
+- **假无损检测** — AAC ≥128k 检不出，设计取舍是"宁可漏报不可误报"
+- **房间校正只到 IR 卷积** — 扫频、反卷积、最小相位校正的算法库与离线测试都在，但真实话筒测量与 `/api/room/*` 路由**尚未接线**
+- **音频体检只有 CLI** — 算法与 `rtahealth` 可用，但**没有 `/api/health` 路由，也没有 UI 入口**
+- **输入采集不经过 DSP** — 采集与监听已实现，但 monitor 是直通输出，采集 → DSP 链未接
+- **Intel Mac 不支持** — 只构建 arm64，传 `x86_64` 会直接 FATAL
 
-完整清单见 [STATUS.md](STATUS.md)。
+更完整的挂账见 [STATUS.md](STATUS.md) 与 [PLATFORM.md](PLATFORM.md)。
+
+---
+
+## 项目来源
+
+本仓库是 **RLPlayer 的 macOS 独立分支**：平台层（音频输出、GPU、窗口壳）按 macOS 原生能力重写，与上游**不再合并**，版本号从 `1.0.0` 独立起算。
+
+上游仓库地址（待补充）：
+
+> <!-- TODO: 填入上游仓库链接 -->
+
+其余平台版本的介绍不在本仓库范围内，本文只描述 macOS 分支的实际能力。
 
 ---
 
@@ -268,17 +199,16 @@ $CM/ctest --test-dir build-mac --output-on-failure     # 82/82
 
 | 文件 | 内容 |
 |---|---|
-| [STATUS.md](STATUS.md) | **逐轮状态与实测数字 —— 最新事实以这里为准** |
-| [AGENTS.md](AGENTS.md) | 开发铁律（8 条 + 反馈目录规范） |
-| [docs/GPU卷积与升频效率细查.md](docs/GPU卷积与升频效率细查.md) | GPU 卷积/升频效率实测（拐点、根因、建议） |
-| [docs/WIP-F1-封面抓取.md](docs/WIP-F1-封面抓取.md) | 在线封面抓取 + 专辑归并的 mac 实现与判据 |
-| [docs/WIP-F6-GPU精度.md](docs/WIP-F6-GPU精度.md) | GPU 精度矩阵与门控建议 |
-| [debug/](debug/) | 每轮 DEBUG 档案（根因、判据、挂账） |
-| [docs/](docs/) | 各模块实测纪要、调研、踩坑记录 |
+| [PLATFORM.md](PLATFORM.md) | 平台层实测记录：CoreAudio、单进程壳、回环比对、并发与边界 |
+| [STATUS.md](STATUS.md) | 逐轮开发记录与判据（**只覆盖到 v1.0.0**，之后的轮次见 commit 与 `debug/`） |
+| [HANDOVER.md](HANDOVER.md) | 架构、构建方式、踩过的坑 |
+| [AGENTS.md](AGENTS.md) | 开发铁律 |
+| [docs/](docs/) | 各模块实测纪要与调研 |
+| [debug/](debug/) | 每轮 DEBUG 档案：根因、判据、挂账 |
 
 ---
 
-## 版权
+## 许可
 
 私有项目，保留所有权利（All rights reserved）。未经作者书面许可，不得复制、分发或用于商业用途。
 
