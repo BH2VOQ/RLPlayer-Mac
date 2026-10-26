@@ -829,18 +829,18 @@ function bindWorkstation() {
   // 快速开始四格：全部复用既有导航/设置入口
   var goFiles = D('amGoFiles');
   if (goFiles) goFiles.onclick = function () {
-    if (IS_MAC_HOST) {
-      pickDirectory((S.roots && S.roots[0]) || '', function (path) {
-        if (!path) return;
-        api('/api/lib/roots', 'add=' + encodeURIComponent(path)).then(function (j) {
-          if (j && j.ok === false) { toast(j.error || '添加失败'); return; }
-          toast('已添加音乐目录：' + path);
-          libChanged(); loadLibStats(); api('/api/lib/scan', ''); renderStation();
-        });
-      });
-    } else {
-      openSettingsTab('adv');
-      var r = D('sp_root'); if (r) { try { r.focus(); } catch (e) { } }
+    // 2026-10-26（用户要求）：「设置文件夹位置」= 直接跳转到**设置里的文件夹设置区**，
+    //   不要再静默弹系统选目录框。
+    //   原因：用户点这个卡片时想的是「去那个地方设置」，而弹框只给了一个孤立动作，
+    //   不告诉他设置在哪个页签、也不显示已有的库根列表 —— 加了新目录后找不到管理入口。
+    //   mac 与 Windows 现在行为一致：openSettingsTab('adv') → 本地音乐库 → 「添加音乐目录」。
+    openSettingsTab('adv');
+    var r = D('sp_root');
+    if (r) {
+      try { r.focus({ preventScroll: true }); } catch (e) { }
+      // 滚动到该字段所在的设置分组，让用户一眼看到；用 scrollIntoView 而不是
+      // 手动算 offsetTop —— #setpage 现在是滚动容器（见 U-2 修复），手动算会算错容器。
+      try { r.scrollIntoView({ block: 'center', behavior: 'smooth' }); } catch (e) { }
     }
   };
   var goRemote = D('amGoRemote');

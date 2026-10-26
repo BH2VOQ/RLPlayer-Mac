@@ -85,12 +85,16 @@ rm -rf "$ICONSET"
 #   **必须是纯数字点号**，带 `-beta` 会被 codesign/系统拒绝。
 #   旧正则 `sed 's/[^0-9.]*\([0-9.]*\).*/\1/'` 会把 `1.0.5-beta.1` 截成 `1.0.5`，
 #   导致 plist 里**丢失 beta 标识**（用户看到的是稳定版号）。
-#   ⟹ 现在拆成两个：VER 保留完整串给 ShortVersion，BUILD 只取数字段给 CFBundleVersion。
+#   ⟹ 拆成两个：VER 保留完整串给 ShortVersion，VERBUILD 只取数字段给 CFBundleVersion。
+# ⚠️ 变量名**绝对不能叫 BUILD** —— 第 19 行的 BUILD 是**构建目录**（默认 $ROOT/build-mac）。
+#   我第一版就叫 BUILD，结果把构建目录覆盖成 "1.0.5"，脚本随后去
+#   `1.0.5/ffmpeg-lite/ffmpeg` 找 ffmpeg ⟹ 报「未找到 1.0.5/ffmpeg-lite/ffmpeg」。
+#   教训：这个脚本里 BUILD 是保留名，新增变量一律加前缀（VERxxx）。
 RAWVER="$(grep -m1 RLPLAYER_VERSION "$ROOT/src/version.h" 2>/dev/null | sed 's/.*"\(.*\)".*/\1/' || true)"
 [[ -n "$RAWVER" ]] || RAWVER="1.0.1"
-VER="$RAWVER"                                                     # 完整版号（可含 -beta.N）
-BUILD="$(printf '%s' "$RAWVER" | sed 's/[^0-9.].*$//; s/\.$//')"  # 纯数字点号段
-[[ -n "$BUILD" ]] || BUILD="1.0.1"
+VER="$RAWVER"                                                          # 完整版号（可含 -beta.N）
+VERBUILD="$(printf '%s' "$RAWVER" | sed 's/[^0-9.].*$//; s/\.$//')"    # 纯数字点号段
+[[ -n "$VERBUILD" ]] || VERBUILD="1.0.1"
 cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -100,7 +104,7 @@ cat > "$APP/Contents/Info.plist" <<PLIST
     <key>CFBundleDisplayName</key>      <string>RLPlayer</string>
     <key>CFBundleExecutable</key>       <string>RLPlayer</string>
     <key>CFBundleIdentifier</key>       <string>com.rta.rlplayer</string>
-    <key>CFBundleVersion</key>          <string>${BUILD}</string>
+    <key>CFBundleVersion</key>          <string>${VERBUILD}</string>
     <key>CFBundleShortVersionString</key> <string>${VER}</string>
     <key>CFBundlePackageType</key>      <string>APPL</string>
     <key>CFBundleIconFile</key>         <string>RLPlayer</string>
