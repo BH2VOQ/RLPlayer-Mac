@@ -609,6 +609,9 @@ function workstationHtml() {
   var rootPath = hasRoots ? String(validRoots[0] || '') : '';
 
   var h = '<div class=am-home>';
+  // 2026-10-26（用户要求）：官方推荐预设卡片放在快速开始页**最顶部** ——
+  // 「一键开局」是新手/换设备后第一个该做的事，比「精选功能」三张卡更前置。
+  h += presetCardHtml();
   h += '<div class=am-sec-hdr>精选功能</div>';
   h += '<div class=am-hero-grid>';
 
@@ -726,6 +729,11 @@ function renderStation() {
   if (!list) return;
   list.innerHTML = workstationHtml();
   bindWorkstation();
+  // 2026-10-26（预设卡片移入快速开始）：绑定与能力加载必须在这里也做一遍。
+  // 原来只在设置页渲染时调 bindPresetCard()/loadPresetCaps()，卡片搬到快速开始后
+  // 若不补这两行，三个按钮会点了没反应（元素在、onclick 没绑）。
+  bindPresetCard();
+  loadPresetCaps(false);
 }
 
 function bindWorkstation() {
@@ -5255,9 +5263,9 @@ function renderSettingsPage() {
   var CH = String(ADV.channels || 0);
   var h = '';
 
-  // ---------- 官方推荐预设卡片 ----------
-  h += presetCardHtml();
-
+  // 2026-10-26：官方推荐预设卡片**移到快速开始页**（用户要求）。
+  // 设置页这里不再渲染 —— 预设是「一键开局」的入口，属于快速开始的心智模型，
+  // 放在设置页顶部反而让「精细调节」的设置页显得喧宾夺主。
   // ---------- 页签（对齐 RLPlayer：Inputs / Outputs / PCM / SDM / Advanced） ----------
   h += '<div class=stabs>'
      + '<button class="stab on" data-g=in>输入</button>'

@@ -428,6 +428,8 @@ static PlayerState g_ps;
 // 20 段参数均衡 PEQ（261024-02 #6）：全局单例。播放线程处理音频，HTTP 线程改参数（热更新）。
 static std::shared_ptr<rta::dsp::PeqEngine> g_peq;
 static std::atomic<bool> g_exitReq{false};
+// 2026-10-25：退出中标志。后台 detached 任务看到它就尽量提前收尾
+static std::atomic<bool> g_shutdown{false};
 
 // ---------------- 进程内存遥测（2026-10-25 大 DSD 文件"卡死"取证） ----------------
 // 为什么必须自己量：外部按秒采样会漏掉解码阶段的瞬时峰值（整曲解成 double 平面只在几秒内存在），
@@ -1127,6 +1129,22 @@ static void upnp_mark_player_state(const std::string& file, bool ok, const std::
 // 所以扫描放后台线程，前端轮询同一端点直到 scanning=false。
 static std::string naa_discover_json(bool) {
     return "{\"ok\":false,\"error\":\"macOS 版暂不支持 NAA 端点发现（Windows 专属）\"}";
+}
+
+// ---------------- Native DSD 采样率判定（上游 6bd21a6）----------------
+// Native DSD 按源位率直通，不做升频。
+// ⚠️ 2026-10-25 修：这里原来只认 "" 和 "src"，而**设置页/conf 里「跟随源」写的是 "follow"**
+//（ui_script.h 的 sRate 第一项、rtaweb.cpp 的 rateAuto 也都把 follow 当跟随源）。
+// 后果是 GUI 用户明明选的就是「跟随源」，却被告知「请改成跟随源」——永远用不了原生 DSD。
+// 现在三种等价写法都接受；"max"（要升频）和具体数字（要换率）仍然明确拒绝。
+static bool native_dsd_precheck(const PlayParams& p, std::string& why) {
+    const bool rateFollowsSource = (p.rate.empty() || p.rate == "src" || p.rate == "follow");
+    if (!rateFollowsSource) {
+        why = "Native DSD 按源位率直通，不做升频：采样率设置当前是「" + p.rate +
+              "」，请改成「跟随源」（设置 → 输出 → 采样率；等价写法 src / follow）。";
+        return false;
+    }
+    return true;
 }
 
 // ---------------- DirectSDM：源 DSD 与目标 DSD 同速率时的逐位直通 ----------------
@@ -5145,6 +5163,17 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
                             "s > 文件时长 " + std::to_string(mi.duration) + "s") + "\"}";
             play_log("PLAY_CUE cue=" + cue_range_text(p.cueStart, p.cueEnd) + " file=" + p.file);
         }
+
+        // Native DSD 参数门（HTTP 层同步拒绝，不开设备）：
+        // 放在起播放线程之前 ⟹ 用户点一下立刻拿到具体原因，而不是"HTTP 说 ok、线程里才失败"。
+        if (p.dsdNative) {
+            std::string why;
+            if (!native_dsd_precheck(p, why)) {
+                play_log("PLAY_REJECT dsdnative=1 file=" + p.file + " " + why);
+                return std::string("{\"ok\":false,\"nativeDsd\":true,\"error\":\"") + jesc(why) + "\"}";
+            }
+        }
+
         params_store(p);
 
         // 先停掉上一次（原子：并发点播放时不会撞 thread 赋值 terminate）
@@ -8034,9 +8063,22 @@ int rlapp::cli_main(int argc, char** argv) {
     //   连接表清空；然后才拆播放线程 / 库扫描线程。否则在途请求会访问正在析构的单例。
     ui.stop();
     g_httpListening.store(false);
+    // ---- 2026-10-25：退出崩溃取证 + 收尾（上游 6bd21a6）----
+    {
+        std::ostringstream o;
+        o << "SHUTDOWN joinable: player=" << (g_ps.th.joinable() ? 1 : 0)
+          << " prefetch=" << (g_pre.th.joinable() ? 1 : 0)
+          << " scan=" << (g_wb.th.joinable() ? 1 : 0);
+        play_log(o.str());
+        printf("%s\n", o.str().c_str());
+    }
+    g_shutdown = true;                     // 让后台活儿看到"要退了"，别再碰全局
     // 控制面已停 → 与 embedded 完全相同的协作收尾（播放/采集/预解码/扫描/写回/后台任务）
     core_shutdown_common();
-    return 0;
+    if (g_pre.th.joinable()) g_pre.th.detach();
+    if (g_wb.th.joinable())  g_wb.th.detach();
+    std::fflush(nullptr);
+    std::_Exit(0);
 }
 
 // ---------------------------------------------------------------------------

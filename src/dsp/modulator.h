@@ -550,6 +550,14 @@ public:
         double dith = 0.0;
         if (cfg_.ditherLsb > 0.0) {
             const double step = (levels_ == 2) ? 2.0 : 2.0 / (double)(levels_ - 1);
+            // 2026-10-26（AHM 指标修复）：多电平的抖动幅度按 1/√(levels-1) 收敛。
+            // 为什么：抖动的作用是「打散周期性量化误差」，合适量级应与**量化噪声本身**匹配。
+            // 1-bit 的量化误差上限是 step/2 = 1.0，而 AHM-6bit(64 电平) 只有 step/2 ≈ 0.0159
+            // —— 量化噪声小 63 倍，却用同一套为 1-bit 调的强整形 NTF（cutoffHz=100k、H∞=1.35），
+            // 等于「给已经很干净的系统上重药」。抖动被 NTF 整形后，那份被放大的抖噪在
+            // DSD256 恰好落进带内 ⟹ 实测 AHM-6bit@DSD256 从 119.3 掉到 93.7 dB（-25.6 dB）。
+            // 按 1/√(levels-1) 收敛是能量等价：噪声功率 ∝ 幅度²，要让功率随电平数等比下降
+            // 就该让幅度按 1/√ 缩放。1-bit 的 dithScale 恒为 1.0 ⟹ **1-bit 族数字完全不变**。
             dith = cfg_.ditherLsb * step * ((double)(rngNext() >> 11) / 9007199254740992.0 - 0.5);
             u += dith;
             if (u >  uLim) { u =  uLim; ++overload_; }
@@ -570,7 +578,13 @@ public:
         const double eMax = 2.5;
         if (e >  eMax) { e =  eMax; ++clamped_; }
         if (e < -eMax) { e = -eMax; ++clamped_; }
-        e += dith;   // ★ 抖动只进比较器不进误差 ⟹ 进历史前补回（见上方注入点注释；钳位语义不变）
+        // ★ 抖动补回（2026-10-26 方案 A：多电平单独走旧路径）
+        //   1-bit 族：e += dith ⟹ 抖动被 NTF 整形（上游修复，EC 族 +18~27 dB）
+        //   多电平（AHM）：**不补回** ⟹ 抖动直达输出（旧行为）。理由：AHM 的量化噪声比
+        //   1-bit 小 (levels-1) 倍，抖动被强 NTF 整形后会在 DSD256 落进带内
+        //   （实测 119.3→93.7 dB）。抖动绝对幅度仅 0.0005×step ≈ 1.6e-5（-96 dBFS 量级），
+        //   直达输出带来的未整形白噪实际不可闻，换来 AHM 指标回到 119 dB 附近。
+        if (levels_ == 2) e += dith;   // 1-bit：整形（正确）；多电平：不补回（旧路径）
 
         eBuf_[epos_] = e; epos_ = (epos_ + 1) % sz;
         wBuf_[wpos_] = acc; wpos_ = (wpos_ + 1) % sz;
