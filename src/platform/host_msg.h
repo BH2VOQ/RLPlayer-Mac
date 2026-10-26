@@ -18,7 +18,10 @@ enum class HostAction {
     Theme,
     OpenUrl,
     Resize,       // arg: left/right/top/bottom/topleft/topright/bottomleft/bottomright
-    PickDir       // 2026-10-25：打开原生「选择文件夹」面板（用户要求可点击选目录）
+    PickDir,      // 2026-10-25：打开原生「选择文件夹」面板（用户要求可点击选目录）
+    // 2026-10-26 F-4 自动更新（用户要求「云端发布更新 → 自动提示 → 客户端一键更新」）
+    UpdateCheck,  // 查一次更新（异步：结果通过 update:status:* 回传页面）
+    UpdateInstall // 一键更新：下载 → 校验 sha256 → 挂载 dmg → 替换 .app → 提示重启
 };
 
 struct HostMessage {
@@ -93,6 +96,13 @@ inline HostMessage parse_host_message(const std::string& m) {
         if (!r.allowed) r.reason = "scheme not allowed (only http/https)";
         return r;
     }
+    // 2026-10-26 F-4 自动更新。两条都是**无参**命令：
+    //   "update:check"   → 查一次（页面启动后调一次，也允许用户手动点「检查更新」）
+    //   "update:install" → 一键更新（下载/校验/挂载/替换）
+    // 为什么无参：更新地址与 token 只能来自 .app 外的 update.conf 与代码常量，
+    // **绝不接受页面传 URL** —— 否则网页侧任何脚本都能命令宿主下载任意文件。
+    if (m == "update:check")   { r.action = HostAction::UpdateCheck;   return r; }
+    if (m == "update:install") { r.action = HostAction::UpdateInstall; return r; }
     return r;
 }
 

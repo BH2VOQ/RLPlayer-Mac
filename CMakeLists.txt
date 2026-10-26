@@ -124,8 +124,15 @@ if(APPLE)
   # macOS 原生壳（§9 第 9 条 / §10 契约）：单进程内直连 |rlapp::dispatch|。
   # mac_host.mm 用 ARC 语义（WKURLSchemeTask/block 对象生命周期不能被 MRR 误释放）。
   # 实测未开 ARC 时在 startURLSchemeTask 的 objc_msgSend 崩 SIGSEGV，开 ARC 后同场景通过。
-  add_executable(rlplayer_mac tools/mac_host.mm)
+  # 2026-10-26 F-4 自动更新：原生执行层（下载/校验/挂载/替换 .app）单独一个 TU。
+  # 只加进 rlplayer_mac，不进 rlapp_core / rtaweb（CLI 不需要装 .app，也不该有 AppKit 依赖）。
+  # 必须开 ARC（与 mac_host.mm 同理：block 捕获的对象生命周期）。
+  add_executable(rlplayer_mac tools/mac_host.mm tools/mac_update.mm)
   set_source_files_properties(tools/mac_host.mm PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
+  set_source_files_properties(tools/mac_update.mm PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
+  # 只有 rlplayer_mac 真正链接更新引擎；test_mac_transport 复用 mac_host.mm 但不带引擎，
+  # 靠这个宏走「unsupported」回退分支（否则会 undefined symbols）。
+  target_compile_definitions(rlplayer_mac PRIVATE RL_WITH_UPDATE=1)
   target_link_libraries(rlplayer_mac PRIVATE rlapp_core "-framework AppKit" "-framework WebKit")
 endif()
 
@@ -164,6 +171,16 @@ if(APPLE)
   add_executable(test_embedded_api tests/test_embedded_api.cpp)
   target_include_directories(test_embedded_api PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tools)
   target_link_libraries(test_embedded_api PRIVATE rlapp_core)
+  # 2026-10-26 F-4 自动更新：安装流水线**真跑**门禁（造真 dmg / 真挂载 / 真 ditto 安装）。
+  # 所有路径都在 /tmp 隔离目录，绝不触碰用户正在使用的 .app。
+  # 判据：篡改必拒绝且不挂载、正确摘要能真装进去（内容可核对）、截断必拒绝、token 脱敏。
+  add_executable(test_mac_update tests/test_mac_update.mm tools/mac_update.mm)
+  set_source_files_properties(tests/test_mac_update.mm tools/mac_update.mm
+                              PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
+  target_include_directories(test_mac_update PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tools)
+  target_link_libraries(test_mac_update PRIVATE ${RL_PLATFORM_LIBS} "-framework AppKit" "-framework Foundation")
+  add_test(NAME mac_update COMMAND test_mac_update)
+
   add_test(NAME embedded_api COMMAND test_embedded_api)
   set_tests_properties(embedded_api PROPERTIES
     ENVIRONMENT "PATH=${CMAKE_SOURCE_DIR}/build-mac/ffmpeg-lite:/usr/bin:/bin:/usr/sbin:/sbin")
@@ -204,6 +221,13 @@ add_executable(test_host_msg tests/test_host_msg.cpp)
 target_link_libraries(test_host_msg PRIVATE rtadsp)
 add_test(NAME host_msg COMMAND test_host_msg)
 
+# 2026-10-26 F-4 自动更新：纯逻辑层离线门禁（不联网、不开窗口、不碰音频设备）
+# 判据：版本比较真值表（1.0.10>1.0.9 能区分数值比较与字符串比较）、sha256 用 NIST 官方向量、
+# 下载 URL 白名单对抗用例、「篡改/截断必失败」安装门禁、五种失败分支都不得等于「已是最新」。
+add_executable(test_update_check tests/test_update_check.cpp)
+target_link_libraries(test_update_check PRIVATE rtadsp)
+add_test(NAME update_check COMMAND test_update_check)
+
 add_executable(test_resampler tests/test_resampler.cpp)
 target_link_libraries(test_resampler PRIVATE rtadsp)
 add_test(NAME resampler COMMAND test_resampler)
@@ -235,6 +259,12 @@ add_test(NAME pipeline COMMAND test_pipeline)
 add_executable(test_conv_matrix tests/test_conv_matrix.cpp)
 target_link_libraries(test_conv_matrix PRIVATE rtadsp)
 add_test(NAME conv_matrix COMMAND test_conv_matrix)
+
+# 卷积 IR 预处理：超 Nyquist 外推 + 自动增益（对标 RLPlayer 5.13，见
+# notes/RLPlayer对RLPlayer可借鉴清单-源码核实版.md §2.4）
+add_executable(test_conv_ir_prep tests/test_conv_ir_prep.cpp)
+target_link_libraries(test_conv_ir_prep PRIVATE rtadsp)
+add_test(NAME conv_ir_prep COMMAND test_conv_ir_prep)
 
 add_executable(test_volume_eq tests/test_volume_eq.cpp)
 target_link_libraries(test_volume_eq PRIVATE rtadsp)
