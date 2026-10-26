@@ -30,8 +30,10 @@ cp "$BUILD/rlplayer_mac" "$APP/Contents/MacOS/RLPlayer"
 chmod +x "$APP/Contents/MacOS/RLPlayer"
 
 # 2) 数据（OPRA 耳机 EQ 索引；path_in_exe_dir 约定 = exe 同目录）
-mkdir -p "$APP/Contents/MacOS/data"
-cp "$ROOT/data/opra_index.json" "$APP/Contents/MacOS/data/"
+# 2026-10-26（出产物修复）：数据放 Contents/Resources/，**不要**放 Contents/MacOS/ ——
+# 后者只该放可执行文件，往里塞 json 会让 codesign -v 报 "code object is not signed at all"。
+mkdir -p "$APP/Contents/Resources/data"
+cp "$ROOT/data/opra_index.json" "$APP/Contents/Resources/data/"
 
 # 2b) Metal GPU 后端（librtagpu.dylib）
 #

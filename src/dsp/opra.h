@@ -445,6 +445,14 @@ public:
             if (!baseDir_.empty()) {
                 fs::path p = fs::path(baseDir_) / "data" / "opra_index.json";
                 if (fs::exists(p, ec)) path = p.string();
+                // 2026-10-26（出产物修复）：macOS .app 的标准布局是数据放 Contents/Resources/，
+                // 而不是 Contents/MacOS/（后者只该放可执行文件 —— 往 MacOS/ 里塞 json 会破坏
+                // 代码签名：codesign -v 报 "code object is not signed at all"）。
+                // baseDir_ = Contents/MacOS 时，下面这条正好命中 Contents/Resources/data/。
+                if (path.empty()) {
+                    fs::path r = fs::path(baseDir_) / ".." / "Resources" / "data" / "opra_index.json";
+                    if (fs::exists(r, ec)) path = r.string();
+                }
             }
             if (path.empty()) {
                 if (fs::exists("data/opra_index.json", ec)) path = "data/opra_index.json";
