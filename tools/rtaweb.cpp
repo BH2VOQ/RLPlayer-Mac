@@ -7951,6 +7951,7 @@ int rlapp::cli_main(int argc, char** argv) {
     // 2026-10-25（单进程原生化收口）：macOS 已全面采用 WKWebView 单进程应用（RLPlayer.app），
     // 不再使用浏览器端。CLI 入口 rtaweb 仅作无头测试工具，默认绝不自动 open 系统浏览器。
     bool noBrowser = true;
+    std::string musicDir;   // --music-dir：直接指定库根（覆盖配置文件）
     // 端口解析（2026-10-25 修）：macOS 壳 tools/mac_host.mm:62 传的是 "--port=%u"（等号形式），
     // 旧代码只认 "--port N"（空格形式）→ 等号形式被静默忽略、永远绑 8899，
     // 于是壳里 8899..8910 的端口回退全是死代码（8899 被占时只能报「无法启动播放服务」）。
@@ -7979,6 +7980,21 @@ int rlapp::cli_main(int argc, char** argv) {
         }
         else if (k == "--lan") lan = true;
         else if (k == "--no-browser") noBrowser = true;   // macOS .app 模式：界面已自动打开
+        // 2026-10-26（二次 DEBUG 修，debug/20261026-01）：补 --music-dir / --music-dir=<dir>。
+        //   此前只能靠 RLPLAYER_LIBRARY_DIR 或 rlplayer-library.conf.p<port> 指定库根，
+        //   命令行传 --music-dir 会被静默忽略（用户以为生效了，实际扫的是别的目录）。
+        else if (k == "--music-dir" && i + 1 < argc) musicDir = argv[++i];
+        else if (k.rfind("--music-dir=", 0) == 0) musicDir = k.substr(12);
+    }
+    // --music-dir：**替换**音乐库扫描根（不是数据目录 —— RLPLAYER_LIBRARY_DIR 是
+    // 配置/索引的存放目录，语义不同，别混用）。这样 `rtaweb --music-dir X` 扫的就是 X，
+    // 不会再去扫配置文件里遗留的旧根（2026-10-26 二次 DEBUG 实测：之前会叠加）。
+    if (!musicDir.empty()) {
+        auto& lib = Library::instance();
+        for (auto r : lib.roots()) lib.removeRoot(r);
+        const auto ar = lib.addRootEx(musicDir);
+        if (!ar.ok) printf("!! --music-dir \"%s\" 加不进库：%s\n", musicDir.c_str(), ar.why.c_str());
+        else printf("  音乐库根已设为：%s\n", musicDir.c_str());
     }
     g_uiPort = port;
     g_lanOn  = lan;

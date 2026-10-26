@@ -69,8 +69,47 @@ inline std::wstring exe_dir_w() {
     const std::string d = rta::platform::module_dir_utf8();
     return std::wstring(d.begin(), d.end());
 }
+// 工具可执行性自检（2026-10-26 二次 DEBUG 修，debug/20261026-01）：
+//   「找到工具」≠「工具能跑」。本机系统 ffmpeg/ffprobe 因 libx265 缺失 `-version` 直接
+//   退出 134（SIGABRT），find_executable 仍会返回路径 ⟹ 解码链路拿到坏工具才在很远处
+//   抛 "ffmpeg 解码失败（退出码 134）"，与真因（工具链坏了）脱钩（铁律 3）。
+//   这里对候选做一次 `-version` 自检，不可用就跳过。
+inline bool tool_runnable(const std::string& exe) {
+    if (exe.empty()) return false;
+    const std::wstring cmd = L"\"" + widen(exe) + L"\" -version";
+    return run_hidden(cmd, nullptr) == 0;
+}
 inline std::string find_tool(const char* name) {
-    return rta::platform::find_executable(name);   // exe 同目录（无 .exe 后缀）→ PATH
+    // ① 环境变量覆盖（RLPLAYER_FFMPEG / RLPLAYER_FFPROBE 等）—— 换机器/自定义工具链的
+    //    正当产品能力；不设时行为与之前一致。
+    {
+        std::string envName = "RLPLAYER_";
+        for (const char* p = name; *p; ++p) envName += (char)std::toupper((unsigned char)*p);
+        if (const char* env = std::getenv(envName.c_str())) {
+            if (env[0] && tool_runnable(env)) return std::string(env);
+        }
+    }
+    // ② exe 同目录（无 .exe 后缀）→ PATH，但必须通过 -version 自检
+    const std::string found = rta::platform::find_executable(name);
+    if (tool_runnable(found)) return found;
+    // ③ 自建 ffmpeg-lite（系统工具链坏掉时的既定可用件）。两处候选：
+    //    a) 与可执行同目录（发布形态：.app/Contents/MacOS/ffmpeg-lite/）
+    //    b) 从可执行目录向上找 build-mac/ffmpeg-lite/（开发/测试形态：ctest 二进制在
+    //       build-mac/ 或 /tmp，仓库根的 lite 才是真的那份）
+    if (std::string(name) == "ffmpeg" || std::string(name) == "ffprobe") {
+        const std::string md = rta::platform::module_dir_utf8();
+        const std::string cand1 = md + "/ffmpeg-lite/" + name;
+        if (tool_runnable(cand1)) return cand1;
+        std::string up = md;
+        for (int depth = 0; depth < 4 && !up.empty(); ++depth) {
+            const std::string cand = up + "/build-mac/ffmpeg-lite/" + name;
+            if (tool_runnable(cand)) return cand;
+            const size_t slash = up.find_last_of('/');
+            if (slash == std::string::npos || slash == 0) break;
+            up = up.substr(0, slash);
+        }
+    }
+    return found;   // 都不可用时仍返回找到的路径，让调用方的错误文案带出真实路径
 }
 // 删临时文件（两平台同名；失败静默——清理动作不该掩盖主流程错误）
 inline void remove_temp(const std::string& p) { std::remove(p.c_str()); }
