@@ -31,20 +31,47 @@ https://github.com/settings/personal-access-tokens/new
 > ⚠️ **绝不要**用有 repo 全权限的经典 token。这个 token 泄露 = 别人能往你仓库写东西。
 > 只授权一个仓库 + 只勾 Issues，泄露面就只剩"往这个私有仓库塞垃圾 issue"。
 
-### 2. 跑部署脚本
+### 2. 先搞定 Cloudflare 认证（二选一）
+
+> ⚠️ **踩过的坑**：第一版脚本想「替你跑 wrangler login」，但脚本要读你粘贴的
+> GitHub token，会把 stdin 变成管道 ⟹ wrangler 判定「非交互环境」直接拒绝登录。
+> 所以认证必须**先单独完成**，再跑脚本。
+
+**方式 A · 不需要浏览器（推荐）**
+
+1. 建 API Token：https://dash.cloudflare.com/profile/api-tokens
+   「Create Token」→ 自定义，权限给：
+   - `Account → Workers Scripts → Edit`
+   - `Account → R2 → Edit`（要存诊断包才需要）
+2. 记下 Account ID（控制台右侧栏）
+
+**方式 B · 浏览器授权**
 
 ```bash
 cd /Users/august/Downloads/DQ/RLPlayer/worker
+npx wrangler login
+```
+
+### 3. 跑部署脚本
+
+```bash
+# 方式 A：
+export CLOUDFLARE_API_TOKEN='粘贴token'
+export CLOUDFLARE_ACCOUNT_ID='你的account id'
+./deploy.sh
+
+# 方式 B（已 login 过）：
 ./deploy.sh
 ```
 
 脚本会：
-1. 检查/打开 Cloudflare 登录（浏览器授权一次）
-2. 让你粘贴上面那个 token → 写进 Worker Secrets（**只存在 Cloudflare，不进代码、不进 git**）
+1. 校验 Cloudflare 认证（未认证时给出上面两种方式的指引，不会硬着头皮跑）
+2. 让你粘贴 GitHub token → 写进 Worker Secrets（**只存在 Cloudflare，不进代码、不进 git**）
 3. 自动生成随机限流盐并写入
-4. 部署，并打印 `https://xxx.workers.dev`
+4. **创建 R2 桶** `rlplayer-feedback`（免费 10GB）并自动写 binding
+5. 部署，并打印 `https://xxx.workers.dev`
 
-### 3. 把 URL 填进代码（一行）
+### 4. 把 URL 填进代码（一行）
 
 `src/net/ui_script.h`：
 
