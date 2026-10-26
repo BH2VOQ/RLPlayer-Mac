@@ -61,7 +61,7 @@ echo "  编译器 : $(clang++ --version | head -1)"
 # -install_name     : @rpath 形式，方便 .app 包内定位
 # -I src            : 为了 #include "dsp/fft.h"（复用项目 double 精度 FFT）
 # -Wl,-dead_strip   : 去掉未引用符号，让 nm -gU 的清单就是真实导出的 4 个
-clang++ -std=c++23 -O2 -fobjc-arc -dynamiclib -arch arm64 \
+clang++ -std=c++23 -O2 -fobjc-arc -dynamiclib -arch arm64 -mmacosx-version-min=13.0 \
     -I "$REPO_ROOT/src" \
     -framework Metal -framework Foundation \
     -install_name @rpath/librtagpu.dylib \

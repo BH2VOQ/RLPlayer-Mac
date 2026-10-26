@@ -96,7 +96,7 @@ build_arm64() {
     --enable-muxer=wav,flac,mp3,ipod,ogg,opus,matroska,aiff,caf,asf,wv,image2 \
     --arch="$ARCH" --target-os=darwin \
     --enable-zlib \
-    $LAME_ENABLE --extra-cflags="$LAME_CFLAGS -arch $ARCH" --extra-ldflags="$LAME_LDFLAGS -arch $ARCH" \
+    $LAME_ENABLE --extra-cflags="$LAME_CFLAGS -arch $ARCH -mmacosx-version-min=13.0" --extra-ldflags="$LAME_LDFLAGS -arch $ARCH -mmacosx-version-min=13.0" \
     --enable-encoder=pcm_s16le,pcm_s24le,pcm_s32le,pcm_f32le,flac,alac,aac,vorbis,opus,libmp3lame \
     --enable-bsf=pcm_rechunk,flac_picture,aac_adtstoasc \
     --enable-filter=aresample,anull,aformat \

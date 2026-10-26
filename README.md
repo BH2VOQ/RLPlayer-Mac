@@ -22,7 +22,7 @@ macOS 上的高保真播放引擎：升频、噪声整形、SDM/DSD 调制、卷
 - **SDM 调制器** — 四族：Butterworth（DSD5/DSD7）、7 阶 Chebyshev、EC 误差反馈、AHM 多电平；EC-5 在 DSD256 带内 SNR **113.5 dB**
 - **DSD 原生读取** — DSF/DFF 直接解析，不经 ffmpeg；DirectSDM 同速率逐位直通，大文件分块流式解码（1764000 帧逐样本一致）
 - **卷积引擎** — 零延迟均匀分块 FFT，分块结果与直接卷积相对误差 **≤6.1e-14**
-- **20 段 PEQ** — RBJ 双二阶、1/3 倍频程、节点可拖、自动前级防削波；单段 +6 dB 实测 **6.0000 dB**（44.1/48/96/192 kHz）
+- **20 段 PEQ** — RBJ 双二阶，20 个中心频率取自 ISO 1/3 倍频程网格，节点可拖、自动前级防削波；单段 +6 dB 实测 **6.0000 dB**（44.1/48/96/192 kHz）
 - **过载保护** — 过采样峰值检测（ISP）自动预衰减、音量渐变、DoP 音量锁 0 dB；满幅 / 瞬态 / 恢复三段都有回归
 
 ### 输出
@@ -64,7 +64,7 @@ macOS 上的高保真播放引擎：升频、噪声整形、SDM/DSD 调制、卷
   </tr>
   <tr>
     <td><b>快速开始</b> — 三张能力卡片 + 三档官方预设，按当前设备能力实时算出推荐档位。</td>
-    <td><b>专辑详情</b> — 68 首整轨列表，每行可收藏、可单独入队，顶部直接播放整张。</td>
+    <td><b>专辑详情</b> — 整轨曲目列表，每行可收藏、可单独入队，顶部直接播放整张。</td>
   </tr>
   <tr>
     <td><img src="docs/images/ui-artists.png" alt="艺术家视图：圆形封面网格，每位艺术家标注专辑数量"></td>
@@ -157,9 +157,9 @@ ctest --test-dir build-mac --output-on-failure
 Metal 内核（`librtagpu.dylib`，运行时编译 MSL）**动态加载**：`dlopen` 失败就退回 CPU，不影响功能。
 
 - **升频：值得开** — 44.1k → 352.8k 快 **29×**，44.1k → 384k 快 **5.5×**
-- **卷积：默认关闭** — 生产形态每块只有 4096 样，远低于 GPU 盈亏平衡点（实测需 n ≥ 32768 才翻盘），任何 IR 长度下都比 CPU 慢 **2.2×~3.5×**
+- **卷积：默认关闭** — 生产形态每块只有 4096 样，远低于 GPU 盈亏平衡点（实测需 n ≥ 32768 才翻盘），任何 IR 长度下都比 CPU 慢：**单块口径（n=4096、block=1024）2.15×~3.57×**；按 overlap-save 真实输入量口径为 **3.4×~8.3×**
 
-功能保留可用、数值正确（卷积最差 **−126.5 dB** 相对 RMS），但 mac 上开它只是净亏。UI 已标注不建议开启。完整实测见 [docs/GPU卷积与升频效率细查.md](docs/GPU卷积与升频效率细查.md)。
+功能保留可用、数值正确（卷积最差 **−126.5 dB** 相对 RMS），但 mac 上开它只是净亏。UI 已标注不建议开启。两套口径的完整实测分别见 [docs/WIP-F6-GPU精度.md](docs/WIP-F6-GPU精度.md) 与 [docs/GPU卷积与升频效率细查.md](docs/GPU卷积与升频效率细查.md)。
 
 ---
 
@@ -226,7 +226,7 @@ Copyright (C) 2026 August Hu
 | 组件 | 许可 | 与本程序的关系 |
 |---|---|---|
 | FFmpeg / FFprobe 8.1.2 | LGPL-2.1-or-later | 以**独立可执行文件**随包分发，由主程序以子进程方式调用；构建时未启用 `--enable-gpl`，故为 LGPL 版。`otool -L` 可验证主程序**未链接**任何 libav* |
-| LAME（libmp3lame） | LGPL-2.0 | 静态链接进上面那个 FFmpeg 可执行文件，不在主程序里 |
+| LAME（libmp3lame） | LGPL-2.0-or-later | 静态链接进上面那个 FFmpeg 可执行文件，不在主程序里。`third_party/lame-arm64/COPYING` 是 GNU Library GPL v2 全文，`lame.h` 头写「either version 2 … or any later version」，故为 2.0-or-later |
 | OPRA 耳机 EQ 数据 | CC BY-SA 4.0 | 归属与传染范围见 [OPRA-NOTICE.txt](OPRA-NOTICE.txt)；仅约束数据本身，不传染本程序源码 |
 
 因为 FFmpeg 是独立进程而非链接库，GPLv3 与本项目对 FFmpeg 的 LGPL 义务互不冲突；替换 `Contents/MacOS/ffmpeg` 为任意兼容版本即可满足 LGPL 的可替换要求。

@@ -193,20 +193,32 @@ for bin in "$APP/Contents/MacOS/RLPlayer" "$APP/Contents/MacOS/ffmpeg" "$APP/Con
 done
 echo "✓ 架构门禁通过：所有二进制均为纯 arm64"
 
-# 7) 部署目标一致性校验：plist 声明的 LSMinimumSystemVersion 必须与二进制 minos 严格一致
+# 7) 部署目标一致性校验：plist 声明的 LSMinimumSystemVersion 必须与【包内每一个二进制】的 minos 严格一致
+#    2026-10-27 审计抓到真缺陷：旧门禁只查 RLPlayer 自己 ⟹ ffmpeg/ffprobe/librtagpu
+#    全是 minos=27.0（编译机默认值）也照样绿灯。macOS 13~26 上 ffmpeg 子进程会被
+#    dyld 直接拒绝 ⟹ 非 WAV/DSF/DFF 全部解不了码。现在四件套逐个查。
 if command -v otool >/dev/null 2>&1; then
-    BIN_MINOS="$(otool -l "$APP/Contents/MacOS/RLPlayer" 2>/dev/null | grep -m1 -A4 LC_BUILD_VERSION | grep -m1 minos | awk '{print $2}')"
     PLIST_MINOS="$(/usr/libexec/PlistBuddy -c 'Print :LSMinimumSystemVersion' "$APP/Contents/Info.plist" 2>/dev/null)"
-    if [[ -z "$BIN_MINOS" || -z "$PLIST_MINOS" ]]; then
-        echo "✗ 致命错误：无法读取 RLPlayer 的 LC_BUILD_VERSION minos 或 Info.plist 的 LSMinimumSystemVersion"
+    if [[ -z "$PLIST_MINOS" ]]; then
+        echo "✗ 致命错误：无法读取 Info.plist 的 LSMinimumSystemVersion"
         exit 1
     fi
-    if [[ "$BIN_MINOS" != "$PLIST_MINOS" ]]; then
-        echo "✗ 致命错误：部署目标不一致：二进制 minos=${BIN_MINOS}，Info.plist LSMinimumSystemVersion=$PLIST_MINOS"
-        echo "  请检查 CMakeLists.txt 是否已设置 CMAKE_OSX_DEPLOYMENT_TARGET=13.0 并重新配置构建目录。"
-        exit 1
-    fi
-    echo "✓ 部署目标门禁通过：minos=$BIN_MINOS / plist=$PLIST_MINOS"
+    MINOS_FAIL=0
+    for bin in RLPlayer ffmpeg ffprobe librtagpu.dylib; do
+        BIN_MINOS="$(otool -l "$APP/Contents/MacOS/$bin" 2>/dev/null | awk '/LC_BUILD_VERSION/{f=1} f && /minos/{print $2; exit}')"
+        if [[ -z "$BIN_MINOS" ]]; then
+            echo "✗ 致命错误：无法读取 $bin 的 LC_BUILD_VERSION minos"
+            exit 1
+        fi
+        if [[ "$BIN_MINOS" != "$PLIST_MINOS" ]]; then
+            echo "✗ 致命错误：部署目标不一致：$bin minos=${BIN_MINOS}，Info.plist LSMinimumSystemVersion=$PLIST_MINOS"
+            echo "  $bin 需要：重新执行 tools/build_ffmpeg_lite_mac.sh / tools/build_gpu_metal_mac.sh"
+            echo "  （脚本已加 -mmacosx-version-min=13.0；旧产物是编译机系统版本，别再打进包里）"
+            MINOS_FAIL=1
+        fi
+    done
+    [[ "$MINOS_FAIL" == "1" ]] && exit 1
+    echo "✓ 部署目标门禁通过：四件套 minos=$PLIST_MINOS / plist=$PLIST_MINOS"
 fi
 
 # 8) adhoc 签名

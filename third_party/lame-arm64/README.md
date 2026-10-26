@@ -24,7 +24,7 @@ ERROR: libmp3lame >= 3.98.3 not found
 |---|---|
 | `lib/libmp3lame.a` | arm64 静态库，423 KB |
 | `include/lame/lame.h` | 公开头文件 |
-| `COPYING` | LAME 的 LGPL-2.1 许可证原文 |
+| `COPYING` | LAME 的 GNU Library GPL v2 许可证原文（LGPL-2.0-or-later：`lame.h` 头写明「either version 2 … or any later version」） |
 
 版本：**LAME 3.100**（LAME 官方最后一个正式发布版）
 架构：`arm64`（`lipo -info` 确认 Non-fat）
