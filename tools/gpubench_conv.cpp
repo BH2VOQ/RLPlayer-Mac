@@ -7,7 +7,7 @@
 // gpubench_conv.cpp — 卷积后端性能对标（**走生产路径**，不是独立 demo）
 //
 // 为什么要这个文件：HIP 那边的 tools/gpu_conv.cpp 是手工编的独立 demo，不跟着源码
-// 更新，曾经掩盖过「gpu_bridge.h 没取符号、GPU 从未真正启用」这个 bug（见 verify.ps1
+// 更新，曾经掩盖过「gpu_bridge.h 没取符号、GPU 从未真正启用」这个 bug（见项目门禁脚本
 // 第 4 步的注释）。所以 CUDA 侧的性能数字一律从 GpuBridge::instance() 拿——
 // 也就是管线真正走的那条路；换后端（HIP/CUDA）只换 DLL，本工具不用改。
 //

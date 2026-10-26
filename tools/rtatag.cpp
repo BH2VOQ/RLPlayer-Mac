@@ -87,11 +87,7 @@ static std::string fmt_ts(const long long ts) {
     if (ts <= 0) return "-";
     const std::time_t t = (std::time_t)ts;
     std::tm tmv {};
-#ifdef _WIN32
-    if (gmtime_s(&tmv, &t) != 0) return "-";
-#else
     if (gmtime_r(&t, &tmv) == nullptr) return "-";
-#endif
     char b[40];
     if (std::strftime(b, sizeof(b), "%Y-%m-%d %H:%M:%S UTC", &tmv) == 0) return "-";
     return b;

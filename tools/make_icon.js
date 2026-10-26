@@ -113,24 +113,3 @@ const sizes = [16, 24, 32, 48, 64, 128, 256];
 const pngs = sizes.map(s => ({ size: s, data: png(s) }));
 fs.writeFileSync(path.join(OUT_DIR, 'rlplayer-256.png'), pngs[pngs.length - 1].data);
 fs.writeFileSync(path.join(OUT_DIR, 'rlplayer-64.png'), pngs[4].data);
-
-// ---- ICO 封装（PNG 负载，Vista+ 支持）----
-const n = pngs.length;
-const header = Buffer.alloc(6);
-header.writeUInt16LE(0, 0); header.writeUInt16LE(1, 2); header.writeUInt16LE(n, 4);
-const dir = Buffer.alloc(16 * n);
-let offset = 6 + 16 * n;
-pngs.forEach((p, i) => {
-  const o = i * 16;
-  dir[o] = p.size >= 256 ? 0 : p.size;
-  dir[o + 1] = p.size >= 256 ? 0 : p.size;
-  dir[o + 2] = 0; dir[o + 3] = 0;
-  dir.writeUInt16LE(1, o + 4);
-  dir.writeUInt16LE(32, o + 6);
-  dir.writeUInt32LE(p.data.length, o + 8);
-  dir.writeUInt32LE(offset, o + 12);
-  offset += p.data.length;
-});
-const ico = Buffer.concat([header, dir, ...pngs.map(p => p.data)]);
-fs.writeFileSync(path.join(OUT_DIR, 'rlplayer.ico'), ico);
-console.log('写出: ' + path.join(OUT_DIR, 'rlplayer.ico') + ' (' + ico.length + ' 字节, ' + n + ' 个尺寸)');

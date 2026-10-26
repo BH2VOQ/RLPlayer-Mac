@@ -5,7 +5,7 @@
 # 本文件是 RLPlayer 的一部分，以 GNU 通用公共许可证第 3 版（或更新版本）发布。
 # 完整条款见仓库根目录的 LICENSE 文件。
 #
-# build_ffmpeg_lite_mac.sh — macOS 精简静态 ffmpeg（对齐 Windows 的 build_ffmpeg_lite.ps1 思路）
+# build_ffmpeg_lite_mac.sh — macOS 精简静态 ffmpeg（自包含，产物随 .app 分发）
 #
 # 为什么：播放器只需要【音频解码 + WAV 写出 + ffprobe 探测 + 元数据写回】。Homebrew ffmpeg 链
 # 一大堆外部库（x265/x264/…），任何一环断裂就是 dyld 启动失败（2026-10-25 实测：

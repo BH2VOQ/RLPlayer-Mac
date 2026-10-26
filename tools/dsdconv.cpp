@@ -121,7 +121,7 @@ int main(int argc, char** argv) {
                 if (s.bit((size_t)c, n) != back.bit((size_t)c, n)) ++diff;
         printf("  逐位比对：%llu 位中不同 %llu 位%s\n", (unsigned long long)(cmpBits * (uint64_t)s.channels),
                (unsigned long long)diff, diff == 0 ? "  ✓ 逐位一致" : "  ✗ 不一致");
-        printf("  DIRECT_SDM_BITEXACT=%d\n", diff == 0 ? 1 : 0);   // 给 verify.ps1 的机器可读判据
+        printf("  DIRECT_SDM_BITEXACT=%d\n", diff == 0 ? 1 : 0);   // 给项目门禁脚本的机器可读判据
         if (s.bits % 16) printf("  [注] 源末尾 %llu 位不足一个 DoP 帧，按规范丢弃\n",
                                 (unsigned long long)(s.bits % 16));
         return diff == 0 ? 0 : 1;
