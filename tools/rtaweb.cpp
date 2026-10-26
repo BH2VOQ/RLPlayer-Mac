@@ -7684,6 +7684,12 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
           << ",\"per\":" << g_dbgPer.load()
           // C2 遥测（2026-10-24 N300 欠载）：dry=设备缓冲空且我们写不进去的次数（≈可闻「啵」），
           // dryms=累计毫秒，ev/evint=事件次数/间隔中位数，prod=pull_chunk 最长阻塞毫秒。
+          // 2026-10-26（用户实测：预设卡「当前设备」不跟随实际播放设备）：
+          //   前端需要知道当前输出设备，才能在换设备后刷新 /api/preset/caps。
+          //   /api/status 之前没有这个字段 ⟹ 卡片一直显示上次探测的结果。
+          //   设备 id 的真相源是配置文件（conf_get("device")，空 = 默认设备），
+          //   与 /api/preset/caps 探测用的是同一个来源（见上方 preset_caps 实现）。
+          << ",\"device\":\"" << jesc(conf_get("device", "")) << "\""
           << ",\"dry\":" << g_dbgDry.load()
           << ",\"dryms\":" << g_dbgDryMs.load()
           << ",\"ev\":" << g_dbgEv.load()

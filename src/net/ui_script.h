@@ -609,10 +609,8 @@ function workstationHtml() {
   var rootPath = hasRoots ? String(validRoots[0] || '') : '';
 
   var h = '<div class=am-home>';
-  // 2026-10-26（用户要求）：官方推荐预设卡片放在快速开始页**最顶部** ——
-  // 「一键开局」是新手/换设备后第一个该做的事，比「精选功能」三张卡更前置。
-  h += presetCardHtml();
-  h += '<div class=am-sec-hdr>精选功能</div>';
+  // 2026-10-26（用户要求重新整理面板）：去掉「精选功能」「常用入口」两个分区标题 ——
+  //   三张能力卡与四个快捷入口本身自解释，标题只占高度（760px 小窗里每行都是钱）。
   h += '<div class=am-hero-grid>';
 
   h += '<div class="am-card c1" id=amCardAdd>';
@@ -643,36 +641,37 @@ function workstationHtml() {
 
   h += '</div>'; // .am-hero-grid
 
-  h += '<div class=am-sec-hdr style="margin-top:14px">常用入口</div>';
+  // 2026-10-26（用户要求）：官方推荐预设放在「精选功能」三张卡**下边**、常用入口上边。
+  // ⚠️ 上一轮已移动过一次，但被后续提交（ecadbd7 的 git add -A src/）把旧状态带回来了 ——
+  //    这次改完必须验证产物里的顺序，不能只看源码。
+  h += presetCardHtml();
+
   h += '<div class=am-quick-row>';
 
   h += '<div class=am-quick-item id=amGoFiles>';
   h += '<div class=am-qico><svg viewBox="0 0 24 24" fill=none stroke="currentColor" stroke-width=2><path d="M3 7.5a2 2 0 012-2h4l1.8 2H19a2 2 0 012 2v8a2 2 0 01-2 2H5a2 2 0 01-2-2z"/></svg></div>';
-  h += '<div class=am-qtext><div class=am-qtitle>设置文件夹位置</div><div class=am-qdesc>选择或更改本地音乐库目录</div></div>';
+  h += '<div class=am-qtext><div class=am-qtitle>设置文件夹位置</div></div>';
   h += '</div>';
 
   h += '<div class=am-quick-item id=amGoRemote>';
   h += '<div class=am-qico><svg viewBox="0 0 24 24" fill=none stroke="currentColor" stroke-width=2><path d="M7 18a4.5 4.5 0 010-9 6 6 0 0111.6 1.6A3.7 3.7 0 0118 18z"/></svg></div>';
-  h += '<div class=am-qtext><div class=am-qtitle>挂载流媒体服务</div><div class=am-qdesc>Subsonic / Navidrome / WebDAV / UPnP</div></div>';
+  h += '<div class=am-qtext><div class=am-qtitle>挂载流媒体服务</div></div>';
   h += '</div>';
 
   h += '<div class=am-quick-item id=amGoMeta>';
   h += '<div class=am-qico><svg viewBox="0 0 24 24" fill=none stroke="currentColor" stroke-width=2><path d="M12 2v4m0 12v4M4.93 4.93l2.83 2.83m8.48 8.48l2.83 2.83M2 12h4m12 0h4M4.93 19.07l2.83-2.83m8.48-8.48l2.83-2.83"/></svg></div>';
-  h += '<div class=am-qtext><div class=am-qtitle>AI 资料与封面补全</div><div class=am-qdesc>自动匹配高精度唱片元数据与插画</div></div>';
+  h += '<div class=am-qtext><div class=am-qtitle>AI 资料与封面补全</div></div>';
   h += '</div>';
 
   h += '<div class=am-quick-item id=amGoIn>';
   h += '<div class=am-qico><svg viewBox="0 0 24 24" fill=none stroke="currentColor" stroke-width=2><path d="M12 1a3 3 0 00-3 3v8a3 3 0 006 0V4a3 3 0 00-3-3z"/><path d="M19 10v2a7 7 0 01-14 0v-2M12 19v4M8 23h8"/></svg></div>';
-  h += '<div class=am-qtext><div class=am-qtitle>音频输入采集</div><div class=am-qdesc>低延迟实时流式监听与分析</div></div>';
+  h += '<div class=am-qtext><div class=am-qtitle>音频输入采集</div></div>';
   h += '</div>';
 
   h += '</div>'; // .am-quick-row
 
-  if (hasRoots && rootPath) {
-    h += '<div class=am-rootline><svg width=12 height=12 viewBox="0 0 24 24" fill=none stroke=currentColor stroke-width=2>'
-       +   '<path d="M3 7.5a2 2 0 012-2h4l1.8 2H19a2 2 0 012 2v8a2 2 0 01-2 2H5a2 2 0 01-2-2z"/></svg>'
-       +   '<span title="' + esc(rootPath) + '">&nbsp;当前音乐目录: ' + esc(rootPath) + '</span></div>';
-  }
+  // 2026-10-26：底部「当前音乐目录」独立行已删 —— 那条信息并进「无损音乐库」卡的描述里
+  //   （hasRoots 时描述本来就写「目录已就绪」），不再单独占一行高度。
   h += '</div>'; // .am-home
   return h;
 }
@@ -2570,6 +2569,19 @@ function tick() {
         ? 'M7 5h4v14H7zM13 5h4v14h-4z' : 'M8 5l12 7-12 7z');
       syncVolUi();     // 音量可能在别处改（键盘 ↑↓ / 底栏滑块），整页跟着走
       renderNpLyric();
+      // 2026-10-26（用户实测：预设卡的「当前设备」不跟随实际播放设备）：
+      //   /api/preset/caps 的探测是实时的，但前端有 10 秒缓存、只在页面渲染时拉一次
+      //   ⟹ 设置里换了输出设备后，卡片仍显示旧设备。
+      //   status 现在带 device 字段（PlayerState.device，空 = 默认设备），
+      //   变了就**强制**刷新能力缓存（首次拿到不算变化，避免启动时空刷一次）。
+      var devNow = (typeof j.device === 'string') ? j.device : '';
+      if (_capsDeviceSeen === null) {
+        _capsDeviceSeen = devNow;                    // 首次：只记录，不刷新
+      } else if (devNow !== _capsDeviceSeen) {
+        _capsDeviceSeen = devNow;
+        if (typeof loadPresetCaps === 'function') loadPresetCaps(true);
+      }
+
     }
     S.volDb = (typeof j.volDb === 'number') ? j.volDb : S.vol;
     S.startDb = (typeof j.startDb === 'number') ? j.startDb : S.vol;
@@ -5078,6 +5090,7 @@ function renderPresetCaps(j) {
   }
 }
 
+var _capsDeviceSeen = null;   // null=还没拿到过；''=默认设备；其它=设备 id
 function loadPresetCaps(force) {
   var now = Date.now();
   if (!force && _capsCache && (now - _capsTime < 10000)) {

@@ -283,6 +283,39 @@ inline std::string rta_ui_page() {
     h += ".am-pill-btn:hover{background:#ffffff;transform:scale(1.02)}";
     h += ".am-pill-btn:active{transform:scale(0.98)}";
     h += ".am-quick-row{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;width:100%}";
+    // 2026-10-26（用户要求）：默认小窗（约 1180x760）下，快速开始页的
+    // 「三张精选卡 + 官方推荐预设 + 常用入口」必须**同一屏放下**，不被底部播放条遮挡。
+    // 可用高度 = 窗口高 - 顶栏 60 - 播放条 80(66+14) - 内容 padding 44 ≈ 576px（760 窗口）。
+    // 原来的固定尺寸（卡片 min-height:248 + 预设卡 ~150 + 快捷行 ~90 + 标题/gap）合计超 620px
+    // ⟹ 必然溢出、被播放条盖住。这里按**视口高度**分档压缩，大窗口保持原观感。
+    //   ≤820px：卡片 200，间距收紧
+    //   ≤740px：卡片 176，预设卡内边距与描述行数进一步收
+    //   ≤680px：卡片 156，隐藏卡片描述（保留标题+按钮，信息不丢）
+    h += "@media (max-height:820px){"
+         ".am-home{padding:14px 24px 16px;gap:12px}"
+         ".am-card{min-height:200px;padding:16px 18px}"
+         ".am-card-title,.am-card h3{font-size:23px}"
+         ".am-card-desc,.am-card p{margin-bottom:8px}"
+         ".preset-card{margin-bottom:12px}"
+         ".preset-grid{padding:10px 14px;gap:10px}"
+         "}";
+    h += "@media (max-height:740px){"
+         ".am-home{padding:12px 22px 14px;gap:10px}"
+         ".am-card{min-height:176px;padding:14px 16px}"
+         ".am-card-title,.am-card h3{font-size:21px}"
+         ".am-card-badge{font-size:9.5px;padding:3px 8px}"
+         ".am-pill-btn{padding:6px 13px;font-size:11.5px}"
+         ".preset-card{margin-bottom:10px}"
+         ".preset-grid{padding:8px 12px;gap:8px}"
+         ".preset-btn{padding:9px 11px}"
+         ".am-quick-item{padding:9px 11px}"
+         "}";
+    h += "@media (max-height:680px){"
+         ".am-card{min-height:150px;padding:12px 14px}"
+         ".am-card-title,.am-card h3{font-size:19px}"
+         ".am-card-desc,.am-card p{display:none}"
+         ".am-quick-row{display:none}"
+         "}";
     h += "@media (max-width:1060px){.am-quick-row{grid-template-columns:repeat(2,minmax(0,1fr))}}";
     h += "@media (max-width:640px){.am-quick-row{grid-template-columns:1fr}}";
     h += ".am-quick-item,.am-quick{display:flex;align-items:center;gap:11px;padding:12px 14px;border-radius:12px;background:var(--bg2);border:1px solid var(--line);cursor:pointer;transition:background .13s,border-color .13s,transform .13s;box-shadow:0 2px 8px var(--shadow);box-sizing:border-box;text-align:left}";
@@ -799,7 +832,15 @@ h += "#npPage .npedge{display:none}";
     h += ".meta-card input:focus{outline:0;border-color:var(--acc);box-shadow:0 0 0 3px var(--acc-weak)}";
     h += "@media (max-width:1100px){.meta-adv-grid{grid-template-columns:1fr}}";
     // 官方推荐预设卡片
+    // ⚠️ 注意：`.preset-card` 这个类名被**两处**共用 ——
+    //   ① 快速开始页的「官方推荐预设」卡（presetCardHtml()，id=presetCard）
+    //   ② 设置页 PCM 页签的**滤波器预设列表**（每项一个 .preset-card，见 ui_script.h ~6823）
+    //   所以不能改 .preset-card 的公共 margin（会连带影响②的列表间距）。
+    //   2026-10-26（用户实测：快速开始页预设卡与「常用入口」之间留白 48px 过大）：
+    //   那 48px = .am-home gap:16 + .preset-card margin-bottom:18 + 标题 inline margin-top:14。
+    //   修法：只在**快速开始页容器内**把该卡的 margin 归零，间距交给 .am-home 的 gap 统一管。
     h += ".preset-card{margin-bottom:18px;border:1px solid var(--line);border-radius:12px;background:var(--bg2);overflow:hidden}";
+    h += ".am-home .preset-card{margin-bottom:0}";
     h += ".preset-card-head{display:flex;align-items:center;justify-content:space-between;padding:11px 16px;border-bottom:1px solid var(--line);background:var(--bg3)}";
     h += ".preset-card-title{font-size:13px;font-weight:650;color:var(--txt);display:flex;align-items:center;gap:8px}";
     h += ".preset-caps-line{font-size:12px;color:var(--txt2);padding:9px 16px;border-bottom:1px solid var(--line);background:var(--field);display:flex;align-items:center;gap:6px}";
