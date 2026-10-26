@@ -459,11 +459,7 @@ struct DsdFileLayout {
 
 // 跨平台 64 位文件定位
 inline int dsd_fseek64(FILE* f, int64_t off, int origin) {
-#if defined(_WIN32)
-    return _fseeki64(f, off, origin);
-#else
-    return ::fseeko(f, (off_t)off, origin);
-#endif
+    return ::fseeko(f, (off_t)off, origin);   // mac：fseeko（原 Windows _fseeki64 分支已删）
 }
 
 // 只读文件头（不载入数据）：给"要不要走流式"的判断与流式解码器用。

@@ -15,19 +15,7 @@
 #ifndef _CRT_SECURE_NO_WARNINGS
 #define _CRT_SECURE_NO_WARNINGS
 #endif
-#if defined(_WIN32)
-#ifndef _WINSOCK_DEPRECATED_NO_WARNINGS
-#define _WINSOCK_DEPRECATED_NO_WARNINGS
-#endif
-#ifndef WIN32_LEAN_AND_MEAN
-#define WIN32_LEAN_AND_MEAN
-#endif
-#ifndef NOMINMAX
-#define NOMINMAX
-#endif
-#include <winsock2.h>
-#include <ws2tcpip.h>
-#else
+// 2026-10-26（mac 独立分支）：原 winsock2 include 块已删。
 // POSIX / macOS：BSD socket 全套
 #include <sys/types.h>
 #include <sys/socket.h>
@@ -42,7 +30,6 @@
 #include <ifaddrs.h>        // getifaddrs()：POSIX 枚举本机网卡的规范做法（见 upnp_local_ipv4）
 #include <cerrno>
 #include "platform/time.h"   // 单调毫秒（语义 = GetTickCount64）
-#endif
 #include "net/upnp_control.h"
 #include <string>
 #include <vector>
@@ -67,82 +54,8 @@
 // 所以 http_get / upnp_discover / UpnpHttpServer 的代码不再出现 #if。
 namespace rta::net::upnp_os {
 
-#if defined(_WIN32)
-
-using socket_t = SOCKET;
-inline constexpr socket_t kInvalidSocket = INVALID_SOCKET;
-
-inline bool   wsa_init()   { WSADATA w; return WSAStartup(MAKEWORD(2, 2), &w) == 0; }
-inline void   wsa_cleanup() { WSACleanup(); }
-inline int    last_error() { return (int)WSAGetLastError(); }
-inline bool   would_block(int e) { return e == WSAEWOULDBLOCK; }
-inline void   close_socket(socket_t s) { ::closesocket(s); }
-
-inline bool set_nonblocking(socket_t s) {
-    u_long mode = 1;
-    return ::ioctlsocket(s, FIONBIO, &mode) == 0;
-}
-
-// 平台把 setsockopt 的 optval 声明成 (const char*)；用这个函数抹平签名差异
-inline int set_opt(socket_t s, int level, int opt, const void* val, int len) {
-    return ::setsockopt(s, level, opt, (const char*)val, len);
-}
-inline int set_timeout(socket_t s, int opt, int ms) {
-    DWORD tv = (DWORD)ms;
-    return ::setsockopt(s, SOL_SOCKET, opt, (const char*)&tv, (int)sizeof(tv));
-}
-
-inline int  io_send(socket_t s, const char* p, int n) { return ::send(s, p, n, 0); }
-inline int  io_recv(socket_t s, char* p, int n)       { return ::recv(s, p, n, 0); }
-inline int  io_sendto(socket_t s, const char* p, int n, const sockaddr* to, int tolen) {
-    return ::sendto(s, p, n, 0, to, tolen);
-}
-inline int  io_recvfrom(socket_t s, char* p, int n, sockaddr* from, int* fromlen) {
-    return ::recvfrom(s, p, n, 0, from, fromlen);
-}
-inline int  io_accept(socket_t s, sockaddr* a, int* alen) { return ::accept(s, a, alen); }
-inline int  io_bind(socket_t s, const sockaddr* a, int alen) { return ::bind(s, a, alen); }
-inline int  io_connect(socket_t s, const sockaddr* a, int alen) { return ::connect(s, a, alen); }
-inline int  io_listen(socket_t s, int backlog) { return ::listen(s, backlog); }
-inline int  io_getsockname(socket_t s, sockaddr* a, int* alen) { return ::getsockname(s, a, alen); }
-
-// 加入 SSDP 组播组 239.255.255.250。ifaddr 为 nullptr 表示让内核选接口。
-inline bool join_multicast(socket_t s, const in_addr* ifaddr) {
-    ip_mreq mreq{};
-    mreq.imr_multiaddr.s_addr = ::inet_addr("239.255.255.250");
-    mreq.imr_interface = ifaddr ? *ifaddr : in_addr{ htonl(INADDR_ANY) };
-    return ::setsockopt(s, IPPROTO_IP, IP_ADD_MEMBERSHIP, (const char*)&mreq, sizeof(mreq)) == 0;
-}
-
-// 等待一组 socket 中任意一个可读，返回可读者的下标。超时单位微秒（与 select 的 timeval 一致）。
-// Windows 用 select（FD_SETSIZE=64 够用，且 winsock 的 select 本来就是这个用法）。
-inline std::vector<size_t> wait_readable(const std::vector<socket_t>& socks, int timeoutUs) {
-    std::vector<size_t> ready;
-    if (socks.empty()) return ready;
-    fd_set rf;
-    FD_ZERO(&rf);
-    for (socket_t s : socks) FD_SET(s, &rf);
-    timeval tv{ timeoutUs / 1000000, timeoutUs % 1000000 };
-    if (::select(0, &rf, nullptr, nullptr, &tv) <= 0) return ready;
-    for (size_t i = 0; i < socks.size(); ++i) if (FD_ISSET(socks[i], &rf)) ready.push_back(i);
-    return ready;
-}
-
-// 64 位文件偏移：Windows 是 _fseeki64/_ftelli64
-inline int    file_seek(FILE* f, int64_t off) { return _fseeki64(f, off, SEEK_SET); }
-inline int64_t file_tell(FILE* f)            { return _ftelli64(f); }
-// 量文件长度并把游标复位到开头（原实现的三行内联，收进别名层以便两平台共用）
-inline int64_t file_size(FILE* f) {
-    if (!f) return 0;
-    if (_fseeki64(f, 0, SEEK_END) != 0) return 0;
-    const int64_t n = _ftelli64(f);
-    _fseeki64(f, 0, SEEK_SET);
-    return n;
-}
-
-inline uint64_t monotonic_ms() { return (uint64_t)GetTickCount64(); }
-
-#else  // ---------------- POSIX / macOS ----------------
+// 2026-10-26（mac 独立分支）：原 winsock2 别名块已删（Windows 平台层移除，
+// 且分支不再同步上游）。下面是唯一的 POSIX/macOS 实现。
 
 using socket_t = int;
 inline constexpr socket_t kInvalidSocket = -1;
@@ -239,7 +152,6 @@ inline int64_t file_size(FILE* f) {
 // 开机以来毫秒、单调、不回退。不偷换 std::chrono::steady_clock（epoch 由实现定义）。
 inline uint64_t monotonic_ms() { return rta::platform::monotonic_ms(); }
 
-#endif
 
 } // namespace rta::net::upnp_os
 
@@ -428,28 +340,6 @@ struct UpnpDiscoverDiag {
 
 inline std::vector<std::string> upnp_local_ipv4(std::vector<std::string>* skipped = nullptr) {
     std::vector<std::string> out;
-#if defined(_WIN32)
-    char host[256] = {0};
-    if (::gethostname(host, sizeof(host)) != 0) return out;
-    addrinfo hints{};
-    hints.ai_family = AF_INET;
-    hints.ai_socktype = SOCK_STREAM;
-    addrinfo* res = nullptr;
-    if (::getaddrinfo(host, nullptr, &hints, &res) != 0) return out;
-    for (addrinfo* p = res; p; p = p->ai_next) {
-        if (!p->ai_addr) continue;
-        char ip[64] = {0};
-        sockaddr_in* sa = (sockaddr_in*)p->ai_addr;
-        if (::inet_ntop(AF_INET, &sa->sin_addr, ip, sizeof(ip)) == nullptr) continue;
-        const std::string s(ip);
-        if (s.rfind("127.", 0) == 0 || s.rfind("169.254.", 0) == 0) continue;
-        // Clash/Mihomo TUN 的 fake-IP 段与常见虚拟网卡段：组播从这里出去没有意义，跳过但记录下来
-        const bool virtual_like = (s.rfind("198.18.", 0) == 0 || s.rfind("198.19.", 0) == 0);
-        if (virtual_like) { if (skipped) skipped->push_back(s + "(代理 TUN)"); continue; }
-        if (std::find(out.begin(), out.end(), s) == out.end()) out.push_back(s);
-    }
-    ::freeaddrinfo(res);
-#else
     // POSIX/macOS：不能用 getaddrinfo(gethostname())。
     // macOS 的 gethostname() 返回 "Mac.local" 之类的 mDNS 名，getaddrinfo 对它的
     // AF_INET 查询通常只回 127.0.0.1（甚至直接失败），结果就是 ips 里只剩 127.x 被过滤掉
@@ -470,7 +360,6 @@ inline std::vector<std::string> upnp_local_ipv4(std::vector<std::string>* skippe
         if (std::find(out.begin(), out.end(), s) == out.end()) out.push_back(s);
     }
     ::freeifaddrs(ifs);
-#endif
     return out;
 }
 

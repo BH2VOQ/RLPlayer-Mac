@@ -43,11 +43,9 @@
 #include <iterator>
 #include <string>
 #include <vector>
-#if defined(_WIN32)
-#include <windows.h>
-#else
+// 2026-10-26（mac 单平台）：原 #if defined(_WIN32) <windows.h> 分支已删（Windows 平台层已移除）；
+// GBK 转换在 mac 上走 iconv。
 #include <iconv.h>
-#endif
 
 namespace rta::meta {
 
@@ -87,48 +85,24 @@ inline bool cue_utf8_valid(const std::string& s) {
     return true;
 }
 
+// wstring -> UTF-8。mac 上 wchar_t 是 4 字节 UTF-32，但本项目的 wstring 仅作字节载体，
+// 直接按字节还原（与 audio_loader.h 的 narrow() 同一口径）。
 inline std::string cue_from_wstring(const std::wstring& w) {
-#if defined(_WIN32)
-    if (w.empty()) return std::string();
-    const int n = ::WideCharToMultiByte(CP_UTF8, 0, w.c_str(), (int)w.size(), nullptr, 0, nullptr, nullptr);
-    if (n <= 0) return std::string();
-    std::string s((size_t)n, '\0');
-    ::WideCharToMultiByte(CP_UTF8, 0, w.c_str(), (int)w.size(), s.data(), n, nullptr, nullptr);
-    return s;
-#else
     return std::string(w.begin(), w.end());
-#endif
 }
 
 inline std::wstring cue_widen_utf8(const std::string& s) {
-#if defined(_WIN32)
-    if (s.empty()) return std::wstring();
-    const int n = ::MultiByteToWideChar(CP_UTF8, 0, s.c_str(), (int)s.size(), nullptr, 0);
-    if (n <= 0) return std::wstring();
-    std::wstring w((size_t)n, L'\0');
-    ::MultiByteToWideChar(CP_UTF8, 0, s.c_str(), (int)s.size(), w.data(), n);
-    return w;
-#else
     return std::wstring(s.begin(), s.end());
-#endif
 }
 
 // UTF-8 路径 -> std::filesystem::path（Windows 上必须走宽字符，macOS 原生 UTF-8 u8path）
 inline fsc::path cue_u8path(const std::string& s) {
-#if defined(_WIN32)
-    return fsc::path(cue_widen_utf8(s));
-#else
     return fsc::u8path(s);
-#endif
 }
 
 inline std::string cue_path_utf8(const fsc::path& p) {
-#if defined(_WIN32)
-    return cue_from_wstring(p.wstring());
-#else
     const std::u8string u = p.u8string();
     return std::string(reinterpret_cast<const char*>(u.data()), u.size());
-#endif
 }
 
 // UTF-16（记事本「Unicode」/「Unicode big endian」另存的 cue 不少见）→ UTF-8
@@ -165,17 +139,9 @@ inline std::string cue_utf16_to_utf8(const std::string& raw, bool bigEndian) {
     return out;
 }
 
-// GBK（CP936）→ UTF-8。Windows 走 MultiByteToWideChar，macOS/POSIX 走 iconv。
+// GBK（CP936）→ UTF-8。mac 走 iconv（原 Windows MultiByteToWideChar 分支已随平台层删除）。
 inline std::string cue_gbk_to_utf8(const std::string& s) {
-#if defined(_WIN32)
-    if (s.empty()) return std::string();
-    int n = ::MultiByteToWideChar(936, MB_ERR_INVALID_CHARS, s.c_str(), (int)s.size(), nullptr, 0);
-    if (n <= 0) n = ::MultiByteToWideChar(936, 0, s.c_str(), (int)s.size(), nullptr, 0);
-    if (n <= 0) return s;                       // 连宽松解码都失败：原样返回，绝不丢字节
-    std::wstring w((size_t)n, L'\0');
-    if (::MultiByteToWideChar(936, 0, s.c_str(), (int)s.size(), w.data(), n) <= 0) return s;
-    return cue_from_wstring(w);
-#else
+    {
     if (s.empty()) return std::string();
     iconv_t cd = iconv_open("UTF-8", "GBK");
     if (cd == (iconv_t)-1) return s;
@@ -191,7 +157,7 @@ inline std::string cue_gbk_to_utf8(const std::string& s) {
     if (res == (size_t)-1) return s;
     out.resize(outbufsize - outbytesleft);
     return out;
-#endif
+    }
 }
 
 // 整份 .cue 文本的编码判定：UTF-16 BOM → UTF-8 BOM → 严格 UTF-8 → GBK
@@ -350,11 +316,7 @@ inline bool cue_all_digits(const std::string& s) {
 // FILE 里的相对路径按 **cue 文件所在目录** 解析；分隔符统一成 '\\'（cue 里写 / 的很多）
 inline std::string cue_resolve_path(const std::string& cuePath, const std::string& ref) {
     std::string f = ref;
-#if defined(_WIN32)
-    for (auto& c : f) if (c == '/') c = '\\';
-#else
-    for (auto& c : f) if (c == '\\') c = '/';
-#endif
+    for (auto& c : f) if (c == '\\') c = '/';   // mac：反斜杠统一成正斜杠（原 Windows 反向分支已删）
     fsc::path p = cue_u8path(f);
     if (p.is_relative()) {
         const fsc::path dir = cue_u8path(cuePath).parent_path();

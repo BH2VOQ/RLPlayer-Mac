@@ -93,12 +93,11 @@
 #include <fstream>
 #include <string>
 #include <vector>
-#ifdef _WIN32
-#include "platform/windows/win_text.h"   // rta::platform::detail::widen（UTF-8 -> UTF-16，含 windows.h）
-#else
+// 2026-10-26（mac 单平台收口）：原 #ifdef _WIN32 分支引用 platform/windows/win_text.h，
+// 该文件随 Windows 平台层一并删除（b5d23b5），在 mac 上永不编译但也指向不存在的文件 ——
+// 已删掉死引用，只保留 POSIX 分支。
 #include <strings.h>
 #define _strnicmp strncasecmp
-#endif
 
 namespace rta::meta::native {
 
@@ -126,28 +125,13 @@ inline SharedStats& stats() { static SharedStats s; return s; }
 //
 // 为什么用 GetEnvironmentVariableW 而不是 _wgetenv：扫描是 8 线程并行，每个文件都会问一次开关；
 // MS CRT 的 _wgetenv 返回的是**共享缓冲**（它自己被标记为 deprecated，建议 _wdupenv_s），
-// 并发读有撕裂风险。GetEnvironmentVariableW 是线程安全的，且不用分配内存。
+// 2026-10-26（mac 独立分支）：原 GetEnvironmentVariableW 宽字符分支已删（Windows 平台层移除）。
 inline bool enabled() {
-#ifdef _WIN32
-    wchar_t v[64] = {0};
-    const DWORD n = ::GetEnvironmentVariableW(L"RLPLAYER_NATIVE_TAGS", v, 64);
-    if (n == 0 || v[0] == L'\0') return true;              // 未设置 = 开
-    std::wstring s(v, (n > 64 ? 64 : (size_t)n));
-    std::wstring low;
-    for (wchar_t c : s) low.push_back((wchar_t)::towlower((wint_t)c));
-    // 去首尾空白（用户可能写 " 0 "）
-    const size_t a = low.find_first_not_of(L" \t\r\n");
-    if (a == std::wstring::npos) return true;
-    const size_t b = low.find_last_not_of(L" \t\r\n");
-    low = low.substr(a, b - a + 1);
-    return !(low == L"0" || low == L"off" || low == L"false" || low == L"no");
-#else
     const char* v = std::getenv("RLPLAYER_NATIVE_TAGS");
     if (!v || !*v) return true;
     std::string s(v);
     for (auto& c : s) c = (char)std::tolower((unsigned char)c);
     return !(s == "0" || s == "off" || s == "false" || s == "no");
-#endif
 }
 
 namespace detail {
@@ -195,20 +179,6 @@ inline bool utf16_to_utf8(const unsigned char* p, size_t n, bool big, std::strin
     out->clear();
     if (n & 1u) return false;                       // 奇数长度：编码坏了
     if (n == 0) return true;
-#ifdef _WIN32
-    std::wstring w;
-    w.reserve(n / 2);
-    for (size_t i = 0; i + 1 < n; i += 2) {
-        const uint16_t u = big ? (uint16_t)((p[i] << 8) | p[i + 1]) : (uint16_t)(p[i] | (p[i + 1] << 8));
-        w.push_back((wchar_t)u);
-    }
-    const int m = ::WideCharToMultiByte(CP_UTF8, 0, w.data(), (int)w.size(), nullptr, 0, nullptr, nullptr);
-    if (m <= 0) return false;
-    std::string s((size_t)m, '\0');
-    ::WideCharToMultiByte(CP_UTF8, 0, w.data(), (int)w.size(), s.data(), m, nullptr, nullptr);
-    *out = std::move(s);
-    return true;
-#else
     for (size_t i = 0; i + 1 < n; i += 2) {
         uint32_t u = big ? (uint32_t)((p[i] << 8) | p[i + 1]) : (uint32_t)(p[i] | (p[i + 1] << 8));
         if (u >= 0xD800 && u <= 0xDBFF) {
@@ -235,7 +205,6 @@ inline bool utf16_to_utf8(const unsigned char* p, size_t n, bool big, std::strin
         }
     }
     return true;
-#endif
 }
 
 // ---------------------------------------------------------------------------
@@ -273,11 +242,7 @@ public:
     }
 private:
     static std::filesystem::path make_path(const std::string& utf8) {
-#ifdef _WIN32
-        return std::filesystem::path(rta::platform::detail::widen(utf8));   // 宽字符构造（见 library.h p8 注释）
-#else
         return std::filesystem::path(std::u8string((const char8_t*)utf8.data(), utf8.size()));
-#endif
     }
     mutable std::ifstream f_;
     long long size_ = 0;

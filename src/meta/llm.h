@@ -36,11 +36,7 @@
 #include <atomic>
 #include <random>
 #include <set>
-#if defined(_WIN32)
-#include <process.h>   // _getpid()
-#else
-#include <unistd.h>    // getpid()
-#endif
+#include <unistd.h>    // getpid()（原 Windows _getpid 分支已删）
 
 namespace rta::meta {
 
@@ -315,11 +311,7 @@ inline std::string llm_usage_path(const std::string& customPath = "") {
 // 改用线程安全的 localtime_s（Windows）/ localtime_r（其它）。
 inline std::string llm_format_month(std::time_t t) {
     std::tm tm{};
-#if defined(_WIN32)
-    if (localtime_s(&tm, &t) != 0) return "197001";
-#else
-    if (!localtime_r(&t, &tm)) return "197001";
-#endif
+    if (!localtime_r(&t, &tm)) return "197001";   // mac：localtime_r（原 localtime_s 分支已删）
     char buf[16];
     std::snprintf(buf, sizeof(buf), "%04d%02d", tm.tm_year + 1900, tm.tm_mon + 1);
     return std::string(buf);
@@ -352,11 +344,7 @@ inline std::mutex& llm_usage_lock() {
 }
 
 inline unsigned long long llm_process_id() {
-#if defined(_WIN32)
-    return (unsigned long long)_getpid();
-#else
     return (unsigned long long)getpid();
-#endif
 }
 
 // 唯一临时文件名：<path>.<tag>.<pid>.<线程/随机><序号>.tmp
@@ -416,11 +404,7 @@ inline void llm_usage_warn_log_locked(const std::string& usagePath, const std::s
     if (!f) return;
     std::time_t now = std::time(nullptr);
     std::tm tm{};
-#if defined(_WIN32)
-    const bool tmOk = localtime_s(&tm, &now) == 0;
-#else
-    const bool tmOk = localtime_r(&now, &tm) != nullptr;
-#endif
+    const bool tmOk = localtime_r(&now, &tm) != nullptr;   // mac（原 localtime_s 分支已删）
     char ts[24] = {0};
     if (tmOk) {
         std::snprintf(ts, sizeof(ts), "%04d-%02d-%02d %02d:%02d:%02d",
