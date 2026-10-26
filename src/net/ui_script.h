@@ -434,7 +434,7 @@ function bindUpdateCard() {
 var FB = { busy: false, diagPath: '' };
 
 // Worker 地址（部署后填入；留空则明确报未配置，不假装成功）
-var FB_WORKER_URL = '';
+var FB_WORKER_URL = 'https://rlplayer-feedback.bh2voq.workers.dev';
 
 function fbMsg(t, kind) {
   var el = D('sp_fbmsg');

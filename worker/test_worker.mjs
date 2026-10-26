@@ -105,6 +105,28 @@ async function run() {
     ck(r.status === 415, '无 Content-Type ⟹ 415', String(r.status));
   }
 
+  console.log('\n=== 1b. CORS（页面跨域 POST 必须能过）===');
+  {
+    store.clear();
+    installFetch();
+    // OPTIONS 预检必须 204 且带 CORS 头，否则浏览器不会发真正的 POST
+    const optReq = new Request('https://worker.example/', { method: 'OPTIONS' });
+    const optRes = await worker.fetch(optReq, ENV);
+    ck(optRes.status === 204, 'OPTIONS 预检 ⟹ 204', String(optRes.status));
+    ck(optRes.headers.get('Access-Control-Allow-Origin') === '*', '预检带 Allow-Origin');
+    ck((optRes.headers.get('Access-Control-Allow-Headers') || '').includes('Content-Type'),
+       '预检允许 Content-Type 头');
+
+    // 正常响应也必须带 CORS 头（否则浏览器读不到 body，页面报 Failed to fetch）
+    const r2 = await worker.fetch(req({ text: 'cors-test' }, { ip: '10.9.9.9' }),
+      { ...ENV, SHARED_SALT: 'salt-cors' });
+    ck(r2.headers.get('Access-Control-Allow-Origin') === '*', '200 响应带 Allow-Origin', String(r2.status));
+
+    // 错误响应同样要带（否则前端连错误信息都读不到）
+    const r3 = await worker.fetch(req({ text: '' }, { ip: '10.9.9.8' }), ENV);
+    ck(r3.headers.get('Access-Control-Allow-Origin') === '*', '400 错误响应也带 Allow-Origin');
+  }
+
   console.log('\n=== 2. 正文闸门 ===');
   {
     store.clear();
