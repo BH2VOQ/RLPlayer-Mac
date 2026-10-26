@@ -6506,7 +6506,10 @@ function eqSettingsHtml() {
       '<div class="sfld wide"><label>IR 脉冲响应卷积文件（WAV）' + tip('留空 = 不做卷积；支持立体声 / 多声道 FIR 房间校正') + '</label>'
     + '<input type=text id=sp_ir value="' + esc(ADV.ir || '') + '" placeholder="' + (SEP === '/' ? '/Users/你的用户名/Music/room.wav' : 'D:\\Music\\room.wav') + '"></div>'
     + chk('sp_irgpu', '卷积走 GPU 硬件加速（需要 librtagpu.dylib 就位）', ADV.irgpu == 1,
-          '房间 / 耳机 FIR 卷积交给 Apple Metal；没有可用后端时自动退回 CPU（输出逐位相同）')
+          '⚠️ macOS 上不建议开启：实测（Apple M4）卷积走 GPU 在任何 IR 长度下都比 CPU 慢 3.4~8.3 倍。'
+          + '原因是 mac 的 GPU 后端把 FFT 留在 CPU、GPU 只做逐点复数乘加，而生产每块只有 4096 样，'
+          + '远低于 GPU 的盈亏平衡点（实测需 n≥32768 才翻盘）。'
+          + '功能保留可用（数值正确），但默认关闭。详见 docs/GPU卷积与升频效率细查.md')
     // 评审 #11：这里原来还有一个「保存 EQ 与房间校正设置」按钮，与底部全局「保存设置」重复 → 移除；
     // sp_eq / sp_ir / sp_irgpu 的值本来就会随 saveSettings 一起提交，不需要第二个主操作。
     );

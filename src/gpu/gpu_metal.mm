@@ -3,10 +3,13 @@
 // ============================================================================
 // 1) 这个文件是什么
 // ============================================================================
-// 它是 gpu_conv_hip.cpp / gpu_resample_hip.cpp 的 macOS 等价物：同样导出那套
-// 动态加载 ABI，让管线在【链接期不依赖】它，运行时 dlopen 不到就自动退回 CPU。
+// 它是本项目**唯一的** GPU 加速后端实现（2026-10-26：mac 单平台收口，
+// 原 CUDA/HIP 两份实现 gpu_conv_cuda.cu / gpu_resample_cuda.cu /
+// gpu_conv_hip.cpp / gpu_resample_hip.cpp 已随 Windows 平台层一并删除）。
+// 仍然保持「动态加载 ABI」的约定：
+// 管线在【链接期不依赖】它，运行时 dlopen 不到就自动退回 CPU。
 //
-// 导出符号（与 HIP/CUDA 版逐字节一致的 4 个，别增删）：
+// 导出符号（4 个，别增删）：
 //   int  rta_gpu_available(void);
 //   int  rta_gpu_convolve(const double* in, long long n,
 //                         const double* ir, long long irLen,
@@ -19,8 +22,7 @@
 //
 // ⚠️ 注意 rta_gpu_resample 的【返回值语义】——这里很容易写错，写错就静默退回 CPU：
 //     成功时返回 (int)nOut（= 实际产出的帧数），不是 0！
-//     依据 src/dsp/resampler.h:268 `if (rc == (int)produced)`，
-//     以及 src/gpu/gpu_resample_hip.cpp:119 `return (int)nOut;`。
+//     依据 src/dsp/resampler.h:268 `if (rc == (int)produced)`。
 //     rta_gpu_convolve 才是「0 = 成功 / 非 0 = 失败」
 //     （依据 src/engine/pipeline.h:287 `... == 0`）。
 //     两者语义不同，本文件按真实调用方写，不按想当然写。
@@ -179,7 +181,7 @@ kernel void conv_mac_kernel(device const float2* H [[buffer(0)]],
 }
 
 // ---- 多相升频：每个输出样本 = 某相位的 T 个抽头 · 最近 T 个输入样本 ----
-// 索引语义严格照 src/gpu/gpu_resample_hip.cpp:21-50 与 src/dsp/resampler.h:278-292：
+// 索引语义严格照 src/dsp/resampler.h:278-292：
 //   hist 是【声道主序】[ch][histLen]（不是交错！）
 //   acc  = sum_{u=0..uEnd-1} phases[p][u] * hist[c][base - u]   ← base-u 递减
 //   uEnd = min(base+1, T, histLen)     ← 启动阶段历史不足 T 时缺的部分视为零
