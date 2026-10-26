@@ -303,23 +303,33 @@ function listErrorBox(what, retryFn) {
   if (D('lstRetry')) D('lstRetry').onclick = function () { if (retryFn) retryFn(); };
 }
 function params() {
-  var dv = D('sDSD').value;              // 0 | dop64 | dop128 | dop256 | nat64 | nat128 | nat256
+  // 2026-10-26 BUG（用户报「刚启动软件时点播放没反应」，偶发）：
+  //   下面这些控件（sDSD/sRate/sFilt/sFiltNx/sShap/sIsp/s2s/sBuf）**只存在于设置页**。
+  //   冷启动后用户如果没打开过设置页就直接点专辑/曲目播放，D('sDSD') 是 null，
+  //   裸写 D('sDSD').value 会抛 TypeError ⟹ params() 中途炸掉 ⟹ api() 根本没发出请求
+  //   ⟹ 表现为「点了完全没反应」，且没有任何 toast（异常在 Promise 外抛出）。
+  //   一旦打开过设置页，控件存在，就恢复正常 —— 所以是**偶发**。
+  //   修法：统一走 pv(id, fallback) / pc(id, fallback) 取值，控件不在时回退到 ADV/默认值。
+  //   （同文件 outModeOf() 早就用了 `D('sDSD') &&` 的防御写法，params() 漏了。）
+  function pv(id, dflt) { var e = D(id); return (e && e.value !== undefined) ? e.value : dflt; }
+  function pc(id, dflt) { var e = D(id); return e ? !!e.checked : !!dflt; }
+  var dv = pv('sDSD', '0');              // 0 | dop64 | dop128 | dop256 | nat64 | nat128 | nat256
   var dsdN = 0, native = 0;
   if (dv.indexOf('nat') === 0) { native = 1; dsdN = parseInt(dv.slice(3), 10) || 0; }
   else if (dv.indexOf('dop') === 0) { dsdN = parseInt(dv.slice(3), 10) || 0; }
   else dsdN = parseInt(dv, 10) || 0;
   return 'dsd=' + dsdN + '&dsdnative=' + native +
-         '&gpuvendor=' + encodeURIComponent(ADV.gpuvendor || (D('sGpu') && D('sGpu').value) || 'auto') +
-         '&rate=' + D('sRate').value +
-         '&filter=' + encodeURIComponent(D('sFilt').value) +
-         '&filterNx=' + encodeURIComponent(D('sFiltNx').value) +
-         '&shaper=' + encodeURIComponent(D('sShap').value) +
+         '&gpuvendor=' + encodeURIComponent(ADV.gpuvendor || pv('sGpu', 'auto') || 'auto') +
+         '&rate=' + pv('sRate', 'follow') +
+         '&filter=' + encodeURIComponent(pv('sFilt', '')) +
+         '&filterNx=' + encodeURIComponent(pv('sFiltNx', '')) +
+         '&shaper=' + encodeURIComponent(pv('sShap', ADV.shaper || '')) +
          '&hogexcl=' + (ADV.hogExclusive ? 1 : 0) +
          '&volume=' + S.vol +
          '&loudness=' + (S.loud ? 1 : 0) +
-         '&isp=' + (D('sIsp').checked ? 1 : 0) +
-         '&twostage=' + (D('s2s').checked ? 1 : 0) +
-         '&buffer=' + D('sBuf').value +
+         '&isp=' + (pc('sIsp', ADV.isp) ? 1 : 0) +
+         '&twostage=' + (pc('s2s', ADV.twostage) ? 1 : 0) +
+         '&buffer=' + pv('sBuf', ADV.buffer || 100) +
          '&modorder=' + (ADV.modorder || 5) +
           '&modfamily=' + encodeURIComponent(ADV.modfamily || 'dsd') +
          '&device=' + encodeURIComponent(ADV.device || '') +

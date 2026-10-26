@@ -80,8 +80,17 @@ iconutil -c icns "$ICONSET" -o "$APP/Contents/Resources/RLPlayer.icns"
 rm -rf "$ICONSET"
 
 # 4) Info.plist
-VER="$(grep -m1 RLPLAYER_VERSION "$ROOT/src/version.h" 2>/dev/null | sed 's/[^0-9.]*\([0-9.]*\).*/\1/' || true)"
-[[ -n "$VER" ]] || VER="1.0.1"
+# 2026-10-26（测试版支持）：版本号现在可能是 `1.0.5-beta.1` 这种形式。
+#   CFBundleShortVersionString 允许预发布后缀，但 CFBundleVersion（build number）
+#   **必须是纯数字点号**，带 `-beta` 会被 codesign/系统拒绝。
+#   旧正则 `sed 's/[^0-9.]*\([0-9.]*\).*/\1/'` 会把 `1.0.5-beta.1` 截成 `1.0.5`，
+#   导致 plist 里**丢失 beta 标识**（用户看到的是稳定版号）。
+#   ⟹ 现在拆成两个：VER 保留完整串给 ShortVersion，BUILD 只取数字段给 CFBundleVersion。
+RAWVER="$(grep -m1 RLPLAYER_VERSION "$ROOT/src/version.h" 2>/dev/null | sed 's/.*"\(.*\)".*/\1/' || true)"
+[[ -n "$RAWVER" ]] || RAWVER="1.0.1"
+VER="$RAWVER"                                                     # 完整版号（可含 -beta.N）
+BUILD="$(printf '%s' "$RAWVER" | sed 's/[^0-9.].*$//; s/\.$//')"  # 纯数字点号段
+[[ -n "$BUILD" ]] || BUILD="1.0.1"
 cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -91,7 +100,7 @@ cat > "$APP/Contents/Info.plist" <<PLIST
     <key>CFBundleDisplayName</key>      <string>RLPlayer</string>
     <key>CFBundleExecutable</key>       <string>RLPlayer</string>
     <key>CFBundleIdentifier</key>       <string>com.rta.rlplayer</string>
-    <key>CFBundleVersion</key>          <string>${VER}</string>
+    <key>CFBundleVersion</key>          <string>${BUILD}</string>
     <key>CFBundleShortVersionString</key> <string>${VER}</string>
     <key>CFBundlePackageType</key>      <string>APPL</string>
     <key>CFBundleIconFile</key>         <string>RLPlayer</string>
