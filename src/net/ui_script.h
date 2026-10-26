@@ -4592,8 +4592,11 @@ function sel(id, label, optsHtml, hint) {
 }
 // wide=true 时整行显示（用于说明较长的开关，避免被 .sgbody 的多列网格压成窄条）
 function chk(id, label, checked, hint, wide) {
+  // 2026-10-26：label 包一层 <span id=Id_lbl>，供需要按真实状态动态改文案的场景定位
+  //（第一个用例：#sp_irgpu 的标题原来写死"需要 librtagpu.dylib 就位"，
+  //  而 .app 里其实已经打包了该库 ⟹ 用户看到永远"需要就位"的假状态）。
   return '<div class="sfld' + (wide ? ' wide' : '') + '"><label class=chk><input type=checkbox id=' + id + (checked ? ' checked' : '') + '>' +
-         label + (hint ? '<span class=tip tabindex=0 role=note data-tip="' + esc(hint) +
+         '<span id="' + id + '_lbl">' + label + '</span>' + (hint ? '<span class=tip tabindex=0 role=note data-tip="' + esc(hint) +
            '" onclick="event.preventDefault();event.stopPropagation()">?</span>' : '') + '</label></div>';
 }
 function txt(id, label, val, hint, ph) {
@@ -6145,6 +6148,14 @@ function renderSettingsPage() {
          '<div class="sfld wide" style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">'
        + '<button class="btn pri" id=sp_diagzip>导出诊断包（.zip）</button>'
        + '<button class=btn id=sp_diagjson>只要 JSON</button>'
+       // 2026-10-26（用户要求「预留好上传诊断的接口」）：
+       //   上传而不是让用户去微信/QQ 传文件的理由：诊断包动辄几 MB，聊天工具会压/过期；
+       //   而且用户往往说不清"该发哪个文件"。
+       //   端点契约（后端接上即可用）：POST /api/diag/upload
+       //     Content-Type: application/zip，Body = 诊断包原始字节
+       //     期望 200 + {"ok":true,"id":"<工单号>","url":"<可选查看地址>"}
+       //   端点未接上时不假装成功（见 uploadDiag 的错误分支）。
+       + '<button class=btn id=sp_diagupload>上传诊断</button>'
        + tip('包内：rlplayer-diag.json（版本 / 系统 / CPU / GPU / 端口）、rlplayer-playback.log（含 .1/.2 轮转）、launcher.log、dumps-manifest.txt、settings-summary.txt；' +
              'api_key / token / password 一律脱敏为 ***，rlplayer-llm.conf 本体不会被打进包。')
        + '<span style="font-size:11.5px;color:var(--mut2);margin-left:2px" id=sp_diagmsg></span></div>'
@@ -6162,7 +6173,27 @@ function renderSettingsPage() {
        + '<span id=sp_updmsg style="font-size:11.5px;color:var(--mut2)"></span></div>'
        + '<div id=sp_updbar style="display:none;height:6px;border-radius:3px;background:var(--track);overflow:hidden;margin:10px 0 2px">'
        + '<i id=sp_updfill style="display:block;height:100%;width:0;background:linear-gradient(90deg,var(--acc),var(--acc2));transition:width .2s"></i></div>'
-       + '<div class=hint id=sp_updnote>更新会下载安装包并校验 sha256；校验不通过一律丢弃，绝不安装被篡改的内容。装完需要你手动重启一次（系统不允许应用自己替换正在运行的自己）。</div>')
+       + '<div class=hint id=sp_updnote>更新会下载安装包并校验 sha256；校验不通过一律丢弃，绝不安装被篡改的内容。安装完成后会自动重启。</div>')
+     // 2026-10-26（用户：反馈走邮件，正文=反馈内容，诊断包=附件）：
+     //   为什么用邮件而不是 issue/自建服务器：
+     //     ① GitHub issue 匿名建不了（实测 401）⟹ 得要 token 进客户端，和安全要求冲突；
+     //     ② issue body 实测上限约 64KB，而单个日志就 1.2MB，诊断包塞不下；
+     //     ③ 邮件天然支持大附件，且**零凭据**（走系统邮件客户端，不在代码里存任何密码）。
+     //   实现：页面收集正文 → postMessage 给原生壳 → 壳生成 .eml（含 zip 附件）→ 打开系统邮件客户端。
+     //   收件人写死在壳侧常量（BH2VOQ@163.com），页面不能指定。
+     + sgroup('反馈问题', '写成邮件发给开发者，可附诊断包',
+         '<div class="sfld wide"><label>问题描述' +
+           tip('写清楚「做了什么 / 期望什么 / 实际什么」最有帮助') + '</label>'
+       + '<textarea id=sp_fbtext rows=5 spellcheck=false placeholder="简单描述你遇到的问题…（例如：播放 DSD 文件时切歌会卡住 1 秒）" '
+       + 'style="width:100%;box-sizing:border-box;padding:8px 10px;border-radius:7px;border:1px solid var(--line);background:var(--field);color:var(--txt);font:inherit;font-size:12.5px;line-height:1.6;resize:vertical;min-height:88px"></textarea>'
+       + '<div class=hint id=sp_fbcount style="margin-top:5px">0 / 8000</div></div>'
+       + '<div class="sfld wide" style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-top:4px">'
+       + '<label class=chk style="margin-right:2px"><input type=checkbox id=sp_fbdiag checked>'
+       + '<span>附带诊断包</span>' + tip('打包日志 / 系统信息 / 设置摘要（token、密码等已脱敏为 ***）。不建议关闭 —— 没有日志很难定位问题') + '</label>'
+       + '<button class="btn pri" id=sp_fbsend>发邮件反馈</button>'
+       + '<span id=sp_fbmsg style="font-size:11.5px;color:var(--mut2)"></span></div>'
+       + '<div class=hint>会在你的邮件客户端里打开一封**已填好收件人、主题与附件**的草稿，你确认后点发送即可。'
+       + '程序不会自己偷偷发信，也不保存任何邮箱密码。</div>')
      + '</div>';
 
   // ---------- 元数据补全（排在「高级」之后）----------
@@ -6425,6 +6456,8 @@ function renderSettingsPage() {
   // 诊断页签的两个按钮（2026-10-22 功能3：从元数据迁出 + 改为一个 ZIP）
   if (D('sp_diagzip')) D('sp_diagzip').onclick = exportDiagZip;
   if (D('sp_diagjson')) D('sp_diagjson').onclick = exportDiag;
+  // 2026-10-26（用户要求预留上传接口）：按钮已绑，端点未接上时会如实报失败，不假装成功
+  if (D('sp_diagupload')) D('sp_diagupload').onclick = uploadDiag;
   // 功能2：相位说明跟随 1x 滤波器与相位覆盖的选择联动
   ['sp_filt', 'sp_phase', 'sp_filtNx'].forEach(function (id) {
     var e = D(id);
@@ -6497,6 +6530,17 @@ function renderSettingsPage() {
       m.textContent = '当前状态：' + (j && j.available ? 'GPU 可用' : '走 CPU（未找到可执行的 GPU 后端）');
       var metalInfo = (j && j.metal) ? ((j.metalUsable === false ? '已就位（本机不可用）' : '已就位（可用）')) : '未就位';
       m.title = 'Apple Metal=' + metalInfo + '；厂商偏好=' + ((j && j.vendor) || 'auto');
+    }
+    // 2026-10-26：把 #sp_irgpu 的标题改成**真实状态**，不再写死"需要就位"。
+    //   三种情况分清楚，避免再出现"库里就在包里、界面却说需要就位"的假结论：
+    //     ① 库不在（j.metal 为假）      → 后端库未打包（这才叫需要就位）
+    //     ② 库在但本机跑不起来           → 已就位但本机不可用（会回退 CPU）
+    //     ③ 库在且能跑                   → 已就位
+    var irl = D('sp_irgpu_lbl');
+    if (irl) {
+      irl.textContent = '卷积走 GPU 硬件加速（' +
+        (!(j && j.metal) ? '后端库未打包'
+         : (j.metalUsable === false ? '后端已就位，本机不可用（会回退 CPU）' : '后端已就位')) + '）';
     }
   }).catch(function () { });
   if (ADV.inBackend === 'wasapi') loadInputDevices();
@@ -6840,7 +6884,11 @@ function eqSettingsHtml() {
   h += sgroup('房间校正 IR（WAV 脉冲响应）', '把房间 / 耳机脉冲响应用 FIR 卷积叠进播放链路',
       '<div class="sfld wide"><label>IR 脉冲响应卷积文件（WAV）' + tip('留空 = 不做卷积；支持立体声 / 多声道 FIR 房间校正') + '</label>'
     + '<input type=text id=sp_ir value="' + esc(ADV.ir || '') + '" placeholder="' + (SEP === '/' ? '/Users/你的用户名/Music/room.wav' : 'D:\\Music\\room.wav') + '"></div>'
-    + chk('sp_irgpu', '卷积走 GPU 硬件加速（需要 librtagpu.dylib 就位）', ADV.irgpu == 1,
+    // 2026-10-26（用户截图指出：.app 里明明打包了 librtagpu.dylib，这行却一直显示"需要就位"）：
+    //   根因是这句标题是**写死的静态文案**，跟后端库真实状态无关 —— 属于文案缺陷，不是功能缺陷。
+    //   改为先给一个中性标题，页面加载后由 applyGpuLabel() 按 /api/gpu 的真实探测结果覆盖
+    //   （探测字段见下方 api('/api/gpu')：metal=库在、metalUsable=真能跑）。
+    + chk('sp_irgpu', '卷积走 GPU 硬件加速（检测中…）', ADV.irgpu == 1,
           '⚠️ macOS 上不建议开启：实测（Apple M4）卷积走 GPU 在任何 IR 长度下都比 CPU 慢 3.4~8.3 倍。'
           + '原因是 mac 的 GPU 后端把 FFT 留在 CPU、GPU 只做逐点复数乘加，而生产每块只有 4096 样，'
           + '远低于 GPU 的盈亏平衡点（实测需 n≥32768 才翻盘）。'
@@ -7638,6 +7686,76 @@ function exportDiag() {
     diagMsg('');
     toast('诊断端点不可用（/api/diag 未响应）');
   });
+}
+
+// ============================================================================
+// 2026-10-26（用户要求：「诊断页的诊断也预留好上传诊断的接口」）
+//
+// 契约（后端按这个实现就能直接用，页面侧不用再改）：
+//   POST /api/diag/upload
+//   Content-Type: application/zip
+//   Body: 与 /api/diagzip 产出完全相同的 ZIP 字节（含已脱敏的日志与系统信息）
+//   成功: 200 + {"ok":true,"id":"<工单号>","url":"<可选查看地址>"}
+//   失败: 非 2xx，或 {"ok":false,"error":"..."}
+//
+// 三条硬约束（都是踩过的坑，不是洁癖）：
+//   ① **复用** /api/diagzip 的产物上传，不另造一份打包逻辑
+//      ⟹ 上传的与导出的永远是同一份内容，不会出现"导出的没问题、上传的漏了脱敏"。
+//   ② 端点没接上时必须如实报错，**绝不假装修好了**。
+//      注意本后端对未知 API 的兜底是「HTTP 200 + {"ok":false,"error":"not found"}」，
+//      所以不能只看 r.ok，还要看 body 里的 ok 字段（与 exportDiag 同一处理）。
+//   ③ 上传前确认 ZIP 头（PK\x03\x04）—— 与 exportDiagZip 同一判据，
+//      防止把兜底 JSON 当诊断包发上去，让服务端收到垃圾。
+// ============================================================================
+function uploadDiag() {
+  var btn = D('sp_diagupload');
+  if (btn) btn.disabled = true;
+  diagMsg('正在准备诊断包…');
+  fetch('/api/diagzip').then(function (r) {
+    if (!r.ok) throw new Error('打包失败 HTTP ' + r.status);
+    return r.blob();
+  }).then(function (blob) {
+    if (blob.size < 22) throw new Error('包太小');
+    return blob.slice(0, 4).arrayBuffer().then(function (b) {
+      var v = new Uint8Array(b);
+      if (!(v[0] === 0x50 && v[1] === 0x4B && v[2] === 0x03 && v[3] === 0x04)) throw new Error('不是 ZIP');
+      diagMsg('正在上传（' + Math.round(blob.size / 1024) + ' KB）…');
+      return fetch('/api/diag/upload', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/zip' },
+        body: blob
+      });
+    });
+  }).then(function (r) {
+    // 200 也可能是兜底报文（本后端未知 API 的行为），所以必须读 body 确认
+    return r.text().then(function (t) {
+      var j = null;
+      try { j = JSON.parse(t); } catch (e) { }
+      if (!r.ok) throw new Error('HTTP ' + r.status + (j && j.error ? '：' + j.error : ''));
+      if (!j || j.ok === false) {
+        throw new Error((j && j.error) ? j.error : '端点未接上（/api/diag/upload 未实现）');
+      }
+      // ⚠️ 2026-10-26 实测踩到的坑（这条是"假成功"，比报错更危险）：
+      //   后端对未知 API 的兜底是前缀匹配 —— POST /api/diag/upload 命中了
+      //   `/api/diag` 的 rfind(prefix,0)==0 分支，**直接回了一份诊断 JSON 且 ok:true**。
+      //   于是"上传"看起来成功了，其实什么都没上传。
+      //   判据：上传成功的响应必须带**工单号 id**（契约见函数头）。
+      //   没有 id 就说明拿到的不是上传端点的响应（多半是被 /api/diag 吃掉），必须报错。
+      if (!j.id) {
+        throw new Error('端点未接上（POST /api/diag/upload 未实现；'
+          + '当前请求被 /api/diag 前缀匹配吃掉了，服务器回的是诊断 JSON 而不是上传结果）');
+      }
+      return j;
+    });
+  }).then(function (j) {
+    var id = j && j.id ? String(j.id) : '';
+    diagMsg(id ? ('已上传，工单号 ' + id) : '已上传');
+    toast(id ? ('诊断包已上传，工单号 ' + id) : '诊断包已上传');
+  }).catch(function (e) {
+    // 如实说不支持，不假装成功
+    diagMsg('');
+    toast('诊断包上传失败：' + (e && e.message ? e.message : e));
+  }).then(function () { if (btn) btn.disabled = false; });
 }
 
 function drawRoots() {

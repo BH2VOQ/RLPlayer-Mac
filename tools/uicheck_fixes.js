@@ -15,8 +15,16 @@
 //   F-2 快速开始跳转      —— 点「设置文件夹位置」必须进设置「高级」页且 sp_root 获得焦点
 //   F-3 主题互不干扰      —— apple / classic × 三主题，语义色变量不得互相串
 //
+// ⚠️⚠️ 铁律 1（绝不向用户听音设备播可听声音）—— 这个脚本会真的播一首歌，所以：
+//   ① 脚本**强制**把后端切成 null（不出声），并在 B-1 之前断言切换成功；
+//   ② 前端拿不到 `backend` 设置时**直接中止**整个测试，绝不"先播了再说"。
+//   历史事故（2026-10-26）：本脚本第一版没有这层保护，落到了 conf 里的 backend=coreaudio，
+//   **真的从 Mac mini 扬声器放了约 40 秒音乐，峰值 −7.4 dBFS**（远超 −60 dBFS 红线）。
+//   那是验收脚本自己的缺陷，不是被测代码的错。补上这道闸门后才允许再跑。
+//
 // 用法：
-//   # 先起一个隔离实例（绝不碰 8899 用户实例）
+//   # 先起一个隔离实例（绝不碰 8899 用户实例）。注意先预置 null 后端更保险：
+//   mkdir -p /tmp/uiv && printf 'backend=null\nvolume=-60\n' > /tmp/uiv/rlplayer-settings.conf
 //   RLPLAYER_STATE_DIR=/tmp/uiv RLPLAYER_LIBRARY_DIR=/tmp/lib \
 //     ./build-mac/rtaweb --port 8971
 //   node tools/uicheck_fixes.js http://127.0.0.1:8971/ [截图目录]
@@ -59,6 +67,39 @@ function section(t) { console.log('\n' + t); }
 
   // ============================================================
   section('B-1 冷启动点播放没反应（不碰设置页）');
+
+  // ---------- 🔴 铁律 1 闸门：播放前必须把后端切成 null（不出声） ----------
+  // 为什么必须在**播放之前**做：B-1 的判据是"后端真的开始播放"，
+  // 一旦落到 coreaudio 就会从用户的扬声器出声。宁可测试失败，也不能出声。
+  const mute = await s.eval(`(function () {
+    try {
+      // ① 优先走公开 API：/api/settings 写 backend=null
+      return fetch('/api/settings', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: 'backend=null&volume=-60'
+      }).then(function (r) { return r.json(); }).then(function (j) {
+        return {apiOk: !!(j && j.ok), raw: JSON.stringify(j).slice(0, 120)};
+      }).catch(function (e) { return {apiOk: false, raw: String(e)}; });
+    } catch (e) { return {apiOk: false, raw: String(e)}; }
+  })()`);
+  // ② 再用 /api/status 复核：device 必须是"Null"或空，绝不能是真实设备名
+  await sleep(600);
+  const snd = await s.eval(`fetch('/api/status').then(function (r) { return r.json(); }).then(function (j) {
+    return {device: String(j.device || ''), deviceId: String(j.deviceId || ''), backend: String(j.backend || '')};
+  })`);
+  const muted = /^(|null|Null)/i.test(snd.deviceId || '') ||
+                /null|不出声/i.test(snd.device || '') ||
+                /^null$/i.test(snd.backend || '');
+  ck(muted, '🔴 已强制静音后端（铁律 1：绝不出声）',
+     'device=' + JSON.stringify(snd.device) + ' deviceId=' + JSON.stringify(snd.deviceId));
+  if (!muted) {
+    // 拿不到 null 后端就**中止**，绝不"先播了再说"
+    console.error('\n⛔ 无法把播放后端切换到 null —— 为避免向用户扬声器出声，测试中止。');
+    console.error('   请用 printf \'backend=null\\n\' > <STATE_DIR>/rlplayer-settings.conf 预置后重跑。');
+    await s.close();
+    process.exit(2);
+  }
   // 判据要证明"冷启动"这件事本身：#setpage 必须从未被渲染（innerHTML 长度 0），
   // 否则测的就不是冷启动路径，修好了也说明不了问题。
   const cold = await s.eval(`({
@@ -188,13 +229,23 @@ function section(t) { console.log('\n' + t); }
   await sleep(1200);
   await s.eval(`document.querySelector('#setpage .stab[data-g=eq]').click()`);
   await sleep(1400);
-  const eq = await s.eval(`(function () {
+  // 2026-10-26 改进（代价：原判据是**假绿**）：
+  //   原来只在单一窗宽（1576px）量一次，且没有负向对照。
+  //   实测证明：把 --peqcols 改回修复前的旧值（minmax(0,...)），在 1024~1576px 下
+  //   溢出数**依然是 0** ⟹ 那个 PASS 无法区分"修好了"和"没修"，证明力为零。
+  //   用户报的叠字**只在 ≤720px 复现**（实测：720px 旧 CSS 溢出 50 处、640px 溢出 60 处）。
+  //   所以现在：扫 6 档窗宽 × 3 主题，并对最窄档做**负向对照**（就地改回旧 CSS 必须变红）。
+  const EQ_WIDTHS = [1576, 1280, 1024, 800, 720, 640];
+  const EQ_THEMES = ['dark', 'light', 'blue'];
+  const probeEq = `(function () {
     var rows = Array.from(document.querySelectorAll('.peqr'));
-    var overflow = [], overlap = [];
+    var overflow = [], overlap = [], clipped = [];
     rows.forEach(function (r, i) {
       Array.from(r.querySelectorAll('input,select')).forEach(function (inp) {
         if (inp.type === 'checkbox') return;
-        if (inp.scrollWidth - inp.clientWidth > 1) overflow.push({row: i + 1, val: inp.value});
+        if (inp.scrollWidth - inp.clientWidth > 2) overflow.push({row: i + 1, val: inp.value, over: inp.scrollWidth - inp.clientWidth});
+        // 裁切：内容比可见宽，用户看不到完整数字（与"溢出到相邻列"是两种病，都要查）
+        if (inp.clientWidth > 0 && inp.scrollWidth > inp.clientWidth + 2) clipped.push({row: i + 1, val: inp.value});
       });
       var cells = Array.from(r.children);
       for (var c = 0; c < cells.length - 1; c++) {
@@ -210,12 +261,48 @@ function section(t) { console.log('\n' + t); }
         if (x.right > y.left + 0.5) hdr.push({col: k, px: +(x.right - y.left).toFixed(1)});
       }
     }
-    return {rows: rows.length, overflow: overflow, overlap: overlap, headerOverlap: hdr};
+    return {rows: rows.length, overflow: overflow, overlap: overlap, clipped: clipped, headerOverlap: hdr};
+  })()`;
+
+  let eqBad = [];
+  for (const w of EQ_WIDTHS) {
+    await s.setViewport(w, 908);
+    await sleep(320);
+    for (const th of EQ_THEMES) {
+      await s.eval(`(function () {
+        if (${JSON.stringify(th)} === 'dark') delete document.documentElement.dataset.theme;
+        else document.documentElement.dataset.theme = ${JSON.stringify(th)};
+      })()`);
+      await sleep(180);
+      const r = await s.eval(probeEq);
+      const ok = r.rows === 20 && r.overflow.length === 0 && r.overlap.length === 0
+              && r.clipped.length === 0 && r.headerOverlap.length === 0;
+      if (!ok) eqBad.push({w, th, r});
+      ck(ok, 'EQ ' + w + 'px / ' + th + ' 无叠字无裁切',
+         'rows=' + r.rows + ' 溢出=' + r.overflow.length + ' 相交=' + r.overlap.length
+         + ' 裁切=' + r.clipped.length);
+    }
+  }
+  // 负向对照：在 720px 下把 --peqcols 改回修复前的旧值，判据**必须变红**
+  await s.setViewport(720, 908);
+  await sleep(300);
+  await s.eval(`(function () {
+    delete document.documentElement.dataset.theme;
+    var st = document.getElementById('negctl'); if (st) st.remove();
+    st = document.createElement('style'); st.id = 'negctl';
+    st.textContent = '.peqwrap{--peqcols:36px minmax(0,1.3fr) minmax(0,1fr) minmax(0,.9fr) 96px 40px !important;max-width:720px !important}';
+    document.head.appendChild(st);
   })()`);
-  ck(eq.rows === 20, 'EQ 20 段全部存在', 'rows=' + eq.rows);
-  ck(eq.overflow.length === 0, '无输入框内容溢出', eq.overflow.length + ' 处');
-  ck(eq.overlap.length === 0, '无相邻列重叠（叠字的直接判据）', eq.overlap.length + ' 处');
-  ck(eq.headerOverlap.length === 0, '表头无重叠', eq.headerOverlap.length + ' 处');
+  await sleep(350);
+  const neg = await s.eval(probeEq);
+  const negCaught = neg.overflow.length > 0 || neg.overlap.length > 0 || neg.clipped.length > 0;
+  ck(negCaught, '负向对照：改回旧 CSS 后判据确实变红（证明上面不是假绿）',
+     '溢出=' + neg.overflow.length + ' 相交=' + neg.overlap.length + ' 裁切=' + neg.clipped.length);
+  await s.shot('b4-negative-control');
+  // 复原
+  await s.eval("(function(){var st=document.getElementById('negctl');if(st)st.remove();})()");
+  await s.setViewport(1576, 908);
+  await sleep(300);
   await shot('b4-eq');
 
   // ============================================================

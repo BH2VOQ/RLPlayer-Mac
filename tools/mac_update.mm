@@ -17,7 +17,9 @@
 //      RedactToken()，把 token 出现的位置抹成 "***"（连长度都不暴露）。
 //   ③ 下载 URL 必须过 update_download_url_allowed()（https + 精确主机）。
 //   ④ 安装前必须过 verify_downloaded_file()；失败即丢弃临时文件，**不挂载、不替换**。
-//   ⑤ **绝不自己重启 .app**（会被 TCC/签名拦）：只弹提示，由用户手动重启。
+//   ⑤ 重启 = **分离的 bash 脚本**（sleep → open -n），不是自我 exec，也不是自我 fork：
+//      脚本由 posix_spawn(SETSID) 脱离本进程会话，本进程退出后才由它起新实例。
+//      脚本创建/派发失败 ⟹ **必须回退 NSAlert**（绝不静默：既没重启又没提示是最坏结局）。
 //   ⑥ 替换前先做 .app 备份；替换失败可用备份回滚。
 //
 // ============================ 线程模型 ============================
@@ -35,6 +37,7 @@
 #import <Foundation/Foundation.h>
 #import <AppKit/AppKit.h>
 
+#include <cctype>
 #include <cerrno>
 #include <cstdio>
 #include <cstdlib>
@@ -46,6 +49,7 @@
 #include <vector>
 
 #include <fcntl.h>
+#include <spawn.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -57,6 +61,131 @@
 
 // RLPLAYER_VERSION 来自 src/version.h（唯一真相源）
 #include "version.h"
+
+extern char** environ;         // posix_spawn 需要显式传环境
+
+// ---------------------------------------------------------------------------
+// NSURLSession 流式下载的 delegate
+//
+// ⚠️ 必须放在**全局作用域**：ObjC 的 @interface 只能出现在全局域（放进 C++ namespace
+//    会报 "Objective-C declarations may only appear in global scope"）。
+//
+// 为什么用 NSURLSessionDownloadTask 而不是 NSURLSessionDataTask：
+//   * dataTask 把字节攒进内存再交给 completionHandler ⟹ 本质上还是"一次性拿整个 body"，
+//     只是换了实现（7MB dmg 不算大，但没必要）；
+//   * downloadTask 由系统直接写临时文件，delegate 按块回 `totalBytesWritten`，
+//     这才是真正**边下边有进度**的形态。
+//
+// 线程模型：所有 delegate 回调都在 NSOperationQueue（maxConcurrent=1，串行）上跑；
+// 调用方在另一个线程用 100ms 切片轮询 `finished`。**主线程完全不需要跑 runloop**
+// （已实测：纯 sleep 轮询时 delegate 照样回调 10 次）。
+// ---------------------------------------------------------------------------
+@interface RLUpdateDownloader : NSObject <NSURLSessionDownloadDelegate> {
+@public
+    std::string        dstPath;         // 目标文件绝对路径
+    std::string        error;           // 首个错误（调用方负责再脱敏一次）
+    NSInteger          httpStatus;      // HTTP 状态码（0 = 没拿到响应）
+    long long          written;         // 已收字节数（delegate 报的）
+    long long          expectedTotal;   // 总字节数（-1 = 服务端没给 Content-Length）
+    std::atomic<bool>  finished;        // didCompleteWithError 已跑完 ⟹ 可以收了
+    std::atomic<bool>  fileOk;          // 文件已完整落盘
+    std::atomic<bool>  httpFailed;      // 非 2xx
+    rta::update::DownloadProgressFn progressBlock;   // 节流后的进度回调（可为 nil）
+    // 节流状态：只在 delegate 串行队列里读写，无需加锁
+    double             lastReportAt;
+    int                lastReportedPct;
+}
+@end
+
+@implementation RLUpdateDownloader
+- (instancetype)init {
+    if ((self = [super init])) {
+        httpStatus = 0;
+        written = 0;
+        expectedTotal = -1;
+        finished = false;
+        fileOk = false;
+        httpFailed = false;
+        progressBlock = nil;
+        lastReportAt = 0;
+        lastReportedPct = -1;
+    }
+    return self;
+}
+
+- (void)URLSession:(NSURLSession*)session
+      downloadTask:(NSURLSessionDownloadTask*)task
+      didWriteData:(int64_t)bytesWritten
+ totalBytesWritten:(int64_t)totalBytesWritten
+totalBytesExpectedToWrite:(int64_t)totalBytesExpectedToWrite {
+    (void)session; (void)task; (void)bytesWritten;
+    expectedTotal = (long long)totalBytesExpectedToWrite;
+    written = (long long)totalBytesWritten;
+    // 节流（用户要求"每 200ms 或每 1%，别刷爆 UI"）：两个条件取 or
+    const int pct = rta::update::download_percent(written, expectedTotal);
+    const double now = CFAbsoluteTimeGetCurrent();
+    const bool timeDue = (now - lastReportAt) >= 0.2;
+    const bool pctDue = (pct > lastReportedPct);
+    if (!timeDue && !pctDue) return;
+    lastReportAt = now;
+    lastReportedPct = pct;
+    if (progressBlock) progressBlock(written, expectedTotal);
+}
+
+- (void)URLSession:(NSURLSession*)session
+      downloadTask:(NSURLSessionDownloadTask*)task
+didFinishDownloadingToURL:(NSURL*)location {
+    (void)session;
+    httpStatus = task.response ? [(NSHTTPURLResponse*)task.response statusCode] : 0;
+    if (httpStatus < 200 || httpStatus >= 300) {
+        // 非 2xx：body 是错误页面，**绝不能**当 dmg 落盘
+        httpFailed = true;
+        error = "下载失败 HTTP " + std::to_string((int)httpStatus);
+        return;
+    }
+    // 落盘：先写 <dst>.part 再 rename（同目录 rename 是原子的）
+    // ⟹ 任何时刻 dstPath 要么不存在，要么是**完整**文件，不存在"半个 dmg"。
+    const std::string part = dstPath + ".part";
+    NSFileManager* fm = [NSFileManager defaultManager];
+    NSString* partNS = [NSString stringWithUTF8String:part.c_str()];
+    [fm removeItemAtPath:partNS error:nil];
+    NSError* ce = nil;
+    if (![fm copyItemAtPath:location.path toPath:partNS error:&ce]) {
+        error = "下载结果落到临时文件失败";
+        return;
+    }
+    if (::rename(part.c_str(), dstPath.c_str()) != 0) {
+        error = std::string("下载落盘失败：") + std::strerror(errno);
+        ::unlink(part.c_str());
+        return;
+    }
+    struct stat st {};
+    if (::stat(dstPath.c_str(), &st) != 0 || !S_ISREG(st.st_mode)) {
+        error = "落盘后文件不可用";
+        ::unlink(dstPath.c_str());
+        return;
+    }
+    fileOk = true;
+}
+
+- (void)URLSession:(NSURLSession*)session
+              task:(NSURLSessionTask*)task
+didCompleteWithError:(NSError*)e {
+    (void)session;
+    if (task.response) httpStatus = [(NSHTTPURLResponse*)task.response statusCode];
+    if (e && error.empty()) {
+        if (e.code == NSURLErrorCancelled) {
+            error = "已取消";
+        } else if (e.code == NSURLErrorTimedOut) {
+            error = "下载超时";
+        } else {
+            const char* m = e.localizedDescription.UTF8String;
+            error = m ? m : "网络错误";
+        }
+    }
+    finished = true;
+}
+@end
 
 namespace rta::update {
 
@@ -136,6 +265,94 @@ inline HttpOutcome Fetch(const std::string& url, const std::string& token, int t
     return out;
 }
 
+// ---------------- 流式下载（NSURLSession）----------------
+// 与 Fetch 的区别（这正是本次要解决的问题）：
+//   Fetch  → libcurl 阻塞，整个 body 一次性返回 ⟹ 只有"开始/结束"两个时间点
+//   本函数 → NSURLSessionDownloadTask + delegate，按块回 totalBytesWritten ⟹ 真有进度
+// 语义保证：返回 false 时 dstPath **一定不存在**（要么没建，要么已 unlink）。
+inline DownloadResult DownloadToFile(const std::string& url,
+                                     const std::string& token,
+                                     const std::string& dstPath,
+                                     int timeoutSeconds,
+                                     DownloadProgressFn onProgress,
+                                     const CancelToken& cancel) {
+    DownloadResult out;
+    if (dstPath.empty()) { out.error = "目标路径为空"; return out; }
+    ::unlink(dstPath.c_str());
+    ::unlink((dstPath + ".part").c_str());
+
+    @autoreleasepool {
+        NSURL* nsurl = [NSURL URLWithString:[NSString stringWithUTF8String:url.c_str()]];
+        if (!nsurl || !nsurl.scheme) { out.error = "下载地址不可用"; return out; }
+
+        RLUpdateDownloader* del = [[RLUpdateDownloader alloc] init];
+        del->dstPath = dstPath;
+        del->progressBlock = onProgress;
+
+        NSURLSessionConfiguration* cfg = [NSURLSessionConfiguration ephemeralSessionConfiguration];
+        // 连接/单次请求超时；整体资源超时按调用方给的秒数（现有 120s 语义保持不变）
+        cfg.timeoutIntervalForRequest  = (timeoutSeconds > 0) ? timeoutSeconds : 120;
+        cfg.timeoutIntervalForResource = (timeoutSeconds > 0) ? timeoutSeconds : 120;
+        cfg.HTTPShouldSetCookies = NO;
+        cfg.requestCachePolicy = NSURLRequestReloadIgnoringLocalCacheData;
+
+        NSOperationQueue* q = [[NSOperationQueue alloc] init];
+        q.maxConcurrentOperationCount = 1;      // delegate 串行 ⟹ 节流状态无需加锁
+
+        NSURLSession* session = [NSURLSession sessionWithConfiguration:cfg
+                                                             delegate:del
+                                                        delegateQueue:q];
+
+        NSMutableURLRequest* rq = [NSMutableURLRequest requestWithURL:nsurl];
+        rq.timeoutInterval = (timeoutSeconds > 0) ? timeoutSeconds : 120;
+        rq.HTTPMethod = @"GET";
+        // token 只在这里作为请求头出现一次，绝不写日志
+        if (!token.empty()) {
+            [rq setValue:[NSString stringWithFormat:@"token %s", token.c_str()]
+                forHTTPHeaderField:@"Authorization"];
+        }
+        NSURLSessionDownloadTask* task = [session downloadTaskWithRequest:rq];
+        [task resume];
+
+        // 100ms 切片轮询 —— 既能及时响应取消，又不依赖调用线程有 runloop（已实测）
+        bool cancelledHere = false;
+        while (!del->finished.load()) {
+            if (cancel.cancelled()) {
+                cancelledHere = true;
+                [task cancel];
+                // 给取消回调一点时间落定，避免和 didComplete 抢
+                for (int i = 0; i < 30 && !del->finished.load(); ++i) {
+                    ::usleep(50 * 1000);
+                }
+                break;
+            }
+            ::usleep(100 * 1000);
+        }
+        [session finishTasksAndInvalidate];
+
+        out.status = (int)del->httpStatus;
+        out.bytes  = del->written;
+        out.cancelled = cancelledHere;
+        if (cancelledHere) {
+            out.error = "已取消";
+        } else if (del->httpFailed.load()) {
+            out.error = del->error;                       // 已是固定文案，无 token
+        } else if (!del->fileOk.load()) {
+            out.error = del->error.empty() ? "下载未完成" : del->error;
+        } else {
+            out.ok = true;
+        }
+        out.error = RedactToken(out.error, token);         // ← ① 脱敏（兜底）
+    }
+
+    // 失败必清（连 .part 一起）：绝不留半个文件给后续校验/挂载
+    if (!out.ok) {
+        ::unlink(dstPath.c_str());
+        ::unlink((dstPath + ".part").c_str());
+    }
+    return out;
+}
+
 // ---------------- 路径 ----------------
 inline std::string ExecutableBundlePath() {
     // .app 的绝对路径：可执行文件在 <bundle>/Contents/MacOS/<exe> ⟹ 上溯 3 级
@@ -181,6 +398,41 @@ inline std::string ShellQuote(const std::string& s) {
     }
     q += "'";
     return q;
+}
+
+// 是否为已存在的目录（.app 必须是目录；用 stat 而不是 NSFileManager 以便与 C++ 侧一致）
+inline bool IsDirectory(const std::string& p) {
+    struct stat st {};
+    return !p.empty() && ::stat(p.c_str(), &st) == 0 && S_ISDIR(st.st_mode);
+}
+
+// ---------------- 仅测试用的 loopback 放行 ----------------
+// 默认关闭；打开后只放行**本机** http 地址（127.0.0.1 / localhost），外部主机仍被白名单拒。
+inline std::atomic<bool>& LoopbackTestFlag() {
+    static std::atomic<bool> f{false};
+    return f;
+}
+
+inline bool IsLoopbackUrl(const std::string& url) {
+    auto starts = [&](const char* pre) {
+        const size_t n = std::strlen(pre);
+        if (url.size() < n) return false;
+        for (size_t i = 0; i < n; ++i) {
+            if (std::tolower((unsigned char)url[i]) != (unsigned char)std::tolower((unsigned char)pre[i])) return false;
+        }
+        return true;
+    };
+    std::string rest;
+    if (starts("http://127.0.0.1:"))        rest = url.substr(std::strlen("http://127.0.0.1:"));
+    else if (starts("http://localhost:"))   rest = url.substr(std::strlen("http://localhost:"));
+    else return false;
+    const size_t slash = rest.find('/');
+    if (slash == std::string::npos || slash == 0) return false;      // 必须有端口 + 路径
+    for (size_t i = 0; i < slash; ++i) {
+        if (!std::isdigit((unsigned char)rest[i])) return false;     // 端口必须是纯数字
+    }
+    const int port = std::atoi(rest.substr(0, slash).c_str());
+    return port > 0 && port <= 65535;
 }
 
 } // namespace detail_native
@@ -246,11 +498,17 @@ void begin_check(ProgressFn progress, DoneFn done) {
             if (lk.found) {
                 manifestUrl = lk.url;
             } else {
-                manifestUrl = std::string(kPrivateRawPrefix) + kManifestAssetName +
-                              "?ref=" + kPrivateManifestRef;
+                // 2026-10-26 迁到 GitHub（公开仓库 BH2VOQ/RLPlayer-Mac）后的退路：
+                //   清单直接是仓库根目录的 latest.json 文件，用 raw.githubusercontent.com 读，
+                //   **匿名即可**（实测 200）。
+                //   旧实现拼的是 kPrivateRawPrefix（api.github.com/.../contents/，形如 Gitea 的
+                //   raw 端点）—— 那个常量已删除，因为 api.github.com 不在下载白名单里。
+                manifestUrl = std::string("https://raw.githubusercontent.com/") +
+                              kRepoOwner + "/" + kRepoName + "/" + kRepoBranch + "/" +
+                              kManifestAssetName;
                 if (!update_download_url_allowed(manifestUrl)) {
                     result.decision = Decision::FailedBadUrl;
-                    result.error = "私有清单地址不在白名单";
+                    result.error = "清单地址不在白名单";
                     if (done) done(result);
                     return;
                 }
@@ -355,6 +613,157 @@ bool sha256_of_file(const std::string& path, std::string& outHex, std::string& e
     return sha256_file(path, outHex, err);
 }
 
+// ---------------------------------------------------------------------------
+// 流式下载（公开接口，见 mac_update.h 的语义说明）
+// 放在这里而不是 detail_native：测试要直接撞它（真起本机 HTTP 服务）。
+// ---------------------------------------------------------------------------
+DownloadResult download_to_file(const std::string& url,
+                                const std::string& token,
+                                const std::string& dstPath,
+                                int timeoutSeconds,
+                                DownloadProgressFn onProgress,
+                                CancelToken cancel) {
+    // 白名单是 begin_install 的职责，但这里也挡一次：任何调用方都不该凭空白名单去连外部主机
+    bool allowed = update_download_url_allowed(url);
+    if (!allowed && detail_native::LoopbackTestFlag().load() && detail_native::IsLoopbackUrl(url)) {
+        allowed = true;                       // ← 仅测试开关打开时，且仅本机地址
+    }
+    if (!allowed) {
+        DownloadResult r;
+        r.error = "下载地址不在白名单，已拒绝";
+        return r;
+    }
+    return detail_native::DownloadToFile(url, token, dstPath, timeoutSeconds, onProgress, cancel);
+}
+
+void set_test_allow_loopback_download(bool enabled) {
+    detail_native::LoopbackTestFlag().store(enabled);
+}
+
+// ---------------------------------------------------------------------------
+// 自动重启：脚本正文 + 落盘 + 分离执行
+// ---------------------------------------------------------------------------
+std::string auto_restart_script_body(const std::string& appPath, const AutoRestartOptions& opts) {
+    const int ms = (opts.sleepMs < 0) ? 0 : opts.sleepMs;
+    std::string s;
+    s += "#!/bin/bash\n";
+    s += "# RLPlayer 自动更新重启脚本（由 update 安装流程生成，执行完自删）\n";
+    s += "# 为什么要 sleep：ditto 刚替换完 .app，当前进程还在用它 → 先等本进程退出，\n";
+    s += "# 避免文件占用/竞态（用户要求约 1.5 秒）。\n";
+    s += "sleep ";
+    s += std::to_string(ms / 1000);
+    if (ms % 1000 != 0) {
+        // 保留毫秒精度（测试用 0/300ms 这类短值时要真的短）
+        s += ".";
+        char buf[8];
+        std::snprintf(buf, sizeof buf, "%03d", ms % 1000);
+        s += buf;
+    }
+    s += "\n";
+    s += "# open -n = 新开一个实例。直接 open 在 .app 已被替换、旧进程仍在时会激活旧实例。\n";
+    s += "/usr/bin/open -n ";
+    s += detail_native::ShellQuote(appPath);
+    s += "\n";
+    s += "# 自删：不留临时脚本垃圾（$0 是本脚本路径）\n";
+    s += "rm -f \"$0\" 2>/dev/null\n";
+    return s;
+}
+
+bool schedule_auto_restart(const std::string& appPath, std::string& outScriptPath,
+                           std::string& outErr, const AutoRestartOptions& opts) {
+    outScriptPath.clear();
+    outErr.clear();
+
+    if (appPath.empty()) { outErr = "新版本 .app 路径为空"; return false; }
+    if (!detail_native::IsDirectory(appPath)) {
+        outErr = "新版本 .app 不存在或不是目录：" + appPath;
+        return false;
+    }
+
+    const std::string tmp = rta::platform::temp_dir_utf8();
+    if (tmp.empty()) { outErr = "没有可用的临时目录"; return false; }
+    char nm[64];
+    std::snprintf(nm, sizeof nm, "rlplayer-restart-%d.sh", (int)::getpid());
+    const std::string script = rta::platform::join(tmp, nm);
+
+    const std::string body = auto_restart_script_body(appPath, opts);
+    // 0600 创建 + 直写：用 open(O_CREAT|O_TRUNC) 而不是 popen/echo，避免 shell 二次解释
+    const int fd = ::open(script.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0700);
+    if (fd < 0) { outErr = std::string("无法创建重启脚本：") + std::strerror(errno); return false; }
+    const ssize_t n = ::write(fd, body.data(), body.size());
+    ::close(fd);
+    if (n < 0 || (size_t)n != body.size()) {
+        ::unlink(script.c_str());
+        outErr = "写入重启脚本失败";
+        return false;
+    }
+    ::chmod(script.c_str(), 0700);          // 有 umask 时补一次，确保可执行
+
+    outScriptPath = script;
+    if (!opts.spawn) return true;           // 只写不跑（测试/诊断）
+
+    // ---------------- 分离执行 ----------------
+    // 用 posix_spawn + POSIX_SPAWN_SETSID 而不是 NSTask：
+    //   * SETSID 让脚本进入**新会话**，本进程退出/收到信号都带不走它（这才是"分离"）
+    //   * NSTask 属于 Foundation 进程管理，跟着 NSApp 生命周期，退出时可能被带走
+    // 已实测：POSIX_SPAWN_SETSID(1024) 在本机可用，spawn 返回 0，子进程真能跑起来。
+    const std::string logPath = opts.logPath.empty()
+        ? rta::platform::join(tmp, "rlplayer-restart.log")
+        : opts.logPath;
+
+    posix_spawn_file_actions_t fa;
+    posix_spawn_file_actions_init(&fa);
+    // stdout/stderr 重定向到日志（诊断用）；脚本自己不打印关键内容，日志为空也正常
+    posix_spawn_file_actions_addopen(&fa, 1, logPath.c_str(), O_WRONLY | O_CREAT | O_APPEND, 0600);
+    posix_spawn_file_actions_addopen(&fa, 2, logPath.c_str(), O_WRONLY | O_CREAT | O_APPEND, 0600);
+    posix_spawn_file_actions_addopen(&fa, 0, "/dev/null", O_RDONLY, 0);
+
+    posix_spawnattr_t attr;
+    posix_spawnattr_init(&attr);
+    short flags = POSIX_SPAWN_SETSID | POSIX_SPAWN_CLOEXEC_DEFAULT;
+#ifdef POSIX_SPAWN_SETSIGDEF
+    flags |= POSIX_SPAWN_SETSIGDEF;
+#endif
+    posix_spawnattr_setflags(&attr, flags);
+#ifdef POSIX_SPAWN_SETSIGDEF
+    sigset_t def;
+    sigemptyset(&def);
+    sigaddset(&def, SIGTERM);
+    sigaddset(&def, SIGINT);
+    posix_spawnattr_setsigdefault(&attr, &def);
+#endif
+
+    // 参数：waitPid > 0 时先等那个 pid（生产=当前进程；测试可传 0 不等）
+    std::string cmd;
+    if (opts.waitPid > 0) {
+        // 等旧进程真的退出再起新的。`while kill -0` 比固定 sleep 更稳（进程可能退得慢）。
+        cmd = "while /bin/kill -0 " + std::to_string((long long)opts.waitPid) +
+              " 2>/dev/null; do /bin/sleep 0.05; done; ";
+        cmd += "/bin/bash ";
+    } else {
+        cmd = "/bin/bash ";
+    }
+    cmd += detail_native::ShellQuote(script);
+
+    const char* argv[] = {"/bin/bash", "-c", cmd.c_str(), nullptr};
+    pid_t pid = 0;
+    const int rc = ::posix_spawn(&pid, "/bin/bash", &fa, &attr,
+                                 const_cast<char* const*>(argv), environ);
+    posix_spawnattr_destroy(&attr);
+    posix_spawn_file_actions_destroy(&fa);
+
+    if (rc != 0) {
+        ::unlink(script.c_str());
+        outScriptPath.clear();
+        outErr = std::string("无法派发重启脚本：") + std::strerror(rc);
+        return false;
+    }
+
+    fprintf(stderr, "RLPlayer: 已派发自动重启（pid=%d, script=%s, log=%s）\n",
+            (int)pid, script.c_str(), logPath.c_str());
+    return true;
+}
+
 bool install_from_local_dmg(const std::string& dmgPath,
                             const std::string& expectedSha256, long long expectedSize,
                             const std::string& mountPoint,
@@ -388,10 +797,138 @@ bool install_from_local_dmg(const std::string& dmgPath,
 }
 
 // ---------------------------------------------------------------------------
-// 一键更新（异步）：下载 → 校验 → 挂载 → 替换 → 提示重启
+// 安装流水线（同步、可注入目标路径）—— begin_install 的全部实质内容
+//
+// 进度区间（2026-10-26 用户要求，唯一真相源在 mac_update.h 的 InstallProgressRange）：
+//   下载 0→40（按真实字节数插值，不是只报 0 和 40）
+//   校验 40→60
+//   安装 60→95
+//   完成 100
+//
+// ⚠️ 顺序即安全边界：verify 必须在 mount 之前。改成流式下载**不改变**这一顺序。
+// ---------------------------------------------------------------------------
+bool run_install_pipeline(const CheckResult& plan, ProgressFn progress, CancelToken cancel,
+                          const InstallPipelineOptions& opts,
+                          std::string& outErr, std::string& outBackup) {
+    outErr.clear();
+    outBackup.clear();
+
+    auto report = [&](const char* stage, const std::string& d, int pct) {
+        NativeProgress p; p.stage = stage; p.detail = d; p.percent = pct;
+        if (progress) progress(p);
+    };
+
+    const Config cfg = detail_native::LoadConfig();
+    const std::string token = cfg.hasToken ? cfg.token : std::string();
+
+    const std::string target = opts.targetApp.empty() ? detail_native::InstallTargetPath()
+                                                      : opts.targetApp;
+    const std::string dmgPath = opts.dmgPath.empty()
+        ? rta::platform::join(rta::platform::temp_dir_utf8(), "rlplayer-update.dmg")
+        : opts.dmgPath;
+    const std::string mntPath = opts.mountPoint.empty()
+        ? rta::platform::join(rta::platform::temp_dir_utf8(), "rlplayer-update-mnt")
+        : opts.mountPoint;
+
+    // ---------- 1. 下载（NSURLSession 流式，真进度）----------
+    report("downloading", "正在下载 " + plan.remoteVersion + " …", 0);
+    ::unlink(dmgPath.c_str());
+    ::unlink((dmgPath + ".part").c_str());
+
+    // 进度：单调不减 + 变化才上报。用头文件里的 DownloadPctTracker（生产与测试同一份）
+    // 而不是在这里内联一套 —— 否则测试测的是测试自己写的逻辑（铁律 3）。
+    auto tracker = std::make_shared<DownloadPctTracker>();
+    tracker->expectedSize = plan.size;          // 清单给了 size 就以它为准
+    DownloadProgressFn onProgress = ^(long long written, long long total) {
+        int pct = 0;
+        if (!tracker->update(written, total, pct)) return;     // 没变化 ⟹ 不刷 UI
+        const long long denom = (plan.size > 0) ? plan.size : total;
+        std::string d = "正在下载 " + plan.remoteVersion + "（" +
+                        std::to_string((long long)written / 1024) + " KB";
+        if (denom > 0) d += " / " + std::to_string((long long)denom / 1024) + " KB";
+        d += "）";
+        NativeProgress p; p.stage = "downloading"; p.detail = d; p.percent = pct;
+        if (progress) progress(p);
+    };
+
+    const DownloadResult dl = download_to_file(plan.downloadUrl, token, dmgPath,
+                                               opts.downloadTimeoutSeconds, onProgress, cancel);
+    if (dl.cancelled) {
+        ::unlink(dmgPath.c_str());
+        outErr = "更新已取消（未做任何改动）";
+        return false;
+    }
+    if (!dl.ok) {
+        // 失败可重试（不改状态、不写"已是最新"）
+        std::string msg = (dl.status == 401 || dl.status == 403)
+                              ? "下载失败：鉴权被拒（检查 update.conf）"
+                              : "下载失败（可重试）";
+        if (dl.status > 0) msg += " HTTP " + std::to_string(dl.status);
+        if (!dl.error.empty()) msg += "：" + dl.error;
+        ::unlink(dmgPath.c_str());
+        outErr = redact_token(msg, token);
+        return false;
+    }
+    report("downloading", "下载完成（" + std::to_string(dl.bytes) + " 字节）",
+           InstallProgressRange::kDownloadEnd);
+
+    // ---------- 2. 校验（篡改/截断必失败 ⟹ 丢弃，绝不挂载）----------
+    // ⚠️ 位置是硬要求：**必须在挂载之前**。这条闸门（sha256 + size）是安全边界。
+    report("verifying", "正在校验 sha256 …", InstallProgressRange::kDownloadEnd);
+    const VerifyResult vr = verify_downloaded_file(dmgPath, plan.sha256, plan.size);
+    if (!vr.ok) {
+        if (!opts.keepDmgOnFailure) ::unlink(dmgPath.c_str());   // ← 关键：失败即丢弃
+        outErr = "校验失败，已丢弃：" + vr.error;
+        return false;
+    }
+    report("verifying", "sha256 校验通过", InstallProgressRange::kVerifyEnd);
+
+    // 取消的最后一个安全边界：校验已过但还没动 .app，此时取消是零代价的
+    if (cancel.cancelled()) {
+        ::unlink(dmgPath.c_str());
+        outErr = "更新已取消（未做任何改动）";
+        return false;
+    }
+
+    // ---------- 3+4. 挂载 → 备份 → 替换 → 卸载（复用有序流水线）----------
+    // ⚠️ install_from_local_dmg 内部第一件事就是**再校验一次** sha256（双重闸门）。
+    report("installing", "正在安装…", InstallProgressRange::kVerifyEnd);
+    std::string backup, ierr;
+    const bool installed = install_from_local_dmg(dmgPath, plan.sha256, plan.size,
+                                                 mntPath, target, backup, ierr);
+    ::unlink(dmgPath.c_str());
+    ::rmdir(mntPath.c_str());
+    outBackup = backup;
+    if (!installed) {
+        outErr = ierr;
+        return false;
+    }
+    fprintf(stderr, "RLPlayer: 更新已安装到 %s（备份：%s）\n",
+            target.c_str(), backup.empty() ? "无（全新安装）" : backup.c_str());
+    report("installing", "安装完成", InstallProgressRange::kInstallEnd);
+
+    // ---------- 5. 自动重启 ----------
+    // 只在 opts.autoRestart 时做（测试必须关掉：绝不真的 open 一个 .app）。
+    if (opts.autoRestart) {
+        std::string scriptPath, serr;
+        AutoRestartOptions ro;
+        ro.sleepMs = 1500;
+        ro.waitPid = (long long)::getpid();    // 等本进程真的退出再起新实例
+        if (!schedule_auto_restart(target, scriptPath, serr, ro)) {
+            fprintf(stderr, "RLPlayer: 自动重启失败（%s），回退到手动重启提示\n", serr.c_str());
+            // 失败不改变"安装成功"这个事实，但要让调用方知道要不要提示手动重启
+            outErr = "installed-but-needs-manual-restart:" + serr;
+        }
+    }
+    report("done", "更新完成", InstallProgressRange::kDone);
+    return true;
+}
+
+// ---------------------------------------------------------------------------
+// 一键更新（异步）：run_install_pipeline + 主线程收尾
 // ⚠️ 任何一步失败都**立即中止**且不碰现有 .app（除替换阶段的备份回滚）。
 // ---------------------------------------------------------------------------
-void begin_install(const CheckResult& plan, ProgressFn progress, InstallFn done) {
+void begin_install(const CheckResult& plan, ProgressFn progress, InstallFn done, CancelToken cancel) {
     // 先做一次纯本地合法性检查：只有 UpdateAvailable 才允许安装
     if (plan.decision != Decision::UpdateAvailable) {
         if (done) done(false, @"没有可用的更新计划");
@@ -405,85 +942,46 @@ void begin_install(const CheckResult& plan, ProgressFn progress, InstallFn done)
         if (done) done(false, @"清单未提供合法的 sha256，已拒绝安装");
         return;
     }
-
-    const std::string tmpDir = rta::platform::temp_dir_utf8();
-    if (tmpDir.empty()) { if (done) done(false, @"没有可用的临时目录"); return; }
-    const std::string dmgPath = rta::platform::join(tmpDir, "rlplayer-update.dmg");
-    const std::string mntPath = rta::platform::join(tmpDir, "rlplayer-update-mnt");
+    if (rta::platform::temp_dir_utf8().empty()) {
+        if (done) done(false, @"没有可用的临时目录");
+        return;
+    }
 
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
-        auto report = [&](const char* stage, const std::string& d, int pct) {
-            NativeProgress p; p.stage = stage; p.detail = d; p.percent = pct;
-            if (progress) progress(p);
-        };
+        InstallPipelineOptions opts;      // 生产默认：目标=当前 .app，自动重启=开
+        std::string err, backup;
+        const bool ok = run_install_pipeline(plan, progress, cancel, opts, err, backup);
 
-        const Config cfg = detail_native::LoadConfig();
-        const std::string token = cfg.hasToken ? cfg.token : std::string();
+        // outErr 以 "installed-but-needs-manual-restart:" 开头 = 装好了但没重启成 ⟹ 走兜底
+        const bool installedButNoRestart =
+            ok && err.rfind("installed-but-needs-manual-restart:", 0) == 0;
 
-        // ---------- 1. 下载 ----------
-        report("downloading", "正在下载 " + plan.remoteVersion + " …", 0);
-        ::unlink(dmgPath.c_str());
-        const auto dl = detail_native::Fetch(plan.downloadUrl, token, 120000);
-        if (!dl.ok || dl.status < 200 || dl.status >= 300) {
-            // 失败可重试（不改状态、不写"已是最新"）
-            std::string msg = (dl.status == 401 || dl.status == 403)
-                                  ? "下载失败：鉴权被拒（检查 update.conf）"
-                                  : "下载失败（可重试）";
-            if (dl.status > 0) msg += " HTTP " + std::to_string(dl.status);
-            if (done) done(false, [NSString stringWithUTF8String:msg.c_str()]);
-            return;
-        }
-        // 落盘（二进制安全）
-        {
-            FILE* f = ::fopen(dmgPath.c_str(), "wb");
-            if (!f) { if (done) done(false, @"无法写入临时文件"); return; }
-            const size_t n = dl.body.empty() ? 0 : std::fwrite(dl.body.data(), 1, dl.body.size(), f);
-            const bool wok = (n == dl.body.size());
-            std::fclose(f);
-            if (!wok) { ::unlink(dmgPath.c_str()); if (done) done(false, @"下载写入不完整，已丢弃"); return; }
-        }
-        report("downloading", "下载完成（" + std::to_string((long long)dl.body.size()) + " 字节）", 40);
-
-        // ---------- 2. 校验（篡改/截断必失败 ⟹ 丢弃，绝不挂载）----------
-        report("verifying", "正在校验 sha256 …", 50);
-        const VerifyResult vr = verify_downloaded_file(dmgPath, plan.sha256, plan.size);
-        if (!vr.ok) {
-            ::unlink(dmgPath.c_str());                       // ← 关键：失败即丢弃
-            if (done) done(false, [NSString stringWithUTF8String:("校验失败，已丢弃：" + vr.error).c_str()]);
-            return;
-        }
-        report("verifying", "sha256 校验通过", 60);
-
-        // ---------- 3+4. 挂载 → 备份 → 替换 → 卸载（复用有序流水线，杜绝两份实现漂移）----------
-        // ⚠️ 这里调的是 install_from_local_dmg，它内部第一件事就是再校验一次 sha256。
-        //    上面第 2 步的校验是"早失败早丢弃"；这里是"替换前的最后一道闸门"。
-        //    两道关卡共用同一个实现 ⟹ 不可能出现"一处放宽了另一处没放宽"。
-        report("installing", "正在安装…", 80);
-        const std::string target = detail_native::InstallTargetPath();
-        std::string backup, ierr;
-        const bool installed = install_from_local_dmg(dmgPath, plan.sha256, plan.size,
-                                                     mntPath, target, backup, ierr);
-        ::unlink(dmgPath.c_str());
-        ::rmdir(mntPath.c_str());
-        if (!installed) {
-            if (done) done(false, [NSString stringWithUTF8String:ierr.c_str()]);
-            return;
-        }
-        fprintf(stderr, "RLPlayer: 更新已安装到 %s（备份：%s）\n",
-                target.c_str(), backup.empty() ? "无（全新安装）" : backup.c_str());
-        report("done", "安装完成，请手动重启 RLPlayer", 100);
-
-        // ---------- 5. 提示用户重启（**绝不自己重启**：会被 TCC/签名拦）----------
         dispatch_async(dispatch_get_main_queue(), ^{
-            NSAlert* a = [[NSAlert alloc] init];
-            a.messageText = @"更新已安装";
-            a.informativeText = [NSString stringWithFormat:
-                @"RLPlayer %s 已安装。请退出并重新打开 RLPlayer 以完成更新。\n\n"
-                @"（程序不会自动重启：macOS 的 TCC/签名机制会拦截自我重启。）",
-                plan.remoteVersion.c_str()];
-            [a addButtonWithTitle:@"好"];
-            [a runModal];
-            if (done) done(true, @"更新已安装，请手动重启");
+            if (!ok) {
+                if (done) done(false, [NSString stringWithUTF8String:err.c_str()]);
+                return;
+            }
+            if (installedButNoRestart) {
+                // 兜底：脚本建不出来/派发失败（磁盘满、权限、临时目录不可用）⟹ 必须提示
+                NSAlert* a = [[NSAlert alloc] init];
+                a.messageText = @"更新已安装";
+                a.informativeText = [NSString stringWithFormat:
+                    @"RLPlayer %s 已安装，但**自动重启没能启动**。\n\n"
+                    @"请手动退出并重新打开 RLPlayer 以完成更新。",
+                    plan.remoteVersion.c_str()];
+                [a addButtonWithTitle:@"好"];
+                [a runModal];
+                if (done) done(true, @"更新已安装，请手动重启");
+                return;
+            }
+            // 正常路径：脚本已在等本进程退出，这里干净退出即可
+            if (done) done(true, @"更新已安装，正在自动重启");
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.15 * NSEC_PER_SEC)),
+                           dispatch_get_main_queue(), ^{
+                               // NSApp terminate 会走 applicationWillTerminate（协作式停核心），
+                               // 比 exit(0) 干净；脚本已经在等本 pid 消失。
+                               [NSApp terminate:nil];
+                           });
         });
     });
 }

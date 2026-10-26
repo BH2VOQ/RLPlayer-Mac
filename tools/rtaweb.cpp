@@ -7825,6 +7825,82 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
     //      "api_key=..." 整行掩码 —— 诊断 JSON 里没有 key，但 log 理论上可能有）；
     //   ② 只挑【已知文件名】，绝不整目录打包（避免把 rlplayer-llm.conf 之类带 key
     //      的配置文件顺手塞进去）。白名单在下面 kFiles 里写死。
+    // 2026-10-26（邮件反馈通道）：把诊断包**保存到约定临时目录**，供页面随后把路径
+    // 交给原生壳作为邮件附件。
+    //
+    // 为什么需要这个端点：浏览器/WebView 里的页面**无法**直接往 $TMPDIR 写文件（沙箱），
+    // 而邮件附件必须是一个真实文件路径。所以由服务端代写。
+    //
+    // 安全（三道）：
+    //   ① 目标目录固定为 $TMPDIR/rlplayer-feedback（不接受页面指定目录）；
+    //   ② 文件名只允许 [A-Za-z0-9._-]，不接受 '/' 与 '..'；后缀强制 .zip；
+    //   ③ 失败一律返回 ok:false + 原因，不返回半成品。
+    //
+    // ⚠️ 顺序：必须排在 "/api/diag" 之前。后端用 rfind(prefix,0)==0 做前缀匹配，
+    //    "/api/diag/save" 也满足 "/api/diag" 的前缀 ⟹ 放后面就永远进不来
+    //    （"diagzip" 当年就踩过一模一样的坑，见上面 diagzip 的注释）。
+    if (rq.path.rfind("/api/diag/save", 0) == 0) {
+        ct = "application/json";
+        std::string name = "rlplayer-diag.zip";
+        // 允许 ?name=xxx.zip 指定文件名（只取 basename，且过滤危险字符）
+        const size_t qpos = rq.path.find('?');
+        if (qpos != std::string::npos) {
+            const std::string qs = rq.path.substr(qpos + 1);
+            const std::string key = "name=";
+            const size_t kp = qs.find(key);
+            if (kp != std::string::npos) {
+                std::string v = qs.substr(kp + key.size());
+                const size_t amp = v.find('&');
+                if (amp != std::string::npos) v = v.substr(0, amp);
+                // 取 basename：截掉最后一个 '/' 之前
+                const size_t sl = v.find_last_of('/');
+                if (sl != std::string::npos) v = v.substr(sl + 1);
+                if (!v.empty()) name = v;
+            }
+        }
+        // 字符白名单 + 强制 .zip 后缀
+        std::string clean;
+        for (char ch : name) {
+            const unsigned char u = (unsigned char)ch;
+            if ((u >= 'A' && u <= 'Z') || (u >= 'a' && u <= 'z') ||
+                (u >= '0' && u <= '9') || u == '.' || u == '_' || u == '-') {
+                clean.push_back(ch);
+            }
+        }
+        if (clean.empty() || clean == "." || clean == "..") clean = "rlplayer-diag.zip";
+        if (clean.size() < 4 || clean.compare(clean.size() - 4, 4, ".zip") != 0) clean += ".zip";
+        if (rq.body.empty()) return std::string("{\"ok\":false,\"error\":\"请求体为空（需要诊断包 zip 字节）\"}");
+        // 校验 ZIP 头 PK\\x03\\x04：别把兜底 JSON 当包存盘（与前端 exportDiagZip 同一判据）
+        if (rq.body.size() < 22 || (unsigned char)rq.body[0] != 0x50 ||
+            (unsigned char)rq.body[1] != 0x4B || (unsigned char)rq.body[2] != 0x03 ||
+            (unsigned char)rq.body[3] != 0x04) {
+            return std::string("{\"ok\":false,\"error\":\"不是合法 ZIP（缺少 PK 头）\"}");
+        }
+        // 目录固定为 <temp>/rlplayer-feedback，与原生壳的 rta::feedback::diagnostic_temp_root()
+        // **必须一致**（那是邮件附件校验的 root；不一致会导致附件被壳拒绝）。
+        // 这里直接用平台层 temp_dir_utf8() 拼，而不是调 rta::feedback::* ——
+        // 那些函数定义在 mac_feedback.mm（ObjC++），rtaweb 不链接它（CLI 不需要发邮件）。
+        std::string tdir = rta::platform::temp_dir_utf8();
+        if (tdir.empty()) return std::string("{\"ok\":false,\"error\":\"临时目录不可用\"}");
+        while (!tdir.empty() && tdir.back() == '/') tdir.pop_back();
+        const std::string dir = tdir + "/rlplayer-feedback";
+        ::mkdir(dir.c_str(), 0700);   // 已存在则忽略（EEXIST）
+        const std::string full = dir + "/" + clean;
+        FILE* fp = std::fopen(full.c_str(), "wb");
+        if (!fp) return std::string("{\"ok\":false,\"error\":\"无法写入临时目录\"}");
+        const size_t wn = std::fwrite(rq.body.data(), 1, rq.body.size(), fp);
+        std::fclose(fp);
+        if (wn != rq.body.size()) {
+            std::remove(full.c_str());
+            return std::string("{\"ok\":false,\"error\":\"写入不完整，已删除\"}");
+        }
+        std::string j = "{\"ok\":true,\"path\":\"";
+        j += full;
+        j += "\",\"size\":";
+        j += std::to_string((long long)wn);
+        j += "}";
+        return j;
+    }
     if (rq.path.rfind("/api/diagzip", 0) == 0) {
         ct = "application/zip";
         // 把 secret 抹掉：整行 api_key=/token=/password= 替换，再把 sk-xxx 抹成 sk-***

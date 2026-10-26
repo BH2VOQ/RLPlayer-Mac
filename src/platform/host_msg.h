@@ -21,14 +21,29 @@ enum class HostAction {
     PickDir,      // 2026-10-25：打开原生「选择文件夹」面板（用户要求可点击选目录）
     // 2026-10-26 F-4 自动更新（用户要求「云端发布更新 → 自动提示 → 客户端一键更新」）
     UpdateCheck,  // 查一次更新（异步：结果通过 update:status:* 回传页面）
-    UpdateInstall // 一键更新：下载 → 校验 sha256 → 挂载 dmg → 替换 .app → 提示重启
+    UpdateInstall,// 一键更新：下载 → 校验 sha256 → 挂载 dmg → 替换 .app → 提示重启
+    // 2026-10-26 邮件反馈通道（用户要求「客户端写反馈 → 收件人 BH2VOQ@163.com → 诊断包作附件」）
+    //
+    // ⚠️ 安全设计的核心：**收件人不在消息里**。
+    //    下面三条都是**无收件人参数**的命令 —— 收件人是 rta::feedback::kRecipient 代码常量，
+    //    页面即便被注入脚本也改不了"发给谁"。同理页面的任何输入都只能进"正文"与"诊断包路径"，
+    //    两者都在宿主侧被清洗（长度/控制字符/路径白名单），不可能是任意收件人或任意文件。
+    FeedbackCompose,    // 写反馈：body 见 HostMessage::arg，是否附诊断包见 attach_diag
+    FeedbackDiagOnly    // 只发诊断包（不写正文）：走同一套检查，正文用固定说明
 };
 
 struct HostMessage {
     HostAction action = HostAction::None;
-    std::string arg;       // Theme: "dark"/"light"/"blue"；OpenUrl: 完整 URL
+    std::string arg;       // Theme: "dark"/"light"/"blue"；OpenUrl: 完整 URL；FeedbackCompose: 反馈正文
     bool allowed = true;   // OpenUrl 专用：协议是否通过白名单
     std::string reason;    // allowed=false 时的原因（写进 launcher.log）
+
+    // ---- 2026-10-26 邮件反馈通道 ----
+    // 注意这些字段都是**页面给的原值**，尚未清洗。真正的清洗在宿主侧
+    // （rta::feedback::sanitize_body / check_attachment_path），这样纯字符串规则能被单测覆盖，
+    // 而本头文件保持"只解析、不改写"的既有定位（它现在也确实是纯解析）。
+    bool attach_diag = false;   // FeedbackCompose/FeedbackDiagOnly: 是否把诊断包作为附件
+    std::string diag_path;      // 页面侧已写好的诊断包临时文件路径（宿主会校验它在临时目录内）
 };
 
 // 外链协议白名单：只允许 http:// 与 https://（大小写不敏感）。
@@ -103,6 +118,61 @@ inline HostMessage parse_host_message(const std::string& m) {
     // **绝不接受页面传 URL** —— 否则网页侧任何脚本都能命令宿主下载任意文件。
     if (m == "update:check")   { r.action = HostAction::UpdateCheck;   return r; }
     if (m == "update:install") { r.action = HostAction::UpdateInstall; return r; }
+
+    // ---------------- 2026-10-26 邮件反馈通道 ----------------
+    // 协议形态（**收件人永远不出现** —— 那是代码常量）：
+    //   "feedback:compose"                  → 无附件，正文为空 ⟹ 宿主会拒绝并提示"请先写反馈内容"
+    //   "feedback:compose:<正文>"            → 正文是页面给的（宿主清洗：控制字符/8000 字上限）
+    //   "feedback:compose+zip:<正文>"        → 同样是正文，但**声明**要附诊断包；
+    //                                         诊断包路径由后面的 "|diag:<路径>" 段单独给
+    //   "feedback:diagonly"                 → 只发诊断包
+    //   "feedback:diagonly|diag:<路径>"      → 只发诊断包 + 指定路径
+    //
+    // 为什么把"附诊断包"和"路径"拆成两段：路径里可能含任何字符（含 '|' 之外的冒号、
+    // 空格、中文），如果和正文挤在一个冒号分隔里就没法可靠切分。
+    // 分段规则：第一个 ':' 之后到 "|diag:" 之前 = 正文；"|diag:" 之后到结尾 = 路径。
+    //
+    // ⚠️ 这里**不做**任何"这看起来像不像合法正文"的判断 —— 那是宿主/纯逻辑层的事。
+    //    本函数只负责把两段原值取出来；若页面没按格式写，取出来的就是空串/None，
+    //    宿主侧 sanitize_body 会把它判成"空反馈"并拒绝发信（不会静默发一封空邮件）。
+    if (m.rfind("feedback:", 0) == 0) {
+        std::string rest = m.substr(9);          // "compose" / "compose:..." / "diagonly..."
+        // 先切出可选的 "|diag:<path>" 尾巴
+        std::string diag;
+        const std::string dtag = "|diag:";
+        const std::size_t dpos = rest.find(dtag);
+        if (dpos != std::string::npos) {
+            diag = rest.substr(dpos + dtag.size());
+            rest = rest.substr(0, dpos);
+            r.diag_path = diag;
+            r.attach_diag = true;
+        }
+        if (rest == "diagonly") {
+            r.action = HostAction::FeedbackDiagOnly;
+            r.attach_diag = true;                // 这条命令的语义就是"必须带诊断包"
+            return r;
+        }
+        if (rest == "compose" || rest == "compose+zip") {
+            r.action = HostAction::FeedbackCompose;
+            if (rest == "compose+zip") r.attach_diag = true;
+            return r;
+        }
+        if (rest.rfind("compose:", 0) == 0) {
+            r.action = HostAction::FeedbackCompose;
+            r.arg = rest.substr(8);              // 正文原值（未清洗）
+            return r;
+        }
+        if (rest.rfind("compose+zip:", 0) == 0) {
+            r.action = HostAction::FeedbackCompose;
+            r.arg = rest.substr(12);
+            r.attach_diag = true;
+            return r;
+        }
+        // 形态不认识 ⟹ 不动作（留 reason 进日志），绝不"猜一个"发出去
+        r.action = HostAction::None;
+        r.reason = "unknown feedback command";
+        return r;
+    }
     return r;
 }
 

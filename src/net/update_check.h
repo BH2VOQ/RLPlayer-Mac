@@ -14,7 +14,7 @@
 // ============================ 安全边界（用户硬要求）============================
 //   * 本文件**不含任何 token 字面量**，也不做鉴权 —— token 只从 .app 外的
 //     update.conf 读进原生壳，作为 HTTP 头一次性使用，绝不进日志/错误信息/UI 文案。
-//   * 下载 URL 必须 https 且主机**精确等于** gitea.felisidus.com（见
+//   * 下载 URL 必须 https 且主机**精确等于**白名单之一（见
 //     update_download_url_allowed：拒绝 http、拒绝别的域、拒绝 user@host、拒绝端口变体）。
 #pragma once
 
@@ -35,31 +35,47 @@ namespace rta::update {
 // ---------------------------------------------------------------------------
 // 0. 常量（唯一真相源）
 // ---------------------------------------------------------------------------
+// 2026-10-26（用户决定）：**通道从 Gitea 整体迁到 GitHub**，仓库 BH2VOQ/RLPlayer-Mac（公开）。
+//   迁移原因：Gitea 私有仓库的 release 附件对 token 全线 403（见下方历史注释），
+//   且匿名建 issue 不可用；GitHub 公开仓库的三条通道都能走通。
+//
+// 三条通道（本文件只用第 1 条；2/3 见 diag_feedback.h）：
+//   ① 更新清单  raw.githubusercontent.com 匿名读（实测 200，**客户端零 token**）
+//   ② 诊断上传  需 token（匿名建 issue 实测 401）
+//   ③ 用户反馈  需 token（同上）
+//
 // 默认「公开更新清单」地址：**匿名可读**，客户端不需要任何 token。
-// 对应的 Gitea 公开仓库由用户创建（见 docs/update/README.md 的落地步骤）；
-// 在没有该仓库时这里会得到 HTTP 404 ⟹ 明确报「检查失败」，**不会**谎报「已是最新」。
+//   ⚠️ 用 raw.githubusercontent.com 而不是 api.github.com：
+//      · 走 raw 不需要 token，也不吃 API 速率限制（匿名 API 只有 60 次/小时/IP）；
+//      · 实测 200 + 正确 JSON。
 inline constexpr const char kDefaultManifestUrl[] =
-    "https://gitea.felisidus.com/August/RLPlayer-update/raw/branch/main/latest.json";
+    "https://raw.githubusercontent.com/BH2VOQ/RLPlayer-Mac/main/latest.json";
 
 // 下载与取清单**唯一允许**的主机（精确匹配，不含端口）。
-inline constexpr const char kAllowedHost[] = "gitea.felisidus.com";
+// 更新这条时**必须同步** update_download_url_allowed() 里的注释与测试用例：
+// 白名单是防止"清单被篡改后变成任意地址下载"的最后一道闸门。
+inline constexpr const char kAllowedHost[] = "raw.githubusercontent.com";
 
-// 私有仓库路径用的 releases API（只有配置了只读 token 才会走）。
+// 允许的**第二**个下载主机：release 附件真正的下载域名。
+//   dmg 体积大，放 release assets 比放仓库文件合适（仓库文件每次改动都会进 git 历史）。
+//   GitHub 的 release 下载链接 302 到 objects.githubusercontent.com，
+//   但**清单里写的是** github.com/...（重定向由 curl/NSURLSession 自己跟随），
+//   所以白名单只需要放行 github.com。
+inline constexpr const char kAllowedDownloadHost[] = "github.com";
+
+// 仓库标识（拼 API 路径用）
+inline constexpr const char kRepoOwner[] = "BH2VOQ";
+inline constexpr const char kRepoName[] = "RLPlayer-Mac";
+inline constexpr const char kRepoBranch[] = "main";
+
+// releases API（诊断/反馈上传走 issue，不走这里；保留给"从 release 读清单"的备选路径）
 inline constexpr const char kReleasesApiUrl[] =
-    "https://gitea.felisidus.com/api/v1/repos/August/RLPlayer/releases";
+    "https://api.github.com/repos/BH2VOQ/RLPlayer-Mac/releases";
 
-// 私有仓库的 **raw 文件** 前缀。
-// 为什么不用 releases 附件的 browser_download_url：2026-10-26 在 gitea 1.27.3 私有仓库上
-// **实测**，附件下载链路对 token 全线 403（5 种鉴权方式全试过）：
-//   /releases/download/<tag>/<file>        → 403
-//   /attachments/<uuid>                    → 403
-//   /api/v1/.../releases/<id>/assets/<aid> → 200 但只返回 JSON 元数据，不返回字节
-// 而 raw 文件路径对 token 正常：
-//   /api/v1/repos/<o>/<r>/raw/<path>?ref=<branch>  → 200 + 真实字节（实测 94869 字节 PNG）
-// 匿名访问 raw 路径 → 404（所以私有性没被破坏）。
-// 结论：私有路径把 dmg 放在**仓库文件**里，用 raw 端点下载。
-inline constexpr const char kPrivateRawPrefix[] =
-    "https://gitea.felisidus.com/api/v1/repos/August/RLPlayer/raw/";
+// 说明：旧版有一个 kPrivateRawPrefix = "https://api.github.com/repos/.../contents/"，
+// 用于拼相对路径下载地址。**已删除** —— api.github.com 不在白名单里（白名单只放行
+// raw.githubusercontent.com 与 github.com），用它拼出来的地址必然被拒。
+// 相对路径现在按 raw.githubusercontent.com/<owner>/<repo>/<ref>/<path> 拼（见上）。
 
 // 清单文件名（作为 release 附件时也用这个名字）。
 inline constexpr const char kManifestAssetName[] = "latest.json";
@@ -369,9 +385,8 @@ inline bool is_hex64(const std::string& s) {
 //
 // 规则（全部满足才放行）：
 //   ① 必须以 "https://" 开头（大小写不敏感）—— http / file / data 一律拒绝
-//   ② host 部分（到第一个 '/' 为止）**精确等于** gitea.felisidus.com
-//       ⟹ 天然拒绝 gitea.felisidus.com.evil.com / evilgitea.felisidus.com /
-//          gitea.felisidus.com:8080 / user@gitea.felisidus.com
+//   ② host 部分（到第一个 '/' 为止）必须**精确等于** kAllowedHost 或 kAllowedDownloadHost
+//       ⟹ 天然拒绝 github.com.evil.com / evilgithub.com / github.com:8080 / user@github.com
 //   ③ 必须有非空路径，且不得含空白与换行（防注入/请求拆分）
 //   ④ 长度上限 4096
 // ---------------------------------------------------------------------------
@@ -391,13 +406,25 @@ inline bool update_download_url_allowed(const std::string& url) {
     const size_t slash = rest.find('/');
     if (slash == std::string::npos || slash == 0) return false;      // 必须有主机名 + 路径
     const std::string host = detail::lower(rest.substr(0, slash));
-    if (host != kAllowedHost) return false;                          // ← 精确主机（②）
+    // ← 精确主机（②）。两个主机都要放行，但**都在编译期写死**，不接受运行时来源：
+    //   · raw.githubusercontent.com = 清单文件（匿名读，不吃 API 速率限制）
+    //   · github.com               = release 附件下载（dmg 走这里，体积大不进 git 历史）
+    // 注意：GitHub 的 release 下载会 302 到 objects.githubusercontent.com，
+    // 但**清单里写的是 github.com**，重定向由 NSURLSession 自己跟随，
+    // 所以白名单只需要放行起始地址，不必把 objects.* 也加进来。
+    if (host != kAllowedHost && host != kAllowedDownloadHost) return false;
     if (slash + 1 >= rest.size()) return false;                      // ③ 路径非空
     return true;
 }
 
-// 私有路径专用：把清单里的相对路径拼成 raw 绝对 URL，并过白名单。
+// 把清单里的相对路径拼成 raw 绝对 URL，并过白名单。
 // 清单里给的若是 "path/to/RLPlayer.dmg"（相对），就走这里；给绝对 https URL 则原样用。
+//
+// 2026-10-26 迁到 GitHub 时的行为变化（实测过）：
+//   GitHub 的 raw **相对路径**要用 raw.githubusercontent.com/<owner>/<repo>/<ref>/<path>，
+//   ref 是**路径段**而不是查询参数 —— 这一点和 Gitea 的 ?ref= 不同。
+//   旧实现拼的是 api.github.com/.../contents/<path>?ref=...，那个域名不在白名单里，
+//   结果就是相对路径永远返回空串（本次测试 3 条红正是这个原因，不是断言写错了）。
 inline std::string resolve_private_download_url(const std::string& manifestValue,
                                                const std::string& ref) {
     if (manifestValue.empty()) return "";
@@ -405,13 +432,18 @@ inline std::string resolve_private_download_url(const std::string& manifestValue
     if (manifestValue.size() > 8 && manifestValue.compare(0, 8, "https://") == 0) {
         return update_download_url_allowed(manifestValue) ? manifestValue : std::string();
     }
-    // 相对路径：拼到 raw 前缀上（去掉前导 '/'）
+    // 相对路径：去掉前导 '/'，拼成 raw.githubusercontent.com/<owner>/<repo>/<ref>/<path>
     std::string rel = manifestValue;
     while (!rel.empty() && rel.front() == '/') rel.erase(rel.begin());
     if (rel.empty()) return "";
-    std::string url = kPrivateRawPrefix;
+    std::string url = "https://raw.githubusercontent.com/";
+    url += kRepoOwner;
+    url += '/';
+    url += kRepoName;
+    url += '/';
+    url += ref.empty() ? kRepoBranch : ref;
+    url += '/';
     url += rel;
-    if (!ref.empty()) url += "?ref=" + ref;
     return update_download_url_allowed(url) ? url : std::string();
 }
 
@@ -422,7 +454,7 @@ inline std::string resolve_private_download_url(const std::string& manifestValue
 // 格式（唯一格式；私有仓库把它作为 release 附件 `latest.json` 上传，公开仓库直接当文件放）：
 //   {
 //     "version":      "1.0.5",                    // 必填，允许 "v" 前缀
-//     "download_url": "https://gitea.felisidus.com/.../RLPlayer-1.0.5.dmg",  // 必填，过白名单
+//     "download_url": "https://github.com/.../RLPlayer-1.0.5.dmg",  // 必填，过白名单
 //     "sha256":       "<64 位 hex>",               // 必填，dmg 的 sha256
 //     "size":         7139420,                     // 选填；>0 时下载后必须一致
 //     "notes":        "更新说明（纯文本）"           // 选填
@@ -478,7 +510,7 @@ inline Manifest parse_update_manifest(const std::string& json) {
         m.downloadUrl = url;
         m.downloadUrlIsRelative = true;
     } else {
-        m.error = "清单 download_url 不在白名单（必须是 https://gitea.felisidus.com/ 或安全的仓库内相对路径）";
+        m.error = "清单 download_url 不在白名单（必须是 https://raw.githubusercontent.com/ 或 https://github.com/，或安全的仓库内相对路径）";
         return m;
     }
 
@@ -779,7 +811,7 @@ inline Config parse_update_config(const std::string& text) {
                     } else {
                         c.manifestUrlValid = false;
                         c.manifestUrl = v;
-                        c.warning = "update.conf: manifest_url 不在白名单（必须 https://gitea.felisidus.com/）";
+                        c.warning = "update.conf: manifest_url 不在白名单（必须 https://raw.githubusercontent.com/）";
                     }
                 }
             }
@@ -802,7 +834,7 @@ inline std::string default_update_conf_template() {
     s += "#        ⚠️ 绝不要填有写权限的 token；本文件一旦泄露等于泄露该 token。\n";
     s += "token=\n";
     s += "#\n";
-    s += "# manifest_url：公开更新清单地址（必须 https://gitea.felisidus.com/ 前缀）\n";
+    s += "# manifest_url：公开更新清单地址（必须 https://raw.githubusercontent.com/ 前缀）\n";
     s += "manifest_url=";
     s += kDefaultManifestUrl;
     s += "\n";

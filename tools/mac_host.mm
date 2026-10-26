@@ -82,17 +82,28 @@ struct CheckResult {
 }
 #endif
 
+// 邮件反馈通道原生层（tools/mac_feedback.mm）。同样用**构建宏**门控而不是 __has_include：
+// tests/test_mac_transport.mm 以 #include "../tools/mac_host.mm" 复用本文件，它的 include
+// 路径里也有 tools/ ⟹ __has_include 会命中，但链接期没有 mac_feedback.o。
+// 现在只在 CMake 给目标定义 RL_WITH_FEEDBACK 时才启用真实现。
+#if defined(RL_WITH_FEEDBACK) && __has_include("mac_feedback.h")
+#define RL_HAVE_MAC_FEEDBACK 1
+#include "mac_feedback.h"
+#endif
+
 #if __has_include("platform/host_msg.h")
 #include "platform/host_msg.h"
 #else
 namespace rta::platform {
 enum class HostAction { None, Minimize, Maximize, Close, Drag, Theme, OpenUrl, Resize, PickDir,
-                        UpdateCheck, UpdateInstall };
+                        UpdateCheck, UpdateInstall, FeedbackCompose, FeedbackDiagOnly };
 struct HostMessage {
     HostAction action = HostAction::None;
     std::string arg;
     bool allowed = true;
     std::string reason;
+    bool attach_diag = false;   // 2026-10-26 邮件反馈：是否附诊断包
+    std::string diag_path;      // 页面给的诊断包临时路径（宿主会校验）
 };
 inline bool external_url_allowed(const std::string& url) {
     if (url.empty() || url.size() > 4096) return false;
@@ -139,6 +150,30 @@ inline HostMessage parse_host_message(const std::string& m) {
     if (m.rfind("pickdir:", 0) == 0) {
         r.action = HostAction::PickDir;
         r.arg = m.substr(8);
+        return r;
+    }
+    // 2026-10-26 邮件反馈（与 src/platform/host_msg.h 保持同步；收件人永远是代码常量，
+    // 协议里**没有**收件人字段）。回退版只做最基本的形态切分，清洗仍在 rta::feedback 里。
+    if (m.rfind("feedback:", 0) == 0) {
+        std::string rest = m.substr(9);
+        const std::string dtag = "|diag:";
+        const std::size_t dpos = rest.find(dtag);
+        if (dpos != std::string::npos) {
+            r.diag_path = rest.substr(dpos + dtag.size());
+            rest = rest.substr(0, dpos);
+            r.attach_diag = true;
+        }
+        if (rest == "diagonly") { r.action = HostAction::FeedbackDiagOnly; r.attach_diag = true; return r; }
+        if (rest == "compose")  { r.action = HostAction::FeedbackCompose; return r; }
+        if (rest == "compose+zip") { r.action = HostAction::FeedbackCompose; r.attach_diag = true; return r; }
+        if (rest.rfind("compose+zip:", 0) == 0) {
+            r.action = HostAction::FeedbackCompose; r.arg = rest.substr(12); r.attach_diag = true; return r;
+        }
+        if (rest.rfind("compose:", 0) == 0) {
+            r.action = HostAction::FeedbackCompose; r.arg = rest.substr(8); return r;
+        }
+        r.action = HostAction::None;
+        r.reason = "unknown feedback command";
         return r;
     }
     return r;
@@ -908,10 +943,122 @@ static NSString *const kShim = @
 #endif
             break;
         }
+        // ---------------- 2026-10-26 邮件反馈通道 ----------------
+        // 设计取舍（与 F-4 更新同思路）：这里**不做**任何"这内容合不合法"的判断，
+        // 全部交给纯逻辑层 rta::feedback（有离线单测）。壳层写错最多"发不出去"，
+        // 不会变成"发到错误的人"或"带上任意文件"。
+        //
+        // 三道硬闸门（缺任何一条都不发信）：
+        //   ① 正文清洗后不能为空（用户没写正文 → 拒绝，并明确提示）；
+        //   ② 附诊断包时，路径必须过 check_attachment_path（在临时目录内 + .zip）+ 文件系统核验；
+        //   ③ 收件人只能是 rta::feedback::kRecipient（这里是唯一取值处，页面无从干预）。
+        case HostAction::FeedbackCompose:
+        case HostAction::FeedbackDiagOnly: {
+#ifdef RL_HAVE_MAC_FEEDBACK
+            [self handleFeedbackMessage:hm];
+#else
+            [self emitToPage:@"feedback:status:{\"stage\":\"failed\",\"code\":\"unsupported\","
+                             "\"message\":\"\u672c\u6784\u5efa\u672a\u542f\u7528\u53cd\u9988\u90ae\u4ef6\u6a21\u5757\"}"];
+#endif
+            break;
+        }
         case HostAction::None:
             break;
     }
 }
+
+// ---------------- 2026-10-26 邮件反馈通道：宿主侧执行 ----------------
+// 回传协议（页面侧 JSON.parse，命名与 update:status:* 对齐）：
+//   feedback:status:{"stage":"...","code":"...","message":"..."}
+//   stage ∈ rejected（被闸门拦下）/ compose-opened（撰写窗口已开）/ fellback（.eml 兜底）/ failed
+#ifdef RL_HAVE_MAC_FEEDBACK
+- (void)handleFeedbackMessage:(const rta::platform::HostMessage &)hm {
+    namespace fb = rta::feedback;
+
+    // ---- ① 正文 ----
+    std::string raw_body = hm.arg;
+    if (hm.action == rta::platform::HostAction::FeedbackDiagOnly) {
+        // 「只上传诊断不写反馈」：给一段固定说明，别让收件人收到一封空邮件。
+        raw_body = "（用户选择只发送诊断包，未填写反馈正文。）";
+    }
+    const fb::BodyResult body = fb::sanitize_body(raw_body);
+    if (body.empty_after_clean) {
+        [self emitFeedbackJson:@{ @"stage": @"rejected",
+                                  @"code": @"empty-body",
+                                  @"message": @"请先写下反馈内容再发送（空邮件不发送）" }];
+        return;
+    }
+
+    // ---- ② 诊断包（可选）----
+    std::string diag_data, diag_name, diag_err, diag_norm;
+    std::vector<std::string> attach_paths;
+    if (hm.attach_diag) {
+        // 「必须带诊断包」的两条命令（DiagOnly / compose+zip）在这里就把路径卡死
+        if (hm.diag_path.empty()) {
+            [self emitFeedbackJson:@{ @"stage": @"rejected",
+                                      @"code": @"no-diag-path",
+                                      @"message": @"缺少诊断包路径：请先在页面生成诊断包"
+                                                  "（诊断包会存到临时目录再交给邮件）" }];
+            return;
+        }
+        if (!fb::load_diagnostic(hm.diag_path, diag_data, diag_name, diag_err, &diag_norm)) {
+            // 诊断包不可用是**可降级**的：告诉用户"附件没带上"，让他选择是否只发正文。
+            [self emitFeedbackJson:@{ @"stage": @"rejected",
+                                      @"code": @"bad-diag",
+                                      @"message": @"诊断包不可用，已取消发送",
+                                      @"detail": [NSString stringWithUTF8String:diag_err.c_str()] ?: @"" }];
+            return;
+        }
+        // 用 **load_diagnostic 校验通过的规范化路径**（不是页面原值）：
+        // 页面给的是 "…/sub/../diag.zip" 这种也认，但交给邮件客户端的一定是消过 "../" 的形式。
+        attach_paths.push_back(diag_norm);
+    }
+
+    // ---- ③ 主题：版本 + 系统信息（页面无法干预格式）----
+    const std::string subject = fb::build_subject(fb::system_meta());
+
+    // ---- ④ 组装提示文字（正文末尾追加截断/清洗说明，让用户知道发生了什么）----
+    std::string body_final = body.text;
+    std::string warning;
+    if (body.truncated) {
+        warning += "\n\n—— 反馈内容超过 " + std::to_string(fb::kMaxBodyChars) +
+                   " 字，已截断（省略 " + std::to_string(body.dropped_chars) + " 字）。";
+    }
+    if (!warning.empty()) body_final += warning;
+
+    // ---- ⑤ 交给原生层（只打开撰写窗口，绝不由代码发送）----
+    const fb::ComposeResult cr = fb::open_compose_window(subject, body_final, attach_paths);
+
+    NSMutableDictionary *d = [NSMutableDictionary dictionary];
+    switch (cr.outcome) {
+        case fb::ComposeOutcome::Opened:        d[@"stage"] = @"compose-opened"; break;
+        case fb::ComposeOutcome::FellBackToEml: d[@"stage"] = @"fellback";       break;
+        case fb::ComposeOutcome::Failed:        d[@"stage"] = @"failed";         break;
+    }
+    d[@"code"] = @"ok";
+    d[@"message"] = [NSString stringWithUTF8String:cr.detail.c_str()] ?: @"";
+    d[@"to"] = [NSString stringWithUTF8String:fb::kRecipient];
+    d[@"truncated"] = @(body.truncated);
+    d[@"droppedChars"] = @((double)body.dropped_chars);
+    d[@"controlChars"] = @((double)body.control_chars);
+    d[@"attachment"] = hm.attach_diag ? [NSString stringWithUTF8String:diag_name.c_str()] : @"";
+    d[@"recipientPreset"] = @(cr.recipient_preset);
+    d[@"subjectPreset"] = @(cr.subject_preset);
+    if (!cr.eml_path.empty()) d[@"emlPath"] = [NSString stringWithUTF8String:cr.eml_path.c_str()];
+    [self emitFeedbackJson:d];
+}
+
+- (void)emitFeedbackJson:(NSDictionary *)dict {
+    if (!dict) return;
+    NSData *d = [NSJSONSerialization dataWithJSONObject:dict options:0 error:nil];
+    if (!d) return;
+    NSString *json = [[NSString alloc] initWithData:d encoding:NSUTF8StringEncoding];
+    if (!json) return;
+    dispatch_async(dispatch_get_main_queue(), ^{
+        [self emitToPage:[@"feedback:status:" stringByAppendingString:json]];
+    });
+}
+#endif
 
 // 宿主 → UI：max/normal 在窗口尺寸变化时发（PLATFORM.md §10.2）
 //
