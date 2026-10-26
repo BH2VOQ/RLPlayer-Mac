@@ -1,0 +1,88 @@
+# ============================================================
+# RLPlayer .gitignore
+# 原则：只提交【源码 + 文档 + 资源】；产物/隐私/密钥/第三方专有软件一律不进仓库
+# ============================================================
+
+# ---------- 1. 密钥（最重要：泄露即等于把 key 公开）----------
+rlplayer-llm.conf
+**/rlplayer-llm.conf
+*.key
+*.pem
+.env
+# 本地运行配置（含曲库路径 / 设备名，属于本机状态）
+rlplayer-settings.conf
+rlplayer-library.conf
+rta-*.conf
+
+# ---------- 2. 构建产物 ----------
+/build/
+/build-mac/
+/build-*/
+/buildwebview2/
+/dist/
+/out/
+*.obj
+*.o
+*.lib
+*.exp
+*.pdb
+*.ilk
+*.exe
+*.dll
+# macOS 动态库构建产物（2026-10-25 Apple Metal GPU 后端）
+#   librtagpu.dylib 由 tools/build_gpu_metal_mac.sh 从 src/gpu/gpu_metal.mm 现场构建，
+#   不进版本库（与 *.dll 同理：二进制不进仓库）。正式发布包由出包脚本内置它。
+*.dylib
+# CUDA 构建产物
+*.cubin
+*.fatbin
+*.ptx
+*.log
+# ⚠️ 例外：third_party 里的【分发性】构建依赖必须进仓库
+#   WebView2Loader.dll 是 Microsoft WebView2 SDK 自带的可再分发组件，链接期必需。
+#   （2026-10-22 教训：最初 *.dll 把它一起挡了，CI 在云机上构建失败
+#     "Error copying file ... WebView2Loader.dll: No such file or directory"）
+!/third_party/**/*.dll
+
+# CUDA 后端二进制（由协作者在 NVIDIA 机器上构建后交回；铁律 6：正式版自包含需要它）
+!/cuda-artifacts/
+!/cuda-artifacts/*.dll
+*.log.*
+CMakeCache.txt
+CMakeFiles/
+.ninja_deps
+.ninja_log
+build.ninja
+compile_commands.json
+
+# ---------- 3. 用户数据 / 隐私 ----------
+/MUSIC/
+/rlplayer-meta/
+/rta-index.tsv
+/rlplayer-index.tsv
+/profiles/
+/反馈和开发/
+/dumps/
+
+# ---------- 4. 第三方【专有软件】，不进仓库（版权/许可原因）----------
+/Tool/
+/research/naa/
+/research/strings/
+/research/strings-*.txt
+RLPlayer*.exe
+/research/manual.txt
+
+# ---------- 5. 编辑器 / 工具缓存 ----------
+/.zcode/
+/.vs/
+/.vscode/
+*.user
+*.suo
+Thumbs.db
+desktop.ini
+docs/shots-ui03/
+%SystemDrive%/
+*SystemDrive*
+# macOS 产物目录（RLPlayer.app 为 make_app_mac.sh 生成物）
+dist-mac/
+.DS_Store
