@@ -77,6 +77,16 @@ function pickDirectory(initial, onDone) {
     // max/normal 等其它消息沿用既有处理（如果有）
     if (m === 'max' || m === 'normal') {
       try { document.documentElement.classList.toggle('zoommax', m === 'max'); } catch (e) { }
+      return;
+    }
+    // 2026-10-26 邮件反馈：宿主回传 "feedback:status:<JSON>"（与 update:status 同一套通道）。
+    // 同样只做一次 JSON.parse，绝不自己切字符串。
+    if (m.indexOf('feedback:status:') === 0) {
+      var fpayload = m.slice('feedback:status:'.length);
+      var fobj = null;
+      try { fobj = JSON.parse(fpayload); } catch (e) { return; }
+      if (fobj) onFeedbackStatus(fobj);
+      return;
     }
   }
   // ⚠️ 不要覆盖 WV.__emit —— 那是宿主垫片自己的派发器，覆盖会让既有的
@@ -385,6 +395,170 @@ function bindUpdateCard() {
     // 点徽标 = 直接去「诊断」页看更新卡片（不静默装，装之前要让用户看见版本号与说明）
     try { openSettingsTab('diag'); } catch (e) { }
   };
+}
+
+// ============================================================================
+// 2026-10-26 反馈通道（用户：点了按钮完全没反应 → 改走 Cloudflare Worker）
+//
+// 演进过程（如实记录，避免后来者重复踩坑）：
+//   ① 最初设计 = 打开系统邮件客户端（NSSharingServiceNameComposeEmail），
+//      用户在自己已登录的邮箱里点发送。理由是不在二进制里存任何凭据。
+//      但实测暴露两个致命问题：
+//        · 页面侧**一行都没接**（#sp_fbsend 没有 onclick，feedback:status 没有接收分支）
+//          ⟹ 用户点按钮完全没反应。这是"壳侧写完 ≠ 能用"的典型。
+//        · 即使接上了，本机 Mail.app 没有可用账号时 performWithItems 仍回传"已打开"，
+//          用户点「发送」发不出去 ⟹ **谎报成功**（违反铁律 3）。
+//   ② 用户决定（2026-10-26）：**别折腾邮箱了，走 Cloudflare Worker**。
+//      「用户什么都不用调，直接就能发给我」才是对的体验。
+//
+// 现在的架构（零凭据、零配置、零用户操作）：
+//
+//   页面  ──POST JSON──▶  Cloudflare Worker  ──GitHub API──▶  Issue / 私有仓库
+//                              （token 只在 Worker 环境变量里，客户端永远拿不到）
+//
+//   * 客户端**不含任何 token**：Worker URL 是公开的，被反编译也无所谓
+//   * DDoS：Cloudflare 免费套餐自带，源站不暴露（用户明确担心这个）
+//   * 诊断包：Worker 负责转存（>64KB 不进 issue body）
+//
+// 协议（见 worker/feedback-worker.js）：
+//   POST <WORKER_URL>
+//   Content-Type: application/json
+//   { "text": "正文", "version": "1.0.7", "os": "macOS 27.0.1 / arm64",
+//     "diag": "<base64 可选，诊断包 zip>" }
+//   → 200 {"ok":true,"id":"<工单号>"}
+//   → 4xx {"ok":false,"error":"原因"}
+//
+// ⚠️ WORKER_URL 留空 = 功能未启用，页面会如实说"反馈通道未配置"，绝不假装发送成功。
+//    部署 Worker 后把地址填到这里（或由宿主注入）即可。
+// ============================================================================
+var FB = { busy: false, diagPath: '' };
+
+// Worker 地址（部署后填入；留空则明确报未配置，不假装成功）
+var FB_WORKER_URL = '';
+
+function fbMsg(t, kind) {
+  var el = D('sp_fbmsg');
+  if (!el) return;
+  el.textContent = t || '';
+  el.style.color = kind === 'err' ? 'var(--danger)'
+                 : kind === 'ok' ? 'var(--ok-text)'
+                 : kind === 'warn' ? 'var(--warn)' : 'var(--mut2)';
+}
+function fbBusy(on) {
+  FB.busy = !!on;
+  var btn = D('sp_fbsend');
+  if (btn) { btn.disabled = !!on; btn.textContent = on ? '正在发送…' : '发送反馈'; }
+}
+function fbCount() {
+  var t = D('sp_fbtext'), c = D('sp_fbcount');
+  if (!t || !c) return;
+  var n = t.value ? t.value.length : 0;
+  c.textContent = n + ' / 8000';
+  // 超长要立刻让用户看见（Worker 也会截断，但提前告知比事后解释好）
+  c.style.color = n > 8000 ? 'var(--warn)' : 'var(--mut2)';
+}
+
+// 宿主回传入口保留（旧邮件路径的兼容分支；Worker 路径不经过这里）
+function onFeedbackStatus(obj) {
+  if (!obj || typeof obj !== 'object') return;
+  fbBusy(false);
+  fbMsg(String(obj.message || obj.stage || '未知状态'), obj.stage === 'failed' ? 'err' : 'ok');
+}
+
+// ArrayBuffer → base64（诊断包要放进 JSON）
+function fbBase64(buf) {
+  var bytes = new Uint8Array(buf);
+  var bin = '';
+  var CHUNK = 0x8000;                    // 分块，避免 apply 参数过多爆栈
+  for (var i = 0; i < bytes.length; i += CHUNK) {
+    bin += String.fromCharCode.apply(null, bytes.subarray(i, i + CHUNK));
+  }
+  return btoa(bin);
+}
+
+// 发送主流程：POST 到 Cloudflare Worker。任何失败都如实显示，绝不假装"已发送"。
+function fbSend() {
+  if (FB.busy) return false;
+  var t = D('sp_fbtext');
+  var text = t ? String(t.value || '') : '';
+  if (!text.trim()) { fbMsg('请先写下反馈内容再发送', 'err'); if (t) t.focus(); return false; }
+  if (!FB_WORKER_URL) {
+    fbMsg('反馈通道未配置（开发者尚未部署 Worker 地址）', 'err');
+    return false;
+  }
+  var wantDiag = false;
+  var cb = D('sp_fbdiag');
+  if (cb) wantDiag = !!cb.checked;
+
+  fbBusy(true);
+
+  var payload = {
+    text: text,
+    version: (D('appVer') && D('appVer').textContent) ? D('appVer').textContent : '',
+    os: (navigator && navigator.userAgent) ? navigator.userAgent : ''
+  };
+
+  var withDiag = function () {
+    if (!wantDiag) return Promise.resolve(payload);
+    fbMsg('正在打包诊断包…');
+    return fetch('/api/diagzip').then(function (r) {
+      if (!r.ok) throw new Error('打包失败 HTTP ' + r.status);
+      return r.blob();
+    }).then(function (blob) {
+      if (blob.size < 22) throw new Error('诊断包太小（不是有效 ZIP）');
+      return blob.arrayBuffer();
+    }).then(function (buf) {
+      var v = new Uint8Array(buf, 0, 4);
+      if (!(v[0] === 0x50 && v[1] === 0x4B && v[2] === 0x03 && v[3] === 0x04)) {
+        throw new Error('诊断包不是合法 ZIP（缺少 PK 头）');
+      }
+      fbMsg('正在上传（' + Math.round(buf.byteLength / 1024) + ' KB）…');
+      payload.diag = fbBase64(buf);
+      payload.diagName = 'rlplayer-diag.zip';
+      return payload;
+    });
+  };
+
+  withDiag().then(function (body) {
+    fbMsg('正在发送…');
+    return fetch(FB_WORKER_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body)
+    });
+  }).then(function (r) {
+    // 200 也可能带 ok:false，所以必须读 body 确认
+    return r.text().then(function (txt) {
+      var j = null;
+      try { j = JSON.parse(txt); } catch (e) { }
+      if (!j) throw new Error('服务器返回非 JSON（HTTP ' + r.status + '）');
+      if (!j.ok) throw new Error(j.error || ('服务器拒绝（HTTP ' + r.status + '）'));
+      return j;
+    });
+  }).then(function (j) {
+    fbBusy(false);
+    fbMsg('已发送，工单号 ' + (j.id || '(无)') + '。感谢反馈！', 'ok');
+    if (t) t.value = '';
+    fbCount();
+  }).catch(function (e) {
+    fbBusy(false);
+    var m = (e && e.message) ? e.message : String(e);
+    // 诊断包过大时给出可操作建议（而不是只说失败）
+    var hint = (m.indexOf('过大') >= 0 || m.indexOf('413') >= 0)
+      ? '（可取消勾选「附带诊断包」只发正文）' : '';
+    fbMsg('发送失败：' + m + hint, 'err');
+  });
+  return true;
+}
+
+function bindFeedbackCard() {
+  var btn = D('sp_fbsend');
+  if (btn) btn.onclick = function () { fbSend(); };
+  var t = D('sp_fbtext');
+  if (t) {
+    t.oninput = fbCount;
+    fbCount();
+  }
 }
 
 // 261024-02 #3：长时长格式（专辑总时长用 1:05:24，单曲用 4:24；都用本地曲库真实数据，不用 AI 猜）
@@ -6181,7 +6355,7 @@ function renderSettingsPage() {
      //     ③ 邮件天然支持大附件，且**零凭据**（走系统邮件客户端，不在代码里存任何密码）。
      //   实现：页面收集正文 → postMessage 给原生壳 → 壳生成 .eml（含 zip 附件）→ 打开系统邮件客户端。
      //   收件人写死在壳侧常量（BH2VOQ@163.com），页面不能指定。
-     + sgroup('反馈问题', '写成邮件发给开发者，可附诊断包',
+     + sgroup('反馈问题', '直接发送给开发者，可附诊断包',
          '<div class="sfld wide"><label>问题描述' +
            tip('写清楚「做了什么 / 期望什么 / 实际什么」最有帮助') + '</label>'
        + '<textarea id=sp_fbtext rows=5 spellcheck=false placeholder="简单描述你遇到的问题…（例如：播放 DSD 文件时切歌会卡住 1 秒）" '
@@ -6190,10 +6364,10 @@ function renderSettingsPage() {
        + '<div class="sfld wide" style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-top:4px">'
        + '<label class=chk style="margin-right:2px"><input type=checkbox id=sp_fbdiag checked>'
        + '<span>附带诊断包</span>' + tip('打包日志 / 系统信息 / 设置摘要（token、密码等已脱敏为 ***）。不建议关闭 —— 没有日志很难定位问题') + '</label>'
-       + '<button class="btn pri" id=sp_fbsend>发邮件反馈</button>'
+       + '<button class="btn pri" id=sp_fbsend>发送反馈</button>'
        + '<span id=sp_fbmsg style="font-size:11.5px;color:var(--mut2)"></span></div>'
-       + '<div class=hint>会在你的邮件客户端里打开一封**已填好收件人、主题与附件**的草稿，你确认后点发送即可。'
-       + '程序不会自己偷偷发信，也不保存任何邮箱密码。</div>')
+       + '<div class=hint>点「发送反馈」会直接把内容上传给开发者，**不需要配置邮箱、不需要注册账号**。'
+       + '诊断包已脱敏（token / 密码一律替换为 ***），不会上传你的音乐文件。</div>')
      + '</div>';
 
   // ---------- 元数据补全（排在「高级」之后）----------
@@ -6279,6 +6453,10 @@ function renderSettingsPage() {
   } else if (UPD.stage === 'failed' && UPD.info) {
     updMsg('检查失败：' + (UPD.info.message || UPD.info.code || '未知原因'), 'err');
   }
+
+  // 2026-10-26 邮件反馈卡片：与更新卡片同样在每次重建后重新绑定
+  //（之前这里完全缺失 ⟹ 用户点「发邮件反馈」没有任何反应）。
+  bindFeedbackCard();
 
   // 设置页里的下拉是复制的快捷面板 HTML，重建后浏览器会退回第一项。
   // 不同步回来，打开设置页再点保存就会把用户的选择悄悄改成第一项。

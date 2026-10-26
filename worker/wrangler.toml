@@ -1,0 +1,32 @@
+# RLPlayer 反馈 Worker 的部署配置
+#
+# 用法：
+#   npm i -g wrangler
+#   wrangler login
+#   wrangler secret put GITHUB_TOKEN    # fine-grained token，只勾 Issues: Read & Write，只授权下面这个仓库
+#   wrangler secret put SHARED_SALT     # 任意随机串（用于 IP 哈希限流）
+#   wrangler deploy
+#
+# 部署完把 https://<name>.<subdomain>.workers.dev 填进
+# RLPlayer/src/net/ui_script.h 的 FB_WORKER_URL。
+
+name = "rlplayer-feedback"
+main = "feedback-worker.js"
+compatibility_date = "2026-10-26"
+
+# 反馈落到哪个仓库的 issue。
+# 建议用**私有**仓库（例如 BH2VOQ/RLPlayer-Feedback），这样用户反馈不会公开可见。
+# 换成公开仓库也能用，但 issue 内容任何人都能看到。
+[vars]
+REPO_OWNER = "BH2VOQ"
+REPO_NAME  = "RLPlayer-Feedback"
+
+# ⚠️ GITHUB_TOKEN / SHARED_SALT 不要写在这里，用 `wrangler secret put` 写进 Secrets。
+#
+# 诊断包（最大 8MB）默认无处安放 —— 需要的话开通 R2 并把 binding 取消注释：
+#
+# [[r2_buckets]]
+# binding = "R2"
+# bucket_name = "rlplayer-feedback"
+#
+# [vars] 里再加一行 R2_BUCKET_NAME = "rlplayer-feedback" 即可启用上传。
