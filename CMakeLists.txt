@@ -67,8 +67,11 @@ add_compile_options($<$<CONFIG:Release>:-DNDEBUG>)
 # （这些库在 macOS 上不存在，留着只会让 configure 报错）；通用 else() 的 curl 兜底也删除。
 # libcurl：http.h 的 macOS 实现（系统自带，零第三方依赖）
 # CoreAudio/AudioToolbox/CoreFoundation：audio_out_coreaudio.h
+# SystemConfiguration（2026-10-26）：http_posix.h 读系统代理用 SCDynamicStoreCopyProxies
+#   —— libcurl 在 macOS 上不读系统代理，必须自己问；不加这个框架会 link error。
 set(RL_PLATFORM_LIBS curl iconv
-    "-framework CoreAudio" "-framework AudioToolbox" "-framework CoreFoundation")
+    "-framework CoreAudio" "-framework AudioToolbox" "-framework CoreFoundation"
+    "-framework SystemConfiguration")
 
 # ---- 跨平台工具 ----
 # 2026-10-25：已改为 macOS 单平台，故不再有「Windows 用 winhttp/ws2_32」这一半说明。
@@ -709,6 +712,13 @@ add_executable(test_upnp_control tests/test_upnp_control.cpp)
 target_include_directories(test_upnp_control PRIVATE ${CMAKE_SOURCE_DIR}/src)
 target_link_libraries(test_upnp_control PRIVATE ${RL_PLATFORM_LIBS})
 add_test(NAME upnp_control COMMAND test_upnp_control)
+
+# 系统代理选择逻辑（2026-10-26）：libcurl 在 macOS 上不读系统代理 ⟹ 更新检查永远超时。
+# 判据是**选择逻辑**本身（没代理必须直连、有代理必须走），与本机是否真开代理无关。
+add_executable(test_system_proxy tests/test_system_proxy.cpp)
+target_include_directories(test_system_proxy PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(test_system_proxy PRIVATE ${RL_PLATFORM_LIBS})
+add_test(NAME system_proxy COMMAND test_system_proxy)
 
 add_executable(test_cast_service tests/test_cast_service.cpp)
 target_include_directories(test_cast_service PRIVATE ${CMAKE_SOURCE_DIR}/src)
