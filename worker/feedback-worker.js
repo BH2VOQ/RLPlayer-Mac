@@ -65,10 +65,27 @@ async function rateLimited(request, env) {
   return false;
 }
 
+// ============================ CORS（必须！2026-10-27 实测踩坑）============================
+// 页面的来源是 rlplayer://app/（WKURLSchemeHandler 自定义 scheme），
+// 而 Worker 在 https://xxx.workers.dev ⟹ 这是**跨域** POST。
+// 第一版没带 CORS 头，浏览器直接把响应拦掉，页面只看到一句
+//   "发送失败：Failed to fetch"
+// —— 服务端其实已经建好 issue 了（用户以为没发出去，实际收到了，更糟）。
+//
+// 为什么允许 *：Worker 是公开的、客户端本来就没有凭据，
+// 放开来源不会增加任何攻击面（攻击者自己 curl 也能发）。
+// 真正的闸门是限流 + 体积上限 + token 只在服务端。
+const CORS = {
+  'Access-Control-Allow-Origin': '*',
+  'Access-Control-Allow-Methods': 'POST, OPTIONS',
+  'Access-Control-Allow-Headers': 'Content-Type',
+  'Access-Control-Max-Age': '86400',
+};
+
 function json(obj, status = 200) {
   return new Response(JSON.stringify(obj), {
     status,
-    headers: { 'Content-Type': 'application/json; charset=utf-8' },
+    headers: { 'Content-Type': 'application/json; charset=utf-8', ...CORS },
   });
 }
 
@@ -93,6 +110,11 @@ function fence(text) {
 
 export default {
   async fetch(request, env) {
+    // CORS 预检：浏览器发 application/json 会先发 OPTIONS，
+    // 不回 204 的话真正的 POST 根本不会发出去（页面报 Failed to fetch）。
+    if (request.method === 'OPTIONS') {
+      return new Response(null, { status: 204, headers: CORS });
+    }
     // 只接受 POST
     if (request.method !== 'POST') {
       return json({ ok: false, error: '只接受 POST' }, 405);

@@ -20,13 +20,13 @@ compatibility_date = "2026-10-26"
 [vars]
 REPO_OWNER = "BH2VOQ"
 REPO_NAME  = "RLPlayer-Feedback"
+R2_BUCKET_NAME = "rlplayer-feedback"
 
 # ⚠️ GITHUB_TOKEN / SHARED_SALT 不要写在这里，用 `wrangler secret put` 写进 Secrets。
 #
-# 诊断包（最大 8MB）默认无处安放 —— 需要的话开通 R2 并把 binding 取消注释：
-#
-# [[r2_buckets]]
-# binding = "R2"
-# bucket_name = "rlplayer-feedback"
-#
-# [vars] 里再加一行 R2_BUCKET_NAME = "rlplayer-feedback" 即可启用上传。
+# 诊断包存储（2026-10-27 已开通 R2 并启用）
+# 免费额度：10GB 存储 + 100万次写/月 + 1000万次读/月 + 出站免费
+# 实测一个诊断包 ~7KB~25KB，10GB 够存几十万个
+[[r2_buckets]]
+binding = "R2"
+bucket_name = "rlplayer-feedback"
