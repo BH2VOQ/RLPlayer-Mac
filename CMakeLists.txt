@@ -517,6 +517,20 @@ if(APPLE)
 endif()
 add_test(NAME library COMMAND test_library)
 
+# ---------------- 2026-10-26：库根绝对路径不变量 + --music-dir 写盘顺序（BUG 回归）----------------
+# 用户报「点侧栏『文件夹』显示目录不存在」。根因链：--music-dir 处理早于 setenv(RLPLAYER_PORT)
+# ⟹ 非默认实例把相对根 "./data" 写进**默认实例**的 rlplayer-library.conf ⟹ .app 双击 cwd=/
+# ⟹ ./data 解析成 /data ⟹ /api/files 默认目录恒不存在。
+# 判据：相对根被拒（含"绝对目录仍可加"的对照）、默认 conf 逐字节不被非默认实例改动、
+#       /api/files 跳过坏根挑真实目录、显式坏 dir 的错误必须带路径。
+add_executable(test_libroot_regress tests/test_libroot_regress.cpp)
+target_include_directories(test_libroot_regress PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(test_libroot_regress PRIVATE ${RL_PLATFORM_LIBS})
+if(APPLE)
+    target_link_libraries(test_libroot_regress PRIVATE iconv)
+endif()
+add_test(NAME libroot_regress COMMAND test_libroot_regress)
+
 add_executable(test_cue tests/test_cue.cpp)
 target_include_directories(test_cue PRIVATE ${CMAKE_SOURCE_DIR}/src)
 if(APPLE)
@@ -529,6 +543,47 @@ if(APPLE)
     target_link_libraries(test_tags_native PRIVATE iconv)
 endif()
 add_test(NAME tags_native COMMAND test_tags_native)
+
+# ---------------- 2026-10-26（debug/20261026-02）：上游 v1.5.2 移植 ----------------
+# B-1 专辑封面多曲重试 + 1x1 占位图不当封面（上游 fb77a0b，mac 独立分支重写）
+#   判据：首曲无图+次曲有图 ⟹ 返回真图；全无图 ⟹ ok=0（不是 67B 占位图）；负缓存不串味。
+#   传 ${CMAKE_SOURCE_DIR} 用于定位 build-mac/ffmpeg-lite/ffmpeg（本机系统 ffmpeg 坏链）。
+add_executable(test_album_cover tests/test_album_cover.cpp)
+target_include_directories(test_album_cover PRIVATE ${CMAKE_SOURCE_DIR}/src)
+if(APPLE)
+    target_link_libraries(test_album_cover PRIVATE iconv)
+endif()
+add_test(NAME album_cover COMMAND test_album_cover ${CMAKE_SOURCE_DIR})
+
+# F-2 音频体检（上游 8001dbb + 99dd012，mac 移植：health_store 文件 IO 按 POSIX 重写）
+add_executable(test_dynamics tests/test_dynamics.cpp)
+target_include_directories(test_dynamics PRIVATE ${CMAKE_SOURCE_DIR}/src)
+add_test(NAME dynamics COMMAND test_dynamics)
+
+add_executable(test_fake_lossless tests/test_fake_lossless.cpp)
+target_include_directories(test_fake_lossless PRIVATE ${CMAKE_SOURCE_DIR}/src)
+add_test(NAME fake_lossless COMMAND test_fake_lossless)
+# ⚠️ 必须在 add_test 之后；PATH 指到 ffmpeg-lite（系统 ffmpeg 坏链，退出码 134）
+set_tests_properties(fake_lossless PROPERTIES
+  ENVIRONMENT "PATH=${CMAKE_SOURCE_DIR}/build-mac/ffmpeg-lite:/usr/bin:/bin:/usr/sbin:/sbin")
+
+add_executable(test_track_health tests/test_track_health.cpp)
+target_include_directories(test_track_health PRIVATE ${CMAKE_SOURCE_DIR}/src)
+add_test(NAME track_health COMMAND test_track_health)
+
+# F-3 房间校正 + 测量编排（上游 f26ca3d + 8d80e17，纯 header，零平台依赖）
+add_executable(test_room_correction tests/test_room_correction.cpp)
+target_include_directories(test_room_correction PRIVATE ${CMAKE_SOURCE_DIR}/src)
+add_test(NAME room_correction COMMAND test_room_correction)
+
+add_executable(test_room_measurement tests/test_room_measurement.cpp)
+target_include_directories(test_room_measurement PRIVATE ${CMAKE_SOURCE_DIR}/src)
+add_test(NAME room_measurement COMMAND test_room_measurement)
+
+add_executable(rtahealth tools/rtahealth.cpp)
+target_include_directories(rtahealth PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(rtahealth PRIVATE ${RL_PLATFORM_LIBS})
+
 add_executable(test_metastore tests/test_metastore.cpp)
 target_include_directories(test_metastore PRIVATE ${CMAKE_SOURCE_DIR}/src)
 add_test(NAME metastore COMMAND test_metastore)

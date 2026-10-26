@@ -483,9 +483,25 @@ int main() {
         } else {
             const uint16_t testPort = 8913;
             // 启动 rtaweb --port 8913 --music-dir ./data --no-browser
+            //
+            // ⚠️ 2026-10-26（用户报「文件夹→目录不存在」的污染源之一）：
+            //   本测试原来**不隔离 RLPLAYER_LIBRARY_DIR**，子进程直接继承测试进程的环境；
+            //   配合当时「--music-dir 早于 setenv(RLPLAYER_PORT)」的 BUG，它的 `--music-dir ./data`
+            //   被写进了**用户真实的** rlplayer-library.conf（实测 10:36 那次就是这么坏的：
+            //   conf 变成 "./data"，.app 双击 cwd=/ ⟹ ./data → /data ⟹ 文件夹页恒「目录不存在」）。
+            //   顺序 BUG 已在 rtaweb.cpp 修掉，但「测试不该碰用户真实数据」这条得单独保证：
+            //   这里显式把库配置/索引关进临时目录，子进程只写临时文件。
+            //   注意必须在 fork **之前**建好目录（子进程里不做可能失败的 fs 操作）。
+            std::error_code isoEc;
+            fs::path isoLib = fs::temp_directory_path(isoEc) / "rta_dsd_path_8913_lib";
+            if (isoEc) isoLib = fs::path("/tmp") / "rta_dsd_path_8913_lib";
+            fs::remove_all(isoLib, isoEc);
+            fs::create_directories(isoLib, isoEc);
+            const std::string isoLibS = isoLib.string();
             pid_t pid = fork();
             if (pid == 0) {
                 std::string pStr = std::to_string(testPort);
+                ::setenv("RLPLAYER_LIBRARY_DIR", isoLibS.c_str(), 1);   // 绝不写用户真实库配置
                 execl(rtawebBin.c_str(), rtawebBin.c_str(),
                       "--port", pStr.c_str(),
                       "--music-dir", "./data",

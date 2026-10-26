@@ -1267,13 +1267,18 @@ function openAlbum(k) {
          '<span class=sum>' + j.tracks.length + ' 首 · 总时长 ' + fmtDurLong(localTotal) + '</span></div>';
     j.tracks.forEach(function (t, i) {
       var isFav = FAV_SET.has(t.path);
-      h += '<div class="trow trow-track" data-i=' + i + ' style="grid-template-columns:28px 24px minmax(120px,1.6fr) minmax(0,1fr) 92px 58px;gap:8px">' +
+      // 2026-10-26（B-3 / 上游 2f21626 的 mac 版）：曲目行第 7 列 = **看得见**的「+」入队按钮。
+      // 以前专辑页只有「点行 = 播放整张」，连右键都没绑 ⟹ 用户想把某一首加进队列**根本无路可走**
+      // （比上游诊断的"只有一条不可发现的右键路径"更严重：这里连那条路径都没有）。
+      // 任何格式（含 .dsf/.dff）都一样，因为入口在 UI 层、与解码路径无关。
+      h += '<div class="trow trow-track" data-i=' + i + ' style="grid-template-columns:28px 24px minmax(120px,1.6fr) minmax(0,1fr) 92px 58px 26px;gap:8px">' +
            '<div class=n>' + (t.n || (i + 1)) + '</div>' +
            favIconHtml(t.path, isFav) +
            '<div class=tt title="' + esc(t.title) + '">' + esc(t.title) + '</div>' +
            '<div class=ar title="' + esc(t.artist || j.artist) + '">' + esc(t.artist || j.artist) + '</div>' +
            '<div class=bd>' + fmtTag(t.sr, t.bits) + '</div>' +
            '<div class=du>' + fmtDurLong(t.dur) + '</div>' +
+           '<button class="add-btn" data-file="' + esc(t.path) + '" title="加入播放队列" aria-label="加入播放队列">+</button>' +
            '</div>';
     });
     h += '</div>';
@@ -1342,12 +1347,34 @@ function openAlbum(k) {
         toggleFav(btn.dataset.file, ev);
       };
     });
+    // 2026-10-26（B-3）：.add-btn 必须**自己**绑 click 并 stopPropagation，
+    // 否则会冒泡到行的 onclick = 播放整张（用户点「+」结果整张专辑重播，是更坏的回归）。
+    Array.prototype.forEach.call(D('list').querySelectorAll('.add-btn'), function (btn) {
+      btn.onclick = function (ev) {
+        ev.stopPropagation();
+        ev.preventDefault();
+        var ti = +btn.closest('.trow').dataset.i;
+        var tk = (j.tracks || [])[ti] || {};
+        // cue 曲目必须把区间一起带上：同一整轨的多首 path 完全相同，
+        // 只传 path 会把「第 3 首」入队成整轨的「第 1 首」（cueQuery 的既有口径）。
+        addPathCue(tk.path, tk.cs, tk.ce);
+      };
+    });
     Array.prototype.forEach.call(D('list').querySelectorAll('.trow'), function (e) {
       e.onclick = function (ev) {
         if (ev.target.closest && ev.target.closest('.fav-btn')) return;
+        if (ev.target.closest && ev.target.closest('.add-btn')) return;   // 「+」自己处理（双保险）
         var ti = +e.dataset.i;
         var tk = (j.tracks || [])[ti] || {};
         playAlbum(j.k, ti, tk.cs, tk.ce);      // cue 曲目：把本轨起止秒一起带上
+      };
+      // 2026-10-26（B-3）：专辑页曲目行右键 = 单曲入队（与曲目列表页 :2134 的既有口径统一）。
+      // 之前这里**完全没有** oncontextmenu ⟹ 右键是浏览器原生菜单，什么都做不了。
+      e.oncontextmenu = function (ev) {
+        ev.preventDefault();
+        ev.stopPropagation();
+        var tk = (j.tracks || [])[+e.dataset.i] || {};
+        addPathCue(tk.path, tk.cs, tk.ce);
       };
     });
   });
@@ -1509,10 +1536,23 @@ function artistCoverKey(who) {
 }
 function artistHeroHtml(who, subText) {
   var cvKey = artistCoverKey(who);
-  var cvStyle = cvKey ? ("background-image:url('/api/lib/cover?k=" + cvKey + "')") : '';
+  // 2026-10-26（F-7）：以前是 **二选一** —— 有 cvKey 就不渲染 .ph，改成 background-image。
+  // 后果：cvKey 指向的专辑只有一张 1x1 占位 PNG 时（B-1：media_info.h 的 get_cover 找不到图
+  // 会返回合法 PNG，HTTP 200），background-image 铺满一个纯色 168px 圆 ⟹ **连首字母都没有**。
+  // 现在与 loadArtists()（:1462-1467）的既有写法统一：
+  //   · .ph 首字母**永远**渲染在底层；
+  //   · 封面用 <img> 覆盖在上，加载失败/解码失败 → onerror 自隐 ⟹ 露回首字母。
+  // 这样「有真封面」「有占位图」「根本没封面」三种情况都不会出现空白圆。
+  var phChar = (String(who == null ? '' : who).trim().slice(0, 1) || '?').toUpperCase();
+  var cvImg = cvKey
+    ? '<img src="/api/lib/cover?k=' + encodeURIComponent(cvKey) + '" loading=lazy alt="" ' +
+      'style="position:absolute;inset:0;width:100%;height:100%;object-fit:cover;border-radius:50%" ' +
+      'onerror="this.style.display=\'none\'">'
+    : '';
   return '<div class="ahead artist-head">' +
-       '<div class=cv style="border-radius:50%;' + cvStyle + '">' +
-       (cvKey ? '' : '<div class=ph style="border-radius:50%">' + esc(String(who).slice(0, 1).toUpperCase()) + '</div>') +
+       '<div class=cv style="border-radius:50%;overflow:hidden">' +
+       '<div class=ph style="border-radius:50%">' + esc(phChar) + '</div>' +
+       cvImg +
        '</div>' +
        '<div class=info>' +
        '<div class=kind>ARTIST · 艺术家资料</div>' +
@@ -2088,13 +2128,17 @@ function renderTracksView() {
   h += '<div style="padding:4px 0 24px">';
   sorted.forEach(function (x, i) {
     var isFav = FAV_SET.has(x.path);
-    h += '<div class="trow trow-track" data-i=' + i + ' style="grid-template-columns:28px 24px minmax(120px,1.6fr) minmax(0,1fr) 92px 58px;gap:8px">' +
+    // 2026-10-26（B-3 / 列表页）：同样加第 7 列「+」。以前这里**只有**右键能入队，
+    // 页面没有任何视觉提示（用户根本不会去右键试）⟹ 等于没有入口。
+    h += '<div class="trow trow-track" data-i=' + i + ' style="grid-template-columns:28px 24px minmax(120px,1.6fr) minmax(0,1fr) 92px 58px 26px;gap:8px">' +
          '<div class=n>' + (i + 1) + '</div>' +
          favIconHtml(x.path, isFav) +
          '<div class=tt title="' + esc(x.title) + '">' + esc(x.title) + '</div>' +
          '<div class=ar title="' + esc(x.artist + ' \u2014 ' + x.album) + '">' + esc(x.artist) + ' \u2014 ' + esc(x.album) + '</div>' +
          '<div class=bd>' + fmtTag(x.sr, x.bits) + '</div>' +
-         '<div class=du>' + fmt(x.dur) + '</div></div>';
+         '<div class=du>' + fmt(x.dur) + '</div>' +
+         '<button class="add-btn" data-file="' + esc(x.path) + '" title="加入播放队列" aria-label="加入播放队列">+</button>' +
+         '</div>';
   });
   h += '</div>';
   // 「共 N 条，当前显示前 M 条」+「加载更多」（261025-01 #6）。
@@ -2126,14 +2170,25 @@ function renderTracksView() {
     };
   });
 
+  // 2026-10-26（B-3）：列表页「+」的 click 必须自己绑 + stopPropagation（否则冒泡成 playPath）
+  Array.prototype.forEach.call(D('list').querySelectorAll('.add-btn'), function (btn) {
+    btn.onclick = function (ev) {
+      ev.stopPropagation();
+      ev.preventDefault();
+      var x = sorted[+btn.closest('.trow').dataset.i] || {};
+      addPathCue(x.path, x.cs, x.ce);
+    };
+  });
   Array.prototype.forEach.call(D('list').querySelectorAll('.trow'), function (e) {
     e.onclick = function (ev) {
       if (ev.target.closest && ev.target.closest('.fav-btn')) return;
+      if (ev.target.closest && ev.target.closest('.add-btn')) return;   // 「+」自己处理（双保险）
       playPath(sorted[+e.dataset.i].path);
     };
     e.oncontextmenu = function (ev) {
       ev.preventDefault();
-      addPath(sorted[+e.dataset.i].path);
+      var x = sorted[+e.dataset.i] || {};
+      addPathCue(x.path, x.cs, x.ce);
     };
   });
 }
@@ -2310,6 +2365,19 @@ function playPath(f, cs, ce) {
 }
 function addPath(f) {
   api('/api/add', 'file=' + encodeURIComponent(f)).then(function () { toast('已加入队列'); loadQ(); });
+}
+/* 2026-10-26（B-3）：带 CUE 区间的入队。
+   为什么不能直接用 addPath：CUE 分轨时**同一整轨文件里的 N 首 path 完全相同**，
+   只传 path ⟹ 点「第 3 首」入队的其实是"整轨"（用户看到的是第 1 首的区间）。
+   /api/add 目前只接受 file（后端 PlayParams 有 cueStart/cueEnd，但 /api/add 分支未读取），
+   所以这里把区间一并送出去：后端将来接线即生效；当前对普通曲目 cs/ce = -1，行为与 addPath 完全一致。
+   ⚠️ 已如实挂账：/api/add 尚未消费 cue_start/cue_end，CUE 分轨的单曲入队仍会入整轨（见交付说明）。 */
+function addPathCue(f, cs, ce) {
+  if (!f) return;
+  api('/api/add', 'file=' + encodeURIComponent(f) + cueQuery(cs, ce)).then(function (j) {
+    if (j && j.ok === false) { toast(j.error || '加入失败'); return; }
+    toast('已加入队列'); loadQ();
+  }).catch(function (e) { toast('加入失败: ' + e); });
 }
 function playRemote(it) {
   api('/api/play', 'rid=' + encodeURIComponent(it.id) + '&rsuffix=' + encodeURIComponent(it.sf || '') + '&' + params())
@@ -2544,6 +2612,104 @@ function loadMeta(f) {
 }
 
 /* ---------------- 状态 ---------------- */
+// ============================================================================
+// 2026-10-26 B-4（debug/20261026-02）：底栏 bit-perfect 徽标 两态 → 六态
+//
+// 旧实现只有 3 种文本（BIT-PERFECT·1bit / BIT-PERFECT / 非 bit-perfect），
+// 分不清「PCM→PCM 升频」「PCM→DSD」「DSD→DSD 升频」，也看不到降级原因。
+//
+// 六态 = bit-perfect / 非 bit-perfect × 直通 / PCM-PCM / PCM-DSD / DSD-DSD：
+//   维度①「有没有动数据」：direct（1-bit 直通，最严格）> yes > no
+//   维度②「动的是什么方向」：直通（不升频）/ PCM→PCM / PCM→DSD / DSD→DSD
+//
+// 数据源**全部**是 /api/status 的后端权威字段（F-5 已落地），前端不自己推导结论：
+//   bitPerfect    direct | yes | no   —— 三态结论
+//   bitPerfectWhy 中文原因（no 时的明细）
+//   outMode       coreaudio | shared | null | upnp | ""（"" = 本进程还没播过）
+//   dsd           实际 DSD 档位（0 = PCM 输出）
+//   dsdRate       1-bit 有效码率（PCM = 0）
+//   carrierRate   DoP 的 PCM 载波率（= dsdRate/16；PCM = 0）
+//   modFamily     dsd | ec | chebyshev | ahm（直通/PCM = 空）
+//   modOrder      实际生效阶数（PCM = 0）
+//   fallbackWhy   非空 = 本次与用户请求不一致的中文原因
+//
+// ⚠️ 为什么「源是 DSD 还是 PCM」不能只看后端：
+//   /api/status 没有 srcFormat 字段，而这是六态里区分「PCM→DSD」与「DSD→DSD」的唯一依据。
+//   所以源格式由**当前曲目扩展名**判定（.dsf/.dff = DSD），并做交叉校验：
+//   DirectSDM 直通时后端 dsdRate 就是源位率；若扩展名说 DSD 但后端一个 DSD 字段都没有，
+//   宁可标「升频」也不编一个方向出来（见 bpBadgeInfo 的注释）。
+//
+// 负向对照（判据）：直通时**不许**出现任何「升频」字样 —— 见 bpBadgeInfo 里
+//   `!up` 分支的三条文本，全部不含「升频」，且 title 也不含。
+// ============================================================================
+function srcIsDsdPath(p) {
+  return /\.(dsf|dff)$/i.test(String(p || ''));
+}
+// 源文件：优先当前曲目（/api/status 的 current），其次最近一次 loadMeta 的文件。
+function bpCurFile() {
+  return (typeof S.lastCur === 'string' && S.lastCur) ? S.lastCur : '';
+}
+// 六态判定（纯函数：只读 S.bp*，不碰 DOM ⟹ 可以用 node 单独跑判据）。
+// 判据来源全是后端字段，**不是**"看 outRate 猜"：DoP 的 outRate 是**载波率**（DSD128=384000），
+// 和"PCM 升频到 384k"数字完全一样，拿它反推会得出相反的结论（上游踩过这个坑）。
+function bpBadgeInfo() {
+  var bpv = S.bpState || '';
+  if (!bpv) return { text: '', cls: '', title: '' };   // 后端还没给结论（未播过/断线首 tick）：不占位、不猜
+
+  var dsdOut = (typeof S.bpDsd === 'number') ? (S.bpDsd > 0) : false;
+  var srcDsd = srcIsDsdPath(bpCurFile());
+  var whyBp = S.bpWhy || '';
+  var whyFb = S.bpFallback || '';
+  var t = '', c = '', title = '';
+
+  // title：降级原因（fallbackWhy）优先，回退 bitPerfectWhy。两者都有且不同时**都**显示 ——
+  // fallbackWhy 讲「实际 ≠ 请求」，bitPerfectWhy 讲「为什么不是 bit-perfect」，是两件事。
+  if (whyFb && whyBp && whyFb !== whyBp) title = '降级原因：' + whyFb + '；' + whyBp;
+  else if (whyFb) title = '降级原因：' + whyFb;
+  else title = whyBp;
+
+  // ★★ 负向对照的落点：直通两态必须在「看 dsd 输出」**之前**返回。
+  //    DirectSDM 直通时后端 dsd>0（DSD 源逐位直通），若先看 dsdOut 就会把直通标成
+  //    「DSD-DSD 升频」—— 那正是"直通时出现升频字样"的失败形态。
+  //    所以顺序是：direct/yes/no 先定「有没有升频」，只有非直通才继续判方向。
+  if (bpv === 'direct') {
+    t = 'BIT-PERFECT·1bit'; c = 'bp-direct';
+    if (!title) title = 'DirectSDM：DSD 1-bit 直通，跳过 PCM 与调制';
+    return { text: t, cls: c, title: title };
+  }
+  if (bpv === 'yes') {
+    // 输出逐位一致 ⟹ 没有升频。（DSD 输出不可能是 yes：DoP 载波必然被 /api/status 判 no）
+    t = 'BIT-PERFECT'; c = 'bp-yes';
+    if (!title) title = '源→解码→输出全程逐位一致（不重采样、0 dB、无抖动/整形、无 EQ/IR）';
+    return { text: t, cls: c, title: title };
+  }
+
+  // ---- 以下是 bpv === 'no'：链路里有改动，需要判方向 ----
+  // 升频方向只有三种，且**必须**有后端证据：
+  //   ① dsd>0            ⟹ 输出真的是 DSD（不是靠 outRate 猜；DoP 的 outRate 是载波率）
+  //        源 DSD ⟹ DSD-DSD 升频；源 PCM ⟹ PCM-DSD 升频
+  //   ② why 里出现「重采样」 ⟹ PCM-PCM 升频
+  //   ③ 其余（音量/EQ/位深/抖动/DoP 载波）⟹ 只写「非 bit-perfect」，绝不冒充升频
+  if (dsdOut) {
+    t = srcDsd ? 'DSD-DSD 升频' : 'PCM-DSD 升频';
+    c = 'bp-up';
+    if (!title) {
+      title = srcDsd ? 'DSD 源 → 更高 DSD 档（先解成 PCM 再重新调制）'
+                     : 'PCM 源 → DSD（SDM 调制后走 DoP 承载）';
+    }
+    return { text: t, cls: c, title: title };
+  }
+  var allWhy = whyFb + ' ' + whyBp;
+  if (allWhy.indexOf('重采样') >= 0) {
+    t = 'PCM-PCM 升频'; c = 'bp-up';
+    if (!title) title = 'PCM 源 → 更高 PCM 采样率';
+    return { text: t, cls: c, title: title };
+  }
+  t = '非 bit-perfect'; c = 'bp-no';
+  if (!title) title = '链路里有改动（原因见信号链）';
+  return { text: t, cls: c, title: title };
+}
+
 function tick() {
   // return 出去：pollSchedule 靠它做 in-flight 互斥（见 pollSchedule 的注释）。
   return api('/api/status').then(function (j) {
@@ -2557,6 +2723,17 @@ function tick() {
     S.playing = !!j.playing; S.paused = !!j.paused; S.dur = j.dur; S.pos = j.pos;
     // 2026-10-23 #1：底栏 bit-perfect 徽标的数据源（后端权威判定，见 /api/status 的 bitPerfect 字段）
     S.bpState = j.bitPerfect || ""; S.bpWhy = j.bitPerfectWhy || "";
+    // 2026-10-26 B-4：六态徽标要判「升频方向」，全部取后端 F-5 的自证字段（前端不自己推导）。
+    //   dsd>0 ⟹ 输出真的是 DSD（DoP 载波）；dsd=0 ⟹ PCM 输出。
+    //   ★ 绝不用 outRate 反推：DoP 的 outRate 是**载波率**（DSD128 = 384000），
+    //     和"PCM 升频到 384k"的数字一模一样，拿它判会得出完全相反的结论。
+    S.bpDsd = (typeof j.dsd === 'number') ? j.dsd : 0;
+    S.bpDsdRate = (typeof j.dsdRate === 'number') ? j.dsdRate : 0;
+    S.bpCarrier = (typeof j.carrierRate === 'number') ? j.carrierRate : 0;
+    S.bpModFamily = j.modFamily || '';
+    S.bpModOrder = (typeof j.modOrder === 'number') ? j.modOrder : 0;
+    S.bpOutMode = j.outMode || '';
+    S.bpFallback = j.fallbackWhy || '';
     // 2026-10-23 261023-03 #2/#5：资料简介的显示门控只用后端权威状态（400ms 轮询顺带更新）
     if (typeof j.hasLlmKey === 'boolean') META.hasLlmKey = j.hasLlmKey;
     if (typeof j.summaryEnabled === 'boolean') META.summaryEnabled = j.summaryEnabled;
@@ -2635,11 +2812,13 @@ function tick() {
     // 2026-10-23 #1：底栏常驻一个「b-p」徽标，不打开信号链也能知道当前是否 bit-perfect。
     // 2026-10-23 用户 261023-04 #1：改成紧凑 chip（class=bp-yes/bp-no/bp-direct），
     // 配色与显隐交给 CSS（三套主题各有一套颜色），这里不写死颜色、也不占中间列。
+    // 2026-10-26 B-4：两态 → 六态。判定全在 bpBadgeInfo()（纯函数，见文件上方），
+    // 这里只负责把结果写进 DOM —— 判据与渲染分开，才能用 node 单独测判定。
     if (D('bpBadge')) {
-      var bpv = S.bpState || '';
-      D('bpBadge').textContent = bpv === 'direct' ? 'BIT-PERFECT·1bit' : (bpv === 'yes' ? 'BIT-PERFECT' : (bpv === 'no' ? '非 bit-perfect' : ''));
-      D('bpBadge').className = bpv ? ('bp-' + bpv) : '';
-      D('bpBadge').title = S.bpWhy || '';
+      var bi = bpBadgeInfo();
+      D('bpBadge').textContent = bi.text;
+      D('bpBadge').className = bi.cls;
+      D('bpBadge').title = bi.title;
     }
     if (j.error) D('nps').textContent = j.error;
   }).catch(function () { });

@@ -1,14 +1,18 @@
-// tests/test_preset_profiles.cpp — 「三档官方推荐预设」决策纯函数的离线单测
+// tests/test_preset_profiles.cpp — 「官方推荐预设」决策纯函数的离线单测（2026-10-26 起四档）
 //
-// 判据（铁律 3）：这里只测**决策**，不测设备。探测（WASAPI IsFormatSupported / ASIO
-// canSampleRate、kAsioCanDoIoFormat）在 rtaweb 里，验证靠 GET /api/preset/caps 的实测输出。
+// 判据（铁律 3）：这里只测**决策**，不测设备。探测（CoreAudio caps / DoP 载波推算）
+// 在 rtaweb 里，验证靠 GET /api/preset/caps 的实测输出。
 // 因此本文件不需要声卡、不开流、不出声，任何机器都能跑。
 //
-// 覆盖的四类硬要求（用户 2026-10-25）：
+// 覆盖的硬要求（用户 2026-10-25 / 2026-10-26）：
 //   1) 无 DSD 能力的设备选 dsd 档必须**降级并给 note**（不是静默假装支持）；
 //   2) maxRate 只有 96k 时 pcm 档**不许写 384**；
 //   3) 源 DSD 与目标同速率 ⟹ directSdm=1（不同速率必须 0）；
-//   4) bitperfect 档在任何设备上都必须满足 bit-perfect 七条件（且负向对照能证明判据不是摆设）。
+//   4) bitperfect 档在任何设备上都必须满足 bit-perfect 七条件（且负向对照能证明判据不是摆设）；
+//   5) 【2026-10-26 第 4 档 pcm2dsd】mac 口径 = **只走 DoP**：
+//      · notes 里**绝不许**出现「原生 / 1-bit 直送」这种本平台不存在的通路（A-5 事故教训）；
+//      · 无 DoP 能力必须明确降级为 PCM 升频并说明原因；
+//      · 既有三档的 plan 结果必须**逐字段不变**（Case 24 是回归底线）。
 #include "engine/preset_profiles.h"
 #include <cstdio>
 #include <string>
@@ -75,6 +79,37 @@ static bool has_note(const PresetSettings& s, const char* needle) {
     for (const auto& n : s.notes) if (n.find(needle) != std::string::npos) return true;
     return false;
 }
+
+// ---- 「虚构通路」判据（2026-10-26 A-5 事故的护栏）----
+// 为什么不能用 has_note(s, "原生") 这种粗词表：
+//   mac 的 note 里**必须**写「mac 无原生 DSD 通路」——这是给用户的诚实说明（否定句），
+//   粗词表会把它判红 ⟹ 要么删掉诚实说明（更糟），要么把断言放宽成摆设（最糟）。
+// 所以判据要区分「声称有原生通路」与「声明没有原生通路」：
+//   · 出现「原生支持 / 1-bit 直送 / 直送 ASIO / 封装选「原生」」⟹ 声称，红；
+//   · 出现「原生」但**带否定词**（无原生 / 没有原生 / 非原生 …）⟹ 声明没有，绿；
+//   · 出现「原生」却没有任何否定词 ⟹ 按声称处理，红。
+// 判据本身是否有效已单独用 7 条样例验证（上游原文判红、mac 实文判绿），
+// 并在 Case 19 里以自检断言固化 —— 不是"看起来严"，是真的能抓住上游那种写法。
+static bool note_claims_native_pathway(const std::string& n) {
+    static const char* kClaim[] = { "原生支持", "1-bit 直送", "1bit 直送", "直送 ASIO",
+                                    "封装选「原生」", "封装选\"原生\"" };
+    for (const char* c : kClaim) if (n.find(c) != std::string::npos) return true;
+    if (n.find("原生") != std::string::npos) {
+        static const char* kNeg[] = { "无原生", "没有原生", "不是原生", "非原生", "不采信原生" };
+        for (const char* g : kNeg) if (n.find(g) != std::string::npos) return false;
+        return true;
+    }
+    return false;
+}
+static bool settings_claim_native_pathway(const PresetSettings& s) {
+    for (const auto& n : s.notes) if (note_claims_native_pathway(n)) return true;
+    return false;
+}
+// 失败时打印第一条"声称了原生通路"的 note 作为证据
+static std::string first_native_claim(const PresetSettings& s) {
+    for (const auto& n : s.notes) if (note_claims_native_pathway(n)) return n;
+    return std::string();
+}
 static uint32_t rate_num(const std::string& r) {
     if (r.empty()) return 0;
     uint32_t v = 0;
@@ -90,7 +125,7 @@ int main() {
     SetConsoleOutputCP(CP_UTF8);
 #endif
     setvbuf(stdout, nullptr, _IONBF, 0);
-    std::printf("=== test_preset_profiles: 三档官方推荐预设的决策纯函数 ===\n");
+    std::printf("=== test_preset_profiles: 四档官方推荐预设的决策纯函数 ===\n");
 
     const std::vector<uint32_t> kFull = {44100, 48000, 88200, 96000, 176400, 192000,
                                          352800, 384000, 705600};
@@ -338,7 +373,225 @@ int main() {
            "Case 18: DoP 最高档由 PCM 载波率推得（96k 设备没有 DoP）");
     }
 
-    if (g_fails == 0) std::printf("\n[ALL PASS] 三档预设决策单测全部通过\n");
+    // ========================================================================
+    // 2026-10-26 第 4 档 PCM→DSD（pcm2dsd）—— **mac 口径：只走 DoP**
+    // ========================================================================
+    // 为什么这些判据必须写成"找关键词断言不许出现"，而不是"断言某条 note 存在"：
+    //   2026-10-26 A-5 事故的形态是「子代理照上游 diff 移植出本平台不存在的通路，
+    //   再写测试喂虚构值让它通过」。所以这里对**虚构通路**做负向断言：
+    //   notes 里任何一处出现「原生」或「1-bit 直送」都算失败，而不只是"某条 note 写对了"。
+
+    // ---- ⑲ pcm2dsd：有 DoP 能力 ⟹ dsd>0 + EC-7 + tight + 512 ----
+    {
+        const DeviceCaps c = wasapi_caps(kFull);     // 705600 载波 ⟹ dopMax=dsd256
+        const SourceInfo src = pcm_src(44100, 16);
+        const PresetSettings s = plan_preset(PresetProfile::PcmToDsd, c, src);
+        ck(s.dsd > 0, "Case 19: pcm2dsd/有 DoP ⟹ dsd>0（真的输出 DSD）", std::to_string(s.dsd));
+        ck(s.dsd == 256, "Case 19: pcm2dsd/DoP 最高 dsd256 ⟹ 目标 DSD256", std::to_string(s.dsd));
+        ck(s.modFamily == "ec", "Case 19: pcm2dsd ⟹ modFamily=ec", s.modFamily);
+        ck(s.modOrder == 7, "Case 19: pcm2dsd ⟹ modOrder=7", std::to_string(s.modOrder));
+        ck(s.filter == "poly-sinc-tight-lp", "Case 19: pcm2dsd ⟹ filter=poly-sinc-tight-lp", s.filter);
+        ck(s.minTapsPerInput == 512, "Case 19: pcm2dsd ⟹ minTapsPerInput=512",
+           std::to_string(s.minTapsPerInput));
+        ck(s.shaper == "none", "Case 19: pcm2dsd ⟹ shaper=none（抖动交给 1-bit 量化）", s.shaper);
+        ck(s.rate == "follow", "Case 19: pcm2dsd ⟹ rate=follow（载波由 dsd 档决定，不由 rate）", s.rate);
+        ck(s.directSdm == 0, "Case 19: pcm2dsd ⟹ directSdm=0（PCM 源没有直通）");
+        ck(s.volumeDb == 0.0 && s.clearEqIr, "Case 19: pcm2dsd ⟹ 音量 0 dB + 清空 EQ/IR");
+        ck(has_note(s, "DoP"), "Case 19: note 写明走 DoP");
+        ck(has_note(s, "载波"), "Case 19: note 写明 DoP 载波率");
+        ck(has_note(s, "705600"), "Case 19: note 的载波数字是 DSD256 的 705600 Hz");
+        // ★ 负向断言（A-5 事故的护栏）：mac 没有原生 DSD 通路，notes 不许**声称**虚构通路。
+        // 用 note_claims_native_pathway 而不是粗词表：诚实说明「mac 无原生 DSD 通路」必须能过。
+        ck(!settings_claim_native_pathway(s),
+           "Case 19[负向]: notes 未声称任何原生 1-bit 直送通路", first_native_claim(s));
+        ck(has_note(s, "无原生 DSD 通路"),
+           "Case 19[正向]: note 明确写「mac 无原生 DSD 通路」（诚实说明，不许省）");
+        // 判据自检：喂上游那种原文必须判红（证明这个断言不是摆设）
+        ck(note_claims_native_pathway("PCM → DSD256：设备原生支持 DSD（封装选「原生」可 1-bit 直送）"),
+           "Case 19[判据自检]: 上游原文被 note_claims_native_pathway 判红");
+        ck(!note_claims_native_pathway("PCM → DSD256：走 DoP，载波 705600 Hz（mac 无原生 DSD 通路）"),
+           "Case 19[判据自检]: mac 的 DoP note 不被误判");
+        ck(!note_claims_native_pathway("设备无原生 DSD，退 DoP，最高 dsd256"),
+           "Case 19[判据自检]: 既有 dsd 档的否定句不被误判");
+    }
+
+    // ---- ⑳ pcm2dsd：即便上层把 dsdNative 填成 true 也不采信（mac 硬前提） ----
+    // 这条是**最关键的防回归判据**：rtaweb 的 preset_probe_caps 把 dsdNative 硬编码 false，
+    // 但只要 plan_preset 里还有一条 caps.dsdNative 分支，将来有人"顺手"改探测就会复活虚构通路。
+    {
+        DeviceCaps c = wasapi_caps(k192k);           // DoP 只到 dsd64
+        c.dsdNative = true;                          // 故意注入本平台不存在的能力
+        c.dsdNativeMax = "dsd256";
+        const PresetSettings s = plan_preset(PresetProfile::PcmToDsd, c, pcm_src(44100, 16));
+        ck(s.dsd == 64, "Case 20: 注入 dsdNative=dsd256 但 DoP 只到 dsd64 ⟹ 仍按 DoP 取 64",
+           std::to_string(s.dsd));
+        ck(!settings_claim_native_pathway(s),
+           "Case 20[负向]: 注入原生能力后 notes 仍未声称原生通路", first_native_claim(s));
+        // 连"没有 DoP、只有原生"的设备也必须降级 —— 证明原生分支真的不存在
+        DeviceCaps onlyNative = wasapi_caps(k96k);
+        onlyNative.dop = false;
+        onlyNative.dopMax.clear();
+        onlyNative.dsdNative = true;
+        onlyNative.dsdNativeMax = "dsd512";
+        const PresetSettings s2 = plan_preset(PresetProfile::PcmToDsd, onlyNative, pcm_src(44100, 16));
+        ck(s2.dsd == 0, "Case 20: 只有「原生」没有 DoP ⟹ dsd=0（mac 不认原生）",
+           std::to_string(s2.dsd));
+        ck(has_note(s2, "降级为 PCM"), "Case 20: 只有原生 ⟹ 明确写降级为 PCM 升频");
+    }
+
+    // ---- ㉑ pcm2dsd：无 DSD 通路 ⟹ dsd=0 + 明确降级为 PCM 升频 ----
+    {
+        const DeviceCaps c = wasapi_caps(k96k);      // 96k 没有 DoP 载波
+        const PresetSettings s = plan_preset(PresetProfile::PcmToDsd, c, pcm_src(44100, 16));
+        ck(s.dsd == 0, "Case 21: pcm2dsd/无 DSD 通路 ⟹ dsd=0", std::to_string(s.dsd));
+        ck(has_note(s, "降级为 PCM 升频"), "Case 21: note 明确写「降级为 PCM 升频」");
+        ck(has_note(s, "DoP"), "Case 21: 降级原因点名 DoP（不是含糊的「不支持」）");
+        ck(s.rate == "96000", "Case 21: 降级后升到设备最高 96000 Hz", s.rate);
+        ck(s.shaper == "auto", "Case 21: 降级后 shaper=auto（PCM 路径）", s.shaper);
+        ck(s.modFamily.empty() && s.modOrder == 0, "Case 21: 降级后不动调制器");
+        ck(s.filter == "poly-sinc-tight-lp" && s.minTapsPerInput == 512,
+           "Case 21: 降级后仍保留 poly-sinc-tight-lp + 512 taps");
+    }
+
+    // ---- ㉒ pcm2dsd：探测全空 ⟹ dsd=0 + follow + note（不假装支持） ----
+    {
+        const DeviceCaps c = wasapi_caps({});
+        const PresetSettings s = plan_preset(PresetProfile::PcmToDsd, c, pcm_src(44100, 16));
+        ck(s.dsd == 0 && s.rate == "follow", "Case 22: pcm2dsd/探测为空 ⟹ dsd=0 且 rate=follow",
+           s.rate);
+        ck(has_note(s, "降级为 PCM 升频"), "Case 22: note 写明已降级");
+        ck(has_note(s, "探测为空"), "Case 22: note 点明探测为空（不假装支持）");
+    }
+
+    // ---- ㉓ 解析与规范名：pcm2dsd / pcm-dsd / pcm-to-dsd ----
+    {
+        PresetProfile p = PresetProfile::Pcm;
+        ck(preset_profile_parse("pcm2dsd", p) && p == PresetProfile::PcmToDsd,
+           "Case 23: profile=pcm2dsd 解析为 PcmToDsd");
+        ck(preset_profile_parse("pcm-dsd", p) && p == PresetProfile::PcmToDsd,
+           "Case 23: profile=pcm-dsd 解析为 PcmToDsd");
+        ck(preset_profile_parse("pcm-to-dsd", p) && p == PresetProfile::PcmToDsd,
+           "Case 23: profile=pcm-to-dsd 解析为 PcmToDsd");
+        ck(preset_profile_parse("PCM2DSD", p) && p == PresetProfile::PcmToDsd,
+           "Case 23: profile=PCM2DSD 大小写不敏感");
+        ck(std::string(preset_profile_name(PresetProfile::PcmToDsd)) == "pcm2dsd",
+           "Case 23: 规范名回 pcm2dsd", preset_profile_name(PresetProfile::PcmToDsd));
+        // 负向：加了第 4 档不许把既有三档的解析吃掉（前缀吞噬的同款风险）
+        ck(preset_profile_parse("dsd", p) && p == PresetProfile::Dsd,
+           "Case 23[负向]: profile=dsd 仍解析为 Dsd（没被 pcm2dsd 抢走）");
+        ck(preset_profile_parse("pcm", p) && p == PresetProfile::Pcm,
+           "Case 23[负向]: profile=pcm 仍解析为 Pcm");
+        ck(!preset_profile_parse("pcm2dsd128", p) && !preset_profile_parse("pcm2", p),
+           "Case 23[负向]: 近似但非法的名字仍失败（全等比较，不是前缀匹配）");
+    }
+
+    // ---- ㉔ 回归底线：既有三档的 plan 结果**逐字段不变** ----
+    // 判据怎么证明"没变"而不是"看起来没变"：把三档在「6 设备 × 3 源」下的全部输出字段
+    // 序列化成一条签名，与**加第 4 档之前**用 git show HEAD:src/engine/preset_profiles.h
+    // 单独编译出来 dump 的 54 条基线逐字节比对（基线不是事后补的，是先跑出来的）。
+    // 签名含：档位名|rate|dsd|modFamily|modOrder|filter|minTapsPerInput|shaper|directSdm|
+    //         clearEqIr|volumeDb(×1e6)。notes 不进口径比对 —— 措辞演进会把判据变成噪声源，
+    //         字段值才是契约（notes 另有 Case 19~22 单独断言）。
+    {
+        struct Dev { const char* name; DeviceCaps c; };
+        std::vector<Dev> devs;
+        devs.push_back({ "full", wasapi_caps(kFull) });
+        devs.push_back({ "96k", wasapi_caps(k96k) });
+        devs.push_back({ "192k", wasapi_caps(k192k) });
+        devs.push_back({ "empty", wasapi_caps({}) });
+        devs.push_back({ "asio256", asio_caps(kFull, "dsd256") });
+        devs.push_back({ "asio1024", asio_caps(kFull, "dsd1024") });
+        std::vector<SourceInfo> srcs;
+        srcs.push_back(pcm_src(44100, 16));
+        srcs.push_back(pcm_src(96000, 24));
+        srcs.push_back(dsd_src(64));
+        const PresetProfile three[3] = { PresetProfile::BitPerfect, PresetProfile::Pcm, PresetProfile::Dsd };
+        // 2026-10-26 加第 4 档**之前**的实测基线（54 条 = 6 设备 × 3 源 × 3 档，顺序固定）
+        static const char* kBaseline[54] = {
+        "bitperfect|follow|0||0||0|none|0|1|0",
+        "pcm|384000|0||0|poly-sinc-tight-lp|512|auto|0|1|0",
+        "dsd|follow|256|ec|7|poly-sinc-tight-lp|512|none|0|1|0",
+        "bitperfect|follow|0||0||0|none|0|1|0",
+        "pcm|384000|0||0|poly-sinc-tight-lp|512|auto|0|1|0",
+        "dsd|follow|256|ec|7|poly-sinc-tight-lp|512|none|0|1|0",
+        "bitperfect|follow|64||0||0|none|1|1|0",
+        "pcm|384000|0||0|poly-sinc-tight-lp|512|auto|0|1|0",
+        "dsd|follow|256|ec|7|poly-sinc-tight-lp|512|none|0|1|0",
+        "bitperfect|follow|0||0||0|none|0|1|0",
+        "pcm|96000|0||0|poly-sinc-tight-lp|512|auto|0|1|0",
+        "dsd|96000|0||0|poly-sinc-tight-lp|512|auto|0|1|0",
+        "bitperfect|follow|0||0||0|none|0|1|0",
+        "pcm|96000|0||0|poly-sinc-tight-lp|512|auto|0|1|0",
+        "dsd|96000|0||0|poly-sinc-tight-lp|512|auto|0|1|0",
+        "bitperfect|follow|0||0||0|none|0|1|0",
+        "pcm|96000|0||0|poly-sinc-tight-lp|512|auto|0|1|0",
+        "dsd|96000|0||0|poly-sinc-tight-lp|512|auto|0|1|0",
+        "bitperfect|follow|0||0||0|none|0|1|0",
+        "pcm|192000|0||0|poly-sinc-tight-lp|512|auto|0|1|0",
+        "dsd|follow|64|ec|7|poly-sinc-tight-lp|512|none|0|1|0",
+        "bitperfect|follow|0||0||0|none|0|1|0",
+        "pcm|192000|0||0|poly-sinc-tight-lp|512|auto|0|1|0",
+        "dsd|follow|64|ec|7|poly-sinc-tight-lp|512|none|0|1|0",
+        "bitperfect|follow|64||0||0|none|1|1|0",
+        "pcm|192000|0||0|poly-sinc-tight-lp|512|auto|0|1|0",
+        "dsd|follow|64|ec|7|poly-sinc-tight-lp|512|none|1|1|0",
+        "bitperfect|follow|0||0||0|none|0|1|0",
+        "pcm|follow|0||0|poly-sinc-tight-lp|512|auto|0|1|0",
+        "dsd|follow|0||0|poly-sinc-tight-lp|512|none|0|1|0",
+        "bitperfect|follow|0||0||0|none|0|1|0",
+        "pcm|follow|0||0|poly-sinc-tight-lp|512|auto|0|1|0",
+        "dsd|follow|0||0|poly-sinc-tight-lp|512|none|0|1|0",
+        "bitperfect|follow|64||0||0|none|0|1|0",
+        "pcm|follow|0||0|poly-sinc-tight-lp|512|auto|0|1|0",
+        "dsd|follow|0||0|poly-sinc-tight-lp|512|none|0|1|0",
+        "bitperfect|follow|0||0||0|none|0|1|0",
+        "pcm|384000|0||0|poly-sinc-tight-lp|512|auto|0|1|0",
+        "dsd|follow|256|ec|7|poly-sinc-tight-lp|512|none|0|1|0",
+        "bitperfect|follow|0||0||0|none|0|1|0",
+        "pcm|384000|0||0|poly-sinc-tight-lp|512|auto|0|1|0",
+        "dsd|follow|256|ec|7|poly-sinc-tight-lp|512|none|0|1|0",
+        "bitperfect|follow|64||0||0|none|1|1|0",
+        "pcm|384000|0||0|poly-sinc-tight-lp|512|auto|0|1|0",
+        "dsd|follow|256|ec|7|poly-sinc-tight-lp|512|none|0|1|0",
+        "bitperfect|follow|0||0||0|none|0|1|0",
+        "pcm|384000|0||0|poly-sinc-tight-lp|512|auto|0|1|0",
+        "dsd|follow|512|ec|7|poly-sinc-tight-lp|512|none|0|1|0",
+        "bitperfect|follow|0||0||0|none|0|1|0",
+        "pcm|384000|0||0|poly-sinc-tight-lp|512|auto|0|1|0",
+        "dsd|follow|512|ec|7|poly-sinc-tight-lp|512|none|0|1|0",
+        "bitperfect|follow|64||0||0|none|1|1|0",
+        "pcm|384000|0||0|poly-sinc-tight-lp|512|auto|0|1|0",
+        "dsd|follow|512|ec|7|poly-sinc-tight-lp|512|none|0|1|0",
+        };
+        int idx = 0, mismatch = 0;
+        std::string firstBad;
+        for (const auto& d : devs) {
+            for (const auto& src : srcs) {
+                for (PresetProfile p : three) {
+                    const PresetSettings s = plan_preset(p, d.c, src);
+                    const std::string sig = std::string(preset_profile_name(p)) + "|" + s.rate + "|" +
+                                            std::to_string(s.dsd) + "|" + s.modFamily + "|" +
+                                            std::to_string(s.modOrder) + "|" + s.filter + "|" +
+                                            std::to_string(s.minTapsPerInput) + "|" + s.shaper + "|" +
+                                            std::to_string(s.directSdm) + "|" +
+                                            std::to_string((int)s.clearEqIr) + "|" +
+                                            std::to_string((long long)(s.volumeDb * 1000000.0));
+                    if (idx >= 54) { ++mismatch; continue; }
+                    if (sig != kBaseline[idx]) {
+                        ++mismatch;
+                        if (firstBad.empty())
+                            firstBad = std::string(d.name) + "/" + preset_profile_name(p) +
+                                       " got=[" + sig + "] want=[" + kBaseline[idx] + "]";
+                    }
+                    ++idx;
+                }
+            }
+        }
+        ck(idx == 54, "Case 24: 三档 × 6 设备 × 3 源 = 54 组全部取到（自检）", std::to_string(idx));
+        ck(mismatch == 0, "Case 24: 三档 54 组签名与加第 4 档**之前**的基线逐字节一致", firstBad);
+    }
+
+    if (g_fails == 0) std::printf("\n[ALL PASS] 四档预设决策单测全部通过\n");
     else               std::printf("\n[FAILED] %d 项未通过\n", g_fails);
     return g_fails == 0 ? 0 : 1;
 }

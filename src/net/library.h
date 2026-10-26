@@ -147,10 +147,20 @@ public:
         std::lock_guard<std::mutex> lk(mtx_);
         return roots_;
     }
-    // 加根：必须先过 UTF-8 校验与合法目录检查
+    // 加根：必须先过 UTF-8 校验、绝对路径校验与合法目录检查
     addRootResult addRootEx(const std::string& dir) {
         if (dir.empty()) return { false, "目录为空" };
         if (!lib_valid_utf8(dir)) return { false, "路径编码非 UTF-8" };
+        // 2026-10-26 BUG（用户截图：点侧栏「文件夹」显示「目录不存在」）的根因 (b)：
+        //   这里原来只查 is_directory，不要求绝对路径 ⟹ "./data" 被原样存进 conf。
+        //   LibTrack::path 的契约本来就是「绝对路径」；相对根存进 conf 后**含义随进程 cwd
+        //   漂移**（.app 双击启动 cwd=/ ⟹ ./data 解析成 /data；开发时 cwd=项目根 ⟹ 指向
+        //   真实目录），同一个 conf 在不同启动方式下指向不同地方，扫描/文件浏览必然对不上
+        //   —— 这正是本 BUG。
+        // ★ 刻意**不**用 fsx::absolute() 自动转换：静默改写用户输入会让「我填的路径」与
+        //   「实际存进 conf 的路径」不一致，且测试会掩盖问题（看着加进去了，存的是别的）。
+        //   拒绝 + 说明原因更诚实。调用方（rtaweb 的 --music-dir）负责先做绝对化。
+        if (!fsx::path(p8(dir)).is_absolute()) return { false, "库根必须是绝对路径: " + dir };
         std::error_code ec;
         bool ok = false;
         try {
@@ -1178,27 +1188,110 @@ inline std::vector<size_t> Library::search(const std::string& q, size_t limit) c
     return hits;
 }
 
+// ---------------------------------------------------------------------------
+// 封面取图（261026-02 B-1，来自上游 v1.5.2 `fb77a0b` 的实测诊断，本机同构复现）
+//
+// 旧实现的两个连锁缺陷（实测必现，与平台无关）：
+//   ① 只问 `tracks_[a.idx[0]].path` 一首 —— 首曲没图就整张专辑空白，哪怕同专辑第 2 首
+//      内嵌了 700 KB 的封面。合辑/精选集里这非常常见（各曲来自不同源文件）。
+//   ② `rta::audio::get_cover()` 找不到图时**不返回空**，而是返回一张 **1x1 透明 PNG**
+//      （media_info.h:362 的 px[]，77~89 字节）。旧代码 `return !bytes.empty()` 于是
+//      恒为 true ⟹ HTTP 200 + 合法 PNG ⟹ 前端 `<img onerror>` 永远不会触发
+//      ⟹ 用户看到的是一块空白而不是首字母占位；更糟的是这张占位图还被写进 coverCache_
+//      **永不重试**，用户后来补了封面也得重启才看得见。
+//
+// 现在的口径：
+//   * 顺序：本专辑 **cv=1 的曲目优先**（≤3 首），再其余曲目（≤3 首）。
+//     两个 3 的上限是为了别对 200 首的合辑起 200 次 ffmpeg（每次一个进程，实测 ~20-40 ms）。
+//   * 判定：真封面 ⟺ 字节数 >= kCoverMinBytes(1KB)。小于它的**继续试下一首**。
+//   * 1x1 占位图（get_cover 的兜底产物）靠 IHDR 宽高识别，**当作"没有"**，不当小图。
+//   * 全部试完：拿到真图 ⟹ 正缓存 + true；只有"小但真实"的图 ⟹ 用它 + true（总比空白好）；
+//     什么都没有 ⟹ **负缓存 + false**（前端 onerror 露首字母，且下次还会重试）。
+//
+// ⚠️ 负缓存用的是「空字节」这一既有约定（见下面 cache 命中分支），不是新的哨兵值。
+// ---------------------------------------------------------------------------
+// 1x1 占位 PNG 识别：只看 PNG 签名 + IHDR 的前 10 字节（宽/高），不解码、不依赖具体字节序列。
+// 这样即使 media_info.h 以后换了占位图颜色/压缩参数，这条判据依然成立。
+inline bool lib_cover_is_1x1_placeholder(const std::vector<unsigned char>& b) {
+    static const unsigned char kPng[8] = { 0x89, 'P', 'N', 'G', 0x0D, 0x0A, 0x1A, 0x0A };
+    if (b.size() < 33) return false;                       // 8(sig)+4(len)+4("IHDR")+8(w,h) = 24；33 是宽松下界
+    if (std::memcmp(b.data(), kPng, 8) != 0) return false;
+    if (std::memcmp(b.data() + 12, "IHDR", 4) != 0) return false;
+    auto be32 = [&](size_t off) {
+        return ((uint32_t)b[off] << 24) | ((uint32_t)b[off + 1] << 16) |
+               ((uint32_t)b[off + 2] << 8) | (uint32_t)b[off + 3];
+    };
+    return be32(16) == 1u && be32(20) == 1u;
+}
+
 inline bool Library::albumCover(const std::string& key, std::vector<unsigned char>& bytes, std::string& mime) {
-    std::string firstPath;
+    // 1 KB：真实封面（含 APIC 缩略图）极少这么小；比它还小的一律先当"可疑"，继续试下一首。
+    const size_t kCoverMinBytes = 1024;
+    // 取图顺序：cv=1 的曲目优先（≤3），再其余曲目（≤3）。锁内只收集路径，锁外才起 ffmpeg。
+    std::vector<std::string> order;
     {
         std::lock_guard<std::mutex> lk(mtx_);
         auto it = coverCache_.find(key);
         if (it != coverCache_.end()) {
-            if (it->second.first.empty()) return false;
+            if (it->second.first.empty()) return false;    // 负缓存：确定没有
             bytes = it->second.first; mime = it->second.second; return true;
         }
+        std::vector<std::string> withCv, without;
         const auto& v = albumVecLocked();
-        for (auto& a : v) if (a.key == key && !a.idx.empty()) { firstPath = tracks_[a.idx[0]].path; break; }
+        for (const auto& a : v) {
+            if (a.key != key) continue;
+            for (size_t ix : a.idx) {
+                if (ix >= tracks_.size()) continue;
+                const LibTrack& t = tracks_[ix];
+                if (t.path.empty()) continue;
+                if (t.hasCover) { if (withCv.size()  < 3) withCv.push_back(t.path); }
+                else            { if (without.size() < 3) without.push_back(t.path); }
+            }
+            break;                                          // 专辑键唯一，命中即停
+        }
+        order = withCv;
+        order.insert(order.end(), without.begin(), without.end());
     }
-    if (firstPath.empty()) return false;
-    std::vector<unsigned char> b = rta::audio::get_cover(firstPath, mime);
-    {
+    if (order.empty()) return false;
+
+    std::vector<unsigned char> best;      // 真封面（>= 1KB）
+    std::string bestMime;
+    std::vector<unsigned char> small;     // 小但**不是** 1x1 占位图（最后兜底）
+    std::string smallMime;
+    for (const std::string& p : order) {
+        std::string m;
+        std::vector<unsigned char> cand = rta::audio::get_cover(p, m);
+        if (cand.empty()) continue;
+        if (lib_cover_is_1x1_placeholder(cand)) continue;    // get_cover 的"没有"兜底：跳过，继续问下一首
+        if (cand.size() >= kCoverMinBytes) { best.swap(cand); bestMime = m; break; }
+        if (small.empty()) { small.swap(cand); smallMime = m; }
+    }
+    if (!best.empty()) {
         std::lock_guard<std::mutex> lk(mtx_);
         if (coverCache_.size() > 256) coverCache_.clear();
-        coverCache_[key] = { b, mime };
+        coverCache_[key] = { best, bestMime };
+        bytes.swap(best);
+        mime = bestMime;
+        return true;
     }
-    bytes.swap(b);
-    return !bytes.empty();
+    if (!small.empty()) {
+        // 全专辑只有小图（真实但很小，例如 600 字节的缩略图）：用它，但仍然**不写负缓存**
+        // —— 让用户以后换了更大的封面时能自动生效。这里也不写正缓存，理由同下。
+        bytes.swap(small);
+        mime = smallMime;
+        return true;
+    }
+    {
+        // 全专辑都没有封面：写负缓存（空字节 = 确定没有），返回 false 让前端露首字母。
+        // 为什么敢缓存"没有"：这一轮已经把 cv=1 与其余各 3 首都问过了，短期内重试只会重复
+        // 起同样的 ffmpeg 进程；而**占位图不写正缓存**这条保证不会把坏结果钉死。
+        std::lock_guard<std::mutex> lk(mtx_);
+        if (coverCache_.size() > 256) coverCache_.clear();
+        coverCache_[key] = { std::vector<unsigned char>(), std::string() };
+    }
+    bytes.clear();
+    mime = "image/png";
+    return false;
 }
 
 inline void Library::joinScan() {
