@@ -618,7 +618,7 @@ add_executable(test_preset_profiles tests/test_preset_profiles.cpp)
 target_include_directories(test_preset_profiles PRIVATE ${CMAKE_SOURCE_DIR}/src)
 add_test(NAME preset_profiles COMMAND test_preset_profiles)
 
-# ---------------- 音频域体检 / 房间校正 / GPU 精度（外部评审会话 6 包，2026-10-26 合入）----------------
+# ================= 音频域六包（外部评审会话 audio-health，2026-10-26 交接）=================
 # A 包：GPU 精度探针（依赖本机 GPU，不注册 add_test；无卡机器会打印"不可用"并 exit 2）
 add_executable(gpu_precision tools/gpu_precision.cpp)
 target_include_directories(gpu_precision PRIVATE ${CMAKE_SOURCE_DIR}/src)
@@ -653,3 +653,10 @@ add_executable(test_room_measurement tests/test_room_measurement.cpp)
 target_link_libraries(test_room_measurement PRIVATE rtadsp)
 target_include_directories(test_room_measurement PRIVATE ${CMAKE_SOURCE_DIR}/src)
 add_test(NAME room_measurement COMMAND test_room_measurement)
+
+# GPU 卷积流式正确性（261026-07）：CPU 流式必须与整块逐位一致；GPU 部分只诊断。
+# 无卡/无 rtagpu.dll 的机器 GPU 段自动 SKIP，CPU 判据照跑。
+add_executable(test_gpu_stream tests/test_gpu_stream.cpp)
+target_link_libraries(test_gpu_stream PRIVATE rtadsp)
+target_include_directories(test_gpu_stream PRIVATE ${CMAKE_SOURCE_DIR}/src)
+add_test(NAME gpu_stream COMMAND test_gpu_stream)
