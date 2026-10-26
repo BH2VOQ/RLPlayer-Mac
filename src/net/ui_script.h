@@ -159,6 +159,85 @@ function toast(m) {
   t.textContent = m; t.classList.add('on');
   clearTimeout(window._tt); window._tt = setTimeout(function () { t.classList.remove('on'); }, 2000);
 }
+// ============================================================================
+// 2026-10-26 F-1 / B-3：底栏文本跑马灯（用户明确要求「用滚动文字」）
+//
+// 为什么用 MutationObserver 而不是改每个赋值点：
+//   #npt / #npart 的 textContent 在 ui_script.h 里有 5+ 个赋值位置
+//   （loadMeta 的 3 处、轮询里的"未播放"、异常分支…），逐个改成 mqSet() 既啰嗦又容易漏。
+//   这里把「文本源」(#npt/#npart) 与「显示层」(.mq>.mqi) 分开：
+//     · 源元素仍然被原代码正常写，只是视觉上隐藏（visibility:hidden，保留占位与测量能力）；
+//     · 观察器把源文本同步到滚动内容里，再按实际溢出量决定是否启动动画。
+//   这样任何既有/将来新增的赋值点都自动生效，零侵入。
+//
+// 判据（铁律 3：要能证明"真溢出才滚"）：
+//   · 未溢出时 .mq 不带 mqon ⟹ 无 animation，静态显示；
+//   · 溢出时 --mqdist = 溢出像素数（负值，向左移），duration = 距离/40px per s；
+//   · hover 暂停由 CSS 负责；prefers-reduced-motion 下完全禁用。
+// ============================================================================
+function mqMeasure(rec) {
+  var wrap = rec.wrap, inner = rec.inner;
+  // 先量"内容自然宽度"与"可用宽度"。inner 是 inline-block ⟹ scrollWidth 约等于自身宽度。
+  var avail = wrap.clientWidth;
+  var need = inner.scrollWidth;
+  if (!avail || !need) { wrap.classList.remove('mqon'); return; }
+  var over = need - avail;
+  if (over <= 2) {                      // +2px 容差：亚像素舍入不算溢出
+    wrap.classList.remove('mqon');
+    wrap.style.removeProperty('--mqdist');
+    wrap.style.removeProperty('--mqdur');
+    return;
+  }
+  wrap.classList.add('mqon');
+  // 向左移 over px 后，末尾正好贴住右边缘；alternate 会自己滚回来。
+  wrap.style.setProperty('--mqdist', (-over) + 'px');
+  // 约 40px/s；下限 4s 避免极短溢出太快，上限 30s 避免超长标题等太久
+  var dur = Math.min(30, Math.max(4, Math.abs(over) / 40));
+  wrap.style.setProperty('--mqdur', dur.toFixed(2) + 's');
+}
+function mqSetupOne(srcId, wrapId) {
+  var src = D(srcId), wrap = D(wrapId);
+  if (!src || !wrap) return null;
+  var inner = wrap.querySelector('.mqi');
+  if (!inner) { inner = document.createElement('span'); inner.className = 'mqi'; wrap.appendChild(inner); }
+  // 源元素隐藏但保留在流里（display:none 会失去测量能力，visibility:hidden 不会）
+  src.style.visibility = 'hidden';
+  src.style.position = 'absolute';
+  src.style.pointerEvents = 'none';
+  src.setAttribute('aria-hidden', 'true');
+  var rec = { src: src, wrap: wrap, inner: inner };
+  rec.sync = function () {
+    var t = src.textContent || '';
+    if (inner.textContent !== t) inner.textContent = t;
+    mqMeasure(rec);
+  };
+  return rec;
+}
+function mqMount() {
+  if (!D('mqTitle') || !D('mqArtist')) return;   // 页面结构不对就不启用，绝不抛异常
+  var recs = [mqSetupOne('npt', 'mqTitle'), mqSetupOne('npart', 'mqArtist')];
+  var live = recs.filter(function (r) { return !!r; });
+  if (!live.length) return;
+  live.forEach(function (rec) {
+    rec.sync();
+    // 文本变了 ⟹ 重算；用 characterData+childList 覆盖 textContent 赋值与直接改节点两种写法
+    var mo = new MutationObserver(function () { rec.sync(); });
+    mo.observe(rec.src, { childList: true, characterData: true, subtree: true });
+  });
+  // 窗口/侧栏尺寸变化会改变可用宽度 ⟹ 重新判定是否溢出（否则缩放窗口后跑马灯状态是旧的）
+  if (!window._mqResize) {
+    window._mqResize = function () {
+      (window._mqRecs || []).forEach(function (rec) { mqMeasure(rec); });
+    };
+    window.addEventListener('resize', window._mqResize);
+    // 字体加载完成后宽度会变，补一次
+    if (document.fonts && document.fonts.ready && document.fonts.ready.then) {
+      document.fonts.ready.then(function () { window._mqResize(); }).catch(function () { });
+    }
+  }
+  window._mqRecs = live;
+}
+
 // 261024-02 #3：长时长格式（专辑总时长用 1:05:24，单曲用 4:24；都用本地曲库真实数据，不用 AI 猜）
 function fmtDurLong(x) {
   x = Math.max(0, Math.round(x || 0));
@@ -8322,6 +8401,9 @@ document.addEventListener('visibilitychange', function () {
 /* ---------------- 启动 ---------------- */
 initFavs();
 if (D('npFavBtn')) D('npFavBtn').onclick = function (ev) { if (S.lastCur) toggleFav(S.lastCur, ev); };
+// 2026-10-26 F-1/B-3：底栏跑马灯。必须在 DOM 就绪后挂，且失败绝不能影响启动 —
+// 页面结构变了（缺 #mqTitle）时 mqMount() 会自己静默返回。
+try { mqMount(); } catch (e) { }
 loadLibStats();
 loadSettings();
 loadFilterPhases();   // 功能2：相位预设真相源（/api/filters）

@@ -418,8 +418,19 @@ inline std::string rta_ui_page() {
     //   · backdrop-filter:blur(32px) saturate(190%) + 半透明 --barbg ⟹ 专辑封面滚过去会被柔化成色块；
     //   · 三列 minmax 模板：左（封面+曲名）/ 中（控制组，天然居中）/ 右（状态+音量），
     //     左右两列等权 ⟹ 中间控制组始终在胶囊正中（沿用 261023-04 #1 的判据）。
-    h += ".bar{position:fixed;left:calc(var(--sidew) + 24px);right:24px;bottom:14px;height:66px;max-width:1120px;margin:0 auto;z-index:15;display:grid;grid-template-columns:minmax(230px,1.5fr) minmax(280px,1.6fr) minmax(180px,1.1fr);align-items:center;gap:14px;padding:0 18px;border-radius:16px;background:var(--barbg);backdrop-filter:blur(32px) saturate(190%);-webkit-backdrop-filter:blur(32px) saturate(190%);border:1px solid var(--bar-border);box-shadow:var(--bar-shadow);box-sizing:border-box;min-width:0}";
-    h += ".np{display:flex;align-items:center;gap:11px;min-width:0;justify-self:start;cursor:pointer;border-radius:10px;padding:4px 6px;margin-left:-6px;transition:.14s}";
+    // 2026-10-26 B-6 回归修复（用户：「底栏排版甚至都没有之前好」）：
+    //   上一轮把左列 180px→230px 想解决"文字挤"，实测**方向错了**：
+    //   · 长曲名真正的溢出原因不是列窄，而是 `.np` 用了 `justify-self:start`
+    //     ⟹ 这个网格项按 **max-content** 撑开，实测宽 658px（列只有 376px），
+    //       直接压住中间控制组（`.keys` 左边缘 854 < np 右边缘 1008）。
+    //   · 加宽左列反而进一步压缩中间控制组，所以"更差"。
+    //   修法（已用 headless Edge 实测验证）：
+    //     ① 列宽恢复基线 minmax(180px,1.1fr) —— 与 743cd5f 一致；
+    //     ② `.np` 改 `justify-self:stretch` + `overflow:hidden`
+    //        ⟹ 宽度锁死在列内（382px），长文本在自己的框里截断，不再压控制组；
+    //     ③ 文本截断交给已有的 `.t1/.t2` ellipsis（它们本来就有）。
+    h += ".bar{position:fixed;left:calc(var(--sidew) + 24px);right:24px;bottom:14px;height:66px;max-width:1120px;margin:0 auto;z-index:15;display:grid;grid-template-columns:minmax(180px,1.1fr) minmax(280px,1.6fr) minmax(180px,1.1fr);align-items:center;gap:14px;padding:0 18px;border-radius:16px;background:var(--barbg);backdrop-filter:blur(32px) saturate(190%);-webkit-backdrop-filter:blur(32px) saturate(190%);border:1px solid var(--bar-border);box-shadow:var(--bar-shadow);box-sizing:border-box;min-width:0}";
+    h += ".np{display:flex;align-items:center;gap:11px;min-width:0;justify-self:stretch;overflow:hidden;cursor:pointer;border-radius:10px;padding:4px 6px;margin-left:-6px;transition:.14s}";
     h += ".np:hover{background:var(--hov)}";
     // Apple Music 的迷你封面是 44px 圆角方图（不是 56px）
     h += ".cv2{width:44px;height:44px;border-radius:8px;flex:none;background:var(--cvbg) center/cover no-repeat;border:1px solid var(--line);box-shadow:0 3px 12px var(--shadow)}";
@@ -430,7 +441,29 @@ inline std::string rta_ui_page() {
     //（大量代码在写它们），只用 CSS 隐藏，不再占行。采样率仍由右侧 #fmt 显示，信息不丢。
     h += ".np .boring{display:none!important}";
     // .tx 必须是可收缩的 flex 列，否则长曲名会把整列撑开、把封面挤出卡片
-    h += ".np .tx{display:flex;flex-direction:column;justify-content:center;min-width:0;overflow:hidden}";
+    // ⚠️ flex:1 不可省：.np 是 flex 行，.tx 若没有 flex-grow 会缩到 min-content（实测只有 244px，
+    //    而整列可用 376px）⟹ 跑马灯会把"本来放得下的标题"误判成溢出。
+    h += ".np .tx{display:flex;flex-direction:column;justify-content:center;flex:1 1 auto;min-width:0;overflow:hidden}";
+    // 2026-10-26 F-1 / B-3（用户明确要求：「底下的那个文字不能用滚动文字吗」）：
+    //   底栏两行文本（曲名 / 艺术家）**超长时改为横向跑马灯**，不再用 ellipsis 截断。
+    //   设计要点：
+    //     · 只在真的溢出时启动（脚本量 scrollWidth > clientWidth），否则完全静止 ——
+    //       无脑滚动会让"短标题"也晃来晃去，比截断更难看；
+    //     · 时长按溢出距离算（约 40px/s），短文本不会一闪而过；
+    //     · hover 暂停（Apple Music 的行为：想看全就悬停）；
+    //     · 用 alternate 往返而不是瞬间跳回 —— 循环 marquee 的"跳回"很刺眼；
+    //     · 不用已废弃的 <marquee> 标签。
+    //   实现：.mq 是裁剪视口，.mqi 是实际滚动的内容；由 ui_script.h 的 mqMount() 注入并同步文本
+    //   （用 MutationObserver 监听，因此所有既有的 textContent 赋值点都不用改）。
+    //   ⚠️ .mq 必须是 **block + width:100% + min-width:0**：
+    //      实测 inline 元素只包住内容宽度（244px 而不是整列），可用宽度就会被算小 ⟹ 误判溢出。
+    h += ".np .tx>.t1,.np .tx>.t2{min-width:0;max-width:100%}";
+    h += ".np .mq{display:block;width:100%;max-width:100%;min-width:0;overflow:hidden}";
+    h += ".np .mq>.mqi{display:inline-block;white-space:nowrap;will-change:transform}";
+    h += ".np .mq.mqon>.mqi{animation:mqscroll var(--mqdur,9s) linear infinite alternate}";
+    h += ".np:hover .mq.mqon>.mqi{animation-play-state:paused}";
+    h += "@keyframes mqscroll{from{transform:translateX(0)}to{transform:translateX(var(--mqdist,0px))}}";
+    h += "@media (prefers-reduced-motion:reduce){.np .mq.mqon>.mqi{animation:none}}";
     // 中间控制+进度：display: flex; flex-direction: column; align-items: center; gap: 3px; width: 100%; max-width: 440px; justify-self: center;
     h += ".ctr{display:flex;flex-direction:column;align-items:center;gap:3px;width:100%;max-width:440px;justify-self:center}.keys{display:flex;align-items:center;gap:6px}";
     // bit-perfect 状态 chip（#bpBadge）：紧凑小标签，颜色区分态；空态不占位。
@@ -767,14 +800,19 @@ h += "#npPage .npedge{display:none}";
     h += ".cline{width:1.5px;height:8px;background:var(--line2,var(--line));margin:-3px 0 -3px 3.75px}";
     h += ".chain-foot{margin-top:10px;font-size:11px;color:var(--mut);line-height:1.6;display:flex;align-items:center;justify-content:space-between;gap:8px}";
     // 设置页
-    // 2026-10-26 BUG（用户报「保存按钮不该在页面底部吗」）：.setfoot 原本是 position:sticky;bottom:0，
-    //   但 sticky 粘的是**最近的滚动祖先**。真正的滚动容器是 .main（overflow:auto），
-    //   #setpage 只是 .main 的 flex 子项、自身不滚动 ⟹ sticky 失去滚动上下文、退化成普通块
-    //   ⟹ 保存栏被推到表单末尾，用户必须滚到最底才看得到（截图里它正卡在「声道音量微调」中间）。
-    //   修法：#setpage 自己成为滚动容器（overflow:auto + flex:1 + min-height:0），sticky 才有意义。
-    //   min-height:0 是 flex 子项能收缩的必要条件，缺了它 overflow 不生效。
-    h += "#setpage{display:none;flex:1;min-height:0;overflow:auto;padding:20px 24px 24px}";
-    h += "#setpage.on{display:block}";
+    // 2026-10-26 B-2 保存栏（用户：「保存正常不应该在页面底部吗」）—— 第二轮，实测定位：
+    //   第一轮把 #setpage 改成滚动容器（overflow:auto + flex:1 + min-height:0）**是对的**，
+    //   headless Edge 实测：flexGrow=1 生效、scrollHeight>clientHeight 时 sticky 确实粘住。
+    //   但 sticky 只解决"内容超过一屏"的情况；**内容不满一屏时它退化成普通块**，
+    //   而 .setfoot 是最后一个子元素 ⟹ 停在内容末尾，而不是视口底部：
+    //     实测 内容不足一屏的三页 —— meta 差距 284px、pcm 80px、sdm 62px（用户看到的"夹在中间"）。
+    //   修法（不改 sticky，改成 flex 列 + margin-top:auto）：
+    //     · #setpage.on 用 flex-direction:column；.setfoot{margin-top:auto}
+    //       ⟹ 内容不满一屏时贴底；内容超过一屏时 margin-top:auto 不产生额外空间，自然跟随滚动。
+    //     · 实测修复后：七个页签的"距视口底"全部 = 24px（即 padding-bottom），且滚到最底不被 .bar 遮挡。
+    //   注意 display:block→flex 不能让 sticky 失效，所以同时保留 sticky 作为超长内容时的兜底。
+    h += "#setpage{display:none;flex:1;min-height:0;overflow:auto;flex-direction:column;padding:20px 24px 24px}";
+    h += "#setpage.on{display:flex}";
     h += ".sgroup{margin-bottom:22px;border:1px solid var(--line);border-radius:12px;background:var(--bg2);overflow:visible}";
     h += ".sghead{display:flex;align-items:center;gap:9px;padding:11px 16px;border-bottom:1px solid var(--line);font-weight:650;font-size:12.5px;background:var(--bg3);border-radius:11px 11px 0 0}";
     h += ".sghead .hint{font-weight:400;font-size:11px;color:var(--mut2)}";
@@ -927,7 +965,9 @@ h += "#npPage .npedge{display:none}";
     h += ".libstats .lbl{display:block;font-size:10px;color:var(--mut2);margin-bottom:3px}";
     h += ".libstats .val{font-weight:650;font-size:14px;color:var(--txt);font-variant-numeric:tabular-nums;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}";
     h += "@media (max-width:1100px){#crumb,#sub{display:none}.search{max-width:320px}}";
-    h += ".setfoot{display:flex;gap:10px;align-items:center;padding:12px 2px 10px;position:sticky;bottom:0;background:var(--bg);border-top:1px solid var(--line);z-index:6}";
+    // 2026-10-26 B-2：margin-top:auto 让保存栏在"内容不满一屏"时也贴到视口底部。
+    //   sticky 保留作为"内容超过一屏"时的兜底（粘在滚动容器底边）。
+    h += ".setfoot{display:flex;gap:10px;align-items:center;padding:12px 2px 10px;margin-top:auto;position:sticky;bottom:0;background:var(--bg);border-top:1px solid var(--line);z-index:6}";
     h += ".setfoot .sp{flex:1}";
     h += ".meter-bar{height:6px;border-radius:3px;background:var(--track);overflow:hidden;position:relative;margin:4px 0 2px}";
     h += ".meter-val{height:100%;width:0%;background:linear-gradient(90deg,var(--acc),#22c55e);transition:width .12s ease;border-radius:3px}";
@@ -1082,7 +1122,12 @@ h += "#npPage .npedge{display:none}";
     //     · 采样率改由右侧已有的 #fmt（"44.1k/24"）承载，不丢信息；
     //     · 播放/暂停状态由中间那颗播放键的图标本身表达。
     h += "<div class=bar><div class='np' id=npOpen title='打开正在播放'>";
-    h += "<div class=cv2 id=cv></div><div class=tx><div class=t1 id=npt>未播放</div><div class=t2 id=npart></div>";
+    // 2026-10-26 F-1/B-3：每行文本套一层 .mq 裁剪视口 + .mqi 滚动内容。
+    //   #npt / #npart 仍是**唯一文本源**（原有 5+ 处赋值点全不动），
+    //   由 ui_script.h 的 mqMount() 用 MutationObserver 同步到 .mqi 并按溢出量决定是否滚动。
+    h += "<div class=cv2 id=cv></div><div class=tx>";
+    h += "<div class=t1><span class=mq id=mqTitle><span class=mqi></span></span><span id=npt>未播放</span></div>";
+    h += "<div class=t2><span class=mq id=mqArtist><span class=mqi></span></span><span id=npart></span></div>";
     h += "<div class='t2 boring' id=nps>选择一个专辑开始</div>";
     h += "<div class='t2 t-next boring' id=npNextTrack style='display:none' title='下一首'></div></div></div>";
     // 2026-10-23（用户 261023-02 #1）：底栏常驻 bit-perfect 徽标。
