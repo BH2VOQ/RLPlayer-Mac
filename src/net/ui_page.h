@@ -761,7 +761,13 @@ h += "#npPage .npedge{display:none}";
     h += ".cline{width:1.5px;height:8px;background:var(--line2,var(--line));margin:-3px 0 -3px 3.75px}";
     h += ".chain-foot{margin-top:10px;font-size:11px;color:var(--mut);line-height:1.6;display:flex;align-items:center;justify-content:space-between;gap:8px}";
     // 设置页
-    h += "#setpage{display:none;padding:20px 24px 104px}";   // 底部留出 sticky 保存栏的高度 + 呼吸位（UI 评审：窄窗底栏压字）
+    // 2026-10-26 BUG（用户报「保存按钮不该在页面底部吗」）：.setfoot 原本是 position:sticky;bottom:0，
+    //   但 sticky 粘的是**最近的滚动祖先**。真正的滚动容器是 .main（overflow:auto），
+    //   #setpage 只是 .main 的 flex 子项、自身不滚动 ⟹ sticky 失去滚动上下文、退化成普通块
+    //   ⟹ 保存栏被推到表单末尾，用户必须滚到最底才看得到（截图里它正卡在「声道音量微调」中间）。
+    //   修法：#setpage 自己成为滚动容器（overflow:auto + flex:1 + min-height:0），sticky 才有意义。
+    //   min-height:0 是 flex 子项能收缩的必要条件，缺了它 overflow 不生效。
+    h += "#setpage{display:none;flex:1;min-height:0;overflow:auto;padding:20px 24px 24px}";
     h += "#setpage.on{display:block}";
     h += ".sgroup{margin-bottom:22px;border:1px solid var(--line);border-radius:12px;background:var(--bg2);overflow:visible}";
     h += ".sghead{display:flex;align-items:center;gap:9px;padding:11px 16px;border-bottom:1px solid var(--line);font-weight:650;font-size:12.5px;background:var(--bg3);border-radius:11px 11px 0 0}";

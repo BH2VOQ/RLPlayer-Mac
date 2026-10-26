@@ -1,30 +1,52 @@
 # RLPlayer
 
-**Windows 上的高保真播放引擎 + 播放器**（RLPlayer 同类）。核心目标只有一个：**不计代价提升本地播放音质**，并且把每一步都变成可测量的数字。
+**macOS 上的高保真播放引擎 + 播放器**（RLPlayer 同类）。核心目标只有一个：**不计代价提升本地播放音质**，并且把每一步都变成可测量的数字。
 
-- 输出链路完全自研：升频 → 抖动/噪声整形 → SDM/DSD 调制 → 卷积 → 20 段 PEQ → WASAPI 独占 / ASIO / UPnP / 网络端点
+- 输出链路完全自研：升频 → 抖动/噪声整形 → SDM/DSD 调制 → 卷积 → 20 段 PEQ → **CoreAudio 独占（Hog）/ 共享 / UPnP / 网络端点**
 - **不追求"听起来更好"，追求"能测出来好"**：升频阻带 −189 dB、DSD 源抽取 THD+N 99.2 dB、网络传输端到端逐位相同
-- 内置 WebView2 界面（**真正无边框**、托盘常驻），也可全部用 CLI 驱动
-- 单包自包含：内置 ffmpeg/ffprobe、GPU 内核、WebView2 运行时，用户机上**不需要装任何运行库**
+- **单进程原生应用**：`.app` 内嵌 WKWebView 渲染界面，业务逻辑**静态链进同一进程**——不占端口、不起子进程、不需要任何浏览器
+- 单包自包含：内置 ffmpeg/ffprobe、Metal GPU 内核，用户机上**不需要装任何运行库**
 
-> 当前版本 **1.3.15**（2026-10-24）。最新事实、逐轮实测数字与已知限制以 [STATUS.md](STATUS.md) 为准。
-
-![主界面](docs/screens/20-dark-albums.png)
+> 当前版本 **1.0.4**（2026-10-26）。逐轮实测数字与已知限制见 [STATUS.md](STATUS.md)。
 
 ---
 
-## 最近更新（1.3.15）
+## 这是独立分支
+
+本仓库是 **macOS 独立产品线**，与上游 `github.com/okhuoyanyan/RLPlayer`（Windows）**不再合并**。
+
+| | 上游 | 本仓库 |
+|---|---|---|
+| 平台 | Windows x64 | macOS 13.0+ / arm64 |
+| 输出 | WASAPI 独占/共享、ASIO | **CoreAudio 独占（Hog）/ 共享** |
+| GPU | HIP（AMD）/ CUDA（NVIDIA） | **Metal** |
+| 界面 | WebView2 + 托盘 | **WKWebView + 原生 NSWindow** |
+| 进程 | 独立 HTTP 服务 + 客户端 | **单进程**（`WKURLSchemeHandler` 桥接内置核心） |
+| DSD 输出 | Native DSD（ASIO）+ DoP | **仅 DoP**（macOS 无 ASIO 原生 DSD 驱动通路） |
+
+> 因此 `#ifdef _WIN32` 分支在本仓库是死代码，Windows 平台层（WASAPI / ASIO / WebView2 / WinHTTP / MMCSS / dbghelp / CUDA / HIP）**已全部删除**。
+
+---
+
+## 最近更新（1.0.4）
+
+对比上游 v1.5.2，本轮修了 6 个 mac 可复现 BUG，并在 mac 架构上重做了 7 组功能：
 
 | 项 | 内容 |
 |---|---|
-| 窗口 | **四边可拖拽拉伸**（页面发起 resize；WebView2 子窗口跨进程，原生 hit-test 拿不到鼠标） |
-| GPU | `/api/status` 拆成 `gpu`（可用）/ `gpuUsed`（本次真的参与）/ `gpuResample` / `gpuConv`；修掉"一首走过 GPU 后所有曲目都亮"的复位 bug |
-| AI 资料 | 进单曲页/专辑页**自动整理**（不用再点）；专辑页并发 ≤2 后台预取全部曲目；检索 knowledge 与 search+fetch 并行（受控 A/B −46%） |
-| 页面 | 艺术家页不再整页空白（先渲染基础页）；专辑资料不再贴边；「切到 bit-perfect 直通」挪到输出后端右侧 |
-| PEQ | 旁路语义写清 + 常驻状态行（已旁路 / 生效·全 0 dB / 生效·有非 0 dB 段） |
-| 音频 | 独占缓冲尊重设置（1.3.14）：删除 20 ms 封顶 + L1/L2 自适应回退 + 学习缓存；STAT 增 `dry/per/bf` |
-
-1.3.14：**四边白框真因**（WebView2 创建时内缩 5px）、歌词跟随重写、PEQ 20 段对齐与 HIFI 化、N300 欠载修复。
+| **专辑封面** | 只问首曲 + 1x1 占位图当封面缓存 ⟹ 首曲无图时整张专辑空白。改为 cv=1 曲目优先（≤3）+ 其余（≤3）、`<1KB` 或 1x1 继续试、占位写负缓存 |
+| **WAV 占位标题** | RIFF `INFO` 的字面 `0x3F`（`???`）压过 ID3 真名。新增 `tag_is_placeholder()`，**只限 WAV 跨块合并**（MP3/OGG 套上会让 A/B 变红） |
+| **单曲入队** | 专辑页曲目行**零入口**（连右键都没绑）。加可见「+」按钮 + 行右键，列表页同步 |
+| **底栏徽标** | 两态 → **六态**（直通 / PCM-PCM / PCM-DSD / DSD-DSD × bit-perfect 与否），带降级原因 `title` |
+| **上传上限** | `/api/upload` 被 16MB 全局 body 上限挡死。按路径给上限（上传 2GB，其余 16MB） |
+| **`Expect: 100-continue`** | curl 对 >1MB 请求体默认带该头并等 `100 Continue`（等 1s），而服务器从不回、body 读循环 500ms 先超时 ⟹ 稳定 400。**基线 2MB 就失败**，被 16MB 上限掩盖至今 |
+| **在线封面** | 新增抓取 + 进度。断网 `fail` 不写负缓存（只有服务器明确说没有才写）；Dice 系数比对拒绝「名字都不像就拿第一张」 |
+| **音频体检** | DR / BS.1770 LUFS / LRA + 假无损检测（频谱截止 + 陡沿 + 24bit LSB），新增 `rtahealth` CLI |
+| **房间校正** | Farina 扫频 / 正则化反卷积 / 心理声学平滑 / 最小相位校正 IR / 超低对齐 / 多声道布局 |
+| **第 4 档预设** | PCM→DSD（`pcm2dsd`，EC-7 + tight + 512 抽头）。**mac 口径：只走 DoP**，无 DoP 能力时明确降级并说明原因 |
+| **status 自证字段** | 新增 `outMode`/`dsd`/`dsdRate`/`carrierRate`/`modFamily`/`modOrder`/`fallbackWhy` |
+| **GPU 精度实测** | 卷积最差 −126.5 dB、升频 max\|Δ\|/峰 8.3e-06（Apple GPU 无 double，与 CUDA 差 9~10 个数量级） |
+| **GPU 卷积真 BUG** | 逐块调用无状态 API ⟹ **IR 拖尾丢失**（实测 65410/65536 样点错、−1.63 dB）。改 overlap-save 后 0/65536、−150.12 dB |
 
 ---
 
@@ -35,12 +57,14 @@
 | 能力 | 说明 |
 |---|---|
 | **多相 sinc 升频** | 任意有理比率；阻带 **−189 dB**，通带纹波 **0.0000 dB** |
-| **滤波器家族** | 16 个预设 + 倒谱法最小相位、混合相位；可指定抽头数 |
+| **滤波器家族** | 16 个预设 + 倒谱法最小相位、混合相位；可指定抽头数；tight 变体（512 抽头/相位） |
 | **抖动 / 噪声整形** | 10 项：NS1/NS4/NS5/NS9/LNS15 + RPDF/TPDF/Gauss1/shaped |
-| **SDM 调制器** | DSD5 / DSD7、多电平 AHM 风格；1-bit 带内 SNR 86.2 dB，8-bit 118.8 dB |
-| **DSD 原生读取** | DSF/DFF 直接读；抽取器 FIR/IIR/CIC；**DirectSDM 逐位直通** |
-| **卷积引擎** | 零延迟均匀分块 FFT，**支持 GPU**（IR 262144 抽头 / 1 秒音频 = 2.0 ms） |
+| **SDM 调制器** | DSD5 / DSD7、多电平 AHM、EC 族（H∞ 受控 NTF）；1-bit 带内 SNR 86.2 dB，8-bit 118.8 dB |
+| **DSD 原生读取** | DSF/DFF 直接读；抽取器 FIR/IIR/CIC；**DirectSDM 逐位直通**；大 DSD 流式解码（首帧 4.3×、内存 17.5×） |
+| **卷积引擎** | 零延迟均匀分块 FFT；支持 Metal GPU（**注意：mac 上 GPU 卷积比 CPU 慢，见下方「GPU」**） |
 | **20 段参数均衡 PEQ** | RBJ 双二阶（PK/LS/HS）、1/3 倍频程、曲线可拖拽节点、自动前级（防削波）、预设 |
+| **房间校正** | IR 卷积 + 测量编排（扫频/反卷积/校正集导出） |
+| **音频体检** | TT DR / LUFS / LRA / 假无损检测，可缓存 |
 | **Matrix / EQ** | 声道路由 + 双二阶 IIR EQ + 延迟插件 + REW/AutoEq 文本解析 + OPRA 耳机预设 |
 | **多声道** | 5.1 / 7.1（WAVEFORMATEXTENSIBLE 声道掩码）+ 每声道增益微调 |
 | **保护** | 过采样峰值检测（ISP）自动预衰减、音量渐变、响度补偿；满幅/瞬态/恢复都有回归测试 |
@@ -49,125 +73,127 @@
 
 | 后端 | 用途 |
 |---|---|
-| **WASAPI 独占** | bit-perfect 直通；自动协商采样率/位深，设备不支持时**如实报错不静默替换**；缓冲尊重用户设置（20–500 ms，失败自适应回退） |
-| **WASAPI 共享** | 独占不可用时的兜底（非 bit-perfect，会明确告知） |
-| **ASIO** | 低延迟专业声卡（驱动崩溃用子进程预检隔离） |
-| **UPnP / DLNA** | 一键推送到局域网渲染器（单曲页 / 流媒体页 / 底栏三处同源） |
-| **NAA / RTANet** | 两机网络音频：**RTANet 端到端逐位相同** + 时钟漂移检测；标准 NAA 只做发现 |
+| **CoreAudio 独占（Hog）** | bit-perfect 直通；Hog Mode 抢设备避免系统混音器重采样；自动协商采样率/位深，设备不支持时**如实报错不静默替换** |
+| **CoreAudio 共享** | 独占不可用时的兜底（非 bit-perfect，会明确告知；不支持 DoP/DSD） |
+| **DoP（DSD over PCM）** | 24-bit 载波封装 DSD；**mac 唯一的 DSD 输出路径** |
+| **UPnP / DLNA** | 一键推送到局域网渲染器 |
+| **NAA / RTANet** | 两机网络音频：RTANet 端到端逐位相同 + 时钟漂移检测；标准 NAA 只做发现 |
 | **Null** | 离线/自动化测试，不开任何设备 |
+
+> **Native DSD**：macOS 没有 ASIO 原生 DSD 驱动通路，`/api/play` 收到 `dsdnative=1` 会**明确报错**而不是静默降级。
 
 ### 界面
 
-WebView2 内嵌、**完全无边框**（无系统标题栏/白框，四边可拉伸，6px 边缘热区）、托盘常驻：
+WKWebView 内嵌、**单进程**、完全无边框（四边可拉伸，6px 边缘热区）：
 专辑网格 / 艺术家 / 曲目 / 文件夹 / 流媒体 / 单曲整页（歌词跟随 + 资料抽屉 + 推送）/ 播放队列 / 设置页（输出·PCM·SDM·高级·EQ·元数据·流媒体·诊断）。
 三套主题（深 / 浅 / 浅蓝），标题栏与窗口边随主题即时切换。
 
 ### 元数据与 AI
 
 - 播放时自动补全标签/封面/歌词：QQ 音乐 / 网易云 / iTunes / lrclib / Discogs；
-- DeepSeek 负责疑难文件名解析、歧义裁决与"资料整理"（**防幻觉**：无来源时标注"AI 整理"，有来源时强制引用）；
+- 在线封面抓取（内嵌图 → 网图 → 负缓存 7 天），请求线程**零网络**；
+- DeepSeek 负责疑难文件名解析、歧义裁决与「资料整理」（**防幻觉**：无来源时标注「AI 整理」，有来源时强制引用）；
 - 实体级缓存（person/release/track），命中即秒回；单曲页与艺术家页**共用同一份 person 缓存**；
 - 可选写回文件标签（`rtatag`），失败不动原文件。
 
 ---
 
-## 界面
-
-| | |
-|---|---|
-| ![专辑](docs/screens/20-dark-albums.png) | ![专辑详情](docs/screens/11-album.png) |
-| ![歌词](docs/screens/12-lyrics.png) | ![信号链](docs/screens/14-chain.png) |
-| ![设置-深](docs/screens/20-dark-settings.png) | ![设置-浅](docs/screens/21-light-settings.png) |
-
----
-
 ## 快速开始
 
-### 直接用发布包
+### 用 DMG 安装包
 
-1. 解压 `RLPlayer-<版本>-win64.zip`（约 371 MB，解压后约 885 MB）
-2. 双击 `RLPlayer.exe`
-3. 托盘图标右键：打开界面 / 复制地址 / 允许局域网访问 / 退出
+1. 下载 `RLPlayer-v<版本>-macOS-arm64.dmg`
+2. 双击挂载，把 `RLPlayer` 拖进 `Applications`
+3. 首次打开若提示「无法验证开发者」：右键 →「打开」，或 `系统设置 → 隐私与安全性 → 仍要打开`
 
-无需安装 VC++ 运行库，无需安装 ROCm，无需单独装 ffmpeg。
+> ad-hoc 签名，未做 Apple 公证（notarization）。自用/内部分发没有问题。
 
-### 用 CLI
+**系统要求**：macOS 13.0+ / Apple Silicon（arm64）。**不支持 Intel Mac。**
 
-```powershell
-# 列出音频端点 + 独占模式支持的采样率/位深矩阵
-tools\wasapi_probe.exe
+### 从源码构建
 
-# 生成测试音（默认 −60 dBFS，不可闻；铁律：绝不擅自放可听声音）
-tools\rtaplay.exe --gen tone.wav 5 44100 24
+```bash
+# 前置：CMake ≥ 3.20、Xcode Command Line Tools
+cd RLPlayer
 
-# bit-perfect 直通
-tools\rtaplay.exe music.flac
+cmake -S . -B build-mac -DCMAKE_BUILD_TYPE=Release
+cmake --build build-mac -j8
+ctest --test-dir build-mac --output-on-failure     # 82/82
 
-# 升频 + 噪声整形
-tools\rtaplay.exe music.flac --rate 705600 --taps 262144 --shaper NS9 --bits 24
+# 出 .app（会自动做架构/部署目标/签名门禁）
+bash tools/make_app_mac.sh
+# → dist-mac/RLPlayer.app
 
-# 房间校正（卷积）+ 耳机 EQ + 音量
-tools\rtaplay.exe music.flac --ir room.wav --eq autoeq.txt --volume -6 --gpu
-
-# 只跑管线不开设备（验证链路首选）
-tools\rtaplay.exe music.flac --rate 705600 --analyze
+# 出 DMG
+hdiutil create -volname "RLPlayer" -srcfolder <staging> -format UDZO RLPlayer.dmg
 ```
+
+> **本机 CMake 不在 PATH**：`/private/tmp/cmake-3.31.6-macos-universal/CMake.app/Contents/bin`
+
+### 用 CLI（开发/调试用）
+
+`rtaweb` 是**开发/测试用 HTTP CLI**（`.app` 不打包它，`make_app_mac.sh` 有门禁：出现即致命错误）。
+它的端点与产品内部 `handle()` 是**同一份代码**，所以适合验证端点语义：
+
+```bash
+# 完全隔离的测试实例（绝不碰用户配置）
+RLPLAYER_STATE_DIR=/tmp/xxx RLPLAYER_LIBRARY_DIR=/tmp/xxx/lib \
+  ./build-mac/rtaweb --port 8960
+
+# 音频体检
+./build-mac/rtahealth 曲目.flac --json
+
+# GPU 精度实测（纯离线，不开设备）
+./build-mac/gpu_precision
+```
+
+> ⚠️ **端口 8899 是用户实例，绝不碰**。测试用 8960+，用完 `kill -TERM`（不 force-kill）。
 
 ---
 
-## 从源码构建
+## GPU
 
-### 前置
+mac 用 `librtagpu.dylib`（Metal，运行时编译 MSL），**动态加载**：dlopen 不到就自动退回 CPU。
 
-| 依赖 | 说明 |
+### ⚠️ 卷积：mac 上不建议开 GPU
+
+实测（Apple M4，`docs/GPU卷积与升频效率细查.md`）：
+
+| IR | 每块 n | GPU | CPU | 结论 |
+|---:|---:|---:|---:|---|
+| 16384 | 4096（**生产**） | 0.891 ms | 0.264 ms | **慢 3.37×** |
+| 16384 | 65536 | 4.108 | 4.332 | 快 5% |
+| 65536 | 4096（**生产**） | 2.088 | 0.520 | **慢 4.02×** |
+| 65536 | 32768 | 3.351 | 4.487 | 快 25% |
+
+**根因**：mac 的 GPU 后端把 FFT 留在 CPU、只做逐点复数乘加；生产每块只有 4096 样，
+远低于 GPU 的盈亏平衡点（实测需 **n ≥ 32768** 才翻盘）。
+即使缓存 IR 频谱（目前每块重算，IR=262144 时占 91.3%）仍慢 3.7~8.3×。
+
+⟹ **`irgpu` 默认关闭，UI 已标注不建议开启**。功能保留可用（数值正确），但 mac 上是净亏。
+
+### ✅ 升频：值得开 GPU
+
+| 转换 | CPU | GPU | 加速 |
+|---|---:|---:|---:|
+| 44.1k → 352800 | 597.9 ms | 16.8 ms | **29×** |
+| 44.1k → 384000 | 21.2 ms | 4.1 ms | **5.5×** |
+
+升频每输出样要做 512~32768 次乘加，是纯算力活，块小也不怕。
+
+### 精度
+
+| 项 | 实测 |
 |---|---|
-| CMake ≥ 3.20 + Ninja | 构建系统 |
-| clang++ / lld-link / llvm-rc | **ROCm 自带的那套**即可（无需 Visual Studio，但需要 Windows SDK 的 rc/库） |
-| Windows SDK | 系统 API / WASAPI / ASIO 头 |
-| WebView2 SDK | 已在 `third_party/webview2` 内置头文件 |
-
-### 构建
-
-```powershell
-cmake -G Ninja -S . -B build -DCMAKE_BUILD_TYPE=Release `
-      -DCMAKE_CXX_COMPILER="C:/Program Files/AMD/ROCm/7.2/bin/clang++.exe" `
-      -DCMAKE_AR="C:/Program Files/AMD/ROCm/7.2/bin/llvm-ar.exe" `
-      -DCMAKE_LINKER="C:/Program Files/AMD/ROCm/7.2/bin/lld-link.exe" `
-      -DCMAKE_RC_COMPILER="C:/Program Files/AMD/ROCm/7.2/bin/llvm-rc.exe"
-cmake --build build
-ctest --test-dir build -E wasapi_shared     # 65/65
-```
-
-`RTA_ARCH` 默认 `x86-64-v2`（分发基线，**不含 AVX-512**，兼容 2009 年后的 CPU）；只在自用机器上可 `-DRTA_ARCH=znver5`。
-
-### GPU 后端（可选）
-
-没有 GPU 也能正常工作（纯 CPU 卷积）。有 AMD 卡时：
-
-```powershell
-hipcc --offload-arch=gfx1201 -O3 -shared -Isrc `
-      src/gpu/gpu_conv_hip.cpp src/gpu/gpu_resample_hip.cpp -o build/rtagpu.dll
-```
-
-> ⚠️ `--offload-arch` **必须**写对（本机 RX 9070 XT = Navi 48 = `gfx1201`）。
-> 写错时 kernel 会**静默失败**而 `hipDeviceSynchronize()` 仍返回成功 —— 详见 [AGENTS.md](AGENTS.md) 铁律 5。
-
-NVIDIA 卡用 `tools/build_gpu_cuda.ps1`（CUDA 12.x；脚本会校验 cubin 与导出符号，避免静默退回 CPU）。
-
-### 出发布包
-
-```powershell
-powershell -File tools\make_dist.ps1 -Version 1.3.15
-```
-
-会先跑兼容门禁（静态 CRT / subsystem ≤ 6.1 / 无 AVX-512），再在"PATH 只剩 System32"的临时目录里
-对内置 GPU 运行时做一次卷积 smoke，任一失败即**拒绝出包**。
+| 卷积（最差格） | **−126.5 dB** 相对 RMS |
+| 卷积（最好格） | −148.4 dB |
+| 升频 | max\|Δ\|/峰 **8.3e-06**（Apple GPU 无 double，与 CUDA 的 ≤8e-16 差 9~10 个数量级） |
 
 ---
 
 ## 客观指标
 
-全部由 `ctest` / `verify.ps1` 自动验证，不是估算：
+全部由 `ctest` 自动验证（**82 套**），不是估算：
 
 | 项 | 实测 |
 |---|---|
@@ -177,12 +203,12 @@ powershell -File tools\make_dist.ps1 -Version 1.3.15
 | DSD5 1-bit 带内 SNR | **86.2 dB** |
 | 8-bit SDM 带内 SNR | **118.8 dB** |
 | DSD 源抽取 THD+N（DSD64→176.4k） | **99.2 dB** |
-| DSD 源抽取混叠抑制 | 144.4 / 156.1 / 108.1 dB（FIR/IIR/CIC） |
 | 双二阶 10 种设计（解析 vs 实测） | 偏差 **0.0000 dB** |
 | 20 段 PEQ 单段 +6 dB | **6.0000 dB**（44.1/48/96/192k） |
 | 网络传输（回环 690 包） | **逐位相同** |
-| GPU 卷积（IR 262144 抽头 / 1 秒） | **2.0 ms** |
-| 离线升频转换速度 | **9.9× 实时** |
+| GPU 卷积修 IR 拖尾后 | 0/65536 样点错、**−150.12 dB** |
+| 专辑封面多曲重试 | 28/28 判据（修前 19 过 9 败） |
+| WAV 占位标题 | 138/138（含 6 条负向对照） |
 
 ---
 
@@ -190,60 +216,51 @@ powershell -File tools\make_dist.ps1 -Version 1.3.15
 
 ```
 src/
-  dsp/         DSP 核心：升频/滤波器/量化器/调制器/卷积/EQ/PEQ（头文件库）
-  audio/      WAV 读写、WASAPI 独占/共享输出、DSD 原生读取、渲染循环、缓冲策略
-  net/        RTANet 协议、UPnP 投放、Web 界面（ui_page.h / ui_script.h）
-  engine/     播放管线（信号链整合）
-  gpu/        HIP / CUDA 内核（卷积 / 重采样）
-  meta/       元数据补全（实体模型 / 数据源 / 缓存 / LLM 综合 / 状态标志）
-tools/        播放器 CLI、端点程序、探针、逐位比对、打包脚本、界面自检
-tests/        ctest 门禁（65 套）
-docs/         各模块实测纪要与调研（含"三次假失败"等踩坑记录）
-verify.ps1    一键自检（全程不打开音频设备）
+  dsp/         DSP 核心：升频/滤波器/量化器/调制器/卷积/EQ/PEQ/房间校正（头文件库）
+  analysis/    音频体检：动态测量（DR/LUFS/LRA）/ 假无损检测 / 体检编排
+  audio/       WAV 读写、DSD 原生读取、渲染循环、缓冲策略
+  platform/    平台层（macos/ 下是 CoreAudio / path / process / http 的 POSIX 实现）
+  net/         RTANet 协议、UPnP 投放、Web 界面（ui_page.h / ui_script.h）
+  engine/      播放管线（信号链整合）、预设决策层
+  gpu/         Metal 内核（卷积 / 重采样）——唯一 GPU 后端
+  meta/        元数据补全（实体模型 / 数据源 / 缓存 / LLM 综合）
+tools/         mac_host.mm（原生壳）、rtaweb（测试 CLI）、rtahealth、gpu_precision、打包脚本
+tests/        ctest 门禁（82 套）
+docs/         各模块实测纪要与调研
 AGENTS.md     开发铁律（动手前必读）
 STATUS.md     逐轮状态与实测数字（最新事实在这里）
-HANDOVER.md   架构 / 构建 / 已知坑清单
 ```
 
 ---
 
 ## 测试与验证
 
-```powershell
-ctest --test-dir build -E wasapi_shared    # 65 套客观验证
-powershell -File verify.ps1               # 一键自检（构建/测试/GPU/网络/界面/DSD/兼容门禁）
-node tools\uicheck.js http://127.0.0.1:8911/ build\uicheck_out   # 界面自检
-powershell -File tools\bordercheck.ps1 -Exe dist\RLPlayer-1.3.15-win64\RLPlayer.exe   # 无边框逐像素/结构判据
+```bash
+CM=/private/tmp/cmake-3.31.6-macos-universal/CMake.app/Contents/bin
+
+$CM/ctest --test-dir build-mac --output-on-failure     # 82/82
 ```
 
 **验证不打开音频设备**：所有链路验证优先离线（`--analyze`）或 Null 后端。
-需要出声的测试默认电平 ≤ −60 dBFS（见 AGENTS.md 铁律 1）。
+需要出声的测试默认电平 ≤ −60 dBFS（见 [AGENTS.md](AGENTS.md) 铁律 1）。
 
----
-
-## 发布包
-
-| 项 | 要求 / 说明 |
-|---|---|
-| 系统 | Windows 7 SP1 / 8 / 10 / 11，x64 |
-| CPU | SSE4.2 + POPCNT（2009 年后）；产物**不含 AVX-512** |
-| 运行库 | **不需要** VC++ 运行库（CRT 静态链接） |
-| 体积 | zip 约 371 MB，解压约 885 MB（主要是 ffmpeg 与 WebView2 运行时） |
-| 内置 | ffmpeg / ffprobe、`rtagpu.dll`（AMD 多架构）、`rtagpu_cuda.dll`（NVIDIA）、`amdhip64_7.dll`、WebView2 固定运行时、17 个 CLI 工具 |
+**Windows 侧门禁**（`verify.ps1` / `check_compat.ps1`）本机跑不了 —— 本仓库已无 Windows 平台层，不再需要。
 
 ---
 
 ## 已知限制
 
+- **Native DSD**：macOS 无 ASIO 原生 DSD 驱动通路，**只支持 DoP**；`dsdnative=1` 会明确报错
+- **GPU 卷积**：任何 IR 长度下都比 CPU 慢（见上方「GPU」），默认关闭
 - **输入采集**：设备枚举与设置页已有，采集→DSP→输出通路未实现
 - **标准 NAA**：只做发现，握手未实现；两机方案请用 RTANet
 - **DSD 域重采样**：同速率 DirectSDM 逐位直通可用；**速率不同时的 DSD→DSD 重采样未做**
-- **Native DSD（ASIO）**：需驱动支持 ASIODSD* 通道类型；DSD 输出走 DoP
 - **7 阶 1-bit 调制器**：只在 DSD128 以上稳定
-- **AI 资料**：首次生成耗时主要来自 LLM（中位 ~12 s）；缓存命中 6~7 ms。检索阶段已并行，LLM 本身未做流式
-- **元数据源**：同人/小众曲目在四大源命中率低属正常（会如实标注"AI 整理"）
+- **假无损检测**：AAC ≥128k 检不出（阈值「宁可漏报不可误报」的设计取舍）
+- **AI 资料**：首次生成耗时主要来自 LLM（中位 ~12 s）；缓存命中 6~7 ms
+- **Intel Mac**：不支持（只构建 arm64）
 
-完整清单（含每项的判据与阻塞原因）见 [STATUS.md](STATUS.md) 与 [ROADMAP.md](ROADMAP.md)。
+完整清单见 [STATUS.md](STATUS.md)。
 
 ---
 
@@ -252,21 +269,17 @@ powershell -File tools\bordercheck.ps1 -Exe dist\RLPlayer-1.3.15-win64\RLPlayer.
 | 文件 | 内容 |
 |---|---|
 | [STATUS.md](STATUS.md) | **逐轮状态与实测数字 —— 最新事实以这里为准** |
-| [HANDOVER.md](HANDOVER.md) | 架构、构建、已知坑 |
-| [ROADMAP.md](ROADMAP.md) | 待开发项与验收判据 |
 | [AGENTS.md](AGENTS.md) | 开发铁律（8 条 + 反馈目录规范） |
-| [tools/README.md](tools/README.md) | 17 个命令行工具逐个说明 |
+| [docs/GPU卷积与升频效率细查.md](docs/GPU卷积与升频效率细查.md) | GPU 卷积/升频效率实测（拐点、根因、建议） |
+| [docs/WIP-F1-封面抓取.md](docs/WIP-F1-封面抓取.md) | 在线封面抓取 + 专辑归并的 mac 实现与判据 |
+| [docs/WIP-F6-GPU精度.md](docs/WIP-F6-GPU精度.md) | GPU 精度矩阵与门控建议 |
+| [debug/](debug/) | 每轮 DEBUG 档案（根因、判据、挂账） |
 | [docs/](docs/) | 各模块实测纪要、调研、踩坑记录 |
 
 ---
-
-## 反馈
-
-用户反馈与开发需求统一投递到 `反馈和开发\`（`debug\` = BUG，`develop\` = 需求），
-处理记录见 [AGENTS.md](AGENTS.md) §8.4。
 
 ## 版权
 
 私有项目，保留所有权利（All rights reserved）。未经作者书面许可，不得复制、分发或用于商业用途。
 
-第三方组件（ffmpeg、WebView2 SDK、AMD HIP runtime 等）遵循其各自许可证。
+第三方组件（ffmpeg 等）遵循其各自许可证。
