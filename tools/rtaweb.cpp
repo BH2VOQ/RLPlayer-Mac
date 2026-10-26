@@ -31,6 +31,9 @@
 #include "net/cast_service.h"      // UPnP/DLNA 投放会话编排（CastManager / CastState / CastStartParams）
 #include "net/app_icon.h"
 #include "net/zipstore.h"          // 最小 ZIP(STORE)打包：导出诊断 = 一个压缩包(2026-10-22 功能3)
+#include "net/http_client.h"       // 封面在线抓取：http_get/http_post（platform/http.h 的平台封装）
+#include "net/json.h"              // /api/lib/cover/prefetch 解析网易 type=10 专辑搜索响应(2026-10-26)
+#include "cover_fetch.h"           // 封面抓取**纯逻辑**（目录穿越/Dice/图片头/负缓存过期，可离线单测）
 using rta::net::Library;
 using rta::net::SourceManager;
 using rta::net::SourceConfig;
@@ -89,6 +92,7 @@ using rta::render::SinkOpenOpts;
 #include <memory>
 #include <set>
 #include <map>
+#include <unordered_map>           // 封面抓取的查询词去重表（CoverTermCache）
 #include <ctime>
 #include <csignal>
 #include <cstdlib>                 // strtol：--port 严格解析（2026-10-25 等号形式）
@@ -3394,6 +3398,21 @@ static std::string queue_file() {
 // 需要"真的在 exe 旁边"的东西（例如 ffmpeg/ffprobe 的定位）不走这个函数。
 static const std::string& runtime_state_dir() {
     static const std::string dir = [] {
+        // 2026-10-26（debug/20261026-02 事故后加）：允许用 RLPLAYER_STATE_DIR 重定向整个状态目录。
+        // 为什么必须加：本函数决定 settings.conf / 索引 / covercache / uploads 的落点，而它**硬编码**
+        // 到 ~/Library/Application Support/RLPlayer，没有任何覆盖手段。后果是**任何**起实例做端点
+        // 测试的动作都会写用户的真实配置 —— 本轮做预设测试时就这样污染过用户 rlplayer-settings.conf
+        // 两次（rate/filter/shaper/isp 被改），只能靠事前备份还原。
+        // 有了这个变量，测试只需 RLPLAYER_STATE_DIR=/tmp/xxx 就能完全隔离，不必再备份/还原。
+        // 语义与既有 RLPLAYER_LIBRARY_DIR（只改库数据）不同：本变量改的是**整个**状态目录。
+        // 空值 = 不覆盖，行为与以前完全一致（用户实例不受影响）。
+        if (const char* env = std::getenv("RLPLAYER_STATE_DIR")) {
+            if (*env) {
+                std::string s(env);
+                while (!s.empty() && (s.back() == '\\' || s.back() == '/')) s.pop_back();
+                if (!s.empty()) return s;
+            }
+        }
         const std::string cfg = rta::platform::config_dir_utf8();
         if (!cfg.empty()) return cfg;
         return rta::platform::module_dir_utf8();
@@ -3515,6 +3534,345 @@ static std::string path_in_exe_dir(const char* name) {
     return (name && *name) ? (base + "/" + name) : base;
 }
 static std::string path_in_exe_dir(const std::string& name) { return path_in_exe_dir(name.c_str()); }
+
+// ================== 专辑封面在线抓取（2026-10-26，上游 c41ce97 的 mac 重做）==================
+// 需求：库内嵌封面覆盖率有限，"缺图的专辑永远空白"。按「专辑名 + 艺术家」去网易云搜专辑
+// （type=10）拿 picUrl，下载后缓存到磁盘。
+//
+// 端点契约：
+//   GET  /api/lib/cover?k=<专辑键>   **只读、零网络**（只 stat / 读磁盘）
+//        ① 内嵌/同目录图（沿用 albumCover 的现有逻辑 + 多曲重试 + 负缓存）
+//        ② <coverdir>/<key>.jpg（网图/人工设置的正缓存）
+//        ③ <coverdir>/<key>.none（负缓存，7 天有效）
+//        三者都没有 → 404 + 空 body（前端 <img onerror> 露回首字母占位）
+//   GET  /api/lib/cover/progress      **只读**：{"ok":true,"running":bool,"done","total",
+//                                     "hit","miss","fail","lastName"}
+//   POST /api/lib/cover/prefetch      **副作用端点**（进 kNeedPost）：立刻返回
+//        {"ok":true,"queued":N,"candidates":N,"running":true}，网络全部丢到后台线程
+//        · 不给 k：库里所有「内嵌无封面且无缓存」的专辑
+//        · 给 k（逗号/换行分隔）：只抓这几张（UI 打开专辑页时可单点预热）
+//        上一轮还在跑 ⟹ {"ok":true,"queued":0,"running":false}（不排队，前端下次再试）
+//   POST /api/lib/cover/set?k=<16位十六进制>  body = 图片原始字节（人工补封面）
+//
+// ★ 为什么绝不能在请求线程里发网络：一次网易搜索 3 s、一张专辑 6 s；放进请求线程
+//   就把整站（含 /api/ping 与静态页）全部排队 —— 这正是"封面页卡死"的老病根。
+//
+// ★ mac 与上游的四处**故意改写**（本段是移植的核心价值，别退回 Windows 写法）：
+//   ① 缓存目录：上游 `<exe>\covercache\`（便携版语义）；mac 用 runtime_state_dir()/covercache
+//      —— .app 内是只读签名区，写进去在正式签名后必失败。额外支持 RLPLAYER_COVER_DIR
+//      覆盖，让测试指向干净的临时目录（不受历史缓存干扰）。
+//   ② 原子改名：上游先试 MoveFileExW、失败再 rename；mac 没有 MoveFileExW，
+//      直接「先写 .part，再 std::filesystem::rename」（同卷 rename 本身原子）。
+//   ③ 网络：上游 WinHTTP；mac 走已有的 rta::net::http_get/http_post（platform/http.h 封装）。
+//   ④ 路径：上游 widen() 宽字符；mac 的 widen() 是**保序恒等**，fs::path(wstring) 对中文
+//      路径直接抛 "locale not supported"（已实测）⟹ 一律 std::filesystem::u8path。
+//   ⑤ 目录穿越防护（?k= 白名单）：与平台无关，照做（见 tools/cover_fetch.h 的 cover_key_slug）。
+//
+// 缓存布局（用户可直接删掉重来）：
+//   <coverdir>/<key>.jpg        正缓存（永久，直到用户手动删）
+//   <coverdir>/<key>.jpg.part   写入中（rename 前；读侧永远看不到半张图）
+//   <coverdir>/<key>.none       负缓存（空文件；mtime 超过 7 天即视为过期，可再抓一次）
+// 只有「服务器明确答复没有」才写 .none；断网/超时/异常（HTTP status==0）**不写** ——
+//   否则一次离线运行就把 7 天负缓存全污染成"没有封面"，用户联网后再也看不到图。
+//   （瞬态失败只计数 fail，下一轮 prefetch 会重试。）
+//
+// 兜底开关：环境变量 RLPLAYER_COVER_HOST（scheme://host）可把搜索请求指到别处
+//   （自动化测试用不可达地址验证「断网不崩、不污染负缓存」）。
+// RLPLAYER_COVER_DIR 覆盖缓存目录；两者都为空 = 默认行为。
+
+// 缓存目录：只解析一次（列表端点每张专辑都会问）
+static const std::string& cover_cache_dir() {
+    static const std::string d = [] {
+        // 测试/多实例隔离优先（与 RLPLAYER_STATE_DIR 同风格）：空值 = 不覆盖。
+        if (const char* env = std::getenv("RLPLAYER_COVER_DIR")) {
+            if (*env) {
+                std::string s(env);
+                while (!s.empty() && (s.back() == '\\' || s.back() == '/')) s.pop_back();
+                if (!s.empty()) return s;
+            }
+        }
+        // mac 口径：放运行期状态目录（~/Library/Application Support/RLPlayer/covercache），
+        // 绝不放进 .app 包内 —— 那是只读签名区，正式签名/公证后写入必失败。
+        return path_in_exe_dir("covercache");
+    }();
+    return d;
+}
+
+// 封面抓取的**纯逻辑**全部在 tools/cover_fetch.h（可离线单测：目录穿越/Dice/图片头/负缓存过期）。
+// 这里只做平台接线：目录注入、HTTP、后台线程、路由。
+static rta::cover::CoverPaths cover_paths(const std::string& key) {
+    return rta::cover::cover_paths_in(cover_cache_dir(), key);
+}
+static bool cover_has_disk(const std::string& key) {
+    return rta::cover::cover_has_disk_in(cover_cache_dir(), key);
+}
+static bool cover_read_cached(const std::string& key, std::vector<unsigned char>& out) {
+    return rta::cover::cover_read_cached_in(cover_cache_dir(), key, out);
+}
+static bool cover_neg_fresh(const std::string& key) {
+    return rta::cover::cover_neg_fresh_in(cover_cache_dir(), key);
+}
+static const char* cover_mime_of(const std::vector<unsigned char>& b) {
+    return rta::cover::cover_mime_of(b);
+}
+
+static std::string cover_env_host() {
+    const char* v = std::getenv("RLPLAYER_COVER_HOST");
+    std::string host = v ? std::string(v) : std::string();
+    while (!host.empty() && (host.back() == ' ' || host.back() == '/')) host.pop_back();
+    return host;                              // 空 = 用网易官方域名
+}
+
+// 落盘正缓存：先写 .part，再 rename（同卷原子）。
+// 返回空串 = 成功；非空 = 人话原因。
+static std::string cover_write_atomic(const std::string& key, const std::vector<unsigned char>& body) {
+    const rta::cover::CoverPaths pp = cover_paths(key);
+    std::error_code ec;
+    fs::create_directories(fs::u8path(pp.dir), ec);
+    {
+        std::ofstream f(fs::u8path(pp.part), std::ios::binary | std::ios::trunc);
+        if (!f) return "无法写入 covercache（目录/权限？）";
+        f.write(reinterpret_cast<const char*>(body.data()), (std::streamsize)body.size());
+        f.flush();
+        if (!f) return "covercache 写入失败（磁盘满？）";
+    }
+    // POSIX 上 rename(2) 同卷替换是原子的；fs::rename 在目标存在时也直接替换
+    // （与 Windows 不同，POSIX 不需要 MOVEFILE_REPLACE_EXISTING）。
+    std::error_code em;
+    fs::rename(fs::u8path(pp.part), fs::u8path(pp.jpg), em);
+    if (em) { std::error_code e2; fs::remove(fs::u8path(pp.part), e2); return "改名失败：" + em.message(); }
+    std::error_code el;
+    fs::remove(fs::u8path(pp.none), el);       // 有图了，旧负缓存作废
+    return std::string();
+}
+
+// 一张待抓的专辑（**深拷贝**自库快照：后台线程绝不回头读 Library 单例）
+struct CoverJob { std::string key, name, artist, term; };
+
+// 一轮预热内共享的「查询词 → 封面 URL」缓存。
+// 为什么需要：同一张碟常因为标签差异被拆成多条，第二轮（只按专辑名）的查询词在重复专辑
+// 之间**完全相同**。不去重就要把同一个词打十几次，既慢又容易触发对方限流。
+// 值 "" = 查过但没有。
+struct CoverTermCache {
+    std::mutex mtx;
+    std::unordered_map<std::string, std::string> pic;
+};
+
+// 后台专用：真正去网上取一张封面并落盘。
+// 返回值只用于统计：Hit = 拿到并写盘；Miss = 服务器确实没有（写 .none）；Fail = 瞬态失败（不写 .none）。
+enum class CoverOutcome { Hit, Miss, Fail };
+
+static CoverOutcome cover_fetch(const CoverJob& job, CoverTermCache& tc,
+                                std::string* detail, long long* bytesOut) {
+    const auto t0 = std::chrono::steady_clock::now();
+    auto elapsed_ms = [&]() {
+        return (int)std::chrono::duration_cast<std::chrono::milliseconds>(
+                   std::chrono::steady_clock::now() - t0).count();
+    };
+    const rta::cover::CoverPaths pp = cover_paths(job.key);
+    std::string pic, err;
+    bool transient = false;      // 瞬态失败（超时/断网/异常）⟹ 不写 7 天负缓存
+
+    try {
+        // 两跳搜索：① "专辑名 艺术家"  ② 只 "专辑名"。
+        // 为什么要第二跳：artist 是目录名/同人社团名时，把艺术家拼进去会**降低**召回 ——
+        //   上游实测 172 张无封面专辑里，带艺术家搜索命中 61，只按专辑名搜索能命中 66 张"完全同名"。
+        struct Try { std::string term, note; };
+        std::vector<Try> tries;
+        if (!job.term.empty()) tries.push_back({job.term, "album+artist"});
+        if (!job.name.empty() && job.name != job.term) tries.push_back({job.name, "album"});
+        std::string host = cover_env_host();
+        if (host.empty()) host = "https://music.163.com";
+        const std::string surl = host + "/api/search/get";
+        const std::vector<std::string> hdr = {
+            "User-Agent: Mozilla/5.0",
+            "Referer: https://music.163.com/",
+        };
+        if (tries.empty()) err = "搜索词为空（专辑名与艺术家都没有）";
+        for (const auto& at : tries) {
+            const int remain = rta::cover::kCoverBudgetMs - elapsed_ms();
+            if (remain <= 0) { err = "预算耗尽（搜索前）"; transient = true; break; }
+            bool have = false;
+            std::string cached;
+            {
+                std::lock_guard<std::mutex> lk(tc.mtx);
+                auto it = tc.pic.find(at.term);
+                if (it != tc.pic.end()) { cached = it->second; have = true; }
+            }
+            if (have) {
+                if (!cached.empty()) { pic = cached; break; }
+                err = "search(" + at.note + ") 无 picUrl";
+                continue;
+            }
+            const int to = remain < rta::cover::kCoverSearchMs ? remain : rta::cover::kCoverSearchMs;
+            const std::string body = "s=" + rta::cover::cover_pct_encode(at.term) + "&type=10&limit=5&offset=0";
+            auto sr = rta::net::http_post(surl, body, hdr, "application/x-www-form-urlencoded", to);
+            if (sr.ok && sr.status == 200) {
+                const std::string js(sr.body.begin(), sr.body.end());
+                const std::string got = rta::cover::cover_pick_pic(js, job.name, job.artist);
+                {
+                    std::lock_guard<std::mutex> lk(tc.mtx);
+                    if (tc.pic.size() < 8192) tc.pic[at.term] = got;
+                }
+                if (!got.empty()) { pic = got; break; }
+                err = "search(" + at.note + ") 无 picUrl";
+            } else {
+                err = "search(" + at.note + ") HTTP " + std::to_string(sr.status) + " " + sr.error;
+                transient = (sr.status == 0);
+                if (transient) break;      // 断网/超时：第二跳也一定失败，别再浪费一个超时
+            }
+        }
+        if (!pic.empty()) {
+            const int remain = rta::cover::kCoverBudgetMs - elapsed_ms();
+            if (remain > 0) {
+                const int to = remain < rta::cover::kCoverDownloadMs ? remain : rta::cover::kCoverDownloadMs;
+                auto ir = rta::net::http_get(pic,
+                                             {"User-Agent: Mozilla/5.0", "Referer: https://music.163.com/"}, to);
+                if (ir.ok && ir.status == 200 && rta::cover::cover_accept_bytes(ir.body)) {
+                    const std::string werr = cover_write_atomic(job.key, ir.body);
+                    if (!werr.empty()) throw std::runtime_error(werr);
+                    if (detail) *detail = pic;
+                    if (bytesOut) *bytesOut = (long long)ir.body.size();
+                    return CoverOutcome::Hit;
+                }
+                if (ir.ok && ir.status == 200) {
+                    // 200 但不是图（错误页/防盗链 HTML）或太小 ⟹ 这是**服务器给了内容**的确定性结论，
+                    // 不是瞬态失败。但也不能当"没有封面"写 7 天负缓存（下一轮可能就好），
+                    // 上游口径：归为 transient（只计 fail，不写 .none）。
+                    err = ir.body.size() < rta::cover::kCoverMinBytes
+                              ? ("图片太小 " + std::to_string(ir.body.size()) + "B")
+                              : ("不是图片（首字节 " + std::to_string(ir.body.empty() ? 0 : (int)ir.body[0]) + "）");
+                    transient = true;
+                } else {
+                    err = "download HTTP " + std::to_string(ir.status) + " " + ir.error;
+                    transient = (ir.status == 0);
+                }
+            } else {
+                err = "预算耗尽（下载前）";
+                transient = true;
+            }
+        }
+    } catch (const std::exception& e) {
+        err = std::string("exception: ") + e.what();
+        transient = true;
+    } catch (...) {
+        err = "exception: unknown";
+        transient = true;
+    }
+
+    if (!transient) {
+        try {
+            std::error_code ec;
+            fs::create_directories(fs::u8path(pp.dir), ec);
+            std::ofstream f(fs::u8path(pp.none), std::ios::binary | std::ios::trunc);
+        } catch (...) {}
+    }
+    if (detail) *detail = err + " ms=" + std::to_string(elapsed_ms());
+    return transient ? CoverOutcome::Fail : CoverOutcome::Miss;
+}
+
+// 一轮预热的共享状态：jobs 是**深拷贝**的名单（线程绝不回头读 Library 单例），
+// 计数全原子；lastName 用短锁保护（progress 端点只在这里排队，一次字符串拷贝）。
+struct CoverBg {
+    std::vector<CoverJob> jobs;
+    CoverTermCache terms;                      // 查询词去重（同一专辑名只打一次网易）
+    std::atomic<size_t> next{0};
+    std::atomic<int> hit{0}, miss{0}, fail{0};
+    std::atomic<bool> running{true};
+    std::mutex lastMtx;
+    std::string last;
+};
+static std::mutex g_cover_bg_mtx;
+static std::shared_ptr<CoverBg> g_cover_bg;
+static std::atomic<size_t> g_cover_active{0};      // 当前在跑的预热轮数（0 或 1）
+
+static void cover_bg_worker(std::shared_ptr<CoverBg> bg) {
+    for (;;) {
+        if (g_shutdown.load()) return;             // 退出中：不再开工（detach 掉也安全）
+        const size_t i = bg->next.fetch_add(1);
+        if (i >= bg->jobs.size()) return;
+        const CoverJob job = bg->jobs[i];          // 拷贝：下面只碰局部 + 网络 + 文件系统
+        {
+            std::lock_guard<std::mutex> lk(bg->lastMtx);
+            bg->last = job.name.empty() ? job.term : job.name;
+        }
+        std::string detail;
+        long long got = 0;
+        const CoverOutcome oc = cover_fetch(job, bg->terms, &detail, &got);
+        switch (oc) {
+        case CoverOutcome::Hit:
+            bg->hit.fetch_add(1);
+            play_log("COVERBG hit key=" + job.key + " name=" + job.name + " bytes=" + std::to_string(got) +
+                     " url=" + detail);
+            break;
+        case CoverOutcome::Miss:
+            bg->miss.fetch_add(1);
+            play_log("COVERBG miss key=" + job.key + " name=" + job.name + " " + detail);
+            break;
+        default:
+            bg->fail.fetch_add(1);
+            play_log("COVERBG fail key=" + job.key + " name=" + job.name + " " + detail);
+            break;
+        }
+    }
+}
+
+// 起一轮预热。返回 true = 已排队；false = 上一轮还在跑 / 名单为空（都不排队）。
+static bool cover_bg_start(std::vector<CoverJob> jobs) {
+    if (jobs.empty()) return false;
+    size_t expect = 0;
+    if (!g_cover_active.compare_exchange_strong(expect, 1)) return false;
+    auto bg = std::make_shared<CoverBg>();
+    bg->jobs = std::move(jobs);
+    const size_t total = bg->jobs.size();
+    {
+        std::lock_guard<std::mutex> lk(g_cover_bg_mtx);
+        g_cover_bg = bg;
+    }
+    std::thread([bg, total]() {
+        std::vector<std::thread> ws;
+        ws.reserve((size_t)rta::cover::kCoverBgConcurrency);
+        for (int k = 0; k < rta::cover::kCoverBgConcurrency; ++k)
+            ws.emplace_back([bg]() { cover_bg_worker(bg); });
+        for (auto& t : ws) if (t.joinable()) t.join();
+        bg->running.store(false);
+        play_log("COVERBG done hit=" + std::to_string(bg->hit.load()) +
+                 " miss=" + std::to_string(bg->miss.load()) +
+                 " fail=" + std::to_string(bg->fail.load()) +
+                 " total=" + std::to_string(total));
+        g_cover_active.store(0);      // 先放行下一轮，再让 shared_ptr 释放名单
+    }).detach();
+    return true;
+}
+
+// 待抓名单（**请求线程**里构建：只读库 + 读目录，不发网络、不下载）。
+// 已有正缓存 / 负缓存未过期 的专辑直接跳过 ⟹ queued 与 total 就是"真的还要联网"的张数。
+static std::vector<CoverJob> cover_build_queue(const std::vector<std::string>& onlyKeys) {
+    std::vector<CoverJob> out;
+    auto& lib = Library::instance();
+    if (!onlyKeys.empty()) {
+        for (const auto& k : onlyKeys) {
+            rta::net::LibCoverTerm t;
+            if (!lib.albumCoverTerm(k, t)) continue;   // 键不存在：忽略（别把队列撑成假进度）
+            if (cover_has_disk(t.key)) continue;       // 已有网图缓存
+            out.push_back({t.key, t.name, t.artist, t.term});
+        }
+        return out;
+    }
+    for (const auto& t : lib.albumsWithoutCover()) {
+        if (cover_has_disk(t.key)) continue;           // 已经抓到了
+        if (cover_neg_fresh(t.key)) continue;          // 7 天内确认为"没有"，别每天重打
+        out.push_back({t.key, t.name, t.artist, t.term});
+    }
+    return out;
+}
+
+// 列表端点用：一张专辑的封面来源。只信扫描时算好的 hasCover 标志 + 一次 stat，绝不触发 ffmpeg。
+static const char* cover_src_of(const std::string& key, bool hasCover) {
+    if (hasCover) return "embed";
+    if (cover_has_disk(key)) return "net";
+    return "none";
+}
 
 // ---------------- 20 段参数均衡 PEQ（261024-02 #6）----------------
 // 全局单例：HTTP 线程改参数（热更新），播放线程处理音频；引擎内部互斥 + 128 样本交叉淡入。
@@ -4584,6 +4942,9 @@ static bool is_side_effect_path(const std::string& p) {
         "/api/buffer/reset", "/api/upload",
         // 预设的 apply 会写 rlplayer-settings.conf（副作用）；caps 是只读查询，不进这张表
         "/api/preset/apply",
+        // 专辑封面预热（2026-10-26）：会落盘 covercache + 打网络。
+        // 只读端点是 /api/lib/cover（单张）与 /api/lib/cover/progress（进度）。
+        "/api/lib/cover/prefetch", "/api/lib/cover/set",
     };
     for (const char* k : kNeedPost) {
         const size_t n = std::strlen(k);
@@ -4606,6 +4967,12 @@ static bool is_side_effect_exempt(const std::string& p) {
         // /api/llm：GET = 读配置状态（已配置 + 掩码），POST = 保存；状态读取必须允许 GET。
         "/api/llm", "/api/llm/test",
     };
+    // ★ 例外中的例外（2026-10-26）：白名单是按**前缀**放的，而 "/api/lib/cover" 下面还有
+    //   /api/lib/cover/prefetch —— 它会落盘 covercache 并打网络，绝不能因为前缀相同而放行 GET。
+    //   （一个 <img src=.../api/lib/cover/prefetch> 就能让整库去联网，正是这张表当年要防的事。）
+    //   这条是 B-6 记录的同类缺陷：新增 /api/x 时必须检查是否已存在 /api/x 的兄弟端点。
+    if (p.rfind("/api/lib/cover/prefetch", 0) == 0) return false;
+    if (p.rfind("/api/lib/cover/set", 0) == 0) return false;
     for (const char* k : kGetOk) if (p.rfind(k, 0) == 0) return true;
     return false;
 }
@@ -4933,7 +5300,19 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
                   << "\",\"artist\":\"" << jesc(a.artist) << "\",\"year\":" << a.year
                   << ",\"n\":" << a.nTracks << ",\"dur\":" << a.duration
                   << ",\"sr\":" << sr << ",\"bits\":" << bits
-                  << ",\"cv\":" << (a.hasCover ? "true" : "false") << "}";
+                  // cvSrc（2026-10-26）：embed = 库里已有图（内嵌流/同目录封面文件）；
+                  // net = 磁盘 covercache 有网图；none = 都没有（前端显示首字母占位）。
+                  // cvUrl 只在有网图时给 —— 与 GET /api/lib/cover?k= 完全同一条路径。
+                  // ★ 只算一次 cover_src_of：它内部是一次 stat，列表端点会走 N 张专辑，
+                  //   同一行里连调 3 次就是 3N 次 stat（本库 1502 张 ⟹ 4506 次）。
+                  //   这正是「封面页慢」这一类问题的形态，别为了少写一行把它引回来。
+                  ;
+                const std::string csrc = cover_src_of(a.key, a.hasCover);
+                j << ",\"cv\":" << ((a.hasCover || csrc == "net") ? "true" : "false")
+                  << ",\"cvSrc\":\"" << csrc << "\"";
+                if (csrc == "net")
+                    j << ",\"cvUrl\":\"/api/lib/cover?k=" << a.key << "\"";
+                j << "}";
             }
             j << "]}";
             return j.str();
@@ -4945,10 +5324,15 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
             rta::net::LibAlbum a;
             if (!lib.album(key, a)) return "{\"ok\":false,\"error\":\"专辑不存在\"}";
             std::ostringstream j;
+            // cvSrc/cvUrl 与 /api/lib/albums 同一口径（见那里注释）
+            const std::string csrc = cover_src_of(a.key, a.hasCover);
             j << "{\"ok\":true,\"k\":\"" << a.key << "\",\"name\":\"" << jesc(a.name)
               << "\",\"artist\":\"" << jesc(a.artist) << "\",\"year\":" << a.year
-              << ",\"dur\":" << a.duration << ",\"cv\":" << (a.hasCover ? "true" : "false")
-              << ",\"tracks\":[";
+              << ",\"dur\":" << a.duration
+              << ",\"cv\":" << ((a.hasCover || csrc == "net") ? "true" : "false")
+              << ",\"cvSrc\":\"" << csrc << "\"";
+            if (csrc == "net") j << ",\"cvUrl\":\"/api/lib/cover?k=" << a.key << "\"";
+            j << ",\"tracks\":[";
             for (size_t i = 0; i < a.idx.size(); ++i) {
                 rta::net::LibTrack t;
                 if (!lib.trackAt(a.idx[i], t)) continue;
@@ -5024,13 +5408,130 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
             j << "]}";
             return j.str();
         }
+        // ---- 封面预热进度（只读；见文件中部「专辑封面在线抓取」注释）----
+        // 必须排在 /api/lib/cover 之前：后者是前者的前缀（同一类路由顺序坑见 /api/lib/albums）。
+        if (rq.path.rfind("/api/lib/cover/progress", 0) == 0) {
+            std::shared_ptr<CoverBg> bg;
+            {
+                std::lock_guard<std::mutex> lk(g_cover_bg_mtx);
+                bg = g_cover_bg;
+            }
+            int hit = 0, miss = 0, fail = 0, total = 0;
+            bool running = false;
+            std::string last;
+            if (bg) {
+                hit  = bg->hit.load();
+                miss = bg->miss.load();
+                fail = bg->fail.load();
+                total = (int)bg->jobs.size();
+                running = bg->running.load();
+                std::lock_guard<std::mutex> lk(bg->lastMtx);
+                last = bg->last;
+            }
+            std::ostringstream j;
+            j << "{\"ok\":true,\"running\":" << (running ? "true" : "false")
+              << ",\"done\":" << (hit + miss + fail)
+              << ",\"total\":" << total
+              << ",\"hit\":" << hit
+              << ",\"miss\":" << miss
+              << ",\"fail\":" << fail
+              << ",\"lastName\":\"" << jesc(last) << "\"}";
+            return j.str();
+        }
+        // ---- 封面预热（POST；副作用端点，见 kNeedPost）----
+        // 立刻返回，网络/下载全在后台 2 线程（见文件中部「专辑封面在线抓取」注释）。
+        if (rq.path.rfind("/api/lib/cover/prefetch", 0) == 0) {
+            std::string rawK;
+            const size_t q = rq.path.find("?k=");
+            if (q != std::string::npos) rawK = urlDecode(rq.path.substr(q + 3));
+            if (rawK.empty()) {   // 也接受表单体 k=<键,键>
+                const size_t f = rq.body.find("k=");
+                if (f != std::string::npos) {
+                    std::string v = rq.body.substr(f + 2);
+                    const size_t amp = v.find('&');
+                    if (amp != std::string::npos) v = v.substr(0, amp);
+                    rawK = urlDecode(v);
+                }
+            }
+            const std::vector<std::string> keys = rta::cover::cover_parse_keys(rawK);
+            const auto jobs = cover_build_queue(keys);      // 只读库 + stat，不发网络
+            const size_t total = jobs.size();
+            const bool started = cover_bg_start(std::move(jobs));
+            play_log("COVERBG prefetch queued=" + std::to_string(started ? total : 0) +
+                     " candidates=" + std::to_string(total) +
+                     " source=" + (keys.empty() ? "library" : "keys"));
+            std::ostringstream j;
+            j << "{\"ok\":true,\"queued\":" << (started ? total : 0)
+              << ",\"candidates\":" << total
+              << ",\"running\":" << (started ? "true" : "false") << "}";
+            return j.str();
+        }
+        // ---- 人工指定封面（POST；副作用端点）----
+        // 为什么需要它：同人自出版专辑在网易/QQ/iTunes 全都查不到、文件里也没有图，
+        // 程序再怎么抓也抓不到 —— 这类只能由用户挑一张图。落盘到 covercache（**不改动音乐文件**）。
+        // 契约：POST /api/lib/cover/set?k=<专辑键>，body = 图片原始字节（jpg/png/webp/gif），≤24MB。
+        if (rq.path.rfind("/api/lib/cover/set", 0) == 0) {
+            std::string key;
+            const size_t qp = rq.path.find("?k=");
+            if (qp != std::string::npos) key = urlDecode(rq.path.substr(qp + 3));
+            std::string kk;
+            for (char c : key) if (std::isxdigit((unsigned char)c)) kk.push_back((char)std::tolower((unsigned char)c));
+            // 专辑键必须是平台生成的 16 位十六进制（fnv_hex 的长度）：这样什么都没有的垃圾输入
+            // （例如 k=..\..\windows\win.ini 里恰好含 hex 字符 "d"）不会莫名其妙写出一张 d.jpg。
+            if (!rta::cover::cover_key_is_strict_hex16(kk))
+                return "{\"ok\":false,\"error\":\"专辑键非法（应为 16 位十六进制）\"}";
+            if (rq.body.size() < 1024) return "{\"ok\":false,\"error\":\"图片太小（<1KB）\"}";
+            if (rq.body.size() > rta::cover::kCoverMaxBytes) return "{\"ok\":false,\"error\":\"图片超过 24MB\"}";
+            const std::vector<unsigned char> body(rq.body.begin(), rq.body.end());
+            if (!rta::cover::cover_looks_like_image(body))
+                return "{\"ok\":false,\"error\":\"不是可识别的图片（jpg/png/webp/gif）\"}";
+            const std::string werr = cover_write_atomic(kk, body);
+            if (!werr.empty()) return "{\"ok\":false,\"error\":\"" + jesc(werr) + "\"}";
+            play_log("COVERSET k=" + kk + " bytes=" + std::to_string((long long)rq.body.size()));
+            return std::string("{\"ok\":true,\"k\":\"") + kk + "\",\"bytes\":" + std::to_string((long long)rq.body.size()) + "}";
+        }
+        // ---- 一张封面（只读；**零网络**，见文件中部「专辑封面在线抓取」注释）----
         if (rq.path.rfind("/api/lib/cover", 0) == 0) {
             std::string key;
             const size_t p = rq.path.find("?k=");
             if (p != std::string::npos) key = urlDecode(rq.path.substr(p + 3));
+            const auto t0 = std::chrono::steady_clock::now();
             std::vector<unsigned char> bytes;
             std::string mime = "image/jpeg";
-            lib.albumCover(key, bytes, mime);
+            const char* src = "none";
+            // ① 内嵌/同目录图（现有逻辑）。
+            //    ★ 只有 hasCover=1 才去问 —— hasCover 是扫描时算好的（内嵌流 or 同目录封面文件）。
+            //      对 hasCover=0 的专辑调 albumCover() 会为每张专辑起 3 次 ffmpeg（~200 ms/张），
+            //      上百张就把控制面堵死几十秒 —— 这正是"封面页卡死"的老病根。现在这条路是 0 次 ffmpeg。
+            bool hasEmbedded = false;
+            rta::net::LibAlbum a;
+            if (!key.empty() && lib.album(key, a)) hasEmbedded = a.hasCover;
+            if (hasEmbedded && lib.albumCover(key, bytes, mime) && !bytes.empty()) {
+                src = "embed";
+            } else {
+                // ② 磁盘正缓存（网图/人工设置）
+                bytes.clear();
+                mime = "image/jpeg";
+                if (cover_read_cached(key, bytes)) { src = "net"; mime = cover_mime_of(bytes); }
+            }
+            const double ms = std::chrono::duration<double, std::milli>(
+                                  std::chrono::steady_clock::now() - t0).count();
+            // 日志节流：专辑页一次渲染就会打上百次这个端点，且响应头是 Cache-Control: no-store
+            // （浏览器每次都重新要）⟹ 每张都写日志等于给播放日志灌噪声 + 给每个请求加一次文件 I/O。
+            // 规则：本进程前 60 次全记（排查"谁 404 / 走哪条路"够用），之后只记 ≥5 ms 的慢请求。
+            static std::atomic<int> s_coverGetSeq{0};
+            const int seq = s_coverGetSeq.fetch_add(1);
+            if (seq < 60 || ms >= 5.0) {
+                char msbuf[24];
+                std::snprintf(msbuf, sizeof(msbuf), "%.2f", ms);
+                play_log(std::string("COVERGET n=") + std::to_string(seq + 1) + " k=" + key + " src=" + src +
+                         " bytes=" + std::to_string(bytes.size()) + " ms=" + msbuf);
+            }
+            if (std::string(src) == "none") {
+                ct = "image/jpeg";
+                rta::net::webui_set_status(404);
+                return std::string();          // 404 + 空 body：<img onerror> 露回首字母
+            }
             ct = mime;
             return std::string(bytes.begin(), bytes.end());
         }

@@ -18,6 +18,9 @@ rta-*.conf
 /build/
 /build-mac/
 /build-*/
+# 测试素材目录：tests/test_pipeline.cpp 在 cwd 下建 testdata/ 写 WAV。
+# ctest 的 cwd 是 build-mac/（已被忽略），但从仓库根手动跑测试时会落在仓库根 ⟹ 这里兜住。
+/testdata/
 /buildwebview2/
 /dist/
 /out/

@@ -552,11 +552,14 @@ function head(title, subtitle, toolsHtml) {
 /* ---------------- 专辑视图 ---------------- */
 // 封面一律尝试加载：拿不到就让 img 自己消失，后面的首字母占位露出来。
 // （早期用 cv 标记决定是否请求，结果「扫描时没识别出封面」就永远不显示了）
+// 2026-10-26（封面在线抓取）：后端 /api/lib/cover 现在**找不到就 404**（不再回 1x1 占位图），
+// 所以 onerror 必须是"隐藏 <img>、露出底下的首字母"，而不是让格子空着。
+// cvUrl 只在「磁盘 covercache 有网图」时由后端给出；没有时回落到老路径（内嵌/同目录图）。
 function albumCardHtml(a, i) {
   return '<div class=card data-i=' + i + '>' +
     '<div class=cv>' +
       '<div class=ph>' + esc((a.name || '?').slice(0, 1).toUpperCase()) + '</div>' +
-      '<img src="/api/lib/cover?k=' + a.k + '" loading=lazy alt="" onerror="this.style.display=\'none\'">' +
+      '<img src="' + (a.cvUrl || ('/api/lib/cover?k=' + a.k)) + '" loading=lazy alt="" onerror="this.style.display=\'none\'">' +
       '<div class=pl><svg width=13 height=13 viewBox="0 0 24 24" fill=#fff><path d="M8 5v14l11-7z"/></svg></div>' +
     '</div>' +
     '<div class=nm title="' + esc(a.name) + '">' + esc(a.name) + '</div>' +
@@ -564,8 +567,37 @@ function albumCardHtml(a, i) {
       (a.year ? '  \u00b7  ' + a.year : '') + (a.sr ? '  \u00b7  ' + fmtTag(a.sr, a.bits) : '') + '</div>' +
     '</div>';
 }
+// 2026-10-26（封面在线抓取）：封面抓取要有**看得见的进度**，并且进库页自动开跑。
+// 后端：POST /api/lib/cover/prefetch（副作用）· GET /api/lib/cover/progress → {running,done,total,hit,miss,fail}
+// 为什么进度必须显式：首次进库页要对上百张缺图专辑联网，没有进度用户会以为"页面又卡死了"
+// —— 那正是这一轮要修的老病根。后端立即返回（网络全在后台 2 线程），前端只轮询。
+var COVP = { timer: 0 };
+function startCoverPrefetch() {
+  api('/api/lib/cover/prefetch', '').then(function (j) {
+    if (!j || !j.ok || !j.running || !j.queued) return;
+    toast('正在抓取封面：共 ' + j.queued + ' 张缺图');
+    pollCoverProgress();
+  }).catch(function () { });
+}
+function pollCoverProgress() {
+  if (COVP.timer) return;
+  COVP.timer = setInterval(function () {
+    api('/api/lib/cover/progress').then(function (g) {
+      if (!g || !g.ok) return;
+      var el = D('covProg');
+      if (el) { el.style.display = 'flex'; el.textContent = '封面 ' + (g.done || 0) + '/' + (g.total || 0) + '（命中 ' + (g.hit || 0) + '）'; }
+      if (!g.running) {
+        clearInterval(COVP.timer); COVP.timer = 0;
+        if (el && g.done > 0) setTimeout(function () { el.style.display = 'none'; }, 2500);
+        if (g.hit > 0) { toast('封面已补齐 ' + g.hit + ' 张'); loadAlbums(); }
+      }
+    }).catch(function () { });
+  }, 700);
+}
+
 function loadAlbums(q, title) {
   S.view = 'albums';
+  startCoverPrefetch();     // 进库页就开跑（没有缺图时后端立即返回 queued=0）
   // 只有「不带搜索词」的整库视图才进缓存：带 q 的是用户主动查询，必须每次新鲜（261025-01 #5）。
   var ck = (q ? '' : 'albums|');
   var hit = viewCacheGet(ck);
@@ -888,7 +920,12 @@ function renderAlbumsFrom(j, q, title) {
     return;
   }
   head(title || '专辑', S.albums.length + ' 张专辑', '');
-  var h = '<div class=grid>';
+  // 封面预热进度条（2026-10-26）：上游 c41ce97 只写了 D('covProg') 的读取端，
+  // **从来没有创建这个元素** ⟹ 进度永远不显示（等于没做）。这里补上真正的容器，
+  // 并且默认 display:none —— 没有预热在跑时它不占位。
+  var h = '<div id=covProg style="display:none;align-items:center;gap:8px;margin:0 22px 10px;' +
+          'font-size:12px;color:var(--sub);font-variant-numeric:tabular-nums"></div>';
+  h += '<div class=grid>';
   S.albums.forEach(function (a, i) {
     h += albumCardHtml(a, i);
   });
@@ -1232,7 +1269,9 @@ function openAlbum(k) {
     if (S.view !== 'album') return;   // 已切走 → 丢弃（否则会把别页内容覆写成专辑页）
     if (!j.ok) { toast(j.error || '打不开专辑'); return; }
     S.album = j;
-    var cv = "background-image:url('/api/lib/cover?k=" + j.k + "')";
+    // 2026-10-26（封面在线抓取）：封面 404 时不要留一块纯色空框 —— 用 <img> + 首字母底层
+    // （与列表页一致）。上游 c41ce97 把 background-image 换成 img 的理由是「封面端点现在
+    // 找不到就 404」，而 background-image 的 404 会留下一块**什么都没有**的纯色方块。
     var sub = [];
     if (j.artist) sub.push(esc(j.artist));
     if (j.year) sub.push(j.year);
@@ -1246,12 +1285,19 @@ function openAlbum(k) {
     var isThisPlaying = (S.playing || S.paused) && S.lastCur && (j.tracks || []).some(function (t) { return t.path === S.lastCur; });
     var albPlayText = isThisPlaying ? (S.paused ? '▶ 继续播放' : '❚❚ 暂停') : '▶ 播放整张';
     var albPlayTitle = isThisPlaying ? (S.paused ? '继续播放专辑' : '暂停播放') : '播放整张专辑';
-    var h = '<div class=ahead><div class=cv style="' + cv + '"></div><div class=info>' +
+    var h = '<div class=ahead><div class=cv style="position:relative">' +
+            '<div class=ph>' + esc((j.name || '?').slice(0, 1).toUpperCase()) + '</div>' +
+            '<img src="' + (j.cvUrl || ('/api/lib/cover?k=' + j.k)) + '" alt="" onerror="this.style.display=\'none\'" style="position:absolute;inset:0;width:100%;height:100%;object-fit:cover;border-radius:inherit">' +
+            '</div><div class=info>' +
             '<div class=kind>ALBUM</div><h1 title="' + esc(j.name) + '">' + esc(j.name) + '</h1>' +
             '<div class=sub>' + sub.join(' \u00b7 ') + '</div>' +
             '<button class="btn pri" id=albPlayAll aria-label="播放整张专辑" title="' + albPlayTitle + '">' + albPlayText + '</button> ' +
             '<button class="btn pri" id=aPlay style="display:none">播放</button> ' +
             '<button class=btn id=aAdd>加入队列</button> ' +
+            // 2026-10-26（261026-02 #3 的人工兜底）：找不到封面的专辑（同人自出版，全网没有）
+            // 允许用户自己挑一张图，存进 covercache（**不动音乐文件**）——把「99%」补到 100% 的人工通道。
+            '<button class=btn id=aSetCover title="为这张专辑指定一张封面图（存到本地缓存，不改动音乐文件）">设置封面</button> ' +
+            '<input type=file id=aCoverFile accept="image/*" style="display:none"> ' +
             '<button class=btn id=aShuf>随机播放</button>' +
             '</div></div>';
 
@@ -1341,6 +1387,23 @@ function openAlbum(k) {
     if (D('aPlay')) D('aPlay').onclick = function () { playAlbum(j.k, 0); };
     D('aAdd').onclick = function () { enqueueAlbum(j.k); };
     D('aShuf').onclick = function () { playAlbum(j.k, Math.floor(Math.random() * j.tracks.length)); };
+    // 2026-10-26：人工补封面（同人自出版专辑全网无图时的唯一出路；存 covercache，不动音乐文件）
+    if (D('aSetCover')) D('aSetCover').onclick = function () { D('aCoverFile').click(); };
+    if (D('aCoverFile')) D('aCoverFile').onchange = function (ev) {
+      var f = ev.target.files && ev.target.files[0];
+      if (!f) return;
+      var x = new XMLHttpRequest();
+      x.open('POST', '/api/lib/cover/set?k=' + encodeURIComponent(j.k));
+      x.onload = function () {
+        try {
+          var r = JSON.parse(x.responseText);
+          if (r && r.ok) { toast('封面已设置'); openAlbum(j.k); }
+          else { toast('设置失败：' + ((r && r.error) || '未知原因')); }
+        } catch (e) { toast('设置失败：响应无法解析'); }
+      };
+      x.onerror = function () { toast('设置失败：网络错误'); };
+      x.send(f);
+    };
     Array.prototype.forEach.call(D('list').querySelectorAll('.fav-btn'), function (btn) {
       btn.onclick = function (ev) {
         ev.stopPropagation();
