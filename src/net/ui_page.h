@@ -814,8 +814,20 @@ h += "#npPage .npedge{display:none}";
     //       ⟹ 内容不满一屏时贴底；内容超过一屏时 margin-top:auto 不产生额外空间，自然跟随滚动。
     //     · 实测修复后：七个页签的"距视口底"全部 = 24px（即 padding-bottom），且滚到最底不被 .bar 遮挡。
     //   注意 display:block→flex 不能让 sticky 失效，所以同时保留 sticky 作为超长内容时的兜底。
-    h += "#setpage{display:none;flex:1;min-height:0;overflow:auto;flex-direction:column;padding:20px 24px 24px}";
+    //
+    // 2026-10-26 再改（用户两条要求，把上面那套 sticky 方案整体换掉）：
+    //   ①「上边栏要贴合 UI」；②「设置里只有页面进行滚动」；③「保存/恢复默认做进各个页面里」。
+    //   新结构：#setpage 只做布局容器（不滚），.stabs 固定一行，.sbody 独立滚动，
+    //   保存栏由 JS 克隆进每个 .spane（见 ui_script.h 的 cloneFootIntoPanes()）。
+    //   实测旧做法的两个病（本文件下方注释留档）：
+    //     · .stabs 背景只覆盖内容宽度（250..1535 vs 容器 226..1568）⟹ 左右露底；
+    //     · sticky 在 flex 列里未真正粘住（滚 60px 后 stabsTop 仍 80，容器顶 60）。
+    //   新结构把 padding 从 #setpage 移到 .sbody/.stabs 各自承担 ⟹ 页签条能整行铺满，
+    //   也不再有 sticky 的粘附范围问题。
+    h += "#setpage{display:none;flex:1;min-height:0;flex-direction:column;overflow:hidden}";
     h += "#setpage.on{display:flex}";
+    // .sbody = 唯一的滚动容器。padding 在这里给，左右 24px 与页签条对齐。
+    h += ".sbody{flex:1;min-height:0;overflow-y:auto;overflow-x:hidden;padding:0 24px 24px}";
     h += ".sgroup{margin-bottom:22px;border:1px solid var(--line);border-radius:12px;background:var(--bg2);overflow:visible}";
     h += ".sghead{display:flex;align-items:center;gap:9px;padding:11px 16px;border-bottom:1px solid var(--line);font-weight:650;font-size:12.5px;background:var(--bg3);border-radius:11px 11px 0 0}";
     h += ".sghead .hint{font-weight:400;font-size:11px;color:var(--mut2)}";
@@ -930,11 +942,23 @@ h += "#npPage .npedge{display:none}";
     h += ".preset-btn-badge{font-size:11px;color:var(--warn);font-weight:600}";
     h += ".preset-btn-sub{font-size:11.5px;line-height:1.45;color:var(--mut)}";
     // 设置页分页（对齐 RLPlayer 的 Inputs / Outputs / PCM / SDM / Advanced）
-    h += ".stabs{display:flex;gap:4px;padding:10px 0 12px;margin:0 0 14px;border-bottom:1px solid var(--line);position:sticky;top:0;background:var(--bg);z-index:6}";
+    // 2026-10-26（用户「上边栏要贴合 UI」）：.stabs 不再 sticky —— 它现在是**固定行**，
+    //   由 #setpage 的 flex 列布局保证它不随内容滚动。
+    //   padding 用 24px 与 .sbody 的左右 padding 完全一致 ⟹ 页签条背景整行铺满，
+    //   滚动时不会再看到内容从两侧穿出来（旧做法的"露底"）。
+    //   background 仍留着，用于 scrollbar 出现时的兜底。
+    h += ".stabs{display:flex;flex-wrap:wrap;gap:4px;padding:14px 24px 12px;margin:0;border-bottom:1px solid var(--line);background:var(--bg);z-index:6;flex:none}";
     h += ".stab{padding:7px 15px;border-radius:8px;font-size:12px;color:var(--mut);border:1px solid transparent;transition:.13s}";
     h += ".stab:hover{background:var(--hov);color:var(--txt2)}";
     h += ".stab.on{background:var(--acc-weak);color:var(--acc-text);border-color:rgba(59,130,246,.32);font-weight:600}";
-    h += ".spane{display:none}.spane.on{display:block}";
+    // 2026-10-26（用户「保存/恢复默认做进各个页面里」）：
+    //   .spane.on 用 flex 列 + .setfoot{margin-top:auto}。
+    //   为什么还要 auto：把保存栏放进每页末尾之后，短页（实测 meta 内容只有 248px、
+    //   可视 564px）会出现"保存栏贴在内容后、下面一大片空白"的观感，像悬在半空。
+    //   margin-top:auto 让它在**内容不满一屏时**被推到页签内容区底部；
+    //   内容超过一屏时 auto 不产生额外空间，它自然排在内容末尾跟着滚。
+    //   这既满足"做进各页面里"（它属于该页签自己的 DOM），又不会有悬空感。
+    h += ".spane{display:none}.spane.on{display:flex;flex-direction:column;min-height:100%;box-sizing:border-box}";
     h += ".trimgrid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px}";
     // 2026-10-24（用户 261024-01 #5）：流媒体多服务器列表 + 行内操作
     h += ".srvlist{display:flex;flex-direction:column;gap:8px}";
@@ -970,7 +994,17 @@ h += "#npPage .npedge{display:none}";
     h += "@media (max-width:1100px){#crumb,#sub{display:none}.search{max-width:320px}}";
     // 2026-10-26 B-2：margin-top:auto 让保存栏在"内容不满一屏"时也贴到视口底部。
     //   sticky 保留作为"内容超过一屏"时的兜底（粘在滚动容器底边）。
-    h += ".setfoot{display:flex;gap:10px;align-items:center;padding:12px 2px 10px;margin-top:auto;position:sticky;bottom:0;background:var(--bg);border-top:1px solid var(--line);z-index:6}";
+    // 2026-10-26（用户「保存设置跟恢复默认按钮要做进各个页面里」）：
+    //   保存栏不再是"粘在滚动区底部的浮层"，而是**每个页签内容的一部分**（JS 克隆进 .spane）。
+    //   因此不再需要 position:sticky / margin-top:auto —— 它就老老实实排在内容末尾。
+    //   间距改成上下各 16px，与 .sgroup 的 22px 底部间距协调，视觉上是一块"页脚动作区"。
+    // margin-top:16px 是最小间距；.spane.on 是 flex 列时，auto 会把保存栏推到该页底部。
+    // 用 margin-top:auto 时 16px 会失效，所以改用 padding-top 保证最小间距。
+    h += ".setfoot{display:flex;gap:10px;align-items:center;padding:14px 2px 6px;margin-top:auto;background:transparent;border-top:1px solid var(--line);z-index:6}";
+    h += ".setfoot{margin-top:auto}";
+    // 诊断 / 流媒体两页不放保存栏：它们的动作全部即时生效，没有"待保存"的概念
+    //（2026-10-24 #5 与评审 #12 的既有决策，本次改成"每页各一份"后仍要保留这条）。
+    h += ".spane[data-g=diag] .setfoot,.spane[data-g=stream] .setfoot{display:none}";
     h += ".setfoot .sp{flex:1}";
     h += ".meter-bar{height:6px;border-radius:3px;background:var(--track);overflow:hidden;position:relative;margin:4px 0 2px}";
     h += ".meter-val{height:100%;width:0%;background:linear-gradient(90deg,var(--acc),#22c55e);transition:width .12s ease;border-radius:3px}";
