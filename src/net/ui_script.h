@@ -5754,6 +5754,53 @@ function bindPresetCard() {
   }
 }
 
+// ============================================================================
+// 2026-10-26（用户：「保存设置跟恢复默认按钮要做进各个页面里」）
+//
+// 做法：渲染时在 .sbody 末尾放一个母版 .setfoot（id=sp_footTpl），
+//   然后 cloneFootIntoPanes() 把它**克隆进每一个 .spane**，克隆完移除母版。
+//   于是每个页签内容结束时都有自己的「保存设置 / 恢复默认」，不再是滚动区底部的浮层。
+//
+// 为什么不用 id 绑定：克隆后会出现 9 个同名按钮，id 必须唯一。
+//   改用 data-act="save|reset"，在 bindFootActions() 里对整个 #setpage 做事件委托，
+//   这样克隆多少份、将来加多少页签，都不需要再改绑定代码。
+//
+// 哪些页签不放保存栏（与改动前的行为一致，是产品决策，不是遗漏）：
+//   · diag（诊断）/ stream（流媒体）—— 这两页的动作全部即时生效，没有"待保存"的概念，
+//     放一个「保存设置」只会让人以为还有东西没存。css 里用 .spane[data-g=diag] .setfoot 隐藏。
+// ============================================================================
+function cloneFootIntoPanes() {
+  var tpl = D('sp_footTpl');
+  var sp = D('setpage');
+  if (!tpl || !sp) return;
+  var panes = sp.querySelectorAll('.spane');
+  Array.prototype.forEach.call(panes, function (pane) {
+    // 已经有就不用再加（重建时 pane 是新 DOM，正常不会重复；这里只是防御）
+    if (pane.querySelector('.setfoot')) return;
+    var c = tpl.cloneNode(true);
+    c.removeAttribute('id');          // id 必须唯一
+    pane.appendChild(c);              // 放在该页签内容最末尾
+  });
+  // 母版用完即弃（不留一个"第 10 份"在 .sbody 末尾）
+  if (tpl.parentNode) tpl.parentNode.removeChild(tpl);
+}
+function bindFootActions() {
+  var sp = D('setpage');
+  if (!sp) return;
+  // 事件委托：一次绑定，覆盖所有克隆副本，也不会重复绑
+  sp.addEventListener('click', function (ev) {
+    var t = ev.target;
+    var btn = t && t.closest ? t.closest('[data-act]') : null;
+    if (!btn) return;
+    ev.preventDefault();
+    var act = btn.getAttribute('data-act');
+    if (act === 'save') {
+      if (typeof applySettings === 'function') applySettings();
+    } else if (act === 'reset') {
+      if (typeof window._resetAllSettings === 'function') window._resetAllSettings();
+    }
+  });
+}
 function renderSettingsPage() {
   var filts = D('sFilt') ? D('sFilt').innerHTML : '';
   // Nx 下拉必须带上"跟随 1x"（空值），否则重建后浏览器退回第一项，一保存就把 Nx 改掉
@@ -5782,6 +5829,18 @@ function renderSettingsPage() {
      // 开发期它是必需品（报错时要拿现场），所以与输入/输出/PCM/SDM/高级 平级。
      + '<button class=stab data-g=diag>诊断</button>'
      + '</div>';
+
+  // 2026-10-26（用户：设置里只有页面进行滚动 + 上边栏要贴合 UI）：
+  //   .stabs 留在 #setpage 里当**固定不滚**的页签条，下面的所有内容 + 保存栏
+  //   统一装进 .sbody —— 只有 .sbody 滚动。
+  //   为什么这样改（实测过旧做法的两个病）：
+  //     ① .stabs 原来是 position:sticky + background:var(--bg)，但它只覆盖内容宽度
+  //        （实测 250..1535，而 #setpage 内容区 226..1568）⟹ 左右各露一条 24/33px 的底，
+  //        滚动时能看到内容从侧面穿过去，就是用户说的"上边栏露底"。
+  //     ② sticky 在 flex 列容器里被限制在自身行内，实测滚 60px 后 stabsTop 仍是 80、
+  //        而容器顶是 60 ⟹ 根本没粘住，只是恰好还没滚到。
+  //   改成「页签条固定 + 内容区独立滚动」后，两个病从结构上消失，不依赖 sticky。
+  h += '<div class=sbody>';
 
   // ---------- 输出 ----------
   h += '<div class="spane" data-g=out>'
@@ -6157,10 +6216,15 @@ function renderSettingsPage() {
        + '</div></div>')
      + '</div>';
 
-  // 底部按钮（不随页签切换）
-  h += '<div class=setfoot><button class="btn pri" id=sp_save>保存设置</button>'
-     + '<button class=btn id=sp_reset>恢复默认</button><span class=sp></span>'
+  // 2026-10-26（用户：保存设置跟恢复默认按钮要做进各个页面里）：
+  //   每个 .spane 各自带一份保存栏（由 JS 在渲染后按页签克隆），而不是全局只有一个。
+  //   这里先留一个"母版"放在 .sbody 末尾，供 JS 克隆；克隆完自身移除。
+  //   好处：保存/恢复默认出现在**每一个**页面内容之中（用户说的"做进各个页面里"），
+  //   不再是悬在滚动区底部的浮层，也就不需要 sticky / margin-top:auto 这些技巧。
+  h += '<div class=setfoot id=sp_footTpl><button class="btn pri" data-act=save>保存设置</button>'
+     + '<button class=btn data-act=reset>恢复默认</button><span class=sp></span>'
      + '<span style="font-size:11.5px;color:var(--mut2)">改动在下一次播放时生效</span></div>';
+  h += '</div>';   // </div .sbody>
 
   D('setpage').innerHTML = h;
 
@@ -6439,8 +6503,10 @@ function renderSettingsPage() {
   // 流媒体页（用户 261024-01 #5）：列表 / 添加 / 编辑 / 删除 / 启用 / 测试 —— 全部即时落盘
   bindSrcPage();
   loadSrcConfig();
-  D('sp_save').onclick = applySettings;
-  D('sp_reset').onclick = function () {
+  // 2026-10-26：保存/恢复默认已改成「每个页签各一份」（见 cloneFootIntoPanes）。
+  //   这里不再按 id 绑定（克隆之后 id 会重复），改为统一按 [data-act] 绑定。
+  bindFootActions();
+  function _resetAll() {
     if (!confirm('把所有参数恢复成默认值？')) return;
     ADV = { device: '', bits: 0, taps: 0, atten: 0, transition: 0, phase: '', modcut: 0, moddith: -1, ir: '', irgpu: 0, ramp: 0, theme: S.theme, modorder: 5, modfamily: 'dsd', directsdm: 0, dsdKind: 'fir', dsdConv: 'narrow',
             backend: 'wasapi', channels: 0, naaHost: '',
@@ -6452,7 +6518,10 @@ function renderSettingsPage() {
     D('sRate').value = 'max'; D('sFiltNx').value = ''; D('sShap').value = 'auto';
     D('sBuf').value = 100; D('sDSD').value = 0; D('sIsp').checked = true; D('s2s').checked = true;
     saveSettings(); renderSettingsPage(); toast('已恢复默认');
-  };
+  }
+  window._resetAllSettings = _resetAll;
+  // 把母版保存栏克隆进每个 .spane，然后移除母版自身
+  cloneFootIntoPanes();
   D('sp_theme').onchange = function () { setTheme(this.value); };
   if (D('sp_uistyle')) D('sp_uistyle').onchange = function () {
     setUiStyle(this.value);

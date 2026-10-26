@@ -98,22 +98,37 @@ function section(t) { console.log('\n' + t); }
   for (const g of TABS) {
     await s.eval(`(function () { var b = document.querySelector('#setpage .stab[data-g=${g}]'); if (b) b.click(); })()`);
     await sleep(550);
+    // 2026-10-26 结构变更后的判据（用户要求「保存/恢复默认做进各个页面里」）：
+    //   保存栏不再是"全局粘在滚动区底部的浮层"，而是每个 .spane 自己的页脚。
+    //   所以判据改成三条：
+    //     ① 当前页签**自己**有一个可见的保存栏（不是全局那一个）；
+    //     ② 内容不满一屏时，它落在页面底部（gap ≈ padding-bottom，不再悬空）；
+    //     ③ 内容超过一屏时，滚到底能看到它，且不被播放条遮挡。
+    //   同时检查"只有 .sbody 在滚"（#setpage 自身 scrollTop 必须恒为 0）。
     const m = await s.eval(`(function () {
       var sp = document.getElementById('setpage');
-      var f = document.querySelector('#setpage .setfoot');
-      if (!f || getComputedStyle(f).display === 'none') return {hidden: true};
-      var fr = f.getBoundingClientRect(), sr = sp.getBoundingClientRect();
+      var sb = sp.querySelector('.sbody');
+      var pane = sp.querySelector('.spane.on');
+      var f = pane ? pane.querySelector('.setfoot') : null;
+      if (!f || getComputedStyle(f).display === 'none') return {hidden: true, g: pane ? pane.dataset.g : '?'};
+      var scrollable = sb.scrollHeight > sb.clientHeight + 1;
+      if (scrollable) sb.scrollTop = sb.scrollHeight;   // 长页先滚到底再量
+      var fr = f.getBoundingClientRect();
+      var sr = sb.getBoundingClientRect();
       var bar = document.querySelector('.bar').getBoundingClientRect();
-      return {gap: Math.round(sr.bottom - fr.bottom),
-              inside: fr.top >= sr.top - 1 && fr.bottom <= sr.bottom + 1,
-              covered: fr.bottom > bar.top,
-              scrollable: sp.scrollHeight > sp.clientHeight + 1};
+      var res = {gap: Math.round(sr.bottom - fr.bottom),
+                 inside: fr.bottom <= sr.bottom + 1,
+                 covered: fr.bottom > bar.top,
+                 scrollable: scrollable,
+                 paneScrollOwn: sp.scrollTop === 0};
+      sb.scrollTop = 0;
+      return res;
     })()`);
-    // 判据三条（用户要的是"始终在底部、能点到"）：
-    //   ① 保存栏完整落在 #setpage 可视区内；② 不被悬浮播放条遮挡；
-    //   ③ 与可视底边的间距 <= padding-bottom + 少量容差（sticky 兜底时会有几 px 偏差）。
-    const ok = !m.hidden && m.inside && !m.covered && m.gap <= 40;
-    ck(ok, '页签 ' + g + ' 保存栏贴底', JSON.stringify(m));
+    // 长页（内容超一屏）与短页判据不同：长页只要"滚到底能看到、不被播放条盖住"就算过，
+    // 不能要求它同时满足"不满一屏也贴底"（那是自相矛盾的）。
+    const ok = !m.hidden && m.inside && !m.covered && m.paneScrollOwn === true
+             && (m.scrollable ? true : m.gap <= 40);
+    ck(ok, '页签 ' + g + ' 保存栏在本页内且可见可点', JSON.stringify(m));
     if (!ok) footBad.push(g);
   }
   await s.eval(`document.querySelector('#setpage .stab[data-g=meta]').click()`);
