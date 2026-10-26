@@ -170,26 +170,26 @@ int main() {
     std::printf("\n=== 3. 下载 URL 白名单 ===\n");
     // =====================================================================
     const char* allow[] = {
-        "https://gitea.felisidus.com/August/RLPlayer/releases/download/v1.0.4/x.dmg",
-        "https://gitea.felisidus.com/August/RLPlayer-update/raw/branch/main/latest.json",
-        "HTTPS://GITEA.FELISIDUS.COM/x/y.dmg",     // scheme/host 大小写不敏感
+        "https://github.com/BH2VOQ/RLPlayer-Mac/releases/download/v1.0.4/x.dmg",
+        "https://raw.githubusercontent.com/BH2VOQ/RLPlayer-Mac/main/latest.json",
+        "HTTPS://RAW.GITHUBUSERCONTENT.COM/x/y.dmg",     // scheme/host 大小写不敏感
     };
     for (const char* u : allow) ck(update_download_url_allowed(u), std::string("放行：") + u);
 
     const char* deny[] = {
-        "http://gitea.felisidus.com/x/y.dmg",                     // 非 https
+        "http://raw.githubusercontent.com/x/y.dmg",               // 非 https
         "https://evil.com/x/y.dmg",                               // 别的域名
-        "https://gitea.felisidus.com.evil.com/x/y.dmg",           // 后缀伪装
-        "https://evilgitea.felisidus.com/x/y.dmg",                // 前缀伪装
-        "https://gitea.felisidus.com:8443/x/y.dmg",               // 端口变体
-        "https://user@gitea.felisidus.com/x/y.dmg",               // userinfo 伪装
-        "https://gitea.felisidus.com/",                           // 没有路径
-        "https://gitea.felisidus.com",                            // 没有路径
+        "https://raw.githubusercontent.com.evil.com/x/y.dmg",     // 后缀伪装
+        "https://evilraw.githubusercontent.com/x/y.dmg",         // 前缀伪装
+        "https://raw.githubusercontent.com:8443/x/y.dmg",         // 端口变体
+        "https://user@raw.githubusercontent.com/x/y.dmg",         // userinfo 伪装
+        "https://raw.githubusercontent.com/",                     // 没有路径
+        "https://raw.githubusercontent.com",                      // 没有路径
         "file:///etc/passwd",                                     // 本地文件
         "data:text/plain,hi",                                     // data URI
         "javascript:alert(1)",                                    // 脚本
         "",                                                       // 空
-        "https://gitea.felisidus.com/x/y.dmg\nHost: evil.com",    // CRLF 注入
+        "https://raw.githubusercontent.com/x/y.dmg\nHost: evil.com",  // CRLF 注入
     };
     for (const char* u : deny) ck(!update_download_url_allowed(u), std::string("拒绝：") + u);
 
@@ -197,13 +197,17 @@ int main() {
     //     所以 dmg 必须放在仓库文件里、走 raw 端点）
     {
         const std::string r1 = resolve_private_download_url("dist/RLPlayer-1.0.5.dmg", "feat/macos-platform");
-        ck(update_download_url_allowed(r1) && r1.find("/api/v1/repos/August/RLPlayer/raw/dist/RLPlayer-1.0.5.dmg") != std::string::npos,
+        // 2026-10-26 迁到 GitHub 后，相对路径的形状是
+        //   https://raw.githubusercontent.com/<owner>/<repo>/<ref>/<path>
+        // ref 是**路径段**（GitHub 的约定），不再是 Gitea 那种 ?ref= 查询参数。
+        ck(update_download_url_allowed(r1) && r1.find("/BH2VOQ/RLPlayer-Mac/feat/macos-platform/dist/RLPlayer-1.0.5.dmg") != std::string::npos,
            "相对路径 → raw 绝对地址（过白名单）", r1);
-        ck(r1.find("?ref=feat/macos-platform") != std::string::npos, "带上 ref 分支参数", r1);
+        ck(r1.find("raw.githubusercontent.com/BH2VOQ/RLPlayer-Mac/") != std::string::npos,
+           "ref 作为路径段拼进 raw 地址（GitHub 约定，不是 ?ref=）", r1);
         const std::string r2 = resolve_private_download_url("/lead/RLPlayer.dmg", "");
-        ck(!r2.empty() && r2.find("raw/lead/RLPlayer.dmg") != std::string::npos,
-           "前导 '/' 被剥掉", r2);
-        const std::string abs = "https://gitea.felisidus.com/August/RLPlayer/raw/x.dmg";
+        ck(!r2.empty() && r2.find("/BH2VOQ/RLPlayer-Mac/main/lead/RLPlayer.dmg") != std::string::npos,
+           "前导 '/' 被剥掉，且空 ref 回退到仓库默认分支", r2);
+        const std::string abs = "https://raw.githubusercontent.com/BH2VOQ/RLPlayer-Mac/main/x.dmg";
         ck(resolve_private_download_url(abs, "main") == abs, "已是 https 绝对地址 ⟹ 原样返回");
         ck(resolve_private_download_url("https://evil.com/x.dmg", "main").empty(),
            "绝对地址但非白名单 ⟹ 拒绝");
@@ -216,7 +220,7 @@ int main() {
     const std::string kShaA = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
     const std::string goodJson =
         "{\"version\":\"1.0.5\",\"download_url\":"
-        "\"https://gitea.felisidus.com/August/RLPlayer/releases/download/v1.0.5/RLPlayer.dmg\","
+        "\"https://github.com/BH2VOQ/RLPlayer-Mac/releases/download/v1.0.5/RLPlayer.dmg\","
         "\"sha256\":\"" + kShaA + "\",\"size\":7139420,\"notes\":\"修复若干问题\"}";
     {
         const Manifest m = parse_update_manifest(goodJson);
@@ -231,17 +235,17 @@ int main() {
     ck(!parse_update_manifest("not json").valid, "非 JSON → 非法");
     ck(!parse_update_manifest("[]").valid, "数组 → 非法");
     ck(!parse_update_manifest(
-            "{\"download_url\":\"https://gitea.felisidus.com/a.dmg\",\"sha256\":\"" + kShaA + "\"}").valid,
+            "{\"download_url\":\"https://github.com/BH2VOQ/RLPlayer-Mac/a.dmg\",\"sha256\":\"" + kShaA + "\"}").valid,
        "缺 version → 非法");
     ck(!parse_update_manifest(
             "{\"version\":\"1.0.5\",\"sha256\":\"" + kShaA + "\"}").valid,
        "缺 download_url → 非法");
     ck(!parse_update_manifest(
-            "{\"version\":\"1.0.5\",\"download_url\":\"https://gitea.felisidus.com/a.dmg\"}").valid,
+            "{\"version\":\"1.0.5\",\"download_url\":\"https://github.com/BH2VOQ/RLPlayer-Mac/a.dmg\"}").valid,
        "缺 sha256 → 非法");
     // 4.2 字段格式不对
     ck(!parse_update_manifest(
-            "{\"version\":\"x.y\",\"download_url\":\"https://gitea.felisidus.com/a.dmg\","
+            "{\"version\":\"x.y\",\"download_url\":\"https://github.com/BH2VOQ/RLPlayer-Mac/a.dmg\","
             "\"sha256\":\"" + kShaA + "\"}").valid,
        "version 非法 → 非法");
     ck(!parse_update_manifest(
@@ -249,11 +253,11 @@ int main() {
             "\"sha256\":\"" + kShaA + "\"}").valid,
        "download_url 非白名单 → 非法（防篡改成任意地址）");
     ck(!parse_update_manifest(
-            "{\"version\":\"1.0.5\",\"download_url\":\"https://gitea.felisidus.com/a.dmg\","
+            "{\"version\":\"1.0.5\",\"download_url\":\"https://github.com/BH2VOQ/RLPlayer-Mac/a.dmg\","
             "\"sha256\":\"deadbeef\"}").valid,
        "sha256 长度不对 → 非法（防截断技巧）");
     ck(!parse_update_manifest(
-            "{\"version\":\"1.0.5\",\"download_url\":\"https://gitea.felisidus.com/a.dmg\","
+            "{\"version\":\"1.0.5\",\"download_url\":\"https://github.com/BH2VOQ/RLPlayer-Mac/a.dmg\","
             "\"sha256\":\"zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz\"}").valid,
        "sha256 含非 hex → 非法");
     // 4.2b 相对路径（私有仓库路径）与路径穿越防护
@@ -283,7 +287,7 @@ int main() {
         std::string upper = kShaA;
         for (char& c : upper) c = (char)std::toupper((unsigned char)c);
         const Manifest m = parse_update_manifest(
-            "{\"version\":\"1.0.5\",\"download_url\":\"https://gitea.felisidus.com/a.dmg\","
+            "{\"version\":\"1.0.5\",\"download_url\":\"https://github.com/BH2VOQ/RLPlayer-Mac/a.dmg\","
             "\"sha256\":\"" + upper + "\"}");
         ck(m.valid && m.sha256 == kShaA, "大写 sha256 归一为小写", m.sha256);
     }
@@ -391,14 +395,14 @@ int main() {
         // 6.2 确实最新（只有这一条能说「已是最新」）
         const std::string sameBody =
             "{\"version\":\"1.0.5-beta.1\",\"download_url\":"
-            "\"https://gitea.felisidus.com/a.dmg\",\"sha256\":\"" + kShaA + "\"}";
+            "\"https://github.com/BH2VOQ/RLPlayer-Mac/a.dmg\",\"sha256\":\"" + kShaA + "\"}";
         const CheckResult r = evaluate_update_check(kLocal, true, 200, sameBody);
         ck(r.decision == Decision::UpToDate, "同版本 ⟹ 已是最新", r.error);
         ck(r.up_to_date(), "up_to_date() 为真");
         // 远端更旧也不算更新（降级不提示）
         const std::string olderBody =
             "{\"version\":\"1.0.4\",\"download_url\":"
-            "\"https://gitea.felisidus.com/a.dmg\",\"sha256\":\"" + kShaA + "\"}";
+            "\"https://github.com/BH2VOQ/RLPlayer-Mac/a.dmg\",\"sha256\":\"" + kShaA + "\"}";
         const CheckResult r2 = evaluate_update_check(kLocal, true, 200, olderBody);
         ck(r2.decision == Decision::UpToDate, "远端更旧 ⟹ 不提示更新（不下拉降级）", r2.error);
     }
@@ -484,9 +488,9 @@ int main() {
     }
     {
         // 7.2 有 token
-        const Config c = parse_update_config("token=abc123def456\nmanifest_url=https://gitea.felisidus.com/x/latest.json\n");
+        const Config c = parse_update_config("token=abc123def456\nmanifest_url=https://raw.githubusercontent.com/BH2VOQ/RLPlayer-Mac/main/latest.json\n");
         ck(c.hasToken && c.token == "abc123def456", "token= 被正确读取");
-        ck(c.manifestUrl == "https://gitea.felisidus.com/x/latest.json", "manifest_url 被正确读取");
+        ck(c.manifestUrl == "https://raw.githubusercontent.com/BH2VOQ/RLPlayer-Mac/main/latest.json", "manifest_url 被正确读取");
     }
     {
         // 7.3 注释与空行
@@ -525,24 +529,24 @@ int main() {
         const std::string releases =
             "[{\"tag_name\":\"v1.0.4\",\"draft\":false,\"assets\":["
             "{\"name\":\"RLPlayer-v1.0.4-macOS-arm64.dmg\",\"size\":7139420,"
-            "\"browser_download_url\":\"https://gitea.felisidus.com/August/RLPlayer/releases/download/v1.0.4/x.dmg\"}]},"
+            "\"browser_download_url\":\"https://github.com/BH2VOQ/RLPlayer-Mac/releases/download/v1.0.4/x.dmg\"}]},"
             "{\"tag_name\":\"v1.0.5\",\"draft\":false,\"assets\":["
             "{\"name\":\"latest.json\",\"browser_download_url\":"
-            "\"https://gitea.felisidus.com/August/RLPlayer/releases/download/v1.0.5/latest.json\"}]},"
+            "\"https://github.com/BH2VOQ/RLPlayer-Mac/releases/download/v1.0.5/latest.json\"}]},"
             "{\"tag_name\":\"v9.9.9\",\"draft\":true,\"assets\":["
             "{\"name\":\"latest.json\",\"browser_download_url\":"
-            "\"https://gitea.felisidus.com/draft/latest.json\"}]}]";
+            "\"https://github.com/BH2VOQ/RLPlayer-Mac/draft/latest.json\"}]}]";
         const ReleaseAssetLookup lk = find_manifest_asset_in_releases(releases);
         ck(lk.found, "找到 latest.json 附件", lk.error);
         ck(lk.tag == "v1.0.5", "取的是**最新非草稿** release（v1.0.5，不是 draft 的 v9.9.9）", lk.tag);
-        ck(lk.url == "https://gitea.felisidus.com/August/RLPlayer/releases/download/v1.0.5/latest.json",
+        ck(lk.url == "https://github.com/BH2VOQ/RLPlayer-Mac/releases/download/v1.0.5/latest.json",
            "附件 URL", lk.url);
     }
     {
         // 8.1 没有 latest.json 附件 → 明确失败（不退回"用 dmg URL 猜"）
         const std::string releases =
             "[{\"tag_name\":\"v1.0.4\",\"assets\":[{\"name\":\"x.dmg\","
-            "\"browser_download_url\":\"https://gitea.felisidus.com/x.dmg\"}]}]";
+            "\"browser_download_url\":\"https://github.com/BH2VOQ/RLPlayer-Mac/x.dmg\"}]}]";
         const ReleaseAssetLookup lk = find_manifest_asset_in_releases(releases);
         ck(!lk.found && !lk.error.empty(), "缺 latest.json 附件 ⟹ 明确失败", lk.error);
     }

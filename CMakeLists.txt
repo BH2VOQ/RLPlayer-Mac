@@ -104,6 +104,22 @@ target_include_directories(rtadsp INTERFACE ${CMAKE_CURRENT_SOURCE_DIR}/src)
 #   * rtaweb = 原有独立 HTTP/浏览器 CLI，功能不删；只是不再被 .app 打包或启动。
 # 只编译一份业务代码：rtaweb 目标直接编 rtaweb.cpp；App 目标链接 rlapp_core（其 TU
 # 用 RLPLAYER_EMBEDDED_LIBRARY 屏蔽 main）。两个目标互不依赖，可并行构建。
+# 2026-10-26 邮件反馈通道：版本号的唯一真相源是 src/version.h。
+# 在 configure 期读一次 #define RLPLAYER_VERSION "x.y.z"，供 mac_feedback.mm 的
+# 反馈主题使用（避免在那个 TU 里再抄一份版本字符串）。
+if(APPLE)
+  file(STRINGS "${CMAKE_SOURCE_DIR}/src/version.h" _rl_ver_line
+       REGEX "^#define[ \t]+RLPLAYER_VERSION[ \t]+\"")
+  if(_rl_ver_line)
+    string(REGEX REPLACE "^#define[ \t]+RLPLAYER_VERSION[ \t]+\"([^\"]*)\".*$" "\\1"
+           RLPLAYER_VERSION_FOR_APP "${_rl_ver_line}")
+    message(STATUS "RLPlayer 版本（来自 src/version.h）：${RLPLAYER_VERSION_FOR_APP}")
+  else()
+    set(RLPLAYER_VERSION_FOR_APP "unknown")
+    message(WARNING "无法从 src/version.h 读取 RLPLAYER_VERSION —— 反馈邮件主题会显示 unknown")
+  endif()
+endif()
+
 if(APPLE)
   # 2026-10-25（系统混音回环）：Process Tap 是 ObjC++ 门控（CATapDescription /
   # AudioHardwareCreateProcessTap 只在 __OBJC__ 下可见），拆成薄包装给纯 C++ 的
@@ -130,9 +146,21 @@ if(APPLE)
   add_executable(rlplayer_mac tools/mac_host.mm tools/mac_update.mm)
   set_source_files_properties(tools/mac_host.mm PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
   set_source_files_properties(tools/mac_update.mm PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
+  # 2026-10-26 邮件反馈通道：原生层（NSSharingService 打开系统邮件撰写窗口）。
+  # 用 target_sources **追加**而不是改上面那行 add_executable（保持"CMakeLists 只新增行"）。
+  # 只加进 rlplayer_mac（CLI 不需要，也不该有 AppKit 依赖），必须开 ARC（block/对象生命周期）。
+  target_sources(rlplayer_mac PRIVATE tools/mac_feedback.mm)
+  set_source_files_properties(tools/mac_feedback.mm PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
   # 只有 rlplayer_mac 真正链接更新引擎；test_mac_transport 复用 mac_host.mm 但不带引擎，
   # 靠这个宏走「unsupported」回退分支（否则会 undefined symbols）。
   target_compile_definitions(rlplayer_mac PRIVATE RL_WITH_UPDATE=1)
+  # 邮件反馈：只有 rlplayer_mac 链接 mac_feedback.mm；test_mac_transport 复用 mac_host.mm
+  # 但不带该 TU，靠这个宏走 "unsupported" 回退分支（与 RL_WITH_UPDATE 同一套路）。
+  target_compile_definitions(rlplayer_mac PRIVATE RL_WITH_FEEDBACK=1)
+  # 主题里的版本号必须来自唯一真相源 src/version.h —— 编译期传进去，
+  # 免得 mac_feedback.mm 里再抄一份版本字符串（抄了迟早不同步）。
+  target_compile_definitions(rlplayer_mac PRIVATE
+    RLPLAYER_VERSION_STR="${RLPLAYER_VERSION_FOR_APP}")
   target_link_libraries(rlplayer_mac PRIVATE rlapp_core "-framework AppKit" "-framework WebKit")
 endif()
 
@@ -220,6 +248,21 @@ add_test(NAME decide_route COMMAND test_decide_route)
 add_executable(test_host_msg tests/test_host_msg.cpp)
 target_link_libraries(test_host_msg PRIVATE rtadsp)
 add_test(NAME host_msg COMMAND test_host_msg)
+
+# 2026-10-26 邮件反馈通道：**纯逻辑层**离线门禁（不含任何系统副作用）。
+# 判据（铁律 3，每条都对应真实会出事的场景，对抗用例是真塞进去看被拦）：
+#   * header 注入：正文/主题里塞 "\r\nBcc: attacker@evil.com" → 整封 .eml 的 header 区
+#     必须不存在任何伪造行；主题里不许有 \r/\n（含 U+2028）；
+#   * 正文截断按**字符**不按字节（9000 个中文字符 → 正好留 8000 字 = 24000 字节）；
+#   * 诊断包路径："../" 逃逸、"~/.ssh" 前缀碰撞（/tmp/x-evil 不能命中 /tmp/x）、含 NUL/CRLF
+#     一律拒绝；只有临时目录内的 .zip 放行；
+#   * MIME：附件 base64 解回来必须与原始字节**逐字节相等**；
+#   * 不打开邮件客户端、不写磁盘、不发任何网络请求（可以进 ctest 全量跑）。
+add_executable(test_mac_feedback tests/test_mac_feedback.cpp)
+target_include_directories(test_mac_feedback PRIVATE ${CMAKE_SOURCE_DIR}/tools)
+# 源码根传进去：凭据扫描那条判据要真读源码文件，不能靠相对路径（换个 cwd 就静默跳过）
+target_compile_definitions(test_mac_feedback PRIVATE RL_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
+add_test(NAME mac_feedback COMMAND test_mac_feedback)
 
 # 2026-10-26 F-4 自动更新：纯逻辑层离线门禁（不联网、不开窗口、不碰音频设备）
 # 判据：版本比较真值表（1.0.10>1.0.9 能区分数值比较与字符串比较）、sha256 用 NIST 官方向量、

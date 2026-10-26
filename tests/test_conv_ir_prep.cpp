@@ -246,7 +246,7 @@ int main() {
 
         // 用安全增益归一（Typical 档：按音乐信号统计特性）
         auto g = estimate_ir_gain(out, 96000.0);
-        const double gain = safe_ir_gain(g, 3.0);
+        const double gain = safe_ir_gain(g, IrGainMode::Passband, 3.0);
         for (auto& v : out) v *= gain;
 
         // 先验证安全增益确实 <= 通带归一增益（否则说明逻辑没生效）
@@ -319,48 +319,172 @@ int main() {
     }
 
     // =====================================================================
-    printf("\n=== 8. 峰值因子标定：实测值必须落在 safe_ir_gain 的假设内 ===\n");
+    printf("\n=== 8. 峰值因子：经验测量必须覆盖真实值（含房间校正风格 IR）===\n");
     {
-        // 这条测试是"防回归"用的：如果将来有人改了 safe_ir_gain 的默认
-        // crestFactor，或者改了 IR 的归一化方式，这里会立刻报出来。
-        struct Case { const char* name; int taps; double cutoff; };
-        const Case cases[] = {
-            {"512/0.5",     512,   0.5 },
-            {"2048/0.85",  2048,   0.85},
-            {"4096/0.9",   4096,   0.9 },
-            {"8192/0.3",   8192,   0.3 },
-        };
-        double worstCrest = 0.0;
-        for (const auto& c : cases) {
+        // 这一节是 2026-10-26 修 bug 后加的回归测试。
+        // v1 用固定 crestFactor=1.8，在下面 room/65536 这个用例上会削波到 2.20。
+        struct Case { std::string name; std::vector<double> ir; double fs; };
+        std::vector<Case> cases;
+
+        // 低通类（v1 能过的）
+        for (auto pr : std::vector<std::pair<int,double>>{{512,0.5},{2048,0.85},{8192,0.3},{32768,0.95}}) {
             LowpassSpec sp;
-            sp.taps = c.taps; sp.cutoff = c.cutoff; sp.attenDb = 120.0;
-            auto ir = design_lowpass(sp);
-            auto g = estimate_ir_gain(ir, 44100.0);
+            sp.taps = pr.first; sp.cutoff = pr.second; sp.attenDb = 120.0;
+            cases.push_back({"lp/" + std::to_string(pr.first), design_lowpass(sp), 44100.0});
+        }
+        // 房间校正风格（v1 失效的）
+        {
+            std::mt19937 r(42); std::uniform_real_distribution<double> u(-1,1);
+            std::vector<double> ir(65536);
+            for (size_t i=0;i<ir.size();++i) {
+                double t=(double)i/ir.size();
+                ir[i]=(u(r)*0.5 + 0.3*std::sin(2*3.14159265*80.0*(double)i/48000.0)
+                       + 0.2*std::sin(2*3.14159265*3000.0*(double)i/48000.0))*std::exp(-5.0*t);
+            }
+            cases.push_back({"room/65536", ir, 48000.0});
+        }
+        // 衰减噪声
+        {
+            std::mt19937 r(11); std::uniform_real_distribution<double> u(-1,1);
+            std::vector<double> ir(65536);
+            for (size_t i=0;i<ir.size();++i) ir[i]=u(r)*std::exp(-6.0*(double)i/ir.size());
+            cases.push_back({"noise/65536", ir, 48000.0});
+        }
+        // 单频共振
+        {
+            std::vector<double> ir(8192);
+            for (size_t i=0;i<ir.size();++i)
+                ir[i]=std::sin(2*3.14159265*1000.0*(double)i/48000.0)*std::exp(-3.0*(double)i/ir.size());
+            cases.push_back({"reson/8192", ir, 48000.0});
+        }
+        // 稀疏脉冲（多路径）
+        {
+            std::vector<double> ir(8192,0.0);
+            ir[0]=1.0; ir[100]=0.8; ir[500]=0.6; ir[2000]=0.4; ir[5000]=0.3;
+            cases.push_back({"sparse/8192", ir, 48000.0});
+        }
+        // 强低频共振（最恶劣）
+        {
+            std::mt19937 r(77); std::uniform_real_distribution<double> u(-1,1);
+            std::vector<double> ir(32768);
+            for (size_t i=0;i<ir.size();++i) {
+                double t=(double)i/ir.size();
+                ir[i]=(u(r)*0.1 + 0.8*std::sin(2*3.14159265*50.0*(double)i/48000.0))*std::exp(-2.0*t);
+            }
+            cases.push_back({"bass-reson/32768", ir, 48000.0});
+        }
 
-            std::mt19937 rng(4242);
-            std::uniform_real_distribution<double> u(-1.0, 1.0);
-            std::vector<double> x(120000);
+        // 真实场景：REW 导出的房间校正 IR —— 按【通带】归一，不是按峰值。
+        // 这一点很关键：按峰值归一的宽带噪声 IR 通带增益高达 20+ 倍，
+        // 它本来就不是透明滤波器，safe_ir_gain 压 -38 dB 是正确的
+        // （但那种 IR 不是用户会导入的东西）。
+        {
+            std::mt19937 r(2024); std::uniform_real_distribution<double> u(-1,1);
+            std::vector<double> ir(32768);
+            for (size_t i=0;i<ir.size();++i)
+                ir[i]=u(r)*std::exp(-7.0*(double)i/ir.size());
+            // 按通带归一（REW 的做法）：先量再除
+            auto g0 = estimate_ir_gain(ir, 48000.0, 200.0, 0.0, /*measureCrest=*/false);
+            if (g0.passbandMean > 1e-300)
+                for (auto& v : ir) v /= g0.passbandMean;
+            cases.push_back({"real-rew/32768", ir, 48000.0});
+        }
+        // 真实场景：归一化到通带 0 dB 的 IR
+        {
+            LowpassSpec sp; sp.taps=4096; sp.cutoff=0.8; sp.attenDb=120.0;
+            cases.push_back({"real-passband/4096", design_lowpass(sp), 48000.0});
+        }
+
+        double worstRatio = 1e9;
+        // 增益合理性检查：对已归一化的 IR，safe 增益不应低于 -12 dB
+        // （否则用户听感是"开了卷积就没声音"）
+        double minGainDbNormalized = 0.0;
+        for (auto& c : cases) {
+            // estimate_ir_gain 默认会实测 crest
+            auto g = estimate_ir_gain(c.ir, c.fs);
+            check(g.measuredCrest > 0.0, std::string(c.name) + " measuredCrest 已测量",
+                  "crest=" + std::to_string(g.measuredCrest));
+
+            // 长时参考：20 万样本白噪
+            std::mt19937 rng(7); std::uniform_real_distribution<double> u(-1,1);
+            std::vector<double> x(200000);
             for (auto& v : x) v = u(rng);
-            auto y = direct_convolve(x, ir);
-            double peak = 0.0;
-            for (double v : y) peak = std::max(peak, std::fabs(v));
-            const double crest = (g.passbandMean > 1e-300) ? peak / g.passbandMean : 0.0;
-            worstCrest = std::max(worstCrest, crest);
-            printf("  %-11s crest=%.3f (%.1f dB)  Σ|h|/passband=%.2f\n",
-                   c.name, crest, 20.0 * std::log10(crest > 0 ? crest : 1e-9),
-                   g.passbandMean > 1e-300 ? g.sumAbs / g.passbandMean : 0.0);
+            StreamingConvolver sc(c.ir, 1024);
+            std::vector<double> y(200000);
+            sc.process(x.data(), y.data(), 200000);
+            double pk = 0.0;
+            for (double v : y) pk = std::max(pk, std::fabs(v));
+            const double refCrest = (g.passbandMean > 1e-300) ? pk / g.passbandMean : 0.0;
 
-            // 用 safe_ir_gain 归一后，白噪输出必须不削波
-            const double gain = safe_ir_gain(g, 0.0);
+            // 关键判据：经验值不能低于参考值太多（允许 10% 低估，由 safetyMargin 兜）
+            const double ratio = (refCrest > 1e-300) ? g.measuredCrest / refCrest : 1.0;
+            worstRatio = std::min(worstRatio, ratio);
+            check(ratio > 0.90, std::string(c.name) + " 经验 crest 不低于参考的 90%",
+                  "ratio=" + std::to_string(ratio));
+
+            // 关键判据：safe_ir_gain 归一后，白噪输出必须不削波
+            const double gain = safe_ir_gain(g, IrGainMode::Passband, 0.0);
             double outPeak = 0.0;
             for (double v : y) outPeak = std::max(outPeak, std::fabs(v) * gain);
-            check(outPeak <= 1.0, std::string(c.name) + " safe 增益下白噪不削波",
-                  "峰值 " + std::to_string(outPeak));
+            check(outPeak <= 1.0, std::string(c.name) + " safe 增益下不削波",
+                  "峰值 " + std::to_string(outPeak) + " 增益 " + std::to_string(gain));
+
+            // 已归一化的 IR（peak≈1 或 passband≈1）不该被压得太狠
+            if (c.name.rfind("real-", 0) == 0) {
+                const double gdb = 20.0 * std::log10(gain);
+                minGainDbNormalized = std::min(minGainDbNormalized, gdb);
+                check(gdb > -12.0, std::string(c.name) + " 归一化 IR 增益 > -12 dB（不压听感）",
+                      std::to_string(gdb) + " dB");
+            }
         }
-        check(worstCrest < 1.8, "实测最坏峰值因子 < safe_ir_gain 默认假设 1.8",
-              "worst=" + std::to_string(worstCrest));
-        check(worstCrest > 1.0, "峰值因子 > 1（确实有峰均比，不是恒等）",
-              "worst=" + std::to_string(worstCrest));
+        check(minGainDbNormalized > -12.0, "所有归一化 IR 的增益 > -12 dB",
+              "最差 " + std::to_string(minGainDbNormalized) + " dB");
+        check(worstRatio > 0.90, "所有用例的经验 crest 最坏比值 > 0.90",
+              "worst=" + std::to_string(worstRatio));
+    }
+
+    // =====================================================================
+    printf("\n=== 9. measureCrest=false 时必须退回保守上界（不削波但压小声）===\n");
+    {
+        LowpassSpec sp; sp.taps = 2048; sp.cutoff = 0.85; sp.attenDb = 120.0;
+        auto ir = design_lowpass(sp);
+        auto gFast = estimate_ir_gain(ir, 44100.0, 200.0, 0.0, /*measureCrest=*/false);
+        check(gFast.measuredCrest == 0.0, "measureCrest=false 时 measuredCrest = 0",
+              "得到 " + std::to_string(gFast.measuredCrest));
+
+        const double gSafe = safe_ir_gain(gFast, IrGainMode::Passband, 0.0);
+        // 退回 Σ|h| 上界，应该比实测版更保守（增益更小）
+        auto gFull = estimate_ir_gain(ir, 44100.0);
+        const double gMeasured = safe_ir_gain(gFull, IrGainMode::Passband, 0.0);
+        check(gSafe <= gMeasured + 1e-12, "无实测时增益 <= 实测版（更保守）",
+              "safe=" + std::to_string(gSafe) + " measured=" + std::to_string(gMeasured));
+
+        // 仍然必须不削波
+        std::mt19937 rng(7); std::uniform_real_distribution<double> u(-1,1);
+        std::vector<double> x(120000);
+        for (auto& v : x) v = u(rng);
+        StreamingConvolver sc(ir, 1024);
+        std::vector<double> y(120000);
+        sc.process(x.data(), y.data(), 120000);
+        double pk = 0.0;
+        for (double v : y) pk = std::max(pk, std::fabs(v) * gSafe);
+        check(pk <= 1.0, "无实测时也不削波", "峰值 " + std::to_string(pk));
+    }
+
+    // =====================================================================
+    printf("\n=== 10. 测量耗时（离线可接受）===\n");
+    {
+        for (int taps : {2048, 65536}) {
+            LowpassSpec sp; sp.taps = taps; sp.cutoff = 0.9; sp.attenDb = 120.0;
+            auto ir = design_lowpass(sp);
+            auto t0 = std::chrono::steady_clock::now();
+            auto g = estimate_ir_gain(ir, 44100.0);
+            auto t1 = std::chrono::steady_clock::now();
+            const double ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
+            printf("  taps=%-6d 估算+实测耗时 %.1f ms (crest=%.3f)\n", taps, ms, g.measuredCrest);
+            check(ms < 2000.0, "taps=" + std::to_string(taps) + " 耗时 < 2s",
+                  std::to_string(ms) + " ms");
+        }
     }
 
     printf("\n%s (fails=%d)\n", fails == 0 ? "ALL PASS" : "SOME FAILED", fails);

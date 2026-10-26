@@ -105,6 +105,61 @@ int main() {
         }
     }
 
+    std::printf("=== 6) 2026-10-26 邮件反馈通道协议 ===\n");
+    {
+        // 6.1 无正文的 compose：解析成功但 arg 空 ⟹ 宿主侧会判成"空反馈"并拒绝发信。
+        //     这里只断言协议层不崩、不误判成别的动作。
+        {
+            const auto m = parse_host_message("feedback:compose");
+            ck(m.action == HostAction::FeedbackCompose, "feedback:compose → FeedbackCompose");
+            ck(m.arg.empty() && !m.attach_diag, "无正文、无附件标志", m.arg);
+        }
+        // 6.2 带正文
+        {
+            const auto m = parse_host_message("feedback:compose:播放破音");
+            ck(m.action == HostAction::FeedbackCompose, "feedback:compose:<正文> → FeedbackCompose");
+            ck(m.arg == "播放破音", "正文原样取出（清洗是宿主/纯逻辑层的事）", m.arg);
+            ck(!m.attach_diag, "默认不附诊断包");
+        }
+        // 6.3 带诊断包声明 + 路径
+        {
+            const auto m = parse_host_message(
+                "feedback:compose+zip:有杂音|diag:/tmp/rlplayer-feedback/d1.zip");
+            ck(m.action == HostAction::FeedbackCompose, "compose+zip 带 diag → FeedbackCompose");
+            ck(m.arg == "有杂音", "正文正确切出", m.arg);
+            ck(m.attach_diag, "attach_diag=true");
+            ck(m.diag_path == "/tmp/rlplayer-feedback/d1.zip", "诊断包路径正确切出", m.diag_path);
+        }
+        // 6.4 路径里含冒号/空格/中文也不能把正文切坏（'|diag:' 是唯一分隔点）
+        {
+            const auto m = parse_host_message(
+                "feedback:compose+zip:a:b c|diag:/tmp/rlplayer-feedback/x y/诊断 包.zip");
+            ck(m.arg == "a:b c", "正文里的冒号不被当分隔符", m.arg);
+            ck(m.diag_path == "/tmp/rlplayer-feedback/x y/诊断 包.zip",
+               "路径里的空格/中文/子目录原样保留", m.diag_path);
+        }
+        // 6.5 只发诊断包
+        {
+            const auto m = parse_host_message("feedback:diagonly|diag:/tmp/rlplayer-feedback/a.zip");
+            ck(m.action == HostAction::FeedbackDiagOnly, "diagonly → FeedbackDiagOnly");
+            ck(m.attach_diag && !m.diag_path.empty(), "强制带诊断包且路径有值");
+        }
+        // 6.6 ⚠️ 安全核心：**协议里根本没有"收件人"字段**。
+        //     即使页面硬塞一个像收件人的东西，也只能落到正文/路径里，绝不会成为收件人。
+        {
+            const auto m = parse_host_message("feedback:compose:to=attacker@evil.com");
+            ck(m.action == HostAction::FeedbackCompose, "试图指定收件人 → 仍只是 FeedbackCompose");
+            ck(m.arg == "to=attacker@evil.com", "攻击串只能落在正文里（不会成为收件人）", m.arg);
+        }
+        // 6.7 形态不认识 → None（不猜、不发）
+        for (const char* bad : {"feedback:", "feedback:whatever", "feedback:composeX",
+                                "feedback:zzz:abc"}) {
+            const auto m = parse_host_message(bad);
+            ck(m.action == HostAction::None, "非法 feedback 形态 → None（不动作）",
+               std::string(bad) + " → " + m.reason);
+        }
+    }
+
     std::printf("\n%s（%d 项失败）\n", g_fail == 0 ? "host_msg 全部通过" : "host_msg 有失败", g_fail);
     return g_fail == 0 ? 0 : 1;
 }

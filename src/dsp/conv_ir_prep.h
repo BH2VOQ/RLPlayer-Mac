@@ -45,14 +45,91 @@ struct IrGainInfo {
     double sumAbs       = 0.0;   // Σ|x[n]|（L1 范数，用于估计最坏情况输出峰值）
     double energy       = 0.0;   // Σx[n]²（L2 能量）
     size_t peakIndex    = 0;     // 峰值位置（用于判断 IR 的延迟/因果性）
+
+    // ---- 经验峰值因子（2026-10-26 新增，修复 safe_ir_gain 的致命缺陷）----
+    // measuredCrest : 用确定性白噪实测的 crest = 输出峰值 / 通带均值。
+    //                 0 = 未测量（调用方传 measure_crest=false，或 IR 为空）。
+    // probePeaks    : 测量时的探测样本数（诊断用）。
+    double measuredCrest = 0.0;
+    size_t probePeaks    = 0;
 };
+
+// ===========================================================================
+// 经验峰值因子测量（safe_ir_gain 的基础）
+// ===========================================================================
+
+// 用确定性白噪实测"输入满幅时，卷积输出的峰值 / 通带均值"这个比值。
+//
+// 为什么必须实测而不是解析估算（这是 2026-10-26 修的真实 bug）：
+//   v1 用固定 crestFactor = 1.8。在 9 种低通 IR 上全部通过，
+//   但在房间校正风格 IR（长 + 共振）上彻底失效：
+//     room/65536: passband=20.83, Σ|h|=4102, 实测峰值=82.4
+//     → 真实 crest = 3.95，固定 1.8 预测不足 → 输出 2.20 削波
+//   试过用 Σ|h|/passband（保守 2~4 倍）和 L1/L2+Σ|h| 的线性模型，
+//   要么失效要么过度保守 6~28 dB。**唯一可靠的办法就是直接测。**
+//
+// 实现：用 xorshift64*（确定性，跨平台逐位一致）生成白噪，
+//       通过 IR 做 FFT 重叠相加卷积，取输出峰值。
+//
+// 精度（2026-10-26 实测，PROBE=262144）：
+//   11 种 IR 上"经验 crest / 长时参考 crest"的比值范围 0.969 ~ 1.167，
+//   即最坏低估 3.1%。配合 safe_ir_gain 的额外余量足够安全。
+//
+// 成本：11~30 ms（262144 探测样本，IR 长度 512~65536）。离线操作，可接受。
+inline double measure_empirical_crest(const std::vector<double>& ir,
+                                      double passbandMean,
+                                      size_t probeSamples = 262144) {
+    if (ir.empty() || !(passbandMean > 1e-300)) return 0.0;
+
+    // 探测长度：至少覆盖 IR 的 2 倍，避免 IR 尾巴被截断
+    const size_t N = std::max(probeSamples, ir.size() * 2);
+    if (N > (size_t(1) << 22)) return 0.0;      // 防御：超过 4M 样本放弃
+
+    // 确定性 PRNG：xorshift64*（与 dither.h 同款，跨平台逐位一致）
+    uint64_t s = 0x9E3779B97F4A7C15ull;
+    auto next = [&s]() {
+        s ^= s >> 12; s ^= s << 25; s ^= s >> 27;
+        return s * 2685821657736338717ull;
+    };
+    std::vector<double> x(N);
+    for (size_t i = 0; i < N; ++i)
+        x[i] = (double)(next() >> 11) * (1.0 / 9007199254740992.0) * 2.0 - 1.0;
+
+    // 重叠相加卷积（FFT 长度 >= 2*IR，hop = fftN - irLen + 1）
+    size_t nfft = 1;
+    while (nfft < ir.size() * 2) nfft <<= 1;
+    const size_t hop = nfft - ir.size() + 1;
+    if (hop == 0) return 0.0;
+
+    std::vector<cplx> H(nfft, cplx(0.0, 0.0));
+    for (size_t i = 0; i < ir.size(); ++i) H[i] = cplx(ir[i], 0.0);
+    fft(H);
+
+    std::vector<double> acc(N, 0.0);
+    std::vector<cplx> X(nfft), Y(nfft);
+    for (size_t off = 0; off < N; off += hop) {
+        std::fill(X.begin(), X.end(), cplx(0.0, 0.0));
+        for (size_t i = 0; i < hop && off + i < N; ++i) X[i] = cplx(x[off + i], 0.0);
+        fft(X);
+        for (size_t k = 0; k < nfft; ++k) Y[k] = X[k] * H[k];
+        fft(Y, /*inverse=*/true);
+        for (size_t i = 0; i < nfft && off + i < N; ++i) acc[off + i] += Y[i].real();
+    }
+
+    double peak = 0.0;
+    for (size_t i = 0; i < N; ++i) peak = std::max(peak, std::fabs(acc[i]));
+    return peak / passbandMean;
+}
 
 // 估算 IR 的增益特征。
 //
 // fs          : IR 自身的采样率（决定通带上限）
 // bandLo/bandHi: 通带平均的频段（Hz）。bandHi <= 0 表示自动取 min(2000, 0.45·fs)
+// measureCrest: 是否实测峰值因子（默认 true）。false 时 measuredCrest = 0，
+//               调用方只能用 guaranteed_ir_gain()（严格但会压低 10~18 dB）。
 inline IrGainInfo estimate_ir_gain(const std::vector<double>& ir, double fs,
-                                   double bandLo = 200.0, double bandHi = 0.0) {
+                                   double bandLo = 200.0, double bandHi = 0.0,
+                                   bool measureCrest = true) {
     IrGainInfo info;
     if (ir.empty()) return info;
 
@@ -101,6 +178,12 @@ inline IrGainInfo estimate_ir_gain(const std::vector<double>& ir, double fs,
             info.passbandDb   = info.peakDb;
         }
     }
+
+    // ---- 经验峰值因子（修复 v1 固定常数的缺陷，见 measure_empirical_crest 注释）----
+    if (measureCrest && info.passbandMean > 1e-300) {
+        info.measuredCrest = measure_empirical_crest(ir, info.passbandMean);
+        info.probePeaks    = 262144;
+    }
     return info;
 }
 
@@ -135,40 +218,57 @@ inline double worst_case_headroom_db(const IrGainInfo& info) {
     return -20.0 * std::log10(info.sumAbs);
 }
 
-// 安全增益：在"通带归一"和"不削波"之间取平衡。
+// 安全增益：在"归一化基准"和"不削波"之间取平衡。
 //
-// ⚠️ 这里踩过两个坑，都记录在 tests/test_conv_ir_prep.cpp §6：
+// ⚠️ 这个函数修过三次，全部记录在 tests/test_conv_ir_prep.cpp §6/§8：
 //
-//   坑 1：只用通带归一不能保证不削波。
-//        2048 抽头低通 IR 通带归一到 1.0 后，满幅白噪输入输出峰值 1.10。
+//   v1（固定 crestFactor = 1.8）—— 有致命 bug
+//      在 9 种低通 IR 上全过，但房间校正风格 IR（长 + 共振）彻底失效：
+//        room/65536: passband=20.83, 实测峰值=82.4, 真实 crest=3.95
+//        固定 1.8 严重低估 → 输出 2.20 ❌ 削波
 //
-//   坑 2：用 Σ|h| 上界又过于保守。
-//        同一 IR 的 Σ|h| = 3.43（要求 -10.7 dB），连"除以 2"都还要 -14.9 dB，
-//        而白噪实测峰值只有 1.10。Σ|h| 假设"所有输入样本都取到与 IR 同号的极端值"，
-//        真实音频永远达不到。直接套用会把音量压低 10~18 dB。
+//   v2（Σ|h| 上界）—— 安全但过度保守
+//      同一低通 IR 的 Σ|h|=3.43 要求 -10.7 dB，而实测只需 -0.8 dB。
+//      直接套用会把音量压低 10~18 dB。
 //
-// 正确做法：**用实测的峰值因子**，而不是解析上界。
-//   2026-10-26 在 macOS arm64 上实测 5 种典型低通 IR，白噪输入的真实峰值因子：
-//     taps=512  cutoff=0.5   → crest 1.36 (2.7 dB)   Σ|h|/passband = 2.29
-//     taps=2048 cutoff=0.85  → crest 1.57 (3.9 dB)   Σ|h|/passband = 3.43
-//     taps=4096 cutoff=0.9   → crest 1.51 (3.6 dB)   Σ|h|/passband = 3.63
-//     taps=8192 cutoff=0.3   → crest 1.16 (1.3 dB)   Σ|h|/passband = 3.56
-//     taps=32768 cutoff=0.95 → crest 1.37 (2.8 dB)   Σ|h|/passband = 4.30
-//   即：真实峰值因子 1.16~1.57，而 Σ|h|/passband 是 2.3~4.3 —— 后者保守 2~4 倍。
-//   取默认 crestFactor = 1.8，覆盖实测最坏值（1.57）并留约 1 dB 余量。
+//   v3（实测 crest）—— 峰值准确了，但基准混淆
+//      room/65536 的 passband=20.8（强共振导致），按通带归一要 -26.4 dB，
+//      再乘 crest 4.39 变成 -39.6 dB —— 用户听到的是"几乎没声音"。
+//      根因：**同时用两个基准**（通带归一 + 峰值约束），两者差距大时过度压制。
 //
-// 数学保证 vs 听感：本函数**不提供**数学上的严格保证（那要 Σ|h|，代价是 -10~-18 dB）。
-// 如果需要严格保证（测试、极端信号），用 guaranteed_ir_gain()。
-inline double safe_ir_gain(const IrGainInfo& info, double headroomDb = 0.0,
-                           double crestFactor = 1.8) {
-    double g = 1.0;
-    if (info.passbandMean > 1e-300) g = 1.0 / info.passbandMean;
+//   v4（当前）—— 基准与限幅分离
+//      * 基准（base）：由 mode 决定，Peak 或 Passband。这是**音量**的来源。
+//      * 限幅（ceiling）：只用实测 crest 判断"会不会削波"，**只在必要时**压。
+//      这样：正常 IR 走基准不动；只有真会削波时才限幅，且限幅量刚好够。
+//
+// 数学保证 vs 听感：本函数**不提供**严格数学保证（那要 Σ|h|，代价 -10~-18 dB）。
+// 需要严格保证时用 guaranteed_ir_gain()。
+inline double safe_ir_gain(const IrGainInfo& info,
+                           IrGainMode mode = IrGainMode::Passband,
+                           double headroomDb = 0.0,
+                           double safetyMargin = 1.05) {
+    // ---- 1. 基准增益（决定音量）----
+    const double ref = (mode == IrGainMode::Peak) ? info.peakAbs : info.passbandMean;
+    double g = (ref > 1e-300) ? 1.0 / ref : 1.0;
 
-    // 峰值预测：通带平均 × 峰值因子。
-    // 这是白噪统计特性的经验值，不是上界 —— 但对音乐信号足够。
-    if (info.passbandMean > 1e-300 && crestFactor > 0.0) {
-        const double predictedPeak = info.passbandMean * crestFactor;
-        if (predictedPeak > 1.0) g = std::min(g, 1.0 / predictedPeak);
+    // ---- 2. 限幅（只在会削波时压，压到刚好够）----
+    // 用实测 crest 预测"满幅白噪输入时的输出峰值"。
+    // measuredCrest == 0（没测）时退回 Σ|h| 上界（保守）。
+    double crest;
+    if (info.measuredCrest > 0.0) {
+        crest = info.measuredCrest * (safetyMargin > 0.0 ? safetyMargin : 1.0);
+    } else {
+        crest = (info.passbandMean > 1e-300 && info.sumAbs > 1e-300)
+                    ? info.sumAbs / info.passbandMean : 0.0;
+    }
+
+    if (crest > 0.0 && info.passbandMean > 1e-300) {
+        // 输出峰值 = 输入峰值(1.0) × 通带均值 × crest × g
+        const double predictedPeak = info.passbandMean * crest * g;
+        if (predictedPeak > 1.0) {
+            // 只压到刚好不削波，不再额外压
+            g /= predictedPeak;
+        }
     }
     return g * std::pow(10.0, -headroomDb / 20.0);
 }
