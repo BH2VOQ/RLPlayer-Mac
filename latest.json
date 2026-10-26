@@ -1,0 +1,8 @@
+{
+  "version": "1.1.0-beta",
+  "notes": "反馈通道上线：直接发送给开发者，不需要配置邮箱或注册账号。同时修复一键更新的三个真 BUG（悬垂引用/系统代理/诊断日志）。这是预发布版。",
+  "download_url": "https://github.com/BH2VOQ/RLPlayer-Mac/releases/download/v1.1.0-beta/RLPlayer-v1.1.0-beta-macOS-arm64.dmg",
+  "sha256": "9e0f392efacd33db531fca9770912391a727b45cd0d507e4788476aec68da684",
+  "size": 6877669,
+  "published_at": "2026-10-27T00:30:00Z"
+}
