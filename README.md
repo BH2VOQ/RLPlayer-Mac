@@ -2,7 +2,7 @@
 
 # RLPlayer
 
-macOS 上的高保真播放引擎：升频、噪声整形、SDM/DSD 调制、卷积与 20 段 PEQ 全链路自研，每一步都给出可复现的实测数字。
+macOS 上的高保真播放引擎，也是 RLPlayer 的 macOS 独立分支：升频、噪声整形、SDM/DSD 调制、卷积与 20 段 PEQ 全链路自研，每一步都给出可复现的实测数字。
 
 [![Platform](https://img.shields.io/badge/platform-macOS%2013%2B%20%C2%B7%20arm64-lightgrey)](#系统要求)
 [![Version](https://img.shields.io/github/v/release/BH2VOQ/RLPlayer-Mac?label=version)](https://github.com/BH2VOQ/RLPlayer-Mac/releases)
@@ -10,7 +10,7 @@ macOS 上的高保真播放引擎：升频、噪声整形、SDM/DSD 调制、卷
 
 ![RLPlayer 主界面：专辑网格与底栏播放控制](docs/images/ui-albums.png)
 
-原生 `.app`：不是 Electron，主进程不起本地 HTTP 服务。界面由 WKWebView 渲染，业务逻辑**静态链进同一个进程**——开一个窗口就是一个播放器。
+原生 `.app`：不是 Electron，主进程不常驻本地 HTTP 服务。界面由 WKWebView 渲染，业务逻辑**静态链进同一个进程**——开一个窗口就是一个播放器。
 
 ---
 
@@ -187,11 +187,15 @@ Metal 内核（`librtagpu.dylib`，运行时编译 MSL）**动态加载**：`dlo
 
 本仓库是 **RLPlayer 的 macOS 独立分支**：平台层（音频输出、GPU、窗口壳）按 macOS 原生能力重写，与上游**不再合并**，版本号从 `1.0.0` 独立起算。
 
-上游仓库地址（待补充）：
+上游仓库（Windows 版，**链接待补充**）：
 
-> <!-- TODO: 填入上游仓库链接 -->
+```text
+<上游仓库链接>
+```
 
-其余平台版本的介绍不在本仓库范围内，本文只描述 macOS 分支的实际能力。
+<!-- TODO: 上面换成上游仓库地址，例如 https://github.com/<owner>/<repo> -->
+
+本文只描述 macOS 分支的实际能力，不涉及其他平台版本的介绍。
 
 ---
 
