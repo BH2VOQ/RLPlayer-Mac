@@ -1,3 +1,9 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2026 August Hu <BH2VOQ@163.com>
+#
+# 本文件是 RLPlayer 的一部分，以 GNU 通用公共许可证第 3 版（或更新版本）发布。
+# 完整条款见仓库根目录的 LICENSE 文件。
+#
 # pxforce.py — 触发重绘后立刻测量（隔离"是否根本没画"与"画了但被盖住"）
 import ctypes, ctypes.wintypes as wt, sys, os, time
 from PIL import ImageGrab

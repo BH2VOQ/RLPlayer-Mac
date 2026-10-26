@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 August Hu <BH2VOQ@163.com>
+//
+// 本文件是 RLPlayer 的一部分，以 GNU 通用公共许可证第 3 版（或更新版本）发布。
+// 完整条款见仓库根目录的 LICENSE 文件。
+//
 // track_health.h — 音频体检 B1b：编排层（动态 + 假无损两分析器的统一入口 + JSON 序列化）
 //
 // 用途：B1a 的两个纯算法分析器（dynamics.h / fake_lossless.h）在这里合成一个「曲目体检」

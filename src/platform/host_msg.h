@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 August Hu <BH2VOQ@163.com>
+//
+// 本文件是 RLPlayer 的一部分，以 GNU 通用公共许可证第 3 版（或更新版本）发布。
+// 完整条款见仓库根目录的 LICENSE 文件。
+//
 // host_msg.h — 宿主（launcher）与页面之间的 postMessage 协议解析（261024-02 #2）
 //
 // 为什么单独抽出来：页面里点资料链接要交给**系统浏览器**打开。协议白名单（只放 http/https）

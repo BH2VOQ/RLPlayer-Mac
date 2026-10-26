@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 August Hu <BH2VOQ@163.com>
+//
+// 本文件是 RLPlayer 的一部分，以 GNU 通用公共许可证第 3 版（或更新版本）发布。
+// 完整条款见仓库根目录的 LICENSE 文件。
+//
 // test_render_loop_dry.cpp — C2/C3 遥测与端点消失回归（2026-10-24 N300 欠载）
 //
 // 被测对象是生产代码 src/audio/render_loop.h（rtaweb 播放线程跑的就是同一份循环，

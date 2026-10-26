@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 August Hu <BH2VOQ@163.com>
+//
+// 本文件是 RLPlayer 的一部分，以 GNU 通用公共许可证第 3 版（或更新版本）发布。
+// 完整条款见仓库根目录的 LICENSE 文件。
+//
 // mac_host.mm — RLPlayer macOS 原生壳（单进程架构：WKURLSchemeHandler 桥接内置核心）
 //
 // 架构设计（单进程合并）：
@@ -738,14 +744,46 @@ static NSString *const kShim = @
 }
 
 - (void)buildMenu {
-    // 最小 App 菜单：保证 Cmd+Q / 关窗语义存在
+    // App 菜单：Cmd+Q / 关窗语义 + GPLv3 要求的「许可证」入口
+    //
+    // 为什么必须有「许可证」项（不是锦上添花）：
+    //   GPLv3 §5(c)/§6 要求分发目标代码时附随许可证文本与获取源码的说明。
+    //   打包脚本已把 LICENSE 放进 Contents/Resources/，但用户得**找得到**才行 ——
+    //   Finder 里右键「显示包内容」不算合理入口，所以这里给一个菜单项直接打开。
     NSMenu *bar = [[NSMenu alloc] init];
     NSMenuItem *appItem = [[NSMenuItem alloc] init];
     NSMenu *appMenu = [[NSMenu alloc] init];
+    [appMenu addItemWithTitle:@"关于 RLPlayer"
+                       action:@selector(orderFrontStandardAboutPanel:)
+                keyEquivalent:@""];
+    [appMenu addItem:[NSMenuItem separatorItem]];
+    [appMenu addItemWithTitle:@"许可证（GPLv3）"
+                       action:@selector(openLicense:)
+                keyEquivalent:@""];
+    [appMenu addItem:[NSMenuItem separatorItem]];
     [appMenu addItemWithTitle:@"退出 RLPlayer" action:@selector(terminate:) keyEquivalent:@"q"];
     appItem.submenu = appMenu;
     [bar addItem:appItem];
     [NSApp setMainMenu:bar];
+}
+
+// 打开包内的 LICENSE（Contents/Resources/LICENSE）。
+// 缺失时用弹窗如实说明，绝不静默什么也不做（铁律 3：不许假装成功）。
+- (void)openLicense:(id)sender {
+    (void)sender;
+    NSString *res = [[[NSBundle mainBundle] bundlePath]
+                     stringByAppendingPathComponent:@"Contents/Resources/LICENSE"];
+    if ([[NSFileManager defaultManager] fileExistsAtPath:res]) {
+        [[NSWorkspace sharedWorkspace] openFile:res];
+        return;
+    }
+    NSAlert *a = [[NSAlert alloc] init];
+    a.messageText = @"未找到 LICENSE 文件";
+    a.informativeText = @"本程序以 GNU GPL v3（或更新版本）发布。"
+                        @"包内 Contents/Resources/LICENSE 缺失，"
+                        @"请到项目仓库查看完整条款。";
+    [a addButtonWithTitle:@"好"];
+    [a runModal];
 }
 
 // ---------------- PLATFORM.md §10.2 消息表：UI → 宿主 ----------------

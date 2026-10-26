@@ -89,3 +89,6 @@ docs/shots-ui03/
 # macOS 产物目录（RLPlayer.app 为 make_app_mac.sh 生成物）
 dist-mac/
 .DS_Store
+
+# 开发流程/代理指令（2026-10-27 用户要求：从公开仓库移除，仅保留本地副本）
+AGENTS.md

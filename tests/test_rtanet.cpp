@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 August Hu <BH2VOQ@163.com>
+//
+// 本文件是 RLPlayer 的一部分，以 GNU 通用公共许可证第 3 版（或更新版本）发布。
+// 完整条款见仓库根目录的 LICENSE 文件。
+//
 // test_rtanet.cpp — RTANet 网络音频协议验证（全程本机回环，不涉及音频设备）
 // 判据：
 //   打包/解包必须逐位可逆（16/24/32 bit）

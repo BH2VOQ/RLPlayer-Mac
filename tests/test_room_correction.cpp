@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 August Hu <BH2VOQ@163.com>
+//
+// 本文件是 RLPlayer 的一部分，以 GNU 通用公共许可证第 3 版（或更新版本）发布。
+// 完整条款见仓库根目录的 LICENSE 文件。
+//
 // test_room_correction.cpp — 房间校正 C1：全合成信号、确定性、完全离线（不开设备）
 //
 // 判据真值全部来自解析式（§2 的三部件功率响应），不依赖被测代码；

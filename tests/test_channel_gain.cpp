@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 August Hu <BH2VOQ@163.com>
+//
+// 本文件是 RLPlayer 的一部分，以 GNU 通用公共许可证第 3 版（或更新版本）发布。
+// 完整条款见仓库根目录的 LICENSE 文件。
+//
 // test_channel_gain.cpp — 每声道增益与多声道路由
 //
 // 判据：管线里给某个输出声道一个 -6.0206 dB（正好 0.5 倍）的增益，

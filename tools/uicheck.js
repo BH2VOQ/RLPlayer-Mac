@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 August Hu <BH2VOQ@163.com>
+//
+// 本文件是 RLPlayer 的一部分，以 GNU 通用公共许可证第 3 版（或更新版本）发布。
+// 完整条款见仓库根目录的 LICENSE 文件。
+//
 // uicheck.js — 用 CDP 真跑一遍网页界面（点专辑、看曲目、抓 JS 异常）
 //
 // 为什么需要它：界面里任何一个 null 元素都会让后续所有事件绑定静默失效

@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 August Hu <BH2VOQ@163.com>
+//
+// 本文件是 RLPlayer 的一部分，以 GNU 通用公共许可证第 3 版（或更新版本）发布。
+// 完整条款见仓库根目录的 LICENSE 文件。
+//
 // knowledge.h — P3 资料层②：直连层（实体 → 权威文本材料）
 //
 // 对应 docs/元数据补全调研与规划.md §3「内容分级」L2 与 §4 P3 里程碑②：

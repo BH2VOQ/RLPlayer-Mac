@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 August Hu <BH2VOQ@163.com>
+//
+// 本文件是 RLPlayer 的一部分，以 GNU 通用公共许可证第 3 版（或更新版本）发布。
+// 完整条款见仓库根目录的 LICENSE 文件。
+//
 // npcheck.js — 单曲播放页 CDP 验收（用户反馈 261023-04 第 4/5/6/7/9 条）
 //
 // 为什么单独一个脚本：uicheck.js 是整站自检，单曲页需要两套窗口尺寸、多次切歌、

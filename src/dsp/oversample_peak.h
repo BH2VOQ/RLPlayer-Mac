@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 August Hu <BH2VOQ@163.com>
+//
+// 本文件是 RLPlayer 的一部分，以 GNU 通用公共许可证第 3 版（或更新版本）发布。
+// 完整条款见仓库根目录的 LICENSE 文件。
+//
 // oversample_peak.h — 过采样峰值（inter-sample over）检测
 //
 // 为什么需要它：数字满幅在【采样点】上，DAC 重建出来的模拟波形却可能超过满幅。

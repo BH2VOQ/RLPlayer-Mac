@@ -2,15 +2,13 @@
 
 # RLPlayer
 
-macOS 上的高保真播放引擎，也是 RLPlayer 的 macOS 独立分支：升频、噪声整形、SDM/DSD 调制、卷积与 20 段 PEQ 全链路自研，每一步都给出可复现的实测数字。
+macOS 上的高保真播放引擎：升频、噪声整形、SDM/DSD 调制、卷积与 20 段 PEQ 全链路自研，每一步都给出可复现的实测数字。
 
 [![Platform](https://img.shields.io/badge/platform-macOS%2013%2B%20%C2%B7%20arm64-lightgrey)](#系统要求)
 [![Version](https://img.shields.io/github/v/release/BH2VOQ/RLPlayer-Mac?label=version)](https://github.com/BH2VOQ/RLPlayer-Mac/releases)
 [![Tests](https://img.shields.io/badge/ctest-87%2F87-brightgreen)](#测试)
 
 ![RLPlayer 主界面：专辑网格与底栏播放控制](docs/images/ui-albums.png)
-
-原生 `.app`：不是 Electron，主进程不常驻本地 HTTP 服务。界面由 WKWebView 渲染，业务逻辑**静态链进同一个进程**——开一个窗口就是一个播放器。
 
 ---
 
@@ -206,7 +204,6 @@ Metal 内核（`librtagpu.dylib`，运行时编译 MSL）**动态加载**：`dlo
 | [PLATFORM.md](PLATFORM.md) | 平台层实测记录：CoreAudio、单进程壳、回环比对、并发与边界 |
 | [STATUS.md](STATUS.md) | 逐轮开发记录与判据（**只覆盖到 v1.0.0**，之后的轮次见 commit 与 `debug/`） |
 | [HANDOVER.md](HANDOVER.md) | 架构、构建方式、踩过的坑 |
-| [AGENTS.md](AGENTS.md) | 开发铁律 |
 | [docs/](docs/) | 各模块实测纪要与调研 |
 | [debug/](debug/) | 每轮 DEBUG 档案：根因、判据、挂账 |
 
@@ -214,6 +211,23 @@ Metal 内核（`librtagpu.dylib`，运行时编译 MSL）**动态加载**：`dlo
 
 ## 许可
 
-私有项目，保留所有权利（All rights reserved）。未经作者书面许可，不得复制、分发或用于商业用途。
+本项目以 **GNU 通用公共许可证第 3 版（或更新版本）** 发布，SPDX 标识符 `GPL-3.0-or-later`。
 
-第三方组件（ffmpeg 等）遵循其各自许可证。
+Copyright (C) 2026 August Hu
+
+- 完整条款见仓库根目录的 [LICENSE](LICENSE)（GPLv3 官方全文，未改动）
+- 每个源文件头部都带 `SPDX-License-Identifier: GPL-3.0-or-later` 声明
+- 分发二进制时，`Contents/Resources/` 内会随包附带 `LICENSE` 与 `OPRA-NOTICE.txt`
+
+简单说：你可以自由使用、修改、再分发本程序，但**再分发时必须同样以 GPLv3 开放源码**，并保留版权与许可声明。本程序不提供任何担保。
+
+### 第三方组件
+
+| 组件 | 许可 | 与本程序的关系 |
+|---|---|---|
+| FFmpeg / FFprobe 8.1.2 | LGPL-2.1-or-later | 以**独立可执行文件**随包分发，由主程序以子进程方式调用；构建时未启用 `--enable-gpl`，故为 LGPL 版。`otool -L` 可验证主程序**未链接**任何 libav* |
+| LAME（libmp3lame） | LGPL-2.0 | 静态链接进上面那个 FFmpeg 可执行文件，不在主程序里 |
+| OPRA 耳机 EQ 数据 | CC BY-SA 4.0 | 归属与传染范围见 [OPRA-NOTICE.txt](OPRA-NOTICE.txt)；仅约束数据本身，不传染本程序源码 |
+
+因为 FFmpeg 是独立进程而非链接库，GPLv3 与本项目对 FFmpeg 的 LGPL 义务互不冲突；替换 `Contents/MacOS/ffmpeg` 为任意兼容版本即可满足 LGPL 的可替换要求。
+

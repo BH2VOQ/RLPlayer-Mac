@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 August Hu <BH2VOQ@163.com>
+//
+// 本文件是 RLPlayer 的一部分，以 GNU 通用公共许可证第 3 版（或更新版本）发布。
+// 完整条款见仓库根目录的 LICENSE 文件。
+//
 // dynamics.h — 音频体检 B1a：纯算法动态分析器（TT DR / BS.1770-4 LUFS / EBU R128 LRA / 样本峰值）
 //
 // 用途：对已在内存里的 PCM（double、标称 [-1,1)、任意声道布局）做一次离线体检，

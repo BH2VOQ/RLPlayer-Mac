@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 August Hu <BH2VOQ@163.com>
+//
+// 本文件是 RLPlayer 的一部分，以 GNU 通用公共许可证第 3 版（或更新版本）发布。
+// 完整条款见仓库根目录的 LICENSE 文件。
+//
 // rtaloop_tap.mm — Process Tap 的 ObjC++ 薄包装（给 rtaloop.cpp 的纯 C++ 侧用）
 //
 // 为什么需要这个文件：macOS 14.2+ 的公开回环机制是

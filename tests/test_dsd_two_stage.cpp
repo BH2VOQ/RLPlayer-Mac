@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 August Hu <BH2VOQ@163.com>
+//
+// 本文件是 RLPlayer 的一部分，以 GNU 通用公共许可证第 3 版（或更新版本）发布。
+// 完整条款见仓库根目录的 LICENSE 文件。
+//
 // test_dsd_two_stage.cpp — ROADMAP P6c：DSD 源两级抽取（CIC 4x + 短 FIR）专项测试
 //
 // 验收判据（ROADMAP P6c & 铁律 3）：

@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 August Hu <BH2VOQ@163.com>
+//
+// 本文件是 RLPlayer 的一部分，以 GNU 通用公共许可证第 3 版（或更新版本）发布。
+// 完整条款见仓库根目录的 LICENSE 文件。
+//
 // test_dynamics.cpp — 音频体检 B1a：动态分析器合成信号验证
 //
 // 全部信号现场合成、完全离线（不开设备、不解码真实文件），判据确定性可复现。

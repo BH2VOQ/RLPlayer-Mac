@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 August Hu <BH2VOQ@163.com>
+//
+// 本文件是 RLPlayer 的一部分，以 GNU 通用公共许可证第 3 版（或更新版本）发布。
+// 完整条款见仓库根目录的 LICENSE 文件。
+//
 // gpu_conv.cpp — GPU 分块卷积（HIP）：把"频域乘累加"这一步放到 Radeon 上
 //
 // 动机：RLPlayer 的 GPU offload【只支持 NVIDIA CUDA】（安装目录只有 cufft64_12.dll），

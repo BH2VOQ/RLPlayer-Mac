@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 August Hu <BH2VOQ@163.com>
+//
+// 本文件是 RLPlayer 的一部分，以 GNU 通用公共许可证第 3 版（或更新版本）发布。
+// 完整条款见仓库根目录的 LICENSE 文件。
+//
 // test_rtanet_e2e.cpp — RTANet 端到端验证：控制面握手 + UDP 流 + 抖动缓冲还原
 // 这是"两机方案"的完整链路演练（全部在本机回环上跑，不涉及音频设备）
 // 判据：接收端重建出的样本流必须与发送端【逐位相同】

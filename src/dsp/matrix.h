@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 August Hu <BH2VOQ@163.com>
+//
+// 本文件是 RLPlayer 的一部分，以 GNU 通用公共许可证第 3 版（或更新版本）发布。
+// 完整条款见仓库根目录的 LICENSE 文件。
+//
 // matrix.h — Matrix 处理：双二阶 EQ（对应手册 "iir" 插件）、延迟（"delay" 插件）、通道路由
 //
 // 手册 7.3 的 iir 插件类型与本文件一一对应：

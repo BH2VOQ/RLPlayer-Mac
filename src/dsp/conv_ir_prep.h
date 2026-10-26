@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 August Hu <BH2VOQ@163.com>
+//
+// 本文件是 RLPlayer 的一部分，以 GNU 通用公共许可证第 3 版（或更新版本）发布。
+// 完整条款见仓库根目录的 LICENSE 文件。
+//
 // conv_ir_prep.h — 卷积 IR 预处理：超 Nyquist 外推 + 自动增益估算
 //
 // 为什么需要（对标 RLPlayer 5.13 的两条能力，见 notes/RLPlayer对RLPlayer可借鉴清单-源码核实版.md §2.4）：

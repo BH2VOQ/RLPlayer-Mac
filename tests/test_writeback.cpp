@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 August Hu <BH2VOQ@163.com>
+//
+// 本文件是 RLPlayer 的一部分，以 GNU 通用公共许可证第 3 版（或更新版本）发布。
+// 完整条款见仓库根目录的 LICENSE 文件。
+//
 // test_writeback.cpp — P2 写回 PCM 逐位门禁(meta/writeback.h)
 //
 // 环境要求(门禁属性,不是可选项):环境里必须有 ffmpeg/ffprobe —— 找不到就 FAIL,不跳过。

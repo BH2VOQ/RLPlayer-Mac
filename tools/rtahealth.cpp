@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 August Hu <BH2VOQ@163.com>
+//
+// 本文件是 RLPlayer 的一部分，以 GNU 通用公共许可证第 3 版（或更新版本）发布。
+// 完整条款见仓库根目录的 LICENSE 文件。
+//
 // rtahealth.cpp — 音频体检 B1b CLI：对文件/目录批量出体检结果（DR/LUFS/LRA/Peak + 假无损）
 //
 // 用法:

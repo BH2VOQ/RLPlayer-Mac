@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 August Hu <BH2VOQ@163.com>
+//
+// 本文件是 RLPlayer 的一部分，以 GNU 通用公共许可证第 3 版（或更新版本）发布。
+// 完整条款见仓库根目录的 LICENSE 文件。
+//
 // test_drift.cpp — 时钟漂移检测验证（纯离线数值实验）
 // 判据：注入已知 ppm 漂移，估计值必须准确复现；无漂移时必须报 0
 #include "net/drift.h"

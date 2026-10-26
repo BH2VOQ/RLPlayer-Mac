@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 August Hu <BH2VOQ@163.com>
+//
+// 本文件是 RLPlayer 的一部分，以 GNU 通用公共许可证第 3 版（或更新版本）发布。
+// 完整条款见仓库根目录的 LICENSE 文件。
+//
 // dsd_integrator.h — DSD 域抽取器（ROADMAP P0-4）：FIR / IIR / CIC
 //
 // 作用：把 1-bit 流（DSD64/128/256…）抽取成 PCM，交给现有管线（升频/抖动/SDM 都不变）。

@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 August Hu <BH2VOQ@163.com>
+//
+// 本文件是 RLPlayer 的一部分，以 GNU 通用公共许可证第 3 版（或更新版本）发布。
+// 完整条款见仓库根目录的 LICENSE 文件。
+//
 // naa_scan.cpp — NAA (Network Audio Adapter) 端点发现 CLI
 //
 // 探测逻辑在 tools/naa_discover.h（rtaweb 的 /api/naa/discover 共用同一份实现，

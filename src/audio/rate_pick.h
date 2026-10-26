@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 August Hu <BH2VOQ@163.com>
+//
+// 本文件是 RLPlayer 的一部分，以 GNU 通用公共许可证第 3 版（或更新版本）发布。
+// 完整条款见仓库根目录的 LICENSE 文件。
+//
 // rate_pick.h — 输出采样率选择（纯逻辑，零设备依赖，可离线单测）
 //
 // 为什么单独抽出来（2026-10-22 现场事故）：

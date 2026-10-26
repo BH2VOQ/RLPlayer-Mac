@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 August Hu <BH2VOQ@163.com>
+//
+// 本文件是 RLPlayer 的一部分，以 GNU 通用公共许可证第 3 版（或更新版本）发布。
+// 完整条款见仓库根目录的 LICENSE 文件。
+//
 // http_client.h — 极简 HTTP(S) 客户端（与平台无关的外壳；传输实现在 platform/http.h）
 //
 // 为什么传输在平台层：Navidrome / Emby 常常跑在 HTTPS 上，自己实现 TLS 不现实。

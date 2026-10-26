@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 August Hu <BH2VOQ@163.com>
+//
+// 本文件是 RLPlayer 的一部分，以 GNU 通用公共许可证第 3 版（或更新版本）发布。
+// 完整条款见仓库根目录的 LICENSE 文件。
+//
 // clock_loop.h — 时钟漂移闭环补偿
 //
 // 问题：Round 14 只做了【检测】。只检测不补偿的话，端点缓冲迟早会溢出（丢样）或耗尽（断音）。

@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 August Hu <BH2VOQ@163.com>
+//
+// 本文件是 RLPlayer 的一部分，以 GNU 通用公共许可证第 3 版（或更新版本）发布。
+// 完整条款见仓库根目录的 LICENSE 文件。
+//
 // src/engine/preset_profiles.h — 「官方推荐预设」的纯决策层（2026-10-26 起四档）
 //
 // 用户 2026-10-25 钦定：官方推荐（原音直通 / PCM 升频 / DSD 升频）都要**自动探测硬件能力**，

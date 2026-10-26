@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 August Hu <BH2VOQ@163.com>
+//
+// 本文件是 RLPlayer 的一部分，以 GNU 通用公共许可证第 3 版（或更新版本）发布。
+// 完整条款见仓库根目录的 LICENSE 文件。
+//
 // retrieval.h — P3 资料层③：检索层（DeepSeek search/fetch + rerank/authority/白名单过滤 + 引用纪律）
 //
 // 对应 docs/P3-资料层接口契约.md §3 与 docs/元数据补全调研与规划.md §3「内容分级」L3：

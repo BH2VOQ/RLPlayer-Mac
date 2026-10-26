@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 August Hu <BH2VOQ@163.com>
+//
+// 本文件是 RLPlayer 的一部分，以 GNU 通用公共许可证第 3 版（或更新版本）发布。
+// 完整条款见仓库根目录的 LICENSE 文件。
+//
 // direct_sdm.h — DirectSDM 直通（ROADMAP P0-3）：源 DSD 速率 == 目标速率时跳过调制
 //
 // 为什么值得单独做：现在 DSD 源一律「ffmpeg 解成 PCM → 升频 → 调制回 1-bit」，

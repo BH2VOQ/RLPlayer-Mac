@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 August Hu <BH2VOQ@163.com>
+//
+// 本文件是 RLPlayer 的一部分，以 GNU 通用公共许可证第 3 版（或更新版本）发布。
+// 完整条款见仓库根目录的 LICENSE 文件。
+//
 // test_ratepick.cpp — 输出采样率选择回归（2026-10-22 现场事故：第二首 44.1k FLAC 按 44100 开流）
 //
 // 事故形态（C:\Users\Administrator\Downloads\rlplayer-playback (4).log 第 9~23 行）：

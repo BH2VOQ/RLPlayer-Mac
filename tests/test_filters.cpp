@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 August Hu <BH2VOQ@163.com>
+//
+// 本文件是 RLPlayer 的一部分，以 GNU 通用公共许可证第 3 版（或更新版本）发布。
+// 完整条款见仓库根目录的 LICENSE 文件。
+//
 // test_filters.cpp — 滤波器家族客观验证（ROADMAP P2 门禁）
 // 验证要点（铁律 3：判据要能证明对的东西，严格避开三个坑）：
 //   1) 全家族变体的通带纹波 / 最差阻带衰减 / 抽头数可测性

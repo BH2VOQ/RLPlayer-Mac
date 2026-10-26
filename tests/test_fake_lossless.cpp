@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 August Hu <BH2VOQ@163.com>
+//
+// 本文件是 RLPlayer 的一部分，以 GNU 通用公共许可证第 3 版（或更新版本）发布。
+// 完整条款见仓库根目录的 LICENSE 文件。
+//
 // test_fake_lossless.cpp — 音频体检 B1a：假无损检测合成信号验证
 // 全部信号现场合成、完全离线：砖墙低通用项目现成的 Kaiser 窗函数法 FIR（src/dsp/filter_design.h）
 // 造出来，缓坡滚降用 Butterworth 双二阶级联 —— 判据确定性可复现。

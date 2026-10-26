@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 August Hu <BH2VOQ@163.com>
+//
+// 本文件是 RLPlayer 的一部分，以 GNU 通用公共许可证第 3 版（或更新版本）发布。
+// 完整条款见仓库根目录的 LICENSE 文件。
+//
 // test_hotfix_guard.cpp — 1.0.5 热修复第一刀的加固回归（HF-03 + HF-01/02 地基）
 //
 // 判据说明（铁律 3）：被测对象是「异常输入被拒且错误带字段信息」与「合法输入不被误杀」，

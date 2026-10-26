@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 August Hu <BH2VOQ@163.com>
+//
+// 本文件是 RLPlayer 的一部分，以 GNU 通用公共许可证第 3 版（或更新版本）发布。
+// 完整条款见仓库根目录的 LICENSE 文件。
+//
 // mock_upnp_renderer.js — 本地假 UPnP MediaRenderer（自动化测试用；不打开音频设备、不出声）
 // 用法：node tools/mock_upnp_renderer.js [port]   （默认 49199；GET /__state 可查调用记录）
 // 提供 description.xml + AVTransport/ConnectionManager 控制面；

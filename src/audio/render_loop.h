@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 August Hu <BH2VOQ@163.com>
+//
+// 本文件是 RLPlayer 的一部分，以 GNU 通用公共许可证第 3 版（或更新版本）发布。
+// 完整条款见仓库根目录的 LICENSE 文件。
+//
 // render_loop.h — 流式渲染主循环（2026-10-22 从 rtaweb.cpp play_one 抽出）
 //
 // 为什么抽成头文件：本轮事故（VM 上独占流 GetCurrentPadding 恒满 → 200 次超时

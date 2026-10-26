@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 August Hu <BH2VOQ@163.com>
+//
+// 本文件是 RLPlayer 的一部分，以 GNU 通用公共许可证第 3 版（或更新版本）发布。
+// 完整条款见仓库根目录的 LICENSE 文件。
+//
 // test_emby.cpp — Emby 客户端端到端测试（内置模拟 Emby 服务器）
 #include "test_compat_posix.h"   // POSIX 垫片：SetConsoleOutputCP/CP_UTF8（macOS 门禁）
 #include "net/webui.h"

@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 August Hu <BH2VOQ@163.com>
+//
+// 本文件是 RLPlayer 的一部分，以 GNU 通用公共许可证第 3 版（或更新版本）发布。
+// 完整条款见仓库根目录的 LICENSE 文件。
+//
 // test_libroot_regress.cpp — 库根绝对路径不变量 + --music-dir 写盘顺序回归
 //
 // 2026-10-26 BUG（用户截图：点侧栏「文件夹」主区域显示「目录不存在」）根因链三步：

@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 August Hu <BH2VOQ@163.com>
+//
+// 本文件是 RLPlayer 的一部分，以 GNU 通用公共许可证第 3 版（或更新版本）发布。
+// 完整条款见仓库根目录的 LICENSE 文件。
+//
 // test_renderfail.cpp — 渲染主循环 RENDERFAIL 归因回归（2026-10-22 VM 事故）
 //
 // 事故：VM 板载 HD Audio 上独占流 GetCurrentPadding 恒满 → write_available 恒 0 →

@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 August Hu <BH2VOQ@163.com>
+//
+// 本文件是 RLPlayer 的一部分，以 GNU 通用公共许可证第 3 版（或更新版本）发布。
+// 完整条款见仓库根目录的 LICENSE 文件。
+//
 // test_stream_baseline.cpp — 刻画当前"整块处理"管线的局限（流式改造的基线）
 //
 // 目的：在做流式改造【之前】，用客观判据把当前行为记录下来。

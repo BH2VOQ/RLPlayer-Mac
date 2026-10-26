@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 August Hu <BH2VOQ@163.com>
+//
+// 本文件是 RLPlayer 的一部分，以 GNU 通用公共许可证第 3 版（或更新版本）发布。
+// 完整条款见仓库根目录的 LICENSE 文件。
+//
 // test_clock_loop.cpp — 时钟漂移闭环补偿验证（纯离线仿真）
 //
 // 模型：发送端按 nominalRate 产生数据；端点以 nominalRate*(1+ppm/1e6) 消费。

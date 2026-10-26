@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 August Hu <BH2VOQ@163.com>
+//
+// 本文件是 RLPlayer 的一部分，以 GNU 通用公共许可证第 3 版（或更新版本）发布。
+// 完整条款见仓库根目录的 LICENSE 文件。
+//
 // test_volume_eq.cpp — 音量控制与 REW/AutoEq 参数 EQ 解析验证（全程离线）
 // 判据：
 //   音量：0 dB 必须逐位一致；−6.0206 dB 必须恰好 ×0.5；渐变必须无跳变

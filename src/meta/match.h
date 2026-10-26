@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 August Hu <BH2VOQ@163.com>
+//
+// 本文件是 RLPlayer 的一部分，以 GNU 通用公共许可证第 3 版（或更新版本）发布。
+// 完整条款见仓库根目录的 LICENSE 文件。
+//
 // match.h — 候选评分与选择（纯函数：无网络、无设备、无 Windows 头）
 //
 // 元数据补全流水线的第 ③ 级（docs/元数据补全调研与规划.md §3）：

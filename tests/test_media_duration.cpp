@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 August Hu <BH2VOQ@163.com>
+//
+// 本文件是 RLPlayer 的一部分，以 GNU 通用公共许可证第 3 版（或更新版本）发布。
+// 完整条款见仓库根目录的 LICENSE 文件。
+//
 // test_media_duration.cpp — probe_media 的时长字段（2026-10-22 跨模块缺陷的回归守卫）
 //
 // 缺陷：src/audio/media_info.h 的 MediaInfo::duration 从未被赋值 —— ffprobe 只问了

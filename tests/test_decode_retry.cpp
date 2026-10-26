@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 August Hu <BH2VOQ@163.com>
+//
+// 本文件是 RLPlayer 的一部分，以 GNU 通用公共许可证第 3 版（或更新版本）发布。
+// 完整条款见仓库根目录的 LICENSE 文件。
+//
 // test_decode_retry.cpp — ffmpeg 解码失败归因 + 瞬时故障重试回归（反馈 20261022-01 现象 B）
 //
 // 现场（VM，1.0.7）：同一个 FLAC「ZARD - 02.翼を広げて.flac」（日文假名 + 空格）

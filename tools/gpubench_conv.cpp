@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 August Hu <BH2VOQ@163.com>
+//
+// 本文件是 RLPlayer 的一部分，以 GNU 通用公共许可证第 3 版（或更新版本）发布。
+// 完整条款见仓库根目录的 LICENSE 文件。
+//
 // gpubench_conv.cpp — 卷积后端性能对标（**走生产路径**，不是独立 demo）
 //
 // 为什么要这个文件：HIP 那边的 tools/gpu_conv.cpp 是手工编的独立 demo，不跟着源码

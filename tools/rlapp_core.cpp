@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 August Hu <BH2VOQ@163.com>
+//
+// 本文件是 RLPlayer 的一部分，以 GNU 通用公共许可证第 3 版（或更新版本）发布。
+// 完整条款见仓库根目录的 LICENSE 文件。
+//
 // rlapp_core.cpp — 进程内后端核心的「库构建形态」翻译单元
 //
 // 为什么是「#include 一个 .cpp」而不是把业务代码拆成 .h/.cpp：

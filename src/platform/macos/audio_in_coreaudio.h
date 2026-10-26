@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 August Hu <BH2VOQ@163.com>
+//
+// 本文件是 RLPlayer 的一部分，以 GNU 通用公共许可证第 3 版（或更新版本）发布。
+// 完整条款见仓库根目录的 LICENSE 文件。
+//
 // audio_in_coreaudio.h — macOS 输入采集（AUHAL 输入侧）
 //
 // 对齐 Windows 的 audio/wasapi_capture.h 接口子集（rtaweb 的采集 worker 与

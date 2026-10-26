@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 August Hu <BH2VOQ@163.com>
+//
+// 本文件是 RLPlayer 的一部分，以 GNU 通用公共许可证第 3 版（或更新版本）发布。
+// 完整条款见仓库根目录的 LICENSE 文件。
+//
 // buffer_policy.h — 独占输出缓冲策略（C1）与起播看门狗（L2）
 //
 // 背景（反馈和开发\debug\20261024-01\N300-欠载-修改方案.md §5）：

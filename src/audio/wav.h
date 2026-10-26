@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 August Hu <BH2VOQ@163.com>
+//
+// 本文件是 RLPlayer 的一部分，以 GNU 通用公共许可证第 3 版（或更新版本）发布。
+// 完整条款见仓库根目录的 LICENSE 文件。
+//
 // wav.h — WAV (RIFF/WAVE) 读写
 // 关键设计：内部保留【原始整数样本】，而不是只存归一化浮点。
 // 这样"直通模式"可以做到逐位还原——浮点往返会引入不可逆的舍入，无法证明比特完美。

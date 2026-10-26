@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 August Hu <BH2VOQ@163.com>
+//
+// 本文件是 RLPlayer 的一部分，以 GNU 通用公共许可证第 3 版（或更新版本）发布。
+// 完整条款见仓库根目录的 LICENSE 文件。
+//
 // dsd_reader.h — DSF / DFF 原生读取 + 写出（ROADMAP P0-1 / P0-2 的底座）
 //
 // 为什么自己读：现在 DSD 文件交给 ffmpeg 先解成 PCM，等于「DSD 进、PCM 中转、DSD 出」，

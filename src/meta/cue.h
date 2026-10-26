@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 August Hu <BH2VOQ@163.com>
+//
+// 本文件是 RLPlayer 的一部分，以 GNU 通用公共许可证第 3 版（或更新版本）发布。
+// 完整条款见仓库根目录的 LICENSE 文件。
+//
 // src/meta/cue.h — CUE 整轨分轨解析（2026-10-25，第一里程碑）
 //
 // 背景：docs/CUE-ISO-SACD支持现状.md 的核查结论是「仓库里完全没有 CUE 解析」，

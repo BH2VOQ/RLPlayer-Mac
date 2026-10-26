@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 August Hu <BH2VOQ@163.com>
+//
+// 本文件是 RLPlayer 的一部分，以 GNU 通用公共许可证第 3 版（或更新版本）发布。
+// 完整条款见仓库根目录的 LICENSE 文件。
+//
 // naa_probe.cpp — NAA 控制通道黑盒探针（只连 TCP 43210，不发音频、不打开任何设备）
 //
 // 目的：搞清 NAA（networkaudiod）在 TCP 连接上的握手顺序与报文封装。

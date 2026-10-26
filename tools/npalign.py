@@ -1,3 +1,9 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2026 August Hu <BH2VOQ@163.com>
+#
+# 本文件是 RLPlayer 的一部分，以 GNU 通用公共许可证第 3 版（或更新版本）发布。
+# 完整条款见仓库根目录的 LICENSE 文件。
+#
 # npalign.py — 逐像素量「/」与播放键中心的 x 坐标差（UI3 的唯一判据）
 #
 # 为什么不能用 getBoundingClientRect 就完事：

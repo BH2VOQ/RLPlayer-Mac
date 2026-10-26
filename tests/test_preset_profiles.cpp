@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 August Hu <BH2VOQ@163.com>
+//
+// 本文件是 RLPlayer 的一部分，以 GNU 通用公共许可证第 3 版（或更新版本）发布。
+// 完整条款见仓库根目录的 LICENSE 文件。
+//
 // tests/test_preset_profiles.cpp — 「官方推荐预设」决策纯函数的离线单测（2026-10-26 起四档）
 //
 // 判据（铁律 3）：这里只测**决策**，不测设备。探测（CoreAudio caps / DoP 载波推算）

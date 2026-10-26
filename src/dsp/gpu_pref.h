@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 August Hu <BH2VOQ@163.com>
+//
+// 本文件是 RLPlayer 的一部分，以 GNU 通用公共许可证第 3 版（或更新版本）发布。
+// 完整条款见仓库根目录的 LICENSE 文件。
+//
 // gpu_pref.h — GPU 后端偏好（AMD / NVIDIA / 自动 / 关闭）
 //
 // 为什么需要它：不同厂商的加速后端导出符号完全一样，所以"选哪张卡/哪个后端"

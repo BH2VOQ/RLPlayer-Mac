@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 August Hu <BH2VOQ@163.com>
+//
+// 本文件是 RLPlayer 的一部分，以 GNU 通用公共许可证第 3 版（或更新版本）发布。
+// 完整条款见仓库根目录的 LICENSE 文件。
+//
 // dynlib.h — 动态库加载（平台层契约，跨平台）
 //
 // 用途：GPU 加速后端是"锦上添花"的 DLL/SO（rtagpu.dll / rtagpu_dx12.dll / rtagpu_cuda.dll /

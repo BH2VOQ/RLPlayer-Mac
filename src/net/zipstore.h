@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 August Hu <BH2VOQ@163.com>
+//
+// 本文件是 RLPlayer 的一部分，以 GNU 通用公共许可证第 3 版（或更新版本）发布。
+// 完整条款见仓库根目录的 LICENSE 文件。
+//
 // zipstore.h — 最小 ZIP 打包（只做 STORE，不压缩；纯 C++，零外部依赖）
 //
 // 为什么自己写（2026-10-22 功能3 的选型理由，必须写清楚）：

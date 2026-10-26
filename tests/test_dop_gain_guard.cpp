@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 August Hu <BH2VOQ@163.com>
+//
+// 本文件是 RLPlayer 的一部分，以 GNU 通用公共许可证第 3 版（或更新版本）发布。
+// 完整条款见仓库根目录的 LICENSE 文件。
+//
 // test_dop_gain_guard.cpp — DoP/DSD 输出时软件音量必须被强制为 0 dB（2026-10-25）
 //
 // 为什么必须有这条门禁（真实风险，不是假想）：

@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 August Hu <BH2VOQ@163.com>
+//
+// 本文件是 RLPlayer 的一部分，以 GNU 通用公共许可证第 3 版（或更新版本）发布。
+// 完整条款见仓库根目录的 LICENSE 文件。
+//
 // enrich.h — 单曲元数据补全编排(docs/元数据补全调研与规划.md §3 的 ①→⑤ 全链)
 //
 // 编排:parse(标签→文件名→LLM) → providers(qq/netease/itunes 搜索) → match(评分排序,

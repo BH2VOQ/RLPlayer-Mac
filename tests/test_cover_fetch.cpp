@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 August Hu <BH2VOQ@163.com>
+//
+// 本文件是 RLPlayer 的一部分，以 GNU 通用公共许可证第 3 版（或更新版本）发布。
+// 完整条款见仓库根目录的 LICENSE 文件。
+//
 // test_cover_fetch.cpp — 在线封面抓取的**纯逻辑**判据（2026-10-26，上游 c41ce97 + 9ce018f 的 mac 重做）
 //
 // 为什么这些判据必须单独存在（铁律 3：测「通过」≠ 测对了东西）：

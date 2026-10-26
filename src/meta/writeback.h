@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 August Hu <BH2VOQ@163.com>
+//
+// 本文件是 RLPlayer 的一部分，以 GNU 通用公共许可证第 3 版（或更新版本）发布。
+// 完整条款见仓库根目录的 LICENSE 文件。
+//
 // writeback.h — P2 标签写回(docs/元数据补全调研与规划.md §3/§4 P2:ffmpeg remux + PCM 逐位门禁)
 //
 // 流程(writeback_file):

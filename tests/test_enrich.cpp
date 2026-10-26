@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 August Hu <BH2VOQ@163.com>
+//
+// 本文件是 RLPlayer 的一部分，以 GNU 通用公共许可证第 3 版（或更新版本）发布。
+// 完整条款见仓库根目录的 LICENSE 文件。
+//
 // test_enrich.cpp — src/meta/enrich.h 的可离线纯函数(全离线,不发任何网络请求)
 //
 // 判据说明(铁律 3):enrich 的编排本体(搜索→评分→融合→落盘)是网络+文件系统流程,

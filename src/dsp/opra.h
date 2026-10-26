@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 August Hu <BH2VOQ@163.com>
+//
+// 本文件是 RLPlayer 的一部分，以 GNU 通用公共许可证第 3 版（或更新版本）发布。
+// 完整条款见仓库根目录的 LICENSE 文件。
+//
 // opra.h — OPRA (Open Profiles for Revealing Audio) 耳机 EQ 数据层与预设管理
 //
 // 对应 docs/耳机EQ-OPRA调研与设计.md 已拍板决策：

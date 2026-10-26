@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 August Hu <BH2VOQ@163.com>
+//
+// 本文件是 RLPlayer 的一部分，以 GNU 通用公共许可证第 3 版（或更新版本）发布。
+// 完整条款见仓库根目录的 LICENSE 文件。
+//
 // test_fullscale.cpp — 满幅 PCM 经过真实管线后的稳定性
 //
 // 2026-10-21 现场故障：24-bit 输出 + 默认 shaper=auto（=LNS15）+ rate=max，

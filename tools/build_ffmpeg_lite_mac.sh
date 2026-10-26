@@ -1,4 +1,10 @@
 #!/bin/zsh
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2026 August Hu <BH2VOQ@163.com>
+#
+# 本文件是 RLPlayer 的一部分，以 GNU 通用公共许可证第 3 版（或更新版本）发布。
+# 完整条款见仓库根目录的 LICENSE 文件。
+#
 # build_ffmpeg_lite_mac.sh — macOS 精简静态 ffmpeg（对齐 Windows 的 build_ffmpeg_lite.ps1 思路）
 #
 # 为什么：播放器只需要【音频解码 + WAV 写出 + ffprobe 探测 + 元数据写回】。Homebrew ffmpeg 链

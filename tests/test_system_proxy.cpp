@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 August Hu <BH2VOQ@163.com>
+//
+// 本文件是 RLPlayer 的一部分，以 GNU 通用公共许可证第 3 版（或更新版本）发布。
+// 完整条款见仓库根目录的 LICENSE 文件。
+//
 // test_system_proxy.cpp — 「有代理走代理、没代理直连」的判据（2026-10-26）
 //
 // 为什么要有这条测试（铁律 3：先问"这个指标真能证明我要证明的事吗"）：

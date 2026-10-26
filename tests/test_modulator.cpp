@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 August Hu <BH2VOQ@163.com>
+//
+// 本文件是 RLPlayer 的一部分，以 GNU 通用公共许可证第 3 版（或更新版本）发布。
+// 完整条款见仓库根目录的 LICENSE 文件。
+//
 // test_modulator.cpp — SDM 调制器客观验证
 // 判据：NTF 设计正确 + 1-bit 输出流在音频带内的 SNR/噪声底 + 环路稳定
 #include "dsp/modulator.h"

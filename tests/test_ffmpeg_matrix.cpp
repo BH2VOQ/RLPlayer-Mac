@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 August Hu <BH2VOQ@163.com>
+//
+// 本文件是 RLPlayer 的一部分，以 GNU 通用公共许可证第 3 版（或更新版本）发布。
+// 完整条款见仓库根目录的 LICENSE 文件。
+//
 // test_ffmpeg_matrix.cpp — 精简版 ffmpeg/ffprobe 的音频格式矩阵门禁（P1：裁剪 ffmpeg）
 //
 // 为什么需要这个测试（铁律 3：能证明「要证明的事」）：

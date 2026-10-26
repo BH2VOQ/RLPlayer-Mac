@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 August Hu <BH2VOQ@163.com>
+//
+// 本文件是 RLPlayer 的一部分，以 GNU 通用公共许可证第 3 版（或更新版本）发布。
+// 完整条款见仓库根目录的 LICENSE 文件。
+//
 // test_gpu_metal.cpp — macOS Metal GPU 后端（librtagpu.dylib）的数值正确性门禁
 //
 // 纯 C++，【不链接】dylib：用 dlopen 运行时加载，与管线真实的调用方式完全一致。

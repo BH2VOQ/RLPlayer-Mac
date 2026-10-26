@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 August Hu <BH2VOQ@163.com>
+//
+// 本文件是 RLPlayer 的一部分，以 GNU 通用公共许可证第 3 版（或更新版本）发布。
+// 完整条款见仓库根目录的 LICENSE 文件。
+//
 // peqcheck.js — 20 段 PEQ 验收（261024-03 #5：文字对齐 + HIFI 交互）
 // 判据：
 //   1) 对齐：表头每列中心 vs 行内控件中心 <= 2px（893x587/DPR1.5 与 1576x908/DPR1 两档都要过）；

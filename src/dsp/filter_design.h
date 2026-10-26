@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 August Hu <BH2VOQ@163.com>
+//
+// 本文件是 RLPlayer 的一部分，以 GNU 通用公共许可证第 3 版（或更新版本）发布。
+// 完整条款见仓库根目录的 LICENSE 文件。
+//
 // filter_design.h — 低通原型 FIR 设计（windowed-sinc + Kaiser 窗）
 // 这是所有重采样滤波器家族的地基：改变 cutoff / 过渡带 / 相位特性即可得到
 // 对应 RLPlayer 的 poly-sinc / poly-sinc-gauss / sinc-* / ext2 等家族。

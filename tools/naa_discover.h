@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 August Hu <BH2VOQ@163.com>
+//
+// 本文件是 RLPlayer 的一部分，以 GNU 通用公共许可证第 3 版（或更新版本）发布。
+// 完整条款见仓库根目录的 LICENSE 文件。
+//
 // tools/naa_discover.h — NAA 端点自动发现（只读端口探测，不输出任何声音）
 //
 // 261024-01 #11：NAA 端点不应该让用户手填 host:port，正常路径应当自动获取。

@@ -1,3 +1,9 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2026 August Hu <BH2VOQ@163.com>
+#
+# 本文件是 RLPlayer 的一部分，以 GNU 通用公共许可证第 3 版（或更新版本）发布。
+# 完整条款见仓库根目录的 LICENSE 文件。
+#
 cmake_minimum_required(VERSION 3.20)
 
 # ---------------- macOS 部署目标（2026-10-25 补） ----------------
@@ -521,7 +527,7 @@ add_test(NAME playback_gpu COMMAND test_playback_gpu)
 #      —— 这 8 条只缺 POSIX 垫片，wp-d2-tests 补完后即可直接打开，无需再改本文件。
 #   ⚠️ 编译通过但运行 FAIL（2 条，**不是平台问题**）：
 #      test_writeback / test_media_duration —— 失败真因是本机 Homebrew ffmpeg 坏链
-#      （libx265 缺失，`ffmpeg -version` 退出码 134，AGENTS.md §1 已记录）。测试本身
+#      （libx265 缺失，`ffmpeg -version` 退出码 134，项目开发铁律 §1 已记录）。测试本身
 #      判据正确（「ffmpeg 造 1s 正弦 FLAC」rc=134），换到 ffmpeg 正常的环境即可。
 #   ❌ 编译失败（7 条）：
 #      windows.h  → test_hotfix_guard、test_renderfail、test_decode_retry、test_stream_decode、
@@ -692,7 +698,7 @@ add_test(NAME writeback COMMAND test_writeback)
 
 # 2026-10-25（门禁基线修正）：这 4 条测试依赖 ffmpeg 造/解素材，而本机 PATH 里的
 # Homebrew ffmpeg 是坏链（缺 libx265.216.dylib，`ffmpeg -version` 退出码 134），
-# 导致它们长期假红（AGENTS.md §1 已记录该环境事实）。
+# 导致它们长期假红（项目开发铁律 §1 已记录该环境事实）。
 # 项目自建的 build-mac/ffmpeg-lite/ffmpeg 是可用的（实测 8.1.2，rc=0）。
 # 用 ENVIRONMENT 把 ffmpeg-lite 放到 PATH 最前 —— 与 embedded_api 的既有手法一致，
 # 不改变测试判据本身（判据强度不动，只修环境）。实测 4/4 全绿。

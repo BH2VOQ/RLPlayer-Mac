@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 August Hu <BH2VOQ@163.com>
+//
+// 本文件是 RLPlayer 的一部分，以 GNU 通用公共许可证第 3 版（或更新版本）发布。
+// 完整条款见仓库根目录的 LICENSE 文件。
+//
 // kaiser.h — Kaiser 窗与零阶修正贝塞尔函数 I0
 // 用于设计高质量 windowed-sinc 低通原型滤波器（RLPlayer poly-sinc 家族的同族做法）
 #pragma once

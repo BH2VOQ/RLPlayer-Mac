@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 August Hu <BH2VOQ@163.com>
+//
+// 本文件是 RLPlayer 的一部分，以 GNU 通用公共许可证第 3 版（或更新版本）发布。
+// 完整条款见仓库根目录的 LICENSE 文件。
+//
 // source_mgr.h — 音源管理（本地文件 + Subsonic/Navidrome/Emby 远程）
 //
 // 核心原则：远程曲目一律先【完整下载原始文件】到本地缓存，再走与本地文件

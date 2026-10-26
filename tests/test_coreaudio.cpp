@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 August Hu <BH2VOQ@163.com>
+//
+// 本文件是 RLPlayer 的一部分，以 GNU 通用公共许可证第 3 版（或更新版本）发布。
+// 完整条款见仓库根目录的 LICENSE 文件。
+//
 // test_coreaudio.cpp — CoreAudio 后端（platform::AudioOutput）的真机端到端测试
 //
 // 为什么要有这个测试（PLATFORM.md §13.4 第 3 条原本写成"未做"）：

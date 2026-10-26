@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 August Hu <BH2VOQ@163.com>
+//
+// 本文件是 RLPlayer 的一部分，以 GNU 通用公共许可证第 3 版（或更新版本）发布。
+// 完整条款见仓库根目录的 LICENSE 文件。
+//
 // process_tap_bridge.h — Process Tap（macOS 14.2+ 系统混音回环）的纯 C 接口
 //
 // 为什么需要这个"纯 C 头 + ObjC++ 实现"的两件套：

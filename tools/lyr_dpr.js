@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 August Hu <BH2VOQ@163.com>
+//
+// 本文件是 RLPlayer 的一部分，以 GNU 通用公共许可证第 3 版（或更新版本）发布。
+// 完整条款见仓库根目录的 LICENSE 文件。
+//
 // lyr_dpr.js — 歌词滚动在【真机档】视口下的验收（默认 893x587 / DPR 1.5）
 // 背景：用户真机 WebView2 视口 893x587 CSS px（窗口 1340x880 @150%），DPR=1.5；
 //       旧验收 tools/t25check.js 用 1576x908 / DPR 1 → 假 PASS，真机「完全不会滚动」。

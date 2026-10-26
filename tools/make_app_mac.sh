@@ -1,4 +1,10 @@
 #!/bin/zsh
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2026 August Hu <BH2VOQ@163.com>
+#
+# 本文件是 RLPlayer 的一部分，以 GNU 通用公共许可证第 3 版（或更新版本）发布。
+# 完整条款见仓库根目录的 LICENSE 文件。
+#
 # make_app_mac.sh — 把 RLPlayer 封装成 macOS .app（单进程 arm64 原生整合）
 #
 # 用法：tools/make_app_mac.sh [构建目录=build-mac]
@@ -34,6 +40,15 @@ chmod +x "$APP/Contents/MacOS/RLPlayer"
 # 后者只该放可执行文件，往里塞 json 会让 codesign -v 报 "code object is not signed at all"。
 mkdir -p "$APP/Contents/Resources/data"
 cp "$ROOT/data/opra_index.json" "$APP/Contents/Resources/data/"
+
+# 2a) 许可证与第三方归属（GPLv3 要求随二进制分发完整条款文本）
+#   * LICENSE       = GPL-3.0 全文（仓库根目录，唯一真相源）
+#   * OPRA-NOTICE   = 内置 OPRA 耳机 EQ 数据的 CC BY-SA 4.0 归属说明
+#   两处缺一，发行包即不合规 ⟹ 这里用致命错误而不是警告。
+for doc in LICENSE OPRA-NOTICE.txt; do
+    [[ -f "$ROOT/$doc" ]] || { echo "✗ 致命错误：缺少 $doc，无法满足 GPLv3 的分发义务"; exit 1; }
+    cp "$ROOT/$doc" "$APP/Contents/Resources/"
+done
 
 # 2b) Metal GPU 后端（librtagpu.dylib）
 #
@@ -108,6 +123,9 @@ cat > "$APP/Contents/Info.plist" <<PLIST
     <key>CFBundleShortVersionString</key> <string>${VER}</string>
     <key>CFBundlePackageType</key>      <string>APPL</string>
     <key>CFBundleIconFile</key>         <string>RLPlayer</string>
+    <!-- GPLv3：二进制分发必须可查到版权与许可（Finder 简介面板 / 关于本机都会显示） -->
+    <key>NSHumanReadableCopyright</key>
+    <string>Copyright (C) 2026 August Hu. Licensed under GNU GPL v3 or later.</string>
     <!-- 2026-10-25：必须与 CMakeLists.txt 的 CMAKE_OSX_DEPLOYMENT_TARGET 保持一致。 -->
     <key>LSMinimumSystemVersion</key>   <string>13.0</string>
     <key>NSHighResolutionCapable</key>  <true/>

@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 August Hu <BH2VOQ@163.com>
+//
+// 本文件是 RLPlayer 的一部分，以 GNU 通用公共许可证第 3 版（或更新版本）发布。
+// 完整条款见仓库根目录的 LICENSE 文件。
+//
 // test_buffer_policy.cpp — C1 独占缓冲策略回归（2026-10-24 N300 欠载）
 //
 // 被测对象是生产代码 src/audio/buffer_policy.h —— rtaweb 的 WasapiSink::open 用的就是它，

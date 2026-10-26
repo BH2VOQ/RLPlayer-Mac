@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 August Hu <BH2VOQ@163.com>
+//
+// 本文件是 RLPlayer 的一部分，以 GNU 通用公共许可证第 3 版（或更新版本）发布。
+// 完整条款见仓库根目录的 LICENSE 文件。
+//
 // test_pipeline.cpp — 播放管线端到端验证
 // 核心判据：直通路径必须逐位可证；无损展宽必须数值不变；升频路径必须低失真
 #include "engine/pipeline.h"

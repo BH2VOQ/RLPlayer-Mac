@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 August Hu <BH2VOQ@163.com>
+//
+// 本文件是 RLPlayer 的一部分，以 GNU 通用公共许可证第 3 版（或更新版本）发布。
+// 完整条款见仓库根目录的 LICENSE 文件。
+//
 // rtanet_rx.cpp — RTANet 端点程序（跑在接 DAC 的那台机器上）
 //
 // 架构（Round 25 重构）：接收线程与播放线程【解耦】

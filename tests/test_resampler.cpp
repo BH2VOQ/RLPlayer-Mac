@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 August Hu <BH2VOQ@163.com>
+//
+// 本文件是 RLPlayer 的一部分，以 GNU 通用公共许可证第 3 版（或更新版本）发布。
+// 完整条款见仓库根目录的 LICENSE 文件。
+//
 // test_resampler.cpp — 多相 sinc 重采样引擎的客观验证
 // 测量方法：Blackman-Harris 窗 + FFT，直接读谱（不用逐点相关法，避免 O(N*F) 爆炸）
 #include "dsp/resampler.h"

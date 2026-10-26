@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 August Hu <BH2VOQ@163.com>
+//
+// 本文件是 RLPlayer 的一部分，以 GNU 通用公共许可证第 3 版（或更新版本）发布。
+// 完整条款见仓库根目录的 LICENSE 文件。
+//
 // mac_update.h — F-4 自动更新原生执行层的**接口**（实现见 mac_update.mm）
 //
 // 为什么单独拆一个头：tools/mac_host.mm 要与它解耦。

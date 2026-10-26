@@ -1,4 +1,10 @@
 #!/usr/bin/env node
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 August Hu <BH2VOQ@163.com>
+//
+// 本文件是 RLPlayer 的一部分，以 GNU 通用公共许可证第 3 版（或更新版本）发布。
+// 完整条款见仓库根目录的 LICENSE 文件。
+//
 // uicheck_fixes2.js —— 对 tools/uicheck_fixes.js 的**独立复核（加严判据）**
 //
 // 为什么还要第二份：
