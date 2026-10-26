@@ -327,9 +327,16 @@ inline std::string rta_ui_page() {
     h += "#dropmask{position:fixed;inset:0;z-index:90;display:none;align-items:center;justify-content:center;background:rgba(8,9,12,.72);backdrop-filter:blur(2px)}";
     h += "#dropmask.on{display:flex}";
     h += "#dropmask>div{border:2px dashed var(--acc);border-radius:16px;padding:42px 64px;font-size:16px;color:var(--acc-text);background:rgba(59,130,246,.08)}";
-    // 右侧（2026-10-26 C-1：#right 不再占网格第三列 —— 网格已改两列，悬浮态见上方 #app.qopen 规则；
-    // 此处只是非悬浮（隐藏/兜底）时的基础样式，border-left/grid-column:3 已随三列布局一并作废）
-    h += "#right{grid-row:2;background:var(--bg2);border-left:1px solid var(--line);display:flex;flex-direction:column;overflow:hidden}";
+    // 右侧抽屉（2026-10-26 C-1 修复第二处）：**默认必须 display:none**。
+    //   事故：旧基础样式写的是 display:flex，而显隐只靠两条规则：
+    //     · #app.noq #right{display:none}        —— 队列视图/设置页时隐藏
+    //     · #app.qopen:not(.noq):not(.setmode) #right{...悬浮卡片...} —— 打开时显示
+    //   但**启动瞬间 #app 既没有 noq 也没有 qopen**（JS 还没跑/刚跑完 setView），
+    //   两条规则都不命中 ⟹ 落到基础样式的 display:flex + border-left，
+    //   于是首屏右边凭空出现一条**直角贴边侧栏**（用户 2026-10-26 实测复现）。
+    //   修法：基础态改成 display:none，只有 .qopen 才显示 —— 三态语义就此闭合：
+    //     默认隐藏 → 打开时悬浮卡片 → .noq 时隐藏。
+    h += "#right{display:none;grid-row:2;background:var(--bg2);border-left:1px solid var(--line);flex-direction:column;overflow:hidden}";
     h += ".rhead{display:flex;align-items:center;gap:8px;padding:10px 14px;border-bottom:1px solid var(--line);font-size:12px;font-weight:600;color:var(--txt2);flex:none;min-height:42px}";
     h += ".rhead .cnt{font-weight:400;color:var(--mut2);font-size:11px}.rbody{flex:1;overflow:auto}";
     h += ".qi{display:flex;gap:9px;padding:8px 14px;cursor:pointer;border-left:3px solid transparent;font-size:12.5px;align-items:center}";
