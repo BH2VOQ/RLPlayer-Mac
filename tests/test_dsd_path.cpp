@@ -22,6 +22,21 @@
 #include <cstring>
 #include <string>
 #include <vector>
+#include <chrono>
+#include <thread>
+#include <array>
+#include <memory>
+#include <fstream>
+#include <filesystem>
+#include <sys/types.h>
+#include <signal.h>
+#include <unistd.h>
+#include <sys/wait.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
+
+namespace fs = std::filesystem;
 
 #ifndef NOMINMAX
 #define NOMINMAX
@@ -449,6 +464,120 @@ int main() {
             check(std::fabs(cfg.passbandHz - 40000.0) < 1e-9,
                   std::string(integrator_name(k)) + " 也支持 XFi 通带",
                   std::to_string(cfg.passbandHz) + " Hz");
+        }
+    }
+
+    printf("\n=== 7. 原生 DSD 采样率判定（A-5）与 rtaweb 退出收尾取证 ===\n");
+    {
+        fs::path exeDir = fs::current_path();
+        fs::path rtawebBin = exeDir / "rtaweb";
+        if (!fs::exists(rtawebBin)) rtawebBin = exeDir / "build-mac" / "rtaweb";
+        if (!fs::exists(rtawebBin)) rtawebBin = exeDir / "RLPlayer" / "build-mac" / "rtaweb";
+        if (!fs::exists(rtawebBin)) {
+            fs::path srcDir = fs::path(__FILE__).parent_path().parent_path();
+            rtawebBin = srcDir / "build-mac" / "rtaweb";
+        }
+
+        if (!fs::exists(rtawebBin)) {
+            check(false, "找不到 rtaweb 可执行文件: " + rtawebBin.string());
+        } else {
+            const uint16_t testPort = 8913;
+            // 启动 rtaweb --port 8913 --music-dir ./data --no-browser
+            pid_t pid = fork();
+            if (pid == 0) {
+                std::string pStr = std::to_string(testPort);
+                execl(rtawebBin.c_str(), rtawebBin.c_str(),
+                      "--port", pStr.c_str(),
+                      "--music-dir", "./data",
+                      "--no-browser", nullptr);
+                _exit(127);
+            } else if (pid < 0) {
+                check(false, "fork() 启动 rtaweb 失败");
+            } else {
+                // 等待端口应答
+                bool ready = false;
+                auto start = std::chrono::steady_clock::now();
+                while (true) {
+                    int s = ::socket(AF_INET, SOCK_STREAM, 0);
+                    if (s >= 0) {
+                        sockaddr_in a{};
+                        a.sin_family = AF_INET;
+                        a.sin_port = htons(testPort);
+                        a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+                        if (::connect(s, (sockaddr*)&a, sizeof(a)) == 0) {
+                            ::close(s);
+                            ready = true;
+                            break;
+                        }
+                        ::close(s);
+                    }
+                    auto now = std::chrono::steady_clock::now();
+                    if (std::chrono::duration_cast<std::chrono::milliseconds>(now - start).count() > 6000) {
+                        break;
+                    }
+                    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+                }
+                check(ready, "rtaweb 端口 8913 服务就绪");
+
+                auto exec_curl = [](const std::string& cmd) -> std::string {
+                    std::array<char, 256> buf;
+                    std::string res;
+                    std::unique_ptr<FILE, decltype(&pclose)> pipe(popen(cmd.c_str(), "r"), pclose);
+                    if (!pipe) return "";
+                    while (fgets(buf.data(), buf.size(), pipe.get()) != nullptr) {
+                        res += buf.data();
+                    }
+                    return res;
+                };
+
+                // ---- 判据 A 已移除（2026-10-26）----
+                // 这里原本断言 native_dsd_precheck 对 rate=max/96000 报「请改成跟随源」。
+                // 该函数已回滚：mac 的 dsdNative 能力恒为 false（CoreAudio 无 ASIO 原生 DSD
+                // 通道），任何 dsdnative=1 的请求都该由 direct_sdm_eligible() 报
+                // 「DSD Native 还没实现」——把用户引向「改成跟随源」是误导（改了也没用）。
+
+                // ---- 判据 B：POST /api/quit 退出收尾取证 ----
+                {
+                    std::string cmd = "curl -s -X POST http://127.0.0.1:" +
+                                      std::to_string(testPort) + "/api/quit";
+                    std::string resp = exec_curl(cmd);
+                    check(resp.find("\"ok\":true") != std::string::npos, "POST /api/quit 返回 ok:true", resp);
+
+                    int status = 0;
+                    bool exited = false;
+                    for (int i = 0; i < 50; ++i) {
+                        pid_t r = ::waitpid(pid, &status, WNOHANG);
+                        if (r == pid) { exited = true; break; }
+                        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                    }
+                    if (!exited) {
+                        // 兜底（铁律 2：SIGTERM 收尾，绝不 SIGKILL）
+                        ::kill(pid, SIGTERM);
+                        ::waitpid(pid, &status, 0);
+                    }
+
+                    check(exited && WIFEXITED(status) && WEXITSTATUS(status) == 0,
+                          "rtaweb 正常退出且退出码为 0（非 SIGABRT）",
+                          "exit=" + std::to_string(WEXITSTATUS(status)));
+
+                    // 读取日志文件，断言包含 "SHUTDOWN joinable"
+                    bool foundShutdownLog = false;
+                    const char* home = std::getenv("HOME");
+                    if (home) {
+                        std::string logPath = std::string(home) + "/Library/Application Support/RLPlayer/rlplayer-playback.log";
+                        std::ifstream lf(logPath);
+                        if (lf) {
+                            std::string line;
+                            while (std::getline(lf, line)) {
+                                if (line.find("SHUTDOWN joinable") != std::string::npos) {
+                                    foundShutdownLog = true;
+                                }
+                            }
+                        }
+                    }
+                    check(foundShutdownLog, "日志文件包含 SHUTDOWN joinable 取证行");
+                }
+            }
         }
     }
 

@@ -5146,11 +5146,18 @@ function applyPresetControls(applied, profile) {
   var vol = applied.volume !== undefined ? applied.volume : applied.vol;
   if (vol === undefined && profile === 'bitperfect') vol = 0;
   if (vol !== undefined) {
-    var vNum = Number(vol) || 0;
+    // ⚠️ 2026-10-26 修（用户实测：点完预设音量条归零但音量还是满的）：
+    //   `vol` 是 **dB**（后端 applied.volume 语义），而 #vol 滑块是**位置刻度 0..1000**。
+    //   旧代码 `D('vol').value = String(vNum)` 把 dB 直接当位置塞进去 ⟹ 0 dB（满音量）
+    //   被写成位置 0（最左 = 静音档）⟹ 条归零、声音照旧满 —— 两个谎同时成立。
+    //   正确：先用 volDbToPos() 换算，再用 volNormalize() 归一（-120 静音档等边界），
+    //   与 /api/status 回调里的处理保持同一口径。
+    var vNum = volNormalize(Number(vol));
     S.vol = vNum;
     S.volDb = vNum;
-    if (D('vol')) D('vol').value = String(vNum);
+    if (D('vol')) D('vol').value = String(volDbToPos(vNum));
     if (D('volDb')) D('volDb').textContent = vNum.toFixed(1) + ' dB';
+    syncVolUi();                      // 两个滑块（#vol / #npVol）+ 标签一起对齐
     api('/api/volume', 'vol=' + vNum).catch(function () {});
   }
 

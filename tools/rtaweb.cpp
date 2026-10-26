@@ -1137,16 +1137,6 @@ static std::string naa_discover_json(bool) {
 //（ui_script.h 的 sRate 第一项、rtaweb.cpp 的 rateAuto 也都把 follow 当跟随源）。
 // 后果是 GUI 用户明明选的就是「跟随源」，却被告知「请改成跟随源」——永远用不了原生 DSD。
 // 现在三种等价写法都接受；"max"（要升频）和具体数字（要换率）仍然明确拒绝。
-static bool native_dsd_precheck(const PlayParams& p, std::string& why) {
-    const bool rateFollowsSource = (p.rate.empty() || p.rate == "src" || p.rate == "follow");
-    if (!rateFollowsSource) {
-        why = "Native DSD 按源位率直通，不做升频：采样率设置当前是「" + p.rate +
-              "」，请改成「跟随源」（设置 → 输出 → 采样率；等价写法 src / follow）。";
-        return false;
-    }
-    return true;
-}
-
 // ---------------- DirectSDM：源 DSD 与目标 DSD 同速率时的逐位直通 ----------------
 // 判定必须在解码之前：DSD256 整曲解成 PCM 要几百 MB，先判再决定路径。
 static bool direct_sdm_eligible(const PlayParams& p, const DsdInfo& info, std::string& why) {
@@ -5164,14 +5154,19 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
             play_log("PLAY_CUE cue=" + cue_range_text(p.cueStart, p.cueEnd) + " file=" + p.file);
         }
 
-        // Native DSD 参数门（HTTP 层同步拒绝，不开设备）：
-        // 放在起播放线程之前 ⟹ 用户点一下立刻拿到具体原因，而不是"HTTP 说 ok、线程里才失败"。
+        // 2026-10-26：这里曾有 native_dsd_precheck（上游 6bd21a6 的 follow 判定移植），已移除。
+        //   理由：mac 的 dsdNative 能力恒为 false（CoreAudio 无 ASIO 原生 DSD 通道），
+        //   按采样率判定只会把用户引向「改成跟随源」——改了也没用，是误导。
+        // 真正的修法是下面这条：**在 /api/play 入口直接拒绝 dsdnative=1**。
+        //   修前缺陷（实测）：`POST /api/play?dsdnative=1` 返回 {"ok":true} 就放行了，
+        //   而拒绝逻辑只在 direct_sdm_eligible()（DirectSDM 分支）里，普通播放路径
+        //   根本不检查 ⟹ 用户看到"播放成功"却没有任何声音（Native DSD 在 mac 上不存在）。
         if (p.dsdNative) {
-            std::string why;
-            if (!native_dsd_precheck(p, why)) {
-                play_log("PLAY_REJECT dsdnative=1 file=" + p.file + " " + why);
-                return std::string("{\"ok\":false,\"nativeDsd\":true,\"error\":\"") + jesc(why) + "\"}";
-            }
+            const std::string why =
+                "DSD Native 还没实现（它走 Native DSD 驱动通道，不是 DoP）。"
+                "macOS 没有原生 DSD 驱动通路：请把输出封装改成 DoP（设置 → 输出 → DSD 封装）。";
+            play_log("PLAY_REJECT dsdnative=1 file=" + p.file + " " + why);
+            return std::string("{\"ok\":false,\"nativeDsd\":true,\"error\":\"") + jesc(why) + "\"}";
         }
 
         params_store(p);
@@ -8070,7 +8065,6 @@ int rlapp::cli_main(int argc, char** argv) {
           << " prefetch=" << (g_pre.th.joinable() ? 1 : 0)
           << " scan=" << (g_wb.th.joinable() ? 1 : 0);
         play_log(o.str());
-        printf("%s\n", o.str().c_str());
     }
     g_shutdown = true;                     // 让后台活儿看到"要退了"，别再碰全局
     // 控制面已停 → 与 embedded 完全相同的协作收尾（播放/采集/预解码/扫描/写回/后台任务）
