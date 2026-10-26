@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: 应用内一键反馈（推荐）
+    url: https://github.com/BH2VOQ/RLPlayer-Mac/issues
+    about: App 内「设置 → 诊断 → 发送反馈」会自动附上诊断包，比手填更快
+  - name: 安全问题
+    url: https://github.com/BH2VOQ/RLPlayer-Mac/blob/main/SECURITY.md
+    about: 安全漏洞请不要开公开 issue，走私下报告渠道

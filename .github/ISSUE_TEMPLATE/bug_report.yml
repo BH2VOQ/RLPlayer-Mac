@@ -1,0 +1,88 @@
+name: Bug 报告
+description: 报告一个可复现的问题
+title: "[Bug] "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        感谢反馈。**请尽量填全**——缺信息往往无法定位。
+
+        > 更省事的方式：App 内 **设置 → 诊断 → 发送反馈**，会自动附上诊断包。
+
+  - type: input
+    id: version
+    attributes:
+      label: RLPlayer 版本
+      description: 侧边栏底部或「设置 → 诊断」里可见
+      placeholder: 例：1.1.0-beta
+    validations:
+      required: true
+
+  - type: input
+    id: system
+    attributes:
+      label: 系统与芯片
+      placeholder: 例：macOS 15.2 / Apple M4
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: 复现步骤
+      placeholder: |
+        1. 打开 ...
+        2. 点击 ...
+        3. 出现 ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: 期望结果
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: 实际结果
+      description: 有报错原文就贴原文，不要转述
+    validations:
+      required: true
+
+  - type: dropdown
+    id: backend
+    attributes:
+      label: 输出后端
+      options:
+        - CoreAudio 独占（Hog）
+        - CoreAudio 共享
+        - DoP（DSD over PCM）
+        - UPnP 投放
+        - 未播放 / 与输出无关
+        - 不确定
+
+  - type: input
+    id: source
+    attributes:
+      label: 出问题的曲目格式
+      description: 例：FLAC 96k/24bit、DFF、DSF、MP3
+      placeholder: 例：FLAC 96k/24bit
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: 诊断包或日志
+      description: 设置 → 诊断 → 导出诊断包后拖进来；或直接描述现象
+      render: text
+
+  - type: checkboxes
+    id: confirm
+    attributes:
+      label: 确认
+      options:
+        - label: 我已确认这是最新版本仍存在的问题
+          required: true
+        - label: 我已搜索过现有 issue，没有重复
+          required: true

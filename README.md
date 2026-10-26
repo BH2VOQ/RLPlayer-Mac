@@ -5,7 +5,7 @@
 macOS 上的高保真播放引擎：升频、噪声整形、SDM/DSD 调制、卷积与 20 段 PEQ 全链路自研，每一步都给出可复现的实测数字。
 
 [![Platform](https://img.shields.io/badge/platform-macOS%2013%2B%20%C2%B7%20arm64-lightgrey)](#系统要求)
-[![Version](https://img.shields.io/github/v/release/BH2VOQ/RLPlayer-Mac?label=version)](https://github.com/BH2VOQ/RLPlayer-Mac/releases)
+[![Version](https://img.shields.io/github/v/release/BH2VOQ/RLPlayer-Mac?label=version&include_prereleases)](https://github.com/BH2VOQ/RLPlayer-Mac/releases)
 [![Tests](https://img.shields.io/badge/ctest-87%2F87-brightgreen)](#测试)
 
 ![RLPlayer 主界面：专辑网格与底栏播放控制](docs/images/ui-albums.png)
@@ -206,6 +206,9 @@ Metal 内核（`librtagpu.dylib`，运行时编译 MSL）**动态加载**：`dlo
 | [HANDOVER.md](HANDOVER.md) | 架构、构建方式、踩过的坑 |
 | [docs/](docs/) | 各模块实测纪要与调研 |
 | [debug/](debug/) | 每轮 DEBUG 档案：根因、判据、挂账 |
+| [CONTRIBUTING.md](CONTRIBUTING.md) | 贡献指南：构建、门禁、提交规范、不接受什么 |
+| [SECURITY.md](SECURITY.md) | 安全问题私下报告渠道与已知设计边界 |
+| [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) | 行为准则 |
 
 ---
 
