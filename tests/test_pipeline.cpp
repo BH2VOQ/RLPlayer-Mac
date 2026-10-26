@@ -43,7 +43,12 @@ static int run_tests() {
     //    ⟹ 退出码 0xC0000409（STATUS_STACK_BUFFER_OVERRUN）。CI 日志里连一行输出都没有，
     //    极易被误判成"栈缓冲区越界 / 真实 UB"。根因只是"测试把本机路径当成了事实"。
     // 修法：运行期创建目录，用相对当前工作目录的 ASCII 路径（ctest 的 cwd 就是 build/）。
-    const std::string dir = "testdata\\";
+    // 2026-10-26（mac 单平台收口）：原来是 "testdata\\"（Windows 分隔符）。POSIX 上 '\' 是**合法文件名字符**，
+    //   于是它在 build-mac/ 下建出一个**文件名就叫** `testdata\rt24.wav` 的普通文件，而不是 `testdata/` 目录。
+    //   后果：每次跑测试都在仓库里留一个 `testdata\rt24.wav` 垃圾文件（已被 .gitignore 外的 untracked 看见），
+    //   而 `create_directories("testdata\\")` 在 POSIX 上"成功"返回 ⟹ 判据永远是绿的，没人发现。
+    //   改用 '/': POSIX 唯一正确写法，且 Windows 也接受 '/'（C 运行期会归一），两边都能跑。
+    const std::string dir = "testdata/";
     {
         std::error_code ec;
         std::filesystem::create_directories(dir, ec);

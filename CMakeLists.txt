@@ -555,6 +555,13 @@ if(APPLE)
 endif()
 add_test(NAME album_cover COMMAND test_album_cover ${CMAKE_SOURCE_DIR})
 
+# F-1 封面抓取纯逻辑（上游 c41ce97 的 mac 重做）：目录穿越 / Dice 负向对照 / 图片头校验 / 负缓存过期。
+#   判据全部离线（不联网、不开设备、不写用户目录），不需要 ffmpeg 与真实曲库。
+#   include 路径要加 tools/ —— cover_fetch.h 在 tools/ 下（与 naa_discover.h 同一口径）。
+add_executable(test_cover_fetch tests/test_cover_fetch.cpp)
+target_include_directories(test_cover_fetch PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tools)
+add_test(NAME cover_fetch COMMAND test_cover_fetch)
+
 # F-2 音频体检（上游 8001dbb + 99dd012，mac 移植：health_store 文件 IO 按 POSIX 重写）
 add_executable(test_dynamics tests/test_dynamics.cpp)
 target_include_directories(test_dynamics PRIVATE ${CMAKE_SOURCE_DIR}/src)
@@ -661,6 +668,27 @@ target_link_libraries(test_gpu_metal PRIVATE ${CMAKE_DL_LIBS})
 add_test(NAME gpu_metal COMMAND test_gpu_metal)
 # dylib 定位：测试自己用 __FILE__ 反推仓库根（ctest 的 cwd 是 build-mac，不是仓库根），
 # 不需要额外环境变量；也可 `test_gpu_metal <path-to-librtagpu.dylib>` 显式指定。
+
+# ---------------- 2026-10-26：GPU 卷积逐块流式正确性（IR 拖尾丢失 BUG 回归）----------------
+# 判据：δ@0/IR=65536/16×4096 必须每一块都有输出（修前只有第 0 块有，65410/65536 样点错，
+#       相对 RMS −1.63 dB）；GPU 逐块 vs CPU StreamingConvolver ≤ −120 dB；换 IR 清历史；
+#       irLen=1/2/512/1024/2048 边界；2 声道历史隔离；GPU 不可用回落 CPU 逐样点相同。
+# 缺 librtagpu.dylib 时打印 [SKIP] 而非假绿（铁律 4）。
+add_executable(test_gpu_conv_streaming tests/test_gpu_conv_streaming.cpp)
+target_link_libraries(test_gpu_conv_streaming PRIVATE rtadsp)
+add_test(NAME gpu_conv_streaming COMMAND test_gpu_conv_streaming)
+
+# ---------------- 2026-10-26：GPU 精度实测（F-6，mac / Metal 口径）----------------
+# 探针：手动跑，不进 ctest（打印整张矩阵，依赖本机 GPU；无卡机器 exit 2）
+add_executable(gpu_precision tools/gpu_precision.cpp)
+target_include_directories(gpu_precision PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(gpu_precision PRIVATE ${CMAKE_DL_LIBS})
+
+# 门禁：把本机实测阈值固化（缺 dylib / GPU 不可用 → [SKIP] + return 0，不算失败）
+add_executable(test_gpu_precision tests/test_gpu_precision.cpp)
+target_include_directories(test_gpu_precision PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(test_gpu_precision PRIVATE ${CMAKE_DL_LIBS})
+add_test(NAME gpu_precision COMMAND test_gpu_precision)
 
 # ---------------- 2026-10-26：WebUi 传输层安全加固测试 ----------------
 add_executable(test_webui_hardening tests/test_webui_hardening.cpp)

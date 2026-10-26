@@ -27,6 +27,7 @@
 #include <string>
 #include <algorithm>
 #include <memory>
+#include <cstring>            // GpuConvStream::ir_signature 用 std::memcpy 取 double 的位模式
 
 namespace rta::engine {
 
@@ -112,6 +113,98 @@ struct PipelineStats {
     size_t   coeffBytes = 0;
 };
 
+// ============================================================================
+// GpuConvStream —— GPU 卷积的 overlap-save 流式包装（【每声道一份】）
+// ============================================================================
+// 为什么必须有它（2026-10-26 实测的生产正确性 BUG）：
+//   rta_gpu_convolve（src/gpu/gpu_metal.mm:419-531）是【无状态整块卷积】——
+//   每次调用只算 conv(本块输入, ir)，从零状态开始。而管线按一块（~4096 样）逐块调用它，
+//   且每块的 w 都是新的 ⟹「上一块输入 × 本块 IR 的尾巴」这一项没有任何地方被计算。
+//   实测（δ 在样点 0 / IR=65536 / 16 块 × 4096）：只有第 0 块有输出，
+//   65409/65536 个样点与真值不符，相对 RMS −1.63 dB（等效 0.3 bit）。
+//   即 irLen > 块长时丢掉 1 − 块长/irLen 的 IR 能量（房间校正 IR 动辄 65536~262144）。
+//   对照：CPU 路径用持久 dsp::StreamingConvolver（ss_.conv[c]），跨块保状态，所以正确。
+//
+// 修法 = overlap-save，但【不是】攒够 irLen 再算（那会引入 irLen 帧延迟，实时不可用）：
+//   把 [上一块输入末尾 irLen-1 样 | 本块 w] 拼成一段连续输入，喂给无状态卷积，
+//   只取输出的【末尾 w.size() 个样点】。拼接输入里已经含有真实的跨块历史，
+//   所以这一段输出就是「含拖尾的正确因果卷积值」⟹ 算法延迟仍为 0，与修前一致。
+//
+// 关键不变量（改这段之前先读）：
+//   * 每声道一份实例：管线是在【按声道循环】里做卷积的，共用一份会把 L/R 历史搅在一起
+//   * irLen ≤ 1 ⟹ 历史长度 0，退化成整块卷积，必须照常工作
+//   * IR 变了（长度不同，或抽样指纹不同）⟹ 旧历史全部作废，必须从零开始
+//   * 缓冲常驻复用，IR=262144 时约 2×2.1 MB/声道；不许每块重新分配
+//
+// ⚠️ 关于「IR 变了」的判据强度（如实挂账，铁律 4）：
+//   现行架构下 cfg_ 在 Pipeline 生命周期内是 const，IR 内容不可能中途改；
+//   换 IR 只能靠新 Pipeline（⟹ 新 ss_ ⟹ 新 gconv）或 prepare_stream（⟹ ss_ 整体重置），
+//   两条路都已经天然清空历史。这里再加一道**抽样指纹**作为纵深防御，
+//   它抓得住真实换 IR 场景（长度变化、内容变化），但不是密码学意义的全量校验 ——
+//   若将来有人让 cfg_ 可变且恰好只改了未被抽到的中间样点，这道网会漏。
+struct GpuConvStream {
+    size_t irLen = 0;          // 当前历史对应的 IR 长度；0 = 无历史（新实例 / 已清空）
+    uint64_t irSig = 0;        // 抽样指纹（见 ir_signature），用来发现"同长度换 IR"
+    std::vector<double> in;    // 常驻：[0, irLen-1) 是历史，其后接本块输入（复用缓冲）
+    std::vector<double> out;   // 拼接输出的 scratch（只取末尾 w.size() 个，复用缓冲）
+
+    void clear() { irLen = 0; irSig = 0; in.clear(); out.clear(); }
+
+    // 抽样指纹：首尾各 8 个 + 最多 48 个等距点。O(64)，与 IR 长度无关。
+    static uint64_t ir_signature(const std::vector<double>& ir) {
+        auto mix = [](uint64_t h, double v) {
+            uint64_t b;
+            std::memcpy(&b, &v, sizeof b);
+            h ^= b + 0x9E3779B97F4A7C15ull + (h << 6) + (h >> 2);
+            return h;
+        };
+        uint64_t h = 0xC0FFEEull ^ (uint64_t)ir.size();
+        const size_t n = ir.size();
+        const size_t head = n < 8 ? n : 8;
+        for (size_t i = 0; i < head; ++i) h = mix(h, ir[i]);
+        const size_t tail = (n > 8) ? ((n - 8 < 8) ? n - 8 : 8) : 0;
+        for (size_t i = n - tail; i < n; ++i) h = mix(h, ir[i]);
+        if (n > 16) {
+            const size_t pts = (n / 3 < 48) ? n / 3 : 48;
+            for (size_t k = 1; k <= pts; ++k) h = mix(h, ir[(n / 3) * k / pts]);
+        }
+        return h;
+    }
+
+    // 成功返回 true。返回 false = GPU 调用失败（此时本对象已清空，调用方应退回 CPU）。
+    bool process(const dsp::GpuBridge& gb, std::vector<double>& w,
+                 const std::vector<double>& ir, int block) {
+        const size_t n = w.size();
+        if (n == 0) return true;
+        if (ir.empty()) return false;                 // 没 IR 不该走到这里
+        const size_t H = ir.size() - 1;               // overlap-save 需要的输入历史长度
+        const uint64_t sig = ir_signature(ir);
+        if (irLen != ir.size() || irSig != sig) {     // IR 换了 ⟹ 旧历史一律作废
+            irLen = ir.size();
+            irSig = sig;
+            in.assign(H, 0.0);
+        }
+        in.resize(H + n);
+        std::copy(w.begin(), w.end(), in.begin() + (std::ptrdiff_t)H);
+        out.assign(H + n, 0.0);
+        if (gb.convolve(in.data(), in.size(), ir.data(), ir.size(),
+                        out.data(), block) != 0) {
+            clear();                                  // 失败 ⟹ 历史不可信，清掉
+            return false;
+        }
+        // overlap-save 的正确截取：拼接输入的第 H 样对应本块第 0 样
+        for (size_t i = 0; i < n; ++i) w[i] = out[H + i];
+        if (H) {
+            // 新历史 = 拼接输入的最后 H 个样点（即 in[n .. n+H)）。
+            // std::copy 允许 d_first < first 的重叠（等价 memmove 左移）。
+            std::copy(in.begin() + (std::ptrdiff_t)n,
+                      in.begin() + (std::ptrdiff_t)(n + H), in.begin());
+            in.resize(H);                             // 只留历史，等下一块接上
+        }
+        return true;
+    }
+};
+
 class Pipeline {
 public:
     explicit Pipeline(const PipelineConfig& cfg) : cfg_(cfg) {}
@@ -151,6 +244,9 @@ public:
         for (auto& l : ss_.loud) if (l) l->reset();
         // 2026-10-25：延迟线改持久后，跳转也必须清历史（否则跳转后先吐出上一个位置的尾巴）
         for (auto& d : ss_.delay) d.reset();
+        // 2026-10-26：GPU 卷积的 overlap-save 历史同理 —— 跳转后不许把上一位置的
+        // 输入尾巴卷进新位置的输出（否则开头 irLen-1 个样点全是脏的）。
+        for (auto& g : ss_.gconv) g.clear();
     }
 
     bool willBeBitPerfect(const AudioBuffer& in) const {
@@ -318,13 +414,23 @@ public:
                     auto& gb = dsp::GpuBridge::instance();
                     st.gpuStatus = gb.status();
                     if (gb.available()) {
-                        std::vector<double> tmp(w.size(), 0.0);
-                        if (gb.convolve(w.data(), w.size(), cp.ir.data(), cp.ir.size(),
-                                        tmp.data(), (int)cfg_.convBlock) == 0) {
-                            w.swap(tmp);
+                        // ★ 2026-10-26 真 BUG 修复（GPU 卷积逐块丢失 IR 拖尾）：
+                        //   旧代码直接 gb.convolve(w, ...) —— 而 rta_gpu_convolve 是
+                        //   【无状态整块卷积】，每块只算 conv(本块, ir)，且 w 每块都是新的
+                        //   ⟹「上一块输入 × 本块 IR 尾巴」从来没被算过。IR 长于块长时
+                        //   丢掉 1−块长/irLen 的 IR 能量（实测 IR=65536/块=4096 时
+                        //   65409/65536 个样点错，相对 RMS −1.63 dB，只有第 0 块有输出）。
+                        //   改用每声道的 overlap-save 包装：拼接 [历史 | 本块] 后只取
+                        //   输出的末尾 w.size() 样 ⟹ 因果卷积正确，且算法延迟仍为 0。
+                        if ((size_t)c >= ss_.gconv.size()) ss_.gconv.resize((size_t)outCh);
+                        GpuConvStream& gcs = ss_.gconv[(size_t)c];
+                        if (gcs.process(gb, w, cp.ir, (int)cfg_.convBlock)) {
                             done = true;
                             st.usedGpuConvolution = true;
                         }
+                        // 失败：gcs.process 内部已清空历史，落到下面 CPU 路径重算本块。
+                        // （该块因此少了一次 GPU 的历史推进 —— 但 CPU 路径自己也有完整
+                        //   持久状态，所以输出仍然正确；见 ss_.conv[c] 分支。）
                     }
                 }
                 if (done) {
@@ -418,6 +524,9 @@ private:
         std::vector<std::unique_ptr<dsp::Loudness>> loud;             // 每声道（各自持有滤波状态）
         // 每输出声道延迟线（2026-10-25 修复：原先每块新建 ⟹ 每块丢 delaySamples 个样本）
         std::vector<dsp::DelayLine> delay;
+        // 每输出声道 GPU 卷积的 overlap-save 历史（2026-10-26 修复：无状态 GPU 卷积
+        // 逐块调用会丢掉 IR 拖尾）。必须每声道独立，且随 prepare_stream 重建 / seek_reset 清空。
+        std::vector<GpuConvStream> gconv;
         double prepareMs = 0.0;      // prepare_stream() 耗时（滤波器设计 + 状态分配）
         size_t coeffBytes = 0;       // 重采样器系数表字节数（多相 L × 每相抽头 × 8）
     };
@@ -457,6 +566,9 @@ private:
         ss_.conv.resize((size_t)outCh);      // unique_ptr 不可拷贝，不能用 assign(n, nullptr)
         // 延迟线按输出声道各一条（长度在首次 process 时按 cfg_.channel[c].delaySamples 定长）
         ss_.delay.assign((size_t)outCh, dsp::DelayLine{});
+        // GPU 卷积历史按输出声道各一份（prepare_stream 里 ss_ = StreamState{} 已清空过，
+        // 这里再显式分配，保证声道数与 outCh 对齐、历史从零开始）
+        ss_.gconv.assign((size_t)outCh, GpuConvStream{});
 
         ss_.loud.clear();
         if (cfg_.loudnessEnabled) {
