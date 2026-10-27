@@ -112,18 +112,15 @@ public:
         if (listenFd_ >= 0) {
             ::shutdown(listenFd_, SHUT_RDWR);
             ::close(listenFd_);
-            listenFd_ = -1;
         }
         if (thread_.joinable()) {
             thread_.join();
         }
+        listenFd_ = -1; // 只在 accept 线程退出后写，避免并发读取产生数据竞争。
         {
             std::lock_guard<std::mutex> lk(clientMtx_);
-            for (int fd : clientFds_) {
-                ::shutdown(fd, SHUT_RDWR);
-                ::close(fd);
-            }
-            clientFds_.clear();
+            // fd 由对应 worker 唯一 close；这里仅 shutdown 唤醒，不能双重 close。
+            for (int fd : clientFds_) ::shutdown(fd, SHUT_RDWR);
         }
         // 等待所有 client worker 退出
         std::unique_lock<std::mutex> lk(workerMtx_);
@@ -173,6 +170,8 @@ private:
 
     void handleClient(int cfd) {
         // 读取请求直到 \r\n\r\n
+        int noSigPipe = 1;
+        ::setsockopt(cfd, SOL_SOCKET, SO_NOSIGPIPE, &noSigPipe, sizeof(noSigPipe));
         std::string reqBuf;
         char buf[1024];
         while (running_) {
@@ -331,7 +330,11 @@ int main() {
         while (!threadStarted) {
             std::this_thread::sleep_for(std::chrono::milliseconds(5));
         }
-        // 让请求发出并在网络层建立连接并阻塞等待响应
+        // 以服务端实际接收为握手，不用 threadStarted + sleep 假定网络请求已发出。
+        const auto acceptedDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+        while (srv.requestCount() == 0 && std::chrono::steady_clock::now() < acceptedDeadline)
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        ck(srv.requestCount() > 0, "取消前服务端已接受真实连接");
         std::this_thread::sleep_for(std::chrono::milliseconds(200));
 
         // 触发取消
