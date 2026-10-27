@@ -8,8 +8,8 @@
 set -u
 
 PORT=19108
-BASE_DIR="/tmp/rlw/i8"
-RUN_DIR="${BASE_DIR}/run8"
+BASE_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+RUN_DIR="${BASE_DIR}/debug/20261027-04-实测反馈7条/b8-quitfast/run"
 BIN="${BASE_DIR}/build-mac/rtaweb"
 TARGET_AIFF="/Users/august/Music/Music/Media.localized/Music/LOSE/爱上火车OST/原野绽芳华.aiff"
 MAX_ELAPSED=1.5

@@ -10157,6 +10157,17 @@ static void core_init_common() {
 // 顺序不能动：播放线程可能还在 prefetch/写 ps，采集线程可能还在摸 CoreAudio，
 // 扫描线程持有 Library 的 th_（joinable 的析构 = terminate → mac .app 实测 SIGABRT）。
 static void core_shutdown_common() {
+    // 退出观测（2026-10-27 B-8）：这行原来只在 cli_main() 里打，而 .app 走的是
+    // stop_embedded() → 本函数，**绕过了它** ⟹ 用户在 .app 里遇到「关闭卡顿」时
+    // 日志里什么都没留下（这正是这个问题一直没被定位到的原因之一）。移到这里，
+    // 两条路径（CLI / embedded）都有同一份观测。
+    {
+        std::ostringstream o;
+        o << "SHUTDOWN joinable: player=" << (g_ps.th.joinable() ? 1 : 0)
+          << " prefetch=" << (g_pre.th.joinable() ? 1 : 0)
+          << " scan=" << (g_wb.th.joinable() ? 1 : 0);
+        play_log(o.str());
+    }
     g_ps.stopJoin();        // 原子停播放线程（协作：置 stop 让 queue_thread 自己退）
     g_inputSession.stop();  // 停采集（同样协作）
     // 预解码槽：只在播放线程停掉之后才安全 join（queue_thread 是唯一会起它的地方）
@@ -10178,12 +10189,18 @@ static void core_shutdown_common() {
     // detached 的后台任务（元数据补全 / 资料整理）：有界等待，收不完就如实记日志。
     // 预算设为 1200ms（任务项 B），超时时记录已等待毫秒数与剩余数
     const auto tWait0 = std::chrono::steady_clock::now();
-    if (!bg_jobs_wait(std::chrono::milliseconds(1200))) {
-        const auto tWaitMs = std::chrono::duration_cast<std::chrono::milliseconds>(
-            std::chrono::steady_clock::now() - tWait0).count();
+    const bool bgDone = bg_jobs_wait(std::chrono::milliseconds(1200));
+    const auto tWaitMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - tWait0).count();
+    // 无论成败都留一行（B-8）：成功也打，否则「没超时」与「根本没走到这里」在日志里无法区分。
+    if (bgDone) {
+        play_log("SHUTDOWN 后台任务已全部收完（等待 " + std::to_string(tWaitMs) + "ms）");
+    } else {
         const int left = g_bgJobs.load();
-        play_log("SHUTDOWN 后台任务已在 1.2s 内取消并等待，仍有 " + std::to_string(left) + " 个未收完（已等待 " + std::to_string(tWaitMs) + "ms）");
-        printf("!! 退出时仍有 %d 个后台任务未收完（已在 1.2s 内取消并等待 %lldms，已在日志记录）\n", left, (long long)tWaitMs);
+        play_log("SHUTDOWN 后台任务已在 1.2s 内取消并等待，仍有 " + std::to_string(left) +
+                 " 个未收完（已等待 " + std::to_string(tWaitMs) + "ms）");
+        printf("!! 退出时仍有 %d 个后台任务未收完（已在 1.2s 内取消并等待 %lldms，已在日志记录）\n",
+               left, (long long)tWaitMs);
     }
 }
 
@@ -10370,13 +10387,8 @@ int rlapp::cli_main(int argc, char** argv) {
     ui.stop();
     g_httpListening.store(false);
     // ---- 2026-10-25：退出崩溃取证 + 收尾（上游 6bd21a6）----
-    {
-        std::ostringstream o;
-        o << "SHUTDOWN joinable: player=" << (g_ps.th.joinable() ? 1 : 0)
-          << " prefetch=" << (g_pre.th.joinable() ? 1 : 0)
-          << " scan=" << (g_wb.th.joinable() ? 1 : 0);
-        play_log(o.str());
-    }
+    // 2026-10-27（B-8）：`SHUTDOWN joinable:` 那行已移进 core_shutdown_common()，
+    // 让 CLI 与 .app（embedded）两条退出路径都有同一份观测；这里不再重复打印。
     g_shutdown = true;                     // 让后台活儿看到"要退了"，别再碰全局
     // 控制面已停 → 与 embedded 完全相同的协作收尾（播放/采集/预解码/扫描/写回/后台任务）
     core_shutdown_common();

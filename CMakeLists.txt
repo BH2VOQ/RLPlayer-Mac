@@ -280,6 +280,15 @@ add_executable(test_update_check tests/test_update_check.cpp)
 target_link_libraries(test_update_check PRIVATE rtadsp)
 add_test(NAME update_check COMMAND test_update_check)
 
+# B-8：真实回环慢 HTTP 的取消/线程隔离/嵌套作用域验证，不访问外网或音频设备。
+if(APPLE)
+  add_executable(test_http_cancel tests/test_http_cancel.cpp)
+  target_include_directories(test_http_cancel PRIVATE ${CMAKE_SOURCE_DIR}/src)
+  target_link_libraries(test_http_cancel PRIVATE ${RL_PLATFORM_LIBS})
+  add_test(NAME http_cancel COMMAND test_http_cancel)
+  set_tests_properties(http_cancel PROPERTIES TIMEOUT 30)
+endif()
+
 add_executable(test_resampler tests/test_resampler.cpp)
 target_link_libraries(test_resampler PRIVATE rtadsp)
 add_test(NAME resampler COMMAND test_resampler)
