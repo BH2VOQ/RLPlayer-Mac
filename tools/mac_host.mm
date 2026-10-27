@@ -1240,16 +1240,31 @@ reject:
             (long long)([[NSDate date] timeIntervalSince1970] * 1000));
 }
 - (BOOL)windowShouldClose:(NSWindow *)sender {
+    (void)sender;
     fprintf(stderr, "RLPlayer: 窗口请求关闭 t=%lld\n",
             (long long)([[NSDate date] timeIntervalSince1970] * 1000));
-    // 2026-10-28 用户实测「点关闭后窗口画面还停留一会儿」。
-    // 实测（CGWindowList 轮询）：进程 0.22s 就没了，但窗口真正从屏幕消失要 **0.50s**。
-    // 也就是说用户看到的"卡"是窗口消失这一步，不是核心收尾。
-    // 这里在**最早**能介入的点（用户点红叉）就把窗口从屏幕移除，让画面立刻消失；
-    // 随后 AppKit 终止流程照常做安全收尾。只 orderOut，绝不 release/close WebView
-    //（那样实测 SIGSEGV：退出阶段 WebKit 已在自毁，再动它会和 WebContent 回调竞争）。
-    [sender orderOut:nil];
-    return YES;
+    // ⚠️ 2026-10-28 严重回归教训（beta3 用户实测：「点完叉，音乐还在播」「卡死」）：
+    //   这里曾经调 [sender orderOut:nil] 想让窗口"立刻消失"。结果窗口被 orderOut 之后，
+    //   AppKit 不再把它当作「最后一个窗口已关闭」⟹ applicationShouldTerminateAfterLastWindowClosed
+    //   **永远不触发** ⟹ 进程不终止 ⟹ 音乐继续播、程序挂在那里 = 用户看到的卡死。
+    //   而且当初加它的理由是错的：实测加了 orderOut 窗口消失仍是 0.45~0.50s，一无收益。
+    //   ⟹ 绝不在这里动窗口生命周期；要「点叉即静音」就在下面直接停播放。
+
+    // 点叉的**第一时间**停播放（而不是等 applicationWillTerminate 里的 stop_embedded）。
+    // 走公开的 dispatch 入口调 /api/stop：它内部是 ps.stopJoin()，协作停播放线程并关流，
+    // 不会像 orderOut 那样破坏 AppKit 的关窗/终止判定。失败也不影响后续正常收尾。
+    {
+        rta::net::HttpRequest stopReq;
+        stopReq.method = "POST";
+        stopReq.path = "/api/stop";
+        std::string stopCt;
+        (void)rlapp::dispatch(stopReq, stopCt);
+        fprintf(stderr, "RLPlayer: 关窗时已停播放 t=%lld\n",
+                (long long)([[NSDate date] timeIntervalSince1970] * 1000));
+    }
+    // 尽早置退出标志：拒绝新工作、取消在途网络（真正的 join 仍在 applicationWillTerminate）
+    rlapp::request_shutdown();
+    return YES;      // 让 AppKit 走正常的 关窗 → 终止 流程
 }
 
 - (void)applicationWillTerminate:(NSNotification *)n {
@@ -1275,10 +1290,26 @@ reject:
     // 2. 停新请求来源，并等待**已派发**的 scheme worker 全部退出核心（_activeWorkers == 0）
     // applicationWillTerminate 是通知，不是可否退出的询问；return 并不能阻止 exit。
     // 诊断超时后继续等业务排空，绝不带着还访问核心的 worker 进入静态析构。
+    // worker 排空同样给硬上限（2026-10-28 用户实测「退出太慢、卡死」）：
+    // 原来这里是**无限循环**等 _activeWorkers 归零。只要有一个 worker 卡在不可取消的
+    // 阻塞调用里（出站连接 / ffmpeg / 文件系统），进程就永远退不出去 = 用户看到的卡死。
+    // 现在：最多等 kWorkerDrainHardCapMs，超时走 _exit(0) —— 不跑静态析构，
+    // 因而不存在「返回后析构、worker 还在摸核心」的 UAF；也不是 force-kill（进程自己退）。
+    static const long long kWorkerDrainHardCapMs = 3000;
     if (![self.schemeHandler waitForInFlightTasksWithTimeout:1.0]) {
-        while (![self.schemeHandler waitForInFlightTasksWithTimeout:1.0]) {
+        while (![self.schemeHandler waitForInFlightTasksWithTimeout:0.5]) {
+            const long long waited = msSince();
             fprintf(stderr, "RLPlayer: 退出仍在等待 %d 个业务 worker 安全结束 t=%lldms\n",
-                    [self.schemeHandler activeWorkersCount], msSince());
+                    [self.schemeHandler activeWorkersCount], waited);
+            if (waited >= kWorkerDrainHardCapMs) {
+                fprintf(stderr,
+                        "RLPlayer: 退出达到硬上限 %lldms，仍有 %d 个 worker 未结束 ⟹ _exit(0) 直接结束"
+                        "（不跑静态析构）\n",
+                        kWorkerDrainHardCapMs, [self.schemeHandler activeWorkersCount]);
+                fflush(stdout);
+                fflush(stderr);
+                std::_Exit(0);
+            }
         }
     }
     fprintf(stderr, "RLPlayer: 退出 worker 已排空 t=%lldms\n", msSince());

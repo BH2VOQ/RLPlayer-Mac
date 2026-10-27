@@ -10351,6 +10351,16 @@ static void core_shutdown_common() {
     // 绝不在还有 detached 任务读 MetaStore / 锁时返回去析构单例（防止 UAF）。
     const auto tWait0 = std::chrono::steady_clock::now();
     bool budgetWarned = false;
+    // ⚠️ 2026-10-28 用户实测「退出太慢、还会卡死」的根治点：
+    //   之前这里是**无限等**（宁可挂住也不提前返回）。挂住的原因很现实：某些后台任务
+    //   卡在不可取消的阻塞调用里（出站连接、ffmpeg、文件系统），永远等不到归零 ⟹ 进程
+    //   再也退不出去，用户看到的就是「点完叉没反应 / 卡死」。
+    //   现在：给等待一个**硬上限**；超时后用 _exit(0) 直接结束进程：
+    //     * _exit 不跑静态析构 ⟹ 不存在“返回后析构、而线程还在访问单例”的 UAF 风险；
+    //     * 又不像 force-kill 那样粗暴（这是进程自己决定退出，退出码 0）；
+    //     * 用户侧表现为「最多卡 kBgWaitHardCapMs，然后一定退掉」，而不是永远挂住。
+    static constexpr long long kBgWaitHardCapMs = 2500;
+    bool hardCapHit = false;
     while (g_bgJobs.load() > 0) {
         if (!bg_jobs_wait(std::chrono::milliseconds(200))) {
             const auto tWaitMs = std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -10360,10 +10370,22 @@ static void core_shutdown_common() {
                 const int left = g_bgJobs.load();
                 play_log("SHUTDOWN 后台任务超过诊断预算 1.2s（剩余 " + std::to_string(left) +
                          " 个未归零，已等待 " + std::to_string(tWaitMs) + "ms），继续等待归零以防 UAF");
-                printf("!! 退出时后台任务超过 1.2s 预算仍有 %d 个未收完（已等待 %lldms，继续等待以防 UAF）\n",
+                printf("!! 退出时后台任务超过 1.2s 预算仍有 %d 个未收完（已等待 %lldms，继续等待到硬上限）\n",
                        left, (long long)tWaitMs);
             }
+            if (tWaitMs >= kBgWaitHardCapMs) { hardCapHit = true; break; }
         }
+    }
+    if (hardCapHit) {
+        const int left = g_bgJobs.load();
+        std::ostringstream o;
+        o << "SHUTDOWN 达到硬上限 " << kBgWaitHardCapMs << "ms，仍有 " << left
+          << " 个后台任务未归零 ⟹ 走 _exit(0) 直接结束（不跑静态析构，避免与在途线程竞争）";
+        play_log(o.str());
+        printf("!! %s\n", o.str().c_str());
+        std::fflush(stdout);
+        std::fflush(stderr);
+        std::_Exit(0);      // 不跑 atexit / 静态析构；这是「保证能退」的最后一道闸
     }
     const auto tWaitTotalMs = std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::steady_clock::now() - tWait0).count();
