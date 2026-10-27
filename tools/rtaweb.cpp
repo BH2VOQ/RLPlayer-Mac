@@ -37,6 +37,7 @@
 #include "net/cast_service.h"      // UPnP/DLNA 投放会话编排（CastManager / CastState / CastStartParams）
 #include "net/app_icon.h"
 #include "net/zipstore.h"          // 最小 ZIP(STORE)打包：导出诊断 = 一个压缩包(2026-10-22 功能3)
+#include "net/feedback_redact.h"   // 诊断包脱敏**唯一入口**（F-7 2026-10-27：吸收上游 feedback.h 的规则清单）
 #include "net/http_client.h"       // 封面在线抓取：http_get/http_post（platform/http.h 的平台封装）
 #include "net/json.h"              // /api/lib/cover/prefetch 解析网易 type=10 专辑搜索响应(2026-10-26)
 #include "cover_fetch.h"           // 封面抓取**纯逻辑**（目录穿越/Dice/图片头/负缓存过期，可离线单测）
@@ -60,6 +61,7 @@ class CoreAudioSink;   // 本文件后部定义；render_loop 的 mac 遥测分�
 // 渲染主循环迁到 rta::render 后，本文件的各后端实现继续用短名（历史上就是全局名）
 using rta::render::OutSink;
 using rta::render::SinkOpenOpts;
+#include "analysis/track_health.h"     // F-5：/api/track/health 音质体检（含 quality 19 项）
 #include "meta/enrich.h"            // 单曲元数据补全编排(播放触发 + /api/enrich + /api/meta 兜底)
 #include "meta/writeback.h"         // P2 标签写回(remux + PCM 逐位门禁;/api/writeback 三端点)
 #include "meta/knowledge.h"         // P3 资料层直连与缓存(/api/entity/knowledge)
@@ -5271,6 +5273,41 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
 
     // ---------------- 本地音乐库（专辑 / 艺术家 / 搜索）----------------
     // 设计取向参考 Roon：以「专辑」为一等公民，而不是让用户翻目录树。
+    // ---- 单曲音质体检（F-5 接线；2026-10-27）----
+    // GET /api/track/health?file=<绝对路径>[&force=1]
+    // 返回 track_health_json() 的全部字段（含 quality 19 项）。
+    // 为什么走这个端点而不是让前端自己算：分析是 CPU 密集（DSD 几百 MB），
+    // 必须在服务端跑；前端只负责把数字画出来。
+    // ⚠️ 只读端点：不改文件、不写缓存以外的东西（缓存由 health_store 管）。
+    if (rq.path.rfind("/api/track/health", 0) == 0) {
+        ct = "application/json; charset=utf-8";
+        std::string file;
+        bool force = false;
+        {
+            const size_t q = rq.path.find("?file=");
+            if (q != std::string::npos) {
+                std::string rest = rq.path.substr(q + 6);
+                const size_t amp = rest.find("&force=");
+                if (amp != std::string::npos) {
+                    force = rest.compare(amp + 7, 1, "1") == 0;
+                    rest = rest.substr(0, amp);
+                }
+                file = urlDecode(rest);
+            }
+        }
+        if (file.empty()) return "{\"ok\":false,\"error\":\"未指定文件\"}";
+        if (!valid_utf8(file)) return utf8_path_reject(file);
+        std::error_code ec;
+        if (!fs::exists(fs::u8path(file), ec) || ec)
+            return std::string("{\"ok\":false,\"error\":\"文件不存在\"}");
+        (void)force;   // 缓存策略由 health_store 按 mtime/size 判定，端点不越权清缓存
+        // 文件级入口保证不抛异常（解码失败落 status=error + 人话原因），
+        // 所以这里不需要 try/catch 兜底。
+        const rta::analysis::TrackHealth h = rta::analysis::analyze_file(file);
+        return std::string("{\"ok\":true,\"health\":") +
+               rta::analysis::track_health_json(h) + "}";
+    }
+
     if (rq.path.rfind("/api/lib", 0) == 0) {
         ct = "application/json; charset=utf-8";
         auto& lib = Library::instance();
@@ -8010,8 +8047,9 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
     //   ✓ 自己写几十行：本地头 + 数据 + 中央目录 + EOCD，每文件 CRC32。
     //
     // ★ 红线：包内【绝不能有 api key】。两道保险：
-    //   ① 逐条内容都过 redact_secrets()（复用 logTail 那段 sk- 掩码，另加
-    //      "api_key=..." 整行掩码 —— 诊断 JSON 里没有 key，但 log 理论上可能有）；
+    //   ① 逐条内容都过 redact_secrets()（F-7 2026-10-27 起 = src/net/feedback_redact.h 的
+    //      rta::feedback::redact()，9 条规则，可离线单测；README.txt 自己也过一遍，
+    //      不给任何条目开例外 —— 见该文件头注释与 tests/test_feedback_redact.cpp）；
     //   ② 只挑【已知文件名】，绝不整目录打包（避免把 rlplayer-llm.conf 之类带 key
     //      的配置文件顺手塞进去）。白名单在下面 kFiles 里写死。
     // 2026-10-26（邮件反馈通道）：把诊断包**保存到约定临时目录**，供页面随后把路径
@@ -8092,32 +8130,21 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
     }
     if (rq.path.rfind("/api/diagzip", 0) == 0) {
         ct = "application/zip";
-        // 把 secret 抹掉：整行 api_key=/token=/password= 替换，再把 sk-xxx 抹成 sk-***
-        auto redact_secrets = [](std::string s) {
-            // (a) 整行键值：api_key=..., token=..., password=...
-            for (const char* key : {"api_key=", "apikey=", "token=", "password=", "secret="}) {
-                size_t from = 0;
-                for (;;) {
-                    const size_t hit = s.find(key, from);
-                    if (hit == std::string::npos) break;
-                    size_t e = s.find_first_of(" \t\r\n\"',;", hit + std::strlen(key));
-                    if (e == std::string::npos) e = s.size();
-                    s.replace(hit + std::strlen(key), e - (hit + std::strlen(key)), "***");
-                    from = hit + std::strlen(key) + 3;
-                }
-            }
-            // (b) 散落的 sk-xxxx（DeepSeek / OpenAI 形态）
-            size_t scan = 0;
-            for (;;) {
-                const size_t p2 = s.find("sk-", scan);
-                if (p2 == std::string::npos) break;
-                const bool boundary = (p2 == 0) || !std::isalnum((unsigned char)s[p2 - 1]);
-                size_t e2 = p2 + 3;
-                while (e2 < s.size() && std::isalnum((unsigned char)s[e2])) ++e2;
-                if (boundary && e2 > p2 + 3) { s.replace(p2 + 3, e2 - (p2 + 3), "***"); scan = p2 + 6; }
-                else scan = p2 + 3;
-            }
-            return s;
+        // 把 secret 抹掉 —— ★ F-7（2026-10-27）：这里**只剩一次转发调用**，规则本体在
+        // src/net/feedback_redact.h（纯函数，可离线单测 tests/test_feedback_redact.cpp）。
+        //
+        // 为什么把原来的内联 lambda 换掉：那段只认 5 个 `k=v` 前缀 + 散落的 sk-，
+        // 实测漏掉 v1.1.1 的这四种明文（红证据见 tests/ 与交付报告）：
+        //   ① JSON 形态   {"token": "abcdef123456"}      —— 键后是 `":` 不是 `=`，整条漏
+        //   ② 头形态     Authorization: Bearer eyJ...    —— 不认识 header 名，整条漏
+        //   ③ 家目录     /Users/august/...               —— 完全不做路径归一
+        //   ④ 邮箱       tester@example.com              —— 不做邮箱处理
+        //   另加：旧代码对 sk-live-XXX 只抹掉 "live" 一段，中段仍明文（比不抹更危险）。
+        // 新实现同时补了 github/AWS/Slack 前缀、Cookie 头、裸 Bearer，并去掉误伤
+        // （曲名里的 "token"、COVERBG 的 key=<短缓存键> 都保留）。
+        rta::feedback::RedactStats redactStats;   // 逐包累计：写进 README.txt 证明真的跑过
+        auto redact_secrets = [&redactStats](std::string s) {
+            return rta::feedback::redact(s, &redactStats);
         };
         auto read_all = [](const std::string& path, size_t maxBytes) {
             std::ifstream f(fs::u8path(path), std::ios::binary);
@@ -8149,7 +8176,25 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
                << ",\"gpu\":\"" << jesc(std::string(rta::dsp::GpuBridge::instance().available() ? "可用" : "不可用") +
                                         std::string("(") + rta::dsp::GpuBridge::instance().status() + ")") << "\""
                << ",\"port\":" << g_uiPort
-               << ",\"lan\":" << (g_lanOn ? "true" : "false") << "}";
+               << ",\"lan\":" << (g_lanOn ? "true" : "false")
+               // F-7：把"会脱敏什么"写进包本身，收到包的人不用翻源码就知道边界。
+               // ⚠️ 这里只报规则名/标记，**不报命中数** —— diag.json 是第一个打包的条目，
+               //    此刻后面的日志还没过脱敏，写进来的计数必然是假的。真实计数在 README.txt
+               //    （最后生成，那时 redactStats 才是完整的）。
+               << ",\"redaction\":{\"applied\":true,\"rules\":[";
+            {
+                const auto rules = rta::feedback::redaction_rules();
+                for (size_t i = 0; i < rules.size(); ++i) {
+                    if (i) dj << ",";
+                    dj << "\"" << jesc(rules[i]) << "\"";
+                }
+            }
+            dj << "],\"marker\":\"<redacted>\",\"user_marker\":\"<user>\""
+               << ",\"excluded_files\":[\"rlplayer-llm.conf\",\"KEY.txt\"]"
+               << ",\"note\":\"" << jesc("上面两个文件的内容从不读取、从不打包；本包里所有字符串都过了同一条脱敏函数"
+                                          "（src/net/feedback_redact.h，单测 tests/test_feedback_redact.cpp）") << "\""
+               << "}"      // 关闭 redaction 对象
+               << "}";     // 关闭最外层 diag.json 对象
             rta::zip::Entry e;
             e.name = "rlplayer-diag.json";
             e.data = redact_secrets(utf8_sanitize(dj.str()));
@@ -8220,6 +8265,10 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
             items.push_back(std::move(e));
         }
         // ⑥ 说明文件：让用户/我们打开包就知道怎么用、以及包内容边界
+        //    ★ F-7：脱敏规则清单从 src/net/feedback_redact.h 直接取，不再手写在这段注释里
+        //      —— 否则规则改了文档不跟着改，用户看到的"会脱敏什么"就是骗人的。
+        //      同时把**本包真实命中数**写出来（redactStats 到这里已经累计完所有条目），
+        //      这是"脱敏真的跑过"的硬证据，而不是一句 applied:true。
         {
             std::ostringstream rd;
             rd << "RLPlayer 诊断包\n"
@@ -8234,11 +8283,23 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
                << "  launcher.log            启动器日志（启动横幅/主题/子进程）\n"
                << "  dumps-manifest.txt      崩溃转储文件清单（dump 本体不打包）\n"
                << "  settings-summary.txt    设置摘要（仅白名单键）\n"
-               << "\n安全: 本包含内容已做脱敏处理 —— api_key / token / password 整行值被替换为 ***，\n"
-               << "      散落的 sk-xxxxx 也被掩码。配置文件本体（rlplayer-llm.conf）【不在包内】。\n";
+               << "\n安全: 本包里所有文本都过了同一条脱敏函数（规则见下）。\n"
+               << "      配置文件本体 rlplayer-llm.conf / KEY.txt 【不在包内】，从不读取、从不打包。\n"
+               << "\n脱敏规则（被替换的值写 <redacted>，用户目录名写 <user>；键名与路径结构保留）:\n"
+               << rta::feedback::redaction_summary_zh() << "\n"
+               << "\n本包实际命中统计（为 0 表示这次日志里确实没有可脱敏内容，不是没跑）:\n"
+               << "  prefixed_key=" << redactStats.prefixed_token
+               << "  auth_header=" << redactStats.header_value
+               << "  bearer=" << redactStats.bearer
+               << "  credential_kv=" << redactStats.credential_kv
+               << "  user_path=" << redactStats.user_path
+               << "  email=" << redactStats.email
+               << "  total=" << redactStats.total() << "\n";
             rta::zip::Entry e;
             e.name = "README.txt";
-            e.data = rd.str();
+            // ⚠️ README 自己也要过脱敏：规则清单里不会有命中，但万一用户设置里带路径
+            //    （后续条目名会把路径拼进来）也不该漏。这条调用同时保证"所有条目无一例外"。
+            e.data = redact_secrets(rd.str());
             items.push_back(std::move(e));
         }
         return rta::zip::build(items);

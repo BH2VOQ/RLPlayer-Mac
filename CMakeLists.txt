@@ -683,6 +683,42 @@ add_test(NAME metastore COMMAND test_metastore)
 add_executable(test_enrich tests/test_enrich.cpp)
 target_include_directories(test_enrich PRIVATE ${CMAKE_SOURCE_DIR}/src)
 add_test(NAME enrich COMMAND test_enrich)
+
+# ---------------- 2026-10-27 P1：上游分析类新模块（F-1 / F-2 / F-3 / F-6）----------------
+# 这四条都是**纯离线**（不发网络、不开音频设备），按「功能不能删除」登记进常规测试区。
+# 链接需求差异（实测得出，别想当然）：
+#   · quality        —— 纯头文件，无需额外链接
+#   · quality_ai     —— 走 platform/http.h（llm 调用）⟹ 需要 RL_PLATFORM_LIBS，
+#                       否则 _curl_easy_init / SCDynamicStoreCopyProxies 一堆 undefined
+#   · version_compare—— 同上
+#   · replaygain / dsd_rate_convert —— 纯 DSP，无需额外链接
+add_executable(test_quality tests/test_quality.cpp)
+target_include_directories(test_quality PRIVATE ${CMAKE_SOURCE_DIR}/src)
+add_test(NAME quality COMMAND test_quality)
+
+add_executable(test_quality_ai tests/test_quality_ai.cpp)
+target_include_directories(test_quality_ai PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(test_quality_ai PRIVATE ${RL_PLATFORM_LIBS})
+add_test(NAME quality_ai COMMAND test_quality_ai)
+
+add_executable(test_version_compare tests/test_version_compare.cpp)
+target_include_directories(test_version_compare PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(test_version_compare PRIVATE ${RL_PLATFORM_LIBS})
+add_test(NAME version_compare COMMAND test_version_compare)
+
+add_executable(test_replaygain tests/test_replaygain.cpp)
+target_include_directories(test_replaygain PRIVATE ${CMAKE_SOURCE_DIR}/src)
+add_test(NAME replaygain COMMAND test_replaygain)
+
+add_executable(test_dsd_rate_convert tests/test_dsd_rate_convert.cpp)
+target_include_directories(test_dsd_rate_convert PRIVATE ${CMAKE_SOURCE_DIR}/src)
+add_test(NAME dsd_rate_convert COMMAND test_dsd_rate_convert)
+
+# F-7：诊断包脱敏（纯函数）。A 段故意保留旧实现作永久红基线，谁把 legacy 修好它就变红。
+add_executable(test_feedback_redact tests/test_feedback_redact.cpp)
+target_include_directories(test_feedback_redact PRIVATE ${CMAKE_SOURCE_DIR}/src)
+add_test(NAME feedback_redact COMMAND test_feedback_redact)
+
 add_executable(test_render_loop_dry tests/test_render_loop_dry.cpp)
 target_link_libraries(test_render_loop_dry PRIVATE rtadsp)
 add_test(NAME render_loop_dry COMMAND test_render_loop_dry)

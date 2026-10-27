@@ -1870,13 +1870,15 @@ function openAlbum(k) {
         var tk = (j.tracks || [])[ti] || {};
         playAlbum(j.k, ti, tk.cs, tk.ce);      // cue 曲目：把本轨起止秒一起带上
       };
-      // 2026-10-26（B-3）：专辑页曲目行右键 = 单曲入队（与曲目列表页 :2134 的既有口径统一）。
+      // 2026-10-26（B-3）：专辑页曲目行右键 = 单曲操作菜单。
       // 之前这里**完全没有** oncontextmenu ⟹ 右键是浏览器原生菜单，什么都做不了。
+      // 2026-10-27（F-5）：加入「音质体检」入口。原来的"右键=直接入队"改成菜单，
+      //   入队仍是菜单第一项（老用户的肌肉记忆保留），新增一项不影响任何既有路径。
       e.oncontextmenu = function (ev) {
         ev.preventDefault();
         ev.stopPropagation();
         var tk = (j.tracks || [])[+e.dataset.i] || {};
-        addPathCue(tk.path, tk.cs, tk.ce);
+        trackActionMenu(tk, ev.clientX, ev.clientY);
       };
     });
   });
@@ -2706,7 +2708,7 @@ function renderTracksView() {
     e.oncontextmenu = function (ev) {
       ev.preventDefault();
       var x = sorted[+e.dataset.i] || {};
-      addPathCue(x.path, x.cs, x.ce);
+      trackActionMenu(x, ev.clientX, ev.clientY);
     };
   });
 }
@@ -5474,6 +5476,161 @@ function pollCastState(once) {
     if (!once && wantLoop) _castPollTimer = setTimeout(function () { pollCastState(); }, 1500);
   });
 }
+/* ---------------- 曲目右键菜单（2026-10-27，F-5）----------------
+   为什么要有它：F-5 需要一个「按需看音质」的入口，但曲目行是 7 列网格，
+   再加一列在 1120px 下会挤破（.trow-track 的窄屏媒体查询已经把 bd 列压到 0px）。
+   所以入口放右键菜单：零布局风险，且能顺手把原来的"右键=直接入队"变成可见选项
+   （原来的入队仍然是第一项，老习惯不变）。
+   菜单是绝对定位的临时节点，点任意处/滚动/ESC 都会关掉，不留残留 DOM。 */
+function trackActionMenu(tk, x, y) {
+  var old = D('__tmenu');
+  if (old) old.remove();
+  if (!tk || !tk.path) return;
+  var items = [
+    { k: 'queue', t: '加入播放队列', f: function () { addPathCue(tk.path, tk.cs, tk.ce); } },
+  ];
+  // 音质体检只对真实存在的本地文件有意义（网络曲目后端没有本地路径）
+  if (!/^https?:/i.test(tk.path)) {
+    items.push({ k: 'quality', t: '音质体检…', f: function () { openQualityModal(tk.path); } });
+  }
+  var h = '<div id=__tmenu style="position:fixed;z-index:9999;left:' + (x || 0) + 'px;top:' + (y || 0) + 'px;' +
+          'background:var(--toast);border:1px solid var(--line);border-radius:9px;padding:5px;min-width:150px;' +
+          'box-shadow:0 10px 30px rgba(0,0,0,.45);font-size:12.5px">';
+  items.forEach(function (it, i) {
+    h += '<button data-k="' + it.k + '" style="display:block;width:100%;text-align:left;padding:7px 11px;' +
+         'background:none;border:0;border-radius:6px;color:var(--txt);font-size:12.5px;cursor:pointer">' +
+         esc(it.t) + '</button>';
+  });
+  h += '</div>';
+  var box = document.createElement('div');
+  box.innerHTML = h;
+  var m = box.firstChild;
+  document.body.appendChild(m);
+  // 夹在视口内：右键点太靠右/靠下时不要跑出屏幕
+  var r = m.getBoundingClientRect();
+  if (r.right > innerWidth - 8) m.style.left = Math.max(8, innerWidth - r.width - 8) + 'px';
+  if (r.bottom > innerHeight - 8) m.style.top = Math.max(8, innerHeight - r.height - 8) + 'px';
+
+  var close = function () {
+    if (m && m.parentNode) m.parentNode.removeChild(m);
+    document.removeEventListener('click', close, true);
+    document.removeEventListener('scroll', close, true);
+    document.removeEventListener('keydown', onKey, true);
+  };
+  var onKey = function (e) { if (e.key === 'Escape') close(); };
+  items.forEach(function (it) {
+    var b = m.querySelector('[data-k="' + it.k + '"]');
+    if (b) b.onclick = function (ev) { ev.stopPropagation(); close(); it.f(); };
+  });
+  // capture 阶段挂，保证点"任何地方"（含别的行）都能关，且不会误触行本身的 onclick
+  setTimeout(function () {
+    document.addEventListener('click', close, true);
+    document.addEventListener('scroll', close, true);
+    document.addEventListener('keydown', onKey, true);
+  }, 0);
+}
+
+/* ---------------- 音质体检弹窗（F-5，2026-10-27）----------------
+   数据源：GET /api/track/health?file=<path> → { ok, health:{ …quality:{19 项} } }
+   为什么单独做弹窗：19 项指标塞进列表会把行高撑爆；用户是按需看，不是常驻。
+   口径（铁律 3）：所有数字都来自后端实测，前端**不做任何再计算**，只做单位与色阶。
+   不可用的指标（如 IMD 需双音素材）显示「不适用」+ 原因，绝不显示 0 冒充正常。 */
+var QMODAL = { file: '', req: 0 };
+function qFmt(v, digits, unit) {
+  // 数值守卫（Q-3 的同一口径）：undefined/null/NaN/Infinity 一律回 '-'，不显示 "NaN"
+  if (v === undefined || v === null || typeof v !== 'number' || !isFinite(v)) return '-';
+  return v.toFixed(digits) + (unit || '');
+}
+function qRow(label, val, hint) {
+  return '<div style="display:flex;justify-content:space-between;gap:12px;padding:5px 0;border-bottom:1px solid var(--line)">' +
+         '<span style="color:var(--txt2);font-size:12px">' + esc(label) + '</span>' +
+         '<span style="color:var(--txt);font-size:12px;font-weight:600;font-variant-numeric:tabular-nums">' + val + '</span>' +
+         '</div>' + (hint ? '<div style="color:var(--mut2);font-size:10.5px;padding:2px 0 6px;line-height:1.45">' + esc(hint) + '</div>' : '');
+}
+function qSection(title) {
+  return '<div style="margin:14px 0 4px;font-size:12.5px;font-weight:650;color:var(--acc)">' + esc(title) + '</div>';
+}
+function openQualityModal(file) {
+  if (!file) { toast('没有可分析的曲目'); return; }
+  QMODAL.file = file;
+  var seq = ++QMODAL.req;
+  var base = file.split(/[\\/]/).pop() || file;
+  openModal('音质体检', '<div class=hint>正在分析…（大文件需要几秒，DSD 走流式分块读）</div>' +
+                       '<div class=hint style="margin-top:6px;opacity:.75">' + esc(base) + '</div>');
+  api('/api/track/health?file=' + encodeURIComponent(file)).then(function (j) {
+    if (seq !== QMODAL.req) return;                      // 已切到别的曲目 → 丢弃
+    if (!j || !j.ok) {
+      D('mbody').innerHTML = '<div class=hint style="color:var(--warn)">无法分析：' +
+        esc((j && j.error) || '未知原因') + '</div>';
+      return;
+    }
+    var h = j.health || {};
+    var q = h.quality || {};
+    var s = '';
+    s += '<div class=hint style="margin-bottom:6px">' + esc(base) + ' · ' +
+         esc(String(h.fs || '?')) + ' Hz · ' + esc(String(h.bits || '?')) + ' bit · ' +
+         esc(String(h.channels || '?')) + ' ch · ' + qFmt(h.duration_sec, 1, ' s') + '</div>';
+
+    // 动态与响度（体检原有）
+    s += qSection('响度与动态');
+    s += qRow('响度 (LUFS)', qFmt(h.lufs, 2));
+    s += qRow('动态范围 DR', qFmt(h.dr_db, 2, ' dB'));
+    s += qRow('响度范围 LRA', qFmt(h.lra, 2, ' LU'));
+    s += qRow('峰值', qFmt(h.peak_dbfs, 2, ' dBFS'));
+
+    if (typeof q.available === 'boolean' && !q.available) {
+      s += '<div class=hint style="margin-top:12px;color:var(--warn)">音质指标不可用：' +
+           esc(q.note || '素材不足') + '</div>';
+      D('mbody').innerHTML = s;
+      return;
+    }
+
+    s += qSection('失真');
+    if (q.thdn_available) s += qRow('THD+N', qFmt(q.thdn_db, 2, ' dB') + '（' + qFmt(q.thdn_pct, 3, '%') + '）');
+    else s += qRow('THD+N', '<span style="color:var(--mut2)">不适用（多峰素材）</span>');
+    s += qRow('非谐波残留', qFmt(q.non_tonal_db, 2, ' dB'), '16 个最强谱峰之外的能量占比；音乐素材下是噪声+失真上界');
+    if (q.imd_available) s += qRow('互调失真 IMD', qFmt(q.imd_db, 2, ' dB'));
+    else s += qRow('互调失真 IMD', '<span style="color:var(--mut2)">不适用</span>',
+                   q.imd_note || '需要双音素材');
+
+    s += qSection('噪声');
+    s += qRow('本底噪声', qFmt(q.noise_floor_dbfs, 2, ' dBFS'), '最低 10% 的 100ms 块电平');
+    s += qRow('信噪比', qFmt(q.snr_db, 2, ' dB'));
+    s += qRow('RMS', qFmt(q.rms_dbfs, 2, ' dBFS'));
+
+    s += qSection('频响');
+    s += qRow('频谱重心', qFmt(q.centroid_hz, 0, ' Hz'), '亮度指标');
+    s += qRow('频谱倾斜', qFmt(q.tilt_db_per_oct, 2, ' dB/oct'));
+    s += qRow('95% 滚降点', qFmt(q.rolloff95_hz, 0, ' Hz'));
+    s += qRow('10kHz 以上能量', qFmt(q.hf_ratio_10k_db, 2, ' dB'));
+
+    s += qSection('削波与峰值');
+    s += qRow('削波样本', String(q.clipped_samples == null ? '-' : q.clipped_samples) +
+              '（' + qFmt(q.clipped_pct, 4, '%') + '）');
+    s += qRow('最长连续削波', String(q.longest_clip_run == null ? '-' : q.longest_clip_run) + ' 样本');
+    s += qRow('峰值因子', qFmt(q.crest_db, 2, ' dB'));
+
+    s += qSection('立体声');
+    if (q.stereo) {
+      s += qRow('声道相关', qFmt(q.channel_corr, 3));
+      s += qRow('单声道兼容损失', qFmt(q.mono_loss_db, 2, ' dB'));
+      s += qRow('side/mid', qFmt(q.side_mid_db, 1, ' dB'));
+    } else {
+      s += qRow('立体声', '<span style="color:var(--mut2)">单声道素材</span>');
+    }
+
+    s += qSection('动态细化');
+    s += qRow('P95−P10', qFmt(q.dyn_p95_p10_db, 2, ' dB'), '3 秒块 RMS 分布');
+    s += qRow('动态重心', qFmt(q.dyn_centroid_dbfs, 2, ' dBFS'));
+
+    if (q.note) s += '<div class=hint style="margin-top:12px;line-height:1.5">' + esc(q.note) + '</div>';
+    D('mbody').innerHTML = s;
+  }).catch(function (e) {
+    if (seq !== QMODAL.req) return;
+    D('mbody').innerHTML = '<div class=hint style="color:var(--warn)">分析失败：' + esc(String(e)) + '</div>';
+  });
+}
+
 function openModal(title, html) {
   var m = D('modal'); if (!m) return;
   D('mtitle').textContent = title;
@@ -6437,7 +6594,7 @@ function renderSettingsPage() {
        //   端点未接上时不假装成功（见 uploadDiag 的错误分支）。
        + '<button class=btn id=sp_diagupload>上传诊断</button>'
        + tip('包内：rlplayer-diag.json（版本 / 系统 / CPU / GPU / 端口）、rlplayer-playback.log（含 .1/.2 轮转）、launcher.log、dumps-manifest.txt、settings-summary.txt；' +
-             'api_key / token / password 一律脱敏为 ***，rlplayer-llm.conf 本体不会被打进包。')
+             'api_key / token / password / Authorization 头一律脱敏为 <redacted>，家目录用户名与邮箱脱敏为 <user>；rlplayer-llm.conf 本体不会被打进包。')
        + '<span style="font-size:11.5px;color:var(--mut2);margin-left:2px" id=sp_diagmsg></span></div>'
        + '<div class=hint>一个 zip 打包全部日志 / 系统信息 / 设置摘要（已脱敏），不用再到处找日志文件</div>')
      // 2026-10-26 F-4 自动更新（用户要求：「云端发布更新 → 自动提示 → 客户端一键更新」）
@@ -6469,11 +6626,11 @@ function renderSettingsPage() {
        + '<div class=hint id=sp_fbcount style="margin-top:5px">0 / 8000</div></div>'
        + '<div class="sfld wide" style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-top:4px">'
        + '<label class=chk style="margin-right:2px"><input type=checkbox id=sp_fbdiag checked>'
-       + '<span>附带诊断包</span>' + tip('打包日志 / 系统信息 / 设置摘要（token、密码等已脱敏为 ***）。不建议关闭 —— 没有日志很难定位问题') + '</label>'
+       + '<span>附带诊断包</span>' + tip('打包日志 / 系统信息 / 设置摘要（token、密码等已脱敏为 <redacted>）。不建议关闭 —— 没有日志很难定位问题') + '</label>'
        + '<button class="btn pri" id=sp_fbsend>发送反馈</button>'
        + '<span id=sp_fbmsg style="font-size:11.5px;color:var(--mut2)"></span></div>'
        + '<div class=hint>点「发送反馈」会直接把内容上传给开发者，**不需要配置邮箱、不需要注册账号**。'
-       + '诊断包已脱敏（token / 密码一律替换为 ***），不会上传你的音乐文件。</div>')
+       + '诊断包已脱敏（token / 密码 / Authorization 头一律替换为 <redacted>，用户名与邮箱替换为 <user>），不会上传你的音乐文件。</div>')
      + '</div>';
 
   // ---------- 元数据补全（排在「高级」之后）----------
