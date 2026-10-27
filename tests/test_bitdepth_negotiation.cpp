@@ -42,6 +42,30 @@ static AudioStreamBasicDescription make_asbd(
 int main() {
     std::printf("=== test_bitdepth_negotiation (离线判据，先红后绿) ===\n");
 
+    // 0. 回归判据（2026-10-28 真机事故）：**设备层**是 Float32 / 24-in-32 时，
+    //    协商结果允许 requiresRepack=true（这是如实报告"设备层与客户端打包不同"），
+    //    但**开流绝不允许因此被拒**。beta2 曾把 requiresRepack 当成拒绝条件，导致用户
+    //    所有歌都报「打开输出后端失败: 设备要求 24-in-32 或浮点容器重打包」，全部无法播放。
+    //    这里把"设备层 Float32 是可接受的上报结果"钉死，防止再犯。
+    {
+        auto devFloat = make_asbd(44100, 2, 32, 8, kAudioFormatFlagIsFloat | kAudioFormatFlagIsPacked);
+        auto r = validate_and_negotiate_format(44100, 24, 2, devFloat);
+        check(r.accepted, "设备层 Float32 + 请求 24bit：协商必须 accepted（AUHAL 负责转换）",
+              r.rejectReason);
+        check(r.requiresRepack, "设备层 Float32 如实报告 requiresRepack（不等于拒绝）", r.fallbackNote);
+        check(r.effectiveBits == 24, "Float32 有效精度报 24（不谎报 32）",
+              std::to_string(r.effectiveBits));
+    }
+    {
+        // 真正的 24-in-32 是「24 位有效、4 字节容器」：bytesPerFrame=8(2ch*4)，且**不是** Packed
+        // （Packed 意味着有效位填满容器）。beta2 事故里 8 bytes/frame + Packed 属于自相矛盾的 ASBD，
+        // 被 analyze 判无效是正确的，这里用合法形态验证「设备层 24-in-32 也不该拒播」。
+        auto dev24in32 = make_asbd(44100, 2, 24, 8,
+                                   kAudioFormatFlagIsSignedInteger | kAudioFormatFlagIsAlignedHigh);
+        auto r = validate_and_negotiate_format(44100, 24, 2, dev24in32);
+        check(r.accepted, "设备层 24-in-32 + 请求 24bit：协商必须 accepted", r.rejectReason);
+    }
+
     // 1. 16-bit packed 成功 (2ch, 44100Hz, 16bit, 4 bytes/frame)
     {
         auto asbd = make_asbd(44100, 2, 16, 4, kAudioFormatFlagIsSignedInteger | kAudioFormatFlagIsPacked);

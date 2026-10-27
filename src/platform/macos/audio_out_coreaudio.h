@@ -538,31 +538,31 @@ public:
                 return false;
             }
 
+            // ⚠️ 2026-10-28 真机回归修复（1.1.0-beta2 用户实测「无法播放」）：
+            //   这里读回的是 **HAL 设备虚拟/混音格式**（kAudioDevicePropertyStreamFormat），
+            //   而 macOS 上它**经常就是 Float32**，与「客户端交给 AUHAL 的内存打包」是两层东西。
+            //   AUHAL 本来就负责 client packed ↔ device 格式之间的转换，所以：
+            //     * 设备层是 Float32 / 24-in-32 **不是错误**，绝不能因此拒绝开流（1.1.4 从没拒绝过，
+            //       本版一度按 requiresRepack 一律拒绝，导致用户所有歌都播不了 —— 已修）；
+            //     * 真正必须严格校验的是 **客户端 ASBD**（见下方 AudioUnitGetProperty），
+            //       因为那才是我们 render 回调真正写出的字节布局。
+            //   设备层格式只做**如实记录**（device_format()/bits_fallback_note()），不参与放行判定。
             auto neg = macos::validate_and_negotiate_format(rate_, bits_, channels_, devAsbd);
-            if (!neg.accepted) {
-                if (hogged_) { detail::set_hog_mode(device_, false); hogged_ = false; }
-                fail(OutputError::UnsupportedFormat, "设备格式校验失败: " + neg.rejectReason);
-                close_locked();
-                return false;
+            if (neg.accepted) {
+                devicePacking_ = neg.acceptedPacking;
+                deviceEffectiveBits_ = neg.effectiveBits;
+                deviceContainerBits_ = neg.containerBits;
+                deviceIsFloat_ = neg.isFloat;
+                formatFallbackNote_ = neg.fallbackNote;
+            } else {
+                // 设备层格式认不出来（例如非交错/异常 ASBD）也只记录，不拒绝：AUHAL 仍会做转换。
+                devicePacking_ = macos::ContainerPacking::Invalid;
+                deviceEffectiveBits_ = (uint32_t)bits_;
+                deviceContainerBits_ = (uint32_t)bits_;
+                deviceIsFloat_ = false;
+                formatFallbackNote_ = "设备层格式无法解析（" + neg.rejectReason +
+                                      "）；客户端仍按 packed 输出，由 AUHAL/HAL 转换";
             }
-
-            // 最保守处理：当前 render 回调仅提供 client Packed 格式（16-bit 2B, 24-bit 3B, 32-bit 4B）。
-            // 若设备需要重打包（requiresRepack，例如 24-in-32），而渲染层尚未提供内存 repack 时，
-            // 绝不能在 client 侧谎称已打包 24-in-32；必须拒绝 client requiresRepack！
-            if (neg.requiresRepack) {
-                if (hogged_) { detail::set_hog_mode(device_, false); hogged_ = false; }
-                fail(OutputError::UnsupportedFormat,
-                     "设备要求 24-in-32 或浮点容器重打包（" + neg.fallbackNote +
-                     "），当前客户端渲染回调仅支持 packed 内存输出，拒绝该模式以避免格式不匹配");
-                close_locked();
-                return false;
-            }
-
-            devicePacking_ = neg.acceptedPacking;
-            deviceEffectiveBits_ = neg.effectiveBits;
-            deviceContainerBits_ = neg.containerBits;
-            deviceIsFloat_ = neg.isFloat;
-            formatFallbackNote_ = neg.fallbackNote;
         } else {
             // 共享模式：不设设备格式，但必须真实读回 ASBD 说明 client vs device 的区别
             AudioStreamBasicDescription devAsbd{};
