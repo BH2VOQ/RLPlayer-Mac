@@ -44,10 +44,24 @@ namespace detail {
 struct CurlSink {
     std::vector<unsigned char>* body = nullptr;
     std::string contentType;
+    const std::atomic<bool>* cancel = nullptr;
 };
+
+inline int curl_xferinfo_cb(void* clientp, curl_off_t dltotal, curl_off_t dlnow,
+                            curl_off_t ultotal, curl_off_t ulnow) {
+    (void)dltotal; (void)dlnow; (void)ultotal; (void)ulnow;
+    auto* sink = static_cast<CurlSink*>(clientp);
+    if (sink && sink->cancel && sink->cancel->load(std::memory_order_relaxed)) {
+        return 1; // 非 0 中断传输（CURLE_ABORTED_BY_CALLBACK）
+    }
+    return 0;
+}
 
 inline size_t curl_write_cb(char* ptr, size_t size, size_t nmemb, void* userdata) {
     auto* sink = static_cast<CurlSink*>(userdata);
+    if (sink && sink->cancel && sink->cancel->load(std::memory_order_relaxed)) {
+        return 0; // 返回不同于 size * nmemb 中断传输（CURLE_WRITE_ERROR）
+    }
     const size_t n = size * nmemb;
     if (sink && sink->body) sink->body->insert(sink->body->end(), ptr, ptr + n);
     return n;
@@ -157,6 +171,14 @@ inline SystemProxySettings system_proxy_snapshot() { return detail::read_system_
 
 inline HttpResult http_request(const HttpRequest& req) {
     HttpResult r;
+    // 预取消检查：如果进入前 cancel 已置位，立刻返回明确的取消错误，不发起网络调用
+    if (req.cancel && req.cancel->load(std::memory_order_relaxed)) {
+        r.error = "请求已取消";
+        r.status = 0;
+        r.ok = false;
+        return r;
+    }
+
     if (!detail::curl_global_ready()) { r.error = "libcurl 初始化失败"; return r; }
 
     CURL* curl = ::curl_easy_init();
@@ -164,6 +186,7 @@ inline HttpResult http_request(const HttpRequest& req) {
 
     detail::CurlSink sink;
     sink.body = &r.body;
+    sink.cancel = req.cancel;
 
     const bool isPost = (req.method == "POST");
     const std::string url = req.url;   // curl 自己处理 URL 编码，不再过 percent_encode_path
@@ -177,6 +200,11 @@ inline HttpResult http_request(const HttpRequest& req) {
     ::curl_easy_setopt(curl, CURLOPT_WRITEDATA, &sink);
     ::curl_easy_setopt(curl, CURLOPT_HEADERFUNCTION, detail::curl_header_cb);
     ::curl_easy_setopt(curl, CURLOPT_HEADERDATA, &sink);
+    if (req.cancel) {
+        ::curl_easy_setopt(curl, CURLOPT_XFERINFOFUNCTION, detail::curl_xferinfo_cb);
+        ::curl_easy_setopt(curl, CURLOPT_XFERINFODATA, &sink);
+        ::curl_easy_setopt(curl, CURLOPT_NOPROGRESS, 0L);
+    }
     ::curl_easy_setopt(curl, CURLOPT_USERAGENT, "RLPlayer/1.0");
     ::curl_easy_setopt(curl, CURLOPT_ACCEPT_ENCODING, "");         // 自动解压
 
@@ -216,8 +244,13 @@ inline HttpResult http_request(const HttpRequest& req) {
     const CURLcode rc = ::curl_easy_perform(curl);
 
     if (rc != CURLE_OK) {
-        // 与 Windows 侧"请求失败"文案对齐，但带上 curl 的具体原因（§7 纪律：文案要可诊断）
-        r.error = std::string("请求失败: ") + ::curl_easy_strerror(rc);
+        // 若是因为 cancel 触发的中断，明确返回"请求已取消"，否则带上 curl 诊断信息
+        if (req.cancel && req.cancel->load(std::memory_order_relaxed)) {
+            r.error = "请求已取消";
+        } else {
+            // 与 Windows 侧"请求失败"文案对齐，但带上 curl 的具体原因（§7 纪律：文案要可诊断）
+            r.error = std::string("请求失败: ") + ::curl_easy_strerror(rc);
+        }
         r.status = 0;
         r.ok = false;
         if (headers) ::curl_slist_free_all(headers);

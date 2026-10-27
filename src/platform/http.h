@@ -20,6 +20,7 @@
 //   * 非 2xx 不算异常：照常返回 body，ok=false，error 里有 "HTTP <码>"
 //   * 任何失败都要在 error 里留下非空、可读的中文原因（不许静默返回空 body）
 #pragma once
+#include <atomic>
 #include <cstddef>
 #include <cstdio>
 #include <string>
@@ -37,6 +38,7 @@ struct HttpRequest {
     std::string proxy;                             // 空 = 直连；"host:port" 或 "http://host:port"
                                                    // 空时**自动回退系统代理**（见下方 SystemProxySettings）
     std::string noProxy;                           // CURLOPT_NOPROXY（系统代理的例外表）；空 = 不过滤
+    const std::atomic<bool>* cancel = nullptr;     // 取消标志（空 = 不支持外部取消；非空且为 true 时中断请求）
 };
 
 struct HttpResult {

@@ -75,6 +75,37 @@ inline std::string http_proxy_normalize(const std::string& proxy) {
     return rta::platform::normalize_proxy(proxy);
 }
 
+// ---------------- 线程局部的取消作用域（P1.6 / i8-http）----------------
+//
+// 契约：
+//   * HttpCancellationScope(const std::atomic<bool>* token) 进入作用域，在当前线程绑定取消 token。
+//   * RAII 析构时恢复进入前的 token，支持任意嵌套。
+//   * 仅影响当前线程的 http_get / http_post 调用，不影响其他线程（如 UPnP / 播放等）。
+//   * token 为 nullptr 时表示该作用域内取消未激活（可用于临时恢复为无取消）。
+//   * token 的生命周期由调用者保证有效至作用域结束（或所有下游阻塞请求完成）。
+namespace http_detail {
+inline const std::atomic<bool>*& current_cancellation_token() {
+    static thread_local const std::atomic<bool>* s_token = nullptr;
+    return s_token;
+}
+} // namespace http_detail
+
+class HttpCancellationScope {
+public:
+    explicit HttpCancellationScope(const std::atomic<bool>* token)
+        : prev_(http_detail::current_cancellation_token()) {
+        http_detail::current_cancellation_token() = token;
+    }
+    ~HttpCancellationScope() {
+        http_detail::current_cancellation_token() = prev_;
+    }
+    HttpCancellationScope(const HttpCancellationScope&) = delete;
+    HttpCancellationScope& operator=(const HttpCancellationScope&) = delete;
+
+private:
+    const std::atomic<bool>* prev_ = nullptr;
+};
+
 // POST（Emby 认证、LLM、元数据源需要）
 inline HttpResponse http_post(const std::string& url, const std::string& body,
                               const std::vector<std::string>& headers = {},
@@ -88,6 +119,7 @@ inline HttpResponse http_post(const std::string& url, const std::string& body,
     req.contentType = contentType ? contentType : "application/json";
     req.timeoutMs   = timeoutMs;
     req.proxy       = http_proxy();
+    req.cancel      = http_detail::current_cancellation_token();
     return http_detail::from_platform(rta::platform::http_request(req));
 }
 
@@ -101,6 +133,7 @@ inline HttpResponse http_get(const std::string& url,
     req.headers   = headers;
     req.timeoutMs = timeoutMs;
     req.proxy     = http_proxy();
+    req.cancel    = http_detail::current_cancellation_token();
     return http_detail::from_platform(rta::platform::http_request(req));
 }
 
