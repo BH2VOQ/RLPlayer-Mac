@@ -1242,6 +1242,13 @@ reject:
 - (BOOL)windowShouldClose:(NSWindow *)sender {
     fprintf(stderr, "RLPlayer: 窗口请求关闭 t=%lld\n",
             (long long)([[NSDate date] timeIntervalSince1970] * 1000));
+    // 2026-10-28 用户实测「点关闭后窗口画面还停留一会儿」。
+    // 实测（CGWindowList 轮询）：进程 0.22s 就没了，但窗口真正从屏幕消失要 **0.50s**。
+    // 也就是说用户看到的"卡"是窗口消失这一步，不是核心收尾。
+    // 这里在**最早**能介入的点（用户点红叉）就把窗口从屏幕移除，让画面立刻消失；
+    // 随后 AppKit 终止流程照常做安全收尾。只 orderOut，绝不 release/close WebView
+    //（那样实测 SIGSEGV：退出阶段 WebKit 已在自毁，再动它会和 WebContent 回调竞争）。
+    [sender orderOut:nil];
     return YES;
 }
 
