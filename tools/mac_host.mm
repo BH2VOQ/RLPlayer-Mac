@@ -1229,22 +1229,45 @@ reject:
 
 - (void)applicationWillTerminate:(NSNotification *)n {
     (void)n;
+    // 分段计时（2026-10-28 用户实测「关闭就会卡一下」）：每段都打点，日志里能看出卡在哪一步。
+    // 之前整段只有一句结论，无法区分是 timer、排空 worker、还是 stop_embedded 慢。
+    const auto tQuit0 = std::chrono::steady_clock::now();
+    auto msSince = [&tQuit0]() {
+        return (long long)std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - tQuit0).count();
+    };
+    fprintf(stderr, "RLPlayer: 退出开始 t=0ms\n");
     [self.exitPollTimer invalidate];
     self.exitPollTimer = nil;
+    fprintf(stderr, "RLPlayer: 退出 timer 已停 t=%lldms\n", msSince());
+
     // 退出契约（rlapp_core.h）：
     // 1. 优先提前通知核心退出（置 g_shutdown 并拒绝新工作，不 join），加速在途任务取消
     rlapp::request_shutdown();
+    fprintf(stderr, "RLPlayer: 退出已通知核心 t=%lldms（在途 worker=%d）\n",
+            msSince(), [self.schemeHandler activeWorkersCount]);
 
     // 2. 停新请求来源，并等待**已派发**的 scheme worker 全部退出核心（_activeWorkers == 0）
     // applicationWillTerminate 是通知，不是可否退出的询问；return 并不能阻止 exit。
     // 诊断超时后继续等业务排空，绝不带着还访问核心的 worker 进入静态析构。
-    while (![self.schemeHandler waitForInFlightTasksWithTimeout:1.0]) {
-        fprintf(stderr, "RLPlayer: 退出仍在等待 %d 个业务 worker 安全结束\n",
-                [self.schemeHandler activeWorkersCount]);
+    if (![self.schemeHandler waitForInFlightTasksWithTimeout:1.0]) {
+        while (![self.schemeHandler waitForInFlightTasksWithTimeout:1.0]) {
+            fprintf(stderr, "RLPlayer: 退出仍在等待 %d 个业务 worker 安全结束 t=%lldms\n",
+                    [self.schemeHandler activeWorkersCount], msSince());
+        }
     }
+    fprintf(stderr, "RLPlayer: 退出 worker 已排空 t=%lldms\n", msSince());
 
     // 3. 协作式收尾：此时保证无任何 scheme worker 在 handle()/核心内运行
     rlapp::stop_embedded();
+    fprintf(stderr, "RLPlayer: 退出收尾完成 t=%lldms\n", msSince());
+
+    // ⚠️ 2026-10-28 实测教训：不要在这里手动拆 WKWebView / 关窗口。
+    //   加过一版 [web stopLoading] + removeScriptMessageHandler + [window close] + 置 nil，
+    //   真机实测 **Segmentation fault: 11**（且"UI 已拆除"那行都没打出来，死在拆除途中）。
+    //   原因：applicationWillTerminate 阶段 WebKit 已进入自己的销毁流程，此时再改它的
+    //   contentController / 窗口生命周期，会与 WebContent 进程的异步回调竞争。
+    //   ⟹ 交给 AppKit/WebKit 自己收尾；本函数只负责「核心状态安全排空」。
 }
 
 @end
