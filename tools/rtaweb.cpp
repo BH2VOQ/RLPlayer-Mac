@@ -4755,13 +4755,14 @@ static void meta_on_play(const std::string& file) {
         if (s_inFlight.count(file) != 0) return;    // 在途:本曲已在补全,不重复
         s_inFlight.insert(file);
     }
-    std::thread([file, ms] {
-        BgJobGuard guard;
-        if (!guard.active()) {
-            std::lock_guard<std::mutex> lk(s_metaMx);
-            s_inFlight.erase(file);
-            return;
-        }
+    // 必须在派发线程之前登记，否则 shutdown 可能在 worker 尚未开始时误判已归零。
+    auto guard = std::make_shared<BgJobGuard>();
+    if (!guard->active()) {
+        std::lock_guard<std::mutex> lk(s_metaMx);
+        s_inFlight.erase(file);
+        return;
+    }
+    std::thread([file, ms, guard] {
         rta::net::HttpCancellationScope httpCancel(&g_shutdown);
         rta::meta::EnrichOpts o;
         o.srcOn = ms.srcOn; o.llm = ms.llm;
@@ -5415,18 +5416,9 @@ static std::map<std::string, SummaryJob> g_summ_jobs;
 static void summary_job_start_fn(const std::string& key, const std::string& kindStr,
                                  const std::string& label,
                                  std::function<rta::meta::SummaryResult()> work) {
-    std::thread([key, kindStr, label, work]() {
-        BgJobGuard guard;
-        if (!guard.active()) {
-            std::lock_guard<std::mutex> lk(g_summ_mu);
-            auto& job = g_summ_jobs[key];
-            job.running = false;
-            job.done = true;
-            job.ok = false;
-            job.body = "{\"ok\":false,\"error\":\"系统退出，任务取消\",\"summaryKind\":\"" + jesc(kindStr) + "\",\"summaryCached\":false}";
-            job.finished_at = (long long)std::time(nullptr);
-            return;
-        }
+    auto guard = std::make_shared<BgJobGuard>();
+    if (!guard->active()) return; // 退出已经开始，禁止再派发访问共享状态的线程。
+    std::thread([key, kindStr, label, work, guard]() {
         if (g_shutdown.load()) {
             std::lock_guard<std::mutex> lk(g_summ_mu);
             auto& job = g_summ_jobs[key];
@@ -5870,12 +5862,12 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
                        (confirmed ? "false" : "true") + ",\"error\":\"" + jesc(err) + "\"}";
             }
             // 会话在线程里跑（扫频最长几十秒，不能堵住 accept）。
-            std::thread([plan]() {
-                BgJobGuard guard;
-                if (!guard.active()) {
-                    s_room.fail("系统退出，测量取消");
-                    return;
-                }
+            auto guard = std::make_shared<BgJobGuard>();
+            if (!guard->active()) {
+                s_room.fail("系统退出，测量取消");
+                return "{\"ok\":false,\"error\":\"系统退出中\"}";
+            }
+            std::thread([plan, guard]() {
                 try {
                     rta::dsp::RoomTxConfig cfg;
                     cfg.rate = 48000;
@@ -10336,15 +10328,22 @@ std::string rlapp::dispatch(const rta::net::HttpRequest& request, std::string& c
     // 并发观测（无锁）：进入 +1，更新峰值，离开 -1。全是 relaxed 原子操作，不进临界区，
     // 因此这个探针本身不会成为「隐形的串行化」——否则它就是在测自己。
     struct InFlight {
+        bool accepted = false;
         InFlight() {
+            // 只锁登记，不串行业务；与 request_shutdown 同锁关闭新请求闸门。
+            std::lock_guard<std::mutex> lk(g_bgMx);
+            if (g_shutdown.load()) return;
+            accepted = true;
             g_dispatchCount.fetch_add(1, std::memory_order_relaxed);
             const int now = g_inFlight.fetch_add(1, std::memory_order_relaxed) + 1;
             int peak = g_peakConcurrent.load(std::memory_order_relaxed);
             while (now > peak &&
                    !g_peakConcurrent.compare_exchange_weak(peak, now, std::memory_order_relaxed)) {}
         }
-        ~InFlight() { g_inFlight.fetch_sub(1, std::memory_order_relaxed); }
+        ~InFlight() { if (accepted) g_inFlight.fetch_sub(1, std::memory_order_relaxed); }
     } inFlight;
+    if (!inFlight.accepted) return "{\"ok\":false,\"error\":\"系统退出中\"}";
+    rta::net::HttpCancellationScope httpCancel(&g_shutdown);
     try {
         return handle(request, contentType);
     } catch (...) {
@@ -10366,6 +10365,10 @@ bool rlapp::exit_requested() {
     return g_exitReq.load();
 }
 
+void rlapp::request_shutdown() {
+    set_shutdown_flag();
+}
+
 void rlapp::stop_embedded() {
     // 尽早置 g_shutdown（与 g_bgMx 同锁，在幂等拦截前先置位，让在途或并发的后台任务立刻感知取消）
     set_shutdown_flag();
@@ -10375,12 +10378,13 @@ void rlapp::stop_embedded() {
 
     // 在途请求防护 drain：等待当前正在 dispatch() 的 handler 真正返回
     const auto drainStart = std::chrono::steady_clock::now();
+    bool warned = false;
     while (g_inFlight.load(std::memory_order_relaxed) > 0) {
-        if (std::chrono::duration_cast<std::chrono::milliseconds>(
+        if (!warned && std::chrono::duration_cast<std::chrono::milliseconds>(
                 std::chrono::steady_clock::now() - drainStart).count() > 5000) {
+            warned = true;
             play_log("SHUTDOWN 在途 dispatch 超过 5s 仍未完全退出（剩余=" +
-                     std::to_string(g_inFlight.load()) + "），继续执行收尾");
-            break;
+                     std::to_string(g_inFlight.load()) + "），继续等待安全排空");
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
