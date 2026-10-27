@@ -2009,9 +2009,19 @@ function renderArtistsFrom(j, q) {
     // 头像统一圆形（评审 #4）：占位字母**始终**渲染在底层，封面用 <img> 覆盖并 onerror 自隐。
     // 以前用 background-image：封面文件缺失时整块纯黑、连首字母都没有（Irotas/RØSE 就是这样）。
     var phChar = (String(k).trim().slice(0, 1) || '?').toUpperCase();
+    // 2026-10-27（F-4 三层降级，与 artistHeroHtml 同一套）：
+    //   ① /api/artist/image（真头像）→ ② /api/lib/cover（专辑封面兜底）→ ③ .ph 首字母
+    // 以前只有②，没有专辑封面的艺人（真实库 106/245）永远只剩首字母圆。
+    // 注意：列表页是**每张卡一张图**，艺人多的库会并发很多请求；
+    //   所以这里加 loading=lazy（浏览器只请求视口内的），不会一次打满。
+    var whoArg = encodeURIComponent(String(k == null ? '' : k));
+    var imgTag = '<img data-stage="artist"' + (v.cv ? (' data-coverkey="' + esc(v.key) + '"') : '') +
+                 ' src="/api/artist/image?who=' + whoArg + '" loading=lazy alt="" ' +
+                 'style="position:absolute;inset:0;width:100%;height:100%;object-fit:cover;border-radius:50%" ' +
+                 'onerror="artistAvatarFallback(this)">';
     h += '<div class=card data-a="' + esc(k) + '"><div class=cv style="border-radius:50%;overflow:hidden">' +
          '<div class=ph style="border-radius:50%">' + esc(phChar) + '</div>' +
-         (v.cv ? '<img src="/api/lib/cover?k=' + v.key + '" loading=lazy alt="" style="position:absolute;inset:0;width:100%;height:100%;object-fit:cover;border-radius:50%" onerror="this.style.display=\'none\'">' : '') + '</div>' +
+         imgTag + '</div>' +
          '<div class=nm>' + esc(k) + '</div><div class=ar>' + v.n + ' 张专辑</div></div>';
   });
   h += '</div>';
@@ -2047,6 +2057,22 @@ function renderAlbumSubset(who) {
      ② 资料回来后只重绘这几块；③ 切走再回来：同 who 的请求 in-flight ⟹ 挂回调复用，
         已有结果 ⟹ 直接渲染，绝不重复请求（费用纪律）。 */
 var ARTIST_KNOW = {};    // who -> { state: 'loading'|'done', res, waiters: [] }
+// F-4：头像三层降级的第二层 —— 头像端点失败时退到专辑封面，再失败就露首字母。
+// 单独成函数（而不是内联 onerror）是因为要读 dataset 且只降一级，内联写不下且易错。
+function artistAvatarFallback(img) {
+  if (!img) return;
+  var stage = img.dataset ? img.dataset.stage : '';
+  var ck = img.dataset ? img.dataset.coverkey : '';
+  if (stage === 'artist' && ck) {
+    // 第二层：换成专辑封面；再失败就走 else 分支隐藏自己
+    img.dataset.stage = 'cover';
+    img.src = '/api/lib/cover?k=' + encodeURIComponent(ck);
+    return;
+  }
+  // 第三层：两层都失败 → 隐藏 img，露出发底下的 .ph 首字母（绝不渲染空白圆）
+  img.style.display = 'none';
+}
+
 function artistCoverKey(who) {
   if (!(S.albums && S.albums.length)) return '';
   for (var i = 0; i < S.albums.length; i++) {
@@ -2064,11 +2090,22 @@ function artistHeroHtml(who, subText) {
   //   · 封面用 <img> 覆盖在上，加载失败/解码失败 → onerror 自隐 ⟹ 露回首字母。
   // 这样「有真封面」「有占位图」「根本没封面」三种情况都不会出现空白圆。
   var phChar = (String(who == null ? '' : who).trim().slice(0, 1) || '?').toUpperCase();
-  var cvImg = cvKey
-    ? '<img src="/api/lib/cover?k=' + encodeURIComponent(cvKey) + '" loading=lazy alt="" ' +
+  // 2026-10-27（F-4 三层降级）：艺人**头像**优先，专辑封面次之，首字母永远兜底。
+  //   ① /api/artist/image?who=  —— 真正的艺人头像（artwork.h 多源调度）
+  //   ② /api/lib/cover?k=       —— 该艺人某张专辑的封面（旧行为，仍保留作兜底）
+  //   ③ .ph 首字母              —— 永远渲染在底层，前两层加载失败就露出来
+  // 为什么要两层 img：以前只有②，没有专辑封面的艺人（真实库 106/245）永远只剩首字母。
+  // ②的 onerror 把自身 display 设成 none 之后，①还应该有机会 —— 所以这里**先①后②**，
+  // ①失败时动态插入②，②也失败就只剩首字母，任何一层都不会留白圆。
+  var whoArg = encodeURIComponent(String(who == null ? '' : who));
+  var cvImg = whoArg
+    ? '<img id=aheadImg data-stage="artist" src="/api/artist/image?who=' + whoArg + '" loading=lazy alt="" ' +
       'style="position:absolute;inset:0;width:100%;height:100%;object-fit:cover;border-radius:50%" ' +
-      'onerror="this.style.display=\'none\'">'
+      'onerror="artistAvatarFallback(this)">'
     : '';
+  // 专辑封面作为第二层，先记在 dataset 上供 onerror 回调取用（不预先渲染，避免两张图同时请求）
+  var cvKeyAttr = cvKey ? (' data-coverkey="' + esc(cvKey) + '"') : '';
+  cvImg = cvImg.replace('<img ', '<img' + cvKeyAttr + ' ');
   return '<div class="ahead artist-head">' +
        '<div class=cv style="border-radius:50%;overflow:hidden">' +
        '<div class=ph style="border-radius:50%">' + esc(phChar) + '</div>' +

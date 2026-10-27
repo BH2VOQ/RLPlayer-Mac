@@ -62,6 +62,7 @@ class CoreAudioSink;   // 本文件后部定义；render_loop 的 mac 遥测分�
 using rta::render::OutSink;
 using rta::render::SinkOpenOpts;
 #include "analysis/track_health.h"     // F-5：/api/track/health 音质体检（含 quality 19 项）
+#include "meta/artwork.h"            // F-4：艺人头像全信源调度（provider.h 能力矩阵派生）
 #include "meta/enrich.h"            // 单曲元数据补全编排(播放触发 + /api/enrich + /api/meta 兜底)
 #include "meta/writeback.h"         // P2 标签写回(remux + PCM 逐位门禁;/api/writeback 三端点)
 #include "meta/knowledge.h"         // P3 资料层直连与缓存(/api/entity/knowledge)
@@ -5279,6 +5280,70 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
     // 为什么走这个端点而不是让前端自己算：分析是 CPU 密集（DSD 几百 MB），
     // 必须在服务端跑；前端只负责把数字画出来。
     // ⚠️ 只读端点：不改文件、不写缓存以外的东西（缓存由 health_store 管）。
+    // ---- 艺人头像（F-4 / R-6；2026-10-27）----
+    // GET /api/artist/image?who=<艺人名>[&refresh=1]
+    //   200 + 图片字节（Content-Type 按魔数定）—— 命中
+    //   404 + JSON 原因                      —— 没找到（前端 onerror 露回首字母）
+    // 为什么只保留这一个端点（不另加 /api/artist/apifill）：
+    //   两处真相会打架（HANDOVER §4.5）。头像的「多源」由 artwork.h 的能力矩阵统一调度，
+    //   调用方永远只问这一个 URL，源顺序的调整不需要改前端。
+    // 缓存：用 runtime_state_dir()/artistcache（与 covercache 同风格），绝不写进 .app 包内。
+    if (rq.path.rfind("/api/artist/image", 0) == 0) {
+        std::string who;
+        bool refresh = false;
+        {
+            const size_t q = rq.path.find("?who=");
+            if (q != std::string::npos) {
+                std::string rest = rq.path.substr(q + 5);
+                const size_t amp = rest.find("&refresh=");
+                if (amp != std::string::npos) {
+                    refresh = rest.compare(amp + 9, 1, "1") == 0;
+                    rest = rest.substr(0, amp);
+                }
+                who = urlDecode(rest);
+            }
+        }
+        if (who.empty()) {
+            ct = "application/json; charset=utf-8";
+            rta::net::webui_set_status(400);
+            return "{\"ok\":false,\"error\":\"未指定 who\"}";
+        }
+        if (!valid_utf8(who)) return utf8_path_reject(who);
+        rta::meta::ArtworkOpts aopts;
+        aopts.cacheDir = path_in_exe_dir("artistcache");
+        aopts.useCache = !refresh;
+        // 源开关沿用既有设置（与 /api/enrich 同一套 srcOn 语义：
+        // MetaSettings.srcOn 是「注册表 id → 开关」，缺省 true，不要写死具体源名）
+        aopts.srcOn = meta_settings_load().srcOn;
+        const rta::meta::ArtistImageResult r = rta::meta::artwork_fetch_artist_image(who, aopts);
+        if (!r.ok || r.bytes.empty()) {
+            ct = "application/json; charset=utf-8";
+            rta::net::webui_set_status(404);
+            std::ostringstream j;
+            j << "{\"ok\":false,\"who\":\"" << jesc(who) << "\",\"error\":\"未找到该艺人头像\""
+              << ",\"tried\":[";
+            for (size_t i = 0; i < r.tried.size(); ++i) {
+                if (i) j << ",";
+                j << "{\"src\":\"" << jesc(r.tried[i].source) << "\",\"ok\":"
+                  << (r.tried[i].ok ? "true" : "false")
+                  << ",\"reason\":\"" << jesc(r.tried[i].reason) << "\"}";
+            }
+            j << "]}";
+            return j.str();
+        }
+        // Content-Type 按**魔数**定，不信 URL 后缀（错误页伪装成 .jpg 的情况真实存在）
+        const unsigned char* b = (const unsigned char*)r.bytes.data();
+        const size_t n = r.bytes.size();
+        if (n >= 8 && b[0] == 0x89 && b[1] == 'P' && b[2] == 'N' && b[3] == 'G') ct = "image/png";
+        else if (n >= 3 && b[0] == 0xFF && b[1] == 0xD8 && b[2] == 0xFF) ct = "image/jpeg";
+        else {
+            ct = "application/json; charset=utf-8";
+            rta::net::webui_set_status(502);
+            return "{\"ok\":false,\"error\":\"取回的内容不是有效图片（无 JPEG/PNG 魔数）\"}";
+        }
+        return r.bytes;
+    }
+
     if (rq.path.rfind("/api/track/health", 0) == 0) {
         ct = "application/json; charset=utf-8";
         std::string file;
