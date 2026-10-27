@@ -51,6 +51,7 @@ using rta::net::SubEntry;
 #include "audio/wav.h"
 #include "audio/audio_loader.h"
 #include "audio/media_info.h"
+#include "audio/output_bit_depth.h"
 #include "audio/render_loop.h"     // 渲染主循环(含 RENDERFAIL 遥测;测试与 rtaweb 共用同一份)
 class CoreAudioSink;   // 本文件后部定义；render_loop 的 mac 遥测分支要用（前向声明）
 #include "audio/rate_pick.h"       // 输出采样率选择的纯逻辑(可离线单测;2026-10-22 第二首按 44100 开流事故)
@@ -2679,6 +2680,15 @@ static bool play_one_impl(const std::string& file, const PlayParams& pIn, rta::a
         // 必须在设备能力检查之前做：失效端点会让 exclusive_rates 对任何位深都返回空列表，
         // 否则永远走不到"回退默认端点"这一步（交接单 §2.1 的并行嫌疑）。
         PlayParams pEff = p;
+        // B-6「跟随源」：输出位深按源文件真实位深请求。解码容器位深（flac/ape 常为 32）不能当源位深，
+        // 所以优先用 probe_media 的位深；不可信时退回 in.bits（只认 16/24 这类可信值）。
+        {
+            int trueSrcBits = 0;
+            const rta::audio::MediaInfo probeMi = rta::audio::probe_media(file);
+            if (probeMi.bits == 16 || probeMi.bits == 24 || probeMi.bits == 32) trueSrcBits = probeMi.bits;
+            else if (in.bits == 16 || in.bits == 24) trueSrcBits = in.bits;
+            pEff.bits = rta::audio::resolve_output_bits(pEff.bits, trueSrcBits);
+        }
         // macOS：空设备由 CoreAudioOutput::open 解析为系统默认输出（§13.9 实测）；
         // 指定设备失效时 open 返回 DeviceNotFound 并带设备可见文案，不需要播放前预检。
 
@@ -2707,7 +2717,7 @@ static bool play_one_impl(const std::string& file, const PlayParams& pIn, rta::a
         dlog("stage gpu-ok");
 
         eng::PipelineConfig cfg;
-        cfg.outBits = (p.bits > 0) ? p.bits : 24;
+        cfg.outBits = (pEff.bits > 0) ? pEff.bits : 24;   // B-6：-1 已在上面解析成源位深
         if (!p.shaper.empty()) cfg.shaper = parse_shaper(p.shaper);
         cfg.replayGainDb = (rgDec.active ? rgDec.appliedDb : 0.0);
         {
@@ -2940,7 +2950,7 @@ static bool play_one_impl(const std::string& file, const PlayParams& pIn, rta::a
                     return false;
                 }
             } else {
-                const int reqBits = (p.bits > 0) ? p.bits : 24;
+                const int reqBits = (pEff.bits > 0) ? pEff.bits : 24;   // B-6：跟随源已解析
                 int bitsCand[4];
                 int nBits = 0;
                 auto pushBit = [&](int b) {

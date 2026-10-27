@@ -3951,7 +3951,10 @@ function loadSettings() {
     if (kv.loudness !== undefined) { D('sLoud').checked = (kv.loudness === '1'); S.loud = D('sLoud').checked; }
     // 高级参数
     if (kv.device !== undefined) ADV.device = kv.device;
-    if (kv.bits !== undefined) ADV.bits = parseInt(kv.bits, 10) || 0;
+    if (kv.bits !== undefined) {
+      var _b = parseInt(kv.bits, 10);
+      ADV.bits = (isNaN(_b) ? 0 : _b);   // -1 = 跟随源，不能被 ||0 吃掉
+    }
     if (kv.taps !== undefined) ADV.taps = parseInt(kv.taps, 10) || 0;
     if (kv.atten !== undefined) ADV.atten = parseFloat(kv.atten) || 0;
     if (kv.transition !== undefined) ADV.transition = parseFloat(kv.transition) || 0;
@@ -6966,8 +6969,9 @@ function renderSettingsPage() {
              'DSD 的比特率与封装（DoP / Native）在 SDM 页设置')
        + sel('sp_rate', '输出采样率', D('sRate').innerHTML, '自动 = 所选设备的最高采样率')
        + sel('sp_bits', '输出位深（PCM）',
-             opt(0, '24 bit', ADV.bits) + opt(16, '16 bit', ADV.bits) + opt(32, '32 bit', ADV.bits),
-             'DSD 输出恒为 1 bit，此项只在 PCM 模式生效')
+             opt(-1, '跟随源（按文件位深）', ADV.bits) + opt(0, '24 bit', ADV.bits) +
+             opt(16, '16 bit', ADV.bits) + opt(32, '32 bit', ADV.bits),
+             '跟随源 = 按文件真实位深请求（16/24/32）；DSD 输出恒为 1 bit，此项只在 PCM 模式生效')
        + sel('sp_ch', '输出声道数',
              opt('0', '跟随源声道数', CH) + opt('2', '2 声道（立体声）', CH) +
              opt('6', '5.1（6 声道）', CH) + opt('8', '7.1（8 声道）', CH),
@@ -9051,7 +9055,7 @@ function drawRoots() {
 
 // 把设置页/快捷面板的值统一写回并保存
 function collectSettings() {
-  ADV.bits = parseInt(D('sp_bits').value, 10) || 0;
+  ADV.bits = (function(){ var v = parseInt(D('sp_bits').value, 10); return isNaN(v) ? 0 : v; })();
   ADV.taps = parseInt(D('sp_taps').value, 10) || 0;
   ADV.atten = parseFloat(D('sp_atten').value) || 0;
   ADV.transition = parseFloat(D('sp_transition').value) || 0;
