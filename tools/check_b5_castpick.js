@@ -25,7 +25,7 @@ const { spawn } = require('child_process');
 const ub = require('./uibrowser');
 
 const BASE_URL = process.argv[2] || 'http://127.0.0.1:19105';
-const EVIDENCE_DIR = process.argv[3] || path.join(__dirname, '../debug/b5-castpick');
+const EVIDENCE_DIR = process.argv[3] || path.join(__dirname, '..', 'debug', '20261027-04-实测反馈7条', 'b5-castpick');
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
