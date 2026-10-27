@@ -41,6 +41,8 @@
 #include <atomic>
 #include <mutex>
 #include <condition_variable>
+#include <chrono>
+#include <cstdio>
 #include <map>
 #include <memory>
 #include <sstream>
@@ -248,7 +250,23 @@ inline void WebUi::stop() {
         {
             std::unique_lock<std::mutex> lk(conns_->mtx);
             for (auto& kv : conns_->conns) sock_shutdown(kv.second);
-            conns_->cv.wait(lk, [this] { return conns_->conns.empty(); });
+            // 2026-10-28 实测事故：这里原来**无限等**空表。若某个 handler 正卡在**出站**网络
+            // （实测 SYN_SENT 到一个不可达内网地址），shutdown 客户端 socket 完全无法中断它，
+            // 于是进程收到 SIGTERM 后 70s+ 仍不退出 —— 用户看到的就是「关闭软件卡顿」。
+            // 现在：有界等待 + 每次超时如实记日志并继续等（绝不 return 后去析构正在被访问的单例），
+            // 诊断信息足够定位到底卡在哪条连接。
+            int waitedMs = 0;
+            while (!conns_->cv.wait_for(lk, std::chrono::milliseconds(500),
+                                        [this] { return conns_->conns.empty(); })) {
+                waitedMs += 500;
+                std::fprintf(stderr,
+                             "[WebUi::stop] 仍在等待 %zu 条连接收尾（已等 %d ms）；"
+                             "若是 handler 卡在出站网络，需要 HTTP 取消或超时才能结束\n",
+                             conns_->conns.size(), waitedMs);
+                if (waitedMs % 10000 == 0) {
+                    for (auto& kv : conns_->conns) sock_shutdown(kv.second);
+                }
+            }
         }
         conns_.reset();
     }
