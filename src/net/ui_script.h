@@ -7934,7 +7934,7 @@ function calSettingsHtml() {
   var h = '';
   // 1. 房间校正（测量向导）—— 本版暂隐藏向导卡片，保留提示文案与 DOM 结构（供之后改版与既有绑定安全）
   h += sgroup('房间校正（测量向导）', '房间测量功能正在重构中',
-      '<div class="sfld wide"><div class=rcnote style="color:var(--t2);padding:10px 12px;background:var(--bg2);border-radius:6px;border:1px solid var(--bd)">'
+      '<div class="sfld wide"><div class=rcnote style="color:var(--txt2);padding:10px 12px;background:var(--bg2);border-radius:6px;border:1px solid var(--line)">'
     + '房间测量正在重做，本版暂不提供。支持已有的「EQ 文件」与「房间校正 IR」独立加载。'
     + '</div></div>');
   h += '<div id=roomCorrCard style="display:none">' + sgroup('房间校正（测量向导）', 'Farina 对数扫频 → 反卷积 → 心理声学平滑 → 目标曲线 → 最小相位校正 FIR · 多声道 2.0~7.1.4',

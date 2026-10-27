@@ -1,4 +1,0 @@
-bands=3
-effectiveWidth=14
-longStrokeRows=[3,4,7,8,9,12,13]
-bandRanges=[[3,4],[7,8,9],[12,13]]

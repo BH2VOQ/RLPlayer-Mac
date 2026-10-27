@@ -8,7 +8,7 @@ const path = require('path');
 const ub = require('./uibrowser');
 
 const base = (process.argv[2] || 'http://127.0.0.1:19101').replace(/\/$/, '');
-const out = process.argv[3] || '/tmp/rlw/i1/evidence';
+const out = process.argv[3] || path.join(__dirname, '..', 'debug', '20261027-04-实测反馈7条', 'b1-replicon');
 fs.mkdirSync(out, { recursive: true });
 
 const lines = [];
