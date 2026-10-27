@@ -632,11 +632,29 @@ function apiFailNote(msg) {
   toast(msg);
 }
 function api(u, body) {
-  // 2026-10-25（安全加固后）：/api/ 下的一律用 POST —— 后端现在把副作用端点限制为 POST
-  // （GET 一律 405，防 <img src="/api/quit"> 这类 CSRF）。读端点 POST 也照常工作（handler 不看 method），
-  // 所以这里统一 POST 既修好「无 body 的 api('/api/fav?...') 变成 GET 被拒」，也不用逐个调用点改。
+  // 读端点（/api/settings /api/status /api/devices /api/rates /api/filters /api/providers /api/gpu /api/peq 等）
+  // 在 body 为空且没有显式修改动作时必须走 GET。
+  // 尤其 /api/settings：无 body 时是读取全量配置（GET），若发 POST 会被后端当成写操作而只回 {"ok":true,"merged":true} 导致 kv 丢失。
   var isApi = u.indexOf('/api/') === 0;
-  var opt = (body === undefined && !isApi) ? {} : { method: 'POST' };
+  var isRead = (body === undefined) && (
+    u === '/api/settings' || u.indexOf('/api/settings?') === 0 ||
+    u === '/api/status' || u.indexOf('/api/status?') === 0 ||
+    u === '/api/devices' || u.indexOf('/api/devices?') === 0 ||
+    u === '/api/rates' || u.indexOf('/api/rates?') === 0 ||
+    u === '/api/filters' || u.indexOf('/api/filters?') === 0 ||
+    u === '/api/providers' || u.indexOf('/api/providers?') === 0 ||
+    u === '/api/gpu' || u.indexOf('/api/gpu?') === 0 ||
+    u === '/api/opra/index' || u.indexOf('/api/opra/index?') === 0 ||
+    u.indexOf('/api/opra/presets') === 0 ||
+    u === '/api/peq' || (u.indexOf('/api/peq?') === 0 && u.indexOf('action=') < 0) ||
+    u === '/api/queue' || u === '/api/recent' || u === '/api/fav/list' ||
+    u.indexOf('/api/lib/albums') === 0 || u.indexOf('/api/lib/album?') === 0 ||
+    u.indexOf('/api/files?') === 0 || u.indexOf('/api/meta?') === 0 ||
+    u === '/api/cast/state' || u.indexOf('/api/cast/devices') === 0 ||
+    u === '/api/input/devices' || u === '/api/input/state' ||
+    u === '/api/src/config' || u.indexOf('/api/src/browse') === 0
+  );
+  var opt = (!isApi || isRead) ? {} : { method: 'POST' };
   if (body !== undefined) opt.body = body;
   // 两个阶段都可能失败：① fetch 本身（超时 / 连接重置 / 服务没起来）；
   // ② r.json()（响应被截断，或拿到的是 HTML 错误页而不是 JSON）。一次 .catch 同时覆盖两者。
@@ -3974,7 +3992,50 @@ function wbApply() {
   }).catch(function () { WB_BUSY = 0; wbButtons(0); wbMsg(''); toast('无法启动写回：网络错误'); });
 }
 
-/* ---------------- 设备能力 ---------------- */
+/* ---------------- 设备能力与混音格式（Q-1 / Q-4） ---------------- */
+var DEVMIX = {};       // deviceId -> {channels, mixRate, mixBits, fmt}
+function devMixOf(id) { return DEVMIX[id || ''] || null; }
+function devMixChannels(id) { var d = devMixOf(id); return (d && d.channels) || 0; }
+function effectiveChannels() {
+  var bk = (D('sp_backend') && D('sp_backend').value) || ADV.backend || 'wasapi';
+  var setCh = parseInt(ADV.channels, 10) || 0;
+  var devCh = devMixChannels(ADV.device);
+  // 共享模式：输出经 CoreAudio 系统混音，恒等于设备混音声道数（系统混音器决定），设置项不参与
+  if (bk === 'wasapi-shared') return devCh || setCh || 2;
+  // 硬件直通 / Null / UPnP：显式选了 2/6/8 就用它；「跟随源」(0) 用设备混音声道数做预览
+  return setCh > 0 ? setCh : (devCh || 2);
+}
+function devMixText(id) {
+  var d = devMixOf(id);
+  if (!d || !d.channels) return '';
+  return d.channels + ' 声道 · ' + (d.mixRate ? (d.mixRate + ' Hz') : '采样率未知') +
+         (d.mixBits ? (' · ' + d.mixBits + ' bit ' + (d.fmt || '')) : '');
+}
+function updateDevMixHint() {
+  var el = D('sp_trimchmsg'); if (!el) return;
+  var n = effectiveChannels();
+  var devCh = devMixChannels(ADV.device);
+  var t = devMixText(ADV.device);
+  var bk = (D('sp_backend') && D('sp_backend').value) || ADV.backend || 'wasapi';
+  var tail;
+  if (parseInt(ADV.channels, 10) > 0) tail = '；「输出声道数」= ' + parseInt(ADV.channels, 10) + '，以此为准';
+  else if (bk === 'wasapi-shared') tail = '；共享模式输出经 CoreAudio 系统混音，恒等于设备声道数';
+  else if (bk === 'wasapi') tail = '；「输出声道数」= 跟随源，硬件直通播放时实际声道随源文件变化';
+  else tail = '；「输出声道数」= 跟随源';
+  el.innerHTML = '按 <b>' + n + ' 声道</b> 显示' +
+    (devCh ? ('（CoreAudio 设备混音 ' + devCh + ' ch' + (t ? (' · ' + esc(t.replace(/^(\d+) 声道 · /, ''))) : '') + '）') : '') + tail;
+}
+function repaintTrims() {
+  var g = document.querySelector('#setpage .trimgrid');
+  if (g) { g.innerHTML = trimFields(effectiveChannels()); bindTrims(); }
+  updateDevMixHint();
+}
+function applyTrimChannels() { repaintTrims(); }
+window.devMixText = devMixText;
+window.updateDevMixHint = updateDevMixHint;
+window.repaintTrims = repaintTrims;
+window.effectiveChannels = effectiveChannels;
+
 // Nx 滤波器下拉默认值：跟随 1x
 (function () {
   var nx = D('sFiltNx');
@@ -3989,13 +4050,28 @@ function wbApply() {
 function loadDeviceList() {
   var bk = ADV.backend || 'wasapi';
   api('/api/devices').then(function (j) {
-    var sel2 = D('sp_device'); if (!sel2) return;
+    var list = j.devices || [];
+    list.forEach(function (d) {
+      if (d && d.id) {
+        DEVMIX[d.id] = {
+          channels: d.channels || 0,
+          mixRate: d.mixRate || 0,
+          mixBits: d.mixBits || 0,
+          fmt: d.mixFmt || ''
+        };
+      }
+    });
+    var sel2 = D('sp_device');
+    if (!sel2) { updateDevMixHint(); return; }
     var h = '<option value="">' +
       ((bk === 'wasapi' || bk === 'wasapi-shared') ? '默认设备' : '（此后端没有本地设备）') +
       '</option>';
-    var list = j.devices || [];
     list.forEach(function (d) {
-      h += '<option value="' + esc(d.id) + '">' + esc(d.name) + (d.default ? '（默认）' : '') + '</option>';
+      var dm = DEVMIX[d.id];
+      h += '<option value="' + esc(d.id) + '">' + esc(d.name) +
+           (d.default ? '（默认）' : '') +
+           (dm && dm.channels ? ('  ·  ' + dm.channels + 'ch' + (dm.mixRate ? ('/' + (dm.mixRate / 1000) + 'k') : '')) : '') +
+           '</option>';
     });
     sel2.innerHTML = h;
     sel2.value = ADV.device || '';
@@ -4003,8 +4079,10 @@ function loadDeviceList() {
       ADV.device = this.value;
       if (bk === 'wasapi') loadRates();   // 只有 CoreAudio 独占能查设备支持的采样率
       saveSettings();
+      repaintTrims();
       toast('输出设备已选择，下次播放生效');
     };
+    repaintTrims();
   }).catch(function () { });
 }
 
@@ -5595,8 +5673,13 @@ function populateCastDevices() {
       if (s.options[k].value === want) { s.value = want; break; }
     }
   });
-  // 第一次发现有设备时自动选中并写回设置（用户不用手填设备地址）
-  if (!saved && _castDevices.length) syncUpnpDev(castDevValue(_castDevices[0]));
+  // 第一次发现有设备时自动在界面回显（绝不在后台静默保存触发 saveSettings）
+  if (!saved && _castDevices.length) {
+    var defVal = castDevValue(_castDevices[0]);
+    ADV.upnpDev = defVal;
+    if (D('sp_cast_dev')) D('sp_cast_dev').value = defVal;
+    if (D('sp_upnp_dev')) D('sp_upnp_dev').value = defVal;
+  }
   backendHint();   // 下拉刚填好，后端提示里的渲染器名字要跟着刷新（否则会显示"未选择渲染器"）
 }
 function syncUpnpDev(value) {
@@ -5660,7 +5743,6 @@ function renderNaaEndpoints(res) {
         s.selectedIndex = 0;
         ADV.naaHost = s.value;
         if (D('sp_naahost')) D('sp_naahost').value = s.value;
-        saveSettings();
       }
     }
   }
@@ -5974,8 +6056,10 @@ var QMODAL = { file: '', req: 0 };
 function qFmt(v, digits, unit) {
   // 数值守卫（Q-3 的同一口径）：undefined/null/NaN/Infinity 一律回 '-'，不显示 "NaN"
   if (v === undefined || v === null || typeof v !== 'number' || !isFinite(v)) return '-';
-  return v.toFixed(digits) + (unit || '');
+  if (v <= -299 && v > -1e6) return '不适用';
+  return v.toFixed(digits !== undefined ? digits : 2) + (unit || '');
 }
+window.qFmt = qFmt;
 function qRow(label, val, hint) {
   return '<div style="display:flex;justify-content:space-between;gap:12px;padding:5px 0;border-bottom:1px solid var(--line)">' +
          '<span style="color:var(--txt2);font-size:12px">' + esc(label) + '</span>' +
@@ -6697,6 +6781,7 @@ function renderSettingsPage() {
      + '<button class=stab data-g=adv>高级</button>'
      // 2026-10-23 用户 261023-04 #2：EQ 与房间校正从左侧主导航移到这里，单开一个页签。
      + '<button class=stab data-g=eq>EQ</button>'
+     + '<button class=stab data-g=cal>声音校准</button>'
      + '<button class=stab data-g=meta>元数据</button>'
      // 2026-10-24（用户 261024-01 #5）：「流媒体」从「高级」拆出来的独立页签。
      + '<button class=stab data-g=stream>流媒体</button>'
@@ -6780,8 +6865,9 @@ function renderSettingsPage() {
        + num({ id: 'sp_ramp', label: '音量渐变（毫秒）' }, ADV.ramp, 0, 2000, 10, '0 = 立即生效（可能爆音）')
        + '<div class="sfld wide"><div id=sp_backendmsg class=hint></div></div>')
      + '<div id=sp_trimwrap>' + sgroup('声道音量微调', '按声道名标注，0 dB = 不动',
-         '<div class="sfld wide"><div class=trimgrid>'+ trimFields(CH) + '</div>' +
-         '<div class=hint>显示的是「输出声道数」对应的实际声道。2 = 左/右；5.1 = 左/右/中置/低音/左环绕/右环绕；7.1 再加左后/右后</div></div>') + '</div>'
+         '<div class="sfld wide"><div class=trimgrid>'+ trimFields(effectiveChannels()) + '</div>' +
+         '<div class=hint id=sp_trimchmsg style="margin-top:8px"></div>' +
+         '<div class=hint style="margin-top:4px">显示的是「输出声道数」对应的实际声道。2 = 左/右；5.1 = 左/右/中置/低音/左环绕/右环绕；7.1 再加左后/右后</div></div>') + '</div>'
      + '</div>';
      // 261024-02 #5：用户明确要求「输出栏位下的 UPnP 投放功能多余」⟹ 整块删除
      // （原「投放（UPnP）」快捷区 + 「投放实时状态」网格）。投放的入口统一挪到
@@ -6955,8 +7041,11 @@ function renderSettingsPage() {
        + chk('sp_loud', '等响度补偿', D('sLoud').checked, '音量越低低频提升越多'))
      + '</div>';
 
-  // ---------- EQ 与房间校正（用户 261023-04 #2：从主导航移进设置页的独立页签）----------
+  // ---------- EQ（PEQ 20段 + 耳机 EQ OPRA） ----------
   h += '<div class=spane data-g=eq>' + eqSettingsHtml() + '</div>';
+
+  // ---------- 声音校准（Q-9 独立页签：房间测量向导 + REW/AutoEq 文本 + 房间校正 IR WAV） ----------
+  h += '<div class=spane data-g=cal>' + calSettingsHtml() + '</div>';
 
   // ---------- 流媒体（用户 261024-01 #5/#6：从「高级」拆成独立页签 + 多服务器 + DLNA 归位）----------
   h += '<div class=spane data-g=stream>'
@@ -7215,6 +7304,7 @@ function renderSettingsPage() {
     backendHint();
     applyBackendState();
     loadDeviceList();        // CoreAudio 列端点，UPnP/Null 没有本地设备
+    repaintTrims();
     // 261024-01 #9/#11：切到 UPnP 时自动发现目标（用户不用手填设备地址）
     // 2026-10-25（用户指令「不可用的要隐藏」）：NAA 已从后端下拉移除，对应分支一并删除；
     // discoverNaa() 本体保留（无副作用），但不再有 UI 入口。
@@ -7276,10 +7366,9 @@ function renderSettingsPage() {
   D('sp_ch').onchange = function () {
     ADV.channels = parseInt(this.value, 10) || 0;
     saveSettings();
-    var g = document.querySelector('#setpage .trimgrid');
-    if (g) { g.innerHTML = trimFields(this.value); bindTrims(); }   // 标签跟着声道布局换
+    repaintTrims();
   };
-  bindTrims();
+  repaintTrims();
   // 2026-10-24（用户 261024-01 #12）：比特率 / 封装永远可选。
   // 在输出 PCM 时改这两个控件 = 用户明确想要 DSD ⟹ 输出模式自动联动到 DSD（并 toast 说明），
   // 不再出现"灰掉点不了"的控件。
@@ -7752,25 +7841,46 @@ function eqSettingsHtml() {
     + '<div id=eqPresetCards style="display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:12px"></div>'
     + '<div id=eqTargetCurveInfo style="margin-top:16px;padding:14px 16px;background:var(--field);border:1px solid var(--line);border-radius:8px;font-size:12.5px;color:var(--txt2);line-height:1.6;display:none"></div>'
     + '</div>');
+  return h;
+}
+
+/* 声音校准页签（Q-9 独立页签）：① 房间测量向导 ② 校正文件（REW / AutoEq 文本）③ 房间校正 IR（WAV + GPU 卷积） */
+function calSettingsHtml() {
+  var h = '';
+  // 1. 房间校正（测量向导）
+  h += '<div id=roomCorrCard>' + sgroup('房间校正（测量向导）', 'Farina 对数扫频 → 反卷积 → 心理声学平滑 → 目标曲线 → 最小相位校正 FIR · 多声道 2.0~7.1.4',
+      '<div class="sfld wide"><div class="in-stat-grid" style="grid-template-columns:repeat(auto-fit,minmax(250px,1fr))">'
+    + '<div class=in-stat-item><span class=lbl>算法版本</span><span class="val sm">CoreAudio 测量链路</span>' +
+      '<div class=rcsub>room_correction.h · room_measurement.h · room_transport_coreaudio.h</div></div>'
+    + '<div class=in-stat-item><span class=lbl>支持声道布局</span><span class="val sm">2.0 ~ 7.1.4（6 种）</span>' +
+      '<div class=rcsub>2.0 / 2.1 / 5.1 / 7.1 / 5.1.2 / 7.1.4 · 带 .1 的 LFE 分频 80 Hz</div></div>'
+    + '<div class=in-stat-item><span class=lbl>当前状态</span><span class="val sm" id=rcStatus>未测量</span>' +
+      '<div class=rcsub id=rcStatusSub>点「开始向导」跑一次测量</div></div>'
+    + '</div></div>'
+    + '<div class="sfld wide" style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">'
+    + '<button class="btn pri" id=bRoomWiz type=button>开始向导</button>'
+    + '<button class="btn" id=bRoomDl type=button style="display:none">下载校正集</button>'
+    + '<span class=rcnote id=rcHint>分 7 步走完一次测量（选布局 → 摆麦 → 测各声道 → 质检 → 生成校正集）。</span>'
+    + '</div>'
+    + '<div class="sfld wide"><div class=rcnote>测量结果（每声道校正 FIR，32-bit float）保存到 <code>data/roomcorr/</code>；'
+    + '应用后由播放链路的 FIR 卷积执行（与下面「校正文件 → 脉冲响应 IR」共用同一个卷积器）。<br>'
+    + '测量会<strong>真的出声</strong>：每个声道一段对数扫频，默认电平 −20 dBFS，开始前会让你确认设备与时长。</div></div>'
+    ) + '</div>';
+
   // 2. EQ 文件（REW / AutoEq 文本）
   h += sgroup('EQ 文件（REW / AutoEq 文本）', '按文件里的 Filter 行生成双二阶滤波器组',
       '<div class="sfld wide"><label>EQ 文件路径' + tip('每行形如 Filter 1: ON PK Fc 1000 Hz Gain -3.0 dB Q 1.41') + '</label>'
     + '<input type=text id=sp_eq value="' + esc(ADV.eq || '') + '" placeholder="' + (SEP === '/' ? '/Users/你的用户名/Music/headphone-eq.txt' : 'D:\\Music\\headphone-eq.txt') + '"></div>');
+
   // 3. 房间校正 IR（WAV 路径 + GPU 卷积开关）
   h += sgroup('房间校正 IR（WAV 脉冲响应）', '把房间 / 耳机脉冲响应用 FIR 卷积叠进播放链路',
       '<div class="sfld wide"><label>IR 脉冲响应卷积文件（WAV）' + tip('留空 = 不做卷积；支持立体声 / 多声道 FIR 房间校正') + '</label>'
     + '<input type=text id=sp_ir value="' + esc(ADV.ir || '') + '" placeholder="' + (SEP === '/' ? '/Users/你的用户名/Music/room.wav' : 'D:\\Music\\room.wav') + '"></div>'
-    // 2026-10-26（用户截图指出：.app 里明明打包了 librtagpu.dylib，这行却一直显示"需要就位"）：
-    //   根因是这句标题是**写死的静态文案**，跟后端库真实状态无关 —— 属于文案缺陷，不是功能缺陷。
-    //   改为先给一个中性标题，页面加载后由 applyGpuLabel() 按 /api/gpu 的真实探测结果覆盖
-    //   （探测字段见下方 api('/api/gpu')：metal=库在、metalUsable=真能跑）。
     + chk('sp_irgpu', '卷积走 GPU 硬件加速（检测中…）', ADV.irgpu == 1,
           '⚠️ macOS 上不建议开启：实测（Apple M4）卷积走 GPU 在任何 IR 长度下都比 CPU 慢 3.4~8.3 倍。'
           + '原因是 mac 的 GPU 后端把 FFT 留在 CPU、GPU 只做逐点复数乘加，而生产每块只有 4096 样，'
           + '远低于 GPU 的盈亏平衡点（实测需 n≥32768 才翻盘）。'
           + '功能保留可用（数值正确），但默认关闭。详见 docs/GPU卷积与升频效率细查.md')
-    // 评审 #11：这里原来还有一个「保存 EQ 与房间校正设置」按钮，与底部全局「保存设置」重复 → 移除；
-    // sp_eq / sp_ir / sp_irgpu 的值本来就会随 saveSettings 一起提交，不需要第二个主操作。
     );
   return h;
 }

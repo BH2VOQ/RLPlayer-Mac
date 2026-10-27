@@ -1005,7 +1005,7 @@ h += "#npPage .npedge{display:none}";
     //   内容超过一屏时 auto 不产生额外空间，它自然排在内容末尾跟着滚。
     //   这既满足"做进各页面里"（它属于该页签自己的 DOM），又不会有悬空感。
     h += ".spane{display:none}.spane.on{display:flex;flex-direction:column;min-height:100%;box-sizing:border-box}";
-    h += ".trimgrid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px}";
+    h += ".trimgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(148px,1fr));gap:10px}";
     // 2026-10-24（用户 261024-01 #5）：流媒体多服务器列表 + 行内操作
     h += ".srvlist{display:flex;flex-direction:column;gap:8px}";
     h += ".srvrow{display:grid;grid-template-columns:9px minmax(0,1fr) auto;align-items:center;gap:9px 12px;padding:10px 13px;border:1px solid var(--line);border-radius:10px;background:var(--field);transition:.13s}";

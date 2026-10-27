@@ -169,7 +169,15 @@ static unsigned long current_pid() {
 #include <CoreAudio/CoreAudio.h>
 #include <CoreFoundation/CoreFoundation.h>
 // ⚠️ CoreAudio 的 C 结构 ::AudioBuffer 与 rta::audio::AudioBuffer 撞名：裸用一律限定化（见下方词边界替换）
-struct MacDevInfo { std::string id, name; bool isDefault; bool hasOutput; uint32_t nominalRate; };
+struct MacDevInfo {
+    std::string id, name;
+    bool isDefault{false};
+    bool hasOutput{false};
+    uint32_t nominalRate{0};
+    int channels{0};
+    int mixBits{0};
+    std::string mixFmt{"unknown"};
+};
 static std::string mac_cfstr(CFStringRef s) {
     if (!s) return "";
     const CFIndex len = ::CFStringGetLength(s);
@@ -219,6 +227,38 @@ static std::vector<MacDevInfo> mac_enum_devices() {
         AudioObjectPropertyAddress raddr{kAudioDevicePropertyNominalSampleRate,
                                          kAudioDevicePropertyScopeOutput, kAudioObjectPropertyElementMain};
         if (::AudioObjectGetPropertyData(d, &raddr, 0, nullptr, &rsz, &rate) == noErr) mi.nominalRate = (uint32_t)rate;
+
+        // Q-1: CoreAudio 输出流混音声道数与流格式探测
+        if (mi.hasOutput) {
+            AudioObjectPropertyAddress saddr{kAudioDevicePropertyStreamConfiguration,
+                                             kAudioDevicePropertyScopeOutput, kAudioObjectPropertyElementMain};
+            UInt32 csz = 0;
+            if (::AudioObjectGetPropertyDataSize(d, &saddr, 0, nullptr, &csz) == noErr && csz > 0) {
+                std::vector<uint8_t> abuf(csz);
+                ::AudioBufferList* abl = reinterpret_cast<::AudioBufferList*>(abuf.data());
+                if (::AudioObjectGetPropertyData(d, &saddr, 0, nullptr, &csz, abl) == noErr) {
+                    for (UInt32 bi = 0; bi < abl->mNumberBuffers; ++bi) {
+                        mi.channels += abl->mBuffers[bi].mNumberChannels;
+                    }
+                }
+            }
+            AudioStreamBasicDescription asbd{};
+            UInt32 fsz = sizeof(asbd);
+            AudioObjectPropertyAddress faddr{kAudioDevicePropertyStreamFormat,
+                                             kAudioDevicePropertyScopeOutput, kAudioObjectPropertyElementMain};
+            if (::AudioObjectGetPropertyData(d, &faddr, 0, nullptr, &fsz, &asbd) == noErr) {
+                if (asbd.mSampleRate > 0) mi.nominalRate = (uint32_t)asbd.mSampleRate;
+                mi.mixBits = (int)asbd.mBitsPerChannel;
+                if (asbd.mFormatFlags & kAudioFormatFlagIsFloat) mi.mixFmt = "float32";
+                else if (asbd.mFormatFlags & kAudioFormatFlagIsSignedInteger) mi.mixFmt = "pcm";
+                else mi.mixFmt = "pcm";
+            }
+            if (mi.channels <= 0) mi.channels = 2;
+            if (mi.nominalRate <= 0) mi.nominalRate = 44100;
+            if (mi.mixBits <= 0) mi.mixBits = 32;
+            if (mi.mixFmt.empty() || mi.mixFmt == "unknown") mi.mixFmt = "float32";
+        }
+
         out.push_back(std::move(mi));
     }
     return out;
@@ -8405,7 +8445,7 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
     if (rq.path.rfind("/api/settings", 0) == 0) {
         ct = "application/json; charset=utf-8";
         const std::string sp = path_in_exe_dir("rlplayer-settings.conf");
-        if (rq.method == "POST") {
+        if (rq.method == "POST" && !rq.body.empty()) {
             // 2026-10-23（真实事故后加固）：旧实现 std::ios::trunc + 只写本次提交的键 ——
             // 任何「只提交部分键」的客户端都会把其余设置整份清空。
             // 事故复现：测试脚本只 POST eq=… 一个键 → backend/volume 等被抹掉 → 重启后回落
@@ -8537,7 +8577,16 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
                 if (anyChange) j << ",\"eqChanged\":" << (eqChanged ? "true" : "false")
                                  << ",\"irChanged\":" << (irChanged ? "true" : "false");
                 if (hotReloaded) j << ",\"hotReload\":true";
-                j << "}";
+                j << ",\"kv\":{";
+                bool firstK = true;
+                for (const auto& kk : order) {
+                    const auto itv = merged.find(kk);
+                    if (itv == merged.end()) continue;
+                    if (!firstK) j << ",";
+                    firstK = false;
+                    j << "\"" << jesc(kk) << "\":\"" << jesc(itv->second) << "\"";
+                }
+                j << "}}";
                 return j.str();
             }
         }
@@ -8595,7 +8644,11 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
             if (!first) j << ",";
             first = false;
             j << "{\"id\":\"" << jesc(d.id) << "\",\"name\":\"" << jesc(d.name) << "\""
-              << ",\"default\":" << (d.isDefault ? "true" : "false") << "}";
+              << ",\"default\":" << (d.isDefault ? "true" : "false")
+              << ",\"channels\":" << d.channels
+              << ",\"mixRate\":" << d.nominalRate
+              << ",\"mixBits\":" << d.mixBits
+              << ",\"mixFmt\":\"" << jesc(d.mixFmt) << "\"}";
         }
         j << "]}";
         return j.str();
