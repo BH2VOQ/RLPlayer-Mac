@@ -3294,11 +3294,14 @@ function cueQuery(cs, ce) {
   return '&cue_start=' + encodeURIComponent(cs) +
          (ce >= 0 ? ('&cue_end=' + encodeURIComponent(ce)) : '');
 }
-function playPath(f, cs, ce) {
+function playPath(f, cs, ce, quiet) {
   S.lastCur = f;
   api('/api/play', 'file=' + encodeURIComponent(f) + cueQuery(cs, ce) + '&' + params()).then(function (j) {
     if (j && j.ok === false) { toast(j.error || '播放失败'); return; }
-    toast('开始播放'); loadQ();
+    // quiet：由调用方给出更准确的提示（如「已停止投放，输出回到本机」），
+    // 不要再叠一句「开始播放」——2026-10-28 用户实测：点停止投放后显示"开始播放"很困惑。
+    if (!quiet) toast('开始播放');
+    loadQ();
   });
 }
 function addPath(f) {
@@ -6325,7 +6328,7 @@ function castStop() {
     ADV.backend = back;
     saveSettings();
     toast('已停止投放，输出回到 ' + back);
-    if (S.lastCur) playPath(S.lastCur);
+    if (S.lastCur) playPath(S.lastCur, undefined, undefined, true);   // 静默：上面的 toast 才是本次操作的结果
     pollCastState(true);
   }).catch(function () { toast('停止投放失败'); });
 }

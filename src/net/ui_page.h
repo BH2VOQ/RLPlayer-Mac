@@ -809,7 +809,9 @@ h += "#npPage .npedge{display:none}";
     // 弹层与信号链（2026-10-25 Apple Music / Roon 高保真信号链重构）
     //   根因修复：之前 .cnode .k 与播放控制键 .k（width:32px;height:32px;display:grid）撞类名，
     //   导致信号链每个小标题都被撑成 32x32 的方块！且顶部 BIT-PERFECT 横幅也被画了红色圆点。
-    h += "#modal{position:fixed;inset:0;z-index:40;background:rgba(0,0,0,.42);backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px);display:none;place-items:center;padding:16px;box-sizing:border-box;overflow:auto}";
+    h += "#modal{position:fixed;inset:0;z-index:120;background:rgba(0,0,0,.42);backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px);display:none;place-items:center;padding:16px;box-sizing:border-box;overflow:auto}";
+    // 2026-10-28（用户实测）：z-index 原为 40，低于 #npPage(70) ⟹ 单曲页里「推送到设备」
+    // 的弹窗被整页压住看不见。弹窗必须盖住所有页面层（npPage 70 / 抽屉 6 / 底栏 15）。
     h += "#modal.on{display:grid}";
     h += ".mcard{width:min(560px,92vw);max-height:calc(100vh - 48px);display:flex;flex-direction:column;overflow:hidden;background:var(--bg2);border:1px solid var(--line2,var(--line));border-radius:18px;box-shadow:0 28px 80px rgba(0,0,0,.35)}";
     h += ".mhead{display:flex;align-items:center;gap:10px;padding:15px 20px;border-bottom:1px solid var(--line);font-size:15px;font-weight:700;letter-spacing:-.2px;flex:none;background:var(--bg2)}";
