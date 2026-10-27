@@ -576,6 +576,42 @@ int main() {
     }
 
     // =====================================================================
+    // 9. 预发布/beta 接收开关（b7: update_available 纯函数）
+    // =====================================================================
+    std::printf("\n--- 9. 预发布/beta 接收开关 ---\n");
+    {
+        // 9.1 本机 1.1.4 + 远端 1.1.5-beta.1: allowPre=false ⟹ false; allowPre=true ⟹ true
+        ck(!update_available("1.1.5-beta.1", "1.1.4", false),
+           "1.1.4 vs 1.1.5-beta.1 (allowPre=false) ⟹ false");
+        ck(update_available("1.1.5-beta.1", "1.1.4", true),
+           "1.1.5-beta.1 vs 1.1.4 (allowPre=true) ⟹ true");
+
+        // 9.2 本机 1.1.4 + 远端 1.1.5: 两种情况都 true
+        ck(update_available("1.1.5", "1.1.4", false),
+           "1.1.4 vs 1.1.5 (allowPre=false) ⟹ true");
+        ck(update_available("1.1.5", "1.1.4", true),
+           "1.1.4 vs 1.1.5 (allowPre=true) ⟹ true");
+
+        // 9.3 本机 1.1.4-beta.2 + 远端 1.1.4-beta.1: false（不倒退）
+        ck(!update_available("1.1.4-beta.1", "1.1.4-beta.2", false),
+           "1.1.4-beta.2 vs 1.1.4-beta.1 (allowPre=false) ⟹ false");
+        ck(!update_available("1.1.4-beta.1", "1.1.4-beta.2", true),
+           "1.1.4-beta.2 vs 1.1.4-beta.1 (allowPre=true) ⟹ false");
+
+        // 9.4 边界测试：相同版本 ⟹ false
+        ck(!update_available("1.1.4", "1.1.4", false),
+           "1.1.4 vs 1.1.4 (allowPre=false) ⟹ false");
+        ck(!update_available("1.1.4", "1.1.4", true),
+           "1.1.4 vs 1.1.4 (allowPre=true) ⟹ false");
+
+        // 9.5 边界测试：本机 1.1.4-rc.1 + 远端 1.1.4 (正式版): 两种情况都 true（正式版比 rc 高）
+        ck(update_available("1.1.4", "1.1.4-rc.1", false),
+           "1.1.4-rc.1 vs 1.1.4 (allowPre=false) ⟹ true");
+        ck(update_available("1.1.4", "1.1.4-rc.1", true),
+           "1.1.4-rc.1 vs 1.1.4 (allowPre=true) ⟹ true");
+    }
+
+    // =====================================================================
     // 汇总
     // =====================================================================
     std::printf("\n=== 汇总：%d 通过 / %d 失败 ===\n", g_pass, g_fail);

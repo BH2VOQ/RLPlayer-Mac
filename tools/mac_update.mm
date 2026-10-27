@@ -197,6 +197,33 @@ namespace rta::update {
 
 namespace detail_native {
 
+// 读 settings 配置中的 updbeta：默认 false
+inline bool LoadUpdBeta() {
+    std::string base;
+    if (const char* env = std::getenv("RLPLAYER_STATE_DIR")) {
+        if (*env) {
+            base = env;
+            while (!base.empty() && (base.back() == '\\' || base.back() == '/')) base.pop_back();
+        }
+    }
+    if (base.empty()) base = rta::platform::config_dir_utf8();
+    if (base.empty()) base = rta::platform::module_dir_utf8();
+    const std::string path = rta::platform::join(base, "rlplayer-settings.conf");
+    std::ifstream f(path);
+    if (!f) return false;
+    std::string line;
+    while (std::getline(f, line)) {
+        if (!line.empty() && line.back() == '\r') line.pop_back();
+        const size_t eq = line.find('=');
+        if (eq == std::string::npos) continue;
+        if (line.substr(0, eq) == "updbeta") {
+            const std::string v = line.substr(eq + 1);
+            return (v == "1" || v == "true");
+        }
+    }
+    return false;
+}
+
 // ---------------- token 脱敏 ----------------
 // 任何可能进 UI/日志的字符串都必须过这里。
 // 为什么连"长度"都不暴露：长度可用于缩小暴力破解范围。
@@ -551,7 +578,8 @@ void begin_check(ProgressFn progress, DoneFn done) {
 
         // ---- 取清单（公开路径：匿名；私有路径：仍要带 token，因为内容在私有仓库里）----
         const auto man = detail_native::Fetch(manifestUrl, token, 15000);
-        result = evaluate_update_check(RLPLAYER_VERSION, man.ok, man.status, man.body);
+        const bool allowBeta = detail_native::LoadUpdBeta();
+        result = evaluate_update_check(RLPLAYER_VERSION, man.ok, man.status, man.body, allowBeta);
         // 2026-10-26（用户实测反馈「检查失败：网络不可用」，但界面上看不到到底为什么）：
         //   原来的 transport 错误串完全没有出口，用户只能看到一句笼统的"网络不可用"，
         //   连是 DNS、TLS、超时还是被拦都不知道 —— 排查时唯一能做的就是再点一次。

@@ -137,6 +137,7 @@ var ADV = {
   device: '', bits: 0, taps: 0, atten: 0, transition: 0, phase: '',
   modcut: 0, moddith: -1, ir: '', irgpu: 0, ramp: 0, theme: 'dark', uiStyle: 'apple',
   eq: '', modorder: 5, modfamily: 'dsd', gpuvendor: 'auto', directsdm: 0, dsdKind: 'fir', dsdConv: 'narrow',
+  updbeta: 0,
   // 输出后端与多声道
   // 261024-01 #9/#11：upnpDev = UPnP/DLNA 渲染器（设备描述 URL）；naaHost 自动发现填，
   // 手动框只是折叠兜底（用户原话：NAA 端点这个选项不应该出现，应该自动获取）。
@@ -396,6 +397,14 @@ function bindUpdateCard() {
   if (c) c.onclick = function () { updCheck(true); };
   var i = D('sp_updinstall');
   if (i) i.onclick = function () { updInstall(); };
+  var beta = D('sp_updbeta');
+  if (beta) {
+    beta.checked = (ADV.updbeta == 1);
+    beta.onchange = function () {
+      ADV.updbeta = this.checked ? 1 : 0;
+      saveSettings();
+    };
+  }
   var b = D('updateBadge');
   if (b) b.onclick = function () {
     // 点徽标 = 直接去「诊断」页看更新卡片（不静默装，装之前要让用户看见版本号与说明）
@@ -3791,6 +3800,7 @@ function saveSettings(immediate) {
         + '&directsdm=' + (ADV.directsdm ? 1 : 0)
         + '&dsdkind=' + (ADV.dsdKind || 'fir') + '&dsdconv=' + (ADV.dsdConv || 'narrow')
         + '&scanthreads=' + (ADV.scanThreads !== undefined ? ADV.scanThreads : 0)
+        + '&updbeta=' + (ADV.updbeta ? 1 : 0)
         + '&opraproduct=' + encodeURIComponent(ADV.opraproduct || '')
         + '&oprapreset=' + encodeURIComponent(ADV.oprapreset || '')
         // 元数据补全（P1.5）：metaon/metallm 固定两键；源开关按注册表逐源写 metasrc_<id>; metasummary 默认0
@@ -3812,6 +3822,10 @@ function loadSettings() {
     var kv = j.kv || {};
     if (kv.scanThreads !== undefined || kv.scanthreads !== undefined) {
       ADV.scanThreads = parseInt(kv.scanThreads || kv.scanthreads, 10) || 0;
+    }
+    if (kv.updbeta !== undefined) {
+      ADV.updbeta = (kv.updbeta === '1' || kv.updbeta === 'true') ? 1 : 0;
+      if (D('sp_updbeta')) D('sp_updbeta').checked = (ADV.updbeta === 1);
     }
     SET_KEYS.forEach(function (p) {
       if (kv[p[1]] !== undefined) ADV[p[1]] = kv[p[1]];
@@ -7132,6 +7146,8 @@ function renderSettingsPage() {
        + '<b style="font-size:12.5px" id=sp_vercur></b>'
        + '<button class=btn id=sp_updcheck>检查更新</button>'
        + '<button class="btn pri" id=sp_updinstall style="display:none">立即更新</button>'
+       + '<label class=chk style="margin-left:4px;font-size:12px"><input type=checkbox id=sp_updbeta' + (ADV.updbeta == 1 ? ' checked' : '') + '>'
+       + '<span>接收测试版（Beta）</span>' + tip('开启后会接收包含 -beta / -rc 等预发布版本更新；关闭则只提示正式版') + '</label>'
        + '<span id=sp_updmsg style="font-size:11.5px;color:var(--mut2)"></span></div>'
        + '<div id=sp_updbar style="display:none;height:6px;border-radius:3px;background:var(--track);overflow:hidden;margin:10px 0 2px">'
        + '<i id=sp_updfill style="display:block;height:100%;width:0;background:linear-gradient(90deg,var(--acc),var(--acc2));transition:width .2s"></i></div>'
@@ -8980,6 +8996,7 @@ function collectSettings() {
   if (D('sp_inmon')) ADV.inMonitor = D('sp_inmon').checked ? 1 : 0;
   if (D('sp_inseconds')) ADV.inSeconds = parseFloat(D('sp_inseconds').value) || 0;
   if (D('sp_inout')) ADV.inOut = (D('sp_inout').value || '').trim();
+  if (D('sp_updbeta')) ADV.updbeta = D('sp_updbeta').checked ? 1 : 0;
   // 同步回快捷面板
 
   D('sRate').value = D('sp_rate').value;

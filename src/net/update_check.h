@@ -256,6 +256,17 @@ inline bool is_newer(const std::string& remote, const std::string& local) {
     return compare_versions(parse_version(remote), parse_version(local)) == VersionCmp::Greater;
 }
 
+// 预发布/beta 接收策略判定：
+// allowPre=false 时：远端带预发布标签 ⟹ 不算有更新（即使版本号更高，等待正式版）；
+// 只有当 remote 比 local 更高，且满足预发布过滤策略时才返回 true。
+inline bool update_available(const std::string& remote, const std::string& local, bool allowPre) {
+    const Version r = parse_version(remote);
+    const Version l = parse_version(local);
+    if (!r.valid || !l.valid) return false;
+    if (!allowPre && r.has_pre()) return false;
+    return compare_versions(r, l) == VersionCmp::Greater;
+}
+
 // ---------------------------------------------------------------------------
 // 2. SHA-256（自己实现，零外部依赖）
 //
@@ -578,9 +589,11 @@ struct CheckResult {
 
 // 把「HTTP 传输结果 + 本地版本」映射成决策。**这是整个检查流程的唯一判定入口**，
 // 原生壳只负责把 http 结果塞进来，不自己写 if —— 保证判定可离线测。
+// allowPre=false 时，即使远端有更高版本，只要带预发布标签就不提示更新（等正式版）。
 inline CheckResult evaluate_update_check(const std::string& localVersion,
                                         bool httpOk, int httpStatus,
-                                        const std::string& body) {
+                                        const std::string& body,
+                                        bool allowPre = false) {
     CheckResult r;
     r.status = httpStatus;
 
@@ -630,7 +643,7 @@ inline CheckResult evaluate_update_check(const std::string& localVersion,
         r.error = "本地版本号无法解析";
         return r;
     }
-    r.decision = (compare_versions(remote, local) == VersionCmp::Greater)
+    r.decision = update_available(m.version, localVersion, allowPre)
                      ? Decision::UpdateAvailable
                      : Decision::UpToDate;
     return r;

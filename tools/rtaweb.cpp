@@ -8882,6 +8882,7 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
                                            // 源开关 metasrc_<id> 按注册表动态放行(见下);
                                            // P3④b AI 综合开关 metasummary (默认0)
                                            "metaon", "metallm", "metasummary", "llmmonthlycap", "scanthreads", "scanThreads",
+                                           "updbeta",
                                            // ReplayGain / Album Gain
                                            "rg.mode", "rg_mode", "rgmode", "rg",
                                            "rg.preventClipping", "rg.preventclipping", "rg_preventclipping", "rgpreventclip",
