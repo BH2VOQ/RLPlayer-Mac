@@ -40,6 +40,7 @@
 // 成因分解是 RENDERFAIL 判据本体（tests/test_renderfail.cpp 直接驱动它），
 // macOS 侧必须继续提供同一套可观测性，否则等于把该能力弄丢而不是"删掉平台实现"。
 #include "audio/write_attrib.h"
+#include "platform/macos/pcm_format_validation.h"
 
 namespace rta::platform {
 namespace detail {
@@ -117,7 +118,8 @@ inline int device_max_channels(AudioDeviceID dev) {
     return ch;
 }
 
-// 设备当前物理格式（bit depth 由 mFormatFlags 推断）
+// 设备当前虚拟混音格式位深（kAudioDevicePropertyStreamFormat 对应 HAL 混音层/虚拟格式，
+// 非底层物理硬件流的物理格式 kAudioStreamPropertyPhysicalFormat；在此如实说明层级）
 inline int device_bit_depth(AudioDeviceID dev) {
     AudioObjectPropertyAddress addr{kAudioDevicePropertyStreamFormat,
                                     kAudioDevicePropertyScopeOutput,
@@ -238,7 +240,17 @@ inline void hw_volume_restore(AudioDeviceID dev, const HwVolumeState& st) {
     if (st.muteSaved) hw_mute_set(dev, st.mute);
 }
 
-// 设置设备物理格式（等价于"按源格式开独占"）。失败说明该格式不被接受。
+// 读取设备当前 StreamFormat（虚拟/混音层 ASBD）
+inline bool get_device_stream_format(AudioDeviceID dev, AudioStreamBasicDescription& outAsbd) {
+    AudioObjectPropertyAddress addr{kAudioDevicePropertyStreamFormat,
+                                    kAudioDevicePropertyScopeOutput,
+                                    kAudioObjectPropertyElementMain};
+    UInt32 size = sizeof(outAsbd);
+    std::memset(&outAsbd, 0, sizeof(outAsbd));
+    return ::AudioObjectGetPropertyData(dev, &addr, 0, nullptr, &size, &outAsbd) == noErr;
+}
+
+// 设置设备流格式（虚拟/混音格式，独占模式下向驱动申请源格式）。失败说明该格式不被接受。
 inline bool set_device_format(AudioDeviceID dev, uint32_t rate, int bits, int channels) {
     AudioStreamBasicDescription asbd{};
     asbd.mSampleRate = (Float64)rate;
@@ -489,22 +501,73 @@ public:
         }
 
         // 2) 按源格式设置设备物理格式 —— 这是 bit-perfect 的关键。
-        //    共享模式跳过（设备可能被其它客户端占用，物理格式归系统管）；
-        //    AUHAL 会按需做 int<->float32 换算（|v|<2^24 时精确）。
-        // 物理格式：不抢 Hog 也照样按源格式设置（保证采样率/位深正确）。
-        // 只有「共享」模式才跳过 —— 那时设备可能被别的客户端占用，物理格式归系统管。
-        if (!shared_ && !detail::set_device_format(device_, rate_, bits_, channels_)) {
-            // 回滚 hog
-            if (hogged_) { detail::set_hog_mode(device_, false); hogged_ = false; }
-            const DeviceCaps c = caps(spec.deviceId);
-            std::string supported;
-            for (uint32_t r : c.rates) supported += std::to_string(r) + " ";
-            fail(OutputError::UnsupportedFormat,
-                 "设备不支持 " + std::to_string(rate_) + " Hz / " + std::to_string(bits_) +
-                 " bit / " + std::to_string(channels_) + " ch（设备支持采样率: " +
-                 (supported.empty() ? std::string("未知") : supported) + "）");
-            device_ = kAudioObjectUnknown;
-            return false;
+        //    共享模式跳过设置设备格式（物理格式归系统/其他客户端管），但必须真实读回
+        //    当前生效的虚拟/混音格式，说明 client vs device 的区别。
+        //    独占模式：先尝试设置设备格式，设完之后真实读回 ASBD 校验！
+        //    若不符且无法安全适配（保持 pack 不变或无正确 pack），明确失败；绝不谎报！
+        actualPacking_ = macos::ContainerPacking::Packed16;
+        actualEffectiveBits_ = (uint32_t)bits_;
+        actualContainerBits_ = (uint32_t)bits_;
+        actualIsFloat_ = false;
+        formatFallbackNote_.clear();
+
+        if (!shared_) {
+            if (!detail::set_device_format(device_, rate_, bits_, channels_)) {
+                // 回滚 hog
+                if (hogged_) { detail::set_hog_mode(device_, false); hogged_ = false; }
+                const DeviceCaps c = caps(spec.deviceId);
+                std::string supported;
+                for (uint32_t r : c.rates) supported += std::to_string(r) + " ";
+                fail(OutputError::UnsupportedFormat,
+                     "设备不支持 " + std::to_string(rate_) + " Hz / " + std::to_string(bits_) +
+                     " bit / " + std::to_string(channels_) + " ch（设备支持采样率: " +
+                     (supported.empty() ? std::string("未知") : supported) + "）");
+                device_ = kAudioObjectUnknown;
+                return false;
+            }
+
+            // 设完后真 GetProperty 读取设备 StreamFormat ASBD，包括 rate, ch, bits, bytes, flags 校验
+            AudioStreamBasicDescription devAsbd{};
+            if (!detail::get_device_stream_format(device_, devAsbd)) {
+                if (hogged_) { detail::set_hog_mode(device_, false); hogged_ = false; }
+                fail(OutputError::Internal, "设置格式后无法读回设备实际格式(StreamFormat)");
+                device_ = kAudioObjectUnknown;
+                return false;
+            }
+
+            auto neg = macos::validate_and_negotiate_format(rate_, bits_, channels_, devAsbd);
+            if (!neg.accepted) {
+                if (hogged_) { detail::set_hog_mode(device_, false); hogged_ = false; }
+                fail(OutputError::UnsupportedFormat, "设备格式校验失败: " + neg.rejectReason);
+                device_ = kAudioObjectUnknown;
+                return false;
+            }
+
+            actualPacking_ = neg.acceptedPacking;
+            actualEffectiveBits_ = neg.effectiveBits;
+            actualContainerBits_ = neg.containerBits;
+            actualIsFloat_ = neg.isFloat;
+            formatFallbackNote_ = neg.fallbackNote;
+        } else {
+            // 共享模式：不设设备格式，但必须真实读回 ASBD 说明 client vs device 的区别
+            AudioStreamBasicDescription devAsbd{};
+            if (detail::get_device_stream_format(device_, devAsbd)) {
+                auto devAnalysis = macos::analyze_pcm_asbd(devAsbd);
+                std::string desc = devAnalysis.valid ? devAnalysis.description : "未知格式";
+                formatFallbackNote_ = "共享模式：客户端请求 " + std::to_string(rate_) + "Hz/" +
+                                      std::to_string(bits_) + "bit/" + std::to_string(channels_) +
+                                      "ch，设备当前为 " + std::to_string((uint32_t)devAsbd.mSampleRate) +
+                                      "Hz/" + desc + "（由系统混音重采样/位深转换）";
+            } else {
+                formatFallbackNote_ = "共享模式（无法读回设备混音格式，由系统混音转接）";
+            }
+            // 客户端发送给 AUHAL 的依然是用户请求的格式
+            if (bits_ == 16) actualPacking_ = macos::ContainerPacking::Packed16;
+            else if (bits_ == 24) actualPacking_ = macos::ContainerPacking::Packed24;
+            else actualPacking_ = macos::ContainerPacking::Int32;
+            actualEffectiveBits_ = (uint32_t)bits_;
+            actualContainerBits_ = (uint32_t)bits_;
+            actualIsFloat_ = false;
         }
 
         // 2b) 设备硬件音量：**不接管**（2026-10-25 用户明确要求，推翻上一版设计）。
@@ -725,17 +788,52 @@ public:
     }
 
     bool bit_perfect() const override {
-        // bit-perfect 的判据（2026-10-25 随 exclusive 开关调整）：
-        //   不经系统混音(shared==false) + 物理格式==源格式 + 增益 1.0 + 无 DSP
+        // bit-perfect 的判据（2026-10-25 随 exclusive 开关调整，2026-10-28 补格式校验）：
+        //   不经系统混音(shared==false) + 物理格式==源格式(无降级回退说明) + 增益 1.0 + 无 DSP
         //
         // ⚠️ **不再要求 hogged_**。原因：Hog 只保证「设备所有权独占」，
         // 与「位流是否被改动」无关 —— 不抢 Hog 时，只要不经系统混音器、
-        // 物理格式按源设置、增益 1.0，送到 DAC 的仍然是逐位相同的位流。
+        // 物理格式按源设置且真实读回完全匹配（formatFallbackNote_ 为空）、增益 1.0，
+        // 送到 DAC 的仍然是逐位相同的位流。
         // 系统音量（硬件标量）作用在 DAC 的模拟/数字音量级，不改变位流本身，
         // 这也是 macOS 上 bit-perfect 的通行判定（Roon / Audirvana 同）。
         //
+        // 若发生了 24-in-32 或 Float32 等回退，尽管精度未丢但容器改变或需转换，不视为严格 bit-perfect。
         // 反过来，抢了 Hog 但走了 DSP/增益，依然不是 bit-perfect —— 那个由引擎层判。
-        return opened_ && !shared_ && (gain_.load(std::memory_order_relaxed) == 1.0);
+        return opened_ && !shared_ && formatFallbackNote_.empty() &&
+               (gain_.load(std::memory_order_relaxed) == 1.0);
+    }
+
+    // ---------------- 只读实际生效格式（供主控 status / signal chain / UI 查询）----------------
+    // 读回的是真实 HAL 混音/虚拟层 (kAudioDevicePropertyStreamFormat) 或客户端协商格式
+    struct ActualFormatInfo {
+        uint32_t sampleRate = 0;
+        int channels = 0;
+        int bits = 0;                      // 容器宽度（位，如 16, 24, 32）
+        int effectiveBits = 0;             // 有效精度位数（如 Float32 为 24，24-in-32 为 24）
+        bool isFloat = false;              // 是否为浮点
+        macos::ContainerPacking packing = macos::ContainerPacking::Invalid;
+        std::string fallbackNote;          // 降级/回退说明（与请求完全一致时为空）
+    };
+
+    ActualFormatInfo actual_format() const {
+        std::lock_guard<std::mutex> lk(const_cast<std::mutex&>(mu_));
+        ActualFormatInfo info;
+        if (!opened_) return info;
+        info.sampleRate = rate_;
+        info.channels = channels_;
+        info.bits = (int)actualContainerBits_;
+        info.effectiveBits = (int)actualEffectiveBits_;
+        info.isFloat = actualIsFloat_;
+        info.packing = actualPacking_;
+        info.fallbackNote = formatFallbackNote_;
+        return info;
+    }
+
+    // 格式回退说明（若格式与请求真正完全一致则为空；非空表示存在回退或说明）
+    std::string bits_fallback_note() const {
+        std::lock_guard<std::mutex> lk(const_cast<std::mutex&>(mu_));
+        return formatFallbackNote_;
     }
 
     OutputError last_error_class() const override { return err_class_; }
@@ -865,6 +963,11 @@ private:
         underruns_.store(0);
         gain_.store(1.0, std::memory_order_relaxed);
         buffer_frames_ = 0;
+        actualPacking_ = macos::ContainerPacking::Packed16;
+        actualEffectiveBits_ = 0;
+        actualContainerBits_ = 0;
+        actualIsFloat_ = false;
+        formatFallbackNote_.clear();
     }
 
     std::mutex mu_;
@@ -903,6 +1006,13 @@ private:
 
     OutputError err_class_ = OutputError::None;
     std::string err_text_;
+
+    // 格式协商与读回校验记录
+    macos::ContainerPacking actualPacking_ = macos::ContainerPacking::Packed16;
+    uint32_t actualEffectiveBits_ = 0;
+    uint32_t actualContainerBits_ = 0;
+    bool actualIsFloat_ = false;
+    std::string formatFallbackNote_;
 };
 
 } // namespace rta::platform
