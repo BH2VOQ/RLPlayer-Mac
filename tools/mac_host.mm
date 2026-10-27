@@ -1227,6 +1227,24 @@ reject:
     (void)a; return YES;                                      // 关窗 = 退出
 }
 
+// 关窗路径计时（2026-10-28）：实测点红叉 0.42s vs ⌘Q 0.15s，差 0.27s 发生在
+// applicationWillTerminate **之前**（窗口关闭 → AppKit 终止流程）。这里打点确认卡在哪一段。
+- (void)windowWillClose:(NSNotification *)n {
+    (void)n;
+    fprintf(stderr, "RLPlayer: 窗口开始关闭 t=%lld\n",
+            (long long)([[NSDate date] timeIntervalSince1970] * 1000));
+}
+- (void)windowDidClose:(NSNotification *)n {
+    (void)n;
+    fprintf(stderr, "RLPlayer: 窗口已关闭 t=%lld\n",
+            (long long)([[NSDate date] timeIntervalSince1970] * 1000));
+}
+- (BOOL)windowShouldClose:(NSWindow *)sender {
+    fprintf(stderr, "RLPlayer: 窗口请求关闭 t=%lld\n",
+            (long long)([[NSDate date] timeIntervalSince1970] * 1000));
+    return YES;
+}
+
 - (void)applicationWillTerminate:(NSNotification *)n {
     (void)n;
     // 分段计时（2026-10-28 用户实测「关闭就会卡一下」）：每段都打点，日志里能看出卡在哪一步。
