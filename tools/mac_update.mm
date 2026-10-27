@@ -1034,6 +1034,11 @@ void begin_install(const CheckResult& plan, ProgressFn progress, InstallFn done,
         if (done) done(false, @"没有可用的更新计划");
         return;
     }
+    // 勾选状态可能在“检查完成”与“点击安装”之间改变，安装入口再次检查当前策略。
+    if (parse_version(plan.remoteVersion).has_pre() && !detail_native::LoadUpdBeta()) {
+        if (done) done(false, @"已关闭预发布更新，请重新检查正式版本");
+        return;
+    }
     // 2026-10-26 诊断：用户实测「下载地址不在白名单」，但日志里 url=[] 是空的。
     // 这行记录**入口看到的**原始值，用来区分"plan 本来就是空的"与"后面被改坏了"。
     {

@@ -402,7 +402,12 @@ function bindUpdateCard() {
     beta.checked = (ADV.updbeta == 1);
     beta.onchange = function () {
       ADV.updbeta = this.checked ? 1 : 0;
-      saveSettings();
+      if (!ADV.updbeta && UPD.info && /-/.test(String(UPD.info.version || ''))) {
+        UPD.stage = ''; UPD.info = null;
+        updInstallBtn(false); setUpdateBadge('');
+        updMsg('已关闭预发布更新，下次检查仅提示正式版');
+      }
+      saveSettings(true);
     };
   }
   var b = D('updateBadge');

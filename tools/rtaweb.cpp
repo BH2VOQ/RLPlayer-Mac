@@ -10343,7 +10343,12 @@ std::string rlapp::dispatch(const rta::net::HttpRequest& request, std::string& c
         }
         ~InFlight() { if (accepted) g_inFlight.fetch_sub(1, std::memory_order_relaxed); }
     } inFlight;
-    if (!inFlight.accepted) return "{\"ok\":false,\"error\":\"系统退出中\"}";
+    if (!inFlight.accepted) {
+        // 生命周期探测保持可用，但绝不再触达已收尾的业务单例。
+        if (request.path == "/api/ping")
+            return "{\"ok\":true,\"app\":\"RLPlayer\",\"shuttingDown\":true}";
+        return "{\"ok\":false,\"error\":\"系统退出中\"}";
+    }
     rta::net::HttpCancellationScope httpCancel(&g_shutdown);
     try {
         return handle(request, contentType);
