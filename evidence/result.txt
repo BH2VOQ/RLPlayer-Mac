@@ -4,6 +4,7 @@ PASS 17px_distinguishable_0_vs_1: {"diff":39,"count0":69,"count1":94}
 PASS 17px_distinguishable_0_vs_2: {"diff":45}
 PASS 17px_distinguishable_0_vs_3: {"diff":62}
 PASS 17px_distinguishable_svg_only_0_vs_1: {"diff":39}
+PASS seq_icon_has_three_horizontal_strokes: {"bands":3,"bandRanges":[[3,4],[7,8,9],[12,13]],"effectiveWidth":14,"longStrokeRows":[3,4,7,8,9,12,13]}
 PASS click_1_cycle: {"step":1,"ui":1,"server":1,"label":"列表循环（播到末尾回到第一首）"}
 PASS click_2_cycle: {"step":2,"ui":2,"server":2,"label":"单曲循环（重复当前这首）"}
 PASS click_3_cycle: {"step":3,"ui":3,"server":3,"label":"随机播放（不重复当前曲）"}

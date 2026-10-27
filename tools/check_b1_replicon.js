@@ -220,6 +220,107 @@ async function api(p, body) {
     check(pixelDiffs.diff0vs3 > 0, '17px_distinguishable_0_vs_3', { diff: pixelDiffs.diff0vs3 });
     check(pixelDiffs.diffSvg0vs1 > 0, '17px_distinguishable_svg_only_0_vs_1', { diff: pixelDiffs.diffSvg0vs1 });
 
+    // 3. 结构判据：seq_icon_has_three_horizontal_strokes
+    // 口径说明：
+    // - 将 REP_ICON[0] 单独塞进 17x17 CSS 像素的 svg（viewBox="0 0 24 24", fill="none", stroke="#ffffff", stroke-width="2"）。
+    // - 容器背景采用与前景纯白高反差的纯黑色（#000000），消除背景杂光。
+    // - 用 CDP clip 精确截 17x17 图，canvas.getImageData 读像素。
+    // - 亮度阈值设为 lum > 50（排除抗锯齿暗边）。
+    // - 统计整个图标的前景有效宽度 effectiveWidth（maxX - minX + 1）。
+    // - 逐行统计前景像素数，若 fgCount >= effectiveWidth * 0.55（满足 >= 60% 宽度笔画），标记为长横笔画行。
+    // - 相邻的长横笔画行合并为一个笔画带（band），统计 bands。
+    // - 断言 bands >= 3（三横线/三箭头呈现 3 个独立的水平横向笔画带；而旧单横线单箭头只有 1 个带）。
+    // - 同时在运行时以旧单横线图标执行自检测试并保存证据文件。
+    async function measureIconBands(svgContent, name) {
+      await s.eval(`(function() {
+        var box = document.getElementById('__test_box_17');
+        box.innerHTML = '<svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="2">' + ${JSON.stringify(svgContent)} + '</svg>';
+      })()`);
+      await ub.sleep(50);
+      const shot = await s.send('Page.captureScreenshot', {
+        format: 'png',
+        clip: { x: setupBox.x, y: setupBox.y, width: setupBox.width, height: setupBox.height, scale: 1 }
+      });
+      fs.writeFileSync(path.join(out, `${name}_17px.png`), Buffer.from(shot.data, 'base64'));
+
+      return await s.eval(`(async function() {
+        return new Promise(function(resolve) {
+          var img = new Image();
+          img.onload = function() {
+            var c = document.createElement('canvas');
+            c.width = 17; c.height = 17;
+            var ctx = c.getContext('2d');
+            ctx.drawImage(img, 0, 0);
+            var idata = ctx.getImageData(0, 0, 17, 17);
+
+            var minX = 17, maxX = 0;
+            for (var y = 0; y < 17; y++) {
+              for (var x = 0; x < 17; x++) {
+                var idx = (y * 17 + x) * 4;
+                var lum = (idata.data[idx] + idata.data[idx+1] + idata.data[idx+2]) / 3;
+                if (lum > 50) {
+                  if (x < minX) minX = x;
+                  if (x > maxX) maxX = x;
+                }
+              }
+            }
+            var effectiveWidth = (maxX >= minX) ? (maxX - minX + 1) : 0;
+            var longStrokeRows = [];
+            for (var y = 0; y < 17; y++) {
+              var fgCount = 0;
+              for (var x = 0; x < 17; x++) {
+                var idx = (y * 17 + x) * 4;
+                var lum = (idata.data[idx] + idata.data[idx+1] + idata.data[idx+2]) / 3;
+                if (lum > 50) fgCount++;
+              }
+              if (fgCount >= effectiveWidth * 0.55) {
+                longStrokeRows.push(y);
+              }
+            }
+            var bandRanges = [];
+            var curBand = [];
+            for (var i = 0; i < longStrokeRows.length; i++) {
+              if (curBand.length === 0 || longStrokeRows[i] === curBand[curBand.length - 1] + 1) {
+                curBand.push(longStrokeRows[i]);
+              } else {
+                bandRanges.push(curBand.slice());
+                curBand = [longStrokeRows[i]];
+              }
+            }
+            if (curBand.length > 0) bandRanges.push(curBand);
+            resolve({
+              effectiveWidth: effectiveWidth,
+              minX: minX,
+              maxX: maxX,
+              longStrokeRows: longStrokeRows,
+              bandRanges: bandRanges,
+              bands: bandRanges.length
+            });
+          };
+          img.src = 'data:image/png;base64,' + ${JSON.stringify(shot.data)};
+        });
+      })()`);
+    }
+
+    // (a) 自检：测试旧图标必红 (bands < 3)
+    const oldIcon = '<path d="M4 12h14M13 6l6 6-6 6"/>';
+    const oldMeasure = await measureIconBands(oldIcon, 'seq_icon_old');
+    const oldEvidence = `bands=${oldMeasure.bands}\neffectiveWidth=${oldMeasure.effectiveWidth}\nlongStrokeRows=${JSON.stringify(oldMeasure.longStrokeRows)}\nbandRanges=${JSON.stringify(oldMeasure.bandRanges)}\n`;
+    fs.writeFileSync(path.join(out, 'red_bands.txt'), oldEvidence);
+
+    // (b) 测试当前 REP_ICON[0] (新图标)
+    const currentRep0 = await s.eval('REP_ICON[0]');
+    const newMeasure = await measureIconBands(currentRep0, 'seq_icon_new');
+    const newEvidence = `bands=${newMeasure.bands}\neffectiveWidth=${newMeasure.effectiveWidth}\nlongStrokeRows=${JSON.stringify(newMeasure.longStrokeRows)}\nbandRanges=${JSON.stringify(newMeasure.bandRanges)}\n`;
+    fs.writeFileSync(path.join(out, 'green_bands.txt'), newEvidence);
+
+    // 核心断言：当前顺序播放图标必须有 >= 3 个横向笔画带
+    check(
+      newMeasure.bands >= 3,
+      'seq_icon_has_three_horizontal_strokes',
+      { bands: newMeasure.bands, bandRanges: newMeasure.bandRanges, effectiveWidth: newMeasure.effectiveWidth, longStrokeRows: newMeasure.longStrokeRows }
+    );
+
     // 清理测试 div
     await s.eval(`(function(){
       var b = document.getElementById('__test_box_17');

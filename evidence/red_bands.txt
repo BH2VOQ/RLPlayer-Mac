@@ -1,0 +1,4 @@
+bands=1
+effectiveWidth=11
+longStrokeRows=[7,8,9]
+bandRanges=[[7,8,9]]
