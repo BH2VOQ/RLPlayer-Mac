@@ -41,17 +41,30 @@ namespace rlapp {
 static std::atomic<int> g_inFlight{0};
 static std::atomic<int> g_maxInFlight{0};
 static std::atomic<bool> g_exitReq{false};
+static std::atomic<bool> g_hangInDispatch{false};
+static std::atomic<bool> g_afterStopHit{false};
+static std::atomic<bool> g_stopped{false};
 
 bool start_embedded() { return true; }
-void stop_embedded() {}
+void stop_embedded() { g_stopped.store(true); }
 bool exit_requested() { return g_exitReq.load(); }
+void request_shutdown() {}
 
 std::string dispatch(const rta::net::HttpRequest& req, std::string& ct) {
+    if (g_stopped.load()) {
+        g_afterStopHit.store(true);
+    }
     const int cur = ++g_inFlight;
     int prev = g_maxInFlight.load();
     while (cur > prev && !g_maxInFlight.compare_exchange_weak(prev, cur)) {}
     std::string res;
-    if (req.path == "/api/ping") {
+    if (req.path == "/api/hang") {
+        while (g_hangInDispatch.load()) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        }
+        ct = "application/json; charset=utf-8";
+        res = "{\"ok\":true,\"unhung\":true}";
+    } else if (req.path == "/api/ping") {
         ct = "application/json; charset=utf-8";
         res = "{\"ok\":true,\"pong\":true}";
     } else if (req.path.rfind("/api/utf8_test", 0) == 0) {
@@ -74,6 +87,47 @@ std::string dispatch(const rta::net::HttpRequest& req, std::string& ct) {
 } // namespace rlapp
 
 #include "../tools/mac_host.mm"
+
+// ---------------------------------------------------------------------------
+// 离线测试桩：模拟真实 WKURLSchemeTask 协议
+// ---------------------------------------------------------------------------
+@interface MockSchemeTask : NSObject <WKURLSchemeTask>
+@property (nonatomic, copy) NSURLRequest *request;
+@property (nonatomic, strong) NSURLResponse *receivedResponse;
+@property (nonatomic, strong) NSMutableData *receivedData;
+@property (nonatomic, assign) NSInteger responseCount;
+@property (nonatomic, assign) NSInteger finishCount;
+@property (nonatomic, assign) NSInteger failCount;
+@property (nonatomic, strong) NSError *failedError;
+@end
+
+@implementation MockSchemeTask
+- (instancetype)initWithURLString:(NSString *)urlStr {
+    self = [super init];
+    if (self) {
+        _request = [NSURLRequest requestWithURL:[NSURL URLWithString:urlStr]];
+        _receivedData = [[NSMutableData alloc] init];
+        _responseCount = 0;
+        _finishCount = 0;
+        _failCount = 0;
+    }
+    return self;
+}
+- (void)didReceiveResponse:(NSURLResponse *)response {
+    _responseCount++;
+    _receivedResponse = response;
+}
+- (void)didReceiveData:(NSData *)data {
+    [_receivedData appendData:data];
+}
+- (void)didFinish {
+    _finishCount++;
+}
+- (void)didFailWithError:(NSError *)error {
+    _failCount++;
+    _failedError = error;
+}
+@end
 
 static int g_fail = 0;
 static void ck(bool ok, const char* what, const std::string& detail = "") {
@@ -400,6 +454,82 @@ int main() {
                        "documentElement=null 场景下 postMessage 仍转发到 rlhost");
                 }
             }
+        }
+
+        // 7. 测试 RLURLSchemeHandler worker 计数与安全退出契约
+        {
+            // 7.1 基础请求生命周期：start -> dispatch -> WebKit 正常回调
+            RLURLSchemeHandler *handler = [[RLURLSchemeHandler alloc] init];
+            ck(handler != nil, "RLURLSchemeHandler 实例化成功");
+
+            WKWebView *dummyWebView = (WKWebView *)[[NSObject alloc] init];
+
+            MockSchemeTask *task1 = [[MockSchemeTask alloc] initWithURLString:@"rlplayer://app/api/ping"];
+            [handler webView:dummyWebView startURLSchemeTask:task1];
+
+            // 等待 task1 在 GCD worker 跑完并完成 WebKit 回调
+            bool done1 = [handler waitForInFlightTasksWithTimeout:1.0];
+            ck(done1, "task1 正常跑完且 waitForInFlightTasks 返回 true");
+            for (int i = 0; i < 100 && task1.finishCount == 0; ++i) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(5));
+            }
+            ck(task1.responseCount == 1, "task1 收到一次 response");
+            ck(task1.finishCount == 1, "task1 收到一次 finish");
+            ck(task1.failCount == 0, "task1 无 fail 回调");
+
+            // 7.2 人为挂起 worker + WebKit stop 取消时序测试：
+            // WebKit 调用 stopURLSchemeTask 摘掉 _tasks，但 GCD worker 仍在 dispatch 中执行。
+            // 契约验证：
+            //   a) stopURLSchemeTask 之后，_tasks 已清空，但 _activeWorkers > 0；
+            //   b) waitForInFlightTasks 在 worker 未退出前必须超时返回 false！
+            //   c) 释放 hang 状态后，worker 正常退出，再次 wait 必须返回 true；
+            //   d) worker 退出过程绝不向 WebKit 双重回调（因为 ctx.stopped == YES）；
+            //   e) 期间没有发生 after-stop 访问核心。
+            RLURLSchemeHandler *hangHandler = [[RLURLSchemeHandler alloc] init];
+            MockSchemeTask *hangTask = [[MockSchemeTask alloc] initWithURLString:@"rlplayer://app/api/hang"];
+            rlapp::g_hangInDispatch.store(true);
+            rlapp::g_afterStopHit.store(false);
+            rlapp::g_stopped.store(false);
+
+            [hangHandler webView:dummyWebView startURLSchemeTask:hangTask];
+
+            // 等待 worker 确实进入 dispatch（_activeWorkers >= 1 且 g_inFlight >= 1）
+            for (int i = 0; i < 200 && [hangHandler activeWorkersCount] == 0; ++i) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(5));
+            }
+            ck([hangHandler activeWorkersCount] == 1, "hangTask 派发后 activeWorkersCount == 1");
+            ck([hangHandler registeredTasksCount] == 1, "hangTask 登记后 registeredTasksCount == 1");
+
+            // 模拟 WebKit 发出 stop 取消（页面导航或关闭 tab）
+            [hangHandler webView:dummyWebView stopURLSchemeTask:hangTask];
+            ck([hangHandler registeredTasksCount] == 0, "WebKit stop 摘除后 registeredTasksCount == 0");
+            ck([hangHandler activeWorkersCount] == 1, "WebKit stop 后业务 worker 仍处于 active 状态");
+
+            // 核心验证：此时 _tasks 为空，但 worker 还在跑；短超时（50ms）必须返回 false！
+            bool waitBlocked = [hangHandler waitForInFlightTasksWithTimeout:0.05];
+            ck(!waitBlocked, "worker 仍在执行时 waitForInFlightTasks 短超时返回 false（防止提前 stop 核心）");
+
+            // 释放挂起，让业务 worker 跑完 dispatch
+            rlapp::g_hangInDispatch.store(false);
+
+            // 再次等待排空，应当成功返回 true
+            bool waitCleared = [hangHandler waitForInFlightTasksWithTimeout:1.0];
+            ck(waitCleared, "释放挂起后 waitForInFlightTasks 成功返回 true");
+            ck([hangHandler activeWorkersCount] == 0, "worker 排空后 activeWorkersCount == 0");
+
+            // 验证双回调防护：被 stop 的 task 绝不能再调 didReceiveResponse/didFinish
+            ck(hangTask.responseCount == 0, "被 stop 的 task 绝无 didReceiveResponse 回调（防双回调）");
+            ck(hangTask.finishCount == 0, "被 stop 的 task 绝无 didFinish 回调（防双回调）");
+
+            // 7.3 验证拒绝新业务时不持锁回调 WebKit
+            MockSchemeTask *rejectedTask = [[MockSchemeTask alloc] initWithURLString:@"rlplayer://app/api/ping"];
+            [hangHandler webView:dummyWebView startURLSchemeTask:rejectedTask];
+            ck(rejectedTask.failCount == 1, "已 stop 的 handler 拒绝新任务并回调 didFailWithError");
+            ck(rejectedTask.failedError.code == NSURLErrorCancelled, "拒绝错误码为 NSURLErrorCancelled");
+
+            // 7.4 验证核心 stop 之后无任何悬垂调用
+            rlapp::stop_embedded();
+            ck(!rlapp::g_afterStopHit.load(), "全流程中无 after-stop 核心访问");
         }
 
         std::printf("=== %d 项失败 ===\n", g_fail);

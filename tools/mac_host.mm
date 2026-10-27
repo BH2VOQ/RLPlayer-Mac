@@ -46,6 +46,7 @@ namespace rlapp {
 bool start_embedded();
 std::string dispatch(const rta::net::HttpRequest&, std::string& contentType);
 bool exit_requested();
+void request_shutdown();
 void stop_embedded();
 int cli_main(int argc, char** argv);
 }
@@ -57,6 +58,7 @@ namespace rlapp {
 bool start_embedded();
 std::string dispatch(const rta::net::HttpRequest&, std::string& contentType);
 bool exit_requested();
+void request_shutdown();
 void stop_embedded();
 int cli_main(int argc, char** argv);
 }
@@ -389,10 +391,13 @@ static NSString *const kShim = @
     std::mutex _mutex;
     std::condition_variable _cv;
     NSMapTable<id<WKURLSchemeTask>, RLSchemeTaskContext *> *_tasks;
+    int _activeWorkers;
     BOOL _isStopping;
 }
 - (instancetype)init;
 - (BOOL)waitForInFlightTasksWithTimeout:(NSTimeInterval)timeout;
+- (int)activeWorkersCount;
+- (NSUInteger)registeredTasksCount;
 @end
 
 @implementation RLURLSchemeHandler
@@ -402,9 +407,20 @@ static NSString *const kShim = @
     if (self) {
         _tasks = [NSMapTable mapTableWithKeyOptions:NSPointerFunctionsStrongMemory | NSPointerFunctionsObjectPointerPersonality
                                        valueOptions:NSPointerFunctionsStrongMemory];
+        _activeWorkers = 0;
         _isStopping = NO;
     }
     return self;
+}
+
+- (int)activeWorkersCount {
+    std::lock_guard<std::mutex> lock(_mutex);
+    return _activeWorkers;
+}
+
+- (NSUInteger)registeredTasksCount {
+    std::lock_guard<std::mutex> lock(_mutex);
+    return [_tasks count];
 }
 
 - (void)webView:(WKWebView *)webView startURLSchemeTask:(id <WKURLSchemeTask>)urlSchemeTask {
@@ -416,84 +432,121 @@ static NSString *const kShim = @
     {
         std::lock_guard<std::mutex> lock(_mutex);
         if (_isStopping) {
-            NSError *err = [NSError errorWithDomain:NSURLErrorDomain code:NSURLErrorCancelled userInfo:nil];
-            [urlSchemeTask didFailWithError:err];
-            return;
+            // 拒绝新请求时绝不持锁回调 WebKit
+            goto reject;
         }
         [_tasks setObject:ctx forKey:urlSchemeTask];
+        _activeWorkers++;
     }
 
-    NSURLRequest *req = urlSchemeTask.request;
-    NSURL *url = req.URL;
-    NSString *methodStr = req.HTTPMethod ?: @"GET";
+    {
+        NSURLRequest *req = urlSchemeTask.request;
+        NSURL *url = req.URL;
+        NSString *methodStr = req.HTTPMethod ?: @"GET";
 
-    NSURLComponents *comp = [NSURLComponents componentsWithURL:url resolvingAgainstBaseURL:NO];
-    NSString *rawPath = comp.percentEncodedPath;
-    if (!rawPath || rawPath.length == 0) rawPath = @"/";
-    if (comp.percentEncodedQuery && comp.percentEncodedQuery.length > 0) {
-        rawPath = [rawPath stringByAppendingFormat:@"?%@", comp.percentEncodedQuery];
-    }
-
-    std::string method = [methodStr UTF8String];
-    std::string path = [rawPath UTF8String];
-    std::string body = ExtractRequestBody(req);
-
-    // 在 GCD 全局并发队列异步处理业务，绝对不加全局锁，保持完全非阻塞并发
-    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
-        rta::net::HttpRequest httpReq;
-        httpReq.method = std::move(method);
-        httpReq.path = std::move(path);
-        httpReq.body = std::move(body);
-
-        std::string contentType;
-        std::string respBody;
-        try {
-            respBody = rlapp::dispatch(httpReq, contentType);
-        } catch (...) {
-            respBody = "{\"ok\":false,\"error\":\"internal error\"}";
-            contentType = "application/json; charset=utf-8";
-        }
-        if (contentType.empty()) {
-            contentType = "application/octet-stream";
+        NSURLComponents *comp = [NSURLComponents componentsWithURL:url resolvingAgainstBaseURL:NO];
+        NSString *rawPath = comp.percentEncodedPath;
+        if (!rawPath || rawPath.length == 0) rawPath = @"/";
+        if (comp.percentEncodedQuery && comp.percentEncodedQuery.length > 0) {
+            rawPath = [rawPath stringByAppendingFormat:@"?%@", comp.percentEncodedQuery];
         }
 
-        NSData *respData = [NSData dataWithBytes:respBody.data() length:respBody.size()];
-        NSDictionary *headers = @{
-            @"Content-Type": [NSString stringWithUTF8String:contentType.c_str()],
-            @"Content-Length": [NSString stringWithFormat:@"%zu", respBody.size()],
-            @"Access-Control-Allow-Origin": @"*",
-            @"Cache-Control": @"no-cache"
-        };
-        NSHTTPURLResponse *httpResp = [[NSHTTPURLResponse alloc] initWithURL:url
-                                                                  statusCode:200
-                                                                 HTTPVersion:@"HTTP/1.1"
-                                                                headerFields:headers];
+        std::string method = [methodStr UTF8String];
+        std::string path = [rawPath UTF8String];
+        std::string body = ExtractRequestBody(req);
 
-        // 关键死锁点（实测 2026-10-25）：不能持 _mutex 调用 didReceiveResponse/didFinish。
-        // WKURLSchemeTask 的回调会同步回到 WebKit 主线程；startURLSchemeTask 同时也要拿
-        // _mutex，形成主线程 <-> worker 互等，表现为白屏 + 退出卡住。
-        // 做法：锁内只做“取消状态检查 + 摘表”，随后释放锁再回调 WebKit。
-        {
-            std::lock_guard<std::mutex> lock(self->_mutex);
-            if (ctx.stopped) {
-                // Task 已被 WebKit 取消或关闭，绝不重复回调
-                return;
+        // 在 GCD 全局并发队列异步处理业务，绝对不加全局锁，保持完全非阻塞并发
+        dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+            std::string contentType;
+            std::string respBody;
+            try {
+                // RAII 保护业务计数：只要离开业务分发范围，无论正常返回、抛异常还是提前返回，必须递减
+                struct WorkerGuard {
+                    RLURLSchemeHandler *handler;
+                    bool active = true;
+                    ~WorkerGuard() {
+                        if (active) {
+                            std::lock_guard<std::mutex> lock(handler->_mutex);
+                            handler->_activeWorkers--;
+                            handler->_cv.notify_all();
+                        }
+                    }
+                } workerGuard{self};
+
+                rta::net::HttpRequest httpReq;
+                httpReq.method = std::move(method);
+                httpReq.path = std::move(path);
+                httpReq.body = std::move(body);
+
+                try {
+                    respBody = rlapp::dispatch(httpReq, contentType);
+                } catch (...) {
+                    respBody = "{\"ok\":false,\"error\":\"internal error\"}";
+                    contentType = "application/json; charset=utf-8";
+                }
+                if (contentType.empty()) {
+                    contentType = "application/octet-stream";
+                }
+
+                // dispatch 完成所有核心访问后，在此立即递减业务 worker 计数
+                {
+                    std::lock_guard<std::mutex> lock(self->_mutex);
+                    workerGuard.active = false;
+                    self->_activeWorkers--;
+                    self->_cv.notify_all();
+                }
+            } catch (...) {
+                // 兜底异常防护
             }
-            ctx.stopped = YES;
-            [self->_tasks removeObjectForKey:urlSchemeTask];
-        }
-        self->_cv.notify_all();
 
+            NSData *respData = [NSData dataWithBytes:respBody.data() length:respBody.size()];
+            NSDictionary *headers = @{
+                @"Content-Type": [NSString stringWithUTF8String:contentType.c_str()],
+                @"Content-Length": [NSString stringWithFormat:@"%zu", respBody.size()],
+                @"Access-Control-Allow-Origin": @"*",
+                @"Cache-Control": @"no-cache"
+            };
+            NSHTTPURLResponse *httpResp = [[NSHTTPURLResponse alloc] initWithURL:url
+                                                                      statusCode:200
+                                                                     HTTPVersion:@"HTTP/1.1"
+                                                                    headerFields:headers];
+
+            // 关键死锁点（实测 2026-10-25）：不能持 _mutex 调用 didReceiveResponse/didFinish。
+            // WKURLSchemeTask 的回调会同步回到 WebKit 主线程；startURLSchemeTask 同时也要拿
+            // _mutex，形成主线程 <-> worker 互等，表现为白屏 + 退出卡住。
+            // 做法：锁内只做“取消状态检查 + 摘表”，随后释放锁再回调 WebKit。
+            {
+                std::lock_guard<std::mutex> lock(self->_mutex);
+                if (ctx.stopped) {
+                    // Task 已被 WebKit 取消或关闭，绝不重复回调
+                    return;
+                }
+                ctx.stopped = YES;
+                [self->_tasks removeObjectForKey:urlSchemeTask];
+            }
+            self->_cv.notify_all();
+
+            @try {
+                [urlSchemeTask didReceiveResponse:httpResp];
+                if (respData.length > 0) {
+                    [urlSchemeTask didReceiveData:respData];
+                }
+                [urlSchemeTask didFinish];
+            } @catch (NSException *ex) {
+                // WebKit 内部在销毁状态可能引发异常，吞掉以防崩溃
+            }
+        });
+        return;
+    }
+
+reject:
+    // 锁外回调 WebKit，绝不持锁防止死锁
+    {
+        NSError *err = [NSError errorWithDomain:NSURLErrorDomain code:NSURLErrorCancelled userInfo:nil];
         @try {
-            [urlSchemeTask didReceiveResponse:httpResp];
-            if (respData.length > 0) {
-                [urlSchemeTask didReceiveData:respData];
-            }
-            [urlSchemeTask didFinish];
-        } @catch (NSException *ex) {
-            // WebKit 内部在销毁状态可能引发异常，吞掉以防崩溃
-        }
-    });
+            [urlSchemeTask didFailWithError:err];
+        } @catch (NSException *ex) {}
+    }
 }
 
 - (void)webView:(WKWebView *)webView stopURLSchemeTask:(id <WKURLSchemeTask>)urlSchemeTask {
@@ -512,8 +565,9 @@ static NSString *const kShim = @
     _isStopping = YES;   // 此后 startURLSchemeTask 会立即用 NSURLErrorCancelled 拒绝
     auto deadline = std::chrono::steady_clock::now() +
                     std::chrono::milliseconds((int64_t)(timeout * 1000));
+    // 等待实际业务 workers 排空（_activeWorkers == 0）且 _tasks 也为空
     return _cv.wait_until(lock, deadline, [self] {
-        return [self->_tasks count] == 0;
+        return self->_activeWorkers == 0 && [self->_tasks count] == 0;
     });
 }
 
@@ -1177,15 +1231,18 @@ static NSString *const kShim = @
     (void)n;
     [self.exitPollTimer invalidate];
     self.exitPollTimer = nil;
-    // 退出契约（rlapp_core.h）：先停新请求来源，再等**已派发**的 dispatch 全部返回，
-    // 最后才允许销毁核心单例。这里不能给“在途请求”设 2 秒上限后就拆核心：
-    // 资料整理/库扫描请求可能仍在 handle() 内访问 MetaStore/Library，提前 stop 会悬垂访问。
-    // waitForInFlightTasksWithTimeout 会以 _isStopping 拒绝新 scheme task；已有任务则全部
-    // 等到底（每个 handler 本身有网络超时，不会无限等待），满足契约后再收尾。
+    // 退出契约（rlapp_core.h）：
+    // 1. 优先提前通知核心退出（置 g_shutdown 并拒绝新工作，不 join），加速在途任务取消
+    rlapp::request_shutdown();
+
+    // 2. 停新请求来源，并等待**已派发**的 scheme worker 全部退出核心（_activeWorkers == 0）
     if (![self.schemeHandler waitForInFlightTasksWithTimeout:30.0]) {
-        fprintf(stderr, "RLPlayer: 退出时仍有 scheme 任务未完成（已等待 30s，放弃等待以避免卡死）\n");
+        fprintf(stderr, "RLPlayer: 退出时仍有 scheme 任务未完成（已等待 30s，为保证内存与线程安全禁止继续析构）\n");
+        return;
     }
-    rlapp::stop_embedded();                                   // 停内置核心（协作式）
+
+    // 3. 协作式收尾：此时保证无任何 scheme worker 在 handle()/核心内运行
+    rlapp::stop_embedded();
 }
 
 @end

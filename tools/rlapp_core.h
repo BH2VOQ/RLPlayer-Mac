@@ -63,6 +63,10 @@ std::string dispatch(const rta::net::HttpRequest& request, std::string& contentT
 // /api/quit 或 /api/shutdown 是否被请求过。壳轮询它来触发收尾。
 bool exit_requested();
 
+// 提前通知核心准备退出（仅置 g_shutdown 标志并拒绝新工作，不等待或 join 线程）。
+// 供宿主在排空 scheme worker 前尽早发起取消信号；由 rtaweb 实现，主线程调用；幂等。
+void request_shutdown();
+
 // 协作式收尾：停播放 → 停输入采集 → 收预解码 → 停/join 库扫描 → 收写回批任务。
 // 仅主线程调用；幂等。不 force-kill 任何进程。
 void stop_embedded();
