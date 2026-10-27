@@ -7932,8 +7932,12 @@ function rcWizard() {
 /* 声音校准页签（Q-9 独立页签）：① 房间测量向导 ② 校正文件（REW / AutoEq 文本）③ 房间校正 IR（WAV + GPU 卷积） */
 function calSettingsHtml() {
   var h = '';
-  // 1. 房间校正（测量向导）
-  h += '<div id=roomCorrCard>' + sgroup('房间校正（测量向导）', 'Farina 对数扫频 → 反卷积 → 心理声学平滑 → 目标曲线 → 最小相位校正 FIR · 多声道 2.0~7.1.4',
+  // 1. 房间校正（测量向导）—— 本版暂隐藏向导卡片，保留提示文案与 DOM 结构（供之后改版与既有绑定安全）
+  h += sgroup('房间校正（测量向导）', '房间测量功能正在重构中',
+      '<div class="sfld wide"><div class=rcnote style="color:var(--t2);padding:10px 12px;background:var(--bg2);border-radius:6px;border:1px solid var(--bd)">'
+    + '房间测量正在重做，本版暂不提供。支持已有的「EQ 文件」与「房间校正 IR」独立加载。'
+    + '</div></div>');
+  h += '<div id=roomCorrCard style="display:none">' + sgroup('房间校正（测量向导）', 'Farina 对数扫频 → 反卷积 → 心理声学平滑 → 目标曲线 → 最小相位校正 FIR · 多声道 2.0~7.1.4',
       '<div class="sfld wide"><div class="in-stat-grid" style="grid-template-columns:repeat(auto-fit,minmax(250px,1fr))">'
     + '<div class=in-stat-item><span class=lbl>算法版本</span><span class="val sm">CoreAudio 测量链路</span>' +
       '<div class=rcsub>room_correction.h · room_measurement.h · room_transport_coreaudio.h</div></div>'
