@@ -4704,6 +4704,8 @@ static rta::meta::EnrichOpts meta_opts_from_settings() {
     o.llm = ms.llm;
     // 功能4：llm 配置固定读 exe 同目录（界面 /api/llm 写的就是这一份）
     o.llmConfPath = path_in_exe_dir("rlplayer-llm.conf");
+    // 挂入全局退出标志：g_shutdown 是静态全局对象，生命周期覆盖整个进程，安全
+    o.cancel = &g_shutdown;
     return o;
 }
 
@@ -4727,6 +4729,9 @@ static void meta_on_play(const std::string& file) {
         rta::meta::EnrichOpts o;
         o.srcOn = ms.srcOn; o.llm = ms.llm;
         o.llmConfPath = path_in_exe_dir("rlplayer-llm.conf");
+        // EnrichOpts 是值拷贝进 lambda，但 cancel 指针指向全局对象 g_shutdown，
+        // 生命周期覆盖整个进程，后台线程安全访问
+        o.cancel = &g_shutdown;
         rta::meta::enrich_track(file, false, o);
         { std::lock_guard<std::mutex> lk(s_metaMx); s_inFlight.erase(file); }
         bg_job_end();
@@ -10171,10 +10176,14 @@ static void core_shutdown_common() {
         if (prev.joinable()) prev.join();
     }
     // detached 的后台任务（元数据补全 / 资料整理）：有界等待，收不完就如实记日志。
-    if (!bg_jobs_wait(std::chrono::milliseconds(5000))) {
+    // 预算设为 1200ms（任务项 B），超时时记录已等待毫秒数与剩余数
+    const auto tWait0 = std::chrono::steady_clock::now();
+    if (!bg_jobs_wait(std::chrono::milliseconds(1200))) {
+        const auto tWaitMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - tWait0).count();
         const int left = g_bgJobs.load();
-        play_log("SHUTDOWN 后台任务未在 5s 内收完，剩余 " + std::to_string(left) + " 个");
-        printf("!! 退出时仍有 %d 个后台任务未收完（已在日志记录）\n", left);
+        play_log("SHUTDOWN 后台任务已在 1.2s 内取消并等待，仍有 " + std::to_string(left) + " 个未收完（已等待 " + std::to_string(tWaitMs) + "ms）");
+        printf("!! 退出时仍有 %d 个后台任务未收完（已在 1.2s 内取消并等待 %lldms，已在日志记录）\n", left, (long long)tWaitMs);
     }
 }
 
@@ -10247,6 +10256,7 @@ void rlapp::stop_embedded() {
     // 幂等：壳可能因为「用户点退出」和「窗口关闭」各调一次。
     static std::atomic<bool> stopped{false};
     if (stopped.exchange(true)) return;
+    g_shutdown = true;     // 协作式取消：让后台任务感知到要退出了
     core_shutdown_common();
 }
 

@@ -44,6 +44,7 @@
 #include "meta/discogs.h"
 #include "audio/media_info.h"
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
@@ -68,6 +69,8 @@ struct EnrichOpts {
     // (rtatag 这类"以 CWD 为家"的调用方保持旧行为);rtaweb 传 exe 同目录的绝对路径 ——
     // 这样【界面里保存的 key】与【补全时读的 key】永远是同一份文件,不受启动 CWD 影响。
     std::string llmConfPath;
+    // 协作式取消标志：可空；在阶段间检查，为 true 时尽早返回，避免退出时阻塞
+    const std::atomic<bool>* cancel = nullptr;
     // 读取开关:map 里没有该源 = 开
     bool enabled(const std::string& id) const {
         const auto it = srcOn.find(id);
@@ -243,6 +246,13 @@ inline bool enrich_adopt(bool confident, int llmPick, bool llmRan, double topSco
 
 inline EnrichStats enrich_track(const std::string& file, bool force, const EnrichOpts& opts) {
     EnrichStats st;
+    auto is_cancelled = [&opts]() -> bool {
+        return opts.cancel != nullptr && opts.cancel->load();
+    };
+    if (is_cancelled()) {
+        st.note = "已取消（退出中）";
+        return st;
+    }
     MetaStore& ms = MetaStore::instance();
     const long long now = (long long)std::time(nullptr);
     std::vector<std::string> notes;              // note 碎片,最后拼一句
@@ -328,6 +338,10 @@ inline EnrichStats enrich_track(const std::string& file, bool force, const Enric
     }
 
     // ---- 4) 搜索(遍历注册表,canSearch 且启用的源逐个调;调用间 ≥300ms;错误记 note 继续) ----
+    if (is_cancelled()) {
+        st.note = "已取消（退出中）";
+        return st;
+    }
     // 注册表顺序 = 搜索优先级(dizzylab → qq → netease → itunes)。
     // E-17 扩展：构造 ProviderQuery 传递 album/circle/dirName 供 dizzylab 优先命中，
     // 其它源无 searchQuery 指针，继续沿用 query（默认忽略新参数）。
@@ -343,6 +357,10 @@ inline EnrichStats enrich_track(const std::string& file, bool force, const Enric
     std::vector<std::string> srcErrs;
     bool firstCall = true;
     for (const ProviderDesc& pd : provider_registry()) {
+        if (is_cancelled()) {
+            st.note = "已取消（退出中）";
+            return st;
+        }
         if (!pd.canSearch) continue;
         if (!opts.enabled(pd.id)) continue;
         if (!firstCall) std::this_thread::sleep_for(std::chrono::milliseconds(300));
@@ -377,7 +395,7 @@ inline EnrichStats enrich_track(const std::string& file, bool force, const Enric
     st.bestSource = cands[bestIdx].source;
     int llmPick = -9;                            // LLM 裁决结果;-9 = 裁决未运行/失败(语义见 enrich_adopt)
     bool llmAdjudicated = false;                 // 裁决这一步是否真实运行(与解析是否用 LLM 无关)
-    if (!st.confident && llmReady && sorted.size() >= 2) {
+    if (!st.confident && llmReady && sorted.size() >= 2 && !is_cancelled()) {
         const int nShow = (int)std::min<size_t>(3, sorted.size());
         std::ostringstream pr;
         pr << "你是音乐元数据匹配裁决助手。根据查询信息,从候选中选出正确匹配;都不对选 -1。\n"
@@ -393,6 +411,10 @@ inline EnrichStats enrich_track(const std::string& file, bool force, const Enric
         }
         pr << "只输出一个 JSON 对象:{\"pick\":0|1|2|-1},不要输出任何其他文字。";
         const LlmReply rep = llm_chat(cfg, { LlmMessage{ "user", pr.str() } }, 200, 0.0f, true);
+        if (is_cancelled()) {
+            st.note = "已取消（退出中）";
+            return st;
+        }
         llmParsed = true;
         llmAdjudicated = true;
         if (rep.ok) {
@@ -488,9 +510,19 @@ inline EnrichStats enrich_track(const std::string& file, bool force, const Enric
     }
 
     // ---- 7) 封面:记录缺封面且候选有 URL → 逐个尝试下载(>2KB + 魔数合法两道闸才收) ----
+    if (is_cancelled()) {
+        finishNote();
+        st.note += "; 已取消（退出中）";
+        return st;
+    }
     if (tm.coverRelPath.empty()) {
         const std::vector<std::string> coverUrls = enrich_detail::ed_candidate_cover_urls(sorted, cands, bestIdx);
         for (const std::string& curl : coverUrls) {
+            if (is_cancelled()) {
+                finishNote();
+                st.note += "; 已取消（退出中）";
+                return st;
+            }
             const rta::net::HttpResponse resp = rta::net::http_get(curl, {}, 15000);
             // 判定收在 enrich_detail::ed_cover_reject_reason —— 生产与单测共用同一份逻辑，
             // 避免"测试自己抄一遍判据、测的是抄写能力"（铁律 3）。
@@ -515,6 +547,11 @@ inline EnrichStats enrich_track(const std::string& file, bool force, const Enric
     // ---- 8) 歌词:lyrics 为空时按注册表【逆序】(canLyric 过滤)= lrclib → netease → qq,
     //         第一个 ok 写入。注册表正向是搜索优先级,逆序恰是 P1 的歌词优先级,顺序不变;
     //         源内句柄经 LyricRequest.cands(按分数从高到低)带入,免重复搜索。 ----
+    if (is_cancelled()) {
+        finishNote();
+        st.note += "; 已取消（退出中）";
+        return st;
+    }
     {
         const auto itL = tm.fields.find("lyrics");
         const bool needLyrics = itL == tm.fields.end() || itL->second.value.empty();
@@ -530,6 +567,11 @@ inline EnrichStats enrich_track(const std::string& file, bool force, const Enric
             LyricResult lr;
             std::vector<std::string> lyrErrs;        // 各参与源的真实失败(P1 只留最后一个)
             for (auto it = provider_registry().rbegin(); it != provider_registry().rend(); ++it) {
+                if (is_cancelled()) {
+                    finishNote();
+                    st.note += "; 已取消（退出中）";
+                    return st;
+                }
                 if (!it->canLyric || !it->lyric) continue;
                 if (!opts.enabled(it->id)) continue;
                 std::string lerr;
