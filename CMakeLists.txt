@@ -291,6 +291,12 @@ if(APPLE)
   target_include_directories(test_bitdepth_negotiation PRIVATE ${CMAKE_SOURCE_DIR}/src)
   target_link_libraries(test_bitdepth_negotiation PRIVATE ${RL_PLATFORM_LIBS})
   add_test(NAME bitdepth_negotiation COMMAND test_bitdepth_negotiation)
+  # 「停止投放」500 的根因判据（离线、无网络、无声）：自己 join 自己 / 重复 join / 并发 join
+  add_executable(test_thread_join_safe tests/test_thread_join_safe.cpp)
+  target_include_directories(test_thread_join_safe PRIVATE ${CMAKE_SOURCE_DIR}/src)
+  target_link_libraries(test_thread_join_safe PRIVATE ${RL_PLATFORM_LIBS})
+  add_test(NAME thread_join_safe COMMAND test_thread_join_safe)
+  set_tests_properties(thread_join_safe PROPERTIES TIMEOUT 60)
   add_executable(test_output_bit_depth tests/test_output_bit_depth.cpp)
   target_include_directories(test_output_bit_depth PRIVATE ${CMAKE_SOURCE_DIR}/src)
   target_link_libraries(test_output_bit_depth PRIVATE ${RL_PLATFORM_LIBS})
@@ -789,6 +795,14 @@ add_executable(test_upnp_control tests/test_upnp_control.cpp)
 target_include_directories(test_upnp_control PRIVATE ${CMAKE_SOURCE_DIR}/src)
 target_link_libraries(test_upnp_control PRIVATE ${RL_PLATFORM_LIBS})
 add_test(NAME upnp_control COMMAND test_upnp_control)
+
+# 2026-10-28（用户「UPnP 搜不到设备」）：发现链路专项回归。
+# 判据 = 网卡选择 / 子网工具 / 回源地址 / 假设备端到端（广播 + 描述解析 + 去重 + 不假阳性）。
+# 全程离线、绑内核临时端口（不碰 1900，不需要 root），**不打开任何音频设备**。
+add_executable(test_upnp_discovery tests/test_upnp_discovery.cpp)
+target_include_directories(test_upnp_discovery PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(test_upnp_discovery PRIVATE ${RL_PLATFORM_LIBS})
+add_test(NAME upnp_discovery COMMAND test_upnp_discovery)
 
 # 系统代理选择逻辑（2026-10-26）：libcurl 在 macOS 上不读系统代理 ⟹ 更新检查永远超时。
 # 判据是**选择逻辑**本身（没代理必须直连、有代理必须走），与本机是否真开代理无关。

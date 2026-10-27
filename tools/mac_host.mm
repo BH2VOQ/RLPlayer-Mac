@@ -1264,6 +1264,13 @@ reject:
     }
     // 尽早置退出标志：拒绝新工作、取消在途网络（真正的 join 仍在 applicationWillTerminate）
     rlapp::request_shutdown();
+
+    // 视觉上**立刻**消失（用户待办：「点击红叉之后应该立即关闭程序的全部功能」）。
+    // ⚠️ 这里绝不能 orderOut/close：窗口一旦被移出窗口列表，AppKit 就不再认为
+    //    「最后一个窗口已关闭」，applicationShouldTerminateAfterLastWindowClosed 不触发，
+    //    进程不退出、音乐继续播（beta3 实测事故）。
+    // alpha=0 只是让窗口不可见，窗口本身仍在，关窗/终止判定完全照常。
+    sender.alphaValue = 0.0;
     return YES;      // 让 AppKit 走正常的 关窗 → 终止 流程
 }
 

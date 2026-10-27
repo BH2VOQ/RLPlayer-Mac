@@ -12,6 +12,7 @@
 #ifndef _WINSOCK_DEPRECATED_NO_WARNINGS
 #define _WINSOCK_DEPRECATED_NO_WARNINGS
 #endif
+#include "net/thread_join_safe.h"
 #include "net/upnp.h"
 #include "net/upnp_control.h"
 #include "audio/wav.h"
@@ -105,15 +106,23 @@ public:
     CastManager(const CastManager&) = delete;
     CastManager& operator=(const CastManager&) = delete;
 
-    std::vector<UpnpDevice> get_devices(bool forceRescan = false) {
+    // diagOut（可空）：把"这次/上次扫描为什么没搜到"如实带出去 —— UI 要显示，
+    // 不能让用户对着空的设备列表猜（2026-10-28 用户反馈「UPnP 搜不到设备」）。
+    std::vector<UpnpDevice> get_devices(bool forceRescan = false, UpnpDiscoverDiag* diagOut = nullptr) {
         std::lock_guard<std::mutex> lk(devMutex_);
         auto now = std::chrono::steady_clock::now();
         double ageSec = std::chrono::duration<double>(now - lastScanTime_).count();
         if (forceRescan || cachedDevices_.empty() || ageSec > 15.0) {
-            cachedDevices_ = upnp_discover(1200);
+            cachedDevices_ = upnp_discover(1200, &lastDiag_);
             lastScanTime_ = std::chrono::steady_clock::now();
         }
+        if (diagOut) *diagOut = lastDiag_;
         return cachedDevices_;
+    }
+
+    UpnpDiscoverDiag last_discovery_diag() {
+        std::lock_guard<std::mutex> lk(devMutex_);
+        return lastDiag_;
     }
 
     CastState get_state() {
@@ -146,20 +155,7 @@ public:
                 return {false, "已有投放会话正在进行中，请先停止"};
             }
         }
-        std::thread prev;
-        {
-            std::lock_guard<std::mutex> tlk(threadMx_);
-            if (workerThread_.joinable()) {
-                if (workerThread_.get_id() == std::this_thread::get_id()) {
-                    workerThread_.detach();
-                } else {
-                    prev = std::move(workerThread_);
-                }
-            }
-        }
-        if (prev.joinable()) {
-            try { prev.join(); } catch (...) { /* 同 stop()：join 失败不打成 500 */ }
-        }
+        rta::net::join_thread_safely(workerThread_, threadMx_);   // 同 stop()：统一走安全收尾
 
         std::lock_guard<std::mutex> lk(mtx_);
         stopReq_.store(false);
@@ -225,30 +221,14 @@ public:
 
     bool stop() {
         stopReq_.store(true);
-        // 2026-10-28 真机事故：`/api/cast/stop` 反复打「DISPATCH 异常已拦截」。
-        // 根因：这里直接 join()，三种情况都会抛 std::system_error 并把整个请求打成 500：
-        //   ① 在 worker 线程内部调用（自己 join 自己 → "Resource deadlock avoided"）；
-        //   ② 两个请求并发调用 stop()，同一 thread 被 join 两次；
-        //   ③ worker 已 detach/失效。
-        // 现在：用独立互斥量把 thread 对象「取出来」，再在锁外 join，且不 join 自身。
-        std::thread toJoin;
-        {
-            std::lock_guard<std::mutex> tlk(threadMx_);
-            if (workerThread_.joinable()) {
-                if (workerThread_.get_id() == std::this_thread::get_id()) {
-                    workerThread_.detach();       // 自己不能 join 自己
-                } else {
-                    toJoin = std::move(workerThread_);
-                }
-            }
-        }
-        if (toJoin.joinable()) {
-            try {
-                toJoin.join();
-            } catch (...) {
-                // join 失败不能把 HTTP 请求打成 500；状态清理照常往下走
-            }
-        }
+        // 2026-10-28 真机事故：`/api/cast/stop` 反复打「DISPATCH 异常已拦截」，前端提示
+        // 「停止投放失败」。根因是这里直接 workerThread_.join()：
+        //   ① 在 worker 线程内部调用（自己 join 自己）——本机实测**不是抛异常而是死锁**；
+        //   ② 用户连点「停止投放」/ 多请求并发 → 同一 std::thread 被 join 两次 → 抛
+        //      std::system_error("Invalid argument") → 整个请求被打成 500。
+        // 收尾逻辑统一走 join_thread_safely()（可离线单测，见 src/net/thread_join_safe.h
+        // 与 tests/test_thread_join_safe.cpp），这里不再自己拼 join。
+        rta::net::join_thread_safely(workerThread_, threadMx_);
         std::lock_guard<std::mutex> lk(mtx_);
         state_.running = false;
         state_.phase = "stopped";
@@ -299,7 +279,7 @@ private:
                 targetDev.port = (colon == std::string::npos) ? 80 : std::atoi(hostport.substr(colon + 1).c_str());
 
                 std::string xml;
-                if (upnp_detail::http_get(targetDev.host, targetDev.port, path, xml)) {
+                if (upnp_detail::http_get(targetDev.host, targetDev.port, path, xml, targetDev.ifindex)) {
                     targetDev.name = upnp_detail::xml_tag(xml, "friendlyName");
                     targetDev.model = upnp_detail::xml_tag(xml, "modelName");
                     targetDev.udn = upnp_detail::xml_tag(xml, "UDN");
@@ -523,7 +503,8 @@ private:
         // 4) UPnP 控制动作 SetAVTransportURI & Play
         UpnpControlClient client(targetDev.av_transport_url(),
                                 targetDev.connection_manager_url(),
-                                targetDev.rendering_control_url());
+                                targetDev.rendering_control_url(),
+                                targetDev.ifname);
 
         UpnpDidlItem didl;
         didl.title = p.file;
@@ -696,6 +677,7 @@ private:
     std::mutex              devMutex_;
     std::vector<UpnpDevice> cachedDevices_;
     std::chrono::steady_clock::time_point lastScanTime_;
+    UpnpDiscoverDiag lastDiag_;
 };
 
 } // namespace rta::net
