@@ -29,6 +29,7 @@
 #include "dsp/gpu_bridge.h"
 #include "dsp/loudness.h"
 #include "dsp/peq.h"          // 261024-02 #6：20 段参数均衡（输入采样率、现有文件 EQ 之前）
+#include "dsp/replaygain.h"
 #include <vector>
 #include <string>
 #include <algorithm>
@@ -87,6 +88,10 @@ struct PipelineConfig {
     // 由 rtaweb 持有同一个 shared_ptr，UI 改参数时热更新（引擎内部交叉淡入）。
     std::shared_ptr<dsp::PeqEngine> peq;
 
+    // ---- ReplayGain / Album Gain ----
+    // 常数增益（dB），在输入采样率、升频/PEQ/Matrix 之前应用一次；0.0 = 直通/不处理
+    double   replayGainDb  = 0.0;
+
     // ---- 音量 ----
     bool     volumeEnabled = false;   // 默认关闭，保证直通可证
     double   volumeDb      = 0.0;
@@ -109,6 +114,8 @@ struct PipelineStats {
     // 各阶段是否实际生效
     bool     usedMatrix = false, usedEq = false, usedDelay = false, usedPeq = false;
     bool     usedConvolution = false, usedResample = false, usedVolume = false;
+    bool     usedReplayGain = false;       // 是否实际应用了 ReplayGain 增益
+    double   appliedReplayGainDb = 0.0;    // 实际应用的 ReplayGain 增益 (dB)
     bool     usedGpuConvolution = false;   // 本次是否真的走了 GPU
     bool     usedChannelGain = false;      // 是否用了每声道增益
     std::string gpuStatus;                 // GPU 桥接状态说明
@@ -222,6 +229,7 @@ public:
         if (!cfg_.matrix.empty()) return true;
         if (cfg_.shaper != dsp::Shaper::None) return true;
         if (cfg_.volumeEnabled && cfg_.volumeDb != 0.0) return true;
+        if (cfg_.replayGainDb != 0.0) return true;
         for (const auto& c : cfg_.channel) {
             if (!c.eq.empty() || c.delaySamples != 0 || !c.ir.empty() || c.gainDb != 0.0) return true;
         }
@@ -326,6 +334,15 @@ public:
         for (size_t n = 0; n < nIn; ++n)
             for (int c = 0; c < inCh; ++c)
                 planes[(size_t)c][n] = in.sample(n, c);
+
+        // ---- ReplayGain / Album Gain（在升频/Matrix/PEQ之前应用一次；0 dB 逐位直通跳过）----
+        if (cfg_.replayGainDb != 0.0) {
+            for (auto& p : planes) {
+                dsp::replaygain::apply_gain(cfg_.replayGainDb, p.data(), p.size());
+            }
+            st.usedReplayGain = true;
+            st.appliedReplayGainDb = cfg_.replayGainDb;
+        }
 
         // 过采样峰值保护（在重采样之前衰减，插值出来的峰就不会再溢出）
         if (cfg_.preAttenDb != 0.0) {
@@ -581,7 +598,7 @@ private:
             for (int c = 0; c < outCh; ++c) {
                 auto L = std::make_unique<dsp::Loudness>(cfg_.loudness);
                 L->init((double)outRate);
-                L->set_volume_db(cfg_.volumeDb);   // 提升量由音量决定
+                L->set_volume_db(dsp::replaygain::loudness_volume_db(cfg_.volumeDb, cfg_.replayGainDb));   // 提升量由实际听音音量决定（含 RG 增益）
                 ss_.loud.push_back(std::move(L));
             }
         }

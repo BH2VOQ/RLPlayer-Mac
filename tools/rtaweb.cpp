@@ -319,6 +319,11 @@ struct PlayParams {
     bool   directSdm = false;         // true = DirectSDM：源 DSD 与目标同速率时逐位直通（要求 0 dB、无 PCM 处理）
     int    bufferMs = 100;
 
+    // ---- ReplayGain / Album Gain ----
+    std::string rgMode = "off";       // off | track | album
+    double      rgPreamp = 0.0;       // 前级增益 dB（-15.0 ~ +15.0，默认 0.0）
+    bool        rgPreventClip = true; // 防削波保护（默认 true）
+
     // ---- 输出后端 / 多声道 / 每声道微调 ----
     std::string sdmFilter;            // SDM（DSD 输出）用的 1x 滤波器；空 = 沿用 filter
     std::string sdmFilterNx;          // SDM 用的 Nx 滤波器；空 = 沿用 filterNx
@@ -439,6 +444,12 @@ struct PlayerState {
     std::string outFallbackWhy;
     double outRate = 0;
     int    outBits = 0;
+    // ---- ReplayGain / Album Gain 状态 ----
+    std::string rgMode = "off";
+    double      rgAppliedDb = 0.0;
+    bool        rgClipLimited = false;
+    std::string rgSource;
+    std::string rgNote;
     // 2026-10-24（用户 261024-04 #8：bit-perfect 时信号链没绿点、右下角 GPU 图标还亮着）：
     //   gpu 只有 render_loop 在 RQ.gpu 置位时写 true（见 rtaweb.cpp 的 rl.gpuOut 接线），
     //   而 **正常播放路径从不复位它** —— 于是一旦本进程里有一首走过 GPU 升频，后面所有曲目
@@ -819,6 +830,11 @@ static PlayParams parseForm(const std::string& body, std::set<std::string>* seen
         else if (k == "inbuf")    p.inBufferMs = std::max(10, atoi(v.c_str()));
         else if (k == "inmon")    p.inMonitor = (v == "1");
         else if (k == "srcbits") p.srcBits = atoi(v.c_str());
+        // ReplayGain / Album Gain
+        else if (k == "rgmode" || k == "rg_mode" || k == "rg.mode" || k == "rg") p.rgMode = v;
+        else if (k == "rgpreamp" || k == "rg_preamp" || k == "rg.preamp" || k == "preamp") p.rgPreamp = atof(v.c_str());
+        else if (k == "rgpreventclip" || k == "rgpreventclipping" || k == "rg_preventclipping" || k == "rg.preventclipping" || k == "rg.preventClipping")
+            p.rgPreventClip = (v == "1" || v == "true");
         // CUE 分轨区间（秒，浮点）。不带 cue_start ⟹ 整首（cueStart 保持 -1）。
         else if (k == "cue_start") p.cueStart = atof(v.c_str());
         else if (k == "cue_end")   p.cueEnd   = atof(v.c_str());
@@ -960,6 +976,28 @@ static PlayParams apply_conf_defaults_for_play(const PlayParams& in, const std::
     }
     if (seen.find("loudness") == seen.end() && hasConf("loudness")) {
         p.loudness = (getConf("loudness") == "1");
+    }
+    if (seen.find("rgmode") == seen.end() && seen.find("rg_mode") == seen.end() &&
+        seen.find("rg.mode") == seen.end() && seen.find("rg") == seen.end()) {
+        if (hasConf("rg.mode")) p.rgMode = getConf("rg.mode");
+        else if (hasConf("rg_mode")) p.rgMode = getConf("rg_mode");
+        else if (hasConf("rgmode")) p.rgMode = getConf("rgmode");
+        else if (hasConf("rg")) p.rgMode = getConf("rg");
+    }
+    if (seen.find("rgpreamp") == seen.end() && seen.find("rg_preamp") == seen.end() &&
+        seen.find("rg.preamp") == seen.end() && seen.find("preamp") == seen.end()) {
+        if (hasConf("rg.preamp")) p.rgPreamp = atof(getConf("rg.preamp").c_str());
+        else if (hasConf("rg_preamp")) p.rgPreamp = atof(getConf("rg_preamp").c_str());
+        else if (hasConf("rgpreamp")) p.rgPreamp = atof(getConf("rgpreamp").c_str());
+        else if (hasConf("preamp")) p.rgPreamp = atof(getConf("preamp").c_str());
+    }
+    if (seen.find("rgpreventclip") == seen.end() && seen.find("rgpreventclipping") == seen.end() &&
+        seen.find("rg_preventclipping") == seen.end() && seen.find("rg.preventclipping") == seen.end() &&
+        seen.find("rg.preventClipping") == seen.end()) {
+        if (hasConf("rg.preventClipping")) p.rgPreventClip = (getConf("rg.preventClipping") == "1" || getConf("rg.preventClipping") == "true");
+        else if (hasConf("rg.preventclipping")) p.rgPreventClip = (getConf("rg.preventclipping") == "1" || getConf("rg.preventclipping") == "true");
+        else if (hasConf("rg_preventclipping")) p.rgPreventClip = (getConf("rg_preventclipping") == "1" || getConf("rg_preventclipping") == "true");
+        else if (hasConf("rgpreventclip")) p.rgPreventClip = (getConf("rgpreventclip") == "1" || getConf("rgpreventclip") == "true");
     }
 
     return p;
@@ -1386,6 +1424,11 @@ static void upnp_mark_player_state(const std::string& file, bool ok, const std::
         ps.error.clear();
         ps.bpState = "no";
         ps.bpWhy = "UPnP 投放：源文件按原采样率供源，渲染器侧是否重采样由对方决定（本机 DSP 未介入）";
+        ps.rgMode = "bypassed";
+        ps.rgAppliedDb = 0.0;
+        ps.rgClipLimited = false;
+        ps.rgSource = "upnp:bypassed";
+        ps.rgNote = "UPnP 投放：源文件直供，本机 ReplayGain 旁路";
         // F-5：投放模式下输出格式由**远端渲染器**决定，本机无从自证 ⟹
         //   dsd/dsdRate/carrierRate/modFamily/modOrder 一律归零（绝不许拿上一首本地播放的
         //   残留值冒充远程事实，与 ps.gpu 在投放模式归零是同一条纪律），
@@ -1427,6 +1470,8 @@ static bool direct_sdm_eligible(const PlayParams& p, const DsdInfo& info, std::s
     const uint32_t base = (info.rate % 48000u == 0) ? 48000u : 44100u;
     const uint32_t target = rta::dsp::dsd_rate(p.dsd, base);
     bool anyProc = !p.eqFile.empty() || !p.convIr.empty() || p.loudness;
+    rta::dsp::replaygain::Mode rgm = rta::dsp::replaygain::Mode::Off;
+    if (rta::dsp::replaygain::parse_mode(p.rgMode, &rgm) && rgm != rta::dsp::replaygain::Mode::Off) anyProc = true;
     for (int i = 0; i < 8; ++i) if (p.trim[i] != 0.0) anyProc = true;
     if (p.outChannels > 0 && p.outChannels != info.channels) anyProc = true;   // 声道数变化也是处理
     const auto d = rta::dsp::direct_sdm_decision(info.rate, target, anyProc, p.volume != 0.0);
@@ -1543,6 +1588,11 @@ static bool play_one_direct(const std::string& file, const PlayParams& p) {
         ps.volDb.store(0.0);
         ps.gpu = false;
         ps.gpuConvUsed.store(false);   // 直通路径不会有卷积，显式归零（#8）
+        ps.rgMode = "off";
+        ps.rgAppliedDb = 0.0;
+        ps.rgClipLimited = false;
+        ps.rgSource = "directsdm:bypass";
+        ps.rgNote = "DirectSDM 1-bit 直通，跳过 PCM 增益处理";
 
         // 信号链快照：DirectSDM 只有"源 → DoP → 设备"三环，如实写出来
         {
@@ -1579,6 +1629,7 @@ static bool play_one_direct(const std::string& file, const PlayParams& p) {
                 << ",\"gpuVendor\":\"\",\"gpuStatus\":\"\""
                 << ",\"volRamp\":0,\"bits\":24,\"eq\":false"
                 << ",\"directSdm\":true"
+                << ",\"rg\":\"off\",\"rgDb\":0,\"rgClip\":false,\"rgSource\":\"directsdm:bypass\",\"rgNote\":\"DirectSDM 1-bit 直通，跳过 PCM 增益处理\""
                 << ",\"decodeMs\":" << dsdMs
                 << ",\"ffmpegMs\":0"
                 << ",\"wavReadMs\":0"
@@ -2388,6 +2439,14 @@ static bool play_one_impl(const std::string& file, const PlayParams& pIn, rta::a
         ps.dspTotalUs.store(0);
         ps.dspChunks.store(0);
         {
+            std::lock_guard<std::mutex> lk(ps.mtx);
+            ps.rgMode = "off";
+            ps.rgAppliedDb = 0.0;
+            ps.rgClipLimited = false;
+            ps.rgSource.clear();
+            ps.rgNote.clear();
+        }
+        {
             std::lock_guard<std::mutex> lk(g_lastEndMx);
             if (g_lastEnd.isPosZeroNoErr) {
                 const auto elapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -2543,6 +2602,25 @@ static bool play_one_impl(const std::string& file, const PlayParams& pIn, rta::a
         // macOS：空设备由 CoreAudioOutput::open 解析为系统默认输出（§13.9 实测）；
         // 指定设备失效时 open 返回 DeviceNotFound 并带设备可见文案，不需要播放前预检。
 
+        // ---- ReplayGain / Album Gain 决策与接入 ----
+        rta::dsp::replaygain::Mode rgMode = rta::dsp::replaygain::Mode::Off;
+        rta::dsp::replaygain::parse_mode(pEff.rgMode, &rgMode);
+        rta::dsp::replaygain::Params rgParams;
+        rgParams.mode = rgMode;
+        rgParams.preventClipping = pEff.rgPreventClip;
+        rgParams.preampDb = pEff.rgPreamp;
+
+        rta::dsp::replaygain::Track tr;
+        tr.path = file;
+        rta::dsp::replaygain::read_tags(file, &tr.tags);
+
+        std::vector<rta::dsp::replaygain::AlbumInfo> albums;
+        if (rgParams.mode == rta::dsp::replaygain::Mode::Album) {
+            std::vector<rta::dsp::replaygain::Track> albTracks = { tr };
+            albums = rta::dsp::replaygain::compute_albums(albTracks, rgParams.referenceLufs);
+        }
+        const auto rgDec = rta::dsp::replaygain::decide(tr, rgParams, albums.empty() ? nullptr : &albums);
+
         // GPU 后端偏好要在建管线之前生效（DLL 是懒加载的）
         rta::dsp::set_gpu_vendor(p.gpuVendor.empty() ? "auto" : p.gpuVendor);
         rta::dsp::GpuBridge::instance().reload();
@@ -2551,6 +2629,15 @@ static bool play_one_impl(const std::string& file, const PlayParams& pIn, rta::a
         eng::PipelineConfig cfg;
         cfg.outBits = (p.bits > 0) ? p.bits : 24;
         if (!p.shaper.empty()) cfg.shaper = parse_shaper(p.shaper);
+        cfg.replayGainDb = (rgDec.active ? rgDec.appliedDb : 0.0);
+        {
+            std::lock_guard<std::mutex> lk(ps.mtx);
+            ps.rgMode = rta::dsp::replaygain::mode_name(rgParams.mode);
+            ps.rgAppliedDb = cfg.replayGainDb;
+            ps.rgClipLimited = (rgDec.active && rgDec.clipLimited);
+            ps.rgSource = rgDec.source;
+            ps.rgNote = rgDec.note;
+        }
         // 2026-10-25（消除双重衰减与死锁）：
         // 音量由设备输出层（CoreAudioOutput::render）通过原子变量毫秒级实时应用。
         // Pipeline 软件音量固定不衰减（0.0 dB），消除"低音量起播后无法拉大"及"双重衰减"。
@@ -3173,6 +3260,11 @@ static bool play_one_impl(const std::string& file, const PlayParams& pIn, rta::a
                 << ",\"eq\":" << (eqLoaded ? "true" : "false")
                 << ",\"directSdm\":false"
                 << ",\"directNote\":\"" << jesc(directNote) << "\""
+                << ",\"rg\":\"" << jesc(ps.rgMode) << "\""
+                << ",\"rgDb\":" << ps.rgAppliedDb
+                << ",\"rgClip\":" << (ps.rgClipLimited ? "true" : "false")
+                << ",\"rgSource\":\"" << jesc(ps.rgSource) << "\""
+                << ",\"rgNote\":\"" << jesc(ps.rgNote) << "\""
                 // ---- bit-perfect 权威结论（用户 261023-02 #1）----
                 // 三态：direct（DirectSDM 1-bit 直通，最严格）/ yes / no（附原因）
                 // 口径：①不重采样 ②音量 0 dB ③无抖动/整形 ④无衰减 ⑤无 EQ/IR ⑥非 DoP ⑦位深未降
@@ -3188,6 +3280,7 @@ static bool play_one_impl(const std::string& file, const PlayParams& pIn, rta::a
                        if (cfg.preAttenDb > 1e-9) return std::string("no");
                        if (eqLoaded || convLoaded || dop) return std::string("no");
                        if (srcBitsEff > 0 && outBits > 0 && outBits < srcBitsEff) return std::string("no");
+                       if (std::fabs(cfg.replayGainDb) > 1e-9) return std::string("no");
                        return std::string("yes");
                    }()) << "\""
                 << ",\"bitPerfectWhy\":\"" << jesc([&] {
@@ -3201,6 +3294,11 @@ static bool play_one_impl(const std::string& file, const PlayParams& pIn, rta::a
                        if (convLoaded) why.push_back("IR 卷积");
                        if (dop) why.push_back("DoP 载波");
                        if (srcBitsEff > 0 && outBits > 0 && outBits < srcBitsEff) why.push_back("位深降低");
+                       if (std::fabs(cfg.replayGainDb) > 1e-9) {
+                           char rgb[64];
+                           std::snprintf(rgb, sizeof(rgb), "ReplayGain (%+.2f dB)", cfg.replayGainDb);
+                           why.push_back(rgb);
+                       }
                        if (why.empty()) return std::string("源→解码→输出全程逐位一致");
                        std::string s; for (size_t i = 0; i < why.size(); ++i) { if (i) s += "、"; s += why[i]; }
                        return s;
@@ -3226,6 +3324,11 @@ static bool play_one_impl(const std::string& file, const PlayParams& pIn, rta::a
                     if (convLoaded) why.push_back("IR 卷积");
                     if (dop) why.push_back("DoP 载波");
                     if (srcBitsEff > 0 && outBits > 0 && outBits < srcBitsEff) why.push_back("位深降低");
+                    if (std::fabs(cfg.replayGainDb) > 1e-9) {
+                        char rgb[64];
+                        std::snprintf(rgb, sizeof(rgb), "ReplayGain (%+.2f dB)", cfg.replayGainDb);
+                        why.push_back(rgb);
+                    }
                     if (why.empty()) { bps = "yes"; bpw = "源→解码→输出全程逐位一致"; }
                     else { std::string s; for (size_t i = 0; i < why.size(); ++i) { if (i) s += "、"; s += why[i]; } bpw = s; }
                 }
@@ -8496,7 +8599,11 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
                                            // 元数据补全(P1.5):总开关与 LLM 固定两键;
                                            // 源开关 metasrc_<id> 按注册表动态放行(见下);
                                            // P3④b AI 综合开关 metasummary (默认0)
-                                           "metaon", "metallm", "metasummary", "llmmonthlycap", "scanthreads", "scanThreads" })
+                                           "metaon", "metallm", "metasummary", "llmmonthlycap", "scanthreads", "scanThreads",
+                                           // ReplayGain / Album Gain
+                                           "rg.mode", "rg_mode", "rgmode", "rg",
+                                           "rg.preventClipping", "rg.preventclipping", "rg_preventclipping", "rgpreventclip",
+                                           "rg.preamp", "rg_preamp", "rgpreamp", "preamp" })
                     if (k == allow) okKey = true;
                 if (!okKey && k.rfind("metasrc_", 0) == 0) {
                     const std::string id = k.substr(8);
@@ -8623,6 +8730,9 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
         injectKv("streamdecode", "1");
         injectKv("stream_threshold_mb", "200");
         injectKv("isp_prescan_sec", "20");
+        injectKv("rg.mode", "off");
+        injectKv("rg.preventClipping", "1");
+        injectKv("rg.preamp", "0.0");
         for (const rta::meta::ProviderDesc& pd : rta::meta::provider_registry()) {
             const std::string nk = std::string("metasrc_") + pd.id;
             if (seen.count(nk) != 0) continue;
@@ -9612,6 +9722,11 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
           << ",\"gpuUsed\":" << (gpuF.gpuUsed ? "true" : "false")
           << ",\"gpuResample\":" << (gpuF.gpuResample ? "true" : "false")
           << ",\"gpuConv\":" << (gpuF.gpuConv ? "true" : "false")
+          << ",\"rg\":\"" << jesc(ps.rgMode) << "\""
+          << ",\"rgDb\":" << ps.rgAppliedDb
+          << ",\"rgClip\":" << (ps.rgClipLimited ? "true" : "false")
+          << ",\"rgSource\":\"" << jesc(ps.rgSource) << "\""
+          << ",\"rgNote\":\"" << jesc(ps.rgNote) << "\""
           << ",\"volDb\":" << ps.volDb.load()
           << ",\"startDb\":" << ps.startDb.load()
           << ",\"pad\":" << ps.dbgPad.load() << ",\"skips\":" << ps.dbgSkips.load()

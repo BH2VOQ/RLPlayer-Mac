@@ -976,6 +976,7 @@ struct Params {
     Mode   mode = Mode::Off;              // 默认 off ⟹ 不动
     double referenceLufs = kReferenceLufs;
     bool   preventClipping = true;        // 默认开
+    double preampDb = 0.0;                // 前级增益 dB（附加在请求增益上，默认 0.0）
     double minGainDb = -60.0;             // 合理区间钳制（防标签写坏成 "-999 dB"）
     double maxGainDb = 30.0;
 };
@@ -1038,6 +1039,7 @@ inline Decision decide(const Track& t, const Params& p, const std::vector<AlbumI
         d.source = "none";
         return d;
     }
+    g += p.preampDb;
     d.requestedDb = g;
 
     // ---- 2) 峰值（防削波依据）：标签峰值优先，缺了才用测量峰值 ----
