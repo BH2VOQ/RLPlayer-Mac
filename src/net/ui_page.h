@@ -850,7 +850,7 @@ h += "#npPage .npedge{display:none}";
     // ===== 20 段 PEQ（261024-03 #5：文字对齐 + HIFI 交互） =====
     // 为什么弃 table：th/td 的列宽由内容撑开，表头与输入框天生不同宽（用户看到的"文字没对齐"）。
     // 现在表头与每一行共用同一个【内容无关】的列模板（px + fr，没有 auto）⟹ 列位置逐像素一致。
-    // 表格与曲线同宽（720px）：列宽不至于被拉成"一大片空白输入框"，也不会跟上面的曲线错位
+    // 表格与曲线同宽：列宽不至于被拉成"一大片空白输入框"，也不会跟上面的曲线错位
     //
     // 2026-10-26 BUG（用户截图：第 10 段「800 赫兹」与右侧「1.41」重叠、最右列「峰值 PK」被压窄）：
     //   ① 列模板用 minmax(0, Xfr) —— 下限是 **0**，grid 可以把列压到比内容还窄，
@@ -859,7 +859,18 @@ h += "#npPage .npedge{display:none}";
     //   修法：每列给**内容下界**（不是 0），并让表格吃掉可用宽度（保留上限，避免超宽屏拉散）。
     //   下界按实际内容取：序号 36 / 频率 112（"20.00 kHz" + 微调箭头）/ 增益 88（"-12.0 dB"）/
     //   Q 76（"0.71"）/ 类型 104（"峰值 PK" 四字 + 下拉箭头）/ 开关 40。
-    h += ".peqwrap{--peqcols:36px minmax(112px,1.25fr) minmax(88px,1fr) minmax(76px,.9fr) minmax(104px,1.1fr) 40px;max-width:920px}";
+    //
+    // 2026-10-27 R-5（大屏留白 + 波形比表格窄 200px）：上面这条"曲线和表格同宽"其实没做到 ——
+    //   .peqwrap 上限 920px、.peqcv 上限 720px，两个**各写各的常数**，大屏下必然错位 200px，
+    //   右边留一条空白。修法：两者共用一个 `--peqw`（同一个上限、同一处定义），
+    //   结构上不可能再各写各的；波形侧再由 ResizeObserver 按实测宽度重算 viewBox（见 ui_script.h）。
+    //   上限取 1280px：1600px 视口下设置页内容区约 1283px ⟹ 常态几乎铺满，超宽屏才收边，
+    //   避免 6 列在 2560 屏上被 fr 拉成"一大片空白输入框"。
+    //   ⚠️ 口径：本地 peqSvgPoint() 用 getBoundingClientRect() 按比例映射，CSS 拉伸**不会**让
+    //   拖拽点错位（实测 scaleX==scaleY，等比缩放）。这条改动解决的是视觉一致性/信息密度，
+    //   **不是**修拖拽 bug —— 拖拽映射判据只做回归，不当成功劳。
+    h += ":root{--peqw:1280px}";
+    h += ".peqwrap{--peqcols:36px minmax(112px,1.25fr) minmax(88px,1fr) minmax(76px,.9fr) minmax(104px,1.1fr) 40px;width:100%;max-width:var(--peqw);box-sizing:border-box}";
     h += ".peqhd,.peqr{display:grid;grid-template-columns:var(--peqcols);gap:0 8px;align-items:center}";
     // 表头必须跟数据行【同一个滚动容器、同一个内容宽度】：否则滚动条宽度 + 表头自带边框
     // 会让两边的可用宽度差 8~10px，fr 列随之变宽，逐列中心偏差线性放大到 9px（实测 1.7/4.9/7.7/9.0）。
@@ -883,7 +894,10 @@ h += "#npPage .npedge{display:none}";
     h += ".peqwrap .peqc input[type=text],.peqwrap .peqc input[type=number]{text-align:right;min-width:0;text-overflow:ellipsis}";
     h += ".peqwrap .peqc input:focus,.peqwrap .peqc select:focus{outline:0;border-color:var(--acc);box-shadow:0 0 0 2px var(--acc-weak)}";
     h += ".peqwrap .peqc input[type=checkbox]{width:14px;height:14px;min-height:0;margin:0;accent-color:var(--acc)}";
-    h += ".peqcv{position:relative;max-width:720px;background:var(--field);border:1px solid var(--line);border-radius:8px;padding:6px 10px 2px;user-select:none}";
+    // R-5：波形与表格共用 --peqw（同一个上限）⟹ 宽度恒等，大屏不再留 200px 空白。
+    // box-sizing:border-box 让 10px 左右内边距 + 1px 边框算在宽度里，否则 .peqcv 会比
+    // .peqwrap 宽 22px（内容盒 vs 边框盒），判据要求差值 ≤ 2px。
+    h += ".peqcv{position:relative;width:100%;max-width:var(--peqw);box-sizing:border-box;background:var(--field);border:1px solid var(--line);border-radius:8px;padding:6px 10px 2px;user-select:none}";
     h += ".peqcv svg.peqsvg{display:block;width:100%;height:auto;touch-action:none}";
     h += ".peqnode{fill:var(--acc);stroke:var(--bg);stroke-width:1.4;cursor:ns-resize}";
     h += ".peqnode:hover,.peqnode.on{fill:var(--acc2);stroke-width:2}";
@@ -1152,7 +1166,9 @@ h += "#npPage .npedge{display:none}";
     h += "<input type=checkbox id=sLoud><input type=checkbox id=sIsp checked><input type=checkbox id=s2s checked>";
     h += "<select id=sGpu><option value=auto>自动</option><option value=amd>AMD</option><option value=nvidia>NVIDIA</option><option value=off>关闭</option></select>";
     h += "<input type=checkbox id=sShuf>";
-    h += "<select id=sRep><option value=0>关闭</option><option value=1>列表循环</option><option value=2>单曲循环</option></select>";
+    // 2026-10-27（R-4）：四态播放模式。原来只有 0/1/2 三态，随机是另一个独立开关 ⟹ 两套真相。
+    // 现在 value 与后端 /api/playmode 的 mode 一一对应（0=顺序 1=列表循环 2=单曲循环 3=随机）。
+    h += "<select id=sRep><option value=0>顺序播放</option><option value=1>列表循环</option><option value=2>单曲循环</option><option value=3>随机播放</option></select>";
     h += "<input id=sRoot>";
     h += "<button id=bAddRoot></button><button id=bRescan></button>";
     h += "<div id=roots2></div>";

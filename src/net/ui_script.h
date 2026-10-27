@@ -4208,24 +4208,55 @@ D('npPlay').onclick = playOrPause;
 D('npStop').onclick = function () { api('/api/stop', '').then(loadQ); };
 // ---- 循环方式：整页按钮与底栏 #bRep、设置页 #sp_rep 共用 #sRep 的值（唯一真相源）----
 // 为什么不自己存一份：历史上"两处各有一份"必然不一致（HANDOVER §4.5 的规矩）。
+// 2026-10-27（R-4）：四态播放模式（0=顺序 1=列表循环 2=单曲循环 3=随机）。
+// 图标/aria-label **随模式变化** —— 只改颜色不改图标是明令禁止的假修
+// （用户看不出当前是哪种模式，等于没修）。
+var REP_META = [
+  { name: '顺序播放', aria: '顺序播放（播到末尾停止）', color: '',          one: false },
+  { name: '列表循环', aria: '列表循环（播到末尾回到第一首）', color: 'var(--acc-text)', one: false },
+  { name: '单曲循环', aria: '单曲循环（重复当前这首）', color: 'var(--acc-text)', one: true },
+  { name: '随机播放', aria: '随机播放（不重复当前曲）', color: 'var(--acc-text)', one: false }
+];
+function repMeta(v) {
+  v = parseInt(v, 10);
+  if (!(v >= 0 && v <= 3)) v = 0;
+  return REP_META[v];
+}
 function applyRep(v) {
-  v = parseInt(v, 10) || 0;
+  v = parseInt(v, 10);
+  if (!(v >= 0 && v <= 3)) v = 0;
+  var m = REP_META[v];
+  // 「1」角标只在单曲循环时显示
   ['repOne', 'npRepOne'].forEach(function (id) {
-    var e = D(id); if (e) e.style.display = (v === 2) ? '' : 'none';
+    var e = D(id); if (e) e.style.display = m.one ? '' : 'none';
   });
   ['bRep', 'npRep'].forEach(function (id) {
-    var e = D(id); if (e) e.style.color = v ? 'var(--acc-text)' : '';
+    var e = D(id);
+    if (!e) return;
+    e.style.color = m.color;
+    e.setAttribute('aria-label', m.aria);
+    e.title = m.aria;
+    // 图标随模式换：顺序=直线箭头 / 列表循环=环形箭头 / 单曲循环=环形+1 / 随机=交叉箭头
+    var svg = e.querySelector('svg');
+    if (svg) svg.innerHTML = REP_ICON[v];
   });
 }
+// 四种模式的图标路径（24x24 viewBox，与既有图标同风格：stroke=currentColor、无填充）
+var REP_ICON = [
+  '<path d="M4 12h14M13 6l6 6-6 6"/>',
+  '<path d="M17 2l4 4-4 4"/><path d="M3 11v-1a4 4 0 014-4h14"/><path d="M7 22l-4-4 4-4"/><path d="M21 13v1a4 4 0 01-4 4H3"/>',
+  '<path d="M17 2l4 4-4 4"/><path d="M3 11v-1a4 4 0 014-4h14"/><path d="M7 22l-4-4 4-4"/><path d="M21 13v1a4 4 0 01-4 4H3"/>',
+  '<path d="M16 3h5v5"/><path d="M4 20L21 3"/><path d="M21 16v5h-5"/><path d="M15 15l6 6"/><path d="M4 4l5 5"/>'
+];
 function cycleRep() {
   var cur = parseInt(D('sRep').value, 10) || 0;
-  var next = (cur + 1) % 3;
+  var next = (cur + 1) % 4;            // R-4：四态
   D('sRep').value = String(next);
-  api('/api/repeat', 'rate=' + next);
+  api('/api/playmode?mode=' + next, '');   // 单一真相源端点
   applyRep(next);
   var sp = D('sp_rep');            // 设置页渲染中时一起同步（它只是同一值的镜像）
   if (sp) sp.value = String(next);
-  toast(['循环：关', '循环：列表', '循环：单曲'][next]);
+  toast('播放模式：' + REP_META[next].name);
   return next;
 }
 // ---- 音量：整页滑块是 #vol 的镜像，两边都只改 S.vol + 下发 /api/volume ----
@@ -4423,7 +4454,7 @@ D('tq').onclick = function () {
   }
   syncRightDrawerBtn();
 };
-D('sRep').onchange = function () { api('/api/repeat', 'rate=' + this.value); };
+D('sRep').onchange = function () { api('/api/playmode?mode=' + this.value, ''); applyRep(this.value); };
 D('sShuf').onchange = function () { api('/api/shuffle?on=' + (this.checked ? 1 : 0), '').then(loadQ); };
 // 底栏滑块同样是**位置刻度**（0..1000）→ 曲线换算成 dB。
 D('vol').addEventListener('pointerdown', function () { VOL_DRAGGING = 'vol'; });
@@ -7426,6 +7457,71 @@ function peqBandsParam() {
 var PEQ_VIEW = null;      // 曲线坐标映射（拖拽换算要用）
 var PEQ_DRAG = null;      // {i, mode:'g'|'q', y0, q0}
 var PEQ_LASTCLICK = null; // {i, t}：自己判双击（不依赖宿主是否派发 dblclick）
+// 2026-10-27 R-5：波形宽度自适应。旧版 viewBox 写死 640 宽、CSS 拉到 100% ⟹ 大屏上整块 SVG
+// （含 9px 刻度字、1.8px 曲线）被等比放大 1.09 倍，文字发虚、线宽变粗；而且 .peqcv 上限
+// 720px 比表格的 920px 窄 200px，右侧空一条。
+// 现在：viewBox 宽度 = 实测 CSS 宽度 ⟹ 1:1 渲染（scale 恒为 1.0），容器一变就按新宽度重画。
+// ⚠️ 口径：peqSvgPoint() 本来就是 getBoundingClientRect() 按比例映射，CSS 拉伸**不会**让拖拽点
+// 错位（实测 scaleX==scaleY，等比缩放）。这条改动解决的是视觉一致性/信息密度，不是修拖拽 bug。
+var PEQ_W = 640;          // 当前绘图宽度（viewBox 单位，与 CSS 像素 1:1）
+var PEQ_H = 132;          // 绘图高度（固定）
+var PEQ_PTS = 160;        // 曲线采样点数（按宽度算密度，见 peqResample）
+var PEQ_OBS = null;       // ResizeObserver 句柄
+var PEQ_OBS_EL = null;    // 正在观察的容器（换容器才重连，避免每次 apply 都 disconnect/observe）
+// 量出波形实际可用的 CSS 宽度。优先量 svg 自身（它 width:100%，已扣掉 .peqcv 的 padding/border）；
+// 首次绘制时 svg 还没建，退回「容器内容宽度」。
+function peqMeasureW() {
+  var box = D('peqCurve'); if (!box) return 0;
+  var svg = box.querySelector('svg.peqsvg');
+  if (svg) { var r = svg.getBoundingClientRect(); var w0 = Math.round(r.width); if (w0 > 0) return w0; }
+  var cs = window.getComputedStyle(box);
+  var pad = (parseFloat(cs.paddingLeft) || 0) + (parseFloat(cs.paddingRight) || 0);
+  var cw = Math.round(box.clientWidth - pad);
+  return cw > 0 ? cw : 0;
+}
+// 按对数频率均匀重采样到 n 点。后端固定给 160 点；宽屏下 plot 区超过 ~960px 时
+// 160 点会稀于 1 点/6px，这里线性插值补密（窄屏 n<=原点数直接返回，不做无用计算）。
+function peqResample(points, n) {
+  if (!points || points.length < 2 || n <= points.length) return points;
+  var lf = function (f) { return Math.log(Math.max(20, Math.min(20000, +f))); };
+  var lo = lf(20), hi = lf(20000), out = [], k = 0;
+  for (var i = 0; i < n; i++) {
+    var t = lo + (hi - lo) * i / (n - 1), f = Math.exp(t);
+    while (k < points.length - 2 && lf(points[k + 1][0]) < t) k++;
+    var a = points[k], b = points[k + 1] || a;
+    var fa = lf(a[0]), fb = lf(b[0]);
+    var u = (fb > fa) ? Math.max(0, Math.min(1, (t - fa) / (fb - fa))) : 0;
+    out.push([f, a[1] + (b[1] - a[1]) * u]);
+  }
+  return out;
+}
+// 容器宽度变了就按新宽度重画。亚像素抖动不重画 —— ResizeObserver 里改 viewBox 会改变 SVG
+// 高度（height:auto 跟宽高比走），不加这道闸可能自激。
+function peqReflow() {
+  var w = peqMeasureW();
+  if (!w || Math.abs(w - PEQ_W) < 1) return;
+  peqDrawCurve((PEQ_STATE && PEQ_STATE.points) || []);
+}
+// 监听波形容器尺寸。同一个容器已在观察就直接返回（peqDrawCurve 每次 apply 都会调到这里）。
+function peqObserveWidth() {
+  var box = D('peqCurve'); if (!box) return;
+  if (PEQ_OBS && PEQ_OBS_EL === box) return;
+  if (PEQ_OBS) { try { PEQ_OBS.disconnect(); } catch (e) { } }
+  PEQ_OBS = null; PEQ_OBS_EL = null;
+  if (typeof ResizeObserver !== 'function') {
+    // 兜底：老宿主没有 ResizeObserver 时退回 window.resize（mac 壳是 NSWindow，拉窗同样触发）
+    if (!peqObserveWidth._win) {
+      peqObserveWidth._win = 1;
+      window.addEventListener('resize', function () { peqReflow(); });
+    }
+    return;
+  }
+  try {
+    PEQ_OBS = new ResizeObserver(function () { peqReflow(); });
+    PEQ_OBS.observe(box);
+    PEQ_OBS_EL = box;
+  } catch (e) { PEQ_OBS = null; }
+}
 function peqFreqX(f) {
   var v = PEQ_VIEW; if (!v) return 0;
   return v.PADL + (Math.log(Math.max(20, Math.min(20000, f)) / 20) / Math.log(1000)) * (v.W - v.PADL - v.PADR);
@@ -7451,11 +7547,21 @@ function peqDrawCurve(points) {
     PEQ_VIEW = null;
     return;
   }
-  var W = 640, H = 132, PADL = 36, PADR = 10, PADT = 10, PADB = 18;
+  var H = 132, PADL = 36, PADR = 10, PADT = 10, PADB = 18;
+  // R-5：宽度不再写死 640 —— 量容器实际宽度当 viewBox 宽，SVG 1:1 渲染（不再被 CSS 放大）。
+  // 量不到（容器还没布局/隐藏）才退回上次宽度，最后兜底 640。
+  var mw = peqMeasureW();
+  var W = mw > 120 ? mw : (PEQ_W > 120 ? PEQ_W : 640);
+  PEQ_W = W; PEQ_H = H;
+  // 采样点数跟着宽度走：约 1 点 / 3px（宽屏补密，曲线仍平滑），上限 800 防点数爆掉。
+  // 下限固定 160 = 后端原始点数（窄屏不补密，不做无用计算）。
+  var wantPts = Math.max(160, Math.min(800, Math.round(W / 3)));
+  PEQ_PTS = wantPts;
   var maxDb = 6, minDb = -6;
   points.forEach(function (p) { maxDb = Math.max(maxDb, p[1]); minDb = Math.min(minDb, p[1]); });
   maxDb = Math.ceil(maxDb / 3) * 3; minDb = Math.floor(minDb / 3) * 3;
   PEQ_VIEW = { W: W, H: H, PADL: PADL, PADR: PADR, PADT: PADT, PADB: PADB, maxDb: maxDb, minDb: minDb };
+  points = peqResample(points, wantPts);
 
   var g = '';
   for (var d = Math.ceil(minDb / 6) * 6; d <= maxDb; d += 6) {
@@ -7484,9 +7590,12 @@ function peqDrawCurve(points) {
     svg = box.querySelector('svg.peqsvg');
     peqBindCurve();
   }
+  // R-5：宽度变了就同步 viewBox（不只是首次建 SVG 时写一次），否则缩放后图被拉变形/留白。
+  svg.setAttribute('viewBox', '0 0 ' + W + ' ' + H);
   svg.querySelector('.peqgrid').innerHTML = g;
   svg.querySelector('.peqline').setAttribute('points', pts);
   peqSyncNodes();
+  peqObserveWidth();   // 挂上 ResizeObserver（同一容器重复调用是 no-op）
 }
 /* ---------------- PEQ：行渲染 / 选中 / 曲线节点交互（261024-03 #5） ---------------- */
 function peqSelectRow(tr) {

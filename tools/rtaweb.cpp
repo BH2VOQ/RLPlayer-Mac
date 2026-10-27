@@ -3539,13 +3539,33 @@ static bool lib_track_cue_sec(const rta::net::LibTrack& t, double& cs, double& c
     return rta::net::lib_cue_range_sec(t, cs, ce);
 }
 
+// 2026-10-27（R-4）：播放模式收敛成**单一真相源** mode ∈ {0,1,2,3}。
+//
+// 为什么必须收敛：原来 `repeat`(0/1/2) 与 `shuffle`(on/off) 是**两个独立字段**，
+// 它们组合出 6 种状态，但用户心智里只有 4 种（顺序 / 列表循环 / 单曲循环 / 随机）。
+// 两套真相的直接后果：前端按钮只能表达 3 态、`repeat=1 + shuffle=true` 这种组合
+// 到底算"列表循环"还是"随机"没有定义，播放推进逻辑里两处 if 各判各的。
+//
+// 现在的模型（与上游 /api/playmode 一致）：
+//   0 = 顺序（播到末尾停）
+//   1 = 列表循环（末尾回到第 1 首）
+//   2 = 单曲循环（原地重播）
+//   3 = 随机（不重复当前曲）
+//
+// ⚠️ 向后兼容：`/api/repeat` 与 `/api/shuffle` 仍然工作，但它们**不再有独立存储**，
+//    而是 mode 的派生写入口（repeat=2 ⟹ mode=2；shuffle=on ⟹ mode=3；shuffle=off ⟹ mode=0）。
+//    读的时候由 mode 反推。这样"两处真相打架"在结构上不可能发生。
 struct QueueState {
     std::mutex mtx;
     std::vector<QItem> items;
     size_t index = 0;
-    int    repeat = 0;      // 0=关 1=列表循环 2=单曲循环
-    bool   shuffle = false; // 随机播放
+    int    mode = 0;        // 0=顺序 1=列表循环 2=单曲循环 3=随机（唯一真相源）
     std::vector<QItem> base;   // 随机前的原始顺序（关掉随机时还原）
+
+    // ---- 派生访问器：给既有代码用，语义与旧字段一一对应 ----
+    // repeat：0=关 1=列表循环 2=单曲循环。随机模式下 repeat 视为 0（随机不循环）。
+    int  repeat_of() const { return (mode == 1) ? 1 : (mode == 2) ? 2 : 0; }
+    bool shuffle_of() const { return mode == 3; }
 };
 static QueueState g_q;
 // ---- 队列持久化：重启后仍保留播放列表 ----
@@ -4716,8 +4736,10 @@ static void queue_save() {
     if (!f) return;
     f << "# RLPlayer playlist v1\n";
     f << "index=" << g_q.index << "\n";
-    f << "repeat=" << g_q.repeat << "\n";
-    f << "shuffle=" << (g_q.shuffle ? 1 : 0) << "\n";
+    f << "mode=" << g_q.mode << "\n";
+    // 旧键同时写一份：万一用户回滚到旧版本，repeat/shuffle 仍能读（单向兼容）
+    f << "repeat=" << g_q.repeat_of() << "\n";
+    f << "shuffle=" << (g_q.shuffle_of() ? 1 : 0) << "\n";
     // 队列项落盘格式：item=<路径>，CUE 分轨项再跟两个 TAB 分隔的秒数（cs/ce）。
     // 普通曲目**逐字节与旧格式相同** ⟹ 老队列文件照旧可读（读侧只在有 TAB 时才当 cue 解析）。
     for (const auto& it : g_q.items) {
@@ -4737,10 +4759,15 @@ static void queue_load() {
     std::lock_guard<std::mutex> lk(g_q.mtx);
     std::string line;
     g_q.items.clear();
+    // R-4：优先读 mode；老文件只有 repeat/shuffle 时按旧语义推导一次（单向兼容）
+    bool hasMode = false;
+    int  oldRepeat = 0;
+    bool oldShuffle = false;
     while (std::getline(f, line)) {
         if (line.rfind("index=", 0) == 0) g_q.index = (size_t)atoi(line.c_str() + 6);
-        else if (line.rfind("repeat=", 0) == 0) g_q.repeat = atoi(line.c_str() + 7);
-        else if (line.rfind("shuffle=", 0) == 0) g_q.shuffle = (atoi(line.c_str() + 8) != 0);
+        else if (line.rfind("mode=", 0) == 0) { g_q.mode = atoi(line.c_str() + 5); hasMode = true; }
+        else if (line.rfind("repeat=", 0) == 0) oldRepeat = atoi(line.c_str() + 7);
+        else if (line.rfind("shuffle=", 0) == 0) oldShuffle = (atoi(line.c_str() + 8) != 0);
         else if (line.rfind("item=", 0) == 0) {
             // item=<路径>[	<cs>	<ce>]：没有 TAB = 普通曲目（旧格式）
             const std::string rest = line.substr(5);
@@ -4758,6 +4785,14 @@ static void queue_load() {
         }
     }
     if (g_q.index >= g_q.items.size()) g_q.index = 0;
+    // R-4：没有 mode 键（老队列文件）⟹ 由 repeat/shuffle 推导一次（单向兼容）
+    if (!hasMode) {
+        if (oldShuffle)          g_q.mode = 3;
+        else if (oldRepeat == 2) g_q.mode = 2;
+        else if (oldRepeat == 1) g_q.mode = 1;
+        else                     g_q.mode = 0;
+    }
+    if (g_q.mode < 0 || g_q.mode > 3) g_q.mode = 0;
 }
 
 // ---- 预解码槽：当前曲播放的同时，后台把下一曲解码进内存 ----
@@ -4823,7 +4858,7 @@ static void queue_thread(PlayParams p, size_t start) {
             std::lock_guard<std::mutex> lk(g_q.mtx);
             if (g_q.items.empty()) break;
             if (idx >= g_q.items.size()) {
-                if (g_q.repeat == 1) idx = 0;
+                if (g_q.mode == 1 || g_q.mode == 3) idx = 0;   // R-4：列表循环与随机都在末尾回绕
                 else break;
             }
             cur = g_q.items[idx];
@@ -4868,9 +4903,17 @@ static void queue_thread(PlayParams p, size_t start) {
         if (ps.stop.load() || !done) break;
 
         std::lock_guard<std::mutex> lk(g_q.mtx);
-        if (g_q.repeat == 2) continue;                     // 单曲循环
+        if (g_q.mode == 2) continue;                       // 单曲循环
+        if (g_q.mode == 3) {                               // 随机：随机挑一首不等于当前的
+            if (g_q.items.size() <= 1) continue;
+            size_t pick = idx;
+            for (int tries = 0; tries < 8 && pick == idx; ++tries)
+                pick = (size_t)(std::rand() % (int)g_q.items.size());
+            if (pick == idx) pick = (idx + 1) % g_q.items.size();   // 兜底：确定性前进一首
+            idx = pick; continue;
+        }
         if (idx + 1 < g_q.items.size()) { idx += 1; continue; }
-        if (g_q.repeat == 1) { idx = 0; continue; }
+        if (g_q.mode == 1) { idx = 0; continue; }
         break;
     }
     ps.playing = false;
@@ -6080,6 +6123,50 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
         return j.str();
     }
 
+    // ⚠️ 顺序关键（2026-10-27 R-4 实测踩到）：/api/playmode 以 "/api/play" 开头，
+    // 后端用 rfind(prefix,0)==0 做前缀匹配 ⟹ playmode 分支**必须排在 /api/play 之前**，
+    // 否则请求会掉进 /api/play 的 "未指定文件" 分支（diagzip 当年同款坑）。
+    // ---- 播放模式：单一真相源（R-4，2026-10-27）----
+    // GET  /api/playmode            → {"ok":true,"mode":N,"name":"顺序|列表循环|单曲循环|随机"}
+    // POST /api/playmode?mode=N     → 设置（body 或查询串皆可）
+    if (rq.path.rfind("/api/playmode", 0) == 0) {
+        ct = "application/json; charset=utf-8";
+        static const char* kNames[] = { "顺序", "列表循环", "单曲循环", "随机" };
+        int want = -1;
+        {
+            const size_t q = rq.path.find("?mode=");
+            if (q != std::string::npos) want = atoi(rq.path.c_str() + q + 6);
+        }
+        if (want < 0) {   // 也接受表单体 mode=N
+            PlayParams p = parseForm(rq.body);
+            if (!p.rate.empty()) want = atoi(p.rate.c_str());
+        }
+        if (rq.method == "POST" && want >= 0) {
+            if (want > 3) want = 0;
+            {
+                std::lock_guard<std::mutex> lk(g_q.mtx);
+                const bool wasShuffle = g_q.shuffle_of();
+                const bool wantShuffle = (want == 3);
+                if (wantShuffle && !wasShuffle) {
+                    g_q.base = g_q.items;
+                    if (g_q.items.size() > 1) {
+                        std::mt19937 rng((unsigned)std::chrono::duration_cast<std::chrono::milliseconds>(
+                            std::chrono::steady_clock::now().time_since_epoch()).count());
+                        std::shuffle(g_q.items.begin(), g_q.items.end(), rng);
+                    }
+                } else if (!wantShuffle && wasShuffle) {
+                    if (!g_q.base.empty()) g_q.items = g_q.base;
+                }
+                g_q.mode = want;
+            }
+            queue_save();
+        }
+        int cur = 0;
+        { std::lock_guard<std::mutex> lk(g_q.mtx); cur = g_q.mode; }
+        return std::string("{\"ok\":true,\"mode\":") + std::to_string(cur) +
+               ",\"name\":\"" + kNames[(cur >= 0 && cur <= 3) ? cur : 0] + "\"}";
+    }
+
     if (rq.path.rfind("/api/play", 0) == 0) {
         ct = "application/json; charset=utf-8";
         // L-2：播放路径才吃 conf 兜底；/api/repeat /api/add 不受影响（见 apply_conf_defaults_for_play 注释）
@@ -7032,16 +7119,21 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
             // 记住整项（不是只记路径）：cue 专辑里同一路径有 N 项，只按路径还原会跳到第 1 首
             const QItem cur = (g_q.index < g_q.items.size()) ? g_q.items[g_q.index] : QItem();
             const bool want = (on != 0);
-            if (want && !g_q.shuffle) {
+            const bool was = g_q.shuffle_of();
+            // R-4：shuffle 不再是独立字段，而是 mode 的派生写入口
+            //   on  → mode=3（随机）
+            //   off → mode=0（顺序）—— 与旧行为一致：关随机后回到不循环的顺序播放
+            if (want && !was) {
                 g_q.base = g_q.items;                 // 保存原顺序，关掉时能还原
                 if (g_q.items.size() > 1) {
                     std::mt19937 rng((unsigned)std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count());
                     std::shuffle(g_q.items.begin(), g_q.items.end(), rng);
                 }
-            } else if (!want && g_q.shuffle) {
+                g_q.mode = 3;
+            } else if (!want && was) {
                 if (!g_q.base.empty()) g_q.items = g_q.base;   // 还原原始顺序
+                g_q.mode = 0;
             }
-            g_q.shuffle = want;
             if (!cur.path.empty()) {
                 for (size_t i = 0; i < g_q.items.size(); ++i)
                     if (g_q.items[i].same(cur)) { g_q.index = i; break; }
@@ -7055,8 +7147,9 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
         std::lock_guard<std::mutex> lk(g_q.mtx);
         std::ostringstream j;
         j << "{\"ok\":true,\"index\":" << g_q.index
-          << ",\"repeat\":" << g_q.repeat
-          << ",\"shuffle\":" << (g_q.shuffle ? "true" : "false") << ",\"items\":[";
+          << ",\"repeat\":" << g_q.repeat_of()
+          << ",\"shuffle\":" << (g_q.shuffle_of() ? "true" : "false")
+          << ",\"mode\":" << g_q.mode << ",\"items\":[";
         for (size_t i = 0; i < g_q.items.size(); ++i) {
             if (i) j << ",";
             j << "\"" << jesc(g_q.items[i].path) << "\"";
@@ -7090,17 +7183,23 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
         return "{\"ok\":true}";
     }
 
+    // 兼容端点：/api/repeat（0=关 1=列表循环 2=单曲循环）⟹ 派生写 mode
     if (rq.path.rfind("/api/repeat", 0) == 0) {
         ct = "application/json; charset=utf-8";
         PlayParams p = parseForm(rq.body);
-        int mode = atoi(p.rate.c_str());
-        if (mode < 0 || mode > 2) mode = 0;
+        int old = atoi(p.rate.c_str());
+        if (old < 0 || old > 2) old = 0;
         {
             std::lock_guard<std::mutex> lk(g_q.mtx);
-            g_q.repeat = mode;
+            const bool wasShuffle = g_q.shuffle_of();
+            // 旧语义：repeat 0/1/2 都是"非随机"；切到非随机要还原顺序
+            if (wasShuffle) {
+                if (!g_q.base.empty()) g_q.items = g_q.base;
+            }
+            g_q.mode = old;          // 0→0 顺序，1→1 列表循环，2→2 单曲循环
         }
         queue_save();
-        return std::string("{\"ok\":true,\"repeat\":") + std::to_string(mode) + "}";
+        return std::string("{\"ok\":true,\"repeat\":") + std::to_string(old) + "}";
     }
 
     if (rq.path.rfind("/api/skip", 0) == 0) {
@@ -7120,10 +7219,10 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
             if (g_q.items.empty()) return "{\"ok\":false,\"error\":\"队列为空\"}";
             if (dir > 0) {
                 if (g_q.index + 1 < g_q.items.size()) { target = g_q.index + 1; ok = true; }
-                else if (g_q.repeat != 0) { target = 0; ok = true; }
+                else if (g_q.mode != 0) { target = 0; ok = true; }   // R-4：循环/随机都可回绕
             } else {
                 if (g_q.index > 0) { target = g_q.index - 1; ok = true; }
-                else if (g_q.repeat != 0) { target = g_q.items.size() - 1; ok = true; }
+                else if (g_q.mode != 0) { target = g_q.items.size() - 1; ok = true; }
             }
         }
         if (!ok) return "{\"ok\":false,\"error\":\"已到队列边界\"}";

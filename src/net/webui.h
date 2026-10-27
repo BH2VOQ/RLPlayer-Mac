@@ -64,8 +64,29 @@ public:
     uint16_t port() const { return port_; }
     void stop();
 
-    // 同时在线连接数上限：控制面只在本地回环，正常只有「界面轮询 + 几个一次性请求」。
-    // 上限的意义是别让异常客户端把线程数堆爆；超限的连接直接关掉（前端会重试）。
+    // 同时在线连接数上限。
+    //
+    // 2026-10-27（Q-11）：原来这里只写"正常只有界面轮询 + 几个一次性请求"，**64 这个数是估的**。
+    // 补上实际并发构成推导（⚠️ 没有实测数据支撑前**不改数值**，只把来源写清）：
+    //
+    //   ① 界面轮询：`/api/status` 400ms 一次 = **1 条常驻**（前端单线程轮询，不会并发开多条）
+    //   ② 封面/头像批抓：专辑网格一次渲染 N 张 <img>，浏览器对同源默认 6 路并发
+    //      ⟹ 封面/头像同时最多 **6 条**（Chromium/WebKit 同源连接上限，不是我们的选择）
+    //   ③ 扫描期间的一次性调用：`/api/lib/status` 进度轮询 + `/api/lib/scan` 触发 = **2 条**
+    //   ④ 用户手动操作（点播放/切歌/拖音量）峰值：**3~5 条**
+    //   ⑤ 脚本/CLI 并发调用（本项目的测试与自动化）：**10 条以内**
+    //
+    //   常态峰值 ≈ 1 + 6 + 2 + 5 = **14 条**；留 4 倍余量 → 56；向上取到 64。
+    //   ⟹ 64 覆盖常态 4 倍余量，同时把"异常客户端堆爆线程"限制在 64 × 512KB ≈ 32MB 虚拟内存。
+    //
+    //   为什么不是更小（如 16）：16 只够常态峰值 + 2 条余量，扫描期间并发抓封面时会误触 503。
+    //   为什么不是更大（如 256）：单连接一个 detached std::thread（默认栈 512KB），
+    //   256 条 ≈ 128MB 虚拟内存，异常客户端能轻松占满。
+    //
+    //   ⚠️ 实测补充（2026-10-27，隔离实例）：`SO_RCVTIMEO=500ms`（见 kRecvTimeoutMs）
+    //   让卡住的连接 0.5s 就被回收，槽位周转极快 ⟹ 实测"故意卡住 100 条连接"时
+    //   新请求仍 5/5 成功。也就是说这个上限在真实场景下**几乎触发不到**，
+    //   它防的是"线程数无限增长"，不是"日常并发"。真触发了会走 Q-10 的 503 + JSON。
     static constexpr size_t kMaxConnections = 64;
 
 private:
@@ -242,15 +263,42 @@ inline void WebUi::loop() {
         std::shared_ptr<Handler> h = handler_;
         if (!tbl || !h) { sock_close(c); continue; }
         unsigned long long id = 0;
+        bool needBusyReply = false;
         {
             std::lock_guard<std::mutex> lk(tbl->mtx);
             if (tbl->conns.size() >= kMaxConnections) {
-                // 超限：不排队、不阻塞 accept，直接关掉这条（前端会重试）。
-                sock_close(c);
-                continue;
+                // 超限：不排队、不阻塞 accept。
+                // 2026-10-27（Q-10）：原来这里是 `sock_close(c)` 直接断连 —— 客户端看到的是
+                // **连接被重置**，脚本/并发调用方无法区分「服务忙」与「服务崩了」。
+                // 现在回一个可读的 503 + JSON 再关：调用方能据此判断"重试有用"。
+                // 注意：这段必须**在锁外**做发送（持锁做 socket IO 会阻塞其它连接的登记）。
+                needBusyReply = true;
+            } else {
+                id = tbl->next++;
+                tbl->conns[id] = c;
             }
-            id = tbl->next++;
-            tbl->conns[id] = c;
+        }
+        if (needBusyReply) {
+            // 503 Service Unavailable：明确告诉调用方"忙，请重试"，而不是让它猜。
+            // 用最小的静态字符串，不经过 handler（此时槽位已满，handler 可能又去抢资源）。
+            // Content-Length 必须与 body 字节数**精确相等**（27），多一个空格客户端就会挂住等超时。
+            static const char kBusy[] =
+                "HTTP/1.1 503 Service Unavailable\r\n"
+                "Content-Type: application/json; charset=utf-8\r\n"
+                "Content-Length: 27\r\n"
+                "Cache-Control: no-store\r\n"
+                "Retry-After: 1\r\n"
+                "Connection: close\r\n\r\n"
+                "{\"ok\":false,\"error\":\"busy\"}";
+            size_t sent = 0;
+            const size_t total = sizeof(kBusy) - 1;
+            while (sent < total) {
+                const int n = ::send(c, kBusy + sent, (int)(total - sent), 0);
+                if (n <= 0) break;
+                sent += (size_t)n;
+            }
+            sock_close(c);
+            continue;
         }
         bool lan = lan_;
         std::string allowedHost = allowedHost_;

@@ -149,7 +149,7 @@ try:
             ok_body = any('busy' in b or '"ok":false' in b for st, b in samples if st == 503)
             ck(True, 'Q-10 超限时返回 HTTP 503', '503 出现 %d 次' % n503)
             ck(ok_body, 'Q-10 503 同时带 JSON body（ok:false / error:busy），客户端可读',
-               [b for st, b in samples if st == 503][:2])
+               ' | '.join([b for st, b in samples if st == 503][:2]))
         elif nreset > 0:
             ck(False, 'Q-10 超限时返回 HTTP 503（不是 RST）',
                '仍出现 %d 次连接重置 —— 红' % nreset)
@@ -159,9 +159,10 @@ try:
     else:
         ck(n503 > 0, 'Q-10 超限时返回 HTTP 503（不是静默断连）',
            '503=%d reset=%d 200=%d' % (n503, nreset, nok))
-        ck(any('busy' in b or '"ok":false' in b for st, b in outcomes if st == 503),
+        bodies = [b for st, b in outcomes if st == 503]
+        ck(any('busy' in b or '"ok":false' in b for b in bodies),
            'Q-10 503 同时带 JSON body（ok:false / error:busy）',
-           [b for st, b in outcomes if st == 503][:2])
+           ' | '.join(bodies[:2]))
 finally:
     for s in held:
         try:

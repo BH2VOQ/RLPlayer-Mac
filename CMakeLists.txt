@@ -719,6 +719,17 @@ add_executable(test_feedback_redact tests/test_feedback_redact.cpp)
 target_include_directories(test_feedback_redact PRIVATE ${CMAKE_SOURCE_DIR}/src)
 add_test(NAME feedback_redact COMMAND test_feedback_redact)
 
+# R-1：房间测量的 mac 传输层（CoreAudio）。
+# §1 算法链零设备（默认跑）；§2/§3 真开设备需 RTA_ROOM_HW=1，§3 真出声还需 RTA_ROOM_AUDIBLE=1
+# （铁律 1：扫频本质可闻，绝不默认播）。链接 process_tap_bridge.mm 是因为 CoreAudioInput
+# 的 loopback 枚举引用了它的 C 接口。
+add_executable(test_room_transport_coreaudio
+               tests/test_room_transport_coreaudio.cpp
+               src/platform/macos/process_tap_bridge.mm)
+target_include_directories(test_room_transport_coreaudio PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(test_room_transport_coreaudio PRIVATE ${RL_PLATFORM_LIBS} "-framework Foundation")
+add_test(NAME room_transport_coreaudio COMMAND test_room_transport_coreaudio)
+
 add_executable(test_render_loop_dry tests/test_render_loop_dry.cpp)
 target_link_libraries(test_render_loop_dry PRIVATE rtadsp)
 add_test(NAME render_loop_dry COMMAND test_render_loop_dry)
