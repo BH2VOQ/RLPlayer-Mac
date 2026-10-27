@@ -84,7 +84,9 @@ for bits in (16, 24):
     st = {}
     while time.time() < deadline:
         st = call('/api/status')
-        if st.get('current') == f and st.get('outBits'):
+        # 光看 current 不够：current 在开流前就切了，outBits 还是上一曲的（实测踩过假红）。
+        # 必须等它**真的开始播放**（playing 且 pos > 0）再读，那时 outBits 才是本曲事实。
+        if st.get('current') == f and st.get('playing') and (st.get('pos') or 0) > 0.05 and st.get('outBits'):
             break
         time.sleep(0.15)
     ck(st.get('outBits') == bits, '源 %d-bit → outBits == %d（跟随源真的生效）' % (bits, bits),
@@ -99,7 +101,7 @@ deadline = _t.time() + 15
 st = {}
 while _t.time() < deadline:
     st = call('/api/status')
-    if st.get('current') == f16 and st.get('outBits'):
+    if st.get('current') == f16 and st.get('playing') and (st.get('pos') or 0) > 0.05 and st.get('outBits'):
         break
     _t.sleep(0.15)
 ck(st.get('outBits') == 24, '反向对照：显式 24 + 16-bit 源 → outBits == 24', 'outBits=' + str(st.get('outBits')))
