@@ -172,12 +172,17 @@ struct UpnpDevice {
     int         port = 0;
     std::string control;           // AVTransport 控制地址（相对或绝对）
     std::string controlConnection; // ConnectionManager 控制地址（相对或绝对）
+    std::string controlRendering;  // RenderingControl 控制地址（相对或绝对）
 
     std::string av_transport_url() const {
         return resolve_url(location, control);
     }
     std::string connection_manager_url() const {
         return resolve_url(location, controlConnection);
+    }
+    std::string rendering_control_url() const {
+        if (controlRendering.empty()) return "";
+        return resolve_url(location, controlRendering);
     }
 };
 
@@ -470,6 +475,7 @@ inline std::vector<UpnpDevice> upnp_discover(int timeoutMs = 1800, UpnpDiscoverD
                 dev.control = extract_service_control_url(xml, "AVTransport");
                 if (dev.control.empty()) dev.control = xml_tag(xml, "controlURL");
                 dev.controlConnection = extract_service_control_url(xml, "ConnectionManager");
+                dev.controlRendering  = extract_service_control_url(xml, "RenderingControl");
             }
             if (dev.name.empty()) dev.name = host;
             out.push_back(dev);

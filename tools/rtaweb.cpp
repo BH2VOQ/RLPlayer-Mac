@@ -590,6 +590,22 @@ static void apply_dsd_src_settings(const PlayParams& p) {
 }
 
 // ---------------- 工具 ----------------
+static std::string path_in_exe_dir(const char* name);
+
+static std::map<std::string, std::string> load_conf_map() {
+    std::map<std::string, std::string> m;
+    std::ifstream f(path_in_exe_dir("rlplayer-settings.conf"));
+    if (!f) return m;
+    std::string line;
+    while (std::getline(f, line)) {
+        if (!line.empty() && line.back() == '\r') line.pop_back();
+        const size_t e = line.find('=');
+        if (e == std::string::npos) continue;
+        m[line.substr(0, e)] = line.substr(e + 1);
+    }
+    return m;
+}
+
 static std::string jesc(const std::string& s) {
     std::string o; o.reserve(s.size() + 8);
     for (unsigned char c : s) {
@@ -690,16 +706,22 @@ static std::string utf8_sanitize(const std::string& s) {
     return o;
 }
 
-// 解析 "k=v&k=v"
-static PlayParams parseForm(const std::string& body) {
+// 解析 "k=v&k=v"（**只解析 body**，不读 conf）
+// 2026-10-27（L-2 重构）：原来把"conf 兜底"直接缝在这个函数尾部，导致**所有**调用方都被兜底，
+// 其中包括 /api/repeat —— 它复用 `rate` 字段传循环模式，于是 conf 里的 rate=96000 会把它算成
+// 非法值判 0，把用户的循环设置静默清掉（实测复现过）。现在 conf 兜底拆成下面独立的
+// apply_conf_defaults_for_play()，只由真正"开始播放"的路径调用。
+static PlayParams parseForm(const std::string& body, std::set<std::string>* seenOut = nullptr) {
     PlayParams p;
     std::istringstream is(body);
     std::string tok;
+    std::set<std::string> seen;
     while (std::getline(is, tok, '&')) {
         const size_t e = tok.find('=');
         if (e == std::string::npos) continue;
         const std::string k = urlDecode(tok.substr(0, e));
         const std::string v = urlDecode(tok.substr(e + 1));
+        seen.insert(k);
         if      (k == "file")     p.file = v;
         else if (k == "filter")   p.filter = v;
         else if (k == "filterNx") p.filterNx = v;
@@ -760,6 +782,142 @@ static PlayParams parseForm(const std::string& body) {
         else if (k == "rsuffix") p.remoteSuffix = v;
         else if (k == "rtitle")  p.remoteTitle = v;
     }
+    // 把"body 里确实出现过的键"交回调用方，供 apply_conf_defaults_for_play 判断哪些该兜底。
+    if (seenOut) *seenOut = seen;
+    return p;
+}
+
+// L-2：对 body 中未出现的**播放偏好**从 rlplayer-settings.conf 兜底。
+//
+// 为什么单独成函数，而不是缝在 parseForm 末尾：
+//   parseForm 有 4 个调用方（/api/play、/api/add、/api/lib/play、/api/repeat），
+//   其中 /api/repeat 复用的是 `rate` 字段来传循环模式（0/1/2）。
+//   兜底一旦无差别生效，conf 里的 rate=96000 就会被 atoi 成 96000 > 2 判非法 → 归 0，
+//   用户的"循环列表/单曲"被静默清成"不循环"（已实测复现）。
+//   ⟹ 兜底只属于"真的要把参数用于播放"的路径，不能属于"解析表单"这个公共动作。
+//
+// 严格绝缘（这些键**永不**从 conf 兜底，否则会串烧队列 / CUE / 远程曲目）：
+//   file, cue_start, cue_end, rid, rsuffix, rtitle, initialSeekFrac, srcbits, dsdnative
+static PlayParams apply_conf_defaults_for_play(const PlayParams& in, const std::set<std::string>& seen) {
+    PlayParams p = in;
+    const auto conf = load_conf_map();
+    auto getConf = [&](const std::string& key) -> std::string {
+        auto it = conf.find(key);
+        return it != conf.end() ? it->second : std::string();
+    };
+    auto hasConf = [&](const std::string& key) -> bool {
+        return conf.find(key) != conf.end();
+    };
+
+    if (seen.find("rate") == seen.end() && hasConf("rate")) {
+        p.rate = getConf("rate");
+    }
+    if (seen.find("filter") == seen.end() && hasConf("filter")) {
+        p.filter = getConf("filter");
+    }
+    if (seen.find("filterNx") == seen.end() && hasConf("filterNx")) {
+        p.filterNx = getConf("filterNx");
+    }
+    if (seen.find("shaper") == seen.end() && hasConf("shaper")) {
+        p.shaper = getConf("shaper");
+    }
+    if (seen.find("twostage") == seen.end() && hasConf("twostage")) {
+        p.twoStage = (getConf("twostage") == "1" || getConf("twostage") == "true");
+    }
+    if (seen.find("isp") == seen.end() && hasConf("isp")) {
+        p.isp = (getConf("isp") == "1" || getConf("isp") == "true");
+    }
+    if (seen.find("dsd") == seen.end() && hasConf("dsd")) {
+        p.dsd = atoi(getConf("dsd").c_str());
+    }
+    if (seen.find("directsdm") == seen.end() && hasConf("directsdm")) {
+        p.directSdm = (getConf("directsdm") == "1");
+    }
+    if (seen.find("modorder") == seen.end() && hasConf("modorder")) {
+        p.modOrder = atoi(getConf("modorder").c_str());
+    }
+    if (seen.find("modfamily") == seen.end() && hasConf("modfamily")) {
+        p.modFamily = getConf("modfamily");
+    }
+    if (seen.find("buffer") == seen.end() && hasConf("buffer")) {
+        p.bufferMs = std::max(10, atoi(getConf("buffer").c_str()));
+    }
+    if (seen.find("device") == seen.end() && hasConf("device")) {
+        p.device = getConf("device");
+    }
+    if (seen.find("bits") == seen.end() && hasConf("bits")) {
+        p.bits = atoi(getConf("bits").c_str());
+    }
+    if (seen.find("taps") == seen.end() && hasConf("taps")) {
+        p.taps = atoi(getConf("taps").c_str());
+    }
+    if (seen.find("mintapsperinput") == seen.end() && hasConf("mintapsperinput")) {
+        p.minTapsPerInput = atoi(getConf("mintapsperinput").c_str());
+    }
+    if (seen.find("atten") == seen.end() && hasConf("atten")) {
+        p.atten = atof(getConf("atten").c_str());
+    }
+    if (seen.find("transition") == seen.end() && hasConf("transition")) {
+        p.transition = atof(getConf("transition").c_str());
+    }
+    if (seen.find("phase") == seen.end() && hasConf("phase")) {
+        p.phase = getConf("phase");
+    }
+    if (seen.find("modcut") == seen.end() && hasConf("modcut")) {
+        p.modCutoff = atof(getConf("modcut").c_str());
+    }
+    if (seen.find("moddith") == seen.end() && hasConf("moddith")) {
+        p.modDither = atof(getConf("moddith").c_str());
+    }
+    if (seen.find("ir") == seen.end() && hasConf("ir")) {
+        p.convIr = getConf("ir");
+    }
+    if (seen.find("eq") == seen.end() && hasConf("eq")) {
+        p.eqFile = getConf("eq");
+    }
+    if (seen.find("irgpu") == seen.end() && hasConf("irgpu")) {
+        p.convGpu = (getConf("irgpu") == "1");
+    }
+    if (seen.find("ramp") == seen.end() && hasConf("ramp")) {
+        p.volRamp = atof(getConf("ramp").c_str());
+    }
+    if (seen.find("hogexcl") == seen.end() && hasConf("hogexcl")) {
+        p.hogExclusive = (getConf("hogexcl") == "1" || getConf("hogexcl") == "true");
+    }
+    if (seen.find("gpuvendor") == seen.end() && hasConf("gpuvendor")) {
+        p.gpuVendor = getConf("gpuvendor");
+    }
+    if (seen.find("sdmfilt") == seen.end() && hasConf("sdmfilt")) {
+        p.sdmFilter = getConf("sdmfilt");
+    }
+    if (seen.find("sdmfiltnx") == seen.end() && hasConf("sdmfiltnx")) {
+        p.sdmFilterNx = getConf("sdmfiltnx");
+    }
+    if (seen.find("dsdkind") == seen.end() && hasConf("dsdkind")) {
+        p.dsdKind = getConf("dsdkind");
+    }
+    if (seen.find("dsdconv") == seen.end() && hasConf("dsdconv")) {
+        p.dsdConv = getConf("dsdconv");
+    }
+    if (seen.find("dsd2stage") == seen.end() && hasConf("dsd2stage")) {
+        p.dsd2Stage = (getConf("dsd2stage") == "1" || getConf("dsd2stage") == "true");
+    }
+    if (seen.find("channels") == seen.end() && hasConf("channels")) {
+        p.outChannels = atoi(getConf("channels").c_str());
+    }
+    if (seen.find("backend") == seen.end() && hasConf("backend")) {
+        p.backend = getConf("backend");
+    }
+    if (seen.find("upnpdev") == seen.end() && hasConf("upnpdev")) {
+        p.upnpDev = getConf("upnpdev");
+    }
+    if (seen.find("volume") == seen.end() && hasConf("volume")) {
+        p.volume = atof(getConf("volume").c_str());
+    }
+    if (seen.find("loudness") == seen.end() && hasConf("loudness")) {
+        p.loudness = (getConf("loudness") == "1");
+    }
+
     return p;
 }
 
@@ -2011,6 +2169,15 @@ static std::string preset_apply_json(const std::string& path) {
         j << "\"" << jesc(notes[i]) << "\"";
     }
     j << "]}";
+
+    // 预设已写盘 ⟹ 上次播放的 bit-perfect 结论不再代表当前配置。
+    // 清零而不是硬写一个状态：此刻没有播放，任何 yes/no 都是编的（铁律 3）。
+    {
+        std::lock_guard<std::mutex> lk(g_ps.mtx);
+        g_ps.bpState.clear();
+        g_ps.bpWhy.clear();
+    }
+
     return j.str();
 }
 
@@ -5463,13 +5630,25 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
             const auto jobs = cover_build_queue(keys);      // 只读库 + stat，不发网络
             const size_t total = jobs.size();
             const bool started = cover_bg_start(std::move(jobs));
+            // 2026-10-27（E-4 真修法）：`running` 必须回答「**现在**后台到底有没有活」，
+            // 而不是「这一次调用有没有启动成功」。
+            // 旧语义 `started?"true":"false"` 的后果：任务由别处（上一页 / 上一次进库页）启动时，
+            // 本次回 running=false ⟹ 前端据此 return ⟹ 没人轮询 /api/lib/cover/progress
+            // ⟹ 抓完不重绘，用户看到「服务端已有图、界面仍首字母占位」。
+            // 改成读真实活跃度后，前端用同一个字段就能覆盖三种情形：
+            //   · 本次启动成功 → 后台在跑 → true
+            //   · 上一轮还在跑 → 后台在跑 → true（旧代码这里错报 false ← 就是本 BUG）
+            //   · 上一轮刚结束 → 后台空闲 → false（此时确实不该显示进度）
+            // 注意：queued 语义**不变**（仍是「本次真的排进队列的张数」），别把两者混为一谈。
+            const bool bgActive = g_cover_active.load() != 0;
             play_log("COVERBG prefetch queued=" + std::to_string(started ? total : 0) +
                      " candidates=" + std::to_string(total) +
+                     " running=" + (bgActive ? "1" : "0") +
                      " source=" + (keys.empty() ? "library" : "keys"));
             std::ostringstream j;
             j << "{\"ok\":true,\"queued\":" << (started ? total : 0)
               << ",\"candidates\":" << total
-              << ",\"running\":" << (started ? "true" : "false") << "}";
+              << ",\"running\":" << (bgActive ? "true" : "false") << "}";
             return j.str();
         }
         // ---- 人工指定封面（POST；副作用端点）----
@@ -5543,7 +5722,9 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
         }
         // 播放整张专辑（?k=专辑键&i=起始曲序），队列被换成这张专辑
         if (rq.path.rfind("/api/lib/play", 0) == 0) {
-            PlayParams p = parseForm(rq.body);
+            // L-2：播放路径才吃 conf 兜底（前端未传的键用用户在设置页保存的值）。
+            std::set<std::string> seenKeys;
+            PlayParams p = apply_conf_defaults_for_play(parseForm(rq.body, &seenKeys), seenKeys);
             std::string key;
             size_t start = 0;
             {
@@ -5799,7 +5980,9 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
 
     if (rq.path.rfind("/api/play", 0) == 0) {
         ct = "application/json; charset=utf-8";
-        PlayParams p = parseForm(rq.body);   // 非 const：远程曲目会把 p.file 换成缓存路径
+        // L-2：播放路径才吃 conf 兜底；/api/repeat /api/add 不受影响（见 apply_conf_defaults_for_play 注释）
+        std::set<std::string> seenKeys;
+        PlayParams p = apply_conf_defaults_for_play(parseForm(rq.body, &seenKeys), seenKeys);   // 非 const：远程曲目会把 p.file 换成缓存路径
         // 远程曲目：先把原始文件完整下载到缓存，再走与本地完全相同的解码与 DSP 路径
         if (!p.remoteId.empty()) {
             std::string ferr;
@@ -8318,6 +8501,13 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
             std::lock_guard<std::mutex> lk(g_paramsMtx);
             g_params.volume = db;
         }
+        if (g_upnpPlayer.load()) {
+            if (!rta::net::CastManager::instance().volume_supported()) {
+                return "{\"ok\":false,\"upnp\":true,\"error\":\"该渲染器未提供 RenderingControl 服务，无法调整音量（请在渲染器端调节）\"}";
+            }
+            rta::net::CastManager::instance().set_volume_db(db);
+            return "{\"ok\":true,\"db\":" + std::to_string(db) + ",\"upnp\":true}";
+        }
         if (!g_activeDop.load()) {
             if (OutSink* s = g_activeSink.load()) {
                 s->set_live_gain_db(db - ps.startDb.load());
@@ -8375,6 +8565,12 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
         // 投放会话若还在跑（含手动「开始投放」的会话），一并停掉 —— 底栏「停止」只能有一个结果。
         if (g_upnpPlayer.exchange(false) || rta::net::CastManager::instance().get_state().running)
             rta::net::CastManager::instance().stop();
+        // 停止播放后清零 bit-perfect 结论（停播后结论已无对象，不留上次播放的旧结论）
+        {
+            std::lock_guard<std::mutex> lk(ps.mtx);
+            ps.bpState.clear();
+            ps.bpWhy.clear();
+        }
         return "{\"ok\":true}";
     }
 
@@ -8487,7 +8683,9 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
           << ",\"carrierRate\":" << ps.outCarrierRate
           << ",\"modFamily\":\"" << jesc(ps.outModFamily) << "\""
           << ",\"modOrder\":" << ps.outModOrder
-          << ",\"fallbackWhy\":\"" << jesc(ps.outFallbackWhy) << "\"";
+          << ",\"fallbackWhy\":\"" << jesc(ps.outFallbackWhy) << "\""
+          << ",\"upnpVolumeSupported\":" << (castMode ? (castSt.volumeSupported ? "true" : "false") : "false")
+          << ",\"upnpVolume\":" << (castMode ? castSt.currentVolume : -1);
         const MetaSettings msStat = meta_settings_load();
         bool hasKeyStat = false;
         {

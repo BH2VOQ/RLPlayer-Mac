@@ -6,32 +6,42 @@
 //
 // mock_upnp_renderer.js — 本地假 UPnP MediaRenderer（自动化测试用；不打开音频设备、不出声）
 // 用法：node tools/mock_upnp_renderer.js [port]   （默认 49199；GET /__state 可查调用记录）
-// 提供 description.xml + AVTransport/ConnectionManager 控制面；
+// 提供 description.xml + AVTransport/ConnectionManager/RenderingControl 控制面；
 // 只记录 SOAP 调用，不获取音频流、不出声。
+// 环境变量：MOCK_UPNP_NO_RC=1 时不声明 RenderingControl 服务。
 const http = require('http');
 const PORT = parseInt(process.argv[2] || '49199', 10);
-const state = { transport: 'STOPPED', uri: '', positionSec: 0, duration: '00:00:10', calls: [] };
+const state = { transport: 'STOPPED', uri: '', positionSec: 0, duration: '00:00:10', volume: 50, calls: [] };
 
-const description = () => '<?xml version="1.0"?>' +
-  '<root xmlns="urn:schemas-upnp-org:device-1-0">' +
-  '<specVersion><major>1</major><minor>0</minor></specVersion>' +
-  '<device><deviceType>urn:schemas-upnp-org:device:MediaRenderer:1</deviceType>' +
-  '<friendlyName>Mock-N1000-Renderer</friendlyName><manufacturer>RLPlayer</manufacturer>' +
-  '<modelName>RLPlayer Mock Renderer</modelName>' +
-  '<UDN>uuid:mock-0000-1111-2222-333344445555</UDN>' +
-  '<serviceList>' +
-  '<service><serviceType>urn:schemas-upnp-org:service:AVTransport:1</serviceType>' +
-  '<serviceId>urn:upnp-org:serviceId:AVTransport</serviceId>' +
-  '<controlURL>/ctl/avt</controlURL><eventSubURL>/evt/avt</eventSubURL><SCPDURL>/avt.xml</SCPDURL></service>' +
-  '<service><serviceType>urn:schemas-upnp-org:service:ConnectionManager:1</serviceType>' +
-  '<serviceId>urn:upnp-org:serviceId:ConnectionManager</serviceId>' +
-  '<controlURL>/ctl/cm</controlURL><eventSubURL>/evt/cm</eventSubURL><SCPDURL>/cm.xml</SCPDURL></service>' +
-  '</serviceList></device></root>';
+const description = () => {
+  const includeRc = !process.env.MOCK_UPNP_NO_RC;
+  let services =
+    '<service><serviceType>urn:schemas-upnp-org:service:AVTransport:1</serviceType>' +
+    '<serviceId>urn:upnp-org:serviceId:AVTransport</serviceId>' +
+    '<controlURL>/ctl/avt</controlURL><eventSubURL>/evt/avt</eventSubURL><SCPDURL>/avt.xml</SCPDURL></service>' +
+    '<service><serviceType>urn:schemas-upnp-org:service:ConnectionManager:1</serviceType>' +
+    '<serviceId>urn:upnp-org:serviceId:ConnectionManager</serviceId>' +
+    '<controlURL>/ctl/cm</controlURL><eventSubURL>/evt/cm</eventSubURL><SCPDURL>/cm.xml</SCPDURL></service>';
+  if (includeRc) {
+    services +=
+      '<service><serviceType>urn:schemas-upnp-org:service:RenderingControl:1</serviceType>' +
+      '<serviceId>urn:upnp-org:serviceId:RenderingControl</serviceId>' +
+      '<controlURL>/ctl/rc</controlURL><eventSubURL>/evt/rc</eventSubURL><SCPDURL>/rc.xml</SCPDURL></service>';
+  }
+  return '<?xml version="1.0"?>' +
+    '<root xmlns="urn:schemas-upnp-org:device-1-0">' +
+    '<specVersion><major>1</major><minor>0</minor></specVersion>' +
+    '<device><deviceType>urn:schemas-upnp-org:device:MediaRenderer:1</deviceType>' +
+    '<friendlyName>Mock-N1000-Renderer</friendlyName><manufacturer>RLPlayer</manufacturer>' +
+    '<modelName>RLPlayer Mock Renderer</modelName>' +
+    '<UDN>uuid:mock-0000-1111-2222-333344445555</UDN>' +
+    '<serviceList>' + services + '</serviceList></device></root>';
+};
 
-const envelope = (action, inner) => '<?xml version="1.0"?>' +
+const envelope = (serviceType, action, inner) => '<?xml version="1.0"?>' +
   '<s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/" ' +
   's:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/"><s:Body>' +
-  '<u:' + action + 'Response xmlns:u="urn:schemas-upnp-org:service:AVTransport:1">' + inner +
+  '<u:' + action + 'Response xmlns:u="' + serviceType + '">' + inner +
   '</u:' + action + 'Response></s:Body></s:Envelope>';
 
 const fmt = (s) => {
@@ -48,15 +58,27 @@ const srv = http.createServer((req, res) => {
       res.writeHead(200, { 'Content-Type': 'text/xml; charset="utf-8"' });
       return res.end(description());
     }
+    if (req.method === 'GET' && (req.url === '/avt.xml' || req.url === '/cm.xml' || req.url === '/rc.xml')) {
+      res.writeHead(200, { 'Content-Type': 'text/xml; charset="utf-8"' });
+      return res.end('<?xml version="1.0"?><scpd xmlns="urn:schemas-upnp-org:service-1-0"><specVersion><major>1</major><minor>0</minor></specVersion></scpd>');
+    }
     if (req.method === 'GET' && req.url === '/__state') {
       res.writeHead(200, { 'Content-Type': 'application/json' });
       return res.end(JSON.stringify(state));
     }
     if (req.method !== 'POST') { res.writeHead(404); return res.end(); }
 
-    const raw = String(req.headers['soapaction'] || '');
-    const mm = /#([A-Za-z]+)/.exec(raw);
+    const rawSoapAction = String(req.headers['soapaction'] || '');
+    const mm = /#([A-Za-z]+)/.exec(rawSoapAction);
     const action = mm ? mm[1] : '';
+    let volumeVal = null;
+    let serviceType = 'urn:schemas-upnp-org:service:AVTransport:1';
+    if (rawSoapAction.indexOf('RenderingControl') !== -1) {
+      serviceType = 'urn:schemas-upnp-org:service:RenderingControl:1';
+    } else if (rawSoapAction.indexOf('ConnectionManager') !== -1) {
+      serviceType = 'urn:schemas-upnp-org:service:ConnectionManager:1';
+    }
+
     if (action === 'SetAVTransportURI') {
       const u = /<CurrentURI>([^<]*)<\/CurrentURI>/.exec(body);
       state.uri = u ? u[1] : '';
@@ -74,8 +96,21 @@ const srv = http.createServer((req, res) => {
         const p = t[1].split(':');
         state.positionSec = (parseInt(p[0], 10) || 0) * 3600 + (parseInt(p[1], 10) || 0) * 60 + (parseInt(p[2], 10) || 0);
       }
+    } else if (action === 'SetVolume') {
+      const v = /<DesiredVolume>([^<]*)<\/DesiredVolume>/.exec(body);
+      if (v) {
+        volumeVal = parseInt(v[1], 10);
+        state.volume = volumeVal;
+      }
     }
-    state.calls.push({ action, transport: state.transport, uri: state.uri, body: body.slice(0, 300) });
+    state.calls.push({
+      action,
+      soapAction: rawSoapAction,
+      transport: state.transport,
+      uri: state.uri,
+      volume: volumeVal !== null ? volumeVal : state.volume,
+      body: body.slice(0, 300)
+    });
 
     let inner = '';
     if (action === 'GetTransportInfo') {
@@ -93,9 +128,13 @@ const srv = http.createServer((req, res) => {
               '<RecordMedium>NOT_IMPLEMENTED</RecordMedium><WriteStatus>NOT_IMPLEMENTED</WriteStatus>';
     } else if (action === 'GetProtocolInfo') {
       inner = '<Source></Source><Sink>http-get:*:audio/wav:*</Sink>';
+    } else if (action === 'GetVolume') {
+      inner = '<CurrentVolume>' + state.volume + '</CurrentVolume>';
+    } else if (action === 'SetVolume') {
+      inner = '';
     }
     res.writeHead(200, { 'Content-Type': 'text/xml; charset="utf-8"' });
-    res.end(envelope(action, inner));
+    res.end(envelope(serviceType, action, inner));
   });
 });
 srv.listen(PORT, '127.0.0.1', () => console.log('mock renderer on http://127.0.0.1:' + PORT + '/'));

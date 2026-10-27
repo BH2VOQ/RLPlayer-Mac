@@ -676,6 +676,13 @@ target_link_libraries(rtahealth PRIVATE ${RL_PLATFORM_LIBS})
 add_executable(test_metastore tests/test_metastore.cpp)
 target_include_directories(test_metastore PRIVATE ${CMAKE_SOURCE_DIR}/src)
 add_test(NAME metastore COMMAND test_metastore)
+# test_enrich —— 原先随 Windows 专属段被整体删除（cmake 里只剩注释里的名字），
+# 但它在 mac 上是**纯离线纯函数**测试（enrich_detail:: 里的决策逻辑，不发网络、不碰设备）。
+# 2026-10-27（E-2）：封面候选链与收图判定的断言加在这里；不重新注册 == 加了没人跑的测试，
+# 故按「功能不能删除」铁律把它放回常规测试区。实测：编译通过 + 全绿。
+add_executable(test_enrich tests/test_enrich.cpp)
+target_include_directories(test_enrich PRIVATE ${CMAKE_SOURCE_DIR}/src)
+add_test(NAME enrich COMMAND test_enrich)
 add_executable(test_render_loop_dry tests/test_render_loop_dry.cpp)
 target_link_libraries(test_render_loop_dry PRIVATE rtadsp)
 add_test(NAME render_loop_dry COMMAND test_render_loop_dry)

@@ -533,8 +533,142 @@ int main() {
         std::remove(tmpPath);
     }
 
-    // ================= 8) 网络发现用例 opt-in =================
-    std::printf("\n-- 8. 网络发现用例 (opt-in) --\n");
+    // ================= 8) RenderingControl 音量（L-3）=================
+    // 对应 debug/20261027-03-UPnP音量无效：投放时音量条无效的三层缺失之一 ——
+    // upnp_control.h 里只有 AVTransport + ConnectionManager，没有 RenderingControl。
+    // 这里测的是**纯逻辑层**（SOAP 构造 / 响应解析 / dB↔0..100 换算 / 能力判定），
+    // 真设备语义（换算系数是否与某款渲染器一致）**不在本测试覆盖内**，见文件末尾挂账。
+    std::printf("\n-- 8. RenderingControl 音量（L-3）--\n");
+    {
+        // 8.1 SOAP 请求必须带对服务类型/动作名/实例号/通道/目标值
+        const std::string soap = build_set_volume_soap(0, 42, "Master");
+        ck(soap.find("urn:schemas-upnp-org:service:RenderingControl:1") != std::string::npos,
+           "SetVolume SOAP 使用 RenderingControl 服务类型");
+        ck(soap.find("<u:SetVolume") != std::string::npos ||
+           soap.find(":SetVolume") != std::string::npos,
+           "SetVolume SOAP 的 action 是 SetVolume");
+        ck(soap.find("<InstanceID>0</InstanceID>") != std::string::npos,
+           "SetVolume SOAP 带 InstanceID=0");
+        ck(soap.find("<Channel>Master</Channel>") != std::string::npos,
+           "SetVolume SOAP 默认通道 Master（不少渲染器只认这个）");
+        ck(soap.find("<DesiredVolume>42</DesiredVolume>") != std::string::npos,
+           "SetVolume SOAP 的 DesiredVolume 是传入值");
+
+        const std::string gsoap = build_get_volume_soap(0, "Master");
+        ck(gsoap.find("GetVolume") != std::string::npos, "GetVolume SOAP 的 action 是 GetVolume");
+        ck(gsoap.find("RenderingControl:1") != std::string::npos,
+           "GetVolume SOAP 也使用 RenderingControl 服务类型");
+
+        // 8.2 响应解析：拿 CurrentVolume；UPnPError 要能被识别（不能把错误当音量）
+        auto v = parse_volume_response(
+            "<?xml version=\"1.0\"?><s:Envelope><s:Body>"
+            "<u:GetVolumeResponse xmlns:u=\"urn:schemas-upnp-org:service:RenderingControl:1\">"
+            "<CurrentVolume>37</CurrentVolume></u:GetVolumeResponse></s:Body></s:Envelope>");
+        ck(v.ok && v.volume == 37, "GetVolume 响应解析出 CurrentVolume=37",
+           std::string("ok=") + (v.ok ? "1" : "0") + " vol=" + std::to_string(v.volume));
+
+        auto verr = parse_volume_response(
+            "<?xml version=\"1.0\"?><s:Envelope><s:Body><s:Fault>"
+            "<UPnPError xmlns=\"urn:schemas-upnp-org:control-1-0\">"
+            "<errorCode>401</errorCode><errorDescription>Invalid Action</errorDescription>"
+            "</UPnPError></s:Fault></s:Body></s:Envelope>");
+        ck(!verr.ok && verr.error.code == 401,
+           "GetVolume 返回 UPnPError 时判失败并带出错误码（不假装成功）",
+           std::string("ok=") + (verr.ok ? "1" : "0") + " code=" + std::to_string(verr.error.code));
+
+        auto vempty = parse_volume_response(
+            "<s:Envelope><s:Body><u:GetVolumeResponse><CurrentVolume></CurrentVolume>"
+            "</u:GetVolumeResponse></s:Body></s:Envelope>");
+        ck(!vempty.ok, "CurrentVolume 为空串时判失败（不把 0 当真实音量）",
+           std::string("ok=") + (vempty.ok ? "1" : "0"));
+
+        // 8.3 客户端能力判定：没拿到 RenderingControl 控制地址就必须报"不支持"
+        {
+            UpnpControlClient noRc("http://127.0.0.1:1/avt", "http://127.0.0.1:1/cm", "");
+            ck(!noRc.rendering_control_supported(),
+               "设备未声明 RenderingControl ⟹ 判不支持（前端据此禁用音量条）");
+            const UpnpActionResult r = noRc.set_volume(50);
+            ck(!r.ok && !r.error.description.empty(),
+               "不支持时 set_volume 返回失败且给得出现原因（不静默成功）",
+               r.error.description);
+
+            UpnpControlClient withRc("http://127.0.0.1:1/avt", "http://127.0.0.1:1/cm",
+                                     "http://127.0.0.1:1/rc");
+            ck(withRc.rendering_control_supported(),
+               "设备声明了 RenderingControl ⟹ 判支持");
+            ck(withRc.rendering_control_url() == "http://127.0.0.1:1/rc",
+               "rendering_control_url 原样保留控制地址");
+        }
+
+        // 8.4 dB → 0..100 换算：边界必须单调、有界、且 0 dB = 100
+        // ⚠️ 这里的断言只证明"单调且有界"，**不证明**与任何真实设备的刻度一致
+        //    （真机系数待调，见文件末尾挂账，铁律 4）。
+        {
+            ck(db_to_upnp_volume(0.0) == 100, "0 dB → 100", std::to_string(db_to_upnp_volume(0.0)));
+            ck(db_to_upnp_volume(-120.0) == 0, "-120 dB → 0", std::to_string(db_to_upnp_volume(-120.0)));
+            ck(db_to_upnp_volume(-999.0) == 0, "极低 dB 钳到 0（不越界）",
+               std::to_string(db_to_upnp_volume(-999.0)));
+            ck(db_to_upnp_volume(6.0) == 100, "正 dB 钳到 100（不越界）",
+               std::to_string(db_to_upnp_volume(6.0)));
+            bool mono = true;
+            int prev = -1;
+            for (int d = 0; d >= -120; --d) {
+                const int cur = db_to_upnp_volume((double)d);
+                if (prev >= 0 && cur > prev) mono = false;   // dB 越低，音量值不得更高
+                if (cur < 0 || cur > 100) mono = false;
+                prev = cur;
+            }
+            ck(mono, "0…-120 dB 全程单调不增且始终落在 0..100");
+            ck(db_to_upnp_volume(-6.0) > db_to_upnp_volume(-20.0),
+               "-6 dB 的音量值高于 -20 dB（方向正确）",
+               std::to_string(db_to_upnp_volume(-6.0)) + " > " + std::to_string(db_to_upnp_volume(-20.0)));
+        }
+
+        // 8.5 真回环端到端：生产 UpnpControlClient 在真 socket 上把 SetVolume/GetVolume 走通。
+        //     这一条是本测试里唯一能证明「SOAP 真的发出去了、对方真的收到了」的判据 ——
+        //     8.1 只证明字符串拼对，不能证明网络路径接得上。
+        //     用本仓库自带的 mock 渲染器（tools/mock_upnp_renderer.js，不出声、不碰音频设备）。
+        //     需要外部进程：设置 RTA_UPNP_MOCK=1 并提供 RTA_UPNP_MOCK_URL 时执行，否则 SKIP
+        //     （cTest 默认不拉起 node，避免把测试依赖绑在 node 上）。
+        {
+            const char* mockEnv = std::getenv("RTA_UPNP_MOCK");
+            const char* mockUrl = std::getenv("RTA_UPNP_MOCK_URL");
+            if (!mockEnv || std::string(mockEnv) != "1" || !mockUrl) {
+                std::printf("  [SKIP] RenderingControl 真回环未执行"
+                            "（设 RTA_UPNP_MOCK=1 + RTA_UPNP_MOCK_URL=http://127.0.0.1:49199 可开启）\n");
+            } else {
+                const std::string base = mockUrl;
+                UpnpControlClient c(base + "/ctl/avt", base + "/ctl/cm", base + "/ctl/rc");
+                ck(c.rendering_control_supported(), "mock 渲染器：能力判定为支持 RenderingControl");
+
+                const UpnpActionResult set1 = c.set_volume(23);
+                ck(set1.ok, "mock 渲染器：SetVolume(23) 返回成功",
+                   set1.error.description);
+                const UpnpVolumeInfo g1 = c.get_volume();
+                ck(g1.ok && g1.volume == 23,
+                   "mock 渲染器：真网回环 GetVolume 读回刚设的 23（服务端真的收到了）",
+                   std::string("ok=") + (g1.ok ? "1" : "0") + " vol=" + std::to_string(g1.volume));
+
+                // 再设一次，确认不是"只成功一次"或读的缓存
+                const UpnpActionResult set2 = c.set_volume(77);
+                const UpnpVolumeInfo g2 = c.get_volume();
+                ck(set2.ok && g2.ok && g2.volume == 77,
+                   "mock 渲染器：再次 SetVolume(77) 后读回 77（值真的被改，不是回显缓存）",
+                   std::string("vol=") + std::to_string(g2.volume));
+
+                // dB 换算与真网链路串起来：-6 dB 应换算成一个 0..100 的合法值并被接受
+                const int want = db_to_upnp_volume(-6.0);
+                const UpnpActionResult set3 = c.set_volume(want);
+                const UpnpVolumeInfo g3 = c.get_volume();
+                ck(set3.ok && g3.ok && g3.volume == want,
+                   "mock 渲染器：dB→0..100 换算值经真网链路往返一致",
+                   std::string("want=") + std::to_string(want) + " got=" + std::to_string(g3.volume));
+            }
+        }
+    }
+
+    // ================= 9) 网络发现用例 opt-in =================
+    std::printf("\n-- 9. 网络发现用例 (opt-in) --\n");
     {
         const char* netEnv = std::getenv("RTA_NET_TESTS");
         if (!netEnv || std::string(netEnv) != "1") {

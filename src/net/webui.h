@@ -141,6 +141,19 @@ inline std::string http_status_text(int code) {
     }
 }
 
+// HTTP 头名大小写不敏感匹配（ASCII 大小写折叠，RFC 7230 §3.2）
+inline bool webui_header_is(const std::string& name, const char* expected) {
+    if (!expected) return false;
+    size_t i = 0;
+    for (; i < name.size(); ++i) {
+        if (expected[i] == '\0') return false;
+        if (std::tolower((unsigned char)name[i]) != std::tolower((unsigned char)expected[i])) {
+            return false;
+        }
+    }
+    return expected[i] == '\0';
+}
+
 // Host 头是否属于本机（allowedHost 是逗号分隔的白名单：127.0.0.1,<port>,localhost,<port>,<计算机名>）
 inline bool webui_host_allowed_impl(const std::string& host, const std::string& allowed) {
     std::string h = host;
@@ -328,7 +341,7 @@ inline void WebUi::handle(socket_t c, const Handler& h, bool lan, const std::str
                 if (!line.empty() && line.back() == '\r') line.pop_back();
                 const size_t colon = line.find(':');
                 if (colon == std::string::npos) continue;
-                if (trim(line.substr(0, colon)) == "Host") { req.host = trim(line.substr(colon + 1)); break; }
+                if (webui_header_is(trim(line.substr(0, colon)), "Host")) { req.host = trim(line.substr(colon + 1)); break; }
             }
         }
         // ---- Expect: 100-continue ----
@@ -353,7 +366,7 @@ inline void WebUi::handle(socket_t c, const Handler& h, bool lan, const std::str
                 if (!line.empty() && line.back() == '\r') line.pop_back();
                 const size_t colon = line.find(':');
                 if (colon == std::string::npos) continue;
-                if (trim(line.substr(0, colon)) != "Expect") continue;
+                if (!webui_header_is(trim(line.substr(0, colon)), "Expect")) continue;
                 std::string v;
                 for (char ch : line.substr(colon + 1)) v.push_back((char)std::tolower((unsigned char)ch));
                 if (v.find("100-continue") != std::string::npos) wants100 = true;
@@ -370,7 +383,7 @@ inline void WebUi::handle(socket_t c, const Handler& h, bool lan, const std::str
                 if (!line.empty() && line.back() == '\r') line.pop_back();
                 const size_t colon = line.find(':');
                 if (colon == std::string::npos) continue;
-                if (trim(line.substr(0, colon)) != "Content-Length") continue;
+                if (!webui_header_is(trim(line.substr(0, colon)), "Content-Length")) continue;
                 const std::string v = trim(line.substr(colon + 1));
                 if (v.empty() || v.find_first_not_of("0123456789") != std::string::npos) { clBad = true; break; }
                 want = (size_t)strtoull(v.c_str(), nullptr, 10);

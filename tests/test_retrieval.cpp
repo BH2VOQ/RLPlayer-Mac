@@ -213,6 +213,25 @@ int main() {
         ck(r_rej.hits.empty() && r_rej.stats.dropped_whitelist == rejected_urls.size(),
            "仿冒/非白名单域名全量拒绝 (dropped_whitelist 计数准确)");
 
+        // E-5 新增断言：同人/数字发行/VGM 数据库白名单放行与门禁复现
+        ck(is_host_in_whitelist(extract_host_from_url("https://www.dizzylab.net/d/WSD0001/"), default_domain_whitelist()),
+           "dizzylab.net 在默认白名单中放行");
+        ck(is_host_in_whitelist(extract_host_from_url("https://booth.pm/ja/items/123456"), default_domain_whitelist()),
+           "booth.pm 在默认白名单中放行");
+        ck(is_host_in_whitelist(extract_host_from_url("https://vgmdb.net/album/789"), default_domain_whitelist()),
+           "vgmdb.net 在默认白名单中放行");
+
+        // 文档判据 2：filter_hits({dizzylab hit, authority=1, rerank=0.95}, f_opts).hits.empty() == true 用来复现“默认闸也丢”的场景
+        {
+            SearchHit dz_hit;
+            dz_hit.title = "Dizzylab Album";
+            dz_hit.url = "https://www.dizzylab.net/d/WSD0001/";
+            dz_hit.rerankScore = 0.95;
+            dz_hit.authority = 1;
+            FilterResult r_dz = filter_hits({ dz_hit }, f_opts);
+            ck(r_dz.hits.empty() == true, "dizzylab hit 在默认闸下因 authority=1 被丢弃 (复现默认闸也丢)");
+        }
+
         // 1.4 去重与排序
         SearchHit d1; d1.url = "https://zh.wikipedia.org/wiki/ZARD"; d1.rerankScore = 1.6; d1.authority = 2;
         SearchHit d2; d2.url = "https://zh.wikipedia.org/wiki/ZARD"; d2.rerankScore = 2.5; d2.authority = 4;

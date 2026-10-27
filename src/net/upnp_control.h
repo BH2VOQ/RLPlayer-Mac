@@ -27,6 +27,7 @@
 #include <functional>
 #include <algorithm>
 #include <cstdio>
+#include <cmath>
 
 namespace rta::net {
 
@@ -317,6 +318,7 @@ inline std::string build_soap_envelope(const std::string& serviceType,
 
 constexpr const char* kServiceAVTransport = "urn:schemas-upnp-org:service:AVTransport:1";
 constexpr const char* kServiceConnectionManager = "urn:schemas-upnp-org:service:ConnectionManager:1";
+constexpr const char* kServiceRenderingControl = "urn:schemas-upnp-org:service:RenderingControl:1";
 
 inline std::string build_set_av_transport_uri_soap(uint32_t instanceId,
                                                    const std::string& currentUri,
@@ -379,6 +381,37 @@ inline std::string build_get_protocol_info_soap() {
     return build_soap_envelope(kServiceConnectionManager, "GetProtocolInfo", {});
 }
 
+inline std::string build_set_volume_soap(uint32_t instanceId,
+                                         int desiredVolume,
+                                         const std::string& channel = "Master") {
+    return build_soap_envelope(kServiceRenderingControl, "SetVolume", {
+        {"InstanceID", std::to_string(instanceId)},
+        {"Channel", xml_escape(channel)},
+        {"DesiredVolume", std::to_string(desiredVolume)}
+    });
+}
+
+inline std::string build_get_volume_soap(uint32_t instanceId,
+                                         const std::string& channel = "Master") {
+    return build_soap_envelope(kServiceRenderingControl, "GetVolume", {
+        {"InstanceID", std::to_string(instanceId)},
+        {"Channel", xml_escape(channel)}
+    });
+}
+
+// dB 换算为 UPnP 0..100 整数音量：
+// 采用幅度法：v = 100 * pow(10, db/20)，db<=-120 返回 0，db>=0 返回 100，四舍五入并夹紧至 [0, 100]。
+// 注释明确写：本机无真实 UPnP 设备，换算口径未在真机验证（挂账）；只验证 mock 收到数值。
+inline int db_to_upnp_volume(double db) {
+    if (std::isnan(db) || db <= -120.0) return 0;
+    if (db >= 0.0) return 100;
+    double amp = 100.0 * std::pow(10.0, db / 20.0);
+    int v = static_cast<int>(std::round(amp));
+    if (v < 0) v = 0;
+    if (v > 100) v = 100;
+    return v;
+}
+
 // ---------------- SOAP 响应模型与解析 ----------------
 
 struct UpnpActionResult {
@@ -423,6 +456,12 @@ struct UpnpProtocolInfo {
     std::string source;
     std::string sink;            // Comma-separated protocol infos
     UpnpError   error;
+};
+
+struct UpnpVolumeInfo {
+    bool ok = false;
+    int  volume = -1;
+    UpnpError error;
 };
 
 inline UpnpTransportInfo parse_transport_info_response(const std::string& xml) {
@@ -471,21 +510,43 @@ inline UpnpProtocolInfo parse_protocol_info_response(const std::string& xml) {
     return info;
 }
 
+inline UpnpVolumeInfo parse_volume_response(const std::string& xml) {
+    UpnpVolumeInfo info;
+    if (parse_upnp_error(xml, info.error)) return info;
+    std::string v = xml_extract_tag(xml, "CurrentVolume");
+    if (!v.empty()) {
+        info.volume = std::atoi(v.c_str());
+        info.ok = true;
+    }
+    return info;
+}
+
 // ---------------- UPnP 控制客户端 ----------------
 
 class UpnpControlClient {
 public:
     UpnpControlClient() = default;
-    UpnpControlClient(std::string avTransportUrl, std::string connectionManagerUrl = "")
-        : avTransportUrl_(std::move(avTransportUrl)), connectionManagerUrl_(std::move(connectionManagerUrl)) {}
+    UpnpControlClient(std::string avTransportUrl, std::string connectionManagerUrl = "", std::string renderingControlUrl = "")
+        : avTransportUrl_(std::move(avTransportUrl)),
+          connectionManagerUrl_(std::move(connectionManagerUrl)),
+          renderingControlUrl_(std::move(renderingControlUrl)) {}
 
-    void set_endpoints(const std::string& avTransportUrl, const std::string& connectionManagerUrl = "") {
+    void set_endpoints(const std::string& avTransportUrl,
+                       const std::string& connectionManagerUrl = "",
+                       const std::string& renderingControlUrl = "") {
         avTransportUrl_ = avTransportUrl;
         connectionManagerUrl_ = connectionManagerUrl;
+        renderingControlUrl_ = renderingControlUrl;
+    }
+
+    void set_rendering_control_url(const std::string& renderingControlUrl) {
+        renderingControlUrl_ = renderingControlUrl;
     }
 
     const std::string& av_transport_url() const { return avTransportUrl_; }
     const std::string& connection_manager_url() const { return connectionManagerUrl_; }
+    const std::string& rendering_control_url() const { return renderingControlUrl_; }
+    bool rendering_control_supported() const { return !renderingControlUrl_.empty(); }
 
     UpnpActionResult set_av_transport_uri(const std::string& uri, const std::string& metadataXml = "", uint32_t instanceId = 0) {
         std::string body = build_set_av_transport_uri_soap(instanceId, uri, metadataXml);
@@ -549,6 +610,37 @@ public:
         return parse_protocol_info_response(r.rawXml);
     }
 
+    UpnpActionResult set_volume(int desiredVolume, uint32_t instanceId = 0, const std::string& channel = "Master") {
+        if (renderingControlUrl_.empty()) {
+            UpnpActionResult res;
+            res.action = "SetVolume";
+            res.ok = false;
+            res.error.code = -1;
+            res.error.description = "设备未提供 RenderingControl 服务，无法设置音量";
+            return res;
+        }
+        std::string body = build_set_volume_soap(instanceId, desiredVolume, channel);
+        return execute_action(renderingControlUrl_, kServiceRenderingControl, "SetVolume", body);
+    }
+
+    UpnpVolumeInfo get_volume(uint32_t instanceId = 0, const std::string& channel = "Master") {
+        UpnpVolumeInfo v;
+        if (renderingControlUrl_.empty()) {
+            v.ok = false;
+            v.error.code = -1;
+            v.error.description = "设备未提供 RenderingControl 服务，无法获取音量";
+            return v;
+        }
+        std::string body = build_get_volume_soap(instanceId, channel);
+        auto r = execute_action(renderingControlUrl_, kServiceRenderingControl, "GetVolume", body);
+        if (!r.ok) {
+            v.ok = false;
+            v.error = r.error;
+            return v;
+        }
+        return parse_volume_response(r.rawXml);
+    }
+
 private:
     UpnpActionResult execute_action(const std::string& url,
                                    const std::string& serviceType,
@@ -586,6 +678,7 @@ private:
 
     std::string avTransportUrl_;
     std::string connectionManagerUrl_;
+    std::string renderingControlUrl_;
 };
 
 // ---------------- 渲染器实际采样率取证 ----------------

@@ -68,6 +68,11 @@ struct CastState {
     std::string rateMatch = "unknown"; // match, mismatch, unknown
     std::string warning;
     std::string error;
+
+    // RenderingControl 音量状态与能力（供后续 HTTP /api/cast/volume 接线）
+    bool        volumeSupported = false;
+    int         currentVolume = -1;       // 0..100，未知为 -1
+    std::string lastVolumeError;          // 最近一次 SetVolume 失败的真实错误描述（成功则为空）
 };
 
 struct CastStartParams {
@@ -144,6 +149,7 @@ public:
         stopReq_.store(false);
         pauseReq_.store(false);
         seekReq_.store(-1.0);
+        volumeReqDb_.store(1.0); // 1.0 表示无待执行的音量请求（合法音量 dB <= 0.0）
         state_.running = true;
         state_.device = p.dev;
         state_.sourceFile = p.file;
@@ -160,6 +166,9 @@ public:
         state_.paused = false;
         state_.warning.clear();
         state_.error.clear();
+        state_.volumeSupported = false;
+        state_.currentVolume = -1;
+        state_.lastVolumeError.clear();
 
         workerThread_ = std::thread([this, p]() {
             run_worker(p);
@@ -173,6 +182,28 @@ public:
     void set_paused(bool on) { pauseReq_.store(on); }
     void seek_seconds(double sec) { seekReq_.store(sec < 0.0 ? -1.0 : sec); }
 
+    // RenderingControl 增补：以 dB 设定投放音量（原子请求，由 worker 轮询循环消费与下发 SOAP）
+    // 合法范围约定：db <= 0.0，幅度法换算为 0..100。传入 1.0 用于清空。
+    void set_volume_db(double db) { volumeReqDb_.store(db); }
+
+    // 查询当前投放设备是否支持 RenderingControl
+    bool volume_supported() {
+        std::lock_guard<std::mutex> lk(mtx_);
+        return state_.volumeSupported;
+    }
+
+    // 查询最近一次 SetVolume 错误信息（若成功则为空）
+    std::string last_volume_error() {
+        std::lock_guard<std::mutex> lk(mtx_);
+        return state_.lastVolumeError;
+    }
+
+    // 查询当前音量（0..100，若未获取到或不支持则为 -1）
+    int get_current_volume() {
+        std::lock_guard<std::mutex> lk(mtx_);
+        return state_.currentVolume;
+    }
+
     bool stop() {
         stopReq_.store(true);
         if (workerThread_.joinable()) {
@@ -183,6 +214,9 @@ public:
         state_.phase = "stopped";
         state_.transportState = "STOPPED";
         state_.paused = false;
+        state_.volumeSupported = false;
+        state_.currentVolume = -1;
+        state_.lastVolumeError.clear();
         return true;
     }
 
@@ -232,6 +266,7 @@ private:
                     targetDev.control = upnp_detail::extract_service_control_url(xml, "AVTransport");
                     if (targetDev.control.empty()) targetDev.control = upnp_detail::xml_tag(xml, "controlURL");
                     targetDev.controlConnection = upnp_detail::extract_service_control_url(xml, "ConnectionManager");
+                    targetDev.controlRendering  = upnp_detail::extract_service_control_url(xml, "RenderingControl");
                     foundDev = true;
                 }
             }
@@ -446,7 +481,9 @@ private:
         std::string streamUrl = "http://" + localIp + ":" + std::to_string(server.port()) + streamPath;
 
         // 4) UPnP 控制动作 SetAVTransportURI & Play
-        UpnpControlClient client(targetDev.av_transport_url(), targetDev.connection_manager_url());
+        UpnpControlClient client(targetDev.av_transport_url(),
+                                targetDev.connection_manager_url(),
+                                targetDev.rendering_control_url());
 
         UpnpDidlItem didl;
         didl.title = p.file;
@@ -475,10 +512,23 @@ private:
         }
 
         // 5) 轮询与状态更新
+        const bool rcSupported = client.rendering_control_supported();
         {
             std::lock_guard<std::mutex> lk(mtx_);
             state_.phase = "playing";
             state_.transportState = "PLAYING";
+            state_.volumeSupported = rcSupported;
+            state_.currentVolume = -1;
+            state_.lastVolumeError.clear();
+        }
+
+        // 首次尝试读取一次当前音量
+        if (rcSupported) {
+            auto vInfo = client.get_volume();
+            if (vInfo.ok) {
+                std::lock_guard<std::mutex> lk(mtx_);
+                state_.currentVolume = vInfo.volume;
+            }
         }
 
         UpnpProtocolInfo proto = client.get_protocol_info();
@@ -514,6 +564,26 @@ private:
                     if (sr.ok) {
                         std::lock_guard<std::mutex> lk(mtx_);
                         state_.positionSec = seekSec;
+                    }
+                }
+            }
+            {
+                // 音量设置请求消费（HTTP 线程写入 volumeReqDb_，这里原子取出）
+                const double vDb = volumeReqDb_.exchange(1.0);
+                if (vDb <= 0.0) {
+                    if (rcSupported) {
+                        const int desiredVol = db_to_upnp_volume(vDb);
+                        const UpnpActionResult vr = client.set_volume(desiredVol);
+                        std::lock_guard<std::mutex> lk(mtx_);
+                        if (vr.ok) {
+                            state_.currentVolume = desiredVol;
+                            state_.lastVolumeError.clear();
+                        } else {
+                            state_.lastVolumeError = vr.error.str();
+                        }
+                    } else {
+                        std::lock_guard<std::mutex> lk(mtx_);
+                        state_.lastVolumeError = "设备不支持 RenderingControl，已忽略 SetVolume";
                     }
                 }
             }
@@ -579,6 +649,7 @@ private:
     std::atomic<bool>       stopReq_{false};
     std::atomic<bool>       pauseReq_{false};
     std::atomic<double>     seekReq_{-1.0};
+    std::atomic<double>     volumeReqDb_{1.0}; // <=0.0 为有效音量请求，1.0 为无请求
     std::thread             workerThread_;
 
     std::mutex              devMutex_;

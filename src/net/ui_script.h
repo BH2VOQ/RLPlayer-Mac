@@ -728,10 +728,10 @@ function params() {
   else dsdN = parseInt(dv, 10) || 0;
   return 'dsd=' + dsdN + '&dsdnative=' + native +
          '&gpuvendor=' + encodeURIComponent(ADV.gpuvendor || pv('sGpu', 'auto') || 'auto') +
-         '&rate=' + pv('sRate', 'follow') +
-         '&filter=' + encodeURIComponent(pv('sFilt', '')) +
-         '&filterNx=' + encodeURIComponent(pv('sFiltNx', '')) +
-         '&shaper=' + encodeURIComponent(pv('sShap', ADV.shaper || '')) +
+         '&rate=' + encodeURIComponent(pv('sRate', (ADV && ADV.rate) ? ADV.rate : 'follow')) +
+         '&filter=' + encodeURIComponent(pv('sFilt', (ADV && ADV.filter) ? ADV.filter : '')) +
+         '&filterNx=' + encodeURIComponent(pv('sFiltNx', (ADV && ADV.filterNx) ? ADV.filterNx : '')) +
+         '&shaper=' + encodeURIComponent(pv('sShap', (ADV && ADV.shaper) ? ADV.shaper : '')) +
          '&hogexcl=' + (ADV.hogExclusive ? 1 : 0) +
          '&volume=' + S.vol +
          '&loudness=' + (S.loud ? 1 : 0) +
@@ -992,9 +992,15 @@ function albumCardHtml(a, i) {
 var COVP = { timer: 0 };
 function startCoverPrefetch() {
   api('/api/lib/cover/prefetch', '').then(function (j) {
-    if (!j || !j.ok || !j.running || !j.queued) return;
-    toast('正在抓取封面：共 ' + j.queued + ' 张缺图');
-    pollCoverProgress();
+    if (!j || !j.ok) return;
+    if (j.queued) toast('正在抓取封面：共 ' + j.queued + ' 张缺图');
+    // 2026-10-27（E-4）：只要**后台真的有活在跑**就轮询，不看"这一轮是不是我启动的"。
+    // 后端 running 已改为真实活跃度（tools/rtaweb.cpp 的 /api/lib/cover/prefetch），
+    // 所以这一行同时覆盖「本次启动成功」与「上一轮还在跑」两种情形 ——
+    // 后者正是"服务端已有图、界面仍首字母占位"的直接原因（debug/20261027-01 §1 E-4）。
+    // queued 只用来弹提示，不再参与"要不要轮询"的判断：它是"本次新排队张数"，
+    // 后台在替别的页面干活时它天然是 0。
+    if (j.running) pollCoverProgress();
   }).catch(function () { });
 }
 function pollCoverProgress() {
@@ -1007,7 +1013,11 @@ function pollCoverProgress() {
       if (!g.running) {
         clearInterval(COVP.timer); COVP.timer = 0;
         if (el && g.done > 0) setTimeout(function () { el.style.display = 'none'; }, 2500);
-        if (g.hit > 0) { toast('封面已补齐 ' + g.hit + ' 张'); loadAlbums(); }
+        // 2026-10-27（E-4 第二处根因）：抓完后必须**绕过视图缓存**重拉一次。
+        // 原来直接调 loadAlbums()，而它开头的 viewCacheGet('albums|') 在 5s TTL 内会命中
+        // 抓取开始时写下的那份快照（cv:false）⟹ 重绘了，但画出来的还是"没有封面"的旧数据。
+        // 这就是"服务端已有图、界面仍首字母占位"的第二层原因，光改轮询条件修不掉。
+        if (g.hit > 0) { toast('封面已补齐 ' + g.hit + ' 张'); delete VIEWC.m['albums|']; loadAlbums(); }
       }
     }).catch(function () { });
   }, 700);
@@ -1333,8 +1343,19 @@ function renderAlbumsFrom(j, q, title) {
   S.albums = (j && j.albums) || [];
   if (!S.albums.length) {
     head(title || '专辑', '0 张', '');
-    D('list').innerHTML = emptyStateHtml();
-    bindEmptyState();
+    if (q) {
+      D('list').innerHTML = '<div class=empty id=searchEmpty style="padding:48px 20px;text-align:center">' +
+                            '<div style="font-size:15px;font-weight:600;margin-bottom:6px">未找到与 “' + esc(q) + '” 相关的专辑</div>' +
+                            '<div style="color:var(--mut2);font-size:12px;margin-bottom:16px">请尝试缩短搜索词，或检查是否有错别字</div>' +
+                            '<button class="btn" id=bSearchClear>清空搜索词</button></div>';
+      if (D('bSearchClear')) D('bSearchClear').onclick = function () {
+        if (D('qClear')) D('qClear').click();
+        else { D('q').value = ''; loadAlbums(''); }
+      };
+    } else {
+      D('list').innerHTML = emptyStateHtml();
+      bindEmptyState();
+    }
     return;
   }
   head(title || '专辑', S.albums.length + ' 张专辑', '');
@@ -1936,34 +1957,50 @@ function enqueueAlbum(k) {
 }
 
 /* ---------------- 艺术家 ---------------- */
-function loadArtists() {
+function loadArtists(q) {
   S.view = 'artists';
+  S.artistsQuery = q || '';
   // 艺术家页是**纯派生视图**：数据源就是 /api/lib/albums 那一份（后端没有独立端点）。
-  // 所以它跟专辑页共用同一个缓存键 —— 先点「专辑」再点「艺术家」不该再全库重算一次，
-  // 这正是用户说的「切标签重复扫描」（261025-01 #5）。
-  var ck = 'albums|';
-  var hit = viewCacheGet(ck);
-  if (hit) { renderArtistsFrom(hit); return; }
+  // 只有无过滤词的完整数据才进缓存：带 q 的即时过滤。
+  var ck = (q ? '' : 'albums|');
+  var hit = viewCacheGet('albums|');
+  if (hit) { renderArtistsFrom(hit, q); return; }
   head('艺术家', '加载中…', '');
   api('/api/lib/albums').then(function (j) {
     if (S.view !== 'artists') return;   // 已切走 → 丢弃，别覆写当前页面
-    if (j && j._err) { head('艺术家', '读取失败', ''); listErrorBox('艺术家列表读取失败', loadArtists); return; }
-    viewCachePut(ck, j);
-    renderArtistsFrom(j);
-  }).catch(function () { listErrorBox('艺术家列表读取失败', loadArtists); });
+    if (j && j._err) { head('艺术家', '读取失败', ''); listErrorBox('艺术家列表读取失败', function () { loadArtists(q); }); return; }
+    viewCachePut('albums|', j);
+    renderArtistsFrom(j, q);
+  }).catch(function () { listErrorBox('艺术家列表读取失败', function () { loadArtists(q); }); });
 }
 
-function renderArtistsFrom(j) {
+function renderArtistsFrom(j, q) {
   var m = {}, order = [];
+  var filterQ = (q || '').trim().toLowerCase();
   ((j && j.albums) || []).forEach(function (a) {
     var k = a.artist || '未知艺术家';
+    if (filterQ && k.toLowerCase().indexOf(filterQ) === -1) return;
     if (!m[k]) { m[k] = { n: 0, d: 0, cv: false, key: a.k }; order.push(k); }
     m[k].n++; m[k].d += a.dur;
     if (a.cv) m[k].cv = true, m[k].key = a.k;
   });
   order.sort(function (x, y) { return x.localeCompare(y, 'zh'); });
-  head('艺术家', order.length + ' 位', '');
-  if (!order.length) { D('list').innerHTML = '<div class=empty>库里还没有音乐</div>'; return; }
+  head(q ? ('艺术家（搜索：' + q + '）') : '艺术家', order.length + ' 位', '');
+  if (!order.length) {
+    if (q) {
+      D('list').innerHTML = '<div class=empty id=searchEmpty style="padding:48px 20px;text-align:center">' +
+                            '<div style="font-size:15px;font-weight:600;margin-bottom:6px">未找到与 “' + esc(q) + '” 相关的艺术家</div>' +
+                            '<div style="color:var(--mut2);font-size:12px;margin-bottom:16px">请尝试缩短搜索词，或检查是否有错别字</div>' +
+                            '<button class="btn" id=bSearchClear>清空搜索词</button></div>';
+      if (D('bSearchClear')) D('bSearchClear').onclick = function () {
+        if (D('qClear')) D('qClear').click();
+        else { D('q').value = ''; loadArtists(''); }
+      };
+    } else {
+      D('list').innerHTML = '<div class=empty>库里还没有音乐</div>';
+    }
+    return;
+  }
   var h = '<div class=grid style="grid-template-columns:repeat(auto-fill,minmax(150px,1fr))">';
   order.forEach(function (k) {
     var v = m[k];
@@ -3135,7 +3172,8 @@ function bpCurFile() {
 // 和"PCM 升频到 384k"数字完全一样，拿它反推会得出相反的结论（上游踩过这个坑）。
 function bpBadgeInfo() {
   var bpv = S.bpState || '';
-  if (!bpv) return { text: '', cls: '', title: '' };   // 后端还没给结论（未播过/断线首 tick）：不占位、不猜
+  if (!bpv) return { text: '待播放验证', cls: 'bp-idle',
+                     title: '当前预设已保存，但尚未播放。bit-perfect 结论只对实际播放生效 —— 播一首才能确认' };
 
   var dsdOut = (typeof S.bpDsd === 'number') ? (S.bpDsd > 0) : false;
   var srcDsd = srcIsDsdPath(bpCurFile());
@@ -3301,6 +3339,24 @@ function tick() {
       D('bpBadge').className = bi.cls;
       D('bpBadge').title = bi.title;
     }
+    if (j.outMode === 'upnp') {
+      var rcOk = (j.upnpVolumeSupported !== false);
+      ['vol', 'npVol'].forEach(function (id) {
+        var e = D(id);
+        if (e) {
+          e.disabled = !rcOk;
+          e.title = rcOk ? '' : '该渲染器未提供 RenderingControl 服务，无法调整音量（请在渲染器端调节）';
+        }
+      });
+    } else {
+      ['vol', 'npVol'].forEach(function (id) {
+        var e = D(id);
+        if (e && e.disabled) {
+          e.disabled = false;
+          e.title = '';
+        }
+      });
+    }
     if (j.error) D('nps').textContent = j.error;
   }).catch(function () { });
 }
@@ -3431,6 +3487,7 @@ function loadSettings() {
       ADV.scanThreads = parseInt(kv.scanThreads || kv.scanthreads, 10) || 0;
     }
     SET_KEYS.forEach(function (p) {
+      if (kv[p[1]] !== undefined) ADV[p[1]] = kv[p[1]];
       var e = D(p[0]); if (!e || kv[p[1]] === undefined) return;
       if (e.type === 'checkbox') e.checked = (kv[p[1]] === '1');
       else if (p[1] === 'dsd') e.value = migrateDsdPack(kv[p[1]]);   // A1 隐藏：nat* → dop*
@@ -4022,12 +4079,40 @@ function updateSearchClearBtn() {
   if (!btn) return;
   btn.style.display = (D('q') && D('q').value) ? '' : 'none';
 }
+function dispatchSearchQuery(v) {
+  var cur = S.view;
+  if (cur === 'albums') {
+    loadAlbums(v);
+  } else if (cur === 'artists') {
+    loadArtists(v);
+  } else if (cur === 'tracks') {
+    loadTracks(v);
+  } else {
+    // 其它视图（如 files、recent、queue、station、settings、album、artist、works 等）：
+    // 若用户主动发起搜索，默认转入曲目搜索（setView('tracks') + loadTracks(v)），
+    // 保证在非库列表页（如设置页、文件页）仍能正常执行全局搜索。
+    setView('tracks');
+    loadTracks(v);
+  }
+}
+function clearSearchQuery() {
+  D('q').value = '';
+  updateSearchClearBtn();
+  var cur = S.view;
+  if (cur === 'albums') {
+    loadAlbums('');
+  } else if (cur === 'artists') {
+    loadArtists('');
+  } else if (cur === 'tracks') {
+    loadTracks('');
+  } else {
+    loadAlbums('');
+  }
+}
 if (D('qClear')) {
   D('qClear').onclick = function () {
-    D('q').value = '';
-    updateSearchClearBtn();
+    clearSearchQuery();
     D('q').focus();
-    loadAlbums('');
   };
 }
 D('q').oninput = function () {
@@ -4035,15 +4120,16 @@ D('q').oninput = function () {
   updateSearchClearBtn();
   clearTimeout(searchTimer);
   searchTimer = setTimeout(function () {
-    if (v) { setView('tracks'); loadTracks(v); }
-    else if (S.view === 'tracks') loadAlbums('');
+    if (v) {
+      dispatchSearchQuery(v);
+    } else {
+      clearSearchQuery();
+    }
   }, 260);
 };
 D('q').onkeydown = function (e) {
   if (e.key === 'Escape') {
-    this.value = '';
-    updateSearchClearBtn();
-    loadAlbums('');
+    clearSearchQuery();
   }
   if (e.key === 'Enter' && S.view === 'tracks') {
     var first = document.querySelector('#list .trow');
@@ -4199,7 +4285,10 @@ function sendVolRealtime(db) {
     _volPendingDb = null;
     // api() 契约：永不 reject（失败也返回兜底对象）⟹ 用同一个回调收尾即可，
     // 但两个分支都写 sendNext 是为了将来 api() 契约变化时也不会卡死 _volInFlight。
-    api('/api/volume?db=' + cur.toFixed(1), '').then(sendNext, sendNext);
+    api('/api/volume?db=' + cur.toFixed(1), '').then(function (j) {
+      if (j && j.ok === false && j.error) toast(j.error);
+      sendNext();
+    }, sendNext);
   };
   sendNext();
 }
@@ -5780,18 +5869,21 @@ function applyPresetControls(applied, profile) {
   var r = applied.rate !== undefined ? applied.rate : applied.sRate;
   if (r === undefined && profile === 'bitperfect') r = 'follow';
   if (r !== undefined) {
+    ADV.rate = r;
     setSelectValue(D('sRate'), r);
     setSelectValue(D('sp_rate'), r);
   }
 
   var f = applied.filter !== undefined ? applied.filter : applied.sFilt;
   if (f !== undefined) {
+    ADV.filter = f;
     setSelectValue(D('sFilt'), f);
     setSelectValue(D('sp_filt'), f);
   }
 
   var fnx = applied.filterNx !== undefined ? applied.filterNx : applied.sFiltNx;
   if (fnx !== undefined) {
+    ADV.filterNx = fnx;
     setSelectValue(D('sFiltNx'), fnx);
     setSelectValue(D('sp_filtNx'), fnx);
   }
@@ -5799,6 +5891,7 @@ function applyPresetControls(applied, profile) {
   var sh = applied.shaper !== undefined ? applied.shaper : applied.sShap;
   if (sh === undefined && profile === 'bitperfect') sh = 'none';
   if (sh !== undefined) {
+    ADV.shaper = sh;
     setSelectValue(D('sShap'), sh);
     setSelectValue(D('sp_shaper'), sh);
   }
@@ -5894,6 +5987,13 @@ function applyPreset(profile) {
     if (j.applied) {
       applyPresetControls(j.applied, profile);
     }
+
+    ['presetBitPerfect', 'presetPcm', 'presetDsd'].forEach(function (id) {
+      if (D(id)) D(id).classList.remove('on');
+    });
+    if (profile === 'bitperfect' && D('presetBitPerfect')) D('presetBitPerfect').classList.add('on');
+    else if (profile === 'pcm' && D('presetPcm')) D('presetPcm').classList.add('on');
+    else if (profile === 'dsd' && D('presetDsd')) D('presetDsd').classList.add('on');
 
     if (j.notes && Array.isArray(j.notes) && j.notes.length) {
       j.notes.forEach(function (note, idx) {

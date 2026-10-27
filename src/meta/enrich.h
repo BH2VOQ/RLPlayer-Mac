@@ -139,6 +139,52 @@ inline std::string ed_cover_ext(const std::string& url) {
     return low.find(".png") != std::string::npos ? "png" : "jpg";
 }
 
+// 图片魔数校验（E-2 第二道闸）：仅接受合法 JPEG 或 PNG，杜绝 HTML 错误页/文本伪装成图片写入
+inline bool ed_is_valid_image(const unsigned char* data, size_t len) {
+    if (!data || len < 8) return false;
+    // JPEG: FF D8 FF
+    if (data[0] == 0xFF && data[1] == 0xD8 && data[2] == 0xFF) return true;
+    // PNG: 89 50 4E 47 0D 0A 1A 0A
+    static const unsigned char kPngMagic[8] = { 0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A };
+    if (std::memcmp(data, kPngMagic, 8) == 0) return true;
+    return false;
+}
+
+// 候选封面 URL 链派生（E-2）：首选置顶，其余候选按分数降序排列，去重且过滤空 URL
+inline std::vector<std::string> ed_candidate_cover_urls(const std::vector<Scored>& sortedDesc,
+                                                        const std::vector<Candidate>& cands,
+                                                        size_t bestIdx) {
+    std::vector<std::string> urls;
+    urls.reserve(sortedDesc.size() + 1);
+    if (bestIdx < cands.size() && !cands[bestIdx].coverUrl.empty()) {
+        urls.push_back(cands[bestIdx].coverUrl);
+    }
+    for (const Scored& s : sortedDesc) {
+        if (s.idx >= cands.size()) continue;
+        const std::string& u = cands[s.idx].coverUrl;
+        if (u.empty()) continue;
+        bool exists = false;
+        for (const std::string& existing : urls) {
+            if (existing == u) { exists = true; break; }
+        }
+        if (!exists) urls.push_back(u);
+    }
+    return urls;
+}
+
+// E-2：封面下载的**决策部分**抽成纯函数，供生产代码与单测共用同一份判据。
+// 抽出来的理由（铁律 3）：如果测试自己再写一遍"HTTP 200 + >2048B + 魔数"，
+// 那证明的是测试的抄写能力，而不是生产代码的行为。这里把判定收在一处，
+// 单测直接喂真字节，测的就是生产路径用的那份逻辑。
+//   status/bytes/len  → 三者共同决定这张图收不收
+//   返回空串 = 收；非空 = 人话原因（逐条进 notes，便于用户看懂为什么没图）
+inline std::string ed_cover_reject_reason(int status, const unsigned char* data, size_t len) {
+    if (status != 200) return "HTTP " + std::to_string(status);
+    if (len <= 2048)   return std::to_string(len) + "B 小于 2048B 门槛";
+    if (!ed_is_valid_image(data, len)) return std::to_string(len) + "B 无有效图片头";
+    return std::string();
+}
+
 // LLM 裁决回包解析:剥围栏/找 {…} 后取 "pick";合法范围 [-1, nShown-1],越界/解析失败 → -1。
 inline int ed_llm_pick(const std::string& text, int nShown) {
     const std::string body = parse_llm_strip_fence(text);
@@ -441,20 +487,28 @@ inline EnrichStats enrich_track(const std::string& file, bool force, const Enric
         }
     }
 
-    // ---- 7) 封面:记录缺封面且首选候选有 URL → 下载(>2KB 才收) ----
-    if (tm.coverRelPath.empty() && !best.coverUrl.empty()) {
-        const rta::net::HttpResponse resp = rta::net::http_get(best.coverUrl, {}, 15000);
-        if (resp.status == 200 && resp.body.size() > 2048) {
+    // ---- 7) 封面:记录缺封面且候选有 URL → 逐个尝试下载(>2KB + 魔数合法两道闸才收) ----
+    if (tm.coverRelPath.empty()) {
+        const std::vector<std::string> coverUrls = enrich_detail::ed_candidate_cover_urls(sorted, cands, bestIdx);
+        for (const std::string& curl : coverUrls) {
+            const rta::net::HttpResponse resp = rta::net::http_get(curl, {}, 15000);
+            // 判定收在 enrich_detail::ed_cover_reject_reason —— 生产与单测共用同一份逻辑，
+            // 避免"测试自己抄一遍判据、测的是抄写能力"（铁律 3）。
+            const std::string reject = enrich_detail::ed_cover_reject_reason(
+                resp.status, resp.body.data(), resp.body.size());
+            if (!reject.empty()) {
+                notes.push_back("封面未收(" + curl.substr(0, 40) + "... " + reject + ")");
+                continue;        // 换下一个候选源继续试（E-2：不再"首选失败即整张无封面"）
+            }
             const std::string rel = ms.saveCover(file, resp.body.data(), resp.body.size(),
-                                                 enrich_detail::ed_cover_ext(best.coverUrl));
+                                                 enrich_detail::ed_cover_ext(curl));
             if (!rel.empty()) {
                 tm.coverRelPath = rel;
                 st.fieldsFilled.push_back("cover");
                 notes.push_back("封面已缓存(" + rel + ")");
-            } else notes.push_back("封面保存失败");
-        } else {
-            notes.push_back("封面未收(" + best.coverUrl.substr(0, 40) + "... HTTP " +
-                            std::to_string(resp.status) + " " + std::to_string(resp.body.size()) + "B)");
+                break; // 成功获取封面并写盘，终止尝试
+            }
+            notes.push_back("封面保存失败(" + curl.substr(0, 40) + "...)");
         }
     }
 

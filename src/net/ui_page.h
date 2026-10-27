@@ -33,8 +33,13 @@ inline std::string rta_ui_page() {
     //   Light = Apple Music 浅色（纯白底 + 极轻灰分层，对标用户截图）
     //   Blue  = Hi-Fi 冰蓝（保留原有冰蓝取向，但补齐毛玻璃边框/阴影变量）
     // 组件里【仍然不许出现硬编码颜色】—— 全部走这里的变量。
+    // 2026-10-27（L-4）：--card 是卡片底色，三套主题都必须定义。
+    // 历史上 5 处 var(--card)（ui_page.h:1042/:1045 + ui_script.h:2300/:2302/:7654 的内联样式）
+    // 全部因它未定义而失效：var() 替换失败 ⟹ 整条 background 声明在「计算值阶段」作废，
+    // 不会回退到更早的竞争声明 ⟹ .model-card / .preset-card（仅非 active 态）背景退化成
+    // rgba(0,0,0,0)（透明）。修法（用户指定：优先补定义，不换引用）：各主题按自己的 --bg3 补齐。
     h += ":root{color-scheme:dark;"
-         "--bg:#161618;--bg2:#1e1e22;--bg3:#26262b;"
+         "--bg:#161618;--bg2:#1e1e22;--bg3:#26262b;--card:#26262b;"
          "--topbg:rgba(22,22,24,.82);"
          "--barbg:rgba(40,40,46,.78);--bar-border:rgba(255,255,255,.12);--bar-shadow:0 16px 44px rgba(0,0,0,.55),0 2px 10px rgba(0,0,0,.30);"
          "--line:rgba(255,255,255,.08);--line2:rgba(255,255,255,.13);"
@@ -55,7 +60,7 @@ inline std::string rta_ui_page() {
          "}";
     // Apple Music 浅色主题（对标用户截图：白底 + 灰分层 + 珊瑚红强调）
     h += "html[data-theme=light]{color-scheme:light;"
-         "--bg:#ffffff;--bg2:#f2f2f6;--bg3:#f7f7fa;"
+         "--bg:#ffffff;--bg2:#f2f2f6;--bg3:#f7f7fa;--card:#f7f7fa;"
          "--topbg:rgba(255,255,255,.85);"
          "--barbg:rgba(246,246,249,.84);--bar-border:rgba(0,0,0,.085);--bar-shadow:0 12px 38px rgba(0,0,0,.13),0 2px 8px rgba(0,0,0,.05);"
          "--line:rgba(0,0,0,.08);--line2:rgba(0,0,0,.13);"
@@ -71,7 +76,7 @@ inline std::string rta_ui_page() {
          "}";
     // Hi-Fi 冰蓝主题
     h += "html[data-theme=blue]{color-scheme:light;"
-         "--bg:#f8faff;--bg2:#ecf2fc;--bg3:#f1f6fe;"
+         "--bg:#f8faff;--bg2:#ecf2fc;--bg3:#f1f6fe;--card:#f1f6fe;"
          "--topbg:rgba(248,250,255,.85);"
          "--barbg:rgba(242,247,255,.85);--bar-border:rgba(15,60,130,.10);--bar-shadow:0 12px 36px rgba(15,50,110,.13),0 2px 8px rgba(15,50,110,.05);"
          "--line:rgba(15,55,115,.09);--line2:rgba(15,55,115,.15);"
@@ -487,6 +492,7 @@ inline std::string rta_ui_page() {
     h += "#bpBadge.bp-no{display:inline-flex;color:var(--warn);border-color:currentColor;background:var(--hov)}";
     h += "#bpBadge.bp-direct{display:inline-flex;color:var(--bp-direct);border-color:currentColor;background:var(--hov)}";
     h += "#bpBadge.bp-up{display:inline-flex;color:var(--acc);border-color:currentColor;background:var(--hov)}";
+    h += "#bpBadge.bp-idle{display:inline-flex;color:var(--mut);border-color:var(--line);background:var(--hov)}";
     // 窄屏：胶囊的左右起点跟着侧栏一起收（1240px 档侧栏是 200px），控制组只压缩不隐藏 ——
     // 歌词/信号链/音量三件套必须始终在（261023-04 #1 的判据）。
     h += "@media (max-width:1400px){.bar{gap:12px}.vol{gap:6px}.vol input[type=range]{width:76px;min-width:48px;flex:0 1 auto}}";
@@ -942,6 +948,7 @@ h += "#npPage .npedge{display:none}";
     h += "@media (max-width:920px){.preset-grid{grid-template-columns:1fr}}";
     h += ".preset-btn{display:flex;flex-direction:column;align-items:flex-start;text-align:left;padding:12px 14px;border-radius:10px;border:1px solid var(--line);background:var(--field);color:var(--txt);cursor:pointer;transition:all .15s ease;min-height:76px;width:100%}";
     h += ".preset-btn:hover{border-color:var(--acc);background:var(--hov);transform:translateY(-1px);box-shadow:0 3px 12px var(--shadow)}";
+    h += ".preset-btn.on{border-color:var(--acc);background:var(--acc-weak);box-shadow:0 0 0 1.5px var(--acc)}";
     h += ".preset-btn:active{transform:translateY(0)}";
     h += ".preset-btn-top{display:flex;align-items:center;justify-content:space-between;width:100%;margin-bottom:6px}";
     h += ".preset-btn-title{font-size:13px;font-weight:650;color:var(--txt)}";

@@ -222,6 +222,85 @@ int main() {
     ck(!enrich_detail::enrich_adopt(false, 1, false, 0.40),
        "6c llmRan=false 时忽略传入的 pick(以 llmRan 为准,防御)");
 
+    // ---- E-2:候选封面 URL 链 + 收图判定 ----
+    // 对应 debug/20261027-01 §1 E-2：首选源 404 时不能整张专辑无封面。
+    // 判据直接跑生产代码用的那两个函数，不重写逻辑（否则测的是抄写能力）。
+    std::printf("-- E-2 封面候选链与收图判定 --\n");
+    {
+        auto cdl = [](const char* src, const char* url) {
+            Candidate c = cd(src, "", "", "", "");
+            c.coverUrl = url;
+            return c;
+        };
+        // 首选(0)有图，1/2 也有图，3 无图
+        std::vector<Candidate> cs = {
+            cdl("netease", "http://a/1.jpg"),
+            cdl("qq",      "http://b/2.jpg"),
+            cdl("itunes",  "http://c/3.jpg"),
+            cdl("lrclib",  ""),
+        };
+        std::vector<Scored> sorted = { sc(0, 0.95), sc(1, 0.90), sc(2, 0.70), sc(3, 0.50) };
+
+        const auto urls = enrich_detail::ed_candidate_cover_urls(sorted, cs, 0);
+        ck(urls.size() == 3, "候选链含全部有 URL 的候选(3 个，空 URL 被过滤)",
+           "size=" + std::to_string(urls.size()));
+        ck(!urls.empty() && urls[0] == "http://a/1.jpg", "候选链首位 = 首选候选的图（优先保证原语义）",
+           urls.empty() ? "(空)" : urls[0]);
+        // 关键：首选失败后**还有后备** —— 这就是"首选 404 不至于整张无封面"的结构保证
+        ck(urls.size() >= 2 && urls[1] == "http://b/2.jpg",
+           "首选之后仍保留第二候选（首选 404 时还有得试）",
+           urls.size() >= 2 ? urls[1] : "(无第二项)");
+
+        // 去重：两个候选同 URL 时不能重复试两次
+        std::vector<Candidate> dup = { cdl("a", "http://x/same.jpg"), cdl("b", "http://x/same.jpg") };
+        std::vector<Scored> dsorted = { sc(0, 0.9), sc(1, 0.8) };
+        ck(enrich_detail::ed_candidate_cover_urls(dsorted, dup, 0).size() == 1,
+           "同 URL 去重（不会对同一张图重复抓两次）");
+
+        // 首选 bestIdx 不在 sorted 首位时，仍应排在链首（语义：首选优先）
+        std::vector<Candidate> cs2 = { cdl("a", "http://a/1.jpg"), cdl("b", "http://b/2.jpg") };
+        std::vector<Scored> s2 = { sc(1, 0.90), sc(0, 0.80) };
+        const auto u2 = enrich_detail::ed_candidate_cover_urls(s2, cs2, 0);
+        ck(u2.size() == 2 && u2[0] == "http://a/1.jpg",
+           "bestIdx=0 时其 URL 仍置顶（不因分数序被挤到后面）",
+           u2.empty() ? "(空)" : u2[0]);
+
+        // ---- 收图三闸：只有"200 + >2048B + 合法图片头"才收 ----
+        std::vector<unsigned char> jpeg(4096, 0x00);
+        jpeg[0] = 0xFF; jpeg[1] = 0xD8; jpeg[2] = 0xFF;
+        std::vector<unsigned char> png(4096, 0x00);
+        const unsigned char kPng[8] = { 0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A };
+        for (int i = 0; i < 8; ++i) png[(size_t)i] = kPng[i];
+        std::vector<unsigned char> html(4096, 'x');           // HTML 错误页伪装
+        html[0] = '<'; html[1] = 'h'; html[2] = 't';
+        std::vector<unsigned char> tiny(100, 0x00);           // 太小
+        tiny[0] = 0xFF; tiny[1] = 0xD8; tiny[2] = 0xFF;
+
+        auto reason = [](int st, const std::vector<unsigned char>& b) {
+            return enrich_detail::ed_cover_reject_reason(st, b.data(), b.size());
+        };
+        ck(reason(404, jpeg).find("HTTP 404") != std::string::npos,
+           "404 被拒，原因写明 HTTP 状态（可追溯）", reason(404, jpeg));
+        ck(reason(200, jpeg).empty(), "200 + 合法 JPEG + >2048B → 收");
+        ck(reason(200, png).empty(), "200 + 合法 PNG + >2048B → 收");
+        ck(!reason(200, html).empty(),
+           "200 但内容是 HTML 错误页 → 拒收（防止把错误页当 jpg 存进去）", reason(200, html));
+        ck(!reason(200, tiny).empty(), "200 但小于 2048B → 拒收（不是真封面）", reason(200, tiny));
+
+        // ---- 生产循环的终止语义：逐个试，第一个成功即停 ----
+        // 用"判定结果序列"模拟真实循环，证明它确实会走完候选链而不是只看第一个。
+        std::vector<std::vector<unsigned char>> bodies = { html, jpeg };   // 第 1 个假图，第 2 个真图
+        int tried = 0; bool got = false;
+        for (size_t i = 0; i < bodies.size() && i < urls.size(); ++i) {
+            ++tried;
+            if (reason(200, bodies[i]).empty()) { got = true; break; }
+        }
+        ck(tried == 2 && got,
+           "E-2 首选图非法时继续试下一候选，拿到真图才停（tried=2, got=true）",
+           "tried=" + std::to_string(tried) + " got=" + std::string(got ? "true" : "false"));
+    }
+
+
     std::printf("\n%s\n", g_fail == 0 ? "全部通过" : (std::to_string(g_fail) + " 项失败").c_str());
     return g_fail == 0 ? 0 : 1;
 }

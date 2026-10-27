@@ -140,7 +140,9 @@ inline const std::vector<std::string>& default_domain_whitelist() {
         "monster-siren.hypergryph.com", "hypergryph.com", "arknights.jp",
         // 通用（中文媒体常见）
         "zhihu.com", "bilibili.com", "weibo.com",
-        "kuwo.cn", "douban.com", "prts.wiki", "yopu.co", "monster-siren.hypergryph.com"
+        "kuwo.cn", "douban.com", "prts.wiki", "yopu.co", "monster-siren.hypergryph.com",
+        // E-5: 同人 / 数字发行 / VGM 数据库
+        "dizzylab.net", "booth.pm", "vgmdb.net"
     };
     return kWhitelist;
 }
