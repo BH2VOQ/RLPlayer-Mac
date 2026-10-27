@@ -9,6 +9,7 @@
 #pragma once
 
 #include <CoreAudio/CoreAudioTypes.h>
+#include <cmath>
 #include <cstdint>
 #include <string>
 
@@ -63,6 +64,18 @@ struct FormatNegotiationResult {
 // 从 ASBD 分析 PCM 格式（纯函数，无系统调用）
 inline PcmFormatAnalysis analyze_pcm_asbd(const AudioStreamBasicDescription& asbd) {
     PcmFormatAnalysis a;
+
+    // 拒绝 NaN / Inf / <= 0 / 小数采样率，避免 double -> uint32 溢出或截断 UB
+    if (std::isnan(asbd.mSampleRate) || std::isinf(asbd.mSampleRate) || asbd.mSampleRate <= 0.0 ||
+        asbd.mSampleRate > 19200000.0) { // 超过 19.2MHz 判定为荒谬/溢出采样率
+        a.description = "无效或溢出的采样率（非数值/负数/超出安全范围）";
+        return a;
+    }
+    if (std::floor(asbd.mSampleRate) != asbd.mSampleRate) {
+        a.description = "拒绝非整数采样率（fractional sample rate）";
+        return a;
+    }
+
     a.sampleRate = (uint32_t)asbd.mSampleRate;
     a.channels = asbd.mChannelsPerFrame;
     a.bitsPerChannel = asbd.mBitsPerChannel;
@@ -78,6 +91,12 @@ inline PcmFormatAnalysis analyze_pcm_asbd(const AudioStreamBasicDescription& asb
 
     if (a.channels == 0 || a.sampleRate == 0) {
         a.description = "无效的声道数或采样率";
+        return a;
+    }
+
+    // 拒绝大端 (BigEndian) 格式：当前音频引擎与 render callback 输出均为原生小端 (Little-Endian)
+    if (asbd.mFormatFlags & kAudioFormatFlagIsBigEndian) {
+        a.description = "不支持大端 (Big-Endian) PCM 格式";
         return a;
     }
 
@@ -103,6 +122,18 @@ inline PcmFormatAnalysis analyze_pcm_asbd(const AudioStreamBasicDescription& asb
     a.isFloat = (asbd.mFormatFlags & kAudioFormatFlagIsFloat) != 0;
     a.isSignedInt = (asbd.mFormatFlags & kAudioFormatFlagIsSignedInteger) != 0;
     a.isPacked = (asbd.mFormatFlags & kAudioFormatFlagIsPacked) != 0;
+    const bool isAlignedHigh = (asbd.mFormatFlags & kAudioFormatFlagIsAlignedHigh) != 0;
+
+    // 标志冲突拒绝：Float 与 SignedInteger 矛盾
+    if (a.isFloat && a.isSignedInt) {
+        a.description = "格式标志冲突：同时指定了 Float 与 SignedInteger";
+        return a;
+    }
+    // 标志冲突拒绝：Packed 与 AlignedHigh 矛盾
+    if (a.isPacked && isAlignedHigh) {
+        a.description = "格式标志冲突：同时指定了 Packed 与 AlignedHigh";
+        return a;
+    }
 
     // 1) 32-bit Float
     if (a.isFloat) {
@@ -111,7 +142,7 @@ inline PcmFormatAnalysis analyze_pcm_asbd(const AudioStreamBasicDescription& asb
             a.packing = ContainerPacking::Float32;
             a.containerBits = 32;
             a.effectiveBits = 24; // 严格依据 IEEE 754 float32 单精度 24 位有效尾数
-            a.description = "32-bit 浮点（容器 32 位，有效精度 24 位）";
+            a.description = "32-bit 浮点（容器 32 位，有效精度 24 位；不宣称比特完美物理保证）";
             return a;
         } else {
             a.description = "不支持的浮点位深/字节数组合";
@@ -140,7 +171,8 @@ inline PcmFormatAnalysis analyze_pcm_asbd(const AudioStreamBasicDescription& asb
             return a;
         }
         // 24-in-32 (24 位装入 32 位容器，4 字节)
-        if (a.bitsPerChannel == 24 && a.bytesPerSample == 4) {
+        // 注意：24-in-32 容器为 4 字节，非 packed 布局（或指定了 AlignedHigh 等）
+        if (a.bitsPerChannel == 24 && a.bytesPerSample == 4 && !a.isPacked) {
             a.valid = true;
             a.packing = ContainerPacking::In32Bit24;
             a.containerBits = 32;
@@ -229,25 +261,28 @@ inline FormatNegotiationResult validate_and_negotiate_format(
             return res;
         }
         if (a.packing == ContainerPacking::In32Bit24) {
-            // 精度同为 24 位，但容器为 32 位（4 字节对齐）
+            // 精度同为 24 位，但设备容器为 32 位（4 字节对齐）。
+            // 此时若 client 未提供内存重打包（repack），需明确标明 requiresRepack，
+            // 供调用方决断是否接受；若无正确 repack 则必须拒绝 client requiresRepack。
+            // fallback 必须描述为 HAL/AUHAL 设备转换，而非内存已打包。
             res.accepted = true;
             res.acceptedPacking = ContainerPacking::In32Bit24;
             res.effectiveBits = 24;
             res.containerBits = 32;
             res.isFloat = false;
             res.requiresRepack = true;
-            res.fallbackNote = "设备采用 24-in-32 容器（有效精度 24 位，容器 32 位）";
+            res.fallbackNote = "设备采用 24-in-32 容器（有效精度 24 位，容器 32 位；由 AUHAL/HAL 进行设备格式转换，非内存打包）";
             return res;
         }
         if (a.packing == ContainerPacking::Float32) {
-            // float32 尾数 24 位，精度等价 24 位
+            // float32 尾数 24 位，有效精度 24 位，不宣称物理比特完美保证
             res.accepted = true;
             res.acceptedPacking = ContainerPacking::Float32;
             res.effectiveBits = 24;
             res.containerBits = 32;
             res.isFloat = true;
             res.requiresRepack = true;
-            res.fallbackNote = "设备采用 Float32（32 位浮点容器，有效精度 24 位）";
+            res.fallbackNote = "设备采用 Float32（32 位浮点容器，有效精度 24 位；由 AUHAL/HAL 进行设备转换，非物理比特完美保证）";
             return res;
         }
         res.accepted = false;

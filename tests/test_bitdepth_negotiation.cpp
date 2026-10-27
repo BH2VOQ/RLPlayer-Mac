@@ -149,14 +149,103 @@ int main() {
               "声道数不符时明确拒绝");
     }
 
-    // 9. CoreAudioOutput getter 与回退说明接口静态契约验证
+    // 9. 拒绝大端 (Big-Endian) 格式
+    {
+        auto asbd = make_asbd(44100, 2, 16, 4,
+                              kAudioFormatFlagIsSignedInteger | kAudioFormatFlagIsPacked | kAudioFormatFlagIsBigEndian);
+        auto a = analyze_pcm_asbd(asbd);
+        check(!a.valid && a.description.find("大端") != std::string::npos,
+              "大端格式拒绝：analyze_pcm_asbd 明确拒绝");
+
+        auto res = validate_and_negotiate_format(44100, 16, 2, asbd);
+        check(!res.accepted && res.rejectReason.find("大端") != std::string::npos,
+              "大端格式协商直接拒绝");
+    }
+
+    // 10. 拒绝标志冲突：Float 与 SignedInteger 矛盾
+    {
+        auto asbd = make_asbd(44100, 2, 32, 8,
+                              kAudioFormatFlagIsFloat | kAudioFormatFlagIsSignedInteger | kAudioFormatFlagIsPacked);
+        auto a = analyze_pcm_asbd(asbd);
+        check(!a.valid && a.description.find("冲突") != std::string::npos,
+              "Float + SignedInteger 矛盾标志拒绝");
+
+        auto res = validate_and_negotiate_format(44100, 32, 2, asbd);
+        check(!res.accepted && !res.rejectReason.empty(),
+              "Float + SignedInteger 冲突协商直接拒绝");
+    }
+
+    // 11. 拒绝标志冲突：Packed 与 AlignedHigh 矛盾
+    {
+        auto asbd = make_asbd(44100, 2, 24, 8,
+                              kAudioFormatFlagIsSignedInteger | kAudioFormatFlagIsPacked | kAudioFormatFlagIsAlignedHigh);
+        auto a = analyze_pcm_asbd(asbd);
+        check(!a.valid && a.description.find("冲突") != std::string::npos,
+              "Packed + AlignedHigh 矛盾标志拒绝");
+
+        auto res = validate_and_negotiate_format(44100, 24, 2, asbd);
+        check(!res.accepted && !res.rejectReason.empty(),
+              "Packed + AlignedHigh 冲突协商直接拒绝");
+    }
+
+    // 12. 拒绝非正常采样率：NaN / Inf / 小数 / 负数，避免 double->uint 溢出 UB
+    {
+        auto asbdNaN = make_asbd(NAN, 2, 16, 4, kAudioFormatFlagIsSignedInteger | kAudioFormatFlagIsPacked);
+        auto aNaN = analyze_pcm_asbd(asbdNaN);
+        check(!aNaN.valid, "NaN 采样率明确拒绝");
+
+        auto asbdInf = make_asbd(INFINITY, 2, 16, 4, kAudioFormatFlagIsSignedInteger | kAudioFormatFlagIsPacked);
+        auto aInf = analyze_pcm_asbd(asbdInf);
+        check(!aInf.valid, "Inf 采样率明确拒绝");
+
+        auto asbdFrac = make_asbd(44100.5, 2, 16, 4, kAudioFormatFlagIsSignedInteger | kAudioFormatFlagIsPacked);
+        auto aFrac = analyze_pcm_asbd(asbdFrac);
+        check(!aFrac.valid && aFrac.description.find("非整数") != std::string::npos,
+              "小数采样率 (44100.5 Hz) 明确拒绝");
+
+        auto asbdNeg = make_asbd(-48000.0, 2, 16, 4, kAudioFormatFlagIsSignedInteger | kAudioFormatFlagIsPacked);
+        auto aNeg = analyze_pcm_asbd(asbdNeg);
+        check(!aNeg.valid, "负数采样率明确拒绝");
+    }
+
+    // 13. CoreAudioOutput getters (client_format / device_format / actual_format) 与状态清理验证
     {
         rta::platform::CoreAudioOutput out;
-        auto fmt = out.actual_format();
-        check(fmt.sampleRate == 0 && fmt.bits == 0 && fmt.fallbackNote.empty(),
+        auto clientFmt = out.client_format();
+        check(clientFmt.sampleRate == 0 && clientFmt.bits == 0 &&
+              clientFmt.packing == ContainerPacking::Invalid,
+              "未 open 时 client_format 返回默认空状态");
+
+        auto devFmt = out.device_format();
+        check(devFmt.sampleRate == 0 && devFmt.bits == 0 && devFmt.fallbackNote.empty() &&
+              devFmt.packing == ContainerPacking::Invalid,
+              "未 open 时 device_format 返回默认空状态");
+
+        auto actualFmt = out.actual_format();
+        check(actualFmt.sampleRate == 0 && actualFmt.bits == 0 && actualFmt.fallbackNote.empty(),
               "未 open 时 actual_format 返回默认空状态");
         check(out.bits_fallback_note().empty(),
               "未 open 时 bits_fallback_note 返回空");
+
+        // const 对象调用测试：验证锁 mutex 使用 mutable 而非 const_cast
+        const rta::platform::CoreAudioOutput& constRef = out;
+        auto constClient = constRef.client_format();
+        auto constDev = constRef.device_format();
+        auto constActual = constRef.actual_format();
+        check(constClient.bits == 0 && constDev.bits == 0 && constActual.bits == 0,
+              "const 引用下调用 getters 正确（基于 mutable std::mutex）");
+
+        // 验证失败 open 会清空所有状态 (close_locked)
+        rta::platform::OpenSpec badSpec{};
+        badSpec.deviceId = "nonexistent_device_id_999999";
+        badSpec.rate = 44100;
+        badSpec.bits = 16;
+        badSpec.channels = 2;
+        bool openOk = out.open(badSpec);
+        check(!openOk, "非法设备 ID open 失败");
+        check(out.client_format().bits == 0 && out.device_format().bits == 0 &&
+              out.actual_format().bits == 0 && out.bits_fallback_note().empty(),
+              "open 失败后状态被彻底清空归位 (close_locked)");
     }
 
     std::printf("=========================================\n");
