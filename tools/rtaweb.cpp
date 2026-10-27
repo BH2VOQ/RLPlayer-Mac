@@ -599,12 +599,43 @@ static std::atomic<int> g_bgJobs{0};
 static std::mutex g_bgMx;
 static std::condition_variable g_bgCv;
 
-static void bg_job_begin() { g_bgJobs.fetch_add(1); }
+// 尽早置位全局退出标志，与 g_bgMx 互斥锁保护，彻底杜绝 check-then-act 竞态
+static void set_shutdown_flag() {
+    std::lock_guard<std::mutex> lk(g_bgMx);
+    g_shutdown.store(true);
+}
+
+// 检查并登记后台任务：登记检查与 shutdown 使用同一 mutex，避免 check-then-act 竞态。
+// 返回 true 表示成功登记，false 表示系统已处于退出中（g_shutdown == true），禁止登记新任务。
+static bool bg_job_begin() {
+    std::lock_guard<std::mutex> lk(g_bgMx);
+    if (g_shutdown.load()) return false;
+    g_bgJobs.fetch_add(1);
+    return true;
+}
+
 static void bg_job_end() {
     g_bgJobs.fetch_sub(1);
     { std::lock_guard<std::mutex> lk(g_bgMx); }   // 与 wait_for 的谓词检查配对（避免丢唤醒）
     g_bgCv.notify_all();
 }
+
+// 异常安全 RAII 卫 guard：无论正常结束或发生异常均保证 bg_job_end 归零
+class BgJobGuard {
+public:
+    BgJobGuard() : active_(bg_job_begin()) {}
+    ~BgJobGuard() {
+        if (active_) {
+            bg_job_end();
+            active_ = false;
+        }
+    }
+    bool active() const { return active_; }
+    BgJobGuard(const BgJobGuard&) = delete;
+    BgJobGuard& operator=(const BgJobGuard&) = delete;
+private:
+    bool active_ = false;
+};
 
 // ---- dispatch 并发观测（诊断/测试用；全部 relaxed 原子，不进任何临界区）----
 // 见 rlapp_core.h 的说明：用来证明「dispatch 没有被串行化」，而不是靠代码审查自证。
@@ -4724,17 +4755,24 @@ static void meta_on_play(const std::string& file) {
         if (s_inFlight.count(file) != 0) return;    // 在途:本曲已在补全,不重复
         s_inFlight.insert(file);
     }
-    bg_job_begin();     // 登记：stop_embedded 会等它收完（有界，超时如实记日志）
     std::thread([file, ms] {
+        BgJobGuard guard;
+        if (!guard.active()) {
+            std::lock_guard<std::mutex> lk(s_metaMx);
+            s_inFlight.erase(file);
+            return;
+        }
+        rta::net::HttpCancellationScope httpCancel(&g_shutdown);
         rta::meta::EnrichOpts o;
         o.srcOn = ms.srcOn; o.llm = ms.llm;
         o.llmConfPath = path_in_exe_dir("rlplayer-llm.conf");
         // EnrichOpts 是值拷贝进 lambda，但 cancel 指针指向全局对象 g_shutdown，
         // 生命周期覆盖整个进程，后台线程安全访问
         o.cancel = &g_shutdown;
-        rta::meta::enrich_track(file, false, o);
+        try {
+            rta::meta::enrich_track(file, false, o);
+        } catch (...) {}
         { std::lock_guard<std::mutex> lk(s_metaMx); s_inFlight.erase(file); }
-        bg_job_end();
     }).detach();
 }
 
@@ -5377,9 +5415,53 @@ static std::map<std::string, SummaryJob> g_summ_jobs;
 static void summary_job_start_fn(const std::string& key, const std::string& kindStr,
                                  const std::string& label,
                                  std::function<rta::meta::SummaryResult()> work) {
-    bg_job_begin();     // 登记：stop_embedded 会等它收完（有界，超时如实记日志）
     std::thread([key, kindStr, label, work]() {
-        const rta::meta::SummaryResult sr = work();
+        BgJobGuard guard;
+        if (!guard.active()) {
+            std::lock_guard<std::mutex> lk(g_summ_mu);
+            auto& job = g_summ_jobs[key];
+            job.running = false;
+            job.done = true;
+            job.ok = false;
+            job.body = "{\"ok\":false,\"error\":\"系统退出，任务取消\",\"summaryKind\":\"" + jesc(kindStr) + "\",\"summaryCached\":false}";
+            job.finished_at = (long long)std::time(nullptr);
+            return;
+        }
+        if (g_shutdown.load()) {
+            std::lock_guard<std::mutex> lk(g_summ_mu);
+            auto& job = g_summ_jobs[key];
+            job.running = false;
+            job.done = true;
+            job.ok = false;
+            job.body = "{\"ok\":false,\"error\":\"系统退出，任务取消\",\"summaryKind\":\"" + jesc(kindStr) + "\",\"summaryCached\":false}";
+            job.finished_at = (long long)std::time(nullptr);
+            return;
+        }
+
+        rta::net::HttpCancellationScope httpCancel(&g_shutdown);
+        rta::meta::SummaryResult sr;
+        try {
+            sr = work();
+        } catch (const std::exception& e) {
+            sr.ok = false;
+            sr.error = std::string("资料整理异常：") + e.what();
+        } catch (...) {
+            sr.ok = false;
+            sr.error = "资料整理未知异常";
+        }
+
+        // work 结束后再次检查 cancel，如果退出中则避免后续阶段/写共享状态，但保证结束登记与清理
+        if (g_shutdown.load()) {
+            std::lock_guard<std::mutex> lk(g_summ_mu);
+            auto& job = g_summ_jobs[key];
+            job.running = false;
+            job.done = true;
+            job.ok = false;
+            job.body = "{\"ok\":false,\"error\":\"系统退出，任务取消\",\"summaryKind\":\"" + jesc(kindStr) + "\",\"summaryCached\":false}";
+            job.finished_at = (long long)std::time(nullptr);
+            return;
+        }
+
         std::string body;
         if (!sr.ok) {
             play_log("SUMMARY failed kind=" + kindStr + " name=" + label + " err=" + sr.error);
@@ -5401,8 +5483,7 @@ static void summary_job_start_fn(const std::string& key, const std::string& kind
             job.ok = sr.ok;
             job.body = body;
             job.finished_at = (long long)std::time(nullptr);
-        }   // 锁必须先放，再登记结束（否则 bg_job_end 里的 g_bgMx 与 g_summ_mu 顺序无保证）
-        bg_job_end();
+        }   // 锁必须先放，再由 BgJobGuard 析构触发 bg_job_end()（顺序完全确定）
     }).detach();
 }
 
@@ -5789,8 +5870,12 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
                        (confirmed ? "false" : "true") + ",\"error\":\"" + jesc(err) + "\"}";
             }
             // 会话在线程里跑（扫频最长几十秒，不能堵住 accept）。
-            bg_job_begin();
             std::thread([plan]() {
+                BgJobGuard guard;
+                if (!guard.active()) {
+                    s_room.fail("系统退出，测量取消");
+                    return;
+                }
                 try {
                     rta::dsp::RoomTxConfig cfg;
                     cfg.rate = 48000;
@@ -5806,7 +5891,7 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
                     const auto all = rta::dsp::room_layouts();
                     for (const auto& l : all)
                         if (plan.layout == (l.name ? l.name : "")) { layout = l; break; }
-                    tx.cancelled = [] { return false; };
+                    tx.cancelled = [] { return g_shutdown.load(); };
                     rta::dsp::MeasurementSession session(spec, layout, plan.levelDbfs);
                     const auto res = session.run(tx);
                     s_room.finish(res);
@@ -5815,7 +5900,6 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
                 } catch (const std::exception& e) {
                     s_room.fail(std::string("测量异常：") + e.what());
                 }
-                bg_job_end();
             }).detach();
             return "{\"ok\":true,\"started\":true,\"warning\":\"" + jesc(plan.warning) + "\"}";
         }
@@ -9749,6 +9833,7 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
 
     if (rq.path.rfind("/api/quit", 0) == 0 || rq.path.rfind("/api/shutdown", 0) == 0) {
         g_exitReq.store(true);
+        set_shutdown_flag();
         return "{\"ok\":true}";
     }
 
@@ -10186,22 +10271,34 @@ static void core_shutdown_common() {
         }
         if (prev.joinable()) prev.join();
     }
-    // detached 的后台任务（元数据补全 / 资料整理）：有界等待，收不完就如实记日志。
-    // 预算设为 1200ms（任务项 B），超时时记录已等待毫秒数与剩余数
+    // detached 的后台任务（元数据补全 / 资料整理）：
+    // 取消网络后等待确认归零；若超过诊断预算仅记日志，继续等待直到真正归零，
+    // 绝不在还有 detached 任务读 MetaStore / 锁时返回去析构单例（防止 UAF）。
     const auto tWait0 = std::chrono::steady_clock::now();
-    const bool bgDone = bg_jobs_wait(std::chrono::milliseconds(1200));
-    const auto tWaitMs = std::chrono::duration_cast<std::chrono::milliseconds>(
-        std::chrono::steady_clock::now() - tWait0).count();
-    // 无论成败都留一行（B-8）：成功也打，否则「没超时」与「根本没走到这里」在日志里无法区分。
-    if (bgDone) {
-        play_log("SHUTDOWN 后台任务已全部收完（等待 " + std::to_string(tWaitMs) + "ms）");
-    } else {
-        const int left = g_bgJobs.load();
-        play_log("SHUTDOWN 后台任务已在 1.2s 内取消并等待，仍有 " + std::to_string(left) +
-                 " 个未收完（已等待 " + std::to_string(tWaitMs) + "ms）");
-        printf("!! 退出时仍有 %d 个后台任务未收完（已在 1.2s 内取消并等待 %lldms，已在日志记录）\n",
-               left, (long long)tWaitMs);
+    bool budgetWarned = false;
+    while (g_bgJobs.load() > 0) {
+        if (!bg_jobs_wait(std::chrono::milliseconds(200))) {
+            const auto tWaitMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now() - tWait0).count();
+            if (!budgetWarned && tWaitMs >= 1200) {
+                budgetWarned = true;
+                const int left = g_bgJobs.load();
+                play_log("SHUTDOWN 后台任务超过诊断预算 1.2s（剩余 " + std::to_string(left) +
+                         " 个未归零，已等待 " + std::to_string(tWaitMs) + "ms），继续等待归零以防 UAF");
+                printf("!! 退出时后台任务超过 1.2s 预算仍有 %d 个未收完（已等待 %lldms，继续等待以防 UAF）\n",
+                       left, (long long)tWaitMs);
+            }
+        }
     }
+    const auto tWaitTotalMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - tWait0).count();
+    // 结构化指标：bg=0 inflight=0 等待时间（只有真正归零才汇报成功）
+    std::ostringstream sMetric;
+    sMetric << "SHUTDOWN bg=" << g_bgJobs.load()
+            << " inflight=" << g_inFlight.load()
+            << " waitMs=" << tWaitTotalMs;
+    play_log(sMetric.str());
+    play_log("SHUTDOWN 后台任务已全部收完（等待 " + std::to_string(tWaitTotalMs) + "ms）");
 }
 
 // ===========================================================================
@@ -10270,10 +10367,24 @@ bool rlapp::exit_requested() {
 }
 
 void rlapp::stop_embedded() {
+    // 尽早置 g_shutdown（与 g_bgMx 同锁，在幂等拦截前先置位，让在途或并发的后台任务立刻感知取消）
+    set_shutdown_flag();
     // 幂等：壳可能因为「用户点退出」和「窗口关闭」各调一次。
     static std::atomic<bool> stopped{false};
     if (stopped.exchange(true)) return;
-    g_shutdown = true;     // 协作式取消：让后台任务感知到要退出了
+
+    // 在途请求防护 drain：等待当前正在 dispatch() 的 handler 真正返回
+    const auto drainStart = std::chrono::steady_clock::now();
+    while (g_inFlight.load(std::memory_order_relaxed) > 0) {
+        if (std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now() - drainStart).count() > 5000) {
+            play_log("SHUTDOWN 在途 dispatch 超过 5s 仍未完全退出（剩余=" +
+                     std::to_string(g_inFlight.load()) + "），继续执行收尾");
+            break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+
     core_shutdown_common();
 }
 
@@ -10381,15 +10492,13 @@ int rlapp::cli_main(int argc, char** argv) {
     ::signal(SIGTERM, [](int){ g_exitReq.store(true); });
     printf("  按 Ctrl+C 退出（或 Dock 图标右键 → 退出）\n");
     while (!g_exitReq.load()) std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    // 无论 CLI 还是 embedded，均在退出入口尽早置 g_shutdown，通知全部后台任务与网络请求提前收尾
+    set_shutdown_flag();
     // 退出顺序（2026-10-25 并发化配套）：
     //   先停 HTTP 控制面 —— handler 现在跑在工作线程里，stop() 会 shutdown 活跃连接并等
     //   连接表清空；然后才拆播放线程 / 库扫描线程。否则在途请求会访问正在析构的单例。
     ui.stop();
     g_httpListening.store(false);
-    // ---- 2026-10-25：退出崩溃取证 + 收尾（上游 6bd21a6）----
-    // 2026-10-27（B-8）：`SHUTDOWN joinable:` 那行已移进 core_shutdown_common()，
-    // 让 CLI 与 .app（embedded）两条退出路径都有同一份观测；这里不再重复打印。
-    g_shutdown = true;                     // 让后台活儿看到"要退了"，别再碰全局
     // 控制面已停 → 与 embedded 完全相同的协作收尾（播放/采集/预解码/扫描/写回/后台任务）
     core_shutdown_common();
     if (g_pre.th.joinable()) g_pre.th.detach();
