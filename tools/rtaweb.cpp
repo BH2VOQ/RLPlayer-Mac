@@ -76,6 +76,9 @@ using rta::render::SinkOpenOpts;
 #include "dsp/peq.h"               // 261024-02 #6：20 段参数均衡（RBJ 双二阶，float64 系数 / float32 处理）
 #include "dsp/opra.h"
 #include "dsp/dop.h"
+#include "dsp/dsd_rate_convert.h"
+#include "dsp/room_api.h"        // R-1：房间测量端点层（授权/计划/状态机）
+#include "platform/macos/room_transport_coreaudio.h"   // F-3：同族整数倍 DSD→DSD 速率转换
 #include "dsp/modulator.h"
 #include "dsp/direct_sdm.h"
 #include "version.h"
@@ -1475,6 +1478,20 @@ static bool direct_sdm_eligible(const PlayParams& p, const DsdInfo& info, std::s
     for (int i = 0; i < 8; ++i) if (p.trim[i] != 0.0) anyProc = true;
     if (p.outChannels > 0 && p.outChannels != info.channels) anyProc = true;   // 声道数变化也是处理
     const auto d = rta::dsp::direct_sdm_decision(info.rate, target, anyProc, p.volume != 0.0);
+    // F-3（2026-10-27）：源 DSD 与目标同族不同速率时，不再一律退回「ffmpeg 解 PCM 再调制」。
+    // 只要 plan_dsd_rate 说同族整数倍可行，就先做 1-bit→1-bit 速率转换，再走直通。
+    // 为什么值得：退回 PCM 重调制要多一次抽取+插值+SDM，且会丢掉源自身的 1-bit 噪声形状；
+    // 而 DSD→DSD 转换的实测代价是 DSD64→128 的 THD+N 与「原样」差 +0.002 dB（模块自述判据）。
+    if (!d.enabled && info.rate != 0 && target != 0) {
+        const auto plan = rta::dsp::plan_dsd_rate(info.rate, target);
+        if (plan.ok()) {
+            why = "源 DSD " + std::to_string(info.rate) + " Hz → 目标 " + std::to_string(target) +
+                  " Hz 同族整数倍：先做 1-bit 速率转换再直通";
+            return true;
+        }
+        why = d.reason + "；且速率转换不可行：" + plan.note;
+        return false;
+    }
     why = d.reason;
     return d.enabled;
 }
@@ -1496,7 +1513,7 @@ static bool play_one_direct(const std::string& file, const PlayParams& p) {
         ps.dspTotalUs.store(0);
         ps.dspChunks.store(0);
         const auto t_dsd_0 = std::chrono::steady_clock::now();
-        const DsdStream src = read_dsd(file);
+        DsdStream src = read_dsd(file);
         const auto t_dsd_1 = std::chrono::steady_clock::now();
         const double dsdMs = std::chrono::duration<double, std::milli>(t_dsd_1 - t_dsd_0).count();
         ps.decodeMs.store((long long)(dsdMs + 0.5));
@@ -1559,6 +1576,38 @@ static bool play_one_direct(const std::string& file, const PlayParams& p) {
                      " path=direct-sdm file=" + file);
         }
         const size_t   frameEnd = frameBase + frameCount;
+
+        // ---- F-3：DSD→DSD 速率转换（同族整数倍）----
+        // 只在"目标档位与源不同"时做；同速率完全不进这里（保持逐位直通）。
+        // 失败必须明确报错并回退普通路径，绝不静默按源速率播（那会让用户以为升频生效了）。
+        if (p.dsd >= 64) {
+            const uint32_t base = (src.rate % 48000u == 0) ? 48000u : 44100u;
+            const uint32_t targetRate = rta::dsp::dsd_rate(p.dsd, base);
+            if (targetRate != src.rate) {
+                const auto plan = rta::dsp::plan_dsd_rate(src.rate, targetRate);
+                if (plan.ok()) {
+                    try {
+                        rta::audio::DsdStream converted;
+                        const auto cr = rta::dsp::convert_dsd_stream(src, targetRate,
+                                                                     rta::dsp::DsdRateConvertConfig{}, converted);
+                        play_log("DSD_RATE src=" + std::to_string(src.rate) + " dst=" +
+                                 std::to_string(targetRate) + " rt=" + std::to_string(cr.realtimeFactor) +
+                                 " headroomDb=" + std::to_string(cr.headroomDb) +
+                                 " ms=" + std::to_string(cr.totalMs) +
+                                 (cr.steppedDown ? (" stepdown=" + cr.stepDownReason) : std::string()));
+                        src = std::move(converted);
+                    } catch (const std::exception& e) {
+                        std::lock_guard<std::mutex> lk(ps.mtx);
+                        ps.error = std::string("DSD 速率转换失败（不按源速率静默播放）：") + e.what();
+                        return false;
+                    }
+                } else {
+                    std::lock_guard<std::mutex> lk(ps.mtx);
+                    ps.error = "DSD 速率转换不可行：" + plan.note;
+                    return false;
+                }
+            }
+        }
 
         // 设备能力：DoP 载波率是源 DSD/16，本机 DAC 不一定支持（DSD256 要 705.6 kHz）。
         // HF-01 接线（2026-10-22）：空支持列表一律当「不支持/端点异常」，绝不静默放行（交接单 §6）。
@@ -5388,6 +5437,8 @@ static bool is_side_effect_path(const std::string& p) {
         "/api/buffer/reset", "/api/upload",
         // CPU-intensive analysis must not be triggered by an incidental GET.
         "/api/compare",
+        // Room measurement plays an audible sweep: a stray GET must never start it.
+        "/api/roomcorr/measure", "/api/roomcorr/cancel",
         // 预设的 apply 会写 rlplayer-settings.conf（副作用）；caps 是只读查询，不进这张表
         "/api/preset/apply",
         // 专辑封面预热（2026-10-26）：会落盘 covercache + 打网络。
@@ -5614,6 +5665,156 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
             return "{\"ok\":false,\"error\":\"取回的内容不是有效图片（无 JPEG/PNG 魔数）\"}";
         }
         return r.bytes;
+    }
+
+    // ---------------- R-1 房间测量（铁律 1：确认前绝不发声）----------------
+    // GET  /api/roomcorr/layouts          可选布局
+    // GET  /api/roomcorr/plan?layout=&sec= 只读计划（设备/时长/电平/横幅），**不打开设备**
+    // POST /api/roomcorr/measure?...&confirm=1  真正测量；缺 confirm 回 428
+    // POST /api/roomcorr/cancel           取消
+    // GET  /api/roomcorr/status           进度与结果
+    if (rq.path.rfind("/api/roomcorr", 0) == 0) {
+        ct = "application/json; charset=utf-8";
+        static rta::dsp::RoomMeasureController s_room;
+        auto qs = [&](const char* key) -> std::string {
+            const std::string pat = std::string("?") + key + "=";
+            size_t pos = rq.path.find(pat);
+            if (pos == std::string::npos) {
+                const std::string pat2 = std::string("&") + key + "=";
+                pos = rq.path.find(pat2);
+                if (pos == std::string::npos) return {};
+                pos += pat2.size();
+            } else {
+                pos += pat.size();
+            }
+            const size_t end = rq.path.find('&', pos);
+            return urlDecode(rq.path.substr(pos, end == std::string::npos ? std::string::npos : end - pos));
+        };
+
+        if (rq.path.rfind("/api/roomcorr/layouts", 0) == 0) {
+            std::ostringstream j;
+            j << "{\"ok\":true,\"layouts\":[";
+            bool first = true;
+            for (const auto& l : rta::dsp::room_layouts()) {
+                if (!first) j << ",";
+                first = false;
+                j << "{\"name\":\"" << jesc(l.name ? l.name : "") << "\",\"ch\":" << l.chCount
+                  << ",\"sub\":" << (l.sub ? "true" : "false") << "}";
+            }
+            j << "]}";
+            return j.str();
+        }
+        if (rq.path.rfind("/api/roomcorr/plan", 0) == 0) {
+            std::string layout = qs("layout");
+            const std::string secs = qs("sec");
+            double sec = secs.empty() ? 6.0 : atof(secs.c_str());
+            std::string playDev, capDev;
+            const auto devs = mac_enum_devices();
+            for (const auto& d : devs) if (d.isDefault) { playDev = d.name; break; }
+            const auto caps = rta::platform::CoreAudioInput::enumerate_capture(false);
+            if (!caps.empty()) capDev = caps[0].name;
+            const auto plan = rta::dsp::room_make_plan(layout, sec, 800.0, playDev, capDev);
+            std::ostringstream j;
+            j << "{\"ok\":" << (plan.ok ? "true" : "false")
+              << ",\"error\":\"" << jesc(plan.error) << "\""
+              << ",\"layout\":\"" << jesc(plan.layout) << "\""
+              << ",\"chCount\":" << plan.chCount
+              << ",\"sweepSeconds\":" << plan.sweepSeconds
+              << ",\"totalSeconds\":" << plan.totalSeconds
+              << ",\"levelDbfs\":" << plan.levelDbfs
+              << ",\"playDevice\":\"" << jesc(plan.playDevice) << "\""
+              << ",\"captureDevice\":\"" << jesc(plan.captureDevice) << "\""
+              << ",\"warning\":\"" << jesc(plan.warning) << "\""
+              << ",\"needsConfirm\":true}";
+            if (!plan.ok) rta::net::webui_set_status(400);
+            return j.str();
+        }
+        if (rq.path.rfind("/api/roomcorr/cancel", 0) == 0) {
+            s_room.cancel();
+            return "{\"ok\":true,\"cancelling\":true}";
+        }
+        if (rq.path.rfind("/api/roomcorr/status", 0) == 0) {
+            const auto snap = s_room.snapshot();
+            static const char* kPhase[] = { "idle", "running", "done", "failed", "cancelled" };
+            const int pi = (int)snap.phase;
+            std::ostringstream j;
+            j << "{\"ok\":true,\"phase\":\"" << kPhase[(pi >= 0 && pi <= 4) ? pi : 0] << "\""
+              << ",\"layout\":\"" << jesc(snap.layout) << "\""
+              << ",\"channelsTotal\":" << snap.channelsTotal
+              << ",\"channelsDone\":" << snap.channelsDone
+              << ",\"currentChannel\":\"" << jesc(snap.currentChannel) << "\""
+              << ",\"error\":\"" << jesc(snap.error) << "\""
+              << ",\"aborted\":" << (snap.aborted ? "true" : "false")
+              << ",\"subDelaySamples\":" << snap.subDelaySamples
+              << ",\"subGainDb\":" << snap.subGainDb
+              << ",\"channels\":[";
+            for (size_t i = 0; i < snap.channels.size(); ++i) {
+                if (i) j << ",";
+                const auto& c = snap.channels[i];
+                j << "{\"name\":\"" << jesc(c.channelName) << "\""
+                  << ",\"valid\":" << (c.valid ? "true" : "false")
+                  << ",\"snrDb\":" << c.snrDb
+                  << ",\"peakMs\":" << c.peakMs
+                  << ",\"note\":\"" << jesc(c.note) << "\"}";
+            }
+            j << "],\"warnings\":[";
+            for (size_t i = 0; i < snap.warnings.size(); ++i) {
+                if (i) j << ",";
+                j << "\"" << jesc(snap.warnings[i]) << "\"";
+            }
+            j << "]}";
+            return j.str();
+        }
+        if (rq.path.rfind("/api/roomcorr/measure", 0) == 0) {
+            const std::string confirm = qs("confirm");
+            std::string layout = qs("layout");
+            const std::string secs = qs("sec");
+            const double sec = secs.empty() ? 6.0 : atof(secs.c_str());
+            std::string playDev, capDev;
+            const auto devs = mac_enum_devices();
+            for (const auto& d : devs) if (d.isDefault) { playDev = d.name; break; }
+            const auto caps = rta::platform::CoreAudioInput::enumerate_capture(false);
+            if (!caps.empty()) capDev = caps[0].name;
+            const auto plan = rta::dsp::room_make_plan(layout, sec, 800.0, playDev, capDev);
+            std::string err;
+            const bool confirmed = (confirm == "1" || confirm == "true");
+            if (!s_room.start(plan, confirmed, err)) {
+                rta::net::webui_set_status(confirmed ? 400 : 428);
+                return std::string("{\"ok\":false,\"needsConfirm\":") +
+                       (confirmed ? "false" : "true") + ",\"error\":\"" + jesc(err) + "\"}";
+            }
+            // 会话在线程里跑（扫频最长几十秒，不能堵住 accept）。
+            bg_job_begin();
+            std::thread([plan]() {
+                try {
+                    rta::dsp::RoomTxConfig cfg;
+                    cfg.rate = 48000;
+                    cfg.channels = plan.chCount;
+                    rta::dsp::CoreAudioRoomTransport tx(cfg);
+                    rta::dsp::SweepSpec spec;
+                    spec.fs = 48000;
+                    spec.f0 = 40.0;
+                    spec.f1 = 18000.0;
+                    spec.durSec = plan.sweepSeconds;
+                    rta::dsp::RoomLayout layout{};
+                    layout.name = plan.layout.c_str();
+                    const auto all = rta::dsp::room_layouts();
+                    for (const auto& l : all)
+                        if (plan.layout == (l.name ? l.name : "")) { layout = l; break; }
+                    tx.cancelled = [] { return false; };
+                    rta::dsp::MeasurementSession session(spec, layout, plan.levelDbfs);
+                    const auto res = session.run(tx);
+                    s_room.finish(res);
+                    if (!tx.lastOk() && res.channels.empty())
+                        s_room.fail(tx.lastError().empty() ? "测量失败" : tx.lastError());
+                } catch (const std::exception& e) {
+                    s_room.fail(std::string("测量异常：") + e.what());
+                }
+                bg_job_end();
+            }).detach();
+            return "{\"ok\":true,\"started\":true,\"warning\":\"" + jesc(plan.warning) + "\"}";
+        }
+        return "{\"ok\":false,\"error\":\"unknown roomcorr api\"}";
     }
 
     // F-8: call both the analyzer and scorer; importing the header alone exposes no feature.

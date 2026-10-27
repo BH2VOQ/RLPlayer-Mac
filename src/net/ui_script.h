@@ -4804,6 +4804,7 @@ D('tq').onclick = function () {
   }
   syncRightDrawerBtn();
 };
+if (D('bRoomWiz')) D('bRoomWiz').onclick = rcWizard;   // R-1：先出确认弹窗，绝不直接开播
 D('sRep').onchange = function () { api('/api/playmode?mode=' + this.value, ''); applyRep(this.value); };
 D('sShuf').onchange = function () { api('/api/shuffle?on=' + (this.checked ? 1 : 0), '').then(loadQ); };
 // 底栏滑块同样是**位置刻度**（0..1000）→ 曲线换算成 dB。
@@ -7844,6 +7845,90 @@ function eqSettingsHtml() {
   return h;
 }
 
+/* ---------------- R-1 房间测量向导（2026-10-27）----------------
+   铁律 1 的 UI 落地点：**先取 /api/roomcorr/plan 把"会向哪个设备播多久多响"摆给用户**，
+   用户点确认之后才 POST measure?confirm=1。没有确认这一步就绝不下发 measure ——
+   后端也会二次校验（缺 confirm 回 428），两边都不许绕过。 */
+var RCWIZ = { plan: null, poll: 0 };
+function rcRenderPlan(p) {
+  if (!p || !p.ok) {
+    D('rcStatus').textContent = '配置有误';
+    D('rcStatusSub').textContent = (p && p.error) || '无法生成测量计划';
+    return;
+  }
+  RCWIZ.plan = p;
+  D('rcStatus').textContent = p.chCount + ' 声道 · 约 ' + Math.round(p.totalSeconds) + ' 秒';
+  D('rcStatusSub').textContent = '输出：' + p.playDevice + ' · 采集：' + p.captureDevice;
+  openModal('房间测量确认', renderRoomConfirm(p));
+  if (D('rcGo')) D('rcGo').onclick = rcStart;
+  if (D('rcCancel2')) D('rcCancel2').onclick = function () { D('modal').classList.remove('on'); };
+}
+function renderRoomConfirm(p) {
+  return '<div style="font-size:12.5px;line-height:1.7">' +
+    '<div style="padding:10px;border:1px solid var(--warn);border-radius:8px;background:var(--bg3);margin-bottom:10px">' +
+    '<b style="color:var(--warn)">⚠️ 这次测量会真的出声</b><div style="margin-top:6px">' + esc(p.warning) + '</div></div>' +
+    '<table style="font-size:12px;border-collapse:collapse;margin-bottom:10px">' +
+    '<tr><td style="padding:2px 12px 2px 0;color:var(--mut)">声道布局</td><td>' + esc(p.layout) + '（' + p.chCount + ' 声道）</td></tr>' +
+    '<tr><td style="padding:2px 12px 2px 0;color:var(--mut)">每声道扫频</td><td>' + Math.round(p.sweepSeconds * 1000) + ' ms</td></tr>' +
+    '<tr><td style="padding:2px 12px 2px 0;color:var(--mut)">预计总时长</td><td>约 ' + Math.round(p.totalSeconds) + ' 秒</td></tr>' +
+    '<tr><td style="padding:2px 12px 2px 0;color:var(--mut)">电平</td><td>' + p.levelDbfs + ' dBFS</td></tr>' +
+    '<tr><td style="padding:2px 12px 2px 0;color:var(--mut)">输出设备</td><td>' + esc(p.playDevice) + '</td></tr>' +
+    '<tr><td style="padding:2px 12px 2px 0;color:var(--mut)">采集设备</td><td>' + esc(p.captureDevice) + '</td></tr>' +
+    '</table>' +
+    '<div class=hint style="margin-bottom:10px">共享模式：不会静音系统其它声音；测量期间请保持安静，可随时取消。</div>' +
+    '<div style="display:flex;gap:10px"><button class="btn pri" id=rcGo>确认并开始测量</button>' +
+    '<button class="btn" id=rcCancel2>取消</button></div></div>';
+}
+function rcPoll() {
+  if (RCWIZ.poll) return;
+  RCWIZ.poll = setInterval(function () {
+    api('/api/roomcorr/status').then(function (s) {
+      if (!s || !s.ok) return;
+      if (s.phase === 'running') {
+        D('rcStatus').textContent = '测量中 ' + s.channelsDone + '/' + s.channelsTotal +
+                                    (s.currentChannel ? '（' + s.currentChannel + '）' : '');
+      } else {
+        clearInterval(RCWIZ.poll); RCWIZ.poll = 0;
+        if (s.phase === 'done') {
+          D('rcStatus').textContent = '完成 ' + (s.channels || []).length + ' 声道';
+          var bad = (s.channels || []).filter(function (c) { return !c.valid; });
+          D('rcStatusSub').textContent = bad.length
+            ? ('有 ' + bad.length + ' 个声道无效：' + bad.map(function (c) { return c.name; }).join('、'))
+            : '全部声道有效';
+        } else if (s.phase === 'cancelled') {
+          D('rcStatus').textContent = '已取消';
+          D('rcStatusSub').textContent = '未生成校正集';
+        } else if (s.phase === 'failed') {
+          D('rcStatus').textContent = '测量失败';
+          D('rcStatusSub').textContent = s.error || '';
+        }
+      }
+    }).catch(function () {});
+  }, 700);
+}
+function rcStart() {
+  var p = RCWIZ.plan;
+  if (!p || !p.ok) return;
+  if (D('rcGo')) D('rcGo').disabled = true;
+  var lay = (D('rcLayout') && D('rcLayout').value) || p.layout;
+  api('/api/roomcorr/measure?layout=' + encodeURIComponent(lay) + '&sec=' + p.sweepSeconds + '&confirm=1', '').then(function (r) {
+    if (D('modal')) D('modal').classList.remove('on');
+    if (!r || r.ok !== true) { toast((r && r.error) || '无法开始测量'); return; }
+    D('rcStatus').textContent = '测量中…';
+    D('rcStatusSub').textContent = '正在向 ' + p.playDevice + ' 播放扫频（可点取消）';
+    if (D('bRoomWiz')) { D('bRoomWiz').textContent = '取消测量'; D('bRoomWiz').onclick = function () {
+      api('/api/roomcorr/cancel', '').then(function () { toast('已请求取消'); });
+    }; }
+    rcPoll();
+  }).catch(function (e) { toast('测量请求失败：' + (e && e.message ? e.message : e)); });
+}
+function rcWizard() {
+  var lay = (D('rcLayout') && D('rcLayout').value) || '2.0';
+  D('rcStatus').textContent = '生成计划…';
+  api('/api/roomcorr/plan?layout=' + encodeURIComponent(lay) + '&sec=6').then(rcRenderPlan)
+    .catch(function (e) { D('rcStatus').textContent = '计划失败'; D('rcStatusSub').textContent = String(e); });
+}
+
 /* 声音校准页签（Q-9 独立页签）：① 房间测量向导 ② 校正文件（REW / AutoEq 文本）③ 房间校正 IR（WAV + GPU 卷积） */
 function calSettingsHtml() {
   var h = '';
@@ -7858,6 +7943,9 @@ function calSettingsHtml() {
       '<div class=rcsub id=rcStatusSub>点「开始向导」跑一次测量</div></div>'
     + '</div></div>'
     + '<div class="sfld wide" style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">'
+    + '<label style="font-size:12px">声道布局 <select id=rcLayout style="min-height:28px">'
+    + '<option value=2.0>2.0</option><option value=2.1>2.1</option><option value=5.1>5.1</option>'
+    + '<option value=7.1>7.1</option><option value=5.1.2>5.1.2</option><option value=7.1.4>7.1.4</option></select></label>'
     + '<button class="btn pri" id=bRoomWiz type=button>开始向导</button>'
     + '<button class="btn" id=bRoomDl type=button style="display:none">下载校正集</button>'
     + '<span class=rcnote id=rcHint>分 7 步走完一次测量（选布局 → 摆麦 → 测各声道 → 质检 → 生成校正集）。</span>'
