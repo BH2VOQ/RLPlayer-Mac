@@ -12,7 +12,7 @@
 # 2) /api/sq/add 追加 1 首带 cs/ce 的曲目 → info 回该曲目且 cs/ce 与请求一致
 # 3) 重复追加同一项（同 path 同 cs/ce）→ 明确响应 duplicate:true 且 info 里仍然只有 1 条
 # 4) CUE 关键判据：同一 path 但不同 cs/ce 追加 → 成功且 info 里变成 2 条（证明不是只按 path 去重）
-# 5) 歌单名消毒：传 ../evil 或含 / 的名字 → list 里名字已净化，不含路径穿越
+# 5) 非法歌单名必须明确拒绝，不能静默净化后覆盖另一个合法歌单
 # 6) 保留入口①行为：/api/sq/save 当前队列为空时报错，语义不改
 
 import json
@@ -102,10 +102,14 @@ ck(len(items2) == 2 and abs(items2[1].get('cs', -1) - 180.0) < 0.001,
 
 # ---------- 5) 歌单名消毒判据 ----------
 r_evil = call('/api/sq/add?name=' + urllib.parse.quote('../evil/test'), {})
-clean_name = r_evil.get('name', '')
-ck(r_evil.get('ok') is True and clean_name == 'eviltest',
-   'B-4 歌单名经过 sqName 消毒（../ 与 / 被剔除）', 'name=' + clean_name)
-call('/api/sq/delete?name=' + urllib.parse.quote(clean_name), {})
+ck(r_evil.get('ok') is False,
+   'B-4 路径穿越名字明确拒绝（不静默改名）', json.dumps(r_evil, ensure_ascii=False))
+for bad_name in ['a/b', 'a\\b', 'line\nname', 'x' * 61]:
+    rejected = call('/api/sq/add?name=' + urllib.parse.quote(bad_name), {})
+    ck(rejected.get('ok') is False, '非法名字被拒绝: ' + repr(bad_name), json.dumps(rejected, ensure_ascii=False))
+for cs, ce in [('nan', '2'), ('1junk', '2'), ('3', '2'), ('inf', '4')]:
+    rejected = call('/api/sq/add?name=test_b4_cue&file=x&cs=' + cs + '&ce=' + ce, {})
+    ck(rejected.get('ok') is False, '非法CUE被拒绝: ' + cs + '/' + ce, json.dumps(rejected, ensure_ascii=False))
 
 # ---------- 6) 保留既有行为：/api/sq/save 空队列报错 ----------
 call('/api/clear', {})

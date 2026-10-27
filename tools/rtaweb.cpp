@@ -6636,6 +6636,10 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
         };
 
         auto sqName = [](std::string n) {
+            // 非法名字必须拒绝，不能删掉字符后意外覆盖另一个合法歌单。
+            if (!valid_utf8(n) || n.size() > 60 || n.find("..") != std::string::npos ||
+                n.find_first_of("/\\\r\n\t") != std::string::npos ||
+                n.find('\0') != std::string::npos) return std::string();
             std::string o;
             for (char c : n) {
                 if (c == '\n' || c == '\r' || c == '\t' || c == '/' || c == '\\') continue;
@@ -6701,12 +6705,20 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
 
             double cs = -1.0;
             double ce = -1.0;
-            if (!csS.empty()) {
-                try { cs = std::stod(csS); } catch (...) { cs = -1.0; }
-            }
-            if (!ceS.empty()) {
-                try { ce = std::stod(ceS); } catch (...) { ce = -1.0; }
-            }
+            auto parseCue = [](const std::string& text, double& out) {
+                if (text.empty()) return true;
+                try {
+                    size_t used = 0;
+                    out = std::stod(text, &used);
+                    return used == text.size() && std::isfinite(out) && (out >= 0 || out == -1);
+                } catch (...) { return false; }
+            };
+            if (!valid_utf8(file) || file.find_first_of("\r\n\t") != std::string::npos ||
+                file.find('\0') != std::string::npos)
+                return "{\"ok\":false,\"error\":\"非法曲目路径\"}";
+            if (!parseCue(csS, cs) || !parseCue(ceS, ce) ||
+                (ce >= 0 && (cs < 0 || ce <= cs)))
+                return "{\"ok\":false,\"error\":\"非法 CUE 区间\"}";
 
             size_t count = 0;
             bool saved = false;
