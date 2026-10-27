@@ -226,7 +226,9 @@ def main():
         # 读取并断言 settings 中的 kv/backend 确认生效
         with urllib.request.urlopen(api_settings_url, timeout=3.0) as resp:
             assert resp.status == 200, f"GET /api/settings HTTP 状态码为 {resp.status}"
-            get_res = json.loads(resp.read().decode("utf-8"))
+            settings_response = json.loads(resp.read().decode("utf-8"))
+            assert settings_response.get("ok") is True
+            get_res = settings_response.get("kv", {})
             print(f"  GET /api/settings 校验: backend={get_res.get('backend')}, metaon={get_res.get('metaon')}, metasummary={get_res.get('metasummary')}")
             assert get_res.get("backend") == "null", f"断言失败: backend 应为 null，实际为 {get_res.get('backend')}"
             assert str(get_res.get("metaon")) in ("1", "true", "True"), f"断言失败: metaon 应为 1，实际为 {get_res.get('metaon')}"

@@ -1334,7 +1334,9 @@ inline SummaryResult retrieval_fetch_track(const std::string& title,
             std::vector<std::future<DsFetchReply>> futs;
             for (size_t i = 0; i < fetch_count; ++i) {
                 const std::string fu = hits[i].url;
-                futs.push_back(std::async(std::launch::async, [fu, cfg_f]() {
+                const auto* cancelToken = rta::net::http_detail::current_cancellation_token();
+                futs.push_back(std::async(std::launch::async, [fu, cfg_f, cancelToken]() {
+                    rta::net::HttpCancellationScope cancelScope(cancelToken);
                     retrieval_rate_limiter().acquire();
                     return ds_fetch(cfg_f, fu, 10000);
                 }));
@@ -1531,7 +1533,11 @@ inline SummaryResult retrieval_fetch(EntityKind kind,
     std::vector<std::string> allowed_urls;
     std::future<void> f_knowledge;
     try {
-        f_knowledge = std::async(std::launch::async, knowledge_stage);
+        const auto* cancelToken = rta::net::http_detail::current_cancellation_token();
+        f_knowledge = std::async(std::launch::async, [knowledge_stage, cancelToken]() mutable {
+            rta::net::HttpCancellationScope cancelScope(cancelToken);
+            knowledge_stage();
+        });
     } catch (...) {
         knowledge_stage();     // 起不了线程（极端资源不足）→ 退回串行，行为与旧版一致
     }
@@ -1597,7 +1603,9 @@ inline SummaryResult retrieval_fetch(EntityKind kind,
             fetch_futs.reserve(fetch_count);
             for (size_t i = 0; i < fetch_count; ++i) {
                 const std::string fu = valid_hits[i].url;
-                fetch_futs.push_back(std::async(std::launch::async, [fu, cfg_fetch]() {
+                const auto* cancelToken = rta::net::http_detail::current_cancellation_token();
+                fetch_futs.push_back(std::async(std::launch::async, [fu, cfg_fetch, cancelToken]() {
+                    rta::net::HttpCancellationScope cancelScope(cancelToken);
                     retrieval_rate_limiter().acquire();
                     return ds_fetch(cfg_fetch, fu, 12000);   // 12s 超时：慢页不拖累整体
                 }));
