@@ -3562,6 +3562,7 @@ struct QueueState {
     size_t index = 0;
     int    mode = 0;        // 0=顺序 1=列表循环 2=单曲循环 3=随机（唯一真相源）
     std::vector<QItem> base;   // 随机前的原始顺序（关掉随机时还原）
+    std::vector<QItem> sortBase; // 排序前的原始顺序（恢复默认顺序用）
 
     // ---- 派生访问器：给既有代码用，语义与旧字段一一对应 ----
     // repeat：0=关 1=列表循环 2=单曲循环。随机模式下 repeat 视为 0（随机不循环）。
@@ -3569,6 +3570,28 @@ struct QueueState {
     bool shuffle_of() const { return mode == 3; }
 };
 static QueueState g_q;
+
+// ---- 队列项的一行文本 → QItem（queue_load 与具名保存队列/整列替换共用）----
+static QItem item_from_line(const std::string& rest) {
+    const size_t t1 = rest.find('\t');
+    if (t1 == std::string::npos) return QItem(rest);
+    QItem it;
+    it.path = rest.substr(0, t1);
+    const size_t t2 = rest.find('\t', t1 + 1);
+    it.cs = std::atof(rest.c_str() + t1 + 1);
+    if (t2 != std::string::npos) it.ce = std::atof(rest.c_str() + t2 + 1);
+    return it;
+}
+
+static size_t queue_reindex_locked(const QItem& cur) {
+    if (!cur.path.empty()) {
+        for (size_t i = 0; i < g_q.items.size(); ++i) {
+            if (g_q.items[i].same(cur)) { g_q.index = i; break; }
+        }
+    }
+    if (g_q.index >= g_q.items.size()) g_q.index = g_q.items.empty() ? 0 : g_q.items.size() - 1;
+    return g_q.index;
+}
 // ---- 队列持久化：重启后仍保留播放列表 ----
 static std::string queue_file() {
     // 2026-10-25（默认目录纠正）：播放队列是运行期状态，不许写进应用包。
@@ -4770,21 +4793,10 @@ static void queue_load() {
         else if (line.rfind("repeat=", 0) == 0) oldRepeat = atoi(line.c_str() + 7);
         else if (line.rfind("shuffle=", 0) == 0) oldShuffle = (atoi(line.c_str() + 8) != 0);
         else if (line.rfind("item=", 0) == 0) {
-            // item=<路径>[	<cs>	<ce>]：没有 TAB = 普通曲目（旧格式）
-            const std::string rest = line.substr(5);
-            const size_t t1 = rest.find('\t');
-            if (t1 == std::string::npos) {
-                g_q.items.emplace_back(rest);
-            } else {
-                QItem it;
-                it.path = rest.substr(0, t1);
-                const size_t t2 = rest.find('\t', t1 + 1);
-                it.cs = std::atof(rest.c_str() + t1 + 1);
-                if (t2 != std::string::npos) it.ce = std::atof(rest.c_str() + t2 + 1);
-                g_q.items.push_back(std::move(it));
-            }
+            g_q.items.push_back(item_from_line(line.substr(5)));
         }
     }
+    g_q.sortBase.clear();
     if (g_q.index >= g_q.items.size()) g_q.index = 0;
     // R-4：没有 mode 键（老队列文件）⟹ 由 repeat/shuffle 推导一次（单向兼容）
     if (!hasMode) {
@@ -4794,6 +4806,76 @@ static void queue_load() {
         else                     g_q.mode = 0;
     }
     if (g_q.mode < 0 || g_q.mode > 3) g_q.mode = 0;
+}
+
+// ---------------- 具名保存队列（用户 261026-08 #6「保存队列 + 重命名」）----------------
+// 为什么不复用 playlists\*.m3u8（/api/pl）：m3u8 装不下 CUE 区间，"保存队列"要求**原样还原整列**
+//   （顺序 + cue 区间都要在），所以单独存一份带区间的 conf；风格与 rlplayer-playlist.txt 一致：
+//   纯文本 / 每行 key=value / # 开头是注释 / UTF-8。
+// 落盘：path_in_exe_dir("rlplayer-savedqueues.conf") ⟹ 重启后仍在（支持 RLPLAYER_STATE_DIR 隔离）。
+struct SavedQueue {
+    std::string name;
+    std::vector<QItem> items;
+};
+static std::mutex g_sqMu;
+static std::vector<SavedQueue> g_sqList;
+static bool g_sqLoaded = false;
+
+static std::string saved_queues_path() { return path_in_exe_dir("rlplayer-savedqueues.conf"); }
+
+static void sq_load_if_needed() {
+    std::lock_guard<std::mutex> lk(g_sqMu);
+    if (g_sqLoaded) return;
+    g_sqLoaded = true;
+    std::ifstream f(fs::u8path(saved_queues_path()), std::ios::binary);
+    if (!f) return;
+    SavedQueue cur;
+    bool open = false;
+    auto flush = [&] {
+        if (open && !cur.name.empty()) g_sqList.push_back(cur);
+        cur = SavedQueue{};
+        open = false;
+    };
+    std::string line;
+    while (std::getline(f, line)) {
+        if (!line.empty() && line.back() == '\r') line.pop_back();
+        if (line.empty() || line[0] == '#') continue;
+        if (line.rfind("name=", 0) == 0) {
+            flush();
+            cur.name = line.substr(5);
+            open = true;
+        } else if (line.rfind("item=", 0) == 0 && open) {
+            cur.items.push_back(item_from_line(line.substr(5)));
+        }
+    }
+    flush();
+}
+
+static bool sq_save_locked() {
+    const std::string path = saved_queues_path();
+    const std::string tmp = path + ".tmp";
+    {
+        std::ofstream f(fs::u8path(tmp), std::ios::binary | std::ios::trunc);
+        if (!f) return false;
+        f << "# RLPlayer saved queues v1\n";
+        for (const auto& q : g_sqList) {
+            f << "name=" << q.name << "\n";
+            for (const auto& it : q.items) {
+                f << "item=" << it.path;
+                if (it.isCue()) {
+                    char cb[80];
+                    std::snprintf(cb, sizeof(cb), "\t%.6f\t%.6f", it.cs, it.ce);
+                    f << cb;
+                }
+                f << "\n";
+            }
+        }
+        if (!f.good()) return false;
+    }
+    std::error_code ec;
+    fs::rename(fs::u8path(tmp), fs::u8path(path), ec);
+    if (ec) { std::error_code ec2; fs::remove(fs::u8path(tmp), ec2); return false; }
+    return true;
 }
 
 // ---- 预解码槽：当前曲播放的同时，后台把下一曲解码进内存 ----
@@ -5155,6 +5237,7 @@ static bool is_side_effect_path(const std::string& p) {
     static const char* kNeedPost[] = {
         "/api/play", "/api/pause", "/api/stop", "/api/seek", "/api/skip", "/api/volume",
         "/api/clear", "/api/repeat", "/api/shuffle", "/api/add", "/api/qdel", "/api/qmove",
+        "/api/qorder", "/api/qsort", "/api/queue/set", "/api/sq",
         "/api/fav", "/api/pl", "/api/lib/scan", "/api/lib/prune", "/api/lib/remove",
         "/api/lib/roots", "/api/rescan", "/api/quit", "/api/shutdown", "/api/settings",
         "/api/writeback", "/api/enrich", "/api/peq", "/api/opra/apply", "/api/cast/start",
@@ -5183,7 +5266,7 @@ static bool is_side_effect_path(const std::string& p) {
 // （/api/fav/list、/api/peq 的 GET 现状、/api/writeback 的 GET 预览、/api/settings 的 GET 读取）
 static bool is_side_effect_exempt(const std::string& p) {
     static const char* kGetOk[] = {
-        "/api/fav/list", "/api/pl/load", "/api/writeback/status", "/api/writeback/dry", "/api/src/browse",
+        "/api/fav/list", "/api/pl/load", "/api/sq/list", "/api/sq/info", "/api/writeback/status", "/api/writeback/dry", "/api/src/browse",
         "/api/src/search", "/api/src/cover", "/api/lib/status", "/api/lib/stats",
         "/api/lib/albums", "/api/lib/album", "/api/lib/search", "/api/lib/cover",
         // /api/llm：GET = 读配置状态（已配置 + 掩码），POST = 保存；状态读取必须允许 GET。
@@ -6097,6 +6180,193 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
         return j.str();
     }
 
+    // ---------------- 具名保存队列 /api/sq（用户 261026-08 #6）----------------
+    //   POST /api/sq/save?name=X        把**当前队列**存成具名队列（同名覆盖）
+    //   GET  /api/sq/list               {"queues":[{name,n}]}
+    //   POST /api/sq/rename?from=A&to=B 改名（目标已存在则拒绝）
+    //   POST /api/sq/delete?name=X      删除
+    //   POST /api/sq/play?name=X&i=0    装进当前队列（前端随后 /api/play 起播第一首）
+    if (rq.path.rfind("/api/sq", 0) == 0) {
+        ct = "application/json; charset=utf-8";
+        sq_load_if_needed();
+        auto sqp = [&](const char* key) -> std::string {
+            const size_t qp = rq.path.find('?');
+            if (qp != std::string::npos) {
+                std::istringstream qs(rq.path.substr(qp + 1));
+                std::string q;
+                while (std::getline(qs, q, '&')) {
+                    const size_t eq = q.find('=');
+                    if (eq == std::string::npos) continue;
+                    if (urlDecode(q.substr(0, eq)) == key) return urlDecode(q.substr(eq + 1));
+                }
+            }
+            std::istringstream is(rq.body);
+            std::string tok;
+            while (std::getline(is, tok, '&')) {
+                const size_t eq = tok.find('=');
+                if (eq == std::string::npos) continue;
+                if (urlDecode(tok.substr(0, eq)) == key) return urlDecode(tok.substr(eq + 1));
+            }
+            return std::string();
+        };
+
+        auto sqName = [](std::string n) {
+            std::string o;
+            for (char c : n) {
+                if (c == '\n' || c == '\r' || c == '\t' || c == '/' || c == '\\') continue;
+                o.push_back(c);
+            }
+            while (!o.empty() && o.front() == ' ') o.erase(o.begin());
+            while (!o.empty() && o.back() == ' ') o.pop_back();
+            while (true) {
+                size_t pos = o.find("..");
+                if (pos == std::string::npos) break;
+                o.erase(pos, 2);
+            }
+            while (!o.empty() && o.front() == ' ') o.erase(o.begin());
+            while (!o.empty() && o.back() == ' ') o.pop_back();
+            if (o.size() > 60) {
+                size_t cut = 60;
+                while (cut > 0 && ((unsigned char)o[cut] & 0xC0) == 0x80) --cut;
+                o.resize(cut);
+            }
+            return o;
+        };
+
+        if (rq.path.rfind("/api/sq/list", 0) == 0) {
+            std::ostringstream j;
+            j << "{\"ok\":true,\"queues\":[";
+            {
+                std::lock_guard<std::mutex> lk(g_sqMu);
+                bool first = true;
+                for (const auto& q : g_sqList) {
+                    if (!first) j << ",";
+                    first = false;
+                    j << "{\"name\":\"" << jesc(q.name) << "\",\"n\":" << q.items.size() << "}";
+                }
+            }
+            j << "]}";
+            return j.str();
+        }
+        if (rq.path.rfind("/api/sq/info", 0) == 0) {
+            const std::string name = sqName(sqp("name"));
+            std::vector<QItem> items;
+            {
+                std::lock_guard<std::mutex> lk(g_sqMu);
+                bool found = false;
+                for (const auto& q : g_sqList) if (q.name == name) { items = q.items; found = true; break; }
+                if (!found) return "{\"ok\":false,\"error\":\"队列不存在\"}";
+            }
+            std::ostringstream j;
+            j << "{\"ok\":true,\"name\":\"" << jesc(name) << "\",\"items\":[";
+            for (size_t i = 0; i < items.size(); ++i) {
+                if (i) j << ",";
+                j << "{\"file\":\"" << jesc(items[i].path) << "\",\"cs\":" << items[i].cs
+                  << ",\"ce\":" << items[i].ce << "}";
+            }
+            j << "]}";
+            return j.str();
+        }
+        if (rq.path.rfind("/api/sq/save", 0) == 0) {
+            const std::string name = sqName(sqp("name"));
+            if (name.empty()) return "{\"ok\":false,\"error\":\"缺少队列名字\"}";
+            std::vector<QItem> items;
+            { std::lock_guard<std::mutex> lk(g_q.mtx); items = g_q.items; }
+            if (items.empty()) return "{\"ok\":false,\"error\":\"当前队列是空的，没有可保存的内容\"}";
+            size_t count = 0;
+            bool saved = false;
+            {
+                std::lock_guard<std::mutex> lk(g_sqMu);
+                bool replaced = false;
+                for (auto& q : g_sqList) {
+                    if (q.name == name) { q.items = items; replaced = true; break; }
+                }
+                if (!replaced) g_sqList.push_back(SavedQueue{name, items});
+                count = items.size();
+                saved = sq_save_locked();
+            }
+            std::ostringstream j;
+            j << "{\"ok\":" << (saved ? "true" : "false") << ",\"name\":\"" << jesc(name)
+              << "\",\"count\":" << count;
+            if (!saved) j << ",\"error\":\"队列已生效但写入磁盘失败（目录不可写？），重启后可能丢失\"";
+            j << "}";
+            return j.str();
+        }
+        if (rq.path.rfind("/api/sq/rename", 0) == 0) {
+            const std::string from = sqName(sqp("from"));
+            const std::string to   = sqName(sqp("to"));
+            if (from.empty() || to.empty()) return "{\"ok\":false,\"error\":\"缺少 from/to 参数\"}";
+            bool found = false, dup = false, saved = false;
+            {
+                std::lock_guard<std::mutex> lk(g_sqMu);
+                for (const auto& q : g_sqList) {
+                    if (q.name == from) found = true;
+                    else if (q.name == to) dup = true;
+                }
+                if (found && !dup && from != to) {
+                    for (auto& q : g_sqList) if (q.name == from) { q.name = to; break; }
+                    saved = sq_save_locked();
+                } else if (found && from == to) {
+                    saved = true;
+                }
+            }
+            if (!found) return "{\"ok\":false,\"error\":\"队列不存在\"}";
+            if (dup && from != to) return "{\"ok\":false,\"error\":\"同名队列已存在\"}";
+            std::ostringstream j;
+            j << "{\"ok\":" << (saved ? "true" : "false") << ",\"from\":\"" << jesc(from)
+              << "\",\"to\":\"" << jesc(to) << "\"";
+            if (!saved) j << ",\"error\":\"写入磁盘失败\"";
+            j << "}";
+            return j.str();
+        }
+        if (rq.path.rfind("/api/sq/delete", 0) == 0) {
+            const std::string name = sqName(sqp("name"));
+            if (name.empty()) return "{\"ok\":false,\"error\":\"缺少 name 参数\"}";
+            bool found = false, saved = false;
+            {
+                std::lock_guard<std::mutex> lk(g_sqMu);
+                for (size_t i = 0; i < g_sqList.size(); ++i) {
+                    if (g_sqList[i].name != name) continue;
+                    g_sqList.erase(g_sqList.begin() + (long long)i);
+                    found = true;
+                    break;
+                }
+                if (found) saved = sq_save_locked();
+            }
+            if (!found) return "{\"ok\":false,\"error\":\"队列不存在\"}";
+            return std::string("{\"ok\":") + (saved ? "true" : "false") + ",\"name\":\"" + jesc(name) + "\"}";
+        }
+        if (rq.path.rfind("/api/sq/play", 0) == 0) {
+            const std::string name = sqName(sqp("name"));
+            const std::string idxS = sqp("i");
+            std::vector<QItem> items;
+            {
+                std::lock_guard<std::mutex> lk(g_sqMu);
+                bool found = false;
+                for (const auto& q : g_sqList) if (q.name == name) { items = q.items; found = true; break; }
+                if (!found) return "{\"ok\":false,\"error\":\"队列不存在\"}";
+            }
+            if (items.empty()) return "{\"ok\":false,\"error\":\"这个队列是空的\"}";
+            size_t idx = idxS.empty() ? 0 : (size_t)std::max(0, atoi(idxS.c_str()));
+            if (idx >= items.size()) idx = 0;
+            size_t cnt = 0;
+            {
+                std::lock_guard<std::mutex> lk(g_q.mtx);
+                g_q.items = std::move(items);
+                g_q.index = idx;
+                g_q.base.clear();
+                g_q.sortBase.clear();
+                cnt = g_q.items.size();
+            }
+            queue_save();
+            std::ostringstream j;
+            j << "{\"ok\":true,\"name\":\"" << jesc(name) << "\",\"count\":" << cnt
+              << ",\"index\":" << idx << "}";
+            return j.str();
+        }
+        return "{\"ok\":false,\"error\":\"未知的 /api/sq 子端点\"}";
+    }
+
     // ---------------- 播放列表 ----------------
     // 注意：不能写成 rfind("/api/pl",0)，否则 /api/play 会被这里截走（本轮真踩到）
     if (rq.path.rfind("/api/pl/", 0) == 0 || rq.path == "/api/pl") {
@@ -6105,54 +6375,211 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
         std::error_code ec;
         fs::create_directories(plDir(), ec);
 
-        if (rq.path.rfind("/api/pl/save", 0) == 0) {
-            std::string name;
+        auto cleanName = [](std::string name) {
+            while (!name.empty() && (name.front() == ' ' || name.front() == '\t')) name.erase(name.begin());
+            while (!name.empty() && (name.back() == ' ' || name.back() == '\t')) name.pop_back();
+            if (name.empty()) name = "未命名播放列表";
+            for (auto& c : name)
+                if (c == '\\' || c == '/' || c == ':' || c == '*' || c == '?' || c == '"' ||
+                    c == '<' || c == '>' || c == '|' || c == '\n' || c == '\r' || c == '\t') c = '_';
+            while (true) {
+                size_t p = name.find("..");
+                if (p == std::string::npos) break;
+                name.replace(p, 2, "__");
+            }
+            if (name.size() > 80) {
+                size_t cut = 80;
+                while (cut > 0 && ((unsigned char)name[cut] & 0xC0) == 0x80) --cut;
+                name.resize(cut);
+            }
+            return name;
+        };
+
+        auto qparam = [&](const char* key) -> std::string {
+            const size_t qp = rq.path.find('?');
+            if (qp != std::string::npos) {
+                std::istringstream qs(rq.path.substr(qp + 1));
+                std::string tok;
+                while (std::getline(qs, tok, '&')) {
+                    const size_t eq = tok.find('=');
+                    if (eq == std::string::npos) continue;
+                    if (urlDecode(tok.substr(0, eq)) == key) return urlDecode(tok.substr(eq + 1));
+                }
+            }
             std::istringstream is(rq.body);
             std::string tok;
-            while (std::getline(is, tok, (char)38)) {
-                const size_t e = tok.find((char)61);
-                if (e == std::string::npos) continue;
-                if (urlDecode(tok.substr(0, e)) == "name") name = urlDecode(tok.substr(e + 1));
+            while (std::getline(is, tok, '&')) {
+                const size_t eq = tok.find('=');
+                if (eq == std::string::npos) continue;
+                if (urlDecode(tok.substr(0, eq)) == key) return urlDecode(tok.substr(eq + 1));
             }
-            if (name.empty()) name = "未命名播放列表";
-            for (auto& c : name) if (c == '\\' || c == '/' || c == ':' || c == '*' || c == '?' || c == '"' || c == '<' || c == '>' || c == '|') c = '_';
-            std::vector<QItem> items;
-            { std::lock_guard<std::mutex> lk(g_q.mtx); items = g_q.items; }
-            std::ofstream f(plDir() / (name + ".m3u8"), std::ios::binary | std::ios::trunc);
-            if (!f) return "{\"ok\":false,\"error\":\"写文件失败\"}";
-            f << "#EXTM3U\n";
-            // ⚠️ 已知限制（如实标注）：m3u8 没有"文件内区间"这一概念，CUE 分轨项只写路径。
-            //    载入播放列表后这些曲目会按整首播（区间信息在队列文件 rlplayer-playlist.txt 里才保留）。
-            for (auto& it : items) f << it.path << "\n";
-            return "{\"ok\":true,\"count\":" + std::to_string(items.size()) + "}";
-        }
-        if (rq.path.rfind("/api/pl/load", 0) == 0) {
-            std::string name;
-            const size_t q = rq.path.find("?name=");
-            if (q != std::string::npos) name = urlDecode(rq.path.substr(q + 6));
-            std::ifstream f(plDir() / (name + ".m3u8"));
-            if (!f) return "{\"ok\":false,\"error\":\"播放列表不存在\"}";
-            std::vector<QItem> items;
+            return std::string();
+        };
+
+        auto isPl = [&](const char* sub) {
+            const std::string base = std::string("/api/pl/") + sub;
+            if (rq.path == base) return true;
+            return rq.path.rfind(base + "?", 0) == 0;
+        };
+
+        auto plFile = [&](const std::string& name) { return plDir() / fs::u8path(name + ".m3u8"); };
+
+        auto loadList = [&](const std::string& name, std::vector<QItem>& out) -> bool {
+            std::ifstream f(plFile(name), std::ios::binary);
+            if (!f) return false;
+            out.clear();
             std::string line;
+            double pendCs = -1.0, pendCe = -1.0;
             while (std::getline(f, line)) {
                 if (!line.empty() && line.back() == '\r') line.pop_back();
-                if (line.empty() || line[0] == '#') continue;
-                items.emplace_back(line);      // m3u8 只有路径 ⟹ 按整首播（见 pl/save 的限制注）
+                if (line.empty()) continue;
+                if (line.rfind("#RTA-CUE ", 0) == 0) {
+                    const char* s = line.c_str() + 9;
+                    char* e2 = nullptr;
+                    pendCs = std::strtod(s, &e2);
+                    pendCe = (e2 && *e2) ? std::strtod(e2, nullptr) : -1.0;
+                    continue;
+                }
+                if (line[0] == '#') continue;
+                out.push_back(QItem(line, pendCs, pendCe));
+                pendCs = -1.0; pendCe = -1.0;
             }
+            return true;
+        };
+
+        auto saveList = [&](const std::string& name, const std::vector<QItem>& items) -> bool {
+            std::ofstream f(plFile(name), std::ios::binary | std::ios::trunc);
+            if (!f) return false;
+            f << "#EXTM3U\n";
+            for (const auto& it : items) {
+                if (it.isCue()) {
+                    char cb[96];
+                    std::snprintf(cb, sizeof(cb), "#RTA-CUE %.6f %.6f\n", it.cs, it.ce);
+                    f << cb;
+                }
+                f << it.path << "\n";
+            }
+            f.flush();
+            return f.good();
+        };
+
+        if (isPl("save")) {
+            const std::string name = cleanName(qparam("name"));
+            std::vector<QItem> items;
+            { std::lock_guard<std::mutex> lk(g_q.mtx); items = g_q.items; }
+            if (!saveList(name, items)) return "{\"ok\":false,\"error\":\"写文件失败\"}";
+            return "{\"ok\":true,\"name\":\"" + jesc(name) + "\",\"count\":" +
+                   std::to_string(items.size()) + "}";
+        }
+        if (isPl("create")) {
+            const std::string name = cleanName(qparam("name"));
+            std::error_code ec2;
+            const bool exists = fs::exists(plFile(name), ec2);
+            if (!exists && !saveList(name, {})) return "{\"ok\":false,\"error\":\"写文件失败\"}";
+            return std::string("{\"ok\":true,\"name\":\"") + jesc(name) +
+                   "\",\"existed\":" + (exists ? "true" : "false") + ",\"count\":0}";
+        }
+        if (isPl("rename")) {
+            const std::string from = cleanName(qparam("from"));
+            const std::string to   = cleanName(qparam("to"));
+            std::error_code ec2;
+            if (!fs::exists(plFile(from), ec2)) return "{\"ok\":false,\"error\":\"播放列表不存在\"}";
+            if (from != to && fs::exists(plFile(to), ec2)) return "{\"ok\":false,\"error\":\"目标名字已存在\"}";
+            if (from != to) {
+                fs::rename(plFile(from), plFile(to), ec2);
+                if (ec2) return "{\"ok\":false,\"error\":\"改名失败\"}";
+            }
+            return "{\"ok\":true,\"from\":\"" + jesc(from) + "\",\"to\":\"" + jesc(to) + "\"}";
+        }
+        if (isPl("add")) {
+            const std::string name = cleanName(qparam("name"));
+            const std::string file = qparam("file");
+            if (file.empty()) return "{\"ok\":false,\"error\":\"缺少 file 参数\"}";
+            if (!valid_utf8(file)) return utf8_path_reject(file);
+            const std::string csS = qparam("cue_start");
+            const std::string ceS = qparam("cue_end");
+            QItem it(file, csS.empty() ? -1.0 : std::atof(csS.c_str()),
+                           ceS.empty() ? -1.0 : std::atof(ceS.c_str()));
+            std::vector<QItem> items;
+            loadList(name, items);
+            items.push_back(it);
+            if (!saveList(name, items)) return "{\"ok\":false,\"error\":\"写文件失败\"}";
+            return "{\"ok\":true,\"name\":\"" + jesc(name) + "\",\"count\":" +
+                   std::to_string(items.size()) + "}";
+        }
+        if (isPl("addmany")) {
+            const std::string name = cleanName(qparam("name"));
+            const std::string files = qparam("files");
+            if (files.empty()) return "{\"ok\":false,\"error\":\"缺少 files 参数\"}";
+            std::vector<QItem> items;
+            loadList(name, items);
+            size_t added = 0;
+            {
+                std::istringstream ls(files);
+                std::string line;
+                while (std::getline(ls, line)) {
+                    if (!line.empty() && line.back() == '\r') line.pop_back();
+                    if (line.empty()) continue;
+                    items.push_back(item_from_line(line));
+                    ++added;
+                }
+            }
+            if (!saveList(name, items)) return "{\"ok\":false,\"error\":\"写文件失败\"}";
+            return "{\"ok\":true,\"name\":\"" + jesc(name) + "\",\"added\":" + std::to_string(added) +
+                   ",\"count\":" + std::to_string(items.size()) + "}";
+        }
+        if (isPl("remove")) {
+            const std::string name = cleanName(qparam("name"));
+            const std::string idxS = qparam("i");
+            if (idxS.empty()) return "{\"ok\":false,\"error\":\"缺少 i 参数\"}";
+            const size_t idx = (size_t)std::max(0, atoi(idxS.c_str()));
+            std::vector<QItem> items;
+            if (!loadList(name, items)) return "{\"ok\":false,\"error\":\"播放列表不存在\"}";
+            if (idx >= items.size()) return "{\"ok\":false,\"error\":\"下标越界\"}";
+            items.erase(items.begin() + (long long)idx);
+            if (!saveList(name, items)) return "{\"ok\":false,\"error\":\"写文件失败\"}";
+            return "{\"ok\":true,\"name\":\"" + jesc(name) + "\",\"count\":" +
+                   std::to_string(items.size()) + "}";
+        }
+        if (isPl("load")) {
+            const std::string name = cleanName(qparam("name"));
+            std::vector<QItem> items;
+            if (!loadList(name, items)) return "{\"ok\":false,\"error\":\"播放列表不存在\"}";
             {
                 std::lock_guard<std::mutex> lk(g_q.mtx);
                 g_q.items = items;
                 g_q.index = 0;
+                g_q.base.clear();
+                g_q.sortBase.clear();
             }
             queue_save();
-            return "{\"ok\":true,\"count\":" + std::to_string(items.size()) + "}";
+            return "{\"ok\":true,\"name\":\"" + jesc(name) + "\",\"count\":" +
+                   std::to_string(items.size()) + "}";
         }
-        if (rq.path.rfind("/api/pl/delete", 0) == 0) {
-            std::string name;
-            const size_t q = rq.path.find("?name=");
-            if (q != std::string::npos) name = urlDecode(rq.path.substr(q + 6));
-            fs::remove(plDir() / (name + ".m3u8"), ec);
-            return std::string("{\"ok\":") + (ec ? "false" : "true") + "}";
+        if (isPl("delete")) {
+            const std::string raw = qparam("name");
+            if (raw.empty()) return "{\"ok\":false,\"error\":\"缺少 name 参数\"}";
+            const std::string name = cleanName(raw);
+            std::error_code ec3;
+            if (!fs::exists(plFile(name), ec3)) return "{\"ok\":false,\"error\":\"播放列表不存在\"}";
+            fs::remove(plFile(name), ec3);
+            return std::string("{\"ok\":") + (ec3 ? "false" : "true") + ",\"name\":\"" + jesc(name) + "\"}";
+        }
+        if (isPl("info")) {
+            const std::string raw = qparam("name");
+            if (raw.empty()) return "{\"ok\":false,\"error\":\"缺少 name 参数\"}";
+            const std::string name = cleanName(raw);
+            std::vector<QItem> items;
+            if (!loadList(name, items)) return "{\"ok\":false,\"error\":\"播放列表不存在\"}";
+            std::ostringstream j;
+            j << "{\"ok\":true,\"name\":\"" << jesc(name) << "\",\"items\":[";
+            for (size_t i = 0; i < items.size(); ++i) {
+                if (i) j << ",";
+                j << "{\"file\":\"" << jesc(items[i].path) << "\",\"cs\":" << items[i].cs
+                  << ",\"ce\":" << items[i].ce << "}";
+            }
+            j << "]}";
+            return j.str();
         }
         // 列表
         std::ostringstream j;
@@ -6302,8 +6729,14 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
             bool found = false;
             for (size_t i = 0; i < g_q.items.size(); ++i)
                 if (g_q.items[i].same(want)) { g_q.index = i; found = true; break; }
-            if (!found) { g_q.items.clear(); g_q.items.push_back(want); g_q.index = 0; }
+            if (!found) {
+                g_q.items.clear();
+                g_q.items.push_back(want);
+                g_q.index = 0;
+                g_q.sortBase.clear();
+            }
         }
+        queue_save();
         ps.played.store(0);
         ps.total.store(0);
         // 后端 = UPnP / DLNA：曲目交给投放会话（cast_service），不启动本地播放线程。
@@ -6339,7 +6772,16 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
         {
             std::lock_guard<std::mutex> lk(g_q.mtx);
             if (idx < g_q.items.size()) {
+                const QItem gone = g_q.items[idx];
                 g_q.items.erase(g_q.items.begin() + (long long)idx);
+                if (!g_q.sortBase.empty()) {
+                    for (size_t i = 0; i < g_q.sortBase.size(); ++i) {
+                        if (g_q.sortBase[i].same(gone)) {
+                            g_q.sortBase.erase(g_q.sortBase.begin() + (long long)i);
+                            break;
+                        }
+                    }
+                }
                 if (g_q.index > idx && g_q.index > 0) --g_q.index;
                 if (g_q.index >= g_q.items.size()) g_q.index = g_q.items.empty() ? 0 : g_q.items.size() - 1;
             }
@@ -6365,6 +6807,91 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
         }
         queue_save();
         return "{\"ok\":true,\"count\":" + std::to_string(cnt) + "}";
+    }
+
+    // ---------------- 队列排序（261027-02 #4）----------------
+    // 两个入口：
+    //   POST /api/qorder  body: files=<urlencoded>，值为按目标顺序排列的多行队列项（与 /api/queue/set 同格式）
+    //   POST /api/qsort?by=default  —— 「恢复默认顺序」：把第一次排序前的快照整列还原
+    if (rq.path.rfind("/api/qsort", 0) == 0) {
+        ct = "application/json; charset=utf-8";
+        std::string by = "default";
+        { const size_t q = rq.path.find("?by="); if (q != std::string::npos) by = urlDecode(rq.path.substr(q + 4)); }
+        if (by != "default") return "{\"ok\":false,\"error\":\"未知排序方式（只支持 by=default）\"}";
+        size_t n = 0, newIndex = 0;
+        bool had = false;
+        {
+            std::lock_guard<std::mutex> lk(g_q.mtx);
+            if (!g_q.sortBase.empty()) {
+                const QItem cur = (g_q.index < g_q.items.size()) ? g_q.items[g_q.index] : QItem();
+                g_q.items = g_q.sortBase;
+                g_q.sortBase.clear();
+                newIndex = queue_reindex_locked(cur);
+                n = g_q.items.size();
+                had = true;
+            }
+            if (!had) newIndex = g_q.index;
+        }
+        if (!had) return "{\"ok\":false,\"error\":\"没有可恢复的排序（队列本来就是默认顺序）\"}";
+        queue_save();
+        return "{\"ok\":true,\"by\":\"default\",\"n\":" + std::to_string(n) +
+               ",\"index\":" + std::to_string(newIndex) + "}";
+    }
+    if (rq.path.rfind("/api/qorder", 0) == 0) {
+        ct = "application/json; charset=utf-8";
+        std::string files;
+        {
+            std::istringstream is(rq.body);
+            std::string tok;
+            while (std::getline(is, tok, '&')) {
+                const size_t e = tok.find('=');
+                if (e == std::string::npos) continue;
+                if (urlDecode(tok.substr(0, e)) == "files") files = urlDecode(tok.substr(e + 1));
+            }
+        }
+        std::vector<QItem> want;
+        {
+            std::istringstream ls(files);
+            std::string line;
+            while (std::getline(ls, line)) {
+                if (!line.empty() && line.back() == '\r') line.pop_back();
+                if (line.empty()) continue;
+                want.push_back(item_from_line(line));
+            }
+        }
+        for (const auto& w : want)
+            if (!valid_utf8(w.path)) return utf8_path_reject(w.path);
+        size_t n = 0, newIndex = 0;
+        std::string err;
+        {
+            std::lock_guard<std::mutex> lk(g_q.mtx);
+            if (want.size() != g_q.items.size()) {
+                err = "顺序与队列条数不一致（" + std::to_string(want.size()) + " vs " +
+                      std::to_string(g_q.items.size()) + "）";
+            } else {
+                std::vector<bool> used(g_q.items.size(), false);
+                for (const auto& w : want) {
+                    bool hit = false;
+                    for (size_t i = 0; i < g_q.items.size(); ++i) {
+                        if (used[i] || !g_q.items[i].same(w)) continue;
+                        used[i] = true;
+                        hit = true;
+                        break;
+                    }
+                    if (!hit) { err = "顺序里出现了队列中没有的曲目"; break; }
+                }
+            }
+            if (err.empty()) {
+                const QItem cur = (g_q.index < g_q.items.size()) ? g_q.items[g_q.index] : QItem();
+                if (g_q.sortBase.empty()) g_q.sortBase = g_q.items;
+                g_q.items = std::move(want);
+                newIndex = queue_reindex_locked(cur);
+                n = g_q.items.size();
+            }
+        }
+        if (!err.empty()) return std::string("{\"ok\":false,\"error\":\"") + jesc(err) + "\"}";
+        queue_save();
+        return "{\"ok\":true,\"n\":" + std::to_string(n) + ",\"index\":" + std::to_string(newIndex) + "}";
     }
 
     if (rq.path.rfind("/api/add", 0) == 0) {
@@ -6406,6 +6933,7 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
             // 若在持锁状态下调用就会死锁（本轮踩到：服务端直接挂住，连接被关闭）。
             std::lock_guard<std::mutex> lk(g_q.mtx);
             for (const auto& f : addList) g_q.items.emplace_back(f);
+            if (!addList.empty()) g_q.sortBase.clear();
             cnt = g_q.items.size();
         }
         queue_save();
@@ -6417,14 +6945,39 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
         ct = "application/json; charset=utf-8";
         fav_load_if_needed();
         if (rq.path.rfind("/api/fav/list", 0) == 0) {
-            std::lock_guard<std::mutex> lk(g_favMu);
+            const bool wantMeta = rq.path.find("meta=1") != std::string::npos;
+            std::vector<std::string> files;
+            { std::lock_guard<std::mutex> lk(g_favMu); files.assign(g_favFiles.begin(), g_favFiles.end()); }
+
+            std::map<std::string, rta::net::LibTrack> meta;
+            if (wantMeta && !files.empty()) {
+                std::set<std::string> want;
+                for (const auto& f : files) want.insert(rta::net::lib_path_key(f));
+                auto& lib = rta::net::Library::instance();
+                const size_t n = lib.trackCount();
+                for (size_t i = 0; i < n; ++i) {
+                    rta::net::LibTrack t;
+                    if (!lib.trackAt(i, t)) continue;
+                    const std::string k = rta::net::lib_path_key(t.path);
+                    if (want.count(k)) meta[k] = t;
+                }
+            }
             std::ostringstream j;
             j << "{\"ok\":true,\"files\":[";
             bool first = true;
-            for (const auto& f : g_favFiles) {
+            for (const auto& f : files) {
                 if (!first) j << ",";
                 first = false;
-                j << "\"" << jesc(f) << "\"";
+                if (!wantMeta) { j << "\"" << jesc(f) << "\""; continue; }
+                const auto it = meta.find(rta::net::lib_path_key(f));
+                j << "{\"file\":\"" << jesc(f) << "\"";
+                if (it != meta.end()) {
+                    j << ",\"title\":\"" << jesc(it->second.title) << "\""
+                      << ",\"artist\":\"" << jesc(it->second.artist) << "\""
+                      << ",\"album\":\"" << jesc(it->second.album) << "\""
+                      << ",\"dur\":" << it->second.duration;
+                }
+                j << "}";
             }
             j << "]}";
             return j.str();
@@ -7199,27 +7752,113 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
         queue_save();
         return std::string("{\"ok\":true,\"shuffle\":") + (on ? "true" : "false") + "}";
     }
+    // ---------------- 整列替换队列（#5 播放全部 / 具名队列播放共用）----------------
+    // POST /api/queue/set  body: files=<urlencoded>，值为多行文本，每行一项：
+    //   普通曲目 = <路径>；CUE 分轨 = <路径><TAB><cs><TAB><ce>（与 rlplayer-playlist.txt 同格式）
+    if (rq.path.rfind("/api/queue/set", 0) == 0) {
+        ct = "application/json; charset=utf-8";
+        std::string files;
+        {
+            std::istringstream is(rq.body);
+            std::string tok;
+            while (std::getline(is, tok, '&')) {
+                const size_t e = tok.find('=');
+                if (e == std::string::npos) continue;
+                if (urlDecode(tok.substr(0, e)) == "files") files = urlDecode(tok.substr(e + 1));
+            }
+        }
+        std::vector<QItem> items;
+        {
+            std::istringstream ls(files);
+            std::string line;
+            while (std::getline(ls, line)) {
+                if (!line.empty() && line.back() == '\r') line.pop_back();
+                if (line.empty()) continue;
+                items.push_back(item_from_line(line));
+            }
+        }
+        if (items.empty()) return "{\"ok\":false,\"error\":\"曲目列表为空\"}";
+        for (const auto& it : items)
+            if (!valid_utf8(it.path)) return utf8_path_reject(it.path);
+        size_t cnt = 0;
+        {
+            std::lock_guard<std::mutex> lk(g_q.mtx);
+            g_q.items = std::move(items);
+            g_q.index = 0;
+            g_q.base.clear();
+            g_q.sortBase.clear();
+            cnt = g_q.items.size();
+        }
+        queue_save();
+        return "{\"ok\":true,\"count\":" + std::to_string(cnt) + "}";
+    }
     if (rq.path.rfind("/api/queue", 0) == 0) {
         ct = "application/json; charset=utf-8";
-        std::lock_guard<std::mutex> lk(g_q.mtx);
+        const bool wantMeta = rq.path.find("meta=1") != std::string::npos;
+        std::vector<QItem> items;
+        size_t index = 0;
+        int mode = 0;
+        bool shuffle = false;
+        {
+            std::lock_guard<std::mutex> lk(g_q.mtx);
+            items = g_q.items;
+            index = g_q.index;
+            mode = g_q.mode;
+            shuffle = g_q.shuffle_of();
+        }
+        std::map<std::string, rta::net::LibTrack> meta;
+        if (wantMeta && !items.empty()) {
+            std::set<std::string> want;
+            for (const auto& it : items) want.insert(rta::net::lib_path_key(it.path));
+            auto& lib = rta::net::Library::instance();
+            const size_t nt = lib.trackCount();
+            for (size_t i = 0; i < nt; ++i) {
+                rta::net::LibTrack t;
+                if (!lib.trackAt(i, t)) continue;
+                const std::string k = rta::net::lib_path_key(t.path);
+                if (!want.count(k)) continue;
+                meta.emplace(k, std::move(t));
+                if (meta.size() >= want.size()) break;
+            }
+        }
         std::ostringstream j;
-        j << "{\"ok\":true,\"index\":" << g_q.index
-          << ",\"repeat\":" << g_q.repeat_of()
-          << ",\"shuffle\":" << (g_q.shuffle_of() ? "true" : "false")
-          << ",\"mode\":" << g_q.mode << ",\"items\":[";
-        for (size_t i = 0; i < g_q.items.size(); ++i) {
+        j << "{\"ok\":true,\"index\":" << index
+          << ",\"repeat\":" << ((mode == 1) ? 1 : (mode == 2) ? 2 : 0)
+          << ",\"shuffle\":" << (shuffle ? "true" : "false")
+          << ",\"mode\":" << mode << ",\"items\":[";
+        for (size_t i = 0; i < items.size(); ++i) {
             if (i) j << ",";
-            j << "\"" << jesc(g_q.items[i].path) << "\"";
+            j << "\"" << jesc(items[i].path) << "\"";
         }
-        // cues：与 items **逐项对齐**的 [起, 止] 秒数组（-1,-1 = 整首）。
-        // 为什么不做成 items 里的对象：这个端点的 items 一直是"路径字符串数组"，界面/脚本
-        // 大量按字符串消费；加一个平行数组既不改旧契约，又让前端能把区间带进 /api/play。
         j << "],\"cues\":[";
-        for (size_t i = 0; i < g_q.items.size(); ++i) {
+        for (size_t i = 0; i < items.size(); ++i) {
             if (i) j << ",";
-            j << "[" << g_q.items[i].cs << "," << g_q.items[i].ce << "]";
+            j << "[" << items[i].cs << "," << items[i].ce << "]";
         }
-        j << "]}";
+        j << "]";
+        if (wantMeta) {
+            j << ",\"metas\":[";
+            for (size_t i = 0; i < items.size(); ++i) {
+                if (i) j << ",";
+                std::string t, a, al;
+                int y = 0;
+                double d = 0.0;
+                const bool isCue = items[i].isCue() && items[i].ce > items[i].cs;
+                if (isCue) d = items[i].ce - items[i].cs;
+                auto f = meta.find(rta::net::lib_path_key(items[i].path));
+                if (f != meta.end()) {
+                    t = f->second.title;
+                    a = f->second.artist;
+                    al = f->second.album;
+                    y = f->second.year;
+                    if (!isCue) d = f->second.duration;
+                }
+                j << "{\"t\":\"" << jesc(t) << "\",\"a\":\"" << jesc(a)
+                  << "\",\"al\":\"" << jesc(al) << "\",\"d\":" << d << ",\"y\":" << y << "}";
+            }
+            j << "]";
+        }
+        j << "}";
         return j.str();
     }
 
@@ -7235,7 +7874,12 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
             std::lock_guard<std::mutex> lk(g_lastEndMx);
             g_lastEnd.isPosZeroNoErr = false;
         }
-        { std::lock_guard<std::mutex> lk(g_q.mtx); g_q.items.clear(); g_q.index = 0; }
+        {
+            std::lock_guard<std::mutex> lk(g_q.mtx);
+            g_q.items.clear();
+            g_q.index = 0;
+            g_q.sortBase.clear();
+        }
         queue_save();
         return "{\"ok\":true}";
     }

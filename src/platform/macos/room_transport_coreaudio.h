@@ -36,6 +36,7 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <numeric>
 #include <string>
 #include <thread>
 #include <vector>
@@ -43,14 +44,67 @@
 #include "../audio_out_factory.h"
 #include "../audio_out.h"
 #include "audio_in_coreaudio.h"
+#include "dsp/resampler.h"
 #include "dsp/room_measurement.h"
 
 namespace rta::dsp {
+
+// 辅助单声道多相 Sinc 重采样（带群延迟对齐与样本截断，保证直达声峰位与时长守恒）
+inline std::vector<double> resample_mono_aligned(const std::vector<double>& in, uint32_t inRate, uint32_t outRate) {
+    if (in.empty() || inRate == 0 || outRate == 0) return {};
+    if (inRate == outRate) return in;
+
+    rta::dsp::ResamplerConfig rcfg;
+    rcfg.inRate = inRate;
+    rcfg.outRate = outRate;
+    rcfg.channels = 1;
+    rcfg.totalTaps = 3072;
+    rcfg.transition = 0.05;
+    rcfg.attenDb = 120.0;
+
+    const uint32_t g = std::gcd(inRate, outRate);
+    const int L = (int)(outRate / g);
+    if (L > 0) {
+        int T = 3072 / L;
+        if (T < 31) T = 31;
+        if ((T % 2) == 0) ++T; // 选奇数抽头，使群延迟在整倍数
+        rcfg.minTapsPerInput = T;
+    }
+
+    rta::dsp::PolyphaseResampler rs(rcfg);
+    const double delayOut = rs.latencyInputSamples() * (double)outRate / (double)inRate;
+    const size_t discardOut = (size_t)std::llround(delayOut);
+
+    const size_t targetFrames = (size_t)std::llround((double)in.size() * (double)outRate / (double)inRate);
+    const size_t flushIn = (size_t)rs.tapsPerPhase() + 64;
+
+    std::vector<double> paddedIn = in;
+    paddedIn.resize(in.size() + flushIn, 0.0);
+
+    const size_t maxOut = rs.maxOutFrames(paddedIn.size());
+    std::vector<double> rawOut(maxOut, 0.0);
+    const double* inP = paddedIn.data();
+    double* outP = rawOut.data();
+    const size_t produced = rs.process(&inP, paddedIn.size(), &outP);
+
+    std::vector<double> out;
+    out.reserve(targetFrames);
+    for (size_t i = 0; i < targetFrames; ++i) {
+        const size_t srcIdx = discardOut + i;
+        if (srcIdx < produced) {
+            out.push_back(rawOut[srcIdx]);
+        } else {
+            out.push_back(0.0);
+        }
+    }
+    return out;
+}
 
 struct RoomTxConfig {
     std::string playDeviceId;      // 空 = 默认输出端点
     std::string captureDeviceId;   // 空 = 默认采集端点
     int         channels = 2;      // 参与测量的声道数
+    int         captureChannel = 0;// 测量麦克风声道（默认 0，即第一声道单声道麦；多扬声器共用同一个测量麦）
     double      tailMs = 800.0;    // 播放结束后继续录多久（房间混响）
     double      preRollMs = 300.0; // 播放前先录多久（本底噪声，质检用）
     // 停滞上限（照抄上游教训：设备被占用时不能无限等，否则整条测量链挂死）
@@ -59,9 +113,47 @@ struct RoomTxConfig {
     uint32_t    rate = 48000;      // 目标采样率；设备不支持时按实际混音率工作
 };
 
+// 抽象音频输入接口（供生产 CoreAudioInput 与离线测试 seam 统一实现）
+class RoomAudioInput {
+public:
+    virtual ~RoomAudioInput() = default;
+    virtual bool open(const rta::platform::MacCaptureConfig& cfg) = 0;
+    virtual bool start() = 0;
+    virtual bool stop() = 0;
+    virtual void close() = 0;
+    virtual size_t read_available(float* dst, size_t maxFrames) = 0;
+    virtual uint32_t rate() const = 0;
+    virtual int channels() const = 0;
+    virtual const std::string& last_error() const = 0;
+};
+
+// 生产默认适配器：委托给真实的 CoreAudioInput
+class DefaultCoreAudioInput : public RoomAudioInput {
+public:
+    bool open(const rta::platform::MacCaptureConfig& cfg) override { return cap_.open(cfg); }
+    bool start() override { return cap_.start(); }
+    bool stop() override { return cap_.stop(); }
+    void close() override { cap_.close(); }
+    size_t read_available(float* dst, size_t maxFrames) override { return cap_.read_available(dst, maxFrames); }
+    uint32_t rate() const override { return cap_.rate(); }
+    int channels() const override { return cap_.channels(); }
+    const std::string& last_error() const override { return cap_.last_error(); }
+private:
+    rta::platform::CoreAudioInput cap_;
+};
+
+// IO Seam 注入结构体：允许测试注入 Mock 音频输入/输出以及时钟控制
+struct RoomIoSeam {
+    std::function<std::unique_ptr<rta::platform::AudioOutput>()> createOutput;
+    std::function<std::unique_ptr<RoomAudioInput>()> createInput;
+    std::function<std::chrono::steady_clock::time_point()> now;
+    std::function<void(std::chrono::milliseconds)> sleepFor;
+};
+
 class CoreAudioRoomTransport : public MeasurementTransport {
 public:
-    explicit CoreAudioRoomTransport(RoomTxConfig cfg) : cfg_(std::move(cfg)) {}
+    explicit CoreAudioRoomTransport(RoomTxConfig cfg, RoomIoSeam seam = {})
+        : cfg_(std::move(cfg)), seam_(std::move(seam)) {}
     ~CoreAudioRoomTransport() override = default;
 
     bool lastOk() const { return ok_; }
@@ -77,6 +169,14 @@ public:
         ok_ = false; err_.clear(); captured_ = 0;
         if (out.empty()) { err_ = "扫频信号为空"; return {}; }
 
+        auto now = [&]() {
+            return seam_.now ? seam_.now() : std::chrono::steady_clock::now();
+        };
+        auto sleepFor = [&](std::chrono::milliseconds ms) {
+            if (seam_.sleepFor) seam_.sleepFor(ms);
+            else std::this_thread::sleep_for(ms);
+        };
+
         // ---- 1) 播放端点（共享模式）----
         // 共享模式的理由：房间测量时用户要能听到扫频（这是刻意的、已确认的可闻信号），
         // 且独占会抢 Hog ⟹ 测量期间系统其它声音全没了，用户容易以为程序挂了。
@@ -88,7 +188,9 @@ public:
         spec.bufferMs = 100.0;
         spec.shared = true;          // 共享：不抢 Hog
         spec.exclusive = false;      // 显式不抢 Hog（字段名是 exclusive，不是 hogExclusive）
-        auto sink = rta::platform::create_audio_output();
+        std::unique_ptr<rta::platform::AudioOutput> sink;
+        if (seam_.createOutput) sink = seam_.createOutput();
+        else sink = rta::platform::create_audio_output();
         if (!sink) { err_ = "无法创建 CoreAudio 输出后端"; return {}; }
         if (!sink->open(spec)) {
             err_ = "打开播放端点失败：" + sink->last_error();
@@ -102,63 +204,83 @@ public:
         }
 
         // ---- 2) 采集端点 ----
-        rta::platform::CoreAudioInput cap;
+        std::unique_ptr<RoomAudioInput> cap;
+        if (seam_.createInput) cap = seam_.createInput();
+        else cap = std::make_unique<DefaultCoreAudioInput>();
         rta::platform::MacCaptureConfig cc;
         cc.deviceId = cfg_.captureDeviceId;
         cc.bufferMs = 200.0;
-        if (!cap.open(cc)) {
-            err_ = "打开采集端点失败：" + cap.last_error();
+        if (!cap->open(cc)) {
+            err_ = "打开采集端点失败：" + cap->last_error();
             sink->close();
             return {};
         }
-        rate_ = (double)(cap.rate() ? cap.rate() : spec.rate);
-        const int capCh = cap.channels() > 0 ? cap.channels() : 2;
+        const uint32_t capRateInt = cap->rate() ? cap->rate() : spec.rate;
+        rate_ = (double)capRateInt;
+        const int capCh = cap->channels() > 0 ? cap->channels() : 2;
         capName_ = cfg_.captureDeviceId.empty() ? std::string("<default>") : cfg_.captureDeviceId;
-        if (!cap.start()) {
-            err_ = "启动采集失败：" + cap.last_error();
-            sink->close(); cap.close();
+        if (!cap->start()) {
+            err_ = "启动采集失败：" + cap->last_error();
+            sink->close(); cap->close();
             return {};
         }
 
-        const size_t preN  = (size_t)(cfg_.preRollMs * 0.001 * rate_);
-        const size_t tailN = (size_t)(cfg_.tailMs   * 0.001 * rate_);
+        const double playRate = (double)spec.rate;
+        const double capRate = rate_;
+
+        const size_t preN  = (size_t)std::llround(cfg_.preRollMs * 0.001 * capRate);
+        const size_t tailN = (size_t)std::llround(cfg_.tailMs   * 0.001 * capRate);
+        const size_t sweepCapN = (size_t)std::llround((double)out.size() * capRate / playRate);
+        const size_t totalExpectedCap = preN + sweepCapN + tailN;
+
         std::vector<float> rec;
-        rec.reserve((preN + out.size() + tailN + 8192) * (size_t)capCh);
+        rec.reserve((totalExpectedCap + 8192) * (size_t)capCh);
 
         auto drain = [&]() {
             std::vector<float> tmp((size_t)capCh * 2048);
             for (;;) {
-                const size_t got = cap.read_available(tmp.data(), 2048);
+                const size_t got = cap->read_available(tmp.data(), 2048);
                 if (got == 0) break;
                 rec.insert(rec.end(), tmp.begin(), tmp.begin() + (std::ptrdiff_t)(got * (size_t)capCh));
             }
         };
         auto frames = [&]() { return rec.size() / (size_t)capCh; };
-        // 返回 false = 超时（采集端没有推进），调用方必须中止而不是继续等
-        auto waitUntil = [&](size_t want, double limitMs) -> bool {
+
+        enum class WaitStatus {
+            Reached,
+            Timeout,
+            Cancelled
+        };
+        auto waitUntil = [&](size_t want, double limitMs) -> WaitStatus {
             const int spins = (int)(limitMs / 2.0);
             for (int i = 0; i < spins && frames() < want; ++i) {
                 drain();
-                if (frames() >= want) return true;
-                if (cancelled && cancelled()) return true;
-                std::this_thread::sleep_for(std::chrono::milliseconds(2));
+                if (frames() >= want) return WaitStatus::Reached;
+                if (cancelled && cancelled()) return WaitStatus::Cancelled;
+                sleepFor(std::chrono::milliseconds(2));
             }
-            return frames() >= want;
+            if (cancelled && cancelled()) return WaitStatus::Cancelled;
+            drain();
+            return frames() >= want ? WaitStatus::Reached : WaitStatus::Timeout;
         };
 
         // ---- 3) 预录（吃本底噪声，质检的 SNR 要用）----
-        if (!waitUntil(preN, cfg_.captureStallMs)) {
+        WaitStatus ws = waitUntil(preN, cfg_.captureStallMs);
+        if (ws == WaitStatus::Cancelled) {
+            err_ = "测量已由用户取消";
+            if (log) log("ROOMTX " + err_);
+            sink->close(); cap->close();
+            return {};
+        }
+        if (ws != WaitStatus::Reached) {
             err_ = "采集端点无数据（预录阶段），检查采集设备是否可用 / 是否被 TCC 门控";
             if (log) log("ROOMTX " + err_);
-            sink->close(); cap.close();
+            sink->close(); cap->close();
             captured_ = 0;
             return {};
         }
 
-        // ---- 4) 边播边录：严格 1:1 推进 ----
-        // 上游 2026-10-26 的教训（照抄正确做法）：写完多少帧就等采集也到多少帧。
-        // 旧写法 waitUntil(preN + written/2) 让播放快于实时、录音按实时走 ⟹ 两者错位，
-        // 3 秒扫频却在 peakMs=10049 处出峰。
+        // ---- 4) 边播边录：严格 1:1 推进（解决跨采样率混时基缺陷）----
         const int playCh = spec.channels > 0 ? spec.channels : 2;
         const int activeCh = (playCh > 0) ? (curCh_ % playCh) : 0;
         if (log) log("ROOMTX play dev=" + playName_ + " ch=" + std::to_string(playCh) +
@@ -169,9 +291,11 @@ public:
         std::vector<int32_t> blk((size_t)playCh * 480);
         size_t written = 0;
         bool writeStalled = false;
-        const auto t0 = std::chrono::steady_clock::now();
+        bool userCancelled = false;
+        auto lastProgress = now(); // 从最后成功写入计时（解决整段 t0 假超时缺陷）
+
         while (written < out.size()) {
-            if (cancelled && cancelled()) break;
+            if (cancelled && cancelled()) { userCancelled = true; break; }
             const size_t n = std::min<size_t>(480, out.size() - written);
             for (size_t i = 0; i < n; ++i) {
                 const double v = std::max(-1.0, std::min(1.0, out[written + i]));
@@ -181,44 +305,123 @@ public:
             }
             size_t off = 0;
             while (off < n) {
+                if (cancelled && cancelled()) { userCancelled = true; break; }
                 const size_t w = sink->write(blk.data() + off * (size_t)playCh, n - off);
                 if (w == 0) {
-                    // 写不进：可能是设备阻塞。按停滞上限中止，绝不无限等。
+                    // 写不进：按最后一次成功写入之后的连续停滞时长判断
                     const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-                        std::chrono::steady_clock::now() - t0).count();
+                        now() - lastProgress).count();
                     if ((double)ms > cfg_.writeStallMs) { writeStalled = true; break; }
-                    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                    sleepFor(std::chrono::milliseconds(1));
                     continue;
                 }
                 off += w;
+                lastProgress = now(); // 成功写入，重置停滞计时器
             }
-            if (writeStalled) break;
+            if (userCancelled || writeStalled) break;
             written += n;
-            // ★ 1:1：等采集也推进到 written 帧（保证扫频与录音不错位）
-            if (!waitUntil(preN + written, cfg_.captureStallMs)) {
+
+            // ★ 1:1：等采集也推进到对应时间帧数（按 capRate/playRate 严格换算时基）
+            const size_t targetCap = preN + (size_t)std::llround((double)written * capRate / playRate);
+            ws = waitUntil(targetCap, cfg_.captureStallMs);
+            if (ws == WaitStatus::Cancelled) { userCancelled = true; break; }
+            if (ws != WaitStatus::Reached) {
                 err_ = "采集端点停滞（边播边录阶段），录音与播放已错位，中止以免给出错误 IR";
                 if (log) log("ROOMTX " + err_);
-                sink->close(); cap.close();
+                sink->close(); cap->close();
                 captured_ = frames();
                 return {};
             }
         }
+
+        if (userCancelled) {
+            err_ = "测量已由用户取消";
+            if (log) log("ROOMTX " + err_);
+            sink->close(); cap->close();
+            captured_ = 0;
+            return {};
+        }
         if (writeStalled) {
             err_ = "播放端点连续写不进（设备被占用？），已中止";
             if (log) log("ROOMTX " + err_);
-            sink->close(); cap.close();
+            sink->close(); cap->close();
             captured_ = frames();
             return {};
         }
 
-        // ---- 5) 尾巴（房间混响）----
-        waitUntil(preN + out.size() + tailN, cfg_.captureStallMs);
+        // ---- 5) 尾巴（房间混响）：检查返回值，绝不静默忽略 ----
+        ws = waitUntil(totalExpectedCap, cfg_.captureStallMs);
+        if (ws == WaitStatus::Cancelled) {
+            err_ = "测量已由用户取消";
+            if (log) log("ROOMTX " + err_);
+            sink->close(); cap->close();
+            return {};
+        }
+        if (ws != WaitStatus::Reached) {
+            err_ = "采集端点停滞（尾部混响阶段），录音不完整，已中止";
+            if (log) log("ROOMTX " + err_);
+            sink->close(); cap->close();
+            return {};
+        }
         drain();
 
+        // ---- 6) 播放硬件渲染排空确认 ----
+        if (written > 0) {
+            const double drainTimeoutMs = (cfg_.writeStallMs > 0 ? cfg_.writeStallMs : 3000.0);
+            bool drainTimedOut = false;
+            size_t lastRendered = sink->frames_rendered();
+            auto lastRenderProgress = now();
+
+            while (sink->frames_rendered() < written) {
+                if (cancelled && cancelled()) {
+                    err_ = "测量已由用户取消";
+                    if (log) log("ROOMTX " + err_);
+                    sink->close(); cap->close();
+                    return {};
+                }
+                const size_t cur = sink->frames_rendered();
+                if (cur > lastRendered) {
+                    lastRendered = cur;
+                    lastRenderProgress = now();
+                } else {
+                    const auto stall = std::chrono::duration_cast<std::chrono::milliseconds>(
+                        now() - lastRenderProgress).count();
+                    if ((double)stall > drainTimeoutMs) {
+                        drainTimedOut = true;
+                        break;
+                    }
+                }
+                sleepFor(std::chrono::milliseconds(2));
+            }
+            if (drainTimedOut) {
+                err_ = "播放端点排空超时（硬件渲染停滞），已中止";
+                if (log) log("ROOMTX " + err_);
+                sink->close(); cap->close();
+                return {};
+            }
+        }
+
         sink->close();
-        cap.close();
+        cap->close();
         captured_ = frames();
-        rate_ = rate_ > 0 ? rate_ : 48000.0;
+
+        // 采集是多声道交错 ⟹ 取指定的测量麦克风声道（不随输出 activeCh 轮换）
+        std::vector<double> rawMono;
+        rawMono.reserve(captured_);
+        const int micCh = (cfg_.captureChannel >= 0 && cfg_.captureChannel < capCh) ? cfg_.captureChannel : 0;
+        for (size_t f = 0; f < captured_; ++f)
+            rawMono.push_back((double)rec[f * (size_t)capCh + (size_t)micCh]);
+
+        // ---- 7) 重采样回到 session rate（若采集采样率与播放会话率不同）----
+        std::vector<double> sessionMono;
+        if (capRateInt != spec.rate) {
+            sessionMono = resample_mono_aligned(rawMono, capRateInt, spec.rate);
+        } else {
+            sessionMono = std::move(rawMono);
+        }
+
+        captured_ = sessionMono.size();
+        rate_ = (double)spec.rate; // 交付给算法层的样本率与会话一致
 
         if (captured_ < samplesToCapture) {
             err_ = "录得样本不足（" + std::to_string(captured_) + " < " +
@@ -227,25 +430,19 @@ public:
             return {};
         }
 
-        // 采集是多声道交错 ⟹ 取 activeCh 那一路转 double（与上游一致：逐声道顺序调用）
-        std::vector<double> mono;
-        mono.reserve(captured_);
-        const int srcCh = (activeCh < capCh) ? activeCh : 0;
-        for (size_t f = 0; f < captured_; ++f)
-            mono.push_back((double)rec[f * (size_t)capCh + (size_t)srcCh]);
-
         ok_ = true;
-        return mono;
+        return sessionMono;
     }
 
 private:
     RoomTxConfig cfg_;
+    RoomIoSeam seam_;
     bool ok_ = false;
     std::string err_;
     size_t captured_ = 0;
     double rate_ = 0.0;
     std::string playName_, capName_;
-    int curCh_ = 0;    // 逐声道轮转（会话层顺序调用本函数）
+    int curCh_ = 0;    // 逐输出声道轮转（会话层顺序调用本函数）
 };
 
 } // namespace rta::dsp

@@ -2905,6 +2905,274 @@ function loadRecent() {
   }).catch(function () { D('list').innerHTML = '<div class=empty>读取失败</div>'; });
 }
 
+/* ---------------- 交互弹窗与辅助 ---------------- */
+function askText(o) {
+  o = o || {};
+  var m = D('modal'); if (!m) return;
+  D('mtitle').textContent = o.title || '输入';
+  D('mbody').innerHTML =
+    '<div style="padding:2px 0 14px"><input id=askIn style="width:100%;padding:9px 11px;border-radius:9px;' +
+    'border:1px solid var(--line);background:var(--field);color:var(--txt);font-size:13px" value="' +
+    esc(o.value || '') + '" placeholder="' + esc(o.placeholder || '') + '"></div>' +
+    (o.hint ? '<div class=hint style="margin:-8px 0 12px">' + esc(o.hint) + '</div>' : '') +
+    '<div style="display:flex;gap:8px;justify-content:flex-end">' +
+    '<button class=btn id=askCancel>取消</button>' +
+    '<button class="btn pri" id=askOk>' + esc(o.ok || '确定') + '</button></div>';
+  m.classList.add('on');
+  var inp = D('askIn');
+  D('askOk').onclick = function () {
+    var v = (D('askIn').value || '').trim();
+    if (!v) { toast('名字不能为空'); return; }
+    m.classList.remove('on');
+    if (o.onOk) o.onOk(v);
+  };
+  D('askCancel').onclick = function () { m.classList.remove('on'); };
+  if (inp) {
+    inp.onkeydown = function (ev) {
+      if (ev.key === 'Enter') { ev.preventDefault(); D('askOk').click(); }
+      else if (ev.key === 'Escape') { ev.preventDefault(); D('askCancel').click(); }
+    };
+    setTimeout(function () { try { inp.focus(); inp.select(); } catch (e) {} }, 30);
+  }
+}
+
+function askConfirm(o) {
+  o = o || {};
+  var m = D('modal'); if (!m) return;
+  D('mtitle').textContent = o.title || '确认';
+  D('mbody').innerHTML =
+    '<div style="padding:2px 0 16px;font-size:12.5px;line-height:1.7;color:var(--txt2)">' + esc(o.text || '') + '</div>' +
+    '<div style="display:flex;gap:8px;justify-content:flex-end">' +
+    '<button class=btn id=cfNo>取消</button>' +
+    '<button class="btn pri" id=cfYes>' + esc(o.ok || '确定') + '</button></div>';
+  m.classList.add('on');
+  D('cfNo').onclick = function () { m.classList.remove('on'); };
+  D('cfYes').onclick = function () { m.classList.remove('on'); if (o.onOk) o.onOk(); };
+}
+
+function folderOf(p) {
+  var s = String(p || '');
+  var i = Math.max(s.lastIndexOf(String.fromCharCode(92)), s.lastIndexOf('/'));
+  if (i <= 0) return '';
+  var head = s.slice(0, i);
+  var j = Math.max(head.lastIndexOf(String.fromCharCode(92)), head.lastIndexOf('/'));
+  return head.slice(j + 1);
+}
+
+/* ---------------- 整列起播（Q-5：收藏 / 歌单 / 队列整列起播共用） ---------------- */
+function ensureSequentialMode(cb) {
+  var cur = parseInt(D('sRep') ? D('sRep').value : 0, 10) || 0;
+  if (cur !== 2) { cb(); return; }
+  D('sRep').value = '1';
+  api('/api/playmode?mode=1').then(function () { applyRep(1); cb(); }).catch(function () { cb(); });
+}
+function playWholeListFrom(files, start, label) {
+  files = (files || []).filter(function (f) { return !!f; });
+  if (!files.length) { toast('这个列表是空的'); return; }
+  var i = parseInt(start, 10) || 0;
+  if (i < 0) i = 0;
+  if (i > files.length - 1) i = files.length - 1;
+  ensureSequentialMode(function () {
+    api('/api/queue/set', 'files=' + encodeURIComponent(files.join(String.fromCharCode(10)))).then(function (j) {
+      if (!j || j.ok === false) { toast((j && j.error) || '建立队列失败'); return; }
+      playPath(files[i]);
+      toast('从第 ' + (i + 1) + ' 首开始顺序播放' + (label ? ('：' + label) : '') + '（共 ' + files.length + ' 首）');
+      if (S.view === 'queue') renderQueuePage();
+    }).catch(function (e) { toast('播放失败: ' + e); });
+  });
+}
+function playWholeList(files, label) { playWholeListFrom(files, 0, label); }
+
+/* ---------------- 我的最爱（Q-6） ---------------- */
+function loadFavs() {
+  S.view = 'favs';
+  head('我的最爱', '加载中…', '');
+  api('/api/fav/list?meta=1').then(function (j) {
+    if (S.view !== 'favs') return;
+    var raw = (j && j.files) || [];
+    S.favs = raw.map(function (x) { return (typeof x === 'string') ? { file: x } : x; });
+    FAV_SET = new Set(S.favs.map(function (x) { return x.file; }));
+    var n = S.favs.length;
+    head('我的最爱', n ? (n + ' 首') : '', '');
+    if (!n) {
+      D('list').innerHTML = '<div class=empty>还没有收藏<br><span style="font-size:11.5px">在曲目行或单曲页点心形，就会出现在这里</span></div>';
+      return;
+    }
+    var h = '<div class=favhint><b>双击</b>任意一首，从这首开始<b>顺序播放</b>整个最爱列表（' + n + ' 首）</div>';
+    h += '<div class=favhead style="grid-template-columns:34px 1fr 180px 200px 34px">' +
+         '<div class=n>#</div><div>标题</div><div>艺术家</div><div class=du>专辑</div><div></div></div>';
+    h += '<div style="padding:2px 0 6px">';
+    S.favs.forEach(function (x, i) {
+      var f = x.file || '';
+      var t = x.title || nam(f);
+      var ar = x.artist || '';
+      var al = x.album || folderOf(f);
+      h += '<div class="trow favrow" data-i=' + i + ' style="grid-template-columns:34px 1fr 180px 200px 34px">' +
+           '<div class=n>' + (i + 1) + '</div>' +
+           '<div class=tt title="' + esc(f) + '">' + esc(t) + '</div>' +
+           '<div class=ar title="' + esc(ar) + '">' + esc(ar) + '</div>' +
+           '<div class=du title="' + esc(al) + '" style="text-align:left;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + esc(al) + '</div>' +
+           '<div style="display:flex;justify-content:flex-end">' + favIconHtml(f, true) + '</div></div>';
+    });
+    h += '</div>';
+    D('list').innerHTML = h;
+    Array.prototype.forEach.call(D('list').querySelectorAll('.favrow'), function (e) {
+      var i = +e.dataset.i, x = S.favs[i]; if (!x) return;
+      e.onclick = function (ev) {
+        if (ev.target.closest && ev.target.closest('.fav-btn')) return;
+        Array.prototype.forEach.call(D('list').querySelectorAll('.favrow'), function (y) {
+          y.classList.toggle('fsel', y === e);
+        });
+      };
+      e.ondblclick = function (ev) {
+        if (ev.target.closest && ev.target.closest('.fav-btn')) return;
+        playWholeListFrom((S.favs || []).map(function (y) { return y.file; }), i, '我的最爱');
+      };
+      e.oncontextmenu = function (ev) { ev.preventDefault(); if (typeof showTrackMenu === 'function') showTrackMenu(ev.clientX, ev.clientY, { path: x.file }); };
+      var b = e.querySelector('.fav-btn');
+      if (b) b.onclick = function (ev) { unfavFromFavs(x.file, ev); };
+    });
+  }).catch(function (e) { D('list').innerHTML = '<div class=empty>读取收藏失败: ' + esc(e) + '</div>'; });
+}
+function unfavFromFavs(file, ev) {
+  if (ev) { ev.stopPropagation(); ev.preventDefault(); }
+  api('/api/fav?file=' + encodeURIComponent(file) + '&on=0').then(function (j) {
+    if (!j || !j.ok) { toast((j && j.error) || '取消收藏失败'); return; }
+    FAV_SET.delete(file);
+    toast('已取消收藏');
+    if (S.view === 'favs') loadFavs();
+  }).catch(function (e) { toast('取消收藏失败: ' + e); });
+}
+
+/* ---------------- 我的歌单（Q-7 具名保存队列） ---------------- */
+function renderSavedQueues() {
+  api('/api/sq/list').then(function (j) {
+    S.sqs = (j && j.queues) || [];
+    paintSavedQueues();
+  }).catch(function () {});
+}
+function paintSavedQueues() {
+  var box = D('sqList'); if (!box) return;
+  var h = '<div class=sqhd>我的歌单</div>';
+  if (!S.sqs || !S.sqs.length) {
+    h += '<div class=sqempty>队列页「保存为歌单」可新建</div>';
+  } else {
+    S.sqs.forEach(function (q, i) {
+      h += '<div class="nav sqrow' + (S.view === 'sq' && S.sqName === q.name ? ' on' : '') + '" data-v=sq data-sq="' + esc(q.name) + '" data-i=' + i + '>' +
+           '<span class=sqn title="' + esc(q.name) + '">' + esc(q.name) + '</span>' +
+           '<span class="sqb ren" title="重命名">✎</span>' +
+           '<span class="sqb del" title="删除">×</span></div>';
+    });
+  }
+  box.innerHTML = h;
+  Array.prototype.forEach.call(box.querySelectorAll('.sqrow'), function (e) {
+    var q = S.sqs[+e.dataset.i]; if (!q) return;
+    e.onclick = function (ev) {
+      if (ev.target.classList.contains('sqb')) return;
+      renderSavedQueuePage(q.name);
+    };
+    var r1 = e.querySelector('.ren'); if (r1) r1.onclick = function (ev) { ev.stopPropagation(); renameQueueDialog(q.name); };
+    var r2 = e.querySelector('.del'); if (r2) r2.onclick = function (ev) { ev.stopPropagation(); deleteSavedQueue(q.name); };
+  });
+}
+function renderSavedQueuePage(name) {
+  if (!name) return;
+  S.view = 'sq'; S.sqName = name;
+  head(name, '加载中…', '');
+  api('/api/sq/info?name=' + encodeURIComponent(name)).then(function (j) {
+    if (S.view !== 'sq' || S.sqName !== name) return;
+    if (!j || !j.ok) {
+      head(name, '', '');
+      D('list').innerHTML = '<div class=empty>歌单不存在（可能已被删除）</div>';
+      return;
+    }
+    var it = j.items || [];
+    S.sqItems = it;
+    head(name, it.length + ' 首',
+      '<button class="btn pri" id=sqPlayAll>▶ 播放整列</button>' +
+      '<button class=btn id=sqRen>重命名</button>' +
+      '<button class=btn id=sqDel>删除</button>');
+    Array.prototype.forEach.call(document.querySelectorAll('.sqlist .sqrow'), function (e) {
+      e.classList.toggle('on', e.dataset.sq === name);
+    });
+    if (!it.length) { D('list').innerHTML = '<div class=empty>这个歌单是空的</div>'; return; }
+    var h = '<div style="padding:6px 0 24px">';
+    it.forEach(function (x, i) {
+      h += '<div class="trow sqtrow" data-i=' + i + ' style="grid-template-columns:34px 1fr 240px">' +
+           '<div class=n>' + (i + 1) + '</div>' +
+           '<div class=tt title="' + esc(x.file) + '">' + esc(nam(x.file)) + '</div>' +
+           '<div class=ar style="text-align:left;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + esc(folderOf(x.file)) + '</div></div>';
+    });
+    D('list').innerHTML = h + '</div>';
+    if (D('sqPlayAll')) D('sqPlayAll').onclick = function () { playSavedQueue(name, 0); };
+    if (D('sqRen')) D('sqRen').onclick = function () { renameQueueDialog(name); };
+    if (D('sqDel')) D('sqDel').onclick = function () { deleteSavedQueue(name); };
+    Array.prototype.forEach.call(D('list').querySelectorAll('.sqtrow'), function (e) {
+      var i = +e.dataset.i;
+      e.onclick = function () { playSavedQueue(name, i); };
+    });
+  }).catch(function (e) { D('list').innerHTML = '<div class=empty>读取歌单失败: ' + esc(e) + '</div>'; });
+}
+function playSavedQueue(name, i) {
+  i = i || 0;
+  ensureSequentialMode(function () {
+    api('/api/sq/play?name=' + encodeURIComponent(name) + '&i=' + i).then(function (j) {
+      if (!j || !j.ok) { toast((j && j.error) || '载入失败'); return; }
+      api('/api/sq/info?name=' + encodeURIComponent(name)).then(function (info) {
+        var it = (info && info.items) || [];
+        var k = Math.min(Math.max(0, i), Math.max(0, it.length - 1));
+        if (it[k]) playPath(it[k].file, it[k].cs, it[k].ce);
+        toast('播放歌单：' + name + '（' + it.length + ' 首）');
+        loadQ();
+      });
+    }).catch(function (e) { toast('播放失败: ' + e); });
+  });
+}
+function saveQueueDialog() {
+  var n = (S.q && S.q.items) ? S.q.items.length : 0;
+  if (!n) { toast('队列是空的，先加几首歌再保存'); return; }
+  askText({ title: '保存为歌单', ok: '保存', value: S.sqName || '',
+    placeholder: '例如 夜深人静',
+    hint: '把现在这 ' + n + ' 首（含顺序与 CUE 区间）存成一个歌单；写入 rlplayer-savedqueues.conf，重启后仍在',
+    onOk: function (name) {
+      api('/api/sq/save?name=' + encodeURIComponent(name)).then(function (j) {
+        if (!j || !j.ok) { toast((j && j.error) || '保存失败'); return; }
+        toast('已存为歌单：' + j.name + '（' + j.count + ' 首）');
+        renderSavedQueues();
+        if (S.view === 'favs') loadFavs();
+        else if (S.view === 'sq') renderSavedQueuePage(j.name);
+      }).catch(function (e) { toast('保存失败: ' + e); });
+    } });
+}
+function renameQueueDialog(name) {
+  askText({ title: '重命名歌单', ok: '改名', value: name,
+    hint: '改名后立刻写入 rlplayer-savedqueues.conf（重启后是新名字）',
+    onOk: function (to) {
+      api('/api/sq/rename?from=' + encodeURIComponent(name) + '&to=' + encodeURIComponent(to)).then(function (j) {
+        if (!j || !j.ok) { toast((j && j.error) || '改名失败'); return; }
+        toast('已改名为：' + j.to);
+        if (S.sqName === name) S.sqName = j.to;
+        renderSavedQueues();
+        if (S.view === 'sq') renderSavedQueuePage(j.to);
+        else if (S.view === 'favs') loadFavs();
+      }).catch(function (e) { toast('改名失败: ' + e); });
+    } });
+}
+function deleteSavedQueue(name) {
+  askConfirm({ title: '删除歌单', ok: '删除',
+    text: '删除歌单「' + name + '」？只删这份歌单，不动当前播放队列。',
+    onOk: function () {
+      api('/api/sq/delete?name=' + encodeURIComponent(name)).then(function (j) {
+        if (!j || !j.ok) { toast((j && j.error) || '删除失败'); return; }
+        toast('已删除：' + name);
+        if (S.sqName === name) S.sqName = '';
+        renderSavedQueues();
+        if (S.view === 'sq') { setView('favs'); loadFavs(); }
+        else if (S.view === 'favs') loadFavs();
+      }).catch(function (e) { toast('删除失败: ' + e); });
+    } });
+}
+
 /* ---------------- 播放控制 ---------------- */
 /* CUE 分轨（2026-10-25）：cue 把整轨切成 N 首，这 N 首的 path 完全相同，
    只有 cue_start/cue_end（秒）能区分。cs < 0 = 整首（旧行为，负向对照就走这条）。
@@ -4108,6 +4376,8 @@ Array.prototype.forEach.call(document.querySelectorAll('.nav'), function (e) {
     else if (v === 'remote') loadRemote('');
     else if (v === 'queue') { renderQueuePage(); }
     else if (v === 'recent') loadRecent();
+    else if (v === 'favs') loadFavs();
+    else if (v === 'sq') renderSavedQueuePage(S.sqName);
     // 2026-10-25：音频工作站独立页（原来挤在专辑空态里，导入音乐后就看不到）
     else if (v === 'station') { renderStation(); }
   };
@@ -8597,24 +8867,91 @@ document.addEventListener('keydown', function (e) {
   else if (e.key === 'i') showChain();
 });
 
+/* ---------------- 队列排序（Q-8） ---------------- */
+function queueItemLine(items, cues, i) {
+  var f = items[i] || '';
+  var c = (cues && cues[i]) || [-1, -1];
+  return (c && c[0] >= 0) ? (f + '\t' + c[0] + '\t' + c[1]) : f;
+}
+function applyQueueSort(by) {
+  if (!by) return;
+  if (by === 'default') {
+    api('/api/qsort?by=default', '').then(function (j) {
+      if (j && j.ok === false) { toast(j.error || '没有可恢复的排序'); S.queueSort = ''; renderQueuePage(); return; }
+      S.queueSort = '';
+      toast('已恢复默认顺序');
+      renderQueuePage(); loadQ();
+    }).catch(function () { renderQueuePage(); });
+    return;
+  }
+  api('/api/queue?meta=1').then(function (q) {
+    var items = q.items || [], cues = q.cues || [], metas = q.metas || [];
+    var n = items.length;
+    if (!n) { toast('队列是空的'); return; }
+    var idx = [];
+    for (var i = 0; i < n; i++) idx.push(i);
+    function meta(i) { return metas[i] || {}; }
+    function txt(i, k) { return String(meta(i)[k] || ''); }
+    if (by === 'title') {
+      idx.sort(function (a, b) { return txt(a, 't').localeCompare(txt(b, 't'), 'zh'); });
+    } else if (by === 'artist') {
+      idx.sort(function (a, b) { return txt(a, 'a').localeCompare(txt(b, 'a'), 'zh'); });
+    } else if (by === 'album') {
+      idx.sort(function (a, b) { return txt(a, 'al').localeCompare(txt(b, 'al'), 'zh'); });
+    } else if (by === 'dur') {
+      idx.sort(function (a, b) { return (+meta(a).d || 0) - (+meta(b).d || 0); });
+    } else if (by === 'year') {
+      idx.sort(function (a, b) { return (+meta(b).y || 0) - (+meta(a).y || 0); });
+    } else if (by === 'shuffle') {
+      for (var k = n - 1; k > 0; k--) {
+        var r = Math.floor(Math.random() * (k + 1));
+        var t = idx[k]; idx[k] = idx[r]; idx[r] = t;
+      }
+    } else if (by === 'reverse') {
+      idx.reverse();
+    }
+    var lines = idx.map(function (i) { return queueItemLine(items, cues, i); });
+    return api('/api/qorder', 'files=' + encodeURIComponent(lines.join('\n'))).then(function (j) {
+      if (j && j.ok === false) { toast(j.error || '排序失败'); renderQueuePage(); return; }
+      S.queueSort = by;
+      renderQueuePage(); loadQ();
+    });
+  }).catch(function () { renderQueuePage(); });
+}
+
 /* ---------------- 播放队列（主视图） ---------------- */
 function renderQueuePage() {
   S.view = 'queue';
   // 2026-10-23（自检暴露）：标题原来只在 /api/queue 回来后才写 → 本地接口虽快，但慢的时候
   // 会出现"已经在队列页、标题还是上一页"的空窗。先同步写标题，再等数据补数量/按钮。
   head('播放队列', '', '');
-  api('/api/queue').then(function (j) {
+  api('/api/queue?meta=1').then(function (j) {
     if (S.view !== 'queue') return;   // 已切走 → 丢弃，别覆写当前页面
     // 兜底对象没有 items：原地不动（否则队列页会显示"队列是空的"，看起来像被清空了）。
     if (j && j._err) { listErrorBox('队列读取失败', renderQueuePage); return; }
-    S.q = { items: j.items || [], index: j.index || 0 };
+    S.q = { items: j.items || [], cues: j.cues || [], metas: j.metas || [], index: j.index || 0 };
     var n = S.q.items.length;
-    head('播放队列', n ? (n + ' 首') : '', n ? '<button class=btn id=qClrAll>清空队列</button>' : '');
+    head('播放队列', n ? (n + ' 首') : '',
+      (n ? '<button class="btn pri" id=qSaveSq title="把当前队列原样存成一个歌单（含顺序与 CUE 区间，重启后仍在）">保存为歌单</button>' : '') +
+      (n ? '<button class=btn id=qClrAll>清空队列</button>' : ''));
     if (!n) {
       D('list').innerHTML = '<div class=empty>队列是空的<br><span style="font-size:11.5px">把文件拖进窗口，或右键专辑/曲目「加入队列」</span></div>';
       return;
     }
-    var h = '<div class=qlist2>';
+    var qs = S.queueSort || 'default';
+    var h = '<div class="qsortbar" style="display:flex;justify-content:flex-end;align-items:center;padding:10px 20px 4px;gap:8px">' +
+            '<span style="font-size:12px;color:var(--mut2)">排序：</span>' +
+            '<select id=qSort class="track-sort sort-select" title="只改变队列顺序，不改变正在播放的那一首">' +
+            '<option value=default' + (qs === 'default' ? ' selected' : '') + '>默认顺序</option>' +
+            '<option value=title' + (qs === 'title' ? ' selected' : '') + '>标题</option>' +
+            '<option value=artist' + (qs === 'artist' ? ' selected' : '') + '>艺术家</option>' +
+            '<option value=album' + (qs === 'album' ? ' selected' : '') + '>专辑</option>' +
+            '<option value=dur' + (qs === 'dur' ? ' selected' : '') + '>时长</option>' +
+            '<option value=year' + (qs === 'year' ? ' selected' : '') + '>年份</option>' +
+            '<option value=shuffle' + (qs === 'shuffle' ? ' selected' : '') + '>随机打乱</option>' +
+            '<option value=reverse' + (qs === 'reverse' ? ' selected' : '') + '>反转顺序</option>' +
+            '</select></div>';
+    h += '<div class=qlist2>';
     S.q.items.forEach(function (f, i) {
       h += '<div class="qrow' + (i === S.q.index ? ' on' : '') + '" data-i=' + i + ' draggable=true>' +
            '<span class=qn>' + (i + 1) + '</span>' +
@@ -8645,6 +8982,8 @@ function renderQueuePage() {
         api('/api/qdel?i=' + i, '').then(function () { toast('已移除'); renderQueuePage(); loadQ(); });
       };
     });
+    if (D('qSort')) D('qSort').onchange = function () { applyQueueSort(this.value); };
+    if (D('qSaveSq')) D('qSaveSq').onclick = function () { saveQueueDialog(); };
     if (D('qClrAll')) D('qClrAll').onclick = function () {
       api('/api/clear', '').then(function () { toast('队列已清空'); renderQueuePage(); loadQ(); });
     };
@@ -9449,6 +9788,14 @@ document.addEventListener('visibilitychange', function () {
 
 /* ---------------- 启动 ---------------- */
 initFavs();
+renderSavedQueues();
+try {
+  window.playWholeListFrom = playWholeListFrom;
+  window.renderSavedQueues = renderSavedQueues;
+  window.loadFavs = loadFavs;
+  window.saveQueueDialog = saveQueueDialog;
+  window.applyQueueSort = applyQueueSort;
+} catch (e) { }
 if (D('npFavBtn')) D('npFavBtn').onclick = function (ev) { if (S.lastCur) toggleFav(S.lastCur, ev); };
 // 2026-10-26 F-1/B-3：底栏跑马灯。必须在 DOM 就绪后挂，且失败绝不能影响启动 —
 // 页面结构变了（缺 #mqTitle）时 mqMount() 会自己静默返回。

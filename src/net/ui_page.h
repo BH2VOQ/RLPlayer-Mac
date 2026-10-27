@@ -780,6 +780,25 @@ h += "#npPage .npedge{display:none}";
     h += ".plrow .n{font-size:11px;color:var(--mut2)}";
     h += ".plrow button{color:var(--mut2);font-size:14px;padding:0 5px}";
     h += ".plrow button:hover{color:var(--danger)}";
+    // 我的最爱
+    h += ".favhint{padding:8px 16px;font-size:12px;color:var(--txt2);background:var(--hov);border-radius:8px;margin-bottom:12px}";
+    h += ".favhead{display:grid;gap:8px;padding:6px 12px;font-size:11px;color:var(--mut2);border-bottom:1px solid var(--line);align-items:center}";
+    h += ".favrow{cursor:pointer}";
+    h += ".favrow.fsel{background:var(--hov);border-color:var(--acc-weak)}";
+    // 我的歌单（保存的队列）
+    h += ".sqlist{margin-top:4px;display:flex;flex-direction:column;gap:2px}";
+    h += ".sqhd{font-size:11px;font-weight:650;color:var(--mut2);padding:6px 14px 2px;letter-spacing:.3px}";
+    h += ".sqempty{font-size:10.5px;color:var(--mut);padding:2px 14px 6px;line-height:1.4}";
+    h += ".sqrow{display:flex;align-items:center;justify-content:space-between;padding:6px 14px;font-size:12px;border-radius:6px;cursor:pointer}";
+    h += ".sqrow:hover{background:var(--hov)}";
+    h += ".sqrow.on{background:var(--acc-weak);color:var(--acc-text);font-weight:600}";
+    h += ".sqrow .sqn{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}";
+    h += ".sqb{width:18px;height:18px;display:inline-flex;align-items:center;justify-content:center;font-size:12px;color:var(--mut);border-radius:4px;cursor:pointer;margin-left:4px}";
+    h += ".sqb:hover{color:var(--txt);background:var(--hov)}";
+    h += ".sqb.del:hover{color:var(--err)}";
+    // 队列排序条与队列增强
+    h += ".qsortbar{display:flex;justify-content:flex-end;align-items:center;padding:10px 20px 4px;gap:8px}";
+    h += ".qlist2{padding:4px 0 24px}";
     // 弹层与信号链（2026-10-25 Apple Music / Roon 高保真信号链重构）
     //   根因修复：之前 .cnode .k 与播放控制键 .k（width:32px;height:32px;display:grid）撞类名，
     //   导致信号链每个小标题都被撑成 32x32 的方块！且顶部 BIT-PERFECT 横幅也被画了红色圆点。
@@ -1095,6 +1114,8 @@ h += "#npPage .npedge{display:none}";
     h += "<div class=sec>播放列表</div>";
     h += "<div class=nav data-v=queue><svg viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='1.8'><path d='M4 6h10M4 12h10M4 18h7'/><path d='M17 15.5V7l4-1v8.5'/><circle cx='16' cy='16.5' r='1.6' fill='currentColor' stroke='none'/><circle cx='20' cy='15' r='1.6' fill='currentColor' stroke='none'/></svg>播放队列</div>";
     h += "<div class=nav data-v=recent><svg viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='1.8'><circle cx='12' cy='12' r='8.5'/><path d='M12 7.2V12l3.2 2'/></svg>最近播放</div>";
+    h += "<div class=nav data-v=favs><svg viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='1.8'><path d='M20.84 4.61a5.5 5.5 0 00-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 00-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 000-7.78z'/></svg>我的最爱</div>";
+    h += "<div id=sqList class=sqlist></div>";
     h += "<div class=sec>音频引擎</div>";
     // 2026-10-25（用户要求「这部分功能我感觉可以单做一个导航菜单」）：
     // 原来三张海报卡（无损音乐库 / 独占直通引擎 / PEQ 与 OPRA）+ 四格快捷入口
