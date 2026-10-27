@@ -902,11 +902,12 @@ h += "#npPage .npedge{display:none}";
     h += ".peqhd>.c,.peqc.c{text-align:center}";
     h += ".peqrows{max-height:340px;overflow:auto;border:1px solid var(--line);border-radius:8px}";
     h += ".peqr{padding:3px 8px;border-bottom:1px solid rgba(255,255,255,.05);background:var(--peq-r1)}";
-    h += ".peqr:nth-child(even){background:var(--peq-r2)}";
+    h += ".peqr{--peq-row-bg:var(--peq-r1);background-color:var(--peq-row-bg)}";
+    h += ".peqr:nth-child(even){--peq-row-bg:var(--peq-r2);background-color:var(--peq-row-bg)}";
     h += ".peqr:last-child{border-bottom:0}";
-    h += ".peqr:hover{background:var(--hov)}";
-    h += ".peqr.sel{background:var(--acc-weak);box-shadow:inset 2px 0 0 var(--acc)}";
-    h += ".peqr:focus{outline:0;background:var(--hov)}";
+    // 高亮与不透明行底色混合，结果仍为不透明色；不改全局输入框变量。
+    h += ".peqr:hover,.peqr:focus{outline:0;background-color:color-mix(in srgb,var(--txt) 6%,var(--peq-row-bg))}";
+    h += ".peqr.sel{background-color:color-mix(in srgb,var(--acc) 16%,var(--peq-row-bg));box-shadow:inset 2px 0 0 var(--acc)}";
     h += ".peqn{font-family:ui-monospace,Consolas,monospace;font-size:11px;color:var(--mut2);font-variant-numeric:tabular-nums;text-align:right;padding:0 6px}";
     h += ".peqr.sel .peqn{color:var(--acc-text);font-weight:700}";
     h += ".peqc{padding:0 6px;min-width:0}";

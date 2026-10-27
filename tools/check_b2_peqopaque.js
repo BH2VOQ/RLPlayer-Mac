@@ -31,6 +31,8 @@ function parseColor(str) {
   if (mRgba) {
     return { r: Number(mRgba[1]), g: Number(mRgba[2]), b: Number(mRgba[3]), a: Number(mRgba[4]) };
   }
+  const modern = str.match(/^color\(srgb\s+([\d.]+)\s+([\d.]+)\s+([\d.]+)(?:\s*\/\s*([\d.]+))?\)$/i);
+  if (modern) return {r: Math.round(+modern[1] * 255), g: Math.round(+modern[2] * 255), b: Math.round(+modern[3] * 255), a: modern[4] === undefined ? 1 : +modern[4]};
   return null;
 }
 
@@ -84,6 +86,21 @@ function parseColor(str) {
       check(styles.hdBg !== styles.r0Bg, `[theme=${theme}] peqhd != peqr(even)`, { hd: styles.hdBg, r0: styles.r0Bg });
       check(styles.r0Bg !== styles.r1Bg, `[theme=${theme}] zebra pattern: peqr(even) != peqr(odd)`, { r0: styles.r0Bg, r1: styles.r1Bg });
 
+      // 状态回归：背景声明会被 hover/selected/focus 替换，不能只测静态斑马纹。
+      const stateColors = await s.eval(`(() => {
+        const row = document.querySelector('#peqRows .peqr');
+        row.classList.add('sel');
+        const selected = getComputedStyle(row).backgroundColor;
+        row.classList.remove('sel');
+        const oldTab = row.getAttribute('tabindex');
+        row.setAttribute('tabindex', '0'); row.focus();
+        const focused = getComputedStyle(row).backgroundColor;
+        row.blur();
+        if (oldTab === null) row.removeAttribute('tabindex'); else row.setAttribute('tabindex', oldTab);
+        return { selected, focused };
+      })()`);
+      check(parseColor(stateColors.selected)?.a === 1, `[theme=${theme}] selected row stays opaque`, stateColors);
+      check(parseColor(stateColors.focused)?.a === 1, `[theme=${theme}] focused row stays opaque`, stateColors);
       await s.shot(path.join(out, `peq_${theme}.png`));
     }
 
