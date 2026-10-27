@@ -773,7 +773,7 @@ function params() {
          '&modorder=' + (ADV.modorder || 5) +
           '&modfamily=' + encodeURIComponent(ADV.modfamily || 'dsd') +
          '&device=' + encodeURIComponent(ADV.device || '') +
-         '&bits=' + (ADV.bits || 0) +
+         '&bits=' + (ADV.bits !== undefined && ADV.bits !== null ? ADV.bits : 0) +
          // 2026-10-24（261024-02 #8）：源文件真实位深（bit-perfect 判据用；解码器容器位深不可靠）
          '&srcbits=' + ((S.curMeta && S.curMeta.bits) ? S.curMeta.bits : 0) +
          '&taps=' + (ADV.taps || 0) +
@@ -3867,7 +3867,7 @@ function saveSettings(immediate) {
   body += '&volume=' + S.vol + '&loudness=' + (D('sLoud').checked ? '1' : '0');
   body += '&theme=' + encodeURIComponent(S.theme || 'dark');
   body += '&uistyle=' + encodeURIComponent(S.uiStyle || 'apple');
-  body += '&device=' + encodeURIComponent(ADV.device || '') + '&bits=' + (ADV.bits || 0)
+  body += '&device=' + encodeURIComponent(ADV.device || '') + '&bits=' + (ADV.bits !== undefined && ADV.bits !== null ? ADV.bits : 0)
         + '&taps=' + (ADV.taps || 0) + '&atten=' + (ADV.atten || 0)
         + '&transition=' + (ADV.transition || 0) + '&phase=' + encodeURIComponent(ADV.phase || '')
         + '&modorder=' + (ADV.modorder || 5) + '&modfamily=' + encodeURIComponent(ADV.modfamily || 'dsd') + '&modcut=' + (ADV.modcut || 0)
