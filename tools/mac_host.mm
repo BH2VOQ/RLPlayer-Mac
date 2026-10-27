@@ -1236,9 +1236,11 @@ reject:
     rlapp::request_shutdown();
 
     // 2. 停新请求来源，并等待**已派发**的 scheme worker 全部退出核心（_activeWorkers == 0）
-    if (![self.schemeHandler waitForInFlightTasksWithTimeout:30.0]) {
-        fprintf(stderr, "RLPlayer: 退出时仍有 scheme 任务未完成（已等待 30s，为保证内存与线程安全禁止继续析构）\n");
-        return;
+    // applicationWillTerminate 是通知，不是可否退出的询问；return 并不能阻止 exit。
+    // 诊断超时后继续等业务排空，绝不带着还访问核心的 worker 进入静态析构。
+    while (![self.schemeHandler waitForInFlightTasksWithTimeout:1.0]) {
+        fprintf(stderr, "RLPlayer: 退出仍在等待 %d 个业务 worker 安全结束\n",
+                [self.schemeHandler activeWorkersCount]);
     }
 
     // 3. 协作式收尾：此时保证无任何 scheme worker 在 handle()/核心内运行
