@@ -6301,13 +6301,13 @@ function npPickCastDevice(cb) {
   }).catch(function () { toast('设备发现失败（/api/cast/devices 无响应）'); cb(null); });
 }
 // 推送：落盘 backend=upnp + upnpdev，再按新参数重放当前曲
-function castPush(file, forcePick) {
+function castPush(file) {
   file = file || S.lastCur || '';
   if (!file) { toast('当前没有可推送的曲目'); return; }
   if (/^https?:/i.test(file)) { toast('网络曲目暂不支持投放'); return; }
   var go = function (dev) {
     if (!dev) return;
-    CAST.prevBackend = (ADV.backend && ADV.backend !== 'upnp') ? ADV.backend : (CAST.prevBackend || 'wasapi');
+    CAST.prevBackend = (ADV.backend && ADV.backend !== 'upnp') ? ADV.backend : (CAST.prevBackend || 'null');
     ADV.backend = 'upnp';
     ADV.upnpDev = dev;
     saveSettings();
@@ -6320,8 +6320,8 @@ function castPush(file, forcePick) {
 // 停止：停会话 → 回到推送前的输出后端 → 恢复本地播放
 function castStop() {
   api('/api/cast/stop', '').then(function () {
-    var back = CAST.prevBackend || 'wasapi';
-    if (back === 'upnp') back = 'wasapi';
+    var back = CAST.prevBackend || 'null';
+    if (back === 'upnp') back = 'null';
     ADV.backend = back;
     saveSettings();
     toast('已停止投放，输出回到 ' + back);
@@ -6347,11 +6347,11 @@ function castToggle() {
     if (D('castActChange')) {
       D('castActChange').onclick = function () {
         D('modal').classList.remove('on');
-        castPush(S.lastCur, true);
+        castPush(S.lastCur);
       };
     }
   } else {
-    castPush(S.lastCur, true);
+    castPush(S.lastCur);
   }
 }
 function npCastBtnHtml() {

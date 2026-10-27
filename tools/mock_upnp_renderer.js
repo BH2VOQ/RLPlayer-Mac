@@ -8,10 +8,17 @@
 // 用法：node tools/mock_upnp_renderer.js [port]   （默认 49199；GET /__state 可查调用记录）
 // 提供 description.xml + AVTransport/ConnectionManager/RenderingControl 控制面；
 // 只记录 SOAP 调用，不获取音频流、不出声。
-// 环境变量：MOCK_UPNP_NO_RC=1 时不声明 RenderingControl 服务。
+// 环境变量：MOCK_UPNP_NO_RC=1 时不声明 RenderingControl 服务；
+//          MOCK_UPNP_UDN 可指定 UDN（默认 uuid:mock-0000-1111-2222-333344445555）；
+//          MOCK_UPNP_SSDP=1 时尝试作为 SSDP responder 响应 M-SEARCH（本机 UDP 1900 无属主才绑定）。
 const http = require('http');
+const dgram = require('dgram');
 const PORT = parseInt(process.argv[2] || '49199', 10);
 const state = { transport: 'STOPPED', uri: '', positionSec: 0, duration: '00:00:10', volume: 50, calls: [] };
+
+function xmlEscape(s) {
+  return String(s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&apos;');
+}
 
 const description = () => {
   const includeRc = !process.env.MOCK_UPNP_NO_RC;
@@ -28,13 +35,15 @@ const description = () => {
       '<serviceId>urn:upnp-org:serviceId:RenderingControl</serviceId>' +
       '<controlURL>/ctl/rc</controlURL><eventSubURL>/evt/rc</eventSubURL><SCPDURL>/rc.xml</SCPDURL></service>';
   }
+  const friendlyName = xmlEscape(process.env.MOCK_UPNP_NAME || 'Mock-N1000-Renderer');
+  const udn = xmlEscape(process.env.MOCK_UPNP_UDN || 'uuid:mock-0000-1111-2222-333344445555');
   return '<?xml version="1.0"?>' +
     '<root xmlns="urn:schemas-upnp-org:device-1-0">' +
     '<specVersion><major>1</major><minor>0</minor></specVersion>' +
     '<device><deviceType>urn:schemas-upnp-org:device:MediaRenderer:1</deviceType>' +
-    '<friendlyName>' + (process.env.MOCK_UPNP_NAME || 'Mock-N1000-Renderer') + '</friendlyName><manufacturer>RLPlayer</manufacturer>' +
+    '<friendlyName>' + friendlyName + '</friendlyName><manufacturer>RLPlayer</manufacturer>' +
     '<modelName>RLPlayer Mock Renderer</modelName>' +
-    '<UDN>uuid:mock-0000-1111-2222-333344445555</UDN>' +
+    '<UDN>' + udn + '</UDN>' +
     '<serviceList>' + services + '</serviceList></device></root>';
 };
 
@@ -137,4 +146,41 @@ const srv = http.createServer((req, res) => {
     res.end(envelope(serviceType, action, inner));
   });
 });
-srv.listen(PORT, '127.0.0.1', () => console.log('mock renderer on http://127.0.0.1:' + PORT + '/'));
+srv.listen(PORT, '127.0.0.1', () => {
+  console.log('mock renderer on http://127.0.0.1:' + PORT + '/');
+
+  if (process.env.MOCK_UPNP_SSDP === '1') {
+    try {
+      const udp = dgram.createSocket({ type: 'udp4', reuseAddr: true });
+      udp.on('error', (err) => {
+        console.log('[SSDP] socket error (ignored):', err.message);
+      });
+      udp.on('message', (msg, rinfo) => {
+        const s = msg.toString();
+        // 限定响应针对 MediaRenderer 或 ssdp:all 的 M-SEARCH 测试
+        if (s.includes('M-SEARCH') && (s.includes('MediaRenderer') || s.includes('ssdp:all') || s.includes('rootdevice'))) {
+          const udn = process.env.MOCK_UPNP_UDN || 'uuid:mock-0000-1111-2222-333344445555';
+          const resp =
+            'HTTP/1.1 200 OK\r\n' +
+            'CACHE-CONTROL: max-age=1800\r\n' +
+            'EXT:\r\n' +
+            'LOCATION: http://127.0.0.1:' + PORT + '/description.xml\r\n' +
+            'SERVER: POSIX/1.0 UPnP/1.0 RLPlayerMock/1.0\r\n' +
+            'ST: urn:schemas-upnp-org:device:MediaRenderer:1\r\n' +
+            'USN: ' + udn + '::urn:schemas-upnp-org:device:MediaRenderer:1\r\n\r\n';
+          udp.send(Buffer.from(resp), rinfo.port, rinfo.address, () => {});
+        }
+      });
+      udp.bind(1900, '0.0.0.0', () => {
+        try {
+          udp.addMembership('239.255.255.250');
+          console.log('[SSDP] responder bound to 0.0.0.0:1900 and joined 239.255.255.250');
+        } catch (e) {
+          console.log('[SSDP] addMembership failed (ignored):', e.message);
+        }
+      });
+    } catch (e) {
+      console.log('[SSDP] bind failed (ignored):', e.message);
+    }
+  }
+});
