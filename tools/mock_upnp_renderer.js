@@ -32,7 +32,7 @@ const description = () => {
     '<root xmlns="urn:schemas-upnp-org:device-1-0">' +
     '<specVersion><major>1</major><minor>0</minor></specVersion>' +
     '<device><deviceType>urn:schemas-upnp-org:device:MediaRenderer:1</deviceType>' +
-    '<friendlyName>Mock-N1000-Renderer</friendlyName><manufacturer>RLPlayer</manufacturer>' +
+    '<friendlyName>' + (process.env.MOCK_UPNP_NAME || 'Mock-N1000-Renderer') + '</friendlyName><manufacturer>RLPlayer</manufacturer>' +
     '<modelName>RLPlayer Mock Renderer</modelName>' +
     '<UDN>uuid:mock-0000-1111-2222-333344445555</UDN>' +
     '<serviceList>' + services + '</serviceList></device></root>';

@@ -1,0 +1,18 @@
+Testing against http://127.0.0.1:19105
+[CASE 3] 测试无设备时点击...
+Case 3 result: {
+  modalOn: false,
+  toastText: '未发现 UPnP / DLNA 渲染器（确认数播已开启 DLNA 且与本机同网段）',
+  errors: []
+}
+Case 3 PASS: 无设备时正确提示 toast: "未发现 UPnP / DLNA 渲染器（确认数播已开启 DLNA 且与本机同网段）"
+[CASE 1 & 2] 测试 2 台设备选择，点击弹窗并选中第二台...
+Case 1 result: {
+  modalOn: false,
+  mtitle: '信号链',
+  rowsCount: 0,
+  rowsText: [],
+  activeRowText: ''
+}
+
+CHECK FAILED: [CASE 1 FAILED] 点击推送到设备后，#modal 未打开

@@ -1,0 +1,37 @@
+Testing against http://127.0.0.1:19105
+[CASE 3] 测试无设备时点击...
+Case 3 result: {
+  modalOn: false,
+  toastText: '未发现 UPnP / DLNA 渲染器（确认数播已开启 DLNA 且与本机同网段）',
+  errors: []
+}
+Case 3 PASS: 无设备时正确提示 toast: "未发现 UPnP / DLNA 渲染器（确认数播已开启 DLNA 且与本机同网段）"
+[CASE 1 & 2] 测试 2 台设备选择，点击弹窗并选中第二台...
+Case 1 result: {
+  modalOn: true,
+  mtitle: '推送到设备',
+  rowsCount: 2,
+  rowsText: [
+    '客厅音箱 A1（当前设备） SoundPro X1 · 192.168.1.50',
+    '书房数播 B2 HiFi Player N1000 · 192.168.1.80'
+  ],
+  activeRowText: '客厅音箱 A1（当前设备）\nSoundPro X1 · 192.168.1.50'
+}
+正在点击第二台设备进行选中...
+Case 2 result: {
+  modalOn: false,
+  advUpnpDev: 'http://192.168.1.80:49152/description.xml',
+  advBackend: 'upnp'
+}
+Case 1 & 2 PASS: 弹窗展示 2 台设备，并成功选中第二台设备: http://192.168.1.80:49152/description.xml
+[CASE 4] 测试已在推送时再点，看到「停止 / 换设备」两选项...
+Case 4 result: {
+  modalOn: true,
+  mtitle: '投放控制',
+  modalHtml: '<div style="font-size:13px;line-height:1.6;margin-bottom:14px">当前正在推送到 <b>书房数播 B2 · HiFi Player N1000</b>。你可以选择更换推送到其他设备，或停止投放恢复本机播放。</div><div class="cast-actions"><button class="btn cast-act-change" id="castActChange" style="padding:7px 16px">换设备</button><button class="btn pri cast-act-stop" id="castActStop" style="padding:7px 16px">停止推送</button></div>',
+  hasStopBtn: true,
+  hasChangeBtn: true
+}
+Case 4 PASS: 正在推送时弹出操作浮层，包含停止与换设备选项
+
+ALL 4 B5 CHECKS PASSED!

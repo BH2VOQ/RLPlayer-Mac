@@ -6267,7 +6267,7 @@ function openModal(title, html) {
   D('mbody').innerHTML = html;
   m.classList.add('on');
 }
-// 未选设备时的设备选择浮层
+// 设备选择浮层（支持高亮当前设备、选择设备直接推送）
 function npPickCastDevice(cb) {
   api('/api/cast/devices?scan=1').then(function (j) {
     _castDevices = (j && j.devices) || [];
@@ -6277,10 +6277,16 @@ function npPickCastDevice(cb) {
       cb(null);
       return;
     }
+    var curDev = (ADV.upnpDev || '').trim();
+    if (CAST.state && CAST.state.running && CAST.state.device) {
+      curDev = CAST.state.device.trim();
+    }
     var h = '<div class=castpick>';
     _castDevices.forEach(function (d, i) {
-      h += '<button class=castpick-row data-i=' + i + '>' +
-           '<span class=cpn>' + esc(d.friendlyName || d.name || d.host) + '</span>' +
+      var val = castDevValue(d);
+      var isCur = (val === curDev);
+      h += '<button class="castpick-row' + (isCur ? ' active' : '') + '" data-i=' + i + '>' +
+           '<span class=cpn>' + esc(d.friendlyName || d.name || d.host) + (isCur ? '（当前设备）' : '') + '</span>' +
            '<span class=cph>' + esc((d.model ? d.model + ' · ' : '') + (d.host || '')) + '</span></button>';
     });
     h += '</div><div class=hint style="margin-top:10px">选中后会把当前曲目推送到该设备，之后的切歌/暂停/进度都作用在它上面。</div>';
@@ -6295,7 +6301,7 @@ function npPickCastDevice(cb) {
   }).catch(function () { toast('设备发现失败（/api/cast/devices 无响应）'); cb(null); });
 }
 // 推送：落盘 backend=upnp + upnpdev，再按新参数重放当前曲
-function castPush(file) {
+function castPush(file, forcePick) {
   file = file || S.lastCur || '';
   if (!file) { toast('当前没有可推送的曲目'); return; }
   if (/^https?:/i.test(file)) { toast('网络曲目暂不支持投放'); return; }
@@ -6309,9 +6315,7 @@ function castPush(file) {
     toast('已推送到 ' + castDevNameOf(dev));
     pollCastState(true);
   };
-  var dev = (ADV.upnpDev || '').trim();
-  if (dev) go(dev);
-  else npPickCastDevice(function (d) { if (d) go(d); });
+  npPickCastDevice(function (d) { if (d) go(d); });
 }
 // 停止：停会话 → 回到推送前的输出后端 → 恢复本地播放
 function castStop() {
@@ -6326,8 +6330,29 @@ function castStop() {
   }).catch(function () { toast('停止投放失败'); });
 }
 function castToggle() {
-  if (castRunning()) castStop();
-  else castPush(S.lastCur);
+  if (castRunning()) {
+    var curName = castDevNameOf((CAST.state || {}).device || ADV.upnpDev);
+    var h = '<div style="font-size:13px;line-height:1.6;margin-bottom:14px">当前正在推送到 <b>' + esc(curName) + '</b>。你可以选择更换推送到其他设备，或停止投放恢复本机播放。</div>';
+    h += '<div class=cast-actions>' +
+         '<button class="btn cast-act-change" id=castActChange style="padding:7px 16px">换设备</button>' +
+         '<button class="btn pri cast-act-stop" id=castActStop style="padding:7px 16px">停止推送</button>' +
+         '</div>';
+    openModal('投放控制', h);
+    if (D('castActStop')) {
+      D('castActStop').onclick = function () {
+        D('modal').classList.remove('on');
+        castStop();
+      };
+    }
+    if (D('castActChange')) {
+      D('castActChange').onclick = function () {
+        D('modal').classList.remove('on');
+        castPush(S.lastCur, true);
+      };
+    }
+  } else {
+    castPush(S.lastCur, true);
+  }
 }
 function npCastBtnHtml() {
   var running = castRunning();

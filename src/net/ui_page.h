@@ -571,8 +571,10 @@ h += "#npPage .npedge{display:none}";
     h += ".castpick{display:flex;flex-direction:column;gap:6px}";
     h += ".castpick-row{display:flex;flex-direction:column;align-items:flex-start;gap:2px;text-align:left;padding:10px 12px;border-radius:10px;border:1px solid var(--line);background:var(--bg3);cursor:pointer;transition:.14s;width:100%}";
     h += ".castpick-row:hover{border-color:var(--acc);background:var(--hov)}";
+    h += ".castpick-row.active{border-color:var(--acc);background:var(--hov);box-shadow:0 0 0 1.5px var(--acc)}";
     h += ".castpick-row .cpn{font-size:13px;font-weight:600;color:var(--txt)}";
     h += ".castpick-row .cph{font-size:11px;color:var(--mut2)}";
+    h += ".cast-actions{display:flex;gap:10px;margin-top:12px;justify-content:flex-end}";
     // 261024-04 #7：自动加载的一行状态（后台整理中 / 失败可点击重试）
     h += ".nprailhint{font-size:10.5px;line-height:1.5;color:var(--mut2);padding:3px 2px 0}";
     h += ".nprailhint .nprailerr{color:var(--warn);cursor:pointer}";
