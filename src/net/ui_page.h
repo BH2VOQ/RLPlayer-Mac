@@ -790,7 +790,9 @@ h += "#npPage .npedge{display:none}";
     h += ".favrow.fsel{background:var(--hov);border-color:var(--acc-weak)}";
     // 我的歌单（保存的队列）
     h += ".sqlist{margin-top:4px;display:flex;flex-direction:column;gap:2px}";
-    h += ".sqhd{font-size:11px;font-weight:650;color:var(--mut2);padding:6px 14px 2px;letter-spacing:.3px}";
+    h += ".sqhd{display:flex;align-items:center;justify-content:space-between;font-size:11px;font-weight:650;color:var(--mut2);padding:6px 14px 2px;letter-spacing:.3px}";
+    h += ".sqhd .sqnew-btn{font-size:11px;font-weight:500;color:var(--mut);background:none;border:0;padding:2px 6px;border-radius:4px;cursor:pointer}";
+    h += ".sqhd .sqnew-btn:hover{color:var(--txt);background:var(--hov)}";
     h += ".sqempty{font-size:10.5px;color:var(--mut);padding:2px 14px 6px;line-height:1.4}";
     h += ".sqrow{display:flex;align-items:center;justify-content:space-between;padding:6px 14px;font-size:12px;border-radius:6px;cursor:pointer}";
     h += ".sqrow:hover{background:var(--hov)}";

@@ -3085,9 +3085,9 @@ function renderSavedQueues() {
 }
 function paintSavedQueues() {
   var box = D('sqList'); if (!box) return;
-  var h = '<div class=sqhd>我的歌单</div>';
+  var h = '<div class=sqhd><span>我的歌单</span><button class=sqnew-btn id=sqNew title="新建空歌单">＋ 新建</button></div>';
   if (!S.sqs || !S.sqs.length) {
-    h += '<div class=sqempty>队列页「保存为歌单」可新建</div>';
+    h += '<div class=sqempty>点击右上角「＋ 新建」创建歌单</div>';
   } else {
     S.sqs.forEach(function (q, i) {
       h += '<div class="nav sqrow' + (S.view === 'sq' && S.sqName === q.name ? ' on' : '') + '" data-v=sq data-sq="' + esc(q.name) + '" data-i=' + i + '>' +
@@ -3097,6 +3097,10 @@ function paintSavedQueues() {
     });
   }
   box.innerHTML = h;
+  if (D('sqNew')) D('sqNew').onclick = function (ev) {
+    ev.stopPropagation();
+    newSavedQueueDialog();
+  };
   Array.prototype.forEach.call(box.querySelectorAll('.sqrow'), function (e) {
     var q = S.sqs[+e.dataset.i]; if (!q) return;
     e.onclick = function (ev) {
@@ -3160,6 +3164,82 @@ function playSavedQueue(name, i) {
     }).catch(function (e) { toast('播放失败: ' + e); });
   });
 }
+function newSavedQueueDialog() {
+  askText({ title: '新建歌单', ok: '创建', value: '',
+    placeholder: '例如 睡眠专区',
+    hint: '创建一份空歌单；可通过右键歌曲或单曲页「添加到歌单」加歌',
+    onOk: function (name) {
+      api('/api/sq/add?name=' + encodeURIComponent(name)).then(function (j) {
+        if (!j || !j.ok) { toast((j && j.error) || '创建失败'); return; }
+        toast('已新建歌单：' + j.name);
+        renderSavedQueues();
+        renderSavedQueuePage(j.name);
+      }).catch(function (e) { toast('创建失败: ' + e); });
+    } });
+}
+function pickSavedQueue(title, cb) {
+  api('/api/sq/list').then(function (j) {
+    var sqs = (j && j.queues) || [];
+    var h = '<div class=castpick style="max-height:360px;overflow-y:auto">';
+    if (!sqs.length) {
+      h += '<div class=hint style="padding:12px 4px">还没有歌单，可直接在上方新建</div>';
+    } else {
+      sqs.forEach(function (q, i) {
+        h += '<button class="castpick-row sqpick-item" data-i=' + i + ' style="padding:8px 12px">' +
+             '<span class=cpn>' + esc(q.name) + '</span>' +
+             '<span class=cph>' + q.n + ' 首曲目</span></button>';
+      });
+    }
+    h += '</div>' +
+         '<div style="margin-top:14px;padding-top:10px;border-top:1px solid var(--line);display:flex;justify-content:space-between;align-items:center">' +
+         '<button class="btn sec" id=pickNewSq>＋ 新建歌单…</button>' +
+         '<button class=btn id=pickCancelSq>取消</button></div>';
+    openModal(title || '选择目标歌单', h);
+    Array.prototype.forEach.call(D('mbody').querySelectorAll('.castpick-row'), function (b) {
+      b.onclick = function () {
+        var q = sqs[+b.dataset.i];
+        if (D('modal')) D('modal').classList.remove('on');
+        if (q && cb) cb(q.name);
+      };
+    });
+    if (D('pickCancelSq')) D('pickCancelSq').onclick = function () {
+      if (D('modal')) D('modal').classList.remove('on');
+    };
+    if (D('pickNewSq')) D('pickNewSq').onclick = function () {
+      if (D('modal')) D('modal').classList.remove('on');
+      askText({ title: '新建歌单', ok: '创建并选入', value: '',
+        placeholder: '例如 我的最爱',
+        onOk: function (name) {
+          api('/api/sq/add?name=' + encodeURIComponent(name)).then(function (res) {
+            if (!res || !res.ok) { toast((res && res.error) || '创建失败'); return; }
+            renderSavedQueues();
+            if (cb) cb(res.name);
+          }).catch(function (e) { toast('创建失败: ' + e); });
+        } });
+    };
+  }).catch(function (e) { toast('读取歌单列表失败: ' + e); });
+}
+function addToSavedQueue(file, cs, ce) {
+  if (!file) { toast('没有指定要添加的曲目'); return; }
+  pickSavedQueue('保存到歌单', function (sqName) {
+    if (!sqName) return;
+    var u = '/api/sq/add?name=' + encodeURIComponent(sqName) +
+            '&file=' + encodeURIComponent(file);
+    if (cs !== undefined && cs >= 0) u += '&cs=' + encodeURIComponent(cs);
+    if (ce !== undefined && ce >= 0) u += '&ce=' + encodeURIComponent(ce);
+    api(u).then(function (j) {
+      if (!j) { toast('添加失败'); return; }
+      if (!j.ok) {
+        if (j.duplicate) toast('已在歌单中');
+        else toast(j.error || '添加失败');
+        return;
+      }
+      toast('已加入歌单「' + sqName + '」（共 ' + j.count + ' 首）');
+      renderSavedQueues();
+      if (S.view === 'sq' && S.sqName === sqName) renderSavedQueuePage(sqName);
+    }).catch(function (e) { toast('添加失败: ' + e); });
+  });
+}
 function saveQueueDialog() {
   var n = (S.q && S.q.items) ? S.q.items.length : 0;
   if (!n) { toast('队列是空的，先加几首歌再保存'); return; }
@@ -3215,6 +3295,7 @@ function cueQuery(cs, ce) {
          (ce >= 0 ? ('&cue_end=' + encodeURIComponent(ce)) : '');
 }
 function playPath(f, cs, ce) {
+  S.lastCur = f;
   api('/api/play', 'file=' + encodeURIComponent(f) + cueQuery(cs, ce) + '&' + params()).then(function (j) {
     if (j && j.ok === false) { toast(j.error || '播放失败'); return; }
     toast('开始播放'); loadQ();
@@ -3325,6 +3406,7 @@ function showQueueRowMenu(i, ev) {
   box.innerHTML =
     '<div class=qmt title="' + esc(f) + '">' + esc(nam(f)) + '</div>' +
     '<button class=qm data-a=play>播放这首</button>' +
+    '<button class=qm data-a=addsq>保存到歌单…</button>' +
     '<button class=qm data-a=del>从队列移除</button>';
   document.body.appendChild(box);
   QMENU.el = box;
@@ -3337,6 +3419,11 @@ function showQueueRowMenu(i, ev) {
       if (a === 'play') {
         var c = (S.q.cues || [])[idx] || [-1, -1];
         playPath(items[idx], c[0], c[1]);
+        return;
+      }
+      if (a === 'addsq') {
+        var c2 = (S.q.cues || [])[idx] || [-1, -1];
+        addToSavedQueue(items[idx], c2[0], c2[1]);
         return;
       }
       // 移除：只有走到这里才真的改数据（右击本身不会）
@@ -6023,6 +6110,7 @@ function trackActionMenu(tk, x, y) {
   if (!tk || !tk.path) return;
   var items = [
     { k: 'queue', t: '加入播放队列', f: function () { addPathCue(tk.path, tk.cs, tk.ce); } },
+    { k: 'addsq', t: '保存到歌单…', f: function () { addToSavedQueue(tk.path, tk.cs, tk.ce); } },
   ];
   // 音质体检只对真实存在的本地文件有意义（网络曲目后端没有本地路径）
   if (!/^https?:/i.test(tk.path)) {
@@ -6243,6 +6331,9 @@ function npCastBtnHtml() {
   return '<button class="chip npcast' + (running ? ' on' : '') + '" id=npCastBtn title="' +
          (running ? '点击停止投放并恢复本机输出' : '把当前曲目推送到 UPnP / DLNA 设备') + '">' +
          castIconSvg() + (running ? ('已推送到 ' + esc(castDevNameOf((CAST.state || {}).device))) : '推送到设备') +
+         '</button>' +
+         '<button class="chip" id=npAddSq title="把当前曲目添加到指定歌单">' +
+         '<svg width=12 height=12 viewBox="0 0 24 24" fill=none stroke=currentColor stroke-width="2" style="vertical-align:-1px;margin-right:4px"><path d="M12 5v14M5 12h14"/></svg>添加到歌单' +
          '</button>';
 }
 
@@ -9205,6 +9296,11 @@ function renderQueuePage() {
         ev.stopPropagation();
         api('/api/qdel?i=' + i, '').then(function () { toast('已移除'); renderQueuePage(); loadQ(); });
       };
+      e.oncontextmenu = function (ev) {
+        ev.preventDefault();
+        ev.stopPropagation();
+        showQueueRowMenu(i, ev);
+      };
     });
     if (D('qSort')) D('qSort').onchange = function () { applyQueueSort(this.value); };
     if (D('qSaveSq')) D('qSaveSq').onclick = function () { saveQueueDialog(); };
@@ -9713,6 +9809,15 @@ function renderNp() {
     D('npMeta').innerHTML = (S.npMetaHtml || '') + npEqChipsHtml() + npCastBtnHtml();
     npBindEqChips();
     if (D('npCastBtn')) D('npCastBtn').onclick = castToggle;
+    if (D('npAddSq')) D('npAddSq').onclick = function () {
+      var curIdx = S.q ? S.q.index : -1;
+      var file = S.lastCur || (curIdx >= 0 && S.q && S.q.items ? S.q.items[curIdx] : '');
+      if (!file) { toast('当前没有播放曲目'); return; }
+      var cue = (curIdx >= 0 && S.q && S.q.cues) ? S.q.cues[curIdx] : null;
+      var cs = (cue && cue[0] !== undefined) ? cue[0] : -1;
+      var ce = (cue && cue[1] !== undefined) ? cue[1] : -1;
+      addToSavedQueue(file, cs, ce);
+    };
     applyCastUi();
   }
   updateFavUi();
@@ -10018,6 +10123,9 @@ try {
   window.renderSavedQueues = renderSavedQueues;
   window.loadFavs = loadFavs;
   window.saveQueueDialog = saveQueueDialog;
+  window.newSavedQueueDialog = newSavedQueueDialog;
+  window.addToSavedQueue = addToSavedQueue;
+  window.pickSavedQueue = pickSavedQueue;
   window.applyQueueSort = applyQueueSort;
 } catch (e) { }
 if (D('npFavBtn')) D('npFavBtn').onclick = function (ev) { if (S.lastCur) toggleFav(S.lastCur, ev); };

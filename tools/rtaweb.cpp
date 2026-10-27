@@ -6692,6 +6692,57 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
             j << "]}";
             return j.str();
         }
+        if (rq.path.rfind("/api/sq/add", 0) == 0) {
+            const std::string name = sqName(sqp("name"));
+            if (name.empty()) return "{\"ok\":false,\"error\":\"缺少歌单名字\"}";
+            const std::string file = sqp("file");
+            const std::string csS  = sqp("cs");
+            const std::string ceS  = sqp("ce");
+
+            double cs = -1.0;
+            double ce = -1.0;
+            if (!csS.empty()) {
+                try { cs = std::stod(csS); } catch (...) { cs = -1.0; }
+            }
+            if (!ceS.empty()) {
+                try { ce = std::stod(ceS); } catch (...) { ce = -1.0; }
+            }
+
+            size_t count = 0;
+            bool saved = false;
+            bool dup = false;
+            {
+                std::lock_guard<std::mutex> lk(g_sqMu);
+                SavedQueue* target = nullptr;
+                for (auto& q : g_sqList) {
+                    if (q.name == name) { target = &q; break; }
+                }
+                if (!target) {
+                    g_sqList.push_back(SavedQueue{name, {}});
+                    target = &g_sqList.back();
+                }
+
+                if (!file.empty()) {
+                    QItem item(file, cs, ce);
+                    for (const auto& it : target->items) {
+                        if (it.same(item)) { dup = true; break; }
+                    }
+                    if (dup) {
+                        return "{\"ok\":false,\"duplicate\":true,\"error\":\"已在歌单中\"}";
+                    }
+                    target->items.push_back(std::move(item));
+                }
+                count = target->items.size();
+                saved = sq_save_locked();
+            }
+
+            std::ostringstream j;
+            j << "{\"ok\":" << (saved ? "true" : "false")
+              << ",\"name\":\"" << jesc(name) << "\",\"count\":" << count;
+            if (!saved) j << ",\"error\":\"写入磁盘失败\"";
+            j << "}";
+            return j.str();
+        }
         if (rq.path.rfind("/api/sq/save", 0) == 0) {
             const std::string name = sqName(sqp("name"));
             if (name.empty()) return "{\"ok\":false,\"error\":\"缺少队列名字\"}";
@@ -7321,7 +7372,16 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
 
     if (rq.path.rfind("/api/add", 0) == 0) {
         ct = "application/json; charset=utf-8";
-        PlayParams p = parseForm(rq.body);   // 非 const：远程曲目会把 p.file 换成缓存路径
+        std::string formBody = rq.body;
+        const size_t qpos = rq.path.find('?');
+        if (qpos != std::string::npos) {
+            const std::string q = rq.path.substr(qpos + 1);
+            if (!q.empty()) {
+                if (!formBody.empty()) formBody += "&";
+                formBody += q;
+            }
+        }
+        PlayParams p = parseForm(formBody);   // 非 const：远程曲目会把 p.file 换成缓存路径
         // 远程曲目：先把原始文件完整下载到缓存，再走与本地完全相同的解码与 DSP 路径
         if (!p.remoteId.empty()) {
             std::string ferr;
