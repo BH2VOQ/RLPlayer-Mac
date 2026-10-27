@@ -34,6 +34,7 @@
 #include <fcntl.h>
 #include <poll.h>
 #include <ifaddrs.h>        // getifaddrs()：POSIX 枚举本机网卡的规范做法（见 upnp_local_ipv4）
+#include <net/if.h>         // if_nametoindex()：IP → 网卡索引（IP_BOUND_IF 用）
 #include <cerrno>
 #include "platform/time.h"   // 单调毫秒（语义 = GetTickCount64）
 #include "net/upnp_control.h"
@@ -119,6 +120,37 @@ inline int  io_getsockname(socket_t s, sockaddr* a, int* alen) {
 // 加入 SSDP 组播组 239.255.255.250。ifaddr 为 nullptr 表示让内核选接口。
 // macOS/POSIX 上这是收到"回给组播地址的应答"的必要条件（Linux 的默认行为更宽松，
 // 但显式加入在两平台都正确且无害）。
+// 把 socket 钉到指定本地地址所在的网卡（IP_BOUND_IF）。
+// 为什么需要：本机若有同网段的虚拟/共享接口（如 macOS「Internet 共享」的 bridge100，
+// 路由标志带 REJECT），内核会优先选它，导致 sendto 直接 EHOSTUNREACH —— SSDP 一台都搜不到。
+// IP_MULTICAST_IF 只改组播出口，改不了内核的单播路由选择，所以必须用 IP_BOUND_IF。
+// 非 macOS/BSD 平台没有 IP_BOUND_IF，退化为 no-op（Windows 由已有分支处理）。
+inline bool bind_to_interface(socket_t s, const std::string& localIp) {
+#if defined(__APPLE__) || defined(__FreeBSD__)
+    if (localIp.empty() || localIp == "0.0.0.0") return false;
+    // 用 getifaddrs 把 IP 映射成接口名，再取索引（没有现成的「IP→索引」API）
+    unsigned int idx = 0;
+    struct ifaddrs* ifs = nullptr;
+    if (::getifaddrs(&ifs) == 0) {
+        for (struct ifaddrs* it = ifs; it; it = it->ifa_next) {
+            if (!it->ifa_addr || it->ifa_addr->sa_family != AF_INET) continue;
+            char buf[64] = {0};
+            const sockaddr_in* sa = (const sockaddr_in*)it->ifa_addr;
+            if (::inet_ntop(AF_INET, &sa->sin_addr, buf, sizeof(buf)) == nullptr) continue;
+            if (localIp != buf) continue;
+            idx = ::if_nametoindex(it->ifa_name);
+            break;
+        }
+        ::freeifaddrs(ifs);
+    }
+    if (idx == 0) return false;
+    return ::setsockopt(s, IPPROTO_IP, IP_BOUND_IF, &idx, sizeof(idx)) == 0;
+#else
+    (void)s; (void)localIp;
+    return false;
+#endif
+}
+
 inline bool join_multicast(socket_t s, const in_addr* ifaddr) {
     ip_mreq mreq{};
     mreq.imr_multiaddr.s_addr = ::inet_addr("239.255.255.250");
@@ -410,7 +442,15 @@ inline std::vector<UpnpDevice> upnp_discover(int timeoutMs = 1800, UpnpDiscoverD
             local.sin_addr = ifaddr;
             // bind 失败也继续（退回任意地址绑定），但组播出口仍按该网卡设置
             (void)upnp_os::io_bind(s, (sockaddr*)&local, sizeof(local));
+            // 2026-10-28 真机事故：本机开了「Internet 共享」，存在一个同网段的 bridge100
+            // （inet 192.168.3.1，status: inactive，路由标志 REJECT）。内核会优先把发往
+            // 192.168.3.x 的包（含 SSDP 组播）丢给 bridge100，sendto 直接 EHOSTUNREACH，
+            // 结果是**一台设备都发现不了**（实测 route get 192.168.3.29 → interface: bridge100,
+            // flags: ...REJECT）。IP_MULTICAST_IF 只影响组播出口，管不了单播路由选择。
+            // 用 IP_BOUND_IF 把 socket 钉死在该网卡上（macOS/BSD 专有），强制走正确接口。
+            // 实测：加了这个之后 TCP 能连上 192.168.3.29:34535（设备真实在线）。
             upnp_os::set_opt(s, IPPROTO_IP, IP_MULTICAST_IF, &ifaddr, sizeof(ifaddr));
+            upnp_os::bind_to_interface(s, ip);
         }
         // 加入 SSDP 组播组：POSIX/macOS 上必须显式 IP_ADD_MEMBERSHIP，
         // 否则收不到渲染器回给 239.255.255.250:1900 的应答（Windows 上不强制，

@@ -3087,7 +3087,9 @@ function paintSavedQueues() {
   var box = D('sqList'); if (!box) return;
   var h = '<div class=sqhd><span>我的歌单</span><button class=sqnew-btn id=sqNew title="新建空歌单">＋ 新建</button></div>';
   if (!S.sqs || !S.sqs.length) {
-    h += '<div class=sqempty>点击右上角「＋ 新建」创建歌单</div>';
+    // 空状态直接做成可点的整行占位：不用去右上角找按钮，也不再多一行提示文字
+    //（2026-10-28 用户截图反馈「这里不太和谐」）。
+    h += '<div class=sqempty id=sqEmpty title="新建歌单">＋ 新建歌单</div>';
   } else {
     S.sqs.forEach(function (q, i) {
       h += '<div class="nav sqrow' + (S.view === 'sq' && S.sqName === q.name ? ' on' : '') + '" data-v=sq data-sq="' + esc(q.name) + '" data-i=' + i + '>' +
@@ -3098,6 +3100,10 @@ function paintSavedQueues() {
   }
   box.innerHTML = h;
   if (D('sqNew')) D('sqNew').onclick = function (ev) {
+    ev.stopPropagation();
+    newSavedQueueDialog();
+  };
+  if (D('sqEmpty')) D('sqEmpty').onclick = function (ev) {
     ev.stopPropagation();
     newSavedQueueDialog();
   };
@@ -6272,20 +6278,22 @@ function openModal(title, html) {
 }
 // 设备选择浮层（支持高亮当前设备、选择设备直接推送）
 function npPickCastDevice(cb) {
-  api('/api/cast/devices?scan=1').then(function (j) {
-    _castDevices = (j && j.devices) || [];
-    populateCastDevices();
-    if (!_castDevices.length) {
-      toast('未发现 UPnP / DLNA 渲染器（确认数播已开启 DLNA 且与本机同网段）');
-      cb(null);
-      return;
-    }
-    var curDev = (ADV.upnpDev || '').trim();
-    if (CAST.state && CAST.state.running && CAST.state.device) {
-      curDev = CAST.state.device.trim();
+  // 2026-10-28 用户实测：「点推送到设备也没有弹窗」。
+  // 根因：原实现是**先扫描再弹窗**，而 SSDP 扫描要 1.2s+（超时更久），扫不到设备时
+  // 只弹一个 toast 就 return —— 弹窗从头到尾不会出现，用户只看到"点了没反应"。
+  // 现在：**立刻弹窗**（带「正在搜索…」占位），扫描在弹窗里异步进行，结果到了再填充。
+  var curDev = (ADV.upnpDev || '').trim();
+  if (CAST.state && CAST.state.running && CAST.state.device) {
+    curDev = CAST.state.device.trim();
+  }
+  var known = (_castDevices || []).slice();
+  function rows(list) {
+    if (!list.length) {
+      return '<div class=castpick-empty>正在搜索局域网里的设备…<br>' +
+             '<span class=hint>若一直搜不到：确认数播已开启 DLNA，且与本机在同一网段</span></div>';
     }
     var h = '<div class=castpick>';
-    _castDevices.forEach(function (d, i) {
+    list.forEach(function (d, i) {
       var val = castDevValue(d);
       var isCur = (val === curDev);
       h += '<button class="castpick-row' + (isCur ? ' active' : '') + '" data-i=' + i + '>' +
@@ -6293,15 +6301,52 @@ function npPickCastDevice(cb) {
            '<span class=cph>' + esc((d.model ? d.model + ' · ' : '') + (d.host || '')) + '</span></button>';
     });
     h += '</div><div class=hint style="margin-top:10px">选中后会把当前曲目推送到该设备，之后的切歌/暂停/进度都作用在它上面。</div>';
-    openModal('推送到设备', h);
+    return h;
+  }
+  function bind(list) {
     Array.prototype.forEach.call(D('mbody').querySelectorAll('.castpick-row'), function (b) {
       b.onclick = function () {
-        var d = _castDevices[+b.dataset.i];
+        var d = list[+b.dataset.i];
         D('modal').classList.remove('on');
         cb(castDevValue(d));
       };
     });
-  }).catch(function () { toast('设备发现失败（/api/cast/devices 无响应）'); cb(null); });
+    var re = D('castRescan');
+    if (re) re.onclick = function () { load(true); };
+  }
+  function load(force) {
+    if (D('mbody')) {
+      D('mbody').innerHTML = rows(force ? [] : known) +
+        '<div style="margin-top:12px"><button class="btn" id=castRescan>重新搜索</button></div>';
+      bind(force ? [] : known);
+    }
+    api('/api/cast/devices' + (force ? '?scan=1' : '')).then(function (j) {
+      var list = (j && j.devices) || [];
+      _castDevices = list;
+      known = list;
+      populateCastDevices();
+      // 弹窗可能已被用户关掉：只在它还开着时刷新，避免"背后改 DOM"
+      if (D('mbody') && D('modal').classList.contains('on')) {
+        D('mbody').innerHTML = rows(list) +
+          '<div style="margin-top:12px"><button class="btn" id=castRescan>重新搜索</button></div>';
+        bind(list);
+      }
+      if (!list.length) {
+        toast('未发现 UPnP / DLNA 渲染器（确认数播已开启 DLNA 且与本机同网段）');
+      }
+    }).catch(function () {
+      if (D('mbody') && D('modal').classList.contains('on')) {
+        D('mbody').innerHTML = '<div class=castpick-empty>设备搜索失败（/api/cast/devices 无响应）</div>' +
+          '<div style="margin-top:12px"><button class="btn" id=castRescan>重试</button></div>';
+        bind([]);
+      }
+      toast('设备发现失败（/api/cast/devices 无响应）');
+    });
+  }
+  openModal('推送到设备', rows(known) +
+    '<div style="margin-top:12px"><button class="btn" id=castRescan>重新搜索</button></div>');
+  bind(known);
+  load(false);
 }
 // 推送：落盘 backend=upnp + upnpdev，再按新参数重放当前曲
 function castPush(file) {

@@ -137,15 +137,31 @@ public:
             return {false, "音频文件不存在: " + p.file};
         }
 
+        // 先把「上一次会话是否还在跑」判掉（短锁），再在锁外 join —— 原来是在持有 mtx_
+        // 的情况下 join，worker 退出前若还需要 mtx_ 就会互等；同时和 stop() 共用 threadMx_，
+        // 避免两处同时取同一个 std::thread 造成重复 join。
+        {
+            std::lock_guard<std::mutex> lk(mtx_);
+            if (state_.running) {
+                return {false, "已有投放会话正在进行中，请先停止"};
+            }
+        }
+        std::thread prev;
+        {
+            std::lock_guard<std::mutex> tlk(threadMx_);
+            if (workerThread_.joinable()) {
+                if (workerThread_.get_id() == std::this_thread::get_id()) {
+                    workerThread_.detach();
+                } else {
+                    prev = std::move(workerThread_);
+                }
+            }
+        }
+        if (prev.joinable()) {
+            try { prev.join(); } catch (...) { /* 同 stop()：join 失败不打成 500 */ }
+        }
+
         std::lock_guard<std::mutex> lk(mtx_);
-        if (state_.running) {
-            return {false, "已有投放会话正在进行中，请先停止"};
-        }
-
-        if (workerThread_.joinable()) {
-            workerThread_.join();
-        }
-
         stopReq_.store(false);
         pauseReq_.store(false);
         seekReq_.store(-1.0);
@@ -170,9 +186,12 @@ public:
         state_.currentVolume = -1;
         state_.lastVolumeError.clear();
 
-        workerThread_ = std::thread([this, p]() {
-            run_worker(p);
-        });
+        {
+            std::lock_guard<std::mutex> tlk(threadMx_);
+            workerThread_ = std::thread([this, p]() {
+                run_worker(p);
+            });
+        }
 
         return {true, ""};
     }
@@ -206,8 +225,29 @@ public:
 
     bool stop() {
         stopReq_.store(true);
-        if (workerThread_.joinable()) {
-            workerThread_.join();
+        // 2026-10-28 真机事故：`/api/cast/stop` 反复打「DISPATCH 异常已拦截」。
+        // 根因：这里直接 join()，三种情况都会抛 std::system_error 并把整个请求打成 500：
+        //   ① 在 worker 线程内部调用（自己 join 自己 → "Resource deadlock avoided"）；
+        //   ② 两个请求并发调用 stop()，同一 thread 被 join 两次；
+        //   ③ worker 已 detach/失效。
+        // 现在：用独立互斥量把 thread 对象「取出来」，再在锁外 join，且不 join 自身。
+        std::thread toJoin;
+        {
+            std::lock_guard<std::mutex> tlk(threadMx_);
+            if (workerThread_.joinable()) {
+                if (workerThread_.get_id() == std::this_thread::get_id()) {
+                    workerThread_.detach();       // 自己不能 join 自己
+                } else {
+                    toJoin = std::move(workerThread_);
+                }
+            }
+        }
+        if (toJoin.joinable()) {
+            try {
+                toJoin.join();
+            } catch (...) {
+                // join 失败不能把 HTTP 请求打成 500；状态清理照常往下走
+            }
         }
         std::lock_guard<std::mutex> lk(mtx_);
         state_.running = false;
@@ -651,6 +691,7 @@ private:
     std::atomic<double>     seekReq_{-1.0};
     std::atomic<double>     volumeReqDb_{1.0}; // <=0.0 为有效音量请求，1.0 为无请求
     std::thread             workerThread_;
+    std::mutex              threadMx_;    // 保护 workerThread_ 的取出/join（见 stop() 注释）
 
     std::mutex              devMutex_;
     std::vector<UpnpDevice> cachedDevices_;

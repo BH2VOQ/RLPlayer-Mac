@@ -792,11 +792,20 @@ h += "#npPage .npedge{display:none}";
     h += ".favrow.fsel{background:var(--hov);border-color:var(--acc-weak)}";
     // 我的歌单（保存的队列）
     h += ".sqlist{margin-top:4px;display:flex;flex-direction:column;gap:2px}";
-    h += ".sqhd{display:flex;align-items:center;justify-content:space-between;font-size:11px;font-weight:650;color:var(--mut2);padding:6px 14px 2px;letter-spacing:.3px}";
-    h += ".sqhd .sqnew-btn{font-size:11px;font-weight:500;color:var(--mut);background:none;border:0;padding:2px 6px;border-radius:4px;cursor:pointer}";
+    // 2026-10-28 用户实测（截图圈出）：歌单区块与侧栏其它分组「不和谐」——
+    //   ① 标题用的是 6px/14px 的自定义内边距，而同侧栏分组标题 .sec 是 14px/11px、导航项 .nav 是 8px/11px，
+    //      三条竖线各错一点，视觉上就"歪"了；
+    //   ② 空状态那句「点击右上角「＋ 新建」创建歌单」既冗余（按钮就在同一行）又多余占一行；
+    //   ③ 行高比 .nav 矮（6px vs 8px），混排时节奏被打断。
+    // 现在：标题与 .sec 同基线、行项与 .nav 同内边距，空状态改成**可点的整行占位**（去掉那句提示）。
+    h += ".sqhd{display:flex;align-items:center;justify-content:space-between;margin:14px 11px 5px;font-size:11px;font-weight:600;color:var(--mut);letter-spacing:.5px}";
+    h += ".sqhd .sqnew-btn{font-size:11.5px;font-weight:500;color:var(--mut);background:none;border:0;padding:2px 6px;border-radius:6px;cursor:pointer;line-height:1.3}";
     h += ".sqhd .sqnew-btn:hover{color:var(--txt);background:var(--hov)}";
-    h += ".sqempty{font-size:10.5px;color:var(--mut);padding:2px 14px 6px;line-height:1.4}";
-    h += ".sqrow{display:flex;align-items:center;justify-content:space-between;padding:6px 14px;font-size:12px;border-radius:6px;cursor:pointer}";
+    // 边框盒子必须与 .nav 的盒子同左沿（12px），否则虚线框比导航行窄一格、"像从半截开始"；
+    // 内部 padding 仍用 11px，保证文字与导航行文字同基线（都从 23px 起）。
+    h += ".sqempty{display:flex;align-items:center;gap:6px;margin:2px 0 4px;padding:8px 11px;font-size:13px;color:var(--mut);border:1px dashed var(--line);border-radius:8px;cursor:pointer;transition:background .12s,color .12s}";
+    h += ".sqempty:hover{color:var(--txt);background:var(--hov);border-color:var(--line2,var(--line))}";
+    h += ".sqrow{display:flex;align-items:center;justify-content:space-between;padding:8px 11px;font-size:13px;border-radius:8px;cursor:pointer}";
     h += ".sqrow:hover{background:var(--hov)}";
     h += ".sqrow.on{background:var(--acc-weak);color:var(--acc-text);font-weight:600}";
     h += ".sqrow .sqn{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}";
