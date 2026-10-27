@@ -1,8 +1,8 @@
 {
-  "version": "1.1.0-beta",
-  "notes": "反馈通道上线：直接发送给开发者，不需要配置邮箱或注册账号。同时修复一键更新的三个真 BUG（悬垂引用/系统代理/诊断日志）。这是预发布版。",
-  "download_url": "https://github.com/BH2VOQ/RLPlayer-Mac/releases/download/v1.1.0-beta/RLPlayer-v1.1.0-beta-macOS-arm64.dmg",
-  "sha256": "9e0f392efacd33db531fca9770912391a727b45cd0d507e4788476aec68da684",
-  "size": 6877669,
-  "published_at": "2026-10-27T00:30:00Z"
+  "version": "1.1.0-beta4",
+  "notes": "修复真机实测反馈：① 修「无法播放」（设备层 Float32/24-in-32 不再被误判为不支持）；② 「推送到设备」改为先弹窗再扫描（原来扫不到就永远不弹）；③ 投放弹窗层级盖住单曲页、停止投放不再误报「开始播放」；④ 歌单区与侧栏对齐；⑤ 关闭即停播，收尾加 2.5s/3s 硬上限防挂死。这是预发布版。",
+  "download_url": "https://github.com/BH2VOQ/RLPlayer-Mac/releases/download/v1.1.0-beta4/RLPlayer-1.1.0-beta4-macOS-arm64.dmg",
+  "sha256": "c190a51a7942f2493c270b9947c29cc303fb80594a24e0aa0b277b44efa85855",
+  "size": 7154399,
+  "published_at": "2026-10-27T19:55:28Z"
 }
