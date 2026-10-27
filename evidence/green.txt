@@ -1,0 +1,35 @@
+PASS [theme=dark] peqhd background alpha == 1: {"bg":"rgb(38, 38, 43)","parsed":{"r":38,"g":38,"b":43,"a":1}}
+PASS [theme=dark] peqr(even) background alpha == 1: {"bg":"rgb(30, 30, 34)","parsed":{"r":30,"g":30,"b":34,"a":1}}
+PASS [theme=dark] peqr(odd) background alpha == 1: {"bg":"rgb(28, 28, 32)","parsed":{"r":28,"g":28,"b":32,"a":1}}
+PASS [theme=dark] peqhd != peqr(even): {"hd":"rgb(38, 38, 43)","r0":"rgb(30, 30, 34)"}
+PASS [theme=dark] zebra pattern: peqr(even) != peqr(odd): {"r0":"rgb(30, 30, 34)","r1":"rgb(28, 28, 32)"}
+PASS [theme=light] peqhd background alpha == 1: {"bg":"rgb(238, 240, 245)","parsed":{"r":238,"g":240,"b":245,"a":1}}
+PASS [theme=light] peqr(even) background alpha == 1: {"bg":"rgb(246, 247, 250)","parsed":{"r":246,"g":247,"b":250,"a":1}}
+PASS [theme=light] peqr(odd) background alpha == 1: {"bg":"rgb(255, 255, 255)","parsed":{"r":255,"g":255,"b":255,"a":1}}
+PASS [theme=light] peqhd != peqr(even): {"hd":"rgb(238, 240, 245)","r0":"rgb(246, 247, 250)"}
+PASS [theme=light] zebra pattern: peqr(even) != peqr(odd): {"r0":"rgb(246, 247, 250)","r1":"rgb(255, 255, 255)"}
+PASS [theme=blue] peqhd background alpha == 1: {"bg":"rgb(229, 239, 253)","parsed":{"r":229,"g":239,"b":253,"a":1}}
+PASS [theme=blue] peqr(even) background alpha == 1: {"bg":"rgb(237, 244, 253)","parsed":{"r":237,"g":244,"b":253,"a":1}}
+PASS [theme=blue] peqr(odd) background alpha == 1: {"bg":"rgb(248, 250, 255)","parsed":{"r":248,"g":250,"b":255,"a":1}}
+PASS [theme=blue] peqhd != peqr(even): {"hd":"rgb(229, 239, 253)","r0":"rgb(237, 244, 253)"}
+PASS [theme=blue] zebra pattern: peqr(even) != peqr(odd): {"r0":"rgb(237, 244, 253)","r1":"rgb(248, 250, 255)"}
+PASS [theme=classic-dark] peqhd background alpha == 1: {"bg":"rgb(17, 20, 27)","parsed":{"r":17,"g":20,"b":27,"a":1}}
+PASS [theme=classic-dark] peqr(even) background alpha == 1: {"bg":"rgb(12, 14, 19)","parsed":{"r":12,"g":14,"b":19,"a":1}}
+PASS [theme=classic-dark] peqr(odd) background alpha == 1: {"bg":"rgb(8, 9, 12)","parsed":{"r":8,"g":9,"b":12,"a":1}}
+PASS [theme=classic-dark] peqhd != peqr(even): {"hd":"rgb(17, 20, 27)","r0":"rgb(12, 14, 19)"}
+PASS [theme=classic-dark] zebra pattern: peqr(even) != peqr(odd): {"r0":"rgb(12, 14, 19)","r1":"rgb(8, 9, 12)"}
+PASS [theme=classic-light] peqhd background alpha == 1: {"bg":"rgb(238, 241, 246)","parsed":{"r":238,"g":241,"b":246,"a":1}}
+PASS [theme=classic-light] peqr(even) background alpha == 1: {"bg":"rgb(255, 255, 255)","parsed":{"r":255,"g":255,"b":255,"a":1}}
+PASS [theme=classic-light] peqr(odd) background alpha == 1: {"bg":"rgb(244, 246, 249)","parsed":{"r":244,"g":246,"b":249,"a":1}}
+PASS [theme=classic-light] peqhd != peqr(even): {"hd":"rgb(238, 241, 246)","r0":"rgb(255, 255, 255)"}
+PASS [theme=classic-light] zebra pattern: peqr(even) != peqr(odd): {"r0":"rgb(255, 255, 255)","r1":"rgb(244, 246, 249)"}
+PASS [theme=classic-blue] peqhd background alpha == 1: {"bg":"rgb(220, 235, 254)","parsed":{"r":220,"g":235,"b":254,"a":1}}
+PASS [theme=classic-blue] peqr(even) background alpha == 1: {"bg":"rgb(247, 251, 255)","parsed":{"r":247,"g":251,"b":255,"a":1}}
+PASS [theme=classic-blue] peqr(odd) background alpha == 1: {"bg":"rgb(233, 242, 255)","parsed":{"r":233,"g":242,"b":255,"a":1}}
+PASS [theme=classic-blue] peqhd != peqr(even): {"hd":"rgb(220, 235, 254)","r0":"rgb(247, 251, 255)"}
+PASS [theme=classic-blue] zebra pattern: peqr(even) != peqr(odd): {"r0":"rgb(247, 251, 255)","r1":"rgb(233, 242, 255)"}
+PASS peqrows scrolled to bottom: {"scrollTop":313}
+PASS peqhd stays sticky at container top: {"hdTop":482,"containerTop":481}
+PASS sticky peqhd background is opaque (alpha == 1): {"bg":"rgb(220, 235, 254)","parsed":{"r":220,"g":235,"b":254,"a":1}}
+
+TOTAL FAILURES: 0

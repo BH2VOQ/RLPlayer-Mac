@@ -40,6 +40,7 @@ inline std::string rta_ui_page() {
     // rgba(0,0,0,0)（透明）。修法（用户指定：优先补定义，不换引用）：各主题按自己的 --bg3 补齐。
     h += ":root{color-scheme:dark;"
          "--bg:#161618;--bg2:#1e1e22;--bg3:#26262b;--card:#26262b;"
+         "--peq-hd:#26262b;--peq-r1:#1c1c20;--peq-r2:#1e1e22;"
          "--topbg:rgba(22,22,24,.82);"
          "--barbg:rgba(40,40,46,.78);--bar-border:rgba(255,255,255,.12);--bar-shadow:0 16px 44px rgba(0,0,0,.55),0 2px 10px rgba(0,0,0,.30);"
          "--line:rgba(255,255,255,.08);--line2:rgba(255,255,255,.13);"
@@ -61,6 +62,7 @@ inline std::string rta_ui_page() {
     // Apple Music 浅色主题（对标用户截图：白底 + 灰分层 + 珊瑚红强调）
     h += "html[data-theme=light]{color-scheme:light;"
          "--bg:#ffffff;--bg2:#f2f2f6;--bg3:#f7f7fa;--card:#f7f7fa;"
+         "--peq-hd:#eef0f5;--peq-r1:#ffffff;--peq-r2:#f6f7fa;"
          "--topbg:rgba(255,255,255,.85);"
          "--barbg:rgba(246,246,249,.84);--bar-border:rgba(0,0,0,.085);--bar-shadow:0 12px 38px rgba(0,0,0,.13),0 2px 8px rgba(0,0,0,.05);"
          "--line:rgba(0,0,0,.08);--line2:rgba(0,0,0,.13);"
@@ -77,6 +79,7 @@ inline std::string rta_ui_page() {
     // Hi-Fi 冰蓝主题
     h += "html[data-theme=blue]{color-scheme:light;"
          "--bg:#f8faff;--bg2:#ecf2fc;--bg3:#f1f6fe;--card:#f1f6fe;"
+         "--peq-hd:#e5effd;--peq-r1:#f8faff;--peq-r2:#edf4fd;"
          "--topbg:rgba(248,250,255,.85);"
          "--barbg:rgba(242,247,255,.85);--bar-border:rgba(15,60,130,.10);--bar-shadow:0 12px 36px rgba(15,50,110,.13),0 2px 8px rgba(15,50,110,.05);"
          "--line:rgba(15,55,115,.09);--line2:rgba(15,55,115,.15);"
@@ -503,9 +506,9 @@ inline std::string rta_ui_page() {
     // 用户 2026-10-25：「可以在设置里切换 ui」。
     // 默认 data-uistyle=apple 为 Apple Music 风格（通顶侧栏 + 珊瑚红图标 + 底部徽标 + 悬浮播放胶囊 + 海报推荐页）；
     // 切到 data-uistyle=classic 时恢复经典工作台风格（蓝紫强调色 + 侧栏顶部品牌区 + 沉底贯通播放栏 + 经典居中卡片）。
-    h += "html[data-uistyle=classic]{--line:rgba(255,255,255,.07);--line2:rgba(255,255,255,.12);--hov:rgba(255,255,255,.05);--hov2:rgba(255,255,255,.10);--field:rgba(255,255,255,.06);--crumb:rgba(8,9,12,.94);--txt:#e8ecf4;--txt2:#c3cad6;--mut:#8b94a3;--mut2:#6b7482;--cvbg:#141821;--phbg:linear-gradient(135deg,#1a2030,#0d111a);--ph-txt:rgba(255,255,255,.14);--shadow:rgba(0,0,0,.55);--track:rgba(255,255,255,.10);--toast:rgba(14,17,24,.97);--bar-border:rgba(255,255,255,.09);--bar-shadow:0 10px 30px rgba(0,0,0,.5),0 1px 6px rgba(0,0,0,.35);--ok:#22c55e;--ok-bg:rgba(34,197,94,.14);--ok-line:rgba(34,197,94,.30);--ok-text:#4ade80;--warn:#f59e0b;--danger:#ef4444;--bp-direct:#a78bfa;--r-lg:12px;--r-md:9px;--r-sm:7px;--sh1:0 1px 2px var(--shadow);--sh2:0 12px 30px -18px var(--shadow);--sidew:226px;--bg:#08090c;--bg2:#0c0e13;--bg3:#11141b;--topbg:#08090c;--barbg:linear-gradient(180deg,#11141b,#0a0c10);--acc:#3b82f6;--acc2:#8b5cf6;--acc-weak:rgba(59,130,246,.16);--acc-text:#9dc0ff;--nav-on:linear-gradient(90deg,rgba(59,130,246,.24),rgba(59,130,246,.04));--nav-on-text:#cfe0ff}";
-    h += "html[data-uistyle=classic][data-theme=light]{--line:rgba(15,23,42,.10);--line2:rgba(15,23,42,.16);--hov:rgba(15,23,42,.04);--hov2:rgba(15,23,42,.08);--field:rgba(15,23,42,.035);--crumb:rgba(244,246,249,.96);--txt:#111827;--txt2:#374151;--mut:#6b7280;--mut2:#9ca3af;--cvbg:#e8ecf2;--phbg:linear-gradient(135deg,#e6ebf3,#d3dae5);--ph-txt:rgba(15,23,42,.14);--shadow:rgba(15,23,42,.14);--track:rgba(15,23,42,.10);--toast:rgba(255,255,255,.98);--bar-border:rgba(15,23,42,.10);--bar-shadow:0 10px 28px rgba(15,23,42,.10),0 1px 5px rgba(15,23,42,.06);--ok:#16a34a;--ok-bg:rgba(22,163,74,.12);--ok-line:rgba(22,163,74,.28);--ok-text:#15803d;--warn:#d97706;--danger:#dc2626;--bp-direct:#7c3aed;--bg:#f4f6f9;--bg2:#ffffff;--bg3:#eef1f6;--topbg:#f4f6f9;--barbg:linear-gradient(180deg,#ffffff,#f0f3f8);--acc:#2563eb;--acc2:#7c3aed;--acc-weak:rgba(37,99,235,.12);--acc-text:#1d4ed8;--nav-on:linear-gradient(90deg,rgba(37,99,235,.13),rgba(37,99,235,.02));--nav-on-text:#1e40af}";
-    h += "html[data-uistyle=classic][data-theme=blue]{--line:rgba(13,110,253,.14);--line2:rgba(13,110,253,.22);--hov:rgba(13,110,253,.06);--hov2:rgba(13,110,253,.12);--field:rgba(13,110,253,.045);--crumb:rgba(233,242,255,.96);--txt:#0b2545;--txt2:#1e3a5f;--mut:#5b7189;--mut2:#8aa0b8;--cvbg:#dbe9fc;--phbg:linear-gradient(135deg,#d8e8fd,#c2d8f5);--ph-txt:rgba(11,37,69,.14);--shadow:rgba(13,58,120,.16);--track:rgba(13,110,253,.12);--toast:rgba(247,251,255,.98);--bar-border:rgba(13,110,253,.16);--bar-shadow:0 10px 28px rgba(13,58,120,.12),0 1px 5px rgba(13,58,120,.06);--ok:#0d9488;--ok-bg:rgba(13,148,136,.12);--ok-line:rgba(13,148,136,.28);--ok-text:#0f766e;--warn:#b45309;--danger:#dc2626;--bp-direct:#6d28d9;--bg:#e9f2ff;--bg2:#f7fbff;--bg3:#dcebfe;--topbg:#e9f2ff;--barbg:linear-gradient(180deg,#f7fbff,#e4f0ff);--acc:#0d6efd;--acc2:#3b9bff;--acc-weak:rgba(13,110,253,.13);--acc-text:#0b5ed7;--nav-on:linear-gradient(90deg,rgba(13,110,253,.16),rgba(13,110,253,.02));--nav-on-text:#0a58ca}";
+    h += "html[data-uistyle=classic]{--line:rgba(255,255,255,.07);--line2:rgba(255,255,255,.12);--hov:rgba(255,255,255,.05);--hov2:rgba(255,255,255,.10);--field:rgba(255,255,255,.06);--crumb:rgba(8,9,12,.94);--txt:#e8ecf4;--txt2:#c3cad6;--mut:#8b94a3;--mut2:#6b7482;--cvbg:#141821;--phbg:linear-gradient(135deg,#1a2030,#0d111a);--ph-txt:rgba(255,255,255,.14);--shadow:rgba(0,0,0,.55);--track:rgba(255,255,255,.10);--toast:rgba(14,17,24,.97);--bar-border:rgba(255,255,255,.09);--bar-shadow:0 10px 30px rgba(0,0,0,.5),0 1px 6px rgba(0,0,0,.35);--ok:#22c55e;--ok-bg:rgba(34,197,94,.14);--ok-line:rgba(34,197,94,.30);--ok-text:#4ade80;--warn:#f59e0b;--danger:#ef4444;--bp-direct:#a78bfa;--r-lg:12px;--r-md:9px;--r-sm:7px;--sh1:0 1px 2px var(--shadow);--sh2:0 12px 30px -18px var(--shadow);--sidew:226px;--bg:#08090c;--bg2:#0c0e13;--bg3:#11141b;--topbg:#08090c;--barbg:linear-gradient(180deg,#11141b,#0a0c10);--acc:#3b82f6;--acc2:#8b5cf6;--acc-weak:rgba(59,130,246,.16);--acc-text:#9dc0ff;--nav-on:linear-gradient(90deg,rgba(59,130,246,.24),rgba(59,130,246,.04));--nav-on-text:#cfe0ff;--peq-hd:#11141b;--peq-r1:#08090c;--peq-r2:#0c0e13}";
+    h += "html[data-uistyle=classic][data-theme=light]{--line:rgba(15,23,42,.10);--line2:rgba(15,23,42,.16);--hov:rgba(15,23,42,.04);--hov2:rgba(15,23,42,.08);--field:rgba(15,23,42,.035);--crumb:rgba(244,246,249,.96);--txt:#111827;--txt2:#374151;--mut:#6b7280;--mut2:#9ca3af;--cvbg:#e8ecf2;--phbg:linear-gradient(135deg,#e6ebf3,#d3dae5);--ph-txt:rgba(15,23,42,.14);--shadow:rgba(15,23,42,.14);--track:rgba(15,23,42,.10);--toast:rgba(255,255,255,.98);--bar-border:rgba(15,23,42,.10);--bar-shadow:0 10px 28px rgba(15,23,42,.10),0 1px 5px rgba(15,23,42,.06);--ok:#16a34a;--ok-bg:rgba(22,163,74,.12);--ok-line:rgba(22,163,74,.28);--ok-text:#15803d;--warn:#d97706;--danger:#dc2626;--bp-direct:#7c3aed;--bg:#f4f6f9;--bg2:#ffffff;--bg3:#eef1f6;--topbg:#f4f6f9;--barbg:linear-gradient(180deg,#ffffff,#f0f3f8);--acc:#2563eb;--acc2:#7c3aed;--acc-weak:rgba(37,99,235,.12);--acc-text:#1d4ed8;--nav-on:linear-gradient(90deg,rgba(37,99,235,.13),rgba(37,99,235,.02));--nav-on-text:#1e40af;--peq-hd:#eef1f6;--peq-r1:#f4f6f9;--peq-r2:#ffffff}";
+    h += "html[data-uistyle=classic][data-theme=blue]{--line:rgba(13,110,253,.14);--line2:rgba(13,110,253,.22);--hov:rgba(13,110,253,.06);--hov2:rgba(13,110,253,.12);--field:rgba(13,110,253,.045);--crumb:rgba(233,242,255,.96);--txt:#0b2545;--txt2:#1e3a5f;--mut:#5b7189;--mut2:#8aa0b8;--cvbg:#dbe9fc;--phbg:linear-gradient(135deg,#d8e8fd,#c2d8f5);--ph-txt:rgba(11,37,69,.14);--shadow:rgba(13,58,120,.16);--track:rgba(13,110,253,.12);--toast:rgba(247,251,255,.98);--bar-border:rgba(13,110,253,.16);--bar-shadow:0 10px 28px rgba(13,58,120,.12),0 1px 5px rgba(13,58,120,.06);--ok:#0d9488;--ok-bg:rgba(13,148,136,.12);--ok-line:rgba(13,148,136,.28);--ok-text:#0f766e;--warn:#b45309;--danger:#dc2626;--bp-direct:#6d28d9;--bg:#e9f2ff;--bg2:#f7fbff;--bg3:#dcebfe;--topbg:#e9f2ff;--barbg:linear-gradient(180deg,#f7fbff,#e4f0ff);--acc:#0d6efd;--acc2:#3b9bff;--acc-weak:rgba(13,110,253,.13);--acc-text:#0b5ed7;--nav-on:linear-gradient(90deg,rgba(13,110,253,.16),rgba(13,110,253,.02));--nav-on-text:#0a58ca;--peq-hd:#dcebfe;--peq-r1:#e9f2ff;--peq-r2:#f7fbff}";
     h += "html[data-uistyle=classic] #app{grid-template-rows:52px minmax(0,1fr) 86px}";
     h += "html[data-uistyle=classic] .side{grid-row:1/3}";
     h += "html[data-uistyle=classic] .side-top{order:-2}";
@@ -893,12 +896,13 @@ h += "#npPage .npedge{display:none}";
     h += ".peqhd,.peqr{display:grid;grid-template-columns:var(--peqcols);gap:0 8px;align-items:center}";
     // 表头必须跟数据行【同一个滚动容器、同一个内容宽度】：否则滚动条宽度 + 表头自带边框
     // 会让两边的可用宽度差 8~10px，fr 列随之变宽，逐列中心偏差线性放大到 9px（实测 1.7/4.9/7.7/9.0）。
-    h += ".peqhd{position:sticky;top:0;z-index:3;background:var(--field);border-bottom:1px solid var(--line);padding:7px 8px;font-size:11px;font-weight:600;color:var(--mut2);letter-spacing:.2px}";
+    h += ".peqhd{position:sticky;top:0;z-index:3;background:var(--peq-hd);border-bottom:1px solid var(--line);padding:7px 8px;font-size:11px;font-weight:600;color:var(--mut2);letter-spacing:.2px}";
     h += ".peqhd>span{padding:0 6px;white-space:nowrap}";
     h += ".peqhd>.num,.peqc.num{text-align:right}";
     h += ".peqhd>.c,.peqc.c{text-align:center}";
     h += ".peqrows{max-height:340px;overflow:auto;border:1px solid var(--line);border-radius:8px}";
-    h += ".peqr{padding:3px 8px;border-bottom:1px solid rgba(255,255,255,.05)}";
+    h += ".peqr{padding:3px 8px;border-bottom:1px solid rgba(255,255,255,.05);background:var(--peq-r1)}";
+    h += ".peqr:nth-child(even){background:var(--peq-r2)}";
     h += ".peqr:last-child{border-bottom:0}";
     h += ".peqr:hover{background:var(--hov)}";
     h += ".peqr.sel{background:var(--acc-weak);box-shadow:inset 2px 0 0 var(--acc)}";

@@ -1,0 +1,20 @@
+FAIL [theme=dark] peqhd background alpha == 1: {"bg":"rgba(255, 255, 255, 0.07)","parsed":{"r":255,"g":255,"b":255,"a":0.07}}
+FAIL [theme=dark] peqr(even) background alpha == 1: {"bg":"rgba(0, 0, 0, 0)","parsed":{"r":0,"g":0,"b":0,"a":0}}
+FAIL [theme=dark] peqr(odd) background alpha == 1: {"bg":"rgba(0, 0, 0, 0)","parsed":{"r":0,"g":0,"b":0,"a":0}}
+PASS [theme=dark] peqhd != peqr(even): {"hd":"rgba(255, 255, 255, 0.07)","r0":"rgba(0, 0, 0, 0)"}
+FAIL [theme=dark] zebra pattern: peqr(even) != peqr(odd): {"r0":"rgba(0, 0, 0, 0)","r1":"rgba(0, 0, 0, 0)"}
+FAIL [theme=light] peqhd background alpha == 1: {"bg":"rgba(0, 0, 0, 0.05)","parsed":{"r":0,"g":0,"b":0,"a":0.05}}
+FAIL [theme=light] peqr(even) background alpha == 1: {"bg":"rgba(0, 0, 0, 0)","parsed":{"r":0,"g":0,"b":0,"a":0}}
+FAIL [theme=light] peqr(odd) background alpha == 1: {"bg":"rgba(0, 0, 0, 0)","parsed":{"r":0,"g":0,"b":0,"a":0}}
+PASS [theme=light] peqhd != peqr(even): {"hd":"rgba(0, 0, 0, 0.05)","r0":"rgba(0, 0, 0, 0)"}
+FAIL [theme=light] zebra pattern: peqr(even) != peqr(odd): {"r0":"rgba(0, 0, 0, 0)","r1":"rgba(0, 0, 0, 0)"}
+FAIL [theme=blue] peqhd background alpha == 1: {"bg":"rgba(15, 55, 115, 0.055)","parsed":{"r":15,"g":55,"b":115,"a":0.055}}
+FAIL [theme=blue] peqr(even) background alpha == 1: {"bg":"rgba(0, 0, 0, 0)","parsed":{"r":0,"g":0,"b":0,"a":0}}
+FAIL [theme=blue] peqr(odd) background alpha == 1: {"bg":"rgba(0, 0, 0, 0)","parsed":{"r":0,"g":0,"b":0,"a":0}}
+PASS [theme=blue] peqhd != peqr(even): {"hd":"rgba(15, 55, 115, 0.055)","r0":"rgba(0, 0, 0, 0)"}
+FAIL [theme=blue] zebra pattern: peqr(even) != peqr(odd): {"r0":"rgba(0, 0, 0, 0)","r1":"rgba(0, 0, 0, 0)"}
+PASS peqrows scrolled to bottom: {"scrollTop":313}
+PASS peqhd stays sticky at container top: {"hdTop":490,"containerTop":489}
+FAIL sticky peqhd background is opaque (alpha == 1): {"bg":"rgba(15, 55, 115, 0.055)","parsed":{"r":15,"g":55,"b":115,"a":0.055}}
+
+TOTAL FAILURES: 13
