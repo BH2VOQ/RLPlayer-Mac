@@ -123,6 +123,46 @@ inline bool all_digits(const std::string& s) {
     return true;
 }
 
+// 把「字母前缀 + 数字后缀」拆开（beta4 → ("beta","4")；beta → ("beta","")）。
+inline void split_alpha_num(const std::string& s, std::string* alpha, std::string* digits) {
+    size_t i = s.size();
+    while (i > 0 && s[i - 1] >= '0' && s[i - 1] <= '9') --i;
+    *alpha = s.substr(0, i);
+    *digits = s.substr(i);
+}
+
+// 纯数字串按数值比（等长时字典序等价于数值序；长度不同则长的更大）。
+inline int cmp_numeric_string(const std::string& x, const std::string& y) {
+    if (x.size() != y.size()) return x.size() < y.size() ? -1 : 1;
+    const int c = x.compare(y);
+    return c < 0 ? -1 : (c > 0 ? 1 : 0);
+}
+
+// 单个预发布标识符比较，返回 -1/0/1。
+//   纯数字 vs 纯数字   → 数值比
+//   纯数字 vs 含字母   → 数字更低（semver）
+//   含字母 vs 含字母   → 拆「字母前缀 + 数字后缀」：前缀字典序，后缀**数值**比
+//
+// 为什么必须拆后缀（2026-10-28 修）：原先含字母的标识符直接 x.compare(y) 走字典序，
+// 于是 "beta10" < "beta4"（'1' < '4'）。本项目实际发布的标签正是**不带点**的
+// 1.1.0-beta4 形式，一旦发到 beta10，装了 beta9 的用户会被判「已是最新」而收不到更新。
+// 这也与项目既有约定一致：预发布数字按数值比，不是按字符串（见 beta.2 vs beta.10 用例）。
+inline int compare_pre_identifier(const std::string& x, const std::string& y) {
+    const bool xd = all_digits(x);
+    const bool yd = all_digits(y);
+    if (xd && yd) return cmp_numeric_string(x, y);
+    if (xd != yd) return xd ? -1 : 1;              // 数字 < 字母
+    std::string xa, xn, ya, yn;
+    split_alpha_num(x, &xa, &xn);
+    split_alpha_num(y, &ya, &yn);
+    const int c = xa.compare(ya);
+    if (c != 0) return c < 0 ? -1 : 1;
+    if (xn.empty() && yn.empty()) return 0;
+    if (xn.empty()) return -1;                     // beta < beta4
+    if (yn.empty()) return 1;
+    return cmp_numeric_string(xn, yn);
+}
+
 // 去掉首尾空白（不修改入参）
 inline std::string trim(const std::string& s) {
     size_t b = 0, e = s.size();
@@ -220,32 +260,9 @@ inline VersionCmp compare_versions(const Version& a, const Version& b) {
 
     const size_t m = std::min(a.pre.size(), b.pre.size());
     for (size_t i = 0; i < m; ++i) {
-        const std::string& x = a.pre[i];
-        const std::string& y = b.pre[i];
-        const bool xd = detail::all_digits(x);
-        const bool yd = detail::all_digits(y);
-        if (xd && yd) {
-            // 按数值比（两位都 <= 9 位，atoll 安全；超长时退回按长度+字典序）
-            const std::string xs = x;
-            const std::string ys = y;
-            if (xs.size() != ys.size() && xs.size() <= 9 && ys.size() <= 9) {
-                const long long xn = std::atoll(xs.c_str());
-                const long long yn = std::atoll(ys.c_str());
-                if (xn < yn) return VersionCmp::Less;
-                if (xn > yn) return VersionCmp::Greater;
-            } else {
-                if (xs.size() != ys.size()) return xs.size() < ys.size() ? VersionCmp::Less : VersionCmp::Greater;
-                const int c = xs.compare(ys);
-                if (c < 0) return VersionCmp::Less;
-                if (c > 0) return VersionCmp::Greater;
-            }
-        } else if (xd != yd) {
-            return xd ? VersionCmp::Less : VersionCmp::Greater;   // 数字 < 字母
-        } else {
-            const int c = x.compare(y);
-            if (c < 0) return VersionCmp::Less;
-            if (c > 0) return VersionCmp::Greater;
-        }
+        const int c = detail::compare_pre_identifier(a.pre[i], b.pre[i]);
+        if (c < 0) return VersionCmp::Less;
+        if (c > 0) return VersionCmp::Greater;
     }
     if (a.pre.size() == b.pre.size()) return VersionCmp::Equal;
     return a.pre.size() < b.pre.size() ? VersionCmp::Less : VersionCmp::Greater;

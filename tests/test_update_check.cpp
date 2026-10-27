@@ -99,6 +99,13 @@ int main() {
     ck_cmp("1.0.5+build7", "1.0.5", VersionCmp::Equal);          // 构建元数据忽略
     // 1.5 预发布标识符长度（前缀短的更低）
     ck_cmp("1.0.5-beta", "1.0.5-beta.1", VersionCmp::Less);
+    // 1.5b 本轮真实用到的标签形式：**不带点**的 beta4（实际发版就是 1.1.0-beta4）
+    // 为什么必须单独测：现有用例只覆盖 "beta" vs "beta.1"（有点）。
+    // 如果不带点的 beta4 被判成"不更新"，装了 10-26 那版 1.1.0-beta 的用户就**永远收不到 beta4**。
+    ck_cmp("1.1.0-beta4", "1.1.0-beta",   VersionCmp::Greater);
+    ck_cmp("1.1.0-beta",  "1.1.0-beta4",  VersionCmp::Less);
+    ck_cmp("1.1.0-beta10", "1.1.0-beta4", VersionCmp::Greater);   // beta10 > beta4，不能按字符串比
+    ck_cmp("1.1.0-beta4", "1.1.0",        VersionCmp::Less);      // 预发布永远低于同号正式版
     // 1.6 数字段前缀 vs 正式版
     ck_cmp("1.0.5-alpha", "1.0.5-beta", VersionCmp::Less);       // 字典序
     ck_cmp("1.0.5-rc.1", "1.0.5",       VersionCmp::Less);
