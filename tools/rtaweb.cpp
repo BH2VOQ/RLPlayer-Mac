@@ -62,6 +62,7 @@ class CoreAudioSink;   // 本文件后部定义；render_loop 的 mac 遥测分�
 using rta::render::OutSink;
 using rta::render::SinkOpenOpts;
 #include "analysis/track_health.h"     // F-5：/api/track/health 音质体检（含 quality 19 项）
+#include "analysis/version_compare_json.h" // F-8: reachable comparison and valid JSON
 #include "meta/artwork.h"            // F-4：艺人头像全信源调度（provider.h 能力矩阵派生）
 #include "meta/enrich.h"            // 单曲元数据补全编排(播放触发 + /api/enrich + /api/meta 兜底)
 #include "meta/writeback.h"         // P2 标签写回(remux + PCM 逐位门禁;/api/writeback 三端点)
@@ -5159,6 +5160,8 @@ static bool is_side_effect_path(const std::string& p) {
         "/api/writeback", "/api/enrich", "/api/peq", "/api/opra/apply", "/api/cast/start",
         "/api/cast/stop", "/api/upnp", "/api/src", "/api/input/start", "/api/input/stop",
         "/api/buffer/reset", "/api/upload",
+        // CPU-intensive analysis must not be triggered by an incidental GET.
+        "/api/compare",
         // 预设的 apply 会写 rlplayer-settings.conf（副作用）；caps 是只读查询，不进这张表
         "/api/preset/apply",
         // 专辑封面预热（2026-10-26）：会落盘 covercache + 打网络。
@@ -5385,6 +5388,53 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
             return "{\"ok\":false,\"error\":\"取回的内容不是有效图片（无 JPEG/PNG 魔数）\"}";
         }
         return r.bytes;
+    }
+
+    // F-8: call both the analyzer and scorer; importing the header alone exposes no feature.
+    if (rq.path == "/api/compare") {
+        ct = "application/json; charset=utf-8";
+        std::vector<std::string> files;
+        if (!rq.body.empty() && rq.body.find_first_not_of(" \t\r\n") != std::string::npos &&
+            rq.body[rq.body.find_first_not_of(" \t\r\n")] == '{') {
+            const auto doc = rta::net::json_parse(rq.body);
+            const auto& paths = doc["files"];
+            for (size_t i = 0; i < paths.size(); ++i) {
+                if (paths.at(i).type != rta::net::Json::Str)
+                    return "{\"ok\":false,\"error\":\"files 必须为路径字符串数组\"}";
+                files.push_back(paths.at(i).s());
+            }
+        } else {
+            std::istringstream form(rq.body);
+            std::string part;
+            while (std::getline(form, part, '&')) {
+                const size_t eq = part.find('=');
+                if (eq == std::string::npos) continue;
+                const std::string key = urlDecode(part.substr(0, eq));
+                if (key == "file") files.push_back(urlDecode(part.substr(eq + 1)));
+            }
+        }
+        if (files.size() < 2 || files.size() > 8)
+            return "{\"ok\":false,\"error\":\"请选择 2～8 个版本\"}";
+        for (const auto& file : files) {
+            if (!valid_utf8(file)) return utf8_path_reject(file);
+            std::error_code ec;
+            if (file.find('\0') != std::string::npos || !fs::is_regular_file(fs::u8path(file), ec) || ec)
+                return "{\"ok\":false,\"error\":\"对比文件不存在或不是普通文件\"}";
+        }
+        // Bound concurrent analysis without serializing unrelated player requests.
+        static std::mutex compareMutex;
+        std::unique_lock<std::mutex> lock(compareMutex, std::try_to_lock);
+        if (!lock.owns_lock()) {
+            rta::net::webui_set_status(503);
+            return "{\"ok\":false,\"error\":\"已有版本对比正在分析，请稍后重试\"}";
+        }
+        try {
+            auto result = rta::analysis::compare_versions(files);
+            rta::analysis::score_versions(result);
+            return rta::analysis::version_compare_json(result);
+        } catch (const std::exception& e) {
+            return std::string("{\"ok\":false,\"error\":\"") + jesc(e.what()) + "\"}";
+        }
     }
 
     if (rq.path.rfind("/api/track/health", 0) == 0) {
@@ -6137,9 +6187,16 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
             const size_t q = rq.path.find("?mode=");
             if (q != std::string::npos) want = atoi(rq.path.c_str() + q + 6);
         }
-        if (want < 0) {   // 也接受表单体 mode=N
-            PlayParams p = parseForm(rq.body);
-            if (!p.rate.empty()) want = atoi(p.rate.c_str());
+        if (want < 0) {   // mode is not a playback sampling-rate parameter.
+            std::istringstream form(rq.body);
+            std::string part;
+            while (std::getline(form, part, '&')) {
+                const size_t eq = part.find('=');
+                if (eq == std::string::npos || urlDecode(part.substr(0, eq)) != "mode") continue;
+                const std::string value = urlDecode(part.substr(eq + 1));
+                if (!value.empty() && value.find_first_not_of("0123456789") == std::string::npos)
+                    want = (value.size() <= 2) ? atoi(value.c_str()) : 99;
+            }
         }
         if (rq.method == "POST" && want >= 0) {
             if (want > 3) want = 0;

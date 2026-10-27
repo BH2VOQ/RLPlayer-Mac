@@ -31,6 +31,25 @@ const path = require('path');
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+// Only terminate the isolated browser process that this helper spawned. Never
+// force-kill a process tree; retain its profile if graceful termination fails.
+async function stopOwnedBrowser(child, ms = 5000) {
+  if (child.exitCode !== null || child.signalCode !== null) return true;
+  return new Promise((resolve) => {
+    const onExit = () => { clearTimeout(timer); resolve(true); };
+    const timer = setTimeout(() => {
+      child.removeListener('exit', onExit);
+      resolve(false);
+    }, ms);
+    child.once('exit', onExit);
+    try { child.kill('SIGTERM'); } catch (e) {
+      clearTimeout(timer);
+      child.removeListener('exit', onExit);
+      resolve(child.exitCode !== null || child.signalCode !== null);
+    }
+  });
+}
+
 // Edge 候选路径：Windows 两种安装位置 + macOS 标准位置；另允许 EDGE_PATH 覆盖。
 const EDGE_CANDIDATES = [
   process.env.EDGE_PATH,
@@ -97,8 +116,9 @@ async function open(opt = {}) {
 
   const pages = await waitTargets(port);
   if (!pages) {
-    try { child.kill('SIGKILL'); } catch (e) { }
-    throw new Error('DevTools 端口没起来（port=' + port + '）。macOS 上通常是没有 --no-sandbox 导致 Edge 自杀。');
+    const stopped = await stopOwnedBrowser(child);
+    if (stopped) { try { fs.rmSync(udd, { recursive: true, force: true }); } catch (e) { } }
+    throw new Error('DevTools 端口没起来（port=' + port + '）；隔离浏览器 TERM=' + stopped);
   }
 
   const ws = new WebSocket(pages[0].webSocketDebuggerUrl);
@@ -170,10 +190,13 @@ async function open(opt = {}) {
     },
     async close() {
       try { ws.close(); } catch (e) { }
-      try { child.kill('SIGKILL'); } catch (e) { }
-      await sleep(150);
-      try { fs.rmSync(udd, { recursive: true, force: true }); } catch (e) { }
-      return { exited };
+      const stopped = await stopOwnedBrowser(child);
+      if (stopped) {
+        try { fs.rmSync(udd, { recursive: true, force: true }); } catch (e) { }
+      } else {
+        throw new Error('隔离浏览器未在 TERM 后退出；保留测试 profile，不做强杀');
+      }
+      return { exited: exited || stopped };
     },
   };
 

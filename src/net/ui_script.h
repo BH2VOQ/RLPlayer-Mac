@@ -2950,7 +2950,9 @@ function loadQ() {
     // cues 与 items 逐项对齐的 [起,止] 秒数组（后端 /api/queue；[-1,-1] = 整首）
     S.q = { items: j.items || [], cues: j.cues || [], index: j.index || 0 };
     if (D('sShuf')) D('sShuf').checked = !!j.shuffle;
-    if (D('sRep') && j.repeat !== undefined) { D('sRep').value = String(j.repeat); applyRep(j.repeat); }
+    // mode is authoritative; repeat=0 is only the legacy projection of random.
+    var mode = (typeof j.mode === 'number') ? j.mode : (j.shuffle ? 3 : (j.repeat || 0));
+    if (D('sRep')) { D('sRep').value = String(mode); applyRep(mode); }
     D('rcnt').textContent = '共 ' + S.q.items.length + ' 首';
     updateNextTrackInfo();
     if (!S.q.items.length) {
@@ -5550,6 +5552,99 @@ function pollCastState(once) {
    所以入口放右键菜单：零布局风险，且能顺手把原来的"右键=直接入队"变成可见选项
    （原来的入队仍然是第一项，老习惯不变）。
    菜单是绝对定位的临时节点，点任意处/滚动/ESC 都会关掉，不留残留 DOM。 */
+/* ---------------- 多版本对比（F-8，2026-10-27）----------------
+   数据源：POST /api/compare，body 为表单重复 file=<绝对路径>（2～8 个）。
+   为什么用表单而不是 JSON：本地 api() 只发 application/x-www-form-urlencoded，
+   后端同时接受两种写法，走表单就不必再引入第二套 fetch 封装。
+   口径（铁律 3）：分数/排名/解释全部由后端 version_compare.h 算出，前端只排版。 */
+var CMP = { files: [], busy: false };
+function cmpBase(p) { return String(p || '').replace(/^.*[\\/]/, ''); }
+function cmpNum(v, digits) { return qFmt(v, digits); }
+function renderCompare(r) {
+  if (!r || !r.ok) return '<div class=hint style="color:var(--warn)">' + esc((r && r.error) || '对比失败') + '</div>';
+  var vs = r.versions || [], rows = r.rows || [];
+  var h = '<div style="font-size:12px">';
+  if (r.sameTrack === false) h += '<div class=hint style="color:var(--warn)">⚠ 包络相关偏低，这些文件可能不是同一首曲子</div>';
+  h += '<div style="font-weight:650;margin:6px 0 4px">排序（好 → 差）</div><ol style="margin:0 0 10px 18px;padding:0">';
+  (r.ranking || []).forEach(function (i) {
+    var v = vs[i] || {};
+    h += '<li>' + esc(v.label || ('#' + i)) + ' <span style="color:var(--mut)">' + esc(cmpBase(v.path)) + '</span>' +
+         ' — <b>' + cmpNum(v.score, 1) + '</b> 分' +
+         (v.error ? ' <span style="color:var(--warn)">' + esc(v.error) + '</span>' : '') + '</li>';
+  });
+  h += '</ol><div style="max-height:42vh;overflow:auto"><table style="font-size:11.5px;border-collapse:collapse;width:100%">';
+  h += '<thead><tr><th style="text-align:left;padding:3px 8px 3px 0">指标</th>';
+  vs.forEach(function (v, i) {
+    h += '<th style="text-align:right;padding:3px 0 3px 10px;font-weight:600">' + esc(v.label || '') +
+         '<div style="font-weight:400;color:var(--mut2);font-size:10.5px;max-width:170px;overflow:hidden;' +
+         'text-overflow:ellipsis;white-space:nowrap">' + esc(cmpBase(v.path)) + '</div></th>';
+  });
+  h += '</tr></thead><tbody>';
+  rows.forEach(function (row) {
+    h += '<tr' + (row.comparable === false ? ' style="opacity:.55"' : '') +
+         '><td style="padding:2px 8px 2px 0;white-space:nowrap">' + esc(row.label || '') +
+         (row.unit ? ' <span style="color:var(--mut2)">' + esc(row.unit) + '</span>' : '') +
+         (row.comparable === false ? tip(row.why) : '') + '</td>';
+    (row.values || []).forEach(function (v, i) {
+      var best = (i === row.bestIndex && row.comparable !== false && !row.informational);
+      h += '<td style="text-align:right;padding:2px 0 2px 10px;font-variant-numeric:tabular-nums' +
+           (best ? ';font-weight:700;color:var(--acc)' : '') + '">' + cmpNum(v) + '</td>';
+    });
+    h += '</tr>';
+  });
+  h += '</tbody></table></div>';
+  h += '<div class=hint style="margin-top:8px;white-space:pre-wrap">' + esc(r.explanation || '') + '</div></div>';
+  return h;
+}
+function cmpRun() {
+  var sel = CMP.files.filter(function (f) { return f.on; }).map(function (f) { return f.path; });
+  if (sel.length < 2) { D('cmpMsg').textContent = '至少勾选 2 个版本'; return; }
+  if (sel.length > 8) { D('cmpMsg').textContent = '一次最多 8 个版本'; return; }
+  if (CMP.busy) return;
+  CMP.busy = true;
+  D('cmpMsg').textContent = '正在对齐并分析 ' + sel.length + ' 个版本…';
+  if (D('cmpGo')) D('cmpGo').disabled = true;
+  var body = sel.map(function (f) { return 'file=' + encodeURIComponent(f); }).join('&');
+  api('/api/compare', body).then(function (r) {
+    CMP.busy = false;
+    if (D('cmpGo')) D('cmpGo').disabled = false;
+    if (D('cmpMsg')) D('cmpMsg').textContent = '';
+    if (D('cmpOut')) D('cmpOut').innerHTML = renderCompare(r);
+  }).catch(function (e) {
+    CMP.busy = false;
+    if (D('cmpGo')) D('cmpGo').disabled = false;
+    if (D('cmpMsg')) D('cmpMsg').textContent = '对比失败：' + (e && e.message ? e.message : e);
+  });
+}
+function openCompareModal(path) {
+  var dir = String(path || '').replace(/[\\/][^\\/]*$/, '');
+  if (!dir) { toast('没有可对比的曲目'); return; }
+  openModal('对比版本', '<div class=hint>正在列出可选文件…</div>');
+  api('/api/files?dir=' + encodeURIComponent(dir)).then(function (j) {
+    var names = (j && j.files) || [];
+    if (!names.length) { D('mbody').innerHTML = '<div class=hint>该目录下没有可对比的音频文件</div>'; return; }
+    var base = cmpBase(path);
+    CMP.files = names.map(function (n) { return { path: dir + '/' + n, on: n === base }; });
+    var h = '<div class=hint style="margin-bottom:8px">' + esc(dir) +
+            '：勾选 2～8 个版本（同一首曲子的不同转制/母带）</div>' +
+            '<div style="max-height:46vh;overflow:auto;display:flex;flex-direction:column;gap:2px">';
+    CMP.files.forEach(function (f, i) {
+      h += '<label style="font-size:12px;display:flex;gap:8px;align-items:center">' +
+           '<input type=checkbox class=cmpck data-i=' + i + (f.on ? ' checked' : '') + '>' +
+           esc(cmpBase(f.path)) + '</label>';
+    });
+    h += '</div><div style="display:flex;gap:10px;align-items:center;margin-top:10px">' +
+         '<button class="btn pri" id=cmpGo>开始对比</button><span class=hint id=cmpMsg></span></div>' +
+         '<div id=cmpOut></div>';
+    D('mbody').innerHTML = h;
+    Array.prototype.forEach.call(document.querySelectorAll('#mbody .cmpck'), function (c) {
+      c.onchange = function () { CMP.files[+this.dataset.i].on = this.checked; };
+    });
+    if (D('cmpGo')) D('cmpGo').onclick = cmpRun;
+  }).catch(function (e) {
+    D('mbody').innerHTML = '<div class=hint style="color:var(--warn)">列目录失败：' + esc(String(e && e.message || e)) + '</div>';
+  });
+}
 function trackActionMenu(tk, x, y) {
   var old = D('__tmenu');
   if (old) old.remove();
@@ -5560,6 +5655,8 @@ function trackActionMenu(tk, x, y) {
   // 音质体检只对真实存在的本地文件有意义（网络曲目后端没有本地路径）
   if (!/^https?:/i.test(tk.path)) {
     items.push({ k: 'quality', t: '音质体检…', f: function () { openQualityModal(tk.path); } });
+    // F-8：同目录多版本对比（2～8 个）。只对本地文件有意义。
+    items.push({ k: 'compare', t: '对比同目录版本…', f: function () { openCompareModal(tk.path); } });
   }
   var h = '<div id=__tmenu style="position:fixed;z-index:9999;left:' + (x || 0) + 'px;top:' + (y || 0) + 'px;' +
           'background:var(--toast);border:1px solid var(--line);border-radius:9px;padding:5px;min-width:150px;' +
@@ -8425,9 +8522,10 @@ function collectSettings() {
   D('sLoud').checked = D('sp_loud').checked;
   S.loud = D('sLoud').checked;
   // 行为类参数立即下发
-  api('/api/repeat', 'rate=' + D('sRep').value);
-  applyRep(D('sRep').value);      // 循环图标/数字跟着设置页的选择走（同一真相源）
-  api('/api/shuffle?on=' + (D('sShuf').checked ? 1 : 0), '');
+  api('/api/playmode?mode=' + D('sRep').value, '');
+  applyRep(D('sRep').value);
+  // The shuffle checkbox is a projection, never a second competing write.
+  D('sShuf').checked = String(D('sRep').value) === '3';
 }
 
 function applySettings() {
