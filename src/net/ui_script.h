@@ -4593,7 +4593,7 @@ function applyRep(v) {
 }
 // 四种模式的图标路径（24x24 viewBox，与既有图标同风格：stroke=currentColor、无填充）
 var REP_ICON = [
-  '<path d="M4 12h14M13 6l6 6-6 6"/>',
+  '<path d="M3 6h11M3 12h11M3 18h11"/><path d="M17 9l4 3-4 3"/>',
   '<path d="M17 2l4 4-4 4"/><path d="M3 11v-1a4 4 0 014-4h14"/><path d="M7 22l-4-4 4-4"/><path d="M21 13v1a4 4 0 01-4 4H3"/>',
   '<path d="M17 2l4 4-4 4"/><path d="M3 11v-1a4 4 0 014-4h14"/><path d="M7 22l-4-4 4-4"/><path d="M21 13v1a4 4 0 01-4 4H3"/>',
   '<path d="M16 3h5v5"/><path d="M4 20L21 3"/><path d="M21 16v5h-5"/><path d="M15 15l6 6"/><path d="M4 4l5 5"/>'
