@@ -1,8 +1,8 @@
 {
-  "version": "1.1.0-beta5",
-  "notes": "① 修「UPnP 搜不到设备」的两层根因：发现链路逐卡钉住物理网卡 + 组播与子网广播各 3 轮（本机「Internet 共享」造出同网段网桥抢走路由时不再全灭），并补上 NSLocalNetworkUsageDescription —— 首次搜索会正常弹「本地网络」授权框；② 修「永远停在正在发现渲染器…」：抓设备描述改非阻塞 connect + 超时，并给整轮发现加总预算，不再卡满 SYN 重传后把投放请求全挂在锁上；③ 控制面也钉同一张网卡，避免「搜到了但一点播放就连接失败」；④ 空列表按诊断给「为什么 + 怎么办」；⑤ 停止投放改走安全 join；关窗第一时间隐藏窗口但不破坏终止判定。这是预发布版。",
-  "download_url": "https://github.com/BH2VOQ/RLPlayer-Mac/releases/download/v1.1.0-beta5/RLPlayer-1.1.0-beta5-macOS-arm64.dmg",
-  "sha256": "5515f616b22daeeefa24eccaf1b77e676904742627a9e508290660d324bb481a",
-  "size": 7165829,
-  "published_at": "2026-10-28T07:16:18Z"
+  "version": "1.1.0",
+  "notes": "① 进度条拖动与播放体验：按住拖动 1:1 即时预览跟手，播放进度逐帧平滑推进，修正跳转后相对步进基准；② 音量步进与控制：方向键与滚轮调节改为固定每步 0.5 dB（按住 Shift 为 0.1 dB），静音按 ↑ 直接恢复至 −54.5 dB 可闻档，双击音量数值或音量条快速复位 0 dB；③ 容错与稳定性：修复打开目录中已不存在音频文件时底层管道断开导致退出闪退的问题；④ 交互与界面优化：修复切歌底栏曲名竞态残留、歌词匹配防串曲复合校验、设置页帮助气泡自适应避让裁切、Dock 图标尺寸留白优化、队列面板清除按钮文案明确。",
+  "download_url": "https://github.com/BH2VOQ/RLPlayer-Mac/releases/download/v1.1.0/RLPlayer-1.1.0-macOS-arm64.dmg",
+  "sha256": "1daf37789fffce72ffc0884df3a5cd37302599b820bcc6418cb17486e8faf0ec",
+  "size": 7364180,
+  "published_at": "2026-10-28T11:15:00Z"
 }
