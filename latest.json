@@ -1,8 +1,8 @@
 {
-  "version": "1.1.0",
-  "notes": "① 进度条拖动与播放体验：按住拖动 1:1 即时预览跟手，播放进度逐帧平滑推进，修正跳转后相对步进基准；② 音量步进与控制：方向键与滚轮调节改为固定每步 0.5 dB（按住 Shift 为 0.1 dB），静音按 ↑ 直接恢复至 −54.5 dB 可闻档，双击音量数值或音量条快速复位 0 dB；③ 容错与稳定性：修复打开目录中已不存在音频文件时底层管道断开导致退出闪退的问题；④ 交互与界面优化：修复切歌底栏曲名竞态残留、歌词匹配防串曲复合校验、设置页帮助气泡自适应避让裁切、Dock 图标尺寸留白优化、队列面板清除按钮文案明确。",
-  "download_url": "https://github.com/BH2VOQ/RLPlayer-Mac/releases/download/v1.1.0/RLPlayer-1.1.0-macOS-arm64.dmg",
-  "sha256": "1daf37789fffce72ffc0884df3a5cd37302599b820bcc6418cb17486e8faf0ec",
-  "size": 7364180,
-  "published_at": "2026-10-28T11:15:00Z"
+  "version": "1.1.1-beta1",
+  "notes": "流媒体修复测试版：① 修复配置好服务器却显示 URL malformed / 列表为空（启用记录被空占位卡住）；② 修复设置页拿不到服务器列表（GET 被误判为副作用而拒绝）；③ 修复应用内「删除 / 测试」按钮点了没反应；④ 流媒体曲名不再显示成一串 id；⑤ 流媒体顶层不再把艺术家当歌曲；⑥ 「我的最爱」不再显示整串路径。新增：流媒体页卡片网格与列表切换、专辑详情页（封面头 + 曲目表 + 播放整张 / 加入队列 / 随机播放）。",
+  "download_url": "https://github.com/BH2VOQ/RLPlayer-Mac/releases/download/v1.1.1-beta1/RLPlayer-1.1.1-beta1-macOS-arm64.dmg",
+  "sha256": "5b2da74d86bdab48ca260356201c39b0590c80c65d6b4c4cf538594cea4703f3",
+  "size": 7375621,
+  "published_at": "2026-10-28T16:42:05Z"
 }
