@@ -107,10 +107,14 @@ private:
 };
 
 // POST（Emby 认证、LLM、元数据源需要）
+// iface：把这次请求钉在某张网卡上（形如 "en1"；空 = 系统选路）。
+// UPnP 控制面必须传它 —— 本机存在同网段虚拟网卡时（Internet 共享/桥接），
+// 不钉网卡连局域网设备会 EHOSTUNREACH（2026-10-28 真机）。
 inline HttpResponse http_post(const std::string& url, const std::string& body,
                               const std::vector<std::string>& headers = {},
                               const char* contentType = "application/json",
-                              int timeoutMs = 20000) {
+                              int timeoutMs = 20000,
+                              const std::string& iface = std::string()) {
     rta::platform::HttpRequest req;
     req.method      = "POST";
     req.url         = url;
@@ -120,13 +124,15 @@ inline HttpResponse http_post(const std::string& url, const std::string& body,
     req.timeoutMs   = timeoutMs;
     req.proxy       = http_proxy();
     req.cancel      = http_detail::current_cancellation_token();
+    req.interface   = iface;
     return http_detail::from_platform(rta::platform::http_request(req));
 }
 
-// GET，可选附加请求头（每项形如 "名: 值"）
+// GET，可选附加请求头（每项形如 "名: 值"）与网卡绑定（见 http_post 的 iface 说明）
 inline HttpResponse http_get(const std::string& url,
                              const std::vector<std::string>& headers = {},
-                             int timeoutMs = 20000) {
+                             int timeoutMs = 20000,
+                             const std::string& iface = std::string()) {
     rta::platform::HttpRequest req;
     req.method    = "GET";
     req.url       = url;
@@ -134,6 +140,7 @@ inline HttpResponse http_get(const std::string& url,
     req.timeoutMs = timeoutMs;
     req.proxy     = http_proxy();
     req.cancel    = http_detail::current_cancellation_token();
+    req.interface = iface;
     return http_detail::from_platform(rta::platform::http_request(req));
 }
 

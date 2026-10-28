@@ -228,6 +228,13 @@ inline HttpResult http_request(const HttpRequest& req) {
         // autoProxy 为空 ⟹ 什么都不设 ⟹ libcurl 直连（改造前的行为）
     }
 
+    // 钉网卡（2026-10-28）：见 platform/http.h 里 HttpRequest::interface 的说明。
+    // libcurl 的语法是 "if!<名字>"，"!" 表示按接口名而不是 IP/主机名解析。
+    if (!req.interface.empty()) {
+        const std::string ifspec = "if!" + req.interface;
+        ::curl_easy_setopt(curl, CURLOPT_INTERFACE, ifspec.c_str());
+    }
+
     // 请求头
     struct curl_slist* headers = nullptr;
     if (isPost && !req.contentType.empty())

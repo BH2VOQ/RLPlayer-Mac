@@ -5820,15 +5820,18 @@ function scanCastDevices(force) {
     btns.forEach(function (b) { if (b) b.disabled = false; });
     _castDevices = (j && j.devices) || [];
     populateCastDevices();
+    // 空列表时说清"为什么"：后端 diag/hint 是实测出来的原因（组播被路由拒绝 / 广播兜底 /
+    // 收到应答却抓不到描述 / 同网段无人应答），不要再让用户对着"可能未开机"猜。
+    var _emptyWhy = (j && j.hint) ? j.hint : '未发现 UPnP/DLNA 渲染器（确认设备已开机并开启 DLNA/UPnP）';
     if (msg) {
       msg.textContent = _castDevices.length
         ? ('共发现 ' + _castDevices.length + ' 个渲染器')
-        : '未发现 UPnP/DLNA 渲染器（可能未开机、不在同一子网，或 SSDP 组播被代理/防火墙拦截）';
+        : _emptyWhy;
     }
     if (msg2) {
       msg2.textContent = _castDevices.length
         ? ('共发现 ' + _castDevices.length + ' 个渲染器')
-        : '未发现 UPnP/DLNA 渲染器：确认数播已开启 UPnP/DLNA 且与本机同一子网';
+        : _emptyWhy;
     }
   }).catch(function () {
     btns.forEach(function (b) { if (b) b.disabled = false; });
@@ -6325,14 +6328,17 @@ function npPickCastDevice(cb) {
       _castDevices = list;
       known = list;
       populateCastDevices();
+      // 空列表必须写明原因（后端 diag.hint 是实测结论，不是猜的）
+      var _emptyWhy = (j && j.hint) ? j.hint : '未发现 UPnP / DLNA 渲染器（确认数播已开启 DLNA 且与本机同网段）';
       // 弹窗可能已被用户关掉：只在它还开着时刷新，避免"背后改 DOM"
       if (D('mbody') && D('modal').classList.contains('on')) {
         D('mbody').innerHTML = rows(list) +
+          (list.length ? '' : '<div class=castpick-empty style="margin-top:10px">' + _emptyWhy.replace(/&/g, '&amp;').replace(/</g, '&lt;') + '</div>') +
           '<div style="margin-top:12px"><button class="btn" id=castRescan>重新搜索</button></div>';
         bind(list);
       }
       if (!list.length) {
-        toast('未发现 UPnP / DLNA 渲染器（确认数播已开启 DLNA 且与本机同网段）');
+        toast(_emptyWhy);
       }
     }).catch(function () {
       if (D('mbody') && D('modal').classList.contains('on')) {

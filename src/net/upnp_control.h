@@ -526,10 +526,19 @@ inline UpnpVolumeInfo parse_volume_response(const std::string& xml) {
 class UpnpControlClient {
 public:
     UpnpControlClient() = default;
-    UpnpControlClient(std::string avTransportUrl, std::string connectionManagerUrl = "", std::string renderingControlUrl = "")
+    // ifname：把 SOAP 请求钉在发现到设备的那张网卡上（"en1"；空 = 系统选路）。
+    // 2026-10-28 真机：本机 Internet 共享造出同网段的 bridge100 后，路由把
+    // 192.168.3.0/24 标成 REJECT ⟹ 不钉网卡的 SOAP 直接 EHOSTUNREACH，
+    // 界面上就是"设备搜到了，但一点播放就报连接失败"。
+    UpnpControlClient(std::string avTransportUrl, std::string connectionManagerUrl = "",
+                      std::string renderingControlUrl = "", std::string ifname = "")
         : avTransportUrl_(std::move(avTransportUrl)),
           connectionManagerUrl_(std::move(connectionManagerUrl)),
-          renderingControlUrl_(std::move(renderingControlUrl)) {}
+          renderingControlUrl_(std::move(renderingControlUrl)),
+          ifname_(std::move(ifname)) {}
+
+    void set_interface(const std::string& ifname) { ifname_ = ifname; }
+    const std::string& interface_name() const { return ifname_; }
 
     void set_endpoints(const std::string& avTransportUrl,
                        const std::string& connectionManagerUrl = "",
@@ -657,7 +666,7 @@ private:
         std::vector<std::string> headers = {
             "SOAPAction: \"" + std::string(serviceType) + "#" + action + "\""
         };
-        HttpResponse httpRes = http_post(url, body, headers, "text/xml; charset=\"utf-8\"", 8000);
+        HttpResponse httpRes = http_post(url, body, headers, "text/xml; charset=\"utf-8\"", 8000, ifname_);
         res.httpStatus = httpRes.status;
         res.rawXml = std::string(httpRes.body.begin(), httpRes.body.end());
         if (httpRes.ok && httpRes.status >= 200 && httpRes.status < 300) {
@@ -679,6 +688,7 @@ private:
     std::string avTransportUrl_;
     std::string connectionManagerUrl_;
     std::string renderingControlUrl_;
+    std::string ifname_;   // 出站网卡（见构造函数注释）
 };
 
 // ---------------- 渲染器实际采样率取证 ----------------

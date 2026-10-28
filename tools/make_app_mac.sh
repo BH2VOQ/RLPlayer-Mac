@@ -137,6 +137,14 @@ cat > "$APP/Contents/Info.plist" <<PLIST
     <dict>
         <key>NSAllowsLocalNetworking</key> <true/>
     </dict>
+    <!-- 2026-10-28（用户「UPnP 搜不到设备」）：
+         macOS 15+ 的「本地网络」隐私开关按 App 授权。**没有这个键，系统不会弹授权框，
+         直接把 LAN 访问判成拒绝**（实测：ad-hoc 的 CLI 二进制向 192.168.3.x 的 connect 与
+         SSDP 组播 sendto 都是 EHOSTUNREACH，而系统 curl 同一个地址 200；系统日志
+         UserEventAgent/nehelper 明确记录 "LocalNetwork: found bundle id …"）。
+         有它才会弹「RLPlayer 想要查找并连接本地网络上的设备」，用户点允许后 UPnP 发现才可用。 -->
+    <key>NSLocalNetworkUsageDescription</key>
+    <string>RLPlayer 需要访问局域网来发现并投放音乐到 UPnP/DLNA 渲染器（设备搜索、读取设备描述、发送播放控制）。若不允许，将无法搜索与投放局域网设备。</string>
     <!-- 输入采集（§13.13）：CoreAudio 输入设备采集需要 TCC 授权 -->
     <key>NSMicrophoneUsageDescription</key>
     <string>RLPlayer 的输入采集功能用于录音与电平监测，仅在您于设置页显式开启时访问麦克风。</string>

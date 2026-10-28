@@ -125,30 +125,114 @@ inline int  io_getsockname(socket_t s, sockaddr* a, int* alen) {
 // 路由标志带 REJECT），内核会优先选它，导致 sendto 直接 EHOSTUNREACH —— SSDP 一台都搜不到。
 // IP_MULTICAST_IF 只改组播出口，改不了内核的单播路由选择，所以必须用 IP_BOUND_IF。
 // 非 macOS/BSD 平台没有 IP_BOUND_IF，退化为 no-op（Windows 由已有分支处理）。
-inline bool bind_to_interface(socket_t s, const std::string& localIp) {
+// 把 socket 钉到指定网卡（IP_BOUND_IF，macOS/BSD 专有）。
+// 为什么需要：本机若有同网段的虚拟/共享接口（如 macOS「Internet 共享」的 bridge100，
+// 路由标志带 REJECT），内核会优先选它，导致 sendto/connect 直接 EHOSTUNREACH ——
+// SSDP 一台都搜不到、设备描述也抓不到。IP_MULTICAST_IF 只改组播出口，
+// 改不了内核的单播路由选择，所以必须用 IP_BOUND_IF。
+// 2026-10-28 真机补记：**不要**再额外 bind(本机 IP)。本机 IP 落在被 REJECT 抢走的
+// 那个网段里时，源地址选择会重新走一遍路由表，bind 过的 socket 反而 EHOSTUNREACH
+//（实测同一目标：bind+pin 失败、只 pin 成功）。所以全链路只用 IP_BOUND_IF，不 bind。
+inline bool pin_to_interface(socket_t s, int ifindex) {
 #if defined(__APPLE__) || defined(__FreeBSD__)
-    if (localIp.empty() || localIp == "0.0.0.0") return false;
-    // 用 getifaddrs 把 IP 映射成接口名，再取索引（没有现成的「IP→索引」API）
-    unsigned int idx = 0;
-    struct ifaddrs* ifs = nullptr;
-    if (::getifaddrs(&ifs) == 0) {
-        for (struct ifaddrs* it = ifs; it; it = it->ifa_next) {
-            if (!it->ifa_addr || it->ifa_addr->sa_family != AF_INET) continue;
-            char buf[64] = {0};
-            const sockaddr_in* sa = (const sockaddr_in*)it->ifa_addr;
-            if (::inet_ntop(AF_INET, &sa->sin_addr, buf, sizeof(buf)) == nullptr) continue;
-            if (localIp != buf) continue;
-            idx = ::if_nametoindex(it->ifa_name);
-            break;
-        }
-        ::freeifaddrs(ifs);
-    }
-    if (idx == 0) return false;
-    return ::setsockopt(s, IPPROTO_IP, IP_BOUND_IF, &idx, sizeof(idx)) == 0;
+    if (ifindex <= 0) return false;
+    return ::setsockopt(s, IPPROTO_IP, IP_BOUND_IF, &ifindex, sizeof(ifindex)) == 0;
 #else
-    (void)s; (void)localIp;
+    (void)s; (void)ifindex;
     return false;
 #endif
+}
+
+// 本机 IPv4 网卡（只保留可用的物理网卡；虚拟/桥接/回环一律剔掉）
+struct UpnpIface {
+    std::string name;      // en1
+    std::string ip;        // 192.168.3.163
+    std::string mask;      // 255.255.255.0
+    std::string net;       // 192.168.3.0
+    std::string bcast;     // 192.168.3.255（无广播地址时为空）
+    int         ifindex = 0;
+};
+
+inline int mask_prefix_len(const std::string& mask) {
+    struct in_addr a{};
+    if (::inet_aton(mask.c_str(), &a) == 0) return 0;
+    uint32_t v = ntohl(a.s_addr);
+    int n = 0;
+    while (v & 0x80000000u) { ++n; v <<= 1; }
+    return n;
+}
+
+inline bool ip_in_subnet(const std::string& hostIp, const std::string& net, const std::string& mask) {
+    struct in_addr h{}, n{}, m{};
+    if (::inet_aton(hostIp.c_str(), &h) == 0) return false;
+    if (::inet_aton(net.c_str(), &n) == 0) return false;
+    if (::inet_aton(mask.c_str(), &m) == 0) return false;
+    return (h.s_addr & m.s_addr) == (n.s_addr & m.s_addr);
+}
+
+// 枚举本机 IPv4 网卡。
+// 为什么不用 gethostname()+getaddrinfo：macOS 返回 "Mac.local"，AF_INET 查询通常只回
+// 127.0.0.1（甚至失败），结果就是"只剩回环、全部被过滤" → 组播只从默认路由出去。
+// getifaddrs() 直接遍历内核的网卡地址表，才是 POSIX 的等价做法。
+// 剔除规则（2026-10-28 真机）：bridge*（Internet 共享/桥接）、utun*/awdl*/llw*/anpi*/ap*
+// 不参与发现 —— 它们要么没有真实链路，要么把 192.168.3.0/24 抢成了 REJECT 路由；
+// 198.18/198.19（Clash 等代理 TUN 的 fake-IP 段）记录到 skipped 后跳过。
+inline std::vector<UpnpIface> upnp_ifaces(std::vector<std::string>* skipped = nullptr) {
+    std::vector<UpnpIface> out;
+    struct ifaddrs* ifs = nullptr;
+    if (::getifaddrs(&ifs) != 0) return out;
+    for (struct ifaddrs* p = ifs; p; p = p->ifa_next) {
+        if (!p->ifa_addr || p->ifa_addr->sa_family != AF_INET) continue;
+        char ipbuf[64] = {0};
+        const sockaddr_in* sa = (const sockaddr_in*)p->ifa_addr;
+        if (::inet_ntop(AF_INET, &sa->sin_addr, ipbuf, sizeof(ipbuf)) == nullptr) continue;
+        const std::string sip(ipbuf);
+        if (sip.rfind("127.", 0) == 0 || sip.rfind("169.254.", 0) == 0) continue;
+        const std::string nm = p->ifa_name ? p->ifa_name : "";
+        const bool virtual_name =
+            nm.rfind("bridge", 0) == 0 || nm.rfind("utun", 0) == 0 ||
+            nm.rfind("awdl", 0) == 0 || nm.rfind("llw", 0) == 0 ||
+            nm.rfind("anpi", 0) == 0 || nm.rfind("ap", 0) == 0 ||
+            nm.rfind("gif", 0) == 0 || nm.rfind("stf", 0) == 0 ||
+            nm.rfind("vmenet", 0) == 0;
+        const bool proxy_tun = (sip.rfind("198.18.", 0) == 0 || sip.rfind("198.19.", 0) == 0);
+        if (virtual_name || proxy_tun) {
+            if (skipped) skipped->push_back(nm + " " + sip + (proxy_tun ? "(代理 TUN)" : "(虚拟/桥接)"));
+            continue;
+        }
+        bool dup = false;
+        for (const auto& e : out) if (e.ip == sip) dup = true;
+        if (dup) continue;
+
+        UpnpIface f;
+        f.name    = nm;
+        f.ip      = sip;
+        f.ifindex = (int)::if_nametoindex(nm.c_str());
+
+        const sockaddr_in* mk = (const sockaddr_in*)p->ifa_netmask;
+        char mkbuf[64] = {0};
+        if (mk) ::inet_ntop(AF_INET, &mk->sin_addr, mkbuf, sizeof(mkbuf));
+        f.mask = mkbuf;
+        const uint32_t ipn = ntohl(sa->sin_addr.s_addr);
+        const uint32_t mkn = mk ? ntohl(mk->sin_addr.s_addr) : 0xffffff00u;
+        struct in_addr a{};
+        a.s_addr = htonl(ipn & mkn);
+        char netbuf[64] = {0};
+        ::inet_ntop(AF_INET, &a, netbuf, sizeof(netbuf));
+        f.net = netbuf;
+        // 广播地址：优先用内核给的（只有 IFF_BROADCAST 才填 ifa_dstaddr），否则按掩码算
+        char bbuf[64] = {0};
+        if ((p->ifa_flags & IFF_BROADCAST) && p->ifa_dstaddr && p->ifa_dstaddr->sa_family == AF_INET) {
+            ::inet_ntop(AF_INET, &((const sockaddr_in*)p->ifa_dstaddr)->sin_addr, bbuf, sizeof(bbuf));
+        } else if (mkn) {
+            a.s_addr = htonl((ipn & mkn) | ~mkn);
+            ::inet_ntop(AF_INET, &a, bbuf, sizeof(bbuf));
+        }
+        f.bcast = bbuf;
+        out.push_back(f);
+    }
+    ::freeifaddrs(ifs);
+    return out;
 }
 
 inline bool join_multicast(socket_t s, const in_addr* ifaddr) {
@@ -205,6 +289,11 @@ struct UpnpDevice {
     std::string control;           // AVTransport 控制地址（相对或绝对）
     std::string controlConnection; // ConnectionManager 控制地址（相对或绝对）
     std::string controlRendering;  // RenderingControl 控制地址（相对或绝对）
+    // 设备是从哪张网卡发现的：后续抓描述/发 SOAP 都钉回这张卡。
+    // 2026-10-28 真机：本机路由把局域网段交给同网段的 bridge100（REJECT），
+    // 不钉网卡的 connect 会 EHOSTUNREACH —— "找到了设备却控制不了"就是这来的。
+    std::string ifname;
+    int         ifindex = 0;
 
     std::string av_transport_url() const {
         return resolve_url(location, control);
@@ -256,23 +345,61 @@ inline std::string extract_service_control_url(const std::string& xml, const cha
     return trim2(xml.substr(c2 + 12, e2 - c2 - 12));
 }
 
-inline bool http_get(const std::string& host, int port, const std::string& path, std::string& out) {
+// ifindex>0 时把连接钉在该网卡上（macOS 上同网段虚拟网卡会把单播路由抢走，
+// 不钉的话"设备明明在线却抓不到描述"）。ifindex=0 表示交给内核选路。
+inline bool http_get(const std::string& host, int port, const std::string& path, std::string& out,
+                     int ifindex = 0, int connectTimeoutMs = 800) {
+    // 回环目标不钉网卡：把 socket 钉在 en1 上去连 127.0.0.1 会失败（本机自测会走到这条）。
+    if (host.rfind("127.", 0) == 0 || host == "localhost") ifindex = 0;
     const bool wsaInit = upnp_os::wsa_init();
     upnp_os::socket_t s = ::socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    if (s != upnp_os::kInvalidSocket) upnp_os::pin_to_interface(s, ifindex);
     if (s == upnp_os::kInvalidSocket) {
         if (wsaInit) upnp_os::wsa_cleanup();
         return false;
     }
-    upnp_os::set_timeout(s, SO_RCVTIMEO, 1500);
-    sockaddr_in a{};
-    a.sin_family = AF_INET;
-    a.sin_port = htons((u_short)port);
-    a.sin_addr.s_addr = ::inet_addr(host.c_str());
-    if (upnp_os::io_connect(s, (sockaddr*)&a, sizeof(a)) != 0) {
+    // ★ 2026-10-28 真机事故（界面永远停在「正在发现渲染器…」，一台设备都不出现）：
+    //   Rygel（`MR4 音响 [DLNA/UPnP]`）同时从 **192.168.3.29** 和 **192.168.5.29** 两个地址
+    //   应答 SSDP，而本机没有到 192.168.5.0/24 的路由 ⟹ 对后者的**阻塞 connect** 会卡满
+    //   内核 SYN 重传预算（数十秒），期间 CastManager 的 devMutex_ 一直被占着，
+    //   下一次 /api/cast/devices 直接挂在锁上 ⟹ 界面永远"正在发现"，超时后也不报错。
+    //   修法：非阻塞 connect + poll 超时（默认 800ms）；连不上就只放弃这一台。
+    if (!upnp_os::set_nonblocking(s)) {
         upnp_os::close_socket(s);
         if (wsaInit) upnp_os::wsa_cleanup();
         return false;
     }
+    sockaddr_in a{};
+    a.sin_family = AF_INET;
+    a.sin_port = htons((u_short)port);
+    a.sin_addr.s_addr = ::inet_addr(host.c_str());
+    bool connected = false;
+    const int rc = upnp_os::io_connect(s, (sockaddr*)&a, sizeof(a));
+    if (rc == 0) {
+        connected = true;
+    } else if (errno == EINPROGRESS || errno == EWOULDBLOCK) {
+        struct pollfd pfd{};
+        pfd.fd = s;
+        pfd.events = POLLOUT;
+        const int pr = ::poll(&pfd, 1, connectTimeoutMs);
+        if (pr > 0) {
+            int soErr = 0;
+            socklen_t el = sizeof(soErr);
+            if (::getsockopt(s, SOL_SOCKET, SO_ERROR, &soErr, &el) == 0 && soErr == 0) connected = true;
+        }
+    }
+    if (!connected) {
+        upnp_os::close_socket(s);
+        if (wsaInit) upnp_os::wsa_cleanup();
+        return false;
+    }
+    // 连上后恢复阻塞模式，用 SO_RCVTIMEO/SO_SNDTIMEO 兜住读写
+    {
+        const int fl = ::fcntl(s, F_GETFL, 0);
+        if (fl >= 0) (void)::fcntl(s, F_SETFL, fl & ~O_NONBLOCK);
+    }
+    upnp_os::set_timeout(s, SO_RCVTIMEO, 1500);
+    upnp_os::set_timeout(s, SO_SNDTIMEO, 1500);
     char req[512];
     std::snprintf(req, sizeof(req),
                   "GET %s HTTP/1.1\r\nHost: %s:%d\r\nConnection: close\r\nUser-Agent: RLPlayer/1\r\n\r\n",
@@ -375,114 +502,172 @@ inline int64_t pump_buffer(const unsigned char* data, int64_t toSend,
 //   默认路由指向 TUN 虚拟网卡，组播包进了隧道 → 局域网设备永远收不到 M-SEARCH（这正是我们复现到的
 //   /api/upnp → n=0）。修法：枚举所有本机 IPv4，逐个网卡设置 IP_MULTICAST_IF 并发送 2 次，
 //   再一起收响应；同时给出诊断信息（找到几个网卡、哪些被跳过），供 UI 如实显示。
+// 发 M-SEARCH 并收集 MediaRenderer。timeoutMs 建议 1500~2500。
+//
+// 2026-10-28 真机事故（用户「UPnP 搜不到设备」，macOS 27 / Apple M4）：
+//   本机开着「Internet 共享」，系统里多出一个同网段的 bridge100（192.168.3.1/24），
+//   路由表因此变成：
+//       192.168.3    link#20  UC    bridge100  !     ← 整个局域网被抢走（REJECT）
+//       224.0.0/4    link#16  UmCS  en1        !     ← 组播也被标 REJECT
+//   实测：向 192.168.3.x 的 connect 是 EHOSTUNREACH —— 只有把 socket 用 IP_BOUND_IF
+//   钉到 en1 才通；同一环境里向 239.255.255.250 的 sendto 也报 EHOSTUNREACH。
+//   ⚠️ 后续复核（同一天）：组播那条**只在被沙箱约束的 shell 进程里复现**，
+//   普通用户进程（su 直启）组播/广播都正常；路由劫持那条（192.168.3.0/24 → bridge100）
+//   是真实且系统级的。两个成因都要按"可能发生"处理，但别混为一谈。
+//   修法（三件，全部实测过）：
+//     ① 逐张物理网卡 pin（IP_BOUND_IF），不 bind 本机 IP；
+//     ② 组播之外**同时发子网广播**（<broadcast>:1900）—— 广播走同网段直连，
+//        不受 224/4 的 REJECT 影响。实测 192.168.3.255:1900 能收到路由器 IGD 的应答；
+//     ③ 诊断如实写清：哪张卡、发了几包、失败的 errno。
 struct UpnpDiscoverDiag {
     int ifaces_tried = 0;
-    int msgs_sent = 0;
-    std::string note;
+    int msgs_sent = 0;        // 成功发出的 M-SEARCH 包数（组播 + 广播）
+    int multicast_sent = 0;
+    int broadcast_sent = 0;
+    int extra_sent = 0;       // 额外单播目标（测试/诊断用）发出的包数
+    int send_failed = 0;      // sendto 返回错误的次数
+    int replies = 0;          // 收到的 SSDP 应答数（含重复）
+    int describe_failed = 0;  // 应答里的 LOCATION 抓不到设备描述
+    std::string note;         // 人话诊断（UI 直接显示）
 };
 
+// 兼容旧调用：只回本机 IPv4 列表（发现流程已改用 upnp_ifaces()）
 inline std::vector<std::string> upnp_local_ipv4(std::vector<std::string>* skipped = nullptr) {
     std::vector<std::string> out;
-    // POSIX/macOS：不能用 getaddrinfo(gethostname())。
-    // macOS 的 gethostname() 返回 "Mac.local" 之类的 mDNS 名，getaddrinfo 对它的
-    // AF_INET 查询通常只回 127.0.0.1（甚至直接失败），结果就是 ips 里只剩 127.x 被过滤掉
-    // → 退回 "0.0.0.0" → 组播只从默认路由出去，正是 2026-10-23 那个「UPnP 搜不到设备」
-    // 的同一个坑。getifaddrs() 直接遍历内核的网卡地址表，才是 POSIX 的等价做法。
-    struct ifaddrs* ifs = nullptr;
-    if (::getifaddrs(&ifs) != 0) return out;
-    for (struct ifaddrs* p = ifs; p; p = p->ifa_next) {
-        if (!p->ifa_addr || p->ifa_addr->sa_family != AF_INET) continue;
-        char ip[64] = {0};
-        const sockaddr_in* sa = (const sockaddr_in*)p->ifa_addr;
-        if (::inet_ntop(AF_INET, &sa->sin_addr, ip, sizeof(ip)) == nullptr) continue;
-        const std::string s(ip);
-        if (s.rfind("127.", 0) == 0 || s.rfind("169.254.", 0) == 0) continue;
-        // 与 Windows 分支同一条规则：代理 TUN 的 fake-IP 段跳过但记录
-        const bool virtual_like = (s.rfind("198.18.", 0) == 0 || s.rfind("198.19.", 0) == 0);
-        if (virtual_like) { if (skipped) skipped->push_back(s + "(代理 TUN)"); continue; }
-        if (std::find(out.begin(), out.end(), s) == out.end()) out.push_back(s);
-    }
-    ::freeifaddrs(ifs);
+    std::vector<std::string> sk;
+    for (const auto& f : upnp_os::upnp_ifaces(&sk)) out.push_back(f.ip);
+    if (skipped) *skipped = sk;
     return out;
 }
 
-inline std::vector<UpnpDevice> upnp_discover(int timeoutMs = 1800, UpnpDiscoverDiag* diag = nullptr) {
+// extraHosts：额外单播探测的主机（**只给测试/诊断用**；生产流程不用）。
+// 为什么需要它：macOS 上把 socket 钉到 en1 之后，发往"本机自己的局域网地址"或子网广播的
+// 包不会再回送给本机其它进程（实测：跨进程收不到，同进程才收得到）。这意味着
+// "本机假渲染器 + 广播" 无法作为自动化判据，只能用 127.0.0.1 单播验证
+// "收包 → 解析 LOCATION → 抓描述" 这一段。真实广播发送另有真机证据（见 docs/）。
+inline std::vector<UpnpDevice> upnp_discover(int timeoutMs = 1800, UpnpDiscoverDiag* diag = nullptr,
+                                             int ssdpPort = 1900,
+                                             const std::vector<std::string>* extraHosts = nullptr) {
     using namespace upnp_detail;
     std::vector<UpnpDevice> out;
-
-    const bool wsaOk = upnp_os::wsa_init();
-    if (!wsaOk) return out;
+    if (diag) *diag = UpnpDiscoverDiag{};
 
     std::vector<std::string> skipped;
-    std::vector<std::string> ips = upnp_local_ipv4(&skipped);
-    if (ips.empty()) ips.push_back("0.0.0.0");   // 拿不到网卡时退回系统默认路由（老行为）
+    std::vector<upnp_os::UpnpIface> ifaces = upnp_os::upnp_ifaces(&skipped);
 
     const char* msg =
         "M-SEARCH * HTTP/1.1\r\n"
         "HOST: 239.255.255.250:1900\r\n"
         "MAN: \"ssdp:discover\"\r\n"
-        "MX: 2\r\n"
+        "MX: 1\r\n"
         "ST: urn:schemas-upnp-org:device:MediaRenderer:1\r\n\r\n";
 
-    sockaddr_in to{};
-    to.sin_family = AF_INET;
-    to.sin_port = htons(1900);
-    to.sin_addr.s_addr = ::inet_addr("239.255.255.250");
+    sockaddr_in toM{};
+    toM.sin_family = AF_INET;
+    toM.sin_port = htons((unsigned short)ssdpPort);
+    toM.sin_addr.s_addr = ::inet_addr("239.255.255.250");
 
-    std::vector<upnp_os::socket_t> socks;
-    for (const auto& ip : ips) {
+    struct Chan { upnp_os::socket_t s; upnp_os::UpnpIface f; };
+    std::vector<Chan> chans;
+    std::vector<std::string> sendErrs;
+
+    auto note_err = [&](const std::string& tag) {
+        const std::string e = std::string(tag) + " " + std::string(std::strerror(errno));
+        for (const auto& x : sendErrs) if (x == e) return;
+        sendErrs.push_back(e);
+    };
+
+    if (ifaces.empty()) {
+        // 一张物理网卡都没有（拔网线/只剩回环）：退回"让内核选路"的老行为，至少不崩
+        upnp_os::UpnpIface f;
+        f.name = "(默认路由)";
+        f.ifindex = 0;
+        ifaces.push_back(f);
+    }
+
+    for (const auto& f : ifaces) {
         upnp_os::socket_t s = ::socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
-        if (s == upnp_os::kInvalidSocket) continue;
-        in_addr ifaddr{};
-        ifaddr.s_addr = ::inet_addr(ip.c_str());
-        if (ip != "0.0.0.0") {
-            sockaddr_in local{};
-            local.sin_family = AF_INET;
-            local.sin_port = htons(0);
-            local.sin_addr = ifaddr;
-            // bind 失败也继续（退回任意地址绑定），但组播出口仍按该网卡设置
-            (void)upnp_os::io_bind(s, (sockaddr*)&local, sizeof(local));
-            // 2026-10-28 真机事故：本机开了「Internet 共享」，存在一个同网段的 bridge100
-            // （inet 192.168.3.1，status: inactive，路由标志 REJECT）。内核会优先把发往
-            // 192.168.3.x 的包（含 SSDP 组播）丢给 bridge100，sendto 直接 EHOSTUNREACH，
-            // 结果是**一台设备都发现不了**（实测 route get 192.168.3.29 → interface: bridge100,
-            // flags: ...REJECT）。IP_MULTICAST_IF 只影响组播出口，管不了单播路由选择。
-            // 用 IP_BOUND_IF 把 socket 钉死在该网卡上（macOS/BSD 专有），强制走正确接口。
-            // 实测：加了这个之后 TCP 能连上 192.168.3.29:34535（设备真实在线）。
-            upnp_os::set_opt(s, IPPROTO_IP, IP_MULTICAST_IF, &ifaddr, sizeof(ifaddr));
-            upnp_os::bind_to_interface(s, ip);
+        if (s == upnp_os::kInvalidSocket) {
+            if (diag) diag->send_failed++;
+            continue;
         }
-        // 加入 SSDP 组播组：POSIX/macOS 上必须显式 IP_ADD_MEMBERSHIP，
-        // 否则收不到渲染器回给 239.255.255.250:1900 的应答（Windows 上不强制，
-        // 加了也无害 —— 语义统一，两平台走同一条代码）。
-        upnp_os::join_multicast(s, ip == "0.0.0.0" ? nullptr : &ifaddr);
-        for (int rep = 0; rep < 2; ++rep) {
-            upnp_os::io_sendto(s, msg, (int)std::strlen(msg), (sockaddr*)&to, sizeof(to));
-            if (diag) diag->msgs_sent++;
+        const int one = 1;
+        upnp_os::set_opt(s, SOL_SOCKET, SO_BROADCAST, &one, sizeof(one));
+        if (!f.ip.empty()) {
+            upnp_os::pin_to_interface(s, f.ifindex);
+            in_addr ifaddr{};
+            ifaddr.s_addr = ::inet_addr(f.ip.c_str());
+            upnp_os::set_opt(s, IPPROTO_IP, IP_MULTICAST_IF, &ifaddr, sizeof(ifaddr));
+            // 加入 SSDP 组播组：POSIX/macOS 上必须显式 IP_ADD_MEMBERSHIP，
+            // 否则收不到渲染器回给 239.255.255.250:1900 的应答。
+            upnp_os::join_multicast(s, &ifaddr);
+        } else {
+            upnp_os::join_multicast(s, nullptr);
+        }
+
+        const int len = (int)std::strlen(msg);
+        for (int rep = 0; rep < 3; ++rep) {
+            if (upnp_os::io_sendto(s, msg, len, (sockaddr*)&toM, sizeof(toM)) > 0) {
+                if (diag) { diag->msgs_sent++; diag->multicast_sent++; }
+            } else if (diag) {
+                diag->send_failed++;
+                note_err("组播");
+            }
+            if (!f.bcast.empty()) {
+                sockaddr_in toB = toM;
+                toB.sin_addr.s_addr = ::inet_addr(f.bcast.c_str());
+                if (upnp_os::io_sendto(s, msg, len, (sockaddr*)&toB, sizeof(toB)) > 0) {
+                    if (diag) { diag->msgs_sent++; diag->broadcast_sent++; }
+                } else if (diag) {
+                    diag->send_failed++;
+                    note_err("广播");
+                }
+            }
             std::this_thread::sleep_for(std::chrono::milliseconds(60));
         }
-        socks.push_back(s);
+        chans.push_back(Chan{s, f});
         if (diag) diag->ifaces_tried++;
     }
-    if (diag && !skipped.empty()) {
-        std::string sk;
-        for (size_t i = 0; i < skipped.size(); ++i) { if (i) sk += ", "; sk += skipped[i]; }
-        diag->note = "已跳过虚拟/代理网卡: " + sk;
+
+    // 额外单播目标（测试/诊断）：不钉网卡 —— 钉了就到不了 127.0.0.1
+    if (extraHosts && !extraHosts->empty()) {
+        upnp_os::socket_t s = ::socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+        if (s != upnp_os::kInvalidSocket) {
+            upnp_os::UpnpIface f;
+            f.name = "(单播目标)";
+            for (const auto& host : *extraHosts) {
+                sockaddr_in to = toM;
+                to.sin_addr.s_addr = ::inet_addr(host.c_str());
+                for (int rep = 0; rep < 2; ++rep) {
+                    if (upnp_os::io_sendto(s, msg, (int)std::strlen(msg), (sockaddr*)&to, sizeof(to)) > 0) {
+                        if (diag) { diag->msgs_sent++; diag->extra_sent++; }
+                    } else if (diag) {
+                        diag->send_failed++;
+                    }
+                    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+                }
+            }
+            chans.push_back(Chan{s, f});
+        }
     }
 
     const uint64_t t0 = upnp_os::monotonic_ms();
-    std::vector<std::string> seen_locations;
+    std::vector<upnp_os::socket_t> socks;
+    for (const auto& c : chans) socks.push_back(c.s);
+
     while (upnp_os::monotonic_ms() - t0 < (uint64_t)timeoutMs && !socks.empty()) {
         const std::vector<size_t> ready = upnp_os::wait_readable(socks, 150000);
         if (ready.empty()) continue;
         for (size_t si : ready) {
-            char buf[4096];
+            if (si >= chans.size()) continue;
+            char buf[8192];
             sockaddr_in from{};
             int fl = sizeof(from);
             const int n = upnp_os::io_recvfrom(socks[si], buf, sizeof(buf), (sockaddr*)&from, &fl);
             if (n <= 0) continue;
+            if (diag) diag->replies++;
             const std::string resp(buf, (size_t)n);
-            std::string loc = header_of(resp, "LOCATION");
+            const std::string loc = header_of(resp, "LOCATION");
             if (loc.empty()) continue;
 
             const std::string lowerLoc = lower(loc);
@@ -507,8 +692,22 @@ inline std::vector<UpnpDevice> upnp_discover(int timeoutMs = 1800, UpnpDiscoverD
             dev.location = loc;
             dev.host = host;
             dev.port = port;
+            dev.ifname = chans[si].f.name;
+            dev.ifindex = chans[si].f.ifindex;
+
             std::string xml;
-            if (http_get(host, port, path, xml)) {
+            // 描述抓取同样要钉在同一张网卡上：本机路由把 192.168.3.0/24 交给 bridge100
+            // 时，不钉的 connect 直接 EHOSTUNREACH（"找到了但名字是 IP"的老现象）。
+            // 总预算保护：发现是"快照"，不能因为某台设备不可达把整个请求拖住
+            const uint64_t spent = upnp_os::monotonic_ms() - t0;
+            const int remainMs = (int)((uint64_t)timeoutMs > spent ? (uint64_t)timeoutMs - spent : 0);
+            bool got = false;
+            if (remainMs > 150) {
+                const int budget = std::min(remainMs - 100, 1500);
+                got = http_get(host, port, path, xml, dev.ifindex, std::min(budget, 800));
+                if (!got && dev.ifindex > 0) got = http_get(host, port, path, xml, 0, std::min(budget, 800));
+            }
+            if (got) {
                 dev.name    = xml_tag(xml, "friendlyName");
                 dev.model   = xml_tag(xml, "modelName");
                 dev.udn     = xml_tag(xml, "UDN");
@@ -516,45 +715,87 @@ inline std::vector<UpnpDevice> upnp_discover(int timeoutMs = 1800, UpnpDiscoverD
                 if (dev.control.empty()) dev.control = xml_tag(xml, "controlURL");
                 dev.controlConnection = extract_service_control_url(xml, "ConnectionManager");
                 dev.controlRendering  = extract_service_control_url(xml, "RenderingControl");
+            } else if (diag) {
+                diag->describe_failed++;
             }
             if (dev.name.empty()) dev.name = host;
             out.push_back(dev);
         }
     }
-    for (upnp_os::socket_t s : socks) upnp_os::close_socket(s);
-    upnp_os::wsa_cleanup();
+    for (auto& c : chans) upnp_os::close_socket(c.s);
+
+    if (diag) {
+        std::ostringstream os;
+        if (ifaces.empty()) {
+            os << "没有可用的 IPv4 网卡";
+        } else {
+            os << "网卡 ";
+            for (size_t i = 0; i < ifaces.size(); ++i) {
+                if (i) os << "、";
+                os << ifaces[i].name << " " << ifaces[i].ip;
+                const int pl = upnp_os::mask_prefix_len(ifaces[i].mask);
+                if (pl > 0) os << "/" << pl;
+            }
+        }
+        if (!skipped.empty()) {
+            os << "；已跳过 ";
+            for (size_t i = 0; i < skipped.size(); ++i) { if (i) os << "、"; os << skipped[i]; }
+        }
+        os << "；发出 " << diag->msgs_sent << " 包(组播 " << diag->multicast_sent
+           << "、广播 " << diag->broadcast_sent << ")";
+        if (diag->extra_sent) os << "、单播目标 " << diag->extra_sent;
+        if (diag->send_failed) {
+            os << "；发送失败 " << diag->send_failed << " 次(";
+            for (size_t i = 0; i < sendErrs.size(); ++i) { if (i) os << "，"; os << sendErrs[i]; }
+            os << ")";
+        }
+        os << "；收到 " << diag->replies << " 个应答";
+        if (diag->describe_failed) os << "，其中 " << diag->describe_failed << " 个抓不到描述";
+        bool mcast_rejected = false;
+        for (const auto& e : sendErrs) if (e.find("No route to host") != std::string::npos) mcast_rejected = true;
+        if (mcast_rejected) {
+            os << "。组播发不出去(No route to host)：常见于「Internet 共享」把同一网段抢成虚拟网桥、"
+                  "代理 TUN 抢了优先路由、或进程被沙箱限制；已用子网广播兜底";
+        }
+        if (out.empty()) os << "。没有设备应答 M-SEARCH";
+        diag->note = os.str();
+    }
     return out;
 }
 
-// 查找本机面向指定目标主机的首选局域网 IP
+// 查找本机面向指定目标主机的首选局域网 IP。
+// 不能再用"UDP connect 让内核选路"：本机若存在同网段虚拟网卡（bridge100），
+// 内核会选它，getsockname() 拿到的是 192.168.3.1 —— 供源 URL 会指向桥接址，
+// 设备根本连不上（2026-10-28 真机实测）。
+// 现在的规则：优先"同网段物理网卡"的地址；否则逐卡 pin 后 connect 取源地址。
 inline std::string upnp_local_ip_for(const std::string& targetHost, uint16_t targetPort = 80) {
-    const bool wsaOk = upnp_os::wsa_init();
-    if (!wsaOk) return "127.0.0.1";
-
-    upnp_os::socket_t s = ::socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
-    if (s == upnp_os::kInvalidSocket) { upnp_os::wsa_cleanup(); return "127.0.0.1"; }
-
-    sockaddr_in dst{};
-    dst.sin_family = AF_INET;
-    dst.sin_port = htons(targetPort ? targetPort : 80);
-    dst.sin_addr.s_addr = ::inet_addr(targetHost.c_str());
-
-    std::string out = "127.0.0.1";
-    // 注意：UDP connect 不发包，只让内核完成路由选路 —— 正是这里要的语义。
-    if (upnp_os::io_connect(s, (sockaddr*)&dst, sizeof(dst)) == 0) {
-        sockaddr_in local{};
-        int len = sizeof(local);
-        if (upnp_os::io_getsockname(s, (sockaddr*)&local, &len) == 0) {
-            char buf[64]{};
-            ::inet_ntop(AF_INET, &local.sin_addr, buf, sizeof(buf));
-            if (std::strlen(buf) > 0 && std::strcmp(buf, "0.0.0.0") != 0) {
-                out = buf;
+    const auto ifaces = upnp_os::upnp_ifaces(nullptr);
+    for (const auto& f : ifaces) {
+        if (upnp_os::ip_in_subnet(targetHost, f.net, f.mask)) return f.ip;
+    }
+    for (const auto& f : ifaces) {
+        upnp_os::socket_t s = ::socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+        if (s == upnp_os::kInvalidSocket) continue;
+        upnp_os::pin_to_interface(s, f.ifindex);
+        sockaddr_in dst{};
+        dst.sin_family = AF_INET;
+        dst.sin_port = htons(targetPort ? targetPort : 80);
+        dst.sin_addr.s_addr = ::inet_addr(targetHost.c_str());
+        std::string got;
+        if (upnp_os::io_connect(s, (sockaddr*)&dst, sizeof(dst)) == 0) {
+            sockaddr_in local{};
+            int len = sizeof(local);
+            char b[64] = {0};
+            if (upnp_os::io_getsockname(s, (sockaddr*)&local, &len) == 0 &&
+                ::inet_ntop(AF_INET, &local.sin_addr, b, sizeof(b)) != nullptr &&
+                std::strcmp(b, "0.0.0.0") != 0) {
+                got = b;
             }
         }
+        upnp_os::close_socket(s);
+        if (!got.empty()) return got;
     }
-    upnp_os::close_socket(s);
-    upnp_os::wsa_cleanup();
-    return out;
+    return "127.0.0.1";
 }
 
 // ---------------- 本地 HTTP 供源服务器（WAV 流） ----------------

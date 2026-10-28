@@ -713,6 +713,31 @@ static std::string jesc(const std::string& s) {
     return o;
 }
 
+// 空的 UPnP 设备列表必须给出"为什么 + 怎么办"。
+// 2026-10-28 用户反馈「UPnP 搜不到设备」时，界面只有「共发现 0 个渲染器」，
+// 分不清是设备没开机、组播被拦，还是本机路由把局域网段交给了虚拟网卡。
+// 判据全部来自 UpnpDiscoverDiag（实测字段），不猜。
+static std::string upnp_empty_hint(const rta::net::UpnpDiscoverDiag& d) {
+    std::string h = "未发现 UPnP/DLNA 渲染器。";
+    const bool mcast_dead = (d.multicast_sent == 0 && d.send_failed > 0);
+    if (mcast_dead && d.broadcast_sent > 0) {
+        h += "本机 SSDP 组播发不出去（常见于「Internet 共享」把同一网段抢成虚拟网桥、代理 TUN "
+             "抢占路由，或进程被系统/沙箱限制），已自动改用子网广播探测；如果设备就在隔壁，"
+             "请确认它已开机并开启了 DLNA/UPnP 渲染器功能。";
+    } else if (mcast_dead) {
+        h += "组播和广播都发不出去（见 diag 的失败原因），请检查网络连接与代理设置。";
+    } else if (d.replies > 0 && d.describe_failed > 0) {
+        h += "收到 " + std::to_string(d.replies) + " 个应答，但抓不到设备描述（" +
+             std::to_string(d.describe_failed) + " 个失败）—— 多为本机到设备的路由被虚拟网卡抢走，"
+             "或设备描述端口被防火墙拦。";
+    } else {
+        h += "同网段内没有渲染器应答 M-SEARCH：确认设备已开机、与电脑在同一局域网、"
+             "并在设备设置里开启 DLNA/UPnP 渲染器。";
+    }
+    h += " 也可以直接填设备描述地址（http://IP:端口/）绕过发现。";
+    return h;
+}
+
 static std::string urlDecode(const std::string& s) {
     std::string o;
     for (size_t i = 0; i < s.size(); ++i) {
@@ -8471,7 +8496,8 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
         if (rq.path.rfind("/api/cast/devices", 0) == 0) {
             const bool forceRescan = (rq.path.find("scan=1") != std::string::npos ||
                                       rq.path.find("rescan=1") != std::string::npos);
-            auto devs = rta::net::CastManager::instance().get_devices(forceRescan);
+            rta::net::UpnpDiscoverDiag ddiag;
+            auto devs = rta::net::CastManager::instance().get_devices(forceRescan, &ddiag);
             std::ostringstream j;
             j << "{\"ok\":true,\"n\":" << devs.size() << ",\"devices\":[";
             for (size_t i = 0; i < devs.size(); ++i) {
@@ -8490,7 +8516,19 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
                   << ",\"hasAVTransport\":" << (!devs[i].control.empty() ? "true" : "false")
                   << "}";
             }
-            j << "]}";
+            // diag/hint：空列表必须能说清"为什么"。字段名与 /api/upnp 保持一致。
+            j << "],\"diag\":{\"ifaces\":" << ddiag.ifaces_tried
+              << ",\"sent\":" << ddiag.msgs_sent
+              << ",\"multicastSent\":" << ddiag.multicast_sent
+              << ",\"broadcastSent\":" << ddiag.broadcast_sent
+              << ",\"sendFailed\":" << ddiag.send_failed
+              << ",\"replies\":" << ddiag.replies
+              << ",\"describeFailed\":" << ddiag.describe_failed
+              << ",\"note\":\"" << jesc(ddiag.note) << "\"}";
+            if (devs.empty()) {
+                j << ",\"hint\":\"" << jesc(upnp_empty_hint(ddiag)) << "\"";
+            }
+            j << "}";
             return j.str();
         }
         if (rq.path.rfind("/api/cast/state", 0) == 0) {
@@ -8611,10 +8649,14 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
         }
         j << "],\"diag\":{\"ifaces\":" << diag.ifaces_tried
           << ",\"sent\":" << diag.msgs_sent
+          << ",\"multicastSent\":" << diag.multicast_sent
+          << ",\"broadcastSent\":" << diag.broadcast_sent
+          << ",\"sendFailed\":" << diag.send_failed
+          << ",\"replies\":" << diag.replies
+          << ",\"describeFailed\":" << diag.describe_failed
           << ",\"note\":\"" << jesc(diag.note) << "\"}";
         if (devs.empty()) {
-            j << ",\"hint\":\"未发现 UPnP 渲染器：SSDP 组播可能被代理(VPN/TUN)/防火墙/路由器 AP 隔离拦截。"
-                 "可关闭代理后重试，或直接填设备地址（http://IP:端口/）直连。\"";
+            j << ",\"hint\":\"" << jesc(upnp_empty_hint(diag)) << "\"";
         }
         j << "}";
         return j.str();
