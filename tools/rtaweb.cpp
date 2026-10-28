@@ -10278,6 +10278,15 @@ static void core_log_startup_banner(unsigned port, bool embedded) {
 
 // ---- 共享初始化（不含 HTTP 监听、不含开浏览器）----
 static void core_init_common() {
+    // 2026-10-28 用户实测「点目录里不存在的曲目 → 窗口直接消失」的根因修复（SIGPIPE）。
+    // 现场证据：launchd 日志 `exited due to SIGPIPE | sent by RLPlayer[pid]`；runningboardd
+    // 报 `termination reported by launchd (2, 13, 13)`；**没有** .ips 崩溃报告、**没有**
+    // SHUTDOWN 日志 —— 进程是被信号直接打死的，写已关闭的管道即触发。
+    // 为什么 .app 必现、CLI 不复现：.app 由 launchd 启动，stdout/stderr 没有终端承接；
+    // 一旦读端关闭，任何 printf/fprintf 写下去就是 SIGPIPE，默认动作=终止进程。
+    // 修法：忽略 SIGPIPE（服务端/长期进程的标准做法）⟹ 写失败退化成 EPIPE 返回错误，
+    // 由调用方判断；进程不再因为这个原因猝死。此处对 .app 与 CLI 两条启动路径同时生效。
+    ::signal(SIGPIPE, SIG_IGN);
     rta::crash::install();    // 崩溃转储（1.0.5）：dump 落 exe 目录 dumps\，filter 先写日志
     setvbuf(stdout, nullptr, _IONBF, 0);
     // 系统级调优：提高进程优先级 + 把系统定时器精度提到 1ms。

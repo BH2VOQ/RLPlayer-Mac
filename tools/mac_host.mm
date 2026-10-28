@@ -30,6 +30,7 @@
 #import <AppKit/AppKit.h>
 #import <WebKit/WebKit.h>
 #include <cstdio>
+#include <csignal>
 #include <cstdlib>
 #include <cstring>
 #include <string>
@@ -1338,6 +1339,12 @@ reject:
 #ifndef RL_TEST_RUNNER
 int main(int argc, const char *argv[]) {
     (void)argc; (void)argv;
+    // 2026-10-28（用户实测闪退根因）：忽略 SIGPIPE。壳在 core_init_common() 之前就会往
+    // stderr 写诊断；.app 由 launchd 启动、stdout/stderr 无终端承接，读端一关，写即触发
+    // SIGPIPE，默认动作直接终止进程 —— 现场证据：launchd `exited due to SIGPIPE`、
+    // runningboardd `(2, 13, 13)`，且没有 .ips、没有 SHUTDOWN 日志。
+    // 在进程第一行生效，覆盖核心初始化之前的写。
+    ::signal(SIGPIPE, SIG_IGN);
     @autoreleasepool {
         HostAppDelegate *del = [[HostAppDelegate alloc] init];
         NSApplication *app = [NSApplication sharedApplication];
