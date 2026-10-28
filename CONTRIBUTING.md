@@ -19,7 +19,7 @@ ctest --test-dir build-mac --output-on-failure
 | 门禁 | 命令 | 期望 |
 |---|---|---|
 | 构建 | `cmake --build build-mac -j8` | 0 error |
-| 测试 | `ctest --test-dir build-mac --output-on-failure` | 87/87 passed |
+| 测试 | `ctest --test-dir build-mac --output-on-failure` | 100/100 passed |
 | 出包 | `bash tools/make_app_mac.sh` | 架构 / 部署目标 / 签名门禁全过 |
 
 **看退出码，不要只看尾行。** 历史上有过「尾行像成功、退出码非 0」的合并事故。
@@ -46,6 +46,6 @@ chore: ...
 ## 报告问题
 
 优先用 [Issue 模板](https://github.com/BH2VOQ/RLPlayer-Mac/issues/new/choose)。
-更方便的方式是 App 内 **设置 → 诊断 → 发送反馈**：会自动附诊断包，省去手工收集日志。
+更方便的方式是 App 内 **设置 → 诊断 → 发送反馈**：可勾选附带诊断包（已脱敏），省去手工收集日志。
 
 安全问题请**不要**开公开 issue，见 [SECURITY.md](SECURITY.md)。
