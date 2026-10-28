@@ -1539,16 +1539,77 @@ document.addEventListener('click', function (ev) {
     t = t.parentNode;
   }
 });
-// 问号气泡左右自适应：右半屏右对齐向左展开，左半屏左对齐向右展开
+// 问号气泡避让：以视口与所有裁剪祖先的交集为边界，而不是按屏幕左右半边猜方向。
+// 保留伪元素和 :hover/:focus 展示；在同一次事件内测量真实换行后的高度，避免首帧被裁。
+function positionTip(t) {
+  if (!t || !t.isConnected || !t.getClientRects().length) return;
+  var bounds = { left:0, top:0, right:document.documentElement.clientWidth, bottom:window.innerHeight };
+  for (var p = t.parentElement; p; p = p.parentElement) {
+    var cs = getComputedStyle(p), pr = p.getBoundingClientRect();
+    if (/auto|scroll|hidden|clip/.test(cs.overflowX)) {
+      bounds.left = Math.max(bounds.left, pr.left + p.clientLeft);
+      bounds.right = Math.min(bounds.right, pr.left + p.clientLeft + p.clientWidth);
+    }
+    if (/auto|scroll|hidden|clip/.test(cs.overflowY)) {
+      bounds.top = Math.max(bounds.top, pr.top + p.clientTop);
+      bounds.bottom = Math.min(bounds.bottom, pr.top + p.clientTop + p.clientHeight);
+    }
+  }
+  var r = t.getBoundingClientRect(), pad = 4;
+  bounds.left += pad; bounds.right -= pad; bounds.top += pad; bounds.bottom -= pad;
+  t.style.setProperty('--tip-x', '0px');
+  t.style.setProperty('--tip-y', '0px');
+  // max-width 指内容盒，减去气泡的 padding(20) 与 border(2)。
+  t.style.setProperty('--tip-max', Math.max(1, bounds.right - bounds.left - 22) + 'px');
+  t.classList.remove('tip-r', 'tip-d');
+  var c = getComputedStyle(t, '::after');
+  function size(axis) {
+    var v = parseFloat(c[axis]) || 0;
+    if (c.boxSizing !== 'border-box') {
+      v += axis === 'width'
+        ? parseFloat(c.paddingLeft) + parseFloat(c.paddingRight) + parseFloat(c.borderLeftWidth) + parseFloat(c.borderRightWidth)
+        : parseFloat(c.paddingTop) + parseFloat(c.paddingBottom) + parseFloat(c.borderTopWidth) + parseFloat(c.borderBottomWidth);
+    }
+    return v;
+  }
+  var w = size('width'), h = size('height');
+  var up = r.top - bounds.top - 8, down = bounds.bottom - r.bottom - 8;
+  // 上方放不下时向下；两侧都不足则选空间更大的一侧，再做边界微调。
+  t.classList.toggle('tip-d', up < h && down > up);
+  var left = r.left + t.clientLeft - 10;
+  t.classList.toggle('tip-r', left + w > bounds.right);
+  c = getComputedStyle(t, '::after');
+  left = c.left !== 'auto' ? r.left + t.clientLeft + parseFloat(c.left)
+    : r.left + t.clientLeft + t.clientWidth - parseFloat(c.right) - w;
+  var top = c.top !== 'auto' ? r.top + t.clientTop + parseFloat(c.top)
+    : r.top + t.clientTop + t.clientHeight - parseFloat(c.bottom) - h;
+  var x = Math.max(bounds.left, Math.min(left, bounds.right - w));
+  var y = Math.max(bounds.top, Math.min(top, bounds.bottom - h));
+  t.style.setProperty('--tip-x', (x - left) + 'px');
+  t.style.setProperty('--tip-y', (y - top) + 'px');
+}
+var hoveredTip = null, tipFrame = 0;
 ['mouseover', 'focusin'].forEach(function (name) {
   document.addEventListener(name, function (e) {
     var t = e.target && e.target.closest && e.target.closest('.tip');
-    if (t) {
-      if (t.getBoundingClientRect().left > window.innerWidth * 0.55) t.classList.add('tip-r');
-      else t.classList.remove('tip-r');
-    }
+    if (name === 'mouseover') hoveredTip = t;
+    if (t) positionTip(t);
   }, true);
 });
+document.addEventListener('mouseout', function (e) {
+  if (hoveredTip && !hoveredTip.contains(e.relatedTarget)) hoveredTip = null;
+}, true);
+function refreshTips() {
+  if (tipFrame) return;
+  tipFrame = requestAnimationFrame(function () {
+    tipFrame = 0;
+    if (hoveredTip) positionTip(hoveredTip);
+    var t = document.activeElement;
+    if (t && t.matches('.tip') && t !== hoveredTip) positionTip(t);
+  });
+}
+document.addEventListener('scroll', refreshTips, true);
+window.addEventListener('resize', refreshTips);
 function renderFieldGrid(fields, kind, opts) {
   if (!fields || typeof fields !== 'object') return '';
   var skip = {};
@@ -7198,8 +7259,10 @@ function renderSettingsPage() {
   // ---------- 高级 ----------
   h += '<div class=spane data-g=adv>'
      + sgroup('外观',
-         '<div class=sfld><label>界面风格' + tip('在 Apple Music 风格（通顶侧栏 + 悬浮毛玻璃播放胶囊 + 精选海报）与经典 Hi-Fi 工作台（DSH / Roon 布局）之间实时切换') + '</label><select id=sp_uistyle>'
-       + opt('apple', 'Apple Music 风格（默认）', S.uiStyle || 'apple') + opt('classic', '经典 Hi-Fi 工作台（DSH / Roon）', S.uiStyle || 'apple')
+         // 2026-10-28（待办 t-49b95d08）：括号里的外观描述是错的 —— 只写风格名，不解释视觉特征。
+         '<div class=sfld><label>界面风格' + tip('在 Apple Music 风格与经典 Hi-Fi 工作台之间实时切换') + '</label><select id=sp_uistyle>'
+       // 2026-10-28（用户同一反馈续）：选项里的括号说明也是错的，连同括号一起去掉，只留风格名。
+       + opt('apple', 'Apple Music 风格', S.uiStyle || 'apple') + opt('classic', '经典 Hi-Fi 工作台', S.uiStyle || 'apple')
        + '</select></div>'
        + '<div class=sfld><label>主题' + tip('顶栏右侧的小圆点也可以快速切换主题') + '</label><select id=sp_theme>'
        + opt('dark', '深色（默认）', S.theme) + opt('light', '白色', S.theme) + opt('blue', '浅蓝色', S.theme)
@@ -7785,10 +7848,8 @@ function renderSettingsPage() {
   initCastControls();
   scanCastDevices(false);
   pollCastState();
-  document.querySelectorAll('.tip').forEach(function (t) {
-    if (t.getBoundingClientRect().left > window.innerWidth * 0.55) t.classList.add('tip-r');
-    else t.classList.remove('tip-r');
-  });
+  // 动态重绘后的气泡由委托 hover/focus 事件按当时的可见区域定位。
+  refreshTips();
 }
 /* ---------------- EQ 与房间校正（261023-03 第6/7条） ---------------- */
 var OPRA_INDEX = null;

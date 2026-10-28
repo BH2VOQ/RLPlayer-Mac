@@ -513,17 +513,72 @@ int main() {
         ck(lyrOrder == std::vector<std::string>{"lrclib", "netease", "qq"},
            "歌词链 = 注册表逆序过滤 = lrclib→netease→qq", lyrJoin);
 
-        // 句柄挑选纯函数:第一个「同源且句柄非空」的候选(数组已按分数从高到低)
-        std::vector<Candidate> cs(3);
-        cs[0].source = "netease"; cs[0].songId = "186016";
-        cs[1].source = "qq"; cs[1].songId = "";                    // 同源但无句柄 → 跳过
-        cs[2].source = "qq"; cs[2].songId = "0039MnYb0qxYhV";
-        ck(pv_lyric_song_id(cs, "qq") == "0039MnYb0qxYhV",
-           "pv_lyric_song_id 跳过空句柄取下一个", pv_lyric_song_id(cs, "qq"));
-        ck(pv_lyric_song_id(cs, "netease") == "186016",
-           "pv_lyric_song_id 命中该源第一个", pv_lyric_song_id(cs, "netease"));
-        ck(pv_lyric_song_id(cs, "itunes").empty(), "无该源候选 → 空串");
-        ck(pv_lyric_song_id({}, "qq").empty(), "空候选表 → 空串");
+        // 句柄挑选纯函数:第一个「同源、句柄非空、且同曲身份通过」的候选
+        LyricRequest q;
+        q.title = "二人的午后"; q.artist = "爱上火车"; q.durationSec = 150;
+        {
+            std::vector<Candidate> cs(3);
+            cs[0].source = "netease"; cs[0].songId = "186016";
+            cs[0].title = "二人的午后"; cs[0].artist = "爱上火车"; cs[0].durationMs = 150000;
+            cs[1].source = "qq"; cs[1].songId = "";                // 同源但无句柄 → 跳过
+            cs[1].title = "二人的午后"; cs[1].artist = "爱上火车"; cs[1].durationMs = 150000;
+            cs[2].source = "qq"; cs[2].songId = "0039MnYb0qxYhV";
+            cs[2].title = "二人的午后"; cs[2].artist = "爱上火车"; cs[2].durationMs = 151000;
+            q.cands = cs;
+            ck(pv_lyric_song_id(q, "qq") == "0039MnYb0qxYhV",
+               "pv_lyric_song_id 跳过空句柄取下一个", pv_lyric_song_id(q, "qq"));
+            ck(pv_lyric_song_id(q, "netease") == "186016",
+               "pv_lyric_song_id 命中该源第一个同曲候选", pv_lyric_song_id(q, "netease"));
+            ck(pv_lyric_song_id(q, "itunes").empty(), "无该源候选 → 空串");
+            double sc = 0;
+            ck(pv_lyric_song_id(q, "netease", &sc) == "186016" && sc > 0.8,
+               "句柄分随句柄返回(歌词自己的置信度)", std::to_string(sc));
+        }
+        {
+            LyricRequest empty;
+            ck(pv_lyric_song_id(empty, "qq").empty(), "空候选表 → 空串");
+        }
+
+        // ---- 2026-10-28 t-33a613d6 回归：歌词张冠李戴 ----
+        // 用户实测本机缓存里 4 首《爱上火车 OST》的歌词来自无关歌（逐字节比对）。
+        // 这里断言：这些候选既不能当句柄，lrclib search 回退也不许取第一条异曲。
+        {
+            auto cand = [](const char* src, const char* id, const char* t, const char* a, long long ms) {
+                Candidate c;
+                c.source = src; c.songId = id; c.title = t; c.artist = a; c.durationMs = ms;
+                return c;
+            };
+            LyricRequest rq;
+            rq.title = "二人的午后"; rq.artist = ""; rq.durationSec = 150;   // 标签无 artist
+            rq.cands.push_back(cand("netease", "469203", "二人の午後", "村下孝蔵", 272000));
+            ck(pv_lyric_song_id(rq, "netease").empty(),
+               "回归:二人的午后150s 不可取村下孝蔵272s 的歌词句柄",
+               pv_lyric_song_id(rq, "netease"));
+
+            LyricRequest rq2;
+            rq2.title = "原野绽芳华"; rq2.artist = ""; rq2.durationSec = 180;
+            rq2.cands.push_back(cand("netease", "1888380853", "梦尽长安", "青盏", 257000));
+            ck(pv_lyric_song_id(rq2, "netease").empty(),
+               "回归:原野绽芳华180s 不可取梦尽长安257s 的歌词句柄");
+
+            // 同曲同源仍然要能取到（防止「一刀切」把功能砍掉）
+            LyricRequest okq;
+            okq.title = "二人的午后"; okq.artist = "爱上火车"; okq.durationSec = 150;
+            okq.cands.push_back(cand("netease", "777", "二人的午后", "爱上火车", 150500));
+            ck(pv_lyric_song_id(okq, "netease") == "777", "同曲同源正常取到歌词句柄");
+
+            // lrclib search：首条是异曲，第二条才是同曲 → 必须跳过第一条
+            const LyricResult rs = parse_lrclib_search_matched(
+                "[{\"trackName\":\"梦尽长安\",\"artistName\":\"青盏\",\"duration\":257,\"plainLyrics\":\"wrong\"},"
+                "{\"trackName\":\"原野绽芳华\",\"artistName\":\"爱上火车\",\"duration\":180,\"plainLyrics\":\"right\"}]",
+                "原野绽芳华", "爱上火车", 180);
+            ck(rs.ok && rs.lrc == "right", "回归:lrclib search 跳过首条异曲取同曲",
+               rs.ok ? rs.lrc : rs.err);
+            const LyricResult rn = parse_lrclib_search_matched(
+                "[{\"trackName\":\"梦尽长安\",\"artistName\":\"青盏\",\"duration\":257,\"plainLyrics\":\"wrong\"}]",
+                "原野绽芳华", "爱上火车", 180);
+            ck(!rn.ok && rn.lrc.empty(), "回归:lrclib search 无同曲 → 宁缺毋取", rn.err);
+        }
 
         // 歌词统一入口的「无句柄 = 静默不参与」分支(不发网络请求):
         // cands 里不放 qq 候选 → lyric_qq_entry 直接 ok=false、err 空。

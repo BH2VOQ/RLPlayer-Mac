@@ -80,19 +80,27 @@ else
     echo "  搜索过：$BUILD/librtagpu.dylib 和 $ROOT/librtagpu.dylib"
 fi
 
-# 3) 图标（256 PNG → 全尺寸 iconset → icns）
-ICONSET="$(mktemp -d)/RLPlayer.iconset"
-mkdir -p "$ICONSET"
-sips -z 16 16     "$ROOT/res/rlplayer-256.png" --out "$ICONSET/icon_16x16.png"     >/dev/null
-sips -z 32 32     "$ROOT/res/rlplayer-256.png" --out "$ICONSET/icon_16x16@2x.png" >/dev/null
-sips -z 32 32     "$ROOT/res/rlplayer-256.png" --out "$ICONSET/icon_32x32.png"     >/dev/null
-sips -z 64 64     "$ROOT/res/rlplayer-256.png" --out "$ICONSET/icon_32x32@2x.png" >/dev/null
-sips -z 128 128   "$ROOT/res/rlplayer-256.png" --out "$ICONSET/icon_128x128.png"   >/dev/null
-sips -z 256 256   "$ROOT/res/rlplayer-256.png" --out "$ICONSET/icon_128x128@2x.png" >/dev/null
-sips -z 256 256   "$ROOT/res/rlplayer-256.png" --out "$ICONSET/icon_256x256.png"   >/dev/null
-sips -z 512 512   "$ROOT/res/rlplayer-256.png" --out "$ICONSET/icon_256x256@2x.png" >/dev/null
+# 3) 图标（256 PNG → 透明画布居中缩放 → 全档 iconset 16…1024 → icns）
+#
+# 2026-10-28（待办 t-95b74bca：用户反馈「底部 Dock 图标偏大」）：
+#   旧做法 `sips -z N N res/rlplayer-256.png` 是**直接缩放原图**，而原图是满幅出血的
+#   圆角方块（alpha>200 实体横跨 233/256 = 91.0% 画布宽）；系统 App 同一量法只有
+#   206/256 = 80.5%（本机 Music / Calculator / Notes 实测，见 tools/iconcheck.py --apple-ref）。
+#   差 27px / 13% ⟹ Dock 里 RLPlayer 的轮廓比邻居大一圈。
+#   现在改为：把原图整体缩到 206/233 ≈ 0.884、居中绘制到**透明**画布，再出全档
+#   （旧版还漏了 512x512@2x = 1024 档，这次一并补上）。
+#   ⚠ 不要用 `sips --padToHeightWidth` 补边：它的补边色没有 alpha 通道，补出来是不透明黑框。
+#   ⚠ 不改 res/rlplayer-256.png 本身、不重新设计品牌视觉，只补留白。
+#   独立几何验收：tools/iconcheck.py（旧 icns 必须红、新 icns 必须绿）
+command -v swift >/dev/null 2>&1 || {
+    echo "✗ 致命错误：找不到 swift，无法生成图标（需要 Xcode Command Line Tools）"
+    exit 1
+}
+ICON_TMP="$(mktemp -d)"
+ICONSET="$ICON_TMP/RLPlayer.iconset"
+swift "$ROOT/tools/make_icon_mac.swift" "$ROOT/res/rlplayer-256.png" "$ICONSET"
 iconutil -c icns "$ICONSET" -o "$APP/Contents/Resources/RLPlayer.icns"
-rm -rf "$ICONSET"
+rm -rf "$ICON_TMP"
 
 # 4) Info.plist
 # 2026-10-26（测试版支持）：版本号现在可能是 `1.0.5-beta.1` 这种形式。

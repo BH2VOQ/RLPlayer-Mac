@@ -47,6 +47,53 @@ static Candidate cd(const char* source, const char* genre, const char* year,
 }
 
 int main() {
+    // ---------------- 歌词身份（2026-10-28 t-33a613d6：张冠李戴回归） ----------------
+    // 用户本机实测：150s 的「二人的午后」缓存了 272s 村下孝蔵的同名曲歌词；
+    // 180s 的「原野绽芳华」缓存了 257s「梦尽长安」的歌词。旧实现把全部候选交给歌词链、
+    // 取该源第一个句柄 ⟹ 元信息与歌词来自两首不同的歌。
+    std::printf("-- lyric identity --\n");
+    {
+        auto lc = [](const char* src, const char* id, const char* t, const char* a, long long ms) {
+            Candidate c;
+            c.source = src; c.songId = id; c.title = t; c.artist = a; c.durationMs = ms;
+            return c;
+        };
+        LyricRequest rq;                       // 标签无 artist（用户这批曲目的真实形态）
+        rq.title = "二人的午后"; rq.artist = ""; rq.durationSec = 150;
+        const Candidate wrong = lc("netease", "469203", "二人の午後", "村下孝蔵", 272000);
+        rq.cands.push_back(wrong);
+        ck(pv_lyric_song_id(rq, "netease").empty(),
+           "歌词:150s 二人的午后 不得取 272s 村下孝蔵 句柄");
+        ck(!pv_lyric_identity(rq.title, rq.artist, rq.durationSec, wrong),
+           "歌词:身份校验直接拒掉异曲候选");
+
+        LyricRequest rq2;
+        rq2.title = "原野绽芳华"; rq2.artist = ""; rq2.durationSec = 180;
+        rq2.cands.push_back(lc("netease", "1888380853", "梦尽长安", "青盏", 257000));
+        ck(pv_lyric_song_id(rq2, "netease").empty(),
+           "歌词:180s 原野绽芳华 不得取 257s 梦尽长安 句柄");
+
+        LyricRequest okq;                      // 同曲必须仍然取得到（防一刀切）
+        okq.title = "二人的午后"; okq.artist = "爱上火车"; okq.durationSec = 150;
+        okq.cands.push_back(lc("netease", "777", "二人的午后", "爱上火车", 150500));
+        ck(pv_lyric_song_id(okq, "netease") == "777", "歌词:同曲同源仍正常取到句柄");
+        double sc2 = 0;
+        ck(pv_lyric_song_id(okq, "netease", &sc2) == "777" && sc2 > 0.8,
+           "歌词:句柄分随句柄返回(歌词自己的置信度)", std::to_string(sc2));
+
+        const LyricResult rs = parse_lrclib_search_matched(
+            "[{\"trackName\":\"梦尽长安\",\"artistName\":\"青盏\",\"duration\":257,\"plainLyrics\":\"wrong\"},"
+            "{\"trackName\":\"原野绽芳华\",\"artistName\":\"爱上火车\",\"duration\":180,\"plainLyrics\":\"right\"}]",
+            "原野绽芳华", "爱上火车", 180);
+        ck(rs.ok && rs.lrc == "right", "歌词:lrclib search 跳过首条异曲取同曲",
+           rs.ok ? rs.lrc : rs.err);
+        const LyricResult rn = parse_lrclib_search_matched(
+            "[{\"trackName\":\"梦尽长安\",\"artistName\":\"青盏\",\"duration\":257,\"plainLyrics\":\"wrong\"}]",
+            "原野绽芳华", "爱上火车", 180);
+        ck(!rn.ok && rn.lrc.empty(), "歌词:lrclib search 无同曲 → 宁缺毋取", rn.err);
+    }
+
+
 #ifdef _WIN32
     SetConsoleOutputCP(CP_UTF8);
 #endif

@@ -68,6 +68,12 @@
 | `peqcheck.js` | PEQ 对齐 + 拖拽/键盘/自动前级验收 | `node tools/peqcheck.js <url> <out>` |
 | `uishots.js` / `uiprobe.js` | 批量截图 / 页面探针 | — |
 | `mock_t25.js` / `mock_upnp_renderer.js` | 页面契约 mock / 假 UPnP 渲染器（不出声、不碰真设备） | — |
+| `tipcheck.js` | 设置页 (?) 气泡几何验收：真实 CDP 鼠标 + 真实 Tab，::after 变换后矩形与全部裁剪祖先求交 | `node tools/tipcheck.js --url http://127.0.0.1:19093 --out /tmp/tipcheck --tab-sweep` |
+| `iconcheck.py` | .icns 图标几何验收（256 档实体 206±4px、四角透明、10 档齐全），需 bundled Python + Pillow | `"$PY" tools/iconcheck.py --icns dist-mac/RLPlayer.app/Contents/Resources/RLPlayer.icns --apple-ref` |
+| `make_icon_mac.swift` | 由 `res/rlplayer-256.png` 生成带透明留白的全档 iconset（打包脚本调用） | `swift tools/make_icon_mac.swift res/rlplayer-256.png /tmp/RLPlayer.iconset` |
+
+**2026-10-28 新增的三个工具**都在 `make_app_mac.sh` 的打包链上或与之配套：
+`make_icon_mac.swift` 出图、`iconcheck.py` 判几何、`tipcheck.js` 判气泡不越界。
 
 **这些脚本的共同前提**：测试实例必须无声（`backend=null`、`volume=-60`），
 脚本会在起播前断言；不通过就拒绝继续。

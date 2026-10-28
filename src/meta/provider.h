@@ -95,6 +95,27 @@ struct LyricRequest {
     std::vector<Candidate> cands;    // 源内句柄(有则用,免重复搜索)
 };
 
+// 歌词身份判定（纯函数，离线回归见 tests/test_metaproviders.cpp）。
+// 2026-10-28（待办 t-33a613d6，用户实测「爱上火车 OST」张冠李戴）：
+//   歌词是不可借用的曲目内容 —— 总分高 ≠ 同曲。artist 未知时 mf_artist 给中性 0.5，
+//   「标题相同 + 时长相近」就能凑到 0.85；而该源候选可能全是无关歌。旧实现把这批候选
+//   的 songId 全交给歌词链、取该源第一个 ⟹ 元信息取 A 歌、歌词抓 B 歌（实测 4 例错配）。
+// 规则（宁缺毋滥，宁可「歌词未取」也不写别人的词）：
+//   ① 标题必须高匹配（titleScore ≥ 0.9）；
+//   ② 两侧时长都已知且判 far（durScore==0）→ 一票否决；
+//   ③ 查询艺人已知 → 候选艺人非空且 artistScore ≥ 0.8；
+//   ④ 艺人未知 → 必须靠明确时长佐证（±3s，durScore==1.0）才取词，不猜未知艺人。
+inline bool pv_lyric_identity(const std::string& qTitle, const std::string& qArtist,
+                              int qSec, const Candidate& c) {
+    if (match_norm(qTitle).empty() || match_norm(c.title).empty()) return false;
+    const Scored s = match_score_detail(qTitle, qArtist, "", qSec, c);
+    if (s.titleScore < 0.90) return false;
+    if (qSec > 0 && c.durationMs > 0 && s.durScore == 0) return false;
+    if (!match_norm(qArtist).empty())
+        return !match_norm(c.artist).empty() && s.artistScore >= 0.80;
+    return qSec > 0 && c.durationMs > 0 && s.durScore >= 1.0;
+}
+
 // 数据源描述符(P1.5):新增数据源 = 往 provider_registry() 注册一项 + 实现函数,零接线。
 //   id       设置键后缀与溯源名("qq"/"netease"/"itunes"/"lrclib";lrclib 仅歌词)
 //   name     设置页显示名("QQ音乐"/"网易云"/"iTunes"/"lrclib 歌词")
@@ -1399,6 +1420,32 @@ inline LyricResult parse_qq_lyric(const std::string& text) {
 // 歌词:网络函数
 // ---------------------------------------------------------------------------
 
+// /api/search 回退:接口顺序不可信(实测首条常是异曲) ⟹ 逐条做同曲身份校验,
+// 只接受第一条「身份通过且确实有词」的条目;全都不通过则如实报「无同曲歌词」。
+inline LyricResult parse_lrclib_search_matched(const std::string& text,
+                                               const std::string& title,
+                                               const std::string& artist,
+                                               int durationSec) {
+    LyricResult r;
+    r.source = "lrclib";
+    const rta::net::Json j = rta::net::json_parse(text);
+    if (j.type != rta::net::Json::Arr) { r.err = "lrclib search: 响应不是 JSON 数组"; return r; }
+    if (j.size() == 0) { r.err = "lrclib search: 无结果"; return r; }
+    for (size_t i = 0; i < j.size(); ++i) {
+        const rta::net::Json& e = j.at(i);
+        Candidate c;
+        c.title  = e["trackName"].s();
+        c.artist = e["artistName"].s();
+        const double seconds = e["duration"].n();
+        if (seconds > 0) c.durationMs = (long long)(seconds * 1000.0);
+        if (!pv_lyric_identity(title, artist, durationSec, c)) continue;
+        LyricResult t = pv_lrclib_obj(e);
+        if (t.ok) return t;
+    }
+    r.err = "lrclib search: 无同曲歌词";
+    return r;
+}
+
 // lrclib:GET /api/get → syncedLyrics(空则 plainLyrics);
 // 404/无果 → 回退 GET /api/search 取第一条;
 // 503(当日过载)→ pv_http_get_retry503 内重试 1 次(sleep 1500ms),仍 503 则如实填 err 放弃。
@@ -1434,7 +1481,7 @@ inline LyricResult lyric_lrclib(const std::string& title, const std::string& art
         return r;
     }
     const std::string text(resp.body.begin(), resp.body.end());
-    return parse_lrclib_search_first(text);
+    return parse_lrclib_search_matched(text, title, artist, durationSec);
 }
 
 // 网易歌词:GET /api/song/lyric?id=&lv=-1&kv=-1&tv=-1,UA "Mozilla/5.0"。探活 ✅。
@@ -1487,12 +1534,18 @@ inline LyricResult lyric_qq(const std::string& songMid) {
 // 注册表(P1.5):歌词统一入口(薄包装,内部复用上面的现有函数)+ 静态注册表
 // ---------------------------------------------------------------------------
 
-// 歌词句柄挑选(纯函数,离线可测):按候选数组顺序找第一个来自 source 且 songId 非空的
-// 候选,返回其 songId。调用方(enrich)传入的 cands 已按匹配分从高到低排好,
-// 所以「第一个」=「分数最高」,与 P1 的 ed_lyric_song_id 语义一致。
-inline std::string pv_lyric_song_id(const std::vector<Candidate>& cands, const char* source) {
-    for (const Candidate& c : cands)
-        if (c.source == source && !c.songId.empty()) return c.songId;
+// 歌词句柄挑选(纯函数,离线可测):只有通过 pv_lyric_identity 同曲校验的候选才配当句柄。
+// 旧实现取「该源第一个非空 songId」、不校验身份 ⟹ 实测把 272s 的村下孝蔵唱词写进了
+// 150s 的「二人的午后」。*score 带回该句柄的真实匹配分（= 歌词自己的置信度）。
+inline std::string pv_lyric_song_id(const LyricRequest& rq, const char* source,
+                                    double* score = nullptr) {
+    if (score) *score = 0;
+    for (const Candidate& c : rq.cands) {
+        if (c.source != source || c.songId.empty()) continue;
+        if (!pv_lyric_identity(rq.title, rq.artist, rq.durationSec, c)) continue;
+        if (score) *score = match_score(rq.title, rq.artist, "", rq.durationSec, c);
+        return c.songId;
+    }
     return "";
 }
 
@@ -1501,8 +1554,9 @@ inline std::string pv_lyric_song_id(const std::vector<Candidate>& cands, const c
 inline LyricResult lyric_qq_entry(const LyricRequest& rq, std::string& err) {
     err.clear();
     LyricResult r; r.source = "qq";
-    const std::string mid = pv_lyric_song_id(rq.cands, "qq");
-    if (mid.empty()) return r;                       // 候选里没有 qq 句柄:不参与
+    double score = 0;
+    const std::string mid = pv_lyric_song_id(rq, "qq", &score);
+    if (mid.empty()) return r;                       // 无「同曲」qq 句柄:不参与
     r = lyric_qq(mid);                               // songMid = 歌曲级 mid(任务 A)
     err = r.err;
     return r;
@@ -1513,7 +1567,8 @@ inline LyricResult lyric_qq_entry(const LyricRequest& rq, std::string& err) {
 inline LyricResult lyric_netease_entry(const LyricRequest& rq, std::string& err) {
     err.clear();
     LyricResult r; r.source = "netease";
-    const std::string sid = pv_lyric_song_id(rq.cands, "netease");
+    double score = 0;
+    const std::string sid = pv_lyric_song_id(rq, "netease", &score);
     if (sid.empty()) return r;
     const long long id = std::strtoll(sid.c_str(), nullptr, 10);
     if (id <= 0) return r;

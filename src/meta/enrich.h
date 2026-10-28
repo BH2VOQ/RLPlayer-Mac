@@ -562,8 +562,13 @@ inline EnrichStats enrich_track(const std::string& file, bool force, const Enric
             lrq.album  = !best.album.empty() ? best.album : mi.album;
             lrq.durationSec = fileSec;
             lrq.cands.reserve(sorted.size());
-            for (const Scored& s : sorted)           // 句柄挑选按分数从高到低(与 P1 一致)
-                if (s.idx < cands.size()) lrq.cands.push_back(cands[s.idx]);
+            // 2026-10-28（待办 t-33a613d6）：只把**通过同曲身份校验**的候选交给歌词链。
+            // 旧实现把全部候选（实测有 0.15 分的无关歌）按分数塞进来，谁排第一就抓谁的词，
+            // 于是「元信息取 A 歌、歌词抓 B 歌」。校验规则见 pv_lyric_identity。
+            for (const Scored& s : sorted)
+                if (s.idx < cands.size() &&
+                    pv_lyric_identity(p.title, p.artist, fileSec, cands[s.idx]))
+                    lrq.cands.push_back(cands[s.idx]);
             LyricResult lr;
             std::vector<std::string> lyrErrs;        // 各参与源的真实失败(P1 只留最后一个)
             for (auto it = provider_registry().rbegin(); it != provider_registry().rend(); ++it) {
@@ -582,7 +587,16 @@ inline EnrichStats enrich_track(const std::string& file, bool force, const Enric
             if (lr.ok && !lr.lrc.empty()) {
                 MetaValue lv;
                 lv.value = lr.lrc; lv.source = lr.source; lv.ts = now;
-                lv.confidence = (float)st.bestScore;      // 歌词无独立评分,随匹配置信
+                // 歌词置信度用**歌词自己的句柄分**，不再借用其它源的最高分：旧写法会把
+                // 0.85 的曲目匹配分写到一条无关歌词上，事后审计误判成同样可信。
+                double lyrConf = -1.0;
+                for (const Candidate& c : lrq.cands) {
+                    if (c.source != lr.source) continue;
+                    const double sc = match_score(lrq.title, lrq.artist, "", lrq.durationSec, c);
+                    if (sc > lyrConf) lyrConf = sc;
+                }
+                if (lyrConf < 0) lyrConf = st.bestScore;   // 无句柄源（lrclib）沿用曲目分兜底
+                lv.confidence = (float)lyrConf;
                 mergeTracked("lyrics", lv);
                 notes.push_back("歌词=" + lr.source);
             } else if (!lyrErrs.empty()) {

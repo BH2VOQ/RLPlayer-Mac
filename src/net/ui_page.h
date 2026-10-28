@@ -963,12 +963,12 @@ h += "#npPage .npedge{display:none}";
     // 2026-10-24（用户 261024-01 #7）：长说明不再铺在页面上 —— 收进 (?) 图标，hover/focus 才显示。
     h += ".tip{display:inline-flex;align-items:center;justify-content:center;width:15px;height:15px;margin-left:5px;border-radius:50%;border:1px solid var(--line2,var(--line));color:var(--mut2);font-size:9.5px;font-weight:700;line-height:1;cursor:help;vertical-align:1px;position:relative;user-select:none;flex:none}";
     h += ".tip:hover,.tip:focus{border-color:var(--acc);color:var(--acc);outline:0}";
-    h += ".tip::after{content:attr(data-tip);position:absolute;left:-10px;bottom:calc(100% + 8px);transform:none;width:max-content;max-width:290px;background:var(--bg3);color:var(--txt2);border:1px solid var(--line);border-radius:9px;padding:8px 10px;font-size:11px;line-height:1.6;font-weight:400;white-space:normal;text-align:left;box-shadow:0 10px 28px var(--shadow);opacity:0;visibility:hidden;transition:opacity .12s,transform .12s;z-index:40;pointer-events:none}";
-    h += ".tip.tip-r::after{left:auto;right:-10px;transform:none}";
+    // 气泡仍由伪元素渲染；JS 按视口与所有滚动/裁剪祖先的交集定位，不放开 .sbody 的溢出。
+    h += ".tip::after{content:attr(data-tip);position:absolute;left:-10px;bottom:calc(100% + 8px);transform:translate(var(--tip-x,0px),var(--tip-y,0px));width:max-content;max-width:min(290px,var(--tip-max,290px));background:var(--bg3);color:var(--txt2);border:1px solid var(--line);border-radius:9px;padding:8px 10px;font-size:11px;line-height:1.6;font-weight:400;white-space:normal;overflow-wrap:anywhere;text-align:left;box-shadow:0 10px 28px var(--shadow);opacity:0;visibility:hidden;transition:opacity .12s;z-index:40;pointer-events:none}";
+    h += ".tip.tip-r::after{left:auto;right:-10px}";
+    h += ".tip.tip-d::after{bottom:auto;top:calc(100% + 8px)}";
     h += ".tip:hover::after,.tip:focus::after{opacity:1;visibility:visible}";
-    // 分组标题的 (?) 改成向下展开：向上会被吸顶的页签条盖住（实测第一个分组就是这样）。
-    h += ".sghead .tip::after{bottom:auto;top:calc(100% + 8px)}";
-    h += "@media (max-width:1200px){.tip::after{max-width:min(240px,42vw)}}";
+    h += "@media (max-width:1200px){.tip::after{max-width:min(240px,42vw,var(--tip-max,240px))}}";
     h += ".sfld.wide{grid-column:1/-1}";
     h += ".sfld .chk{margin:0}";
     // 元数据「高级选项」：左右两列卡片（左=数据源，右=DeepSeek 接入 + 标签写回）。
