@@ -1175,7 +1175,9 @@ h += "#npPage .npedge{display:none}";
     h += "<div id=right><div class=rhead>";
     h += "<button class='rtab on' data-t=q>队列</button><button class=rtab data-t=l>歌词</button>";
     h += "<span class=sp></span><span class=cnt id=rcnt></span>";
-    h += "<button class=ibtn id=qclr title='清空队列' style='width:26px;height:26px'><svg width=13 height=13 viewBox='0 0 24 24' fill=none stroke=currentColor stroke-width=2><path d='M18 6L6 18M6 6l12 12'/></svg></button></div>";
+    // 2026-10-28（用户要求）：队列面板右上角的 ✕ 图标改成文字「清除」——图标看不出是
+    // 清空队列还是关闭面板。宽度改为自适应（.ibtn 是固定 32px，会挤断文字），高度沿用 26px。
+    h += "<button class=ibtn id=qclr title='清空队列' style='width:auto;min-width:46px;height:26px;padding:0 9px;font-size:11.5px;line-height:1;white-space:nowrap'>清除</button></div>";
     h += "<div class=rbody><div id=qlist></div><div id=lyricbox style='display:none'></div></div>";
     h += "</div>";
 
