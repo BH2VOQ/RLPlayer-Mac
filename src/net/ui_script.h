@@ -3752,6 +3752,8 @@ function tick() {
     // 2.5 秒才切到 400ms，进度条像卡住；反之停止后还在 400ms 空转就是白烧后端。
     if (S.playing !== !!j.playing || S.paused !== !!j.paused) pollKick();
     S.playing = !!j.playing; S.paused = !!j.paused; S.dur = j.dur; S.pos = j.pos;
+    // 1.1.0：外推基准 —— rAF 用「S.pos + 经过时间」把 400 ms 一格补成 60 fps 连续推进
+    SEEK.posAt = nowMs();
     // 2026-10-23 #1：底栏 bit-perfect 徽标的数据源（后端权威判定，见 /api/status 的 bitPerfect 字段）
     S.bpState = j.bitPerfect || ""; S.bpWhy = j.bitPerfectWhy || "";
     // 2026-10-26 B-4：六态徽标要判「升频方向」，全部取后端 F-5 的自证字段（前端不自己推导）。
@@ -3770,9 +3772,9 @@ function tick() {
     if (typeof j.summaryEnabled === 'boolean') META.summaryEnabled = j.summaryEnabled;
     // 正在播放整页：进度条 / 时间 / 播放图标
     if (D('npPage') && D('npPage').classList.contains('on')) {
-      if (D('npBar') && S.dur > 0) D('npBar').style.width = Math.min(100, S.pos / S.dur * 100) + '%';
-      if (D('npPos')) D('npPos').textContent = fmt(S.pos);
       if (D('npDur')) D('npDur').textContent = fmt(S.dur);
+      paintSeek(seekDisplaySec());   // 1.1.0：整页进度条也走唯一写入口（拖动中画的是预览）
+      seekAnimKick();
       if (D('npIcP')) D('npIcP').setAttribute('d', (S.playing && !S.paused)
         ? 'M7 5h4v14H7zM13 5h4v14h-4z' : 'M8 5l12 7-12 7z');
       syncVolUi();     // 音量可能在别处改（键盘 ↑↓ / 底栏滑块），整页跟着走
@@ -3809,15 +3811,17 @@ function tick() {
       var scanStr = (typeof j.scanMs === 'number' && j.scanMs > 0) ? (j.scanMs >= 1000 ? (j.scanMs/1000).toFixed(2) + ' s' : j.scanMs.toFixed(0) + ' ms') : '–';
       D('chainTiming').textContent = '解码 ' + decStr + '  \u00b7  临时WAV ' + wavStr + '  \u00b7  DSP ' + dspStr + '  \u00b7  库扫描 ' + scanStr;
     }
-    var pct = (j.dur > 0 ? Math.min(100, j.pos / j.dur * 100) : 0) + '%';
-    if (D('bar')) D('bar').style.width = pct;
-    D('tpos').textContent = fmt(j.pos);
+    // 1.1.0（拖动不丝滑）：底栏进度条不再在这里直接写 —— 统一交给 paintSeek / rAF，
+    //   否则 400 ms 轮询会把拖动预览"回拉"。后端 pos 已追上目标就提前解除保持窗。
+    if (SEEK.holdUntil && Math.abs((S.pos || 0) - SEEK.holdTarget) <= 1.0) SEEK.holdUntil = 0;
+    paintSeek(seekDisplaySec());
+    seekAnimKick();
     D('tdur').textContent = fmt(j.dur);
     D('icP').setAttribute('d', S.playing && !S.paused
       ? 'M7 5h4v14H7zM13 5h4v14h-4z'                     /* 暂停图标 */
       : 'M8 5v14l11-7z');                                 /* 播放图标 */
     if (j.current) {
-      if (S.lastCur !== j.current) { S.lastCur = j.current; loadMeta(j.current); loadLyrics(j.current); }
+      if (S.lastCur !== j.current) { S.lastCur = j.current; SEEK.holdUntil = 0; loadMeta(j.current); loadLyrics(j.current); }
       syncLyrics(j.pos);
       D('nps').textContent = (j.playing ? (j.paused ? '已暂停' : '播放中') : '已停止') +
         (j.outRate ? ' \u00b7 ' + j.outRate + ' Hz / ' + j.outBits + ' bit' : '');
@@ -4869,6 +4873,62 @@ function volNormalize(db) {
   return d;
 }
 
+/* ---------------- 音量步进：固定 dB 档位（1.1.0，模仿主流播放器） ----------------
+ *
+ * 检索结论（2026-10-28，CPA 检索；来源见每行括号）：
+ *   · Windows 官方《Audio-Tapered Volume Controls》：音量条应让「滑块位置 ↔ 感知响度」近似线性，
+ *     也就是 dB 随位置大致线性变化；并给出 −96 dB ≈ 16 bit DAC 最低有效输出（×65535 的倒数）作为参照。
+ *     （learn.microsoft.com/windows/win32/coreaudio/audio-tapered-volume-controls）
+ *   · JRiver 内置音量实测映射：10% = −46 dB、25% = −27 dB、50% = −14 dB、75% = −6 dB、100% = 0 dB
+ *     （yabb.jriver.com/interact，topic 69939）。本站 p^1.6 曲线为
+ *     −45.9 / −34.0 / −18.1 / −6.0 / 0 ⟹ 同族，不需要改曲线。
+ *   · Roon / Audirvāna / foobar2000 的 ± 键都是**固定 dB 步进**（0.5 dB，可配 1 dB）；
+ *     foobar 的读数固定 2 位小数（0.00 dB）。
+ *
+ * 所以本站真正不合主流的地方**不是曲线，而是步进**：
+ *   旧实现 ↑↓ 走"滑块行程的 2.5%"（2026-10-25 为躲开静音卡死而改的位置步进）⟹
+ *   顶端一步只有 0.12 dB（连按十下听不出变化），底部一步却有 49 dB（静音一步蹦到 −49 dB）。
+ *   这正是「音量 db 不对」的手感来源。改成固定档位后，任何位置、任何方向的一步都一样大。
+ */
+var VOL_STEP_DB = 0.5;   // 粗档：键盘 ↑↓、滚轮一格（Roon / Audirvāna / foobar 的默认档）
+var VOL_FINE_DB = 0.1;   // 细档：Shift + ↑↓（正好等于标签的 1 位小数精度）
+/* 真正"能听见的最低档"：−55 dB 这个曲线底**本身就在静音档里**
+ * （volDbToPos(−55) = 0 ≤ VOL_SILENT_POS ⟹ volNormalize 会把它收回 −120）。
+ * 位置 6 才刚离开静音区，对应 −54.47 dB ⟹ 按 0.5 栅格取 −54.5。
+ * 这条是 2026-10-28 实测踩出来的：volNudge 里若拿 VOL_MIN_DB 当"最低可闻档"，
+ * 静音后按 ↑ 会被 volNormalize 立刻收回静音 ⟹ 音量键再次"按了没反应"。
+ * 判据见 tools/check_volume_db.js 的 B / K 两条。 */
+var VOL_AUDIBLE_DB = -54.5;
+/* 按 dB 步进音量。返回是否真的变了（没变就不用发请求）。
+ *
+ * 三条边界都显式处理，不留"按了没反应"：
+ *   ① 静音态（−120 = 增益 0）按**向上** ⟹ 直接落到曲线底 −55 dB（最低可闻档），
+ *      不再像旧实现那样从 −119.5 一格一格往上爬（那等于 130 次按键才出声）；
+ *      按**向下**保持静音（不产生"静音还能再小"的无意义状态）。
+ *   ② 步进结果先落到档位栅格（0.5 / 0.1 dB），避免出现 −17.3 这种"看着像随手拖出来"的值。
+ *   ③ 越界：>0 dB 削波 ⟹ 夹到 0；<−55 dB ⟹ 落静音档。
+ */
+function volNudge(stepDb) {
+  var step = parseFloat(stepDb);
+  if (!isFinite(step) || step === 0) return false;
+  var cur = (typeof S.vol === 'number' && isFinite(S.vol)) ? S.vol : 0;
+  var silent = volDbToPos(cur) <= VOL_SILENT_POS;
+  var next;
+  if (silent) {
+    next = (step > 0) ? VOL_AUDIBLE_DB : VOL_SILENT_DB;
+  } else {
+    var grid = (Math.abs(step) >= VOL_STEP_DB - 1e-9) ? VOL_STEP_DB : VOL_FINE_DB;
+    next = Math.round((cur + step) / grid) * grid;
+    if (next > 0) next = 0;
+    if (next < VOL_AUDIBLE_DB - 1e-6) next = (step < 0) ? VOL_SILENT_DB : VOL_AUDIBLE_DB;
+  }
+  // 浮点残留（-54.49999999999）按 1 位小数收一下，标签显示与实际下发必须同一个数
+  next = Math.round(next * 10) / 10;
+  if (next === cur) return false;
+  setVol(next);
+  return true;
+}
+
 /* 实时音量下发：in-flight 单通道「最新值接力」，既零延迟又零堆积。
  *
  * 2026-10-25 用户报「音量不跟着音量条实时变，停下来才跳变」。根因不是后端慢，而是
@@ -4965,11 +5025,120 @@ if (D('npVol')) {
     saveSettings();
   });
 }
-D('npSeek').onclick = function (ev) {
-  if (!S.dur) return;
-  var r = this.getBoundingClientRect();
-  doSeek((ev.clientX - r.left) / Math.max(1, r.width));
-};
+/* ---------------- 进度条：拖动跟手 + 播放中平滑推进（1.1.0 用户报「拖动不丝滑」） ----------------
+ *
+ * 根因三条（缺一条都不丝滑，必须一起治）：
+ *   ① #seek / #npSeek 此前**只绑了 onclick**：click 在 mouseup 时才触发 ⟹ 按住拖动期间
+ *      没有任何视觉反馈，只有松手那一刻跳一次。光标在动、条子不动 = 用户说的"不丝滑"。
+ *   ② .track i{transition:width .18s linear}：即便补了预览，填充条也要慢 180 ms 追目标值。
+ *   ③ /api/status 的 400 ms 轮询每轮把 j.pos 写回 #bar/#npBar ⟹ 预览被回拉（橡皮筋）。
+ *
+ * 修法：
+ *   · 拖动期间前端**独占**进度显示（SEEK.drag）：pointermove 1:1 跟手，含时间标签；
+ *   · 松手只发**一次** seek。拖动中绝不发请求 —— 后端 seek = 丢块 + seek_reset + 0.5 s 预卷
+ *     （render_loop.h:361 → rtaweb.cpp:3523），代价几十~几百毫秒；每像素一次就是几十个
+ *     请求排队，用户听到的会是"停下来才跳"（与 2026-10-25 音量条同一个坑，见 sendVolRealtime）；
+ *   · 播放中由 requestAnimationFrame 按「上次 pos + 经过时间」推进，60 fps 连续走，
+ *     不再靠 400 ms 一格的离散跳变；暂停/停止时不跑（不白烧 CPU）。
+ *
+ * 为什么不做"拖动中边拖边发声"（scrub）：那等于把上面几十次昂贵 seek 摊进拖动过程，
+ * 代价远大于收益（foobar2000 / MusicBee 这类桌面播放器同样是"预览 + 松手提交"）。
+ */
+var SEEK = { drag: null, frac: 0, holdUntil: 0, holdTarget: 0, raf: 0, posAt: 0, lastW: -1, lastT: '', lastCommitAt: -1e9 };
+function nowMs() {
+  return (window.performance && window.performance.now) ? window.performance.now() : Date.now();
+}
+// 光标 → 百分比落点（夹到 0..1：拖出轨道两端不跳变）
+function seekFracAt(el, clientX) {
+  var r = el.getBoundingClientRect();
+  return Math.max(0, Math.min(1, (clientX - r.left) / Math.max(1, r.width)));
+}
+/* 进度显示的**唯一写入口**（tick / 拖动 / rAF 全走这里）。
+ * 旧实现三处各写一半 —— 谁最后写谁赢，于是预览和轮询互相打架。 */
+function paintSeek(sec) {
+  var dur = S.dur || 0;
+  if (!isFinite(sec) || sec < 0) sec = 0;
+  if (dur > 0 && sec > dur) sec = dur;
+  var w = Math.round((dur > 0 ? sec / dur * 100 : 0) * 100) / 100;
+  if (w !== SEEK.lastW) {
+    SEEK.lastW = w;
+    if (D('bar')) D('bar').style.width = w + '%';
+    if (D('npBar')) D('npBar').style.width = w + '%';
+  }
+  var t = fmt(sec);
+  if (t !== SEEK.lastT) {
+    SEEK.lastT = t;
+    if (D('tpos')) D('tpos').textContent = t;
+    if (D('npPos')) D('npPos').textContent = t;
+  }
+}
+// 当前该显示的秒数：拖动 > 刚提交的保持窗 > 播放中外推 > 后端原值
+function seekDisplaySec() {
+  var dur = S.dur || 0;
+  if (SEEK.drag) return SEEK.frac * dur;
+  var now = nowMs();
+  if (SEEK.holdUntil && now < SEEK.holdUntil) return SEEK.holdTarget;
+  if (S.playing && !S.paused && dur > 0 && SEEK.posAt) {
+    return Math.min(dur, (S.pos || 0) + (now - SEEK.posAt) / 1000);
+  }
+  return S.pos || 0;
+}
+function seekAnimFrame() {
+  SEEK.raf = 0;
+  paintSeek(seekDisplaySec());
+  var playing = S.playing && !S.paused && (S.dur || 0) > 0;
+  if (SEEK.drag || playing || (SEEK.holdUntil && nowMs() < SEEK.holdUntil)) {
+    SEEK.raf = requestAnimationFrame(seekAnimFrame);
+  }
+}
+function seekAnimKick() {
+  if (!SEEK.raf && typeof requestAnimationFrame === 'function') SEEK.raf = requestAnimationFrame(seekAnimFrame);
+}
+function bindSeekDrag(id) {
+  var el = D(id);
+  if (!el) return;
+  el.addEventListener('pointerdown', function (ev) {
+    if (!(S.dur > 0)) return;                                        // 时长未知不拖（换算不出来）
+    if (typeof ev.button === 'number' && ev.button !== 0) return;    // 只认左键 / 主触点
+    SEEK.drag = id;
+    SEEK.frac = seekFracAt(el, ev.clientX);
+    paintSeek(SEEK.frac * (S.dur || 0));
+    try { el.setPointerCapture(ev.pointerId); } catch (e) { }        // 拖出轨道也继续跟手
+    seekAnimKick();
+    ev.preventDefault();                                             // 别让浏览器去选中文字
+  });
+  // 合成点击（自动化脚本 / 键盘激活）不会产生 pointerdown：仍按"点哪跳哪"处理。
+  // 真实指针路径在 pointerup 已提交，这里用时间窗去重，避免一次点击发两次 seek。
+  el.addEventListener('click', function (ev) {
+    if (!(S.dur > 0)) return;
+    if (nowMs() - SEEK.lastCommitAt < 400) return;
+    doSeek(seekFracAt(el, ev.clientX));
+  });
+}
+window.addEventListener('pointermove', function (ev) {
+  if (!SEEK.drag) return;
+  var el = D(SEEK.drag);
+  if (!el) { SEEK.drag = null; return; }
+  SEEK.frac = seekFracAt(el, ev.clientX);
+  paintSeek(SEEK.frac * (S.dur || 0));
+  if (ev.cancelable) ev.preventDefault();
+}, { passive: false });
+window.addEventListener('pointerup', function (ev) {
+  if (!SEEK.drag) return;
+  var id = SEEK.drag, el = D(id);
+  if (el) { try { el.releasePointerCapture(ev.pointerId); } catch (e) { } }
+  if (el && typeof ev.clientX === 'number') SEEK.frac = seekFracAt(el, ev.clientX);
+  SEEK.drag = null;
+  doSeek(SEEK.frac);      // 全程只发这一次（见上方"为什么不在拖动中发请求"）
+});
+window.addEventListener('pointercancel', function () {
+  if (!SEEK.drag) return;
+  SEEK.drag = null;
+  SEEK.holdUntil = 0;
+  paintSeek(seekDisplaySec());
+  seekAnimKick();
+});
+bindSeekDrag('npSeek');
 function isRightDrawerVisible() {
   var r = D('right');
   if (!r) return false;
@@ -5016,6 +5185,30 @@ D('sLoud').onchange = function () { S.loud = this.checked; saveSettings(); };
   e.addEventListener('change', saveSettings);
 });
 D('vol').addEventListener('change', saveSettings);
+
+/* 音量条上的滚轮 / 双击（1.1.0）：主流播放器的两条通用手势 ——
+ *   · 滚轮一格 = 0.5 dB（Roon / Audirvāna 的滚轮与 ± 键同档位）；
+ *   · 双击 = 回 0 dB（foobar2000 / JRiver 的"双击复位"约定；做 bit-perfect 时最常用，
+ *     旧实现只能靠拖到顶端猜位置）。
+ * wheel 必须 passive:false 才拦得住页面滚动，否则滚轮=同时改音量+滚页面。 */
+function bindVolExtras(el, labId) {
+  if (!el) return;
+  el.addEventListener('wheel', function (ev) {
+    if (!ev.deltaY) return;
+    ev.preventDefault();
+    volNudge(ev.deltaY < 0 ? VOL_STEP_DB : -VOL_STEP_DB);
+  }, { passive: false });
+  el.addEventListener('dblclick', function (ev) { ev.preventDefault(); setVol(0); });
+  el.title = (el.title ? el.title + '；' : '') + '滚轮 ±0.5 dB，双击归零（0 dB）';
+  var lab = labId ? D(labId) : null;
+  if (lab) {
+    lab.style.cursor = 'pointer';
+    lab.title = '双击归零（0 dB）';
+    lab.addEventListener('dblclick', function (ev) { ev.preventDefault(); setVol(0); });
+  }
+}
+bindVolExtras(D('vol'));
+bindVolExtras(D('npVol'), 'npVolLab');
 // 2026-10-24 #5：旧的「流媒体服务器」单表单（srcSave/saveSrc）已删除，改由设置页「流媒体」页签的
 // bindSrcPage() 绑定（多服务器列表）。这里的隐藏快捷面板不保留副本。
 D('bUpnp').onclick = function () {
@@ -5062,7 +5255,7 @@ D('bHelp').onclick = function () {
   D('mtitle').textContent = '快捷键与提示';
   D('modal').classList.add('on');
   var rows = [
-    ['空格', '暂停 / 继续'], ['← →', '后退 / 前进 5 秒'], ['↑ ↓', '音量增减 1 dB'],
+    ['空格', '暂停 / 继续'], ['← →', '后退 / 前进 5 秒'], ['↑ ↓', '音量 ±0.5 dB（Shift ±0.1 dB）'],
     ['n / p', '下一首 / 上一首'], ['s', '停止'], ['l', '歌词'], ['i', '信号链'],
     ['右键专辑', '整张加入队列'], ['右键曲目', '加入队列'], ['右键队列条目', '从队列移除'],
     ['拖动队列条目', '调整播放顺序'], ['Esc（搜索框内）', '清空搜索']
@@ -5079,10 +5272,7 @@ D('bHelp').onclick = function () {
 };
 D('mclose').onclick = function () { D('modal').classList.remove('on'); };
 D('modal').onclick = function (e) { if (e.target === D('modal')) D('modal').classList.remove('on'); };
-D('seek').onclick = function (e) {
-  var r = this.getBoundingClientRect();
-  doSeek((e.clientX - r.left) / r.width);
-};
+bindSeekDrag('seek');
 D('bScan').onclick = function () {
   api('/api/lib/scan', '').then(function () { toast('开始扫描音乐库'); libChanged(); loadLibStats(); });
 };
@@ -5103,6 +5293,14 @@ D('bAddRoot').onclick = function () {
 // 不等下一次 400ms tick（否则跳转后歌词要"愣一下"才跟上）。
 function doSeek(frac) {
   var f = Math.max(0, Math.min(0.9999, frac));
+  // 1.1.0（拖动不丝滑）：先落预览、再发请求 —— 松手/点击的那一帧条子就停在目标位置；
+  //   之后 400 ms 轮询回来的**旧 pos** 不许把它拉回去（SEEK.holdUntil 窗口内显示 holdTarget）。
+  SEEK.frac = f;
+  SEEK.holdTarget = f * (S.dur || 0);
+  SEEK.holdUntil = nowMs() + 1200;
+  SEEK.lastCommitAt = nowMs();
+  paintSeek(SEEK.holdTarget);
+  seekAnimKick();
   api('/api/seek?pos=' + f.toFixed(4), '');
   lyricReposition();
   if (D('npPage') && D('npPage').classList.contains('on')) renderNpLyric();
@@ -5110,7 +5308,11 @@ function doSeek(frac) {
 }
 function seekRel(d) {
   if (!S.dur || S.dur <= 0) return;
-  doSeek((S.pos + d) / S.dur);
+  // 1.1.0：相对跳转必须相对**屏幕上显示的那个位置**（seekDisplaySec）。
+  //   用 S.pos 会踩两个坑：① 播放中它比画面落后最多 400 ms（每格轮询）；
+  //   ② 刚 seek 过、后端还没追上时它是**旧位置** ⟹ 松手后按 ←/→ 会跳回上一处
+  //   （验收脚本 J 条实测复现：条子在 70%，按 +5 s 反而退到 40%）。
+  doSeek((seekDisplaySec() + d) / S.dur);
 }
 function setVol(v) {
   // v 是 **dB**（键盘 ↑↓ 等入口传的就是 dB）。滑块是位置刻度，这里必须换算。
@@ -9305,13 +9507,13 @@ document.addEventListener('keydown', function (e) {
     if (e.shiftKey) seekRel(-5);
     else D('bPrev').click();
   }
-  // 音量 ↑↓：**按滑块位置**步进，不是按 dB 加减。
-  // 为什么改（2026-10-25 v3 配套）：曲线在低端是幂次的，dB 加减 1 在位置 1000 附近几乎不动
-  // （−1 dB 只退 5 格），在底部却会一步跨过整个静音档；更致命的是 S.vol 到了 −120（静音）后
-  // `Math.max(-60, S.vol - 1)` 会把它钉死在 −60 ⟹ volNormalize 再收回 −120 ⟹ **音量键永久失灵**。
-  // 改成位置步进后：静音态按 ↑ 从位置 0 走到 25（≈ −49 dB，能听见），方向对称、可逆。
-  else if (e.key === 'ArrowUp') { e.preventDefault(); setVol(volPosToDb(volDbToPos(S.vol) + 25)); }
-  else if (e.key === 'ArrowDown') { e.preventDefault(); setVol(volPosToDb(volDbToPos(S.vol) - 25)); }
+  // 音量 ↑↓：**固定 dB 档位**（1.1.0 改，见 volNudge 上方检索结论）。
+  // 历史两次翻车都记在这里，别再改回"位置步进"：
+  //   2026-10-25 之前：`Math.max(-60, S.vol - 1)` 在 −120（静音）处把值钉死 ⟹ 音量键永久失灵；
+  //   2026-10-25 之后：改成走"滑块行程 2.5%"，键不卡了，但一步的 dB 数随位置从 0.12 变到 49，
+  //   用户听起来就是"顶部不灵、底部一跳一大截"。现在由 volNudge 统一处理静音/栅格/越界。
+  else if (e.key === 'ArrowUp') { e.preventDefault(); volNudge(e.shiftKey ? VOL_FINE_DB : VOL_STEP_DB); }
+  else if (e.key === 'ArrowDown') { e.preventDefault(); volNudge(e.shiftKey ? -VOL_FINE_DB : -VOL_STEP_DB); }
   else if (e.key === 'n') D('bNext').click();
   else if (e.key === 'p') D('bPrev').click();
   else if (e.key === 's') D('bStop').click();

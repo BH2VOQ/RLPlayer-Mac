@@ -624,7 +624,7 @@ h += "#npPage .npedge{display:none}";
     h += ".nptime{font-size:12px;color:var(--mut2);display:flex;align-items:center;gap:6px;font-variant-numeric:tabular-nums;white-space:nowrap}";
     h += ".nptime .tval{font-weight:600;color:var(--txt2);min-width:0}";
     h += ".nptime .tsep{opacity:.45}";
-    h += ".npseek{width:100%;height:5px;border-radius:3px;background:rgba(255,255,255,.16);position:relative;cursor:pointer;transition:height .15s}";
+    h += ".npseek{width:100%;height:5px;border-radius:3px;background:rgba(255,255,255,.16);position:relative;cursor:pointer;transition:height .15s;touch-action:none;-webkit-user-select:none;user-select:none}";
     h += ".npseek:hover{height:7px}";
     h += ".npseek>i{position:absolute;left:0;top:0;bottom:0;border-radius:2px;background:var(--acc);width:0}";
     h += ".nptime .tlab{font-size:10px;color:var(--mut2);letter-spacing:.4px}";
@@ -755,8 +755,10 @@ h += "#npPage .npedge{display:none}";
     h += ".prog{width:100%;display:flex;align-items:center;gap:8px;font-size:10.5px;color:var(--mut2);font-variant-numeric:tabular-nums;max-width:560px;min-width:0}";
     h += ".prog>#tpos,.prog>#tdur{flex:none;min-width:34px;line-height:1.4}";
     h += ".prog>#tpos{text-align:right}.prog>#tdur{text-align:left}";
-    h += ".track{flex:1 1 auto;height:5px;border-radius:3px;background:var(--track);overflow:hidden;cursor:pointer;position:relative;min-width:0}";
-    h += ".track i{display:block;height:100%;border-radius:3px;background:linear-gradient(90deg,var(--acc),var(--acc2));transition:width .18s linear;width:0}";
+    h += ".track{flex:1 1 auto;height:5px;border-radius:3px;background:var(--track);overflow:hidden;cursor:pointer;position:relative;min-width:0;touch-action:none;-webkit-user-select:none;user-select:none}";
+    // 1.1.0（拖动不丝滑）：填充条**不能**带 width 过渡 —— 0.18 s 的补间会让它永远慢光标
+    //   半拍（拖动时看起来像"黏"）。平滑推进改由 requestAnimationFrame 每帧直接写 width 完成。
+    h += ".track i{display:block;height:100%;border-radius:3px;background:linear-gradient(90deg,var(--acc),var(--acc2));transition:none;width:0}";
     h += ".vol{display:flex;align-items:center;gap:8px;justify-content:flex-end;justify-self:end;min-width:0}.vol input[type=range]{width:88px;accent-color:var(--acc)}";
     h += ".badge{font-size:9.5px;padding:2px 7px;border-radius:5px;background:var(--acc-weak);color:var(--acc-text);border:1px solid var(--acc-weak);font-weight:600;letter-spacing:.3px;white-space:nowrap}";
     h += ".badge.g{background:var(--ok-bg);color:var(--ok-text);border-color:var(--ok-line)}";
