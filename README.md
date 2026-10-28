@@ -7,7 +7,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/BH2VOQ/RLPlayer-Mac/releases"><img src="https://img.shields.io/github/v/release/BH2VOQ/RLPlayer-Mac?label=release&style=flat-square&color=22d3ee&include_prereleases" alt="Release"></a>
+  <a href="https://github.com/BH2VOQ/RLPlayer-Mac/releases"><img src="https://img.shields.io/github/v/release/BH2VOQ/RLPlayer-Mac?label=release&style=flat-square&color=22d3ee" alt="Release"></a>
   <img src="https://img.shields.io/badge/macOS-13%2B%20%C2%B7%20arm64-0b1120?style=flat-square&logo=apple&logoColor=white" alt="macOS 13+ · arm64">
   <img src="https://img.shields.io/badge/ctest-100%2F100-34d399?style=flat-square" alt="ctest 100/100">
   <img src="https://img.shields.io/badge/license-GPL--3.0--or--later-a78bfa?style=flat-square" alt="GPL-3.0-or-later">
@@ -17,7 +17,7 @@
 <p align="center">
   <b>升频 · 噪声整形 · SDM/DSD · 卷积 · 20 段 PEQ</b><br>
   <sub>每一步都给出可复现的实测数字，而不是「我觉得更好听」。</sub><br>
-  <sub>当前 <b>1.1.0</b> · <a href="ROADMAP-1.1.x.md">路线图</a> · <a href="https://github.com/BH2VOQ/RLPlayer-Mac/releases">更新日志</a></sub>
+  <sub>当前版本以上方 Release 徽标为准 · <a href="ROADMAP-1.1.x.md">路线图</a> · <a href="https://github.com/BH2VOQ/RLPlayer-Mac/releases">更新日志</a></sub>
 </p>
 
 ---
@@ -233,12 +233,12 @@ Metal 内核（`librtagpu.dylib`，运行时编译 MSL）**动态加载**：`dlo
 
 ## 🗺 路线图
 
-> 当前正式版 **1.1.0**。1.1.1 起为计划，**尚未开工**；完整判据、切分线与挂账见
+> **1.1.0** 是本路线图的基线；实际发布版本以上方 Release 徽标为准。1.1.1 起为计划，**尚未开工**；完整判据、切分线与挂账见
 > **[ROADMAP-1.1.x.md](ROADMAP-1.1.x.md)**。
 
 | 版本 | 主题 | 状态 |
 |---|---|---|
-| **1.1.0** | 当前正式版 | ✅ 已发布 |
+| **1.1.0** | 基线版本 | ✅ 已发布 |
 | **1.1.1** | 诊断记录精细化 + debug 清账 | 🧭 计划 |
 | **1.1.2** | **AirPlay 输出适配** | 🧭 计划 |
 | **1.1.3** | LLM 模型列表 | 🧭 计划 |
@@ -304,7 +304,7 @@ flowchart LR
 
 ## 项目来源
 
-本仓库是 **RLPlayer 的 macOS 独立分支**：平台层（音频输出、GPU、窗口壳）按 macOS 原生能力重写，与上游**不再合并**，版本号从 `1.0.0` 独立起算，当前 **1.1.0**。
+本仓库是 **RLPlayer 的 macOS 独立分支**：平台层（音频输出、GPU、窗口壳）按 macOS 原生能力重写，与上游**不再合并**，版本号从 `1.0.0` 独立起算，当前版本以上方 Release 徽标为准（本路线图基线为 1.1.0）。
 
 上游仓库（Windows 版）：**<https://github.com/okhuoyanyan/RLPlayer2>**
 
@@ -350,5 +350,5 @@ Copyright (C) 2026 August Hu
 ---
 
 <p align="center">
-  <sub>如果 RLPlayer 让你的耳朵受益，去 GitHub 点个 ⭐ 就是最好的支持。</sub>
+  <sub>如果 RLPlayer 帮到了你，欢迎在 <a href="https://github.com/BH2VOQ/RLPlayer-Mac">GitHub 点个 Star</a>，支持后续开发。</sub>
 </p>
