@@ -3363,6 +3363,12 @@ function cueQuery(cs, ce) {
 }
 function playPath(f, cs, ce, quiet) {
   S.lastCur = f;
+  // 2026-10-28（用户实测「换歌后底栏还保留上一首」）：切歌瞬间就把底栏切到新曲目，
+  // 并作废在飞的旧 meta 请求。否则上一首的 /api/meta 响应后到会把标题写回去，而轮询
+  // 已认为 S.lastCur == current 不再重拉 ⟹ 底栏永久停在上一首。
+  S.metaSeq = (S.metaSeq || 0) + 1;
+  if (D('npt')) D('npt').textContent = nam(f);
+  if (D('npart')) D('npart').textContent = '';
   api('/api/play', 'file=' + encodeURIComponent(f) + cueQuery(cs, ce) + '&' + params()).then(function (j) {
     if (j && j.ok === false) { toast(j.error || '播放失败'); return; }
     // quiet：由调用方给出更准确的提示（如「已停止投放，输出回到本机」），
@@ -3610,7 +3616,11 @@ function buildNpMetaHtml(m) {
 }
 function loadMeta(f) {
   if (!f) return;
+  // 同一竞态的另一半：只接受「最新一次请求」且「仍是当前曲目」的响应，旧响应直接丢弃。
+  var mySeq = (S.metaSeq = (S.metaSeq || 0) + 1);
   api('/api/meta?file=' + encodeURIComponent(f)).then(function (m) {
+    if (mySeq !== S.metaSeq) return;
+    if (S.lastCur && f !== S.lastCur) return;
     S.curMeta = m;
     if (m.title) D('npt').textContent = m.title;
     else D('npt').textContent = nam(f);
@@ -3624,7 +3634,11 @@ function loadMeta(f) {
     if (D('npPage') && D('npPage').classList.contains('on')) {
       renderNp();   // renderNp 内部已调 updateNpSummary(S.curMeta)，不再重复请求
     }
-  }).catch(function () { D('npt').textContent = nam(f); });
+  }).catch(function () {
+    if (mySeq !== S.metaSeq) return;
+    if (S.lastCur && f !== S.lastCur) return;
+    D('npt').textContent = nam(f);
+  });
 }
 
 /* ---------------- 状态 ---------------- */
