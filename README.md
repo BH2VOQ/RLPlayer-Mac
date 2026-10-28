@@ -185,13 +185,7 @@ Metal 内核（`librtagpu.dylib`，运行时编译 MSL）**动态加载**：`dlo
 
 本仓库是 **RLPlayer 的 macOS 独立分支**：平台层（音频输出、GPU、窗口壳）按 macOS 原生能力重写，与上游**不再合并**，版本号从 `1.0.0` 独立起算。
 
-上游仓库（Windows 版，**链接待补充**）：
-
-```text
-<上游仓库链接>
-```
-
-<!-- TODO: 上面换成上游仓库地址，例如 https://github.com/<owner>/<repo> -->
+上游仓库（Windows 版）：**<https://github.com/okhuoyanyan/RLPlayer2>**
 
 本文只描述 macOS 分支的实际能力，不涉及其他平台版本的介绍。
 
