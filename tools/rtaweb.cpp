@@ -3132,8 +3132,8 @@ static bool play_one_impl(const std::string& file, const PlayParams& pIn, rta::a
             pEff.outChannels = mixCh;                  // 下方 outCh 取 pEff —— 管线负责声道变换
         }
 
-        // 滤波器：1x 与 Nx 可以分开选（RLPlayer 的标准做法：
-        // 44.1/48k 用陡一点的，>=88.2k 用短一点的，避免过度处理）
+        // 滤波器：1x 与 Nx 可独立选择。
+        // 44.1/48k 与 >=88.2k 输入分别配置，避免不必要的处理。
         // DSD 输出时优先用 SDM 页那一组滤波器（与 PCM 独立）；没选就沿用 PCM 的
         std::string fname;
         if (p.dsd >= 64) {

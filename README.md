@@ -225,7 +225,7 @@ Metal 内核（`librtagpu.dylib`，运行时编译 MSL）**动态加载**：`dlo
 - **升频：值得开** — 44.1k → 352.8k 快 **29×**，44.1k → 384k 快 **5.5×**
 - **卷积：默认关闭** — 生产形态每块只有 4096 样，远低于 GPU 盈亏平衡点（实测需 n ≥ 32768 才翻盘），任何 IR 长度下都比 CPU 慢：**单块口径（n=4096、block=1024）2.15×~3.57×**；按 overlap-save 真实输入量口径为 **3.4×~8.3×**
 
-功能保留可用、数值正确（卷积最差 **−126.5 dB** 相对 RMS），但 mac 上开它只是净亏。UI 已标注不建议开启。两套口径的完整实测分别见 [docs/WIP-F6-GPU精度.md](docs/WIP-F6-GPU精度.md) 与 [docs/GPU卷积与升频效率细查.md](docs/GPU卷积与升频效率细查.md)。
+功能保留可用、数值正确（卷积最差 **−126.5 dB** 相对 RMS），但 mac 上开它只是净亏。UI 已标注不建议开启。两套口径的完整实测分别见 [GPU 精度实测](<docs/GPU精度实测.md>) 与 [docs/GPU卷积与升频效率细查.md](docs/GPU卷积与升频效率细查.md)。
 
 </details>
 
@@ -285,7 +285,7 @@ flowchart LR
 - **输入采集不经过 DSP** — 采集与监听已实现，但 monitor 是直通输出，采集 → DSP 链未接
 - **Intel Mac 不支持** — 只构建 arm64，传 `x86_64` 会直接 FATAL
 
-更完整的挂账见 [STATUS.md](STATUS.md) 与 [PLATFORM.md](PLATFORM.md)。
+当前未完成功能与验收条件见[开发路线图](<ROADMAP-1.1.x.md>)；历史测试数字仅适用于报告记录的环境和版本，不代表本轮重新实测。
 
 ---
 
@@ -294,11 +294,8 @@ flowchart LR
 | 文件 | 内容 |
 |---|---|
 | [ROADMAP-1.1.x.md](ROADMAP-1.1.x.md) | **1.1.0 之后的版本路线图**：逐版任务、判据、依赖与切分线 |
-| [PLATFORM.md](PLATFORM.md) | 平台层实测记录：CoreAudio、单进程壳、回环比对、并发与边界 |
-| [STATUS.md](STATUS.md) | 逐轮开发记录与判据（最新到 1.1.0） |
-| [HANDOVER.md](HANDOVER.md) | 架构、构建方式、踩过的坑 |
-| [docs/](docs/) | 各模块实测纪要与调研 |
-| [debug/](debug/) | 每轮 DEBUG 档案：根因、判据、挂账 |
+| [GPU 精度实测](<docs/GPU精度实测.md>) | Metal 数值精度、复跑命令和未测边界 |
+| [GPU 效率测试](<docs/GPU卷积与升频效率细查.md>) | 特定块长下的性能数据与局限；独立探针复跑命令未完整归档 |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | 贡献指南：构建、门禁、提交规范、不接受什么 |
 | [SECURITY.md](SECURITY.md) | 安全问题私下报告渠道与已知设计边界 |
 | [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) | 行为准则 |

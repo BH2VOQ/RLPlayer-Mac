@@ -34,14 +34,14 @@ struct ResamplerConfig {
     int      channels = 2;
 
     // 原型总抽头数（内插域），会向上取整到 L 的整数倍。
-    // RLPlayer 的 poly-sinc 家族量级：65536（-short）/ 262144（-long）/ 1048576+（long/sinc-M）
+    // 默认使用 262144 抽头；命名滤波器的抽头配置见 filter_families.h。
     int      totalTaps  = 262144;
     double   attenDb    = 180.0;   // 目标阻带衰减
     // 过渡带占比：截止点相对理想 Nyquist 回退的比例（0 = 砖墙理想，越大地越平缓）
     double   transition = 0.04;
 
     // ---- 命名滤波器（Round 56）----
-    // 原先重采样器只会设计 Kaiser 窗 sinc，选不到手册里的滤波器家族。
+    // 原先重采样器只会设计 Kaiser 窗 sinc，无法选择其他窗函数与相位组合。
     // 这里不传"原型数据"而只传【窗类型 + 相位类型】，让重采样器自己在
     // 【内插域】里按正确截止点与 ×L 直流增益完成设计 —— 从而根本避开
     // "输入域原型 vs 内插域原型"归一化基准不同这个陷阱（见 STATUS.md）。

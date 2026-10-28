@@ -8,8 +8,7 @@
 > **2026-10-25 平台变更**：项目已从「Windows + macOS 双平台」转为 **macOS 单平台**。
 > 所有 `.ps1` 脚本、Windows 专属工具（`launcher` / `wasapi_probe` / `wasapi_ex_probe` /
 > `asio_probe` / `wv2_probe` / `pxprobe` / `gpu_resample_test`）与 WebView2 SDK 已删除。
-> 删的是**平台实现**，不是能力：Windows 上存在过的功能已在 macOS 侧有等价实现
-> （详见 `PLATFORM.md` §13.15）。仍未移植的项在那里如实挂账。
+> 当前支持范围与未完成功能以根目录 README 和开发路线图为准；历史平台实现不代表当前 macOS 已通过验收。
 
 > 所有会出声的工具默认电平 ≤ −60 dBFS；链路验证优先 `--analyze`（不打开设备）。
 > 见项目开发铁律第 1 条。

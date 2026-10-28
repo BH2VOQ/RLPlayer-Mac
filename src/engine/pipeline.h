@@ -6,7 +6,7 @@
 //
 // pipeline.h — 完整 DSP 播放管线
 //
-// 信号链顺序（对齐 RLPlayer 手册 4~7 章的架构）：
+// 信号链顺序：
 //   1) 解码缓冲（源采样率，按声道解交错为 double 平面）
 //   2) Matrix 路由/混合      —— 增益可为 dB 或线性；负增益 = 反相（M/S 处理）
 //   3) 每输出声道处理链       —— IIR EQ（双二阶级联）+ 延迟
@@ -43,8 +43,8 @@ using rta::audio::AudioBuffer;
 
 // 单个输出声道的处理链
 struct ChannelProcess {
-    std::vector<dsp::Biquad> eq;      // 级联双二阶（对应手册 "iir" 插件）
-    int    delaySamples = 0;          // 延迟（对应手册 "delay" 插件）
+    std::vector<dsp::Biquad> eq;      // 级联双二阶 EQ
+    int    delaySamples = 0;          // 延迟（样本数）
     std::vector<double> ir;           // 卷积 IR（对应 WAV 卷积 / 卷积引擎）
     bool   useGpu = false;            // true 时优先走 GPU 卷积（不可用则自动退回 CPU）
     double gainDb = 0.0;              // 本声道增益（左右平衡 / 多声道校正）；0 = 不动
@@ -68,7 +68,7 @@ struct PipelineConfig {
     // 新预设（*-tight）用它把 T 与 L 解耦，否则 44.1→384k 时通带 20 kHz 掉 5 dB。
     int      minTapsPerInput = 0;
 
-    // 等响度补偿（手册 4.2 Loudness）。依 cfg.volumeDb 决定提升量：
+    // 等响度补偿。依 cfg.volumeDb 决定提升量：
     // 音量在上界及以上时提升量为 0 ⟹ 自动旁路 ⟹ 比特完美不受影响。
     bool                loudnessEnabled = false;
     dsp::LoudnessConfig loudness;

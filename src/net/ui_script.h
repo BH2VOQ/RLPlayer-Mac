@@ -7242,7 +7242,7 @@ function renderSettingsPage() {
   // 2026-10-26：官方推荐预设卡片**移到快速开始页**（用户要求）。
   // 设置页这里不再渲染 —— 预设是「一键开局」的入口，属于快速开始的心智模型，
   // 放在设置页顶部反而让「精细调节」的设置页显得喧宾夺主。
-  // ---------- 页签（对齐 RLPlayer：Inputs / Outputs / PCM / SDM / Advanced） ----------
+  // ---------- 设置页签：输入 / 输出 / PCM / SDM / 高级等 ----------
   h += '<div class=stabs>'
      + '<button class="stab on" data-g=in>输入</button>'
      + '<button class=stab data-g=out>输出</button>'
@@ -7346,7 +7346,7 @@ function renderSettingsPage() {
 
   // ---------- PCM ----------
   h += '<div class=spane data-g=pcm>'
-     + sgroup('升频与滤波', 'RLPlayer 多相 sinc 滤波器预设',
+     + sgroup('升频与滤波', 'RLPlayer 多相 sinc 滤波器：窗函数、相位与抽头数预设',
          sel('sp_filt', '1x 滤波器（44.1 / 48 kHz 音源）', filts, '播放 44.1 / 48 kHz 文件时使用')
        + sel('sp_filtNx', 'Nx 滤波器（88.2 kHz 及以上音源）', filtsNx,
              '播放 88.2 / 96 / 176.4 kHz 等文件时使用；留空 = 与 1x 相同')

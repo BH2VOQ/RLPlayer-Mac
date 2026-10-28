@@ -6,7 +6,7 @@
 //
 // eq_text.h — REW / AutoEq 参数均衡器文本解析
 //
-// 支持两种常见格式（手册 7 章 Matrix 的 "Process" 可直接吃这类文件）：
+// 支持两种常见的参数均衡器文本格式：
 //
 //   REW 导出：
 //     Filter  1: ON PK     Fc   100.0 Hz  Gain   3.0 dB  Q  1.400

@@ -6,22 +6,21 @@
 //
 // conv_ir_prep.h — 卷积 IR 预处理：超 Nyquist 外推 + 自动增益估算
 //
-// 为什么需要（对标 RLPlayer 5.13 的两条能力，见 notes/RLPlayer对RLPlayer可借鉴清单-源码核实版.md §2.4）：
+// 两项预处理能力的用途：
 //
 //  1) 超 Nyquist 外推
 //     用户导入的 IR 常常是 44.1k/48k 测量的（REW、AutoEq、厂商提供的 44.1k WAV）。
 //     这些 IR 的带宽只到 fs_ir/2（22.05k / 24k）。播放 96k 或 192k 素材时，
 //     22k 以上完全空白 —— 听感是"高频发闷/缺空气感"。
-//     RLPlayer 的做法是"Extend frequency response of the filter beyond Nyquist
-//     frequency of the filter file"。本文件用同一种标准思路独立实现：
-//     在频域把 IR 的幅度谱按高频趋势延拓到目标带宽，再变换回时域。
+//     本文件在频域把 IR 的幅度谱按高频趋势延拓到目标带宽，
+//     再变换回时域，以扩展滤波器文件原有 Nyquist 频率之外的响应。
 //
 //  2) 自动增益估算
 //     IR 的绝对增益千差万别（不同软件导出的归一化基准不同：有的归一化到峰值 1.0，
 //     有的归一化到 0 dB 平均，有的干脆不归一化）。直接塞进卷积器会导致
 //     整体过响或过轻，甚至削波。
-//     RLPlayer 显示"Estimated gain of the last loaded filter file"。
-//     本文件提供两种基准（峰值 / 通带平均），并给出建议的补偿增益。
+//     本文件提供两种基准（峰值 / 通带平均），用于估算已加载 IR 的增益，
+//     并给出建议的补偿增益。
 //
 // 设计约束：
 //  * 纯算法，不碰设备/线程/文件（与 room_correction.h 同样的铁律）

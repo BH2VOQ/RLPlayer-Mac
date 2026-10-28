@@ -7,7 +7,7 @@
 // ui_page.h — RLPlayer 界面骨架（单页应用外壳）
 //
 // 设计取向：Roon 式「左导航 + 主内容 + 右队列 + 底部播放条」。
-// 与 RLPlayer 的差别：以【专辑】为一等公民，而不是让用户翻目录树；搜索是全局的。
+// 以【专辑】为核心组织音乐库，并提供全局搜索，减少目录翻找。
 //
 // 主题：全部颜色走 CSS 变量，html[data-theme] 切换三套主题（深色 / 白色 / 浅蓝）。
 // 规律：组件样式里【不允许再出现硬编码颜色】，否则换主题时必然漏掉某块 ——
@@ -1009,7 +1009,7 @@ h += "#npPage .npedge{display:none}";
     h += ".preset-btn-title{font-size:13px;font-weight:650;color:var(--txt)}";
     h += ".preset-btn-badge{font-size:11px;color:var(--warn);font-weight:600}";
     h += ".preset-btn-sub{font-size:11.5px;line-height:1.45;color:var(--mut)}";
-    // 设置页分页（对齐 RLPlayer 的 Inputs / Outputs / PCM / SDM / Advanced）
+    // 设置页分页：输入 / 输出 / PCM / SDM / 高级等
     // 2026-10-26（用户「上边栏要贴合 UI」）：.stabs 不再 sticky —— 它现在是**固定行**，
     //   由 #setpage 的 flex 列布局保证它不随内容滚动。
     //   padding 用 24px 与 .sbody 的左右 padding 完全一致 ⟹ 页签条背景整行铺满，

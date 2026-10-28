@@ -22,7 +22,7 @@ struct DirectSdmDecision {
     std::string reason;
 };
 
-// 直通条件（与 RLPlayer 的 DirectSDM 语义一致）：
+// DirectSDM 逐位直通条件：
 //   源 DSD 速率 == 目标 DSD 速率，且 PCM 域没有任何处理（EQ/卷积/重采样），音量 = 0 dB。
 // 任何一项不满足都要老实走调制器，并在 UI 里说明原因。
 inline DirectSdmDecision direct_sdm_decision(uint32_t srcRate, uint32_t targetRate,

@@ -6,10 +6,10 @@
 //
 // volume.h — 音量控制
 //
-// 设计要点（对应手册 4.2 “Volume control”）：
+// 设计要点：
 //   * 0 dB 必须【逐位精确】：增益恰为 1.0 时不得引入任何数值扰动
 //   * 增益变化必须渐变（ramp），否则会产生咔哒声
-//   * 手册的 “Fixed volume”：勾选 ≈ −3 dB，灰显 ≈ −6 dB，给 inter-sample 过冲留余量
+//   * 固定音量预设为 −3 dB / −6 dB 两档，给 inter-sample 过冲留余量
 //   * 本模块不做抖动/整形：管线末端的 Quantizer 才是正确的抖动注入点
 //     （在音量之后、量化之前注入，才能让抖动真正作用于最终量化误差）
 #pragma once
@@ -59,7 +59,7 @@ public:
         for (size_t i = 0; i < n; ++i) buf[i] = process(buf[i]);
     }
 
-    // 手册 4.2：固定音量的两档
+    // 固定音量的两档预设
     static constexpr double fixed_volume_grayed_db()  { return -3.0; }   // 灰显
     static constexpr double fixed_volume_checked_db() { return -6.0; }   // 勾选
 

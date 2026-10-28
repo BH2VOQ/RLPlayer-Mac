@@ -4,15 +4,10 @@
 // 本文件是 RLPlayer 的一部分，以 GNU 通用公共许可证第 3 版（或更新版本）发布。
 // 完整条款见仓库根目录的 LICENSE 文件。
 //
-// loudness.h — 音量自适应等响度补偿（手册 4.2 Loudness）
+// loudness.h — 音量自适应等响度补偿
 //
-// 手册原文：
-//   "Loudness is a volume-adaptive loudness control with adjustable parameters.
-//    For bass and treble controls, the corner frequency, slope factor and level can be
-//    adjusted (Parameter 1 to Parameter 6 respectively). Lower bound (Parameter 7) is
-//    volume setting where at or below, set maximum loudness value is reached.
-//    Higher bound (Parameter 8) is volume setting where at and above, loudness value
-//    reaches 0 dB."
+// 参数定义：低音与高音分别可调角频率、斜率因子和最大提升量（P1~P6）。
+// 音量处于下界（P7）及以下时取最大提升；处于上界（P8）及以上时补偿为 0 dB。
 //
 // 物理动机：人耳的等响曲线（ISO 226）在小音量下对低频与极高频的敏感度显著下降。
 // 音量拧小时若不补偿，听感会"变薄"。Loudness 就是按当前音量补回这部分。

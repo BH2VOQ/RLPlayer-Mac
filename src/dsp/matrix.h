@@ -4,11 +4,11 @@
 // 本文件是 RLPlayer 的一部分，以 GNU 通用公共许可证第 3 版（或更新版本）发布。
 // 完整条款见仓库根目录的 LICENSE 文件。
 //
-// matrix.h — Matrix 处理：双二阶 EQ（对应手册 "iir" 插件）、延迟（"delay" 插件）、通道路由
+// matrix.h — Matrix 处理：双二阶 EQ、延迟、通道路由
 //
-// 手册 7.3 的 iir 插件类型与本文件一一对应：
+// 支持的 IIR 滤波器类型：
 //   lp / lp1 / hp / hp1 / bp / ap / notch / peak / lshelf / hshelf / biquad
-// 手册 7.2 的 delay 插件参数：s=样本  t=秒  d=米（v 默认 343.956 m/s）
+// 延迟参数单位：s=样本  t=秒  d=米（v 默认 343.956 m/s）
 //
 // 双二阶采用 RBJ Audio EQ Cookbook 公式，直接型转置 II（数值稳定性好）。
 #pragma once
@@ -169,7 +169,7 @@ inline void allpass(Biquad& q, double fs, double f0, double Q) {
     const double alpha = std::sin(w0) / (2.0 * Q);
     q.set(1 - alpha, -2 * cw, 1 + alpha, 1 + alpha, -2 * cw, 1 - alpha);
 }
-// 一阶（手册 lp1 / hp1）：用 K = tan(w0/2) 的双线性设计
+// 一阶低通 / 高通（lp1 / hp1）：用 K = tan(w0/2) 的双线性设计
 inline void lowpass1(Biquad& q, double fs, double f0) {
     const double K = std::tan(kPi * f0 / fs);
     q.set(K, K, 0.0, K + 1.0, K - 1.0, 0.0);
@@ -181,7 +181,7 @@ inline void highpass1(Biquad& q, double fs, double f0) {
 
 } // namespace biquad_design
 
-// ---------------- 延迟线（手册 "delay" 插件）----------------
+// ---------------- 延迟线 ----------------
 class DelayLine {
 public:
     void set_samples(size_t n) { buf_.assign(n > 0 ? n : 1, 0.0); pos_ = 0; n_ = n; }

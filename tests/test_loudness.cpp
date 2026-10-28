@@ -35,7 +35,7 @@ int main() {
     setvbuf(stdout, nullptr, _IONBF, 0);
     const double fs = 48000.0;
 
-    printf("=== 1. 边界行为（手册 P7/P8）===\n");
+    printf("=== 1. 边界行为（音量下界 / 上界）===\n");
     {
         LoudnessConfig c;   // 下界 -30，上界 0，低音 6 dB，高音 3 dB
         Loudness L(c); L.init(fs);

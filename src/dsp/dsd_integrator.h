@@ -68,8 +68,8 @@ struct IntegratorConfig {
 
 // ---------------- Conversion：DSD → PCM 抽取的「窄 / 宽 / XFi」三组预设 ----------------
 //
-// 说明（不冒充 RLPlayer）：RLPlayer 没有公开 Conversion 的曲线定义，这里给的是**我们自己的**
-// 三组真参数：只改通带上限，阻带起点随之 = outRate − passband，过渡带因此变窄、抽头数变多。
+// 本项目的三组预设只改通带上限，阻带起点随之 = outRate − passband，
+// 过渡带因此变窄、抽头数变多。
 //   narrow：20 kHz 通带（默认，保护最严）
 //   wide  ：30 kHz 通带（给 20–30 kHz 留内容）
 //   xfi   ：40 kHz 通带（最宽；代价是过渡带最窄、抽头最多）

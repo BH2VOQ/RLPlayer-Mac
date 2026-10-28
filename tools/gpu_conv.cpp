@@ -6,8 +6,7 @@
 //
 // gpu_conv.cpp — GPU 分块卷积（HIP）：把"频域乘累加"这一步放到 Radeon 上
 //
-// 动机：RLPlayer 的 GPU offload【只支持 NVIDIA CUDA】（安装目录只有 cufft64_12.dll），
-//       而本机 RX 9070 XT 在官方路径下完全闲置。我们用 ROCm/HIP 把它用起来。
+// 实现：通过 ROCm/HIP 在 Radeon GPU 上执行卷积分区的频域乘累加。
 //
 // 分工：
 //   CPU  做每块的 FFT / IFFT（块数多但每块很小，传输可批量摊薄）

@@ -6,7 +6,7 @@
 //
 // filter_families.h — 滤波器家族：窗函数、相位类型、预设表
 //
-// 对应 RLPlayer 手册 4.6 的滤波家族结构：
+// 滤波器家族的三个设计维度：
 //   * 窗函数决定"家族性格"：Kaiser（poly-sinc 系）、Gaussian（gauss 系）、
 //     Blackman-Harris（closed-form / sinc 系高衰减）、Hann（温和）
 //   * 相位类型决定"时间行为"：线性相位（对称振铃，前后都有）vs
@@ -216,7 +216,7 @@ inline std::vector<double> to_intermediate_phase(const std::vector<double>& h, d
     return out;
 }
 
-// ---------------- 预设表（对齐手册家族命名与变体）----------------
+// ---------------- 预设表（家族命名与变体）----------------
 struct FilterPreset {
     const char* name;
     int         taps;        // 抽头数（对应 -short/-medium/-long/-xl/sinc-M 等）
@@ -236,7 +236,7 @@ struct FilterPreset {
     int         tapsPerInput = 0;
 };
 
-// 抽头数量级参考手册：short≈4k, medium≈32k, long≈256k, xl≈1M, sinc-M≈1M, 16M≈16M
+// 预设抽头数量级：short≈4k, medium≈32k, long≈256k, xl≈1M, sinc-M≈1M, 16M≈16M
 inline const std::vector<FilterPreset>& filter_presets() {
     static const std::vector<FilterPreset> p = {
         // ---- 1. 经典 poly-sinc 家族（Kaiser 窗）----

@@ -335,8 +335,7 @@ add_executable(test_conv_matrix tests/test_conv_matrix.cpp)
 target_link_libraries(test_conv_matrix PRIVATE rtadsp)
 add_test(NAME conv_matrix COMMAND test_conv_matrix)
 
-# 卷积 IR 预处理：超 Nyquist 外推 + 自动增益（对标 RLPlayer 5.13，见
-# notes/RLPlayer对RLPlayer可借鉴清单-源码核实版.md §2.4）
+# 卷积 IR 预处理：超 Nyquist 外推 + 自动增益。
 add_executable(test_conv_ir_prep tests/test_conv_ir_prep.cpp)
 target_link_libraries(test_conv_ir_prep PRIVATE rtadsp)
 add_test(NAME conv_ir_prep COMMAND test_conv_ir_prep)
@@ -512,7 +511,7 @@ target_include_directories(test_zipstore PRIVATE ${CMAKE_SOURCE_DIR}/src)
 add_test(NAME zipstore COMMAND test_zipstore)
 
 # P3① 实体模型（schema/归一化/显式边/落盘）：全离线，不调任何网络 API ——
-# 归一化与 id 是纯函数；落盘到 %TEMP%；真实曲库样本只读 D:\RLPlayer\MUSIC
+# 归一化与 id 是纯函数；临时目录落盘；真实曲库样本只读访问
 #（缺失时打 [SKIP]，不伪造成通过）。铁律 3：断言「全半角不折叠必然 FAIL」有反向验证。
 add_executable(test_year tests/test_year.cpp)
 target_include_directories(test_year PRIVATE ${CMAKE_SOURCE_DIR}/src)

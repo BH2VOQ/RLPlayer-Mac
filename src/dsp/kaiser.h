@@ -5,7 +5,7 @@
 // 完整条款见仓库根目录的 LICENSE 文件。
 //
 // kaiser.h — Kaiser 窗与零阶修正贝塞尔函数 I0
-// 用于设计高质量 windowed-sinc 低通原型滤波器（RLPlayer poly-sinc 家族的同族做法）
+// 用于设计高质量 windowed-sinc 低通原型滤波器
 #pragma once
 #include <cmath>
 #include <vector>

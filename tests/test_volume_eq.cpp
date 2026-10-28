@@ -83,11 +83,11 @@ int main() {
                       g[N - 1], maxJump, mono ? "是" : "否");
         check(mono && std::fabs(g[N - 1] - 0.1) < 1e-12 && maxJump < 1e-3, "渐变无跳变且终值正确", buf);
 
-        // 手册 4.2 固定音量两档
+        // 固定音量预设两档
         std::snprintf(buf, sizeof(buf), "(灰显 %.1f dB, 勾选 %.1f dB)",
                       VolumeControl::fixed_volume_grayed_db(), VolumeControl::fixed_volume_checked_db());
         check(VolumeControl::fixed_volume_grayed_db() == -3.0 &&
-              VolumeControl::fixed_volume_checked_db() == -6.0, "固定音量两档符合手册", buf);
+              VolumeControl::fixed_volume_checked_db() == -6.0, "固定音量两档符合预设", buf);
     }
 
     printf("\n=== 2. REW / AutoEq 参数 EQ 文本解析 ===\n");

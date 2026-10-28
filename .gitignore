@@ -54,10 +54,24 @@ compile_commands.json
 
 # ---------- 4. 第三方【专有软件】，不进仓库（版权/许可原因）----------
 /Tool/
-/research/naa/
-/research/strings/
-/research/strings-*.txt
-/research/manual.txt
+/research/
+/notes/
+/debug/
+/STATUS.md
+/HANDOVER.md
+/PLAN.md
+/PLATFORM.md
+/P1-调查.md
+/验收说明.md
+/ROADMAP.md
+/docs/*.md
+!/docs/GPU精度实测.md
+!/docs/GPU卷积与升频效率细查.md
+/docs/update/
+/tools/libs_scan.py
+/tools/manual_*.py
+/tools/pdf_extract.py
+/tools/README-template.txt
 
 # ---------- 5. 编辑器 / 工具缓存 ----------
 /.zcode/
@@ -78,3 +92,6 @@ AGENTS.md
 
 # 品牌设计候选图（本地素材，不入库；2026-10-28）
 /docs/brand/
+
+# 本地代码备份不入库
+*.bak

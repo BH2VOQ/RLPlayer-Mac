@@ -6,7 +6,7 @@
 //
 // filter_design.h — 低通原型 FIR 设计（windowed-sinc + Kaiser 窗）
 // 这是所有重采样滤波器家族的地基：改变 cutoff / 过渡带 / 相位特性即可得到
-// 对应 RLPlayer 的 poly-sinc / poly-sinc-gauss / sinc-* / ext2 等家族。
+// poly-sinc / poly-sinc-gauss / sinc-* / ext2 等项目滤波器家族。
 #pragma once
 #include "kaiser.h"
 #include <vector>
