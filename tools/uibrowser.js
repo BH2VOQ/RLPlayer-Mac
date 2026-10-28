@@ -69,6 +69,13 @@ function edgeArgs({ port, userDataDir, width, height }) {
     '--no-first-run',
     '--no-default-browser-check',
     '--remote-allow-origins=*',      // Edge 156：否则 WS 握手被拒
+    // 2026-10-28（用户「一直在调用我钥匙串」）：Chromium/Edge 在 macOS 上会用 login 钥匙串里的
+    // "<产品> Safe Storage" 加密 profile 的 cookie/密码库。我们每次验收都用一个全新的临时
+    // --user-data-dir，等于每次都要碰一次钥匙串 —— 实测会反复弹系统授权框，而自动化测试根本
+    // 不需要真钥匙串。--use-mock-keychain 让 Chromium 用内存里的假钥匙串（官方提供的测试开关），
+    // --password-store=basic 再断掉对 Keychain 的密码库后端选择。两条一起加，测试再也不碰钥匙串。
+    '--use-mock-keychain',
+    '--password-store=basic',
     '--user-data-dir=' + userDataDir,
     '--remote-debugging-port=' + port,
     '--window-size=' + width + ',' + height,

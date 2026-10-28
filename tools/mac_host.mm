@@ -686,7 +686,7 @@ reject:
 // 宿主应用委托与窗口控制
 // ---------------------------------------------------------------------------
 @interface HostAppDelegate : NSObject <NSApplicationDelegate, WKScriptMessageHandler,
-                                       WKNavigationDelegate, NSWindowDelegate>
+                                       WKNavigationDelegate, NSWindowDelegate, WKUIDelegate>
 @property (nonatomic, strong) NSWindow *window;
 @property (nonatomic, strong) WKWebView *web;
 @property (nonatomic, strong) RLURLSchemeHandler *schemeHandler;
@@ -701,6 +701,77 @@ reject:
 @end
 
 @implementation HostAppDelegate
+
+// ---------------- JS 对话框（WKUIDelegate）----------------
+// 背景（2026-10-28 用户实测「之前保存的无法删除」）：WKWebView **不会**自己弹
+// alert/confirm/prompt；页面调用时走 UIDelegate 回调，没有实现就静默返回
+// confirm()=false、prompt()=nil ⟹ 删除服务器 / 重置 PEQ / 恢复默认参数这些
+// 走了 confirm() 的按钮在 .app 里全部"点了没反应"。
+// 这些对话框都是用户点击触发的短交互，这里用 NSAlert 走系统原生样式。
+// 注意：completionHandler **必须且只能调用一次**，否则 WebKit 会一直挂着这次导航回调。
+- (void)webView:(WKWebView *)webView
+    runJavaScriptAlertPanelWithMessage:(NSString *)message
+                      initiatedByFrame:(WKFrameInfo *)frame
+                     completionHandler:(void (^)(void))completionHandler {
+    (void)webView; (void)frame;
+    NSAlert *a = [[NSAlert alloc] init];
+    a.messageText = message.length ? message : @"";
+    [a addButtonWithTitle:@"好"];
+    a.alertStyle = NSAlertStyleInformational;
+    if (self.window && self.window.attachedSheet == nil && self.window.isVisible) {
+        [a beginSheetModalForWindow:self.window completionHandler:^(NSModalResponse r) {
+            (void)r;
+            completionHandler();
+        }];
+    } else {
+        [a runModal];
+        completionHandler();
+    }
+}
+
+- (void)webView:(WKWebView *)webView
+    runJavaScriptConfirmPanelWithMessage:(NSString *)message
+                        initiatedByFrame:(WKFrameInfo *)frame
+                       completionHandler:(void (^)(BOOL))completionHandler {
+    (void)webView; (void)frame;
+    NSAlert *a = [[NSAlert alloc] init];
+    a.messageText = message.length ? message : @"";
+    // 第一枚按钮 = 确定（返回 YES）。用 firstButtonReturn 判定，不依赖按钮标题文案。
+    [a addButtonWithTitle:@"确定"];
+    [a addButtonWithTitle:@"取消"];
+    a.alertStyle = NSAlertStyleWarning;
+    if (self.window && self.window.attachedSheet == nil && self.window.isVisible) {
+        [a beginSheetModalForWindow:self.window completionHandler:^(NSModalResponse r) {
+            completionHandler(r == NSAlertFirstButtonReturn);
+        }];
+    } else {
+        completionHandler([a runModal] == NSAlertFirstButtonReturn);
+    }
+}
+
+- (void)webView:(WKWebView *)webView
+    runJavaScriptTextInputPanelWithPrompt:(NSString *)prompt
+                              defaultText:(NSString *)defaultText
+                         initiatedByFrame:(WKFrameInfo *)frame
+                        completionHandler:(void (^)(NSString *))completionHandler {
+    (void)webView; (void)frame;
+    NSAlert *a = [[NSAlert alloc] init];
+    a.messageText = prompt.length ? prompt : @"";
+    [a addButtonWithTitle:@"确定"];
+    [a addButtonWithTitle:@"取消"];
+    NSTextField *field = [[NSTextField alloc] initWithFrame:NSMakeRect(0, 0, 280, 24)];
+    field.stringValue = defaultText.length ? defaultText : @"";
+    a.accessoryView = field;
+    a.window.initialFirstResponder = field;
+    if (self.window && self.window.attachedSheet == nil && self.window.isVisible) {
+        [a beginSheetModalForWindow:self.window completionHandler:^(NSModalResponse r) {
+            completionHandler(r == NSAlertFirstButtonReturn ? field.stringValue : nil);
+        }];
+    } else {
+        const NSModalResponse r = [a runModal];
+        completionHandler(r == NSAlertFirstButtonReturn ? field.stringValue : nil);
+    }
+}
 
 - (void)applicationDidFinishLaunching:(NSNotification *)n {
     (void)n;
@@ -780,6 +851,11 @@ reject:
 
     self.web = [[WKWebView alloc] initWithFrame:frame configuration:cfg];
     self.web.navigationDelegate = self;
+    // 2026-10-28（用户「之前保存的无法删除」）：**必须**设 WKUIDelegate。
+    // WKWebView 默认不弹 JS 对话框，没有 UIDelegate 时 confirm() 直接返回 false
+    // ⟹ 所有「删除/重置」类按钮在 .app 里点了毫无反应，而在 Edge/CLI 里正常
+    // （所以网页端 UI 测试抓不到这一类缺陷）。
+    self.web.UIDelegate = self;
     self.web.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
     [self.window setContentView:self.web];
 

@@ -5610,6 +5610,9 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
     };
     auto getReadOnlyOk = [&](const std::string& p) {
         if (hasSideEffectQuery(p)) return false;
+        // 流媒体配置读取/已保存服务器连通性测试不修改配置；不能被 /api/src 总前缀误拦。
+        if (p == "/api/src/config" || p.rfind("/api/src/config?", 0) == 0 ||
+            p == "/api/src/ping" || p.rfind("/api/src/ping?", 0) == 0) return true;
         if (p.rfind("/api/writeback", 0) == 0) return p.rfind("/api/writeback/status", 0) != 0;  // 预览端点
         if (p.rfind("/api/settings", 0) == 0) return true;
         if (p.rfind("/api/peq", 0) == 0) return p.rfind("/api/peq/preset", 0) != 0;
@@ -7182,7 +7185,7 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
         // 远程曲目：先把原始文件完整下载到缓存，再走与本地完全相同的解码与 DSP 路径
         if (!p.remoteId.empty()) {
             std::string ferr;
-            const std::string local = SourceManager::instance().fetch(p.remoteId, p.remoteSuffix, ferr);
+            const std::string local = SourceManager::instance().fetch(p.remoteId, p.remoteSuffix, p.remoteTitle, ferr);
             if (local.empty())
                 return std::string("{\"ok\":false,\"error\":\"获取远程曲目失败: ") + jesc(ferr) + "\"}";
             p.file = local;
@@ -7432,7 +7435,7 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
         // 远程曲目：先把原始文件完整下载到缓存，再走与本地完全相同的解码与 DSP 路径
         if (!p.remoteId.empty()) {
             std::string ferr;
-            const std::string local = SourceManager::instance().fetch(p.remoteId, p.remoteSuffix, ferr);
+            const std::string local = SourceManager::instance().fetch(p.remoteId, p.remoteSuffix, p.remoteTitle, ferr);
             if (local.empty())
                 return std::string("{\"ok\":false,\"error\":\"获取远程曲目失败: ") + jesc(ferr) + "\"}";
             p.file = local;
@@ -7587,6 +7590,8 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
                     c.user = gv("user");
                     c.pass = gv("pass");
                     c.name = gv("name");
+                    if (!c.valid())
+                        return "{\"ok\":false,\"error\":\"请先填写服务器地址与用户名\"}";
                     const std::string id = gv("id");
                     if (action == "add" || (action.empty() && id.empty())) {
                         const std::string nid = mgr.add_server(c);
@@ -7604,14 +7609,20 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
                 if (action == "active") {
                     const bool ok = mgr.set_active(gv("id"));
                     return std::string("{\"ok\":") + (ok ? "true" : "false") +
-                           ",\"error\":\"" + (ok ? "" : "服务器不存在（可能已被删除）") + "\"}";
+                           ",\"error\":\"" + (ok ? "" : "服务器不存在或地址、用户名未填写") + "\"}";
                 }
-                // 旧协议兜底：只带 kind/base/user/pass → 更新当前启用服务器（没有就新建）
+                // 旧协议只接受显式配置字段；空 POST/未知 action 不是一次配置更新。
+                // 否则未配置时的读取误用会创建空占位，后续 add 又会把它保留为 active。
+                if (!action.empty() || (!f.count("kind") && !f.count("base") &&
+                                        !f.count("user") && !f.count("pass")))
+                    return "{\"ok\":false,\"error\":\"未提供有效的服务器配置操作\"}";
                 SourceConfig c = mgr.config();
                 if (f.count("kind")) c.kind = gv("kind");
                 if (f.count("base")) c.base = gv("base");
                 if (f.count("user")) c.user = gv("user");
                 if (f.count("pass")) c.pass = gv("pass");
+                if (!c.valid())
+                    return "{\"ok\":false,\"error\":\"请先填写服务器地址与用户名\"}";
                 mgr.set_config(c);
                 return "{\"ok\":true}";
             }

@@ -85,7 +85,18 @@ public:
         const Json& ix = sr["indexes"]["index"];
         for (size_t i = 0; i < ix.size(); ++i) {
             const Json& artist = ix.at(i)["artist"];
-            for (size_t k = 0; k < artist.size(); ++k) out.push_back(to_entry(artist.at(k)));
+            for (size_t k = 0; k < artist.size(); ++k) {
+                SubEntry e = to_entry(artist.at(k));
+                // 2026-10-28（用户实测「流媒体有 bug」）：**必须是目录**。
+                // Subsonic 协议里 Index.artist[] 是 ArtistID3 对象（id/name/albumCount/coverArt…），
+                // **根本没有 isDir 字段** —— isDir 只属于 Child。改前照 to_entry 默认 false，
+                // 界面就把艺术家渲染成歌曲（♪ 而非文件夹），点一下走 playRemote(artistId)
+                // 当成曲子去下载，于是"服务器明明连上了却用不了"。
+                // ⚠️ 判据教训：mock 里别顺手补 "isDir":true —— 真实 Navidrome 不返回它，
+                // 补了就等于用假数据证明假结论（见 tests/test_source_manager.cpp 的注释）。
+                e.isDir = true;
+                out.push_back(e);
+            }
         }
         return out;
     }

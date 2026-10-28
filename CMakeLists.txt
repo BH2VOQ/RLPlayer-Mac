@@ -176,6 +176,24 @@ endif()
 # ---------------- 测试 ----------------
 enable_testing()
 
+# 流媒体启用配置：真实 loopback Subsonic 请求 + 隔离配置持久化。
+add_executable(test_source_manager tests/test_source_manager.cpp)
+target_include_directories(test_source_manager PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(test_source_manager PRIVATE ${RL_PLATFORM_LIBS})
+add_test(NAME source_manager COMMAND test_source_manager)
+
+# Subsonic 协议语义（含「Index.artist[] 没有 isDir，必须按目录处理」这条真实形状判据）。
+add_executable(test_subsonic tests/test_subsonic.cpp)
+target_include_directories(test_subsonic PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(test_subsonic PRIVATE ${RL_PLATFORM_LIBS})
+add_test(NAME subsonic COMMAND test_subsonic)
+
+# 手动 opt-in 原生验收：真 WKWebView/真 embedded 核心，不进入自动 CTest（会开自有窗口）。
+add_executable(test_source_native tests/test_source_native.mm)
+set_source_files_properties(tests/test_source_native.mm PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
+target_include_directories(test_source_native PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tools)
+target_link_libraries(test_source_native PRIVATE rlapp_core "-framework AppKit" "-framework WebKit")
+
 # ---- 跨平台测试（macOS 也跑）----
 # CoreAudio 后端端到端（macOS 真机；铁律 1：默认 -60 dBFS，几乎不可闻）
 # 必须显式传 --device 才碰物理声卡；不带参数时只跑只读能力查询。

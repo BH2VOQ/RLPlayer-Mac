@@ -124,6 +124,10 @@ function openExternal(u) {
 }
 var S = {
   view: 'albums', albums: [], album: null, files: [], remote: [],
+  // 2026-10-28（流媒体专辑详情页）：导航栈 = 已经进入过的目录项，**栈顶 = 当前目录**。
+  // 专辑详情页的头部（专辑名/艺术家/封面）与「返回上一级」都读它；直接 loadRemote(id)
+  // 进来时栈是空的 ⟹ 头部退化（见 remoteAlbumHead）。
+  rstack: [],
   q: { items: [], index: 0 }, cur: '', playing: false, paused: false,
   vol: 0, loud: false, lastCur: '', roots: [], scanning: false, dur: 0, pos: 0,
   volDb: 0, startDb: 0, theme: 'dark', uiStyle: 'apple', queueHidden: false,
@@ -616,9 +620,17 @@ function parentFolder(p) {
   return segs.length >= 2 ? segs[segs.length - 2] : '';
 }
 function nam(p) {
-  var s = String(p || ''), i = Math.max(s.lastIndexOf('/'), s.lastIndexOf(SEP));
+  // 2026-10-28（用户实测「加入歌单后标题是路径名」）：**必须也按反斜杠切**。
+  // 收藏/队列里的路径被 normalize_fav_path() 统一成了反斜杠（历史 Windows 口径），
+  // 而 macOS 上 SEP='/' ⟹ 旧写法 Math.max(lastIndexOf('/'), lastIndexOf(SEP)) 恒为 -1，
+  // 整串路径被当成文件名显示。folderOf() 早就同时认两种分隔符，这里补齐。
+  var s = String(p || '');
+  var i = Math.max(s.lastIndexOf('/'), s.lastIndexOf(String.fromCharCode(92)), s.lastIndexOf(SEP));
   return i >= 0 ? s.slice(i + 1) : s;
 }
+// 去掉常见音频扩展名（只用于**显示**，不改任何真实路径）。
+var AUDIO_EXT_RE = /\.(aiff|aif|flac|wav|mp3|m4a|aac|ogg|opus|ape|wv|dsf|dff|wma|alac)$/i;
+function stemOf(p) { return nam(p).replace(AUDIO_EXT_RE, ''); }
 function base(p) { return String(p || '').replace(/[/\\]+$/, ''); }
 function join(a, b) { return base(a) + SEP + b; }
 // 261025-01 #7/#10：api() 必须自己兜住网络失败，不能把 rejection 甩给上百个调用点。
@@ -666,7 +678,8 @@ function api(u, body) {
     u.indexOf('/api/files?') === 0 || u.indexOf('/api/meta?') === 0 ||
     u === '/api/cast/state' || u.indexOf('/api/cast/devices') === 0 ||
     u === '/api/input/devices' || u === '/api/input/state' ||
-    u === '/api/src/config' || u.indexOf('/api/src/browse') === 0
+    u === '/api/src/config' || u === '/api/src/ping' || u.indexOf('/api/src/ping?') === 0 ||
+    u.indexOf('/api/src/browse') === 0
   );
   var opt = (!isApi || isRead) ? {} : { method: 'POST' };
   if (body !== undefined) opt.body = body;
@@ -3097,9 +3110,14 @@ function loadFavs() {
     h += '<div style="padding:2px 0 6px">';
     S.favs.forEach(function (x, i) {
       var f = x.file || '';
-      var t = x.title || nam(f);
+      // 流媒体曲目是「先下载到 remote-cache 再播」，不在曲库索引里 ⟹ /api/fav/list 没有 meta，
+      // 这里必须给一个**人能读**的兜底：文件名（去扩展名）。缓存名现在就是曲名（见 source_mgr
+      // 的 fetch displayName），所以显示的是真标题而不是远端 id 或整串路径。
+      var t = x.title || stemOf(f);
       var ar = x.artist || '';
       var al = x.album || folderOf(f);
+      // remote-cache 是实现细节，不该出现在「专辑」列
+      if (!x.album && al === 'remote-cache') al = '';
       h += '<div class="trow favrow" data-i=' + i + ' style="grid-template-columns:34px 1fr 180px 200px 34px">' +
            '<div class=n>' + (i + 1) + '</div>' +
            '<div class=tt title="' + esc(f) + '">' + esc(t) + '</div>' +
@@ -3394,7 +3412,11 @@ function addPathCue(f, cs, ce) {
   }).catch(function (e) { toast('加入失败: ' + e); });
 }
 function playRemote(it) {
-  api('/api/play', 'rid=' + encodeURIComponent(it.id) + '&rsuffix=' + encodeURIComponent(it.sf || '') + '&' + params())
+  // 2026-10-28（用户「流媒体过来的名字是乱码的」）：必须把**曲名**一起送过去。
+  // 播放器/队列/底栏/最近播放的显示名都从本地文件路径派生，而远程曲目会先下载到缓存；
+  // 不传 rtitle 时缓存名只能用远端 id ⟹ 界面显示成一串 id（看起来就是乱码）。
+  api('/api/play', 'rid=' + encodeURIComponent(it.id) + '&rsuffix=' + encodeURIComponent(it.sf || '') +
+      '&rtitle=' + encodeURIComponent(it.t || '') + '&' + params())
     .then(function (j) { if (!j.ok) toast(j.error || '播放失败'); else loadQ(); });
 }
 
@@ -4398,6 +4420,266 @@ function loadLibStats() {
 }
 
 /* ---------------- 流媒体 ---------------- */
+// 2026-10-28（用户：「流媒体那个页面，我希望可以跟专辑用一个显示方式，然后可以切成列表显示」）：
+//   · 默认 = 专辑页那套卡片网格（直接复用 .grid/.card/.cv/.ph/.nm/.ar，封面圆角/尺寸/悬停
+//     全部与专辑页同源，ui_page.h 里没有为流媒体另起一套封面样式）；
+//   · 工具条右侧给一个「网格 / 列表」分段控件，点一下切行式列表、再点切回网格；
+//   · 选择记在 localStorage。为什么不走 /api/settings：后端设置键在 tools/rtaweb.cpp 里是
+//     硬编码白名单（SET_KEYS + 逐字段解析），加新键必须改后端，而本页只允许改 UI。
+//     键名按约定带 rlplayer- 前缀（既有 rta-theme/rta-uistyle 同性质，属于纯前端外观偏好）。
+var REMOTE_VIEW_KEY = 'rlplayer-remote-view';
+var REMOTE_VIEW = (function () {
+  var v = '';
+  try { v = localStorage.getItem(REMOTE_VIEW_KEY) || ''; } catch (e) { }
+  return v === 'list' ? 'list' : 'grid';   // 缺省 = 网格（与专辑页一致）
+})();
+function remoteViewSet(v) {
+  REMOTE_VIEW = (v === 'list') ? 'list' : 'grid';
+  try { localStorage.setItem(REMOTE_VIEW_KEY, REMOTE_VIEW); } catch (e) { }
+}
+var REMOTE_ICON = {
+  grid: "<svg viewBox='0 0 24 24' fill=none stroke=currentColor stroke-width=1.8><rect x='3.5' y='3.5' width='7' height='7' rx='1.4'/><rect x='13.5' y='3.5' width='7' height='7' rx='1.4'/><rect x='3.5' y='13.5' width='7' height='7' rx='1.4'/><rect x='13.5' y='13.5' width='7' height='7' rx='1.4'/></svg>",
+  list: "<svg viewBox='0 0 24 24' fill=none stroke=currentColor stroke-width=1.8><path d='M4 6h16M4 12h16M4 18h16'/></svg>"
+};
+// 工具条里的分段控件：底座就用既有 .btn（与「返回专辑」等按钮同款），.rvtog 只补选中态。
+// 选择器：#remoteView（容器）/ .rvbtn[data-rmv=grid|list]（两档）/ .rvbtn.on（当前档）。
+function remoteToolsHtml() {
+  var g = REMOTE_VIEW === 'grid';
+  return '<span class=rvtog id=remoteView role=group aria-label="流媒体显示方式">' +
+    '<button class="btn rvbtn' + (g ? ' on' : '') + '" data-rmv=grid aria-pressed="' + (g ? 'true' : 'false') +
+      '" title="网格显示（封面卡片）">' + REMOTE_ICON.grid + '网格</button>' +
+    '<button class="btn rvbtn' + (g ? '' : ' on') + '" data-rmv=list aria-pressed="' + (g ? 'false' : 'true') +
+      '" title="列表显示">' + REMOTE_ICON.list + '列表</button></span>';
+}
+// 远程条目 → 专辑页同款卡片。字段：t 标题 / ar 艺术家 / al 专辑 / cv coverId / dir 是否目录。
+// 没封面的条目（cv 为空）**不渲染 <img>**：/api/src/cover 找不到时只回空 body，
+// 那种 <img> 会先闪一下破图图标再被 onerror 藏起来 —— 干脆不发这个请求，直接露首字母占位。
+function remoteCardHtml(it, i) {
+  var name = it.t || '?';
+  var sub = it.dir ? '文件夹' : [it.ar, it.al].filter(function (x) { return !!x; }).join('  \u00b7  ');
+  var h = '<div class="card row' + (it.dir ? ' rowdir' : '') + '" data-r=' + i + '>' +
+    '<div class=cv><div class=ph>' + esc(name.slice(0, 1).toUpperCase()) + '</div>';
+  if (it.cv) {
+    h += '<img src="/api/src/cover?id=' + encodeURIComponent(it.cv) +
+         '" loading=lazy alt="" onerror="this.style.display=\'none\'">';
+  }
+  // 只有曲目给播放角标（目录点了是进入下一层，不该画播放键）
+  if (!it.dir) h += '<div class=pl><svg width=13 height=13 viewBox="0 0 24 24" fill=#fff><path d="M8 5v14l11-7z"/></svg></div>';
+  return h + '</div>' +
+    '<div class=nm title="' + esc(name) + '">' + esc(name) + '</div>' +
+    '<div class=ar title="' + esc(sub) + '">' + (sub ? esc(sub) : '&nbsp;') + '</div></div>';
+}
+function remoteBackRowHtml() {
+  return '<div class="row rowdir" data-r=-1><span class=ico>&#128193;</span><span class=nm>返回上一级</span></div>';
+}
+
+/* ---------------- 流媒体：专辑详情页（2026-10-28 用户要求） ----------------
+   用户原话：「点进流媒体里的专辑 → 就是本地专辑详情页这套（大封面头 + 曲目表 + 播放整张/加入队列/随机播放）」。
+   判定：当前目录的子项**全部是非目录且非空** ⟹ 这就是一张专辑的曲目表，按 openAlbum 的结构渲染；
+        其余（根/艺术家/含子目录/空目录）仍是上一条的网格 / 列表。
+   头部信息来源 = 导航栈 S.rstack（进入目录时压入 {id,t,cv,ar}，返回时出栈）；直接 loadRemote(id)
+        进来时栈空 ⟹ 退化为「首曲的 ar + 首曲 coverId」。
+   ⚠️ 本地专辑页 openAlbum 一个字没动：这里只照抄它的结构与 class（.ahead/.cv/.ph/.info/.kind/
+        h1/.sub/.trlist-head/.trow/.add-btn），不碰它的任何逻辑，也不引入它那两个对流媒体无意义的
+        入口（设置封面 / 心形收藏）。 */
+function remoteStackSync(id) {
+  // 让栈与「当前目录」对齐：栈里能找到 id 就截到它；找不到就清空（= 无栈，走退化头部）。
+  var st = S.rstack || (S.rstack = []);
+  for (var i = st.length - 1; i >= 0; i--) {
+    if (String(st[i].id) === String(id || '')) { st.length = i + 1; return; }
+  }
+  st.length = 0;
+}
+function remoteEnterDir(it) {
+  // 先对齐再压栈：从网格/列表点进目录时，栈顶正好是当前目录（否则从别处跳进来的栈是脏的）。
+  remoteStackSync(S.rpath);
+  (S.rstack = S.rstack || []).push({ id: it.id, t: it.t || '', cv: it.cv || '', ar: it.ar || '' });
+  loadRemote(it.id);
+}
+function remoteGoBack() {
+  var st = S.rstack || [];
+  if (st.length && String(st[st.length - 1].id) === String(S.rpath || '')) {
+    st.pop();                                          // 出栈 = 回到上一层目录
+    loadRemote(st.length ? st[st.length - 1].id : '');
+    return;
+  }
+  // 栈里没有当前位置（直接 loadRemote 进来的）→ 沿用老口径：砍掉路径最后一段。
+  loadRemote((S.rpath || '').split('/').slice(0, -1).join('/'));
+}
+// 子项全部是曲目且非空 ⟹ 专辑层。空目录**不算**（要保持原来的「此目录为空」空态）。
+function remoteIsAlbumLayer(items) {
+  if (!items || !items.length) return false;
+  for (var i = 0; i < items.length; i++) if (items[i].dir) return false;
+  return true;
+}
+function remoteAlbumHead(items) {
+  var st = S.rstack || [];
+  var top = (st.length && String(st[st.length - 1].id) === String(S.rpath || '')) ? st[st.length - 1] : null;
+  var first = items[0] || {};
+  // 无栈时按用户要求退化：首曲的 ar + 首曲 coverId；专辑名优先用曲目自带的 al，
+  // 连 al 都没有才显示「未知专辑」（比硬写「未知专辑」更诚实，也不会骗人）。
+  return {
+    name: (top && top.t) || first.al || '未知专辑',
+    artist: (top && top.ar) || first.ar || '',
+    cv: (top && top.cv) || first.cv || ''
+  };
+}
+// 远程曲目入队：**每一条都必须带 rid/rsuffix/rtitle**。少带 rtitle 时后端拿远端 id 当缓存名，
+// 界面就显示成一串 id（上一轮刚修过的「名字是乱码」）。抽出来给「+」「整张」「随机」共用。
+function remoteAddOne(it) {
+  return api('/api/add', 'rid=' + encodeURIComponent(it.id) +
+    '&rsuffix=' + encodeURIComponent(it.sf || '') +
+    '&rtitle=' + encodeURIComponent(it.t || ''));
+}
+// 整张入队：**串行**（/api/add 是往队列尾部追加，并发会打乱曲目顺序）。
+// 任一条失败就停（不半张专辑入队），返回成功的条数（0 = 失败）。
+function remoteAddAll(items) {
+  var chain = Promise.resolve(true), n = 0;
+  items.forEach(function (it) {
+    chain = chain.then(function (ok) {
+      if (!ok) return false;
+      return remoteAddOne(it).then(function (j) {
+        if (j && j.ok === false) { toast(j.error || '加入失败'); return false; }
+        n++;
+        return true;
+      });
+    });
+  });
+  return chain.then(function (ok) { return ok ? n : 0; });
+}
+function remoteAlbumHtml(hd, items) {
+  var total = 0;
+  items.forEach(function (t) { total += (t.dur || 0); });
+  // 副标题字段顺序与本地专辑页一致：艺术家 · N 首 · 总时长（总时长 = Σ dur，走同一个 fmtDurLong）。
+  var sub = [];
+  if (hd.artist) sub.push(esc(hd.artist));
+  sub.push(items.length + ' 首');
+  sub.push(fmtDurLong(total));
+  var h = '<div class=ahead><div class=cv style="position:relative">' +
+    '<div class=ph>' + esc((hd.name || '?').slice(0, 1).toUpperCase()) + '</div>' +
+    // 封面取远程 coverId（后端 /api/src/cover）。取不到就让 <img> 自己消失，露出首字母占位 ——
+    // 与 openAlbum 同一条 fallback，避免留一块什么都没有的纯色方块。
+    (hd.cv ? '<img src="/api/src/cover?id=' + encodeURIComponent(hd.cv) + '" alt="" ' +
+             'onerror="this.style.display=\'none\'" ' +
+             'style="position:absolute;inset:0;width:100%;height:100%;object-fit:cover;border-radius:inherit">' : '') +
+    '</div><div class=info>' +
+    '<div class=kind>ALBUM</div><h1 title="' + esc(hd.name) + '">' + esc(hd.name) + '</h1>' +
+    '<div class=sub>' + sub.join(' \u00b7 ') + '</div>' +
+    '<button class="btn pri" id=ralbPlayAll aria-label="播放整张专辑" title="播放整张专辑">\u25b6 播放整张</button> ' +
+    '<button class=btn id=ralbAdd title="把这张专辑的全部曲目加入播放队列">加入队列</button> ' +
+    '<button class=btn id=ralbShuf title="整张入队后随机挑一首开始播放">随机播放</button>' +
+    '</div></div>';
+  h += '<div style="padding:4px 22px 24px">';
+  h += '<div class="trlist-head"><span class=lb>曲目列表</span><span class=sp></span>' +
+       '<span class=sum>' + items.length + ' 首 · 总时长 ' + fmtDurLong(total) + '</span></div>';
+  // 列：序号 / 标题 / 艺术家 / 时长 / 「+」入队（本地页还多「收藏」「规格」两列，流媒体没有这两样东西）
+  items.forEach(function (t, i) {
+    h += '<div class="trow" data-i=' + i + ' style="grid-template-columns:28px minmax(120px,1.6fr) minmax(0,1fr) 58px 26px;gap:8px">' +
+         '<div class=n>' + (i + 1) + '</div>' +
+         '<div class=tt title="' + esc(t.t || '') + '">' + esc(t.t || '') + '</div>' +
+         '<div class=ar title="' + esc(t.ar || hd.artist) + '">' + esc(t.ar || hd.artist) + '</div>' +
+         '<div class=du>' + fmtDurLong(t.dur) + '</div>' +
+         '<button class="add-btn" data-i="' + i + '" title="加入播放队列" aria-label="加入播放队列">+</button>' +
+         '</div>';
+  });
+  h += '</div>';
+  return h;
+}
+function renderRemoteAlbum(items) {
+  var hd = remoteAlbumHead(items);
+  // 顶栏：与本地专辑页「← 返回专辑」同款的返回入口（详情页不需要网格/列表切换）。
+  head(hd.name, items.length + ' 首',
+    '<button class=btn id=rBackDir title="返回上一级" aria-label="返回上一级">\u2190 返回上一级</button>');
+  D('list').innerHTML = remoteAlbumHtml(hd, items);
+  if (D('rBackDir')) D('rBackDir').onclick = function () { remoteGoBack(); };
+  // 「播放整张」= 全部按顺序入队后播第 1 首（走逐首 /api/add + 一条 /api/play；见交付说明的取舍）。
+  if (D('ralbPlayAll')) D('ralbPlayAll').onclick = function () {
+    remoteAddAll(items).then(function (n) { if (!n) return; playRemote(items[0]); });
+  };
+  if (D('ralbAdd')) D('ralbAdd').onclick = function () {
+    remoteAddAll(items).then(function (n) { if (!n) return; toast('整张专辑已加入队列'); loadQ(); });
+  };
+  // 「随机播放」= 全部入队后随机起点播放（与本地专辑页 aShuf 的语义一致：随机挑一首当起点）。
+  if (D('ralbShuf')) D('ralbShuf').onclick = function () {
+    remoteAddAll(items).then(function (n) {
+      if (!n) return;
+      playRemote(items[Math.floor(Math.random() * items.length)]);
+    });
+  };
+  // 单曲行：点行 = 播这一首。
+  Array.prototype.forEach.call(D('list').querySelectorAll('.trow'), function (e) {
+    e.onclick = function (ev) {
+      if (ev.target.closest && ev.target.closest('.add-btn')) return;   // 「+」自己处理（双保险）
+      var t = items[+e.dataset.i];
+      if (t) playRemote(t);
+    };
+  });
+  // 「+」必须**自己**绑 click 并 stopPropagation，否则冒泡到行的 onclick 会变成播这首/整张，
+  // 用户点「+」结果开始播放 —— 与本地专辑页 B-3 同一条教训。
+  Array.prototype.forEach.call(D('list').querySelectorAll('.add-btn'), function (btn) {
+    btn.onclick = function (ev) {
+      ev.stopPropagation();
+      ev.preventDefault();
+      var t = items[+btn.dataset.i];
+      if (!t) return;
+      remoteAddOne(t).then(function (j) {
+        if (j && j.ok === false) { toast(j.error || '加入失败'); return; }
+        toast('已加入队列'); loadQ();
+      });
+    };
+  });
+}
+
+// 只负责画（不发请求）：切换显示方式时原地重画，不重新拉目录、也不丢当前层级。
+function renderRemote() {
+  var items = S.remote || [];
+  // 专辑层（子项全是曲目且非空）→ 本地专辑页那套详情页，不再画网格/列表。
+  if (remoteIsAlbumLayer(items)) { renderRemoteAlbum(items); return; }
+  var grid = REMOTE_VIEW === 'grid';
+  head('流媒体', items.length + ' 项', remoteToolsHtml());
+  var h = '';
+  // 返回上一级：两种显示方式下都是独立的行式入口，不参与网格化（网格里没有"上一级"卡片）。
+  if (S.rpath) h += remoteBackRowHtml();
+  if (!items.length) {
+    // 文案与原来逐字一致；外面多套一层 .rempty 只是为了在保留返回行时仍维持原先的居中空态
+    // （#list:has(> .empty) 那条居中规则会把同级的返回行一起横向居中，所以不能让 .empty 当直接子节点）。
+    h += '<div class=rempty><div class=empty>此目录为空<br><span style="font-size:11px">先在右侧「设置」里填服务器地址并保存</span></div></div>';
+  } else if (grid) {
+    h += '<div class="grid rgrid">';
+    items.forEach(function (it, i) { h += remoteCardHtml(it, i); });
+    h += '</div>';
+  } else {
+    items.forEach(function (it, i) {
+      h += '<div class="row' + (it.dir ? ' rowdir' : '') + '" data-r=' + i + '>' +
+           '<span class=ico>' + (it.dir ? '&#128193;' : '&#127925;') + '</span>' +
+           '<span class=nm>' + esc(it.t) + '</span><span class=meta>' + esc(it.dir ? '' : (it.ar || '')) + '</span></div>';
+    });
+  }
+  D('list').innerHTML = h;
+  // 绑定必须用 querySelectorAll('[data-r]')：网格卡在 .grid 里面，是 #list 的孙节点，
+  // 原来只遍历 D('list').children 的写法在网格模式下一条都绑不上。
+  Array.prototype.forEach.call(D('list').querySelectorAll('[data-r]'), function (e) {
+    var i = +e.dataset.r;
+    e.onclick = function () {
+      if (i < 0) remoteGoBack();
+      else {
+        var it = S.remote[i];
+        if (!it) return;
+        if (it.dir) remoteEnterDir(it); else playRemote(it);
+      }
+    };
+  });
+  // 分段控件在顶栏 #tools 里（不在 #list 内），必须单独在 #tools 上找。
+  var tb = D('tools');
+  if (!tb) return;
+  Array.prototype.forEach.call(tb.querySelectorAll('.rvbtn'), function (b) {
+    b.onclick = function () {
+      if (REMOTE_VIEW === b.dataset.rmv) return;
+      remoteViewSet(b.dataset.rmv);
+      renderRemote();
+    };
+  });
+}
 function loadRemote(id) {
   S.view = 'remote';
   api('/api/src/browse?id=' + encodeURIComponent(id || '')).then(function (j) {
@@ -4418,24 +4700,9 @@ function loadRemote(id) {
       return;
     }
     S.remote = j.items || []; S.rpath = id || '';
-    head('流媒体', S.remote.length + ' 项', '');
-    var h = '';
-    if (id) h += '<div class="row rowdir" data-r=-1><span class=ico>&#128193;</span><span class=nm>返回上一级</span></div>';
-    S.remote.forEach(function (it, i) {
-      h += '<div class="row' + (it.dir ? ' rowdir' : '') + '" data-r=' + i + '>' +
-           '<span class=ico>' + (it.dir ? '&#128193;' : '&#127925;') + '</span>' +
-           '<span class=nm>' + esc(it.t) + '</span><span class=meta>' + esc(it.dir ? '' : (it.ar || '')) + '</span></div>';
-    });
-    if (!S.remote.length) h = '<div class=empty>此目录为空<br><span style="font-size:11px">先在右侧「设置」里填服务器地址并保存</span></div>';
-    D('list').innerHTML = h;
-    Array.prototype.forEach.call(D('list').children, function (e) {
-      if (e.dataset.r === undefined) return;
-      var i = +e.dataset.r;
-      e.onclick = function () {
-        if (i < 0) loadRemote(S.rpath.split('/').slice(0, -1).join('/'));
-        else { var it = S.remote[i]; if (it.dir) loadRemote(it.id); else playRemote(it); }
-      };
-    });
+    // 栈与当前目录对齐：直接 loadRemote(id) 进来时栈里没有它 ⟹ 清空（头部走退化态）。
+    remoteStackSync(id || '');
+    renderRemote();
   }).catch(function (e) { D('list').innerHTML = '<div class=empty>' + esc(e) + '</div>'; });
 }
 
@@ -7242,7 +7509,7 @@ function renderSettingsPage() {
   // 2026-10-26：官方推荐预设卡片**移到快速开始页**（用户要求）。
   // 设置页这里不再渲染 —— 预设是「一键开局」的入口，属于快速开始的心智模型，
   // 放在设置页顶部反而让「精细调节」的设置页显得喧宾夺主。
-  // ---------- 设置页签：输入 / 输出 / PCM / SDM / 高级等 ----------
+  // ---------- 页签（对齐 HQPlayer：Inputs / Outputs / PCM / SDM / Advanced） ----------
   h += '<div class=stabs>'
      + '<button class="stab on" data-g=in>输入</button>'
      + '<button class=stab data-g=out>输出</button>'
@@ -7346,7 +7613,7 @@ function renderSettingsPage() {
 
   // ---------- PCM ----------
   h += '<div class=spane data-g=pcm>'
-     + sgroup('升频与滤波', 'RLPlayer 多相 sinc 滤波器：窗函数、相位与抽头数预设',
+     + sgroup('升频与滤波', 'HQPlayer 的 poly-sinc 家族',
          sel('sp_filt', '1x 滤波器（44.1 / 48 kHz 音源）', filts, '播放 44.1 / 48 kHz 文件时使用')
        + sel('sp_filtNx', 'Nx 滤波器（88.2 kHz 及以上音源）', filtsNx,
              '播放 88.2 / 96 / 176.4 kHz 等文件时使用；留空 = 与 1x 相同')

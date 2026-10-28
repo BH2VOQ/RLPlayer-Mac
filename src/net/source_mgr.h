@@ -86,6 +86,7 @@ public:
             servers_.push_back(n);
             active_ = n.id;
         }
+        ensure_active_locked();
         apply_active_locked();
         save_locked();
     }
@@ -97,6 +98,7 @@ public:
         if (c.name.empty()) c.name = c.display_name();
         servers_.push_back(c);
         if (active_.empty()) active_ = c.id;
+        ensure_active_locked();
         apply_active_locked();
         save_locked();
         return c.id;
@@ -111,6 +113,7 @@ public:
             c.id = id;
             if (c.name.empty()) c.name = c.display_name();
             s = c;
+            ensure_active_locked();
             apply_active_locked();
             save_locked();
             return true;
@@ -124,10 +127,7 @@ public:
                                      [&](const SourceConfig& s) { return s.id == id; });
         if (it == servers_.end()) return false;
         servers_.erase(it);
-        if (active_ == id) {
-            active_.clear();
-            for (const auto& s : servers_) if (s.valid()) { active_ = s.id; break; }
-        }
+        ensure_active_locked();
         apply_active_locked();
         save_locked();
         return true;
@@ -137,6 +137,7 @@ public:
         std::lock_guard<std::mutex> lk(mtx_);
         for (const auto& s : servers_) {
             if (s.id != id) continue;
+            if (!s.valid()) return false;
             active_ = id;
             apply_active_locked();
             save_locked();
@@ -200,7 +201,14 @@ public:
     }
 
     // ★ 下载原始文件到缓存，返回本地路径。失败返回空串。
-    std::string fetch(const std::string& id, const std::string& suffix, std::string& err) {
+    //
+    // 2026-10-28（用户「流媒体过来的名字是乱码的」）：displayName 决定**缓存文件名**。
+    // 为什么这很重要：播放器/队列/底栏/最近播放的显示名**全部从文件路径派生**
+    // （tools/rtaweb.cpp 的 stem_or_self），而改前缓存名用的是远端 id
+    // （例如 `1XiEYRmbBtzjljr4sBr06.aff`）⟹ 界面上看到的就是那串 id，像乱码。
+    // 去重键仍然是 id（cache_ 映射），只有文件名变成人能读的曲名；重名时补 id 片段避免互相覆盖。
+    std::string fetch(const std::string& id, const std::string& suffix,
+                      const std::string& displayName, std::string& err) {
         {
             std::lock_guard<std::mutex> lk(mtx_);
             auto it = cache_.find(id);
@@ -231,10 +239,25 @@ public:
         std::error_code ec;
         std::filesystem::create_directories(dir, ec);
 
-        std::string safeId;
-        for (char c : id) safeId += (isalnum((unsigned char)c) ? c : '_');
         std::string ext = suffix.empty() ? std::string(".audio") : ("." + suffix);
-        const auto u8p = (std::filesystem::path(dir) / (safeId + ext)).u8string();
+        const std::string safeId = sanitize_stem(id);
+        std::string stem = sanitize_stem(displayName);
+        if (stem.empty()) stem = safeId;
+        if (stem.size() > 80) stem.resize(80);
+        // 同一台服务器里两首歌可能同名：若这个名字已被**别的 id** 占用，补一段 id 区分，
+        // 否则后一首会覆盖前一首的缓存文件（内容错、且 cache_ 里两条记录指向同一路径）。
+        {
+            std::lock_guard<std::mutex> lk(mtx_);
+            for (const auto& kv : cache_) {
+                if (kv.first == id) continue;
+                const auto stemU8 = std::filesystem::path(kv.second).stem().u8string();
+                if (std::string(reinterpret_cast<const char*>(stemU8.data()), stemU8.size()) == stem) {
+                    stem += "_" + safeId.substr(0, 8);
+                    break;
+                }
+            }
+        }
+        const auto u8p = (std::filesystem::path(dir) / (stem + ext)).u8string();
         const std::string path(reinterpret_cast<const char*>(u8p.data()), u8p.size());
 
         std::ofstream f(path, std::ios::binary);
@@ -257,7 +280,7 @@ public:
         active_.clear();
         next_id_ = 1;
         std::ifstream f(confPath);
-        if (!f) return;
+        if (!f) { apply_active_locked(); return; }
 
         std::map<std::string, std::map<std::string, std::string>> rows;   // id → 字段
         std::string legacyKind, legacyBase, legacyUser, legacyPass;
@@ -317,10 +340,8 @@ public:
             maxId = 1;
         }
         next_id_ = (std::max)((std::max)(nextId, maxId + 1), 1);
-        // active 指向不存在的 id（conf 被手改过）时回退到第一台可用服务器
-        if (!active_.empty() && !find_locked(active_)) active_.clear();
-        if (active_.empty())
-            for (const auto& s : servers_) if (s.valid()) { active_ = s.id; break; }
+        // 历史配置可能启用了空占位项：只在内存回退，不删除条目、不改写用户配置。
+        ensure_active_locked();
         // 还没落盘成 v2 的老 conf：这里不主动写，下一次保存时自然升级。
         apply_active_locked();
     }
@@ -344,6 +365,23 @@ private:
         return rta::platform::join(rta::platform::data_dir_utf8(), "remote-cache");
     }
 
+    // 文件名安全化：保留 UTF-8 多字节序列（中文曲名要原样显示），只替换路径分隔符/控制符/
+    // Windows 保留字符；空结果由调用方兜底。绝不在这里做 UTF-8 → 单字节转换。
+    static std::string sanitize_stem(const std::string& s) {
+        std::string o;
+        for (unsigned char c : s) {
+            if (c < 0x20 || c == 0x7F) continue;
+            switch (c) {
+                case '/': case '\\': case ':': case '*': case '?': case '"':
+                case '<': case '>': case '|': case '\n': case '\r': case '\t':
+                    o += '_'; break;
+                default: o += (char)c;
+            }
+        }
+        while (!o.empty() && (o.back() == ' ' || o.back() == '.')) o.pop_back();
+        return o;
+    }
+
     SourceConfig* find_locked(const std::string& id) {
         for (auto& s : servers_) if (s.id == id) return &s;
         return nullptr;
@@ -354,7 +392,17 @@ private:
     }
     const SourceConfig* active_locked() const {
         if (active_.empty()) return nullptr;
-        return find_locked(active_);
+        const SourceConfig* c = find_locked(active_);
+        return c && c->valid() ? c : nullptr;
+    }
+    // 启用状态的统一约束：保留已有有效选择，否则按列表顺序选第一台有效服务器。
+    // 没有可用配置时清空 active，让所有浏览/下载入口明确报未配置，而非请求空 URL。
+    void ensure_active_locked() {
+        if (active_locked()) return;
+        active_.clear();
+        for (const auto& s : servers_) {
+            if (s.valid()) { active_ = s.id; break; }
+        }
     }
     SourceConfig* mutable_active_locked() {
         if (active_.empty()) return nullptr;

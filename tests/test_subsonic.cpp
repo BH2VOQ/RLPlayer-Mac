@@ -63,6 +63,13 @@ static std::string mock_handler(const HttpRequest& rq, std::string& ct) {
         return "{\"subsonic-response\":{\"status\":\"ok\",\"searchResult3\":{\"song\":["
                "{\"id\":\"s9\",\"title\":\"搜到的歌\",\"artist\":\"A\",\"album\":\"B\"}]}}";
     }
+    // 2026-10-28：真实 Navidrome 的 Index.artist[] 是 ArtistID3，**没有 isDir 字段**。
+    // 这里刻意照抄真实形状（不补 isDir），用来证明"艺术家必须被当成目录"，而不是用假数据糊过去。
+    if (rq.path.rfind("/rest/getIndexes.view", 0) == 0) {
+        if (!authOk) return "{\"subsonic-response\":{\"status\":\"failed\"}}";
+        return "{\"subsonic-response\":{\"status\":\"ok\",\"indexes\":{\"index\":[{\"name\":\"A\",\"artist\":["
+               "{\"id\":\"ar-1\",\"name\":\"艺术家甲\",\"albumCount\":2,\"coverArt\":\"ar-1\"}]}]}}}";
+    }
     if (rq.path.rfind("/rest/download.view", 0) == 0) {
         if (!authOk) { ct = "text/plain"; return "AUTH_FAIL"; }
         // 返回一段可识别的"原始文件"内容
@@ -115,6 +122,18 @@ int main() {
             ck(v[0].suffix == "flac", "suffix 解析正确");
             ck(!v[0].isDir && v[1].isDir, "isDir 区分正确");
             ck(v[0].size == 34567890LL, "size 解析正确", "(" + std::to_string(v[0].size) + ")");
+        }
+    }
+
+    printf("\n=== 2b. 顶层索引：艺术家必须是目录（协议里没有 isDir）===\n");
+    {
+        Subsonic s(good);
+        std::string err;
+        auto v = s.indexes(err);
+        ck(v.size() == 1, "getIndexes 返回 1 个艺术家", "(size=" + std::to_string(v.size()) + ")");
+        if (!v.empty()) {
+            ck(v[0].isDir, "艺术家条目 isDir=true（否则界面当歌曲去播放，流媒体整页不可用）");
+            ck(v[0].title == "艺术家甲", "ArtistID3.name 映射到 title", "(" + v[0].title + ")");
         }
     }
 

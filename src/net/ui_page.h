@@ -7,7 +7,7 @@
 // ui_page.h — RLPlayer 界面骨架（单页应用外壳）
 //
 // 设计取向：Roon 式「左导航 + 主内容 + 右队列 + 底部播放条」。
-// 以【专辑】为核心组织音乐库，并提供全局搜索，减少目录翻找。
+// 与 HQPlayer 的差别：以【专辑】为一等公民，而不是让用户翻目录树；搜索是全局的。
 //
 // 主题：全部颜色走 CSS 变量，html[data-theme] 切换三套主题（深色 / 白色 / 浅蓝）。
 // 规律：组件样式里【不允许再出现硬编码颜色】，否则换主题时必然漏掉某块 ——
@@ -358,6 +358,23 @@ inline std::string rta_ui_page() {
     //       行式内容拉到超宽会严重损害可读性（一行文字横跨 2000px 扫视不动）。
     h += "#list>.grid{box-sizing:border-box}";
     h += ".main>.pad,#setpage>.pad{max-width:1180px;margin-left:auto;margin-right:auto;box-sizing:border-box}";
+    // ---------- 流媒体页：网格 / 列表双显示（2026-10-28 用户要求「跟专辑用一个显示方式」） ----------
+    // 网格卡**直接复用专辑页那整套** .grid/.card/.cv/.ph/.nm/.ar（封面圆角、尺寸、悬停、
+    // 播放角标全部同源），这里只补两件事：
+    //   ① 工具条上的「网格 / 列表」分段控件 —— 底座是既有 .btn，.rvtog 只加选中态；
+    //   ② 卡片同时带 .row/.rowdir。验收脚本 tools/sourcecheck.js 用 `#list .rowdir` 与
+    //      `#list .row:not(.rowdir)` 找目录行/曲目行；带上这两个 class 后网格模式下两种
+    //      选择器照样命中，脚本零改动。代价是 .row 的 flex 布局会套到卡片上，所以下面用
+    //      `#list .rgrid>.card.row` 的高优先级把它还原成卡片布局 —— .row 本身一个字没改，
+    //      专辑页与其它页面的行式列表完全不受影响。
+    h += ".rvtog{display:inline-flex;align-items:center;gap:4px}";
+    h += ".rvtog .btn{display:inline-flex;align-items:center;gap:5px;padding:5px 11px}";
+    h += ".rvtog .btn svg{width:14px;height:14px;flex:none;opacity:.78}";
+    h += ".rvtog .btn.on{background:var(--acc-weak);border-color:var(--acc);color:var(--acc-text);font-weight:600}";
+    h += ".rvtog .btn.on svg{opacity:1}";
+    h += "#list .rgrid>.card.row{display:block;gap:0;align-items:stretch;padding:7px;margin:-7px;border-bottom:0;transition:.16s}";
+    // 空目录：保留「返回上一级」行时仍要原来的居中空态（与 #list:has(> .empty) 同一组数值）
+    h += "#list>.rempty{flex:1;display:flex;align-items:center;justify-content:center;box-sizing:border-box;padding:28px}";
     // 文件夹：地址栏
     h += ".pathbar{display:flex;gap:8px;align-items:center;padding:12px 18px;border-bottom:1px solid var(--line);position:sticky;top:0;background:var(--bg);z-index:4}";
     h += ".pb{width:30px;height:30px;border-radius:8px;border:1px solid var(--line);background:var(--hov);font-size:13px;flex:none}";
@@ -1009,7 +1026,7 @@ h += "#npPage .npedge{display:none}";
     h += ".preset-btn-title{font-size:13px;font-weight:650;color:var(--txt)}";
     h += ".preset-btn-badge{font-size:11px;color:var(--warn);font-weight:600}";
     h += ".preset-btn-sub{font-size:11.5px;line-height:1.45;color:var(--mut)}";
-    // 设置页分页：输入 / 输出 / PCM / SDM / 高级等
+    // 设置页分页（对齐 HQPlayer 的 Inputs / Outputs / PCM / SDM / Advanced）
     // 2026-10-26（用户「上边栏要贴合 UI」）：.stabs 不再 sticky —— 它现在是**固定行**，
     //   由 #setpage 的 flex 列布局保证它不随内容滚动。
     //   padding 用 24px 与 .sbody 的左右 padding 完全一致 ⟹ 页签条背景整行铺满，
