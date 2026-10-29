@@ -1,5 +1,5 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1200" height="340" viewBox="0 0 1200 340" role="img" aria-labelledby="t d">
-  <title id="t">RLPlayer — macOS 高保真播放引擎</title>
+  <title id="t">RLPlayer — macOS HiFi 播放引擎</title>
   <desc id="d">浅色渐变横幅：产品名、能力标签与一条声波</desc>
   <defs>
     <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
@@ -52,7 +52,7 @@
       <path d="M 985 120 A 60 60 0 0 1 1040 110" fill="none" stroke="#0f172a" stroke-opacity="0.2" stroke-width="3" stroke-linecap="round"/>
     </g>
     <text x="72" y="112" font-family="-apple-system, BlinkMacSystemFont, 'SF Pro Display', 'Helvetica Neue', Arial, sans-serif" font-size="64" font-weight="700" fill="#0f172a" letter-spacing="1">RLPlayer</text>
-    <text x="74" y="152" font-family="-apple-system, BlinkMacSystemFont, 'PingFang SC', 'Hiragino Sans GB', Arial, sans-serif" font-size="20" fill="#334155">macOS 高保真播放引擎 · 升频 · 噪声整形 · SDM/DSD · 卷积 · PEQ</text>
+    <text x="74" y="152" font-family="-apple-system, BlinkMacSystemFont, 'PingFang SC', 'Hiragino Sans GB', Arial, sans-serif" font-size="20" fill="#334155">macOS HiFi 播放引擎 · 升频 · 噪声整形 · SDM/DSD · 卷积 · PEQ</text>
     <g font-family="-apple-system, BlinkMacSystemFont, 'PingFang SC', Arial, sans-serif" font-size="13.5" fill="#0f172a">
       <rect x="72" y="178" rx="14" width="204" height="28" fill="#ffffff" fill-opacity="0.8" stroke="#0891b2" stroke-opacity="0.35"/>
       <text x="90" y="197">macOS 13+ · Apple Silicon</text>
