@@ -346,7 +346,7 @@ rlplayer-llm.conf；不进安装包，界面永不回显明文	rlplayer-llm.conf
 随机打乱	Shuffle	(qs === 'shuffle' ? ' selected' : '') + '>随机打乱</option>' + '<option valu
 面向普通消费者的均衡曲线，在平直基础上微抬极低频与极高频，听感更具感染力。	A balanced curve for general consumers, slightly elevating sub-bass and ultra-highs above neutral for an engaging listening experience.	性与高频空气感，适合日常通勤随身聆听与流媒体影视。', tech: '面向普通消费者的均衡曲线，在平直基础上微抬极低频与极高频，听感更具感染力。' }; } if (d.indexOf('diffuse')
 音频引擎	Audio Engine	qList class=sqlist></div><div class=sec>音频引擎</div><div class=nav data-v=station><svg
-音频输入采集	Audio Input Capture	M12 19v4M8 23h8"/></svg></div>'; h += '<div class=am-qtext><div class=am-qtitle>音频输入
+音频输入采集	Audio Capture	M12 19v4M8 23h8"/></svg></div>'; h += '<div class=am-qtext><div class=am-qtitle>音频输入
 频谱倾斜	Spectral Tilt	d_hz, 0, ' Hz'), '亮度指标'); s += qRow('频谱倾斜', qFmt(q.tilt_db_per_oct, 2, ' dB/oct'
 首开始顺序播放	 ordered playback	iles[i]); toast('从第 ' + (i + 1) + ' 首开始顺序播放' + (label ? ('：' + label) : '') + '（共
 首曲目，	 tracks, 	var msg = '扫描完成：共 ' + (j.tracks || 0) + ' 首曲目，' + (j.albums || 0) + ' 张专辑';

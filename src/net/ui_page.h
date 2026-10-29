@@ -401,6 +401,14 @@ inline std::string rta_ui_page(const std::string& lang = "zh") {
     h += ".am-qtext,.am-quick .tx{min-width:0;flex:1}";
     h += ".am-qtitle,.am-quick .nm{font-size:12.5px;font-weight:650;color:var(--txt);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;display:block}";
     h += ".am-qdesc,.am-quick .ds{font-size:11px;color:var(--mut);margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;display:block}";
+    // 英文比中文宽 1.5~2 倍：中文单行放得下的标签，英文会被裁成 "Mount Streaming Se…"。
+    // 规则只对 data-lang=en 生效，中文版排版一点不动。
+    //   · 快捷入口标题/说明允许折到两行（行高收紧，卡片高度只多一点）；
+    //   · 预设卡片顶栏允许换行，徽标不再挤进标题（"★ DSD unsupported" 之前压住了 "DSD Upsampling"）。
+    h += "html[data-lang=en] .am-qtitle,html[data-lang=en] .am-quick .nm{white-space:normal;overflow:visible;text-overflow:clip;line-height:1.3}";
+    h += "html[data-lang=en] .am-qdesc,html[data-lang=en] .am-quick .ds{white-space:normal;overflow:visible;text-overflow:clip;line-height:1.35}";
+    h += "html[data-lang=en] .preset-btn-top{flex-wrap:wrap;row-gap:2px}";
+    h += "html[data-lang=en] .preset-btn-badge{white-space:nowrap}";
     h += ".am-rootline{display:flex;align-items:center;gap:6px;font-size:11px;color:var(--mut2);padding-top:4px}";
     h += ".empty{padding:44px 20px;text-align:center;color:var(--mut2);font-size:12.5px;line-height:2}";
     h += "#list:has(> .empty){display:flex;align-items:center;justify-content:center;box-sizing:border-box;padding:28px}";

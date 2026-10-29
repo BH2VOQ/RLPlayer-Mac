@@ -35,8 +35,8 @@ poly-sinc-xl [线性相位]	poly-sinc-xl [Linear phase]	位]</option><option val
 sinc-L [线性相位]	sinc-L [Linear phase]	[线性相位]</option><option value="sinc-L">sinc-L [线性相位]</option><option value="sinc-LL">sinc-LL
 · 不同演绎	 · Performances	: '')) : 'Discogs 实时') + ' · 不同演绎 ' + distinctCount + ' / 发行版本 ' + rele
 ▶ 继续播放	▶ Resume Playback	bPlayText = isThisPlaying ? (S.paused ? '▶ 继续播放' : '❚❚ 暂停') : '▶ 播放整张'; var albPla
-★ 硬件不支持 DSD	★ Hardware does not support DSD	dsdBadge = dev.dop ? '★ 降级为 DoP' : '★ 硬件不支持 DSD'; } var pcmBadge = ''; if (dev.m
-★ 降级为 DoP	★ Fallback to DoP	e === false) { dsdBadge = dev.dop ? '★ 降级为 DoP' : '★ 硬件不支持 DSD'; } var pcmBadge =
+★ 硬件不支持 DSD	★ DSD unsupported	dsdBadge = dev.dop ? '★ 降级为 DoP' : '★ 硬件不支持 DSD'; } var pcmBadge = ''; if (dev.m
+★ 降级为 DoP	★ DoP only	e === false) { dsdBadge = dev.dop ? '★ 降级为 DoP' : '★ 硬件不支持 DSD'; } var pcmBadge =
 专辑列表读取失败	Failed to load album list	itle || '专辑', '读取失败', ''); listErrorBox('专辑列表读取失败', function () { loadAlbums(q, title);
 个渲染器	renderers	? ('共发现 ' + _castDevices.length + ' 个渲染器') : _emptyWhy; } if (
 低音	Subwoofer	if (n === 6) return ['左', '右', '中置', '低音', '左环绕', '右环绕']; if (n === 8) return
@@ -305,7 +305,7 @@ dB，实时微调	 dB, real-time trim 	s += '（起播 ' + S.startDb.toFixed(1) 
 计划失败	Calibration plan failed	ction (e) { D('rcStatus').textContent = '计划失败'; D('rcStatusSub').textContent = Strin
 设备搜索失败（/api/cast/devices 无响应）	Device discovery failed (/api/cast/devices not responding)	'on')) { D('mbody').innerHTML = '<div class=castpick-empty>设备搜索失败（/api/cast/devices 无响应）</div>' +
 设置失败：网络错误	Failed to save settings: network error	; x.onerror = function () { toast('设置失败：网络错误'); }; x.send(f); }; Arra
-设置文件夹位置	Set Folder Location	5a2 2 0 01-2-2z"/></svg></div>'; h += '<div class=am-qtext><div class=am-qtitle>设置文件夹
+设置文件夹位置	Set Music Folder	5a2 2 0 01-2-2z"/></svg></div>'; h += '<div class=am-qtext><div class=am-qtitle>设置文件夹
 诊断	Diagnostics	报错时要拿现场），所以与输入/输出/PCM/SDM/高级 平级。 + '<button class=stab data-g=diag>诊断</button
 该实体暂无可用的 AI 整理资料。	No AI-curated summary available for this item.	d || {}, '', kind, opts); if (!h) h = '<div class=npdhint>该实体暂无可用的 AI 整理资料。</div>'; return h;
 该目录下没有可对比的音频文件	No comparable audio files found in this directory.	!names.length) { D('mbody').innerHTML = '<div class=hint>该目录下没有可对比的音频文件</div>'; return; }

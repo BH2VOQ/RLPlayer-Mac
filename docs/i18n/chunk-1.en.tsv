@@ -81,7 +81,7 @@ sinc-LL [线性相位]	sinc-LL [Linear phase]	[线性相位]</option><option val
 = 88.2 kHz 时使用	= 88.2 kHz	随上面的 1x</option>' + filts, '输出 DSD 且源文件 >= 88.2 kHz 时使用') + sel('sp_dsdrat
 =频率 ±1%（Shift 加速）。修改即时生效（热更新，交叉淡入防爆音），并自动保存到 rlplayer-peq.txt。	= Frequency ±1% (Shift to accelerate). Changes take effect immediately (hot-reload with crossfade to prevent pops) and are automatically saved to rlplayer-peq.txt.	<b>双击节点</b>=该段复位（0 dB / Q 1.41）。' + '选中行后 <b>↑↓</b>=增益 0.1 dB、<b>←→</b>=频率 ±1%（Shift 加速）。修改即时生效（热更新，交叉淡入防爆音），并自动保存到 rlplayer-peq.txt。</div
 AHM 多电平（6~8 bit 风格）	AHM Multilevel (6-8 bit style)	ly || 'dsd') + opt('ahm', 'AHM 多电平（6~8 bit 风格）', ADV.modfamily || 'dsd'),
-AI 资料与封面补全	AI Metadata & Cover Art Completion	-8.48l2.83-2.83"/></svg></div>'; h += '<div class=am-qtext><div class=am-qtitle>AI 资料与封面
+AI 资料与封面补全	AI Metadata & Artwork	-8.48l2.83-2.83"/></svg></div>'; h += '<div class=am-qtext><div class=am-qtitle>AI 资料与封面
 ASIO 已移除（macOS 使用 CoreAudio）	ASIO removed (macOS uses CoreAudio)	绝不静默改。 var REMOVED_BACKENDS = { asio: 'ASIO 已移除（macOS 使用 CoreAudio）', // 2026-10-25（用户指令「不可用的要隐藏」）：NAA /
 AutoEQ 校准：按实测目标平直化，小幅低频架	AutoEQ Calibration: Flattened to measured target, slight bass shelf	,-0.6],[1.0,1.2]] }, autoeq: { label: 'AutoEQ 校准：按实测目标平直化，小幅低频架', pts: [[0,3.8],[0.10,3.8],[0.18,2
 Boléro（拉威尔）	Boléro (Ravel)	lor:var(--mut2)">示例作品：</span>' + '<button class="btn chip-work" data-title="Boléro"
@@ -213,7 +213,7 @@ narrow（通带 20 kHz，默认）	narrow (20 kHz passband, default)	Conversion'
 把现在这	Save these 	, placeholder: '例如 夜深人静', hint: '把现在这 ' + n + ' 首（含顺序与 CUE 区间）存成一个歌单；写入 rlpl
 投放控制	Casting Control	on>' + '</div>'; openModal('投放控制', h); if (D('castActStop')) {
 拜雅 Beyerdynamic	Beyerdynamic	-brand="Apple">苹果 Apple</button>' + '<button class="btn brand-chip" data-brand="Beyerdynami
-挂载流媒体服务	Mount Streaming Service	3.7 0 0118 18z"/></svg></div>'; h += '<div class=am-qtext><div class=am-qtitle>挂载流媒体
+挂载流媒体服务	Mount Streaming	3.7 0 0118 18z"/></svg></div>'; h += '<div class=am-qtext><div class=am-qtitle>挂载流媒体
 指挥	Conductor	3;min-width:0">标题 / 发行</span>' + '<span style="flex:0.9;min-width:0">指挥</sp
 按采样率自动重标定	Automatically recalibrate based on sample rate	CPU 运算量约 1/4')) + sgroup('抖动与保护', '按采样率自动重标定', sel('sp_shaper', '抖动 / 噪声整形
 搜索耳机品牌或型号（如 Sennheiser / HD 600 / AirPods / Sony / XM5…）	Search headphone brand or model (e.g. Sennheiser / HD 600 / AirPods / Sony / XM5...)	ex;align-items:center;gap:10px">' + '<input id=sp_opra_search type=text placeholder="搜索耳机品牌或型号（如 Sennheiser / HD 600 / AirPods / Son

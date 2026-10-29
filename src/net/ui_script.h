@@ -7277,7 +7277,7 @@ function presetCardHtml() {
         + '<span class=preset-btn-title>DSD 升频</span>'
         + '<span class=preset-btn-badge id=presetDsdBadge style="' + (dsdBadge ? '' : 'display:none') + '">' + dsdBadge + '</span>'
         + '</div>'
-        + '<div class=preset-btn-sub id=presetDsdSub>升到 ' + esc(dsdTarget) + '，EC-7 调制器</div>'
+        + '<div class=preset-btn-sub id=presetDsdSub>升到 ' + esc(String(dsdTarget).toUpperCase()) + '，EC-7 调制器</div>'
         + '</button>'
         + '</div>'
         + '</div>';
