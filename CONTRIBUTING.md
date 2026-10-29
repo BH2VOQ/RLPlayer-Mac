@@ -26,16 +26,24 @@ ctest --test-dir build-mac --output-on-failure
 
 `ctest` 请在本机空闲时串行跑：并行跑重型构建会让个别用例假红。
 
-## 提交信息格式
+## 提交信息格式（中英双语，英文在前）
 
-```
-feat(scope): 一句话说清改了什么
-fix(scope): ...
-docs: ...
-chore: ...
+标题用英文；正文先英文、后中文，中间用 `---` 分隔。中文标题放在中文正文第一行。
+
+```text
+feat(scope): one-line English summary
+
+What changed / why / evidence (English).
+
+---
+feat(scope): 一句话中文摘要
+
+改了什么、为什么、判据（实测数字贴进来）。
 ```
 
-正文写清三件事：**根因、改法、判据**（实测数字贴进来）。涉及取舍的地方写明为什么这样选。
+- 前缀沿用 `feat` / `fix` / `docs` / `chore` / `test` / `release`。
+- 标题与正文都不能只有一种语言；数字、版本号、文件名两边必须一致。
+- 正文写清三件事：**根因、改法、判据**（实测数字贴进来）；涉及取舍的地方写明为什么这样选。
 
 ## 不接受什么
 
