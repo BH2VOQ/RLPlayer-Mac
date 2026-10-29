@@ -1,8 +1,8 @@
 {
-  "version": "1.1.1-beta1",
-  "notes": "流媒体修复测试版：① 修复配置好服务器却显示 URL malformed / 列表为空（启用记录被空占位卡住）；② 修复设置页拿不到服务器列表（GET 被误判为副作用而拒绝）；③ 修复应用内「删除 / 测试」按钮点了没反应；④ 流媒体曲名不再显示成一串 id；⑤ 流媒体顶层不再把艺术家当歌曲；⑥ 「我的最爱」不再显示整串路径。新增：流媒体页卡片网格与列表切换、专辑详情页（封面头 + 曲目表 + 播放整张 / 加入队列 / 随机播放）。",
-  "download_url": "https://github.com/BH2VOQ/RLPlayer-Mac/releases/download/v1.1.1-beta1/RLPlayer-1.1.1-beta1-macOS-arm64.dmg",
-  "sha256": "5b2da74d86bdab48ca260356201c39b0590c80c65d6b4c4cf538594cea4703f3",
-  "size": 7375621,
-  "published_at": "2026-10-28T16:42:05Z"
+  "version": "1.1.1-beta2",
+  "notes": "中英界面切换（整站英文、术语按 Hi-Fi 惯例）+ 诊断多实例事件隔离与真实失败码 + 英文排版修正。Chinese/English UI switch, per-instance diagnostics logs, real failure codes, English layout fixes.",
+  "download_url": "https://github.com/BH2VOQ/RLPlayer-Mac/releases/download/v1.1.1-beta2/RLPlayer-1.1.1-beta2-macOS-arm64.dmg",
+  "sha256": "49466499baf1424a7e733f400d93d1bdf5741f5a87d24f694ec6b252e97f1acb",
+  "size": 7734036,
+  "published_at": "2026-10-29T15:58:05Z"
 }
