@@ -1,5 +1,5 @@
+// SPDX-FileCopyrightText: 2026 BH2VOQ <https://github.com/BH2VOQ>
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 August Hu <BH2VOQ@163.com>
 // 本文件是 RLPlayer 的一部分；完整条款见根目录 LICENSE。
 // 验收判据：顺序播放图标（三横线+箭头）在 17px 栅格化下与列表循环、单曲循环、随机播放视觉可区分
 'use strict';

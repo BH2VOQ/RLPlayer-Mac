@@ -13,7 +13,7 @@
 
 <p align="center">
   <img src="https://img.shields.io/badge/HiFi-DSP%20%C2%B7%20DoP%20%C2%B7%20bit--perfect-22d3ee?style=flat-square" alt="HiFi">
-  <a href="https://github.com/BH2VOQ/RLPlayer-Mac/releases"><img src="https://img.shields.io/github/v/release/BH2VOQ/RLPlayer-Mac?label=release&style=flat-square&color=22d3ee" alt="Release"></a>
+  <a href="https://github.com/BH2VOQ/RLPlayer-Mac/releases"><img src="https://img.shields.io/github/v/release/BH2VOQ/RLPlayer-Mac?include_prereleases&label=release&style=flat-square&color=22d3ee" alt="Release"></a>
   <img src="https://img.shields.io/badge/macOS-13%2B%20%C2%B7%20arm64-0b1120?style=flat-square&logo=apple&logoColor=white" alt="macOS 13+ · arm64">
   <img src="https://img.shields.io/badge/ctest-100%2F100-34d399?style=flat-square" alt="ctest 100/100">
   <img src="https://img.shields.io/badge/license-GPL--3.0--or--later-a78bfa?style=flat-square" alt="GPL-3.0-or-later">
@@ -336,7 +336,10 @@ This document describes only the actual capabilities of the macOS branch and doe
 
 This project is released under the **GNU General Public License, version 3 or later**, SPDX identifier `GPL-3.0-or-later`.
 
-Copyright (C) 2026 August Hu
+Copyright (C) 2026 BH2VOQ <https://github.com/BH2VOQ> — macOS branch  
+Copyright (C) 2026 rainlain <https://github.com/okhuoyanyan> — upstream RLPlayer2
+
+The full copyright structure (what is derived from upstream, what is new in this branch) is in [COPYRIGHT.md](COPYRIGHT.md).
 
 - Full terms in [LICENSE](LICENSE) at the repository root (official GPLv3 text, unmodified)
 - Every source file carries an `SPDX-License-Identifier: GPL-3.0-or-later` header

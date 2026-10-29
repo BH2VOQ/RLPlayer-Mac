@@ -1,5 +1,5 @@
+// SPDX-FileCopyrightText: 2026 BH2VOQ <https://github.com/BH2VOQ>
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 August Hu <BH2VOQ@163.com>
 // 本文件是 RLPlayer 的一部分；完整条款见根目录 LICENSE。
 // uicheck_p3_settings.js — Q-1/Q-3/Q-4/Q-9 + 设置页覆写 conf 的复核判据
 // 独立复核：Q-1/Q-3/Q-4/Q-9 + conf 不被覆写（不依赖工作树的脆弱时序）

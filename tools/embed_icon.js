@@ -1,5 +1,5 @@
+// SPDX-FileCopyrightText: 2026 BH2VOQ <https://github.com/BH2VOQ>
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 August Hu <BH2VOQ@163.com>
 //
 // 本文件是 RLPlayer 的一部分，以 GNU 通用公共许可证第 3 版（或更新版本）发布。
 // 完整条款见仓库根目录的 LICENSE 文件。
@@ -8,8 +8,8 @@ const fs = require('fs');
 const path = require('path');
 const png = fs.readFileSync(process.argv[2]);
 const bytes = Array.from(png);
-let out = '// SPDX-License-Identifier: GPL-3.0-or-later\n';
-out += '// Copyright (C) 2026 August Hu <BH2VOQ@163.com>\n';
+let out = '// SPDX-FileCopyrightText: 2026 BH2VOQ <https://github.com/BH2VOQ>\n';
+out += '// SPDX-License-Identifier: GPL-3.0-or-later\n';
 out += '//\n';
 out += '// 本文件是 RLPlayer 的一部分，以 GNU 通用公共许可证第 3 版（或更新版本）发布。\n';
 out += '// 完整条款见仓库根目录的 LICENSE 文件。\n';

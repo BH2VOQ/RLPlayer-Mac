@@ -13,7 +13,7 @@
 
 <p align="center">  
   <img src="https://img.shields.io/badge/HiFi-DSP%20%C2%B7%20DoP%20%C2%B7%20bit--perfect-22d3ee?style=flat-square" alt="HiFi">  
-  <a href="https://github.com/BH2VOQ/RLPlayer-Mac/releases"><img src="https://img.shields.io/github/v/release/BH2VOQ/RLPlayer-Mac?label=release&style=flat-square&color=22d3ee" alt="Release"></a>  
+  <a href="https://github.com/BH2VOQ/RLPlayer-Mac/releases"><img src="https://img.shields.io/github/v/release/BH2VOQ/RLPlayer-Mac?include_prereleases&label=release&style=flat-square&color=22d3ee" alt="Release"></a>  
   <img src="https://img.shields.io/badge/macOS-13%2B%20%C2%B7%20arm64-0b1120?style=flat-square&logo=apple&logoColor=white" alt="macOS 13+ · arm64">  
   <img src="https://img.shields.io/badge/ctest-100%2F100-34d399?style=flat-square" alt="ctest 100/100">  
   <img src="https://img.shields.io/badge/license-GPL--3.0--or--later-a78bfa?style=flat-square" alt="GPL-3.0-or-later">  
@@ -337,7 +337,10 @@ flowchart LR
 
 本项目以 **GNU 通用公共许可证第 3 版（或更新版本）** 发布，SPDX 标识符 `GPL-3.0-or-later`。
 
-Copyright (C) 2026 August Hu
+Copyright (C) 2026 BH2VOQ <https://github.com/BH2VOQ> — macOS 分支  
+Copyright (C) 2026 rainlain <https://github.com/okhuoyanyan> — 上游 RLPlayer2
+
+完整的版权结构（哪些来自上游、哪些是本分支新增）见 [COPYRIGHT.md](COPYRIGHT.md)。
 
 - 完整条款见仓库根目录的 [LICENSE](LICENSE)（GPLv3 官方全文，未改动）
 - 每个源文件头部都带 `SPDX-License-Identifier: GPL-3.0-or-later` 声明

@@ -1,5 +1,5 @@
+// SPDX-FileCopyrightText: 2026 BH2VOQ <https://github.com/BH2VOQ>
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 August Hu <BH2VOQ@163.com>
 // 本文件是 RLPlayer 的一部分；完整条款见根目录 LICENSE。
 //
 // check_b5b_castui.js — B-5 追加两条 UI 判据（2026-10-28 用户实测反馈）

@@ -1,5 +1,5 @@
+// SPDX-FileCopyrightText: 2026 BH2VOQ <https://github.com/BH2VOQ>
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 August Hu <BH2VOQ@163.com>
 // 本文件是 RLPlayer 的一部分；完整条款见根目录 LICENSE。
 // uicheck_roomcorr.js — R-1 测量向导的铁律 1 判据（确认前绝不出声）
 const fs=require('fs'); const ub=require('/Users/august/Downloads/DQ/RLPlayer/tools/uibrowser');
