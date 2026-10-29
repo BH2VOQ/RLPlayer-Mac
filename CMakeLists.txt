@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
-# Copyright (C) 2026 August Hu <BH2VOQ@163.com>
+# Copyright (C) 2026 BH2VOQ <https://github.com/BH2VOQ>
 #
 # 本文件是 RLPlayer 的一部分，以 GNU 通用公共许可证第 3 版（或更新版本）发布。
 # 完整条款见仓库根目录的 LICENSE 文件。
@@ -176,6 +176,21 @@ endif()
 # ---------------- 测试 ----------------
 enable_testing()
 
+# 1.1.1 诊断基础：真实 JSONL/轮转/脱敏与隔离子进程退出标记。
+add_executable(test_diag_event tests/test_diag_event.cpp)
+target_link_libraries(test_diag_event PRIVATE rtadsp)
+add_test(NAME diag_event COMMAND test_diag_event)
+add_executable(test_diag_run_marker tests/test_diag_run_marker.cpp)
+target_link_libraries(test_diag_run_marker PRIVATE rtadsp)
+add_test(NAME diag_run_marker COMMAND test_diag_run_marker)
+add_executable(rtadiag tools/rtadiag.cpp)
+target_link_libraries(rtadiag PRIVATE rtadsp)
+foreach(_diag_test diag_bundle diag_http diag_questions rtadiag float_decode quality_edges health_store lyrics_cache ir_resample)
+  add_executable(test_${_diag_test} tests/test_${_diag_test}.cpp)
+  target_link_libraries(test_${_diag_test} PRIVATE rtadsp ${RL_PLATFORM_LIBS})
+  add_test(NAME ${_diag_test} COMMAND test_${_diag_test})
+endforeach()
+
 # 流媒体启用配置：真实 loopback Subsonic 请求 + 隔离配置持久化。
 add_executable(test_source_manager tests/test_source_manager.cpp)
 target_include_directories(test_source_manager PRIVATE ${CMAKE_SOURCE_DIR}/src)
@@ -193,6 +208,13 @@ add_executable(test_source_native tests/test_source_native.mm)
 set_source_files_properties(tests/test_source_native.mm PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
 target_include_directories(test_source_native PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tools)
 target_link_libraries(test_source_native PRIVATE rlapp_core "-framework AppKit" "-framework WebKit")
+
+# 手动原生首绘验收（会开隔离窗口，不进入自动CTest）。
+add_executable(test_startup_native tests/test_startup_native.mm)
+set_source_files_properties(tests/test_startup_native.mm PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
+target_include_directories(test_startup_native PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tools)
+target_link_libraries(test_startup_native PRIVATE rlapp_core "-framework AppKit" "-framework WebKit"
+    "-framework ScreenCaptureKit" "-framework ImageIO" "-framework UniformTypeIdentifiers")
 
 # ---- 跨平台测试（macOS 也跑）----
 # CoreAudio 后端端到端（macOS 真机；铁律 1：默认 -60 dBFS，几乎不可闻）

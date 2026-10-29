@@ -1,0 +1,29 @@
+语言	Language	设置页「外观」语言下拉的标签
+切换界面显示语言，保存后刷新生效	Choose the display language. Takes effect after the page reloads.	设置页语言下拉的提示气泡
+下一首	Next track	播放条按钮 tooltip
+上一首	Previous track	播放条按钮 tooltip
+循环方式	Repeat mode	循环按钮 tooltip
+点击跳转	Click to seek	进度条 tooltip
+搜索专辑 / 艺术家 / 曲目…	Search albums, artists, tracks…	全局搜索框 placeholder
+显示或隐藏队列	Show or hide queue	队列开关 tooltip
+返回（Esc）	Back (Esc)	正在播放浮层关闭 tooltip
+关闭（Esc）	Close (Esc)	数据浮层关闭 tooltip
+快捷键与技巧	Shortcuts & tips	帮助按钮 tooltip
+打开正在播放	Open Now Playing	底部播放条 tooltip
+拖拽移动窗口	Drag to move window	浮层拖拽把手 tooltip
+音量（dB）	Volume (dB)	音量滑杆 tooltip
+清空搜索	Clear search	搜索框清除按钮 tooltip
+当前时间	Current time	进度时间 tooltip
+正在投放	Casting	UPnP 投放徽标 tooltip
+最小化	Minimize	窗口控制按钮 tooltip
+总时长	Total duration	总时长 tooltip
+浅色	Light	主题按钮 tooltip
+深色	Dark	主题按钮 tooltip
+浅蓝	Blue	主题按钮 tooltip
+返回	Back	浮层返回按钮 aria-label
+输入目录后回车，例如	Enter a folder path and press Return, e.g. 	目录输入框 placeholder 前缀
+还没有启用任何流媒体服务器	No streaming servers are enabled yet	流媒体后端错误（source_mgr.h）
+[两段式]	[2-Stage]	滤波器预设的附加标记
+[最小相位]	[Minimum phase]	滤波器预设的附加标记
+[线性相位]	[Linear phase]	滤波器预设的附加标记
+[混合相位]	[Intermediate phase]	滤波器预设的附加标记

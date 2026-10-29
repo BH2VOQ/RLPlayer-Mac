@@ -1,5 +1,5 @@
+// SPDX-FileCopyrightText: 2026 BH2VOQ <https://github.com/BH2VOQ>
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 August Hu <BH2VOQ@163.com>
 //
 // 本文件是 RLPlayer 的一部分，以 GNU 通用公共许可证第 3 版（或更新版本）发布。
 // 完整条款见仓库根目录的 LICENSE 文件。
@@ -190,6 +190,10 @@ int main(int argc, char** argv) {
         } else if (store && !force && store->lookup(job.path, mtime, fsize, h)) {
             hit = true;
         } else {
+            // Guard analysis-to-cache race: capture identity and digest before and verify after;
+            // do not bind old metrics to new bytes or store entries on failed hash.
+            const FileIdentity beforeId = store ? FileIdentity::from_path(job.path) : FileIdentity{};
+            const std::string beforeDigest = (store && beforeId.valid) ? health_content_digest(job.path) : std::string();
             const auto t0 = std::chrono::steady_clock::now();
             h = analyze_file(job.path);
             ms = ms_since(t0);
@@ -197,7 +201,13 @@ int main(int argc, char** argv) {
             sumMs += ms;
             // 只缓存 ready 结果：瞬时读不了的文件不该被错误结果钉死（文件变更后键会失效，
             // 但「当时读不了」与「文件变了」无从区分，保守起见错误不入库）
-            if (store && h.status == "ready") { store->upsert(job.path, mtime, fsize, h); ++nUp; }
+            if (store && h.status == "ready" && !beforeDigest.empty() && beforeId.valid) {
+                const FileIdentity afterId = FileIdentity::from_path(job.path);
+                if (beforeId.matches(afterId) && health_content_digest(job.path) == beforeDigest) {
+                    store->upsert(job.path, mtime, fsize, h, beforeDigest, &afterId);
+                    ++nUp;
+                }
+            }
         }
         if (hit) ++nCached;
         if (h.status != "ready") ++nErr;

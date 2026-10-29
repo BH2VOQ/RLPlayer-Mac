@@ -1,3 +1,10 @@
+// SPDX-FileCopyrightText: 2026 rainlain <https://github.com/okhuoyanyan>
+// SPDX-FileCopyrightText: 2026 BH2VOQ <https://github.com/BH2VOQ>
+// SPDX-License-Identifier: GPL-3.0-or-later
+//
+// 本文件是 RLPlayer 的一部分，以 GNU 通用公共许可证第 3 版（或更新版本）发布。
+// 完整条款见仓库根目录的 LICENSE 文件。
+//
 // fake_lossless.h — 音频体检 B1a：假无损（有损源转制）检测 + 24-bit 容器 LSB 检查
 //
 // 用途：判断「容器/位深是无损，内容却像从有损版本转制」的素材，reason 直接供 UI 展示。

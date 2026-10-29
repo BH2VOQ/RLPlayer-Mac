@@ -1,5 +1,5 @@
+// SPDX-FileCopyrightText: 2026 BH2VOQ <https://github.com/BH2VOQ>
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 August Hu <BH2VOQ@163.com>
 //
 // 本文件是 RLPlayer 的一部分，以 GNU 通用公共许可证第 3 版（或更新版本）发布。
 // 完整条款见仓库根目录的 LICENSE 文件。
@@ -245,6 +245,7 @@ inline bool enrich_adopt(bool confident, int llmPick, bool llmRan, double topSco
 // ---------------------------------------------------------------------------
 
 inline EnrichStats enrich_track(const std::string& file, bool force, const EnrichOpts& opts) {
+    rta::net::HttpDiagScope httpDiag(rta::diag::Stage::Meta);
     EnrichStats st;
     auto is_cancelled = [&opts]() -> bool {
         return opts.cancel != nullptr && opts.cancel->load();
@@ -259,8 +260,14 @@ inline EnrichStats enrich_track(const std::string& file, bool force, const Enric
 
     // ---- 1) 已有完整记录且未 force → skipped ----
     TrackMeta tm;
-    const bool had = ms.load(file, tm);
+    const bool had = ms.load(file, tm, true);
     if (!had) tm.path = file;                    // 无记录:新建(路径决定 hash)
+    const bool staleLyrics=tm.fields.count("lyrics_refresh")!=0;
+    const bool refreshDue=force || lyric_refresh_due(tm,now);
+    if (staleLyrics && refreshDue) {
+        tm.fields["lyrics_refresh_try"]={"attempt", "internal", now, 1.0f};
+        ms.save(tm); // also records failed/early-return attempts without losing quarantined lyrics
+    }
     if (had && !force) {
         const auto itT = tm.fields.find("title");
         const auto itA = tm.fields.find("artist");
@@ -268,7 +275,7 @@ inline EnrichStats enrich_track(const std::string& file, bool force, const Enric
         const std::string t = (itT == tm.fields.end()) ? "" : itT->second.value;
         const std::string a = (itA == tm.fields.end()) ? "" : itA->second.value;
         const std::string al = (itAl == tm.fields.end()) ? "" : itAl->second.value;
-        if (!t.empty() && (!a.empty() || !al.empty())) {
+        if ((!staleLyrics || !refreshDue) && !t.empty() && (!a.empty() || !al.empty())) {
             st.skipped = true;
             st.note = "已有完整标签记录(title + artist/album 非空),未动(可用 force 强制)";
             return st;
@@ -554,7 +561,7 @@ inline EnrichStats enrich_track(const std::string& file, bool force, const Enric
     }
     {
         const auto itL = tm.fields.find("lyrics");
-        const bool needLyrics = itL == tm.fields.end() || itL->second.value.empty();
+        const bool needLyrics = (itL == tm.fields.end() || itL->second.value.empty()) && (!staleLyrics || refreshDue);
         if (needLyrics) {
             LyricRequest lrq;
             lrq.title  = p.title;
@@ -598,6 +605,10 @@ inline EnrichStats enrich_track(const std::string& file, bool force, const Enric
                 if (lyrConf < 0) lyrConf = st.bestScore;   // 无句柄源（lrclib）沿用曲目分兜底
                 lv.confidence = (float)lyrConf;
                 mergeTracked("lyrics", lv);
+                tm.fields["lyrics_identity"] = {lyric_cache_identity(tm), "internal", now, 1.0f};
+                tm.fields.erase("lyrics_refresh");
+                tm.fields.erase("lyrics_unverified");
+                tm.fields.erase("lyrics_refresh_try");
                 notes.push_back("歌词=" + lr.source);
             } else if (!lyrErrs.empty()) {
                 notes.push_back("歌词未取(" + enrich_detail::ed_join_notes(lyrErrs) + ")");

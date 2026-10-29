@@ -1,53 +1,27 @@
+// SPDX-FileCopyrightText: 2026 BH2VOQ <https://github.com/BH2VOQ>
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 August Hu <BH2VOQ@163.com>
 //
 // 本文件是 RLPlayer 的一部分，以 GNU 通用公共许可证第 3 版（或更新版本）发布。
 // 完整条款见仓库根目录的 LICENSE 文件。
 //
-// health_store.h — 音频体检 B1b：按 (规范路径, mtime, size) 三元组为键的健康缓存
+// health_store.h — 体检缓存：规范路径 + 强文件身份 (mtime, size, ctime_ns 字符串, inode, dev) + SHA-256
 //
 // 设计要点：
-//  1) 键 = std::filesystem::weakly_canonical 规范化后的路径（generic 形式，'/' 分隔），
-//     命中还须 mtime、size 逐字相等 —— 文件被改写/替换后自然失效，不需要 TTL。
-//     mtime 取「自时钟纪元的毫秒数」而不是原生 count：JSON number 走 double（53 位尾数），
-//     纳秒 count 约 1.8e18，超出 2^53 会失真导致缓存永不命中（mac 实测丢 8 ns，
-//     见 tests/test_track_health.cpp §7 的负向对照）。毫秒级余量充足。
-//  2) 序列化复用 track_health_json（单条体检的对象体），外层是数组，每条
-//     {"path":..,"mtime":..,"size":..,"health":{..}}；解析用 src/net/json.h（只读解析器，
-//     项目约定不引第三方 JSON 库）。
-//  3) 损坏文件如实报错、绝不静默清空：构造时解析失败 → loadError() 非空，此时
-//     save() 拒绝写盘（防止用一个空库把用户缓存覆盖掉），需要人工删掉/修复缓存文件。
-//  4) save() 原子写：先写 <path>.tmp 再 rename，崩溃最多留下一个 tmp，不会写坏正身。
-//
-// ---------------- macOS 移植（2026-10-26，本文件是本工作包**唯一必须重写**的头）----------------
-// 上游 68e628f 的 health_store.h 是三处 Windows 专属写法，mac 上**根本编不过**：
-//
-//   a) 宽字符版 fopen（`f`+`w` 前缀的那个 CRT 扩展，上游 :147 / :168）
-//      —— 那是 MSVC CRT 的私有扩展，libc++/macOS 没有这个符号。
-//   b) Win32 的文件属性探测 API 的宽字符变体（上游 :150）
-//      —— Win32 API，mac 没有。
-//   c) `std::filesystem::weakly_canonical(rta::audio::widen(path))`（上游 :30 / :118-119）
-//      —— 语法能过，**但 mac 上会抛异常**。本机实测（clang 21 / libc++）：
-//          fs::path(widen("/tmp/中文/x.json"))  →  throw std::runtime_error("locale not supported")
-//          fs::path(widen("/tmp/ascii/x.json")) →  ok
-//        根因：mac 的 `widen()` 是**字节保序恒等**（src/audio/audio_loader.h:52，
-//        `std::wstring(s.begin(), s.end())`，UTF-8 字节直接塞进宽字符），而
-//        `fs::path(const std::wstring&)` 在 libc++ 里要按 **宽字符语义转码**
-//        （走 locale/codecvt，取不到 locale 就 throw），并不是"按字节搬运"。
-//        ⟹ 上游注释「widen() UTF-8→UTF-16，中文缓存路径必需」在 mac 上是**双重错误**：
-//           ① mac 不做 UTF-8→UTF-16 转码；② 拿它构造 fs::path 会在中文路径上直接抛。
-//
-// 本库改法（任务书口径）：全部走 `std::filesystem::u8path` 系（UTF-8 语义，mac 原生安全），
-// 文件 IO 走 `std::fopen`。宽字符路径构造（`widen`/`narrow`）与任何 Win32 文件属性 API
-// 在本文件一律不出现 —— 这也是平台边界门禁（判据 5）的 grep 口径。
-//
-// 关于 u8path 的形态：C++20 起 `fs::u8path(const char*)` 已被标记 deprecated
-//（`-Wdeprecated-declarations`，因为 char8_t 出现后它退化成 "u8string 的便捷包装"）。
-// `path_from_utf8()` 因此优先用**语义完全等价且不 deprecated** 的 `path(u8string)`，
-// 只有在没有 char8_t 的旧标准库上才退回 `u8path`。两者对 UTF-8 输入逐字节等价
-//（本机实测 match=1，含中文路径）。
+//  1) 键 = std::filesystem::weakly_canonical 规范化后的路径（generic 形式，'/' 分隔）。
+//  2) 强文件身份快速命中：
+//     包含 mtime (ms), size (bytes), ctime_ns (秒.纳秒 字符串格式，彻底避免 double 精度损失),
+//     inode, dev。
+//     如果文件身份元数据完全一致（有效且未修改），快速 O(1) 判定命中，无需对几十/几百MB音频重复哈希；
+//     对于旧 schema 缺少这些强身份字段的旧缓存条目，判定 miss 并重新计算更新；
+//     对于文件同大小、mtime 被人为篡改但中段被修改的情况，inode / ctime_ns 变化将立即触发失效；
+//  3) 防竞态与错误防污染：
+//     分析前取文件身份并计算哈希，分析后核验文件身份与哈希是否一致（防分析期间并发写覆盖将老指标赋给新内容）；
+//     哈希失败或读失败时不存入死条目；错误结果（status != "ready"）绝不入库。
+//  4) 损坏文件如实报错、绝不静默清空：构造时解析失败 → loadError() 非空，此时 save() 拒绝写盘。
+//  5) save() 原子写：先写 <path>.tmp 再 rename，POSIX rename 语义保证原子替换。
 #pragma once
 #include "track_health.h"
+#include "../net/update_check.h"
 #include "../net/json.h"             // rta::net::json_parse（只读解析）
 #include <filesystem>
 #include <map>
@@ -55,6 +29,8 @@
 #include <cstdint>
 #include <cstdio>
 #include <cmath>
+#include <fstream>
+#include <sys/stat.h>
 
 namespace rta::analysis {
 
@@ -76,6 +52,76 @@ inline std::string normalize_path_key(const std::string& path) {
         return std::filesystem::weakly_canonical(path_from_utf8(path)).generic_string();
     } catch (...) {
         return path;
+    }
+}
+
+// 强文件身份结构：支持 O(1) 快速比对
+struct FileIdentity {
+    int64_t mtime = 0;         // 毫秒时间戳（与现有 mtime 保持一致）
+    int64_t size = 0;          // 文件字节大小
+    uint64_t inode = 0;        // st_ino
+    uint64_t dev = 0;          // st_dev
+    std::string ctime_ns_str;  // 秒.纳秒 字符串形式，避免 double 精度丢失 (如 "1793268154.813815379")
+    bool valid = false;
+
+    static FileIdentity from_path(const std::string& path) {
+        FileIdentity id;
+        struct stat st;
+        const auto p = path_from_utf8(path);
+        if (::stat(p.c_str(), &st) == 0) {
+#if defined(__APPLE__)
+            id.mtime = (int64_t)st.st_mtime * 1000 + (int64_t)(st.st_mtimespec.tv_nsec / 1000000);
+            const long c_nsec = st.st_ctimespec.tv_nsec;
+#elif defined(_POSIX_C_SOURCE) && _POSIX_C_SOURCE >= 200809L
+            id.mtime = (int64_t)st.st_mtime * 1000 + (int64_t)(st.st_mtim.tv_nsec / 1000000);
+            const long c_nsec = st.st_ctim.tv_nsec;
+#else
+            id.mtime = (int64_t)st.st_mtime * 1000;
+            const long c_nsec = 0;
+#endif
+            id.size = (int64_t)st.st_size;
+            id.inode = (uint64_t)st.st_ino;
+            id.dev = (uint64_t)st.st_dev;
+
+            char buf[64];
+            std::snprintf(buf, sizeof(buf), "%lld.%09ld", (long long)st.st_ctime, c_nsec);
+            id.ctime_ns_str = buf;
+            id.valid = true;
+        }
+        return id;
+    }
+
+    bool matches(const FileIdentity& o) const {
+        if (!valid || !o.valid) return false;
+        return mtime == o.mtime &&
+               size == o.size &&
+               inode == o.inode &&
+               dev == o.dev &&
+               !ctime_ns_str.empty() &&
+               ctime_ns_str == o.ctime_ns_str;
+    }
+};
+
+// Full-content digest, not a head/tail sample: middle-byte edits must invalidate.
+inline std::string health_content_digest(const std::string& path) {
+    std::ifstream f(path_from_utf8(path), std::ios::binary);
+    if (!f) return {};
+    uint32_t h[8]; rta::update::detail_sha256::init(h);
+    uint64_t total = 0;
+    uint8_t block[64];
+    for (;;) {
+        f.read(reinterpret_cast<char*>(block), sizeof(block));
+        const size_t n = (size_t)f.gcount(); total += n;
+        if (n == sizeof(block)) { rta::update::detail_sha256::block(h, block); continue; }
+        if (f.bad() || (!f.eof() && f.fail())) return {};
+        uint8_t tail[128]{};
+        if (n) std::memcpy(tail, block, n);
+        tail[n] = 0x80;
+        const size_t bytes = n < 56 ? 64 : 128;
+        for (int i=0;i<8;++i) tail[bytes-1-i] = (uint8_t)((total*8)>>(i*8));
+        rta::update::detail_sha256::block(h, tail);
+        if (bytes==128) rta::update::detail_sha256::block(h, tail+64);
+        return rta::update::detail_sha256::hex_of(h);
     }
 }
 
@@ -103,6 +149,13 @@ public:
             Entry en;
             en.mtime = (int64_t)std::llround(e["mtime"].n());
             en.size  = (int64_t)std::llround(e["size"].n());
+            en.digest = e["sha256"].s();
+            en.ctime_ns = e["ctime_ns"].s();
+            en.inode = (uint64_t)std::strtoull(e["inode"].s().c_str(), nullptr, 10);
+            if (en.inode == 0 && e["inode"].type == rta::net::Json::Num) en.inode = (uint64_t)e["inode"].n();
+            en.dev = (uint64_t)std::strtoull(e["dev"].s().c_str(), nullptr, 10);
+            if (en.dev == 0 && e["dev"].type == rta::net::Json::Num) en.dev = (uint64_t)e["dev"].n();
+
             TrackHealth& h = en.health;
             h.drDb = hj["dr_db"].n();
             h.lufs = hj["lufs"].n();
@@ -120,25 +173,107 @@ public:
             h.status = hj["status"].s();
             h.error = hj["error"].s();
             h.analyzedAtMs = (int64_t)std::llround(hj["analyzed_at_ms"].n());
+            const auto& q = hj["quality"];
+            h.hasQuality = q["available"].b;
+            h.quality.valid = h.hasQuality;
+            h.quality.fs = h.fs; h.quality.channels = h.channels;
+            h.quality.thdnDb = q["thdn_db"].n();
+            h.quality.thdnPct = q["thdn_pct"].n();
+            h.quality.nonTonalDb = q["non_tonal_db"].n();
+            h.quality.imdDb = q["imd_db"].n();
+            h.quality.noiseFloorDbfs = q["noise_floor_dbfs"].n();
+            h.quality.spectralMinDbfs = q["spectral_min_dbfs"].n();
+            h.quality.snrDb = q["snr_db"].n();
+            h.quality.centroidHz = q["centroid_hz"].n();
+            h.quality.tiltDbPerOct = q["tilt_db_per_oct"].n();
+            h.quality.rolloff95Hz = q["rolloff95_hz"].n();
+            h.quality.hfRatio10kDb = q["hf_ratio_10k_db"].n();
+            h.quality.peakDbfs = q["peak_dbfs_q"].n();
+            h.quality.rmsDbfs = q["rms_dbfs"].n();
+            h.quality.clippedSamples = q["clipped_samples"].n();
+            h.quality.clippedPct = q["clipped_pct"].n();
+            h.quality.clippedRuns = q["clipped_runs"].n();
+            h.quality.longestClipRun = q["longest_clip_run"].n();
+            h.quality.crestDb = q["crest_db"].n();
+            h.quality.channelCorr = q["channel_corr"].n();
+            h.quality.monoLossDb = q["mono_loss_db"].n();
+            h.quality.sideMidDb = q["side_mid_db"].n();
+            h.quality.dynP95P10Db = q["dyn_p95_p10_db"].n();
+            h.quality.dynCentroidDbfs = q["dyn_centroid_dbfs"].n();
+            h.quality.quietP10Dbfs = q["quiet_p10_dbfs"].n();
+            h.quality.silencePct = q["silence_pct"].n();
+            h.quality.spectralWindows = q["spectral_windows"].n();
+            h.quality.thdnAvailable = q["thdn_available"].b;
+            h.quality.imdAvailable = q["imd_available"].b;
+            h.quality.stereo = q["stereo"].b;
+            h.quality.thdnMethod = q["thdn_method"].s();
+            h.quality.imdNote = q["imd_note"].s();
+            h.quality.note = q["note"].s();
             entries_[normalize_path_key(p)] = std::move(en);
         }
     }
 
-    // 命中 = 路径（规范化后）+ mtime + size 三者全等。返回 false 表示需重算。
+    // 命中判定：
+    //  1. 路径匹配；
+    //  2. 强身份（mtime, size, ctime_ns, inode, dev）完整存在且全等 → O(1) 极速命中！
+    //  3. 若缓存条目未携带 inode/ctime_ns（或测试注入的虚拟三元组）：
+    //     如果存在有效 digest，对真实文件做全内容哈希核验（旧 schema 只有 mtime/size 无 sha256 则 miss 重算）。
     bool lookup(const std::string& path, int64_t mtime, int64_t size, TrackHealth& out) const {
         if (!loadError_.empty()) return false;
         const auto it = entries_.find(normalize_path_key(path));
         if (it == entries_.end()) return false;
         if (it->second.mtime != mtime || it->second.size != size) return false;
+        if (it->second.digest.empty()) return false; // 旧 schema 缺少 digest，触发重新分析
+
+        // 如果缓存条目具备强身份元数据 (ctime_ns 非空且 inode 非 0)，且当前文件实际存在
+        const FileIdentity currId = FileIdentity::from_path(path);
+        if (currId.valid && !it->second.ctime_ns.empty() && it->second.inode != 0) {
+            // 真实物理文件强身份匹配：mtime, size, inode, dev, ctime_ns 比对
+            if (currId.mtime == it->second.mtime &&
+                currId.size == it->second.size &&
+                currId.inode == it->second.inode &&
+                currId.dev == it->second.dev &&
+                currId.ctime_ns_str == it->second.ctime_ns) {
+                out = it->second.health;
+                return true;
+            }
+            // 强身份已记录但当前与文件状态不符（说明发生修改）
+            return false;
+        }
+
+        // 条目未记录强身份（如老条目迁移，或使用自定义 mtime/size 的模拟测试），回退校验 content digest
+        const std::string digest = health_content_digest(path);
+        if (digest.empty() || digest != it->second.digest) return false;
         out = it->second.health;
         return true;
     }
 
-    void upsert(const std::string& path, int64_t mtime, int64_t size, const TrackHealth& h) {
+    void upsert(const std::string& path, int64_t mtime, int64_t size, const TrackHealth& h,
+                const std::string& verifiedDigest = {}, const FileIdentity* id = nullptr) {
+        if (h.status != "ready") return; // 错误条目不入库
+        std::string digest = verifiedDigest;
+        if (digest.empty()) {
+            digest = health_content_digest(path);
+            if (digest.empty()) return; // 哈希失败不存入死条目
+        }
+        FileIdentity currentId;
+        if (id && id->valid) {
+            currentId = *id;
+        } else {
+            currentId = FileIdentity::from_path(path);
+        }
+
         Entry en;
         en.mtime = mtime;
         en.size = size;
         en.health = h;
+        en.digest = std::move(digest);
+        // 只有当 mtime 和 size 与真实磁盘文件一致时，才将磁盘文件的 inode/ctime 强身份绑定进条目
+        if (currentId.valid && currentId.mtime == mtime && currentId.size == size) {
+            en.ctime_ns = currentId.ctime_ns_str;
+            en.inode = currentId.inode;
+            en.dev = currentId.dev;
+        }
         entries_[normalize_path_key(path)] = std::move(en);
     }
 
@@ -154,6 +289,10 @@ public:
             data += "{\"path\":\"" + detail::json_escape(kv.first) + "\"";
             data += ",\"mtime\":" + std::to_string((long long)kv.second.mtime);
             data += ",\"size\":" + std::to_string((long long)kv.second.size);
+            data += ",\"sha256\":\"" + kv.second.digest + "\"";
+            if (!kv.second.ctime_ns.empty()) data += ",\"ctime_ns\":\"" + kv.second.ctime_ns + "\"";
+            if (kv.second.inode != 0) data += ",\"inode\":\"" + std::to_string(kv.second.inode) + "\"";
+            if (kv.second.dev != 0) data += ",\"dev\":\"" + std::to_string(kv.second.dev) + "\"";
             data += ",\"health\":" + track_health_json(kv.second.health);
             data += "}";
         }
@@ -161,9 +300,6 @@ public:
         const std::string tmp = jsonPath_ + ".tmp";
         if (!write_whole_file(tmp, data)) return false;
         std::error_code ec;
-        // POSIX（mac）的 rename(2) 语义：目标已存在时**原子替换**，不需要"先删再改名"
-        // 的退化分支（那是上游为 Windows MoveFileEx 非覆盖语义留的）。mac 上如果真失败，
-        // 说明是跨卷/权限问题，删正身只会让用户丢缓存 —— 所以这里如实失败、保留 tmp。
         const std::filesystem::path from = path_from_utf8(tmp);
         const std::filesystem::path to   = path_from_utf8(jsonPath_);
         std::filesystem::rename(from, to, ec);
@@ -180,14 +316,12 @@ private:
         int64_t mtime = 0;
         int64_t size = 0;
         TrackHealth health;
+        std::string digest;
+        std::string ctime_ns; // 秒.纳秒 字符串
+        uint64_t inode = 0;
+        uint64_t dev = 0;
     };
 
-    // 读整个文件。文件不存在返回 false 且 *err 为空（= 合法的空库）；其他读失败 *err 带原因。
-    //
-    // mac 写法（替代上游的宽字符 fopen + Win32 文件属性探测）：
-    //   * fopen 失败时**不能**一律当"空库" —— 那样权限问题会被静默当成"没缓存"，
-    //     然后 save() 又把用户缓存覆盖掉。所以用 fs::exists 二次判定：
-    //     ec 为空且 exists=false ⟹ 真不存在（空库）；否则如实报错。
     static bool read_whole_file(const std::string& path, std::string* out, std::string* err) {
         out->clear();
         err->clear();

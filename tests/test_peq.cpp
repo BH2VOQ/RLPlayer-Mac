@@ -1,5 +1,5 @@
+// SPDX-FileCopyrightText: 2026 BH2VOQ <https://github.com/BH2VOQ>
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 August Hu <BH2VOQ@163.com>
 //
 // 本文件是 RLPlayer 的一部分，以 GNU 通用公共许可证第 3 版（或更新版本）发布。
 // 完整条款见仓库根目录的 LICENSE 文件。
@@ -392,6 +392,12 @@ int main() {
         check(!rta::engine::Pipeline(cf2).hasAnyProcessing(), "PEQ 全 0dB 时 hasAnyProcessing=false（保持直通）");
     }
 
+    {
+        auto s = one_band(1000.0, 18.0, 1.41);
+        const double gain = measured_gain_db(s, 48000, 1000);
+        check(std::abs(gain - 18.0) < 0.1, "+18 dB 导入预设保持既有频响，不截到 +12", num(gain));
+        check(std::abs(peq_response_db(s, 48000, 1000) - 18.0) < 0.01, "+18 dB 解析频响与实测一致");
+    }
     printf("\n%s（%d 项失败）\n", fails == 0 ? "全部通过" : "有失败项", fails);
     return fails == 0 ? 0 : 1;
 }

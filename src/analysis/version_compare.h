@@ -1,3 +1,9 @@
+// SPDX-FileCopyrightText: 2026 BH2VOQ <https://github.com/BH2VOQ>
+// SPDX-License-Identifier: GPL-3.0-or-later
+//
+// 本文件是 RLPlayer 的一部分，以 GNU 通用公共许可证第 3 版（或更新版本）发布。
+// 完整条款见仓库根目录的 LICENSE 文件。
+//
 // version_compare.h — 音频体检 B3：同一首曲子的多版本音质对比（N 个文件）
 //
 // 用户目标：「对比同一首音乐，不同版本之间的音质高低」。注意这是两件事：

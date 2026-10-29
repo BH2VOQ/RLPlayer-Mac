@@ -1,5 +1,5 @@
+// SPDX-FileCopyrightText: 2026 BH2VOQ <https://github.com/BH2VOQ>
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 August Hu <BH2VOQ@163.com>
 //
 // 本文件是 RLPlayer 的一部分，以 GNU 通用公共许可证第 3 版（或更新版本）发布。
 // 完整条款见仓库根目录的 LICENSE 文件。
@@ -327,6 +327,47 @@ inline bool has_rate_in(const std::vector<uint32_t>& v, uint32_t r) {
     return false;
 }
 
+// ---------------------------------------------------------------------------
+// DoP 载波推导（纯能力逻辑：只读设备报出的 rates，不打开设备、不碰音频输出）
+//
+// DoP 把 1 bit DSD 塞进 16 bit PCM 容器 ⟹ 承载率 = DSD 位率 / 16：
+//   44.1k 族 DSD64/128/256/512 → 176400 / 352800 / 705600 / 1411200
+//   48k   族 DSD64/128/256/512 → 192000 / 384000 / 768000 / 1536000
+//
+// 判据（#8 的验收要求「无对应采样率族不能虚报支持」）：
+//   · 设备 rates 里必须有**某个族**的载波率，否则 carrier=0 ⟹ 不能声称支持 DoP。
+//     只有 44100/48000/96000 的设备一个载波都没有，必须报「不支持」而不是 176400。
+//   · 取**最高档**：支持 705600 的设备报 705600，不是写死 176400。
+//   · 同档位两族都在（如 352800 与 384000）时报数值更大者；两个载波都真实存在，
+//     报大的不构成虚报。
+//
+// ⚠️ 这张表必须与 src/engine/preset_profiles.h 的 preset_dop_max_from_rates() 一致：
+// 平台层 DeviceCaps.dopCarrierRate 与引擎侧 preset caps.dopMax 是两份能力模型，
+// 历史上已漂移过一次（此处写死 176400，引擎侧按 rates 算出 705600）。
+// tests/test_coreaudio.cpp 的 [1b] 段有一条**跨模型一致性**断言锁住两者；
+// 改这里必须同时看 src/engine/preset_profiles.h:192。
+struct DopCarrier {
+    uint32_t carrier = 0;   // DoP 承载的 PCM 采样率（Hz）；0 = 无可用载波
+    int level = 0;          // 对应 DSD 档位（64/128/256/512）；0 = 无
+};
+
+inline DopCarrier dop_carrier_from_rates(const std::vector<uint32_t>& rates) {
+    DopCarrier best;
+    for (uint32_t r : rates) {
+        if (r == 0) continue;
+        for (int m : {64, 128, 256, 512}) {
+            const uint32_t c441 = (uint32_t)(44100 * m) / 16u;
+            const uint32_t c48  = (uint32_t)(48000 * m) / 16u;
+            if (r != c441 && r != c48) continue;
+            if (m > best.level || (m == best.level && r > best.carrier)) {
+                best.level = m;
+                best.carrier = r;
+            }
+        }
+    }
+    return best;
+}
+
 // 默认输出设备
 inline AudioDeviceID default_output_device() {
     AudioObjectPropertyAddress addr{kAudioHardwarePropertyDefaultOutputDevice,
@@ -421,13 +462,16 @@ public:
         // bit-perfect 前提：独占 + 不插入任何转换。AUHAL 直连设备时成立。
         c.bitPerfectCapable = c.exclusiveMode;
 
-        // DoP：设备支持 176400 就能承载 DSD64
-        if (detail::has_rate_in(c.rates, 176400)) {
+        // DoP：按设备**真实** rates 选最高载波（#8）。
+        // 旧实现写死「有 176400 就报 176400」，设备支持 352800/705600 时被误判成只能 DSD64，
+        // 且紧跟的 `c.dsd = (c.dsd==DoP)?DoP:None;` 是恒等赋值（把「支持」永久钉死）。
+        // 现在：没有任何族的载波就保持 None/0 —— 不虚报。
+        const detail::DopCarrier dop = detail::dop_carrier_from_rates(c.rates);
+        if (dop.carrier != 0) {
             c.dsd = DsdTransport::DoP;
-            c.dopCarrierRate = 176400;
+            c.dopCarrierRate = dop.carrier;
         }
         // Native DSD：macOS 无通用用户态 API（见文件头"未解决项"）
-        c.dsd = (c.dsd == DsdTransport::DoP) ? DsdTransport::DoP : DsdTransport::None;
         c.nativeDsdRate = 0;
 
         // 缓冲范围：HAL 默认 IO 缓冲 512 帧可调；按设备采样率折算成毫秒
@@ -757,8 +801,9 @@ public:
         size_t space = capacity - used - 1;
         // 2026-10-25：接入欠载归因（与 WASAPI 侧同构）。
         // 环形缓冲满 ⟹ 等价 WASAPI 的「设备缓冲满」(pad=full)；
-        // 空间不足一个 IO 周期 ⟹ 等价「供料不足一个周期」(avail<period)；
-        // 其余归 other。这三个计数由 STAT/WFAIL/RENDERFAIL 直接打印。
+        // CoreAudio接受任意正帧数的部分写，不实施WASAPI式整周期量化。
+        // 因此正常开流下只有ring满会产生零写；starved/other为0是该后端能力事实，
+        // 不为“填统计”拒绝原本可写的半周期数据。其它后端不支持时返回-1。
         if (space == 0) {
             zero_.classify(0, 0, frames, io_period_frames_);
             return 0;                       // 满：部分写语义，返回 0 让调用方稍后重试
@@ -802,6 +847,11 @@ public:
     // ---------------- 欠载归因（与 WASAPI 侧同名同义，2026-10-25 移植）----------------
     // 对应原来 WasapiOutput::zero_pad_full / zero_starved / last_zero_reason。
     // 调用方（rtaweb 的 STAT/WFAIL、tests/test_renderfail）无需区分平台。
+    size_t io_period_frames() const { return io_period_frames_; }
+    long long queued_frames() const {
+        std::lock_guard<std::mutex> lk(mu_);
+        return ring_frames_ ? (long long)((write_pos_ + ring_frames_ - read_pos_) % ring_frames_) : 0;
+    }
     long long zero_pad_full() const { return zero_.padFull; }
     long long zero_starved() const { return zero_.starved; }
     long long zero_other() const { return zero_.other; }

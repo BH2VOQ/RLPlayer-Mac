@@ -1,0 +1,370 @@
+时长	Duration	词', '作曲', '编曲', '歌曲风格', '发行时间', '所属专辑', '时长', '版本说明', '衍生作品', '歌词赏析'], person: [
+加载中…	Loading...	title); return; } head(title || '专辑', '加载中…', ''); api('/api/lib/albums?q=' + en
+简介	Summary	长', '版本说明', '衍生作品', '歌词赏析'], person: ['简介', '国籍', '活跃年代', '风格', '代表作品', '厂牌', '合
+播放整张专辑	Play Entire Album	ying ? (S.paused ? '继续播放专辑' : '暂停播放') : '播放整张专辑'; var h = '<div class=ahead><div c
+张专辑	albums	head(title || '专辑', S.albums.length + ' 张专辑', ''); // 封面预热进度条（2026-10-26）：上游 c4
+未知原因	Unknown reason	g('检查失败：' + (obj.message || obj.code || '未知原因'), 'err'); } else if (stage === 'ins
+重试	Retry	在扫描 / 冷算曲库）。数据没有丢失，稍后重试即可。</div>' + '<button class="btn pri" id=lstRetry>重试</b
+❚❚ 暂停	❚❚ Pause	isThisPlaying ? (S.paused ? '▶ 继续播放' : '❚❚ 暂停') : '▶ 播放整张'; var albPlayTitle = i
+复制链接	Copy Link	btn chip-copy" data-url="' + esc(url) + '" title="复制链接" ' + 'style="' + fs
+已推送到	Cast to 	innerHTML = castIconSvg() + (running ? ('已推送到 ' + esc(nm)) : '推送到设备'); nb.classL
+推送到设备	Cast to Device	vg() + (running ? ('已推送到 ' + esc(nm)) : '推送到设备'); nb.classList.toggle('on', runni
+搜索：	Search: 	TracksView(); return; } } head(q ? ('搜索：' + q) : '曲目', '搜索中…', ''); var u = '
+收藏	Favorite	Path) + '" title="' + (isFav ? '取消收藏' : '收藏') + '">' + '<svg width=14 hei
+新建歌单	New Playlist	//（2026-10-28 用户截图反馈「这里不太和谐」）。 h += '<div class=sqempty id=sqEmpty title="新建歌单">
+最近播放	Recently Played	8.5'/><path d='M12 7.2V12l3.2 2'/></svg>最近播放</div><div class=nav data-v=favs><svg vi
+未找到与 “	No results found for '	center">' + '<div style="font-size:15px;font-weight:600;ma
+段	Band	ws：同一个内容宽度 ⟹ 同一套列轨道（这是"对齐"的根） var h = '<div class=peqhd><span>段</span><span cla
+预设	Preset	/ 实际」，不再展开解释什么叫覆盖。 msg.textContent = '预设 ' + it.phaseName + '（抽头 ' + it.taps +
+Apple Music 风格	Apple Music Style	的，连同括号一起去掉，只留风格名。 + opt('apple', 'Apple Music 风格', S.uiStyle || 'apple') + opt('classic
+Discogs 实时	Discogs Real-time	ted_at) + (j.offline ? ' · 离线' : '')) : 'Discogs 实时') + ' · 不同演绎 ' + distin
+Shift+拖 / 滚轮	Shift+Drag / Scroll	复核）· Q 0.1~20 · 频率 10 Hz~20 kHz。' + '曲线上 <b>拖拽节点</b>：水平=频率（对数）、垂直=增益；<b>Shift+拖 / 滚轮</b>
+closed-form [线性相位]	closed-form [Linear phase]	相位]</option><option value="closed-form">closed-form [线性相位]</option><option value="closed-form-M">c
+closed-form-M [线性相位]	closed-form-M [Linear phase]	]</option><option value="closed-form-M">closed-form-M [线性相位]</option><option value="closed-form-16M"
+closed-form-fast [线性相位]	closed-form-fast [Linear phase]	option><option value="closed-form-fast">closed-form-fast [线性相位]</option><option value="closed-form">clo
+poly-sinc-2s [两段式] [线性相位]	poly-sinc-2s [2-Stage] [Linear phase]	位]</option><option value="poly-sinc-2s">poly-sinc-2s [两段式] [线性相位]</option><option value="poly-sinc-mp-2s"
+poly-sinc-ext2-2s [两段式] [线性相位]	poly-sinc-ext2-2s [2-Stage] [Linear phase]	ption><option value="poly-sinc-ext2-2s">poly-sinc-ext2-2s [两段式] [线性相位]</option><option value="poly-sinc-ext2-x
+poly-sinc-gauss-hires-mp [最小相位]	poly-sinc-gauss-hires-mp [Minimum phase]	option value="poly-sinc-gauss-hires-mp">poly-sinc-gauss-hires-mp [最小相位]</option><option value="poly-sinc-gauss-
+poly-sinc-gauss-long-2s [两段式] [线性相位]	poly-sinc-gauss-long-2s [2-Stage] [Linear phase]	<option value="poly-sinc-gauss-long-2s">poly-sinc-gauss-long-2s [两段式] [线性相位]</option><option value="poly-sinc-gauss-
+poly-sinc-hb-m [线性相位]	poly-sinc-hb-m [Linear phase]	</option><option value="poly-sinc-hb-m">poly-sinc-hb-m [线性相位]</option><option value="poly-sinc-hb-l">
+poly-sinc-long-lp [线性相位]	poly-sinc-long-lp [Linear phase]	ption><option value="poly-sinc-long-lp">poly-sinc-long-lp [线性相位]</option><option value="poly-sinc-long-m
+poly-sinc-mp-2s [两段式] [最小相位]	poly-sinc-mp-2s [2-Stage] [Minimum phase]	/option><option value="poly-sinc-mp-2s">poly-sinc-mp-2s [两段式] [最小相位]</option><option value="poly-sinc-long-l
+poly-sinc-short-2s [两段式] [线性相位]	poly-sinc-short-2s [2-Stage] [Linear phase]	tion><option value="poly-sinc-short-2s">poly-sinc-short-2s [两段式] [线性相位]</option><option value="poly-sinc-lp">po
+poly-sinc-tight-lp [线性相位]	poly-sinc-tight-lp [Linear phase]	tion><option value="poly-sinc-tight-lp">poly-sinc-tight-lp [线性相位]</option><option value="apod-20k-tight">
+poly-sinc-xl [线性相位]	poly-sinc-xl [Linear phase]	位]</option><option value="poly-sinc-xl">poly-sinc-xl [线性相位]</option><option value="poly-sinc-xla">p
+sinc-L [线性相位]	sinc-L [Linear phase]	[线性相位]</option><option value="sinc-L">sinc-L [线性相位]</option><option value="sinc-LL">sinc-LL
+· 不同演绎	 · Performances	: '')) : 'Discogs 实时') + ' · 不同演绎 ' + distinctCount + ' / 发行版本 ' + rele
+▶ 继续播放	▶ Resume Playback	bPlayText = isThisPlaying ? (S.paused ? '▶ 继续播放' : '❚❚ 暂停') : '▶ 播放整张'; var albPla
+★ 硬件不支持 DSD	★ Hardware does not support DSD	dsdBadge = dev.dop ? '★ 降级为 DoP' : '★ 硬件不支持 DSD'; } var pcmBadge = ''; if (dev.m
+★ 降级为 DoP	★ Fallback to DoP	e === false) { dsdBadge = dev.dop ? '★ 降级为 DoP' : '★ 硬件不支持 DSD'; } var pcmBadge =
+专辑列表读取失败	Failed to load album list	itle || '专辑', '读取失败', ''); listErrorBox('专辑列表读取失败', function () { loadAlbums(q, title);
+个渲染器	renderers	? ('共发现 ' + _castDevices.length + ' 个渲染器') : _emptyWhy; } if (
+低音	Subwoofer	if (n === 6) return ['左', '右', '中置', '低音', '左环绕', '右环绕']; if (n === 8) return
+保存到歌单…	Save to Playlist...	ass=qm data-a=play>播放这首</button>' + '<button class=qm data-a=addsq>保存到歌单…</button>
+信号链	Signal Chain	上一首'], ['s', '停止'], ['l', '歌词'], ['i', '信号链'], ['右键专辑', '整张加入队列'], ['右键曲目', '单
+关联	Related	, '专辑编号', '时长', '专辑介绍', '曲目列表', '制作人员', '关联'], work: ['作曲家', '创作年代', '体裁'] }; //
+加入队列	Add to Queue	splay:none">播放</button> ' + '<button class=btn id=aAdd>加入队列</button> ' +
+单曲循环	Repeat One	on value=1>列表循环</option><option value=2>单曲循环</option><option value=3>随机播放</option></
+同名 .lrc 文件、内嵌歌词，或播放时自动在线补全（可在设置-元数据补全关闭）	Matching .lrc file, embedded lyrics, or auto-fetch online during playback (can be disabled in Settings - Metadata Completion).	+ '</div>'; }).join('') : '<div class="ly none">没有歌词<br><span style="font-size:11px">同名 .lrc 文件、内嵌歌词，或播放时自
+声道布局	Channel Layout	se:collapse;margin-bottom:10px">' + '<tr><td style="padding:2px 12px 2px 0;color
+实际最大单段 ±	Actual max single band ±	ath.max(maxCurve,+p[1]||0);}); peqMsg('实际最大单段 ±'+maxBand.toFixed(1)+' dB；总曲线峰值 '+maxCu
+左环绕	Left Surround	(n === 6) return ['左', '右', '中置', '低音', '左环绕', '右环绕']; if (n === 8) return ['左',
+应用预设失败	Failed to apply preset	toast((j && (j.error || j.message)) || '应用预设失败'); return j; } if (j.ap
+推送当前曲	Cast Current Track	ush.textContent = running ? '重新推送当前曲' : '推送当前曲'; } if (stop) stop.disabled = !runni
+播放失败:	Playback failed: 	ge(); }).catch(function (e) { toast('播放失败: ' + e); }); }); } function playWhole
+无法连接后端（服务正忙或已退出），稍后重试	Cannot connect to backend (service busy or exited). Please retry later.	ate.now()-traceStart}); apiFailNote('无法连接后端（服务正忙或已退出），稍后重试'); var o = apiFail('无法连接后端（服务正忙或已退
+正在整理资料…	Curating info...	e="margin:8px 22px 24px">' + '<div style="font-size:12px;color:var(--mut2)">
+没发现 DLNA 渲染器	No DLNA renderers found	if (!devs.length) { m.textContent = '没发现 DLNA 渲染器'; return; } m.innerHTML = devs.map
+移除失败	Failed to remove	j && j.ok === false) { toast(j.error || '移除失败'); return; } // 反馈 #3：后端会连
+空闲	Idle	'; } else { rEl.textContent = '空闲'; rEl.style.color = ''; }
+衍生作品	Derivative Works	, '歌曲风格', '发行时间', '所属专辑', '时长', '版本说明', '衍生作品', '歌词赏析'], person: ['简介', '国籍', '活跃年
+读取	Read	&& j.wavReadMs > 0) { wavStr = '读取 ' + j.wavReadMs.toFixed(1) + ' ms';
+超时	Timeout	'资料整理失败（' + esc(s.error || '超时') + '）· 点击重试</div>'; var rb
+超过常用 ±12 dB：请复核曲线并使用自动前级留出余量。	Exceeds common ±12 dB range: please check the curve and use Auto Preamp to leave headroom.	toFixed(1)+' dB（含前级）。'+ (maxBand>12?'超过常用 ±12 dB：请复核曲线并使用自动前级留出余量。':'')); if (D('peqBypass')) D('peqByp
+输入	Input	D('mtitle').textContent = o.title || '输入'; D('mbody').innerHTML = '<div s
+输入设备列表读取失败	Failed to read input device list	D('sp_inmsg').textContent = j.error || '输入设备列表读取失败'; return; } var list = (
+还没有添加目录	No folders added yet	}); D('roots2').innerHTML = h || '<div style="font-size:11.5px;color:#5b6478">还没
+还没有添加音乐目录	No music folders added yet	class=ettl>' + (hasRoots ? '库里还没有音乐' : '还没有添加音乐目录') + '</div>'; hc += '<div class=eh
+连接失败：	Connection failed: 	'测试'; } toast(j && j.ok ? '连接成功' : ('连接失败：' + ((j && j.error) || '未知错误'))); }).
+重命名	Rename	+ esc(q.name) + '</span>' + '<span class="sqb ren" title="重命名">✎</span>
+重新发现	Rediscover	e="">（正在发现…）</option></select>' + '<button class=btn id=sp_upnp_scan style="wh
+重试查询	Retry Query	esc(errMsg) + '</div>' + '<button class="btn pri" id=bRetryVersions>重
+（点击打开 EQ 与房间校正）	 (Click to open EQ & Room Correction)	le="' + esc('当前 EQ：' + npFileName(eq) + '（点击打开 EQ 与房间校正）') + '">' + '<svg width=11 hei
+" placeholder="留空自动存至 Application Support/RLPlayer/recordings	' placeholder='Leave empty to auto-save to Application Support/RLPlayer/recordings	' + esc(ADV.inOut || '') + '" placeholder="留空自动存至 Application Support/RLPlayer/recordings' + SEP + 'cap-时间戳.wav"></div>'
+0 = 自动（默认 min(CPU, 8)）	0 = Auto (default min(CPU, 8))	描线程数'}, ADV.scanThreads || 0, 0, 32, 1, '0 = 自动（默认 min(CPU, 8)）') + '<div class="sfld wide"><di
+1x 滤波器（44.1 / 48 kHz 音源）	1x Filter (44.1 / 48 kHz source)	poly-sinc 家族', sel('sp_filt', '1x 滤波器（44.1 / 48 kHz 音源）', filts, '播放 44.1 / 48 kHz 文件时使用')
+3 秒块 RMS 分布	3s block RMS distribution	P10', qFmt(q.dyn_p95_p10_db, 2, ' dB'), '3 秒块 RMS 分布'); s += qRow('动态重心', qFmt(q.dyn_ce
+64-Bit 升频	64-Bit Upsampling	GpuUsed, badge: sigGpuUsed ? 'GPU 升频' : '64-Bit 升频', kind: sigGpuUsed ? 'gpu' : 'dsp' });
+7 阶在低采样率或 Chebyshev 1-bit 下不稳定，程序会自动降为 5 阶	7th order is unstable at low sample rates or with Chebyshev 1-bit; the app will automatically fall back to 5th order.	以上）', ADV.modorder || 5), '7 阶在低采样率或 Chebyshev 1-bit 下不稳定，程序会自动降为 5 阶') + num({ id: 'sp_modcut', labe
+7.1（8 声道）	7.1 (8 channels)	opt('6', '5.1（6 声道）', CH) + opt('8', '7.1（8 声道）', CH), '设备必须支持该声道数；多声道用 W
+=增益 0.1 dB、	= Gain 0.1 dB, 	<b>双击节点</b>=该段复位（0 dB / Q 1.41）。' + '选中行后 <b>↑↓</b>=增益 0.1 dB、<b>←→</b>=频率 ±1%（Shift 加速
+AI 增强（DeepSeek）	AI Enhancement (DeepSeek)	产生费用', true) + chk('sp_metallm', 'AI 增强（DeepSeek）', aiOn, '联网调用 DeepSeek（按次
+API Key 已保存（界面只显示掩码）	API Key saved (interface displays mask only)	llmPost('key=' + encodeURIComponent(k), 'API Key 已保存（界面只显示掩码）'); } function llmClear() { llmPost('cl
+Apple Metal（GPU 加速）· 已就位，本机未检测到可用 Metal 设备（会自动回退）	Apple Metal (GPU Acceleration) · Ready; no usable Metal device detected on this Mac (will automatically fall back)	: (j.metalUsable === false ? 'Apple Metal（GPU 加速）· 已就位，本机未检测到可用 Metal 设备（会自动回退）'
+Bit-Perfect 状态未知	Bit-Perfect status unknown	else { heroCls = ' warn'; heroTitle = 'Bit-Perfect 状态未知'; heroIcon = '?'; } var nodes = [
+Chebyshev（可配带外增益与截止，1-bit 保护运行于 5 阶）	Chebyshev (configurable out-of-band gain and cutoff; 1-bit protection runs at 5th order)	'dsd') + opt('chebyshev', 'Chebyshev（可配带外增益与截止，1-bit 保护运行于 5 阶）', ADV.modfamily || 'dsd') +
+CoreAudio 测量链路	CoreAudio Measurement Pipeline	at(auto-fit,minmax(250px,1fr))">' + '<div class=in-stat-item><span class=lbl>算法版本</span><s
+DSD 位流装进 24-bit PCM 容器（DAC 端剥壳，全程 bit-perfect）；	Pack DSD bitstream into 24-bit PCM container (unpacked at DAC, bit-perfect throughout); 	t-perfect）', dsdPackOf()), 'DSD 位流装进 24-bit PCM 容器（DAC 端剥壳，全程 bit-perfect）；' + 'macOS 的 CoreAudio 只提供
+DeepSeek 接入	DeepSeek Integration	+ '<div class=meta-card>' + '<div class=mh>DeepSeek 接入' + tip('只用于上面的「AI 增强」；不填
+DirectSDM：DSD 源同速率直通（逐位一致）	DirectSDM: DSD source same-rate passthrough (bit-exact)	irectSDM', chk('sp_directsdm', 'DirectSDM：DSD 源同速率直通（逐位一致）', ADV.directsdm == 1, '源
+DoP 封装	DoP Encapsulation	, kind: 'dsp' }); nodes.push({ k: 'DoP 封装', v: '24-bit 载波 ' + p.outRate + ' Hz \
+EQ 文件路径	EQ File Path	文本）', '按文件里的 Filter 行生成双二阶滤波器组', '<div class="sfld wide"><label>EQ 文件路径' + tip('
+GPU 升频	GPU Upsampling	gpu: !!sigGpuUsed, badge: sigGpuUsed ? 'GPU 升频' : '64-Bit 升频', kind: sigGpuUsed ? 'gp
+GPU 卷积	GPU Convolution	PU 计算'), gpu: convGpu, badge: convGpu ? 'GPU 卷积' : 'DSP 均衡', kind: convGpu ? 'gpu' : '
+GPU 可用 · 本次未参与（信号链里绿色节点才会亮）	GPU available · Not active for current playback (green nodes in signal chain indicate active)	sed ? 'GPU 参与本次播放' : (S.gpuOn ? 'GPU 可用 · 本次未参与（信号链里绿色节点才会亮）' : 'GPU 未参与本次播放'); } else {
+Optimum HiFi 强调极低失真与线性动态，不对低频做过多主观提升，保持纯正声底。	Optimum HiFi emphasizes ultra-low distortion and linear dynamics without excessive bass boost, preserving an uncolored sonic foundation.	频通透无染色，适合古典乐、爵士乐与纯乐器发烧录音。', tech: 'Optimum HiFi 强调极低失真与线性动态，不对低频做过多主观提升，保持纯正声底。' }; } if (d.indexOf('neutral')
+Oversampling 1x（44.1 / 48 kHz 音源）	Oversampling 1x (44.1 / 48 kHz source)	只在输出 DSD 时生效', sel('sp_sdmo1', 'Oversampling 1x（44.1 / 48 kHz 音源）', '<option value="">跟随 PC
+Oversampling Nx（88.2 kHz 及以上音源）	Oversampling Nx (88.2 kHz and above source)	用 PCM 页的 1x') + sel('sp_sdmoNx', 'Oversampling Nx（88.2 kHz 及以上音源）', '<option value="">跟随上面的 1x</option>'
+PCM-DSD 升频	PCM-to-DSD Upsampling	dOut) { t = srcDsd ? 'DSD-DSD 升频' : 'PCM-DSD 升频'; c = 'bp-up'; if (!title) {
+[回环]	[Loopback]	me.indexOf(' · 回环') < 0 && name.indexOf('[回环]') < 0 && name.indexOf('[Loopback]') <
+\n上次运行:	, Last run: 	known')+'\n版本: '+(j.version||'unknown')+'\n上次运行: '+(j.runState?j.runState.lastExit:'unk
+\n版本:	, Version: 	_id: '+(j.case_id||j.caseId||'unknown')+'\n版本: '+(j.version||'unknown')+'\n上次运行: '+(j
+\u00b7 两段式	 · 2-Stage	0b7 ' + p.taps + ' 抽头' + (p.twoStage ? ' \u00b7 两段式' : '') + ' \u2192 ' + p.outRate +
+\u2190 返回上一级	← Back to Parent	head(hd.name, items.length + ' 首', '<button class=btn id=rBackDir title="返回上一级" aria-la
+dB，实时微调	 dB, real-time trim 	s += '（起播 ' + S.startDb.toFixed(1) + ' dB，实时微调 ' + (v - S.startDb).toFixed(1) + ' dB
+· 共	 · Total 	else { text = '队列末尾' + (qLen > 0 ? (' · 共 ' + qLen + ' 首') : ''); tip = '当前
+· 目标曲线说明	 · Target Curve Details	color:var(--txt)">' + esc(curve.name) + ' · 目标曲线说明</div>' + '<div style="margin-bo
+· 调音预设	 · Tuning Preset	tle.textContent = vendor + ' ' + name + ' · 调音预设'; if (msg) msg.textContent = '正在获
+← 返回正在播放	← Back to Now Playing	代的录音版本', (fromNp && S.lastCur) ? '<button class=btn id=wBackNp title="返回单曲播放页">←
+⚠️ macOS 上不建议开启：实测（Apple M4）卷积走 GPU 在任何 IR 长度下都比 CPU 慢 3.4~8.3 倍。	⚠️ Not recommended on macOS: tests (Apple M4) show GPU convolution is 3.4-8.3x slower than CPU across all IR lengths.	硬件加速（检测中…）', ADV.irgpu == 1, '⚠️ macOS 上不建议开启：实测（Apple M4）卷积走 GPU 在任何 IR 长度下都比 CPU 慢 3.4~8.3 倍。' + '原因是 mac 的 GPU 后端把 FFT 留在
+」？只删这份歌单，不动当前播放队列。	'? Only this playlist will be deleted; current playback queue remains unchanged.	', ok: '删除', text: '删除歌单「' + name + '」？只删这份歌单，不动当前播放队列。', onOk: function () { api('/
+一个文件，不用再到处找日志	Single file, no more searching for logs	ne data-g=diag>' + sgroup('导出诊断包', '一个文件，不用再到处找日志', '<div class="sfld wide" sty
+一次最多 8 个版本	Maximum 8 versions at a time	length > 8) { D('cmpMsg').textContent = '一次最多 8 个版本'; return; } if (CMP.busy) return;
+上一级	Parent Folder	h = '<div class=pathbar>' + '<button class=pb id=fUp title="上一级">\u2191
+下载校正集	Download Calibration Profile	oomWiz type=button>开始向导</button>' + '<button class="btn" id=bRoomDl type=button s
+不支持的链接（只允许 http / https）	Unsupported URL (http / https only)	rim(); if (!extUrlAllowed(u)) { toast('不支持的链接（只允许 http / https）'); return false; } if (WV) { wcmd('o
+专辑艺术家	Album Artist	'年份'], ['genre', '流派'], ['albumArtist', '专辑艺术家']].forEach(function (p) { var v =
+个点超出满幅）→ 预衰减	 points over full-scale) → Pre-attenuation 	toFixed(1) + '%（' + p.ispOver + ' 个点超出满幅）→ 预衰减 ' + p.preAtten.toFixed(1) + ' dB', ba
+为这张专辑指定一张封面图（存到本地缓存，不改动音乐文件）	Assign a cover art image for this album (saved to local cache, does not modify audio files)	文件**）——把「99%」补到 100% 的人工通道。 '<button class=btn id=aSetCover title="为这张专辑指定一张封面图（存到本地缓存，不改动音乐文件）"
+主题	Theme	e') + '</select></div>' + '<div class=sfld><label>主题' + tip('顶栏右侧的小圆
+仅录制模式生效；留空自动保存在 ~/Library/Application Support/RLPlayer/recordings（不可用时退回临时目录）	Effective only in recording mode; leave empty to auto-save to ~/Library/Application Support/RLPlayer/recordings (falls back to temp directory if unavailable).	e"><label>输出文件路径（WAV）' + tip('仅录制模式生效；留空自动保存在 ~/Library/Application Support/RLPlayer/recordings（不可用时退回临时目录）') + '</label><input type=text id=sp_in
+任意一首，从这首开始	any track to start 	/div>'; return; } var h = '<div class=favhint><b>双击</b>任意一首，从这首开始<b>顺序播放</b>
+传输状态	Transport State	st_stat_pos>0:00</span></div>' + '<div class=in-stat-item><span class=lbl>传输状
+位	artists	搜索：' + q + '）') : '艺术家', order.length + ' 位', ''); if (!order.length) { if
+作曲	Composer	var EF_ORDER = { track: ['演唱', '作词', '作曲', '编曲', '歌曲风格', '发行时间', '所属专辑', '时长',
+例如 客厅 NAS	e.g. Living Room NAS	id=sp_src_ftitle>添加服务器</div>' + '<div class=sfld><label>名称</label><input type=tex
+例如 睡眠专区	e.g. Sleep Zone	, ok: '创建', value: '', placeholder: '例如 睡眠专区', hint: '创建一份空歌单；可通过右键歌曲或单曲页「添加到歌单
+停止失败:	Failed to stop: 	= (j && j.error) || '停止失败'; toast('停止失败: ' + err); pollInputState();
+停止推送	Stop Casting	ding:7px 16px">换设备</button>' + '<button class="btn pri cast-act-stop" id=ca
+停止采集	Stop Capture	" id=sp_instart>开始采集</button>' + '<button class=btn id=sp_instop disabled>停止采
+关闭后两项都停，本地与公开数据源照常工作	When turned off, both features stop; local and public data sources continue to work normally.	专辑 / 单曲页整理简介并缓存（7 天有效）。' + '关闭后两项都停，本地与公开数据源照常工作', true) + '<div class="sfld wid
+写回批次已启动…	Write-back batch started...	urn; WB_BUSY = 1; wbButtons(1); wbMsg('写回批次已启动…'); api('/api/writeback', '{"apply":t
+写回未执行：	Write-back not executed: 	0); wbMsg(''); if (j.error) { toast('写回未执行：' + j.error); return; } toast('写入 '
+出版方	Publisher	release: ['艺术家', '发行时间', '专辑类型', '语种', '出版方', '专辑编号', '时长', '专辑介绍', '曲目列表', '制作人员'
+分 7 步走完一次测量（选布局 → 摆麦 → 测各声道 → 质检 → 生成校正集）。	Complete calibration in 7 steps (choose layout → place mic → measure channels → quality check → generate calibration profile).	le="display:none">下载校正集</button>' + '<span class=rcnote id=rcHint>分 7 步走完一次测量（选布局 → 摆麦 → 测各声道 → 质检 → 生成校正集）。</span>'
+列表	List	'" title="列表显示">' + REMOTE_ICON.list + '列表</button></span>'; } // 远程条目 → 专辑页同款卡片。
+创作年代	Composition Date	'曲目列表', '制作人员', '关联'], work: ['作曲家', '创作年代', '体裁'] }; // 长文本标签：独占整行并保留换行（这些一定不是一格
+创建	Create	alog() { askText({ title: '新建歌单', ok: '创建', value: '', placeholder: '例如 睡眠专区
+删除中…	Deleting...	= true; D('rmdGo').textContent = '删除中…'; api('/api/lib/rmdir', 'dir=' +
+删除歌单	Delete Playlist	avedQueue(name) { askConfirm({ title: '删除歌单', ok: '删除', text: '删除歌单「' + name +
+删除用户预设「	Delete user preset '	et'); if (!sel) return; if (confirm('删除用户预设「' + sel.value + '」？（内置预设不能删除）')) peqPre
+删除预设	Delete Preset	Save type=button>保存为预设…</button>' + '<button class="btn" id=peqDelete type=butto
+削波计数 (正 / 负)	Clipping Count (+ / -)	xrun>溢出 0 / 欠载 0</span></div>' + '<div class=in-stat-item><span class=lbl>削波计数 (正 / 负
+加载	Load	x;height:26px"></select></label>' + '<button class="btn" id=peqLoad type=butto
+勾选后把采集直接送到系统默认共享端点监听；不勾选则录制保存为 WAV	Check to route captured audio directly to system default shared endpoint for monitoring; uncheck to record and save as WAV.	ect）', ADV.inMonitor == 1, '勾选后把采集直接送到系统默认共享端点监听；不勾选则录制保存为 WAV') + num({ id: 'sp_inseconds', l
+包含物理采集设备与系统混音回环端点（标注「回环」的那一项）	Includes physical capture devices and system mix loopback endpoints (labeled '[Loopback]').	option value="">（未选择 / 默认设备）</option>', '包含物理采集设备与系统混音回环端点（标注「回环」的那一项）') + sel('sp_inch', '声道偏移', opt(
+匹配到	Matched 	} else { hint.textContent = '匹配到 ' + hits.length + ' 款耳机型号'; }
+匹配（Bit-Perfect）	Matched (Bit-Perfect)	=== 'match') { rmEl.textContent = '匹配（Bit-Perfect）'; rmEl.style.color = 'var(--ok)'
+升频与滤波	Upsampling & Filtering	class=spane data-g=pcm>' + sgroup('升频与滤波', 'HQPlayer 的 poly-sinc 家族',
+卷积走 GPU 硬件加速（检测中…）	GPU hardware-accelerated convolution (detecting...)	av') + '"></div>' + chk('sp_irgpu', '卷积走 GPU 硬件加速（检测中…）', ADV.irgpu == 1, '⚠️ macOS
+原型抽头数（0 = 按预设自动）	Prototype taps (0 = auto by preset)	>' + num({ id: 'sp_taps', label: '原型抽头数（0 = 按预设自动）' }, ADV.taps, 0, 2097152, 1024,
+原生读取 + DirectSDM	Native Read + DirectSDM	抑制空闲音')) + sgroup('SDM 源（DSD 文件）', '原生读取 + DirectSDM', chk('sp_directsdm', 'Direct
+反馈通道未配置（开发者尚未部署 Worker 地址）	Feedback channel not configured (developer has not deployed Worker URL).	se; } if (!FB_WORKER_URL) { fbMsg('反馈通道未配置（开发者尚未部署 Worker 地址）', 'err'); return false; } var
+取消收藏失败	Failed to unfavorite	(!j || !j.ok) { toast((j && j.error) || '取消收藏失败'); return; } FAV_SET.delete(file);
+古典作品页：按「作品名 + 作曲家」检索 Discogs 上的不同录音版本（指挥 / 乐团 / 年代 / 厂牌），	Classical Works view: search Discogs by work title and composer for different recordings (conductor / orchestra / year / label), 	bottom:12px;line-height:1.6">' + '古典作品页：按「作品名 + 作曲家」检索 Discogs 上的不同录音版本（指挥 / 乐团 / 年代 / 厂牌），' + '帮你在同一首作品的不同演绎里挑到更对味的一张。可以自己
+只做发现。DLNA 投放会经过对方的重采样，	discovery only. DLNA casting will undergo resampling on the receiving device, 	rt) + '</span></div>'; }); h += '<div style="font-size:10.5px;color:#5b6478;margin-top:6px;lin
+只在输出 DSD 时生效	Only effective when outputting DSD	ne data-g=sdm>' + sgroup('SDM 输出', '只在输出 DSD 时生效', sel('sp_sdmo1', 'Oversampli
+只想让它不出现在曲库里？用设置里的「移除」即可，那个不碰磁盘。	Just want to hide it from the library? Use 'Remove' in Settings; it does not touch the disk.	argin-bottom:16px">' + '只想让它不出现在曲库里？用设置里的「移除」即可，那个不碰磁盘。</div>' + '<div style="disp
+只要 JSON	JSON Only	_diagzip>导出诊断包（.zip）</button>' + '<button class=btn id=sp_diagjson>只要 JSON</butt
+合作	Collaborations	'简介', '国籍', '活跃年代', '风格', '代表作品', '厂牌', '合作'], release: ['艺术家', '发行时间', '专辑类型',
+后端已就位	Backend ready	le === false ? '后端已就位，本机不可用（会回退 CPU）' : '后端已就位')) + '）'; } }).catch(function ()
+后端库未打包	Backend library not packaged	GPU 硬件加速（' + (!(j && j.metal) ? '后端库未打包' : (j.metalUsable === false ?
+后端没有响应或连接被重置（服务可能正在扫描 / 冷算曲库）。数据没有丢失，稍后重试即可。	Backend is not responding or the connection was reset (service may be scanning or indexing library). No data was lost; please retry later.	-height:1.7;margin-bottom:14px">' + '后端没有响应或连接被重置（服务可能正在扫描 / 冷算曲库）。数据没有丢失，稍后重试即可。</div>' + '<button class="btn pri"
+启用失败：	Failed to enable: 	j) { if (!j || !j.ok) { toast('启用失败：' + ((j && j.error) || '未知错误')); return
+哈曼入耳目标曲线 (Harman In-Ear)	Harman In-Ear Target Curve (Harman In-Ear)	iem') >= 0)) { return { name: '哈曼入耳目标曲线 (Harman In-Ear)', scene: '针对入耳式耳道封闭增强低频动态与人声清晰度，
+哈曼头戴目标曲线 (Harman Over-Ear)	Harman Over-Ear Target Curve (Harman Over-Ear)	rman') >= 0) { return { name: '哈曼头戴目标曲线 (Harman Over-Ear)', scene: '符合大众听音盲测偏好，低频温暖厚实、中高频平
+噪声整形拐点（kHz，0 = 100）	Noise shaping corner frequency (kHz, 0 = 100)	+ num({ id: 'sp_modcut', label: '噪声整形拐点（kHz，0 = 100）' }, ADV.modcut, 0, 200, 5) + nu
+型号:	Model: 	msg.textContent = d ? ((d.model ? ('型号: ' + d.model + ' · ') : '') + (d.hasAVT
+声道 ·	 channels · 	nnels) return ''; return d.channels + ' 声道 · ' + (d.mixRate ? (d.mixRate + ' Hz')
+声道 · 约	 channels · approx. 	D('rcStatus').textContent = p.chCount + ' 声道 · 约 ' + Math.round(p.totalSeconds) + ' 秒'
+声道音量微调	Channel Volume Trims	+ '<div id=sp_trimwrap>' + sgroup('声道音量微调', '按声道名标注，0 dB = 不动', '<div c
+声道）	 channels)	d>' + esc(p.layout) + '（' + p.chCount + ' 声道）</td></tr>' + '<tr><td style="padd
+声音校准	Sound Calibration	lass=stab data-g=eq>EQ</button>' + '<button class=stab data-g=cal>声音校准</button>
+大比率时 CPU 运算量约 1/4	CPU load reduced to approx. 1/4 at high upsampling ratios	chk('sp_2s', '两段式升频', D('s2s').checked, '大比率时 CPU 运算量约 1/4')) + sgroup('抖动与保护', '按采样率自动重标定',
+实时	Real-time	ngth; return (d.from_cache ? '缓存' : '实时') + (n ? ' · ' + n + ' 个版本' : ''); }
+对比失败：	Comparison failed: 	(D('cmpMsg')) D('cmpMsg').textContent = '对比失败：' + (e && e.message ? e.message : e);
+导出诊断包	Export Diagnostics Package	class=spane data-g=diag>' + sgroup('导出诊断包', '一个文件，不用再到处找日志', '<div clas
+导出诊断包（.zip）	Export Diagnostics Package (.zip)	ter;gap:10px;flex-wrap:wrap">' + '<button class="btn pri" id=sp_diagzip>导出诊断包（.zip）<
+局域网：http://	LAN: http://	:' + j.port + '/<br>' + (j.lan ? ('局域网：http://' + esc(j.ip) + ':' + j.port + '/（已开启）'
+峰值保护	Peak Protection	p.preAtten < 0) { nodes.push({ k: '峰值保护', v: '检测到过采样峰值 ' + (p.ispPeak * 100).t
+峰值因子	Crest Factor	ngest_clip_run) + ' 样本'); s += qRow('峰值因子', qFmt(q.crest_db, 2, ' dB')); s
+峰值电平	Peak Level	"width:0%"></div></div></div>' + '<div class=in-stat-item><span class=lbl>峰值电
+已保存房间校正设置	Room correction settings saved	; saveSettings(true); toast('已保存房间校正设置'); }; } // 初始：有已选型号 → 回填「品牌 型
+已停止投放，输出回到	Casting stopped, output returned to 	d = back; saveSettings(); toast('已停止投放，输出回到 ' + back); if (S.lastCur) playPath
+已关闭严格独占：系统音量可正常调节	Strict exclusive mode disabled: system volume can be adjusted normally	已开启严格独占：系统音量条将失效，请用本程序音量条调音量' : '已关闭严格独占：系统音量可正常调节'); }; } D('sp_addroot').onclic
+已切换界面风格：	Interface style switched: 	{ setUiStyle(this.value); toast('已切换界面风格：' + (this.value === 'classic' ? '经典 Hi-
+已加载预设：	Preset loaded: 	er(j); if (action === 'load') toast('已加载预设：' + name); else if (action === 'sav
+已就位（本机不可用）	Ready (not available on this Mac)	j.metal) ? ((j.metalUsable === false ? '已就位（本机不可用）' : '已就位（可用）')) : '未就位'; m.title
+已应用	Applied 	00); }); } else { toast('已应用 ' + (profile === 'bitperfect' ? '原音直通'
+已应用调音预设到 EQ	Tuning preset applied to EQ	; saveSettings(true); toast('已应用调音预设到 EQ'); Array.prototype.forEach.call(
+已暂停	Paused	.textContent = (j.playing ? (j.paused ? '已暂停' : '播放中') : '已停止') + (j.outRat
+已添加音乐目录，但未找到音频文件	Music folders added, but no audio files found.	;margin-bottom:8px">' + (hasRoots ? '已添加音乐目录，但未找到音频文件' : '还没有添加音乐目录') + '</div>' + '<div
+已缓存	Cached	「未核对」这类长尾文案。 return d.summaryCached ? '已缓存' : '刚刚整理'; } function npDataSkeleton()
+已选择：	Selected: 	')) : (v ? ('已选择：' + v) : '点「重新发现」扫描局域网里的 MediaRenderer'
+帮你在同一首作品的不同演绎里挑到更对味的一张。可以自己填作品名查询，也可以直接点下方「示例作品」芯片一键检索。	Helping you find the perfect performance among different recordings of the same work. Enter a work title to search, or click any sample work chip below for instant lookup.	上的不同录音版本（指挥 / 乐团 / 年代 / 厂牌），' + '帮你在同一首作品的不同演绎里挑到更对味的一张。可以自己填作品名查询，也可以直接点下方「示例作品」芯片一键检索。</div>'; // 搜索卡片 h += '<div class=
+开启后会接收包含 -beta / -rc 等预发布版本更新；关闭则只提示正式版	When enabled, pre-release updates including -beta and -rc will be received; when disabled, only official releases will be notified.	+ '<span>接收测试版（Beta）</span>' + tip('开启后会接收包含 -beta / -rc 等预发布版本更新；关闭则只提示正式版') + '</label>' + '<span id=sp_u
+开始对比	Start Comparison	ms:center;margin-top:10px">' + '<button class="btn pri" id=cmpGo>开始对比</butt
+开始播放专辑	Starting album playback	j.error || '播放失败'); return; } toast('开始播放专辑'); loadQ(); }); } function enqueueAl
+开始更新…	Starting update...	true; updInstallBtn(false); updMsg('开始更新…'); updBar(0); wcmd('update:install
+强制刷新	Force Refresh	adding:0 16px">查询版本</button> ' + '<button class=btn id=bRefreshVersions style
+当前 IR：	Current IR: 	n class=chip id=npIrChip title="' + esc('当前 IR：' + npFileName(ir) + '（点击打开 EQ 与房间校正）')
+当前正在推送到	Currently casting to 	{}).device || ADV.upnpDev); var h = '<div style="font-size:13px;line-height:1.6;mar
+当前目录中未发现可识别的音频文件，请确认音频格式或更换目录。	No recognized audio files found in current folders. Please check audio formats or select another folder.	margin-bottom:20px">' + (hasRoots ? '当前目录中未发现可识别的音频文件，请确认音频格式或更换目录。' : 'RLPlayer 会自动为您建立高保真音乐库并整理专辑与元数据。<b
+录音室中性：全频段尽量平直	Studio Neutral: as flat as possible across all frequencies	.82,0],[1.0,0.6]] }, studio: { label: '录音室中性：全频段尽量平直', pts: [[0,0],[0.12,-0.3],[0.24,-0
+循环模式	Repeat Mode	sgroup('播放', '', sel('sp_rep', '循环模式', D('sRep').innerHTML, '') + ch
+微调（Shift 加速）	Fine-tune (Shift to accelerate)	<b>Shift+拖 / 滚轮</b> 改 Q</span>' + '<span><b>双击</b> 该段复位</span><span><b>↑↓←→</b> 微调（Shi
+快捷键与提示	Shortcuts & Tips	nction () { D('mtitle').textContent = '快捷键与提示'; D('modal').classList.add('on');
+恢复默认	Restore Defaults	ri" data-act=save>保存设置</button>' + '<button class=btn data-act=reset>恢复默认</butt
+打包日志 / 系统信息 / 设置摘要（token、密码等已脱敏为	Package logs, system info, and settings summary (tokens, passwords sanitized to 	d>' + '<span>附带诊断包</span>' + tip('打包日志 / 系统信息 / 设置摘要（token、密码等已脱敏为 <redacted>）。不建议关闭 —— 没有日志很难定位问题') + '<
+打开失败：	Failed to open: 	('已在浏览器新标签打开'); } catch (e) { toast('打开失败：' + u); } } return true; } var S =
+打开快速开始	Open Quick Start	? '重新扫描' : '扫描目录') + '</button>' + '<button class="btn" id=emptyGoStation>打开快速开始<
+扩散场目标：声场开阔、高频细节多	Diffuse Field Target: spacious soundstage, abundant high-frequency detail	,0.8],[1.0,2.6]] }, diffuse: { label: '扩散场目标：声场开阔、高频细节多', pts: [[0,0],[0.10,-0.3],[0.20,-0
+把当前曲目推送到 UPnP / DLNA 设备	Cast current track to UPnP / DLNA device	+ (running ? '点击停止投放并恢复本机输出' : '把当前曲目推送到 UPnP / DLNA 设备') + '">' + castIconSvg() + (r
+抑制空闲音	Idle tone suppression	-1 = 默认）' }, ADV.moddith, -1, 1, 0.001, '抑制空闲音')) + sgroup('SDM 源（DSD 文件）', '原生读
+指标	Metric	collapse:collapse;width:100%">'; h += '<thead><tr><th style="text-align:left;pad
+按作品名查不同指挥/乐团/年代的录音版本	Search by work title for different recordings across conductors, orchestras, and eras	（回到正在播放页），不是无路可退。 head('古典作品 · 演绎版本', '按作品名查不同指挥/乐团/年代的录音版本', (fromNp && S.lastCur) ? '<but
+按文件里的 Filter 行生成双二阶滤波器组	Generate biquad filter bank from Filter lines in the file	h += sgroup('EQ 文件（REW / AutoEq 文本）', '按文件里的 Filter 行生成双二阶滤波器组', '<div class="sfld wide"><label
+排序（好 → 差）	Sort (Best → Worst)	">⚠ 包络相关偏低，这些文件可能不是同一首曲子</div>'; h += '<div style="font-weight:650;margin:6px 0 4px">排序
+搜索失败	Search failed	function () { D('upnpList').innerHTML = '<div style="font-size:11px;color:#e8654b">搜
+搜索失败：服务没响应	Search failed: service not responding	}).catch(function () { m.textContent = '搜索失败：服务没响应'; }); } /* ---------------- 视图切换 ----
+播放 44.1 / 48 kHz 文件时使用	Used when playing 44.1 / 48 kHz files	lt', '1x 滤波器（44.1 / 48 kHz 音源）', filts, '播放 44.1 / 48 kHz 文件时使用') + sel('sp_filtNx', 'Nx 滤波器（88
+播放时后台补全标签 / 封面 / 歌词，结果落在本地库	Complete tags, cover art, and lyrics in the background during playback; results saved to local library.	ne data-g=meta>' + sgroup('元数据补全', '播放时后台补全标签 / 封面 / 歌词，结果落在本地库', chk('sp_metaon', '自动补全（不用 A
+播放模式：	Playback mode: 	f (sp) sp.value = String(next); toast('播放模式：' + REP_META[next].name); return next
+播放歌单：	Playing playlist: 	ile, it[k].cs, it[k].ce); toast('播放歌单：' + name + '（' + it.length + ' 首）');
+播放这首	Play This Track	) + '">' + esc(nam(f)) + '</div>' + '<button class=qm data-a=play>播放这首</button>'
+改名后立刻写入 rlplayer-savedqueues.conf（重启后是新名字）	Saved immediately to rlplayer-savedqueues.conf after renaming (retains new name across restarts).	命名歌单', ok: '改名', value: name, hint: '改名后立刻写入 rlplayer-savedqueues.conf（重启后是新名字）', onOk: function (to) { api(
+改名失败:	Failed to rename: 	(); }).catch(function (e) { toast('改名失败: ' + e); }); } }); } function delet
+数据源	Data Sources	+ '<div class=meta-card>' + '<div class=mh>数据源' + tip('越靠上优先级越高；关掉的源完全不
+旁路	Bypass	端返回值为准） peqMsg('已应用（' + (j.bypass ? '旁路' : '生效') + ' · 采样率 ' + Math.round(j.fs
+旁路 = 绕过 PEQ（20 段全部不参与计算，信号直通）。默认	Bypass = Bypasses PEQ (all 20 bands excluded from calculation, direct signal passthrough). Default 	Txt>PEQ 当前：读取中…</span></div>' + '<div class=hint id=peqByPassHint>旁路 = 绕过 PEQ（20 段全部不参与计算，信号直通）。默认<stron
+旁路（源采样率与输出一致，逐位直通）	Bypass (source sample rate matches output, bit-exact direct passthrough)	); else nodes.push({ k: '采样率转换', v: '旁路（源采样率与输出一致，逐位直通）', badge: '逐位旁路', kind: 'lossless' });
+无损解码	Lossless Decoding	ts + ' bit / ' + p.inCh + ' ch', badge: '无损解码', kind: 'lossless' }); var convGpu
+无损音乐库	Lossless Music Library	dge>\uf8ff Hi-Fi Library</div>'; h += '<div class=am-card-mid><div class=am-card-ti
+无法启动写回：网络错误	Failed to start write-back: network error	USY = 0; wbButtons(0); wbMsg(''); toast('无法启动写回：网络错误'); }); } /* ---------------- 设备能力与混音格
+是什么：	What it is: 	curve.name) + ' · 目标曲线说明</div>' + '<div style="margin-bottom:5px"><b style="co
+显示	Display	」= 跟随源'; el.innerHTML = '按 <b>' + n + ' 声道</b> 显示' + (devCh ? ('（CoreAudio 设
+暂停 / 继续	Pause / Resume	st.add('on'); var rows = [ ['空格', '暂停 / 继续'], ['← →', '上一首 / 下一首'], ['Shift + ← →
+最大化	Maximize	ICON_MAX; b.title = isMax ? '还原' : '最大化'; } WV.addEventListener('message',
+有	There are 	textContent = bad.length ? ('有 ' + bad.length + ' 个声道无效：' + bad.map(f
+服务器拒绝（HTTP	Server rejected (HTTP 	if (!j.ok) throw new Error(j.error || ('服务器拒绝（HTTP ' + r.status + '）')); return j;
+未发现 UPnP / DLNA 渲染器（确认数播已开启 DLNA 且与本机同网段）	No UPnP / DLNA renderers found (ensure network streamer has DLNA enabled and is on the same subnet as this Mac)	ar _emptyWhy = (j && j.hint) ? j.hint : '未发现 UPnP / DLNA 渲染器（确认数播已开启 DLNA 且与本机同网段）'; // 弹窗可能已被用户关掉：只在它还开着时刷新，避免"背后改
+未在 Discogs 检索到该作品的演绎版本，或当前网络不可达。	No recordings of this work found on Discogs, or the network is currently unreachable.	rs && j.errors[0]) || (j && j.error) || '未在 Discogs 检索到该作品的演绎版本，或当前网络不可达。'; h += '<div class="card empty-car
+未找到匹配的耳机型号，请尝试不同关键词	No matching headphone models found. Please try different keywords.	ts.length) { hint.textContent = '未找到匹配的耳机型号，请尝试不同关键词'; } else if (allHits.length > 30
+未测量	Not Measured	带 .1 的 LFE 分频 80 Hz</div></div>' + '<div class=in-stat-item><span class=lbl>当前
+未生成校正集	No calibration profile generated	D('rcStatusSub').textContent = '未生成校正集'; } else if (s.phase === 'fail
+未知专辑	Unknown Album	name: (top && top.t) || first.al || '未知专辑', artist: (top && top.ar) || first
+未配置 —— 填入 DeepSeek API Key 后点「保存 Key」	Not configured - enter DeepSeek API Key and click 'Save Key'	asked + '（模型 ' + LLM.model + '）') : '未配置 —— 填入 DeepSeek API Key 后点「保存 Key」'; m.textContent = s + '；key 只存本机 rlp
+本地供源就绪	Local Stream Ready	discovering': '设备发现中', 'serving': '本地供源就绪', 'playing': '投放播放中', 'sto
+来源链接:	Source link: 	text); }); } else { toast('来源链接: ' + text); } }; } funct
+标签 / 封面	Tags / Cover Art	/ 封面 / 歌词' : p.canSearch ? '标签 / 封面' : '歌词（独立歌词源）'; return
+格式	Format	le="min-width:75px">厂牌</span>' + '<span style="min-width:55px">格式</span>' +
+检查更新	Check for Updates	ize:12.5px" id=sp_vercur></b>' + '<button class=btn id=sp_updcheck>检查更新</butt
+检测到插值峰值超满幅时预衰减	Applies pre-attenuation when inter-sample peaks exceed full scale	sp', '过采样峰值保护（ISP）', D('sIsp').checked, '检测到插值峰值超满幅时预衰减')) + '</div>'; // ---------- SD
+次	 requests	.textContent = (st.requestCount || 0) + ' 次'; } var portEl = D('sp_cast_stat
+歌曲资料未能取到 · 点击重试	Failed to fetch track info · Click to retry	"重新请求这首歌的 AI 整理">' + '歌曲资料未能取到 · 点击重试</span>'; var b = D('npSummRetry');
+歌词（独立歌词源）	Lyrics (independent lyrics source)	: p.canSearch ? '标签 / 封面' : '歌词（独立歌词源）'; return chk('sp_meta_' + p.id, p.
+正在对齐并分析	Aligning and analyzing 	usy = true; D('cmpMsg').textContent = '正在对齐并分析 ' + sel.length + ' 个版本…'; if (D('cmp
+正在打包诊断包…	Packaging diagnostics package...	urn Promise.resolve(payload); fbMsg('正在打包诊断包…'); return fetch('/api/diagzip').th
+正在搜索局域网里的设备…	Searching for devices on local network...	{ if (!list.length) { return '<div class=castpick-empty>正在搜索局域网里的设备…<br>' +
+正在播放	Now Playing	nction npPlayingKindText(m) { var t = '正在播放'; if (!m) return t; var b = [];
+正在统计要删除的文件…	Counting files to delete...	var busy = toast; // 只是别名，保持行短 busy('正在统计要删除的文件…'); api('/api/lib/rmdirinfo', 'dir='
+此操作不可恢复（不进废纸篓）。	This operation cannot be undone (will not be moved to Trash).	个子目录') : '') + '。</div>' + '<div style="color:var(--danger);font-weight:600;margin
+每声道扫频	Per-channel sweep	（' + p.chCount + ' 声道）</td></tr>' + '<tr><td style="padding:2px 12px 2px 0;color:
+每行形如 Filter 1: ON PK Fc 1000 Hz Gain -3.0 dB Q 1.41	Each line formatted as Filter 1: ON PK Fc 1000 Hz Gain -3.0 dB Q 1.41	class="sfld wide"><label>EQ 文件路径' + tip('每行形如 Filter 1: ON PK Fc 1000 Hz Gain -3.0 dB Q 1.41') + '</label>' + '<input type=text
+没有匹配的曲目	No matching tracks	} else { D('list').innerHTML = '<div class=empty>没有匹配的曲目</div>'; } ret
+没有可加入的文件	No files to add	y(paths) { if (!paths.length) { toast('没有可加入的文件'); return; } var i = 0, n = 0; (fu
+没有可对比的曲目	No tracks available for comparison	\\/][^\\/]*$/, ''); if (!dir) { toast('没有可对比的曲目'); return; } openModal('对比版本', '<div
+活跃年代	Years Active	'衍生作品', '歌词赏析'], person: ['简介', '国籍', '活跃年代', '风格', '代表作品', '厂牌', '合作'], release
+流媒体目录读取失败	Failed to load streaming directory	{ head('流媒体', '读取失败', ''); listErrorBox('流媒体目录读取失败', function () { loadRemote(id || '');
+浏览…	Browse...	w 壳）才有宿主通道；浏览器直开时按钮隐藏，避免点了没反应。 + '<button class="btn" id=sp_browseRoot style
+混合相位	Intermediate phase	'线性相位', minimum: '最小相位', intermediate: '混合相位' }[override] || override) : it.pha
+添加到歌单	Add to Playlist	AddSq title="把当前曲目添加到指定歌单">' + '<svg width=12 height=12 viewBox="0 0 24 24"
+添加失败:	Failed to add: 	ame); }).catch(function (e) { toast('添加失败: ' + e); }); }); } function saveQueue
+清空队列	Clear Queue	仍在）">保存为歌单</button>' : '') + (n ? '<button class=btn id=qClrAll>清空队列</button>'
+清除 Key	Clear Key	n id=sp_llmtest>测试连接</button>' + '<button class=btn id=sp_llmclear>清除 Key</butt
+源文件	Source File	var nodes = []; nodes.push({ k: '源文件', v: nam(p.src) + (p.codec ? ' \u00b7
+源采样率	Source Sample Rate	=max>自动（设备最高）</option><option value=src>源采样率</option><option value=44100>44100</opti
+滚轮 ±0.5 dB，双击归零（0 dB）	Scroll ±0.5 dB, double-click to reset (0 dB)	le = (el.title ? el.title + '；' : '') + '滚轮 ±0.5 dB，双击归零（0 dB）'; var lab = labId ? D(labId) : null;
+点击停止投放并恢复本机输出（阶段：	Click to stop casting and restore local output (stage: 	n', running); nb.title = running ? ('点击停止投放并恢复本机输出（阶段：' + (st.phase || '-') + '）')
+点击卡片选中	Click card to select	pace-between;gap:8px">' + '<span style="font-size:11px;color:var(--mut2)
+独占模式会接管这个设备；共享模式经系统混音，不接管	Exclusive mode takes full control of this device; shared mode mixes through the system and does not take control.	出设备', '<option value="">默认设备</option>', '独占模式会接管这个设备；共享模式经系统混音，不接管') // 2026-10-25（方案 C，用户选择）：Hog
+独占直通引擎	Exclusive Direct Engine	dge>CoreAudio · Hog Mode</div>'; h += '<div class=am-card-mid><div class=am-card-tit
+留空 = 保持原密码	Leave empty to keep existing password	'; D('sp_src_pass').placeholder = s ? '留空 = 保持原密码' : '密码'; srcFormMsg(s ? ('正在编辑「' + (
+监听级纯中性调音，无主观音染，适合专业音频工作者与追求纯粹原声的用户。	Monitoring-grade pure neutral tuning with no coloration, ideal for audio professionals and purists.	e: 'IEF 中性监听目标 (Neutral)', scene: '监听级纯中性调音，无主观音染，适合专业音频工作者与追求纯粹原声的用户。', tech: 'IEF Neutral 以平直无染为核心，低频
+目标渲染器	Target Renderer	t_stat_phase>已停止</span></div>' + '<div class=in-stat-item><span class=lbl>目标渲染
+直接发送给开发者，可附诊断包	Send directly to developers, optionally attaching diagnostics package	@163.com），页面不能指定。 + sgroup('反馈问题', '直接发送给开发者，可附诊断包', '<div class="sfld wide"><la
+直通监听已启动	Passthrough monitoring started	if (j && j.ok) { toast(isMon ? '直通监听已启动' : '录制采集已启动'); if (D('sp_inmsg')
+真的出声	actually emit sound	下面「校正文件 → 脉冲响应 IR」共用同一个卷积器）。<br>' + '测量会<strong>真的出声</strong>：每个声道一段对数扫频，默认电平 −2
+硬件直通 · bit-perfect；不抢 Hog ⟹ 系统音量条 / 音量键全程可用。如需彻底独占（屏蔽其它 App 声音），请勾选「严格独占」。	Hardware direct · bit-perfect; does not acquire Hog ⟹ system volume slider and keys remain functional. For complete exclusivity (muting other apps), check 'Strict Exclusive'.	它 App 声音；系统音量条会失效，请用本程序音量条调音量。' : '硬件直通 · bit-perfect；不抢 Hog ⟹ 系统音量条 / 音量键全程可用。如需彻底独占（屏蔽其它 App 声音），请勾选「严格独占」。'; } else if (bk === 'wasapi-shared')
+空格	Space	lassList.add('on'); var rows = [ ['空格', '暂停 / 继续'], ['← →', '上一首 / 下一首'], ['
+符合大众听音盲测偏好，低频温暖厚实、中高频平衡耐听，杂食百搭，适合绝大多数现代流行乐与影视原声。	Matches mainstream blind-test listening preferences with warm, impactful bass and smooth, balanced mids/highs. Versatile for modern pop, vocals, and soundtracks.	头戴目标曲线 (Harman Over-Ear)', scene: '符合大众听音盲测偏好，低频温暖厚实、中高频平衡耐听，杂食百搭，适合绝大多数现代流行乐与影视原声。', tech: 'Harman Target 基于 Harman
+系统混音	System Mixer	p.buffer + ' ms', badge: isSharedOut ? '系统混音' : '硬件独占', kind: isSharedOut ? 'dsp' :
+索尼 Sony	Sony	heiser">森海塞尔 Sennheiser</button>' + '<button class="btn brand-chip" data-brand="Son
+维基百科	Wikipedia	ce.indexOf('wikipedia') >= 0) srcName = '维基百科'; else if (m.source.indexOf('moe
+网络信息读取失败，稍后重试	Failed to load network information. Please retry later.	&& j._err) { D('netMsg').textContent = '网络信息读取失败，稍后重试'; return; } D('netMsg').innerHTML
+网络曲目暂无歌词	No lyrics available for streaming track	test(file)) { D('lyricbox').innerHTML = '<div class="ly none">网络曲目暂无歌词</div>'; return; }
+耳机 EQ（OPRA 校准预设）	Headphone EQ (OPRA Calibration Presets)	'); // 1. 耳机 EQ（OPRA） h += sgroup('耳机 EQ（OPRA 校准预设）', '收录 6,230 款耳机专业校准滤波 · CC BY-SA 4.0',
+联网调用 DeepSeek（按次计费）：解析无标签文件、并在艺术家 / 专辑 / 单曲页整理简介并缓存（7 天有效）。	Calls DeepSeek online (pay-per-request): parses untagged files, curates summaries on artist / album / track views, and caches results (valid for 7 days).	, 'AI 增强（DeepSeek）', aiOn, '联网调用 DeepSeek（按次计费）：解析无标签文件、并在艺术家 / 专辑 / 单曲页整理简介并缓存（7 天有效）。' + '关闭后两项都停，本地与公开数据源照常工作'
+自动前级	Auto Preamp 	s(pre).toFixed(0) + ' dB 余量）'); toast('自动前级 ' + pre + ' dB（峰值 +' + maxGain.toFixed
+自动前级：曲线峰值 +	Auto Preamp: curve peak +	inp.value = pre; peqApply(); peqMsg('自动前级：曲线峰值 +' + maxGain.toFixed(1) + ' dB → 前级 ' +
+自动发现失败：/api/naa/discover 无响应	Auto-discovery failed: /api/naa/discover not responding	sp_naa_msg'))) { em.textContent = '自动发现失败：/api/naa/discover 无响应'; em.style.color = 'var(--err)';
+自由场目标曲线 (Free Field)	Free Field Target Curve (Free Field)	ield') >= 0) { return { name: '自由场目标曲线 (Free Field)', scene: '模拟消音室正前方向直达声，干脆纯净，适合需要
+艺术家资料	Artist Info	; head(who, S.albums.length + ' 张专辑', '<button class=btn id=bArtistBio>艺术家资料</butto
+艺术家（搜索：	Artists (Search: 	localeCompare(y, 'zh'); }); head(q ? ('艺术家（搜索：' + q + '）') : '艺术家', order.length + '
+补全到的标签 / 封面写回音频文件本身；写前校验音频数据逐位不变，原文件备份到 rlplayer-meta	Write fetched tags and cover art back into audio files; bit-exact audio integrity verified before writing, original files backed up to rlplayer-meta.	weight:400">默认开启</span></div>' + '<div class=hint id=sp_wbdesc style="margin:2px 0 9px">补全到的标签 / 封面写回音频文件本身；写前校验音频数据逐位不变，原文件备份
+计划失败	Calibration plan failed	ction (e) { D('rcStatus').textContent = '计划失败'; D('rcStatusSub').textContent = Strin
+设备搜索失败（/api/cast/devices 无响应）	Device discovery failed (/api/cast/devices not responding)	'on')) { D('mbody').innerHTML = '<div class=castpick-empty>设备搜索失败（/api/cast/devices 无响应）</div>' +
+设置失败：网络错误	Failed to save settings: network error	; x.onerror = function () { toast('设置失败：网络错误'); }; x.send(f); }; Arra
+设置文件夹位置	Set Folder Location	5a2 2 0 01-2-2z"/></svg></div>'; h += '<div class=am-qtext><div class=am-qtitle>设置文件夹
+诊断	Diagnostics	报错时要拿现场），所以与输入/输出/PCM/SDM/高级 平级。 + '<button class=stab data-g=diag>诊断</button
+该实体暂无可用的 AI 整理资料。	No AI-curated summary available for this item.	d || {}, '', kind, opts); if (!h) h = '<div class=npdhint>该实体暂无可用的 AI 整理资料。</div>'; return h;
+该目录下没有可对比的音频文件	No comparable audio files found in this directory.	!names.length) { D('mbody').innerHTML = '<div class=hint>该目录下没有可对比的音频文件</div>'; return; }
+请先写下反馈内容再发送	Please enter feedback details before sending.	| '') : ''; if (!text.trim()) { fbMsg('请先写下反馈内容再发送', 'err'); if (t) t.focus(); return fal
+请填写用户名	Please enter a username.	; return; } if (!user) { srcFormMsg('请填写用户名', false); return; } var body = 'acti
+请填写问题描述后发送反馈，诊断包会一并上传。	Please describe the issue before sending feedback; diagnostics package will be uploaded together.	'smooth' }); text.focus(); } diagMsg('请填写问题描述后发送反馈，诊断包会一并上传。'); } function drawRoots() { var bo
+读取收藏失败:	Failed to load favorites: 	ch(function (e) { D('list').innerHTML = '<div class=empty>读取收藏失败: ' + esc(e) + '</div>'
+调制器抖动（LSB，-1 = 默认）	Modulator dither (LSB, -1 = default)	+ num({ id: 'sp_moddith', label: '调制器抖动（LSB，-1 = 默认）' }, ADV.moddith, -1, 1, 0.001, '抑制空闲音'
+调整播放顺序	Reorder Playback	, '队列菜单（播放 / 歌单 / 移除）'], ['拖动队列条目', '调整播放顺序'], ['Esc（搜索框内）', '清空并退出搜索'], ['Ctrl /
+资料库	Library	ide-top id=sideTop></div><div class=sec>资料库</div><div class='nav on' data-v=albums>
+走 CPU（未找到可执行的 GPU 后端）	Running on CPU (no executable GPU backend found)	当前状态：' + (j && j.available ? 'GPU 可用' : '走 CPU（未找到可执行的 GPU 后端）'); var metalInfo = (j && j.metal
+越小延迟越低，但更容易欠载	Lower values reduce latency but increase underrun risk	冲（毫秒）' }, D('sBuf').value, 10, 500, 10, '越小延迟越低，但更容易欠载') + num({ id: 'sp_ramp', label:
+跟随源 = 按文件真实位深请求（16/24/32）；DSD 输出恒为 1 bit，此项只在 PCM 模式生效	Follow source = request exact file bit depth (16/24/32); DSD output is always 1 bit, option only effective in PCM mode.	t(32, '32 bit', ADV.bits), '跟随源 = 按文件真实位深请求（16/24/32）；DSD 输出恒为 1 bit，此项只在 PCM 模式生效') + sel('sp_ch', '输出声道数',
+转到	Go	ic' : 'D:\\Music') + '">' + '<button class=pb id=fGo title="转到">\u21b5
+载入失败	Failed to load	(!j || !j.ok) { toast((j && j.error) || '载入失败'); return; } api('/api/sq/info?n
+输入后端	Input Backend	AUHAL 输入侧。 sel('sp_inbackend', '输入后端', opt('none', '[none]', ADV.inBackend
+输入缓冲（毫秒）	Input buffer (ms)	) + num({ id: 'sp_inbuf', label: '输入缓冲（毫秒）' }, ADV.inBuf || 100, 10, 500, 10, '环形
+输出设备已选择，下次播放生效	Output device selected; takes effect on next playback.	gs(); repaintTrims(); toast('输出设备已选择，下次播放生效'); }; repaintTrims(); }).cat
+近期	recently	subText = '缓存 · ' + (firstDate || '近期') + ' 取回' + (j.offline ? ' · 离线' : '')
+返回列表	Back to List	bArtistRefresh>刷新资料</button> ' + '<button class=btn id=bBackArtists>返回列表</but
+还原	Restore	_REST : ICON_MAX; b.title = isMax ? '还原' : '最大化'; } WV.addEventListener('m
+还没有播放记录	No playback history yet	if (!it.length) { D('list').innerHTML = '<div class=empty>还没有播放记录</div>'; return; }
+还没有歌单，可直接在上方新建	No playlists yet; create one above.	o">'; if (!sqs.length) { h += '<div class=hint style="padding:12px 4px">还没有歌单，可直接在上方
+选中后会把当前曲目推送到该设备，之后的切歌/暂停/进度都作用在它上面。	Selecting will cast the current track to this device; subsequent track changes, pause, and seeking will apply to it.	+ '</span></button>'; }); h += '</div><div class=hint style="margin-top:10px">选中后会把当前曲目推送到该设备，之后的切歌/暂停/进度都
+选择目标歌单	Select Target Playlist	/button></div>'; openModal(title || '选择目标歌单', h); Array.prototype.forEach.call
+选择调音目标预设	Select Tuning Target Preset	m:12px;gap:10px;flex-wrap:wrap">' + '<h3 id=eqSelectedModelTitle style="font-size:14
+采样率未知	Sample rate unknown	' + (d.mixRate ? (d.mixRate + ' Hz') : '采样率未知') + (d.mixBits ? (' · ' + d.m
+采集实时状态	Real-time Capture Status	span>' + '</div>') + sgroup('采集实时状态', '1 秒自动轮询', '<div class="sfl
+采集设备	Capture Device	esc(p.playDevice) + '</td></tr>' + '<tr><td style="padding:2px 12px 2px 0;color
+重新扫描	Rescan	id=bEmptyScan>&#128260; ' + (hasRoots ? '重新扫描' : '扫描目录') + '</button>' + '<butto
+重新扫描全部	Rescan All	e="display:none">浏览…</button>' + '<button class="btn" id=sp_addroot>添加目录</butto
+重新整理	Recurate	npDataSummaryBody(st.data, kind) + '<div style="margin-top:16px"><button class=
+重置为 Flat（20 段全部 0dB）？	Reset to Flat (all 20 bands 0 dB)?	onclick = function () { if (confirm('重置为 Flat（20 段全部 0dB）？')) peqPresetAction('reset', 'Flat');
+针对入耳式耳道封闭增强低频动态与人声清晰度，适合现代流行、人声与节奏感强的音乐。	Compensates for in-ear seal by enhancing bass dynamics and vocal clarity; ideal for modern pop, vocal, and rhythmic music.	哈曼入耳目标曲线 (Harman In-Ear)', scene: '针对入耳式耳道封闭增强低频动态与人声清晰度，适合现代流行、人声与节奏感强的音乐。', tech: 'Harman In-Ear Target 补偿
+队列	Queue	l='currentColor' stroke='none'/></svg>播放队列</div><div class=nav data-v=recent><svg
+队列已清空	Queue cleared	pi/clear', '').then(function () { toast('队列已清空'); renderQueuePage(); loadQ(); });
+阶 SDM	th-order SDM	b7 1-bit \u00b7 ' + (p.modOrder || 5) + ' 阶 SDM', badge: 'SDM 调制', kind: 'dsp' });
+随机播放（不重复当前曲）	Shuffle (without repeating current track)	', one: true }, { name: '随机播放', aria: '随机播放（不重复当前曲）', color: 'var(--acc-text)', one: false
+需要双音素材	Dual-tone source required	pan>', q.imd_note || '需要双音素材'); s += qSection('噪声'); s +=
+非 bit-perfect	Non-bit-perfect	t: t, cls: c, title: title }; } t = '非 bit-perfect'; c = 'bp-no'; if (!title) title = '
+非谐波残留	Non-harmonic Residue	ut2)">不适用（多峰素材）</span>'); s += qRow('非谐波残留', qFmt(q.non_tonal_db, 2, ' dB'), '16
+音质指标不可用：	Audio metrics unavailable: 	'boolean' && !q.available) { s += '<div class=hint style="margin-top:12px;color:va
+音量	Volume	s(p.volume) < 0.05; nodes.push({ k: '音量', v: volText(p.volume), id: 'chainVol'
+音量条已拉到最左端：增益 0（真静音）	Volume slider at minimum: gain 0 (true mute)	输出刺耳白噪音。请在 DAC 端调音量。' : (silent ? '音量条已拉到最左端：增益 0（真静音）' : ''); } } if (D('npRep')) D('npRep
+音量越低低频提升越多	Greater bass boost at lower volumes	'sp_loud', '等响度补偿', D('sLoud').checked, '音量越低低频提升越多')) + '</div>'; // ---------- E
+预设名（保存到 rlplayer-peq-presets.txt）：	Preset name (saved to rlplayer-peq-presets.txt): 	lick = function () { var n = prompt('预设名（保存到 rlplayer-peq-presets.txt）：', (PEQ_STATE && PEQ_STATE.name) || '我的
+预设相位：读取中…	Preset Phase: Reading...	说清"预设"是什么，不编造具体相位 msg.textContent = '预设相位：读取中…'; return; } var actual = overr
+频响	Frequency Response	_dbfs, 2, ' dBFS')); s += qSection('频响'); s += qRow('频谱重心', qFmt(q.centro
+频谱重心	Spectral Centroid	s += qSection('频响'); s += qRow('频谱重心', qFmt(q.centroid_hz, 0, ' Hz'), '亮度指标
+首跳过	tracks skipped	le || 0) + ' 首可写，' + (j.skipped || 0) + ' 首跳过'); }).catch(function () { WB_BUSY =
+首，剩余	tracks, remaining 	= '下一首：' + nextTitle + '（队列共 ' + qLen + ' 首，剩余 ' + remain + ' 首）'; } else { te
+马勒第五交响曲	Mahler: Symphony No. 5	ur Seasons">四季（维瓦尔第）</button>' + '<button class="btn chip-work" data-title="Symp
+高架 HS	High Shelf (HS)	(b.type === 'HS' ? ' selected' : '') + '>高架 HS</option></select>'; h += '<div cl
+默认开启	Enabled by default	：默认开启，不提供开关 —— 只说明能力，两个动作按钮照旧。 + '<div class="mh sub">标签写回<span class=hint st
+默认排序	Default Order	ode === 'default' ? ' selected' : '') + '>默认排序</option>' + '<option value=
+（声道	 (Channel 	'<div class=sfld><label>' + names[i] + '（声道 ' + (i + 1) + '，dB）</label>' +
+（强制覆盖）	 (Forced Override)	aps + '）· 实际输出 ' + actual + (override ? '（强制覆盖）' : ''); } // ---- 功能4（用户 2026-10-22）：
+（正在发现…）	(Discovering...)	style="display:flex;gap:8px">' + '<select id=sp_upnp_dev style="flex:1"><option
+，同时清掉	, also clearing 	r' && r.removedTracks > 0) ? ('，同时清掉 ' + r.removedTracks + ' 首索引记录') : '';
+，点这里去更新	, click here to update	t = text; b.title = '发现新版本 ' + text + '，点这里去更新'; } function updCheck(manual) { if (
+：每个声道一段对数扫频，默认电平 −20 dBFS，开始前会让你确认设备与时长。	: a logarithmic sweep per channel at default −20 dBFS; you will confirm device and duration before starting.	下面「校正文件 → 脉冲响应 IR」共用同一个卷积器）。<br>' + '测量会<strong>真的出声</strong>：每个声道一段对数扫频，默认电平 −20 dBFS，开始前会让你确认设备与时长。</div></div>'
+；rlplayer-llm.conf 本体不会被打进包。	; rlplayer-llm.conf itself will not be included in the package.	t、settings-summary.txt；' + 'api_key / token / password / Authorization 头一律脱敏为 <redacted>，家目录用户名

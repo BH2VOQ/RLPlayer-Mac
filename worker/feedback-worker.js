@@ -1,5 +1,5 @@
+// SPDX-FileCopyrightText: 2026 BH2VOQ <https://github.com/BH2VOQ>
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 August Hu <BH2VOQ@163.com>
 //
 // 本文件是 RLPlayer 的一部分，以 GNU 通用公共许可证第 3 版（或更新版本）发布。
 // 完整条款见仓库根目录的 LICENSE 文件。
@@ -44,7 +44,7 @@
 //   * 只写进你自己指定的仓库。
 
 const MAX_BODY_BYTES = 16 * 1024;          // 正文硬上限
-const MAX_DIAG_BYTES = 8 * 1024 * 1024;    // 诊断包硬上限（base64 解码后）
+const MAX_DIAG_BYTES = 12 * 1024 * 1024;    // 诊断包硬上限（base64 解码后）
 const RATE_LIMIT_PER_MIN = 5;
 
 // 简易限流：用 Cache API 存"IP → 计数"，60 秒过期。
@@ -162,7 +162,7 @@ export default {
         return json({ ok: false, error: '诊断包 base64 解码失败' }, 400);
       }
       if (diagBytes.length > MAX_DIAG_BYTES) {
-        return json({ ok: false, error: '诊断包过大（上限 8MB，可取消勾选只发正文）' }, 413);
+        return json({ ok: false, error: '诊断包过大（上限 12MB，可取消勾选只发正文）' }, 413);
       }
       // 必须是 ZIP（PK\x03\x04），与客户端同一判据
       if (diagBytes.length < 22 ||
@@ -183,9 +183,11 @@ export default {
     const version = (typeof body.version === 'string' ? body.version : '').slice(0, 64);
     const os = (typeof body.os === 'string' ? body.os : '').slice(0, 200);
 
-    const title = '[' + id + '] 用户反馈 ' + (version ? 'v' + version.replace(/^v/, '') : '');
+    const caseId = typeof body.case_id === 'string' && /^RLP-[A-Za-z0-9-]{1,64}$/.test(body.case_id) ? body.case_id : '';
+    const title = '[' + id + ']' + (caseId ? ' [case:' + caseId + ']' : '') + ' 用户反馈 ' + (version ? 'v' + version.replace(/^v/, '') : '');
     const issueBody =
       '**工单号**：' + id + '\n' +
+      '**诊断案例**：' + (caseId || '(未提供)') + '\n' +
       '**版本**：' + (version || '(未知)') + '\n' +
       '**环境**：' + (os || '(未知)') + '\n' +
       '**诊断包**：' + (diagBytes ? ('已附带（' + Math.round(diagBytes.length / 1024) + ' KB）') : '未附带') + '\n\n' +

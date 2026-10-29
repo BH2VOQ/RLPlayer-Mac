@@ -1,5 +1,5 @@
+// SPDX-FileCopyrightText: 2026 BH2VOQ <https://github.com/BH2VOQ>
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 August Hu <BH2VOQ@163.com>
 //
 // 本文件是 RLPlayer 的一部分，以 GNU 通用公共许可证第 3 版（或更新版本）发布。
 // 完整条款见仓库根目录的 LICENSE 文件。
@@ -159,10 +159,10 @@ async function run() {
     ck(r.status === 400, '不是 ZIP（缺 PK 头）⟹ 400', String(r.status));
 
     // 超大
-    const huge = new Uint8Array(9 * 1024 * 1024);
+    const huge = new Uint8Array(13 * 1024 * 1024);
     huge[0] = 0x50; huge[1] = 0x4B; huge[2] = 0x03; huge[3] = 0x04;
     r = await worker.fetch(req({ text: 'x', diag: b64(huge) }, { ip: '10.0.2.3' }), ENV);
-    ck(r.status === 413, '诊断包 > 8MB ⟹ 413', String(r.status));
+    ck(r.status === 413, '诊断包 > 12MB ⟹ 413', String(r.status));
   }
 
   console.log('\n=== 4. 未配置 token 必须失败（绝不假装成功）===');

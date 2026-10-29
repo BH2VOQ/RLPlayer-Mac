@@ -1,5 +1,5 @@
+// SPDX-FileCopyrightText: 2026 BH2VOQ <https://github.com/BH2VOQ>
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 August Hu <BH2VOQ@163.com>
 //
 // 本文件是 RLPlayer 的一部分，以 GNU 通用公共许可证第 3 版（或更新版本）发布。
 // 完整条款见仓库根目录的 LICENSE 文件。
@@ -10,7 +10,8 @@
 //   * RBJ Audio EQ Cookbook 双二阶：peaking / low-shelf / high-shelf；
 //     系数用 float64 计算，采样处理用 float32（z1/z2 状态为 float）。
 //   * 默认 20 段，中心频率取 ISO 1/3 倍频程序列（20Hz~20kHz）中的 20 个；
-//     每段默认 Q=1.41、增益 0dB（±12dB 步进 0.1 由 UI 约束）。
+//     每段默认 Q=1.41、增益 0dB；编辑/导入/系数设计统一 ±24dB（步进 0.1）。
+//     ±12dB 是常用调整范围，不是硬边界；大提升须检查总曲线峰值并留前级余量。
 //   * 采样率相关：prepare(fs) 按当前采样率重建全部系数（44.1/48/96/192k …）。
 //   * 热更新：set_settings() 不打断音频线程；新系数链从零状态启动，
 //     与旧链做 N 样本线性交叉淡入（默认 128 样本），避免爆音。

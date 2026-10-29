@@ -1,6 +1,6 @@
 #!/bin/zsh
+# SPDX-FileCopyrightText: 2026 BH2VOQ <https://github.com/BH2VOQ>
 # SPDX-License-Identifier: GPL-3.0-or-later
-# Copyright (C) 2026 August Hu <BH2VOQ@163.com>
 #
 # 本文件是 RLPlayer 的一部分，以 GNU 通用公共许可证第 3 版（或更新版本）发布。
 # 完整条款见仓库根目录的 LICENSE 文件。
@@ -182,6 +182,11 @@ for tool in ffmpeg ffprobe; do
     echo "✓ 已内置 ${tool}：自建 arm64 精简静态版（$(du -h "$src_tool" | cut -f1)）"
 done
 
+# Offline diagnosis is part of the self-contained diagnostic deliverable.
+[[ -x "$BUILD/rtadiag" ]] || { echo "✗ 缺少 rtadiag，请先构建离线诊断工具"; exit 1; }
+cp "$BUILD/rtadiag" "$APP/Contents/MacOS/rtadiag"
+chmod +x "$APP/Contents/MacOS/rtadiag"
+
 # 6) 单进程与纯 arm64 门禁校验
 # 6a) 严禁 rtaweb 或 x86 产物进入 App
 if [[ -e "$APP/Contents/MacOS/rtaweb" ]]; then
@@ -196,7 +201,7 @@ if find "$APP/Contents/MacOS" -maxdepth 1 -name '*-x86_64' -print -quit | grep -
 fi
 
 # 6b) 架构硬校验：所有 Contents/MacOS 下的 Mach-O 可执行文件必须严格纯 arm64
-for bin in "$APP/Contents/MacOS/RLPlayer" "$APP/Contents/MacOS/ffmpeg" "$APP/Contents/MacOS/ffprobe"; do
+for bin in "$APP/Contents/MacOS/RLPlayer" "$APP/Contents/MacOS/ffmpeg" "$APP/Contents/MacOS/ffprobe" "$APP/Contents/MacOS/rtadiag"; do
     if [[ ! -f "$bin" ]]; then
         echo "✗ 致命错误：缺少核心二进制 $bin"
         exit 1
@@ -220,7 +225,7 @@ if command -v otool >/dev/null 2>&1; then
         exit 1
     fi
     MINOS_FAIL=0
-    for bin in RLPlayer ffmpeg ffprobe librtagpu.dylib; do
+    for bin in RLPlayer ffmpeg ffprobe librtagpu.dylib rtadiag; do
         BIN_MINOS="$(otool -l "$APP/Contents/MacOS/$bin" 2>/dev/null | awk '/LC_BUILD_VERSION/{f=1} f && /minos/{print $2; exit}')"
         if [[ -z "$BIN_MINOS" ]]; then
             echo "✗ 致命错误：无法读取 $bin 的 LC_BUILD_VERSION minos"

@@ -1,5 +1,5 @@
+// SPDX-FileCopyrightText: 2026 BH2VOQ <https://github.com/BH2VOQ>
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 August Hu <BH2VOQ@163.com>
 //
 // 本文件是 RLPlayer 的一部分，以 GNU 通用公共许可证第 3 版（或更新版本）发布。
 // 完整条款见仓库根目录的 LICENSE 文件。
@@ -33,6 +33,8 @@
 #include <csignal>
 #include <cstdlib>
 #include <cstring>
+#include <cctype>
+#include <fstream>
 #include <string>
 #include <vector>
 #include <mutex>
@@ -98,6 +100,11 @@ struct CheckResult {
 #if defined(RL_WITH_FEEDBACK) && __has_include("mac_feedback.h")
 #define RL_HAVE_MAC_FEEDBACK 1
 #include "mac_feedback.h"
+#endif
+
+// 1.1.1 D2：更新检查失败也要留稳定错误码（不只在原生弹窗里说人话）。
+#if __has_include("diag/diag.h")
+#include "diag/diag.h"
 #endif
 
 #if __has_include("platform/host_msg.h")
@@ -685,6 +692,47 @@ reject:
 // ---------------------------------------------------------------------------
 // 宿主应用委托与窗口控制
 // ---------------------------------------------------------------------------
+
+// 1.1.1-beta2：原生菜单语言。真相源与页面一致 —— rlplayer-settings.conf 的 `lang=en`。
+// 这里刻意**不依赖** rta::platform::config_dir_utf8()（本文件在测试里被 #include 复用，
+// 那条路径可能没链平台层），所以自己按同一条规则解析：env RLPLAYER_STATE_DIR >
+// ~/Library/Application Support/RLPlayer > 什么都不认（回落中文）。
+static bool native_ui_lang_is_en() {
+    std::string base;
+    if (const char* env = std::getenv("RLPLAYER_STATE_DIR")) {
+        if (*env) {
+            base = env;
+            while (!base.empty() && (base.back() == '\\' || base.back() == '/')) base.pop_back();
+        }
+    }
+    if (base.empty()) {
+        @autoreleasepool {
+            NSArray<NSString*>* dirs = NSSearchPathForDirectoriesInDomains(
+                NSApplicationSupportDirectory, NSUserDomainMask, YES);
+            if (dirs.count > 0) {
+                NSString* p = [dirs[0] stringByAppendingPathComponent:@"RLPlayer"];
+                const char* u = [p fileSystemRepresentation];
+                if (u && *u) base = u;
+            }
+        }
+    }
+    if (base.empty()) return false;
+    std::ifstream f(base + "/rlplayer-settings.conf");
+    if (!f) return false;
+    std::string line;
+    while (std::getline(f, line)) {
+        if (!line.empty() && line.back() == '\r') line.pop_back();
+        const size_t eq = line.find('=');
+        if (eq == std::string::npos) continue;
+        if (line.substr(0, eq) == "lang") {
+            std::string v = line.substr(eq + 1);
+            for (char& c : v) c = (char)std::tolower((unsigned char)c);
+            return v == "en";
+        }
+    }
+    return false;
+}
+
 @interface HostAppDelegate : NSObject <NSApplicationDelegate, WKScriptMessageHandler,
                                        WKNavigationDelegate, NSWindowDelegate, WKUIDelegate>
 @property (nonatomic, strong) NSWindow *window;
@@ -694,6 +742,7 @@ reject:
 @property (nonatomic, strong) NSTimer *exitPollTimer;
 @property (nonatomic) NSRect savedFrame;       // max 前的窗口 frame（还原用）
 @property (nonatomic) bool zoomed;
+@property (nonatomic) BOOL startupWindowRevealed;
 // F-4：最近一次「检查更新」的结果，作为「一键更新」的安装计划。
 // 为什么不接受页面传计划：页面若能把 download_url/sha256 塞进来，就等于让网页决定
 // 宿主去下载并安装什么 —— sha256 由页面给的那一版等于没有闸门。
@@ -701,6 +750,33 @@ reject:
 @end
 
 @implementation HostAppDelegate
+
+// The window remains hidden until the HTML theme is applied and WebKit has painted.
+// Otherwise light/blue cold launch exposes the default dark native backing first.
+- (void)revealStartupWindowForTheme:(NSString*)theme {
+    const BOOL light=[theme isEqualToString:@"light"];
+    const BOOL blue=[theme isEqualToString:@"blue"];
+    NSColor* color=light ? [NSColor whiteColor] : (blue ?
+        [NSColor colorWithSRGBRed:248.0/255 green:250.0/255 blue:1 alpha:1] :
+        [NSColor colorWithSRGBRed:22.0/255 green:22.0/255 blue:24.0/255 alpha:1]);
+    self.window.backgroundColor=color;
+    if(@available(macOS 12.0,*))self.web.underPageBackgroundColor=color;
+    self.window.appearance=[NSAppearance appearanceNamed:(light||blue)?NSAppearanceNameAqua:NSAppearanceNameDarkAqua];
+    if(!self.startupWindowRevealed){self.startupWindowRevealed=YES;[self.window makeKeyAndOrderFront:nil];}
+}
+- (void)webView:(WKWebView*)webView didFinishNavigation:(WKNavigation*)navigation {
+    (void)navigation;
+    if(self.startupWindowRevealed || ![webView.URL.scheme isEqualToString:@"rlplayer"])return;
+    [webView evaluateJavaScript:@"document.documentElement.dataset.theme||'dark'" completionHandler:^(id value,NSError* error){
+        NSString* theme=(!error&&[value isKindOfClass:NSString.class])?value:@"dark";
+        // The snapshot completion comes from WebContent after a rendered update, unlike
+        // evaluateJavaScript returning an unresolved Promise on older WebKit releases.
+        [webView takeSnapshotWithConfiguration:nil completionHandler:^(NSImage* image,NSError* snapshotError){
+            (void)image;(void)snapshotError;
+            [self revealStartupWindowForTheme:theme];
+        }];
+    }];
+}
 
 // ---------------- JS 对话框（WKUIDelegate）----------------
 // 背景（2026-10-28 用户实测「之前保存的无法删除」）：WKWebView **不会**自己弹
@@ -799,7 +875,7 @@ reject:
     self.window.titleVisibility = NSWindowTitleHidden;      // 无标题文字（页面自带顶栏）
     self.window.titlebarAppearsTransparent = YES;
     self.window.appearance = [NSAppearance appearanceNamed:NSAppearanceNameDarkAqua];
-    self.window.backgroundColor = [NSColor colorWithCalibratedRed:0.047 green:0.055 blue:0.075 alpha:1.0];
+    self.window.backgroundColor = [NSColor colorWithSRGBRed:22.0/255 green:22.0/255 blue:24.0/255 alpha:1.0];
     self.window.minSize = NSMakeSize(600, 400);
     [self.window center];
     self.window.delegate = self;
@@ -851,6 +927,8 @@ reject:
 
     self.web = [[WKWebView alloc] initWithFrame:frame configuration:cfg];
     self.web.navigationDelegate = self;
+    // Public API: never expose WKWebView's default white backing before first paint.
+    if (@available(macOS 12.0, *)) self.web.underPageBackgroundColor = self.window.backgroundColor;
     // 2026-10-28（用户「之前保存的无法删除」）：**必须**设 WKUIDelegate。
     // WKWebView 默认不弹 JS 对话框，没有 UIDelegate 时 confirm() 直接返回 false
     // ⟹ 所有「删除/重置」类按钮在 .app 里点了毫无反应，而在 Edge/CLI 里正常
@@ -861,7 +939,10 @@ reject:
 
     // 主页面加载自定义 scheme URL
     [self.web loadRequest:[NSURLRequest requestWithURL:[NSURL URLWithString:@"rlplayer://app/"]]];
-    [self.window makeKeyAndOrderFront:nil];
+    // A bounded fallback preserves startup error visibility if navigation never finishes.
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW,5*NSEC_PER_SEC),dispatch_get_main_queue(),^{
+        if(!self.startupWindowRevealed)[self revealStartupWindowForTheme:@"dark"];
+    });
 
     // 轮询 rlapp::exit_requested()：响应 /api/quit 或 shutdown 请求
     self.exitPollTimer = [NSTimer scheduledTimerWithTimeInterval:0.2
@@ -884,15 +965,19 @@ reject:
     NSMenu *bar = [[NSMenu alloc] init];
     NSMenuItem *appItem = [[NSMenuItem alloc] init];
     NSMenu *appMenu = [[NSMenu alloc] init];
-    [appMenu addItemWithTitle:@"关于 RLPlayer"
+    // 1.1.1-beta2：App 菜单跟随界面语言（与页面同一真相源：rlplayer-settings.conf 的 lang）。
+    // 为什么在宿主侧单独读一次：NSMenu 是原生对象，页面里的 i18n 引擎改不到它。
+    // 代价（如实记录）：切换语言后菜单要**重启 App** 才变；页面重载不会重建 NSMenu。
+    const bool en = native_ui_lang_is_en();
+    [appMenu addItemWithTitle:(en ? @"About RLPlayer" : @"关于 RLPlayer")
                        action:@selector(orderFrontStandardAboutPanel:)
                 keyEquivalent:@""];
     [appMenu addItem:[NSMenuItem separatorItem]];
-    [appMenu addItemWithTitle:@"许可证（GPLv3）"
+    [appMenu addItemWithTitle:(en ? @"License (GPLv3)" : @"许可证（GPLv3）")
                        action:@selector(openLicense:)
                 keyEquivalent:@""];
     [appMenu addItem:[NSMenuItem separatorItem]];
-    [appMenu addItemWithTitle:@"退出 RLPlayer" action:@selector(terminate:) keyEquivalent:@"q"];
+    [appMenu addItemWithTitle:(en ? @"Quit RLPlayer" : @"退出 RLPlayer") action:@selector(terminate:) keyEquivalent:@"q"];
     appItem.submenu = appMenu;
     [bar addItem:appItem];
     [NSApp setMainMenu:bar];
@@ -909,11 +994,19 @@ reject:
         return;
     }
     NSAlert *a = [[NSAlert alloc] init];
-    a.messageText = @"未找到 LICENSE 文件";
-    a.informativeText = @"本程序以 GNU GPL v3（或更新版本）发布。"
-                        @"包内 Contents/Resources/LICENSE 缺失，"
-                        @"请到项目仓库查看完整条款。";
-    [a addButtonWithTitle:@"好"];
+    if (native_ui_lang_is_en()) {
+        a.messageText = @"LICENSE file not found";
+        a.informativeText = @"This program is released under the GNU GPL v3 (or later). "
+                            @"Contents/Resources/LICENSE is missing from the bundle; "
+                            @"see the project repository for the full terms.";
+        [a addButtonWithTitle:@"OK"];
+    } else {
+        a.messageText = @"未找到 LICENSE 文件";
+        a.informativeText = @"本程序以 GNU GPL v3（或更新版本）发布。"
+                            @"包内 Contents/Resources/LICENSE 缺失，"
+                            @"请到项目仓库查看完整条款。";
+        [a addButtonWithTitle:@"好"];
+    }
     [a runModal];
 }
 
@@ -955,6 +1048,8 @@ reject:
             break;
         }
         case HostAction::Theme:
+            // Do not reveal during document loading; didFinishNavigation owns first reveal.
+            if(self.startupWindowRevealed)[self revealStartupWindowForTheme:[NSString stringWithUTF8String:hm.arg.c_str()]];
             if (hm.arg == "dark") {
                 self.window.appearance = [NSAppearance appearanceNamed:NSAppearanceNameDarkAqua];
             } else if (hm.arg == "light" || hm.arg == "blue") {
@@ -1275,6 +1370,8 @@ reject:
 - (void)emitUpdateResult:(const rta::update::CheckResult &)r {
     // 记下安装计划（只有 UpdateAvailable 才会被 begin_install 接受）
     self.lastUpdatePlan = r;
+    if(!r.up_to_date() && !r.available()) rta::diag::diag_emit("update.failed",rta::diag::Stage::Update,
+        rta::diag::find_code("update.check_failed"),{{"decision",r.code()},{"reason",r.error},{"http_status",std::to_string(r.status),rta::diag::KvKind::Num}});
 
     NSMutableDictionary *d = [NSMutableDictionary dictionary];
     d[@"stage"]  = r.up_to_date() ? @"up-to-date" : (r.available() ? @"available" : @"failed");

@@ -1,5 +1,5 @@
+// SPDX-FileCopyrightText: 2026 BH2VOQ <https://github.com/BH2VOQ>
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 August Hu <BH2VOQ@163.com>
 //
 // 本文件是 RLPlayer 的一部分，以 GNU 通用公共许可证第 3 版（或更新版本）发布。
 // 完整条款见仓库根目录的 LICENSE 文件。
@@ -37,6 +37,9 @@
 #include "net/cast_service.h"      // UPnP/DLNA 投放会话编排（CastManager / CastState / CastStartParams）
 #include "net/app_icon.h"
 #include "net/zipstore.h"          // 最小 ZIP(STORE)打包：导出诊断 = 一个压缩包(2026-10-22 功能3)
+#include "diag/diag.h"
+#include "diag/bundle.h"
+#include "diag/report.h"
 #include "net/feedback_redact.h"   // 诊断包脱敏**唯一入口**（F-7 2026-10-27：吸收上游 feedback.h 的规则清单）
 #include "net/http_client.h"       // 封面在线抓取：http_get/http_post（platform/http.h 的平台封装）
 #include "net/json.h"              // /api/lib/cover/prefetch 解析网易 type=10 专辑搜索响应(2026-10-26)
@@ -74,6 +77,7 @@ using rta::render::SinkOpenOpts;
 #include "dsp/filter_families.h"
 #include "dsp/oversample_peak.h"
 #include "dsp/eq_text.h"
+#include "dsp/ir_resample.h"
 #include "dsp/peq.h"               // 261024-02 #6：20 段参数均衡（RBJ 双二阶，float64 系数 / float32 处理）
 #include "dsp/opra.h"
 #include "dsp/dop.h"
@@ -181,6 +185,7 @@ struct MacDevInfo {
     int channels{0};
     int mixBits{0};
     std::string mixFmt{"unknown"};
+    uint32_t transportType{0}; // CoreAudio fourCC, read-only evidence; zero means unknown
 };
 static std::string mac_cfstr(CFStringRef s) {
     if (!s) return "";
@@ -213,6 +218,9 @@ static std::vector<MacDevInfo> mac_enum_devices() {
         MacDevInfo mi;
         mi.id = std::to_string((unsigned)d);
         mi.isDefault = hasDef && d == defId;
+        UInt32 transportBytes=sizeof(mi.transportType);
+        AudioObjectPropertyAddress transportAddress{kAudioDevicePropertyTransportType,kAudioObjectPropertyScopeGlobal,kAudioObjectPropertyElementMain};
+        if(::AudioObjectGetPropertyData(d,&transportAddress,0,nullptr,&transportBytes,&mi.transportType)!=noErr)mi.transportType=0;
         CFStringRef name = nullptr;
         UInt32 nsz = sizeof(name);
         AudioObjectPropertyAddress naddr{kAudioObjectPropertyName, kAudioObjectPropertyScopeGlobal,
@@ -589,6 +597,7 @@ static bool     g_lanOn  = false;
 // 存在理由：/api/net 原来无条件回 "port":8899，界面就照着渲染「本机：http://127.0.0.1:8899/」。
 // 单进程之后那个端口**根本没人监听**，再这么说就是让用户去点一个死链接（铁律 4：不许假装）。
 static std::atomic<bool> g_httpListening{false};
+static rta::diag::DiagStartResult g_diagStartup; // initialized before request entry points open
 
 // ---- 后台 detached 任务追踪（元数据补全 / 资料整理）----
 // 2026-10-25（单进程合并）：这两类任务原来是纯 detached 线程，进程退出时没人等它们。
@@ -711,6 +720,131 @@ static std::string jesc(const std::string& s) {
         }
     }
     return o;
+}
+
+// ---------------- 请求 id / 最近动作轨迹（D3，2026-10-29）----------------
+// 为什么要 rid：诊断包要能回答"用户此前做了什么"（ROADMAP Q8），而现有日志只有事件、
+// 没有"这一次请求"的关联键；前后端同一个码/同一个 id 才能把 UI 报错与后端现场对上。
+// 为什么现在还不能写进 diag/event.h：src/diag 由基础代理实现，接口未落地；
+// 这里先用进程内自增号（与后端稳定码同一命名空间），diag 就绪后由 diag_new_rid() 接管。
+static std::atomic<unsigned long long> g_ridSeq{0};
+static std::string rid_new() {
+    static const unsigned long long boot =
+        (unsigned long long)std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::system_clock::now().time_since_epoch()).count();
+    const unsigned long long n = g_ridSeq.fetch_add(1, std::memory_order_relaxed) + 1;
+    char b[64];
+    std::snprintf(b, sizeof(b), "r-%08llx-%04llu", (unsigned long long)(boot & 0xffffffffull), n);
+    return b;
+}
+static thread_local std::string t_rid;
+static const std::string& rid_current() { return t_rid; }
+struct RidScope {
+    explicit RidScope(const std::string& r) : previous(t_rid) { t_rid = r; }
+    ~RidScope() { t_rid = previous; }
+    std::string previous;
+    RidScope(const RidScope&) = delete;
+    RidScope& operator=(const RidScope&) = delete;
+};
+
+// 最近动作轨迹：只记"做了什么"，不记查询串（查询串可能含搜索词/签名/key，见脱敏要求）。
+struct ActionRec {
+    long long ts = 0;
+    std::string rid, method, path;
+    int status = 0;          // HTTP 语义状态（200 / 400 / 404 / 422 / 500）
+    bool ok = true;          // 业务层 {"ok":false} 也算失败（HTTP 200 不代表成功）
+    bool dispatchException = false;
+    long long ms = 0;
+};
+static std::mutex          g_actMx;
+static std::deque<ActionRec> g_actRing;
+static void action_record(const ActionRec& a) {
+    std::lock_guard<std::mutex> lk(g_actMx);
+    g_actRing.push_back(a);
+    while (g_actRing.size() > 200) g_actRing.pop_front();
+}
+static std::string path_no_query(const std::string& p) {
+    const size_t q = p.find('?');
+    return q == std::string::npos ? p : p.substr(0, q);
+}
+static std::string actions_json(size_t limit = 50) {
+    std::lock_guard<std::mutex> lk(g_actMx);
+    std::ostringstream j;
+    j << "[";
+    const size_t n = g_actRing.size();
+    const size_t start = (n > limit) ? n - limit : 0;
+    bool first = true;
+    for (size_t i = start; i < n; ++i) {
+        const ActionRec& a = g_actRing[i];
+        if (!first) j << ",";
+        first = false;
+        j << "{\"ts\":" << a.ts << ",\"rid\":\"" << jesc(a.rid) << "\""
+          << ",\"method\":\"" << jesc(a.method) << "\""
+          << ",\"path\":\"" << jesc(a.path) << "\""
+          << ",\"status\":" << a.status
+          << ",\"ok\":" << (a.ok ? "true" : "false")
+          << ",\"exception\":" << (a.dispatchException ? "true" : "false")
+          << ",\"ms\":" << a.ms << "}";
+    }
+    j << "]";
+    return j.str();
+}
+
+// 诊断/错误文本脱敏：所有"写日志或回给界面"的异常原因都过这一道。
+// 为什么要去查询串：feedback_redact.h 的既有规则**不认 URL query**（tests/test_diag_event.cpp
+// 的 A 段把这条红基线钉住了），而 HTTP 客户端的异常文本里经常整条 URL 带 access_token/q=。
+// 这里只动真正长得像 URL 的片段，不动普通文件路径。
+static std::string err_text_redacted(std::string s) {
+    s = rta::feedback::redact(std::move(s));
+    size_t scan = 0;
+    while (true) {
+        const size_t h = s.find("http", scan);
+        if (h == std::string::npos) break;
+        const size_t q = s.find('?', h);
+        if (q == std::string::npos) break;
+        // 只有当 '?' 前面确实是 http(s):// 结构时才裁剪，避免误伤文件名里的 '?'
+        const bool isUrl = (s.compare(h, 7, "http://") == 0) || (s.compare(h, 8, "https://") == 0);
+        if (!isUrl) { scan = h + 4; continue; }
+        const size_t stop = s.find_first_of(" \t\r\n\"'<>", q);
+        const size_t end = (stop == std::string::npos) ? s.size() : stop;
+        s.replace(q, end - q, "?<redacted-query>");
+        scan = q + 17;
+    }
+    return s;
+}
+
+// ---------------- 体检端点统一错误契约（#17 / B4，2026-10-29）----------------// 修前实测（debug/20261028-02-RLPlayer2核对/evidence/api-cli-results.json）：
+//   * 非法 WAV → {"ok":true,"health":{status:"error", 各指标 0}} —— 调用方看 ok 就当成功，
+//     把 0 当响度/峰值画出去（默认 0 冒充正常结果）；
+//   * 缺参数/文件不存在 → {"ok":false,"error":...} 没有 health —— 与上一条不同构，
+//     前端无法用同一套判据区分"没分析"与"分析失败"。
+// 现契约（三种结果同构，字段只增不删）：
+//   {"ok":<bool>,"usable":<bool>,"code":"<稳定码>","error":"<人话>","health":{...}}
+//   ok == usable == (health.status == "ready")；失败时 health.status=="error"，
+//   指标字段一律为 null（不是 0 —— 0 在 JSON/JS 里是"测出来就是 0"，null 才是"没有结论"）。
+// 稳定码取自 src/diag/error_codes.h（未就绪时用同名字面量，落地后逐字一致，见 diag 接线处）。
+static long long rlp_epoch_ms() {
+    return (long long)std::chrono::duration_cast<std::chrono::milliseconds>(
+               std::chrono::system_clock::now().time_since_epoch()).count();
+}
+static std::string health_failure_json(const std::string& code, const std::string& msg,
+                                       const rta::analysis::TrackHealth* h = nullptr,
+                                       const std::string& rid = std::string()) {
+    std::ostringstream j;
+    j << "{\"ok\":false,\"usable\":false,\"code\":\"" << jesc(code) << "\""
+      << ",\"error\":\"" << jesc(msg) << "\"";
+    if (!rid.empty()) j << ",\"rid\":\"" << jesc(rid) << "\"";
+    j << ",\"health\":{\"dr_db\":null,\"lufs\":null,\"lra\":null,\"peak_dbfs\":null"
+      << ",\"lossless_suspected\":false,\"cutoff_hz\":null,\"confidence\":null"
+      << ",\"reason\":\"\",\"fake24\":false"
+      << ",\"duration_sec\":" << (h ? h->durationSec : 0.0)
+      << ",\"fs\":" << (h ? (unsigned long long)h->fs : 0ull)
+      << ",\"channels\":" << (h ? h->channels : 0)
+      << ",\"bits\":" << (h ? h->bits : 0)
+      << ",\"status\":\"error\",\"error\":\"" << jesc(msg) << "\""
+      << ",\"analyzed_at_ms\":" << (h && h->analyzedAtMs > 0 ? (long long)h->analyzedAtMs : rlp_epoch_ms())
+      << ",\"quality\":{\"available\":false}}}";
+    return j.str();
 }
 
 // 空的 UPnP 设备列表必须给出"为什么 + 怎么办"。
@@ -1168,6 +1302,34 @@ public:
         const int nap = (ms > 0 && ms < 10) ? ms : 10;
         std::this_thread::sleep_for(std::chrono::milliseconds(nap));
         return true;
+    }
+    long long pad_before_write() const override {
+        if (auto* ca=dynamic_cast<rta::platform::CoreAudioOutput*>(ao_.get())) return ca->queued_frames();
+        return -1;
+    }
+    long long last_pad() const override {
+        if (auto* ca=dynamic_cast<rta::platform::CoreAudioOutput*>(ao_.get())) return ca->queued_frames();
+        return -1;
+    }
+    long long device_period_frames() const override {
+        if (auto* ca=dynamic_cast<rta::platform::CoreAudioOutput*>(ao_.get())) return (long long)ca->io_period_frames();
+        return -1;
+    }
+    long long zero_pad_full() const override {
+        if (auto* ca=dynamic_cast<rta::platform::CoreAudioOutput*>(ao_.get())) return ca->zero_pad_full();
+        return -1;
+    }
+    long long zero_starved() const override {
+        if (auto* ca=dynamic_cast<rta::platform::CoreAudioOutput*>(ao_.get())) return ca->zero_starved();
+        return -1;
+    }
+    long long zero_other() const override {
+        if (auto* ca=dynamic_cast<rta::platform::CoreAudioOutput*>(ao_.get())) return ca->zero_other();
+        return -1;
+    }
+    std::string zero_reason() const override {
+        if (auto* ca=dynamic_cast<rta::platform::CoreAudioOutput*>(ao_.get())) return ca->last_zero_reason();
+        return "unknown";
     }
     size_t frames_rendered() const { return ao_->frames_rendered(); }
     uint64_t underruns() const { return ao_->underruns(); }
@@ -2464,6 +2626,7 @@ static BigIspScan scan_isp_blocks(PlaySource& src, size_t fromFrame, size_t limi
 static bool play_one_impl(const std::string& file, const PlayParams& pIn, rta::audio::AudioBuffer& buf,
                           bool* sharedFallback, const std::string& extraNote) {
     auto& ps = g_ps;
+    rta::diag::Stage failureStage = rta::diag::Stage::Decode;
     play_log_rotate();
     g_dbgPeak.store(0.0);
     g_dbgClip.store(0);
@@ -2621,6 +2784,14 @@ static bool play_one_impl(const std::string& file, const PlayParams& pIn, rta::a
         }
         const rta::audio::AudioBuffer& in = src.stream ? inMeta : buf;
         const size_t srcFrames = src.frames;
+        failureStage = rta::diag::Stage::Dsp;
+        {
+            rta::diag::Event e; e.evt="decode.done"; e.set_stage(rta::diag::Stage::Decode);
+            e.str("path",file).str("format",rta::audio::lowerExt(file)).str("decoder",note.text)
+             .num("rate",in.rate).num("channels",in.channels).num("bits",in.bits).num("frames",srcFrames)
+             .numf("elapsed_ms",note.totalMs).numf("cue_start",p.cueStart).numf("cue_end",p.cueEnd).boolean("float",in.isFloat);
+            rta::diag::diag_emit(e);
+        }
         {
             char b[240];
             std::snprintf(b, sizeof(b), "stream=%d decodedMb=%.0f inBufMb=%.0f",
@@ -2634,6 +2805,8 @@ static bool play_one_impl(const std::string& file, const PlayParams& pIn, rta::a
         if (ps.stop.load()) return false;
         // 空解码结果不要再往下走到"设备不支持 0 Hz"——那是误导性的错误。
         if (in.rate == 0 || srcFrames == 0) {
+            rta::diag::diag_emit("decode.empty",rta::diag::Stage::Decode,rta::diag::find_code("decode.read_failed"),
+                {{"frames","0",rta::diag::KvKind::Num},{"format",rta::audio::lowerExt(file)}});
             std::lock_guard<std::mutex> lk(ps.mtx);
             ps.error = "解码结果为空（文件损坏、格式不支持，或 ffmpeg 解码失败）：" + file;
             return false;
@@ -2963,6 +3136,11 @@ static bool play_one_impl(const std::string& file, const PlayParams& pIn, rta::a
                 bool ok = false;
                 for (auto r : rates) if (r == deviceRate) ok = true;
                 if (!ok) {
+                    rta::diag::Event evidence;evidence.evt="negotiate.failed";
+                    evidence.set_code(rta::diag::find_code(rates.empty()?"negotiate.device_not_found":"negotiate.rate_unsupported"));
+                    evidence.num("requested_rate",deviceRate).str("device",pEff.device);
+                    if(!rates.empty())evidence.boolean("rate_supported",false);
+                    rta::diag::diag_emit(evidence);
                     std::string list;
                     for (size_t i = 0; i < rates.size(); ++i) { if (i) list += " / "; list += std::to_string(rates[i]); }
                     std::lock_guard<std::mutex> lk(ps.mtx);
@@ -3070,6 +3248,12 @@ static bool play_one_impl(const std::string& file, const PlayParams& pIn, rta::a
                         const auto dec = rta::audio::decide_capability_failure(false, wantDevRate, {});
                         es << "。" << dec.userMessage;
                     }
+                    const auto& rateList=ratesByBits.empty()?std::vector<uint32_t>{}:ratesByBits.front();
+                    rta::diag::Event evidence; evidence.evt="negotiate.failed";
+                    evidence.set_code(rta::diag::find_code(rateList.empty()?"negotiate.device_not_found":"negotiate.rate_unsupported"));
+                    evidence.str("device",pEff.device).num("requested_rate",wantDevRate).str("device_rates",join(rateList));
+                    if(!rateList.empty()) evidence.boolean("rate_supported",false);
+                    evidence.str("reason",es.str());rta::diag::diag_emit(evidence);
                     std::lock_guard<std::mutex> lk(ps.mtx);
                     ps.error = es.str();
                     return false;
@@ -3214,11 +3398,16 @@ static bool play_one_impl(const std::string& file, const PlayParams& pIn, rta::a
                         dst.ir.assign(irb.frames(), 0.0);
                         const int srcCh = (irb.channels > 1) ? (int)(c % (size_t)irb.channels) : 0;
                         for (size_t n = 0; n < irb.frames(); ++n) dst.ir[n] = irb.sample(n, srcCh);
+                        dst.ir = rta::dsp::resample_ir(dst.ir, irb.rate, in.rate);
                         dst.useGpu = p.convGpu;
                     }
                     convLoaded = true;
                 }
-            } catch (...) { /* IR 读失败就当没配 */ }
+            } catch (const std::exception& e) {
+                rta::diag::diag_emit("dsp.ir.failed",rta::diag::Stage::Dsp,rta::diag::find_code("dsp.ir_load_failed"),{{"reason",e.what()},{"path",p.convIr}});
+            } catch (...) {
+                rta::diag::diag_emit("dsp.ir.failed",rta::diag::Stage::Dsp,rta::diag::find_code("dsp.ir_load_failed"));
+            }
         }
 
         // ---------------- 流式渲染 ----------------
@@ -3469,7 +3658,8 @@ static bool play_one_impl(const std::string& file, const PlayParams& pIn, rta::a
         //   拖过音量后，下一曲的实时增益 = 旧 volDb - 新 startDb（凭空多减几十 dB）。
         ps.volDb.store(p.volume);
 
-        std::thread prod([&]() {
+        std::thread prod([&, rid=rta::diag::current_rid()]() {
+            rta::diag::ScopedRid diagRid(rid);
             const size_t kChunk = 4096;
             uint64_t myEpoch = RQ.epoch.load();
             auto pl = std::make_unique<eng::Pipeline>(cfg);
@@ -3635,7 +3825,17 @@ static bool play_one_impl(const std::string& file, const PlayParams& pIn, rta::a
 
         // 输出后端：独占 / 共享 / NAA / Null，由 make_sink 决定（pEff：可能已回退默认端点）
         auto sink = make_sink(pEff);
+        failureStage = rta::diag::Stage::Negotiate;
+        {
+            rta::diag::Event e; e.evt="negotiate.request";e.set_stage(rta::diag::Stage::Negotiate);
+            e.str("device",pEff.device).str("backend",pEff.backend).num("requested_rate",deviceRate)
+             .num("channels",outCh).num("bits",outBits).num("buffer_ms",pEff.bufferMs)
+             .num("attempt",1);
+            rta::diag::diag_emit(e);
+        }
         if (!sink->open(sink_opts(pEff), deviceRate, outCh, outBits)) {
+            rta::diag::diag_emit("negotiate.failed",rta::diag::Stage::Negotiate,rta::diag::find_code("negotiate.format_rejected"),
+                {{"reason",sink->last_error()},{"requested_rate",std::to_string(deviceRate),rta::diag::KvKind::Num}});
             RQ.abort.store(true); RQ.cv.notify_all(); prod.join();
             std::lock_guard<std::mutex> lk(ps.mtx);
             std::string msg = "打开输出后端失败: " + sink->last_error();
@@ -3645,6 +3845,10 @@ static bool play_one_impl(const std::string& file, const PlayParams& pIn, rta::a
             ps.error = msg;
             return false;
         }
+        rta::diag::diag_emit("negotiate.accepted",rta::diag::Stage::Negotiate,nullptr,
+            {{"actual_rate",std::to_string(deviceRate),rta::diag::KvKind::Num},
+             {"actual_bits",std::to_string(outBits),rta::diag::KvKind::Num},
+             {"buffer_frames",std::to_string(sink->buffer_frames()),rta::diag::KvKind::Num}});
         ActiveSinkGuard sinkGuard(sink.get(), dop);
         // 2026-10-23 真机 DEBUG：打开成功也要如实带出「驱动实际接受的是哪种独占格式」。
         // 之前这句只有失败时才有，成功时用户只看到"32-bit"，根本不知道内部是紧凑24还是32容器，
@@ -3738,7 +3942,14 @@ static bool play_one_impl(const std::string& file, const PlayParams& pIn, rta::a
         // error 非空 = 非正常退出（生产者异常等），绝不能当"正常播完"返回 true
         //（否则队列线程会静默续播下一曲，把故障掩盖成正常切歌）。
         return !ps.stop.load() && ps.error.empty();
+    } catch (const rta::audio::DecodeFailure& e) {
+        rta::diag::diag_emit("decode.failed",rta::diag::Stage::Decode,rta::diag::find_code(e.code),
+            {{"format",rta::audio::lowerExt(file)},{"path",file}});
+        std::lock_guard<std::mutex> lk(ps.mtx); ps.error=e.what();
     } catch (const std::exception& e) {
+        rta::diag::diag_emit("play.failed",failureStage,
+            failureStage==rta::diag::Stage::Decode?rta::diag::find_code("decode.read_failed"):nullptr,
+            {{"reason",e.what()},{"path",file},{"format",rta::audio::lowerExt(file)}});
         std::lock_guard<std::mutex> lk(ps.mtx);
         ps.error = std::string("异常: ") + e.what();
     } catch (...) {
@@ -3759,14 +3970,43 @@ static bool play_one(const std::string& file, const PlayParams& p, rta::audio::A
     if (ok || !sharedFallback) return ok;
     if (ps.stop.load()) return false;   // 用户已停止：不要再重开一遍
 
+    // STARVING/回退不得"静默从头播"（ROADMAP 1.1.1 遗留项，2026-10-29）：
+    // 修前这里无条件 `ps.played.store(0)` 再重开 —— 用户听到的是"歌突然回到开头"，
+    // 日志里只有 FALLBACK_SHARED，没有任何"位置去哪了"的证据。
+    // 现在用现有能力（PlayParams::initialSeekFrac + start_pos_for，EQ 热重载同一套）续播：
+    //   frac = 已输出帧 / 本曲总输出帧（CUE 区间已按区间计）。两者同源，进度条不跳。
+    const size_t playedFrames = ps.played.load();
+    const size_t totalFrames  = ps.total.load();
+    const double frac = (totalFrames > 0) ? (double)playedFrames / (double)totalFrames : 0.0;
+    const double posSec = (ps.outRate > 0) ? (double)playedFrames / (double)ps.outRate : 0.0;
+    // ≥99.9% 视为"已播完"：此时续播没有意义，也不该伪装成从头播一次。
+    if (frac >= 0.999) {
+        play_log("FALLBACK_SKIP 独占流无响应但已播到尾部 frac=" + std::to_string(frac) +
+                 "，不再重开 file=" + file);
+        return false;
+    }
+
     PlayParams p2 = p;
     p2.backend = "wasapi-shared";
     p2.shaper = "none";                 // 共享模式不追求 bit-perfect，关掉抖动整形
-    play_log("FALLBACK_SHARED 独占流无响应,回退 WASAPI 共享(非 bit-perfect) file=" + file);
+    const bool resume = (frac > 0.0 && frac < 1.0 && totalFrames > 0);
+    if (resume) p2.initialSeekFrac = frac;
+    const std::string where = resume
+        ? ("已从 " + std::to_string(posSec) + "s(frac=" + std::to_string(frac) + ")续播")
+        : "位置不足(未输出帧)，从 0s 重开";
+    play_log("FALLBACK_SHARED 独占流无响应,回退 WASAPI 共享(非 bit-perfect) " + where +
+             " played=" + std::to_string(playedFrames) + "/" + std::to_string(totalFrames) +
+             " file=" + file);
     { std::lock_guard<std::mutex> lk(ps.mtx); ps.error.clear(); }
-    ps.played.store(0);
-    return play_one_impl(file, p2, buf, nullptr,
-                         "独占流无响应,已回退 WASAPI 共享(非 bit-perfect)");
+    // played 不在这里归零：由 play_one_impl 按 start_pos_for 写成续播起点（同源）。
+    // 若确实没播过任何帧，start_pos_for 会给 0，那是**如实**的 0，不是被静默清掉的 0。
+    if (resume) {
+        std::lock_guard<std::mutex> lk(ps.mtx);
+        if (!ps.outFallbackWhy.empty()) ps.outFallbackWhy += "；";
+        ps.outFallbackWhy += where;
+    }
+    const std::string note = "独占流无响应,已回退 WASAPI 共享(非 bit-perfect)，" + where;
+    return play_one_impl(file, p2, buf, nullptr, note);
 }
 
 // ---------------- 播放队列 ----------------
@@ -4687,6 +4927,35 @@ static std::string llm_conf_proxy_line() {
 // 旧版只有单份 .1，一盖就丢，现场排查要"上上次启动"的日志时无从找起。
 static std::mutex g_playLogMx;
 static void play_log(const std::string& s) {
+    // Existing text prefixes stay intact; structured copy is supplementary, never recursive.
+    try {
+        rta::diag::Event e;
+        const size_t space = s.find(' ');
+        e.evt = s.substr(0, space);
+        e.set_stage(rta::diag::Stage::Io);
+        if (e.evt.find("DECODE") != std::string::npos) e.set_stage(rta::diag::Stage::Decode);
+        else if (e.evt.find("META") != std::string::npos) e.set_stage(rta::diag::Stage::Meta);
+        else if (e.evt.find("LLM") != std::string::npos) e.set_stage(rta::diag::Stage::Llm);
+        else if (e.evt.find("CAST") != std::string::npos || e.evt.find("UPNP") != std::string::npos) e.set_stage(rta::diag::Stage::Upnp);
+        else if (e.evt.find("LIB") != std::string::npos) e.set_stage(rta::diag::Stage::Library);
+        else if (e.evt.find("ROOM") != std::string::npos) e.set_stage(rta::diag::Stage::Room);
+        else if (e.evt.find("PIPE") != std::string::npos || e.evt.find("DSP") != std::string::npos) e.set_stage(rta::diag::Stage::Dsp);
+        if (e.evt == "DEVICE_LOST") e.set_code(rta::diag::find_code("io.device_lost"));
+        else if (e.evt == "RENDERFAIL") e.set_code(rta::diag::find_code(s.find("STARVING") != std::string::npos ? "io.underrun" : "io.stalled"));
+        else if (e.evt == "WFAIL") e.set_code(rta::diag::find_code("io.write_failed"));
+        e.str("detail", s);
+        // Extract only numeric/boolean evidence, never infer a cause from arbitrary prose.
+        std::istringstream parts(s); std::string word;
+        static const std::set<std::string> numeric = {"rate","bits","ch","channels","frames","ms","pos","pad","peak","clip","dry","dryms","wr","w0","per","bf","ev","evint","prod","t","underrun","elapsed_ms","requested_rate","actual_rate","bufferFrames","attempt"};
+        while (parts >> word) {
+            const auto eq = word.find('='); if (eq == std::string::npos) continue;
+            const std::string key=word.substr(0,eq), value=word.substr(eq+1);
+            if (!numeric.count(key) || value.empty()) continue;
+            char* end=nullptr; const double n=std::strtod(value.c_str(),&end);
+            if (end && *end=='\0' && std::isfinite(n)) e.numf(key,n);
+        }
+        rta::diag::diag_emit(e);
+    } catch (...) { /* Diagnostics must not stop playback on allocation/IO failure. */ }
     std::lock_guard<std::mutex> lk(g_playLogMx);
     const std::string p = path_in_exe_dir("rlplayer-playback.log");
     std::error_code ec;
@@ -4707,7 +4976,7 @@ static void play_log(const std::string& s) {
                       lt.tm_hour, lt.tm_min, lt.tm_sec, ms);
         f << ts;
     }
-    f << s << "\n";
+    f << rta::diag::redact_text(s, nullptr, false) << "\n";
 }
 static void play_log_rotate() {
     const std::string p = path_in_exe_dir("rlplayer-playback.log");
@@ -4797,7 +5066,8 @@ static void meta_on_play(const std::string& file) {
         s_inFlight.erase(file);
         return;
     }
-    std::thread([file, ms, guard] {
+    std::thread([file, ms, guard, rid=rta::diag::current_rid()] {
+        rta::diag::ScopedRid diagRid(rid);
         rta::net::HttpCancellationScope httpCancel(&g_shutdown);
         rta::meta::EnrichOpts o;
         o.srcOn = ms.srcOn; o.llm = ms.llm;
@@ -5453,7 +5723,8 @@ static void summary_job_start_fn(const std::string& key, const std::string& kind
                                  std::function<rta::meta::SummaryResult()> work) {
     auto guard = std::make_shared<BgJobGuard>();
     if (!guard->active()) return; // 退出已经开始，禁止再派发访问共享状态的线程。
-    std::thread([key, kindStr, label, work, guard]() {
+    std::thread([key, kindStr, label, work, guard, rid=rta::diag::current_rid()]() {
+        rta::diag::ScopedRid diagRid(rid);
         if (g_shutdown.load()) {
             std::lock_guard<std::mutex> lk(g_summ_mu);
             auto& job = g_summ_jobs[key];
@@ -5587,6 +5858,183 @@ static bool is_side_effect_exempt(const std::string& p) {
     if (p.rfind("/api/lib/cover/set", 0) == 0) return false;
     for (const char* k : kGetOk) if (p.rfind(k, 0) == 0) return true;
     return false;
+}
+
+// ---------------- 诊断现场快照（D4，2026-10-29）----------------
+// 为什么必须只有**一份**：修前 /api/diag 与 /api/diagzip 各拼一份"现场"，
+// 字段/口径已经漂移（zip 里的 diag.json 没有 endpoints、没有 lastError）。
+// 诊断包与界面必须是同一份证据，否则用户说"包里看不到界面上的错误"，
+// 而我们只能猜是哪个端口丢的。这里统一成一个纯函数：两边都调它，不递归 HTTP。
+//
+// 依赖 D6：运行标记/上次退出结论由 src/diag（基础代理）提供；未就绪时**如实写 unknown**
+// 并给出缺失证据项，绝不用"看起来正常"顶替（铁律 4）。
+static std::string diag_case_id() {
+    static const std::string id = [] {
+        const std::time_t t = std::time(nullptr);
+        std::tm tmv{};
+        localtime_r(&t, &tmv);
+        char b[64];
+        std::strftime(b, sizeof(b), "RLP-%Y%m%d-%H%M%S", &tmv);
+        char p[32];
+        std::snprintf(p, sizeof(p), "-%08lx", (unsigned long)current_pid());
+        return std::string(b) + p;
+    }();
+    return id;
+}
+static std::string diag_sid() { return rta::diag::event_log().sid(); }
+static rta::diag::EventLog& diag_ui_log() { static rta::diag::EventLog log; return log; }
+
+static std::string diag_snapshot_json(bool withProbe) {
+    auto& ps = g_ps;
+    std::ostringstream j;
+    // 2026-10-25：forceProbe 是 Windows 侧"强制重探"的开关；macOS 侧 caps() 每次都实查
+    // （无缓存层），所以这里不再需要该变量。保留 refresh=1 的路由语义不变。
+    const auto upSec = std::chrono::duration_cast<std::chrono::seconds>(
+        std::chrono::steady_clock::now() - g_startTp).count();
+    j << "{\"ok\":true"
+      << ",\"version\":\"" << RLPLAYER_VERSION << "\""
+      << ",\"build\":\"" << jesc(g_buildTime) << "\""
+      << ",\"pid\":" << current_pid()
+      << ",\"uptime\":" << (long long)upSec
+      << ",\"os\":\"" << jesc(rta::diag::os_version_string()) << "\""
+      << ",\"cpu\":\"" << jesc(rta::diag::cpu_brand()) << "\""
+      << ",\"gpu\":\"" << jesc(std::string(rta::dsp::GpuBridge::instance().available() ? "可用" : "不可用") +
+                               std::string("(") + rta::dsp::GpuBridge::instance().status() + ")") << "\""
+      << ",\"tester\":\"" << jesc(rta::diag::read_tester()) << "\""
+      // case_id / sid：诊断包的关联键（前后端同码、同一个请求 id 的锚点）
+      << ",\"caseId\":\"" << jesc(diag_case_id()) << "\""
+      << ",\"sid\":\"" << jesc(diag_sid()) << "\""
+      << ",\"rid\":\"" << jesc(rid_current()) << "\""
+      << ",\"case_id\":\"" << jesc(diag_case_id()) << "\""
+      << ",\"runState\":{\"lastExit\":\"" << rta::diag::run_marker().previous().reason_class()
+      << "\",\"evidence\":\"" << jesc(rta::diag::run_marker().previous().zh_summary()) << "\"}"
+      << ",\"errorCodeTable\":{\"version\":" << rta::diag::kErrorCodeTableVersion << "}"
+      << ",\"port\":" << g_uiPort
+      << ",\"lan\":" << (g_lanOn ? "true" : "false");
+
+    // 端点：每端点给友好名/ID/活状态 + 各档支持率（macOS caps() 无按位深分档，三档同表）。
+    long long probeAgeMax = -1;
+    j << ",\"probe\":{\"performed\":" << (withProbe ? "true" : "false")
+      << ",\"skippedReason\":\"" << (withProbe ? "" : "调用方未请求探活") << "\"}";
+    j << ",\"endpoints\":[";
+    if (withProbe) {
+        std::vector<MacDevInfo> devs;
+        for (const auto& d : mac_enum_devices())
+            if (d.hasOutput) devs.push_back(d);
+        auto joinRates = [](const std::vector<uint32_t>& v) {
+            std::string s;
+            for (size_t k = 0; k < v.size(); ++k) { if (k) s += "/"; s += std::to_string(v[k]); }
+            return s;
+        };
+        bool firstE = true;
+        for (const auto& d : devs) {
+            if (!firstE) j << ",";
+            firstE = false;
+            j << "{\"name\":\"" << jesc(d.name) << "\",\"id\":\"" << jesc(d.id) << "\""
+              << ",\"default\":" << (d.isDefault ? "true" : "false")
+              << ",\"transport_type\":" << d.transportType;
+            auto out = rta::platform::create_audio_output();
+            const rta::platform::DeviceCaps c = out ? out->caps(d.id) : rta::platform::DeviceCaps{};
+            j << ",\"alive\":" << (c.rates.empty() ? "false" : "true")
+              << ",\"r16\":" << c.rates.size()
+              << ",\"r24\":" << c.rates.size()
+              << ",\"r32\":" << c.rates.size()
+              << ",\"rates16\":\"" << joinRates(c.rates) << "\""
+              << ",\"rates24\":\"" << joinRates(c.rates) << "\""
+              << ",\"rates32\":\"" << joinRates(c.rates) << "\"}";
+        }
+    }
+    j << "],\"probeAge\":" << probeAgeMax;
+    // 设置摘要：只取六个白名单键（不回显 ir/eq 等文件路径内容）
+    {
+        std::ifstream f(path_in_exe_dir("rlplayer-settings.conf"));
+        std::string line, backend = "wasapi", rate, bits, filter, shaper, metaon = "1";
+        while (std::getline(f, line)) {
+            if (!line.empty() && line.back() == '\r') line.pop_back();
+            const size_t e = line.find('=');
+            if (e == std::string::npos) continue;
+            const std::string k = line.substr(0, e), v = line.substr(e + 1);
+            if      (k == "backend") backend = v;
+            else if (k == "rate")    rate    = v;
+            else if (k == "bits")    bits    = v;
+            else if (k == "filter")  filter  = v;
+            else if (k == "shaper")  shaper  = v;
+            else if (k == "metaon")  metaon  = v;
+        }
+        j << ",\"settings\":{\"backend\":\"" << jesc(backend)
+          << "\",\"rate\":\"" << jesc(rate)
+          << "\",\"bits\":\"" << jesc(bits)
+          << "\",\"filter\":\"" << jesc(filter)
+          << "\",\"shaper\":\"" << jesc(shaper)
+          << "\",\"metaon\":\"" << jesc(metaon) << "\"}";
+    }
+    // 日志尾 ≤8KB。当前日志不写 key 等敏感串；仍加一层 sk-[A-Za-z0-9]+ 掩码作保险
+    {
+        std::string tail;
+        {
+            std::ifstream f(path_in_exe_dir("rlplayer-playback.log"), std::ios::binary);
+            if (f) {
+                f.seekg(0, std::ios::end);
+                const std::streamoff len = f.tellg();
+                if (len > 0) {
+                    f.seekg(len > 8192 ? len - 8192 : (std::streamoff)0);
+                    tail.assign(std::istreambuf_iterator<char>(f), std::istreambuf_iterator<char>());
+                }
+            }
+        }
+        tail = rta::diag::redact_text(utf8_sanitize(tail), nullptr, false);
+        j << ",\"logTail\":\"" << jesc(tail) << "\"";
+    }
+    // 最近事件（D1/D2 落盘后才有内容；没有就明确写 present:false 而不是空数组谎称"无异常"）
+    {
+        const auto recent = rta::diag::event_log().recent(20);
+        j << ",\"events\":{\"file\":\"events.jsonl\",\"present\":" << (rta::diag::event_log().is_open() ? "true" : "false")
+          << ",\"recentCount\":" << recent.size() << ",\"recent\":[";
+        for (size_t i = 0; i < recent.size(); ++i) { if (i) j << ","; j << rta::diag::event_to_json(recent[i]); }
+        j << "]}";
+    }
+    static const std::string tools = [] {
+        std::string out="{";
+        bool first=true;
+        for (const char* name : {"ffmpeg","ffprobe"}) {
+            const auto path=rta::audio::find_tool(name);
+            std::string version;
+            int rc=path.empty() ? -1 : rta::audio::run_hidden(rta::audio::widen("\""+path+"\" -version"),&version);
+            version=version.substr(0,version.find('\n'));
+            if(!first)out+=","; first=false;
+            out+="\""+std::string(name)+"\":{\"available\":"+(rc==0?"true":"false")+",\"exit_code\":"+std::to_string(rc)+",\"version\":\""+jesc(rta::diag::redact_text(version))+"\"}";
+        }
+        return out+"}";
+    }();
+    j << ",\"tools\":" << tools;
+    // 诊断通道状态：code 由 diag_start 给出真实失败原因（event_log / run_marker / dir_lock），
+    // 不再把"运行标记写失败"也报成 event_log_unwritable（1.1.1 P0-3）。
+    // secondary/dir 是**事实字段**：副实例把事件写进 instances/<sid>/，界面/诊断包要能自证。
+    j << ",\"diagChannel\":{\"ok\":" << (rta::diag::diag_active()?"true":"false")
+      << ",\"code\":\"" << jesc(g_diagStartup.ok?"":g_diagStartup.code)
+      << "\",\"secondary\":" << (g_diagStartup.secondary?"true":"false")
+      << ",\"dir\":\"" << jesc(g_diagStartup.dir)
+      << "\",\"sid\":\"" << jesc(g_diagStartup.sid)
+      << "\",\"error\":\"" << jesc(rta::diag::redact_text(g_diagStartup.error))
+      << "\",\"write_error\":\"" << jesc(rta::diag::redact_text(rta::diag::event_log().last_error())) << "\"}";
+    {
+        std::lock_guard<std::mutex> lock(ps.mtx);
+        if(!ps.signal.empty()) {
+            const auto safe=rta::diag::redact_text(ps.signal,nullptr,false);
+            j << ",\"effective_settings\":" << safe
+              << ",\"settings_fingerprint\":\"" << rta::update::sha256_hex(safe) << "\"";
+        } else j << ",\"effective_settings\":null,\"settings_fingerprint\":null";
+    }
+    j << ",\"io\":{\"dry\":" << g_dbgDry.load() << ",\"dry_ms\":" << g_dbgDryMs.load()
+      << ",\"writes\":" << g_dbgWr.load() << ",\"zero_writes\":" << g_dbgW0.load()
+      << ",\"peak\":" << g_dbgPeak.load() << ",\"clip\":" << g_dbgClip.load() << "}";
+    j << ",\"actions\":" << actions_json(50);
+    {
+        std::lock_guard<std::mutex> lk(ps.mtx);
+        j << ",\"lastError\":\"" << jesc(rta::diag::redact_text(ps.error)) << "\"";
+    }
+    j << "}";
+    return j.str();
 }
 
 static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
@@ -5847,6 +6295,8 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
         }
         if (rq.path.rfind("/api/roomcorr/cancel", 0) == 0) {
             s_room.cancel();
+            rta::diag::diag_emit("room.cancelled",rta::diag::Stage::Room,rta::diag::find_code("room.cancelled"),
+                {{"cancelled","true",rta::diag::KvKind::Bool}});
             return "{\"ok\":true,\"cancelling\":true}";
         }
         if (rq.path.rfind("/api/roomcorr/status", 0) == 0) {
@@ -5999,17 +6449,37 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
                 file = urlDecode(rest);
             }
         }
-        if (file.empty()) return "{\"ok\":false,\"error\":\"未指定文件\"}";
-        if (!valid_utf8(file)) return utf8_path_reject(file);
+        // 三类结果同构（#17）：缺参/不存在/解码失败都是 ok:false + 稳定 code + health 桩，
+        // 只有 status=="ready" 才 ok:true。这样前端只需看 ok/usable/status 一个判据。
+        const std::string rid = rid_current();
+        if (file.empty()) {
+            rta::net::webui_set_status(400);
+            return health_failure_json("decode.read_failed", "未指定文件（需要 ?file=<绝对路径>）",
+                                       nullptr, rid);
+        }
+        if (!valid_utf8(file)) {
+            rta::net::webui_set_status(400);
+            return health_failure_json("decode.read_failed", "路径不是合法 UTF-8，已拒绝", nullptr, rid);
+        }
         std::error_code ec;
-        if (!fs::exists(fs::u8path(file), ec) || ec)
-            return std::string("{\"ok\":false,\"error\":\"文件不存在\"}");
+        if (!fs::exists(fs::u8path(file), ec) || ec) {
+            rta::net::webui_set_status(404);
+            return health_failure_json("library.path_missing", "文件不存在", nullptr, rid);
+        }
         (void)force;   // 缓存策略由 health_store 按 mtime/size 判定，端点不越权清缓存
         // 文件级入口保证不抛异常（解码失败落 status=error + 人话原因），
         // 所以这里不需要 try/catch 兜底。
         const rta::analysis::TrackHealth h = rta::analysis::analyze_file(file);
-        return std::string("{\"ok\":true,\"health\":") +
-               rta::analysis::track_health_json(h) + "}";
+        if (h.status != "ready") {
+            rta::net::webui_set_status(422);
+            const std::string why = h.error.empty() ? "分析失败（未给出原因）" : h.error;
+            return health_failure_json(h.errorCode.empty()?"decode.read_failed":h.errorCode, why, &h, rid);
+        }
+        std::ostringstream j;
+        j << "{\"ok\":true,\"usable\":true";
+        if (!rid.empty()) j << ",\"rid\":\"" << jesc(rid) << "\"";
+        j << ",\"health\":" << rta::analysis::track_health_json(h) << "}";
+        return j.str();
     }
 
     if (rq.path.rfind("/api/lib", 0) == 0) {
@@ -6628,7 +7098,7 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
         // 3) MetaStore 补全歌词兜底(P1):前两路都空才查;原文样输出(src="meta:<来源>")
         if (text.empty()) {
             rta::meta::TrackMeta tm;
-            if (rta::meta::MetaStore::instance().load(file, tm)) {
+            if (rta::meta::MetaStore::instance().load(file, tm, true)) {
                 const auto it = tm.fields.find("lyrics");
                 if (it != tm.fields.end() && !it->second.value.empty()) {
                     text = it->second.value;
@@ -7246,23 +7716,42 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
             ps.error.clear();
             ps.current = p.file;
         }
+        size_t qCount = 0, qIndex = 0;
+        bool qAppended = false;
         {
             std::lock_guard<std::mutex> lk(g_q.mtx);
-            // 如果点的文件已在队列里，就从它开始播；否则把队列换成它。
+            // 如果点的文件已在队列里，就从它开始播；否则**追加到队尾并定位**。
             // CUE 分轨（2026-10-25）：匹配必须带区间 —— 同一路径在一张 cue 专辑里出现 N 次，
             // 只按路径找会永远命中第 1 首（点第 3 轨听到第 1 轨）。
+            //
+            // #14 / B1（2026-10-29，本地实测 15 首队列点队列外第 16 首只剩 1 首）：
+            // 修前这里 `clear(); push_back(want); index=0; sortBase.clear();` —— 一次单曲点播
+            // 就把整列队列删掉并立即落盘（queue_save 紧跟在锁外）。用户丢的不只是内存里的队列，
+            // 重启后也回不来。现在区分两种语义：
+            //   · 单曲点播（本入口）＝ **追加并定位**，不删除任何既有项、不改它们的顺序/区间；
+            //   · 整列替换（/api/queue/set、/api/lib/play 整张专辑）＝ 替换整列（那两个入口不动）。
+            // 随机/排序的"原始顺序"快照也要同步追加，否则关掉随机/恢复默认排序时新曲会消失
+            //（那是同一个 bug 的另一种形态：队列里有，但用户一还原顺序就丢）。
             const QItem want(p.file, p.cueStart, p.cueEnd);
-            bool found = false;
+            size_t hit = g_q.items.size();
             for (size_t i = 0; i < g_q.items.size(); ++i)
-                if (g_q.items[i].same(want)) { g_q.index = i; found = true; break; }
-            if (!found) {
-                g_q.items.clear();
+                if (g_q.items[i].same(want)) { hit = i; break; }
+            if (hit < g_q.items.size()) {
+                g_q.index = hit;
+            } else {
                 g_q.items.push_back(want);
-                g_q.index = 0;
-                g_q.sortBase.clear();
+                if (!g_q.sortBase.empty()) g_q.sortBase.push_back(want);
+                if (!g_q.base.empty()) g_q.base.push_back(want);
+                g_q.index = g_q.items.size() - 1;
+                qAppended = true;
             }
+            qCount = g_q.items.size();
+            qIndex = g_q.index;
         }
         queue_save();
+        play_log(std::string("QUEUE_") + (qAppended ? "APPEND" : "LOCATE") +
+                 " count=" + std::to_string(qCount) + " index=" + std::to_string(qIndex) +
+                 " cue=" + cue_range_text(p.cueStart, p.cueEnd) + " file=" + p.file);
         ps.played.store(0);
         ps.total.store(0);
         // 后端 = UPnP / DLNA：曲目交给投放会话（cast_service），不启动本地播放线程。
@@ -7280,13 +7769,16 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
             ps.outRate = 0;
             ps.outBits = 0;
             ps.playing.store(true);
-            return "{\"ok\":true,\"upnp\":true}";
+            return "{\"ok\":true,\"upnp\":true,\"count\":" + std::to_string(qCount) +
+                   ",\"index\":" + std::to_string(qIndex) + "}";
         }
         ps.playing.store(true);
         const size_t st0 = g_q.index;
         // restart 内部会 join 旧线程（上一步 stopJoin 已把它停掉），再接管新线程
-        ps.restart([p, st0] { return queue_thread(p, st0); });
-        return "{\"ok\":true}";
+        ps.restart([p, st0, rid=rta::diag::current_rid()] { rta::diag::ScopedRid diagRid(rid); return queue_thread(p, st0); });
+        return "{\"ok\":true,\"count\":" + std::to_string(qCount) +
+               ",\"index\":" + std::to_string(qIndex) + ",\"appended\":" +
+               (qAppended ? "true" : "false") + "}";
     }
 
     if (rq.path.rfind("/api/qdel", 0) == 0) {
@@ -7442,7 +7934,16 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
         }
         // 拖进来的是目录时，把里面的音频文件全部展开（最多 5000 个，递归）
         if (!p.file.empty() && !valid_utf8(p.file)) return utf8_path_reject(p.file);   // F1
-        std::vector<std::string> addList;
+        // M-2（2026-10-29）：入队必须**带上 CUE 区间**。修前这里只取 path（`emplace_back(f)`），
+        // 于是"把 cue 专辑第 N 首加进队列"会退化成整轨从头播，重启后也无从恢复区间。
+        // 区间自洽性在入队前先判（与 /api/play 同一口径）；目录展开不含区间。
+        if (p.cueStart >= 0.0) {
+            if (p.cueEnd >= 0.0 && p.cueEnd <= p.cueStart)
+                return "{\"ok\":false,\"error\":\"cue_start/cue_end 区间非法：cue_end 必须大于 cue_start\"}";
+        } else if (p.cueEnd >= 0.0) {
+            return "{\"ok\":false,\"error\":\"cue_end 需要同时提供 cue_start（只给终点没有意义）\"}";
+        }
+        std::vector<QItem> addList;
         {
             std::error_code ec;
             if (fs::is_directory(fs::u8path(p.file), ec) && !ec) {
@@ -7456,10 +7957,10 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
                     std::transform(ext.begin(), ext.end(), ext.begin(), [](unsigned char c) { return (char)std::tolower(c); });
                     bool ok = false;
                     for (const char* e : kExt) if (ext == e) { ok = true; break; }
-                    if (ok) { addList.push_back(pathToUtf8(it->path())); ++guard; }
+                    if (ok) { addList.emplace_back(pathToUtf8(it->path())); ++guard; }
                 }
             } else {
-                addList.push_back(p.file);
+                addList.emplace_back(p.file, p.cueStart, p.cueEnd);
             }
         }
         size_t cnt = 0;
@@ -7467,7 +7968,7 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
             // 注意：必须用独立作用域释放锁 —— queue_save() 内部会再次加锁，
             // 若在持锁状态下调用就会死锁（本轮踩到：服务端直接挂住，连接被关闭）。
             std::lock_guard<std::mutex> lk(g_q.mtx);
-            for (const auto& f : addList) g_q.items.emplace_back(f);
+            for (const auto& it : addList) g_q.items.push_back(it);
             if (!addList.empty()) g_q.sortBase.clear();
             cnt = g_q.items.size();
         }
@@ -7799,7 +8300,7 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
         const bool hasCover = c.size() > 128;
         // MetaStore 补全结果覆盖输出(P1):记录里值非空才覆盖;albumArtist/year/lyrics 是新增键
         rta::meta::TrackMeta tm;
-        const bool haveMeta = rta::meta::MetaStore::instance().load(file, tm);
+        const bool haveMeta = rta::meta::MetaStore::instance().load(file, tm, true);
         std::string fTitle = mi.title, fArtist = mi.artist, fAlbum = mi.album, fGenre = mi.genre;
         std::string fAlbumArtist, fYear, fLyrics;
         std::map<std::string, std::string> metaSrc;     // 字段 → MetaValue.source(溯源表)
@@ -8509,6 +9010,11 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
                                       rq.path.find("rescan=1") != std::string::npos);
             rta::net::UpnpDiscoverDiag ddiag;
             auto devs = rta::net::CastManager::instance().get_devices(forceRescan, &ddiag);
+            rta::diag::diag_emit("upnp.discovery",rta::diag::Stage::Upnp,
+                devs.empty()?rta::diag::find_code("upnp.no_renderer"):nullptr,
+                {{"devices",std::to_string(devs.size()),rta::diag::KvKind::Num},
+                 {"sent",std::to_string(ddiag.msgs_sent),rta::diag::KvKind::Num},
+                 {"replies",std::to_string(ddiag.replies),rta::diag::KvKind::Num}});
             std::ostringstream j;
             j << "{\"ok\":true,\"n\":" << devs.size() << ",\"devices\":[";
             for (size_t i = 0; i < devs.size(); ++i) {
@@ -8678,7 +9184,12 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
     //   本端点单独写 rlplayer-llm.conf，且 GET 只回掩码。
     if (rq.path.rfind("/api/llm", 0) == 0) {
         ct = "application/json; charset=utf-8";
-        if (rq.path.rfind("/api/llm/test", 0) == 0) return llm_test_json();
+        if (rq.path.rfind("/api/llm/test", 0) == 0) {
+            const auto config=rta::meta::llm_config_load(path_in_exe_dir("rlplayer-llm.conf"));
+            if(config.apiKey.empty()) rta::diag::diag_emit("llm.config",rta::diag::Stage::Llm,rta::diag::find_code("llm.not_configured"),
+                {{"key_present","false",rta::diag::KvKind::Bool}});
+            return llm_test_json();
+        }
         if (rq.method != "POST") return llm_status_json();
 
         std::map<std::string, std::string> f;
@@ -9003,7 +9514,7 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
                 for (const char* allow : { "rate", "filter", "filterNx", "shaper", "dsd", "modorder",
                                            "buffer", "volume", "loudness", "isp", "twostage",
                                            "device", "bits", "taps", "atten", "transition", "phase",
-                                           "modfamily", "oobgain", "ahmbits", "modcut", "moddith", "ir", "irgpu", "ramp", "theme", "uistyle", "eq",
+                                           "modfamily", "oobgain", "ahmbits", "modcut", "moddith", "ir", "irgpu", "ramp", "theme", "uistyle", "lang", "eq",
                                            "gpuvendor", "dsdnative", "directsdm", "dsdkind", "dsdconv", "dsd2stage",
                                            "backend", "naahost", "upnpdev", "channels", "trim",
                                            "inbackend", "indev", "inoffset", "inbuf", "inmon",
@@ -9479,6 +9990,46 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
         return R"({"ok":true})";
     }
 
+    // Structured UI telemetry: never persist input values, free-form messages or stacks.
+    if (path_no_query(rq.path) == "/api/ui/events") {
+        ct = "application/json; charset=utf-8";
+        if (rq.method == "GET") {
+            std::string j = "{\"ok\":true,\"schema\":1,\"case_id\":\"" + jesc(diag_case_id()) + "\",\"events\":[";
+            const auto events = diag_ui_log().recent(20);
+            for (size_t i = 0; i < events.size(); ++i) { if (i) j += ","; j += rta::diag::event_to_json(events[i]); }
+            return j + "],\"count\":" + std::to_string(events.size()) + "}";
+        }
+        if (rq.method != "POST") { rta::net::webui_set_status(405); return "{\"ok\":false}"; }
+        if (rq.body.size() > 32768) { rta::net::webui_set_status(413); return "{\"ok\":false,\"error\":\"telemetry batch too large\"}"; }
+        const auto batch = rta::net::json_parse(rq.body);
+        if (batch["events"].type != rta::net::Json::Arr || batch["events"].size() > 200) {
+            rta::net::webui_set_status(400); return "{\"ok\":false,\"error\":\"invalid telemetry batch\"}";
+        }
+        static const std::set<std::string> kinds = {"action", "error", "nav", "api"};
+        static const std::set<std::string> names = {"help_open", "diag_export", "diag_upload", "fb_send", "settings_open", "view_switch", "play", "pause", "stop", "skip", "seek", "queue_add", "queue_remove"};
+        static const std::set<std::string> routes = {"albums", "artists", "tracks", "queue", "settings", "settings:diag", "np", "folders", "search"};
+        size_t stored = 0;
+        for (const auto& row : batch["events"].arr) {
+            const std::string kind = row["evt"].s();
+            if (!kinds.count(kind)) continue;
+            rta::diag::Event e;
+            e.evt = "ui." + kind; e.set_stage(rta::diag::Stage::Ui); e.rid = rid_current();
+            const std::string code = row["code"].s();
+            if (code == "UI_EXC" || code == "UI_REJ") e.set_code(rta::diag::find_code("ui.script_error"));
+            else if (code == "UI_API_FAIL") e.set_code(rta::diag::find_code("ui.request_failed"));
+            if (names.count(row["name"].s())) e.str("name", row["name"].s());
+            if (routes.count(row["route"].s())) e.str("route", row["route"].s());
+            std::string path = path_no_query(row["path"].s());
+            if (path.rfind("/api/", 0) == 0 && path.size() < 80 && path.find_first_not_of("/abcdefghijklmnopqrstuvwxyz0123456789_-") == std::string::npos) e.str("path", path);
+            const std::string where = row["where"].s();
+            if (where.rfind("app.js:", 0) == 0 && where.size() < 30 && where.find_first_not_of("0123456789:", 7) == std::string::npos) e.str("where", where);
+            e.num("status", std::clamp((int)row["status"].n(), 0, 599));
+            e.num("dur", std::clamp((long long)row["dur"].n(), 0ll, 3600000ll));
+            if (diag_ui_log().write(e)) ++stored;
+        }
+        return "{\"ok\":true,\"case_id\":\"" + jesc(diag_case_id()) + "\",\"stored\":" + std::to_string(stored) + "}";
+    }
+
     // ---------------- 导出诊断：一个压缩包（2026-10-22 功能3）----------------
     // ★ 顺序很重要：本块必须排在 /api/diag 之前。两个端点都用 rfind(prefix,0)==0
     //   前缀匹配，"diagzip" 也满足 "/api/diag" 的前缀 —— 放在后面就永远进不来
@@ -9574,296 +10125,58 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
         j += "}";
         return j;
     }
-    if (rq.path.rfind("/api/diagzip", 0) == 0) {
+    if (path_no_query(rq.path) == "/api/diagzip") {
         ct = "application/zip";
-        // 把 secret 抹掉 —— ★ F-7（2026-10-27）：这里**只剩一次转发调用**，规则本体在
-        // src/net/feedback_redact.h（纯函数，可离线单测 tests/test_feedback_redact.cpp）。
-        //
-        // 为什么把原来的内联 lambda 换掉：那段只认 5 个 `k=v` 前缀 + 散落的 sk-，
-        // 实测漏掉 v1.1.1 的这四种明文（红证据见 tests/ 与交付报告）：
-        //   ① JSON 形态   {"token": "abcdef123456"}      —— 键后是 `":` 不是 `=`，整条漏
-        //   ② 头形态     Authorization: Bearer eyJ...    —— 不认识 header 名，整条漏
-        //   ③ 家目录     /Users/august/...               —— 完全不做路径归一
-        //   ④ 邮箱       tester@example.com              —— 不做邮箱处理
-        //   另加：旧代码对 sk-live-XXX 只抹掉 "live" 一段，中段仍明文（比不抹更危险）。
-        // 新实现同时补了 github/AWS/Slack 前缀、Cookie 头、裸 Bearer，并去掉误伤
-        // （曲名里的 "token"、COVERBG 的 key=<短缓存键> 都保留）。
-        rta::feedback::RedactStats redactStats;   // 逐包累计：写进 README.txt 证明真的跑过
-        auto redact_secrets = [&redactStats](std::string s) {
-            return rta::feedback::redact(s, &redactStats);
+        rta::diag::BundleSpec spec;
+        spec.case_id = diag_case_id();
+        spec.app_version = RLPLAYER_VERSION;
+        spec.app_build = g_buildTime;
+        spec.platform.os = rta::diag::os_version_string();
+        spec.platform.arch = "arm64";
+        spec.platform.cpu = rta::diag::cpu_brand();
+        spec.run.pid = current_pid();
+        spec.run.run_id = diag_sid();
+        const auto previous = rta::diag::run_marker().previous();
+        spec.run.known = previous.found;
+        spec.run.clean_exit = previous.clean;
+        spec.run.exit_reason = previous.found ? previous.reason_class() : "unknown_no_previous_marker";
+        spec.cs.origin = "rtaweb";
+        if (g_diagStartup.secondary)
+            spec.notes.push_back("Secondary instance: this process runs while another instance owns the state dir; "
+                                 "its event log is isolated under instances/<sid>/ and must not be read as the primary session.");
+        spec.redaction_note = "Structured fields and legacy logs are redacted before packaging; private bodies excluded.";
+        if (!previous.found) spec.notes.push_back("Previous exit unknown: no previous marker; clean_exit is not proof of a prior clean shutdown.");
+        std::vector<rta::diag::BundleEntry> items;
+        items.push_back(rta::diag::make_entry("diag.json", diag_snapshot_json(true), rta::diag::EntryKind::Json, 100));
+        auto event_text = [](rta::diag::EventLog& log) {
+            return log.snapshot_text(); // full retained source; bundle records all trimming
         };
-        auto read_all = [](const std::string& path, size_t maxBytes) {
-            std::ifstream f(fs::u8path(path), std::ios::binary);
-            if (!f) return std::string();
-            f.seekg(0, std::ios::end);
-            const std::streamoff len = f.tellg();
-            if (len <= 0) return std::string();
-            const std::streamoff take = (len > (std::streamoff)maxBytes) ? (std::streamoff)maxBytes : len;
-            f.seekg(len - take);      // 只取尾部：诊断看的是最近发生了什么
-            std::string s((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
-            return s;
-        };
-
-        std::vector<rta::zip::Entry> items;
-        // ① diag.json：直接把 /api/diag 同一份内容拿进来（现算，不递归 HTTP）
-        //    这里不重跑端点探活（可能耗时 3 秒），只取"设置摘要 + 版本/OS/CPU/GPU"这类
-        //    静态信息；探活结果本来就属于"现场状态"，用户要时再点一次 /api/diag 即可。
-        {
-            std::ostringstream dj;
-            dj << "{\"ok\":true"
-               << ",\"version\":\"" << RLPLAYER_VERSION << "\""
-               << ",\"build\":\"" << jesc(g_buildTime) << "\""
-               << ",\"pid\":" << current_pid()
-               << ",\"uptime\":" << (long long)std::chrono::duration_cast<std::chrono::seconds>(
-                      std::chrono::steady_clock::now() - g_startTp).count()
-               << ",\"os\":\"" << jesc(rta::diag::os_version_string()) << "\""
-               << ",\"cpu\":\"" << jesc(rta::diag::cpu_brand()) << "\""
-               << ",\"tester\":\"" << jesc(rta::diag::read_tester()) << "\""
-               << ",\"gpu\":\"" << jesc(std::string(rta::dsp::GpuBridge::instance().available() ? "可用" : "不可用") +
-                                        std::string("(") + rta::dsp::GpuBridge::instance().status() + ")") << "\""
-               << ",\"port\":" << g_uiPort
-               << ",\"lan\":" << (g_lanOn ? "true" : "false")
-               // F-7：把"会脱敏什么"写进包本身，收到包的人不用翻源码就知道边界。
-               // ⚠️ 这里只报规则名/标记，**不报命中数** —— diag.json 是第一个打包的条目，
-               //    此刻后面的日志还没过脱敏，写进来的计数必然是假的。真实计数在 README.txt
-               //    （最后生成，那时 redactStats 才是完整的）。
-               << ",\"redaction\":{\"applied\":true,\"rules\":[";
-            {
-                const auto rules = rta::feedback::redaction_rules();
-                for (size_t i = 0; i < rules.size(); ++i) {
-                    if (i) dj << ",";
-                    dj << "\"" << jesc(rules[i]) << "\"";
-                }
-            }
-            dj << "],\"marker\":\"<redacted>\",\"user_marker\":\"<user>\""
-               << ",\"excluded_files\":[\"rlplayer-llm.conf\",\"KEY.txt\"]"
-               << ",\"note\":\"" << jesc("上面两个文件的内容从不读取、从不打包；本包里所有字符串都过了同一条脱敏函数"
-                                          "（src/net/feedback_redact.h，单测 tests/test_feedback_redact.cpp）") << "\""
-               << "}"      // 关闭 redaction 对象
-               << "}";     // 关闭最外层 diag.json 对象
-            rta::zip::Entry e;
-            e.name = "rlplayer-diag.json";
-            e.data = redact_secrets(utf8_sanitize(dj.str()));
-            items.push_back(std::move(e));
+        items.push_back(rta::diag::make_entry("events.jsonl", event_text(rta::diag::event_log()), rta::diag::EntryKind::Jsonl, 80));
+        items.push_back(rta::diag::make_entry("uievents.jsonl", event_text(diag_ui_log()), rta::diag::EntryKind::Jsonl, 60));
+        for (const char* leaf : {"rlplayer-playback.log", "rlplayer-playback.log.1", "rlplayer-playback.log.2", "launcher.log"}) {
+            std::ifstream f(path_in_exe_dir(leaf), std::ios::binary);
+            if (!f) continue;
+            std::string text((std::istreambuf_iterator<char>(f)), {});
+            text = rta::diag::redact_text(utf8_sanitize(text), nullptr, false);
+            items.push_back(rta::diag::make_entry(leaf, std::move(text), rta::diag::EntryKind::Log, 40));
         }
-        // ② 播放日志：当前 + 轮转的 .1/.2（现场排查常常需要"上上次启动"）
-        for (const char* nm : {"rlplayer-playback.log", "rlplayer-playback.log.1",
-                               "rlplayer-playback.log.2"}) {
-            std::string body = read_all(path_in_exe_dir(nm), 2u * 1024u * 1024u);
-            if (body.empty()) continue;
-            rta::zip::Entry e;
-            e.name = nm;
-            e.data = redact_secrets(utf8_sanitize(body));
-            items.push_back(std::move(e));
+        auto result = rta::diag::assemble_with_report(spec, std::move(items),
+            [&spec](const std::vector<rta::diag::MaterializedEntry>& entries) {
+                return rta::diag::render_report_text_for_bundle(entries, spec, [](const std::string& code,rta::diag::CodeInfo& info){
+                    const auto* c=rta::diag::find_code(code);if(!c)return false;
+                    info.code=c->code;info.stage=rta::diag::stage_name(c->stage);info.name_zh=c->zh;return true;
+                });
+            });
+        if (!result.ok || result.over_budget) {
+            ct = "application/json";
+            rta::net::webui_set_status(500);
+            return "{\"ok\":false,\"code\":\"diag.package_incomplete\",\"error\":\"" + jesc(result.err.empty() ? "诊断包超过预算" : result.err) + "\"}";
         }
-        // ③ 启动器日志
-        {
-            std::string body = read_all(path_in_exe_dir("launcher.log"), 2u * 1024u * 1024u);
-            if (!body.empty()) {
-                rta::zip::Entry e;
-                e.name = "launcher.log";
-                e.data = redact_secrets(utf8_sanitize(body));
-                items.push_back(std::move(e));
-            }
-        }
-        // ④ 崩溃转储目录：只带文件名清单（dump 本身几十 MB，塞进诊断包没有意义，
-        //    但"有没有 dump、叫什么名字"对排查非常有用）
-        {
-            std::ostringstream ls;
-            std::error_code ec;
-            const std::string dir = path_in_exe_dir("dumps");
-            int n = 0;
-            if (fs::exists(fs::u8path(dir), ec) && fs::is_directory(fs::u8path(dir), ec)) {
-                for (auto& de : fs::directory_iterator(fs::u8path(dir),
-                                                       fs::directory_options::skip_permission_denied, ec)) {
-                    ls << pathToUtf8(de.path().filename()) << "\t"
-                       << (long long)fs::file_size(de.path(), ec) << " bytes\n";
-                    if (++n > 200) break;
-                }
-            }
-            ls << "\n" << (n == 0 ? "(dumps 目录为空或不存在：本机没有发生崩溃转储)\n"
-                                  : ("共 " + std::to_string(n) + " 个文件；完整 dump 未打包（体积过大）\n"));
-            rta::zip::Entry e;
-            e.name = "dumps-manifest.txt";
-            e.data = redact_secrets(ls.str());
-            items.push_back(std::move(e));
-        }
-        // ⑤ 设置摘要（只放白名单键，绝不整份 conf —— 里面可能躺着别的东西）
-        {
-            std::ostringstream st2;
-            st2 << "# RLPlayer 设置摘要（仅白名单键，不含 api key / 路径以外的敏感项）\n";
-            std::ifstream f(fs::u8path(path_in_exe_dir("rlplayer-settings.conf")));
-            std::string line;
-            static const char* kAllow[] = {"rate", "filter", "filterNx", "shaper", "dsd", "modorder",
-                                           "modfamily", "buffer", "isp", "twostage", "backend", "bits", "device",
-                                           "theme", "uistyle", "taps", "atten", "transition", "phase", "directsdm",
-                                           "dsdkind", "dsdconv", "dsd2stage", "channels", "metaon", "metallm"};
-            while (std::getline(f, line)) {
-                if (!line.empty() && line.back() == '\r') line.pop_back();
-                const size_t e2 = line.find('=');
-                if (e2 == std::string::npos) continue;
-                const std::string k = line.substr(0, e2);
-                for (const char* a : kAllow) if (k == a) { st2 << line << "\n"; break; }
-            }
-            rta::zip::Entry e;
-            e.name = "settings-summary.txt";
-            e.data = redact_secrets(st2.str());
-            items.push_back(std::move(e));
-        }
-        // ⑥ 说明文件：让用户/我们打开包就知道怎么用、以及包内容边界
-        //    ★ F-7：脱敏规则清单从 src/net/feedback_redact.h 直接取，不再手写在这段注释里
-        //      —— 否则规则改了文档不跟着改，用户看到的"会脱敏什么"就是骗人的。
-        //      同时把**本包真实命中数**写出来（redactStats 到这里已经累计完所有条目），
-        //      这是"脱敏真的跑过"的硬证据，而不是一句 applied:true。
-        {
-            std::ostringstream rd;
-            rd << "RLPlayer 诊断包\n"
-               << "=================================================\n"
-               << "版本: " << RLPLAYER_VERSION << "\n"
-               << "生成: " << g_buildTime << "（构建时间）\n"
-               << "条目:\n"
-               << "  rlplayer-diag.json      版本/OS/CPU/GPU/端口等静态信息\n"
-               << "  rlplayer-playback.log   播放格式/峰值/欠载（当前，最多 2MB 尾部）\n"
-               << "  rlplayer-playback.log.1 上一次轮转的播放日志（存在才带）\n"
-               << "  rlplayer-playback.log.2 上上次轮转（存在才带）\n"
-               << "  launcher.log            启动器日志（启动横幅/主题/子进程）\n"
-               << "  dumps-manifest.txt      崩溃转储文件清单（dump 本体不打包）\n"
-               << "  settings-summary.txt    设置摘要（仅白名单键）\n"
-               << "\n安全: 本包里所有文本都过了同一条脱敏函数（规则见下）。\n"
-               << "      配置文件本体 rlplayer-llm.conf / KEY.txt 【不在包内】，从不读取、从不打包。\n"
-               << "\n脱敏规则（被替换的值写 <redacted>，用户目录名写 <user>；键名与路径结构保留）:\n"
-               << rta::feedback::redaction_summary_zh() << "\n"
-               << "\n本包实际命中统计（为 0 表示这次日志里确实没有可脱敏内容，不是没跑）:\n"
-               << "  prefixed_key=" << redactStats.prefixed_token
-               << "  auth_header=" << redactStats.header_value
-               << "  bearer=" << redactStats.bearer
-               << "  credential_kv=" << redactStats.credential_kv
-               << "  user_path=" << redactStats.user_path
-               << "  email=" << redactStats.email
-               << "  total=" << redactStats.total() << "\n";
-            rta::zip::Entry e;
-            e.name = "README.txt";
-            // ⚠️ README 自己也要过脱敏：规则清单里不会有命中，但万一用户设置里带路径
-            //    （后续条目名会把路径拼进来）也不该漏。这条调用同时保证"所有条目无一例外"。
-            e.data = redact_secrets(rd.str());
-            items.push_back(std::move(e));
-        }
-        return rta::zip::build(items);
+        return rta::diag::zip_of(result);
     }
-
-    // ---------------- 诊断（1.0.5 可观测性）----------------
-    // 版本/构建/PID/运行时长/OS/CPU/GPU/内测标识 + 端点探活摘要 + 设置六键 + 日志尾 + 最近错误。
-    // 端点探活（probe_formats 对 16/24/32 各跑一遍独占支持率）可能耗时：总预算 3 秒，
-    // 超时未探的字段如实写"不可用"，绝不卡住 HTTP 线程。
-    if (rq.path.rfind("/api/diag", 0) == 0) {
+    if (path_no_query(rq.path) == "/api/diag") {
         ct = "application/json; charset=utf-8";
-        std::ostringstream j;
-        // 2026-10-25：forceProbe 是 Windows 侧"强制重探"的开关；macOS 侧 caps() 每次都实查
-        // （无缓存层），所以这里不再需要该变量。保留 refresh=1 的路由语义不变。
-        const auto upSec = std::chrono::duration_cast<std::chrono::seconds>(
-            std::chrono::steady_clock::now() - g_startTp).count();
-        j << "{\"ok\":true"
-          << ",\"version\":\"" << RLPLAYER_VERSION << "\""
-          << ",\"build\":\"" << jesc(g_buildTime) << "\""
-          << ",\"pid\":" << current_pid()
-          << ",\"uptime\":" << (long long)upSec
-          << ",\"os\":\"" << jesc(rta::diag::os_version_string()) << "\""
-          << ",\"cpu\":\"" << jesc(rta::diag::cpu_brand()) << "\""
-          << ",\"gpu\":\"" << jesc(std::string(rta::dsp::GpuBridge::instance().available() ? "可用" : "不可用") +
-                                   std::string("(") + rta::dsp::GpuBridge::instance().status() + ")") << "\""
-          << ",\"tester\":\"" << jesc(rta::diag::read_tester()) << "\"";
-        // 端点：每端点给友好名/ID/活状态 + 16/24/32 各自的支持率数。
-        // F3：probe 结果走 60s TTL 缓存（probeAge = 本次响应所用探活的最大年龄秒数，
-        // 刚探的为 0）；refresh=1 强制全部重探。只有真要探时才受 3 秒共享预算约束。
-        // 2026-10-25：probeDeadline（3 秒共享预算）是 Windows 侧多点位探活用的；
-        // macOS 侧 caps() 是单次 CoreAudio 查询，不存在多点位预算，故移除。
-        long long probeAgeMax = -1;
-        j << ",\"endpoints\":[";
-        {
-            // macOS：设备清单来自 CoreAudio；"探活+三档率表"用 caps() 一次查询（无按位深分档，
-            // 三档同表 —— CoreAudio caps 语义，如实呈现而不是编造分档数据）
-            std::vector<MacDevInfo> devs;
-            for (const auto& d : mac_enum_devices())
-                if (d.hasOutput) devs.push_back(d);
-            auto joinRates = [](const std::vector<uint32_t>& v) {
-                std::string s;
-                for (size_t k = 0; k < v.size(); ++k) { if (k) s += "/"; s += std::to_string(v[k]); }
-                return s;
-            };
-            bool firstE = true;
-            for (const auto& d : devs) {
-                if (!firstE) j << ",";
-                firstE = false;
-                j << "{\"name\":\"" << jesc(d.name) << "\",\"id\":\"" << jesc(d.id) << "\""
-                  << ",\"default\":" << (d.isDefault ? "true" : "false");
-                auto out = rta::platform::create_audio_output();
-                const rta::platform::DeviceCaps c = out ? out->caps(d.id) : rta::platform::DeviceCaps{};
-                j << ",\"alive\":" << (c.rates.empty() ? "false" : "true")
-                  << ",\"r16\":" << c.rates.size()
-                  << ",\"r24\":" << c.rates.size()
-                  << ",\"r32\":" << c.rates.size()
-                  << ",\"rates16\":\"" << joinRates(c.rates) << "\""
-                  << ",\"rates24\":\"" << joinRates(c.rates) << "\""
-                  << ",\"rates32\":\"" << joinRates(c.rates) << "\"}";
-            }
-        }
-        j << "],\"probeAge\":" << probeAgeMax;
-        // 设置摘要：只取六个白名单键（不回显 ir/eq 等文件路径内容）
-        {
-            std::ifstream f(path_in_exe_dir("rlplayer-settings.conf"));
-            std::string line, backend = "wasapi", rate, bits, filter, shaper, metaon = "1";
-            while (std::getline(f, line)) {
-                if (!line.empty() && line.back() == '\r') line.pop_back();
-                const size_t e = line.find('=');
-                if (e == std::string::npos) continue;
-                const std::string k = line.substr(0, e), v = line.substr(e + 1);
-                if      (k == "backend") backend = v;
-                else if (k == "rate")    rate    = v;
-                else if (k == "bits")    bits    = v;
-                else if (k == "filter")  filter  = v;
-                else if (k == "shaper")  shaper  = v;
-                else if (k == "metaon")  metaon  = v;
-            }
-            j << ",\"settings\":{\"backend\":\"" << jesc(backend)
-              << "\",\"rate\":\"" << jesc(rate)
-              << "\",\"bits\":\"" << jesc(bits)
-              << "\",\"filter\":\"" << jesc(filter)
-              << "\",\"shaper\":\"" << jesc(shaper)
-              << "\",\"metaon\":\"" << jesc(metaon) << "\"}";
-        }
-        // 日志尾 ≤8KB。当前日志不写 key 等敏感串；仍加一层 sk-[A-Za-z0-9]+ 掩码作保险
-        {
-            std::string tail;
-            {
-                std::ifstream f(path_in_exe_dir("rlplayer-playback.log"), std::ios::binary);
-                if (f) {
-                    f.seekg(0, std::ios::end);
-                    const std::streamoff len = f.tellg();
-                    if (len > 0) {
-                        f.seekg(len > 8192 ? len - 8192 : (std::streamoff)0);
-                        tail.assign(std::istreambuf_iterator<char>(f), std::istreambuf_iterator<char>());
-                    }
-                }
-            }
-            size_t scan = 0;
-            for (;;) {
-                const size_t p2 = tail.find("sk-", scan);
-                if (p2 == std::string::npos) break;
-                const bool boundary = (p2 == 0) || !std::isalnum((unsigned char)tail[p2 - 1]);
-                size_t e2 = p2 + 3;
-                while (e2 < tail.size() && std::isalnum((unsigned char)tail[e2])) ++e2;
-                if (boundary && e2 > p2 + 3) { tail.replace(p2 + 3, e2 - (p2 + 3), "***"); scan = p2 + 6; }
-                else scan = p2 + 3;
-            }
-            tail = utf8_sanitize(tail);   // F6：日志里的非 UTF-8 字节换成 U+FFFD，浏览器不再乱码
-            j << ",\"logTail\":\"" << jesc(tail) << "\"";
-        }
-        {
-            std::lock_guard<std::mutex> lk(ps.mtx);
-            j << ",\"lastError\":\"" << jesc(ps.error) << "\"";
-        }
-        j << "}";
-        return j.str();
+        return diag_snapshot_json(true);
     }
 
     // 应用标识：启动器用它区分"本程序的实例"和"别的程序占了这个端口"
@@ -10310,6 +10623,22 @@ static void core_init_common() {
     // 顺序敏感：queue_load / Library::load / SourceManager::load 都从 path_in_exe_dir()
     // （= 新的 config_dir）读，先搬后读才不会让老用户"设置和曲库全没了"。
     migrate_legacy_state_files();
+    rta::diag::DiagConfig diagConfig;
+    diagConfig.dir = pathToUtf8(fs::path(path_in_exe_dir("rlplayer-events.jsonl")).parent_path());
+    diagConfig.app_version = RLPLAYER_VERSION;
+    g_diagStartup = rta::diag::diag_start(diagConfig);
+    // 失败码由 diag_start 给出（event_log / run_marker / dir_lock 三种），不再在调用点硬编码。
+    if(!g_diagStartup.ok) std::fprintf(stderr,"DIAG_START_FAILED code=%s reason=%s\n",
+        g_diagStartup.code.empty()?"diag.event_log_unwritable":g_diagStartup.code.c_str(),
+        rta::diag::redact_text(g_diagStartup.error).c_str());
+    if(g_diagStartup.secondary) std::fprintf(stderr,"DIAG_SECONDARY sid=%s dir=%s\n",
+        g_diagStartup.sid.c_str(), g_diagStartup.dir.c_str());
+    rta::diag::EventLogConfig uiConfig;
+    // 事件目录用**实际**目录：副实例在 instances/<sid>/，不能跟着主实例写同一个 uievents.jsonl。
+    uiConfig.dir = g_diagStartup.dir.empty()?diagConfig.dir:g_diagStartup.dir; uiConfig.file = "uievents.jsonl";
+    diag_ui_log().set_config(uiConfig);
+    diag_ui_log().set_sid(diag_sid());
+    diag_ui_log().open();
 
     queue_load();                             // 恢复上次的播放列表
     Library::instance().load();               // 载入音乐库索引
@@ -10447,6 +10776,7 @@ static void core_shutdown_common() {
         printf("!! %s\n", o.str().c_str());
         std::fflush(stdout);
         std::fflush(stderr);
+        rta::diag::run_marker().abandon("shutdown_timeout");
         std::_Exit(0);      // 不跑 atexit / 静态析构；这是「保证能退」的最后一道闸
     }
     const auto tWaitTotalMs = std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -10458,6 +10788,8 @@ static void core_shutdown_common() {
             << " waitMs=" << tWaitTotalMs;
     play_log(sMetric.str());
     play_log("SHUTDOWN 后台任务已全部收完（等待 " + std::to_string(tWaitTotalMs) + "ms）");
+    diag_ui_log().close();
+    rta::diag::diag_stop("user_quit");
 }
 
 // ===========================================================================
@@ -10482,6 +10814,75 @@ bool rlapp::start_embedded() {
         play_log("MODE embedded（进程内直连，无本地 HTTP 监听，无浏览器 fork）");
     });
     return true;
+}
+
+// 每个请求的统一入口：分配 rid → 计时 → 记录动作 → 拦截异常并**保留原因**（D3，2026-10-29）。
+// 修前（10518 附近）catch(...) 只写一句 "DISPATCH 异常已拦截"，异常类型/文本/请求全丢，
+// 用户看到的是 "internal error"，我们拿到诊断包也查不出是什么炸了。
+// 现在：std::exception 带 what()；未知异常也如实写 "未知异常（非 std::exception）"；
+// 文本先脱敏（密钥/家目录/URL query）再写日志与返回，绝不落明文。
+static std::string handle_traced(const rta::net::HttpRequest& request, std::string& contentType) {
+    const std::string rid = rid_new();
+    RidScope ridScope(rid);
+    rta::diag::ScopedRid diagRid(rid);
+    const std::string route=path_no_query(request.path);
+    rta::diag::Stage stage=rta::diag::Stage::Unknown;
+    if(route.rfind("/api/llm",0)==0) stage=rta::diag::Stage::Llm;
+    else if(route.rfind("/api/cast",0)==0 || route.rfind("/api/upnp",0)==0) stage=rta::diag::Stage::Upnp;
+    else if(route.rfind("/api/entity",0)==0 || route.rfind("/api/enrich",0)==0) stage=rta::diag::Stage::Meta;
+    rta::net::HttpDiagScope httpDiag(stage);
+    rta::diag::diag_beat();
+    rta::net::webui_set_status(200);   // embedded 路径不会自动复位状态槽，这里显式复位
+    const auto t0 = std::chrono::steady_clock::now();
+    ActionRec act;
+    act.ts = rlp_epoch_ms();
+    act.rid = rid;
+    act.method = request.method;
+    act.path = path_no_query(request.path);
+
+    std::string out;
+    try {
+        out = handle(request, contentType);
+        act.ok = (out.rfind("{\"ok\":false", 0) != 0);
+    } catch (const std::exception& e) {
+        contentType = "application/json; charset=utf-8";
+        const std::string why = err_text_redacted(std::string("异常原因=") + e.what());
+        play_log("DISPATCH 异常已拦截 rid=" + rid + " method=" + request.method +
+                 " path=" + act.path + " " + why);
+        act.ok = false;
+        act.dispatchException = true;
+        rta::net::webui_set_status(500);
+        out = "{\"ok\":false,\"usable\":false,\"code\":\"ui.internal_error\",\"rid\":\"" +
+              jesc(rid) + "\",\"method\":\"" + jesc(request.method) + "\",\"path\":\"" +
+              jesc(act.path) + "\",\"error\":\"" + jesc(why) + "\"}";
+    } catch (...) {
+        contentType = "application/json; charset=utf-8";
+        play_log("DISPATCH 异常已拦截 rid=" + rid + " method=" + request.method +
+                 " path=" + act.path + " 未知异常（非 std::exception）");
+        act.ok = false;
+        act.dispatchException = true;
+        rta::net::webui_set_status(500);
+        out = "{\"ok\":false,\"usable\":false,\"code\":\"ui.internal_error\",\"rid\":\"" +
+              jesc(rid) + "\",\"method\":\"" + jesc(request.method) + "\",\"path\":\"" +
+              jesc(act.path) + "\",\"error\":\"未知异常（非 std::exception，已拦截并记录）\"}";
+    }
+    act.status = rta::net::webui_status_slot()->load();
+    act.ms = (long long)std::chrono::duration_cast<std::chrono::milliseconds>(
+                 std::chrono::steady_clock::now() - t0).count();
+    action_record(act);
+    if (act.path.rfind("/api/", 0) == 0 && act.path != "/api/ui/events") {
+        rta::diag::Event e;
+        e.evt = "request.end"; e.set_stage(rta::diag::Stage::Ui); e.rid = rid;
+        e.str("path", act.path).str("method", act.method).num("status", act.status).num("elapsed_ms", act.ms).boolean("ok", act.ok);
+        const auto json = contentType.find("application/json") != std::string::npos ? rta::net::json_parse(out) : rta::net::Json{};
+        if (json.has("code")) e.set_code(rta::diag::find_code(json["code"].s()));
+        if (act.dispatchException) e.set_code(rta::diag::find_code("ui.internal_error"));
+        rta::diag::diag_emit(e);
+    }
+    if (contentType.find("application/json") != std::string::npos && !out.empty() && out.front() == '{' &&
+        !rta::net::json_parse(out).has("rid"))
+        out.insert(1, "\"rid\":\"" + jesc(rid) + "\",");
+    return out;
 }
 
 std::string rlapp::dispatch(const rta::net::HttpRequest& request, std::string& contentType) {
@@ -10516,14 +10917,8 @@ std::string rlapp::dispatch(const rta::net::HttpRequest& request, std::string& c
         return "{\"ok\":false,\"error\":\"系统退出中\"}";
     }
     rta::net::HttpCancellationScope httpCancel(&g_shutdown);
-    try {
-        return handle(request, contentType);
-    } catch (...) {
-        // 旧 WebUi::handle 也是 try/catch 吞掉异常后关连接；这里等价，绝不把异常抛回 ObjC++。
-        contentType = "application/json; charset=utf-8";
-        play_log("DISPATCH 异常已拦截（请求 " + request.path + "）");
-        return "{\"ok\":false,\"error\":\"internal error\"}";
-    }
+    // 统一走 handle_traced：rid / 动作轨迹 / 异常原因保留（D3）。
+    return handle_traced(request, contentType);
 }
 
 int       rlapp::max_concurrent_dispatches() { return g_peakConcurrent.load(); }
@@ -10647,7 +11042,7 @@ int rlapp::cli_main(int argc, char** argv) {
     core_init_common();
 
     rta::net::WebUi ui;
-    if (!ui.start(port, handle, !lan)) {
+    if (!ui.start(port, handle_traced, !lan)) {
         printf("!! 端口 %u 启动失败（被占用？）\n", (unsigned)port);
         return 1;
     }
@@ -10667,7 +11062,7 @@ int rlapp::cli_main(int argc, char** argv) {
     ::signal(SIGINT, [](int){ g_exitReq.store(true); });
     ::signal(SIGTERM, [](int){ g_exitReq.store(true); });
     printf("  按 Ctrl+C 退出（或 Dock 图标右键 → 退出）\n");
-    while (!g_exitReq.load()) std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    while (!g_exitReq.load()) { rta::diag::diag_beat(); std::this_thread::sleep_for(std::chrono::milliseconds(50)); }
     // 无论 CLI 还是 embedded，均在退出入口尽早置 g_shutdown，通知全部后台任务与网络请求提前收尾
     set_shutdown_flag();
     // 退出顺序（2026-10-25 并发化配套）：

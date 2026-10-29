@@ -21,6 +21,27 @@
 
 版本号可随插入任务调整，但 **1.1.2 的主题固定为 AirPlay**；每版首发 beta，不为修复另预留空版本。
 
+## 1.1.1-beta2（2026-10-29 中途版，已交付）
+
+主题：**完善既有功能 + 界面中英切换**。版本号 `src/version.h` = `1.1.1-beta2`。
+
+| 交付 | 内容 | 判据 |
+|---|---|---|
+| 语言切换 | 设置 → 输出 → 外观新增语言下拉（中文 / English）；整站英文化（导航、设置 9 页签、播放条、右键菜单、帮助、诊断页、后端说明），对照表 1508 条，源数据 `docs/i18n/*.tsv`，生成物 `src/net/i18n_table.h` | `tools/check_111_i18n.js` 12/12：英文模式 9 个视图 + 9 个页签 + 帮助零可见中文；切回中文逐字不变；下拉切换真实落盘并重载生效 |
+| 原生菜单 | App 菜单（关于 / 许可证 / 退出）与 LICENSE 弹窗跟随 `lang` | 需重启 App 生效（NSMenu 为原生对象） |
+| P0-1 | 核实运行标记 I 段为真 `fork()` 子进程；真实双进程同 state dir 复验 Q9 不再假 clean | 两个真实进程 + `/api/diagzip` 的 `manifest.run` 字段 |
+| P0-2 | 副实例事件隔离：`DiagStartResult.secondary/dir/code`，副实例写 `instances/<sid>/` | 真实双实例：副实例 `secondary=true`，事件文件分离，主标记未被篡改 |
+| P0-3 | `/api/diag` 的 `diagChannel.code` 改为真实原因（event_log / run_marker / dir_lock） | 真实二进制故障注入得到 `diag.run_marker_unwritable` |
+| 决策 | fastFeed 判死保持「连续 201 次尝试」，不折算时间；≈0.5 s 判死为预期代价 | 用户 2026-10-29 裁定，代码注释改为「已决」 |
+
+回归基线（本机实测）：构建 exit 0；串行 ctest **113/113**；`check_111_backend` **22/22**；
+`check_111_production_faults` **12/12**；`check_111_ui` **7/7**；`test_startup_native` 首帧 PASS；`check_111_i18n` **12/12**。
+包内四件套 + `rtadiag` 均 arm64、`minos=13.0`、adhoc 签名 valid，包内 FLAC→PCM 逐字节相等。
+
+未验 / 待回归：真机项（STARVING 恢复、DoP 真实载波、UPnP 音量校准、macOS 15 图标气泡）全部未做；
+Windows 侧待回归（动了 `ui_page.h` / `ui_script.h` / `diag.h` / `mac_host.mm`）；
+英文模式下需要真实设备才触发的后端错误句子未逐句验证。
+
 ## 1.1.1：诊断记录精细化与问题修复
 
 ### 诊断目标

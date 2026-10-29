@@ -1,5 +1,5 @@
+// SPDX-FileCopyrightText: 2026 BH2VOQ <https://github.com/BH2VOQ>
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 August Hu <BH2VOQ@163.com>
 //
 // 本文件是 RLPlayer 的一部分，以 GNU 通用公共许可证第 3 版（或更新版本）发布。
 // 完整条款见仓库根目录的 LICENSE 文件。
@@ -287,6 +287,7 @@ struct HttpOutcome {
 // 统一走 net/http_client.h（平台层 libcurl，阻塞、同步）。
 // token 只在这里作为请求头出现一次，绝不写日志。
 inline HttpOutcome Fetch(const std::string& url, const std::string& token, int timeoutMs) {
+    rta::net::HttpDiagScope diagScope(rta::diag::Stage::Update);
     HttpOutcome out;
     std::vector<std::string> headers;
     if (!token.empty()) headers.push_back("Authorization: token " + token);

@@ -1,3 +1,9 @@
+// SPDX-FileCopyrightText: 2026 BH2VOQ <https://github.com/BH2VOQ>
+// SPDX-License-Identifier: GPL-3.0-or-later
+//
+// 本文件是 RLPlayer 的一部分，以 GNU 通用公共许可证第 3 版（或更新版本）发布。
+// 完整条款见仓库根目录的 LICENSE 文件。
+//
 // quality.h — 音频体检 B2：音质分析器（失真 / 噪声 / 频响 / 削波 / 立体声 / 动态细化）
 //
 // 定位：dynamics.h 管「响度与动态」，fake_lossless.h 管「是不是有损转制」，
@@ -218,29 +224,45 @@ inline QualityWindowPlan make_quality_plan(size_t n, double fs) {
     return p;
 }
 
-// 谱域指标（THD+N / 本底 / 频响）。winMix[w] = 第 w 窗的已混迭单声道原始样本（未加窗）。
+// 谱域指标（THD+N / 本底 / 频响）。winCh[w][c] = 第 w 窗第 c 声道的原始样本（未加窗）。
+// 各有效声道独立做 FFT 并对单边功率谱求平均，稳健避免声道间相位抵消。
 inline void spectrum_metrics(const QualityWindowPlan& plan,
-                             const std::vector<std::vector<double>>& winMix,
+                             const std::vector<std::vector<std::vector<double>>>& winCh,
+                             const std::vector<char>& active,
                              QualityResult& out) {
     const size_t kW = plan.kW, half = plan.half, nWin = plan.nWin;
-    if (kW < 1024 || nWin == 0 || winMix.empty()) return;
+    if (kW < 1024 || nWin == 0 || winCh.empty()) return;
 
     double w2 = 0.0;
     for (size_t i = 0; i < kW; ++i) w2 += qdetail::bh4(i, kW) * qdetail::bh4(i, kW);
     const double meanW2 = w2 / (double)kW;
+
+    size_t nActCh = 0;
+    for (char a : active) if (a) ++nActCh;
+    if (nActCh == 0) return;
 
     std::vector<std::vector<double>> wins;
     wins.reserve(nWin);
     std::vector<double> avgPower(half + 1, 0.0);
     std::vector<rta::dsp::cplx> buf(kW);
     for (size_t w = 0; w < nWin; ++w) {
-        const std::vector<double>& src = winMix[w];
-        for (size_t i = 0; i < kW; ++i) buf[i] = rta::dsp::cplx(src[i] * qdetail::bh4(i, kW), 0.0);
-        rta::dsp::fft(buf, false);
-        std::vector<double> P(half + 1, 0.0);
-        for (size_t k = 0; k <= half; ++k) { const double m = std::abs(buf[k]); P[k] = m * m; }
-        for (size_t k = 0; k <= half; ++k) avgPower[k] += P[k];
-        wins.push_back(std::move(P));
+        std::vector<double> Pw(half + 1, 0.0);
+        for (size_t c = 0; c < winCh[w].size(); ++c) {
+            if (c < active.size() && !active[c]) continue;
+            const std::vector<double>& src = winCh[w][c];
+            if (src.size() < kW) continue;
+            for (size_t i = 0; i < kW; ++i) buf[i] = rta::dsp::cplx(src[i] * qdetail::bh4(i, kW), 0.0);
+            rta::dsp::fft(buf, false);
+            for (size_t k = 0; k <= half; ++k) {
+                const double m = std::abs(buf[k]);
+                Pw[k] += (m * m);
+            }
+        }
+        for (size_t k = 0; k <= half; ++k) {
+            Pw[k] /= (double)nActCh;
+            avgPower[k] += Pw[k];
+        }
+        wins.push_back(std::move(Pw));
     }
     for (size_t k = 0; k <= half; ++k) avgPower[k] /= (double)nWin;
 
@@ -403,7 +425,7 @@ inline void spectrum_metrics(const QualityWindowPlan& plan,
     {
         double hf = 0.0;
         const size_t k10 = (size_t)std::ceil(10000.0 / binHz);
-        for (size_t k = std::min(k10, half); k <= half; ++k) hf += avgPower[k];
+        for (size_t k = k10; k <= half; ++k) hf += avgPower[k];
         out.hfRatio10kDb = 10.0 * std::log10(std::max(hf, 1e-300) / den);
         if (out.hfRatio10kDb < -120.0) out.hfRatio10kDb = -120.0;
     }
@@ -431,6 +453,7 @@ public:
         ssum_.assign((size_t)channels_, 0.0);
         clipCnt_.assign((size_t)channels_, 0);
         run_.assign((size_t)channels_, 0);
+        runSign_.assign((size_t)channels_, 0);
         runCount_ = 0;
         longestRun_ = 0;
         sLR_ = sL_ = sR_ = sM_ = sS_ = 0.0;
@@ -448,12 +471,15 @@ public:
 
         plan_ = qdetail::QualityWindowPlan();
         plan_.start.clear();
-        winMix_.clear();
+        winCh_.clear();
         mixBuf_.clear();
         if (bad_) return;
         plan_ = qdetail::make_quality_plan(totalFrames, fs_);
-        winMix_.resize(plan_.nWin);
-        for (size_t w = 0; w < plan_.nWin; ++w) winMix_[w].assign(plan_.kW, 0.0);
+        winCh_.resize(plan_.nWin);
+        for (size_t w = 0; w < plan_.nWin; ++w) {
+            winCh_[w].resize((size_t)channels_);
+            for (int c = 0; c < channels_; ++c) winCh_[w][(size_t)c].assign(plan_.kW, 0.0);
+        }
         if (envHop_ > 0 && totalFrames > 0) env_.reserve(totalFrames / envHop_ + 1);
     }
 
@@ -502,14 +528,14 @@ public:
         r.rmsDbfs = (rms > 0.0) ? 20.0 * std::log10(rms) : -300.0;
 
         // ---- 削波 ----
-        size_t cnt = 0, runs = 0, longest = 0;
+        size_t cnt = 0, runs = runCount_, longest = 0;
         for (int c = 0; c < channels_; ++c) {
             cnt += clipCnt_[(size_t)c];
             // 文件结束时仍挂着的连续段也要结算
             const size_t openRun = run_[(size_t)c];
             longest = std::max(longest, openRun);
+            if (openRun >= kClipRunMin) ++runs;
         }
-        runs = runCount_;
         longest = std::max(longest, longestRun_);
         const double denom = (double)pos_ * (double)std::max(1, nActive_);
         r.clippedSamples = cnt;
@@ -542,7 +568,7 @@ public:
             lv.reserve(blkP_.size());
             size_t silent = 0;
             for (double p : blkP_) {
-                const double db = 10.0 * std::log10(std::max(p, 1e-30));
+                const double db = 10.0 * std::log10(std::max(p, 1e-300));
                 lv.push_back(db);
                 if (db < -60.0) ++silent;
             }
@@ -559,7 +585,7 @@ public:
         if (!dynP_.empty()) {
             std::vector<double> lv;
             lv.reserve(dynP_.size());
-            for (double p : dynP_) lv.push_back(10.0 * std::log10(std::max(p, 1e-30)));
+            for (double p : dynP_) lv.push_back(10.0 * std::log10(std::max(p, 1e-300)));
             std::vector<double> asc = lv;
             std::sort(asc.begin(), asc.end());
             if (asc.size() >= 2) r.dynP95P10Db = percentile_sorted(asc, 0.95) - percentile_sorted(asc, 0.10);
@@ -574,7 +600,7 @@ public:
         // ---- 谱域 ----
         const auto tSpec = std::chrono::steady_clock::now();
         r.spectralWindows = plan_.nWin;
-        if (!winMix_.empty() && plan_.kW >= 1024) qdetail::spectrum_metrics(plan_, winMix_, r);
+        if (!winCh_.empty() && plan_.kW >= 1024) qdetail::spectrum_metrics(plan_, winCh_, active_, r);
         r.imdAvailable = false;
         r.imdNote = "素材非双音，互调失真不适用（需 60 Hz + 7 kHz 之类的双音测试信号；"
                     "对双音素材请调用 measure_imd_smpte）";
@@ -583,7 +609,7 @@ public:
             r.snrDb = std::clamp(r.rmsDbfs - r.noiseFloorDbfs, 0.0, 140.0);
         }
         r.valid = (r.frames > 0);
-        if (r.frames < plan_.kW) r.note = "素材短于一个谱窗，谱类指标按单窗估计";
+        if (r.frames < plan_.kW) r.note += (r.note.empty() ? "" : "；") + std::string("素材短于一个谱窗，谱类指标按单窗估计");
         // 口径提醒（不是错误）：谱最小统计对动态音乐是【下界】，绝对值偏低；同一首的相对比较不受影响
         if (!r.note.empty()) r.note += "；";
         r.note += "本底噪声为谱最小统计（动态音乐为下界，同一首相对比较不受影响）";
@@ -601,39 +627,47 @@ public:
     const std::vector<float>& envelope() const { return env_; }
     double envelopeHz() const { return envHz_; }
     // 谱窗缓冲字节数（内存报告用）
-    size_t windowBytes() const { return plan_.nWin * plan_.kW * sizeof(double); }
+    size_t windowBytes() const { return plan_.nWin * (size_t)channels_ * plan_.kW * sizeof(double); }
 
 private:
     template <class Get>
     void push_block(const Get& get, size_t frames) {
-        // 谱窗重叠区间（只有落入谱窗的帧才做混迭）
+        // 谱窗重叠区间（只有落入谱窗的帧才记录各声道样本）
         for (size_t w = 0; w < plan_.nWin; ++w) {
             const size_t ws = plan_.start[w], we = ws + plan_.kW;
             const size_t begin = pos_, end = begin + frames;
             if (we <= begin || ws >= end) continue;
             const size_t lo = std::max(begin, ws), hi = std::min(end, we);
-            double* dst = winMix_[w].data();
-            for (size_t g = lo; g < hi; ++g) {
-                double s = 0.0;
-                for (int c = 0; c < channels_; ++c) if (active_[(size_t)c]) s += get((size_t)c, g - begin);
-                dst[g - ws] = (nActive_ > 0) ? s / (double)nActive_ : 0.0;
+            for (int c = 0; c < channels_; ++c) {
+                if (!active_[(size_t)c]) continue;
+                double* dst = winCh_[w][(size_t)c].data();
+                for (size_t g = lo; g < hi; ++g) {
+                    dst[g - ws] = get((size_t)c, g - begin);
+                }
             }
         }
         for (size_t i = 0; i < frames; ++i) {
-            double sum = 0.0;
+            double channelPower = 0.0;
             for (int c = 0; c < channels_; ++c) {
                 if (!active_[(size_t)c]) continue;
                 const double x = get((size_t)c, i);
-                sum += x;
+                channelPower += x * x;
                 const double a = std::fabs(x);
                 if (a > peak_[(size_t)c]) peak_[(size_t)c] = a;
                 ssum_[(size_t)c] += x * x;
                 if (a >= kClipThreshold) {
                     ++clipCnt_[(size_t)c];
+                    const int sign = x < 0.0 ? -1 : 1;
+                    if (runSign_[(size_t)c] != sign) {
+                        if (run_[(size_t)c] >= kClipRunMin) ++runCount_;
+                        run_[(size_t)c] = 0;
+                    }
+                    runSign_[(size_t)c] = sign;
                     if (++run_[(size_t)c] > longestRun_) longestRun_ = run_[(size_t)c];
                 } else {
                     if (run_[(size_t)c] >= kClipRunMin) ++runCount_;
                     run_[(size_t)c] = 0;
+                    runSign_[(size_t)c] = 0;
                 }
             }
             if (channels_ >= 2 && active_[0] && active_[1]) {
@@ -643,8 +677,8 @@ private:
                 sM_ += m * m; sS_ += s * s;
             }
             const double np = (double)std::max(1, nActive_);
-            const double mean = sum / np;
-            const double p = mean * mean;   // 单声道化后的瞬时功率
+            // 块电平与包络按各声道功率平均；避免先混单声道导致反相信号抵消为零
+            const double p = channelPower / np;
             blkAcc_ += p; dynAcc_ += p; envAcc_ += p;
             if (blkLen_ > 0 && ++blkCnt_ == blkLen_) {
                 blkP_.push_back(blkAcc_ / (double)blkLen_);
@@ -671,6 +705,7 @@ private:
 
     std::vector<double> peak_, ssum_;
     std::vector<size_t> clipCnt_, run_;
+    std::vector<int> runSign_;
     size_t runCount_ = 0, longestRun_ = 0;
     double sLR_ = 0.0, sL_ = 0.0, sR_ = 0.0, sM_ = 0.0, sS_ = 0.0;
 
@@ -686,7 +721,7 @@ private:
     std::vector<float> env_;
 
     qdetail::QualityWindowPlan plan_;
-    std::vector<std::vector<double>> winMix_;
+    std::vector<std::vector<std::vector<double>>> winCh_;
     std::vector<double> mixBuf_;
 };
 

@@ -1,5 +1,5 @@
+// SPDX-FileCopyrightText: 2026 BH2VOQ <https://github.com/BH2VOQ>
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 August Hu <BH2VOQ@163.com>
 //
 // 本文件是 RLPlayer 的一部分，以 GNU 通用公共许可证第 3 版（或更新版本）发布。
 // 完整条款见仓库根目录的 LICENSE 文件。
@@ -87,6 +87,30 @@ struct TrackMeta {
     std::string coverRelPath;    // 相对 baseDir，如 "covers/xx.jpg"
 };
 
+// Network lyrics without an identity receipt predate strict matching. Keep the original
+// cache file intact, but never serve those bytes as verified lyrics on a cache hit.
+inline constexpr const char* kLyricIdentityVersion = "2";
+inline bool lyric_cache_needs_refresh(const TrackMeta& tm) {
+    const auto it=tm.fields.find("lyrics");
+    if(it==tm.fields.end() || it->second.value.empty()) return tm.fields.count("lyrics_unverified") != 0;
+    if(it->second.source=="user" || it->second.source=="tag") return false;
+    const auto receipt=tm.fields.find("lyrics_identity");
+    if(receipt==tm.fields.end()) return true;
+    const auto title=tm.fields.find("title"), artist=tm.fields.find("artist");
+    const std::string identity=std::string(kLyricIdentityVersion)+"|"+
+        (title==tm.fields.end()?"":title->second.value)+"|"+(artist==tm.fields.end()?"":artist->second.value);
+    return receipt->second.value!=identity;
+}
+inline bool lyric_refresh_due(const TrackMeta& tm, long long now) {
+    const auto it=tm.fields.find("lyrics_refresh_try");
+    return it==tm.fields.end() || now < it->second.ts || now-it->second.ts >= 86400;
+}
+inline std::string lyric_cache_identity(const TrackMeta& tm) {
+    const auto title=tm.fields.find("title"),artist=tm.fields.find("artist");
+    return std::string(kLyricIdentityVersion)+"|"+(title==tm.fields.end()?"":title->second.value)+"|"+
+        (artist==tm.fields.end()?"":artist->second.value);
+}
+
 // 来源优先级：user(100) > tag(90) > 事实源(50) > llm(10) > 其它(0)
 inline int meta_source_rank(const std::string& source) {
     if (source == "user") return 100;
@@ -135,7 +159,7 @@ public:
     }
 
     // 读 <base>/tracks/<hash>.json；文件不存在或损坏返回 false（out 保持不变）
-    bool load(const std::string& trackPath, TrackMeta& out) {
+    bool load(const std::string& trackPath, TrackMeta& out, bool verifyLyrics = false) {
         const fsx::path file = tracksDir() / (hashOf(trackPath) + ".json");
         std::error_code ec;
         if (!fsx::exists(file, ec)) return false;
@@ -159,6 +183,14 @@ public:
             v.ts         = (long long)fv["ts"].n();
             v.confidence = (float)fv["confidence"].n();
             tm.fields[kv.first] = std::move(v);
+        }
+        if (verifyLyrics && lyric_cache_needs_refresh(tm)) {
+            // Quarantine, never erase the only cached copy; save() must retain recoverable bytes.
+            if (tm.fields.count("lyrics")) {
+                tm.fields["lyrics_unverified"] = tm.fields["lyrics"];
+                tm.fields.erase("lyrics");
+            }
+            tm.fields["lyrics_refresh"] = {"1", "internal", 0, 1.0f};
         }
         out = std::move(tm);
         return true;

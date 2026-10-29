@@ -1,5 +1,5 @@
+// SPDX-FileCopyrightText: 2026 BH2VOQ <https://github.com/BH2VOQ>
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 August Hu <BH2VOQ@163.com>
 //
 // 本文件是 RLPlayer 的一部分，以 GNU 通用公共许可证第 3 版（或更新版本）发布。
 // 完整条款见仓库根目录的 LICENSE 文件。
@@ -113,7 +113,8 @@ inline bool pv_lyric_identity(const std::string& qTitle, const std::string& qArt
     if (qSec > 0 && c.durationMs > 0 && s.durScore == 0) return false;
     if (!match_norm(qArtist).empty())
         return !match_norm(c.artist).empty() && s.artistScore >= 0.80;
-    return qSec > 0 && c.durationMs > 0 && s.durScore >= 1.0;
+    // Unknown artist requires an exact normalized title, not merely a high fuzzy score.
+    return match_norm(qTitle) == match_norm(c.title) && qSec > 0 && c.durationMs > 0 && s.durScore >= 1.0;
 }
 
 // 数据源描述符(P1.5):新增数据源 = 往 provider_registry() 注册一项 + 实现函数,零接线。

@@ -1,5 +1,5 @@
+// SPDX-FileCopyrightText: 2026 BH2VOQ <https://github.com/BH2VOQ>
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 August Hu <BH2VOQ@163.com>
 //
 // 本文件是 RLPlayer 的一部分，以 GNU 通用公共许可证第 3 版（或更新版本）发布。
 // 完整条款见仓库根目录的 LICENSE 文件。
@@ -739,8 +739,12 @@ inline LlmReply llm_parse_chat_response(const std::string& text) {
 // POST {base}/chat/completions，超时 60s，单次调用不重试
 inline LlmReply llm_chat(const LlmConfig& cfg, const std::vector<LlmMessage>& msgs,
                          int maxTokens = 800, float temperature = 0.2f, bool jsonObject = false) {
+    rta::net::HttpDiagScope httpDiag(rta::diag::Stage::Llm);
     LlmReply r;
-    if (cfg.apiKey.empty()) { r.error = "未配置 api_key（rlplayer-llm.conf）"; return r; }
+    if (cfg.apiKey.empty()) {
+        rta::diag::diag_emit("llm.config",rta::diag::Stage::Llm,rta::diag::find_code("llm.not_configured"),{{"key_present","false",rta::diag::KvKind::Bool}});
+        r.error = "未配置 api_key（rlplayer-llm.conf）"; return r;
+    }
 
     // E-8: 月度调用上限与超限降级（超限不发起 HTTP）
     std::string capErr;
@@ -867,7 +871,10 @@ inline std::string ds_http_error(const std::string& apiKey, int status, const st
 // POST {base}/v1/tools/search，超时 60s，单次调用不重试
 inline DsSearchReply ds_search(const LlmConfig& cfg, const std::string& query, int count = 5) {
     DsSearchReply r;
-    if (cfg.apiKey.empty()) { r.error = "未配置 api_key（rlplayer-llm.conf）"; return r; }
+    if (cfg.apiKey.empty()) {
+        rta::diag::diag_emit("llm.config",rta::diag::Stage::Llm,rta::diag::find_code("llm.not_configured"),{{"key_present","false",rta::diag::KvKind::Bool}});
+        r.error = "未配置 api_key（rlplayer-llm.conf）"; return r;
+    }
 
     // E-8: 月度调用上限与超限降级（超限不发起 HTTP）
     std::string capErr;
@@ -909,7 +916,10 @@ inline DsSearchReply ds_search(const LlmConfig& cfg, const std::string& query, i
 // 慢页面不再把整个资料整理拖到 20s+（实测最慢一次 fetch 阶段 10.9s）。
 inline DsFetchReply ds_fetch(const LlmConfig& cfg, const std::string& url, int timeout_ms = 60000) {
     DsFetchReply r;
-    if (cfg.apiKey.empty()) { r.error = "未配置 api_key（rlplayer-llm.conf）"; return r; }
+    if (cfg.apiKey.empty()) {
+        rta::diag::diag_emit("llm.config",rta::diag::Stage::Llm,rta::diag::find_code("llm.not_configured"),{{"key_present","false",rta::diag::KvKind::Bool}});
+        r.error = "未配置 api_key（rlplayer-llm.conf）"; return r;
+    }
 
     // E-8: 月度调用上限与超限降级（超限不发起 HTTP）
     std::string capErr;

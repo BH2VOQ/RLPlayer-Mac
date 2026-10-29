@@ -1,5 +1,5 @@
+// SPDX-FileCopyrightText: 2026 BH2VOQ <https://github.com/BH2VOQ>
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 August Hu <BH2VOQ@163.com>
 //
 // 本文件是 RLPlayer 的一部分，以 GNU 通用公共许可证第 3 版（或更新版本）发布。
 // 完整条款见仓库根目录的 LICENSE 文件。
@@ -14,6 +14,7 @@
 // 迁移原则：循环体逐行照搬，仅把外部引用（ps.* / RQ / g_dbg* / in.* / play_log / dlog）
 // 换成 RenderHost 的指针/钩子；唯一的逻辑增量为超时 break 前的 RENDERFAIL 遥测。
 #pragma once
+#include <algorithm>   // std::clamp（fastFeed 的等待上限）与 std::min/max
 #include <atomic>
 #include <chrono>
 #include <cmath>
@@ -51,6 +52,23 @@ struct OutSink {
     // 2026-10-24 C2：返回值只用于 STAT 的 ev/evint 遥测，调用方可以忽略（旧实现是 void）。
     virtual bool   wait_event(int) { return false; }
     virtual long long last_pad() const { return 0; }
+    // 写入【前】的设备缓冲水位（帧）。render_loop 在每次 write_available() 之前立即采样一次
+    // （fastFeed 也一样，每个写尝试各采一次）。
+    // 为什么必须写前采样：fastFeed 的写入会当场把缓冲补满，写完再读就永远是「满」，
+    // dry（触底）判据会整体失明 —— 实测 A 组形态（2 周期缓冲、pad 每次都触底且都补上了）
+    // 会给出 dry=0，于是「dry 恒为 0」看起来像健康。tests/test_render_loop_dry.cpp 的
+    // fastFeed 用例钉住了这条：写前触底、写后变满的那一拍【必须】still 计入 dry。
+    // 实现要求（接口清单见 .agents/111-afternoon-audio-api.md）：
+    //   · 返回【调用这一刻】的实际水位（实时读，或在采集点维护的写前快照）；
+    //     绝不允许返回「上一次写完后的水位」；
+    //   · 无锁等待、无分配（每个写尝试一次，独占下 ≈200 次/秒）；
+    //   · 只有 device_period_frames() >= 0 的后端才参与 dry 统计，其余后端返回值不会被当作判据。
+    // 默认实现只能退回上一次写尝试记下的水位（滞后一拍），精度不足 ⟹ 后端应自行覆盖。
+    virtual long long pad_before_write() const {
+        WriteAttempt wa;
+        if (last_write_attempt(wa) && wa.pad >= 0) return wa.pad;
+        return last_pad();
+    }
     virtual size_t write_one_period(const int32_t* pcm, size_t frames) = 0;
     // WASAPI 用它把设备缓冲补满；其它后端默认退回 write_one_period。
     virtual size_t write_available(const int32_t* pcm, size_t frames) { return write_one_period(pcm, frames); }
@@ -67,8 +85,15 @@ struct OutSink {
     virtual long long last_gb_hr() const { return -999; }
     // 「写不进去」的成因分解（2026-10-22 反馈 20261022-02）：w0 是个混在一起的数，
     // 分不清「设备缓冲恒满」和「我们喂不上」。默认返回 -1 = 后端不支持该统计。
-    virtual long long zero_pad_full() const { return -1; }   // ① 设备缓冲满
-    virtual long long zero_starved()  const { return -1; }   // ② 供料不足一个周期
+    // ★ 计数契约（与 rta::audio::ZeroAttrib::classify 同一份判据，平台无关）：
+    //   三个计数都是【逐次写尝试】的累计值，每次 write_available() 返回 0 必须落进且只落进一个桶，
+    //   于是 STAT/RENDERFAIL 里恒有 w0 == zp + zs + zo。
+    //   为什么强调「逐次」而不是「每轮」：fastFeed 下同一轮循环最多两次写尝试（写→等→再写），
+    //   按轮计数会让上面这个等式对不上，也让 w0 与真实尝试次数脱钩。
+    //   tests/test_render_loop_dry.cpp 用生产分类器 ZeroAttrib 驱动 mock，直接断言该等式。
+    virtual long long zero_pad_full() const { return -1; }   // ① 设备缓冲满（room == 0）
+    virtual long long zero_starved()  const { return -1; }   // ② 供料不足一个周期（avail < per）
+    virtual long long zero_other()    const { return -1; }   // ③ 其它（如可用空间不足一个周期）
     virtual std::string zero_reason() const { return "-"; }  // 最近一次成因
 
     // ---------------- C2 遥测（2026-10-24 N300 欠载；纯观测，全部带默认值）----------------
@@ -196,6 +221,7 @@ struct RenderHost {
     std::atomic<long long>* dbgProd   = nullptr;   // pull_chunk 单次最长阻塞 ms
     // STAT 输出周期（秒）。生产 = 5s；测试用虚拟时钟时可以调小以便断言 STAT 字段。
     double statPeriodSec = 5.0;
+    bool fastFeed = true; // 生产默认：先写，有背压才等待；false 仅用于历史对照夹具。
 
     // ---- C3 端点消失（B 缺陷：N300 96k 从 USB 总线掉线）----
     // 写失败期间每隔 deviceAliveCheckMs 询问一次 sink.endpoint_alive()；false ⟹
@@ -226,7 +252,7 @@ inline void render_loop(OutSink& sink, RenderHost& h) {
     size_t period = sink.buffer_frames() ? sink.buffer_frames() : 9600;
     std::vector<int32_t> pend;
     size_t pendFrames = 0;
-    size_t played = 0;
+    size_t played = h.played ? h.played->load() : 0; // preserve caller's resume/seek position
     int timeouts = 0;
     // 「这一串连续写不进去」的起点（timeouts 0→1 时记）。
     // ★ 2026-10-25 真 BUG 修复：RENDERFAIL 文案里的秒数原先写成 timeouts*20/1000，
@@ -255,6 +281,7 @@ inline void render_loop(OutSink& sink, RenderHost& h) {
     long long prodMaxMs = 0;      // pull_chunk 单次最长阻塞
     size_t    writtenTotal = 0;   // 已写入帧数（L2 判「零写入」用）
     long long wfailN    = 0;      // 写失败次数（WFAIL 明细只打前 200 条）
+    double lastSuccessT = loopStartT, gapMaxMs = 0.0;
     double    lastAliveProbeT = loopStartT - 1.0;  // 首次写失败立即问一次端点存活
     bool      l2Tried   = false;  // L2 看门狗只尝试一次（避免无限重开）
     double    lastLogT  = loopStartT;
@@ -428,12 +455,14 @@ inline void render_loop(OutSink& sink, RenderHost& h) {
                    // 两者不一致就说明换算/位深基准有问题（2026-10-23 共享电平定论用）。
                    << " fpeak=" << sink.out_peak()
                    << " w0=" << h.dbgW0->load() << " wr=" << h.dbgWr->load();
-                // ★ 2026-10-22 反馈 20261022-02：w0 混着两种互斥成因，必须分开记。
-                //   zp=设备缓冲满（pad 满）  zs=供料不足一个周期（我们喂不上）
+                // ★ 2026-10-22 反馈 20261022-02：w0 混着三种互斥成因，必须分开记。
+                //   zp=设备缓冲满（room 被占满）  zs=供料不足一个周期（我们喂不上）
+                //   zo=其它（如可用空间不足一个周期 —— 整周期量化后归零，不是设备满）
                 //   实测只要 zs>0 就说明瓶颈在【轮询粒度/供料】，不在设备。
-                const long long zp = sink.zero_pad_full(), zs = sink.zero_starved();
-                if (zp >= 0 || zs >= 0)
-                    ls << " zp=" << zp << " zs=" << zs << " zr=" << sink.zero_reason();
+                //   三者按【逐次写尝试】累计 ⟹ 同一行里 w0 == zp + zs + zo（接口契约见 OutSink）。
+                const long long zp = sink.zero_pad_full(), zs = sink.zero_starved(), zo = sink.zero_other();
+                if (zp >= 0 || zs >= 0 || zo >= 0)
+                    ls << " zp=" << zp << " zs=" << zs << " zo=" << zo << " zr=" << sink.zero_reason();
                 // ---- C2（2026-10-24 N300 欠载）：把「设备触底」数字化 ----
                 // per = 设备周期帧数（-1 = 该后端不报）；bf = 本循环用的缓冲帧数；
                 // dry/dryms = 轮询时设备缓冲已触底（pad==0）的次数与处于该状态的累计毫秒；
@@ -444,12 +473,63 @@ inline void render_loop(OutSink& sink, RenderHost& h) {
                    << " dryms=" << dryMsNow(nowT)
                    << " ev=" << evN
                    << " evint=" << evIntMedian()
-                   << " prod=" << prodMaxMs;
+                   << " prod=" << prodMaxMs << " gapMaxMs=" << gapMaxMs;
                 h.log(ls.str());
                 publish(nowT);
             }
         }
-        const bool waited = sink.wait_event(20);
+        // Fast feed: 先把设备缓冲的可用空间填满，只有出现背压（这一拍 0 帧写进去）才短暂等待。
+        // 每次写尝试都单独记数（wr/w0/dry/WFAIL）——fastFeed 下一轮最多两次尝试，
+        // 按轮记数会让 w0 与真实尝试次数、与 zp+zs+zo 都对不上。
+        size_t w = 0;
+        // 写前水位【作为参数】传进来，不在外层留可变状态：dry 判据依赖「这一次尝试写入之前」的
+        // 水位，fastFeed 写完就满，一旦谁把采样点挪到写之后，dry 会静默变成恒 0。
+        auto record_attempt = [&](size_t written, long long padBefore, double tAttempt) {
+            if (written > 0) {
+                if (h.dbgWr) h.dbgWr->fetch_add(1);
+            } else {
+                if (h.dbgW0) h.dbgW0->fetch_add(1);
+            }
+            // dry：本次写尝试【之前】设备缓冲已触底（pad==0）、手里有数据。
+            // 「写成功也算」是有意的（方案 §6.3）：设备已经空了一段，补上都消除不了那段空窗。
+            const bool padTouched = (sink.device_period_frames() >= 0 &&
+                                     padBefore == 0 && pendFrames > 0);
+            if (padTouched) {
+                if (tAttempt - loopStartT >= 0.5) {
+                    ++dryN;
+                    if (!inDry) { inDry = true; dryEnterT = tAttempt; }
+                }
+            } else if (inDry) {
+                flushDry(tAttempt);
+            }
+
+            if (written == 0 && pendFrames > 0) {
+                ++wfailN;
+                if (wfailN <= 200 && h.log) {
+                    std::ostringstream ws;
+                    ws.setf(std::ios::fixed); ws.precision(3);
+                    ws << "WFAIL t=" << (tAttempt - loopStartT) << " pad=" << sink.last_pad();
+                    OutSink::WriteAttempt wa;
+                    if (sink.last_write_attempt(wa))
+                        ws << " room=" << wa.room << " per=" << wa.per << " avail=" << wa.avail
+                           << " toWrite=" << wa.toWrite << " gb_hr=" << wa.gbHr;
+                    ws << " zr=" << sink.zero_reason();
+                    h.log(ws.str());
+                }
+            }
+        };
+
+        if (h.fastFeed && pendFrames > 0) {
+            const long long padBefore = sink.pad_before_write();   // 必须在本行之后的写入【之前】
+            w = sink.write_available(pend.data(), pendFrames);
+            const double tFirst = nowSec();
+            record_attempt(w, padBefore, tFirst);
+        }
+
+        const auto per = sink.device_period_frames();
+        const int waitMs = h.fastFeed && h.deviceRate > 0 ?
+            std::clamp((int)(1000.0 * (double)(per > 0 ? per : (long long)period) / h.deviceRate / 2.0), 1, 20) : 20;
+        const bool waited = (!h.fastFeed || w == 0) ? sink.wait_event(waitMs) : false;
         const double evT = nowSec();
         if (waited) {
             ++evN;
@@ -460,49 +540,20 @@ inline void render_loop(OutSink& sink, RenderHost& h) {
             }
             evLastT = evT;
         }
-        h.dbgPad->store(sink.last_pad());
-        const size_t w = sink.write_available(pend.data(), pendFrames);
+
+        if (pendFrames > 0 && (!h.fastFeed || w == 0)) {
+            const long long padBefore = sink.pad_before_write();   // 同上：写前采样
+            w = sink.write_available(pend.data(), pendFrames);
+            const double tSecond = nowSec();
+            record_attempt(w, padBefore, tSecond);
+        }
+
         const double tAfter = nowSec();
-        if (w > 0) h.dbgWr->fetch_add(1); else h.dbgW0->fetch_add(1);
-
-        // ---- C2 dry 计数（纯观测，方案 §6.3）----
-        // 定义（与方案一致）：起播 500 ms 后，设备缓冲在本次写入前已经触底（pad==0）且
-        // 手里有数据 ⟹ 计一次 dry。**不看这一拍是否写成功**：
-        //   · 2 个周期的 20ms 缓冲（A 组现场）几乎每次轮询 pad 都是 0 —— 就算紧接着补上，
-        //     设备也已经有了一段空窗，这正是听感「啵」的温床；
-        //   · 10 个周期的 100ms 缓冲（B 组现场）只有真喂不上时才会触底（现场采样 0%）。
-        // 所以 M2 才能用「10 分钟 dry=0」做判据。若改成「只在写失败时计数」，A 组形态
-        // 反而会漏掉（pad 触底但补上了）—— 那是把判据改成「看不见」。
-        // 只对能报告真实设备周期的后端计数（per<0 的 Null/NAA/共享后端没有 padding 概念）。
-        const bool padTouched = (sink.device_period_frames() >= 0 &&
-                                 sink.last_pad() == 0 && pendFrames > 0);
-        if (padTouched) {
-            if (tAfter - loopStartT >= 0.5) {
-                ++dryN;
-                if (!inDry) { inDry = true; dryEnterT = tAfter; }
-            }
-        } else if (inDry) {
-            flushDry(tAfter);
-        }
-
-        // ---- C2 WFAIL 明细（只前 200 条；方案 §6.5）----
-        // 只记「手里有数据却写不进去」；队列暂时空导致的 0 写入不是写失败。
-        if (w == 0 && pendFrames > 0) {
-            ++wfailN;
-            if (wfailN <= 200 && h.log) {
-                std::ostringstream ws;
-                ws.setf(std::ios::fixed); ws.precision(3);
-                ws << "WFAIL t=" << (tAfter - loopStartT) << " pad=" << sink.last_pad();
-                OutSink::WriteAttempt wa;
-                if (sink.last_write_attempt(wa))
-                    ws << " room=" << wa.room << " per=" << wa.per << " avail=" << wa.avail
-                       << " toWrite=" << wa.toWrite << " gb_hr=" << wa.gbHr;
-                ws << " zr=" << sink.zero_reason();
-                h.log(ws.str());
-            }
-        }
+        h.dbgPad->store(sink.last_pad());
 
         if (w > 0) {
+            gapMaxMs = std::max(gapMaxMs, (tAfter - lastSuccessT) * 1000.0);
+            lastSuccessT = tAfter;
             pend.erase(pend.begin(), pend.begin() + (long long)(w * (size_t)h.outCh));
             pendFrames -= w;
             played += w;
@@ -549,6 +600,11 @@ inline void render_loop(OutSink& sink, RenderHost& h) {
             // 独占模式在 VM 板载 HD Audio 上 GetCurrentPadding 恒满 → write_available 恒 0。
             // 旧版在这里静默 break，END pos=0 error="" 成悬案；现在必须留下完整归因。
             if (timeouts == 0) timeoutT0 = tAfter;   // 这一串的起点（用于实测时长）
+            // 已决（2026-10-29，用户裁定）：判据就是「连续 201 次写尝试」，**保持现状**，
+            //    不折算成 max(201 次, 4s)。事实如实记录：fastFeed 一轮最多两次尝试、只等 per/2
+            //    （96k/per=960 ⟹ 5ms），所以完全死掉的设备从旧时序的 ≈4s 提前到 ≈0.5s 判 RENDERFAIL。
+            //    这个提前是 fastFeed 的**预期代价**（更快失败、更快回退与报错），不是缺陷；
+            //    次数阈值不动（动它才是改判据）。下面日志里的时长取实测墙钟，不按次数×20ms 估算。
             if (++timeouts > 200) {
                 std::ostringstream fs;
                 // 时长取【实测墙钟】（tAfter - timeoutT0），不再用「次数 x 20ms」估算：
@@ -559,10 +615,11 @@ inline void render_loop(OutSink& sink, RenderHost& h) {
                    << "（疑似虚拟声卡/独占模式不可用）"
                    << " w0=" << h.dbgW0->load() << " wr=" << h.dbgWr->load();
                 // 与 STAT 同一口径：把「写不进去」的成因一并带出（不支持计数的后端省略）。
-                // w0 本身混着「缓冲满」与「喂不上一个周期」两种互斥成因，只看 w0 无法定案。
-                const long long zpf = sink.zero_pad_full(), zst = sink.zero_starved();
-                if (zpf >= 0 || zst >= 0)
-                    fs << " zp=" << zpf << " zs=" << zst << " zr=" << sink.zero_reason();
+                // w0 本身混着「缓冲满」「喂不上一个周期」「可用空间不足一个周期」三种互斥成因，
+                // 只看 w0 无法定案；w0 == zp + zs + zo 才能在日志里自证没丢数。
+                const long long zpf = sink.zero_pad_full(), zst = sink.zero_starved(), zot = sink.zero_other();
+                if (zpf >= 0 || zst >= 0 || zot >= 0)
+                    fs << " zp=" << zpf << " zs=" << zst << " zo=" << zot << " zr=" << sink.zero_reason();
                 fs << " last_pad=" << sink.last_pad()
                    << " 缓冲=" << period << "帧"
                    << " GetBuffer HRESULT=" << sink.last_gb_hr()
@@ -644,6 +701,7 @@ inline void render_loop(OutSink& sink, RenderHost& h) {
                            << " —— 设备在放但每个周期都断，听感为周期性「啵」声/破音"
                            << " w0=" << h.dbgW0->load() << " wr=" << h.dbgWr->load()
                            << " zp=" << sink.zero_pad_full() << " zs=" << sink.zero_starved()
+                           << " zo=" << sink.zero_other()
                            << " last_pad=" << sink.last_pad()
                            << " 缓冲=" << period << "帧"
                            << " GetBuffer HRESULT=" << sink.last_gb_hr()

@@ -1,5 +1,5 @@
+// SPDX-FileCopyrightText: 2026 BH2VOQ <https://github.com/BH2VOQ>
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 August Hu <BH2VOQ@163.com>
 //
 // 本文件是 RLPlayer 的一部分，以 GNU 通用公共许可证第 3 版（或更新版本）发布。
 // 完整条款见仓库根目录的 LICENSE 文件。
@@ -17,6 +17,8 @@
 // 只实现 GET/POST —— 流媒体接入只需要"把原始文件拉下来"和几个 JSON API。
 #pragma once
 #include "platform/http.h"
+#include "diag/diag.h"
+#include <chrono>
 #include <mutex>
 #include <string>
 #include <utility>
@@ -25,6 +27,7 @@
 namespace rta::net {
 
 struct HttpResponse {
+    bool         timedOut = false;
     bool         ok = false;
     int          status = 0;
     std::string  contentType;
@@ -44,6 +47,7 @@ namespace http_detail {
 inline HttpResponse from_platform(rta::platform::HttpResult&& p) {
     HttpResponse r;
     r.ok          = p.ok;
+    r.timedOut    = p.timedOut;
     r.status      = p.status;
     r.contentType = std::move(p.contentType);
     r.error       = std::move(p.error);
@@ -106,6 +110,39 @@ private:
     const std::atomic<bool>* prev_ = nullptr;
 };
 
+// Explicit caller context, not a guess based on HTTP status or URL spelling.
+inline thread_local rta::diag::Stage http_diag_stage = rta::diag::Stage::Unknown;
+struct HttpDiagScope {
+    rta::diag::Stage previous;
+    explicit HttpDiagScope(rta::diag::Stage s):previous(http_diag_stage){http_diag_stage=s;}
+    ~HttpDiagScope(){http_diag_stage=previous;}
+};
+inline HttpResponse traced_request(const rta::platform::HttpRequest& req) {
+    const auto start=std::chrono::steady_clock::now();
+    auto response=http_detail::from_platform(rta::platform::http_request(req));
+    rta::diag::Event event;
+    event.evt="http.end";event.set_stage(http_diag_stage);
+    event.str("url",req.url).str("method",req.method).num("http_status",response.status)
+      .num("elapsed_ms",std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now()-start).count())
+      .num("timeout_ms",req.timeoutMs).boolean("timed_out",response.timedOut).boolean("ok",response.ok)
+      .str("source",req.url.substr(0,req.url.find('?')))
+      .str("net_error",response.status==0 ? (response.timedOut?"timeout":"transport_failed") : "");
+    const char* code=nullptr;
+    if(!response.ok){
+        if(http_diag_stage==rta::diag::Stage::Meta)code=response.timedOut?"meta.timeout":
+            (response.status==404?"meta.not_found":"meta.network_failed");
+        else if(http_diag_stage==rta::diag::Stage::Llm)code=response.timedOut?"llm.timeout":
+            (response.status==0?"llm.network_failed":
+            ((response.status==401||response.status==403)?"llm.auth_failed":
+            (response.status==429?"llm.rate_limited":"llm.http_failed")));
+        else if(http_diag_stage==rta::diag::Stage::Upnp)code="upnp.control_failed";
+        else if(http_diag_stage==rta::diag::Stage::Update)code="update.check_failed";
+        if(code)event.set_code(rta::diag::find_code(code));
+    }
+    rta::diag::diag_emit(event); // never include headers, request body or response body
+    return response;
+}
+
 // POST（Emby 认证、LLM、元数据源需要）
 // iface：把这次请求钉在某张网卡上（形如 "en1"；空 = 系统选路）。
 // UPnP 控制面必须传它 —— 本机存在同网段虚拟网卡时（Internet 共享/桥接），
@@ -125,7 +162,7 @@ inline HttpResponse http_post(const std::string& url, const std::string& body,
     req.proxy       = http_proxy();
     req.cancel      = http_detail::current_cancellation_token();
     req.interface   = iface;
-    return http_detail::from_platform(rta::platform::http_request(req));
+    return traced_request(req);
 }
 
 // GET，可选附加请求头（每项形如 "名: 值"）与网卡绑定（见 http_post 的 iface 说明）
@@ -141,7 +178,7 @@ inline HttpResponse http_get(const std::string& url,
     req.proxy     = http_proxy();
     req.cancel    = http_detail::current_cancellation_token();
     req.interface = iface;
-    return http_detail::from_platform(rta::platform::http_request(req));
+    return traced_request(req);
 }
 
 inline std::string http_get_text(const std::string& url,

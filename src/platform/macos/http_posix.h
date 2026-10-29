@@ -1,5 +1,5 @@
+// SPDX-FileCopyrightText: 2026 BH2VOQ <https://github.com/BH2VOQ>
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 August Hu <BH2VOQ@163.com>
 //
 // 本文件是 RLPlayer 的一部分，以 GNU 通用公共许可证第 3 版（或更新版本）发布。
 // 完整条款见仓库根目录的 LICENSE 文件。
@@ -250,6 +250,7 @@ inline HttpResult http_request(const HttpRequest& req) {
 
     const CURLcode rc = ::curl_easy_perform(curl);
 
+    r.timedOut = (rc == CURLE_OPERATION_TIMEDOUT);
     if (rc != CURLE_OK) {
         // 若是因为 cancel 触发的中断，明确返回"请求已取消"，否则带上 curl 诊断信息
         if (req.cancel && req.cancel->load(std::memory_order_relaxed)) {

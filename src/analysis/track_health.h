@@ -1,5 +1,5 @@
+// SPDX-FileCopyrightText: 2026 BH2VOQ <https://github.com/BH2VOQ>
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 August Hu <BH2VOQ@163.com>
 //
 // 本文件是 RLPlayer 的一部分，以 GNU 通用公共许可证第 3 版（或更新版本）发布。
 // 完整条款见仓库根目录的 LICENSE 文件。
@@ -67,6 +67,7 @@ struct TrackHealth {
     int bits = 0;
     std::string status;          // "ready" / "error"
     std::string error;           // status=error 时的人话原因
+    std::string errorCode;       // stable diagnostic code; never inferred from translated prose
     int64_t analyzedAtMs = 0;    // Unix epoch 毫秒；缓存命中语义见 docs/分析器API建议.md
     // ---- 音质分析（B2 quality.h，2026-10-27 接入）----
     // hasQuality=false 时 quality 全 0，JSON 段里 available=false（老调用方只读老字段，零影响）。
@@ -240,6 +241,8 @@ inline TrackHealth analyze_file_whole(const std::string& path) {
         rta::audio::LoadNote note;
         rta::audio::AudioBuffer buf = rta::audio::read_any(path, &note);
         return analyze_buffer(buf);
+    } catch (const rta::audio::DecodeFailure& e) {
+        h.status = "error"; h.error = e.what(); h.errorCode = e.code;
     } catch (const std::exception& e) {
         h.status = "error";
         h.error = e.what();

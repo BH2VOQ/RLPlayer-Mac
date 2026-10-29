@@ -1,3 +1,9 @@
+// SPDX-FileCopyrightText: 2026 BH2VOQ <https://github.com/BH2VOQ>
+// SPDX-License-Identifier: GPL-3.0-or-later
+//
+// 本文件是 RLPlayer 的一部分，以 GNU 通用公共许可证第 3 版（或更新版本）发布。
+// 完整条款见仓库根目录的 LICENSE 文件。
+//
 // quality_ai.h — 音频体检 B4：把确定性指标翻译成人话（DeepSeek 解释层，纯附加）
 //
 // 定位（用户 261027-01 最终提醒 #2）：

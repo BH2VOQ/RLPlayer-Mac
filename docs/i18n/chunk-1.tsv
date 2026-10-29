@@ -1,0 +1,370 @@
+首		ur || 0; sub.push(j.tracks.length + ' 首'); sub.push(fmtDurLong(localTotal
+未知错误		k) { toast('预览失败：' + ((j && j.error) || '未知错误')); return; } toast((j.writable ||
+艺术家		3.4-6.8 7.5-6.8s7.5 2.7 7.5 6.8'/></svg>艺术家</div><div class=nav data-v=tracks><svg
+取消		ify-content:flex-end">' + '<button class=btn id=rmdCancel>取消</button
+已复制来源链接		t(u).then(function () { toast('已复制来源链接'); }).catch(function () {
+随机播放		on value=2>单曲循环</option><option value=3>随机播放</option></select><input id=sRoot><butto
+AI 整理		; } } else if (!title) { h += '<div style="font-size:10.5px;color:var(--mut
+加入失败		(j) { if (!j.ok) { toast(j.error || '加入失败'); return; } toast('整张专辑已加入队列'); l
+右		rn ['单声道']; if (n === 2) return ['左', '右']; if (n === 4) return ['左', '右', '左
+已移除		l?i=' + i, '').then(function () { toast('已移除'); loadQ(); }); }; // 反馈 #
+年份		ercase;letter-spacing:0.5px">' + '<span style="font-family:monospace;min-wi
+PCM 升频		</div>' + '</button>' + '<button class=preset-btn id=presetPcm aria-la
+个文件		le="margin-bottom:10px">将删除 <b>' + nf + '</b> 个文件' + (nd ? ('、<b>'
+发现新版本		updInstallBtn(true, '立即更新'); updMsg('发现新版本 ' + v, 'warn'); // 主动提示（用户要的「自动提示」
+已加入队列		IComponent(f)).then(function () { toast('已加入队列'); loadQ(); }); } /* 2026-10-26（B-3）：带
+暂停播放		isThisPlaying ? (S.paused ? '继续播放专辑' : '暂停播放') : '播放整张专辑'; var h = '<div class=
+标题		tMode === 'title' ? ' selected' : '') + '>标题</option>' + '<option value=
+正在获取资料…		style="margin-bottom:20px">' + '<div style="font-size:12px;color:var(--mut2)">
+请尝试缩短搜索词，或检查是否有错别字		专辑</div>' + '<div style="color:var(--mut2);font-size:12px;margin-botto
+重新搜索		ML = rows(force ? [] : known) + '<div style="margin-top:12px"><button class=
+顺序播放		d=sShuf><select id=sRep><option value=0>顺序播放</option><option value=1>列表循环</option><o
+默认设备		= 'wasapi' || bk === 'wasapi-shared') ? '默认设备' : '（此后端没有本地设备）') + '</option>';
+/ 发行版本		' · 不同演绎 ' + distinctCount + ' / 发行版本 ' + releaseCount; h += '<div class=
+apod-20k-tight [线性相位]		</option><option value="apod-20k-tight">apod-20k-tight [线性相位]</option></select><select id=sFiltNx><op
+apod-wide [线性相位]		线性相位]</option><option value="apod-wide">apod-wide [线性相位]</option><option value="poly-sinc-tight-
+dB；总曲线峰值		peqMsg('实际最大单段 ±'+maxBand.toFixed(1)+' dB；总曲线峰值 '+maxCurve.toFixed(1)+' dB（含前级）。'+
+poly-sinc-ext2-xl [线性相位]		ption><option value="poly-sinc-ext2-xl">poly-sinc-ext2-xl [线性相位]</option><option value="poly-sinc-ext2-x
+poly-sinc-ext2-xla [线性相位]		tion><option value="poly-sinc-ext2-xla">poly-sinc-ext2-xla [线性相位]</option><option value="poly-sinc-hb">po
+poly-sinc-gauss-hires-lp [线性相位]		option value="poly-sinc-gauss-hires-lp">poly-sinc-gauss-hires-lp [线性相位]</option><option value="poly-sinc-gauss-
+poly-sinc-gauss-xla [线性相位]		ion><option value="poly-sinc-gauss-xla">poly-sinc-gauss-xla [线性相位]</option><option value="poly-sinc-ext2">
+poly-sinc-hb-l-2s [两段式] [线性相位]		ption><option value="poly-sinc-hb-l-2s">poly-sinc-hb-l-2s [两段式] [线性相位]</option><option value="sinc-S">sinc-S
+poly-sinc-hb-s [线性相位]		</option><option value="poly-sinc-hb-s">poly-sinc-hb-s [线性相位]</option><option value="poly-sinc-hb-m">
+poly-sinc-long-2s [两段式] [线性相位]		ption><option value="poly-sinc-long-2s">poly-sinc-long-2s [两段式] [线性相位]</option><option value="poly-sinc-xl">po
+poly-sinc-mp [最小相位]		位]</option><option value="poly-sinc-mp">poly-sinc-mp [最小相位]</option><option value="poly-sinc-2s">po
+poly-sinc-short-mp [最小相位]		tion><option value="poly-sinc-short-mp">poly-sinc-short-mp [最小相位]</option><option value="poly-sinc-short-
+poly-sinc-xtr [线性相位]		]</option><option value="poly-sinc-xtr">poly-sinc-xtr [线性相位]</option><option value="poly-sinc-gauss-
+sinc-LL [线性相位]		[线性相位]</option><option value="sinc-LL">sinc-LL [线性相位]</option><option value="closed-form-fast
+▶ 播放整张		ing ? (S.paused ? '▶ 继续播放' : '❚❚ 暂停') : '▶ 播放整张'; var albPlayTitle = isThisPlaying
+★ 仅共享模式		e') + '">' + (dev.exclusive === false ? '★ 仅共享模式' : '') + '</span>' + '</div>'
+共发现		ontent = _castDevices.length ? ('共发现 ' + _castDevices.length + ' 个渲染器')
+创建失败:		e); }).catch(function (e) { toast('创建失败: ' + e); }); } }); } function pickS
+删除失败		rue) { toast((r && r.error) ? r.error : '删除失败'); return; } var extra = (type
+升到		'</span>' + '</div>' + '<div class=preset-btn-sub id=presetDsdSub
+升到设备最高档（当前		'</span>' + '</div>' + '<div class=preset-btn-sub id=presetPcmSub>升到设备最高档
+原音直通（bit-perfect）		+ '<div class=preset-grid>' + '<button class=preset-btn id=presetBitPerfect aria-label=
+发送反馈		!!on; btn.textContent = on ? '正在发送…' : '发送反馈'; } } function fbCount() { var t = D
+取回		bText = '缓存 · ' + (firstDate || '近期') + ' 取回' + (j.offline ? ' · 离线' : ''); }
+右环绕		6) return ['左', '右', '中置', '低音', '左环绕', '右环绕']; if (n === 8) return ['左', '右', '中
+否		(dev.dsdNativeMax || 'dsd256') + '）') : '否'; } var pcmTargetRate = dev.maxRat
+密码		pass').placeholder = s ? '留空 = 保持原密码' : '密码'; srcFormMsg(s ? ('正在编辑「' + (s.name
+展开全部		sed'); this.textContent = isCol ? '展开全部' : '收起简介'; }; } } function openA
+左后		'右']; if (n === 4) return ['左', '右', '左后', '右后']; if (n === 6) return ['左', '
+已移除，清理		ibChanged(); toast(n > 0 ? ('已移除，清理 ' + n + ' 首') : '已移除'); re
+当前设备：		caps-line id=presetCapsInfo>' + '当前设备：' + esc(name) + ' · 最高 ' + esc(maxRate)
+扫描失败（/api/cast/devices 无响应）		lse; }); if (msg) msg.textContent = '扫描失败（/api/cast/devices 无响应）'; if (msg2) msg2.textContent = '扫描
+整张专辑已加入队列		j.error || '加入失败'); return; } toast('整张专辑已加入队列'); loadQ(); }); } /* --------------
+是（最高		efined) { dsdStr = dev.dsdNative ? ('是（最高 ' + (dev.dsdNativeMax || 'dsd256') + '
+来源		x + 1) + '] ' + (c.title || c.source || '来源'); h += citationChipHtml(c.url,
+检查失败：		⚠️ 绝不说「已是最新」：网络/鉴权/解析失败就是失败 updMsg('检查失败：' + (obj.message || obj.code || '未知原因')
+歌词赏析		, '发行时间', '所属专辑', '时长', '版本说明', '衍生作品', '歌词赏析'], person: ['简介', '国籍', '活跃年代', '风格'
+正在发现渲染器…		true; }); if (msg) msg.textContent = '正在发现渲染器…'; if (msg2) msg2.textContent = '正在发现
+没有歌词		+ '</div>'; }).join('') : '<div class="ly none">没有歌词<br><span style="f
+点「重新发现」扫描局域网里的 MediaRenderer		: (v ? ('已选择：' + v) : '点「重新发现」扫描局域网里的 MediaRenderer'); } }; } if (btnScan) b
+确定		lass="btn pri" id=askOk>' + esc(o.ok || '确定') + '</button></div>'; m.classList.a
+设置		4.4 16.1l1.9-1.1M17.7 9l1.9-1.1'/></svg>设置</div><div class=sp></div><div class=sid
+资料整理失败（		tabindex=0>' + '资料整理失败（' + esc(s.error || '超时') + '）· 点击重试</di
+输出设备		（见上），这里不再占一行。 + sel('sp_device', '输出设备', '<option value="">默认设备</option>', '独
+采样率转换		ed; if (p.resample) nodes.push({ k: '采样率转换', v: (p.filter || 'Kaiser sinc') + '
+高级选项 ▾		wide" style="margin-top:2px">' + '<button class=btn id=sp_metamore style="font-
+（未选择 / 默认设备）		输入设备'; return; } var hh = '<option value="">（未选择 / 默认设备）</option>'; list.f
+（累计		lMs === 'number' && j.dspTotalMs > 0) ? '（累计 ' + j.dspTotalMs.toFixed(1) + ' ms）' :
+，EC-7 调制器		id=presetDsdSub>升到 ' + esc(dsdTarget) + '，EC-7 调制器</div>' + '</button>' +
+" title="在系统浏览器打开：		btn chip-open" data-url="' + esc(url) + '" title="在系统浏览器打开：' + esc(url) + '" ' + 'style="
+/ 欠载		tContent = '溢出 ' + (st.overflow || 0) + ' / 欠载 ' + (st.underflow || 0); xEl.styl
+/ 访问）		以 http://' + esc(j.ip) + ':' + j.port + '/ 访问）')); }); }; D('bLyric').onclick = fun
+0 = 立即生效（可能爆音）		l: '音量渐变（毫秒）' }, ADV.ramp, 0, 2000, 10, '0 = 立即生效（可能爆音）') + '<div class="sfld wide"><di
+10kHz 以上能量		rolloff95_hz, 0, ' Hz')); s += qRow('10kHz 以上能量', qFmt(q.hf_ratio_10k_db, 2, ' dB'));
+2.0 / 2.1 / 5.1 / 7.1 / 5.1.2 / 7.1.4 · 带 .1 的 LFE 分频 80 Hz		al sm">2.0 ~ 7.1.4（6 种）</span>' + '<div class=rcsub>2.0 / 2.1 / 5.1 / 7.1 / 5.1.2 / 7.1.4 · 带 .1 的 LFE 分频 80 Hz</div></div>' + '<
+24-bit 载波		}); nodes.push({ k: 'DoP 封装', v: '24-bit 载波 ' + p.outRate + ' Hz \u00b7 标记 0x05/0x
+5 阶（DSD64 起）		modorder', '调制器阶数', opt(5, '5 阶（DSD64 起）', ADV.modorder || 5) + opt(7, '7 阶（需 D
+= 88.2 kHz 时使用		随上面的 1x</option>' + filts, '输出 DSD 且源文件 >= 88.2 kHz 时使用') + sel('sp_dsdrat
+=频率 ±1%（Shift 加速）。修改即时生效（热更新，交叉淡入防爆音），并自动保存到 rlplayer-peq.txt。		<b>双击节点</b>=该段复位（0 dB / Q 1.41）。' + '选中行后 <b>↑↓</b>=增益 0.1 dB、<b>←→</b>=频率 ±1%（Shift 加速）。修改即时生效（热更新，交叉淡入防爆音），并自动保存到 rlplayer-peq.txt。</div
+AHM 多电平（6~8 bit 风格）		ly || 'dsd') + opt('ahm', 'AHM 多电平（6~8 bit 风格）', ADV.modfamily || 'dsd'),
+AI 资料与封面补全		-8.48l2.83-2.83"/></svg></div>'; h += '<div class=am-qtext><div class=am-qtitle>AI 资料与封面
+ASIO 已移除（macOS 使用 CoreAudio）		绝不静默改。 var REMOVED_BACKENDS = { asio: 'ASIO 已移除（macOS 使用 CoreAudio）', // 2026-10-25（用户指令「不可用的要隐藏」）：NAA /
+AutoEQ 校准：按实测目标平直化，小幅低频架		,-0.6],[1.0,1.2]] }, autoeq: { label: 'AutoEQ 校准：按实测目标平直化，小幅低频架', pts: [[0,3.8],[0.10,3.8],[0.18,2
+Boléro（拉威尔）		lor:var(--mut2)">示例作品：</span>' + '<button class="btn chip-work" data-title="Boléro"
+CLASSICAL WORK · 古典作品		r(--hov);border-radius:10px">' + '<div class=kind style="font-size:11px;font-weight:600;letter
+DSD 标准（Butterworth NTF，1-bit）		mily', '调制器族', opt('dsd', 'DSD 标准（Butterworth NTF，1-bit）', ADV.modfamily || 'dsd') +
+DSD 源 Conversion		PCM 链都被跳过') + sel('sp_dsdconv', 'DSD 源 Conversion', opt('narrow', 'narrow（通
+DSD 的比特率与封装（DoP / Native）在 SDM 页设置		'DSD（SDM）', outModeOf()), 'DSD 的比特率与封装（DoP / Native）在 SDM 页设置') + sel('sp_rate', '输出采样率', D('
+DSD512 / 1024 的 DoP 载波是 1411.2 / 2822.4 kHz，绝大多数设备不支持		.1584 MHz）', dsdRateOf()), 'DSD512 / 1024 的 DoP 载波是 1411.2 / 2822.4 kHz，绝大多数设备不支持') // 2026-10-25（用户指令「A1 隐藏」）：Na
+DSP 均衡		u: convGpu, badge: convGpu ? 'GPU 卷积' : 'DSP 均衡', kind: convGpu ? 'gpu' : 'dsp' });
+DirectSDM 需要 0 dB 音量，已把音量设为 0 dB		VolUi(); // 标签跟着显示 0.0 dB toast('DirectSDM 需要 0 dB 音量，已把音量设为 0 dB'); } saveSettings(); }; ap
+FIR 卷积		: '')); if (p.conv) eqParts.push('FIR 卷积' + (ADV.ir ? (' ' + nam(ADV.ir)) : '')
+Harman Target 基于 Harman 实验室长期双盲听音实验，低频有约 4~6dB 适度平滑提升，高频平顺无刺激刺耳感。		耐听，杂食百搭，适合绝大多数现代流行乐与影视原声。', tech: 'Harman Target 基于 Harman 实验室长期双盲听音实验，低频有约 4~6dB 适度平滑提升，高频平顺无刺激刺耳感。' }; } if (d.indexOf('soundguys
+Harman 入耳目标：低频更厚、3kHz 耳道增益		2],[1.0,0.9]] }, harman_iem: { label: 'Harman 入耳目标：低频更厚、3kHz 耳道增益', pts: [[0,9],[0.07,9],[0.13,7.2],
+IEF Neutral 以平直无染为核心，低频不外加低音架，高频顺滑延伸。		主观音染，适合专业音频工作者与追求纯粹原声的用户。', tech: 'IEF Neutral 以平直无染为核心，低频不外加低音架，高频顺滑延伸。' }; } var authorName = author
+IR 脉冲响应卷积文件（WAV）		）', '把房间 / 耳机脉冲响应用 FIR 卷积叠进播放链路', '<div class="sfld wide"><label>IR 脉冲响应卷积文件（WAV）' + tip('
+ISP 保护		+ p.preAtten.toFixed(1) + ' dB', badge: 'ISP 保护', kind: 'dsp' }); } if (p.loud
+PCM-PCM 升频		(allWhy.indexOf('重采样') >= 0) { t = 'PCM-PCM 升频'; c = 'bp-up'; if (!title) title =
+PEQ 当前：已旁路（PEQ 不生效，信号直通）		); var txt; if (bypass) { txt = 'PEQ 当前：已旁路（PEQ 不生效，信号直通）'; } else if (active === 0 && Math.ab
+PEQ 当前：读取中…		at><span class=tag>状态</span>' + '<span id=peqStatTxt>PEQ 当前：读取中…</span></div>' +
+RLPlayer 会自动为您建立高保真音乐库并整理专辑与元数据。		ts ? '当前目录中未发现可识别的音频文件，请确认音频格式或更换目录。' : 'RLPlayer 会自动为您建立高保真音乐库并整理专辑与元数据。<br>支持 FLAC、DSD (DSF/DFF)、WAV、ALAC、CUE
+RMS 电平		at_clips>+0 / -0</span></div>' + '<div class=in-stat-item><span class=lbl>RMS 电
+Rtings 参考目标曲线		ings') >= 0) { return { name: 'Rtings 参考目标曲线', scene: 'Rtings 实验室测量的平直均衡曲线，适合
+SDM 源（DSD 文件）		, -1, 1, 0.001, '抑制空闲音')) + sgroup('SDM 源（DSD 文件）', '原生读取 + DirectSDM', chk('sp
+SenseLab 目标：高频峰谷精细补偿		1.6],[1.0,2.4]] }, senselab: { label: 'SenseLab 目标：高频峰谷精细补偿', pts: [[0,0.5],[0.15,0.2],[0.28,-
+SoundGuys 大众消费曲线		umer') >= 0) { return { name: 'SoundGuys 大众消费曲线', scene: '兼顾清晰度与氛围感，微调低频弹性与高频空气感
+UPnP / DLNA 投放（局域网渲染器）		故整项移除（后端拒绝分支保留）。 + opt('upnp', 'UPnP / DLNA 投放（局域网渲染器）', BK) + opt('null', 'Null out
+UPnP / DLNA 投放：播放 / 切歌 / 暂停 / 拖动进度都会作用到渲染器		ontent || ''; } m.textContent = 'UPnP / DLNA 投放：播放 / 切歌 / 暂停 / 拖动进度都会作用到渲染器 ' + (devName || '（未选择渲染器）') + '。
+\u2713 连接成功		nction (j) { srcFormMsg(j && j.ok ? '\u2713 连接成功' : ('\u2717 ' + ((j && j.error) || '失败
+auto = 按输出位深自动选型		sel('sp_shaper', '抖动 / 噪声整形', shaps, 'auto = 按输出位深自动选型') + chk('sp_isp', '过采样峰值保护（ISP）
+bit-perfect 要求音量 0 dB（不衰减、输出满幅）。\n当前音量		Now) > 1e-9) { if (window.confirm('bit-perfect 要求音量 0 dB（不衰减、输出满幅）。\n当前音量 ' + volNow.toFixed(1) +
+dB → 前级		sg('自动前级：曲线峰值 +' + maxGain.toFixed(1) + ' dB → 前级 ' + pre + ' dB（留出 ' + Math.abs(pre).t
+dB（留出		axGain.toFixed(1) + ' dB → 前级 ' + pre + ' dB（留出 ' + Math.abs(pre).toFixed(0) + ' dB 余
+macOS 不支持 NAA 推流，已切到 CoreAudio 独占		option 已不存在）+ 播放直接失败，是白屏级别的体验事故。 naa: 'macOS 不支持 NAA 推流，已切到 CoreAudio 独占' }; var _removedBackendNotified = {};
+ms（key 有效）		模型 ' + j.model + '，耗时 ' + j.latencyMs + ' ms（key 有效）'; else m.textContent = '连接失败：' +
+narrow（通带 20 kHz，默认）		Conversion', opt('narrow', 'narrow（通带 20 kHz，默认）', ADV.dsdConv || 'narrow') +
+⚠️ 这次测量会真的出声		:var(--bg3);margin-bottom:10px">' + '<b style="color:var(--warn)">⚠️ 这次测量会真的出声</b><div s
+「跟随预设」= 不覆盖滤波器自带相位。强制项会覆盖预设：		线性/最小 各 50%）', ADV.phase), '「跟随预设」= 不覆盖滤波器自带相位。强制项会覆盖预设：' + '线性 = 无相位失真、有前振铃；最小 =
+」？只删配置，不动已下载缓存。		服务器「' + (s ? (s.name || s.base) : id) + '」？只删配置，不动已下载缓存。')) return; api('/api/src/confi
+」？（内置预设不能删除）		if (confirm('删除用户预设「' + sel.value + '」？（内置预设不能删除）')) peqPresetAction('delete', sel.value
+上一首 / 下一首		rows = [ ['空格', '暂停 / 继续'], ['← →', '上一首 / 下一首'], ['Shift + ← →', '后退 / 前进 5 秒'], ['↑
+上次扫描		it('扫描线程（生效）', th ? th : '自动') + it('上次扫描', ms > 0 ? (ms / 1000).toFixed(1) + '
+下一首:		r nextTitle = nam(nextPath); text = '下一首: ' + nextTitle + (remain > 0 ? (' · 剩 '
+不是 ZIP		0x03 && v[3] === 0x04)) throw new Error('不是 ZIP'); var name = 'rlplayer-diag-' +
+两段式升频		例如 0.04 = 回退 4%') + chk('sp_2s', '两段式升频', D('s2s').checked, '大比率时 CPU 运算量约 1/4
+严格独占（抢 Hog Mode）		须写清楚让用户自己权衡。 + chk('sp_hogexcl', '严格独占（抢 Hog Mode）', ADV.hogExclusive == 1,
+个（目标 ≥5，未做臆造）		' + '不同演绎仅 ' + distinctCount + ' 个（目标 ≥5，未做臆造）' + '</div>'; } // 版本列表
+亮度指标		('频谱重心', qFmt(q.centroid_hz, 0, ' Hz'), '亮度指标'); s += qRow('频谱倾斜', qFmt(q.tilt_d
+代表作品		], person: ['简介', '国籍', '活跃年代', '风格', '代表作品', '厂牌', '合作'], release: ['艺术家', '发行时
+低频平顺不轰鸣、中频通透无染色，适合古典乐、爵士乐与纯乐器发烧录音。		最佳高保真目标曲线 (Optimum HiFi)', scene: '低频平顺不轰鸣、中频通透无染色，适合古典乐、爵士乐与纯乐器发烧录音。', tech: 'Optimum HiFi 强调极低失真与线性动
+作品名称，例如 Boléro / Symphony No. 5		d=wTitle value="' + esc(defaultTitle) + '" placeholder="作品名称，例如 Boléro / Symphony No. 5" style="width:100%;heig
+作品：		版本（可能网络不可达或作品名不匹配）。</div>' + '<div class=npdhint style="margin-top:6px">
+作曲家		'专辑介绍', '曲目列表', '制作人员', '关联'], work: ['作曲家', '创作年代', '体裁'] }; // 长文本标签：独占整行并保留换行（
+作曲家:		// 头部概要卡片 var subStr = (composer ? ('作曲家: ' + esc(composer) + ' · ') : '') +
+供源端口		st_stat_reqs>0 次</span></div>' + '<div class=in-stat-item><span class=lbl>供源端
+供源请求数		t_stat_bytes>0 B</span></div>' + '<div class=in-stat-item><span class=lbl>供源请求
+依据上面的来源整理，可能不完整，请以来源为准		mary.citations.length > 0) { h += '<div style="font-size:11px;color:var(--mut2);margin-top:8px">
+保存失败:		e); }).catch(function (e) { toast('保存失败: ' + e); }); } }); } function renam
+信噪比		), '最低 10% 的 100ms 块电平'); s += qRow('信噪比', qFmt(q.snr_db, 2, ' dB')); s +=
+停止		B）'], ['n / p', '下一首 / 上一首'], ['s', '停止'], ['l', '歌词'], ['i', '信号链'], ['右键
+停止投放		d=sp_cast_push>推送当前曲</button>' + '<button class=btn id=sp_cast_stop disabled>
+元数据		s=stab data-g=cal>声音校准</button>' + '<button class=stab data-g=meta>元数据</button
+先填入 API Key；留空保存不会改动现有配置		\s+|\s+$/g, '') : ''; if (!k) { toast('先填入 API Key；留空保存不会改动现有配置'); return; } llmPost('key=' + encode
+内置 6200+ 款耳机 OPRA 目标曲线 · 卷积房间校正 IR · 响度分析		+= '<div class=am-card-bottom>'; h += '<div class=am-card-desc>内置 6200+ 款耳机 OPRA 目标曲线 · 卷积房间校正 IR · 响度分析</div>'; h +=
+写清楚「做了什么 / 期望什么 / 实际什么」最有帮助		fld wide"><label>问题描述' + tip('写清楚「做了什么 / 期望什么 / 实际什么」最有帮助') + '</label>' + '<textarea id=
+分		' — <b>' + cmpNum(v.score, 1) + '</b> 分' + (v.error ? ' <span st
+切到 bit-perfect 直通		x:none;white-space:nowrap" ' + 'title="判据：输出采样率 = 源 / 抖动 = none / 音量 0 dB / 无 EQ·IR / 独占
+创建并选入		n'); askText({ title: '新建歌单', ok: '创建并选入', value: '', placeholder: '例如
+删除失败：		j) { if (!j || !j.ok) { toast('删除失败：' + ((j && j.error) || '未知错误')); return
+删除歌单「		rm({ title: '删除歌单', ok: '删除', text: '删除歌单「' + name + '」？只删这份歌单，不动当前播放队列。', on
+判据：输出采样率 = 源 / 抖动 = none / 音量 0 dB / 无 EQ·IR / 独占 CoreAudio		x:none;white-space:nowrap" ' + 'title="判据：输出采样率 = 源 / 抖动 = none / 音量 0 dB / 无 EQ·IR / 独占 CoreAudio">切到 bit-perfect 直通</button>'
+削波与峰值		_10k_db, 2, ' dB')); s += qSection('削波与峰值'); s += qRow('削波样本', String(q.clip
+动态范围 DR		LUFS)', qFmt(h.lufs, 2)); s += qRow('动态范围 DR', qFmt(h.dr_db, 2, ' dB')); s += q
+勾选 = PEQ 不生效（直通）；不勾选 = PEQ 生效		center;gap:14px;flex-wrap:wrap">' + '<label class=chk style="margin:0" title="勾选 = PEQ 不生效（直通）；不勾选 = PEQ
+勾选 = 真独占：屏蔽其它 App 声音、设备所有权归本程序；		）', ADV.hogExclusive == 1, '勾选 = 真独占：屏蔽其它 App 声音、设备所有权归本程序；' + '**但系统音量条 / 音量键会失效**（m
+包内：rlplayer-diag.json（版本 / 系统 / CPU / GPU / 端口）、rlplayer-playback.log（含 .1/.2 轮转）、launcher.log、dumps-manifest.txt、settings-summary.txt；		agupload>随反馈上传诊断</button>' + tip('包内：rlplayer-diag.json（版本 / 系统 / CPU / GPU / 端口）、rlplayer-playback.log（含 .1/.2 轮转）、launcher.log、dumps-manifest.txt、settings-summary.txt；' + 'api_key / token / pas
+单曲菜单（入队 / 歌单 / 体检 / 对比）		信号链'], ['右键专辑', '整张加入队列'], ['右键曲目', '单曲菜单（入队 / 歌单 / 体检 / 对比）'], ['右键队列条目', '队列菜单（播放 / 歌单 / 移除）'],
+双击归零（0 dB）		yle.cursor = 'pointer'; lab.title = '双击归零（0 dB）'; lab.addEventListener('dblclick',
+双击节点		复核）· Q 0.1~20 · 频率 10 Hz~20 kHz。' + '曲线上 <b>拖拽节点</b>：水平=频率（对数）、垂直=增益；<b>Shift+拖
+反馈问题		量（BH2VOQ@163.com），页面不能指定。 + sgroup('反馈问题', '直接发送给开发者，可附诊断包', '<div cla
+取消收藏失败:		Favs(); }).catch(function (e) { toast('取消收藏失败: ' + e); }); } /* ---------------- 我的歌
+只在「DSD 源 → PCM」路径生效；DirectSDM 直通时整条 PCM 链都被跳过		）', ADV.dsdKind || 'fir'), '只在「DSD 源 → PCM」路径生效；DirectSDM 直通时整条 PCM 链都被跳过') + sel('sp_dsdconv', 'DSD 源 Co
+可以点「浏览…」直接选文件夹，也可以手填路径		' + txt('sp_root', '添加音乐目录', '', '可以点「浏览…」直接选文件夹，也可以手填路径', (SEP === '/' ? '/Users/你的用户名/Music'
+可保存多台，同一时刻启用一台；只取原始文件，不转码		data-g=stream>' + sgroup('流媒体服务器', '可保存多台，同一时刻启用一台；只取原始文件，不转码', '<div class="sfld wide" sty
+右键专辑		'停止'], ['l', '歌词'], ['i', '信号链'], ['右键专辑', '整张加入队列'], ['右键曲目', '单曲菜单（入队 / 歌单 /
+后端		ex:1 1 auto;min-width:180px">' + '<label>后端' + tip('选到当前不可用的后端时，播放会直接返回原因，不
+启动即可以 http://		:' + j.port + '/（已开启）') : ('局域网访问：未开启（用 <code>--lan</code> 启动即可以 http://' + esc(
+启动检查更新…		Btn(false); updMsg(manual ? '正在检查…' : '启动检查更新…'); wcmd('update:check'); return tr
+启用失败：服务没响应		); }).catch(function () { toast('启用失败：服务没响应'); }); return; } i
+在曲目行或单曲页点心形，就会出现在这里		if (!n) { D('list').innerHTML = '<div class=empty>还没有收藏<br><span style="font-size:11.5px">在
+基于 AutoEq 优化算法与专业人工耳测量数据计算所得的双二阶 IIR 滤波器组。		' 依据测量数据生成的校准滤波，平直化固有频响缺陷。', tech: '基于 AutoEq 优化算法与专业人工耳测量数据计算所得的双二阶 IIR 滤波器组。' }; } // EQ 页签当前是否可见（设置页开着 + 选中 EQ
+增益 dB		ws：同一个内容宽度 ⟹ 同一套列轨道（这是"对齐"的根） var h = '<div class=peqhd><span>段</span><span class=n
+声道相关		'); if (q.stereo) { s += qRow('声道相关', qFmt(q.channel_corr, 3)); s +=
+多相分解后每一相的抽头数 ≈ 抽头数 ÷ 升频比；0 = 用所选滤波器预设自带长度		DV.taps, 0, 2097152, 1024, '多相分解后每一相的抽头数 ≈ 抽头数 ÷ 升频比；0 = 用所选滤波器预设自带长度') + num({ id: 'sp_atten', label
+官方推荐预设		.27l6.91-1.01L12 2z"/></svg>' + '官方推荐预设' + '</span>' + '<butto
+对比同目录版本…		件有意义。 items.push({ k: 'compare', t: '对比同目录版本…', f: function () { openCompareModal(tk
+对比失败		:var(--warn)">' + esc((r && r.error) || '对比失败') + '</div>'; var vs = r.versions ||
+封面		tyle.display = 'flex'; el.textContent = '封面 ' + (g.done || 0) + '/' + (g.total ||
+峰值		, qFmt(h.lra, 2, ' LU')); s += qRow('峰值', qFmt(h.peak_dbfs, 2, ' dBFS'));
+已保存预设：		; else if (action === 'save') toast('已保存预设：' + name); else if (action === 'res
+已删除：		or) || '删除失败'); return; } toast('已删除：' + name); if (S.sqName === nam
+已加入歌单「		'); return; } toast('已加入歌单「' + sqName + '」（共 ' + j.count + ' 首）');
+已启用「		|| '未知错误')); return; } toast('已启用「' + (s ? (s.name || s.base) : id) + '」'
+已恢复默认		Settings(); renderSettingsPage(); toast('已恢复默认'); } window._resetAllSettings = _r
+已更新，请手动重启应用以完成		llBtn(false); updMsg(obj.message || '已更新，请手动重启应用以完成', 'ok'); } else { // 未知 stage（宿主
+已添加到收藏		FAV_SET.add(filePath); toast('已添加到收藏'); } else { FAV_SET.dele
+已添加，正在扫描		error || '添加失败'); return; } toast('已添加，正在扫描'); libChanged(); loadLibStats(); api('
+已添加：		|| '添加失败'); return; } toast('已添加：' + path); libChanged(); lo
+已配置：		turn; } var s = LLM.configured ? ('已配置：' + LLM.masked + '（模型 ' + LLM.model + '
+应用中…		URIComponent(peqBandsParam()); peqMsg('应用中…'); api('/api/peq', body).then(functi
+开始重新扫描		an', 'full=1').then(function () { toast('开始重新扫描'); libChanged(); loadLibStats(); }); }
+张缺图		.queued) toast('正在抓取封面：共 ' + j.queued + ' 张缺图'); // 2026-10-27（E-4）：只要**后台真的有活在
+强制线性相位		ADV.phase) + opt('linear', '强制线性相位', ADV.phase) + opt('minim
+当前已是队列最后一首（共		' · 共 ' + qLen + ' 首') : ''); tip = '当前已是队列最后一首（共 ' + qLen + ' 首）'; } if (el) {
+当前没有可安装的新版本		if (UPD.stage !== 'available') { updMsg('当前没有可安装的新版本', 'err'); return false; } UPD.busy =
+当前输出 PCM：改动比特率 / 封装会自动把输出切到 DSD（SDM）		play:none"><div class=hint>' + '当前输出 PCM：改动比特率 / 封装会自动把输出切到 DSD（SDM）' + '</div></div>' + sel('sp_mod
+当前预设已保存，但尚未播放。bit-perfect 结论只对实际播放生效 —— 播一首才能确认		'bp-idle', title: '当前预设已保存，但尚未播放。bit-perfect 结论只对实际播放生效 —— 播一首才能确认' }; var dsdOut = (typeof S.bpDsd ==
+录制采集已启动		j.ok) { toast(isMon ? '直通监听已启动' : '录制采集已启动'); if (D('sp_inmsg')) D('sp_inms
+待播放验证		State || ''; if (!bpv) return { text: '待播放验证', cls: 'bp-idle',
+想要 bit-perfect：输出采样率选「保持源采样率」、抖动选「none」、音量 0 dB。		频设备，其他程序的声音会被静音 —— 这是正常的。<br>' + '想要 bit-perfect：输出采样率选「保持源采样率」、抖动选「none」、音量 0 dB。</div>'; D('mbody').innerHTML = h; };
+房间测量正在重做，本版暂不提供。支持已有的「EQ 文件」与「房间校正 IR」独立加载。		x;border:1px solid var(--line)">' + '房间测量正在重做，本版暂不提供。支持已有的「EQ 文件」与「房间校正 IR」独立加载。' + '</div></div>'); h += '<div i
+房间测量确认		' · 采集：' + p.captureDevice; openModal('房间测量确认', renderRoomConfirm(p)); if (D('rcGo
+所有参数都在这里，改完点「保存」		'' : 'none'; if (isSet) { head('设置', '所有参数都在这里，改完点「保存」', ''); renderSettingsPage(); } else
+打不开专辑		成专辑页） if (!j.ok) { toast(j.error || '打不开专辑'); return; } S.album = j; // 2
+扫描中		pct + '%'; D('cnt').textContent = '扫描中 ' + j.scanned + '/' + j.total; } e
+扫描完成：共		if (wasScanning) { var msg = '扫描完成：共 ' + (j.tracks || 0) + ' 首曲目，' + (j.alb
+扫描目录		Scan>&#128260; ' + (hasRoots ? '重新扫描' : '扫描目录') + '</button>' + '<button class="
+扫描线程（生效）		t('专辑', (j.albums || 0)) + it('扫描线程（生效）', th ? th : '自动') + it('上次扫描', ms > 0
+把前级设为 -ceil(当前曲线峰值增益)，给 EQ 提升留出余量，避免数字削波		3 #5：按曲线峰值一键设前级，防削波（只在前端算，DSP 不动） + '<button class="btn" id=peqAutoPre type=button title="把前级设为 -ceil(当前曲线峰值增益)，给 EQ
+把现在这		, placeholder: '例如 夜深人静', hint: '把现在这 ' + n + ' 首（含顺序与 CUE 区间）存成一个歌单；写入 rlpl
+投放控制		on>' + '</div>'; openModal('投放控制', h); if (D('castActStop')) {
+拜雅 Beyerdynamic		-brand="Apple">苹果 Apple</button>' + '<button class="btn brand-chip" data-brand="Beyerdynami
+挂载流媒体服务		3.7 0 0118 18z"/></svg></div>'; h += '<div class=am-qtext><div class=am-qtitle>挂载流媒体
+指挥		3;min-width:0">标题 / 发行</span>' + '<span style="flex:0.9;min-width:0">指挥</sp
+按采样率自动重标定		CPU 运算量约 1/4')) + sgroup('抖动与保护', '按采样率自动重标定', sel('sp_shaper', '抖动 / 噪声整形
+搜索耳机品牌或型号（如 Sennheiser / HD 600 / AirPods / Sony / XM5…）		ex;align-items:center;gap:10px">' + '<input id=sp_opra_search type=text placeholder="搜索耳机品牌或型号（如 Sennheiser / HD 600 / AirPods / Son
+摘要已复制		writeText(text).then(function(){diagMsg('摘要已复制');},function(){diagMsg('请选择上方摘要手动复制');
+播放 88.2 / 96 / 176.4 kHz 等文件时使用；留空 = 与 1x 相同		88.2 kHz 及以上音源）', filtsNx, '播放 88.2 / 96 / 176.4 kHz 等文件时使用；留空 = 与 1x 相同') + sel('sp_phase', '相位（覆盖滤波器预设
+播放中		tent = (j.playing ? (j.paused ? '已暂停' : '播放中') : '已停止') + (j.outRate ? ' \u
+播放列表		118 18z'/></svg>流媒体</div><div class=sec>播放列表</div><div class=nav data-v=queue><svg v
+播放扫频（可点取消）		).textContent = '正在向 ' + p.playDevice + ' 播放扫频（可点取消）'; if (D('bRoomWiz')) { D('bRoomWi
+操作		le="min-width:55px">格式</span>' + '<span style="min-width:80px;text-align:ri
+操作失败：		on (j) { if (!j || !j.ok) { toast('操作失败：' + ((j && j.error) || '未知错误')); return
+收藏优先		ortMode === 'fav' ? ' selected' : '') + '>收藏优先</option>' + '</select></div
+收起简介		this.textContent = isCol ? '展开全部' : '收起简介'; }; } } function openArtistProf
+改名		name) { askText({ title: '重命名歌单', ok: '改名', value: name, hint: '改名后立刻写入 rlpl
+改这里会把输出模式切到 DSD（SDM）		-disabled'); e.title = isDsd ? '' : '改这里会把输出模式切到 DSD（SDM）'; }); var note = D('sp_dsdmodenote
+整张入队后随机挑一首开始播放		把这张专辑的全部曲目加入播放队列">加入队列</button> ' + '<button class=btn id=ralbShuf title="整张入队后随机挑一首开始播放">
+整张加入队列		['l', '歌词'], ['i', '信号链'], ['右键专辑', '整张加入队列'], ['右键曲目', '单曲菜单（入队 / 歌单 / 体检 / 对比）']
+整理中…		idle' || st.state === 'loading') return '整理中…'; if (st.state === 'error') return '
+新版本		v = obj.version ? ('v' + obj.version) : '新版本'; updInstallBtn(true, '立即更新');
+旁路（勾选 = PEQ 不生效，直通）		center;gap:14px;flex-wrap:wrap">' + '<label class=chk style="margin:0" title="勾选 = PEQ 不生效（直通）；
+无损源		' + p.codec.toUpperCase() : ''), badge: '无损源', kind: 'lossless' }); nodes.push(
+无法启动写回：		0; wbButtons(0); wbMsg(''); toast('无法启动写回：' + ((j && j.error) || '未知错误'));
+无法开始测量		.ok !== true) { toast((r && r.error) || '无法开始测量'); return; } D('rcStatus').textCon
+无法生成测量计划		usSub').textContent = (p && p.error) || '无法生成测量计划'; return; } RCWIZ.plan = p;
+无（逐位）		'抖动 / 噪声整形', v: !isNoShap ? p.shaper : '无（逐位）', badge: isNoShap ? '逐位直通' : '噪声整形', k
+暂无可用预设		h) { if (msg) msg.textContent = '暂无可用预设'; if (presetsBox) presetsBox.i
+暂无该实体的资料。		ate === 'error') { body.innerHTML = '<div class=npdhint>暂无该实体的资料。' + (st.error ? ('（'
+曲目资料已后台整理		(ALBPREF.done >= ALBPREF.total) ? ('曲目资料已后台整理 ' + ALBPREF.total + ' 首') : ('正在后台
+更新会下载安装包并校验 sha256；校验不通过一律丢弃，绝不安装被篡改的内容。安装完成后会自动重启。		nsition:width .2s"></i></div>' + '<div class=hint id=sp_updnote>更新会下载安装包并校验 sha256；校验不通过一律丢弃，绝不安装被篡改的内容。安装完成后会自动重启。</div>')
+最长连续削波		pped_pct, 4, '%') + '）'); s += qRow('最长连续削波', String(q.longest_clip_run == null ?
+服务器已更新		srcShowForm(false); toast(wasEdit ? '服务器已更新' : '服务器已添加'); loadSrcConfig(); }
+未就位		== false ? '已就位（本机不可用）' : '已就位（可用）')) : '未就位'; m.title = 'Apple Metal=' + met
+未知状态		bMsg(String(obj.message || obj.stage || '未知状态'), obj.stage === 'failed' ? 'err' : 'o
+本地音乐库		」与结果区搬去「流媒体」页（DLNA 归流媒体）。 + sgroup('本地音乐库', '本地目录扫描入索引；DLNA / UPnP 在「流媒体」页',
+条，当前显示前		e:12px;color:var(--mut2)">共 ' + total + ' 条，当前显示前 ' + t.length + ' 条</div>' +
+来源:		ps += '<span class=badge title="' + esc('来源: ' + (src[p[0]] || '本地标签')) + '">' +
+样本		n == null ? '-' : q.longest_clip_run) + ' 样本'); s += qRow('峰值因子', qFmt(q.crest
+检查新版本，一键更新		没法替换 .app，不能假装能装。 + sgroup('软件更新', '检查新版本，一键更新', '<div class="sfld wide" sty
+款耳机型号		nt.textContent = '匹配到 ' + hits.length + ' 款耳机型号'; } hint.style.display =
+款耳机，已显示前 30 条。继续输入更具体关键词以精确筛选…		extContent = '共匹配到 ' + allHits.length + ' 款耳机，已显示前 30 条。继续输入更具体关键词以精确筛选…'; } else { hint.textCon
+歌曲		f (title) out.push({ k: 'track', label: '歌曲', name: title, artist: artist }); if
+歌词加载中…		}, w); D("lyricbox").innerHTML = '<div class="ly none">歌词加载中…<br><span style="f
+正在上传（		是合法 ZIP（缺少 PK 头）'); } fbMsg('正在上传（' + Math.round(buf.byteLength / 1024) +
+正在分析…（大文件需要几秒，DSD 走流式分块读）		/]/).pop() || file; openModal('音质体检', '<div class=hint>正在分析…（大文件需要几秒，DSD 走流式分块读）</div>' +
+正在列出可选文件…		可对比的曲目'); return; } openModal('对比版本', '<div class=hint>正在列出可选文件…</div>'); api('/api/f
+正在后台整理歌曲资料…		.style.display = ''; el.innerHTML = '<span class=nprailbusy>正在后台整理歌曲资料…</span>'; } el
+正在抓取封面：共		!j.ok) return; if (j.queued) toast('正在抓取封面：共 ' + j.queued + ' 张缺图'); // 2026-10
+正在搜索（约 2 秒）…		nction () { D('upnpList').innerHTML = '<div style="font-size:11px;color:#5b6478">正在搜索（约 2
+正在更新…		.busy = true; updMsg(obj.message || '正在更新…'); } else if (stage === 'installed')
+正在自动发现 NAA 端点（只读扫描本机网段的 TCP 43210）…		D('sp_naa_msg'))) { m.textContent = '正在自动发现 NAA 端点（只读扫描本机网段的 TCP 43210）…'; m.style.color = 'var(--mut2)';
+正在获取预设…		· 调音预设'; if (msg) msg.textContent = '正在获取预设…'; if (presetsBox) presetsBox.inner
+段已复位（0.0 dB / Q 1.41）		ScheduleApply(100); peqMsg('第 ' + i + ' 段已复位（0.0 dB / Q 1.41）'); } function peqSvgPoint(ev) { var
+没有指定要添加的曲目		ue(file, cs, ce) { if (!file) { toast('没有指定要添加的曲目'); return; } pickSavedQueue('保存到歌单',
+注重高保真声学平直度与相位一致性，适合乐器真实音色鉴赏与原声发烧录音。		name: 'SenseLab 声学实验室目标', scene: '注重高保真声学平直度与相位一致性，适合乐器真实音色鉴赏与原声发烧录音。', tech: 'SenseLab 方案基于精细声学补偿，重点修
+流媒体服务器		ass=spane data-g=stream>' + sgroup('流媒体服务器', '可保存多台，同一时刻启用一台；只取原始文件，不转码',
+测量中		) { D('rcStatus').textContent = '测量中 ' + s.channelsDone + '/' + s.channelsT
+测量会		下面「校正文件 → 脉冲响应 IR」共用同一个卷积器）。<br>' + '测量会<strong>真的出声</strong>：每个声道一段对数扫频，默认电平 −
+测量失败		{ D('rcStatus').textContent = '测量失败'; D('rcStatusSub').textConte
+消费级曲线：低频与极高频微抬		,-0.3],[1.0,0]] }, consumer: { label: '消费级曲线：低频与极高频微抬', pts: [[0,4.5],[0.12,4.5],[0.20,3
+清空并退出搜索		['拖动队列条目', '调整播放顺序'], ['Esc（搜索框内）', '清空并退出搜索'], ['Ctrl / ⌘ + F', '聚焦搜索'] ]; var
+清除		1.5px;line-height:1;white-space:nowrap'>清除</button></div><div class=rbody><div id=
+溢出 0 / 欠载 0		"width:0%"></div></div></div>' + '<div class=in-stat-item><span class=lbl>溢出 / 欠载</s
+爱科技 AKG		ica">铁三角 Audio-Technica</button>' + '<button class="btn brand-chip" data-brand="AKG
+版		rEditions + ' 版">+' + p.otherEditions + ' 版</span>'; } if (p.dedupUnknown
+独占 = bit-perfect；共享 = 兼容性最好（虚拟机 / 远程桌面）		ane" data-g=out>' + sgroup('输出后端', '独占 = bit-perfect；共享 = 兼容性最好（虚拟机 / 远程桌面）', // 261024-04 #2：用户要求「放在后端那个
+环形缓冲时间深度		（毫秒）' }, ADV.inBuf || 100, 10, 500, 10, '环形缓冲时间深度') + chk('sp_inmon', '直通监听（非 bit
+用户名		p://192.168.1.10:4533"></div>' + '<div class=sfld><label>用户名</label><input t
+电平		(p.totalSeconds) + ' 秒</td></tr>' + '<tr><td style="padding:2px 12px 2px 0;col
+白色		ark', '深色（默认）', S.theme) + opt('light', '白色', S.theme) + opt('blue', '浅蓝色', S.them
+目标渲染器（UPnP / DLNA）		upnpwrap style="display:none">' + '<label>目标渲染器（UPnP / DLNA）</label>' + '<div style="d
+硬件独占		+ ' ms', badge: isSharedOut ? '系统混音' : '硬件独占', kind: isSharedOut ? 'dsp' : 'lossles
+硬件直通 + 严格独占（Hog）：播放期间屏蔽其它 App 声音；系统音量条会失效，请用本程序音量条调音量。		== 1); m.textContent = hog ? '硬件直通 + 严格独占（Hog）：播放期间屏蔽其它 App 声音；系统音量条会失效，请用本程序音量条调音量。' : '硬件直通 · bit-perfect；不抢 Hog ⟹
+确认		D('mtitle').textContent = o.title || '确认'; D('mbody').innerHTML = '<div s
+第		es(); peqScheduleApply(100); peqMsg('第 ' + i + ' 段已复位（0.0 dB / Q 1.41）'); } f
+算法版本		at(auto-fit,minmax(250px,1fr))">' + '<div class=in-stat-item><span class=lbl>算法版
+累计		er' && p.dspTotalMs > 0) { tDsp = '累计 ' + p.dspTotalMs.toFixed(1) + ' ms';
+编曲		F_ORDER = { track: ['演唱', '作词', '作曲', '编曲', '歌曲风格', '发行时间', '所属专辑', '时长', '版本说明'
+编辑		rvbtn data-a=test>测试</button>' + '<button class=srvbtn data-a=edit>编辑</butt
+编辑已有服务器时留空 = 保持原密码不变；密码只存本机 rlplayer-sources.conf		+ '<div class=sfld><label>密码' + tip('编辑已有服务器时留空 = 保持原密码不变；密码只存本机 rlplayer-sources.conf') + '</label>' + '<input type=p
+网络错误或预设获取失败		if (presetsBox) presetsBox.innerHTML = '<div class=empty style="padding:20px 0">网络错误或预设获取失
+自动 = 所选设备的最高采样率		p_rate', '输出采样率', D('sRate').innerHTML, '自动 = 所选设备的最高采样率') + sel('sp_bits', '输出位深（PCM）',
+自动前级（防削波）		3 #5：按曲线峰值一键设前级，防削波（只在前端算，DSP 不动） + '<button class="btn" id=peqAutoPre type=button ti
+自动补全（不用 AI）		歌词，结果落在本地库', chk('sp_metaon', '自动补全（不用 AI）', META.on == 1, '只用公开数据源（
+若一直搜不到：确认数播已开启 DLNA，且与本机在同一网段		-empty>正在搜索局域网里的设备…<br>' + '<span class=hint>若一直搜不到：确认数播已开启 DLNA，且与本机在同一网段</span></div>'; }
+萌娘百科		urce.indexOf('moegirl') >= 0) srcName = '萌娘百科'; else if (m.source.indexOf('dis
+设备发现中		{ var pMap = { 'discovering': '设备发现中', 'serving': '本地供源就绪', 'pl
+设置封面		文件**）——把「99%」补到 100% 的人工通道。 '<button class=btn id=aSetCover title="为这张专辑
+诊断包不是合法 ZIP（缺少 PK 头）		3] === 0x04)) { throw new Error('诊断包不是合法 ZIP（缺少 PK 头）'); } fbMsg('正在上传（' + Math.
+诊断包太小（不是有效 ZIP）		if (blob.size < 22) throw new Error('诊断包太小（不是有效 ZIP）'); return blob.arrayBuffer();
+诊断包导出失败：		nction (e) { diagMsg(''); toast('诊断包导出失败：' + (e && e.message ? e.message : e));
+诊断包已导出：		lob.size / 1024) + ' KB）'); toast('诊断包已导出：' + name); }); }).catch(function
+诊断包已脱敏（token / 密码 / Authorization 头一律替换为		内容上传给开发者，**不需要配置邮箱、不需要注册账号**。' + '诊断包已脱敏（token / 密码 / Authorization 头一律替换为 <redacted>，用户名与邮箱替换为 <user>），不会上传你的音乐文
+诊断端点不可用（/api/diag 未响应）		unction () { diagMsg(''); toast('诊断端点不可用（/api/diag 未响应）'); }); } // =======================
+该段复位		<b>Shift+拖 / 滚轮</b> 改 Q</span>' + '<span><b>双击</b> 该段复位</span><span><b>↑↓←→</b
+语种		作'], release: ['艺术家', '发行时间', '专辑类型', '语种', '出版方', '专辑编号', '时长', '专辑介绍', '曲目列表',
+说明：		px solid var(--line)">' + '说明：' + esc(curve.scene) + '</div>' +
+请输入作品名称		.value.trim() : ''; if (!t) { toast('请输入作品名称'); return; } openWorkVersions(t, c
+贝多芬第五交响曲		Boléro">Boléro（拉威尔）</button>' + '<button class="btn chip-work" data-title="Symph
+跟随 1x（不单独指定）		重建后浏览器退回第一项，一保存就把 Nx 改掉 var filtsNx = '<option value="">跟随 1x（不单独指定）</option>' + filts;
+输入设备		麦克风 / 系统混音回环') + sel('sp_indev', '输入设备', '<option value="">（未选择 / 默认设备）</opti
+输入设备与采集		ss="spane on" data-g=in>' + sgroup('输入设备与采集', 'CoreAudio 采集 / 录制与直通监听', /
+输出位深（PCM）		= 所选设备的最高采样率') + sel('sp_bits', '输出位深（PCM）', opt(-1, '跟随源（按文件位深）', A
+输出后端		lass="spane" data-g=out>' + sgroup('输出后端', '独占 = bit-perfect；共享 = 兼容性最好（虚拟机 / 远
+输出文件		"width:0%"></div></div></div>' + '<div class=in-stat-item style="grid-column:
+运行状态		ass="sfld wide in-stat-grid">' + '<div class=in-stat-item><span class=lbl>运行状
+返回全部专辑		; head(who, S.albums.length + ' 张专辑', '<button class=btn id=bArtistBio>艺术家资料</button
+返回单曲播放页		代的录音版本', (fromNp && S.lastCur) ? '<button class=btn id=wBackNp title="返回单曲播放页">←
+还没有开始播放		if (!j.ok) { D('mbody').innerHTML = '<div class=empty>还没有开始播放</div>'; return; }
+这个列表是空的		n !!f; }); if (!files.length) { toast('这个列表是空的'); return; } var i = parseInt(start,
+进度		' s' : '—'); if (j.scanning) h += it('进度', (j.scanned || 0) + ' / ' + (j.total
+远低于 GPU 的盈亏平衡点（实测需 n≥32768 才翻盘）。		U 只做逐点复数乘加，而生产每块只有 4096 样，' + '远低于 GPU 的盈亏平衡点（实测需 n≥32768 才翻盘）。' + '功能保留可用（数值正确），但默认关闭。详见 do
+适合谁：		>' + esc(curve.tech) + '</div>' + '<div><b style="color:var(--txt)">适合谁：</b>'
+逐位旁路		采样率转换', v: '旁路（源采样率与输出一致，逐位直通）', badge: '逐位旁路', kind: 'lossless' }); if (p.eq ||
+逐位无损		me), id: 'chainVol', badge: isUnitVol ? '逐位无损' : '数字衰减', kind: isUnitVol ? 'lossless
+通带越宽，阻带起点越靠近、过渡带越窄、抽头越多		ADV.dsdConv || 'narrow'), '通带越宽，阻带起点越靠近、过渡带越窄、抽头越多') + '<div class="sfld wide"><di
+配置输出设备		自动跟随源采样率 · DoP / SDM 调制器</div>'; h += '<button class="am-pill-btn" id=emptyGoSet>配置输
+重新请求这首歌的 AI 整理		.style.display = ''; el.innerHTML = '<span class=nprailerr id=npSummRetry role=button tabi
+铁三角 Audio-Technica		ynamic">拜雅 Beyerdynamic</button>' + '<button class="btn brand-chip" data-brand="Audio-Technica
+队列是空的，先加几首歌再保存		S.q.items.length : 0; if (!n) { toast('队列是空的，先加几首歌再保存'); return; } askText({ title: '保存为歌单
+队列末尾		+ remain + ' 首）'; } else { text = '队列末尾' + (qLen > 0 ? (' · 共 ' + qLen + ' 首')
+队列菜单（播放 / 歌单 / 移除）		'单曲菜单（入队 / 歌单 / 体检 / 对比）'], ['右键队列条目', '队列菜单（播放 / 歌单 / 移除）'], ['拖动队列条目', '调整播放顺序'], ['Esc（搜索框
+附带诊断包		heckbox id=sp_fbdiag checked>' + '<span>附带诊断包</span>' + tip('打包日志 / 系统信息 / 设置摘
+随反馈上传诊断		未接上时不假装成功（见 uploadDiag 的错误分支）。 + '<button class=btn id=sp_diagupload>随反馈上传诊断</bu
+静音（增益 0）		用户会以为是两个不同的状态。 if (v <= -59.5) return '静音（增益 0）'; var s = v.toFixed(1) + ' dB'; if
+音乐库…		>\u2191</button>' + (opts ? '<select class=psel id=fRoot><option value="
+音质体检		lit(/[\\/]/).pop() || file; openModal('音质体检', '<div class=hint>正在分析…（大文件需要几秒，DSD 走
+音质体检…		h)) { items.push({ k: 'quality', t: '音质体检…', f: function () { openQualityModal(tk
+音量只能用本程序的音量条调。不勾 = 系统音量全程可用（默认）。		*（macOS Hog 机制限制，实测确认），' + '音量只能用本程序的音量条调。不勾 = 系统音量全程可用（默认）。', true) + sel('sp_outmode', '输出
+音量渐变（毫秒）		') + num({ id: 'sp_ramp', label: '音量渐变（毫秒）' }, ADV.ramp, 0, 2000, 10, '0 = 立即生效（可
+顶栏右侧的小圆点也可以快速切换主题		+ '<div class=sfld><label>主题' + tip('顶栏右侧的小圆点也可以快速切换主题') + '</label><select id=sp_theme>'
+顺序播放（播到末尾停止）		ar REP_META = [ { name: '顺序播放', aria: '顺序播放（播到末尾停止）', color: '', one: false },
+预览写回		rap:wrap;align-items:center">' + '<button class=btn id=sp_wbdry>预览写回</button>
+预览失败：网络错误		USY = 0; wbButtons(0); wbMsg(''); toast('预览失败：网络错误'); }); } function wbApply() { if (WB
+预计总时长		Seconds * 1000) + ' ms</td></tr>' + '<tr><td style="padding:2px 12px 2px 0;color:
+频响曲线（等待数据…）		| !points.length) { box.innerHTML = '<div style="font-size:11.5px;color:var(--mut2);pad
+风格与相似		yle="margin-bottom:24px">' + '<div style="font-size:12px;font-weight:600;l
+首曲目		'<span class=cph>' + q.n + ' 首曲目</span></button>'; }); }
+首索引记录		? ('，同时清掉 ' + r.removedTracks + ' 首索引记录') : ''; toast('已删除 ' + (r.fil
+高级选项 ▴		'false'); this.textContent = open ? '高级选项 ▴' : '高级选项 ▾'; }; wbSyncBusy(); if
+默认顺序		(qs === 'default' ? ' selected' : '') + '>默认顺序</option>' + '<option valu
+（上次选择）		pts += '<option value="' + esc(saved) + '">（上次选择）' + esc(saved) + '</option>'; } [
+（抽头		sg.textContent = '预设 ' + it.phaseName + '（抽头 ' + it.taps + '）· 实际输出 ' + actual + (o
+（直通监听无输出文件）		st.outFile || (st.mode === 'monitor' ? '（直通监听无输出文件）' : '-'); } var errBox = D('sp_sta
+（读取设备列表失败）		& j.ok === false) { s.innerHTML = '<option value="">（读取设备列表失败）</option>'; if (
+（输入设备列表读取失败）		D('sp_indev'); if (s) s.innerHTML = '<option value="">（输入设备列表读取失败）</option>'; if (D(
+）· 实际输出		设 ' + it.phaseName + '（抽头 ' + it.taps + '）· 实际输出 ' + actual + (override ? '（强制覆盖）' : ''
+）。不建议关闭 —— 没有日志很难定位问题		d>' + '<span>附带诊断包</span>' + tip('打包日志 / 系统信息 / 设置摘要（token、密码等已脱敏为 <redacted>）。不建议关闭 —— 没有日志很难
+＋ 新建歌单		//（2026-10-28 用户截图反馈「这里不太和谐」）。 h += '<div class=sqempty id=sqEmpty title="新建歌单">＋
+＋ 新建歌单…		etween;align-items:center">' + '<button class="btn sec" id=pickNewSq>＋ 新建歌单…</
+，以此为准		出声道数」= ' + parseInt(ADV.channels, 10) + '，以此为准'; else if (bk === 'wasapi-shared') t
+，家目录用户名与邮箱脱敏为		t、settings-summary.txt；' + 'api_key / token / password / Authorization 头一律脱敏为 <r
+：勾选 2～8 个版本（同一首曲子的不同转制/母带）		-bottom:8px">' + esc(dir) + '：勾选 2～8 个版本（同一首曲子的不同转制/母带）</div>' + '<div style="max-
+：水平=频率（对数）、垂直=增益；		复核）· Q 0.1~20 · 频率 10 Hz~20 kHz。' + '曲线上 <b>拖拽节点</b>：水平=频率（对数）、垂直=增益；<b>Shift+拖 / 滚轮</b>=改 Q；
+；「输出声道数」= 跟随源		= 跟随源，硬件直通播放时实际声道随源文件变化'; else tail = '；「输出声道数」= 跟随源'; el.innerHTML = '按 <b>' + n + ' 声道<
+；按注册表顺序参与补全		id, p.name, META_SRC[p.id] !== 0, cap + '；按注册表顺序参与补全'); }).join(''); } function renderMet

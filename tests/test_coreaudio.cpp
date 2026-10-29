@@ -1,5 +1,5 @@
+// SPDX-FileCopyrightText: 2026 BH2VOQ <https://github.com/BH2VOQ>
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 August Hu <BH2VOQ@163.com>
 //
 // 本文件是 RLPlayer 的一部分，以 GNU 通用公共许可证第 3 版（或更新版本）发布。
 // 完整条款见仓库根目录的 LICENSE 文件。
@@ -35,6 +35,7 @@
 //      macOS 的 Hog 语义弱于 WASAPI 独占，bit-perfect 的实际保障是物理格式锁定。
 #include "platform/audio_out_factory.h"
 #include "platform/macos/audio_out_coreaudio.h"
+#include "engine/preset_profiles.h"
 
 #include <atomic>
 #include <chrono>
@@ -183,6 +184,107 @@ int main(int argc, char** argv) {
                 caps.bitPerfectCapable ? "是" : "否",
                 caps.dsd == DsdTransport::DoP ? "支持" : "不支持");
     check(!caps.rates.empty(), "能枚举到设备支持的采样率");
+
+    // ---------- 1b. 纯离线：#8 DoP 载波推导（不 open、不出声、只读设备 rates） ----------
+    //
+    // 为什么必须有这一段（铁律 3）：旧代码的判据是「rates 里有 176400 ⟹ 报 176400」，
+    // 这条错误判据**无法**被「设备能开流」「DSD64 能播」这类测试抓到 —— 支持 705.6k 的
+    // DAC 在旧代码下也照样开流成功，只是被误标成 DSD64 上限。这里直接测映射函数本身。
+    std::printf("\n[1b] DoP 载波推导（纯能力逻辑；含 44.1k/48k 两族与空列表边界）\n");
+    {
+        using rta::platform::detail::dop_carrier_from_rates;
+        using rta::platform::detail::DopCarrier;
+
+        struct Case {
+            std::vector<uint32_t> rates;
+            uint32_t wantCarrier;
+            int wantLevel;
+            const char* what;
+        };
+        const std::vector<Case> cases = {
+            // 设备只报 176400：只能是 DSD64
+            {{44100, 48000, 88200, 96000, 176400}, 176400, 64, "只到 176400 载波 -> DSD64"},
+            // 支持 352.8k：DSD128
+            {{44100, 88200, 176400, 352800}, 352800, 128, "352800 载波 -> DSD128"},
+            // 题面点名的三档都在：取最高（旧代码在这里报 176400）
+            {{44100, 88200, 176400, 352800, 705600}, 705600, 256, "支持 705600 -> DSD256（旧代码错报 176400）"},
+            // DSD512 载波
+            {{44100, 705600, 1411200}, 1411200, 512, "1411200 载波 -> DSD512"},
+            // 只有 48k 族载波：192000 = 48k*64/16，等价 DSD64（48k 族）
+            {{48000, 96000, 192000}, 192000, 64, "只有 48k 族 192000 载波 -> DSD64（旧代码报不支持）"},
+            {{48000, 192000, 384000}, 384000, 128, "48k 族 384000 载波 -> DSD128"},
+            // 同档两族都在：报数值更大者，且不得低于该档
+            {{176400, 192000, 352800, 384000}, 384000, 128, "同档两族都在 -> 取数值更大者（384000/DSD128）"},
+            // 一个载波都没有：必须报 0，不得虚报
+            {{44100, 48000, 88200, 96000}, 0, 0, "没有载波 -> 0（不得虚报 176400）"},
+            {{44100, 48000}, 0, 0, "只有 44.1k/48k -> 0"},
+            {{}, 0, 0, "空列表 -> 0"},
+        };
+        for (const Case& c : cases) {
+            const DopCarrier got = dop_carrier_from_rates(c.rates);
+            char detail[160];
+            std::snprintf(detail, sizeof detail, "%s：got carrier=%u level=%d, want carrier=%u level=%d",
+                          c.what, got.carrier, got.level, c.wantCarrier, c.wantLevel);
+            check(got.carrier == c.wantCarrier && got.level == c.wantLevel,
+                  std::string("载波推导：") + c.what, detail);
+        }
+
+        // 占位 0 的采样率不得被当成载波（设备列表里偶发 0 值）
+        {
+            const DopCarrier z = dop_carrier_from_rates({0, 0, 0});
+            check(z.carrier == 0 && z.level == 0, "rates 里的 0 不被当成载波");
+        }
+
+        // 跨模型一致性（防漂移）：平台层 helper 与引擎侧 preset_dop_max_from_rates()
+        // 必须对同一 rates 给出**同一档位**。两处任一改动不同步，这里立刻红。
+        {
+            using rta::engine::preset_dop_max_from_rates;
+            using rta::engine::dsd_level_from_name;
+            const std::vector<std::vector<uint32_t>> lists = {
+                {44100, 48000, 88200, 96000, 176400, 192000},
+                {44100, 88200, 176400, 352800, 705600},
+                {48000, 96000, 192000},
+                {48000, 192000, 384000, 768000},
+                {44100, 352800},
+                {44100, 176400, 352800, 384000, 705600, 768000},
+                {44100, 48000, 96000},
+                {},
+            };
+            for (const auto& rs : lists) {
+                const DopCarrier plat = dop_carrier_from_rates(rs);
+                const int engLevel = dsd_level_from_name(preset_dop_max_from_rates(rs));
+                const bool same = (plat.level == (engLevel > 0 ? engLevel : 0));
+                std::string detail = "rates=[";
+                for (size_t i = 0; i < rs.size(); ++i) {
+                    if (i) detail += ",";
+                    detail += std::to_string(rs[i]);
+                }
+                detail += "] platform_level=" + std::to_string(plat.level) +
+                          " engine_level=" + std::to_string(engLevel);
+                check(same, "平台层载波档位与引擎侧 preset_dop_max_from_rates 一致", detail);
+            }
+        }
+    }
+
+    // ---------- 1c. 真实设备只读核对：caps() 的 DoP 字段必须与 rates 自洽 ----------
+    //
+    // 只读断言（不 open、不 start、不写数据）：无论本机插的是什么设备，
+    // dopCarrierRate 与 dsd 都必须与「rates 里到底有没有载波」一致。
+    std::printf("\n[1c] 真实设备 caps().dopCarrierRate / dsd 与 rates 自洽（只读）\n");
+    {
+        using rta::platform::detail::dop_carrier_from_rates;
+        const auto expect = dop_carrier_from_rates(caps.rates);
+        std::printf("   rates 推导载波=%u（DSD%d）  caps 报告载波=%u  caps.dsd=%s\n",
+                    expect.carrier, expect.level, caps.dopCarrierRate,
+                    caps.dsd == DsdTransport::DoP ? "DoP" : "None");
+        check(caps.dopCarrierRate == expect.carrier,
+              "caps.dopCarrierRate 等于按设备 rates 推导出的最高载波",
+              "got=" + std::to_string(caps.dopCarrierRate) + " want=" + std::to_string(expect.carrier));
+        check((caps.dopCarrierRate != 0) == (caps.dsd == DsdTransport::DoP),
+              "dsd 与 dopCarrierRate 一致（有载波才说 DoP，无载波不能说支持）");
+        check(caps.dsd != DsdTransport::Native && caps.nativeDsdRate == 0,
+              "macOS 不虚报 Native DSD（无通用用户态通路）");
+    }
 
     // ---------- 2. 纯离线：decide_route 与真实设备能力交叉验证 ----------
     std::printf("\n[2] 用真实设备能力跑 decide_route（纯函数，不开流）\n");

@@ -1,3 +1,9 @@
+// SPDX-FileCopyrightText: 2026 BH2VOQ <https://github.com/BH2VOQ>
+// SPDX-License-Identifier: GPL-3.0-or-later
+//
+// 本文件是 RLPlayer 的一部分，以 GNU 通用公共许可证第 3 版（或更新版本）发布。
+// 完整条款见仓库根目录的 LICENSE 文件。
+//
 // artwork.h — 封面 / 头像 / 艺人信息的**全信源统一调度**(2026-10-27)
 //
 // 用户原话(261026-05/06、261025-02)：

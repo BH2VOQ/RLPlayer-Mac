@@ -1,5 +1,5 @@
+// SPDX-FileCopyrightText: 2026 BH2VOQ <https://github.com/BH2VOQ>
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 August Hu <BH2VOQ@163.com>
 //
 // 本文件是 RLPlayer 的一部分，以 GNU 通用公共许可证第 3 版（或更新版本）发布。
 // 完整条款见仓库根目录的 LICENSE 文件。
@@ -15,6 +15,36 @@ namespace rta::net {
 inline const char* rta_ui_script() {
     return R"JS(
 var D = function (i) { return document.getElementById(i); };
+// D3: metadata-only recent actions. Do not record text, error messages, stacks or input values.
+var UI_TRACE = [], UI_TRACE_PENDING = [], UI_TRACE_FAILURES = 0, UI_TRACE_BUSY = false;
+function uiTrace(evt, name, extra) {
+  var row = { evt: evt };
+  if (name) row.name = name;
+  if (extra) ['code','where','path','status','dur','route'].forEach(function(k) { if (extra[k] !== undefined) row[k] = extra[k]; });
+  UI_TRACE.push(row); if (UI_TRACE.length > 200) UI_TRACE.shift();
+  UI_TRACE_PENDING.push(row); if (UI_TRACE_PENDING.length > 200) UI_TRACE_PENDING.shift();
+}
+function uiTraceFlush() {
+  if (UI_TRACE_BUSY || UI_TRACE_FAILURES >= 2 || !UI_TRACE_PENDING.length) return;
+  UI_TRACE_BUSY = true;
+  var batch = UI_TRACE_PENDING.splice(0, 50);
+  fetch('/api/ui/events', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({schema:1,events:batch})})
+    .then(function(r){ if(!r.ok) throw 0; return r.json(); })
+    .then(function(j){ if(!j || !j.ok) throw 0; UI_TRACE_FAILURES=0; })
+    .catch(function(){ ++UI_TRACE_FAILURES; UI_TRACE_PENDING=batch.concat(UI_TRACE_PENDING).slice(-200); })
+    .then(function(){ UI_TRACE_BUSY=false; });
+}
+window.addEventListener('error', function(e){ uiTrace('error', '', {code:'UI_EXC', where:'app.js:'+Math.max(0,Number(e.lineno)||0)}); });
+window.addEventListener('unhandledrejection', function(){ uiTrace('error','',{code:'UI_REJ'}); });
+document.addEventListener('click',function(e){
+  var el=e.target && e.target.closest ? e.target.closest('[id],.nav') : null;
+  if(!el) return;
+  var names={bHelp:'help_open',sp_diagzip:'diag_export',sp_fbsend:'fb_send',bStop:'stop',bNext:'skip',bPrev:'skip',bPause:'pause'};
+  if(names[el.id]) uiTrace('action',names[el.id]);
+  else if(el.classList.contains('nav')) uiTrace('nav','view_switch');
+},true);
+setInterval(uiTraceFlush,2000);
+
 var WV = (window.chrome && window.chrome.webview) ? window.chrome.webview : null;
 if (WV) document.documentElement.classList.add('webview2');
 // 2026-10-25（mac 控件协调）——**页面侧的 mac 原生壳判定**，不依赖宿主垫片。
@@ -139,7 +169,7 @@ var S = {
 // 老用户的 conf 里可能还留着 backend=asio —— 由 migrateRemovedBackend() 在加载时优雅降级。
 var ADV = {
   device: '', bits: 0, taps: 0, atten: 0, transition: 0, phase: '',
-  modcut: 0, moddith: -1, ir: '', irgpu: 0, ramp: 0, theme: 'dark', uiStyle: 'apple',
+  modcut: 0, moddith: -1, ir: '', irgpu: 0, ramp: 0, theme: 'dark', uiStyle: 'apple', lang: 'zh',
   eq: '', modorder: 5, modfamily: 'dsd', gpuvendor: 'auto', directsdm: 0, dsdKind: 'fir', dsdConv: 'narrow',
   updbeta: 0,
   // 输出后端与多声道
@@ -177,13 +207,27 @@ var SEP = (function () {
 
 // 先按本地记忆应用主题与界面风格（不等 /api/settings 返回，避免启动瞬间闪一下）
 (function () {
-  var t = null, u = null;
-  try { t = localStorage.getItem('rta-theme'); u = localStorage.getItem('rta-uistyle'); } catch (e) { }
+  var t = null, u = null, l = null;
+  try {
+    t = localStorage.getItem('rta-theme');
+    u = localStorage.getItem('rta-uistyle');
+    l = localStorage.getItem('rta-lang');
+  } catch (e) { }
   if (t === 'light' || t === 'blue') document.documentElement.dataset.theme = t;
   document.documentElement.dataset.uistyle = (u === 'classic') ? 'classic' : 'apple';
   S.uiStyle = document.documentElement.dataset.uistyle;
   ADV.uiStyle = S.uiStyle;
+  if (l === 'en' || l === 'zh') {
+    document.documentElement.dataset.lang = l;
+    document.documentElement.lang = l;
+    ADV.lang = l;
+  }
 })();
+
+function strCompare(a, b) {
+  var l = (document.documentElement && document.documentElement.dataset && document.documentElement.dataset.lang === 'en') ? 'en' : 'zh';
+  return (a || '').localeCompare(b || '', l);
+}
 
 function toast(m) {
   var t = D('toast'); if (!t) return;
@@ -543,7 +587,10 @@ function fbSend() {
     });
   };
 
-  withDiag().then(function (body) {
+  api('/api/diag').then(function(j){
+    if(j && j.ok) payload.case_id=j.case_id||j.caseId||'';
+    return withDiag();
+  }).then(function (body) {
     fbMsg('正在发送…');
     return fetch(FB_WORKER_URL, {
       method: 'POST',
@@ -685,7 +732,10 @@ function api(u, body) {
   if (body !== undefined) opt.body = body;
   // 两个阶段都可能失败：① fetch 本身（超时 / 连接重置 / 服务没起来）；
   // ② r.json()（响应被截断，或拿到的是 HTML 错误页而不是 JSON）。一次 .catch 同时覆盖两者。
-  return fetch(u, opt).then(function (r) { return r.json(); }).then(function (j) {
+  var traceStart=Date.now(), traceStatus=0, tracePath=String(u).split('?')[0];
+  return fetch(u, opt).then(function (r) { traceStatus=r.status; return r.json(); }).then(function (j) {
+    if(tracePath.indexOf('/api/')===0 && !isRead && tracePath!='/api/ui/events')
+      uiTrace('api','',{path:tracePath,status:traceStatus,dur:Date.now()-traceStart});
     if (!j || typeof j !== 'object') { apiFailNote('后端响应格式异常'); return apiFail('后端响应格式异常'); }
     return j;
   }).catch(function (e) {
@@ -693,6 +743,7 @@ function api(u, body) {
     // 原样回显等于把同一句抱怨还给他，而且没有任何可操作的下一步。
     // 统一成中文动作提示；原始信息只留在 _raw 里给排查用（不参与任何界面渲染）。
     var raw = (e && e.message) ? String(e.message) : '请求失败';
+    uiTrace('error','',{code:'UI_API_FAIL',path:tracePath,status:traceStatus,dur:Date.now()-traceStart});
     apiFailNote('无法连接后端（服务正忙或已退出），稍后重试');
     var o = apiFail('无法连接后端（服务正忙或已退出），稍后重试');
     o._raw = raw;
@@ -807,7 +858,8 @@ function params() {
          '&sdmfilt=' + encodeURIComponent(ADV.sdmFilt || '') +
          '&sdmfiltnx=' + encodeURIComponent(ADV.sdmFiltNx || '') +
          '&directsdm=' + (ADV.directsdm ? 1 : 0) +
-         '&dsdkind=' + (ADV.dsdKind || 'fir') + '&dsdconv=' + (ADV.dsdConv || 'narrow');
+         '&dsdkind=' + (ADV.dsdKind || 'fir') + '&dsdconv=' + (ADV.dsdConv || 'narrow') +
+         '&lang=' + encodeURIComponent(ADV.lang || 'zh');
 }
 /* ---------------- 主题 ---------------- */
 function setTheme(t, persist) {
@@ -2092,7 +2144,7 @@ function renderArtistsFrom(j, q) {
     m[k].n++; m[k].d += a.dur;
     if (a.cv) m[k].cv = true, m[k].key = a.k;
   });
-  order.sort(function (x, y) { return x.localeCompare(y, 'zh'); });
+  order.sort(function (x, y) { return strCompare(x, y); });
   head(q ? ('艺术家（搜索：' + q + '）') : '艺术家', order.length + ' 位', '');
   if (!order.length) {
     if (q) {
@@ -2757,11 +2809,11 @@ function renderTracksView() {
   var sortMode = S.trackSort || 'default';
   var sorted = t.slice();
   if (sortMode === 'title') {
-    sorted.sort(function (a, b) { return (a.title || '').localeCompare(b.title || '', 'zh'); });
+    sorted.sort(function (a, b) { return strCompare(a.title, b.title); });
   } else if (sortMode === 'artist') {
-    sorted.sort(function (a, b) { return (a.artist || '').localeCompare(b.artist || '', 'zh'); });
+    sorted.sort(function (a, b) { return strCompare(a.artist, b.artist); });
   } else if (sortMode === 'album') {
-    sorted.sort(function (a, b) { return (a.album || '').localeCompare(b.album || '', 'zh'); });
+    sorted.sort(function (a, b) { return strCompare(a.album, b.album); });
   } else if (sortMode === 'dur') {
     sorted.sort(function (a, b) { return (a.dur || 0) - (b.dur || 0); });
   } else if (sortMode === 'year') {
@@ -2771,7 +2823,7 @@ function renderTracksView() {
       var fa = FAV_SET.has(a.path) ? 1 : 0;
       var fb = FAV_SET.has(b.path) ? 1 : 0;
       if (fa !== fb) return fb - fa; // 收藏优先排前面
-      return (a.title || '').localeCompare(b.title || '', 'zh');
+      return strCompare(a.title, b.title);
     });
   }
 
@@ -3977,6 +4029,7 @@ function saveSettings(immediate) {
   body += '&volume=' + S.vol + '&loudness=' + (D('sLoud').checked ? '1' : '0');
   body += '&theme=' + encodeURIComponent(S.theme || 'dark');
   body += '&uistyle=' + encodeURIComponent(S.uiStyle || 'apple');
+  body += '&lang=' + encodeURIComponent(ADV.lang || 'zh');
   body += '&device=' + encodeURIComponent(ADV.device || '') + '&bits=' + (ADV.bits !== undefined && ADV.bits !== null ? ADV.bits : 0)
         + '&taps=' + (ADV.taps || 0) + '&atten=' + (ADV.atten || 0)
         + '&transition=' + (ADV.transition || 0) + '&phase=' + encodeURIComponent(ADV.phase || '')
@@ -4022,6 +4075,12 @@ function saveSettings(immediate) {
 function loadSettings() {
   api('/api/settings').then(function (j) {
     var kv = j.kv || {};
+    var savedLang = '';
+    try { savedLang = localStorage.getItem('rta-lang'); } catch (e) {}
+    var effectiveLang = (savedLang === 'en' || savedLang === 'zh') ? savedLang : (kv.lang || 'zh');
+    if (effectiveLang !== 'en' && effectiveLang !== 'zh') effectiveLang = 'zh';
+    ADV.lang = effectiveLang;
+    if (D('sp_lang')) D('sp_lang').value = effectiveLang;
     if (kv.scanThreads !== undefined || kv.scanthreads !== undefined) {
       ADV.scanThreads = parseInt(kv.scanThreads || kv.scanthreads, 10) || 0;
     }
@@ -4236,13 +4295,21 @@ function updateDevMixHint() {
   var devCh = devMixChannels(ADV.device);
   var t = devMixText(ADV.device);
   var bk = (D('sp_backend') && D('sp_backend').value) || ADV.backend || 'wasapi';
+  // 这段话横跨 <b> 与多段拼接，单靠词条替换译出来是 "Per 2 channels Display: …" 这种生硬句子
+  // （1.1.1-beta2 校对实录）。所以这里整句按语言二选一，别让引擎去猜句子结构。
+  var isEn = (document.documentElement.dataset.lang === 'en');
   var tail;
-  if (parseInt(ADV.channels, 10) > 0) tail = '；「输出声道数」= ' + parseInt(ADV.channels, 10) + '，以此为准';
-  else if (bk === 'wasapi-shared') tail = '；共享模式输出经 CoreAudio 系统混音，恒等于设备声道数';
-  else if (bk === 'wasapi') tail = '；「输出声道数」= 跟随源，硬件直通播放时实际声道随源文件变化';
-  else tail = '；「输出声道数」= 跟随源';
-  el.innerHTML = '按 <b>' + n + ' 声道</b> 显示' +
-    (devCh ? ('（CoreAudio 设备混音 ' + devCh + ' ch' + (t ? (' · ' + esc(t.replace(/^(\d+) 声道 · /, ''))) : '') + '）') : '') + tail;
+  if (parseInt(ADV.channels, 10) > 0) tail = isEn ? ('; Output Channels = ' + parseInt(ADV.channels, 10) + ' (authoritative)')
+                                                  : ('；「输出声道数」= ' + parseInt(ADV.channels, 10) + '，以此为准');
+  else if (bk === 'wasapi-shared') tail = isEn ? '; Shared mode is mixed by CoreAudio, so it always equals the device channel count'
+                                               : '；共享模式输出经 CoreAudio 系统混音，恒等于设备声道数';
+  else if (bk === 'wasapi') tail = isEn ? '; Output Channels = Follow source; in exclusive mode the actual channels follow the source file'
+                                        : '；「输出声道数」= 跟随源，硬件直通播放时实际声道随源文件变化';
+  else tail = isEn ? '; Output Channels = Follow source' : '；「输出声道数」= 跟随源';
+  var head = isEn ? ('Showing <b>' + n + ' channels</b>') : ('按 <b>' + n + ' 声道</b> 显示');
+  var mix = devCh ? ((isEn ? ' (CoreAudio device mix ' : '（CoreAudio 设备混音 ') + devCh + ' ch' +
+    (t ? (' · ' + esc(t.replace(/^(\d+) 声道 · /, ''))) : '') + (isEn ? ')' : '）')) : '';
+  el.innerHTML = head + mix + tail;
 }
 function repaintTrims() {
   var g = document.querySelector('#setpage .trimgrid');
@@ -5522,10 +5589,10 @@ D('bHelp').onclick = function () {
   D('mtitle').textContent = '快捷键与提示';
   D('modal').classList.add('on');
   var rows = [
-    ['空格', '暂停 / 继续'], ['← →', '后退 / 前进 5 秒'], ['↑ ↓', '音量 ±0.5 dB（Shift ±0.1 dB）'],
+    ['空格', '暂停 / 继续'], ['← →', '上一首 / 下一首'], ['Shift + ← →', '后退 / 前进 5 秒'], ['↑ ↓', '音量 ±0.5 dB（Shift ±0.1 dB）'],
     ['n / p', '下一首 / 上一首'], ['s', '停止'], ['l', '歌词'], ['i', '信号链'],
-    ['右键专辑', '整张加入队列'], ['右键曲目', '加入队列'], ['右键队列条目', '从队列移除'],
-    ['拖动队列条目', '调整播放顺序'], ['Esc（搜索框内）', '清空搜索']
+    ['右键专辑', '整张加入队列'], ['右键曲目', '单曲菜单（入队 / 歌单 / 体检 / 对比）'], ['右键队列条目', '队列菜单（播放 / 歌单 / 移除）'],
+    ['拖动队列条目', '调整播放顺序'], ['Esc（搜索框内）', '清空并退出搜索'], ['Ctrl / ⌘ + F', '聚焦搜索']
   ];
   var h = '<div style="display:grid;grid-template-columns:120px 1fr;gap:9px 14px;font-size:12.5px">';
   rows.forEach(function (r) {
@@ -6745,9 +6812,9 @@ function openQualityModal(file) {
                        '<div class=hint style="margin-top:6px;opacity:.75">' + esc(base) + '</div>');
   api('/api/track/health?file=' + encodeURIComponent(file)).then(function (j) {
     if (seq !== QMODAL.req) return;                      // 已切到别的曲目 → 丢弃
-    if (!j || !j.ok) {
+    if (!j || !j.ok || j.usable === false || !j.health || j.health.status !== 'ready') {
       D('mbody').innerHTML = '<div class=hint style="color:var(--warn)">无法分析：' +
-        esc((j && j.error) || '未知原因') + '</div>';
+        esc((j && j.error) || '未知原因') + (j && j.code ? ' [' + esc(j.code) + ']' : '') + '</div>';
       return;
     }
     var h = j.health || {};
@@ -7749,6 +7816,9 @@ function renderSettingsPage() {
        + '</select></div>'
        + '<div class=sfld><label>主题' + tip('顶栏右侧的小圆点也可以快速切换主题') + '</label><select id=sp_theme>'
        + opt('dark', '深色（默认）', S.theme) + opt('light', '白色', S.theme) + opt('blue', '浅蓝色', S.theme)
+       + '</select></div>'
+       + '<div class=sfld><label>语言' + tip('切换界面显示语言，保存后刷新生效') + '</label><select id=sp_lang>'
+       + opt('zh', '中文', ADV.lang || 'zh') + opt('en', 'English', ADV.lang || 'zh')
        + '</select></div>')
      + sgroup('GPU',
          sel('sp_gpu', 'GPU 后端',
@@ -7849,6 +7919,8 @@ function renderSettingsPage() {
          '<div class="sfld wide" style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">'
        + '<button class="btn pri" id=sp_diagzip>导出诊断包（.zip）</button>'
        + '<button class=btn id=sp_diagjson>只要 JSON</button>'
+        + '<button class=btn id=sp_diagsummary>查看 / 复制诊断摘要</button>'
+        + '<pre id=sp_diagsummarytext style="width:100%;white-space:pre-wrap;max-height:260px;overflow:auto"></pre>'
        // 2026-10-26（用户要求「预留好上传诊断的接口」）：
        //   上传而不是让用户去微信/QQ 传文件的理由：诊断包动辄几 MB，聊天工具会压/过期；
        //   而且用户往往说不清"该发哪个文件"。
@@ -7856,7 +7928,7 @@ function renderSettingsPage() {
        //     Content-Type: application/zip，Body = 诊断包原始字节
        //     期望 200 + {"ok":true,"id":"<工单号>","url":"<可选查看地址>"}
        //   端点未接上时不假装成功（见 uploadDiag 的错误分支）。
-       + '<button class=btn id=sp_diagupload>上传诊断</button>'
+       + '<button class=btn id=sp_diagupload>随反馈上传诊断</button>'
        + tip('包内：rlplayer-diag.json（版本 / 系统 / CPU / GPU / 端口）、rlplayer-playback.log（含 .1/.2 轮转）、launcher.log、dumps-manifest.txt、settings-summary.txt；' +
              'api_key / token / password / Authorization 头一律脱敏为 <redacted>，家目录用户名与邮箱脱敏为 <user>；rlplayer-llm.conf 本体不会被打进包。')
        + '<span style="font-size:11.5px;color:var(--mut2);margin-left:2px" id=sp_diagmsg></span></div>'
@@ -8163,6 +8235,7 @@ function renderSettingsPage() {
   // 诊断页签的两个按钮（2026-10-22 功能3：从元数据迁出 + 改为一个 ZIP）
   if (D('sp_diagzip')) D('sp_diagzip').onclick = exportDiagZip;
   if (D('sp_diagjson')) D('sp_diagjson').onclick = exportDiag;
+  if (D('sp_diagsummary')) D('sp_diagsummary').onclick = showDiagSummary;
   // 2026-10-26（用户要求预留上传接口）：按钮已绑，端点未接上时会如实报失败，不假装成功
   if (D('sp_diagupload')) D('sp_diagupload').onclick = uploadDiag;
   // 功能2：相位说明跟随 1x 滤波器与相位覆盖的选择联动
@@ -8274,6 +8347,16 @@ function renderSettingsPage() {
   // 把母版保存栏克隆进每个 .spane，然后移除母版自身
   cloneFootIntoPanes();
   D('sp_theme').onchange = function () { setTheme(this.value); };
+  if (D('sp_lang')) D('sp_lang').onchange = function () {
+    var val = (this.value === 'en') ? 'en' : 'zh';
+    ADV.lang = val;
+    try { localStorage.setItem('rta-lang', val); } catch (e) {}
+    api('/api/settings', 'lang=' + encodeURIComponent(val)).then(function () {
+      location.reload();
+    }).catch(function () {
+      location.reload();
+    });
+  };
   if (D('sp_uistyle')) D('sp_uistyle').onchange = function () {
     setUiStyle(this.value);
     toast('已切换界面风格：' + (this.value === 'classic' ? '经典 Hi-Fi 工作台' : 'Apple Music 风格'));
@@ -8548,7 +8631,7 @@ function eqSettingsHtml() {
     + '<div class="sfld wide"><div class=peqwrap>'
     + '<div id=peqRows class=peqrows></div>'
     + '</div>'
-    + '<div style="font-size:11px;color:var(--mut2);margin-top:5px">增益 ±12 dB（步进 0.1）· Q 0.1~20 · 频率 10 Hz~20 kHz。'
+    + '<div style="font-size:11px;color:var(--mut2);margin-top:5px">增益 ±24 dB（步进 0.1；超过 ±12 dB 请复核）· Q 0.1~20 · 频率 10 Hz~20 kHz。'
     + '曲线上 <b>拖拽节点</b>：水平=频率（对数）、垂直=增益；<b>Shift+拖 / 滚轮</b>=改 Q；<b>双击节点</b>=该段复位（0 dB / Q 1.41）。'
     + '选中行后 <b>↑↓</b>=增益 0.1 dB、<b>←→</b>=频率 ±1%（Shift 加速）。修改即时生效（热更新，交叉淡入防爆音），并自动保存到 rlplayer-peq.txt。</div></div>');
 
@@ -8744,7 +8827,7 @@ function peqRowBand(tr) {
   if (!isFinite(fv) || fv <= 0) fv = 1000;
   return {
     i: +tr.dataset.i, type: t.value, freq: peqClampFreq(fv),
-    gain: Math.max(-12, Math.min(12, parseFloat(g.value) || 0)),
+    gain: Math.max(-24, Math.min(24, parseFloat(g.value) || 0)),
     q: Math.max(0.1, Math.min(20, parseFloat(q.value) || 1.41)),
     on: on.checked
   };
@@ -8846,7 +8929,7 @@ function peqCurveFreqAt(x) {
 function peqCurveGainAt(y) {
   var v = PEQ_VIEW; if (!v) return 0;
   var t = (y - v.PADT) / (v.H - v.PADT - v.PADB);
-  return Math.max(-12, Math.min(12, v.maxDb - Math.max(0, Math.min(1, t)) * (v.maxDb - v.minDb)));
+  return Math.max(-24, Math.min(24, v.maxDb - Math.max(0, Math.min(1, t)) * (v.maxDb - v.minDb)));
 }
 function peqDrawCurve(points) {
   var box = D('peqCurve'); if (!box) return;
@@ -9072,7 +9155,7 @@ function peqRenderRows(j) {
     h += '<div class=peqr data-i=' + (i + 1) + ' tabindex=0>'
        + '<span class=peqn>' + (i + 1 < 10 ? '0' : '') + (i + 1) + '</span>'
        + '<span class=peqc><input class=peqF type=text spellcheck=false value="' + esc(peqFreqText(b.freq)) + '"></span>'
-       + '<span class="peqc num"><input class=peqG type=number step=0.1 min=-12 max=12 value="' + (+b.gain).toFixed(1) + '"></span>'
+       + '<span class="peqc num"><input class=peqG type=number step=0.1 min=-24 max=24 value="' + (+b.gain).toFixed(1) + '"></span>'
        + '<span class="peqc num"><input class=peqQ type=number step=0.01 min=0.1 max=20 value="' + (+b.q).toFixed(2) + '"></span>'
        + '<span class=peqc>' + sel + '</span>'
        + '<span class="peqc c"><input class=peqOn type=checkbox' + (b.on ? ' checked' : '') + '></span>'
@@ -9095,7 +9178,7 @@ function peqRenderRows(j) {
       if (k === 'ArrowUp' || k === 'ArrowDown') {
         ev.preventDefault();
         var d = (k === 'ArrowUp' ? 1 : -1) * (fast ? 1 : 0.1);
-        g.value = (Math.max(-12, Math.min(12, (parseFloat(g.value) || 0) + d))).toFixed(1);
+        g.value = (Math.max(-24, Math.min(24, (parseFloat(g.value) || 0) + d))).toFixed(1);
       } else if (k === 'ArrowLeft' || k === 'ArrowRight') {
         if (ev.target !== tr && ev.target.tagName === 'INPUT' && ev.target.type === 'text') return; // 文本输入框里让光标移动
         ev.preventDefault();
@@ -9119,6 +9202,9 @@ function peqAutoPreamp() {
   } else {
     peqCollectBands().forEach(function (b) { if (b.on && b.gain > maxGain) maxGain = b.gain; });
   }
+  // Points already include current preamp. Remove it before computing a replacement.
+  var oldPre = PEQ_STATE && typeof PEQ_STATE.preamp === 'number' ? PEQ_STATE.preamp : 0;
+  if (pts.length) maxGain = Math.max(0, maxGain - oldPre);
   var pre = -Math.max(0, Math.ceil(maxGain));
   var inp = D('peqPreamp');
   if (inp) inp.value = pre;
@@ -9128,6 +9214,11 @@ function peqAutoPreamp() {
 }
 function peqRender(j) {
   PEQ_STATE = j;
+  var maxBand = 0, maxCurve = 0;
+  (j.bands||[]).forEach(function(b){if(b.on) maxBand=Math.max(maxBand,Math.abs(+b.gain||0));});
+  (j.points||[]).forEach(function(p){maxCurve=Math.max(maxCurve,+p[1]||0);});
+  peqMsg('实际最大单段 ±'+maxBand.toFixed(1)+' dB；总曲线峰值 '+maxCurve.toFixed(1)+' dB（含前级）。'+
+    (maxBand>12?'超过常用 ±12 dB：请复核曲线并使用自动前级留出余量。':''));
   if (D('peqBypass')) D('peqBypass').checked = !!j.bypass;
   if (D('peqPreamp')) D('peqPreamp').value = j.preamp;
   peqStatusRender(j);   // 261024-04 #3：状态行跟着后端的真值走
@@ -9188,6 +9279,11 @@ function peqApply() {
   api('/api/peq', body).then(function (j) {
     if (!j || !j.ok) { peqMsg('失败：' + ((j && j.error) || '未知错误')); return; }
     PEQ_STATE = j;
+  var maxBand = 0, maxCurve = 0;
+  (j.bands||[]).forEach(function(b){if(b.on) maxBand=Math.max(maxBand,Math.abs(+b.gain||0));});
+  (j.points||[]).forEach(function(p){maxCurve=Math.max(maxCurve,+p[1]||0);});
+  peqMsg('实际最大单段 ±'+maxBand.toFixed(1)+' dB；总曲线峰值 '+maxCurve.toFixed(1)+' dB（含前级）。'+
+    (maxBand>12?'超过常用 ±12 dB：请复核曲线并使用自动前级留出余量。':''));
     peqDrawCurve(j.points);   // 只刷新曲线，不重建输入框（避免打断正在输入的光标）
     peqStatusRender(j);       // 261024-04 #3：状态行刷新（以后端返回值为准）
     peqMsg('已应用（' + (j.bypass ? '旁路' : '生效') + ' · 采样率 ' + Math.round(j.fs) + ' Hz）');
@@ -9529,6 +9625,18 @@ function downloadBlob(blob, filename) {
   a.remove();
   setTimeout(function () { URL.revokeObjectURL(a.href); }, 5000);
 }
+function showDiagSummary() {
+  uiTraceFlush();
+  api('/api/diag').then(function(j){
+    if(!j || !j.ok) { diagMsg('诊断接口未接入'); return; }
+    var rows=(j.events && j.events.recent)||[];
+    var text='case_id: '+(j.case_id||j.caseId||'unknown')+'\n版本: '+(j.version||'unknown')+'\n上次运行: '+(j.runState?j.runState.lastExit:'unknown')+'\n';
+    rows.slice(-20).forEach(function(e){text += [e.ts,e.rid,e.stage,e.evt,e.code].join(' ')+'\n';});
+    if(!rows.length) text+='最近事件证据缺失\n';
+    var box=D('sp_diagsummarytext'); if(box) box.textContent=text;
+    if(navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(text).then(function(){diagMsg('摘要已复制');},function(){diagMsg('请选择上方摘要手动复制');});
+  });
+}
 function diagStamp() {
   var d = new Date();
   function p2(n) { return (n < 10 ? '0' : '') + n; }
@@ -9603,55 +9711,13 @@ function exportDiag() {
 //      防止把兜底 JSON 当诊断包发上去，让服务端收到垃圾。
 // ============================================================================
 function uploadDiag() {
-  var btn = D('sp_diagupload');
-  if (btn) btn.disabled = true;
-  diagMsg('正在准备诊断包…');
-  fetch('/api/diagzip').then(function (r) {
-    if (!r.ok) throw new Error('打包失败 HTTP ' + r.status);
-    return r.blob();
-  }).then(function (blob) {
-    if (blob.size < 22) throw new Error('包太小');
-    return blob.slice(0, 4).arrayBuffer().then(function (b) {
-      var v = new Uint8Array(b);
-      if (!(v[0] === 0x50 && v[1] === 0x4B && v[2] === 0x03 && v[3] === 0x04)) throw new Error('不是 ZIP');
-      diagMsg('正在上传（' + Math.round(blob.size / 1024) + ' KB）…');
-      return fetch('/api/diag/upload', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/zip' },
-        body: blob
-      });
-    });
-  }).then(function (r) {
-    // 200 也可能是兜底报文（本后端未知 API 的行为），所以必须读 body 确认
-    return r.text().then(function (t) {
-      var j = null;
-      try { j = JSON.parse(t); } catch (e) { }
-      if (!r.ok) throw new Error('HTTP ' + r.status + (j && j.error ? '：' + j.error : ''));
-      if (!j || j.ok === false) {
-        throw new Error((j && j.error) ? j.error : '端点未接上（/api/diag/upload 未实现）');
-      }
-      // ⚠️ 2026-10-26 实测踩到的坑（这条是"假成功"，比报错更危险）：
-      //   后端对未知 API 的兜底是前缀匹配 —— POST /api/diag/upload 命中了
-      //   `/api/diag` 的 rfind(prefix,0)==0 分支，**直接回了一份诊断 JSON 且 ok:true**。
-      //   于是"上传"看起来成功了，其实什么都没上传。
-      //   判据：上传成功的响应必须带**工单号 id**（契约见函数头）。
-      //   没有 id 就说明拿到的不是上传端点的响应（多半是被 /api/diag 吃掉），必须报错。
-      if (!j.id) {
-        throw new Error('端点未接上（POST /api/diag/upload 未实现；'
-          + '当前请求被 /api/diag 前缀匹配吃掉了，服务器回的是诊断 JSON 而不是上传结果）');
-      }
-      return j;
-    });
-  }).then(function (j) {
-    var id = j && j.id ? String(j.id) : '';
-    diagMsg(id ? ('已上传，工单号 ' + id) : '已上传');
-    toast(id ? ('诊断包已上传，工单号 ' + id) : '诊断包已上传');
-  }).catch(function (e) {
-    // 如实说不支持，不假装成功
-    diagMsg('');
-    toast('诊断包上传失败：' + (e && e.message ? e.message : e));
-  }).then(function () { if (btn) btn.disabled = false; });
+  uiTrace('action', 'diag_upload');
+  var cb = D('sp_fbdiag'), text = D('sp_fbtext');
+  if (cb) cb.checked = true;
+  if (text) { text.scrollIntoView({ block: 'center', behavior: 'smooth' }); text.focus(); }
+  diagMsg('请填写问题描述后发送反馈，诊断包会一并上传。');
 }
+
 
 function drawRoots() {
   var box = D('sp_roots'); if (!box) return;
@@ -9835,11 +9901,11 @@ function applyQueueSort(by) {
     function meta(i) { return metas[i] || {}; }
     function txt(i, k) { return String(meta(i)[k] || ''); }
     if (by === 'title') {
-      idx.sort(function (a, b) { return txt(a, 't').localeCompare(txt(b, 't'), 'zh'); });
+      idx.sort(function (a, b) { return strCompare(txt(a, 't'), txt(b, 't')); });
     } else if (by === 'artist') {
-      idx.sort(function (a, b) { return txt(a, 'a').localeCompare(txt(b, 'a'), 'zh'); });
+      idx.sort(function (a, b) { return strCompare(txt(a, 'a'), txt(b, 'a')); });
     } else if (by === 'album') {
-      idx.sort(function (a, b) { return txt(a, 'al').localeCompare(txt(b, 'al'), 'zh'); });
+      idx.sort(function (a, b) { return strCompare(txt(a, 'al'), txt(b, 'al')); });
     } else if (by === 'dur') {
       idx.sort(function (a, b) { return (+meta(a).d || 0) - (+meta(b).d || 0); });
     } else if (by === 'year') {

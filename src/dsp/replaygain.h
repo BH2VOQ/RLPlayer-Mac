@@ -1,3 +1,9 @@
+// SPDX-FileCopyrightText: 2026 BH2VOQ <https://github.com/BH2VOQ>
+// SPDX-License-Identifier: GPL-3.0-or-later
+//
+// 本文件是 RLPlayer 的一部分，以 GNU 通用公共许可证第 3 版（或更新版本）发布。
+// 完整条款见仓库根目录的 LICENSE 文件。
+//
 // replaygain.h — ReplayGain / Album Gain（标签读取 + RG2.0 计算 + 三模式应用策略）
 // ============================================================================
 // ⚠️ 先说结论（给界面和接口用）：**开启后不是 bit-perfect**。

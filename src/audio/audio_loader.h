@@ -1,5 +1,5 @@
+// SPDX-FileCopyrightText: 2026 BH2VOQ <https://github.com/BH2VOQ>
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 August Hu <BH2VOQ@163.com>
 //
 // 本文件是 RLPlayer 的一部分，以 GNU 通用公共许可证第 3 版（或更新版本）发布。
 // 完整条款见仓库根目录的 LICENSE 文件。
@@ -31,6 +31,7 @@
 #include <poll.h>
 #include <sys/stat.h>
 #include "audio/wav.h"
+#include "audio/decode_evidence.h"
 #include "audio/dsd_reader.h"
 #include "dsp/dsd_integrator.h"
 #include <string>
@@ -147,6 +148,23 @@ inline int probe_bit_depth(const std::string& ffprobe, const std::string& file) 
     if (v <= 16) return 16;
     if (v <= 24) return 24;
     return 32;
+}
+
+// 解码器 sample_fmt 反映 float 输出能力，不能用 bits_per_raw_sample 替代。
+// 例如 mp3float 的 fltp 可超过 ±1；转成 pcm_s32le 会提前削平过冲。
+inline const char* decode_pcm_codec(const std::string& ffprobe, const std::string& path, int bits) {
+    std::string fmt;
+    bool probed = false;
+    if (!ffprobe.empty()) {
+        const std::wstring cmd = L"\"" + widen(ffprobe) + L"\" -v error -select_streams a:0 "
+            L"-show_entries stream=sample_fmt -of default=nw=1:nk=1 \"" + widen(path) + L"\"";
+        probed = run_hidden(cmd, &fmt) == 0 && !fmt.empty();
+        if (probed && (fmt.rfind("flt", 0) == 0 || fmt.rfind("dbl", 0) == 0)) return "pcm_f32le";
+    }
+    // 探针缺失不能把有损浮点素材退回整数；整数无损保持原位深。
+    const auto ext = lowerExt(path);
+    if (!probed && (ext == ".mp3" || ext == ".aac" || ext == ".m4a" || ext == ".ogg" || ext == ".opus")) return "pcm_f32le";
+    return bits <= 16 ? "pcm_s16le" : (bits <= 24 ? "pcm_s24le" : "pcm_s32le");
 }
 
 struct LoadNote {
@@ -845,7 +863,7 @@ inline AudioBuffer read_via_ffmpeg_file(const std::string& path, LoadNote* note 
     }
 
     const int bits = probe_bit_depth(ffprobe, path);
-    const char* codec = (bits <= 16) ? "pcm_s16le" : (bits <= 24 ? "pcm_s24le" : "pcm_s32le");
+    const char* codec = decode_pcm_codec(ffprobe, path, bits);
 
     // POSIX：临时目录用 platform 层（含尾分隔符契约）；文件名用 pid+原子计数保证并发唯一
     static std::atomic<unsigned long long> seq{0};
@@ -946,6 +964,7 @@ const std::wstring cmd = L"\"" + widen(ffmpeg) + L"\" -v error -y -i \"" + widen
                                      "，临时WAV=" + tmpPath + "，大小=" + tmpBytesTxt + "，退出码=0)");
         const auto t_wav_0 = std::chrono::steady_clock::now();
         buf = read_wav(tmpPath);
+        validate_flac_decoded_frames(path,buf.frames());
         const auto t_wav_1 = std::chrono::steady_clock::now();
         wav_ms = std::chrono::duration<double, std::milli>(t_wav_1 - t_wav_0).count();
     } catch (...) {
@@ -987,7 +1006,7 @@ inline AudioBuffer read_via_ffmpeg_stream(const std::string& path, LoadNote* not
     }
 
     const int bits = probe_bit_depth(ffprobe, path);
-    const char* codec = (bits <= 16) ? "pcm_s16le" : (bits <= 24 ? "pcm_s24le" : "pcm_s32le");
+    const char* codec = decode_pcm_codec(ffprobe, path, bits);
     // pipe:1 = stdout。ffmpeg 的 wav muxer 在不可 seek 的输出上会写 0xFFFFFFFF
     // 的长度字段（实测本机 ffmpeg 8.1.2：RIFF sz 与 data sz 均为 0xFFFFFFFF），
     // parse_wav_header 已按"流式管道未定长度"处理，不需要额外分支。
@@ -1108,6 +1127,7 @@ inline AudioBuffer read_via_ffmpeg_stream(const std::string& path, LoadNote* not
         note->wavReadMs = 0.0;                  // 流式没有独立的 WAV 读取阶段
         note->totalMs = std::chrono::duration<double, std::milli>(t_total_1 - t_total_0).count();
     }
+    validate_flac_decoded_frames(path,buf.frames());
     return buf;
 }
 
@@ -1119,6 +1139,8 @@ inline AudioBuffer read_via_ffmpeg(const std::string& path, LoadNote* note = nul
     }
     try {
         return read_via_ffmpeg_stream(path, note);
+    } catch (const DecodeFailure&) {
+        throw; // Frame-count evidence is not a pipe limitation; file fallback cannot repair it.
     } catch (const std::exception& e) {
         // 源文件探针归因：如果源文件此刻确实读不了（权限/不存在），回退临时文件同样
         // 无法解决，必须直接重抛，保留原始退出码与权威归因。

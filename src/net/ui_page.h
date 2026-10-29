@@ -1,5 +1,5 @@
+// SPDX-FileCopyrightText: 2026 BH2VOQ <https://github.com/BH2VOQ>
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 August Hu <BH2VOQ@163.com>
 //
 // 本文件是 RLPlayer 的一部分，以 GNU 通用公共许可证第 3 版（或更新版本）发布。
 // 完整条款见仓库根目录的 LICENSE 文件。
@@ -14,18 +14,73 @@
 // 这是本轮加主题时定的规矩。
 #pragma once
 #include <string>
+#include <fstream>
+#include <cstdlib>
+#include <algorithm>
+#include <cctype>
 #include "../version.h"
+#include "i18n.h"
+#include "platform/path.h"
 
 namespace rta::net {
 
-inline std::string rta_ui_page() {
+inline std::string read_conf_lang_from_state() {
+    std::string conf_path;
+    if (const char* env = std::getenv("RLPLAYER_STATE_DIR")) {
+        if (*env) conf_path = std::string(env) + "/rlplayer-settings.conf";
+    }
+    if (conf_path.empty()) {
+        std::string cfg = rta::platform::config_dir_utf8();
+        if (!cfg.empty()) conf_path = cfg + "/rlplayer-settings.conf";
+        else conf_path = "rlplayer-settings.conf";
+    }
+    std::ifstream f(conf_path);
+    if (!f) return "";
+    std::string line;
+    while (std::getline(f, line)) {
+        if (!line.empty() && line.back() == '\r') line.pop_back();
+        size_t eq = line.find('=');
+        if (eq == std::string::npos) continue;
+        std::string k = line.substr(0, eq);
+        while (!k.empty() && (k.back() == ' ' || k.back() == '\t')) k.pop_back();
+        if (k == "lang") {
+            std::string v = line.substr(eq + 1);
+            while (!v.empty() && (v.front() == ' ' || v.front() == '\t')) v.erase(v.begin());
+            while (!v.empty() && (v.back() == ' ' || v.back() == '\t')) v.pop_back();
+            for (char& c : v) c = (char)std::tolower((unsigned char)c);
+            return v;
+        }
+    }
+    return "";
+}
+
+inline std::string rta_ui_page(const std::string& lang = "zh") {
+    std::string l = lang;
+    for (char& c : l) c = (char)std::tolower((unsigned char)c);
+    std::string eff = "zh";
+    if (l == "en") {
+        eff = "en";
+    } else {
+        std::string conf_l = read_conf_lang_from_state();
+        if (conf_l == "en") eff = "en";
+    }
+
     std::string h;
-    h += "<!doctype html><html lang=zh data-theme=dark data-uistyle=apple><head><meta charset=utf-8>";
+    if (eff == "en") {
+        h += "<!doctype html><html lang=en data-lang=en data-theme=dark data-uistyle=apple><head><meta charset=utf-8>";
+    } else {
+        h += "<!doctype html><html lang=zh data-lang=zh data-theme=dark data-uistyle=apple><head><meta charset=utf-8>";
+    }
     h += "<meta name=viewport content='width=device-width,initial-scale=1'>";
     h += "<title>RLPlayer</title>";
     // theme-color 决定 Edge「应用窗口」标题栏/边框的颜色；不设就是系统白，跟深色本体割裂。
     h += "<meta name=theme-color content='#161618'>";
     h += "<link rel=icon type='image/png' href='/favicon.png'>";
+    h += rta_i18n_head_script();
+    // Apply remembered theme before CSS/first paint, not only at body-end app.js.
+    h += "<script>(function(){try{var t=localStorage.getItem('rta-theme'),u=localStorage.getItem('rta-uistyle');"
+         "if(t==='light'||t==='blue')document.documentElement.dataset.theme=t;"
+         "document.documentElement.dataset.uistyle=u==='classic'?'classic':'apple';}catch(e){}})();</script>";
     h += "<style>";
     // ---------- 主题变量 ----------
     // 2026-10-25（Apple Music 风格重构）：三套配色整体换成 Apple Music 体系 ——
@@ -1374,7 +1429,9 @@ h += "#npPage .npedge{display:none}";
 
     h += "<div id=modal><div class=mcard><div class=mhead><b id=mtitle>信号链</b><span class=sp></span><button class=ibtn id=mclose><svg width=15 height=15 viewBox='0 0 24 24' fill=none stroke=currentColor stroke-width=2><path d='M18 6L6 18M6 6l12 12'/></svg></button></div><div class=mbody id=mbody></div></div></div>";
     h += "<div class=toast id=toast></div></div>";
-    h += "<script src=/app.js></script></body></html>";
+    h += "<script src=/app.js></script>";
+    h += rta_i18n_body_script();
+    h += "</body></html>";
     return h;
 }
 
