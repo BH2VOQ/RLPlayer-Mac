@@ -15,13 +15,17 @@
 namespace rta::net {
 
 inline std::string rta_i18n_head_script() {
+    // 语言优先级的唯一真相源是**配置文件**（rlplayer-settings.conf 的 lang）。
+    // localStorage 只是同一台机器的快速缓存，只在配置里还没有取值时用来兜底。
+    // 为什么改（2026-10-30 用户报的 BUG：升级客户端后语言被换掉）：WebKit 的 localStorage
+    // 按 bundle/数据容器存在，版本更替时可能残留上一版的旧值；旧实现让它无条件覆盖服务端
+    // 渲染的 data-lang，于是"用户设了英文，升级后变回中文"。
     return "<script>(function(){try{"
+           "var d=document.documentElement;"
+           "if(d&&d.dataset&&d.dataset.langSrc==='conf')return;"
            "var l=localStorage.getItem('rta-lang');"
            "if(l==='en'||l==='zh'){"
-           "if(document.documentElement.dataset.lang!==l){"
-           "document.documentElement.dataset.lang=l;"
-           "document.documentElement.lang=l;"
-           "}"
+           "if(d.dataset.lang!==l){d.dataset.lang=l;d.lang=l;}"
            "}"
            "}catch(e){}})();</script>";
 }

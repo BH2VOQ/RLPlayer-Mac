@@ -58,18 +58,30 @@ inline std::string rta_ui_page(const std::string& lang = "zh") {
     std::string l = lang;
     for (char& c : l) c = (char)std::tolower((unsigned char)c);
     std::string eff = "zh";
+    bool from_conf = false;
     if (l == "en") {
         eff = "en";
+        from_conf = true;
     } else {
         std::string conf_l = read_conf_lang_from_state();
-        if (conf_l == "en") eff = "en";
+        if (conf_l == "en" || conf_l == "zh") {
+            eff = conf_l;
+            from_conf = true;   // 配置里有明确取值 ⟹ 它就是唯一真相源
+        }
     }
 
+    // data-lang-src：告诉前端这个语言是「配置里写的」还是「默认值」。
+    // 只有 default（配置里还没有 lang）时才允许 localStorage 的缓存值临时覆盖。
+    // 为什么必须区分（2026-10-30 用户报的真 BUG）：更新版本后 WebKit 的 localStorage
+    // 可能残留上一版的旧值，它会把用户在配置里的选择盖掉 ⟹ 一升级语言就变了。
+    const char* src = from_conf ? "conf" : "default";
     std::string h;
     if (eff == "en") {
-        h += "<!doctype html><html lang=en data-lang=en data-theme=dark data-uistyle=apple><head><meta charset=utf-8>";
+        h += std::string("<!doctype html><html lang=en data-lang=en data-lang-src=") + src +
+             " data-theme=dark data-uistyle=apple><head><meta charset=utf-8>";
     } else {
-        h += "<!doctype html><html lang=zh data-lang=zh data-theme=dark data-uistyle=apple><head><meta charset=utf-8>";
+        h += std::string("<!doctype html><html lang=zh data-lang=zh data-lang-src=") + src +
+             " data-theme=dark data-uistyle=apple><head><meta charset=utf-8>";
     }
     h += "<meta name=viewport content='width=device-width,initial-scale=1'>";
     h += "<title>RLPlayer</title>";

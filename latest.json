@@ -1,8 +1,8 @@
 {
-  "version": "1.1.1-beta2",
-  "notes": "中英界面切换（整站英文、术语按 Hi-Fi 惯例）+ 诊断多实例事件隔离与真实失败码 + 英文排版修正。Chinese/English UI switch, per-instance diagnostics logs, real failure codes, English layout fixes.",
-  "download_url": "https://github.com/BH2VOQ/RLPlayer-Mac/releases/download/v1.1.1-beta2/RLPlayer-1.1.1-beta2-macOS-arm64.dmg",
-  "sha256": "49466499baf1424a7e733f400d93d1bdf5741f5a87d24f694ec6b252e97f1acb",
-  "size": 7734036,
-  "published_at": "2026-10-29T15:58:05Z"
+  "version": "1.1.1-beta3",
+  "notes": "修复：升级客户端后界面语言被换掉（配置里的 lang 现在是唯一真相源，localStorage 只作首次运行兜底；保存设置不再顺手写 lang）。Fix: the UI language no longer changes after an app update; the config file stays authoritative.",
+  "download_url": "https://github.com/BH2VOQ/RLPlayer-Mac/releases/download/v1.1.1-beta3/RLPlayer-1.1.1-beta3-macOS-arm64.dmg",
+  "sha256": "72bfa1d58eb905be9a35326dc60566d4fa2433d575c642280c721d05b3f9841b",
+  "size": 7735248,
+  "published_at": "2026-10-29T16:24:35Z"
 }

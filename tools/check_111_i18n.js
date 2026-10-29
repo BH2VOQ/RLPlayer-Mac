@@ -166,6 +166,28 @@ async function runLang(lang) {
     const hasSelect = await session.eval("(()=>{var s=document.getElementById('sp_lang');return s? s.tagName+':'+s.value : 'missing'})()");
     ck(/^SELECT:(zh|en)$/.test(hasSelect), 'settings exposes a language selector #sp_lang', hasSelect);
 
+    // ---------- 回归：配置里的语言不许被 localStorage 的旧缓存盖掉 ----------
+    // 用户报的 BUG：升级客户端后界面语言变了。根因是旧实现让 localStorage 无条件覆盖
+    // 服务端渲染的 data-lang（WebKit 缓存可能残留上一版的值）。判据 = 造出"配置 en / 缓存 zh"
+    // 这种冲突，页面必须是英文；反过来也必须成立。
+    await runLang('en');
+    await session.eval("localStorage.setItem('rta-lang','zh')");
+    await session.eval("location.reload()");
+    await session.waitFor("document.documentElement.dataset.lang!==undefined && typeof openSettingsTab==='function'");
+    await pause(600);
+    const confWins1 = await session.eval("document.documentElement.dataset.lang");
+    ck(confWins1 === 'en', 'config lang wins over a stale localStorage cache (en vs cached zh)', confWins1);
+    const navConf1 = await session.eval("document.querySelector('.nav[data-v=settings]').textContent.trim()");
+    ck(navConf1 === 'Settings', 'stale cache does not flip the UI back to Chinese', navConf1);
+
+    await runLang('zh');
+    await session.eval("localStorage.setItem('rta-lang','en')");
+    await session.eval("location.reload()");
+    await session.waitFor("document.documentElement.dataset.lang!==undefined && typeof openSettingsTab==='function'");
+    await pause(600);
+    const confWins2 = await session.eval("document.documentElement.dataset.lang");
+    ck(confWins2 === 'zh', 'config lang wins the other way too (zh vs cached en)', confWins2);
+
     // ---------- 真正的切换链路：改下拉 → POST 保存 → 页面重载 → 变英文 ----------
     // 用户口径：选中就切换；切换会重载，但必须**留在当前页签**，不许跳回「专辑」。
     await session.eval("openSettingsTab('out')");

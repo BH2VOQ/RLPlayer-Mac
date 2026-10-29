@@ -217,7 +217,9 @@ var SEP = (function () {
   document.documentElement.dataset.uistyle = (u === 'classic') ? 'classic' : 'apple';
   S.uiStyle = document.documentElement.dataset.uistyle;
   ADV.uiStyle = S.uiStyle;
-  if (l === 'en' || l === 'zh') {
+  // 配置里有明确取值时，它就是真相源：忽略 localStorage 残留（详见 ui_page.h 的 data-lang-src）。
+  var confSays = document.documentElement.dataset.langSrc === 'conf';
+  if (!confSays && (l === 'en' || l === 'zh')) {
     document.documentElement.dataset.lang = l;
     document.documentElement.lang = l;
     ADV.lang = l;
@@ -4035,7 +4037,6 @@ function saveSettings(immediate) {
   body += '&volume=' + S.vol + '&loudness=' + (D('sLoud').checked ? '1' : '0');
   body += '&theme=' + encodeURIComponent(S.theme || 'dark');
   body += '&uistyle=' + encodeURIComponent(S.uiStyle || 'apple');
-  body += '&lang=' + encodeURIComponent(ADV.lang || 'zh');
   body += '&device=' + encodeURIComponent(ADV.device || '') + '&bits=' + (ADV.bits !== undefined && ADV.bits !== null ? ADV.bits : 0)
         + '&taps=' + (ADV.taps || 0) + '&atten=' + (ADV.atten || 0)
         + '&transition=' + (ADV.transition || 0) + '&phase=' + encodeURIComponent(ADV.phase || '')
