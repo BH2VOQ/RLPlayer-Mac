@@ -261,20 +261,16 @@ Metal 内核（`librtagpu.dylib`，运行时编译 MSL）**动态加载**：`dlo
 | **1.2.0** | 房间测量向导（真机验收）                         | 🧭 计划 |
 
 ```mermaid
-flowchart LR
-  A["1.1.1<br/>诊断 + 清账"] --> B["1.1.2<br/>AirPlay"]
-  B --> C["1.1.3<br/>LLM 模型"]
-  C --> D["1.1.4<br/>音频分析"]
-  D --> E["1.1.5<br/>资料检索"]
-  E --> F["1.1.6<br/>AI 流式"]
-  F --> G["1.1.7<br/>补图"]
-  G --> H["1.1.8<br/>封面写回"]
-  H --> I["1.1.9<br/>平台/性能"]
-  I --> J["1.2.0<br/>房间测量"]
+flowchart TB
+  A["1.1.1 – 1.1.3<br/>诊断 · AirPlay<br/>LLM 模型"]
+  B["1.1.4 – 1.1.6<br/>音频分析 · 资料检索<br/>AI 流式"]
+  C["1.1.7 – 1.1.9<br/>补图 · 封面写回<br/>平台 / 性能"]
+  D["1.2.0<br/>房间测量向导"]
+  A --> B --> C --> D
   classDef plan fill:#0f172a,stroke:#334155,color:#e2e8f0;
-  classDef air fill:#0e7490,stroke:#22d3ee,color:#ecfeff;
-  class A,B,C,D,E,F,G,H,I,J plan;
-  class B air;
+  classDef next fill:#0e7490,stroke:#22d3ee,color:#ecfeff;
+  class A,B,C plan;
+  class D next;
 ```
 
 **发布纪律**：每版先出 `-beta1`，beta 期间只修 bug；P0/P1 清零才出正式版。版本号不预留，1.2.0 是上限。

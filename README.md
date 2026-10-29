@@ -261,20 +261,16 @@ The functionality stays available and numerically correct (worst convolution cas
 | **1.2.0** | Room measurement wizard (real-machine acceptance)                  | 🧭 Planned  |
 
 ```mermaid
-flowchart LR
-  A["1.1.1<br/>diagnostics + cleanup"] --> B["1.1.2<br/>AirPlay"]
-  B --> C["1.1.3<br/>LLM models"]
-  C --> D["1.1.4<br/>audio analysis"]
-  D --> E["1.1.5<br/>library lookup"]
-  E --> F["1.1.6<br/>AI streaming"]
-  F --> G["1.1.7<br/>covers"]
-  G --> H["1.1.8<br/>cover write-back"]
-  H --> I["1.1.9<br/>platform / performance"]
-  I --> J["1.2.0<br/>room measurement"]
+flowchart TB
+  A["1.1.1 – 1.1.3<br/>diagnostics · AirPlay<br/>LLM models"]
+  B["1.1.4 – 1.1.6<br/>audio analysis · library lookup<br/>AI streaming"]
+  C["1.1.7 – 1.1.9<br/>covers · cover write-back<br/>platform / performance"]
+  D["1.2.0<br/>room measurement wizard"]
+  A --> B --> C --> D
   classDef plan fill:#0f172a,stroke:#334155,color:#e2e8f0;
-  classDef air fill:#0e7490,stroke:#22d3ee,color:#ecfeff;
-  class A,B,C,D,E,F,G,H,I,J plan;
-  class B air;
+  classDef next fill:#0e7490,stroke:#22d3ee,color:#ecfeff;
+  class A,B,C plan;
+  class D next;
 ```
 
 **Release discipline**: every version starts with `-beta1`; during beta only bug fixes go in; a stable release ships only when P0/P1 are at zero. Version numbers are not reserved, and 1.2.0 is the ceiling.
