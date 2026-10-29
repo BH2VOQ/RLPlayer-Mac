@@ -24,7 +24,10 @@
 
 namespace rta::net {
 
-inline std::string read_conf_lang_from_state() {
+// 读 state 目录下 rlplayer-settings.conf 的单个键（小写、去空白）。缺失返回空串。
+// 这是**界面偏好的唯一持久化位置**：配置在 Application Support 里，跟着用户走，不跟版本走。
+inline std::string read_conf_value(const char* key) {
+    if (!key || !*key) return "";
     std::string conf_path;
     if (const char* env = std::getenv("RLPLAYER_STATE_DIR")) {
         if (*env) conf_path = std::string(env) + "/rlplayer-settings.conf";
@@ -43,16 +46,18 @@ inline std::string read_conf_lang_from_state() {
         if (eq == std::string::npos) continue;
         std::string k = line.substr(0, eq);
         while (!k.empty() && (k.back() == ' ' || k.back() == '\t')) k.pop_back();
-        if (k == "lang") {
-            std::string v = line.substr(eq + 1);
-            while (!v.empty() && (v.front() == ' ' || v.front() == '\t')) v.erase(v.begin());
-            while (!v.empty() && (v.back() == ' ' || v.back() == '\t')) v.pop_back();
-            for (char& c : v) c = (char)std::tolower((unsigned char)c);
-            return v;
-        }
+        if (k != key) continue;
+        std::string v = line.substr(eq + 1);
+        while (!v.empty() && (v.front() == ' ' || v.front() == '\t')) v.erase(v.begin());
+        while (!v.empty() && (v.back() == ' ' || v.back() == '\t')) v.pop_back();
+        for (char& c : v) c = (char)std::tolower((unsigned char)c);
+        return v;
     }
     return "";
 }
+
+// 兼容旧调用点（只关心 lang）
+inline std::string read_conf_lang_from_state() { return read_conf_value("lang"); }
 
 inline std::string rta_ui_page(const std::string& lang = "zh") {
     std::string l = lang;
@@ -63,26 +68,24 @@ inline std::string rta_ui_page(const std::string& lang = "zh") {
         eff = "en";
         from_conf = true;
     } else {
-        std::string conf_l = read_conf_lang_from_state();
-        if (conf_l == "en" || conf_l == "zh") {
-            eff = conf_l;
-            from_conf = true;   // 配置里有明确取值 ⟹ 它就是唯一真相源
-        }
+        std::string conf_l = read_conf_value("lang");
+        if (conf_l == "en" || conf_l == "zh") { eff = conf_l; from_conf = true; }
     }
+    // 主题与界面风格同样以配置为准：这样换版本、清 WebKit 缓存都不会把用户的外观打回默认。
+    std::string conf_theme = read_conf_value("theme");
+    const bool theme_from_conf = (conf_theme == "dark" || conf_theme == "light" || conf_theme == "blue");
+    const std::string theme = theme_from_conf ? conf_theme : "dark";
+    std::string conf_style = read_conf_value("uistyle");
+    const bool style_from_conf = (conf_style == "apple" || conf_style == "classic");
+    const std::string style = style_from_conf ? conf_style : "apple";
 
-    // data-lang-src：告诉前端这个语言是「配置里写的」还是「默认值」。
-    // 只有 default（配置里还没有 lang）时才允许 localStorage 的缓存值临时覆盖。
-    // 为什么必须区分（2026-10-30 用户报的真 BUG）：更新版本后 WebKit 的 localStorage
-    // 可能残留上一版的旧值，它会把用户在配置里的选择盖掉 ⟹ 一升级语言就变了。
     const char* src = from_conf ? "conf" : "default";
     std::string h;
-    if (eff == "en") {
-        h += std::string("<!doctype html><html lang=en data-lang=en data-lang-src=") + src +
-             " data-theme=dark data-uistyle=apple><head><meta charset=utf-8>";
-    } else {
-        h += std::string("<!doctype html><html lang=zh data-lang=zh data-lang-src=") + src +
-             " data-theme=dark data-uistyle=apple><head><meta charset=utf-8>";
-    }
+    h += std::string("<!doctype html><html lang=") + eff + " data-lang=" + eff +
+         " data-lang-src=" + src +
+         " data-theme=" + theme + " data-theme-src=" + (theme_from_conf ? "conf" : "default") +
+         " data-uistyle=" + style + " data-uistyle-src=" + (style_from_conf ? "conf" : "default") +
+         "><head><meta charset=utf-8>";
     h += "<meta name=viewport content='width=device-width,initial-scale=1'>";
     h += "<title>RLPlayer</title>";
     // theme-color 决定 Edge「应用窗口」标题栏/边框的颜色；不设就是系统白，跟深色本体割裂。
@@ -90,9 +93,14 @@ inline std::string rta_ui_page(const std::string& lang = "zh") {
     h += "<link rel=icon type='image/png' href='/favicon.png'>";
     h += rta_i18n_head_script();
     // Apply remembered theme before CSS/first paint, not only at body-end app.js.
-    h += "<script>(function(){try{var t=localStorage.getItem('rta-theme'),u=localStorage.getItem('rta-uistyle');"
-         "if(t==='light'||t==='blue')document.documentElement.dataset.theme=t;"
-         "document.documentElement.dataset.uistyle=u==='classic'?'classic':'apple';}catch(e){}})();</script>";
+    // localStorage 只是"配置里还没有值"时的兜底，绝不允许它盖掉磁盘上的持久设置。
+    h += "<script>(function(){try{var d=document.documentElement;"
+         "if(!d||!d.dataset)return;"
+         "if(d.dataset.themeSrc!=='conf'){var t=localStorage.getItem('rta-theme');"
+         "if(t==='light'||t==='blue'||t==='dark')d.dataset.theme=t;}"
+         "if(d.dataset.uistyleSrc!=='conf'){var u=localStorage.getItem('rta-uistyle');"
+         "d.dataset.uistyle=u==='classic'?'classic':'apple';}"
+         "}catch(e){}})();</script>";
     h += "<style>";
     // ---------- 主题变量 ----------
     // 2026-10-25（Apple Music 风格重构）：三套配色整体换成 Apple Music 体系 ——

@@ -93,17 +93,23 @@ const COLLECT = `(() => {
 })()`;
 
 async function runLang(lang) {
-  fs.writeFileSync(conf, `backend=null\nmetaon=0\nmetallm=0\nlang=${lang}\n`);
-  if (!child) {
-    await new Promise((resolve, reject) => {
-      let s = net.createServer(); s.once('error', reject);
-      s.listen(port, '127.0.0.1', () => s.close(resolve));
-    });
-    child = spawn(binary, ['--port', String(port), '--music-dir', path.join(root, 'music')], { env, cwd: root, stdio: 'ignore' });
-    for (let i = 0; i < 150; i++) {
-      try { if ((await fetch(`http://127.0.0.1:${port}/api/ping`)).ok) break; } catch { }
-      await pause(100);
-    }
+  // 每次换配置都**重启服务**：rtaweb 启动时把设置读进内存，/api/settings 返回的是内存副本。
+  // 只改磁盘不重启，页面会被内存里的旧主题覆盖 —— 那是测试假象，不是产品行为（本轮踩过）。
+  fs.writeFileSync(conf, `backend=null\nmetaon=0\nmetallm=0\nlang=${lang}\ntheme=light\nuistyle=apple\n`);
+  if (child) {
+    child.kill('SIGTERM');
+    await Promise.race([new Promise(r => child.once('exit', r)), pause(10000)]);
+    if (child.exitCode === null) throw Error('owned server did not exit after TERM');
+    child = null;
+  }
+  await new Promise((resolve, reject) => {
+    let s = net.createServer(); s.once('error', reject);
+    s.listen(port, '127.0.0.1', () => s.close(resolve));
+  });
+  child = spawn(binary, ['--port', String(port), '--music-dir', path.join(root, 'music')], { env, cwd: root, stdio: 'ignore' });
+  for (let i = 0; i < 150; i++) {
+    try { if ((await fetch(`http://127.0.0.1:${port}/api/ping`)).ok) break; } catch { }
+    await pause(100);
   }
   if (session) { await session.close(); session = null; }
   session = await ub.open({ url: `http://127.0.0.1:${port}/`, port: browserPort });
@@ -173,7 +179,7 @@ async function runLang(lang) {
     await runLang('en');
     await session.eval("localStorage.setItem('rta-lang','zh')");
     await session.eval("location.reload()");
-    await session.waitFor("document.documentElement.dataset.lang!==undefined && typeof openSettingsTab==='function'");
+    await session.waitFor("document.readyState!=='loading' && document.documentElement.dataset.lang==='en' && typeof openSettingsTab==='function'", 15000);
     await pause(600);
     const confWins1 = await session.eval("document.documentElement.dataset.lang");
     ck(confWins1 === 'en', 'config lang wins over a stale localStorage cache (en vs cached zh)', confWins1);
@@ -183,10 +189,25 @@ async function runLang(lang) {
     await runLang('zh');
     await session.eval("localStorage.setItem('rta-lang','en')");
     await session.eval("location.reload()");
-    await session.waitFor("document.documentElement.dataset.lang!==undefined && typeof openSettingsTab==='function'");
+    await session.waitFor("document.readyState!=='loading' && document.documentElement.dataset.lang==='zh' && typeof openSettingsTab==='function'", 15000);
     await pause(600);
     const confWins2 = await session.eval("document.documentElement.dataset.lang");
     ck(confWins2 === 'zh', 'config lang wins the other way too (zh vs cached en)', confWins2);
+
+    // ---------- 回归：主题 / 界面风格 / 流媒体视图也必须以配置为准 ----------
+    // 用户要求「所有设置都存本地配置，不跟版本走」。判据 = 造出"配置 light / 缓存 dark"的冲突，
+    // 首绘必须是 light；uistyle 同理。这四项（lang/theme/uistyle/remoteview）都是持久偏好。
+    await runLang('en');
+    await session.eval("localStorage.setItem('rta-theme','dark');localStorage.setItem('rta-uistyle','classic')");
+    await session.eval("location.reload()");
+    // 必须等**重载后的新文档**真的生效：只等 dataset 存在会被旧文档立刻满足（本轮实测踩到）。
+    // 判据直接等目标值本身，超时就是失败，不允许"读早了"混过去。
+    await session.waitFor("document.readyState!=='loading' && document.documentElement.dataset.theme==='light' && typeof openSettingsTab==='function'", 15000);
+    await pause(300);
+    const themeNow = await session.eval("document.documentElement.dataset.theme + '|' + document.documentElement.dataset.themeSrc");
+    ck(themeNow === 'light|conf', 'config theme wins over a stale localStorage theme', themeNow);
+    const styleNow = await session.eval("document.documentElement.dataset.uistyle + '|' + document.documentElement.dataset.uistyleSrc");
+    ck(styleNow === 'apple|conf', 'config UI style wins over a stale localStorage style', styleNow);
 
     // ---------- 真正的切换链路：改下拉 → POST 保存 → 页面重载 → 变英文 ----------
     // 用户口径：选中就切换；切换会重载，但必须**留在当前页签**，不许跳回「专辑」。

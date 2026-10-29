@@ -9514,7 +9514,7 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
                 for (const char* allow : { "rate", "filter", "filterNx", "shaper", "dsd", "modorder",
                                            "buffer", "volume", "loudness", "isp", "twostage",
                                            "device", "bits", "taps", "atten", "transition", "phase",
-                                           "modfamily", "oobgain", "ahmbits", "modcut", "moddith", "ir", "irgpu", "ramp", "theme", "uistyle", "lang", "eq",
+                                           "modfamily", "oobgain", "ahmbits", "modcut", "moddith", "ir", "irgpu", "ramp", "theme", "uistyle", "lang", "remoteview", "eq",
                                            "gpuvendor", "dsdnative", "directsdm", "dsdkind", "dsdconv", "dsd2stage",
                                            "backend", "naahost", "upnpdev", "channels", "trim",
                                            "inbackend", "indev", "inoffset", "inbuf", "inmon",

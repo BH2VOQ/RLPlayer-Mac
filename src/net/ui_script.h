@@ -213,9 +213,18 @@ var SEP = (function () {
     u = localStorage.getItem('rta-uistyle');
     l = localStorage.getItem('rta-lang');
   } catch (e) { }
-  if (t === 'light' || t === 'blue') document.documentElement.dataset.theme = t;
-  document.documentElement.dataset.uistyle = (u === 'classic') ? 'classic' : 'apple';
-  S.uiStyle = document.documentElement.dataset.uistyle;
+  // 配置里已经写了 theme/uistyle 时（data-*-src=conf），它是真相源：
+  // localStorage 只在这两项还没有持久值时才兜底，避免"清缓存/换版本"把外观打回默认。
+  var d0 = document.documentElement;
+  if (!(d0.dataset && d0.dataset.themeSrc === 'conf')) {
+    if (t === 'light' || t === 'blue' || t === 'dark') d0.dataset.theme = t;
+  }
+  if (!(d0.dataset && d0.dataset.uistyleSrc === 'conf')) {
+    d0.dataset.uistyle = (u === 'classic') ? 'classic' : 'apple';
+  }
+  S.theme = d0.dataset.theme || 'dark';
+  S.uiStyle = d0.dataset.uistyle || 'apple';
+  ADV.theme = S.theme;
   ADV.uiStyle = S.uiStyle;
   // 配置里有明确取值时，它就是真相源：忽略 localStorage 残留（详见 ui_page.h 的 data-lang-src）。
   var confSays = document.documentElement.dataset.langSrc === 'conf';
@@ -4088,6 +4097,14 @@ function loadSettings() {
     if (effectiveLang !== 'en' && effectiveLang !== 'zh') effectiveLang = 'zh';
     ADV.lang = effectiveLang;
     if (D('sp_lang')) D('sp_lang').value = effectiveLang;
+    // 流媒体视图（网格 / 列表）以配置为准；配置里没有才保留本机缓存。
+    if (kv.remoteview === 'list' || kv.remoteview === 'grid') {
+      if (REMOTE_VIEW !== kv.remoteview) {
+        REMOTE_VIEW = kv.remoteview;
+        try { localStorage.setItem(REMOTE_VIEW_KEY, REMOTE_VIEW); } catch (e) { }
+        if (S.view === 'remote' && typeof renderRemote === 'function') { try { renderRemote(); } catch (e) { } }
+      }
+    }
     if (kv.scanThreads !== undefined || kv.scanthreads !== undefined) {
       ADV.scanThreads = parseInt(kv.scanThreads || kv.scanthreads, 10) || 0;
     }
@@ -4180,11 +4197,16 @@ function loadSettings() {
     if (kv.metaon !== undefined) META.on = (kv.metaon === '1') ? 1 : 0;
     if (kv.metallm !== undefined) META.llm = (kv.metallm === '1') ? 1 : 0;
     if (kv.metasummary !== undefined) META.summary = (kv.metasummary === '1') ? 1 : 0;
-    // 主题与界面风格：本地优先（避免闪一下），否则用服务端保存的
+    // 主题与界面风格：**配置优先**，localStorage 只在配置里还没有值时兜底。
+    // 旧实现是"本地优先"，于是升级/清缓存后 localStorage 的旧值会把用户的持久设置盖掉
+    // （2026-10-30 用户报的 BUG）。data-*-src=conf 就是"配置里有值"的标志。
     var t = null, u = null;
     try { t = localStorage.getItem('rta-theme'); u = localStorage.getItem('rta-uistyle'); } catch (e) { }
-    setTheme(t || kv.theme || 'dark', false);
-    setUiStyle(u || kv.uistyle || 'apple', false);
+    var dEl = document.documentElement;
+    var themeConf = !!(dEl.dataset && dEl.dataset.themeSrc === 'conf');
+    var styleConf = !!(dEl.dataset && dEl.dataset.uistyleSrc === 'conf');
+    setTheme(themeConf ? (kv.theme || 'dark') : (t || kv.theme || 'dark'), false);
+    setUiStyle(styleConf ? (kv.uistyle || 'apple') : (u || kv.uistyle || 'apple'), false);
     // 用户 261023-04 #4：EQ/IR 芯片读的是上面刚填好的 ADV.eq / ADV.ir ——
     // 设置页保存后立刻重绘单曲页（清空 EQ 后芯片要马上消失，不用重开页面）。
     if (D('npPage') && D('npPage').classList.contains('on')) renderNp();
@@ -4510,6 +4532,8 @@ var REMOTE_VIEW = (function () {
 function remoteViewSet(v) {
   REMOTE_VIEW = (v === 'list') ? 'list' : 'grid';
   try { localStorage.setItem(REMOTE_VIEW_KEY, REMOTE_VIEW); } catch (e) { }
+  // 界面偏好一律落到**配置文件**（不跟版本走）：localStorage 只是本机镜像。
+  try { api('/api/settings', 'remoteview=' + encodeURIComponent(REMOTE_VIEW)); } catch (e) { }
 }
 var REMOTE_ICON = {
   grid: "<svg viewBox='0 0 24 24' fill=none stroke=currentColor stroke-width=1.8><rect x='3.5' y='3.5' width='7' height='7' rx='1.4'/><rect x='13.5' y='3.5' width='7' height='7' rx='1.4'/><rect x='3.5' y='13.5' width='7' height='7' rx='1.4'/><rect x='13.5' y='13.5' width='7' height='7' rx='1.4'/></svg>",
