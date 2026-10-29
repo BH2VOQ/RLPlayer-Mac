@@ -351,7 +351,7 @@ inline const I18nPair* i18n_table(std::size_t* count) {
         {"还没有开始播放", "Playback has not started"},
         {"这个列表是空的", "This list is empty"},
         {"进度", "Progress"},
-        {"远低于 GPU 的盈亏平衡点（实测需 n≥32768 才翻盘）。", "Far below the GPU breakeven point (benchmarks show n>=32768 required to outperform)."},
+        {"远低于 GPU 的盈亏平衡点（实测需 n≥32768 才翻盘）。", "far below the GPU breakeven point (benchmarks show n>=32768 required to outperform). "},
         {"适合谁：", "Recommended for: "},
         {"逐位旁路", "Bit-perfect Bypass"},
         {"逐位无损", "Bit-perfect Lossless"},
@@ -683,7 +683,7 @@ inline const I18nPair* i18n_table(std::size_t* count) {
         {"版\"", " editions'"},
         {"独占模式下播放会接管音频设备，其他程序的声音会被静音 —— 这是正常的。", "Playback in exclusive mode takes full ownership of the audio device and mutes sounds from other apps — this is normal."},
         {"由", "By "},
-        {"界面风格", "UI Theme"},
+        {"界面风格", "Interface Style"},
         {"留空 = 不做卷积；支持立体声 / 多声道 FIR 房间校正", "Leave empty for no convolution; supports stereo / multi-channel FIR room correction"},
         {"目录已就绪 · 点击重新扫描建立专辑与封面索引", "Folder ready · Click to rescan and index albums & cover art"},
         {"目录已经配好，但索引里还没有曲目。点下面的按钮重新扫描，或换一个目录。", "Folders are configured, but no tracks are indexed yet. Click the button below to rescan, or choose a different folder."},
@@ -1244,7 +1244,7 @@ inline const I18nPair* i18n_table(std::size_t* count) {
         {"· 目标曲线说明", " · Target Curve Details"},
         {"· 调音预设", " · Tuning Preset"},
         {"← 返回正在播放", "← Back to Now Playing"},
-        {"⚠️ macOS 上不建议开启：实测（Apple M4）卷积走 GPU 在任何 IR 长度下都比 CPU 慢 3.4~8.3 倍。", "⚠️ Not recommended on macOS: tests (Apple M4) show GPU convolution is 3.4-8.3x slower than CPU across all IR lengths."},
+        {"⚠️ macOS 上不建议开启：实测（Apple M4）卷积走 GPU 在任何 IR 长度下都比 CPU 慢 3.4~8.3 倍。", "⚠️ Not recommended on macOS: tests (Apple M4) show GPU convolution is 3.4-8.3x slower than CPU across all IR lengths. "},
         {"」？只删这份歌单，不动当前播放队列。", "'? Only this playlist will be deleted; current playback queue remains unchanged."},
         {"一个文件，不用再到处找日志", "Single file, no more searching for logs"},
         {"一次最多 8 个版本", "Maximum 8 versions at a time"},
@@ -1535,6 +1535,10 @@ inline const I18nPair* i18n_table(std::size_t* count) {
         {"[最小相位]", "[Minimum phase]"},
         {"[线性相位]", "[Linear phase]"},
         {"[混合相位]", "[Intermediate phase]"},
+        {"通用", "General"},
+        {"留空自动存至 Application Support/RLPlayer/recordings", "Leave empty to auto-save to Application Support/RLPlayer/recordings"},
+        {"cap-时间戳.wav", "cap-timestamp.wav"},
+        {"时间戳", "timestamp"},
     };
     if (count) *count = sizeof(k) / sizeof(k[0]);
     return k;

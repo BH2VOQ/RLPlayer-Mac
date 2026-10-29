@@ -27,3 +27,7 @@
 [最小相位]	[Minimum phase]	滤波器预设的附加标记
 [线性相位]	[Linear phase]	滤波器预设的附加标记
 [混合相位]	[Intermediate phase]	滤波器预设的附加标记
+通用	General	设置页第一个页签（原「高级」）
+留空自动存至 Application Support/RLPlayer/recordings	Leave empty to auto-save to Application Support/RLPlayer/recordings	录制输出路径 placeholder 前缀
+cap-时间戳.wav	cap-timestamp.wav	录制输出默认文件名
+时间戳	timestamp	文件名占位词

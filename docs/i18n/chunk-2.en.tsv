@@ -285,7 +285,7 @@ rlplayer-llm.conf；不进安装包，界面永不回显明文	rlplayer-llm.conf
 版"	 editions'	" title="同演绎其他发行 +' + p.otherEditions + ' 版">+' + p.otherEditions + ' 版</span>';
 独占模式下播放会接管音频设备，其他程序的声音会被静音 —— 这是正常的。	Playback in exclusive mode takes full ownership of the audio device and mutes sounds from other apps — this is normal.	lor:#5b6478;line-height:1.8">' + '独占模式下播放会接管音频设备，其他程序的声音会被静音 —— 这是正常的。<br>' + '想要 bit-perfect：输出采样率选「保
 由	By 	|| (authorName + ' 专业校准预设'), scene: '由 ' + authorName + ' 依据测量数据生成的校准滤波，平直化固有
-界面风格	UI Theme	：括号里的外观描述是错的 —— 只写风格名，不解释视觉特征。 '<div class=sfld><label>界面风格' + tip('在 Apple
+界面风格	Interface Style	：括号里的外观描述是错的 —— 只写风格名，不解释视觉特征。 '<div class=sfld><label>界面风格' + tip('在 Apple
 留空 = 不做卷积；支持立体声 / 多声道 FIR 房间校正	Leave empty for no convolution; supports stereo / multi-channel FIR room correction	ld wide"><label>IR 脉冲响应卷积文件（WAV）' + tip('留空 = 不做卷积；支持立体声 / 多声道 FIR 房间校正') + '</label>' + '<input type=text
 目录已就绪 · 点击重新扫描建立专辑与封面索引	Folder ready · Click to rescan and index albums & cover art	ss=am-card-desc>' + (hasRoots ? '目录已就绪 · 点击重新扫描建立专辑与封面索引' : '支持 FLAC · DSD (DSF/DFF) ·
 目录已经配好，但索引里还没有曲目。点下面的按钮重新扫描，或换一个目录。	Folders are configured, but no tracks are indexed yet. Click the button below to rescan, or choose a different folder.	v class=ehint>' + (hasRoots ? '目录已经配好，但索引里还没有曲目。点下面的按钮重新扫描，或换一个目录。' : '添加一个包含音频文件的本地目录，RLPlayer

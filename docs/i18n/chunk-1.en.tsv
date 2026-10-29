@@ -323,7 +323,7 @@ narrow（通带 20 kHz，默认）	narrow (20 kHz passband, default)	Conversion'
 还没有开始播放	Playback has not started	if (!j.ok) { D('mbody').innerHTML = '<div class=empty>还没有开始播放</div>'; return; }
 这个列表是空的	This list is empty	n !!f; }); if (!files.length) { toast('这个列表是空的'); return; } var i = parseInt(start,
 进度	Progress	' s' : '—'); if (j.scanning) h += it('进度', (j.scanned || 0) + ' / ' + (j.total
-远低于 GPU 的盈亏平衡点（实测需 n≥32768 才翻盘）。	Far below the GPU breakeven point (benchmarks show n>=32768 required to outperform).	U 只做逐点复数乘加，而生产每块只有 4096 样，' + '远低于 GPU 的盈亏平衡点（实测需 n≥32768 才翻盘）。' + '功能保留可用（数值正确），但默认关闭。详见 do
+远低于 GPU 的盈亏平衡点（实测需 n≥32768 才翻盘）。	far below the GPU breakeven point (benchmarks show n>=32768 required to outperform). 	U 只做逐点复数乘加，而生产每块只有 4096 样，' + '远低于 GPU 的盈亏平衡点（实测需 n≥32768 才翻盘）。' + '功能保留可用（数值正确），但默认关闭。详见 do
 适合谁：	Recommended for: 	>' + esc(curve.tech) + '</div>' + '<div><b style="color:var(--txt)">适合谁：</b>'
 逐位旁路	Bit-perfect Bypass	采样率转换', v: '旁路（源采样率与输出一致，逐位直通）', badge: '逐位旁路', kind: 'lossless' }); if (p.eq ||
 逐位无损	Bit-perfect Lossless	me), id: 'chainVol', badge: isUnitVol ? '逐位无损' : '数字衰减', kind: isUnitVol ? 'lossless

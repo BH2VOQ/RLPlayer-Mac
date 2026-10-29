@@ -221,6 +221,12 @@ var SEP = (function () {
     document.documentElement.dataset.lang = l;
     document.documentElement.lang = l;
     ADV.lang = l;
+  } else {
+    // 没有本地记忆时以**服务端渲染的 data-lang**（= 配置里的 lang）为准。
+    // 不补这一步的后果（2026-10-29 实测踩到）：ADV.lang 会停在默认 'zh'，
+    // 之后任何一次「保存设置」都会把 lang=zh 写回配置，英文模式被静默改回中文。
+    var dl = document.documentElement.dataset.lang;
+    if (dl === 'en' || dl === 'zh') ADV.lang = dl;
   }
 })();
 
@@ -1293,7 +1299,7 @@ function renderStation() {
 }
 
 function bindWorkstation() {
-  // 主 CTA（卡 1）：没有目录 → 进设置「高级」并聚焦目录输入框；已有目录 → 触发已有 #bScan
+  // 主 CTA（卡 1）：没有目录 → 进设置「通用」并聚焦目录输入框；已有目录 → 触发已有 #bScan
   var add = D('emptyGoAdd');
   if (add) add.onclick = function (ev) {
     if (ev && ev.stopPropagation) ev.stopPropagation();
@@ -1376,7 +1382,7 @@ function bindEmptyState() {
     setView('station');
     renderStation();
   };
-  // 主 CTA（卡 1）：没有目录 → 直接进设置页「高级」（那里有添加目录输入框）；
+  // 主 CTA（卡 1）：没有目录 → 直接进设置页「通用」（那里有添加目录输入框）；
   //               已有目录但索引为空 → 直接触发已有的 #bScan（重新扫描）按钮。
   var add = D('emptyGoAdd');
   if (add) add.onclick = function (ev) {
@@ -7578,11 +7584,14 @@ function renderSettingsPage() {
   // 放在设置页顶部反而让「精细调节」的设置页显得喧宾夺主。
   // ---------- 页签（对齐 HQPlayer：Inputs / Outputs / PCM / SDM / Advanced） ----------
   h += '<div class=stabs>'
-     + '<button class="stab on" data-g=in>输入</button>'
+     // 2026-10-29（用户要求）：「高级」改名「通用」并提到第一个 —— 外观/GPU/目录这些
+     // 日常设置不该藏在「高级」这种听起来像危险区的名字后面，而且它才是打开设置时
+     // 最该先看到的一页，所以默认选中也从「输入」移到它。
+     + '<button class="stab on" data-g=adv>通用</button>'
+     + '<button class=stab data-g=in>输入</button>'
      + '<button class=stab data-g=out>输出</button>'
      + '<button class=stab data-g=pcm>PCM</button>'
      + '<button class=stab data-g=sdm>SDM</button>'
-     + '<button class=stab data-g=adv>高级</button>'
      // 2026-10-23 用户 261023-04 #2：EQ 与房间校正从左侧主导航移到这里，单开一个页签。
      + '<button class=stab data-g=eq>EQ</button>'
      + '<button class=stab data-g=cal>声音校准</button>'
@@ -7763,7 +7772,7 @@ function renderSettingsPage() {
        + '<div class="sfld wide"><div class=hint id=sp_dsdmsg></div></div>')
      + '</div>';
   // ---------- 输入 ----------
-  h += '<div class="spane on" data-g=in>'
+  h += '<div class=spane data-g=in>'
      + sgroup('输入设备与采集', 'CoreAudio 采集 / 录制与直通监听',
          // 2026-10-25（用户指令「能使用的要用它真正的名字」）：value 仍是 wasapi
          // （rtaweb.cpp 的输入采集分派靠它），但实际后端已是 CoreAudio 的 AUHAL 输入侧。
@@ -7807,7 +7816,7 @@ function renderSettingsPage() {
 
 
   // ---------- 高级 ----------
-  h += '<div class=spane data-g=adv>'
+  h += '<div class="spane on" data-g=adv>'
      + sgroup('外观',
          // 2026-10-28（待办 t-49b95d08）：括号里的外观描述是错的 —— 只写风格名，不解释视觉特征。
          '<div class=sfld><label>界面风格' + tip('在 Apple Music 风格与经典 Hi-Fi 工作台之间实时切换') + '</label><select id=sp_uistyle>'
@@ -8348,9 +8357,17 @@ function renderSettingsPage() {
   cloneFootIntoPanes();
   D('sp_theme').onchange = function () { setTheme(this.value); };
   if (D('sp_lang')) D('sp_lang').onchange = function () {
+    // 2026-10-29（用户两次口径，最终以第二次为准）：**选中就切换**，不等保存。
+    // 但切换要重载页面，所以先把「当前在哪个视图 / 设置页哪个页签」记进 sessionStorage，
+    // 重载后由启动末尾的 restoreViewAfterReload() 跳回去 —— 否则换个语言就被踢回「专辑」页。
     var val = (this.value === 'en') ? 'en' : 'zh';
     ADV.lang = val;
-    try { localStorage.setItem('rta-lang', val); } catch (e) {}
+    try { localStorage.setItem('rta-lang', val); } catch (e) { }
+    try {
+      var tabEl = document.querySelector('#setpage .stab.on');
+      sessionStorage.setItem('rta-restore-view',
+        JSON.stringify({ v: S.view || 'albums', t: tabEl ? (tabEl.dataset || {}).g || '' : '' }));
+    } catch (e) { }
     api('/api/settings', 'lang=' + encodeURIComponent(val)).then(function () {
       location.reload();
     }).catch(function () {
@@ -10842,6 +10859,54 @@ loadQ();
 loadSrcConfig();
 tick();
 pollStart();
+
+/* ---------------- 语言切换后的视图恢复 ----------------
+   语言切换会整页重载（最省事、也最不容易留下半翻状态）。重载本身会把视图重置成
+   「专辑」，用户反馈那样很打断人。所以在切换前把视图/页签写进 sessionStorage，
+   这里读出来跳回去；只恢复一级页面，详情页（专辑/艺术家详情）退回其列表页。 */
+(function restoreViewAfterReload() {
+  var raw = null;
+  try { raw = sessionStorage.getItem('rta-restore-view'); } catch (e) { }
+  if (!raw) return;
+  try { sessionStorage.removeItem('rta-restore-view'); } catch (e) { }
+  var st = null;
+  try { st = JSON.parse(raw); } catch (e) { return; }
+  if (!st) return;
+  // 为什么要重试：启动时 loadAlbums('') 是异步的，曲子回来后会自己渲染「专辑」页，
+  // 一次性的延迟跳转会被它盖掉（2026-10-29 实测：设定跳到设置页，加载完却回到专辑）。
+  // 所以最多重试 6 次（≈1.5s），一旦目标视图真的立住就停；用户中途自己点/按键则立即放弃，
+  // 绝不把用户从他想去的地方拽回来。
+  var done = false, tries = 0;
+  function onUser() { done = true; }
+  try {
+    document.addEventListener('mousedown', onUser, true);
+    document.addEventListener('keydown', onUser, true);
+    document.addEventListener('wheel', onUser, true);
+  } catch (e) { }
+  function applied() {
+    if (st.v === 'settings') {
+      var sp = document.getElementById('setpage');
+      return !!(sp && sp.classList && sp.classList.contains('on'));
+    }
+    return S.view === st.v;
+  }
+  function apply() {
+    if (done) return;
+    if (++tries > 6) { done = true; return; }
+    try {
+      if (st.v === 'settings') {
+        openSettingsTab(st.t || 'adv');
+      } else {
+        var parent = { album: 'albums', artist: 'artists', work: 'tracks', works: 'tracks' }[st.v] || st.v;
+        var nav = document.querySelector('.nav[data-v=' + parent + ']');
+        if (nav) nav.click();
+      }
+    } catch (e) { }
+    if (applied()) { done = true; return; }
+    setTimeout(apply, 250);
+  }
+  setTimeout(apply, 100);
+})();
 )JS";
 }
 

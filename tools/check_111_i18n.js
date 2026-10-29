@@ -45,6 +45,14 @@ const pause = ms => new Promise(r => setTimeout(r, ms));
 // 在页面里跑：抓出所有可见中文（文本节点 + 会被朗读的属性）
 const COLLECT = `(() => {
   const CJK = /[\\u3400-\\u4dbf\\u4e00-\\u9fff\\uf900-\\ufaff]/;
+  // 例外：**真实存在的文件名/路径**不翻译（例如 docs/GPU卷积与升频效率细查.md）。
+  // 判据不是"看起来像路径"，而是带扩展名且含斜杠或已知后缀的词元；其余中文一律算漏译。
+  // 逐词剔除「含中文 + 带斜杠 + 有扩展名」的路径词元（例如 docs/GPU卷积与升频效率细查.md）。
+  // 不用复杂正则：这段是嵌在 JS 模板字符串里的代码，转义层数多，逐词判断更直观也更好改。
+  const stripPaths = s => s.split(/\\s+/).filter(w => {
+    const isPath = w.indexOf('/') >= 0 && /\\.[A-Za-z0-9]{2,5}$/.test(w);
+    return !(isPath && CJK.test(w));
+  }).join(' ');
   const out = [];
   // 只算**用户当下能看见**的文字：隐藏的 DOM（display:none / visibility / 0 尺寸）不计。
   // 为什么必须过滤：设置页整块在启动时就渲染好但隐藏，不过滤会把没打开过的页签也算进来，
@@ -72,13 +80,13 @@ const COLLECT = `(() => {
     if (tag === 'script' || tag === 'style' || tag === 'textarea') continue;
     if (!visible(p)) continue;
     const t = (n.nodeValue || '').trim();
-    if (t && CJK.test(t)) out.push(t.slice(0, 160));
+    if (t && CJK.test(stripPaths(t))) out.push(t.slice(0, 160));
   }
-  for (const el of document.body.querySelectorAll('[title],[placeholder],[aria-label],[alt]')) {
+  for (const el of document.body.querySelectorAll('[title],[placeholder],[aria-label],[alt],[data-tip]')) {
     if (!visible(el)) continue;
-    for (const a of ['title', 'placeholder', 'aria-label', 'alt']) {
+    for (const a of ['title', 'placeholder', 'aria-label', 'alt', 'data-tip']) {
       const v = el.getAttribute(a);
-      if (v && CJK.test(v)) out.push(a + '=' + v.slice(0, 160));
+      if (v && CJK.test(stripPaths(v))) out.push(a + '=' + v.slice(0, 160));
     }
   }
   return out;
@@ -125,7 +133,7 @@ async function runLang(lang) {
     }
     ck(thin.length === 0, 'every traversed view actually rendered text (not an empty page)', thin);
     // 设置页 9 个页签
-    for (const g of ['out', 'pcm', 'sdm', 'adv', 'eq', 'cal', 'meta', 'stream', 'diag']) {
+    for (const g of ['adv', 'in', 'out', 'pcm', 'sdm', 'eq', 'cal', 'meta', 'stream', 'diag']) {
       await session.eval(`openSettingsTab('${g}')`);
       await pause(450);
       const got = await session.eval(COLLECT);
@@ -159,6 +167,9 @@ async function runLang(lang) {
     ck(/^SELECT:(zh|en)$/.test(hasSelect), 'settings exposes a language selector #sp_lang', hasSelect);
 
     // ---------- 真正的切换链路：改下拉 → POST 保存 → 页面重载 → 变英文 ----------
+    // 用户口径：选中就切换；切换会重载，但必须**留在当前页签**，不许跳回「专辑」。
+    await session.eval("openSettingsTab('out')");
+    await pause(400);
     await session.eval("(()=>{var s=document.getElementById('sp_lang');s.value='en';s.dispatchEvent(new Event('change'));})()");
     let switched = false;
     for (let i = 0; i < 60; i++) {
@@ -174,6 +185,11 @@ async function runLang(lang) {
     ck(ls === 'en', 'switch remembered rta-lang in localStorage', ls);
     const zhBack = await session.eval("document.querySelector('.nav[data-v=settings]').textContent.trim()");
     ck(zhBack === 'Settings', 'after switch the nav is English without a manual reload', zhBack);
+    await pause(1800);   // 等首屏异步渲染跑完，确认"回到原页签"不是只在加载瞬间成立
+    const tabAfter = await session.eval("(document.querySelector('#setpage .stab.on')||{}).dataset ? document.querySelector('#setpage .stab.on').dataset.g : 'none'");
+    ck(tabAfter === 'out', 'switch keeps the same settings tab instead of jumping home', tabAfter);
+    const viewAfter = await session.eval("(function(){var n=document.querySelector('#setpage');return n && n.style.display!=='none' && n.offsetParent!==null;})()");
+    ck(viewAfter === true, 'switch keeps the settings page open (did not fall back to Albums)', viewAfter);
 
     if (!keep) { try { await session.shot(path.join(root, 'i18n-en.png')); } catch { } }
   } finally {

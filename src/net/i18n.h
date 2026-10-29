@@ -133,7 +133,9 @@ inline std::string rta_i18n_body_script() {
     s += "  return str;\n";
     s += "}\n";
     s += "var processedNodes=(typeof WeakSet==='function')?new WeakSet():null;\n";
-    s += "var ATTRS=['title','placeholder','aria-label','alt'];\n";
+    // data-tip 是设置页「?」气泡的正文（tip() 生成 <span class=tip data-tip=…>）；
+    // 漏了它就会出现「界面英文、悬浮说明中文」的半截效果（2026-10-29 实测）。
+    s += "var ATTRS=['title','placeholder','aria-label','alt','data-tip'];\n";
     s += "function translateTextNode(node){\n";
     s += "  if(!node||!node.nodeValue)return;\n";
     s += "  if(processedNodes&&processedNodes.has(node))return;\n";
@@ -187,7 +189,7 @@ inline std::string rta_i18n_body_script() {
     s += "    while((node=walk.nextNode())){\n";
     s += "      translateTextNode(node);\n";
     s += "    }\n";
-    s += "    var els=root.querySelectorAll?root.querySelectorAll('[title],[placeholder],[aria-label],[alt]'):[];\n";
+    s += "    var els=root.querySelectorAll?root.querySelectorAll('[title],[placeholder],[aria-label],[alt],[data-tip]'):[];\n";
     s += "    for(var i=0;i<els.length;i++)translateElementAttrs(els[i]);\n";
     s += "  }\n";
     s += "}\n";
@@ -239,7 +241,7 @@ inline std::string rta_i18n_body_script() {
     s += "      subtree:true,\n";
     s += "      characterData:true,\n";
     s += "      attributes:true,\n";
-    s += "      attributeFilter:['title','placeholder','aria-label','alt']\n";
+    s += "      attributeFilter:['title','placeholder','aria-label','alt','data-tip']\n";
     s += "    });\n";
     s += "  }catch(e){}\n";
     s += "}\n";

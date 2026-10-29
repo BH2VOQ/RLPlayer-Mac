@@ -106,7 +106,7 @@ dB，实时微调	 dB, real-time trim 	s += '（起播 ' + S.startDb.toFixed(1) 
 · 目标曲线说明	 · Target Curve Details	color:var(--txt)">' + esc(curve.name) + ' · 目标曲线说明</div>' + '<div style="margin-bo
 · 调音预设	 · Tuning Preset	tle.textContent = vendor + ' ' + name + ' · 调音预设'; if (msg) msg.textContent = '正在获
 ← 返回正在播放	← Back to Now Playing	代的录音版本', (fromNp && S.lastCur) ? '<button class=btn id=wBackNp title="返回单曲播放页">←
-⚠️ macOS 上不建议开启：实测（Apple M4）卷积走 GPU 在任何 IR 长度下都比 CPU 慢 3.4~8.3 倍。	⚠️ Not recommended on macOS: tests (Apple M4) show GPU convolution is 3.4-8.3x slower than CPU across all IR lengths.	硬件加速（检测中…）', ADV.irgpu == 1, '⚠️ macOS 上不建议开启：实测（Apple M4）卷积走 GPU 在任何 IR 长度下都比 CPU 慢 3.4~8.3 倍。' + '原因是 mac 的 GPU 后端把 FFT 留在
+⚠️ macOS 上不建议开启：实测（Apple M4）卷积走 GPU 在任何 IR 长度下都比 CPU 慢 3.4~8.3 倍。	⚠️ Not recommended on macOS: tests (Apple M4) show GPU convolution is 3.4-8.3x slower than CPU across all IR lengths. 	硬件加速（检测中…）', ADV.irgpu == 1, '⚠️ macOS 上不建议开启：实测（Apple M4）卷积走 GPU 在任何 IR 长度下都比 CPU 慢 3.4~8.3 倍。' + '原因是 mac 的 GPU 后端把 FFT 留在
 」？只删这份歌单，不动当前播放队列。	'? Only this playlist will be deleted; current playback queue remains unchanged.	', ok: '删除', text: '删除歌单「' + name + '」？只删这份歌单，不动当前播放队列。', onOk: function () { api('/
 一个文件，不用再到处找日志	Single file, no more searching for logs	ne data-g=diag>' + sgroup('导出诊断包', '一个文件，不用再到处找日志', '<div class="sfld wide" sty
 一次最多 8 个版本	Maximum 8 versions at a time	length > 8) { D('cmpMsg').textContent = '一次最多 8 个版本'; return; } if (CMP.busy) return;
