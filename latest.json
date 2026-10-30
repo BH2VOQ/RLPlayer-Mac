@@ -1,8 +1,8 @@
 {
-  "version": "1.1.1-beta4",
-  "notes": "修复：界面偏好（语言/主题/界面风格/流媒体视图）统一以本地配置为准，升级或清缓存都不再改变用户设置。All UI preferences now live in the local config; an app update no longer changes them.",
-  "download_url": "https://github.com/BH2VOQ/RLPlayer-Mac/releases/download/v1.1.1-beta4/RLPlayer-1.1.1-beta4-macOS-arm64.dmg",
-  "sha256": "acc84bcd65fa24857d83fb03dd7a724fbe47fcf88ae2129ec123764165071f28",
-  "size": 7737567,
-  "published_at": "2026-10-29T16:51:14Z"
+  "version": "1.1.1",
+  "notes": "Stable 1.1.1: includes everything from beta1–beta4 (bilingual UI, streaming overhaul, settings that survive updates) plus real UPnP track switching, an instant cast button, a lag-free EQ curve and ±24 dB range. · 稳定版 1.1.1：包含 beta1–beta4 的全部内容（中英界面、流媒体整修、升级不改设置），并修好投放切歌、投放按钮实时跟随、EQ 曲线跟手与 ±24 dB 量程。",
+  "download_url": "https://github.com/BH2VOQ/RLPlayer-Mac/releases/download/v1.1.1/RLPlayer-1.1.1-macOS-arm64.dmg",
+  "sha256": "52fcbf3b7877afaba481898bce5a245655e9c60c267da1d284b833e27b124745",
+  "size": 7768211,
+  "published_at": "2026-10-30T06:46:28Z"
 }
