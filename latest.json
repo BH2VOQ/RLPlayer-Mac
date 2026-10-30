@@ -1,8 +1,8 @@
 {
-  "version": "1.1.1.1",
-  "notes": "Hotfix 1.1.1.1: fixes auto-advance to the next track during UPnP casting across sequential, repeat, and shuffle modes, and preserves the active track position and queue sync when switching playback modes. · 热修补丁 1.1.1.1：修复 UPnP 投放在顺序、循环、随机模式下不自动播放下一曲的问题，并修复切换播放模式时的当前曲目定位与队列同步。",
-  "download_url": "https://github.com/BH2VOQ/RLPlayer-Mac/releases/download/v1.1.1.1/RLPlayer-1.1.1.1-macOS-arm64.dmg",
-  "sha256": "8002aca2be31719713dce52fb6bb44b76acb531a9bf9fd57b4eea45011cec0f1",
-  "size": 7783562,
-  "published_at": "2026-10-30T08:44:59Z"
+  "version": "1.1.1.2",
+  "notes": "Hotfix 1.1.1.2: auto-completion now runs while casting to a UPnP renderer, lyrics prefer a timestamped LRC over plain text, and the lyrics panel waits long enough for the provider chain. · 热修补丁 1.1.1.2：修复投放到 UPnP 渲染器时不再自动补全的问题；歌词优先采用带时间轴的那份，歌词面板也会等到补全链路返回。",
+  "download_url": "https://github.com/BH2VOQ/RLPlayer-Mac/releases/download/v1.1.1.2/RLPlayer-1.1.1.2-macOS-arm64.dmg",
+  "sha256": "9b2324c94dd1782c71546b8e0fd3c1526d1f4a53254cb9f363e0e48a4c7a228e",
+  "size": 7784355,
+  "published_at": "2026-10-30T11:42:05Z"
 }
