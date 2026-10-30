@@ -2000,7 +2000,19 @@ function openAlbum(k) {
     }
     if (D('aPlay')) D('aPlay').onclick = function () { playAlbum(j.k, 0); };
     D('aAdd').onclick = function () { enqueueAlbum(j.k); };
-    D('aShuf').onclick = function () { playAlbum(j.k, Math.floor(Math.random() * j.tracks.length)); };
+    D('aShuf').onclick = function () {
+      if (!j.tracks || !j.tracks.length) return;
+      if (D('sRep')) D('sRep').value = '3';
+      applyRep(3);
+      if (D('sp_rep')) D('sp_rep').value = '3';
+      var started = false;
+      var startFn = function () {
+        if (started) return;
+        started = true;
+        playAlbum(j.k, Math.floor(Math.random() * j.tracks.length));
+      };
+      api('/api/playmode?mode=3', '').then(startFn).catch(startFn);
+    };
     // 2026-10-26：人工补封面（同人自出版专辑全网无图时的唯一出路；存 covercache，不动音乐文件）
     if (D('aSetCover')) D('aSetCover').onclick = function () { D('aCoverFile').click(); };
     if (D('aCoverFile')) D('aCoverFile').onchange = function (ev) {
@@ -3660,9 +3672,13 @@ function updateNextTrackInfo() {
   var repMode = (D('sRep') && D('sRep').value) || '0';
   var nextIdx = curIdx + 1;
   var hasNext = true;
-  if (nextIdx >= qLen) {
-    if (repMode === '1') {
+  if (repMode === '2') {
+    nextIdx = (curIdx >= 0 && curIdx < qLen) ? curIdx : 0;
+    hasNext = (qLen > 0);
+  } else if (nextIdx >= qLen) {
+    if (repMode === '1' || repMode === '3') {
       nextIdx = 0;
+      hasNext = (qLen > 0);
     } else {
       hasNext = false;
     }
@@ -5155,6 +5171,8 @@ function applyRep(v) {
     var svg = e.querySelector('svg');
     if (svg) svg.innerHTML = REP_ICON[v];
   });
+  if (D('sShuf')) D('sShuf').checked = (v === 3);
+  if (D('sp_shuf')) D('sp_shuf').checked = (v === 3);
 }
 // 四种模式的图标路径（24x24 viewBox，与既有图标同风格：stroke=currentColor、无填充）
 var REP_ICON = [
@@ -5167,7 +5185,7 @@ function cycleRep() {
   var cur = parseInt(D('sRep').value, 10) || 0;
   var next = (cur + 1) % 4;            // R-4：四态
   D('sRep').value = String(next);
-  api('/api/playmode?mode=' + next, '');   // 单一真相源端点
+  api('/api/playmode?mode=' + next, '').then(loadQ);   // 单一真相源端点
   applyRep(next);
   var sp = D('sp_rep');            // 设置页渲染中时一起同步（它只是同一值的镜像）
   if (sp) sp.value = String(next);
@@ -5535,7 +5553,7 @@ D('tq').onclick = function () {
   syncRightDrawerBtn();
 };
 if (D('bRoomWiz')) D('bRoomWiz').onclick = rcWizard;   // R-1：先出确认弹窗，绝不直接开播
-D('sRep').onchange = function () { api('/api/playmode?mode=' + this.value, ''); applyRep(this.value); };
+D('sRep').onchange = function () { api('/api/playmode?mode=' + this.value, '').then(loadQ); applyRep(this.value); };
 D('sShuf').onchange = function () { api('/api/shuffle?on=' + (this.checked ? 1 : 0), '').then(loadQ); };
 // 底栏滑块同样是**位置刻度**（0..1000）→ 曲线换算成 dB。
 D('vol').addEventListener('pointerdown', function () { VOL_DRAGGING = 'vol'; });
@@ -7648,6 +7666,8 @@ function cloneFootIntoPanes() {
 function bindFootActions() {
   var sp = D('setpage');
   if (!sp) return;
+  if (sp._footBound) return;
+  sp._footBound = true;
   // 事件委托：一次绑定，覆盖所有克隆副本，也不会重复绑
   sp.addEventListener('click', function (ev) {
     var t = ev.target;
@@ -8173,6 +8193,15 @@ function renderSettingsPage() {
         if (a.options[i].value === b.value) { a.value = b.value; return; }
       }
     } else { a.value = b.value; }
+  });
+  if (D('sp_shuf') && D('sp_rep')) D('sp_shuf').checked = (String(D('sp_rep').value) === '3');
+  if (D('sp_rep')) D('sp_rep').addEventListener('change', function () {
+    if (D('sp_shuf')) D('sp_shuf').checked = (String(this.value) === '3');
+  });
+  if (D('sp_shuf')) D('sp_shuf').addEventListener('change', function () {
+    var r = D('sp_rep'); if (!r) return;
+    if (this.checked) r.value = '3';
+    else if (String(r.value) === '3') r.value = '0';
   });
 
   // 先把 DSD 三个控件的当前值从隐藏状态同步过来
@@ -10154,12 +10183,15 @@ function collectSettings() {
   D('sBuf').value = D('sp_buffer').value;
   D('sIsp').checked = D('sp_isp').checked;
   D('s2s').checked = D('sp_2s').checked;
+  var prevRep = String(D('sRep').value);
   D('sRep').value = D('sp_rep').value;
   D('sShuf').checked = D('sp_shuf').checked;
   D('sLoud').checked = D('sp_loud').checked;
   S.loud = D('sLoud').checked;
   // 行为类参数立即下发
-  api('/api/playmode?mode=' + D('sRep').value, '');
+  api('/api/playmode?mode=' + D('sRep').value, '').then(function () {
+    if (String(D('sRep').value) !== prevRep) loadQ();
+  });
   applyRep(D('sRep').value);
   // The shuffle checkbox is a projection, never a second competing write.
   D('sShuf').checked = String(D('sRep').value) === '3';

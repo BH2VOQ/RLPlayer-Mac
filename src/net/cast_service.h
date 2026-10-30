@@ -405,6 +405,7 @@ inline std::string action_failed_en(const std::string& action, const UpnpError& 
 
 struct CastState {
     bool        running = false;
+    bool        endedNaturally = false; // 本次投放是否因曲目自然播完而结束（主动 stop / 报错 / 未起播均为 false）
     std::string device;
     std::string sourceFile;
     uint16_t    servePort = 8912;
@@ -499,7 +500,13 @@ public:
         }
 
         std::error_code ec;
-        if (!fs::exists(fs::u8path(p.file), ec) || ec) {
+#if defined(__cpp_char8_t)
+        const fs::path filePath(reinterpret_cast<const char8_t*>(p.file.data()),
+                                reinterpret_cast<const char8_t*>(p.file.data() + p.file.size()));
+#else
+        const fs::path filePath = fs::u8path(p.file);
+#endif
+        if (!fs::exists(filePath, ec) || ec) {
             return {false, "音频文件不存在: " + p.file};
         }
 
@@ -520,6 +527,7 @@ public:
         seekReq_.store(-1.0);
         volumeReqDb_.store(1.0); // 1.0 表示无待执行的音量请求（合法音量 dB <= 0.0）
         state_.running = true;
+        state_.endedNaturally = false;
         state_.device = p.dev;
         state_.sourceFile = p.file;
         state_.servePort = p.port ? p.port : 8912;
@@ -589,6 +597,7 @@ public:
         rta::net::join_thread_safely(workerThread_, threadMx_);
         std::lock_guard<std::mutex> lk(mtx_);
         state_.running = false;
+        state_.endedNaturally = false;
         state_.phase = "stopped";
         state_.transportState = "STOPPED";
         state_.paused = false;
@@ -612,6 +621,7 @@ private:
                                                           const std::string& errEn = std::string()) {
             std::lock_guard<std::mutex> lk(mtx_);
             state_.running = false;
+            state_.endedNaturally = false;
             state_.phase = "error";
             state_.error = err;
             state_.errorEn = errEn;
@@ -689,6 +699,7 @@ private:
         if (stopReq_.load()) {
             std::lock_guard<std::mutex> lk(mtx_);
             state_.running = false;
+            state_.endedNaturally = false;
             state_.phase = "stopped";
             return;
         }
@@ -833,6 +844,7 @@ private:
         if (stopReq_.load()) {
             std::lock_guard<std::mutex> lk(mtx_);
             state_.running = false;
+            state_.endedNaturally = false;
             state_.phase = "stopped";
             state_.paused = false;
             if (needCleanupTemp && !tempWavPath.empty()) std::remove(tempWavPath.c_str());
@@ -924,11 +936,14 @@ private:
         UpnpProtocolInfo proto = client.get_protocol_info();
         auto startTime = std::chrono::steady_clock::now();
         bool pausedApplied = false;
+        bool sawActive = false;
+        bool naturalEnd = false;
 
         while (!stopReq_.load()) {
             auto now = std::chrono::steady_clock::now();
             double elapsed = std::chrono::duration<double>(now - startTime).count();
             if (p.seconds > 0.0 && elapsed >= p.seconds) {
+                naturalEnd = !stopReq_.load();
                 break;
             }
 
@@ -1003,6 +1018,12 @@ private:
                 state_.servedBytes = server.total_bytes_served();
                 state_.requestCount = (int)server.total_requests_served();
 
+                if ((transport.ok && transport.state == "PLAYING") ||
+                    state_.servedBytes > 0 ||
+                    state_.positionSec > 0.0) {
+                    sawActive = true;
+                }
+
                 if (analysis.verdict == SamplingRateVerdict::Match) {
                     state_.rateMatch = "match";
                 } else if (analysis.verdict == SamplingRateVerdict::Mismatch) {
@@ -1020,8 +1041,19 @@ private:
                 }
             }
 
-            if (transport.ok && (transport.state == "STOPPED" || transport.state == "NO_MEDIA_PRESENT") && elapsed > 2.0) {
-                break;
+            if (transport.ok && (transport.state == "STOPPED" || transport.state == "NO_MEDIA_PRESENT") &&
+                !wantPause && !pausedApplied) {
+                const double minElapsed = (durationSec > 0.0 && durationSec < 2.0)
+                                          ? std::max(0.25, durationSec * 0.8)
+                                          : 2.0;
+                if (sawActive && elapsed >= minElapsed) {
+                    naturalEnd = true;
+                    break;
+                }
+                if (!sawActive && elapsed > 2.0) {
+                    naturalEnd = false;
+                    break;
+                }
             }
 
             for (int i = 0; i < 5; ++i) {
@@ -1040,6 +1072,7 @@ private:
         {
             std::lock_guard<std::mutex> lk(mtx_);
             state_.running = false;
+            state_.endedNaturally = naturalEnd && !stopReq_.load();
             state_.phase = "stopped";
             state_.transportState = "STOPPED";
             state_.paused = false;

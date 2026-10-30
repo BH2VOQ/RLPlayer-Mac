@@ -1637,6 +1637,7 @@ static std::unique_ptr<OutSink> make_sink(const PlayParams& p) {
 // 不经过播放器的升频 / 滤波器 / EQ / 音量 / DSP 链（cast_service 只做解码 → WAV/DoP）。
 // 要"把 DSP 处理后的流实时推给渲染器"需要另外的牵引式流式供源，本轮不做。
 static std::atomic<bool> g_upnpPlayer{false};   // true = 当前"播放器"由投放会话承担
+static std::atomic<bool> g_upnpQueueActive{false}; // true = upnp_queue_thread 正在托管队列推进与切歌过渡
 
 // DSD 源（.dsf/.dff）必须走 DoP 打包：cast_service 对未开 DoP 的 DSD 会明确拒绝，
 // 而不是悄悄转码成 PCM 降质输出（铁律 3）。
@@ -4214,6 +4215,131 @@ static size_t queue_reindex_locked(const QItem& cur) {
     if (g_q.index >= g_q.items.size()) g_q.index = g_q.items.empty() ? 0 : g_q.items.size() - 1;
     return g_q.index;
 }
+
+static std::mt19937& queue_rng() {
+    static thread_local std::mt19937 rng([] {
+        std::random_device rd;
+        const auto ns = (unsigned)std::chrono::high_resolution_clock::now().time_since_epoch().count();
+        return (unsigned)(rd() ^ ns);
+    }());
+    return rng;
+}
+
+static void queue_set_mode_locked(int want) {
+    if (want < 0 || want > 3) want = 0;
+    const QItem cur = (g_q.index < g_q.items.size()) ? g_q.items[g_q.index] : QItem();
+    const bool wasShuffle = g_q.shuffle_of();
+    const bool wantShuffle = (want == 3);
+    if (wantShuffle && !wasShuffle) {
+        g_q.base = g_q.items;
+        if (g_q.items.size() > 1) {
+            std::shuffle(g_q.items.begin(), g_q.items.end(), queue_rng());
+        }
+    } else if (!wantShuffle && wasShuffle) {
+        if (!g_q.base.empty()) {
+            g_q.items = g_q.base;
+            g_q.base.clear();
+        }
+    }
+    g_q.mode = want;
+    if (!cur.path.empty()) queue_reindex_locked(cur);
+}
+
+static bool queue_advance_locked(const QItem& finishedCur, size_t fallbackIdx, size_t& outIdx) {
+    if (g_q.items.empty()) return false;
+    bool found = false;
+    size_t curIdx = 0;
+    if (g_q.index < g_q.items.size() && g_q.items[g_q.index].same(finishedCur)) {
+        curIdx = g_q.index;
+        found = true;
+    } else {
+        for (size_t i = 0; i < g_q.items.size(); ++i) {
+            if (g_q.items[i].same(finishedCur)) {
+                curIdx = i;
+                found = true;
+                break;
+            }
+        }
+    }
+    if (!found) {
+        if (g_q.mode == 2) {
+            outIdx = (g_q.index < g_q.items.size()) ? g_q.index : 0;
+            g_q.index = outIdx;
+            return true;
+        }
+        if (fallbackIdx < g_q.items.size()) {
+            outIdx = fallbackIdx;
+            g_q.index = outIdx;
+            return true;
+        }
+        if (g_q.mode == 1 || g_q.mode == 3) {
+            outIdx = 0;
+            g_q.index = 0;
+            return true;
+        }
+        return false;
+    }
+    if (g_q.mode == 2) {
+        outIdx = curIdx;
+        g_q.index = outIdx;
+        return true;
+    }
+    if (g_q.mode == 0) {
+        if (curIdx + 1 < g_q.items.size()) {
+            outIdx = curIdx + 1;
+            g_q.index = outIdx;
+            return true;
+        }
+        return false;
+    }
+    if (g_q.mode == 1) {
+        outIdx = (curIdx + 1 < g_q.items.size()) ? (curIdx + 1) : 0;
+        g_q.index = outIdx;
+        return true;
+    }
+    if (g_q.mode == 3) {
+        if (g_q.items.size() <= 1) {
+            outIdx = 0;
+            g_q.index = 0;
+            return true;
+        }
+        if (curIdx + 1 < g_q.items.size()) {
+            outIdx = curIdx + 1;
+            if (g_q.items[outIdx].same(finishedCur)) {
+                for (size_t k = outIdx + 1; k < g_q.items.size(); ++k) {
+                    if (!g_q.items[k].same(finishedCur)) {
+                        std::swap(g_q.items[outIdx], g_q.items[k]);
+                        break;
+                    }
+                }
+                if (g_q.items[outIdx].same(finishedCur)) {
+                    for (size_t k = 0; k < curIdx; ++k) {
+                        if (!g_q.items[k].same(finishedCur)) {
+                            outIdx = k;
+                            break;
+                        }
+                    }
+                }
+            }
+            g_q.index = outIdx;
+            return true;
+        } else {
+            std::shuffle(g_q.items.begin(), g_q.items.end(), queue_rng());
+            if (g_q.items[0].same(finishedCur)) {
+                for (size_t k = 1; k < g_q.items.size(); ++k) {
+                    if (!g_q.items[k].same(finishedCur)) {
+                        std::swap(g_q.items[0], g_q.items[k]);
+                        break;
+                    }
+                }
+            }
+            outIdx = 0;
+            g_q.index = 0;
+            return true;
+        }
+    }
+    return false;
+}
 // ---- 队列持久化：重启后仍保留播放列表 ----
 static std::string queue_file() {
     // 2026-10-25（默认目录纠正）：播放队列是运行期状态，不许写进应用包。
@@ -5471,6 +5597,8 @@ static void queue_load() {
         else                     g_q.mode = 0;
     }
     if (g_q.mode < 0 || g_q.mode > 3) g_q.mode = 0;
+    if (g_q.shuffle_of() && g_q.base.empty()) g_q.base = g_q.items;
+    else if (!g_q.shuffle_of()) g_q.base.clear();
 }
 
 // ---------------- 具名保存队列（用户 261026-08 #6「保存队列 + 重命名」）----------------
@@ -5650,21 +5778,105 @@ static void queue_thread(PlayParams p, size_t start) {
         }
         if (ps.stop.load() || !done) break;
 
-        std::lock_guard<std::mutex> lk(g_q.mtx);
-        if (g_q.mode == 2) continue;                       // 单曲循环
-        if (g_q.mode == 3) {                               // 随机：随机挑一首不等于当前的
-            if (g_q.items.size() <= 1) continue;
-            size_t pick = idx;
-            for (int tries = 0; tries < 8 && pick == idx; ++tries)
-                pick = (size_t)(std::rand() % (int)g_q.items.size());
-            if (pick == idx) pick = (idx + 1) % g_q.items.size();   // 兜底：确定性前进一首
-            idx = pick; continue;
+        {
+            std::lock_guard<std::mutex> lk(g_q.mtx);
+            if (!queue_advance_locked(cur, idx, idx)) break;
         }
-        if (idx + 1 < g_q.items.size()) { idx += 1; continue; }
-        if (g_q.mode == 1) { idx = 0; continue; }
-        break;
+        queue_save();
     }
     ps.playing = false;
+}
+
+// ---- UPnP / DLNA 投放队列推进线程：监听当前投放曲自然播完并按 g_q.mode 自动推进下一曲 ----
+static void upnp_queue_thread(PlayParams pInit, size_t startIdx) {
+    struct ActiveGuard {
+        ~ActiveGuard() { g_upnpQueueActive.store(false); }
+    } guard;
+    auto& ps = g_ps;
+    size_t idx = startIdx;
+    QItem cur;
+    {
+        std::lock_guard<std::mutex> lk(g_q.mtx);
+        if (idx < g_q.items.size()) cur = g_q.items[idx];
+        else cur = QItem(pInit.file, pInit.cueStart, pInit.cueEnd);
+    }
+    while (!ps.stop.load() && g_upnpPlayer.load()) {
+        const auto st = rta::net::CastManager::instance().get_state();
+        if (st.running) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+            continue;
+        }
+        if (ps.stop.load() || !g_upnpPlayer.load()) return;
+        if (!st.endedNaturally) {
+            if (!st.error.empty()) upnp_mark_player_state(cur.path, false, st.error);
+            play_log("CAST_END natural=0 file=" + cur.path + " error=\"" + st.error + "\"");
+            g_upnpQueueActive.store(false);
+            g_upnpPlayer.store(false);
+            ps.playing.store(false);
+            ps.paused.store(false);
+            return;
+        }
+        play_log("CAST_END natural=1 pos=" + std::to_string(st.positionSec) +
+                 " dur=" + std::to_string(st.durationSec) + " file=" + cur.path);
+        QItem nextItem;
+        int modeNow = 0;
+        bool hasNext = false;
+        {
+            std::lock_guard<std::mutex> lk(g_q.mtx);
+            modeNow = g_q.mode;
+            hasNext = queue_advance_locked(cur, idx, idx);
+            if (hasNext && idx < g_q.items.size()) nextItem = g_q.items[idx];
+            else hasNext = false;
+        }
+        if (!hasNext) {
+            play_log("CAST_QUEUE_DONE mode=" + std::to_string(modeNow));
+            g_upnpQueueActive.store(false);
+            g_upnpPlayer.store(false);
+            ps.playing.store(false);
+            ps.paused.store(false);
+            return;
+        }
+        queue_save();
+        if (nextItem.cs >= 0.0) {
+            const std::string cerr = "UPnP 投放不支持 CUE 分轨（渲染器只能播整个文件），请切到本地后端";
+            upnp_mark_player_state(nextItem.path, false, cerr);
+            play_log("CAST_AUTO_REJECT cue file=" + nextItem.path);
+            g_upnpQueueActive.store(false);
+            g_upnpPlayer.store(false);
+            ps.playing.store(false);
+            ps.paused.store(false);
+            return;
+        }
+        if (ps.stop.load() || !g_upnpPlayer.load()) return;
+        PlayParams pNext = params_snapshot();
+        if (pNext.upnpDev.empty()) pNext.upnpDev = pInit.upnpDev;
+        std::string err;
+        const bool started = upnp_start_track(pNext, nextItem.path, err);
+        if (ps.stop.load() || !g_upnpPlayer.load()) {
+            if (started && !g_upnpPlayer.load()) rta::net::CastManager::instance().stop();
+            return;
+        }
+        if (!started) {
+            upnp_mark_player_state(nextItem.path, false, err);
+            play_log("CAST_AUTO_FAIL index=" + std::to_string(idx) +
+                     " file=" + nextItem.path + " error=\"" + err + "\"");
+            g_upnpQueueActive.store(false);
+            g_upnpPlayer.store(false);
+            ps.playing.store(false);
+            ps.paused.store(false);
+            return;
+        }
+        cur = nextItem;
+        upnp_mark_player_state(cur.path, true, "");
+        ps.outRate = 0;
+        ps.outBits = 0;
+        ps.played.store(0);
+        ps.total.store(0);
+        ps.paused.store(false);
+        ps.playing.store(true);
+        play_log("CAST_AUTO_NEXT mode=" + std::to_string(modeNow) +
+                 " index=" + std::to_string(idx) + " file=" + cur.path);
+    }
 }
 
 // ---------------- 播放中切换 EQ/IR 的热重载（2026-10-25「耳机 EQ 切了没变化」核心修复）----------------
@@ -7114,8 +7326,19 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
             }
             {
                 std::lock_guard<std::mutex> lk(g_q.mtx);
-                g_q.items = items;
-                g_q.index = start;
+                g_q.sortBase.clear();
+                if (g_q.shuffle_of()) {
+                    g_q.base = items;
+                    if (start < items.size() && start != 0) std::swap(items[0], items[start]);
+                    if (items.size() > 2) std::shuffle(items.begin() + 1, items.end(), queue_rng());
+                    g_q.items = items;
+                    start = 0;
+                    g_q.index = 0;
+                } else {
+                    g_q.base.clear();
+                    g_q.items = items;
+                    g_q.index = start;
+                }
             }
             queue_save();
             params_store(p);
@@ -7134,27 +7357,40 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
                 // 绝不悄悄从头播整轨（铁律 3）。
                 if (tgt.cs >= 0.0)
                     return "{\"ok\":false,\"error\":\"UPnP 投放不支持 CUE 分轨（渲染器只能播整个文件），请切到本地后端\"}";
-                ps.stopJoin();                 // 若之前是本地播放，先停（协作式，绝不 force-kill）
+                g_upnpQueueActive.store(false);
                 g_upnpPlayer.store(false);
+                ps.stopJoin();                 // 若之前是本地播放或旧投放推进线程，先停（协作式，绝不 force-kill）
                 std::string err;
                 if (!upnp_start_track(p, tgt.path, err)) {
                     upnp_mark_player_state(tgt.path, false, err);
                     ps.playing.store(false);
+                    ps.paused.store(false);
+                    g_upnpQueueActive.store(false);
                     g_upnpPlayer.store(false);
                     return std::string("{\"ok\":false,\"error\":\"") + jesc(err) + "\"}";
                 }
                 g_upnpPlayer.store(true);
+                g_upnpQueueActive.store(true);
                 upnp_mark_player_state(tgt.path, true, "");
                 ps.outRate = 0;
                 ps.outBits = 0;
                 ps.played.store(0);
                 ps.total.store(0);
+                ps.paused.store(false);
                 ps.playing.store(true);
+                ps.restart([p, start, rid=rta::diag::current_rid()] { rta::diag::ScopedRid diagRid(rid); upnp_queue_thread(p, start); });
                 play_log("CAST_SWITCH reason=lib-play file=" + tgt.path);
                 return "{\"ok\":true,\"upnp\":true,\"count\":" + std::to_string(items.size()) +
                        ",\"index\":" + std::to_string(start) + "}";
             }
+            g_upnpQueueActive.store(false);
+            g_upnpPlayer.store(false);
             // 停旧线程 + join + 起新线程 = 一次原子操作（并发点播放不再撞 thread 赋值 terminate）
+            ps.stopJoin();
+            if (rta::net::CastManager::instance().get_state().running) {
+                rta::net::CastManager::instance().stop();
+                play_log("CAST_STOP reason=lib-play-switch-to-local");
+            }
             ps.restart([p, start] { return queue_thread(p, start); });
             { std::lock_guard<std::mutex> lk(ps.mtx); ps.error.clear(); ps.current = items[start].path; }
             ps.played.store(0);
@@ -7172,14 +7408,18 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
             size_t cnt = 0;
             {
                 std::lock_guard<std::mutex> lk(g_q.mtx);
+                size_t added = 0;
                 for (size_t ix : a.idx) {
                     rta::net::LibTrack t;
                     if (!lib.trackAt(ix, t)) continue;
                     double cs = -1.0, ce = -1.0;
                     const bool isCue = lib_track_cue_sec(t, cs, ce);
-                    g_q.items.emplace_back(t.path, isCue ? cs : -1.0, isCue ? ce : -1.0);
-                    ++cnt;
+                    const QItem qit(t.path, isCue ? cs : -1.0, isCue ? ce : -1.0);
+                    g_q.items.push_back(qit);
+                    if (!g_q.base.empty()) g_q.base.push_back(qit);
+                    ++added;
                 }
+                if (added > 0) g_q.sortBase.clear();
                 cnt = g_q.items.size();
             }
             queue_save();
@@ -7525,7 +7765,8 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
                 std::lock_guard<std::mutex> lk(g_q.mtx);
                 g_q.items = std::move(items);
                 g_q.index = idx;
-                g_q.base.clear();
+                if (g_q.shuffle_of()) g_q.base = g_q.items;
+                else g_q.base.clear();
                 g_q.sortBase.clear();
                 cnt = g_q.items.size();
             }
@@ -7720,7 +7961,8 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
                 std::lock_guard<std::mutex> lk(g_q.mtx);
                 g_q.items = items;
                 g_q.index = 0;
-                g_q.base.clear();
+                if (g_q.shuffle_of()) g_q.base = g_q.items;
+                else g_q.base.clear();
                 g_q.sortBase.clear();
             }
             queue_save();
@@ -7800,19 +8042,7 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
             if (want > 3) want = 0;
             {
                 std::lock_guard<std::mutex> lk(g_q.mtx);
-                const bool wasShuffle = g_q.shuffle_of();
-                const bool wantShuffle = (want == 3);
-                if (wantShuffle && !wasShuffle) {
-                    g_q.base = g_q.items;
-                    if (g_q.items.size() > 1) {
-                        std::mt19937 rng((unsigned)std::chrono::duration_cast<std::chrono::milliseconds>(
-                            std::chrono::steady_clock::now().time_since_epoch()).count());
-                        std::shuffle(g_q.items.begin(), g_q.items.end(), rng);
-                    }
-                } else if (!wantShuffle && wasShuffle) {
-                    if (!g_q.base.empty()) g_q.items = g_q.base;
-                }
-                g_q.mode = want;
+                queue_set_mode_locked(want);
             }
             queue_save();
         }
@@ -7882,6 +8112,8 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
         params_store(p);
 
         // 先停掉上一次（原子：并发点播放时不会撞 thread 赋值 terminate）
+        g_upnpQueueActive.store(false);
+        g_upnpPlayer.store(false);
         ps.stopJoin();
         // 一条会话原则（261024-01 #9）：开始新的本地播放时，停掉可能还在跑的投放会话，
         // 避免本机声卡与网络渲染器同时出声（两套控制互相打架）。
@@ -7891,7 +8123,6 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
         // /api/status 已改报本地而 /api/cast/state 仍 running=true ⟹ 界面卡在投放状态，
         // 只有手动「停止推流」才恢复。这里补上真正的那次 stop（backend=upnp 走下面的
         // upnp_start_track，它内部会先 stop，不要重复调用）。
-        g_upnpPlayer.store(false);
         if (p.backend != "upnp" && rta::net::CastManager::instance().get_state().running) {
             rta::net::CastManager::instance().stop();
             play_log("CAST_STOP reason=switch-to-local backend=" + (p.backend.empty() ? "(default)" : p.backend));
@@ -7939,26 +8170,32 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
                  " cue=" + cue_range_text(p.cueStart, p.cueEnd) + " file=" + p.file);
         ps.played.store(0);
         ps.total.store(0);
-        // 后端 = UPnP / DLNA：曲目交给投放会话（cast_service），不启动本地播放线程。
+        // 后端 = UPnP / DLNA：曲目交给投放会话（cast_service），并起 upnp_queue_thread 托管自动下一曲。
         // 失败如实返回原因（note/前端 toast），绝不假装出声。
         if (p.backend == "upnp") {
             std::string err;
             if (!upnp_start_track(p, p.file, err)) {
                 upnp_mark_player_state(p.file, false, err);
                 ps.playing.store(false);
+                ps.paused.store(false);
+                g_upnpQueueActive.store(false);
                 g_upnpPlayer.store(false);
                 return std::string("{\"ok\":false,\"error\":\"") + jesc(err) + "\"}";
             }
             g_upnpPlayer.store(true);
+            g_upnpQueueActive.store(true);
             upnp_mark_player_state(p.file, true, "");
             ps.outRate = 0;
             ps.outBits = 0;
+            ps.paused.store(false);
             ps.playing.store(true);
+            const size_t st0 = qIndex;
+            ps.restart([p, st0, rid=rta::diag::current_rid()] { rta::diag::ScopedRid diagRid(rid); upnp_queue_thread(p, st0); });
             return "{\"ok\":true,\"upnp\":true,\"count\":" + std::to_string(qCount) +
                    ",\"index\":" + std::to_string(qIndex) + "}";
         }
         ps.playing.store(true);
-        const size_t st0 = g_q.index;
+        const size_t st0 = qIndex;
         // restart 内部会 join 旧线程（上一步 stopJoin 已把它停掉），再接管新线程
         ps.restart([p, st0, rid=rta::diag::current_rid()] { rta::diag::ScopedRid diagRid(rid); return queue_thread(p, st0); });
         return "{\"ok\":true,\"count\":" + std::to_string(qCount) +
@@ -7985,6 +8222,14 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
                         }
                     }
                 }
+                if (!g_q.base.empty()) {
+                    for (size_t i = 0; i < g_q.base.size(); ++i) {
+                        if (g_q.base[i].same(gone)) {
+                            g_q.base.erase(g_q.base.begin() + (long long)i);
+                            break;
+                        }
+                    }
+                }
                 if (g_q.index > idx && g_q.index > 0) --g_q.index;
                 if (g_q.index >= g_q.items.size()) g_q.index = g_q.items.empty() ? 0 : g_q.items.size() - 1;
             }
@@ -8002,9 +8247,11 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
         {
             std::lock_guard<std::mutex> lk(g_q.mtx);
             if (from < g_q.items.size() && to < g_q.items.size() && from != to) {
+                const QItem cur = (g_q.index < g_q.items.size()) ? g_q.items[g_q.index] : QItem();
                 QItem v = g_q.items[from];
                 g_q.items.erase(g_q.items.begin() + (long long)from);
                 g_q.items.insert(g_q.items.begin() + (long long)to, v);
+                if (!cur.path.empty()) queue_reindex_locked(cur);
             }
             cnt = g_q.items.size();
         }
@@ -8153,7 +8400,10 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
             // 注意：必须用独立作用域释放锁 —— queue_save() 内部会再次加锁，
             // 若在持锁状态下调用就会死锁（本轮踩到：服务端直接挂住，连接被关闭）。
             std::lock_guard<std::mutex> lk(g_q.mtx);
-            for (const auto& it : addList) g_q.items.push_back(it);
+            for (const auto& it : addList) {
+                g_q.items.push_back(it);
+                if (!g_q.base.empty()) g_q.base.push_back(it);
+            }
             if (!addList.empty()) g_q.sortBase.clear();
             cnt = g_q.items.size();
         }
@@ -8953,30 +9203,10 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
         if (q != std::string::npos) on = atoi(rq.path.c_str() + q + 4);
         {
             std::lock_guard<std::mutex> lk(g_q.mtx);
-            // 记住"正在播的那首"，重排后要让 index 仍然指向它，
-            // 否则一按随机就会跳歌（这是最容易被用户当成 bug 的细节）
-            // 记住整项（不是只记路径）：cue 专辑里同一路径有 N 项，只按路径还原会跳到第 1 首
-            const QItem cur = (g_q.index < g_q.items.size()) ? g_q.items[g_q.index] : QItem();
-            const bool want = (on != 0);
-            const bool was = g_q.shuffle_of();
             // R-4：shuffle 不再是独立字段，而是 mode 的派生写入口
             //   on  → mode=3（随机）
             //   off → mode=0（顺序）—— 与旧行为一致：关随机后回到不循环的顺序播放
-            if (want && !was) {
-                g_q.base = g_q.items;                 // 保存原顺序，关掉时能还原
-                if (g_q.items.size() > 1) {
-                    std::mt19937 rng((unsigned)std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count());
-                    std::shuffle(g_q.items.begin(), g_q.items.end(), rng);
-                }
-                g_q.mode = 3;
-            } else if (!want && was) {
-                if (!g_q.base.empty()) g_q.items = g_q.base;   // 还原原始顺序
-                g_q.mode = 0;
-            }
-            if (!cur.path.empty()) {
-                for (size_t i = 0; i < g_q.items.size(); ++i)
-                    if (g_q.items[i].same(cur)) { g_q.index = i; break; }
-            }
+            queue_set_mode_locked(on != 0 ? 3 : 0);
         }
         queue_save();
         return std::string("{\"ok\":true,\"shuffle\":") + (on ? "true" : "false") + "}";
@@ -9014,7 +9244,8 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
             std::lock_guard<std::mutex> lk(g_q.mtx);
             g_q.items = std::move(items);
             g_q.index = 0;
-            g_q.base.clear();
+            if (g_q.shuffle_of()) g_q.base = g_q.items;
+            else g_q.base.clear();
             g_q.sortBase.clear();
             cnt = g_q.items.size();
         }
@@ -9093,10 +9324,12 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
 
     if (rq.path.rfind("/api/clear", 0) == 0) {
         ct = "application/json; charset=utf-8";
+        g_upnpQueueActive.store(false);
+        g_upnpPlayer.store(false);
         ps.stopJoin();          // 原子停线程（并发请求下不再撞 thread 赋值 terminate）
         ps.playing.store(false);
+        ps.paused.store(false);
         // 清空队列同时结束投放会话（否则渲染器还会继续播上一首）
-        g_upnpPlayer.store(false);
         if (rta::net::CastManager::instance().get_state().running)
             rta::net::CastManager::instance().stop();
         {
@@ -9107,6 +9340,7 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
             std::lock_guard<std::mutex> lk(g_q.mtx);
             g_q.items.clear();
             g_q.index = 0;
+            g_q.base.clear();
             g_q.sortBase.clear();
         }
         queue_save();
@@ -9121,12 +9355,7 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
         if (old < 0 || old > 2) old = 0;
         {
             std::lock_guard<std::mutex> lk(g_q.mtx);
-            const bool wasShuffle = g_q.shuffle_of();
-            // 旧语义：repeat 0/1/2 都是"非随机"；切到非随机要还原顺序
-            if (wasShuffle) {
-                if (!g_q.base.empty()) g_q.items = g_q.base;
-            }
-            g_q.mode = old;          // 0→0 顺序，1→1 列表循环，2→2 单曲循环
+            queue_set_mode_locked(old);
         }
         queue_save();
         return std::string("{\"ok\":true,\"repeat\":") + std::to_string(old) + "}";
@@ -9139,10 +9368,13 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
         const size_t q = rq.path.find("?dir=");
         if (q != std::string::npos) dir = atoi(rq.path.c_str() + q + 5);
 
+        g_upnpQueueActive.store(false);
+        g_upnpPlayer.store(false);
         ps.stopJoin();          // 原子停线程
 
         PlayParams p = params_snapshot();
         size_t target = 0;
+        QItem targetItem;
         bool ok = false;
         {
             std::lock_guard<std::mutex> lk(g_q.mtx);
@@ -9154,31 +9386,51 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
                 if (g_q.index > 0) { target = g_q.index - 1; ok = true; }
                 else if (g_q.mode != 0) { target = g_q.items.size() - 1; ok = true; }
             }
+            if (ok && target < g_q.items.size()) {
+                g_q.index = target;
+                targetItem = g_q.items[target];
+            }
         }
         if (!ok) return "{\"ok\":false,\"error\":\"已到队列边界\"}";
+        queue_save();
         ps.played.store(0);
         ps.total.store(0);
         // 后端 = UPnP / DLNA：切歌同样转交投放会话（停旧会话 → 起新会话），
         // 保证底栏「下一首 / 上一首」在投放模式下行为与本地播放一致。
         if (p.backend == "upnp") {
-            std::string targetFile;
-            {
-                std::lock_guard<std::mutex> lk(g_q.mtx);
-                targetFile = g_q.items[target].path;
+            if (targetItem.cs >= 0.0) {
+                const std::string cerr = "UPnP 投放不支持 CUE 分轨（渲染器只能播整个文件），请切到本地后端";
+                if (rta::net::CastManager::instance().get_state().running)
+                    rta::net::CastManager::instance().stop();
+                upnp_mark_player_state(targetItem.path, false, cerr);
+                ps.playing.store(false);
+                ps.paused.store(false);
+                g_upnpQueueActive.store(false);
+                g_upnpPlayer.store(false);
+                return std::string("{\"ok\":false,\"error\":\"") + jesc(cerr) + "\"}";
             }
             std::string err;
-            if (!upnp_start_track(p, targetFile, err)) {
-                upnp_mark_player_state(targetFile, false, err);
+            if (!upnp_start_track(p, targetItem.path, err)) {
+                upnp_mark_player_state(targetItem.path, false, err);
                 ps.playing.store(false);
+                ps.paused.store(false);
+                g_upnpQueueActive.store(false);
                 g_upnpPlayer.store(false);
                 return std::string("{\"ok\":false,\"error\":\"") + jesc(err) + "\"}";
             }
             g_upnpPlayer.store(true);
-            upnp_mark_player_state(targetFile, true, "");
+            g_upnpQueueActive.store(true);
+            upnp_mark_player_state(targetItem.path, true, "");
             ps.outRate = 0;
             ps.outBits = 0;
+            ps.paused.store(false);
             ps.playing.store(true);
+            ps.restart([p, target, rid=rta::diag::current_rid()] { rta::diag::ScopedRid diagRid(rid); upnp_queue_thread(p, target); });
             return "{\"ok\":true,\"index\":" + std::to_string(target) + ",\"upnp\":true}";
+        }
+        if (rta::net::CastManager::instance().get_state().running) {
+            rta::net::CastManager::instance().stop();
+            play_log("CAST_STOP reason=skip-switch-to-local");
         }
         ps.playing.store(true);
         ps.restart([p, target] { return queue_thread(p, target); });
@@ -9302,10 +9554,11 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
             if (p.port == 0) p.port = 8912;
             // 一条会话原则（261024-01 #9）：手动「开始投放」先停本地播放，
             // 避免本机声卡与网络渲染器同时出声；播放器状态交给投放会话接管前先清零。
+            g_upnpQueueActive.store(false);
+            g_upnpPlayer.store(false);
             ps.stopJoin();      // 原子停线程
             ps.playing.store(false);
             ps.paused.store(false);
-            g_upnpPlayer.store(false);
             auto res = rta::net::CastManager::instance().start(p);
             if (!res.ok) {
                 // 铁律：不假装成功 —— 真实原因原样透给前端
@@ -9316,8 +9569,10 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
             return "{\"ok\":true,\"started\":true,\"phase\":\"discovering\"}";
         }
         if (rq.path.rfind("/api/cast/stop", 0) == 0) {
-            rta::net::CastManager::instance().stop();
+            g_upnpQueueActive.store(false);
             g_upnpPlayer.store(false);
+            ps.stopJoin();
+            rta::net::CastManager::instance().stop();
             ps.playing.store(false);
             ps.paused.store(false);
             return "{\"ok\":true,\"stopped\":true}";
@@ -10584,6 +10839,8 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
 
     if (rq.path.rfind("/api/stop", 0) == 0) {
         ct = "application/json; charset=utf-8";
+        g_upnpQueueActive.store(false);
+        const bool wasUpnp = g_upnpPlayer.exchange(false);
         ps.stopJoin();          // 原子停线程（stop 标志已在其中置位并复位）
         ps.pauseReq.store(false);
         ps.seekReq.store(-1.0);
@@ -10594,7 +10851,7 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
             g_lastEnd.isPosZeroNoErr = false;
         }
         // 投放会话若还在跑（含手动「开始投放」的会话），一并停掉 —— 底栏「停止」只能有一个结果。
-        if (g_upnpPlayer.exchange(false) || rta::net::CastManager::instance().get_state().running)
+        if (wasUpnp || rta::net::CastManager::instance().get_state().running)
             rta::net::CastManager::instance().stop();
         // 停止播放后清零 bit-perfect 结论（停播后结论已无对象，不留上次播放的旧结论）
         {
@@ -10611,10 +10868,14 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
         // 否则底栏与「投放实时状态」会各显示一套进度，互相打架。
         rta::net::CastState castSt;
         bool castMode = false;
+        bool castTransition = false;
         if (g_upnpPlayer.load()) {
             castSt = rta::net::CastManager::instance().get_state();
             if (castSt.running) {
                 castMode = true;
+            } else if (g_upnpQueueActive.load()) {
+                castMode = true;
+                castTransition = true;
             } else {
                 // 投放自然结束（渲染器播完 / 出错被停）：播放器回到停止态并清掉投放标志
                 g_upnpPlayer.store(false);
@@ -10625,16 +10886,16 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
         std::lock_guard<std::mutex> lk(ps.mtx);
         std::ostringstream j;
         const size_t pl2 = ps.played.load(), tt = ps.total.load();
-        const double pos = castMode ? castSt.positionSec
+        const double pos = castMode ? (castTransition ? 0.0 : castSt.positionSec)
                                     : (ps.outRate > 0 ? (double)pl2 / ps.outRate : 0.0);
-        const double dur = castMode ? castSt.durationSec
+        const double dur = castMode ? (castTransition ? 0.0 : castSt.durationSec)
                                     : (ps.outRate > 0 ? (double)tt / ps.outRate : 0.0);
         const bool playingStat = castMode ? true : ps.playing.load();
-        const bool pausedStat = castMode ? castSt.paused : ps.paused.load();
-        const std::string curStat = castMode ? castSt.sourceFile : ps.current;
-        const std::string errStat = castMode ? castSt.error : ps.error;
-        const uint32_t rateStat = castMode ? castSt.sampleRate : ps.outRate;
-        const int bitsStat = castMode ? castSt.bits : ps.outBits;
+        const bool pausedStat = castMode ? (castTransition ? false : castSt.paused) : ps.paused.load();
+        const std::string curStat = castMode ? (castTransition ? ps.current : castSt.sourceFile) : ps.current;
+        const std::string errStat = castMode ? (castTransition ? ps.error : castSt.error) : ps.error;
+        const uint32_t rateStat = castMode ? (castTransition ? 0u : castSt.sampleRate) : ps.outRate;
+        const int bitsStat = castMode ? (castTransition ? 0 : castSt.bits) : ps.outBits;
         // 2026-10-24（用户 261024-04 #8）：GPU 语义拆分。组合语义的唯一事实源 =
         // rta::meta::playback_gpu_flags（src/meta/statusflags.h，带真值表与单测）：
         //   gpu         = GPU 可用性（与本次播放无关，旧字段名保留）
@@ -10931,7 +11192,10 @@ static void core_shutdown_common() {
           << " scan=" << (g_wb.th.joinable() ? 1 : 0);
         play_log(o.str());
     }
-    g_ps.stopJoin();        // 原子停播放线程（协作：置 stop 让 queue_thread 自己退）
+    g_upnpQueueActive.store(false);
+    g_upnpPlayer.store(false);
+    g_ps.stopJoin();        // 原子停播放线程（协作：置 stop 让 queue_thread / upnp_queue_thread 自己退）
+    rta::net::CastManager::instance().stop();
     g_inputSession.stop();  // 停采集（同样协作）
     // 预解码槽：只在播放线程停掉之后才安全 join（queue_thread 是唯一会起它的地方）
     if (g_pre.th.joinable()) g_pre.th.join();
