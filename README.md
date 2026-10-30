@@ -245,7 +245,7 @@ The functionality stays available and numerically correct (worst convolution cas
 
 ## 🗺 Roadmap
 
-> **1.1.1** is the current stable release; the actual released version follows the Release badge above. 1.1.2 onward is planned; the full criteria, split lines and open items are in
+> **1.1.1.1** is the current stable release; the actual released version follows the Release badge above. 1.1.2 onward is planned; the full criteria, split lines and open items are in
 > **[ROADMAP-1.1.x.md](ROADMAP-1.1.x.md)**.
 
 | Version   | Theme                                                              | Status     |
@@ -313,7 +313,7 @@ See the [development roadmap](ROADMAP-1.1.x.md) for unfinished features and acce
 
 ## Project origin
 
-This repository is an **independent macOS branch of RLPlayer**: the platform layer (audio output, GPU, window shell) has been rewritten against native macOS capabilities and **no longer merges with upstream**; version numbers start independently from `1.0.0`, and the current version follows the Release badge above (current stable version is 1.1.1).
+This repository is an **independent macOS branch of RLPlayer**: the platform layer (audio output, GPU, window shell) has been rewritten against native macOS capabilities and **no longer merges with upstream**; version numbers start independently from `1.0.0`, and the current version follows the Release badge above (current stable version is 1.1.1.1).
 
 Upstream repository (Windows edition): **<https://github.com/okhuoyanyan/RLPlayer2>**
 
