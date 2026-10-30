@@ -74,8 +74,8 @@ static std::string raw_http_exchange(uint16_t port, const std::string& reqData, 
 int main() {
     std::printf("=== test_webui_hardening: WebUi 传输层安全加固测试 ===\n\n");
 
-    const uint16_t port1 = 8912;
-    const uint16_t port2 = 8913;
+    const uint16_t port1 = 19101;
+    const uint16_t port2 = 19106;
 
     // 实例 1：loopbackOnly = true (默认)
     WebUi ui1;

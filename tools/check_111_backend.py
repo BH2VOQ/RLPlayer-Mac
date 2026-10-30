@@ -38,6 +38,10 @@ def start():
 def stop():
  global proc
  if proc and proc.poll() is None:
+  owner=subprocess.run(['ps','-p',str(proc.pid),'-o','uid=,ppid=,comm='],text=True,capture_output=True,check=True).stdout.strip()
+  with open(root/'owners.log','a') as out:out.write(owner+'\n')
+  fields=owner.split(None,2)
+  if len(fields)!=3 or int(fields[0])!=os.getuid() or int(fields[1])!=os.getpid() or pathlib.Path(fields[2]).name!=pathlib.Path(binary).name:raise RuntimeError('owned server identity changed; no signal sent')
   proc.terminate();proc.wait(timeout=15)
  proc=None
 checks=[]

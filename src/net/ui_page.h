@@ -1051,6 +1051,10 @@ h += "#npPage .npedge{display:none}";
     // 261024-04 #3：PEQ 旁路的语义必须一眼看懂 —— 组标题下常驻一行「PEQ 当前：生效 / 已旁路」。
     // 生效用正文色（不是绿色：绿色在本项目里已经专指 bit-perfect / GPU），旁路用弱化色。
     h += ".peqstat{display:flex;align-items:center;gap:8px;font-size:12px;color:var(--txt)}";
+    // 2026-10-30：EQ 状态消息行。定高 + 单行省略 ⟹ 文案再长也不改变工具条高度，
+    // 拖节点时曲线/表格不会被"撑下去"（真机实测曾被撑动 31px，看起来就是排版在抖）。
+    h += ".peqmsg{display:block;flex:1 1 100%;min-width:0;height:18px;line-height:18px;margin-top:2px;font-size:11.5px;color:var(--mut2);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}";
+    h += ".peqstat #peqStatTxt{min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}";
     h += ".peqstat .tag{font-size:10.5px;font-weight:700;letter-spacing:.3px;padding:2px 8px;border-radius:9px;border:1px solid var(--line);background:var(--hov);color:var(--txt2);flex:none}";
     h += ".peqstat.bypass{color:var(--mut)}";
     h += ".peqstat.bypass .tag{color:var(--mut2);border-style:dashed}";

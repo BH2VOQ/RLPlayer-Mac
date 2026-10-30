@@ -33,6 +33,7 @@
 #include <array>
 #include <memory>
 #include <fstream>
+#include <sstream>
 #include <filesystem>
 #include <sys/types.h>
 #include <signal.h>
@@ -41,6 +42,122 @@
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
+#include <fcntl.h>
+#include <cerrno>
+#include <set>
+
+// Port probing is read-only: a successful TCP connect proves reachability, not ownership.
+struct CommandRead {
+    int status = -1;
+    std::string text;
+};
+
+static CommandRead read_command(const std::string& command) {
+    CommandRead result;
+    FILE* pipe = ::popen(command.c_str(), "r");
+    if (!pipe) return result;
+    std::array<char, 512> buffer{};
+    while (::fgets(buffer.data(), buffer.size(), pipe)) result.text += buffer.data();
+    const int status = ::pclose(pipe);
+    if (status >= 0 && WIFEXITED(status)) result.status = WEXITSTATUS(status);
+    return result;
+}
+
+struct ListenerRead {
+    bool valid = false;
+    std::set<pid_t> pids;
+};
+
+static ListenerRead read_listeners(uint16_t port) {
+    const auto result = read_command("/usr/sbin/lsof -nP -a -iTCP:" +
+        std::to_string(port) + " -sTCP:LISTEN -Fp 2>&1");
+    ListenerRead listeners;
+    if (result.status == 1 && result.text.empty()) {
+        listeners.valid = true;  // lsof's documented no-match result, not an error.
+        return listeners;
+    }
+    if (result.status != 0) return listeners;
+    std::istringstream lines(result.text);
+    std::string line;
+    while (std::getline(lines, line)) {
+        // lsof -Fp also emits file descriptor records (for example f3).
+        if (line.size() > 1 && line.front() == 'f' &&
+            line.find_first_not_of("0123456789", 1) == std::string::npos) continue;
+        if (line.size() < 2 || line.front() != 'p' ||
+            line.find_first_not_of("0123456789", 1) != std::string::npos) return {};
+        try {
+            const long value = std::stol(line.substr(1));
+            if (value <= 0 || value > INT32_MAX) return {};
+            listeners.pids.insert(static_cast<pid_t>(value));
+        } catch (...) { return {}; }
+    }
+    listeners.valid = !listeners.pids.empty();
+    return listeners;
+}
+
+struct OwnedChild {
+    pid_t pid;
+    uid_t uid;
+    pid_t parent;
+    std::string basename;
+    bool reaped = false;
+    bool waitError = false;
+    int status = 0;
+
+    // Never signal a PID which has already been reaped (and may have been reused).
+    bool poll() {
+        if (reaped || waitError) return false;
+        pid_t result;
+        do { result = ::waitpid(pid, &status, WNOHANG); } while (result < 0 && errno == EINTR);
+        if (result == pid) reaped = true;
+        else if (result < 0) waitError = true;
+        return !reaped && !waitError;
+    }
+
+    bool identity() {
+        if (!poll()) return false;
+        const auto result = read_command("/bin/ps -p " + std::to_string(pid) +
+                                        " -o uid=,ppid=,comm= 2>&1");
+        if (result.status != 0) return false;
+        std::istringstream row(result.text);
+        unsigned long actualUid = 0;
+        long actualParent = 0;
+        if (!(row >> actualUid >> actualParent)) return false;
+        std::string comm;
+        std::getline(row >> std::ws, comm);
+        const auto end = comm.find_last_not_of(" \t\r\n");
+        if (end == std::string::npos) return false;
+        comm.erase(end + 1);
+        return actualUid == uid && actualParent == parent &&
+               std::filesystem::path(comm).filename().string() == basename && poll();
+    }
+
+    bool owns_listener(uint16_t port) {
+        if (!identity()) return false;
+        const auto listeners = read_listeners(port);
+        return listeners.valid && listeners.pids == std::set<pid_t>{pid} && identity();
+    }
+
+    bool wait_for_exit(int milliseconds) {
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(milliseconds);
+        while (poll() && std::chrono::steady_clock::now() < deadline)
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        poll();
+        return reaped;
+    }
+
+    bool stop() {
+        if (!poll()) return reaped;
+        // Same strict UID/PPID/basename check for cleanup as for the HTTP gate.
+        if (!identity()) {
+            printf("  [WARN] PID %d identity unproven; no SIGTERM; preserve isolation directory\n", (int)pid);
+            return reaped;
+        }
+        if (::kill(pid, SIGTERM) != 0 && errno != ESRCH)
+            printf("  [WARN] SIGTERM failed for owned child %d: %s\n", (int)pid, ::strerror(errno));
+        return wait_for_exit(5000);  // No SIGKILL and no unbounded waitpid.
+    }
+};
 
 namespace fs = std::filesystem;
 
@@ -487,117 +604,155 @@ int main() {
         if (!fs::exists(rtawebBin)) {
             check(false, "找不到 rtaweb 可执行文件: " + rtawebBin.string());
         } else {
-            const uint16_t testPort = 8913;
-            // 启动 rtaweb --port 8913 --music-dir ./data --no-browser
-            //
-            // ⚠️ 2026-10-26（用户报「文件夹→目录不存在」的污染源之一）：
-            //   本测试原来**不隔离 RLPLAYER_LIBRARY_DIR**，子进程直接继承测试进程的环境；
-            //   配合当时「--music-dir 早于 setenv(RLPLAYER_PORT)」的 BUG，它的 `--music-dir ./data`
-            //   被写进了**用户真实的** rlplayer-library.conf（实测 10:36 那次就是这么坏的：
-            //   conf 变成 "./data"，.app 双击 cwd=/ ⟹ ./data → /data ⟹ 文件夹页恒「目录不存在」）。
-            //   顺序 BUG 已在 rtaweb.cpp 修掉，但「测试不该碰用户真实数据」这条得单独保证：
-            //   这里显式把库配置/索引关进临时目录，子进程只写临时文件。
-            //   注意必须在 fork **之前**建好目录（子进程里不做可能失败的 fs 操作）。
-            std::error_code isoEc;
-            fs::path isoLib = fs::temp_directory_path(isoEc) / "rta_dsd_path_8913_lib";
-            if (isoEc) isoLib = fs::path("/tmp") / "rta_dsd_path_8913_lib";
-            fs::remove_all(isoLib, isoEc);
-            fs::create_directories(isoLib, isoEc);
-            const std::string isoLibS = isoLib.string();
-            pid_t pid = fork();
-            if (pid == 0) {
-                std::string pStr = std::to_string(testPort);
-                ::setenv("RLPLAYER_LIBRARY_DIR", isoLibS.c_str(), 1);   // 绝不写用户真实库配置
-                execl(rtawebBin.c_str(), rtawebBin.c_str(),
-                      "--port", pStr.c_str(),
-                      "--music-dir", "./data",
-                      "--no-browser", nullptr);
-                _exit(127);
-            } else if (pid < 0) {
-                check(false, "fork() 启动 rtaweb 失败");
+            // 固定测试服务端口使用 19106 允许范围并串行复用
+            const uint16_t testPort = 19106;
+            const auto before = read_listeners(testPort);
+            if (!before.valid || !before.pids.empty()) {
+                check(false, "DSD ownership preflight: port 19106 busy or ownership unreadable; no spawn, no HTTP");
+                return 1;
+            }
+            rtawebBin = fs::absolute(rtawebBin);
+
+            // 独立 mkdtemp 根目录，全隔离 HOME / CFFIXED_USER_HOME / STATE / LIBRARY / COVER
+            char tempTemplate[] = "/tmp/rta_dsd_path_iso_XXXXXX";
+            char* tempDir = ::mkdtemp(tempTemplate);
+            if (!tempDir) {
+                check(false, "mkdtemp 创建隔离目录失败");
             } else {
-                // 等待端口应答
-                bool ready = false;
-                auto start = std::chrono::steady_clock::now();
-                while (true) {
-                    int s = ::socket(AF_INET, SOCK_STREAM, 0);
-                    if (s >= 0) {
-                        sockaddr_in a{};
-                        a.sin_family = AF_INET;
-                        a.sin_port = htons(testPort);
-                        a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-                        if (::connect(s, (sockaddr*)&a, sizeof(a)) == 0) {
-                            ::close(s);
-                            ready = true;
-                            break;
-                        }
-                        ::close(s);
-                    }
-                    auto now = std::chrono::steady_clock::now();
-                    if (std::chrono::duration_cast<std::chrono::milliseconds>(now - start).count() > 6000) {
-                        break;
-                    }
-                    std::this_thread::sleep_for(std::chrono::milliseconds(50));
-                }
-                check(ready, "rtaweb 端口 8913 服务就绪");
+                fs::path isoRoot(tempDir);
+                fs::path isoHome = isoRoot / "home";
+                fs::path isoState = isoRoot / "state";
+                fs::path isoLib = isoRoot / "lib";
+                fs::path isoCover = isoRoot / "cover";
+                fs::path isoLogs = isoRoot / "logs";
 
-                auto exec_curl = [](const std::string& cmd) -> std::string {
-                    std::array<char, 256> buf;
-                    std::string res;
-                    std::unique_ptr<FILE, decltype(&pclose)> pipe(popen(cmd.c_str(), "r"), pclose);
-                    if (!pipe) return "";
-                    while (fgets(buf.data(), buf.size(), pipe.get()) != nullptr) {
-                        res += buf.data();
-                    }
-                    return res;
-                };
+                std::error_code isoEc;
+                fs::create_directories(isoHome / "Library" / "Application Support" / "RLPlayer", isoEc);
+                fs::create_directories(isoState, isoEc);
+                fs::create_directories(isoLib, isoEc);
+                fs::create_directories(isoCover, isoEc);
+                fs::create_directories(isoLogs, isoEc);
 
-                // ---- 判据 A 已移除（2026-10-26）----
-                // 这里原本断言 native_dsd_precheck 对 rate=max/96000 报「请改成跟随源」。
-                // 该函数已回滚：mac 的 dsdNative 能力恒为 false（CoreAudio 无 ASIO 原生 DSD
-                // 通道），任何 dsdnative=1 的请求都该由 direct_sdm_eligible() 报
-                // 「DSD Native 还没实现」——把用户引向「改成跟随源」是误导（改了也没用）。
-
-                // ---- 判据 B：POST /api/quit 退出收尾取证 ----
+                // 预写入隔离的 rlplayer-settings.conf：backend=null / metaon=0 / metallm=0 / volume=-120
+                const std::string confContent =
+                    "backend=null\n"
+                    "metaon=0\n"
+                    "metallm=0\n"
+                    "volume=-120\n";
                 {
-                    std::string cmd = "curl -s -X POST http://127.0.0.1:" +
-                                      std::to_string(testPort) + "/api/quit";
-                    std::string resp = exec_curl(cmd);
-                    check(resp.find("\"ok\":true") != std::string::npos, "POST /api/quit 返回 ok:true", resp);
+                    std::ofstream cf(isoState / "rlplayer-settings.conf");
+                    cf << confContent;
+                }
+                {
+                    std::ofstream cf(isoHome / "Library" / "Application Support" / "RLPlayer" / "rlplayer-settings.conf");
+                    cf << confContent;
+                }
 
-                    int status = 0;
-                    bool exited = false;
-                    for (int i = 0; i < 50; ++i) {
-                        pid_t r = ::waitpid(pid, &status, WNOHANG);
-                        if (r == pid) { exited = true; break; }
-                        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                const std::string isoHomeS = isoHome.string();
+                const std::string isoStateS = isoState.string();
+                const std::string isoLibS = isoLib.string();
+                const std::string isoCoverS = isoCover.string();
+                const std::string outLogFile = (isoLogs / "rtaweb_stdout_stderr.log").string();
+
+                pid_t pid = fork();
+                if (pid == 0) {
+                    ::setsid();
+                    ::chdir(isoRoot.c_str());
+                    ::setenv("HOME", isoHomeS.c_str(), 1);
+                    ::setenv("CFFIXED_USER_HOME", isoHomeS.c_str(), 1);
+                    ::setenv("RLPLAYER_STATE_DIR", isoStateS.c_str(), 1);
+                    ::setenv("RLPLAYER_LIBRARY_DIR", isoLibS.c_str(), 1);
+                    ::setenv("RLPLAYER_COVER_DIR", isoCoverS.c_str(), 1);
+
+                    int fd = ::open(outLogFile.c_str(), O_CREAT | O_WRONLY | O_TRUNC, 0644);
+                    if (fd >= 0) {
+                        ::dup2(fd, STDOUT_FILENO);
+                        ::dup2(fd, STDERR_FILENO);
+                        if (fd > 2) ::close(fd);
                     }
-                    if (!exited) {
-                        // 兜底（铁律 2：SIGTERM 收尾，绝不 SIGKILL）
-                        ::kill(pid, SIGTERM);
-                        ::waitpid(pid, &status, 0);
+
+                    std::string pStr = std::to_string(testPort);
+                    execl(rtawebBin.c_str(), rtawebBin.c_str(),
+                          "--port", pStr.c_str(),
+                          "--music-dir", "./data",
+                          "--no-browser", nullptr);
+                    _exit(127);
+                } else if (pid < 0) {
+                    check(false, "fork() 启动 rtaweb 失败");
+                    fs::remove_all(isoRoot, isoEc);
+                } else {
+                    OwnedChild child{pid, ::getuid(), ::getpid(), rtawebBin.filename().string()};
+                    bool ready = false;
+                    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(6);
+                    while (child.poll() && std::chrono::steady_clock::now() < deadline) {
+                        // The child may still be between fork and exec. Never HTTP-probe readiness.
+                        const auto listeners = read_listeners(testPort);
+                        if (!listeners.valid || (!listeners.pids.empty() &&
+                            listeners.pids != std::set<pid_t>{pid})) break;
+                        if (child.owns_listener(testPort)) { ready = true; break; }
+                        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+                    }
+                    check(ready, "rtaweb readiness requires exact spawned UID/PPID/basename and sole listener PID",
+                          "pid=" + std::to_string(pid));
+                    if (!ready) {
+                        check(child.stop(), "failed-start child safely reaped without HTTP or force kill");
+                        if (child.reaped) fs::remove_all(isoRoot, isoEc);
+                        else printf("  [WARN] isolation directory preserved: %s\n", isoRoot.c_str());
+                        return 1;
                     }
 
-                    check(exited && WIFEXITED(status) && WEXITSTATUS(status) == 0,
-                          "rtaweb 正常退出且退出码为 0（非 SIGABRT）",
-                          "exit=" + std::to_string(WEXITSTATUS(status)));
+                    // ---- 判据 B：POST /api/quit 退出收尾取证 ----
+                    {
+                        // Revalidate immediately before every HTTP operation, not only once at startup.
+                        const bool owned = child.owns_listener(testPort);
+                        check(owned, "POST /api/quit ownership gate: exact child identity and listener");
+                        CommandRead response;
+                        if (owned) response = read_command(
+                            "/usr/bin/curl --noproxy '*' --connect-timeout 1 --max-time 3 -s -X POST http://127.0.0.1:" +
+                            std::to_string(testPort) + "/api/quit");
+                        check(owned && response.status == 0 && response.text.find("\"ok\":true") != std::string::npos,
+                              "POST /api/quit 返回 ok:true", response.text);
 
-                    // 读取日志文件，断言包含 "SHUTDOWN joinable"
-                    bool foundShutdownLog = false;
-                    const char* home = std::getenv("HOME");
-                    if (home) {
-                        std::string logPath = std::string(home) + "/Library/Application Support/RLPlayer/rlplayer-playback.log";
-                        std::ifstream lf(logPath);
+                        bool exited = child.wait_for_exit(5000);
+                        if (!exited) exited = child.stop();
+                        const bool normal = exited && WIFEXITED(child.status);
+                        check(normal && WEXITSTATUS(child.status) == 0,
+                              "rtaweb 正常退出且退出码为 0（非 SIGABRT）",
+                              normal ? "exit=" + std::to_string(WEXITSTATUS(child.status)) :
+                                       "no normal reaped exit (raw status=" + std::to_string(child.status) + ")");
+
+                        // 读取隔离 state 的日志，断言必须读此次隔离 state 的日志与本次 pid / 本次 SHUTDOWN 关联
+                        bool foundShutdownLog = false;
+                        bool foundStartupPid = false;
+                        std::string expectedPidStr = "pid=" + std::to_string(pid);
+                        std::string stateLogPath = (isoState / "rlplayer-playback.log").string();
+                        std::ifstream lf(stateLogPath);
+                        if (!lf) {
+                            // 若降级至 home 支持目录，读取隔离 home
+                            stateLogPath = (isoHome / "Library" / "Application Support" / "RLPlayer" / "rlplayer-playback.log").string();
+                            lf.open(stateLogPath);
+                        }
                         if (lf) {
                             std::string line;
                             while (std::getline(lf, line)) {
+                                if (line.find("STARTUP") != std::string::npos && line.find(expectedPidStr) != std::string::npos) {
+                                    foundStartupPid = true;
+                                }
                                 if (line.find("SHUTDOWN joinable") != std::string::npos) {
                                     foundShutdownLog = true;
                                 }
                             }
                         }
+                        check(foundStartupPid && foundShutdownLog,
+                              "隔离日志中包含本次 PID 启动记录且包含本次 SHUTDOWN joinable 取证行",
+                              "pid=" + std::to_string(pid) + " log=" + stateLogPath);
                     }
-                    check(foundShutdownLog, "日志文件包含 SHUTDOWN joinable 取证行");
+
+                    // A live or unaccounted child may still use this directory: preserve it.
+                    if (child.reaped) fs::remove_all(isoRoot, isoEc);
+                    else {
+                        check(false, "child not reaped; isolation directory must be preserved", isoRoot.string());
+                    }
                 }
             }
         }

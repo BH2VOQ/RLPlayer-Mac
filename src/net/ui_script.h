@@ -3456,12 +3456,15 @@ function playPath(f, cs, ce, quiet) {
   S.metaSeq = (S.metaSeq || 0) + 1;
   if (D('npt')) D('npt').textContent = nam(f);
   if (D('npart')) D('npart').textContent = '';
-  api('/api/play', 'file=' + encodeURIComponent(f) + cueQuery(cs, ce) + '&' + params()).then(function (j) {
-    if (j && j.ok === false) { toast(j.error || '播放失败'); return; }
+  // 2026-10-30（B2）：**必须把 Promise 交回去**。投放的按钮状态依赖「/api/play 真的落地」——
+  // 以前不 return，调用方只能立刻盲发一次 /api/cast/state，必然先于服务端的 start() 到达。
+  return api('/api/play', 'file=' + encodeURIComponent(f) + cueQuery(cs, ce) + '&' + params()).then(function (j) {
+    if (j && j.ok === false) { toast(j.error || '播放失败'); return j; }
     // quiet：由调用方给出更准确的提示（如「已停止投放，输出回到本机」），
     // 不要再叠一句「开始播放」——2026-10-28 用户实测：点停止投放后显示"开始播放"很困惑。
     if (!quiet) toast('开始播放');
     loadQ();
+    return j;
   });
 }
 function addPath(f) {
@@ -6609,8 +6612,22 @@ function initCastControls() {
        ⟹ 之后的切歌/暂停/seek 全部由后端路由到同一条投放会话（"所有播放都走 UPNP"）。
      * 再点一次 = 停止投放 + 回到推送前的输出后端（默认 wasapi），并恢复本地播放。
        （刻意记 prevBackend 而不是硬编码 wasapi：测试实例是 null，硬编码会把安全设置冲掉。） */
-var CAST = { state: null, prevBackend: '' };
-function castRunning() { return !!(CAST.state && CAST.state.running); }
+var CAST = { state: null, prevBackend: '', seq: 0, runningSeq: 0 };
+// 2026-10-30 用户实测 bug（B2）：「点完投送，投送到设备按钮没有实时切换到设备，
+//   还保持着图示状态，退出重进才正常。」
+//   根因是**顺序竞态**：castPush 里 playPath() 之后立刻发一次 /api/cast/state，
+//   而 playPath 内部的 /api/play 还在飞、CastManager::start() 尚未把 running 置 true
+//   ⟹ 那一次采样读到 running=false 就收工（once=true 从不重试），按钮永远停在「推送到设备」，
+//   只有离开/重进单曲页（10108 处的 pollCastState(true)）才被纠正。
+//   修法见下方 castWaitRunning()：等 /api/play 落地后再做「最多 5s / 每 300ms」的有界收敛。
+function castRunning() { return castSessionStarted(CAST.state); }
+// 投放刚发起时 CastManager 的状态序列是 stopped → discovering → serving，
+// 中间任一阶段都说明"会话已经建立"，按钮就该点亮（不必等 serving）。
+function castSessionStarted(st) {
+  if (!st) return false;
+  if (st.running) return true;
+  return st.phase === 'discovering' || st.phase === 'serving' || st.phase === 'playing';
+}
 function castDevNameOf(loc) {
   loc = String(loc || '');
   for (var i = 0; i < _castDevices.length; i++) {
@@ -6628,7 +6645,9 @@ function castIconSvg() {
 function applyCastUi(st) {
   if (st && typeof st.running === 'boolean') CAST.state = st;
   st = CAST.state || {};
-  var running = !!st.running;
+  // 「会话已建立」而不是「running 已经 true」：discovering/serving 阶段按钮就该点亮，
+  // 否则网络发现那 1～2 秒里用户看到的是"点完没反应"（B2 的观感来源之一）。
+  var running = castSessionStarted(st);
   var nm = castDevNameOf(st.device);
   var nb = D('npCastBtn');
   if (nb) {
@@ -6647,7 +6666,13 @@ function applyCastUi(st) {
   if (stop) stop.disabled = !running;
   updateCastStateUi(st);
 }
-function pollCastState(once) {
+// once=true：单次采样（进页面时报一次就够了，绝不为了它开循环）。
+// once=true + expect=true：**有界收敛等待** —— 刚发起投放时 CastManager 还没 start()，
+//   一次采样必然读到 running=false；这时按 300ms 重试，直到「会话已建立」或 phase==='error'，
+//   上限 CAST_WAIT_MS。上限 5s 的依据：真机实测 discovering→serving 约 1.2～1.7s
+//   （SSDP 发现 1.4s + SOAP 3 次/轮 @1500ms）。17 次请求，代价可忽略。
+var CAST_WAIT_MS = 5000, CAST_WAIT_STEP = 300;
+function pollCastState(once, expect) {
   clearTimeout(_castPollTimer);
   var outPane = document.querySelector('#setpage .spane[data-g=out]');
   var streamPane = document.querySelector('#setpage .spane[data-g=stream]');
@@ -6655,12 +6680,43 @@ function pollCastState(once) {
               || (outPane && outPane.classList.contains('on') && D('setpage') && D('setpage').classList.contains('on'))
               || (D('npPage') && D('npPage').classList.contains('on'))
               || (CAST.state && CAST.state.running);
-  api('/api/cast/state').then(function (st) {
-    applyCastUi(st);
-    if (!once && wantLoop) _castPollTimer = setTimeout(function () { pollCastState(); }, 1000);
-  }).catch(function () {
-    if (!once && wantLoop) _castPollTimer = setTimeout(function () { pollCastState(); }, 1500);
-  });
+  var deadline = nowMs() + CAST_WAIT_MS;
+  var sample = function () {
+    var mySeq = ++CAST.seq;
+    api('/api/cast/state').then(function (st) {
+      // 并发保护：先发出的请求可能后到。只要有一次更新（seq 更大）的采样已经看到
+      // 「会话已建立」，就不再接受更早的 running=false 样本 —— 否则按钮会被旧响应按回去。
+      var stale = mySeq < CAST.runningSeq;
+      if (castSessionStarted(st)) CAST.runningSeq = mySeq;
+      if (!stale) applyCastUi(st);
+      if (!once) {
+        if (wantLoop) _castPollTimer = setTimeout(function () { pollCastState(); }, 1000);
+        return;
+      }
+      if (!expect) return;
+      if (castSessionStarted(st) || (st && st.phase === 'error')) {
+        // 2026-10-30（B2 的反向，真机 stub 复现）：收敛成功后**不能就此撒手**。
+        //   设备拒绝 SetAVTransportURI（UPnPError 714 / 掉线 / 被占用）时，后端会在
+        //   /api/play 已经回 ok、会话已经 running 之后才把 phase 改成 error —— 那时已经
+        //   没有人在轮询了，界面就会一直说「已推送到」（按钮说假话，方向与 B2 相反）。
+        //   所以：会话已建立 ⟹ 接着走常规 1s 轮询（与设置页输出面板完全同一节奏，
+        //   不是新增的高频轮询）；1s 内能发现 phase=error/running=false 并自动回退按钮。
+        var keep = (D('npPage') && D('npPage').classList.contains('on'))
+                || (CAST.state && CAST.state.running);
+        if (keep) _castPollTimer = setTimeout(function () { pollCastState(); }, 1000);
+        return;
+      }
+      if (nowMs() >= deadline) return;
+      _castPollTimer = setTimeout(sample, CAST_WAIT_STEP);
+    }).catch(function () {
+      if (!once) {
+        if (wantLoop) _castPollTimer = setTimeout(function () { pollCastState(); }, 1500);
+        return;
+      }
+      if (expect && nowMs() < deadline) _castPollTimer = setTimeout(sample, CAST_WAIT_STEP);
+    });
+  };
+  sample();
 }
 /* ---------------- 曲目右键菜单（2026-10-27，F-5）----------------
    为什么要有它：F-5 需要一个「按需看音质」的入口，但曲目行是 7 列网格，
@@ -7007,9 +7063,20 @@ function castPush(file) {
     ADV.backend = 'upnp';
     ADV.upnpDev = dev;
     saveSettings();
-    playPath(file);
+    // 2026-10-30（B2）「点完投送按钮没实时切换，退出重进才对」：
+    //   旧顺序是 playPath()（异步，不返回 Promise）→ toast → pollCastState(true)，
+    //   那一次轮询几乎必然**先于**服务端的 CastManager::start() 到达 ⟹ 读到 running=false
+    //   且 once=true 不重试 ⟹ 按钮永久停在「推送到设备」。
+    //   新顺序：① 本地先乐观点亮（0ms，用户点完立刻有反馈）；② /api/play 落地后做有界收敛
+    //   （最多 5s / 每 300ms，见到会话已建立或 phase==='error' 立刻停）。
+    //   乐观态不是假话：它是「已经开始推送」的即时投影，真实状态由 ② 覆盖，失败会自动退回。
+    CAST.state = { running: true, phase: 'discovering', device: dev, sourceFile: file };
+    applyCastUi();
     toast('已推送到 ' + castDevNameOf(dev));
-    pollCastState(true);
+    playPath(file).then(function (j) {
+      if (j && j.ok === false) pollCastState(true);   // 失败：单次采样把按钮退回真实状态
+      else pollCastState(true, true);                 // 成功：收敛等待到 running/serving
+    }, function () { pollCastState(true); });
   };
   npPickCastDevice(function (d) { if (d) go(d); });
 }
@@ -8667,14 +8734,19 @@ function eqSettingsHtml() {
     + '<button class="btn" id=peqSave type=button>保存为预设…</button>'
     + '<button class="btn" id=peqDelete type=button>删除预设</button>'
     + '<button class="btn" id=peqReset type=button>重置 Flat</button>'
-    + '<span id=peqMsg style="font-size:11.5px;color:var(--mut2)"></span>'
+    // 2026-10-30（用户实测「移动节点就会动排版，画面一抖一抖的」）：这一行以前是工具条里的
+    // 一个**自适应宽度**的 inline 段，而它每 ~100ms 就被 peqApply 重写成不同长度
+    //（"应用中…" ↔ 长摘要）。工具条是 flex-wrap，文字一长就多折一行 ⟹ 整块内容（含曲线、
+    // 20 行表格）被往下推 31px，拖拽时看起来就是"排版在抖"。
+    // 修法：独立占一行 + 固定行高 18px + nowrap/ellipsis。文案再长也绝不改变高度。
+    + '<span id=peqMsg class=peqmsg></span>'
     + '</div>'
     + '<div class="sfld wide"><div class="peqcv" id=peqCurve></div></div>'
     + '<div class="sfld wide"><div class=peqwrap>'
     + '<div id=peqRows class=peqrows></div>'
     + '</div>'
     + '<div style="font-size:11px;color:var(--mut2);margin-top:5px">增益 ±24 dB（步进 0.1；超过 ±12 dB 请复核）· Q 0.1~20 · 频率 10 Hz~20 kHz。'
-    + '曲线上 <b>拖拽节点</b>：水平=频率（对数）、垂直=增益；<b>Shift+拖 / 滚轮</b>=改 Q；<b>双击节点</b>=该段复位（0 dB / Q 1.41）。'
+    + '曲线上 <b>拖拽节点</b>：垂直=增益；<b>按住 ⌥ Option 再拖</b>=横向改频率（对数轴，默认不跟着手抖跑）；<b>Shift+拖 / 滚轮</b>=改 Q；<b>双击节点</b>=该段复位（0 dB / Q 1.41）。'
     + '选中行后 <b>↑↓</b>=增益 0.1 dB、<b>←→</b>=频率 ±1%（Shift 加速）。修改即时生效（热更新，交叉淡入防爆音），并自动保存到 rlplayer-peq.txt。</div></div>');
 
 
@@ -8888,6 +8960,10 @@ function peqBandsParam() {
 // 261024-03 #5 HIFI 化：曲线上叠 20 个频段节点（可拖/滚轮/双击），并做增量更新
 //（增量很关键：拖拽时 peqApply 每次回来都重建 SVG 会丢掉 pointer capture，拖到一半就断）
 var PEQ_VIEW = null;      // 曲线坐标映射（拖拽换算要用）
+// 2026-10-30 用户实测 bug：图只能上下拉 ±6 dB —— 因为量程按数据自适应、下限写死 ±6，
+// 而拖拽把「画布内比例」钳在 0..1 ⟹ 拖到画布边就是量程边，永远到不了 ±24。
+// PEQ_VIEW_HINT 是**拖拽期的量程下限**：越界拖时把它撑大（只增不减），松手清空回到自适应。
+var PEQ_VIEW_HINT = null; // {maxDb, minDb}；null = 完全按数据自适应
 var PEQ_DRAG = null;      // {i, mode:'g'|'q', y0, q0}
 var PEQ_LASTCLICK = null; // {i, t}：自己判双击（不依赖宿主是否派发 dblclick）
 // 2026-10-27 R-5：波形宽度自适应。旧版 viewBox 写死 640 宽、CSS 拉到 100% ⟹ 大屏上整块 SVG
@@ -8927,6 +9003,100 @@ function peqResample(points, n) {
     out.push([f, a[1] + (b[1] - a[1]) * u]);
   }
   return out;
+}
+/* ---------------- PEQ 曲线预览（拖拽期 60fps 用，2026-10-30 B3） ----------------
+   用户原话：「新增的 eq 图调整的曲线非常不顺滑，带的整体视觉上非常卡顿」。
+   根因：权威曲线只由 /api/peq 的响应刷新，而 POST 是 100ms 节流 ⟹ 拖拽时节点跟手、
+   曲线却 10Hz 跳格；而且每次响应都会重建整个网格（innerHTML）+ 量宽
+   （getBoundingClientRect = 强制同步布局）⟹ 一帧里既有 DOM 重建又有强制布局，整体发卡。
+   修法分两层：
+     * 这里按 **C++ 同一套 RBJ 公式**（src/dsp/peq.h 的 peq_design_band / peq_response_db）
+       在前端算一遍，**只在按住拖拽期间**当预览用，每帧最多更新一次 polyline 的 points；
+     * 权威曲线仍然来自后端（peqApply 落地时直接替换）；两套公式同源 ⟹ 替换时不跳变。
+   ⚠️ 为什么破例"抄第二份公式"：60fps 的曲线跟随无法靠 HTTP 往返实现；正确性的真相源
+      依然是后端（预览只在 pointer 按住期间存在，松手后立刻被 peqApply 覆盖）。 */
+function peqBandCoeffs(b, fs) {
+  // 与 peq_design_band 逐行对应：同样的钳位、同样的 RBJ 三种类型、a0 归一化。
+  if (!(fs > 0)) return null;
+  var f0 = Math.min(Math.max(+b.freq || 1000, 10), 0.49 * fs);
+  var q = Math.min(Math.max(+b.q || 1.41, 0.1), 20);
+  var g = Math.min(Math.max(+b.gain || 0, -24), 24);
+  if (Math.abs(g) < 1e-9) return null;             // 0 dB = 恒等（与 C++ 一致）
+  var A = Math.pow(10, g / 40);
+  var w0 = 2 * Math.PI * f0 / fs, cw = Math.cos(w0), sw = Math.sin(w0);
+  var alpha = sw / (2 * q), tsa = 2 * Math.sqrt(A) * alpha;
+  var b0, b1, b2, a0, a1, a2;
+  if (b.type === 'LS') {
+    b0 = A * ((A + 1) - (A - 1) * cw + tsa);
+    b1 = 2 * A * ((A - 1) - (A + 1) * cw);
+    b2 = A * ((A + 1) - (A - 1) * cw - tsa);
+    a0 = (A + 1) + (A - 1) * cw + tsa;
+    a1 = -2 * ((A - 1) + (A + 1) * cw);
+    a2 = (A + 1) + (A - 1) * cw - tsa;
+  } else if (b.type === 'HS') {
+    b0 = A * ((A + 1) + (A - 1) * cw + tsa);
+    b1 = -2 * A * ((A - 1) + (A + 1) * cw);
+    b2 = A * ((A + 1) + (A - 1) * cw - tsa);
+    a0 = (A + 1) - (A - 1) * cw + tsa;
+    a1 = 2 * ((A - 1) - (A + 1) * cw);
+    a2 = (A + 1) - (A - 1) * cw - tsa;
+  } else {
+    b0 = 1 + alpha * A; b1 = -2 * cw; b2 = 1 - alpha * A;
+    a0 = 1 + alpha / A; a1 = -2 * cw; a2 = 1 - alpha / A;
+  }
+  var inv = Math.abs(a0) > 1e-300 ? 1 / a0 : 0;
+  return [b0 * inv, b1 * inv, b2 * inv, a1 * inv, a2 * inv];
+}
+function peqPreviewPoints(bands, preampDb, fs, n, bypass) {
+  var out = [], k;
+  if (!(fs > 0)) fs = 48000;
+  if (bypass) {                                    // 旁路 = 平直 0 dB（同 peq_response_db 的早期 return）
+    for (k = 0; k < n; k++) out.push([20 * Math.pow(1000, k / (n - 1)), 0]);
+    return out;
+  }
+  var co = [];
+  for (var i = 0; i < bands.length; i++) {
+    if (bands[i].on === false) continue;
+    var c = peqBandCoeffs(bands[i], fs);
+    if (c) co.push(c);
+  }
+  var pre = Math.min(Math.max(+preampDb || 0, -24), 24);
+  var base = 20 * Math.log10(Math.max(Math.pow(10, pre / 20), 1e-300));
+  for (k = 0; k < n; k++) {
+    var f = 20 * Math.pow(1000, k / (n - 1));
+    var fn = Math.min(Math.max(f / (fs * 0.5), 0), 1);
+    var w = Math.PI * fn, cw = Math.cos(w), sw = Math.sin(w);
+    var c2 = Math.cos(2 * w), s2 = Math.sin(2 * w);
+    var db = base;
+    for (var j = 0; j < co.length; j++) {
+      var q = co[j];
+      var nr = q[0] + q[1] * cw + q[2] * c2, ni = -(q[1] * sw + q[2] * s2);
+      var dr = 1 + q[3] * cw + q[4] * c2, di = -(q[3] * sw + q[4] * s2);
+      db += 20 * Math.log10(Math.sqrt(nr * nr + ni * ni) / (Math.sqrt(dr * dr + di * di) + 1e-300) + 1e-300);
+    }
+    out.push([f, db]);
+  }
+  return out;
+}
+// 廉价重绘：只改 polyline 的 points（不量宽、不重建网格、不动节点）。
+function peqRedrawLine(points) {
+  var box = D('peqCurve'); if (!box) return;
+  var svg = box.querySelector('svg.peqsvg'); if (!svg) return;
+  var line = svg.querySelector('.peqline'); if (!line) return;
+  var pts = '';
+  for (var i = 0; i < points.length; i++)
+    pts += (i ? ' ' : '') + peqFreqX(points[i][0]).toFixed(1) + ',' + peqGainY(points[i][1]).toFixed(1);
+  line.setAttribute('points', pts);
+}
+// 拖拽期的预览上下文：一次读表（20 行 × 5 控件），之后每帧只用缓存 + 当前拖拽值算曲线。
+function peqPreviewCtx(i) {
+  return {
+    bands: peqCollectBands(),
+    fs: (PEQ_STATE && PEQ_STATE.fs > 0) ? PEQ_STATE.fs : 48000,
+    pre: (D('peqPreamp') && D('peqPreamp').value) || 0,
+    bypass: !!(D('peqBypass') && D('peqBypass').checked),
+    idx: Math.max(0, i - 1)
+  };
 }
 // 容器宽度变了就按新宽度重画。亚像素抖动不重画 —— ResizeObserver 里改 viewBox 会改变 SVG
 // 高度（height:auto 跟宽高比走），不加这道闸可能自激。
@@ -8970,8 +9140,10 @@ function peqCurveFreqAt(x) {
 }
 function peqCurveGainAt(y) {
   var v = PEQ_VIEW; if (!v) return 0;
+  // 不再把比例钳在 0..1：指针拖出画布上下边时按同一 dB/像素继续加/减，
+  // 硬上限仍然只有 ±24（= 表格输入框与引擎的编辑上限）。
   var t = (y - v.PADT) / (v.H - v.PADT - v.PADB);
-  return Math.max(-24, Math.min(24, v.maxDb - Math.max(0, Math.min(1, t)) * (v.maxDb - v.minDb)));
+  return Math.max(-24, Math.min(24, v.maxDb - t * (v.maxDb - v.minDb)));
 }
 function peqDrawCurve(points) {
   var box = D('peqCurve'); if (!box) return;
@@ -8992,21 +9164,34 @@ function peqDrawCurve(points) {
   PEQ_PTS = wantPts;
   var maxDb = 6, minDb = -6;
   points.forEach(function (p) { maxDb = Math.max(maxDb, p[1]); minDb = Math.min(minDb, p[1]); });
-  maxDb = Math.ceil(maxDb / 3) * 3; minDb = Math.floor(minDb / 3) * 3;
+  // 拖拽期量程下限（方案 C：往边上一推，画布自己放大，节点继续跟手）
+  if (PEQ_VIEW_HINT) {
+    maxDb = Math.max(maxDb, PEQ_VIEW_HINT.maxDb);
+    minDb = Math.min(minDb, PEQ_VIEW_HINT.minDb);
+  }
+  // 量程不超出编辑上限 ±24（与表格输入框 min/max 一致），也不因空数据变成退化的 0 跨度
+  maxDb = Math.min(24, Math.ceil(maxDb / 3) * 3); minDb = Math.max(-24, Math.floor(minDb / 3) * 3);
+  // 2026-10-30（B3）：量程与宽度都没变时就**不重建网格**。
+  // 拖拽期权威曲线按 100ms 回来一次，旧实现每次都 innerHTML 重建 ~25 个网格节点
+  // （刻度线+文字）并重新量宽（getBoundingClientRect = 强制同步布局）⟹ 用户看到"整体视觉卡顿"。
+  // 现在：只有量程/宽度真的变了才重建网格，其余情况只换 polyline 的 points。
+  var sameGeom = !!(PEQ_VIEW && PEQ_VIEW.W === W && PEQ_VIEW.maxDb === maxDb && PEQ_VIEW.minDb === minDb);
   PEQ_VIEW = { W: W, H: H, PADL: PADL, PADR: PADR, PADT: PADT, PADB: PADB, maxDb: maxDb, minDb: minDb };
   points = peqResample(points, wantPts);
 
   var g = '';
-  for (var d = Math.ceil(minDb / 6) * 6; d <= maxDb; d += 6) {
-    g += '<line x1="' + PADL + '" y1="' + peqGainY(d).toFixed(1) + '" x2="' + (W - PADR) + '" y2="' + peqGainY(d).toFixed(1) +
-         '" stroke="var(--line)" stroke-width="1" stroke-dasharray="' + (d === 0 ? '4 3' : '2 4') + '" opacity="' + (d === 0 ? '0.9' : '0.5') + '"/>';
-    g += '<text x="2" y="' + (peqGainY(d) + 3).toFixed(1) + '" font-size="9" fill="var(--mut2)">' + d + 'dB</text>';
+  if (!sameGeom) {
+    for (var d = Math.ceil(minDb / 6) * 6; d <= maxDb; d += 6) {
+      g += '<line x1="' + PADL + '" y1="' + peqGainY(d).toFixed(1) + '" x2="' + (W - PADR) + '" y2="' + peqGainY(d).toFixed(1) +
+           '" stroke="var(--line)" stroke-width="1" stroke-dasharray="' + (d === 0 ? '4 3' : '2 4') + '" opacity="' + (d === 0 ? '0.9' : '0.5') + '"/>';
+      g += '<text x="2" y="' + (peqGainY(d) + 3).toFixed(1) + '" font-size="9" fill="var(--mut2)">' + d + 'dB</text>';
+    }
+    [[20, '20'], [100, '100'], [1000, '1k'], [10000, '10k'], [20000, '20k']].forEach(function (fk) {
+      var x = peqFreqX(fk[0]);
+      g += '<line x1="' + x.toFixed(1) + '" y1="' + PADT + '" x2="' + x.toFixed(1) + '" y2="' + (H - PADB) + '" stroke="var(--line)" stroke-width="1" stroke-dasharray="2 4" opacity=".45"/>';
+      g += '<text x="' + (x - 8).toFixed(1) + '" y="' + (H - 4) + '" font-size="9" fill="var(--mut2)">' + fk[1] + '</text>';
+    });
   }
-  [[20, '20'], [100, '100'], [1000, '1k'], [10000, '10k'], [20000, '20k']].forEach(function (fk) {
-    var x = peqFreqX(fk[0]);
-    g += '<line x1="' + x.toFixed(1) + '" y1="' + PADT + '" x2="' + x.toFixed(1) + '" y2="' + (H - PADB) + '" stroke="var(--line)" stroke-width="1" stroke-dasharray="2 4" opacity=".45"/>';
-    g += '<text x="' + (x - 8).toFixed(1) + '" y="' + (H - 4) + '" font-size="9" fill="var(--mut2)">' + fk[1] + '</text>';
-  });
   var pts = points.map(function (p) { return peqFreqX(p[0]).toFixed(1) + ',' + peqGainY(p[1]).toFixed(1); }).join(' ');
 
   var svg = box.querySelector('svg.peqsvg');
@@ -9017,7 +9202,7 @@ function peqDrawCurve(points) {
         '<polyline class=peqline fill=none stroke="var(--acc)" stroke-width=1.8 stroke-linejoin=round stroke-linecap=round points=""/>' +
         '<g class=peqnodes></g>' +
       '</svg>' +
-      '<div class=peqlegend><span><b>拖拽节点</b> 水平=频率 · 垂直=增益</span><span><b>Shift+拖 / 滚轮</b> 改 Q</span>' +
+      '<div class=peqlegend><span><b>拖拽节点</b> 垂直=增益（<b>按住 ⌥ Option</b> 才横向改频率）</span><span><b>Shift+拖 / 滚轮</b> 改 Q</span>' +
       '<span><b>双击</b> 该段复位</span><span><b>↑↓←→</b> 微调（Shift 加速）</span></div>' +
       '<div class=peqtip id=peqTip></div>';
     svg = box.querySelector('svg.peqsvg');
@@ -9025,9 +9210,12 @@ function peqDrawCurve(points) {
   }
   // R-5：宽度变了就同步 viewBox（不只是首次建 SVG 时写一次），否则缩放后图被拉变形/留白。
   svg.setAttribute('viewBox', '0 0 ' + W + ' ' + H);
-  svg.querySelector('.peqgrid').innerHTML = g;
+  if (!sameGeom) svg.querySelector('.peqgrid').innerHTML = g;   // 量程没变 → 网格是同一份，别重建
   svg.querySelector('.peqline').setAttribute('points', pts);
-  peqSyncNodes();
+  // 拖拽期间只更新被拖的那个节点（20 个节点 × 40 次属性写/帧是"跟手但发卡"的另一半原因）；
+  // 量程变了（sameGeom=false）则所有节点都要跟着重新定位。
+  if (PEQ_DRAG && sameGeom && typeof PEQ_DRAG.i === 'number') peqSyncNodes(PEQ_DRAG.i);
+  else peqSyncNodes();
   peqObserveWidth();   // 挂上 ResizeObserver（同一容器重复调用是 no-op）
 }
 /* ---------------- PEQ：行渲染 / 选中 / 曲线节点交互（261024-03 #5） ---------------- */
@@ -9039,10 +9227,12 @@ function peqRowTipText(b) {
          ' dB · Q ' + b.q.toFixed(2) + ' · ' + b.type + (b.on ? '' : '（已关）');
 }
 // tooltip 定位：有事件用鼠标位置；没有（滚轮/键盘）就用节点自身位置
-function peqTipAt(html, ev, node) {
+// boxRect：调用方已知容器位置时可传进来（拖拽热路径每帧都要定位 tooltip，
+// 每次 getBoundingClientRect 都是一次强制同步布局）。不传则自己量（默认行为不变）。
+function peqTipAt(html, ev, node, boxRect) {
   var tip = D('peqTip'), box = D('peqCurve');
   if (!tip || !box) return;
-  var br = box.getBoundingClientRect();
+  var br = boxRect || box.getBoundingClientRect();
   var cx, cy;
   if (ev && typeof ev.clientX === 'number') { cx = ev.clientX; cy = ev.clientY; }
   else if (node) { var nr = node.getBoundingClientRect(); cx = nr.left + nr.width / 2; cy = nr.top + nr.height / 2; }
@@ -9072,6 +9262,86 @@ function peqSvgPoint(ev) {
            y: (ev.clientY - r.top) / r.height * PEQ_VIEW.H };
 }
 function peqNodeRow(i) { return document.querySelector('#peqRows .peqr[data-i="' + i + '"]'); }
+// 拖拽的两段式处理（2026-10-30 B3）：
+//   ① peqDragValue()：**同步**执行「值 + 量程」——拖出来的 .peqG/.peqF 数值和 PEQ_VIEW 量程
+//      必须立刻可见（check_111_peq_drag 就是同步读这两样；若也塞进 rAF，会变成"拖了但数值没动"）。
+//      成本极低：几个浮点运算 + 两个 input.value 写；量程扩张只在 3dB 台阶上发生。
+//   ② peqDragVisual()：**每帧最多一次**的视觉更新（曲线预览 polyline / 节点 / tooltip）。
+//      这才是 120～250Hz pointermove 里的重活：旧的 tooltip 定位每次都 getBoundingClientRect
+//      （强制同步布局）+ 到处 setAttribute，一帧干好几次 ⟹ 用户看到的"整体视觉卡顿"。
+function peqSvgPointCached(ev, r) {
+  if (!r) return peqSvgPoint(ev);
+  if (!r.width || !r.height || !PEQ_VIEW) return null;
+  return { x: (ev.clientX - r.left) / r.width * PEQ_VIEW.W,
+           y: (ev.clientY - r.top) / r.height * PEQ_VIEW.H };
+}
+function peqDragGeomRefresh(dg, svgEl, box) {
+  // 拖拽期间窗口/滚动一般不动，几何每 250ms 复核一次即可（原来每条 pointermove 都量一次）
+  if (dg.rect && (nowMs() - (dg.rectAt || 0)) <= 250) return;
+  dg.rect = svgEl.getBoundingClientRect();
+  dg.boxRect = box ? box.getBoundingClientRect() : null;
+  dg.rectAt = nowMs();
+  dg.pxPerUnit = (dg.rect && dg.rect.height && PEQ_VIEW) ? dg.rect.height / PEQ_VIEW.H : (dg.pxPerUnit || 1);
+}
+function peqDragValue(e) {
+  var dg = PEQ_DRAG; if (!dg) return;
+  var tr = peqNodeRow(dg.i); if (!tr) return;
+  var box = D('peqCurve');
+  var svgEl = box && box.querySelector('svg.peqsvg');
+  if (!svgEl) return;
+  peqDragGeomRefresh(dg, svgEl, box);
+  if (dg.mode === 'q') {
+    var qv = Math.max(0.1, Math.min(20, dg.q0 * Math.pow(2, (dg.y0 - e.clientY) / 60)));
+    tr.querySelector('.peqQ').value = qv.toFixed(2);
+    return;
+  }
+  var v = PEQ_VIEW;
+  // 2026-10-30 用户实测：节点能被左右拖动是**设计**（图例原文写着「水平=频率」），
+  //   但副作用很烦 —— 只想上下调增益时，鼠标/手指几像素的横向抖动就会改频率，
+  //   而且频率没有"复位"入口（双击只复位 0dB/Q）。
+  // 现在：默认**只改增益**（垂直），要改频率必须**按住 Option(⌥)** 再拖。
+  //   Shift+拖 仍然是改 Q（与原来一致）；Option 与 Shift 同时按 = 只改频率、不改 Q。
+  var altX = !!(e.altKey || e.optionKey);
+  if (altX) {
+    var p = peqSvgPointCached(e, dg.rect); if (!p) return;
+    tr.querySelector('.peqF').value = peqFreqText(peqCurveFreqAt(p.x));
+  }
+  if (!v) return;
+  var plotH = Math.max(1, v.H - v.PADT - v.PADB);
+  var dbPerUnit = (v.maxDb - v.minDb) / plotH;               // dB / viewBox 单位
+  var dyPx = dg.yPrev - e.clientY;                           // >0 = 向上 = 加增益
+  dg.yPrev = e.clientY;
+  dg.g = Math.max(-24, Math.min(24, dg.g + dyPx / (dg.pxPerUnit || 1) * dbPerUnit));
+  var g = dg.g;
+  tr.querySelector('.peqG').value = g.toFixed(1);
+  if (g > v.maxDb || g < v.minDb) {
+    // 拖出当前量程就当场扩量程并整块重绘（只扩不缩；松手后由 peqApply 回到按数据自适应）
+    // 只在 3dB 台阶上发生，量到了才重绘，不是每条事件都重绘（旧实现的事件频率成本在别处）
+    var hint = PEQ_VIEW_HINT || { maxDb: v.maxDb, minDb: v.minDb };
+    PEQ_VIEW_HINT = { maxDb: Math.max(hint.maxDb, g), minDb: Math.min(hint.minDb, g) };
+    peqDrawCurve((PEQ_STATE && PEQ_STATE.points) || []);
+  }
+}
+function peqDragPreview(tr) {
+  var dg = PEQ_DRAG; if (!dg || !dg.ctx || !dg.ctx.bands) return;
+  var b = peqRowBand(tr);                       // 只读 1 行（5 个控件）
+  var bands = dg.ctx.bands, k = dg.ctx.idx;
+  if (bands[k]) { bands[k].gain = b.gain; bands[k].freq = b.freq; bands[k].q = b.q; bands[k].on = b.on; }
+  peqRedrawLine(peqPreviewPoints(bands, dg.ctx.pre, dg.ctx.fs, PEQ_PTS, dg.ctx.bypass));
+}
+function peqDragVisual(e) {
+  var dg = PEQ_DRAG; if (!dg) return;
+  dg.raf = 0;
+  var tr = peqNodeRow(dg.i); if (!tr) return;
+  var box = D('peqCurve');
+  var svgEl = box && box.querySelector('svg.peqsvg');
+  if (!svgEl) return;
+  if (dg.mode !== 'q') peqDragPreview(tr);   // 量程内：本地公式预览，每帧只换 polyline 的 points
+  peqSyncNodes(dg.i);
+  var node = svgEl.querySelector('.peqnode[data-i="' + dg.i + '"]');
+  peqTipAt(peqRowTipText(peqRowBand(tr)), e, node, dg.boxRect);
+  peqScheduleApply(100);           // 拖拽 100ms 节流（HTTP 那条链路保持原节奏）
+}
 function peqBindCurve() {
   var box = D('peqCurve'); if (!box) return;
   var svg = box.querySelector('svg.peqsvg'); if (!svg) return;
@@ -9126,31 +9396,54 @@ function peqBindCurve() {
       return;
     }
     PEQ_LASTCLICK = { i: i, t: now };
+    // 2026-10-30（B3）：拖拽期一次性缓存「几何 + 预览上下文」，之后每帧不再量布局。
+    //   rect：getBoundingClientRect() 每次调用都会强制同步布局（拖拽 120Hz × 每次都不止一次），
+    //         这是"整体视觉卡顿"最直接的来源；拖拽期间窗口尺寸不会变，量一次就够。
+    //   pxPerUnit：CSS 像素 / viewBox 单位，位移量换算要用。
+    var rect = svg.getBoundingClientRect();
     PEQ_DRAG = { i: i, mode: ev.shiftKey ? 'q' : 'g', y0: ev.clientY,
-                 q0: parseFloat(tr.querySelector('.peqQ').value) || 1.41 };
+                 q0: parseFloat(tr.querySelector('.peqQ').value) || 1.41,
+                 // 增益拖拽用「位移累加」而不是「绝对坐标映射」：
+                 // 绝对映射在自动扩量程时会自我放大（量程变大→同一位置对应更大 dB→再扩量程），
+                 // 一次拖出边界就冲到 ±24，停不到 +9 这种中间值。位移累加下灵敏度随量程自动变缓，
+                 // 指针不动值就不动，节点跟手且可精确停在任意值。
+                 g: parseFloat(tr.querySelector('.peqG').value) || 0,
+                 yPrev: ev.clientY,
+                 rect: rect,
+                 pxPerUnit: (rect && rect.height) ? rect.height / (PEQ_VIEW ? PEQ_VIEW.H : 132) : 1,
+                 ctx: peqPreviewCtx(i),
+                 raf: 0, ev: null };
     try { svg.setPointerCapture(ev.pointerId); } catch (e) { }
     var c = svg.querySelector('.peqnode[data-i="' + i + '"]'); if (c) c.classList.add('on');
   });
   svg.addEventListener('pointermove', function (ev) {
     if (!PEQ_DRAG) return;
-    var tr = peqNodeRow(PEQ_DRAG.i); if (!tr) return;
-    if (PEQ_DRAG.mode === 'q') {
-      var qv = Math.max(0.1, Math.min(20, PEQ_DRAG.q0 * Math.pow(2, (PEQ_DRAG.y0 - ev.clientY) / 60)));
-      tr.querySelector('.peqQ').value = qv.toFixed(2);
-    } else {
-      var p = peqSvgPoint(ev); if (!p) return;
-      tr.querySelector('.peqF').value = peqFreqText(peqCurveFreqAt(p.x));
-      tr.querySelector('.peqG').value = peqCurveGainAt(p.y).toFixed(1);
-    }
-    peqSyncNodes();
-    var node = svg.querySelector('.peqnode[data-i="' + PEQ_DRAG.i + '"]');
-    peqTipAt(peqRowTipText(peqRowBand(tr)), ev, node);
-    peqScheduleApply(100);           // 拖拽 100ms 节流
+    // ① 同步：值与量程立刻可见（判据与用户看到的数字都靠它）
+    peqDragValue(ev);
+    // ② 每帧一次：曲线预览 / 节点 / tooltip（旧实现每条事件都干一次 ⟹ 视觉卡顿的来源）
+    PEQ_DRAG.ev = { clientX: ev.clientX, clientY: ev.clientY };
+    if (PEQ_DRAG.raf) return;
+    var run = function () {
+      if (!PEQ_DRAG) return;
+      PEQ_DRAG.raf = 0;
+      var e = PEQ_DRAG.ev;
+      if (e) peqDragVisual(e);
+    };
+    PEQ_DRAG.raf = (typeof requestAnimationFrame === 'function')
+      ? requestAnimationFrame(run) : setTimeout(run, 16);
   });
   var endDrag = function () {
     if (!PEQ_DRAG) return;
+    // 收尾前把排队中的最后一帧算进去：rAF 合并只丢"中间帧"，但最后一帧的位移不能丢，
+    // 否则松手位置会比指针实际位置差几个像素（高刷下尤其明显）。
+    if (PEQ_DRAG.raf) {
+      if (typeof cancelAnimationFrame === 'function') { try { cancelAnimationFrame(PEQ_DRAG.raf); } catch (e) { } }
+      PEQ_DRAG.raf = 0;
+      if (PEQ_DRAG.ev) peqDragVisual(PEQ_DRAG.ev);
+    }
     var i = PEQ_DRAG.i;
     PEQ_DRAG = null;
+    PEQ_VIEW_HINT = null;      // 松手后量程回到「按数据自适应」
     var c = svg.querySelector('.peqnode[data-i="' + i + '"]'); if (c) c.classList.remove('on');
     peqTipHide();
     clearTimeout(PEQ_TIMER); peqApply();   // 松手立刻落一次，不等节流窗口
@@ -9159,11 +9452,25 @@ function peqBindCurve() {
   svg.addEventListener('pointercancel', endDrag);
 }
 // 把 20 个节点同步到当前行值（拖拽/键盘/滚轮后立即反映，不等后端）
-function peqSyncNodes() {
+// only = 段号（1 基）：只同步那一个节点（拖拽热路径；读 1 行而不是 20 行）。
+function peqSyncNodes(only) {
   var box = D('peqCurve');
   var svg = box && box.querySelector('svg.peqsvg');
   if (!svg || !PEQ_VIEW) return;
   var host = svg.querySelector('.peqnodes'); if (!host) return;
+  if (only && host.querySelectorAll('circle.peqhit').length) {
+    var trOne = peqNodeRow(only);
+    if (!trOne) return;
+    var bOne = peqRowBand(trOne);
+    var cOne = host.querySelector('circle.peqnode[data-i="' + only + '"]');
+    if (!cOne) return;
+    var x1 = peqFreqX(bOne.freq).toFixed(1), y1 = peqGainY(bOne.gain).toFixed(1);
+    cOne.setAttribute('cx', x1); cOne.setAttribute('cy', y1);
+    cOne.classList.toggle('off', bOne.on === false);
+    var hOne = host.querySelector('circle.peqhit[data-i="' + only + '"]');
+    if (hOne) { hOne.setAttribute('cx', x1); hOne.setAttribute('cy', y1); }
+    return;
+  }
   var bands = peqCollectBands();
   if (!bands.length && PEQ_STATE && PEQ_STATE.bands) bands = PEQ_STATE.bands;
   if (host.querySelectorAll('circle.peqhit').length !== bands.length) {
@@ -9254,13 +9561,21 @@ function peqAutoPreamp() {
   peqMsg('自动前级：曲线峰值 +' + maxGain.toFixed(1) + ' dB → 前级 ' + pre + ' dB（留出 ' + Math.abs(pre).toFixed(0) + ' dB 余量）');
   toast('自动前级 ' + pre + ' dB（峰值 +' + maxGain.toFixed(1) + ' dB）');
 }
+function peqGainSummary(j) {
+  var maxBand = 0, maxCurve = -Infinity;
+  (j.bands||[]).forEach(function(b){if(b.on) maxBand=Math.max(maxBand,Math.abs(+b.gain||0));});
+  (j.points||[]).forEach(function(p){if(isFinite(+p[1])) maxCurve=Math.max(maxCurve,+p[1]);});
+  var en = document.documentElement.dataset.lang === 'en';
+  var peak = isFinite(maxCurve) ? maxCurve.toFixed(1) : '-';
+  return en
+    ? ('Maximum band gain: ±'+maxBand.toFixed(1)+' dB; overall curve peak: '+peak+' dB (including preamp).'+
+       (maxBand>12?' Above the usual ±12 dB range: review the curve and use Auto Preamp for headroom.':''))
+    : ('实际最大单段 ±'+maxBand.toFixed(1)+' dB；总曲线峰值 '+peak+' dB（含前级）。'+
+       (maxBand>12?'超过常用 ±12 dB：请复核曲线并使用自动前级留出余量。':''));
+}
 function peqRender(j) {
   PEQ_STATE = j;
-  var maxBand = 0, maxCurve = 0;
-  (j.bands||[]).forEach(function(b){if(b.on) maxBand=Math.max(maxBand,Math.abs(+b.gain||0));});
-  (j.points||[]).forEach(function(p){maxCurve=Math.max(maxCurve,+p[1]||0);});
-  peqMsg('实际最大单段 ±'+maxBand.toFixed(1)+' dB；总曲线峰值 '+maxCurve.toFixed(1)+' dB（含前级）。'+
-    (maxBand>12?'超过常用 ±12 dB：请复核曲线并使用自动前级留出余量。':''));
+  peqMsg(peqGainSummary(j));
   if (D('peqBypass')) D('peqBypass').checked = !!j.bypass;
   if (D('peqPreamp')) D('peqPreamp').value = j.preamp;
   peqStatusRender(j);   // 261024-04 #3：状态行跟着后端的真值走
@@ -9277,6 +9592,9 @@ function peqRender(j) {
   peqDrawCurve(j.points);
 }
 function peqMsg(t) { var e = D('peqMsg'); if (e) e.textContent = t || ''; }
+// 拖拽期间的消息：**必须定长**（"实际最大单段…总曲线峰值…超过常用 ±12dB…" 那种长摘要在
+// 拖拽中每 100ms 变一次，既刺眼也曾把工具条撑高）。所以拖拽中只说一句"已应用"，
+// 长摘要等松手（endDrag → peqApply）再给一次。
 // 261024-04 #3：把「旁路 / 生效」的**语义**写成一行常驻状态，而不是只留一个 checkbox 让用户猜。
 // 判据：勾选/取消勾选后这一行文字必须立刻跟着变（不依赖后端往返）。
 // 文案分三态：
@@ -9321,14 +9639,13 @@ function peqApply() {
   api('/api/peq', body).then(function (j) {
     if (!j || !j.ok) { peqMsg('失败：' + ((j && j.error) || '未知错误')); return; }
     PEQ_STATE = j;
-  var maxBand = 0, maxCurve = 0;
-  (j.bands||[]).forEach(function(b){if(b.on) maxBand=Math.max(maxBand,Math.abs(+b.gain||0));});
-  (j.points||[]).forEach(function(p){maxCurve=Math.max(maxCurve,+p[1]||0);});
-  peqMsg('实际最大单段 ±'+maxBand.toFixed(1)+' dB；总曲线峰值 '+maxCurve.toFixed(1)+' dB（含前级）。'+
-    (maxBand>12?'超过常用 ±12 dB：请复核曲线并使用自动前级留出余量。':''));
     peqDrawCurve(j.points);   // 只刷新曲线，不重建输入框（避免打断正在输入的光标）
     peqStatusRender(j);       // 261024-04 #3：状态行刷新（以后端返回值为准）
-    peqMsg('已应用（' + (j.bypass ? '旁路' : '生效') + ' · 采样率 ' + Math.round(j.fs) + ' Hz）');
+    var applied = document.documentElement.dataset.lang === 'en'
+      ? ('Applied ('+(j.bypass?'bypassed':'active')+'; sample rate '+Math.round(j.fs)+' Hz). ')
+      : ('已应用（'+(j.bypass?'旁路':'生效')+' · 采样率 '+Math.round(j.fs)+' Hz）。');
+    // 拖拽中只报进度（定长），松手后才把带峰值/警示的完整摘要在状态行给一次
+    peqMsg(PEQ_DRAG ? applied : (applied + peqGainSummary(j)));
   }).catch(function (e) { peqMsg('失败：' + e); });
 }
 function peqLoadState() {

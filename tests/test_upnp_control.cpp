@@ -13,7 +13,7 @@
 //   4) HTTP 供源 Range 语义（200 / 206 / 416 状态码与 Content-Range）
 //   5) Token 防目录遍历（拒绝 .. 和非法后缀）
 //   6) 采样率取证三态判定（Match / Mismatch / Unknown，告警非 bit-perfect）
-//   7) 本地 HTTP 供源回环实测（端口 8910，Range 分段拉取逐字节校验）
+//   7) 本地 HTTP 供源回环实测（端口 19101/19106，Range 分段拉取逐字节校验）
 //   8) 网络发现用例 opt-in（RTA_NET_TESTS=1 时才发真实 SSDP）
 #include "net/upnp.h"
 #include "net/upnp_control.h"
@@ -329,12 +329,12 @@ int main() {
            "未知时如实标注「未声明具体采样率/未做端到端重采样实测」", a3.detail);
     }
 
-    // ================= 7) 本地 HTTP 供源回环实测（端口 8910） =================
-    std::printf("\n-- 7. 本地 HTTP 供源回环实测 (端口 8910) --\n");
+    // ================= 7) 本地 HTTP 供源回环实测（端口 19101） =================
+    std::printf("\n-- 7. 本地 HTTP 供源回环实测 (端口 19101) --\n");
     {
         UpnpHttpServer server;
-        const uint16_t testPort = 8910;
-        ck(server.start(testPort, "127.0.0.1"), "本地 HTTP 服务在 127.0.0.1:8910 启动成功");
+        const uint16_t testPort = 19101;
+        ck(server.start(testPort, "127.0.0.1"), "本地 HTTP 服务在 127.0.0.1:19101 启动成功");
 
         // 构造 1000 字节特征数据
         std::vector<uint8_t> dummyData(1000);
@@ -342,7 +342,7 @@ int main() {
             dummyData[i] = (uint8_t)(i & 0xFF);
         }
         std::string streamPath = server.register_buffer(dummyData, "audio/wav");
-        std::string baseHttpUrl = "http://127.0.0.1:8910" + streamPath;
+        std::string baseHttpUrl = "http://127.0.0.1:19101" + streamPath;
 
         // a) 全量 GET 请求
         HttpResponse rFull = http_get(baseHttpUrl, {}, 5000);
@@ -371,7 +371,7 @@ int main() {
         ck(rOob.status == 416, "越界 Range 收到 416 响应", std::to_string(rOob.status));
 
         // e) 伪造 token / 目录遍历 -> 404
-        HttpResponse rTraversal = http_get("http://127.0.0.1:8910/stream/../secret.txt", {}, 5000);
+        HttpResponse rTraversal = http_get("http://127.0.0.1:19101/stream/../secret.txt", {}, 5000);
         ck(rTraversal.status == 404, "目录遍历请求收到 404", std::to_string(rTraversal.status));
 
         // f) 访问日志检查
@@ -509,7 +509,7 @@ int main() {
         // (e) 真回环（文件分支 + 真 socket 全链路）：生产 pump_file 在真实 socket 上跑一遍
         {
             UpnpHttpServer server;
-            const uint16_t port = 8913;
+            const uint16_t port = 19106;
             if (server.start(port, "127.0.0.1")) {
                 const std::string sp = server.register_file(tmpPath, "audio/wav");
                 const std::string base = "http://127.0.0.1:" + std::to_string(port) + sp;
@@ -526,7 +526,7 @@ int main() {
                 server.stop();
                 ck(!server.is_running(), "文件供源服务安全停止");
             } else {
-                ck(false, "文件供源回环服务启动（127.0.0.1:8913）", "端口被占用");
+                ck(false, "文件供源回环服务启动（127.0.0.1:19106）", "端口被占用");
             }
         }
 

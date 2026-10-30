@@ -16,7 +16,7 @@
 //   node tools/check_111_i18n.js --binary build-mac/rtaweb [--keep]
 'use strict';
 const fs = require('fs'), os = require('os'), path = require('path'), net = require('net');
-const { spawn } = require('child_process'), ub = require('./uibrowser');
+const { spawn, execFileSync } = require('child_process'), ub = require('./uibrowser');
 
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'rlp-111-i18n-'));
 const port = 19106, browserPort = 9712;
@@ -41,18 +41,33 @@ function ck(v, name, data) {
   console.log((v ? 'PASS ' : 'FAIL ') + name + (data === undefined ? '' : ' ' + JSON.stringify(data)));
 }
 const pause = ms => new Promise(r => setTimeout(r, ms));
+function verifyOwnedServer() {
+  const owner = execFileSync('ps', ['-p', String(child.pid), '-o', 'uid=,ppid=,comm='], { encoding: 'utf8' }).trim();
+  fs.appendFileSync(path.join(root, 'owners.log'), owner + '\n');
+  const m = owner.match(/^(\d+)\s+(\d+)\s+(.+)$/);
+  if (!m || +m[1] !== process.getuid() || +m[2] !== process.pid || path.basename(m[3]) !== path.basename(binary))
+    throw Error('server identity changed; no signal sent');
+}
 
 // 在页面里跑：抓出所有可见中文（文本节点 + 会被朗读的属性）
-const COLLECT = `(() => {
+//
+// 两类**操作系统/用户提供的专有名词**必须原样显示，不计作漏译（翻译层无权改写身份信息）：
+//   ① 真实文件名/路径：含斜杠且有扩展名的词元；
+//   ② 真实音频设备名：由 CoreAudio/驱动提供（例如内置扬声器在中文系统上就叫「Mac mini扬声器」），
+//      运行期从 /api/devices 取真实名字注入 COLLECT，不写死任何字符串。
+// 判据因此是「除这两类专有名词外，可见文本里不得残留中文」，而不是「整页零中文」。
+const COLLECT = `((preservedNames) => {
   const CJK = /[\\u3400-\\u4dbf\\u4e00-\\u9fff\\uf900-\\ufaff]/;
-  // 例外：**真实存在的文件名/路径**不翻译（例如 docs/GPU卷积与升频效率细查.md）。
-  // 判据不是"看起来像路径"，而是带扩展名且含斜杠或已知后缀的词元；其余中文一律算漏译。
+  const names = (preservedNames || []).filter(Boolean).sort((a, b) => b.length - a.length);
   // 逐词剔除「含中文 + 带斜杠 + 有扩展名」的路径词元（例如 docs/GPU卷积与升频效率细查.md）。
   // 不用复杂正则：这段是嵌在 JS 模板字符串里的代码，转义层数多，逐词判断更直观也更好改。
   const stripPaths = s => s.split(/\\s+/).filter(w => {
     const isPath = w.indexOf('/') >= 0 && /\\.[A-Za-z0-9]{2,5}$/.test(w);
     return !(isPath && CJK.test(w));
   }).join(' ');
+  // 先把真实设备名整段挖掉（设备名可能带空格，不能按词切）
+  const stripNames = s => names.reduce((acc, nm) => acc.split(nm).join(' '), s);
+  const residue = s => stripPaths(stripNames(s));
   const out = [];
   // 只算**用户当下能看见**的文字：隐藏的 DOM（display:none / visibility / 0 尺寸）不计。
   // 为什么必须过滤：设置页整块在启动时就渲染好但隐藏，不过滤会把没打开过的页签也算进来，
@@ -80,23 +95,24 @@ const COLLECT = `(() => {
     if (tag === 'script' || tag === 'style' || tag === 'textarea') continue;
     if (!visible(p)) continue;
     const t = (n.nodeValue || '').trim();
-    if (t && CJK.test(stripPaths(t))) out.push(t.slice(0, 160));
+    if (t && CJK.test(residue(t))) out.push(t.slice(0, 160));
   }
   for (const el of document.body.querySelectorAll('[title],[placeholder],[aria-label],[alt],[data-tip]')) {
     if (!visible(el)) continue;
     for (const a of ['title', 'placeholder', 'aria-label', 'alt', 'data-tip']) {
       const v = el.getAttribute(a);
-      if (v && CJK.test(stripPaths(v))) out.push(a + '=' + v.slice(0, 160));
+      if (v && CJK.test(residue(v))) out.push(a + '=' + v.slice(0, 160));
     }
   }
   return out;
-})()`;
+})`;
 
 async function runLang(lang) {
   // 每次换配置都**重启服务**：rtaweb 启动时把设置读进内存，/api/settings 返回的是内存副本。
   // 只改磁盘不重启，页面会被内存里的旧主题覆盖 —— 那是测试假象，不是产品行为（本轮踩过）。
   fs.writeFileSync(conf, `backend=null\nmetaon=0\nmetallm=0\nlang=${lang}\ntheme=light\nuistyle=apple\n`);
   if (child) {
+    verifyOwnedServer();
     child.kill('SIGTERM');
     await Promise.race([new Promise(r => child.once('exit', r)), pause(10000)]);
     if (child.exitCode === null) throw Error('owned server did not exit after TERM');
@@ -122,6 +138,12 @@ async function runLang(lang) {
   try {
     // ---------- 英文模式 ----------
     await runLang('en');
+    // 真实设备名是 OS/驱动提供的专有名词（中文系统上内置扬声器就叫「Mac mini扬声器」），
+    // 必须原样显示；从生产 API 取真实名字，绝不写死，也绝不用它去豁免可翻译文案。
+    const devs = await (await fetch(`http://127.0.0.1:${port}/api/devices`)).json();
+    const osNames = (devs.devices || []).map((d) => d && d.name).filter((n) => typeof n === 'string' && n);
+    ck(osNames.length > 0, 'production /api/devices reported real device names (OS proper nouns)', osNames);
+    const collect = (extra) => session.eval(`${COLLECT}(${JSON.stringify(osNames.concat(extra || []))})`);
     const langAttr = await session.eval("document.documentElement.dataset.lang + '|' + document.documentElement.lang");
     ck(langAttr === 'en|en', 'html data-lang/lang = en|en', langAttr);
 
@@ -131,7 +153,7 @@ async function runLang(lang) {
     for (const v of views) {
       await session.eval(`(function(){var n=document.querySelector('.nav[data-v=${v}]'); if(n) n.click();})()`);
       await pause(350);
-      const got = await session.eval(COLLECT);
+      const got = await collect();
       for (const s of got) leftovers.push(`${v}: ${s}`);
       // 反空跑检查：视图必须真的渲染出文字，否则"零中文"只是因为页面是空的
       const len = await session.eval("(document.body.innerText||'').replace(/\\s+/g,' ').trim().length");
@@ -142,13 +164,13 @@ async function runLang(lang) {
     for (const g of ['adv', 'in', 'out', 'pcm', 'sdm', 'eq', 'cal', 'meta', 'stream', 'diag']) {
       await session.eval(`openSettingsTab('${g}')`);
       await pause(450);
-      const got = await session.eval(COLLECT);
+      const got = await collect();
       for (const s of got) leftovers.push(`settings/${g}: ${s}`);
     }
     // 帮助浮层
     await session.eval("openSettingsTab('eq');document.getElementById('bHelp').click()");
     await pause(350);
-    for (const s of await session.eval(COLLECT)) leftovers.push(`help: ${s}`);
+    for (const s of await collect()) leftovers.push(`help: ${s}`);
     await session.eval("var c=document.getElementById('mclose'); if(c) c.click()");
     await pause(200);
 
@@ -163,7 +185,7 @@ async function runLang(lang) {
     ck(zhAttr === 'zh|zh', 'html data-lang/lang = zh|zh', zhAttr);
     const zhNav = await session.eval("document.querySelector('.nav[data-v=settings]').textContent.trim()");
     ck(zhNav.includes('设置'), 'chinese mode still shows Chinese nav label', zhNav);
-    const zhCount = (await session.eval(COLLECT)).length;
+    const zhCount = (await collect()).length;
     ck(zhCount > 20, 'chinese mode still has plenty of Chinese text (sanity: page is not empty)', zhCount);
 
     // ---------- 切换开关存在 ----------
@@ -211,14 +233,17 @@ async function runLang(lang) {
 
     // ---------- 真正的切换链路：改下拉 → POST 保存 → 页面重载 → 变英文 ----------
     // 用户口径：选中就切换；切换会重载，但必须**留在当前页签**，不许跳回「专辑」。
+    await runLang('zh');
     await session.eval("openSettingsTab('out')");
     await pause(400);
-    await session.eval("(()=>{var s=document.getElementById('sp_lang');s.value='en';s.dispatchEvent(new Event('change'));})()");
+    const beforeSwitch = await session.eval("document.documentElement.dataset.lang + '|' + document.getElementById('sp_lang').value");
+    ck(beforeSwitch === 'zh|zh', 'language switch starts from a genuinely Chinese document and selector', beforeSwitch);
+    await session.eval("window.__switchDocument = true;var s=document.getElementById('sp_lang');s.value='en';s.dispatchEvent(new Event('change'));");
     let switched = false;
     for (let i = 0; i < 60; i++) {
       await pause(200);
       try {
-        if (await session.eval("document.documentElement.dataset.lang==='en'")) { switched = true; break; }
+        if (await session.eval("document.documentElement.dataset.lang==='en' && !window.__switchDocument && typeof openSettingsTab==='function'")) { switched = true; break; }
       } catch { }
     }
     ck(switched, 'language selector switch reloads the page into English');
@@ -238,6 +263,7 @@ async function runLang(lang) {
   } finally {
     if (session) await session.close();
     if (child && child.exitCode === null) {
+      verifyOwnedServer();
       child.kill('SIGTERM');
       await Promise.race([new Promise(r => child.once('exit', r)), pause(10000)]);
       if (child.exitCode === null) throw Error('owned server did not exit after TERM');

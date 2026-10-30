@@ -286,6 +286,17 @@ int main(int argc, char** argv) {
               "macOS 不虚报 Native DSD（无通用用户态通路）");
     }
 
+    // ---------- 1d. AudioOutput Hog 接口只读默认契约 ----------
+    std::printf("\n[1d] AudioOutput Hog 接口只读默认契约\n");
+    {
+        auto outTest = create_audio_output();
+        check(outTest != nullptr, "create_audio_output 成功");
+        if (outTest) {
+            check(outTest->hog_requested() == false, "初始状态 hog_requested() == false");
+            check(outTest->hog_acquired() == false, "初始状态 hog_acquired() == false");
+        }
+    }
+
     // ---------- 2. 纯离线：decide_route 与真实设备能力交叉验证 ----------
     std::printf("\n[2] 用真实设备能力跑 decide_route（纯函数，不开流）\n");
     if (!caps.rates.empty()) {
@@ -527,6 +538,8 @@ int main(int argc, char** argv) {
     {
         auto o4 = create_audio_output();
         o4->close();          // 未 open 就 close
+        check(o4->hog_requested() == false, "close 后 hog_requested 保持 false");
+        check(o4->hog_acquired() == false, "close 后 hog_acquired 保持 false");
         o4->close();          // 再 close 一次
         check(true, "未 open 时重复 close 不崩溃");
     }

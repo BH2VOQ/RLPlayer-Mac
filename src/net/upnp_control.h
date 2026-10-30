@@ -583,27 +583,29 @@ public:
         return execute_action(avTransportUrl_, kServiceAVTransport, "Seek", body);
     }
 
-    UpnpTransportInfo get_transport_info(uint32_t instanceId = 0) {
+    // timeoutMs：轮询类调用允许传更短超时 —— 投放工作线程每轮要连做 3 个这样的查询，
+    // 用 8s 会让「停止投放」的同步 join 最坏等 24s（2026-10-30 实测切歌卡顿的真因）。
+    UpnpTransportInfo get_transport_info(uint32_t instanceId = 0, int timeoutMs = 8000) {
         std::string body = build_get_transport_info_soap(instanceId);
-        auto r = execute_action(avTransportUrl_, kServiceAVTransport, "GetTransportInfo", body);
+        auto r = execute_action(avTransportUrl_, kServiceAVTransport, "GetTransportInfo", body, timeoutMs);
         if (!r.ok) {
             UpnpTransportInfo t; t.ok = false; t.error = r.error; return t;
         }
         return parse_transport_info_response(r.rawXml);
     }
 
-    UpnpPositionInfo get_position_info(uint32_t instanceId = 0) {
+    UpnpPositionInfo get_position_info(uint32_t instanceId = 0, int timeoutMs = 8000) {
         std::string body = build_get_position_info_soap(instanceId);
-        auto r = execute_action(avTransportUrl_, kServiceAVTransport, "GetPositionInfo", body);
+        auto r = execute_action(avTransportUrl_, kServiceAVTransport, "GetPositionInfo", body, timeoutMs);
         if (!r.ok) {
             UpnpPositionInfo p; p.ok = false; p.error = r.error; return p;
         }
         return parse_position_info_response(r.rawXml);
     }
 
-    UpnpMediaInfo get_media_info(uint32_t instanceId = 0) {
+    UpnpMediaInfo get_media_info(uint32_t instanceId = 0, int timeoutMs = 8000) {
         std::string body = build_get_media_info_soap(instanceId);
-        auto r = execute_action(avTransportUrl_, kServiceAVTransport, "GetMediaInfo", body);
+        auto r = execute_action(avTransportUrl_, kServiceAVTransport, "GetMediaInfo", body, timeoutMs);
         if (!r.ok) {
             UpnpMediaInfo m; m.ok = false; m.error = r.error; return m;
         }
@@ -655,7 +657,8 @@ private:
     UpnpActionResult execute_action(const std::string& url,
                                    const std::string& serviceType,
                                    const std::string& action,
-                                   const std::string& body) {
+                                   const std::string& body,
+                                   int timeoutMs = 8000) {
         UpnpActionResult res;
         res.action = action;
         if (url.empty()) {
@@ -667,7 +670,7 @@ private:
         std::vector<std::string> headers = {
             "SOAPAction: \"" + std::string(serviceType) + "#" + action + "\""
         };
-        HttpResponse httpRes = http_post(url, body, headers, "text/xml; charset=\"utf-8\"", 8000, ifname_);
+        HttpResponse httpRes = http_post(url, body, headers, "text/xml; charset=\"utf-8\"", timeoutMs, ifname_);
         res.httpStatus = httpRes.status;
         res.rawXml = std::string(httpRes.body.begin(), httpRes.body.end());
         if (httpRes.ok && httpRes.status >= 200 && httpRes.status < 300) {

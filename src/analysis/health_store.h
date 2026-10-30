@@ -34,6 +34,12 @@
 
 namespace rta::analysis {
 
+// 当前体检分析算法代际标识：
+// 算法/指标口径变化后升级此代号，确保旧代际缓存安全 miss 重算，
+// 同时保留合法未损坏旧缓存条目不被强制洗白。
+inline constexpr const char* kCurrentAnalysisGeneration = "health-analysis-v2";
+
+
 // UTF-8 窄串 → 原生路径。**这是本文件唯一允许的路径构造入口**：
 // 上游的 `widen()` 路线在 mac 上对非 ASCII 会抛 "locale not supported"（见文件头）。
 inline std::filesystem::path path_from_utf8(const std::string& s) {
@@ -156,6 +162,24 @@ public:
             en.dev = (uint64_t)std::strtoull(e["dev"].s().c_str(), nullptr, 10);
             if (en.dev == 0 && e["dev"].type == rta::net::Json::Num) en.dev = (uint64_t)e["dev"].n();
 
+            if (e.has("analysis_generation")) {
+                en.hasGeneration = true;
+                const auto& gj = e["analysis_generation"];
+                if (gj.type == rta::net::Json::Str) {
+                    en.generation = gj.str;
+                    en.rawGenerationJson = "\"" + detail::json_escape(gj.str) + "\"";
+                } else if (gj.type == rta::net::Json::Num) {
+                    // Invalid numeric generations stay invalid; never narrow untrusted doubles to integers.
+                    en.rawGenerationJson = "null";
+                } else if (gj.type == rta::net::Json::Bool) {
+                    en.rawGenerationJson = gj.b ? "true" : "false";
+                } else if (gj.type == rta::net::Json::Null) {
+                    en.rawGenerationJson = "null";
+                } else {
+                    en.rawGenerationJson = "null";
+                }
+            }
+
             TrackHealth& h = en.health;
             h.drDb = hj["dr_db"].n();
             h.lufs = hj["lufs"].n();
@@ -215,13 +239,15 @@ public:
 
     // 命中判定：
     //  1. 路径匹配；
-    //  2. 强身份（mtime, size, ctime_ns, inode, dev）完整存在且全等 → O(1) 极速命中！
-    //  3. 若缓存条目未携带 inode/ctime_ns（或测试注入的虚拟三元组）：
+    //  2. 分析代际匹配当前代（缺失/未知/未来/非法代际一律 miss）；
+    //  3. 强身份（mtime, size, ctime_ns, inode, dev）完整存在且全等 → O(1) 极速命中！
+    //  4. 若缓存条目未携带 inode/ctime_ns（或测试注入的虚拟三元组）：
     //     如果存在有效 digest，对真实文件做全内容哈希核验（旧 schema 只有 mtime/size 无 sha256 则 miss 重算）。
     bool lookup(const std::string& path, int64_t mtime, int64_t size, TrackHealth& out) const {
         if (!loadError_.empty()) return false;
         const auto it = entries_.find(normalize_path_key(path));
         if (it == entries_.end()) return false;
+        if (!it->second.hasGeneration || it->second.generation != kCurrentAnalysisGeneration) return false;
         if (it->second.mtime != mtime || it->second.size != size) return false;
         if (it->second.digest.empty()) return false; // 旧 schema 缺少 digest，触发重新分析
 
@@ -268,6 +294,9 @@ public:
         en.size = size;
         en.health = h;
         en.digest = std::move(digest);
+        en.hasGeneration = true;
+        en.generation = kCurrentAnalysisGeneration;
+        en.rawGenerationJson = "\"" + std::string(kCurrentAnalysisGeneration) + "\"";
         // 只有当 mtime 和 size 与真实磁盘文件一致时，才将磁盘文件的 inode/ctime 强身份绑定进条目
         if (currentId.valid && currentId.mtime == mtime && currentId.size == size) {
             en.ctime_ns = currentId.ctime_ns_str;
@@ -287,6 +316,9 @@ public:
             if (!first) data += ",";
             first = false;
             data += "{\"path\":\"" + detail::json_escape(kv.first) + "\"";
+            if (kv.second.hasGeneration && !kv.second.rawGenerationJson.empty()) {
+                data += ",\"analysis_generation\":" + kv.second.rawGenerationJson;
+            }
             data += ",\"mtime\":" + std::to_string((long long)kv.second.mtime);
             data += ",\"size\":" + std::to_string((long long)kv.second.size);
             data += ",\"sha256\":\"" + kv.second.digest + "\"";
@@ -320,6 +352,9 @@ private:
         std::string ctime_ns; // 秒.纳秒 字符串
         uint64_t inode = 0;
         uint64_t dev = 0;
+        std::string rawGenerationJson;
+        bool hasGeneration = false;
+        std::string generation;
     };
 
     static bool read_whole_file(const std::string& path, std::string* out, std::string* err) {

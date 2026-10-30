@@ -43,6 +43,17 @@ int main() {
     h.quality.peakDbfs = -3.0;
     h.quality.thdnMethod = "single_tone";
     h.quality.note = "synthetic";
+    h.fs = 48000; h.channels = 2; h.bits = 24;
+    auto& q = h.quality;
+    q.thdnDb = -71.125; q.thdnPct = 0.01234; q.thdnAvailable = true;
+    q.nonTonalDb = -65.375; q.imdAvailable = true; q.imdDb = -68.625; q.imdNote = "IMD test";
+    q.noiseFloorDbfs = -91.5; q.spectralMinDbfs = -99.25; q.snrDb = 70.75;
+    q.centroidHz = 1234.5; q.tiltDbPerOct = -2.125; q.rolloff95Hz = 9876.5; q.hfRatio10kDb = -31.125;
+    q.rmsDbfs = -15.875; q.clippedSamples = 7; q.clippedPct = 0.12345;
+    q.clippedRuns = 2; q.longestClipRun = 4; q.crestDb = 12.875;
+    q.stereo = true; q.channelCorr = -0.4321; q.monoLossDb = 3.875; q.sideMidDb = 8.625;
+    q.dynP95P10Db = 9.375; q.dynCentroidDbfs = -18.125; q.quietP10Dbfs = -40.375;
+    q.silencePct = 12.875; q.spectralWindows = 37;
 
     // 2. 存入强身份缓存
     HealthStore store(cache);
@@ -53,11 +64,88 @@ int main() {
     ck(store.lookup(file, id0.mtime, id0.size, got), "same content cache hit (O(1) fast key)");
     ck(got.hasQuality && got.quality.peakDbfs == -3.0 && got.quality.note == "synthetic", "quality preserved");
 
-    // 3. 落盘重载后验证强身份元数据与 quality 字段仍然完整保存
+    // 3. 代际只描述分析算法；缺失/未知/未来/非法代际即使文件身份完全相同也必须 miss。
+    // 这些回归只依赖 JSON 契约，能在旧头文件上编译并真实跑红。
+    auto readText = [](const std::string& path) {
+        std::ifstream f(path);
+        return std::string(std::istreambuf_iterator<char>(f), std::istreambuf_iterator<char>());
+    };
+    auto writeText = [](const std::string& path, const std::string& text) {
+        std::ofstream f(path); f << text;
+    };
+    const std::string baseline = readText(cache);
+    const auto baselineJson = rta::net::json_parse(baseline);
+    const auto& generation = baselineJson.at(0)["analysis_generation"];
+    ck(generation.type == rta::net::Json::Str && !generation.str.empty(),
+       "new upsert persists dedicated analysis_generation string");
+    auto withGeneration = [&](const std::string& literal) {
+        std::string text = baseline;
+        const auto start = text.find(",\"analysis_generation\":");
+        if (start != std::string::npos) text.erase(start, text.find(',', start + 1) - start);
+        if (!literal.empty()) text.insert(2, "\"analysis_generation\":" + literal + ",");
+        return text;
+    };
+    const auto staleCache = (root / "stale_cache.json").string();
+    const auto otherFile = (root / "other.bin").string();
+    writeText(otherFile, "independent entry");
+    const auto otherId = FileIdentity::from_path(otherFile);
+    const std::vector<std::string> staleGenerations = {
+        "", "\"health-analysis-unknown\"", "\"health-analysis-999999\"", "\"\"", "123", "true", "null"
+    };
+    for (const auto& literal : staleGenerations) {
+        writeText(staleCache, withGeneration(literal));
+        HealthStore stale(staleCache);
+        ck(stale.loadError().empty() && stale.size() == 1, "stale generation loads without destructive reset");
+        TrackHealth untouched; untouched.quality.note = "unchanged-on-miss";
+        ck(!stale.lookup(file, id0.mtime, id0.size, untouched), "missing/unknown/future/malformed analysis generation misses");
+        ck(untouched.quality.note == "unchanged-on-miss", "generation miss does not return stale health");
+        stale.upsert(otherFile, otherId.mtime, otherId.size, h);
+        ck(stale.save(), "mixed stale/current entries save without resetting store");
+        const auto saved = rta::net::json_parse(readText(staleCache));
+        for (const auto& e : saved.arr) {
+            if (e["path"].s() != normalize_path_key(file)) continue;
+            const auto before = rta::net::json_parse(withGeneration(literal)).at(0)["analysis_generation"];
+            if (before.type == rta::net::Json::Str)
+                ck(e["analysis_generation"].type == before.type && e["analysis_generation"].str == before.str,
+                   "save preserves original stale string generation exactly");
+            else
+                ck(e["analysis_generation"].type != rta::net::Json::Str,
+                   "save never launders missing/malformed generation into current string");
+        }
+        HealthStore resaved(staleCache);
+        ck(!resaved.lookup(file, id0.mtime, id0.size, untouched), "stale entry remains miss across save/reload");
+        ck(resaved.lookup(otherFile, otherId.mtime, otherId.size, got), "fresh upsert beside stale entry hits after reload");
+        resaved.upsert(file, id0.mtime, id0.size, h);
+        ck(resaved.save(), "explicit fresh upsert replaces stale generation");
+        HealthStore refreshed(staleCache);
+        ck(refreshed.lookup(file, id0.mtime, id0.size, got), "reanalyzed entry receives current generation and hits");
+    }
+    // A current generation without strong identity must retain the digest fallback.
+    {
+        auto digestOnly = baseline;
+        for (const char* key : {"ctime_ns", "inode", "dev"}) {
+            const auto start = digestOnly.find(std::string(",\"") + key + "\":");
+            if (start != std::string::npos) digestOnly.erase(start, digestOnly.find(',', start + 1) - start);
+        }
+        writeText(staleCache, digestOnly);
+        HealthStore digestStore(staleCache);
+        ck(digestStore.lookup(file, id0.mtime, id0.size, got), "current generation digest fallback still hits");
+    }
+    // Corruption must not be overwritten even after a successful fresh upsert in memory.
+    for (const std::string broken : {std::string(), std::string("not-json"), std::string("{}")}) {
+        writeText(staleCache, broken);
+        HealthStore damaged(staleCache);
+        damaged.upsert(file, id0.mtime, id0.size, h);
+        ck(!damaged.loadError().empty() && !damaged.save() && readText(staleCache) == broken,
+           "damaged cache is reported and original bytes are never overwritten");
+    }
+
+    // 4. 落盘重载后验证强身份元数据与 quality 字段仍然完整保存
     {
         HealthStore reload(cache);
         ck(reload.lookup(file, id0.mtime, id0.size, got), "persisted quality and strong identity survives reload");
         ck(got.hasQuality && got.quality.peakDbfs == -3.0 && got.quality.note == "synthetic", "reloaded quality exact match");
+        ck(track_health_json(got) == track_health_json(h), "every serialized health/quality field survives current-generation reload");
     }
 
     // 4. 旧 schema 无 sha256 或无强身份时的处理验证 (保留旧 schema miss 逻辑)

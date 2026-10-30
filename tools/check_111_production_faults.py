@@ -64,7 +64,11 @@ for scenario in ('truncated_flac','unsupported_rate','llm_missing','room_cancel'
   (root/'rtadiag.json').write_text(out.stdout);(root/'rtadiag.stderr.txt').write_text(out.stderr)
   j=json.loads(out.stdout);ck(out.returncode==0 and j['conclusion']['id']==expected,scenario+' production ZIP -> rtadiag unique conclusion')
  finally:
-  if proc.poll() is None:proc.terminate();proc.wait(timeout=15)
+  if proc.poll() is None:
+   owner=subprocess.run(['ps','-p',str(proc.pid),'-o','uid=,ppid=,comm='],text=True,capture_output=True,check=True).stdout.strip()
+   (root/'owner-before-term.txt').write_text(owner+'\n');fields=owner.split(None,2)
+   if len(fields)!=3 or int(fields[0])!=os.getuid() or int(fields[1])!=os.getpid() or pathlib.Path(fields[2]).name!=pathlib.Path(binary).name:raise RuntimeError('owned server identity changed; no signal sent')
+   proc.terminate();proc.wait(timeout=15)
   log.close()
 (base_root/'results.json').write_text(json.dumps(results,ensure_ascii=False,indent=2));print('EVIDENCE',base_root,flush=True)
 raise SystemExit(0 if all(r['pass'] for r in results) else 1)

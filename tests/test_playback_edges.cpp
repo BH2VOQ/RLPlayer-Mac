@@ -325,8 +325,10 @@ static void test_delay_seek_reset() {
 }
 
 // ---------------- 5. RENDERFAIL 文案里的「秒数」必须等于实测墙钟 ----------------
-// render_loop.h 用 timeouts*20/1000 拼这句文案。20ms 是【旧时序】的轮询上限；
-// 归因证据必须等于实测墙钟，否则排障方向会被带偏（铁律 3）。
+// render_loop.h 曾用 timeouts*20/1000 拼文案。fastFeed 不能再按旧 20ms 推算：
+// 归因证据必须等于实测墙钟；保持用户裁定的现有阈值，不把轮计数偷换成逐次写计数。
+// 2026-10-30 已决：保持201轮，修正文案而不改变生产计数。
+// fastFeed 全零写时每轮两次 write_available，201轮=402次实际写尝试。
 struct DeadFullSink : rta::render::OutSink {
     explicit DeadFullSink(double* c) : clk(c) {}
     bool open(const rta::render::SinkOpenOpts&, uint32_t, int, int) override { return true; }
@@ -334,8 +336,11 @@ struct DeadFullSink : rta::render::OutSink {
     size_t buffer_frames() const override { return (size_t)bf; }
     bool wait_event(int ms) override { *clk += (double)ms / 1000.0; lastWaitMs = ms; return true; }
     size_t write_one_period(const int32_t*, size_t) override { return 0; }
-    size_t write_available(const int32_t*, size_t) override { return 0; }
+    size_t write_available(const int32_t*, size_t) override { ++attempts; return 0; }
+    int attempts = 0;
     long long last_pad() const override { return bf; }        // 缓冲恒满 ⟹ 写不进去
+    long long device_period_frames() const override { return per; }
+    long long per = -1;
     const std::string& last_error() const override { return e; }
     double* clk;
     long long bf = 9600;
@@ -343,7 +348,7 @@ struct DeadFullSink : rta::render::OutSink {
     std::string e;
 };
 
-static void run_renderfail(double* elapsed, std::string* msg, int* waitMs) {
+static void run_renderfail(double* elapsed, std::string* msg, int* waitMs, long long per = -1) {
     std::atomic<bool> stop{false}, pauseReq{false}, paused{false};
     std::atomic<double> seekReq{-1.0};
     std::atomic<size_t> played{0};
@@ -375,11 +380,15 @@ static void run_renderfail(double* elapsed, std::string* msg, int* waitMs) {
     h.log = [&](const std::string& s) { logs.push_back(s); };
     h.deviceLabel = "扬声器 (mock)";
     h.fallbackEligible = false; h.dop = false; h.onShared = false;
-    h.starveEnabled = false;         // 本用例只走「连续 200 次」那条归因
+    h.starveEnabled = false;         // 本用例只走现有连续 201 轮归因；不改变用户裁定阈值
     h.statPeriodSec = 1e9;           // 不打 STAT
 
     DeadFullSink sink(&clock);
+    sink.per = per;
     rta::render::render_loop(sink, h);
+    ck(w0.load() == sink.attempts, "零写遥测与实际写尝试次数一致", std::to_string(sink.attempts));
+    ck(sink.attempts == 402 && h.failMsg.find("连续 201 轮未写入") != std::string::npos,
+       "现有 fastFeed 阈值保留且文案准确：201轮对应402次实际写尝试", std::to_string(sink.attempts));
     *elapsed = clock;
     *waitMs = sink.lastWaitMs;
     *msg = h.failMsg;
@@ -401,6 +410,10 @@ static void test_renderfail_duration() {
     ck(std::fabs(claimed - elapsed) <= tol,
        "声称时长 == 实测墙钟（±10%）",
        "声称 " + std::to_string(claimed) + "s vs 实测 " + std::to_string(elapsed) + "s");
+    run_renderfail(&elapsed, &msg, &waitMs, 960);
+    std::printf("      已知周期960/96k：等待=%dms，201轮/402次实际写，墙钟=%.3fs\n", waitMs, elapsed);
+    ck(waitMs == 5 && std::fabs(elapsed - 1.005) < 1e-6,
+       "已知10ms设备周期：现有判死约1.005秒，而非注释约0.5秒（不改行为）");
 }
 
 int main() {

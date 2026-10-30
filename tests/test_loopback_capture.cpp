@@ -191,15 +191,22 @@ int main() {
         check(!in.is_running(), "close() 后 is_running()==false（幂等）");
     }
     // 空 deviceId 是"默认输入设备"的合法语义，不能因为它不存在就报错；
-    // 这里只验证它不会误判成回环（本机可能没有输入设备，故不断言成功）
+    // 零设备约束：默认路径绝不 open 实际物理输入设备。
+    // 空 deviceId 的实际 open 迁到 RTA_LOOPBACK_TESTS 显式 opt-in 门控里；
+    // 默认路径清楚 SKIP；不存在 deviceId 拒绝仍保留在上方（且确认不 fallback 到默认设备）。
     {
-        CoreAudioInput in;
-        MacCaptureConfig cfg;
-        cfg.deviceId = "";
-        cfg.bufferMs = 50.0;
-        (void)in.open(cfg);
-        check(!in.is_loopback(), "空 deviceId 不会走进回环分支");
-        in.close();
+        const std::string wantReal = env_str("RTA_LOOPBACK_TESTS");
+        if (wantReal == "1") {
+            CoreAudioInput in;
+            MacCaptureConfig cfg;
+            cfg.deviceId = "";
+            cfg.bufferMs = 50.0;
+            (void)in.open(cfg);
+            check(!in.is_loopback(), "空 deviceId 不会走进回环分支");
+            in.close();
+        } else {
+            std::printf("  [SKIP] 空 deviceId open 需物理设备，默认跳过（设 RTA_LOOPBACK_TESTS=1 才跑，保持零设备打开）\n");
+        }
     }
     std::printf("\n");
 

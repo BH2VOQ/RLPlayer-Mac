@@ -1,0 +1,7 @@
+网络请求失败	Network request failed	LLM 测试连接/检索的网络层失败：前缀项（底层原因由 rtaweb 拼接，禁止逐词翻译）
+尚未配置 API Key	API key is not configured yet	LLM 测试连接：未填 key 的静态整句（/api/llm/test）
+未选择 UPnP / DLNA 渲染器：设置 → 输出 → 目标渲染器（点「重新发现」刷新列表）	No UPnP / DLNA renderer selected: Settings → Output → Target renderer (click Discover again to refresh the list)	UPnP 投放的前置检查（rtaweb upnp_start_track 同步拒绝，未进入投放会话）
+UPnP 投放启动失败：	UPnP cast failed to start: 	UPnP 投放同步启动失败：前缀项（其后接 cast_service 返回的原因）
+未指定曲目	No track specified	UPnP 投放：空文件参数的同步拒绝
+未指定音频文件路径	No audio file path specified	投放会话 start()：空文件参数的同步拒绝
+已有投放会话正在进行中，请先停止	A cast session is already running; stop it first	投放会话 start()：并发会话的同步拒绝

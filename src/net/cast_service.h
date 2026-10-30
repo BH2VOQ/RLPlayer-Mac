@@ -51,6 +51,358 @@ inline std::string make_cast_temp_wav_path(const char* tag) {
     return (td / name).string();
 }
 
+// ---------------------------------------------------------------------------
+// 用户可见错误文案（中文 / 英文并行；**纯函数**，可离线单测 tests/test_cast_service.cpp）
+//
+// 为什么抽成函数：这些句子带插值（设备描述 URL、查询串、文件路径、SOAP 原因），以前是
+// 行内拼接的中文字面量 —— 一旦写坏，单测抓不到（历史事故：那一处
+// 「未找到名称/型号包含 "" + p.dev + ""」少了转义，界面上就真的显示一对空引号）。
+// 抽出来之后测试可以逐条断言「插值真的进去了」「没有残留 "" 字样」「英文非空且不含中文」。
+//
+// 纪律：
+//   · error（中文）永远是行为真相；errorEn 只是同一事实的另一语言。两者同时设置、同时清空。
+//   · 英文分支绝不改变成功/失败判定、不改变 phase、不改变 diag 事件。
+//   · 底层原因串只做**可枚举前缀**的精确剥离/映射，绝不逐词贪心翻译（见 strip_dup_cn_prefix）。
+// ---------------------------------------------------------------------------
+namespace cast_err {
+
+inline std::string replace_all(std::string str, const std::string& from, const std::string& to) {
+    if (from.empty()) return str;
+    size_t start_pos = 0;
+    while ((start_pos = str.find(from, start_pos)) != std::string::npos) {
+        str.replace(start_pos, from.length(), to);
+        start_pos += to.length();
+    }
+    return str;
+}
+
+inline bool has_cjk(const std::string& s) {
+    for (unsigned char c : s) {
+        if (c >= 0xE3) return true;
+    }
+    return false;
+}
+
+// 本地音频读取/解码底层异常（源文件格式损坏/截断/缺少块等）的结构化英文转换
+inline std::string local_audio_why_en(const std::string& why) {
+    if (!has_cjk(why)) return why;
+
+    std::string s = why;
+
+    // 1. 处理常见前缀
+    if (s.rfind("无法打开文件: ", 0) == 0) {
+        return "cannot open file: " + s.substr(std::string("无法打开文件: ").size());
+    }
+    if (s.rfind("空文件或无法定长: ", 0) == 0) {
+        return "empty file or cannot determine length: " + s.substr(std::string("空文件或无法定长: ").size());
+    }
+    if (s.rfind("读取不完整: ", 0) == 0) {
+        return "incomplete read: " + s.substr(std::string("读取不完整: ").size());
+    }
+    if (s.rfind("无法写入: ", 0) == 0) {
+        return "cannot write: " + s.substr(std::string("无法写入: ").size());
+    }
+    if (s.rfind("写入不完整: ", 0) == 0) {
+        return "incomplete write: " + s.substr(std::string("写入不完整: ").size());
+    }
+    if (s.rfind("解码阶段异常: ", 0) == 0) {
+        return "decoding phase error: " + local_audio_why_en(s.substr(std::string("解码阶段异常: ").size()));
+    }
+
+    // 2. 不是合法的 WAV 文件(文件=..., 实际字节=..., 需 RIFF/WAVE 头且≥44 字节)
+    static const std::string kBadWavPrefix = "不是合法的 WAV 文件(文件=";
+    if (s.rfind(kBadWavPrefix, 0) == 0) {
+        size_t pBytes = s.find(", 实际字节=");
+        size_t pReq = s.find(", 需 RIFF/WAVE 头且≥44 字节)");
+        if (pBytes != std::string::npos && pReq != std::string::npos && pReq > pBytes) {
+            std::string filePath = s.substr(kBadWavPrefix.size(), pBytes - kBadWavPrefix.size());
+            size_t bytesStart = pBytes + std::string(", 实际字节=").size();
+            std::string actualBytes = s.substr(bytesStart, pReq - bytesStart);
+            return "not a valid WAV file (file=" + filePath + ", actual bytes=" + actualBytes +
+                   ", requires RIFF/WAVE header and >= 44 bytes)";
+        }
+    }
+
+    // 3. DSD / DSF / DFF 前缀形式
+    static const std::string kNotDsfPrefix = "不是 DSF 文件（缺少 \"DSD \" 头）: ";
+    if (s.rfind(kNotDsfPrefix, 0) == 0) {
+        return "not a DSF file (missing \"DSD \" header): " + s.substr(kNotDsfPrefix.size());
+    }
+    static const std::string kNotDffPrefix = "不是 DFF(DSDIFF) 文件（缺少 \"FRM8\" 头）: ";
+    if (s.rfind(kNotDffPrefix, 0) == 0) {
+        return "not a DFF (DSDIFF) file (missing \"FRM8\" header): " + s.substr(kNotDffPrefix.size());
+    }
+    static const std::string kNotDsdPrefix = "不是 DSD 文件（按扩展名判断）: ";
+    if (s.rfind(kNotDsdPrefix, 0) == 0) {
+        return "not a DSD file (by extension): " + s.substr(kNotDsdPrefix.size());
+    }
+
+    // 4. 带 ctx(...) 后缀的结构化错误：
+    // 形如: <HEAD>(文件=<path>, fmtTag=<tag>, ch=<ch>, bps=<bps>, rate=<rate>, dataLen=<len>, 实际文件字节=<bytes>)
+    size_t ctxPos = s.rfind("(文件=");
+    if (ctxPos != std::string::npos && s.back() == ')') {
+        std::string head = s.substr(0, ctxPos);
+        std::string ctxTail = s.substr(ctxPos);
+
+        ctxTail = replace_all(ctxTail, "(文件=", "(file=");
+        ctxTail = replace_all(ctxTail, ", 实际文件字节=", ", actual file bytes=");
+
+        std::string headEn = head;
+        if (head.find("WAV data 块被截断(声明 dataLen=") != std::string::npos) {
+            size_t pD = head.find("声明 dataLen=");
+            size_t pAvail = head.find(", 块体实际可用=");
+            if (pD != std::string::npos && pAvail != std::string::npos) {
+                size_t dStart = pD + std::string("声明 dataLen=").size();
+                size_t dEnd = head.find(" 字节", dStart);
+                std::string decl = head.substr(dStart, dEnd - dStart);
+                size_t aStart = pAvail + std::string(", 块体实际可用=").size();
+                size_t aEnd = head.find(" 字节", aStart);
+                std::string avail = head.substr(aStart, aEnd - aStart);
+                headEn = "WAV data chunk truncated (declared dataLen=" + decl +
+                         " bytes, chunk body available=" + avail + " bytes)";
+            }
+        } else if (head.find("WAV fmt 块过短(声明 sz=") != std::string::npos) {
+            size_t pSz = head.find("声明 sz=");
+            if (pSz != std::string::npos) {
+                size_t szStart = pSz + std::string("声明 sz=").size();
+                size_t szEnd = head.find(" 字节", szStart);
+                std::string sz = head.substr(szStart, szEnd - szStart);
+                headEn = "WAV fmt chunk too short (declared sz=" + sz + " bytes, requires >= 16)";
+            }
+        } else if (head == "WAV 缺少 fmt 块") {
+            headEn = "WAV missing fmt chunk";
+        } else if (head == "WAV 缺少 data 块") {
+            headEn = "WAV missing data chunk";
+        } else if (head == "WAV 编码不是线性 PCM(fmtTag 需 1=PCM 或 3=IEEE float)") {
+            headEn = "WAV encoding is not linear PCM (fmtTag requires 1=PCM or 3=IEEE float)";
+        } else if (head == "float WAV 位深非法(允许 32 或 64)") {
+            headEn = "float WAV bit depth invalid (allows 32 or 64)";
+        } else if (head.find("float64 WAV 不支持") != std::string::npos) {
+            headEn = "float64 WAV not supported (pipeline stores float32), please convert to 32-bit float or integer PCM";
+        } else if (head == "WAV 位深非法(允许 8/16/24/32)") {
+            headEn = "WAV bit depth invalid (allows 8/16/24/32)";
+        } else if (head == "WAV 声道数非法(允许 1..32)") {
+            headEn = "WAV channels invalid (allows 1..32)";
+        } else if (head.find("WAV 采样率非法") != std::string::npos) {
+            size_t pCur = head.find("当前=");
+            if (pCur != std::string::npos) {
+                size_t rStart = pCur + std::string("当前=").size();
+                size_t rEnd = head.find(" Hz", rStart);
+                std::string rate = (rEnd != std::string::npos) ? head.substr(rStart, rEnd - rStart) : "";
+                headEn = "WAV sample rate invalid (current=" + rate + " Hz, allowed 1..4000000; 0 causes inf duration/progress)";
+            } else {
+                headEn = "WAV sample rate invalid (allowed 1..4000000)";
+            }
+        } else if (head == "WAV 位深换算字节数非法(bytesPer<=0)") {
+            headEn = "WAV bytes-per-sample invalid (bytesPer<=0)";
+        } else if (head.find("WAV data 块越界(dataLen=") != std::string::npos) {
+            size_t pD = head.find("dataLen=");
+            size_t pAvail = head.find(" > 块体实际可用=");
+            if (pD != std::string::npos && pAvail != std::string::npos) {
+                std::string dlen = head.substr(pD + 8, pAvail - (pD + 8));
+                std::string avail = head.substr(pAvail + std::string(" > 块体实际可用=").size());
+                if (!avail.empty() && avail.back() == ')') avail.pop_back();
+                headEn = "WAV data chunk out of bounds (dataLen=" + dlen + " > chunk body available=" + avail + ")";
+            }
+        } else if (head.find("样本数超过防御上限(") != std::string::npos) {
+            headEn = replace_all(head, "样本数超过防御上限", "sample count exceeds safety limit");
+        }
+
+        return headEn + ctxTail;
+    }
+
+    // 5. 其他带括号单参数或具体字段的已知错误
+    if (s.rfind("无法确定文件大小(文件=", 0) == 0) {
+        return replace_all(replace_all(s, "无法确定文件大小(文件=", "cannot determine file size (file="), ")", ")");
+    }
+    if (s.rfind("文件为空(文件=", 0) == 0) {
+        return replace_all(replace_all(s, "文件为空(文件=", "file is empty (file="), ", 大小=0 字节)", ", size=0 bytes)");
+    }
+    if (s.rfind("文件超过防御上限(文件=", 0) == 0) {
+        std::string res = replace_all(s, "文件超过防御上限(文件=", "file exceeds safety limit (file=");
+        res = replace_all(res, ", 大小=", ", size=");
+        res = replace_all(res, " 字节, 上限=", " bytes, limit=");
+        res = replace_all(res, " 字节)", " bytes)");
+        return res;
+    }
+    if (s.rfind("读取失败(文件=", 0) == 0) {
+        std::string res = replace_all(s, "读取失败(文件=", "read failed (file=");
+        res = replace_all(res, ", 期望=", ", expected=");
+        res = replace_all(res, " 字节)", " bytes)");
+        return res;
+    }
+
+    // 6. 其他 DSD 错误枚举
+    if (s.find("DSF 头长度异常") != std::string::npos) {
+        return replace_all(replace_all(s, "DSF 头长度异常（", "DSF header size abnormal ("), "，应为 28）", ", expected 28)");
+    }
+    if (s == "DSF 缺少 fmt 块或文件被截断") return "DSF missing fmt chunk or file truncated";
+    if (s.find("DSF fmt 块长度异常") != std::string::npos) {
+        return replace_all(replace_all(s, "DSF fmt 块长度异常（", "DSF fmt chunk size abnormal ("), "）", ")");
+    }
+    if (s == "DSF fmt 块被截断") return "DSF fmt chunk truncated";
+    if (s.find("DSF format id = ") != std::string::npos && s.find("暂不支持") != std::string::npos) {
+        return replace_all(s, "（DST 压缩）暂不支持", " (DST compression) not supported");
+    }
+    if (s.find("DSF bits per sample = ") != std::string::npos) {
+        return replace_all(s, "（应为 1）", " (expected 1)");
+    }
+    if (s == "DSF bits per sample 非 1") return "DSF bits per sample not 1";
+    if (s.rfind("DSF 声道数异常: ", 0) == 0) return "DSF channels abnormal: " + s.substr(std::string("DSF 声道数异常: ").size());
+    if (s.rfind("DSF 采样率异常: ", 0) == 0) return "DSF sample rate abnormal: " + s.substr(std::string("DSF 采样率异常: ").size());
+    if (s.rfind("DSF 每声道块长异常: ", 0) == 0) return "DSF block size per channel abnormal: " + s.substr(std::string("DSF 每声道块长异常: ").size());
+    if (s == "DSF 样本数为 0") return "DSF sample count is 0";
+    if (s == "DSF 缺少 fmt 块") return "DSF missing fmt chunk";
+    if (s == "DSF 缺少 data 块") return "DSF missing data chunk";
+    if (s == "DSF data 块过短") return "DSF data chunk too short";
+    if (s == "DSF data 块长度不足（文件被截断）") return "DSF data chunk length insufficient (file truncated)";
+    if (s.rfind("DSF 声道 ", 0) == 0 && s.find(" 数据不足") != std::string::npos) {
+        std::string ch = s.substr(std::string("DSF 声道 ").size());
+        size_t end = ch.find(" 数据不足");
+        if (end != std::string::npos) ch = ch.substr(0, end);
+        return "DSF channel " + ch + " data insufficient";
+    }
+
+    if (s == "DFF 的 form type 不是 \"DSD \"（不支持 DST 或其它容器）" ||
+        s == "DFF form type 不是 \"DSD \"（DST 不支持）") {
+        return "DFF form type is not \"DSD \" (DST or other containers not supported)";
+    }
+    if (s == "DFF PROP 块不是 \"SND \"") return "DFF PROP chunk is not \"SND \"";
+    if (s == "DFF PROP 块被截断") return "DFF PROP chunk truncated";
+    if (s == "DFF 使用 DST 压缩（DST 块），暂不支持" || s == "DFF 使用 DST 压缩，暂不支持流式解码") {
+        return "DFF uses DST compression (DST chunk), not supported";
+    }
+    if (s == "DFF 缺少 DSD 数据块") return "DFF missing DSD data block";
+    if (s == "DFF 缺少 FS（采样率）子块" || s == "DFF 缺少 FS") return "DFF missing FS (sample rate) subchunk";
+    if (s.rfind("DFF 压缩类型不是 \"DSD \"", 0) == 0) {
+        return replace_all(replace_all(s, "DFF 压缩类型不是 \"DSD \"（为 \"", "DFF compression type is not \"DSD \" (is \""), "\"）", "\")");
+    }
+    if (s.rfind("DFF 声道数异常: ", 0) == 0) return "DFF channels abnormal: " + s.substr(std::string("DFF 声道数异常: ").size());
+    if (s.rfind("DFF DSD 数据长度 ", 0) == 0) {
+        return replace_all(s, " 异常", " abnormal");
+    }
+
+    // 7. ffmpeg 解码产物异常
+    if (s.rfind("ffmpeg 解码产物异常: 临时 WAV 缺失或过小(源文件=", 0) == 0) {
+        std::string res = replace_all(s, "ffmpeg 解码产物异常: 临时 WAV 缺失或过小(源文件=", "ffmpeg decode output abnormal: temp WAV missing or too small (source file=");
+        res = replace_all(res, ", 实际字节=", ", actual bytes=");
+        res = replace_all(res, " 字节)", " bytes)");
+        return res;
+    }
+
+    // 未知错误：不逐词机器瞎翻，保留原样以保证事实不失真
+    return s;
+}
+
+// 底层 http 层的失败串自带「请求失败: <原因>」前缀（src/platform/macos/http_posix.h:260），
+// 上层再包一层就成了「…失败: 请求失败: <原因>」。这里只剥离可枚举的重复前缀，
+// 剩下的原因**原样保留**（可能是英文 curl 文案，也可能是设备给的中文描述）。
+inline std::string strip_dup_cn_prefix(const std::string& s) {
+    static const char* kPrefixes[] = {"网络请求失败: ", "网络请求失败：", "网络请求失败",
+                                      "请求失败: ", "请求失败：", "请求失败"};
+    for (const char* p : kPrefixes) {
+        const std::string pf(p);
+        if (pf.empty() || s.size() < pf.size()) continue;
+        if (s.compare(0, pf.size(), pf) != 0) continue;
+        std::string rest = s.substr(pf.size());
+        // 前缀后面可能还留着空白/冒号（"请求失败: " 已被整段吃掉，这里只清残留）
+        while (!rest.empty()) {
+            if (rest.front() == ' ' || rest.front() == ':') rest.erase(rest.begin());
+            else if (rest.compare(0, std::string("：").size(), "：") == 0)
+                rest.erase(0, std::string("：").size());
+            else break;
+        }
+        return rest;
+    }
+    return s;
+}
+
+// 设备描述 URL 取不到（手动填写 http:// 渲染器描述地址）
+inline std::string dev_desc_url_failed(const std::string& url) {
+    return "无法从指定设备描述 URL 获取描述: " + url;
+}
+inline std::string dev_desc_url_failed_en(const std::string& url) {
+    return "Could not fetch the device description from the specified URL: " + url;
+}
+
+// SSDP 一个都没搜到
+inline std::string no_renderer_found() {
+    return "局域网内未发现任何 UPnP 渲染器（请检查设备是否开机与网络配置）";
+}
+inline std::string no_renderer_found_en() {
+    return "No UPnP renderer found on the local network (check that the device is powered on and networked)";
+}
+
+// 名称/型号未命中：插值必须带引号，且不能出现空引号对（""）
+inline std::string dev_not_found(const std::string& query) {
+    return "未找到名称/型号包含 \"" + query + "\" 的 UPnP 渲染器";
+}
+inline std::string dev_not_found_en(const std::string& query) {
+    return "No UPnP renderer found whose name/model contains \"" + query + "\"";
+}
+
+// DSD 源
+inline std::string dsd_read_invalid(const std::string& file) {
+    return "DSD 文件读取失败或格式无效: " + file;
+}
+inline std::string dsd_read_invalid_en(const std::string& file) {
+    return "Failed to read the DSD file, or its format is invalid: " + file;
+}
+inline std::string dsd_pack_failed(const std::string& why) {
+    return "DSD 读取/打包失败: " + why;
+}
+inline std::string dsd_pack_failed_en(const std::string& why) {
+    return "DSD decode / DoP packing failed: " + local_audio_why_en(why);
+}
+
+// 非 DSD 源
+inline std::string wav_read_failed(const std::string& why) {
+    return "读取源 WAV 失败: " + why;
+}
+inline std::string wav_read_failed_en(const std::string& why) {
+    return "Failed to read the source WAV: " + local_audio_why_en(why);
+}
+inline std::string temp_wav_write_failed(const std::string& why) {
+    return "解码/写出临时 WAV 失败: " + why;
+}
+inline std::string temp_wav_write_failed_en(const std::string& why) {
+    return "Failed to decode or write the temporary WAV: " + local_audio_why_en(why);
+}
+
+// 本地供源 HTTP 服务起不来（端口段全被占）
+inline std::string http_server_bind_failed(uint32_t wantPort, uint32_t lastPort) {
+    return "无法在 0.0.0.0:" + std::to_string(wantPort) + "–" + std::to_string(lastPort) +
+           " 启动 HTTP 供源服务（端口全被占用）";
+}
+inline std::string http_server_bind_failed_en(uint32_t wantPort, uint32_t lastPort) {
+    return "Cannot start the HTTP streaming server on 0.0.0.0:" + std::to_string(wantPort) +
+           "-" + std::to_string(lastPort) + " (every port in that range is in use)";
+}
+
+// SOAP 原因串的英文版：只映射一条已知中文原因（控制 URL 为空），其余按前缀去重后原样保留。
+inline std::string upnp_reason_en(const std::string& raw) {
+    static const std::string kEmptyCtrlUrl = "控制 URL 为空，无法执行 ";
+    if (raw.compare(0, kEmptyCtrlUrl.size(), kEmptyCtrlUrl) == 0) {
+        return "control URL is empty; cannot execute " + raw.substr(kEmptyCtrlUrl.size());
+    }
+    const std::string rest = strip_dup_cn_prefix(raw);
+    // 只剩「请求失败」前缀、没有原因时不要输出空括号："( )" 等于什么都没说。
+    // 如实写 no detail，让日志里也能看出"这条确实没带原因"。
+    return rest.empty() ? std::string("no detail") : rest;
+}
+
+// 「<动作> 失败: <SOAP 原因>」：中文版与历史文案逐字一致，英文版是同一事实的另一语言
+inline std::string action_failed(const std::string& action, const UpnpError& e) {
+    return action + " 失败: " + e.str();
+}
+inline std::string action_failed_en(const std::string& action, const UpnpError& e) {
+    if (!e.has_error()) return action + " failed: OK";
+    return action + " failed: UPnPError " + std::to_string(e.code) + " (" +
+           upnp_reason_en(e.description) + ")";
+}
+
+}  // namespace cast_err
+
 struct CastState {
     bool        running = false;
     std::string device;
@@ -70,6 +422,10 @@ struct CastState {
     std::string rateMatch = "unknown"; // match, mismatch, unknown
     std::string warning;
     std::string error;
+    // 同一条失败事实的英文版（英文界面用）。error 永远是中文真相，两者同进同退：
+    // 会话开始时一起清空，失败时一起写入。英文可能为空（例如底层原因无法英文表述时），
+    // 消费方必须按「英文为空 → 回落中文」处理，绝不显示空白。
+    std::string errorEn;
 
     // RenderingControl 音量状态与能力（供后续 HTTP /api/cast/volume 接线）
     bool        volumeSupported = false;
@@ -179,6 +535,7 @@ public:
         state_.paused = false;
         state_.warning.clear();
         state_.error.clear();
+        state_.errorEn.clear();
         state_.volumeSupported = false;
         state_.currentVolume = -1;
         state_.lastVolumeError.clear();
@@ -249,11 +606,15 @@ private:
         AudioSourceFormat srcFormat;
         double durationSec = 0.0;   // 供播放器进度条用（源文件时长，秒）
 
-        auto fail = [this, &tempWavPath, &needCleanupTemp](const std::string& err) {
+        // err：中文（行为真相，历史文案逐字保留）；errEn：同一事实的英文版（可空）。
+        // 英文参数必须与中文同时给出，避免出现「界面切英文但错误还是中文」的半截状态。
+        auto fail = [this, &tempWavPath, &needCleanupTemp](const std::string& err,
+                                                          const std::string& errEn = std::string()) {
             std::lock_guard<std::mutex> lk(mtx_);
             state_.running = false;
             state_.phase = "error";
             state_.error = err;
+            state_.errorEn = errEn;
             if (needCleanupTemp && !tempWavPath.empty()) {
                 std::remove(tempWavPath.c_str());
             }
@@ -292,13 +653,13 @@ private:
                 }
             }
             if (!foundDev) {
-                fail("无法从指定设备描述 URL 获取描述: " + p.dev);
+                fail(cast_err::dev_desc_url_failed(p.dev), cast_err::dev_desc_url_failed_en(p.dev));
                 return;
             }
         } else {
             auto devs = upnp_discover(2000);
             if (devs.empty()) {
-                fail("局域网内未发现任何 UPnP 渲染器（请检查设备是否开机与网络配置）");
+                fail(cast_err::no_renderer_found(), cast_err::no_renderer_found_en());
                 return;
             }
             if (!p.dev.empty()) {
@@ -313,7 +674,10 @@ private:
                     }
                 }
                 if (!foundDev) {
-                    fail("未找到名称/型号包含 "" + p.dev + "" 的 UPnP 渲染器");
+                    // 历史实现是行内拼接（`"…包含 "" + p.dev + "" 的…"`），能编但极易被误改成
+                    // 真的输出一对空引号；改成纯函数后 tests/test_cast_service.cpp 可以断言
+                    // 「查询串出现在引号里」且「没有残留 "" 字样」。
+                    fail(cast_err::dev_not_found(p.dev), cast_err::dev_not_found_en(p.dev));
                     return;
                 }
             } else {
@@ -342,7 +706,7 @@ private:
             try {
                 rta::audio::DsdStream dsd = rta::audio::read_dsd(p.file);
                 if (dsd.rate == 0 || dsd.channels == 0 || dsd.data.empty()) {
-                    fail("DSD 文件读取失败或格式无效: " + p.file);
+                    fail(cast_err::dsd_read_invalid(p.file), cast_err::dsd_read_invalid_en(p.file));
                     return;
                 }
                 const uint32_t carrierRate = dsd.rate / 16u;
@@ -381,7 +745,7 @@ private:
                 srcFormat.encoding = "DSD over PCM (DoP v1.1)";
                 durationSec = (double)dsd.bits / (double)dsd.rate;
             } catch (const std::exception& e) {
-                fail(std::string("DSD 读取/打包失败: ") + e.what());
+                fail(cast_err::dsd_pack_failed(e.what()), cast_err::dsd_pack_failed_en(e.what()));
                 return;
             }
         } else {
@@ -396,7 +760,7 @@ private:
                     durationSec = ab.rate ? (double)ab.frames() / (double)ab.rate : 0.0;
                     wavToServe = p.file;
                 } catch (const std::exception& e) {
-                    fail(std::string("读取源 WAV 失败: ") + e.what());
+                    fail(cast_err::wav_read_failed(e.what()), cast_err::wav_read_failed_en(e.what()));
                     return;
                 }
             } else {
@@ -451,7 +815,8 @@ private:
                     srcFormat.encoding = "Linear PCM";
                     durationSec = ab.rate ? (double)ab.frames() / (double)ab.rate : 0.0;
                 } catch (const std::exception& e) {
-                    fail(std::string("解码/写出临时 WAV 失败: ") + e.what());
+                    fail(cast_err::temp_wav_write_failed(e.what()),
+                         cast_err::temp_wav_write_failed_en(e.what()));
                     return;
                 }
             }
@@ -488,8 +853,9 @@ private:
             if (stopReq_.load()) break;
         }
         if (!bound) {
-            fail("无法在 0.0.0.0:" + std::to_string(wantPort) + "–" + std::to_string((int)wantPort + 9) +
-                 " 启动 HTTP 供源服务（端口全被占用）");
+            // 端口段上界按 uint32_t 传：wantPort 是 uint16_t，+9 若按 uint16_t 计算会回绕
+            fail(cast_err::http_server_bind_failed((uint32_t)wantPort, (uint32_t)wantPort + 9u),
+                 cast_err::http_server_bind_failed_en((uint32_t)wantPort, (uint32_t)wantPort + 9u));
             return;
         }
         {
@@ -521,7 +887,8 @@ private:
         UpnpActionResult setRes = client.set_av_transport_uri(streamUrl, didlXml);
         if (!setRes.ok) {
             server.stop();
-            fail("SetAVTransportURI 失败: " + setRes.error.str());
+            fail(cast_err::action_failed("SetAVTransportURI", setRes.error),
+                 cast_err::action_failed_en("SetAVTransportURI", setRes.error));
             return;
         }
 
@@ -529,7 +896,8 @@ private:
         if (!playRes.ok) {
             client.stop();
             server.stop();
-            fail("Play 失败: " + playRes.error.str());
+            fail(cast_err::action_failed("Play", playRes.error),
+                 cast_err::action_failed_en("Play", playRes.error));
             return;
         }
 
@@ -610,9 +978,21 @@ private:
                 }
             }
 
-            UpnpTransportInfo transport = client.get_transport_info();
-            UpnpPositionInfo pos = client.get_position_info();
-            UpnpMediaInfo media = client.get_media_info();
+            // 2026-10-30（真机：投放中切歌整机静默 10s/18s 的根因）：
+            // 这三个是**轮询**查询，原来各用 8000ms 超时，而停止投放是同步 join 工作线程
+            // ⟹ 切歌最坏要等 3×8s=24s，前端 await 这个请求就等于界面卡死。
+            // 现在：①每个查询前先看 stopReq_，已请求停止就一个都不打；
+            //       ②轮询超时降到 kPollTimeoutMs（控制类动作 SetAVTransportURI/Play/Stop 仍 8s）。
+            static constexpr int kPollTimeoutMs = 1500;
+            bool cancelled = false;
+            UpnpTransportInfo transport;
+            UpnpPositionInfo pos;
+            UpnpMediaInfo media;
+            if (stopReq_.load()) { cancelled = true; }
+            if (!cancelled) { media = client.get_media_info(0, kPollTimeoutMs);  if (stopReq_.load()) cancelled = true; }
+            if (!cancelled) { pos = client.get_position_info(0, kPollTimeoutMs); if (stopReq_.load()) cancelled = true; }
+            if (!cancelled) { transport = client.get_transport_info(0, kPollTimeoutMs); }
+            if (cancelled) break;   // 已请求停止：立刻退出循环去收尾，别再拖累 join
 
             SamplingRateAnalysis analysis = analyze_sampling_rate(srcFormat, media, pos, proto);
 

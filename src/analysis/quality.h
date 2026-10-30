@@ -12,7 +12,7 @@
 //        2) 噪声类：本底噪声（谱最小统计）、信噪比
 //        3) 频响类：频谱重心（brightness）、频谱倾斜（dB/oct）、95% 谱滚降点、10 kHz 以上能量占比
 //        4) 削波类：削波样本计数/占比、连续削波段、峰值因子（crest factor）
-//        5) 立体声类：声道间相关系数、单声道兼容性（L+R 能量损失）、side/mid 比
+//        5) 立体声类：声道间相关系数、单声道兼容性（L+R 能量损失）、side/mid 比（有限范围 [−120,+120]）
 //        6) 动态细化：3 秒窗 RMS 分布的 P95−P10、能量加权动态重心（dBFS）
 //
 // ================== 口径与依据（不许拍脑袋，逐条写清） ==================
@@ -21,7 +21,9 @@
 //    几十个 bin 外仍有 −80 dB 量级 —— 那会把 THD+N 的地板卡在 −80 dB，测不出更好的设备。
 //    BH4 旁瓣 −92 dB，实测地板见 tests/test_quality.cpp（纯正弦 −100 dB 以下）。
 //  * THD+N（陷波法）：每窗取最强的 ≤16 个谱峰（间隔 ≥ 2·10 bin），把峰位 ±10 bin 挖掉，
-//    THD+N = 10·log10(Σ剩余 |X|² / Σ全部 |X|²)，多窗取中位数。
+//    THD+N = 10·log10(Σ剩余 |X|² / Σ全部 |X|²)。多窗统计只取【有效活动窗】（静音门与本底噪声
+//    同一判据：高于「最响窗 −60 dB」且高于 −70 dBFS）的 dB 中位数 —— 近静音窗里残差≈总能量，
+//    把它算进来会让「10 s 纯音」和「5 s 纯音 + 5 s 极低电平尾」差出 91 dB（实测，见 spectrum_metrics）。
 //    ★ 对纯正弦这是标准 THD+N；对音乐素材它刻画的是「最强 16 个谱峰之外的能量占比」，
 //      即噪声 + 失真 + 非谐波成分的【上界】，不能当成单一正弦的 THD+N 去和 dB 数比。
 //      之所以仍用它做「版本对比」：同一首曲子的两个版本，谐波结构几乎相同，该量对
@@ -84,7 +86,7 @@ struct QualityResult {
     //     残差 = 谐波 + 噪声 ⟹ 这是标准意义的 THD+N，thdnAvailable=true；
     //   * 多峰模式（音乐素材）：没有可定义的"基频"，THD+N 无意义 ⟹ thdnAvailable=false，
     //     改用 nonTonalDb（16 个最强谱峰之外的能量占比），这是噪声/失真/有损残留的上界。
-    double thdnDb = 0.0;         // 单基频模式：THD+N（多窗中位数）
+    double thdnDb = 0.0;         // 单基频模式：THD+N（仅有效活动窗的 dB 中位数）
     double thdnPct = 0.0;        // 10^(thdnDb/20) × 100
     bool   thdnAvailable = false;
     std::string thdnMethod;      // "single_tone" / "multi_peak"
@@ -124,7 +126,10 @@ struct QualityResult {
     bool   stereo = false;       // channels >= 2
     double channelCorr = 0.0;    // Pearson r ∈ [-1,1]
     double monoLossDb = 0.0;     // 10log10(立体声平均功率 / 单声道化功率)，0=完美
-    double sideMidDb = 0.0;      // 10log10(side² / mid²)
+    // 10log10(side² / mid²)，有限范围 ∈ [−120, +120]：−120 = 没有 side 分量（L==R）或两端都是
+    //   数字零（整段静音）；+120 = 没有 mid 分量（L==−R）。两个哨兵含义不同，不能混用。
+    //   多声道素材不计算（不猜声道布局），保持 0 并在 note 里标注不适用。
+    double sideMidDb = 0.0;
 
     // ---- 6. 动态细化 ----
     double dynP95P10Db = 0.0;    // 3 s 块 RMS 的 P95−P10
@@ -317,9 +322,47 @@ inline void spectrum_metrics(const QualityWindowPlan& plan,
     const bool singleTone = (fundRatio >= 0.90);
 
 
-    // ---- THD+N（单基频）/ 非谐波残留（多峰），均取窗间 dB 中位数 ----
+    // ---- 窗能量与「有效窗」判据：THD+N 与本底噪声共用同一口径 ----
+    // 窗功率 = 该窗（加窗后）按 Parseval 折算的均方；判据 = 高于「最响窗 −60 dB」且高于 −70 dBFS。
+    // 先算在这里，是因为紧随其后的 THD+N 也只能用有效窗（见下条注释）。
+    const double winScale = 1.0 / ((double)kW * (double)kW * meanW2);
+    std::vector<double> winPow(wins.size(), 0.0);
+    double maxWin = 0.0;
+    for (size_t w = 0; w < wins.size(); ++w) {
+        winPow[w] = qdetail::full_power_sum(wins[w], 0, half) * winScale;
+        maxWin = std::max(maxWin, winPow[w]);
+    }
+    const double gateFloor = std::max(1e-7, maxWin * 1e-6);   // −70 dBFS 与「最响窗 −60 dB」取高者
+    std::vector<char> loudWin(wins.size(), 0);
+    size_t nLoud = 0;
+    for (size_t w = 0; w < wins.size(); ++w)
+        if (winPow[w] > gateFloor) { loudWin[w] = 1; ++nLoud; }
+    // 本底噪声沿用的 activity：绝对门判掉全部窗时退化成「全窗参与」（历史口径，不改）。
+    std::vector<char> activeWin = loudWin;
+    size_t nActive = nLoud;
+    if (nActive == 0) { for (size_t w = 0; w < wins.size(); ++w) { activeWin[w] = 1; ++nActive; } }
+
+    // ---- THD+N（单基频）/ 非谐波残留（多峰），均取【有效活动窗】的 dB 中位数 ----
+    // ★ 为什么必须按有效窗取中位数（实测红例，对应 16.4 判据）：
+    //   10 s 997 Hz 纯音的 THD+N = −91.507 dB；与之【等长】的「5 s 纯音 + 5 s ±1 LSB 尾」
+    //   却报 −0.011 dB（差 91.5 dB）；尾段换成数字零又回到 −91.507（delta 0）。
+    //   机理：±1 LSB 尾窗的 tot>0（量化尾噪声不是零），但窗内没有信号，残差≈总能量，
+    //   于是该窗 thdn≈0 dB；8 个谱窗里 4 个落在尾段时，中位数直接变成 0 dB 量级。
+    //   数字零窗 tot==0 被跳过，所以旧代码只有「近静音尾」会红。
+    //   THD+N 的物理含义是「有信号时」的失真+噪声，没有信号的窗不该参与统计 ——
+    //   这不是放宽阈值，而是统计对象本来就该只含有信号的窗。
+    // 极低电平素材（整段都在 −70 dBFS 绝对门以下）：绝对门会判掉全部窗，此时退回【纯相对门】
+    // （最响窗 −60 dB）再判一次 —— 既不会把近静音窗算进来，也不会把整段都判成"无窗"
+    // （maxWin==0 的真全零素材没有任何窗入选，THD+N 照旧标为不可用）。
+    std::vector<char> thdnWin = loudWin;
+    if (nLoud == 0 && maxWin > 0.0) {
+        const double relGate = maxWin * 1e-6;
+        for (size_t w = 0; w < wins.size(); ++w) thdnWin[w] = (winPow[w] > relGate) ? 1 : 0;
+    }
     std::vector<double> thdnList, nonTonalList;
-    for (const auto& P : wins) {
+    for (size_t w = 0; w < wins.size(); ++w) {
+        if (!thdnWin[w]) continue;
+        const std::vector<double>& P = wins[w];
         // ★ 分子分母必须同口径：这里都用「单边 bin 直和」（不折半）。用 full_power_sum（中间
         //   bin ×2）当分母、残差用直和，会恰好差 3.01 dB —— 实测踩过（−40 → −43.01）。
         double tot = 0.0;
@@ -350,21 +393,8 @@ inline void spectrum_metrics(const QualityWindowPlan& plan,
     //     （实测正弦+噪声时 SNR 被压到 0 dB）；
     //  ② 静音窗：有 8% 静音段的曲子里只要有一个窗落进静音，所有 bin 的最小值都变成 0，
     //     本底噪声立刻变成 −200 dBFS、SNR 变成 140 dB（实测 3 首 FLAC 就是这样被污染的）。
-    //     判据：窗电平低于「最响窗 −60 dB」或低于 −70 dBFS 视为静音窗，不参与最小值统计。
-    const double winScale = 1.0 / ((double)kW * (double)kW * meanW2);
-    std::vector<double> winPow(wins.size(), 0.0);
-    double maxWin = 0.0;
-    for (size_t w = 0; w < wins.size(); ++w) {
-        winPow[w] = qdetail::full_power_sum(wins[w], 0, half) * winScale;
-        maxWin = std::max(maxWin, winPow[w]);
-    }
-    const double gateFloor = std::max(1e-7, maxWin * 1e-6);   // −70 dBFS 与「最响窗 −60 dB」取高者
-    std::vector<char> activeWin(wins.size(), 0);
-    size_t nActive = 0;
-    for (size_t w = 0; w < wins.size(); ++w)
-        if (winPow[w] > gateFloor) { activeWin[w] = 1; ++nActive; }
-    if (nActive == 0) { for (size_t w = 0; w < wins.size(); ++w) { activeWin[w] = 1; ++nActive; } }
-
+    //     判据：窗电平低于「最响窗 −60 dB」或低于 −70 dBFS 视为静音窗，不参与最小值统计
+    //     —— activeWin / nActive 就是上面那份 loudWin 与它的兜底，这里不再另算一套。
     std::vector<double> noiseP(half + 1, 0.0);
     for (size_t k = 0; k <= half; ++k) {
         double mn = 0.0; bool first = true;
@@ -557,9 +587,21 @@ public:
             const double monoPow = sM_ / (double)pos_;
             r.monoLossDb = (monoPow > 0.0) ? 10.0 * std::log10(std::max(stereoPow, 1e-30) / monoPow) : 120.0;
             r.monoLossDb = std::clamp(r.monoLossDb, 0.0, 120.0);
-            r.sideMidDb = (monoPow > 0.0)
-                ? 10.0 * std::log10(std::max(sS_ / (double)pos_, 1e-30) / monoPow) : -120.0;
-            r.sideMidDb = std::max(r.sideMidDb, -120.0);
+            // ★ sideMidDb 的哨兵不能只有一个（实测红例，对应 16.3c）：反相 L=−R 时 mid 功率为 0、
+            //   side 功率非 0，按定义 10log10(side²/mid²) 是 +∞，旧代码却和「L==R（没有 side）」
+            //   一样落到下限 −120，于是该字段无法区分「没有 side」与「没有 mid」。现在按成分分开报：
+            //     * mid>0            → 正常比值（钳到 [−120, +120]）；
+            //     * mid==0 且 side>0 → +120（有限上限，与 monoLoss 的 120 dB 同口径；不输出 inf）；
+            //     * mid==0 且 side==0→ −120（整段数字静音：两端都没有成分，不能报成"只有 side"）。
+            //   有限范围语义：sideMidDb ∈ [−120, +120]；−120 = 无 side（或两端皆无），+120 = 纯 side。
+            //   多声道不适用（外层 if 只对 2 声道且两声道都有效时进入）。
+            const double sidePow = sS_ / (double)pos_;
+            if (monoPow > 0.0) {
+                r.sideMidDb = 10.0 * std::log10(std::max(sidePow, 1e-30) / monoPow);
+            } else {
+                r.sideMidDb = (sidePow > 0.0) ? 120.0 : -120.0;
+            }
+            r.sideMidDb = std::clamp(r.sideMidDb, -120.0, 120.0);
         }
 
         // ---- 100 ms 块电平 ----

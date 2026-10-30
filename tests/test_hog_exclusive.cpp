@@ -23,12 +23,15 @@
 // ⚠️ 铁律 1：会短暂改动系统音量（最后恢复），但**不播放任何声音**。
 //    默认只在 --allow-hw-touch 时执行真实 Hog 抢占；否则只做只读断言。
 #include "platform/audio_out.h"
+#include "platform/audio_out_factory.h"
+#include "platform/macos/audio_out_coreaudio.h"
 #include <CoreAudio/CoreAudio.h>
 #include <cstdio>
 #include <cstdlib>
 #include <cmath>
 #include <string>
 #include <unistd.h>
+#include <sys/wait.h>
 
 namespace {
 int g_fail = 0;
@@ -81,11 +84,41 @@ int main(int argc, char** argv) {
     std::printf("模式：%s\n\n", touch ? "真实抢占（会短暂改系统音量，不播放声音）" : "只读断言（零副作用）");
 
     // ---- 1) OpenSpec::exclusive 默认必须是 false ----
-    std::printf("-- 1. OpenSpec::exclusive 默认值 --\n");
+    std::printf("-- 1. OpenSpec::exclusive 默认值与只读接口契约 --\n");
     {
         rta::platform::OpenSpec sp;
         ck(sp.exclusive == false, "默认 exclusive=false（不抢 Hog ⟹ 系统音量可用）");
         ck(sp.shared == false, "默认 shared=false（不经系统混音器）");
+
+        auto out = rta::platform::create_audio_output();
+        ck(out != nullptr, "输出后端实例创建成功");
+        if (out) {
+            ck(out->hog_requested() == false, "未开流时 hog_requested() 为 false");
+            ck(out->hog_acquired() == false, "未开流时 hog_acquired() 为 false");
+        }
+    }
+
+    // ---- 1.1) AudioOutput 默认实现只读契约（不破坏 null/shared/mock）----
+    std::printf("-- 1.1 AudioOutput 默认实现只读契约 --\n");
+    {
+        class DummyOutput : public rta::platform::AudioOutput {
+        public:
+            rta::platform::DeviceCaps caps(const std::string&) override { return {}; }
+            bool open(const rta::platform::OpenSpec&) override { return true; }
+            bool start() override { return true; }
+            size_t write(const int32_t*, size_t f) override { return f; }
+            void pause() override {}
+            void resume() override {}
+            void close() override {}
+            size_t buffer_frames() const override { return 0; }
+            size_t frames_written() const override { return 0; }
+            bool bit_perfect() const override { return false; }
+            rta::platform::OutputError last_error_class() const override { return rta::platform::OutputError::None; }
+            const std::string& last_error() const override { static std::string s; return s; }
+        };
+        DummyOutput dummy;
+        ck(dummy.hog_requested() == false, "DummyOutput 默认 hog_requested() == false");
+        ck(dummy.hog_acquired() == false, "DummyOutput 默认 hog_acquired() == false");
     }
 
     const AudioDeviceID dev = defOut();
@@ -128,6 +161,65 @@ int main(int argc, char** argv) {
             ck(std::fabs((double)after - (double)before) < 0.03,
                "独占期间系统音量被阻断（Hog 语义，不是 bug）",
                "前=" + std::to_string((double)before) + " 后=" + std::to_string((double)after));
+        }
+    }
+
+    // ---- 3.1) 跨进程 Hog 冲突时严格拒绝，报 DeviceBusy 并附真实 PID ----
+    std::printf("\n-- 3.1 跨进程 Hog 冲突时严格拒绝，报 DeviceBusy --\n");
+    // 先释放当前进程的 Hog，确保环境干净
+    setHog(dev, false);
+    ::usleep(200000);
+    {
+        int p2c[2]{-1, -1}, c2p[2]{-1, -1};
+        if (::pipe(p2c) == 0 && ::pipe(c2p) == 0) {
+            pid_t child = ::fork();
+            if (child == 0) {
+                ::close(p2c[1]); ::close(c2p[0]);
+                setHog(dev, true);
+                ::usleep(200000);
+                const bool held = (hogOwner(dev) == ::getpid());
+                char token = held ? 'H' : 'F';
+                (void)::write(c2p[1], &token, 1);
+                char waitBuf = 0;
+                (void)::read(p2c[0], &waitBuf, 1);
+                setHog(dev, false);
+                ::usleep(100000);
+                ::close(p2c[0]); ::close(c2p[1]);
+                ::_exit(held ? 0 : 1);
+            }
+            ::close(p2c[0]); ::close(c2p[1]);
+            char childStatus = 0;
+            if (::read(c2p[0], &childStatus, 1) == 1 && childStatus == 'H') {
+                rta::platform::CoreAudioOutput testOut;
+                rta::platform::OpenSpec spec;
+                spec.deviceId = std::to_string(dev);
+                spec.rate = 44100;
+                spec.bits = 16;
+                spec.channels = 2;
+                spec.exclusive = true;
+                spec.shared = false;
+                const bool opened = testOut.open(spec);
+                ck(!opened, "子进程持有 Hog 时，严格独占 open 必须拒绝返回 false");
+                ck(testOut.last_error_class() == rta::platform::OutputError::DeviceBusy,
+                   "错误分类必须为 DeviceBusy（绝不能是 UnsupportedFormat）");
+                ck(testOut.last_error().find("独占模式（Hog Mode）申请被拒绝") != std::string::npos,
+                   "last_error 必须明确包含独占申请被拒绝文案");
+                ck(testOut.last_error().find(std::to_string(child)) != std::string::npos,
+                   "last_error 必须包含真实的占用者 PID");
+                ck(testOut.hog_requested() == true, "open 拒绝后 hog_requested 记录为 true");
+                ck(testOut.hog_acquired() == false, "open 拒绝后 hog_acquired 记录为 false");
+                testOut.close();
+                ck(testOut.hog_requested() == false, "close 后 hog_requested 归零为 false");
+                ck(testOut.hog_acquired() == false, "close 后 hog_acquired 归零为 false");
+            } else {
+                ck(false, "子进程抢占 Hog 准备失败");
+            }
+            char stopToken = 'Q';
+            (void)::write(p2c[1], &stopToken, 1);
+            ::close(p2c[1]); ::close(c2p[0]);
+            int st = 0;
+            ::waitpid(child, &st, 0);
+            ::usleep(200000);
         }
     }
 

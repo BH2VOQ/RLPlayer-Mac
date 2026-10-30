@@ -21,6 +21,8 @@
 #include <thread>
 #include <array>
 #include <memory>
+#include <fstream>
+#include <sstream>
 #include <filesystem>
 #include <sys/types.h>
 #include <signal.h>
@@ -29,6 +31,7 @@
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
+#include <fcntl.h>
 
 namespace fs = std::filesystem;
 
@@ -55,6 +58,57 @@ static std::string exec_cmd(const std::string& cmd) {
         result.pop_back();
     }
     return result;
+}
+
+// 只读核验进程：PID/uid/comm 是否完全属于本次测试 spawn 的 rtaweb
+static bool verify_spawned_process(pid_t targetPid, uid_t expectedUid, const std::string& expectedCommSubstr) {
+    if (targetPid <= 0) return false;
+    std::string cmd = "ps -p " + std::to_string(targetPid) + " -o pid=,uid=,comm=";
+    std::string out = exec_cmd(cmd);
+    if (out.empty()) return false;
+    std::istringstream iss(out);
+    pid_t p = 0;
+    uid_t u = 0;
+    std::string comm;
+    if (!(iss >> p >> u >> comm)) return false;
+    if (p != targetPid) return false;
+    if (u != expectedUid) return false;
+    if (comm.find(expectedCommSubstr) == std::string::npos) return false;
+    return true;
+}
+
+// 优雅且安全退出子进程：核验属主，POST /api/quit 优先，超时兜底只发 SIGTERM，绝不 force kill
+static void stop_spawned_process(pid_t pid, uint16_t port) {
+    if (pid <= 0) return;
+    int observed = 0;
+    if (::waitpid(pid, &observed, WNOHANG) == pid) return;
+    if (!verify_spawned_process(pid, ::getuid(), "rtaweb")) {
+        ck(false, "停止前属主核验失败：不发请求或信号");
+        return;
+    }
+    const std::string listener = exec_cmd("lsof -nP -iTCP:" + std::to_string(port) + " -sTCP:LISTEN -t");
+    if (listener == std::to_string(pid)) {
+        std::string quitCmd = "curl -s -m 3 -X POST \"http://127.0.0.1:" + std::to_string(port) + "/api/quit\" >/dev/null 2>&1";
+        exec_cmd(quitCmd);
+    }
+    int status = 0;
+    for (int i = 0; i < 50; ++i) {
+        if (::waitpid(pid, &status, WNOHANG) == pid) return;
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    }
+    // 若未退出，stop 前核验自己 spawn 的 PID / uid / 命令（只读），核验通过后只发 SIGTERM，绝不 force kill
+    int st = 0;
+    if (::waitpid(pid, &st, WNOHANG) == 0) {
+        if (verify_spawned_process(pid, ::getuid(), "rtaweb")) {
+            ::kill(pid, SIGTERM);
+            for (int i = 0; i < 50; ++i) {
+                if (::waitpid(pid, &status, WNOHANG) == pid) return;
+                std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            }
+        } else {
+            std::printf("  [WARN] PID %d 属主/命令核验不通过，跳过 SIGTERM 以免误伤\n", (int)pid);
+        }
+    }
 }
 
 // 探测端口是否已开始应答
@@ -106,26 +160,101 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
-    const uint16_t testPort = 8911;
+    rtawebBin = fs::absolute(rtawebBin);
+    // 固定测试服务端口使用 19101 允许范围并串行复用
+    const uint16_t testPort = 19101;
+    const std::string listeners = exec_cmd("lsof -nP -iTCP:19101 -sTCP:LISTEN -t");
+    if (!listeners.empty()) { ck(false, "测试端口已有属主，不启动或停止任何服务", listeners); return 1; }
+    int probe = ::socket(AF_INET, SOCK_STREAM, 0);
+    sockaddr_in bindAddr{}; bindAddr.sin_family = AF_INET; bindAddr.sin_port = htons(testPort);
+    bindAddr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    int reuse = 1; ::setsockopt(probe, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse));
+    const bool freePort = probe >= 0 && ::bind(probe, (sockaddr*)&bindAddr, sizeof(bindAddr)) == 0;
+    if (probe >= 0) ::close(probe);
+    if (!freePort) { ck(false, "测试端口预绑定检查失败"); return 1; }
+
+    // 独立 mkdtemp 根目录，全隔离 HOME / CFFIXED_USER_HOME / STATE / LIBRARY / COVER
+    char tempTemplate[] = "/tmp/rta_net405_iso_XXXXXX";
+    char* tempDir = ::mkdtemp(tempTemplate);
+    if (!tempDir) {
+        std::printf("  [FAIL] mkdtemp 创建隔离目录失败\n");
+        return 1;
+    }
+    fs::path isoRoot(tempDir);
+    fs::path isoHome = isoRoot / "home";
+    fs::path isoState = isoRoot / "state";
+    fs::path isoLib = isoRoot / "lib";
+    fs::path isoCover = isoRoot / "cover";
+    fs::path isoLogs = isoRoot / "logs";
+
+    std::error_code ec;
+    fs::create_directories(isoHome / "Library" / "Application Support" / "RLPlayer", ec);
+    fs::create_directories(isoState, ec);
+    fs::create_directories(isoLib, ec);
+    fs::create_directories(isoCover, ec);
+    fs::create_directories(isoLogs, ec);
+
+    // 预写入隔离的 rlplayer-settings.conf：backend=null / metaon=0 / metallm=0 / volume=-120
+    const std::string confContent =
+        "backend=null\n"
+        "metaon=0\n"
+        "metallm=0\n"
+        "volume=-120\n";
+    {
+        std::ofstream cf(isoState / "rlplayer-settings.conf");
+        cf << confContent;
+    }
+    {
+        std::ofstream cf(isoHome / "Library" / "Application Support" / "RLPlayer" / "rlplayer-settings.conf");
+        cf << confContent;
+    }
+
+    const std::string isoHomeS = isoHome.string();
+    const std::string isoStateS = isoState.string();
+    const std::string isoLibS = isoLib.string();
+    const std::string isoCoverS = isoCover.string();
+    const std::string outLogFile = (isoLogs / "rtaweb_stdout_stderr.log").string();
 
     // 启动 rtaweb 子进程
     pid_t pid = fork();
     if (pid == 0) {
-        // 子进程
+        // 子进程环境完全隔离，绝不读用户任何真实配置
+        ::setsid();
+        ::chdir(isoRoot.c_str());
+        ::setenv("HOME", isoHomeS.c_str(), 1);
+        ::setenv("CFFIXED_USER_HOME", isoHomeS.c_str(), 1);
+        ::setenv("RLPLAYER_STATE_DIR", isoStateS.c_str(), 1);
+        ::setenv("RLPLAYER_LIBRARY_DIR", isoLibS.c_str(), 1);
+        ::setenv("RLPLAYER_COVER_DIR", isoCoverS.c_str(), 1);
+
+        // log 重定向专属目录
+        int fd = ::open(outLogFile.c_str(), O_CREAT | O_WRONLY | O_TRUNC, 0644);
+        if (fd >= 0) {
+            ::dup2(fd, STDOUT_FILENO);
+            ::dup2(fd, STDERR_FILENO);
+            if (fd > 2) ::close(fd);
+        }
+
         std::string pStr = std::to_string(testPort);
         execl(rtawebBin.c_str(), rtawebBin.c_str(), "--port", pStr.c_str(), "--no-browser", nullptr);
         _exit(127);
     } else if (pid < 0) {
         std::printf("  [FAIL] fork() 失败\n");
+        fs::remove_all(isoRoot, ec);
         return 1;
     }
 
     // 等待服务就绪
     if (!wait_port_ready(testPort, 6000)) {
         std::printf("  [FAIL] rtaweb 未能在超时时间内监听端口 %u\n", testPort);
-        kill(pid, SIGTERM);
-        int st = 0;
-        waitpid(pid, &st, 0);
+        stop_spawned_process(pid, testPort);
+        fs::remove_all(isoRoot, ec);
+        return 1;
+    }
+    const std::string listenerPid = exec_cmd("lsof -nP -iTCP:19101 -sTCP:LISTEN -t");
+    if (listenerPid != std::to_string(pid)) {
+        ck(false, "监听属主不是本次子进程，不发业务请求", listenerPid);
+        stop_spawned_process(pid, testPort);
         return 1;
     }
 
@@ -161,10 +290,11 @@ int main(int argc, char* argv[]) {
         ck(code == "200", "④ GET /api/llm 豁免只读返回 200 OK", "实际: " + code);
     }
 
-    // 优雅退出进程
-    kill(pid, SIGTERM);
-    int status = 0;
-    waitpid(pid, &status, 0);
+    // 优雅退出进程并核验属主
+    stop_spawned_process(pid, testPort);
+
+    // 清理临时目录
+    fs::remove_all(isoRoot, ec);
 
     std::printf("=== 测试完毕，失败数: %d ===\n", g_fail);
     return g_fail == 0 ? 0 : 1;

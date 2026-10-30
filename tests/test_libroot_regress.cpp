@@ -21,11 +21,11 @@
 //         那等于把库功能删了（铁律：功能不能删除）。
 //       ★ 对抗性：先把 "./data" 建成**真实存在的目录**再喂进去。这样"旧代码接受它"
 //         的唯一原因就是"没校验绝对性"，而不是"目录不存在"——判据不会被巧合蒙混过关。
-//   [2] 核心：fork+exec 起真 rtaweb --port 8937 --music-dir <绝对临时音乐目录>，
+//   [2] 核心：fork+exec 起真 rtaweb --port 19101 --music-dir <绝对临时音乐目录>，
 //       RLPLAYER_LIBRARY_DIR 指向临时 lib 目录，里面**预置**一份默认 conf（含哨兵根）。
-//       跑完断言：默认 conf **逐字节不变**（哨兵还在），且 .p8937 conf 是 --music-dir 那个
+//       跑完断言：默认 conf **逐字节不变**（哨兵还在），且 .p19101 conf 是 --music-dir 那个
 //       绝对目录。这一条直接证明「非默认实例不再写坏默认实例的配置」。
-//   [3] GET /api/files 不带 dir：conf 里放坏根（./data）在前 + 真实目录在后，
+//   [3] GET /api/files 不带 dir：conf 里放坏根（./data）在前 + 真实目录在后（端口 19106），
 //       ok 必须为 true 且 dir 必须是**真实存在**的目录（不是 ./data）。
 //   [4] GET /api/files?dir=<不存在>：ok 必须 false 且 error **带上该路径**
 //       （旧代码只说「目录不存在」，等于把根因藏起来）。
@@ -158,6 +158,13 @@ static pid_t spawnRtaweb(const std::string& exe, int port, const std::vector<std
     // 继承值掩盖（confLeaf 照样能拿到端口），回归测试就失去意义。
     ::unsetenv("RLPLAYER_PORT");
     ::setenv("RLPLAYER_LIBRARY_DIR", libDir.c_str(), 1);
+    const fs::path iso = fs::path(logPath).parent_path() / ("state-" + std::to_string(port));
+    fs::create_directories(iso / "home"); fs::create_directories(iso / "covers");
+    ::setenv("HOME", (iso / "home").c_str(), 1);
+    ::setenv("CFFIXED_USER_HOME", (iso / "home").c_str(), 1);
+    ::setenv("RLPLAYER_STATE_DIR", iso.c_str(), 1);
+    ::setenv("RLPLAYER_COVER_DIR", (iso / "covers").c_str(), 1);
+    std::ofstream(iso / "rlplayer-settings.conf") << "backend=null\nmetaon=0\nmetallm=0\nvolume=-120\n";
 
     const int fd = ::open(logPath.c_str(), O_CREAT | O_WRONLY | O_TRUNC, 0644);
     if (fd >= 0) { ::dup2(fd, STDOUT_FILENO); ::dup2(fd, STDERR_FILENO); if (fd > 2) ::close(fd); }
@@ -166,17 +173,34 @@ static pid_t spawnRtaweb(const std::string& exe, int port, const std::vector<std
     ::_exit(127);
 }
 
-// 优雅停：POST /api/quit → 等退出；超时兜底只 SIGTERM（铁律 2）
+// 优雅停：POST /api/quit → 等退出；stop 前核验 PID/uid/comm，超时兜底只 SIGTERM（铁律 2：绝不 force-kill）
 static void stopRtaweb(pid_t pid, int port) {
     if (pid <= 0) return;
-    execSh("curl -s -m 5 -X POST 'http://127.0.0.1:" + std::to_string(port) + "/api/quit' >/dev/null 2>&1");
     int status = 0;
+    if (::waitpid(pid, &status, WNOHANG) == pid) return;
+    const std::string observed = execSh("ps -p " + std::to_string(pid) + " -o uid=,ppid=,comm=");
+    std::istringstream pre(observed); uid_t uid = 0; pid_t parent = 0; std::string exe;
+    if (!(pre >> uid >> parent >> exe) || uid != ::getuid() || parent != ::getpid() || exe.find("rtaweb") == std::string::npos) {
+        ck(false, "退出前子进程属主核验失败，不发请求或信号", observed); return;
+    }
+    std::string listeners = execSh("lsof -nP -iTCP:" + std::to_string(port) + " -sTCP:LISTEN -t");
+    while (!listeners.empty() && (listeners.back()=='\n' || listeners.back()=='\r')) listeners.pop_back();
+    if (listeners == std::to_string(pid))
+        execSh("curl -s -m 5 -X POST 'http://127.0.0.1:" + std::to_string(port) + "/api/quit' >/dev/null 2>&1");
     for (int i = 0; i < 80; ++i) {                     // 最多 ~8s
         if (::waitpid(pid, &status, WNOHANG) == pid) return;
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
     }
-    ::kill(pid, SIGTERM);                              // 兜底：绝不 SIGKILL
-    ::waitpid(pid, &status, 0);
+    // 核验自己 spawn 的 PID / uid / 命令（只读）
+    std::string out = execSh("ps -p " + std::to_string(pid) + " -o pid=,uid=,comm=");
+    std::istringstream iss(out);
+    pid_t p = 0; uid_t u = 0; std::string comm;
+    if ((iss >> p >> u >> comm) && p == pid && u == ::getuid() && comm.find("rtaweb") != std::string::npos) {
+        ::kill(pid, SIGTERM);                          // 兜底：绝不 SIGKILL
+        ::waitpid(pid, &status, 0);
+    } else {
+        std::printf("  [WARN] PID %d 属主/命令核验不通过，跳过 SIGTERM 以免误伤\n", (int)pid);
+    }
 }
 
 static bool waitPort(int port, int ms) {
@@ -255,7 +279,7 @@ int main() {
     // [2] 核心：--music-dir 不得写坏默认实例的 conf（写盘顺序回归）
     // =====================================================================
     std::printf("\n== [2] --music-dir 写盘顺序（核心）==\n");
-    const int kPort = 8937;
+    const int kPort = 19101;
     ck(portFree(kPort), "端口 " + std::to_string(kPort) + " 空闲可用（不会碰 8899 用户实例）");
     {
         const fs::path defConf = tmp / "lib" / "rlplayer-library.conf";
@@ -265,7 +289,7 @@ int main() {
         readAll(defConf, before);
 
         const pid_t pid = spawnRtaweb(rtaweb, kPort, { "--music-dir", musicCli }, libS,
-                                      u8str(tmp / "rtaweb_8937.log"));
+                                      u8str(tmp / "rtaweb_19101.log"));
         ck(pid > 0, "rtaweb 子进程已启动", "pid=" + std::to_string((int)pid));
         ck(waitPort(kPort, 15000), "rtaweb 端口就绪");
 
@@ -296,14 +320,14 @@ int main() {
     // [3] GET /api/files 不带 dir：坏根在前也要挑到真实存在的目录
     // =====================================================================
     std::printf("\n== [3] /api/files 默认目录兜底 ==\n");
-    const int kPort2 = 8938;
+    const int kPort2 = 19106;
     ck(portFree(kPort2), "端口 " + std::to_string(kPort2) + " 空闲可用");
     {
         // conf 里放一个坏根（相对路径 ./data，cwd=/ 时必不存在）在前，真实目录在后
         const fs::path pConf2 = tmp / "lib" / ("rlplayer-library.conf.p" + std::to_string(kPort2));
         writeAll(pConf2, "# RLPlayer 音乐库根目录，每行一个\n./data\n" + musicOk + "\n");
 
-        const pid_t pid = spawnRtaweb(rtaweb, kPort2, {}, libS, u8str(tmp / "rtaweb_8938.log"));
+        const pid_t pid = spawnRtaweb(rtaweb, kPort2, {}, libS, u8str(tmp / "rtaweb_19106.log"));
         ck(pid > 0, "rtaweb 子进程已启动（坏根实例）", "pid=" + std::to_string((int)pid));
         ck(waitPort(kPort2, 15000), "rtaweb 端口就绪");
 

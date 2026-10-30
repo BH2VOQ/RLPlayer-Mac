@@ -596,22 +596,21 @@ inline void render_loop(OutSink& sink, RenderHost& h) {
                     break;
                 }
             }
-            // 手里有数据却 4 秒写不进去 ⟹ 设备异常。2026-10-22 VM 事故根因：
+            // 手里有数据却连续201轮写不进去 ⟹ 设备异常。2026-10-22 VM 事故根因：
             // 独占模式在 VM 板载 HD Audio 上 GetCurrentPadding 恒满 → write_available 恒 0。
             // 旧版在这里静默 break，END pos=0 error="" 成悬案；现在必须留下完整归因。
             if (timeouts == 0) timeoutT0 = tAfter;   // 这一串的起点（用于实测时长）
-            // 已决（2026-10-29，用户裁定）：判据就是「连续 201 次写尝试」，**保持现状**，
-            //    不折算成 max(201 次, 4s)。事实如实记录：fastFeed 一轮最多两次尝试、只等 per/2
-            //    （96k/per=960 ⟹ 5ms），所以完全死掉的设备从旧时序的 ≈4s 提前到 ≈0.5s 判 RENDERFAIL。
-            //    这个提前是 fastFeed 的**预期代价**（更快失败、更快回退与报错），不是缺陷；
-            //    次数阈值不动（动它才是改判据）。下面日志里的时长取实测墙钟，不按次数×20ms 估算。
+            // 已决（2026-10-30）：保持现行「连续201轮」计数，不折算成逐次201写或4秒门槛。
+            // fastFeed 全零写时每轮最多两次尝试：201轮对应402次实际写；w0仍逐次独立统计。
+            // 96k/per=960时每轮只等5ms，夹具墙钟约1.005s，不是旧注释的约0.5s。
+            // 阈值与计数逻辑不变；日志时长取实测墙钟，不按次数×20ms估算。
             if (++timeouts > 200) {
                 std::ostringstream fs;
                 // 时长取【实测墙钟】（tAfter - timeoutT0），不再用「次数 x 20ms」估算：
                 // fastFeed 下一轮只等 per/2，两者能差 4 倍。次数本身仍如实带上。
                 fs.setf(std::ios::fixed); fs.precision(2);
                 fs << "RENDERFAIL 设备流 " << (tAfter - timeoutT0) << " 秒未接受数据"
-                   << "（连续 " << timeouts << " 次写入失败）"
+                   << "（连续 " << timeouts << " 轮未写入）"
                    << "（疑似虚拟声卡/独占模式不可用）"
                    << " w0=" << h.dbgW0->load() << " wr=" << h.dbgWr->load();
                 // 与 STAT 同一口径：把「写不进去」的成因一并带出（不支持计数的后端省略）。

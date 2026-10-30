@@ -427,6 +427,9 @@ struct PlayerState {
     std::string error;
     std::string info;
     std::string signal;       // 本次播放的信号链快照（JSON），供界面画"每一环"
+    // 真实 Hog 独占请求与持有状态（2026-10-30 用户拍板：status 不得用设置偏好当实际持有）
+    std::atomic<bool> hogRequested{false};
+    std::atomic<bool> hogAcquired{false};
     // 2026-10-23（用户 261023-02 #1）：本次播放的 bit-perfect 结论（direct/yes/no）+ 原因。
     // 在信号链 JSON 生成处一并写入，/api/status 直接带出，供底栏常驻徽标使用。
     std::string bpState;
@@ -521,6 +524,8 @@ struct PlayerState {
         stop.store(true);
         joinIfDoneLocked();
         stop.store(false);
+        hogRequested.store(false);
+        hogAcquired.store(false);
     }
 };
 static PlayerState g_ps;
@@ -546,6 +551,8 @@ static void set_out_format_state(const char* mode, int dsdLevel, uint32_t dsdBit
 // mode 传实际后端模式，dsd/调制字段归零（本曲还没决定是否走 DSD）。
 static void reset_out_format_state(const char* mode) {
     set_out_format_state(mode, 0, 0, 0, std::string(), 0, std::string());
+    g_ps.hogRequested.store(false);
+    g_ps.hogAcquired.store(false);
 }
 
 // 20 段参数均衡 PEQ（261024-02 #6）：全局单例。播放线程处理音频，HTTP 线程改参数（热更新）。
@@ -1223,6 +1230,7 @@ static SinkOpenOpts sink_opts(const PlayParams& p) {
 
 // 播放器 exe 目录下的文件路径（定义在本文件后面；WasapiSink 的学习缓存要用，先声明）。
 static std::string path_in_exe_dir(const char* name);
+static bool ui_lang_en();
 
 
 // ---------------- CoreAudio 输出后端（macOS）----------------
@@ -1243,8 +1251,12 @@ public:
         // exclusive_ 由 make_sink 依据 PlayParams::hogExclusive 设置。
         sp.exclusive = exclusive_;
         if (!ao_->open(sp)) {
-            err_ = std::string(rta::platform::output_error_text(ao_->last_error_class()));
-            if (!ao_->last_error().empty()) err_ += "：" + ao_->last_error();
+            if (ao_->last_error_class() == rta::platform::OutputError::DeviceBusy && ao_->hog_requested()) {
+                err_ = ao_->last_error();
+            } else {
+                err_ = std::string(rta::platform::output_error_text(ao_->last_error_class()));
+                if (!ao_->last_error().empty()) err_ += "：" + ao_->last_error();
+            }
             return false;
         }
         return true;
@@ -1349,6 +1361,18 @@ public:
     // 2026-10-25（方案 C）：严格独占开关。true = 抢 Hog（系统音量失效、其他 App 静音）；
     // false = 不抢 Hog（系统音量可用，默认）。见 OpenSpec::exclusive 的注释。
     void set_exclusive(bool ex) { exclusive_ = ex; }
+    bool hog_requested() const { return ao_ ? ao_->hog_requested() : false; }
+    bool hog_acquired() const { return ao_ ? ao_->hog_acquired() : false; }
+    rta::platform::OutputError last_error_class() const { return ao_ ? ao_->last_error_class() : rta::platform::OutputError::None; }
+    std::string last_error_for_lang(bool en) const {
+        if (en && ao_) {
+            if (auto* ca = dynamic_cast<rta::platform::CoreAudioOutput*>(ao_.get())) {
+                if (!ca->last_error_en().empty()) return ca->last_error_en();
+            }
+        }
+        return err_;
+    }
+    const std::string& ao_last_error() const { static const std::string s; return ao_ ? ao_->last_error() : s; }
 private:
     std::unique_ptr<rta::platform::AudioOutput> ao_ = rta::platform::create_audio_output();
     bool shared_ = false;
@@ -1419,10 +1443,19 @@ struct ActiveSinkGuard {
     ActiveSinkGuard(OutSink* s, bool dop) {
         g_activeDop.store(dop);
         g_activeSink.store(s);
+        if (auto* ca = dynamic_cast<CoreAudioSink*>(s)) {
+            g_ps.hogRequested.store(ca->hog_requested());
+            g_ps.hogAcquired.store(ca->hog_acquired());
+        } else {
+            g_ps.hogRequested.store(false);
+            g_ps.hogAcquired.store(false);
+        }
     }
     ~ActiveSinkGuard() {
         g_activeSink.store(nullptr);
         g_activeDop.store(false);
+        g_ps.hogRequested.store(false);
+        g_ps.hogAcquired.store(false);
     }
 };
 
@@ -1927,15 +1960,41 @@ static bool play_one_direct(const std::string& file, const PlayParams& p) {
         }
 
         auto sink = make_sink(p);
+        auto* ca = dynamic_cast<CoreAudioSink*>(sink.get());
         if (!sink->open(sink_opts(p), carrier, ch, 24)) {
+            const bool isHogDenied = ca && (ca->last_error_class() == rta::platform::OutputError::DeviceBusy) && ca->hog_requested();
+            if (isHogDenied) {
+                rta::diag::Event e; e.evt = "io.hog_denied";
+                e.set_stage(rta::diag::Stage::Io);
+                e.set_code(rta::diag::find_code("io.hog_denied"));
+                e.str("device", p.device);
+                e.str("reason", ca->ao_last_error());
+                rta::diag::diag_emit(e);
+            }
             std::lock_guard<std::mutex> lk(ps.mtx);
-            ps.error = "打开输出后端失败: " + sink->last_error();
+            if (ca) {
+                ps.hogRequested.store(ca->hog_requested());
+                ps.hogAcquired.store(ca->hog_acquired());
+            }
+            const bool langEn = ui_lang_en();
+            const std::string errBody = ca ? ca->last_error_for_lang(langEn) : sink->last_error();
+            ps.error = langEn ? ("Failed to open output backend: " + errBody)
+                              : ("打开输出后端失败: " + errBody);
             return false;
         }
         ActiveSinkGuard sinkGuard(sink.get(), true);
+        if (ca) {
+            ps.hogRequested.store(ca->hog_requested());
+            ps.hogAcquired.store(ca->hog_acquired());
+        }
         if (!sink->start()) {
             std::lock_guard<std::mutex> lk(ps.mtx);
-            ps.error = "启动输出失败: " + sink->last_error();
+            ps.hogRequested.store(false);
+            ps.hogAcquired.store(false);
+            const bool langEn = ui_lang_en();
+            const std::string errBody = ca ? ca->last_error_for_lang(langEn) : sink->last_error();
+            ps.error = langEn ? ("Failed to start output: " + errBody)
+                              : ("启动输出失败: " + errBody);
             sink->close();
             return false;
         }
@@ -2174,6 +2233,18 @@ static std::string conf_get(const std::string& key, const std::string& def = std
         if (line.substr(0, e) == key) return line.substr(e + 1);
     }
     return def;
+}
+
+// 用户可见错误文案与页面渲染共用同一份语言配置。
+// 「界面语言」的真相源只有一个：state 目录里 rlplayer-settings.conf 的 lang
+//（net/ui_page.h 的 read_conf_value / read_conf_lang_from_state 就是它，服务端渲染
+//  data-lang 用的也是这一份），避免与页面采用不同语言优先级。
+//
+// 为什么单独包一层而不在各处直读：① 只在一处决定"缺省是中文"，绝不会两处口径漂移；
+// ② 英文句是新增分支，读不到配置/配置没写 lang 时必须**保持既有中文文案逐字不变**
+//   （翻译不能变成一次静默的体验变更）。
+static bool ui_lang_en() {
+    return rta::net::read_conf_lang_from_state() == "en";
 }
 
 // 每次播放开始时把「大文件流式」策略刷成配置值：
@@ -3227,35 +3298,58 @@ static bool play_one_impl(const std::string& file, const PlayParams& pIn, rta::a
                 }
                 if (effBits == 0) {
                     // 全不命中：probe_formats 拿三档列表，错误带端点 id 与请求值
-                    auto join = [](const std::vector<uint32_t>& v) {
+                    // none：列表为空时的占位词。中英文各自成句，绝不允许英文句里冒出「无」。
+                    auto join = [](const std::vector<uint32_t>& v, const char* none = "无") {
                         std::string s;
                         for (size_t k = 0; k < v.size(); ++k) { if (k) s += "/"; s += std::to_string(v[k]); }
-                        return s.empty() ? std::string("无") : s;
+                        return s.empty() ? std::string(none) : s;
                     };
+                    const std::vector<uint32_t> rl = ratesByBits.empty()
+                        ? std::vector<uint32_t>() : ratesByBits[0];
                     std::ostringstream es;
                     es << "设备独占模式不支持 " << wantDevRate << " Hz（请求位深 " << reqBits
                        << "-bit，候选 16/24/32 全不命中）。";
                     // macOS：CoreAudio caps 是"整设备一份率表"（无按位深分档），用已探测的列表
-                    {
-                        const std::vector<uint32_t>& rl = ratesByBits.empty()
-                            ? std::vector<uint32_t>() : ratesByBits[0];
-                        es << "设备 id=" << (pEff.device.empty() ? std::string("(默认端点)") : pEff.device)
-                           << "；CoreAudio 支持率: " << join(rl)
-                           << srcDesc;
-                    }
+                    es << "设备 id=" << (pEff.device.empty() ? std::string("(默认端点)") : pEff.device)
+                       << "；CoreAudio 支持率: " << join(rl)
+                       << srcDesc;
                     if (!rateAuto) {
                         // 明确选择档：绝不自动改率，但必须让用户清楚「做不到的是你选的那个率」
                         const auto dec = rta::audio::decide_capability_failure(false, wantDevRate, {});
                         es << "。" << dec.userMessage;
+                    }
+                    // ---- 英文界面：整句按语言二选一，**不做逐词替换** ----
+                    // 数值全部沿用上面同一批变量（请求率 / 请求位深 / 端点 id / 设备支持率表 /
+                    // 源采样率 / 后端），不为英文另算一遍 —— 两种语言对不上号比不翻译更糟。
+                    // 错误码、diag 事件与协商判定与语言无关：evidence.reason 仍记中文原句。
+                    const std::string msgZh = es.str();
+                    std::string msgOut = msgZh;
+                    if (ui_lang_en()) {
+                        std::ostringstream en;
+                        en << "Exclusive mode on the device cannot run " << wantDevRate
+                           << " Hz (requested bit depth " << reqBits
+                           << "-bit; none of the candidate depths 16/24/32 matched)."
+                           << " Device id="
+                           << (pEff.device.empty() ? std::string("(default endpoint)") : pEff.device)
+                           << "; CoreAudio supported rates: " << join(rl, "none")
+                           << " (source sample rate " << in.rate << " Hz, backend "
+                           << (p.backend.empty() ? std::string("wasapi") : p.backend) << ")";
+                        if (!rateAuto) {
+                            // 与 dec.userMessage 同一事实（明确选择档不自动改率），只是语言不同
+                            en << ". You explicitly selected this sample rate, so RLPlayer reports the"
+                                  " failure instead of switching rates on its own (change it in Settings,"
+                                  " or set the sample rate to Max so a supported rate is picked for you).";
+                        }
+                        msgOut = en.str();
                     }
                     const auto& rateList=ratesByBits.empty()?std::vector<uint32_t>{}:ratesByBits.front();
                     rta::diag::Event evidence; evidence.evt="negotiate.failed";
                     evidence.set_code(rta::diag::find_code(rateList.empty()?"negotiate.device_not_found":"negotiate.rate_unsupported"));
                     evidence.str("device",pEff.device).num("requested_rate",wantDevRate).str("device_rates",join(rateList));
                     if(!rateList.empty()) evidence.boolean("rate_supported",false);
-                    evidence.str("reason",es.str());rta::diag::diag_emit(evidence);
+                    evidence.str("reason",msgZh);rta::diag::diag_emit(evidence);
                     std::lock_guard<std::mutex> lk(ps.mtx);
-                    ps.error = es.str();
+                    ps.error = msgOut;
                     return false;
                 }
                 if (effBits != reqBits) {
@@ -3833,15 +3927,36 @@ static bool play_one_impl(const std::string& file, const PlayParams& pIn, rta::a
              .num("attempt",1);
             rta::diag::diag_emit(e);
         }
+        auto* ca = dynamic_cast<CoreAudioSink*>(sink.get());
         if (!sink->open(sink_opts(pEff), deviceRate, outCh, outBits)) {
-            rta::diag::diag_emit("negotiate.failed",rta::diag::Stage::Negotiate,rta::diag::find_code("negotiate.format_rejected"),
-                {{"reason",sink->last_error()},{"requested_rate",std::to_string(deviceRate),rta::diag::KvKind::Num}});
+            const bool isHogDenied = ca && (ca->last_error_class() == rta::platform::OutputError::DeviceBusy) && ca->hog_requested();
+            if (isHogDenied) {
+                failureStage = rta::diag::Stage::Io;
+                rta::diag::Event e; e.evt = "io.hog_denied";
+                e.set_stage(rta::diag::Stage::Io);
+                e.set_code(rta::diag::find_code("io.hog_denied"));
+                e.str("device", pEff.device);
+                e.str("reason", ca->ao_last_error());
+                rta::diag::diag_emit(e);
+            } else {
+                rta::diag::diag_emit("negotiate.failed",rta::diag::Stage::Negotiate,rta::diag::find_code("negotiate.format_rejected"),
+                    {{"reason",sink->last_error()},{"requested_rate",std::to_string(deviceRate),rta::diag::KvKind::Num}});
+            }
             RQ.abort.store(true); RQ.cv.notify_all(); prod.join();
             std::lock_guard<std::mutex> lk(ps.mtx);
-            std::string msg = "打开输出后端失败: " + sink->last_error();
+            if (ca) {
+                ps.hogRequested.store(ca->hog_requested());
+                ps.hogAcquired.store(ca->hog_acquired());
+            }
+            const bool langEn = ui_lang_en();
+            const std::string errBody = ca ? ca->last_error_for_lang(langEn) : sink->last_error();
+            std::string msg = langEn ? ("Failed to open output backend: " + errBody)
+                                     : ("打开输出后端失败: " + errBody);
             // HF-01/02：open 失败把第一刀的 OpenFail（请求格式/支持列表/HRESULT/端点 id）拼进错误，
             // 不再只剩一句 UNSUPPORTED_FORMAT。
-            if (!note.text.empty()) msg += "；note=" + note.text;
+            if (!note.text.empty()) {
+                msg += langEn ? ("; note=" + note.text) : ("；note=" + note.text);
+            }
             ps.error = msg;
             return false;
         }
@@ -3850,20 +3965,29 @@ static bool play_one_impl(const std::string& file, const PlayParams& pIn, rta::a
              {"actual_bits",std::to_string(outBits),rta::diag::KvKind::Num},
              {"buffer_frames",std::to_string(sink->buffer_frames()),rta::diag::KvKind::Num}});
         ActiveSinkGuard sinkGuard(sink.get(), dop);
+        if (ca) {
+            ps.hogRequested.store(ca->hog_requested());
+            ps.hogAcquired.store(ca->hog_acquired());
+        }
         // 2026-10-23 真机 DEBUG：打开成功也要如实带出「驱动实际接受的是哪种独占格式」。
         // 之前这句只有失败时才有，成功时用户只看到"32-bit"，根本不知道内部是紧凑24还是32容器，
         // 1.3.x「能播/不能播」的原因因此全靠猜（本机是紧凑24、UltraLite 是32容器/24有效）。
 
         // 2026-10-25（音量语义）：基准恒为 0.0 dB，起播初始增益直接调 set_live_gain_db(p.volume)！
         // render_loop 之后每 tick 传入的 delta（volDb - startDb）恒等于用户当前请求的绝对音量 volDb。
-        if (auto* ca = dynamic_cast<CoreAudioSink*>(sink.get())) {
+        if (ca) {
             ca->set_base_gain_db(0.0);
             ca->set_live_gain_db(p.volume);
         }
         if (!sink->start()) {
             RQ.abort.store(true); RQ.cv.notify_all(); prod.join();
             std::lock_guard<std::mutex> lk(ps.mtx);
-            ps.error = "启动输出失败: " + sink->last_error();
+            ps.hogRequested.store(false);
+            ps.hogAcquired.store(false);
+            const bool langEn = ui_lang_en();
+            const std::string errBody = ca ? ca->last_error_for_lang(langEn) : sink->last_error();
+            ps.error = langEn ? ("Failed to start output: " + errBody)
+                              : ("启动输出失败: " + errBody);
             return false;
         }
 
@@ -5672,13 +5796,29 @@ static std::string llm_test_json() {
         std::chrono::steady_clock::now() - t0).count();
     const std::string text(resp.body.begin(), resp.body.end());
     if (resp.status == 0) {
-        const std::string e = rta::meta::llm_redact(c.apiKey, "网络请求失败: " + resp.error);
+        // 网络层失败（连不上 / 超时 / DNS）：这一句是**整句按语言选择**的，不是逐词替换。
+        // 旧文案是 "网络请求失败: " + resp.error，而 resp.error 本身已经带「请求失败: 」
+        // 前缀（src/platform/macos/http_posix.h:260）⟹ 用户看到
+        // 「网络请求失败: 请求失败: Couldn't connect to server」。这里先用 cast_err 的
+        // 前缀剥离去掉重复项，再套语言整句；底层原因（curl 英文文案 / 系统中文串）原样保留，
+        // 绝不逐词翻译。llm_redact 仍是唯一出口，key 不会被带出去。
+        const std::string detail = rta::net::cast_err::strip_dup_cn_prefix(resp.error);
+        const std::string e = rta::meta::llm_redact(c.apiKey,
+            ui_lang_en()
+                ? (detail.empty() ? std::string("Network request failed")
+                                  : ("Network request failed: " + detail))
+                : (detail.empty() ? std::string("网络请求失败")
+                                  : ("网络请求失败: " + detail)));
         return "{\"ok\":false,\"error\":\"" + jesc(e) + "\",\"latencyMs\":" + std::to_string(ms) + "}";
     }
     const rta::meta::LlmReply p = rta::meta::llm_parse_chat_response(text);
     if (resp.status < 200 || resp.status >= 300) {
+        std::string detail = p.error;
+        const std::string serverPrefix = "服务端错误: ";
+        if (ui_lang_en() && detail.rfind(serverPrefix, 0) == 0)
+            detail = "Server error: " + detail.substr(serverPrefix.size());
         const std::string e = rta::meta::llm_redact(c.apiKey,
-            "HTTP " + std::to_string(resp.status) + (p.error.empty() ? "" : ": " + p.error));
+            "HTTP " + std::to_string(resp.status) + (detail.empty() ? "" : ": " + detail));
         return "{\"ok\":false,\"error\":\"" + jesc(e) + "\",\"latencyMs\":" + std::to_string(ms) + "}";
     }
     if (!p.ok) {
@@ -6979,6 +7119,41 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
             }
             queue_save();
             params_store(p);
+            // 2026-10-30 真机 bug（用户实测 B1）：「投放 A 后再点 B 切不过去，界面卡在 A」。
+            //   根因就在这一处：本入口曾经**无视 backend=upnp**，无条件启动本地管线 ——
+            //   make_sink("upnp") 返回 NullSink ⟹ 本地线程静默空转（解码但不发声），
+            //   而 A 的投放会话仍在跑、g_upnpPlayer 仍为 true ⟹ /api/status 的 current 继续
+            //   取自 castSt.sourceFile（= A），前端 tick 认为 current 没变 ⟹ 单曲页/底栏永久停在 A。
+            //   实测证据（用户 2026-10-30 12:47 会话日志）：/api/lib/play 之后出现
+            //   START+PLAY+RENDER_STOP（本地管线），而 /api/cast/state 的 sourceFile 始终是 A。
+            // 修法：与 /api/play、/api/skip 对齐 —— backend=upnp 一律走投放会话（先 stop 旧会话，
+            //   由 upnp_start_track 内部完成），本地线程一律不起。
+            if (p.backend == "upnp") {
+                const QItem& tgt = items[start];
+                // 与 /api/play 同一口径：渲染器只能播整个文件，CUE 分轨在这里如实拒绝，
+                // 绝不悄悄从头播整轨（铁律 3）。
+                if (tgt.cs >= 0.0)
+                    return "{\"ok\":false,\"error\":\"UPnP 投放不支持 CUE 分轨（渲染器只能播整个文件），请切到本地后端\"}";
+                ps.stopJoin();                 // 若之前是本地播放，先停（协作式，绝不 force-kill）
+                g_upnpPlayer.store(false);
+                std::string err;
+                if (!upnp_start_track(p, tgt.path, err)) {
+                    upnp_mark_player_state(tgt.path, false, err);
+                    ps.playing.store(false);
+                    g_upnpPlayer.store(false);
+                    return std::string("{\"ok\":false,\"error\":\"") + jesc(err) + "\"}";
+                }
+                g_upnpPlayer.store(true);
+                upnp_mark_player_state(tgt.path, true, "");
+                ps.outRate = 0;
+                ps.outBits = 0;
+                ps.played.store(0);
+                ps.total.store(0);
+                ps.playing.store(true);
+                play_log("CAST_SWITCH reason=lib-play file=" + tgt.path);
+                return "{\"ok\":true,\"upnp\":true,\"count\":" + std::to_string(items.size()) +
+                       ",\"index\":" + std::to_string(start) + "}";
+            }
             // 停旧线程 + join + 起新线程 = 一次原子操作（并发点播放不再撞 thread 赋值 terminate）
             ps.restart([p, start] { return queue_thread(p, start); });
             { std::lock_guard<std::mutex> lk(ps.mtx); ps.error.clear(); ps.current = items[start].path; }
@@ -7710,7 +7885,17 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
         ps.stopJoin();
         // 一条会话原则（261024-01 #9）：开始新的本地播放时，停掉可能还在跑的投放会话，
         // 避免本机声卡与网络渲染器同时出声（两套控制互相打架）。
+        //
+        // 2026-10-30 真机 bug（用户实测）：这里以前**只清了 g_upnpPlayer 标志、从没真正 stop()**，
+        // 与上一句注释承诺的行为不符。后果：切到本地后渲染器继续播、HTTP 供源还在跑，
+        // /api/status 已改报本地而 /api/cast/state 仍 running=true ⟹ 界面卡在投放状态，
+        // 只有手动「停止推流」才恢复。这里补上真正的那次 stop（backend=upnp 走下面的
+        // upnp_start_track，它内部会先 stop，不要重复调用）。
         g_upnpPlayer.store(false);
+        if (p.backend != "upnp" && rta::net::CastManager::instance().get_state().running) {
+            rta::net::CastManager::instance().stop();
+            play_log("CAST_STOP reason=switch-to-local backend=" + (p.backend.empty() ? "(default)" : p.backend));
+        }
         {
             std::lock_guard<std::mutex> lk(ps.mtx);
             ps.error.clear();
@@ -9050,6 +9235,14 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
         }
         if (rq.path.rfind("/api/cast/state", 0) == 0) {
             auto st = rta::net::CastManager::instance().get_state();
+            // 英文界面：error 按当前 lang 选择（英文缺失时**回落中文**，绝不给空串 ——
+            // 前端就是拿 st.error 直接显示到投放面板上的：src/net/ui_script.h 的
+            // updateCastStateUi → errEl.textContent = st.error）。errorZh 保留中文真相
+            // 供日志/诊断/其它消费者使用，errorEn 是同一事实的英文原文。
+            // 失败显现逻辑本身没动：phase/error 何时写、写什么，仍由 cast_service 的 worker 决定，
+            // 这里只决定"这一条用哪种语言显示"。
+            const bool langEn = ui_lang_en();
+            const std::string errShown = (langEn && !st.errorEn.empty()) ? st.errorEn : st.error;
             std::ostringstream j;
             j << "{\"ok\":true"
               << ",\"running\":" << (st.running ? "true" : "false")
@@ -9063,7 +9256,10 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
               << ",\"requestCount\":" << st.requestCount
               << ",\"rateMatch\":\"" << jesc(st.rateMatch) << "\""
               << ",\"warning\":\"" << jesc(st.warning) << "\""
-              << ",\"error\":\"" << jesc(st.error) << "\""
+              << ",\"error\":\"" << jesc(errShown) << "\""
+              << ",\"errorZh\":\"" << jesc(st.error) << "\""
+              << ",\"errorEn\":\"" << jesc(st.errorEn) << "\""
+              << ",\"lang\":\"" << (langEn ? "en" : "zh") << "\""
               // 261024-01 #9：后端 = UPnP 时播放器底栏的进度/时长/格式/暂停也取这份数据
               //（一条会话、一个状态源，避免底栏与投放面板各显示一套进度）
               << ",\"durationSec\":" << st.durationSec
@@ -9682,12 +9878,26 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
             if (!d.hasOutput) continue;   // 只列输出设备（与 Windows 端点语义一致）
             if (!first) j << ",";
             first = false;
+            // #8（ROADMAP-1.1.x 待办 8「DoP 载波只写不读」）：能力字段以前只写不读 ——
+            // 本接口只给 mixRate/mixBits，UI 拿不到「这台设备支持哪些采样率、DoP 载波是哪个」。
+            // 这里补两个字段，取值全部来自 **只读** caps（CoreAudio AudioObjectGetPropertyData，
+            // 不开流、不抢 Hog、不改设备物理格式；同一个函数就是 /api/rates 与预设探测用的那个）：
+            //   rates          = 设备报出的采样率表（升序；空 = 查询失败/端点不可用，不臆造）
+            //   dopCarrierRate = 按 rates 推导出的最高 DoP 载波（Hz；0 = 没有可用载波）
+            // 纪律：算不出载波就必须是 0。只报 44100/48000 的端点没有任何 DSD 载波，
+            // 报 176400 就是谎称支持 DSD64/DSD128 —— 推导与 preset_dop_max_from_rates 同源，
+            // 跨模型一致性由 tests/test_coreaudio.cpp 的 [1b] 段钉住。
+            auto out = rta::platform::create_audio_output();
+            const rta::platform::DeviceCaps dc = out ? out->caps(d.id) : rta::platform::DeviceCaps{};
             j << "{\"id\":\"" << jesc(d.id) << "\",\"name\":\"" << jesc(d.name) << "\""
               << ",\"default\":" << (d.isDefault ? "true" : "false")
               << ",\"channels\":" << d.channels
               << ",\"mixRate\":" << d.nominalRate
               << ",\"mixBits\":" << d.mixBits
-              << ",\"mixFmt\":\"" << jesc(d.mixFmt) << "\"}";
+              << ",\"mixFmt\":\"" << jesc(d.mixFmt) << "\""
+              << ",\"rates\":[";
+            for (size_t i = 0; i < dc.rates.size(); ++i) { if (i) j << ","; j << dc.rates[i]; }
+            j << "],\"dopCarrierRate\":" << dc.dopCarrierRate << "}";
         }
         j << "]}";
         return j.str();
@@ -10504,6 +10714,8 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
           //   modOrder     **实际生效**阶数（降阶保护后的值，不是用户填的值）
           //   fallbackWhy  非空 = 与用户请求不一致的中文原因（空 = 没降级）
           << ",\"outMode\":\"" << jesc(ps.outMode) << "\""
+          << ",\"hogRequested\":" << (castMode ? "false" : (ps.hogRequested.load() ? "true" : "false"))
+          << ",\"hogAcquired\":" << (castMode ? "false" : (ps.hogAcquired.load() ? "true" : "false"))
           << ",\"dsd\":" << ps.outDsdLevel
           << ",\"dsdRate\":" << ps.outDsdRate
           << ",\"carrierRate\":" << ps.outCarrierRate

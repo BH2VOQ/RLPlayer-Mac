@@ -307,6 +307,18 @@ inline bool is_hogged_by_us(AudioDeviceID dev) {
     return owner == ::getpid();
 }
 
+// 读取当前占用 Hog 的进程 PID（-1 表示无占用或无法读取）
+inline pid_t get_hog_owner(AudioDeviceID dev) {
+    AudioObjectPropertyAddress addr{kAudioDevicePropertyHogMode,
+                                    kAudioObjectPropertyScopeGlobal,
+                                    kAudioObjectPropertyElementMain};
+    if (!::AudioObjectHasProperty(dev, &addr)) return -1;
+    pid_t owner = -1;
+    UInt32 size = sizeof(owner);
+    if (::AudioObjectGetPropertyData(dev, &addr, 0, nullptr, &size, &owner) != noErr) return -1;
+    return owner;
+}
+
 // 该设备是否支持 Hog Mode（= 能否做"独占"）。
 // 判据：属性存在 + 当前没有被别的进程占着。注意：这【不】会去抢独占，
 // 只做只读探测 —— 铁律 2/1 都要求"先只读检查"。
@@ -531,17 +543,24 @@ public:
         buffer_ms_ = spec.bufferMs;
         shared_ = spec.shared;
 
-        // 1) Hog Mode（严格独占）—— 2026-10-25 改为由 OpenSpec::exclusive **独立控制**。
-        //
-        // 为什么不再是「!shared 就抢」：实测确认 Hog 会阻断其它进程改硬件音量
-        // （系统音量条/音量键失效），而用户希望「正常调节系统音量的前提下独占」。
-        // 二者物理互斥，所以做成开关（方案 C）：
-        //   exclusive=true  → 抢 Hog：真独占，其他 App 声音被屏蔽，但系统音量失效；
-        //   exclusive=false → 不抢 Hog：系统音量全程可用（默认）。
-        // 失败不致命，如实降级为"非 bit-perfect"。
+        // 1) Hog Mode（严格独占）—— 由 OpenSpec::exclusive 独立控制。
+        //    用户拍板：严格 Hog 请求（spec.exclusive && !shared）抢占失败必须在改格式前明确拒绝，
+        //    不静默降级，不假冒格式不支持（UnsupportedFormat），必须返回 DeviceBusy 并提示真正 owner PID。
+        hog_requested_ = (spec.exclusive && !shared_);
         hogged_ = false;
-        if (spec.exclusive && !shared_) {
+        if (hog_requested_) {
             hogged_ = detail::set_hog_mode(device_, true) && detail::is_hogged_by_us(device_);
+            if (!hogged_) {
+                const pid_t owner = detail::get_hog_owner(device_);
+                const std::string ownerStr = (owner > 0) ? std::to_string(owner) : "unknown";
+                close_locked();
+                hog_requested_ = true;
+                hogged_ = false;
+                fail(OutputError::DeviceBusy,
+                     "独占模式（Hog Mode）申请被拒绝：输出设备当前被其它程序（PID: " + ownerStr + "）占用，请关闭占用该设备的程序，或改用共享模式",
+                     "Exclusive mode (Hog Mode) request denied: audio device is occupied by another process (PID: " + ownerStr + "). Please close the occupying process or switch to shared mode in Settings.");
+                return false;
+            }
         }
 
         // 2) 按源格式设置设备物理格式 —— 这是 bit-perfect 的关键。
@@ -837,7 +856,12 @@ public:
     void close() override {
         std::lock_guard<std::mutex> lk(mu_);
         close_locked();
+        hog_requested_ = false;
+        hogged_ = false;
     }
+
+    bool hog_requested() const override { return hog_requested_; }
+    bool hog_acquired() const override { return hogged_; }
 
     size_t buffer_frames() const override { return buffer_frames_; }
     size_t frames_written() const override { return frames_written_; }
@@ -970,6 +994,7 @@ public:
 
     OutputError last_error_class() const override { return err_class_; }
     const std::string& last_error() const override { return err_text_; }
+    const std::string& last_error_en() const { return err_text_en_; }
 
 private:
     static AudioDeviceID resolve_device(const std::string& id) {
@@ -1052,11 +1077,12 @@ private:
         frames_rendered_.fetch_add(out_frames);
     }
 
-    void fail(OutputError e, std::string text) {
+    void fail(OutputError e, std::string text, std::string textEn = "") {
         err_class_ = e;
         err_text_ = std::move(text);
+        err_text_en_ = std::move(textEn);
     }
-    void clear_error() { err_class_ = OutputError::None; err_text_.clear(); }
+    void clear_error() { err_class_ = OutputError::None; err_text_.clear(); err_text_en_.clear(); }
 
     void rollback_unit() {
         if (unit_) { ::AudioComponentInstanceDispose(unit_); unit_ = nullptr; }
@@ -1119,6 +1145,7 @@ private:
     bool initialized_ = false;
     bool running_ = false;
     bool paused_ = false;
+    bool hog_requested_ = false;
     bool hogged_ = false;
     bool shared_ = false;
     size_t buffer_frames_ = 0;
@@ -1140,6 +1167,7 @@ private:
 
     OutputError err_class_ = OutputError::None;
     std::string err_text_;
+    std::string err_text_en_;
 
     // 格式协商与读回校验记录（设备端 vs 客户端）
     macos::ContainerPacking devicePacking_ = macos::ContainerPacking::Packed16;

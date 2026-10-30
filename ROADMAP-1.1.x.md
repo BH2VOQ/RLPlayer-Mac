@@ -28,6 +28,23 @@
 localStorage 仅在配置尚未有值时才兜底；`loadSettings()` 不再"本地优先"覆盖配置。
 `check_111_i18n` 新增 4 条冲突断言（配置 vs 过期缓存，中英双向 + 主题 + 风格），共 19 条。
 
+### beta4 收尾补丁（2026-10-30 末，未发布）
+
+- **统计真红→修**：THD+N 被近静音窗污染（等长纯音 −91.507 dB vs 纯音 + −90 dB 尾 −0.011 dB，Δ91.5 dB）
+  与反相 side/mid 误报 −120 两条真红已修；修后纯音与噪声尾同为 −91.507，反相 +120 / 同相 −120。
+- **严格 Hog 失败改为明确拒绝**（用户拍板）：真机实测修复前把「设备被占用」误报成「不支持 44100 Hz/16 bit」；
+  修后返回 `DeviceBusy` + 真实占用者 PID 并 emit `io.hog_denied`，且拒绝发生在改设备格式之前；
+  `/api/status` 增 `hogRequested` / `hogAcquired` 真值字段，不拿设置偏好冒充实际持有。
+- **fastFeed 判死口径定案**（2026-10-30）：保持「连续 201 轮」，只把文案与注释纠正为
+  「201 轮 = 402 次实际写；96k/per=960 时夹具墙钟 1.005 s」，阈值与计数逻辑不动。
+- **CLI 体检缓存加分析代际**：每条缓存带 `analysis_generation`，缺失/未知/未来/非法一律 miss，
+  `save()` 不把旧条目洗白成当前代；算法升级后不会被旧指标静默命中。
+- **英文故障覆盖扩到真实坏音频**：坏/截断 WAV 的底层中文异常结构化映射为英文（保留路径与数值），
+  真实 API → 真实 DOM 全链断言；「英文残留中文」判据改为「除真实文件名/路径与系统设备名外零中文」。
+- **判据自身修掉三处假绿**：DSD 退出测试补端口所有权门控（合成哨兵证明旧版会误关他人服务）；
+  UI 快捷键补 `/api/status` 后端断言（CDP 拦截反例证明旧判据假阳性）；
+  `check_111_closeout_backend.py` 致命异常不再把 summary 写成 `exit=0` 并打印「全绿」。
+
 ## 1.1.1-beta3（2026-10-30，修复版）
 
 主题：修「升级客户端后界面语言被换掉」。判据：配置里已有 `lang` 时它就是唯一真相源，
@@ -45,7 +62,7 @@ WebKit 的 localStorage 只作首次运行的兜底缓存；「保存设置」�
 | P0-1 | 核实运行标记 I 段为真 `fork()` 子进程；真实双进程同 state dir 复验 Q9 不再假 clean | 两个真实进程 + `/api/diagzip` 的 `manifest.run` 字段 |
 | P0-2 | 副实例事件隔离：`DiagStartResult.secondary/dir/code`，副实例写 `instances/<sid>/` | 真实双实例：副实例 `secondary=true`，事件文件分离，主标记未被篡改 |
 | P0-3 | `/api/diag` 的 `diagChannel.code` 改为真实原因（event_log / run_marker / dir_lock） | 真实二进制故障注入得到 `diag.run_marker_unwritable` |
-| 决策 | fastFeed 判死保持「连续 201 次尝试」，不折算时间；≈0.5 s 判死为预期代价 | 用户 2026-10-29 裁定，代码注释改为「已决」 |
+| 决策 | fastFeed 判死保持「连续 201 次尝试」，不折算时间；≈0.5 s 判死为预期代价 | 用户 2026-10-29 裁定；**beta4 复测纠正**：实为 201 轮 / 402 次实际写，960@96k 约 1.005 s（见 1.1.1-beta4 段） |
 
 回归基线（本机实测）：构建 exit 0；串行 ctest **113/113**；`check_111_backend` **22/22**；
 `check_111_production_faults` **12/12**；`check_111_ui` **7/7**；`test_startup_native` 首帧 PASS；`check_111_i18n` **12/12**。

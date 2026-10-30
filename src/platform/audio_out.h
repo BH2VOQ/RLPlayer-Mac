@@ -314,6 +314,11 @@ public:
 
     virtual OutputError last_error_class() const = 0;
     virtual const std::string& last_error() const = 0;
+
+    // Hog Mode 独占请求与实际持有状态（macOS CoreAudio）。
+    // 默认返回 false，不破坏 null/shared/mock 等无需 Hog 的后端。
+    virtual bool hog_requested() const { return false; }
+    virtual bool hog_acquired() const { return false; }
 };
 
 } // namespace rta::platform

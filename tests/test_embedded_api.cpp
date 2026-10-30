@@ -154,12 +154,19 @@ int main() {
     std::printf("== 单进程 embedded 核心（rlapp::*）验证 ==\n");
 
     // ---- 隔离：曲库/配置/索引全部落临时目录，绝不碰用户真实库根 ----
-    const fs::path tmp = fs::temp_directory_path() / "rlapp_embedded_test";
+    const fs::path tmp = fs::temp_directory_path() / ("rlapp_embedded_test_" + std::to_string(::getpid()));
     std::error_code ec;
     fs::remove_all(tmp, ec);
     fs::create_directories(tmp, ec);
     if (ec) { std::printf("!! 无法创建临时目录 %s\n", u8str(tmp).c_str()); return 2; }
     ::setenv("RLPLAYER_LIBRARY_DIR", u8str(tmp).c_str(), 1);
+    for (const char* leaf : {"home", "state", "covers"}) fs::create_directories(tmp / leaf);
+    ::setenv("HOME", u8str(tmp / "home").c_str(), 1);
+    ::setenv("CFFIXED_USER_HOME", u8str(tmp / "home").c_str(), 1);
+    ::setenv("RLPLAYER_STATE_DIR", u8str(tmp / "state").c_str(), 1);
+    ::setenv("RLPLAYER_COVER_DIR", u8str(tmp / "covers").c_str(), 1);
+    std::ofstream(tmp / "state" / "rlplayer-settings.conf")
+        << "backend=null\nmetaon=0\nmetallm=0\nvolume=-120\n";
 
     // 构造一份真索引（格式与 Library::buildIndexLocked 输出一致，v3）
     // 作用：让 /api/lib/* 走真实的「索引 → 内存模型 → 查询」链路，而不是空库恒回 0。
