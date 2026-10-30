@@ -15,7 +15,7 @@
   <img src="https://img.shields.io/badge/HiFi-DSP%20%C2%B7%20DoP%20%C2%B7%20bit--perfect-22d3ee?style=flat-square" alt="HiFi">
   <a href="https://github.com/BH2VOQ/RLPlayer-Mac/releases"><img src="https://img.shields.io/github/v/release/BH2VOQ/RLPlayer-Mac?include_prereleases&label=release&style=flat-square&color=22d3ee" alt="Release"></a>
   <img src="https://img.shields.io/badge/macOS-13%2B%20%C2%B7%20arm64-0b1120?style=flat-square&logo=apple&logoColor=white" alt="macOS 13+ · arm64">
-  <img src="https://img.shields.io/badge/ctest-100%2F100-34d399?style=flat-square" alt="ctest 100/100">
+  <img src="https://img.shields.io/badge/ctest-113%2F113-34d399?style=flat-square" alt="ctest 113/113">
   <img src="https://img.shields.io/badge/license-GPL--3.0--or--later-a78bfa?style=flat-square" alt="GPL-3.0-or-later">
   <img src="https://img.shields.io/badge/runtime%20deps-0-f472b6?style=flat-square" alt="No runtime dependencies">
 </p>
@@ -34,7 +34,7 @@
   <img src="docs/images/ui-albums.png" alt="RLPlayer main window: album grid with playback controls in the bottom bar" width="100%">
 </p>
 
-|  52  |     4    |    6230   |    100   |   0   |
+|  52  |     4    |    6230   |    113   |   0   |
 | :--: | :------: | :-------: | :------: | :---: |
 | Upsampling presets | SDM modulator families | OPRA headphone curves | ctest cases | Runtime dependencies |
 
@@ -69,23 +69,24 @@ This chain is not an illustration: every item is visible with the actual values 
 - **SDM modulators** — four families: Butterworth (DSD5/DSD7), 7th-order Chebyshev, EC error feedback, AHM multi-level; EC-5 reaches **113.5 dB** in-band SNR at DSD256
 - **Native DSD reading** — DSF/DFF parsed directly, without ffmpeg; DirectSDM passes through bit-for-bit at matching rates; large files are streamed in chunks (1764000 frames, sample-exact)
 - **Convolution engine** — zero-latency uniformly partitioned FFT; relative error against direct convolution **≤6.1e-14**
-- **20-band PEQ** — RBJ biquads, 20 center frequencies on the ISO 1/3-octave grid, draggable nodes, automatic preamp anti-clipping; a single band at +6 dB measures **6.0000 dB** (44.1/48/96/192 kHz)
+- **20-band PEQ** — RBJ biquads, 20 center frequencies on the ISO 1/3-octave grid, draggable nodes with real-time curve preview (0 px lag) and ±24 dB range (hold ⌥ Option to sweep frequency), automatic preamp anti-clipping; a single band at +6 dB measures **6.0000 dB** (44.1/48/96/192 kHz)
 - **Overload protection** — oversampled peak detection (ISP) with automatic pre-attenuation, volume ramping, DoP volume locked at 0 dB; full-scale / transient / recovery each have regression coverage
 
 ### 🔊 Output
 
-- **CoreAudio exclusive (Hog)** — AUHAL + Hog preemption + physical format lock, avoiding resampling by the system mixer; when a device does not support the target format it **reports the error honestly instead of substituting silently**
+- **CoreAudio exclusive (Hog)** — AUHAL + Hog preemption + physical format lock, avoiding resampling by the system mixer; reports real `DeviceBusy` and blocking PID on collision instead of misleading format errors
 - **CoreAudio shared** — the fallback when exclusive mode is unavailable; `bit_perfect()` explicitly returns false and says so; 16/24/32-bit measured deviation **0 LSB**
 - **DoP** — DSD wrapped in a 24-bit carrier, the only DSD output path on macOS; in DoP mode it never silently falls back to shared
-- **UPnP / DLNA** — real SSDP discovery + AVTransport control + local serving; the served byte count is **byte-identical to the file**
+- **UPnP / DLNA** — real SSDP discovery + AVTransport control + local serving; seamless track switching while casting, instant button feedback (<100 ms) with automatic error reversion; served byte count is **byte-identical to the file**
 - **Null** — runs the DSP without opening a device; all offline tests and automated checks go through it
 - **Three official presets** — bit-perfect passthrough / PCM upsampling / DSD upsampling (the backend also supports a fourth, PCM→DSD); the recommended preset is computed live from the current device's capabilities, with the downgrade reason stated
 
 ### 🖥 Interface
 
 - **Single-process native shell** — NSWindow + WKWebView, pages served through a custom `rlplayer://app/` scheme to the in-process core, **the main process listens on no port** (only a temporary local serving service while casting over UPnP)
+- **Bilingual interface** — complete Chinese / English UI toggle under Settings → General → Appearance → Language with 1,513 curated Hi-Fi terminology pairs; macOS application menu follows the setting
 - **Three palettes × two UI styles** — dark / white / light blue, in an Apple Music style and a classic Hi-Fi workstation style
-- **Ten settings tabs** — Input / Output / PCM / SDM / Advanced / EQ / Sound calibration / Metadata / Streaming / Diagnostics; the tab bar is fixed and only the content scrolls
+- **Ten settings tabs** — Input / Output / PCM / SDM / General / EQ / Sound calibration / Metadata / Streaming / Diagnostics; the tab bar is fixed and only the content scrolls
 - **Six-state bit-perfect badge** — passthrough, PCM→PCM, PCM→DSD and DSD→DSD each distinguish whether they are bit-perfect, with the downgrade reason
 - **Full-bleed window** — hidden title bar + FullSizeContentView with content filling the window, and 5 px hot zones on all four edges for resizing
 
@@ -93,10 +94,11 @@ This chain is not an illustration: every item is visible with the actual values 
 
 - **Native tag parsing** — FLAC / WAV / MP3 / OGG read directly, **60×–250× faster** than going through ffprobe
 - **CUE sheet splitting** — UTF-16 / UTF-8 / GBK encodings and 1/75-frame indices
+- **Streaming and album detail** — Subsonic streaming page unified with local album card grid; dedicated album detail view with full metadata and batch actions
 - **Metadata enrichment** — five sources: QQ Music / NetEase Cloud Music / iTunes / lrclib / dizzylab; tags, cover art and lyrics are filled in automatically during playback
 - **Online cover fetching** — embedded art → web art → 7-day negative cache; no negative caching while offline, and a miss is recorded only when the server explicitly says there is none
 - **OPRA headphone EQ** — **6230** headphone target curves built in, written into the EQ chain in one click
-- **Audio health check** — `/api/track/health` plus a per-track popup, 19 objective metrics; the `rtahealth` CLI runs the same algorithms offline
+- **Audio health check** — `/api/track/health` plus a per-track popup, objective metrics including THD+N, noise floor, stereo correlation, mono compatibility, and side/mid ratio; cached results carry algorithm generation tags
 - **Auto-update** — check, download, sha256 verification, install, rollback on failure; the channel is a public GitHub repository and the client holds no token
 - **Built-in feedback** — Settings → Diagnostics, describe the issue, optionally attach a diagnostic bundle (already redacted), forwarded through a Cloudflare Worker; the `.zip` can also be exported and sent manually
 
@@ -180,7 +182,7 @@ The app is ad-hoc signed and not notarized by Apple. That is fine for personal u
 # Prerequisites: CMake ≥ 3.20, Xcode Command Line Tools
 cmake -S . -B build-mac -DCMAKE_BUILD_TYPE=Release
 cmake --build build-mac -j8
-ctest --test-dir build-mac --output-on-failure     # 100/100
+ctest --test-dir build-mac --output-on-failure     # 113/113
 
 # Build the .app (the script gates architecture / deployment target / signing, and fails if any check is off)
 bash tools/make_app_mac.sh
@@ -197,7 +199,7 @@ bash tools/make_app_mac.sh
 ctest --test-dir build-mac --output-on-failure
 ```
 
-**100/100 passing.** Covers DSP numerics, output paths, networking, metadata, the UI decision layer and the update installer logic.
+**113/113 passing.** Covers DSP numerics, output paths, networking, metadata, the UI decision layer and the update installer logic.
 
 Verification **does not open audio devices by default**: offline analysis and the Null backend come first; every test that has to make sound runs at ≤ −60 dBFS.
 
@@ -243,13 +245,13 @@ The functionality stays available and numerically correct (worst convolution cas
 
 ## 🗺 Roadmap
 
-> **1.1.0** is the baseline for this roadmap; the actual released version follows the Release badge above. 1.1.1 onward is planned and **not started**; the full criteria, split lines and open items are in
+> **1.1.1** is the current stable release; the actual released version follows the Release badge above. 1.1.2 onward is planned; the full criteria, split lines and open items are in
 > **[ROADMAP-1.1.x.md](ROADMAP-1.1.x.md)**.
 
 | Version   | Theme                                                              | Status     |
 | --------- | ------------------------------------------------------------------ | ---------- |
 | **1.1.0** | Baseline release                                                   | ✅ Released |
-| **1.1.1** | Finer diagnostics + debug backlog cleanup                          | 🧭 Planned  |
+| **1.1.1** | Diagnostics, streaming overhaul, bilingual UI & cast/PEQ fixes     | ✅ Released |
 | **1.1.2** | **AirPlay output support**                                         | 🧭 Planned  |
 | **1.1.3** | LLM model list                                                     | 🧭 Planned  |
 | **1.1.4** | Audio analysis on the track page (three-level folding / true peak / multichannel) | 🧭 Planned |
@@ -262,7 +264,7 @@ The functionality stays available and numerically correct (worst convolution cas
 
 ```mermaid
 flowchart TB
-  A["1.1.1 – 1.1.3<br/>diagnostics · AirPlay<br/>LLM models"]
+  A["1.1.2 – 1.1.3<br/>AirPlay<br/>LLM models"]
   B["1.1.4 – 1.1.6<br/>audio analysis · library lookup<br/>AI streaming"]
   C["1.1.7 – 1.1.9<br/>covers · cover write-back<br/>platform / performance"]
   D["1.2.0<br/>room measurement wizard"]
@@ -281,6 +283,7 @@ flowchart TB
 
 - **Native DSD is unavailable** — CoreAudio defines PCM only and has no native DSD path; `dsdnative=1` reports an explicit error instead of silently downgrading. DSD works only through DoP
 - **AirPlay is not supported yet** — planned for **1.1.2**; the device list does not currently distinguish AirPlay from local sound cards, so choosing AirPlay does not mean it has been verified
+- **UPnP casting cannot play CUE-split tracks** — a renderer can only stream discrete files; clicking a CUE track during cast explicitly reports an error rather than falling back silently
 - **The room measurement wizard is currently hidden** — 7 transport-layer defects are fixed; the wizard and real microphone measurement are planned for **1.2.0**; the existing manual “EQ file / room correction IR” loading still works
 - **Hog is not exclusive kernel audio** — Hog takes over the device but does not block I/O from other processes; the real bit-perfect guarantee comes from the physical format lock
 - **The exclusive path cannot prove itself bit-for-bit** — a device-side loopback tap conflicts with Hog, so the exclusive path currently has only indirect evidence
@@ -299,7 +302,7 @@ See the [development roadmap](ROADMAP-1.1.x.md) for unfinished features and acce
 
 | File | Contents |
 |---|---|
-| [ROADMAP-1.1.x.md](ROADMAP-1.1.x.md) | **Roadmap after 1.1.0**: per-version tasks, criteria, dependencies and split lines |
+| [ROADMAP-1.1.x.md](ROADMAP-1.1.x.md) | **Roadmap 1.1.1 → 1.2.0**: per-version tasks, criteria, dependencies and split lines |
 | [GPU precision measurements](<docs/GPU精度实测.md>) | Metal numeric precision, re-run commands and untested boundaries |
 | [GPU efficiency tests](<docs/GPU卷积与升频效率细查.md>) | Performance data at specific block sizes and its limits; the standalone probe re-run commands are not fully archived |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | Contribution guide: build, gates, commit conventions, what is not accepted |
@@ -310,7 +313,7 @@ See the [development roadmap](ROADMAP-1.1.x.md) for unfinished features and acce
 
 ## Project origin
 
-This repository is an **independent macOS branch of RLPlayer**: the platform layer (audio output, GPU, window shell) has been rewritten against native macOS capabilities and **no longer merges with upstream**; version numbers start independently from `1.0.0`, and the current version follows the Release badge above (this roadmap baseline is 1.1.0).
+This repository is an **independent macOS branch of RLPlayer**: the platform layer (audio output, GPU, window shell) has been rewritten against native macOS capabilities and **no longer merges with upstream**; version numbers start independently from `1.0.0`, and the current version follows the Release badge above (current stable version is 1.1.1).
 
 Upstream repository (Windows edition): **<https://github.com/okhuoyanyan/RLPlayer2>**
 

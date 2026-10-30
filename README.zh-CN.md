@@ -15,7 +15,7 @@
   <img src="https://img.shields.io/badge/HiFi-DSP%20%C2%B7%20DoP%20%C2%B7%20bit--perfect-22d3ee?style=flat-square" alt="HiFi">  
   <a href="https://github.com/BH2VOQ/RLPlayer-Mac/releases"><img src="https://img.shields.io/github/v/release/BH2VOQ/RLPlayer-Mac?include_prereleases&label=release&style=flat-square&color=22d3ee" alt="Release"></a>  
   <img src="https://img.shields.io/badge/macOS-13%2B%20%C2%B7%20arm64-0b1120?style=flat-square&logo=apple&logoColor=white" alt="macOS 13+ · arm64">  
-  <img src="https://img.shields.io/badge/ctest-100%2F100-34d399?style=flat-square" alt="ctest 100/100">  
+  <img src="https://img.shields.io/badge/ctest-113%2F113-34d399?style=flat-square" alt="ctest 100/100">  
   <img src="https://img.shields.io/badge/license-GPL--3.0--or--later-a78bfa?style=flat-square" alt="GPL-3.0-or-later">  
   <img src="https://img.shields.io/badge/runtime%20deps-0-f472b6?style=flat-square" alt="No runtime dependencies">  
 </p>
@@ -34,7 +34,7 @@
   <img src="docs/images/ui-albums.png" alt="RLPlayer 主界面：专辑网格与底栏播放控制" width="100%">  
 </p>
 
-|  52  |     4    |    6230   |    100   |   0   |
+|  52  |     4    |    6230   |    113   |   0   |
 | :--: | :------: | :-------: | :------: | :---: |
 | 升频预设 | SDM 调制器族 | OPRA 耳机曲线 | ctest 用例 | 运行时依赖 |
 
@@ -69,23 +69,24 @@ FLAC 44.1 kHz / 16 bit
 - **SDM 调制器** — 四族：Butterworth（DSD5/DSD7）、7 阶 Chebyshev、EC 误差反馈、AHM 多电平；EC-5 在 DSD256 带内 SNR **113.5 dB**
 - **DSD 原生读取** — DSF/DFF 直接解析，不经 ffmpeg；DirectSDM 同速率逐位直通，大文件分块流式解码（1764000 帧逐样本一致）
 - **卷积引擎** — 零延迟均匀分块 FFT，分块结果与直接卷积相对误差 **≤6.1e-14**
-- **20 段 PEQ** — RBJ 双二阶，20 个中心频率取自 ISO 1/3 倍频程网格，节点可拖、自动前级防削波；单段 +6 dB 实测 **6.0000 dB**（44.1/48/96/192 kHz）
+- **20 段 PEQ** — RBJ 双二阶，20 个中心频率取自 ISO 1/3 倍频程网格，节点可拖拽、带实时平滑曲线预览（0px 滞后），量程放开至 ±24 dB（按住 ⌥ Option 可横向调频防手抖误触），自动前级防削波；单段 +6 dB 实测 **6.0000 dB**（44.1/48/96/192 kHz）
 - **过载保护** — 过采样峰值检测（ISP）自动预衰减、音量渐变、DoP 音量锁 0 dB；满幅 / 瞬态 / 恢复三段都有回归
 
 ### 🔊 输出
 
-- **CoreAudio 独占（Hog）** — AUHAL + Hog 抢占 + 物理格式锁定，避免系统混音器重采样；设备不支持目标格式时**如实报错，不静默替换**
+- **CoreAudio 独占（Hog）** — AUHAL + Hog 抢占 + 物理格式锁定，避免系统混音器重采样；独占冲突时如实返回 DeviceBusy 及占用进程 PID，不误报格式错误
 - **CoreAudio 共享** — 独占不可用时的兜底，`bit_perfect()` 明确返回 false 并告知；16/24/32 bit 三种位深实测 **0 LSB** 偏差
 - **DoP** — 24-bit 载波封装 DSD，macOS 上唯一的 DSD 输出路径；DoP 模式下绝不静默回退到共享
-- **UPnP / DLNA** — 真实 SSDP 发现 + AVTransport 控制 + 本地供源，实测供源字节数与文件**逐字节相同**
+- **UPnP / DLNA** — 真实 SSDP 发现 + AVTransport 控制 + 本地供源；投放中切歌无缝切换投放会话，按钮状态即时反馈（<100ms）且失败自动退回；实测供源字节数与文件**逐字节相同**
 - **Null** — 只跑 DSP 不开设备，所有离线测试与自动化验证都走它
 - **三档官方预设** — 原音直通 / PCM 升频 / DSD 升频（后端另支持第四档 PCM→DSD），按当前设备能力实时算出推荐档位并标注降级原因
 
 ### 🖥 界面
 
 - **单进程原生壳** — NSWindow + WKWebView，页面走自定义 `rlplayer://app/` scheme 交给进程内核心，**主进程不监听端口**（只有 UPnP 投放期间临时起一个本地供源服务）
+- **中英双语界面** — 设置 → 通用 → 外观 → 语言，即时切换并保持当前页面与页签；1,513 条 Hi-Fi 专业术语对照；macOS 系统原生菜单跟随语言
 - **三套配色 × 两套界面风格** — 深色 / 白色 / 浅蓝色，Apple Music 风与经典 Hi-Fi 工作台各一套
-- **十个设置页签** — 输入 / 输出 / PCM / SDM / 高级 / EQ / 声音校准 / 元数据 / 流媒体 / 诊断；页签条固定、只有内容滚动
+- **十个设置页签** — 输入 / 输出 / PCM / SDM / 通用 / EQ / 声音校准 / 元数据 / 流媒体 / 诊断；页签条固定、只有内容滚动
 - **六态位完美徽标** — 直通、PCM→PCM、PCM→DSD、DSD→DSD 各自区分是否 bit-perfect，并给出降级原因
 - **通栏窗口** — 隐藏标题栏 + FullSizeContentView 内容铺满，四边 5px 热区可拉伸
 
@@ -93,10 +94,11 @@ FLAC 44.1 kHz / 16 bit
 
 - **原生标签解析** — FLAC / WAV / MP3 / OGG 直接读，比走 ffprobe 快 **60×~250×**
 - **CUE 整轨分轨** — UTF-16 / UTF-8 / GBK 编码与 1/75 帧索引
+- **流媒体与专辑详情** — Subsonic 流媒体页面与本地专辑卡片网格统一，支持列表/网格切换；专属详情页支持完整元数据展示与整张/入队/随机操作
 - **元数据补全** — QQ 音乐 / 网易云 / iTunes / lrclib / dizzylab 五源；播放时自动补标签、封面、歌词
 - **在线封面抓取** — 内嵌图 → 网图 → 负缓存 7 天；断网不写负缓存，只有服务器明确说没有才记缺失
 - **OPRA 耳机 EQ** — 内置 **6230** 款耳机目标曲线，一键写入 EQ 链
-- **音质体检** — `/api/track/health` + 单曲页弹窗，19 项客观指标；`rtahealth` CLI 可离线跑同一套算法
+- **音质体检** — `/api/track/health` + 单曲页弹窗，包含 THD+N、本底噪声、声道相关性、单声道兼容性及 side/mid 能量比等指标；体检缓存带算法代际标识
 - **自动更新** — 检查、下载、sha256 校验、安装、失败回滚；通道是公开的 GitHub 仓库，客户端零 token
 - **内置反馈** — 设置 → 诊断里写问题描述，可选附诊断包（已脱敏），经 Cloudflare Worker 转发；也可导出 `.zip` 手动发送
 
@@ -180,7 +182,7 @@ ad-hoc 签名，未做 Apple 公证。自用与内部分发没有问题；正式
 # 前置：CMake ≥ 3.20、Xcode Command Line Tools
 cmake -S . -B build-mac -DCMAKE_BUILD_TYPE=Release
 cmake --build build-mac -j8
-ctest --test-dir build-mac --output-on-failure     # 100/100
+ctest --test-dir build-mac --output-on-failure     # 113/113
 
 # 出 .app（脚本内做架构 / 部署目标 / 签名门禁，不达标直接失败）
 bash tools/make_app_mac.sh
@@ -197,7 +199,7 @@ bash tools/make_app_mac.sh
 ctest --test-dir build-mac --output-on-failure
 ```
 
-**100/100 通过。** 覆盖 DSP 数值、输出路径、网络、元数据、UI 判定层与更新安装逻辑。
+**113/113 通过。** 覆盖 DSP 数值、输出路径、网络、元数据、UI 判定层与更新安装逻辑。
 
 验证默认**不打开音频设备**：优先离线分析与 Null 后端；需要出声的用例电平一律 ≤ −60 dBFS。
 
@@ -243,13 +245,13 @@ Metal 内核（`librtagpu.dylib`，运行时编译 MSL）**动态加载**：`dlo
 
 ## 🗺 路线图
 
-> **1.1.0** 是本路线图的基线；实际发布版本以上方 Release 徽标为准。1.1.1 起为计划，**尚未开工**；完整判据、切分线与挂账见  
+> **1.1.1** 是当前正式版本；实际发布版本以上方 Release 徽标为准。1.1.2 起为后续计划；完整判据、切分线与挂账见  
 > **[ROADMAP-1.1.x.md](ROADMAP-1.1.x.md)**。
 
-| 版本        | 主题                                   | 状态    |
-| --------- | ------------------------------------ | ----- |
-| **1.1.0** | 基线版本                                 | ✅ 已发布 |
-| **1.1.1** | 诊断记录精细化 + debug 清账                   | 🧭 计划 |
+| 版本        | 主题                                                   | 状态    |
+| --------- | ---------------------------------------------------- | ----- |
+| **1.1.0** | 基线版本                                                 | ✅ 已发布 |
+| **1.1.1** | 诊断记录、流媒体重构、中英双语界面与投放/PEQ修复                   | ✅ 已发布 |
 | **1.1.2** | **AirPlay 输出适配**                     | 🧭 计划 |
 | **1.1.3** | LLM 模型列表                             | 🧭 计划 |
 | **1.1.4** | 单曲页音频分析（三级折叠 / 真峰 / 多声道）             | 🧭 计划 |
@@ -262,7 +264,7 @@ Metal 内核（`librtagpu.dylib`，运行时编译 MSL）**动态加载**：`dlo
 
 ```mermaid
 flowchart TB
-  A["1.1.1 – 1.1.3<br/>诊断 · AirPlay<br/>LLM 模型"]
+  A["1.1.2 – 1.1.3<br/>AirPlay<br/>LLM 模型"]
   B["1.1.4 – 1.1.6<br/>音频分析 · 资料检索<br/>AI 流式"]
   C["1.1.7 – 1.1.9<br/>补图 · 封面写回<br/>平台 / 性能"]
   D["1.2.0<br/>房间测量向导"]
@@ -281,6 +283,7 @@ flowchart TB
 
 - **Native DSD 不可用** — CoreAudio 只定义 PCM，没有原生 DSD 通路；`dsdnative=1` 会明确报错而不是静默降级。DSD 只能走 DoP
 - **AirPlay 尚未支持** — 计划在 **1.1.2** 适配；当前设备列表不区分 AirPlay 与本地声卡，选 AirPlay 不代表已验证
+- **UPnP 投放不支持 CUE 分轨** — 远端渲染器仅能播放完整文件；投放时点击 CUE 分轨曲目会明确报错，不再静默退回本地播放
 - **房间测量向导当前隐藏** — 传输层 7 处缺陷已修，向导与真实话筒测量计划在 **1.2.0** 重做；现有「EQ 文件 / 房间校正 IR」手动加载仍可用
 - **Hog 不是独占式内核音频** — Hog 只抢设备、不阻止其它进程 IO，bit-perfect 的实际保障来自物理格式锁定
 - **独占路径无法自证逐位** — 设备侧回环 tap 与 Hog 互斥，独占路径目前只有间接证据
@@ -300,7 +303,7 @@ flowchart TB
 
 | 文件 | 内容 |
 |---|---|
-| [ROADMAP-1.1.x.md](ROADMAP-1.1.x.md) | **1.1.0 之后的版本路线图**：逐版任务、判据、依赖与切分线 |
+| [ROADMAP-1.1.x.md](ROADMAP-1.1.x.md) | **1.1.1 → 1.2.0 版本路线图**：逐版任务、判据、依赖与切分线 |
 | [GPU 精度实测](<docs/GPU精度实测.md>) | Metal 数值精度、复跑命令和未测边界 |
 | [GPU 效率测试](<docs/GPU卷积与升频效率细查.md>) | 特定块长下的性能数据与局限；独立探针复跑命令未完整归档 |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | 贡献指南：构建、门禁、提交规范、不接受什么 |
@@ -311,7 +314,7 @@ flowchart TB
 
 ## 项目来源
 
-本仓库是 **RLPlayer 的 macOS 独立分支**：平台层（音频输出、GPU、窗口壳）按 macOS 原生能力重写，与上游**不再合并**，版本号从 `1.0.0` 独立起算，当前版本以上方 Release 徽标为准（本路线图基线为 1.1.0）。
+本仓库是 **RLPlayer 的 macOS 独立分支**：平台层（音频输出、GPU、窗口壳）按 macOS 原生能力重写，与上游**不再合并**，版本号从 `1.0.0` 独立起算，当前版本以上方 Release 徽标为准（当前正式版为 1.1.1）。
 
 上游仓库（Windows 版）：**<https://github.com/okhuoyanyan/RLPlayer2>**
 
