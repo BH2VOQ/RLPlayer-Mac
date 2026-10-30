@@ -1,8 +1,8 @@
 {
-  "version": "1.1.1",
-  "notes": "Stable 1.1.1: includes everything from beta1–beta4 (bilingual UI, streaming overhaul, settings that survive updates) plus real UPnP track switching, an instant cast button, a lag-free EQ curve and ±24 dB range. · 稳定版 1.1.1：包含 beta1–beta4 的全部内容（中英界面、流媒体整修、升级不改设置），并修好投放切歌、投放按钮实时跟随、EQ 曲线跟手与 ±24 dB 量程。",
-  "download_url": "https://github.com/BH2VOQ/RLPlayer-Mac/releases/download/v1.1.1/RLPlayer-1.1.1-macOS-arm64.dmg",
-  "sha256": "52fcbf3b7877afaba481898bce5a245655e9c60c267da1d284b833e27b124745",
-  "size": 7768211,
-  "published_at": "2026-10-30T06:46:28Z"
+  "version": "1.1.1.1",
+  "notes": "Hotfix 1.1.1.1: fixes auto-advance to the next track during UPnP casting across sequential, repeat, and shuffle modes, and preserves the active track position and queue sync when switching playback modes. · 热修补丁 1.1.1.1：修复 UPnP 投放在顺序、循环、随机模式下不自动播放下一曲的问题，并修复切换播放模式时的当前曲目定位与队列同步。",
+  "download_url": "https://github.com/BH2VOQ/RLPlayer-Mac/releases/download/v1.1.1.1/RLPlayer-1.1.1.1-macOS-arm64.dmg",
+  "sha256": "8002aca2be31719713dce52fb6bb44b76acb531a9bf9fd57b4eea45011cec0f1",
+  "size": 7783562,
+  "published_at": "2026-10-30T08:44:59Z"
 }
