@@ -348,6 +348,24 @@ int main() {
     }
 
 
+    // ---------------- 歌词「带轴判定」(2026-10-30 歌词补全了但不滚 的修复判据) ----------------
+    // 要证明的事:歌词链能否区分「带 [mm:ss] 时间轴的 LRC」与「纯文本」。
+    // 旧链是「第一个 ok 就停」⟹ lrclib 的 plainLyrics 会挡住网易云同曲的带轴歌词;
+    // 现在链里用 ed_lrc_timed 决定「无轴先留作兜底、继续问下一个源」,所以误判两个方向都要测:
+    // 假阳性([ti:]/[ar:]/[offset:] 被当成时间轴)= 永远跳过带轴源;
+    // 假阴性([mm:ss.xx] 被判成无轴)= 退回纯文本,歌词不滚。
+    std::printf("-- ed_lrc_timed --\n");
+    {
+        using enrich_detail::ed_lrc_timed;
+        ck(ed_lrc_timed("[00:16.64] 交差点の真ん中"), "[mm:ss.xx] → 带轴");
+        ck(ed_lrc_timed("[1:05] 短分位"), "[m:ss] → 带轴");
+        ck(ed_lrc_timed("[00:44.26][00:50.00] 一行多时间戳"), "一行多时间戳 → 带轴");
+        ck(!ed_lrc_timed("第一行纯文本\n第二行纯文本"), "纯文本 → 无轴");
+        ck(!ed_lrc_timed("[ti:迷星叫]\n[ar:MyGO!!!!!]\n[offset:+300]\n纯文本"),
+           "[ti:]/[ar:]/[offset:] 元数据标签不算时间轴");
+        ck(!ed_lrc_timed(""), "空串 → 无轴");
+    }
+
     std::printf("\n%s\n", g_fail == 0 ? "全部通过" : (std::to_string(g_fail) + " 项失败").c_str());
     return g_fail == 0 ? 0 : 1;
 }

@@ -5889,10 +5889,12 @@ function loadLyrics(file, isRetry) {
           return '<div class="ly" data-i="' + i + '">' + esc(l.s) + '</div>';
         }).join('')
       : '<div class="ly none">没有歌词<br><span style="font-size:11px">同名 .lrc 文件、内嵌歌词，或播放时自动在线补全（可在设置-元数据补全关闭）</span></div>';
-    // 空结果 → 退避重试（后端可能正在后台补全；最多 4 次：1s/2s/3s/5s）
-    if (!LY.lines.length && LYRETRY.file === file && LYRETRY.n < 4) {
-      var waits = [1000, 2000, 3000, 5000];
-      var w = waits[LYRETRY.n] || 5000;
+    // 空结果 → 退避重试（后端可能正在后台补全；最多 6 次：1/2/3/5/8/13s ≈ 32s）
+    // 2026-10-30：旧窗口只有 1+2+3+5=11s。投放起播才触发补全时，要等搜索链（5 源 × ≥300ms）
+    // 加歌词请求走完，实测可能超过 11s ⟹ 界面先报「没有歌词」，要切歌/切页签才出词。
+    if (!LY.lines.length && LYRETRY.file === file && LYRETRY.n < 6) {
+      var waits = [1000, 2000, 3000, 5000, 8000, 13000];
+      var w = waits[LYRETRY.n] || 13000;
       LYRETRY.n++;
       if (LYRETRY.timer) clearTimeout(LYRETRY.timer);
       LYRETRY.timer = setTimeout(function () {

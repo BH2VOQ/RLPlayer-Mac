@@ -238,6 +238,24 @@ inline bool enrich_adopt(bool confident, int llmPick, bool llmRan, double topSco
     return topScore >= kEnrichAdoptTop;          // 无背书时只放行高分
 }
 
+// 歌词是否带 [mm:ss] 时间轴。判据与前端 parseLrc 同口径的最小集:
+// 方括号 + 1~3 位数字(分) + ':' + 1~2 位数字(秒);出现一处即算"带轴"。
+// 用途(2026-10-30 用户实测「歌词补上了但不滚」):歌词链「第一个 ok 就 break」会停在
+// lrclib 的 plainLyrics 上(它没有 syncedLyrics),而网易云同曲往往有带轴 LRC ⟹
+// 必须能区分两者,才能"无轴先留作兜底、继续问下一个源"。
+inline bool ed_lrc_timed(const std::string& s) {
+    for (size_t i = 0; i < s.size(); ++i) {
+        if (s[i] != '[') continue;
+        size_t j = i + 1, nd = 0;
+        while (j < s.size() && s[j] >= '0' && s[j] <= '9' && nd < 3) { ++j; ++nd; }
+        if (nd == 0 || j >= s.size() || s[j] != ':') continue;
+        size_t k = j + 1, ns = 0;
+        while (k < s.size() && s[k] >= '0' && s[k] <= '9' && ns < 2) { ++k; ++ns; }
+        if (ns > 0) return true;
+    }
+    return false;
+}
+
 } // namespace enrich_detail
 
 // ---------------------------------------------------------------------------
@@ -551,8 +569,10 @@ inline EnrichStats enrich_track(const std::string& file, bool force, const Enric
         }
     }
 
-    // ---- 8) 歌词:lyrics 为空时按注册表【逆序】(canLyric 过滤)= lrclib → netease → qq,
-    //         第一个 ok 写入。注册表正向是搜索优先级,逆序恰是 P1 的歌词优先级,顺序不变;
+    // ---- 8) 歌词:lyrics 为空时按注册表【逆序】(canLyric 过滤)= lrclib → netease → qq。
+    //         2026-10-30 改「第一个 ok 就停」为「带轴优先」:无轴(纯文本)结果先留作兜底、
+    //         继续问下一个源,全链都没有带轴结果才用它。理由见 enrich_detail::ed_lrc_timed。
+    //         注册表正向是搜索优先级,逆序恰是 P1 的歌词优先级,顺序不变;
     //         源内句柄经 LyricRequest.cands(按分数从高到低)带入,免重复搜索。 ----
     if (is_cancelled()) {
         finishNote();
@@ -576,7 +596,8 @@ inline EnrichStats enrich_track(const std::string& file, bool force, const Enric
                 if (s.idx < cands.size() &&
                     pv_lyric_identity(p.title, p.artist, fileSec, cands[s.idx]))
                     lrq.cands.push_back(cands[s.idx]);
-            LyricResult lr;
+            LyricResult lr;                          // 最终采用(带轴优先)
+            LyricResult plain;                       // 无轴兜底(第一个 ok 的纯文本)
             std::vector<std::string> lyrErrs;        // 各参与源的真实失败(P1 只留最后一个)
             for (auto it = provider_registry().rbegin(); it != provider_registry().rend(); ++it) {
                 if (is_cancelled()) {
@@ -588,9 +609,14 @@ inline EnrichStats enrich_track(const std::string& file, bool force, const Enric
                 if (!opts.enabled(it->id)) continue;
                 std::string lerr;
                 LyricResult t = it->lyric(lrq, lerr);
-                if (t.ok) { lr = std::move(t); break; }
+                if (t.ok && !t.lrc.empty()) {
+                    if (enrich_detail::ed_lrc_timed(t.lrc)) { lr = std::move(t); break; }
+                    if (!plain.ok) plain = std::move(t);   // 无轴:先留着,继续问下一个源
+                    continue;
+                }
                 if (!t.err.empty()) lyrErrs.push_back(t.err);
             }
+            if (!lr.ok && plain.ok) lr = std::move(plain);   // 全链无带轴 → 退回纯文本
             if (lr.ok && !lr.lrc.empty()) {
                 MetaValue lv;
                 lv.value = lr.lrc; lv.source = lr.source; lv.ts = now;
@@ -609,7 +635,8 @@ inline EnrichStats enrich_track(const std::string& file, bool force, const Enric
                 tm.fields.erase("lyrics_refresh");
                 tm.fields.erase("lyrics_unverified");
                 tm.fields.erase("lyrics_refresh_try");
-                notes.push_back("歌词=" + lr.source);
+                notes.push_back("歌词=" + lr.source +
+                                (enrich_detail::ed_lrc_timed(lr.lrc) ? "" : "(纯文本,全链无带轴)"));
             } else if (!lyrErrs.empty()) {
                 notes.push_back("歌词未取(" + enrich_detail::ed_join_notes(lyrErrs) + ")");
             } else {

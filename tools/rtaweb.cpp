@@ -1703,6 +1703,17 @@ static void upnp_mark_player_state(const std::string& file, bool ok, const std::
     }
 }
 
+// 投放起播的统一收尾：先把播放器状态归位，再触发与本地播放**同一套**的元数据补全。
+// 2026-10-30 用户实测（投放不放歌时歌词不补、取消投放立刻补）：投放的 5 个起播点
+// （/api/lib/play、/api/play、/api/skip、/api/cast/start、自动下一曲）此前只调
+// upnp_mark_player_state、从不调 meta_on_play ⟹ 投放期间 metabase 永远没有新记录，
+// /api/lyrics 三路（sidecar / 内嵌 / metabase）全空，界面停在「没有歌词」。
+// 两件事绑在一个入口，将来再加投放起点也不会只接一半。
+static void upnp_note_started(const std::string& file) {
+    upnp_mark_player_state(file, true, "");
+    meta_on_play(file);
+}
+
 // ---------------- NAA 端点自动发现（261024-01 #11）----------------
 // 用户原话：「NAA 端点（host:port）这个选项不应该出现啊，应该是自动获取的啊」。
 // 探测本体在 tools/naa_discover.h（与 CLI naa_scan 共用）。这里做异步任务：
@@ -5867,7 +5878,7 @@ static void upnp_queue_thread(PlayParams pInit, size_t startIdx) {
             return;
         }
         cur = nextItem;
-        upnp_mark_player_state(cur.path, true, "");
+        upnp_note_started(cur.path);
         ps.outRate = 0;
         ps.outBits = 0;
         ps.played.store(0);
@@ -7371,7 +7382,7 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
                 }
                 g_upnpPlayer.store(true);
                 g_upnpQueueActive.store(true);
-                upnp_mark_player_state(tgt.path, true, "");
+                upnp_note_started(tgt.path);
                 ps.outRate = 0;
                 ps.outBits = 0;
                 ps.played.store(0);
@@ -8184,7 +8195,7 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
             }
             g_upnpPlayer.store(true);
             g_upnpQueueActive.store(true);
-            upnp_mark_player_state(p.file, true, "");
+            upnp_note_started(p.file);
             ps.outRate = 0;
             ps.outBits = 0;
             ps.paused.store(false);
@@ -9420,7 +9431,7 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
             }
             g_upnpPlayer.store(true);
             g_upnpQueueActive.store(true);
-            upnp_mark_player_state(targetItem.path, true, "");
+            upnp_note_started(targetItem.path);
             ps.outRate = 0;
             ps.outBits = 0;
             ps.paused.store(false);
@@ -9565,7 +9576,7 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
                 return "{\"ok\":false,\"error\":\"" + jesc(res.error) + "\"}";
             }
             g_upnpPlayer.store(true);
-            upnp_mark_player_state(p.file, true, "");
+            upnp_note_started(p.file);
             return "{\"ok\":true,\"started\":true,\"phase\":\"discovering\"}";
         }
         if (rq.path.rfind("/api/cast/stop", 0) == 0) {
