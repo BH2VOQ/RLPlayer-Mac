@@ -1,8 +1,8 @@
 {
-  "version": "1.1.1.2",
-  "notes": "Hotfix 1.1.1.2: auto-completion now runs while casting to a UPnP renderer, lyrics prefer a timestamped LRC over plain text, and the lyrics panel waits long enough for the provider chain. · 热修补丁 1.1.1.2：修复投放到 UPnP 渲染器时不再自动补全的问题；歌词优先采用带时间轴的那份，歌词面板也会等到补全链路返回。",
-  "download_url": "https://github.com/BH2VOQ/RLPlayer-Mac/releases/download/v1.1.1.2/RLPlayer-1.1.1.2-macOS-arm64.dmg",
-  "sha256": "9b2324c94dd1782c71546b8e0fd3c1526d1f4a53254cb9f363e0e48a4c7a228e",
-  "size": 7784355,
-  "published_at": "2026-10-30T11:42:05Z"
+  "version": "1.1.1.3",
+  "notes": "Hotfix 1.1.1.3: the floating player bar no longer hides the end of long track lists, and the English PEQ help / curve legend is fully translated. · 热修补丁 1.1.1.3：悬浮播放条不再遮住长列表末尾；英文界面的 PEQ 帮助与曲线图例翻译已补全。",
+  "download_url": "https://github.com/BH2VOQ/RLPlayer-Mac/releases/download/v1.1.1.3/RLPlayer-1.1.1.3-macOS-arm64.dmg",
+  "sha256": "e945b94324c2bca6f506154f7ba4beedf27a5ed8db07e1cef83572f11ef3ad5a",
+  "size": 7784328,
+  "published_at": "2026-10-31T12:52:08Z"
 }
