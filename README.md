@@ -252,6 +252,7 @@ The functionality stays available and numerically correct (worst convolution cas
 | --------- | ------------------------------------------------------------------ | ---------- |
 | **1.1.0** | Baseline release                                                   | ✅ Released |
 | **1.1.1** | Diagnostics, streaming overhaul, bilingual UI & cast/PEQ fixes     | ✅ Released |
+| **1.1.1.3** | DSD playback reliability hotfix (rate conversion / direct-SDM gating / DoP continuity) | 🧭 Planned |
 | **1.1.2** | **AirPlay output support**                                         | 🧭 Planned  |
 | **1.1.3** | LLM model list                                                     | 🧭 Planned  |
 | **1.1.4** | Audio analysis on the track page (three-level folding / true peak / multichannel) | 🧭 Planned |
@@ -261,21 +262,31 @@ The functionality stays available and numerically correct (worst convolution cas
 | **1.1.8** | Safe cover write-back (off by default)                             | 🧭 Planned  |
 | **1.1.9** | macOS platform and performance (QoS / App Nap / caching / benchmarks) | 🧭 Planned |
 | **1.2.0** | Room measurement wizard (real-machine acceptance)                  | 🧭 Planned  |
+| **1.2.1** | PCM / SRC correctness & preset catalogue alignment | 🧭 Planned |
+| **1.2.2** | End-to-end double path for DSD | 🧭 Planned |
+| **1.2.3** | DSD multi-stage interpolation, CPU performance & backend self-report | 🧭 Planned |
+| **1.2.4** | SDM stability and observability | 🧭 Planned |
+| **1.2.5** | Device capabilities and conditional high-rate support | 🧭 Planned |
+| **1.3.0** | Stable integration and support matrix | 🧭 Planned |
 
 ```mermaid
 flowchart TB
-  A["1.1.2 – 1.1.3<br/>AirPlay<br/>LLM models"]
-  B["1.1.4 – 1.1.6<br/>audio analysis · library lookup<br/>AI streaming"]
-  C["1.1.7 – 1.1.9<br/>covers · cover write-back<br/>platform / performance"]
-  D["1.2.0<br/>room measurement wizard"]
-  A --> B --> C --> D
+  A["1.1.1.3<br/>DSD reliability hotfix"]
+  B["1.1.2 – 1.1.3<br/>AirPlay<br/>LLM models"]
+  C["1.1.4 – 1.1.6<br/>audio analysis · library lookup<br/>AI streaming"]
+  D["1.1.7 – 1.1.9<br/>covers · write-back<br/>platform / performance"]
+  E["1.2.0<br/>room measurement + measurement baseline"]
+  F["1.2.1 – 1.2.3<br/>PCM/SRC · DSD double · cascade"]
+  G["1.2.4 – 1.2.5<br/>SDM stability · device capabilities"]
+  H["1.3.0<br/>stable integration"]
+  A --> B --> C --> D --> E --> F --> G --> H
   classDef plan fill:#0f172a,stroke:#334155,color:#e2e8f0;
   classDef next fill:#0e7490,stroke:#22d3ee,color:#ecfeff;
-  class A,B,C plan;
-  class D next;
+  class A,B,C,D,E,F,G plan;
+  class H next;
 ```
 
-**Release discipline**: every version starts with `-beta1`; during beta only bug fixes go in; a stable release ships only when P0/P1 are at zero. Version numbers are not reserved, and 1.2.0 is the ceiling.
+**Release discipline**: every version starts with `-beta1`; during beta only bug fixes go in; a stable release ships only when P0/P1 are at zero. Version numbers are not reserved, and 1.3.0 is the ceiling.
 
 ---
 
@@ -302,7 +313,7 @@ See the [development roadmap](ROADMAP-1.1.x.md) for unfinished features and acce
 
 | File | Contents |
 |---|---|
-| [ROADMAP-1.1.x.md](ROADMAP-1.1.x.md) | **Roadmap 1.1.1 → 1.2.0**: per-version tasks, criteria, dependencies and split lines |
+| [ROADMAP-1.1.x.md](ROADMAP-1.1.x.md) | **Roadmap 1.1.1 → 1.3.0**: per-version tasks, criteria, dependencies, audio track and split lines |
 | [GPU precision measurements](<docs/GPU精度实测.md>) | Metal numeric precision, re-run commands and untested boundaries |
 | [GPU efficiency tests](<docs/GPU卷积与升频效率细查.md>) | Performance data at specific block sizes and its limits; the standalone probe re-run commands are not fully archived |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | Contribution guide: build, gates, commit conventions, what is not accepted |
