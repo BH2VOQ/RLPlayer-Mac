@@ -368,3 +368,9 @@ rlplayer-llm.conf；不进安装包，界面永不回显明文	rlplayer-llm.conf
 ；「输出声道数」= 跟随源，硬件直通播放时实际声道随源文件变化	; 'Output Channels' = Follow Source, actual channels follow source file during hardware direct playback	道数'; else if (bk === 'wasapi') tail = '；「输出声道数」= 跟随源，硬件直通播放时实际声道随源文件变化'; else tail = '；「输出声道数」= 跟随源'; el.
 ；共享模式输出经 CoreAudio 系统混音，恒等于设备声道数	; Shared mode output is mixed by CoreAudio and always matches device channel count	else if (bk === 'wasapi-shared') tail = '；共享模式输出经 CoreAudio 系统混音，恒等于设备声道数'; else if (bk === 'wasapi') tail = '
 ；配置里的 proxy= 行已保留	; 'proxy=' line in configuration preserved	conf，不进安装包、界面从不回显明文' + (LLM.proxy ? '；配置里的 proxy= 行已保留' : ''); } function llmRefresh() { re
+垂直=增益（	Vertical = Gain (	PEQ curve legend: drag nodes
+才横向改频率）	to drag horizontally and change frequency)	PEQ curve legend: Option-drag
+按住 ⌥ Option	Hold ⌥ Option	PEQ help: Option-drag
+按住 ⌥ Option 再拖	Hold ⌥ Option while dragging	PEQ help: Option-drag
+：垂直=增益；	: Vertical = Gain; 	PEQ help: drag semantics
+=横向改频率（对数轴，默认不跟着手抖跑）；	= Drag horizontally to change frequency (log axis; does not follow jitter by default);	PEQ help: drag semantics
