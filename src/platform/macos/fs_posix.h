@@ -20,8 +20,11 @@
 #include <cerrno>
 #include <cstdio>
 #include <filesystem>
+#include <string>
+#include <vector>
 #include <sys/stat.h>
 
+#include <dirent.h>
 #include <fcntl.h>
 #include <unistd.h>
 
@@ -83,5 +86,45 @@ inline bool file_exists(const std::filesystem::path& p) {
 }
 
 inline int last_error_code() { return errno; }
+
+// ---- 容错目录枚举（2026-10-31，1.1.1.4）----
+// opendir/readdir 逐项拿名字，再用 lstat 判定类型：
+//   * 目录打不开（ENOENT/EACCES/…）→ 返回 false，errno 留给调用方
+//   * 单项 lstat 失败（SMB 上常见的失效目录项，实测 errno=2 ENOENT）→ ++skipped 后继续
+//   * 不用 d_type（部分网络文件系统给 DT_UNKNOWN，不可信）
+//   * 符号链接只 lstat 不 stat：目标是目录也不递归（由调用方的 is_symlink 决定）
+inline bool list_dir(const std::string& path, std::vector<DirEntry>& out, size_t& skipped) {
+    DIR* d = ::opendir(path.c_str());
+    if (!d) return false;
+    out.clear();
+    skipped = 0;
+    // 拼子项路径时避免出现 "//"（根目录 "/" 自带分隔符）
+    const bool needSep = !path.empty() && path.back() != '/';
+    std::string full;
+    full.reserve(path.size() + 256);
+    int readErr = 0;
+    struct dirent* de = nullptr;
+    for (;;) {
+        errno = 0;
+        de = ::readdir(d);
+        if (!de) { readErr = errno; break; }
+        const char* nm = de->d_name;
+        if (nm[0] == '.' && (nm[1] == '\0' || (nm[1] == '.' && nm[2] == '\0'))) continue;
+        full.assign(path);
+        if (needSep) full += '/';
+        full += nm;
+        struct stat st{};
+        if (::lstat(full.c_str(), &st) != 0) { ++skipped; continue; }   // 失效项：跳过，不中止遍历
+        DirEntry e;
+        e.name = nm;
+        e.is_symlink = S_ISLNK(st.st_mode);            // lstat ⟹ 链接自身，不是目标
+        e.is_dir = !e.is_symlink && S_ISDIR(st.st_mode);
+        out.push_back(std::move(e));
+    }
+    ::closedir(d);
+    errno = readErr;   // 保留 readdir 的真实错误；lstat 的 ENOENT 不算目录错误
+    // 读到一半出错绝不能当成"目录已读完"（那又会变成静默截断）；交给调用方按 failedDir 处理。
+    return readErr == 0;
+}
 
 } // namespace rta::platform

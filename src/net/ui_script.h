@@ -5659,11 +5659,18 @@ D('bHelp').onclick = function () {
 D('mclose').onclick = function () { D('modal').classList.remove('on'); };
 D('modal').onclick = function (e) { if (e.target === D('modal')) D('modal').classList.remove('on'); };
 bindSeekDrag('seek');
+// 1.1.1.4：后端已在扫时 startScan 不再假装启动 ⟹ 按 j.started 给不同提示
 D('bScan').onclick = function () {
-  api('/api/lib/scan', '').then(function () { toast('开始扫描音乐库'); libChanged(); loadLibStats(); });
+  api('/api/lib/scan', '').then(function (j) {
+    toast(j && j.started === false ? '扫描已在进行中' : '开始扫描音乐库');
+    libChanged(); loadLibStats();
+  });
 };
 D('bRescan').onclick = function () {
-  api('/api/lib/scan', 'full=1').then(function () { toast('重新读取全部标签'); libChanged(); loadLibStats(); });
+  api('/api/lib/scan', 'full=1').then(function (j) {
+    toast(j && j.started === false ? '扫描已在进行中' : '重新读取全部标签');
+    libChanged(); loadLibStats();
+  });
 };
 D('bAddRoot').onclick = function () {
   var d = D('sRoot').value.trim();
@@ -8540,7 +8547,12 @@ function renderSettingsPage() {
       toast('已添加，正在扫描'); libChanged(); loadLibStats(); api('/api/lib/scan', '');
     });
   };
-  D('sp_rescan').onclick = function () { api('/api/lib/scan', 'full=1').then(function () { toast('开始重新扫描'); libChanged(); loadLibStats(); }); };
+  D('sp_rescan').onclick = function () {
+    api('/api/lib/scan', 'full=1').then(function (j) {
+      toast(j && j.started === false ? '扫描已在进行中' : '开始重新扫描');
+      libChanged(); loadLibStats();
+    });
+  };
   if (D('sp_scanthreads')) {
     D('sp_scanthreads').onchange = function () {
       ADV.scanThreads = parseInt(this.value, 10) || 0;

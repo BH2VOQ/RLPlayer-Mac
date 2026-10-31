@@ -6866,6 +6866,10 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
               << ",\"probed\":" << s.probed
               << ",\"cached\":" << s.cached
               << ",\"removed\":" << s.removed
+              // 1.1.1.4：失效目录项 / 读不全的目录 / 索引是否完整（SMB 上"完成"≠"扫全了"）
+              << ",\"skipped\":" << s.skipped
+              << ",\"failedDirs\":" << s.failedDirs
+              << ",\"complete\":" << (s.complete ? "true" : "false")
               << ",\"msg\":\"" << jesc(s.msg) << "\"}";
             return j.str();
         }
@@ -6884,6 +6888,9 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
               << ",\"probed\":" << s.probed
               << ",\"cached\":" << s.cached
               << ",\"removed\":" << s.removed
+              << ",\"skipped\":" << s.skipped
+              << ",\"failedDirs\":" << s.failedDirs
+              << ",\"complete\":" << (s.complete ? "true" : "false")
               << ",\"msg\":\"" << jesc(s.msg) << "\",\"roots\":[";
             for (size_t i = 0; i < roots.size(); ++i) { if (i) j << ","; j << "\"" << jesc(roots[i]) << "\""; }
             j << "]}";
@@ -6896,8 +6903,10 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
                      std::string(" full=") + (full ? "1" : "0");
             play_log(lg);
             dlog(lg);
-            lib.startScan(full);
-            return "{\"ok\":true}";
+            // 1.1.1.4：把"有没有真的启动"如实回给前端（旧实现无论是否在扫都回 ok:true）
+            const bool started = lib.startScan(full);
+            if (!started) return "{\"ok\":true,\"started\":false,\"reason\":\"already-scanning\"}";
+            return "{\"ok\":true,\"started\":true}";
         }
         // ---- 清理（261025-01 一.3：删掉的文件的记录必须能清掉）----
         if (rq.path.rfind("/api/lib/prune", 0) == 0) {
@@ -10744,8 +10753,10 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
     }
 
     if (rq.path.rfind("/api/rescan", 0) == 0) {
-        Library::instance().startScan(true);
-        return "{\"ok\":true}";
+        // 与 /api/lib/scan 同一语义（1.1.1.4）：已在扫时如实回 started=false
+        if (!Library::instance().startScan(true))
+            return "{\"ok\":true,\"started\":false,\"reason\":\"already-scanning\"}";
+        return "{\"ok\":true,\"started\":true}";
     }
 
     if (rq.path.rfind("/api/quit", 0) == 0 || rq.path.rfind("/api/shutdown", 0) == 0) {
@@ -11164,6 +11175,8 @@ static void core_init_common() {
     rta::dsp::OpraService::instance().init(rta::platform::module_dir_utf8() + "/data/opra_index.json", rta::platform::module_dir_utf8());
     // 20 段参数均衡 PEQ（261024-02 #6）：开机载入用户当前设置；文件不存在 = Flat（20 段 0dB）
     peq_load_current();
+    // 1.1.1.4：启动时是否补一次后台增量扫描（默认开；rlplayer-settings.conf 里 scanonstartup=0 关闭）
+    bool scanOnStartup = true;
     {
         std::ifstream f(path_in_exe_dir("rlplayer-settings.conf"));
         std::string line;
@@ -11180,11 +11193,22 @@ static void core_init_common() {
             if (k == "streamdecode") {
                 rta::audio::set_stream_decode_enabled(v != "0" && v != "false");
             }
+            if (k == "scanonstartup" || k == "scanOnStartup") {
+                scanOnStartup = !(v == "0" || v == "false" || v == "False" || v == "FALSE");
+            }
         }
     }
     if (Library::instance().trackCount() == 0) {
         printf("音乐库为空，开始首次扫描（根目录见 rlplayer-library.conf）…\n");
         Library::instance().startScan();
+    } else if (scanOnStartup) {
+        // 1.1.1.4：旧实现只在库为空时首扫 ⟹ 索引非空时新增文件重启后永不收录。
+        // 索引超过 60 秒没更新就后台补一次增量扫描（startScan 自己起线程，不阻塞首帧）。
+        const double age = Library::instance().indexAgeSeconds();
+        if (age > 60.0) {
+            printf("音乐库索引已 %.0f 秒未更新，后台增量扫描（scanonstartup=0 可关闭）…\n", age);
+            Library::instance().startScan(false);
+        }
     }
 }
 

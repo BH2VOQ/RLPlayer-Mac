@@ -24,10 +24,12 @@
 #include "audio/audio_loader.h"
 #include "audio/media_info.h"
 #include "net/scan_pool.h"
+#include "platform/fs.h"        // 容错目录枚举 list_dir（1.1.1.4：SMB 失效项不再中止遍历）
 #include "meta/entities.h"
 #include "meta/cue.h"          // CUE 整轨分轨解析
 #include <cmath>
 #include "meta/tags_native.h"   // 原生标签快速通道（FLAC/WAV/MP3/OGG；lib_probe_one 的原生分支）
+#include <functional>
 #include <memory>
 #include <string>
 #include <vector>
@@ -279,6 +281,11 @@ public:
         size_t tracks = 0, albums = 0;
         double lastScanMs = 0.0;
         int    probed = 0, cached = 0, removed = 0;
+        // 1.1.1.4：这次遍历里失效的目录项数、读不全的目录数，以及索引是否"完整"。
+        // complete=false 表示索引可用但可能缺行（SMB 失效项/目录权限），前端/用户据此判断要不要复核。
+        size_t skipped = 0;
+        size_t failedDirs = 0;
+        bool   complete = true;
         std::string msg;
     };
     Snapshot snapshot() const {
@@ -292,6 +299,9 @@ public:
         s.probed   = lastScanProbed_.load();
         s.cached   = lastScanCached_.load();
         s.removed  = removedMissing_.load();
+        s.skipped  = scanSkipped_.load();
+        s.failedDirs = scanFailedDirs_.load();
+        s.complete = scanComplete_.load();
         s.msg      = scanMsg();
         return s;
     }
@@ -342,7 +352,12 @@ public:
 
     // ---- 扫描 ----
     void load();            // 读配置与索引
-    void startScan(bool forceFull = false);
+    // 返回值（1.1.1.4）：已有一轮扫描在跑时返回 false（调用方据此告诉前端"已在进行中"，
+    // 而不是假装又启动了一次）；成功起了后台线程返回 true。
+    bool startScan(bool forceFull = false);
+    // 索引文件多久没更新过（秒）。文件不存在/读不到返回 1e9 ⟹ 立刻值得扫。
+    // 1.1.1.4 启动增量扫描的判据（索引非空但过期太久时后台补一次）。
+    double indexAgeSeconds() const;
     void stopScan() {
         cancel_.store(true);
         std::shared_ptr<ScanPool> p;
@@ -418,6 +433,10 @@ private:
     std::atomic<int> lastScanProbed_{0};
     std::atomic<int> lastScanCached_{0};
     std::atomic<int> removedMissing_{0};
+    // 1.1.1.4：本轮遍历的失效项计数 / 读不全的目录数 / 索引是否完整
+    std::atomic<size_t> scanSkipped_{0};
+    std::atomic<size_t> scanFailedDirs_{0};
+    std::atomic<bool>   scanComplete_{true};
     std::atomic<size_t> trackCount_{0};
     mutable std::atomic<size_t> albumCount_{0};   // albumVecLocked() 是 const
     std::shared_ptr<ScanPool> activePool_;
@@ -518,6 +537,71 @@ inline bool lib_is_cue(const fsx::path& p) {
     std::string ext = u8s(p.extension().u8string());
     for (auto& c : ext) c = (char)std::tolower((unsigned char)c);
     return ext == ".cue";
+}
+
+// ---------------------------------------------------------------------------
+// 容错目录遍历（2026-10-31，1.1.1.4 索引停滞）
+// ---------------------------------------------------------------------------
+// 为什么不能用 recursive_directory_iterator：SMB 上只要有一个目录项 lstat 失败
+// （实测 /Volumes/Music/KOKIA/翼を広けて (EP)，err=2 ENOENT），increment 就置 ec
+// 并把迭代器变成 end —— 外层 for 直接正常退出，整次遍历被静默截断，
+// 而扫描仍以"完成"写盘（索引 4.4k 行 vs 实际 6.0k 首）。
+//
+// 这里的契约：
+//   * 失效目录项（lstat 失败）只计入 skipped，遍历继续
+//   * 目录打不开计入 failedDirs（调用方据此保留其下旧记录），遍历继续
+//   * 隐藏项（name[0]=='.'）跳过，与旧逻辑一致
+//   * 目录 symlink 不递归；文件 symlink 按文件名扩展名照旧当音频/cue 收录
+//   * 非 UTF-8 名称计入 skipped（索引只存 UTF-8）
+//   * onProgress：每 128 个目录项 + 每个目录结束时各调一次（限频由调用方做）
+struct LibWalkResult {
+    size_t skipped = 0;                  // 失效目录项（ENOENT 等）
+    std::vector<std::string> failedDirs; // opendir 失败的目录
+    bool cancelled = false;
+};
+
+inline LibWalkResult lib_walk_tree(const std::string& root,
+                                   const std::function<void(const std::string&)>& onFile,
+                                   const std::function<void(const std::string&)>& onCue,
+                                   const std::function<void()>& onProgress,
+                                   const std::function<bool()>& cancelled) {
+    LibWalkResult r;
+    std::vector<std::string> stack;      // 显式栈做深度优先，避免递归爆栈
+    stack.push_back(root);
+    size_t seen = 0;
+    std::vector<rta::platform::DirEntry> ents;
+    while (!stack.empty()) {
+        if (cancelled && cancelled()) { r.cancelled = true; return r; }
+        const std::string dir = stack.back();
+        stack.pop_back();
+        size_t badItems = 0;
+        ents.clear();
+        if (!rta::platform::list_dir(dir, ents, badItems)) {
+            r.failedDirs.push_back(dir);       // 打不开：记下来，但不中止
+        } else {
+            r.skipped += badItems;
+            const bool needSep = !dir.empty() && dir.back() != '/';
+            for (const auto& e : ents) {
+                if (cancelled && cancelled()) { r.cancelled = true; return r; }
+                if (!e.name.empty() && e.name[0] == '.') continue;   // 隐藏项（旧逻辑一致）
+                std::string full = dir;
+                if (needSep) full += '/';
+                full += e.name;
+                if (!lib_valid_utf8(full)) { ++r.skipped; continue; }
+                if ((++seen & 0x7F) == 0) {
+                    if (onProgress) onProgress();
+                    std::this_thread::yield();   // 大库遍历别把 UI/播放线程拖死（旧遍历每 64 项让出）
+                }
+                if (e.is_dir) { stack.push_back(std::move(full)); continue; }
+                // 到这里是普通文件或符号链接：is_dir 已排除符号链接指向的目录（不递归）
+                const fsx::path p = p8(full);
+                if (lib_is_audio(p)) { if (onFile) onFile(full); }
+                else if (lib_is_cue(p)) { if (onCue) onCue(full); }
+            }
+        }
+        if (onProgress) onProgress();      // 每个目录结束汇报一次
+    }
+    return r;
 }
 
 // cue 的 FILE 指向的音频此刻是否真的在磁盘上
@@ -836,6 +920,15 @@ inline std::string Library::confPath() {
 inline std::string Library::indexPath() {
     const std::string d = libDataDir(), leaf = confLeaf("rlplayer-index.tsv");
     return d.empty() ? leaf : rta::platform::join(d, leaf);
+}
+// 索引文件的"年龄"（秒）：last_write_time 与当前时钟差。读不到 = 1e9（当作立刻要扫）。
+inline double Library::indexAgeSeconds() const {
+    std::error_code ec;
+    const auto t = fsx::last_write_time(p8(indexPath()), ec);
+    if (ec) return 1e9;
+    const auto now = fsx::file_time_type::clock::now();
+    const double sec = std::chrono::duration<double>(now - t).count();
+    return sec < 0.0 ? 0.0 : sec;
 }
 inline std::string Library::readFile(const std::string& p) {
     std::ifstream f(p, std::ios::binary);
@@ -1394,8 +1487,8 @@ inline void Library::joinScan() {
     if (th_.joinable()) th_.join();
 }
 
-inline void Library::startScan(bool forceFull) {
-    if (scanning_.load()) return;
+inline bool Library::startScan(bool forceFull) {
+    if (scanning_.load()) return false;
     joinScan();
     const auto roots = this->roots();
     // 旧索引（增量基准）
@@ -1405,6 +1498,10 @@ inline void Library::startScan(bool forceFull) {
     scanning_.store(true);
     scanned_.store(0);
     total_.store(0);
+    // 1.1.1.4：新一轮开始 ⟹ 上一轮的"完成/失效项/坏目录"结论全部作废
+    scanSkipped_.store(0);
+    scanFailedDirs_.store(0);
+    scanComplete_.store(false);
     { std::lock_guard<std::mutex> lk(msgMtx_); scanMsg_ = "正在遍历目录…"; }
 
     const size_t thCount = this->scanThreads();
@@ -1466,9 +1563,18 @@ inline void Library::startScan(bool forceFull) {
         std::vector<std::string> walked;
         std::vector<std::string> cueWalked;
         std::vector<std::string> badRoots;   // 打不开的根（例如离线外接盘）
+        std::vector<std::string> failedDirs; // 能进但读不全的子目录（SMB 失效项 / 权限）
         std::error_code ec;
-        size_t seen = 0;
         auto lastTick = std::chrono::steady_clock::now();
+        // 进度限频（150ms）：遍历是单线程 I/O，这里只是让用户看到数字在动
+        auto noteProgress = [&] {
+            const auto now = std::chrono::steady_clock::now();
+            if (std::chrono::duration<double, std::milli>(now - lastTick).count() < 150.0) return;
+            lastTick = now;
+            std::lock_guard<std::mutex> lk(msgMtx_);
+            scanMsg_ = "正在遍历目录… " + std::to_string(walked.size()) + " 首";
+        };
+        size_t skippedItems = 0;
         for (const auto& root : roots) {
             if (cancel_.load()) break;
             bool isDir = false;
@@ -1477,49 +1583,45 @@ inline void Library::startScan(bool forceFull) {
                 isDir = fsx::is_directory(p8(root), ec);
             } catch (const std::exception&) { isDir = false; }
             if (!isDir) { badRoots.push_back(root); continue; }
-            for (auto it = fsx::recursive_directory_iterator(
-                     p8(root), fsx::directory_options::skip_permission_denied, ec);
-                 it != fsx::recursive_directory_iterator(); ) {
-                if (cancel_.load()) break;
-                if (ec) { it.increment(ec); continue; }
-                const auto& ep = it->path();
-                std::string name = u8s(ep.filename().u8string());
-                if (!name.empty() && name[0] == '.') { it.disable_recursion_pending(); it.increment(ec); continue; }
-                if (it->is_directory(ec)) { it.increment(ec); continue; }
-                if (lib_is_audio(ep)) {
-                    walked.push_back(u8s(ep.u8string()));
-                    total_.store((int)walked.size());
-                } else if (lib_is_cue(ep)) {
-                    cueWalked.push_back(u8s(ep.u8string()));
-                }
-                // ---- 分片让出（261025-01 一.1：大库扫描不能把机器/界面拖死）----
-                // 每 64 个目录项让出一次时间片，并且每 150ms 汇报一次「已发现多少首」，
-                // 用户至少能看到进度在动；遍历本身是单线程 I/O，让出成本可忽略。
-                if ((++seen & 0x3F) == 0) {
-                    const auto now = std::chrono::steady_clock::now();
-                    if (std::chrono::duration<double, std::milli>(now - lastTick).count() >= 150.0) {
-                        lastTick = now;
-                        std::lock_guard<std::mutex> lk(msgMtx_);
-                        scanMsg_ = "正在遍历目录… " + std::to_string(walked.size()) + " 首";
-                    }
-                    std::this_thread::yield();
-                }
-                it.increment(ec);
-            }
+            // 1.1.1.4：改用平台层容错枚举（失效项只计数、不中止整次遍历）
+            LibWalkResult wr = lib_walk_tree(
+                root,
+                [&](const std::string& f) { walked.push_back(f); total_.store((int)walked.size()); },
+                [&](const std::string& c) { cueWalked.push_back(c); },
+                noteProgress,
+                [&] { return cancel_.load(); });
+            skippedItems += wr.skipped;
+            for (auto& d : wr.failedDirs) failedDirs.push_back(std::move(d));
+            if (wr.cancelled || cancel_.load()) break;
+            std::this_thread::yield();   // 多个根之间让出一次时间片（大库扫描不拖死界面）
         }
-        if (cancel_.load()) { scanning_.store(false); return; }
+        scanSkipped_.store(skippedItems);
+        scanFailedDirs_.store(failedDirs.size());
+        if (cancel_.load()) {
+            // 取消：绝不写索引（半截结果落盘比不扫更糟），也不算"完成"
+            scanComplete_.store(false);
+            scanning_.store(false);
+            return;
+        }
 
         const int n = (int)walked.size();
         total_.store(n);
         if (n == 0 && cueWalked.empty()) {
             const auto tEnd = std::chrono::steady_clock::now();
             const double durMs = std::chrono::duration<double, std::milli>(tEnd - tStart).count();
-            // ★ 防"库被清空"：有坏根就保留这些根下的老记录，只在真没有坏根时清空。
+            // ★ 防"库被清空"：有坏根/有读不全的目录就保留这些位置下的老记录，只在真没有坏根时清空。
             std::vector<LibTrack> kept;
-            if (!badRoots.empty()) {
-                for (auto& o : old)
+            if (!badRoots.empty() || !failedDirs.empty()) {
+                for (auto& o : old) {
+                    bool keep = false;
                     for (auto& br : badRoots)
-                        if (lib_path_under(o.path, br)) { kept.push_back(o); break; }
+                        if (lib_path_under(o.path, br)) { keep = true; break; }   // 盘不在：直接保留
+                    if (!keep)
+                        for (auto& fd : failedDirs)
+                            // 坏子目录不一定是"盘不在"（可能只是这一层读不了）⟹ 文件确实还在才保留
+                            if (lib_path_under(o.path, fd)) { keep = lib_file_exists(o.path); break; }
+                    if (keep) kept.push_back(o);
+                }
             }
             std::string text;
             {
@@ -1534,6 +1636,7 @@ inline void Library::startScan(bool forceFull) {
                 text = indexTextLocked();
             }
             writeIndex(text);          // 锁外写盘
+            scanComplete_.store(failedDirs.empty() && badRoots.empty());
             {
                 std::lock_guard<std::mutex> lk(msgMtx_);
                 std::string m = "完成：0 首";
@@ -1543,6 +1646,8 @@ inline void Library::startScan(bool forceFull) {
                     if (badRoots.size() > 1) m += " 等";
                     m += "）";
                 }
+                if (skippedItems > 0) m += "；跳过 " + std::to_string(skippedItems) + " 个失效项";
+                if (!failedDirs.empty()) m += "；" + std::to_string(failedDirs.size()) + " 个目录不可读（保留旧记录）";
                 scanMsg_ = m;
             }
             scanning_.store(false);
@@ -1677,6 +1782,7 @@ inline void Library::startScan(bool forceFull) {
         }
 
         if (cancel_.load()) {
+            scanComplete_.store(false);
             scanning_.store(false);
             return;
         }
@@ -1726,10 +1832,10 @@ inline void Library::startScan(bool forceFull) {
         const auto tEnd = std::chrono::steady_clock::now();
         const double durMs = std::chrono::duration<double, std::milli>(tEnd - tStart).count();
 
-        // 打不开的根：保留下面的老记录（不因为它们"这次没被遍历到"就被删掉）
+        // 打不开的根 + 读不全的子目录：保留下面的老记录（不因为它们"这次没被遍历到"就被删掉）
         // 坏根恢复防复活：逐条问 lib_file_exists，不在的不复活
         int badKeepSkipped = 0;
-        if (!badRoots.empty()) {
+        if (!badRoots.empty() || !failedDirs.empty()) {
             const std::unordered_map<std::string, size_t> freshByPath = [&] {
                 std::unordered_map<std::string, size_t> m;
                 m.reserve(fresh.size() * 2);
@@ -1739,16 +1845,13 @@ inline void Library::startScan(bool forceFull) {
             for (auto& o : old) {
                 if (freshByPath.count(o.path)) continue;
                 if (cueClaimed.count(lib_path_key(o.path))) continue;
-                for (auto& br : badRoots) {
-                    if (lib_path_under(o.path, br)) {
-                        if (lib_file_exists(o.path)) {
-                            fresh.push_back(o);
-                        } else {
-                            ++badKeepSkipped;
-                        }
-                        break;
-                    }
-                }
+                bool under = false;
+                for (auto& br : badRoots) if (lib_path_under(o.path, br)) { under = true; break; }
+                if (!under)
+                    for (auto& fd : failedDirs) if (lib_path_under(o.path, fd)) { under = true; break; }
+                if (!under) continue;
+                if (lib_file_exists(o.path)) fresh.push_back(o);
+                else ++badKeepSkipped;
             }
         }
 
@@ -1767,6 +1870,8 @@ inline void Library::startScan(bool forceFull) {
             text = indexTextLocked();
         }
         writeIndex(text);          // 锁外写盘（见 indexTextLocked 注释）
+        // 1.1.1.4：有读不全的目录 ⟹ 索引可用但不完整（行数可能偏少），complete=false
+        scanComplete_.store(failedDirs.empty() && badRoots.empty());
         {
             std::lock_guard<std::mutex> lk(msgMtx_);
             std::string m = "完成：" + std::to_string(nt) + " 首 (" + std::to_string((int)(durMs + 0.5)) + " ms)";
@@ -1775,6 +1880,9 @@ inline void Library::startScan(bool forceFull) {
                 if (badKeepSkipped > 0) m += "，跳过 " + std::to_string(badKeepSkipped) + " 条已不存在的文件";
                 m += "）";
             }
+            if (skippedItems > 0) m += "；跳过 " + std::to_string(skippedItems) + " 个失效项";
+            if (!failedDirs.empty())
+                m += "；" + std::to_string(failedDirs.size()) + " 个目录不可读（保留旧记录）";
             const int gone = removedMissing_.load();
             if (gone > 0) m += "；已剔除 " + std::to_string(gone) + " 条不存在的文件";
             if (!cueWalked.empty())
@@ -1787,13 +1895,16 @@ inline void Library::startScan(bool forceFull) {
         catch (const std::exception& e) {
             // 任何异常都不许把进程带走：降级成一条错误文案，索引维持扫描前的样子。
             { std::lock_guard<std::mutex> lk(msgMtx_); scanMsg_ = std::string("扫描失败：") + e.what(); }
+            scanComplete_.store(false);
             scanning_.store(false);
         }
         catch (...) {
             { std::lock_guard<std::mutex> lk(msgMtx_); scanMsg_ = "扫描失败：未知异常"; }
+            scanComplete_.store(false);
             scanning_.store(false);
         }
     });
+    return true;
 }
 
 // 真实批量入口：从音乐库 LibTrack 扫描结果构建实体图

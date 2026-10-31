@@ -16,6 +16,7 @@
 #include "net/library.h"
 #if !defined(_WIN32)
 #include <iconv.h>
+#include <unistd.h>      // geteuid（[6] chmod 000 子断言是否有效）
 #endif
 #include <cstdio>
 #include <string>
@@ -651,6 +652,144 @@ int main() {
             ck(dupTitles == "A1 A2 ", "被抢后只用先到的 a.cue 展开（B1/B2 不重复出现）", dupTitles);
         }
         fs::remove_all(tmp6, ec);
+    }
+
+    // =======================================================================
+    // [6] 容错目录遍历 lib_walk_tree（1.1.1.4 索引停滞：SMB 失效项不许中止整次遍历）
+    // =======================================================================
+    // 判据（铁律 3）：这里证明的是"遇到读不了的东西仍然把其余文件走完"，
+    // 而不是"扫到的数量对不对"。所以同时断言：
+    //   ① 正常项（含文件 symlink）全部收到 ② 隐藏项一个都没收
+    //   ③ 读不了的子目录进 failedDirs **且** 其余文件照旧全收到（这一条才是修复的重点）
+    std::printf("\n== [6] 容错目录遍历 lib_walk_tree ==\n");
+    {
+        const fs::path wroot = fs::temp_directory_path() / U("rta_lib_walk");
+        fs::remove_all(wroot, ec);
+        fs::create_directories(wroot / U("sub"), ec);
+        auto mkf = [&](const fs::path& p, const std::string& body) {
+            std::ofstream f(p, std::ios::binary);
+            f << body;
+        };
+        mkf(wroot / U("a.flac"), "fLaC");
+        mkf(wroot / U("b.flac"), "fLaC");
+        mkf(wroot / U("sub") / U("c.flac"), "fLaC");
+        mkf(wroot / U("album.cue"), "FILE \"a.flac\" WAVE\n  TRACK 01 AUDIO\n    INDEX 01 00:00:00\n");
+        mkf(wroot / U(".hidden.flac"), "fLaC");
+        fs::create_directories(wroot / U(".hiddendir"), ec);
+        mkf(wroot / U(".hiddendir") / U("d.flac"), "fLaC");
+
+        // 文件 symlink：目标是音频 ⟹ 按文件收录（保留旧行为）；目录 symlink 不递归
+        bool symOk = false;
+        {
+            std::error_code sec;
+            fs::create_symlink(wroot / U("a.flac"), wroot / U("link.flac"), sec);
+            symOk = !sec && fs::exists(wroot / U("link.flac"), sec);
+        }
+        if (!symOk) std::printf("  [INFO] 无法创建 symlink，跳过该条断言\n");
+        bool dirSymOk = false;
+        {
+            std::error_code sec;
+            fs::create_directory_symlink(wroot / U("sub"), wroot / U("sublink"), sec);
+            dirSymOk = !sec && fs::is_symlink(wroot / U("sublink"), sec);
+        }
+
+        // 读不了的子目录（chmod 000）：root 用户权限无效，只能跳过该子断言
+        const fs::path locked = wroot / U("sub") / U("locked");
+        fs::create_directories(locked, ec);
+        mkf(locked / U("invisible.flac"), "fLaC");
+        bool canBlock = true;
+#if !defined(_WIN32)
+        canBlock = (::geteuid() != 0);
+#endif
+        if (canBlock) fs::permissions(locked, fs::perms::none, ec);
+        else std::printf("  [INFO] 当前用户是 root，chmod 000 无效，跳过 failedDirs 子断言\n");
+
+        std::vector<std::string> audio, cues;
+        int progress = 0;
+        const auto wr = rta::net::lib_walk_tree(
+            p2u(wroot),
+            [&](const std::string& f) { audio.push_back(f); },
+            [&](const std::string& c) { cues.push_back(c); },
+            [&] { ++progress; },
+            [] { return false; });
+
+        const size_t wantAudio = (symOk ? 4u : 3u);   // a/b/sub-c (+ link) ，不含 locked 与隐藏项
+        std::string audioList;
+        for (auto& a : audio) audioList += a + " ";
+        std::printf("  [INFO] 收到音频 %zu（期望 %zu）/ cue %zu / skipped=%zu / failedDirs=%zu / symlink=%s\n",
+                    audio.size(), wantAudio, cues.size(), wr.skipped, wr.failedDirs.size(),
+                    symOk ? "yes" : "no");
+        const std::string wantMsg = "音频回调收到 " + std::to_string(wantAudio) + " 个（含文件 symlink）";
+        ck(audio.size() == wantAudio, wantMsg.c_str(),
+           std::to_string(audio.size()) + "/" + std::to_string(wantAudio) + "：" + audioList);
+        ck(cues.size() == 1, "cue 回调收到 1 个", std::to_string(cues.size()));
+        bool hiddenClean = true;
+        for (auto& a : audio) if (a.find(".hidden") != std::string::npos) hiddenClean = false;
+        for (auto& c : cues) if (c.find(".hidden") != std::string::npos) hiddenClean = false;
+        ck(hiddenClean, "隐藏文件/隐藏目录里的文件都没有被收录");
+        ck(progress > 0, "onProgress 被回调（进度文本能动）", std::to_string(progress));
+        if (dirSymOk) {
+            // 目录 symlink 不递归 ⟹ sub 里的 c.flac 只从真实 sub 收一次（不能翻倍）
+            int subC = 0;
+            for (auto& a : audio) if (a.find("c.flac") != std::string::npos) ++subC;
+            ck(subC == 1, "目录 symlink 不被递归（c.flac 只收 1 次）", std::to_string(subC));
+        }
+        if (canBlock) {
+            ck(!wr.failedDirs.empty(), "不可读目录记入 failedDirs（不抛异常、不中止）",
+               std::to_string(wr.failedDirs.size()) + " 个");
+            ck(audio.size() == wantAudio,
+               "有不可读目录时其余文件照旧全部走完（这正是 1.1.1.4 要修的：旧实现整个遍历被截断）",
+               std::to_string(audio.size()) + " / " + std::to_string(wantAudio));
+            ck(!wr.cancelled, "正常遍历 cancelled=false");
+        }
+        fs::permissions(locked, fs::perms::owner_all, ec);   // 恢复权限才能删
+
+        // ---- 子用例 B：多个不可读目录交错在树里，遍历不许被"截断"（与 readdir 顺序无关）----
+        // 只放一个不可读目录时，它恰好被最后访问就测不出「一次失败=整次中止」这个旧行为；
+        // 因此并列 6 组「可读目录 d* + 不可读目录 u*」：旧行为会在第一个 u* 处停下，
+        // 后面的 d* 全收不到（实测 6 组时几乎必然漏），新行为 6 首全收。
+        if (canBlock) {
+            const fs::path broot = fs::temp_directory_path() / U("rta_lib_walk_bad");
+            fs::remove_all(broot, ec);
+            fs::create_directories(broot, ec);
+            std::vector<fs::path> locks;
+            for (int i = 0; i < 6; ++i) {
+                const std::string sfx = std::to_string(i);
+                const fs::path okDir = broot / fs::u8path("d" + sfx);
+                const fs::path noDir = broot / fs::u8path("u" + sfx);
+                fs::create_directories(okDir, ec);
+                fs::create_directories(noDir, ec);
+                mkf(okDir / fs::u8path("t" + sfx + ".flac"), "fLaC");
+                mkf(noDir / fs::u8path("x" + sfx + ".flac"), "fLaC");
+                fs::permissions(noDir, fs::perms::none, ec);
+                locks.push_back(noDir);
+            }
+            std::vector<std::string> gotB;
+            const auto rb = rta::net::lib_walk_tree(
+                p2u(broot),
+                [&](const std::string& f) { gotB.push_back(f); },
+                [](const std::string&) {}, [] {}, [] { return false; });
+            ck(gotB.size() == 6, "6 个不可读目录交错在树里 ⟹ 6 首仍全部收到（遍历没被截断）",
+               std::to_string(gotB.size()) + "/6, failedDirs=" + std::to_string(rb.failedDirs.size()));
+            ck(rb.failedDirs.size() == 6, "6 个不可读目录全部记入 failedDirs",
+               std::to_string(rb.failedDirs.size()));
+            for (auto& l : locks) fs::permissions(l, fs::perms::owner_all, ec);
+            fs::remove_all(broot, ec);
+        }
+
+        // 取消回调：第一次就返回 true ⟹ 标记 cancelled，不继续走
+        {
+            std::vector<std::string> got;
+            const auto cr = rta::net::lib_walk_tree(
+                p2u(wroot),
+                [&](const std::string& f) { got.push_back(f); },
+                [](const std::string&) {},
+                [] {},
+                [] { return true; });
+            ck(cr.cancelled && got.empty(), "cancelled 回调返回 true 时立刻停止（不收集任何文件）",
+               std::to_string(got.size()) + " 个 / cancelled=" + (cr.cancelled ? "1" : "0"));
+        }
+        fs::remove_all(wroot, ec);
     }
 
         fs::current_path(oldCwd, ec);
