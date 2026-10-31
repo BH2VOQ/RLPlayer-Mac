@@ -1,8 +1,8 @@
 {
-  "version": "1.1.1.3",
-  "notes": "Hotfix 1.1.1.3: the floating player bar no longer hides the end of long track lists, and the English PEQ help / curve legend is fully translated. · 热修补丁 1.1.1.3：悬浮播放条不再遮住长列表末尾；英文界面的 PEQ 帮助与曲线图例翻译已补全。",
-  "download_url": "https://github.com/BH2VOQ/RLPlayer-Mac/releases/download/v1.1.1.3/RLPlayer-1.1.1.3-macOS-arm64.dmg",
-  "sha256": "e945b94324c2bca6f506154f7ba4beedf27a5ed8db07e1cef83572f11ef3ad5a",
-  "size": 7784328,
-  "published_at": "2026-10-31T12:52:08Z"
+  "version": "1.1.1.4-beta",
+  "notes": "Beta 1.1.1.4: library scans survive stale SMB entries and resume on startup; cover extraction now has a hard timeout and a concurrency cap, so slow network files no longer freeze the UI. · 测试版 1.1.1.4：索引扫描不再被失效的 SMB 目录项截断，启动会补增量；封面提取增加硬超时与并发上限，慢网盘不再卡住界面。",
+  "download_url": "https://github.com/BH2VOQ/RLPlayer-Mac/releases/download/v1.1.1.4-beta/RLPlayer-1.1.1.4-beta-macOS-arm64.dmg",
+  "sha256": "36fb39f211f9ddb38dfd240ec0b45b131dcec01aadff063d3f65c442e03ac302",
+  "size": 7793687,
+  "published_at": "2026-10-31T14:52:34Z"
 }
