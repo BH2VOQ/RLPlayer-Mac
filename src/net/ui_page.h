@@ -348,7 +348,14 @@ inline std::string rta_ui_page(const std::string& lang = "zh") {
     h += ".row .nm{flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.row .meta{font-size:11px;color:var(--mut2);flex:none}";
     h += ".rowdir .nm{color:var(--acc-text)}";
     // ---------- 空态（2026-10-25 Apple Music「专属精选推荐」风格首页 + Classic 居中卡片）----------
-    h += "#list{flex:1;display:flex;flex-direction:column;min-height:0}";
+    // 2026-10-31（用户截图：底下播放胶囊遮住曲目列表最后几行）：
+    //   .main 是 flex 列滚动容器，padding-bottom:92px 本来要给悬浮播放胶囊留位；
+    //   但 #list 原为 flex:1（可收缩 + min-height:0）⟹ 内容超长时 #list 被压成视口高度，
+    //   超出部分以「溢出」形式存在，.main 的 padding-bottom 不计入这段溢出的滚动区，
+    //   实测滚到底最后一行仍压在胶囊下方 55px（1180×760、40 首专辑页）。
+    //   修法：flex-shrink 改为 0（flex:1 0 auto）⟹ #list 按内容高度参与布局，
+    //   .main 的 padding-bottom 才会真正成为可滚动到底的留白；内容不足时仍由 flex-grow 填满。
+    h += "#list{flex:1 0 auto;display:flex;flex-direction:column;min-height:0}";
     h += ".emptystate{flex:1;display:flex;align-items:center;justify-content:center;box-sizing:border-box;padding:28px 24px}";
     h += ".emptystate .ecard{width:100%;max-width:440px;display:flex;flex-direction:column;align-items:center;text-align:center;padding:34px 34px 28px;border:1px solid var(--line);border-radius:16px;background:linear-gradient(180deg,var(--bg2),var(--bg3));box-shadow:0 18px 44px -18px var(--shadow)}";
     h += ".emptystate .eic{width:50px;height:50px;border-radius:12px;display:grid;place-items:center;background:var(--acc-weak);color:var(--acc-text);margin-bottom:14px;flex:none}";
