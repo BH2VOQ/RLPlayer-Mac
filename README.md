@@ -252,8 +252,7 @@ The functionality stays available and numerically correct (worst convolution cas
 | --------- | ------------------------------------------------------------------ | ---------- |
 | **1.1.0** | Baseline release                                                   | ✅ Released |
 | **1.1.1** | Diagnostics, streaming overhaul, bilingual UI & cast/PEQ fixes     | ✅ Released |
-| **1.1.1.3** | DSD playback reliability hotfix (rate conversion / direct-SDM gating / DoP continuity) | 🧭 Planned |
-| **1.1.2** | **AirPlay output support**                                         | 🧭 Planned  |
+| **1.1.2** | **AirPlay output support** + DSD playback reliability hotfix (formerly 1.1.1.3) | 🧭 Planned |
 | **1.1.3** | LLM model list                                                     | 🧭 Planned  |
 | **1.1.4** | Audio analysis on the track page (three-level folding / true peak / multichannel) | 🧭 Planned |
 | **1.1.5** | Library lookup (album context / asynchronous knowledge)            | 🧭 Planned  |
@@ -271,8 +270,8 @@ The functionality stays available and numerically correct (worst convolution cas
 
 ```mermaid
 flowchart TB
-  A["1.1.1.3<br/>DSD reliability hotfix"]
-  B["1.1.2 – 1.1.3<br/>AirPlay<br/>LLM models"]
+  A["1.1.2<br/>AirPlay + DSD reliability hotfix"]
+  B["1.1.3<br/>LLM models"]
   C["1.1.4 – 1.1.6<br/>audio analysis · library lookup<br/>AI streaming"]
   D["1.1.7 – 1.1.9<br/>covers · write-back<br/>platform / performance"]
   E["1.2.0<br/>room measurement + measurement baseline"]
