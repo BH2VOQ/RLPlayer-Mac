@@ -23,6 +23,8 @@
 #include <vector>
 #include <filesystem>
 #include <fstream>
+#include <chrono>        // [7] 封面/进程超时要断言真实墙钟耗时
+#include <cstdlib>       // [7] getenv（保存并恢复 RLPLAYER_FFMPEG）
 #include "test_compat_posix.h"   // POSIX 垫片：SetConsoleOutputCP/_putenv_s（macOS 门禁）
 
 namespace fs = std::filesystem;
@@ -790,6 +792,113 @@ int main() {
                std::to_string(got.size()) + " 个 / cancelled=" + (cr.cancelled ? "1" : "0"));
         }
         fs::remove_all(wroot, ec);
+    }
+
+    // =======================================================================
+    // [7] 封面超时 / 进程超时（1.1.1.4-beta「封面提取卡 UI」，2026-10-31）
+    // =======================================================================
+    // 判据（铁律 3）：这里要证明的不是"有没有返回"，而是**慢子进程不再把请求线程拖住**：
+    //   ① `run_hidden_timeout` 对自然要睡 5 s 的子进程能在 ~200 ms 内终止它并报告 timed_out；
+    //   ② 正常快命令既不被误杀、输出也不丢（超时闸门不能顺手把工作结果吞掉）；
+    //   ③ `get_cover` 在 200 ms 预算下**不返回卡死 5 s 的等待**，而是退回 1x1 占位图并置 timed_out；
+    //   ④ 超时结果**没有**被 per-file 封面缓存钉死（第二次调用仍然真去尝试、仍然报告超时）——
+    //      这条是"占位图永久缓存 ⟹ 用户补封面也不生效"那个老缺陷的防回归闸门。
+    // 只有时间数字能证明 ①③：所以除了返回字段，还断言**实际墙钟耗时**。
+    std::printf("\n== [7] 封面超时 / 进程超时 ==\n");
+    {
+        using clk = std::chrono::steady_clock;
+        auto ms_since = [](const clk::time_point& t0) {
+            return (long long)std::chrono::duration_cast<std::chrono::milliseconds>(clk::now() - t0).count();
+        };
+
+        // ---- 7.1 慢子进程必须在 deadline 附近被打断（而不是等满 5 s）----
+        {
+            const auto t0 = clk::now();
+            const auto pr = rta::platform::run_hidden_timeout("/bin/sleep 5", false, 200);
+            const long long cost = ms_since(t0);
+            std::printf("     [7.1] /bin/sleep 5 --timeout 200ms -> started=%d timed_out=%d exit=%d 耗时=%lldms\n",
+                        (int)pr.started, (int)pr.timed_out, pr.exit_code, cost);
+            ck(pr.started, "[7.1] 子进程确实启动了（started=true）");
+            ck(pr.timed_out, "[7.1] 200ms 到点 ⟹ timed_out=true");
+            ck(pr.exit_code == 124, "[7.1] 超时退出码 = 124（shell timeout 惯例）",
+               "exit=" + std::to_string(pr.exit_code));
+            ck(cost < 2000, "[7.1] 实际耗时 < 2000ms（没有等满 5s）",
+               std::to_string(cost) + "ms");
+        }
+
+        // ---- 7.2 快命令不许被超时闸门误杀，输出照旧收全 ----
+        {
+            const auto t0 = clk::now();
+            const auto pr = rta::platform::run_hidden_timeout("/bin/echo hello", true, 2000);
+            const long long cost = ms_since(t0);
+            std::printf("     [7.2] /bin/echo hello --timeout 2000ms -> started=%d timed_out=%d exit=%d output=\"%s\" 耗时=%lldms\n",
+                        (int)pr.started, (int)pr.timed_out, pr.exit_code,
+                        pr.output.substr(0, 32).c_str(), cost);
+            ck(pr.started, "[7.2] 子进程启动了（started=true）");
+            ck(!pr.timed_out, "[7.2] 正常退出不算超时（timed_out=false）");
+            ck(pr.exit_code == 0, "[7.2] 退出码 0", "exit=" + std::to_string(pr.exit_code));
+            ck(pr.output.find("hello") != std::string::npos,
+               "[7.2] capture=true 时 stdout 被完整收下（含 hello）", pr.output.substr(0, 64));
+            ck(cost < 2000, "[7.2] 正常路径没有被 deadline 拖慢", std::to_string(cost) + "ms");
+        }
+
+        // ---- 7.3 get_cover：假 ffmpeg 卡 5 s，200 ms 预算必须按时放弃 ----
+        // 假工具走产品既有的 RLPLAYER_FFMPEG 覆盖机制（find_tool ① 分支）：
+        //   `$1 == -version` 立刻 exit 0 ⟹ 通过 find_tool 的可执行性自检；
+        //   其余调用（真正抽封面）卡 5 s ⟹ 只有超时机制能救。
+        const fs::path gdir = fs::temp_directory_path() / U("rta_cover_timeout");
+        fs::remove_all(gdir, ec);
+        fs::create_directories(gdir, ec);
+        const fs::path fakeFf = gdir / U("slow-ffmpeg.sh");
+        {
+            std::ofstream f(fakeFf, std::ios::binary);
+            f << "#!/bin/sh\n"
+                 "# 测试专用假 ffmpeg：-version 立刻成功（过 find_tool 自检），抽封面时卡 5 秒\n"
+                 "if [ \"$1\" = \"-version\" ]; then exit 0; fi\n"
+                 "exec sleep 5\n";
+        }
+        std::error_code pec;
+        fs::permissions(fakeFf, fs::perms::owner_all, fs::perm_options::replace, pec);
+
+        const fs::path slowFlac = gdir / U("slow.flac");
+        {
+            std::ofstream f(slowFlac, std::ios::binary);
+            f << "fLaC";
+        }
+
+        const char* oldFfEnv = std::getenv("RLPLAYER_FFMPEG");
+        const std::string oldFfSaved = oldFfEnv ? oldFfEnv : "";
+        const bool hadFfEnv = (oldFfEnv != nullptr);
+        _putenv_s("RLPLAYER_FFMPEG", p2u(fakeFf).c_str());
+
+        {
+            std::string mime;
+            bool timedOut = false;
+            const auto t0 = clk::now();
+            const std::vector<unsigned char> cov = rta::audio::get_cover(p2u(slowFlac), mime, 200, &timedOut);
+            const long long cost = ms_since(t0);
+            std::printf("     [7.3] get_cover(200ms, 假ffmpeg睡5s) -> timed_out=%d size=%zu mime=%s 耗时=%lldms\n",
+                        (int)timedOut, cov.size(), mime.c_str(), cost);
+            ck(timedOut, "[7.3] get_cover 报告 timed_out=true（旧实现没有超时，会卡满 5s）");
+            ck(cost < 2000, "[7.3] get_cover 在 200ms 预算内返回（< 2000ms）", std::to_string(cost) + "ms");
+            ck(!cov.empty(), "[7.3] 超时仍返回非空字节（1x1 占位图兜底，前端 onerror 可露首字母）",
+               std::to_string(cov.size()) + " B");
+
+            std::string mime2;
+            bool timedOut2 = false;
+            const auto t1 = clk::now();
+            const std::vector<unsigned char> cov2 = rta::audio::get_cover(p2u(slowFlac), mime2, 200, &timedOut2);
+            const long long cost2 = ms_since(t1);
+            std::printf("     [7.3] 第二次 get_cover -> timed_out=%d size=%zu 耗时=%lldms\n",
+                        (int)timedOut2, cov2.size(), cost2);
+            ck(timedOut2, "[7.3] 第二次仍报告超时 ⟹ 超时结果**没有**被 per-file 封面缓存钉死",
+               "timed_out=" + std::to_string((int)timedOut2));
+            ck(cost2 < 2000, "[7.3] 第二次也在预算内返回", std::to_string(cost2) + "ms");
+        }
+
+        if (hadFfEnv) _putenv_s("RLPLAYER_FFMPEG", oldFfSaved.c_str());
+        else          _putenv_s("RLPLAYER_FFMPEG", "");
+        fs::remove_all(gdir, ec);
     }
 
         fs::current_path(oldCwd, ec);

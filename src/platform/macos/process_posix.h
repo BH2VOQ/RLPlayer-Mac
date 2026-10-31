@@ -21,12 +21,17 @@
 // 二次解释（文件名里有 $ 就会出错）。直接 exec 更安全、也更接近 Windows 语义。
 //
 // ⚠️ 铁律 2：本层只负责"启动并等待"，不做任何 kill。子进程退出由它自己决定。
+// 唯一例外是 run_hidden_timeout：它只终止**自己 spawn 的那个 pid**（见下文注释）。
 #include <cerrno>
+#include <chrono>
 #include <cstring>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include <fcntl.h>
+#include <poll.h>
+#include <signal.h>
 #include <spawn.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
@@ -142,6 +147,138 @@ inline ProcessResult run_hidden(const std::string& command_line_utf8, bool captu
     while (::waitpid(pid, &status, 0) < 0) {
         if (errno != EINTR) break;                  // 被信号打断就重试，其他错误放弃
     }
+    if (WIFEXITED(status)) out.exit_code = WEXITSTATUS(status);
+    else if (WIFSIGNALED(status)) out.exit_code = 128 + WTERMSIG(status);   // shell 惯例
+    else out.exit_code = -1;
+    return out;
+}
+
+// ---------------- 带超时的等待（2026-10-31，1.1.1.4-beta「封面提取卡 UI」）----------------
+// 为什么需要：封面接口里那次 `ffmpeg -map 0:v:0 -c:v copy` 是**同步**调用，实测 SMB 库上
+// 单次可达 20–249 s（events 日志 399 次 >60 s，最大 248,783 ms）。原来 run_hidden 无条件
+// 等到子进程自己退出 ⟹ 请求线程被慢盘永久占住，几十个并发就把 SMB/WebKit 拖死。
+//
+// 与 run_hidden 的关系：命令行拆分、/dev/null stdin、管道捕获全部同一套代码；只多两件事：
+//   ① 等待改成 `poll() + waitpid(WNOHANG)` 轮询 —— **一边读管道一边探退出**。
+//      只 waitpid 不读管道会死锁：子进程写满 64 KB 管道后阻塞，永远不退出。
+//   ② 到 deadline 对自己 spawn 的 pid 发 SIGTERM，最多再等 500 ms，仍未退出则 SIGKILL。
+//      ⚠️ 铁律 2：只发给**本函数自己的子进程 pid**，不碰进程组、不碰别的进程。
+inline ProcessResult run_hidden_timeout(const std::string& command_line_utf8,
+                                       bool capture_output, int timeout_ms) {
+    if (timeout_ms <= 0) return run_hidden(command_line_utf8, capture_output);   // 不设超时 = 旧语义
+
+    ProcessResult out;                              // exit_code = -1, started = false
+    std::vector<std::string> parts = detail::split_command_line(command_line_utf8);
+    if (parts.empty()) return out;
+
+    std::vector<char*> argv;
+    argv.reserve(parts.size() + 1);
+    for (std::string& s : parts) argv.push_back(s.data());
+    argv.push_back(nullptr);
+
+    int pipefd[2] = {-1, -1};
+    if (capture_output && ::pipe(pipefd) != 0) return out;
+
+    posix_spawn_file_actions_t actions;
+    ::posix_spawn_file_actions_init(&actions);
+    if (capture_output) {
+        ::posix_spawn_file_actions_adddup2(&actions, pipefd[1], STDOUT_FILENO);
+        ::posix_spawn_file_actions_adddup2(&actions, pipefd[1], STDERR_FILENO);
+        ::posix_spawn_file_actions_addclose(&actions, pipefd[0]);
+        ::posix_spawn_file_actions_addclose(&actions, pipefd[1]);
+    }
+    ::posix_spawn_file_actions_addopen(&actions, STDIN_FILENO, "/dev/null", O_RDONLY, 0);
+
+    pid_t pid = 0;
+    const int rc = ::posix_spawn(&pid, parts[0].c_str(), &actions, nullptr, argv.data(), environ);
+    ::posix_spawn_file_actions_destroy(&actions);
+
+    if (rc != 0) {
+        if (capture_output) { ::close(pipefd[0]); ::close(pipefd[1]); }
+        errno = rc;
+        return out;                                 // started=false, exit_code=-1
+    }
+    out.started = true;
+
+    // 读端非阻塞：这样"有数据就读、没数据立刻让出"与 waitpid 轮询能交替进行。
+    int rd = -1;
+    if (capture_output) {
+        ::close(pipefd[1]);                         // 父进程只读；不关写端就等不到 EOF
+        rd = pipefd[0];
+        const int fl = ::fcntl(rd, F_GETFL, 0);
+        if (fl >= 0) ::fcntl(rd, F_SETFL, fl | O_NONBLOCK);
+    }
+
+    // 排空管道：返回 false 表示已读到 EOF（读端会被关掉）。
+    auto drain = [&]() -> bool {
+        if (rd < 0) return false;
+        char buf[4096];
+        for (;;) {
+            const ssize_t got = ::read(rd, buf, sizeof(buf));
+            if (got > 0) { out.output.append(buf, (size_t)got); continue; }
+            if (got == 0) {                         // EOF：子进程的写端全关了
+                ::close(rd); rd = -1;
+                return false;
+            }
+            break;                                  // EAGAIN 等：暂时没数据
+        }
+        return true;
+    };
+
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
+    int status = 0;
+    bool timed_out = false;
+
+    for (;;) {
+        drain();
+
+        const pid_t r = ::waitpid(pid, &status, WNOHANG);
+        if (r == pid) break;                        // 已退出并回收，status 有效
+        if (r < 0 && errno != EINTR) { status = 0; break; }   // ECHILD 等：无从回收，退出码按 -1
+
+        const auto now = std::chrono::steady_clock::now();
+        if (now >= deadline) { timed_out = true; break; }
+
+        long long slice = std::chrono::duration_cast<std::chrono::milliseconds>(deadline - now).count();
+        if (slice > 20) slice = 20;                 // 20ms 粒度：既及时响应 deadline，也不空转 CPU
+        if (slice < 1) slice = 1;
+
+        if (rd >= 0) {
+            struct pollfd pfd{};
+            pfd.fd = rd;
+            pfd.events = POLLIN;
+            ::poll(&pfd, 1, (int)slice);
+        } else {
+            std::this_thread::sleep_for(std::chrono::milliseconds(slice));
+        }
+    }
+
+    if (timed_out) {
+        // 先礼后兵：SIGTERM → 最多 500ms（10ms 步进）→ 仍在则 SIGKILL → 必须 waitpid 回收，
+        // 否则留下僵尸进程。只对 pid（本函数自己 spawn 的）发信号。
+        ::kill(pid, SIGTERM);
+        bool reaped = false;
+        for (int i = 0; i < 50; ++i) {
+            drain();                                // 收尸同时排空：被 TERM 的子进程可能还在写
+            if (::waitpid(pid, &status, WNOHANG) == pid) { reaped = true; break; }
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+        if (!reaped) {
+            ::kill(pid, SIGKILL);
+            while (::waitpid(pid, &status, 0) < 0 && errno == EINTR) {}
+        }
+        if (rd >= 0) { ::close(rd); rd = -1; }
+        out.timed_out = true;
+        out.exit_code = 124;                        // shell 的 timeout(1) 惯例
+        return out;
+    }
+
+    // 正常退出：子进程写端已关，把管道里剩下的字节读干净（非阻塞 read 会读到数据后返回 0）。
+    if (rd >= 0) {
+        for (int i = 0; i < 64 && drain(); ++i) {}   // 正常情况一次就读到 EOF；上限只是防御
+        if (rd >= 0) { ::close(rd); rd = -1; }
+    }
+
     if (WIFEXITED(status)) out.exit_code = WEXITSTATUS(status);
     else if (WIFSIGNALED(status)) out.exit_code = 128 + WTERMSIG(status);   // shell 惯例
     else out.exit_code = -1;

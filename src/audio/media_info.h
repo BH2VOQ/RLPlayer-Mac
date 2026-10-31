@@ -303,7 +303,17 @@ inline std::string temp_path(const wchar_t* ext) {
 }
 
 // 返回封面字节；同时把 mime 写进 outMime
-inline std::vector<unsigned char> get_cover(const std::string& file, std::string& outMime) {
+//
+// 2026-10-31（1.1.1.4-beta「封面提取卡 UI」）：加两个可选参数。
+//   * ffmpeg_timeout_ms —— 内嵌封面抽取那次 ffmpeg 的硬上限（<=0 表示不设超时，等同旧行为）。
+//     实测 SMB 库上单次可达 20–249 s（events 日志 399 次 >60 s，最大 248,783 ms），没有上限
+//     就会把请求线程和 SMB 一起拖死。同目录 cover 文件的读取**不超时**（只是一次本地 stat+read）。
+//   * timed_out —— 回填"这次是因为超时才没拿到图"。调用方据此**不写负缓存、不下"没有封面"结论**。
+inline std::vector<unsigned char> get_cover(const std::string& file, std::string& outMime,
+                                            int ffmpeg_timeout_ms = 6000,
+                                            bool* timed_out = nullptr) {
+    if (timed_out) *timed_out = false;
+    bool timeout_hit = false;
     auto& cc = cover_cache();
     {
         std::lock_guard<std::mutex> lk(cc.mtx);
@@ -348,17 +358,28 @@ inline std::vector<unsigned char> get_cover(const std::string& file, std::string
             const std::string tmp = temp_path(L".img");
             const std::wstring cmd = L"\"" + widen(ffmpeg) + L"\" -v error -y -i \"" + widen(file) +
                 L"\" -map 0:v:0 -c:v copy -f image2 \"" + widen(tmp) + L"\"";
-            run_hidden(cmd, nullptr);
-            std::ifstream f(std::filesystem::u8path(tmp), std::ios::binary);
-            if (f) {
-                std::vector<unsigned char> b{ std::istreambuf_iterator<char>(f), {} };
-                f.close();
-                if (b.size() > 64) {
-                    // 拷贝模式下扩展名不可信，按文件头判真实 mime
-                    outMime = "image/jpeg";
-                    if (b.size() > 8 && b[0] == 0x89 && b[1] == 0x50 && b[2] == 0x4E && b[3] == 0x47) outMime = "image/png";
-                    else if (b.size() > 12 && b[0] == 0x52 && b[1] == 0x49 && b[2] == 0x46 && b[3] == 0x46) outMime = "image/webp";
-                    bytes = std::move(b);
+            // 2026-10-31（1.1.1.4-beta「封面提取卡 UI」）：这次 ffmpeg 原来是**无超时**的同步调用，
+            // 实测 SMB 库上单次 20–249 s。慢盘上几十个并发请求会同时压住 SMB 与 WebKit ⟹ UI 卡死。
+            // 改成带硬上限的版本：到点只终止本进程自己 spawn 的这个 pid（平台层负责 SIGTERM→SIGKILL）。
+            const rta::platform::ProcessResult pr =
+                rta::platform::run_hidden_timeout(narrow(cmd), false, ffmpeg_timeout_ms);
+            if (pr.timed_out) {
+                // 超时**不等于**"这个文件没有封面"：不要读（多半还没写完的）临时文件，
+                // 也不要让 1x1 占位图进 per-file 缓存 —— 上层才好重试。
+                timeout_hit = true;
+                bytes.clear();
+            } else {
+                std::ifstream f(std::filesystem::u8path(tmp), std::ios::binary);
+                if (f) {
+                    std::vector<unsigned char> b{ std::istreambuf_iterator<char>(f), {} };
+                    f.close();
+                    if (b.size() > 64) {
+                        // 拷贝模式下扩展名不可信，按文件头判真实 mime
+                        outMime = "image/jpeg";
+                        if (b.size() > 8 && b[0] == 0x89 && b[1] == 0x50 && b[2] == 0x4E && b[3] == 0x47) outMime = "image/png";
+                        else if (b.size() > 12 && b[0] == 0x52 && b[1] == 0x49 && b[2] == 0x46 && b[3] == 0x46) outMime = "image/webp";
+                        bytes = std::move(b);
+                    }
                 }
             }
             remove_temp(tmp);   // 平台内联（audio_loader.h）
@@ -366,6 +387,7 @@ inline std::vector<unsigned char> get_cover(const std::string& file, std::string
         }
     }
     // 3) 都没有：返回 1x1 透明 PNG
+    // （超时也走这里：调用方拿到的是"暂时没有图"，timed_out=true 告诉它别当结论缓存）
     {
         static const unsigned char px[] = {
             0x89,0x50,0x4E,0x47,0x0D,0x0A,0x1A,0x0A,0,0,0,0x0D,0x49,0x48,0x44,0x52,
@@ -378,7 +400,10 @@ inline std::vector<unsigned char> get_cover(const std::string& file, std::string
     }
 
 done:
-    {
+    if (timed_out) *timed_out = timeout_hit;
+    // 超时结果绝不进 per-file 缓存：否则这张 1x1 占位图会被钉死（实测旧行为正是如此 —— 第二次
+    // 调用 0 ms 拿到占位图），用户后来补上封面/网络恢复也不会重试。
+    if (!timeout_hit) {
         std::lock_guard<std::mutex> lk(cc.mtx);
         cc.data[file] = bytes;
         cc.mime[file] = outMime;

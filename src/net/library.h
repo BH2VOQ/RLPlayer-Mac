@@ -36,6 +36,8 @@
 #include <map>
 #include <unordered_map>
 #include <mutex>
+#include <condition_variable>   // 封面 ffmpeg 全局并发闸门（1.1.1.4-beta「封面提取卡 UI」）
+#include <chrono>               // 同上：闸门等待与专辑取图总预算
 #include <atomic>
 #include <thread>
 #include <filesystem>
@@ -1378,9 +1380,64 @@ inline bool lib_cover_is_1x1_placeholder(const std::vector<unsigned char>& b) {
     return be32(16) == 1u && be32(20) == 1u;
 }
 
+// ---------------------------------------------------------------------------
+// 封面 ffmpeg 的全局并发闸门（1.1.1.4-beta「封面提取卡 UI」，2026-10-31）
+//
+// 为什么需要：每次 `/api/lib/cover` 缓存未命中都会**同步**起一次 ffmpeg 抽内嵌封面。
+// 实测 SMB 库上单次 20–249 s（rlplayer-events.jsonl：399 次 >60 s，最大 248,783 ms），
+// 而封面请求走 scheme-handler 的并发队列 ⟹ 几十个慢 ffmpeg 同时占住 SMB 与 WebKit，
+// 播放器 UI 跟着卡住。两道闸：
+//   ① 硬超时 —— 单文件 6 s（get_cover 的 ffmpeg_timeout_ms）+ 单张专辑总预算 12 s；
+//   ② 全进程并发上限 2 —— 不管有多少封面请求排队，同时跑的 ffmpeg 不超过 2 个。
+//
+// 为什么放 header-inline 的 static：C++17 保证这种 inline 函数内的 static 局部变量在**整个
+// 程序里唯一**（跨 TU 共享）。webui 的封面线程与测试里的多实例因此共用同一份计数。
+// 闸门只包住真的需要起 ffmpeg 的路径 —— 缓存命中在上面就返回了，不占位。
+// ---------------------------------------------------------------------------
+inline std::mutex& cover_gate_mu() { static std::mutex m; return m; }
+inline std::condition_variable& cover_gate_cv() { static std::condition_variable cv; return cv; }
+inline int& cover_gate_active() { static int n = 0; return n; }
+
+// 取一个并发位。wait_ms <= 0 只做非阻塞尝试。成功返回 true（**必须**配对 cover_gate_release）。
+inline bool cover_gate_acquire(int wait_ms) {
+    constexpr int kMaxConcurrent = 2;                       // 全局并发上限
+    std::unique_lock<std::mutex> lk(cover_gate_mu());
+    auto ready = [] { return cover_gate_active() < kMaxConcurrent; };
+    if (ready()) { ++cover_gate_active(); return true; }
+    if (wait_ms <= 0) return false;
+    if (!cover_gate_cv().wait_for(lk, std::chrono::milliseconds(wait_ms), ready)) return false;
+    ++cover_gate_active();
+    return true;
+}
+
+inline void cover_gate_release() {
+    {
+        std::lock_guard<std::mutex> lk(cover_gate_mu());
+        if (cover_gate_active() > 0) --cover_gate_active();
+    }
+    cover_gate_cv().notify_all();
+}
+
+// RAII：保证任何返回路径（含提前 return / 异常）都放开并发位。
+struct CoverGateGuard {
+    bool held = false;
+    explicit CoverGateGuard(bool ok) : held(ok) {}
+    CoverGateGuard(const CoverGateGuard&) = delete;
+    CoverGateGuard& operator=(const CoverGateGuard&) = delete;
+    ~CoverGateGuard() { if (held) cover_gate_release(); }
+};
+
 inline bool Library::albumCover(const std::string& key, std::vector<unsigned char>& bytes, std::string& mime) {
     // 1 KB：真实封面（含 APIC 缩略图）极少这么小；比它还小的一律先当"可疑"，继续试下一首。
     const size_t kCoverMinBytes = 1024;
+    // ---- 三个时限 + 一个并发上限（1.1.1.4-beta「封面提取卡 UI」，2026-10-31）----
+    // 数值依据：SMB 库上单次 ffmpeg 实测 20–249 s（P50 也远超 6 s 的样本 399 个）。
+    //   * 单文件 6 s：正常的本地盘/千兆 SMB 抽一张内嵌图远小于它，超过就在这一首上止损；
+    //   * 单张专辑 12 s（最多 6 首候选）：等价于"允许两次单文件超时"，再多就是盘真的不行了；
+    //   * 等并发位 1.5 s：等不到说明已有 2 个慢 ffmpeg 在跑，这时候排队只是在堆请求线程。
+    const int kFfmpegTimeoutMs = 6000;      // 单文件 ffmpeg 硬上限
+    const int kAlbumBudgetMs   = 12000;     // 单张专辑总预算
+    const int kGateWaitMs      = 1500;      // 等全局并发位最多这么久
     // 取图顺序：cv=1 的曲目优先（≤3），再其余曲目（≤3）。锁内只收集路径，锁外才起 ffmpeg。
     std::vector<std::string> order;
     {
@@ -1408,13 +1465,41 @@ inline bool Library::albumCover(const std::string& key, std::vector<unsigned cha
     }
     if (order.empty()) return false;
 
+    // ---- 并发闸门（2026-10-31，1.1.1.4-beta「封面提取卡 UI」）----
+    // 只在真的要起 ffmpeg 时才排队；缓存命中已在上面返回，不占位。
+    // 等不到就**放弃这一次**：宁可这次不显示封面，也不要把请求线程堆在慢盘后面。
+    // 注意这里**不写负缓存** —— 排队失败不等于"这张专辑没有封面"，下次还得能重试。
+    if (!cover_gate_acquire(kGateWaitMs)) return false;
+    CoverGateGuard gate(true);
+
+    // 等位期间别的线程可能已经把这张专辑取好了 —— 再查一次，避免重复起 ffmpeg。
+    {
+        std::lock_guard<std::mutex> lk(mtx_);
+        auto it = coverCache_.find(key);
+        if (it != coverCache_.end()) {
+            if (it->second.first.empty()) return false;    // 负缓存：确定没有
+            bytes = it->second.first; mime = it->second.second; return true;
+        }
+    }
+
     std::vector<unsigned char> best;      // 真封面（>= 1KB）
     std::string bestMime;
     std::vector<unsigned char> small;     // 小但**不是** 1x1 占位图（最后兜底）
     std::string smallMime;
+    bool timedOut = false;
+    const auto deadline =
+        std::chrono::steady_clock::now() + std::chrono::milliseconds(kAlbumBudgetMs);
     for (const std::string& p : order) {
+        const auto now = std::chrono::steady_clock::now();
+        if (now >= deadline) { timedOut = true; break; }        // 整张专辑的预算用完
+        long long remain =
+            std::chrono::duration_cast<std::chrono::milliseconds>(deadline - now).count();
+        if (remain < 1) remain = 1;
+        const int timeoutMs = (int)std::min<long long>(kFfmpegTimeoutMs, remain);
         std::string m;
-        std::vector<unsigned char> cand = rta::audio::get_cover(p, m);
+        bool t = false;
+        std::vector<unsigned char> cand = rta::audio::get_cover(p, m, timeoutMs, &t);
+        if (t) { timedOut = true; continue; }        // 超时不是"没封面"：占位图不算数，试下一首
         if (cand.empty()) continue;
         if (lib_cover_is_1x1_placeholder(cand)) continue;    // get_cover 的"没有"兜底：跳过，继续问下一首
         if (cand.size() >= kCoverMinBytes) { best.swap(cand); bestMime = m; break; }
@@ -1435,7 +1520,7 @@ inline bool Library::albumCover(const std::string& key, std::vector<unsigned cha
         mime = smallMime;
         return true;
     }
-    {
+    if (!timedOut) {
         // 全专辑都没有封面：写负缓存（空字节 = 确定没有），返回 false 让前端露首字母。
         // 为什么敢缓存"没有"：这一轮已经把 cv=1 与其余各 3 首都问过了，短期内重试只会重复
         // 起同样的 ffmpeg 进程；而**占位图不写正缓存**这条保证不会把坏结果钉死。
@@ -1443,6 +1528,8 @@ inline bool Library::albumCover(const std::string& key, std::vector<unsigned cha
         if (coverCache_.size() > 256) coverCache_.clear();
         coverCache_[key] = { std::vector<unsigned char>(), std::string() };
     }
+    // 超时（有曲目是"没问完"而不是"问了没有"）⟹ 直接返回 false，**不写负缓存**：
+    // 否则慢盘上的一次超时会让这张专辑在本次进程生命周期里永久显示首字母。
     bytes.clear();
     mime = "image/png";
     return false;
