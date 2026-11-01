@@ -94,6 +94,12 @@ inline int last_error_code() { return errno; }
 //   * 不用 d_type（部分网络文件系统给 DT_UNKNOWN，不可信）
 //   * 符号链接只 lstat 不 stat：目标是目录也不递归（由调用方的 is_symlink 决定）
 inline bool list_dir(const std::string& path, std::vector<DirEntry>& out, size_t& skipped) {
+    return list_dir(path, out, skipped, nullptr);
+}
+
+inline bool list_dir(const std::string& path, std::vector<DirEntry>& out, size_t& skipped,
+                     std::vector<std::string>* skipped_names) {
+    if (skipped_names) skipped_names->clear();
     DIR* d = ::opendir(path.c_str());
     if (!d) return false;
     out.clear();
@@ -114,7 +120,11 @@ inline bool list_dir(const std::string& path, std::vector<DirEntry>& out, size_t
         if (needSep) full += '/';
         full += nm;
         struct stat st{};
-        if (::lstat(full.c_str(), &st) != 0) { ++skipped; continue; }   // 失效项：跳过，不中止遍历
+        if (::lstat(full.c_str(), &st) != 0) {                       // 失效项：跳过，不中止遍历
+            ++skipped;
+            if (skipped_names) skipped_names->push_back(nm);
+            continue;
+        }
         DirEntry e;
         e.name = nm;
         e.is_symlink = S_ISLNK(st.st_mode);            // lstat ⟹ 链接自身，不是目标

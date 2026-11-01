@@ -157,10 +157,12 @@ inline std::string http_status_text(int code) {
         case 200: return "OK";
         case 400: return "Bad Request";
         case 403: return "Forbidden";
+        case 404: return "Not Found";
         case 405: return "Method Not Allowed";
         case 413: return "Payload Too Large";
         case 431: return "Request Header Fields Too Large";
         case 500: return "Internal Server Error";
+        case 503: return "Service Unavailable";
         default:  return "OK";
     }
 }
@@ -196,10 +198,11 @@ inline bool webui_host_allowed_impl(const std::string& host, const std::string& 
     return false;
 }
 
-// handler 想把状态行写成 405/4xx 时调它（默认一律 200）。
-// 用 inline 函数 + 函数内 static（C++11 起线程安全初始化）比暴露 extern WebUi* 更省心。
+// handler 设置本次同步 dispatch 的响应状态（默认 200）。
+// 每条 HTTP 连接 / native GCD worker 各用自己的槽，防止并发请求互相
+// 覆盖状态；保留 atomic 指针 API，现有调用方无需改动。由传输层读后复位。
 inline std::atomic<int>* webui_status_slot() {
-    static std::atomic<int> s{200};
+    static thread_local std::atomic<int> s{200};
     return &s;
 }
 inline void webui_set_status(int code) { webui_status_slot()->store(code); }
@@ -306,7 +309,7 @@ inline void WebUi::loop() {
                 "Content-Type: application/json; charset=utf-8\r\n"
                 "Content-Length: 27\r\n"
                 "Cache-Control: no-store\r\n"
-                "Retry-After: 1\r\n"
+                "Retry-After: 2\r\n"
                 "Connection: close\r\n\r\n"
                 "{\"ok\":false,\"error\":\"busy\"}";
             size_t sent = 0;
@@ -505,8 +508,9 @@ inline void WebUi::handle(socket_t c, const Handler& h, bool lan, const std::str
     std::ostringstream resp;
     resp << "HTTP/1.1 " << status << " " << http_status_text(status) << "\r\n"
          << "Content-Type: " << ctype << "\r\n"
-         << "Content-Length: " << payload.size() << "\r\n"
-         << "Cache-Control: no-store\r\nConnection: close\r\n\r\n"
+         << "Content-Length: " << payload.size() << "\r\n";
+    if (status == 503) resp << "Retry-After: 2\r\n";
+    resp << "Cache-Control: no-store\r\nConnection: close\r\n\r\n"
          << payload;
     const std::string s = resp.str();
     // 整包发送：send() 可能只写出一部分（大响应 + 并发时发送缓冲更容易满）。

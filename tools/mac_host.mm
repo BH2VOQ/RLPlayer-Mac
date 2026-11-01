@@ -40,6 +40,7 @@
 #include <mutex>
 #include <condition_variable>
 #include <chrono>
+#include <atomic>
 
 #if __has_include("rlapp_core.h")
 #include "rlapp_core.h"
@@ -56,6 +57,12 @@ int cli_main(int argc, char** argv);
 #else
 namespace rta::net {
 struct HttpRequest { std::string method, path, body; };
+// Standalone host/test fallback without the web transport headers.
+inline std::atomic<int>* webui_status_slot() {
+    static thread_local std::atomic<int> status{200};
+    return &status;
+}
+inline void webui_set_status(int code) { webui_status_slot()->store(code); }
 }
 namespace rlapp {
 bool start_embedded();
@@ -303,6 +310,11 @@ static NSString *const kShim = @
 "      return window.webkit.messageHandlers.rltransport.postMessage(payload);\n"
 "    });\n"
 "  }\n"
+"  function responseHeaders(res) {\n"
+"    var headers = { 'Content-Type': res.contentType || 'text/plain' };\n"
+"    if (res.status === 503) headers['Retry-After'] = String(res.retryAfter || 2);\n"
+"    return headers;\n"
+"  }\n"
 "  var origXHR = window.XMLHttpRequest;\n"
 "  if (origXHR) {\n"
 "    var origOpen = origXHR.prototype.open;\n"
@@ -355,7 +367,7 @@ static NSString *const kShim = @
 "          }\n"
 "          return new Response(data, {\n"
 "            status: res.status || 200,\n"
-"            headers: { 'Content-Type': res.contentType || 'text/plain' }\n"
+"            headers: responseHeaders(res)\n"
 "          });\n"
 "        });\n"
 "      }\n"
@@ -374,7 +386,7 @@ static NSString *const kShim = @
 "            }\n"
 "            return new Response(data, {\n"
 "              status: res.status || 200,\n"
-"              headers: { 'Content-Type': res.contentType || 'text/plain' }\n"
+"              headers: responseHeaders(res)\n"
 "            });\n"
 "          });\n"
 "        }\n"
@@ -467,6 +479,7 @@ static NSString *const kShim = @
         dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
             std::string contentType;
             std::string respBody;
+            int responseStatus = 200;
             try {
                 // RAII 保护业务计数：只要离开业务分发范围，无论正常返回、抛异常还是提前返回，必须递减
                 struct WorkerGuard {
@@ -488,7 +501,10 @@ static NSString *const kShim = @
 
                 try {
                     respBody = rlapp::dispatch(httpReq, contentType);
+                    responseStatus = rta::net::webui_status_slot()->exchange(200);
                 } catch (...) {
+                    rta::net::webui_status_slot()->store(200);
+                    responseStatus = 500;
                     respBody = "{\"ok\":false,\"error\":\"internal error\"}";
                     contentType = "application/json; charset=utf-8";
                 }
@@ -508,14 +524,15 @@ static NSString *const kShim = @
             }
 
             NSData *respData = [NSData dataWithBytes:respBody.data() length:respBody.size()];
-            NSDictionary *headers = @{
+            NSMutableDictionary *headers = [@{
                 @"Content-Type": [NSString stringWithUTF8String:contentType.c_str()],
                 @"Content-Length": [NSString stringWithFormat:@"%zu", respBody.size()],
                 @"Access-Control-Allow-Origin": @"*",
                 @"Cache-Control": @"no-cache"
-            };
+            } mutableCopy];
+            if (responseStatus == 503) headers[@"Retry-After"] = @"2";
             NSHTTPURLResponse *httpResp = [[NSHTTPURLResponse alloc] initWithURL:url
-                                                                      statusCode:200
+                                                                      statusCode:responseStatus
                                                                      HTTPVersion:@"HTTP/1.1"
                                                                     headerFields:headers];
 
@@ -638,9 +655,13 @@ reject:
 
         std::string contentType;
         std::string respBody;
+        int responseStatus = 200;
         try {
             respBody = rlapp::dispatch(httpReq, contentType);
+            responseStatus = rta::net::webui_status_slot()->exchange(200);
         } catch (...) {
+            rta::net::webui_status_slot()->store(200);
+            responseStatus = 500;
             respBody = "{\"ok\":false,\"error\":\"internal error\"}";
             contentType = "application/json; charset=utf-8";
         }
@@ -657,7 +678,8 @@ reject:
             NSData *nsData = [NSData dataWithBytes:respBody.data() length:respBody.size()];
             NSString *b64 = [nsData base64EncodedStringWithOptions:0];
             replyHandler(@{
-                @"status": @200,
+                @"status": @(responseStatus),
+                @"retryAfter": @(responseStatus == 503 ? 2 : 0),
                 @"contentType": [NSString stringWithUTF8String:contentType.c_str()],
                 @"bodyBase64": b64 ?: @"",
                 @"isBase64": @YES
@@ -670,14 +692,16 @@ reject:
                 NSData *nsData = [NSData dataWithBytes:respBody.data() length:respBody.size()];
                 NSString *b64 = [nsData base64EncodedStringWithOptions:0];
                 replyHandler(@{
-                    @"status": @200,
+                    @"status": @(responseStatus),
+                    @"retryAfter": @(responseStatus == 503 ? 2 : 0),
                     @"contentType": [NSString stringWithUTF8String:contentType.c_str()],
                     @"bodyBase64": b64 ?: @"",
                     @"isBase64": @YES
                 }, nil);
             } else {
                 replyHandler(@{
-                    @"status": @200,
+                    @"status": @(responseStatus),
+                    @"retryAfter": @(responseStatus == 503 ? 2 : 0),
                     @"contentType": [NSString stringWithUTF8String:contentType.c_str()],
                     @"body": nsStr,
                     @"isBase64": @NO
@@ -1370,8 +1394,10 @@ static bool native_ui_lang_is_en() {
 - (void)emitUpdateResult:(const rta::update::CheckResult &)r {
     // 记下安装计划（只有 UpdateAvailable 才会被 begin_install 接受）
     self.lastUpdatePlan = r;
+#if __has_include("diag/diag.h")
     if(!r.up_to_date() && !r.available()) rta::diag::diag_emit("update.failed",rta::diag::Stage::Update,
         rta::diag::find_code("update.check_failed"),{{"decision",r.code()},{"reason",r.error},{"http_status",std::to_string(r.status),rta::diag::KvKind::Num}});
+#endif
 
     NSMutableDictionary *d = [NSMutableDictionary dictionary];
     d[@"stage"]  = r.up_to_date() ? @"up-to-date" : (r.available() ? @"available" : @"failed");

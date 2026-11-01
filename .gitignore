@@ -98,3 +98,7 @@ AGENTS.md
 
 # 本地代理协调、工作树与设计缓存（发布规范禁止进公开仓库）
 /.agents/
+
+# Python 字节码缓存（tools/*.py 被 import 时生成，不属源码）
+__pycache__/
+*.pyc

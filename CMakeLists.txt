@@ -204,6 +204,12 @@ target_link_libraries(test_subsonic PRIVATE ${RL_PLATFORM_LIBS})
 add_test(NAME subsonic COMMAND test_subsonic)
 
 # 手动 opt-in 原生验收：真 WKWebView/真 embedded 核心，不进入自动 CTest（会开自有窗口）。
+# Opt-in real WKWebView cover acceptance against explicitly isolated existing state.
+add_executable(test_cover_native tests/test_cover_native.mm)
+set_source_files_properties(tests/test_cover_native.mm PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
+target_include_directories(test_cover_native PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tools)
+target_link_libraries(test_cover_native PRIVATE rlapp_core "-framework AppKit" "-framework WebKit")
+
 add_executable(test_source_native tests/test_source_native.mm)
 set_source_files_properties(tests/test_source_native.mm PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
 target_include_directories(test_source_native PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tools)
@@ -698,6 +704,26 @@ if(APPLE)
     target_link_libraries(test_album_cover PRIVATE iconv)
 endif()
 add_test(NAME album_cover COMMAND test_album_cover ${CMAKE_SOURCE_DIR})
+# 本地封面落盘（2026-11-01）后，任何调用 albumCover() 的用例都会写 covercache/embed。
+# 这两个用例没有自带 setenv 隔离 ⟹ 在 ctest 里显式指到构建目录，绝不写用户
+# ~/Library/Application Support/RLPlayer（实测未隔离时确实写进去了）。
+set_tests_properties(album_cover PROPERTIES ENVIRONMENT
+  "HOME=${CMAKE_BINARY_DIR}/test-env/album_cover/home;RLPLAYER_STATE_DIR=${CMAKE_BINARY_DIR}/test-env/album_cover/state;RLPLAYER_LIBRARY_DIR=${CMAKE_BINARY_DIR}/test-env/album_cover/library;RLPLAYER_COVER_DIR=${CMAKE_BINARY_DIR}/test-env/album_cover/covers")
+set_tests_properties(library PROPERTIES ENVIRONMENT
+  "HOME=${CMAKE_BINARY_DIR}/test-env/library/home;RLPLAYER_STATE_DIR=${CMAKE_BINARY_DIR}/test-env/library/state;RLPLAYER_LIBRARY_DIR=${CMAKE_BINARY_DIR}/test-env/library/library;RLPLAYER_COVER_DIR=${CMAKE_BINARY_DIR}/test-env/library/covers")
+
+# Startup directory fingerprint and persistent local covers: isolated filesystem/process regressions.
+add_executable(test_library_fingerprint tests/test_library_fingerprint.cpp)
+target_include_directories(test_library_fingerprint PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(test_library_fingerprint PRIVATE iconv)
+add_test(NAME library_fingerprint COMMAND test_library_fingerprint)
+add_executable(test_local_cover_cache tests/test_local_cover_cache.cpp)
+target_include_directories(test_local_cover_cache PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(test_local_cover_cache PRIVATE iconv)
+add_test(NAME local_cover_cache COMMAND test_local_cover_cache)
+add_executable(test_http_response_state tests/test_http_response_state.cpp)
+target_include_directories(test_http_response_state PRIVATE ${CMAKE_SOURCE_DIR}/src)
+add_test(NAME http_response_state COMMAND test_http_response_state)
 
 # F-1 封面抓取纯逻辑（上游 c41ce97 的 mac 重做）：目录穿越 / Dice 负向对照 / 图片头校验 / 负缓存过期。
 #   判据全部离线（不联网、不开设备、不写用户目录），不需要 ffmpeg 与真实曲库。

@@ -165,8 +165,13 @@ int main() {
     ::setenv("CFFIXED_USER_HOME", u8str(tmp / "home").c_str(), 1);
     ::setenv("RLPLAYER_STATE_DIR", u8str(tmp / "state").c_str(), 1);
     ::setenv("RLPLAYER_COVER_DIR", u8str(tmp / "covers").c_str(), 1);
+    // scanonstartup=0：本用例要的是「静态索引 -> API 路由」这一段，索引行是合成路径
+    // （musicRoot 下并没有真实文件）。1.1.1.4 起启动会按目录变化检测决定是否扫描，
+    // 首次（无指纹）必然扫一次，而扫描会把「文件已不存在」的行剔除 ⟹ 这里必须显式关掉，
+    // 否则测到的就不是 API 路由，而是扫描清理。启动扫描本身由 test_library_fingerprint
+    // 与 tools/check_startup_cover_cache.py 覆盖。
     std::ofstream(tmp / "state" / "rlplayer-settings.conf")
-        << "backend=null\nmetaon=0\nmetallm=0\nvolume=-120\n";
+        << "backend=null\nmetaon=0\nmetallm=0\nvolume=-120\nscanonstartup=0\n";
 
     // 构造一份真索引（格式与 Library::buildIndexLocked 输出一致，v3）
     // 作用：让 /api/lib/* 走真实的「索引 → 内存模型 → 查询」链路，而不是空库恒回 0。

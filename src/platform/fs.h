@@ -55,6 +55,12 @@ struct DirEntry {
 // 调用方负责跳过 "." / ".."（本函数已过滤），但**不**负责过滤隐藏项。
 bool list_dir(const std::string& path, std::vector<DirEntry>& out, size_t& skipped);
 
+// 同上，但额外返回失效项的文件名，便于调用方做**一次**重试：
+// SMB 上失效目录项分两类 —— 缓存里残留的名字（重试仍 ENOENT，永久）、瞬时抖动（重试即成功）。
+// 不区分这两类会导致「库里有 1 个永久失效项 ⟹ 每次启动都整库重扫」。
+bool list_dir(const std::string& path, std::vector<DirEntry>& out, size_t& skipped,
+              std::vector<std::string>* skipped_names);
+
 // 最近一次系统错误码的数字值（Windows: GetLastError()；POSIX: errno）。
 // 用户可见错误文案必须带上它 —— 不许只说"失败了"。
 int last_error_code();

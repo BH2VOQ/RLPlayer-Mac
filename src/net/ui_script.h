@@ -1081,6 +1081,142 @@ function head(title, subtitle, toolsHtml) {
   D('tools').innerHTML = toolsHtml || '';
 }
 
+/* ---------------- 本地专辑封面加载 ---------------- */
+// <img> 看不到 HTTP status；只对本地专辑封面用 fetch→Blob，503 才延迟重试一次。
+// 两个在途请求与后端抽图闸门一致，冷首屏不会把几十张图同时打进 busy。
+// 不改 class/style/布局，也不接管其他 API 或艺术家头像的加载。
+var COVER_IMAGES = new WeakMap(), COVER_QUEUE = [], COVER_ACTIVE = 0;
+function coverImageLocal(url) {
+  try {
+    var u = new URL(url, location.href);
+    return u.protocol === location.protocol && u.host === location.host && u.pathname === '/api/lib/cover';
+  } catch (e) { return false; }
+}
+function coverImageAlive(s) {
+  return !s.dead && s.img.isConnected && COVER_IMAGES.get(s.img) === s;
+}
+function coverImageRelease(s) {
+  if (s.objectUrl) { URL.revokeObjectURL(s.objectUrl); s.objectUrl = ''; }
+}
+function coverImageCancel(img) {
+  var s = COVER_IMAGES.get(img);
+  if (!s) return;
+  s.dead = true;
+  clearTimeout(s.timer);
+  if (s.controller) s.controller.abort();
+  if (s.decoded) {
+    img.removeEventListener('load', s.decoded);
+    img.removeEventListener('error', s.decoded);
+    s.decoded = null;
+  }
+  if (COVER_VISIBLE) COVER_VISIBLE.unobserve(img);
+  coverImageRelease(s);
+  COVER_IMAGES.delete(img);
+}
+function coverImageError(s) {
+  if (!coverImageAlive(s)) return;
+  // 保留各处原来的 onerror 语义（首字母 / 艺人头像降级），不把 busy 当成没图。
+  s.img.dispatchEvent(new Event('error'));
+}
+function coverImageEnqueue(s) {
+  if (!coverImageAlive(s) || s.queued) return;
+  s.queued = true;
+  COVER_QUEUE.push(s);
+  coverImagePump();
+}
+function coverImagePump() {
+  while (COVER_ACTIVE < 2 && COVER_QUEUE.length) {
+    var s = COVER_QUEUE.shift();
+    s.queued = false;
+    if (!coverImageAlive(s)) continue;
+    coverImageFetch(s);
+  }
+}
+function coverImageFetch(s) {
+  ++COVER_ACTIVE;
+  s.controller = window.AbortController ? new AbortController() : null;
+  var opts = s.controller ? { signal: s.controller.signal } : {};
+  fetch(s.url, opts).then(function (r) {
+    if (!coverImageAlive(s)) return null;
+    if (r.status === 503 && s.retries === 0) {
+      ++s.retries;
+      var raw = r.headers.get('Retry-After'), delay = Number(raw);
+      if (!raw || !isFinite(delay)) delay = raw ? (Date.parse(raw) - Date.now()) / 1000 : 2;
+      if (!isFinite(delay)) delay = 2;
+      // 有界延时，不占在途名额；重试重新排队，也受并发上限约束。
+      s.timer = setTimeout(function () { s.timer = 0; coverImageEnqueue(s); }, Math.max(0, Math.min(10, delay)) * 1000);
+      return null;
+    }
+    if (!r.ok) { coverImageError(s); return null; } // 真404不重试；第二次503也止步。
+    return r.blob();
+  }).then(function (blob) {
+    if (!blob || !coverImageAlive(s)) return;
+    coverImageRelease(s);
+    var objectUrl = URL.createObjectURL(blob);
+    s.objectUrl = objectUrl;
+    // 浏览器原生解码与 load/error 事件照旧；解码结束即可释放 Blob URL。
+    function decoded() {
+      s.img.removeEventListener('load', decoded);
+      s.img.removeEventListener('error', decoded);
+      s.decoded = null;
+      if (s.objectUrl === objectUrl) coverImageRelease(s);
+    }
+    s.decoded = decoded;
+    s.img.addEventListener('load', decoded);
+    s.img.addEventListener('error', decoded);
+    s.img.src = objectUrl;
+  }).catch(function (e) {
+    if (!e || e.name !== 'AbortError') coverImageError(s);
+  }).then(function () {
+    s.controller = null;
+    --COVER_ACTIVE;
+    coverImagePump();
+  });
+}
+var COVER_VISIBLE = window.IntersectionObserver ? new IntersectionObserver(function (entries) {
+  entries.forEach(function (entry) {
+    if (!entry.isIntersecting) return;
+    COVER_VISIBLE.unobserve(entry.target);
+    var s = COVER_IMAGES.get(entry.target);
+    if (s) coverImageEnqueue(s);
+  });
+}, { rootMargin: '200px' }) : null;
+function coverImageObserve(img) {
+  var url = img.getAttribute('data-cover-src');
+  if (!url) { coverImageCancel(img); return; }
+  var old = COVER_IMAGES.get(img);
+  if (old && !old.dead && old.url === url) return;
+  coverImageCancel(img);
+  if (!coverImageLocal(url)) { img.src = url; return; }
+  var s = { img: img, url: url, retries: 0, timer: 0, queued: false, dead: false, objectUrl: '', controller: null };
+  COVER_IMAGES.set(img, s);
+  if (img.loading === 'lazy' && COVER_VISIBLE) COVER_VISIBLE.observe(img);
+  else coverImageEnqueue(s);
+}
+function coverImageLoad(img, url) {
+  img.setAttribute('data-cover-src', url);
+  coverImageObserve(img);
+}
+function coverImageWalk(node, fn) {
+  if (!node || node.nodeType !== 1) return;
+  if (node.matches('img[data-cover-src]')) fn(node);
+  node.querySelectorAll('img[data-cover-src]').forEach(fn);
+}
+(function coverImageBind() {
+  new MutationObserver(function (records) {
+    records.forEach(function (r) {
+      if (r.type === 'attributes') { coverImageObserve(r.target); return; }
+      r.removedNodes.forEach(function (node) {
+        coverImageWalk(node, function (img) { if (!img.isConnected) coverImageCancel(img); });
+      });
+      r.addedNodes.forEach(function (node) { coverImageWalk(node, coverImageObserve); });
+    });
+    // Don't retain removed queued images until another fetch finally completes.
+    COVER_QUEUE = COVER_QUEUE.filter(coverImageAlive);
+  }).observe(document.body, { childList: true, subtree: true, attributes: true, attributeFilter: ['data-cover-src'] });
+  coverImageWalk(document.body, coverImageObserve);
+})();
+
 /* ---------------- 专辑视图 ---------------- */
 // 封面一律尝试加载：拿不到就让 img 自己消失，后面的首字母占位露出来。
 // （早期用 cv 标记决定是否请求，结果「扫描时没识别出封面」就永远不显示了）
@@ -1091,7 +1227,7 @@ function albumCardHtml(a, i) {
   return '<div class=card data-i=' + i + '>' +
     '<div class=cv>' +
       '<div class=ph>' + esc((a.name || '?').slice(0, 1).toUpperCase()) + '</div>' +
-      '<img src="' + (a.cvUrl || ('/api/lib/cover?k=' + a.k)) + '" loading=lazy alt="" onerror="this.style.display=\'none\'">' +
+      '<img data-cover-src="' + esc(a.cvUrl || ('/api/lib/cover?k=' + a.k)) + '" loading=lazy alt="" onerror="this.style.display=\'none\'">' +
       '<div class=pl><svg width=13 height=13 viewBox="0 0 24 24" fill=#fff><path d="M8 5v14l11-7z"/></svg></div>' +
     '</div>' +
     '<div class=nm title="' + esc(a.name) + '">' + esc(a.name) + '</div>' +
@@ -1901,7 +2037,7 @@ function openAlbum(k) {
     var albPlayTitle = isThisPlaying ? (S.paused ? '继续播放专辑' : '暂停播放') : '播放整张专辑';
     var h = '<div class=ahead><div class=cv style="position:relative">' +
             '<div class=ph>' + esc((j.name || '?').slice(0, 1).toUpperCase()) + '</div>' +
-            '<img src="' + (j.cvUrl || ('/api/lib/cover?k=' + j.k)) + '" alt="" onerror="this.style.display=\'none\'" style="position:absolute;inset:0;width:100%;height:100%;object-fit:cover;border-radius:inherit">' +
+            '<img data-cover-src="' + esc(j.cvUrl || ('/api/lib/cover?k=' + j.k)) + '" alt="" onerror="this.style.display=\'none\'" style="position:absolute;inset:0;width:100%;height:100%;object-fit:cover;border-radius:inherit">' +
             '</div><div class=info>' +
             '<div class=kind>ALBUM</div><h1 title="' + esc(j.name) + '">' + esc(j.name) + '</h1>' +
             '<div class=sub>' + sub.join(' \u00b7 ') + '</div>' +
@@ -2253,7 +2389,7 @@ function artistAvatarFallback(img) {
   if (stage === 'artist' && ck) {
     // 第二层：换成专辑封面；再失败就走 else 分支隐藏自己
     img.dataset.stage = 'cover';
-    img.src = '/api/lib/cover?k=' + encodeURIComponent(ck);
+    coverImageLoad(img, '/api/lib/cover?k=' + encodeURIComponent(ck));
     return;
   }
   // 第三层：两层都失败 → 隐藏 img，露出发底下的 .ph 首字母（绝不渲染空白圆）

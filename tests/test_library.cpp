@@ -401,8 +401,15 @@ int main() {
         auto readIdx = [&](const fs::path& dir, fs::path& out) {
             out.clear();
             std::error_code e;
-            for (auto& de : fs::directory_iterator(dir, e))
-                if (de.path().filename().string().rfind("rlplayer-index", 0) == 0) out = de.path();
+            for (auto& de : fs::directory_iterator(dir, e)) {
+                const std::string name = de.path().filename().string();
+                if (name.rfind("rlplayer-index", 0) != 0) continue;
+                // 2026-11-01：同目录现在还有变化指纹 rlplayer-index.dirs.tsv（扫描完/手扫都会写）。
+                // 它按字典序排在 rlplayer-index.tsv 之前，旧的前缀匹配会把它当成索引来读，
+                // 于是断言全落到指纹格式上。只认真正的索引文件。
+                if (name.find(".dirs.tsv") != std::string::npos) continue;
+                out = de.path();
+            }
         };
 
         const fs::path tmp6 = fs::temp_directory_path() / "rta_lib_cue";

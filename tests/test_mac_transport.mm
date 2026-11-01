@@ -51,6 +51,7 @@ bool exit_requested() { return g_exitReq.load(); }
 void request_shutdown() {}
 
 std::string dispatch(const rta::net::HttpRequest& req, std::string& ct) {
+    rta::net::webui_status_slot()->store(200);  // Same entry contract as the real embedded dispatcher.
     if (g_stopped.load()) {
         g_afterStopHit.store(true);
     }
@@ -64,6 +65,18 @@ std::string dispatch(const rta::net::HttpRequest& req, std::string& ct) {
         }
         ct = "application/json; charset=utf-8";
         res = "{\"ok\":true,\"unhung\":true}";
+    } else if (req.path == "/api/busy") {
+        rta::net::webui_set_status(503);
+        ct = "application/json; charset=utf-8";
+        res = "{\"ok\":false,\"error\":\"cover busy\"}";
+    } else if (req.path == "/api/busy_binary") {
+        rta::net::webui_set_status(503);
+        ct = "application/octet-stream";
+        res = std::string("\0\xff", 2);
+    } else if (req.path == "/api/busy_invalid_utf8") {
+        rta::net::webui_set_status(503);
+        ct = "text/plain";
+        res = std::string("\xff", 1);
     } else if (req.path == "/api/ping") {
         ct = "application/json; charset=utf-8";
         res = "{\"ok\":true,\"pong\":true}";
@@ -78,6 +91,7 @@ std::string dispatch(const rta::net::HttpRequest& req, std::string& ct) {
         ct = "application/json; charset=utf-8";
         res = "{\"ok\":true}";
     } else {
+        rta::net::webui_set_status(404);
         ct = "application/json; charset=utf-8";
         res = "{\"ok\":false,\"error\":\"not found\"}";
     }
@@ -98,6 +112,7 @@ std::string dispatch(const rta::net::HttpRequest& req, std::string& ct) {
 @property (nonatomic, assign) NSInteger responseCount;
 @property (nonatomic, assign) NSInteger finishCount;
 @property (nonatomic, assign) NSInteger failCount;
+@property (nonatomic, assign) NSInteger workerStatusAfterDispatch;
 @property (nonatomic, strong) NSError *failedError;
 @end
 
@@ -114,6 +129,7 @@ std::string dispatch(const rta::net::HttpRequest& req, std::string& ct) {
     return self;
 }
 - (void)didReceiveResponse:(NSURLResponse *)response {
+    _workerStatusAfterDispatch = rta::net::webui_status_slot()->load();
     _responseCount++;
     _receivedResponse = response;
 }
@@ -127,6 +143,14 @@ std::string dispatch(const rta::net::HttpRequest& req, std::string& ct) {
     _failCount++;
     _failedError = error;
 }
+@end
+
+// WKScriptMessage cannot be directly constructed with a body; this small duck-
+// typed object invokes the actual native handler without opening a WKWebView.
+@interface MockTransportMessage : NSObject
+@property (nonatomic, strong) id body;
+@end
+@implementation MockTransportMessage
 @end
 
 static int g_fail = 0;
@@ -391,6 +415,45 @@ int main() {
                        RLJSString(ctx, @"String(window.fetch('/api/ping'))"));
                 }
 
+                // Execute both JS Response constructors (RPC fallback and Blob),
+                // not a source-string check: Retry-After must reach fetch callers.
+                {
+                    id responseCtx = [[ctxCls alloc] init];
+                    NSString *responseBootstrap = [[NSString stringWithUTF8String:bootstrap]
+                        stringByReplacingOccurrencesOfString:@"return 'orig-catch:' + String(u);"
+                                                  withString:@"return fn(new Error('scheme failed'));" ];
+                    err.clear();
+                    ck(RLEvalJS(responseCtx, responseBootstrap, err), "Response-header JS environment", err);
+                    ck(RLEvalJS(responseCtx,
+                        @"var __rpcReply = {status:503,contentType:'application/json',body:'busy',retryAfter:2};"
+                         "window.webkit.messageHandlers.rltransport.postMessage = function(){return Promise.resolve(__rpcReply);};"
+                         "function Response(data,opt){this.status=opt.status;this.headers=opt.headers;this.body=data;}"
+                         "function FileReader(){}; FileReader.prototype.readAsArrayBuffer=function(){this.result=new ArrayBuffer(0);this.onload();};"
+                         "function btoa(s){return '';}; var __response = null;", err),
+                        "Response and Blob APIs stubbed", err);
+                    ck(RLEvalJS(responseCtx, kShim, err), "Response-header shim executes", err);
+                    ck(RLEvalJS(responseCtx,
+                        @"window.fetch('/api/busy').then(function(r){__response=r;});", err),
+                        "fallback fetch executes", err);
+                    ck(RLJSString(responseCtx, @"String(__response && __response.status)+':'+String(__response && __response.headers['Retry-After'])") == "503:2",
+                       "fallback fetch Response carries 503 and Retry-After: 2");
+                    ck(RLEvalJS(responseCtx,
+                        @"__response=null;window.fetch('/api/busy',{body:new Blob()}).then(function(r){__response=r;});", err),
+                        "Blob fetch executes", err);
+                    ck(RLJSString(responseCtx, @"String(__response && __response.status)+':'+String(__response && __response.headers['Retry-After'])") == "503:2",
+                       "Blob fetch Response carries 503 and Retry-After: 2");
+                    ck(RLEvalJS(responseCtx,
+                        @"__rpcReply={status:404,body:'missing'};window.fetch('/api/missing').then(function(r){__response=r;});", err),
+                        "404 fallback fetch executes", err);
+                    ck(RLJSString(responseCtx, @"String(__response.status)+':'+String(__response.headers['Retry-After'])") == "404:undefined",
+                       "fetch preserves real 404 without Retry-After");
+                    ck(RLEvalJS(responseCtx,
+                        @"__rpcReply={status:200,body:'ok'};window.fetch('/api/ping').then(function(r){__response=r;});", err),
+                        "200 fallback fetch executes", err);
+                    ck(RLJSString(responseCtx, @"String(__response.status)+':'+String(__response.headers['Retry-After'])") == "200:undefined",
+                       "fetch 200 after errors has no retry contamination");
+                }
+
                 // 6.4.9 ⚠️ 最关键的时序场景：**documentStart 时 documentElement 还不存在**。
                 //       WKUserScriptInjectionTimeAtDocumentStart 注入时，documentElement
                 //       完全可能是 null（页面还没开始解析）。若 shim 直接
@@ -453,6 +516,60 @@ int main() {
                         @"(function(){ window.chrome.webview.postMessage('max'); return __msgs.join(','); })()") == "max",
                        "documentElement=null 场景下 postMessage 仍转发到 rlhost");
                 }
+            }
+        }
+
+        // Real native transport implementations, stubbed core only: 503/404 must
+        // survive both response paths and must not leak into the next 200.
+        {
+            RLURLSchemeHandler *handler = [[RLURLSchemeHandler alloc] init];
+            WKWebView *dummyView = (WKWebView *)[[NSObject alloc] init];
+            WKUserContentController *dummyController = [[WKUserContentController alloc] init];
+            for (NSString *path in @[@"/api/busy", @"/api/missing", @"/api/ping"]) {
+                MockSchemeTask *task = [[MockSchemeTask alloc]
+                    initWithURLString:[@"rlplayer://app" stringByAppendingString:path]];
+                [handler webView:dummyView startURLSchemeTask:task];
+                for (int i = 0; i < 200 && task.finishCount == 0; ++i)
+                    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+                NSHTTPURLResponse *response = (NSHTTPURLResponse *)task.receivedResponse;
+                const NSInteger expected = [path isEqualToString:@"/api/busy"] ? 503 :
+                    ([path isEqualToString:@"/api/missing"] ? 404 : 200);
+                ck(task.finishCount == 1 && response.statusCode == expected,
+                   "scheme preserves 503/404 then clean 200", [path UTF8String]);
+                ck(task.workerStatusAfterDispatch == 200,
+                   "scheme consumes and resets status on its actual dispatch worker", [path UTF8String]);
+                NSString *retry = [response valueForHTTPHeaderField:@"Retry-After"];
+                ck(expected == 503 ? [retry isEqualToString:@"2"] : retry == nil,
+                   "scheme Retry-After only on 503", [path UTF8String]);
+                if (expected == 503) {
+                    NSString *text = [[NSString alloc] initWithData:task.receivedData encoding:NSUTF8StringEncoding];
+                    ck([text isEqualToString:@"{\"ok\":false,\"error\":\"cover busy\"}"] &&
+                       [[response valueForHTTPHeaderField:@"Content-Type"] hasPrefix:@"application/json"],
+                       "scheme HTTP503 retains JSON body and MIME");
+                }
+            }
+            ck([handler waitForInFlightTasksWithTimeout:1.0], "status scheme handler drains");
+
+            RLTransportHandler *rpc = [[RLTransportHandler alloc] init];
+            for (NSString *path in @[@"/api/busy", @"/api/busy_binary", @"/api/busy_invalid_utf8",
+                                     @"/api/missing", @"/api/ping"]) {
+                MockTransportMessage *message = [[MockTransportMessage alloc] init];
+                message.body = @{@"method": @"GET", @"url": path};
+                __block NSDictionary *reply = nil;
+                dispatch_semaphore_t semaphore = dispatch_semaphore_create(0);
+                [rpc userContentController:dummyController didReceiveScriptMessage:(WKScriptMessage *)message
+                              replyHandler:^(id value, NSString *error) {
+                    if (!error) reply = value;
+                    dispatch_semaphore_signal(semaphore);
+                }];
+                const bool replied = dispatch_semaphore_wait(semaphore,
+                    dispatch_time(DISPATCH_TIME_NOW, 2 * NSEC_PER_SEC)) == 0;
+                const int expected = [path hasPrefix:@"/api/busy"] ? 503 :
+                    ([path isEqualToString:@"/api/missing"] ? 404 : 200);
+                ck(replied && [reply[@"status"] intValue] == expected,
+                   "RPC preserves 503/404 then clean 200 in every encoding branch", [path UTF8String]);
+                ck(expected == 503 ? [reply[@"retryAfter"] intValue] == 2 : [reply[@"retryAfter"] intValue] == 0,
+                   "RPC retryAfter only on 503", [path UTF8String]);
             }
         }
 

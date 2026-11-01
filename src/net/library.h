@@ -23,6 +23,7 @@
 #define _strtoi64 strtoll
 #include "audio/audio_loader.h"
 #include "audio/media_info.h"
+#include "net/local_cover_cache.h"
 #include "net/scan_pool.h"
 #include "platform/fs.h"        // 容错目录枚举 list_dir（1.1.1.4：SMB 失效项不再中止遍历）
 #include "meta/entities.h"
@@ -45,6 +46,10 @@
 #include <algorithm>
 #include <cstdio>
 #include <cstdint>
+#include <dirent.h>             // startup fingerprint: d_type, never stat audio files
+#include <sys/stat.h>
+#include <sstream>
+#include <iomanip>
 
 namespace rta::net {
 
@@ -195,6 +200,8 @@ public:
         std::lock_guard<std::mutex> lk(mtx_);
         for (auto& r : roots_) if (r == dir) return { true, "" };
         roots_.push_back(dir);
+        ++rootsRevision_;
+        invalidateFingerprintLocked();
         saveRootsLocked();
         return { true, "" };
     }
@@ -216,6 +223,8 @@ public:
             auto it = std::find(roots_.begin(), roots_.end(), dir);
             if (it == roots_.end()) return -1;
             roots_.erase(it);
+            ++rootsRevision_;
+            invalidateFingerprintLocked();
             saveRootsLocked();
             removed = purgeTracksUnderLocked(lib_norm_path(dir), &snap);
         }
@@ -342,7 +351,10 @@ public:
     std::vector<size_t> search(const std::string& q, size_t limit = 300) const;
 
     // 某专辑的封面（字节 + mime），失败返回空
-    bool albumCover(const std::string& key, std::vector<unsigned char>& bytes, std::string& mime);
+    // source: embedcache (validated disk/memory), embed (fresh local), busy, none.
+    // busy distinguishes temporary contention/timeout from a genuine missing image.
+    bool albumCover(const std::string& key, std::vector<unsigned char>& bytes, std::string& mime,
+                    std::string* source = nullptr, bool* busy = nullptr);
 
     // ---- 封面在线抓取用的「按 album+artist 反查」（2026-10-26）----
     // ① 全库快照：所有「内嵌流与同目录封面文件都没有」的专辑（hasCover 在扫描时已算好：
@@ -357,15 +369,21 @@ public:
     // 返回值（1.1.1.4）：已有一轮扫描在跑时返回 false（调用方据此告诉前端"已在进行中"，
     // 而不是假装又启动了一次）；成功起了后台线程返回 true。
     bool startScan(bool forceFull = false);
+    // Runs the directory-only check on the scan worker; callback also runs there.
+    // false + "unchanged" means skipped; all other reasons must be logged distinctly.
+    using StartupScanCallback = std::function<void(const std::string&, bool)>;
+    bool startStartupScan(StartupScanCallback callback = {});
     // 索引文件多久没更新过（秒）。文件不存在/读不到返回 1e9 ⟹ 立刻值得扫。
     // 1.1.1.4 启动增量扫描的判据（索引非空但过期太久时后台补一次）。
     double indexAgeSeconds() const;
     void stopScan() {
+        std::lock_guard<std::mutex> lifecycle(scanLifecycleMtx_);
         cancel_.store(true);
         std::shared_ptr<ScanPool> p;
         {
             std::lock_guard<std::mutex> lk(mtx_);
             p = activePool_;
+            if (scanning_.load()) invalidateFingerprintLocked();
         }
         if (p) p->cancel();
     }
@@ -397,7 +415,14 @@ private:
     // 索引落盘拆成两步（2026-10-25）：buildIndexLocked() 在锁内构造快照字符串，
     // writeIndex() 在锁外写盘 —— 否则整份索引（实测 12000 首 1.28 MB）写盘期间持锁，HTTP 单线程服务整个卡住。
     std::string buildIndexLocked() const;
-    void writeIndex(const std::string& snapshot);
+    bool writeIndex(const std::string& snapshot);
+    bool startScanWorker(bool forceFull, bool startup, StartupScanCallback callback);
+    void invalidateFingerprintLocked(); // caller holds mtx_
+    // why：为什么标不干净（"ok" = 已标干净）。写进 /api/lib/status 的 dirtyReason，
+    // 免得下次再出现「不知道为什么又扫了一遍」只能靠人肉猜。
+    bool finishFingerprint(const std::vector<std::string>& roots, uint64_t revision,
+                           const std::map<std::string, long long>& before, bool eligible,
+                           const std::string& indexText, std::string* why = nullptr);
     // 删除 tracks_ 中位于 rootNorm 之下（含该目录自身）的曲目，返回删除数。
     // 调用方必须已持 mtx_；返回 >0 时 *snapOut 是重算好的索引快照，由调用方在锁外落盘。
     int purgeTracksUnderLocked(const fsx::path& rootNorm, std::string* snapOut);
@@ -408,20 +433,29 @@ private:
     static bool scanTreeForRemoval(const fsx::path& target, int& files, int& dirs, std::string& err);
     const std::vector<LibAlbum>& albumVecLocked() const;
     static std::string readFile(const std::string& p);
-    static void writeFile(const std::string& p, const std::string& s);
+    static bool writeFile(const std::string& p, const std::string& s);
     static std::string exeDirOrEmpty();   // 2026-10-23：库配置/索引固定落 exe 目录（见 confPath 注释）
     static std::string libDataDir();      // 同样可被 RLPLAYER_LIBRARY_DIR 覆盖（测试/多实例）
     static std::string confLeaf(const char* base);   // 非默认端口加 .p<port> 后缀，避免实例互相踩库
     static std::string confPath();
     static std::string indexPath();
+    static std::string fingerprintPath() {
+        const auto d = libDataDir(), leaf = confLeaf("rlplayer-index.dirs.tsv");
+        return d.empty() ? leaf : rta::platform::join(d, leaf);
+    }
 
     mutable std::mutex mtx_;
     std::vector<std::string> roots_;
     std::vector<LibTrack> tracks_;
     mutable std::vector<LibAlbum> albums_;
     mutable bool albumsDirty_ = true;
-    mutable std::map<std::string, std::pair<std::vector<unsigned char>, std::string>> coverCache_;
+    mutable std::map<std::string, local_cover::Entry> coverCache_;
 
+    // Serializes thread ownership, not worker IO. Never held by the worker.
+    std::mutex scanLifecycleMtx_;
+    std::mutex indexWriteMtx_;
+    uint64_t rootsRevision_ = 0; // protected by mtx_
+    bool fingerprintInvalidated_ = false; // protected by mtx_; invalidation IO succeeded
     std::thread th_;
     std::atomic<bool> scanning_{false};
     std::atomic<bool> cancel_{false};
@@ -558,6 +592,8 @@ inline bool lib_is_cue(const fsx::path& p) {
 //   * onProgress：每 128 个目录项 + 每个目录结束时各调一次（限频由调用方做）
 struct LibWalkResult {
     size_t skipped = 0;                  // 失效目录项（ENOENT 等）
+    size_t recovered = 0;                // 首次 lstat 失败、重试成功（SMB 瞬时抖动）
+    std::vector<std::string> unreadable; // 重试后仍失效的项（缓存残留名 / 非 UTF-8 名）
     std::vector<std::string> failedDirs; // opendir 失败的目录
     bool cancelled = false;
 };
@@ -577,19 +613,41 @@ inline LibWalkResult lib_walk_tree(const std::string& root,
         const std::string dir = stack.back();
         stack.pop_back();
         size_t badItems = 0;
+        std::vector<std::string> badNames;
         ents.clear();
-        if (!rta::platform::list_dir(dir, ents, badItems)) {
+        if (!rta::platform::list_dir(dir, ents, badItems, &badNames)) {
             r.failedDirs.push_back(dir);       // 打不开：记下来，但不中止
         } else {
-            r.skipped += badItems;
+            // skipped 只统计「重试后仍失效」+「非 UTF-8 名」；重试成功的计入 recovered（不是跳过）。
             const bool needSep = !dir.empty() && dir.back() != '/';
+            // 失效项目的一次重试（2026-11-01）：SMB 上「缓存残留名」与「瞬时抖动」在第一次
+            // lstat 里长得一模一样（都是 ENOENT）。不重试就只能把两者都当永久失败 ⟹ 这类
+            // 库要么每次启动整库重扫，要么静默漏掉只是抖了一下的真实文件。重试一次两者都能分开：
+            // 抖动 ⟹ 立刻走正常路径收进来（recovered）；仍失败 ⟹ 记入 unreadable（可见、可解释），
+            // 不再阻塞指纹标干净（否则 1 个死名字就让 6k 首的库永远每次启动扫 60s）。
+            for (const auto& nm : badNames) {
+                if (cancelled && cancelled()) { r.cancelled = true; return r; }
+                if (!nm.empty() && nm[0] == '.') continue;
+                std::string full = dir;
+                if (needSep) full += '/';
+                full += nm;
+                if (!lib_valid_utf8(full)) { ++r.skipped; r.unreadable.push_back(std::move(full)); continue; }
+                struct stat st{};
+                if (::lstat(full.c_str(), &st) != 0) { ++r.skipped; r.unreadable.push_back(std::move(full)); continue; }
+                ++r.recovered;
+                const bool isDir = !S_ISLNK(st.st_mode) && S_ISDIR(st.st_mode);
+                if (isDir) { stack.push_back(std::move(full)); continue; }
+                const fsx::path p = p8(full);
+                if (lib_is_audio(p)) { if (onFile) onFile(full); }
+                else if (lib_is_cue(p)) { if (onCue) onCue(full); }
+            }
             for (const auto& e : ents) {
                 if (cancelled && cancelled()) { r.cancelled = true; return r; }
                 if (!e.name.empty() && e.name[0] == '.') continue;   // 隐藏项（旧逻辑一致）
                 std::string full = dir;
                 if (needSep) full += '/';
                 full += e.name;
-                if (!lib_valid_utf8(full)) { ++r.skipped; continue; }
+                if (!lib_valid_utf8(full)) { ++r.skipped; r.unreadable.push_back(std::move(full)); continue; }
                 if ((++seen & 0x7F) == 0) {
                     if (onProgress) onProgress();
                     std::this_thread::yield();   // 大库遍历别把 UI/播放线程拖死（旧遍历每 64 项让出）
@@ -604,6 +662,131 @@ inline LibWalkResult lib_walk_tree(const std::string& root,
         if (onProgress) onProgress();      // 每个目录结束汇报一次
     }
     return r;
+}
+
+// Directory fingerprints intentionally do not detect in-place tag edits: manual scan does.
+// readdir d_type avoids list_dir's per-entry lstat (including every audio file on SMB).
+struct LibDirectoryFingerprint {
+    std::map<std::string, long long> dirs;
+    bool complete = true;
+    std::vector<std::string> problems;   // 不完整的原因（路径 + errno），供日志解释"为什么不能跳过"
+};
+inline LibDirectoryFingerprint lib_directory_fingerprint(
+    const std::vector<std::string>& roots, const std::function<bool()>& cancelled = {}) {
+    LibDirectoryFingerprint out;
+    std::vector<std::string> pending = roots;
+    while (!pending.empty()) {
+        if (cancelled && cancelled()) { out.complete = false; break; }
+        const auto dir = pending.back(); pending.pop_back();
+        if (out.dirs.count(dir)) continue;
+        struct stat before{}, after{};
+        if (!lib_valid_utf8(dir)) { out.complete = false; out.problems.push_back(dir + " (非 UTF-8 名)"); continue; }
+        if (::stat(dir.c_str(), &before) != 0) {
+            // ENOENT/ESTALE：父目录上次列出的名字现在没了（SMB 缓存残留）。它不是"读不全"，
+            // 而是"已经不在了"；真增删由父目录 mtime 反映，所以不阻塞指纹。
+            if (errno != ENOENT && errno != ESTALE) {
+                out.complete = false;
+                out.problems.push_back(dir + " (stat errno=" + std::to_string(errno) + ")");
+            }
+            continue;
+        }
+        if (!S_ISDIR(before.st_mode)) { out.complete = false; out.problems.push_back(dir + " (不是目录)"); continue; }
+        const auto ns = [](const struct stat& st) -> long long {
+            return (long long)st.st_mtimespec.tv_sec * 1000000000LL + st.st_mtimespec.tv_nsec;
+        };
+        DIR* raw = ::opendir(dir.c_str());
+        if (!raw) {
+            const int e = errno;
+            if (e != ENOENT && e != ESTALE) {
+                out.complete = false;
+                out.problems.push_back(dir + " (opendir errno=" + std::to_string(e) + ")");
+            }
+            continue;
+        }
+        std::unique_ptr<DIR, int(*)(DIR*)> handle(raw, ::closedir);
+        out.dirs.emplace(dir, ns(before));
+        for (;;) {
+            if (cancelled && cancelled()) { out.complete = false; return out; }
+            errno = 0;
+            const auto* ent = ::readdir(raw);
+            if (!ent) {
+                if (errno) { out.complete = false; out.problems.push_back(dir + " (readdir errno=" + std::to_string(errno) + ")"); }
+                break;
+            }
+            if (ent->d_name[0] == '.') continue;
+            const std::string full = dir + (dir.back() == '/' ? "" : "/") + ent->d_name;
+            if (!lib_valid_utf8(full)) continue;   // 非 UTF-8 名无法进索引：父目录 mtime 仍跟踪增删，不算"读不全"
+            if (ent->d_type == DT_DIR) pending.push_back(full);
+            else if (ent->d_type == DT_UNKNOWN) {
+                // Unknown type must not follow symlinks (including directory cycles).
+                // Only this filesystem fallback needs lstat; known audio entries are never stat'ed.
+                struct stat type{};
+                if (::lstat(full.c_str(), &type) != 0) {
+                    // SMB 缓存里的失效名字会永久 ENOENT（实测 /Volumes/Music 有 11 个）：
+                    // 它不是"目录读不全"，而是"这个名字什么也不是"。把它当硬失败会让这类库
+                    // 每次启动都整库重扫 —— 正是本轮要修的症状。真增删仍由父目录 mtime 反映。
+                    if (errno != ENOENT && errno != ESTALE) {
+                        out.complete = false;
+                        out.problems.push_back(full + " (lstat errno=" + std::to_string(errno) + ")");
+                    }
+                } else if (S_ISDIR(type.st_mode)) pending.push_back(full);
+            }
+        }
+        if (::stat(dir.c_str(), &after) != 0 || ns(before) != ns(after)) {
+            out.complete = false;
+            out.problems.push_back(dir + " (扫描期间目录发生变化)");
+        }
+    }
+    return out;
+}
+inline std::string lib_fingerprint_hex(const std::string& s) {
+    static const char* hex = "0123456789abcdef";
+    std::string out; out.reserve(s.size() * 2);
+    for (unsigned char c : s) { out += hex[c >> 4]; out += hex[c & 15]; }
+    return out;
+}
+inline bool lib_fingerprint_unhex(const std::string& s, std::string& out) {
+    if (s.size() % 2) return false;
+    out.clear();
+    auto digit = [](char c) { return c >= '0' && c <= '9' ? c - '0' : c >= 'a' && c <= 'f' ? c - 'a' + 10 : -1; };
+    for (size_t i = 0; i < s.size(); i += 2) {
+        const int a = digit(s[i]), b = digit(s[i + 1]);
+        if (a < 0 || b < 0) return false;
+        out += (char)((a << 4) | b);
+    }
+    return !out.empty() && lib_valid_utf8(out);
+}
+inline std::string lib_fingerprint_text(const std::vector<std::string>& roots,
+    const std::map<std::string, long long>& dirs, const std::string& indexText) {
+    std::string body = "#libDirsV\t1\t" + fnv_hex(indexText) + "\n";
+    for (const auto& root : roots) body += "R\t" + lib_fingerprint_hex(root) + "\n";
+    for (const auto& [dir, mt] : dirs) body += "D\t" + std::to_string(mt) + "\t" + lib_fingerprint_hex(dir) + "\n";
+    return body + "#end\t" + fnv_hex(body) + "\n";
+}
+inline bool lib_fingerprint_parse(const std::string& text, const std::string& indexText,
+    std::vector<std::string>& roots, std::map<std::string, long long>& dirs) {
+    roots.clear(); dirs.clear();
+    const auto end = text.rfind("#end\t");
+    if (end == std::string::npos || text.substr(end) != "#end\t" + fnv_hex(text.substr(0, end)) + "\n") return false;
+    std::istringstream in(text.substr(0, end)); std::string line;
+    if (!std::getline(in, line) || line != "#libDirsV\t1\t" + fnv_hex(indexText) ||
+        indexText.rfind("#libIndexV\t4\n", 0) != 0) return false;
+    while (std::getline(in, line)) {
+        std::string path;
+        if (line.rfind("R\t", 0) == 0) {
+            if (!lib_fingerprint_unhex(line.substr(2), path)) return false;
+            roots.push_back(path);
+        } else if (line.rfind("D\t", 0) == 0) {
+            const auto tab = line.find('\t', 2);
+            if (tab == std::string::npos || !lib_fingerprint_unhex(line.substr(tab + 1), path)) return false;
+            try {
+                size_t used = 0; const auto number = line.substr(2, tab - 2);
+                const auto mt = std::stoll(number, &used);
+                if (used != number.size() || !dirs.emplace(path, mt).second) return false;
+            } catch (...) { return false; }
+        } else return false;
+    }
+    return true;
 }
 
 // cue 的 FILE 指向的音频此刻是否真的在磁盘上
@@ -945,28 +1128,21 @@ inline std::string Library::readFile(const std::string& p) {
     std::string s((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
     return s;
 }
-inline void Library::writeFile(const std::string& p, const std::string& s) {
-    std::string tmp = p + ".tmp";
+inline bool Library::writeFile(const std::string& p, const std::string& s) {
+    const std::string tmp = p + ".tmp";
     {
         std::ofstream f(tmp, std::ios::binary | std::ios::trunc);
-        if (!f) return;
+        if (!f) return false;
         f.write(s.data(), (std::streamsize)s.size());
-        // ★ 2026-10-25（索引一致性审查）：必须在 flush 之后才能 rename。
-        //   旧实现出了作用域才析构 → 析构时才 flush；写盘出错时剩下的只有"截断的 tmp"，
-        //   而 rename 不看内容。这里把"写失败"变成"绝不替换旧索引"，并在 rename 前检查。
         f.flush();
-        if (!f.good()) { f.close(); std::error_code e2; fsx::remove(tmp, e2); return; }
+        if (!f.good()) { f.close(); std::error_code ec; fsx::remove(tmp, ec); return false; }
+        f.close();
+        if (f.fail()) { std::error_code ec; fsx::remove(tmp, ec); return false; }
     }
     std::error_code ec;
-    fsx::rename(tmp, p, ec);
-    // rename 不能覆盖已存在文件时（个别网络盘/杀软占用），退化为"删旧再改名"；
-    // 仍然失败就保留 tmp（不回滚旧索引 —— 旧索引比没有索引好）。
-    if (ec) {
-        std::error_code e2;
-        fsx::remove(p, e2);
-        ec.clear();
-        fsx::rename(tmp, p, ec);
-    }
+    fsx::rename(tmp, p, ec); // POSIX atomic replace; never delete a good old index on failure.
+    if (ec) { std::error_code e2; fsx::remove(tmp, e2); }
+    return !ec;
 }
 
 inline void Library::load() {
@@ -1227,8 +1403,44 @@ inline std::string Library::buildIndexLocked() const {
     return s;
 }
 // 锁外落盘（调用方持锁时构造好的快照）。writeFile 自己走 tmp+rename，原子性由它保证。
-inline void Library::writeIndex(const std::string& snapshot) {
-    writeFile(indexPath(), snapshot);
+inline bool Library::writeIndex(const std::string& snapshot) {
+    std::lock_guard<std::mutex> lk(indexWriteMtx_);
+    return writeFile(indexPath(), snapshot);
+}
+inline void Library::invalidateFingerprintLocked() {
+    std::error_code ec;
+    fsx::remove(p8(fingerprintPath()), ec);
+    fingerprintInvalidated_ = !ec;
+    if (ec) fingerprintInvalidated_ = writeFile(fingerprintPath(), "#dirty\n");
+}
+inline bool Library::finishFingerprint(const std::vector<std::string>& roots, uint64_t revision,
+    const std::map<std::string, long long>& before, bool eligible, const std::string& indexText,
+    std::string* why) {
+    auto fail = [why](const char* r) { if (why) *why = r; return false; };
+    if (!eligible) return fail(why && !why->empty() ? why->c_str() : "ineligible");
+    if (cancel_.load()) return fail("cancelled");
+    const auto after = lib_directory_fingerprint(roots, [&] { return cancel_.load(); });
+    if (!after.complete) {
+        // 带上第一条具体原因：否则日志只说"不完整"，下次还得再猜一遍。
+        static thread_local std::string detail;
+        detail = "dirs-unreadable";
+        if (!after.problems.empty()) {
+            std::string p0 = after.problems.front();
+            if (p0.size() > 160) p0.resize(160);
+            detail += "[" + p0 + "]";
+        }
+        return fail(detail.c_str());
+    }
+    if (before != after.dirs) return fail("dirs-changed-during-scan");
+    if (cancel_.load()) return fail("cancelled");
+    std::lock_guard<std::mutex> lk(mtx_);
+    if (rootsRevision_ != revision || roots_ != roots) return fail("roots-changed");
+    if (!fingerprintInvalidated_) return fail("marker-not-dirty");
+    if (cancel_.load()) return fail("cancelled");
+    // Persist the BEFORE snapshot, never an end-of-scan snapshot that could hide a missed change.
+    if (!writeFile(fingerprintPath(), lib_fingerprint_text(roots, before, indexText))) return fail("marker-write-failed");
+    if (why) *why = "ok";
+    return true;
 }
 
 // 专辑整理（读时推算）。
@@ -1359,12 +1571,11 @@ inline std::vector<size_t> Library::search(const std::string& q, size_t limit) c
 // 现在的口径：
 //   * 顺序：本专辑 **cv=1 的曲目优先**（≤3 首），再其余曲目（≤3 首）。
 //     两个 3 的上限是为了别对 200 首的合辑起 200 次 ffmpeg（每次一个进程，实测 ~20-40 ms）。
-//   * 判定：真封面 ⟺ 字节数 >= kCoverMinBytes(1KB)。小于它的**继续试下一首**。
-//   * 1x1 占位图（get_cover 的兜底产物）靠 IHDR 宽高识别，**当作"没有"**，不当小图。
-//   * 全部试完：拿到真图 ⟹ 正缓存 + true；只有"小但真实"的图 ⟹ 用它 + true（总比空白好）；
-//     什么都没有 ⟹ **负缓存 + false**（前端 onerror 露首字母，且下次还会重试）。
-//
-// ⚠️ 负缓存用的是「空字节」这一既有约定（见下面 cache 命中分支），不是新的哨兵值。
+//   * 判定：>=1KB 优先；小但真实且非 1x1 的图片继续作为兜底。
+//   * 2026-11-01：正缓存落独立 embed/ 命名空间。每次命中都校验音频与同目录图片的
+//     纳秒 mtime/size，目录签名变化时重新枚举图片；内存缓存也不例外。
+//   * 不缓存失败/缺图/占位；忙或超时显式 busy，避免被 HTTP 层误报永久没有封面。
+//   * 同 key singleflight、全局两个并发位，等待为零；单文件6秒、专辑12秒预算保持。
 // ---------------------------------------------------------------------------
 // 1x1 占位 PNG 识别：只看 PNG 签名 + IHDR 的前 10 字节（宽/高），不解码、不依赖具体字节序列。
 // 这样即使 media_info.h 以后换了占位图颜色/压缩参数，这条判据依然成立。
@@ -1427,26 +1638,21 @@ struct CoverGateGuard {
     ~CoverGateGuard() { if (held) cover_gate_release(); }
 };
 
-inline bool Library::albumCover(const std::string& key, std::vector<unsigned char>& bytes, std::string& mime) {
-    // 1 KB：真实封面（含 APIC 缩略图）极少这么小；比它还小的一律先当"可疑"，继续试下一首。
-    const size_t kCoverMinBytes = 1024;
-    // ---- 三个时限 + 一个并发上限（1.1.1.4-beta「封面提取卡 UI」，2026-10-31）----
-    // 数值依据：SMB 库上单次 ffmpeg 实测 20–249 s（P50 也远超 6 s 的样本 399 个）。
-    //   * 单文件 6 s：正常的本地盘/千兆 SMB 抽一张内嵌图远小于它，超过就在这一首上止损；
-    //   * 单张专辑 12 s（最多 6 首候选）：等价于"允许两次单文件超时"，再多就是盘真的不行了；
-    //   * 等并发位 1.5 s：等不到说明已有 2 个慢 ffmpeg 在跑，这时候排队只是在堆请求线程。
-    const int kFfmpegTimeoutMs = 6000;      // 单文件 ffmpeg 硬上限
-    const int kAlbumBudgetMs   = 12000;     // 单张专辑总预算
-    const int kGateWaitMs      = 1500;      // 等全局并发位最多这么久
-    // 取图顺序：cv=1 的曲目优先（≤3），再其余曲目（≤3）。锁内只收集路径，锁外才起 ffmpeg。
+inline bool Library::albumCover(const std::string& key, std::vector<unsigned char>& bytes, std::string& mime,
+                               std::string* source, bool* busy) {
+    bytes.clear(); mime = "image/png";
+    if (source) *source = "none";
+    if (busy) *busy = false;
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(12000);
+    auto temporarilyBusy = [&] {
+        if (source) *source = "busy";
+        if (busy) *busy = true;
+        return false;
+    };
+    // cv=1 first (at most 3), then other tracks (at most 3), as before.
     std::vector<std::string> order;
     {
         std::lock_guard<std::mutex> lk(mtx_);
-        auto it = coverCache_.find(key);
-        if (it != coverCache_.end()) {
-            if (it->second.first.empty()) return false;    // 负缓存：确定没有
-            bytes = it->second.first; mime = it->second.second; return true;
-        }
         std::vector<std::string> withCv, without;
         const auto& v = albumVecLocked();
         for (const auto& a : v) {
@@ -1463,76 +1669,86 @@ inline bool Library::albumCover(const std::string& key, std::vector<unsigned cha
         order = withCv;
         order.insert(order.end(), without.begin(), without.end());
     }
-    if (order.empty()) return false;
-
-    // ---- 并发闸门（2026-10-31，1.1.1.4-beta「封面提取卡 UI」）----
-    // 只在真的要起 ffmpeg 时才排队；缓存命中已在上面返回，不占位。
-    // 等不到就**放弃这一次**：宁可这次不显示封面，也不要把请求线程堆在慢盘后面。
-    // 注意这里**不写负缓存** —— 排队失败不等于"这张专辑没有封面"，下次还得能重试。
-    if (!cover_gate_acquire(kGateWaitMs)) return false;
-    CoverGateGuard gate(true);
-
-    // 等位期间别的线程可能已经把这张专辑取好了 —— 再查一次，避免重复起 ffmpeg。
+    if (order.empty() || !local_cover::valid_key(key)) return false;
+    std::string fingerprint;
+    if (!local_cover::snapshot(order, fingerprint)) return temporarilyBusy();
+    auto accept = [&](const local_cover::Entry& entry, const char* src) {
+        bytes = entry.bytes; mime = entry.mime;
+        if (source) *source = src;
+        return true;
+    };
     {
         std::lock_guard<std::mutex> lk(mtx_);
         auto it = coverCache_.find(key);
         if (it != coverCache_.end()) {
-            if (it->second.first.empty()) return false;    // 负缓存：确定没有
-            bytes = it->second.first; mime = it->second.second; return true;
+            if (it->second.fingerprint == fingerprint) return accept(it->second, "embedcache");
+            coverCache_.erase(it);
         }
     }
+    local_cover::Entry disk;
+    if (local_cover::read(key, fingerprint, disk)) {
+        std::lock_guard<std::mutex> lk(mtx_);
+        if (coverCache_.size() >= 256) coverCache_.erase(coverCache_.begin());
+        coverCache_[key] = disk;
+        return accept(disk, "embedcache");
+    }
+    // Same-key misses never start duplicate extraction. Busy is retryable and nonblocking.
+    local_cover::Flight flight(local_cover::root() + "/" + key);
+    if (!flight.held) return temporarilyBusy();
+    if (local_cover::read(key, fingerprint, disk)) return accept(disk, "embedcache");
 
-    std::vector<unsigned char> best;      // 真封面（>= 1KB）
-    std::string bestMime;
-    std::vector<unsigned char> small;     // 小但**不是** 1x1 占位图（最后兜底）
-    std::string smallMime;
+    local_cover::Entry best, small;
     bool timedOut = false;
-    const auto deadline =
-        std::chrono::steady_clock::now() + std::chrono::milliseconds(kAlbumBudgetMs);
-    for (const std::string& p : order) {
-        const auto now = std::chrono::steady_clock::now();
-        if (now >= deadline) { timedOut = true; break; }        // 整张专辑的预算用完
-        long long remain =
-            std::chrono::duration_cast<std::chrono::milliseconds>(deadline - now).count();
-        if (remain < 1) remain = 1;
-        const int timeoutMs = (int)std::min<long long>(kFfmpegTimeoutMs, remain);
-        std::string m;
-        bool t = false;
-        std::vector<unsigned char> cand = rta::audio::get_cover(p, m, timeoutMs, &t);
-        if (t) { timedOut = true; continue; }        // 超时不是"没封面"：占位图不算数，试下一首
-        if (cand.empty()) continue;
-        if (lib_cover_is_1x1_placeholder(cand)) continue;    // get_cover 的"没有"兜底：跳过，继续问下一首
-        if (cand.size() >= kCoverMinBytes) { best.swap(cand); bestMime = m; break; }
-        if (small.empty()) { small.swap(cand); smallMime = m; }
+    CoverGateGuard gate(false);
+    for (const auto& p : order) {
+        if (std::chrono::steady_clock::now() >= deadline) { timedOut = true; break; }
+        std::vector<unsigned char> cand; std::string m, imageSource;
+        // Sibling pictures do not need an ffmpeg concurrency slot.
+        for (const auto& pic : local_cover::pictures(p)) {
+            if (local_cover::read_image(pic, cand, m) && !lib_cover_is_1x1_placeholder(cand)) {
+                imageSource = pic; break;
+            }
+            cand.clear();
+        }
+        if (cand.empty()) {
+            if (!gate.held) {
+                if (!cover_gate_acquire(0)) return temporarilyBusy();
+                gate.held = true;
+            }
+            const auto remain = std::chrono::duration_cast<std::chrono::milliseconds>(
+                deadline - std::chrono::steady_clock::now()).count();
+            if (remain <= 0) { timedOut = true; break; }
+            const std::string ffmpeg = rta::audio::find_tool("ffmpeg");
+            if (ffmpeg.empty()) continue;
+            const std::string tmp = rta::audio::temp_path(L".img");
+            const std::string cmd = local_cover::quote(ffmpeg) + " -v error -y -i " + local_cover::quote(p) +
+                " -map 0:v:0 -c:v copy -f image2 " + local_cover::quote(tmp);
+            const auto pr = rta::platform::run_hidden_timeout(cmd, false, (int)std::min<long long>(6000, remain));
+            // Bypass media_info's path-only cache: it cannot detect changed source bytes.
+            if (pr.timed_out) timedOut = true;
+            else if (pr.started && pr.exit_code == 0) local_cover::read_image(tmp, cand, m);
+            rta::audio::remove_temp(tmp);
+            imageSource = p;
+        }
+        if (cand.empty() || lib_cover_is_1x1_placeholder(cand)) continue;
+        local_cover::Entry entry{fingerprint, imageSource, m, std::move(cand)};
+        if (entry.bytes.size() >= 1024) { best = std::move(entry); break; }
+        if (small.bytes.empty()) small = std::move(entry);
     }
-    if (!best.empty()) {
-        std::lock_guard<std::mutex> lk(mtx_);
-        if (coverCache_.size() > 256) coverCache_.clear();
-        coverCache_[key] = { best, bestMime };
-        bytes.swap(best);
-        mime = bestMime;
-        return true;
+    if (best.bytes.empty()) best = std::move(small);
+    if (!best.bytes.empty()) {
+        std::string after;
+        if (!local_cover::snapshot(order, after) || after != fingerprint) return temporarilyBusy();
+        local_cover::write(key, best); // IO failure must not hide a successfully extracted image
+        {
+            std::lock_guard<std::mutex> lk(mtx_);
+            if (coverCache_.size() >= 256) coverCache_.erase(coverCache_.begin());
+            coverCache_[key] = best;
+        }
+        return accept(best, "embed");
     }
-    if (!small.empty()) {
-        // 全专辑只有小图（真实但很小，例如 600 字节的缩略图）：用它，但仍然**不写负缓存**
-        // —— 让用户以后换了更大的封面时能自动生效。这里也不写正缓存，理由同下。
-        bytes.swap(small);
-        mime = smallMime;
-        return true;
-    }
-    if (!timedOut) {
-        // 全专辑都没有封面：写负缓存（空字节 = 确定没有），返回 false 让前端露首字母。
-        // 为什么敢缓存"没有"：这一轮已经把 cv=1 与其余各 3 首都问过了，短期内重试只会重复
-        // 起同样的 ffmpeg 进程；而**占位图不写正缓存**这条保证不会把坏结果钉死。
-        std::lock_guard<std::mutex> lk(mtx_);
-        if (coverCache_.size() > 256) coverCache_.clear();
-        coverCache_[key] = { std::vector<unsigned char>(), std::string() };
-    }
-    // 超时（有曲目是"没问完"而不是"问了没有"）⟹ 直接返回 false，**不写负缓存**：
-    // 否则慢盘上的一次超时会让这张专辑在本次进程生命周期里永久显示首字母。
-    bytes.clear();
-    mime = "image/png";
-    return false;
+    // Failures and missing/placeholder images never become permanent negative entries.
+    return timedOut ? temporarilyBusy() : false;
 }
 
 // ---------------- 封面在线抓取：按 album+artist 反查（2026-10-26）----------------
@@ -1571,15 +1787,21 @@ inline bool Library::albumCoverTerm(const std::string& key, LibCoverTerm& out) c
 }
 
 inline void Library::joinScan() {
-    if (th_.joinable()) th_.join();
+    std::thread thread;
+    { std::lock_guard<std::mutex> lk(scanLifecycleMtx_); thread = std::move(th_); }
+    if (thread.joinable()) thread.join(); // stopScan remains available while waiting.
 }
 
 inline bool Library::startScan(bool forceFull) {
+    return startScanWorker(forceFull, false, {});
+}
+inline bool Library::startStartupScan(StartupScanCallback callback) {
+    return startScanWorker(false, true, std::move(callback));
+}
+inline bool Library::startScanWorker(bool forceFull, bool startup, StartupScanCallback callback) {
+    std::lock_guard<std::mutex> lifecycle(scanLifecycleMtx_);
     if (scanning_.load()) return false;
-    joinScan();
-    const auto roots = this->roots();
-    // 旧索引（增量基准）
-    std::vector<LibTrack> old = [&] { std::lock_guard<std::mutex> lk(mtx_); return tracks_; }();
+    if (th_.joinable()) th_.join();
 
     cancel_.store(false);
     scanning_.store(true);
@@ -1593,11 +1815,50 @@ inline bool Library::startScan(bool forceFull) {
 
     const size_t thCount = this->scanThreads();
 
-    th_ = std::thread([this, roots, old, forceFull, thCount]() {
-        // ★ 整个扫描体包一层 catch：扫描是后台线程，任何未捕获异常都会 std::terminate，
-        // 进程直接消失。异常只允许降级成一条错误文案。
+    try {
+    th_ = std::thread([this, forceFull, thCount, startup, callback = std::move(callback)]() {
+        const auto notify = [&](const std::string& reason, bool scan) {
+            if (callback) { try { callback(reason, scan); } catch (...) {} }
+        };
         try {
         const auto tStart = std::chrono::steady_clock::now();
+        std::vector<std::string> roots;
+        std::vector<LibTrack> old;
+        uint64_t revision = 0;
+        {
+            std::lock_guard<std::mutex> lk(mtx_);
+            roots = roots_; old = tracks_; revision = rootsRevision_;
+        }
+        LibDirectoryFingerprint baseline;
+        if (startup) {
+            baseline = lib_directory_fingerprint(roots, [&] { return cancel_.load(); });
+            std::string reason = "changed";
+            const auto persisted = readFile(fingerprintPath());
+            const auto indexText = readFile(indexPath());
+            std::vector<std::string> savedRoots;
+            std::map<std::string, long long> savedDirs;
+            if (persisted.empty()) reason = "missing";
+            else if (!lib_fingerprint_parse(persisted, indexText, savedRoots, savedDirs)) reason = "invalid";
+            else if (!baseline.complete) reason = "unreadable";
+            else if (savedRoots == roots && savedDirs == baseline.dirs) reason = "unchanged";
+            {
+                std::lock_guard<std::mutex> lk(mtx_);
+                if (rootsRevision_ != revision || roots_ != roots) reason = "roots-changed";
+            }
+            if (cancel_.load()) { notify("cancelled", false); scanning_.store(false); return; }
+            if (reason == "unchanged") {
+                scanComplete_.store(true);
+                notify(reason, false);
+                { std::lock_guard<std::mutex> lk(msgMtx_); scanMsg_ = "目录未变化，跳过启动扫描"; }
+                scanning_.store(false);
+                return;
+            }
+            notify(reason, true);
+        }
+        // Dirty BEFORE any index mutation/walk; crash/cancel never leaves a clean marker.
+        { std::lock_guard<std::mutex> lk(mtx_); invalidateFingerprintLocked(); }
+        baseline = lib_directory_fingerprint(roots, [&] { return cancel_.load(); });
+        bool indexWritesOk = true;
 
         // 老记录按路径建索引，便于复用
         std::unordered_map<std::string, size_t> oldByPath;
@@ -1641,7 +1902,7 @@ inline bool Library::startScan(bool forceFull) {
                         text = indexTextLocked();
                     }
                 }
-                if (gone > 0) writeIndex(text);
+                if (gone > 0) indexWritesOk = writeIndex(text) && indexWritesOk;
             }
             removedMissing_.store(gone);
         }
@@ -1662,6 +1923,8 @@ inline bool Library::startScan(bool forceFull) {
             scanMsg_ = "正在遍历目录… " + std::to_string(walked.size()) + " 首";
         };
         size_t skippedItems = 0;
+        size_t unreadableItems = 0;   // 重试后仍失效的项：可见，但不阻塞指纹（见 lib_walk_tree 注释）
+        size_t recoveredItems = 0;    // 首次 lstat 失败、重试成功的项（SMB 瞬时抖动；已正常收录）
         for (const auto& root : roots) {
             if (cancel_.load()) break;
             bool isDir = false;
@@ -1678,6 +1941,8 @@ inline bool Library::startScan(bool forceFull) {
                 noteProgress,
                 [&] { return cancel_.load(); });
             skippedItems += wr.skipped;
+            unreadableItems += wr.unreadable.size();
+            recoveredItems += wr.recovered;
             for (auto& d : wr.failedDirs) failedDirs.push_back(std::move(d));
             if (wr.cancelled || cancel_.load()) break;
             std::this_thread::yield();   // 多个根之间让出一次时间片（大库扫描不拖死界面）
@@ -1722,8 +1987,13 @@ inline bool Library::startScan(bool forceFull) {
                 lastScanCached_.store(0);
                 text = indexTextLocked();
             }
-            writeIndex(text);          // 锁外写盘
-            scanComplete_.store(failedDirs.empty() && badRoots.empty());
+            indexWritesOk = writeIndex(text) && indexWritesOk;
+            std::string dirtyWhy = !indexWritesOk ? "index-write-failed"
+                                 : !baseline.complete ? "dirs-incomplete"
+                                 : !failedDirs.empty() ? "failed-dirs"
+                                 : !badRoots.empty() ? "bad-roots" : "ok";
+            scanComplete_.store(finishFingerprint(roots, revision, baseline.dirs,
+                indexWritesOk && baseline.complete && failedDirs.empty() && badRoots.empty(), text, &dirtyWhy));
             {
                 std::lock_guard<std::mutex> lk(msgMtx_);
                 std::string m = "完成：0 首";
@@ -1734,7 +2004,9 @@ inline bool Library::startScan(bool forceFull) {
                     m += "）";
                 }
                 if (skippedItems > 0) m += "；跳过 " + std::to_string(skippedItems) + " 个失效项";
+                if (unreadableItems > 0) m += "（其中 " + std::to_string(unreadableItems) + " 个重试后仍不可读；不影响变化检测）";
                 if (!failedDirs.empty()) m += "；" + std::to_string(failedDirs.size()) + " 个目录不可读（保留旧记录）";
+                if (!scanComplete_.load()) m += "；变化指纹未标干净 dirty=" + dirtyWhy;
                 scanMsg_ = m;
             }
             scanning_.store(false);
@@ -1784,6 +2056,7 @@ inline bool Library::startScan(bool forceFull) {
         std::atomic<int> completed{0};
         std::atomic<int> probedCount{0};
         std::atomic<int> cachedCount{0};
+        std::atomic<bool> probeFailed{false};
 
         // 2026-10-26（B-1）：允许用环境变量 RLPLAYER_FFPROBE 指定 ffprobe 路径。
         // 为什么需要：本机系统 ffprobe 坏了（-version 退出 134），find_tool 仍会返回它，
@@ -1808,7 +2081,7 @@ inline bool Library::startScan(bool forceFull) {
         for (int i = 0; i < n; ++i) {
             if (cancel_.load()) break;
             const bool submitted = pool->submit([this, i, n, &walked, &oldByPath, &old, forceFull, &ffprobe,
-                                                 &fresh, &completed, &probedCount, &cachedCount, &lastMsg,
+                                                 &fresh, &completed, &probedCount, &cachedCount, &probeFailed, &lastMsg,
                                                  &cueCand, &cueProbeMtx, &cueProbeMap]() {
                 if (cancel_.load()) return;
                 const std::string& p = walked[(size_t)i];
@@ -1826,7 +2099,7 @@ inline bool Library::startScan(bool forceFull) {
                 auto oit = oldByPath.find(p);
                 if (!forceFull && !cueOwned && oit != oldByPath.end()) {
                     const LibTrack& o = old[oit->second];
-                    if (!o.isCueTrack() && o.mtime == mt && o.size == sz) {
+                    if (!o.isCueTrack() && o.sampleRate > 0 && o.channels > 0 && o.mtime == mt && o.size == sz) {
                         fresh[(size_t)i] = o;
                         cachedCount.fetch_add(1, std::memory_order_relaxed);
                         const int c = completed.fetch_add(1, std::memory_order_relaxed) + 1;
@@ -1835,6 +2108,7 @@ inline bool Library::startScan(bool forceFull) {
                     }
                 }
                 LibTrack t = lib_probe_one(p, ffprobe);
+                if (t.sampleRate <= 0 || t.channels <= 0) probeFailed.store(true);
                 t.mtime = mt;
                 t.size = sz;
                 if (t.title.empty()) {
@@ -1849,12 +2123,14 @@ inline bool Library::startScan(bool forceFull) {
                 probedCount.fetch_add(1, std::memory_order_relaxed);
                 const int c = completed.fetch_add(1, std::memory_order_relaxed) + 1;
                 scanned_.store(c);
-                // 进度文案：改为限频（每 100ms 一次）而不是每 8 首一次
-                if (c == n || std::chrono::duration<double, std::milli>(
-                                  std::chrono::steady_clock::now() - lastMsg).count() >= 100.0) {
-                    lastMsg = std::chrono::steady_clock::now();
+                // lastMsg is shared by workers: both its read and write use msgMtx_.
+                {
                     std::lock_guard<std::mutex> lk(msgMtx_);
-                    scanMsg_ = "读取标签 " + std::to_string(c) + "/" + std::to_string(n);
+                    const auto now = std::chrono::steady_clock::now();
+                    if (c == n || std::chrono::duration<double, std::milli>(now - lastMsg).count() >= 100.0) {
+                        lastMsg = now;
+                        scanMsg_ = "读取标签 " + std::to_string(c) + "/" + std::to_string(n);
+                    }
                 }
             });
             if (!submitted) break;
@@ -1956,9 +2232,18 @@ inline bool Library::startScan(bool forceFull) {
             albumVecLocked();
             text = indexTextLocked();
         }
-        writeIndex(text);          // 锁外写盘（见 indexTextLocked 注释）
-        // 1.1.1.4：有读不全的目录 ⟹ 索引可用但不完整（行数可能偏少），complete=false
-        scanComplete_.store(failedDirs.empty() && badRoots.empty());
+        indexWritesOk = writeIndex(text) && indexWritesOk;
+        // Keep dirty on cancellation, partial enumeration, write failure or concurrent directory/root changes.
+        // 已重试仍失效的单个名字不再阻塞指纹：它既进不了索引也改不了父目录 mtime 的语义，
+        // 却会让「库里有 1 个 SMB 残留名」变成「每次启动整库重扫 60s」（2026-11-01 实测）。
+        std::string dirtyWhy = !indexWritesOk ? "index-write-failed"
+                             : pool->hasError() ? "worker-error"
+                             : probeFailed.load() ? "probe-failed"
+                             : !baseline.complete ? "dirs-incomplete"
+                             : !failedDirs.empty() ? "failed-dirs"
+                             : !badRoots.empty() ? "bad-roots" : "ok";
+        scanComplete_.store(finishFingerprint(roots, revision, baseline.dirs,
+            indexWritesOk && !pool->hasError() && !probeFailed.load() && baseline.complete && failedDirs.empty() && badRoots.empty(), text, &dirtyWhy));
         {
             std::lock_guard<std::mutex> lk(msgMtx_);
             std::string m = "完成：" + std::to_string(nt) + " 首 (" + std::to_string((int)(durMs + 0.5)) + " ms)";
@@ -1968,6 +2253,11 @@ inline bool Library::startScan(bool forceFull) {
                 m += "）";
             }
             if (skippedItems > 0) m += "；跳过 " + std::to_string(skippedItems) + " 个失效项";
+            if (unreadableItems > 0)
+                m += "（其中 " + std::to_string(unreadableItems) + " 个重试后仍不可读；不影响变化检测）";
+            if (recoveredItems > 0)
+                m += "；" + std::to_string(recoveredItems) + " 个失效项重试后已收录";
+            if (!scanComplete_.load()) m += "；变化指纹未标干净 dirty=" + dirtyWhy;
             if (!failedDirs.empty())
                 m += "；" + std::to_string(failedDirs.size()) + " 个目录不可读（保留旧记录）";
             const int gone = removedMissing_.load();
@@ -1991,6 +2281,7 @@ inline bool Library::startScan(bool forceFull) {
             scanning_.store(false);
         }
     });
+    } catch (...) { scanning_.store(false); scanComplete_.store(false); return false; }
     return true;
 }
 

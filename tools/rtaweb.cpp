@@ -4582,8 +4582,14 @@ static const std::string& cover_cache_dir() {
 static rta::cover::CoverPaths cover_paths(const std::string& key) {
     return rta::cover::cover_paths_in(cover_cache_dir(), key);
 }
+// 人工封面独立存放：在线抓取与本地抽取都不覆盖用户选择。
+static std::string cover_manual_dir() { return cover_cache_dir() + "/manual"; }
+static bool cover_read_manual(const std::string& key, std::vector<unsigned char>& out) {
+    return rta::cover::cover_read_cached_in(cover_manual_dir(), key, out);
+}
 static bool cover_has_disk(const std::string& key) {
-    return rta::cover::cover_has_disk_in(cover_cache_dir(), key);
+    return rta::cover::cover_has_disk_in(cover_manual_dir(), key) ||
+           rta::cover::cover_has_disk_in(cover_cache_dir(), key);
 }
 static bool cover_read_cached(const std::string& key, std::vector<unsigned char>& out) {
     return rta::cover::cover_read_cached_in(cover_cache_dir(), key, out);
@@ -4604,8 +4610,13 @@ static std::string cover_env_host() {
 
 // 落盘正缓存：先写 .part，再 rename（同卷原子）。
 // 返回空串 = 成功；非空 = 人话原因。
-static std::string cover_write_atomic(const std::string& key, const std::vector<unsigned char>& body) {
-    const rta::cover::CoverPaths pp = cover_paths(key);
+static std::string cover_write_atomic(const std::string& key, const std::vector<unsigned char>& body,
+                                      bool manual = false) {
+    // 同名 .part 不允许并发写入，锁只包本地落盘，不包网络/抽图。
+    static std::mutex writeMtx;
+    std::lock_guard<std::mutex> lock(writeMtx);
+    const rta::cover::CoverPaths pp = rta::cover::cover_paths_in(
+        manual ? cover_manual_dir() : cover_cache_dir(), key);
     std::error_code ec;
     fs::create_directories(fs::u8path(pp.dir), ec);
     {
@@ -7253,7 +7264,7 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
             const std::vector<unsigned char> body(rq.body.begin(), rq.body.end());
             if (!rta::cover::cover_looks_like_image(body))
                 return "{\"ok\":false,\"error\":\"不是可识别的图片（jpg/png/webp/gif）\"}";
-            const std::string werr = cover_write_atomic(kk, body);
+            const std::string werr = cover_write_atomic(kk, body, true);
             if (!werr.empty()) return "{\"ok\":false,\"error\":\"" + jesc(werr) + "\"}";
             play_log("COVERSET k=" + kk + " bytes=" + std::to_string((long long)rq.body.size()));
             return std::string("{\"ok\":true,\"k\":\"") + kk + "\",\"bytes\":" + std::to_string((long long)rq.body.size()) + "}";
@@ -7267,20 +7278,24 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
             std::vector<unsigned char> bytes;
             std::string mime = "image/jpeg";
             const char* src = "none";
-            // ① 内嵌/同目录图（现有逻辑）。
-            //    ★ 只有 hasCover=1 才去问 —— hasCover 是扫描时算好的（内嵌流 or 同目录封面文件）。
-            //      对 hasCover=0 的专辑调 albumCover() 会为每张专辑起 3 次 ffmpeg（~200 ms/张），
-            //      上百张就把控制面堵死几十秒 —— 这正是"封面页卡死"的老病根。现在这条路是 0 次 ffmpeg。
-            bool hasEmbedded = false;
-            rta::net::LibAlbum a;
-            if (!key.empty() && lib.album(key, a)) hasEmbedded = a.hasCover;
-            if (hasEmbedded && lib.albumCover(key, bytes, mime) && !bytes.empty()) {
-                src = "embed";
+            bool busy = false;
+            std::string localSource;
+            // 人工选择永久优先，且与在线/内嵌命名空间隔离。
+            if (cover_read_manual(key, bytes)) {
+                src = "manual";
+                mime = cover_mime_of(bytes);
             } else {
-                // ② 磁盘正缓存（网图/人工设置）
-                bytes.clear();
-                mime = "image/jpeg";
-                if (cover_read_cached(key, bytes)) { src = "net"; mime = cover_mime_of(bytes); }
+                // hasCover=0 不启动抽图；本地缓存查验在 albumCover 内且早于并发闸门。
+                rta::net::LibAlbum a;
+                const bool hasEmbedded = !key.empty() && lib.album(key, a) && a.hasCover;
+                if (hasEmbedded && lib.albumCover(key, bytes, mime, &localSource, &busy) && !bytes.empty()) {
+                    src = localSource.c_str();
+                } else {
+                    bytes.clear();
+                    mime = "image/jpeg";
+                    if (cover_read_cached(key, bytes)) { src = "net"; mime = cover_mime_of(bytes); }
+                    else if (busy) src = "busy";
+                }
             }
             const double ms = std::chrono::duration<double, std::milli>(
                                   std::chrono::steady_clock::now() - t0).count();
@@ -7294,6 +7309,11 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
                 std::snprintf(msbuf, sizeof(msbuf), "%.2f", ms);
                 play_log(std::string("COVERGET n=") + std::to_string(seq + 1) + " k=" + key + " src=" + src +
                          " bytes=" + std::to_string(bytes.size()) + " ms=" + msbuf);
+            }
+            if (std::string(src) == "busy") {
+                ct = "application/json; charset=utf-8";
+                rta::net::webui_set_status(503);
+                return "{\"ok\":false,\"busy\":true,\"error\":\"cover_busy\"}";
             }
             if (std::string(src) == "none") {
                 ct = "image/jpeg";
@@ -11200,15 +11220,15 @@ static void core_init_common() {
     }
     if (Library::instance().trackCount() == 0) {
         printf("音乐库为空，开始首次扫描（根目录见 rlplayer-library.conf）…\n");
+        play_log("LIBSCAN startup scan reason=empty");
         Library::instance().startScan();
     } else if (scanOnStartup) {
-        // 1.1.1.4：旧实现只在库为空时首扫 ⟹ 索引非空时新增文件重启后永不收录。
-        // 索引超过 60 秒没更新就后台补一次增量扫描（startScan 自己起线程，不阻塞首帧）。
-        const double age = Library::instance().indexAgeSeconds();
-        if (age > 60.0) {
-            printf("音乐库索引已 %.0f 秒未更新，后台增量扫描（scanonstartup=0 可关闭）…\n", age);
-            Library::instance().startScan(false);
-        }
+        // 后台只遍历目录并比较持久指纹，不因索引年龄触发整库扫描。
+        Library::instance().startStartupScan([](const std::string& reason, bool willScan) {
+            play_log(std::string("LIBSCAN startup ") + (willScan ? "scan" : "skip") + " reason=" + reason);
+        });
+    } else {
+        play_log("LIBSCAN startup skip reason=disabled");
     }
 }
 
@@ -11399,6 +11419,7 @@ static std::string handle_traced(const rta::net::HttpRequest& request, std::stri
 std::string rlapp::dispatch(const rta::net::HttpRequest& request, std::string& contentType) {
     // 与旧 WebUi::handle 逐字一致的默认值：handler 自己改 ct（图片/JS/HTML/文本/zip）。
     contentType = "application/json; charset=utf-8";
+    rta::net::webui_status_slot()->store(200); // 工作线程复用时不继承上一请求状态。
     // 这里【绝不】加全局请求锁：WKURLSchemeHandler 用多个工作线程并发回调，
     // 加锁就把旧 WebUi「每连接一个工作线程」的并行能力退化回串行（那是本轮明确禁止的）。
     // 线程安全由 handle() 内部原有的 per-endpoint 锁（ps.mtx / g_q.mtx / g_logMx …）保证，
@@ -11542,10 +11563,14 @@ int rlapp::cli_main(int argc, char** argv) {
             }
         }
         auto& lib = Library::instance();
-        for (auto r : lib.roots()) lib.removeRoot(r);
-        const auto ar = lib.addRootEx(musicDir);
-        if (!ar.ok) printf("!! --music-dir \"%s\" 加不进库：%s\n", musicDir.c_str(), ar.why.c_str());
-        else printf("  音乐库根已设为：%s\n", musicDir.c_str());
+        const auto currentRoots = lib.roots();
+        // 同一隔离实例重启不应先删根、清索引，再加回相同根。
+        if (currentRoots.size() != 1 || currentRoots.front() != musicDir) {
+            for (const auto& r : currentRoots) lib.removeRoot(r);
+            const auto ar = lib.addRootEx(musicDir);
+            if (!ar.ok) printf("!! --music-dir \"%s\" 加不进库：%s\n", musicDir.c_str(), ar.why.c_str());
+            else printf("  音乐库根已设为：%s\n", musicDir.c_str());
+        }
     }
     g_uiPort = port;
     g_lanOn  = lan;
