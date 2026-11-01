@@ -25,6 +25,7 @@
 #include "audio/media_info.h"
 #include "net/local_cover_cache.h"
 #include "net/scan_pool.h"
+#include "net/library_probe_retry.h"
 #include "platform/fs.h"        // 容错目录枚举 list_dir（1.1.1.4：SMB 失效项不再中止遍历）
 #include "meta/entities.h"
 #include "meta/cue.h"          // CUE 整轨分轨解析
@@ -297,6 +298,8 @@ public:
         size_t skipped = 0;
         size_t failedDirs = 0;
         bool   complete = true;
+        bool directoryComplete = true, directoryUnchanged = false, metadataHealthy = true;
+        size_t metadataPending = 0, probeUnreadable = 0;
         std::string msg;
     };
     Snapshot snapshot() const {
@@ -312,7 +315,12 @@ public:
         s.removed  = removedMissing_.load();
         s.skipped  = scanSkipped_.load();
         s.failedDirs = scanFailedDirs_.load();
-        s.complete = scanComplete_.load();
+        s.directoryComplete = scanComplete_.load();
+        s.directoryUnchanged = directoryUnchanged_.load();
+        s.metadataPending = metadataPending_.load();
+        s.probeUnreadable = probeUnreadable_.load();
+        s.metadataHealthy = s.metadataPending == 0;
+        s.complete = s.directoryComplete && s.metadataHealthy;
         s.msg      = scanMsg();
         return s;
     }
@@ -373,6 +381,9 @@ public:
     // false + "unchanged" means skipped; all other reasons must be logged distinctly.
     using StartupScanCallback = std::function<void(const std::string&, bool)>;
     bool startStartupScan(StartupScanCallback callback = {});
+    void setScanLogHook(std::function<void(const std::string&)> hook) {
+        std::lock_guard<std::mutex> lk(scanLogMtx_); scanLogHook_ = std::move(hook);
+    }
     // 索引文件多久没更新过（秒）。文件不存在/读不到返回 1e9 ⟹ 立刻值得扫。
     // 1.1.1.4 启动增量扫描的判据（索引非空但过期太久时后台补一次）。
     double indexAgeSeconds() const;
@@ -417,6 +428,18 @@ private:
     std::string buildIndexLocked() const;
     bool writeIndex(const std::string& snapshot);
     bool startScanWorker(bool forceFull, bool startup, StartupScanCallback callback);
+    void retryPendingMetadata(const std::vector<std::string>& roots, uint64_t revision,
+                              const std::map<std::string, long long>& dirs);
+    void emitScanLog(const std::string& text) {
+        std::function<void(const std::string&)> hook;
+        { std::lock_guard<std::mutex> lk(scanLogMtx_); hook = scanLogHook_; }
+        if (hook) { try { hook(text); } catch (...) {} }
+    }
+    void reportScanDone(const std::string& reason) {
+        emitScanLog("done directoryClean=" + std::to_string(scanComplete_.load()) +
+            " metadataPending=" + std::to_string(metadataPending_.load()) +
+            " probeUnreadable=" + std::to_string(probeUnreadable_.load()) + " reason=" + reason);
+    }
     void invalidateFingerprintLocked(); // caller holds mtx_
     // why：为什么标不干净（"ok" = 已标干净）。写进 /api/lib/status 的 dirtyReason，
     // 免得下次再出现「不知道为什么又扫了一遍」只能靠人肉猜。
@@ -447,6 +470,12 @@ private:
     mutable std::mutex mtx_;
     std::vector<std::string> roots_;
     std::vector<LibTrack> tracks_;
+    LibProbeRetries probeRetries_; // persisted in the same atomic index transaction
+    bool probeRetryFooterValid_ = true; // protected by mtx_
+    std::atomic<size_t> metadataPending_{0}, probeUnreadable_{0};
+    std::atomic<bool> directoryUnchanged_{false};
+    std::mutex scanLogMtx_;
+    std::function<void(const std::string&)> scanLogHook_;
     mutable std::vector<LibAlbum> albums_;
     mutable bool albumsDirty_ = true;
     mutable std::map<std::string, local_cover::Entry> coverCache_;
@@ -931,7 +960,8 @@ struct LibDirAlbumMemo {
 };
 
 // 一次 ffprobe 取全部信息（比 media_info.h 的两次调用快一倍）
-inline LibTrack lib_probe_one(const std::string& file, const std::string& ffprobePath = "") {
+inline LibTrack lib_probe_one(const std::string& file, const std::string& ffprobePath = "",
+                              int timeoutMs = 6000, bool nativeAllowed = true) {
     LibTrack t;
     t.path = file;
     // ===================== 原生标签快速通道（调度层，2026-10-25） =====================
@@ -943,7 +973,7 @@ inline LibTrack lib_probe_one(const std::string& file, const std::string& ffprob
     // unsynchronisation、数字流派引用、Opus、RF64、"id3 " 块…）一律返回 false，原样落到下面的 ffprobe，
     // 保证「关掉原生通道」与「开着」得到同一份入库结果（tests/verify 与 tests/test_tags_native.cpp 判据）。
     // 环境变量 RLPLAYER_NATIVE_TAGS=0 可整体关闭（默认开）。
-    if (rta::meta::native::enabled()) {
+    if (nativeAllowed && rta::meta::native::enabled()) {
         rta::meta::native::TagInfo ni;
         std::string why;
         if (rta::meta::native::probe_file(file, &ni, &why)) {
@@ -986,7 +1016,9 @@ inline LibTrack lib_probe_one(const std::string& file, const std::string& ffprob
         L":stream_tags=title,artist,album,album_artist,date,genre,track,disc"
         L":format=duration:format_tags=title,artist,album,album_artist,date,genre,track,disc,tracktotal"
         L" -of default=nw=0 \"" + rta::audio::widen(file) + L"\"";
-    if (rta::audio::run_hidden(cmd, &out) != 0) return t;
+    const auto process = rta::platform::run_hidden_timeout(rta::audio::wide_to_utf8(cmd), true, timeoutMs);
+    if (!process.started || process.exit_code != 0 || process.timed_out) return t;
+    out = process.output;
 
     std::string title, artist, album, aartist, date, genre, track, disc;
     bool curIsAudio = false;   // 当前解析到的流是不是音频（封面流的字段不能覆盖音频参数）
@@ -1268,6 +1300,11 @@ inline void Library::load() {
     {
         std::lock_guard<std::mutex> lk(mtx_);
         tracks_.swap(loaded);
+        probeRetries_ = lib_probe_retries_parse(idx, &probeRetryFooterValid_);
+        // Migrate old failed placeholder rows without forcing a whole-library scan.
+        for (const auto& track : tracks_)
+            if (track.sampleRate <= 0 || track.channels <= 0 || !probeRetryFooterValid_) probeRetries_.try_emplace(track.path);
+        metadataPending_.store(probeRetries_.size());
         albumsDirty_ = true;
         trackCount_.store(tracks_.size());
         albumCount_.store(0);
@@ -1310,6 +1347,10 @@ inline int Library::purgeTracksUnderLocked(const fsx::path& rootNorm, std::strin
     std::vector<LibTrack> keep;
     keep.reserve(tracks_.size());
     int removed = 0;
+    for (auto it = probeRetries_.begin(); it != probeRetries_.end(); ) {
+        if (lib_path_within(it->first, rootNorm)) it = probeRetries_.erase(it); else ++it;
+    }
+    metadataPending_.store(probeRetries_.size());
     for (auto& t : tracks_) {
         if (lib_path_within(t.path, rootNorm)) { ++removed; continue; }
         keep.push_back(std::move(t));
@@ -1400,6 +1441,13 @@ inline std::string Library::buildIndexLocked() const {
         std::snprintf(buf, sizeof(buf), "%d\t%lld\t%lld\n", t.cueNo, t.cueOff, t.cueLen);
         s += buf;
     }
+    // Drop removed-root/removed-track pending rows in the same atomic index transaction.
+    LibProbeRetries liveRetries;
+    for (const auto& track : tracks_) {
+        auto it = probeRetries_.find(track.path);
+        if (it != probeRetries_.end()) liveRetries.emplace(it->first, it->second);
+    }
+    s += lib_probe_retries_text(liveRetries);
     return s;
 }
 // 锁外落盘（调用方持锁时构造好的快照）。writeFile 自己走 tmp+rename，原子性由它保证。
@@ -1786,6 +1834,98 @@ inline bool Library::albumCoverTerm(const std::string& key, LibCoverTerm& out) c
     return false;
 }
 
+inline void Library::retryPendingMetadata(const std::vector<std::string>& roots, uint64_t revision,
+    const std::map<std::string, long long>& dirs) {
+    LibProbeRetries pending;
+    { std::lock_guard<std::mutex> lk(mtx_); pending = probeRetries_; }
+    const auto now = lib_probe_retry_now();
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(6);
+    size_t attempted = 0, recovered = 0;
+    std::string ffprobe;
+    if (const char* env = std::getenv("RLPLAYER_FFPROBE")) ffprobe = env;
+    if (ffprobe.empty()) ffprobe = rta::audio::find_tool("ffprobe");
+    for (auto& [path, retry] : pending) {
+        if (retry.due > now) continue;
+        if (cancel_.load() || attempted >= 16) break;
+        const auto remain = std::chrono::duration_cast<std::chrono::milliseconds>(deadline - std::chrono::steady_clock::now()).count();
+        if (remain <= 0) break;
+        ++attempted;
+        const auto token = [&](long long& mt, long long& size) {
+            struct stat st{};
+            if (::stat(path.c_str(), &st) != 0 || !S_ISREG(st.st_mode)) return false;
+            std::error_code ec;
+            const auto ft = fsx::last_write_time(p8(path), ec);
+            if (ec) return false;
+            mt = (long long)ft.time_since_epoch().count();
+            size = st.st_size; return true;
+        };
+        long long beforeMt = 0, beforeSize = 0, afterMt = 0, afterSize = 0;
+        const bool beforeOk = token(beforeMt, beforeSize);
+        // Retry-only skips native IO (unbounded stdio on a stalled SMB mount).
+        auto track = lib_probe_one(path, ffprobe, (int)std::min<long long>(3000, remain), false);
+        const bool stable = beforeOk && token(afterMt, afterSize) && beforeMt == afterMt && beforeSize == afterSize;
+        if (cancel_.load()) break;
+        std::lock_guard<std::mutex> lk(mtx_);
+        if (!probeRetries_.count(path)) continue; // concurrent removal must never resurrect a path
+        bool accepted = false;
+        if (stable && track.sampleRate > 0 && track.channels > 0) {
+            track.mtime = beforeMt;
+            track.size = beforeSize;
+            bool cueValid = true;
+            for (const auto& old : tracks_) if (old.path == path && old.isCueTrack() && old.sampleRate <= 0) cueValid = false;
+            if (cueValid) for (auto& old : tracks_) {
+                if (old.path != path) continue;
+                if (old.isCueTrack()) {
+                    if (old.cueOff >= 0) old.cueOff = (long long)std::llround((double)old.cueOff * track.sampleRate / old.sampleRate);
+                    if (old.cueLen >= 0) old.cueLen = (long long)std::llround((double)old.cueLen * track.sampleRate / old.sampleRate);
+                    old.sampleRate = track.sampleRate; old.channels = track.channels; old.bits = track.bits;
+                    old.codec = track.codec; old.hasCover = track.hasCover; old.mtime = track.mtime; old.size = track.size;
+                    if (old.cueLen >= 0) old.duration = (double)old.cueLen / old.sampleRate;
+                } else { if (track.title.empty()) track.title = old.title; old = track; }
+                accepted = true;
+            }
+        }
+        if (accepted) { probeRetries_.erase(path); ++recovered; albumsDirty_ = true; }
+        else { auto& item = probeRetries_[path]; item.due = now + 300; ++item.attempts; }
+    }
+    bool persisted = true;
+    if (attempted > 0 && !cancel_.load()) {
+        std::string text;
+        {
+            std::lock_guard<std::mutex> lk(mtx_);
+            invalidateFingerprintLocked();
+            metadataPending_.store(probeRetries_.size());
+            text = indexTextLocked();
+        }
+        persisted = writeIndex(text);
+        // No second directory traversal: revalidate the already-observed directory mtimes.
+        // Any insertion/removal changes a parent in this set; never replace baseline with end state.
+        for (const auto& [dir, expected] : dirs) {
+            if (!persisted || cancel_.load()) { persisted = false; break; }
+            struct stat st{};
+            if (::stat(dir.c_str(), &st) != 0 ||
+                (long long)st.st_mtimespec.tv_sec * 1000000000LL + st.st_mtimespec.tv_nsec != expected) persisted = false;
+        }
+        {
+            std::lock_guard<std::mutex> lk(mtx_);
+            if (persisted && !cancel_.load() && rootsRevision_ == revision && roots_ == roots && fingerprintInvalidated_)
+                persisted = writeFile(fingerprintPath(), lib_fingerprint_text(roots, dirs, text));
+            else persisted = false;
+        }
+        scanComplete_.store(persisted);
+    }
+    if (cancel_.load()) scanComplete_.store(false);
+    { std::lock_guard<std::mutex> lk(mtx_); metadataPending_.store(probeRetries_.size()); }
+    probeUnreadable_.store(attempted - recovered);
+    {
+        std::lock_guard<std::mutex> lk(msgMtx_);
+        scanMsg_ = "目录未变化，元数据待重试 " + std::to_string(metadataPending_.load()) + " 首";
+    }
+    emitScanLog("metadata_retry attempted=" + std::to_string(attempted) + " recovered=" +
+        std::to_string(recovered) + " pending=" + std::to_string(metadataPending_.load()) +
+        " directoryClean=" + std::to_string(scanComplete_.load()));
+}
+
 inline void Library::joinScan() {
     std::thread thread;
     { std::lock_guard<std::mutex> lk(scanLifecycleMtx_); thread = std::move(th_); }
@@ -1811,6 +1951,8 @@ inline bool Library::startScanWorker(bool forceFull, bool startup, StartupScanCa
     scanSkipped_.store(0);
     scanFailedDirs_.store(0);
     scanComplete_.store(false);
+    directoryUnchanged_.store(false);
+    probeUnreadable_.store(0);
     { std::lock_guard<std::mutex> lk(msgMtx_); scanMsg_ = "正在遍历目录…"; }
 
     const size_t thCount = this->scanThreads();
@@ -1824,10 +1966,13 @@ inline bool Library::startScanWorker(bool forceFull, bool startup, StartupScanCa
         const auto tStart = std::chrono::steady_clock::now();
         std::vector<std::string> roots;
         std::vector<LibTrack> old;
+        LibProbeRetries oldRetries;
+        bool retryFooterValid = true;
         uint64_t revision = 0;
         {
             std::lock_guard<std::mutex> lk(mtx_);
             roots = roots_; old = tracks_; revision = rootsRevision_;
+            oldRetries = probeRetries_; retryFooterValid = probeRetryFooterValid_;
         }
         LibDirectoryFingerprint baseline;
         if (startup) {
@@ -1837,7 +1982,8 @@ inline bool Library::startScanWorker(bool forceFull, bool startup, StartupScanCa
             const auto indexText = readFile(indexPath());
             std::vector<std::string> savedRoots;
             std::map<std::string, long long> savedDirs;
-            if (persisted.empty()) reason = "missing";
+            if (!retryFooterValid) reason = "invalid-retry-footer";
+            else if (persisted.empty()) reason = "missing";
             else if (!lib_fingerprint_parse(persisted, indexText, savedRoots, savedDirs)) reason = "invalid";
             else if (!baseline.complete) reason = "unreadable";
             else if (savedRoots == roots && savedDirs == baseline.dirs) reason = "unchanged";
@@ -1848,8 +1994,11 @@ inline bool Library::startScanWorker(bool forceFull, bool startup, StartupScanCa
             if (cancel_.load()) { notify("cancelled", false); scanning_.store(false); return; }
             if (reason == "unchanged") {
                 scanComplete_.store(true);
+                directoryUnchanged_.store(true);
                 notify(reason, false);
-                { std::lock_guard<std::mutex> lk(msgMtx_); scanMsg_ = "目录未变化，跳过启动扫描"; }
+                if (metadataPending_.load() > 0) retryPendingMetadata(roots, revision, baseline.dirs);
+                else { std::lock_guard<std::mutex> lk(msgMtx_); scanMsg_ = "目录未变化，跳过启动扫描"; }
+                reportScanDone("unchanged");
                 scanning_.store(false);
                 return;
             }
@@ -1979,6 +2128,8 @@ inline bool Library::startScanWorker(bool forceFull, bool startup, StartupScanCa
             {
                 std::lock_guard<std::mutex> lk(mtx_);
                 tracks_.swap(kept);
+                if (badRoots.empty() && failedDirs.empty()) probeRetries_.clear();
+                metadataPending_.store(probeRetries_.size());
                 albumsDirty_ = true;
                 albumCount_.store(0);
                 trackCount_.store(tracks_.size());
@@ -2009,6 +2160,7 @@ inline bool Library::startScanWorker(bool forceFull, bool startup, StartupScanCa
                 if (!scanComplete_.load()) m += "；变化指纹未标干净 dirty=" + dirtyWhy;
                 scanMsg_ = m;
             }
+            reportScanDone(dirtyWhy);
             scanning_.store(false);
             return;
         }
@@ -2056,7 +2208,14 @@ inline bool Library::startScanWorker(bool forceFull, bool startup, StartupScanCa
         std::atomic<int> completed{0};
         std::atomic<int> probedCount{0};
         std::atomic<int> cachedCount{0};
-        std::atomic<bool> probeFailed{false};
+        // Metadata failures do not imply directory changes. Retry once immediately;
+        // keep unresolved files in the persistent retry queue instead of invalidating
+        // the directory fingerprint on every launch. Failure after two attempts is
+        // only a result of this scan, not proof of permanent corruption.
+        // Metadata health remains explicitly false while any retry is pending.
+        std::atomic<int> probeUnreadable{0};
+        std::mutex retryMtx;
+        LibProbeRetries nextRetries;
 
         // 2026-10-26（B-1）：允许用环境变量 RLPLAYER_FFPROBE 指定 ffprobe 路径。
         // 为什么需要：本机系统 ffprobe 坏了（-version 退出 134），find_tool 仍会返回它，
@@ -2080,8 +2239,8 @@ inline bool Library::startScanWorker(bool forceFull, bool startup, StartupScanCa
 
         for (int i = 0; i < n; ++i) {
             if (cancel_.load()) break;
-            const bool submitted = pool->submit([this, i, n, &walked, &oldByPath, &old, forceFull, &ffprobe,
-                                                 &fresh, &completed, &probedCount, &cachedCount, &probeFailed, &lastMsg,
+            const bool submitted = pool->submit([this, i, n, &walked, &oldByPath, &old, &oldRetries, forceFull, &ffprobe,
+                                                 &fresh, &completed, &probedCount, &cachedCount, &probeUnreadable, &retryMtx, &nextRetries, &lastMsg,
                                                  &cueCand, &cueProbeMtx, &cueProbeMap]() {
                 if (cancel_.load()) return;
                 const std::string& p = walked[(size_t)i];
@@ -2097,7 +2256,7 @@ inline bool Library::startScanWorker(bool forceFull, bool startup, StartupScanCa
                 const std::string pkey = lib_path_key(p);
                 const bool cueOwned = (cueCand.count(pkey) != 0);
                 auto oit = oldByPath.find(p);
-                if (!forceFull && !cueOwned && oit != oldByPath.end()) {
+                if (!forceFull && !cueOwned && !oldRetries.count(p) && oit != oldByPath.end()) {
                     const LibTrack& o = old[oit->second];
                     if (!o.isCueTrack() && o.sampleRate > 0 && o.channels > 0 && o.mtime == mt && o.size == sz) {
                         fresh[(size_t)i] = o;
@@ -2108,9 +2267,17 @@ inline bool Library::startScanWorker(bool forceFull, bool startup, StartupScanCa
                     }
                 }
                 LibTrack t = lib_probe_one(p, ffprobe);
-                if (t.sampleRate <= 0 || t.channels <= 0) probeFailed.store(true);
-                t.mtime = mt;
-                t.size = sz;
+                if ((t.sampleRate <= 0 || t.channels <= 0) && !cancel_.load())
+                    t = lib_probe_one(p, ffprobe, 3000, false); // one bounded immediate retry
+                const bool unreadable = t.sampleRate <= 0 || t.channels <= 0;
+                if (unreadable) {
+                    probeUnreadable.fetch_add(1, std::memory_order_relaxed);
+                    { std::lock_guard<std::mutex> lk(retryMtx); nextRetries[p] = {lib_probe_retry_now() + 300, 1}; }
+                    // Failure must never erase good historical tags or advance their success token.
+                    if (oit != oldByPath.end() && !old[oit->second].isCueTrack() &&
+                        old[oit->second].sampleRate > 0 && old[oit->second].channels > 0) t = old[oit->second];
+                    else { t.path = p; t.mtime = mt; t.size = sz; }
+                } else { t.mtime = mt; t.size = sz; }
                 if (t.title.empty()) {
                     std::string sn = u8s(p8(p).stem().u8string());
                     t.title = sn.empty() ? p : sn;
@@ -2192,6 +2359,14 @@ inline bool Library::startScanWorker(bool forceFull, bool startup, StartupScanCa
             fresh.swap(kept);
         }
 
+        // Failed CUE sources retain all known-good virtual rows, never a duplicate whole-file placeholder.
+        for (const auto& [path, retry] : nextRetries) {
+            bool oldCue = false;
+            for (const auto& row : old) if (row.path == path && row.isCueTrack()) oldCue = true;
+            if (!oldCue) continue;
+            fresh.erase(std::remove_if(fresh.begin(), fresh.end(), [&](const auto& row) { return row.path == path; }), fresh.end());
+            for (const auto& row : old) if (row.path == path && row.isCueTrack()) fresh.push_back(row);
+        }
         const auto tEnd = std::chrono::steady_clock::now();
         const double durMs = std::chrono::duration<double, std::milli>(tEnd - tStart).count();
 
@@ -2223,6 +2398,17 @@ inline bool Library::startScanWorker(bool forceFull, bool startup, StartupScanCa
         {
             std::lock_guard<std::mutex> lk(mtx_);
             tracks_.swap(fresh);
+            for (const auto& row : tracks_) {
+                auto prior = oldRetries.find(row.path);
+                bool inaccessible = false;
+                for (const auto& root : badRoots) if (lib_path_under(row.path, root)) inaccessible = true;
+                for (const auto& dir : failedDirs) if (lib_path_under(row.path, dir)) inaccessible = true;
+                if (inaccessible && prior != oldRetries.end()) nextRetries.try_emplace(prior->first, prior->second);
+            }
+            probeRetries_ = std::move(nextRetries);
+            probeRetryFooterValid_ = true;
+            metadataPending_.store(probeRetries_.size());
+            probeUnreadable_.store((size_t)probeUnreadable.load());
             albumsDirty_ = true;
             lastScanMs_.store(durMs);
             lastScanProbed_.store(probedCount.load());
@@ -2238,12 +2424,11 @@ inline bool Library::startScanWorker(bool forceFull, bool startup, StartupScanCa
         // 却会让「库里有 1 个 SMB 残留名」变成「每次启动整库重扫 60s」（2026-11-01 实测）。
         std::string dirtyWhy = !indexWritesOk ? "index-write-failed"
                              : pool->hasError() ? "worker-error"
-                             : probeFailed.load() ? "probe-failed"
                              : !baseline.complete ? "dirs-incomplete"
                              : !failedDirs.empty() ? "failed-dirs"
                              : !badRoots.empty() ? "bad-roots" : "ok";
         scanComplete_.store(finishFingerprint(roots, revision, baseline.dirs,
-            indexWritesOk && !pool->hasError() && !probeFailed.load() && baseline.complete && failedDirs.empty() && badRoots.empty(), text, &dirtyWhy));
+            indexWritesOk && !pool->hasError() && baseline.complete && failedDirs.empty() && badRoots.empty(), text, &dirtyWhy));
         {
             std::lock_guard<std::mutex> lk(msgMtx_);
             std::string m = "完成：" + std::to_string(nt) + " 首 (" + std::to_string((int)(durMs + 0.5)) + " ms)";
@@ -2262,11 +2447,13 @@ inline bool Library::startScanWorker(bool forceFull, bool startup, StartupScanCa
                 m += "；" + std::to_string(failedDirs.size()) + " 个目录不可读（保留旧记录）";
             const int gone = removedMissing_.load();
             if (gone > 0) m += "；已剔除 " + std::to_string(gone) + " 条不存在的文件";
+            if (metadataPending_.load() > 0) m += "；元数据待重试 " + std::to_string(metadataPending_.load()) + " 首（目录变化检测仍有效）";
             if (!cueWalked.empty())
                 m += "；CUE 展开 " + std::to_string(cueOk) + " 张/" + std::to_string(cueTracks.size()) +
                      " 首" + (cueLost > 0 ? "（" + std::to_string(cueLost) + " 张退回整轨）" : "");
             scanMsg_ = m;
         }
+        reportScanDone(dirtyWhy);
         scanning_.store(false);
         }
         catch (const std::exception& e) {

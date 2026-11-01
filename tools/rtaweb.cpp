@@ -6881,6 +6881,11 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
               << ",\"skipped\":" << s.skipped
               << ",\"failedDirs\":" << s.failedDirs
               << ",\"complete\":" << (s.complete ? "true" : "false")
+              << ",\"directoryComplete\":" << (s.directoryComplete ? "true" : "false")
+              << ",\"directoryUnchanged\":" << (s.directoryUnchanged ? "true" : "false")
+              << ",\"metadataPending\":" << s.metadataPending
+              << ",\"probeUnreadable\":" << s.probeUnreadable
+              << ",\"metadataHealthy\":" << (s.metadataHealthy ? "true" : "false")
               << ",\"msg\":\"" << jesc(s.msg) << "\"}";
             return j.str();
         }
@@ -6902,6 +6907,11 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
               << ",\"skipped\":" << s.skipped
               << ",\"failedDirs\":" << s.failedDirs
               << ",\"complete\":" << (s.complete ? "true" : "false")
+              << ",\"directoryComplete\":" << (s.directoryComplete ? "true" : "false")
+              << ",\"directoryUnchanged\":" << (s.directoryUnchanged ? "true" : "false")
+              << ",\"metadataPending\":" << s.metadataPending
+              << ",\"probeUnreadable\":" << s.probeUnreadable
+              << ",\"metadataHealthy\":" << (s.metadataHealthy ? "true" : "false")
               << ",\"msg\":\"" << jesc(s.msg) << "\",\"roots\":[";
             for (size_t i = 0; i < roots.size(); ++i) { if (i) j << ","; j << "\"" << jesc(roots[i]) << "\""; }
             j << "]}";
@@ -11156,6 +11166,9 @@ static void core_init_common() {
     diag_ui_log().open();
 
     queue_load();                             // 恢复上次的播放列表
+    Library::instance().setScanLogHook([](const std::string& message) {
+        play_log("LIBSCAN " + message); // 扫描完成/未落指纹/定点重试原因统一归入 LIBSCAN。
+    });
     Library::instance().load();               // 载入音乐库索引
     (void)Library::instance().albumCount();   // 整理并缓存初始专辑数（让 snapshot 的 albumCountFast 有初值）
     // 2026-10-24（用户 261024-01 #5）：流媒体服务器配置必须开机载入。

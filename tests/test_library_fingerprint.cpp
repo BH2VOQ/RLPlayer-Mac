@@ -116,7 +116,11 @@ int main(int argc, char** argv) {
     fs::remove(block); run(); check(scanned, "cancelled scan retried on startup");
 
     put(fail, ""); lib.startScan(true); lib.joinScan();
-    check(!lib.snapshot().complete && !fs::exists(fingerprint), "probe failure stays dirty");
+    // 单文件探测失败不能强迫目录永远重扫：整体仍报不完整，但目录指纹可用，
+    // 失败元数据通过持久队列重试（细节由 test_library_probe_retry 覆盖）。
+    check(!lib.snapshot().complete && lib.snapshot().directoryComplete &&
+          lib.snapshot().metadataPending > 0 && fs::exists(fingerprint),
+          "probe failure stays visible without invalidating settled directory fingerprint");
     fs::remove(fail); lib.startScan(true); lib.joinScan();
     check(lib.snapshot().complete, "successful full retry restores clean fingerprint");
     fs::remove(index); fs::create_directory(index); put(index / "keep", "prevents rename");
