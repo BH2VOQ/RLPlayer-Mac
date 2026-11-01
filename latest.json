@@ -1,8 +1,8 @@
 {
-  "version": "1.1.1.4-beta",
-  "notes": "Beta 1.1.1.4: library scans survive stale SMB entries and resume on startup; cover extraction now has a hard timeout and a concurrency cap, so slow network files no longer freeze the UI. · 测试版 1.1.1.4：索引扫描不再被失效的 SMB 目录项截断，启动会补增量；封面提取增加硬超时与并发上限，慢网盘不再卡住界面。",
-  "download_url": "https://github.com/BH2VOQ/RLPlayer-Mac/releases/download/v1.1.1.4-beta/RLPlayer-1.1.1.4-beta-macOS-arm64.dmg",
-  "sha256": "36fb39f211f9ddb38dfd240ec0b45b131dcec01aadff063d3f65c442e03ac302",
-  "size": 7793687,
-  "published_at": "2026-10-31T14:52:34Z"
+  "version": "1.1.1.4",
+  "notes": "Stable 1.1.1.4: library scans survive stale SMB entries and resume on startup; cover extraction now has a hard timeout and a concurrency cap, so slow network files no longer freeze the UI. · 正式版 1.1.1.4：索引扫描不再被失效的 SMB 目录项截断，启动会补增量；封面提取增加硬超时与并发上限，慢网盘不再卡住界面。",
+  "download_url": "https://github.com/BH2VOQ/RLPlayer-Mac/releases/download/v1.1.1.4/RLPlayer-1.1.1.4-macOS-arm64.dmg",
+  "sha256": "2d6fef1459e9205d854797f249557e352b3379fd0303dc20c0e7a540d5462375",
+  "size": 7793074,
+  "published_at": "2026-11-01T05:11:09Z"
 }
