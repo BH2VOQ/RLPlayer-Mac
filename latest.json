@@ -1,8 +1,8 @@
 {
-  "version": "1.1.1.4",
-  "notes": "Stable 1.1.1.4: library scans survive stale SMB entries and resume on startup; cover extraction now has a hard timeout and a concurrency cap, so slow network files no longer freeze the UI. · 正式版 1.1.1.4：索引扫描不再被失效的 SMB 目录项截断，启动会补增量；封面提取增加硬超时与并发上限，慢网盘不再卡住界面。",
-  "download_url": "https://github.com/BH2VOQ/RLPlayer-Mac/releases/download/v1.1.1.4/RLPlayer-1.1.1.4-macOS-arm64.dmg",
-  "sha256": "2d6fef1459e9205d854797f249557e352b3379fd0303dc20c0e7a540d5462375",
-  "size": 7793074,
-  "published_at": "2026-11-01T05:11:09Z"
+  "version": "1.1.1.5-beta",
+  "notes": "Beta 1.1.1.5: startup no longer rescans an unchanged library (a persisted directory fingerprint is checked with a directory-only walk), album covers extracted from local files are now cached on disk so restarts no longer re-run ffmpeg, and cover contention returns a retryable busy instead of a false 404; manually chosen covers now always win. · 测试版 1.1.1.5：库没有变化时启动不再整库重扫（只遍历目录比对持久指纹）；本地内嵌/同目录封面落盘缓存，重启不再重跑 ffmpeg；封面并发争用改为可重试的忙状态而不是假 404；人工封面永久优先。",
+  "download_url": "https://github.com/BH2VOQ/RLPlayer-Mac/releases/download/v1.1.1.5-beta/RLPlayer-1.1.1.5-beta-macOS-arm64.dmg",
+  "sha256": "2e99ce3ea8832ba48ba6353824f5958e2ce5e6654f9c46a327a8527ea59bccf3",
+  "size": 7839781,
+  "published_at": "2026-11-01T07:56:24Z"
 }
