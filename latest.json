@@ -1,8 +1,8 @@
 {
-  "version": "1.1.1.5-beta",
-  "notes": "Beta 1.1.1.5: startup no longer rescans an unchanged library (a persisted directory fingerprint is checked with a directory-only walk), album covers extracted from local files are now cached on disk so restarts no longer re-run ffmpeg, and cover contention returns a retryable busy instead of a false 404; manually chosen covers now always win. · 测试版 1.1.1.5：库没有变化时启动不再整库重扫（只遍历目录比对持久指纹）；本地内嵌/同目录封面落盘缓存，重启不再重跑 ffmpeg；封面并发争用改为可重试的忙状态而不是假 404；人工封面永久优先。",
-  "download_url": "https://github.com/BH2VOQ/RLPlayer-Mac/releases/download/v1.1.1.5-beta/RLPlayer-1.1.1.5-beta-macOS-arm64.dmg",
-  "sha256": "2e99ce3ea8832ba48ba6353824f5958e2ce5e6654f9c46a327a8527ea59bccf3",
-  "size": 7839781,
-  "published_at": "2026-11-01T07:56:24Z"
+  "version": "1.1.1.5-beta2",
+  "notes": "Beta 1.1.1.5-beta2: decouple directory change detection from individual metadata probe failures so unreadable audio files no longer trigger whole-library rescans on every launch; failed metadata entries are tracked in a bounded retry queue with backoff while preserving valid tags and directory fingerprints. · 测试版 1.1.1.5-beta2：解耦目录完整性与单文件元数据探测，不可读音频不再导致每次启动整库重扫；失败项保留有效标签并进入退避重试队列，目录指纹正常落地。",
+  "download_url": "https://github.com/BH2VOQ/RLPlayer-Mac/releases/download/v1.1.1.5-beta2/RLPlayer-1.1.1.5-beta2-macOS-arm64.dmg",
+  "sha256": "7c9d37fa56e6e782478fe3dffb86bab93951758b85cfe05f61fc36fec8021f7d",
+  "size": 7857011,
+  "published_at": "2026-11-01T18:03:29Z"
 }
