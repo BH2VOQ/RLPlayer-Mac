@@ -1704,6 +1704,8 @@ static bool upnp_start_track(const PlayParams& p, const std::string& file, std::
              (upnp_is_dsd_file(file) || p.dsd >= 64);
     cp.initialVolumeDb = std::isfinite(p.volume) ? std::clamp(p.volume, -144.0, 0.0) : -20.0;
     cp.applyUpsample = (conf_get("cast_upsample", "0") == "1");
+    // 强制目标率：默认关。打开后即使渲染器没声明目标速率，也按上限升（状态里必须标明"未获声明验证"）。
+    cp.forceUpsampleRate = (conf_get("cast_upsample_force", "0") == "1");
     cp.ceilingRate = get_cast_upsample_ceiling();
     cp.filterName = conf_get("filter", "");
     cp.requestedRate = conf_get("rate", "");
@@ -9904,6 +9906,8 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
               << ",\"currentVolume\":" << st.currentVolume
               << ",\"lastVolumeError\":\"" << jesc(st.lastVolumeError) << "\""
               << ",\"upsampleApplied\":" << (st.upsampleApplied ? "true" : "false")
+              << ",\"upsampleForced\":" << (st.upsampleForced ? "true" : "false")
+              << ",\"castUpsampleForce\":" << (conf_get("cast_upsample_force", "0") == "1" ? "true" : "false")
               << ",\"servedRate\":" << st.servedRate
               << ",\"servedFilter\":\"" << jesc(st.servedFilter) << "\""
               << ",\"servedBits\":" << st.servedBits
@@ -9973,6 +9977,9 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
             }
             if (p.requestedRate.empty()) {
                 p.requestedRate = conf_get("rate", "");
+            }
+            if (!p.forceUpsampleRate) {
+                p.forceUpsampleRate = (conf_get("cast_upsample_force", "0") == "1");
             }
             // 一条会话原则（261024-01 #9）：手动「开始投放」先停本地播放，
             // 避免本机声卡与网络渲染器同时出声；播放器状态交给投放会话接管前先清零。
@@ -10433,7 +10440,7 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
                                            // 源开关 metasrc_<id> 按注册表动态放行(见下);
                                            // P3④b AI 综合开关 metasummary (默认0)
                                            "metaon", "metallm", "metasummary", "llmmonthlycap", "scanthreads", "scanThreads",
-                                           "cast_upsample", "cast_upsample_ceiling",
+                                           "cast_upsample", "cast_upsample_ceiling", "cast_upsample_force",
                                            "updbeta",
                                            // ReplayGain / Album Gain
                                            "rg.mode", "rg_mode", "rgmode", "rg",
@@ -11198,6 +11205,7 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
                  << ",\"latencySource\":\"" << jesc(cs.latencySource) << "\""
                  << ",\"resample\":" << (cs.resampled ? "true" : "false")
                  << ",\"upsampleApplied\":" << (cs.upsampleApplied ? "true" : "false")
+                 << ",\"upsampleForced\":" << (cs.upsampleForced ? "true" : "false")
                  << ",\"servedRate\":" << cs.servedRate
                  << ",\"servedFilter\":\"" << jesc(cs.servedFilter) << "\""
                  << ",\"servedBits\":" << cs.servedBits
@@ -11458,6 +11466,7 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
           << ",\"inRate\":" << (castMode ? (castTransition ? 0u : castSt.sourceRate) : 0u)
           << ",\"resampled\":" << ((castMode && !castTransition && castSt.resampled) ? "true" : "false")
           << ",\"upsampleApplied\":" << ((castMode && !castTransition && castSt.upsampleApplied) ? "true" : "false")
+          << ",\"upsampleForced\":" << ((castMode && !castTransition && castSt.upsampleForced) ? "true" : "false")
           << ",\"servedRate\":" << (castMode ? (castTransition ? 0u : castSt.servedRate) : 0u)
           << ",\"servedFilter\":\"" << jesc(castMode ? castSt.servedFilter : std::string()) << "\""
           << ",\"servedBits\":" << (castMode ? (castTransition ? 0 : castSt.servedBits) : 0)

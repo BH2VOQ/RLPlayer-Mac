@@ -1618,6 +1618,8 @@ inline const I18nPair* i18n_table(std::size_t* count) {
         {"（当前值，不在列表中）", "(current value, not in list)"},
         {"（当前）", "(current)"},
         {"PCM 降采样", "PCM downsampling"},
+        {"强制目标率（忽略渲染器声明）", "Force target rate (ignore renderer declaration)"},
+        {"默认关闭。只有渲染器没有声明更高速率时才需要它：勾选后仍按「同族整数倍 + 上限」升频，但供出去的速率未经设备声明验证，可能被拒播；界面上会标注「强制」。", "Off by default. Only needed when the renderer declares no higher rate: even then the target must be a same-family integer multiple within the ceiling, but the served rate is not backed by the device's declaration and may be refused. The UI labels it as forced."},
     };
     if (count) *count = sizeof(k) / sizeof(k[0]);
     return k;

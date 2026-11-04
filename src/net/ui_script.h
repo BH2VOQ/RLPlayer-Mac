@@ -184,7 +184,7 @@ var ADV = {
   // 输入
   inBackend: 'none', inDev: '', inOffset: 0, inBuf: 100, inMonitor: 0, inSeconds: 0, inOut: '',
   // 投放升频（1.1.3）：默认关；上限 192000
-  cast_upsample: '0', cast_upsample_ceiling: '192000',
+  cast_upsample: '0', cast_upsample_ceiling: '192000', cast_upsample_force: '0',
   // SDM（DSD 输出）专用滤波器：空 = 沿用 PCM 页那一组
   sdmFilt: '', sdmFiltNx: ''
 };
@@ -4019,7 +4019,8 @@ function bpBadgeInfo() {
     }
     if (upUp) {
       t = 'PCM-PCM 升频'; c = 'bp-up';
-      if (!title) title = 'UPnP 投放：先在本机升频再供源（源 ' + S.bpInRate + ' → ' + S.bpOutRate + ' Hz），非 bit-perfect';
+      if (!title) title = (S.bpForced ? 'UPnP 投放：强制本机升频（渲染器未声明该速率）' : 'UPnP 投放：先在本机升频再供源')
+                           + '（源 ' + S.bpInRate + ' → ' + S.bpOutRate + ' Hz），非 bit-perfect';
       return { text: t, cls: c, title: title };
     }
     if (S.bpResampled) {
@@ -4104,6 +4105,8 @@ function tick() {
       ? j.servedRate
       : ((S.bpDsd > 0) ? 0 : ((typeof j.outRate === 'number') ? j.outRate : 0));
     S.bpResampled = (j.resampled === true);
+    // 强制升频：目标率未经渲染器声明验证 —— 徽标与信号链都要如实标注，不能混成普通升频。
+    S.bpForced = (j.upsampleForced === true);
     S.bpFallback = j.fallbackWhy || '';
     // 2026-10-23 261023-03 #2/#5：资料简介的显示门控只用后端权威状态（400ms 轮询顺带更新）
     if (typeof j.hasLlmKey === 'boolean') META.hasLlmKey = j.hasLlmKey;
@@ -4318,7 +4321,7 @@ function ensureGpuOption(val) {
 }
 var SET_KEYS = [['sRate','rate'], ['sFilt','filter'], ['sFiltNx','filterNx'], ['sShap','shaper'],
                 ['sDSD','dsd'], ['sBuf','buffer'], ['sIsp','isp'], ['s2s','twostage'], ['sGpu','gpuvendor'],
-                ['cast_up','cast_upsample'], ['cast_ceil','cast_upsample_ceiling']];
+                ['cast_up','cast_upsample'], ['cast_ceil','cast_upsample_ceiling'], ['cast_force','cast_upsample_force']];
 function saveSettings(immediate) {
   var body = '';
   SET_KEYS.forEach(function (p) {
@@ -6399,7 +6402,8 @@ function showChain() {
         var outR = p.servedRate || p.outRate || 0;
         nodes.push({
           k: '采样率转换',
-          v: '本机升频 ' + p.inRate + ' \u2192 ' + outR + ' Hz \u00b7 ' + filtName + '（投放供源）',
+          v: '本机升频 ' + p.inRate + ' \u2192 ' + outR + ' Hz \u00b7 ' + filtName + '（投放供源）'
+             + (p.upsampleForced === true ? ' \u00b7 强制（渲染器未声明该速率）' : ''),
           badge: 'PCM-PCM 升频',
           kind: 'dsp'
         });
@@ -8667,6 +8671,9 @@ function renderSettingsPage() {
              opt('384000', '384000', ADV.cast_upsample_ceiling || '192000') +
              opt('768000', '768000', ADV.cast_upsample_ceiling || '192000'),
              '默认 192000')
+       + chk('cast_force', '强制目标率（忽略渲染器声明）',
+             (ADV.cast_upsample_force == 1 || ADV.cast_upsample_force === '1'),
+             '默认关闭。只有渲染器没有声明更高速率时才需要它：勾选后仍按「同族整数倍 + 上限」升频，但供出去的速率未经设备声明验证，可能被拒播；界面上会标注「强制」。', true)
        + '<div class="sfld wide"><div class=hint style="color:var(--warn, #eab308)">开启后投放不再是 bit-perfect（渲染器收到的已不是源文件原样）</div></div>'
        + '<div class="sfld wide"><div class=hint id=sp_cast_up_info>投放升频复用这两项设置：当前目标采样率 <b id=sp_cast_up_currate>' + esc((D('sRate') && D('sRate').value) || ADV.rate || 'follow') + '</b> · 滤波器 <b id=sp_cast_up_curfilt>' + esc((D('sFilt') && D('sFilt').value) || ADV.filter || 'poly-sinc-lp') + '</b></div></div>'
        + '<div class="sfld wide" style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-top:2px">'
@@ -9044,6 +9051,10 @@ function renderSettingsPage() {
   };
   if (D('cast_ceil')) D('cast_ceil').onchange = function () {
     ADV.cast_upsample_ceiling = this.value;
+    saveSettings();
+  };
+  if (D('cast_force')) D('cast_force').onchange = function () {
+    ADV.cast_upsample_force = this.checked ? '1' : '0';
     saveSettings();
   };
   syncCastUpsampleInfo();

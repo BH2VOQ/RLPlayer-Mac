@@ -280,6 +280,46 @@ int main() {
     // =========================================================================
     // 2. 深度验证：note 文案中的真相与数字对齐
     // =========================================================================
+    // =========================================================================
+    // 1b. 强制目标率（forceRate）：渲染器没声明也按上限升，但必须自证"未获声明验证"
+    // =========================================================================
+    std::printf("\n-- 1b. 强制目标率（渲染器未声明时的显式强制） --\n");
+    {
+        // 真实设备形状：Rygel「MR4 音响」只声明 44100，源是 96k。
+        auto on = decide_cast_target_rate(96000, "max", {44100}, 192000, true, /*forceRate=*/true);
+        ck(on.upsample && on.targetRate == 192000, "强制开+max：96000 → 192000", on.reason + " target=" + std::to_string(on.targetRate));
+        ck(on.forced, "强制开+max：forced=true（声明里没有 192000）");
+        ck(on.noteZh.find("强制") != std::string::npos && on.noteZh.find("192000") != std::string::npos, "强制开+max：note 说明是强制且未经声明验证", on.noteZh);
+        ck(!on.noteEn.empty() && !has_cjk(on.noteEn), "强制开+max：英文 note 非空且无中文", on.noteEn);
+
+        auto off = decide_cast_target_rate(96000, "max", {44100}, 192000, true, /*forceRate=*/false);
+        ck(!off.upsample && off.reason == "no-down", "强制关+同输入：不升频（对照：声明上限 44.1k 低于源 96k，判 no-down）", off.reason);
+
+        auto m44 = decide_cast_target_rate(44100, "max", {44100}, 192000, true, true);
+        ck(m44.upsample && m44.targetRate == 176400, "强制开+44.1k 源+max：取 176400（≤cap 的最大整数倍）", std::to_string(m44.targetRate));
+
+        auto num = decide_cast_target_rate(96000, "192000", {44100}, 192000, true, true);
+        ck(num.upsample && num.targetRate == 192000 && num.forced, "强制开+数字 192000：照做", num.reason);
+
+        auto over = decide_cast_target_rate(96000, "288000", {44100}, 192000, true, true);
+        ck(over.upsample && over.targetRate == 192000 && over.capped, "强制开+数字超上限：压到 192000 且 capped", over.reason);
+
+        auto same = decide_cast_target_rate(96000, "96000", {44100}, 192000, true, true);
+        ck(!same.upsample && same.reason == "already", "强制开+数字=源率：不升（already）", same.reason);
+
+        auto odd = decide_cast_target_rate(96000, "160000", {44100}, 192000, true, true);
+        ck(!odd.upsample && odd.reason == "no-same-family", "强制开+非整数倍：拒绝（同族规则不被强制绕过）", odd.reason);
+
+        auto declared = decide_cast_target_rate(96000, "192000", {44100, 192000}, 192000, true, true);
+        ck(declared.upsample && declared.targetRate == 192000 && !declared.forced, "强制开但声明里本来就有：forced=false（不冒充强制）", declared.reason);
+
+        auto nocap = decide_cast_target_rate(96000, "max", {44100}, 0, true, true);
+        ck(!nocap.upsample && nocap.reason == "no-same-family", "强制开+无上限：无法确定目标，按源直供", nocap.reason);
+
+        auto offsw = decide_cast_target_rate(96000, "max", {44100}, 192000, /*apply=*/false, /*force=*/true);
+        ck(!offsw.upsample && offsw.reason == "off", "强制开但总开关关：仍然直供（强制不能绕过总开关）", offsw.reason);
+    }
+
     std::printf("\n-- 2. 文案真相与数字一致性断言 --\n");
     {
         // 跨族时 note 必须出现声明列表

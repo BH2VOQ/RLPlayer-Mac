@@ -554,6 +554,7 @@ struct CastState {
 
     // 1.1.3 投放升频新增状态字段
     bool        upsampleApplied = false;
+    bool        upsampleForced = false;   // 目标率是"用户强制"的：未获渲染器声明验证
     uint32_t    servedRate = 0;      // 实际供出去的采样率
     int         servedBits = 0;      // 实际供出去的位深
     std::string servedFilter;        // 实际使用的命名滤波器（未知名字已回退时显示回退后的名字）
@@ -581,6 +582,8 @@ struct CastStartParams {
 
     // 1.1.3 投放升频新增字段
     bool        applyUpsample = false;
+    // 强制目标率：默认关。只影响"渲染器没声明目标速率"时的判定，开关本身仍受 applyUpsample 支配。
+    bool        forceUpsampleRate = false;
     uint32_t    ceilingRate   = 192000;
     std::string filterName;      // 命名滤波器；空 = 默认 "poly-sinc-lp"
     std::string requestedRate;   // "" | "src" | "follow" | "max" | 十进制数字
@@ -761,6 +764,7 @@ public:
         state_.currentVolume = -1;
         state_.lastVolumeError.clear();
         state_.upsampleApplied = false;
+        state_.upsampleForced = false;
         state_.servedRate = 0;
         state_.servedBits = 0;
         state_.servedFilter.clear();
@@ -1524,7 +1528,8 @@ private:
                 p.requestedRate,
                 rendererRates,
                 p.ceilingRate,
-                p.applyUpsample
+                p.applyUpsample,
+                p.forceUpsampleRate
             );
 
             if (!rateDecision.upsample) {
@@ -1743,6 +1748,7 @@ private:
                     state_.prepFramesTotal = targetOutFrames;
                     state_.prepFramesDone = 0;
                     state_.upsampleApplied = true;
+                    state_.upsampleForced = rateDecision.forced;
                     state_.servedRate = targetRate;
                     state_.servedBits = servedBits;
                     state_.servedFilter = effectiveFilter;

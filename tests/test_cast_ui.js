@@ -35,7 +35,7 @@ function check(desc, cond, extra) {
 function createMockElement(id) {
   const el = {
     id: id || '',
-    type: (id === 'cast_up' || id === 'sLoud' || id === 'sp_loud' || id === 'sShuf' || id === 'sp_shuf') ? 'checkbox' : '',
+    type: (id === 'cast_up' || id === 'cast_force' || id === 'sLoud' || id === 'sp_loud' || id === 'sShuf' || id === 'sp_shuf') ? 'checkbox' : '',
     value: '',
     textContent: '',
     innerHTML: '',
@@ -518,6 +518,29 @@ async function runTests() {
       const badgeDown = env.bpBadgeInfo();
       check('AirPlay 降采样：绝不显示「PCM-PCM 升频」', badgeDown.text !== 'PCM-PCM 升频', badgeDown.text);
       check('AirPlay 降采样：徽标如实显示「PCM 降采样」', badgeDown.text === 'PCM 降采样', badgeDown.text);
+
+      // 场景 1d：强制目标率（渲染器没声明该速率，用户显式勾了开关）——
+      // 升频徽标仍然成立，但**必须**标注"强制/未获声明验证"，不能与普通升频混为一谈。
+      statusPayload = Object.assign({}, statusPayload, {
+        transport: 'upnp', outMode: 'upnp', device: 'MR4 音响 [DLNA/UPnP]',
+        inRate: 96000, outRate: 192000, servedRate: 192000, resampled: true,
+        upsampleApplied: true, upsampleForced: true,
+        upsampleNote: '已强制升频 96000 Hz → 192000 Hz（渲染器声明：44100 Hz，未包含 192000 Hz；此速率未经设备声明验证）'
+      });
+      signalPayload.path = Object.assign({}, signalPayload.path, {
+        inRate: 96000, outRate: 192000, servedRate: 192000, filter: 'poly-sinc-tight-lp',
+        upsampleApplied: true, upsampleForced: true, castDspBypass: true
+      });
+      await env.tick();
+      env.S.bpState = 'no';
+      const badgeF = env.bpBadgeInfo();
+      check('强制升频：徽标仍为「PCM-PCM 升频」', badgeF.text === 'PCM-PCM 升频', badgeF.text);
+      check('强制升频：悬停文案标明「强制本机升频（渲染器未声明该速率）」',
+            badgeF.title.includes('强制本机升频（渲染器未声明该速率）'), badgeF.title);
+      await env.showChain();
+      const mbodyF = env._getEl('mbody').innerHTML;
+      check('强制升频：信号链标注「· 强制（渲染器未声明该速率）」',
+            mbodyF.includes('本机升频 96000 → 192000 Hz') && mbodyF.includes('强制（渲染器未声明该速率）'), mbodyF);
       check('开+生效：信号链节点带“PCM-PCM 升频”徽章', mbody.includes('PCM-PCM 升频'), mbody);
     }
 
@@ -631,6 +654,15 @@ async function runTests() {
     selCeil.dispatchEvent({ type: 'change' });
     env.saveSettings(true);
     check('切换 cast_ceil 后 saveSettings 包含 cast_upsample_ceiling=384000', lastSavedBody.includes('cast_upsample_ceiling=384000'), lastSavedBody);
+
+    // 强制目标率开关：默认关、勾选后落 cast_upsample_force=1
+    const chkForce = env._getEl('cast_force');
+    check('设置页存在 cast_force 开关控件', chkForce !== null && chkForce.id === 'cast_force');
+    check('cast_force 默认状态为关闭 (checked=false)', chkForce.checked === false);
+    chkForce.checked = true;
+    chkForce.dispatchEvent({ type: 'change' });
+    env.saveSettings(true);
+    check('勾选 cast_force 后 saveSettings 包含 cast_upsample_force=1', lastSavedBody.includes('cast_upsample_force=1'), lastSavedBody);
   }
 
   console.log(`\n==============================================`);

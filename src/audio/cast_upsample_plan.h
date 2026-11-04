@@ -30,6 +30,7 @@ struct CastRateDecision {
     bool        upsample   = false;
     bool        capped     = false;  // 请求值被 ceiling/渲染器能力压低过
     bool        undeclared = false;  // 渲染器未声明任何速率
+    bool        forced     = false;  // 强制升频：目标率未经渲染器声明验证（用户显式勾选）
     std::string reason;              // 机器可读枚举，见下表
     std::string noteZh;              // 用户可见中文真相（可为空：off/src 时也给一句话更好）
     std::string noteEn;              // 同位英文（非空、不含中文）
@@ -39,7 +40,8 @@ inline CastRateDecision decide_cast_target_rate(uint32_t sourceRate,
                                                 const std::string& requested,
                                                 const std::vector<uint32_t>& rendererRates,
                                                 uint32_t ceiling,
-                                                bool applyUpsample);
+                                                bool applyUpsample,
+                                                bool forceRate = false);
 
 struct CastBitDecision {
     int servedBits = 0;
@@ -123,7 +125,8 @@ inline CastRateDecision decide_cast_target_rate(uint32_t sourceRate,
                                                 const std::string& requested,
                                                 const std::vector<uint32_t>& rendererRates,
                                                 uint32_t ceiling,
-                                                bool applyUpsample) {
+                                                bool applyUpsample,
+                                                bool forceRate) {
     CastRateDecision d;
 
     // 1. applyUpsample == false → target=sourceRate, upsample=false, reason="off"
@@ -204,6 +207,83 @@ inline CastRateDecision decide_cast_target_rate(uint32_t sourceRate,
         cap = cast_plan_detail::min_non_zero(reqNum, ceiling, rendererMax);
         if (cap < reqNum) {
             d.capped = true;
+        }
+    }
+
+    // 5b. 强制目标率（用户显式勾选）：忽略"必须被声明"这一条，但**同族整数倍与上限仍然成立**。
+    //     为什么要它：实测 Rygel（MR4 音响）只声明 audio/l16;rate=44100，却实际能收 96k WAV；
+    //     声明只是它写得保守，不该由我们替用户判定"设备不行"。
+    //     代价必须写在 note 里：目标率没有声明背书，可能被拒播 —— 绝不与普通升频混为一谈。
+    if (forceRate) {
+        const bool isMaxReq = (lowerReq == "max");
+        // 强制只受"本机上限"约束：既然明确忽略渲染器声明，就不能再拿声明去当上限，
+        // 否则"强制"会退化成"看声明脸色"。上限没设就明确拒绝，不猜一个目标出来。
+        const uint32_t fcap = ceiling;
+        if (fcap == 0) {
+            d.reason = "no-same-family";
+            d.noteZh = "已启用强制目标率，但没有设置投放升频上限，无法确定目标，按源直供";
+            d.noteEn = "Forced target rate is on, but no cast upsampling ceiling is set; "
+                       "cannot determine a target, serving at source rate.";
+            return d;
+        }
+        uint32_t best = 0;
+        bool cappedHere = false;
+        if (isMaxReq) {
+            if (fcap > sourceRate) best = (fcap / sourceRate) * sourceRate;   // 源率整数倍里最大的
+        } else if (reqNum > sourceRate && (reqNum % sourceRate) == 0 && reqNum <= fcap) {
+            best = reqNum;
+        } else if (reqNum > fcap) {
+            cappedHere = true;
+            if (fcap > sourceRate) best = (fcap / sourceRate) * sourceRate;
+        }
+        if (best > sourceRate) {
+            const bool declared = std::find(rendererRates.begin(), rendererRates.end(), best) != rendererRates.end();
+            d.targetRate = best;
+            d.upsample = true;
+            d.forced = !declared;
+            d.capped = d.capped || cappedHere;
+            d.reason = "ok";
+            const std::string srcStr = std::to_string(sourceRate);
+            const std::string dstStr = std::to_string(best);
+            const std::string declStr = rendererRates.empty() ? std::string("(未声明)")
+                                                              : cast_plan_detail::join_rates(rendererRates);
+            if (declared) {
+                d.noteZh = "源采样率 " + srcStr + " Hz 升频至 " + dstStr + " Hz（渲染器声明：" + declStr + " Hz）";
+                d.noteEn = "Source rate " + srcStr + " Hz upsampled to " + dstStr +
+                           " Hz (renderer declared: " + declStr + " Hz).";
+            } else {
+                d.noteZh = "已强制升频 " + srcStr + " Hz → " + dstStr + " Hz（渲染器声明：" + declStr +
+                           " Hz，未包含 " + dstStr + " Hz；此速率未经设备声明验证，可能被拒播）";
+                d.noteEn = "Forced upsampling " + srcStr + " Hz -> " + dstStr + " Hz (renderer declared: " +
+                           declStr + " Hz, which does not include " + dstStr +
+                           " Hz; this rate is not backed by the device declaration and may be refused).";
+            }
+            return d;
+        }
+        // 强制也没算出合法目标 → 按"用户请求"本身给原因（不能用声明算出的 cap 去解释，
+        // 否则用户看到的是"降采样拒绝"，而真实原因是"你填的不是源率的整数倍"）。
+        if (!isMaxReq) {
+            if (reqNum == sourceRate) {
+                d.reason = "already";
+                d.noteZh = "源采样率已是目标速率 " + std::to_string(sourceRate) + " Hz，无需升频，按源直供";
+                d.noteEn = "Source sample rate is already at target rate " + std::to_string(sourceRate) +
+                           " Hz; serving at source rate.";
+            } else if (reqNum < sourceRate) {
+                d.reason = "no-down";
+                d.noteZh = "强制目标率 " + std::to_string(reqNum) + " Hz 低于源 " +
+                           std::to_string(sourceRate) + " Hz，本版只升不降";
+                d.noteEn = "Forced target " + std::to_string(reqNum) + " Hz is below the source " +
+                           std::to_string(sourceRate) + " Hz; this version only upsamples.";
+            } else {
+                d.reason = "no-same-family";
+                d.noteZh = "强制目标率 " + std::to_string(reqNum) + " Hz 不是源采样率 " +
+                           std::to_string(sourceRate) + " Hz 的整数倍（同族规则不被强制绕过），按源直供";
+                d.noteEn = "Forced target " + std::to_string(reqNum) + " Hz is not an integer multiple of the source " +
+                           std::to_string(sourceRate) + " Hz (forcing does not bypass the same-family rule); serving at source rate.";
+            }
+            d.targetRate = sourceRate;
+            d.upsample = false;
+            return d;
         }
     }
 
