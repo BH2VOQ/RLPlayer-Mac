@@ -1,0 +1,27 @@
+投放时应用本机升频	Apply local upsampling when casting	Release 1.1.3
+只在 UPnP/DLNA 投放生效；本机播放的升频设置不变	Only applies to UPnP/DLNA casting; local playback upsampling settings remain unchanged	Release 1.1.3
+投放升频上限	Cast upsampling ceiling	Release 1.1.3
+开启后投放不再是 bit-perfect（渲染器收到的已不是源文件原样）	When enabled, casting is no longer bit-perfect (renderer does not receive the original source file)	Release 1.1.3
+投放升频复用这两项设置：当前目标采样率 	Cast upsampling reuses these settings: current target rate 	Release 1.1.3
+（投放供源）	(Cast served)	Release 1.1.3
+本机升频 	Local upsampling 	Release 1.1.3
+准备进度	Preparation progress	Release 1.1.3
+LLM 模型	LLM Model	Release 1.1.3
+选择用于资料补全与增强的模型；search / fetch 保持默认	Select model used for metadata enrichment; search and fetch remain default	Release 1.1.3
+刷新列表	Refresh List	Release 1.1.3
+模型列表读取中…（读不到也可以直接手填）	Loading model list... (manual entry supported if loading fails)	Release 1.1.3
+模型 id 不能为空	Model ID cannot be empty	Release 1.1.3
+当前已经在用 	Already currently using 	Release 1.1.3
+模型已切换为 	Model switched to 	Release 1.1.3
+正在重新拉取模型列表…	Refreshing model list...	Release 1.1.3
+已拉到 	Fetched 	Release 1.1.3
+ 个模型，但当前用的 	 models, but current 	Release 1.1.3
+ 不在列表里 —— 建议重新选择，但不会自动改配置。	 is not in the list - reselecting is recommended, but config will not change automatically.	Release 1.1.3
+ 个模型	 models	Release 1.1.3
+ · search / fetch 不受这里影响，始终用默认模型	 · search and fetch are not affected and always use default models	Release 1.1.3
+拉取模型列表失败：	Failed to fetch model list: 	Release 1.1.3
+ —— 可直接手填模型 id（回车生效），保持默认也可以。	 - you can enter model ID manually (press Enter to apply), or keep default.	Release 1.1.3
+服务端没有返回任何模型 —— 可直接手填模型 id（回车生效）。	Server returned no models - you can enter model ID manually (press Enter to apply).	Release 1.1.3
+（当前值，不在列表中）	(current value, not in list)	Release 1.1.3
+（当前）	(current)	Release 1.1.3
+PCM 降采样	PCM downsampling	Release 1.1.3

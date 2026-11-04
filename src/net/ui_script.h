@@ -183,6 +183,8 @@ var ADV = {
   trim0: 0, trim1: 0, trim2: 0, trim3: 0, trim4: 0, trim5: 0, trim6: 0, trim7: 0,
   // 输入
   inBackend: 'none', inDev: '', inOffset: 0, inBuf: 100, inMonitor: 0, inSeconds: 0, inOut: '',
+  // 投放升频（1.1.3）：默认关；上限 192000
+  cast_upsample: '0', cast_upsample_ceiling: '192000',
   // SDM（DSD 输出）专用滤波器：空 = 沿用 PCM 页那一组
   sdmFilt: '', sdmFiltNx: ''
 };
@@ -3975,9 +3977,23 @@ function bpBadgeInfo() {
   // 1.1.2 AP-1.2: 播放signal/status将提供transport/sharedOnly/latencyKnown/latencyMs/latencySource，
   // bitPerfect='no', bitPerfectWhy说明端到端未验证。UI任何自推断bitPerfect都不能覆盖这一真值。
   if (S.bpTransport === 'airplay' || (whyBp && whyBp.indexOf('AirPlay') >= 0)) {
-    if (S.bpResampled) {
+    // 1.1.3（审阅 D 发现）：AirPlay 固定 44100 Hz —— 源是 96k/192k 时这是**降采样**，
+    // 旧代码只要 resampled=true 就报「PCM-PCM 升频」，把降质说成升频。方向必须有证据才敢说。
+    var apDown = (S.bpResampled && S.bpInRate > 0 && S.bpOutRate > 0 && S.bpOutRate < S.bpInRate);
+    var apUp   = (S.bpResampled && S.bpInRate > 0 && S.bpOutRate > 0 && S.bpOutRate > S.bpInRate);
+    if (apDown) {
+      t = 'PCM 降采样'; c = 'bp-no';
+      if (!title) title = 'AirPlay 投放：44100 Hz 是发送端固定格式，源 ' + S.bpInRate + ' Hz 被降采样，非 bit-perfect';
+      return { text: t, cls: c, title: title };
+    }
+    if (apUp) {
       t = 'PCM-PCM 升频'; c = 'bp-up';
-      if (!title) title = 'AirPlay 投放：44100 Hz 是发送端固定格式（源 ' + S.bpInRate + ' Hz），非 bit-perfect';
+      if (!title) title = 'AirPlay 投放：' + S.bpInRate + ' → ' + S.bpOutRate + ' Hz（44100 Hz 发送端固定格式），非 bit-perfect';
+      return { text: t, cls: c, title: title };
+    }
+    if (S.bpResampled) {
+      t = '非 bit-perfect'; c = 'bp-no';
+      if (!title) title = 'AirPlay 投放：已变更采样率（方向未确认），非 bit-perfect';
       return { text: t, cls: c, title: title };
     }
     t = '非 bit-perfect'; c = 'bp-no';
@@ -3993,9 +4009,23 @@ function bpBadgeInfo() {
     // 投放是否升频由**后端证据**决定：resampled=true 说明供出去的流真的换了采样率，
     // 那就如实标「PCM-PCM 升频」；否则标非 bit-perfect，并说清本机没升频。
     // 这样将来投放真的接上本机升频时，徽标会自己变对，不需要再改这段。
-    if (S.bpResampled) {
+    var upDown = (S.bpResampled && S.bpInRate > 0 && S.bpOutRate > 0 && S.bpOutRate < S.bpInRate);
+    var upUp   = (S.bpResampled && S.bpInRate > 0 && S.bpOutRate > 0 && S.bpOutRate > S.bpInRate);
+    if (upDown) {
+      // 本版投放**只升不降**；真走到这里说明后端行为与约定不符 —— 如实说降采样，绝不报成升频。
+      t = 'PCM 降采样'; c = 'bp-no';
+      if (!title) title = 'UPnP 投放：供源 ' + S.bpOutRate + ' Hz 低于源 ' + S.bpInRate + ' Hz（降采样），非 bit-perfect';
+      return { text: t, cls: c, title: title };
+    }
+    if (upUp) {
       t = 'PCM-PCM 升频'; c = 'bp-up';
       if (!title) title = 'UPnP 投放：先在本机升频再供源（源 ' + S.bpInRate + ' → ' + S.bpOutRate + ' Hz），非 bit-perfect';
+      return { text: t, cls: c, title: title };
+    }
+    if (S.bpResampled) {
+      // 改了速率但拿不到两端数字：不猜方向，也不冒充升频。
+      t = '非 bit-perfect'; c = 'bp-no';
+      if (!title) title = 'UPnP 投放：已变更采样率（方向未确认），非 bit-perfect';
       return { text: t, cls: c, title: title };
     }
     t = '非 bit-perfect'; c = 'bp-no';
@@ -4066,6 +4096,13 @@ function tick() {
     S.bpOutMode = j.outMode || '';
     // 投放是否真的改了速率，只信后端给的两个数（源速率/输出速率），不按传输类型猜。
     S.bpInRate = (typeof j.inRate === 'number') ? j.inRate : 0;
+    // 1.1.3（审阅 D 发现）：徽标悬停文案要写「源 X → Y Hz」，以前只有 inRate 被赋值，
+    // bpOutRate 永远是 undefined，于是真实投放升频时悬停显示「源 44100 → undefined Hz」。
+    // 只认后端证据：优先 servedRate（实际供出去的速率），其次 outRate；
+    // DSD 输出不走这条（DoP 的 outRate 是载波率，拿来当 PCM 输出速率会得到相反结论）。
+    S.bpOutRate = (typeof j.servedRate === 'number' && j.servedRate > 0)
+      ? j.servedRate
+      : ((S.bpDsd > 0) ? 0 : ((typeof j.outRate === 'number') ? j.outRate : 0));
     S.bpResampled = (j.resampled === true);
     S.bpFallback = j.fallbackWhy || '';
     // 2026-10-23 261023-03 #2/#5：资料简介的显示门控只用后端权威状态（400ms 轮询顺带更新）
@@ -4280,12 +4317,15 @@ function ensureGpuOption(val) {
   }
 }
 var SET_KEYS = [['sRate','rate'], ['sFilt','filter'], ['sFiltNx','filterNx'], ['sShap','shaper'],
-                ['sDSD','dsd'], ['sBuf','buffer'], ['sIsp','isp'], ['s2s','twostage'], ['sGpu','gpuvendor']];
+                ['sDSD','dsd'], ['sBuf','buffer'], ['sIsp','isp'], ['s2s','twostage'], ['sGpu','gpuvendor'],
+                ['cast_up','cast_upsample'], ['cast_ceil','cast_upsample_ceiling']];
 function saveSettings(immediate) {
   var body = '';
   SET_KEYS.forEach(function (p) {
-    var e = D(p[0]); if (!e) return;
-    var v = (e.type === 'checkbox') ? (e.checked ? '1' : '0') : e.value;
+    var e = D(p[0]);
+    var v = e ? ((e.type === 'checkbox') ? (e.checked ? '1' : '0') : e.value) : (ADV[p[1]] !== undefined ? ADV[p[1]] : '');
+    if (v === '' && p[1] === 'cast_upsample') v = '0';
+    if (v === '' && p[1] === 'cast_upsample_ceiling') v = '192000';
     if (body) body += '&';
     body += p[1] + '=' + encodeURIComponent(v);
   });
@@ -4333,6 +4373,7 @@ function saveSettings(immediate) {
   } else {
     window._setT = setTimeout(function () { api('/api/settings', body); }, 300);
   }
+  if (typeof syncCastUpsampleInfo === 'function') syncCastUpsampleInfo();
 }
 function loadSettings() {
   api('/api/settings').then(function (j) {
@@ -6350,19 +6391,39 @@ function showChain() {
     nodes.push({ k: '解码', v: (p.note || '原生无损解码') + '  \u00b7  ' + p.inRate + ' Hz / ' + p.inBits + ' bit / ' + p.inCh + ' ch', badge: '无损解码', kind: 'lossless' });
     var convGpu = (typeof p.convGpu === 'boolean') ? p.convGpu : (p.irGpu === true);
     var sigGpuUsed = (typeof p.gpuUsed === 'boolean') ? p.gpuUsed : !!S.gpuUsed;
-    if (p.resample) nodes.push({ k: '采样率转换', v: (p.filter || 'Kaiser sinc') + '  \u00b7  ' + p.phase + '  \u00b7  ' + p.taps + ' 抽头' + (p.twoStage ? '  \u00b7  两段式' : '') + '  \u2192  ' + p.outRate + ' Hz' + (sigGpuUsed ? '  \u00b7  GPU' : ''), gpu: !!sigGpuUsed, badge: sigGpuUsed ? 'GPU 升频' : '64-Bit 升频', kind: sigGpuUsed ? 'gpu' : 'dsp' });
-    else if (p.castDspBypass === true) {
-      // 投放链路 = 解码 → 供源/推流，播放器的升频/EQ/IR/音量都不在里面。
-      // 用户如果正好设了升频，必须在这里说清楚「这条路上没生效」，不能让他以为已经升过了。
-      var reqRate = String(p.requestedRate || '');
-      var wantsUp = (reqRate === 'max' || reqRate === 'follow' || (parseInt(reqRate, 10) > (p.outRate || 0)));
-      nodes.push({
-        k: '采样率转换',
-        v: '旁路（投放不经过本机 DSP：升频/EQ/IR/音量都不参与' +
-           (wantsUp ? '；你的设置要求升频（' + (reqRate === 'max' ? '最高' : reqRate + ' Hz') + '），但投放不走这条链' : '') + '）',
-        badge: '投放旁路', kind: 'dsp'
-      });
+    if (p.castDspBypass === true) {
+      if (p.upsampleApplied === true) {
+        // 显示**实际用的**滤波器（后端 servedFilter）；它和用户填的名字不同，说明发生了回退，
+        // 回退原因已写在后端 note 里 —— 此处绝不显示用户填的、但实际没用上的名字。
+        var filtName = p.servedFilter || p.filter || (D('sFilt') && D('sFilt').value) || ADV.filter || 'poly-sinc-lp';
+        var outR = p.servedRate || p.outRate || 0;
+        nodes.push({
+          k: '采样率转换',
+          v: '本机升频 ' + p.inRate + ' \u2192 ' + outR + ' Hz \u00b7 ' + filtName + '（投放供源）',
+          badge: 'PCM-PCM 升频',
+          kind: 'dsp'
+        });
+      } else if (p.upsampleNote) {
+        nodes.push({
+          k: '采样率转换',
+          v: p.upsampleNote,
+          badge: '投放旁路',
+          kind: 'dsp'
+        });
+      } else {
+        // 投放链路 = 解码 → 供源/推流，播放器的升频/EQ/IR/音量都不在里面。
+        // 用户如果正好设了升频，必须在这里说清楚「这条路上没生效」，不能让他以为已经升过了。
+        var reqRate = String(p.requestedRate || '');
+        var wantsUp = (reqRate === 'max' || reqRate === 'follow' || (parseInt(reqRate, 10) > (p.outRate || 0)));
+        nodes.push({
+          k: '采样率转换',
+          v: '旁路（投放不经过本机 DSP：升频/EQ/IR/音量都不参与' +
+             (wantsUp ? '；你的设置要求升频（' + (reqRate === 'max' ? '最高' : reqRate + ' Hz') + '），但投放不走这条链' : '') + '）',
+          badge: '投放旁路', kind: 'dsp'
+        });
+      }
     }
+    else if (p.resample) nodes.push({ k: '采样率转换', v: (p.filter || 'Kaiser sinc') + '  \u00b7  ' + p.phase + '  \u00b7  ' + p.taps + ' 抽头' + (p.twoStage ? '  \u00b7  两段式' : '') + '  \u2192  ' + p.outRate + ' Hz' + (sigGpuUsed ? '  \u00b7  GPU' : ''), gpu: !!sigGpuUsed, badge: sigGpuUsed ? 'GPU 升频' : '64-Bit 升频', kind: sigGpuUsed ? 'gpu' : 'dsp' });
     else nodes.push({ k: '采样率转换', v: '旁路（源采样率与输出一致，逐位直通）', badge: '逐位旁路', kind: 'lossless' });
     if (p.eq || p.conv) {
       var eqParts = [];
@@ -6859,6 +6920,17 @@ function updateCastStateUi(st) {
     if (D('sp_cast_msg')) D('sp_cast_msg').textContent = st.error;
   } else {
     if (errBox) errBox.style.display = 'none';
+  }
+
+  var prepBox = D('sp_cast_stat_prep_box');
+  if (prepBox) {
+    if (st.prepPercent !== undefined && st.prepPercent >= 0) {
+      prepBox.style.display = 'block';
+      var prepVal = D('sp_cast_stat_prep');
+      if (prepVal) prepVal.textContent = st.prepPercent + '%';
+    } else {
+      prepBox.style.display = 'none';
+    }
   }
 }
 
@@ -7746,6 +7818,7 @@ function llmRender(j) {
     LLM.baseUrl = j.baseUrl || '';
     LLM.proxy = !!j.proxy;
     LLM.loaded = true;
+    llmModelRender();
   }
   var m = D('sp_llmmsg');
   if (!m) return;
@@ -7791,6 +7864,102 @@ function llmTest() {
     if (b) { b.disabled = false; b.textContent = '测试连接'; }
     if (m) m.textContent = '连接失败：服务没响应';
   });
+}
+
+/* 2026-10-27（用户 261027-06 P1）：模型列表 + 下拉选择。
+   对应后端 GET /api/llm/models（永远 200：拉不到就 ok:false + error）。
+   三条纪律：
+     * 拉不到 ⟹ 自动切「手填输入框」并写出原因 —— 设置页绝不能因为网关没有 /models 就崩；
+     * 列表里有当前 model ⟹ 直接选中它；没有 ⟹ 额外插一条「（当前值，不在列表中）」+ 黄字提示重选，
+       但**不改**用户配置（不擅自把用户选的模型换掉）；
+     * 选中即保存：POST /api/llm model=…（与保存 Key 同一条路径，写同一份 rlplayer-llm.conf）。 */
+var LLM_MODELS = { tried: false, ok: false, list: [], current: '', inList: false, err: '', at: 0 };
+function llmModelMsg(txt, warn) {
+  var m = D('sp_llmmodmsg');
+  if (!m) return;
+  m.innerHTML = warn ? ('<span style="color:var(--warn,#e6a23c)">' + txt + '</span>') : txt;
+}
+function llmModelRender() {
+  var sel = D('sp_llmmodel'), txt = D('sp_llmmodeltext');
+  var cur = LLM.model || '';
+  if (!sel || !txt) return;
+  if (LLM_MODELS.ok && LLM_MODELS.list.length) {
+    sel.style.display = '';
+    txt.style.display = 'none';
+    var h = '', has = false;
+    for (var i = 0; i < LLM_MODELS.list.length; ++i) {
+      var id = String(LLM_MODELS.list[i].id || '');
+      if (!id) continue;
+      if (id === cur) has = true;
+      h += '<option value="' + esc(id) + '">' + esc(id) + (id === cur ? '　（当前）' : '') + '</option>';
+    }
+    if (!has && cur) h += '<option value="' + esc(cur) + '">' + esc(cur) + '　（当前值，不在列表中）</option>';
+    sel.innerHTML = h;
+    sel.value = cur;
+    var n = LLM_MODELS.list.length;
+    if (cur && !has) {
+      llmModelMsg('已拉到 ' + n + ' 个模型，但当前用的 ' + esc(cur) +
+                  ' 不在列表里 —— 建议重新选择，但不会自动改配置。', true);
+    } else {
+      llmModelMsg('已拉到 ' + n + ' 个模型' + (cur ? ('，当前 ' + esc(cur)) : '') +
+                  ' · search / fetch 不受这里影响，始终用默认模型');
+    }
+    return;
+  }
+  // 降级：手填。值直接放在输入框里，用户可改可留空（留空 = 不动配置）
+  sel.style.display = 'none';
+  txt.style.display = '';
+  if (!txt.value) txt.value = cur;
+  if (LLM_MODELS.err) {
+    llmModelMsg('拉取模型列表失败：' + esc(LLM_MODELS.err) +
+                ' —— 可直接手填模型 id（回车生效），保持默认也可以。', true);
+  } else if (LLM_MODELS.tried) {
+    llmModelMsg('服务端没有返回任何模型 —— 可直接手填模型 id（回车生效）。', true);
+  } else {
+    llmModelMsg('模型列表读取中…（读不到也可以直接手填）');
+  }
+}
+function llmModelsLoad(force) {
+  var sel = D('sp_llmmodel');
+  if (!sel) return Promise.resolve(null);
+  if (!D('sp_llmmodeltext')) return Promise.resolve(null);
+  if (force) llmModelMsg('正在重新拉取模型列表…');
+  var url = '/api/llm/models' + (force ? '?refresh=1' : '');
+  return fetch(url).then(function (r) { return r.json(); }).then(function (j) {
+    LLM_MODELS.tried = true;
+    LLM_MODELS.ok = !!(j && j.ok);
+    LLM_MODELS.list = (j && j.models) || [];
+    LLM_MODELS.inList = !!(j && j.currentInList);
+    LLM_MODELS.err = (j && j.error) || '';
+    LLM_MODELS.at = Date.now();
+    if (j && j.current) { LLM.model = j.current; LLM_MODELS.current = j.current; }
+    llmModelRender();
+    return j;
+  }).catch(function (err) {
+    LLM_MODELS.tried = true;
+    LLM_MODELS.ok = false;
+    LLM_MODELS.list = [];
+    LLM_MODELS.err = (err && err.message) || '服务没响应';
+    llmModelRender();
+    return null;
+  });
+}
+function llmSaveModel(v) {
+  v = String(v || '').replace(/^\s+|\s+$/g, '');
+  if (!v) { toast('模型 id 不能为空'); llmModelRender(); return Promise.resolve(null); }
+  if (v === LLM.model) { toast('当前已经在用 ' + v); return Promise.resolve(null); }
+  return llmPost('model=' + encodeURIComponent(v), '模型已切换为 ' + v).then(function (j) {
+    if (j && j.ok) { LLM.model = j.model || v; llmModelRender(); llmModelsLoad(false); }
+    return j;
+  });
+}
+
+function syncCastUpsampleInfo() {
+  var rEl = D('sp_cast_up_currate'), fEl = D('sp_cast_up_curfilt');
+  var r = (D('sRate') && D('sRate').value) || ADV.rate || 'follow';
+  var f = (D('sFilt') && D('sFilt').value) || ADV.filter || 'poly-sinc-lp';
+  if (rEl) rEl.textContent = r;
+  if (fEl) fEl.textContent = f;
 }
 
 /* ---------------- 官方推荐预设与硬件能力 ---------------- */
@@ -8491,6 +8660,15 @@ function renderSettingsPage() {
        + '<select id=sp_cast_dev style="flex:1;min-width:220px"><option value="">（未发现 UPnP 渲染器）</option></select>'
        + '<button class=btn id=sp_cast_scan style="white-space:nowrap">重新发现</button></div>'
        + '<div class="sfld wide"><div class=hint id=sp_cast_devmsg>点「重新发现」扫描局域网里的 MediaRenderer</div></div>'
+       + chk('cast_up', '投放时应用本机升频', (ADV.cast_upsample == 1 || ADV.cast_upsample === '1'), '只在 UPnP/DLNA 投放生效；本机播放的升频设置不变', true)
+       + sel('cast_ceil', '投放升频上限',
+             opt('96000', '96000', ADV.cast_upsample_ceiling || '192000') +
+             opt('192000', '192000', ADV.cast_upsample_ceiling || '192000') +
+             opt('384000', '384000', ADV.cast_upsample_ceiling || '192000') +
+             opt('768000', '768000', ADV.cast_upsample_ceiling || '192000'),
+             '默认 192000')
+       + '<div class="sfld wide"><div class=hint style="color:var(--warn, #eab308)">开启后投放不再是 bit-perfect（渲染器收到的已不是源文件原样）</div></div>'
+       + '<div class="sfld wide"><div class=hint id=sp_cast_up_info>投放升频复用这两项设置：当前目标采样率 <b id=sp_cast_up_currate>' + esc((D('sRate') && D('sRate').value) || ADV.rate || 'follow') + '</b> · 滤波器 <b id=sp_cast_up_curfilt>' + esc((D('sFilt') && D('sFilt').value) || ADV.filter || 'poly-sinc-lp') + '</b></div></div>'
        + '<div class="sfld wide" style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-top:2px">'
        + '<button class="btn pri" id=sp_cast_push>推送当前曲</button>'
        + '<button class=btn id=sp_cast_stop disabled>停止投放</button>'
@@ -8504,6 +8682,7 @@ function renderSettingsPage() {
        + '<div class=in-stat-item><span class=lbl>供源请求数</span><span class=val id=sp_cast_stat_reqs>0 次</span></div>'
        + '<div class=in-stat-item><span class=lbl>供源端口</span><span class=val id=sp_cast_stat_port>8912</span></div>'
        + '<div class=in-stat-item><span class=lbl>采样率取证</span><span class=val id=sp_cast_stat_ratematch>未取证</span></div>'
+       + '<div class=in-stat-item id=sp_cast_stat_prep_box style="display:none"><span class=lbl>准备进度</span><span class=val id=sp_cast_stat_prep>0%</span></div>'
        + '<div class=in-stat-item id=sp_cast_stat_warn_box style="grid-column:1/-1;display:none;color:var(--warn, #eab308)">'
        + '<span class=lbl style="color:var(--warn, #eab308)">采样率告警</span><span class=val id=sp_cast_stat_warn></span></div>'
        + '<div class=in-stat-item id=sp_cast_stat_err_box style="grid-column:1/-1;display:none;color:var(--err)">'
@@ -8614,6 +8793,14 @@ function renderSettingsPage() {
        + '<button class="btn pri" id=sp_llmsave>保存 Key</button>'
        + '<button class=btn id=sp_llmtest>测试连接</button>'
        + '<button class=btn id=sp_llmclear>清除 Key</button></div>'
+       + '<div style="margin-top:12px"><label style="display:block;font-size:11px;color:var(--mut);margin-bottom:5px">LLM 模型' + tip('选择用于资料补全与增强的模型；search / fetch 保持默认') + '</label>'
+       + '<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">'
+       + '<select id=sp_llmmodel style="flex:1;min-width:180px;display:none"></select>'
+       + '<input type=text id=sp_llmmodeltext placeholder="例如 deepseek-chat" style="flex:1;min-width:180px">'
+       + '<button class=btn id=sp_llmmodels style="white-space:nowrap">刷新列表</button>'
+       + '</div>'
+       + '<div class=hint id=sp_llmmodmsg style="margin-top:4px">模型列表读取中…（读不到也可以直接手填）</div>'
+       + '</div>'
        // 用户 261024-01 #8：默认开启，不提供开关 —— 只说明能力，两个动作按钮照旧。
        + '<div class="mh sub">标签写回<span class=hint style="font-weight:400">默认开启</span></div>'
        + '<div class=hint id=sp_wbdesc style="margin:2px 0 9px">补全到的标签 / 封面写回音频文件本身；写前校验音频数据逐位不变，原文件备份到 rlplayer-meta' + SEP + 'backups</div>'
@@ -8839,11 +9026,27 @@ function renderSettingsPage() {
   if (D('sp_llmsave')) D('sp_llmsave').onclick = llmSave;
   if (D('sp_llmtest')) D('sp_llmtest').onclick = llmTest;
   if (D('sp_llmclear')) D('sp_llmclear').onclick = llmClear;
+  if (D('sp_llmmodels')) D('sp_llmmodels').onclick = function () { llmModelsLoad(true); };
+  if (D('sp_llmmodel')) D('sp_llmmodel').onchange = function () { llmSaveModel(this.value); };
+  if (D('sp_llmmodeltext')) D('sp_llmmodeltext').addEventListener('keydown', function (ev) {
+    if (ev.key === 'Enter') llmSaveModel(this.value);
+  });
+  llmModelRender();
+  llmModelsLoad(false);
   if (D('sp_llmkey')) {
     D('sp_llmkey').value = '';
     D('sp_llmkey').addEventListener('keydown', function (ev) { if (ev.key === 'Enter') llmSave(); });
   }
   llmRefresh();
+  if (D('cast_up')) D('cast_up').onchange = function () {
+    ADV.cast_upsample = this.checked ? '1' : '0';
+    saveSettings();
+  };
+  if (D('cast_ceil')) D('cast_ceil').onchange = function () {
+    ADV.cast_upsample_ceiling = this.value;
+    saveSettings();
+  };
+  syncCastUpsampleInfo();
   // 诊断页签的两个按钮（2026-10-22 功能3：从元数据迁出 + 改为一个 ZIP）
   if (D('sp_diagzip')) D('sp_diagzip').onclick = exportDiagZip;
   if (D('sp_diagjson')) D('sp_diagjson').onclick = exportDiag;

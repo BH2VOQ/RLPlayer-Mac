@@ -1673,6 +1673,15 @@ static bool upnp_is_dsd_file(const std::string& file) {
 
 static std::string conf_get(const std::string& key, const std::string& def = std::string());
 
+static uint32_t get_cast_upsample_ceiling() {
+    const std::string c = conf_get("cast_upsample_ceiling", "192000");
+    if (c == "96000") return 96000;
+    if (c == "192000") return 192000;
+    if (c == "384000") return 384000;
+    if (c == "768000") return 768000;
+    return 192000;
+}
+
 // 把一条曲目交给投放会话。切歌 / 重播都走这里：先停旧会话再起新会话
 //（CastManager 同一时刻只允许一条会话）。失败原因原样返回，界面直接显示，不假装成功。
 static bool upnp_start_track(const PlayParams& p, const std::string& file, std::string& err) {
@@ -1694,6 +1703,10 @@ static bool upnp_start_track(const PlayParams& p, const std::string& file, std::
     cp.dop = !rta::net::CastManager::is_airplay_dev(p.upnpDev) &&
              (upnp_is_dsd_file(file) || p.dsd >= 64);
     cp.initialVolumeDb = std::isfinite(p.volume) ? std::clamp(p.volume, -144.0, 0.0) : -20.0;
+    cp.applyUpsample = (conf_get("cast_upsample", "0") == "1");
+    cp.ceilingRate = get_cast_upsample_ceiling();
+    cp.filterName = conf_get("filter", "");
+    cp.requestedRate = conf_get("rate", "");
     rta::net::CastManager::instance().stop();
     const auto r = rta::net::CastManager::instance().start(cp);
     if (!r.ok) {
@@ -6301,6 +6314,48 @@ static std::string llm_test_json() {
            std::to_string(ms) + ",\"tokens\":" + std::to_string(p.totalTokens) + "}";
 }
 
+// 2026-10-27（用户 261027-06 P1）：GET /api/llm/models —— 拉取当前可用模型列表。
+// 契约：
+//   * 永远 HTTP 200：拉不到就 ok=false + error，界面保留手填输入框，绝不把设置页弄崩；
+//   * models[] 只给 id(+ownedBy)，按服务端顺序；
+//   * current = 配置里现在用的 model；currentInList = 它是否在列表里（false ⟹ 界面提示重选）；
+//   * cached = 这次是否命中进程内 60 s 缓存；?refresh=1 强制重拉。
+static std::string llm_models_json(const std::string& path) {
+    const rta::meta::LlmConfig c = rta::meta::llm_config_load(llm_conf_path());
+    const bool force = (path.find("refresh=1") != std::string::npos) ||
+                       (path.find("force=1") != std::string::npos);
+    bool cached = false;
+    const rta::meta::LlmModelList ml = rta::meta::llm_models_fetch(c, 15000, force, &cached);
+
+    std::ostringstream j;
+    j << "{\"ok\":" << (ml.ok ? "true" : "false")
+      << ",\"configured\":" << (c.apiKey.empty() ? "false" : "true")
+      << ",\"current\":\"" << jesc(c.model) << "\""
+      << ",\"baseUrl\":\"" << jesc(rta::meta::llm_base_url(c.baseUrl)) << "\""
+      << ",\"cached\":" << (cached ? "true" : "false")
+      << ",\"latencyMs\":" << ml.latencyMs
+      << ",\"count\":" << ml.count()
+      << ",\"currentInList\":" << (ml.ok && ml.has(c.model) ? "true" : "false");
+    if (!ml.ok) j << ",\"error\":\"" << jesc(ml.error) << "\"";
+    j << ",\"models\":[";
+    for (size_t i = 0; i < ml.models.size(); ++i) {
+        if (i) j << ",";
+        j << "{\"id\":\"" << jesc(ml.models[i].id) << "\"";
+        if (!ml.models[i].ownedBy.empty())
+            j << ",\"ownedBy\":\"" << jesc(ml.models[i].ownedBy) << "\"";
+        j << "}";
+    }
+    j << "]}";
+    play_log(std::string("LLM_MODELS ") + (ml.ok ? "ok" : "failed") +
+             " count=" + std::to_string(ml.count()) +
+             " cached=" + (cached ? "1" : "0") +
+             " latencyMs=" + std::to_string(ml.latencyMs) +
+             " current=" + c.model +
+             " inList=" + ((ml.ok && ml.has(c.model)) ? "1" : "0") +
+             (ml.ok ? std::string() : (" err=" + ml.error)));
+    return j.str();
+}
+
 // 简介返回 JSON 附带「实体种类 / 是否来自缓存」标志（2026-10-23 用户 261023-03 #2/#3）：
 // 前端据此决定加载态与是否重复请求；summary_to_json 本体是缓存文件格式，不掺入运行时标志。
 static std::string summary_json_with_flags(const rta::meta::SummaryResult& sr,
@@ -9848,6 +9903,18 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
               << ",\"volumeSupported\":" << (st.volumeSupported ? "true" : "false")
               << ",\"currentVolume\":" << st.currentVolume
               << ",\"lastVolumeError\":\"" << jesc(st.lastVolumeError) << "\""
+              << ",\"upsampleApplied\":" << (st.upsampleApplied ? "true" : "false")
+              << ",\"servedRate\":" << st.servedRate
+              << ",\"servedFilter\":\"" << jesc(st.servedFilter) << "\""
+              << ",\"servedBits\":" << st.servedBits
+              << ",\"upsampleNote\":\"" << jesc(st.upsampleNote) << "\""
+              << ",\"upsampleNoteEn\":\"" << jesc(st.upsampleNoteEn) << "\""
+              << ",\"prepPercent\":" << st.prepPercent
+              << ",\"prepFramesTotal\":" << st.prepFramesTotal
+              << ",\"prepFramesDone\":" << st.prepFramesDone
+              << ",\"castUpsample\":" << (conf_get("cast_upsample", "0") == "1" ? "true" : "false")
+              << ",\"castCeiling\":" << get_cast_upsample_ceiling()
+              << ",\"resampled\":" << (st.resampled ? "true" : "false")
               << "}";
             return j.str();
         }
@@ -9868,6 +9935,10 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
                 if (j.has("dop")) p.dop = (j["dop"].type == rta::net::Json::Bool) ? j["dop"].b : (j["dop"].n() != 0.0);
                 if (j.has("volume")) { initialVolDb = j["volume"].n(); hasInitialVol = true; }
                 else if (j.has("volDb")) { initialVolDb = j["volDb"].n(); hasInitialVol = true; }
+                if (j.has("applyUpsample")) p.applyUpsample = (j["applyUpsample"].type == rta::net::Json::Bool) ? j["applyUpsample"].b : (j["applyUpsample"].n() != 0.0);
+                if (j.has("ceilingRate")) p.ceilingRate = (uint32_t)j["ceilingRate"].n();
+                if (j.has("filterName")) p.filterName = j["filterName"].s();
+                if (j.has("requestedRate")) p.requestedRate = j["requestedRate"].s();
             } else {
                 std::istringstream is(rq.body);
                 std::string tok;
@@ -9884,9 +9955,25 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
                     else if (k == "seconds") p.seconds = std::atof(v.c_str());
                     else if (k == "dop") p.dop = (v == "1" || v == "true");
                     else if (k == "volume" || k == "volDb") { initialVolDb = std::atof(v.c_str()); hasInitialVol = true; }
+                    else if (k == "applyUpsample") p.applyUpsample = (v == "1" || v == "true");
+                    else if (k == "ceilingRate") p.ceilingRate = (uint32_t)std::strtoul(v.c_str(), nullptr, 10);
+                    else if (k == "filterName") p.filterName = v;
+                    else if (k == "requestedRate") p.requestedRate = v;
                 }
             }
             if (p.port == 0) p.port = 8912;
+            if (!p.applyUpsample && conf_get("cast_upsample", "0") == "1") {
+                p.applyUpsample = true;
+            }
+            if (p.ceilingRate == 0 || p.ceilingRate == 192000) {
+                p.ceilingRate = get_cast_upsample_ceiling();
+            }
+            if (p.filterName.empty()) {
+                p.filterName = conf_get("filter", "");
+            }
+            if (p.requestedRate.empty()) {
+                p.requestedRate = conf_get("rate", "");
+            }
             // 一条会话原则（261024-01 #9）：手动「开始投放」先停本地播放，
             // 避免本机声卡与网络渲染器同时出声；播放器状态交给投放会话接管前先清零。
             g_upnpQueueActive.store(false);
@@ -9988,12 +10075,20 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
         j << "}";
         return j.str();
     }
+    // 2026-10-27（用户 261027-06 P1）：模型列表。必须排在既有 /api/llm 前缀处理之前 ——
+    // 它是只读 GET，且要在「没配 key / 断网 / 网关 404」时仍然回 200 + ok:false（设置页优雅降级）。
+    if (rq.path.rfind("/api/llm/models", 0) == 0) {
+        ct = "application/json; charset=utf-8";
+        return llm_models_json(rq.path);
+    }
+
     // ---------------- DeepSeek API Key（2026-10-22 功能4）----------------
     // ★ 不并入 /api/settings：那个端点写 rlplayer-settings.conf（整文件重写），
     //   key 混进去会被诊断包 / 导出 / 同步顺手带走，而且 POST 白名单里也不该有它。
     //   本端点单独写 rlplayer-llm.conf，且 GET 只回掩码。
     if (rq.path.rfind("/api/llm", 0) == 0) {
         ct = "application/json; charset=utf-8";
+        if (rq.path.rfind("/api/llm/models", 0) == 0) return llm_models_json(rq.path);
         if (rq.path.rfind("/api/llm/test", 0) == 0) {
             const auto config=rta::meta::llm_config_load(path_in_exe_dir("rlplayer-llm.conf"));
             if(config.apiKey.empty()) rta::diag::diag_emit("llm.config",rta::diag::Stage::Llm,rta::diag::find_code("llm.not_configured"),
@@ -10338,6 +10433,7 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
                                            // 源开关 metasrc_<id> 按注册表动态放行(见下);
                                            // P3④b AI 综合开关 metasummary (默认0)
                                            "metaon", "metallm", "metasummary", "llmmonthlycap", "scanthreads", "scanThreads",
+                                           "cast_upsample", "cast_upsample_ceiling",
                                            "updbeta",
                                            // ReplayGain / Album Gain
                                            "rg.mode", "rg_mode", "rgmode", "rg",
@@ -11101,10 +11197,21 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
                  << ",\"latencyMs\":" << cs.latencyMs
                  << ",\"latencySource\":\"" << jesc(cs.latencySource) << "\""
                  << ",\"resample\":" << (cs.resampled ? "true" : "false")
+                 << ",\"upsampleApplied\":" << (cs.upsampleApplied ? "true" : "false")
+                 << ",\"servedRate\":" << cs.servedRate
+                 << ",\"servedFilter\":\"" << jesc(cs.servedFilter) << "\""
+                 << ",\"servedBits\":" << cs.servedBits
+                 << ",\"upsampleNote\":\"" << jesc(cs.upsampleNote) << "\""
+                 << ",\"prepPercent\":" << cs.prepPercent
+                 << ",\"prepFramesDone\":" << cs.prepFramesDone
+                 << ",\"prepFramesTotal\":" << cs.prepFramesTotal
+                 << ",\"castUpsample\":" << (conf_get("cast_upsample", "0") == "1" ? "true" : "false")
+                 << ",\"castCeiling\":" << get_cast_upsample_ceiling()
                  // 投放走的是「解码 → 供源/推流」，不经过播放器的升频/EQ/IR/音量链。
                  // 静默忽略用户设置是最坏的形态：这里把事实交给界面去说清楚。
                  << ",\"castDspBypass\":true"
                  << ",\"requestedRate\":\"" << jesc(conf_get("rate", "")) << "\""
+                 << ",\"filter\":\"" << jesc(conf_get("filter", "poly-sinc-lp")) << "\""
                  << ",\"volume\":" << cs.currentVolumeDb
                  << ",\"note\":\"" << jesc(cs.warning) << "\"}}";
             return live.str();
@@ -11350,6 +11457,16 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
           // 投放将来若真的先升频再供源，这里 resampled 会变 true，徽标自动变成「升频」。
           << ",\"inRate\":" << (castMode ? (castTransition ? 0u : castSt.sourceRate) : 0u)
           << ",\"resampled\":" << ((castMode && !castTransition && castSt.resampled) ? "true" : "false")
+          << ",\"upsampleApplied\":" << ((castMode && !castTransition && castSt.upsampleApplied) ? "true" : "false")
+          << ",\"servedRate\":" << (castMode ? (castTransition ? 0u : castSt.servedRate) : 0u)
+          << ",\"servedFilter\":\"" << jesc(castMode ? castSt.servedFilter : std::string()) << "\""
+          << ",\"servedBits\":" << (castMode ? (castTransition ? 0 : castSt.servedBits) : 0)
+          << ",\"upsampleNote\":\"" << jesc(castMode ? (castTransition ? "" : castSt.upsampleNote) : "") << "\""
+          << ",\"prepPercent\":" << (castMode ? (castTransition ? -1 : castSt.prepPercent) : -1)
+          << ",\"prepFramesDone\":" << (castMode ? (castTransition ? 0ULL : castSt.prepFramesDone) : 0ULL)
+          << ",\"prepFramesTotal\":" << (castMode ? (castTransition ? 0ULL : castSt.prepFramesTotal) : 0ULL)
+          << ",\"castUpsample\":" << (conf_get("cast_upsample", "0") == "1" ? "true" : "false")
+          << ",\"castCeiling\":" << get_cast_upsample_ceiling()
           << ",\"outBits\":" << bitsStat
           << ",\"gpu\":" << (gpuF.gpu ? "true" : "false")
           << ",\"gpuUsed\":" << (gpuF.gpuUsed ? "true" : "false")

@@ -35,6 +35,7 @@ function check(desc, cond, extra) {
 function createMockElement(id) {
   const el = {
     id: id || '',
+    type: (id === 'cast_up' || id === 'sLoud' || id === 'sp_loud' || id === 'sShuf' || id === 'sp_shuf') ? 'checkbox' : '',
     value: '',
     textContent: '',
     innerHTML: '',
@@ -122,6 +123,8 @@ function createEnvironment(apiHandler) {
     clearTimeout() {},
     setInterval() { return 1; },
     clearInterval() {},
+    requestAnimationFrame(fn) { return setTimeout(fn, 0); },
+    cancelAnimationFrame(id) { clearTimeout(id); },
     Date,
     Math,
     parseInt,
@@ -435,6 +438,199 @@ async function runTests() {
 
     env.updateCastStateUi({ running: true, phase: 'decoding' });
     check('英文或多语言环境下 decoding 正确展示', pEl.textContent.length > 0 && pEl.textContent !== '已停止');
+  }
+
+  // Test 7: 1.1.3 UPnP 投放升频信号链与徽标证据契约测试
+  {
+    console.log('\n-- Test 7: 1.1.3 UPnP 投放升频信号链与徽标证据契约测试 --');
+
+    // 场景 1: 开 + 生效 (resampled=true, upsampleApplied=true)
+    {
+      let signalPayload = {
+        ok: true,
+        path: {
+          src: '/Music/track1.flac',
+          codec: 'flac',
+          inRate: 44100,
+          inBits: 16,
+          inCh: 2,
+          dur: 180,
+          outRate: 176400,
+          outBits: 24,
+          outCh: 2,
+          device: 'http://192.168.1.80:8080/desc.xml',
+          transport: 'upnp',
+          outMode: 'upnp',
+          resample: true,
+          upsampleApplied: true,
+          servedRate: 176400,
+          filter: 'poly-sinc-lp',
+          castDspBypass: true
+        }
+      };
+
+      // 1.1.3 集成修（审阅 D）：**不许**手填 S.bpOutRate —— 那样会掩盖生产端 tick() 里
+      // 漏赋值导致的「源 44100 → undefined Hz」。这里走真实轮询路径，让字段由 /api/status 解包。
+      let statusPayload = {
+        ok: true, castMode: true, castPhase: 'playing', playing: true, paused: false,
+        current: '/Music/track1.flac', dur: 180, pos: 10,
+        outRate: 176400, outBits: 24, inRate: 44100, resampled: true, dsd: 0,
+        servedRate: 176400, servedBits: 24, upsampleApplied: true, upsampleNote: '',
+        transport: 'upnp', outMode: 'upnp', bitPerfect: 'no'
+      };
+      const env = createEnvironment((url) => {
+        if (url.startsWith('/api/signal')) return signalPayload;
+        if (url.startsWith('/api/status')) return statusPayload;
+      });
+
+      await env.tick();               // 字段全部由生产解包代码填，测试不写死
+      env.S.bpState = 'no';
+
+      const badge = env.bpBadgeInfo();
+      check('开+生效：底栏徽标显示“PCM-PCM 升频”', badge.text === 'PCM-PCM 升频', badge.text);
+      check('开+生效：底栏徽标带升频自证说明', badge.title.includes('先在本机升频再供源'), badge.title);
+      check('开+生效：悬停文案带出真实两端速率（不得出现 undefined）',
+            badge.title.includes('44100 → 176400') && !badge.title.includes('undefined'), badge.title);
+
+      await env.showChain();
+      const mbody = env._getEl('mbody').innerHTML;
+      check('开+生效：信号链节点显示“本机升频 44100 → 176400 Hz · poly-sinc-lp（投放供源）”',
+            mbody.includes('本机升频 44100 → 176400 Hz · poly-sinc-lp（投放供源）'), mbody);
+
+      // 场景 1b（1.1.3 集成补）：用户填的滤波器名与实际用的不同（后端发生回退）时，
+      // 链条必须显示**实际用的** servedFilter —— 否则界面会把一个没被用上的名字当成事实。
+      signalPayload.path.filter = 'poly-sinc-mp';        // 用户在设置里填的名字
+      signalPayload.path.servedFilter = 'poly-sinc-lp';  // 后端真正使用的预设（回退后）
+      await env.showChain();
+      const mbody2 = env._getEl('mbody').innerHTML;
+      check('生效但滤波器发生回退：链条显示实际使用的 poly-sinc-lp，而不是用户填的 poly-sinc-mp',
+            mbody2.includes('本机升频 44100 → 176400 Hz · poly-sinc-lp（投放供源）') &&
+            !mbody2.includes('poly-sinc-mp（投放供源）'), mbody2);
+
+      // 场景 1c（审阅 D 发现）：AirPlay 固定 44100 Hz —— 96k 源是**降采样**，
+      // 旧逻辑只要 resampled=true 就报「PCM-PCM 升频」，把降质说成升频。
+      statusPayload = Object.assign({}, statusPayload, {
+        transport: 'airplay', outMode: 'airplay', castDevice: 'airplay://192.168.1.100:5000',
+        inRate: 96000, outRate: 44100, servedRate: 44100, resampled: true
+      });
+      await env.tick();
+      env.S.bpState = 'no';
+      const badgeDown = env.bpBadgeInfo();
+      check('AirPlay 降采样：绝不显示「PCM-PCM 升频」', badgeDown.text !== 'PCM-PCM 升频', badgeDown.text);
+      check('AirPlay 降采样：徽标如实显示「PCM 降采样」', badgeDown.text === 'PCM 降采样', badgeDown.text);
+      check('开+生效：信号链节点带“PCM-PCM 升频”徽章', mbody.includes('PCM-PCM 升频'), mbody);
+    }
+
+    // 场景 2: 被压回 (后端返回 upsampleApplied=false + note 含「被渲染器上限压到」)
+    {
+      let signalPayload = {
+        ok: true,
+        path: {
+          src: '/Music/track2.flac',
+          codec: 'flac',
+          inRate: 44100,
+          inBits: 16,
+          inCh: 2,
+          dur: 200,
+          outRate: 44100,
+          outBits: 16,
+          outCh: 2,
+          device: 'http://192.168.1.80:8080/desc.xml',
+          transport: 'upnp',
+          outMode: 'upnp',
+          resample: false,
+          upsampleApplied: false,
+          upsampleNote: '本机升频被渲染器上限压到 96000 Hz',
+          castDspBypass: true
+        }
+      };
+
+      const env = createEnvironment((url) => {
+        if (url.startsWith('/api/signal')) return signalPayload;
+      });
+
+      env.S.bpState = 'no';
+      env.S.bpTransport = 'upnp';
+      env.S.bpOutMode = 'upnp';
+      env.S.bpResampled = false;
+
+      const badge = env.bpBadgeInfo();
+      check('被压回：底栏徽标为“非 bit-perfect”，绝不冒充升频', badge.text === '非 bit-perfect', badge.text);
+
+      await env.showChain();
+      const mbody = env._getEl('mbody').innerHTML;
+      check('被压回：信号链节点出现 note 原文“被渲染器上限压到 96000 Hz”',
+            mbody.includes('本机升频被渲染器上限压到 96000 Hz'), mbody);
+      check('被压回：信号链节点徽章为“投放旁路”，绝不显示“PCM-PCM 升频”',
+            mbody.includes('投放旁路') && !mbody.includes('PCM-PCM 升频'), mbody);
+    }
+
+    // 场景 3: 关闭 (负向对照：不许回归)
+    {
+      let signalPayload = {
+        ok: true,
+        path: {
+          src: '/Music/track3.flac',
+          codec: 'flac',
+          inRate: 44100,
+          inBits: 16,
+          inCh: 2,
+          dur: 150,
+          outRate: 44100,
+          outBits: 16,
+          outCh: 2,
+          device: 'http://192.168.1.80:8080/desc.xml',
+          transport: 'upnp',
+          outMode: 'upnp',
+          resample: false,
+          upsampleApplied: false,
+          requestedRate: 'max',
+          castDspBypass: true
+        }
+      };
+
+      const env = createEnvironment((url) => {
+        if (url.startsWith('/api/signal')) return signalPayload;
+      });
+
+      await env.showChain();
+      const mbody = env._getEl('mbody').innerHTML;
+      check('关闭：保持原有“投放旁路”徽章与“旁路（投放不经过本机 DSP…”文案一字不改',
+            mbody.includes('投放旁路') && mbody.includes('旁路（投放不经过本机 DSP：升频/EQ/IR/音量都不参与；你的设置要求升频（最高），但投放不走这条链）'), mbody);
+      check('关闭：绝不显示升频徽章', !mbody.includes('PCM-PCM 升频'), mbody);
+    }
+  }
+
+  // Test 8: 设置页投放升频控件契约 (cast_up, cast_ceil, SET_KEYS)
+  {
+    console.log('\n-- Test 8: 设置页投放升频控件与 SET_KEYS 契约 --');
+    let lastSavedBody = '';
+    const env = createEnvironment((url, opt) => {
+      if (url === '/api/settings' && opt && opt.body) {
+        lastSavedBody = opt.body;
+        return { ok: true };
+      }
+    });
+
+    env.renderSettingsPage();
+    const chkUp = env._getEl('cast_up');
+    const selCeil = env._getEl('cast_ceil');
+    check('设置页存在 cast_up 开关控件', chkUp !== null && chkUp.id === 'cast_up');
+    check('设置页存在 cast_ceil 上限下拉控件', selCeil !== null && selCeil.id === 'cast_ceil');
+    check('cast_up 默认状态为关闭 (checked=false)', chkUp.checked === false);
+    check('cast_ceil 默认上限为 192000', selCeil.value === '192000' || selCeil.value === '');
+
+    // 勾选 cast_up 并保存
+    chkUp.checked = true;
+    chkUp.dispatchEvent({ type: 'change' });
+    env.saveSettings(true);
+    check('勾选 cast_up 后 saveSettings 包含 cast_upsample=1', lastSavedBody.includes('cast_upsample=1'), lastSavedBody);
+
+    // 切换 cast_ceil 为 384000
+    selCeil.value = '384000';
+    selCeil.dispatchEvent({ type: 'change' });
+    env.saveSettings(true);
+    check('切换 cast_ceil 后 saveSettings 包含 cast_upsample_ceiling=384000', lastSavedBody.includes('cast_upsample_ceiling=384000'), lastSavedBody);
   }
 
   console.log(`\n==============================================`);
