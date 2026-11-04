@@ -2,7 +2,7 @@
   "version": "1.1.2",
   "notes": "AirPlay receiver discovery and direct RAOP casting; corrected cast status, clock synchronization and DSD/DoP playback reliability. · 新增 AirPlay 接收器发现与应用内 RAOP 投放，修正投放状态、时钟同步及 DSD/DoP 播放可靠性。",
   "download_url": "https://github.com/BH2VOQ/RLPlayer-Mac/releases/download/v1.1.2/RLPlayer-1.1.2-macOS-arm64.dmg",
-  "sha256": "cf99128ae828d7e103f3a16f2cbc255cfb27c279b4fc2e3af1906b1bdd2104a0",
-  "size": 8046773,
+  "sha256": "b4f6329f8b0ef8c4c6f65177004dad97bd1fc977506d4ca36cdf9c3932dc7f57",
+  "size": 8046264,
   "published_at": "2026-11-04T04:00:00Z"
 }
