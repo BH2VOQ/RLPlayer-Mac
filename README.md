@@ -247,7 +247,7 @@ The functionality stays available and numerically correct (worst convolution cas
 
 ## 🗺 Roadmap
 
-> The current version follows the Release badge above. **1.1.2** adds AirPlay casting and DSD reliability fixes; **1.1.2.1** is a hotfix for cast status/labels; 1.1.3 onward is planned. The full criteria, validation limits and open items are in
+> The current version follows the Release badge above. **1.1.2** adds AirPlay casting and DSD reliability fixes; **1.1.2.1** is a hotfix for cast status/labels; **1.1.3** adds opt-in UPnP/DLNA cast upsampling and the LLM model list; 1.1.4 onward is planned. The full criteria, validation limits and open items are in
 > **[ROADMAP-1.1.x.md](ROADMAP-1.1.x.md)**.
 
 | Version   | Theme                                                              | Status     |
@@ -256,7 +256,7 @@ The functionality stays available and numerically correct (worst convolution cas
 | **1.1.1** | Diagnostics, streaming overhaul, bilingual UI & cast/PEQ fixes     | ✅ Released |
 | **1.1.2** | **AirPlay receiver discovery / casting** + DSD playback reliability | ✅ Released (offline-verified) |
 | **1.1.2.1** | Hotfix: no false “PCM upsampling” when casting, honest AirPlay labels, source→wire bit-exact proof | ✅ Released |
-| **1.1.3** | LLM model list                                                     | 🧭 Planned  |
+| **1.1.3** | **UPnP/DLNA cast upsampling** + LLM model list                      | ✅ Released (offline-verified; upsampling on a real renderer that declares >44.1 kHz untested) |
 | **1.1.4** | Audio analysis on the track page (three-level folding / true peak / multichannel) | 🧭 Planned |
 | **1.1.5** | Library lookup (album context / asynchronous knowledge)            | 🧭 Planned  |
 | **1.1.6** | AI summary streaming and stage progress                            | 🧭 Planned  |
@@ -274,7 +274,7 @@ The functionality stays available and numerically correct (worst convolution cas
 ```mermaid
 flowchart TB
   A["1.1.2<br/>AirPlay + DSD reliability hotfix"]
-  B["1.1.3<br/>LLM models"]
+  B["1.1.3<br/>cast upsampling · LLM models"]
   C["1.1.4 – 1.1.6<br/>audio analysis · library lookup<br/>AI streaming"]
   D["1.1.7 – 1.1.9<br/>covers · write-back<br/>platform / performance"]
   E["1.2.0<br/>room measurement + measurement baseline"]
