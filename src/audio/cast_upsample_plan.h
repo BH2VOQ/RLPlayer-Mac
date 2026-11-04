@@ -261,7 +261,11 @@ inline CastRateDecision decide_cast_target_rate(uint32_t sourceRate,
     d.targetRate = sourceRate;
     d.upsample = false;
 
-    if (cap == sourceRate || (isNumeric && reqNum == sourceRate)) {
+    // 2026-11-05（真实设备实测暴露）：`cap == sourceRate` 有两种完全不同的成因，不能一律说
+    // 「源已是目标率」——当渲染器**只声明到源率**（实测 Rygel 只声明 audio/l16;rate=44100）
+    // 时，真实原因是"它没有更高的同族速率"，说成"无需升频"会让用户以为是自己设置的问题。
+    // 只有用户**明确点名要源率**（numeric == sourceRate）才算 already。
+    if (isNumeric && reqNum == sourceRate) {
         d.reason = "already";
         d.noteZh = "源采样率已是目标速率 " + std::to_string(sourceRate) + " Hz，无需升频，按源直供";
         d.noteEn = "Source sample rate is already at target rate " + std::to_string(sourceRate) + " Hz; serving at source rate.";
