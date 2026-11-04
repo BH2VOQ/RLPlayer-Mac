@@ -343,275 +343,293 @@ int main() {
 
     // ================= 6) Loopback Mock UPnP AVTransport 生命周期与 endedNaturally 契约测试 =================
     std::printf("\n-- 6. Loopback Mock UPnP AVTransport 生命周期与 endedNaturally 契约测试 --\n");
-    {
-        enum class MockMode {
-            NormalNaturalEnd = 0, // Play 时拉流 + PLAYING 保持 350ms 后转 STOPPED
-            ContinuousPlay   = 1, // Play 时拉流 + 始终保持 PLAYING（供测试主动 stop）
-            BogusStopped     = 2  // Play 时不拉流 + 状态始终保持 STOPPED（未起播即 STOPPED）
-        };
+    enum class MockMode {
+        NormalNaturalEnd = 0, // Play 时拉流 + PLAYING 保持 350ms 后转 STOPPED
+        ContinuousPlay   = 1, // Play 时拉流 + 始终保持 PLAYING（供测试主动 stop）
+        BogusStopped     = 2  // Play 时不拉流 + 状态始终保持 STOPPED（未起播即 STOPPED）
+    };
 
-        class LoopbackMockUpnpRenderer {
-        public:
-            ~LoopbackMockUpnpRenderer() { stop(); }
+    class LoopbackMockUpnpRenderer {
+    public:
+        ~LoopbackMockUpnpRenderer() { stop(); }
 
-            bool start() {
-                if (!upnp_os::wsa_init()) return false;
-                wsaStarted_ = true;
-                listen_ = ::socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-                if (listen_ == upnp_os::kInvalidSocket) return false;
-                int yes = 1;
-                upnp_os::set_opt(listen_, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(yes));
+        bool start() {
+            if (!upnp_os::wsa_init()) return false;
+            wsaStarted_ = true;
+            listen_ = ::socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+            if (listen_ == upnp_os::kInvalidSocket) return false;
+            int yes = 1;
+            upnp_os::set_opt(listen_, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(yes));
 
-                sockaddr_in a{};
-                a.sin_family = AF_INET;
-                a.sin_port = htons(0);
-                a.sin_addr.s_addr = ::inet_addr("127.0.0.1");
-                if (upnp_os::io_bind(listen_, (sockaddr*)&a, sizeof(a)) != 0) {
-                    upnp_os::close_socket(listen_);
-                    listen_ = upnp_os::kInvalidSocket;
-                    return false;
+            sockaddr_in a{};
+            a.sin_family = AF_INET;
+            a.sin_port = htons(0);
+            a.sin_addr.s_addr = ::inet_addr("127.0.0.1");
+            if (upnp_os::io_bind(listen_, (sockaddr*)&a, sizeof(a)) != 0) {
+                upnp_os::close_socket(listen_);
+                listen_ = upnp_os::kInvalidSocket;
+                return false;
+            }
+            if (upnp_os::io_listen(listen_, 16) != 0) {
+                upnp_os::close_socket(listen_);
+                listen_ = upnp_os::kInvalidSocket;
+                return false;
+            }
+            sockaddr_in got{};
+            int gl = sizeof(got);
+            if (upnp_os::io_getsockname(listen_, (sockaddr*)&got, &gl) != 0) {
+                upnp_os::close_socket(listen_);
+                listen_ = upnp_os::kInvalidSocket;
+                return false;
+            }
+            port_ = ntohs(got.sin_port);
+            stop_.store(false);
+            th_ = std::thread([this]() { accept_loop(); });
+            return port_ > 0;
+        }
+
+        void stop() {
+            stop_.store(true);
+            if (listen_ != upnp_os::kInvalidSocket) {
+                upnp_os::close_socket(listen_);
+                listen_ = upnp_os::kInvalidSocket;
+            }
+            if (th_.joinable()) th_.join();
+            if (wsaStarted_) {
+                upnp_os::wsa_cleanup();
+                wsaStarted_ = false;
+            }
+        }
+
+        uint16_t port() const { return port_; }
+
+        void reset_mode(MockMode m) {
+            std::lock_guard<std::mutex> lk(mu_);
+            mode_ = m;
+            currentUri_.clear();
+            playStarted_ = false;
+            sink_ = "http-get:*:audio/wav:*";
+        }
+
+        void set_sink(const std::string& sink) {
+            std::lock_guard<std::mutex> lk(mu_);
+            sink_ = sink;
+        }
+
+        std::string get_current_uri() {
+            std::lock_guard<std::mutex> lk(mu_);
+            return currentUri_;
+        }
+
+    private:
+        static void fetch_stream_once(const std::string& uri) {
+            if (uri.rfind("http://", 0) != 0) return;
+            const size_t hs = 7;
+            const size_t slash = uri.find('/', hs);
+            const std::string hostport = uri.substr(hs, (slash == std::string::npos ? uri.size() : slash) - hs);
+            const std::string path = (slash == std::string::npos) ? "/" : uri.substr(slash);
+            const size_t colon = hostport.find(':');
+            const std::string host = (colon == std::string::npos) ? hostport : hostport.substr(0, colon);
+            const int port = (colon == std::string::npos) ? 80 : std::atoi(hostport.substr(colon + 1).c_str());
+            std::string dummyOut;
+            // 只走 loopback 拉取本地 UpnpHttpServer 的静音 WAV 流
+            (void)upnp_detail::http_get("127.0.0.1", port, path, dummyOut, 0, 1000);
+        }
+
+        static void send_http(upnp_os::socket_t c, const std::string& body) {
+            char hdr[256];
+            std::snprintf(hdr, sizeof(hdr),
+                          "HTTP/1.1 200 OK\r\n"
+                          "Content-Type: text/xml; charset=\"utf-8\"\r\n"
+                          "Content-Length: %zu\r\n"
+                          "Connection: close\r\n\r\n",
+                          body.size());
+            upnp_os::io_send(c, hdr, (int)std::strlen(hdr));
+            if (!body.empty()) {
+                upnp_os::io_send(c, body.data(), (int)body.size());
+            }
+        }
+
+        void handle_conn(upnp_os::socket_t c) {
+            upnp_os::set_timeout(c, SO_RCVTIMEO, 2000);
+            upnp_os::set_timeout(c, SO_SNDTIMEO, 2000);
+
+            std::string req;
+            char buf[4096];
+            size_t hdrEnd = std::string::npos;
+            size_t contentLen = 0;
+
+            while (req.size() < 65536) {
+                int r = upnp_os::io_recv(c, buf, sizeof(buf));
+                if (r <= 0) break;
+                req.append(buf, (size_t)r);
+                if (hdrEnd == std::string::npos) {
+                    hdrEnd = req.find("\r\n\r\n");
+                    if (hdrEnd != std::string::npos) {
+                        std::string clStr = upnp_detail::header_of(req.substr(0, hdrEnd), "content-length");
+                        if (!clStr.empty()) contentLen = (size_t)std::strtoul(clStr.c_str(), nullptr, 10);
+                    }
                 }
-                if (upnp_os::io_listen(listen_, 16) != 0) {
-                    upnp_os::close_socket(listen_);
-                    listen_ = upnp_os::kInvalidSocket;
-                    return false;
+                if (hdrEnd != std::string::npos && req.size() >= hdrEnd + 4 + contentLen) {
+                    break;
                 }
-                sockaddr_in got{};
-                int gl = sizeof(got);
-                if (upnp_os::io_getsockname(listen_, (sockaddr*)&got, &gl) != 0) {
-                    upnp_os::close_socket(listen_);
-                    listen_ = upnp_os::kInvalidSocket;
-                    return false;
-                }
-                port_ = ntohs(got.sin_port);
-                stop_.store(false);
-                th_ = std::thread([this]() { accept_loop(); });
-                return port_ > 0;
             }
 
-            void stop() {
-                stop_.store(true);
-                if (listen_ != upnp_os::kInvalidSocket) {
-                    upnp_os::close_socket(listen_);
-                    listen_ = upnp_os::kInvalidSocket;
-                }
-                if (th_.joinable()) th_.join();
-                if (wsaStarted_) {
-                    upnp_os::wsa_cleanup();
-                    wsaStarted_ = false;
-                }
+            if (req.rfind("GET /desc.xml", 0) == 0) {
+                const std::string descXml =
+                    "<?xml version=\"1.0\" encoding=\"utf-8\"?>"
+                    "<root xmlns=\"urn:schemas-upnp-org:device-1-0\">"
+                    "<device>"
+                    "<deviceType>urn:schemas-upnp-org:device:MediaRenderer:1</deviceType>"
+                    "<friendlyName>LoopbackMockRenderer</friendlyName>"
+                    "<modelName>RLPlayerMock</modelName>"
+                    "<UDN>uuid:rlplayer-mock-cast-renderer</UDN>"
+                    "<serviceList>"
+                    "<service>"
+                    "<serviceType>urn:schemas-upnp-org:service:AVTransport:1</serviceType>"
+                    "<serviceId>urn:upnp-org:serviceId:AVTransport</serviceId>"
+                    "<controlURL>/upnp/control/AVTransport1</controlURL>"
+                    "</service>"
+                    "</serviceList>"
+                    "</device>"
+                    "</root>";
+                send_http(c, descXml);
+                upnp_os::close_socket(c);
+                return;
             }
 
-            uint16_t port() const { return port_; }
+            const std::string soapAction = upnp_detail::header_of(req, "SOAPAction");
+            const std::string body = (hdrEnd != std::string::npos) ? req.substr(hdrEnd + 4) : req;
+            auto has_action = [&](const char* act) {
+                return soapAction.find(act) != std::string::npos ||
+                       body.find(std::string("<u:") + act) != std::string::npos;
+            };
 
-            void reset_mode(MockMode m) {
-                std::lock_guard<std::mutex> lk(mu_);
-                mode_ = m;
-                currentUri_.clear();
-                playStarted_ = false;
-            }
-
-        private:
-            static void fetch_stream_once(const std::string& uri) {
-                if (uri.rfind("http://", 0) != 0) return;
-                const size_t hs = 7;
-                const size_t slash = uri.find('/', hs);
-                const std::string hostport = uri.substr(hs, (slash == std::string::npos ? uri.size() : slash) - hs);
-                const std::string path = (slash == std::string::npos) ? "/" : uri.substr(slash);
-                const size_t colon = hostport.find(':');
-                const std::string host = (colon == std::string::npos) ? hostport : hostport.substr(0, colon);
-                const int port = (colon == std::string::npos) ? 80 : std::atoi(hostport.substr(colon + 1).c_str());
-                std::string dummyOut;
-                // 只走 loopback 拉取本地 UpnpHttpServer 的静音 WAV 流
-                (void)upnp_detail::http_get("127.0.0.1", port, path, dummyOut, 0, 1000);
-            }
-
-            static void send_http(upnp_os::socket_t c, const std::string& body) {
-                char hdr[256];
-                std::snprintf(hdr, sizeof(hdr),
-                              "HTTP/1.1 200 OK\r\n"
-                              "Content-Type: text/xml; charset=\"utf-8\"\r\n"
-                              "Content-Length: %zu\r\n"
-                              "Connection: close\r\n\r\n",
-                              body.size());
-                upnp_os::io_send(c, hdr, (int)std::strlen(hdr));
-                if (!body.empty()) {
-                    upnp_os::io_send(c, body.data(), (int)body.size());
+            if (has_action("SetAVTransportURI")) {
+                std::string uri = xml_unescape(xml_extract_tag(body, "CurrentURI"));
+                {
+                    std::lock_guard<std::mutex> lk(mu_);
+                    currentUri_ = uri;
                 }
-            }
-
-            void handle_conn(upnp_os::socket_t c) {
-                upnp_os::set_timeout(c, SO_RCVTIMEO, 2000);
-                upnp_os::set_timeout(c, SO_SNDTIMEO, 2000);
-
-                std::string req;
-                char buf[4096];
-                size_t hdrEnd = std::string::npos;
-                size_t contentLen = 0;
-
-                while (req.size() < 65536) {
-                    int r = upnp_os::io_recv(c, buf, sizeof(buf));
-                    if (r <= 0) break;
-                    req.append(buf, (size_t)r);
-                    if (hdrEnd == std::string::npos) {
-                        hdrEnd = req.find("\r\n\r\n");
-                        if (hdrEnd != std::string::npos) {
-                            std::string clStr = upnp_detail::header_of(req.substr(0, hdrEnd), "content-length");
-                            if (!clStr.empty()) contentLen = (size_t)std::strtoul(clStr.c_str(), nullptr, 10);
-                        }
-                    }
-                    if (hdrEnd != std::string::npos && req.size() >= hdrEnd + 4 + contentLen) {
-                        break;
+                send_http(c, build_soap_envelope(kServiceAVTransport, "SetAVTransportURIResponse", {}));
+            } else if (has_action("Play")) {
+                std::string uriToFetch;
+                MockMode m;
+                {
+                    std::lock_guard<std::mutex> lk(mu_);
+                    m = mode_;
+                    if (m != MockMode::BogusStopped) {
+                        uriToFetch = currentUri_;
+                        playStarted_ = true;
+                        playStartTp_ = std::chrono::steady_clock::now();
                     }
                 }
-
-                if (req.rfind("GET /desc.xml", 0) == 0) {
-                    const std::string descXml =
-                        "<?xml version=\"1.0\" encoding=\"utf-8\"?>"
-                        "<root xmlns=\"urn:schemas-upnp-org:device-1-0\">"
-                        "<device>"
-                        "<deviceType>urn:schemas-upnp-org:device:MediaRenderer:1</deviceType>"
-                        "<friendlyName>LoopbackMockRenderer</friendlyName>"
-                        "<modelName>RLPlayerMock</modelName>"
-                        "<UDN>uuid:rlplayer-mock-cast-renderer</UDN>"
-                        "<serviceList>"
-                        "<service>"
-                        "<serviceType>urn:schemas-upnp-org:service:AVTransport:1</serviceType>"
-                        "<serviceId>urn:upnp-org:serviceId:AVTransport</serviceId>"
-                        "<controlURL>/upnp/control/AVTransport1</controlURL>"
-                        "</service>"
-                        "</serviceList>"
-                        "</device>"
-                        "</root>";
-                    send_http(c, descXml);
-                    upnp_os::close_socket(c);
-                    return;
+                if (!uriToFetch.empty()) {
+                    fetch_stream_once(uriToFetch);
                 }
-
-                const std::string soapAction = upnp_detail::header_of(req, "SOAPAction");
-                const std::string body = (hdrEnd != std::string::npos) ? req.substr(hdrEnd + 4) : req;
-                auto has_action = [&](const char* act) {
-                    return soapAction.find(act) != std::string::npos ||
-                           body.find(std::string("<u:") + act) != std::string::npos;
-                };
-
-                if (has_action("SetAVTransportURI")) {
-                    std::string uri = xml_unescape(xml_extract_tag(body, "CurrentURI"));
-                    {
-                        std::lock_guard<std::mutex> lk(mu_);
-                        currentUri_ = uri;
-                    }
-                    send_http(c, build_soap_envelope(kServiceAVTransport, "SetAVTransportURIResponse", {}));
-                } else if (has_action("Play")) {
-                    std::string uriToFetch;
-                    MockMode m;
-                    {
-                        std::lock_guard<std::mutex> lk(mu_);
-                        m = mode_;
-                        if (m != MockMode::BogusStopped) {
-                            uriToFetch = currentUri_;
-                            playStarted_ = true;
-                            playStartTp_ = std::chrono::steady_clock::now();
-                        }
-                    }
-                    if (!uriToFetch.empty()) {
-                        fetch_stream_once(uriToFetch);
-                    }
-                    send_http(c, build_soap_envelope(kServiceAVTransport, "PlayResponse", {}));
-                } else if (has_action("GetTransportInfo")) {
-                    std::string stateStr = "STOPPED";
-                    {
-                        std::lock_guard<std::mutex> lk(mu_);
-                        if (mode_ == MockMode::ContinuousPlay) {
-                            stateStr = playStarted_ ? "PLAYING" : "STOPPED";
-                        } else if (mode_ == MockMode::NormalNaturalEnd) {
-                            if (playStarted_) {
-                                double ms = std::chrono::duration<double, std::milli>(
-                                    std::chrono::steady_clock::now() - playStartTp_).count();
-                                stateStr = (ms < 350.0) ? "PLAYING" : "STOPPED";
-                            } else {
-                                stateStr = "STOPPED";
-                            }
+                send_http(c, build_soap_envelope(kServiceAVTransport, "PlayResponse", {}));
+            } else if (has_action("GetTransportInfo")) {
+                std::string stateStr = "STOPPED";
+                {
+                    std::lock_guard<std::mutex> lk(mu_);
+                    if (mode_ == MockMode::ContinuousPlay) {
+                        stateStr = playStarted_ ? "PLAYING" : "STOPPED";
+                    } else if (mode_ == MockMode::NormalNaturalEnd) {
+                        if (playStarted_) {
+                            double ms = std::chrono::duration<double, std::milli>(
+                                std::chrono::steady_clock::now() - playStartTp_).count();
+                            stateStr = (ms < 350.0) ? "PLAYING" : "STOPPED";
                         } else {
-                            // BogusStopped: 假停模式下始终返回 STOPPED
                             stateStr = "STOPPED";
                         }
+                    } else {
+                        // BogusStopped: 假停模式下始终返回 STOPPED
+                        stateStr = "STOPPED";
                     }
-                    send_http(c, build_soap_envelope(kServiceAVTransport, "GetTransportInfoResponse", {
-                        {"CurrentTransportState", stateStr},
-                        {"CurrentTransportStatus", "OK"},
-                        {"CurrentSpeed", "1"}
-                    }));
-                } else if (has_action("GetPositionInfo")) {
-                    std::string uri;
-                    {
-                        std::lock_guard<std::mutex> lk(mu_);
-                        uri = currentUri_;
-                    }
-                    send_http(c, build_soap_envelope(kServiceAVTransport, "GetPositionInfoResponse", {
-                        {"Track", "1"},
-                        {"TrackDuration", "00:00:01"},
-                        {"TrackMetaData", ""},
-                        {"TrackURI", xml_escape(uri)},
-                        {"RelTime", "00:00:00"},
-                        {"AbsTime", "00:00:00"}
-                    }));
-                } else if (has_action("GetMediaInfo")) {
-                    std::string uri;
-                    {
-                        std::lock_guard<std::mutex> lk(mu_);
-                        uri = currentUri_;
-                    }
-                    send_http(c, build_soap_envelope(kServiceAVTransport, "GetMediaInfoResponse", {
-                        {"NrTracks", "1"},
-                        {"MediaDuration", "00:00:01"},
-                        {"CurrentURI", xml_escape(uri)},
-                        {"CurrentURIMetaData", ""},
-                        {"NextURI", ""}
-                    }));
-                } else if (has_action("Stop")) {
-                    {
-                        std::lock_guard<std::mutex> lk(mu_);
-                        playStarted_ = false;
-                    }
-                    send_http(c, build_soap_envelope(kServiceAVTransport, "StopResponse", {}));
-                } else {
-                    send_http(c, build_soap_envelope(kServiceConnectionManager, "GetProtocolInfoResponse", {
-                        {"Source", ""},
-                        {"Sink", "http-get:*:audio/wav:*"}
-                    }));
                 }
-
-                upnp_os::close_socket(c);
+                send_http(c, build_soap_envelope(kServiceAVTransport, "GetTransportInfoResponse", {
+                    {"CurrentTransportState", stateStr},
+                    {"CurrentTransportStatus", "OK"},
+                    {"CurrentSpeed", "1"}
+                }));
+            } else if (has_action("GetPositionInfo")) {
+                std::string uri;
+                {
+                    std::lock_guard<std::mutex> lk(mu_);
+                    uri = currentUri_;
+                }
+                send_http(c, build_soap_envelope(kServiceAVTransport, "GetPositionInfoResponse", {
+                    {"Track", "1"},
+                    {"TrackDuration", "00:00:01"},
+                    {"TrackMetaData", ""},
+                    {"TrackURI", xml_escape(uri)},
+                    {"RelTime", "00:00:00"},
+                    {"AbsTime", "00:00:00"}
+                }));
+            } else if (has_action("GetMediaInfo")) {
+                std::string uri;
+                {
+                    std::lock_guard<std::mutex> lk(mu_);
+                    uri = currentUri_;
+                }
+                send_http(c, build_soap_envelope(kServiceAVTransport, "GetMediaInfoResponse", {
+                    {"NrTracks", "1"},
+                    {"MediaDuration", "00:00:01"},
+                    {"CurrentURI", xml_escape(uri)},
+                    {"CurrentURIMetaData", ""},
+                    {"NextURI", ""}
+                }));
+            } else if (has_action("Stop")) {
+                {
+                    std::lock_guard<std::mutex> lk(mu_);
+                    playStarted_ = false;
+                }
+                send_http(c, build_soap_envelope(kServiceAVTransport, "StopResponse", {}));
+            } else {
+                std::string currentSink;
+                {
+                    std::lock_guard<std::mutex> lk(mu_);
+                    currentSink = sink_;
+                }
+                send_http(c, build_soap_envelope(kServiceConnectionManager, "GetProtocolInfoResponse", {
+                    {"Source", ""},
+                    {"Sink", currentSink}
+                }));
             }
 
-            void accept_loop() {
-                while (!stop_.load()) {
-                    sockaddr_in cli{};
-                    int clen = sizeof(cli);
-                    upnp_os::socket_t c = upnp_os::io_accept(listen_, (sockaddr*)&cli, &clen);
-                    if (c == upnp_os::kInvalidSocket) {
-                        if (stop_.load()) break;
-                        const int e = upnp_os::last_error();
-                        if (e == EBADF || e == EINVAL || e == ENOTSOCK) break;
-                        continue;
-                    }
-                    handle_conn(c);
+            upnp_os::close_socket(c);
+        }
+
+        void accept_loop() {
+            while (!stop_.load()) {
+                sockaddr_in cli{};
+                int clen = sizeof(cli);
+                upnp_os::socket_t c = upnp_os::io_accept(listen_, (sockaddr*)&cli, &clen);
+                if (c == upnp_os::kInvalidSocket) {
+                    if (stop_.load()) break;
+                    const int e = upnp_os::last_error();
+                    if (e == EBADF || e == EINVAL || e == ENOTSOCK) break;
+                    continue;
                 }
+                handle_conn(c);
             }
+        }
 
-            upnp_os::socket_t listen_ = upnp_os::kInvalidSocket;
-            uint16_t port_ = 0;
-            bool wsaStarted_ = false;
-            std::atomic<bool> stop_{true};
-            std::thread th_;
+        upnp_os::socket_t listen_ = upnp_os::kInvalidSocket;
+        uint16_t port_ = 0;
+        bool wsaStarted_ = false;
+        std::atomic<bool> stop_{true};
+        std::thread th_;
 
-            std::mutex mu_;
-            MockMode mode_ = MockMode::NormalNaturalEnd;
-            std::string currentUri_;
-            bool playStarted_ = false;
-            std::chrono::steady_clock::time_point playStartTp_{};
-        };
+        std::mutex mu_;
+        MockMode mode_ = MockMode::NormalNaturalEnd;
+        std::string currentUri_;
+        std::string sink_ = "http-get:*:audio/wav:*";
+        bool playStarted_ = false;
+        std::chrono::steady_clock::time_point playStartTp_{};
+    };
+
+    {
 
         // 生成 0.35 秒全零静音（≤ -60 dBFS）临时 WAV 文件（44100 Hz, 16-bit, 2ch）
         const std::string silentWavPath = make_cast_temp_wav_path("mock_silent_test");
@@ -1455,6 +1473,528 @@ int main() {
 
         raopMock.shutdown();
         std::remove(apWavPath.c_str());
+    }
+
+    // ================= 8) 1.1.3 UPnP 投放升频与流式供源测试 =================
+    std::printf("\n-- 8. 1.1.3 UPnP 投放升频与流式供源完整契约测试 --\n");
+    {
+        // 8.0 parse_sink_formats 纯函数覆盖
+        {
+            auto f0 = parse_sink_formats("");
+            ck(f0.empty(), "parse_sink_formats: 空串返回空列表");
+
+            auto f1 = parse_sink_formats("http-get:*:audio/wav:*");
+            ck(f1.empty(), "parse_sink_formats: 无 rate 通配 WAV 返回空列表 (视为未声明)");
+
+            auto f2 = parse_sink_formats("http-get:*:audio/wav:DLNA.ORG_PN=WAV;rate=88200");
+            ck(f2.size() == 1 && f2[0].rate == 88200 && f2[0].bits == 0,
+               "parse_sink_formats: audio/wav 指定 rate=88200 解析正确");
+
+            auto f3 = parse_sink_formats("http-get:*:audio/x-wav:rate=96000;bitspersample=24");
+            ck(f3.size() == 1 && f3[0].rate == 96000 && f3[0].bits == 24,
+               "parse_sink_formats: audio/x-wav 识别 96000 Hz / 24 bit");
+
+            auto f4 = parse_sink_formats("http-get:*:audio/L16:rate=44100,http-get:*:audio/L24:rate=192000,http-get:*:audio/L32:rate=384000");
+            ck(f4.size() == 3 &&
+               f4[0].rate == 44100 && f4[0].bits == 16 &&
+               f4[1].rate == 192000 && f4[1].bits == 24 &&
+               f4[2].rate == 384000 && f4[2].bits == 32,
+               "parse_sink_formats: L16/L24/L32 复合能力列表完整解析");
+        }
+
+        // 辅助结构与函数
+        struct HttpFetchResult {
+            int statusCode = 0;
+            std::string headers;
+            std::string body;
+        };
+
+        auto fetch_http_data = [](const std::string& uri, const std::string& rangeHeader = "") -> HttpFetchResult {
+            HttpFetchResult res;
+            if (uri.rfind("http://", 0) != 0) return res;
+            const size_t hs = 7;
+            const size_t slash = uri.find('/', hs);
+            const std::string hostport = uri.substr(hs, (slash == std::string::npos ? uri.size() : slash) - hs);
+            const std::string path = (slash == std::string::npos) ? "/" : uri.substr(slash);
+            const size_t colon = hostport.find(':');
+            const std::string host = (colon == std::string::npos) ? hostport : hostport.substr(0, colon);
+            const int port = (colon == std::string::npos) ? 80 : std::atoi(hostport.substr(colon + 1).c_str());
+
+            upnp_os::socket_t s = ::socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+            if (s == upnp_os::kInvalidSocket) return res;
+            upnp_os::set_timeout(s, SO_RCVTIMEO, 3000);
+            upnp_os::set_timeout(s, SO_SNDTIMEO, 3000);
+
+            sockaddr_in a{};
+            a.sin_family = AF_INET;
+            a.sin_port = htons((uint16_t)port);
+            a.sin_addr.s_addr = ::inet_addr(host.c_str());
+            if (::connect(s, (sockaddr*)&a, sizeof(a)) != 0) {
+                upnp_os::close_socket(s);
+                return res;
+            }
+
+            std::string req = "GET " + path + " HTTP/1.1\r\nHost: " + hostport + "\r\n";
+            if (!rangeHeader.empty()) {
+                req += "Range: " + rangeHeader + "\r\n";
+            }
+            req += "Connection: close\r\n\r\n";
+            upnp_os::io_send(s, req.data(), (int)req.size());
+
+            std::string raw;
+            char buf[8192];
+            int r = 0;
+            while ((r = upnp_os::io_recv(s, buf, sizeof(buf))) > 0) {
+                raw.append(buf, (size_t)r);
+            }
+            upnp_os::close_socket(s);
+
+            size_t hdrEnd = raw.find("\r\n\r\n");
+            if (hdrEnd != std::string::npos) {
+                res.headers = raw.substr(0, hdrEnd);
+                res.body = raw.substr(hdrEnd + 4);
+                size_t sp1 = res.headers.find(' ');
+                if (sp1 != std::string::npos) {
+                    res.statusCode = std::atoi(res.headers.c_str() + sp1 + 1);
+                }
+            } else {
+                res.body = raw;
+            }
+            return res;
+        };
+
+        auto read_file_binary = [](const std::string& path) -> std::string {
+            std::ifstream in(path, std::ios::binary);
+            return std::string((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+        };
+
+        auto count_temp_rtacast = []() -> size_t {
+            size_t c = 0;
+            std::error_code ec;
+            for (const auto& entry : fs::directory_iterator(fs::temp_directory_path(ec), ec)) {
+                if (entry.path().filename().string().rfind("rtacast_", 0) == 0) ++c;
+            }
+            return c;
+        };
+
+        // 构造测试源文件：44100 Hz, 16 bit, 2 声道, 4410 帧 (0.1秒), 振幅 ≤ -60 dBFS (铁律 1)
+        const std::string srcWavPath = make_cast_temp_wav_path("upsample_test_src");
+        rta::audio::AudioBuffer srcBuf;
+        srcBuf.rate = 44100;
+        srcBuf.channels = 2;
+        srcBuf.bits = 16;
+        srcBuf.isFloat = false;
+        const size_t kSrcFrames = 4410;
+        srcBuf.raw.resize(kSrcFrames * 2);
+        for (size_t i = 0; i < kSrcFrames; ++i) {
+            // -60 dBFS 极微弱正弦波，绝对不可听
+            double v = std::sin(2.0 * M_PI * 440.0 * (double)i / 44100.0) * 0.0009;
+            srcBuf.setSample(i, 0, v);
+            srcBuf.setSample(i, 1, -v);
+        }
+        rta::audio::write_wav(srcWavPath, srcBuf);
+
+        // 启动 Loopback Mock 渲染器
+        LoopbackMockUpnpRenderer mock;
+        mock.start();
+        mock.reset_mode(MockMode::ContinuousPlay);
+        mock.set_sink("http-get:*:audio/wav:DLNA.ORG_PN=WAV;rate=88200,http-get:*:audio/L24:rate=88200");
+        const std::string descUrl = "http://127.0.0.1:" + std::to_string(mock.port()) + "/desc.xml";
+
+        // ================= 判据 1, 2, 3, 4, 5: 升频生效 / 逐字节相等 / 帧数守恒 / Range / 状态一致 =================
+        {
+            CastStartParams p;
+            p.dev = descUrl;
+            p.file = srcWavPath;
+            p.applyUpsample = true;
+            p.requestedRate = "88200";
+            p.filterName = "poly-sinc-lp";
+
+            auto startRes = mgr.start(p);
+            ck(startRes.ok, "判据 1-5: 投放升频起播请求受理成功");
+
+            // 等待进入 playing
+            CastState st;
+            for (int i = 0; i < 60; ++i) {
+                st = mgr.get_state();
+                if (st.phase == "playing") break;
+                std::this_thread::sleep_for(std::chrono::milliseconds(50));
+            }
+            ck(st.phase == "playing", "判据 1-5: 顺利进入 playing 阶段", "当前=" + st.phase);
+
+            // 判据 5: 状态一致性断言
+            // 依据：UI 与外部状态必须如实反映实际生效的升频参数、源格式与是否重采样，不得谎报
+            ck(st.upsampleApplied == true, "判据 5(状态一致): upsampleApplied 为 true");
+            ck(st.resampled == true, "判据 5(状态一致): resampled 为 true (88200 != 44100)");
+            ck(st.servedRate == 88200, "判据 5(状态一致): servedRate 精确为 88200");
+            ck(st.servedBits == 16, "判据 5(状态一致): servedBits 为 16 (源位深)");
+            // 1.1.3 集成补：界面显示的是**实际用的**滤波器（servedFilter），
+            // 它必须非空且等于本次真正喂给重采样器的预设名，否则 UI 只能回落到"用户填的名字"——
+            // 一旦发生回退（名字不存在），界面就会显示一个没被用上的名字（假信息）。
+            ck(st.servedFilter == "poly-sinc-lp",
+               "判据 5(状态一致): servedFilter 记录实际使用的预设名 poly-sinc-lp", st.servedFilter);
+            ck(st.sampleRate == 88200, "判据 5(状态一致): sampleRate 为 88200");
+            ck(st.bits == 16, "判据 5(状态一致): bits 为 16");
+            ck(st.sourceRate == 44100, "判据 5(状态一致): sourceRate 为源率 44100");
+            ck(st.sourceBits == 16, "判据 5(状态一致): sourceBits 为源位深 16");
+            ck(st.sourceChannels == 2, "判据 5(状态一致): sourceChannels 为 2");
+
+            std::string streamUri = mock.get_current_uri();
+            ck(!streamUri.empty(), "Mock 接收端捕获到投放 streamUri", streamUri);
+
+            HttpFetchResult fullRes = fetch_http_data(streamUri);
+            ck(fullRes.statusCode == 200, "HTTP GET 获取完整 WAV 流返回 200 OK");
+            ck(fullRes.body.size() >= 44, "HTTP GET 获取数据体大于 44 字节头大小");
+
+            // 判据 1: WAV 头结构精确断言
+            // 依据：只有 RIFF/fmt/data 44 字节头与真实目标采样率、位深、声道及 data 大小完全自洽，DLNA 渲染器才能无误解码
+            if (fullRes.body.size() >= 44) {
+                const uint8_t* h = reinterpret_cast<const uint8_t*>(fullRes.body.data());
+                bool riffOk = (std::memcmp(h, "RIFF", 4) == 0);
+                uint32_t riffSz = (uint32_t)h[4] | ((uint32_t)h[5] << 8) | ((uint32_t)h[6] << 16) | ((uint32_t)h[7] << 24);
+                bool waveOk = (std::memcmp(h + 8, "WAVE", 4) == 0);
+                bool fmtOk = (std::memcmp(h + 12, "fmt ", 4) == 0);
+                uint32_t fmtSz = (uint32_t)h[16] | ((uint32_t)h[17] << 8) | ((uint32_t)h[18] << 16) | ((uint32_t)h[19] << 24);
+                uint16_t tag = (uint16_t)h[20] | ((uint16_t)h[21] << 8);
+                uint16_t ch = (uint16_t)h[22] | ((uint16_t)h[23] << 8);
+                uint32_t rate = (uint32_t)h[24] | ((uint32_t)h[25] << 8) | ((uint32_t)h[26] << 16) | ((uint32_t)h[27] << 24);
+                uint32_t byteRate = (uint32_t)h[28] | ((uint32_t)h[29] << 8) | ((uint32_t)h[30] << 16) | ((uint32_t)h[31] << 24);
+                uint16_t blockAlign = (uint16_t)h[32] | ((uint16_t)h[33] << 8);
+                uint16_t bits = (uint16_t)h[34] | ((uint16_t)h[35] << 8);
+                bool dataTagOk = (std::memcmp(h + 36, "data", 4) == 0);
+                uint32_t dataSz = (uint32_t)h[40] | ((uint32_t)h[41] << 8) | ((uint32_t)h[42] << 16) | ((uint32_t)h[43] << 24);
+
+                ck(riffOk && waveOk && fmtOk && dataTagOk, "判据 1(WAV头): 包含合法的 RIFF / WAVE / fmt / data 块标头");
+                ck(fmtSz == 16 && tag == 1, "判据 1(WAV头): fmtSz=16 且 tag=1 (标准线性 PCM)");
+                ck(ch == 2 && rate == 88200 && bits == 16, "判据 1(WAV头): 声道=2, 采样率=88200, 位深=16");
+                ck(byteRate == 88200 * 4 && blockAlign == 4, "判据 1(WAV头): byteRate 与 blockAlign 精确匹配");
+                ck(riffSz == 36 + dataSz, "判据 1(WAV头): RIFF 总大小字段等于 36 + data 大小",
+                   "riffSz=" + std::to_string(riffSz) + " 36+dataSz=" + std::to_string(36 + dataSz));
+                ck(fullRes.body.size() == 44 + dataSz, "判据 1(WAV头): 文件实际字节大小精确等于 44 + data 大小",
+                   "body=" + std::to_string(fullRes.body.size()) + " 44+dataSz=" + std::to_string(44 + dataSz));
+            }
+
+            // 判据 3: 帧数守恒断言
+            // 依据：总输出帧数必须精确守恒于 llround(srcFrames * targetRate / sourceRate)，不多也不少一帧
+            const uint64_t expectedFrames = (uint64_t)std::llround((double)kSrcFrames * 88200.0 / 44100.0); // 8820
+            const size_t actualDataBytes = fullRes.body.size() >= 44 ? (fullRes.body.size() - 44) : 0;
+            const size_t actualFrames = actualDataBytes / 4;
+            ck(actualFrames == expectedFrames,
+               "判据 3(帧数守恒): 实际输出帧数精确等于理论计算",
+               "actual=" + std::to_string(actualFrames) + " expected=" + std::to_string(expectedFrames));
+            ck(actualDataBytes == expectedFrames * 4,
+               "判据 3(帧数守恒): 数据块末尾无任何溢出或截断的残留字节");
+
+            // 判据 2: 逐字节相等断言
+            // 依据：同一 PolyphaseResampler 配置与命名滤波器下，流式分块写盘与离线独立计算产出的 PCM 逐字节一致
+            std::vector<uint8_t> expectedPcmBytes;
+            {
+                rta::dsp::ResamplerConfig rcfg;
+                rcfg.inRate = 44100;
+                rcfg.outRate = 88200;
+                rcfg.channels = 2;
+                const auto* fp = rta::dsp::find_preset("poly-sinc-lp", false);
+                rcfg.totalTaps = fp->taps;
+                rcfg.transition = fp->transition;
+                rcfg.attenDb = fp->attenDb;
+                rcfg.window = fp->window;
+                rcfg.phase = fp->phase;
+                rcfg.twoStage = fp->twoStage;
+                rcfg.minTapsPerInput = fp->tapsPerInput;
+
+                rta::dsp::PolyphaseResampler testResampler(rcfg);
+                uint64_t refWritten = 0;
+
+                auto append_ref_frames = [&](const std::vector<std::vector<double>>& outCh, size_t nOut) {
+                    if (nOut == 0) return;
+                    if (refWritten + nOut > expectedFrames) nOut = (size_t)(expectedFrames - refWritten);
+                    if (nOut == 0) return;
+                    for (size_t i = 0; i < nOut; ++i) {
+                        for (int c = 0; c < 2; ++c) {
+                            double x = outCh[c][i];
+                            if (!rta::audio::audio_finite(x)) x = 0.0;
+                            double s = x * 32768.0;
+                            s = std::floor(s + 0.5);
+                            if (s > 32767.0) s = 32767.0;
+                            if (s < -32768.0) s = -32768.0;
+                            int16_t v = static_cast<int16_t>(s);
+                            expectedPcmBytes.push_back((uint8_t)(v & 0xFF));
+                            expectedPcmBytes.push_back((uint8_t)((v >> 8) & 0xFF));
+                        }
+                    }
+                    refWritten += nOut;
+                };
+
+                size_t srcOffset = 0;
+                const size_t kChunk = 1 << 16;
+                while (srcOffset < srcBuf.frames()) {
+                    size_t thisChunk = std::min(kChunk, (size_t)(srcBuf.frames() - srcOffset));
+                    std::vector<std::vector<double>> inCh(2, std::vector<double>(thisChunk));
+                    for (int c = 0; c < 2; ++c) {
+                        for (size_t i = 0; i < thisChunk; ++i) inCh[c][i] = srcBuf.sample(srcOffset + i, c);
+                    }
+                    srcOffset += thisChunk;
+                    size_t maxOut = testResampler.maxOutFrames(thisChunk);
+                    std::vector<std::vector<double>> outCh(2, std::vector<double>(maxOut));
+                    std::vector<const double*> inPtrs = {inCh[0].data(), inCh[1].data()};
+                    std::vector<double*> outPtrs = {outCh[0].data(), outCh[1].data()};
+                    size_t nOut = testResampler.process(inPtrs.data(), thisChunk, outPtrs.data());
+                    append_ref_frames(outCh, nOut);
+                }
+
+                const size_t drainChunk = 1024;
+                std::vector<std::vector<double>> zeroIn(2, std::vector<double>(drainChunk, 0.0));
+                std::vector<const double*> zeroPtrs = {zeroIn[0].data(), zeroIn[1].data()};
+                size_t maxDrainOut = testResampler.maxOutFrames(drainChunk);
+                std::vector<std::vector<double>> drainOut(2, std::vector<double>(maxDrainOut));
+                std::vector<double*> drainOutPtrs = {drainOut[0].data(), drainOut[1].data()};
+                const size_t maxDrainIn = (size_t)std::ceil(testResampler.latencyInputSamples() * 2.0) + 2048;
+                size_t drainedIn = 0;
+                while (refWritten < expectedFrames && drainedIn < maxDrainIn) {
+                    size_t nOut = testResampler.process(zeroPtrs.data(), drainChunk, drainOutPtrs.data());
+                    drainedIn += drainChunk;
+                    if (nOut > 0) append_ref_frames(drainOut, nOut);
+                }
+                if (refWritten < expectedFrames) {
+                    size_t pad = (size_t)(expectedFrames - refWritten);
+                    std::vector<std::vector<double>> padCh(2, std::vector<double>(pad, 0.0));
+                    append_ref_frames(padCh, pad);
+                }
+            }
+
+            std::string actualPcmBytes = fullRes.body.substr(44);
+            ck(actualPcmBytes.size() == expectedPcmBytes.size(),
+               "判据 2(逐字节相等): PCM 字节大小与离线独立计算完全一致",
+               std::to_string(actualPcmBytes.size()) + " bytes");
+            ck(actualPcmBytes == std::string(reinterpret_cast<const char*>(expectedPcmBytes.data()), expectedPcmBytes.size()),
+               "判据 2(逐字节相等): HTTP 供出的 PCM 样本与离线独立重采样算出的 PCM 逐字节完全相等");
+
+            // 判据 4: Range 请求断言
+            // 依据：UPnP 渲染器在 Seek 或预缓冲时高频使用 HTTP Range 206，必须精确返回指定范围字节切片与 Content-Range
+            HttpFetchResult rangeRes = fetch_http_data(streamUri, "bytes=1000-1999");
+            ck(rangeRes.statusCode == 206, "判据 4(Range): Range 请求返回 206 Partial Content");
+            std::string expectedContentRange = "Content-Range: bytes 1000-1999/" + std::to_string(fullRes.body.size());
+            ck(rangeRes.headers.find(expectedContentRange) != std::string::npos,
+               "判据 4(Range): 响应头中包含正确的 Content-Range", expectedContentRange);
+            ck(rangeRes.body.size() == 1000, "判据 4(Range): Range 响应数据体恰好为 1000 字节");
+            ck(rangeRes.body == fullRes.body.substr(1000, 1000),
+               "判据 4(Range): Range 数据体与全量流对应位置切片逐字节完全相同");
+
+            mgr.stop();
+        }
+
+        // ================= 判据 6: 关开关，原文件直供 =================
+        // 依据：用户关闭升频开关时，供源必须是源文件的逐字节镜像，不得发生任何重采样或额外包装
+        {
+            CastStartParams pOff;
+            pOff.dev = descUrl;
+            pOff.file = srcWavPath;
+            pOff.applyUpsample = false;
+
+            auto rOff = mgr.start(pOff);
+            ck(rOff.ok, "判据 6(关开关): 关开关起播成功");
+            for (int i = 0; i < 60; ++i) {
+                if (mgr.get_state().phase == "playing") break;
+                std::this_thread::sleep_for(std::chrono::milliseconds(50));
+            }
+            CastState stOff = mgr.get_state();
+            ck(stOff.phase == "playing", "判据 6(关开关): 顺利进入 playing");
+            ck(!stOff.upsampleApplied, "判据 6(关开关): upsampleApplied 保持 false");
+            ck(!stOff.resampled, "判据 6(关开关): resampled 保持 false");
+            ck(stOff.servedRate == 44100, "判据 6(关开关): servedRate 为 44100");
+
+            std::string offUri = mock.get_current_uri();
+            HttpFetchResult offRes = fetch_http_data(offUri);
+            std::string srcFileBytes = read_file_binary(srcWavPath);
+            ck(offRes.body.size() == srcFileBytes.size(),
+               "判据 6(关开关): 供出的字节数与源文件完全相同", std::to_string(offRes.body.size()));
+            ck(offRes.body == srcFileBytes, "判据 6(关开关): 供出的全部字节与源文件逐字节完全相等");
+
+            mgr.stop();
+        }
+
+        // ================= 判据 7: 磁盘不足 (注入 seam) =================
+        // 依据：当临时目录磁盘容量不足时，必须提前防御性拒绝并给出可读原因，严禁留下半截或损坏的临时文件
+        {
+            size_t beforeCount = count_temp_rtacast();
+            cast_test_hooks().freeBytesOverride = 1024; // 模拟仅剩 1 KB 可用
+
+            CastStartParams pDisk;
+            pDisk.dev = descUrl;
+            pDisk.file = srcWavPath;
+            pDisk.applyUpsample = true;
+            pDisk.requestedRate = "88200";
+
+            mgr.start(pDisk);
+            for (int i = 0; i < 40; ++i) {
+                if (mgr.get_state().phase == "error") break;
+                std::this_thread::sleep_for(std::chrono::milliseconds(50));
+            }
+            CastState stDisk = mgr.get_state();
+            ck(stDisk.phase == "error", "判据 7(磁盘不足): 空间不足时会话进入 error 状态");
+            ck(stDisk.error.find("磁盘空间不足") != std::string::npos,
+               "判据 7(磁盘不足): 中文提示包含「磁盘空间不足」", stDisk.error);
+            ck(!stDisk.errorEn.empty() && !has_cjk(stDisk.errorEn),
+               "判据 7(磁盘不足): 英文提示非空且不含中文", stDisk.errorEn);
+            ck(count_temp_rtacast() == beforeCount,
+               "判据 7(磁盘不足): 临时目录 rtacast_* 计数未增加，无残留孤儿文件");
+
+            cast_test_hooks().freeBytesOverride = -1; // 恢复
+            mgr.stop();
+        }
+
+        // ================= 判据 8: 准备阶段取消 =================
+        // 依据：准备升频大文件耗时较长，若用户在此期间点击停止，必须有界响应、及时退出并清理临时文件
+        {
+            size_t beforeCount = count_temp_rtacast();
+            cast_test_hooks().prepTick = []() -> bool {
+                return true; // 模拟在重采样首块触发取消信号
+            };
+
+            CastStartParams pCancel;
+            pCancel.dev = descUrl;
+            pCancel.file = srcWavPath;
+            pCancel.applyUpsample = true;
+            pCancel.requestedRate = "88200";
+
+            auto t0 = std::chrono::steady_clock::now();
+            mgr.start(pCancel);
+
+            for (int i = 0; i < 40; ++i) {
+                if (!mgr.get_state().running) break;
+                std::this_thread::sleep_for(std::chrono::milliseconds(50));
+            }
+            auto elapsed = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+            CastState stCancel = mgr.get_state();
+
+            ck(!stCancel.running, "判据 8(取消): 取消后 running 为 false");
+            ck(stCancel.phase == "stopped", "判据 8(取消): 取消后 phase 为 stopped");
+            ck(elapsed < 1.5, "判据 8(取消): 准备阶段取消在有界时间内退出", std::to_string(elapsed) + "s");
+            ck(count_temp_rtacast() == beforeCount,
+               "判据 8(取消): 临时生成的未完成 WAV 文件被彻底删除，临时目录计数不变");
+
+            cast_test_hooks().prepTick = nullptr; // 恢复
+            mgr.stop();
+        }
+
+        // ================= 判据 9: 渲染器未声明格式 (默认 Sink) =================
+        // 依据：DLNA 常见通配 Sink 未声明支持的具体采样率，此时必须退回本机上限策略并在 note 中说明渲染器未声明
+        {
+            mock.set_sink("http-get:*:audio/wav:*"); // 默认未声明格式
+
+            CastStartParams pUndecl;
+            pUndecl.dev = descUrl;
+            pUndecl.file = srcWavPath;
+            pUndecl.applyUpsample = true;
+            pUndecl.requestedRate = "max";
+            pUndecl.ceilingRate = 88200;
+
+            mgr.start(pUndecl);
+            for (int i = 0; i < 60; ++i) {
+                if (mgr.get_state().phase == "playing") break;
+                std::this_thread::sleep_for(std::chrono::milliseconds(50));
+            }
+            CastState stUndecl = mgr.get_state();
+            ck(stUndecl.phase == "playing", "判据 9(未声明Sink): 起播进入 playing");
+            ck(stUndecl.upsampleApplied == true, "判据 9(未声明Sink): 依本机上限策略升频生效");
+            ck(stUndecl.servedRate == 88200, "判据 9(未声明Sink): 目标采样率取 ceiling 88200");
+            ck(stUndecl.upsampleNote.find("渲染器未声明接收格式") != std::string::npos,
+               "判据 9(未声明Sink): 中文 note 说明「渲染器未声明接收格式」");
+            ck(stUndecl.upsampleNoteEn.find("renderer declared no receive format") != std::string::npos ||
+               stUndecl.upsampleNoteEn.find("renderer undeclared") != std::string::npos,
+               "判据 9(未声明Sink): 英文 note 包含未声明说明", stUndecl.upsampleNoteEn);
+
+            mgr.stop();
+        }
+
+        // ================= 判据 10: DSD 源 + 开关开 =================
+        // 依据：DSD 源文件通过 DoP 直通，绝不参与投放升频转码，并在 note 中如实陈述
+        {
+            const std::string dsfTestPath = make_cast_temp_wav_path("dsd_upsample_test") + ".dsf";
+            // 构造合法的极小 DSF 文件
+            std::vector<uint8_t> d;
+            auto wr32 = [&](uint32_t v) {
+                d.push_back(v & 0xff); d.push_back((v >> 8) & 0xff);
+                d.push_back((v >> 16) & 0xff); d.push_back((v >> 24) & 0xff);
+            };
+            auto wr64 = [&](uint64_t v) {
+                for (int i = 0; i < 8; ++i) d.push_back((v >> (i * 8)) & 0xff);
+            };
+            d.insert(d.end(), {'D','S','D',' '});
+            wr64(28); wr64(0); wr64(0);
+            d.insert(d.end(), {'f','m','t',' '});
+            wr64(52); wr32(1); wr32(0); wr32(2); wr32(2); wr32(2822400); wr32(1);
+            wr64(32); wr32(4096); wr32(0);
+            d.insert(d.end(), {'d','a','t','a'});
+            uint64_t dSize = 4096 * 2;
+            wr64(12 + dSize);
+            d.resize(d.size() + dSize, 0x55);
+            uint64_t tot = d.size();
+            for (int i = 0; i < 8; ++i) d[12 + i] = (tot >> (i * 8)) & 0xff;
+
+            {
+                std::ofstream out(dsfTestPath, std::ios::binary);
+                out.write((char*)d.data(), d.size());
+            }
+
+            CastStartParams pDsd;
+            pDsd.dev = descUrl;
+            pDsd.file = dsfTestPath;
+            pDsd.dop = true;
+            pDsd.applyUpsample = true;
+            pDsd.requestedRate = "88200";
+
+            mgr.start(pDsd);
+            for (int i = 0; i < 60; ++i) {
+                if (mgr.get_state().phase == "playing") break;
+                std::this_thread::sleep_for(std::chrono::milliseconds(50));
+            }
+            CastState stDsd = mgr.get_state();
+            ck(stDsd.phase == "playing", "判据 10(DSD源): DSD 源起播进入 playing");
+            ck(!stDsd.upsampleApplied, "判据 10(DSD源): upsampleApplied 保持 false");
+            ck(stDsd.upsampleNote.find("DSD 源不参与投放升频") != std::string::npos,
+               "判据 10(DSD源): 中文 note 说明「DSD 源不参与投放升频，保持 DoP 直通」");
+            ck(stDsd.upsampleNoteEn.find("DSD source does not participate in cast upsampling") != std::string::npos,
+               "判据 10(DSD源): 英文 note 说明 DSD 保持 DoP 直通");
+
+            mgr.stop();
+            std::remove(dsfTestPath.c_str());
+        }
+
+        // ================= 判据 11: 4 GiB 上限超限拒绝 (注入 seam) =================
+        // 依据：WAV(RIFF) data 块长度为 32-bit uint，超过 4 GiB 必须直接拒绝，严禁产出谎报长度或截断损坏的假文件
+        {
+            size_t beforeCount = count_temp_rtacast();
+            // 模拟将上限压到 500 字节，预计生成的 35KB 文件立刻触发防御门禁
+            cast_test_hooks().maxWavBytesOverride = 500;
+
+            CastStartParams pOver;
+            pOver.dev = descUrl;
+            pOver.file = srcWavPath;
+            pOver.applyUpsample = true;
+            pOver.requestedRate = "88200";
+
+            mgr.start(pOver);
+            for (int i = 0; i < 40; ++i) {
+                if (mgr.get_state().phase == "error") break;
+                std::this_thread::sleep_for(std::chrono::milliseconds(50));
+            }
+            CastState stOver = mgr.get_state();
+            ck(stOver.phase == "error", "判据 11(4GiB上限): 超过上限时会话进入 error 状态");
+            ck(stOver.error.find("超过 WAV(RIFF) 4 GiB 上限") != std::string::npos,
+               "判据 11(4GiB上限): 中文错误提示明确指出超过 WAV(RIFF) 4 GiB 上限");
+            ck(!stOver.errorEn.empty() && !has_cjk(stOver.errorEn),
+               "判据 11(4GiB上限): 英文错误提示非空且不含中文", stOver.errorEn);
+            ck(count_temp_rtacast() == beforeCount,
+               "判据 11(4GiB上限): 拒绝后未落盘，临时目录无残留文件");
+
+            cast_test_hooks().maxWavBytesOverride = -1; // 恢复
+            mgr.stop();
+        }
+
+        // 清理测试源文件与 Mock
+        mock.stop();
+        std::remove(srcWavPath.c_str());
     }
 
     std::printf("\n=== 测试总结: %s (失败: %d) ===\n", g_fail ? "FAIL" : "PASS", g_fail);
