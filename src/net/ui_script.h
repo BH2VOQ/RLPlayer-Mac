@@ -3976,7 +3976,19 @@ function bpBadgeInfo() {
   // bitPerfect='no', bitPerfectWhy说明端到端未验证。UI任何自推断bitPerfect都不能覆盖这一真值。
   if (S.bpTransport === 'airplay' || (whyBp && whyBp.indexOf('AirPlay') >= 0)) {
     t = '非 bit-perfect'; c = 'bp-no';
-    if (!title) title = whyBp || 'AirPlay 传输：系统混音与网络重封装，端到端逐位未获验证';
+    if (!title) title = whyBp || 'AirPlay 传输：发送端逐位无损，接收端解码后的输出无法验证';
+    return { text: t, cls: c, title: title };
+  }
+  // 1.1.2 修（用户 2026-11-04：投放 UPnP 时一直显示「PCM 升频」）：
+  // UPnP 投放把**源文件按原采样率**供源，本机根本不升频；旧代码却拿 why 文案里
+  // 「渲染器侧是否重采样由对方决定」这句**包含「重采样」三个字**去匹配，于是每首 UPnP
+  // 都被判成 PCM-PCM 升频。这里在进入文案匹配前就先分清「投放」与「本地播放」：
+  // 投放链路里升频只可能发生在远端，本机不主张任何升频方向。
+  if (S.bpTransport === 'upnp' || S.bpOutMode === 'upnp' || (whyBp && whyBp.indexOf('UPnP') >= 0)) {
+    t = '非 bit-perfect'; c = 'bp-no';
+    if (!title) {
+      title = whyBp || 'UPnP 投放：源文件按原采样率供源，本机不做升频；接收端是否重采样由对方决定';
+    }
     return { text: t, cls: c, title: title };
   }
 
@@ -3995,7 +4007,11 @@ function bpBadgeInfo() {
     return { text: t, cls: c, title: title };
   }
   var allWhy = whyFb + ' ' + whyBp;
-  if (allWhy.indexOf('重采样') >= 0) {
+  // 只对**本地播放**做文案推断：投放（airplay/upnp）已在上面各自返回，
+  // 且它们的原因句里本来就会出现「重采样」字样，这里再退一道，防止将来文案改动又把它带回来。
+  var isCastOut = (S.bpTransport === 'airplay' || S.bpTransport === 'upnp' ||
+                   S.bpOutMode === 'airplay' || S.bpOutMode === 'upnp');
+  if (!isCastOut && allWhy.indexOf('重采样') >= 0) {
     t = 'PCM-PCM 升频'; c = 'bp-up';
     if (!title) title = 'PCM 源 → 更高 PCM 采样率';
     return { text: t, cls: c, title: title };
@@ -6295,8 +6311,19 @@ function showChain() {
       // 1.1.2 AP-1.2：AirPlay 的"非 bit-perfect"不是 DSP 造成的，是**传输本身**
       // （系统混音 + 网络重封装，端到端逐位未获验证）。说成 DSP 会把用户引向错误的排查方向。
       heroCls = ' warn';
-      heroTitle = (p.transport === 'airplay' || S.bpTransport === 'airplay')
-        ? '非 Bit-Perfect · AirPlay 传输（端到端逐位未获验证）'
+      // 1.1.2 补（用户 2026-11-04 提问「AirPlay 都是非 bit-perfect，有没有验证方式」）：
+      // 结论必须分两段说，否则把「我们能控制、也已验证过的那一段」也一起否掉了。
+      //   A 段 = 源 PCM → ALAC 网络包：可验证，且已用独立解码器（FFmpeg ALAC）交叉验证；
+      //   B 段 = 接收端解码后的重采样/音量/模拟输出：发送端无从观测。
+      // A 段成立的条件写死在这里（少一条就退回笼统口径，绝不夸大）：
+      //   传输是 airplay、没有走重采样、源是 16 bit 双声道、音量 0 dB。
+      var senderExact = ((p.transport === 'airplay') || (S.bpTransport === 'airplay')) &&
+                        !p.resample && (p.inBits === 16) && (p.inCh === 2) &&
+                        Math.abs(typeof p.volume === 'number' ? p.volume : 0) < 0.05;
+      heroTitle = ((p.transport === 'airplay') || (S.bpTransport === 'airplay'))
+        ? (senderExact
+            ? '非 Bit-Perfect · 端到端未验证（源→网络包已逐位验证）'
+            : '非 Bit-Perfect · AirPlay 传输（端到端逐位未获验证）')
         : '非 Bit-Perfect · 信号经过 DSP 处理';
       heroIcon = '!';
     }
@@ -6334,17 +6361,29 @@ function showChain() {
     var isAirPlayOut = (p.transport === 'airplay') || (S.bpTransport === 'airplay');
     var isSharedOut = (ADV.backend === 'wasapi-shared') || (p.sharedOnly === true) || isAirPlayOut;
     var latText = '';
+    // AirPlay 的延迟来自**发送端设定的 RAOP 缓冲**，不是 CoreAudio 的设备属性；
+    // 以前统一写「系统属性延迟」，等于把两种完全不同来源的数字贴同一个标签（用户 2026-11-04 截图可见）。
+    var latLabel = isAirPlayOut ? '网络缓冲' : '系统属性延迟';
     if (p.latencyKnown === true && typeof p.latencyMs === 'number' && p.latencyMs > 0) {
-      latText = '  \u00b7  系统属性延迟 ' + Math.round(p.latencyMs) + ' ms' + (p.latencySource ? (' (' + p.latencySource + ')') : '');
+      latText = '  \u00b7  ' + latLabel + ' ' + Math.round(p.latencyMs) + ' ms' +
+                (p.latencySource ? (' (' + p.latencySource + ')') : '');
     } else if (isAirPlayOut) {
-      latText = '  \u00b7  延迟未知（系统未上报，受网络缓冲影响）';
+      latText = '  \u00b7  延迟未知（发送端未上报缓冲长度）';
     }
+    // 缓冲：AirPlay 走自己的发送端缓冲，没有 CoreAudio 的 buffer 概念；
+    // 以前无条件拼 p.buffer ⟹ 界面上出现「缓冲 undefined ms」（用户 2026-11-04 截图）。
+    var bufText = '';
+    if (typeof p.buffer === 'number' && isFinite(p.buffer) && p.buffer > 0) {
+      bufText = '  \u00b7  缓冲 ' + Math.round(p.buffer) + ' ms';
+    }
+    var senderExactOut = isAirPlayOut && !p.resample && (p.inBits === 16) && (p.inCh === 2) &&
+                         Math.abs(typeof p.volume === 'number' ? p.volume : 0) < 0.05;
     var outModeText = isAirPlayOut
-      ? 'AirPlay 共享输出（非 bit-perfect，端到端逐位未获验证）'
+      ? (senderExactOut ? 'AirPlay 网络输出（源→包逐位一致；接收端不可验证）'
+                        : 'AirPlay 网络输出（非 bit-perfect，端到端逐位未获验证）')
       : (isSharedOut ? '共享模式（非 bit-perfect）' : '独占模式');
     nodes.push({ k: '输出', v: p.device + '  \u00b7  ' + p.outRate + ' Hz / ' + p.outBits + ' bit / ' + p.outCh +
-      ' ch  \u00b7  ' + outModeText + latText +
-      '  \u00b7  缓冲 ' + p.buffer + ' ms',
+      ' ch  \u00b7  ' + outModeText + latText + bufText,
       badge: isAirPlayOut ? 'AirPlay' : (isSharedOut ? '系统混音' : '硬件独占'),
       kind: (isAirPlayOut || isSharedOut) ? 'dsp' : 'lossless' });
 
@@ -6442,7 +6481,10 @@ function backendHint() {
     var latMsg = (dev && dev.latencyKnown && typeof dev.latencyMs === 'number')
       ? ('系统属性延迟 ' + Math.round(dev.latencyMs) + ' ms' + (dev.latencySource ? (' (' + dev.latencySource + ')') : ''))
       : '延迟未知（系统未上报）';
-    m.textContent = 'AirPlay 共享输出：经系统混音，端到端 bit-perfect 未获验证；' + latMsg + '；不支持严格独占（Hog）与 DoP/Native DSD。';
+    // 「经系统混音」是错的：这条路径是 RLPlayer 自己把 ALAC 推到接收器，不经过系统混音器。
+    // 真正不可验证的是接收端解码之后的那一段（重采样 / 音量 / 模拟输出）。
+    m.textContent = 'AirPlay 投放：发送端把源 PCM 编成 ALAC 网络包（源→包可逐位验证），' +
+      '接收端解码后的重采样与模拟输出无法从本机验证；' + latMsg + '；不支持严格独占（Hog）与 DoP/Native DSD。';
     return;
   }
   var bk = (D('sp_backend') && D('sp_backend').value) || 'wasapi';

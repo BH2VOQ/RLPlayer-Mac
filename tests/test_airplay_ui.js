@@ -533,6 +533,56 @@ async function runTests() {
     check('空闲状态时不继承上一曲的 AirPlay 非 bit-perfect，干净回到待播放验证', bp.cls === 'bp-idle' && bp.text === '待播放验证', bp);
   }
 
+  // Test 10b: UPnP 投放不许自称「PCM 升频」（用户 2026-11-04 反馈）
+  // 背景：UPnP 把源文件按原采样率供源，本机不升频；旧逻辑拿原因文案里的
+  // 「渲染器侧是否重采样由对方决定」去匹配「重采样」三字，于是每首都显示 PCM 升频。
+  {
+    console.log('\n-- Test 10b: UPnP 投放徽标不冒充升频 --');
+    let statusResponse = {
+      ok: true,
+      playing: true,
+      paused: false,
+      current: '/Music/track.flac',
+      dur: 240,
+      pos: 12,
+      transport: 'upnp',
+      outMode: 'upnp',
+      castMode: true,
+      castPhase: 'playing',
+      sharedOnly: true,
+      bitPerfect: 'no',
+      bitPerfectWhy: 'UPnP 投放：源文件按原采样率供源，本机不做升频；接收端是否重采样由对方决定（本机 DSP 未介入）'
+    };
+    const env = createEnvironment((url) => {
+      if (url.startsWith('/api/status')) return statusResponse;
+    });
+    await env.tick();
+    let bp = env.bpBadgeInfo();
+    check('UPnP 投放徽标不显示 PCM 升频', bp.text.indexOf('升频') < 0, bp.text);
+    check('UPnP 投放徽标为「非 bit-perfect」', bp.text === '非 bit-perfect', bp.text);
+    check('UPnP 投放说明里点明本机不做升频、远端不由本机判断',
+          String(bp.title).indexOf('升频') >= 0, String(bp.title));
+
+    // 负向对照：本地播放真的重采样时，必须仍然显示升频（不能为了修投放把这条判据一起废掉）
+    statusResponse = {
+      ok: true,
+      playing: true,
+      paused: false,
+      current: '/Music/track.flac',
+      dur: 240,
+      pos: 12,
+      transport: 'coreaudio',
+      outMode: 'coreaudio',
+      castMode: false,
+      sharedOnly: false,
+      bitPerfect: 'no',
+      bitPerfectWhy: '重采样 44100→384000 Hz'
+    };
+    await env.tick();
+    bp = env.bpBadgeInfo();
+    check('本地播放真重采样仍显示 PCM-PCM 升频（负向对照）', bp.text === 'PCM-PCM 升频', bp.text);
+  }
+
   // Test 9: AirPlay 约束 Hog 与 DSD/DoP 输出（不偷偷覆盖用户本地设置，DSD PCM 允许，DoP/Native 拒绝）
   {
     console.log('\n-- Test 9: UI 约束与 DSD/DoP 处理规则 --');
@@ -605,9 +655,17 @@ async function runTests() {
     await env.showChain();
     const mbody = env._getEl('mbody');
     check('信号链包含 AirPlay 节点徽章', mbody.innerHTML.includes('AirPlay'), mbody.innerHTML);
-    check('信号链包含系统属性延迟说明', mbody.innerHTML.includes('系统属性延迟 250 ms'), mbody.innerHTML);
+    // 2026-11-04：AirPlay 的延迟来自发送端设定的 RAOP 缓冲，不是 CoreAudio 设备属性。
+    // 旧文案把它标成「系统属性延迟」是错的，这里改为断言**正确标签**，并明确禁止旧标签。
+    check('信号链把 AirPlay 延迟标为网络缓冲', mbody.innerHTML.includes('网络缓冲 250 ms'), mbody.innerHTML);
+    check('信号链不再把 AirPlay 延迟标成系统属性延迟', !mbody.innerHTML.includes('系统属性延迟'), mbody.innerHTML);
     check('信号链不含写死的 2000ms', !/2000\s*ms|2\s*秒|2s\b/.test(mbody.innerHTML));
-    check('信号链标题声明 AirPlay 传输（端到端逐位未获验证）', mbody.innerHTML.includes('AirPlay 传输（端到端逐位未获验证）'));
+    // 结论必须是两段式：源→网络包已逐位验证，端到端仍未验证。少任何一半都算回归。
+    check('信号链标题区分「源→包已验证」与「端到端未验证」',
+          mbody.innerHTML.includes('端到端未验证') && mbody.innerHTML.includes('源→网络包已逐位验证'),
+          mbody.innerHTML);
+    check('信号链输出节点说明源→包逐位一致', mbody.innerHTML.includes('源→包逐位一致'), mbody.innerHTML);
+    check('信号链不出现 undefined 值', !/undefined/.test(mbody.innerHTML), mbody.innerHTML);
   }
 
   // Test 11: AirPlay 投放状态与 Now Playing 状态契约

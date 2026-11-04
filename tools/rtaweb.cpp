@@ -1719,7 +1719,7 @@ static void upnp_mark_player_state(const std::string& file, bool ok, const std::
         ps.error.clear();
         ps.bpState = "no";
         ps.bpWhy = isAp ? "AirPlay 投放：44100 Hz / 16 bit ALAC，端到端逐位未获验证"
-                        : "UPnP 投放：源文件按原采样率供源，渲染器侧是否重采样由对方决定（本机 DSP 未介入）";
+                        : "UPnP 投放：源文件按原采样率供源，本机不做升频；接收端是否重采样由对方决定（本机 DSP 未介入）";
         ps.rgMode = "bypassed";
         ps.rgAppliedDb = 0.0;
         ps.rgClipLimited = false;
@@ -3917,7 +3917,7 @@ static bool play_one_impl(const std::string& file, const PlayParams& pIn, rta::a
                 << ",\"bitPerfectWhy\":\"" << jesc([&] {
                        if (p.directSdm && directNote.empty()) return std::string("DirectSDM：1-bit 直通，跳过 PCM 与调制");
                        std::vector<std::string> why;
-                       if (targetIsAirPlay) why.push_back("AirPlay 网络传输（系统混音 + 重封装，端到端逐位未获验证）");
+                       if (targetIsAirPlay) why.push_back("AirPlay 网络传输（发送端逐位无损；接收端解码后的输出无法验证）");
                        if (outRate != in.rate) why.push_back("重采样 " + std::to_string(in.rate) + "→" + std::to_string(outRate) + " Hz");
                        if (std::fabs(p.volume) > 1e-9) why.push_back("音量 " + std::to_string((int)std::lround(p.volume)) + " dB");
                        if (cfg.shaper != rta::dsp::Shaper::None) why.push_back("抖动/整形");
@@ -3949,7 +3949,7 @@ static bool play_one_impl(const std::string& file, const PlayParams& pIn, rta::a
                 else {
                     std::vector<std::string> why;
                     // 与信号链 JSON 同一口径（两处必须一致，否则徽标与详情页会互相打脸）
-                    if (targetIsAirPlay) why.push_back("AirPlay 网络传输（系统混音 + 重封装，端到端逐位未获验证）");
+                    if (targetIsAirPlay) why.push_back("AirPlay 网络传输（发送端逐位无损；接收端解码后的输出无法验证）");
                     if (outRate != in.rate) why.push_back("重采样 " + std::to_string(in.rate) + "→" + std::to_string(outRate) + " Hz");
                     if (std::fabs(p.volume) > 1e-9) why.push_back("音量 " + std::to_string((int)std::lround(p.volume)) + " dB");
                     if (cfg.shaper != rta::dsp::Shaper::None) why.push_back("抖动/整形");
@@ -11382,7 +11382,7 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
           // 2026-10-23（用户 261023-02 #1）：status 也带上 bit-perfect 结论，
           // 让底栏徽标不用额外请求 /api/signal 就能显示（轮询已经是 400ms 一次）。
           << ",\"bitPerfect\":\"" << jesc(castMode ? "no" : ps.bpState) << "\""
-          << ",\"bitPerfectWhy\":\"" << jesc(castMode ? (isAirPlayCast ? "AirPlay 投放：44100 Hz / 16 bit ALAC，端到端逐位未获验证" : "UPnP 投放：源文件按原采样率供源，渲染器侧是否重采样由对方决定（本机 DSP 未介入）") : ps.bpWhy) << "\""
+          << ",\"bitPerfectWhy\":\"" << jesc(castMode ? (isAirPlayCast ? "AirPlay 投放：44100 Hz / 16 bit ALAC，端到端逐位未获验证" : "UPnP 投放：源文件按原采样率供源，本机不做升频；接收端是否重采样由对方决定（本机 DSP 未介入）") : ps.bpWhy) << "\""
           // ---- 输出格式自证（2026-10-26 F-5，mac 口径）----
           // 为什么底栏只拿到 outRate 会误判：DoP 的 outRate 是**载波率**
           // （DSD128/48k 族 = 6144000/16 = 384000），和"PCM 升频到 384k"数字完全一样。

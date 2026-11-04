@@ -1577,6 +1577,14 @@ inline const I18nPair* i18n_table(std::size_t* count) {
         {"（上次选择 · 离线/需刷新）", "(Last selection · Offline/needs refresh) "},
         {"上次保存的设备", "Last saved device"},
         {"当前未在线，点击上方已发现设备即可重新选择并刷新。", "is currently not online. Click a discovered device above to reselect and refresh."},
+        {"非 Bit-Perfect · 端到端未验证（源→网络包已逐位验证）", "Non-bit-perfect · End-to-end unverified (source→wire is bit-exact)"},
+        {"网络缓冲", "Network buffer"},
+        {"延迟未知（发送端未上报缓冲长度）", "Latency unknown (sender did not report its buffer)"},
+        {"AirPlay 网络输出（源→包逐位一致；接收端不可验证）", "AirPlay network output (source→wire bit-exact; receiver not verifiable)"},
+        {"AirPlay 网络输出（非 bit-perfect，端到端逐位未获验证）", "AirPlay network output (non-bit-perfect, end-to-end unverified)"},
+        {"AirPlay 投放：发送端把源 PCM 编成 ALAC 网络包（源→包可逐位验证），接收端解码后的重采样与模拟输出无法从本机验证；", "AirPlay casting: the sender encodes source PCM into ALAC packets (source→wire is verifiable); the receiver's own resampling and analog output cannot be verified from this machine;"},
+        {"AirPlay 传输：发送端逐位无损，接收端解码后的输出无法验证", "AirPlay transport: bit-exact at the sender, receiver output not verifiable"},
+        {"UPnP 投放：源文件按原采样率供源，本机不做升频；接收端是否重采样由对方决定（本机 DSP 未介入）", "UPnP casting: the source file is served at its native sample rate; this app never upsamples. Whether the receiver resamples is decided by the receiver (local DSP not involved)."},
     };
     if (count) *count = sizeof(k) / sizeof(k[0]);
     return k;
