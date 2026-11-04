@@ -256,7 +256,8 @@ The functionality stays available and numerically correct (worst convolution cas
 | **1.1.1** | Diagnostics, streaming overhaul, bilingual UI & cast/PEQ fixes     | ✅ Released |
 | **1.1.2** | **AirPlay receiver discovery / casting** + DSD playback reliability | ✅ Released (offline-verified) |
 | **1.1.2.1** | Hotfix: no false “PCM upsampling” when casting, honest AirPlay labels, source→wire bit-exact proof | ✅ Released |
-| **1.1.3** | **UPnP/DLNA cast upsampling** + LLM model list                      | ✅ Released (offline-verified; upsampling on a real renderer that declares >44.1 kHz untested) |
+| **1.1.3** | **UPnP/DLNA cast upsampling** + LLM model list                      | ✅ Released (offline-verified) |
+| **1.1.3.1** | Cast upsampling: explicit **force target rate** for renderers that under-declare | ✅ Released |
 | **1.1.4** | Audio analysis on the track page (three-level folding / true peak / multichannel) | 🧭 Planned |
 | **1.1.5** | Library lookup (album context / asynchronous knowledge)            | 🧭 Planned  |
 | **1.1.6** | AI summary streaming and stage progress                            | 🧭 Planned  |

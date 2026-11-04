@@ -1992,6 +1992,135 @@ int main() {
             mgr.stop();
         }
 
+        // ================= 判据 12: 显式强制目标率 (forceUpsampleRate) =================
+        // 依据：真实设备（如 Rygel MR4 音响）仅声明 audio/l16;rate=44100，
+        // forceUpsampleRate=false 时保持直供；
+        // forceUpsampleRate=true 时成功升频至 192000 且标记 upsampleForced=true、帧数守恒、WAV 头正确；
+        // applyUpsample=false 时强制开关不生效，保持直供。
+        {
+            const std::string src96kWavPath = make_cast_temp_wav_path("upsample_test_96k_src");
+            rta::audio::AudioBuffer src96kBuf;
+            src96kBuf.rate = 96000;
+            src96kBuf.channels = 2;
+            src96kBuf.bits = 16;
+            src96kBuf.isFloat = false;
+            const size_t kSrc96kFrames = 4800; // 0.05 秒
+            src96kBuf.raw.resize(kSrc96kFrames * 2);
+            for (size_t i = 0; i < kSrc96kFrames; ++i) {
+                // -60 dBFS 极微弱正弦波，绝对不可听 (铁律 1)
+                double v = std::sin(2.0 * M_PI * 440.0 * (double)i / 96000.0) * 0.0009;
+                src96kBuf.setSample(i, 0, v);
+                src96kBuf.setSample(i, 1, -v);
+            }
+            rta::audio::write_wav(src96kWavPath, src96kBuf);
+
+            // Mock 渲染器 Sink 只声明 audio/l16;rate=44100
+            mock.set_sink("http-get:*:audio/l16:rate=44100");
+
+            // 12.1 forceUpsampleRate=false → upsampleApplied=false、供出的字节等于源文件（直供）
+            {
+                CastStartParams pNoForce;
+                pNoForce.dev = descUrl;
+                pNoForce.file = src96kWavPath;
+                pNoForce.applyUpsample = true;
+                pNoForce.forceUpsampleRate = false;
+                pNoForce.requestedRate = "max";
+                pNoForce.ceilingRate = 192000;
+
+                auto startRes = mgr.start(pNoForce);
+                ck(startRes.ok, "判据 12.1(强制关): 起播请求受理成功");
+                for (int i = 0; i < 60; ++i) {
+                    if (mgr.get_state().phase == "playing") break;
+                    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+                }
+                CastState stNoForce = mgr.get_state();
+                ck(stNoForce.phase == "playing", "判据 12.1(强制关): 顺利进入 playing");
+                ck(stNoForce.upsampleApplied == false, "判据 12.1(强制关): upsampleApplied 为 false (直供)");
+                ck(stNoForce.upsampleForced == false, "判据 12.1(强制关): upsampleForced 为 false");
+
+                std::string streamUri = mock.get_current_uri();
+                HttpFetchResult resNoForce = fetch_http_data(streamUri);
+                std::string srcData = read_file_binary(src96kWavPath);
+                ck(resNoForce.body.size() == srcData.size(), "判据 12.1(强制关): 供出的字节数精确等于源文件大小");
+                ck(resNoForce.body == srcData, "判据 12.1(强制关): 供出的全部字节与源文件逐字节完全相等");
+
+                mgr.stop();
+            }
+
+            // 12.2 forceUpsampleRate=true → upsampleApplied=true, upsampleForced=true, servedRate=192000, 帧数守恒, note 含「强制」
+            {
+                CastStartParams pForce;
+                pForce.dev = descUrl;
+                pForce.file = src96kWavPath;
+                pForce.applyUpsample = true;
+                pForce.forceUpsampleRate = true;
+                pForce.requestedRate = "max";
+                pForce.ceilingRate = 192000;
+
+                auto startRes = mgr.start(pForce);
+                ck(startRes.ok, "判据 12.2(强制开): 起播请求受理成功");
+                for (int i = 0; i < 60; ++i) {
+                    if (mgr.get_state().phase == "playing") break;
+                    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+                }
+                CastState stForce = mgr.get_state();
+                ck(stForce.phase == "playing", "判据 12.2(强制开): 顺利进入 playing");
+                ck(stForce.upsampleApplied == true, "判据 12.2(强制开): upsampleApplied 为 true");
+                ck(stForce.upsampleForced == true, "判据 12.2(强制开): upsampleForced 为 true");
+                ck(stForce.servedRate == 192000, "判据 12.2(强制开): servedRate 精确为 192000");
+                ck(stForce.upsampleNote.find("强制") != std::string::npos, "判据 12.2(强制开): upsampleNote 包含「强制」", stForce.upsampleNote);
+
+                std::string streamUri = mock.get_current_uri();
+                HttpFetchResult resForce = fetch_http_data(streamUri);
+                ck(resForce.body.size() >= 44, "判据 12.2(强制开): 获取到合法 WAV 数据头");
+                if (resForce.body.size() >= 44) {
+                    const uint8_t* h = reinterpret_cast<const uint8_t*>(resForce.body.data());
+                    uint32_t rate = (uint32_t)h[24] | ((uint32_t)h[25] << 8) | ((uint32_t)h[26] << 16) | ((uint32_t)h[27] << 24);
+                    uint32_t dataSz = (uint32_t)h[40] | ((uint32_t)h[41] << 8) | ((uint32_t)h[42] << 16) | ((uint32_t)h[43] << 24);
+                    uint16_t ch = (uint16_t)h[22] | ((uint16_t)h[23] << 8);
+                    uint16_t bits = (uint16_t)h[34] | ((uint16_t)h[35] << 8);
+                    ck(rate == 192000, "判据 12.2(强制开): 临时 WAV 头采样率精确为 192000");
+                    const uint64_t expFrames = (uint64_t)std::llround((double)kSrc96kFrames * 192000.0 / 96000.0);
+                    const uint64_t expBytes = expFrames * (uint64_t)ch * ((bits + 7) / 8);
+                    ck(dataSz == expBytes, "判据 12.2(强制开): 帧数守恒且 data 字节精确等于理论值");
+                }
+
+                mgr.stop();
+            }
+
+            // 12.3 关开关 (applyUpsample=false) + force=true → 仍然直供，upsampleApplied=false
+            {
+                CastStartParams pOff;
+                pOff.dev = descUrl;
+                pOff.file = src96kWavPath;
+                pOff.applyUpsample = false;
+                pOff.forceUpsampleRate = true;
+                pOff.requestedRate = "max";
+                pOff.ceilingRate = 192000;
+
+                auto startRes = mgr.start(pOff);
+                ck(startRes.ok, "判据 12.3(关开关): 起播请求受理成功");
+                for (int i = 0; i < 60; ++i) {
+                    if (mgr.get_state().phase == "playing") break;
+                    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+                }
+                CastState stOff = mgr.get_state();
+                ck(stOff.phase == "playing", "判据 12.3(关开关): 顺利进入 playing");
+                ck(stOff.upsampleApplied == false, "判据 12.3(关开关): upsampleApplied 保持 false");
+                ck(stOff.upsampleForced == false, "判据 12.3(关开关): upsampleForced 保持 false");
+
+                std::string streamUri = mock.get_current_uri();
+                HttpFetchResult resOff = fetch_http_data(streamUri);
+                std::string srcData = read_file_binary(src96kWavPath);
+                ck(resOff.body.size() == srcData.size(), "判据 12.3(关开关): 供出的字节数与源文件完全相同");
+                ck(resOff.body == srcData, "判据 12.3(关开关): 供出的全部字节与源文件逐字节完全相等");
+
+                mgr.stop();
+            }
+
+            std::remove(src96kWavPath.c_str());
+        }
+
         // 清理测试源文件与 Mock
         mock.stop();
         std::remove(srcWavPath.c_str());

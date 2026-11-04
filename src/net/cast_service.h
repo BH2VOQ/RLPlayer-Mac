@@ -1434,6 +1434,7 @@ private:
             if (p.applyUpsample) {
                 std::lock_guard<std::mutex> lk(mtx_);
                 state_.upsampleApplied = false;
+                state_.upsampleForced = false;
                 state_.upsampleNote = "DSD 源不参与投放升频，保持 DoP 直通";
                 state_.upsampleNoteEn = "DSD source does not participate in cast upsampling; preserving DoP passthrough";
             }
@@ -1537,6 +1538,7 @@ private:
                 {
                     std::lock_guard<std::mutex> lk(mtx_);
                     state_.upsampleApplied = false;
+                    state_.upsampleForced = false;
                     state_.servedRate = sourceRate;
                     state_.servedBits = sourceBits;
                     state_.upsampleNote = rateDecision.noteZh;
