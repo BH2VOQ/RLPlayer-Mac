@@ -254,7 +254,7 @@ The functionality stays available and numerically correct (worst convolution cas
 | --------- | ------------------------------------------------------------------ | ---------- |
 | **1.1.0** | Baseline release                                                   | ✅ Released |
 | **1.1.1** | Diagnostics, streaming overhaul, bilingual UI & cast/PEQ fixes     | ✅ Released |
-| **1.1.2** | **AirPlay receiver discovery / casting** + DSD playback reliability | Release candidate |
+| **1.1.2** | **AirPlay receiver discovery / casting** + DSD playback reliability | ✅ Released (offline-verified) |
 | **1.1.3** | LLM model list                                                     | 🧭 Planned  |
 | **1.1.4** | Audio analysis on the track page (three-level folding / true peak / multichannel) | 🧭 Planned |
 | **1.1.5** | Library lookup (album context / asynchronous knowledge)            | 🧭 Planned  |
