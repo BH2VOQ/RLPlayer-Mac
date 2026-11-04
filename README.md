@@ -15,7 +15,7 @@
   <img src="https://img.shields.io/badge/HiFi-DSP%20%C2%B7%20DoP%20%C2%B7%20bit--perfect-22d3ee?style=flat-square" alt="HiFi">
   <a href="https://github.com/BH2VOQ/RLPlayer-Mac/releases"><img src="https://img.shields.io/github/v/release/BH2VOQ/RLPlayer-Mac?include_prereleases&label=release&style=flat-square&color=22d3ee" alt="Release"></a>
   <img src="https://img.shields.io/badge/macOS-13%2B%20%C2%B7%20arm64-0b1120?style=flat-square&logo=apple&logoColor=white" alt="macOS 13+ · arm64">
-  <img src="https://img.shields.io/badge/ctest-113%2F113-34d399?style=flat-square" alt="ctest 113/113">
+  <img src="https://img.shields.io/badge/ctest-132%2F132-34d399?style=flat-square" alt="ctest 132/132">
   <img src="https://img.shields.io/badge/license-GPL--3.0--or--later-a78bfa?style=flat-square" alt="GPL-3.0-or-later">
   <img src="https://img.shields.io/badge/runtime%20deps-0-f472b6?style=flat-square" alt="No runtime dependencies">
 </p>
@@ -247,7 +247,7 @@ The functionality stays available and numerically correct (worst convolution cas
 
 ## 🗺 Roadmap
 
-> The current version follows the Release badge above. **1.1.2** adds AirPlay casting and DSD reliability fixes; 1.1.3 onward is planned. The full criteria, validation limits and open items are in
+> The current version follows the Release badge above. **1.1.2** adds AirPlay casting and DSD reliability fixes; **1.1.2.1** is a hotfix for cast status/labels; 1.1.3 onward is planned. The full criteria, validation limits and open items are in
 > **[ROADMAP-1.1.x.md](ROADMAP-1.1.x.md)**.
 
 | Version   | Theme                                                              | Status     |
@@ -255,6 +255,7 @@ The functionality stays available and numerically correct (worst convolution cas
 | **1.1.0** | Baseline release                                                   | ✅ Released |
 | **1.1.1** | Diagnostics, streaming overhaul, bilingual UI & cast/PEQ fixes     | ✅ Released |
 | **1.1.2** | **AirPlay receiver discovery / casting** + DSD playback reliability | ✅ Released (offline-verified) |
+| **1.1.2.1** | Hotfix: no false “PCM upsampling” when casting, honest AirPlay labels, source→wire bit-exact proof | ✅ Released |
 | **1.1.3** | LLM model list                                                     | 🧭 Planned  |
 | **1.1.4** | Audio analysis on the track page (three-level folding / true peak / multichannel) | 🧭 Planned |
 | **1.1.5** | Library lookup (album context / asynchronous knowledge)            | 🧭 Planned  |

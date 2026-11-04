@@ -1,8 +1,8 @@
 {
-  "version": "1.1.2",
-  "notes": "AirPlay receiver discovery and direct RAOP casting; corrected cast status, clock synchronization and DSD/DoP playback reliability. · 新增 AirPlay 接收器发现与应用内 RAOP 投放，修正投放状态、时钟同步及 DSD/DoP 播放可靠性。",
-  "download_url": "https://github.com/BH2VOQ/RLPlayer-Mac/releases/download/v1.1.2/RLPlayer-1.1.2-macOS-arm64.dmg",
-  "sha256": "b4f6329f8b0ef8c4c6f65177004dad97bd1fc977506d4ca36cdf9c3932dc7f57",
-  "size": 8046264,
-  "published_at": "2026-11-04T04:00:00Z"
+  "version": "1.1.2.1",
+  "notes": "Hotfix: casting no longer reports a false “PCM upsampling”, AirPlay latency/buffer labels now match their real source, and the source→wire path is proven bit-exact with an independent decoder. · 热修：投放不再假报「PCM 升频」，AirPlay 延迟/缓冲标签改为真实来源，源→网络包逐位一致性新增独立解码器验证。",
+  "download_url": "https://github.com/BH2VOQ/RLPlayer-Mac/releases/download/v1.1.2.1/RLPlayer-1.1.2.1-macOS-arm64.dmg",
+  "sha256": "ef9b50f74c1c8ebca47a1bd446cf953373f19b0a859c76b4cb6dd9238bd101b9",
+  "size": 8047228,
+  "published_at": "2026-11-04T04:29:44Z"
 }
