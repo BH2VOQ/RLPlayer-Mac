@@ -704,6 +704,14 @@ target_include_directories(test_cast_audio PRIVATE ${CMAKE_SOURCE_DIR}/src)
 add_test(NAME cast_audio COMMAND test_cast_audio)
 set_tests_properties(cast_audio PROPERTIES TIMEOUT 60)
 
+# AirPlay 发送端「源 PCM → 网络包」逐位一致：用 FFmpeg 的 ALAC 解码器做独立交叉验证
+# （不能用 Apple 编码器 + Apple 解码器自证）。没装 ffmpeg 时该用例明确 SKIP，不冒充通过。
+add_executable(test_cast_bit_exact tests/test_cast_bit_exact.cpp)
+target_include_directories(test_cast_bit_exact PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(test_cast_bit_exact PRIVATE "-framework AudioToolbox" "-framework CoreFoundation")
+add_test(NAME cast_bit_exact COMMAND test_cast_bit_exact)
+set_tests_properties(cast_bit_exact PROPERTIES TIMEOUT 60)
+
 # 1.1.2 AirPlay UI：用 Node 的 vm 直接跑 ui_script.h 的生产逻辑（不复制逻辑）
 find_program(NODE_EXECUTABLE node)
 if(NODE_EXECUTABLE)
