@@ -581,6 +581,17 @@ async function runTests() {
     await env.tick();
     bp = env.bpBadgeInfo();
     check('本地播放真重采样仍显示 PCM-PCM 升频（负向对照）', bp.text === 'PCM-PCM 升频', bp.text);
+
+    // 负向对照 2：投放**真的**先升频再供源时，徽标必须显示升频（而不是无脑写死"非 bit-perfect"）。
+    statusResponse = {
+      ok: true, playing: true, paused: false, current: '/Music/track.flac',
+      dur: 240, pos: 12, transport: 'upnp', outMode: 'upnp', castMode: true,
+      castPhase: 'playing', sharedOnly: true, inRate: 44100, outRate: 176400, resampled: true,
+      bitPerfect: 'no', bitPerfectWhy: 'UPnP 投放：先在本机升频再供源'
+    };
+    await env.tick();
+    bp = env.bpBadgeInfo();
+    check('投放真的升频时徽标显示 PCM-PCM 升频', bp.text === 'PCM-PCM 升频', bp.text);
   }
 
   // Test 9: AirPlay 约束 Hog 与 DSD/DoP 输出（不偷偷覆盖用户本地设置，DSD PCM 允许，DoP/Native 拒绝）

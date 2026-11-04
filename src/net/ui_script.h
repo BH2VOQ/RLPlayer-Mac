@@ -3975,6 +3975,11 @@ function bpBadgeInfo() {
   // 1.1.2 AP-1.2: 播放signal/status将提供transport/sharedOnly/latencyKnown/latencyMs/latencySource，
   // bitPerfect='no', bitPerfectWhy说明端到端未验证。UI任何自推断bitPerfect都不能覆盖这一真值。
   if (S.bpTransport === 'airplay' || (whyBp && whyBp.indexOf('AirPlay') >= 0)) {
+    if (S.bpResampled) {
+      t = 'PCM-PCM 升频'; c = 'bp-up';
+      if (!title) title = 'AirPlay 投放：44100 Hz 是发送端固定格式（源 ' + S.bpInRate + ' Hz），非 bit-perfect';
+      return { text: t, cls: c, title: title };
+    }
     t = '非 bit-perfect'; c = 'bp-no';
     if (!title) title = whyBp || 'AirPlay 传输：发送端逐位无损，接收端解码后的输出无法验证';
     return { text: t, cls: c, title: title };
@@ -3985,6 +3990,14 @@ function bpBadgeInfo() {
   // 都被判成 PCM-PCM 升频。这里在进入文案匹配前就先分清「投放」与「本地播放」：
   // 投放链路里升频只可能发生在远端，本机不主张任何升频方向。
   if (S.bpTransport === 'upnp' || S.bpOutMode === 'upnp' || (whyBp && whyBp.indexOf('UPnP') >= 0)) {
+    // 投放是否升频由**后端证据**决定：resampled=true 说明供出去的流真的换了采样率，
+    // 那就如实标「PCM-PCM 升频」；否则标非 bit-perfect，并说清本机没升频。
+    // 这样将来投放真的接上本机升频时，徽标会自己变对，不需要再改这段。
+    if (S.bpResampled) {
+      t = 'PCM-PCM 升频'; c = 'bp-up';
+      if (!title) title = 'UPnP 投放：先在本机升频再供源（源 ' + S.bpInRate + ' → ' + S.bpOutRate + ' Hz），非 bit-perfect';
+      return { text: t, cls: c, title: title };
+    }
     t = '非 bit-perfect'; c = 'bp-no';
     if (!title) {
       title = whyBp || 'UPnP 投放：源文件按原采样率供源，本机不做升频；接收端是否重采样由对方决定';
@@ -4051,6 +4064,9 @@ function tick() {
     S.bpModFamily = j.modFamily || '';
     S.bpModOrder = (typeof j.modOrder === 'number') ? j.modOrder : 0;
     S.bpOutMode = j.outMode || '';
+    // 投放是否真的改了速率，只信后端给的两个数（源速率/输出速率），不按传输类型猜。
+    S.bpInRate = (typeof j.inRate === 'number') ? j.inRate : 0;
+    S.bpResampled = (j.resampled === true);
     S.bpFallback = j.fallbackWhy || '';
     // 2026-10-23 261023-03 #2/#5：资料简介的显示门控只用后端权威状态（400ms 轮询顺带更新）
     if (typeof j.hasLlmKey === 'boolean') META.hasLlmKey = j.hasLlmKey;
@@ -6335,6 +6351,18 @@ function showChain() {
     var convGpu = (typeof p.convGpu === 'boolean') ? p.convGpu : (p.irGpu === true);
     var sigGpuUsed = (typeof p.gpuUsed === 'boolean') ? p.gpuUsed : !!S.gpuUsed;
     if (p.resample) nodes.push({ k: '采样率转换', v: (p.filter || 'Kaiser sinc') + '  \u00b7  ' + p.phase + '  \u00b7  ' + p.taps + ' 抽头' + (p.twoStage ? '  \u00b7  两段式' : '') + '  \u2192  ' + p.outRate + ' Hz' + (sigGpuUsed ? '  \u00b7  GPU' : ''), gpu: !!sigGpuUsed, badge: sigGpuUsed ? 'GPU 升频' : '64-Bit 升频', kind: sigGpuUsed ? 'gpu' : 'dsp' });
+    else if (p.castDspBypass === true) {
+      // 投放链路 = 解码 → 供源/推流，播放器的升频/EQ/IR/音量都不在里面。
+      // 用户如果正好设了升频，必须在这里说清楚「这条路上没生效」，不能让他以为已经升过了。
+      var reqRate = String(p.requestedRate || '');
+      var wantsUp = (reqRate === 'max' || reqRate === 'follow' || (parseInt(reqRate, 10) > (p.outRate || 0)));
+      nodes.push({
+        k: '采样率转换',
+        v: '旁路（投放不经过本机 DSP：升频/EQ/IR/音量都不参与' +
+           (wantsUp ? '；你的设置要求升频（' + (reqRate === 'max' ? '最高' : reqRate + ' Hz') + '），但投放不走这条链' : '') + '）',
+        badge: '投放旁路', kind: 'dsp'
+      });
+    }
     else nodes.push({ k: '采样率转换', v: '旁路（源采样率与输出一致，逐位直通）', badge: '逐位旁路', kind: 'lossless' });
     if (p.eq || p.conv) {
       var eqParts = [];

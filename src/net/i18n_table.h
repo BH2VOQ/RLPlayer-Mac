@@ -1585,6 +1585,12 @@ inline const I18nPair* i18n_table(std::size_t* count) {
         {"AirPlay 投放：发送端把源 PCM 编成 ALAC 网络包（源→包可逐位验证），接收端解码后的重采样与模拟输出无法从本机验证；", "AirPlay casting: the sender encodes source PCM into ALAC packets (source→wire is verifiable); the receiver's own resampling and analog output cannot be verified from this machine;"},
         {"AirPlay 传输：发送端逐位无损，接收端解码后的输出无法验证", "AirPlay transport: bit-exact at the sender, receiver output not verifiable"},
         {"UPnP 投放：源文件按原采样率供源，本机不做升频；接收端是否重采样由对方决定（本机 DSP 未介入）", "UPnP casting: the source file is served at its native sample rate; this app never upsamples. Whether the receiver resamples is decided by the receiver (local DSP not involved)."},
+        {"旁路（投放不经过本机 DSP：升频/EQ/IR/音量都不参与", "Passthrough (casting bypasses local DSP: no upsampling/EQ/IR/volume"},
+        {"你的设置要求升频（", "Your settings request upsampling ("},
+        {"），但投放不走这条链", "), but casting does not use that chain"},
+        {"投放旁路", "Cast bypass"},
+        {"UPnP 投放：先在本机升频再供源（源 ", "UPnP casting: upsampled locally before serving (source "},
+        {"AirPlay 投放：44100 Hz 是发送端固定格式（源 ", "AirPlay casting: 44100 Hz is the sender's fixed format (source "},
     };
     if (count) *count = sizeof(k) / sizeof(k[0]);
     return k;

@@ -11101,6 +11101,10 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
                  << ",\"latencyMs\":" << cs.latencyMs
                  << ",\"latencySource\":\"" << jesc(cs.latencySource) << "\""
                  << ",\"resample\":" << (cs.resampled ? "true" : "false")
+                 // 投放走的是「解码 → 供源/推流」，不经过播放器的升频/EQ/IR/音量链。
+                 // 静默忽略用户设置是最坏的形态：这里把事实交给界面去说清楚。
+                 << ",\"castDspBypass\":true"
+                 << ",\"requestedRate\":\"" << jesc(conf_get("rate", "")) << "\""
                  << ",\"volume\":" << cs.currentVolumeDb
                  << ",\"note\":\"" << jesc(cs.warning) << "\"}}";
             return live.str();
@@ -11342,6 +11346,10 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
           << ",\"pos\":" << pos
           << ",\"dur\":" << dur
           << ",\"outRate\":" << rateStat
+          // 升频判定必须有后端证据（源速率 vs 供源/输出速率），不能靠传输类型猜：
+          // 投放将来若真的先升频再供源，这里 resampled 会变 true，徽标自动变成「升频」。
+          << ",\"inRate\":" << (castMode ? (castTransition ? 0u : castSt.sourceRate) : 0u)
+          << ",\"resampled\":" << ((castMode && !castTransition && castSt.resampled) ? "true" : "false")
           << ",\"outBits\":" << bitsStat
           << ",\"gpu\":" << (gpuF.gpu ? "true" : "false")
           << ",\"gpuUsed\":" << (gpuF.gpuUsed ? "true" : "false")
