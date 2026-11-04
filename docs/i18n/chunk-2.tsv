@@ -101,7 +101,7 @@ Free Field 曲线反映消音室内扬声器正前方的直达声听觉响应。
 GPU 参与本次播放		e'; D('gpub').title = S.gpuUsed ? 'GPU 参与本次播放' : (S.gpuOn ? 'GPU 可用 · 本次未参与（
 GPU 可用		Content = '当前状态：' + (j && j.available ? 'GPU 可用' : '走 CPU（未找到可执行的 GPU 后端）'); var
 GPU 计算		\u00b7 ') + ' \u00b7 ' + (convGpu ? 'GPU 计算' : 'CPU 计算'), gpu: convGpu, badge: con
-HQPlayer 的 poly-sinc 家族		ane data-g=pcm>' + sgroup('升频与滤波', 'HQPlayer 的 poly-sinc 家族', sel('sp_filt', '1x 滤波器（44.1
+poly-sinc 滤波器家族		ane data-g=pcm>' + sgroup('升频与滤波', 'poly-sinc 滤波器家族', sel('sp_filt', '1x 滤波器（44.1
 Harman 头戴目标：低频温和提升、中高频平顺		TARGET_CURVES = { harman_oe: { label: 'Harman 头戴目标：低频温和提升、中高频平顺', pts: [[0,6],[0.08,6],[0.15,5],[0
 Hz \u00b7 标记 0x05/0xFA 交替		'DoP 封装', v: '24-bit 载波 ' + p.outRate + ' Hz \u00b7 标记 0x05/0xFA 交替', badge: 'DoP 1.1', kind: 'lossless'
 IIR（Butterworth 10 阶，相位非线性）		ind || 'fir') + opt('iir', 'IIR（Butterworth 10 阶，相位非线性）', ADV.dsdKind || 'fir') +

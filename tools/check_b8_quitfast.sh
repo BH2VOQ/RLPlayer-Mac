@@ -1,6 +1,6 @@
 #!/bin/bash
+# SPDX-FileCopyrightText: 2026 BH2VOQ <https://github.com/BH2VOQ>
 # SPDX-License-Identifier: GPL-3.0-or-later
-# Copyright (C) 2026 August
 # 判据脚本：验证 RLPlayer 播放触发后台元数据补全时，退出能否在 1.5 秒内协作收尾（check_b8_quitfast.sh）
 # 判据来源：用户反馈「关闭软件的时候很卡顿」，主控实测定位根因为后台元数据补全在退出时未协作取消并无脑等待5秒。
 # 判定标准：elapsed <= 1.5s -> PASS，否则 FAIL。
@@ -11,7 +11,7 @@ PORT=19108
 BASE_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 RUN_DIR="${BASE_DIR}/debug/20261027-04-实测反馈7条/b8-quitfast/run"
 BIN="${BASE_DIR}/build-mac/rtaweb"
-TARGET_AIFF="/Users/august/Music/Music/Media.localized/Music/LOSE/爱上火车OST/原野绽芳华.aiff"
+TARGET_AIFF="${TARGET_AIFF:-${1:-}}"
 MAX_ELAPSED=1.5
 
 if [ ! -x "$BIN" ]; then
@@ -19,8 +19,9 @@ if [ ! -x "$BIN" ]; then
     exit 1
 fi
 
-if [ ! -f "$TARGET_AIFF" ]; then
-    echo "ERROR: 测试音频不存在: $TARGET_AIFF" >&2
+if [ -z "$TARGET_AIFF" ] || [ ! -f "$TARGET_AIFF" ]; then
+    echo "ERROR: 请通过参数或 TARGET_AIFF 环境变量指定有效的测试音频文件路径" >&2
+    echo "用法: TARGET_AIFF=/path/to/test.aiff $0 或 $0 /path/to/test.aiff" >&2
     exit 1
 fi
 

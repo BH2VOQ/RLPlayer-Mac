@@ -608,7 +608,7 @@ inline bool lib_is_cue(const fsx::path& p) {
 // 容错目录遍历（2026-10-31，1.1.1.4 索引停滞）
 // ---------------------------------------------------------------------------
 // 为什么不能用 recursive_directory_iterator：SMB 上只要有一个目录项 lstat 失败
-// （实测 /Volumes/Music/KOKIA/翼を広けて (EP)，err=2 ENOENT），increment 就置 ec
+// （实测 SMB 挂载目录存在失效条目时，err=2 ENOENT），increment 就置 ec
 // 并把迭代器变成 end —— 外层 for 直接正常退出，整次遍历被静默截断，
 // 而扫描仍以"完成"写盘（索引 4.4k 行 vs 实际 6.0k 首）。
 //
@@ -751,7 +751,7 @@ inline LibDirectoryFingerprint lib_directory_fingerprint(
                 // Only this filesystem fallback needs lstat; known audio entries are never stat'ed.
                 struct stat type{};
                 if (::lstat(full.c_str(), &type) != 0) {
-                    // SMB 缓存里的失效名字会永久 ENOENT（实测 /Volumes/Music 有 11 个）：
+                    // SMB 缓存里的失效名字会永久 ENOENT（例如网络共享缓存失效条目）：
                     // 它不是"目录读不全"，而是"这个名字什么也不是"。把它当硬失败会让这类库
                     // 每次启动都整库重扫 —— 正是本轮要修的症状。真增删仍由父目录 mtime 反映。
                     if (errno != ENOENT && errno != ESTALE) {

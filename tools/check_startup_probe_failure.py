@@ -14,7 +14,7 @@ sound, starts a browser, or operates on the user's running application.
 Example:
   python3 tools/check_startup_probe_failure.py --binary build-mac/rtaweb \
     --index "$HOME/Library/Application Support/RLPlayer/rlplayer-index.tsv" \
-    --music /Volumes/Music --out /tmp/rlplayer-probe-regression --skip-covers
+    --music /path/to/Music --out /tmp/rlplayer-probe-regression --skip-covers
 
 ⚠ Boundaries: this exercises real CLI/service scan and restart, not native .app
 installation or playback. Output contains private paths and stays outside git.

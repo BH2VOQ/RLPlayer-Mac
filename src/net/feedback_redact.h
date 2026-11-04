@@ -16,7 +16,7 @@
 // 实测（见 tests/test_feedback_redact.cpp 的 legacy_redact 对照）漏掉了：
 //   ① JSON 形态  `"token": "abcdef123456"`   —— 键后面跟的是 `":`，不是 `=`，整条漏
 //   ② 头形态    `Authorization: Bearer eyJ...` —— 不认识 header 名，整条漏
-//   ③ 家目录    `/Users/august/...`            —— 完全不做路径归一
+//   ③ 家目录    `/Users/tester/...`            —— 完全不做路径归一
 //   ④ 邮箱      `tester@example.com`           —— 不做邮箱处理
 //   ⑤ `sk-live-ABCDEF...` 只抹到第一个 '-' 为止，**中间那段仍然明文**（比不抹更危险：
 //      看起来像脱敏了，实际泄漏）

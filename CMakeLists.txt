@@ -267,6 +267,27 @@ if(APPLE)
   add_test(NAME embedded_api COMMAND test_embedded_api)
   set_tests_properties(embedded_api PROPERTIES
     ENVIRONMENT "PATH=${CMAKE_SOURCE_DIR}/build-mac/ffmpeg-lite:/usr/bin:/bin:/usr/sbin:/sbin")
+
+  # 1.1.2 AirPlay 平台策略门禁（AP-1.1/1.2/1.3/1.4/1.6）。
+  # 全离线：FourCC 识别、能力收敛、DoP 前置拒绝、延迟来源、存活判定；
+  # 不 open 任何设备、不出声、不改系统音量（铁律 1）。
+  add_executable(test_airplay_policy tests/test_airplay_policy.cpp)
+  target_include_directories(test_airplay_policy PRIVATE ${CMAKE_SOURCE_DIR}/src)
+  target_link_libraries(test_airplay_policy PRIVATE ${RL_PLATFORM_LIBS})
+  add_test(NAME airplay_policy COMMAND test_airplay_policy)
+
+  # 1.1.2 P0-3：DoP 欠载/尾块补全必须是合法静音帧（0x05/0xFA 交替），不能裸补 0。
+  # 判据含反例自证：全零缓冲必须被判非法 —— 否则这个测试证明不了任何事。
+  add_executable(test_dop_underrun_fill tests/test_dop_underrun_fill.cpp)
+  target_include_directories(test_dop_underrun_fill PRIVATE ${CMAKE_SOURCE_DIR}/src)
+  add_test(NAME dop_underrun_fill COMMAND test_dop_underrun_fill)
+
+  # 1.1.2 P0-3（引擎侧）：render_loop 的 EOS 尾块在 DoP 下必须补合法静音帧。
+  # 判据：①纯函数标记严格交替；②真实 render_loop 在 h.dop=true 下最后一帧仍合法；
+  # ③PCM 对照仍补 0（零回归）；④钩子缺失时必须告警且置位诊断标志（不许静默）。
+  add_executable(test_dop_padding tests/test_dop_padding.cpp)
+  target_include_directories(test_dop_padding PRIVATE ${CMAKE_SOURCE_DIR}/src)
+  add_test(NAME dop_padding COMMAND test_dop_padding)
 endif()
 
 add_executable(test_knowledge tests/test_knowledge.cpp)
@@ -458,6 +479,19 @@ add_executable(test_eq_reload tests/test_eq_reload.cpp ${RL_LOOPBACK_SRC})
 target_include_directories(test_eq_reload PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tools)
 target_link_libraries(test_eq_reload PRIVATE rtadsp ${RL_PLATFORM_LIBS} "-framework Foundation")
 add_test(NAME eq_reload COMMAND test_eq_reload)
+
+# ---------------- 1.1.2 DSD 播放可靠性热修（P0-1 / P0-2）----------------
+# P0-2：直通资格不得被"同族速率计划可用"覆盖（EQ/IR/音量/响度/RG/trim/声道变化）。
+# P0-1：速率转换后必须以**实际**位率算载波、DoP 帧数与 CUE 区间。
+# 都是纯规划逻辑 → 独立单元测试；生产 TU 回归测试嵌入 rtaweb.cpp + null sink（不开设备）。
+add_executable(test_direct_dsd_plan tests/test_direct_dsd_plan.cpp)
+target_include_directories(test_direct_dsd_plan PRIVATE ${CMAKE_SOURCE_DIR}/src)
+add_test(NAME direct_dsd_plan COMMAND test_direct_dsd_plan)
+
+add_executable(test_dsd_production tests/test_dsd_production.cpp ${RL_LOOPBACK_SRC})
+target_include_directories(test_dsd_production PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tools)
+target_link_libraries(test_dsd_production PRIVATE rtadsp ${RL_PLATFORM_LIBS} "-framework Foundation")
+add_test(NAME dsd_production COMMAND test_dsd_production)
 
 # ---------------- 20 段参数均衡 PEQ（261024-02 #6）：0dB 直通 / 6dB@fc / Q 带宽 /
 #                  采样率重建 / 满幅过载恢复 / 热更新交叉淡入（铁律 7）----------------
@@ -653,6 +687,44 @@ add_test(NAME dsd_path COMMAND test_dsd_path)
 add_executable(test_dsd_reader tests/test_dsd_reader.cpp)
 target_link_libraries(test_dsd_reader PRIVATE rtadsp)
 add_test(NAME dsd_reader COMMAND test_dsd_reader)
+# 1.1.2 P0-3：DSD 抽取目标采样率必须按 44.1k / 48k **族**取上限。
+# 旧实现一律 705600 ⟹ 48k 族 DSD256(12.288M) 不能整除，直接播不了。
+# 1.1.2 AirPlay 投放基础件：ALAC 编码回环逐样本一致 + RAOP 发现/TXT 解析对抗用例
+add_executable(test_alac_encoder tests/test_alac_encoder.cpp)
+target_include_directories(test_alac_encoder PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(test_alac_encoder PRIVATE "-framework AudioToolbox" "-framework CoreFoundation")
+add_test(NAME alac_encoder COMMAND test_alac_encoder)
+
+add_executable(test_airplay_discovery tests/test_airplay_discovery.cpp)
+target_include_directories(test_airplay_discovery PRIVATE ${CMAKE_SOURCE_DIR}/src)
+add_test(NAME airplay_discovery COMMAND test_airplay_discovery)
+
+add_executable(test_cast_audio tests/test_cast_audio.cpp)
+target_include_directories(test_cast_audio PRIVATE ${CMAKE_SOURCE_DIR}/src)
+add_test(NAME cast_audio COMMAND test_cast_audio)
+set_tests_properties(cast_audio PROPERTIES TIMEOUT 60)
+
+# 1.1.2 AirPlay UI：用 Node 的 vm 直接跑 ui_script.h 的生产逻辑（不复制逻辑）
+find_program(NODE_EXECUTABLE node)
+if(NODE_EXECUTABLE)
+  add_test(NAME airplay_ui COMMAND ${NODE_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tests/test_airplay_ui.js)
+  set_tests_properties(airplay_ui PROPERTIES WORKING_DIRECTORY ${CMAKE_SOURCE_DIR} TIMEOUT 30)
+  add_test(NAME cast_ui COMMAND ${NODE_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tests/test_cast_ui.js)
+  set_tests_properties(cast_ui PROPERTIES WORKING_DIRECTORY ${CMAKE_SOURCE_DIR} TIMEOUT 30)
+  add_test(NAME cast_contract COMMAND ${NODE_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/check_cast_contract.js)
+  set_tests_properties(cast_contract PROPERTIES WORKING_DIRECTORY ${CMAKE_SOURCE_DIR} TIMEOUT 30)
+endif()
+
+add_executable(test_raop_session tests/test_raop_session.cpp)
+target_include_directories(test_raop_session PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(test_raop_session PRIVATE "-framework AudioToolbox" "-framework CoreFoundation")
+add_test(NAME raop_session COMMAND test_raop_session)
+# Loopback protocol tests must fail bounded instead of wedging a release run.
+set_tests_properties(raop_session PROPERTIES TIMEOUT 60)
+
+add_executable(test_dsd_decimate_rate tests/test_dsd_decimate_rate.cpp)
+target_include_directories(test_dsd_decimate_rate PRIVATE ${CMAKE_SOURCE_DIR}/src)
+add_test(NAME dsd_decimate_rate COMMAND test_dsd_decimate_rate)
 add_executable(test_dsd_two_stage tests/test_dsd_two_stage.cpp)
 target_include_directories(test_dsd_two_stage PRIVATE ${CMAKE_SOURCE_DIR}/src)
 target_link_libraries(test_dsd_two_stage PRIVATE ${RL_PLATFORM_LIBS})
@@ -884,6 +956,14 @@ add_executable(test_cast_service tests/test_cast_service.cpp)
 target_include_directories(test_cast_service PRIVATE ${CMAKE_SOURCE_DIR}/src)
 target_link_libraries(test_cast_service PRIVATE ${RL_PLATFORM_LIBS})
 add_test(NAME cast_service COMMAND test_cast_service)
+set_tests_properties(cast_service PROPERTIES TIMEOUT 90)
+
+# Actual embedded dispatcher + loopback RAOP worker: no physical output.
+add_executable(test_cast_status tests/test_cast_status.cpp ${RL_LOOPBACK_SRC})
+target_include_directories(test_cast_status PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tools)
+target_link_libraries(test_cast_status PRIVATE rtadsp ${RL_PLATFORM_LIBS} "-framework Foundation")
+add_test(NAME cast_status COMMAND test_cast_status)
+set_tests_properties(cast_status PROPERTIES TIMEOUT 45)
 
 # ---------------- 2026-10-25：系统混音回环（Process Tap）----------------
 # macOS 没有 WASAPI Loopback 那样的系统混音回环端点，官方机制是 macOS 14.2+ 的

@@ -145,7 +145,7 @@ dB，实时微调	 dB, real-time trim 	s += '（起播 ' + S.startDb.toFixed(1) 
 包含物理采集设备与系统混音回环端点（标注「回环」的那一项）	Includes physical capture devices and system mix loopback endpoints (labeled '[Loopback]').	option value="">（未选择 / 默认设备）</option>', '包含物理采集设备与系统混音回环端点（标注「回环」的那一项）') + sel('sp_inch', '声道偏移', opt(
 匹配到	Matched 	} else { hint.textContent = '匹配到 ' + hits.length + ' 款耳机型号'; }
 匹配（Bit-Perfect）	Matched (Bit-Perfect)	=== 'match') { rmEl.textContent = '匹配（Bit-Perfect）'; rmEl.style.color = 'var(--ok)'
-升频与滤波	Upsampling & Filtering	class=spane data-g=pcm>' + sgroup('升频与滤波', 'HQPlayer 的 poly-sinc 家族',
+升频与滤波	Upsampling & Filtering	class=spane data-g=pcm>' + sgroup('升频与滤波', 'poly-sinc 滤波器家族',
 卷积走 GPU 硬件加速（检测中…）	GPU hardware-accelerated convolution (detecting...)	av') + '"></div>' + chk('sp_irgpu', '卷积走 GPU 硬件加速（检测中…）', ADV.irgpu == 1, '⚠️ macOS
 原型抽头数（0 = 按预设自动）	Prototype taps (0 = auto by preset)	>' + num({ id: 'sp_taps', label: '原型抽头数（0 = 按预设自动）' }, ADV.taps, 0, 2097152, 1024,
 原生读取 + DirectSDM	Native Read + DirectSDM	抑制空闲音')) + sgroup('SDM 源（DSD 文件）', '原生读取 + DirectSDM', chk('sp_directsdm', 'Direct

@@ -39,9 +39,9 @@ struct HttpRequest {
                                                    // 空时**自动回退系统代理**（见下方 SystemProxySettings）
     std::string noProxy;                           // CURLOPT_NOPROXY（系统代理的例外表）；空 = 不过滤
     // 钉住出站网卡（形如 "en1"；空 = 交给系统选路）。
-    // 为什么需要（2026-10-28 真机）：本机「Internet 共享」造出一个同网段的虚拟网桥，
-    // 路由表把 192.168.3.0/24 整段交给它并标 REJECT ⟹ 不钉网卡时连 192.168.3.x 直接
-    // EHOSTUNREACH，表现就是"设备找到了却控制不了/抓不到描述"。
+    // 为什么需要：当系统存在同网段虚拟网桥抢占路由并标 REJECT 时，
+    // 不钉网卡向局域网 IP 发送连接可能直接 EHOSTUNREACH，
+    // 表现为"设备找到了却控制不了/抓不到描述"。
     // macOS 实现用 CURLOPT_INTERFACE("if!en1")；没有该能力的平台忽略此字段。
     std::string interface;
     const std::atomic<bool>* cancel = nullptr;     // 取消标志（空 = 不支持外部取消；非空且为 true 时中断请求）

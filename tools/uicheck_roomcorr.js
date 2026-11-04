@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // 本文件是 RLPlayer 的一部分；完整条款见根目录 LICENSE。
 // uicheck_roomcorr.js — R-1 测量向导的铁律 1 判据（确认前绝不出声）
-const fs=require('fs'); const ub=require('/Users/august/Downloads/DQ/RLPlayer/tools/uibrowser');
+const fs=require('fs'); const ub=require('./uibrowser');
 let fail=0; function ck(o,l,d){console.log((o?'PASS ':'FAIL ')+l+': '+JSON.stringify(d));if(!o)fail++;}
 (async()=>{let s;
 try{

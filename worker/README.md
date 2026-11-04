@@ -48,7 +48,7 @@ https://github.com/settings/personal-access-tokens/new
 **方式 B · 浏览器授权**
 
 ```bash
-cd /Users/august/Downloads/DQ/RLPlayer/worker
+cd <repo>/worker
 npx wrangler login
 ```
 

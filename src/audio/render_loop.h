@@ -186,6 +186,13 @@ struct RenderHost {
     bool dop = false;               // DoP/DSD 输出（不能回退共享）
     bool onShared = false;          // 当前已是共享后端（第二次尝试失败时的文案分支）
 
+    // ---- DoP 尾块/静音填充钩子（1.1.2 P0-3）----
+    // DoP 输出在 EOS 尾块不足一个设备周期时，不能像 PCM 一样 resize(0) 补零，
+    // 否则会破坏高 8 位的 0x05/0xFA 交替标记产生 0x00 非法 DoP。
+    // 该钩子向 pend 缓冲追加 needFrames 帧合法 DoP 静音。
+    std::function<void(std::vector<int32_t>& pend, size_t outCh, size_t needFrames)> dopPadFrames;
+    bool dopPadMissing = false; // h.dop 开启但 dopPadFrames 为空时置为 true 并警告日志
+
     // ---- 吞吐率判据（2026-10-22 用户真机反馈 20261022-02）----
     // 旧判据「连续 200 次写不进去」有个真实盲区：只要设备【偶尔】接受一次数据，
     // timeouts 就被清零，永远攒不到 200 ⟹ 永不归因、永不回退、也不报错，
@@ -420,8 +427,29 @@ inline void render_loop(OutSink& sink, RenderHost& h) {
         //   就能把整个周期写走，pad 后 pendFrames 立即归零退出；共享模式每 20ms 只腾出
         //   ≈20ms 空间，pendFrames 落回 period 以下若再次补齐，就会每 tick 凭空多出一段
         //   静音、0.5 秒的文件永远播不完（实测 pos 冲到 200 秒还在写）。
+        //
+        // 2026-11-03（1.1.2 P0-3 DoP 尾块合法静音补全）：
+        //   DoP 时 h.dop=true，裸补全零会让 24-bit 容器高 8 位标记变成 0x00（非法 DoP 导致
+        //   接收端 DAC 爆音或切 PCM）。若有 dopPadFrames 钩子则委托其补全合法 DoP 静音；
+        //   若钩子缺失则保守保留旧行为补全为 0，但置位 dopPadMissing 并记录明确警告日志。
         if (eos && pendFrames > 0 && pendFrames < period && !padded) {
-            pend.resize(period * (size_t)h.outCh, 0);
+            const size_t needFrames = period - pendFrames;
+            if (h.dop) {
+                if (h.dopPadFrames) {
+                    h.dopPadFrames(pend, (size_t)h.outCh, needFrames);
+                    if (pend.size() < period * (size_t)h.outCh) {
+                        pend.resize(period * (size_t)h.outCh, 0);
+                    }
+                } else {
+                    h.dopPadMissing = true;
+                    if (h.log) {
+                        h.log("WARN: DoP output padded with zeros at EOS (missing dopPadFrames hook); receiver may mute or pop");
+                    }
+                    pend.resize(period * (size_t)h.outCh, 0);
+                }
+            } else {
+                pend.resize(period * (size_t)h.outCh, 0);
+            }
             pendFrames = period;
             padded = true;
         }
@@ -578,10 +606,13 @@ inline void render_loop(OutSink& sink, RenderHost& h) {
                        << " 缓冲=" << period << "帧";
                     if (h.log) h.log(ds.str());
                     std::ostringstream fs;
-                    fs << "输出设备已断开（USB 掉线/端点已从系统枚举中消失）—— "
-                          "设备不再是 ACTIVE 端点，请重新连接后在系统里确认设备恢复再重播。"
-                          "已停止播放：不自动回退 WASAPI 共享，也不从头重播"
-                          "（用户要 bit-perfect，静默降级比报错更有害）。"
+                    // 1.1.2（真机实测）：原文写死"USB 掉线"，但同一路径也会接住
+                    // AirPlay 接收器掉线/休眠、蓝牙断开、聚合设备被移除 —— 对用户是误导。
+                    // 文案改成"端点级"描述，并把可能的成因列全，不猜具体是哪种。
+                    fs << "输出设备已断开（USB 拔出 / AirPlay 接收器掉线或休眠 / 网络端点消失）—— "
+                          "该端点已从系统枚举中消失，不是格式或缓冲问题。请恢复设备后在系统里确认它回来再重播。"
+                          "已停止播放：不自动回退共享、也不从头重播"
+                          "（静默降级比报错更有害）。"
                        << " device=\"" << h.deviceLabel << "\""
                        << " id=" << (h.deviceIdDesc.empty() ? "(默认)" : h.deviceIdDesc)
                        << " w0=" << h.dbgW0->load() << " wr=" << h.dbgWr->load()

@@ -41,6 +41,8 @@
 // macOS 侧必须继续提供同一套可观测性，否则等于把该能力弄丢而不是"删掉平台实现"。
 #include "audio/write_attrib.h"
 #include "platform/macos/pcm_format_validation.h"
+#include "platform/macos/airplay_policy.h"
+#include "platform/macos/dop_silence_fill.h"   // 1.1.2 P0-3：欠载时的合法 DoP 静音帧
 
 namespace rta::platform {
 namespace detail {
@@ -128,6 +130,116 @@ inline int device_bit_depth(AudioDeviceID dev) {
     UInt32 size = sizeof(asbd);
     if (::AudioObjectGetPropertyData(dev, &addr, 0, nullptr, &size, &asbd) != noErr) return 0;
     return (int)asbd.mBitsPerChannel;
+}
+
+// ---------------- 1.1.2 传输类型、延迟与生命周期属性读取 ----------------
+
+// 读取设备的 TransportType FourCC（kAudioDevicePropertyTransportType）
+inline uint32_t device_transport_type(AudioDeviceID dev) {
+    AudioObjectPropertyAddress addr{kAudioDevicePropertyTransportType,
+                                    kAudioObjectPropertyScopeGlobal,
+                                    kAudioObjectPropertyElementMain};
+    UInt32 type = 0;
+    UInt32 size = sizeof(type);
+    if (::AudioObjectGetPropertyData(dev, &addr, 0, nullptr, &size, &type) != noErr) return 0;
+    return type;
+}
+
+// 读取设备当前 nominal 采样率（kAudioDevicePropertyNominalSampleRate）
+inline uint32_t device_current_rate(AudioDeviceID dev) {
+    AudioObjectPropertyAddress addr{kAudioDevicePropertyNominalSampleRate,
+                                    kAudioObjectPropertyScopeOutput,
+                                    kAudioObjectPropertyElementMain};
+    Float64 rate = 0.0;
+    UInt32 size = sizeof(rate);
+    if (::AudioObjectGetPropertyData(dev, &addr, 0, nullptr, &size, &rate) != noErr) return 0;
+    return (uint32_t)std::llround(rate);
+}
+
+// 读取设备当前缓冲大小（kAudioDevicePropertyBufferFrameSize）
+inline size_t device_current_buffer_frames(AudioDeviceID dev) {
+    AudioObjectPropertyAddress addr{kAudioDevicePropertyBufferFrameSize,
+                                    kAudioObjectPropertyScopeOutput,
+                                    kAudioObjectPropertyElementMain};
+    UInt32 frames = 0;
+    UInt32 size = sizeof(frames);
+    if (::AudioObjectGetPropertyData(dev, &addr, 0, nullptr, &size, &frames) != noErr) return 0;
+    return (size_t)frames;
+}
+
+// 读取输出流的延迟帧数（kAudioStreamPropertyLatency）
+inline bool stream_output_latency(AudioStreamID stream, UInt32& outLatency) {
+    AudioObjectPropertyAddress addr{kAudioStreamPropertyLatency,
+                                    kAudioObjectPropertyScopeGlobal,
+                                    kAudioObjectPropertyElementMain};
+    UInt32 lat = 0;
+    UInt32 size = sizeof(lat);
+    if (::AudioObjectGetPropertyData(stream, &addr, 0, nullptr, &size, &lat) != noErr) return false;
+    outLatency = lat;
+    return true;
+}
+
+// 读取设备输出流列表并汇总首个输出流或所有输出流的延迟（通常取第一个输出流流延迟）
+inline bool device_output_stream_latency(AudioDeviceID dev, UInt32& outStreamLatency) {
+    outStreamLatency = 0;
+    AudioObjectPropertyAddress addr{kAudioDevicePropertyStreams,
+                                    kAudioDevicePropertyScopeOutput,
+                                    kAudioObjectPropertyElementMain};
+    UInt32 size = 0;
+    if (::AudioObjectGetPropertyDataSize(dev, &addr, 0, nullptr, &size) != noErr || size == 0) return false;
+    const size_t count = size / sizeof(AudioStreamID);
+    std::vector<AudioStreamID> streams(count);
+    if (::AudioObjectGetPropertyData(dev, &addr, 0, nullptr, &size, streams.data()) != noErr) return false;
+    for (AudioStreamID s : streams) {
+        UInt32 lat = 0;
+        if (stream_output_latency(s, lat)) {
+            outStreamLatency = lat;
+            return true;
+        }
+    }
+    return false;
+}
+
+// 读取可读延迟信息并构建 DeviceCaps 中的延迟字段（AP-1.2）
+inline void probe_device_latency(AudioDeviceID dev, double sampleRate,
+                                 bool& outKnown, double& outLatencyMs, std::string& outSource) {
+    outKnown = false;
+    outLatencyMs = 0.0;
+    outSource = "none";
+
+    UInt32 devLat = 0;
+    AudioObjectPropertyAddress addrDev{kAudioDevicePropertyLatency,
+                                       kAudioDevicePropertyScopeOutput,
+                                       kAudioObjectPropertyElementMain};
+    UInt32 szDev = sizeof(devLat);
+    bool hasDev = (::AudioObjectGetPropertyData(dev, &addrDev, 0, nullptr, &szDev, &devLat) == noErr);
+
+    UInt32 safety = 0;
+    AudioObjectPropertyAddress addrSafety{kAudioDevicePropertySafetyOffset,
+                                          kAudioDevicePropertyScopeOutput,
+                                          kAudioObjectPropertyElementMain};
+    UInt32 szSafety = sizeof(safety);
+    bool hasSafety = (::AudioObjectGetPropertyData(dev, &addrSafety, 0, nullptr, &szSafety, &safety) == noErr);
+
+    UInt32 streamLat = 0;
+    bool hasStream = device_output_stream_latency(dev, streamLat);
+
+    outKnown = macos::compute_device_latency(devLat, safety, streamLat, sampleRate,
+                                            hasDev, hasSafety, hasStream,
+                                            outLatencyMs, outSource);
+}
+
+// 检查设备是否在线就绪（kAudioDevicePropertyDeviceIsAlive）
+inline bool is_device_alive(AudioDeviceID dev) {
+    if (dev == kAudioObjectUnknown) return false;
+    AudioObjectPropertyAddress addr{kAudioDevicePropertyDeviceIsAlive,
+                                    kAudioObjectPropertyScopeGlobal,
+                                    kAudioObjectPropertyElementMain};
+    UInt32 alive = 0;
+    UInt32 size = sizeof(alive);
+    if (::AudioObjectGetPropertyData(dev, &addr, 0, nullptr, &size, &alive) != noErr) return false;
+    const UInt32 streams = output_stream_count(dev);
+    return macos::check_endpoint_alive(alive, streams);
 }
 
 // ---------------- 设备硬件音量（2026-10-25 用户报「接管之后音量被锁死」）----------------
@@ -491,6 +603,21 @@ public:
         c.minPeriodFrames = 32;
         c.minBufferMs = 32.0 * 1000.0 / (double)base;
         c.maxBufferMs = 4096.0 * 1000.0 / (double)base;
+
+        // 1.1.2 传输类型、延迟与硬件当前格式（AP-1.1 ~ AP-1.4）
+        c.transportType = detail::device_transport_type(dev);
+        c.transport = macos::transport_type_to_string(c.transportType);
+        c.currentRate = detail::device_current_rate(dev);
+        c.currentChannels = detail::device_max_channels(dev);
+        c.currentBufferFrames = detail::device_current_buffer_frames(dev);
+
+        const double sampleRateForLatency = (c.currentRate > 0) ? (double)c.currentRate : (double)base;
+        detail::probe_device_latency(dev, sampleRateForLatency, c.latencyKnown, c.latencyMs, c.latencySource);
+
+        // 统一应用 AirPlay 能力收敛策略（AP-1.2, AP-1.3, AP-1.4）：
+        // 若 transportType 为 'airp'，强制 sharedOnly=true、exclusive=false、bitPerfectCapable=false、dsd=None
+        macos::sanitize_airplay_caps(c);
+
         return c;
     }
 
@@ -537,16 +664,68 @@ public:
             fail(OutputError::DeviceNotFound, "找不到输出设备（deviceId=\"" + spec.deviceId + "\"）");
             return false;
         }
-        rate_ = spec.rate;
-        bits_ = spec.bits;
-        channels_ = spec.channels;
-        buffer_ms_ = spec.bufferMs;
-        shared_ = spec.shared;
+
+        // 1.1.2 实际设备再确认与防护（AP-1.3, AP-1.4）：
+        // 读取设备实际能力（含 transportType 与 currentRate），执行开流策略校验。
+        // ⚠️ 顺序很重要：先把 AirPlay 的请求**规范化**成共享输出，再走校验。
+        //   AP-1.3 要的是"共享输出、不申请 Hog"，不是"拒绝开流"：用户把设备选成
+        //   AirPlay、而后端仍是默认独占时，必须自动落到共享路径，而不是报一个他无法
+        //   理解的 UnsupportedFormat。下面的 validate 保留为纵深防御（断言）。
+        const DeviceCaps actualDevCaps = caps(spec.deviceId);
+        const bool isAirPlay = macos::is_airplay_transport(actualDevCaps.transportType) || actualDevCaps.sharedOnly;
+
+        OpenSpec effective = spec;
+        if (isAirPlay) {
+            effective.shared = true;
+            effective.exclusive = false;   // AirPlay 永不抢 Hog
+        }
+
+        std::string policyErrZh, policyErrEn;
+        if (!macos::validate_open_spec(actualDevCaps, effective, policyErrZh, policyErrEn)) {
+            close_locked();
+            fail(OutputError::UnsupportedFormat, policyErrZh, policyErrEn);
+            return false;
+        }
+
+        rate_ = effective.rate;
+        bits_ = effective.bits;
+        channels_ = effective.channels;
+        buffer_ms_ = effective.bufferMs;
+        // AirPlay 强制 shared=true、禁止 Hog
+        shared_ = isAirPlay ? true : effective.shared;
+        // DoP 走的是"必须独占"的路径：共享/规范化后若仍带 dop，平台的
+        // validate_open_spec 已经拒绝；这里把标记存下来供自证与诊断使用。
+        dop_requested_.store(effective.dop, std::memory_order_relaxed);
+
+        // ---- 1.1.2 DoP 客户端的容器门槛（任务要求：只拒"真的不够"）----
+        // DoP 把 16 位 DSD + 8 位标记拼进**一个 24-bit 字**，本实现的打包也只产出 3 字节/样本
+        // （见 dop_silence_fill.h::dop_write_period_24le）。所以客户端位深必须是 24：
+        // 16 位装不下 24 个有效位；32 位则要求把标记搬到 bit24..31，那是另一种打包，
+        // 本实现不产出 —— 两种情况都必须在动硬件之前明确拒绝，而不是让 DAC 收到错位数据。
+        // 注意：这里只管**客户端**位深；设备侧容器是 Float32 / 24-in-32 都允许（见下方门槛）。
+        if (effective.dop && bits_ != 24) {
+            close_locked();
+            fail(OutputError::UnsupportedFormat,
+                 "DoP 只支持 24-bit 容器（当前请求 " + std::to_string(bits_) +
+                     "-bit）：DoP 的标记就在 24-bit 字的高 8 位，位深不对时载波无法成立",
+                 "DoP requires a 24-bit container (requested " + std::to_string(bits_) +
+                     "-bit): DoP markers live in the top 8 bits of the 24-bit word.");
+            return false;
+        }
+        if (effective.dop && shared_) {
+            // 冗余闸：validate_open_spec 已挡过一遍。这里再挡一次是因为 `shared_` 还受
+            // AirPlay 规范化影响，两条路径必须都落到"明确拒绝"，绝不能偷偷共享输出。
+            close_locked();
+            fail(OutputError::UnsupportedFormat,
+                 "拒绝在共享输出（经系统混音）下发送 DoP：混音/重采样会破坏 DoP 标记",
+                 "Refused DoP on shared output: the system mixer would corrupt DoP markers.");
+            return false;
+        }
 
         // 1) Hog Mode（严格独占）—— 由 OpenSpec::exclusive 独立控制。
         //    用户拍板：严格 Hog 请求（spec.exclusive && !shared）抢占失败必须在改格式前明确拒绝，
         //    不静默降级，不假冒格式不支持（UnsupportedFormat），必须返回 DeviceBusy 并提示真正 owner PID。
-        hog_requested_ = (spec.exclusive && !shared_);
+        hog_requested_ = (effective.exclusive && !shared_);
         hogged_ = false;
         if (hog_requested_) {
             hogged_ = detail::set_hog_mode(device_, true) && detail::is_hogged_by_us(device_);
@@ -611,6 +790,9 @@ public:
             //       因为那才是我们 render 回调真正写出的字节布局。
             //   设备层格式只做**如实记录**（device_format()/bits_fallback_note()），不参与放行判定。
             auto neg = macos::validate_and_negotiate_format(rate_, bits_, channels_, devAsbd);
+            dopDeviceRate_.store((uint32_t)devAsbd.mSampleRate, std::memory_order_relaxed);
+            dopExclusiveRateOk_.store(((uint32_t)devAsbd.mSampleRate == rate_),
+                                      std::memory_order_relaxed);
             if (neg.accepted) {
                 devicePacking_ = neg.acceptedPacking;
                 deviceEffectiveBits_ = neg.effectiveBits;
@@ -625,6 +807,69 @@ public:
                 deviceIsFloat_ = false;
                 formatFallbackNote_ = "设备层格式无法解析（" + neg.rejectReason +
                                       "）；客户端仍按 packed 输出，由 AUHAL/HAL 转换";
+            }
+
+            // ---- 1.1.2 DoP 的真实精度/速率门槛（只拒"真的不够"）----
+            //
+            // 这里是**独立于 PCM 协商**的判据：PCM 的"位深必须完全匹配否则拒绝"对 DoP 太严
+            // （那会把 24-in-32 / Float32 / 32-bit 容器这些**无损**承载全部判死），
+            // 而 DoP 真正需要的只有三条：
+            //   ① 设备有效精度 ≥ 24 bit：DoP 用 24 个有效位（低 16 位 DSD + 高 8 位标记）。
+            //      Packed16(16) 就是"真的不够"，拒绝 —— 这不是保守，是物理上装不下。
+            //   ② 设备速率必须**等于**请求载波率：不等就意味着 AUHAL/HAL 在中间做采样率转换，
+            //      重采样会插值/滤波，0x05/0xFA 的逐帧交替立刻消失 ⟹ 拒绝。
+            //   ③ 声道数必须一致：否则 DoP 帧被摊到不同声道，接收端拿到的位流是错位拼起来的。
+            //
+            // 明确**不拒**的三类（都能证明无损，拒了就是删功能）：
+            //   · Float32（effectiveBits=24）：24-bit 整数样本 |v| ≤ 2^23 在 IEEE-754 float32
+            //     的 24 位尾数里可**精确**表示（2^23 以内整数全部可表示，无舍入）⟹ 转换本身
+            //     不破坏 DoP。会破坏它的是系统混音/抖动/增益 —— 那些在共享模式与增益闸里挡掉了。
+            //   · 24-in-32（effectiveBits=24）：24 位有效数据放进 32 位容器，HAL 在**同一组
+            //     24 位有效位**上搬运（左移 8 或右移 8），标记仍落在有效 24 位的最高 8 位，
+            //     不会错位成 0x0500（那要求真有 8 位信息丢失，对齐搬运没有）。
+            //   · Int32（effectiveBits=32）：24 位字装进 32 位整型容器同样是纯移位，无损。
+            // 这三类仍会如实写入 formatFallbackNote_ ⟹ bit_perfect() 报 false（不谎报位完美），
+            // 但**不**阻止开流。
+            if (effective.dop) {
+                const auto devAn = macos::analyze_pcm_asbd(devAsbd);
+                if (!devAn.valid) {
+                    close_locked();   // close_locked→rollback_device 会归还 Hog，无需重复
+                    fail(OutputError::UnsupportedFormat,
+                         "DoP 无法确认设备精度：设备读回格式不可解析（" + devAn.description + "）",
+                         "DoP cannot verify device precision: unreadable device ASBD (" +
+                             devAn.description + ")");
+                    return false;
+                }
+                if (devAn.effectiveBits < 24) {
+                    close_locked();
+                    fail(OutputError::UnsupportedFormat,
+                         "DoP 需要至少 24-bit 有效精度，设备实际只有 " +
+                             std::to_string(devAn.effectiveBits) + "-bit（" + devAn.description + "）",
+                         "DoP requires >= 24-bit effective precision; the device reports " +
+                             std::to_string(devAn.effectiveBits) + "-bit.");
+                    return false;
+                }
+                if (devAn.sampleRate != rate_) {
+                    close_locked();
+                    fail(OutputError::UnsupportedFormat,
+                         "DoP 要求设备运行在请求的载波率 " + std::to_string(rate_) +
+                             " Hz，设备实际为 " + std::to_string(devAn.sampleRate) +
+                             " Hz（中间做采样率转换会破坏 DoP 标记）",
+                         "DoP requires the device to run at the requested carrier rate " +
+                             std::to_string(rate_) + " Hz; the device reports " +
+                             std::to_string(devAn.sampleRate) + " Hz.");
+                    return false;
+                }
+                if ((int)devAn.channels != channels_) {
+                    close_locked();
+                    fail(OutputError::UnsupportedFormat,
+                         "DoP 要求设备声道数与输出一致：请求 " + std::to_string(channels_) +
+                             " ch，设备实际 " + std::to_string(devAn.channels) + " ch",
+                         "DoP requires matching channel count: requested " +
+                             std::to_string(channels_) + " ch, device reports " +
+                             std::to_string(devAn.channels) + " ch.");
+                    return false;
+                }
             }
         } else {
             // 共享模式：不设设备格式，但必须真实读回 ASBD 说明 client vs device 的区别
@@ -743,11 +988,34 @@ public:
         else clientPacking_ = macos::ContainerPacking::Int32;
         clientBits_ = (uint32_t)bits_;
 
-        // 6) 缓冲帧数 = bufferMs 折算
-        UInt32 frames = (UInt32)((double)rate_ * buffer_ms_ / 1000.0);
-        if (frames < 32) frames = 32;
-        ::AudioUnitSetProperty(unit_, kAudioDevicePropertyBufferFrameSize,
-                               kAudioUnitScope_Global, 0, &frames, sizeof(frames));
+        // 6) 缓冲帧数：
+        // 若为 AirPlay 设备（isAirPlay），严禁硬套本地 bufferMs，采用设备实际 buffer size
+        UInt32 frames = 0;
+        if (isAirPlay && actualDevCaps.currentBufferFrames >= 32) {
+            frames = (UInt32)actualDevCaps.currentBufferFrames;
+        } else {
+            frames = (UInt32)((double)rate_ * buffer_ms_ / 1000.0);
+            if (frames < 32) frames = 32;
+            ::AudioUnitSetProperty(unit_, kAudioDevicePropertyBufferFrameSize,
+                                   kAudioUnitScope_Global, 0, &frames, sizeof(frames));
+        }
+
+        // 读回实际生效的 buffer frame size 并检查校验
+        UInt32 actualBufferFrames = 0;
+        UInt32 bufSizeVal = sizeof(actualBufferFrames);
+        if (::AudioUnitGetProperty(unit_, kAudioDevicePropertyBufferFrameSize,
+                                   kAudioUnitScope_Global, 0, &actualBufferFrames, &bufSizeVal) == noErr &&
+            actualBufferFrames >= 32) {
+            frames = actualBufferFrames;
+        }
+        // ⚠️ 兜底：AirPlay 且设备没报 currentBufferFrames、读回也失败时 frames 会是 0。
+        // 0 会让 buffer_frames() 返回 0 ⟹ 渲染循环只能拿 4096 的猜测周期，而环形缓冲
+        // 却按 1024 分配，等于人为把吞吐压到 1/4。这里退回 bufferMs 折算，绝不返回 0。
+        if (frames < 32) {
+            frames = (UInt32)((double)rate_ * (buffer_ms_ > 0.0 ? buffer_ms_ : 100.0) / 1000.0);
+            if (frames < 32) frames = 32;
+        }
+
         buffer_frames_ = frames;
         // 2026-10-25：IO 周期帧数 = 设备的 buffer frame size。ZeroAttrib 用它判
         // 「供料不足一个周期」（等价 WASAPI 的 per）。
@@ -838,6 +1106,15 @@ public:
                         interleaved + i * (size_t)channels_,
                         sizeof(int32_t) * (size_t)channels_);
         }
+        // ⚠️ 1.1.2 修正（P0-3 后续）：这里**不再**记录 DoP 相位。
+        //
+        // 旧实现在生产者侧算「最后一帧入队的是 0x05 ⟹ 欠载时下一帧用 0xFA」。这个推断在
+        // 环形缓冲里还留着**更旧的未渲染帧**时是错的（部分渲染 / 欠载后的真实场景）：
+        //   已渲染到 0xFA，环里还剩 0x05…，生产者却给出"下一帧 = 0xFA"
+        //   ⟹ 欠载填充的第一帧与刚渲染出去的最后一帧**同标记** ⟹ 接收端判非法（A,A）。
+        // 而且这个字节跨线程（write 线程写、render 线程读）本来就是一条数据竞争。
+        // 现在相位只由渲染线程持有（dopPhase_，见 dop_silence_fill.h 的 DopPhase），
+        // 从**真正渲染出去的最后一帧**接续；生产者线程不参与，竞争与错相一起消失。
         write_pos_ = (write_pos_ + n) % capacity;
         frames_written_ += n;
         return n;
@@ -862,6 +1139,45 @@ public:
 
     bool hog_requested() const override { return hog_requested_; }
     bool hog_acquired() const override { return hogged_; }
+    // 1.1.2：本次 open 是否请求了 DoP 承载（AirPlay/共享模式已被前置拒绝）。
+    bool dop_requested() const { return dop_requested_.load(std::memory_order_relaxed); }
+    // 1.1.2 AP-1.3 自证：本次是否被平台强制成了共享输出（AirPlay 恒为 true）。
+    bool shared_mode() const { return shared_; }
+
+    // ---------------- 1.1.2 DoP 安全自证（只读诊断，供 STAT / signal chain 取用）----------------
+    // phase    : 渲染侧标记相位的异常计数（改写/非法/声道对齐）与"下一帧标记"
+    // gainBlocked : DoP 下被拒绝的非 1.0 增益请求次数
+    // exclusiveRateOk : 开流时设备实际速率是否真的等于请求速率（DoP 的硬前提）
+    // 这些值只增不减，读它们不会改变行为，也不会进实时路径。
+    struct DopSafety {
+        uint8_t phaseNext = 0;
+        uint64_t rephasedFrames = 0;
+        uint64_t invalidMarkerFrames = 0;
+        uint64_t channelFixedFrames = 0;
+        uint64_t gainRequestsBlocked = 0;
+        uint32_t deviceRate = 0;      // 开流时读回的设备速率（0 = 没读/共享模式）
+        bool exclusiveRateOk = false; // 设备速率 == 请求速率
+    };
+    DopSafety dop_safety() const {
+        DopSafety s;
+        const auto snap = dopPhase_.snapshot();
+        s.phaseNext = snap.next;
+        s.rephasedFrames = snap.rephased;
+        s.invalidMarkerFrames = snap.invalidMarker;
+        s.channelFixedFrames = snap.channelFixed;
+        s.gainRequestsBlocked = dopGainIgnored_.load(std::memory_order_relaxed);
+        s.deviceRate = dopDeviceRate_.load(std::memory_order_relaxed);
+        s.exclusiveRateOk = dopExclusiveRateOk_.load(std::memory_order_relaxed);
+        return s;
+    }
+
+    // 1.1.2 生命周期与端点存活监测（AP-1.6）
+    // 只读根据 kAudioDevicePropertyDeviceIsAlive 及输出流查询，避免渲染循环无限等待
+    bool endpoint_alive() const {
+        std::lock_guard<std::mutex> lk(mu_);
+        if (device_ == kAudioObjectUnknown) return false;
+        return detail::is_device_alive(device_);
+    }
 
     size_t buffer_frames() const override { return buffer_frames_; }
     size_t frames_written() const override { return frames_written_; }
@@ -889,7 +1205,24 @@ public:
         return detail::scale_sample_i32(s, bits, g);
     }
 
-    void set_gain(double linear) override { gain_.store(linear, std::memory_order_relaxed); }
+    // ---------------- 实时音量 ----------------
+    // 🔴 1.1.2 DoP 增益闸（纵深防御，任务要求）：DoP 请求下**丢弃**任何非 1.0 的软件增益。
+    //
+    // 为什么必须在入口丢，而不是只靠 render 侧兜底：
+    //   * DoP 把 DSD 位流装进 24-bit 容器，高 8 位是 0x05/0xFA 标记。任何增益都会把它
+    //     当整数缩放（0x05XXXX × 0.5 = 0x02XXXX）⟹ 标记消失 ⟹ 接收端判非法 PCM/白噪。
+    //   * 这条路径**不能**靠"调用方记得不要设增益"来保证：音量滑块、渐变、set_base 与
+    //     set_live 的交叉都可能在切歌/停止瞬间漏进来。丢弃 + 计数才是可自证的。
+    // 语义后果（必须让 UI/用户知道）：DSD 播放期间软件音量不生效，音量由 DAC/系统负责。
+    // 这不是退步 —— 对 DSD 来说软件增益本来就不该存在。
+    void set_gain(double linear) override {
+        if (dop_requested_.load(std::memory_order_relaxed)) {
+            // 只记"被挡了几次"，不改 gain_：干净地保持 1.0，bit_perfect() 判据不受影响。
+            dopGainIgnored_.fetch_add(1, std::memory_order_relaxed);
+            return;
+        }
+        gain_.store(linear, std::memory_order_relaxed);
+    }
 
     // 2026-10-25：接管后「音量条的起点 dB」。
     // 独占接管时硬件音量被置满、软件增益接管；为了让用户看到/拖动的音量值与
@@ -962,8 +1295,11 @@ public:
         std::lock_guard<std::mutex> lk(mu_);
         DeviceFormatInfo info;
         if (!opened_) return info;
-        info.sampleRate = rate_;
-        info.channels = channels_;
+        // 观察 device_format：若读取到了底层设备真实 sampleRate，保留真实 device readback 而不谎报 client rate
+        const uint32_t realDevRate = detail::device_current_rate(device_);
+        info.sampleRate = (realDevRate > 0) ? realDevRate : rate_;
+        const int realDevCh = detail::device_max_channels(device_);
+        info.channels = (realDevCh > 0) ? realDevCh : channels_;
         info.bits = (int)deviceContainerBits_;
         info.effectiveBits = (int)deviceEffectiveBits_;
         info.isFloat = deviceIsFloat_;
@@ -1032,6 +1368,8 @@ private:
     void render(UInt32 frames, AudioBufferList* io) {
         const size_t ch = (size_t)channels_;
         const size_t capacity = ring_frames_;
+        // 环形缓冲未分配（open 没走完）时一帧都不碰：原来的 `% capacity` 在这里是除零。
+        if (!io || io->mNumberBuffers == 0 || capacity == 0) return;
         const size_t avail = (write_pos_ + capacity - read_pos_) % capacity;
         const size_t take = frames < avail ? frames : avail;
 
@@ -1047,6 +1385,28 @@ private:
         const size_t frame_bytes = bytes_per_sample * ch;
         // 设备请求的帧数 = 字节数 / 每帧字节数（不能用 int32 宽度反推！）
         const size_t out_frames = frame_bytes ? (io->mBuffers[0].mDataByteSize / frame_bytes) : 0;
+
+        // ---- 1.1.2 P0-3 后续：DoP 输出整段委托给纯函数（dop_silence_fill.h）----
+        //
+        // 为什么整段切出去：DoP 的三件事——24-bit 容器打包、标记相位、欠载补静音——过去
+        // 一半在实时回调里手写、一半在纯函数里，于是"相位从哪来"这类错误只能靠真机听出来
+        // （而铁律 1 禁止我们那样验证）。现在这三件事只有一份实现，测试离线驱动同一份代码。
+        //
+        // 增益闸（task 1）：DoP 请求时 render 侧**无条件**按 1.0 输出，不看 gain_。
+        // 任何非单位增益都会改写 24-bit 字（含承载标记的高 8 位）⟹ 接收端判非法。
+        // set_gain() 已经在入口丢弃这类请求，这里是第二道闸（纵深防御，不依赖调用顺序）。
+        const bool dop = dop_requested_.load(std::memory_order_relaxed);
+        if (dop && bytes_per_sample == 3) {
+            const macos::DopPeriodStats st = macos::dop_write_period_24le(
+                out, out_frames, ring_.data(), capacity, read_pos_, take, ch,
+                gain_.load(std::memory_order_relaxed), dopPhase_);
+            if (st.gainIgnored) dopGainIgnored_.fetch_add(1, std::memory_order_relaxed);
+            // 只消费真正写出去的帧（out_frames 小于 take 时不白丢环里的数据）。
+            read_pos_ = (read_pos_ + st.written) % capacity;
+            if (st.written < out_frames) underruns_.fetch_add(1);
+            frames_rendered_.fetch_add(out_frames);
+            return;
+        }
 
         const double g = gain_.load(std::memory_order_relaxed);
         size_t i = 0;
@@ -1068,7 +1428,10 @@ private:
                 }
             }
         }
-        // 不足补静音（真静音 = 0），并记一次欠载
+        // 不足补静音，并记一次欠载。
+        //
+        // 普通 PCM 路径行为逐字节不变（仍补 0），旧判据与测试阈值一律不动。
+        // DoP 路径已在上面由 dop_write_period_24le 处理（补的是合法 0x05/0xFA 静音帧）。
         if (i < out_frames) {
             std::memset(out + i * frame_bytes, 0, frame_bytes * (out_frames - i));
             underruns_.fetch_add(1);
@@ -1113,6 +1476,11 @@ private:
         running_ = false;
         paused_ = false;
         shared_ = false;
+        dop_requested_.store(false, std::memory_order_relaxed);
+        dopPhase_.reset();               // 相位归零：下一次开流从"未知"重新接管上游标记
+        dopGainIgnored_.store(0, std::memory_order_relaxed);
+        dopDeviceRate_.store(0, std::memory_order_relaxed);
+        dopExclusiveRateOk_.store(false, std::memory_order_relaxed);
         write_pos_ = read_pos_ = 0;
         ring_.clear();
         ring_frames_ = 0;
@@ -1148,6 +1516,20 @@ private:
     bool hog_requested_ = false;
     bool hogged_ = false;
     bool shared_ = false;
+    // 1.1.2：本次 open 是否请求 DoP 承载（供自证/诊断；AirPlay 与共享模式在
+    // validate_open_spec 里已被前置拒绝，绝不会走到写硬件）。
+    // 原子：open() 在控制线程写，render() 在实时线程读，set_gain() 也可能从 UI 线程读。
+    std::atomic<bool> dop_requested_{false};
+    // DoP 渲染相位（**只由渲染线程推进**；控制线程仅在 close/open 时 reset）。
+    // ⚠️ 不要再加"生产者侧相位"：write() 记录的是入队顺序，不是渲染顺序，
+    //    环里还有旧帧时会算错（这正是 1.1.2 修掉的缺陷，见 write() 的注释）。
+    macos::DopPhase dopPhase_;
+    // DoP 下被拒绝的非 1.0 增益请求次数（纵深防御的自证，UI/诊断可读）。
+    std::atomic<uint64_t> dopGainIgnored_{0};
+    // 开流时读回的设备速率与"是否等于请求速率"（DoP 的硬前提，自证用；共享模式不填）。
+    // 原子：open() 在控制线程写，dop_safety() 可能从 STAT 线程读（并发读不能是裸变量）。
+    std::atomic<uint32_t> dopDeviceRate_{0};
+    std::atomic<bool> dopExclusiveRateOk_{false};
     size_t buffer_frames_ = 0;
     size_t frames_written_ = 0;
 

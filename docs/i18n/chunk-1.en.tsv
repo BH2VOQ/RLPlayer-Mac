@@ -160,7 +160,7 @@ narrow（通带 20 kHz，默认）	narrow (20 kHz passband, default)	Conversion'
 单曲菜单（入队 / 歌单 / 体检 / 对比）	Track Menu (Enqueue / Playlist / Health Check / Compare)	信号链'], ['右键专辑', '整张加入队列'], ['右键曲目', '单曲菜单（入队 / 歌单 / 体检 / 对比）'], ['右键队列条目', '队列菜单（播放 / 歌单 / 移除）'],
 双击归零（0 dB）	Double-click to reset (0 dB)	yle.cursor = 'pointer'; lab.title = '双击归零（0 dB）'; lab.addEventListener('dblclick',
 双击节点	Double-click Node	复核）· Q 0.1~20 · 频率 10 Hz~20 kHz。' + '曲线上 <b>拖拽节点</b>：水平=频率（对数）、垂直=增益；<b>Shift+拖
-反馈问题	Feedback	量（BH2VOQ@163.com），页面不能指定。 + sgroup('反馈问题', '直接发送给开发者，可附诊断包', '<div cla
+反馈问题	Feedback	反馈收件通道由宿主控制，页面不能指定。 + sgroup('反馈问题', '直接发送给开发者，可附诊断包', '<div cla
 取消收藏失败:	Failed to unfavorite: 	Favs(); }).catch(function (e) { toast('取消收藏失败: ' + e); }); } /* ---------------- 我的歌
 只在「DSD 源 → PCM」路径生效；DirectSDM 直通时整条 PCM 链都被跳过	Only active on 'DSD source → PCM' path; entire PCM chain is bypassed during DirectSDM passthrough	）', ADV.dsdKind || 'fir'), '只在「DSD 源 → PCM」路径生效；DirectSDM 直通时整条 PCM 链都被跳过') + sel('sp_dsdconv', 'DSD 源 Co
 可以点「浏览…」直接选文件夹，也可以手填路径	Click 'Browse...' to select a folder, or enter the path manually	' + txt('sp_root', '添加音乐目录', '', '可以点「浏览…」直接选文件夹，也可以手填路径', (SEP === '/' ? '/Users/你的用户名/Music'

@@ -4,7 +4,7 @@
 // uicheck_p3_settings.js — Q-1/Q-3/Q-4/Q-9 + 设置页覆写 conf 的复核判据
 // 独立复核：Q-1/Q-3/Q-4/Q-9 + conf 不被覆写（不依赖工作树的脆弱时序）
 const fs=require('fs'), path=require('path');
-const ub=require('/Users/august/Downloads/DQ/RLPlayer/tools/uibrowser');
+const ub=require('./uibrowser');
 const base=process.argv[2], conf=process.argv[3];
 let fail=0;
 function ck(ok,l,d){console.log((ok?'PASS ':'FAIL ')+l+': '+JSON.stringify(d));if(!ok)fail++;}

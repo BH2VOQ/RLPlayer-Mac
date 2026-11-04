@@ -147,10 +147,10 @@ inline bool pin_to_interface(socket_t s, int ifindex) {
 // 本机 IPv4 网卡（只保留可用的物理网卡；虚拟/桥接/回环一律剔掉）
 struct UpnpIface {
     std::string name;      // en1
-    std::string ip;        // 192.168.3.163
+    std::string ip;        // 192.0.2.163
     std::string mask;      // 255.255.255.0
-    std::string net;       // 192.168.3.0
-    std::string bcast;     // 192.168.3.255（无广播地址时为空）
+    std::string net;       // 192.0.2.0
+    std::string bcast;     // 192.0.2.255（无广播地址时为空）
     int         ifindex = 0;
 };
 
@@ -176,7 +176,7 @@ inline bool ip_in_subnet(const std::string& hostIp, const std::string& net, cons
 // 127.0.0.1（甚至失败），结果就是"只剩回环、全部被过滤" → 组播只从默认路由出去。
 // getifaddrs() 直接遍历内核的网卡地址表，才是 POSIX 的等价做法。
 // 剔除规则（2026-10-28 真机）：bridge*（Internet 共享/桥接）、utun*/awdl*/llw*/anpi*/ap*
-// 不参与发现 —— 它们要么没有真实链路，要么把 192.168.3.0/24 抢成了 REJECT 路由；
+// 不参与发现 —— 它们要么没有真实链路，要么抢占局域网子网产生 REJECT 路由；
 // 198.18/198.19（Clash 等代理 TUN 的 fake-IP 段）记录到 skipped 后跳过。
 inline std::vector<UpnpIface> upnp_ifaces(std::vector<std::string>* skipped = nullptr) {
     std::vector<UpnpIface> out;
@@ -360,8 +360,8 @@ inline bool http_get(const std::string& host, int port, const std::string& path,
         return false;
     }
     // ★ 2026-10-28 真机事故（界面永远停在「正在发现渲染器…」，一台设备都不出现）：
-    //   Rygel（`MR4 音响 [DLNA/UPnP]`）同时从 **192.168.3.29** 和 **192.168.5.29** 两个地址
-    //   应答 SSDP，而本机没有到 192.168.5.0/24 的路由 ⟹ 对后者的**阻塞 connect** 会卡满
+    //   局域网渲染器同时从多个 IP 地址应答 SSDP（其中一个不可路由时），
+    //   若本机没有对应子网路由 ⟹ 对后者的**阻塞 connect** 会卡满
     //   内核 SYN 重传预算（数十秒），期间 CastManager 的 devMutex_ 一直被占着，
     //   下一次 /api/cast/devices 直接挂在锁上 ⟹ 界面永远"正在发现"，超时后也不报错。
     //   修法：非阻塞 connect + poll 超时（默认 800ms）；连不上就只放弃这一台。
@@ -505,20 +505,18 @@ inline int64_t pump_buffer(const unsigned char* data, int64_t toSend,
 //   再一起收响应；同时给出诊断信息（找到几个网卡、哪些被跳过），供 UI 如实显示。
 // 发 M-SEARCH 并收集 MediaRenderer。timeoutMs 建议 1500~2500。
 //
-// 2026-10-28 真机事故（用户「UPnP 搜不到设备」，macOS 27 / Apple M4）：
-//   本机开着「Internet 共享」，系统里多出一个同网段的 bridge100（192.168.3.1/24），
-//   路由表因此变成：
-//       192.168.3    link#20  UC    bridge100  !     ← 整个局域网被抢走（REJECT）
-//       224.0.0/4    link#16  UmCS  en1        !     ← 组播也被标 REJECT
-//   实测：向 192.168.3.x 的 connect 是 EHOSTUNREACH —— 只有把 socket 用 IP_BOUND_IF
-//   钉到 en1 才通；同一环境里向 239.255.255.250 的 sendto 也报 EHOSTUNREACH。
-//   ⚠️ 后续复核（同一天）：组播那条**只在被沙箱约束的 shell 进程里复现**，
-//   普通用户进程（su 直启）组播/广播都正常；路由劫持那条（192.168.3.0/24 → bridge100）
-//   是真实且系统级的。两个成因都要按"可能发生"处理，但别混为一谈。
+// 2026-10-28 场景：
+//   本机开着虚拟网络桥接，系统里多出一个同网段 bridge 虚拟接口，
+//   路由表可能把局域网整段抢走（REJECT）或将组播标为 REJECT。
+//   实测：向目标 IP connect 报 EHOSTUNREACH —— 只有把 socket 用 IP_BOUND_IF
+//   钉到物理网卡才通；同一环境里向 239.255.255.250 的 sendto 也可能报 EHOSTUNREACH。
+//   ⚠️ 复核说明：组播受限可能与特定环境沙箱或路由优先级有关，
+//   普通用户进程组播/广播通常正常；路由抢占 bridge 是真实且系统级的。
+//   两个成因都要按"可能发生"处理，但别混为一谈。
 //   修法（三件，全部实测过）：
 //     ① 逐张物理网卡 pin（IP_BOUND_IF），不 bind 本机 IP；
 //     ② 组播之外**同时发子网广播**（<broadcast>:1900）—— 广播走同网段直连，
-//        不受 224/4 的 REJECT 影响。实测 192.168.3.255:1900 能收到路由器 IGD 的应答；
+//        不受 224/4 的 REJECT 影响；
 //     ③ 诊断如实写清：哪张卡、发了几包、失败的 errno。
 struct UpnpDiscoverDiag {
     int ifaces_tried = 0;
@@ -697,7 +695,7 @@ inline std::vector<UpnpDevice> upnp_discover(int timeoutMs = 1800, UpnpDiscoverD
             dev.ifindex = chans[si].f.ifindex;
 
             std::string xml;
-            // 描述抓取同样要钉在同一张网卡上：本机路由把 192.168.3.0/24 交给 bridge100
+            // 描述抓取同样要钉在同一张网卡上：当系统路由存在虚拟桥接抢占目标子网
             // 时，不钉的 connect 直接 EHOSTUNREACH（"找到了但名字是 IP"的老现象）。
             // 总预算保护：发现是"快照"，不能因为某台设备不可达把整个请求拖住
             const uint64_t spent = upnp_os::monotonic_ms() - t0;
@@ -765,9 +763,9 @@ inline std::vector<UpnpDevice> upnp_discover(int timeoutMs = 1800, UpnpDiscoverD
 }
 
 // 查找本机面向指定目标主机的首选局域网 IP。
-// 不能再用"UDP connect 让内核选路"：本机若存在同网段虚拟网卡（bridge100），
-// 内核会选它，getsockname() 拿到的是 192.168.3.1 —— 供源 URL 会指向桥接址，
-// 设备根本连不上（2026-10-28 真机实测）。
+// 不能再用"UDP connect 让内核选路"：本机若存在同网段虚拟网卡（如 bridge 虚拟接口），
+// 内核会误选，getsockname() 拿到的是虚拟桥接地址 —— 供源 URL 会指向桥接址，
+// 设备根本连不上。
 // 现在的规则：优先"同网段物理网卡"的地址；否则逐卡 pin 后 connect 取源地址。
 inline std::string upnp_local_ip_for(const std::string& targetHost, uint16_t targetPort = 80) {
     const auto ifaces = upnp_os::upnp_ifaces(nullptr);

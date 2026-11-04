@@ -39,12 +39,11 @@ APP="$ROOT/dist-mac/RLPlayer.app"
 DMG_DIR="$ROOT/dist-mac"
 BG="$ROOT/tools/dmg/background.tiff"
 
-# ---------- 版本 ----------
-if [ -n "${2:-}" ]; then
-  VER="$2"
-else
-  VER="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP/Contents/Info.plist" 2>/dev/null || echo "0.0.0")"
-fi
+# ---------- 版本：镜像名与实际 App 必须一致 ----------
+APP_VER="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP/Contents/Info.plist")"
+VER="${2:-$APP_VER}"
+[ "$VER" = "$APP_VER" ] || { echo "✗ 版本不一致：DMG=$VER App=$APP_VER"; exit 1; }
+case "$VER" in *[!0-9A-Za-z.-]*|"") echo "✗ 非法版本号"; exit 1;; esac
 DMG="$DMG_DIR/RLPlayer-${VER}-macOS-arm64.dmg"
 
 # ---------- 前置检查 ----------
@@ -57,14 +56,19 @@ command -v dmgbuild >/dev/null || {
 
 echo "=== 制作 DMG：RLPlayer $VER ==="
 
-# ---------- 清理残留挂载 ----------
-for v in /Volumes/RLPlayer*; do
-  [ -d "$v" ] && hdiutil detach "$v" -quiet 2>/dev/null || true
-done
+# Do not detach unrelated images; verification owns only its temporary mount.
 
 # ---------- 写 dmgbuild 配置 ----------
 SETTINGS="$(mktemp /tmp/rlplayer-dmgsettings.XXXXXX.py)"
-trap 'rm -f "$SETTINGS"' EXIT
+MNT=""
+cleanup() {
+  if [ -n "$MNT" ] && [ -d "$MNT" ]; then
+    hdiutil detach "$MNT" -quiet 2>/dev/null || true
+    rmdir "$MNT" 2>/dev/null || true
+  fi
+  rm -f "$SETTINGS"
+}
+trap cleanup EXIT
 
 cat > "$SETTINGS" <<'PYEOF'
 # dmgbuild 配置（由 tools/make_dmg.sh 生成；app / bg 通过 -D 传入）
@@ -123,21 +127,33 @@ hdiutil verify "$DMG" >/dev/null && echo "   镜像校验通过 ✓"
 # 以及 backgroundImageAlias（背景图）。缺任一项都说明样式没写进去。
 MNT="$(mktemp -d /tmp/rlplayer-verify.XXXXXX)"
 hdiutil attach "$DMG" -readonly -noverify -nobrowse -mountpoint "$MNT" >/dev/null 2>&1
+VERIFIED_APP="$MNT/RLPlayer.app"
+[ -x "$VERIFIED_APP/Contents/MacOS/RLPlayer" ] || { echo "✗ 镜像中缺少 App"; exit 1; }
+MOUNTED_VER="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$VERIFIED_APP/Contents/Info.plist")"
+[ "$MOUNTED_VER" = "$VER" ] || { echo "✗ 镜像中版本不一致"; exit 1; }
+codesign --verify --deep --strict "$VERIFIED_APP"
+for tool in RLPlayer ffmpeg ffprobe librtagpu.dylib rtadiag; do
+  [ -f "$VERIFIED_APP/Contents/MacOS/$tool" ] || { echo "✗ 镜像中缺少 $tool"; exit 1; }
+done
+for doc in LICENSE COPYRIGHT.md OPRA-NOTICE.txt; do
+  [ -f "$VERIFIED_APP/Contents/Resources/$doc" ] || { echo "✗ 镜像中缺少 $doc"; exit 1; }
+done
 DS="$MNT/.DS_Store"
 if [ ! -f "$DS" ]; then
-  echo "   ✗ .DS_Store 缺失"
+  echo "   ✗ .DS_Store 缺失"; exit 1
 else
   echo "   .DS_Store: $(stat -f%z "$DS") 字节"
   for key in bwsp icvp Iloc backgroundImageAlias; do
     if LC_ALL=C strings -a "$DS" | grep -q "$key"; then
       echo "     ✓ $key"
     else
-      echo "     ✗ $key 缺失"
+      echo "     ✗ $key 缺失"; exit 1
     fi
   done
 fi
-hdiutil detach "$MNT" -quiet 2>/dev/null || true
-rmdir "$MNT" 2>/dev/null || true
+hdiutil detach "$MNT" -quiet
+rmdir "$MNT"
+MNT=""
 
 SIZE_BYTES=$(stat -f%z "$DMG")
 SHA=$(shasum -a 256 "$DMG" | awk '{print $1}')

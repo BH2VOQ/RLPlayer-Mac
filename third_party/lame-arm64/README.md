@@ -67,12 +67,14 @@ nm third_party/lame-arm64/lib/libmp3lame.a | grep "T _lame_set_VBR_quality"
 1. 检查 `third_party/lame-arm64/lib/libmp3lame.a` 是否存在
 2. 存在 ⟹ 加 `--enable-libmp3lame --extra-cflags=-I<dir>/include --extra-ldflags=-L<dir>/lib`，
    并在 `--enable-encoder` 列表里追加 `libmp3lame`
-3. 不存在 ⟹ 打印警告并跳过，构建出「不含 MP3 编码」的 ffmpeg（**不会失败**）
+3. 不存在 ⟹ 构建立即失败，不会静默删去 MP3 写回能力。
 
-⟹ 这个目录是可选的加速项：删掉它构建仍能成功，只是失去 MP3 写回能力。
+这个目录是自包含构建的必需输入，不是可选加速项。
 
 ## 许可
 
-LAME 是 **LGPL-2.1**。本仓库以静态库形式链接进 ffmpeg 二进制，
-分发时须遵守 LGPL 的相应条款（提供源码获取途径 / 允许替换该库）。
-`COPYING` 已随目录一并保留。
+LAME 3.100 是 **LGPL-2.0-or-later**，依据 `COPYING` 与 `lame.h` 的版本声明。
+本仓库以静态库形式链接进独立的 FFmpeg 二进制；完整源码来自
+<https://deb.debian.org/debian/pool/main/l/lame/lame_3.100.orig.tar.gz>，
+上面的构建命令和 [FFmpeg 构建脚本](../../tools/build_ffmpeg_lite_mac.sh) 可用于修改后重新构建。
+`COPYING` 与本说明同样随应用分发，用户可替换工具并重新签名自己的修改版。

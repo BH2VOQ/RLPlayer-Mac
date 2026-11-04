@@ -45,9 +45,19 @@ cp "$ROOT/data/opra_index.json" "$APP/Contents/Resources/data/"
 #   * LICENSE       = GPL-3.0 全文（仓库根目录，唯一真相源）
 #   * OPRA-NOTICE   = 内置 OPRA 耳机 EQ 数据的 CC BY-SA 4.0 归属说明
 #   两处缺一，发行包即不合规 ⟹ 这里用致命错误而不是警告。
-for doc in LICENSE OPRA-NOTICE.txt; do
+for doc in LICENSE COPYRIGHT.md OPRA-NOTICE.txt; do
     [[ -f "$ROOT/$doc" ]] || { echo "✗ 致命错误：缺少 $doc，无法满足 GPLv3 的分发义务"; exit 1; }
     cp "$ROOT/$doc" "$APP/Contents/Resources/"
+done
+# Separate executables carry their own notices/licenses as well as the app GPL.
+mkdir -p "$APP/Contents/Resources/third_party/ffmpeg" "$APP/Contents/Resources/third_party/lame"
+for doc in COPYING.LGPLv2.1 README.md; do
+    [[ -f "$ROOT/third_party/ffmpeg/$doc" ]] || { echo "✗ 缺少 FFmpeg 许可材料：$doc"; exit 1; }
+    cp "$ROOT/third_party/ffmpeg/$doc" "$APP/Contents/Resources/third_party/ffmpeg/"
+done
+for doc in COPYING README.md; do
+    [[ -f "$ROOT/third_party/lame-arm64/$doc" ]] || { echo "✗ 缺少 LAME 许可材料：$doc"; exit 1; }
+    cp "$ROOT/third_party/lame-arm64/$doc" "$APP/Contents/Resources/third_party/lame/"
 done
 
 # 2b) Metal GPU 后端（librtagpu.dylib）
@@ -56,11 +66,8 @@ done
 # 后果：设置里 GPU 下拉永远显示「后端库未就位」，Metal 加速实际不可用 ——
 # 而 src/dsp/gpu_pref.h 的搜索路径正是 @executable_path/librtagpu.dylib。
 #
-# 它由 tools/build_gpu_metal_mac.sh 生成（gitignore 掉了，属于构建产物），
-# 所以这里做「有就打包、没有就明确警告」而不是静默跳过：
-#   有库 → 复制到 Contents/MacOS/ 并校验 arm64
-#   无库 → 打印 ⚠ 说明 GPU 加速不可用、怎么构建；**不中断打包**
-#          （GPU 是可选加速，缺它 CPU 卷积照常工作，不该因此出不了包）
+# 它由 tools/build_gpu_metal_mac.sh 生成（构建产物不入库）。
+# 自包含发行包必须内置：缺少或架构不符均为致命错误，不能悄悄出一个缺件的包。
 GPU_LIB=""
 for cand in "$BUILD/librtagpu.dylib" "$ROOT/librtagpu.dylib"; do
     if [[ -f "$cand" ]]; then GPU_LIB="$cand"; break; fi
@@ -68,16 +75,13 @@ done
 if [[ -n "$GPU_LIB" ]]; then
     cp "$GPU_LIB" "$APP/Contents/MacOS/librtagpu.dylib"
     chmod +x "$APP/Contents/MacOS/librtagpu.dylib"
-    # 架构校验：必须含 arm64（发布版只留 arm64，见工作区记忆 single-process-merge-plan.md）
-    if ! lipo -archs "$APP/Contents/MacOS/librtagpu.dylib" 2>/dev/null | grep -q arm64; then
-        echo "⚠ librtagpu.dylib 不含 arm64 架构，GPU 加速可能不可用"
-    else
-        echo "✓ 已打包 Metal GPU 后端：librtagpu.dylib"
-    fi
+    GPU_ARCH="$(lipo -archs "$APP/Contents/MacOS/librtagpu.dylib" 2>/dev/null || true)"
+    [[ "$GPU_ARCH" == "arm64" ]] || { echo "✗ librtagpu.dylib 必须为纯 arm64（实际：$GPU_ARCH）"; exit 1; }
+    echo "✓ 已打包 Metal GPU 后端：librtagpu.dylib"
 else
-    echo "⚠ 未找到 librtagpu.dylib（GPU 加速不可用，CPU 卷积照常）"
+    echo "✗ 缺少 librtagpu.dylib，自包含发行包拒绝打包"
     echo "  构建方法：bash tools/build_gpu_metal_mac.sh"
-    echo "  搜索过：$BUILD/librtagpu.dylib 和 $ROOT/librtagpu.dylib"
+    exit 1
 fi
 
 # 3) 图标（256 PNG → 透明画布居中缩放 → 全档 iconset 16…1024 → icns）
@@ -133,7 +137,7 @@ cat > "$APP/Contents/Info.plist" <<PLIST
     <key>CFBundleIconFile</key>         <string>RLPlayer</string>
     <!-- GPLv3：二进制分发必须可查到版权与许可（Finder 简介面板 / 关于本机都会显示） -->
     <key>NSHumanReadableCopyright</key>
-    <string>Copyright (C) 2026 August Hu. Licensed under GNU GPL v3 or later.</string>
+    <string>Copyright (C) 2026 rainlain and BH2VOQ. Licensed under GNU GPL v3 or later.</string>
     <!-- 2026-10-25：必须与 CMakeLists.txt 的 CMAKE_OSX_DEPLOYMENT_TARGET 保持一致。 -->
     <key>LSMinimumSystemVersion</key>   <string>13.0</string>
     <key>NSHighResolutionCapable</key>  <true/>
@@ -152,7 +156,12 @@ cat > "$APP/Contents/Info.plist" <<PLIST
          UserEventAgent/nehelper 明确记录 "LocalNetwork: found bundle id …"）。
          有它才会弹「RLPlayer 想要查找并连接本地网络上的设备」，用户点允许后 UPnP 发现才可用。 -->
     <key>NSLocalNetworkUsageDescription</key>
-    <string>RLPlayer 需要访问局域网来发现并投放音乐到 UPnP/DLNA 渲染器（设备搜索、读取设备描述、发送播放控制）。若不允许，将无法搜索与投放局域网设备。</string>
+    <string>RLPlayer discovers and streams music to AirPlay and UPnP/DLNA receivers on your local network. RLPlayer 需要访问局域网来发现 AirPlay 和 UPnP/DLNA 接收器并投放音乐。</string>
+    <key>NSBonjourServices</key>
+    <array>
+        <string>_raop._tcp</string>
+        <string>_airplay._tcp</string>
+    </array>
     <!-- 输入采集（§13.13）：CoreAudio 输入设备采集需要 TCC 授权 -->
     <key>NSMicrophoneUsageDescription</key>
     <string>RLPlayer 的输入采集功能用于录音与电平监测，仅在您于设置页显式开启时访问麦克风。</string>

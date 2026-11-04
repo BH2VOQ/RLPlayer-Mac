@@ -1,0 +1,25 @@
+AirPlay 共享输出（非 bit-perfect，端到端逐位未获验证）	AirPlay shared output (non-bit-perfect, end-to-end bit-perfection unverified)	Release 1.1.2
+AirPlay 设备：将使用系统共享输出（不独占/Hog），端到端 bit-perfect 未获验证	AirPlay device: will use system shared output (no exclusive/Hog), end-to-end bit-perfect unverified	Release 1.1.2
+AirPlay 不支持 DoP/Native DSD 输出；如需播放请将输出模式设为 PCM	AirPlay does not support DoP/Native DSD output; please set output mode to PCM to play	Release 1.1.2
+AirPlay 设备仅支持系统共享输出，不支持严格独占（Hog）	AirPlay device only supports system shared output, strict exclusive (Hog) is not supported	Release 1.1.2
+AirPlay 设备不支持 DoP 直通，如需播放 DSD 请将输出模式设为 PCM	AirPlay device does not support DoP passthrough; set output mode to PCM to play DSD	Release 1.1.2
+延迟未知	Latency unknown	Release 1.1.2
+系统属性延迟	System property latency	Release 1.1.2
+（不可用）	(Unavailable)	Release 1.1.2
+  ·  （不可用）	  ·  (Unavailable)	Release 1.1.2
+音频解码中	Decoding Audio	Release 1.1.2
+设备连接中	Connecting Device	Release 1.1.2
+AirPlay 投放暂不支持拖动进度	Seeking is not supported during AirPlay casting	Release 1.1.2
+正在连接 	Connecting to 	Release 1.1.2
+正在准备音频…	Preparing audio...	Release 1.1.2
+正在发现…	Discovering...	Release 1.1.2
+正在推送到 	Casting to 	Release 1.1.2
+正在连接…	Connecting...	Release 1.1.2
+AirPlay 投放：重采样为 44100 Hz / 16 bit ALAC 传输，非 bit-perfect	AirPlay casting: Resampled to 44100 Hz / 16 bit ALAC stream, non-bit-perfect	Release 1.1.2
+AirPlay 投放：重采样为 44100 Hz / 16 bit ALAC 网络推流（非 bit-perfect）	AirPlay casting: Resampled to 44100 Hz / 16 bit ALAC network stream (non-bit-perfect)	Release 1.1.2
+AirPlay 投放启动失败：	AirPlay cast failed to start: 	Release 1.1.2
+投放启动失败	Failed to start casting	Release 1.1.2
+投放失败：	Casting failed: 	Release 1.1.2
+（上次选择 · 离线/需刷新）	(Last selection · Offline/needs refresh) 	Release 1.1.2
+上次保存的设备	Last saved device	Release 1.1.2
+当前未在线，点击上方已发现设备即可重新选择并刷新。	is currently not online. Click a discovered device above to reselect and refresh.	Release 1.1.2

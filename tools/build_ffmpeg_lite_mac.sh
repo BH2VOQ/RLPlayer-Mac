@@ -76,8 +76,10 @@ build_arm64() {
   fi
 
   local LAME_ENABLE="--enable-libmp3lame"
-  local LAME_CFLAGS="-I$LAME_ARCH_DIR/include"
-  local LAME_LDFLAGS="-L$LAME_ARCH_DIR/lib"
+  # Relative paths keep the build machine's home directory out of -version output.
+  # configure/make run in build-mac/ffmpeg-lite-build-arm64/ffmpeg-$VER.
+  local LAME_CFLAGS="-I../../../third_party/lame-arm64/include"
+  local LAME_LDFLAGS="-L../../../third_party/lame-arm64/lib"
   echo "== 使用 $ARCH 静态 lame: $LAME_ARCH_DIR =="
 
   # 写回能力必须与 src/meta/writeback.h 的 writeback_muxer 全覆盖：

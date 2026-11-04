@@ -214,7 +214,7 @@ static bool waitPort(int port, int ms) {
     }
 }
 
-int main() {
+int main(int argc, char** argv) {
     SetConsoleOutputCP(CP_UTF8);
     std::printf("== 库根绝对路径 / --music-dir 写盘顺序 回归 ==\n");
 
@@ -260,17 +260,31 @@ int main() {
         fs::current_path(oldCwd, ec);
     }
 
-    // 找 rtaweb 可执行文件（CMake 生成的测试都在 build-mac 下，同目录即可）
-    const fs::path exeDir = fs::path(exe_path_utf8()).parent_path();
+    // 找 rtaweb 可执行文件：优先命令行指定/同目录，再按环境变量/当前工作目录相对路径推导
     std::string rtaweb;
-    for (const char* cand : { "rtaweb" }) {
-        const fs::path p = exeDir / cand;
-        if (fs::is_regular_file(p, ec)) { rtaweb = u8str(p); break; }
+    if (argc > 1 && argv[1] && argv[1][0]) {
+        const fs::path p(argv[1]);
+        if (fs::is_regular_file(p, ec)) rtaweb = p.string();
     }
     if (rtaweb.empty()) {
-        // 兜底：源码树里的 build-mac（本机固定位置）
-        const fs::path p = "/Users/august/Downloads/DQ/RLPlayer/build-mac/rtaweb";
-        if (fs::is_regular_file(p, ec)) rtaweb = p.string();
+        const char* envPath = std::getenv("RTAWEB_BIN");
+        if (envPath && *envPath) {
+            const fs::path p(envPath);
+            if (fs::is_regular_file(p, ec)) rtaweb = p.string();
+        }
+    }
+    if (rtaweb.empty()) {
+        const fs::path exeDir = fs::path(exe_path_utf8()).parent_path();
+        for (const char* cand : { "rtaweb", "build-mac/rtaweb", "../build-mac/rtaweb" }) {
+            const fs::path p = (cand[0] == '/') ? fs::path(cand) : (exeDir / cand);
+            if (fs::is_regular_file(p, ec)) { rtaweb = u8str(p); break; }
+        }
+    }
+    if (rtaweb.empty()) {
+        for (const fs::path p : { fs::current_path() / "build-mac" / "rtaweb",
+                                  fs::current_path() / "rtaweb" }) {
+            if (fs::is_regular_file(p, ec)) { rtaweb = p.string(); break; }
+        }
     }
     ck(!rtaweb.empty(), "找到 rtaweb 可执行文件", rtaweb.empty() ? "(未找到，后续子进程判据无法执行)" : rtaweb);
     if (rtaweb.empty()) { std::printf("\nFAIL=%d PASS=%d\n", g_fail, g_pass); return 1; }

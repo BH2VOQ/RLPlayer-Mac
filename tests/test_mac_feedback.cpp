@@ -221,7 +221,7 @@ int main() {
                "size=" + std::to_string(with_nul.size()));
             ck(!ok(with_nul), "含 NUL → 拒绝", check_attachment_path(with_nul, root).reason);
         }
-        ck(!ok("/Users/august/Library/Keychains/login.keychain-db"), "任意绝对路径 → 拒绝");
+        ck(!ok("/Users/tester/Library/Keychains/login.keychain-db"), "任意绝对路径 → 拒绝");
 
         // 大小写：.ZIP 也应放行（用户可见名可能是大写）
         ck(ok("/tmp/rlplayer-feedback/DIAG.ZIP"), ".ZIP 大写后缀放行");

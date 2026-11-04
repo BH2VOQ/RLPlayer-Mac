@@ -16,9 +16,9 @@
 //
 // 不抽：读/写文件内容（std::ifstream/ofstream 已经足够，且行为一致）。
 //
-// 为什么要抽目录枚举：std::filesystem::recursive_directory_iterator 在 SMB 上遇到
+// 为什么要抽目录枚举：std::filesystem::recursive_directory_iterator 在 SMB 挂载上遇到
 // 失效目录项时，increment 直接失败并把迭代器置为 end —— 整次遍历静默中止
-// （实测：/Volumes/Music 扫到 KOKIA/翼を広けて (EP) 时 err=2，索引被截断到 4.4k 行）。
+// （例如遇到网络共享失效目录项时 err=2，导致索引被截断）。
 // 平台层用 opendir/readdir + lstat 逐项判定，失效项只计数不中止。
 #pragma once
 #include <filesystem>

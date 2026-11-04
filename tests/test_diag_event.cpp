@@ -128,7 +128,7 @@ int main() {
         ck_has(legacy, "0123456789abcdef0123",
                "A3 红基线：裸 key= 只有 ≥32 字符才抹，20 字符密钥泄漏");
         // 既有能力对照（不是本轮新增）：家目录用户名会被抹
-        ck_has(rta::feedback::redact("/Users/august/Library/x"), "/Users/<user>/Library/x",
+        ck_has(rta::feedback::redact("/Users/tester/Library/x"), "/Users/<user>/Library/x",
                "A4 既有层已经能抹家目录用户名（对照，防把旧能力算成新能力）");
     }
 
@@ -195,7 +195,7 @@ int main() {
         e.code = "meta.timeout";
         e.str("api_key", kKey);
         e.str("url", "https://api.example.com/v1/tracks?q=My%20Secret%20Song&access_token=zzz&sig=abc");
-        e.str("path", "/Users/august/Library/Application Support/RLPlayer/cache.db");
+        e.str("path", "/Users/tester/Library/Application Support/RLPlayer/cache.db");
         e.str("lyrics", kLyric);
         e.str("key", "0123456789abcdef0123");   // 20 字符：既有层门槛 32，会漏
         e.num("rate", 44100);
@@ -215,7 +215,7 @@ int main() {
         ck_not_has(disk, "sig=abc", "C6b 磁盘无 URL query 签名参数");
         ck_has(disk, "https://api.example.com/v1/tracks?<redacted-query:3>",
                "C6c URL 结构保留、query 整体标记（3 个参数）");
-        ck_not_has(disk, "august", "C7 磁盘无用户名");
+        ck_not_has(disk, "tester", "C7 磁盘无用户名");
         ck_has(disk, "/Users/<user>/Library/Application Support/RLPlayer/cache.db",
                "C7b 家目录结构保留，只换用户名段");
         ck_not_has(disk, "第一句歌词", "C8 磁盘无歌词正文");

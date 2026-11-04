@@ -116,7 +116,7 @@ int main() {
         "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0."
         "dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U";
     const std::string kJsonToken   = "{\"token\": \"abcdef123456\"}";
-    const std::string kHomePath    = "from=/Users/august/Downloads/DQ/RLPlayer/build-mac";
+    const std::string kHomePath    = "from=/Users/tester/Downloads/DQ/RLPlayer/build-mac";
     const std::string kAuthHeader  = "LLM request headers: Authorization: Bearer " + kJwt;
     const std::string kSkLive      = "OPENAI_KEY=sk-live-ABCDEF123456XYZ len=51";
     const std::string kMail        = "contact=tester@example.com";
@@ -133,7 +133,7 @@ int main() {
 
         const std::string a2 = legacy::redact_secrets(kHomePath);
         std::printf("  旧实现(家目录)       : %s\n", a2.c_str());
-        ck_has(a2, "august", "A2 红基线：旧实现漏家目录用户名（明文仍在）");
+        ck_has(a2, "tester", "A2 红基线：旧实现漏家目录用户名（明文仍在）");
 
         const std::string a3 = legacy::redact_secrets(kAuthHeader);
         std::printf("  旧实现(Bearer 头)    : %s\n", a3.c_str());
@@ -188,10 +188,10 @@ int main() {
         // 一条真实的日志行（就是 /api/diagzip 里那种内容）
         const std::string line =
             "2026-10-27 16:01:00 LLM cfg access_token=\"tok_9f8e7d6c5b4a\" "
-            "from=/Users/august/Library/Application Support/RLPlayer";
+            "from=/Users/tester/Library/Application Support/RLPlayer";
         const std::string out = rta::feedback::redact(line);
         ck_not_has(out, "tok_9f8e7d6c5b4a", "B14 真实日志行：access_token 值不再明文");
-        ck_not_has(out, "august", "B14b 真实日志行：用户名不再明文");
+        ck_not_has(out, "tester", "B14b 真实日志行：用户名不再明文");
         ck_has(out, "/Users/<user>/Library/Application Support/RLPlayer",
                "B14c 真实日志行：路径结构完整保留，只换用户名");
     }

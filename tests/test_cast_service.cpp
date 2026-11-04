@@ -16,6 +16,7 @@
 #include <atomic>
 #include <mutex>
 #include <chrono>
+#include <functional>
 
 #ifdef _WIN32
 extern "C" __declspec(dllimport) int __stdcall SetConsoleOutputCP(unsigned int);
@@ -134,12 +135,40 @@ int main() {
         std::remove(dffPath.c_str());
     }
 
-    // ================= 3) 设备列表只读查询与接口健壮性 =================
-    std::printf("\n-- 3. 设备列表查询接口 --\n");
+    // ================= 3) 设备标识 / 发现缓存的只读查询（不做真实网络发现） =================
+    //
+    // 纪律：本测试**不发起任何真实发现**（不发 SSDP M-SEARCH、不跑 mDNS 浏览）。
+    // 历史上这里调 get_devices(false)，缓存为空时会真的去发一轮 SSDP —— 既是未声明的
+    // 网络副作用，也让「离线可跑」这个前提在无网/受限环境里不成立。
+    // 现在只读缓存/诊断（last_discovery_diag），并断言 AirPlay 标识判定这一纯函数。
+    std::printf("\n-- 3. 设备标识与发现缓存只读查询（无网络副作用） --\n");
     {
-        // forceRescan = false，不触发阻塞式全网扫描
-        auto devs = mgr.get_devices(false);
-        ck(true, "get_devices 接口调用正常且不崩潰");
+        // 只读：不触发扫描，仅取上一次诊断（可能为空）
+        auto diag = mgr.last_discovery_diag();
+        (void)diag;   // 只要求可读、不崩
+        ck(true, "last_discovery_diag 只读查询正常且不触发扫描");
+
+        ck(CastManager::is_airplay_dev("airplay://192.0.2.10:5000/synthetic"),
+           "AirPlay 设备标识判定为真");
+        ck(!CastManager::is_airplay_dev("http://192.0.2.10:1400/desc.xml"),
+           "HTTP 描述 URL 不被误判为 AirPlay");
+        std::string h;
+        uint16_t p = 0;
+        ck(CastManager::parse_airplay_dev("airplay://192.0.2.10:5000/synthetic", h, p) &&
+               h == "192.0.2.10" && p == 5000,
+           "AirPlay 标识解析出 host/port", h + ":" + std::to_string(p));
+
+        // 注入式设备列表（离线）：只改缓存，不联网
+        rta::net::AirPlayDevice synthetic;
+        synthetic.id = "synthetic-1";
+        synthetic.name = "Synthetic Speaker";
+        synthetic.host = "192.0.2.11";
+        synthetic.port = 5000;
+        mgr.set_airplay_devices_for_test({synthetic});
+        auto aps = mgr.get_airplay_devices(false);
+        ck(aps.size() == 1 && aps[0].name == "Synthetic Speaker",
+           "注入的合成 AirPlay 设备可被读取（不触发 mDNS）", std::to_string(aps.size()));
+        mgr.set_airplay_devices_for_test({});
     }
 
     // ================= 4) 停止与回位 =================
@@ -272,6 +301,44 @@ int main() {
         ck(enDsf.find("not a DSF file") != std::string::npos, "DSF 异常结构化映射为英文", enDsf);
         ck(enDsf.find("/tmp/bad.dsf") != std::string::npos, "DSF 异常路径保留", enDsf);
         ck(!has_cjk(enDsf), "DSF 英文文案不含中文", enDsf);
+    }
+
+    // ================= 5b) 纯函数：可听位置（含 2^32 回绕）与自然结束判据 =================
+    //
+    // 这两条是「判据本身最容易写错」的地方，所以抽成纯函数单独断言：
+    //   · 可听位置 = current − latency，且差值必须是模 2^32 的；用 `current >= start` 判断
+    //     在时间戳回绕后永久失效（一首歌播不到 27 小时测不出来，但纯函数能测）。
+    //   · 自然结束 = finish 成功 ∧ 全部源帧已发 ∧ 未被 stop；历史实现漏掉第一条。
+    std::printf("\n-- 5b. 可听位置（模 2^32）与自然结束判据（纯函数） --\n");
+    {
+        const uint32_t kLat = 88200;
+        const uint32_t base = 1000;
+        ck(cast_audible_frames(base, base, kLat) == 0, "刚起播：可听位置为 0（latency 未走完）");
+        ck(cast_audible_frames(base + kLat / 2, base, kLat) == 0, "latency 未走完前一律为 0（不报负进度）");
+        ck(cast_audible_frames(base + kLat, base, kLat) == 0, "恰好走完 latency：可听位置仍为 0");
+        ck(cast_audible_frames(base + kLat + 5000, base, kLat) == 5000,
+           "可听位置 = (current − start) − latency",
+           std::to_string(cast_audible_frames(base + kLat + 5000, base, kLat)));
+        ck(cast_audible_frames(base + kLat + 5000, base, 0) == kLat + 5000,
+           "latency=0 时可听位置等于源时钟差");
+
+        // 回绕：start 靠近 2^32 顶端，current 已经绕到低地址；差值仍是 0x20000 帧
+        const uint32_t wrapBase = 0xFFFFFF00u;                    // start
+        const uint32_t wrapCurrent = 0x00010000u;                 // 已回绕：数值上 < start
+        const uint64_t wrapElapsed = static_cast<uint32_t>(wrapCurrent - wrapBase);  // 0x10100 = 65792
+        ck(wrapElapsed == 65792u, "回绕后模 2^32 差值 = 65792 帧（不是 0）", std::to_string(wrapElapsed));
+        ck(cast_audible_frames(wrapCurrent, wrapBase, 0) == wrapElapsed,
+           "回绕后 latency=0 的可听位置正确（`current>=start` 写法在这里会得 0）",
+           std::to_string(cast_audible_frames(wrapCurrent, wrapBase, 0)));
+        ck(cast_audible_frames(wrapCurrent, wrapBase, 88200) == 0,
+           "回绕 + latency 未走完：钳到 0，不产生天文数字");
+
+        // 自然结束判据：三者必须同时成立
+        ck(cast_natural_end(true, true, false), "finish 成功 + 全部发出 + 未停止 ⟹ 自然结束");
+        ck(!cast_natural_end(false, true, false), "finish 失败 ⟹ 绝不报自然结束（历史漏洞）");
+        ck(!cast_natural_end(true, false, false), "未发出全部帧 ⟹ 不报自然结束");
+        ck(!cast_natural_end(true, true, true), "用户 stop ⟹ 不报自然结束");
+        ck(!cast_natural_end(false, true, true), "finish 失败 + 用户 stop ⟹ 不报自然结束");
     }
 
     // ================= 6) Loopback Mock UPnP AVTransport 生命周期与 endedNaturally 契约测试 =================
@@ -648,6 +715,746 @@ int main() {
         // 5. 清理临时 WAV 文件与 Mock 线程
         mock.stop();
         std::remove(silentWavPath.c_str());
+    }
+
+    // ================= 7) Loopback Mock AirPlay (RAOP) 完整端到端生命周期 =================
+    std::printf("\n-- 7. Loopback Mock AirPlay (RAOP) 生命周期契约与捕获测试 --\n");
+    {
+        // 构造简单的假 RAOP 接收端，监听 127.0.0.1 随机端口
+        struct MiniRaopReceiver {
+            int listenFd = -1;
+            uint16_t port = 0;
+            int audioFd = -1;
+            uint16_t audioPort = 0;
+            int controlFd = -1;
+            uint16_t controlPort = 0;
+            int timingFd = -1;
+            uint16_t timingPort = 0;
+
+            std::atomic<bool> stop{false};
+            std::thread acceptTh;
+            std::thread udpTh;
+
+            // 接收端播放缓冲（帧）＝ RECORD 回包里的 Audio-Latency。
+            // 2 s = RaopSession::kRaopDefaultLatencyFrames：必须与发送端用于进度/排空的时间轴**同一个数**，
+            // 否则测的是两套不同的假设（旧测试只数包，根本发现不了这件事）。
+            uint32_t latencyFrames = 88200;
+            // 发送端 prebuffer（协议层默认 0.35 s）：决定 RTP 时间轴何时真正开始走。
+            uint32_t prebufferFrames = 15435;
+            // 让 SET_PARAMETER volume 返回 453：验证「初始音量失败必须在发声前中止」。
+            std::atomic<bool> failVolume{false};
+
+            std::mutex mtx;
+            std::vector<std::string> rtspMethods;
+            std::vector<std::string> rtspBodies;
+            size_t audioPackets = 0;
+            size_t controlPackets = 0;
+            bool recorded = false;
+            std::chrono::steady_clock::time_point recordTp{};
+
+            size_t audio_packet_count() {
+                std::lock_guard<std::mutex> lk(mtx);
+                return audioPackets;
+            }
+            size_t control_packet_count() {
+                std::lock_guard<std::mutex> lk(mtx);
+                return controlPackets;
+            }
+            bool saw_method(const std::string& m) {
+                std::lock_guard<std::mutex> lk(mtx);
+                for (const auto& x : rtspMethods) if (x == m) return true;
+                return false;
+            }
+            // 假接收端的**播放模型**（不是包计数）：
+            //   RTP 时间轴自 RECORD 起 +prebuffer 开始走，对端再压一个 latency 才轮到第一个样本出声；
+            //   之后按 1× 速率推进。已收帧数是上限（喂不满就播不满）。
+            // 用它断言「发送端真的等到了可听终点」，而不是只等到「包都发完了」。
+            double model_audible_frames(std::chrono::steady_clock::time_point now) {
+                std::lock_guard<std::mutex> lk(mtx);
+                if (!recorded) return 0.0;
+                const double elapsed = std::chrono::duration<double>(now - recordTp).count();
+                const double delay =
+                    static_cast<double>(latencyFrames) + static_cast<double>(prebufferFrames);
+                const double advanced = std::max(0.0, elapsed * 44100.0 - delay);
+                const double received = static_cast<double>(audioPackets) * 352.0;
+                return std::min(advanced, received);
+            }
+            bool recorded_once() {
+                std::lock_guard<std::mutex> lk(mtx);
+                return recorded;
+            }
+            // 每个子用例开头清一次捕获：判据里会断言「这次一条音频都没发」之类的绝对数量。
+            void reset_capture() {
+                std::lock_guard<std::mutex> lk(mtx);
+                rtspMethods.clear();
+                rtspBodies.clear();
+                audioPackets = 0;
+                controlPackets = 0;
+                recorded = false;
+                recordTp = std::chrono::steady_clock::time_point{};
+            }
+
+            static int bind_udp_random(uint16_t& p) {
+                int s = ::socket(AF_INET, SOCK_DGRAM, 0);
+                if (s < 0) return -1;
+                sockaddr_in a{};
+                a.sin_family = AF_INET;
+                a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+                a.sin_port = 0;
+                if (::bind(s, (sockaddr*)&a, sizeof(a)) < 0) { ::close(s); return -1; }
+                socklen_t len = sizeof(a);
+                ::getsockname(s, (sockaddr*)&a, &len);
+                p = ntohs(a.sin_port);
+                return s;
+            }
+
+            bool start() {
+                listenFd = ::socket(AF_INET, SOCK_STREAM, 0);
+                if (listenFd < 0) return false;
+                int one = 1;
+                ::setsockopt(listenFd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
+                sockaddr_in a{};
+                a.sin_family = AF_INET;
+                a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+                a.sin_port = 0;
+                if (::bind(listenFd, (sockaddr*)&a, sizeof(a)) < 0) return false;
+                socklen_t len = sizeof(a);
+                ::getsockname(listenFd, (sockaddr*)&a, &len);
+                port = ntohs(a.sin_port);
+                if (::listen(listenFd, 8) < 0) return false;
+
+                audioFd = bind_udp_random(audioPort);
+                controlFd = bind_udp_random(controlPort);
+                timingFd = bind_udp_random(timingPort);
+                if (audioFd < 0 || controlFd < 0 || timingFd < 0) return false;
+
+                acceptTh = std::thread([this]() {
+                    while (!stop.load()) {
+                        pollfd pfd{};
+                        pfd.fd = listenFd;
+                        pfd.events = POLLIN;
+                        if (::poll(&pfd, 1, 20) <= 0) continue;
+                        sockaddr_in ca{};
+                        socklen_t cl = sizeof(ca);
+                        int c = ::accept(listenFd, (sockaddr*)&ca, &cl);
+                        if (c < 0) continue;
+
+                        std::thread([this, c]() {
+                            char buf[4096];
+                            std::string inBuf;
+                            while (!stop.load()) {
+                                pollfd cfd{};
+                                cfd.fd = c;
+                                cfd.events = POLLIN;
+                                if (::poll(&cfd, 1, 20) <= 0) continue;
+                                ssize_t n = ::recv(c, buf, sizeof(buf), 0);
+                                if (n <= 0) break;
+                                inBuf.append(buf, n);
+
+                                size_t pos = 0;
+                                while ((pos = inBuf.find("\r\n\r\n")) != std::string::npos) {
+                                    std::string req = inBuf.substr(0, pos + 4);
+                                    inBuf.erase(0, pos + 4);
+
+                                    std::string method;
+                                    size_t sp = req.find(' ');
+                                    if (sp != std::string::npos) method = req.substr(0, sp);
+
+                                    std::string cseq = "1";
+                                    size_t csp = req.find("CSeq: ");
+                                    if (csp != std::string::npos) {
+                                        size_t cr = req.find("\r\n", csp);
+                                        cseq = req.substr(csp + 6, cr - (csp + 6));
+                                    }
+
+                                    std::string clenStr;
+                                    size_t clp = req.find("Content-Length: ");
+                                    if (clp != std::string::npos) {
+                                        size_t cr = req.find("\r\n", clp);
+                                        clenStr = req.substr(clp + 16, cr - (clp + 16));
+                                    }
+                                    size_t clen = clenStr.empty() ? 0 : std::stoul(clenStr);
+                                    std::string body;
+                                    if (clen > 0) {
+                                        while (inBuf.size() < clen && !stop.load()) {
+                                            ssize_t rn = ::recv(c, buf, sizeof(buf), 0);
+                                            if (rn <= 0) break;
+                                            inBuf.append(buf, rn);
+                                        }
+                                        if (inBuf.size() >= clen) {
+                                            body = inBuf.substr(0, clen);
+                                            inBuf.erase(0, clen);
+                                        }
+                                    }
+
+                                    {
+                                        std::lock_guard<std::mutex> lk(mtx);
+                                        rtspMethods.push_back(method);
+                                        if (!body.empty()) rtspBodies.push_back(body);
+                                    }
+
+                                    // 可注入的 SET_PARAMETER volume 失败：发送端必须据此在发声前中止。
+                                    const bool volFail = (method == "SET_PARAMETER") &&
+                                                         failVolume.load() &&
+                                                         body.find("volume:") != std::string::npos;
+
+                                    std::ostringstream resp;
+                                    if (volFail) {
+                                        resp << "RTSP/1.0 453 Not Enough Bandwidth\r\nCSeq: " << cseq << "\r\n";
+                                    } else {
+                                        resp << "RTSP/1.0 200 OK\r\nCSeq: " << cseq << "\r\n";
+                                    }
+                                    if (!volFail) {
+                                        if (method == "SETUP") {
+                                            resp << "Transport: RTP/AVP/UDP;unicast;interleaved=0-1;mode=record;"
+                                                 << "server_port=" << audioPort << ";control_port=" << controlPort
+                                                 << ";timing_port=" << timingPort << "\r\n"
+                                                 << "Session: 11223344\r\n";
+                                        } else if (method == "RECORD") {
+                                            resp << "Audio-Latency: " << latencyFrames << "\r\n"
+                                                 << "Session: 11223344\r\n";
+                                            std::lock_guard<std::mutex> lk(mtx);
+                                            recorded = true;
+                                            recordTp = std::chrono::steady_clock::now();
+                                        }
+                                    }
+                                    resp << "\r\n";
+                                    std::string s = resp.str();
+                                    ::send(c, s.data(), s.size(), 0);
+                                }
+                            }
+                            ::close(c);
+                        }).detach();
+                    }
+                });
+
+                udpTh = std::thread([this]() {
+                    pollfd pfds[2]{};
+                    pfds[0].fd = audioFd; pfds[0].events = POLLIN;
+                    pfds[1].fd = controlFd; pfds[1].events = POLLIN;
+                    uint8_t ubuf[4096];
+                    while (!stop.load()) {
+                        if (::poll(pfds, 2, 20) <= 0) continue;
+                        if (pfds[0].revents & POLLIN) {
+                            sockaddr_storage from{};
+                            socklen_t flen = sizeof(from);
+                            ssize_t n = ::recvfrom(audioFd, ubuf, sizeof(ubuf), 0, (sockaddr*)&from, &flen);
+                            if (n > 0) {
+                                std::lock_guard<std::mutex> lk(mtx);
+                                audioPackets++;
+                            }
+                        }
+                        if (pfds[1].revents & POLLIN) {
+                            sockaddr_storage from{};
+                            socklen_t flen = sizeof(from);
+                            ssize_t n = ::recvfrom(controlFd, ubuf, sizeof(ubuf), 0, (sockaddr*)&from, &flen);
+                            if (n > 0) {
+                                std::lock_guard<std::mutex> lk(mtx);
+                                controlPackets++;
+                            }
+                        }
+                    }
+                });
+                return true;
+            }
+
+            void shutdown() {
+                stop.store(true);
+                if (acceptTh.joinable()) acceptTh.join();
+                if (udpTh.joinable()) udpTh.join();
+                if (listenFd >= 0) { ::close(listenFd); listenFd = -1; }
+                if (audioFd >= 0) { ::close(audioFd); audioFd = -1; }
+                if (controlFd >= 0) { ::close(controlFd); controlFd = -1; }
+                if (timingFd >= 0) { ::close(timingFd); timingFd = -1; }
+            }
+        };
+
+        MiniRaopReceiver raopMock;
+        ck(raopMock.start(), "MiniRaopReceiver 假接收端本地启动成功");
+
+        // 构造 0.2 秒静音 WAV（44100 / 16 / 2）。全零 ⟹ 即使有人误开设备也完全无声（铁律 1）。
+        // 时长选短是因为真实协议默认播放缓冲 = 2 s（kRaopDefaultLatencyFrames）：
+        // 自然结束必须等到「可听终点」= prebuffer 0.35 s + latency 2 s + 时长，一个用例 ≈ 2.6 s。
+        const std::string apWavPath = make_cast_temp_wav_path("raop_test");
+        const size_t kTotalFrames = 8820;                          // 0.2 s
+        const size_t kTotalPackets = (kTotalFrames + 351) / 352;   // 26（含 EOS 补齐包）
+        const double kDurationSec = static_cast<double>(kTotalFrames) / 44100.0;
+        const double kLatencySec = static_cast<double>(raopMock.latencyFrames) / 44100.0;
+        const double kPrebufferSec = static_cast<double>(raopMock.prebufferFrames) / 44100.0;
+        const double kNominalEndSec = kPrebufferSec + kLatencySec + kDurationSec;
+        {
+            rta::audio::AudioBuffer ab;
+            ab.rate = 44100;
+            ab.channels = 2;
+            ab.bits = 16;
+            ab.isFloat = false;
+            ab.raw.assign(kTotalFrames * 2, 0);
+            rta::audio::write_wav(apWavPath, ab);
+        }
+
+        auto now_tp = []() { return std::chrono::steady_clock::now(); };
+        auto secs_since = [](std::chrono::steady_clock::time_point t0) {
+            return std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+        };
+        auto wait_until = [&](const std::function<bool()>& pred, double timeoutSec) -> bool {
+            auto t0 = now_tp();
+            while (!pred()) {
+                if (secs_since(t0) > timeoutSec) return false;
+                std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            }
+            return true;
+        };
+        auto wait_session_end = [&](double timeoutSec) -> bool {
+            return wait_until([]() { return !CastManager::instance().get_state().running; }, timeoutSec);
+        };
+        auto airplay_dev_url = [&](const char* extra) {
+            return "airplay://127.0.0.1:" + std::to_string(raopMock.port) + "/spk" + (extra ? extra : "");
+        };
+
+        // ─────────────────────────────────────────────────────────────────────
+        // 7.1 预检：密码 / 只支持加密 / 不支持 ALAC / 仅公布 pk= / 显式 enc=1 / DoP
+        // ─────────────────────────────────────────────────────────────────────
+        // 需要密码的设备
+        {
+            raopMock.reset_capture();
+            CastStartParams cp;
+            cp.dev = airplay_dev_url("?pw=1");
+            cp.file = apWavPath;
+            auto sr = mgr.start(cp);
+            ck(sr.ok, "密码设备：start() 接收请求并在后台 worker 中做预检");
+            wait_session_end(3.0);
+            auto st = mgr.get_state();
+            if (st.running) mgr.stop();
+            ck(st.phase == "error", "密码设备预检进入 error phase", st.phase);
+            ck(st.error.find("密码") != std::string::npos, "正确报出不支持密码提示", st.error);
+            ck(raopMock.audio_packet_count() == 0, "密码设备在发任何音频之前就被拒绝",
+               std::to_string(raopMock.audio_packet_count()));
+        }
+
+        // 只支持加密（et 明确不含明文 0）＋ 同时公布 pk=：
+        // 判定必须看 needsEncryption（et），不能把「有 pk=」当成「必须加密」，也不能漏掉真要求。
+        {
+            raopMock.reset_capture();
+            AirPlayDevice encOnly;
+            encOnly.id = "synthetic-enc-only";
+            encOnly.name = "Synthetic Enc Only";
+            encOnly.host = "127.0.0.1";
+            encOnly.port = raopMock.port;
+            encOnly.password = false;
+            encOnly.supportsPlaintext = false;
+            encOnly.needsEncryption = true;
+            encOnly.hasPublicKey = true;
+            encOnly.supportsAlac = true;
+            mgr.set_airplay_devices_for_test({encOnly});
+
+            CastStartParams cp;
+            cp.dev = airplay_dev_url("");
+            cp.file = apWavPath;
+            auto sr = mgr.start(cp);
+            ck(sr.ok, "加密专用设备：start() 成功受理（判定在 worker 预检）");
+            wait_session_end(3.0);
+            auto st = mgr.get_state();
+            if (st.running) mgr.stop();
+            ck(st.phase == "error", "只支持加密（et 无 0）的接收端被拒绝", st.phase + " / " + st.error);
+            ck(st.error.find("加密") != std::string::npos, "错误文案指出「要求 RSA 加密」", st.error);
+            ck(raopMock.audio_packet_count() == 0, "加密专用接收端未收到任何音频包");
+            ck(!st.volumeSupported, "失败会话不残留 volumeSupported（界面不会给出音量控件）");
+            ck(!st.errorEn.empty() && !has_cjk(st.errorEn), "加密专用拒绝：英文文案齐全且不含中文", st.errorEn);
+            mgr.set_airplay_devices_for_test({});
+        }
+
+        // 不支持 ALAC（cn 不含 1）：本版本只发 ALAC，必须在握手前拒绝
+        {
+            raopMock.reset_capture();
+            AirPlayDevice noAlac;
+            noAlac.id = "synthetic-no-alac";
+            noAlac.name = "Synthetic No ALAC";
+            noAlac.host = "127.0.0.1";
+            noAlac.port = raopMock.port;
+            noAlac.supportsPlaintext = true;
+            noAlac.needsEncryption = false;
+            noAlac.supportsAlac = false;
+            mgr.set_airplay_devices_for_test({noAlac});
+
+            CastStartParams cp;
+            cp.dev = airplay_dev_url("");
+            cp.file = apWavPath;
+            auto sr = mgr.start(cp);
+            ck(sr.ok, "不支持 ALAC：start() 成功受理");
+            wait_session_end(3.0);
+            auto st = mgr.get_state();
+            if (st.running) mgr.stop();
+            ck(st.phase == "error", "cn 不含 1 的接收端被拒绝", st.phase + " / " + st.error);
+            ck(st.error.find("ALAC") != std::string::npos, "错误文案明确指出缺 ALAC 能力", st.error);
+            ck(!raopMock.recorded_once(), "不支持 ALAC 时连 ANNOUNCE/RECORD 都不发（未浪费一次握手）");
+            mgr.set_airplay_devices_for_test({});
+        }
+
+        // 仅公布 pk=（hasPublicKey=true、needsEncryption=false）：必须**允许**明文尝试
+        {
+            raopMock.reset_capture();
+            AirPlayDevice pkOnly;
+            pkOnly.id = "synthetic-pk-only";
+            pkOnly.name = "Synthetic PK Only";
+            pkOnly.host = "127.0.0.1";
+            pkOnly.port = raopMock.port;
+            pkOnly.supportsPlaintext = true;
+            pkOnly.needsEncryption = false;
+            pkOnly.hasPublicKey = true;
+            pkOnly.supportsAlac = true;
+            mgr.set_airplay_devices_for_test({pkOnly});
+
+            CastStartParams cp;
+            cp.dev = airplay_dev_url("");
+            cp.file = apWavPath;
+            auto sr = mgr.start(cp);
+            ck(sr.ok, "仅有 pk= 的设备：start() 成功");
+            const bool reachedPlaying =
+                wait_until([&]() { return mgr.get_state().phase == "playing"; }, 4.0);
+            auto st = mgr.get_state();
+            ck(reachedPlaying && st.error.empty(),
+               "仅有 pk= 不代表必须加密：连接与起播不被拒绝", st.phase + " / " + st.error);
+            ck(st.warning.find("pk=") != std::string::npos,
+               "警告里如实记录「公布 pk=，仍按明文尝试」", st.warning);
+            mgr.stop();
+            mgr.set_airplay_devices_for_test({});
+        }
+
+        // URL 显式 enc=1：拒绝（这一次是真的「调用方确证要求加密」）
+        {
+            raopMock.reset_capture();
+            CastStartParams cp;
+            cp.dev = airplay_dev_url("?enc=1");
+            cp.file = apWavPath;
+            auto sr = mgr.start(cp);
+            ck(sr.ok, "enc=1：start() 成功受理");
+            wait_session_end(3.0);
+            auto st = mgr.get_state();
+            if (st.running) mgr.stop();
+            ck(st.error.find("加密") != std::string::npos, "URL 显式 enc=1 被拒绝并说明原因", st.error);
+            ck(raopMock.audio_packet_count() == 0, "enc=1 拒绝路径未发音频");
+        }
+
+        // DoP + AirPlay：必须在 start() 同步拒绝（RAOP 没有 DoP 载体）
+        {
+            CastStartParams cp;
+            cp.dev = airplay_dev_url("");
+            cp.file = apWavPath;
+            cp.dop = true;
+            auto sr = mgr.start(cp);
+            ck(!sr.ok, "AirPlay + DoP 被同步拒绝");
+            ck(sr.error.find("DoP") != std::string::npos, "拒绝文案包含 DoP", sr.error);
+            ck(!mgr.get_state().running, "DoP 拒绝后没有留下半启动会话");
+        }
+
+        // ─────────────────────────────────────────────────────────────────────
+        // 7.2 初始音量下发失败：必须在**发出任何音频之前**中止
+        // ─────────────────────────────────────────────────────────────────────
+        {
+            raopMock.reset_capture();
+            raopMock.failVolume.store(true);
+            CastStartParams cp;
+            cp.dev = airplay_dev_url("");
+            cp.file = apWavPath;
+            cp.initialVolumeDb = -20.0;
+            auto sr = mgr.start(cp);
+            ck(sr.ok, "音量失败用例：start() 成功受理");
+            const bool ended = wait_session_end(4.0);
+            auto st = mgr.get_state();
+            if (st.running) mgr.stop();
+            raopMock.failVolume.store(false);
+            ck(ended && st.phase == "error", "SET_PARAMETER volume 失败 ⟹ 会话进入 error", st.phase);
+            ck(st.error.find("音量") != std::string::npos,
+               "错误文案指出「初始音量设置失败」", st.error);
+            ck(raopMock.recorded_once(), "中止发生在 RECORD 之后（握手完成，证明不是连不上）");
+            ck(raopMock.audio_packet_count() == 0,
+               "音量未知时一条音频都没发（避免以未知音量起播）",
+               std::to_string(raopMock.audio_packet_count()));
+            ck(st.currentVolume == -1, "失败后不谎报已设置音量（currentVolume == -1）",
+               std::to_string(st.currentVolume));
+            ck(!st.volumeSupported, "音量失败后不残留 volumeSupported");
+        }
+
+        // ─────────────────────────────────────────────────────────────────────
+        // 7.3 正常生命周期：初始音量、运行期音量、可听进度、延迟排空后的自然结束
+        // ─────────────────────────────────────────────────────────────────────
+        {
+            raopMock.reset_capture();
+            CastStartParams cp;
+            cp.dev = airplay_dev_url("");
+            cp.file = apWavPath;
+            cp.initialVolumeDb = -20.0; // 保守初始音量，绝不 0 dB 爆音
+            auto tStart = now_tp();
+            auto sr = mgr.start(cp);
+            ck(sr.ok, "正常 AirPlay start() 成功", sr.error);
+
+            ck(wait_until([&]() { return mgr.get_state().phase == "playing"; }, 4.0),
+               "成功进入 playing 阶段", mgr.get_state().phase);
+            ck(mgr.get_state().volumeSupported, "AirPlay 报告 volumeSupported 为 true");
+            ck(mgr.get_state().currentVolume > 0 && mgr.get_state().currentVolume < 100,
+               "初始音量已下发并映射到合理百分比", std::to_string(mgr.get_state().currentVolume));
+            ck(mgr.get_state().lastVolumeError.empty(), "初始音量成功时 lastVolumeError 为空",
+               mgr.get_state().lastVolumeError);
+
+            // 运行期音量：成功后更新百分比；这里顺带验证 -15 dB 比 -20 dB 更响
+            const int volBefore = mgr.get_state().currentVolume;
+            mgr.set_volume_db(-15.0);
+            ck(wait_until([&]() { return mgr.get_state().currentVolume != volBefore; }, 1.0),
+               "SetVolume 后音量百分比已更新",
+               std::to_string(volBefore) + " -> " + std::to_string(mgr.get_state().currentVolume));
+            ck(mgr.get_state().currentVolume > volBefore, "更小的衰减（-15 dB）映射出更大的百分比");
+
+            // 运行期音量失败：不得把「没发出去」显示成「已设为 −30 dB / X%」
+            {
+                raopMock.failVolume.store(true);
+                const int volConfirmed = mgr.get_state().currentVolume;
+                mgr.set_volume_db(-30.0);
+                ck(wait_until([&]() { return !mgr.get_state().lastVolumeError.empty(); }, 2.5),
+                   "运行期音量失败被如实记录（lastVolumeError 非空）",
+                   mgr.get_state().lastVolumeError);
+                ck(mgr.get_state().currentVolume == volConfirmed,
+                   "运行期音量失败不更新百分比（保持上次已确认值）",
+                   std::to_string(volConfirmed) + " -> " + std::to_string(mgr.get_state().currentVolume));
+                raopMock.failVolume.store(false);
+            }
+
+            // 进度必须是「可听位置」：延迟 2 s + prebuffer 0.35 s 之后才应动起来
+            std::this_thread::sleep_for(std::chrono::milliseconds(300));
+            ck(mgr.get_state().positionSec < 0.01,
+               "起播 0.3 s 后进度仍 ≈ 0（可听位置尚未越过播放缓冲）",
+               std::to_string(mgr.get_state().positionSec));
+
+            // 自然结束：必须等到可听终点（≈ prebuffer + latency + 时长）
+            const bool ended = wait_session_end(6.0);
+            auto tEnd = now_tp();
+            auto st = mgr.get_state();
+            if (st.running) mgr.stop();
+            ck(ended, "AirPlay 自然播完后会话退出");
+            ck(st.endedNaturally, "AirPlay 自然播完后 endedNaturally 必须为 true");
+            ck(st.error.empty(), "AirPlay 自然播完后无错误", st.error);
+            ck(std::abs(st.positionSec - kDurationSec) < 1e-6,
+               "自然结束后 positionSec 落在曲目末尾",
+               std::to_string(st.positionSec) + " vs " + std::to_string(kDurationSec));
+
+            // ① 假接收端的播放模型必须已经播到终点（证明等的是「可听位置」而不是「包都发完了」）
+            const double modelAudible = raopMock.model_audible_frames(tEnd);
+            ck(modelAudible >= static_cast<double>(kTotalFrames) - 220.0,
+               "发送端等到了接收端播放模型的终点（不是按包数提前结束）",
+               "audible=" + std::to_string(modelAudible) + " total=" + std::to_string(kTotalFrames));
+            // ② 结束时刻必须晚于 prebuffer+latency+时长（旧实现会在 ≈0.2 s 就宣称播完）
+            const double elapsed = std::chrono::duration<double>(tEnd - tStart).count();
+            const double nominalSec = kNominalEndSec;
+            ck(elapsed >= nominalSec - 0.15,
+               "结束时刻不早于 prebuffer+latency+时长（延迟尾巴没被切掉）",
+               "elapsed=" + std::to_string(elapsed) + " nominal=" + std::to_string(nominalSec));
+            ck(elapsed <= nominalSec + 2.5, "结束时刻有界（不会无限等待）",
+               std::to_string(elapsed));
+
+            // ③ 包与控制面事实
+            const size_t audioPkts = raopMock.audio_packet_count();
+            const size_t ctrlPkts = raopMock.control_packet_count();
+            ck(audioPkts >= kTotalPackets,
+               "假接收端捕获到全部 RTP 音频包（含 EOS 补齐包）",
+               "audio=" + std::to_string(audioPkts) + " expected>=" + std::to_string(kTotalPackets));
+            ck(ctrlPkts > 0, "假接收端捕获到 Control (sync) 包", std::to_string(ctrlPkts));
+            ck(raopMock.saw_method("TEARDOWN"), "自然结束后发出了 TEARDOWN");
+
+            bool hasVolParam = false;
+            {
+                std::lock_guard<std::mutex> lk(raopMock.mtx);
+                for (const auto& b : raopMock.rtspBodies) {
+                    if (b.find("volume: ") != std::string::npos) hasVolParam = true;
+                }
+            }
+            ck(hasVolParam, "假接收端捕获到 SET_PARAMETER volume 指令");
+        }
+
+        // ─────────────────────────────────────────────────────────────────────
+        // 7.4 暂停发生在「所有包已发完之后」（drain 阶段）：
+        //     ① 暂停期间不得推进位置、不得结束后台会话；
+        //     ② 结束后台排空预算不能被「暂停时长」耗尽（旧实现会在暂停中把歌播完）；
+        //     ③ 恢复后进度不得回跳。
+        // ─────────────────────────────────────────────────────────────────────
+        {
+            raopMock.reset_capture();
+            CastStartParams cp;
+            cp.dev = airplay_dev_url("");
+            cp.file = apWavPath;
+            auto tStart = now_tp();
+            auto sr = mgr.start(cp);
+            ck(sr.ok, "暂停用例：start() 成功", sr.error);
+
+            ck(wait_until([&]() { return mgr.get_state().phase == "playing"; }, 4.0),
+               "暂停用例：进入 playing");
+            // 等所有包发完（含 EOS 补齐）且接收端已经开始出声
+            const bool allSent = wait_until([&]() { return raopMock.audio_packet_count() >= kTotalPackets; }, 3.0);
+            ck(allSent, "暂停用例：全部音频包已发出（暂停将发生在 drain 阶段）",
+               std::to_string(raopMock.audio_packet_count()));
+            const bool playingStarted = wait_until([&]() {
+                return raopMock.model_audible_frames(now_tp()) > 0.03 * 44100.0;
+            }, 4.0);
+            ck(playingStarted, "暂停用例：接收端已开始出声（可听位置 > 0）");
+
+            const double posBefore = mgr.get_state().positionSec;
+            ck(posBefore > 0.0 && posBefore < kDurationSec,
+               "暂停前进度处于曲目中间", std::to_string(posBefore));
+
+            mgr.set_paused(true);
+            auto tPause = now_tp();
+            ck(wait_until([&]() { return mgr.get_state().paused; }, 1.0), "set_paused(true) 生效");
+            ck(raopMock.saw_method("FLUSH"), "暂停通过 RTSP FLUSH 让对端静音（协议层契约）");
+
+            std::this_thread::sleep_for(std::chrono::milliseconds(400));
+            {
+                auto st = mgr.get_state();
+                ck(st.running, "暂停 0.4 s 后会话仍在运行（没有在暂停里把歌「播完」）");
+                ck(st.paused, "暂停 0.4 s 后 paused 仍为 true");
+                ck(std::abs(st.positionSec - posBefore) <= 0.03,
+                   "暂停期间进度冻结（不前进、不跳变）",
+                   std::to_string(posBefore) + " -> " + std::to_string(st.positionSec));
+                ck(st.positionSec < kDurationSec - 0.005,
+                   "暂停期间进度未到达曲目末尾", std::to_string(st.positionSec));
+            }
+
+            mgr.set_paused(false);
+            std::this_thread::sleep_for(std::chrono::milliseconds(150));
+            {
+                auto st = mgr.get_state();
+                ck(!st.paused, "set_paused(false) 恢复播放");
+                ck(st.positionSec >= posBefore - 0.015,
+                   "恢复后进度不回跳（时间轴重锚带来的小幅回退被单调钳位吸收）",
+                   std::to_string(posBefore) + " -> " + std::to_string(st.positionSec));
+            }
+
+            const bool ended = wait_session_end(6.0);
+            auto tEnd = now_tp();
+            auto st = mgr.get_state();
+            if (st.running) mgr.stop();
+            ck(ended, "暂停/恢复后仍能自然结束（drain 预算未被暂停耗尽）");
+            ck(st.endedNaturally, "暂停/恢复后 endedNaturally 为 true", st.error);
+            ck(st.error.empty(), "暂停/恢复后无错误", st.error);
+
+            const double pauseSec = std::chrono::duration<double>(now_tp() - tPause).count();
+            const double sincePause = std::chrono::duration<double>(tEnd - tPause).count();
+            ck(sincePause >= 0.30, "结束时刻晚于暂停开始（暂停没有被排空截止时间吞掉）",
+               "sincePause=" + std::to_string(sincePause) + " pauseSec≈" + std::to_string(pauseSec));
+            const double totalElapsed = std::chrono::duration<double>(tEnd - tStart).count();
+            ck(totalElapsed >= kNominalEndSec + 0.30,
+               "总时长 ≥ prebuffer+latency+时长+暂停（暂停真的被等过了）",
+               std::to_string(totalElapsed));
+        }
+
+        // ─────────────────────────────────────────────────────────────────────
+        // 7.5 暂停状态下 stop()：必须有界返回（不能等到歌自然结束）
+        // ─────────────────────────────────────────────────────────────────────
+        {
+            raopMock.reset_capture();
+            CastStartParams cp;
+            cp.dev = airplay_dev_url("");
+            cp.file = apWavPath;
+            auto sr = mgr.start(cp);
+            ck(sr.ok, "暂停中 stop：start() 成功", sr.error);
+            ck(wait_until([&]() { return mgr.get_state().phase == "playing"; }, 4.0),
+               "暂停中 stop：进入 playing");
+            mgr.set_paused(true);
+            ck(wait_until([&]() { return mgr.get_state().paused; }, 1.0), "暂停中 stop：已暂停");
+            const auto t0 = now_tp();
+            mgr.stop();
+            const double stopSec = std::chrono::duration<double>(now_tp() - t0).count();
+            ck(stopSec < 1.5, "暂停状态下 stop() 有界返回（< 1.5 s）", std::to_string(stopSec));
+            auto st = mgr.get_state();
+            ck(!st.running, "暂停中 stop() 后 running == false");
+            ck(!st.endedNaturally, "暂停中 stop() 不算自然结束");
+            ck(st.phase == "stopped", "暂停中 stop() 后 phase == stopped", st.phase);
+        }
+
+        // ─────────────────────────────────────────────────────────────────────
+        // 7.6 并发 start / 快速 start-stop：不重复 join、不互等整首歌
+        // ─────────────────────────────────────────────────────────────────────
+        {
+            raopMock.reset_capture();
+            CastStartParams cp;
+            cp.dev = airplay_dev_url("");
+            cp.file = apWavPath;
+            auto sr = mgr.start(cp);
+            ck(sr.ok, "并发 start：首个会话启动成功", sr.error);
+            ck(wait_until([&]() { return mgr.get_state().phase == "playing"; }, 4.0),
+               "并发 start：首个会话已进入 playing");
+
+            // 4 个线程同时 start：必须全部被拒绝（不能有第二个 thread 覆盖 workerThread_）
+            std::atomic<int> accepted{0};
+            std::atomic<int> rejected{0};
+            std::vector<std::thread> ths;
+            for (int r = 0; r < 4; ++r) {
+                ths.emplace_back([&]() {
+                    auto rr = mgr.start(cp);
+                    if (rr.ok) accepted.fetch_add(1);
+                    else rejected.fetch_add(1);
+                });
+            }
+            for (auto& t : ths) t.join();
+            ck(accepted.load() == 0, "并发 start：没有任何一个请求被接受（running 会话保护）",
+               "accepted=" + std::to_string(accepted.load()));
+            ck(rejected.load() == 4, "并发 start：4 个请求全部明确拒绝",
+               "rejected=" + std::to_string(rejected.load()));
+            ck(mgr.get_state().running, "并发 start 后原会话仍在运行（未被覆盖）");
+            mgr.stop();
+            ck(!mgr.get_state().running, "并发 start 用例收尾正常");
+
+            // 空闲状态下的并发 start：这是历史 bug 的精确形态 ——
+            // 两个 start() 同时通过 running==false 检查后，第二个会去 join 第一个的 worker，
+            // 于是一次「开始投放」要等到**整首歌播完**才返回，而且可能起出两条会话。
+            // 现在 start()/stop() 由 lifecycleMtx_ 串行化 ⟹ 恰好 1 个被接受，其余立即拒绝。
+            {
+                raopMock.reset_capture();
+                CastStartParams cp3;
+                cp3.dev = airplay_dev_url("");
+                cp3.file = apWavPath;
+
+                std::mutex resMtx;
+                int acceptedIdle = 0, rejectedIdle = 0;
+                double maxSec = 0.0;
+                std::vector<std::thread> ths2;
+                for (int i = 0; i < 4; ++i) {
+                    ths2.emplace_back([&]() {
+                        const auto tc = now_tp();
+                        auto rr = mgr.start(cp3);
+                        const double sec = std::chrono::duration<double>(now_tp() - tc).count();
+                        std::lock_guard<std::mutex> lk(resMtx);
+                        if (rr.ok) ++acceptedIdle; else ++rejectedIdle;
+                        if (sec > maxSec) maxSec = sec;
+                    });
+                }
+                for (auto& t : ths2) t.join();
+                ck(acceptedIdle == 1, "空闲并发 start：恰好 1 个被接受（不会起两条会话）",
+                   std::to_string(acceptedIdle));
+                ck(rejectedIdle == 3, "空闲并发 start：其余 3 个立即明确拒绝",
+                   std::to_string(rejectedIdle));
+                ck(maxSec < 1.5, "空闲并发 start：没有请求等待整首歌（旧实现会 join 到曲终）",
+                   std::to_string(maxSec));
+                mgr.stop();
+                ck(!mgr.get_state().running, "空闲并发 start 用例收尾正常");
+            }
+
+            // 连击快速 start/stop：不重复 join、不抛异常、不死锁
+            bool raceOk = true;
+            for (int r = 0; r < 5; ++r) {
+                try {
+                    CastStartParams cp2;
+                    cp2.dev = airplay_dev_url("");
+                    cp2.file = apWavPath;
+                    mgr.start(cp2);
+                    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+                    mgr.stop();
+                } catch (...) {
+                    raceOk = false;
+                }
+            }
+            ck(raceOk && !mgr.get_state().running, "连击快速 start/stop 稳健收尾无死锁");
+        }
+
+        raopMock.shutdown();
+        std::remove(apWavPath.c_str());
     }
 
     std::printf("\n=== 测试总结: %s (失败: %d) ===\n", g_fail ? "FAIL" : "PASS", g_fail);

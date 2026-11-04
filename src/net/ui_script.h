@@ -3597,6 +3597,16 @@ function cueQuery(cs, ce) {
          (ce >= 0 ? ('&cue_end=' + encodeURIComponent(ce)) : '');
 }
 function playPath(f, cs, ce, quiet) {
+  if (!f) return Promise.resolve();
+  // 1.1.2 AP-1.4: AirPlay 输出时拒绝 DoP/Native DSD 输出；DSD 素材可显式选 PCM 解码播放，不能用文件类型一刀切拒绝
+  var dev = devMixOf(ADV.device);
+  if (isAirPlayDevice(dev)) {
+    var out = outModeOf();
+    if (out === 'dsd') {
+      toast('AirPlay 不支持 DoP/Native DSD 输出；如需播放请将输出模式设为 PCM');
+      return Promise.resolve({ ok: false, error: 'AirPlay 不支持 DoP/Native DSD 输出' });
+    }
+  }
   S.lastCur = f;
   // 2026-10-28（用户实测「换歌后底栏还保留上一首」）：切歌瞬间就把底栏切到新曲目，
   // 并作废在飞的旧 meta 请求。否则上一首的 /api/meta 响应后到会把标题写回去，而轮询
@@ -3962,6 +3972,14 @@ function bpBadgeInfo() {
   }
 
   // ---- 以下是 bpv === 'no'：链路里有改动，需要判方向 ----
+  // 1.1.2 AP-1.2: 播放signal/status将提供transport/sharedOnly/latencyKnown/latencyMs/latencySource，
+  // bitPerfect='no', bitPerfectWhy说明端到端未验证。UI任何自推断bitPerfect都不能覆盖这一真值。
+  if (S.bpTransport === 'airplay' || (whyBp && whyBp.indexOf('AirPlay') >= 0)) {
+    t = '非 bit-perfect'; c = 'bp-no';
+    if (!title) title = whyBp || 'AirPlay 传输：系统混音与网络重封装，端到端逐位未获验证';
+    return { text: t, cls: c, title: title };
+  }
+
   // 升频方向只有三种，且**必须**有后端证据：
   //   ① dsd>0            ⟹ 输出真的是 DSD（不是靠 outRate 猜；DoP 的 outRate 是载波率）
   //        源 DSD ⟹ DSD-DSD 升频；源 PCM ⟹ PCM-DSD 升频
@@ -4002,6 +4020,11 @@ function tick() {
     SEEK.posAt = nowMs();
     // 2026-10-23 #1：底栏 bit-perfect 徽标的数据源（后端权威判定，见 /api/status 的 bitPerfect 字段）
     S.bpState = j.bitPerfect || ""; S.bpWhy = j.bitPerfectWhy || "";
+    S.bpTransport = j.transport || "";
+    S.bpSharedOnly = !!j.sharedOnly;
+    S.bpLatencyKnown = !!j.latencyKnown;
+    S.bpLatencyMs = (typeof j.latencyMs === 'number') ? j.latencyMs : null;
+    S.bpLatencySource = j.latencySource || "";
     // 2026-10-26 B-4：六态徽标要判「升频方向」，全部取后端 F-5 的自证字段（前端不自己推导）。
     //   dsd>0 ⟹ 输出真的是 DSD（DoP 载波）；dsd=0 ⟹ PCM 输出。
     //   ★ 绝不用 outRate 反推：DoP 的 outRate 是**载波率**（DSD128 = 384000），
@@ -4069,7 +4092,34 @@ function tick() {
     if (j.current) {
       if (S.lastCur !== j.current) { S.lastCur = j.current; SEEK.holdUntil = 0; loadMeta(j.current); loadLyrics(j.current); }
       syncLyrics(j.pos);
-      D('nps').textContent = (j.playing ? (j.paused ? '已暂停' : '播放中') : '已停止') +
+      var statusText = (j.playing ? (j.paused ? '已暂停' : '播放中') : '已停止');
+      if (j.castMode) {
+        if (j.castPhase === 'connecting') statusText = '设备连接中';
+        else if (j.castPhase === 'decoding') statusText = '音频解码中';
+        else if (j.castPhase === 'discovering') statusText = '设备发现中';
+        else if (j.paused) statusText = '已暂停';
+        else if (j.playing) statusText = '投放播放中';
+        var isAirPlay = (j.outMode === 'airplay' || j.transport === 'airplay' || (j.castDevice && j.castDevice.indexOf('airplay://') === 0));
+        var cBadge = D('castBadge');
+        if (cBadge) {
+          cBadge.style.display = 'inline-flex';
+          cBadge.textContent = isAirPlay ? 'AirPlay' : 'UPnP';
+        }
+      } else if (!castRunning()) {
+        var cBadge = D('castBadge');
+        if (cBadge) cBadge.style.display = 'none';
+      }
+      var isAirPlayCast = (j.castMode && (j.outMode === 'airplay' || j.transport === 'airplay' || (j.castDevice && j.castDevice.indexOf('airplay://') === 0))) ||
+                          (castRunning() && CAST.state && CAST.state.device && CAST.state.device.indexOf('airplay://') === 0);
+      ['seek', 'npSeek'].forEach(function (id) {
+        var el = D(id);
+        if (el) {
+          el.title = isAirPlayCast ? 'AirPlay 投放暂不支持拖动进度' : '点击跳转';
+          if (isAirPlayCast) el.setAttribute('aria-disabled', 'true');
+          else el.removeAttribute('aria-disabled');
+        }
+      });
+      D('nps').textContent = statusText +
         (j.outRate ? ' \u00b7 ' + j.outRate + ' Hz / ' + j.outBits + ' bit' : '');
       D('fmt').textContent = j.outRate ? (Math.round(j.outRate / 100) / 10) + 'k/' + j.outBits : '--';
       updateNextTrackInfo();
@@ -4086,6 +4136,15 @@ function tick() {
       S.gpuUsed = false; S.gpuOn = false;
       D('fmt').textContent = '--';
       D('gpub').style.display = 'none';
+      if (!j.playing && !j.paused) {
+        S.bpState = "";
+        S.bpWhy = "";
+        S.bpTransport = "";
+        S.bpSharedOnly = false;
+        S.bpLatencyKnown = false;
+        S.bpLatencyMs = null;
+        S.bpLatencySource = "";
+      }
       if (S.lastCur) { S.lastCur = ''; D('npt').textContent = '未播放'; D('npart').textContent = ''; D('nps').textContent = '选择一个专辑开始'; D('cv').style.backgroundImage = ''; S.npMetaHtml = ''; if (D('npMeta')) D('npMeta').innerHTML = ''; }
       updateNextTrackInfo();
     }
@@ -4456,7 +4515,19 @@ function wbApply() {
 
 /* ---------------- 设备能力与混音格式（Q-1 / Q-4） ---------------- */
 var DEVMIX = {};       // deviceId -> {channels, mixRate, mixBits, fmt}
-function devMixOf(id) { return DEVMIX[id || ''] || null; }
+function devMixOf(id) {
+  if (id && DEVMIX[id]) return DEVMIX[id];
+  if (!id) {
+    // 默认设备选项需正确找到 isDefault
+    for (var k in DEVMIX) {
+      if (DEVMIX[k] && DEVMIX[k].isDefault) return DEVMIX[k];
+    }
+  }
+  return null;
+}
+function isAirPlayDevice(d) {
+  return !!(d && d.transport === 'airplay');
+}
 function devMixChannels(id) { var d = devMixOf(id); return (d && d.channels) || 0; }
 function effectiveChannels() {
   var bk = (D('sp_backend') && D('sp_backend').value) || ADV.backend || 'wasapi';
@@ -4470,8 +4541,22 @@ function effectiveChannels() {
 function devMixText(id) {
   var d = devMixOf(id);
   if (!d || !d.channels) return '';
-  return d.channels + ' 声道 · ' + (d.mixRate ? (d.mixRate + ' Hz') : '采样率未知') +
-         (d.mixBits ? (' · ' + d.mixBits + ' bit ' + (d.fmt || '')) : '');
+  var isEn = (typeof document !== 'undefined' && document.documentElement && document.documentElement.dataset.lang === 'en');
+  var parts = [];
+  parts.push(d.channels + (isEn ? ' ch' : ' 声道'));
+  parts.push(d.mixRate ? (d.mixRate + ' Hz') : (isEn ? 'Sample rate unknown' : '采样率未知'));
+  if (d.mixBits) parts.push(d.mixBits + ' bit ' + (d.fmt || ''));
+  if (isAirPlayDevice(d)) {
+    parts.push('AirPlay');
+    parts.push(isEn ? 'Shared Output' : '共享输出');
+    if (d.latencyKnown && typeof d.latencyMs === 'number') {
+      parts.push((isEn ? 'Latency ' : '延迟 ') + Math.round(d.latencyMs) + ' ms' + (d.latencySource ? (' (' + d.latencySource + ')') : ''));
+    } else {
+      parts.push(isEn ? 'Latency unknown' : '延迟未知');
+    }
+    parts.push(isEn ? 'End-to-end bit-perfect unverified' : '端到端 bit-perfect 未验证');
+  }
+  return parts.join(' · ');
 }
 function updateDevMixHint() {
   var el = D('sp_trimchmsg'); if (!el) return;
@@ -4517,41 +4602,125 @@ window.effectiveChannels = effectiveChannels;
   }
 })();
 
-function loadDeviceList() {
+function applyAirPlayUIConstraints() {
+  var dev = devMixOf(ADV.device);
+  var isAir = isAirPlayDevice(dev);
+  var hogEl = D('sp_hogexcl');
+  if (hogEl) {
+    hogEl.disabled = isAir;
+    var lbl = D('sp_hogexcl_lbl');
+    if (lbl) {
+      lbl.title = isAir ? 'AirPlay 设备仅支持系统共享输出，不支持严格独占（Hog）' : '';
+    }
+  }
+  var dsdpk = D('sp_dsdpk');
+  if (dsdpk) {
+    dsdpk.title = isAir ? 'AirPlay 设备不支持 DoP 直通，如需播放 DSD 请将输出模式设为 PCM' : '';
+  }
+  backendHint();
+}
+
+function loadDeviceList(force) {
   var bk = ADV.backend || 'wasapi';
-  api('/api/devices').then(function (j) {
-    var list = j.devices || [];
+  return api('/api/devices' + (force ? '?reload=1' : '')).then(function (j) {
+    var list = (j && j.devices) || [];
+    var defaultDev = null;
     list.forEach(function (d) {
       if (d && d.id) {
         DEVMIX[d.id] = {
-          channels: d.channels || 0,
-          mixRate: d.mixRate || 0,
+          id: d.id,
+          name: d.name || '',
+          channels: (typeof d.currentChannels === 'number' && d.currentChannels > 0) ? d.currentChannels : (d.channels || 0),
+          mixRate: (typeof d.currentRate === 'number' && d.currentRate > 0) ? d.currentRate : (d.mixRate || 0),
           mixBits: d.mixBits || 0,
-          fmt: d.mixFmt || ''
+          fmt: d.mixFmt || '',
+          isDefault: !!(d.default === true || d.isDefault === true),
+          transport: d.transport || 'unknown',
+          transportType: (typeof d.transportType === 'number') ? d.transportType : 0,
+          sharedOnly: !!d.sharedOnly,
+          latencyKnown: !!d.latencyKnown,
+          latencyMs: (typeof d.latencyMs === 'number' ? d.latencyMs : (d.latencyKnown ? 0 : null)),
+          latencySource: d.latencySource || '',
+          currentRate: d.currentRate || 0,
+          currentChannels: d.currentChannels || 0,
+          currentBufferFrames: d.currentBufferFrames || 0,
+          bitPerfectVerified: (d.bitPerfectVerified !== undefined) ? !!d.bitPerfectVerified : (d.transport === 'airplay' ? false : undefined),
+          dopCarrierRate: (typeof d.dopCarrierRate === 'number') ? d.dopCarrierRate : 0,
+          dsd: d.dsd || 'none'
         };
+        if (d.default === true || d.isDefault === true) {
+          defaultDev = DEVMIX[d.id];
+        }
       }
     });
     var sel2 = D('sp_device');
-    if (!sel2) { updateDevMixHint(); return; }
-    var h = '<option value="">' +
-      ((bk === 'wasapi' || bk === 'wasapi-shared') ? '默认设备' : '（此后端没有本地设备）') +
-      '</option>';
+    if (!sel2) { updateDevMixHint(); applyAirPlayUIConstraints(); return; }
+    var isEn = (typeof document !== 'undefined' && document.documentElement && document.documentElement.dataset.lang === 'en');
+    var defText = (bk === 'wasapi' || bk === 'wasapi-shared') ? (isEn ? 'Default Device' : '默认设备') : (isEn ? '(This backend has no local devices)' : '（此后端没有本地设备）');
+    if ((bk === 'wasapi' || bk === 'wasapi-shared') && defaultDev) {
+      var defAir = (defaultDev.transport === 'airplay');
+      if (defAir) {
+        var defLat = (defaultDev.latencyKnown && typeof defaultDev.latencyMs === 'number')
+          ? ((isEn ? ' · Latency ' : ' · 延迟 ') + Math.round(defaultDev.latencyMs) + 'ms')
+          : (isEn ? ' · Latency unknown' : ' · 延迟未知');
+        defText += '  ·  AirPlay' + defLat;
+      }
+    }
+    var h = '<option value="">' + esc(defText) + '</option>';
+    var foundSelected = false;
     list.forEach(function (d) {
-      var dm = DEVMIX[d.id];
-      h += '<option value="' + esc(d.id) + '">' + esc(d.name) +
-           (d.default ? '（默认）' : '') +
-           (dm && dm.channels ? ('  ·  ' + dm.channels + 'ch' + (dm.mixRate ? ('/' + (dm.mixRate / 1000) + 'k') : '')) : '') +
-           '</option>';
+      if (d && d.id) {
+        if (d.id === ADV.device) foundSelected = true;
+        var dm = DEVMIX[d.id];
+        // AirPlay 标注：延迟只能用系统属性（未知就写"延迟未知"），**绝不写死 2 秒**。
+        // 端到端 bit-perfect 未获验证，这里也不做任何"音质无损"的暗示。
+        var air = (dm && dm.transport === 'airplay');
+        var lat = '';
+        if (air) {
+          lat = (dm.latencyKnown && typeof dm.latencyMs === 'number')
+            ? ((isEn ? ' · Latency ' : ' · 延迟 ') + Math.round(dm.latencyMs) + 'ms')
+            : (isEn ? ' · Latency unknown' : ' · 延迟未知');
+        }
+        var chRate = '';
+        if (dm && dm.channels) {
+          chRate = '  ·  ' + dm.channels + 'ch' + (dm.mixRate ? ('/' + (dm.mixRate / 1000) + 'k') : '');
+        }
+        h += '<option value="' + esc(d.id) + '">' + esc(d.name) +
+             ((d.default === true || d.isDefault === true) ? (isEn ? ' (Default)' : '（默认）') : '') +
+             (air ? '  ·  AirPlay' : '') +
+             chRate +
+             lat +
+             '</option>';
+      }
     });
+    // 出现/消失时选中ID不要悄悄改成默认，可展示不可用
+    if (ADV.device && !foundSelected) {
+      var dmOld = DEVMIX[ADV.device];
+      var nameOld = (dmOld && dmOld.name) ? dmOld.name : ADV.device;
+      var airOld = (dmOld && dmOld.transport === 'airplay');
+      h += '<option value="' + esc(ADV.device) + '">' + esc(nameOld) +
+           (airOld ? '  ·  AirPlay' : '') +
+           (isEn ? '  ·  (Unavailable)' : '  ·  （不可用）') +
+           '</option>';
+    }
     sel2.innerHTML = h;
     sel2.value = ADV.device || '';
     sel2.onchange = function () {
       ADV.device = this.value;
+      var picked = devMixOf(this.value);
       if (bk === 'wasapi') loadRates();   // 只有 CoreAudio 独占能查设备支持的采样率
       saveSettings();
       repaintTrims();
-      toast('输出设备已选择，下次播放生效');
+      applyAirPlayUIConstraints();
+      // 1.1.2 AP-1.3：AirPlay 只能共享输出。这里只**提示**，不偷偷改用户的设置 ——
+      // 真正的强制落在播放路径（用户可能只是先选设备、别的曲目仍用本地独占）。
+      if (isAirPlayDevice(picked)) {
+        toast('AirPlay 设备：将使用系统共享输出（不独占/Hog），端到端 bit-perfect 未获验证');
+      } else {
+        toast('输出设备已选择，下次播放生效');
+      }
     };
+    applyAirPlayUIConstraints();
     repaintTrims();
   }).catch(function () { });
 }
@@ -5622,6 +5791,12 @@ function bindSeekDrag(id) {
   el.addEventListener('pointerdown', function (ev) {
     if (!(S.dur > 0)) return;                                        // 时长未知不拖（换算不出来）
     if (typeof ev.button === 'number' && ev.button !== 0) return;    // 只认左键 / 主触点
+    var isAirPlayCast = (castRunning() && CAST.state && CAST.state.device && CAST.state.device.indexOf('airplay://') === 0) ||
+                        (S.bpOutMode === 'airplay' || S.bpTransport === 'airplay');
+    if (isAirPlayCast) {
+      toast('AirPlay 投放暂不支持拖动进度');
+      return;
+    }
     SEEK.drag = id;
     SEEK.frac = seekFracAt(el, ev.clientX);
     paintSeek(SEEK.frac * (S.dur || 0));
@@ -5821,6 +5996,13 @@ D('bAddRoot').onclick = function () {
 // 261024-02 #4：seek 统一走这里 —— 发完请求立刻清掉歌词的手动滚动保护并重定位，
 // 不等下一次 400ms tick（否则跳转后歌词要"愣一下"才跟上）。
 function doSeek(frac) {
+  var isAirPlayCast = (castRunning() && CAST.state && CAST.state.device && CAST.state.device.indexOf('airplay://') === 0) ||
+                      (S.bpOutMode === 'airplay' || S.bpTransport === 'airplay');
+  if (isAirPlayCast) {
+    toast('AirPlay 投放暂不支持拖动进度');
+    paintSeek(seekDisplaySec());
+    return;
+  }
   var f = Math.max(0, Math.min(0.9999, frac));
   // 1.1.0（拖动不丝滑）：先落预览、再发请求 —— 松手/点击的那一帧条子就停在目标位置；
   //   之后 400 ms 轮询回来的**旧 pos** 不许把它拉回去（SEEK.holdUntil 窗口内显示 holdTarget）。
@@ -5830,7 +6012,16 @@ function doSeek(frac) {
   SEEK.lastCommitAt = nowMs();
   paintSeek(SEEK.holdTarget);
   seekAnimKick();
-  api('/api/seek?pos=' + f.toFixed(4), '');
+  api('/api/seek?pos=' + f.toFixed(4), '').then(function (j) {
+    if (j && j.ok === false) {
+      toast(j.error || '跳转失败');
+      SEEK.holdUntil = 0;
+      paintSeek(seekDisplaySec());
+    }
+  }).catch(function () {
+    SEEK.holdUntil = 0;
+    paintSeek(seekDisplaySec());
+  });
   lyricReposition();
   if (D('npPage') && D('npPage').classList.contains('on')) renderNpLyric();
   if (RTAB === 'l') syncLyrics(f * (S.dur || 0));
@@ -6092,7 +6283,7 @@ function volText(liveDb) {
 function showChain() {
   D('mtitle').textContent = '信号链';
   D('modal').classList.add('on');
-  api('/api/signal').then(function (j) {
+  return api('/api/signal').then(function (j) {
     if (!j.ok) { D('mbody').innerHTML = '<div class=empty>还没有开始播放</div>'; return; }
     var p = j.path;
     var bp = p.bitPerfect || '';
@@ -6100,7 +6291,15 @@ function showChain() {
     var heroCls = '', heroTitle = 'BIT-PERFECT · 全链路逐位无损', heroIcon = '\u2713';
     if (bp === 'direct') { heroCls = ' direct'; heroTitle = 'BIT-PERFECT · 1-bit DSD 直通'; heroIcon = '\u25c6'; }
     else if (bp === 'yes') { heroCls = ''; heroTitle = 'BIT-PERFECT · 全链路逐位无损'; heroIcon = '\u2713'; }
-    else if (bp === 'no') { heroCls = ' warn'; heroTitle = '非 Bit-Perfect · 信号经过 DSP 处理'; heroIcon = '!'; }
+    else if (bp === 'no') {
+      // 1.1.2 AP-1.2：AirPlay 的"非 bit-perfect"不是 DSP 造成的，是**传输本身**
+      // （系统混音 + 网络重封装，端到端逐位未获验证）。说成 DSP 会把用户引向错误的排查方向。
+      heroCls = ' warn';
+      heroTitle = (p.transport === 'airplay' || S.bpTransport === 'airplay')
+        ? '非 Bit-Perfect · AirPlay 传输（端到端逐位未获验证）'
+        : '非 Bit-Perfect · 信号经过 DSP 处理';
+      heroIcon = '!';
+    }
     else { heroCls = ' warn'; heroTitle = 'Bit-Perfect 状态未知'; heroIcon = '?'; }
 
     var nodes = [];
@@ -6130,10 +6329,24 @@ function showChain() {
     if (p.loudness) nodes.push({ k: '等响度补偿', v: '开启', badge: 'DSP 响度', kind: 'dsp' });
     var isUnitVol = (typeof p.volume !== 'number') || Math.abs(p.volume) < 0.05;
     nodes.push({ k: '音量', v: volText(p.volume), id: 'chainVol', badge: isUnitVol ? '逐位无损' : '数字衰减', kind: isUnitVol ? 'lossless' : 'dsp' });
-    var isSharedOut = (ADV.backend === 'wasapi-shared');
+    // 1.1.2 AP-1.2/AP-1.7：输出节点必须如实说明"送到哪里、走什么传输、延迟从哪来"。
+    // 判定只用后端给的真值（p.transport / p.sharedOnly），不从后端名猜、不写死延迟。
+    var isAirPlayOut = (p.transport === 'airplay') || (S.bpTransport === 'airplay');
+    var isSharedOut = (ADV.backend === 'wasapi-shared') || (p.sharedOnly === true) || isAirPlayOut;
+    var latText = '';
+    if (p.latencyKnown === true && typeof p.latencyMs === 'number' && p.latencyMs > 0) {
+      latText = '  \u00b7  系统属性延迟 ' + Math.round(p.latencyMs) + ' ms' + (p.latencySource ? (' (' + p.latencySource + ')') : '');
+    } else if (isAirPlayOut) {
+      latText = '  \u00b7  延迟未知（系统未上报，受网络缓冲影响）';
+    }
+    var outModeText = isAirPlayOut
+      ? 'AirPlay 共享输出（非 bit-perfect，端到端逐位未获验证）'
+      : (isSharedOut ? '共享模式（非 bit-perfect）' : '独占模式');
     nodes.push({ k: '输出', v: p.device + '  \u00b7  ' + p.outRate + ' Hz / ' + p.outBits + ' bit / ' + p.outCh +
-      ' ch  \u00b7  ' + (isSharedOut ? '共享模式（非 bit-perfect）' : '独占模式') +
-      '  \u00b7  缓冲 ' + p.buffer + ' ms', badge: isSharedOut ? '系统混音' : '硬件独占', kind: isSharedOut ? 'dsp' : 'lossless' });
+      ' ch  \u00b7  ' + outModeText + latText +
+      '  \u00b7  缓冲 ' + p.buffer + ' ms',
+      badge: isAirPlayOut ? 'AirPlay' : (isSharedOut ? '系统混音' : '硬件独占'),
+      kind: (isAirPlayOut || isSharedOut) ? 'dsp' : 'lossless' });
 
     var tDec = (typeof p.decodeMs === 'number' && p.decodeMs > 0)
       ? (p.decodeMs >= 1000 ? (p.decodeMs / 1000).toFixed(2) + ' s' : p.decodeMs.toFixed(1) + ' ms')
@@ -6223,6 +6436,15 @@ function txt(id, label, val, hint, ph) {
 /* ---------------- 输出后端 / 输入设备 ---------------- */
 function backendHint() {
   var m = D('sp_backendmsg'); if (!m) return;
+  var dev = devMixOf(ADV.device);
+  var isAir = isAirPlayDevice(dev);
+  if (isAir) {
+    var latMsg = (dev && dev.latencyKnown && typeof dev.latencyMs === 'number')
+      ? ('系统属性延迟 ' + Math.round(dev.latencyMs) + ' ms' + (dev.latencySource ? (' (' + dev.latencySource + ')') : ''))
+      : '延迟未知（系统未上报）';
+    m.textContent = 'AirPlay 共享输出：经系统混音，端到端 bit-perfect 未获验证；' + latMsg + '；不支持严格独占（Hog）与 DoP/Native DSD。';
+    return;
+  }
   var bk = (D('sp_backend') && D('sp_backend').value) || 'wasapi';
   if (bk === 'wasapi') {
     // 2026-10-25（方案 C）：如实说明当前是否真的抢 Hog，而不是笼统说"独占/接管"。
@@ -6485,6 +6707,8 @@ function updateCastStateUi(st) {
   if (pEl) {
     var pMap = {
       'discovering': '设备发现中',
+      'decoding': '音频解码中',
+      'connecting': '设备连接中',
       'serving': '本地供源就绪',
       'playing': '投放播放中',
       'stopped': '已停止',
@@ -6532,7 +6756,11 @@ function updateCastStateUi(st) {
 
   var rmEl = D('sp_cast_stat_ratematch');
   if (rmEl) {
-    if (st.rateMatch === 'match') {
+    var isAp = st.device && st.device.indexOf('airplay://') === 0;
+    if (isAp) {
+      rmEl.textContent = 'AirPlay 共享（44.1k/16bit 非 bit-perfect）';
+      rmEl.style.color = 'var(--warn, #eab308)';
+    } else if (st.rateMatch === 'match') {
       rmEl.textContent = '匹配（Bit-Perfect）';
       rmEl.style.color = 'var(--ok)';
     } else if (st.rateMatch === 'mismatch') {
@@ -6569,7 +6797,13 @@ function updateCastStateUi(st) {
 // sp_cast_dev）共用同一份发现结果与同一个选择。value 一律用设备描述 URL ——
 // 直连描述比按名字匹配可靠（本机 SSDP 被拦时 CastManager 仍可用 http://IP:PORT/ 直连）。
 function castDevLabel(d) {
-  return (d.friendlyName || d.name || d.host || '') + (d.model ? (' · ' + d.model) : '');
+  // 1.1.2：同一个列表里混排 UPnP 与 AirPlay。协议前缀必须一眼可见 ——
+  // 两者的能力差很多（AirPlay = 共享式推流、有 2 秒级延迟、不支持 DoP），
+  // 用户不该从型号串里去猜。
+  var kind = (d.kind === 'airplay') ? 'AirPlay' : 'UPnP';
+  var name = (d.friendlyName || d.name || d.host || '');
+  var tail = d.model ? (' · ' + d.model) : '';
+  return '[' + kind + '] ' + name + tail;
 }
 function castDevValue(d) {
   return d.location || d.friendlyName || d.name || d.host || '';
@@ -6587,7 +6821,7 @@ function populateCastDevices() {
     for (var i = 0; i < _castDevices.length; i++) {
       if (castDevValue(_castDevices[i]) === saved) { haveSaved = true; break; }
     }
-    if (!haveSaved) opts += '<option value="' + esc(saved) + '">（上次选择）' + esc(saved) + '</option>';
+    if (!haveSaved) opts += '<option value="' + esc(saved) + '">（上次选择 · 离线/需刷新）' + esc(saved) + '</option>';
   }
   ['sp_cast_dev', 'sp_upnp_dev'].forEach(function (id) {
     var s = D(id);
@@ -6788,8 +7022,9 @@ function castRunning() { return castSessionStarted(CAST.state); }
 // 中间任一阶段都说明"会话已经建立"，按钮就该点亮（不必等 serving）。
 function castSessionStarted(st) {
   if (!st) return false;
-  if (st.running) return true;
-  return st.phase === 'discovering' || st.phase === 'serving' || st.phase === 'playing';
+  if (!st.running) return false;
+  return st.phase === 'discovering' || st.phase === 'serving' || st.phase === 'playing' ||
+         st.phase === 'connecting' || st.phase === 'decoding';
 }
 function castDevNameOf(loc) {
   loc = String(loc || '');
@@ -6808,24 +7043,40 @@ function castIconSvg() {
 function applyCastUi(st) {
   if (st && typeof st.running === 'boolean') CAST.state = st;
   st = CAST.state || {};
-  // 「会话已建立」而不是「running 已经 true」：discovering/serving 阶段按钮就该点亮，
-  // 否则网络发现那 1～2 秒里用户看到的是"点完没反应"（B2 的观感来源之一）。
   var running = castSessionStarted(st);
   var nm = castDevNameOf(st.device);
+  var isAirPlay = (st.device && st.device.indexOf('airplay://') === 0) || (ADV.upnpDev && ADV.upnpDev.indexOf('airplay://') === 0);
+  var protoLabel = isAirPlay ? 'AirPlay' : 'UPnP';
   var nb = D('npCastBtn');
   if (nb) {
-    nb.innerHTML = castIconSvg() + (running ? ('已推送到 ' + esc(nm)) : '推送到设备');
+    var btnText = '推送到设备';
+    if (running) {
+      if (st.phase === 'connecting') btnText = '正在连接 ' + esc(nm);
+      else if (st.phase === 'decoding') btnText = '正在解码…';
+      else if (st.phase === 'discovering') btnText = '正在发现…';
+      else btnText = '已推送到 ' + esc(nm);
+    }
+    nb.innerHTML = castIconSvg() + btnText;
     nb.classList.toggle('on', running);
     nb.title = running ? ('点击停止投放并恢复本机输出（阶段：' + (st.phase || '-') + '）')
-                       : '把当前曲目推送到 UPnP / DLNA 设备，之后所有播放都走它';
+                       : '把当前曲目推送到 UPnP / AirPlay 设备，之后所有播放都走它';
   }
   var badge = D('castBadge');
   if (badge) {
     badge.style.display = running ? 'inline-flex' : 'none';
+    badge.textContent = protoLabel;
     badge.title = running ? ('正在投放到 ' + nm) : '';
   }
   var push = D('sp_cast_push'), stop = D('sp_cast_stop');
-  if (push) { push.textContent = running ? '重新推送当前曲' : '推送当前曲'; }
+  if (push) {
+    if (running) {
+      if (st.phase === 'connecting') push.textContent = '正在连接…';
+      else if (st.phase === 'decoding') push.textContent = '正在解码…';
+      else push.textContent = '重新推送当前曲';
+    } else {
+      push.textContent = '推送当前曲';
+    }
+  }
   if (stop) stop.disabled = !running;
   updateCastStateUi(st);
 }
@@ -6857,7 +7108,12 @@ function pollCastState(once, expect) {
         return;
       }
       if (!expect) return;
-      if (castSessionStarted(st) || (st && st.phase === 'error')) {
+      if (st && st.phase === 'error') {
+        applyCastUi(st);
+        if (st.error) toast('投放失败：' + st.error);
+        return;
+      }
+      if (castSessionStarted(st)) {
         // 2026-10-30（B2 的反向，真机 stub 复现）：收敛成功后**不能就此撒手**。
         //   设备拒绝 SetAVTransportURI（UPnPError 714 / 掉线 / 被占用）时，后端会在
         //   /api/play 已经回 ok、会话已经 running 之后才把 phase 改成 error —— 那时已经
@@ -7154,16 +7410,19 @@ function npPickCastDevice(cb) {
   function rows(list) {
     if (!list.length) {
       return '<div class=castpick-empty>正在搜索局域网里的设备…<br>' +
-             '<span class=hint>若一直搜不到：确认数播已开启 DLNA，且与本机在同一网段</span></div>';
+             '<span class=hint>若一直搜不到：确认数播已开启 DLNA / AirPlay，且与本机在同一网段或同一 Wi-Fi</span></div>';
     }
     var h = '<div class=castpick>';
     list.forEach(function (d, i) {
       var val = castDevValue(d);
       var isCur = (val === curDev);
       h += '<button class="castpick-row' + (isCur ? ' active' : '') + '" data-i=' + i + '>' +
-           '<span class=cpn>' + esc(d.friendlyName || d.name || d.host) + (isCur ? '（当前设备）' : '') + '</span>' +
+           '<span class=cpn>' + esc((d.kind === 'airplay' ? '[AirPlay] ' : '') + (d.friendlyName || d.name || d.host)) + (isCur ? '（当前设备）' : '') + '</span>' +
            '<span class=cph>' + esc((d.model ? d.model + ' · ' : '') + (d.host || '')) + '</span></button>';
     });
+    if (curDev && !list.some(function (d) { return castDevValue(d) === curDev; })) {
+      h += '<div class=hint style="margin-top:8px;color:var(--warn, #eab308)">上次保存的设备 (' + esc(curDev) + ') 当前未在线，点击上方已发现设备即可重新选择并刷新。</div>';
+    }
     h += '</div><div class=hint style="margin-top:10px">选中后会把当前曲目推送到该设备，之后的切歌/暂停/进度都作用在它上面。</div>';
     return h;
   }
@@ -7190,7 +7449,7 @@ function npPickCastDevice(cb) {
       known = list;
       populateCastDevices();
       // 空列表必须写明原因（后端 diag.hint 是实测结论，不是猜的）
-      var _emptyWhy = (j && j.hint) ? j.hint : '未发现 UPnP / DLNA 渲染器（确认数播已开启 DLNA 且与本机同网段）';
+      var _emptyWhy = (j && j.hint) ? j.hint : '未发现 UPnP / DLNA 或 AirPlay 设备（确认数播已开 DLNA、音箱已开 AirPlay，且与本机同网段/同 Wi-Fi）';
       // 弹窗可能已被用户关掉：只在它还开着时刷新，避免"背后改 DOM"
       if (D('mbody') && D('modal').classList.contains('on')) {
         D('mbody').innerHTML = rows(list) +
@@ -7226,30 +7485,35 @@ function castPush(file) {
     ADV.backend = 'upnp';
     ADV.upnpDev = dev;
     saveSettings();
-    // 2026-10-30（B2）「点完投送按钮没实时切换，退出重进才对」：
-    //   旧顺序是 playPath()（异步，不返回 Promise）→ toast → pollCastState(true)，
-    //   那一次轮询几乎必然**先于**服务端的 CastManager::start() 到达 ⟹ 读到 running=false
-    //   且 once=true 不重试 ⟹ 按钮永久停在「推送到设备」。
-    //   新顺序：① 本地先乐观点亮（0ms，用户点完立刻有反馈）；② /api/play 落地后做有界收敛
-    //   （最多 5s / 每 300ms，见到会话已建立或 phase==='error' 立刻停）。
-    //   乐观态不是假话：它是「已经开始推送」的即时投影，真实状态由 ② 覆盖，失败会自动退回。
-    CAST.state = { running: true, phase: 'discovering', device: dev, sourceFile: file };
+    // 乐观态：处于正在连接状态，绝不能把 accepted 标为已推送到
+    CAST.state = { running: true, phase: 'connecting', device: dev, sourceFile: file };
     applyCastUi();
-    toast('已推送到 ' + castDevNameOf(dev));
+    toast('正在推送到 ' + castDevNameOf(dev));
     playPath(file).then(function (j) {
-      if (j && j.ok === false) pollCastState(true);   // 失败：单次采样把按钮退回真实状态
-      else pollCastState(true, true);                 // 成功：收敛等待到 running/serving
-    }, function () { pollCastState(true); });
+      if (j && j.ok === false) {
+        CAST.state = { running: false, phase: 'error', device: dev, error: j.error || '投放启动失败' };
+        applyCastUi();
+        pollCastState(true);
+      } else {
+        pollCastState(true, true);
+      }
+    }, function (err) {
+      CAST.state = { running: false, phase: 'error', device: dev, error: String(err && err.message || err || '投放启动失败') };
+      applyCastUi();
+      pollCastState(true);
+    });
   };
   npPickCastDevice(function (d) { if (d) go(d); });
 }
 // 停止：停会话 → 回到推送前的输出后端 → 恢复本地播放
 function castStop() {
-  api('/api/cast/stop', '').then(function () {
+  return api('/api/cast/stop', '').then(function () {
     var back = CAST.prevBackend || 'null';
     if (back === 'upnp') back = 'null';
     ADV.backend = back;
     saveSettings();
+    CAST.state = { running: false, phase: 'stopped' };
+    applyCastUi();
     toast('已停止投放，输出回到 ' + back);
     if (S.lastCur) playPath(S.lastCur, undefined, undefined, true);   // 静默：上面的 toast 才是本次操作的结果
     pollCastState(true);
@@ -7759,7 +8023,10 @@ function bindPresetCard() {
     D('presetCapsRefresh').onclick = function () {
       var btn = this;
       btn.disabled = true;
-      loadPresetCaps(true).then(function () {
+      Promise.all([
+        loadPresetCaps(true),
+        loadDeviceList(true)
+      ]).then(function () {
         btn.disabled = false;
         toast('硬件能力已刷新');
       }).catch(function () {
@@ -7839,7 +8106,7 @@ function renderSettingsPage() {
   // 2026-10-26：官方推荐预设卡片**移到快速开始页**（用户要求）。
   // 设置页这里不再渲染 —— 预设是「一键开局」的入口，属于快速开始的心智模型，
   // 放在设置页顶部反而让「精细调节」的设置页显得喧宾夺主。
-  // ---------- 页签（对齐 HQPlayer：Inputs / Outputs / PCM / SDM / Advanced） ----------
+  // ---------- 设置页签：输入 / 输出 / PCM / SDM / 通用 ----------
   h += '<div class=stabs>'
      // 2026-10-29（用户要求）：「高级」改名「通用」并提到第一个 —— 外观/GPU/目录这些
      // 日常设置不该藏在「高级」这种听起来像危险区的名字后面，而且它才是打开设置时
@@ -7946,7 +8213,7 @@ function renderSettingsPage() {
 
   // ---------- PCM ----------
   h += '<div class=spane data-g=pcm>'
-     + sgroup('升频与滤波', 'HQPlayer 的 poly-sinc 家族',
+     + sgroup('升频与滤波', 'poly-sinc 滤波器家族',
          sel('sp_filt', '1x 滤波器（44.1 / 48 kHz 音源）', filts, '播放 44.1 / 48 kHz 文件时使用')
        + sel('sp_filtNx', 'Nx 滤波器（88.2 kHz 及以上音源）', filtsNx,
              '播放 88.2 / 96 / 176.4 kHz 等文件时使用；留空 = 与 1x 相同')
@@ -8221,7 +8488,7 @@ function renderSettingsPage() {
      //     ② issue body 实测上限约 64KB，而单个日志就 1.2MB，诊断包塞不下；
      //     ③ 邮件天然支持大附件，且**零凭据**（走系统邮件客户端，不在代码里存任何密码）。
      //   实现：页面收集正文 → postMessage 给原生壳 → 壳生成 .eml（含 zip 附件）→ 打开系统邮件客户端。
-     //   收件人写死在壳侧常量（BH2VOQ@163.com），页面不能指定。
+     //   反馈收件通道由宿主控制，页面不能指定。
      + sgroup('反馈问题', '直接发送给开发者，可附诊断包',
          '<div class="sfld wide"><label>问题描述' +
            tip('写清楚「做了什么 / 期望什么 / 实际什么」最有帮助') + '</label>'
@@ -11361,6 +11628,18 @@ try {
   window.addToSavedQueue = addToSavedQueue;
   window.pickSavedQueue = pickSavedQueue;
   window.applyQueueSort = applyQueueSort;
+  window.loadDeviceList = loadDeviceList;
+  window.devMixOf = devMixOf;
+  window.isAirPlayDevice = isAirPlayDevice;
+  window.applyAirPlayUIConstraints = applyAirPlayUIConstraints;
+  window.bpBadgeInfo = bpBadgeInfo;
+  window.showChain = showChain;
+  window.playPath = playPath;
+  window.backendHint = backendHint;
+  window.tick = tick;
+  window.DEVMIX = DEVMIX;
+  window.S = S;
+  window.ADV = ADV;
 } catch (e) { }
 if (D('npFavBtn')) D('npFavBtn').onclick = function (ev) { if (S.lastCur) toggleFav(S.lastCur, ev); };
 // 2026-10-26 F-1/B-3：底栏跑马灯。必须在 DOM 就绪后挂，且失败绝不能影响启动 —

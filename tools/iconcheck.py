@@ -17,9 +17,9 @@
 #   所以判据是：256 档实体 206±4 px 且 bbox 居中、全档 icns 齐全、四角 alpha=0。
 #
 # 依赖：Pillow（读 PNG alpha）+ 系统 iconutil（解包 icns）。
-#   ⚠ 本机系统 python3 的 PIL 曾报 x86 加载错误，请用工作区自带 Python：
-#     PY=/Users/august/.dsh/dsh-runtimes/dsh-next-primary-runtime/dependencies/python/bin/python3
-#     "$PY" tools/iconcheck.py --icns dist-mac/RLPlayer.app/Contents/Resources/RLPlayer.icns
+#   ⚠ 若系统 python3 缺少 Pillow，请通过虚拟环境或包管理器安装：
+#     python3 -m pip install pillow
+#     python3 tools/iconcheck.py --icns dist-mac/RLPlayer.app/Contents/Resources/RLPlayer.icns
 #
 # 用法：
 #   iconcheck.py --icns <路径.icns> [--expect-entity 206] [--tolerance 4]
@@ -43,9 +43,9 @@ try:
 except Exception as exc:  # noqa: BLE001 - 需要把原因原样报给用户
     sys.stderr.write(
         "✗ 无法导入 Pillow（%s）。\n"
-        "  请用工作区自带 Python 运行：\n"
-        "  /Users/august/.dsh/dsh-runtimes/dsh-next-primary-runtime/dependencies/python/bin/python3 "
-        "tools/iconcheck.py ...\n" % exc)
+        "  请安装依赖后运行：\n"
+        "  python3 -m pip install pillow\n"
+        "  python3 tools/iconcheck.py ...\n" % exc)
     sys.exit(2)
 
 ALPHA_THRESHOLD = 200           # 与 tools/make_icon_mac.swift 的判据保持一致

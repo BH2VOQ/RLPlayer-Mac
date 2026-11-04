@@ -1,7 +1,7 @@
 # RLPlayer Mac 路线图：1.1.1 → 1.3.0
 
 > **本文件是唯一主路线图。** 文件名沿用 `ROADMAP-1.1.x.md`，只为不破坏 README 与交接文档里的旧链接；内容已覆盖到 1.3.0。
-> 更新：2026-10-31。当前正式版以 README 与 Release 徽标为准；**1.1.2 起均为计划**，不表示已实现或通过验收。
+> 更新：2026-11-04。当前正式版以 README 与 Release 徽标为准；**1.1.3 起均为计划**，不表示已实现或通过验收。
 > 每版先出 beta，P0/P1 未闭环不转正式版；修复通常开 patch 热修，不为此占用功能版本号（本次 1.1.2 合并 DSD 热修为用户指定例外）。
 > 1.2.x–1.3.0 的音频专项完整判据见工作区 `reports/RLPlayer-Mac-1.2.x-1.3.0-音频开发路线图.md`（内部材料，不入库）；上游 Windows 2.0.0 的逐项对照见附录 B。
 
@@ -12,7 +12,7 @@
 | 版本 | 主题 | 类型 | 状态 |
 |---|---|---|---|
 | **1.1.1 / .1 / .2** | 诊断与遗留问题收尾、中英双语、投放链路、偏好持久化 | 功能 + 修复 | ✅ 已发布 |
-| **1.1.2** | AirPlay 输出适配 + DSD 播放可靠性热修（原 1.1.1.3 并入） | 功能 + 热修 | 📋 计划 |
+| **1.1.2** | AirPlay 接收器发现与应用内 RAOP 投放、系统 AirPlay 输出适配、DSD 播放可靠性热修 | 功能 + 热修 | 🚧 发布回归 |
 | **1.1.3** | LLM 模型列表 | 功能 | 📋 计划 |
 | **1.1.4** | 单曲页音频分析（真峰 dBTP、自动分析） | 功能 | 📋 计划 |
 | **1.1.5** | 资料检索（专辑上下文、归属校验、缓存迁移） | 功能 | 📋 计划 |
@@ -52,16 +52,96 @@
 验收需要真实 HomePod、Apple TV 或兼容音箱：44.1k/16 连续播放至少 10 分钟、96k 素材转换、DSD 路径、暂停/seek、音量、断网、休眠及切回本地。
 无真实接收器时仅可报告代码/夹具结果，不能宣称端到端完成；出声须单独授权。
 
+### 1.1.2-beta1 实施状态（2026-11-03，基线 `v1.1.1.5-beta2`）
+
+**证据等级**：🧪 自动化/离线通过　🔬 生产路径（null sink / 真实 HTTP 枚举）通过　📱 真实接收器/设备实测（历史 beta 曾验证兼容的 Shairport Sync 接收器；最终发布回归在静音条件下执行，不冒充听感验收）
+
+| 项 | 状态 | 证据 |
+|---|---|---|
+| AP-1.1 transport 识别 | 🧪🔬 | `airplay_policy` 55 条；`/api/devices` 实测返回 `transport/transportType`（本机 displayport/builtin，按 FourCC 判定，不按名字） |
+| AP-1.2 AirPlay 标注 / 延迟来源 / bit-perfect 不虚报 | 🧪🔬 | 延迟取 `kAudioDevicePropertyLatency + SafetyOffset + StreamLatency` 并附来源；本机实测 2.9–9.3 ms（**非写死 2 s**）；AirPlay 一律 `bitPerfect:"no"` + 原因 |
+| AP-1.3 共享输出、不 Hog、按实际格式协商 | 🧪🔬 | `sanitize_airplay_caps` + `open()` 先规范化再校验；注释写明"强制共享而非拒绝开流"；声道按设备实际值（单声道 1ch，>2ch 仍 2ch 并标注未验证） |
+| AP-1.4 拒绝 DoP/Native、DSD→PCM 如实展示 | 🧪 | 平台层共享/网络端点前置拒绝；播放入口 AirPlay+`dsd>=64` 明确拒绝；显式 `dsd=0` 允许 DSD→PCM |
+| AP-1.5 欠载/超时判据以实测为准 | 🧪 | **判据未改**（无真实接收器证据不得放宽）；错误监测与 WFAIL 归因完整保留 |
+| AP-1.6 生命周期 | 🧪 | 新增 `CoreAudioOutput::endpoint_alive()` 与 `CoreAudioSink` 覆盖（基线里 macOS **从未触发过 DEVICE_LOST**，已修） |
+| AP-1.7 不承诺多房间 | 🧪 | UI 无分组入口断言 |
+| AP-1.8 诊断字段 | 🧪🔬 | `/api/signal`、`/api/status` 带 transport/延迟/来源/sharedOnly |
+| **真实 AirPlay 接收器 10 分钟/96k/断网/休眠** | 📱 部分实测 | 已验：真实接收器出声、16 s 稳速、掉线 2 s 内 DEVICE_LOST、回归可重播、自有 RAOP 发送端可出声。**未验**：10 分钟长播、96k 源、休眠/切网 |
+
+**已知边界（如实挂账）**：多声道共享输出仍按 2ch 协商（下混未验证）；历史设备观察不代表所有硬件/系统版本均完成验收。
+
 ### B. DSD 播放可靠性热修（原 1.1.1.3，P0）
 
-**为什么必须做**：两项 DSD 风险属“会播错/会绕过用户处理”的可靠性问题，不能等到 1.2.x 音频专项。当前仅为代码审查发现，**尚未复现**。
+**为什么必须做**：两项 DSD 风险属“会播错/会绕过用户处理”的可靠性问题，不能等到 1.2.x 音频专项。下文分别记录离线复现、代码修复与历史设备观察，证据不相互替代。
 
-- [ ] **P0-1** 复现并修正 DSD 变速后仍沿用转换前载波率/帧范围的问题（`tools/rtaweb.cpp` 的转换前后参数与切片位置）；升速、降速、尾块、seek 全覆盖。
-- [ ] **P0-2** 修正直通资格判定被后续“同族速率计划可用”覆盖的问题：存在 EQ/卷积/音量时不得进入直通，也不得虚报“逐位直通”。
-- [ ] **P0-3** 排查 DoP 连续性风险池：欠载补零、暂停/恢复、切歌、EOS 的合法静音与标记保持；48k 族 DSD 抽取上限、AHM 多电平打包语义一并核实。
-- [ ] **P0-4** 若某项无法复现，**只记录不改代码**，写明卡点；不得以“看着不对”直接改。
+- [x] **P0-1** 复现并修正 DSD 变速后仍沿用转换前载波率/帧范围的问题（`tools/rtaweb.cpp` 的转换前后参数与切片位置）；升速、降速、尾块、seek 全覆盖。
+- [x] **P0-2** 修正直通资格判定被后续“同族速率计划可用”覆盖的问题：存在 EQ/卷积/音量时不得进入直通，也不得虚报“逐位直通”。
+- [x] **P0-3** 排查 DoP 连续性风险池：欠载补零、暂停/恢复、切歌、EOS 的合法静音与标记保持；48k 族 DSD 抽取上限、AHM 多电平打包语义一并核实。
+- [x] **P0-4** 若某项无法复现，**只记录不改代码**，写明卡点；不得以“看着不对”直接改。
 
 **验收**：每项先有可失败的夹具或离线断言，再改到绿；合成数据经生产接线/null sink 验证时长、帧数、载波与状态字段一致；直通打包→解包逐位一致。构建 0 error、ctest 全绿、重出 `.app` 实跑。
+
+**1.1.2-beta1 实测（2026-11-03，macOS 27.2 arm64）**：构建 exit 0；串行 ctest **123/123 passed**（181 s，exit 0）；
+`.app` 已重出，版本 `1.1.2-beta1`、纯 arm64、`minos=13.0`、adhoc 签名 valid。新增判据：
+`direct_dsd_plan` / `dsd_production` / `dsd_decimate_rate` / `dop_padding` / `dop_underrun_fill` / `airplay_policy`；
+UI 走 `tools/check_112_airplay_ui.js`（headless Edge）**9/9**。
+
+- **P0-1 已复现并修**：`play_one_direct` 原在速率转换**前**固定 `srcRate/carrier/totalFrames/CUE frameEnd`，
+  转换后沿用旧值 ⟹ 升速被截断一半、降速越界、载波开错、CUE 错位。修法：转换后按实际流重算，
+  信号链如实标 `bitPerfect:"no"` / `filter:"DsdRateConverter"`（不再谎报逐位直通）。
+- **P0-2 已复现并修**：`direct_sdm_eligible` 在 `direct_sdm_decision` 拒绝后被 `plan.ok()` 覆盖 ⟹
+  EQ/卷积/音量/响度/RG/trim/声道变化被静默绕过。修法：处理条件一票否决，永不进入直通；
+  并补 PEQ 生效判定（`g_peq->has_effect()`）。
+- **P0-3 部分复现，已修三处**：① 48k 族 DSD256/512 抽查取上限写死 705.6 kHz ⟹ 不整除、直接播不了
+  （改按族取 705.6/768 kHz）；② render_loop EOS 尾块裸补 0 ⟹ DoP 标记变 0x00；
+  ③ CoreAudio 欠载 `memset(0)` ⟹ 同样非法标记。均改为补合法 DoP 静音帧并从真实数据接力相位。
+- **P0-3 未复现（只记录，未改代码）**：seek 时底层环形缓冲残留旧帧（无 `flush()` 暴露）、
+  跨曲起流未向 DAC 预发锁相静音。**AHM 多电平 × DoP 1-bit 语义冲突已证实**：
+  AHM 强制 64~256 电平，而 DoP 只承载 1 bit，旧路径按 `>0.0` 硬切 —— 现改为**明确拒绝该组合**
+  并给出二选一出路，不做静默降档。
+- ⚠️ 真实 DAC 的 DoP 结尾/欠载听感未验证；系统 AirPlay 与应用内 RAOP 的历史设备观察见下文。最终修订的自动回归不打开真实输出设备。
+
+**历史 beta 设备复测（2026-11-03，另行授权）**：使用 DisplayPort 输出（报告最高载波 192000 Hz）、
+内置输出与兼容网络接收器，素材为正常 FLAC / DSD64 音乐。端点接受并消费帧不等于 DAC 已识别 DoP，
+也不等于端到端逐位比对；未做过的听感和设备回环继续列为未验证。
+
+| 场景 | 结果 |
+|---|---|
+| PCM FLAC 实播 | ✅ pos 正常推进、`transport=builtin`、`latencyMs=6.3`、`bitPerfect=no`（音量 −12 dB） |
+| DSD64→PCM | ✅ 176400 Hz 流式解码，无错误 |
+| DSD64→DoP DSD64（直通） | 端点接受 `carrier=176400`、`dsdRate=2822400`、`modOrder=0`，进度推进；`bitPerfect=direct` 是源位流路径判定，不是 DAC 识别/设备端回环逐位验证 |
+| DSD + EQ（P0-2 靶子） | ✅ **不再直通**：`directSdm=false`、`eq=true`、`bitPerfect=no` 且原因含 EQ |
+| DSD64→DSD128（设备无 352800） | ✅ 明确拒绝并列出设备真实支持率（修复后 1.69 s 返回，见下） |
+| 系统 AirPlay 输出（兼容的 Shairport Sync 接收器） | 📱 历史 beta 见下表；与应用内 RAOP 发送端不是同一路径 |
+| AirPlay **推送到设备**（应用内 RAOP 发送端） | 历史 beta 曾观测到接收端 PCM 为 `RUNNING`；最终修订只报告静音协议/数据回归，不以该状态代替听感验收 |
+
+**历史系统 AirPlay 输出验证（2026-11-03，兼容接收器，transport=`airp`=1634300528）**
+
+| 判据 | 实测 |
+|---|---|
+| AP-1.1 传输识别 | `/api/devices` 返回 `transport:"airplay"`、`transportType:1634300528`（按 FourCC，非按名字） |
+| AP-1.2 延迟与 bit-perfect | `latencyMs:2000`，来源 `stream: 88200 frames @44.1k` —— **读出来的，不是写死 2 秒**；`bitPerfect:"no"`，原因首条即"AirPlay 网络传输（端到端逐位未获验证）" |
+| AP-1.3 强制共享/不 Hog | 请求 `backend=wasapi + hogexcl=1` ⟹ 实测 `outMode=shared`、`hogRequested=false`、`hogAcquired=false`，`fallbackWhy` 写明自动改共享 |
+| AP-1.4 拒 DoP | 请求 `dsd=64` ⟹ **0.46 s** 明确拒绝（`PLAY_REJECT airplay_dop`），未开流 |
+| AP-1.4 DSD→PCM | `dsd=0` ⟹ DSD64 解码为 PCM 44.1k 播放，信号链 `directSdm=false / resample=true`，note 写明共享混音改率 |
+| AP-1.5 不误判 | 连续 16 s：pos 每 2 s 走 2.032 s（1×），`dry=0`、`gapMaxMs=17`，全程零 RENDERFAIL/零欠载告警 |
+| AP-1.6 设备消失 | 播放中把系统输出切走，端点从枚举消失；历史观察为 **2 s 内** `DEVICE_LOST`，停止且不静默回退、不从头重播 |
+| AP-1.6 设备回归 | 重新选回接收器后可重播（`transport=airplay`、`outMode=shared`）；不依赖临时数字 id 永久稳定 |
+| AP-1.7 | UI 无多房间/分组入口（headless 断言） |
+
+**真机又抓到并修掉三个缺陷**：
+1. DirectSDM 信号链/PLAY 日志把设备写成"默认设备"的名字（实际在 107 上播）——根因是 `mac_find_dev`
+   传了空 deviceId。已改为传真实端点，并给直通分支补齐 `deviceId/transport/latency*/sharedOnly`。
+2. **顺序错误**：整轨 DSD64→DSD128 转换先跑完（实测 41.6 s，`DSD_RATE rt=5.78 ms=41628`），
+   之后才检查设备载波并拒绝 ⟹ 用户盯着"播放中 0:00"近一分钟、白算一遍。已把只读载波探测
+   提到转换之前，现同请求 **1.69 s 拒绝**、`DSD_RATE` 行数 0、并留 `DSD_RATE_SKIP` 归因行。
+
+3. `DEVICE_LOST` 文案写死"USB 掉线"，而同一路径也会接住 AirPlay 掉线/休眠 —— 对用户是误导。
+   已改为端点级描述（USB 拔出 / AirPlay 接收器掉线或休眠 / 网络端点消失），不猜具体成因。
+
+**仍挂账**：整轨变速本身仍是 O(文件长度) 的起播等待（本机 227 s 曲目约 42 s），属 1.2.3 流式/分块
+stage plan 范围，本轮不动；真实 DAC 的 DoP 结尾/欠载听感、多声道共享下混、AirPlay 10 分钟长播与
+休眠/切网仍未验（本轮只跑到 16 s 稳速与一次掉线/回归）。自有 RAOP 发送端（推送到设备）已实测出声，但长播稳定性、RTP 重传、seek 均未做。
 **不做**：不引入新功能、不改默认滤波器、不动 DSP 判据阈值。
 
 ## 1.1.3—1.1.8：逐项功能交付

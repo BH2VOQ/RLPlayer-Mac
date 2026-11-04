@@ -616,6 +616,23 @@ inline DsdFileLayout probe_dsd_layout(const std::string& path) {
 }
 
 
+// DSD 源抽取到 PCM 的目标采样率（1.1.2 P0-3 修正：上限必须按**族**选，不能一律 705.6k）。
+//
+// 旧实现三处都写 `std::min(rate/16, 705600u)`。对 44.1k 族没问题（DSD256=11.2896M/16=705600），
+// 但 48k 族 DSD256 = 12.288M，/16 = 768000，被 705600 截断后
+//     12288000 % 705600 = 292800 != 0
+// ⟹ 整除校验直接失败，48k 族 DSD256/DSD512 **根本播不了**（报"无法整数抽取"）。
+// 这不是"上限太保守"，是算错了族：48k 族的 DSD 上限就是 768000。
+// 返回 0 表示无法得到合法整数抽取率（调用方必须据此明确报错，不得静默降级）。
+inline uint32_t dsd_decimate_rate(uint32_t dsdRate) {
+    if (dsdRate == 0) return 0;
+    const uint32_t maxRate = (dsdRate % 48000u == 0u) ? 768000u : 705600u;
+    uint32_t out = dsdRate / 16u;
+    if (out > maxRate) out = maxRate;
+    if (out == 0 || dsdRate % out != 0) return 0;
+    return out;
+}
+
 // 流式 DSD -> PCM 读取器：按「块」读原始 1-bit 流、逐块抽取，内存与文件长度无关。
 // 用法：
 //   DsdPcmStream s; std::string err;
@@ -636,8 +653,8 @@ public:
             if (errOut) *errOut = e.what();
             return false;
         }
-        outRate_ = std::min<uint32_t>(layout_.rate / 16u, 705600u);
-        if (outRate_ == 0 || layout_.rate % outRate_ != 0) {
+        outRate_ = dsd_decimate_rate(layout_.rate);
+        if (outRate_ == 0) {
             if (errOut) *errOut = "DSD 采样率无法整数抽取（" + std::to_string(layout_.rate) + " → " +
                                   std::to_string(outRate_) + "）";
             return false;
@@ -782,8 +799,8 @@ inline BigFileStreamSettings& big_file_stream_settings() { static BigFileStreamS
 inline bool dsd_streamable(const std::string& path, double* decodedMb = nullptr, std::string* why = nullptr) {
     try {
         const DsdFileLayout L = probe_dsd_layout(path);
-        const uint32_t outRate = std::min<uint32_t>(L.rate / 16u, 705600u);
-        if (outRate == 0 || L.rate % outRate != 0) {
+        const uint32_t outRate = dsd_decimate_rate(L.rate);
+        if (outRate == 0) {
             if (why) *why = "DSD 采样率无法整数抽取";
             return false;
         }
@@ -813,12 +830,18 @@ inline bool should_stream_decode(const std::string& path, double* decodedMb = nu
 // DSD 源：原生读取 + 我们的抽取器（ROADMAP P0-1/P0-4/P0-5）
 //
 // 以前 .dsf/.dff 走 ffmpeg 解成 PCM：多一层量化、拿不到 1-bit 流、DirectSDM 无从谈起。
-// 现在读原始位流，按设置用 FIR / IIR / CIC 抽取到 DSD/16（上限 705.6 kHz），
+// 现在读原始位流，按设置用 FIR / IIR / CIC 抽取到 DSD/16（44.1k 族上限 705.6 kHz / 48k 族 768 kHz），
 // 后续升频/抖动/SDM 完全不变。读取失败仍回退 ffmpeg（保持可用）。
 inline AudioBuffer read_dsd_native(const std::string& path, LoadNote* note) {
     const auto t_dsd_0 = std::chrono::steady_clock::now();
     DsdStream s = read_dsd(path);
-    const uint32_t outRate = std::min<uint32_t>(s.rate / 16u, 705600u);
+    const uint32_t outRate = dsd_decimate_rate(s.rate);
+    // 抽取率算不出来时必须明确拒绝（调用方 read_any 会回退 ffmpeg 并如实记录原因），
+    // 绝不能让 0 流进 conversion_integrator 变成除零或"看起来成功"的空缓冲。
+    if (outRate == 0) {
+        throw std::runtime_error("DSD 采样率无法整数抽取（" + std::to_string(s.rate) +
+                                 " Hz，1-bit 位率异常或超出当前支持的 DSD 档位）");
+    }
     const DsdPcmSettings st = dsd_pcm_settings();
     const dsp::IntegratorConfig cfg =
         dsp::conversion_integrator(st.kind, st.conversion, s.rate, outRate, 120.0, st.twoStage);

@@ -86,6 +86,8 @@ using rta::render::SinkOpenOpts;
 #include "platform/macos/room_transport_coreaudio.h"   // F-3：同族整数倍 DSD→DSD 速率转换
 #include "dsp/modulator.h"
 #include "dsp/direct_sdm.h"
+#include "audio/direct_dsd_plan.h"
+#include "audio/dop_padding.h"   // 1.1.2 P0-3：DoP 尾块合法静音（0x05/0xFA 交替）
 #include "version.h"
 // 2026-10-25（单进程合并）：本文件同时是「独立 CLI 的全部实现」和「进程内 embedded 核心」。
 // rlapp_core.h 声明 start_embedded/dispatch/exit_requested/stop_embedded/cli_main，
@@ -457,6 +459,14 @@ struct PlayerState {
     std::string outModFamily;
     int         outModOrder    = 0;
     std::string outFallbackWhy;
+    // ---- 1.1.2 AirPlay 输出适配（AP-1.8）：本次输出的传输与延迟自证 ----
+    // 与 outMode/outFallbackWhy 同源同时机写入（起播时探一次），不给 /api/status 的 400ms
+    // 轮询增加任何 CoreAudio 属性查询。空/0/false = 未知，绝不拿猜测值填充。
+    std::string outTransport = "unknown";   // airplay | usb | builtin | ...
+    bool        outLatencyKnown = false;    // 系统属性读到了才为 true
+    double      outLatencyMs = 0.0;         // 系统属性换算值（不是端到端实测）
+    std::string outLatencySource = "none";  // 这个数从哪来
+    bool        outSharedOnly = false;      // AirPlay 等仅共享端点
     double outRate = 0;
     int    outBits = 0;
     // ---- ReplayGain / Album Gain 状态 ----
@@ -1250,6 +1260,9 @@ public:
         // 2026-10-25（方案 C）：Hog 独占由独立开关控制，不再与 shared 绑定。
         // exclusive_ 由 make_sink 依据 PlayParams::hogExclusive 设置。
         sp.exclusive = exclusive_;
+        // 1.1.2（AP-1.4）：把"本次是 DoP 承载"如实传给平台层。平台层据此在共享/网络
+        // 端点上**写硬件之前**明确拒绝，并在欠载时补合法 DoP 静音帧而不是裸零。
+        sp.dop = dop_;
         if (!ao_->open(sp)) {
             if (ao_->last_error_class() == rta::platform::OutputError::DeviceBusy && ao_->hog_requested()) {
                 err_ = ao_->last_error();
@@ -1361,6 +1374,15 @@ public:
     // 2026-10-25（方案 C）：严格独占开关。true = 抢 Hog（系统音量失效、其他 App 静音）；
     // false = 不抢 Hog（系统音量可用，默认）。见 OpenSpec::exclusive 的注释。
     void set_exclusive(bool ex) { exclusive_ = ex; }
+    // 1.1.2：本次输出是否为 DoP 承载（决定平台层欠载补什么、能否在共享端点开流）。
+    void set_dop(bool d) { dop_ = d; }
+    // 1.1.2 AP-1.6：端点存活。基线里**根本没有覆盖**这个方法，于是 render_loop 的
+    // 250ms 探针永远拿到基类默认的 true —— macOS 上拔掉 USB DAC / AirPlay 接收器
+    // 掉网时永远不会触发 DEVICE_LOST，只能干等 201 轮超时报 RENDERFAIL。
+    bool endpoint_alive() const override {
+        if (auto* ca = dynamic_cast<rta::platform::CoreAudioOutput*>(ao_.get())) return ca->endpoint_alive();
+        return true;
+    }
     bool hog_requested() const { return ao_ ? ao_->hog_requested() : false; }
     bool hog_acquired() const { return ao_ ? ao_->hog_acquired() : false; }
     rta::platform::OutputError last_error_class() const { return ao_ ? ao_->last_error_class() : rta::platform::OutputError::None; }
@@ -1377,6 +1399,7 @@ private:
     std::unique_ptr<rta::platform::AudioOutput> ao_ = rta::platform::create_audio_output();
     bool shared_ = false;
     bool exclusive_ = false;   // 严格独占（抢 Hog）；默认 false = 系统音量可用
+    bool dop_ = false;         // 1.1.2：DoP 承载（AirPlay/共享端点必须前置拒绝）
     double baseDb_ = 0.0;   // 起播时的绝对音量基准（set_live_gain_db 收到的是相对它的 delta）
     std::string err_;
 };
@@ -1621,6 +1644,8 @@ static std::unique_ptr<OutSink> make_sink(const PlayParams& p) {
     // 这里是第二道闸：即便绕过 UI 直接调 /api/play，也不会落到一个空指针或假装成功。
     auto s = std::make_unique<CoreAudioSink>();
     s->set_shared(p.backend == "wasapi-shared");
+    // 1.1.2：DSD 档位 >= 64 即 DoP 承载（DirectSDM 也走 DoP 装箱）。
+    s->set_dop(p.dsd >= 64);
     // 2026-10-25（方案 C）：Hog 独占开关。共享模式本来就不该抢 Hog。
     s->set_exclusive(p.hogExclusive && p.backend != "wasapi-shared");
     return s;
@@ -1646,6 +1671,8 @@ static bool upnp_is_dsd_file(const std::string& file) {
     return ext == ".dsf" || ext == ".dff";
 }
 
+static std::string conf_get(const std::string& key, const std::string& def = std::string());
+
 // 把一条曲目交给投放会话。切歌 / 重播都走这里：先停旧会话再起新会话
 //（CastManager 同一时刻只允许一条会话）。失败原因原样返回，界面直接显示，不假装成功。
 static bool upnp_start_track(const PlayParams& p, const std::string& file, std::string& err) {
@@ -1664,38 +1691,51 @@ static bool upnp_start_track(const PlayParams& p, const std::string& file, std::
     cp.bits = 0;
     cp.seconds = 0.0;
     // DSD 源必须 DoP 打包（cast_service 对未开 DoP 的 DSD 会明确拒绝 —— 铁律 3：不悄悄转码降质）
-    cp.dop = upnp_is_dsd_file(file) || p.dsd >= 64;
+    cp.dop = !rta::net::CastManager::is_airplay_dev(p.upnpDev) &&
+             (upnp_is_dsd_file(file) || p.dsd >= 64);
+    cp.initialVolumeDb = std::isfinite(p.volume) ? std::clamp(p.volume, -144.0, 0.0) : -20.0;
     rta::net::CastManager::instance().stop();
     const auto r = rta::net::CastManager::instance().start(cp);
-    if (!r.ok) { err = "UPnP 投放启动失败：" + r.error; return false; }
+    if (!r.ok) {
+        const bool isAp = rta::net::CastManager::is_airplay_dev(p.upnpDev);
+        err = (isAp ? "AirPlay 投放启动失败：" : "UPnP 投放启动失败：") + r.error;
+        return false;
+    }
     return true;
 }
 
 // 投放模式下写播放器状态：底栏从 /api/status 读这些字段，必须与投放会话口径一致。
-static void upnp_mark_player_state(const std::string& file, bool ok, const std::string& err) {
+static void upnp_mark_player_state(const std::string& file, bool ok, const std::string& err, const std::string& dev = "") {
     auto& ps = g_ps;
     std::lock_guard<std::mutex> lk(ps.mtx);
+    std::string targetDev = dev;
+    if (targetDev.empty()) {
+        targetDev = rta::net::CastManager::instance().get_state().device;
+        if (targetDev.empty()) targetDev = conf_get("upnpdev", "");
+    }
+    const bool isAp = rta::net::CastManager::is_airplay_dev(targetDev);
     if (ok) {
         ps.current = file;
         ps.error.clear();
         ps.bpState = "no";
-        ps.bpWhy = "UPnP 投放：源文件按原采样率供源，渲染器侧是否重采样由对方决定（本机 DSP 未介入）";
+        ps.bpWhy = isAp ? "AirPlay 投放：44100 Hz / 16 bit ALAC，端到端逐位未获验证"
+                        : "UPnP 投放：源文件按原采样率供源，渲染器侧是否重采样由对方决定（本机 DSP 未介入）";
         ps.rgMode = "bypassed";
         ps.rgAppliedDb = 0.0;
         ps.rgClipLimited = false;
-        ps.rgSource = "upnp:bypassed";
-        ps.rgNote = "UPnP 投放：源文件直供，本机 ReplayGain 旁路";
-        // F-5：投放模式下输出格式由**远端渲染器**决定，本机无从自证 ⟹
-        //   dsd/dsdRate/carrierRate/modFamily/modOrder 一律归零（绝不许拿上一首本地播放的
-        //   残留值冒充远程事实，与 ps.gpu 在投放模式归零是同一条纪律），
-        //   fallbackWhy 如实说明"无法自证"而不是留空（留空 = 声称"没降级"，那是假话）。
-        ps.outMode        = "upnp";
+        ps.rgSource = isAp ? "airplay:bypassed" : "upnp:bypassed";
+        ps.rgNote = isAp ? "AirPlay 投放：源文件经 ALAC 编码推流，本机 ReplayGain 旁路"
+                         : "UPnP 投放：源文件直供，本机 ReplayGain 旁路";
+        // F-5：投放模式下区分 AirPlay 与 UPnP，不谎报 bit-perfect
+        ps.outMode        = isAp ? "airplay" : "upnp";
+        ps.outTransport   = isAp ? "airplay" : "upnp";
         ps.outDsdLevel    = 0;
         ps.outDsdRate     = 0;
         ps.outCarrierRate = 0;
         ps.outModFamily.clear();
         ps.outModOrder    = 0;
-        ps.outFallbackWhy = "UPnP 投放：输出格式与采样率由远端渲染器决定（本机 DSP 未介入，无法自证）";
+        ps.outFallbackWhy = isAp ? "AirPlay 投放：44100 Hz / 16 bit ALAC 网络推流（非 bit-perfect）"
+                                 : "UPnP 投放：输出格式与采样率由远端渲染器决定（本机 DSP 未介入，无法自证）";
     } else {
         ps.error = err;
         ps.bpState = "no";
@@ -1709,9 +1749,29 @@ static void upnp_mark_player_state(const std::string& file, bool ok, const std::
 // upnp_mark_player_state、从不调 meta_on_play ⟹ 投放期间 metabase 永远没有新记录，
 // /api/lyrics 三路（sidecar / 内嵌 / metabase）全空，界面停在「没有歌词」。
 // 两件事绑在一个入口，将来再加投放起点也不会只接一半。
-static void upnp_note_started(const std::string& file) {
-    upnp_mark_player_state(file, true, "");
+static void upnp_note_started(const std::string& file, const std::string& dev = "") {
+    upnp_mark_player_state(file, true, "", dev);
     meta_on_play(file);
+    auto& ps = g_ps;
+    std::string targetDev = dev;
+    if (targetDev.empty()) {
+        targetDev = rta::net::CastManager::instance().get_state().device;
+        if (targetDev.empty()) targetDev = conf_get("upnpdev", "");
+    }
+    const bool isAp = rta::net::CastManager::is_airplay_dev(targetDev);
+    // The asynchronous worker has not decoded/opened anything yet. Unknown input
+    // metadata remains unknown; /api/signal reads the live CastState once ready.
+    std::ostringstream sig;
+    sig << "{\"src\":\"" << jesc(file) << "\""
+        << ",\"device\":\"" << jesc(targetDev) << "\""
+        << ",\"transport\":\"" << (isAp ? "airplay" : "upnp") << "\""
+        << ",\"inRate\":0,\"inBits\":0,\"inCh\":0"
+        << ",\"outRate\":0,\"outBits\":0,\"outCh\":0"
+        << ",\"latencyKnown\":false,\"latencyMs\":0,\"latencySource\":\"\""
+        << ",\"bitPerfect\":\"no\",\"bitPerfectWhy\":\"Remote output has not been verified bit-for-bit\"}";
+
+    std::lock_guard<std::mutex> lk(ps.mtx);
+    ps.signal = sig.str();
 }
 
 // ---------------- NAA 端点自动发现（261024-01 #11）----------------
@@ -1737,27 +1797,15 @@ static bool direct_sdm_eligible(const PlayParams& p, const DsdInfo& info, std::s
     const uint32_t base = (info.rate % 48000u == 0) ? 48000u : 44100u;
     const uint32_t target = rta::dsp::dsd_rate(p.dsd, base);
     bool anyProc = !p.eqFile.empty() || !p.convIr.empty() || p.loudness;
+    if (g_peq && g_peq->has_effect()) anyProc = true;
     rta::dsp::replaygain::Mode rgm = rta::dsp::replaygain::Mode::Off;
     if (rta::dsp::replaygain::parse_mode(p.rgMode, &rgm) && rgm != rta::dsp::replaygain::Mode::Off) anyProc = true;
     for (int i = 0; i < 8; ++i) if (p.trim[i] != 0.0) anyProc = true;
     if (p.outChannels > 0 && p.outChannels != info.channels) anyProc = true;   // 声道数变化也是处理
-    const auto d = rta::dsp::direct_sdm_decision(info.rate, target, anyProc, p.volume != 0.0);
-    // F-3（2026-10-27）：源 DSD 与目标同族不同速率时，不再一律退回「ffmpeg 解 PCM 再调制」。
-    // 只要 plan_dsd_rate 说同族整数倍可行，就先做 1-bit→1-bit 速率转换，再走直通。
-    // 为什么值得：退回 PCM 重调制要多一次抽取+插值+SDM，且会丢掉源自身的 1-bit 噪声形状；
-    // 而 DSD→DSD 转换的实测代价是 DSD64→128 的 THD+N 与「原样」差 +0.002 dB（模块自述判据）。
-    if (!d.enabled && info.rate != 0 && target != 0) {
-        const auto plan = rta::dsp::plan_dsd_rate(info.rate, target);
-        if (plan.ok()) {
-            why = "源 DSD " + std::to_string(info.rate) + " Hz → 目标 " + std::to_string(target) +
-                  " Hz 同族整数倍：先做 1-bit 速率转换再直通";
-            return true;
-        }
-        why = d.reason + "；且速率转换不可行：" + plan.note;
-        return false;
-    }
-    why = d.reason;
-    return d.enabled;
+
+    const auto elig = rta::audio::evaluate_direct_dsd(info.rate, info.channels, p.dsd, p.dsdNative, anyProc, p.volume != 0.0);
+    why = elig.why;
+    return elig.eligible;
 }
 
 // 直接播放 DSD 源：1-bit 流按 16 位整数倍切片 → DoP 24-bit 载波 → 输出后端。
@@ -1776,6 +1824,10 @@ static bool play_one_direct(const std::string& file, const PlayParams& p) {
         ps.dspChunkUs.store(0);
         ps.dspTotalUs.store(0);
         ps.dspChunks.store(0);
+        {
+            std::lock_guard<std::mutex> lk(ps.mtx);
+            ps.error.clear();
+        }
         const auto t_dsd_0 = std::chrono::steady_clock::now();
         DsdStream src = read_dsd(file);
         const auto t_dsd_1 = std::chrono::steady_clock::now();
@@ -1793,73 +1845,59 @@ static bool play_one_direct(const std::string& file, const PlayParams& p) {
             ps.error = "共享模式不支持 DoP/DSD（共享会重采样破坏 DoP 载波），请切换到独占模式。";
             return false;
         }
-        const uint32_t srcRate = src.rate;
-        const uint32_t carrier = srcRate / 16u;
-        const int      ch = src.channels;
-        const size_t   totalFrames = (size_t)(src.bits / 16ull);   // DoP 帧数（每声道）
-        if (totalFrames == 0) {
-            std::lock_guard<std::mutex> lk(ps.mtx);
-            ps.error = "DSD 数据不足一个 DoP 帧（16 位）";
-            return false;
-        }
-        // ---- CUE 分轨（2026-10-25）：1-bit 直通（DirectSDM / DoP 回落）同样按区间播 ----
-        // 换算：totalFrames 是 DoP 帧（= 1-bit 样点/16），区间是"秒" ⟹
-        //   帧号 = 秒 × srcRate / 16（srcRate 就是 1-bit 位率）。
-        // 不实现这一档的代价很实在：SACD 整轨 .dsf + cue 在 DirectSDM 下会从文件头开播，
-        // 用户听到的是第 1 首而进度条显示第 5 首 —— 静默错位比报错更难查。
-        size_t frameBase = 0, frameCount = totalFrames;
-        if (p.cueStart >= 0.0) {
-            const double fileSec = (double)totalFrames / (double)carrier;
-            const double framesPerSec = (double)srcRate / 16.0;   // DoP 帧/秒
-            auto cueFail = [&](const std::string& why) {
-                play_log("CUE_REJECT " + why + " cue=" + cue_range_text(p.cueStart, p.cueEnd) +
-                         " file=" + file);
-                std::lock_guard<std::mutex> lk(ps.mtx);
-                ps.error = why;
-                return false;
-            };
-            if (p.cueEnd >= 0.0 && p.cueEnd <= p.cueStart)
-                return cueFail("CUE 分轨区间非法：终点 " + std::to_string(p.cueEnd) +
-                               "s 不大于起点 " + std::to_string(p.cueStart) + "s（文件 " +
-                               std::to_string(fileSec) + "s）：" + file);
-            const long long b = (long long)std::llround(p.cueStart * framesPerSec);
-            if (b < 0 || (size_t)b >= totalFrames)
-                return cueFail("CUE 分轨起点越界：起点 " + std::to_string(p.cueStart) +
-                               "s ≥ 文件时长 " + std::to_string(fileSec) + "s：" + file);
-            long long e = (p.cueEnd >= 0.0) ? (long long)std::llround(p.cueEnd * framesPerSec)
-                                            : (long long)totalFrames;
-            if (e > (long long)totalFrames) e = (long long)totalFrames;
-            if (e <= b)
-                return cueFail("CUE 分轨区间越界：" + cue_range_text(p.cueStart, p.cueEnd) +
-                               " 落在文件时长 " + std::to_string(fileSec) + "s 之外：" + file);
-            frameBase  = (size_t)b;
-            frameCount = (size_t)(e - (long long)b);
-            play_log("CUE_RANGE cue=" + cue_range_text(p.cueStart, p.cueEnd) +
-                     " base=" + std::to_string(frameBase) + " frames=" + std::to_string(frameCount) +
-                     " carrier=" + std::to_string(carrier) + " fileSec=" + std::to_string(fileSec) +
-                     " path=direct-sdm file=" + file);
-        }
-        const size_t   frameEnd = frameBase + frameCount;
-
+        const uint32_t srcRateOrig = src.rate;
         // ---- F-3：DSD→DSD 速率转换（同族整数倍）----
         // 只在"目标档位与源不同"时做；同速率完全不进这里（保持逐位直通）。
         // 失败必须明确报错并回退普通路径，绝不静默按源速率播（那会让用户以为升频生效了）。
+        // 注意：必须在速率转换后，基于实际有效流计算 carrier / totalFrames / CUE frameEnd / 信号链！
+        bool isConvertedRate = false;
+        int dsdEffOrder = 0;
+        bool dsdSteppedDown = false;
+        std::string dsdStepDownReason;
         if (p.dsd >= 64) {
             const uint32_t base = (src.rate % 48000u == 0) ? 48000u : 44100u;
             const uint32_t targetRate = rta::dsp::dsd_rate(p.dsd, base);
             if (targetRate != src.rate) {
                 const auto plan = rta::dsp::plan_dsd_rate(src.rate, targetRate);
                 if (plan.ok()) {
+                    // ★ 1.1.2 真机实测（2026-11-03）：**先问设备能不能收，再做转换**。
+                    //   旧顺序是先整轨转换、再检查载波 —— 实测 227 秒 DSD64→DSD128 转换花了
+                    //   41.6 秒（DSD_RATE rt=5.78、ms=41628），然后才报"设备不支持 352800 Hz"。
+                    //   结果：用户看到"正在播放 0:00"的假象近一分钟，白算一遍、白占一份内存。
+                    //   探测是只读的、毫秒级，必须在贵的操作之前完成。
+                    if (p.backend.empty() || p.backend == "wasapi") {
+                        const uint32_t wantCarrier = targetRate / 16u;
+                        const std::vector<uint32_t> pre = probe_exclusive_rates(p.device, 24, src.channels);
+                        bool okPre = false;
+                        for (auto r : pre) if (r == wantCarrier) okPre = true;
+                        if (!okPre) {
+                            std::string list;
+                            for (size_t i = 0; i < pre.size(); ++i) { if (i) list += " / "; list += std::to_string(pre[i]); }
+                            play_log("DSD_RATE_SKIP device_carrier_unsupported want=" + std::to_string(wantCarrier) +
+                                     " device=" + p.device);
+                            std::lock_guard<std::mutex> lk(ps.mtx);
+                            ps.error = pre.empty()
+                                ? ("设备独占支持列表为空（端点不可用或 24-bit 容器不被接受），无法确认 DirectSDM 所需的 DoP 载波 " +
+                                   std::to_string(wantCarrier) + " Hz。")
+                                : ("设备不支持 DirectSDM 所需的 DoP 载波 " + std::to_string(wantCarrier) +
+                                   " Hz。设备支持：" + list);
+                            return false;
+                        }
+                    }
                     try {
                         rta::audio::DsdStream converted;
                         const auto cr = rta::dsp::convert_dsd_stream(src, targetRate,
                                                                      rta::dsp::DsdRateConvertConfig{}, converted);
+                        dsdEffOrder = cr.effectiveOrder;
+                        dsdSteppedDown = cr.steppedDown;
+                        dsdStepDownReason = cr.stepDownReason;
                         play_log("DSD_RATE src=" + std::to_string(src.rate) + " dst=" +
                                  std::to_string(targetRate) + " rt=" + std::to_string(cr.realtimeFactor) +
                                  " headroomDb=" + std::to_string(cr.headroomDb) +
                                  " ms=" + std::to_string(cr.totalMs) +
                                  (cr.steppedDown ? (" stepdown=" + cr.stepDownReason) : std::string()));
                         src = std::move(converted);
+                        isConvertedRate = true;
                     } catch (const std::exception& e) {
                         std::lock_guard<std::mutex> lk(ps.mtx);
                         ps.error = std::string("DSD 速率转换失败（不按源速率静默播放）：") + e.what();
@@ -1871,6 +1909,53 @@ static bool play_one_direct(const std::string& file, const PlayParams& p) {
                     return false;
                 }
             }
+        }
+
+        const uint32_t actualRate = src.rate;
+        const uint32_t carrier = actualRate / 16u;
+        const int      ch = src.channels;
+        const size_t   totalFrames = (size_t)(src.bits / 16ull);   // 转换后实际 DoP 帧数（每声道）
+        if (totalFrames == 0) {
+            std::lock_guard<std::mutex> lk(ps.mtx);
+            ps.error = "DSD 数据不足一个 DoP 帧（16 位）";
+            return false;
+        }
+
+        // ---- CUE 分轨（基于转换后实际有效速率与 DoP 帧数计算切片范围）----
+        size_t frameBase = 0, frameCount = totalFrames;
+        if (p.cueStart >= 0.0) {
+            const auto sp = rta::audio::plan_direct_dsd_slice(actualRate, src.bits, p.cueStart, p.cueEnd);
+            if (!sp.cueValid) {
+                play_log("CUE_REJECT " + sp.cueError + " cue=" + cue_range_text(p.cueStart, p.cueEnd) +
+                         " file=" + file);
+                std::lock_guard<std::mutex> lk(ps.mtx);
+                ps.error = sp.cueError;
+                return false;
+            }
+            frameBase = sp.frameBase;
+            frameCount = sp.frameCount;
+            const double fileSec = (double)totalFrames / (double)carrier;
+            play_log("CUE_RANGE cue=" + cue_range_text(p.cueStart, p.cueEnd) +
+                     " base=" + std::to_string(frameBase) + " frames=" + std::to_string(frameCount) +
+                     " carrier=" + std::to_string(carrier) + " fileSec=" + std::to_string(fileSec) +
+                     " path=direct-sdm file=" + file);
+        }
+        const size_t frameEnd = frameBase + frameCount;
+        rta::audio::DirectDsdSlicePlan spanPlan;
+        spanPlan.effectiveRate = actualRate;
+        spanPlan.carrierRate = carrier;
+        spanPlan.totalBits = src.bits;
+        spanPlan.totalDoPFrames = totalFrames;
+        spanPlan.frameBase = frameBase;
+        spanPlan.frameCount = frameCount;
+        spanPlan.frameEnd = frameEnd;
+        const auto span = rta::audio::validate_direct_dsd_span(spanPlan, (size_t)ch,
+            [&](size_t c) { return c < src.data.size() ? src.data[c].size() : size_t{0}; });
+        if (!span.ok) {
+            play_log("DSD_SPAN_REJECT " + span.why);
+            std::lock_guard<std::mutex> lk(ps.mtx);
+            ps.error = "DSD 数据与声明不一致：" + span.why;
+            return false;
         }
 
         // 设备能力：DoP 载波率是源 DSD/16，本机 DAC 不一定支持（DSD256 要 705.6 kHz）。
@@ -1912,36 +1997,67 @@ static bool play_one_direct(const std::string& file, const PlayParams& p) {
             std::string dev = "默认音频设备";
             if (p.backend == "naa") dev = p.naaHost.empty() ? "NAA 127.0.0.1:43210" : p.naaHost;
             else if (p.backend == "null") dev = "Null 输出（不出声）";
-            else { std::string di; mac_find_dev(std::string(), dev, di); }
+            // 1.1.2 AP-1.8（真机实测抓到）：这里原来传的是**空** deviceId，
+            // 于是信号链与 PLAY 日志永远写"默认设备"的名字 —— 明明在 107 上播 DSD，
+            // 记录里却是内置扬声器。诊断数据必须指向真实端点，否则排障会被带偏。
+            else { std::string di; mac_find_dev(p.device, dev, di); }
+
+            // 1.1.2 AP-1.8：直通分支也要带出传输与延迟事实（与 PCM 分支同源同口径）。
+            // 只读 caps，不开流；AirPlay/共享端点已在入口被拒绝，这里只是记录。
+            rta::platform::DeviceCaps dc;
+            if (p.backend.empty() || p.backend == "wasapi" || p.backend == "wasapi-shared") {
+                auto pr = rta::platform::create_audio_output();
+                if (pr) dc = pr->caps(p.device);
+            }
+
+            const std::string bpState = isConvertedRate ? "no" : "direct";
+            const std::string bpWhy = isConvertedRate
+                ? ("DSD 速率转换 " + std::to_string(srcRateOrig) + "→" + std::to_string(actualRate) + " Hz（1-bit 调制变换）")
+                : "DirectSDM：1-bit 直通，跳过 PCM 与调制";
+            const std::string phaseDesc = isConvertedRate ? "DSD速率转换" : "逐位直通";
+            const std::string phaseCode = isConvertedRate ? "convert" : "direct";
+            const std::string noteDesc = isConvertedRate
+                ? ("DSD 速率转换：" + std::to_string(srcRateOrig) + " Hz → " + std::to_string(actualRate) + " Hz（同族整数倍）")
+                : "DirectSDM：1-bit 直通，跳过 PCM 与调制";
+
             std::ostringstream sig;
             sig << "{\"src\":\"" << jesc(file) << "\""
                 << ",\"codec\":\"dsd\""
-                << ",\"inRate\":" << srcRate
+                << ",\"inRate\":" << srcRateOrig
                 << ",\"inBits\":1"
                 << ",\"inCh\":" << ch
                 << ",\"dur\":" << (double)frameCount / (double)carrier   // CUE：本区间时长
                 << ",\"cueStart\":" << p.cueStart
                 << ",\"cueEnd\":" << p.cueEnd
                 << ",\"fileDur\":" << (double)totalFrames / (double)carrier
-                << ",\"note\":\"" << jesc(std::string("DirectSDM：1-bit 直通，跳过 PCM 与调制")) << "\""
-                << ",\"outRate\":" << srcRate
+                << ",\"note\":\"" << jesc(noteDesc) << "\""
+                << ",\"outRate\":" << actualRate
                 << ",\"outBits\":24"
                 << ",\"outCh\":" << ch
                 << ",\"carrier\":" << carrier
                 << ",\"device\":\"" << jesc(dev) << "\""
-                << ",\"resample\":false,\"twoStage\":false,\"taps\":0"
-                << ",\"filter\":\"DirectSDM\""
-                << ",\"phaseCode\":\"direct\",\"phase\":\"逐位直通\""
+                << ",\"deviceId\":\"" << jesc(p.device) << "\""
+                << ",\"transport\":\"" << jesc(dc.transport) << "\""
+                << ",\"sharedOnly\":" << (dc.sharedOnly ? "true" : "false")
+                << ",\"latencyKnown\":" << (dc.latencyKnown ? "true" : "false")
+                << ",\"latencyMs\":" << dc.latencyMs
+                << ",\"latencySource\":\"" << jesc(dc.latencySource) << "\""
+                << ",\"resample\":" << (isConvertedRate ? "true" : "false")
+                << ",\"twoStage\":false,\"taps\":0"
+                << ",\"filter\":\"" << (isConvertedRate ? "DsdRateConverter" : "DirectSDM") << "\""
+                << ",\"phaseCode\":\"" << phaseCode << "\",\"phase\":\"" << phaseDesc << "\""
                 << ",\"gpuAvailable\":false,\"shaper\":\"none\",\"loudness\":false"
                 << ",\"volume\":0,\"buffer\":" << p.bufferMs
                 << ",\"dsd\":" << p.dsd
-                << ",\"dsdRate\":" << srcRate
-                << ",\"modOrder\":0"
+                << ",\"dsdRate\":" << actualRate
+                << ",\"modOrder\":" << (isConvertedRate ? dsdEffOrder : 0)
                 << ",\"ispPeak\":0,\"ispOver\":0,\"preAtten\":0"
                 << ",\"atten\":0,\"conv\":false,\"irGpu\":false"
                 << ",\"gpuVendor\":\"\",\"gpuStatus\":\"\""
                 << ",\"volRamp\":0,\"bits\":24,\"eq\":false"
-                << ",\"directSdm\":true"
+                << ",\"directSdm\":" << (isConvertedRate ? "false" : "true")
+                << ",\"bitPerfect\":\"" << bpState << "\""
+                << ",\"bitPerfectWhy\":\"" << jesc(bpWhy) << "\""
                 << ",\"rg\":\"off\",\"rgDb\":0,\"rgClip\":false,\"rgSource\":\"directsdm:bypass\",\"rgNote\":\"DirectSDM 1-bit 直通，跳过 PCM 增益处理\""
                 << ",\"decodeMs\":" << dsdMs
                 << ",\"ffmpegMs\":0"
@@ -1953,22 +2069,30 @@ static bool play_one_direct(const std::string& file, const PlayParams& p) {
             meta_on_play(file);   // 播放触发元数据补全(设置可关;inFlight 去重,后台线程)
             std::lock_guard<std::mutex> lk(ps.mtx);
             ps.signal = sig.str();
-            ps.info = "DirectSDM：DSD 源 " + std::to_string(srcRate) + " Hz → DoP " +
-                      std::to_string(carrier) + " Hz（跳过调制，逐位直通）";
+            ps.bpState = bpState;
+            ps.bpWhy = bpWhy;
+            if (isConvertedRate) {
+                ps.info = "DSD 速率转换：DSD 源 " + std::to_string(srcRateOrig) + " Hz → " +
+                          std::to_string(actualRate) + " Hz → DoP " + std::to_string(carrier) + " Hz";
+            } else {
+                ps.info = "DirectSDM：DSD 源 " + std::to_string(actualRate) + " Hz → DoP " +
+                          std::to_string(carrier) + " Hz（跳过调制，逐位直通）";
+            }
         }
         // F-5 自证（DirectSDM 分支）：1-bit 直通**没有调制器参与** ⟹ modFamily 必须为空、
         // modOrder = 0（上游 261025-02 #5 同款口径：native 直通 modOrder=0）。
         // ★ 这里刻意不写 "native"：mac 的 DirectSDM 仍然是 DoP 装箱送 CoreAudio，
         //   不是 ASIO 原生 1-bit 通道（那种通路在 mac 不存在，见 /api/play 的 dsdnative 门）。
-        // dsd 档位按源 1-bit 位率反推（srcRate / 44100 或 /48000），dsdRate = 源位率本身，
-        // carrierRate = DoP 载波 = srcRate/16 —— 三个数一起给，用户才能分辨"384000 是载波"。
+        // dsd 档位按实际 1-bit 位率反推（actualRate / 44100 或 /48000），dsdRate = 实际位率本身，
+        // carrierRate = DoP 载波 = actualRate/16 —— 三个数一起给，用户才能分辨"384000 是载波"。
         {
             uint32_t lvl = 0;
-            if (srcRate && srcRate % 48000u == 0) lvl = srcRate / 48000u;
-            else if (srcRate && srcRate % 44100u == 0) lvl = srcRate / 44100u;
+            if (actualRate && actualRate % 48000u == 0) lvl = actualRate / 48000u;
+            else if (actualRate && actualRate % 44100u == 0) lvl = actualRate / 44100u;
             set_out_format_state(out_mode_of_backend(p.backend).c_str(),
-                                 (int)lvl, srcRate, carrier,
-                                 std::string(), 0, std::string());
+                                 (int)lvl, actualRate, carrier,
+                                 std::string(), (isConvertedRate ? dsdEffOrder : 0),
+                                 (isConvertedRate ? "dsd" : std::string()));
         }
 
         auto sink = make_sink(p);
@@ -2024,7 +2148,7 @@ static bool play_one_direct(const std::string& file, const PlayParams& p) {
             if (posFrames >= frameEnd) return false;
             const size_t n = std::min(want, frameEnd - posFrames);
             DsdStream chunk;
-            chunk.rate = srcRate;
+            chunk.rate = actualRate;
             chunk.channels = ch;
             chunk.bits = (uint64_t)n * 16ull;
             chunk.data.resize((size_t)ch);
@@ -2042,7 +2166,7 @@ static bool play_one_direct(const std::string& file, const PlayParams& p) {
         // 全 0 样本的标记位是 0x00，接收端会判定"非法 DoP"并可能静音/报错。
         auto append_silence = [&](size_t n) {
             DsdStream chunk;
-            chunk.rate = srcRate;
+            chunk.rate = actualRate;
             chunk.channels = ch;
             chunk.bits = (uint64_t)n * 16ull;
             chunk.data.assign((size_t)ch, std::vector<uint8_t>(n * 2, 0x55));
@@ -2234,7 +2358,7 @@ struct PlaySource {
 };
 
 // 读 rlplayer-settings.conf 的单键（缺失返回 def）
-static std::string conf_get(const std::string& key, const std::string& def = std::string()) {
+static std::string conf_get(const std::string& key, const std::string& def) {
     std::ifstream f(path_in_exe_dir("rlplayer-settings.conf"));
     if (!f) return def;
     std::string line;
@@ -2751,6 +2875,81 @@ static bool play_one_impl(const std::string& file, const PlayParams& pIn, rta::a
         if (!fallbackWhy.empty()) fallbackWhy += "；";
         fallbackWhy += s;
     };
+    // ---- 1.1.2 AirPlay 输出适配（AP-1.1 / AP-1.3 / AP-1.4）：入口定策 ----
+    // 为什么必须在 DirectSDM 判定与解码之前：
+    //   ① DoP/DSD 送到 AirPlay（网络共享流）会被系统混音与重封装改写标记 ⟹ 白噪；
+    //   ② DirectSDM 判定只看 DSD 参数，不知道"目标是网络共享端点"；
+    //   ③ 默认设备若在"枚举 → 开流"之间被系统换掉（插拔耳机 / AirPlay 握手 / 蓝牙），
+    //      就会出现"探测 A、开流 B"，日志与听感全对不上。
+    // 纪律：全部结论来自 CoreAudio transport 与只读 caps，**不按设备名猜**。
+    std::string airplayNote;
+    rta::platform::DeviceCaps targetCaps;
+    bool targetIsAirPlay = false;
+    {
+        const bool localBackend = (pE.backend.empty() || pE.backend == "wasapi" || pE.backend == "wasapi-shared");
+        if (localBackend) {
+            if (pE.device.empty()) {
+                for (const auto& d : mac_enum_devices()) {
+                    if (d.hasOutput && d.isDefault) { pE.device = d.id; break; }
+                }
+            }
+            auto probe = rta::platform::create_audio_output();
+            if (probe) targetCaps = probe->caps(pE.device);
+            targetIsAirPlay = targetCaps.sharedOnly || targetCaps.transport == "airplay";
+        }
+    }
+    if (targetIsAirPlay) {
+        // AP-1.3：AirPlay 只走系统共享输出 —— 不抢 Hog、不改设备物理格式。
+        if (pE.backend != "wasapi-shared") {
+            airplayNote = "AirPlay 设备只支持系统共享输出，已自动由独占改为共享（非 bit-perfect）";
+            appendFallback(airplayNote);
+            pE.backend = "wasapi-shared";
+        }
+        pE.hogExclusive = false;
+        // AP-1.4：拒绝 DoP / Native DSD。注意这里**不是**"DSD 永久不能播"：
+        // 用户把「DSD 封装」设为 PCM 时（pE.dsd == 0），DSD 源会被解码成 PCM 再输出，
+        // 那是合法且明确的选择 —— 只要信号链如实写出"DSD 源 → PCM"。
+        if (pE.dsd >= 64) {
+            play_log("PLAY_REJECT airplay_dop device=" + pE.device + " dsd=" + std::to_string(pE.dsd) +
+                     " file=" + file);
+            std::lock_guard<std::mutex> lk(ps.mtx);
+            ps.error = "AirPlay 不支持 DoP/DSD 直通：AirPlay 是经系统混音与网络重封装的共享输出，"
+                       "DoP 的 0x05/0xFA 标记会被改写并可能产生严重噪声。"
+                       "请把「DSD 封装」改为 PCM（DSD 会被解码为 PCM，非逐位直通），或改用 USB/内置声卡。";
+            return false;
+        }
+        if (pE.directSdm) {
+            // DirectSDM 同样是 DoP 装箱；挡掉它，避免落到 play_one_direct 里报一句
+            // 误导性的"请切换到独占模式"（用户根本切不了，AirPlay 就没有独占）。
+            pE.directSdm = false;
+            appendFallback("AirPlay 不支持 DirectSDM 逐位直通，已按普通 DSD→PCM 路径处理");
+            directNote = "DirectSDM 未启用：AirPlay 是共享网络输出，不支持 1-bit 直通";
+        }
+    }
+    {
+        // 把本次目标端点的传输/延迟事实落进播放状态（供 /api/status 带出）。
+        // 放在这里而不是解析信号链 JSON：状态机与信号链必须同源，避免两套口径漂移。
+        std::lock_guard<std::mutex> lk(ps.mtx);
+        ps.outTransport     = targetCaps.transport.empty() ? std::string("unknown") : targetCaps.transport;
+        ps.outLatencyKnown  = targetCaps.latencyKnown;
+        ps.outLatencyMs     = targetCaps.latencyMs;
+        ps.outLatencySource = targetCaps.latencySource;
+        ps.outSharedOnly    = targetCaps.sharedOnly;
+    }
+    // ---- 1.1.2 P0-3：AHM 多电平与 DoP 1-bit 的语义冲突必须显式拒绝 ----
+    // AHM 族在 SdmModulator 构造函数里被强制展开成 2^ahmBits 电平（默认 8 bit = 256 级），
+    // 而 DoP v1.1 的容器只承载 **1 bit**。旧路径把多电平样本直接喂 dop_pack，后者按
+    // `> 0.0` 一刀切成 1-bit —— 等于在没有对应噪声整形的条件下硬量化，
+    // 带内噪声会明显恶化，而界面还写着"AHM 多电平"。这是"看起来支持、实际退化"。
+    // 不做静默降档（项目纪律：降档/转 PCM 必须由用户显式选择），在这里明确拒绝并给出出路。
+    if (pE.dsd >= 64 && rta::dsp::parse_modulator_family(pE.modFamily) == rta::dsp::ModulatorFamily::Ahm) {
+        play_log("PLAY_REJECT ahm_dop_conflict family=ahm dsd=" + std::to_string(pE.dsd) + " file=" + file);
+        std::lock_guard<std::mutex> lk(ps.mtx);
+        ps.error = "调制器族 AHM 是多电平 SDM，而 DoP 容器只能承载 1-bit：两者不能同时使用。"
+                   "请二选一 —— 把调制器族改成 DSD / Chebyshev / EC（1-bit 族）继续走 DoP，"
+                   "或把「DSD 封装」改成 PCM 以保留 AHM 多电平输出。";
+        return false;
+    }
     if (p.directSdm) {
         const std::string ext = lowerExt(file);
         if (ext == ".dsf" || ext == ".dff") {
@@ -3399,7 +3598,15 @@ static bool play_one_impl(const std::string& file, const PlayParams& pIn, rta::a
             for (const auto& d : mac_enum_devices()) {
                 if (d.id == di) { mixRate = d.nominalRate; break; }
             }
+            // 1.1.2 AP-1.3：不再无条件写死 2ch。按设备当前输出声道协商，
+            // 但**只降不升**：单声道端点给 1；其余仍按 2（多声道下混/上混的听感未获真机验证，
+            // 不能凭"设备报了 6ch"就擅自把管线改成 6ch —— 那是拿未验证行为冒充适配）。
             mixCh = 2;
+            if (targetCaps.currentChannels == 1) mixCh = 1;
+            if (targetCaps.currentChannels > 2) {
+                appendNote("设备输出声道为 " + std::to_string(targetCaps.currentChannels) +
+                           "，共享输出仍按 2ch 立体声协商（多声道下混未验证）");
+            }
             mixFloat = true;
             if (!mixRate) {
                 std::lock_guard<std::mutex> lk(ps.mtx);
@@ -3622,6 +3829,16 @@ static bool play_one_impl(const std::string& file, const PlayParams& pIn, rta::a
             << ",\"outCh\":" << outCh
             << ",\"device\":\"" << jesc(dev) << "\""
             << ",\"deviceId\":\"" << jesc(devId) << "\""
+            // 1.1.2 AP-1.8：诊断必须能回答"这一曲到底送到了什么传输上、延迟从哪来、
+            // 是共享还是独占"。这里的值全部是**本次实际**的只读探测结果，不是用户偏好。
+            << ",\"transport\":\"" << jesc(targetCaps.transport) << "\""
+            << ",\"sharedOnly\":" << (targetCaps.sharedOnly ? "true" : "false")
+            << ",\"latencyKnown\":" << (targetCaps.latencyKnown ? "true" : "false")
+            << ",\"latencyMs\":" << targetCaps.latencyMs
+            << ",\"latencySource\":\"" << jesc(targetCaps.latencySource) << "\""
+            << ",\"deviceCurrentRate\":" << targetCaps.currentRate
+            << ",\"deviceCurrentChannels\":" << targetCaps.currentChannels
+            << ",\"deviceCurrentBufferFrames\":" << targetCaps.currentBufferFrames
             << ",\"bitsFallback\":\"" << jesc(bitNote) << "\""
                 // 2026-10-23（用户 261023-02 #1）：信号链要在显眼处给出**权威的 bit-perfect 结论**，
                 // 而不是让用户自己从 resample/volume/shaper/eq 等一堆字段里推。
@@ -3681,6 +3898,10 @@ static bool play_one_impl(const std::string& file, const PlayParams& pIn, rta::a
                 // 2026-10-24（261024-02 #8）：位深判据用"源文件真实位深"（见下方 srcBitsEff 声明）
                 << ",\"bitPerfect\":\"" << ([&] {
                        if (p.directSdm && directNote.empty()) return std::string("direct");
+                       // 1.1.2 AP-1.2：AirPlay 端到端逐位一致**未获验证**（系统混音 + 网络重封装），
+                       // 一票否决。不这么做的话，"44.1k/16 + 音量 0 + 无 EQ"会让底栏亮出
+                       // 一个假的绿色 BIT-PERFECT 徽标 —— 那正是路线图点名要修的错误结论。
+                       if (targetIsAirPlay) return std::string("no");
                        if (outRate != in.rate) return std::string("no");
                        if (std::fabs(p.volume) > 1e-9) return std::string("no");
                        if (cfg.shaper != rta::dsp::Shaper::None) return std::string("no");
@@ -3696,6 +3917,7 @@ static bool play_one_impl(const std::string& file, const PlayParams& pIn, rta::a
                 << ",\"bitPerfectWhy\":\"" << jesc([&] {
                        if (p.directSdm && directNote.empty()) return std::string("DirectSDM：1-bit 直通，跳过 PCM 与调制");
                        std::vector<std::string> why;
+                       if (targetIsAirPlay) why.push_back("AirPlay 网络传输（系统混音 + 重封装，端到端逐位未获验证）");
                        if (outRate != in.rate) why.push_back("重采样 " + std::to_string(in.rate) + "→" + std::to_string(outRate) + " Hz");
                        if (std::fabs(p.volume) > 1e-9) why.push_back("音量 " + std::to_string((int)std::lround(p.volume)) + " dB");
                        if (cfg.shaper != rta::dsp::Shaper::None) why.push_back("抖动/整形");
@@ -3726,6 +3948,8 @@ static bool play_one_impl(const std::string& file, const PlayParams& pIn, rta::a
                 if (p.directSdm && directNote.empty()) { bps = "direct"; bpw = "DirectSDM：1-bit 直通，跳过 PCM 与调制"; }
                 else {
                     std::vector<std::string> why;
+                    // 与信号链 JSON 同一口径（两处必须一致，否则徽标与详情页会互相打脸）
+                    if (targetIsAirPlay) why.push_back("AirPlay 网络传输（系统混音 + 重封装，端到端逐位未获验证）");
                     if (outRate != in.rate) why.push_back("重采样 " + std::to_string(in.rate) + "→" + std::to_string(outRate) + " Hz");
                     if (std::fabs(p.volume) > 1e-9) why.push_back("音量 " + std::to_string((int)std::lround(p.volume)) + " dB");
                     if (cfg.shaper != rta::dsp::Shaper::None) why.push_back("抖动/整形");
@@ -4048,6 +4272,20 @@ static bool play_one_impl(const std::string& file, const PlayParams& pIn, rta::a
         rl.fallbackEligible = (sharedFallback != nullptr) && !dop &&
                               (p.backend.empty() || p.backend == "wasapi");
         rl.dop = dop;
+        // 1.1.2 P0-3：DoP 的 EOS 尾块不能补零（高 8 位标记会变成 0x00，接收端判非法 DoP）。
+        // 相位从 pend 里最后**一帧真实数据**接上，而不是每段都从 0x05 重来 ——
+        // 否则块边界会出现 A,A，同样非法。
+        rl.dopPadFrames = [](std::vector<int32_t>& pend, size_t outCh, size_t needFrames) {
+            if (outCh == 0 || needFrames == 0) return;
+            uint8_t last = rta::dsp::DOP_MARKER_A;
+            if (pend.size() >= outCh) {
+                const uint8_t m = (uint8_t)(((uint32_t)pend[pend.size() - outCh] >> 16) & 0xFFu);
+                if (m == rta::dsp::DOP_MARKER_A || m == rta::dsp::DOP_MARKER_B) last = m;
+            }
+            uint8_t first = (last == rta::dsp::DOP_MARKER_A) ? rta::dsp::DOP_MARKER_B
+                                                            : rta::dsp::DOP_MARKER_A;
+            rta::audio::append_dop_silence_frames(pend, outCh, needFrames, first);
+        };
         rta::render::render_loop(*sink, rl);
 
         RQ.abort.store(true); RQ.cv.notify_all();
@@ -4421,7 +4659,7 @@ static void migrate_legacy_state_files() {
     // 2026-10-25（用户报「改完文件夹重启又回归」的第二个根因，实测已复现）：
     // 开发机上 exe 目录是 build-mac/ —— 那里残留的旧配置会被当成「老用户数据」搬进
     // 正式配置目录，把用户刚改的设置**覆盖回去**。日志里抓到过：
-    //   MIGRATE 旧位置 → config_dir：3 项；from=/Users/august/Downloads/DQ/RLPlayer/build-mac
+    //   MIGRATE 旧位置 → config_dir：3 项；来源为旧构建目录
     // 而且每次重新编译，build-mac 里又会产生新的旧文件 ⟹ 用户感觉「一直在被重置」。
     //
     // 判据：**只有"看起来像正式安装目录"才做迁移**。开发构建目录一律跳过：
@@ -5830,7 +6068,7 @@ static void upnp_queue_thread(PlayParams pInit, size_t startIdx) {
         }
         if (ps.stop.load() || !g_upnpPlayer.load()) return;
         if (!st.endedNaturally) {
-            if (!st.error.empty()) upnp_mark_player_state(cur.path, false, st.error);
+            if (!st.error.empty()) upnp_mark_player_state(cur.path, false, st.error, pInit.upnpDev);
             play_log("CAST_END natural=0 file=" + cur.path + " error=\"" + st.error + "\"");
             g_upnpQueueActive.store(false);
             g_upnpPlayer.store(false);
@@ -5861,7 +6099,7 @@ static void upnp_queue_thread(PlayParams pInit, size_t startIdx) {
         queue_save();
         if (nextItem.cs >= 0.0) {
             const std::string cerr = "UPnP 投放不支持 CUE 分轨（渲染器只能播整个文件），请切到本地后端";
-            upnp_mark_player_state(nextItem.path, false, cerr);
+            upnp_mark_player_state(nextItem.path, false, cerr, pInit.upnpDev);
             play_log("CAST_AUTO_REJECT cue file=" + nextItem.path);
             g_upnpQueueActive.store(false);
             g_upnpPlayer.store(false);
@@ -5879,7 +6117,7 @@ static void upnp_queue_thread(PlayParams pInit, size_t startIdx) {
             return;
         }
         if (!started) {
-            upnp_mark_player_state(nextItem.path, false, err);
+            upnp_mark_player_state(nextItem.path, false, err, pNext.upnpDev);
             play_log("CAST_AUTO_FAIL index=" + std::to_string(idx) +
                      " file=" + nextItem.path + " error=\"" + err + "\"");
             g_upnpQueueActive.store(false);
@@ -5889,7 +6127,7 @@ static void upnp_queue_thread(PlayParams pInit, size_t startIdx) {
             return;
         }
         cur = nextItem;
-        upnp_note_started(cur.path);
+        upnp_note_started(cur.path, pNext.upnpDev);
         ps.outRate = 0;
         ps.outBits = 0;
         ps.played.store(0);
@@ -7412,7 +7650,7 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
                 ps.stopJoin();                 // 若之前是本地播放或旧投放推进线程，先停（协作式，绝不 force-kill）
                 std::string err;
                 if (!upnp_start_track(p, tgt.path, err)) {
-                    upnp_mark_player_state(tgt.path, false, err);
+                    upnp_mark_player_state(tgt.path, false, err, p.upnpDev);
                     ps.playing.store(false);
                     ps.paused.store(false);
                     g_upnpQueueActive.store(false);
@@ -7421,7 +7659,7 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
                 }
                 g_upnpPlayer.store(true);
                 g_upnpQueueActive.store(true);
-                upnp_note_started(tgt.path);
+                upnp_note_started(tgt.path, p.upnpDev);
                 ps.outRate = 0;
                 ps.outBits = 0;
                 ps.played.store(0);
@@ -8225,7 +8463,7 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
         if (p.backend == "upnp") {
             std::string err;
             if (!upnp_start_track(p, p.file, err)) {
-                upnp_mark_player_state(p.file, false, err);
+                upnp_mark_player_state(p.file, false, err, p.upnpDev);
                 ps.playing.store(false);
                 ps.paused.store(false);
                 g_upnpQueueActive.store(false);
@@ -8234,7 +8472,7 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
             }
             g_upnpPlayer.store(true);
             g_upnpQueueActive.store(true);
-            upnp_note_started(p.file);
+            upnp_note_started(p.file, p.upnpDev);
             ps.outRate = 0;
             ps.outBits = 0;
             ps.paused.store(false);
@@ -9452,7 +9690,7 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
                 const std::string cerr = "UPnP 投放不支持 CUE 分轨（渲染器只能播整个文件），请切到本地后端";
                 if (rta::net::CastManager::instance().get_state().running)
                     rta::net::CastManager::instance().stop();
-                upnp_mark_player_state(targetItem.path, false, cerr);
+                upnp_mark_player_state(targetItem.path, false, cerr, p.upnpDev);
                 ps.playing.store(false);
                 ps.paused.store(false);
                 g_upnpQueueActive.store(false);
@@ -9461,7 +9699,7 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
             }
             std::string err;
             if (!upnp_start_track(p, targetItem.path, err)) {
-                upnp_mark_player_state(targetItem.path, false, err);
+                upnp_mark_player_state(targetItem.path, false, err, p.upnpDev);
                 ps.playing.store(false);
                 ps.paused.store(false);
                 g_upnpQueueActive.store(false);
@@ -9470,7 +9708,7 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
             }
             g_upnpPlayer.store(true);
             g_upnpQueueActive.store(true);
-            upnp_note_started(targetItem.path);
+            upnp_note_started(targetItem.path, p.upnpDev);
             ps.outRate = 0;
             ps.outBits = 0;
             ps.paused.store(false);
@@ -9497,13 +9735,20 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
                                       rq.path.find("rescan=1") != std::string::npos);
             rta::net::UpnpDiscoverDiag ddiag;
             auto devs = rta::net::CastManager::instance().get_devices(forceRescan, &ddiag);
+            std::string apDiag;
+            const auto apDevs = rta::net::CastManager::instance().get_airplay_devices(forceRescan, &apDiag);
             rta::diag::diag_emit("upnp.discovery",rta::diag::Stage::Upnp,
                 devs.empty()?rta::diag::find_code("upnp.no_renderer"):nullptr,
                 {{"devices",std::to_string(devs.size()),rta::diag::KvKind::Num},
                  {"sent",std::to_string(ddiag.msgs_sent),rta::diag::KvKind::Num},
-                 {"replies",std::to_string(ddiag.replies),rta::diag::KvKind::Num}});
+                 {"replies",std::to_string(ddiag.replies),rta::diag::KvKind::Num},
+                 {"airplay",std::to_string(apDevs.size()),rta::diag::KvKind::Num}});
+            // 1.1.2：AirPlay 接收器与 UPnP 渲染器放进**同一个**"推送到设备"列表。
+            // 前端用 location 当下拉 value，所以 AirPlay 也用 location 承载标识（airplay://host:port/id），
+            // 这样不需要改 castDevValue()/castDevLabel() 的取值逻辑。
+            const size_t nTotal = devs.size() + apDevs.size();
             std::ostringstream j;
-            j << "{\"ok\":true,\"n\":" << devs.size() << ",\"devices\":[";
+            j << "{\"ok\":true,\"n\":" << nTotal << ",\"devices\":[";
             for (size_t i = 0; i < devs.size(); ++i) {
                 if (i) j << ",";
                 // WebUI 的 castDevValue() 取 location 作为下拉 value（直连描述 URL 比按名字匹配可靠），
@@ -9518,6 +9763,35 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
                   << ",\"avTransportUrl\":\"" << jesc(devs[i].av_transport_url()) << "\""
                   << ",\"connectionManagerUrl\":\"" << jesc(devs[i].connection_manager_url()) << "\""
                   << ",\"hasAVTransport\":" << (!devs[i].control.empty() ? "true" : "false")
+                  << ",\"kind\":\"upnp\""
+                  << "}";
+            }
+            for (size_t i = 0; i < apDevs.size(); ++i) {
+                if (!devs.empty() || i) j << ",";
+                const auto& a = apDevs[i];
+                // 模型串只写**事实**（协议/采样率/是否要求加密），不写"高保真"这类营销词。
+                std::string model = std::string("AirPlay") + (a.model.empty() ? "" : (" · " + a.model)) +
+                                    " · " + std::to_string(a.sampleRate) + " Hz/" +
+                                    std::to_string(a.sampleSize) + " bit";
+                if (a.needsEncryption) model += " · 需加密(暂不支持)";
+                if (a.password) model += " · 需密码(暂不支持)";
+                if (!a.supportsAlac) model += " · 未声明 ALAC(暂不支持)";
+                const std::string endpointHost = a.host.find(':') == std::string::npos ? a.host : "[" + a.host + "]";
+                j << "{\"name\":\"" << jesc(a.name) << "\""
+                  << ",\"friendlyName\":\"" << jesc(a.name) << "\""
+                  << ",\"model\":\"" << jesc(model) << "\""
+                  << ",\"host\":\"" << jesc(a.host) << "\""
+                  << ",\"port\":" << a.port
+                  // 只用 host:port 作为标识：id 里带空格/中文，经表单往返容易变形；
+                  // 同一地址上本来也只可能有一个接收器，host:port 足够稳定且可比较。
+                  << ",\"location\":\"airplay://" << jesc(endpointHost) << ":" << a.port << "\""
+                  << ",\"kind\":\"airplay\""
+                  << ",\"needsEncryption\":" << (a.needsEncryption ? "true" : "false")
+                  << ",\"hasPublicKey\":" << (a.hasPublicKey ? "true" : "false")
+                  << ",\"supportsPlaintext\":" << (a.supportsPlaintext ? "true" : "false")
+                  << ",\"supportsAlac\":" << (a.supportsAlac ? "true" : "false")
+                  << ",\"password\":" << (a.password ? "true" : "false")
+                  << ",\"hasAVTransport\":true"
                   << "}";
             }
             // diag/hint：空列表必须能说清"为什么"。字段名与 /api/upnp 保持一致。
@@ -9529,9 +9803,12 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
               << ",\"replies\":" << ddiag.replies
               << ",\"describeFailed\":" << ddiag.describe_failed
               << ",\"note\":\"" << jesc(ddiag.note) << "\"}";
-            if (devs.empty()) {
-                j << ",\"hint\":\"" << jesc(upnp_empty_hint(ddiag)) << "\"";
+            if (nTotal == 0) {
+                std::string hint = upnp_empty_hint(ddiag);
+                if (!apDiag.empty()) hint += "；AirPlay：" + apDiag;
+                j << ",\"hint\":\"" << jesc(hint) << "\"";
             }
+            j << ",\"airplayDiag\":\"" << jesc(apDiag) << "\"";
             j << "}";
             return j.str();
         }
@@ -9568,12 +9845,17 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
               << ",\"sampleRate\":" << st.sampleRate
               << ",\"bits\":" << st.bits
               << ",\"paused\":" << (st.paused ? "true" : "false")
+              << ",\"volumeSupported\":" << (st.volumeSupported ? "true" : "false")
+              << ",\"currentVolume\":" << st.currentVolume
+              << ",\"lastVolumeError\":\"" << jesc(st.lastVolumeError) << "\""
               << "}";
             return j.str();
         }
         if (rq.path.rfind("/api/cast/start", 0) == 0) {
             if (rq.method != "POST") return "{\"ok\":false,\"error\":\"Method Not Allowed\"}";
             rta::net::CastStartParams p;
+            double initialVolDb = 1.0;
+            bool hasInitialVol = false;
             // body 同时支持 JSON 与 k=v&k=v（照历史实现；WebUI 用空 body 表单风格）
             if (!rq.body.empty() && rq.body.front() == '{') {
                 auto j = rta::net::json_parse(rq.body);
@@ -9584,6 +9866,8 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
                 if (j.has("bits")) p.bits = (int)j["bits"].n();
                 if (j.has("seconds")) p.seconds = j["seconds"].n();
                 if (j.has("dop")) p.dop = (j["dop"].type == rta::net::Json::Bool) ? j["dop"].b : (j["dop"].n() != 0.0);
+                if (j.has("volume")) { initialVolDb = j["volume"].n(); hasInitialVol = true; }
+                else if (j.has("volDb")) { initialVolDb = j["volDb"].n(); hasInitialVol = true; }
             } else {
                 std::istringstream is(rq.body);
                 std::string tok;
@@ -9599,6 +9883,7 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
                     else if (k == "bits") p.bits = std::atoi(v.c_str());
                     else if (k == "seconds") p.seconds = std::atof(v.c_str());
                     else if (k == "dop") p.dop = (v == "1" || v == "true");
+                    else if (k == "volume" || k == "volDb") { initialVolDb = std::atof(v.c_str()); hasInitialVol = true; }
                 }
             }
             if (p.port == 0) p.port = 8912;
@@ -9609,13 +9894,37 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
             ps.stopJoin();      // 原子停线程
             ps.playing.store(false);
             ps.paused.store(false);
+            const double chosenInitialDb = hasInitialVol ? initialVolDb : ps.volDb.load();
+            p.initialVolumeDb = std::isfinite(chosenInitialDb) ? std::clamp(chosenInitialDb, -144.0, 0.0) : -20.0;
+            rta::net::CastManager::instance().stop();
             auto res = rta::net::CastManager::instance().start(p);
             if (!res.ok) {
                 // 铁律：不假装成功 —— 真实原因原样透给前端
                 return "{\"ok\":false,\"error\":\"" + jesc(res.error) + "\"}";
             }
             g_upnpPlayer.store(true);
-            upnp_note_started(p.file);
+            g_upnpQueueActive.store(true);
+            upnp_note_started(p.file, p.dev);
+            if (hasInitialVol && initialVolDb <= 0.0) {
+                rta::net::CastManager::instance().set_volume_db(initialVolDb);
+            } else if (ps.volDb.load() <= 0.0) {
+                rta::net::CastManager::instance().set_volume_db(ps.volDb.load());
+            }
+            ps.paused.store(false);
+            ps.playing.store(true);
+            PlayParams pp = params_snapshot();
+            pp.upnpDev = p.dev;
+            pp.file = p.file;
+            pp.backend = "upnp";
+            size_t qIndex = 0;
+            {
+                std::lock_guard<std::mutex> lk(g_q.mtx);
+                qIndex = g_q.index;
+            }
+            ps.restart([pp, qIndex, rid=rta::diag::current_rid()] {
+                rta::diag::ScopedRid diagRid(rid);
+                upnp_queue_thread(pp, qIndex);
+            });
             return "{\"ok\":true,\"started\":true,\"phase\":\"discovering\"}";
         }
         if (rq.path.rfind("/api/cast/stop", 0) == 0) {
@@ -10202,7 +10511,26 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
               << ",\"mixFmt\":\"" << jesc(d.mixFmt) << "\""
               << ",\"rates\":[";
             for (size_t i = 0; i < dc.rates.size(); ++i) { if (i) j << ","; j << dc.rates[i]; }
-            j << "],\"dopCarrierRate\":" << dc.dopCarrierRate << "}";
+            j << "],\"dopCarrierRate\":" << dc.dopCarrierRate
+              // ---- 1.1.2 AirPlay 输出适配（AP-1.1/1.2/1.3/1.4）：传输类型与可读延迟 ----
+              // 纪律（用户 2026-10-31 路线图）：① 按 CoreAudio transport 判类型，**不按设备名**；
+              // ② 延迟只能来自系统属性并注明来源，**绝不写死 2 秒**；读不到就 latencyKnown=false；
+              // ③ AirPlay 的端到端 bit-perfect 未获验证 ⟹ bitPerfectCapable 恒 false；
+              // ④ DoP/Native 能力在 AirPlay 上已被平台层清零，这里只如实转发。
+              << ",\"transportType\":" << dc.transportType
+              << ",\"transport\":\"" << jesc(dc.transport) << "\""
+              << ",\"sharedOnly\":" << (dc.sharedOnly ? "true" : "false")
+              << ",\"latencyKnown\":" << (dc.latencyKnown ? "true" : "false")
+              << ",\"latencyMs\":" << dc.latencyMs
+              << ",\"latencySource\":\"" << jesc(dc.latencySource) << "\""
+              << ",\"currentRate\":" << dc.currentRate
+              << ",\"currentChannels\":" << dc.currentChannels
+              << ",\"currentBufferFrames\":" << dc.currentBufferFrames
+              << ",\"bitPerfectCapable\":" << (dc.bitPerfectCapable ? "true" : "false")
+              << ",\"supportsHog\":" << (dc.exclusiveMode ? "true" : "false")
+              << ",\"dsd\":\"" << (dc.dsd == rta::platform::DsdTransport::DoP ? "dop"
+                                       : (dc.dsd == rta::platform::DsdTransport::Native ? "native" : "none")) << "\""
+              << "}";
         }
         j << "]}";
         return j.str();
@@ -10754,6 +11082,29 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
 
     if (rq.path.rfind("/api/signal", 0) == 0) {
         ct = "application/json; charset=utf-8";
+        const auto cs = rta::net::CastManager::instance().get_state();
+        if (cs.running) {
+            const bool ap = rta::net::CastManager::is_airplay_dev(cs.device);
+            std::ostringstream live;
+            live << "{\"ok\":true,\"path\":{\"src\":\"" << jesc(cs.sourceFile) << "\""
+                 << ",\"codec\":\"" << jesc(rta::audio::lowerExt(cs.sourceFile)) << "\""
+                 << ",\"inRate\":" << cs.sourceRate << ",\"inBits\":" << cs.sourceBits
+                 << ",\"inCh\":" << cs.sourceChannels << ",\"dur\":" << cs.durationSec
+                 << ",\"outRate\":" << cs.sampleRate << ",\"outBits\":" << cs.bits
+                 << ",\"outCh\":" << (ap ? 2 : cs.sourceChannels)
+                 << ",\"device\":\"" << jesc(cs.device) << "\""
+                 << ",\"transport\":\"" << (ap ? "airplay" : "upnp") << "\""
+                 << ",\"outMode\":\"" << (ap ? "airplay" : "upnp") << "\""
+                 << ",\"sharedOnly\":true,\"bitPerfect\":\"no\""
+                 << ",\"bitPerfectWhy\":\"Remote output has not been verified bit-for-bit\""
+                 << ",\"latencyKnown\":" << (cs.latencyKnown ? "true" : "false")
+                 << ",\"latencyMs\":" << cs.latencyMs
+                 << ",\"latencySource\":\"" << jesc(cs.latencySource) << "\""
+                 << ",\"resample\":" << (cs.resampled ? "true" : "false")
+                 << ",\"volume\":" << cs.currentVolumeDb
+                 << ",\"note\":\"" << jesc(cs.warning) << "\"}}";
+            return live.str();
+        }
         std::lock_guard<std::mutex> lk(ps.mtx);
         if (ps.signal.empty()) return "{\"ok\":false}";
         const long long dspCnt = ps.dspChunks.load();
@@ -10839,7 +11190,8 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
             std::lock_guard<std::mutex> lk(g_paramsMtx);
             g_params.volume = db;
         }
-        if (g_upnpPlayer.load()) {
+        const auto castStVol = rta::net::CastManager::instance().get_state();
+        if (g_upnpPlayer.load() || castStVol.running) {
             if (!rta::net::CastManager::instance().volume_supported()) {
                 return "{\"ok\":false,\"upnp\":true,\"error\":\"该渲染器未提供 RenderingControl 服务，无法调整音量（请在渲染器端调节）\"}";
             }
@@ -10863,8 +11215,11 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
         if (frac > 1.0) frac = 1.0;
         // 后端 = UPnP（261024-01 #9）：进度条跳转转交投放会话（worker 里发 AVTransport Seek REL_TIME）。
         // 时长未知（渲染器还没报）时不瞎跳，如实返回。
-        if (g_upnpPlayer.load()) {
-            const auto st = rta::net::CastManager::instance().get_state();
+        const auto st = rta::net::CastManager::instance().get_state();
+        if (g_upnpPlayer.load() || st.running) {
+            if (st.running && rta::net::CastManager::is_airplay_dev(st.device)) {
+                return "{\"ok\":false,\"error\":\"AirPlay 投放暂不支持拖动进度\",\"airplay\":true}";
+            }
             if (st.running && st.durationSec > 0.0) {
                 rta::net::CastManager::instance().seek_seconds(frac * st.durationSec);
                 return "{\"ok\":true,\"upnp\":true}";
@@ -10881,7 +11236,8 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
         const size_t q = rq.path.find("?on=");
         if (q != std::string::npos) on = atoi(rq.path.c_str() + q + 4);
         // 后端 = UPnP：暂停 / 继续转交投放会话（AVTransport Pause / Play）
-        if (g_upnpPlayer.load()) {
+        const auto st = rta::net::CastManager::instance().get_state();
+        if (g_upnpPlayer.load() || st.running) {
             rta::net::CastManager::instance().set_paused(on != 0);
             return std::string("{\"ok\":true,\"paused\":") + ((on != 0) ? "true" : "false") + ",\"upnp\":true}";
         }
@@ -10918,13 +11274,13 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
         ct = "application/json; charset=utf-8";
         // 261024-01 #9：后端 = UPnP 时，播放器状态唯一来源 = 投放会话（一条会话、一个数字），
         // 否则底栏与「投放实时状态」会各显示一套进度，互相打架。
-        rta::net::CastState castSt;
+        rta::net::CastState castSt = rta::net::CastManager::instance().get_state();
         bool castMode = false;
         bool castTransition = false;
-        if (g_upnpPlayer.load()) {
-            castSt = rta::net::CastManager::instance().get_state();
+        if (castSt.running || g_upnpPlayer.load()) {
             if (castSt.running) {
                 castMode = true;
+                g_upnpPlayer.store(true);
             } else if (g_upnpQueueActive.load()) {
                 castMode = true;
                 castTransition = true;
@@ -10935,17 +11291,31 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
                 ps.paused.store(false);
             }
         }
+        // 异步失败（phase=error）时 running 已经是 false，castMode 也随之变 false；
+        // 若不在这里单独记住失败原因，errStat 会退回空的 ps.error ⟹ 界面只剩一句空错误，
+        // 用户根本不知道投放为什么没起来（实测：ANNOUNCE 403 时投放面板报错、底栏一片空白）。
+        const bool castFailed = (castSt.phase == "error" && !castSt.error.empty());
         std::lock_guard<std::mutex> lk(ps.mtx);
         std::ostringstream j;
         const size_t pl2 = ps.played.load(), tt = ps.total.load();
+        const bool isAirPlayCast = castMode && rta::net::CastManager::is_airplay_dev(castSt.device);
         const double pos = castMode ? (castTransition ? 0.0 : castSt.positionSec)
                                     : (ps.outRate > 0 ? (double)pl2 / ps.outRate : 0.0);
-        const double dur = castMode ? (castTransition ? 0.0 : castSt.durationSec)
-                                    : (ps.outRate > 0 ? (double)tt / ps.outRate : 0.0);
-        const bool playingStat = castMode ? true : ps.playing.load();
-        const bool pausedStat = castMode ? (castTransition ? false : castSt.paused) : ps.paused.load();
-        const std::string curStat = castMode ? (castTransition ? ps.current : castSt.sourceFile) : ps.current;
-        const std::string errStat = castMode ? (castTransition ? ps.error : castSt.error) : ps.error;
+        double dur = castMode ? (castTransition ? 0.0 : castSt.durationSec)
+                              : (ps.outRate > 0 ? (double)tt / ps.outRate : 0.0);
+        if (castMode && dur <= 0.0 && ps.outRate > 0 && tt > 0) {
+            dur = (double)tt / ps.outRate;
+        }
+        const bool isCastPlaying = (castSt.phase == "playing" || castSt.phase == "serving");
+        const bool isCastPreparing = (castSt.phase == "connecting" || castSt.phase == "decoding" || castSt.phase == "discovering");
+        const bool playingStat = castMode ? (isCastPlaying || isCastPreparing) : ps.playing.load();
+        const bool pausedStat = castMode ? (castTransition ? false : (castSt.paused || castSt.transportState == "PAUSED" || castSt.transportState == "PAUSED_PLAYBACK")) : ps.paused.load();
+        const std::string curStat = castMode
+            ? (castTransition ? ps.current : (!castSt.sourceFile.empty() ? castSt.sourceFile : ps.current))
+            : ((castFailed && !castSt.sourceFile.empty()) ? castSt.sourceFile : ps.current);
+        const std::string errStat = castMode
+            ? (castTransition ? ps.error : (!castSt.error.empty() ? castSt.error : ps.error))
+            : (castFailed ? castSt.error : ps.error);
         const uint32_t rateStat = castMode ? (castTransition ? 0u : castSt.sampleRate) : ps.outRate;
         const int bitsStat = castMode ? (castTransition ? 0 : castSt.bits) : ps.outBits;
         // 2026-10-24（用户 261024-04 #8）：GPU 语义拆分。组合语义的唯一事实源 =
@@ -11011,8 +11381,8 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
           << ",\"scanMs\":" << Library::instance().lastScanMs()
           // 2026-10-23（用户 261023-02 #1）：status 也带上 bit-perfect 结论，
           // 让底栏徽标不用额外请求 /api/signal 就能显示（轮询已经是 400ms 一次）。
-          << ",\"bitPerfect\":\"" << jesc(ps.bpState) << "\""
-          << ",\"bitPerfectWhy\":\"" << jesc(ps.bpWhy) << "\""
+          << ",\"bitPerfect\":\"" << jesc(castMode ? "no" : ps.bpState) << "\""
+          << ",\"bitPerfectWhy\":\"" << jesc(castMode ? (isAirPlayCast ? "AirPlay 投放：44100 Hz / 16 bit ALAC，端到端逐位未获验证" : "UPnP 投放：源文件按原采样率供源，渲染器侧是否重采样由对方决定（本机 DSP 未介入）") : ps.bpWhy) << "\""
           // ---- 输出格式自证（2026-10-26 F-5，mac 口径）----
           // 为什么底栏只拿到 outRate 会误判：DoP 的 outRate 是**载波率**
           // （DSD128/48k 族 = 6144000/16 = 384000），和"PCM 升频到 384k"数字完全一样。
@@ -11026,7 +11396,7 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
           //   modFamily    调制器族（PCM / DirectSDM 直通 = 空）
           //   modOrder     **实际生效**阶数（降阶保护后的值，不是用户填的值）
           //   fallbackWhy  非空 = 与用户请求不一致的中文原因（空 = 没降级）
-          << ",\"outMode\":\"" << jesc(ps.outMode) << "\""
+          << ",\"outMode\":\"" << jesc(castMode ? (isAirPlayCast ? "airplay" : "upnp") : ps.outMode) << "\""
           << ",\"hogRequested\":" << (castMode ? "false" : (ps.hogRequested.load() ? "true" : "false"))
           << ",\"hogAcquired\":" << (castMode ? "false" : (ps.hogAcquired.load() ? "true" : "false"))
           << ",\"dsd\":" << ps.outDsdLevel
@@ -11034,9 +11404,20 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
           << ",\"carrierRate\":" << ps.outCarrierRate
           << ",\"modFamily\":\"" << jesc(ps.outModFamily) << "\""
           << ",\"modOrder\":" << ps.outModOrder
-          << ",\"fallbackWhy\":\"" << jesc(ps.outFallbackWhy) << "\""
+          << ",\"fallbackWhy\":\"" << jesc(castMode ? (isAirPlayCast ? "AirPlay 投放：44100 Hz / 16 bit ALAC 网络推流（非 bit-perfect）" : "UPnP 投放：输出格式与采样率由远端渲染器决定（本机 DSP 未介入，无法自证）") : ps.outFallbackWhy) << "\""
+          << ",\"transport\":\"" << jesc(castMode ? (isAirPlayCast ? "airplay" : "upnp") : ps.outTransport) << "\""
+          << ",\"sharedOnly\":" << (castMode ? "true" : (ps.outSharedOnly ? "true" : "false"))
+          << ",\"latencyKnown\":" << (castMode ? (castSt.latencyKnown ? "true" : "false") : (ps.outLatencyKnown ? "true" : "false"))
+          << ",\"latencyMs\":" << (castMode ? castSt.latencyMs : ps.outLatencyMs)
+          << ",\"latencySource\":\"" << jesc(castMode ? castSt.latencySource : ps.outLatencySource) << "\""
+          << ",\"castMode\":" << (castMode ? "true" : "false")
+          << ",\"castPhase\":\"" << jesc(castMode ? castSt.phase : "") << "\""
+          << ",\"castDevice\":\"" << jesc(castMode ? castSt.device : "") << "\""
+          << ",\"transportState\":\"" << jesc(castMode ? castSt.transportState : "") << "\""
           << ",\"upnpVolumeSupported\":" << (castMode ? (castSt.volumeSupported ? "true" : "false") : "false")
-          << ",\"upnpVolume\":" << (castMode ? castSt.currentVolume : -1);
+          << ",\"upnpVolume\":" << (castMode ? castSt.currentVolume : -1)
+          << ",\"castVolumeSupported\":" << (castMode ? (castSt.volumeSupported ? "true" : "false") : "false")
+          << ",\"castVolume\":" << (castMode ? castSt.currentVolume : -1);
         const MetaSettings msStat = meta_settings_load();
         bool hasKeyStat = false;
         {

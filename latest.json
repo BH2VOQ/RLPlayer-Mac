@@ -1,8 +1,8 @@
 {
-  "version": "1.1.1.5-beta2",
-  "notes": "Beta 1.1.1.5-beta2: decouple directory change detection from individual metadata probe failures so unreadable audio files no longer trigger whole-library rescans on every launch; failed metadata entries are tracked in a bounded retry queue with backoff while preserving valid tags and directory fingerprints. · 测试版 1.1.1.5-beta2：解耦目录完整性与单文件元数据探测，不可读音频不再导致每次启动整库重扫；失败项保留有效标签并进入退避重试队列，目录指纹正常落地。",
-  "download_url": "https://github.com/BH2VOQ/RLPlayer-Mac/releases/download/v1.1.1.5-beta2/RLPlayer-1.1.1.5-beta2-macOS-arm64.dmg",
-  "sha256": "7c9d37fa56e6e782478fe3dffb86bab93951758b85cfe05f61fc36fec8021f7d",
-  "size": 7857011,
-  "published_at": "2026-11-01T18:03:29Z"
+  "version": "1.1.2",
+  "notes": "AirPlay receiver discovery and direct RAOP casting; corrected cast status, clock synchronization and DSD/DoP playback reliability. · 新增 AirPlay 接收器发现与应用内 RAOP 投放，修正投放状态、时钟同步及 DSD/DoP 播放可靠性。",
+  "download_url": "https://github.com/BH2VOQ/RLPlayer-Mac/releases/download/v1.1.2/RLPlayer-1.1.2-macOS-arm64.dmg",
+  "sha256": "cf99128ae828d7e103f3a16f2cbc255cfb27c279b4fc2e3af1906b1bdd2104a0",
+  "size": 8046773,
+  "published_at": "2026-11-04T04:00:00Z"
 }

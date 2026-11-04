@@ -321,7 +321,7 @@ add_test(NAME gpu_precision COMMAND test_gpu_precision)
 
 ```bash
 CM=/private/tmp/cmake-3.31.6-macos-universal/CMake.app/Contents/bin
-cd /Users/august/Downloads/DQ/RLPlayer
+cd <repo>
 
 # 独立目录，不碰 build-mac（主控独占）
 mkdir -p build-gpuprec

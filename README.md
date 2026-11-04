@@ -23,7 +23,7 @@
 <p align="center">
   <b>HiFi signal chain · upsampling · noise shaping · SDM/DSD · convolution · 20-band PEQ</b>
 
-  <sub>Every step comes with a reproducible measurement, not “I think it sounds better”.</sub>
+  <sub>Measured DSP results and validation limits are documented separately; playback alone is not a fidelity measurement.</sub>
 
   <sub>Current version follows the Release badge above · <a href="ROADMAP-1.1.x.md">Roadmap</a> · <a href="https://github.com/BH2VOQ/RLPlayer-Mac/releases">Changelog</a></sub>
 </p>
@@ -77,7 +77,9 @@ This chain is not an illustration: every item is visible with the actual values 
 - **CoreAudio exclusive (Hog)** — AUHAL + Hog preemption + physical format lock, avoiding resampling by the system mixer; reports real `DeviceBusy` and blocking PID on collision instead of misleading format errors
 - **CoreAudio shared** — the fallback when exclusive mode is unavailable; `bit_perfect()` explicitly returns false and says so; 16/24/32-bit measured deviation **0 LSB**
 - **DoP** — DSD wrapped in a 24-bit carrier, the only DSD output path on macOS; in DoP mode it never silently falls back to shared
-- **UPnP / DLNA** — real SSDP discovery + AVTransport control + local serving; seamless track switching while casting, instant button feedback (<100 ms) with automatic error reversion; served byte count is **byte-identical to the file**
+- **UPnP / DLNA** — SSDP discovery, AVTransport control and local file serving; track changes, playback state and errors follow the remote session. Source sample rate and bit depth are retained unless conversion is requested; the receiver may apply its own processing.
+- **AirPlay receivers in “Cast to device”** — discover compatible AirPlay 1 / RAOP receivers directly, without changing the macOS system output. This sender uses ALAC at **44.1 kHz / 16 bit / stereo**, with explicit conversion disclosure, clock synchronization and bounded packet retransmission. AirPlay 2 pairing/multi-room, password authentication and encrypted-only receivers are not supported. AirPlay output is **not advertised as end-to-end bit-perfect**.
+- **System AirPlay output** — CoreAudio transport-based detection, shared output without Hog, reported latency with its source, and explicit refusal of DoP/Native DSD. A DSD source can be decoded to PCM when PCM output is selected.
 - **Null** — runs the DSP without opening a device; all offline tests and automated checks go through it
 - **Three official presets** — bit-perfect passthrough / PCM upsampling / DSD upsampling (the backend also supports a fourth, PCM→DSD); the recommended preset is computed live from the current device's capabilities, with the downgrade reason stated
 
@@ -245,14 +247,14 @@ The functionality stays available and numerically correct (worst convolution cas
 
 ## 🗺 Roadmap
 
-> **1.1.1.4** is the current stable release; the actual released version follows the Release badge above. 1.1.2 onward is planned; the full criteria, split lines and open items are in
+> The current version follows the Release badge above. **1.1.2** adds AirPlay casting and DSD reliability fixes; 1.1.3 onward is planned. The full criteria, validation limits and open items are in
 > **[ROADMAP-1.1.x.md](ROADMAP-1.1.x.md)**.
 
 | Version   | Theme                                                              | Status     |
 | --------- | ------------------------------------------------------------------ | ---------- |
 | **1.1.0** | Baseline release                                                   | ✅ Released |
 | **1.1.1** | Diagnostics, streaming overhaul, bilingual UI & cast/PEQ fixes     | ✅ Released |
-| **1.1.2** | **AirPlay output support** + DSD playback reliability hotfix (formerly 1.1.1.3) | 🧭 Planned |
+| **1.1.2** | **AirPlay receiver discovery / casting** + DSD playback reliability | Release candidate |
 | **1.1.3** | LLM model list                                                     | 🧭 Planned  |
 | **1.1.4** | Audio analysis on the track page (three-level folding / true peak / multichannel) | 🧭 Planned |
 | **1.1.5** | Library lookup (album context / asynchronous knowledge)            | 🧭 Planned  |
@@ -292,7 +294,7 @@ flowchart TB
 ## Known limitations
 
 - **Native DSD is unavailable** — CoreAudio defines PCM only and has no native DSD path; `dsdnative=1` reports an explicit error instead of silently downgrading. DSD works only through DoP
-- **AirPlay is not supported yet** — planned for **1.1.2**; the device list does not currently distinguish AirPlay from local sound cards, so choosing AirPlay does not mean it has been verified
+- **AirPlay compatibility** — the app's sender targets plaintext AirPlay 1 / RAOP receivers at 44.1 kHz / 16 bit / stereo. AirPlay 2 pairing/multi-room, password authentication and encrypted-only receivers are not supported; direct casting currently has no seek. Receiver processing and network loss prevent a general end-to-end bit-perfect promise. Final release changes are verified with silent loopback receivers; long-duration listening, network switching and sleep/resume are not claimed as tested.
 - **UPnP casting cannot play CUE-split tracks** — a renderer can only stream discrete files; clicking a CUE track during cast explicitly reports an error rather than falling back silently
 - **The room measurement wizard is currently hidden** — 7 transport-layer defects are fixed; the wizard and real microphone measurement are planned for **1.2.0**; the existing manual “EQ file / room correction IR” loading still works
 - **Hog is not exclusive kernel audio** — Hog takes over the device but does not block I/O from other processes; the real bit-perfect guarantee comes from the physical format lock
@@ -323,7 +325,7 @@ See the [development roadmap](ROADMAP-1.1.x.md) for unfinished features and acce
 
 ## Project origin
 
-This repository is an **independent macOS branch of RLPlayer**: the platform layer (audio output, GPU, window shell) has been rewritten against native macOS capabilities and **no longer merges with upstream**; version numbers start independently from `1.0.0`, and the current version follows the Release badge above (current stable version is 1.1.1.4).
+This repository is an **independent macOS branch of RLPlayer**: the platform layer (audio output, GPU, window shell) has been rewritten against native macOS capabilities and **no longer merges with upstream**; version numbers start independently from `1.0.0`, and the current version follows the Release badge above .
 
 Upstream repository (Windows edition): **<https://github.com/okhuoyanyan/RLPlayer2>**
 

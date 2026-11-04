@@ -528,9 +528,9 @@ class UpnpControlClient {
 public:
     UpnpControlClient() = default;
     // ifname：把 SOAP 请求钉在发现到设备的那张网卡上（"en1"；空 = 系统选路）。
-    // 2026-10-28 真机：本机 Internet 共享造出同网段的 bridge100 后，路由把
-    // 192.168.3.0/24 标成 REJECT ⟹ 不钉网卡的 SOAP 直接 EHOSTUNREACH，
-    // 界面上就是"设备搜到了，但一点播放就报连接失败"。
+    // 当系统存在虚拟网卡导致同网段路由被异常重定向或标为 REJECT 时，
+    // 不钉网卡的 SOAP 可能直接 EHOSTUNREACH，
+    // 界面上表现为"设备搜到了，但一点播放就报连接失败"。
     UpnpControlClient(std::string avTransportUrl, std::string connectionManagerUrl = "",
                       std::string renderingControlUrl = "", std::string ifname = "")
         : avTransportUrl_(std::move(avTransportUrl)),

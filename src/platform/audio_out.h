@@ -91,6 +91,17 @@ struct DeviceCaps {
     double minBufferMs = 0.0;           // 缓冲下限（0 = 未测量）
     double maxBufferMs = 0.0;           // 缓冲上限（0 = 未测量）
     size_t minPeriodFrames = 0;         // 设备最小周期（帧；0 = 未测量）
+
+    // 1.1.2 扩展：传输类型与延迟信息（AP-1.1 ~ AP-1.8）
+    uint32_t transportType = 0;         // CoreAudio FourCC (如 'airp', 'usb ', 'bltn' 等；0 = 未知)
+    std::string transport = "unknown";  // 传输类型名称 ("airplay", "usb", "builtin", "bluetooth", "aggregate", "unknown" 等)
+    bool sharedOnly = false;            // 是否仅支持共享模式（AirPlay 为 true，不可申请 Hog 独占）
+    bool latencyKnown = false;          // 延迟是否可信已知（非固定 2s 假数据）
+    double latencyMs = 0.0;             // 延迟毫秒数（未知为 0.0）
+    std::string latencySource = "none"; // 延迟数值来源说明（属性名与组成说明；未知为 "none" 或 "unknown"）
+    uint32_t currentRate = 0;           // 设备当前硬件采样率（未知 0，而不是假 44100）
+    int currentChannels = 0;            // 设备当前硬件输出声道数（未知 0，而不是假 2ch）
+    size_t currentBufferFrames = 0;     // 设备当前硬件缓冲帧数（未知 0）
 };
 
 // 开流参数
@@ -123,6 +134,10 @@ struct OpenSpec {
     //
     // 默认 false：默认不抢 Hog，保证用户开箱就能用系统音量（见 make_sink 的映射）。
     bool exclusive = false;
+
+    // 1.1.2 扩展：DoP 承载标记（供主控 CoreAudioSink 接线与平台层前置拦截）
+    // AirPlay 或 shared 模式下若 dop=true 必须在任何写硬件前明确拒绝
+    bool dop = false;
 };
 
 // ---------------------------------------------------------------------------

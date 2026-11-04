@@ -181,13 +181,13 @@ int main() {
 
         rta::diag::CrashEvidence dump;
         dump.crash_dump = true;
-        dump.crash_dump_path = "/Users/august/Library/Logs/DiagnosticReports/RLPlayer-1.ips";
+        dump.crash_dump_path = "/Users/tester/Library/Logs/DiagnosticReports/RLPlayer-1.ips";
         const auto crashed = rta::diag::classify_marker(raw, dump, false);
         ck(crashed.kind == rta::diag::UncleanKind::Crashed, "D2 有崩溃转储 → Crashed");
         ck_eq(crashed.reason_class(), "unclean_crashed", "D3 reason_class=unclean_crashed");
         ck(has(crashed.zh_summary(), "崩溃转储"), "D4 说明里给出证据来源",
            crashed.zh_summary());
-        ck(!has(crashed.zh_summary(), "august"), "D5 证据路径也过脱敏（无用户名）",
+        ck(!has(crashed.zh_summary(), "tester"), "D5 证据路径也过脱敏（无用户名）",
            crashed.zh_summary());
 
         rta::diag::CrashEvidence sig;
@@ -206,7 +206,7 @@ int main() {
         ck_eq(none.reason_class(), "unclean_unknown", "D11 reason_class 稳定");
 
         // 崩溃证据里也不能把用户路径打出去（证据本身要过脱敏）
-        ck(!has(crashed.evidence, "august"), "D12 证据串本身已脱敏", crashed.evidence);
+        ck(!has(crashed.evidence, "tester"), "D12 证据串本身已脱敏", crashed.evidence);
     }
 
     // ---------------------------------------------------------------- E
