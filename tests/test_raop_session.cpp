@@ -1020,6 +1020,28 @@ void test_packet_cache() {
         }
         ck(ordered, "snapshot_in_order returns entries in send order", std::to_string(snap.size()));
         ck(c.size() == 5, "snapshot does not disturb the cache");
+
+        // 写满并绕环之后仍必须是严格发送顺序（下标 0 不再是"最老"）。
+        // 旧实现在这里会把最新几包当最老的先发出，恢复播放时对端收到时间戳逆序的包。
+        RtpPacketCache wrapped(8);
+        for (uint16_t i = 0; i < 20; ++i) {
+            uint8_t bb[2] = {static_cast<uint8_t>(i), 0};
+            wrapped.store(static_cast<uint16_t>(0x3000 + i), 500u + i, bb, sizeof(bb));
+        }
+        std::vector<CachedRtpPacket> wsnap;
+        wrapped.snapshot_in_order(wsnap);
+        bool wrappedOrdered = (wsnap.size() == 8);
+        for (size_t i = 0; wrappedOrdered && i < wsnap.size(); ++i) {
+            // 20 包写进 8 格 ⟹ 存活的是最后 8 个（第 12..19 包 = 0x300C..0x3013），顺序严格递增
+            wrappedOrdered = wsnap[i].sequence == static_cast<uint16_t>(0x300C + i) &&
+                             wsnap[i].timestamp == 500u + 12u + static_cast<uint32_t>(i) &&
+                             !wsnap[i].payload.empty() &&
+                             wsnap[i].payload[0] == static_cast<uint8_t>(12 + i);
+        }
+        ck(wrappedOrdered, "snapshot_in_order stays in send order after the ring wraps",
+           wsnap.empty() ? std::string("empty")
+                         : (std::to_string(wsnap.front().sequence) + ".." +
+                            std::to_string(wsnap.back().sequence)));
     }
 }
 

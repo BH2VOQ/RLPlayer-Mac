@@ -99,11 +99,18 @@ public:
 
     // 按写入顺序（即发送顺序）拷出快照。有界：最多 capacity() 个包。
     // 暂停/恢复重放在途窗口时用它，保证重发顺序与原始发送顺序一致。
+    //
+    // ⚠️ 环形缓冲**写满之后**最老的元素在 next_，不是下标 0：
+    //   旧实现直接取 ring_[0..count_-1]，满载时会把“最新 21 个包”当成最老的先发出去，
+    //   补发顺序因此整体错乱（2026-11-04 十分钟长跑实测：一次恢复后出现 21 个包的跳号）。
+    //   有界快照必须从 next_ 起绕环读，否则恢复播放会把时间戳逆序的包推给接收端。
     void snapshot_in_order(std::vector<CachedRtpPacket>& out) const {
         std::lock_guard<std::mutex> lk(mtx_);
         out.clear();
+        if (ring_.empty() || count_ == 0) return;
         out.reserve(count_);
-        for (size_t i = 0; i < count_; ++i) out.push_back(ring_[i]);
+        const size_t start = (count_ < capacity_) ? 0 : next_;
+        for (size_t i = 0; i < count_; ++i) out.push_back(ring_[(start + i) % capacity_]);
     }
 
     size_t capacity() const {
