@@ -721,6 +721,19 @@ if(NODE_EXECUTABLE)
   set_tests_properties(cast_ui PROPERTIES WORKING_DIRECTORY ${CMAKE_SOURCE_DIR} TIMEOUT 30)
   add_test(NAME cast_contract COMMAND ${NODE_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/check_cast_contract.js)
   set_tests_properties(cast_contract PROPERTIES WORKING_DIRECTORY ${CMAKE_SOURCE_DIR} TIMEOUT 30)
+  # 1.1.3 LLM 模型下拉：有列表 → 下拉标「（当前）」；拉不到 → 手填降级且不改配置；
+  # 选中 → POST /api/llm model=… 。全部 mock fetch，绝不连真实网关。
+  add_test(NAME llm_ui COMMAND ${NODE_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tests/test_llm_ui.js)
+  set_tests_properties(llm_ui PROPERTIES WORKING_DIRECTORY ${CMAKE_SOURCE_DIR} TIMEOUT 30)
+endif()
+
+# i18n 门禁：docs/i18n/*.en.tsv → src/net/i18n_table.h 必须与生成物一致
+#（计划书 §7.2.4 要求 --check 通过；把它变成常驻测试，避免"改了文案忘了重生成"）
+find_program(PYTHON3_EXECUTABLE python3)
+if(PYTHON3_EXECUTABLE)
+  add_test(NAME i18n_table_check
+           COMMAND ${PYTHON3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/gen_i18n_table.py --check)
+  set_tests_properties(i18n_table_check PROPERTIES WORKING_DIRECTORY ${CMAKE_SOURCE_DIR} TIMEOUT 60)
 endif()
 
 add_executable(test_raop_session tests/test_raop_session.cpp)
@@ -1052,6 +1065,21 @@ add_test(NAME dsd_stream_decode COMMAND test_dsd_stream_decode)
 add_executable(test_preset_profiles tests/test_preset_profiles.cpp)
 target_include_directories(test_preset_profiles PRIVATE ${CMAKE_SOURCE_DIR}/src)
 add_test(NAME preset_profiles COMMAND test_preset_profiles)
+
+# ---------------- 1.1.3：投放升频目标率决策（2026-11-04）----------------
+# 纯头文件（src/audio/cast_upsample_plan.h）：表驱动断言「开关/上限/渲染器声明/同族约束/
+# 非法输入/只升不降」的每一种组合，不开设备、不读文件、不碰网络。
+add_executable(test_cast_upsample_plan tests/test_cast_upsample_plan.cpp)
+target_include_directories(test_cast_upsample_plan PRIVATE ${CMAKE_SOURCE_DIR}/src)
+add_test(NAME cast_upsample_plan COMMAND test_cast_upsample_plan)
+
+# ---------------- 1.1.3：LLM 模型列表（2026-11-04）----------------
+# 只测 src/meta/llm.h 的解析 / 缓存 / 脱敏：请求全部走 LlmConfig.transport 的 mock，
+# 绝不连真实网关（用户 key 不进测试、不出网）。
+add_executable(test_llm_models tests/test_llm_models.cpp)
+target_include_directories(test_llm_models PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(test_llm_models PRIVATE ${RL_PLATFORM_LIBS})
+add_test(NAME llm_models COMMAND test_llm_models)
 
 option(RTA_BUILD_LEGACY_TESTS "构建尚未移植到 macOS 的旧测试（缺 POSIX 垫片，默认关闭）" OFF)
 if(RTA_BUILD_LEGACY_TESTS)
