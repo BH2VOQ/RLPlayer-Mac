@@ -261,6 +261,12 @@ int main() {
         ck(contains(ct, "text/html"), "/ contentType=text/html", ct);
         ck(page.size() > 1000, "/ 返回非空 HTML", "len=" + std::to_string(page.size()));
 
+        // 1.1.3.2：侧栏品牌位必须是真实 logo 图片（黑底白声波），不能退回红色 "R" 圆形占位。
+        ck(contains(page, "<img class=logo src=/favicon.png"),
+           "/ 侧栏品牌位用真实 logo 图片", "len=" + std::to_string(page.size()));
+        ck(!contains(page, "<div class=logo>R</div>"),
+           "/ 侧栏品牌位不再有红色 R 占位", "len=" + std::to_string(page.size()));
+
         const std::string js = call("/app.js", &ct);
         ck(contains(ct, "javascript"), "/app.js contentType=javascript", ct);
         ck(js.size() > 10000, "/app.js 返回非空脚本", "len=" + std::to_string(js.size()));

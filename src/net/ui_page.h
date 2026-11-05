@@ -272,7 +272,9 @@ inline std::string rta_ui_page(const std::string& lang = "zh") {
     h += "html.machost .side-top{display:block;height:38px;flex:none;margin:-12px -12px 4px;padding:0 14px}";
     // 侧栏底部左下角品牌徽标
     h += ".side-brand{display:flex;align-items:center;gap:10px;padding:10px 10px 2px;margin-top:6px;border-top:1px solid var(--line);flex:none;box-sizing:border-box;-webkit-user-select:none;user-select:none}";
-    h += ".logo{width:28px;height:28px;border-radius:50%;background:linear-gradient(135deg,var(--acc),var(--acc2));display:grid;place-items:center;font-weight:700;font-size:12.5px;color:#fff;flex:none}";
+    // 1.1.3.2：侧栏品牌位改放真实 logo 图片（黑底白声波，见 res/rlplayer-64.png / app_icon.h），
+    // 不再用红色 "R" 圆形占位。圆角随图标本身的圆角方形，禁掉原生图片拖拽以免抢窗口拖动。
+    h += ".logo{width:28px;height:28px;border-radius:7px;object-fit:contain;display:block;flex:none;-webkit-user-drag:none;user-select:none}";
     h += ".ttl{font-size:12.5px;font-weight:600;color:var(--txt);line-height:1.25}";
     h += ".ttl .ver-badge{display:inline-block;margin-left:6px;padding:1px 6px;border-radius:6px;font-size:10px;font-weight:600;color:var(--mut);background:var(--hov);border:1px solid var(--line);vertical-align:1px;font-variant-numeric:tabular-nums}";
     h += ".ttl small{display:block;font-size:9px;font-weight:500;color:var(--mut);letter-spacing:.6px;margin-top:1px}";
@@ -1257,8 +1259,9 @@ h += "#npPage .npedge{display:none}";
     h += "<div class=nav data-v=station><svg viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='1.8'><rect x='3' y='4' width='18' height='12' rx='2'/><path d='M7 20h10M12 16v4'/><path d='M7 11l2.5-2.5L12 11l2.5-2.5L17 11'/></svg>快速开始</div>";
     h += "<div class=nav data-v=settings><svg viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='1.8'><circle cx='12' cy='12' r='3.2'/><path d='M12 3.5v2.2M12 18.3v2.2M4.4 7.9l1.9 1.1M17.7 15l1.9 1.1M4.4 16.1l1.9-1.1M17.7 9l1.9-1.1'/></svg>设置</div>";
     h += "<div class=sp></div>";
-    // 品牌徽标栏：贴侧栏最底（像 Apple Music 左下角个人徽标），常驻显示当前版本号（单一真相源 RLPLAYER_VERSION）
-    h += "<div class=side-brand id=sideBrand><div class=logo>R</div><div class=ttl>RLPlayer<span class=ver-badge id=appVer>v" RLPLAYER_VERSION "</span><small>HI-FI AUDIO ENGINE</small></div></div>";
+    // 品牌徽标栏：贴侧栏最底（像 Apple Music 左下角个人徽标），常驻显示当前版本号（单一真相源 RLPLAYER_VERSION）。
+    // 1.1.3.2：logo 用内嵌 /favicon.png（黑底白声波，与 Dock 图标同源），alt 给无障碍读屏用。
+    h += "<div class=side-brand id=sideBrand><img class=logo src=/favicon.png alt='RLPlayer' draggable=false><div class=ttl>RLPlayer<span class=ver-badge id=appVer>v" RLPLAYER_VERSION "</span><small>HI-FI AUDIO ENGINE</small></div></div>";
     h += "</div>";
 
     // ---------- 顶栏（位于第 2 列起，品牌移至侧栏） ----------

@@ -258,6 +258,7 @@ The functionality stays available and numerically correct (worst convolution cas
 | **1.1.2.1** | Hotfix: no false “PCM upsampling” when casting, honest AirPlay labels, source→wire bit-exact proof | ✅ Released |
 | **1.1.3** | **UPnP/DLNA cast upsampling** + LLM model list                      | ✅ Released (offline-verified) |
 | **1.1.3.1** | Cast upsampling: explicit **force target rate** for renderers that under-declare | ✅ Released |
+| **1.1.3.2** | Black-background logo; real app logo in the sidebar brand slot | ✅ Released |
 | **1.1.4** | Audio analysis on the track page (three-level folding / true peak / multichannel) | 🧭 Planned |
 | **1.1.5** | Library lookup (album context / asynchronous knowledge)            | 🧭 Planned  |
 | **1.1.6** | AI summary streaming and stage progress                            | 🧭 Planned  |

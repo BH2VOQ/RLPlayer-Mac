@@ -41,14 +41,16 @@ function draw(size) {
       const cover = 1 - smooth(-0.9, 0.9, d);          // 抗锯齿覆盖
       if (cover <= 0) continue;
 
-      // 对角渐变：左上 #3b82f6 -> 右下 #8b5cf6
+      // 黑底（1.1.3.2）：用户要求把 logo 的蓝底改成黑底，白色声波保持不变。
+      // 左上 #1a1a1e -> 右下 #000000 的近黑渐变，只留一点中性灰高光，
+      // 避免纯黑在深色侧栏里和背景糊成一片（不加任何色相，仍是黑底）。
       const t = Math.min(1, Math.max(0, ((x + y) / (2 * S)) * 1.15));
-      let r = 0x3b + (0x8b - 0x3b) * t;
-      let g = 0x82 + (0x5c - 0x82) * t;
-      let b = 0xf6 + (0xf6 - 0xf6) * t;
-      // 左上角加一点高光
+      let r = 26 - 26 * t;
+      let g = 26 - 26 * t;
+      let b = 30 - 30 * t;
+      // 左上角加一点中性灰高光
       const hl = Math.max(0, 1 - Math.hypot(x - S * 0.22, y - S * 0.18) / (S * 0.55));
-      r += hl * 26; g += hl * 26; b += hl * 26;
+      r += hl * 18; g += hl * 18; b += hl * 18;
 
       // 白色声波：一条水平中心线 + 上下起伏的包络
       const nx = (x - cx) / (S * 0.5);                 // -1..1

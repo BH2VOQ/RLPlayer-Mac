@@ -1,8 +1,8 @@
 {
-  "version": "1.1.3.1",
-  "notes": "Adds an explicit force-target-rate switch for UPnP/DLNA cast upsampling: when a renderer under-declares its supported rates, the target can now be forced within the same-family integer-multiple rule, and the UI labels such a rate as forced and not backed by the device declaration.\n投放升频新增「强制目标率」开关：渲染器未声明更高速率时可显式强制，仍受同族整数倍与上限约束；界面与状态会标注该速率未经设备声明验证。",
-  "download_url": "https://github.com/BH2VOQ/RLPlayer-Mac/releases/download/v1.1.3.1/RLPlayer-1.1.3.1-macOS-arm64.dmg",
-  "sha256": "b193fa8287877d77e32fd85edad431018c087aaa3ecbeb9748fba41ac43741d6",
-  "size": 8086356,
-  "published_at": "2026-11-04T18:37:16Z"
+  "version": "1.1.3.2",
+  "notes": "Brand refresh: the blue/purple app icon is now a near-black background with the same white waveform, and the sidebar brand slot shows the real app logo instead of the red \"R\" placeholder. Dock icon, favicon and README logo follow the same change.\n品牌更新：logo 的蓝紫底改为黑底（白色声波不变），侧栏左下角品牌位由红色「R」占位换成真实产品 logo；Dock 图标、favicon 与 README logo 同步更换。",
+  "download_url": "https://github.com/BH2VOQ/RLPlayer-Mac/releases/download/v1.1.3.2/RLPlayer-1.1.3.2-macOS-arm64.dmg",
+  "sha256": "3f04a956ebb4f35f684a1591b219ee302d8d840652283d05894387f91abcf39e",
+  "size": 8012447,
+  "published_at": "2026-11-05T15:50:24Z"
 }
