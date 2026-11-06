@@ -37,7 +37,7 @@ namespace rta::analysis {
 // 当前体检分析算法代际标识：
 // 算法/指标口径变化后升级此代号，确保旧代际缓存安全 miss 重算，
 // 同时保留合法未损坏旧缓存条目不被强制洗白。
-inline constexpr const char* kCurrentAnalysisGeneration = "health-analysis-v2";
+inline constexpr const char* kCurrentAnalysisGeneration = "health-analysis-v3";
 
 
 // UTF-8 窄串 → 原生路径。**这是本文件唯一允许的路径构造入口**：
@@ -197,6 +197,12 @@ public:
             h.status = hj["status"].s();
             h.error = hj["error"].s();
             h.analyzedAtMs = (int64_t)std::llround(hj["analyzed_at_ms"].n());
+            // 1.1.4 新增字段：旧缓存里没有时保持默认（false / 0），不把缺失当结论。
+            h.truePeakDbtp = hj["true_peak_dbtp"].n();
+            h.truePeakAvailable = hj["true_peak_available"].b;
+            h.drAvailable = hj["dr_available"].b;
+            h.lraAvailable = hj["lra_available"].b;
+            h.lufsAvailable = hj["lufs_available"].b;
             const auto& q = hj["quality"];
             h.hasQuality = q["available"].b;
             h.quality.valid = h.hasQuality;
@@ -212,6 +218,7 @@ public:
             h.quality.tiltDbPerOct = q["tilt_db_per_oct"].n();
             h.quality.rolloff95Hz = q["rolloff95_hz"].n();
             h.quality.hfRatio10kDb = q["hf_ratio_10k_db"].n();
+            h.quality.hfRatio10kAvailable = q["hf_ratio_10k_available"].b;
             h.quality.peakDbfs = q["peak_dbfs_q"].n();
             h.quality.rmsDbfs = q["rms_dbfs"].n();
             h.quality.clippedSamples = q["clipped_samples"].n();
@@ -222,6 +229,7 @@ public:
             h.quality.channelCorr = q["channel_corr"].n();
             h.quality.monoLossDb = q["mono_loss_db"].n();
             h.quality.sideMidDb = q["side_mid_db"].n();
+            h.quality.sideMidAvailable = q["side_mid_available"].b;
             h.quality.dynP95P10Db = q["dyn_p95_p10_db"].n();
             h.quality.dynCentroidDbfs = q["dyn_centroid_dbfs"].n();
             h.quality.quietP10Dbfs = q["quiet_p10_dbfs"].n();

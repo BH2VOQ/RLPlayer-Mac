@@ -66,6 +66,7 @@ class CoreAudioSink;   // 本文件后部定义；render_loop 的 mac 遥测分�
 using rta::render::OutSink;
 using rta::render::SinkOpenOpts;
 #include "analysis/track_health.h"     // F-5：/api/track/health 音质体检（含 quality 19 项）
+#include "analysis/health_store.h"     // 1.1.4：/api/health 缓存键用强文件身份（mtime/size/ctime/inode/dev）
 #include "analysis/version_compare_json.h" // F-8: reachable comparison and valid JSON
 #include "meta/artwork.h"            // F-4：艺人头像全信源调度（provider.h 能力矩阵派生）
 #include "meta/enrich.h"            // 单曲元数据补全编排(播放触发 + /api/enrich + /api/meta 兜底)
@@ -852,6 +853,8 @@ static std::string health_failure_json(const std::string& code, const std::strin
       << ",\"error\":\"" << jesc(msg) << "\"";
     if (!rid.empty()) j << ",\"rid\":\"" << jesc(rid) << "\"";
     j << ",\"health\":{\"dr_db\":null,\"lufs\":null,\"lra\":null,\"peak_dbfs\":null"
+      << ",\"true_peak_dbtp\":null,\"true_peak_available\":false"
+      << ",\"dr_available\":false,\"lra_available\":false,\"lufs_available\":false"
       << ",\"lossless_suspected\":false,\"cutoff_hz\":null,\"confidence\":null"
       << ",\"reason\":\"\",\"fake24\":false"
       << ",\"duration_sec\":" << (h ? h->durationSec : 0.0)
@@ -860,7 +863,7 @@ static std::string health_failure_json(const std::string& code, const std::strin
       << ",\"bits\":" << (h ? h->bits : 0)
       << ",\"status\":\"error\",\"error\":\"" << jesc(msg) << "\""
       << ",\"analyzed_at_ms\":" << (h && h->analyzedAtMs > 0 ? (long long)h->analyzedAtMs : rlp_epoch_ms())
-      << ",\"quality\":{\"available\":false}}}";
+      << ",\"quality\":{\"available\":false,\"hf_ratio_10k_available\":false,\"side_mid_available\":false}}}";
     return j.str();
 }
 
@@ -936,6 +939,213 @@ static bool valid_utf8(const std::string& s) {
         i += (size_t)cont + 1;
     }
     return true;
+}
+
+// ==================== 1.1.4 单曲页音频分析：缓存 / 并发 / 取消 ====================
+//
+// 为什么不是"前端多调几次 /api/track/health"就完事：
+//   ① 分析是 CPU 密集（整曲解码 + FFT + 假无损谱），重复分析同一首纯属浪费；
+//   ② 自动分析由 400 ms 的状态轮询驱动，切歌/暂停/拖进度都不能触发第二次；
+//   ③ 切歌后旧分析必须尽快停下，不能继续占着解码与 FFT 算力（用户明确要求"切歌立即取消"）。
+//
+// 这里的三条硬约束：
+//   * 同一时刻只跑一个分析（g_health_run_mtx）；后到的请求会先取消前一个，再排队；
+//   * 缓存键 = 规范化路径 + 强文件身份（mtime/size/ctime_ns/inode/dev），文件内容变了必然 miss；
+//   * 缓存只存 status=="ready" 的结果；错误/取消绝不入库，避免把失败当结论反复返回。
+// 端点：GET/POST /api/health?file=<绝对路径>[&force=1]；GET /api/anl/stats 看计数。
+struct HealthCacheEntry {
+    rta::analysis::TrackHealth health;
+    rta::analysis::FileIdentity id;
+    int64_t cachedAtMs = 0;
+};
+static std::mutex g_healthCacheMtx;
+static std::map<std::string, HealthCacheEntry> g_healthCache;
+static std::deque<std::string> g_healthCacheOrder;
+static constexpr size_t kHealthCacheMax = 24;
+
+static std::mutex g_healthRunMtx;          // 串行化分析（并发上限 = 1）
+static std::mutex g_healthTokenMtx;        // 保护 g_healthToken
+static std::shared_ptr<std::atomic<bool>> g_healthToken;   // 当前分析请求的取消标志
+static std::atomic<uint64_t> g_healthRuns{0};       // 真正开始跑的分析次数
+static std::atomic<uint64_t> g_healthHits{0};       // 内存缓存命中次数
+static std::atomic<uint64_t> g_healthCancelled{0};  // 被新请求取消的次数
+
+static std::string health_stats_json() {
+    size_t cacheSize = 0;
+    {
+        std::lock_guard<std::mutex> lk(g_healthCacheMtx);
+        cacheSize = g_healthCache.size();
+    }
+    std::ostringstream j;
+    j << "{\"runs\":" << (unsigned long long)g_healthRuns.load()
+      << ",\"hits\":" << (unsigned long long)g_healthHits.load()
+      << ",\"cancelled\":" << (unsigned long long)g_healthCancelled.load()
+      << ",\"cache\":" << (unsigned long long)cacheSize << "}";
+    return j.str();
+}
+
+// 缓存查询：命中要求强文件身份完全一致。文件改了/换了 inode ⟹ 旧条目立刻丢掉。
+static bool health_cache_lookup(const std::string& key, const rta::analysis::FileIdentity& id,
+                                rta::analysis::TrackHealth& out) {
+    std::lock_guard<std::mutex> lk(g_healthCacheMtx);
+    auto it = g_healthCache.find(key);
+    if (it == g_healthCache.end()) return false;
+    if (!id.valid || !it->second.id.matches(id)) {
+        g_healthCache.erase(it);
+        return false;
+    }
+    out = it->second.health;
+    return true;
+}
+
+static void health_cache_put(const std::string& key, const rta::analysis::TrackHealth& h,
+                             const rta::analysis::FileIdentity& id) {
+    std::lock_guard<std::mutex> lk(g_healthCacheMtx);
+    if (g_healthCache.find(key) == g_healthCache.end()) g_healthCacheOrder.push_back(key);
+    HealthCacheEntry e;
+    e.health = h;
+    e.id = id;
+    e.cachedAtMs = rlp_epoch_ms();
+    g_healthCache[key] = std::move(e);
+    while (g_healthCacheOrder.size() > kHealthCacheMax) {
+        const std::string old = g_healthCacheOrder.front();
+        g_healthCacheOrder.pop_front();
+        g_healthCache.erase(old);
+    }
+}
+
+// 新请求接管：先把上一个请求的取消标志置真，再给自己发一个新标志。
+// 这样即使两个请求同时进来，先跑的那个也会在下一个分块边界退出。
+static std::shared_ptr<std::atomic<bool>> health_begin_request() {
+    std::lock_guard<std::mutex> lk(g_healthTokenMtx);
+    if (g_healthToken) g_healthToken->store(true);
+    g_healthToken = std::make_shared<std::atomic<bool>>(false);
+    return g_healthToken;
+}
+
+// UI 切歌/离开时显式取消：即使新曲目不触发分析（自动分析关闭/网络曲目），也让旧分析尽快停下。
+static bool health_cancel_current() {
+    std::lock_guard<std::mutex> lk(g_healthTokenMtx);
+    if (!g_healthToken) return false;
+    const bool was = !g_healthToken->load();
+    g_healthToken->store(true);
+    return was;
+}
+
+// 查询串解析：只取本端点认识的键；file 必须最后 urlDecode（%26 不能当分隔符）。
+static void health_parse_query(const std::string& path, std::string* file, bool* force) {
+    if (file) file->clear();
+    if (force) *force = false;
+    const size_t q = path.find('?');
+    if (q == std::string::npos) return;
+    const std::string qs = path.substr(q + 1);
+    size_t start = 0;
+    while (start <= qs.size()) {
+        const size_t amp = qs.find('&', start);
+        const std::string tok = qs.substr(start, amp == std::string::npos ? std::string::npos : amp - start);
+        const size_t eq = tok.find('=');
+        if (eq != std::string::npos) {
+            const std::string k = urlDecode(tok.substr(0, eq));
+            const std::string v = urlDecode(tok.substr(eq + 1));
+            if (k == "file" && file) *file = v;
+            else if (k == "force" && force) *force = (v == "1" || v == "true");
+        }
+        if (amp == std::string::npos) break;
+        start = amp + 1;
+    }
+}
+
+// /api/health 与 /api/track/health 共用这一份实现（旧的端点名保留，避免破坏既有调用方）。
+static std::string handle_health_analysis(const rta::net::HttpRequest& rq, std::string& ct) {
+    ct = "application/json; charset=utf-8";
+    std::string file;
+    bool force = false;
+    health_parse_query(rq.path, &file, &force);
+    const std::string rid = rid_current();
+    const auto t0 = std::chrono::steady_clock::now();
+    auto elapsed_ms = [&]() {
+        return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+    };
+
+    if (file.empty()) {
+        rta::net::webui_set_status(400);
+        return health_failure_json("decode.read_failed", "未指定文件（需要 ?file=<绝对路径>）", nullptr, rid);
+    }
+    if (!valid_utf8(file)) {
+        rta::net::webui_set_status(400);
+        return health_failure_json("decode.read_failed", "路径不是合法 UTF-8，已拒绝", nullptr, rid);
+    }
+    std::error_code ec;
+    if (!fs::exists(fs::u8path(file), ec) || ec) {
+        rta::net::webui_set_status(404);
+        return health_failure_json("library.path_missing", "文件不存在", nullptr, rid);
+    }
+
+    const std::string key = rta::analysis::normalize_path_key(file);
+    const rta::analysis::FileIdentity before = rta::analysis::FileIdentity::from_path(file);
+
+    rta::analysis::TrackHealth h;
+    if (!force && health_cache_lookup(key, before, h)) {
+        g_healthHits.fetch_add(1);
+        std::ostringstream j;
+        j << "{\"ok\":true,\"usable\":true,\"cached\":true,\"ms\":"
+          << (long long)std::llround(elapsed_ms());
+        if (!rid.empty()) j << ",\"rid\":\"" << jesc(rid) << "\"";
+        j << ",\"stats\":" << health_stats_json()
+          << ",\"health\":" << rta::analysis::track_health_json(h) << "}";
+        return j.str();
+    }
+
+    const auto token = health_begin_request();
+    {
+        std::unique_lock<std::mutex> runLk(g_healthRunMtx);
+        if (token->load()) {
+            g_healthCancelled.fetch_add(1);
+            rta::net::webui_set_status(409);
+            std::ostringstream j;
+            j << "{\"ok\":false,\"usable\":false,\"cancelled\":true"
+              << ",\"code\":\"analysis.cancelled\",\"error\":\"分析已取消\""
+              << ",\"stats\":" << health_stats_json() << "}";
+            return j.str();
+        }
+        g_healthRuns.fetch_add(1);
+        rta::analysis::HealthStreamOptions opt;
+        opt.cancel = token.get();
+        h = rta::analysis::analyze_file(file, opt);
+    }
+
+    if (token->load() || h.status == "cancelled") {
+        g_healthCancelled.fetch_add(1);
+        rta::net::webui_set_status(409);
+        std::ostringstream j;
+        j << "{\"ok\":false,\"usable\":false,\"cancelled\":true"
+          << ",\"code\":\"analysis.cancelled\",\"error\":\"分析已取消（切歌或新请求接管）\""
+          << ",\"stats\":" << health_stats_json() << "}";
+        return j.str();
+    }
+
+    if (h.status != "ready") {
+        rta::net::webui_set_status(422);
+        const std::string why = h.error.empty() ? "分析失败（未给出原因）" : h.error;
+        return health_failure_json(h.errorCode.empty() ? "decode.read_failed" : h.errorCode, why, &h, rid);
+    }
+
+    // 分析期间文件被改/被替换：结论对应的是旧内容，不能缓存，也不能冒充新文件的结论。
+    const rta::analysis::FileIdentity after = rta::analysis::FileIdentity::from_path(file);
+    if (!after.valid || !before.valid || !after.matches(before)) {
+        rta::net::webui_set_status(409);
+        return health_failure_json("decode.read_changed",
+                                   "文件在分析期间发生变化，请等拷贝/下载完成后再试", &h, rid);
+    }
+    health_cache_put(key, h, after);
+
+    std::ostringstream j;
+    j << "{\"ok\":true,\"usable\":true,\"cached\":false,\"ms\":"
+      << (long long)std::llround(elapsed_ms());
+    if (!rid.empty()) j << ",\"rid\":\"" << jesc(rid) << "\"";
+    j << ",\"stats\":" << health_stats_json()
+      << ",\"health\":" << rta::analysis::track_health_json(h) << "}";
+    return j.str();
 }
 
 // F6：非法 UTF-8 字节替换为 U+FFFD（替换符）。playback.log 里可能出现旧版本写入或
@@ -6830,12 +7040,10 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
 
     // ---------------- 本地音乐库（专辑 / 艺术家 / 搜索）----------------
     // 设计取向参考 Roon：以「专辑」为一等公民，而不是让用户翻目录树。
-    // ---- 单曲音质体检（F-5 接线；2026-10-27）----
-    // GET /api/track/health?file=<绝对路径>[&force=1]
-    // 返回 track_health_json() 的全部字段（含 quality 19 项）。
-    // 为什么走这个端点而不是让前端自己算：分析是 CPU 密集（DSD 几百 MB），
-    // 必须在服务端跑；前端只负责把数字画出来。
-    // ⚠️ 只读端点：不改文件、不写缓存以外的东西（缓存由 health_store 管）。
+    // ---- 单曲音质体检（F-5 接线；2026-10-27；1.1.4 升级为 /api/health + 缓存/并发/取消）----
+    // 路由在下方统一走 handle_health_analysis()；旧的 /api/track/health 保留为同义别名。
+    // 为什么走服务端而不是让前端自己算：分析是 CPU 密集（DSD 几百 MB），前端只负责画数字。
+    // ⚠️ 只读端点：不改文件；只写进程内分析缓存（不落盘）。
     // ---- 艺人头像（F-4 / R-6；2026-10-27）----
     // GET /api/artist/image?who=<艺人名>[&refresh=1]
     //   200 + 图片字节（Content-Type 按魔数定）—— 命中
@@ -7102,53 +7310,22 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
         }
     }
 
-    if (rq.path.rfind("/api/track/health", 0) == 0) {
+    // GET /api/anl/stats → 分析缓存/并发计数（诊断与 UI 判据用；只读）
+    if (rq.path.rfind("/api/anl/stats", 0) == 0) {
         ct = "application/json; charset=utf-8";
-        std::string file;
-        bool force = false;
-        {
-            const size_t q = rq.path.find("?file=");
-            if (q != std::string::npos) {
-                std::string rest = rq.path.substr(q + 6);
-                const size_t amp = rest.find("&force=");
-                if (amp != std::string::npos) {
-                    force = rest.compare(amp + 7, 1, "1") == 0;
-                    rest = rest.substr(0, amp);
-                }
-                file = urlDecode(rest);
-            }
-        }
-        // 三类结果同构（#17）：缺参/不存在/解码失败都是 ok:false + 稳定 code + health 桩，
-        // 只有 status=="ready" 才 ok:true。这样前端只需看 ok/usable/status 一个判据。
-        const std::string rid = rid_current();
-        if (file.empty()) {
-            rta::net::webui_set_status(400);
-            return health_failure_json("decode.read_failed", "未指定文件（需要 ?file=<绝对路径>）",
-                                       nullptr, rid);
-        }
-        if (!valid_utf8(file)) {
-            rta::net::webui_set_status(400);
-            return health_failure_json("decode.read_failed", "路径不是合法 UTF-8，已拒绝", nullptr, rid);
-        }
-        std::error_code ec;
-        if (!fs::exists(fs::u8path(file), ec) || ec) {
-            rta::net::webui_set_status(404);
-            return health_failure_json("library.path_missing", "文件不存在", nullptr, rid);
-        }
-        (void)force;   // 缓存策略由 health_store 按 mtime/size 判定，端点不越权清缓存
-        // 文件级入口保证不抛异常（解码失败落 status=error + 人话原因），
-        // 所以这里不需要 try/catch 兜底。
-        const rta::analysis::TrackHealth h = rta::analysis::analyze_file(file);
-        if (h.status != "ready") {
-            rta::net::webui_set_status(422);
-            const std::string why = h.error.empty() ? "分析失败（未给出原因）" : h.error;
-            return health_failure_json(h.errorCode.empty()?"decode.read_failed":h.errorCode, why, &h, rid);
-        }
-        std::ostringstream j;
-        j << "{\"ok\":true,\"usable\":true";
-        if (!rid.empty()) j << ",\"rid\":\"" << jesc(rid) << "\"";
-        j << ",\"health\":" << rta::analysis::track_health_json(h) << "}";
-        return j.str();
+        return std::string("{\"ok\":true,\"stats\":") + health_stats_json() + "}";
+    }
+    // POST/GET /api/anl/cancel → 取消当前正在跑的分析（切歌/离开单曲页；只置标志，不杀线程）
+    if (rq.path.rfind("/api/anl/cancel", 0) == 0) {
+        ct = "application/json; charset=utf-8";
+        const bool had = health_cancel_current();
+        return std::string("{\"ok\":true,\"cancelled\":") + (had ? "true" : "false") + "}";
+    }
+    // GET/POST /api/health?file=<绝对路径>[&force=1]  → 1.1.4 单曲页分析（缓存/并发/取消）
+    // 旧的 /api/track/health 保留为同义别名（右键"音质体检"弹窗仍用它）。
+    if (rq.path.rfind("/api/track/health", 0) == 0 ||
+        rq.path.rfind("/api/health", 0) == 0) {
+        return handle_health_analysis(rq, ct);
     }
 
     if (rq.path.rfind("/api/lib", 0) == 0) {
@@ -10442,6 +10619,8 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
                                            "metaon", "metallm", "metasummary", "llmmonthlycap", "scanthreads", "scanThreads",
                                            "cast_upsample", "cast_upsample_ceiling", "cast_upsample_force",
                                            "updbeta",
+                                           // 1.1.4 单曲页分析：默认关闭的"播放即后台分析"
+                                           "autoanl",
                                            // ReplayGain / Album Gain
                                            "rg.mode", "rg_mode", "rgmode", "rg",
                                            "rg.preventClipping", "rg.preventclipping", "rg_preventclipping", "rgpreventclip",

@@ -179,6 +179,7 @@ int main() {
               fmt("实测 %.0f Hz", r.rolloff95Hz));
         check(std::fabs(r.hfRatio10kDb + 2.34) < 0.45, "白噪 >10 kHz 能量占比 = −2.34 ±0.45 dB",
               fmt("实测 %+.2f dB", r.hfRatio10kDb));
+        check(r.hfRatio10kAvailable, "48 kHz 素材：10 kHz 带在奈奎斯特内存在 ⟹ hfRatio10kAvailable = true");
     }
     {
         // 幅度 ∝ 1/sqrt(f)（功率 ∝ 1/f）⟹ 倾斜 −3.01 dB/oct —— 用频域合成，答案解析
@@ -298,6 +299,26 @@ int main() {
     }
 
     {
+        // 2 声道「正常立体声」：side/mid 必须标记为【可用】，且是 [−120,+120] 内的有限数。
+        // 解析解：ch1 = 0.5·ch0 ⟹ mid = 0.75·ch0、side = 0.25·ch0 ⟹ 10log10(1/9) = −9.542 dB
+        const size_t n = (size_t)(4.0 * fs);
+        auto ch = mk(2, n);
+        add_noise(ch[0], 0.1, 31);
+        for (size_t i = 0; i < n; ++i) ch[1][i] = 0.5 * ch[0][i];
+        auto p = ptrs(ch);
+        const QualityResult r = measure_quality(p.data(), 2, n, fs);
+        printf("  2 声道 ch1=0.5·ch0：sideMidAvailable=%d，side/mid %.4f dB（理论 −9.5424）\n",
+               (int)r.sideMidAvailable, r.sideMidDb);
+        check(r.sideMidAvailable, "2 声道：side/mid 标记为可用（sideMidAvailable = true）");
+        check(std::isfinite(r.sideMidDb) && r.sideMidDb >= -120.0 && r.sideMidDb <= 120.0,
+              "2 声道：side/mid 是 [−120,+120] 内的有限数", fmt("实测 %.4f dB", r.sideMidDb));
+        const double theorySideMid = 10.0 * std::log10(1.0 / 9.0);   // −9.542425094… dB
+        check(std::fabs(r.sideMidDb - theorySideMid) < 1e-6,
+              "2 声道 ch1=0.5·ch0 → side/mid = 10log10(1/9) = −9.542425 dB（解析解）",
+              fmt("实测 %.9f dB", r.sideMidDb));
+    }
+
+    {
         // 多声道：不许把第 0/1 声道当成 L/R（实测 6 声道 FLAC 前两声道相关 −0.66，纯属布局不同）
         const size_t n = (size_t)(6.0 * fs);
         auto ch = mk(6, n);
@@ -309,6 +330,9 @@ int main() {
         printf("  6 声道素材：stereo=%d，note=%s\n", (int)r.stereo, r.note.c_str());
         check(!r.stereo, ">2 声道 ⟹ 立体声指标标为不适用（不猜布局）");
         check(r.note.find("立体声指标不适用") != std::string::npos, "note 写明原因", r.note);
+        check(!r.sideMidAvailable && r.sideMidDb <= -299.0,
+              ">2 声道 ⟹ side/mid 写 −300 哨兵（不是 0）；长素材同样如此",
+              fmt("实测 %.1f dB", r.sideMidDb));
     }
 
     // ---------------------------------------------------------------- 6. 动态细化
@@ -378,8 +402,74 @@ int main() {
               "非双音素材 → 互调失真标注「不适用」并给原因", r.imdNote);
     }
 
-    // ---------------------------------------------------------------- 8. 分块一致性
-    printf("\n=== 8. 整段 vs 分块（任意块大小必须逐位一致）===\n");
+    // ---------------------------------------------------------------- 8. 不适用语义
+    printf("\n=== 8. 「不适用」必须显式（多声道 / 短素材 / 低采样率 / 口径说明）===\n");
+    {
+        // 1 s × 6 ch @ 48 kHz：>2 声道 ⟹ 立体声指标不适用，side/mid 写 −300 哨兵而不是 0。
+        // 为什么不能用 0：0 dB 是「side 与 mid 等能量」的合法测量值，用它表示「不适用」两者无法区分。
+        const size_t n = (size_t)(1.0 * fs);
+        auto ch = mk(6, n);
+        for (int c = 0; c < 6; ++c) add_noise(ch[(size_t)c], 0.1, 200 + (unsigned long long)c);
+        auto p = ptrs(ch);
+        const QualityResult r = measure_quality(p.data(), 6, n, fs);
+        printf("  1 s × 6 ch：sideMidAvailable=%d，sideMidDb=%.1f，stereo=%d\n",
+               (int)r.sideMidAvailable, r.sideMidDb, (int)r.stereo);
+        printf("    note=%s\n", r.note.c_str());
+        check(r.note.find("立体声指标不适用") != std::string::npos,
+              "1 s 多声道：note 写明立体声指标不适用", r.note);
+        check(!r.sideMidAvailable, "1 s 多声道：sideMidAvailable = false（不是给个 0 冒充数值）");
+        check(r.sideMidDb <= -299.0, "1 s 多声道：sideMidDb = −300 哨兵（不是 0）",
+              fmt("实测 %.1f dB", r.sideMidDb));
+        check(!r.stereo, "1 s 多声道：stereo 语义不变（>2 ch 仍为 false）");
+    }
+    {
+        // 1 s × 6 ch @ 2 kHz：谱窗计划会按帧数缩短（最短 2048 点），所以「1 秒、但短于一个谱窗」
+        // 只有采样率 < 2048 Hz 时才成立 —— 这里正是用它把两条注记同时踩出来：
+        // 多声道注记先写、短素材注记再【追加】（旧风险：一旦覆盖，多声道/不适用说明就丢了）。
+        const double fsLow = 2000.0;
+        const size_t n = (size_t)(1.0 * fsLow);                 // 2000 帧 < 2048（最短谱窗）
+        auto ch = mk(6, n);
+        for (int c = 0; c < 6; ++c) add_noise(ch[(size_t)c], 0.1, 400 + (unsigned long long)c);
+        auto p = ptrs(ch);
+        const QualityResult r = measure_quality(p.data(), 6, n, fsLow);
+        printf("  1 s × 6 ch @ 2 kHz（%zu 帧 < 2048 谱窗）：\n    note=%s\n", n, r.note.c_str());
+        check(r.note.find("立体声指标不适用") != std::string::npos,
+              "短素材：多声道注记仍在 note 里（没有被后面的注记覆盖）", r.note);
+        check(r.note.find("短于一个谱窗") != std::string::npos,
+              "短素材：追加了「短于一个谱窗」注记", r.note);
+        check(!r.sideMidAvailable && r.sideMidDb <= -299.0, "短素材：side/mid 仍标不适用（不强行给数）");
+        check(!r.hfRatio10kAvailable && r.hfRatio10kDb <= -299.0,
+              "2 kHz 素材：10 kHz 带不存在 ⟹ hfRatio10k 显式不适用");
+    }
+    {
+        // fs = 8 kHz ⟹ 奈奎斯特 4 kHz，10 kHz 以上根本【没有 bin】：必须显式不适用。
+        // 旧实现会算成 −120（钳位后，看起来像"真测到 −120 dB"）或 0（更像"能量全在高频"）。
+        const double fs8 = 8000.0;
+        const size_t n = (size_t)(2.0 * fs8);                   // ≥2 s
+        auto ch = mk(1, n);
+        add_noise(ch[0], 0.1, 8080);
+        auto p = ptrs(ch);
+        const QualityResult r = measure_quality(p.data(), 1, n, fs8);
+        printf("  8 kHz 白噪：hfRatio10kAvailable=%d，hfRatio10kDb=%.1f\n",
+               (int)r.hfRatio10kAvailable, r.hfRatio10kDb);
+        check(!r.hfRatio10kAvailable, "fs=8000：hfRatio10kAvailable = false");
+        check(r.hfRatio10kDb <= -299.0, "fs=8000：hfRatio10kDb = −300 哨兵（不是 −120，更不是 0）",
+              fmt("实测 %.1f dB", r.hfRatio10kDb));
+    }
+    {
+        // 口径说明必须与实现一致：noiseFloorDbfs = 最低 10% 的 100 ms 块电平 ⟹ 动态音乐时是【上界】。
+        // 谱最小统计（真正偏低的那个）只放在诊断字段 spectralMinDbfs 里，note 不许再说成「下界」。
+        const size_t n = (size_t)(4.0 * fs);
+        auto ch = mk(1, n);
+        add_noise(ch[0], 0.05, 31337);
+        auto p = ptrs(ch);
+        const QualityResult r = measure_quality(p.data(), 1, n, fs);
+        check(r.note.find("上界") != std::string::npos, "note 说明本底噪声是【上界】", r.note);
+        check(r.note.find("下界") == std::string::npos, "note 不再出现自相矛盾的【下界】", r.note);
+    }
+
+    // ---------------------------------------------------------------- 9. 分块一致性
+    printf("\n=== 9. 整段 vs 分块（任意块大小必须逐位一致）===\n");
     {
         const size_t n = (size_t)(13.7 * fs);
         auto ch = mk(2, n);

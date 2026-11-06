@@ -1,0 +1,87 @@
+音频分析	Audio Analysis	1.1.4 analysis panel
+动态	Dynamics	1.1.4 analysis panel
+音质	Audio Quality	1.1.4 analysis panel
+假无损	Lossless Check	1.1.4 analysis panel
+全部指标	All Metrics	1.1.4 analysis panel
+详细	Details	1.1.4 analysis panel
+分析	Analyze	1.1.4 analysis panel
+重新分析当前曲目（强制重算，忽略缓存）	Re-analyze the current track (force recompute, ignore cache)	1.1.4 analysis panel
+切换详细程度：摘要 → 详细 → 全部指标	Change detail level: Summary → Details → All metrics	1.1.4 analysis panel
+切换详细程度	Change detail level	1.1.4 analysis panel
+当前曲目的分析状态	Analysis status of the current track	1.1.4 analysis panel
+不适用（采样率 ≤20 kHz）	N/A (sample rate ≤20 kHz)	1.1.4 analysis panel
+采样率 ≤20 kHz	Sample rate ≤20 kHz	1.1.4 analysis panel
+播放时自动分析（后台）	Analyze in the background during playback	1.1.4 analysis panel
+默认关闭；只分析本地文件，每曲只跑一次，切歌立即取消；不会占用播放线程	Off by default; local files only, once per track, cancelled immediately on track change; does not occupy the playback thread	1.1.4 analysis panel
+点「分析」手动分析，或在设置 → 通用 → 播放 里开启「播放时自动分析」	Click Analyze, or enable Analyze during playback under Settings → General → Playback	1.1.4 analysis panel
+尚未分析	Not analyzed yet	1.1.4 analysis panel
+未分析	Not analyzed	1.1.4 analysis panel
+正在分析…	Analyzing...	1.1.4 analysis panel
+分析于	Analyzed at	1.1.4 analysis panel
+· 缓存命中	· Cache hit	1.1.4 analysis panel
+分析失败	Analysis failed	1.1.4 analysis panel
+分析失败 · 点击重试	Analysis failed · Click to retry	1.1.4 analysis panel
+点击重试	Click to retry	1.1.4 analysis panel
+分析超时（240 s）	Analysis timed out (240 s)	1.1.4 analysis panel
+无法连接后端	Cannot reach the backend	1.1.4 analysis panel
+当前没有可分析的本地曲目	No local track available for analysis	1.1.4 analysis panel
+仅本地文件可分析	Only local files can be analyzed	1.1.4 analysis panel
+网络曲目不做本地分析	Network tracks are not analyzed locally	1.1.4 analysis panel
+当前曲目：	Current track: 	1.1.4 analysis panel
+多声道	Multichannel	1.1.4 analysis panel
+多峰素材	Multi-peak material	1.1.4 analysis panel
+需双音素材	Requires a dual-tone signal	1.1.4 analysis panel
+素材过短	Material too short	1.1.4 analysis panel
+素材过短 · 动态不适用	Material too short · Dynamics N/A	1.1.4 analysis panel
+不适用 · 样本不足	N/A · Insufficient samples	1.1.4 analysis panel
+不适用（样本不足）	N/A (insufficient samples)	1.1.4 analysis panel
+无有效音频 · 指标不适用	No valid audio · Metrics N/A	1.1.4 analysis panel
+样本峰值	Sample peak	1.1.4 analysis panel
+真峰 (dBTP)	True peak (dBTP)	1.1.4 analysis panel
+采样率	Sample rate	1.1.4 analysis panel
+位深	Bit depth	1.1.4 analysis panel
+分析状态	Analysis status	1.1.4 analysis panel
+分析时刻	Analyzed at	1.1.4 analysis panel
+分析记录	Analysis log	1.1.4 analysis panel
+削波	Clipping	1.1.4 analysis panel
+削波段数	Clipping runs	1.1.4 analysis panel
+10k 以上能量	Energy above 10 kHz	1.1.4 analysis panel
+立体声相关	Stereo correlation	1.1.4 analysis panel
+频谱最小值	Spectral minimum	1.1.4 analysis panel
+静音占比	Silence ratio	1.1.4 analysis panel
+安静段 P10	Quiet P10	1.1.4 analysis panel
+谱窗数	Spectral windows	1.1.4 analysis panel
+判定	Verdict	1.1.4 analysis panel
+截止频率	Cutoff	1.1.4 analysis panel
+置信度	Confidence	1.1.4 analysis panel
+24bit 实为低位深	24-bit is actually low-bit-depth	1.1.4 analysis panel
+24bit 可疑	24-bit suspicious	1.1.4 analysis panel
+原始证据	Raw evidence	1.1.4 analysis panel
+判定依据	Basis	1.1.4 analysis panel
+未发现	Not found	1.1.4 analysis panel
+未检出	Not detected	1.1.4 analysis panel
+未检出截止	No cutoff detected	1.1.4 analysis panel
+满带宽	Full bandwidth	1.1.4 analysis panel
+带宽仅	Bandwidth only	1.1.4 analysis panel
+疑似有损转码	Suspected lossy transcode	1.1.4 analysis panel
+证据不足	Insufficient evidence	1.1.4 analysis panel
+证据不足 · 置信度	Insufficient evidence · Confidence	1.1.4 analysis panel
+良好动态 · 古典/爵士常见	Good dynamics · common in classical/jazz	1.1.4 analysis panel
+中等动态 · 摇滚/原声常见	Moderate dynamics · common in rock/acoustic	1.1.4 analysis panel
+动态偏紧 · 流行母带常见	Tight dynamics · common in pop masters	1.1.4 analysis panel
+低动态 · 高压缩母带	Low dynamics · heavily compressed master	1.1.4 analysis panel
+干净 · 无明显削波	Clean · no obvious clipping	1.1.4 analysis panel
+干净	Clean	1.1.4 analysis panel
+有削波 · 最长	Clipping · longest	1.1.4 analysis panel
+轻微削波	Slight clipping	1.1.4 analysis panel
+dBTP ⟹ 母带已过载	dBTP ⟹ master is over	1.1.4 analysis panel
+样本峰值只反映采样点，采样点之间的峰值只有真峰能看见	Sample peak only reflects sample points; inter-sample peaks are visible only via true peak	1.1.4 analysis panel
+母带要修	Master needs fixing	1.1.4 analysis panel
+展开：每张卡显示指标（2 列）	Expand: metrics per card (2 columns)	1.1.4 analysis panel
+展开：显示全部原始指标	Expand: show all raw metrics	1.1.4 analysis panel
+收起	Collapse	1.1.4 analysis panel
+收起：只留一行摘要	Collapse: summary only	1.1.4 analysis panel
+点击切换详细程度	Click to change detail level	1.1.4 analysis panel
+截止	Cutoff	1.1.4 analysis panel
+段削波	clipping runs	1.1.4 analysis panel
+个样本	samples	1.1.4 analysis panel

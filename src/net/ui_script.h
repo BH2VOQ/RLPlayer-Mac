@@ -172,6 +172,9 @@ var ADV = {
   modcut: 0, moddith: -1, ir: '', irgpu: 0, ramp: 0, theme: 'dark', uiStyle: 'apple', lang: 'zh',
   eq: '', modorder: 5, modfamily: 'dsd', gpuvendor: 'auto', directsdm: 0, dsdKind: 'fir', dsdConv: 'narrow',
   updbeta: 0,
+  // 1.1.4：播放时自动音频分析。**默认关**（后台解码 + FFT 是纯 CPU 开销，不该在用户没同意时发生）。
+  // 只分析本地文件；每曲只自动跑一次；切歌立即取消（见 ANL 状态机）。
+  autoanl: 0,
   // 输出后端与多声道
   // 261024-01 #9/#11：upnpDev = UPnP/DLNA 渲染器（设备描述 URL）；naaHost 自动发现填，
   // 手动框只是折叠兜底（用户原话：NAA 端点这个选项不应该出现，应该自动获取）。
@@ -4220,6 +4223,11 @@ function tick() {
       if (S.lastCur) { S.lastCur = ''; D('npt').textContent = '未播放'; D('npart').textContent = ''; D('nps').textContent = '选择一个专辑开始'; D('cv').style.backgroundImage = ''; S.npMetaHtml = ''; if (D('npMeta')) D('npMeta').innerHTML = ''; }
       updateNextTrackInfo();
     }
+    // 1.1.4 单曲页音频分析：借已经跑着的状态轮询驱动一次（不额外增加请求）。
+    //   · 切歌：上一首的在途请求立刻 abort + seq++，并让服务器停手（见 anlTick）；
+    //   · 同曲：只有「自动分析开 + 正在播放 + 本地文件 + 没缓存 + 没在跑 + 本曲还没自动跑过」才发一次；
+    //     暂停 / 继续 / 拖动进度都不会重新触发（会话验收判据）。
+    anlTick(j.current ? (S.lastCur || '') : '', !!(j.playing && !j.paused));
     syncAlbPlayAllBtn();
     // 2026-10-23 #1：底栏常驻一个「b-p」徽标，不打开信号链也能知道当前是否 bit-perfect。
     // 2026-10-23 用户 261023-04 #1：改成紧凑 chip（class=bp-yes/bp-no/bp-direct），
@@ -4321,6 +4329,8 @@ function ensureGpuOption(val) {
 }
 var SET_KEYS = [['sRate','rate'], ['sFilt','filter'], ['sFiltNx','filterNx'], ['sShap','shaper'],
                 ['sDSD','dsd'], ['sBuf','buffer'], ['sIsp','isp'], ['s2s','twostage'], ['sGpu','gpuvendor'],
+                // 1.1.4：后端白名单已接受 autoanl（tools/rtaweb.cpp 的 settings 键表），前端只按契约读写
+                ['sp_autoanl','autoanl'],
                 ['cast_up','cast_upsample'], ['cast_ceil','cast_upsample_ceiling'], ['cast_force','cast_upsample_force']];
 function saveSettings(immediate) {
   var body = '';
@@ -4414,6 +4424,10 @@ function loadSettings() {
       }
       else e.value = kv[p[1]];
     });
+    // 1.1.4（分析面板）：自动分析的真相源在 conf（autoanl）；这里把内存里的开关同步过来。
+    //   放在 SET_KEYS 循环**之后**：上面已经把 kv.autoanl 写进 ADV 与（若设置页已渲染）复选框。
+    //   老用户 conf 没有这个键 ⟹ 保持默认 0（关），绝不擅自开始后台分析。
+    ANL.auto = (ADV.autoanl == 1 || ADV.autoanl === '1') ? 1 : 0;
     // ---- 老用户配置迁移（功能1 的红线：不许悄悄改老用户行为）----
     // 只有 conf 里【完全没有 rate 键】时才用新默认（follow）：
     //   老用户 conf 通常有 rate=max → kv.rate 有值 → 上面 SET_KEYS 已把它写回 <select>，
@@ -7536,6 +7550,582 @@ function openQualityModal(file) {
   });
 }
 
+/* ---------------- 1.1.4 单曲页「音频分析」面板（ANL） ----------------
+   数据源：GET /api/health?file=<绝对路径>[&force=1]
+     → { ok, usable, cached, ms, stats:{runs,hits,cancelled,cache}, health:{…, quality:{…19 项…}} }
+   为什么必须是状态机（而不是"点一下拿结果"）：
+     ① 自动分析由 400 ms 的状态轮询驱动 —— 暂停/继续/拖动进度都**不能**触发第二次，
+        否则一次听歌就能把后端刷成串行队列；
+     ② 切歌后**上一首的响应**绝不能落到新曲目的面板上（串台比不显示更糟）；
+     ③ 切歌时还要让**服务器**也停下旧分析（/api/anl/cancel），否则 CPU 继续烧在没人看的结果上。
+   三级折叠：L0 每卡一行真实摘要（默认）/ L1 每卡指标网格（2 列）/ L2 全部原始指标。
+   口径（铁律 3）：每个数字都来自后端实测，前端只做单位与判读；-300（<= -299）是"不适用"哨兵，
+   必须显示成「不适用」，绝不能被格式化成 -300.00 冒充一个测量值。
+   🔴 铁律 1：本模块只发 HTTP 请求，绝不打开任何音频设备。 */
+var ANL = {auto:0, cur:'', cache:{}, busy:{}, autoDone:'', lvl:0, seq:0, req:0, ctrl:null, err:'', meta:{}, paintSig:''};
+// 生产环境 api() 的引用：window.api 与它不同 ⟹ 自动化测试注入了假后端（见 anlFetch）。
+var ANL_API_PROD = null;
+var ANL_TIMEOUT_MS = 240000;   // 整曲解码 + FFT + 假无损谱；大 DSD 需要时间，240 s 是硬上限
+var ANL_NA = '不适用';
+
+// 只有本地绝对路径才可分析：http(s)/smb 是网络资源，UNC 是别人机器上的共享，.cda 只是 CD 音轨占位符。
+function anlIsLocal(p) {
+  if (!p || typeof p !== 'string') return false;
+  var s = p.replace(/^\s+|\s+$/g, '');
+  if (!s) return false;
+  // .cda 必须先判：它是 CD 音轨占位符（不是可分析的文件），而它在磁盘上通常也是绝对路径，
+  // 放到最后判会被上面的"绝对路径"分支提前 return true，后端只会回一个"读不了"。
+  if (/\.cda(?:[?#]|$)/i.test(s)) return false;
+  if (/^[a-zA-Z]:[\\/]/.test(s)) return true;                  // Windows 盘符
+  if (/^[a-z][a-z0-9+.-]*:/i.test(s)) return false;            // 任何 URL scheme（http/smb/file/…）
+  if (s.indexOf('\\\\') === 0) return false;                   // UNC \\host\share
+  if (s.charAt(0) === '/') return true;                        // POSIX 绝对路径
+  return false;
+}
+
+// 数值守卫：undefined/null/NaN/Infinity 与「不适用」哨兵（<= -299）一律当作"没有值"。
+function anlHas(v) { return typeof v === 'number' && isFinite(v) && v > -299; }
+function anlInt(v) { return (typeof v === 'number' && isFinite(v)) ? String(Math.round(v)) : ANL_NA; }
+function anlFmt(v, digits, unit) {
+  return anlHas(v) ? (v.toFixed(digits === undefined ? 2 : digits) + (unit || '')) : ANL_NA;
+}
+function anlV(t, na, warn) { return { t: t, na: !!na, warn: !!warn }; }
+function anlNA(why) { return anlV(why ? (ANL_NA + '（' + why + '）') : ANL_NA, true); }
+// 单元格：标签左 / 值右；NA 用灰字（"没有值"和"值=0"在视觉上必须能分开）
+function anlCell(lb, v) {
+  var t = (v && v.t !== undefined) ? v.t : String(v);
+  var cls = (v && v.na) ? ' na' : ((v && v.warn) ? ' warn' : '');
+  // 只有"不适用（…原因…）"这类长文案才整行独占：两列会把原因截成省略号；
+  // 纯数字永远不独占（否则 2 列网格的节奏会被打乱，看着像错位）。
+  var wide = (v && v.na && String(t).length > 8) ? ' wide' : '';
+  // title 里放完整「标签：值」：窄窗下数值仍可能被截断，悬停要能看到原值
+  return '<div class="anlml' + wide + '" title="' + esc(lb + '：' + t) + '">' +
+         '<span class=anllb>' + esc(lb) + '</span>' +
+         '<span class="anlv' + cls + '">' + esc(t) + '</span></div>';
+}
+function anlSec(t) { return '<div class=anlsec>' + esc(t) + '</div>'; }
+function anlNote(t) { return '<div class=anlnote>' + esc(t || '') + '</div>'; }
+
+// ---- 单项格式化（每一条都自带"不适用"的原因，绝不拿 0 冒充正常）----
+function anlDrV(h) {
+  if (h.dr_available === false) return anlNA('素材过短');
+  if (!anlHas(h.dr_db)) return anlNA();
+  return anlV(h.dr_db.toFixed(2) + ' dB');
+}
+function anlLraV(h) {
+  if (h.lra_available === false) return anlNA('素材过短');
+  if (!anlHas(h.lra)) return anlNA();
+  return anlV(h.lra.toFixed(2) + ' LU');
+}
+function anlLufsV(h) {
+  if (h.lufs_available === false) return anlNA('素材过短');
+  if (!anlHas(h.lufs)) return anlNA();
+  return anlV(h.lufs.toFixed(2) + ' LUFS');
+}
+function anlPeakV(h) {
+  if (!anlHas(h.peak_dbfs)) return anlNA();
+  return anlV(h.peak_dbfs.toFixed(2) + ' dBFS');
+}
+// 真峰：样本点之间的峰值。>0 dBTP = 采样点之间已越界（母带过载），必须显式带 + 号。
+function anlTpV(h) {
+  if (h.true_peak_available === false) return anlNA();
+  if (!anlHas(h.true_peak_dbtp)) return anlNA();
+  var v = h.true_peak_dbtp;
+  return anlV((v > 0 ? '+' : '') + v.toFixed(2) + ' dBTP', false, v > 0);
+}
+// 真峰过载警告：任何折叠层级都不允许把它藏起来（这是"母带要修"的强信号）。
+function anlTpWarnHtml(h) {
+  if (!h || h.true_peak_available === false) return '';
+  if (!anlHas(h.true_peak_dbtp) || h.true_peak_dbtp <= 0) return '';
+  var v = h.true_peak_dbtp;
+  return '<div class=anlwarn>真峰 ' + (v > 0 ? '+' : '') + v.toFixed(2) + ' dBTP ⟹ 母带已过载' +
+         '<span class=anlwh>　样本峰值只反映采样点，采样点之间的峰值只有真峰能看见</span></div>';
+}
+function anlHfAvail(h) {
+  var q = (h && h.quality) || {};
+  if (q.hf_ratio_10k_available !== undefined) return !!q.hf_ratio_10k_available;
+  return (h && h.fs ? h.fs : 0) > 20000;
+}
+function anlHfV(h) {
+  var q = (h && h.quality) || {};
+  if (!anlHfAvail(h)) return anlNA('采样率 ≤20 kHz');
+  if (!anlHas(q.hf_ratio_10k_db)) return anlNA();
+  return anlV(q.hf_ratio_10k_db.toFixed(2) + ' dB');
+}
+function anlSideAvail(h) {
+  var q = (h && h.quality) || {};
+  var ch = (h && h.channels) || 0;
+  if (q.side_mid_available !== undefined) return !!q.side_mid_available;
+  return ch <= 2;
+}
+function anlCorrV(h) {
+  var q = (h && h.quality) || {};
+  var ch = (h && h.channels) || 0;
+  if (ch > 2) return anlNA('多声道');
+  if (q.stereo !== true) return anlV('单声道素材', true);
+  if (!anlSideAvail(h) || !anlHas(q.channel_corr)) return anlNA();
+  return anlV(q.channel_corr.toFixed(3));
+}
+function anlSideMidV(h) {
+  var q = (h && h.quality) || {};
+  var ch = (h && h.channels) || 0;
+  if (ch > 2) return anlNA('多声道');
+  if (q.stereo !== true) return anlV('单声道素材', true);
+  if (!anlSideAvail(h) || !anlHas(q.side_mid_db)) return anlNA();
+  return anlV(q.side_mid_db.toFixed(1) + ' dB');
+}
+function anlMonoLossV(h) {
+  var q = (h && h.quality) || {};
+  var ch = (h && h.channels) || 0;
+  if (ch > 2) return anlNA('多声道');
+  if (q.stereo !== true) return anlV('单声道素材', true);
+  if (!anlSideAvail(h) || !anlHas(q.mono_loss_db)) return anlNA();
+  return anlV(q.mono_loss_db.toFixed(2) + ' dB');
+}
+function anlThdnV(q) {
+  if (q.thdn_available === false) return anlNA('多峰素材');
+  if (!anlHas(q.thdn_db)) return anlNA();
+  var pct = anlHas(q.thdn_pct) ? ('（' + q.thdn_pct.toFixed(3) + '%）') : '';
+  return anlV(q.thdn_db.toFixed(2) + ' dB' + pct);
+}
+function anlImdV(q) {
+  if (q.imd_available === false) return anlNA('需双音素材');
+  if (!anlHas(q.imd_db)) return anlNA();
+  return anlV(q.imd_db.toFixed(2) + ' dB');
+}
+function anlClipV(q) {
+  var n = (typeof q.clipped_samples === 'number' && isFinite(q.clipped_samples)) ? q.clipped_samples : null;
+  if (n === null) return anlNA();
+  if (!n) return anlV('0');
+  var pct = anlHas(q.clipped_pct) ? ('（' + q.clipped_pct.toFixed(3) + '%）') : '';
+  return anlV(n + ' 个样本' + pct, false, true);
+}
+function anlRunsV(q) {
+  if (typeof q.clipped_runs !== 'number' || !isFinite(q.clipped_runs)) return anlNA();
+  if (!q.clipped_runs) return anlV('0');
+  return anlV(q.clipped_runs + ' 段削波', false, true);
+}
+function anlLongestV(q) {
+  if (typeof q.longest_clip_run !== 'number' || !isFinite(q.longest_clip_run)) return anlNA();
+  if (!q.longest_clip_run) return anlV('0');
+  return anlV(q.longest_clip_run + ' 样本', false, q.longest_clip_run >= 3);
+}
+function anlConfV(h) {
+  if (!anlHas(h.confidence)) return anlNA();
+  var c = h.confidence;
+  return anlV((c <= 1.0001 ? c * 100 : c).toFixed(0) + '%');
+}
+function anlCutoffV(h) {
+  // cutoff_hz=0 是「未检出陡沿」，不是「0 kHz 带宽」；显示成 0.0 kHz 会被读成结论。
+  if (!anlHas(h.cutoff_hz) || !(h.cutoff_hz > 0)) return anlV('未检出');
+  return anlV((h.cutoff_hz / 1000).toFixed(1) + ' kHz');
+}
+function anlDurV(h) {
+  if (!anlHas(h.duration_sec)) return anlNA();
+  return anlV(h.duration_sec.toFixed(1) + ' s');
+}
+function anlVerV(h) {
+  if (h.status && h.status !== 'ready') return anlV('分析未完成', true);
+  if (h.lossless_suspected) return anlV('疑似有损转码', false, true);
+  // 有截止但置信度不足：说"证据不足"，不要冒充"未发现"。
+  if (anlHas(h.cutoff_hz) && h.cutoff_hz > 0 && anlHas(h.confidence) && h.confidence < 0.5)
+    return anlV('证据不足 · 置信度 ' + Math.round(h.confidence * 100) + '%');
+  return anlV('未发现');
+}
+function anlClockStr(ms) {
+  if (typeof ms !== 'number' || !isFinite(ms) || ms <= 0) return '';
+  var d = new Date(ms);
+  var f = function (n) { return (n < 10 ? '0' : '') + n; };
+  return f(d.getHours()) + ':' + f(d.getMinutes());
+}
+function anlMsStr(ms) {
+  var v = (typeof ms === 'number' && isFinite(ms) && ms > 0) ? ms : 0;
+  return v >= 1000 ? (v / 1000).toFixed(1) + ' s' : Math.max(1, Math.round(v)) + ' ms';
+}
+
+// ---- L0 摘要：一行真实判读，全部由 health 字段推导（不是写死的文案）----
+function anlSumDyn(h) {
+  var parts = [];
+  if (h.dr_available === false || !anlHas(h.dr_db)) parts.push('素材过短 · 动态不适用');
+  else {
+    var dr = h.dr_db;
+    if (dr >= 14) parts.push('良好动态 · 古典/爵士常见');
+    else if (dr >= 11) parts.push('中等动态 · 摇滚/原声常见');
+    else if (dr >= 8) parts.push('动态偏紧 · 流行母带常见');
+    else parts.push('低动态 · 高压缩母带');
+  }
+  return parts.join(' · ');
+}
+function anlSumQual(h) {
+  var q = h.quality || {};
+  if (q.available !== true) return '不适用 · 样本不足';
+  // 数字静音/无有效音频：不能因为 clipped_samples=0 就说"干净"（0 段削波在静音里没有意义）。
+  if (!anlHas(q.peak_dbfs_q) || !anlHas(q.rms_dbfs)) return '无有效音频 · 指标不适用';
+  var parts = [];
+  var n = (typeof q.clipped_samples === 'number' && isFinite(q.clipped_samples)) ? q.clipped_samples : 0;
+  if (!n) parts.push('干净 · 无明显削波');
+  else if (q.clipped_runs > 0 && q.longest_clip_run >= 3) parts.push('有削波 · 最长 ' + q.longest_clip_run + ' 样本');
+  else parts.push('轻微削波 · ' + n + ' 样本');
+  // 不在摘要里用 snr_db 判"本底偏高"：quality.h 的 SNR = 全轨 RMS − 最低 10% 块电平，
+  // 对压缩过的流行乐天然只有 15~20 dB（那是动态小，不是噪声大）。原始值放 L1/L2。
+  return parts.join(' · ');
+}
+function anlSumFake(h) {
+  if (h.status && h.status !== 'ready') return '分析未完成';
+  var parts = [];
+  if (h.lossless_suspected) {
+    parts.push('疑似有损转码');
+    if (anlHas(h.cutoff_hz)) parts.push('截止 ' + (h.cutoff_hz / 1000).toFixed(1) + ' kHz');
+  } else {
+    parts.push('未发现');
+    // 「满带宽」必须有证据：截止频率接近 fs/2 才敢这么说，否则如实写"证据不足"
+    if (anlHas(h.cutoff_hz) && h.cutoff_hz > 0 && h.fs > 0) {
+      var ratio = h.cutoff_hz / (h.fs / 2);
+      parts.push(ratio >= 0.93 ? '满带宽' : ('带宽仅 ' + Math.round(ratio * 100) + '%'));
+    } else parts.push('未检出截止');
+  }
+  if (h.fake24) parts.push('24bit 实为低位深');
+  return parts.join(' · ');
+}
+
+function anlCard(key, title, badge, summary, body) {
+  return '<div class=anlcard data-k="' + key + '">' +
+         '<div class=anlchd title="点击切换详细程度"><span class=anlct>' + esc(title) + '</span>' + (badge || '') + '</div>' +
+         '<div class=anlcs>' + esc(summary || '') + '</div>' +
+         (body || '') + '</div>';
+}
+function anlEmptyBody(L) {
+  return L > 0 ? ('<div class=anlgrid>' + anlNote('点「分析」手动分析，或在设置 → 通用 → 播放 里开启「播放时自动分析」') + '</div>') : '';
+}
+
+// ① 动态：DR / LUFS / LRA / 样本峰值 / 真峰 / 声道（L1）；L2 追加采样规格与分析元数据
+function anlCardDyn(h, L, path) {
+  if (!h) return anlCard('dyn', '动态', '', anlEmptySummary(path), anlEmptyBody(L));
+  var badge = '';
+  if ((h.channels || 0) > 2) badge = '<span class=anlbadge>多声道 ' + h.channels + ' ch</span>';
+  var body = '';
+  if (L === 0) {
+    body = anlTpWarnHtml(h);
+  } else {
+    var g = '';
+    g += anlCell('动态范围 DR', anlDrV(h));
+    g += anlCell('响度 (LUFS)', anlLufsV(h));
+    g += anlCell('响度范围 LRA', anlLraV(h));
+    g += anlCell('真峰 (dBTP)', anlTpV(h));
+    g += anlCell('样本峰值', anlPeakV(h));
+    g += anlCell('声道', anlV((h.channels ? h.channels + ' ch' : ANL_NA), !h.channels));
+    g += anlTpWarnHtml(h);
+    if (L === 2) {
+      g += anlSec('采样规格');
+      g += anlCell('采样率', anlV(h.fs ? h.fs + ' Hz' : ANL_NA, !h.fs));
+      g += anlCell('位深', anlV(h.bits ? h.bits + ' bit' : ANL_NA, !h.bits));
+      g += anlCell('时长', anlDurV(h));
+      g += anlSec('分析记录');
+      g += anlCell('分析状态', anlV(h.status || ANL_NA, h.status !== 'ready'));
+      g += anlCell('分析时刻', anlV(anlClockStr(h.analyzed_at_ms) || ANL_NA, !anlClockStr(h.analyzed_at_ms)));
+      if (h.error) g += anlNote('后端说明：' + h.error);
+    }
+    body = '<div class=anlgrid>' + g + '</div>';
+  }
+  return anlCard('dyn', '动态', badge, anlSumDyn(h), body);
+}
+
+// ② 音质：削波 / 峰值因子 / 信噪比 / 频谱重心 / 10k 比 / 立体声相关（L1）；L2 是 19 项全量
+function anlCardQual(h, L, path) {
+  if (!h) return anlCard('qual', '音质', '', anlEmptySummary(path), anlEmptyBody(L));
+  var q = h.quality || {};
+  var body = '';
+  if (q.available !== true) {
+    // 样本不足时不摆一堆无意义的数字（那正是"看着很专业其实是噪声"的来源）
+    if (L > 0) {
+      var g0 = '';
+      g0 += anlSec('可用性');
+      g0 += anlCell('音质指标', anlV('不适用（样本不足）', true));
+      g0 += anlCell('谱窗数', anlV(anlInt(q.spectral_windows), !(q.spectral_windows > 0)));
+      g0 += anlNote(q.note || '素材太短或静音占比过高，无法做稳定的频谱统计');
+      body = '<div class=anlgrid>' + g0 + '</div>';
+    }
+    return anlCard('qual', '音质', '', anlSumQual(h), body);
+  }
+  if (L === 0) return anlCard('qual', '音质', '', anlSumQual(h), body);
+  var g = '';
+  g += anlCell('削波样本', anlClipV(q));
+  g += anlCell('最长连续削波', anlLongestV(q));
+  g += anlCell('峰值因子', anlFmtV(q.crest_db, 2, ' dB'));
+  g += anlCell('信噪比', anlFmtV(q.snr_db, 2, ' dB'));
+  g += anlCell('频谱重心', anlFmtV(q.centroid_hz, 0, ' Hz'));
+  g += anlCell('本底噪声', anlFmtV(q.noise_floor_dbfs, 2, ' dBFS'));
+  g += anlCell('10k 以上能量', anlHfV(h));
+  g += anlCell('立体声相关', anlCorrV(h));
+  if (L === 2) {
+    g += anlSec('失真');
+    g += anlCell('THD+N', anlThdnV(q));
+    g += anlCell('互调失真 IMD', anlImdV(q));
+    g += anlCell('非谐波残留', anlFmtV(q.non_tonal_db, 2, ' dB'));
+    g += anlCell('THD+N 方法', anlV(q.thdn_method || ANL_NA, !q.thdn_method));
+    g += anlSec('噪声');
+    g += anlCell('频谱最小值', anlFmtV(q.spectral_min_dbfs, 2, ' dBFS'));
+    g += anlCell('RMS', anlFmtV(q.rms_dbfs, 2, ' dBFS'));
+    g += anlCell('静音占比', anlFmtV(q.silence_pct, 2, '%'));
+    g += anlSec('频响');
+    g += anlCell('频谱倾斜', anlFmtV(q.tilt_db_per_oct, 2, ' dB/oct'));
+    g += anlCell('95% 滚降点', anlFmtV(q.rolloff95_hz, 0, ' Hz'));
+    g += anlCell('10k 以上能量', anlHfV(h));
+    g += anlCell('频谱重心', anlFmtV(q.centroid_hz, 0, ' Hz'));
+    g += anlSec('削波');
+    g += anlCell('削波样本', anlClipV(q));
+    g += anlCell('削波段数', anlRunsV(q));
+    g += anlCell('最长连续削波', anlLongestV(q));
+    g += anlCell('峰值因子', anlFmtV(q.crest_db, 2, ' dB'));
+    g += anlSec('立体声');
+    g += anlCell('声道相关', anlCorrV(h));
+    g += anlCell('单声道兼容损失', anlMonoLossV(h));
+    g += anlCell('side/mid', anlSideMidV(h));
+    g += anlSec('动态细化');
+    g += anlCell('P95−P10', anlFmtV(q.dyn_p95_p10_db, 2, ' dB'));
+    g += anlCell('动态重心', anlFmtV(q.dyn_centroid_dbfs, 2, ' dBFS'));
+    g += anlCell('安静段 P10', anlFmtV(q.quiet_p10_dbfs, 2, ' dBFS'));
+    g += anlCell('谱窗数', anlV(anlInt(q.spectral_windows), !(q.spectral_windows > 0)));
+    if (q.note) g += anlNote(q.note);
+  }
+  body = '<div class=anlgrid>' + g + '</div>';
+  return anlCard('qual', '音质', '', anlSumQual(h), body);
+}
+
+// ③ 假无损：判定 / 截止频率 / 置信度 / 谱窗数 / 时长 / 原因（L1）；L2 追加原始证据
+function anlCardFake(h, L, path) {
+  var badge = (h && h.fake24) ? '<span class=anlbadge>24bit 可疑</span>' : '';
+  if (!h) return anlCard('fake', '假无损', badge, anlEmptySummary(path), anlEmptyBody(L));
+  var body = '';
+  if (L > 0) {
+    var g = '';
+    g += anlCell('判定', anlVerV(h));
+    g += anlCell('截止频率', anlCutoffV(h));
+    g += anlCell('置信度', anlConfV(h));
+    g += anlCell('谱窗数', anlV(anlInt(h.quality && h.quality.spectral_windows), !(h.quality && h.quality.spectral_windows > 0)));
+    g += anlCell('时长', anlDurV(h));
+    g += anlCell('24bit 实为低位深', anlV(h.fake24 ? '是' : '否', false, !!h.fake24));
+    if (L === 2) {
+      g += anlSec('原始证据');
+      g += anlCell('lossless_suspected', anlV(h.lossless_suspected ? 'true' : 'false'));
+      g += anlCell('cutoff_hz', anlHas(h.cutoff_hz) ? anlV(h.cutoff_hz.toFixed(1) + ' Hz') : anlNA());
+      g += anlCell('confidence', anlHas(h.confidence) ? anlV(h.confidence.toFixed(3)) : anlNA());
+      g += anlCell('fs / 2', anlV(h.fs ? (h.fs / 2) + ' Hz' : ANL_NA, !h.fs));
+      g += anlCell('分析状态', anlV(h.status || ANL_NA, h.status !== 'ready'));
+      g += anlCell('分析时刻', anlV(anlClockStr(h.analyzed_at_ms) || ANL_NA, !anlClockStr(h.analyzed_at_ms)));
+    }
+    if (h.reason) { g += anlSec('判定依据'); g += anlNote(h.reason); }
+    body = '<div class=anlgrid>' + g + '</div>';
+  }
+  return anlCard('fake', '假无损', badge, anlSumFake(h), body);
+}
+// 数值单元格的通用包装（把 anlFmt 的字符串变成 anlV：值不可用时是 NA 而不是 "不适用 dB"）
+function anlFmtV(v, digits, unit) {
+  return anlHas(v) ? anlV(v.toFixed(digits) + (unit || '')) : anlNA();
+}
+function anlEmptySummary(path) {
+  return (path && !anlIsLocal(path)) ? '网络曲目不做本地分析' : '尚未分析';
+}
+// 三张卡片的 HTML（纯函数：给同一份 health 永远得到同一份输出，便于单独验收）
+function anlCardsHtml(h, path, lvl) {
+  var L = Math.max(0, Math.min(2, (lvl | 0)));
+  return anlCardDyn(h || null, L, path) + anlCardQual(h || null, L, path) + anlCardFake(h || null, L, path);
+}
+
+// ---- 传输：生产路径必须能真的把请求掐断（AbortSignal），测试注入 window.api 时走假后端 ----
+function anlFetch(u, ctrl) {
+  // api() 是全站统一的 fetch 包装，不接受 AbortSignal；而"切歌立刻取消 / 240 s 超时"必须真的
+  // 断开请求（否则 socket 与后端解析都还在）。所以这里直接用 fetch。
+  // 例外：自动化测试（tools/check_114_analysis_ui.js）会把 window.api 换成假后端 ——
+  // 那时必须走它，否则判据打不到生产的分析状态机，只能证明测试自己写的逻辑自洽。
+  if (ANL_API_PROD && typeof window.api === 'function' && window.api !== ANL_API_PROD) {
+    try { return Promise.resolve(window.api(u)); } catch (e) { return Promise.reject(e); }
+  }
+  return fetch(u, { signal: ctrl ? ctrl.signal : undefined, cache: 'no-store' }).then(function (r) {
+    return r.json();
+  });
+}
+// 让服务器停下当前分析（只置取消标志，不杀线程）。fire-and-forget：失败绝不能影响界面。
+function anlCancelServer() {
+  try {
+    if (typeof window.api !== 'function') return;
+    var r = window.api('/api/anl/cancel', '');
+    if (r && r.catch) r.catch(function () { });
+  } catch (e) { }
+}
+function anlAbortInFlight() {
+  if (ANL.ctrl) {
+    try { ANL.ctrl.abort(); } catch (e) { }
+  }
+  ANL.ctrl = null;
+}
+
+// 分析一首曲目。force=true 忽略服务端缓存（手动「分析」按钮）。
+function anlAnalyze(path, force) {
+  var p = path || '';
+  if (!anlIsLocal(p)) { toast('当前没有可分析的本地曲目'); return null; }
+  var seq = ANL.seq;
+  var req = ++ANL.req;
+  // 同一首重复点「分析」：先掐掉上一个在途请求（两个请求的结果不能互相覆盖）
+  anlAbortInFlight();
+  var ctrl = (typeof AbortController === 'function') ? new AbortController() : null;
+  ANL.ctrl = ctrl;
+  // busy 存的是**本次请求号**而不是 true：被新请求掐掉的那个旧请求回来时不能把"正在分析"擦掉
+  ANL.busy[p] = req;
+  ANL.err = '';
+  ANL.paintSig = '';
+  anlPaint();
+  var timedOut = false;
+  var timer = setTimeout(function () {
+    timedOut = true;
+    if (ctrl) { try { ctrl.abort(); } catch (e) { } }
+  }, ANL_TIMEOUT_MS);
+  var u = '/api/health?file=' + encodeURIComponent(p) + (force ? '&force=1' : '');
+  return anlFetch(u, ctrl).then(function (j) {
+    clearTimeout(timer);
+    if (ANL.ctrl === ctrl) ANL.ctrl = null;
+    if (ANL.busy[p] === req) ANL.busy[p] = false;
+    // 过期结果一律丢弃：切歌 / 重复请求 / 已经不在播放这一首
+    if (seq !== ANL.seq || p !== ANL.cur || p !== S.lastCur) return;
+    if (j && j.cancelled) { anlPaint(); return; }     // 后端主动取消：不是错误
+    if (!j || j.ok === false) {
+      ANL.err = (j && j.error) || '分析失败';
+      ANL.paintSig = '';
+      anlPaint();
+      return;
+    }
+    var h = j.health;
+    if (!h || h.status === 'error' || h.status === 'cancelled') {
+      ANL.err = (h && h.error) || (j && j.error) || '分析失败';
+      ANL.paintSig = '';
+      anlPaint();
+      return;
+    }
+    ANL.cache[p] = h;
+    ANL.meta[p] = { cached: !!j.cached, ms: (typeof j.ms === 'number' ? j.ms : 0), at: Date.now(), req: req };
+    ANL.err = '';
+    ANL.paintSig = '';
+    anlPaint();
+  }).catch(function (e) {
+    clearTimeout(timer);
+    if (ANL.ctrl === ctrl) ANL.ctrl = null;
+    if (ANL.busy[p] === req) ANL.busy[p] = false;
+    if (seq !== ANL.seq || p !== ANL.cur) return;      // 切歌导致的 abort：安静退出
+    var aborted = (e && (e.name === 'AbortError' || /abort/i.test(String(e.message || ''))));
+    if (aborted && !timedOut) { anlPaint(); return; }  // 用户主动取消：不报错
+    ANL.err = timedOut ? '分析超时（240 s）' : ('分析失败：' + ((e && e.message) || '无法连接后端'));
+    ANL.paintSig = '';
+    anlPaint();
+  });
+}
+
+// 每轮状态轮询都调一次：切歌即取消；自动分析每曲只跑一次。
+function anlTick(path, active) {
+  var p = path || '';
+  if (p !== ANL.cur) {
+    var prev = ANL.cur;
+    anlAbortInFlight();
+    ANL.seq++;                    // 让所有迟到的响应对不上号
+    ANL.cur = p;
+    ANL.lvl = 0;                  // 层级跟着曲目复位；暂停 / 拖动进度**不**复位
+    ANL.err = '';
+    ANL.paintSig = '';
+    if (prev) anlCancelServer();  // 让服务器也停下上一首的分析
+    anlPaint();
+    return;
+  }
+  if (!p || !active) return;
+  if (!ANL.auto) return;
+  if (ANL.autoDone === p) return;          // 每曲只自动跑一次（暂停/继续/拖动都不重新触发）
+  if (ANL.busy[p] || ANL.cache[p]) return;
+  if (!anlIsLocal(p)) return;
+  ANL.autoDone = p;
+  anlAnalyze(p, false);
+}
+
+function anlSetLvl(n) {
+  var v = n | 0;
+  if (v < 0) v = 0;
+  if (v > 2) v = 2;
+  if (ANL.lvl === v) return;
+  ANL.lvl = v;
+  anlPaint();
+}
+function anlRunManual() {
+  var p = ANL.cur || S.lastCur || '';
+  if (!anlIsLocal(p)) { toast('当前没有可分析的本地曲目'); return; }
+  anlAnalyze(p, true);
+}
+
+// 状态文字：未播放 / 正在分析… / 12.3 s · 缓存命中 / 分析失败 · 点击重试 / 分析于 HH:MM
+function anlStatText(p, h, m, busy) {
+  if (!p) return '未播放';
+  if (!anlIsLocal(p)) return '仅本地文件可分析';
+  if (busy) return '正在分析…';
+  if (ANL.err) return '分析失败 · 点击重试';
+  if (h) {
+    if (m && m.cached) return anlMsStr(m.ms) + ' · 缓存命中';
+    if (m && m.at) return '分析于 ' + anlClockStr(m.at);
+    if (anlClockStr(h.analyzed_at_ms)) return '分析于 ' + anlClockStr(h.analyzed_at_ms);
+    return '已分析';
+  }
+  return '未分析';
+}
+
+// 重绘面板。签名不变就一个字都不动（否则 400 ms 轮询会把悬停/滚动/展开打回去）。
+function anlPaint() {
+  var body = D('npAnlBody');
+  if (!body) return;
+  var p = ANL.cur || '';
+  var h = p ? (ANL.cache[p] || null) : null;
+  var m = p ? (ANL.meta[p] || null) : null;
+  var busy = !!(p && ANL.busy[p]);
+  var lvl = ANL.lvl | 0;
+  var at = (h && typeof h.analyzed_at_ms === 'number') ? h.analyzed_at_ms : 0;
+  var sig = p + '|' + lvl + '|' + (busy ? 1 : 0) + '|' + (ANL.err || '') + '|' + at + '|' + ((m && m.cached) ? 1 : 0);
+  if (sig === ANL.paintSig) return;
+  ANL.paintSig = sig;
+  var stat = D('npAnlStat');
+  if (stat) {
+    stat.textContent = anlStatText(p, h, m, busy);
+    stat.style.cursor = ANL.err ? 'pointer' : '';
+    stat.title = ANL.err ? '点击重试'
+      : (p ? (anlIsLocal(p) ? ('当前曲目：' + (p.split(/[\\/]/).pop() || p)) : '网络曲目不做本地分析') : '当前没有播放曲目');
+  }
+  var tg = D('npAnlToggle');
+  if (tg) {
+    // 按钮文案写的是**点下去会发生什么**（L0 → 详细 → 全部指标 → 收起）
+    tg.textContent = (lvl === 0) ? '详细' : (lvl === 1 ? '全部指标' : '收起');
+    tg.title = (lvl === 0) ? '展开：每张卡显示指标（2 列）'
+      : (lvl === 1 ? '展开：显示全部原始指标' : '收起：只留一行摘要');
+  }
+  body.innerHTML = anlCardsHtml(h, p, lvl);
+}
+
+// 绑定（onclick 赋值 ⟹ 天然幂等；每次打开单曲页重绑一次也无害）
+function anlBind() {
+  var tg = D('npAnlToggle');
+  if (tg) tg.onclick = function () { anlSetLvl((ANL.lvl + 1) % 3); };
+  var run = D('npAnlRun');
+  if (run) run.onclick = anlRunManual;
+  var stat = D('npAnlStat');
+  if (stat) stat.onclick = function () { if (ANL.err && anlIsLocal(ANL.cur)) anlAnalyze(ANL.cur, false); };
+  var body = D('npAnlBody');
+  if (body && !body._anlBound) {
+    body._anlBound = 1;
+    body.onclick = function (ev) {
+      var el = ev.target;
+      var hd = (el && el.closest) ? el.closest('.anlchd') : null;
+      if (hd) anlSetLvl((ANL.lvl + 1) % 3);      // 点卡头 = 同样的一级（可选入口）
+    };
+  }
+}
+function anlInit() {
+  ANL_API_PROD = (typeof window.api === 'function') ? window.api : null;
+  try { anlBind(); } catch (e) { }
+  try { anlPaint(); } catch (e) { }
+}
+
 function openModal(title, html) {
   var m = D('modal'); if (!m) return;
   D('mtitle').textContent = title;
@@ -8624,7 +9214,10 @@ function renderSettingsPage() {
      + sgroup('播放', '',
          sel('sp_rep', '循环模式', D('sRep').innerHTML, '')
        + chk('sp_shuf', '随机播放', D('sShuf').checked, '关掉会恢复原顺序')
-       + chk('sp_loud', '等响度补偿', D('sLoud').checked, '音量越低低频提升越多'))
+       + chk('sp_loud', '等响度补偿', D('sLoud').checked, '音量越低低频提升越多')
+       // 1.1.4：单曲页「音频分析」的自动开关。默认关；只分析本地文件，每曲只跑一次，切歌立即取消。
+       + chk('sp_autoanl', '播放时自动分析（后台）', ADV.autoanl == 1,
+             '默认关闭；只分析本地文件，每曲只跑一次，切歌立即取消；不会占用播放线程'))
      + '</div>';
 
   // ---------- EQ（PEQ 20段 + 耳机 EQ OPRA） ----------
@@ -9159,8 +9752,11 @@ function renderSettingsPage() {
   function _resetAll() {
     if (!confirm('把所有参数恢复成默认值？')) return;
     ADV = { device: '', bits: 0, taps: 0, atten: 0, transition: 0, phase: '', modcut: 0, moddith: -1, ir: '', irgpu: 0, ramp: 0, theme: S.theme, modorder: 5, modfamily: 'dsd', directsdm: 0, dsdKind: 'fir', dsdConv: 'narrow',
-            backend: 'wasapi', channels: 0, naaHost: '',
+            backend: 'wasapi', channels: 0, naaHost: '', autoanl: 0,
             inBackend: 'none', inDev: '', inOffset: 0, inBuf: 100, inMonitor: 0, inSeconds: 0, inOut: '' };
+    // 1.1.4：「恢复默认」必须把**内存里的**自动分析开关一并关掉 —— 复选框会跟着 ADV 重建为未勾选，
+    //   若 ANL.auto 不同步归零，界面显示"关"而实际还在后台分析（比不重置更糟）。
+    ANL.auto = 0;
     // 元数据两键的默认：自动补全开；AI 增强关（联网计费项默认关，避免「恢复默认」反而产生费用）。
     // 源开关随注册表一并全开。
     META = { on: 1, llm: 0, summary: 0 };
@@ -9224,6 +9820,17 @@ function renderSettingsPage() {
       toast(this.checked
         ? '已开启严格独占：系统音量条将失效，请用本程序音量条调音量'
         : '已关闭严格独占：系统音量可正常调节');
+    };
+  }
+  // 1.1.4：自动分析开关（默认关）。打开时若当前正在播放本地曲目，立刻补跑一次 ——
+  //   否则用户会以为"勾了没反应"（要等下一次切歌）。anlTick 自带去重（每曲只跑一次），
+  //   重复触发无副作用；暂停中不触发（只在真的在播放时分析）。
+  if (D('sp_autoanl')) {
+    D('sp_autoanl').onchange = function () {
+      ADV.autoanl = this.checked ? 1 : 0;
+      ANL.auto = this.checked ? 1 : 0;
+      saveSettings();
+      if (ANL.auto) anlTick(S.lastCur || '', !!(S.playing && !S.paused));
     };
   }
   D('sp_addroot').onclick = function () {
@@ -11106,6 +11713,10 @@ function openNowPlaying() {
     if (!S.curMeta) loadMeta(S.lastCur);
   }
   renderNp();
+  // 1.1.4：分析面板的按钮/卡头点击在这里绑一次（onclick 赋值 + 委托，重复调用无副作用），
+  //   然后立刻重绘 —— 进入单曲页要马上看到当前曲目的摘要，而不是等下一轮轮询。
+  anlBind();
+  anlPaint();
   // 261024-04 #7：进入单曲页立刻自动加载这首歌的 AI 整理（不必等 400ms 的 renderNp 轮询）
   npAutoSummary();
   // 整页控件是底栏/设置页的镜像：进来时刷一次，绝不显示与底栏不同的值
@@ -11623,6 +12234,8 @@ function renderNp() {
     D('npCover').style.display = '';
   }
   renderNpLyric();
+  // 1.1.4：整页每次重绘的最后一步刷分析面板（anlPaint 内部有签名去重，签名没变就一个字不动）
+  anlPaint();
 }
 // 整页歌词（261024-02 #4 重做）
 //   * 当前行 .on 由**时间戳**决定（二分不需要，行数最多几百，线性即可）；
@@ -11924,6 +12537,16 @@ try {
   window.DEVMIX = DEVMIX;
   window.S = S;
   window.ADV = ADV;
+  // 1.1.4 音频分析面板：状态机与纯渲染函数对外暴露 —— 自动化验收
+  // （tools/check_114_analysis_ui.js）要驱动**生产代码**，而不是在测试里另写一份逻辑。
+  window.ANL = ANL;
+  window.anlTick = anlTick;
+  window.anlAnalyze = anlAnalyze;
+  window.anlPaint = anlPaint;
+  window.anlBind = anlBind;
+  window.anlSetLvl = anlSetLvl;
+  window.anlCardsHtml = anlCardsHtml;
+  window.anlIsLocal = anlIsLocal;
 } catch (e) { }
 if (D('npFavBtn')) D('npFavBtn').onclick = function (ev) { if (S.lastCur) toggleFav(S.lastCur, ev); };
 // 2026-10-26 F-1/B-3：底栏跑马灯。必须在 DOM 就绪后挂，且失败绝不能影响启动 —
@@ -11944,6 +12567,8 @@ loadRates();
 loadAlbums('');
 loadQ();
 loadSrcConfig();
+// 1.1.4：分析面板先绑定再开始轮询 —— tick() 里会调 anlTick，按钮还没绑就会"点了没反应"。
+anlInit();
 tick();
 pollStart();
 

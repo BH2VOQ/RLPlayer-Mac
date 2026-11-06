@@ -41,6 +41,7 @@
 #include <string>
 #include <vector>
 #include <cstdint>
+#include <atomic>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
@@ -54,6 +55,12 @@ struct TrackHealth {
     double lufs = 0.0;
     double lra = 0.0;
     double peakDbfs = 0.0;
+    // true peak / 可用性（dynamics.h 原样透传；JSON additive keys，见 track_health_json）
+    double truePeakDbtp = 0.0;        // 4× 过采样峰值；不可用时 JSON 写 -300
+    bool   truePeakAvailable = false;
+    bool   drAvailable = false;
+    bool   lraAvailable = false;
+    bool   lufsAvailable = false;
     // 假无损（fake_lossless.h 原样透传）
     bool   losslessSuspected = false;
     double cutoffHz = 0.0;
@@ -84,6 +91,11 @@ struct TrackHealth {
 struct HealthStreamOptions {
     size_t blockFrames = 65536;  // 分块帧数（建议 65536~262144；取 1000 结果也一样）
     bool   stream = true;        // false = 强制整段路径（对照 / 回退 / 排错）
+    // 可选取消标志：drive_health 在每个分块循环开头检查；置 true 后尽快返回
+    // status="cancelled"（errorCode="analysis.cancelled"），不再继续解码。
+    // 生命周期由调用方负责（整个 analyze_file 调用期间必须保持有效）；nullptr = 不取消。
+    // 注意 analyze_file_whole 是整曲一口气解码，没有取消支持（见其注释）。
+    std::atomic<bool>* cancel = nullptr;
 };
 
 namespace detail {
@@ -91,6 +103,26 @@ namespace detail {
 inline int64_t now_ms() {
     return (int64_t)std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::system_clock::now().time_since_epoch()).count();
+}
+
+// 取消结果：status/error/errorCode 三个字段是稳定契约（errorCode 供程序判断，
+// 不从翻译后的 error 文案反推）。partial 非空时保留已解析出的元信息；
+// 分析还没开始（拿不到文件元信息）时只填 analyzedAtMs。
+inline TrackHealth cancelled_health(const TrackHealth* partial = nullptr) {
+    TrackHealth h;
+    if (partial) {
+        h.fs = partial->fs;
+        h.channels = partial->channels;
+        h.bits = partial->bits;
+        h.durationSec = partial->durationSec;
+        h.analyzedAtMs = partial->analyzedAtMs;
+    } else {
+        h.analyzedAtMs = now_ms();
+    }
+    h.status = "cancelled";
+    h.error = "分析已取消";
+    h.errorCode = "analysis.cancelled";
+    return h;
 }
 
 // JSON 字符串转义（对齐 rtaweb.cpp 的 jesc；补全 \b \f \r 三种短转义）。
@@ -147,7 +179,8 @@ private:
 // 通用流式驱动：src 需提供 rate()/channels()/bits()/isFloat()/totalFrames()/read(pos,n,out)。
 // 逐块把交错样本转成 double 喂给两个增量分析器；峰值内存 = 一个块 + 分析器常数状态。
 template <class Src>
-inline TrackHealth drive_health(Src& src, size_t blockFrames, bool* streamedOk) {
+inline TrackHealth drive_health(Src& src, size_t blockFrames, bool* streamedOk,
+                                std::atomic<bool>* cancel = nullptr) {
     TrackHealth h;
     h.fs = src.rate();
     h.channels = src.channels();
@@ -179,6 +212,10 @@ inline TrackHealth drive_health(Src& src, size_t blockFrames, bool* streamedOk) 
     rta::audio::AudioBuffer chunk;
     size_t pos = 0;
     while (pos < total) {
+        // 取消只在这里检查：块与块之间是安全的退出点，不会留下半块状态。
+        // fs/channels/bits/analyzedAtMs 在循环前已填好，cancelled_health(&h) 原样保留。
+        if (cancel && cancel->load(std::memory_order_relaxed))
+            return cancelled_health(&h);
         const size_t n = std::min(step, total - pos);
         const size_t got = src.read(pos, n, chunk);
         if (got == 0) break;
@@ -200,6 +237,11 @@ inline TrackHealth drive_health(Src& src, size_t blockFrames, bool* streamedOk) 
     h.lufs = d.lufsIntegrated;
     h.lra = d.lra;
     h.peakDbfs = d.peakDbfs;
+    h.truePeakDbtp = d.truePeakDbtp;
+    h.truePeakAvailable = d.truePeakAvailable;
+    h.drAvailable = d.drAvailable;
+    h.lraAvailable = d.lraAvailable;
+    h.lufsAvailable = d.lufsAvailable;
     h.losslessSuspected = lc.suspected;
     h.cutoffHz = lc.cutoffHz;
     h.confidence = lc.confidence;
@@ -231,10 +273,13 @@ inline TrackHealth drive_health(Src& src, size_t blockFrames, bool* streamedOk) 
 // 内部按 65536 帧分块喂增量分析器（不再铺整段 double 平面），结果与整段接口逐位相同。
 inline TrackHealth analyze_buffer(const rta::audio::AudioBuffer& buf) {
     detail::BufferSource src(buf);
-    return detail::drive_health(src, 65536, nullptr);
+    return detail::drive_health(src, 65536, nullptr, nullptr);   // 内存缓冲不可取消
 }
 
 // 整段路径（老实现，保留作为回退与对照基准）：read_any 整曲解码 + analyze_buffer。绝不抛异常。
+// ★ 本路径【没有取消支持】：read_any 与 analyze_buffer 一口气跑完，中途无法安全打断。
+//   需要取消的调用方必须走 analyze_file(..., opt.cancel=...)：analyze_file 在取消已请求时
+//   直接返回 cancelled，绝不在取消后回退到这里。
 inline TrackHealth analyze_file_whole(const std::string& path) {
     TrackHealth h;
     try {
@@ -256,17 +301,31 @@ inline TrackHealth analyze_file_whole(const std::string& path) {
 
 // 文件级入口（流式优先）：能分块读就分块读；任何环节不成立就回退 analyze_file_whole。
 // 绝不向调用方抛异常。
+//
+// 取消契约（opt.cancel）：
+//   * 流式块循环在每个块开头检查，置位后返回 status="cancelled" 且不再解码；
+//   * 任何可能回退整段路径的岔口都会再查一次 —— 取消已请求时【绝不】进入
+//     analyze_file_whole（整段解码不可中断，详见其注释）；
+//   * 没走到流式源（stream=false / 无法打开）时也能立即返回 cancelled。
 inline TrackHealth analyze_file(const std::string& path, const HealthStreamOptions& opt) {
+    const auto cancel_requested = [&] {
+        return opt.cancel && opt.cancel->load(std::memory_order_relaxed);
+    };
+    if (cancel_requested()) return detail::cancelled_health();
     if (opt.stream) {
         detail::HealthSource src;
         std::string why;
         if (src.open(path, &why)) {
             bool ok = false;
-            TrackHealth h = detail::drive_health(src, opt.blockFrames, &ok);
+            TrackHealth h = detail::drive_health(src, opt.blockFrames, &ok, opt.cancel);
+            if (h.status == "cancelled") return h;   // 流式循环已取消：保留元信息，不回退
             if (ok && h.status == "ready") return h;
             // 短读/计划不成立/无样本：回退整段路径，用老实现的结论（错误信息也由它给）。
+            // 回退前再查一次取消：此时 h 已带 fs/channels/bits/analyzedAtMs，原样保留。
+            if (cancel_requested()) return detail::cancelled_health(&h);
         }
     }
+    if (cancel_requested()) return detail::cancelled_health();
     return analyze_file_whole(path);
 }
 
@@ -282,6 +341,13 @@ inline std::string track_health_json(const TrackHealth& h) {
       << ",\"lufs\":"       << detail::jnum(h.lufs, "%.3f")
       << ",\"lra\":"        << detail::jnum(h.lra, "%.3f")
       << ",\"peak_dbfs\":"  << detail::jnum(h.peakDbfs, "%.3f")
+      // ---- true peak / 可用性（1.1.4 新增；additive only，老键一个不动）----
+      // true_peak_dbtp 在不可用时写 -300（与 lufs 的哨兵口径一致），不写 0（0 会被读成 0 dBTP）。
+      << ",\"true_peak_dbtp\":" << detail::jnum(h.truePeakAvailable ? h.truePeakDbtp : -300.0, "%.3f")
+      << ",\"true_peak_available\":" << (h.truePeakAvailable ? "true" : "false")
+      << ",\"dr_available\":"   << (h.drAvailable ? "true" : "false")
+      << ",\"lra_available\":"  << (h.lraAvailable ? "true" : "false")
+      << ",\"lufs_available\":" << (h.lufsAvailable ? "true" : "false")
       << ",\"lossless_suspected\":" << (h.losslessSuspected ? "true" : "false")
       << ",\"cutoff_hz\":"  << detail::jnum(h.cutoffHz, "%.1f")
       << ",\"confidence\":" << detail::jnum(h.confidence, "%.3f")
@@ -317,6 +383,7 @@ inline std::string track_health_json(const TrackHealth& h) {
       << ",\"tilt_db_per_oct\":" << detail::jnum(h.quality.tiltDbPerOct, "%.3f")
       << ",\"rolloff95_hz\":"  << detail::jnum(h.quality.rolloff95Hz, "%.1f")
       << ",\"hf_ratio_10k_db\":" << detail::jnum(h.quality.hfRatio10kDb, "%.3f")
+      << ",\"hf_ratio_10k_available\":" << (h.quality.hfRatio10kAvailable ? "true" : "false")
       // 4. 削波 / 峰值
       << ",\"peak_dbfs_q\":"   << detail::jnum(h.quality.peakDbfs, "%.3f")
       << ",\"rms_dbfs\":"      << detail::jnum(h.quality.rmsDbfs, "%.3f")
@@ -330,6 +397,7 @@ inline std::string track_health_json(const TrackHealth& h) {
       << ",\"channel_corr\":"  << detail::jnum(h.quality.channelCorr, "%.4f")
       << ",\"mono_loss_db\":"  << detail::jnum(h.quality.monoLossDb, "%.3f")
       << ",\"side_mid_db\":"   << detail::jnum(h.quality.sideMidDb, "%.3f")
+      << ",\"side_mid_available\":" << (h.quality.sideMidAvailable ? "true" : "false")
       // 6. 动态细化
       << ",\"dyn_p95_p10_db\":" << detail::jnum(h.quality.dynP95P10Db, "%.3f")
       << ",\"dyn_centroid_dbfs\":" << detail::jnum(h.quality.dynCentroidDbfs, "%.3f")

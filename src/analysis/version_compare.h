@@ -11,11 +11,14 @@
 //   2) 排序：必须能说出「为什么 A 比 B 好」，而不是给个黑箱数字。
 //
 // ================== 对齐（不猜，用互相关） ==================
-//  * 包络：每文件按 200 Hz 取单声道 RMS 包络（5 ms 一点），与版本无关、与编码无关；
-//  * 粗对齐：FFT 互相关（不是 O(n²) 直接算 —— 5 分钟曲子 6 万个点直接算要 3.6e9 次乘加），
-//    取归一化互相关峰的位置做包络级延迟；包络粒度 5 ms。
-//  * 相似度门限：对齐后归一化包络相关 < 0.55 ⟹ 判为「不是同一首」，全部对比作废
-//    （不同母带同一首歌实测 0.8~0.99；两首不同的曲子 0.1~0.3，余量很大）。
+//  * 包络：每文件按 200 Hz 取单声道 RMS 包络（5 ms 一点），与版本无关、与编码无关。
+//    原始包络只作诊断/兼容；对齐与判同曲用它的 11 点（55 ms）居中平滑版，
+//    见 VersionData::envSmooth 的说明（5 ms 原始包络对低音相位敏感，会给出几秒的错误延迟）。
+//  * 粗对齐：在平滑包络上做 FFT 互相关（不是 O(n²) 直接算 —— 5 分钟曲子 6 万个点直接算要
+//    3.6e9 次乘加），取峰的位置做包络级延迟；再在粗峰 ±8 点（±40 ms）内用 3 点（15 ms）
+//    平滑包络细化，最终延迟粒度仍是 5 ms。
+//  * 相似度门限：对齐后平滑包络的归一化相关 < 0.45 ⟹ 判为「不是同一首」，全部对比作废
+//    （门限依据见 CompareOptions；本机合成夹具的余量见 tests/test_version_compare.cpp）。
 //  * 公共区段：把各版本按其延迟换算成时间轴，取所有版本都覆盖的那一段，
 //    然后【只在这一段上重算全部指标】—— 否则一个版本多 10 秒前导静音就会污染
 //    本底噪声、静音占比、动态重心等所有统计量。
@@ -115,9 +118,13 @@ private:
 // ---------------- 结果结构 ----------------
 struct CompareOptions {
     size_t blockFrames = 65536;
-    // 判同曲门限。实测（本机曲库，200 Hz 包络、重叠段 Pearson）：
-    //   同一首不同母带 0.53 / 0.56（真实曲库两对）；不同曲子 0.04 / 0.25 / 0.29。
-    // 取 0.45 落在两簇之间；0.45~0.7 属"像同一首但母带/剪辑不同"，解释里会额外提示。
+    // 判同曲门限（200 Hz 包络、重叠段 Pearson）。老口径（原始 5 ms 包络，本机曲库）：
+    //   同一首不同母带 0.53 / 0.56；不同曲子 0.04 / 0.25 / 0.29。
+    // 1.1.4 起判据改用 11 点平滑包络，相关值整体上移（本机合成夹具：同一内容裁 1 s /
+    //   前置 3 s 静音 0.96；两首不同的低音素材 0.16~0.24），0.45 仍落在两簇之间且余量更大。
+    // ⚠ 未解决项：真实曲库「同一首不同母带」在平滑包络上的值尚未重测，沿用老口径 0.53~0.56
+    //   作为"会低到 0.5 左右"的下界参考（铁律 4）。
+    // 0.45~0.7 属"像同一首但母带/剪辑不同"，解释里会额外提示。
     double minEnvCorr = 0.45;
     bool   verbose = false;       // true 时把对齐/耗时打到 stderr
 };
@@ -145,7 +152,16 @@ struct VersionData {
     double envCorr = 1.0;
     long long windowStartFrames = 0;
     size_t windowFrames = 0;
-    std::vector<float> env;       // 200 Hz 单声道 RMS 包络（对齐用；不参与评分）
+    std::vector<float> env;       // 200 Hz 单声道 RMS 包络（原始 5 ms；诊断/兼容用；不参与评分）
+    // 平滑后的包络（≈55 ms 居中移动平均）——【对齐与判同曲只用这一个】。
+    // ★ 为什么必须有它（上游 2026-10-27 DEBUG，本机 44.1k 复现）：5 ms RMS 窗比低音的周期还短
+    //   （98 Hz 一周期 10.2 ms ⟹ 一窗只有半个周期），每个 bin 的 RMS 强烈依赖窗的起始相位。
+    //   44.1 kHz 的 hop 是 220 样本，1 s 平移 = 200.45 个 hop（不是整数），各 bin 的相位整体错位，
+    //   同一段音频的原始包络互相关会从 1.00 掉到 0.55 左右，峰值还会跑到完全错误的延迟上
+    //   （本机合成夹具实测：同一内容裁掉前 1 s ⟹ 原实现 lag=+2.03 s（真值 −1.0），真延迟处相关
+    //   只有 0.57；前置 3 s 数字静音 ⟹ 原实现 lag=+2.93 s（真值 +3.0），真延迟处相关 0.61）。
+    //   11 点平滑对 98 Hz 纹波衰减 ≈21 dB，峰值回到真延迟、相关 0.95+。
+    std::vector<float> envSmooth;
     // 公共区段上的指标
     QualityResult quality;
     DynamicsResult dynamicsTimes;
@@ -260,6 +276,28 @@ inline double overlap_corr(const std::vector<float>& a, const std::vector<float>
     return cov / std::sqrt(va * vb);
 }
 
+// 对齐用的包络平滑宽度（点数，1 点 = 1/200 s）。11 点 ≈ 55 ms：
+// 比最低乐音周期（约 30 Hz ⟹ 33 ms）长，足以把「5 ms 窗起始相位」的影响平均掉；
+// 又远短于音乐结构（4~8 s 的乐句），不会把相邻的鼓点糊成一个包。
+inline constexpr int kAlignSmooth = 11;
+
+// 居中移动平均（两端按实际可用点数平均，不补零 —— 补零会在首尾制造假的下凹）。
+inline std::vector<float> smooth_env(const std::vector<float>& x, int w) {
+    if (w <= 1 || x.size() < 3) return x;
+    std::vector<float> o(x.size(), 0.0f);
+    const int h = w / 2;
+    for (long long i = 0; i < (long long)x.size(); ++i) {
+        double s = 0.0; int n = 0;
+        for (int k = -h; k <= h; ++k) {
+            const long long j = i + k;
+            if (j < 0 || j >= (long long)x.size()) continue;
+            s += x[(size_t)j]; ++n;
+        }
+        o[(size_t)i] = (float)(s / (double)std::max(1, n));
+    }
+    return o;
+}
+
 // 线性锚点映射到 0..100（低于 lo 记 0，高于 hi 记 100）
 inline double map_range(double v, double lo, double hi) {
     if (!(hi > lo)) return 0.0;
@@ -314,7 +352,7 @@ inline VersionCompare compare_versions(const std::vector<std::string>& paths, co
         out.versions[i].label = "V" + std::to_string(i + 1);
     }
 
-    // ---- 第一遍：包络 + 元信息（内存只留包络，与曲长弱相关：4 B / 5 ms ≈ 0.8 MB/小时）----
+    // ---- 第一遍：包络 + 元信息（内存只留包络：原始 + 平滑两份，≈1.6 MB/小时，与曲长弱相关）----
     std::vector<std::unique_ptr<PcmFile>> srcs;
     for (size_t i = 0; i < paths.size(); ++i) {
         auto pf = std::make_unique<PcmFile>();
@@ -343,22 +381,42 @@ inline VersionCompare compare_versions(const std::vector<std::string>& paths, co
         }
         srcs.push_back(std::move(pf));
         v.env.swap(renorm);
+        v.envSmooth = vcdetail::smooth_env(v.env, vcdetail::kAlignSmooth);
     }
     out.enrollMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
     auto t1 = std::chrono::steady_clock::now();
 
     // ---- 对齐：全部对参考版本（V1）做互相关 ----
-    const std::vector<float>& refEnv = out.versions[0].env;
+    // ★ 只用【平滑包络】求延迟与判同曲（理由见 VersionData::envSmooth 的注释：5 ms 原始包络
+    //   对低音相位敏感，44.1k 上同一内容裁 1 s 的峰会偏到 +2.03 s、真延迟处相关只剩 0.57，
+    //   而且仍能过 0.45 的同曲门）。
+    const std::vector<float>& refEnv = out.versions[0].envSmooth;
+    // 细化用的中间尺度包络（3 点 ≈ 15 ms）：11 点平滑的峰太宽，实测「前置 0.5 s 静音」会偏 20 ms，
+    // 而 20 ms 足以让同一内容在 30 s 素材上差 2 分以上。所以两级：
+    //   ① 11 点平滑上求峰（抗低频相位，绝不滑到别的周期）；
+    //   ② 只在粗峰 ±8 点（±40 ms）内用 3 点平滑包络重新取峰（更锐，且不会跑远）。
+    std::vector<std::vector<float>> refineEnv(out.versions.size());
+    for (size_t i = 0; i < out.versions.size(); ++i)
+        refineEnv[i] = vcdetail::smooth_env(out.versions[i].env, 3);
     double worstCorr = 2.0;
     for (size_t i = 1; i < out.versions.size(); ++i) {
         long long lag = 0; double corr = 0.0;
-        vcdetail::best_lag(refEnv, out.versions[i].env, &lag, &corr);
+        vcdetail::best_lag(refEnv, out.versions[i].envSmooth, &lag, &corr);
+        {
+            long long bestLag = lag;
+            double bestC = vcdetail::overlap_corr(refineEnv[0], refineEnv[i], lag);
+            for (int dd = -8; dd <= 8; ++dd) {
+                const double c = vcdetail::overlap_corr(refineEnv[0], refineEnv[i], lag + dd);
+                if (c > bestC) { bestC = c; bestLag = lag + dd; }
+            }
+            lag = bestLag;
+        }
         // r[k] = Σ a[n]·b[n−k] 在 k 处最大 ⟹ 版本 i 的内容比参考【早】k 点，
         // 即「参考时间 0 在该文件里的位置」= −k。符号写反会让公共区段整段错位（实测踩过）。
         out.versions[i].lagSec200 = -lag;
         out.versions[i].lagSec = -(double)lag / 200.0;
         // 判据用重叠段 Pearson（见 vcdetail::overlap_corr 的说明）；FFT 的全局值只用于定位
-        out.versions[i].envCorr = vcdetail::overlap_corr(refEnv, out.versions[i].env, lag);
+        out.versions[i].envCorr = vcdetail::overlap_corr(refEnv, out.versions[i].envSmooth, lag);
         worstCorr = std::min(worstCorr, out.versions[i].envCorr);
         if (opt.verbose)
             std::fprintf(stderr, "  对齐 %s: 延迟 %+.3f s, 包络相关 %.4f\n",

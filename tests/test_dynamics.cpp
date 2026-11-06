@@ -15,11 +15,18 @@
 //   「不许崩，且给出合理值」。上游没有这组（它在 mac 与 Windows 上都不会崩，
 //   只是没人测过），这里按 mac 实测补上，并把「什么算合理值」写成可核对的断言。
 //
+// **新增 §8 true peak / dBTP（1.1.4）**：
+//   a) fs/4 + 45° 相位：样本峰值恰好 −3.0103 dBFS，模拟波形峰值 = 1.0 ⟹ 0 dBTP；
+//   b) 独立 8× 参考（测试内自建 16 抽头 Kaiser sinc，不复用被测的 4× 核）对照；
+//   c) 流式（块 1 / 37 / 65536）与一次性 measure_dynamics 的 truePeakDbtp 逐位相同；
+//   d) available 标志：10 s 全可用、1 s 的 DR/LRA 不可用、数字静音 true peak 不可用。
+//
 // 平台差异：本测试零 Win32 依赖（纯 std::vector + <cstdio>），mac 上原样可跑。
 // 唯一的写法调整是 `setvbuf(..., _IONBF, ...)` 保留不动（POSIX 同样支持）。
 #include "analysis/dynamics.h"
 #include <cstdio>
 #include <cmath>
+#include <cstring>   // std::memcmp（true peak 流式逐位比对）
 #include <string>
 #include <vector>
 
@@ -40,10 +47,95 @@ static std::vector<std::vector<double>> make_sine(int channels, size_t n, double
     return ch;
 }
 
+// 带初相的单声道/多声道正弦（true peak 测试用；通道间同相）
+static std::vector<std::vector<double>> make_sine_ph(int channels, size_t n, double fs,
+                                                     double hz, double amp, double phase) {
+    std::vector<std::vector<double>> ch((size_t)channels, std::vector<double>(n));
+    for (int c = 0; c < channels; ++c)
+        for (size_t i = 0; i < n; ++i)
+            ch[(size_t)c][i] = amp * std::sin(2.0 * kPi * hz * (double)i / fs + phase);
+    return ch;
+}
+
 static std::vector<const double*> ptrs(const std::vector<std::vector<double>>& ch) {
     std::vector<const double*> p;
     for (const auto& c : ch) p.push_back(c.data());
     return p;
+}
+
+// ---------------- 测试内独立 8× 参考（SECTION 8b） ----------------
+// 目的：给 4× true peak 一个不共享被测核的对照。这里自建 16 抽头 Kaiser(beta=6)
+// 窗 sinc、8 个相位（0, 1/8, …, 7/8），每相做直流归一；相 0 强制 delta。
+// 与 dsp/oversample_peak.h 的 4×8 核在抽头数、相位数、实现上都不同 —— 若被测核
+// 的索引/边界写错，这里的数值不会跟着错。
+//
+// 为什么 4× 与 8× 可以不同（网格遗漏 / grid miss）：
+//   两者都只在离散网格上取 max，8× 不是模拟真值，只是更密的网格。
+//   4× 网格步长 0.25 样本，8× 是 0.125 样本。对 fs/4 正弦，真实峰值可能正好落在
+//   两个 4× 格点之间：4× 最坏欠读 20log10(cos(π/16)) = −0.168 dB；同一位置若
+//   8× 格点恰好命中（φ=π/16），4× 与 8× 就差 0.168 dB —— 这是 4× 网格的
+//   已知局限，不是实现错误。本节选用的相位（0 / 0.37 / π/4 / 1.10 / π/2）覆盖了
+//   网格内不同位置，差 ≤ 0.15 dB，用来抓"相位索引错/少算相位/边界漏算"这类
+//   真正的实现错误；最坏网格位置另在 8b 末尾用解析真值单独钉住。
+//   （更密的 8× 最坏欠读也只有 20log10(cos(π/32)) = −0.042 dB。）
+static const std::vector<std::vector<double>>& ref8_kernel() {
+    static const std::vector<std::vector<double>> k = [] {
+        const int TAPS = 16, PH = 8;
+        std::vector<std::vector<double>> t((size_t)PH, std::vector<double>((size_t)TAPS, 0.0));
+        auto i0 = [](double z) {
+            double sum = 1.0, term = 1.0;
+            const double half = z * 0.5;
+            for (int m = 1; m < 64; ++m) {
+                term *= (half / (double)m) * (half / (double)m);
+                sum += term;
+                if (term < sum * 1e-17) break;
+            }
+            return sum;
+        };
+        for (int p = 0; p < PH; ++p) {
+            const double frac = (double)p / (double)PH;
+            double sum = 0.0;
+            for (int n = 0; n < TAPS; ++n) {
+                const double x = (double)n - (double)(TAPS / 2 - 1) - frac;
+                const double s = (std::fabs(x) < 1e-12) ? 1.0
+                                                        : std::sin(kPi * x) / (kPi * x);
+                const double r = (x + (double)(TAPS / 2)) / (double)TAPS;
+                double w = 0.0;
+                if (r > 0.0 && r < 1.0) {
+                    const double t2 = 2.0 * r - 1.0;
+                    const double v = std::max(0.0, 1.0 - t2 * t2);
+                    w = i0(6.0 * std::sqrt(v)) / i0(6.0);
+                }
+                t[(size_t)p][(size_t)n] = s * w;
+                sum += s * w;
+            }
+            if (sum != 0.0)
+                for (double& v : t[(size_t)p]) v /= sum;
+        }
+        for (int n = 0; n < TAPS; ++n)
+            t[0][(size_t)n] = (n == TAPS / 2 - 1) ? 1.0 : 0.0;
+        return t;
+    }();
+    return k;
+}
+
+// 8× 参考峰值（dBFS）。边界只算 taps 全部落在信号内的点，不补零/不复制端点。
+static double true_peak_ref8_dbfs(const std::vector<double>& x) {
+    const auto& K = ref8_kernel();
+    const int TAPS = (int)K[0].size();
+    const int half = TAPS / 2 - 1;
+    double peak = 0.0;
+    for (double v : x) peak = std::max(peak, std::fabs(v));
+    const size_t n = x.size();
+    for (size_t i = (size_t)half; i + (size_t)(TAPS - 1 - half) < n; ++i) {
+        for (int p = 1; p < (int)K.size(); ++p) {
+            double acc = 0.0;
+            for (int t = 0; t < TAPS; ++t)
+                acc += K[(size_t)p][(size_t)t] * x[i + (size_t)t - (size_t)half];
+            peak = std::max(peak, std::fabs(acc));
+        }
+    }
+    return peak > 0.0 ? 20.0 * std::log10(peak) : -300.0;
 }
 
 // 直接用 ITU 表 48 kHz 系数算级联响应（dB）—— 与重标定实现独立比对，防变换代数写错
@@ -305,6 +397,141 @@ int main() {
         const double* p6[2] = { p[0], nullptr };
         const DynamicsResult r6 = measure_dynamics(p6, 2, 4800, fs);
         check(!r6.valid, "第 2 声道 nullptr → 不崩，valid=false（样本不足一块）");
+    }
+
+    // ---------------- §8 true peak / dBTP（1.1.4 新增） ----------------
+    printf("\n=== 8. true peak / dBTP（4× 过采样）===\n");
+
+    printf("  --- 8a. fs/4 + 45° 相位：样本峰值 −3.0103 dBFS，模拟峰值 0 dBTP ---\n");
+    {
+        // x[n] = sin(2π(fs/4)n/fs + π/4)：采样点都在 ±1/√2，模拟波形峰值 = 1.0。
+        // 这是 true peak 存在的理由：样本峰值看不出 3 dB 的差额。
+        const size_t n = (size_t)(2.0 * fs);
+        auto ch = make_sine_ph(1, n, fs, fs / 4.0, 1.0, kPi / 4.0);
+        auto p = ptrs(ch);
+        const DynamicsResult r = measure_dynamics(p.data(), 1, n, fs);
+        char b[256];
+        std::snprintf(b, sizeof(b),
+                      "(样本峰值 %.6f dBFS, truePeak %.6f dBTP, 差 %.6f dB, avail=%d)",
+                      r.peakDbfs, r.truePeakDbtp, r.truePeakDbtp - r.peakDbfs,
+                      (int)r.truePeakAvailable);
+        printf("  %s\n", b);
+        check(std::fabs(r.peakDbfs - (-3.0103)) <= 0.05, "样本峰值 = −3.0103 dBFS ±0.05", b);
+        check(std::fabs(r.truePeakDbtp - 0.0) <= 0.1, "truePeakDbtp = 0.0 dBTP ±0.1", b);
+        check(std::fabs((r.truePeakDbtp - r.peakDbfs) - 3.0103) <= 0.15,
+              "true peak 比样本峰值高 3.01 dB ±0.15", b);
+        check(r.truePeakAvailable, "truePeakAvailable = true", b);
+    }
+
+    printf("  --- 8b. 独立 8× 参考（16 抽头 Kaiser sinc）对照：1 k / 10 k / fs/4 × 5 相位 ---\n");
+    {
+        // 幅度 0.8（解析真值 −1.9382 dBFS）。相位刻意混入 0.37 / 1.10 rad
+        // （不与采样网格对齐），让 4× 与 8× 的插值差异真正暴露出来；0 / π4 / π2
+        // 则是对照组：这些相位下 1 kHz/10 kHz 的峰值恰好落在采样点上。
+        // 5 个相位只用于 0.15 dB 的实现正确性判据；网格遗漏最坏位置单独在块末测。
+        const size_t n = (size_t)(1.0 * fs);
+        const double phases[] = { 0.0, 0.37, kPi / 4.0, 1.10, kPi / 2.0 };
+        for (double hz : { 1000.0, 10000.0, fs / 4.0 }) {
+            for (double ph : phases) {
+                auto ch = make_sine_ph(1, n, fs, hz, 0.8, ph);
+                auto p = ptrs(ch);
+                const DynamicsResult r = measure_dynamics(p.data(), 1, n, fs);
+                const double ref = true_peak_ref8_dbfs(ch[0]);
+                const double diff = std::fabs(r.truePeakDbtp - ref);
+                char b[256];
+                std::snprintf(b, sizeof(b),
+                              "(%.0f Hz, φ=%.3f rad: 4× %.6f dBTP, 8× %.6f dBTP, |Δ| %.6f dB)",
+                              hz, ph, r.truePeakDbtp, ref, diff);
+                check(diff <= 0.15, "4× 与独立 8× 参考差 ≤ 0.15 dB（网格遗漏已计入判据）", b);
+            }
+        }
+        // 已知网格遗漏的最坏位置（解析真值对照；不属于上面的 4× vs 8× 0.15 dB 判据）：
+        // fs/4、φ=π/16 时真实峰值在 n=0.875，恰好是 8× 格点、又位于两个 4× 格点
+        // （0.75 / 1.0）正中。4× 只能取到格点，欠读 20log10(cos(π/16)) = −0.1684 dB；
+        // 此时样本峰值也恰好是同一值（−2.1067 dBFS，比解析真值低 0.1684 dB）—— 这条
+        // 同时说明"只看样本峰值会低估"与"4× 固有网格遗漏"，避免把离散化误差误判成 bug。
+        {
+            auto chW = make_sine_ph(1, n, fs, fs / 4.0, 0.8, kPi / 16.0);
+            auto pW = ptrs(chW);
+            const DynamicsResult rW = measure_dynamics(pW.data(), 1, n, fs);
+            const double analyticDb = 20.0 * std::log10(0.8);
+            char b[256];
+            std::snprintf(b, sizeof(b),
+                          "(fs/4, φ=π/16: 4× %.6f dBTP, 解析真值 %.6f dBTP, 欠读 %.6f dB)",
+                          rW.truePeakDbtp, analyticDb, rW.truePeakDbtp - analyticDb);
+            check(std::fabs((rW.truePeakDbtp - analyticDb) - (-0.1684)) <= 0.01,
+                  "已知网格遗漏：最坏相位 4× 欠读 0.168 dB（解析真值对照，非实现错误）", b);
+        }
+    }
+
+    printf("  --- 8c. 流式 vs 一次性：块 1 / 37 / 65536 的 truePeakDbtp 逐位一致 ---\n");
+    {
+        const size_t n = 100003;   // 故意不是整块 / 不是 400 ms 边界
+        auto ch = make_sine_ph(2, n, fs, 997.0, 0.7, 0.3);
+        auto p = ptrs(ch);
+        const DynamicsResult whole = measure_dynamics(p.data(), 2, n, fs);
+        check(whole.truePeakAvailable, "一次性接口 true peak 可用", std::to_string(whole.truePeakDbtp));
+        for (size_t B : { size_t(1), size_t(37), size_t(65536) }) {
+            DynamicsAccumulator acc;
+            acc.begin(2, fs);
+            for (size_t pos = 0; pos < n; pos += B) {
+                const size_t m = std::min(B, n - pos);
+                const double* pp[2] = { ch[0].data() + pos, ch[1].data() + pos };
+                acc.add_planar(pp, m);
+            }
+            const DynamicsResult r = acc.finalize();
+            const bool sameTp = std::memcmp(&r.truePeakDbtp, &whole.truePeakDbtp, sizeof(double)) == 0;
+            const bool sameFlags = r.truePeakAvailable == whole.truePeakAvailable
+                                && r.drAvailable == whole.drAvailable
+                                && r.lraAvailable == whole.lraAvailable
+                                && r.lufsAvailable == whole.lufsAvailable;
+            char b[220];
+            std::snprintf(b, sizeof(b),
+                          "(块 %zu: 流式 %.17g vs 一次性 %.17g, flags=%d)",
+                          B, r.truePeakDbtp, whole.truePeakDbtp, (int)sameFlags);
+            check(sameTp, "truePeakDbtp 逐位相同（memcmp）", b);
+            check(sameFlags, "available 标志完全相同", b);
+        }
+    }
+
+    printf("  --- 8d. available 标志：10 s 全可用 / 1 s DR·LRA 不可用 / 静音 true peak 不可用 ---\n");
+    {
+        const size_t n10 = (size_t)(10.0 * fs);
+        auto ch10 = make_sine(1, n10, fs, 997.0, 0.5);
+        auto p10 = ptrs(ch10);
+        const DynamicsResult r10 = measure_dynamics(p10.data(), 1, n10, fs);
+        char b[256];
+        std::snprintf(b, sizeof(b), "(10 s: dr=%d lra=%d lufs=%d tp=%d)",
+                      (int)r10.drAvailable, (int)r10.lraAvailable,
+                      (int)r10.lufsAvailable, (int)r10.truePeakAvailable);
+        printf("  %s\n", b);
+        check(r10.drAvailable && r10.lraAvailable && r10.lufsAvailable && r10.truePeakAvailable,
+              "10 s 正弦：dr/lra/lufs/truePeak 全部 available", b);
+
+        const size_t n1 = (size_t)(1.0 * fs);
+        auto ch1 = make_sine(1, n1, fs, 997.0, 0.5);
+        auto p1 = ptrs(ch1);
+        const DynamicsResult r1 = measure_dynamics(p1.data(), 1, n1, fs);
+        std::snprintf(b, sizeof(b), "(1 s: dr=%d lra=%d lufs=%d tp=%d)",
+                      (int)r1.drAvailable, (int)r1.lraAvailable,
+                      (int)r1.lufsAvailable, (int)r1.truePeakAvailable);
+        printf("  %s\n", b);
+        check(!r1.drAvailable && !r1.lraAvailable,
+              "1 s 正弦：drAvailable=false、lraAvailable=false（<3 s 口径不成立）", b);
+        check(r1.lufsAvailable && r1.truePeakAvailable,
+              "1 s 正弦：lufs/truePeak 仍 available（400 ms 块与峰值都成立）", b);
+
+        auto sil = make_sine(2, n10, fs, 997.0, 0.0);
+        auto ps = ptrs(sil);
+        const DynamicsResult rs = measure_dynamics(ps.data(), 2, n10, fs);
+        std::snprintf(b, sizeof(b), "(静音: truePeak %.3f dBTP, tp=%d, dr=%d, lra=%d, lufs=%d)",
+                      rs.truePeakDbtp, (int)rs.truePeakAvailable,
+                      (int)rs.drAvailable, (int)rs.lraAvailable, (int)rs.lufsAvailable);
+        printf("  %s\n", b);
+        check(rs.truePeakDbtp <= -299.0 && !rs.truePeakAvailable,
+              "数字静音：truePeakDbtp ≤ −299 且 truePeakAvailable=false", b);
+        check(!rs.drAvailable && !rs.lraAvailable && !rs.lufsAvailable,
+              "数字静音：dr/lra/lufs 均不可用（不拿 0 冒充有效值）", b);
     }
 
     printf("\n%s (失败项 %d)\n", fails == 0 ? "全部通过" : "存在失败", fails);

@@ -24,9 +24,32 @@ int main(){
  std::vector<std::vector<double>> plateau(1,std::vector<double>(4800,1));auto p=measure(plateau,48000);ck(p.clippedRuns==1&&p.longestClipRun==4800,"EOF clipped run is counted");
  std::vector<std::vector<double>> anti(2,std::vector<double>(4800));for(size_t i=0;i<4800;++i){anti[0][i]=.1;anti[1][i]=-.1;}
  auto b=measure(anti,48000);ck(b.silencePct==0&&b.noiseFloorDbfs < -19.9&&b.noiseFloorDbfs > -20.1,"anti-phase stereo is not silence");
- auto low=measure(alternating,16000);ck(low.hfRatio10kDb<=-120,"Nyquist below 10k has no >10k energy");
+ auto low=measure(alternating,16000);
+ ck(low.hfRatio10kDb<=-120,"Nyquist below 10k has no >10k energy");
+ ck(!low.hfRatio10kAvailable,"Nyquist below 10k: hfRatio10k marked not-applicable (not a 0/-120 measurement)");
  std::vector<std::vector<double>> shortMulti(6,std::vector<double>(32,.00001));auto c=measure(shortMulti,48000);ck(c.note.find("多声道")!=std::string::npos,"short note preserves multichannel applicability");
+ ck(c.valid,"32-frame material still reports valid (valid semantics = frames>0, unchanged)");
+ ck(!c.sideMidAvailable&&c.sideMidDb<=-299.0,"short multichannel: side/mid is the -300 sentinel, not 0");
+ ck(c.note.find("短于一个谱窗")!=std::string::npos&&c.note.find("立体声指标不适用")!=std::string::npos,
+    "short multichannel: short-material note is appended, multichannel note survives");
  std::vector<std::vector<double>> quiet(1,std::vector<double>(4800,1e-18));auto q=measure(quiet,48000);ck(std::abs(q.noiseFloorDbfs+360)<.1,"extremely quiet power not clamped to -300 dBFS");
+
+ // 0 帧 / 1 帧：不崩、valid 语义不变（仍由帧数决定），且【不强行】把不可用指标标成可用。
+ // ⚠️ 这里只断言实现当前的语义，不替实现"补"可用性：0 帧没有测过任何东西，就必须 valid=false。
+ {
+   std::vector<std::vector<double>> none(2, std::vector<double>(0));
+   auto r0 = measure(none, 48000);
+   ck(!r0.valid && r0.note.find("不可用") != std::string::npos, "0 frames: valid=false with a note (nothing was measured)");
+   ck(!r0.sideMidAvailable && !r0.hfRatio10kAvailable, "0 frames: availability flags stay false (no fake measurement)");
+   ck(std::isfinite(r0.sideMidDb) && std::isfinite(r0.hfRatio10kDb), "0 frames: numeric fields stay finite (no NaN/inf)");
+
+   std::vector<std::vector<double>> one(2, std::vector<double>(1, 0.25));
+   auto r1 = measure(one, 48000);
+   ck(r1.valid && r1.frames == 1, "1 frame: valid semantics unchanged (frames>0 => true)");
+   ck(r1.note.find("短于一个谱窗") != std::string::npos, "1 frame: short-material note appended, not overwritten");
+   ck(std::isfinite(r1.sideMidDb) && std::isfinite(r1.hfRatio10kDb)
+      && std::isfinite(r1.noiseFloorDbfs) && std::isfinite(r1.thdnDb), "1 frame: no NaN/inf anywhere");
+ }
 
  // 新增 2s 1kHz 反相对照同相测试
  const double fs2 = 48000.0;
