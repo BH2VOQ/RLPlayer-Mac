@@ -657,7 +657,11 @@ h += "#npPage .npedge{display:none}";
     //   资料内容改为右侧抽屉，默认完全不出现在版面上；歌词与资料永远**左右相邻**，绝不上下堆叠。
     //   旧版四行（资料整行 + 歌词整行）已删除 —— 那正是用户说的"上下排列丑到不忍直视"。
     // 内容列限宽并居中：hero / 歌词+标签栏 / 控制区 共用同一条左右边界（对齐判据靠这个，而不是靠肉眼）
-    h += ".npgrid{position:relative;z-index:2;height:100%;display:grid;grid-template-rows:auto minmax(0,1fr) auto;gap:18px;padding:44px 40px 18px;box-sizing:border-box;max-width:1240px;margin:0 auto}";
+    // 1.1.4：加第四行「音频分析」面板（#npAnal，见下方 .anl* 样式段）。行序 =
+    //   ① 封面+标题 ② 歌词+资料栏(1fr，唯一可压缩行) ③ 分析面板(auto) ④ 控制区(auto)。
+    //   分析面板高度上限 min(38vh,340px) + 内部滚动 ⟹ 矮窗口下先压②，再让面板自己滚，
+    //   控制区永远留在屏幕内（tools/check_114_analysis_ui.js 有几何判据）。
+    h += ".npgrid{position:relative;z-index:2;height:100%;display:grid;grid-template-rows:auto minmax(0,1fr) auto auto;gap:18px;padding:44px 40px 18px;box-sizing:border-box;max-width:1240px;margin:0 auto}";
     h += ".npgrid.nolyric #npLyric{display:none}";
     // 行2：左歌词 + 右标签栏（标签栏无可用资料时整列收起，歌词自动吃满）
     h += ".npbody{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:22px;min-height:0;align-items:stretch}";
@@ -759,7 +763,66 @@ h += "#npPage .npedge{display:none}";
     h += ".ly-hint{position:sticky;top:0;z-index:2;font-size:10.5px;letter-spacing:.3px;color:var(--mut2);background:var(--bg);border-bottom:1px solid var(--line);padding:3px 0;margin-bottom:4px;pointer-events:none}";
     h += ".npline{font-size:clamp(13px,1.9vh,17px);line-height:2.05;color:var(--mut);transition:.18s}";
     h += ".npline.on{color:var(--txt);font-weight:650;transform:scale(1.03)}";
-    // 行3：控制区（261024-01 #3b ①：音量不再是底部独立一行）——
+    // 行3（1.1.4）：音频分析面板 #npAnal。三级折叠（L0 摘要 / L1 指标 / L2 全部原始值）。
+    // 设计约束（Lead 要求）：紧凑、低调、不抢封面与歌词；只用既有 CSS 变量 ⟹ 深/浅/蓝三套主题自动跟随；
+    // 高度上限 min(38vh,340px) 且**卡片区**自己滚（头部固定），所以它永远不会把控制区顶出屏幕。
+    h += "#npAnal{min-height:0;display:flex;flex-direction:column;gap:6px;padding:8px 11px 9px;border-radius:14px;"
+         "background:rgba(255,255,255,.045);border:1px solid rgba(255,255,255,.08);backdrop-filter:blur(8px);"
+         "max-height:min(38vh,340px)}";
+    h += ".anlhead{display:flex;align-items:center;gap:8px;flex:none;min-width:0}";
+    h += ".anllab{font-size:11px;letter-spacing:.6px;font-weight:700;color:var(--txt2);flex:none}";
+    h += "#npAnlStat{font-size:10.5px;color:var(--mut2);flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;"
+         "white-space:nowrap;font-variant-numeric:tabular-nums}";
+    h += ".anlbtn{font-size:11px;padding:3px 9px;border-radius:8px;background:var(--hov);color:var(--txt2);"
+         "border:1px solid var(--line);cursor:pointer;transition:.13s;white-space:nowrap;flex:none}";
+    h += ".anlbtn:hover{background:var(--hov2);color:var(--txt);border-color:var(--acc)}";
+    h += ".anlbtn:active{transform:scale(.97)}";
+    h += ".anlbtn.pri{color:var(--acc-text);background:var(--acc-weak);border-color:var(--acc-weak);font-weight:600}";
+    // 卡片区：auto-fit 让窄窗自动降列（3 → 2 → 1），minmax 保证每张卡不会再被压成一条
+    h += "#npAnlBody{min-height:0;overflow:auto;display:grid;grid-template-columns:repeat(auto-fit,minmax(212px,1fr));"
+         "gap:8px;align-content:start;padding-right:2px;scrollbar-width:thin}";
+    h += "#npAnlBody::-webkit-scrollbar{width:6px}";
+    h += "#npAnlBody::-webkit-scrollbar-thumb{background:var(--line);border-radius:3px}";
+    h += ".anlcard{min-width:0;border-radius:10px;border:1px solid var(--line);background:var(--bg2);"
+         "padding:7px 9px 8px;display:flex;flex-direction:column;gap:4px}";
+    h += ".anlchd{display:flex;align-items:center;gap:6px;min-width:0;cursor:pointer}";
+    h += ".anlchd:hover .anlct{color:var(--txt)}";
+    h += ".anlct{font-size:10.5px;font-weight:700;letter-spacing:.8px;color:var(--mut2);flex:none;transition:.13s}";
+    h += ".anlbadge{font-size:9.5px;padding:1px 5px;border-radius:5px;background:var(--acc-weak);color:var(--acc-text);"
+         "border:1px solid var(--acc-weak);font-weight:600;flex:none;white-space:nowrap}";
+    h += ".anlcs{font-size:11.5px;line-height:1.45;color:var(--txt);min-width:0}";
+    // 指标网格：2 列（Lead 明确要求 2 列），标签左、值右；值等宽数字，便于纵向比对
+    h += ".anlgrid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:1px 10px;min-width:0}";
+    h += ".anlml{display:flex;align-items:baseline;justify-content:space-between;gap:8px;min-width:0;padding:1px 0;"
+         "border-bottom:1px solid rgba(255,255,255,.045)}";
+    h += ".anlml.wide{grid-column:1/-1}";
+    h += ".anllb{font-size:10px;color:var(--mut2);white-space:nowrap}";
+    h += ".anlv{font-size:11px;color:var(--txt);font-variant-numeric:tabular-nums;white-space:nowrap;overflow:hidden;"
+         "text-overflow:ellipsis;text-align:right}";
+    // N/A 的文案（"不适用（采样率 ≤20 kHz）"这类）比数字长得多：允许换行，绝不用省略号把原因吃掉
+    h += ".anlv.na{color:var(--mut2);font-size:10.5px;white-space:normal;line-height:1.35}";
+    h += ".anlv.warn{color:var(--warn);font-weight:600}";
+    h += ".anlsec{grid-column:1/-1;font-size:10px;font-weight:700;letter-spacing:.7px;color:var(--acc-text);"
+         "margin-top:3px;padding-top:3px;border-top:1px solid var(--line)}";
+    // 真峰过载警告：这是「母带要修」的强信号，任何层级都不许被折叠掉
+    h += ".anlwarn{font-size:10.5px;line-height:1.5;color:var(--warn);background:rgba(234,179,8,.10);"
+         "border:1px solid rgba(234,179,8,.24);border-radius:7px;padding:3px 7px}";
+    h += ".anlgrid .anlwarn{grid-column:1/-1}";
+    h += ".anlwarn .anlwh{color:var(--mut2);font-size:9.5px}";
+    h += ".anlnote{grid-column:1/-1;font-size:10px;line-height:1.45;color:var(--mut2);word-break:break-word}";
+    // 浅色/浅蓝主题：浮卡的半透明白底在浅背景上等于没有 ⟹ 换成低对比深色描边（与 .nprailcard 同一套做法）
+    h += "html[data-theme=light] #npAnal,html[data-theme=blue] #npAnal{background:rgba(15,23,42,.04);border-color:rgba(15,23,42,.10)}";
+    h += "html[data-theme=light] .anlcard,html[data-theme=blue] .anlcard{background:rgba(255,255,255,.78);"
+         "border-color:rgba(15,23,42,.14);box-shadow:0 1px 2px rgba(15,23,42,.05)}";
+    h += "html[data-theme=light] .anlml,html[data-theme=blue] .anlml{border-bottom-color:rgba(15,23,42,.08)}";
+    h += "html[data-theme=light] .anlwarn,html[data-theme=blue] .anlwarn{background:rgba(180,83,9,.09);border-color:rgba(180,83,9,.24)}";
+    // 矮窗（1024x640 这类）：上限再压一档，保证 ① 面板自身不超屏 ② 歌词仍有一行可显示的高度
+    h += "@media (max-height:720px){#npAnal{max-height:min(31vh,230px);padding:6px 9px 7px;gap:4px}"
+         "#npAnlBody{gap:6px}.anlcs{font-size:11px}}";
+    // 窄窗：卡片仍是三栏时每张只有 ~210px，卡内再分两列会把数值截成"14.60…"⟹ 卡内改单列（标签+值一行）
+    h += "@media (max-width:1100px){.anlgrid{grid-template-columns:minmax(0,1fr)}}";
+    h += "@media (max-width:760px){#npAnlBody{grid-template-columns:minmax(0,1fr)}}";
+    // 行4：控制区（261024-01 #3b ①：音量不再是底部独立一行）——
     //   进度条一行；下面**同一行**放「时间（左）/ 控制键（中）/ 音量（右）」，
     //   三列都居中于同一条竖轴，整页底部只剩这一块控制区。
     h += ".npctl2{min-height:0;display:grid;grid-template-rows:auto auto;gap:12px;justify-items:center}";
@@ -1384,8 +1447,8 @@ h += "#npPage .npedge{display:none}";
     // 导致"拖到中间就没声音"（中点 -30 dB 只有 3% 振幅）。详见 ui_script.h 的曲线注释。
     h += "<input id=vol type=range min=0 max=1000 step=1 value=1000></div></div>";
     // ---------- 正在播放（点封面/曲名打开） ----------
-    // 布局：CSS Grid 四行（2026-10-23 用户 261023-04 #6）——
-    //   .nphero 封面+标题区 / .npdata 资料区 / #npLyric 歌词区 / .npctl2 进度控制区。
+    // 布局：CSS Grid 四行（2026-10-23 用户 261023-04 #6；1.1.4 加入第四行音频分析面板）——
+    //   .nphero 封面+标题区 / .npbody（左歌词 + 右资料栏）/ #npAnal 音频分析 / .npctl2 进度控制区。
     //   任何尺寸下四行互不重叠：每行 min-height:0 + 行内滚动，控件不再绝对定位。
     h += "<div id=npPage>";
     h += "<div class=npbg id=npbg></div><div class=npveil></div>";
@@ -1429,7 +1492,21 @@ h += "#npPage .npedge{display:none}";
     // 261024-04 #7：自动加载的状态/失败重试行（正常态 display:none，不打扰版面）
     h += "<div id=npSummHint class=nprailhint style='display:none'></div></div></aside>";
     h += "</div>";
-    // 行3：控制区（整页也要能操作，否则进来就必须退出）
+    // 行3（1.1.4）：音频分析面板。**永远可见**（默认 L0 三行摘要），但内部滚动、高度封顶，
+    //   绝不把下面的播放控制挤出屏幕。内容与交互全部由 ui_script.h 的 ANL 状态机驱动：
+    //   #npAnlStat = 状态文字（未播放 / 正在分析… / 12.3 s · 缓存命中 / 分析失败 · 点击重试 / 分析于 HH:MM）
+    //   #npAnlToggle = 三级折叠（0→1→2→0）
+    //   #npAnlRun = 手动强制重算（force=1，忽略服务端缓存）
+    h += "<div class=npAnal id=npAnal>";
+    h += "<div class=anlhead>";
+    h += "<span class=anllab>音频分析</span>";
+    h += "<span id=npAnlStat title='当前曲目的分析状态'>未播放</span>";
+    h += "<button class=anlbtn id=npAnlToggle title='切换详细程度：摘要 → 详细 → 全部指标' aria-label='切换详细程度'>详细</button>";
+    h += "<button class='anlbtn pri' id=npAnlRun title='重新分析当前曲目（强制重算，忽略缓存）'>分析</button>";
+    h += "</div>";
+    h += "<div id=npAnlBody></div>";
+    h += "</div>";
+    // 行4：控制区（整页也要能操作，否则进来就必须退出）
     h += "<div class=npctl2>";
     h += "<div class=npseek id=npSeek title='点击跳转'><i id=npBar></i></div>";
     // 261024-01 #3b ①：音量不再单独一行 —— 「时间 / 控制键 / 音量」同处一行（三列网格，中列恒居中）。

@@ -9,7 +9,7 @@
 // 定位：dynamics.h 管「响度与动态」，fake_lossless.h 管「是不是有损转制」，
 //       本文件补上用户说的「音质」本身 —— 六类客观指标，全部离线、确定性、不依赖 AI：
 //        1) 失真类：THD+N（陷波法，纯音乐素材也能跑）、互调失真（需双音素材，否则显式跳过）
-//        2) 噪声类：本底噪声（谱最小统计）、信噪比
+//        2) 噪声类：本底噪声（最低 10% 的 100 ms 块电平；谱最小统计仅作诊断）、信噪比
 //        3) 频响类：频谱重心（brightness）、频谱倾斜（dB/oct）、95% 谱滚降点、10 kHz 以上能量占比
 //        4) 削波类：削波样本计数/占比、连续削波段、峰值因子（crest factor）
 //        5) 立体声类：声道间相关系数、单声道兼容性（L+R 能量损失）、side/mid 比（有限范围 [−120,+120]）
@@ -30,9 +30,11 @@
 //      「噪声地板抬升 / 削波 / 有损转制」都单调变差，是可比的相对量（见 version_compare.h）。
 //  * IMD（SMPTE 双音）：需要明确的 f1/f2，故做成独立函数 measure_imd_smpte()，
 //    由调用方给频率；体检主流程不猜 —— 素材不是双音时 imdAvailable=false 并写明原因。
-//    本底噪声：每 bin 取各窗最小值（谱最小统计 Martin），再乘窗数纠正「取最小值」的
-//    指数分布偏置（E[min of W 指数样本] = 真值/W）。平稳素材准确；动态音乐偏低（已知偏置），
-//    因此 SNR 【只用于同一首不同版本之间的相对比较】（偏置对双方一致）。
+//  * 本底噪声（对外口径）：noiseFloorDbfs = 最低 10% 的 100 ms 块电平（不是谱最小统计）。
+//    连续音乐测到的是「最安静的那 10% 的音乐」⟹ 是实际噪声的【上界】，同一首不同版本仍可比。
+//    谱最小统计（每 bin 取各窗最小值，Martin 偏置 ×窗数纠正：E[min of W 指数样本] = 真值/W）
+//    只作诊断字段 spectralMinDbfs —— 平稳噪声准，动态音乐偏低（已知偏置），不参与评分。
+//    SNR 与噪声指标【只用于同一首不同版本之间的相对比较】（偏置对双方一致）。
 //  * 削波门限 0.999（≈ −0.009 dBFS）。16-bit 解码到 double 的满幅是 32767/32768 = 0.999969，
 //    落在门限内；正常节目的峰值极少越过 −0.009 dBFS，误报风险由「连续 ≥3 样本成段」再收一道。
 //  * 立体声指标只取前两个声道（多声道素材按 L/R 看前两声道，其余声道不参与）。
@@ -111,7 +113,11 @@ struct QualityResult {
     double centroidHz = 0.0;     // 能量加权谱重心（brightness）
     double tiltDbPerOct = 0.0;   // [100 Hz, 10 kHz] 最小二乘斜率
     double rolloff95Hz = 0.0;    // 95% 累积能量的频率（音乐本身的高频含量，不是截止点）
-    double hfRatio10kDb = 0.0;   // 10 kHz 以上能量 / 全带能量（dB）
+    // 10 kHz 以上能量 / 全带能量（dB）。★ 只有「10 kHz 这个带在奈奎斯特内存在」时才有定义：
+    //   fs ≤ 20 kHz（即 half·binHz ≤ 10 kHz）时该带根本不存在 ⟹ hfRatio10kAvailable=false，
+    //   hfRatio10kDb 写 −300 哨兵（不是 0 —— 0 dB 会被读成「能量全在 10 kHz 以上」）。
+    double hfRatio10kDb = 0.0;
+    bool   hfRatio10kAvailable = false;
 
     // ---- 4. 削波 ----
     double peakDbfs = 0.0;       // 样本峰值（各声道取最大）
@@ -128,8 +134,12 @@ struct QualityResult {
     double monoLossDb = 0.0;     // 10log10(立体声平均功率 / 单声道化功率)，0=完美
     // 10log10(side² / mid²)，有限范围 ∈ [−120, +120]：−120 = 没有 side 分量（L==R）或两端都是
     //   数字零（整段静音）；+120 = 没有 mid 分量（L==−R）。两个哨兵含义不同，不能混用。
-    //   多声道素材不计算（不猜声道布局），保持 0 并在 note 里标注不适用。
+    //   多声道素材不计算（不猜声道布局），是否可用由 sideMidAvailable 显式标出。
     double sideMidDb = 0.0;
+    // 只有「2 声道且两声道都有效」时 side/mid 才有定义。单声道 / 多声道 / 只有一路有效 ⟹
+    //   sideMidAvailable=false，sideMidDb 写 −300 哨兵（不是 0 —— 0 dB 是「side 与 mid 等能量」的
+    //   合法测量值，用 0 表示「不适用」会让两者无法区分）。
+    bool   sideMidAvailable = false;
 
     // ---- 6. 动态细化 ----
     double dynP95P10Db = 0.0;    // 3 s 块 RMS 的 P95−P10
@@ -236,6 +246,11 @@ inline void spectrum_metrics(const QualityWindowPlan& plan,
                              const std::vector<char>& active,
                              QualityResult& out) {
     const size_t kW = plan.kW, half = plan.half, nWin = plan.nWin;
+    // ★「不适用」必须显式：本函数任何一条早退路径（样本不足 / 全零 / 无有效声道）都表示
+    //   10 kHz 能量占比【没有被测量】⟹ 保持 hfRatio10kAvailable=false 并写 −300 哨兵（不是 0）。
+    //   正常路径会在「10 kHz 带存在」时覆盖它。
+    out.hfRatio10kAvailable = false;
+    out.hfRatio10kDb = -300.0;
     if (kW < 1024 || nWin == 0 || winCh.empty()) return;
 
     double w2 = 0.0;
@@ -452,12 +467,26 @@ inline void spectrum_metrics(const QualityWindowPlan& plan,
     }
 
     // 10 kHz 以上能量占比
+    // ★ 带是否存在必须先判：half·binHz = fs/2 是分析带宽上界。fs ≤ 20 kHz 时 10 kHz 以上
+    //   根本没有 bin，旧代码会得到 log10(1e-300/den) 被钳到 −120，看起来像"测得 −120 dB"；
+    //   更早在没做 ±120 钳位的版本里还会报 0 dB。这里显式标「不适用」+ −300 哨兵。
     {
-        double hf = 0.0;
-        const size_t k10 = (size_t)std::ceil(10000.0 / binHz);
-        for (size_t k = k10; k <= half; ++k) hf += avgPower[k];
-        out.hfRatio10kDb = 10.0 * std::log10(std::max(hf, 1e-300) / den);
-        if (out.hfRatio10kDb < -120.0) out.hfRatio10kDb = -120.0;
+        const bool bandExists = ((double)half * binHz > 10000.0) && (den > 0.0);
+        if (!bandExists) {
+            out.hfRatio10kAvailable = false;
+            out.hfRatio10kDb = -300.0;
+        } else {
+            double hf = 0.0;
+            const size_t k10 = (size_t)std::ceil(10000.0 / binHz);
+            // bandExists 为真时必有 k10 ≤ half；仍显式守卫，避免极端 binHz 下把 k10 用越界
+            //（无符号回绕会让 for 条件永远成立）。
+            if (k10 <= half) {
+                for (size_t k = k10; k <= half; ++k) hf += avgPower[k];
+            }
+            out.hfRatio10kDb = 10.0 * std::log10(std::max(hf, 1e-300) / den);
+            if (out.hfRatio10kDb < -120.0) out.hfRatio10kDb = -120.0;
+            out.hfRatio10kAvailable = true;
+        }
     }
 }
 
@@ -602,6 +631,14 @@ public:
                 r.sideMidDb = (sidePow > 0.0) ? 120.0 : -120.0;
             }
             r.sideMidDb = std::clamp(r.sideMidDb, -120.0, 120.0);
+            r.sideMidAvailable = true;   // 2 声道且两声道都有效 ⟹ 该指标有定义
+        } else {
+            // ★ 单声道 / 多声道 / 只有一路有效：side-mid 没有定义 ⟹ 显式标「不适用」并写 −300 哨兵。
+            //   旧代码在这里保持 0 dB，而 0 dB 恰恰是「side 与 mid 等能量」的合法测量值 ——
+            //   用 0 表示不适用会与该测量值无法区分（和 THD+N 的 thdnAvailable 同一套约定）。
+            //   r.stereo 的语义保持不变（仍只在 2 声道且两路都有效时置 true）。
+            r.sideMidAvailable = false;
+            r.sideMidDb = -300.0;
         }
 
         // ---- 100 ms 块电平 ----
@@ -652,9 +689,11 @@ public:
         }
         r.valid = (r.frames > 0);
         if (r.frames < plan_.kW) r.note += (r.note.empty() ? "" : "；") + std::string("素材短于一个谱窗，谱类指标按单窗估计");
-        // 口径提醒（不是错误）：谱最小统计对动态音乐是【下界】，绝对值偏低；同一首的相对比较不受影响
+        // 口径提醒（不是错误）：noiseFloorDbfs 是【最低 10% 的 100 ms 块电平】，不是谱最小统计。
+        // 连续音乐里它测到的是「最安静的那 10% 的音乐」⟹ 是实际噪声的【上界】；同一首相对比较不受影响。
+        // （谱最小统计才是下界，它只放在诊断字段 spectralMinDbfs 里，不参与本句描述。）
         if (!r.note.empty()) r.note += "；";
-        r.note += "本底噪声为谱最小统计（动态音乐为下界，同一首相对比较不受影响）";
+        r.note += "本底噪声为最低 10% 的 100 ms 块电平（动态音乐时是实际噪声的上界，同一首相对比较不受影响）";
         if (tm) tm->spectralMs =
             std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - tSpec).count();
         return r;

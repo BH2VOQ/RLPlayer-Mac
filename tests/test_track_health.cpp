@@ -41,6 +41,7 @@
 #include <chrono>
 #include <cstring>     // std::memcmp（逐位比对）
 #include <algorithm>   // std::max（max|Δ| 汇总）
+#include <atomic>      // std::atomic<bool>（分析取消）
 
 using namespace rta::analysis;
 using rta::dsp::kPi;
@@ -113,6 +114,10 @@ static bool same_health(const TrackHealth& a, const TrackHealth& b) {
     return a.status == b.status && a.error == b.error
         && same_bits(a.drDb, b.drDb) && same_bits(a.lufs, b.lufs)
         && same_bits(a.lra, b.lra) && same_bits(a.peakDbfs, b.peakDbfs)
+        && same_bits(a.truePeakDbtp, b.truePeakDbtp)
+        && a.truePeakAvailable == b.truePeakAvailable
+        && a.drAvailable == b.drAvailable && a.lraAvailable == b.lraAvailable
+        && a.lufsAvailable == b.lufsAvailable
         && same_bits(a.cutoffHz, b.cutoffHz) && same_bits(a.confidence, b.confidence)
         && a.losslessSuspected == b.losslessSuspected && a.fake24bit == b.fake24bit
         && a.reason == b.reason
@@ -122,18 +127,21 @@ static bool same_health(const TrackHealth& a, const TrackHealth& b) {
 static std::string health_brief(const TrackHealth& h) {
     char b[320];
     std::snprintf(b, sizeof(b),
-                  "(DR %.17g / LUFS %.17g / LRA %.17g / peak %.17g / cutoff %.17g / conf %.17g / sus %d / fake24 %d / %s)",
-                  h.drDb, h.lufs, h.lra, h.peakDbfs, h.cutoffHz, h.confidence,
+                  "(DR %.17g / LUFS %.17g / LRA %.17g / peak %.17g / tp %.17g / cutoff %.17g / conf %.17g / sus %d / fake24 %d / %s)",
+                  h.drDb, h.lufs, h.lra, h.peakDbfs, h.truePeakDbtp, h.cutoffHz, h.confidence,
                   (int)h.losslessSuspected, (int)h.fake24bit, h.status.c_str());
     return std::string(b);
 }
 static std::string max_diff_text(const TrackHealth& x, const TrackHealth& y) {
     auto d = [](double p, double q) { return std::fabs(p - q); };
     char buf[256];
-    std::snprintf(buf, sizeof(buf), "max|Δ| = %.17g (dr %.3g, lufs %.3g, lra %.3g, peak %.3g, cutoff %.3g, conf %.3g)",
+    std::snprintf(buf, sizeof(buf),
+                  "max|Δ| = %.17g (dr %.3g, lufs %.3g, lra %.3g, peak %.3g, tp %.3g, cutoff %.3g, conf %.3g)",
                   std::max({ d(x.drDb, y.drDb), d(x.lufs, y.lufs), d(x.lra, y.lra), d(x.peakDbfs, y.peakDbfs),
+                             d(x.truePeakDbtp, y.truePeakDbtp),
                              d(x.cutoffHz, y.cutoffHz), d(x.confidence, y.confidence) }),
                   d(x.drDb, y.drDb), d(x.lufs, y.lufs), d(x.lra, y.lra), d(x.peakDbfs, y.peakDbfs),
+                  d(x.truePeakDbtp, y.truePeakDbtp),
                   d(x.cutoffHz, y.cutoffHz), d(x.confidence, y.confidence));
     return std::string(buf);
 }
@@ -270,6 +278,20 @@ int main() {
         check(std::fabs(hf.lra - h1.lra) <= 0.05, "lra 一致（±0.05）");
         check(std::fabs(hf.peakDbfs - h1.peakDbfs) <= 0.05, "peak_dbfs 一致（±0.05）");
         check(hf.fs == 48000 && hf.channels == 2 && hf.bits == 16, "元信息一致（read_wav 回读）");
+        // 1.1.4：正常 analyze_file 的结果必须带 true peak 与 available 标志，JSON 键齐全
+        check(hf.truePeakAvailable && hf.drAvailable && hf.lraAvailable && hf.lufsAvailable,
+              "新 flags 透传：10 s 素材 truePeak/dr/lra/lufs 全部 available", health_brief(hf));
+        const std::string jf = track_health_json(hf);
+        const char* newKeys[] = { "true_peak_dbtp", "true_peak_available",
+                                  "dr_available", "lra_available", "lufs_available",
+                                  "hf_ratio_10k_available", "side_mid_available" };
+        for (const char* k : newKeys) {
+            const std::string needle = std::string("\"") + k + "\":";
+            check(jf.find(needle) != std::string::npos,
+                  std::string("正常 analyze_file JSON 含新字段: ") + k);
+        }
+        check(jf.find("\"true_peak_available\":true") != std::string::npos,
+              "正常 analyze_file JSON: true_peak_available=true");
         std::error_code ec;
         fsx::remove(P(wavPath), ec);
         check(!fsx::exists(P(wavPath)), "临时文件已删除");
@@ -358,6 +380,9 @@ int main() {
     {
         TrackHealth t;
         t.drDb = 8.125; t.lufs = -23.456; t.lra = 5.25; t.peakDbfs = -0.1;
+        // 1.1.4 新字段（additive）：true peak 与 available 标志
+        t.truePeakDbtp = -0.075; t.truePeakAvailable = true;
+        t.drAvailable = true; t.lraAvailable = true; t.lufsAvailable = true;
         t.losslessSuspected = true; t.cutoffHz = 16193.0; t.confidence = 0.875;
         t.reason = "测试\"引号\"\\反斜杠\n换行\t制表 中文直通 16.2 kHz";
         t.fake24bit = true; t.durationSec = 123.4567; t.fs = 48000;
@@ -366,7 +391,9 @@ int main() {
         const std::string j = track_health_json(t);
         const char* keys[] = { "dr_db", "lufs", "lra", "peak_dbfs", "lossless_suspected", "cutoff_hz",
                                "confidence", "reason", "fake24", "duration_sec", "fs", "channels",
-                               "bits", "status", "error", "analyzed_at_ms" };
+                               "bits", "status", "error", "analyzed_at_ms",
+                               "true_peak_dbtp", "true_peak_available",
+                               "dr_available", "lra_available", "lufs_available" };
         for (const char* k : keys) {
             const std::string needle = std::string("\"") + k + "\":";
             check(j.find(needle) != std::string::npos, std::string("字段名存在: ") + k);
@@ -374,11 +401,23 @@ int main() {
         const rta::net::Json p = rta::net::json_parse(j);
         check(p.ok(), "项目 JSON 解析器可解析（合法 JSON）");
         check(std::fabs(p["lufs"].n() - (-23.456)) < 5e-4, "lufs 数值往返", std::to_string(p["lufs"].n()));
+        check(std::fabs(p["true_peak_dbtp"].n() - (-0.075)) < 5e-4, "true_peak_dbtp 数值往返",
+              std::to_string(p["true_peak_dbtp"].n()));
+        check(p["true_peak_available"].b && p["dr_available"].b && p["lra_available"].b
+                  && p["lufs_available"].b,
+              "新 available 布尔字段往返");
         check(p["lossless_suspected"].b && p["fake24"].b, "布尔字段往返");
         check(p["reason"].s() == t.reason, "reason 转义回读逐字一致", p["reason"].s());
         check((int64_t)p["analyzed_at_ms"].n() == 1761360000123ll, "analyzed_at_ms 毫秒往返（double 精度内无损）");
         check((int)p["fs"].n() == 48000 && (int)p["channels"].n() == 2 && (int)p["bits"].n() == 24,
               "整数元信息往返");
+        // 不可用时必须写 -300（0 会被误读成 0 dBTP）
+        TrackHealth t2;
+        t2.truePeakDbtp = 0.0; t2.truePeakAvailable = false;
+        const std::string j2 = track_health_json(t2);
+        check(j2.find("\"true_peak_dbtp\":-300.000") != std::string::npos
+                  && j2.find("\"true_peak_available\":false") != std::string::npos,
+              "true peak 不可用时 JSON 写 -300 / false", j2.substr(0, 120));
     }
 
     // ---------------- §7 中文路径往返（mac 新增：本移植的核心判据） ----------------
@@ -595,6 +634,100 @@ int main() {
         check(!s.streamed, "流式源拒绝 → 已回退整段（streamed=false）", health_brief(s));
         check(same_health(whole, s), "回退结果与整段逐位一致", max_diff_text(whole, s));
         std::error_code ec; fsx::remove(p, ec);
+    }
+
+    // ---------------- §12 分析取消（1.1.4 新增） ----------------
+    printf("\n=== 12. 取消：opt.cancel 置位 → cancelled / analysis.cancelled，且不回退整段解码 ===\n");
+    {
+        const std::string cp = rta::platform::join(tmpDir, "rtahealth_cancel_small.wav");
+        rta::audio::AudioBuffer small;
+        small.rate = 48000; small.channels = 2; small.bits = 16; small.isFloat = false;
+        const size_t sn = (size_t)(0.5 * 48000.0);
+        small.raw.resize(sn * 2);
+        for (size_t i = 0; i < sn; ++i) {
+            const double x = 0.2 * std::sin(2.0 * kPi * 997.0 * (double)i / 48000.0);
+            const int32_t v = (int32_t)std::llround(x * 32768.0);
+            small.raw[i * 2] = v;
+            small.raw[i * 2 + 1] = v;
+        }
+        check(write_wav44(cp, small), "写出小型 WAV 夹具（0.5 s / 16-bit 立体声）", cp);
+
+        // 12a 调用前就置位：应立刻返回 cancelled，不打开/解码文件
+        std::atomic<bool> cancel{true};
+        HealthStreamOptions o;
+        o.blockFrames = 1000;
+        o.cancel = &cancel;
+        TrackHealth hc = analyze_file(cp, o);
+        check(hc.status == "cancelled", "预置 cancel=true → status=cancelled", hc.status);
+        check(hc.errorCode == "analysis.cancelled", "errorCode=analysis.cancelled", hc.errorCode);
+        check(hc.error == "分析已取消", "error=分析已取消", hc.error);
+        check(hc.analyzedAtMs > 0, "cancelled 结果仍填 analyzed_at_ms");
+
+        // 12b 路径不存在 + 预置取消：仍必须是 cancelled 而不是 error
+        //     —— 若错误地回退 analyze_file_whole，这里会变成"打不开文件"的 error。
+        const std::string ghost = rta::platform::join(tmpDir, "rtahealth_cancel_ghost.wav");
+        const TrackHealth hg = analyze_file(ghost, o);
+        check(hg.status == "cancelled" && hg.errorCode == "analysis.cancelled",
+              "不存在的路径 + 预置 cancel → cancelled（证明未回退整段解码）",
+              hg.status + " / " + hg.errorCode);
+
+        // 12c 正常路径（cancel=false，指针仍传入）：ready，且新字段/JSON 键齐全
+        cancel.store(false);
+        HealthStreamOptions o2;
+        o2.blockFrames = 1000;
+        o2.cancel = &cancel;
+        const TrackHealth hn = analyze_file(cp, o2);
+        check(hn.status == "ready", "cancel=false → 正常 ready", hn.error);
+        check(hn.truePeakAvailable && hn.lufsAvailable,
+              "0.5 s 素材 truePeak/lufs available", health_brief(hn));
+        check(!hn.drAvailable && !hn.lraAvailable,
+              "0.5 s 素材 dr/lra 不可用（<3 s 口径不成立）", health_brief(hn));
+        const std::string jn = track_health_json(hn);
+        const char* nk[] = { "true_peak_dbtp", "true_peak_available",
+                             "dr_available", "lra_available", "lufs_available",
+                             "hf_ratio_10k_available", "side_mid_available" };
+        for (const char* k : nk) {
+            const std::string needle = std::string("\"") + k + "\":";
+            check(jn.find(needle) != std::string::npos,
+                  std::string("正常 analyze_file JSON 含新字段: ") + k);
+        }
+        check(jn.find("\"true_peak_available\":true") != std::string::npos
+                  && jn.find("\"dr_available\":false") != std::string::npos
+                  && jn.find("\"lra_available\":false") != std::string::npos,
+              "0.5 s 素材 JSON 的 available 标志与结构体一致");
+
+        // 12d 流式块循环内部的取消：源在第一次 read 时置位，drive_health 必须在
+        //     下一块开头看到并退出，同时保留已解析的 fs/channels/bits/analyzedAtMs。
+        std::atomic<bool> loopCancel{false};
+        struct CancelAfterFirstRead {
+            std::atomic<bool>* flag;
+            size_t total;
+            uint32_t rate() const { return 48000; }
+            int channels() const { return 2; }
+            int bits() const { return 16; }
+            bool isFloat() const { return false; }
+            size_t totalFrames() const { return total; }
+            size_t read(size_t pos, size_t n, rta::audio::AudioBuffer& out) {
+                if (pos >= total || n == 0) return 0;
+                if (n > total - pos) n = total - pos;
+                out.rate = 48000; out.channels = 2; out.bits = 16; out.isFloat = false;
+                out.raw.assign(n * 2, 0);
+                flag->store(true);   // 第一块读完即请求取消
+                return n;
+            }
+        } src{ &loopCancel, 10000 };
+        bool streamedOk = true;
+        const TrackHealth hl = detail::drive_health(src, 1000, &streamedOk, &loopCancel);
+        check(hl.status == "cancelled" && hl.errorCode == "analysis.cancelled",
+              "drive_health 在下一块开头检测取消", hl.status);
+        check(hl.fs == 48000 && hl.channels == 2 && hl.bits == 16,
+              "取消结果保留 fs/channels/bits");
+        check(hl.analyzedAtMs > 0, "取消结果保留 analyzed_at_ms");
+        check(!streamedOk, "取消时 streamedOk=false（未完成流式读取）");
+
+        std::error_code ec;
+        fsx::remove(P(cp), ec);
+        check(!fsx::exists(P(cp)), "取消测试临时文件已删除");
     }
 
     printf("\n%s (失败项 %d)\n", fails == 0 ? "全部通过" : "存在失败", fails);

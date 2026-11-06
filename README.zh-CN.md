@@ -15,7 +15,7 @@
   <img src="https://img.shields.io/badge/HiFi-DSP%20%C2%B7%20DoP%20%C2%B7%20bit--perfect-22d3ee?style=flat-square" alt="HiFi">  
   <a href="https://github.com/BH2VOQ/RLPlayer-Mac/releases"><img src="https://img.shields.io/github/v/release/BH2VOQ/RLPlayer-Mac?include_prereleases&label=release&style=flat-square&color=22d3ee" alt="Release"></a>  
   <img src="https://img.shields.io/badge/macOS-13%2B%20%C2%B7%20arm64-0b1120?style=flat-square&logo=apple&logoColor=white" alt="macOS 13+ · arm64">  
-  <img src="https://img.shields.io/badge/ctest-132%2F132-34d399?style=flat-square" alt="ctest 132/132">  
+  <img src="https://img.shields.io/badge/ctest-136%2F136-34d399?style=flat-square" alt="ctest 136/136">
   <img src="https://img.shields.io/badge/license-GPL--3.0--or--later-a78bfa?style=flat-square" alt="GPL-3.0-or-later">  
   <img src="https://img.shields.io/badge/runtime%20deps-0-f472b6?style=flat-square" alt="No runtime dependencies">  
 </p>
@@ -34,7 +34,7 @@
   <img src="docs/images/ui-albums.png" alt="RLPlayer 主界面：专辑网格与底栏播放控制" width="100%">  
 </p>
 
-|  52  |     4    |    6230   |    113   |   0   |
+|  52  |     4    |    6230   |    136   |   0   |
 | :--: | :------: | :-------: | :------: | :---: |
 | 升频预设 | SDM 调制器族 | OPRA 耳机曲线 | ctest 用例 | 运行时依赖 |
 
@@ -247,7 +247,7 @@ Metal 内核（`librtagpu.dylib`，运行时编译 MSL）**动态加载**：`dlo
 
 ## 🗺 路线图
 
-> 当前版本以上方 Release 徽标为准。**1.1.2** 新增 AirPlay 投放并修复 DSD 可靠性问题；**1.1.2.1** 为投放状态/文案的热修；**1.1.3** 新增 UPnP/DLNA 投放升频（默认关闭）与 LLM 模型列表；1.1.4 起为后续计划。完整判据、验证边界与挂账见
+> 当前版本以上方 Release 徽标为准。**1.1.2** 新增 AirPlay 投放并修复 DSD 可靠性问题；**1.1.2.1** 为投放状态/文案的热修；**1.1.3** 新增 UPnP/DLNA 投放升频（默认关闭）与 LLM 模型列表；**1.1.4**（PR 中，尚未发布）新增单曲页音频分析面板（真峰 dBTP、11 点版本对齐）；1.1.5 起为后续计划。完整判据、验证边界与挂账见
 > **[ROADMAP-1.1.x.md](ROADMAP-1.1.x.md)**。
 
 | 版本        | 主题                                                   | 状态    |
@@ -259,7 +259,7 @@ Metal 内核（`librtagpu.dylib`，运行时编译 MSL）**动态加载**：`dlo
 | **1.1.3** | **UPnP/DLNA 投放升频** + LLM 模型列表 | ✅ 已发布（离线验证） |
 | **1.1.3.1** | 投放升频：新增**强制目标率**（渲染器声明不全时显式强制） | ✅ 已发布 |
 | **1.1.3.2** | logo 改黑底；侧栏品牌位换成真实产品 logo | ✅ 已发布 |
-| **1.1.4** | 单曲页音频分析（三级折叠 / 真峰 / 多声道）             | 🧭 计划 |
+| **1.1.4** | **单曲页音频分析** — L0/L1/L2 三级折叠、真峰 dBTP（4× 过采样）、自动分析默认关闭、每曲去重与切歌取消；版本对比 11 点平滑对齐 | 🚧 PR 中（未发布） |
 | **1.1.5** | 资料检索（专辑上下文 / knowledge 异步）           | 🧭 计划 |
 | **1.1.6** | AI 摘要流式与阶段进度                         | 🧭 计划 |
 | **1.1.7** | 补图批处理（续跑 / 逐源统计 / 剪影拒收）              | 🧭 计划 |

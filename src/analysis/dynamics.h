@@ -31,10 +31,19 @@
 //     绝对门 −70 LUFS，相对门 =（门内初算积分 −10 LU）再积分。
 //  3) LRA：EBU Tech 3342。3 秒短时窗、步进 100 ms；过绝对门 −70 与相对门（积分 −20 LU）后
 //     取 P95 − P10（升序线性插值百分位）。
+//  4) True peak（dBTP）：ITU-R BS.1770 附件 2 的"过采样峰值"思路。用 dsp/oversample_peak.h
+//     已有的 4 相 × 8 抽头 Kaiser 窗 sinc 核（isp_kernel()）对采样点之间做 4× 插值，
+//     每声道 true peak = max(样本峰值, 所有插值点 |y|)；全局取各有效声道的较大者。
+//     流式实现只多留【每声道 8 个样本】的环形缓冲（O(1) 内存，与曲长无关）。
+//     ★ 边界：只有 taps 覆盖的样本全部到齐后才计算插值点（i ≥ 3 且 i ≤ n−5，n=已收样本数）；
+//       文件头尾不插值（未来样本未知时补零/复制端点都会制造虚假过冲），样本峰值另行计入，
+//       所以边缘的整数采样点不会丢。
+//     ★ 4× 是"测量网格"：真实峰值可能落在两个 4× 格点之间，与 8× 参考可差零点几分 dB
+//       （见 tests/test_dynamics.cpp 的 8× 独立参考对照）。
 //
 // 已知局限（详见 docs/WIP-B1a.md）：
 //   - 声道权重 G_i 只实现了立体声 L/R = 1.0，多声道一律按 1.0（BS.1770 的 Ls/Rs = 1.41 未做）；
-//   - 素材 < 3 秒时 DR/LRA 口径不成立（返回 0）；< 400 ms 时整体 valid=false。
+//   - 素材 < 3 秒时 DR/LRA 口径不成立（返回 0，且对应 available=false）；< 400 ms 时整体 valid=false。
 //
 // ================== 增量（流式）接口 ==================
 // 背景（261026-03 遗留项）：整曲体检要把整段样本握在手里 —— DSD64 的 271 MB 文件解码成
@@ -47,7 +56,8 @@
 //
 // ★ 硬约定（必须逐位一致，不是"接近"）：同一组样本，无论
 //     measure_dynamics 一次喂完，还是 add_* 分成任意块（含每块 1 帧、块大小跨
-//     400 ms / 3 s 边界、块长不是步进的整数倍）喂进去，四个输出必须【完全相同（==）】。
+//     400 ms / 3 s 边界、块长不是步进的整数倍）喂进去，全部输出（含 true peak
+//     与各 available 标志）必须【完全相同（==）】。
 //   实现上 measure_dynamics 就是"整段喂给 DynamicsAccumulator"的包装，两者共用同一份
 //   算术；新增指标也必须共用，禁止各写一份。之所以成立：
 //     - 峰值是 max，与顺序无关；
@@ -55,8 +65,9 @@
 //       【样本时间顺序】累加；块边界只决定"何时把已累加的窗口收走"，不改变加法顺序；
 //     - 所有门限/百分位在 finalize() 里按老代码的同一顺序、同一表达式重放。
 #pragma once
-#include "../dsp/matrix.h"   // Biquad（直接型转置 II）
-#include "../dsp/kaiser.h"   // kPi
+#include "../dsp/matrix.h"           // Biquad（直接型转置 II）
+#include "../dsp/kaiser.h"           // kPi
+#include "../dsp/oversample_peak.h"  // isp_kernel()：4 相 × 8 抽头插值核（true peak 共用）
 #include <vector>
 #include <algorithm>
 #include <functional>
@@ -72,6 +83,15 @@ struct DynamicsResult {
     double lra = 0.0;            // EBU R128 短期响度 10~95 百分位差
     double peakDbfs = 0.0;       // 样本峰值
     bool   valid = false;
+    // ---- true peak（4× 过采样）与显式可用性 ----
+    // 哨兵约定与 lufs 一致：truePeakDbtp = -300.0 表示"没有可测峰值"（全静音/无有效声道），
+    // 此时 truePeakAvailable=false。注意空输入（pos_==0）仍保持结构体默认值 0.0，
+    // 与 measure_dynamics 的 n==0 早退逐位一致；有样本但全静音才落 -300。
+    double truePeakDbtp = 0.0;        // 20·log10(4× 过采样峰值)，或 -300.0（不可用）
+    bool   truePeakAvailable = false; // 任一有效声道有样本峰值 > 0
+    bool   drAvailable = false;       // 至少一个声道产出有限 DR（peak>0 && rms2>0）
+    bool   lraAvailable = false;      // 至少 2 个过门短时窗（否则 lra 保持 0）
+    bool   lufsAvailable = false;     // lufsIntegrated 不是 -300 哨兵
 };
 
 // ---- K 加权锚点：ITU-R BS.1770-4 表 1 的 48 kHz 规范系数 ----
@@ -156,6 +176,12 @@ public:
         pos_ = 0;
         peakCh_.assign((size_t)channels_, 0.0);
 
+        // true peak：4 相 × 8 抽头核只取一次静态表地址；每声道只留最后 8 个样本。
+        // 每帧不做任何分配（vectors 只在这里 begin() 分配一次）。
+        tpKernel_ = &rta::dsp::isp_kernel();
+        tpRing_.assign((size_t)channels_ * 8, 0.0);
+        tpIspCh_.assign((size_t)channels_, 0.0);
+
         drLen_ = (fs > 0.0) ? (size_t)std::llround(3.0 * fs) : 0;
         drAcc_.assign((size_t)channels_, 0.0);
         drCnt_.assign((size_t)channels_, 0);
@@ -227,9 +253,19 @@ public:
         // 而不是 −300，别"顺手修"——那会让两个接口在空输入上不再相等）。
         if (pos_ == 0) return r;
         double peak = 0.0;
-        for (int c = 0; c < channels_; ++c)
-            if (active_[(size_t)c] && peakCh_[(size_t)c] > peak) peak = peakCh_[(size_t)c];
+        double tpPeak = 0.0;                 // 4× 过采样后的全局峰值（线性）
+        bool   tpAny = false;                // 任一有效声道有样本峰值 > 0
+        for (int c = 0; c < channels_; ++c) {
+            if (!active_[(size_t)c]) continue;
+            if (peakCh_[(size_t)c] > peak) peak = peakCh_[(size_t)c];
+            // true peak 逐声道 = max(样本峰值, 插值点最大值)；全局取较大者
+            const double chTp = std::max(peakCh_[(size_t)c], tpIspCh_[(size_t)c]);
+            if (chTp > tpPeak) tpPeak = chTp;
+            if (peakCh_[(size_t)c] > 0.0) tpAny = true;
+        }
         r.peakDbfs = (peak > 0.0) ? 20.0 * std::log10(peak) : -300.0;
+        r.truePeakAvailable = tpAny;
+        r.truePeakDbtp = tpAny ? 20.0 * std::log10(tpPeak) : -300.0;
 
         // ---- TT DR：3 s 块，前 20% 块合并样本求 RMS₂ ----
         if (drLen_ > 0) {
@@ -250,6 +286,7 @@ public:
                     drInit = true;
                 }
             }
+            r.drAvailable = drInit;   // 至少一个声道 peak>0 且 rms2>0
         }
 
         if (blk_ == 0 || stp_ == 0) return r;
@@ -261,11 +298,12 @@ public:
         const double absGate = std::pow(10.0, (-70.0 + 0.691) / 10.0);
         double ungated = 0.0; size_t nU = 0;
         for (double p : blkPow_) if (p > absGate) { ungated += p; ++nU; }
-        if (nU == 0) { r.lufsIntegrated = -300.0; return r; }   // 全素材低于绝对门：测不出
+        if (nU == 0) { r.lufsIntegrated = -300.0; r.lufsAvailable = false; return r; }   // 全素材低于绝对门：测不出
         const double relGate = (ungated / (double)nU) / 10.0;   // （门内初算积分 −10 LU）⟹ 功率 ÷10
         double gated = 0.0; size_t nG = 0;
         for (double p : blkPow_) if (p > absGate && p > relGate) { gated += p; ++nG; }
         r.lufsIntegrated = (nG > 0) ? (-0.691 + 10.0 * std::log10(gated / (double)nG)) : -300.0;
+        r.lufsAvailable = (r.lufsIntegrated > -299.0);   // -300 是"测不出"哨兵
 
         // ---- LRA：3 s 短时窗 / 100 ms 步进，绝对门 −70 + 相对门（积分−20），P95 − P10 ----
         if (w3_ > 0 && !stPow_.empty()) {
@@ -279,6 +317,7 @@ public:
             if (stL.size() >= 2) {
                 std::sort(stL.begin(), stL.end());
                 r.lra = percentile_sorted(stL, 0.95) - percentile_sorted(stL, 0.10);
+                r.lraAvailable = true;   // 至少 2 个过门短时窗；否则 lra 保持 0 / 不可用
             }
         }
         return r;
@@ -327,6 +366,33 @@ private:
             }
             if (++ringPos_ == ringLen_) ringPos_ = 0;
         }
+        // ---- true peak（4× 过采样）----
+        // 当前帧绝对下标 n = pos_（0 基）。先把它写进每声道 8 样本环（下标 j → j&7）。
+        // 核的 tap t 覆盖 x[i+t−3]（t=0..7），所以算 i 点需要 x[i−3..i+4]；
+        // 收到第 n 帧后最新样本是 n，能算的最大 i = n−4。帧 n≥7 时算唯一的新点 i=n−4，
+        // 不碰任何未来样本（文件头 i<3 与文件尾 i>n−5 自然被跳过；样本峰值另行计入）。
+        const size_t n = pos_;
+        for (int c = 0; c < channels_; ++c) {
+            if (!active_[(size_t)c]) continue;
+            tpRing_[(size_t)c * 8 + (n & 7)] = getVal(c);
+        }
+        if (tpKernel_ && n >= 7) {
+            const size_t i = n - 4;                 // ≥3，taps 全部落在已收样本内
+            const auto& K = *tpKernel_;
+            for (int c = 0; c < channels_; ++c) {
+                if (!active_[(size_t)c]) continue;
+                const size_t base = (size_t)c * 8;
+                double tp = tpIspCh_[(size_t)c];
+                for (int p = 1; p < 4; ++p) {       // 相 0 就是样本本身，已由峰值覆盖
+                    double acc = 0.0;
+                    for (int t = 0; t < 8; ++t)
+                        acc += K[(size_t)p][(size_t)t] * tpRing_[base + ((i + (size_t)t - 3) & 7)];
+                    const double a = std::fabs(acc);
+                    if (a > tp) tp = a;
+                }
+                tpIspCh_[(size_t)c] = tp;
+            }
+        }
         ++pos_;
         if (lufsEnabled_) {
             if (pos_ == nextBlkEnd_) { blkPow_.push_back(window_power(blk_)); nextBlkEnd_ += stp_; }
@@ -360,6 +426,10 @@ private:
     size_t pos_ = 0;
 
     std::vector<double> peakCh_;
+    // true peak：每声道最后 8 个样本的环形缓冲（下标 j&7）+ 每声道插值点最大值
+    const std::vector<std::vector<double>>* tpKernel_ = nullptr;
+    std::vector<double> tpRing_;
+    std::vector<double> tpIspCh_;
     size_t drLen_ = 0;
     std::vector<double> drAcc_;
     std::vector<size_t> drCnt_;
@@ -382,7 +452,9 @@ inline DynamicsResult measure_dynamics(const double* const* ch, int channels, si
     if (!ch || channels <= 0 || n == 0 || fs <= 0.0) return r;
     bool any = false;
     for (int c = 0; c < channels; ++c) if (ch[c]) any = true;
-    if (!any) { r.peakDbfs = -300.0; return r; }   // 全空指针：旧实现同样只留默认值
+    // 全空指针：旧字段保持老行为（只留 peakDbfs=-300）；true peak 同样不可用 ⟹ -300。
+    // 这样与「所有声道 active=0 但喂过帧」的流式 finalize 结果也一致。
+    if (!any) { r.peakDbfs = -300.0; r.truePeakDbtp = -300.0; return r; }
     std::vector<char> active((size_t)channels, 0);
     for (int c = 0; c < channels; ++c) active[(size_t)c] = ch[c] ? 1 : 0;
     DynamicsAccumulator acc;

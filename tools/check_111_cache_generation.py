@@ -116,8 +116,8 @@ def main():
     assert res_new_second.get('cached') is True, f"Expected patched rtahealth cached=true after update, got {res_new_second.get('cached')}"
     new_cache_data = json.loads(cache_file.read_text())
     assert len(new_cache_data) == 1
-    assert new_cache_data[0].get('analysis_generation') == 'health-analysis-v2', f"Unexpected generation: {new_cache_data[0].get('analysis_generation')}"
-    print("PASS: Cache successfully updated with analysis_generation='health-analysis-v2' and hits on subsequent run.")
+    assert new_cache_data[0].get('analysis_generation') == 'health-analysis-v3', f"Unexpected generation: {new_cache_data[0].get('analysis_generation')}"
+    print("PASS: Cache successfully updated with analysis_generation='health-analysis-v3' and hits on subsequent run.")
 
     print("[Step 6] Testing stale / unknown / future generation in cache...")
     for bad_gen in ["health-analysis-v1", "health-analysis-unknown", "health-analysis-9999", "", 123, True, None]:

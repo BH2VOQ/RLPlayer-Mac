@@ -91,6 +91,55 @@ static std::vector<std::vector<double>> with_lead(const std::vector<std::vector<
     return o;
 }
 
+// 低音主导的合成素材（专为 44.1 kHz 对齐回归）：98 Hz 基频 + 同相谐波（窄脉冲 ⟹ 5 ms RMS
+// 窗内纹波很强），中间有不规则空拍（音乐结构）。44.1 kHz 的 5 ms 窗 = 220 样本，1 s 平移
+// = 200.45 个 hop（不是整数）⟹ 原始 5 ms 包络各 bin 的窗相位整体错位，正是上游对齐失败的
+// 触发条件；55 ms 平滑后才回到真延迟。seed 决定空拍位置/长度，换 seed/基频即为"另一首"。
+static std::vector<std::vector<double>> make_low_bass(size_t n, double fs, double peak,
+                                                      double f0, int harmonics,
+                                                      double restLen, double restGap,
+                                                      unsigned long long seed,
+                                                      double slowRate = 0.09,
+                                                      double slowPhase = 0.7,
+                                                      double slowDepth = 0.15) {
+    std::vector<std::vector<double>> ch(2, std::vector<double>(n, 0.0));
+    unsigned long long s = seed;
+    auto uni = [&]() { s ^= s >> 12; s ^= s << 25; s ^= s >> 27;
+                       return (double)((s * 2685821657736338717ull) >> 11) / 9007199254740992.0; };
+    const double T = (double)n / fs;
+    struct Rest { double t0, t1; };
+    std::vector<Rest> rests;
+    for (double t = restGap * (0.6 + 0.8 * uni()); t < T - 0.2;) {
+        const double len = restLen * (0.6 + 0.8 * uni());
+        rests.push_back({ t, t + len });
+        t += len + restGap * (0.8 + 0.8 * uni());
+    }
+    const double fade = 0.010;                       // 10 ms 淡入/淡出，避免空拍边缘出现咔嗒
+    for (size_t i = 0; i < n; ++i) {
+        const double t = (double)i / fs;
+        double g = 1.0;
+        for (const Rest& r : rests) {
+            if (t <= r.t0 - fade || t >= r.t1 + fade) continue;
+            if (t < r.t0) g *= (r.t0 - t) / fade;
+            else if (t <= r.t1) g = 0.0;
+            else g *= (t - r.t1) / fade;
+        }
+        const double slow = 1.0 - slowDepth + slowDepth * std::sin(2.0 * kPi * slowRate * t + slowPhase);
+        double l = 0.0, rr = 0.0;
+        for (int k = 1; k <= harmonics; ++k) {
+            const double ph = 0.05 * (double)k;
+            l  += std::sin(2.0 * kPi * (double)k * f0 * t + ph);
+            rr += std::sin(2.0 * kPi * (double)k * f0 * t + 0.5 + ph);
+        }
+        ch[0][i] = g * slow * 0.05 * l;
+        ch[1][i] = g * slow * 0.05 * rr;
+    }
+    double mx = 0.0;
+    for (const auto& c : ch) for (double v : c) mx = std::max(mx, std::fabs(v));
+    if (mx > 0.0) for (auto& c : ch) for (double& v : c) v *= peak / mx;
+    return ch;
+}
+
 int main() {
     setvbuf(stdout, nullptr, _IONBF, 0);
     const double fs = 48000.0;
@@ -275,6 +324,72 @@ int main() {
         for (size_t i = 0; same && i < r.scores.size(); ++i) same = (r2.scores[i] == r.scores[i]);
         check(same, "两次运行得分逐位相同（==）");
         check(r2.explanation == r.explanation, "两次运行解释文本相同");
+    }
+
+    // ==== 8. 低音 98 Hz 对齐（上游失败样本的回归；44.1 kHz，5 ms 窗 = 220 样本）====
+    // 失败机理：98 Hz 一周期 10.2 ms > 5 ms 原始窗，每 bin 的 RMS 依赖窗起始相位；44.1k 的
+    // 1.0 s 平移 = 200.45 hop（非整数）⟹ 原始包络在真延迟处相关只剩 ~0.55，峰值跑到几秒外。
+    // 11 点（55 ms）平滑把纹波平均掉，再用 3 点（15 ms）在 ±8 点内细化。
+    // 注：0.5 s / 2.0 s 前导静音的旧用例仍在第 1 节，必须继续通过。
+    printf("\n=== 8. 低音 98 Hz：11 点平滑粗对齐 + 3 点细化（裁 1 s / 3 s 静音）===\n");
+    {
+        const double fsLow = 44100.0;
+        const size_t nLow = (size_t)(12.0 * fsLow);
+        auto low = make_low_bass(nLow, fsLow, 0.95, 98.0, 8, 0.35, 2.2, 28ull);
+        std::vector<std::vector<double>> lowCut(2);
+        for (int c = 0; c < 2; ++c)
+            lowCut[c].assign(low[c].begin() + (size_t)(1.0 * fsLow), low[c].end());
+        auto lowSil = with_lead(low, (size_t)(3.0 * fsLow));
+        // 另一首低音素材（负对照）：110 Hz、更密的空拍（0.45 s 节奏）、seed 与慢起伏
+        // 的速率/相位/深度全不同
+        auto lowOther = make_low_bass(nLow, fsLow, 0.95, 110.0, 5, 0.25, 0.45, 1000025ull,
+                                      0.23, 3.3, 0.40);
+
+        const std::string pL1 = (dir / "low_v1.wav").string();
+        const std::string pLc = (dir / "low_cut1s.wav").string();
+        const std::string pLs = (dir / "low_sil3s.wav").string();
+        const std::string pLo = (dir / "low_other.wav").string();
+        check(write_wav(pL1, low, (uint32_t)fsLow, 24), "写低音 V1（98 Hz，12 s）");
+        check(write_wav(pLc, lowCut, (uint32_t)fsLow, 24), "写低音 V2（裁掉前 1.0 s）");
+        check(write_wav(pLs, lowSil, (uint32_t)fsLow, 24), "写低音 V3（前置 3.0 s 数字静音）");
+        check(write_wav(pLo, lowOther, (uint32_t)fsLow, 24), "写低音另一首（110 Hz，不同空拍）");
+
+        VersionCompare rc = compare_versions({ pL1, pLc });
+        printf("  裁掉前 1.0 s：lagSec=%+.4f s，envCorr=%.4f，sameTrack=%d\n",
+               rc.versions.size() > 1 ? rc.versions[1].lagSec : 0.0,
+               rc.versions.size() > 1 ? rc.versions[1].envCorr : 0.0, (int)rc.sameTrack);
+        check(rc.ok, "低音素材裁 1.0 s 仍判为同曲", rc.error);
+        if (rc.ok) {
+            const VersionData& v = rc.versions[1];
+            check(std::fabs(v.lagSec - (-1.0)) <= 0.05, "lagSec = −1.00 s ±0.05 s（真延迟）",
+                  f2(v.lagSec, -1.0));
+            check(v.envCorr > 0.90, "平滑包络相关 > 0.90（原始 5 ms 包络在真延迟处只有 0.57）",
+                  f2(v.envCorr));
+            // 符号约定：lagSec200 = −lag，且 lagSec = −lag/200（别"顺手"改符号）
+            check(std::fabs(v.lagSec * 200.0 - (double)v.lagSec200) < 1e-9,
+                  "lagSec200 与 lagSec 的符号约定一致", f2(v.lagSec200, v.lagSec));
+        }
+
+        VersionCompare rs = compare_versions({ pL1, pLs });
+        printf("  前置 3.0 s 静音：lagSec=%+.4f s，envCorr=%.4f，sameTrack=%d\n",
+               rs.versions.size() > 1 ? rs.versions[1].lagSec : 0.0,
+               rs.versions.size() > 1 ? rs.versions[1].envCorr : 0.0, (int)rs.sameTrack);
+        check(rs.ok, "低音素材前置 3.0 s 静音仍判为同曲", rs.error);
+        if (rs.ok) {
+            const VersionData& v = rs.versions[1];
+            check(std::fabs(v.lagSec - 3.0) <= 0.05, "lagSec = +3.00 s ±0.05 s（真延迟）",
+                  f2(v.lagSec, 3.0));
+            check(v.envCorr > 0.90, "平滑包络相关 > 0.90（原始 5 ms 包络在真延迟处只有 0.61）",
+                  f2(v.envCorr));
+            check(std::fabs(v.lagSec * 200.0 - (double)v.lagSec200) < 1e-9,
+                  "lagSec200 与 lagSec 的符号约定一致", f2(v.lagSec200, v.lagSec));
+        }
+
+        VersionCompare ro = compare_versions({ pL1, pLo });
+        printf("  另一首低音素材：包络相关 %.4f → sameTrack=%d\n",
+               ro.sameTrackCorr, (int)ro.sameTrack);
+        check(!ro.ok && !ro.sameTrack,
+              "另一首低音素材仍判「不是同一首」（平滑没有把判据放宽）", ro.error);
     }
 
     fsx::remove_all(dir, ec);
