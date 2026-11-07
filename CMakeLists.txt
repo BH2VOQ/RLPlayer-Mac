@@ -1081,6 +1081,13 @@ target_include_directories(test_llm_models PRIVATE ${CMAKE_SOURCE_DIR}/src)
 target_link_libraries(test_llm_models PRIVATE ${RL_PLATFORM_LIBS})
 add_test(NAME llm_models COMMAND test_llm_models)
 
+# ---------------- 1.1.4-beta3：数据源可手动排序（2026-11-07）----------------
+# 只测 src/meta/provider.h 的纯函数（默认顺序 / csv 解析 / 顺序生效），零网络。
+add_executable(test_provider_order tests/test_provider_order.cpp)
+target_include_directories(test_provider_order PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(test_provider_order PRIVATE ${RL_PLATFORM_LIBS})
+add_test(NAME provider_order COMMAND test_provider_order)
+
 option(RTA_BUILD_LEGACY_TESTS "构建尚未移植到 macOS 的旧测试（缺 POSIX 垫片，默认关闭）" OFF)
 if(RTA_BUILD_LEGACY_TESTS)
 

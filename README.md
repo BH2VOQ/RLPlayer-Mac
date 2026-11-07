@@ -97,7 +97,8 @@ This chain is not an illustration: every item is visible with the actual values 
 - **Native tag parsing** — FLAC / WAV / MP3 / OGG read directly, **60×–250× faster** than going through ffprobe
 - **CUE sheet splitting** — UTF-16 / UTF-8 / GBK encodings and 1/75-frame indices
 - **Streaming and album detail** — Subsonic streaming page unified with local album card grid; dedicated album detail view with full metadata and batch actions
-- **Metadata enrichment** — five sources: QQ Music / NetEase Cloud Music / iTunes / lrclib / dizzylab; tags, cover art and lyrics are filled in automatically during playback
+- **Metadata enrichment** — six sources: QQ Music / NetEase Cloud Music / iTunes / lrclib / dizzylab / Discogs, with a **user-orderable priority list** in Settings (higher rows win); tags, cover art and lyrics are filled in automatically during playback
+- **AI enhancement (OpenAI-compatible)** — DeepSeek / OpenAI / OpenRouter / SiliconFlow / local Ollama or your own gateway: paste the base URL and key; the model list is fetched automatically and can also be typed in
 - **Online cover fetching** — embedded art → web art → 7-day negative cache; no negative caching while offline, and a miss is recorded only when the server explicitly says there is none
 - **OPRA headphone EQ** — **6230** headphone target curves built in, written into the EQ chain in one click
 - **Audio health check** — `/api/track/health` plus a per-track popup, objective metrics including THD+N, noise floor, stereo correlation, mono compatibility, and side/mid ratio; cached results carry algorithm generation tags

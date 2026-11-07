@@ -60,6 +60,7 @@
 #include "net/json.h"
 #include "meta/match.h"          // Candidate 的唯一定义(评分与 provider 共用,2026-10-21 统一)
 #include "meta/year.h"           // E-14：年份清洗统一由此头提供
+#include <algorithm>             // std::find（pv_parse_order 的保序去重）
 #include <array>
 #include <chrono>
 #include <cstdio>
@@ -1586,17 +1587,22 @@ inline LyricResult lyric_lrclib_entry(const LyricRequest& rq, std::string& err) 
     return r;
 }
 
-// 静态注册表(唯一事实源):顺序 = 搜索优先级。
-//   dizzylab → qq → netease → itunes   (搜索链按正向遍历)
-//   lrclib → netease → qq              (歌词链按【逆序】+ canLyric 过滤)
+// 静态注册表(唯一事实源):**内容**与能力位在这里,但**调用先后不再由表序决定**。
+//   2026-11-07 起用户可在设置页排序,顺序以 csv 传进来,由 pv_ordered()(本文件末尾)展开;
+//   表序只是 pv_default_order() 的兜底(未在默认顺序里列出的源按表序排在最后,如 discogs)。
+//   默认顺序下:搜索链 dizzylab → netease → qq → itunes(成员与旧正序相同,qq/netease 对调;
+//                lrclib/discogs 无 canSearch);歌词链 lrclib → netease → qq(与旧逆序逐项相同,
+//                dizzylab/itunes 无 canLyric)⟹ 判据见 tests/test_provider_order.cpp 第 7 节。
+//   ⚠️ 改表序**不再**改变调用先后;要改默认行为请改 pv_default_order()。
 //
 // dizzylab 排第一的理由(2026-10-22,见本源头注):曲库是同人为主(555/653),
 // 目录名=「专辑 @ 社团」,而 QQ/网易/iTunes 对同人社团发行基本无条目 —— 它是这类
 // 曲目的正解。⚠️ 排第一【不改变采纳门槛】:enrich_adopt 仍要求
 // confident ‖ LLM pick≥0 ‖ top≥0.80,宁可拒采也不写错(宁缺毋错,§1.6.A P1.5 验收)。
 //
-// lrclib 挪到表尾后歌词链逆序仍是 lrclib→netease→qq(dizzylab canLyric=false 自动跳过),
-// 与 P1 的固定歌词顺序完全一致 —— tests/test_metaproviders.cpp 有该顺序断言。
+// 表内顺序仍保持「dizzylab 打头」的原样:它既是这套矩阵的来源顺序,也是 pv_parse_order()
+// 追加未提及源时的兜底顺序。历史原因(旧实现靠表序反向遍历凑歌词链)已由 pv_default_order()
+// 接管,别再往这里加「逆序」语义。
 inline const std::vector<ProviderDesc>& provider_registry() {
     // 能力位(第三列)每一项都有实测依据,写在条目上方的注释里;填 false 的一律注明
     // 「未找到公开接口/实测无该字段」—— 不许拍脑袋填 true(用户 2026-10-27 要求核查)。
@@ -1676,6 +1682,112 @@ inline const std::vector<ProviderDesc>& provider_registry() {
           nullptr, nullptr, nullptr },
     };
     return reg;
+}
+
+// ---------------------------------------------------------------------------
+// 数据源顺序（用户可排序，2026-11-07）
+//
+// 设置页「越靠上优先级越高」的**唯一事实源**：用户在设置里调好的顺序以逗号分隔的 id 串
+// 一路传到这里（EnrichOpts::order / ArtworkOpts::order），搜索链、歌词链、封面·头像·
+// 简介链全部按 pv_ordered() 展开的**同一条**顺序走。
+// 改造前是「搜索正序 + 歌词逆序 + 头像正序」三套硬编码，改一处得记三个方向，正是本节的由来。
+//
+// 默认顺序是**刻意选的**，不是注册表原序，别当成乱排再改回去：
+//   {"dizzylab","lrclib","netease","qq","itunes"}
+//   * 歌词链（lrclib→netease→qq）与改造前**逐字一致**：旧代码是「注册表逆序 + canLyric
+//     过滤」凑出来的这条链，现在明文写进默认顺序，断言可以直接读（见
+//     tests/test_provider_order.cpp「默认顺序下 canLyric 过滤」）。
+//   * 搜索链相对旧的正序（dizzylab→qq→netease→itunes）只对调了 qq/netease：搜索候选是
+//     收齐后按 match_score_all 统一排序再采纳的，源的先后只影响「同分时的先后」与调用
+//     先后（含 300ms 间隔的排队），不影响候选集合 ⟹ 默认行为等价。
+//   * itunes 沉到表尾：它只有曲目/封面/外链，没有歌词也没有艺人图，排后不吃亏。
+//
+// 已知取舍（不隐瞒）：改造前**头像链是 dizzylab→qq→netease→discogs**（注册表正序），
+//   与歌词链想要的 netease→qq 方向相反 —— 一条全局顺序不可能同时逐项等价于两套旧顺序。
+//   本工作包选择「歌词链逐项不变」，因此默认顺序下头像链变成 dizzylab→netease→qq→discogs
+//   （见 artwork.h 文件头「头像优先级」一节的同步说明）。要改这个取舍，就改这里，别再散落。
+// ---------------------------------------------------------------------------
+inline std::vector<std::string> pv_default_order() {
+    return { "dizzylab", "lrclib", "netease", "qq", "itunes" };
+}
+
+namespace pv_order_detail {
+
+// ASCII 空白（与 dl_detail::dl_ws 同口径；全角空格不认，id 本来也不会带）
+inline bool ord_ws(char c) { return c == ' ' || c == '\t' || c == '\r' || c == '\n'; }
+
+// trim + 小写：只动 ASCII，UTF-8 多字节原样保留（id 是 ASCII，但别写坏别人的字节）
+inline std::string ord_norm(const std::string& s) {
+    size_t a = 0, b = s.size();
+    while (a < b && ord_ws(s[a])) ++a;
+    while (b > a && ord_ws(s[b - 1])) --b;
+    std::string o = s.substr(a, b - a);
+    for (char& c : o)
+        if (c >= 'A' && c <= 'Z') c = (char)(c - 'A' + 'a');
+    return o;
+}
+
+// id 是否真在注册表里（未知 id 一律丢弃 —— 设置里存过旧版本的源名也不会把链打歪）
+inline bool ord_known(const std::string& id) {
+    for (const ProviderDesc& pd : provider_registry())
+        if (id == pd.id) return true;
+    return false;
+}
+
+} // namespace pv_order_detail
+
+// csv（"qq,netease" / "QQ, netease,qq," / "" / "???"）→ 完整顺序。
+//   ① 按 ',' 切 → trim → 小写 → 只留注册表真实存在的 id → 去重保序；
+//   ② csv 里没提到的注册表 id：先按 pv_default_order() 顺序追加到尾部（用户没动过设置时
+//      得到的就是完整默认行为，而不是只剩用户点过的那几个源）；
+//   ③ 连默认顺序里都没有的注册表 id（例如 2026-10-27 补进矩阵的 discogs）再按注册表原序
+//      排在最尾 —— 将来加源时，用户已保存的旧顺序串不会把新源静默漏掉（任务判据之一）。
+// 入参为空 / 全是垃圾 → 结果就是 pv_default_order()（+ ③ 的兜底项），不会返回空表。
+inline std::vector<std::string> pv_parse_order(const std::string& csv) {
+    std::vector<std::string> out;
+    out.reserve(provider_registry().size());
+    auto push = [&out](const std::string& id) {
+        if (id.empty()) return;
+        if (std::find(out.begin(), out.end(), id) != out.end()) return;
+        out.push_back(id);
+    };
+    size_t i = 0;
+    while (i <= csv.size()) {
+        const size_t comma = csv.find(',', i);
+        const size_t end   = (comma == std::string::npos) ? csv.size() : comma;
+        const std::string tok = pv_order_detail::ord_norm(csv.substr(i, end - i));
+        if (pv_order_detail::ord_known(tok)) push(tok);
+        if (comma == std::string::npos) break;
+        i = comma + 1;
+    }
+    for (const std::string& id : pv_default_order())
+        if (pv_order_detail::ord_known(id)) push(id);
+    for (const ProviderDesc& pd : provider_registry()) push(pd.id);
+    return out;
+}
+
+// 顺序 → csv（写回设置页/配置文件用）。不做 trim/小写/校验：入参已是解析后的 id 列表。
+inline std::string pv_order_join(const std::vector<std::string>& ids) {
+    std::string s;
+    for (const std::string& id : ids) {
+        if (!s.empty()) s += ',';
+        s += id;
+    }
+    return s;
+}
+
+// csv → 注册表指针数组，长度**恒等于 provider_registry().size()**（每个源恰好出现一次）。
+// 指针全部指向 provider_registry() 内部元素 —— 它是函数内 static const vector，
+// 进程生命周期内地址稳定，所以调用方可以放心把指针存起来（不会变成野指针）。
+// 顺序 = pv_parse_order(csv)；调用方再各自按 canSearch / canLyric / 能力位过滤。
+inline std::vector<const ProviderDesc*> pv_ordered(const std::string& csv) {
+    const std::vector<std::string> ids = pv_parse_order(csv);
+    std::vector<const ProviderDesc*> out;
+    out.reserve(ids.size());
+    for (const std::string& id : ids)
+        for (const ProviderDesc& pd : provider_registry())
+            if (id == pd.id) { out.push_back(&pd); break; }
+    return out;
 }
 
 } // namespace rta::meta

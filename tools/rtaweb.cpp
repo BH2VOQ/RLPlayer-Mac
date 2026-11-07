@@ -5735,6 +5735,10 @@ struct MetaSettings {
     bool llm = true;                         // metallm
     bool summary = false;                    // metasummary 默认 0（成本策略：显式开启）
     std::map<std::string, bool> srcOn;       // 注册表 id → 开关(缺省 true)
+    // 2026-11-07（1.1.4-beta3）：数据源顺序。metasrcorder=qq,netease,... 逗号分隔；
+    // 空 = 用 provider.h 里的默认顺序（pv_default_order，与改造前的链顺序等价）。
+    // 规范化（去未知 id / 补全缺项 / 去重）统一走 rta::meta::pv_parse_order。
+    std::string order;
 };
 static bool meta_bool_val(const std::string& v) {
     return v == "1" || v == "true" || v == "on";
@@ -5754,6 +5758,7 @@ static MetaSettings meta_settings_load() {
         else if (k == "metallm")     ms.llm     = meta_bool_val(v);
         else if (k == "metasummary") ms.summary = meta_bool_val(v);
         else if (k.rfind("metasrc_", 0) == 0) ms.srcOn[k.substr(8)] = meta_bool_val(v);
+        else if (k == "metasrcorder") ms.order = rta::meta::pv_order_join(rta::meta::pv_parse_order(v));
         else if (k == "metaqq")      legacy["qq"]      = v;
         else if (k == "metanetease") legacy["netease"] = v;
         else if (k == "metaitunes")  legacy["itunes"]  = v;
@@ -5771,6 +5776,7 @@ static rta::meta::EnrichOpts meta_opts_from_settings() {
     const MetaSettings ms = meta_settings_load();
     rta::meta::EnrichOpts o;
     o.srcOn = ms.srcOn;
+    o.order = ms.order;
     o.llm = ms.llm;
     // 功能4：llm 配置固定读 exe 同目录（界面 /api/llm 写的就是这一份）
     o.llmConfPath = path_in_exe_dir("rlplayer-llm.conf");
@@ -5805,7 +5811,7 @@ static void meta_on_play(const std::string& file) {
         rta::diag::ScopedRid diagRid(rid);
         rta::net::HttpCancellationScope httpCancel(&g_shutdown);
         rta::meta::EnrichOpts o;
-        o.srcOn = ms.srcOn; o.llm = ms.llm;
+        o.srcOn = ms.srcOn; o.order = ms.order; o.llm = ms.llm;
         o.llmConfPath = path_in_exe_dir("rlplayer-llm.conf");
         // EnrichOpts 是值拷贝进 lambda，但 cancel 指针指向全局对象 g_shutdown，
         // 生命周期覆盖整个进程，后台线程安全访问
@@ -6486,9 +6492,20 @@ static std::string llm_test_json() {
     const std::string body = rta::meta::llm_build_chat_body(
         c.model, { rta::meta::LlmMessage{"user", "ping"} }, 8, 0.0f, false);
     const auto t0 = std::chrono::steady_clock::now();
-    const rta::net::HttpResponse resp = rta::net::http_post(
-        rta::meta::llm_base_url(c.baseUrl) + "/chat/completions", body,
-        { "Authorization: Bearer " + c.apiKey }, "application/json", 15000);
+    // 2026-11-07（1.1.4-beta3）：「测试连接」与 llm_chat 走同一套候选路径（base -> base/v1）。
+    // 只在 404/405（这条路径不存在）时换下一条；401/429/5xx 一律照原样报出来。
+    // 不这么做就会出现「模型清单拉得到、点测试连接却 404」的自相矛盾，用户会误判成 key 坏了。
+    rta::net::HttpResponse resp;
+    std::string usedPath;
+    for (const std::string& cand : rta::meta::llm_base_candidates(c.baseUrl)) {
+        const std::string url = cand + "/chat/completions";
+        resp = rta::net::http_post(url, body,
+            { "Authorization: Bearer " + c.apiKey }, "application/json", 15000);
+        if (resp.status == 404 || resp.status == 405) continue;   // 路径不对 -> 试下一条候选
+        const std::string base = rta::meta::llm_normalize_base(c.baseUrl);
+        if (url.size() > base.size()) usedPath = url.substr(base.size());
+        break;
+    }
     const long long ms = (long long)std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::steady_clock::now() - t0).count();
     const std::string text(resp.body.begin(), resp.body.end());
@@ -6523,7 +6540,8 @@ static std::string llm_test_json() {
         return "{\"ok\":false,\"error\":\"" + jesc(e) + "\",\"latencyMs\":" + std::to_string(ms) + "}";
     }
     return "{\"ok\":true,\"model\":\"" + jesc(c.model) + "\",\"latencyMs\":" +
-           std::to_string(ms) + ",\"tokens\":" + std::to_string(p.totalTokens) + "}";
+           std::to_string(ms) + ",\"tokens\":" + std::to_string(p.totalTokens) +
+           ",\"path\":\"" + jesc(usedPath) + "\"}";
 }
 
 // 2026-10-27（用户 261027-06 P1）：GET /api/llm/models —— 拉取当前可用模型列表。
@@ -6547,7 +6565,17 @@ static std::string llm_models_json(const std::string& path) {
       << ",\"cached\":" << (cached ? "true" : "false")
       << ",\"latencyMs\":" << ml.latencyMs
       << ",\"count\":" << ml.count()
-      << ",\"currentInList\":" << (ml.ok && ml.has(c.model) ? "true" : "false");
+      << ",\"currentInList\":" << (ml.ok && ml.has(c.model) ? "true" : "false")
+      // 2026-11-07（1.1.4-beta3）：OpenAI 兼容端点有两种常见写法（带 /v1 与不带 /v1），
+      // 命中哪一条要让用户看得见 —— 设置页据此提示「这台网关走的是 /v1/models」。
+      << ",\"path\":\"" << jesc(ml.modelsPath) << "\""
+      << ",\"resolvedBase\":\"" << jesc(ml.resolvedBase) << "\""
+      << ",\"tried\":[";
+    for (size_t i = 0; i < ml.triedPaths.size(); ++i) {
+        if (i) j << ",";
+        j << "\"" << jesc(ml.triedPaths[i]) << "\"";
+    }
+    j << "]";
     if (!ml.ok) j << ",\"error\":\"" << jesc(ml.error) << "\"";
     j << ",\"models\":[";
     for (size_t i = 0; i < ml.models.size(); ++i) {
@@ -7079,6 +7107,7 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
         // 源开关沿用既有设置（与 /api/enrich 同一套 srcOn 语义：
         // MetaSettings.srcOn 是「注册表 id → 开关」，缺省 true，不要写死具体源名）
         aopts.srcOn = meta_settings_load().srcOn;
+        aopts.order  = meta_settings_load().order;   // 1.1.4-beta3：头像候选链同样按用户顺序
         const rta::meta::ArtistImageResult r = rta::meta::artwork_fetch_artist_image(who, aopts);
         if (!r.ok || r.bytes.empty()) {
             ct = "application/json; charset=utf-8";
@@ -9190,7 +9219,11 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
         std::ostringstream j;
         j << "{\"ok\":true,\"items\":[";
         bool first = true;
-        for (const rta::meta::ProviderDesc& pd : rta::meta::provider_registry()) {
+        // 2026-11-07（1.1.4-beta3）：顺序即优先级。items 按用户顺序（metasrcorder）返回，
+        // 前端按数组顺序渲染即可；同时回一份规范化的 order 字符串，前端保存时原样写回，
+        // 免得两端各算一套排列。pv_ordered 保证「长度 == 注册表大小、无未知 id、无重复」。
+        for (const rta::meta::ProviderDesc* pp : rta::meta::pv_ordered(ms.order)) {
+            const rta::meta::ProviderDesc& pd = *pp;
             if (!first) j << ",";
             first = false;
             const auto it = ms.srcOn.find(pd.id);
@@ -9200,7 +9233,11 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
               << ",\"canSearch\":" << (pd.canSearch ? "true" : "false")
               << ",\"canLyric\":" << (pd.canLyric ? "true" : "false") << "}";
         }
-        j << "],\"llm\":" << (ms.llm ? "true" : "false")
+        j << "],\"order\":\"" << jesc(rta::meta::pv_order_join(rta::meta::pv_parse_order(ms.order))) << "\""
+          // 2026-11-07：出厂默认顺序单独回一份 —— 设置页的「恢复默认」必须复位到**出厂**，
+          // 不能复位成「这次打开页面时后端报的那份」（那等于把用户改过的顺序当成默认）。
+          << ",\"defaultOrder\":\"" << jesc(rta::meta::pv_order_join(rta::meta::pv_parse_order(std::string()))) << "\""
+          << ",\"llm\":" << (ms.llm ? "true" : "false")
           << ",\"on\":" << (ms.on ? "true" : "false") << "}";
         return j.str();
     }
@@ -10306,6 +10343,13 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
             return "{\"ok\":false,\"error\":\"模型名格式不对\"}";
         if (hasBase && !llm_value_ok(f["base_url"], 512))
             return "{\"ok\":false,\"error\":\"base_url 格式不对\"}";
+        // 2026-11-07（1.1.4-beta3）：接口地址只接受 http(s)。缺 scheme 时 normalize 会补 https://，
+        // 但 file:// / ftp:// / 明显不是 URL 的串要先挡在门外 —— 这个值会进 HTTP 请求，不校验就是 SSRF 面。
+        if (hasBase) {
+            const std::string nb = rta::meta::llm_normalize_base(f["base_url"]);
+            if (nb.rfind("http://", 0) != 0 && nb.rfind("https://", 0) != 0)
+                return "{\"ok\":false,\"error\":\"接口地址只支持 http:// 或 https://\"}";
+        }
 
         rta::meta::LlmConfig c = rta::meta::llm_config_load(llm_conf_path());
         std::string changed;
@@ -10616,7 +10660,7 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
                                            // 元数据补全(P1.5):总开关与 LLM 固定两键;
                                            // 源开关 metasrc_<id> 按注册表动态放行(见下);
                                            // P3④b AI 综合开关 metasummary (默认0)
-                                           "metaon", "metallm", "metasummary", "llmmonthlycap", "scanthreads", "scanThreads",
+                                           "metaon", "metallm", "metasummary", "metasrcorder", "llmmonthlycap", "scanthreads", "scanThreads",
                                            "cast_upsample", "cast_upsample_ceiling", "cast_upsample_force",
                                            "updbeta",
                                            // 1.1.4 单曲页分析：默认关闭的"播放即后台分析"
@@ -10634,6 +10678,11 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
                 if (!okKey) continue;
                 std::string clean;
                 for (char ch : v) if (ch != 10 && ch != 13) clean += ch;
+                // 2026-11-07（1.1.4-beta3）：数据源顺序键只认注册表 id。落盘前统一规范化
+                //（去未知 id / 去重 / 把没提到的 id 按默认顺序补到尾部），conf 里永远是一个完整排列，
+                // 读侧不必再做第二套猜测。空值 = 回到默认顺序（显式写全，便于人工核对）。
+                if (k == "metasrcorder")
+                    clean = rta::meta::pv_order_join(rta::meta::pv_parse_order(clean));
                 if (k == "scanThreads" || k == "scanthreads") {
                     const int st = atoi(clean.c_str());
                     if (st > 0) Library::instance().setScanThreads((size_t)st);

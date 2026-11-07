@@ -200,6 +200,13 @@ var ADV = {
 var META = { on: 1, llm: 1, summary: 0, hasLlmKey: null, summaryEnabled: null };
 var META_PROVIDERS = null;   // /api/providers 的 items（启动时拉取；null = 还没到）
 var META_SRC = {};           // id → 0/1（源开关状态，随 /api/providers 到达而填充）
+// 2026-11-07（1.1.4-beta3）：数据源手动排序。顺序即优先级（越靠前越先参与补全）。
+//   META_ORDER         = 当前顺序（id 数组），渲染 / 拖拽 / 上下移 / 落盘全读它；
+//   META_ORDER_DEFAULT = 后端给的默认顺序（「恢复默认」复位用，来自 /api/providers 的 order）。
+// 后端回的 order 已是**规范化后的完整排列**（去未知 id、去重、补全缺项）⟹ 前端原样用，
+// 不自己再排一遍：两边各算一套排列只会分叉。
+var META_ORDER = [];
+var META_ORDER_DEFAULT = [];
 // 路径分隔符：**按运行平台判定**，不再硬编码反斜杠。
 // 旧实现写死 String.fromCharCode(92)（"\"），macOS 上 join('/tmp/libtest','A') 会得到
 // "/tmp/libtest\A" —— 这是个不存在的路径，于是「文件夹」视图点进去就是空白/报错，
@@ -4382,7 +4389,11 @@ function saveSettings(immediate) {
         + '&metasummary=' + (META.summary ? 1 : 0)
         + (META_PROVIDERS || []).map(function (p) {
             return '&metasrc_' + p.id + '=' + (META_SRC[p.id] === 0 ? 0 : 1);
-          }).join('');
+          }).join('')
+        // 1.1.4-beta3：数据源顺序（逗号分隔 id，顺序即优先级），与 metasrc_<id> 同一次请求落盘。
+        // 原样写回、不在前端重排（后端 order 才是规范化的那份）；还没拿到注册表时 META_ORDER 为空
+        // ⟹ 不发这个键，免得把用户已存的顺序覆盖成空串。
+        + (META_ORDER.length ? ('&metasrcorder=' + META_ORDER.join(',')) : '');
   clearTimeout(window._setT);
   if (immediate) {
     api('/api/settings', body);
@@ -4520,32 +4531,159 @@ function loadSettings() {
   }).catch(function () { });
 }
 
-/* ---------------- 元数据源开关（P1.5：/api/providers 注册表驱动） ---------------- */
-// 源开关的 HTML 由注册表条目生成：能力位决定提示文案（搜索/歌词）。渲染进设置页
-// 元数据分组的 #sp_metasrc 占位容器；/api/providers 晚到也会在到达后补填。
+/* ---------------- 元数据源开关 + 手动排序（P1.5 / 1.1.4-beta3） ----------------
+   源开关仍由 /api/providers 注册表驱动：后端注册一个描述符，前端零改动。
+   1.1.4-beta3 起每行多了拖拽把手、序号与上移 / 下移按钮 —— 顺序即优先级：
+     * 顺序状态只有一份：META_ORDER（id 数组），渲染 / 重排 / 落盘都读它；
+     * 拖拽与按钮两条路都要能用（触摸板 / 读屏下拖拽不可靠，所以按钮不是可选装饰）；
+     * 上下移只改顺序不改开关；关掉某个源也不动顺序。
+   后端 /api/providers 的 order 是规范化后的完整排列，前端原样使用（见 metaOrderInit）。 */
+function metaProviderIds() {
+  return (META_PROVIDERS || []).map(function (p) { return p.id; });
+}
+function metaProviderName(id) {
+  var ps = META_PROVIDERS || [];
+  for (var i = 0; i < ps.length; ++i) if (ps[i].id === id) return ps[i].name || id;
+  return id;
+}
+// 兜底不变量：META_ORDER 必须是「注册表 id 的一个排列」。
+// 只做两件事 —— 丢掉注册表里不存在的 id、把注册表里缺的 id 追加到尾部；**不重排已有部分**
+// （顺序由后端 order 或用户操作决定，前端不再算第二套）。
+function metaOrderNormalize() {
+  var all = metaProviderIds();
+  if (!all.length) return META_ORDER;          // 注册表还没到：不猜、不动
+  var out = [];
+  for (var i = 0; i < META_ORDER.length; ++i) {
+    var id = META_ORDER[i];
+    if (all.indexOf(id) >= 0 && out.indexOf(id) < 0) out.push(id);
+  }
+  for (var j = 0; j < all.length; ++j) if (out.indexOf(all[j]) < 0) out.push(all[j]);
+  META_ORDER = out;
+  return META_ORDER;
+}
+// orderStr = /api/providers 的 order（逗号分隔）。字段缺失（老后端）⟹ 回落到 items 顺序。
+function metaOrderInit(orderStr) {
+  var all = metaProviderIds();
+  var fromServer = String(orderStr === undefined || orderStr === null ? '' : orderStr)
+    .split(',')
+    .map(function (s) { return s.replace(/^\s+|\s+$/g, ''); })
+    .filter(function (s) { return !!s; });
+  META_ORDER = fromServer.length ? fromServer : all.slice();
+  metaOrderNormalize();
+  META_ORDER_DEFAULT = META_ORDER.slice();
+  return META_ORDER;
+}
+// 「恢复默认」用：复位成后端给的默认顺序（没有就保持现状）。
+function metaOrderReset() {
+  if (META_ORDER_DEFAULT.length) META_ORDER = META_ORDER_DEFAULT.slice();
+  metaOrderNormalize();
+  return META_ORDER;
+}
+function metaOrderMove(from, to) {
+  metaOrderNormalize();
+  var n = META_ORDER.length;
+  if (from < 0 || from >= n || to < 0 || to >= n || from === to) return false;
+  var id = META_ORDER.splice(from, 1)[0];
+  META_ORDER.splice(to, 0, id);
+  return true;
+}
+function metaOrderStep(id, delta) {
+  var i = META_ORDER.indexOf(id);
+  if (i < 0) return false;
+  return metaOrderMove(i, i + delta);
+}
+// 重排之后统一走这里：刷新行 + 立刻落盘（同一次 /api/settings）+ 一条短 toast。
+// dir 只用于「把键盘焦点还回去」：重排会重建整行 DOM，焦点必丢，不还原的话
+// 键盘 / 读屏用户连按两次 Enter 第二次就落空了。
+function metaOrderCommit(ok, id, dir) {
+  if (!ok) return false;
+  renderMetaSrcRows();
+  saveSettings();
+  toast('顺序已保存：' + META_ORDER.map(metaProviderName).join(' → '));
+  var up = D('sp_metamvup_' + id), dn = D('sp_metamvdn_' + id);
+  var pick = (dir < 0) ? up : dn;
+  if (!pick || pick.disabled) pick = (dir < 0) ? dn : up;   // 该方向已到顶/到底 ⟹ 用反方向那个
+  if (pick && pick.focus) { try { pick.focus(); } catch (e) { } }
+  return true;
+}
 function metaSrcHtml() {
-  return (META_PROVIDERS || []).map(function (p) {
+  metaOrderNormalize();
+  var byId = {};
+  (META_PROVIDERS || []).forEach(function (p) { byId[p.id] = p; });
+  var n = META_ORDER.length;
+  if (!n) return '';
+  var h = '';
+  for (var i = 0; i < n; ++i) {
+    var id = META_ORDER[i];
+    var p = byId[id] || { id: id, name: id, canSearch: true, canLyric: true };
     var cap = (p.canSearch && p.canLyric) ? '标签 / 封面 / 歌词'
             : p.canSearch ? '标签 / 封面'
             : '歌词（独立歌词源）';
-    return chk('sp_meta_' + p.id, p.name, META_SRC[p.id] !== 0, cap + '；按注册表顺序参与补全');
-  }).join('');
+    var first = (i === 0), last = (i === n - 1);
+    // 行容器带 data-id 且 draggable=true；按钮 id 按数据源 id 生成，绑定不依赖 querySelector
+    //（设置页重建后靠 id 逐个重绑，和这个文件里其它控件保持同一套写法）。
+    h += '<div class=metasrcrow id=sp_metasrcrow_' + esc(id) + ' data-id="' + esc(id) + '" draggable=true'
+       + ' style="display:flex;align-items:center;gap:8px;padding:6px 8px;margin-bottom:8px;'
+       + 'border:1px solid var(--line);border-radius:8px;background:var(--field)">'
+       + '<span class=metadrag id=sp_metadrag_' + esc(id) + ' title="按住拖动调整优先级"'
+       + ' style="cursor:grab;user-select:none;color:var(--mut2);font-size:13px;line-height:1">⠿</span>'
+       + '<span class=metaidx title="优先级序号" style="min-width:16px;text-align:right;font-size:11px;'
+       + 'color:var(--mut2);font-variant-numeric:tabular-nums">' + (i + 1) + '</span>'
+       + '<div style="flex:1 1 150px;min-width:0">'
+       + chk('sp_meta_' + id, p.name, META_SRC[id] !== 0, cap + '；越靠上优先级越高')
+       + '</div>'
+       + '<button class=btn id=sp_metamvup_' + esc(id) + ' title="上移（提高优先级）"'
+       + (first ? ' disabled' : '') + ' aria-label="上移（提高优先级）"'
+       + ' style="padding:2px 7px;font-size:11px;line-height:1.4">▲</button>'
+       + '<button class=btn id=sp_metamvdn_' + esc(id) + ' title="下移（降低优先级）"'
+       + (last ? ' disabled' : '') + ' aria-label="下移（降低优先级）"'
+       + ' style="padding:2px 7px;font-size:11px;line-height:1.4">▼</button>'
+       + '</div>';
+  }
+  return h;
 }
 function renderMetaSrcRows() {
   var box = D('sp_metasrc'); if (!box) return;
   box.innerHTML = metaSrcHtml();
-  (META_PROVIDERS || []).forEach(function (p) {
-    var e = D('sp_meta_' + p.id); if (!e) return;
-    e.onchange = function () { META_SRC[p.id] = this.checked ? 1 : 0; saveSettings(); };
+  metaOrderNormalize().forEach(function (id, i) {
+    var cb = D('sp_meta_' + id);
+    if (cb) cb.onchange = function () { META_SRC[id] = this.checked ? 1 : 0; saveSettings(); };
+    var up = D('sp_metamvup_' + id);
+    if (up) up.onclick = function () { metaOrderCommit(metaOrderStep(id, -1), id, -1); };
+    var dn = D('sp_metamvdn_' + id);
+    if (dn) dn.onclick = function () { metaOrderCommit(metaOrderStep(id, +1), id, +1); };
+    var row = D('sp_metasrcrow_' + id);
+    if (!row) return;
+    // 拖拽照抄播放队列那一套（ui_script.h 渲染队列处）：dragstart 写 text/plain=index，
+    // dragover 必须 preventDefault 才收得到 drop，drop 里按 index 重排。
+    row.ondragstart = function (ev) {
+      var dt = ev && ev.dataTransfer; if (!dt || !dt.setData) return;
+      dt.setData('text/plain', String(i)); dt.effectAllowed = 'move';
+    };
+    row.ondragover = function (ev) {
+      var dt = ev && ev.dataTransfer;
+      if (ev && ev.preventDefault) ev.preventDefault();
+      if (dt) dt.dropEffect = 'move';
+    };
+    row.ondrop = function (ev) {
+      if (ev && ev.preventDefault) ev.preventDefault();
+      if (ev && ev.stopPropagation) ev.stopPropagation();
+      var dt = ev && ev.dataTransfer;
+      if (!dt || !dt.getData) return;
+      var from = parseInt(dt.getData('text/plain'), 10);
+      if (isNaN(from)) return;
+      metaOrderCommit(metaOrderMove(from, i), id, from > i ? -1 : +1);
+    };
   });
 }
-// 启动时拉一次注册表（含当前开关状态，旧键已由后端迁移）；设置页开着时立即重填，
+// 启动时拉一次注册表（含当前开关状态与顺序，旧键已由后端迁移）；设置页开着时立即重填，
 // 没开着则下次 renderSettingsPage 用缓存渲染。
 function fillMetaProviders() {
   api('/api/providers').then(function (j) {
     if (!j || !j.ok || !j.items) return;
     META_PROVIDERS = j.items;
     META_PROVIDERS.forEach(function (p) { META_SRC[p.id] = p.on ? 1 : 0; });
+    metaOrderInit(j.order);      // order 缺失（老后端）⟹ 回落 items 顺序
     renderMetaSrcRows();
   }).catch(function () { });
 }
@@ -8401,36 +8539,140 @@ function bindPhaseHint() {
   msg.textContent = '预设 ' + it.phaseName + '（抽头 ' + it.taps + '）· 实际输出 ' + actual + (override ? '（强制覆盖）' : '');
 }
 
-// ---- 功能4（用户 2026-10-22）：DeepSeek API Key 的界面入口 ----
-// 三条硬约束（对应后端 /api/llm）：
-//   ① 界面只显示掩码（sk-****abcd）：GET 只回 mask，输入框永不回填；
-//   ② 保存后立刻清空输入框 —— 明文不在 DOM 里多停留一秒；
-//   ③ 与 /api/settings 完全分离：key 进 rlplayer-llm.conf，普通设置进另一个文件。
+/* ---- 功能4（用户 2026-10-22）：AI 接口（OpenAI 兼容）的界面入口 ----
+   2026-11-07（1.1.4-beta3）：从「写死 DeepSeek」扩成「任意 OpenAI 兼容端点」。
+   预设只是把地址填进输入框（**不**自动保存），落盘仍要用户点「保存并连接」。
+   三条硬约束不变（对应后端 /api/llm）：
+     ① 界面只显示掩码（sk-****abcd）：GET 只回 mask，输入框永不回填；
+     ② 保存后立刻清空输入框 —— 明文不在 DOM 里多停留一秒；
+     ③ 与 /api/settings 完全分离：key 进 rlplayer-llm.conf，普通设置进另一个文件。 */
 var LLM = { configured: false, masked: '', model: 'deepseek-flash', baseUrl: '', proxy: false, loaded: false };
-function llmRender(j) {
-  if (j && j.ok) {
-    LLM.configured = !!j.configured;
-    LLM.masked = j.masked || '';
-    LLM.model = j.model || 'deepseek-flash';
-    LLM.baseUrl = j.baseUrl || '';
-    LLM.proxy = !!j.proxy;
-    LLM.loaded = true;
-    llmModelRender();
+
+// 接口预设：只负责「填地址」，不做连通性判断 —— 能不能用由「测试连接」回答。
+// custom 的 url 留空：选中它绝不覆盖用户已填的地址。
+var LLM_PROVIDERS = [
+  { id: 'deepseek',    name: 'DeepSeek',               url: 'https://api.deepseek.com' },
+  { id: 'openai',      name: 'OpenAI',                 url: 'https://api.openai.com/v1' },
+  { id: 'openrouter',  name: 'OpenRouter',             url: 'https://openrouter.ai/api/v1' },
+  { id: 'siliconflow', name: 'SiliconFlow（硅基流动）', url: 'https://api.siliconflow.cn/v1' },
+  { id: 'ollama',      name: 'Ollama（本机）',          url: 'http://127.0.0.1:11434/v1' },
+  { id: 'custom',      name: '自定义',                  url: '' }
+];
+
+function llmHas(o, k) { return !!o && Object.prototype.hasOwnProperty.call(o, k); }
+// 状态行只显示端点（不铺整条 URL）；超长截断，免得把状态行撑爆。
+function llmHostOf(u) {
+  var s = String(u === undefined || u === null ? '' : u).replace(/^\s+|\s+$/g, '');
+  if (!s) return '';
+  s = s.replace(/^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//, '');
+  var cut = s.search(/[\/?#]/);
+  if (cut >= 0) s = s.substring(0, cut);
+  return s;
+}
+function llmHostShort(u) {
+  var h = llmHostOf(u);
+  return h.length > 42 ? (h.substring(0, 42) + '…') : h;
+}
+// 「当前端点」：输入框里还没保存的值优先 —— 用户改地址就能立刻看到提示跟着变。
+function llmEndpointRaw() {
+  var e = D('sp_llmbase');
+  var v = e ? String(e.value || '').replace(/^\s+|\s+$/g, '') : '';
+  return v || LLM.baseUrl || '';
+}
+// 联网检索（search / fetch）是 DeepSeek 侧才有的能力。留空 = 默认端点（DeepSeek）⟹ 不算"外部"。
+function llmIsForeignEndpoint() {
+  var h = llmHostOf(llmEndpointRaw());
+  if (!h) return false;
+  return !/(^|\.)deepseek\.com$/i.test(h);
+}
+// 这是「说明」不是「警告」：非 DeepSeek 端点只是能力差异，补全功能不中断。
+function llmEndpointNote() {
+  var el = D('sp_llmcapnote');
+  if (!el) return;
+  el.style.display = llmIsForeignEndpoint() ? '' : 'none';
+}
+function llmProviderById(id) {
+  for (var i = 0; i < LLM_PROVIDERS.length; ++i) if (LLM_PROVIDERS[i].id === id) return LLM_PROVIDERS[i];
+  return null;
+}
+// 反查：已保存 / 已填的地址属于哪个预设？按 host 比（忽略 /v1 差异），认不出来就是 custom。
+function llmProviderIdOf(base) {
+  var s = String(base === undefined || base === null ? '' : base).replace(/^\s+|\s+$/g, '');
+  if (!s) return 'deepseek';                    // 留空 = 走默认端点（DeepSeek）
+  var h = llmHostOf(s);
+  for (var i = 0; i < LLM_PROVIDERS.length; ++i) {
+    var p = LLM_PROVIDERS[i];
+    if (p.url && llmHostOf(p.url) === h) return p.id;
   }
+  return 'custom';
+}
+function llmProviderOptionsHtml(cur) {
+  var h = '';
+  for (var i = 0; i < LLM_PROVIDERS.length; ++i) {
+    var p = LLM_PROVIDERS[i];
+    h += '<option value="' + esc(p.id) + '"' + (p.id === cur ? ' selected' : '') + '>' + esc(p.name) + '</option>';
+  }
+  return h;
+}
+// 选预设：只把地址写进输入框（不落盘）。custom 绝不动用户已填的内容。
+function llmApplyProvider(id) {
+  var p = llmProviderById(id);
+  var e = D('sp_llmbase');
+  if (p && p.url && e) e.value = p.url;
+  llmEndpointNote();
+  return p ? p.url : '';
+}
+// 地址被手改 ⟹ 预设下拉跟着走，避免"下拉说 OpenAI、地址是别家"。
+function llmProviderSync() {
+  var sel = D('sp_llmprovider');
+  if (sel) sel.value = llmProviderIdOf(llmEndpointRaw());
+  llmEndpointNote();
+}
+// 已保存的地址只在输入框为空时回填 —— 绝不覆盖用户正在敲的内容。
+function llmBaseFill() {
+  var e = D('sp_llmbase');
+  if (e && !String(e.value || '').replace(/^\s+|\s+$/g, '') && LLM.baseUrl) e.value = LLM.baseUrl;
+  llmProviderSync();
+}
+// 状态行只讲三件事：是否已配置（掩码）、当前模型、当前端点（只显示 host）。
+function llmStatusText() {
+  if (!LLM.loaded) return '读取配置中…';
+  var host = llmHostShort(llmEndpointRaw());
+  var s = LLM.configured ? ('已配置：' + (LLM.masked || '****')) : '未配置';
+  s += ' · 模型 ' + (LLM.model || '—');
+  // 地址留空 = 走默认端点，这里直接显默认 host（不额外加「默认」二字：
+  // 它落在动态拼接里，单独的「默认」键会让全站 '默认' 都被替换，得不偿失）。
+  s += ' · 端点 ' + (host ? host : 'api.deepseek.com');
+  return s;
+}
+// 状态行 = 三要素 + 可选的"刚刚发生了什么"（连接结果 / 失败原因），两者不互相覆盖。
+function llmMsg(note) {
   var m = D('sp_llmmsg');
   if (!m) return;
-  if (!LLM.loaded) { m.textContent = '读取配置中…'; return; }
-  var s = LLM.configured
-    ? ('已配置：' + LLM.masked + '（模型 ' + LLM.model + '）')
-    : '未配置 —— 填入 DeepSeek API Key 后点「保存 Key」';
-  m.textContent = s + '；key 只存本机 rlplayer-llm.conf，不进安装包、界面从不回显明文' +
-    (LLM.proxy ? '；配置里的 proxy= 行已保留' : '');
+  var s = llmStatusText();
+  if (note) s += ' · ' + note;
+  if (LLM.proxy) s += ' · 配置里的 proxy= 行已保留';
+  m.textContent = s;
+}
+function llmRender(j) {
+  if (j && j.ok) {
+    // 只覆盖响应里真有的字段：POST 回包与 GET 未必同形，缺字段不能当成"清空配置"。
+    if (llmHas(j, 'configured')) LLM.configured = !!j.configured;
+    if (llmHas(j, 'masked')) LLM.masked = j.masked || '';
+    if (llmHas(j, 'model')) LLM.model = j.model || LLM.model;
+    if (llmHas(j, 'baseUrl')) LLM.baseUrl = j.baseUrl || '';
+    if (llmHas(j, 'proxy')) LLM.proxy = !!j.proxy;
+    LLM.loaded = true;
+    llmBaseFill();
+    llmModelRender();
+  }
+  llmMsg('');
 }
 function llmRefresh() {
   return fetch('/api/llm').then(function (r) { return r.json(); }).then(llmRender)
     .catch(function () { var m = D('sp_llmmsg'); if (m) m.textContent = '读取配置失败（服务没响应）'; });
 }
-function llmPost(body, okMsg) {
+function llmPost(body, okMsg, after) {
   return fetch('/api/llm', { method: 'POST', body: body })
     .then(function (r) { return r.json(); })
     .then(function (j) {
@@ -8439,28 +8681,40 @@ function llmPost(body, okMsg) {
       if (e) e.value = '';                       // 明文绝不在 DOM 里停留
       llmRender(j);
       if (okMsg) toast(okMsg);
-      return j;
+      return after ? after(j) : j;
     });
 }
+/* 「保存并连接」= POST base_url（key 非空时一并 POST）→ 成功后自动重拉模型清单 + 自动跑一次连接测试。
+   为什么连着做：端点一换模型清单必然过期，而用户点完这个按钮最想知道的就是"到底连不连得上"。 */
 function llmSave() {
-  var e = D('sp_llmkey');
-  var k = e ? String(e.value || '').replace(/^\s+|\s+$/g, '') : '';
-  if (!k) { toast('先填入 API Key；留空保存不会改动现有配置'); return; }
-  llmPost('key=' + encodeURIComponent(k), 'API Key 已保存（界面只显示掩码）');
+  var eb = D('sp_llmbase'), ek = D('sp_llmkey'), btn = D('sp_llmsave');
+  var base = eb ? String(eb.value || '').replace(/^\s+|\s+$/g, '') : '';
+  var key = ek ? String(ek.value || '').replace(/^\s+|\s+$/g, '') : '';
+  var body = '';
+  if (base) body += 'base_url=' + encodeURIComponent(base);
+  if (key) body += (body ? '&' : '') + 'key=' + encodeURIComponent(key);
+  if (!body) { toast('先填 API 地址或 API Key；两项都空不会改动现有配置'); return Promise.resolve(null); }
+  if (btn) { btn.disabled = true; btn.textContent = '保存中…'; }
+  function restore() { if (btn) { btn.disabled = false; btn.textContent = '保存并连接'; } }
+  return llmPost(body, key ? 'API Key 已保存（界面只显示掩码）' : 'API 地址已保存', function (j) {
+    var p1 = llmModelsLoad(true);      // 端点可能换了 ⟹ 强制重拉（服务端 60s 缓存一起绕过）
+    var p2 = llmTest();                // 顺手验证一次；失败也只是提示，不影响已保存的配置
+    // 后续两步都自带兜底；即便它们 reject 也不能把"已保存成功"说成保存失败。
+    return Promise.all([p1, p2]).then(function () { return j; }, function () { return j; });
+  }).then(function (j) { restore(); return j; },
+          function () { restore(); toast('保存失败：服务没响应'); return null; });
 }
-function llmClear() { llmPost('clear=1', '已清除 API Key（可随时重新填入）'); }
+function llmClear() { return llmPost('clear=1', '已清除 API Key（可随时重新填入）'); }
 function llmTest() {
-  var b = D('sp_llmtest'), m = D('sp_llmmsg');
+  var b = D('sp_llmtest');
   if (b) { b.disabled = true; b.textContent = '测试中…'; }
-  fetch('/api/llm/test').then(function (r) { return r.json(); }).then(function (j) {
-    if (b) { b.disabled = false; b.textContent = '测试连接'; }
-    if (!m) return;
-    if (j && j.ok) m.textContent = '连接成功：模型 ' + j.model + '，耗时 ' + j.latencyMs + ' ms（key 有效）';
-    else m.textContent = '连接失败：' + ((j && j.error) || '未知错误');
-  }).catch(function () {
-    if (b) { b.disabled = false; b.textContent = '测试连接'; }
-    if (m) m.textContent = '连接失败：服务没响应';
-  });
+  function back() { if (b) { b.disabled = false; b.textContent = '测试连接'; } }
+  return fetch('/api/llm/test').then(function (r) { return r.json(); }).then(function (j) {
+    back();
+    if (j && j.ok) llmMsg('连接成功：模型 ' + j.model + '，耗时 ' + j.latencyMs + ' ms（key 有效）');
+    else llmMsg('连接失败：' + ((j && j.error) || '未知错误'));
+    return j;
+  }).catch(function () { back(); llmMsg('连接失败：服务没响应'); return null; });
 }
 
 /* 2026-10-27（用户 261027-06 P1）：模型列表 + 下拉选择。
@@ -9371,8 +9625,8 @@ function renderSettingsPage() {
      + sgroup('元数据补全', '播放时后台补全标签 / 封面 / 歌词，结果落在本地库',
          chk('sp_metaon', '自动补全（不用 AI）', META.on == 1,
              '只用公开数据源（QQ音乐 / 网易云 / iTunes / dizzylab / lrclib）补全标签、封面、歌词；全程不调用 AI，不产生费用', true)
-       + chk('sp_metallm', 'AI 增强（DeepSeek）', aiOn,
-             '联网调用 DeepSeek（按次计费）：解析无标签文件、并在艺术家 / 专辑 / 单曲页整理简介并缓存（7 天有效）。' +
+       + chk('sp_metallm', 'AI 增强（OpenAI 兼容）', aiOn,
+             '联网调用所选 AI 接口（按次计费）：解析无标签文件、并在艺术家 / 专辑 / 单曲页整理简介并缓存（7 天有效）。' +
              '关闭后两项都停，本地与公开数据源照常工作', true)
        + '<div class="sfld wide" style="margin-top:2px">'
        + '<button class=btn id=sp_metamore style="font-size:12px" aria-expanded="false">高级选项 ▾</button>'
@@ -9380,29 +9634,43 @@ function renderSettingsPage() {
        // #sp_metaadv 必须跨满 .sgbody 的整行（否则会被压进单个 260px 网格单元，两列各只剩 140px）
        + '<div class="sfld wide" id=sp_metaadv style="display:none;margin-top:14px">'
        + '<div class=meta-adv-grid>'
-       // 左列：数据源（逐源开关，注册表驱动渲染进 #sp_metasrc）
-       + '<div class=meta-card>'
-       + '<div class=mh>数据源' + tip('越靠上优先级越高；关掉的源完全不参与补全') + '</div>'
-       + '<div id=sp_metasrc class=meta-src-grid>' + metaSrcHtml() + '</div>'
-       + '</div>'
-       // 右列：DeepSeek 接入 + 标签写回
-       + '<div class=meta-card>'
-       + '<div class=mh>DeepSeek 接入' + tip('只用于上面的「AI 增强」；不填也能用全部本地与公开数据源') + '</div>'
-       + '<label style="display:block;font-size:11px;color:var(--mut);margin-bottom:5px">DeepSeek API Key' +
-           tip('只存本机 build' + SEP + 'rlplayer-llm.conf；不进安装包，界面永不回显明文') + '</label>'
-       + '<input type=password id=sp_llmkey autocomplete=off spellcheck=false placeholder="sk-…（粘贴后点保存，只显示掩码）" style="width:100%">'
-       + '<div class=hint id=sp_llmmsg style="margin-top:6px">读取配置中…</div>'
-       + '<div style="display:flex;gap:8px;margin-top:8px;flex-wrap:wrap">'
-       + '<button class="btn pri" id=sp_llmsave>保存 Key</button>'
-       + '<button class=btn id=sp_llmtest>测试连接</button>'
-       + '<button class=btn id=sp_llmclear>清除 Key</button></div>'
-       + '<div style="margin-top:12px"><label style="display:block;font-size:11px;color:var(--mut);margin-bottom:5px">LLM 模型' + tip('选择用于资料补全与增强的模型；search / fetch 保持默认') + '</label>'
-       + '<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">'
-       + '<select id=sp_llmmodel style="flex:1;min-width:180px;display:none"></select>'
-       + '<input type=text id=sp_llmmodeltext placeholder="例如 deepseek-chat" style="flex:1;min-width:180px">'
-       + '<button class=btn id=sp_llmmodels style="white-space:nowrap">刷新列表</button>'
-       + '</div>'
-       + '<div class=hint id=sp_llmmodmsg style="margin-top:4px">模型列表读取中…（读不到也可以直接手填）</div>'
+        // 左列：数据源（逐源开关 + 手动排序，注册表驱动渲染进 #sp_metasrc）
+        + '<div class=meta-card>'
+        + '<div class=mh>数据源' + tip('越靠上优先级越高；拖动把手或点 ▲▼ 调整顺序，关掉的源完全不参与补全') + '</div>'
+        // 行容器现在是「一行一个数据源」（不再走 .meta-src-grid 的多列网格），
+        // 所以这里显式 display:block 覆盖它；行内布局用内联样式，避免为一个页面改全局 CSS。
+        + '<div id=sp_metasrc class=meta-src-grid style="display:block">' + metaSrcHtml() + '</div>'
+        + '</div>'
+        // 右列：AI 接入（OpenAI 兼容）+ 标签写回
+        // 2026-11-07（1.1.4-beta3）：原来是写死的「DeepSeek 接入」。现在任何 OpenAI 兼容端点都能用：
+        //   ①「接口预设」只把地址填进下面的输入框 —— 不自动保存，用户点「保存并连接」才落盘；
+        //   ②「保存并连接」= POST base_url(+key)，成功后自动重拉模型清单 + 自动跑一次连接测试；
+        //   ③ key 仍然只显示掩码、保存后立刻清空、绝不回填明文。
+        + '<div class=meta-card>'
+        + '<div class=mh>AI 接入（OpenAI 兼容）' + tip('任何兼容 OpenAI 的服务都能用：DeepSeek / OpenAI / OpenRouter / 硅基流动 / 本机 Ollama，或自己的网关。只用于上面的「AI 增强」；不填也能用全部本地与公开数据源') + '</div>'
+        + '<label style="display:block;font-size:11px;color:var(--mut);margin-bottom:5px">接口预设' +
+            tip('选中只是把地址写进下面的「API 地址」，不会自动保存；点「保存并连接」才生效') + '</label>'
+        + '<select id=sp_llmprovider style="width:100%;margin-bottom:9px">' + llmProviderOptionsHtml(llmProviderIdOf(LLM.baseUrl)) + '</select>'
+        + '<label style="display:block;font-size:11px;color:var(--mut);margin-bottom:5px">API 地址' +
+            tip('带不带 /v1 都行：服务端会自动试 /models 与 /v1/models。留空 = 默认端点（DeepSeek）') + '</label>'
+        + '<input type=text id=sp_llmbase autocomplete=off spellcheck=false value="' + esc(LLM.baseUrl || '') + '" placeholder="https://api.deepseek.com" style="width:100%;margin-bottom:9px">'
+        + '<label style="display:block;font-size:11px;color:var(--mut);margin-bottom:5px">API Key' +
+            tip('只存本机 build' + SEP + 'rlplayer-llm.conf；不进安装包，界面永不回显明文') + '</label>'
+        + '<input type=password id=sp_llmkey autocomplete=off spellcheck=false placeholder="sk-…（粘贴后点保存，只显示掩码）" style="width:100%">'
+        + '<div class=hint id=sp_llmmsg style="margin-top:6px">读取配置中…</div>'
+        // 「说明」而不是「警告」：非 DeepSeek 端点只是能力差异（没有联网检索），补全功能不中断。
+        + '<div class=hint id=sp_llmcapnote style="display:none;margin-top:4px">联网检索（search / fetch）是 DeepSeek 专有能力；换到其它端点后会自动退回 Wikipedia / Discogs + 模型自身知识，功能不中断。</div>'
+        + '<div style="display:flex;gap:8px;margin-top:8px;flex-wrap:wrap">'
+        + '<button class="btn pri" id=sp_llmsave>保存并连接</button>'
+        + '<button class=btn id=sp_llmtest>测试连接</button>'
+        + '<button class=btn id=sp_llmclear>清除 Key</button></div>'
+        + '<div style="margin-top:12px"><label style="display:block;font-size:11px;color:var(--mut);margin-bottom:5px">LLM 模型' + tip('选择用于资料补全与增强的模型；search / fetch 保持默认') + '</label>'
+        + '<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">'
+        + '<select id=sp_llmmodel style="flex:1;min-width:180px;display:none"></select>'
+        + '<input type=text id=sp_llmmodeltext placeholder="例如 deepseek-chat" style="flex:1;min-width:180px">'
+        + '<button class=btn id=sp_llmmodels style="white-space:nowrap">刷新列表</button>'
+        + '</div>'
+        + '<div class=hint id=sp_llmmodmsg style="margin-top:4px">模型列表读取中…（读不到也可以直接手填）</div>'
        + '</div>'
        // 用户 261024-01 #8：默认开启，不提供开关 —— 只说明能力，两个动作按钮照旧。
        + '<div class="mh sub">标签写回<span class=hint style="font-weight:400">默认开启</span></div>'
@@ -9625,7 +9893,11 @@ function renderSettingsPage() {
     saveSettings();
     if (S.lastCur) loadMeta(S.lastCur);   // 关掉后简介板块要立刻消失，不用刷新
   };
-  // 功能4：DeepSeek API Key（保存 / 测试连接 / 清除）。输入框重建后必须为空 ——
+  // 1.1.4-beta3：接口预设 + API 地址。预设只把地址填进输入框（不落盘）；
+  //   手改地址时预设下拉跟着走，避免"下拉说 OpenAI、地址是别家"。
+  if (D('sp_llmprovider')) D('sp_llmprovider').onchange = function () { llmApplyProvider(this.value); };
+  if (D('sp_llmbase')) D('sp_llmbase').addEventListener('input', llmProviderSync);
+  // 功能4：AI 接口的 Key（保存并连接 / 测试连接 / 清除）。输入框重建后必须为空 ——
   // 这是「永不回显明文」的最后一道：哪怕浏览器缓存了 value，重建也会清掉。
   if (D('sp_llmsave')) D('sp_llmsave').onclick = llmSave;
   if (D('sp_llmtest')) D('sp_llmtest').onclick = llmTest;
@@ -9765,6 +10037,10 @@ function renderSettingsPage() {
     // 源开关随注册表一并全开。
     META = { on: 1, llm: 0, summary: 0 };
     (META_PROVIDERS || []).forEach(function (p) { META_SRC[p.id] = 1; });
+    // 1.1.4-beta3：顺序也复位成后端给的默认顺序，并立刻重画行
+    //（否则「恢复默认」之后界面还停在上次拖出来的顺序，落盘的却是默认顺序）。
+    metaOrderReset();
+    renderMetaSrcRows();
     D('sRate').value = 'max'; D('sFiltNx').value = ''; D('sShap').value = 'auto';
     D('sBuf').value = 100; D('sDSD').value = 0; D('sIsp').checked = true; D('s2s').checked = true;
     saveSettings(); renderSettingsPage(); toast('已恢复默认');

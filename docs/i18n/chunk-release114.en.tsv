@@ -86,3 +86,33 @@ dBTP ⟹ 母带已过载	dBTP ⟹ master is over	1.1.4 analysis panel
 段削波	clipping runs	1.1.4 analysis panel
 个样本	samples	1.1.4 analysis panel
 更新安装失败：	Install failed: 	更新器安装阶段失败（与「检查失败」区分）
+AI 接入（OpenAI 兼容）	AI Integration (OpenAI-compatible)	1.1.4-beta3 AI 接入 / 数据源排序
+任何兼容 OpenAI 的服务都能用：DeepSeek / OpenAI / OpenRouter / 硅基流动 / 本机 Ollama，或自己的网关。只用于上面的「AI 增强」；不填也能用全部本地与公开数据源	Any OpenAI-compatible service works: DeepSeek / OpenAI / OpenRouter / SiliconFlow / local Ollama, or your own gateway. Only used for AI Enhancement above; all local and public sources work without it	1.1.4-beta3 AI 接入 / 数据源排序
+接口预设	API preset	1.1.4-beta3 AI 接入 / 数据源排序
+选中只是把地址写进下面的「API 地址」，不会自动保存；点「保存并连接」才生效	Selecting one only fills in the API base URL below; nothing is saved until you click Save and connect	1.1.4-beta3 AI 接入 / 数据源排序
+API 地址	API base URL	1.1.4-beta3 AI 接入 / 数据源排序
+带不带 /v1 都行：服务端会自动试 /models 与 /v1/models。留空 = 默认端点（DeepSeek）	With or without /v1 both work: the server tries /models and /v1/models automatically. Leave empty for the default endpoint (DeepSeek)	1.1.4-beta3 AI 接入 / 数据源排序
+保存并连接	Save and connect	1.1.4-beta3 AI 接入 / 数据源排序
+联网检索（search / fetch）是 DeepSeek 专有能力；换到其它端点后会自动退回 Wikipedia / Discogs + 模型自身知识，功能不中断。	Online search (search / fetch) is DeepSeek-only; on other endpoints it falls back to Wikipedia / Discogs plus the model own knowledge, with no loss of functionality.	1.1.4-beta3 AI 接入 / 数据源排序
+越靠上优先级越高；拖动把手或点 ▲▼ 调整顺序，关掉的源完全不参与补全	Higher rows have higher priority; drag the handle or use the arrows to reorder. Disabled sources are not used at all	1.1.4-beta3 AI 接入 / 数据源排序
+按住拖动调整优先级	Drag to change priority	1.1.4-beta3 AI 接入 / 数据源排序
+优先级序号	Priority rank	1.1.4-beta3 AI 接入 / 数据源排序
+上移（提高优先级）	Move up (raise priority)	1.1.4-beta3 AI 接入 / 数据源排序
+下移（降低优先级）	Move down (lower priority)	1.1.4-beta3 AI 接入 / 数据源排序
+标签 / 封面 / 歌词；越靠上优先级越高	Tags / Cover art / Lyrics; higher rows have higher priority	1.1.4-beta3 AI 接入 / 数据源排序
+标签 / 封面；越靠上优先级越高	Tags / Cover art; higher rows have higher priority	1.1.4-beta3 AI 接入 / 数据源排序
+歌词（独立歌词源）；越靠上优先级越高	Lyrics (independent lyrics source); higher rows have higher priority	1.1.4-beta3 AI 接入 / 数据源排序
+AI 增强（OpenAI 兼容）	AI Enhancement (OpenAI-compatible)	1.1.4-beta3 AI 接入 / 数据源排序
+联网调用所选 AI 接口（按次计费）：解析无标签文件、并在艺术家 / 专辑 / 单曲页整理简介并缓存（7 天有效）。	Calls the selected AI endpoint online (pay-per-request): parses untagged files and curates summaries on artist / album / track pages, caching results for 7 days. 	1.1.4-beta3 AI 接入 / 数据源排序
+SiliconFlow（硅基流动）	SiliconFlow	1.1.4-beta3 AI 接入 / 数据源排序
+Ollama（本机）	Ollama (local)	1.1.4-beta3 AI 接入 / 数据源排序
+自定义	Custom	1.1.4-beta3 AI 接入 / 数据源排序
+未配置	Not configured	1.1.4-beta3 AI 接入 / 数据源排序
+模型 	model 	1.1.4-beta3 AI 接入 / 数据源排序
+端点 	endpoint 	1.1.4-beta3 AI 接入 / 数据源排序
+顺序已保存：	Order saved: 	1.1.4-beta3 AI 接入 / 数据源排序
+先填 API 地址或 API Key；两项都空不会改动现有配置	Enter an API base URL or an API key first; leaving both empty changes nothing	1.1.4-beta3 AI 接入 / 数据源排序
+API 地址已保存	API base URL saved	1.1.4-beta3 AI 接入 / 数据源排序
+QQ音乐	QQ Music	1.1.4-beta3 AI 接入 / 数据源排序
+网易云	NetEase Cloud	1.1.4-beta3 AI 接入 / 数据源排序
+配置里的 proxy= 行已保留	proxy= line in configuration preserved	1.1.4-beta3 AI 接入 / 数据源排序

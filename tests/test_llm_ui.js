@@ -1,7 +1,8 @@
 // SPDX-FileCopyrightText: 2026 BH2VOQ <https://github.com/BH2VOQ>
 // SPDX-License-Identifier: GPL-3.0-or-later
 //
-// test_llm_ui.js — 1.1.3 LLM Models UI Contract 纯 Node.js 逻辑断言与回归测试
+// test_llm_ui.js — 1.1.3 LLM Models UI Contract（1.1.4-beta3 扩：AI 接入 OpenAI 兼容 + 数据源排序）
+// 纯 Node.js 逻辑断言与回归测试；全部离线 mock，零真实网络。
 'use strict';
 
 const fs = require('fs');
@@ -141,6 +142,7 @@ function createEnvironment(apiHandler) {
     decodeURIComponent,
     addEventListener() {},
     removeEventListener() {},
+    confirm() { return true; },
     MutationObserver: MockObserver,
     IntersectionObserver: MockObserver,
     ResizeObserver: MockObserver,
@@ -191,7 +193,7 @@ function createEnvironment(apiHandler) {
 }
 
 async function runTests() {
-  console.log('=== RLPlayer 1.1.3 LLM Models UI Contract 逻辑与回归测试 ===\n');
+  console.log('=== RLPlayer 1.1.3/1.1.4 LLM 接入与数据源排序 UI Contract 逻辑与回归测试 ===\n');
 
   // Test 1: 有列表且当前值在列表中 (currentInList=true)
   {
@@ -352,6 +354,360 @@ async function runTests() {
 
     check('force=true 时请求 URL 带有 refresh=1 参数',
           requestedUrls.some(u => u.includes('refresh=1')), requestedUrls);
+  }
+
+  // ==========================================================================
+  // 以下为 1.1.4-beta3 新增：AI 接入（OpenAI 兼容）与数据源手动排序
+  // 全部离线 mock，零真实网络。
+  // ==========================================================================
+
+  // Test 6: 接口预设 → API 地址（预设只填地址不落盘；custom 不覆盖已填内容）
+  {
+    console.log('\n-- Test 6: 接口预设写地址 / 不自动保存 / custom 不覆盖 --');
+    const posts = [];
+    const env = createEnvironment((url, opt) => {
+      if (url === '/api/llm' && opt && opt.method === 'POST') { posts.push(opt.body); return { ok: true }; }
+      if (url === '/api/llm') return { ok: true, configured: false, masked: '', model: 'deepseek-chat', baseUrl: '' };
+      if (url.startsWith('/api/llm/models')) return { ok: true, models: [] };
+    });
+    env.renderSettingsPage();
+    await new Promise(r => setImmediate(r));
+
+    const ids = env.LLM_PROVIDERS.map(p => p.id).join(',');
+    check('预设表为 deepseek/openai/openrouter/siliconflow/ollama/custom',
+          ids === 'deepseek,openai,openrouter,siliconflow,ollama,custom', ids);
+
+    const sel = env._getEl('sp_llmprovider');
+    const base = env._getEl('sp_llmbase');
+    sel.value = 'openai';
+    sel.dispatchEvent({ type: 'change' });
+    check('选 openai 预设 → 地址框写成 https://api.openai.com/v1',
+          base.value === 'https://api.openai.com/v1', base.value);
+    check('选预设不会自动落盘（没有 POST /api/llm）', posts.length === 0, posts);
+
+    sel.value = 'ollama';
+    sel.dispatchEvent({ type: 'change' });
+    check('选 ollama 预设 → 地址框写成 http://127.0.0.1:11434/v1',
+          base.value === 'http://127.0.0.1:11434/v1', base.value);
+
+    base.value = 'https://my-gw.example.com/v1';
+    sel.value = 'custom';
+    sel.dispatchEvent({ type: 'change' });
+    check('选 custom 预设不覆盖用户已填的地址',
+          base.value === 'https://my-gw.example.com/v1', base.value);
+
+    // 端点提示：deepseek 不显示，换别家显示「说明」而非「警告」
+    sel.value = 'deepseek';
+    sel.dispatchEvent({ type: 'change' });
+    const note = env._getEl('sp_llmcapnote');
+    check('端点是 deepseek 时不显示联网检索说明', note.style.display === 'none', note.style.display);
+    sel.value = 'openrouter';
+    sel.dispatchEvent({ type: 'change' });
+    check('端点不是 deepseek 时显示联网检索说明', note.style.display !== 'none', note.style.display);
+    check('该说明是普通说明（没有 --warn 红色样式）', note.innerHTML.indexOf('var(--warn') < 0, note.innerHTML);
+    // 说明文案本身在设置页 HTML 里（mock 不解析 innerHTML ⟹ 直接查渲染出来的页面文本）
+    const page = env._getEl('setpage').innerHTML;
+    check('设置页 HTML 含接口预设下拉 / API 地址框 / 保存并连接按钮',
+          page.indexOf('id=sp_llmprovider') >= 0 && page.indexOf('id=sp_llmbase') >= 0 &&
+          page.indexOf('保存并连接') >= 0);
+    check('卡片标题已改成「AI 接入（OpenAI 兼容）」', page.indexOf('AI 接入（OpenAI 兼容）') >= 0);
+    check('「AI 增强」开关文案已改成 OpenAI 兼容', page.indexOf('AI 增强（OpenAI 兼容）') >= 0);
+    check('旧的「DeepSeek 接入」标题已不再出现', page.indexOf('DeepSeek 接入') < 0);
+    check('非 DeepSeek 说明是独立一行（不是拼进状态行）',
+          page.indexOf('id=sp_llmcapnote') >= 0 && page.indexOf('id=sp_llmmsg') >= 0);
+    check('该说明提到 search / fetch 与 Wikipedia / Discogs',
+          page.indexOf('联网检索（search / fetch）是 DeepSeek 专有能力') >= 0 &&
+          page.indexOf('Wikipedia / Discogs') >= 0);
+  }
+
+  // Test 7: 「保存并连接」—— POST body 契约 + 成功后自动刷新模型清单 + 自动连接测试
+  {
+    console.log('\n-- Test 7: 保存并连接（body 编码 / 自动重拉 / 自动测试 / 状态行） --');
+    const posts = [];
+    const modelsUrls = [];
+    const testCalls = [];
+    const env = createEnvironment((url, opt) => {
+      if (url === '/api/llm' && opt && opt.method === 'POST') {
+        posts.push(opt.body);
+        return { ok: true, configured: true, masked: 'sk-****abcd',
+                 model: 'gpt-4o-mini', baseUrl: 'https://api.openai.com/v1' };
+      }
+      if (url.startsWith('/api/llm/models')) {
+        modelsUrls.push(url);
+        return { ok: true, models: [{ id: 'gpt-4o-mini' }], current: 'gpt-4o-mini', currentInList: true, count: 1 };
+      }
+      if (url === '/api/llm/test') {
+        testCalls.push(url);
+        return { ok: true, model: 'gpt-4o-mini', latencyMs: 42 };
+      }
+      if (url === '/api/llm') return { ok: true };
+    });
+    env.renderSettingsPage();
+    await new Promise(r => setImmediate(r));
+    check('页面打开即自动拉一次模型清单（且不带 refresh=1）',
+          modelsUrls.length === 1 && modelsUrls[0].indexOf('refresh=1') < 0, modelsUrls);
+
+    const base = env._getEl('sp_llmbase');
+    const key = env._getEl('sp_llmkey');
+
+    // ① base_url + key 都必须 URL 编码后进 body
+    const rawBase = 'https://api.openai.com/v1?x=1&y=2';
+    const rawKey = 'sk-a/b+c=d';
+    base.value = rawBase;
+    key.value = rawKey;
+    const modelsBefore = modelsUrls.length;
+    const testBefore = testCalls.length;
+    await env.llmSave();
+
+    check('保存只发了一次 POST /api/llm', posts.length === 1, posts);
+    check('body 里 base_url 已 URL 编码',
+          posts[0].indexOf('base_url=' + encodeURIComponent(rawBase)) >= 0, posts[0]);
+    check('body 里 key 已 URL 编码',
+          posts[0].indexOf('key=' + encodeURIComponent(rawKey)) >= 0, posts[0]);
+    check('保存成功后立刻清空 key 输入框（明文不留在 DOM）', key.value === '', key.value);
+    check('保存成功后自动强制重拉模型清单（refresh=1）',
+          modelsUrls.length === modelsBefore + 1 &&
+          modelsUrls[modelsUrls.length - 1].indexOf('refresh=1') >= 0, modelsUrls);
+    check('保存成功后自动跑了一次连接测试',
+          testCalls.length === testBefore + 1, testCalls);
+
+    const msg = env._getEl('sp_llmmsg');
+    check('状态行同时说清掩码 / 当前模型 / 当前端点 host',
+          msg.textContent.indexOf('sk-****abcd') >= 0 &&
+          msg.textContent.indexOf('gpt-4o-mini') >= 0 &&
+          msg.textContent.indexOf('api.openai.com') >= 0, msg.textContent);
+
+    // ② key 为空 ⟹ 只 POST base_url，绝不带 key 字段
+    key.value = '';
+    base.value = 'https://openrouter.ai/api/v1';
+    await env.llmSave();
+    check('key 为空时 body 里没有 key 字段',
+          posts.length === 2 && posts[1].indexOf('key=') < 0, posts[1]);
+    check('key 为空时仍然 POST 了 base_url',
+          posts[1].indexOf('base_url=' + encodeURIComponent('https://openrouter.ai/api/v1')) >= 0, posts[1]);
+
+    // ③ 两项都空 ⟹ 不发请求（避免把配置写坏）
+    base.value = '';
+    key.value = '';
+    await env.llmSave();
+    check('地址与 key 都为空时不发 POST', posts.length === 2, posts.length);
+  }
+
+  // Test 8: 数据源排序 —— 渲染顺序 / 序号 / 上下移 / 越界按钮 disabled
+  {
+    console.log('\n-- Test 8: 数据源排序（渲染顺序 / 序号 / 上下移 / 越界禁用） --');
+    const env = createEnvironment((url) => {
+      if (url === '/api/llm') return { ok: true };
+      if (url.startsWith('/api/llm/models')) return { ok: true, models: [] };
+    });
+    env.renderSettingsPage();
+    await new Promise(r => setImmediate(r));
+
+    env.META_PROVIDERS = [
+      { id: 'dizzylab', name: 'dizzylab', on: true, canSearch: true, canLyric: false },
+      { id: 'netease', name: '网易云音乐', on: true, canSearch: true, canLyric: true },
+      { id: 'qq', name: 'QQ音乐', on: false, canSearch: true, canLyric: true },
+      { id: 'itunes', name: 'iTunes', on: true, canSearch: true, canLyric: false }
+    ];
+    env.META_SRC = { dizzylab: 1, netease: 1, qq: 0, itunes: 1 };
+    env.META_ORDER = ['qq', 'netease', 'dizzylab', 'itunes'];
+    env.renderMetaSrcRows();
+
+    const html = env._getEl('sp_metasrc').innerHTML;
+    const order = [];
+    const re = /data-id="([^"]+)"/g;
+    let mm;
+    while ((mm = re.exec(html)) !== null) order.push(mm[1]);
+    check('渲染出的行顺序与 META_ORDER 一致',
+          order.join(',') === 'qq,netease,dizzylab,itunes', order);
+
+    const rows = html.split('<div class=metasrcrow').slice(1);
+    check('渲染出 4 行', rows.length === 4, rows.length);
+    check('每行序号 = 位置 + 1',
+          rows.every((r, i) => new RegExp('class=metaidx[^>]*>' + (i + 1) + '<').test(r)),
+          rows.map(r => r.slice(0, 80)));
+    check('行容器带 draggable=true', rows.every(r => /draggable=true/.test(r)));
+    check('行容器带 data-id', rows.every(r => /data-id="/.test(r)));
+    check('第一行的上移按钮 disabled', /id=sp_metamvup_qq[^>]*disabled/.test(rows[0]), rows[0].slice(0, 220));
+    check('最后一行的下移按钮 disabled', /id=sp_metamvdn_itunes[^>]*disabled/.test(rows[3]), rows[3].slice(0, 220));
+    check('第一行下移 / 最后一行上移可用',
+          !/id=sp_metamvdn_qq[^>]*disabled/.test(rows[0]) &&
+          !/id=sp_metamvup_itunes[^>]*disabled/.test(rows[3]));
+
+    // 上移：第二行（netease）→ 第 1
+    env._getEl('sp_metamvup_netease').onclick();
+    check('点上移后 META_ORDER 变为 netease,qq,dizzylab,itunes',
+          env.META_ORDER.join(',') === 'netease,qq,dizzylab,itunes', env.META_ORDER);
+    check('重排后弹出「顺序已保存」toast',
+          env._toasts.some(x => x.indexOf('顺序已保存：') === 0), env._toasts);
+
+    // 越界：现在 netease 在第一行，再点上移必须无效
+    env._getEl('sp_metamvup_netease').onclick();
+    check('第一行再点上移不改变顺序（越界无效）',
+          env.META_ORDER.join(',') === 'netease,qq,dizzylab,itunes', env.META_ORDER);
+
+    // 下移：第一行（netease）→ 第 2
+    env._getEl('sp_metamvdn_netease').onclick();
+    check('点下移后 META_ORDER 变为 qq,netease,dizzylab,itunes',
+          env.META_ORDER.join(',') === 'qq,netease,dizzylab,itunes', env.META_ORDER);
+
+    // 越界：现在 itunes 在最后一行，点下移必须无效
+    env._getEl('sp_metamvdn_itunes').onclick();
+    check('最后一行再点下移不改变顺序（越界无效）',
+          env.META_ORDER.join(',') === 'qq,netease,dizzylab,itunes', env.META_ORDER);
+
+    // 拖拽路径：dragstart 写行号，dragover 必须 preventDefault，drop 里按行号重排
+    //（与播放队列同一套 dataTransfer 用法 —— mock DOM 不派发真拖拽，这里直接调 handler）
+    let dragged = null;
+    env._getEl('sp_metasrcrow_qq').ondragstart({
+      dataTransfer: { setData: (k, v) => { dragged = { k, v }; }, effectAllowed: '' }
+    });
+    check('dragstart 往 dataTransfer 写 text/plain=行号',
+          !!dragged && dragged.k === 'text/plain' && dragged.v === '0', dragged);
+
+    let prevented = 0;
+    env._getEl('sp_metasrcrow_itunes').ondragover({
+      preventDefault: () => { prevented++; }, dataTransfer: {}
+    });
+    check('dragover 调用了 preventDefault（否则收不到 drop）', prevented === 1, prevented);
+
+    env._getEl('sp_metasrcrow_itunes').ondrop({
+      preventDefault() {}, stopPropagation() {},
+      dataTransfer: { getData: () => '0' }     // 把第 0 行（qq）拖到最后一行
+    });
+    check('drop 后把 qq 移到 itunes 之后（拖拽与按钮走同一套重排）',
+          env.META_ORDER.join(',') === 'netease,dizzylab,itunes,qq', env.META_ORDER);
+
+    // 关掉某个源不改变顺序
+    const cb = env._getEl('sp_meta_qq');
+    const orderBeforeToggle = env.META_ORDER.join(',');
+    cb.checked = true;
+    cb.onchange();
+    check('勾选/关闭数据源不改变 META_ORDER',
+          env.META_ORDER.join(',') === orderBeforeToggle && env.META_SRC.qq === 1,
+          { order: env.META_ORDER, src: env.META_SRC });
+  }
+
+  // Test 9: saveSettings 的 body 里 metasrcorder 与 META_ORDER 逐字一致
+  {
+    console.log('\n-- Test 9: saveSettings 落盘 metasrcorder --');
+    const settingBodies = [];
+    const env = createEnvironment((url, opt) => {
+      if (url === '/api/settings' && opt && opt.method === 'POST') {
+        settingBodies.push(opt.body);
+        return { ok: true };
+      }
+      if (url === '/api/llm') return { ok: true };
+      if (url.startsWith('/api/llm/models')) return { ok: true, models: [] };
+    });
+    env.renderSettingsPage();
+    await new Promise(r => setImmediate(r));
+
+    env.META_PROVIDERS = [
+      { id: 'dizzylab', name: 'dizzylab', on: true, canSearch: true, canLyric: false },
+      { id: 'netease', name: '网易云音乐', on: true, canSearch: true, canLyric: true },
+      { id: 'qq', name: 'QQ音乐', on: true, canSearch: true, canLyric: true },
+      { id: 'itunes', name: 'iTunes', on: true, canSearch: true, canLyric: false }
+    ];
+    env.META_SRC = { dizzylab: 1, netease: 1, qq: 0, itunes: 1 };
+    env.META_ORDER = ['qq', 'netease', 'dizzylab', 'itunes'];
+    env.saveSettings(true);
+
+    const body = settingBodies[settingBodies.length - 1] || '';
+    check('body 里 metasrcorder 与 META_ORDER.join(,) 逐字一致',
+          body.indexOf('&metasrcorder=' + env.META_ORDER.join(',')) >= 0, body);
+    check('顺序与逐源开关在同一次请求里',
+          body.indexOf('&metasrc_qq=') >= 0 && body.indexOf('&metasrcorder=') >= 0, body);
+
+    env.META_ORDER = [];
+    env.saveSettings(true);
+    const body2 = settingBodies[settingBodies.length - 1] || '';
+    check('META_ORDER 为空时不下发 metasrcorder（避免覆盖成空串）',
+          body2.indexOf('metasrcorder=') < 0, body2);
+  }
+
+  // Test 10: /api/providers 的 order 原样使用；缺 order 回落 items；缺项补到尾部
+  {
+    console.log('\n-- Test 10: /api/providers order 的使用与兜底 --');
+    const mk = (payload) => createEnvironment((url) => {
+      if (url === '/api/providers') return payload;
+      if (url === '/api/llm') return { ok: true };
+      if (url.startsWith('/api/llm/models')) return { ok: true, models: [] };
+    });
+
+    const items = [
+      { id: 'dizzylab', name: 'dizzylab', on: true, canSearch: true, canLyric: false },
+      { id: 'lrclib', name: 'lrclib', on: true, canSearch: false, canLyric: true },
+      { id: 'netease', name: '网易云音乐', on: false, canSearch: true, canLyric: true },
+      { id: 'qq', name: 'QQ音乐', on: true, canSearch: true, canLyric: true }
+    ];
+
+    // ① 有 order ⟹ 原样使用，不被 items 顺序覆盖（前端不重排）
+    const withOrder = mk({ ok: true, items, order: 'qq,netease,dizzylab,lrclib' });
+    withOrder.renderSettingsPage();
+    withOrder.fillMetaProviders();
+    await new Promise(r => setImmediate(r));
+    check('有 order 时 META_ORDER 与 order 逐字一致（不被 items 顺序改写）',
+          withOrder.META_ORDER.join(',') === 'qq,netease,dizzylab,lrclib', withOrder.META_ORDER);
+
+    // ② 没有 order 字段（老后端）⟹ 回落 items 顺序，不崩
+    const noOrder = mk({ ok: true, items });
+    noOrder.renderSettingsPage();
+    noOrder.fillMetaProviders();
+    await new Promise(r => setImmediate(r));
+    check('没有 order 字段时 META_ORDER 回落 items 顺序',
+          noOrder.META_ORDER.join(',') === 'dizzylab,lrclib,netease,qq', noOrder.META_ORDER);
+    check('META_SRC 仍按 items.on 初始化',
+          noOrder.META_SRC.dizzylab === 1 && noOrder.META_SRC.netease === 0, noOrder.META_SRC);
+
+    // ③ order 缺项（损坏/旧数据）⟹ 缺的 id 追加到尾部，仍是完整排列
+    const partial = mk({ ok: true, items, order: 'netease' });
+    partial.renderSettingsPage();
+    partial.fillMetaProviders();
+    await new Promise(r => setImmediate(r));
+    check('order 缺项时缺的 id 追加到尾部',
+          partial.META_ORDER.join(',') === 'netease,dizzylab,lrclib,qq', partial.META_ORDER);
+
+    // ④ 恢复默认把顺序复位成后端给的默认顺序
+    const reset = mk({ ok: true, items, order: 'qq,netease,dizzylab,lrclib' });
+    reset.renderSettingsPage();
+    reset.fillMetaProviders();
+    await new Promise(r => setImmediate(r));
+    reset.META_ORDER = ['lrclib', 'qq', 'netease', 'dizzylab'];
+    reset.metaOrderReset();
+    check('恢复默认后 META_ORDER 复位成后端默认顺序',
+          reset.META_ORDER.join(',') === 'qq,netease,dizzylab,lrclib', reset.META_ORDER);
+  }
+
+  // Test 11: 「恢复默认」把顺序复位成后端给的默认顺序（端到端走 _resetAllSettings）
+  {
+    console.log('\n-- Test 11: 恢复默认复位数据源顺序 --');
+    const items = [
+      { id: 'dizzylab', name: 'dizzylab', on: true, canSearch: true, canLyric: false },
+      { id: 'lrclib', name: 'lrclib', on: false, canSearch: false, canLyric: true },
+      { id: 'netease', name: '网易云', on: false, canSearch: true, canLyric: true },
+      { id: 'qq', name: 'QQ音乐', on: false, canSearch: true, canLyric: true }
+    ];
+    const env = createEnvironment((url) => {
+      if (url === '/api/providers') return { ok: true, items, order: 'qq,netease,dizzylab,lrclib' };
+      if (url === '/api/llm') return { ok: true };
+      if (url.startsWith('/api/llm/models')) return { ok: true, models: [] };
+    });
+    env.renderSettingsPage();
+    env.fillMetaProviders();
+    await new Promise(r => setImmediate(r));
+    check('到达 /api/providers 后 META_ORDER = order',
+          env.META_ORDER.join(',') === 'qq,netease,dizzylab,lrclib', env.META_ORDER);
+
+    // 用户手动调乱顺序，然后点「恢复默认」
+    env.META_ORDER = ['lrclib', 'qq', 'netease', 'dizzylab'];
+    check('可调用 _resetAllSettings（confirm 已 stub 成 true）', typeof env._resetAllSettings === 'function');
+    env._resetAllSettings();
+    check('恢复默认后 META_ORDER 回到后端给的默认顺序',
+          env.META_ORDER.join(',') === 'qq,netease,dizzylab,lrclib', env.META_ORDER);
+    check('恢复默认后逐源开关全部打开',
+          env.META_SRC.qq === 1 && env.META_SRC.netease === 1 && env.META_SRC.lrclib === 1,
+          env.META_SRC);
   }
 
   console.log(`\n==============================================`);

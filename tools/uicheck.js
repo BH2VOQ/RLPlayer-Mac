@@ -533,8 +533,10 @@ async function gotoFiles() {
   // 2026-10-24 用户 261024-01 #7：说明文字收进 (?) 的 data-tip（hover 才显示）——
   // 判据必须同时读可见文字与 data-tip，否则会把"移进提示"误判成"文案丢失"。
   const aiLabel = await evalJs("(function(){var e=document.getElementById('sp_metallm');var f=e?e.closest('.sfld'):null;if(!f)return '';var t=f.textContent;var d=f.querySelectorAll('[data-tip]');for(var i=0;i<d.length;i++)t+=' '+d[i].getAttribute('data-tip');return t;})()");
-  ck(aiLabel.indexOf('AI 增强') >= 0 && aiLabel.indexOf('DeepSeek') >= 0 && aiLabel.indexOf('联网') >= 0 && aiLabel.indexOf('按次计费') >= 0,
-     '「AI 增强（DeepSeek）」文案包含联网 / 按次计费说明（可见文字或 (?) 提示）', aiLabel);
+  // 2026-11-07（1.1.4-beta3）：接入不再写死 DeepSeek（支持任意 OpenAI 兼容端点）⟹
+  // 判据从「必须出现 DeepSeek」放宽为「必须出现 OpenAI 兼容**或** DeepSeek」，其余三条不变。
+  ck(aiLabel.indexOf('AI 增强') >= 0 && (aiLabel.indexOf('OpenAI 兼容') >= 0 || aiLabel.indexOf('DeepSeek') >= 0) && aiLabel.indexOf('联网') >= 0 && aiLabel.indexOf('按次计费') >= 0,
+     '「AI 增强（OpenAI 兼容）」文案包含联网 / 按次计费说明（可见文字或 (?) 提示）', aiLabel);
 
   // 合并语义：一次勾选必须**同时**写 metallm 与 metasummary（开=1,1 / 关=0,0）。
   // 自检纪律：原状态可能是 metallm=1,metasummary=0 的混合态，合并后无法用两次点击还原成混合态，

@@ -23,7 +23,8 @@
 //     无记录,下次播放可再试。背景:P1.5 二十首抽样人工核对出 4 例错配,全部是
 //     「top1 0.32~0.49 + LLM 裁决=-1 仍被写入」(同人曲在网易的大量同社团错曲目诱饵)。
 //   * fieldsFilled 只记「本次真正新写入(合并生效)」的字段:写前快照、写后比对;
-//   * 网络纪律:搜索源之间 sleep ≥300ms;歌词依序 lrclib→netease→qq 取第一个 ok;
+//   * 网络纪律:搜索源之间 sleep ≥300ms;歌词按用户顺序(默认 lrclib→netease→qq,
+//     见 provider.h 的 pv_default_order())取第一个**带轴**结果,无轴结果只作兜底;
 //     封面只在记录缺 coverRelPath 且首选候选有 coverUrl 时下载一次(>2KB 才收);
 //   * 可离线测试面(铁律 3,不造假联网测试):字段兜底选择/封面扩展名判定/LLM pick 解析/
 //     歌词句柄挑选/查询串拼装都抽成纯函数(enrich_detail),tests/test_enrich.cpp 最小构造覆盖;
@@ -71,6 +72,11 @@ struct EnrichOpts {
     std::string llmConfPath;
     // 协作式取消标志：可空；在阶段间检查，为 true 时尽早返回，避免退出时阻塞
     const std::atomic<bool>* cancel = nullptr;
+    // 数据源顺序(2026-11-07,设置页可排序):逗号分隔的 id,如 "qq,netease,dizzylab"。
+    // 空串 = 默认顺序(pv_default_order())⟹ 不传就是改造前的行为,调用方零改动。
+    // 内容由 pv_parse_order() 统一解析(trim/小写/去重/丢弃未知 id/补齐未提到的源),
+    // 本结构**不**保存解析结果,避免「设置改了但缓存里还是旧顺序」的第二份事实源。
+    std::string order;
     // 读取开关:map 里没有该源 = 开
     bool enabled(const std::string& id) const {
         const auto it = srcOn.find(id);
@@ -367,7 +373,10 @@ inline EnrichStats enrich_track(const std::string& file, bool force, const Enric
         st.note = "已取消（退出中）";
         return st;
     }
-    // 注册表顺序 = 搜索优先级(dizzylab → qq → netease → itunes)。
+    // 调用顺序 = 用户在设置页排的顺序(opts.order 为空 → pv_default_order())，
+    // 默认下是 dizzylab → netease → qq → itunes(qq/netease 与改造前的正序对调，
+    // 理由见 provider.h 的 pv_default_order() 注释)；长度恒 = 注册表项数，
+    // 逐个按 canSearch / opts.enabled 过滤(判据与改造前逐条相同)。
     // E-17 扩展：构造 ProviderQuery 传递 album/circle/dirName 供 dizzylab 优先命中，
     // 其它源无 searchQuery 指针，继续沿用 query（默认忽略新参数）。
     ProviderQuery pq;
@@ -381,23 +390,23 @@ inline EnrichStats enrich_track(const std::string& file, bool force, const Enric
     std::vector<Candidate> cands;
     std::vector<std::string> srcErrs;
     bool firstCall = true;
-    for (const ProviderDesc& pd : provider_registry()) {
+    for (const ProviderDesc* pp : pv_ordered(opts.order)) {
         if (is_cancelled()) {
             st.note = "已取消（退出中）";
             return st;
         }
-        if (!pd.canSearch) continue;
-        if (!opts.enabled(pd.id)) continue;
+        if (!pp->canSearch) continue;
+        if (!opts.enabled(pp->id)) continue;
         if (!firstCall) std::this_thread::sleep_for(std::chrono::milliseconds(300));
         firstCall = false;
         std::string err;
         std::vector<Candidate> got;
-        if (pd.searchQuery) {
-            got = pd.searchQuery(pq, err);
-        } else if (pd.search) {
-            got = pd.search(pq.query, err);
+        if (pp->searchQuery) {
+            got = pp->searchQuery(pq, err);
+        } else if (pp->search) {
+            got = pp->search(pq.query, err);
         }
-        if (!err.empty()) srcErrs.push_back(std::string(pd.id) + ": " + err);
+        if (!err.empty()) srcErrs.push_back(std::string(pp->id) + ": " + err);
         for (Candidate& c : got) cands.push_back(std::move(c));
     }
     st.nCand = (int)cands.size();
@@ -569,10 +578,11 @@ inline EnrichStats enrich_track(const std::string& file, bool force, const Enric
         }
     }
 
-    // ---- 8) 歌词:lyrics 为空时按注册表【逆序】(canLyric 过滤)= lrclib → netease → qq。
+    // ---- 8) 歌词:lyrics 为空时按**用户顺序**正序(canLyric 过滤)走一遍。
     //         2026-10-30 改「第一个 ok 就停」为「带轴优先」:无轴(纯文本)结果先留作兜底、
     //         继续问下一个源,全链都没有带轴结果才用它。理由见 enrich_detail::ed_lrc_timed。
-    //         注册表正向是搜索优先级,逆序恰是 P1 的歌词优先级,顺序不变;
+    //         2026-11-07 顺序改为用户可排:opts.order 为空 → pv_default_order(),其歌词链
+    //         仍是 lrclib → netease → qq(与 P1 的固定顺序逐项相同);用户改顺序则照用户的来。
     //         源内句柄经 LyricRequest.cands(按分数从高到低)带入,免重复搜索。 ----
     if (is_cancelled()) {
         finishNote();
@@ -599,16 +609,19 @@ inline EnrichStats enrich_track(const std::string& file, bool force, const Enric
             LyricResult lr;                          // 最终采用(带轴优先)
             LyricResult plain;                       // 无轴兜底(第一个 ok 的纯文本)
             std::vector<std::string> lyrErrs;        // 各参与源的真实失败(P1 只留最后一个)
-            for (auto it = provider_registry().rbegin(); it != provider_registry().rend(); ++it) {
+            // 2026-11-07：与搜索链**同一套** pv_ordered(opts.order) 正序(旧实现靠反向遍历
+            // 注册表凑出 lrclib→netease→qq)。默认顺序下这条链仍是 lrclib→netease→qq,逐项相同；
+            // 用户改顺序后歌词链随之改变 —— 一条顺序驱动全部链，不再有第二套方向。
+            for (const ProviderDesc* pp : pv_ordered(opts.order)) {
                 if (is_cancelled()) {
                     finishNote();
                     st.note += "; 已取消（退出中）";
                     return st;
                 }
-                if (!it->canLyric || !it->lyric) continue;
-                if (!opts.enabled(it->id)) continue;
+                if (!pp->canLyric || !pp->lyric) continue;
+                if (!opts.enabled(pp->id)) continue;
                 std::string lerr;
-                LyricResult t = it->lyric(lrq, lerr);
+                LyricResult t = pp->lyric(lrq, lerr);
                 if (t.ok && !t.lrc.empty()) {
                     if (enrich_detail::ed_lrc_timed(t.lrc)) { lr = std::move(t); break; }
                     if (!plain.ok) plain = std::move(t);   // 无轴:先留着,继续问下一个源

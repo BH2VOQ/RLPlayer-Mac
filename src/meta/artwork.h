@@ -14,23 +14,31 @@
 // 本文件回答的就是这一条：**谁能提供什么，由 provider.h 的能力矩阵声明；候选列表由矩阵
 // 派生**，不再每类内容各写一段「先试 A 再试 B」的死代码，也不再有「头像只问网易云」。
 //
-// 三类内容的派生入口(全部只按 ArtCap 过滤 + 注册表顺序，没有第二份名单)：
-//   art_cover_sources()   Cover 位，正序(注册表顺序=dizzylab→qq→netease→itunes→discogs)
-//   art_artist_sources()  ArtistImage 位，正序(见下方「头像优先级」)
-//   art_lyric_sources()   Lyrics 位，**逆序**(保持 P1 的 lrclib→netease→qq 优先级不变)
-// 断言：tests/test_metaproviders.cpp 检查「每个声明了 ArtistImage 的源都有抓取实现」
-// 与「每个抓取实现都在注册表里声明了该能力」—— 两边不一致会直接测试失败。
+// 三类内容的派生入口(只按 ArtCap 过滤 + **用户顺序**，没有第二份名单)：
+//   art_cover_sources()   Cover 位，按 order(空 = 默认 = dizzylab→netease→qq→itunes→discogs)
+//   art_artist_sources()  ArtistImage 位，同上(见下方「头像优先级」)
+//   art_lyric_sources()   Lyrics 位，同上(默认下 = lrclib→netease→qq，与 P1 逐项相同)
+// 全部走 provider.h 的 pv_ordered(order)：改造前的 reverse 参数已删除 —— 顺序只由用户
+// 顺序(pv_default_order())决定，不再有「这张表正序、那张表逆序」的第二套方向。
+// 断言：tests/test_provider_order.cpp 检查「派生入口的顺序 == 用户顺序(默认 = pv_default_order())」
+// 与各能力位的成员；旧的 tests/test_metaproviders.cpp 里那两条同名断言当前**未注册进 ctest**
+// (见 CMakeLists.txt:615 的说明)，不要误以为门禁覆盖了它们。
 //
 // ---------------------------------------------------------------------------
 // 头像优先级为什么是 dizzylab 打头(2026-10-27 实测,真实库 245 位艺人)
 // ---------------------------------------------------------------------------
+// ⚠️ 2026-11-07 起**先后由用户顺序决定**(ArtworkOpts::order → pv_ordered)，下面这段
+//    解释的是「默认顺序下为什么 dizzylab 打头」和各源的实测覆盖，不是硬编码的链：
 //   * dizzylab 命中「用户」卡片时给的是**艺人自己的头像**(avatars/xxx.png!cover,
 //     实测 Khrisma 68,713 B),而且一次 GET 同时带回简介与外链；
 //   * 真实库是同人为主(Khrisma 62 首 / 炒饭 33 / MhT 27 / AnnyJuly 16),
 //     这些人在网易云/QQ 基本查不到 —— 这正是「只接网易云」145/246 只剩首字母的根因；
-//   * QQ 次之(musicu 歌手搜索覆盖大,实测蔡琴 17,197 B / TAMUSIC 49,625 B / 初音未来 23,951 B);
-//   * 网易云第三(首个结果可能是粉丝号,必须精确名匹配后取 picUrl);
-//   * Discogs 最后(匿名 25 req/min,只对前三源都落空的艺人补,内部单列节流)。
+//   * 改造前 QQ 次之、网易云第三；现在默认顺序(pv_default_order():dizzylab→lrclib→
+//     netease→qq→itunes)下**网易云排在 QQ 之前** —— 这是「歌词链 lrclib→netease→qq
+//     逐项不变」的代价(一条全局顺序没法同时满足两套旧方向，取舍写在 provider.h 的
+//     pv_default_order() 注释里)。QQ 实测覆盖:蔡琴 17,197 B / TAMUSIC 49,625 B /
+//     初音未来 23,951 B;网易云首个结果可能是粉丝号，必须精确名匹配后取 picUrl；
+//   * Discogs 仍最后(匿名 25 req/min,只对前面各源都落空的艺人补,内部单列节流)。
 //
 // ⚠️ 精确名匹配是**默认行为**(用户 2026-10-27 复核的硬要求)：宽松匹配会张冠李戴 ——
 //    实测 dizzylab「炒饭」→「铁棍山药炒饭」、「MhT」→「MHTWSNBB666」、
@@ -118,6 +126,9 @@ struct ArtworkOpts {
     size_t minBytes    = 1024;               // 小于它当「没有头像」(既有 rtaweb 阈值)
     size_t maxBytes    = 12u * 1024u * 1024u;
     std::map<std::string, bool> srcOn;       // 源开关；未列出的源 = 开(与 EnrichOpts 同语义)
+    // 数据源顺序(2026-11-07，与 EnrichOpts::order 同一套语义/同一份解析)：
+    // 逗号分隔 id，空 = 默认顺序(pv_default_order())；封面/头像/简介三条链都按它走。
+    std::string order;
     bool allowFuzzy = false;                 // 默认精确匹配(见文件头 ⚠️)
     // 全名四源都落空时，退回「主艺人」(A & B / A feat. B 里的 A)再跑一遍同一条链。
     // 真实库实测：245 位里 106 位无头像，其中 43 位靠这条救回来(见 art_primary_artist)。
@@ -568,34 +579,34 @@ inline std::vector<ArtArtistCandidate> art_parse_itunes_artists(const std::strin
 // ===========================================================================
 // 4) 能力矩阵 → 候选源列表(数据驱动的唯一入口)
 // ===========================================================================
+// 能力位过滤 + **用户顺序**(order 为空 → pv_default_order())。
+// pv_ordered() 保证「长度恒 = 注册表项数、每个源出现一次」，所以这里不会漏源也不会重复；
+// 改造前的 bool reverse 参数已删除：顺序只由 order 决定，调用方不再各自决定方向。
 inline std::vector<const ProviderDesc*> art_sources_with(ArtCap cap,
                                                         const std::map<std::string, bool>& srcOn,
-                                                        bool reverse = false) {
+                                                        const std::string& order = std::string()) {
     std::vector<const ProviderDesc*> out;
-    const auto& reg = provider_registry();
-    auto on = [&](const ProviderDesc& pd) {
-        const auto it = srcOn.find(pd.id);
-        return it == srcOn.end() ? true : it->second;
-    };
-    if (reverse) {
-        for (auto it = reg.rbegin(); it != reg.rend(); ++it)
-            if (pv_has_cap(it->caps, cap) && on(*it)) out.push_back(&*it);
-    } else {
-        for (const ProviderDesc& pd : reg)
-            if (pv_has_cap(pd.caps, cap) && on(pd)) out.push_back(&pd);
+    for (const ProviderDesc* pd : pv_ordered(order)) {
+        if (!pv_has_cap(pd->caps, cap)) continue;
+        const auto it = srcOn.find(pd->id);
+        if (it != srcOn.end() && !it->second) continue;   // 未列出的源 = 开(与 EnrichOpts 同语义)
+        out.push_back(pd);
     }
     return out;
 }
 
-inline std::vector<const ProviderDesc*> art_cover_sources(const std::map<std::string, bool>& srcOn) {
-    return art_sources_with(ArtCap::Cover, srcOn, false);
+inline std::vector<const ProviderDesc*> art_cover_sources(const std::map<std::string, bool>& srcOn,
+                                                         const std::string& order = std::string()) {
+    return art_sources_with(ArtCap::Cover, srcOn, order);
 }
-inline std::vector<const ProviderDesc*> art_artist_sources(const std::map<std::string, bool>& srcOn) {
-    return art_sources_with(ArtCap::ArtistImage, srcOn, false);
+inline std::vector<const ProviderDesc*> art_artist_sources(const std::map<std::string, bool>& srcOn,
+                                                          const std::string& order = std::string()) {
+    return art_sources_with(ArtCap::ArtistImage, srcOn, order);
 }
-// 歌词链保持 P1 的逆序(lrclib → netease → qq)：注册表逆序 + Lyrics 过滤，顺序与改造前逐项相同。
-inline std::vector<const ProviderDesc*> art_lyric_sources(const std::map<std::string, bool>& srcOn) {
-    return art_sources_with(ArtCap::Lyrics, srcOn, true);
+// 歌词链也走同一条 order：默认顺序下 Lyrics 过滤 = lrclib → netease → qq(与 P1 逐项相同)。
+inline std::vector<const ProviderDesc*> art_lyric_sources(const std::map<std::string, bool>& srcOn,
+                                                         const std::string& order = std::string()) {
+    return art_sources_with(ArtCap::Lyrics, srcOn, order);
 }
 
 // 封面候选 URL 链(enrich 侧用)：按匹配分从高到低把所有候选的 coverUrl 去重排队。
@@ -1061,7 +1072,7 @@ inline const ArtArtistSource* art_fetcher_of(const std::string& id) {
 //    头像链自动包含它，不用改任何循环(用户要求「以后新增一个源只改注册表一处」)。
 inline std::vector<const ArtArtistSource*> art_artist_image_plan(const ArtworkOpts& opts) {
     std::vector<const ArtArtistSource*> out;
-    for (const ProviderDesc* pd : art_artist_sources(opts.srcOn)) {
+    for (const ProviderDesc* pd : art_artist_sources(opts.srcOn, opts.order)) {
         if (opts.onlySource && std::string(opts.onlySource) != pd->id) continue;
         if (const ArtArtistSource* f = art_fetcher_of(pd->id)) out.push_back(f);
     }
@@ -1233,7 +1244,7 @@ inline ArtistProfileResult artwork_fetch_artist_profile(const std::string& rawNa
     const std::string name = art_trim_name(rawName);
     if (name.empty()) return res;
     int remaining = opts.totalBudgetMs;
-    for (const ProviderDesc* pd : art_sources_with(ArtCap::ArtistBio, opts.srcOn)) {
+    for (const ProviderDesc* pd : art_sources_with(ArtCap::ArtistBio, opts.srcOn, opts.order)) {
         if (opts.onlySource && std::string(opts.onlySource) != pd->id) continue;
         if (remaining <= 0) break;
         const auto t0 = std::chrono::steady_clock::now();

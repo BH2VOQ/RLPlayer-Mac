@@ -19,6 +19,9 @@
 //     （\ " \n \r \t 与 <0x20 → \u00xx；中文保持原样 UTF-8）
 //   * 网络三个函数（llm_chat / ds_search / ds_fetch）内部各做一次调用、不重试；
 //     重试 / 限频 / 熔断归上层（调研文档 §3「网络纪律」）
+//   * 端点（用户 261107）：支持任意 OpenAI 兼容端点。baseUrl 先过 llm_normalize_base()
+//     收敛成 scheme+host[+版本]；请求路径按 llm_base_candidates() 的候选顺序尝试
+//     （不带版本优先、/v1 兜底），只有"路径不存在"（404/405）才换下一条候选。
 //   * 可测试性：body 构造与响应解析全部拆成纯函数，离线喂写死报文即可测（铁律 3）
 #pragma once
 // （原 WIN32_LEAN_AND_MEAN / NOMINMAX 前导已删：http_client.h -> platform/http.h 会在
@@ -131,11 +134,97 @@ inline std::string llm_mask_key(const std::string& k) {
     return k.substr(0, 3) + "****" + k.substr(k.size() - 4);
 }
 
-// baseUrl 规整：去首尾空白与结尾斜杠；空则回退默认端点
-inline std::string llm_base_url(const std::string& raw) {
+// ---------------------------------------------------------------------------
+// base URL 规整与候选路径（用户 261107：支持「任意 OpenAI 兼容端点」）
+//
+// 用户实际粘进来的东西五花八门：只贴主机（api.openai.com/v1）、贴了完整端点
+// （https://api.deepseek.com/chat/completions）、末尾多几个斜杠……这里统一收敛成
+// 「scheme + host[:port] + 可选 /v1 或 /v1beta」，再由 llm_base_candidates() 决定
+// 实际要试哪几条路径。全部是纯函数（可离线测，铁律 3）。
+// ---------------------------------------------------------------------------
+
+// 纯函数：规整 base URL。
+//   * trim；空 → 默认端点 https://api.deepseek.com
+//   * 没有 "://" 就补 "https://"（用户常只贴 api.openai.com/v1）
+//   * 反复剥掉结尾 "/" 与误粘的端点后缀（/chat/completions、/completions、/models）
+//   * 剥完再剥一次结尾 "/"；但所有剥离都不越过 "://" 之后的位置，
+//     所以退化的 "https://" 绝不会被削成 "https:"
+inline std::string llm_normalize_base(const std::string& raw) {
     std::string b = llm_trim(raw);
-    if (b.empty()) b = "https://api.deepseek.com";
-    while (b.size() > 1 && b.back() == '/') b.pop_back();
+    if (b.empty()) return std::string("https://api.deepseek.com");
+    if (b.find("://") == std::string::npos) b = "https://" + b;
+
+    const size_t schemeEnd = b.find("://") + 3;   // "://" 之后的第一个字符下标
+    // 剥结尾斜杠：永远保留 scheme 段的 "//"（b.size() > schemeEnd 才允许削）
+    auto strip_tail_slash = [&](std::string& s) {
+        while (s.size() > schemeEnd && s.back() == '/') s.pop_back();
+    };
+
+    static const char* kEndSuffixes[] = { "/chat/completions", "/completions", "/models" };
+    for (;;) {
+        strip_tail_slash(b);
+        bool stripped = false;
+        for (const char* suf : kEndSuffixes) {
+            const std::string s(suf);
+            // 剥掉后必须还剩至少一个 host 字符（"https://models" 这种不许剥成 "https://"）
+            if (b.size() > schemeEnd + s.size() &&
+                b.compare(b.size() - s.size(), s.size(), s) == 0) {
+                b.erase(b.size() - s.size());
+                stripped = true;
+                break;
+            }
+        }
+        if (!stripped) break;
+    }
+    strip_tail_slash(b);
+    return b;
+}
+
+// baseUrl 规整（旧名字，向后兼容）：语义完全等于 llm_normalize_base
+inline std::string llm_base_url(const std::string& raw) { return llm_normalize_base(raw); }
+
+// base 的 path 是否已带版本段（以 /v1 或 /v1beta 结尾）
+inline bool llm_base_has_version(const std::string& base) {
+    const std::string b = llm_normalize_base(base);
+    const size_t n = b.size();
+    auto ends = [&](const char* suf) {
+        const std::string s(suf);
+        return n > s.size() && b.compare(n - s.size(), s.size(), s) == 0;
+    };
+    return ends("/v1") || ends("/v1beta");
+}
+
+// 纯函数：候选 base 列表（顺序有意义，调用方按序试）。
+//   * 已带 /v1 或 /v1beta → 只有它自己
+//   * 否则 {base, base + "/v1"} —— **不带版本优先，/v1 兜底**。
+//     顺序不能反：既有测试断言的是不带版本的 URL，反过来会把它们全打红。
+inline std::vector<std::string> llm_base_candidates(const std::string& base) {
+    const std::string b = llm_normalize_base(base);
+    if (llm_base_has_version(b)) return { b };
+    return { b, b + "/v1" };
+}
+
+// 纯函数：DeepSeek 专有 tools 接口的 base。
+// ds_search / ds_fetch 自己会拼 "/v1/tools/..."，所以这里必须先剥掉用户可能已经
+// 带上的 "/v1" / "/v1beta" —— 否则 base 填 https://api.deepseek.com/v1 会变成
+// /v1/v1/tools/...（261107 修掉的既有隐患）。默认 base 下结果逐字不变。
+inline std::string llm_tools_base(const std::string& raw) {
+    std::string b = llm_normalize_base(raw);
+    const size_t schemeEnd = b.find("://") + 3;
+    for (;;) {
+        bool stripped = false;
+        for (const char* suf : { "/v1beta", "/v1" }) {
+            const std::string s(suf);
+            if (b.size() > schemeEnd + s.size() &&
+                b.compare(b.size() - s.size(), s.size(), s) == 0) {
+                b.erase(b.size() - s.size());
+                stripped = true;
+                break;
+            }
+        }
+        if (!stripped) break;
+    }
+    while (b.size() > schemeEnd && b.back() == '/') b.pop_back();
     return b;
 }
 
@@ -692,6 +781,11 @@ struct LlmModelList {
     std::string error;                  // 人可读失败原因（已脱敏）
     std::vector<LlmModelInfo> models;
     long long latencyMs = 0;
+    // 多路径回退的真实结果（用户 261107）：命中的 base 与路径后缀，
+    // 以及这次试过哪些路径（形如 "/models"、"/v1/models"；失败时用于报错与测试断言）
+    std::string resolvedBase;           // 命中候选的 base（不含 /models）
+    std::string modelsPath;             // 命中路径后缀："/models" 或 "/v1/models"
+    std::vector<std::string> triedPaths;
     int count() const { return (int)models.size(); }
     bool has(const std::string& id) const {
         for (const LlmModelInfo& m : models) if (m.id == id) return true;
@@ -769,7 +863,73 @@ inline void llm_models_cache_clear() {
     llm_models_cache_slot() = LlmModelsCacheEntry{};
 }
 
-// GET {base}/models。force=true 跳过缓存；outCached 回报这次是否来自缓存。
+// ---------------------------------------------------------------------------
+// 端点解析缓存（用户 261107）：llm_models_fetch 试出「哪条 base 路径真的能通」后记下来，
+// 供 llm_chat 复用 —— 否则每个 chat 都要先吃一次 404 再回退到 /v1。
+//
+// key = 原始 base + "|" + hash(apiKey)：与模型列表缓存同口径，绝不落明文 key。
+// TTL 60 s（与模型列表缓存同一窗口）；过期/清空后自动回到候选顺序。
+// llm_chat 命中缓存时**只用**这一条 base：失败也不静默换路径，而是把缓存项清掉，
+// 让下一次调用重新按候选顺序探测。
+// ---------------------------------------------------------------------------
+struct LlmEndpointCacheEntry {
+    std::string base;                   // 命中的 base，如 https://api.openai.com/v1
+    std::string path;                   // 命中的路径后缀："/models" 或 "/v1/models"
+    std::chrono::steady_clock::time_point tp{};
+};
+inline std::mutex& llm_endpoint_cache_mutex() {
+    static std::mutex m;
+    return m;
+}
+inline std::map<std::string, LlmEndpointCacheEntry>& llm_endpoint_cache_map() {
+    static std::map<std::string, LlmEndpointCacheEntry> m;
+    return m;
+}
+inline std::string llm_endpoint_cache_key(const std::string& base, const std::string& apiKey) {
+    return base + "|" + std::to_string((unsigned long long)std::hash<std::string>{}(apiKey));
+}
+// 测试用：清空缓存（证伪"命中缓存"与"清完重新按候选顺序试"都要靠它）
+inline void llm_endpoint_cache_clear() {
+    std::lock_guard<std::mutex> lk(llm_endpoint_cache_mutex());
+    llm_endpoint_cache_map().clear();
+}
+inline void llm_endpoint_cache_put(const std::string& key, const std::string& base,
+                                   const std::string& path) {
+    std::lock_guard<std::mutex> lk(llm_endpoint_cache_mutex());
+    LlmEndpointCacheEntry& e = llm_endpoint_cache_map()[key];
+    e.base = base;
+    e.path = path;
+    e.tp = std::chrono::steady_clock::now();
+}
+// 取：过期即当没有（顺带清掉，免得表无限长）
+inline bool llm_endpoint_cache_get(const std::string& key, LlmEndpointCacheEntry& out) {
+    std::lock_guard<std::mutex> lk(llm_endpoint_cache_mutex());
+    auto& m = llm_endpoint_cache_map();
+    const auto it = m.find(key);
+    if (it == m.end()) return false;
+    const auto age = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - it->second.tp).count();
+    if (age < 0 || age >= 60000) { m.erase(it); return false; }
+    out = it->second;
+    return true;
+}
+inline void llm_endpoint_cache_erase(const std::string& key) {
+    std::lock_guard<std::mutex> lk(llm_endpoint_cache_mutex());
+    llm_endpoint_cache_map().erase(key);
+}
+
+// GET {cand}/models，按 llm_base_candidates 的顺序逐条试（用户 261107）。
+// force=true 跳过缓存；outCached 回报这次是否来自缓存。
+//
+// 回退纪律（判据见 tests/test_llm_models.cpp §11-§15）：
+//   * 2xx 且解析成功 → 采用；命中路径与 resolvedBase 写进结果，并写入端点解析缓存；
+//   * 401/403 → 立即停止（鉴权错，换路径没意义），错误照旧过 llm_redact；
+//   * 404/405 → 试下一条候选（"这条路径不存在"）；
+//   * 2xx 但解析失败 → 试下一条候选（网关可能把 HTML 错误页当 200 回）；
+//   * 其它非 2xx（5xx/429/…）与网络失败（status==0）→ 立即停止：服务端/链路已坏，
+//     换路径只是白白多打一次（既有用例断言 500 只发一次请求）；
+//   * 全失败 → ok=false，error 带"已尝试"的路径。
+// 60 s 缓存与 force 语义不变；缓存键仍按原始 base + key 哈希（绝不落明文 key）。
 inline LlmModelList llm_models_fetch(const LlmConfig& cfg, int timeoutMs = 15000,
                                       bool force = false, bool* outCached = nullptr) {
     LlmModelList r;
@@ -778,9 +938,8 @@ inline LlmModelList llm_models_fetch(const LlmConfig& cfg, int timeoutMs = 15000
         r.error = llm_redact(cfg.apiKey, "未配置 api_key（rlplayer-llm.conf）");
         return r;
     }
-    const std::string base = llm_base_url(cfg.baseUrl);
-    const std::string cacheKey = base + "|" + std::to_string(
-        (unsigned long long)std::hash<std::string>{}(cfg.apiKey));
+    const std::string base = llm_normalize_base(cfg.baseUrl);
+    const std::string cacheKey = llm_endpoint_cache_key(base, cfg.apiKey);
 
     if (!force) {
         std::lock_guard<std::mutex> lk(llm_models_cache_mutex());
@@ -798,42 +957,82 @@ inline LlmModelList llm_models_fetch(const LlmConfig& cfg, int timeoutMs = 15000
         }
     }
 
-    const std::string url = base + "/models";
+    const std::vector<std::string> cands = llm_base_candidates(base);
     const std::vector<std::string> headers = { "Authorization: Bearer " + cfg.apiKey };
     const auto t0 = std::chrono::steady_clock::now();
-    rta::net::HttpResponse resp;
-    if (cfg.transport) {
-        resp = cfg.transport(url, "", headers);
-    } else {
-        resp = rta::net::http_get(url, headers, timeoutMs);
-    }
-    r.latencyMs = (long long)std::chrono::duration_cast<std::chrono::milliseconds>(
-        std::chrono::steady_clock::now() - t0).count();
+    auto elapsedMs = [&t0]() {
+        return (long long)std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - t0).count();
+    };
+    // 候选相对原始 base 的路径前缀：第 1 条是 ""，第 2 条是 "/v1"
+    auto path_of = [&base](const std::string& cand) {
+        return (cand.size() >= base.size() && cand.compare(0, base.size(), base) == 0)
+                   ? cand.substr(base.size())
+                   : std::string();
+    };
 
-    if (resp.status == 0) {
-        r.error = llm_redact(cfg.apiKey, "网络请求失败: " + resp.error);
-        return r;
-    }
-    const std::string text(resp.body.begin(), resp.body.end());
-    if (resp.status < 200 || resp.status >= 300) {
+    std::string lastErr;
+    for (size_t i = 0; i < cands.size(); ++i) {
+        const std::string path = path_of(cands[i]) + "/models";   // "/models" 或 "/v1/models"
+        const std::string url = cands[i] + "/models";
+        r.triedPaths.push_back(path);
+
+        rta::net::HttpResponse resp;
+        if (cfg.transport) {
+            resp = cfg.transport(url, "", headers);
+        } else {
+            resp = rta::net::http_get(url, headers, timeoutMs);
+        }
+
+        if (resp.status == 0) {                       // 网络底层失败：换路径也没用
+            r.latencyMs = elapsedMs();
+            r.error = llm_redact(cfg.apiKey, "网络请求失败: " + resp.error);
+            return r;
+        }
+        const std::string text(resp.body.begin(), resp.body.end());
+
+        if (resp.status >= 200 && resp.status < 300) {
+            LlmModelList p = llm_parse_models_response(text);
+            if (!p.ok) {                              // 2xx 但不是模型列表 → 试下一条
+                lastErr = llm_redact(cfg.apiKey, p.error);
+                continue;
+            }
+            p.fromCache = false;
+            p.resolvedBase = cands[i];
+            p.modelsPath = path;
+            p.triedPaths = r.triedPaths;
+            p.latencyMs = elapsedMs();
+            {
+                std::lock_guard<std::mutex> lk(llm_models_cache_mutex());
+                LlmModelsCacheEntry& e = llm_models_cache_slot();
+                e.key = cacheKey;
+                e.res = p;
+                e.tp = std::chrono::steady_clock::now();
+            }
+            llm_endpoint_cache_put(cacheKey, cands[i], path);   // 供 llm_chat 复用
+            return p;
+        }
+
         const LlmModelList p = llm_parse_models_response(text);   // 借它提取 error.message
-        r.error = llm_redact(cfg.apiKey,
+        lastErr = llm_redact(cfg.apiKey,
             "HTTP " + std::to_string(resp.status) + (p.error.empty() ? "" : ": " + p.error));
-        return r;
+
+        if (resp.status == 404 || resp.status == 405) continue;   // 路径不存在 → 下一条候选
+        break;                                                    // 其余一律不换路径
     }
-    r = llm_parse_models_response(text);
-    if (!r.ok) {
-        r.error = llm_redact(cfg.apiKey, r.error);
-        return r;
+
+    r.ok = false;
+    r.latencyMs = elapsedMs();
+    std::string msg = lastErr.empty() ? std::string("未取得模型列表") : lastErr;
+    if (!r.triedPaths.empty()) {
+        msg += "（已尝试 ";
+        for (size_t i = 0; i < r.triedPaths.size(); ++i) {
+            if (i) msg += "、";
+            msg += r.triedPaths[i];
+        }
+        msg += "）";
     }
-    {
-        std::lock_guard<std::mutex> lk(llm_models_cache_mutex());
-        LlmModelsCacheEntry& e = llm_models_cache_slot();
-        e.key = cacheKey;
-        e.res = r;
-        e.res.fromCache = false;
-        e.tp = std::chrono::steady_clock::now();
-    }
+    r.error = llm_redact(cfg.apiKey, msg);
     return r;
 }
 
@@ -909,7 +1108,9 @@ inline LlmReply llm_parse_chat_response(const std::string& text) {
     return r;
 }
 
-// POST {base}/chat/completions，超时 60s，单次调用不重试
+// POST {cand}/chat/completions，超时 60s，单次调用不重试。
+// 261107：按 llm_base_candidates 顺序试，但**只有 404/405（路径不存在）才换下一条**；
+// 401/403/429/5xx/网络失败一律不重试。用量只在最终成功那一次记一次。
 inline LlmReply llm_chat(const LlmConfig& cfg, const std::vector<LlmMessage>& msgs,
                          int maxTokens = 800, float temperature = 0.2f, bool jsonObject = false) {
     rta::net::HttpDiagScope httpDiag(rta::diag::Stage::Llm);
@@ -927,35 +1128,87 @@ inline LlmReply llm_chat(const LlmConfig& cfg, const std::vector<LlmMessage>& ms
     }
 
     const std::string body = llm_build_chat_body(cfg.model, msgs, maxTokens, temperature, jsonObject);
-    const std::string url = llm_base_url(cfg.baseUrl) + "/chat/completions";
     const std::vector<std::string> headers = { "Authorization: Bearer " + cfg.apiKey };
+    const std::string base = llm_normalize_base(cfg.baseUrl);
+    const std::string cacheKey = llm_endpoint_cache_key(base, cfg.apiKey);
 
-    rta::net::HttpResponse resp;
-    if (cfg.transport) {
-        resp = cfg.transport(url, body, headers);
+    // 候选 base：有端点解析缓存就**只用**缓存那一条（失败也不许静默乱试其它），
+    // 否则按 llm_base_candidates 的顺序试（不带版本优先、/v1 兜底）。
+    std::vector<std::string> cands;
+    LlmEndpointCacheEntry hit;
+    const bool fromEndpointCache = llm_endpoint_cache_get(cacheKey, hit);
+    if (fromEndpointCache) {
+        cands.push_back(hit.base);
     } else {
-        resp = rta::net::http_post(url, body, headers, "application/json", 60000);
+        cands = llm_base_candidates(base);
     }
+    auto path_of = [&base](const std::string& cand) {
+        return (cand.size() >= base.size() && cand.compare(0, base.size(), base) == 0)
+                   ? cand.substr(base.size())
+                   : std::string();
+    };
 
-    if (resp.status == 0) {
-        r.error = llm_redact(cfg.apiKey, "网络请求失败: " + resp.error);
-        return r;
-    }
-    const std::string text(resp.body.begin(), resp.body.end());
-    if (resp.status < 200 || resp.status >= 300) {
+    std::vector<std::string> tried;
+    std::string lastErr;
+    for (size_t i = 0; i < cands.size(); ++i) {
+        const std::string url = cands[i] + "/chat/completions";
+        const std::string path = path_of(cands[i]) + "/chat/completions";
+        tried.push_back(path);
+
+        rta::net::HttpResponse resp;
+        if (cfg.transport) {
+            resp = cfg.transport(url, body, headers);
+        } else {
+            resp = rta::net::http_post(url, body, headers, "application/json", 60000);
+        }
+
+        if (resp.status == 0) {                    // 网络底层失败：不重试、不换路径
+            if (fromEndpointCache) llm_endpoint_cache_erase(cacheKey);
+            r.error = llm_redact(cfg.apiKey, "网络请求失败: " + resp.error);
+            return r;
+        }
+        const std::string text(resp.body.begin(), resp.body.end());
+
+        if (resp.status >= 200 && resp.status < 300) {
+            r = llm_parse_chat_response(text);
+            if (!r.ok) {                           // 2xx 但报文坏：不换路径重试
+                r.error = llm_redact(cfg.apiKey, r.error);
+                return r;
+            }
+            // E-8: 成功响应计费口径（按实际成功计）——★ 整个回退过程只在这里记一次
+            const std::string m = cfg.monthOverride.empty() ? llm_current_month() : cfg.monthOverride;
+            llm_record_usage(m, "chat", cfg.usagePath);
+            // 候选第 2 条才通的，把这条端点记下来，供后续 chat 直接命中
+            if (i > 0) llm_endpoint_cache_put(cacheKey, cands[i], path);
+            return r;
+        }
+
         const LlmReply p = llm_parse_chat_response(text);   // 借它提取服务端 error.message
-        r.error = llm_redact(cfg.apiKey,
+        lastErr = llm_redact(cfg.apiKey,
             "HTTP " + std::to_string(resp.status) + (p.error.empty() ? "" : ": " + p.error));
-        return r;
+
+        const bool pathMissing = (resp.status == 404 || resp.status == 405);
+        if (fromEndpointCache) {
+            // 缓存里的端点已经不可用：清掉，下次调用重新探测（本次仍不换路径）
+            if (pathMissing) llm_endpoint_cache_erase(cacheKey);
+            break;
+        }
+        // 只有"这条路径不存在"才换下一条候选；401/403/429/5xx 一律不重试
+        if (pathMissing && i + 1 < cands.size()) continue;
+        break;
     }
-    r = llm_parse_chat_response(text);
-    if (!r.ok) {
-        r.error = llm_redact(cfg.apiKey, r.error);
-    } else {
-        // E-8: 成功响应计费口径（按实际成功计）
-        const std::string m = cfg.monthOverride.empty() ? llm_current_month() : cfg.monthOverride;
-        llm_record_usage(m, "chat", cfg.usagePath);
+
+    r.ok = false;
+    std::string msg = lastErr.empty() ? std::string("请求失败") : lastErr;
+    if (tried.size() > 1) {
+        msg += "（已尝试 ";
+        for (size_t i = 0; i < tried.size(); ++i) {
+            if (i) msg += "、";
+            msg += tried[i];
+        }
+        msg += "）";
     }
+    r.error = llm_redact(cfg.apiKey, msg);
     return r;
 }
 
@@ -1041,7 +1294,8 @@ inline std::string ds_http_error(const std::string& apiKey, int status, const st
         "HTTP " + std::to_string(status) + (p.error.empty() ? "" : ": " + p.error));
 }
 
-// POST {base}/v1/tools/search，超时 60s，单次调用不重试
+// POST {llm_tools_base}/v1/tools/search，超时 60s，单次调用不重试
+// （base 里的 /v1 由 llm_tools_base 先剥掉，见文件头 llm_tools_base 的说明）
 inline DsSearchReply ds_search(const LlmConfig& cfg, const std::string& query, int count = 5) {
     DsSearchReply r;
     if (cfg.apiKey.empty()) {
@@ -1057,7 +1311,8 @@ inline DsSearchReply ds_search(const LlmConfig& cfg, const std::string& query, i
     }
 
     const std::string body = ds_build_search_body(query, count);
-    const std::string url = llm_base_url(cfg.baseUrl) + "/v1/tools/search";
+    // 261107：走 llm_tools_base —— 用户 base 里若已带 /v1，这里不会被拼成 /v1/v1/tools/...
+    const std::string url = llm_tools_base(cfg.baseUrl) + "/v1/tools/search";
     const std::vector<std::string> headers = { "Authorization: Bearer " + cfg.apiKey };
 
     rta::net::HttpResponse resp;
@@ -1084,7 +1339,7 @@ inline DsSearchReply ds_search(const LlmConfig& cfg, const std::string& query, i
     return r;
 }
 
-// POST {base}/v1/tools/fetch，单次调用不重试。timeout_ms 默认 60s；
+// POST {llm_tools_base}/v1/tools/fetch，单次调用不重试。timeout_ms 默认 60s；
 // 2026-10-24（261024-02 #1 速度）：检索层改成 4 路并行 + 单页 12s 超时，
 // 慢页面不再把整个资料整理拖到 20s+（实测最慢一次 fetch 阶段 10.9s）。
 inline DsFetchReply ds_fetch(const LlmConfig& cfg, const std::string& url, int timeout_ms = 60000) {
@@ -1102,7 +1357,7 @@ inline DsFetchReply ds_fetch(const LlmConfig& cfg, const std::string& url, int t
     }
 
     const std::string body = ds_build_fetch_body(url);
-    const std::string reqUrl = llm_base_url(cfg.baseUrl) + "/v1/tools/fetch";
+    const std::string reqUrl = llm_tools_base(cfg.baseUrl) + "/v1/tools/fetch";   // 同上：先剥 /v1
     const std::vector<std::string> headers = { "Authorization: Bearer " + cfg.apiKey };
 
     rta::net::HttpResponse resp;
