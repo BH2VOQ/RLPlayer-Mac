@@ -1,8 +1,8 @@
 {
-  "version": "1.1.4-beta4",
-  "notes": "Metadata search can run on DeepSeek, AnySearch or Tavily, audio analysis now sits in a left rail symmetric with AI summary while lyrics stay centered, and an opt-in AI retry fills cover and lyrics when the track name fails to match · 元数据检索端点可选 DeepSeek / AnySearch / Tavily，音频分析移入与 AI 整理对称的左竖栏且歌词保持居中，新增可选的 AI 辅助重试，在歌名对不上时补封面与歌词",
-  "download_url": "https://github.com/BH2VOQ/RLPlayer-Mac/releases/download/v1.1.4-beta4/RLPlayer-1.1.4-beta4-macOS-arm64.dmg",
-  "sha256": "308bcffd6c93117d1c04b553e40364ed4da489b2799b6acfb6d4fbf52075a04e",
-  "size": 8045242,
-  "published_at": "2026-11-07T14:13:58Z"
+  "version": "1.1.4-beta5",
+  "notes": "The app now has a standard Edit menu, so Cmd+A / Cmd+C / Cmd+V / Cmd+X / Cmd+Z / Shift+Cmd+Z work in the search box, the feedback box and any text field, with existing shortcuts unchanged · 应用补上标准「编辑」菜单，搜索框、反馈框与任何文本输入处的 Cmd+A / Cmd+C / Cmd+V / Cmd+X / Cmd+Z / Shift+Cmd+Z 可用，既有快捷键保持不变",
+  "download_url": "https://github.com/BH2VOQ/RLPlayer-Mac/releases/download/v1.1.4-beta5/RLPlayer-1.1.4-beta5-macOS-arm64.dmg",
+  "sha256": "0838b62cca258e0fcc86550a26e551411e00c4a39871f55d9a94b2fffc50405d",
+  "size": 8045975,
+  "published_at": "2026-11-07T16:04:42Z"
 }
