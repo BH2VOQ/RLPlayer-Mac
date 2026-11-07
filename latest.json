@@ -1,8 +1,8 @@
 {
-  "version": "1.1.3.2",
-  "notes": "Brand refresh: the blue/purple app icon is now a near-black background with the same white waveform, and the sidebar brand slot shows the real app logo instead of the red \"R\" placeholder. Dock icon, favicon and README logo follow the same change.\n品牌更新：logo 的蓝紫底改为黑底（白色声波不变），侧栏左下角品牌位由红色「R」占位换成真实产品 logo；Dock 图标、favicon 与 README logo 同步更换。",
-  "download_url": "https://github.com/BH2VOQ/RLPlayer-Mac/releases/download/v1.1.3.2/RLPlayer-1.1.3.2-macOS-arm64.dmg",
-  "sha256": "3f04a956ebb4f35f684a1591b219ee302d8d840652283d05894387f91abcf39e",
-  "size": 8012447,
-  "published_at": "2026-11-05T15:50:24Z"
+  "version": "1.1.4-beta1",
+  "notes": "Beta of 1.1.4: single-track audio analysis on the Now Playing page — three cards (Dynamics / Audio Quality / Lossless Check) folded at L0/L1/L2, an independent true peak in dBTP (4x oversampling), auto analysis off by default with per-track dedup and cancel-on-track-change, \"N/A\" instead of 0 when a metric cannot be measured, and an 11-point smoothed envelope for version-comparison alignment.\n1.1.4 预发布：单曲页新增音频分析面板（动态 / 音质 / 假无损三张卡，L0/L1/L2 三级折叠），独立真峰 dBTP（4× 过采样），自动分析默认关闭（每曲去重、切歌取消），测不出的指标显示「不适用」而不是 0；版本对比改用 11 点平滑包络对齐。",
+  "download_url": "https://github.com/BH2VOQ/RLPlayer-Mac/releases/download/v1.1.4-beta1/RLPlayer-1.1.4-beta1-macOS-arm64.dmg",
+  "sha256": "9acfe3577a46ee365d05e65f1255b9fc7e06d54c6db19d928d0f93f580e121c4",
+  "size": 8011832,
+  "published_at": "2026-11-07T03:01:36Z"
 }
