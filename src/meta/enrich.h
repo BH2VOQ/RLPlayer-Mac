@@ -43,6 +43,7 @@
 #include "meta/provider.h"
 #include "meta/match.h"
 #include "meta/discogs.h"
+#include "meta/ai_fill.h"        // 1.1.4-beta4 AI 辅助爬取（纯函数层）
 #include "audio/media_info.h"
 #include <algorithm>
 #include <atomic>
@@ -77,6 +78,9 @@ struct EnrichOpts {
     // 内容由 pv_parse_order() 统一解析(trim/小写/去重/丢弃未知 id/补齐未提到的源),
     // 本结构**不**保存解析结果,避免「设置改了但缓存里还是旧顺序」的第二份事实源。
     std::string order;
+    // 1.1.4-beta4：AI 辅助爬取封面歌词开关（设置页 metaaifill）。默认 false = 不额外花 LLM 调用。
+    //   开启后，自动爬取失败（未采纳）时用 LLM 规范化歌名、重跑确定性链。见 ai_fill.h / enrich_track wrapper。
+    bool aiFill = false;
     // 读取开关:map 里没有该源 = 开
     bool enabled(const std::string& id) const {
         const auto it = srcOn.find(id);
@@ -105,6 +109,10 @@ struct EnrichStats {
     std::string bestSource;                  // 采用候选的来源 "qq"/"netease"/"itunes"
     std::string note;                        // 一句话:候选/置信/LLM 是否参与/各源错误摘要
     std::vector<std::string> fieldsFilled;   // 本次实际新写入(合并生效)的字段名(含 "cover")
+    // 1.1.4-beta4：本次查询侧实际使用的标题/艺术家（标签名或文件名解析，非候选名）。
+    //   AI 辅助 wrapper 用它做「规范化提示词上下文」与「重跑是否值得」的比对基线，
+    //   避免"标签写错成 Track 01、文件名才对"时误判无需重跑。纯诊断字段，不进 note。
+    std::string qTitle, qArtist;
 };
 
 // ---------------------------------------------------------------------------
@@ -268,7 +276,11 @@ inline bool ed_lrc_timed(const std::string& s) {
 // 编排本体
 // ---------------------------------------------------------------------------
 
-inline EnrichStats enrich_track(const std::string& file, bool force, const EnrichOpts& opts) {
+// core（对外入口是下面的 enrich_track wrapper，签名保持原样）。
+// aiName 非空 = 这是「AI 辅助重跑轮」：用规范化后的 标题/艺术家 覆盖查询侧名字，
+//   后续 provider 搜索 / 封面 / 歌词链全部沿用现有确定性源与校验（不写 LLM 生成的内容）。
+inline EnrichStats enrich_track_core(const std::string& file, bool force, const EnrichOpts& opts,
+                                     const AiFillName* aiName) {
     rta::net::HttpDiagScope httpDiag(rta::diag::Stage::Meta);
     EnrichStats st;
     auto is_cancelled = [&opts]() -> bool {
@@ -361,7 +373,21 @@ inline EnrichStats enrich_track(const std::string& file, bool force, const Enric
             }
         }
     }
+    // 1.1.4-beta4：AI 辅助重跑轮 —— 用 LLM 规范化后的名字覆盖查询侧 ParsedName。
+    //   只覆盖 title/artist（供搜索/歌词链使用），不写任何 LLM 生成的封面 URL / 歌词文本；
+    //   后续第 4~9 步完全复用确定性 provider 链与 ed_cover_reject_reason / pv_lyric_identity 校验。
+    if (aiName && aiName->ok && !aiName->title.empty()) {
+        p.title  = aiName->title;
+        p.artist = aiName->artist;
+        p.feat.clear(); p.version.clear();
+        p.method = "ai-fill";
+        p.confidence = 0.7f;
+        llmParsed = true;
+        notes.push_back("AI辅助规范化歌名: " + p.artist + " - " + p.title);
+    }
     const std::string query = enrich_detail::ed_query_string(p.artist, p.title);
+    // 记录本次查询侧真实使用的名字（AI 辅助 wrapper 的比对基线；纯诊断字段）。
+    st.qTitle = p.title; st.qArtist = p.artist;
     if (p.title.empty()) {                       // 无标题无法搜索(编排到此为止,如实报告)
         notes.push_back("无可用的标题查询串(标签与文件名都拆不出 title)");
         st.note = "失败: " + enrich_detail::ed_join_notes(notes);
@@ -662,6 +688,51 @@ inline EnrichStats enrich_track(const std::string& file, bool force, const Enric
     if (!tm.fields.empty() || !tm.coverRelPath.empty()) ms.save(tm);
 
     finishNote();
+    return st;
+}
+
+// ---------------------------------------------------------------------------
+// 对外入口（签名保持不变，所有既有调用方零改动）：自动爬取 + 失败后 AI 辅助兜底。
+//
+// 1.1.4-beta4（用户：设置里开关「AI 辅助爬取封面歌词」，自动爬取失败后自动切换）：
+//   * 先跑一次确定性 enrich_track_core（aiName=nullptr）—— 行为与改造前逐字一致；
+//   * 仅当「开关 opts.aiFill 开 + LLM 可用 + 首轮未采纳(!ok) 且非 skipped」时，才用
+//     LLM 把首轮查询名规范化（ai_fill_name_prompt / ai_fill_parse_name），再用修正名
+//     **重跑同一条确定性链**；封面仍来自 provider coverUrl（过 ed_cover_reject_reason），
+//     歌词仍来自 lyric 源（过 pv_lyric_identity）——AI 不写任何内容进库，只纠正查询名；
+//   * 名字与首轮实质相同 / 解析失败 / 取消 → 放弃重跑（不重复花 LLM 与网络）；
+//   * 重跑仍未采纳 → 保留首轮结果，note 里如实标注「尝试过 AI 辅助」；
+//   * 取消标志在两轮之间再查一次，退出时不阻塞。
+// 触发判定与提示词/解析/可用性全是 ai_fill.h 的纯函数，离线可测（test_ai_fill.cpp）。
+// ---------------------------------------------------------------------------
+inline EnrichStats enrich_track(const std::string& file, bool force, const EnrichOpts& opts) {
+    EnrichStats st = enrich_track_core(file, force, opts, nullptr);
+
+    LlmConfig cfg;
+    if (opts.llm) cfg = opts.llmConfPath.empty() ? llm_config_load() : llm_config_load(opts.llmConfPath);
+    const bool llmReady = opts.llm && !cfg.apiKey.empty();
+    if (!ai_fill_should_retry(opts.aiFill, llmReady, st.ok, st.skipped)) return st;
+    if (opts.cancel && opts.cancel->load()) return st;
+
+    const std::string stem = meta_string_of(meta_path_of(file).stem());
+    const std::string parentName = meta_string_of(meta_path_of(file).parent_path().filename());
+    const std::string prompt = ai_fill_name_prompt(stem, st.qTitle, st.qArtist, std::string(), parentName);
+    const LlmReply rep = llm_chat(cfg, { LlmMessage{ "user", prompt } }, 200, 0.0f, true);
+    if (opts.cancel && opts.cancel->load()) return st;
+
+    AiFillName name = rep.ok ? ai_fill_parse_name(rep.content) : AiFillName();
+    if (!ai_fill_name_usable(name, st.qTitle, st.qArtist)) {
+        st.note += "; AI辅助未给出可用歌名（放弃重跑）";
+        return st;
+    }
+
+    EnrichStats retry = enrich_track_core(file, force, opts, &name);
+    if (retry.ok) {
+        // 采用 AI 辅助轮结果；note 前置标明来源，便于诊断与人工核对。
+        retry.note = "AI辅助重跑已采纳 → " + retry.note;
+        return retry;
+    }
+    st.note += "; AI辅助重跑仍未采纳(规范化=" + name.artist + " - " + name.title + ")";
     return st;
 }
 

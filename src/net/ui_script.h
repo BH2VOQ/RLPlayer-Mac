@@ -197,7 +197,7 @@ var ADV = {
 // summary = 设置开关（/api/settings 的 metasummary，改动即时生效）；
 // hasLlmKey / summaryEnabled = /api/status 回报的权威状态（是否配了 key、后端是否开着开关）。
 // 简介板块的显示门控用这两个：没 key 又没缓存时连加载行都不显示（用户 261023-03 #5）。
-var META = { on: 1, llm: 1, summary: 0, hasLlmKey: null, summaryEnabled: null };
+var META = { on: 1, llm: 1, summary: 0, aiFill: 0, hasLlmKey: null, summaryEnabled: null };
 var META_PROVIDERS = null;   // /api/providers 的 items（启动时拉取；null = 还没到）
 var META_SRC = {};           // id → 0/1（源开关状态，随 /api/providers 到达而填充）
 // 2026-11-07（1.1.4-beta3）：数据源手动排序。顺序即优先级（越靠前越先参与补全）。
@@ -4387,6 +4387,8 @@ function saveSettings(immediate) {
         + '&metaon=' + (META.on ? 1 : 0)
         + '&metallm=' + (META.llm ? 1 : 0)
         + '&metasummary=' + (META.summary ? 1 : 0)
+        // 1.1.4-beta4：AI 辅助爬取封面歌词开关（默认 0，失败后自动兜底）
+        + '&metaaifill=' + (META.aiFill ? 1 : 0)
         + (META_PROVIDERS || []).map(function (p) {
             return '&metasrc_' + p.id + '=' + (META_SRC[p.id] === 0 ? 0 : 1);
           }).join('')
@@ -4515,6 +4517,7 @@ function loadSettings() {
     if (kv.metaon !== undefined) META.on = (kv.metaon === '1') ? 1 : 0;
     if (kv.metallm !== undefined) META.llm = (kv.metallm === '1') ? 1 : 0;
     if (kv.metasummary !== undefined) META.summary = (kv.metasummary === '1') ? 1 : 0;
+    if (kv.metaaifill !== undefined) META.aiFill = (kv.metaaifill === '1') ? 1 : 0;
     // 主题与界面风格：**配置优先**，localStorage 只在配置里还没有值时兜底。
     // 旧实现是"本地优先"，于是升级/清缓存后 localStorage 的旧值会把用户的持久设置盖掉
     // （2026-10-30 用户报的 BUG）。data-*-src=conf 就是"配置里有值"的标志。
@@ -8548,6 +8551,79 @@ function bindPhaseHint() {
      ③ 与 /api/settings 完全分离：key 进 rlplayer-llm.conf，普通设置进另一个文件。 */
 var LLM = { configured: false, masked: '', model: 'deepseek-flash', baseUrl: '', proxy: false, loaded: false };
 
+/* ---------------- 1.1.4-beta4 联网检索端点（search / fetch 一起切换） ----------------
+   状态来自 /api/llm 的 GET/POST 回包（searchProvider / searchBaseUrl / searchMasked）。
+   与 LLM 对象分开：端点是「AI 增强」整理资料的检索底座，配置存同一份 rlplayer-llm.conf
+   的 search_* 三行，走 /api/llm 同一条 POST。明文 key 绝不回显，只给掩码。 */
+var SEARCH = { provider: 'deepseek', baseUrl: '', masked: '', loaded: false };
+var SEARCH_PROVIDERS = [
+  { id: 'deepseek',  name: 'DeepSeek（默认）' },
+  { id: 'anysearch', name: 'AnySearch' },
+  { id: 'tavily',    name: 'Tavily' }
+];
+function searchProviderOptionsHtml(cur) {
+  var h = '';
+  for (var i = 0; i < SEARCH_PROVIDERS.length; ++i) {
+    var p = SEARCH_PROVIDERS[i];
+    h += '<option value="' + esc(p.id) + '"' + (p.id === cur ? ' selected' : '') + '>' + esc(p.name) + '</option>';
+  }
+  return h;
+}
+function searchStatusText() {
+  if (!SEARCH.loaded) return '读取配置中…';
+  var nm = SEARCH_PROVIDERS[0].name;
+  for (var i = 0; i < SEARCH_PROVIDERS.length; ++i)
+    if (SEARCH_PROVIDERS[i].id === SEARCH.provider) nm = SEARCH_PROVIDERS[i].name;
+  // 状态行只拼 provider 名（已收录词条）+ 可选掩码；keyless 时不额外造中文串。
+  return nm + (SEARCH.masked ? (' · Key ' + SEARCH.masked) : '');
+}
+function searchMsg(note) {
+  var m = D('sp_searchmsg');
+  if (!m) return;
+  var s = searchStatusText();
+  if (note) s += ' · ' + note;
+  m.textContent = s;
+}
+// 选中第三方端点时显示「与 AI 接入互不依赖」提示；切回 DeepSeek 隐藏。
+function searchCapNote() {
+  var el = D('sp_searchcapnote'), sel = D('sp_searchprovider');
+  if (!el) return;
+  var p = sel ? sel.value : SEARCH.provider;
+  el.style.display = (p !== 'deepseek') ? '' : 'none';
+}
+function searchRender(j) {
+  if (!j || !j.ok) return;
+  // 只覆盖响应里真有的字段（与 llmRender 同口径），POST 回包缺字段不当成清空。
+  if (llmHas(j, 'searchProvider')) SEARCH.provider = j.searchProvider || 'deepseek';
+  if (llmHas(j, 'searchBaseUrl'))  SEARCH.baseUrl  = j.searchBaseUrl || '';
+  if (llmHas(j, 'searchMasked'))   SEARCH.masked   = j.searchMasked || '';
+  SEARCH.loaded = true;
+  var sel = D('sp_searchprovider');
+  if (sel) sel.value = SEARCH.provider;
+  var eb = D('sp_searchbase');
+  if (eb && !String(eb.value || '').replace(/^\s+|\s+$/g, '') && SEARCH.baseUrl) eb.value = SEARCH.baseUrl;
+  searchMsg('');
+  searchCapNote();
+}
+// 保存端点：provider + 可选 base + 可选 key。base 留空会 POST 空串（后端据此清默认值），
+// key 留空则不带 search_key（后端保持已存的 key，实现「改端点不清 key」）。
+function searchSave() {
+  var sp = D('sp_searchprovider'), sb = D('sp_searchbase'), sk = D('sp_searchkey'), btn = D('sp_searchsave');
+  var prov = sp ? sp.value : 'deepseek';
+  var base = sb ? String(sb.value || '').replace(/^\s+|\s+$/g, '') : '';
+  var key = sk ? String(sk.value || '').replace(/^\s+|\s+$/g, '') : '';
+  var body = 'search_provider=' + encodeURIComponent(prov) + '&search_base_url=' + encodeURIComponent(base);
+  if (key) body += '&search_key=' + encodeURIComponent(key);
+  if (btn) { btn.disabled = true; btn.textContent = '保存中…'; }
+  function restore() { if (btn) { btn.disabled = false; btn.textContent = '保存端点'; } }
+  return llmPost(body, '检索端点已保存', function (j) {
+    if (sk) sk.value = '';              // 明文绝不在 DOM 停留
+    return j;
+  }).then(function (j) { restore(); return j; },
+          function () { restore(); toast('保存失败：服务没响应'); return null; });
+}
+function searchClear() { return llmPost('search_key_clear=1', '已清除检索 Key', null); }
+
 // 接口预设：只负责「填地址」，不做连通性判断 —— 能不能用由「测试连接」回答。
 // custom 的 url 留空：选中它绝不覆盖用户已填的地址。
 var LLM_PROVIDERS = [
@@ -8667,6 +8743,7 @@ function llmRender(j) {
     llmModelRender();
   }
   llmMsg('');
+  searchRender(j);          // 1.1.4-beta4：同一回包刷新联网检索端点状态
 }
 function llmRefresh() {
   return fetch('/api/llm').then(function (r) { return r.json(); }).then(llmRender)
@@ -9628,6 +9705,9 @@ function renderSettingsPage() {
        + chk('sp_metallm', 'AI 增强（OpenAI 兼容）', aiOn,
              '联网调用所选 AI 接口（按次计费）：解析无标签文件、并在艺术家 / 专辑 / 单曲页整理简介并缓存（7 天有效）。' +
              '关闭后两项都停，本地与公开数据源照常工作', true)
+       // 1.1.4-beta4：AI 辅助爬取封面歌词（默认关）。自动爬取失败后自动切换成 AI 辅助。
+       + chk('sp_metaaifill', 'AI 辅助爬取封面歌词', META.aiFill == 1,
+             '开启后，当自动爬取因歌名对不上而失败（搜索无候选 / 低分不敢采纳）时，自动用 AI 规范化歌名再重跑一次公开数据源检索，补齐封面与歌词。仅在失败时触发，会多一次 AI 调用（按次计费）；AI 只纠正歌名，封面与歌词仍来自公开数据源并过同曲校验，不会写入编造内容', true)
        + '<div class="sfld wide" style="margin-top:2px">'
        + '<button class=btn id=sp_metamore style="font-size:12px" aria-expanded="false">高级选项 ▾</button>'
        + '</div>'
@@ -9659,7 +9739,7 @@ function renderSettingsPage() {
         + '<input type=password id=sp_llmkey autocomplete=off spellcheck=false placeholder="sk-…（粘贴后点保存，只显示掩码）" style="width:100%">'
         + '<div class=hint id=sp_llmmsg style="margin-top:6px">读取配置中…</div>'
         // 「说明」而不是「警告」：非 DeepSeek 端点只是能力差异（没有联网检索），补全功能不中断。
-        + '<div class=hint id=sp_llmcapnote style="display:none;margin-top:4px">联网检索（search / fetch）是 DeepSeek 专有能力；换到其它端点后会自动退回 Wikipedia / Discogs + 模型自身知识，功能不中断。</div>'
+        + '<div class=hint id=sp_llmcapnote style="display:none;margin-top:4px">AI 接口换成非 DeepSeek 端点不影响联网检索；search / fetch 由下方「联网检索端点」单独控制。</div>'
         + '<div style="display:flex;gap:8px;margin-top:8px;flex-wrap:wrap">'
         + '<button class="btn pri" id=sp_llmsave>保存并连接</button>'
         + '<button class=btn id=sp_llmtest>测试连接</button>'
@@ -9679,6 +9759,25 @@ function renderSettingsPage() {
        + '<button class=btn id=sp_wbdry>预览写回</button>'
        + '<button class=btn id=sp_wbapply>执行写回</button>'
        + '<span id=sp_wbmsg style="font-size:11.5px;color:var(--mut2)"></span></div>'
+       + '</div>'
+       // 1.1.4-beta4：联网检索端点（search / fetch 一起切换）。跨满两列单独成行。
+       // 端点/provider/自定义 base/key 存 rlplayer-llm.conf 的 search_* 三行，走 /api/llm 同一条 POST。
+       + '<div class=meta-card style="grid-column:1/-1">'
+       + '<div class=mh>联网检索端点' + tip('「AI 增强」整理资料时用的 search / fetch 端点。DeepSeek 为默认；切到 AnySearch / Tavily 后，非 DeepSeek 的 AI 接口也能联网检索。两个能力一起切换，Key 只存本机、界面永不回显明文') + '</div>'
+       + '<label style="display:block;font-size:11px;color:var(--mut);margin-bottom:5px">检索端点' +
+           tip('选好端点后点「保存端点」生效；留空 Key 用免费匿名额度（keyless）') + '</label>'
+       + '<select id=sp_searchprovider style="width:100%;margin-bottom:9px">' + searchProviderOptionsHtml(SEARCH.provider) + '</select>'
+       + '<label style="display:block;font-size:11px;color:var(--mut);margin-bottom:5px">检索地址（可选）' +
+           tip('留空用厂商默认地址；需要自建网关 / 代理时才填，只取 http(s) 主机部分') + '</label>'
+       + '<input type=text id=sp_searchbase autocomplete=off spellcheck=false placeholder="留空用厂商默认" style="width:100%;margin-bottom:9px">'
+       + '<label style="display:block;font-size:11px;color:var(--mut);margin-bottom:5px">检索 Key（可选）' +
+           tip('与「AI 接入」的 Key 相互独立；只存本机 rlplayer-llm.conf，保存后界面只显示掩码') + '</label>'
+       + '<input type=password id=sp_searchkey autocomplete=off spellcheck=false placeholder="留空用免费额度" style="width:100%">'
+       + '<div class=hint id=sp_searchmsg style="margin-top:6px">读取配置中…</div>'
+       + '<div class=hint id=sp_searchcapnote style="display:none;margin-top:4px">联网检索端点已在下方单独设置，与「AI 接入」的端点互不依赖。</div>'
+       + '<div style="display:flex;gap:8px;margin-top:8px;flex-wrap:wrap">'
+       + '<button class="btn pri" id=sp_searchsave>保存端点</button>'
+       + '<button class=btn id=sp_searchclear>清除检索 Key</button></div>'
        + '</div>'
        + '</div></div>')
      + '</div>';
@@ -9893,6 +9992,9 @@ function renderSettingsPage() {
     saveSettings();
     if (S.lastCur) loadMeta(S.lastCur);   // 关掉后简介板块要立刻消失，不用刷新
   };
+  // 1.1.4-beta4：AI 辅助爬取封面歌词开关（独立键 metaaifill，不并入 AI 增强的两键联动）。
+  var eMetaAiFill = D('sp_metaaifill');
+  if (eMetaAiFill) eMetaAiFill.onchange = function () { META.aiFill = this.checked ? 1 : 0; saveSettings(); };
   // 1.1.4-beta3：接口预设 + API 地址。预设只把地址填进输入框（不落盘）；
   //   手改地址时预设下拉跟着走，避免"下拉说 OpenAI、地址是别家"。
   if (D('sp_llmprovider')) D('sp_llmprovider').onchange = function () { llmApplyProvider(this.value); };
@@ -9907,6 +10009,14 @@ function renderSettingsPage() {
   if (D('sp_llmmodeltext')) D('sp_llmmodeltext').addEventListener('keydown', function (ev) {
     if (ev.key === 'Enter') llmSaveModel(this.value);
   });
+  if (D('sp_searchkey')) {
+    D('sp_searchkey').value = '';
+    D('sp_searchkey').addEventListener('keydown', function (ev) { if (ev.key === 'Enter') searchSave(); });
+  }
+  // 1.1.4-beta4：联网检索端点（provider 下拉 / 保存 / 清除 Key）。
+  if (D('sp_searchprovider')) D('sp_searchprovider').onchange = searchCapNote;
+  if (D('sp_searchsave')) D('sp_searchsave').onclick = searchSave;
+  if (D('sp_searchclear')) D('sp_searchclear').onclick = searchClear;
   llmModelRender();
   llmModelsLoad(false);
   if (D('sp_llmkey')) {
@@ -10033,9 +10143,9 @@ function renderSettingsPage() {
     // 1.1.4：「恢复默认」必须把**内存里的**自动分析开关一并关掉 —— 复选框会跟着 ADV 重建为未勾选，
     //   若 ANL.auto 不同步归零，界面显示"关"而实际还在后台分析（比不重置更糟）。
     ANL.auto = 0;
-    // 元数据两键的默认：自动补全开；AI 增强关（联网计费项默认关，避免「恢复默认」反而产生费用）。
+    // 元数据键的默认：自动补全开；AI 增强 / AI 辅助爬取关（联网计费项默认关，避免「恢复默认」反而产生费用）。
     // 源开关随注册表一并全开。
-    META = { on: 1, llm: 0, summary: 0 };
+    META = { on: 1, llm: 0, summary: 0, aiFill: 0 };
     (META_PROVIDERS || []).forEach(function (p) { META_SRC[p.id] = 1; });
     // 1.1.4-beta3：顺序也复位成后端给的默认顺序，并立刻重画行
     //（否则「恢复默认」之后界面还停在上次拖出来的顺序，落盘的却是默认顺序）。
@@ -12440,7 +12550,8 @@ function updateNpData(m) {
   var can = npDataCan(m);
   var tabs = can ? npDataTargets(m) : [];
   if (!can || !tabs.length) {
-    // 没有任何可用资料：整个标签栏收起（不占版面、不留空白块），抽屉也收起
+    // 1.1.4-beta4：右竖栏改为「恒占位」（.nprail 恒 display:block），remove('on') 只表示
+    //   「这次没有 AI 资料」—— 抽屉收起、标签清空，但列宽不变 ⟹ 歌词居中不受影响（对称恒占位）。
     rail.classList.remove('on');
     if (grid) grid.classList.remove('withdata');
     if (NP_DATA.active) npDrawerClose();

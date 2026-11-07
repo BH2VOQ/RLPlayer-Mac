@@ -1,0 +1,16 @@
+联网检索端点	Search endpoints	1.1.4-beta4 联网检索端点
+检索端点	Provider	1.1.4-beta4 联网检索端点
+检索地址（可选）	Search base URL (optional)	1.1.4-beta4 联网检索端点
+检索 Key（可选）	Search API key (optional)	1.1.4-beta4 联网检索端点
+留空用厂商默认	Leave empty for the vendor default	1.1.4-beta4 联网检索端点
+留空用免费额度	Leave empty for the free tier	1.1.4-beta4 联网检索端点
+联网检索端点已在下方单独设置，与「AI 接入」的端点互不依赖。	Search endpoints are set separately below and are independent of the AI connection endpoint.	1.1.4-beta4 联网检索端点
+保存端点	Save endpoints	1.1.4-beta4 联网检索端点
+清除检索 Key	Clear search key	1.1.4-beta4 联网检索端点
+DeepSeek（默认）	DeepSeek (default)	1.1.4-beta4 联网检索端点
+检索端点已保存	Search endpoints saved	1.1.4-beta4 联网检索端点
+已清除检索 Key	Search key cleared	1.1.4-beta4 联网检索端点
+「AI 增强」整理资料时用的 search / fetch 端点。DeepSeek 为默认；切到 AnySearch / Tavily 后，非 DeepSeek 的 AI 接口也能联网检索。两个能力一起切换，Key 只存本机、界面永不回显明文	The search / fetch endpoints used by AI Enhancement for research. DeepSeek is the default; switching to AnySearch / Tavily lets non-DeepSeek AI connections search the web too. Both capabilities switch together; the key is stored locally and never shown in plain text.	1.1.4-beta4 联网检索端点
+选好端点后点「保存端点」生效；留空 Key 用免费匿名额度（keyless）	The choice takes effect after clicking Save endpoints; leave the key empty to use the free anonymous quota (keyless).	1.1.4-beta4 联网检索端点
+留空用厂商默认地址；需要自建网关 / 代理时才填，只取 http(s) 主机部分	Leave empty to use the vendor default address; only fill this for a self-hosted gateway or proxy, using the http(s) host only.	1.1.4-beta4 联网检索端点
+与「AI 接入」的 Key 相互独立；只存本机 rlplayer-llm.conf，保存后界面只显示掩码	Independent of the AI connection key; stored locally in rlplayer-llm.conf and shown only as a mask after saving.	1.1.4-beta4 联网检索端点

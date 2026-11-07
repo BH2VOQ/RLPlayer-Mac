@@ -11,7 +11,8 @@
 // 不是在测试里另写一份"和产品一样的逻辑" —— 那只能证明两份代码都写了同一段文字。
 //
 // 判据（每条都对着一条明确的产品要求）：
-//   A1 面板存在且在 #npPage 的 .npgrid 里、位于 .npbody 与 .npctl2 之间；网格是四行。
+//   A1 面板在 #npPage 的 .npbody 左竖栏；.npgrid 三行、.npbody 三列且左右等宽；
+//      音频分析在左、AI 整理在右、歌词中心恒等于容器中心（对称且不影响歌词居中）。
 //   A2 默认 auto=0 / lvl=0；三张 L0 卡片可见且**没有**指标网格。
 //   A3 三个层级都渲染三张卡；L1 有「真峰」「dBTP」，L0 没有（折叠真的折叠了）。
 //   A4 fs/4 45° 的假素材：样本峰值 -3.01 与真峰 0.00 dBTP 同时出现，且真峰 > 样本峰值
@@ -30,7 +31,8 @@
 //       （串台判据 —— 这是本面板最容易出错、也最容易被"看起来正常"掩盖的一条）。
 //   A14 状态文字：完成态是「分析于 HH:MM」或「… · 缓存命中」。
 //   A15 设置页「通用 → 播放」里有 sp_autoanl，默认未勾选；勾选后 ANL.auto 跟着变 1。
-//   A16 几何：1024x640 与 1576x908 下四行互不重叠、控制区完整在视口内（面板不许把控件顶出屏幕）。
+//   A16 几何：1024x640 与 1576x908 下三行互不重叠、左右竖栏等宽、歌词恒居中、
+//      控制区完整在视口内（左右竖栏铺满行2 高度、卡片区内滚，不许把控件顶出屏幕）。
 //   A17 anlIsLocal：只认本地绝对路径（http/smb/UNC/.cda 一律拒绝）。
 //
 // 🔴 铁律 1：全程 headless，**不播放任何音频**（不调 /api/play），后端用 Lead 起好的 backend=null 实例。
@@ -96,29 +98,42 @@ const H_OVER = withQ({ true_peak_dbtp: 0.31, peak_dbfs: -0.2 });
       process.exit(2);
     }
 
-    /* ---------------- A1/A16：结构 ---------------- */
+    /* ---------------- A1/A16：结构（1.1.4-beta4 竖栏对称布局） ---------------- */
     const dom = await s.eval(`(function(){
       var p=document.getElementById('npAnal'), page=document.getElementById('npPage'),
           grid=document.getElementById('npGrid'), body=document.querySelector('.npbody'),
-          ctl=document.querySelector('.npctl2');
-      if(!p||!page||!grid) return {ok:false};
-      // computed 值是 "auto minmax(0px, 1fr) auto auto" —— minmax() 内部有空格，先折叠再切
+          lyr=document.getElementById('npLyric'), rail=document.getElementById('npRail');
+      if(!p||!page||!grid||!body||!lyr||!rail) return {ok:false};
+      // computed 值是 "auto minmax(0px, 1fr) auto" —— minmax() 内部有空格，先折叠再切
       var rows=getComputedStyle(grid).gridTemplateRows.replace(/minmax\\([^)]*\\)/g,'MINMAX')
                  .split(/\\s+/).filter(Boolean);
-      var order=function(a,b){ return !!(a&&b&&(a.compareDocumentPosition(b)&Node.DOCUMENT_POSITION_FOLLOWING)); };
+      var cols=getComputedStyle(body).gridTemplateColumns.split(/\\s+/).filter(Boolean)
+                 .map(function(x){return parseFloat(x);});
+      var rb=body.getBoundingClientRect(), lr=lyr.getBoundingClientRect(),
+          pr=p.getBoundingClientRect(), rr=rail.getBoundingClientRect();
       return {
-        ok:true, inPage: page.contains(p), inGrid: grid.contains(p),
-        afterBody: order(body,p), beforeCtl: order(p,ctl),
+        ok:true, inPage: page.contains(p), inBody: body.contains(p),
         rows: rows.length,
-        maxH: getComputedStyle(p).maxHeight,
+        cols: cols.length,
+        // 左右竖栏等宽（对称）：三列模板 1fr|2fr|1fr ⟹ 第一列 == 第三列
+        sideEq: cols.length===3 && Math.abs(cols[0]-cols[2])<=1.5,
+        // 音频分析在歌词左、AI 整理在歌词右
+        leftRail: pr.right <= lr.left + 1.5,
+        rightRail: rr.left >= lr.right - 1.5,
+        // 歌词中心恒等于 .npbody 中心（用户硬约束：两侧竖栏不影响歌词居中）
+        centerDx: Math.abs((lr.left+lr.width/2)-(rb.left+rb.width/2)),
         overflow: getComputedStyle(document.getElementById('npAnlBody')).overflowY
       };
     })()`);
-    ck(dom && dom.ok && dom.inPage, 'A1 #npAnal 在 #npPage 里');
-    ck(dom && dom.inGrid && dom.afterBody && dom.beforeCtl, 'A1 #npAnal 位于 .npbody 与 .npctl2 之间',
-      dom ? `grid=${dom.inGrid} body→anl=${dom.afterBody} anl→ctl=${dom.beforeCtl}` : '');
-    ck(dom && dom.rows === 4, 'A1 .npgrid 是四行网格', dom ? `tracks=${dom.rows}` : '');
-    ck(dom && dom.overflow === 'auto', 'A1 卡片区自己滚动（不会把控制区顶下去）', dom ? `overflow=${dom.overflow} maxH=${dom.maxH}` : '');
+    ck(dom && dom.ok && dom.inPage && dom.inBody, 'A1 #npAnal 在 #npPage 的 .npbody 内（左竖栏）');
+    ck(dom && dom.rows === 3, 'A1 .npgrid 是三行网格（音频分析不再单独占行）', dom ? `tracks=${dom.rows}` : '');
+    ck(dom && dom.cols === 3 && dom.sideEq, 'A1 .npbody 三列且左右竖栏等宽（对称分布）',
+      dom ? `cols=${dom.cols} sideEq=${dom.sideEq}` : '');
+    ck(dom && dom.leftRail && dom.rightRail, 'A1 音频分析在左、AI 整理在右（对称分布）',
+      dom ? `left=${dom.leftRail} right=${dom.rightRail}` : '');
+    ck(dom && dom.centerDx <= 1.5, 'A1 歌词中心恒等于容器中心（两侧竖栏不影响歌词居中）',
+      dom ? `centerDx=${dom.centerDx}` : '');
+    ck(dom && dom.overflow === 'auto', 'A1 卡片区自己滚动（不会把控制区顶下去）', dom ? `overflow=${dom.overflow}` : '');
 
     /* ---------------- A2：默认 auto=0 / lvl=0 ---------------- */
     const def = await s.eval("[window.ANL.auto, window.ANL.lvl].join(',')");
@@ -395,17 +410,26 @@ const H_OVER = withQ({ true_peak_dbtp: 0.31, peak_dbfs: -0.2 });
     ck(/force=1/.test(runForce), 'A18 手动「分析」走 force=1（忽略服务端缓存）', runForce);
     await ub.sleep(300);
 
-    /* ---------------- A16：几何（面板不许把控制区顶出屏幕） ---------------- */
+    /* ---------------- A16：几何（1.1.4-beta4 竖栏对称布局） ---------------- */
     const geo = async (w, h) => {
       await s.setViewport(w, h);
       await ub.sleep(220);
       return s.eval(`(function(){
         var g=function(sel){var e=document.querySelector(sel);if(!e)return null;var b=e.getBoundingClientRect();
-          return {t:Math.round(b.top),b:Math.round(b.bottom),h:Math.round(b.height)};};
-        var a=document.getElementById('npAnal');
+          return {t:Math.round(b.top),b:Math.round(b.bottom),l:Math.round(b.left),r:Math.round(b.right),h:Math.round(b.height)};};
+        var a=document.getElementById('npAnal'), lyr=document.getElementById('npLyric'),
+            rail=document.getElementById('npRail'), body=document.querySelector('.npbody');
+        var ab=a?a.getBoundingClientRect():null, lb=lyr?lyr.getBoundingClientRect():null,
+            rb=body?body.getBoundingClientRect():null, rr=rail?rail.getBoundingClientRect():null;
         return {hero:g('.nphero'), body:g('.npbody'), anl:g('#npAnal'), ctl:g('.npctl2'),
                 anlShown: a?getComputedStyle(a).display:'(missing)', vh:innerHeight,
-                cards:(document.querySelectorAll('#npAnlBody .anlcard')||[]).length};
+                cards:(document.querySelectorAll('#npAnlBody .anlcard')||[]).length,
+                // 左右竖栏等宽（对称）
+                sideEq: !!(ab&&rr) && Math.abs(ab.width-rr.width)<=1.5,
+                // 歌词中心 == 容器中心（恒居中）
+                centerDx: (lb&&rb)?Math.abs((lb.left+lb.width/2)-(rb.left+rb.width/2)):-1,
+                // 竖栏铺满行2 高度（不再限高把控制区顶出去）
+                anlInBody: !!(ab&&rb) && ab.top>=rb.top-1.5 && ab.bottom<=rb.bottom+1.5};
       })()`);
     };
     for (const [w, h] of [[1024, 640], [1576, 908]]) {
@@ -413,10 +437,15 @@ const H_OVER = withQ({ true_peak_dbtp: 0.31, peak_dbfs: -0.2 });
       const okBox = g && g.anl && g.hero && g.body && g.ctl;
       ck(okBox && g.anlShown !== 'none' && g.anl.h > 0, `A16 ${w}x${h}：#npAnal 可见且有高度`,
         g ? `h=${g.anl && g.anl.h} display=${g.anlShown} cards=${g.cards}` : '');
-      ck(okBox && g.hero.b <= g.body.t + 1 && g.body.b <= g.anl.t + 1 && g.anl.b <= g.ctl.t + 1,
-        `A16 ${w}x${h}：四行互不重叠`,
-        g ? `hero.b=${g.hero.b} body.b=${g.body.b} anl.b=${g.anl.b} ctl.t=${g.ctl.t}` : '');
-      ck(okBox && g.ctl.b <= g.vh, `A16 ${w}x${h}：控制区完整留在视口内（面板没有把它顶出去）`,
+      ck(okBox && g.hero.b <= g.body.t + 1 && g.body.b <= g.ctl.t + 1,
+        `A16 ${w}x${h}：三行互不重叠（左竖栏并入行2）`,
+        g ? `hero.b=${g.hero.b} body.b=${g.body.b} ctl.t=${g.ctl.t}` : '');
+      ck(okBox && g.anlInBody, `A16 ${w}x${h}：音频分析竖栏铺在行2 内（不额外占行、不顶控制区）`,
+        g ? `anlInBody=${g.anlInBody}` : '');
+      ck(okBox && g.sideEq, `A16 ${w}x${h}：左右竖栏等宽（对称分布）`, g ? `sideEq=${g.sideEq}` : '');
+      ck(okBox && g.centerDx >= 0 && g.centerDx <= 1.5,
+        `A16 ${w}x${h}：歌词恒居中（两侧竖栏不影响）`, g ? `centerDx=${g.centerDx}` : '');
+      ck(okBox && g.ctl.b <= g.vh, `A16 ${w}x${h}：控制区完整留在视口内（竖栏没有把它顶出去）`,
         g ? `ctl.b=${g.ctl.b} vh=${g.vh}` : '');
       ck(okBox && g.body.h > 0, `A16 ${w}x${h}：歌词行仍分得到高度`, g ? `body.h=${g.body.h}` : '');
     }

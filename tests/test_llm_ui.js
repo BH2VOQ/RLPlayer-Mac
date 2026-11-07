@@ -415,9 +415,16 @@ async function runTests() {
     check('旧的「DeepSeek 接入」标题已不再出现', page.indexOf('DeepSeek 接入') < 0);
     check('非 DeepSeek 说明是独立一行（不是拼进状态行）',
           page.indexOf('id=sp_llmcapnote') >= 0 && page.indexOf('id=sp_llmmsg') >= 0);
-    check('该说明提到 search / fetch 与 Wikipedia / Discogs',
-          page.indexOf('联网检索（search / fetch）是 DeepSeek 专有能力') >= 0 &&
-          page.indexOf('Wikipedia / Discogs') >= 0);
+    check('该说明改为「联网检索由下方端点独立控制」的新语义（1.1.4-beta4 起联网检索端点独立）',
+          page.indexOf('不影响联网检索') >= 0 &&
+          page.indexOf('「联网检索端点」单独控制') >= 0 &&
+          page.indexOf('DeepSeek 专有能力') < 0);
+    // 1.1.4-beta4：设置页新增「联网检索端点」卡片（provider 下拉 / base / key / 保存 / 清除）
+    check('设置页 HTML 含联网检索端点卡片各控件',
+          page.indexOf('联网检索端点') >= 0 &&
+          page.indexOf('id=sp_searchprovider') >= 0 && page.indexOf('id=sp_searchbase') >= 0 &&
+          page.indexOf('id=sp_searchkey') >= 0 && page.indexOf('id=sp_searchsave') >= 0 &&
+          page.indexOf('id=sp_searchclear') >= 0);
   }
 
   // Test 7: 「保存并连接」—— POST body 契约 + 成功后自动刷新模型清单 + 自动连接测试
@@ -708,6 +715,103 @@ async function runTests() {
     check('恢复默认后逐源开关全部打开',
           env.META_SRC.qq === 1 && env.META_SRC.netease === 1 && env.META_SRC.lrclib === 1,
           env.META_SRC);
+  }
+
+  // Test 12: 1.1.4-beta4 联网检索端点 JS 契约
+  {
+    console.log('\n-- Test 12: 联网检索端点（状态渲染 / 保存 body / keyless / 清除 Key） --');
+    const posted = [];
+    const env = createEnvironment((url, opt) => {
+      if (url === '/api/llm' && opt && opt.method === 'POST') { posted.push(opt.body); return { ok: true, searchProvider: 'anysearch' }; }
+      if (url === '/api/llm') return { ok: true, searchProvider: 'tavily', searchBaseUrl: 'https://gw.example.com', searchMasked: 'tv****ABCD' };
+      if (url.startsWith('/api/llm/models')) return { ok: true, models: [] };
+      return { ok: true };
+    });
+    env.renderSettingsPage();
+
+    // provider 下拉只认三种（DeepSeek 默认 / AnySearch / Tavily）
+    const sel = env._getEl('sp_searchprovider');
+    const opts = (typeof sel.innerHTML === 'string') ? sel.innerHTML : '';
+    // mock 不解析 option ⟹ 直接查渲染的设置页 HTML
+    const page = env._getEl('setpage').innerHTML;
+    check('端点下拉含 3 个 provider 选项',
+          page.indexOf('value="deepseek"') >= 0 && page.indexOf('value="anysearch"') >= 0 && page.indexOf('value="tavily"') >= 0);
+
+    // GET /api/llm 回包经 llmRender→searchRender 刷新 SEARCH 状态与状态行
+    await env.llmRefresh();
+    check('searchRender 读回 provider=tavily', env.SEARCH.provider === 'tavily', env.SEARCH.provider);
+    check('searchRender 读回 baseUrl 与掩码',
+          env.SEARCH.baseUrl === 'https://gw.example.com' && env.SEARCH.masked === 'tv****ABCD');
+    check('状态行显示掩码（不明文）', env._getEl('sp_searchmsg').textContent.indexOf('tv****ABCD') >= 0,
+          env._getEl('sp_searchmsg').textContent);
+    check('第三方端点时显示「互不依赖」说明',
+          env._getEl('sp_searchcapnote').style.display !== 'none');
+
+    // 保存：provider+base 一定带，key 空则不带 search_key（不清已存 key）
+    sel.value = 'anysearch';
+    env._getEl('sp_searchbase').value = 'https://api.anysearch.com';
+    env._getEl('sp_searchkey').value = '';
+    posted.length = 0;
+    await env.searchSave();
+    const b1 = posted[0] || '';
+    check('searchSave 带 search_provider 与 search_base_url',
+          b1.indexOf('search_provider=anysearch') >= 0 && b1.indexOf('search_base_url=') >= 0, b1);
+    check('keyless（key 空）不带 search_key 字段', b1.indexOf('search_key=') < 0, b1);
+
+    // 填了 key 才 POST，且保存后 DOM 清空明文
+    env._getEl('sp_searchkey').value = 'tvly-SECRET';
+    posted.length = 0;
+    await env.searchSave();
+    const b2 = posted[0] || '';
+    check('有 key 时 POST 含 search_key', b2.indexOf('search_key=tvly-SECRET') >= 0, b2);
+    check('保存后 key 输入框清空（明文不残留）', env._getEl('sp_searchkey').value === '');
+
+    // 清除 key 走 search_key_clear=1
+    posted.length = 0;
+    await env.searchClear();
+    check('清除检索 Key POST search_key_clear=1',
+          (posted[0] || '').indexOf('search_key_clear=1') >= 0, posted[0]);
+  }
+
+  // Test 13: 1.1.4-beta4「AI 辅助爬取封面歌词」设置开关（下发 / 联动 / 恢复默认）
+  {
+    console.log('\n-- Test 13: AI 辅助爬取开关 metaaifill --');
+    const bodies = [];
+    const env = createEnvironment((url, opt) => {
+      if (url === '/api/settings' && opt && opt.method === 'POST') { bodies.push(opt.body); return { ok: true }; }
+      if (url === '/api/llm') return { ok: true };
+      if (url.startsWith('/api/llm/models')) return { ok: true, models: [] };
+    });
+    env.renderSettingsPage();
+    await new Promise(r => setImmediate(r));
+
+    // 设置页含该开关；默认未勾选（成本铁律：默认关）
+    const page = env._getEl('setpage').innerHTML;
+    check('设置页 HTML 含 AI 辅助爬取开关', page.indexOf('id=sp_metaaifill') >= 0 &&
+          page.indexOf('AI 辅助爬取封面歌词') >= 0);
+    check('META.aiFill 默认 0（不额外花 LLM 调用）', env.META.aiFill === 0, String(env.META.aiFill));
+
+    // 勾选 → 触发 onchange（联动 META）→ 立即落盘（mock 的 setTimeout 不执行，
+    //   防抖版 saveSettings() 不会 POST，故像 Test 9 一样显式 saveSettings(true) 断言 body）
+    const box = env._getEl('sp_metaaifill');
+    box.checked = true;
+    if (typeof box.onchange === 'function') box.onchange.call(box);
+    check('META.aiFill 跟随复选框置 1（onchange 联动）', env.META.aiFill === 1, String(env.META.aiFill));
+    env.saveSettings(true);
+    const b1 = bodies[bodies.length - 1] || '';
+    check('勾选后 saveSettings 下发 metaaifill=1', b1.indexOf('&metaaifill=1') >= 0, b1);
+
+    // 取消勾选 → 下发 metaaifill=0
+    box.checked = false;
+    if (typeof box.onchange === 'function') box.onchange.call(box);
+    env.saveSettings(true);
+    const b2 = bodies[bodies.length - 1] || '';
+    check('取消勾选后下发 metaaifill=0', b2.indexOf('&metaaifill=0') >= 0, b2);
+
+    // 恢复默认把 aiFill 复位 0（与 META 初值一致，避免「恢复默认」反而开启计费项）
+    env.META.aiFill = 1;
+    env._resetAllSettings();
+    check('恢复默认后 META.aiFill 复位 0', env.META.aiFill === 0, String(env.META.aiFill));
   }
 
   console.log(`\n==============================================`);

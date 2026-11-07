@@ -652,20 +652,23 @@ h += "#npPage .npedge{display:none}";
     h += "#npPage .npgrip:active{cursor:grabbing}";
     h += ".npbg{position:absolute;inset:-60px;background-size:cover;background-position:center;filter:blur(64px) saturate(1.15) brightness(.38);transform:scale(1.08)}";
     h += ".npveil{position:absolute;inset:0;background:linear-gradient(180deg,rgba(8,9,12,.35),rgba(8,9,12,.82))}";
-    // 三段式网格（261024-01 #3b，用户原话「丑的令人震惊」）：
-    //   行1 封面+标题 / 行2 歌词（左）+ 资料标签栏（右，默认只露标签）/ 行3 控制区。
-    //   资料内容改为右侧抽屉，默认完全不出现在版面上；歌词与资料永远**左右相邻**，绝不上下堆叠。
-    //   旧版四行（资料整行 + 歌词整行）已删除 —— 那正是用户说的"上下排列丑到不忍直视"。
-    // 内容列限宽并居中：hero / 歌词+标签栏 / 控制区 共用同一条左右边界（对齐判据靠这个，而不是靠肉眼）
-    // 1.1.4：加第四行「音频分析」面板（#npAnal，见下方 .anl* 样式段）。行序 =
-    //   ① 封面+标题 ② 歌词+资料栏(1fr，唯一可压缩行) ③ 分析面板(auto) ④ 控制区(auto)。
-    //   分析面板高度上限 min(38vh,340px) + 内部滚动 ⟹ 矮窗口下先压②，再让面板自己滚，
-    //   控制区永远留在屏幕内（tools/check_114_analysis_ui.js 有几何判据）。
-    h += ".npgrid{position:relative;z-index:2;height:100%;display:grid;grid-template-rows:auto minmax(0,1fr) auto auto;gap:18px;padding:44px 40px 18px;box-sizing:border-box;max-width:1240px;margin:0 auto}";
+    // 三段式网格（261024-01 #3b 基础；1.1.4-beta4 改「左右竖栏对称」）：
+    //   行1 封面+标题 / 行2「左竖栏 音频分析 ┃ 中 歌词 ┃ 右竖栏 AI 整理」/ 行3 控制区。
+    //   1.1.4-beta4：音频分析从「行3 整行通栏」移进 .npbody 的左竖栏，与右竖栏「AI 整理」
+    //   **等宽对称**。.npbody 三列 minmax(0,1fr) | minmax(0,2fr) | minmax(0,1fr)：
+    //   左右等宽 W1=W3 ⟹ 中列中心 W1+gap+W2/2 == 容器中心 (2W1+2gap+W2)/2，
+    //   所以歌词恒居中于页面，**无论两侧内容显隐/长短**（用户硬约束，靠数学不靠肉眼）。
+    //   三列用显式 grid-column/grid-row 固定：某列 display:none 时其它列不串位（如 .nolyric）。
+    //   #npAnal 竖栏铺满行2 高度、卡片区内部单列滚动；控制区永远留在屏幕内。
+    //   几何判据见 tools/check_114_analysis_ui.js（A1 三行/三列 + A16 对称与居中）。
+    h += ".npgrid{position:relative;z-index:2;height:100%;display:grid;grid-template-rows:auto minmax(0,1fr) auto;gap:18px;padding:44px 40px 18px;box-sizing:border-box;max-width:1240px;margin:0 auto}";
     h += ".npgrid.nolyric #npLyric{display:none}";
-    // 行2：左歌词 + 右标签栏（标签栏无可用资料时整列收起，歌词自动吃满）
-    h += ".npbody{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:22px;min-height:0;align-items:stretch}";
-    h += ".nprail{display:none;min-height:0;align-self:start}";
+    // 行2：左竖栏（音频分析）| 中（歌词，恒居中）| 右竖栏（AI 整理），左右等宽对称。
+    h += ".npbody{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,2fr) minmax(0,1fr);gap:18px;min-height:0;align-items:stretch}";
+    h += "#npAnal{grid-column:1;grid-row:1}";
+    h += "#npLyric{grid-column:2;grid-row:1}";
+    h += "#npRail{grid-column:3;grid-row:1}";
+    h += ".nprail{display:block;min-height:0}";
     h += ".nprail.on{display:block}";
     // 资料卡：右侧一张紧凑浮卡（caption + 三个标签），比"贯穿全高的分隔线 + 飘着的药丸"更像正式组件
     h += ".nprailcard{display:flex;flex-direction:column;gap:5px;padding:9px;border-radius:14px;background:rgba(255,255,255,.045);border:1px solid rgba(255,255,255,.08);backdrop-filter:blur(8px);min-width:104px}";
@@ -763,13 +766,14 @@ h += "#npPage .npedge{display:none}";
     h += ".ly-hint{position:sticky;top:0;z-index:2;font-size:10.5px;letter-spacing:.3px;color:var(--mut2);background:var(--bg);border-bottom:1px solid var(--line);padding:3px 0;margin-bottom:4px;pointer-events:none}";
     h += ".npline{font-size:clamp(13px,1.9vh,17px);line-height:2.05;color:var(--mut);transition:.18s}";
     h += ".npline.on{color:var(--txt);font-weight:650;transform:scale(1.03)}";
-    // 行3（1.1.4）：音频分析面板 #npAnal。三级折叠（L0 摘要 / L1 指标 / L2 全部原始值）。
-    // 设计约束（Lead 要求）：紧凑、低调、不抢封面与歌词；只用既有 CSS 变量 ⟹ 深/浅/蓝三套主题自动跟随；
-    // 高度上限 min(38vh,340px) 且**卡片区**自己滚（头部固定），所以它永远不会把控制区顶出屏幕。
+    // 行2 左竖栏（1.1.4-beta4）：音频分析 #npAnal。三级折叠（L0 摘要 / L1 指标 / L2 全部原始值）。
+    // 与旧「通栏行」的区别：现在是 .npbody 的左竖栏，**铺满行2 高度**（不再有 38vh 限高），
+    //   卡片区单列纵向排列、头部固定、卡片区自己滚 ⟹ 不抢中间歌词、也不把控制区顶出屏幕。
+    // 设计约束（沿用）：紧凑低调、只用既有 CSS 变量 ⟹ 深/浅/蓝三套主题自动跟随。
     h += "#npAnal{min-height:0;display:flex;flex-direction:column;gap:6px;padding:8px 11px 9px;border-radius:14px;"
          "background:rgba(255,255,255,.045);border:1px solid rgba(255,255,255,.08);backdrop-filter:blur(8px);"
-         "max-height:min(38vh,340px)}";
-    h += ".anlhead{display:flex;align-items:center;gap:8px;flex:none;min-width:0}";
+         "overflow:hidden}";
+    h += ".anlhead{display:flex;align-items:center;gap:8px;flex-wrap:wrap;flex:none;min-width:0}";
     h += ".anllab{font-size:11px;letter-spacing:.6px;font-weight:700;color:var(--txt2);flex:none}";
     h += "#npAnlStat{font-size:10.5px;color:var(--mut2);flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;"
          "white-space:nowrap;font-variant-numeric:tabular-nums}";
@@ -778,8 +782,8 @@ h += "#npPage .npedge{display:none}";
     h += ".anlbtn:hover{background:var(--hov2);color:var(--txt);border-color:var(--acc)}";
     h += ".anlbtn:active{transform:scale(.97)}";
     h += ".anlbtn.pri{color:var(--acc-text);background:var(--acc-weak);border-color:var(--acc-weak);font-weight:600}";
-    // 卡片区：auto-fit 让窄窗自动降列（3 → 2 → 1），minmax 保证每张卡不会再被压成一条
-    h += "#npAnlBody{min-height:0;overflow:auto;display:grid;grid-template-columns:repeat(auto-fit,minmax(212px,1fr));"
+    // 卡片区：左竖栏窄 ⟹ 单列纵向堆叠（旧通栏用 auto-fit 多列），头部固定、卡片区自己滚。
+    h += "#npAnlBody{min-height:0;overflow:auto;display:grid;grid-template-columns:minmax(0,1fr);"
          "gap:8px;align-content:start;padding-right:2px;scrollbar-width:thin}";
     h += "#npAnlBody::-webkit-scrollbar{width:6px}";
     h += "#npAnlBody::-webkit-scrollbar-thumb{background:var(--line);border-radius:3px}";
@@ -816,12 +820,12 @@ h += "#npPage .npedge{display:none}";
          "border-color:rgba(15,23,42,.14);box-shadow:0 1px 2px rgba(15,23,42,.05)}";
     h += "html[data-theme=light] .anlml,html[data-theme=blue] .anlml{border-bottom-color:rgba(15,23,42,.08)}";
     h += "html[data-theme=light] .anlwarn,html[data-theme=blue] .anlwarn{background:rgba(180,83,9,.09);border-color:rgba(180,83,9,.24)}";
-    // 矮窗（1024x640 这类）：上限再压一档，保证 ① 面板自身不超屏 ② 歌词仍有一行可显示的高度
-    h += "@media (max-height:720px){#npAnal{max-height:min(31vh,230px);padding:6px 9px 7px;gap:4px}"
+    // 矮窗（1024x640 这类）：竖栏铺满行2（不再限高），只压缩内边距与字号；
+    //   行2 高度由 .npgrid 的 minmax(0,1fr) 统一约束，控制区永远留在屏幕内。
+    h += "@media (max-height:720px){#npAnal{padding:6px 9px 7px;gap:4px}"
          "#npAnlBody{gap:6px}.anlcs{font-size:11px}}";
-    // 窄窗：卡片仍是三栏时每张只有 ~210px，卡内再分两列会把数值截成"14.60…"⟹ 卡内改单列（标签+值一行）
+    // 窄窗：竖栏内指标网格改单列（标签+值一行），避免数值被截成"14.60…"
     h += "@media (max-width:1100px){.anlgrid{grid-template-columns:minmax(0,1fr)}}";
-    h += "@media (max-width:760px){#npAnlBody{grid-template-columns:minmax(0,1fr)}}";
     // 行4：控制区（261024-01 #3b ①：音量不再是底部独立一行）——
     //   进度条一行；下面**同一行**放「时间（左）/ 控制键（中）/ 音量（右）」，
     //   三列都居中于同一条竖轴，整页底部只剩这一块控制区。
@@ -1482,21 +1486,14 @@ h += "#npPage .npedge{display:none}";
     // npMeta：元数据补全芯片（year/genre/albumArtist/已补全）+ 当前 EQ/IR 芯片，由 renderNp 填充
     h += "<div class=npmline id=npMeta></div>";
     h += "</div></div>";
-    // 行2（261024-01 #3b ②③）：**左歌词 / 右资料标签栏**，左右排列，绝不上下堆叠。
-    //   资料默认完全隐藏，右侧只露「歌曲 / 专辑 / 艺术家 / 作品」标签；
-    //   点标签 → 从右侧滑出抽屉看内容（.npdrawer，默认 translateX(102%) + visibility:hidden）。
+    // 行2（1.1.4-beta4）：**左竖栏 音频分析 ┃ 中 歌词 ┃ 右竖栏 AI 整理**，三列等宽对称。
+    //   左右栏显隐/长短都不影响中间歌词居中（.npbody 三列 1fr|2fr|1fr + 显式列定位）。
+    //   右栏「AI 整理」：默认只露「歌曲 / 专辑 / 艺术家 / 作品」标签，点标签 → 右侧抽屉看内容。
     h += "<div class=npbody id=npBody>";
-    h += "<div class=nplyric2 id=npLyric><div class=npline>还没有在播放</div></div>";
-    h += "<aside class=nprail id=npRail><div class=nprailcard><div class=nprailcap>AI 整理</div>";
-    h += "<div class=npchipwrap id=npTabs></div>";
-    // 261024-04 #7：自动加载的状态/失败重试行（正常态 display:none，不打扰版面）
-    h += "<div id=npSummHint class=nprailhint style='display:none'></div></div></aside>";
-    h += "</div>";
-    // 行3（1.1.4）：音频分析面板。**永远可见**（默认 L0 三行摘要），但内部滚动、高度封顶，
-    //   绝不把下面的播放控制挤出屏幕。内容与交互全部由 ui_script.h 的 ANL 状态机驱动：
-    //   #npAnlStat = 状态文字（未播放 / 正在分析… / 12.3 s · 缓存命中 / 分析失败 · 点击重试 / 分析于 HH:MM）
-    //   #npAnlToggle = 三级折叠（0→1→2→0）
-    //   #npAnlRun = 手动强制重算（force=1，忽略服务端缓存）
+    // 左竖栏（col1）：音频分析面板。**永远可见**（默认 L0 三行摘要），卡片区内部纵向滚动，
+    //   铺满行2 高度、绝不把播放控制挤出屏幕。内容与交互全部由 ui_script.h 的 ANL 状态机驱动：
+    //   #npAnlStat = 状态文字（未播放 / 正在分析… / 缓存命中 / 分析失败·点击重试 / 分析于 HH:MM）
+    //   #npAnlToggle = 三级折叠（0→1→2→0）；#npAnlRun = 手动强制重算（force=1）
     h += "<div class=npAnal id=npAnal>";
     h += "<div class=anlhead>";
     h += "<span class=anllab>音频分析</span>";
@@ -1505,6 +1502,14 @@ h += "#npPage .npedge{display:none}";
     h += "<button class='anlbtn pri' id=npAnlRun title='重新分析当前曲目（强制重算，忽略缓存）'>分析</button>";
     h += "</div>";
     h += "<div id=npAnlBody></div>";
+    h += "</div>";
+    // 中列（col2）：歌词，恒居中
+    h += "<div class=nplyric2 id=npLyric><div class=npline>还没有在播放</div></div>";
+    // 右竖栏（col3）：AI 整理
+    h += "<aside class=nprail id=npRail><div class=nprailcard><div class=nprailcap>AI 整理</div>";
+    h += "<div class=npchipwrap id=npTabs></div>";
+    // 261024-04 #7：自动加载的状态/失败重试行（正常态 display:none，不打扰版面）
+    h += "<div id=npSummHint class=nprailhint style='display:none'></div></div></aside>";
     h += "</div>";
     // 行4：控制区（整页也要能操作，否则进来就必须退出）
     h += "<div class=npctl2>";

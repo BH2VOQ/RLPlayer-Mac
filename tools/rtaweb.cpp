@@ -5734,6 +5734,7 @@ struct MetaSettings {
     bool on = true;                          // metaon 总开关
     bool llm = true;                         // metallm
     bool summary = false;                    // metasummary 默认 0（成本策略：显式开启）
+    bool aiFill = false;                     // 1.1.4-beta4 metaaifill：AI 辅助爬取封面歌词，默认 0
     std::map<std::string, bool> srcOn;       // 注册表 id → 开关(缺省 true)
     // 2026-11-07（1.1.4-beta3）：数据源顺序。metasrcorder=qq,netease,... 逗号分隔；
     // 空 = 用 provider.h 里的默认顺序（pv_default_order，与改造前的链顺序等价）。
@@ -5757,6 +5758,7 @@ static MetaSettings meta_settings_load() {
         if      (k == "metaon")      ms.on      = meta_bool_val(v);
         else if (k == "metallm")     ms.llm     = meta_bool_val(v);
         else if (k == "metasummary") ms.summary = meta_bool_val(v);
+        else if (k == "metaaifill")  ms.aiFill  = meta_bool_val(v);   // 1.1.4-beta4 AI 辅助爬取
         else if (k.rfind("metasrc_", 0) == 0) ms.srcOn[k.substr(8)] = meta_bool_val(v);
         else if (k == "metasrcorder") ms.order = rta::meta::pv_order_join(rta::meta::pv_parse_order(v));
         else if (k == "metaqq")      legacy["qq"]      = v;
@@ -5778,6 +5780,7 @@ static rta::meta::EnrichOpts meta_opts_from_settings() {
     o.srcOn = ms.srcOn;
     o.order = ms.order;
     o.llm = ms.llm;
+    o.aiFill = ms.aiFill;                // 1.1.4-beta4 AI 辅助爬取开关透传给 enrich
     // 功能4：llm 配置固定读 exe 同目录（界面 /api/llm 写的就是这一份）
     o.llmConfPath = path_in_exe_dir("rlplayer-llm.conf");
     // 挂入全局退出标志：g_shutdown 是静态全局对象，生命周期覆盖整个进程，安全
@@ -5811,7 +5814,7 @@ static void meta_on_play(const std::string& file) {
         rta::diag::ScopedRid diagRid(rid);
         rta::net::HttpCancellationScope httpCancel(&g_shutdown);
         rta::meta::EnrichOpts o;
-        o.srcOn = ms.srcOn; o.order = ms.order; o.llm = ms.llm;
+        o.srcOn = ms.srcOn; o.order = ms.order; o.llm = ms.llm; o.aiFill = ms.aiFill;
         o.llmConfPath = path_in_exe_dir("rlplayer-llm.conf");
         // EnrichOpts 是值拷贝进 lambda，但 cancel 指针指向全局对象 g_shutdown，
         // 生命周期覆盖整个进程，后台线程安全访问
@@ -6467,6 +6470,10 @@ static std::string llm_status_json() {
       << ",\"proxy\":" << (llm_conf_proxy_line().empty() ? "false" : "true")
       << ",\"monthlyCap\":" << c.monthlyCap
       << ",\"currentUsage\":" << rta::meta::llm_get_monthly_count(rta::meta::llm_current_month(), c.usagePath)
+      // 1.1.4-beta4：联网检索端点状态（绝不回显明文 key，只给掩码 + provider + 自定义 base）。
+      << ",\"searchProvider\":\"" << jesc(rta::meta::ds_provider_of(c)) << "\""
+      << ",\"searchBaseUrl\":\"" << jesc(c.searchBaseUrl) << "\""
+      << ",\"searchMasked\":\"" << jesc(rta::meta::llm_mask_key(c.searchKey)) << "\""
       << "}";
     return j.str();
 }
@@ -9238,6 +9245,7 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
           // 不能复位成「这次打开页面时后端报的那份」（那等于把用户改过的顺序当成默认）。
           << ",\"defaultOrder\":\"" << jesc(rta::meta::pv_order_join(rta::meta::pv_parse_order(std::string()))) << "\""
           << ",\"llm\":" << (ms.llm ? "true" : "false")
+          << ",\"aiFill\":" << (ms.aiFill ? "true" : "false")
           << ",\"on\":" << (ms.on ? "true" : "false") << "}";
         return j.str();
     }
@@ -10335,7 +10343,14 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
         const bool hasModel = (f.count("model") != 0) && !f["model"].empty();
         const bool hasBase  = (f.count("base_url") != 0) && !f["base_url"].empty();
         const bool hasCap   = (f.count("llmmonthlycap") != 0) || (f.count("monthly_cap") != 0);
-        if (!clear && !hasKey && !hasModel && !hasBase && !hasCap)
+        // 1.1.4-beta4：联网检索端点字段。search_provider 归一到三者之一（后端 ds_provider_of 兜底）；
+        //   search_base_url 可为空（= 用厂商默认），search_key 可为空（= keyless）；
+        //   "search_key_clear"=1 用于显式清除第三方 key（与 clear= 清 LLM key 分开）。
+        const bool hasProv  = (f.count("search_provider") != 0);
+        const bool hasSBase = (f.count("search_base_url") != 0);
+        const bool hasSKey  = (f.count("search_key") != 0);
+        const bool sKeyClear = (f.count("search_key_clear") != 0) && f["search_key_clear"] == "1";
+        if (!clear && !hasKey && !hasModel && !hasBase && !hasCap && !hasProv && !hasSBase && !hasSKey && !sKeyClear)
             return "{\"ok\":false,\"error\":\"没有可保存的字段\"}";
         if (hasKey && !llm_value_ok(f["key"], 512))
             return "{\"ok\":false,\"error\":\"API Key 格式不对（不允许空格/控制字符，最长 512）\"}";
@@ -10343,6 +10358,16 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
             return "{\"ok\":false,\"error\":\"模型名格式不对\"}";
         if (hasBase && !llm_value_ok(f["base_url"], 512))
             return "{\"ok\":false,\"error\":\"base_url 格式不对\"}";
+        if (hasSKey && !f["search_key"].empty() && !llm_value_ok(f["search_key"], 512))
+            return "{\"ok\":false,\"error\":\"检索 Key 格式不对（不允许空格/控制字符，最长 512）\"}";
+        // 自定义检索 base 只接受 http(s)（同 base_url 的 SSRF 面），补 scheme 由 ds_third_base 负责。
+        if (hasSBase && !f["search_base_url"].empty()) {
+            if (!llm_value_ok(f["search_base_url"], 512))
+                return "{\"ok\":false,\"error\":\"检索地址格式不对（不允许空格/控制字符，最长 512）\"}";
+            const std::string nb = rta::meta::llm_normalize_base(f["search_base_url"]);
+            if (nb.rfind("http://", 0) != 0 && nb.rfind("https://", 0) != 0)
+                return "{\"ok\":false,\"error\":\"检索地址只支持 http:// 或 https://\"}";
+        }
         // 2026-11-07（1.1.4-beta3）：接口地址只接受 http(s)。缺 scheme 时 normalize 会补 https://，
         // 但 file:// / ftp:// / 明显不是 URL 的串要先挡在门外 —— 这个值会进 HTTP 请求，不校验就是 SSRF 面。
         if (hasBase) {
@@ -10363,6 +10388,11 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
             c.monthlyCap = atoi(capStr.c_str());
             note("monthlyCap");
         }
+        // 1.1.4-beta4：联网检索端点。provider 用后端归一化结果（未知值回落 deepseek，绝不落非法值）。
+        if (hasProv)       { c.searchProvider = rta::meta::ds_provider_norm(f["search_provider"]); note("searchProvider"); }
+        if (hasSBase)      { c.searchBaseUrl = f["search_base_url"]; note("searchBaseUrl"); }
+        if (sKeyClear)     { c.searchKey.clear(); note("searchKey"); }
+        else if (hasSKey && !f["search_key"].empty()) { c.searchKey = f["search_key"]; note("searchKey"); }
         if (!rta::meta::llm_config_save_merge(c, llm_conf_path()))
             return "{\"ok\":false,\"error\":\"写入 rlplayer-llm.conf 失败（文件被占用？）\"}";
         // 日志只记「改了哪些字段 + 掩码」，绝不记值：launcher/playback 日志会进诊断包。
@@ -10660,7 +10690,7 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
                                            // 元数据补全(P1.5):总开关与 LLM 固定两键;
                                            // 源开关 metasrc_<id> 按注册表动态放行(见下);
                                            // P3④b AI 综合开关 metasummary (默认0)
-                                           "metaon", "metallm", "metasummary", "metasrcorder", "llmmonthlycap", "scanthreads", "scanThreads",
+                                           "metaon", "metallm", "metasummary", "metaaifill", "metasrcorder", "llmmonthlycap", "scanthreads", "scanThreads",
                                            "cast_upsample", "cast_upsample_ceiling", "cast_upsample_force",
                                            "updbeta",
                                            // 1.1.4 单曲页分析：默认关闭的"播放即后台分析"
@@ -10796,6 +10826,7 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
         injectKv("metaon", "1");
         injectKv("metallm", "1");
         injectKv("metasummary", "0");
+        injectKv("metaaifill", "0");
         injectKv("llmmonthlycap", "0");
         injectKv("streamdecode", "1");
         injectKv("stream_threshold_mb", "200");

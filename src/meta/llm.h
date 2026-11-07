@@ -11,6 +11,8 @@
 //   * POST {base}/v1/tools/search  — 联网检索（results[]: title/url/snippet/summary/
 //                                    rerank_score/authority/date；过滤策略在调用方做）
 //   * POST {base}/v1/tools/fetch   — 拉取网页正文（title + Markdown）
+//   * 1.1.4-beta4：search/fetch 端点可切换（DeepSeek / AnySearch / Tavily），
+//     见文件尾「联网检索端点」段；DeepSeek 为默认且路径逐字不变。
 //
 // 设计要点：
 //   * api_key 只用于 Authorization 请求头。任何错误消息在返回前都过一遍 llm_redact()，
@@ -239,13 +241,22 @@ struct LlmConfig {
     int monthlyCap = 0;                    // 设置键 llmmonthlycap（0=不限，默认 0）
     std::string usagePath;                 // 用量文件路径，为空则自动定位
     std::string monthOverride;             // 测试用：模拟当前月份（如 "202611"）
+    // 1.1.4-beta4：联网检索（search / fetch）端点，二者一起切换。
+    //   searchProvider = "deepseek"(默认,专有 /v1/tools/*) | "anysearch" | "tavily"
+    //   searchBaseUrl  = 第三方端点的自定义 base（空 = 用厂商默认），仅 http(s)
+    //   searchKey      = 第三方端点的 key（空 = keyless / 匿名额度）；deepseek 一律用 apiKey
+    // 端点协议与响应字段来自 2026-11-07 公开文档核实；见文件尾「联网检索端点」段。
+    std::string searchProvider = "deepseek";
+    std::string searchBaseUrl;
+    std::string searchKey;
     // mock transport 钩子（测试用，离线无网络）
     std::function<rta::net::HttpResponse(const std::string& url,
                                          const std::string& body,
                                          const std::vector<std::string>& headers)> transport;
 };
 
-// 缺文件 → 返回默认值（空 key）。key 名：base_url / api_key / model / llmmonthlycap；其他键忽略。
+// 缺文件 → 返回默认值（空 key）。key 名：base_url / api_key / model / llmmonthlycap /
+// usage_path / search_provider / search_base_url / search_key；其他键忽略。
 inline LlmConfig llm_config_load(const std::string& path = "rlplayer-llm.conf") {
     LlmConfig c;
     std::ifstream f(path, std::ios::binary);
@@ -267,6 +278,9 @@ inline LlmConfig llm_config_load(const std::string& path = "rlplayer-llm.conf") 
                 else if (k == "model")    c.model   = v;
                 else if (k == "llmmonthlycap" || k == "monthly_cap" || k == "monthlycap") c.monthlyCap = atoi(v.c_str());
                 else if (k == "usage_path") c.usagePath = v;
+                else if (k == "search_provider") c.searchProvider = v;
+                else if (k == "search_base_url") c.searchBaseUrl = v;
+                else if (k == "search_key")      c.searchKey = v;
             } else {
                 line += all[i];
             }
@@ -307,6 +321,9 @@ inline bool llm_config_save(const LlmConfig& c, const std::string& path = "rlpla
     o << "model=" << c.model << "\n";
     if (c.monthlyCap > 0) o << "llmmonthlycap=" << c.monthlyCap << "\n";
     if (!c.usagePath.empty()) o << "usage_path=" << c.usagePath << "\n";
+    if (c.searchProvider != "deepseek") o << "search_provider=" << c.searchProvider << "\n";
+    if (!c.searchBaseUrl.empty()) o << "search_base_url=" << c.searchBaseUrl << "\n";
+    if (!c.searchKey.empty()) o << "search_key=" << c.searchKey << "\n";
     const std::string s = o.str();
     const std::string tmp = path + ".tmp";
     {
@@ -327,6 +344,7 @@ inline bool llm_config_save(const LlmConfig& c, const std::string& path = "rlpla
 inline bool llm_config_save_merge(const LlmConfig& c, const std::string& path = "rlplayer-llm.conf") {
     std::vector<std::string> out;
     bool wroteBase = false, wroteKey = false, wroteModel = false, wroteCap = false, wroteUsage = false;
+    bool wroteProv = false, wroteSBase = false, wroteSKey = false;
     {
         std::ifstream f(path, std::ios::binary);
         std::string line;
@@ -355,6 +373,18 @@ inline bool llm_config_save_merge(const LlmConfig& c, const std::string& path = 
                 if (wroteUsage) continue;
                 if (!c.usagePath.empty()) out.push_back("usage_path=" + c.usagePath);
                 wroteUsage = true;
+            } else if (k == "search_provider") {
+                if (wroteProv) continue;
+                if (c.searchProvider != "deepseek") out.push_back("search_provider=" + c.searchProvider);
+                wroteProv = true;
+            } else if (k == "search_base_url") {
+                if (wroteSBase) continue;
+                if (!c.searchBaseUrl.empty()) out.push_back("search_base_url=" + c.searchBaseUrl);
+                wroteSBase = true;
+            } else if (k == "search_key") {
+                if (wroteSKey) continue;
+                if (!c.searchKey.empty()) out.push_back("search_key=" + c.searchKey);
+                wroteSKey = true;
             } else {
                 out.push_back(line);                     // 注释 / 空行 / proxy= / 未知键
             }
@@ -365,6 +395,9 @@ inline bool llm_config_save_merge(const LlmConfig& c, const std::string& path = 
     if (!wroteModel) out.push_back("model=" + c.model);
     if (!wroteCap && c.monthlyCap > 0) out.push_back("llmmonthlycap=" + std::to_string(c.monthlyCap));
     if (!wroteUsage && !c.usagePath.empty()) out.push_back("usage_path=" + c.usagePath);
+    if (!wroteProv  && c.searchProvider != "deepseek") out.push_back("search_provider=" + c.searchProvider);
+    if (!wroteSBase && !c.searchBaseUrl.empty()) out.push_back("search_base_url=" + c.searchBaseUrl);
+    if (!wroteSKey  && !c.searchKey.empty()) out.push_back("search_key=" + c.searchKey);
     std::string s;
     for (const std::string& l : out) { s += l; s += "\n"; }
     const std::string tmp = path + ".tmp";
@@ -1294,9 +1327,253 @@ inline std::string ds_http_error(const std::string& apiKey, int status, const st
         "HTTP " + std::to_string(status) + (p.error.empty() ? "" : ": " + p.error));
 }
 
+// ---------------------------------------------------------------------------
+// 1.1.4-beta4：联网检索端点（DeepSeek / AnySearch / Tavily，search 与 fetch 一起切换）
+// ---------------------------------------------------------------------------
+// 端点、请求字段、响应结构来自 2026-11-07 公开文档核实：
+//   * DeepSeek（默认）：POST {tools_base}/v1/tools/search  body {"query","count"}
+//       resp results[]:{title,url,snippet,summary,rerank_score,authority,date}
+//     POST {tools_base}/v1/tools/fetch   body {"url"}  resp {title,content}
+//   * AnySearch：POST https://api.anysearch.com/v1/search   body {"query","max_results"}
+//       resp {code,message,data:{results[]:{title,url,snippet,content},metadata}}  code!=0 = 业务错误
+//     POST https://api.anysearch.com/v1/extract  body {"url"}  resp {url,title,<正文>}
+//   * Tavily：POST https://api.tavily.com/search   body {"query","max_results"[,"api_key"]}
+//       resp {results[]:{title,url,content,score}}
+//     POST https://api.tavily.com/extract  body {"urls":[...][,"api_key"]}
+//       resp {results[]:{url,raw_content},failed_results[]}
+// 纪律：
+//   * **DeepSeek 路径逐字不变**：ds_search/ds_fetch 仅在 provider=外部时早返回到
+//     ds_search_external / ds_fetch_external；既有 137 条测试不回归。
+//   * 请求体构造与响应解析全部是纯函数，离线喂写死报文即可测（铁律 3）。
+//   * 第三方无 rerank_score/authority：按返回顺序赋递减分 + authority=2，仅为复用既有
+//     filter_hits 的数值闸（0.8/2）与排序管线，**不代表提供商置信度**；域名白名单仍是质量主闸。
+//   * 认证：deepseek 用 apiKey（Bearer）；anysearch 用 searchKey（Bearer，空=匿名 keyless）；
+//     tavily 用 body 里的 api_key（空=keyless）。错误文本一律过 llm_redact(secret)。
+//   * 第三方是独立计费/额度，不走 DeepSeek 的 llm_check_cap / llm_record_usage。
+//   * ⚠️ AnySearch /v1/extract 正文的 JSON 字段名公开文档被截断，未能完全确认；
+//     解析采用「多候选键」宽松取第一个非空（见 ds_ext_pick_text）。此点须在实机联调时按真实
+//     响应核对；解析本身离线可测，不伪造联网成功。
+
+// provider 归一化：只认三种，其余（含空/未知/大小写变体/带空格）一律回落 deepseek。
+inline std::string ds_provider_norm(const std::string& raw) {
+    std::string s;
+    for (char c : raw) {
+        if (c >= 'A' && c <= 'Z') c = (char)(c - 'A' + 'a');
+        if (c != ' ' && c != '\t' && c != '\r' && c != '\n') s += c;
+    }
+    if (s == "anysearch" || s == "tavily") return s;
+    return "deepseek";
+}
+inline std::string ds_provider_of(const LlmConfig& cfg) { return ds_provider_norm(cfg.searchProvider); }
+inline bool ds_is_external(const LlmConfig& cfg) { return ds_provider_of(cfg) != "deepseek"; }
+
+// 厂商默认 base（host-only，路径由 ds_*_url 拼）。自定义 base 只取 scheme+host，
+// 无论用户填 host 还是带路径，都统一收敛，避免 /v1/v1/search 这类重复（沿用 llm_tools_base 的坑位教训）。
+inline std::string ds_third_base(const LlmConfig& cfg, const std::string& provider) {
+    const std::string def = provider == "anysearch" ? "https://api.anysearch.com" : "https://api.tavily.com";
+    std::string b = cfg.searchBaseUrl;
+    // trim 前后空白（手搓，避免依赖 llm_trim 之外的状态）
+    size_t a = 0, z = b.size();
+    while (a < z && (b[a] == ' ' || b[a] == '\t')) ++a;
+    while (z > a && (b[z-1] == ' ' || b[z-1] == '\t')) --z;
+    b = b.substr(a, z - a);
+    if (b.empty()) return def;
+    if (b.find("://") == std::string::npos) b = "https://" + b;
+    const size_t schemeEnd = b.find("://") + 3;
+    const size_t slash = b.find('/', schemeEnd);
+    if (slash != std::string::npos) b.erase(slash);
+    return b;
+}
+// 完整端点 URL（纯函数，可离线断言）。deepseek 的 URL 由 ds_search/ds_fetch 原逻辑自己拼，不走这里。
+inline std::string ds_search_url(const LlmConfig& cfg, const std::string& provider) {
+    const std::string b = ds_third_base(cfg, provider);
+    return provider == "anysearch" ? (b + "/v1/search") : (b + "/search");
+}
+inline std::string ds_fetch_url(const LlmConfig& cfg, const std::string& provider) {
+    const std::string b = ds_third_base(cfg, provider);
+    return provider == "anysearch" ? (b + "/v1/extract") : (b + "/extract");
+}
+
+// 请求体构造（分派）。deepseek 逐字复用旧函数，外部按厂商字段。
+inline std::string ds_build_search_body_for(const LlmConfig& cfg, const std::string& provider,
+                                            const std::string& query, int count) {
+    if (provider == "deepseek") return ds_build_search_body(query, count);
+    int n = count < 1 ? 1 : (count > 10 ? 10 : count);   // 两家公共安全上限
+    std::ostringstream o;
+    o << "{\"query\":\"" << llm_esc(query) << "\",\"max_results\":" << n;
+    if (provider == "tavily" && !cfg.searchKey.empty())
+        o << ",\"api_key\":\"" << llm_esc(cfg.searchKey) << "\"";
+    o << "}";
+    return o.str();
+}
+inline std::string ds_build_fetch_body_for(const LlmConfig& cfg, const std::string& provider,
+                                           const std::string& url) {
+    if (provider == "deepseek") return ds_build_fetch_body(url);
+    std::ostringstream o;
+    if (provider == "tavily") {
+        o << "{\"urls\":[\"" << llm_esc(url) << "\"]";
+        if (!cfg.searchKey.empty()) o << ",\"api_key\":\"" << llm_esc(cfg.searchKey) << "\"";
+        o << "}";
+    } else { // anysearch
+        o << "{\"url\":\"" << llm_esc(url) << "\"}";
+    }
+    return o.str();
+}
+
+// 认证头（分派）。返回用于 redact 的 secret 也在此一并给出。
+inline std::string ds_secret_of(const LlmConfig& cfg, const std::string& provider) {
+    return provider == "deepseek" ? cfg.apiKey : cfg.searchKey;
+}
+inline std::vector<std::string> ds_headers_for(const LlmConfig& cfg, const std::string& provider) {
+    if (provider == "deepseek") return { "Authorization: Bearer " + cfg.apiKey };
+    if (provider == "anysearch" && !cfg.searchKey.empty())
+        return { "Authorization: Bearer " + cfg.searchKey };
+    return {}; // tavily 走 body api_key；keyless 时任何厂商都不带认证头
+}
+
+// 多候选键取正文：AnySearch /v1/extract 正文字段名未完全确认，宽松取第一个非空。
+inline std::string ds_ext_pick_text(const rta::net::Json& obj, const char* const* keys, size_t n) {
+    for (size_t i = 0; i < n; ++i) {
+        const std::string v = obj[keys[i]].s();
+        if (!v.empty()) return v;
+    }
+    return std::string();
+}
+// 归一化分数：按返回序号递减，保证 > min_rerank_score(0.8)，authority 过 min_authority(2)。
+// 仅为复用既有 filter_hits/排序管线，非提供商置信度（第三方不提供该类信号）。
+inline double ds_ext_norm_score(size_t i) { return 1.6 - 0.05 * (double)(i > 15 ? 15 : i); }
+
+// 第三方 search 响应 → DsSearchReply（纯函数，离线可测）。
+inline DsSearchReply ds_parse_external_search(const std::string& provider, const std::string& text) {
+    DsSearchReply r;
+    if (provider == "deepseek") return ds_parse_search_response(text);
+    const rta::net::Json j = rta::net::json_parse(text);
+    if (j.type != rta::net::Json::Obj) { r.error = "响应不是合法 JSON"; return r; }
+    if (provider == "anysearch") {
+        if (j.has("code") && (long long)j["code"].n() != 0) {
+            const std::string m = j["message"].s();
+            r.error = "服务端错误: " + (m.empty() ? ("code=" + std::to_string((long long)j["code"].n())) : m);
+            return r;
+        }
+    } else if (j.has("error")) { // tavily 错误体 {error:{message}} 或 {detail}
+        const rta::net::Json& e = j["error"];
+        std::string m = e.has("message") ? e["message"].s() : e.s();
+        if (m.empty()) m = j["detail"].s();
+        if (!m.empty()) { r.error = "服务端错误: " + m; return r; }
+    }
+    // results 数组位置：anysearch 在 data.results，tavily 在顶层 results。
+    const rta::net::Json& arr = provider == "anysearch" ? j["data"]["results"] : j["results"];
+    if (arr.type != rta::net::Json::Arr) { r.error = "响应缺少 results"; return r; }
+    r.hits.reserve(arr.size());
+    for (size_t i = 0; i < arr.size(); ++i) {
+        const rta::net::Json& h = arr.at(i);
+        DsHit hit;
+        hit.title = h["title"].s();
+        hit.url   = h["url"].s();
+        if (provider == "anysearch") {
+            hit.snippet = h["snippet"].s();
+            hit.summary = h["content"].s();
+        } else { // tavily：content 同时作 snippet / summary
+            hit.snippet = h["content"].s();
+            hit.summary = h["content"].s();
+        }
+        hit.rerankScore = ds_ext_norm_score(i);
+        hit.authority   = 2;
+        r.hits.push_back(std::move(hit));
+    }
+    r.ok = true;   // 0 条命中也是合法空结果（与 ds_parse_search_response 同口径）
+    return r;
+}
+// 第三方 fetch/extract 响应 → DsFetchReply（纯函数，离线可测）。
+inline DsFetchReply ds_parse_external_fetch(const std::string& provider, const std::string& text) {
+    DsFetchReply r;
+    if (provider == "deepseek") return ds_parse_fetch_response(text);
+    const rta::net::Json j = rta::net::json_parse(text);
+    if (j.type != rta::net::Json::Obj) { r.error = "响应不是合法 JSON"; return r; }
+    if (provider == "anysearch") {
+        if (j.has("code") && (long long)j["code"].n() != 0) {
+            const std::string m = j["message"].s();
+            r.error = "服务端错误: " + (m.empty() ? ("code=" + std::to_string((long long)j["code"].n())) : m);
+            return r;
+        }
+        // 正文可能在顶层或 data 内；字段名多候选（公开文档截断，见段头说明）。
+        static const char* const kBodyKeys[] = { "content", "markdown", "text", "raw_content", "body", "main_content" };
+        const rta::net::Json& d = j.has("data") && j["data"].type == rta::net::Json::Obj ? j["data"] : j;
+        r.content = ds_ext_pick_text(d, kBodyKeys, sizeof(kBodyKeys) / sizeof(kBodyKeys[0]));
+        r.title   = d["title"].s();
+        if (r.title.empty()) r.title = j["url"].s();
+    } else { // tavily extract：results[0].raw_content，failed_results 非空且 results 空 = 失败
+        const rta::net::Json& arr = j["results"];
+        if (arr.type == rta::net::Json::Arr && arr.size() > 0) {
+            const rta::net::Json& f = arr.at(0);
+            static const char* const kBodyKeys[] = { "raw_content", "content", "text" };
+            r.content = ds_ext_pick_text(f, kBodyKeys, sizeof(kBodyKeys) / sizeof(kBodyKeys[0]));
+            r.title   = f["url"].s();
+        } else {
+            const rta::net::Json& fr = j["failed_results"];
+            std::string m = (fr.type == rta::net::Json::Arr && fr.size() > 0) ? fr.at(0)["error"].s() : std::string();
+            r.error = m.empty() ? "响应缺少 results" : ("抓取失败: " + m);
+            return r;
+        }
+    }
+    if (r.content.empty()) { r.error = "响应缺少正文"; return r; }
+    r.ok = true;
+    return r;
+}
+
+// 第三方 search 网络函数：单次调用不重试、不套 DeepSeek 月度配额、keyless 不因 apiKey 空报错。
+inline DsSearchReply ds_search_external(const LlmConfig& cfg, const std::string& query, int count) {
+    DsSearchReply r;
+    const std::string provider = ds_provider_of(cfg);
+    const std::string secret   = ds_secret_of(cfg, provider);
+    const std::string url      = ds_search_url(cfg, provider);
+    const std::string body     = ds_build_search_body_for(cfg, provider, query, count);
+    const std::vector<std::string> headers = ds_headers_for(cfg, provider);
+    rta::net::HttpResponse resp;
+    if (cfg.transport) {
+        resp = cfg.transport(url, body, headers);
+    } else {
+        resp = rta::net::http_post(url, body, headers, "application/json", 60000);
+    }
+    if (resp.status == 0) { r.error = llm_redact(secret, "网络请求失败: " + resp.error); return r; }
+    const std::string text(resp.body.begin(), resp.body.end());
+    if (resp.status < 200 || resp.status >= 300) {
+        r.error = llm_redact(secret, "HTTP " + std::to_string(resp.status) + ": " + text.substr(0, 200));
+        return r;
+    }
+    r = ds_parse_external_search(provider, text);
+    if (!r.ok) r.error = llm_redact(secret, r.error);
+    return r;
+}
+// 第三方 fetch 网络函数。
+inline DsFetchReply ds_fetch_external(const LlmConfig& cfg, const std::string& url, int timeout_ms) {
+    DsFetchReply r;
+    const std::string provider = ds_provider_of(cfg);
+    const std::string secret   = ds_secret_of(cfg, provider);
+    const std::string reqUrl   = ds_fetch_url(cfg, provider);
+    const std::string body     = ds_build_fetch_body_for(cfg, provider, url);
+    const std::vector<std::string> headers = ds_headers_for(cfg, provider);
+    rta::net::HttpResponse resp;
+    if (cfg.transport) {
+        resp = cfg.transport(reqUrl, body, headers);
+    } else {
+        resp = rta::net::http_post(reqUrl, body, headers, "application/json", timeout_ms);
+    }
+    if (resp.status == 0) { r.error = llm_redact(secret, "网络请求失败: " + resp.error); return r; }
+    const std::string text(resp.body.begin(), resp.body.end());
+    if (resp.status < 200 || resp.status >= 300) {
+        r.error = llm_redact(secret, "HTTP " + std::to_string(resp.status) + ": " + text.substr(0, 200));
+        return r;
+    }
+    r = ds_parse_external_fetch(provider, text);
+    if (!r.ok) r.error = llm_redact(secret, r.error);
+    return r;
+}
+
 // POST {llm_tools_base}/v1/tools/search，超时 60s，单次调用不重试
 // （base 里的 /v1 由 llm_tools_base 先剥掉，见文件头 llm_tools_base 的说明）
 inline DsSearchReply ds_search(const LlmConfig& cfg, const std::string& query, int count = 5) {
+    if (ds_is_external(cfg)) return ds_search_external(cfg, query, count);  // 1.1.4-beta4 端点分派
     DsSearchReply r;
     if (cfg.apiKey.empty()) {
         rta::diag::diag_emit("llm.config",rta::diag::Stage::Llm,rta::diag::find_code("llm.not_configured"),{{"key_present","false",rta::diag::KvKind::Bool}});
@@ -1343,6 +1620,7 @@ inline DsSearchReply ds_search(const LlmConfig& cfg, const std::string& query, i
 // 2026-10-24（261024-02 #1 速度）：检索层改成 4 路并行 + 单页 12s 超时，
 // 慢页面不再把整个资料整理拖到 20s+（实测最慢一次 fetch 阶段 10.9s）。
 inline DsFetchReply ds_fetch(const LlmConfig& cfg, const std::string& url, int timeout_ms = 60000) {
+    if (ds_is_external(cfg)) return ds_fetch_external(cfg, url, timeout_ms);  // 1.1.4-beta4 端点分派
     DsFetchReply r;
     if (cfg.apiKey.empty()) {
         rta::diag::diag_emit("llm.config",rta::diag::Stage::Llm,rta::diag::find_code("llm.not_configured"),{{"key_present","false",rta::diag::KvKind::Bool}});

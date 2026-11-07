@@ -93,7 +93,7 @@ AI 接入（OpenAI 兼容）	AI Integration (OpenAI-compatible)	1.1.4-beta3 AI �
 API 地址	API base URL	1.1.4-beta3 AI 接入 / 数据源排序
 带不带 /v1 都行：服务端会自动试 /models 与 /v1/models。留空 = 默认端点（DeepSeek）	With or without /v1 both work: the server tries /models and /v1/models automatically. Leave empty for the default endpoint (DeepSeek)	1.1.4-beta3 AI 接入 / 数据源排序
 保存并连接	Save and connect	1.1.4-beta3 AI 接入 / 数据源排序
-联网检索（search / fetch）是 DeepSeek 专有能力；换到其它端点后会自动退回 Wikipedia / Discogs + 模型自身知识，功能不中断。	Online search (search / fetch) is DeepSeek-only; on other endpoints it falls back to Wikipedia / Discogs plus the model own knowledge, with no loss of functionality.	1.1.4-beta3 AI 接入 / 数据源排序
+AI 接口换成非 DeepSeek 端点不影响联网检索；search / fetch 由下方「联网检索端点」单独控制。	Switching the AI endpoint away from DeepSeek does not affect online search; search / fetch is controlled separately under Search endpoints below.	1.1.4-beta4 联网检索端点
 越靠上优先级越高；拖动把手或点 ▲▼ 调整顺序，关掉的源完全不参与补全	Higher rows have higher priority; drag the handle or use the arrows to reorder. Disabled sources are not used at all	1.1.4-beta3 AI 接入 / 数据源排序
 按住拖动调整优先级	Drag to change priority	1.1.4-beta3 AI 接入 / 数据源排序
 优先级序号	Priority rank	1.1.4-beta3 AI 接入 / 数据源排序
