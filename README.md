@@ -247,7 +247,7 @@ The functionality stays available and numerically correct (worst convolution cas
 
 ## 🗺 Roadmap
 
-> The current version follows the Release badge above. **1.1.2** adds AirPlay casting and DSD reliability fixes; **1.1.2.1** is a hotfix for cast status/labels; **1.1.3** adds opt-in UPnP/DLNA cast upsampling and the LLM model list; **1.1.4-beta1** (the pre-release of **1.1.4**) adds the single-track audio analysis panel with true peak dBTP, auto-analysis off by default and the version-alignment fix; 1.1.5 onward is planned. The full criteria, validation limits and open items are in
+> The current version follows the Release badge above. **1.1.2** adds AirPlay casting and DSD reliability fixes; **1.1.2.1** is a hotfix for cast status/labels; **1.1.3** adds opt-in UPnP/DLNA cast upsampling and the LLM model list; **1.1.4-beta1** (the pre-release of **1.1.4**) adds the single-track audio analysis panel with true peak dBTP, auto-analysis off by default and the version-alignment fix; **1.1.4-beta2** fixes the one-click updater, which reported a successfully installed update as failed when the downloaded DMG could not be unmounted; 1.1.5 onward is planned. The full criteria, validation limits and open items are in
 > **[ROADMAP-1.1.x.md](ROADMAP-1.1.x.md)**.
 
 | Version   | Theme                                                              | Status     |
@@ -259,7 +259,7 @@ The functionality stays available and numerically correct (worst convolution cas
 | **1.1.3** | **UPnP/DLNA cast upsampling** + LLM model list                      | ✅ Released (offline-verified) |
 | **1.1.3.1** | Cast upsampling: explicit **force target rate** for renderers that under-declare | ✅ Released |
 | **1.1.3.2** | Black-background logo; real app logo in the sidebar brand slot | ✅ Released |
-| **1.1.4** | **Single-track audio analysis** — L0/L1/L2 folding, true peak dBTP (4× oversampling), auto-analysis off by default, per-track dedup and cancellation; version-compare 11-point alignment | 🧪 1.1.4-beta1 released (offline-verified; stable 1.1.4 pending) |
+| **1.1.4** | **Single-track audio analysis** — L0/L1/L2 folding, true peak dBTP (4× oversampling), auto-analysis off by default, per-track dedup and cancellation; version-compare 11-point alignment. **1.1.4-beta2** fixes the updater: no false "check failed" after an install, no mount-point reuse | 🧪 1.1.4-beta2 released (offline-verified; stable 1.1.4 pending) |
 | **1.1.5** | Library lookup (album context / asynchronous knowledge)            | 🧭 Planned  |
 | **1.1.6** | AI summary streaming and stage progress                            | 🧭 Planned  |
 | **1.1.7** | Batch cover backfill (resume / per-source stats / silhouette rejection) | 🧭 Planned |

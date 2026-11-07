@@ -56,9 +56,13 @@
 
 #include <fcntl.h>
 #include <spawn.h>
+#include <sys/mount.h>          // statfs（is_mount_point：挂载前先看清路）
+#include <sys/param.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <unistd.h>
+
+#include <climits>              // PATH_MAX（realpath 归一化）
 
 #include "mac_update.h"        // 本模块的公开接口（本文件提供实现）
 #include "net/http_client.h"    // rta::net::http_get（平台层 libcurl，阻塞同步）
@@ -475,6 +479,38 @@ inline std::atomic<bool>& LoopbackTestFlag() {
     return f;
 }
 
+// ---------------- 仅测试用的「强制卸载失败」注入 ----------------
+// 默认关闭。打开后 unmount_image() **不真的去卸**，而是直接回报"资源忙"式失败。
+//
+// 为什么需要：2026-11-07 的事故形态是「.app 已经换成功了，但最后 detach 失败 ⟹
+// 整单被判定为失败、也不自动重启」。要证明"这条不再算失败"，就必须能**稳定复现**
+// 卸载失败。真复现（拿子进程 cwd 顶住卷）已实测可行，但在别的机器/CI 上不稳且会留下挂载残留；
+// 注入式失败可复现、可回收，断言的点完全一样（install_from_local_dmg 的返回值与出参）。
+inline std::atomic<bool>& UnmountFailTestFlag() {
+    static std::atomic<bool> f{false};
+    return f;
+}
+
+// 把外部命令输出压成一行（错误文案要能放进一行日志 / UI 提示）
+inline std::string TrimCmdOutput(const std::string& s) {
+    std::string r;
+    r.reserve(s.size());
+    for (char c : s) r.push_back((c == '\n' || c == '\r' || c == '\t') ? ' ' : c);
+    while (!r.empty() && r.back() == ' ') r.pop_back();
+    while (!r.empty() && r.front() == ' ') r.erase(r.begin());
+    return r;
+}
+
+// install 阶段失败必须落盘（2026-11-07 现场教训：整单失败时日志里只有 BEGIN_INSTALL_ENTER，
+// 用户给的截图之外**什么都不剩**，事后无法复盘是哪一步、什么原因）。
+// stage ∈ verify / mount / install（download 失败另有 UPDATE_DOWNLOAD_FAIL，不重复）。
+inline void AppendInstallFailLog(const char* stage, const std::string& errText) {
+    char line[1600];
+    std::snprintf(line, sizeof line, "UPDATE_INSTALL_FAIL stage=%s err=%s",
+                  stage ? stage : "?", errText.c_str());
+    AppendUpdateLog(line);
+}
+
 inline bool IsLoopbackUrl(const std::string& url) {
     auto starts = [&](const char* pre) {
         const size_t n = std::strlen(pre);
@@ -615,18 +651,114 @@ void begin_check(ProgressFn progress, DoneFn done) {
 // ---------------------------------------------------------------------------
 // 可单独调用的安装步骤（测试用真 dmg 跑，见 tests/test_mac_update.mm）
 // ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// 挂载点判定（2026-11-07 修的真 BUG：写死挂载点 + 叠挂）
+//
+// 现场：11-06 那次更新留下的 disk25 一直挂在写死的 <temp>/rlplayer-update-mnt 上，
+// 11-07 再走同一路径 ⟹ 收尾 detach 必然"资源忙"，整单更新被误判失败（.app 其实已换好）。
+// 根因有两条，缺一不可：
+//   ① 挂载点是写死常量 ⟹ "上一轮的残留"和"这一轮"是**同一个路径**；
+//   ② 挂载前不检查该路径**是否已经挂着东西** ⟹ hdiutil 会**再叠一层**。
+//      已实测（本机 macOS 27）：对同一 -mountpoint 挂第二个镜像 rc=0，新卷盖住旧卷，
+//      旧卷从此既看不见也卸不掉，下一次 detach 就是"资源忙"。
+// 所以这里补的是"挂之前先看清路"。
+// ---------------------------------------------------------------------------
+
+// 归一化：realpath 能解就解（/tmp → /private/tmp、/var → /private/var）；解不了就
+// 逐级上溯到最近一个存在的祖先再拼回剩余部分（挂载点/临时目录常常"还没建出来"）。
+inline std::string CanonicalizeForCompare(const std::string& path) {
+    if (path.empty()) return path;
+    std::string p = path;
+    while (p.size() > 1 && p.back() == '/') p.pop_back();
+
+    char buf[PATH_MAX] = {0};
+    if (::realpath(p.c_str(), buf) != nullptr) return std::string(buf);
+
+    std::string tail;                 // 还不存在的那几级（按原顺序拼回）
+    std::string cur = p;
+    while (true) {
+        const size_t slash = cur.find_last_of('/');
+        if (slash == std::string::npos || slash == 0) break;
+        tail = cur.substr(slash) + tail;
+        cur = cur.substr(0, slash);
+        char pb[PATH_MAX] = {0};
+        if (::realpath(cur.c_str(), pb) != nullptr) return std::string(pb) + tail;
+    }
+    return p;                          // 整条链都不存在：原样返回（比较仍一致，只是不解符号链接）
+}
+
+bool is_mount_point(const std::string& path) {
+    if (path.empty()) return false;
+    struct statfs sfs {};
+    if (::statfs(path.c_str(), &sfs) != 0) return false;      // 不存在/无权限 ⟹ 不是挂载点
+
+    // f_mntonname 是**内核挂载表里的名字**（/tmp 记成 /private/tmp，/var 同理）
+    // ⟹ 两边都归一化后再比，才能吃掉 /var 与 /private/var 的差异。
+    if (CanonicalizeForCompare(std::string(sfs.f_mntonname)) == CanonicalizeForCompare(path)) return true;
+
+    // 兜底：路径与父目录的 st_dev 不同 ⟹ 这个目录本身就是另一个文件系统的根（也是挂载点）。
+    // 这条覆盖 f_mntonname 名字对不上的情形（例如挂载表里记的是别名路径）。
+    struct stat self {}, parent {};
+    std::string up = path;
+    while (up.size() > 1 && up.back() == '/') up.pop_back();
+    const size_t slash = up.find_last_of('/');
+    if (slash == std::string::npos) return false;
+    const std::string parentPath = (slash == 0) ? std::string("/") : up.substr(0, slash);
+    if (::stat(up.c_str(), &self) != 0) return false;
+    if (::stat(parentPath.c_str(), &parent) != 0) return false;
+    return parent.st_dev != self.st_dev;
+}
+
+bool is_own_temp_mount(const std::string& path) {
+    if (path.empty()) return false;
+    const std::string tmp = rta::platform::temp_dir_utf8();
+    if (tmp.empty()) return false;
+
+    std::string root = CanonicalizeForCompare(tmp);
+    if (root.empty()) return false;
+    while (root.size() > 1 && root.back() == '/') root.pop_back();
+    root.push_back('/');
+
+    const std::string mp = CanonicalizeForCompare(path);
+    if (mp.size() <= root.size()) return false;
+    if (mp.compare(0, root.size(), root) != 0) return false;   // 必须在 temp 目录**之下**
+
+    const std::string leaf = mp.substr(root.size());
+    if (leaf.find('/') != std::string::npos) return false;      // 只认 temp 的直接子项（挂载点本身）
+    return leaf.rfind("rlplayer-update-mnt", 0) == 0;           // basename 必须是我们的命名
+}
+
+void set_test_force_unmount_failure(bool enabled) {
+    detail_native::UnmountFailTestFlag().store(enabled);
+}
+
 bool mount_image(const std::string& dmgPath, const std::string& mountPoint,
                  std::string& outAppPath, std::string& err) {
     outAppPath.clear();
     err.clear();
     if (dmgPath.empty() || mountPoint.empty()) { err = "参数为空"; return false; }
     ::mkdir(mountPoint.c_str(), 0700);
+
+    // ⚠️ 先清路：**绝不允许在已挂载的路径上叠挂**（2026-11-07 事故机制，见本节顶部说明）
+    if (is_mount_point(mountPoint)) {
+        std::string uerr;
+        if (!unmount_image(mountPoint, uerr)) {
+            err = "挂载点已被占用且清理失败：" + mountPoint + "（" + uerr + "）";
+            return false;                     // 宁可明确失败，也不叠挂
+        }
+        ::mkdir(mountPoint.c_str(), 0700);    // unmount_image 成功后会把目录 rmdir 掉
+    }
+
     std::string out;
-    const std::string cmd = "/usr/bin/hdiutil attach -nobrowse -noverify -noautoopen -mountpoint " +
+    // -readonly：镜像只读挂载。真实产物是 UDZO（压缩、天然只读），但**未压缩镜像**
+    // （测试夹具、或将来改用稀疏/UDIF 未压缩格式）默认可写，挂载瞬间 HFS 会回写卷头
+    // （挂载时间等）⟹ 镜像文件字节被改，后续任何 sha256 复核都会对不上（已实测：
+    // makehybrid 夹具挂载前后 sha 不同）。更新流程从不往镜像里写东西，只读是正确语义。
+    const std::string cmd = "/usr/bin/hdiutil attach -readonly -nobrowse -noverify -noautoopen -mountpoint " +
                             detail_native::ShellQuote(mountPoint) + " " +
                             detail_native::ShellQuote(dmgPath) + " 2>&1";
     if (detail_native::RunCapture(cmd, out) != 0) {
-        err = "hdiutil attach 失败：" + out;
+        err = "hdiutil attach 失败：" + detail_native::TrimCmdOutput(out);
         return false;
     }
     // 取镜像内第一个 *.app（不假设名字：产物可能叫 RLPlayer.app）
@@ -649,15 +781,77 @@ bool mount_image(const std::string& dmgPath, const std::string& mountPoint,
 }
 
 bool unmount_image(const std::string& mountPoint, std::string& err) {
-    std::string out;
-    if (detail_native::RunCapture("/usr/bin/hdiutil detach " + detail_native::ShellQuote(mountPoint) + " 2>&1",
-                                  out) != 0) {
-        err = "hdiutil detach 失败：" + out;
-        // 挂载点目录留给系统清理；不 force（铁律 2 的精神：不硬来）
+    err.clear();
+    if (mountPoint.empty()) { err = "挂载点为空"; return false; }
+
+    // 仅测试用：模拟"资源忙"卸载失败（不真卸；测试自己负责恢复并清理）
+    if (detail_native::UnmountFailTestFlag().load()) {
+        err = "hdiutil detach 失败（测试注入：couldn't eject - 资源忙；共尝试 8 次）";
         return false;
     }
-    ::rmdir(mountPoint.c_str());
-    return true;
+
+    // 幂等：本来就不是挂载点 ⟹ 没有东西可卸（也顺手清掉遗留的空目录）
+    if (!is_mount_point(mountPoint)) {
+        ::rmdir(mountPoint.c_str());
+        return true;
+    }
+
+    const std::string q = detail_native::ShellQuote(mountPoint);
+    std::string out, lastOut;
+    int tries = 0;
+
+    // ① hdiutil detach 共 5 次，失败按 150/300/600/900ms 退避（第一次立刻试）
+    static const int kBackoffMs[5] = {0, 150, 300, 600, 900};
+    for (int i = 0; i < 5; ++i) {
+        if (kBackoffMs[i] > 0) ::usleep((useconds_t)kBackoffMs[i] * 1000);
+        ++tries;
+        out.clear();
+        if (detail_native::RunCapture("/usr/bin/hdiutil detach " + q + " 2>&1", out) == 0) {
+            ::rmdir(mountPoint.c_str());
+            return true;
+        }
+        lastOut = detail_native::TrimCmdOutput(out);
+    }
+
+    // ② 兜底：diskutil unmount（走 DiskArbitration，对"某进程占用卷"会直接点名 dissenting PID）
+    // ⚠️ 本机 diskutil 在 /usr/sbin（/usr/bin/diskutil 不存在，已实测）
+    ++tries;
+    out.clear();
+    if (detail_native::RunCapture("/usr/sbin/diskutil unmount " + q + " 2>&1", out) == 0) {
+        // 卷已卸下 ⟹ 挂载点已空（这正是我们要的结果）；再试一次把设备也 detach 掉
+        std::string o2;
+        (void)detail_native::RunCapture("/usr/bin/hdiutil detach " + q + " 2>&1", o2);
+        ::rmdir(mountPoint.c_str());
+        return true;
+    }
+    lastOut = detail_native::TrimCmdOutput(out);
+
+    // ③ 再给一次普通 detach（diskutil 刚把占用者梳理过，这一枪常常就过了）
+    ++tries;
+    out.clear();
+    if (detail_native::RunCapture("/usr/bin/hdiutil detach " + q + " 2>&1", out) == 0) {
+        ::rmdir(mountPoint.c_str());
+        return true;
+    }
+    lastOut = detail_native::TrimCmdOutput(out);
+
+    // ④ 最后手段：-force —— **只有确认是我们自己的临时挂载点才允许**
+    // （保险丝：绝不对用户真盘/别的卷强制卸载；判错的后果是拔掉用户正在用的盘）
+    const bool mayForce = is_own_temp_mount(mountPoint);
+    if (mayForce) {
+        ++tries;
+        out.clear();
+        if (detail_native::RunCapture("/usr/bin/hdiutil detach -force " + q + " 2>&1", out) == 0) {
+            ::rmdir(mountPoint.c_str());
+            return true;
+        }
+        lastOut = detail_native::TrimCmdOutput(out);
+    }
+
+    err = "hdiutil detach 失败（共尝试 " + std::to_string(tries) + " 次" +
+          (mayForce ? "，含 -force" : "；该路径不是自有临时挂载点，未使用 -force") +
+          "；最后一次输出：" + lastOut + "）";
+    return false;
 }
 
 bool install_app_bundle(const std::string& srcApp, const std::string& targetApp,
@@ -858,30 +1052,48 @@ bool install_from_local_dmg(const std::string& dmgPath,
                             const std::string& expectedSha256, long long expectedSize,
                             const std::string& mountPoint,
                             const std::string& targetApp,
-                            std::string& outBackup, std::string& err) {
+                            std::string& outBackup, std::string& err,
+                            std::string& outWarning) {
     outBackup.clear();
+    outWarning.clear();
     err.clear();          // 成功时不留上一次的失败文案（调用方可能在同一个 err 上复用）
 
     // ① 校验必须是第一道闸门。过了才允许挂载/替换 —— 顺序即安全边界。
     const VerifyResult vr = verify_downloaded_file(dmgPath, expectedSha256, expectedSize);
     if (!vr.ok) {
         err = vr.error;                  // 调用方负责丢弃 dmg 文件
+        // 本层拿不到 token（err 只由路径/系统输出拼成），脱敏是恒等变换，但仍过一遍
+        detail_native::AppendInstallFailLog("verify", redact_token(err, std::string()));
         return false;                    // ← 绝不进入 ②③
     }
 
     // ② 挂载
     std::string srcApp;
-    if (!mount_image(dmgPath, mountPoint, srcApp, err)) return false;
+    if (!mount_image(dmgPath, mountPoint, srcApp, err)) {
+        detail_native::AppendInstallFailLog("mount", redact_token(err, std::string()));
+        return false;
+    }
 
     // ③ 安装（内部备份 + 失败回滚）
     std::string backup;
     const bool ok = install_app_bundle(srcApp, targetApp, backup, err);
     outBackup = backup;
+    if (!ok) detail_native::AppendInstallFailLog("install", redact_token(err, std::string()));
 
     // ④ 无论成败都卸载（否则会残留挂载点）
+    //
+    // ⚠️ 2026-11-07 修的真 BUG：这里原来把"装成功但没卸干净"直接 **同化成整单失败**
+    //   （err = uerr; return false）。后果是用户看到「检查失败：hdiutil detach 失败…资源忙」，
+    //   而 /Applications/RLPlayer.app **其实已经换成新版了**，也不会自动重启 ——
+    //   用户以为没更新，实际已经更新，下次再点又会撞上"资源忙"。
+    //   正确做法：装成功就返回 true，把"没卸干净"当 **warning** 交给调用方（err 保持空），
+    //   由调用方记一行日志后照常走自动重启。
     std::string uerr;
     if (!unmount_image(mountPoint, uerr)) {
-        if (ok) { err = uerr; return false; }        // 装成功但没卸干净 → 报失败让人看到
+        if (ok) {
+            outWarning = uerr;           // 如实报告，但绝不因此判定更新失败
+            err.clear();
+        }
     }
     return ok;
 }
@@ -916,9 +1128,36 @@ bool run_install_pipeline(const CheckResult& plan, ProgressFn progress, CancelTo
     const std::string dmgPath = opts.dmgPath.empty()
         ? rta::platform::join(rta::platform::temp_dir_utf8(), "rlplayer-update.dmg")
         : opts.dmgPath;
+    // 2026-11-07：默认挂载点必须**每轮唯一**（<temp>/rlplayer-update-mnt-<pid>）。
+    // 原来写死 <temp>/rlplayer-update-mnt ⟹ "上一轮的残留"与"这一轮"是同一路径，
+    // 11-07 就是撞在 11-06 留下的 disk25 上（detach 必然"资源忙"）。
     const std::string mntPath = opts.mountPoint.empty()
-        ? rta::platform::join(rta::platform::temp_dir_utf8(), "rlplayer-update-mnt")
+        ? rta::platform::join(rta::platform::temp_dir_utf8(),
+                              "rlplayer-update-mnt-" + std::to_string((long long)::getpid()))
         : opts.mountPoint;
+
+    // ---------- 0. 遗留挂载自愈（2026-11-07）----------
+    // 旧版本把挂载点写死成 <temp>/rlplayer-update-mnt，踩过这个 bug 的用户机器上可能
+    // **还挂着一份从没卸干净的镜像**（本机现在就有一条 /dev/disk25s1 挂在
+    // .../T/rlplayer-update-mnt 上，已经挂了一天多）。发版后应当自愈，而不是等用户手工 detach。
+    //
+    // 规则：
+    //   * 只有"那个路径确实还是挂载点"才动它（别人的目录/普通文件一概不碰）；
+    //   * 清理走的是 unmount_image() 那一套（重试 → diskutil → 仅自家路径才 -force）；
+    //   * **清不掉不阻断**本次更新（新挂载点已每轮唯一，两者不冲突），但必须留痕。
+    {
+        const std::string staleMnt = rta::platform::join(rta::platform::temp_dir_utf8(),
+                                                         "rlplayer-update-mnt");
+        if (is_mount_point(staleMnt)) {
+            std::string staleErr;
+            const bool cleaned = unmount_image(staleMnt, staleErr);
+            char line[2200];
+            std::snprintf(line, sizeof line, "UPDATE_STALE_MOUNT_CLEANED path=%s ok=%d err=%s",
+                          staleMnt.c_str(), cleaned ? 1 : 0,
+                          redact_token(staleErr, token).c_str());
+            detail_native::AppendUpdateLog(line);
+        }
+    }
 
     // ---------- 1. 下载（NSURLSession 流式，真进度）----------
     report("downloading", "正在下载 " + plan.remoteVersion + " …", 0);
@@ -980,6 +1219,8 @@ bool run_install_pipeline(const CheckResult& plan, ProgressFn progress, CancelTo
     if (!vr.ok) {
         if (!opts.keepDmgOnFailure) ::unlink(dmgPath.c_str());   // ← 关键：失败即丢弃
         outErr = "校验失败，已丢弃：" + vr.error;
+        // 落盘（token 已脱敏）：失败必须有现场，不能只剩一行 BEGIN_INSTALL_ENTER
+        detail_native::AppendInstallFailLog("verify", redact_token(vr.error, token));
         return false;
     }
     report("verifying", "sha256 校验通过", InstallProgressRange::kVerifyEnd);
@@ -994,15 +1235,25 @@ bool run_install_pipeline(const CheckResult& plan, ProgressFn progress, CancelTo
     // ---------- 3+4. 挂载 → 备份 → 替换 → 卸载（复用有序流水线）----------
     // ⚠️ install_from_local_dmg 内部第一件事就是**再校验一次** sha256（双重闸门）。
     report("installing", "正在安装…", InstallProgressRange::kVerifyEnd);
-    std::string backup, ierr;
+    std::string backup, ierr, iwarn;
     const bool installed = install_from_local_dmg(dmgPath, plan.sha256, plan.size,
-                                                 mntPath, target, backup, ierr);
+                                                 mntPath, target, backup, ierr, iwarn);
     ::unlink(dmgPath.c_str());
-    ::rmdir(mntPath.c_str());
+    ::rmdir(mntPath.c_str());          // 结束（成功或失败）都清掉挂载点目录
     outBackup = backup;
     if (!installed) {
+        // 失败的具体 stage/原因已由 install_from_local_dmg 落盘（UPDATE_INSTALL_FAIL），
+        // 这里**不重复写**一行，避免同一次失败在日志里出现两条互相打架的记录。
         outErr = ierr;
         return false;
+    }
+    if (!iwarn.empty()) {
+        // 装好了但没卸干净：**不再算整单失败**（2026-11-07 真 BUG 的修复点）。
+        // 只落一行 warning 留痕，然后照常往下走到自动重启与 report("done")。
+        char line[2000];
+        std::snprintf(line, sizeof line, "UPDATE_UNMOUNT_WARN stage=unmount err=%s",
+                      redact_token(iwarn, token).c_str());
+        detail_native::AppendUpdateLog(line);
     }
     fprintf(stderr, "RLPlayer: 更新已安装到 %s（备份：%s）\n",
             target.c_str(), backup.empty() ? "无（全新安装）" : backup.c_str());

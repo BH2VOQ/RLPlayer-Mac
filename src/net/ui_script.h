@@ -406,7 +406,10 @@ function onUpdateStatus(obj) {
     updBar(null);
     updInstallBtn(false);
     // ⚠️ 绝不说「已是最新」：网络/鉴权/解析失败就是失败
-    updMsg('检查失败：' + (obj.message || obj.code || '未知原因'), 'err');
+    // 2026-11-07：安装阶段失败不能再叫「检查失败」——事故现场就是这样误导用户的：
+    //   .app 其实已经换好，界面上却写「检查失败：hdiutil detach 失败…」，看着像没开始更新。
+    updMsg((obj.code === 'install-failed' ? '更新安装失败：' : '检查失败：') +
+           (obj.message || obj.code || '未知原因'), 'err');
   } else if (stage === 'installing') {
     UPD.busy = true;
     updMsg(obj.message || '正在更新…');
@@ -9442,7 +9445,8 @@ function renderSettingsPage() {
   } else if (UPD.stage === 'up-to-date') {
     updMsg('已是最新版本', 'ok');
   } else if (UPD.stage === 'failed' && UPD.info) {
-    updMsg('检查失败：' + (UPD.info.message || UPD.info.code || '未知原因'), 'err');
+    updMsg((UPD.info.code === 'install-failed' ? '更新安装失败：' : '检查失败：') +
+           (UPD.info.message || UPD.info.code || '未知原因'), 'err');
   }
 
   // 2026-10-26 邮件反馈卡片：与更新卡片同样在每次重建后重新绑定

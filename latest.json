@@ -1,8 +1,8 @@
 {
-  "version": "1.1.4-beta1",
-  "notes": "Beta of 1.1.4: single-track audio analysis on the Now Playing page — three cards (Dynamics / Audio Quality / Lossless Check) folded at L0/L1/L2, an independent true peak in dBTP (4x oversampling), auto analysis off by default with per-track dedup and cancel-on-track-change, \"N/A\" instead of 0 when a metric cannot be measured, and an 11-point smoothed envelope for version-comparison alignment.\n1.1.4 预发布：单曲页新增音频分析面板（动态 / 音质 / 假无损三张卡，L0/L1/L2 三级折叠），独立真峰 dBTP（4× 过采样），自动分析默认关闭（每曲去重、切歌取消），测不出的指标显示「不适用」而不是 0；版本对比改用 11 点平滑包络对齐。",
-  "download_url": "https://github.com/BH2VOQ/RLPlayer-Mac/releases/download/v1.1.4-beta1/RLPlayer-1.1.4-beta1-macOS-arm64.dmg",
-  "sha256": "9acfe3577a46ee365d05e65f1255b9fc7e06d54c6db19d928d0f93f580e121c4",
-  "size": 8011832,
-  "published_at": "2026-11-07T03:01:36Z"
+  "version": "1.1.4-beta2",
+  "notes": "Updater: an update that was already installed is no longer reported as failed when the downloaded DMG cannot be unmounted; each run uses its own mount point, unmount retries and falls back, and leftovers from older builds are cleaned automatically · 更新器：已经装好的更新不再因 DMG 卸不掉而误报失败；挂载点每轮唯一、卸载带重试与兜底、历史残留自动清理",
+  "download_url": "https://github.com/BH2VOQ/RLPlayer-Mac/releases/download/v1.1.4-beta2/RLPlayer-1.1.4-beta2-macOS-arm64.dmg",
+  "sha256": "e48208199f9ce75c051ab73338ed37d47741057c0d42aa4ca111b50577f4474c",
+  "size": 8016315,
+  "published_at": "2026-11-07T04:05:38Z"
 }

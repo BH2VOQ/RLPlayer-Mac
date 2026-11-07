@@ -107,6 +107,72 @@ static std::string read_marker(const std::string& appPath) {
     return s;
 }
 
+// ---------------------------------------------------------------------------
+// 【2026-11-07 新增】夹具：造一个**真的能挂载**的镜像
+//
+// 首选 hdiutil create -srcfolder（与线上发布的 UDZO 同构）。本机沙箱实测会拒绝
+// create（"操作不被允许"），那就退到 hdiutil makehybrid -hfs —— 同一条 DiskImages
+// 路径，只是格式不同：一样能 attach / 读文件 / detach，足以验证挂载点语义。
+// 两条都不行 ⟹ 夹具造不出来，**如实失败**（不跳过断言、不伪造通过），并打印实际走的是哪条。
+// ---------------------------------------------------------------------------
+static bool make_image_fixture(const std::string& stageDir, const std::string& outBase,
+                               std::string& outImage, std::string& why) {
+    outImage.clear();
+    why.clear();
+    {
+        const std::string img = outBase + ".udzo.dmg";
+        ::unlink(img.c_str());
+        const int rc = run("/usr/bin/hdiutil create -quiet -srcfolder '" + stageDir +
+                           "' -format UDZO -volname FixtureF4 '" + img + "'");
+        if (rc == 0 && file_exists(img)) {
+            outImage = img;
+            why = "hdiutil create(UDZO)";
+            return true;
+        }
+    }
+    {
+        const std::string baseNoExt = outBase + ".hyb";
+        run("rm -f '" + baseNoExt + ".dmg' '" + baseNoExt + ".iso'");
+        const int rc = run("/usr/bin/hdiutil makehybrid -hfs -quiet -o '" + baseNoExt +
+                           "' '" + stageDir + "'");
+        const std::string img = baseNoExt + ".dmg";
+        if (rc == 0 && file_exists(img)) {
+            outImage = img;
+            why = "hdiutil makehybrid(HFS)  ← hdiutil create 在本机被沙箱拒绝";
+            return true;
+        }
+    }
+    why = "hdiutil create 与 hdiutil makehybrid 都失败（造不出可挂载夹具）";
+    return false;
+}
+
+// 数一数系统里还挂着几个引用这个镜像文件的设备（0 = 没有残留）。
+// 为什么必须数它：只断言"函数返回 true"看不出设备泄漏 —— 而 11-07 事故的形态正是
+// 「.app 装好了，但每跑一次就多留一个卸不掉的 disk」。用 -F 精确匹配路径。
+static long long count_attached_images(const std::string& imagePath) {
+    if (imagePath.empty()) return -1;
+    FILE* p = ::popen(("/usr/bin/hdiutil info 2>/dev/null | /usr/bin/grep -F -c -- '" +
+                       imagePath + "'").c_str(), "r");
+    if (!p) return -1;
+    char buf[64] = {0};
+    long long n = -1;
+    if (std::fgets(buf, sizeof buf, p)) n = std::atoll(buf);
+    ::pclose(p);
+    return n;
+}
+
+// 文件里是否出现某段文本（用来断言"失败/warning 真的写进了日志"）
+static bool file_contains(const std::string& path, const std::string& needle) {
+    FILE* f = std::fopen(path.c_str(), "rb");
+    if (!f) return false;
+    std::string s;
+    char buf[4096];
+    size_t n = 0;
+    while ((n = std::fread(buf, 1, sizeof buf, f)) > 0) s.append(buf, n);
+    std::fclose(f);
+    return s.find(needle) != std::string::npos;
+}
+
 int main() {
     @autoreleasepool {
         setvbuf(stdout, nullptr, _IONBF, 0);
@@ -176,8 +242,8 @@ int main() {
 
             const std::string mnt = base + "/mnt-guard";
             const std::string wrongSha(64, 'b');       // 与真 dmg 摘要肯定不同
-            std::string backup, gerr;
-            const bool r = install_from_local_dmg(dmg, wrongSha, 0, mnt, target, backup, gerr);
+            std::string backup, gerr, gwarn;
+            const bool r = install_from_local_dmg(dmg, wrongSha, 0, mnt, target, backup, gerr, gwarn);
             ck(!r, "【篡改】install_from_local_dmg 拒绝安装", gerr);
             ck(backup.empty(), "【篡改】没有产生备份（说明连备份都没开始）", backup);
             ck(read_marker(target) == beforeSha,
@@ -187,9 +253,9 @@ int main() {
             ck(!dir_exists(mnt), "【篡改】挂载点未被创建（拒绝发生在挂载之前）");
 
             // 反向对照：同一份 dmg + **正确**摘要 ⟹ 必须真的换掉（否则上面那条可能只是"恒不变"）
-            std::string backup2, gerr2;
+            std::string backup2, gerr2, gwarn2;
             const std::string mnt2 = base + "/mnt-guard-ok";
-            const bool r2 = install_from_local_dmg(dmg, realSha, file_size(dmg), mnt2, target, backup2, gerr2);
+            const bool r2 = install_from_local_dmg(dmg, realSha, file_size(dmg), mnt2, target, backup2, gerr2, gwarn2);
             ck(r2, "【对照】正确摘要 ⟹ 安装成功（证明上一条不是恒不动作）", gerr2);
             ck(read_marker(target) == "PAYLOAD-v1.0.5",
                "【对照】内容确实被换成新版", read_marker(target));
@@ -982,6 +1048,488 @@ int main() {
             run("pkill -TERM -f '" + srvPy + "' 2>/dev/null");
             ::usleep(150 * 1000);
             set_test_allow_loopback_download(false);
+        }
+
+
+        // =====================================================================
+        // 14. 【本次修复·A】挂载点已被别的真镜像占着 ⟹ 先清路再挂，绝不叠挂
+        //
+        // 现场（2026-11-07）：写死的挂载点 <temp>/rlplayer-update-mnt 上还挂着 11-06
+        // 那次更新留下的 disk25，第二天再走同一路径。
+        // 本机实测：hdiutil attach -mountpoint <已被占用的路径> 会**成功**并把新卷
+        // 盖在旧卷上面（rc=0），旧卷从此既看不见也卸不掉 ⟹ 收尾 detach 就是"资源忙"。
+        //
+        // 判据设计（铁律 3：不能只断言"返回 true"）：
+        //   a) 前提成立：调用前挂载点上**确实**挂着一个镜像，且内容是可核对的旧载荷
+        //   b) install_from_local_dmg 返回 true 且 err 为空
+        //   c) 目标 .app 的内容是**新**镜像里的那份（证明真的换了，不是没动）
+        //   d) 收尾后 hdiutil info 里**一个**挂着这两个镜像的设备都不剩
+        //      （旧实现在这里会留下"旧"镜像 —— 这正是事故里 disk23/26/27 的来源）
+        // =====================================================================
+        {
+            const std::string occBase = base + "/occ";
+            run("mkdir -p '" + occBase + "/stage-old' '" + occBase + "/stage-new'");
+            ck(make_fake_app(occBase + "/stage-old/RLPlayer.app", "PAYLOAD-OLD-A"),
+               "【A】构造「旧」镜像载荷");
+            ck(make_fake_app(occBase + "/stage-new/RLPlayer.app", "PAYLOAD-NEW-B"),
+               "【A】构造「新」镜像载荷");
+
+            std::string imgOld, imgNew, howOld, howNew;
+            const bool okOld = make_image_fixture(occBase + "/stage-old", occBase + "/img-old",
+                                                  imgOld, howOld);
+            const bool okNew = make_image_fixture(occBase + "/stage-new", occBase + "/img-new",
+                                                  imgNew, howNew);
+            std::printf("  [info] 夹具镜像：old=%s（%s）  new=%s（%s）\n",
+                        imgOld.c_str(), howOld.c_str(), imgNew.c_str(), howNew.c_str());
+            ck(okOld && file_exists(imgOld), "【A】造出「旧」镜像（真能挂载的那种）", howOld);
+            ck(okNew && file_exists(imgNew), "【A】造出「新」镜像（真能挂载的那种）", howNew);
+
+            // 挂载点名成我们自己的命名（万一本机需要 -force 兜底时守卫能放行；正常路径不会用到）
+            const std::string mpOcc = base + "/rlplayer-update-mnt-occ";
+            std::string srcApp, aerr;
+            const bool preMounted = mount_image(imgOld, mpOcc, srcApp, aerr);
+            ck(preMounted, "【A】前提：先把「旧」镜像挂到目标挂载点", aerr);
+            ck(is_mount_point(mpOcc),
+               "【A】前提：该路径确实已是挂载点（is_mount_point 判定正确）", mpOcc);
+            ck(!srcApp.empty() && read_marker(srcApp) == "PAYLOAD-OLD-A",
+               "【A】前提：挂载点上此刻真的躺着旧载荷", read_marker(srcApp));
+
+            std::string shaNew, aShaErr;
+            ck(sha256_of_file(imgNew, shaNew, aShaErr), "【A】算「新」镜像的摘要", aShaErr);
+
+            const std::string targetOcc = base + "/occ-apps/RLPlayer.app";
+            run("mkdir -p '" + base + "/occ-apps'");
+            std::string backupOcc, insErr, warnOcc;
+            const bool okOcc = install_from_local_dmg(imgNew, shaNew, file_size(imgNew),
+                                                      mpOcc, targetOcc, backupOcc, insErr, warnOcc);
+            ck(okOcc, "【A】挂载点被占用时安装仍然成功（先清路，不是硬往上叠）", insErr);
+            ck(insErr.empty(), "【A】成功时 err 为空", insErr);
+            ck(warnOcc.empty(), "【A】正常卸载不产生 warning", warnOcc);
+            ck(read_marker(targetOcc) == "PAYLOAD-NEW-B",
+               "【A】装进去的是**新**镜像里的那份", read_marker(targetOcc));
+            ck(!dir_exists(mpOcc), "【A】挂载点目录已清掉（rmdir，不留空壳）", mpOcc);
+
+            const long long leftOld = count_attached_images(imgOld);
+            const long long leftNew = count_attached_images(imgNew);
+            std::printf("  [info] 安装后仍 attach 的设备数：old=%lld new=%lld\n", leftOld, leftNew);
+            ck(leftOld == 0, "【A】旧镜像已彻底卸下（hdiutil info 里 0 条）",
+               "count=" + std::to_string(leftOld));
+            ck(leftNew == 0, "【A】新镜像也已彻底卸下（0 条）",
+               "count=" + std::to_string(leftNew));
+        }
+
+        // =====================================================================
+        // 15. 【本次修复·B】卸载失败不再算整单失败（注入式强制失败）
+        //
+        // 现场（2026-11-07 11:07）：.app 已经从 1.1.3.2 换成 1.1.4-beta1（备份也在），
+        // 但 UI 报「检查失败：hdiutil detach 失败 … couldn't eject "disk25" - 资源忙」，
+        // 也没有自动重启。用户以为没更新，实际已经更新了。
+        //
+        // 判据：
+        //   ① install_from_local_dmg：装成功 + 卸载失败 ⟹ **返回 true**、err 为空、warning 非空
+        //   ② run_install_pipeline：同样返回 true（不再整单失败），且 .app 已换好
+        //   ③ 那条 warning 必须**落盘**（UPDATE_UNMOUNT_WARN stage=unmount err=…）
+        //   ④ 流水线的默认挂载点 = <temp>/rlplayer-update-mnt-<pid>（每轮唯一，不写死）
+        //   ⑤ 测试自己把挂载残留清干净（不许把这个测试变成新的"disk25"来源）
+        // =====================================================================
+        {
+            const std::string fBase = base + "/fu";
+            run("mkdir -p '" + fBase + "/stage'");
+            ck(make_fake_app(fBase + "/stage/RLPlayer.app", "PAYLOAD-C"), "【B】构造镜像载荷");
+            std::string imgFu, howFu, shaFu, bShaErr;
+            ck(make_image_fixture(fBase + "/stage", fBase + "/img", imgFu, howFu),
+               "【B】造出可挂载镜像", howFu);
+            ck(sha256_of_file(imgFu, shaFu, bShaErr), "【B】算镜像摘要", bShaErr);
+            const long long szFu = file_size(imgFu);
+            std::printf("  [info] 镜像夹具：%s（%s） size=%lld\n",
+                        imgFu.c_str(), howFu.c_str(), szFu);
+
+            // ---------- B-① install_from_local_dmg + 注入强制卸载失败 ----------
+            {
+                const std::string targetB = base + "/fu-apps/RLPlayer.app";
+                run("mkdir -p '" + base + "/fu-apps'");
+                const std::string mpFu = base + "/rlplayer-update-mnt-fu";
+
+                set_test_force_unmount_failure(true);
+                std::string backupB, errB, warnB;
+                const bool okB = install_from_local_dmg(imgFu, shaFu, szFu, mpFu, targetB,
+                                                        backupB, errB, warnB);
+                set_test_force_unmount_failure(false);   // 立刻关掉：后面的真卸载不能被注入污染
+
+                ck(okB, "【B】装成功但卸载失败 ⟹ install_from_local_dmg 仍返回 true", errB);
+                ck(errB.empty(), "【B】返回 true 时 err 必须为空（warning 不许混进 err）", errB);
+                ck(!warnB.empty(), "【B】warning 被带出来（调用方能看到「没卸干净」）", warnB);
+                ck(read_marker(targetB) == "PAYLOAD-C",
+                   "【B】.app 确实已经换成新版（更新是真的生效了）", read_marker(targetB));
+                ck(is_mount_point(mpFu),
+                   "【B】注入确实生效：那一刻挂载点还挂着（证明卸载真的失败了）", mpFu);
+
+                std::string cleanErr;
+                ck(unmount_image(mpFu, cleanErr),
+                   "【B】关掉注入后能真正卸掉（本测试不留挂载残留）", cleanErr);
+                ck(!is_mount_point(mpFu), "【B】挂载点已清", mpFu);
+            }
+
+            // ---------- B-② run_install_pipeline 也不再整单失败 ----------
+            {
+                const std::string srvFu = fBase + "/srv.py";
+                const std::string portFu = fBase + "/port.txt";
+                {
+                    FILE* f = std::fopen(srvFu.c_str(), "wb");
+                    std::string py;
+                    py += "import http.server, socketserver\n";
+                    py += "DATA = open('" + imgFu + "','rb').read()\n";
+                    py += "class H(http.server.BaseHTTPRequestHandler):\n";
+                    py += "    def do_GET(self):\n";
+                    py += "        self.send_response(200)\n";
+                    py += "        self.send_header('Content-Length', str(len(DATA)))\n";
+                    py += "        self.end_headers()\n";
+                    py += "        self.wfile.write(DATA); self.wfile.flush()\n";
+                    py += "    def log_message(self, *a): pass\n";
+                    py += "srv = socketserver.TCPServer(('127.0.0.1', 0), H)\n";
+                    py += "print(srv.server_address[1], flush=True); srv.serve_forever()\n";
+                    std::fwrite(py.data(), 1, py.size(), f);
+                    std::fclose(f);
+                }
+                std::system(("/usr/bin/python3 '" + srvFu + "' > '" + portFu + "' 2>&1 &").c_str());
+                int port = 0;
+                for (int i = 0; i < 100 && port <= 0; ++i) {
+                    ::usleep(100 * 1000);
+                    FILE* f = std::fopen(portFu.c_str(), "r");
+                    if (!f) continue;
+                    char buf[32] = {0};
+                    if (std::fgets(buf, sizeof buf, f)) port = std::atoi(buf);
+                    std::fclose(f);
+                }
+                ck(port > 0, "【B】本地 dmg HTTP 服务就绪", "port=" + std::to_string(port));
+
+                if (port > 0) {
+                    CheckResult plan;
+                    plan.decision = Decision::UpdateAvailable;
+                    plan.remoteVersion = "9.9.9-fu";
+                    plan.downloadUrl = "http://127.0.0.1:" + std::to_string(port) + "/u.dmg";
+                    plan.sha256 = shaFu;
+                    plan.size = szFu;
+
+                    const std::string targetP = base + "/fu-pipe/RLPlayer.app";
+                    run("mkdir -p '" + base + "/fu-pipe'");
+                    InstallPipelineOptions opt;
+                    opt.targetApp = targetP;
+                    opt.dmgPath = fBase + "/pipe.dmg";
+                    // ⚠️ mountPoint 故意留空：要验证**默认**挂载点是每轮唯一的
+                    //    <temp>/rlplayer-update-mnt-<pid>，而不是写死的老名字
+                    opt.autoRestart = false;      // 测试绝不真的 open 一个 .app
+
+                    const std::string defMp = rta::platform::join(
+                        rta::platform::temp_dir_utf8(),
+                        "rlplayer-update-mnt-" + std::to_string((long long)::getpid()));
+
+                    // loopback 下载闸门只在本测试里放行（外部地址仍被白名单拒）
+                    set_test_allow_loopback_download(true);
+                    set_test_force_unmount_failure(true);
+                    std::string perr, pbackup;
+                    const bool okP = run_install_pipeline(plan, nil, CancelToken(), opt, perr, pbackup);
+                    set_test_force_unmount_failure(false);
+                    set_test_allow_loopback_download(false);
+
+                    ck(okP, "【B】流水线：卸载失败也返回 true（整单不再失败）", perr);
+                    ck(perr.empty(), "【B】流水线：err 为空（不该把 warning 当失败）", perr);
+                    ck(read_marker(targetP) == "PAYLOAD-C",
+                       "【B】流水线：新版本确实装好了", read_marker(targetP));
+                    ck(is_mount_point(defMp),
+                       "【B】流水线默认挂载点 = <temp>/rlplayer-update-mnt-<pid>（且当时确实挂着）",
+                       defMp);
+                    ck(defMp.find("rlplayer-update-mnt-" + std::to_string((long long)::getpid())) !=
+                       std::string::npos,
+                       "【B】默认挂载点带 pid（每轮唯一，不再写死老名字）", defMp);
+
+                    const std::string logPath = rta::platform::join(
+                        rta::platform::config_dir_utf8(), "rlplayer-update.log");
+                    ck(file_contains(logPath, "UPDATE_UNMOUNT_WARN stage=unmount err="),
+                       "【B】UPDATE_UNMOUNT_WARN 已落盘到 rlplayer-update.log", logPath);
+
+                    std::string cleanErr2;
+                    ck(unmount_image(defMp, cleanErr2),
+                       "【B】关掉注入后流水线的挂载点也能真卸掉（不留残留）", cleanErr2);
+                }
+                std::system(("pkill -TERM -f '" + srvFu + "' 2>/dev/null").c_str());
+                ::usleep(150 * 1000);
+            }
+        }
+
+        // =====================================================================
+        // 16. 【本次修复·C】-force 的保险丝：is_own_temp_mount()
+        //
+        // 这是**唯一**允许 `hdiutil detach -force` 的守卫。判错的后果不是"更新失败"，
+        // 而是**强制卸载用户真盘/外接盘上的卷**。所以必须单独测，且"必须 false"的那几
+        // 条一个都不能少。
+        // =====================================================================
+        {
+            const std::string tmpDir = rta::platform::temp_dir_utf8();
+            ck(!tmpDir.empty(), "temp_dir_utf8 非空", tmpDir);
+            std::printf("  [info] temp_dir_utf8 = [%s]\n", tmpDir.c_str());
+
+            const std::string leaf = "rlplayer-update-mnt-" + std::to_string((long long)::getpid());
+            const std::string own = rta::platform::join(tmpDir, leaf);
+            ck(is_own_temp_mount(own), "【C】temp 目录下 rlplayer-update-mnt* ⟹ true", own);
+            ck(is_own_temp_mount(own + "-occ"),
+               "【C】同前缀的后缀变体也算自己的（...-occ）", own + "-occ");
+            ck(is_own_temp_mount(rta::platform::join(tmpDir, "rlplayer-update-mnt")),
+               "【C】老名字（不带后缀）同一判定 ⟹ true（兼容旧残留的清理）");
+
+            ck(!is_own_temp_mount(rta::platform::join(tmpDir, "someone-else-mnt")),
+               "【C】temp 下但 basename 前缀不对 ⟹ false");
+            ck(!is_own_temp_mount(rta::platform::join(tmpDir, "rlplayer-update")),
+               "【C】前缀更短（rlplayer-update）⟹ false");
+            ck(!is_own_temp_mount(rta::platform::join(tmpDir, "xrlplayer-update-mnt-1")),
+               "【C】前缀不在开头 ⟹ false");
+            ck(!is_own_temp_mount(own + "/RLPlayer.app"),
+               "【C】挂载点**里面**的子路径 ⟹ false（只认挂载点本身）", own + "/RLPlayer.app");
+
+            ck(!is_own_temp_mount("/Applications/rlplayer-update-mnt-1"),
+               "【C】/Applications 下的同名 ⟹ false（绝不 force 用户的应用盘）");
+            ck(!is_own_temp_mount("/Volumes/Backup/rlplayer-update-mnt-1"),
+               "【C】/Volumes/... 下的同名 ⟹ false（绝不 force 外接盘）");
+            ck(!is_own_temp_mount("/Users/Shared/rlplayer-update-mnt-1"),
+               "【C】用户目录下的同名 ⟹ false");
+            ck(!is_own_temp_mount("/"), "【C】根目录 ⟹ false");
+            ck(!is_own_temp_mount(""), "【C】空串 ⟹ false");
+            ck(!is_own_temp_mount("rlplayer-update-mnt-1"),
+               "【C】相对路径 ⟹ false（不是绝对路径就不能证明在 temp 下）");
+            ck(!is_own_temp_mount(tmpDir), "【C】temp 目录本身不是挂载点 ⟹ false", tmpDir);
+
+            // /var 与 /private/var（/tmp 与 /private/tmp）必须归一化后等价 ——
+            // 内核挂载表里记的是 /private/... 那一份，调用方传的常是 /var 或 /tmp。
+            ck(is_own_temp_mount("/private" + own),
+               "【C】/var(=/tmp) 与 /private/var 归一化后等价 ⟹ true", "/private" + own);
+
+            // is_mount_point 的基本判定（真挂载点的那条在用例 A/B 里已经验过）
+            ck(!is_mount_point(""), "【C】空串不是挂载点");
+            ck(!is_mount_point("/tmp/no-such-mount-pt-" + std::to_string((long long)::getpid())),
+               "【C】不存在的路径不是挂载点");
+            ck(is_mount_point("/"), "【C】/ 是挂载点（f_mntonname == /）");
+            ck(!is_mount_point("/Applications"),
+               "【C】/Applications 不是挂载点（在数据卷里，不是卷根）");
+        }
+
+        // =====================================================================
+        // 17. 【本次修复·D】install 阶段失败必须落盘（UPDATE_INSTALL_FAIL）
+        //
+        // 现场（2026-11-07）：整单失败时 rlplayer-update.log 里只有一行 BEGIN_INSTALL_ENTER，
+        // 到底是 verify / mount / install 哪一步、什么原因，**完全没有**，事后无法复盘。
+        // 三个 stage 各撞一次，逐个断言日志里有对应记录。
+        // =====================================================================
+        {
+            const std::string lBase = base + "/logf";
+            run("mkdir -p '" + lBase + "'");
+            const std::string logPath = rta::platform::join(
+                rta::platform::config_dir_utf8(), "rlplayer-update.log");
+
+            // ---------- D-① verify 失败 ----------
+            {
+                std::string imgL, howL, shaL, e0;
+                run("mkdir -p '" + lBase + "/stage'");
+                make_fake_app(lBase + "/stage/RLPlayer.app", "PAYLOAD-D");
+                if (make_image_fixture(lBase + "/stage", lBase + "/img", imgL, howL) &&
+                    sha256_of_file(imgL, shaL, e0)) {
+                    std::string bk, er, wn;
+                    const std::string wrongSha(64, 'd');
+                    const bool bad = install_from_local_dmg(imgL, wrongSha, 0,
+                                                            base + "/rlplayer-update-mnt-v",
+                                                            base + "/logf/t1.app", bk, er, wn);
+                    ck(!bad && !er.empty(), "【D】坏摘要 ⟹ 安装失败（前提）", er);
+                    ck(file_contains(logPath, "UPDATE_INSTALL_FAIL stage=verify err="),
+                       "【D】verify 失败已落盘（stage=verify）", logPath);
+                } else {
+                    ck(false, "【D】准备好 verify 用例的镜像夹具", howL);
+                }
+            }
+
+            // ---------- D-② mount 失败（摘要全对、但根本不是镜像）----------
+            {
+                const std::string notImage = lBase + "/not-an-image.bin";
+                {
+                    FILE* f = std::fopen(notImage.c_str(), "wb");
+                    if (f) { const char* junk = "this is definitely not a disk image\n"; std::fwrite(junk, 1, std::strlen(junk), f); std::fclose(f); }
+                }
+                std::string shaJ, e1;
+                ck(sha256_of_file(notImage, shaJ, e1), "【D】算「非镜像文件」的摘要", e1);
+                std::string bk, er, wn;
+                const bool bad = install_from_local_dmg(notImage, shaJ, file_size(notImage),
+                                                        base + "/rlplayer-update-mnt-m",
+                                                        base + "/logf/t2.app", bk, er, wn);
+                ck(!bad, "【D】摘要对但不是镜像 ⟹ 挂载失败（前提）", er);
+                ck(er.find("hdiutil attach") != std::string::npos || er.find("挂载点") != std::string::npos,
+                   "【D】失败原因确实是挂载（不是校验）", er);
+                ck(file_contains(logPath, "UPDATE_INSTALL_FAIL stage=mount err="),
+                   "【D】mount 失败已落盘（stage=mount）", logPath);
+            }
+
+            // ---------- D-③ install 失败（能挂载，但目标位置写不进去）----------
+            {
+                std::string imgL, howL, shaL, e2;
+                const bool haveImg = make_image_fixture(lBase + "/stage", lBase + "/img2", imgL, howL) &&
+                                     sha256_of_file(imgL, shaL, e2);
+                ck(haveImg, "【D】准备 install 用例的镜像夹具", howL);
+                if (haveImg) {
+                    std::string bk, er, wn;
+                    // /dev/null/RLPlayer.app ⟹ ditto 必然 "Not a directory"（已实测）
+                    const bool bad = install_from_local_dmg(imgL, shaL, file_size(imgL),
+                                                            base + "/rlplayer-update-mnt-i",
+                                                            "/dev/null/RLPlayer.app", bk, er, wn);
+                    ck(!bad, "【D】目标写不进去 ⟹ 安装失败（前提）", er);
+                    ck(er.find("复制到目标失败") != std::string::npos,
+                       "【D】失败原因确实是复制（不是校验/挂载）", er);
+                    ck(file_contains(logPath, "UPDATE_INSTALL_FAIL stage=install err="),
+                       "【D】install 失败已落盘（stage=install）", logPath);
+                    ck(!is_mount_point(base + "/rlplayer-update-mnt-i"),
+                       "【D】install 失败后挂载点照样被卸掉（不残留）");
+                }
+            }
+        }
+
+
+        // =====================================================================
+        // 18. 【本次修复·E】旧写死挂载点的遗留残留：流水线开工时自愈
+        //
+        // 旧版本把挂载点写死成 <temp>/rlplayer-update-mnt，踩过这个 bug 的用户机器上
+        // 可能**还挂着一份卸不掉的镜像**（本机现场：/dev/disk25s1 在
+        // /private/var/folders/…/T/rlplayer-update-mnt 上挂了一天多）。
+        // 发版后应当自愈，而不是等用户手工 detach。
+        //
+        // 判据：
+        //   ① 旧路径仍是挂载点 ⟹ 清掉它，并写 UPDATE_STALE_MOUNT_CLEANED path=… ok=1
+        //   ② 清不掉时（注入失败）⟹ **不阻断**：流水线照样 true，日志里 ok=0
+        //   ③ 两种情形都要求新版本**真的装好**（不能为了清残留把安装搞坏）
+        // =====================================================================
+        {
+            const std::string sBase = base + "/stale";
+            run("mkdir -p '" + sBase + "/stage'");
+            ck(make_fake_app(sBase + "/stage/RLPlayer.app", "PAYLOAD-STALE"), "【E】构造镜像载荷");
+            std::string imgS, howS, shaS, eS;
+            ck(make_image_fixture(sBase + "/stage", sBase + "/img", imgS, howS),
+               "【E】造出可挂载镜像", howS);
+            ck(sha256_of_file(imgS, shaS, eS), "【E】算镜像摘要", eS);
+            const long long szS = file_size(imgS);
+
+            const std::string staleMnt = rta::platform::join(rta::platform::temp_dir_utf8(),
+                                                             "rlplayer-update-mnt");
+            const std::string logPath = rta::platform::join(rta::platform::config_dir_utf8(),
+                                                            "rlplayer-update.log");
+            std::printf("  [info] 旧写死挂载点 = [%s]\n", staleMnt.c_str());
+
+            const std::string srvS = sBase + "/srv.py";
+            const std::string portS = sBase + "/port.txt";
+            {
+                FILE* f = std::fopen(srvS.c_str(), "wb");
+                std::string py;
+                py += "import http.server, socketserver\n";
+                py += "DATA = open('" + imgS + "','rb').read()\n";
+                py += "class H(http.server.BaseHTTPRequestHandler):\n";
+                py += "    def do_GET(self):\n";
+                py += "        self.send_response(200)\n";
+                py += "        self.send_header('Content-Length', str(len(DATA)))\n";
+                py += "        self.end_headers()\n";
+                py += "        self.wfile.write(DATA); self.wfile.flush()\n";
+                py += "    def log_message(self, *a): pass\n";
+                py += "srv = socketserver.TCPServer(('127.0.0.1', 0), H)\n";
+                py += "print(srv.server_address[1], flush=True); srv.serve_forever()\n";
+                std::fwrite(py.data(), 1, py.size(), f);
+                std::fclose(f);
+            }
+            std::system(("/usr/bin/python3 '" + srvS + "' > '" + portS + "' 2>&1 &").c_str());
+            int portS8 = 0;
+            for (int i = 0; i < 100 && portS8 <= 0; ++i) {
+                ::usleep(100 * 1000);
+                FILE* f = std::fopen(portS.c_str(), "r");
+                if (!f) continue;
+                char buf[32] = {0};
+                if (std::fgets(buf, sizeof buf, f)) portS8 = std::atoi(buf);
+                std::fclose(f);
+            }
+            ck(portS8 > 0, "【E】本地 dmg HTTP 服务就绪", "port=" + std::to_string(portS8));
+
+            if (portS8 > 0) {
+                CheckResult plan;
+                plan.decision = Decision::UpdateAvailable;
+                plan.remoteVersion = "9.9.9-stale";
+                plan.downloadUrl = "http://127.0.0.1:" + std::to_string(portS8) + "/u.dmg";
+                plan.sha256 = shaS;
+                plan.size = szS;
+
+                // ---------- 18a：旧路径被占着 ⟹ 自愈 + 流水线成功 ----------
+                {
+                    std::string srcApp, me;
+                    const bool pre = mount_image(imgS, staleMnt, srcApp, me);
+                    ck(pre, "【E】前提：把镜像挂到旧写死挂载点上（模拟用户的遗留残留）", me);
+                    ck(is_mount_point(staleMnt), "【E】前提：旧路径确实已是挂载点", staleMnt);
+
+                    InstallPipelineOptions opt;
+                    opt.targetApp = base + "/stale-apps-a/RLPlayer.app";
+                    run("mkdir -p '" + base + "/stale-apps-a'");
+                    opt.dmgPath = sBase + "/a.dmg";
+                    opt.autoRestart = false;
+
+                    set_test_allow_loopback_download(true);
+                    std::string perr, pback;
+                    const bool okP = run_install_pipeline(plan, nil, CancelToken(), opt, perr, pback);
+                    set_test_allow_loopback_download(false);
+                    ck(okP, "【E】旧残留存在时流水线照样成功", perr);
+                    ck(read_marker(opt.targetApp) == "PAYLOAD-STALE",
+                       "【E】新版本确实装好了", read_marker(opt.targetApp));
+                    ck(file_contains(logPath, "UPDATE_STALE_MOUNT_CLEANED path=" + staleMnt),
+                       "【E】自愈动作已落盘（带路径）", logPath);
+                    ck(file_contains(logPath, "UPDATE_STALE_MOUNT_CLEANED path=" + staleMnt + " ok=1"),
+                       "【E】清理结果 ok=1（真的清掉了）", logPath);
+                    ck(!is_mount_point(staleMnt), "【E】旧挂载点已清空", staleMnt);
+                    const long long leftS = count_attached_images(imgS);
+                    ck(leftS == 0, "【E】旧镜像不再有 attach 残留",
+                       "count=" + std::to_string(leftS));
+                }
+
+                // ---------- 18b：清不掉时不阻断（注入强制失败）----------
+                {
+                    std::string srcApp, me;
+                    const bool pre = mount_image(imgS, staleMnt, srcApp, me);
+                    ck(pre, "【E】前提：再挂一份到旧路径（给「清不掉」分支用）", me);
+                    ck(is_mount_point(staleMnt), "【E】前提（18b）：旧路径又挂上了", staleMnt);
+
+                    InstallPipelineOptions opt;
+                    opt.targetApp = base + "/stale-apps-b/RLPlayer.app";
+                    run("mkdir -p '" + base + "/stale-apps-b'");
+                    opt.dmgPath = sBase + "/b.dmg";
+                    opt.autoRestart = false;
+
+                    set_test_allow_loopback_download(true);
+                    set_test_force_unmount_failure(true);
+                    std::string perr, pback;
+                    const bool okP = run_install_pipeline(plan, nil, CancelToken(), opt, perr, pback);
+                    set_test_force_unmount_failure(false);
+                    set_test_allow_loopback_download(false);
+
+                    ck(okP, "【E】旧残留清不掉也**不阻断**更新（仍返回 true）", perr);
+                    ck(read_marker(opt.targetApp) == "PAYLOAD-STALE",
+                       "【E】「清不掉」分支里新版本照样装好", read_marker(opt.targetApp));
+                    ck(file_contains(logPath, "UPDATE_STALE_MOUNT_CLEANED path=" + staleMnt + " ok=0"),
+                       "【E】清不掉时日志如实写 ok=0", logPath);
+                    ck(is_mount_point(staleMnt),
+                       "【E】清不掉 ⟹ 旧路径确实还挂着（注入生效，不是被别的东西清了）", staleMnt);
+
+                    // 收尾：注入关掉后把两份残留都清干净（本测试不制造新的 disk25）
+                    std::string c1;
+                    ck(unmount_image(staleMnt, c1), "【E】关掉注入后清掉旧路径残留", c1);
+                    const std::string defMp = rta::platform::join(
+                        rta::platform::temp_dir_utf8(),
+                        "rlplayer-update-mnt-" + std::to_string((long long)::getpid()));
+                    std::string c2;
+                    ck(unmount_image(defMp, c2), "【E】关掉注入后清掉本轮默认挂载点残留", c2);
+                    const long long left2 = count_attached_images(imgS);
+                    ck(left2 == 0, "【E】收尾后没有任何 attach 残留",
+                       "count=" + std::to_string(left2));
+                }
+            }
+            std::system(("pkill -TERM -f '" + srvS + "' 2>/dev/null").c_str());
+            ::usleep(150 * 1000);
         }
 
         // 清理

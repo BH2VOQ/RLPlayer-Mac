@@ -1707,6 +1707,7 @@ inline const I18nPair* i18n_table(std::size_t* count) {
         {"截止", "Cutoff"},
         {"段削波", "clipping runs"},
         {"个样本", "samples"},
+        {"更新安装失败：", "Install failed: "},
     };
     if (count) *count = sizeof(k) / sizeof(k[0]);
     return k;

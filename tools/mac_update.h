@@ -142,7 +142,7 @@ void begin_install(const CheckResult& plan, ProgressFn progress, InstallFn done,
 struct InstallPipelineOptions {
     std::string targetApp;              // 空 = detail_native::InstallTargetPath()
     std::string dmgPath;                // 空 = <temp>/rlplayer-update.dmg
-    std::string mountPoint;             // 空 = <temp>/rlplayer-update-mnt
+    std::string mountPoint;             // 空 = <temp>/rlplayer-update-mnt-<pid>（每轮唯一，绝不写死）
     int         downloadTimeoutSeconds = 120;
     bool        autoRestart = true;     // 测试必须传 false（绝不真的去 open 一个 .app）
     bool        keepDmgOnFailure = false;  // 仅诊断用；默认 false = 失败即删
@@ -194,6 +194,13 @@ DownloadResult download_to_file(const std::string& url,
 // 为什么需要它：要用**真 NSURLSession 打真 HTTP**验证流式进度，就必须能指向一个临时
 // 本机服务；否则这条改动永远只能靠代码审查（违反铁律 3）。
 void set_test_allow_loopback_download(bool enabled);
+
+// ⚠️ **仅测试用**：默认完全关闭。
+// 打开后 unmount_image() 不真的去卸，而是直接回报「资源忙」式失败。
+// 唯一用途是证明 2026-11-07 那条真 BUG 已修：**.app 换成功了但卸载失败 ⟹ 不再算整单失败**。
+// 生产路径永远不会打开它（没有调用点）；就算误开，后果也只是"临时挂载点没卸掉"，
+// 而不会碰到用户的 .app（卸载与替换是两件事）。
+void set_test_force_unmount_failure(bool enabled);
 
 // ---------------------------------------------------------------------------
 // 自动重启（2026-10-26：不再只说"请手动重启"）
@@ -249,7 +256,21 @@ bool mount_image(const std::string& dmgPath, const std::string& mountPoint,
                  std::string& outAppPath, std::string& err);
 
 // 卸载挂载点（幂等；失败只写 err 不抛）。
+// 实现：hdiutil detach ×5（150/300/600/900ms 退避）→ diskutil unmount
+//       → hdiutil detach → **仅当 is_own_temp_mount() 为真**才 hdiutil detach -force。
+// 成功（卸下）会顺手 rmdir 掉挂载点目录；本来就不是挂载点时直接返回 true（幂等）。
 bool unmount_image(const std::string& mountPoint, std::string& err);
+
+// 该路径当前是否是**挂载点**：用 ::statfs 取 f_mntonname，与 realpath 归一化后的路径比较
+// （这样 /var 与 /private/var、/tmp 与 /private/tmp 的差异被吃掉）。
+// 为什么需要它：hdiutil attach -mountpoint <已挂载路径> 会**成功叠挂**（本机实测 rc=0），
+// 旧卷从此看不见也卸不掉 ⟹ 下一次 detach 就是"资源忙"（2026-11-07 事故根因）。
+bool is_mount_point(const std::string& path);
+
+// 该路径是否是**我们自己的**临时挂载点：位于 temp_dir_utf8() 之下，且最后一级名字以
+// rlplayer-update-mnt 开头。**只有它为真时才允许 hdiutil detach -force** ——
+// 这是一条保险丝：绝不对用户真盘（/Volumes/…、/Applications、外接盘）上的卷强制卸载。
+bool is_own_temp_mount(const std::string& path);
 
 // 把 srcApp 拷到 targetApp。若 targetApp 已存在，先备份到 *outBackup（可为空串=没备份）。
 // 复制失败且备份成功时**自动回滚**（把备份拷回 targetApp）。
@@ -268,14 +289,22 @@ bool sha256_of_file(const std::string& path, std::string& outHex, std::string& e
 //
 // 固定顺序（顺序本身就是安全边界，不许重排）：
 //   ① verify_downloaded_file  ← 不过就 return，绝不进入 ②③
-//   ② mount_image
+//   ② mount_image（挂载前会先清掉已被占用的挂载点，绝不叠挂）
 //   ③ install_app_bundle（内部先备份、失败回滚）
 //   ④ unmount_image（无论 ③ 成败都要卸）
+//
+// 返回值语义（2026-11-07 修正）：
+//   * 返回 true ⟺ **.app 已经装好**。此时 err 必为空；
+//   * 若装好了但挂载点没卸干净（"资源忙"），返回**仍是 true**，原因写进 outWarning
+//     —— 卸载失败**不再**把整单更新判成失败（.app 已经换好，卡住用户只会更糟）；
+//   * 返回 false ⟹ verify / mount / install 三者之一失败，原因在 err；
+//     该次失败已由本函数自己写一行 UPDATE_INSTALL_FAIL 到 rlplayer-update.log。
 // ---------------------------------------------------------------------------
 bool install_from_local_dmg(const std::string& dmgPath,
                             const std::string& expectedSha256, long long expectedSize,
                             const std::string& mountPoint,
                             const std::string& targetApp,
-                            std::string& outBackup, std::string& err);
+                            std::string& outBackup, std::string& err,
+                            std::string& outWarning);
 
 } // namespace rta::update

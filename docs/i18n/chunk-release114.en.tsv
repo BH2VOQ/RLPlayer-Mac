@@ -85,3 +85,4 @@ dBTP ⟹ 母带已过载	dBTP ⟹ master is over	1.1.4 analysis panel
 截止	Cutoff	1.1.4 analysis panel
 段削波	clipping runs	1.1.4 analysis panel
 个样本	samples	1.1.4 analysis panel
+更新安装失败：	Install failed: 	更新器安装阶段失败（与「检查失败」区分）
