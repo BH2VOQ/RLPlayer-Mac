@@ -1,8 +1,8 @@
 {
-  "version": "1.1.4-beta5",
-  "notes": "The app now has a standard Edit menu, so Cmd+A / Cmd+C / Cmd+V / Cmd+X / Cmd+Z / Shift+Cmd+Z work in the search box, the feedback box and any text field, with existing shortcuts unchanged · 应用补上标准「编辑」菜单，搜索框、反馈框与任何文本输入处的 Cmd+A / Cmd+C / Cmd+V / Cmd+X / Cmd+Z / Shift+Cmd+Z 可用，既有快捷键保持不变",
-  "download_url": "https://github.com/BH2VOQ/RLPlayer-Mac/releases/download/v1.1.4-beta5/RLPlayer-1.1.4-beta5-macOS-arm64.dmg",
-  "sha256": "0838b62cca258e0fcc86550a26e551411e00c4a39871f55d9a94b2fffc50405d",
-  "size": 8045975,
-  "published_at": "2026-11-07T16:04:42Z"
+  "version": "1.1.4-beta6",
+  "notes": "The now-playing side panels can be fully hidden, every AI summary section shows condensed content on the panel, the summary popup now uses the app's card style, and a layout pass fixes truncated titles, the settings save bar, blank no-lyric columns and hidden horizontal overflow. · 播放界面左右侧栏可完全隐藏；AI 资料每栏显示精简的已整理内容；资料浮层改为与程序弹窗同款卡片；并修复顶栏标题截断、设置页保存栏、无歌词空白列与隐藏横向溢出等排版问题。",
+  "download_url": "https://github.com/BH2VOQ/RLPlayer-Mac/releases/download/v1.1.4-beta6/RLPlayer-1.1.4-beta6-macOS-arm64.dmg",
+  "sha256": "b78adb49f657121efbb81dfa70d8c098b610508ef686a521963db9a2d363a677",
+  "size": 8050377,
+  "published_at": "2026-11-07T20:27:55Z"
 }
