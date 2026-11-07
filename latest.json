@@ -1,8 +1,8 @@
 {
-  "version": "1.1.4-beta2",
-  "notes": "Updater: an update that was already installed is no longer reported as failed when the downloaded DMG cannot be unmounted; each run uses its own mount point, unmount retries and falls back, and leftovers from older builds are cleaned automatically · 更新器：已经装好的更新不再因 DMG 卸不掉而误报失败；挂载点每轮唯一、卸载带重试与兜底、历史残留自动清理",
-  "download_url": "https://github.com/BH2VOQ/RLPlayer-Mac/releases/download/v1.1.4-beta2/RLPlayer-1.1.4-beta2-macOS-arm64.dmg",
-  "sha256": "e48208199f9ce75c051ab73338ed37d47741057c0d42aa4ca111b50577f4474c",
-  "size": 8016315,
-  "published_at": "2026-11-07T04:05:38Z"
+  "version": "1.1.4-beta3",
+  "notes": "AI enhancement now accepts any OpenAI-compatible endpoint (API presets, base URL, automatic model list) and the metadata data sources can be reordered by hand · AI 增强支持任意 OpenAI 兼容接口（接口预设 / API 地址 / 模型清单自动获取），元数据数据源可手动排序",
+  "download_url": "https://github.com/BH2VOQ/RLPlayer-Mac/releases/download/v1.1.4-beta3/RLPlayer-1.1.4-beta3-macOS-arm64.dmg",
+  "sha256": "6f49fef6de21c9b774420a33db41a44e14389bd28505299320aed1224f29ec97",
+  "size": 8030084,
+  "published_at": "2026-11-07T05:36:53Z"
 }
