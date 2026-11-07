@@ -1,8 +1,8 @@
 {
-  "version": "1.1.4-beta3",
-  "notes": "AI enhancement now accepts any OpenAI-compatible endpoint (API presets, base URL, automatic model list) and the metadata data sources can be reordered by hand · AI 增强支持任意 OpenAI 兼容接口（接口预设 / API 地址 / 模型清单自动获取），元数据数据源可手动排序",
-  "download_url": "https://github.com/BH2VOQ/RLPlayer-Mac/releases/download/v1.1.4-beta3/RLPlayer-1.1.4-beta3-macOS-arm64.dmg",
-  "sha256": "6f49fef6de21c9b774420a33db41a44e14389bd28505299320aed1224f29ec97",
-  "size": 8030084,
-  "published_at": "2026-11-07T05:36:53Z"
+  "version": "1.1.4-beta4",
+  "notes": "Metadata search can run on DeepSeek, AnySearch or Tavily, audio analysis now sits in a left rail symmetric with AI summary while lyrics stay centered, and an opt-in AI retry fills cover and lyrics when the track name fails to match · 元数据检索端点可选 DeepSeek / AnySearch / Tavily，音频分析移入与 AI 整理对称的左竖栏且歌词保持居中，新增可选的 AI 辅助重试，在歌名对不上时补封面与歌词",
+  "download_url": "https://github.com/BH2VOQ/RLPlayer-Mac/releases/download/v1.1.4-beta4/RLPlayer-1.1.4-beta4-macOS-arm64.dmg",
+  "sha256": "308bcffd6c93117d1c04b553e40364ed4da489b2799b6acfb6d4fbf52075a04e",
+  "size": 8045242,
+  "published_at": "2026-11-07T14:13:58Z"
 }
