@@ -1,8 +1,8 @@
 {
-  "version": "1.1.4-beta7",
-  "notes": "AI summaries appear instantly from cache and refresh in the background, songs without their own cover fall back to the album cover, cached covers no longer flash blank when paging, and returning from an album restores the grid position. · AI 整理过期缓存立即显示并后台刷新；无自身封面的曲目回落到专辑封面；已缓存封面翻页不再空白；从专辑详情返回恢复网格位置。",
-  "download_url": "https://github.com/BH2VOQ/RLPlayer-Mac/releases/download/v1.1.4-beta7/RLPlayer-1.1.4-beta7-macOS-arm64.dmg",
-  "sha256": "d867bcc6b9c2341fcbbae8e6000c1559a169d04658e31d204351c8713beed178",
-  "size": 8060345,
-  "published_at": "2026-11-07T21:21:29Z"
+  "version": "1.1.4-beta8",
+  "notes": "Performance pass: measured startup 0.09-0.18 s, idle RSS 23-24 MB and endpoints 0.35-3.0 ms; /api/meta memoized 8.48->0.52 ms; offscreen album/list layout cut from 44-64 ms to 12-13 ms on 1,502 cards; external-volume library scan left unchanged as it is I/O-bound. · 性能优化：实测启动 0.09–0.18 s、空闲内存 23–24 MB、端点 0.35–3.0 ms；/api/meta 记忆化 8.48→0.52 ms；1,502 张专辑网格的离屏布局从 44–64 ms 降到 12–13 ms；外置卷整库扫描属 I/O 受限，如实保持不动。",
+  "download_url": "https://github.com/BH2VOQ/RLPlayer-Mac/releases/download/v1.1.4-beta8/RLPlayer-1.1.4-beta8-macOS-arm64.dmg",
+  "sha256": "fb77e9e94e02f9b9c6e5c9f3efc2de27b96e8ec01ce030c909e4c02a1a51a225",
+  "size": 8059795,
+  "published_at": "2026-11-07T21:40:38Z"
 }
