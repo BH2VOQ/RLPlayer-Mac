@@ -107,8 +107,11 @@ const H_OVER = withQ({ true_peak_dbtp: 0.31, peak_dbfs: -0.2 });
       // computed 值是 "auto minmax(0px, 1fr) auto" —— minmax() 内部有空格，先折叠再切
       var rows=getComputedStyle(grid).gridTemplateRows.replace(/minmax\\([^)]*\\)/g,'MINMAX')
                  .split(/\\s+/).filter(Boolean);
-      var cols=getComputedStyle(body).gridTemplateColumns.split(/\\s+/).filter(Boolean)
-                 .map(function(x){return parseFloat(x);});
+      // 1.1.4-beta6：旧解析按空白切分 —— 但 computed 值里 minmax() 内部**带空格**
+      //（"minmax(0px, 1fr) minmax(0px, 2fr) minmax(0px, 1fr)"），切出来是 6 段 NaN/1fr，
+      // A1 的"三列等宽"判据因此永远失败（判据本身写错，不是布局错）。这里只修解析：
+      // 直接抽取已解析的像素列宽，再断言列数/等宽。
+      var cols=(getComputedStyle(body).gridTemplateColumns.match(/-?[\\d.]+px/g)||[]).map(parseFloat);
       var rb=body.getBoundingClientRect(), lr=lyr.getBoundingClientRect(),
           pr=p.getBoundingClientRect(), rr=rail.getBoundingClientRect();
       return {

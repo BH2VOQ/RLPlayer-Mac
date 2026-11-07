@@ -217,8 +217,13 @@ inline std::string rta_ui_page(const std::string& lang = "zh") {
     // 顶栏（第 2 列起，右侧通底，左侧与主内容对齐）
     // 2026-10-25（Apple Music 风格重构）：顶栏变成半透明毛玻璃大字报
     h += ".top{grid-column:2/-1;grid-row:1;display:flex;align-items:center;gap:12px;height:60px;padding:0 24px 0 28px;background:var(--topbg);backdrop-filter:blur(20px);-webkit-backdrop-filter:blur(20px);border-bottom:1px solid var(--line);position:relative;z-index:9;min-width:0;box-sizing:border-box}";
-    h += ".ptitle{font-weight:750;font-size:24px;letter-spacing:-0.5px;color:var(--txt);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:260px;flex:0 1 auto;line-height:1.2}";
-    h += ".pcnt{font-size:12px;font-weight:500;color:var(--mut);white-space:nowrap;flex:none;margin-top:4px}";
+    // 1.1.4-beta6（审计 L3）：标题原来 flex:0 1 auto 会被同行的长计数/搜索框挤到比文字还窄
+    //（1024x640 下「设置」渲染成「设..」）。改为不许收缩：要省略只按 max-width 省略，
+    // 让可收缩的 .pcnt / .search 先让位。
+    h += ".ptitle{font-weight:750;font-size:24px;letter-spacing:-0.5px;color:var(--txt);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:260px;flex:0 0 auto;line-height:1.2}";
+    // 1.1.4-beta6（审计 L3）：计数文案（「所有参数都在这里…」这类）允许收缩并省略，
+    // 不能再把页标题挤没；只有在窄窗才限制最大宽度。
+    h += ".pcnt{font-size:12px;font-weight:500;color:var(--mut);white-space:nowrap;flex:0 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;margin-top:4px;max-width:340px}";
     h += ".ptools{display:flex;align-items:center;gap:4px;flex:none}";
     h += ".wctl{display:none;align-items:center;margin-left:2px;margin-right:-10px;flex:none}";
     h += "html.webview2 .wctl{display:flex}";
@@ -650,6 +655,11 @@ h += "#npPage .npedge{display:none}";
     // 拖拽条：贴顶 34px，透明，不挡下方内容（z-index 高于背景、低于关闭按钮）
     h += "#npPage .npgrip{position:absolute;top:0;left:0;right:0;height:34px;z-index:5;cursor:grab;background:transparent}";
     h += "#npPage .npgrip:active{cursor:grabbing}";
+    // 1.1.4-beta6（审计 L5）：模糊背景原来直接挂在 #npPage 上，inset:-60px + scale(1.08)
+    // 让它的**变换后边界**超出页面约 8%，把 #npPage.scrollWidth 撑到 视口+106~128px
+    //（视觉上被 overflow:hidden 裁掉，但仍是"看不见的横向溢出"，UI 审计会判红）。
+    // 修法：给背景单独一层 overflow:hidden 的裁剪容器，超出部分由容器裁掉，不再计入页面滚动区。
+    h += ".npbgwrap{position:absolute;inset:0;overflow:hidden;pointer-events:none}";
     h += ".npbg{position:absolute;inset:-60px;background-size:cover;background-position:center;filter:blur(64px) saturate(1.15) brightness(.38);transform:scale(1.08)}";
     h += ".npveil{position:absolute;inset:0;background:linear-gradient(180deg,rgba(8,9,12,.35),rgba(8,9,12,.82))}";
     // 三段式网格（261024-01 #3b 基础；1.1.4-beta4 改「左右竖栏对称」）：
@@ -658,11 +668,17 @@ h += "#npPage .npedge{display:none}";
     //   **等宽对称**。.npbody 三列 minmax(0,1fr) | minmax(0,2fr) | minmax(0,1fr)：
     //   左右等宽 W1=W3 ⟹ 中列中心 W1+gap+W2/2 == 容器中心 (2W1+2gap+W2)/2，
     //   所以歌词恒居中于页面，**无论两侧内容显隐/长短**（用户硬约束，靠数学不靠肉眼）。
-    //   三列用显式 grid-column/grid-row 固定：某列 display:none 时其它列不串位（如 .nolyric）。
+    //   三列用显式 grid-column/grid-row 固定：某列 display:none 时其它列不串位。
     //   #npAnal 竖栏铺满行2 高度、卡片区内部单列滚动；控制区永远留在屏幕内。
     //   几何判据见 tools/check_114_analysis_ui.js（A1 三行/三列 + A16 对称与居中）。
+    //   1.1.4-beta6（用户要求）：左右竖栏都能**完全隐藏**（display:none，不留残条/半透明底）。
+    //     开关在右上角（#npAnalToggle / #npRailToggle，状态记 localStorage），每个面板头部也有隐藏键。
+    //     单侧隐藏时仍保留三列模板（隐藏列留空）⟹ 歌词继续严格居中于页面（沿用 beta4 用户硬约束）；
+    //     两侧同时隐藏时中列占满整行，歌词仍居中（单列时容器中心 == 页面中心）。
     h += ".npgrid{position:relative;z-index:2;height:100%;display:grid;grid-template-rows:auto minmax(0,1fr) auto;gap:18px;padding:44px 40px 18px;box-sizing:border-box;max-width:1240px;margin:0 auto}";
-    h += ".npgrid.nolyric #npLyric{display:none}";
+    // 无歌词：1.1.4-beta6 起不再把整列 display:none（那会在页面正中留一大块空白，看起来像排版错乱），
+    // 改为保留列并显示居中的「暂无歌词」提示（.nplyric2.empty 已经负责垂直居中）。
+    h += ".npgrid.nolyric #npLyric{display:block}";
     // 行2：左竖栏（音频分析）| 中（歌词，恒居中）| 右竖栏（AI 整理），左右等宽对称。
     h += ".npbody{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,2fr) minmax(0,1fr);gap:18px;min-height:0;align-items:stretch}";
     h += "#npAnal{grid-column:1;grid-row:1}";
@@ -670,14 +686,40 @@ h += "#npPage .npedge{display:none}";
     h += "#npRail{grid-column:3;grid-row:1}";
     h += ".nprail{display:block;min-height:0}";
     h += ".nprail.on{display:block}";
-    // 资料卡：右侧一张紧凑浮卡（caption + 三个标签），比"贯穿全高的分隔线 + 飘着的药丸"更像正式组件
-    h += ".nprailcard{display:flex;flex-direction:column;gap:5px;padding:9px;border-radius:14px;background:rgba(255,255,255,.045);border:1px solid rgba(255,255,255,.08);backdrop-filter:blur(8px);min-width:104px}";
-    h += ".nprailcap{font-size:9.5px;letter-spacing:1.5px;color:var(--mut2);font-weight:700;padding:0 4px 3px}";
-    h += ".npchipwrap{display:flex;flex-direction:column;align-items:stretch;gap:4px;min-height:0}";
-    // 标签（歌曲/专辑/艺术家/作品）：默认只露这一列药丸，点开才从右侧滑出抽屉。
-    h += ".npchip{display:flex;align-items:center;gap:8px;justify-content:space-between;padding:7px 10px;border-radius:9px;font-size:12px;color:var(--mut);background:transparent;border:1px solid transparent;cursor:pointer;transition:.14s;white-space:nowrap;line-height:1.5;text-align:left}";
-    h += ".npchip:hover{color:var(--txt);background:rgba(255,255,255,.09)}";
-    h += ".npchip.on{color:var(--acc-text);background:var(--acc-weak);border-color:var(--acc-weak);font-weight:600}";
+    // 1.1.4-beta6：左右竖栏完全隐藏。隐藏时不占位也不留边条；
+    // 单侧隐藏保留空列（歌词恒居中），双侧隐藏时歌词列占满整行。
+    h += ".npgrid.noanal #npAnal{display:none}";
+    h += ".npgrid.norail #npRail{display:none}";
+    h += ".npgrid.nopanels .npbody{grid-template-columns:minmax(0,1fr)}";
+    h += ".npgrid.nopanels #npLyric{grid-column:1}";
+    // 资料卡（1.1.4-beta6 重做）：右竖栏从"只有一排药丸"变成"每栏一张小卡 + 精简已整理内容"。
+    // 用户原话：「右边那个 AI 资料面板内容太空了，每个栏目都要在面板上显示精简的已整理资料」。
+    // 卡片沿用左竖栏的浮卡视觉（圆角 / 半透明白 / 细描边 / blur）⟹ 左右两栏是同一套设计语言。
+    h += ".nprailcard{display:flex;flex-direction:column;gap:8px;padding:10px;border-radius:14px;background:rgba(255,255,255,.045);border:1px solid rgba(255,255,255,.08);backdrop-filter:blur(8px);min-width:0;min-height:0;height:100%;box-sizing:border-box;overflow:hidden}";
+    h += ".nprailhead{display:flex;align-items:center;gap:8px;flex:none;min-width:0}";
+    h += ".nprailcap{font-size:9.5px;letter-spacing:1.5px;color:var(--mut2);font-weight:700;flex:1 1 auto;padding:0 2px}";
+    h += ".nprailhide{width:22px;height:22px;border-radius:50%;display:grid;place-items:center;color:var(--mut2);flex:none;transition:.13s}";
+    h += ".nprailhide:hover{background:var(--hov2);color:var(--txt)}";
+    h += ".npchipwrap{display:flex;flex-direction:column;align-items:stretch;gap:6px;min-height:0;flex:1 1 auto;overflow:auto;scrollbar-width:thin}";
+    h += ".npchipwrap::-webkit-scrollbar{width:6px}";
+    h += ".npchipwrap::-webkit-scrollbar-thumb{background:var(--line);border-radius:3px}";
+    // 单个栏目卡：第一行「类型 + 状态点 + 状态文字」，下面 1~2 行精简内容（优先 AI 整理字段，缺失时用本地事实）。
+    h += ".npchip{display:flex;flex-direction:column;align-items:stretch;gap:2px;padding:8px 10px 9px;border-radius:11px;font-size:12px;color:var(--mut);background:rgba(255,255,255,.03);border:1px solid rgba(255,255,255,.06);cursor:pointer;transition:.14s;line-height:1.45;text-align:left;min-width:0}";
+    h += ".npchip:hover{color:var(--txt);background:rgba(255,255,255,.09);border-color:rgba(255,255,255,.14)}";
+    h += ".npchip.on{color:var(--txt);background:var(--acc-weak);border-color:var(--acc-weak)}";
+    h += ".npchip-top{display:flex;align-items:center;gap:7px;min-width:0}";
+    h += ".npchip-name{font-size:11.5px;font-weight:700;letter-spacing:.4px;color:var(--txt2);flex:1 1 auto;white-space:nowrap;min-width:0;overflow:hidden;text-overflow:ellipsis}";
+    h += ".npchip.on .npchip-name{color:var(--acc-text)}";
+    h += ".npchip-st{font-size:9.5px;color:var(--mut2);flex:none;white-space:nowrap;font-weight:600}";
+    h += ".npchip-p1{font-size:11.5px;color:var(--txt2);min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}";
+    h += ".npchip-p2{font-size:10.5px;color:var(--mut2);min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}";
+    h += ".npchip-p1.mut{color:var(--mut2)}";
+    h += ".nprailempty{font-size:10.5px;line-height:1.6;color:var(--mut2);padding:2px 4px 4px;white-space:normal}";
+    // 资料来源脚注：只有 AI 整理才有引用；这行不参与滚动内容，固定在卡片底部
+    h += ".nprailsrc{margin-top:auto;font-size:9.5px;color:var(--mut2);padding:0 4px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}";
+    h += "html[data-theme=light] .npchip,html[data-theme=blue] .npchip{background:rgba(15,23,42,.03);border-color:rgba(15,23,42,.08)}";
+    h += "html[data-theme=light] .npchip:hover,html[data-theme=blue] .npchip:hover{background:rgba(15,23,42,.06);border-color:rgba(15,23,42,.14)}";
+    h += "html[data-theme=light] .npchip.on,html[data-theme=blue] .npchip.on{background:var(--acc-weak);border-color:var(--acc-weak)}";
     // 261024-02 #5：单曲页「推送到设备」按钮（和元数据芯片同一行；投放中高亮）
     h += ".npcast{display:inline-flex;align-items:center;gap:0;font-size:11.5px;padding:4px 10px;border-radius:12px;background:var(--bg3);color:var(--txt2);border:1px solid var(--line);cursor:pointer;transition:.15s;white-space:nowrap}";
     h += ".npcast:hover{background:var(--hov);color:var(--txt);border-color:var(--acc)}";
@@ -702,16 +744,29 @@ h += "#npPage .npedge{display:none}";
     h += ".npchip.err .dot{opacity:.9;background:var(--warn)}";
     h += "@keyframes npdot{0%,100%{opacity:.25}50%{opacity:1}}";
     h += "@media (prefers-reduced-motion:reduce){.npchip.busy .dot{animation:none}}";
-    // 资料抽屉（默认隐藏，transform 滑入 / 滑出；不改变版面尺寸 ⟹ 歌词不会被挤压跳动）
-    h += ".npdrawerbg{position:absolute;inset:0;z-index:5;background:rgba(0,0,0,.34);opacity:0;pointer-events:none;transition:opacity .2s}";
+    // 资料浮层（1.1.4-beta6 重做「弹窗效果」）：旧版是贴边整条深色板 + 直角 + 半透明遮罩，
+    // 和 App 自己的卡片弹窗（#modal .mcard：18px 圆角 / 浮起阴影 / --bg2 卡面 / 同字号）不是
+    // 同一套视觉语言 —— 用户原话「点击这个面板的选项之后的弹窗效果也不符合当前程序美术风格」。
+    // 现在改成**悬浮卡片**：四周留 14px、18px 圆角、与 .mcard 同源的卡面/描边/阴影/标题字号，
+    // 打开时同时滑入 + 淡入；宽度收敛到 min(430px,44vw)，不再占掉半屏。
+    h += ".npdrawerbg{position:absolute;inset:0;z-index:5;background:rgba(0,0,0,.30);-webkit-backdrop-filter:blur(2px);backdrop-filter:blur(2px);opacity:0;pointer-events:none;transition:opacity .22s}";
     h += ".npdrawerbg.on{opacity:1;pointer-events:auto}";
-    h += ".npdrawer{position:absolute;top:0;right:0;bottom:0;z-index:6;width:min(460px,46vw);display:flex;flex-direction:column;background:var(--bg2);border-left:1px solid var(--line);box-shadow:-28px 0 70px rgba(0,0,0,.5);transform:translateX(102%);visibility:hidden;transition:transform .22s cubic-bezier(.4,0,.2,1),visibility .22s}";
-    h += ".npdrawer.on{transform:none;visibility:visible}";
-    h += ".npdhead{display:flex;align-items:center;gap:9px;padding:16px 16px 12px;border-bottom:1px solid var(--line);flex:none;min-width:0}";
-    h += ".npdkicker{font-size:9.5px;letter-spacing:1.2px;font-weight:700;color:var(--acc-text);background:var(--acc-weak);border-radius:5px;padding:2px 6px;flex:none}";
-    h += ".npdname{font-size:13.5px;font-weight:650;color:var(--txt);min-width:0;flex:1 1 auto;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}";
-    h += ".npdclose{width:26px;height:26px;border-radius:50%;display:grid;place-items:center;color:var(--mut);flex:none;transition:.13s}";
+    h += ".npdrawerclip{position:absolute;inset:0;z-index:6;overflow:hidden;pointer-events:none}";
+    h += ".npdrawer{position:absolute;top:14px;right:14px;bottom:14px;z-index:6;width:min(430px,44vw);display:flex;flex-direction:column;background:var(--bg2);border:1px solid var(--line2,var(--line));border-radius:18px;box-shadow:0 28px 80px rgba(0,0,0,.42);overflow:hidden;pointer-events:auto;transform:translateX(calc(100% + 26px));opacity:0;visibility:hidden;transition:transform .26s cubic-bezier(.2,.8,.2,1),opacity .18s ease,visibility .26s}";
+    h += ".npdrawer.on{transform:none;opacity:1;visibility:visible}";
+    h += ".npdhead{display:flex;align-items:center;gap:9px;padding:15px 16px 13px;border-bottom:1px solid var(--line);flex:none;min-width:0;background:var(--bg2)}";
+    h += ".npdkicker{font-size:9.5px;letter-spacing:1.2px;font-weight:700;color:var(--acc-text);background:var(--acc-weak);border-radius:6px;padding:2px 7px;flex:none}";
+    h += ".npdname{font-size:14px;font-weight:650;letter-spacing:-.2px;color:var(--txt);min-width:0;flex:1 1 auto;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}";
+    h += ".npdstat{font-size:10.5px;color:var(--mut2);flex:none;white-space:nowrap}";
+    h += ".npdclose{width:26px;height:26px;border-radius:50%;display:grid;place-items:center;color:var(--mut);flex:none;transition:.13s;background:var(--hov)}";
     h += ".npdclose:hover{background:var(--hov2);color:var(--txt)}";
+    // 浮层正文：与设置页/资料页同一套字段网格（.efields / .efrow）；顶部一行「AI 整理 + 状态」小标。
+    h += ".npdcap{display:flex;align-items:center;gap:8px;font-size:10px;letter-spacing:1.2px;font-weight:700;color:var(--mut2);margin-bottom:10px;text-transform:uppercase}";
+    h += ".npdcap .sp{flex:1}";
+    h += ".npdcap .npdcapst{letter-spacing:0;text-transform:none;font-weight:600;font-size:10.5px;color:var(--mut2)}";
+    h += ".npdbody .efields{gap:11px 18px}";
+    h += ".npdbody .efrow .vl{line-height:1.66}";
+    h += "@media (max-width:1100px){.npdrawer{width:min(430px,52vw)}}";
     h += ".nphero{display:grid;grid-template-columns:auto minmax(0,1fr);gap:26px;align-items:center;min-height:0}";
     h += ".npcover{height:clamp(132px,24vh,236px)}";
     h += ".npcover img{height:100%;width:auto;aspect-ratio:1/1;object-fit:cover;border-radius:14px;box-shadow:0 24px 70px rgba(0,0,0,.6);display:block}";
@@ -752,7 +807,7 @@ h += "#npPage .npedge{display:none}";
     h += ".npvol .vlab{font-size:11px;min-width:58px;white-space:nowrap;text-align:right;font-variant-numeric:tabular-nums;color:var(--txt2)}";
     // 行3：歌词区（独立滚动，min-height:0 保证网格行真的能压缩 —— 这是 1024x640 下
     // 歌词压到进度条上的根因：旧实现 .nplyric 固定 58vh 且控件绝对定位，二者必然重叠）
-    h += ".nplyric2{--nppad:0px;min-height:0;overflow:auto;text-align:center;scrollbar-width:none;padding:2px 0;-webkit-mask-image:linear-gradient(180deg,transparent 0,#000 26px,#000 calc(100% - 26px),transparent 100%);mask-image:linear-gradient(180deg,transparent 0,#000 26px,#000 calc(100% - 26px),transparent 100%)}";
+    h += ".nplyric2{--nppad:0px;min-height:0;overflow-y:auto;overflow-x:hidden;text-align:center;scrollbar-width:none;padding:2px 0;-webkit-mask-image:linear-gradient(180deg,transparent 0,#000 26px,#000 calc(100% - 26px),transparent 100%);mask-image:linear-gradient(180deg,transparent 0,#000 26px,#000 calc(100% - 26px),transparent 100%)}";
     // 无歌词/纯音乐时把提示垂直居中，避免大片空白显得像没加载出来
     h += ".nplyric2.empty{display:flex;flex-direction:column;align-items:center;justify-content:center}";
     h += ".nplyric2::-webkit-scrollbar{display:none}";
@@ -770,10 +825,13 @@ h += "#npPage .npedge{display:none}";
     // 与旧「通栏行」的区别：现在是 .npbody 的左竖栏，**铺满行2 高度**（不再有 38vh 限高），
     //   卡片区单列纵向排列、头部固定、卡片区自己滚 ⟹ 不抢中间歌词、也不把控制区顶出屏幕。
     // 设计约束（沿用）：紧凑低调、只用既有 CSS 变量 ⟹ 深/浅/蓝三套主题自动跟随。
-    h += "#npAnal{min-height:0;display:flex;flex-direction:column;gap:6px;padding:8px 11px 9px;border-radius:14px;"
+    h += "#npAnal{position:relative;min-height:0;display:flex;flex-direction:column;gap:6px;padding:8px 11px 9px;border-radius:14px;"
          "background:rgba(255,255,255,.045);border:1px solid rgba(255,255,255,.08);backdrop-filter:blur(8px);"
          "overflow:hidden}";
-    h += ".anlhead{display:flex;align-items:center;gap:8px;flex-wrap:wrap;flex:none;min-width:0}";
+    // 1.1.4-beta6（审计 L8）：栏头「收起」键改绝对定位在面板右上角，避免在窄栏里被 flex-wrap
+    // 挤到第二行、变成一个孤立的 ‹ 按钮。
+    h += ".anlhead{display:flex;align-items:center;gap:8px;flex-wrap:wrap;flex:none;min-width:0;padding-right:26px}";
+    h += ".anlhide{position:absolute;top:7px;right:8px;padding:3px 6px}";
     h += ".anllab{font-size:11px;letter-spacing:.6px;font-weight:700;color:var(--txt2);flex:none}";
     h += "#npAnlStat{font-size:10.5px;color:var(--mut2);flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;"
          "white-space:nowrap;font-variant-numeric:tabular-nums}";
@@ -892,6 +950,22 @@ h += "#npPage .npedge{display:none}";
     h += "html[data-theme=dark] .npclose{background:rgba(30,32,38,.92);border-color:rgba(255,255,255,.16);";
     h += "box-shadow:0 1px 3px rgba(0,0,0,.4)}";
     h += "html[data-theme=dark] .npclose:hover{background:rgba(48,50,58,.96)}";
+    // 1.1.4-beta6：单曲页右上角「侧栏开关」组（左分析 / 右 AI 资料）。
+    // 和返回按钮同一枚圆盘视觉，紧挨在它左侧；aria-pressed 表示面板当前是否显示，
+    // 关闭态图标上画一道斜杠（一眼看出「现在不显示」）。面板头部也各有隐藏键，两处同源。
+    h += ".nppanels{position:absolute;top:16px;right:66px;z-index:6;display:flex;align-items:center;gap:8px}";
+    h += ".nptoggle{position:relative;width:34px;height:34px;border-radius:50%;display:flex;align-items:center;justify-content:center;";
+    h += "background:rgba(255,255,255,.92);border:1px solid rgba(15,23,42,.14);box-shadow:0 1px 3px rgba(15,23,42,.16);";
+    h += "color:var(--txt2);transition:background .15s,transform .12s,color .15s,border-color .15s}";
+    h += ".nptoggle:hover{background:#fff;color:var(--txt);transform:scale(1.04)}";
+    h += ".nptoggle:active{transform:scale(.97)}";
+    h += ".nptoggle.on{color:var(--acc-text);border-color:var(--acc-weak)}";
+    h += ".nptoggle[aria-pressed=false]::after{content:'';position:absolute;left:7px;right:7px;top:50%;height:1.5px;";
+    h += "border-radius:1px;background:currentColor;opacity:.62;transform:rotate(-42deg)}";
+    h += "html[data-theme=dark] .nptoggle{background:rgba(30,32,38,.92);border-color:rgba(255,255,255,.16);box-shadow:0 1px 3px rgba(0,0,0,.4)}";
+    h += "html[data-theme=dark] .nptoggle:hover{background:rgba(48,50,58,.96)}";
+    h += "@media (max-width:1120px){.nppanels{right:62px;gap:6px}.nptoggle{width:32px;height:32px}}";
+
     // machost：红绿灯占顶部约 8..30px，这里从 46 下移到 52，留出明确间隙
     // 2026-10-25（用户第二次反馈「按钮还在这」）：上一版把 top 从 46 挪到 52 没用 ——
     // 因为 .npgrid 的 padding-top 是 44px，封面从 y=44 开始，而按钮占 52..90
@@ -905,6 +979,7 @@ h += "#npPage .npedge{display:none}";
     // 按钮已移到右上角，那里没有红绿灯 ⟹ 不需要纵向让位，也不需要再给内容加 padding-top
     // （之前为左上按钮加的 78px 会让封面整体下移，视觉上很空，现在恢复原布局）。
     h += "html.machost .npclose{top:16px;right:20px}";
+    h += "html.machost .nppanels{right:68px}";
     // 窄/矮窗口（用户 261023-04 #6 的 1024x640）：压缩行高与留白，但行间距不小于 12px
     h += "@media (max-height:720px){.npgrid{padding:36px 24px 10px;gap:12px}.nphero{gap:16px}.npcover{height:clamp(108px,22vh,164px)}.npkind{margin-bottom:5px}.nptit{font-size:19px}.npsub{font-size:11.5px;margin-top:5px}.npmline{margin-top:6px;min-height:20px}.npctl2{gap:8px}.npdbody{font-size:12px;line-height:1.6}}";
     h += "@media (max-width:1120px){.npgrid{padding:38px 24px 12px}.nphero{gap:16px}.npcover{height:clamp(108px,20vh,180px)}}";
@@ -1146,10 +1221,14 @@ h += "#npPage .npedge{display:none}";
     h += ".tip{display:inline-flex;align-items:center;justify-content:center;width:15px;height:15px;margin-left:5px;border-radius:50%;border:1px solid var(--line2,var(--line));color:var(--mut2);font-size:9.5px;font-weight:700;line-height:1;cursor:help;vertical-align:1px;position:relative;user-select:none;flex:none}";
     h += ".tip:hover,.tip:focus{border-color:var(--acc);color:var(--acc);outline:0}";
     // 气泡仍由伪元素渲染；JS 按视口与所有滚动/裁剪祖先的交集定位，不放开 .sbody 的溢出。
-    h += ".tip::after{content:attr(data-tip);position:absolute;left:-10px;bottom:calc(100% + 8px);transform:translate(var(--tip-x,0px),var(--tip-y,0px));width:max-content;max-width:min(290px,var(--tip-max,290px));background:var(--bg3);color:var(--txt2);border:1px solid var(--line);border-radius:9px;padding:8px 10px;font-size:11px;line-height:1.6;font-weight:400;white-space:normal;overflow-wrap:anywhere;text-align:left;box-shadow:0 10px 28px var(--shadow);opacity:0;visibility:hidden;transition:opacity .12s;z-index:40;pointer-events:none}";
+    // 1.1.4-beta6（审计 L4）：隐藏状态的 tooltip 伪元素虽然 visibility:hidden，但绝对定位的
+    // 大盒子仍然计入最近滚动祖先（.sbody）的 scrollWidth —— 设置页因此出现"看不见的横向溢出"
+    // （1024 实测 799/789）。用 display:none 默认、hover/focus 才 display:block 彻底移除占位；
+    // positionTip() 在 mouseover/focusin 里测量，此时 :hover/:focus 已经生效，测量仍然正确。
+    h += ".tip::after{display:none;content:attr(data-tip);position:absolute;left:-10px;bottom:calc(100% + 8px);transform:translate(var(--tip-x,0px),var(--tip-y,0px));width:max-content;max-width:min(290px,var(--tip-max,290px));background:var(--bg3);color:var(--txt2);border:1px solid var(--line);border-radius:9px;padding:8px 10px;font-size:11px;line-height:1.6;font-weight:400;white-space:normal;overflow-wrap:anywhere;text-align:left;box-shadow:0 10px 28px var(--shadow);opacity:0;visibility:hidden;transition:opacity .12s;z-index:40;pointer-events:none}";
     h += ".tip.tip-r::after{left:auto;right:-10px}";
     h += ".tip.tip-d::after{bottom:auto;top:calc(100% + 8px)}";
-    h += ".tip:hover::after,.tip:focus::after{opacity:1;visibility:visible}";
+    h += ".tip:hover::after,.tip:focus::after{display:block;opacity:1;visibility:visible}";
     h += "@media (max-width:1200px){.tip::after{max-width:min(240px,42vw,var(--tip-max,240px))}}";
     h += ".sfld.wide{grid-column:1/-1}";
     h += ".sfld .chk{margin:0}";
@@ -1240,6 +1319,8 @@ h += "#npPage .npedge{display:none}";
     h += ".libstats .lbl{display:block;font-size:10px;color:var(--mut2);margin-bottom:3px}";
     h += ".libstats .val{font-weight:650;font-size:14px;color:var(--txt);font-variant-numeric:tabular-nums;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}";
     h += "@media (max-width:1100px){#crumb,#sub{display:none}.search{max-width:320px}}";
+    // 1.1.4-beta6：1024 档顶栏优先级 —— 页标题完整可见，搜索与计数先让位。
+    h += "@media (max-width:1120px){.pcnt{max-width:120px}.search{flex:0 1 240px;min-width:120px}.top{gap:9px;padding:0 18px 0 22px}}";
     // 2026-10-26 B-2：margin-top:auto 让保存栏在"内容不满一屏"时也贴到视口底部。
     //   sticky 保留作为"内容超过一屏"时的兜底（粘在滚动容器底边）。
     // 2026-10-26（用户「保存设置跟恢复默认按钮要做进各个页面里」）：
@@ -1248,7 +1329,10 @@ h += "#npPage .npedge{display:none}";
     //   间距改成上下各 16px，与 .sgroup 的 22px 底部间距协调，视觉上是一块"页脚动作区"。
     // margin-top:16px 是最小间距；.spane.on 是 flex 列时，auto 会把保存栏推到该页底部。
     // 用 margin-top:auto 时 16px 会失效，所以改用 padding-top 保证最小间距。
-    h += ".setfoot{display:flex;gap:10px;align-items:center;padding:14px 2px 6px;margin-top:auto;background:transparent;border-top:1px solid var(--line);z-index:6}";
+    // 1.1.4-beta6（审计 L7）：保存栏原来是每个页签内容末尾的静态元素 —— 长页签（高级/元数据）
+    // 必须滚到底才看得到「保存」。改为 sticky 吸底（仍是每个页签自己的保存/恢复默认，作用域不变）：
+    // 任何页签、任何窗口高度下保存入口都常驻可见。
+    h += ".setfoot{position:sticky;bottom:0;display:flex;gap:10px;align-items:center;padding:12px 2px 10px;margin-top:auto;background:var(--bg);border-top:1px solid var(--line);z-index:6}";
     h += ".setfoot{margin-top:auto}";
     // 诊断 / 流媒体两页不放保存栏：它们的动作全部即时生效，没有"待保存"的概念
     //（2026-10-24 #5 与评审 #12 的既有决策，本次改成"每页各一份"后仍要保留这条）。
@@ -1455,7 +1539,7 @@ h += "#npPage .npedge{display:none}";
     //   .nphero 封面+标题区 / .npbody（左歌词 + 右资料栏）/ #npAnal 音频分析 / .npctl2 进度控制区。
     //   任何尺寸下四行互不重叠：每行 min-height:0 + 行内滚动，控件不再绝对定位。
     h += "<div id=npPage>";
-    h += "<div class=npbg id=npbg></div><div class=npveil></div>";
+    h += "<div class=npbgwrap><div class=npbg id=npbg></div></div><div class=npveil></div>";
     // #5：页面最外圈刷成 --bg（暗角），与宿主 5px 边带同色 ⟹ 接缝不可见（见上方 CSS 注）
     h += "<div class=npedge></div>";
     // 2026-10-23 用户反馈「单曲播放页面无法拖动窗口（主页面可以）」：
@@ -1473,6 +1557,17 @@ h += "#npPage .npedge{display:none}";
          "<path d='M4 4l6 6M10 10H5.5M10 10V5.5'/>"
          "<path d='M20 20l-6-6M14 14h4.5M14 14v4.5'/>"
          "</svg></button>";
+    // 1.1.4-beta6（用户要求）：左「音频分析」/ 右「AI 资料」两侧竖栏可完全隐藏。
+    // 两个圆形开关放在右上角返回键左侧；aria-pressed=true 表示面板正在显示（关闭态画斜杠）。
+    // 状态存 localStorage（rta-np-anal / rta-np-rail），下次进单曲页沿用；点面板头部的同源隐藏键也写入同一状态。
+    h += "<div class=nppanels role=group aria-label='单曲页侧栏开关'>";
+    h += "<button class='nptoggle on' id=npAnalToggle aria-pressed=true aria-label='显示或隐藏音频分析面板' title='显示 / 隐藏音频分析面板'>"
+         "<svg width=16 height=16 viewBox='0 0 24 24' fill=none stroke=currentColor stroke-width=2 stroke-linecap=round>"
+         "<path d='M4 20V10M9.5 20V4M15 20v-7M20.5 20V7'/></svg></button>";
+    h += "<button class='nptoggle on' id=npRailToggle aria-pressed=true aria-label='显示或隐藏 AI 资料面板' title='显示 / 隐藏 AI 资料面板'>"
+         "<svg width=16 height=16 viewBox='0 0 24 24' fill=none stroke=currentColor stroke-width=2 stroke-linecap=round stroke-linejoin=round>"
+         "<rect x='3.5' y='4.5' width='17' height='15' rx='3'/><path d='M7.5 9h9M7.5 12.5h9M7.5 16h5'/></svg></button>";
+    h += "</div>";
     h += "<div class=npgrid id=npGrid>";
     // 行1：封面 + 标题区（标题/副题/元数据芯片/EQ 芯片）
     h += "<div class=nphero>";
@@ -1500,13 +1595,21 @@ h += "#npPage .npedge{display:none}";
     h += "<span id=npAnlStat title='当前曲目的分析状态'>未播放</span>";
     h += "<button class=anlbtn id=npAnlToggle title='切换详细程度：摘要 → 详细 → 全部指标' aria-label='切换详细程度'>详细</button>";
     h += "<button class='anlbtn pri' id=npAnlRun title='重新分析当前曲目（强制重算，忽略缓存）'>分析</button>";
+    // 1.1.4-beta6：面板头部也能收起（与右上角开关同源状态），收起后完全隐藏。
+    h += "<button class='anlbtn anlhide' id=npAnalHide title='隐藏音频分析面板，可在右上角重新显示' aria-label='隐藏音频分析面板'>"
+         "<svg width=11 height=11 viewBox='0 0 24 24' fill=none stroke=currentColor stroke-width=2.4 stroke-linecap=round stroke-linejoin=round><path d='M14 6l-6 6 6 6'/></svg></button>";
     h += "</div>";
     h += "<div id=npAnlBody></div>";
     h += "</div>";
     // 中列（col2）：歌词，恒居中
     h += "<div class=nplyric2 id=npLyric><div class=npline>还没有在播放</div></div>";
-    // 右竖栏（col3）：AI 整理
-    h += "<aside class=nprail id=npRail><div class=nprailcard><div class=nprailcap>AI 整理</div>";
+    // 右竖栏（col3）：AI 整理。1.1.4-beta6：每个栏目一张小卡，卡内直接显示**精简的已整理资料**
+    //   （优先 AI 缓存/自动整理出的字段，缺失时回落到本地曲库事实），不再只有一排空药丸。
+    h += "<aside class=nprail id=npRail><div class=nprailcard>";
+    h += "<div class=nprailhead><div class=nprailcap>AI 整理</div>";
+    h += "<button class=nprailhide id=npRailHide title='隐藏 AI 资料面板，可在右上角重新显示' aria-label='隐藏 AI 资料面板'>"
+         "<svg width=11 height=11 viewBox='0 0 24 24' fill=none stroke=currentColor stroke-width=2.4 stroke-linecap=round stroke-linejoin=round><path d='M10 6l6 6-6 6'/></svg></button>";
+    h += "</div>";
     h += "<div class=npchipwrap id=npTabs></div>";
     // 261024-04 #7：自动加载的状态/失败重试行（正常态 display:none，不打扰版面）
     h += "<div id=npSummHint class=nprailhint style='display:none'></div></div></aside>";
@@ -1541,14 +1644,19 @@ h += "#npPage .npedge{display:none}";
     h += "</div>";   // .npctl2
     // 关：.npgrid → #npPage
     h += "</div>";
-    // 资料抽屉（#3b ③）：默认隐藏；点右侧标签才滑出。层级在 .npgrid 之上、#modal 之下。
+    // 资料浮层（#3b ③）：默认隐藏；点右侧栏目卡才滑出。层级在 .npgrid 之上、#modal 之下。
     h += "<div class=npdrawerbg id=npDrawerBg></div>";
+    // 1.1.4-beta6：外再套一层剪裁容器 —— 收起时浮层停在画布右侧之外，若不剪裁会撑大
+    // #npPage 的 scrollWidth（审计实测 1576 视口下 scrollWidth=2045，属"看不见的横向溢出"）。
+    // 剪裁层自身不吃事件（pointer-events:none），浮层本体单独恢复 pointer-events:auto。
+    h += "<div class=npdrawerclip>";
     h += "<aside class=npdrawer id=npDrawer>";
     h += "<div class=npdhead><span class=npdkicker id=npDrawerKind>资料</span>";
     h += "<div class=npdname id=npDrawerName></div>";
     h += "<span class=npdstat id=npDataStat></span>";
     h += "<button class=npdclose id=npDataClose title='关闭（Esc）'><svg width=14 height=14 viewBox='0 0 24 24' fill=none stroke=currentColor stroke-width=2><path d='M18 6L6 18M6 6l12 12'/></svg></button>";
     h += "</div><div class=npdbody id=npDataBody></div></aside>";
+    h += "</div>";
     h += "</div>";
 
     h += "<div id=modal><div class=mcard><div class=mhead><b id=mtitle>信号链</b><span class=sp></span><button class=ibtn id=mclose><svg width=15 height=15 viewBox='0 0 24 24' fill=none stroke=currentColor stroke-width=2><path d='M18 6L6 18M6 6l12 12'/></svg></button></div><div class=mbody id=mbody></div></div></div>";

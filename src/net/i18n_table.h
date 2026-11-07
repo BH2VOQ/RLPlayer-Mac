@@ -1756,6 +1756,19 @@ inline const I18nPair* i18n_table(std::size_t* count) {
         {"与「AI 接入」的 Key 相互独立；只存本机 rlplayer-llm.conf，保存后界面只显示掩码", "Independent of the AI connection key; stored locally in rlplayer-llm.conf and shown only as a mask after saving."},
         {"AI 辅助爬取封面歌词", "AI-assisted cover & lyrics fetch"},
         {"开启后，当自动爬取因歌名对不上而失败（搜索无候选 / 低分不敢采纳）时，自动用 AI 规范化歌名再重跑一次公开数据源检索，补齐封面与歌词。仅在失败时触发，会多一次 AI 调用（按次计费）；AI 只纠正歌名，封面与歌词仍来自公开数据源并过同曲校验，不会写入编造内容", "When automatic fetching fails because the track name does not match (no search hits / low score), AI normalizes the track name and public sources are re-queried once to fill in cover art and lyrics. Only triggered on failure; costs one extra AI call. AI only corrects the name — cover and lyrics still come from public sources and pass identity checks, so no fabricated content is written."},
+        {"显示 / 隐藏音频分析面板", "Show / hide audio analysis panel"},
+        {"显示 / 隐藏 AI 资料面板", "Show / hide AI summary panel"},
+        {"显示或隐藏音频分析面板", "Show or hide the audio analysis panel"},
+        {"显示或隐藏 AI 资料面板", "Show or hide the AI summary panel"},
+        {"隐藏音频分析面板，可在右上角重新显示", "Hide the audio analysis panel; restore it from the top-right"},
+        {"隐藏 AI 资料面板，可在右上角重新显示", "Hide the AI summary panel; restore it from the top-right"},
+        {"隐藏音频分析面板", "Hide audio analysis panel"},
+        {"隐藏 AI 资料面板", "Hide AI summary panel"},
+        {"单曲页侧栏开关", "Now-playing side panel toggles"},
+        {"播放后在右侧显示歌曲、专辑、艺术家（古典作品还会多一栏演绎版本）的精简整理资料。", "When a track plays, condensed summaries for the song, album and artist appear here (classical works also list performances)."},
+        {"点开查看完整 AI 整理资料", "Open the full AI summary"},
+        {"点开查看整理资料", "Open summary"},
+        {"已整理", "Summarized"},
     };
     if (count) *count = sizeof(k) / sizeof(k[0]);
     return k;

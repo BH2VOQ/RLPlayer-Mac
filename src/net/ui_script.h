@@ -1938,7 +1938,9 @@ function renderSummaryContent(summary, title, kind, opts) {
     if (summary.citations && summary.citations.length > 0) {
       h += '<div style="font-size:11px;color:var(--mut2);margin-top:8px">依据上面的来源整理，可能不完整，请以来源为准</div>';
     }
-  } else if (!title) {
+  } else if (!title && !(opts && opts.noFoot)) {
+    // 1.1.4-beta6（审计 L9）：资料浮层正文顶部已经有「AI 整理」胶囊标（npDataCaption），
+    // 这里不再重复同一行脚注（调用方传 opts.noFoot=1）。其它页面沿用原行为。
     h += '<div style="font-size:10.5px;color:var(--mut2);letter-spacing:.6px;margin-top:10px">AI 整理</div>';
   }
   return h;
@@ -1947,12 +1949,20 @@ function renderSummaryContent(summary, title, kind, opts) {
 // 简介请求（2026-10-23 DEBUG）：后端把「未命中缓存」的生成放到了后台线程，首次请求立即回
 // {"pending":true}，这里按 2s 轮询同一个 URL 直到出结果/超时。这样自动生成期间
 // /api/status（400ms 轮询）与播放控制不会被单线程 HTTP 后端堵住（以前会整站卡死）。
-function fetchSummary(url, onDone, tries) {
+function fetchSummary(url, onDone, tries, startedAt) {
+  // 1.1.4-beta6（AI 整理体感，用户反馈"检索太慢"）：
+  //   原实现固定 2000ms 轮询 —— 后台任务完成后，界面平均还要空等 1s、最多 2s 才显示结果。
+  //   现在优先听后端建议（pending 响应里的 retryAfterMs，CLAMP 150..2000），缺省 400ms；
+  //   120s 总超时上限保持不变（按墙钟判断，不再按 2s×60 次数）。
+  //   注意 startedAt 必须**按请求传递**（不能挂在函数上）：单曲页同时有 track/release/person
+  //   三条 summary 在飞，共享一个计时器会让后发起的请求提前超时。
   tries = tries || 0;
+  if (!startedAt) startedAt = Date.now();
   api(url).then(function (j) {
     if (j && j.pending) {
-      if (tries >= 60) { onDone({ ok: false, error: '资料整理超时' }); return; }
-      setTimeout(function () { fetchSummary(url, onDone, tries + 1); }, 2000);
+      if (Date.now() - startedAt > 120000) { onDone({ ok: false, error: '资料整理超时' }); return; }
+      var delay = (typeof j.retryAfterMs === 'number' && j.retryAfterMs >= 150 && j.retryAfterMs <= 2000) ? j.retryAfterMs : 400;
+      setTimeout(function () { fetchSummary(url, onDone, tries + 1, startedAt); }, delay);
       return;
     }
     onDone(j);
@@ -5566,6 +5576,9 @@ Array.prototype.forEach.call(document.querySelectorAll('.nav'), function (e) {
   e.onclick = function () {
     var v = e.dataset.v;
     if (!v) return;
+    // 1.1.4-beta6（审计 L6）：搜索框里还留着旧查询时点左侧导航，列表会回到全部而输入框
+    // 仍显示旧词（用户看到"搜索框和列表不是一个状态"）。导航即清空搜索，与点 ✕ 同义。
+    if (D('q') && D('q').value) { D('q').value = ''; if (typeof updateSearchClearBtn === 'function') updateSearchClearBtn(); }
     setView(v);
     if (v === 'albums') loadAlbums('');
     else if (v === 'artists') loadArtists();
@@ -11940,16 +11953,18 @@ document.addEventListener('keydown', function (e) {
   else if (e.key === 'p') D('bPrev').click();
   else if (e.key === 's') D('bStop').click();
   else if (e.key === 'l') D('bLyric').click();
-  // Esc：层级返回（抽屉 -> 单曲页 -> 弹窗 -> 设置页 -> 专辑/艺术家详情页）与返回按钮行为一致
+  // Esc：层级返回（弹窗 → 抽屉 → 单曲页 → 设置页 → 专辑/艺术家详情页）与返回按钮行为一致
+  // 1.1.4-beta6：弹窗必须最优先 —— 旧顺序先判 npPage，单曲页里打开的任何弹窗按 Esc
+  // 会把整页关掉（用户实测困扰）；资料浮层不是 #modal，仍走下面抖音 npPage 分支。
   else if (e.key === 'Escape') {
-    if (D('npPage') && D('npPage').classList.contains('on')) {
+    if (D('modal') && D('modal').classList.contains('on')) {
+      D('modal').classList.remove('on');
+    } else if (D('npPage') && D('npPage').classList.contains('on')) {
       if (typeof npDrawerIsOpen === 'function' && npDrawerIsOpen()) {
         npDrawerClose(); npDataRenderBody();
       } else {
         closeNowPlaying();
       }
-    } else if (D('modal') && D('modal').classList.contains('on')) {
-      D('modal').classList.remove('on');
     } else if (D('setpage') && D('setpage').classList.contains('on')) {
       setView('albums');
     } else if (S.view === 'album') {
@@ -12107,6 +12122,8 @@ function openNowPlaying() {
   //   然后立刻重绘 —— 进入单曲页要马上看到当前曲目的摘要，而不是等下一轮轮询。
   anlBind();
   anlPaint();
+  // 1.1.4-beta6：侧栏显隐偏好每次进页都重新套一遍（localStorage 可能被别的窗口/版本改过）
+  npPanelsApply();
   // 261024-04 #7：进入单曲页立刻自动加载这首歌的 AI 整理（不必等 400ms 的 renderNp 轮询）
   npAutoSummary();
   // 整页控件是底栏/设置页的镜像：进来时刷一次，绝不显示与底栏不同的值
@@ -12115,6 +12132,54 @@ function openNowPlaying() {
   pollCastState(true);   // 261024-02 #5：进来就取一次投放状态（按钮文案/高亮由 applyCastUi 统一刷）
 }
 function closeNowPlaying() { var pg = D('npPage'); if (pg) pg.classList.remove('on'); }
+
+/* ---------------- 单曲页侧栏显隐（1.1.4-beta6，用户要求） ----------------
+   用户原话：「播放界面左侧分析与右侧 ai 资料要能做到完全隐藏」。
+   设计：
+     * 状态存 localStorage（rta-np-anal / rta-np-rail）；缺省 = 两侧都显示（与 beta5 行为一致）。
+       这是单页布局偏好，不进 settings.conf —— 换版本/清缓存不该把布局打回默认，
+       也不需要后端设置项（后端契约不动）。
+     * 隐藏 = .npgrid 上的 noanal / norail 类 → 对应竖栏 display:none（完全隐藏，不留遮罩/边条）。
+     * 单侧隐藏仍保留三列模板（隐藏列留空）⟹ 歌词继续严格居中于页面（沿用 1.1.4-beta4 用户硬约束）；
+       两侧同时隐藏时 .nopanels 把中列扩成整行，单列容器中心 == 页面中心，歌词仍居中。
+     * 隐藏面板**不影响**该栏的数据预取：重新打开时内容已就绪，不会二次等待。
+     * 恢复入口：右上角两个圆形开关始终可见（返回键左侧）；面板头部也有隐藏键（两处同源状态）。 */
+var NP_PANELS = { anal: true, rail: true };
+function npPanelsLoad() {
+  NP_PANELS.anal = true; NP_PANELS.rail = true;
+  try {
+    NP_PANELS.anal = localStorage.getItem('rta-np-anal') !== '0';
+    NP_PANELS.rail = localStorage.getItem('rta-np-rail') !== '0';
+  } catch (e) { /* localStorage 不可用：默认都显示 */ }
+}
+function npPanelsApply() {
+  var g = D('npGrid'); if (!g) return;
+  g.classList.toggle('noanal', !NP_PANELS.anal);
+  g.classList.toggle('norail', !NP_PANELS.rail);
+  g.classList.toggle('nopanels', !NP_PANELS.anal && !NP_PANELS.rail);
+  var a = D('npAnalToggle'), r = D('npRailToggle');
+  if (a) { a.setAttribute('aria-pressed', NP_PANELS.anal ? 'true' : 'false'); a.classList.toggle('on', NP_PANELS.anal); }
+  if (r) { r.setAttribute('aria-pressed', NP_PANELS.rail ? 'true' : 'false'); r.classList.toggle('on', NP_PANELS.rail); }
+  // 收起右栏时顺手收起资料浮层，避免浮层背后留一块空列（视觉上像点错了）
+  if (!NP_PANELS.rail && typeof npDrawerIsOpen === 'function' && npDrawerIsOpen()) npDrawerClose();
+}
+function npPanelsSet(which, show) {
+  if (which !== 'anal' && which !== 'rail') return;
+  NP_PANELS[which] = !!show;
+  try { localStorage.setItem(which === 'anal' ? 'rta-np-anal' : 'rta-np-rail', show ? '1' : '0'); } catch (e) { }
+  npPanelsApply();
+}
+function npPanelsToggle(which) { npPanelsSet(which, !NP_PANELS[which]); }
+function npPanelsBind() {
+  var a = D('npAnalToggle'), r = D('npRailToggle'), ah = D('npAnalHide'), rh = D('npRailHide');
+  if (a) a.onclick = function () { npPanelsToggle('anal'); };
+  if (r) r.onclick = function () { npPanelsToggle('rail'); };
+  if (ah) ah.onclick = function () { npPanelsSet('anal', false); };
+  if (rh) rh.onclick = function () { npPanelsSet('rail', false); };
+  npPanelsApply();
+}
+npPanelsLoad();
+npPanelsBind();   // 脚本在 body 末尾执行：DOM 已就绪，刷新后布局偏好立即生效
 
 /* ---------------- 单曲页「资料」面板（用户 261023-04 #7/#9） ----------------
    数据：GET /api/entity/summary?kind=track|release|person&name=..&artist=..&lang=zh
@@ -12126,7 +12191,7 @@ function closeNowPlaying() { var pg = D('npPage'); if (pg) pg.classList.remove('
      - 「作品」只在判定为古典时出现，走 /api/entity/versions（Discogs 版本推荐），
        并提供进入「古典作品」整页的入口（左导航已按 #9 移除）。
    状态机：idle → loading（骨架）→ ok / error；切歌/关页丢弃过期回调。 */
-var NP_DATA = { key: '', active: '', tabs: [], cache: {}, inflight: {}, req: 0, bodyKey: '', tabSig: '' };
+var NP_DATA = { key: '', active: '', tabs: [], cache: {}, inflight: {}, req: 0, bodyKey: '', tabSig: null };
 
 function npFileName(p) {
   var s = String(p || '').replace(/\\/g, '/');
@@ -12198,11 +12263,12 @@ function npBindEqChips() {
   if (ir) ir.onclick = function () { closeNowPlaying(); openSettingsTab('eq'); };
 }
 function npDataReset() {
-  NP_DATA = { key: '', active: '', tabs: [], cache: {}, inflight: {}, req: 0, bodyKey: '', tabSig: '' };
+  NP_DATA = { key: '', active: '', tabs: [], cache: {}, inflight: {}, req: 0, bodyKey: '', tabSig: null };
   var b = D('npDataBody'); if (b) b.innerHTML = '';
   var t = D('npTabs'); if (t) t.innerHTML = '';
   var s = D('npDataStat'); if (s) s.textContent = '';
   NPPREF.key = '';    // 切歌：允许下一首重新预取（旧请求的结果由 key 守卫丢弃）
+  NPPREF_PERSON.key = '';
   npDrawerClose();
 }
 // 抽屉开关（#3b ③）：资料默认不占版面，点标签才从右侧滑出
@@ -12265,24 +12331,119 @@ function npDataTab(kind) {
 }
 // 右侧标签栏（#3b ③）：默认只露「歌曲 / 专辑 / 艺术家 / 作品」四类药丸；
 // 每个药丸带一个状态点（灰=没取过、脉冲=整理中、绿=已有内容、黄=取不到），点开才请求、才出抽屉。
+// 右侧栏目（1.1.4-beta6）：每栏一张小卡，卡内直接显示**精简的已整理资料**。
+// 用户原话：「ai 资料的每个栏目都要在面板上显示精简的已整理资料……右边那个 ai 资料面板内容太空了」。
+// 数据优先级：AI 整理返回的 fields（已整理）→ 本地曲库事实（标题/艺术家/专辑/格式/时长）兜底。
+// 这样即使 AI 还没返回/没配置 key，面板也不会只剩一枚空药丸；AI 结果到了再原地刷新。
+// 状态点语义不变：灰=没取过 / 脉冲=整理中 / 绿=已有内容 / 黄=取不到。
+var NP_PREV = {};   // 本次签名计算出的预览，渲染时复用（避免重复算）
+function npRailShort(v, n) {
+  var s = efValueText(v).replace(/\s+/g, ' ').trim();
+  if (!s) return '';
+  // 字段值可能是长段落（简介/赏析）：预览只留开头，点开浮层看全文
+  if (n && s.length > n) s = s.slice(0, n - 1).replace(/[，,、;；。\s]+$/, '') + '…';
+  return s;
+}
+function npRailPick(fields, keys, limit) {
+  var out = [];
+  (keys || []).forEach(function (k) {
+    if (out.length >= (limit || 2)) return;
+    var v = npRailShort(fields && fields[k], 24);
+    if (v) out.push(k + ' ' + v);
+  });
+  return out.join(' · ');
+}
+function npRailLocalTrack(m) {
+  var a = [], b = [];
+  if (m && m.artist) a.push(m.artist);
+  if (m && m.album) a.push(m.album);
+  var fmt = [];
+  if (m && m.codec) fmt.push(String(m.codec).toUpperCase());
+  if (m && m.sampleRate) fmt.push((m.sampleRate / 1000).toFixed(m.sampleRate % 1000 ? 1 : 0) + 'k');
+  if (m && m.bits) fmt.push(m.bits + 'bit');
+  if (S.dur > 0) fmt.push(fmtDurLong(S.dur));
+  if (fmt.length) b.push(fmt.join(' · '));
+  return { p1: a.join(' · '), p2: b.join(' · ') };
+}
+// 返回 {p1,p2,st}：p1/p2 = 两行精简内容；st = 状态短语（已缓存 / 整理中… / 暂无资料）
+function npRailPreview(kind, st) {
+  var m = S.curMeta || {};
+  var d = (st && st.data) || null;
+  var fields = (d && d.fields) || null;
+  var p1 = '', p2 = '';
+  if (kind === 'track') {
+    var loc = npRailLocalTrack(m);
+    p1 = npRailPick(fields, ['演唱', '作曲', '作词', '编曲'], 2);
+    p2 = npRailPick(fields, ['歌曲风格', '发行时间', '所属专辑', '衍生作品'], 2);
+    if (!p1) p1 = loc.p1 || (m.title || '');
+    if (!p2) p2 = loc.p2;
+  } else if (kind === 'release') {
+    var alb = (d && d.__album) || null;
+    var lp = [];
+    if (m.albumArtist || m.artist) lp.push(m.albumArtist || m.artist);
+    if (alb && alb.year) lp.push(String(alb.year));
+    if (alb && alb.tracks && alb.tracks.length) {
+      var tot = 0;
+      alb.tracks.forEach(function (t) { tot += (t.dur || 0); });
+      lp.push(alb.tracks.length + ' 首');
+      if (tot > 0) lp.push(fmtDurLong(tot));
+    } else if (S.dur > 0) {
+      lp.push(fmtDurLong(S.dur));
+    }
+    p1 = lp.join(' · ');
+    p2 = npRailPick(fields, ['出版方', '专辑类型', '语种', '发行时间'], 2);
+    if (!p2 && alb && alb.sr) p2 = fmtTag(alb.sr, alb.bits);
+  } else if (kind === 'person') {
+    p1 = npRailPick(fields, ['国籍', '活跃年代'], 2);
+    p2 = npRailPick(fields, ['风格', '代表作品'], 2);
+    if (!p1) p1 = (m.albumArtist || m.artist || '');
+  } else if (kind === 'work') {
+    var wt = npWorkTarget(m);
+    p1 = npRailPick(fields, ['作曲家', '创作年代'], 2) || (wt.composer || '');
+    p2 = npRailPick(fields, ['体裁'], 1);
+  }
+  var stText = '';
+  if (!st || st.state === 'idle') stText = '';
+  else if (st.state === 'loading') stText = '整理中…';
+  else if (st.state === 'error') stText = '暂无资料';
+  else stText = (d && d.from_cache) ? '已缓存' : '已整理';
+  return { p1: p1 || '', p2: p2 || '', st: stText };
+}
 function npDataTabsSig() {
+  NP_PREV = {};
   return (NP_DATA.tabs || []).map(function (t) {
     var st = NP_DATA.cache[t.k] || { state: 'idle' };
-    return t.k + ':' + t.label + ':' + st.state + ':' + (NP_DATA.active === t.k ? '1' : '0');
+    var pv = npRailPreview(t.k, st);
+    NP_PREV[t.k] = pv;
+    return t.k + ':' + t.label + ':' + st.state + ':' + (NP_DATA.active === t.k ? '1' : '0') + ':' +
+           pv.p1 + '\u0001' + pv.p2 + '\u0001' + pv.st;
   }).join('|');
 }
 function npDataRenderTabs() {
   var el = D('npTabs'); if (!el) return;
   var sig = npDataTabsSig();
-  if (sig === NP_DATA.tabSig) return;     // renderNp 每 400ms 调一次：没变化绝不重绘（否则悬停会闪）
+  // 1.1.4-beta6：tabSig 初始为 null（不是空串）——空标签集的签名也是空串，
+  // 若初始也用空串，第一次"没有栏目"时会被误判为"没变化"而留着上一首的旧卡片。
+  if (NP_DATA.tabSig !== null && sig === NP_DATA.tabSig) return;   // renderNp 每 400ms 调一次：没变化绝不重绘（否则悬停会闪）
   NP_DATA.tabSig = sig;
+  var tabs = NP_DATA.tabs || [];
+  if (!tabs.length) {
+    el.innerHTML = '<div class=nprailempty>播放后在右侧显示歌曲、专辑、艺术家（古典作品还会多一栏演绎版本）的精简整理资料。</div>';
+    return;
+  }
   var h = '';
-  (NP_DATA.tabs || []).forEach(function (t) {
+  tabs.forEach(function (t) {
     var st = NP_DATA.cache[t.k] || { state: 'idle' };
+    var pv = NP_PREV[t.k] || npRailPreview(t.k, st);
     var cls = st.state === 'ok' ? ' ok' : (st.state === 'loading' ? ' busy' : (st.state === 'error' ? ' err' : ''));
     h += '<button class="npchip' + cls + (NP_DATA.active === t.k ? ' on' : '') + '" data-k="' + esc(t.k) + '"' +
-         ' title="' + esc(t.label + '：' + (t.name || '') + '（点击查看 AI 整理的资料）') + '">' +
-         '<i class=dot></i>' + esc(t.label) + '</button>';
+         ' title="' + esc(t.label + '：' + (t.name || '') + '（点击查看完整 AI 整理资料）') + '">' +
+         '<span class=npchip-top><i class=dot></i><span class=npchip-name>' + esc(t.label) + '</span>' +
+         '<span class=npchip-st>' + esc(pv.st) + '</span></span>' +
+         (pv.p1 ? '<span class=npchip-p1>' + esc(pv.p1) + '</span>' : '') +
+         (pv.p2 ? '<span class=npchip-p2>' + esc(pv.p2) + '</span>' : '') +
+         (!pv.p1 && !pv.p2 ? '<span class=npchip-p2>点开查看整理资料</span>' : '') +
+         '</button>';
   });
   el.innerHTML = h;
   Array.prototype.forEach.call(el.querySelectorAll('.npchip'), function (b) {
@@ -12314,7 +12475,7 @@ function npDataSummaryBody(d, kind) {
   // 261024-01 #2：脚注只留「AI 整理」。
   // 261024-02 #3：本地曲库数据优先（歌曲=文件真实时长；专辑=Σ本地曲目 + 逐行曲目列表）。
   kind = kind || NP_DATA.active;
-  var opts = {};
+  var opts = { noFoot: 1 };   // 浮层正文顶部已有 npDataCaption 的「AI 整理」标，脚注不重复
   if (d && d.__local) opts.local = d.__local;
   if (kind === 'release' && d && d.__album) {
     var trs = d.__album.tracks || [], tot = 0;
@@ -12361,6 +12522,13 @@ function npDataHeader(kind, st) {
   if (n) n.textContent = t.name || '';
   if (s) s.textContent = kind ? npDataStatHtml(kind, st) : '';
 }
+// 1.1.4-beta6：浮层正文顶部的一行小标（「AI 整理」+ 来源状态），与 App 弹窗的标题层级一致。
+// 状态文字沿用 npDataStatHtml（已缓存 / 刚刚整理 / 缓存 · N 个版本），不另造一套口径。
+function npDataCaption(kind, st) {
+  var s = kind ? npDataStatHtml(kind, st) : '';
+  return '<div class=npdcap><span>AI 整理</span><span class=sp></span>' +
+         (s ? '<span class=npdcapst>' + esc(s) + '</span>' : '') + '</div>';
+}
 function npDataRenderBody(force) {
   var body = D('npDataBody');
   if (!body) return;
@@ -12377,16 +12545,16 @@ function npDataRenderBody(force) {
   var need = (sig !== NP_DATA.bodyKey);
   if (!need && !force) return;
   NP_DATA.bodyKey = sig;
-  if (st.state === 'idle' || st.state === 'loading') { body.innerHTML = npDataSkeleton(); return; }
+  if (st.state === 'idle' || st.state === 'loading') { body.innerHTML = npDataCaption(kind, st) + npDataSkeleton(); return; }
   if (st.state === 'error') {
-    body.innerHTML = '<div class=npdhint>暂无该实体的资料。' + (st.error ? ('（' + esc(st.error) + '）') : '') + '</div>' +
+    body.innerHTML = npDataCaption(kind, st) + '<div class=npdhint>暂无该实体的资料。' + (st.error ? ('（' + esc(st.error) + '）') : '') + '</div>' +
       '<div style="margin-top:10px"><button class=btn id=npDataRetry>重试</button></div>';
     var rb = D('npDataRetry');
     if (rb) rb.onclick = function () { npDataEnsure(kind, true); };
     return;
   }
   if (kind === 'work') {
-    body.innerHTML = npDataWorkBody(st.data) +
+    body.innerHTML = npDataCaption(kind, st) + npDataWorkBody(st.data) +
       '<div style="margin-top:14px"><button class="btn" id=npDataRefresh style="font-size:11px;padding:3px 10px">重新查询</button></div>';
     bindCopyChips(body);
     var wo = D('npWorkOpen'); if (wo) wo.onclick = npOpenWorks;
@@ -12394,7 +12562,7 @@ function npDataRenderBody(force) {
     var wf = D('npDataRefresh'); if (wf) wf.onclick = function () { npDataEnsure('work', true); };
     return;
   }
-  body.innerHTML = npDataSummaryBody(st.data, kind) +
+  body.innerHTML = npDataCaption(kind, st) + npDataSummaryBody(st.data, kind) +
     '<div style="margin-top:16px"><button class="btn" id=npDataRefresh style="font-size:11px;padding:3px 10px" title="重新请求 AI 整理（会消耗一次模型调用）">重新整理</button></div>';
   bindCopyChips(body);
   var rf = D('npDataRefresh');
@@ -12424,6 +12592,33 @@ function npLocalAlbum(name, artist, cb) {
 //   * 只预取 release 这一个实体，一次（同一首歌只发一次）；不打开抽屉、不改变任何 UI 状态；
 //   * 失败静默（不 toast、不留错误态）；切歌后旧结果直接丢弃（key 不匹配）。
 var NPPREF = { key: '' };
+// 1.1.4-beta6：右栏每个栏目都要有可显示的精简内容 ⟹ 进单曲页时把「艺术家」也加入后台预取。
+// 费用纪律与 npPrefetchRelease 完全一致：只在开了 AI 整理且配了 key 时发一次；失败静默；
+// 同一切歌周期内只发一次（NPPREF_PERSON 守卫）；person 实体跨歌复用（同一艺术家只生成一次）。
+var NPPREF_PERSON = { key: '' };
+function npPrefetchPerson() {
+  if (META.summary != 1) return;
+  if (META.hasLlmKey !== true && META.summaryEnabled !== true) return;
+  var tabs = NP_DATA.tabs || [], per = null;
+  for (var i = 0; i < tabs.length; ++i) if (tabs[i].k === 'person') per = tabs[i];
+  if (!per || !per.name) return;
+  var st0 = NP_DATA.cache['person'];
+  if (st0 && (st0.state === 'ok' || st0.state === 'loading')) return;
+  var myTrack = S.lastCur || '';
+  var key = myTrack + '|' + per.name;
+  if (NPPREF_PERSON.key === key) return;
+  NPPREF_PERSON.key = key;
+  summaryOnce(npSummUrl('person', per), function (s) {
+    if (NPPREF_PERSON.key !== key || (S.lastCur || '') !== myTrack) return;   // 切歌 → 丢弃
+    if (!summHas(s)) return;                                                 // 失败静默
+    if (NP_DATA.cache['person'] && NP_DATA.cache['person'].state === 'ok') return;
+    NP_DATA.cache['person'] = { state: 'ok', data: s };
+    NP_DATA.tabSig = null;  // 强制重算签名：预览内容变了必须重绘
+    npDataRenderTabs();
+    if (NP_DATA.active === 'person') npDataRenderBody();
+  });
+}
+
 // 单曲页各类资料的 URL 只在这里拼（抽屉 / 预取 / 自动加载共用，才能命中同一份 summaryOnce 缓存）
 function npSummUrl(kind, t, force) {
   return '/api/entity/summary?kind=' + kind + '&name=' + encodeURIComponent((t && t.name) || '') +
@@ -12496,6 +12691,12 @@ function npDataEnsure(kind, force) {
   NP_DATA.inflight[fp] = 1;
   var req = NP_DATA.req;
   NP_DATA.cache[kind] = { state: 'loading' };
+  // 1.1.4-beta6：右栏卡片的状态点/预览必须跟着状态机走。旧实现只在 renderNp（进页 / meta 回来时
+  // 才调用，不是每 400ms 轮询）里刷标签，异步 summary 完成后没人重绘 ⟹ 卡片停在"整理中"、
+  // 状态行「正在后台整理…」永不消失。这里在请求开始/完成两处都强制重绘标签与状态行。
+  NP_DATA.tabSig = null;
+  npDataRenderTabs();
+  npRailHint();
   if (NP_DATA.active === kind) npDataRenderBody();
 
   function done(data, err) {
@@ -12504,6 +12705,9 @@ function npDataEnsure(kind, force) {
     if (!D('npPage') || !D('npPage').classList.contains('on')) return;
     if (data) NP_DATA.cache[kind] = { state: 'ok', data: data };
     else NP_DATA.cache[kind] = { state: 'error', error: err || '' };
+    NP_DATA.tabSig = null;
+    npDataRenderTabs();
+    npRailHint();
     if (NP_DATA.active === kind) npDataRenderBody();
   }
   if (kind === 'work') {
@@ -12552,8 +12756,13 @@ function updateNpData(m) {
   if (!can || !tabs.length) {
     // 1.1.4-beta4：右竖栏改为「恒占位」（.nprail 恒 display:block），remove('on') 只表示
     //   「这次没有 AI 资料」—— 抽屉收起、标签清空，但列宽不变 ⟹ 歌词居中不受影响（对称恒占位）。
+    // 1.1.4-beta6：这里必须真的把标签清空（旧实现直接 return，切到无 AI 资料的曲目后
+    //   上一首的栏目卡会留在面板里，看起来像"资料串台"）。
     rail.classList.remove('on');
     if (grid) grid.classList.remove('withdata');
+    NP_DATA.tabs = [];
+    NP_DATA.tabSig = null;
+    npDataRenderTabs();
     if (NP_DATA.active) npDrawerClose();
     return;
   }
@@ -12567,8 +12776,13 @@ function updateNpData(m) {
   // 261024-01 #3b ③「默认隐藏」：抽屉不打开、不占版面；
   // 261024-02 追加：但**专辑资料允许后台预取一次**（Lead 指定，改善"点开要等 10~30s"的体感）。
   npPrefetchRelease();
+  // 1.1.4-beta6：右栏「艺术家」栏目也预取一次（详见 npPrefetchPerson 的费用纪律）
+  npPrefetchPerson();
   // 261024-04 #7：进入单曲页自动加载**这首歌**的 summary（不需要点标签）
   npAutoSummary();
+  // 1.1.4-beta6：状态行每次都按当前缓存状态同步（旧实现只在 npAutoSummary 内部刷，
+  // 若那次调用被前面的分支提前 return，加载完成后"正在后台整理…"会一直挂着）。
+  npRailHint();
   if (NP_DATA.active) npDataEnsure(NP_DATA.active, false);
   npDataRenderBody();
 }
