@@ -1271,7 +1271,7 @@ function albumCardHtml(a, i) {
   return '<div class=card data-i=' + i + '>' +
     '<div class=cv>' +
       '<div class=ph>' + esc((a.name || '?').slice(0, 1).toUpperCase()) + '</div>' +
-      '<img data-cover-src="' + esc(a.cvUrl || ('/api/lib/cover?k=' + a.k)) + '" loading=lazy alt="" onerror="this.style.display=\'none\'">' +
+      '<img data-cover-src="' + esc(a.cvUrl || ('/api/lib/cover?k=' + a.k)) + '" loading=lazy decoding=async alt="" onerror="this.style.display=\'none\'">' +
       '<div class=pl><svg width=13 height=13 viewBox="0 0 24 24" fill=#fff><path d="M8 5v14l11-7z"/></svg></div>' +
     '</div>' +
     '<div class=nm title="' + esc(a.name) + '">' + esc(a.name) + '</div>' +

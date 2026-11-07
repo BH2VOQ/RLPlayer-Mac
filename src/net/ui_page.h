@@ -301,6 +301,11 @@ inline std::string rta_ui_page(const std::string& lang = "zh") {
     // 专辑网格
     h += ".grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(152px,1fr));gap:16px;padding:18px}";
     h += ".card{cursor:pointer;transition:.16s;border-radius:11px;padding:7px;margin:-7px}";
+    // 1.1.4-beta8（性能）：大库（实测 1502 张专辑）离屏卡片跳过布局/绘制/样式计算。
+    // 滚动和翻页时只处理视口附近的卡片；contain-intrinsic-size 用实测卡片尺寸占位，
+    // 避免滚动条长度跳动。长列表（曲目/最近播放等）同理。
+    h += ".grid>.card{content-visibility:auto;contain-intrinsic-size:196px 250px}";
+    h += "#list>.trow,#list>.row{content-visibility:auto;contain-intrinsic-size:auto 45px}";
     h += ".card:hover{background:var(--hov)}";
     h += ".card .cv{aspect-ratio:1;border-radius:9px;background:var(--cvbg) center/cover no-repeat;border:1px solid var(--line);position:relative;overflow:hidden;box-shadow:0 4px 16px var(--shadow)}";
     h += ".card .cv .ph{position:absolute;inset:0;display:grid;place-items:center;font-size:30px;font-weight:800;color:var(--ph-txt);background:var(--phbg)}";
