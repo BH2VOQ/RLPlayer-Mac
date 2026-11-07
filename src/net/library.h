@@ -349,6 +349,19 @@ public:
         for (auto& a : v) if (a.key == key) { out = a; return true; }
         return false;
     }
+    // 2026-11-08（1.1.4-beta7 #2）：按曲目文件路径反查所属专辑键（单曲封面兜底用）。
+    // 调用方只在本曲**没有**自己的封面时才偶尔问一次；一次线性扫描 = O(曲目数)。
+    // CUE 分轨共享物理路径 → 返回包含该路径的第一个专辑键（同一物理文件本来就属于同一张碟）。
+    bool albumKeyOfTrack(const std::string& path, std::string& keyOut) const {
+        keyOut.clear();
+        if (path.empty()) return false;
+        std::lock_guard<std::mutex> lk(mtx_);
+        albumVecLocked();                     // 保证 memo 与专辑向量一致（dirty 时重建）
+        const auto it = trackAlbumKey_.find(path);
+        if (it == trackAlbumKey_.end()) return false;
+        keyOut = it->second;
+        return true;
+    }
     bool trackAt(size_t i, LibTrack& out) const {
         std::lock_guard<std::mutex> lk(mtx_);
         if (i >= tracks_.size()) return false;
@@ -478,6 +491,9 @@ private:
     std::function<void(const std::string&)> scanLogHook_;
     mutable std::vector<LibAlbum> albums_;
     mutable bool albumsDirty_ = true;
+    // 2026-11-08（1.1.4-beta7 #2）：曲目路径 → 专辑键 memo（单曲封面兜底反查，O(1)）。
+    // 与 albums_ 同生命周期：albumsDirty_ 时在 albumVecLocked() 里一起重建。
+    mutable std::unordered_map<std::string, std::string> trackAlbumKey_;
     mutable std::map<std::string, local_cover::Entry> coverCache_;
 
     // Serializes thread ownership, not worker IO. Never held by the worker.
@@ -1535,6 +1551,7 @@ inline std::string lib_dir_album_key(const std::string& dir) {
 inline const std::vector<LibAlbum>& Library::albumVecLocked() const {
     if (!albumsDirty_) return albums_;
     albums_.clear();
+    trackAlbumKey_.clear();
     const size_t n = tracks_.size();
     LibDirAlbumMemo memo;               // 局部 memo：同目录只扫一次
     std::vector<int> discOf(n, 0);      // 预先算好排序用碟号（comparator 里必须零 IO）
@@ -1585,6 +1602,10 @@ inline const std::vector<LibAlbum>& Library::albumVecLocked() const {
         const std::string x = a.artist + "\x1f" + a.name, y = b.artist + "\x1f" + b.name;
         return x < y;
     });
+    // 2026-11-08（beta7 #2）：路径 → 专辑键 memo（一次重建 O(曲目数)，之后反查 O(1)）。
+    for (const auto& a : albums_)
+        for (size_t ix : a.idx)
+            if (ix < tracks_.size()) trackAlbumKey_[tracks_[ix].path] = a.key;
     albumsDirty_ = false;
     albumCount_.store(albums_.size());
     return albums_;
@@ -1637,6 +1658,30 @@ inline bool lib_cover_is_1x1_placeholder(const std::vector<unsigned char>& b) {
                ((uint32_t)b[off + 2] << 8) | (uint32_t)b[off + 3];
     };
     return be32(16) == 1u && be32(20) == 1u;
+}
+
+// ---------------------------------------------------------------------------
+// 2026-11-08（1.1.4-beta7 #2）：单曲封面缺失 → 专辑封面兜底来源判定（**纯函数**，可离线单测）
+//
+// 用户反馈：一首歌自己找不到封面时整块空白，但同一张专辑明明有封面。
+// 兜底顺序必须与专辑封面端点 /api/lib/cover 完全一致（人工 > 专辑内嵌 > 在线抓取缓存），
+// 否则同一张专辑在专辑页与单曲页会显示不同的图，反而制造新的"封面不一致"。
+//
+// 输入全是调用方用**零网络、零 ffmpeg** 的方式查到的布尔：
+//   ownAvailable   本曲已经有可用封面（内嵌/同目录/MetaStore 缓存）→ 不需要兜底
+//   albumHasEmbed  所属专辑扫描期 hasCover 标志（专辑内有内嵌流或同目录 cover/folder/front）
+//   albumManual    covercache/manual/<albumKey>.jpg 存在（用户手工设过）
+//   albumOnline    covercache/<albumKey>.jpg 存在（在线抓取正缓存）
+// 返回 None = 确实没有可兜底的图 ⟹ 调用方保持 404 / 首字母占位，**绝不造假图**。
+enum class LibCoverFallback { None = 0, AlbumManual, AlbumEmbedded, AlbumOnline };
+
+inline LibCoverFallback lib_cover_fallback_source(bool ownAvailable, bool albumHasEmbed,
+                                                  bool albumManual, bool albumOnline) {
+    if (ownAvailable) return LibCoverFallback::None;
+    if (albumManual) return LibCoverFallback::AlbumManual;
+    if (albumHasEmbed) return LibCoverFallback::AlbumEmbedded;
+    if (albumOnline) return LibCoverFallback::AlbumOnline;
+    return LibCoverFallback::None;
 }
 
 // ---------------------------------------------------------------------------

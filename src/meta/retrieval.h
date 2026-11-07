@@ -37,6 +37,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <condition_variable>
 #include <future>
 #include <cstdint>
 #include <cstdio>
@@ -46,6 +47,7 @@
 #include <fstream>
 #include <iterator>
 #include <map>
+#include <memory>
 #include <mutex>
 #include <set>
 #include <sstream>
@@ -1002,6 +1004,61 @@ inline RetrievalRateLimiter& retrieval_rate_limiter() {
 }
 
 // ---------------------------------------------------------------------------
+// 并行取正文 + 软截止（2026-11-08，1.1.4-beta7 速度）
+//
+// 旧实现：4 路 std::async + 按序 futs[i].get() → 整阶段耗时 = **最慢那一页**（实测
+// fetch=10215ms），把 AI 整理硬拖到 30s。新实现：每页一个 detached 线程写自己的槽，
+// 本线程最多等到 deadline，到点还没回来的页直接丢弃。丢页是安全的：正文只是最后的
+// 提示词材料，少一页不会产生错误数据；引用校验仍只接受 allowed_urls 里的真实 URL。
+// detached 线程只写自己的 shared_ptr 槽，不回头读库/实体等共享状态，进程退出安全。
+struct RetrievalFetchSlot {
+    std::mutex mtx;
+    std::condition_variable cv;
+    bool done = false;
+    DsFetchReply rep;
+};
+
+inline std::vector<DsFetchReply> retrieval_fetch_pages(const std::vector<std::string>& urls,
+                                                       const LlmConfig& cfg,
+                                                       int page_timeout_ms,
+                                                       int deadline_ms) {
+    std::vector<DsFetchReply> out(urls.size());
+    if (urls.empty()) return out;
+    std::vector<std::shared_ptr<RetrievalFetchSlot>> slots;
+    slots.reserve(urls.size());
+    const auto deadline = std::chrono::steady_clock::now() +
+                          std::chrono::milliseconds(std::max(1, deadline_ms));
+    for (size_t i = 0; i < urls.size(); ++i) {
+        auto slot = std::make_shared<RetrievalFetchSlot>();
+        slots.push_back(slot);
+        const std::string fu = urls[i];
+        const LlmConfig cfg_f = cfg;
+        const auto* cancelToken = rta::net::http_detail::current_cancellation_token();
+        try {
+            std::thread([slot, fu, cfg_f, cancelToken, page_timeout_ms]() {
+                rta::net::HttpCancellationScope cancelScope(cancelToken);
+                retrieval_rate_limiter().acquire();
+                DsFetchReply r = ds_fetch(cfg_f, fu, page_timeout_ms);
+                {
+                    std::lock_guard<std::mutex> lk(slot->mtx);
+                    slot->rep = std::move(r);
+                    slot->done = true;
+                }
+                slot->cv.notify_all();
+            }).detach();
+        } catch (...) {
+            // 线程起不来（极端资源不足）→ 这一页按"没抓到"处理，安全降级
+        }
+    }
+    for (size_t i = 0; i < slots.size(); ++i) {
+        std::unique_lock<std::mutex> lk(slots[i]->mtx);
+        slots[i]->cv.wait_until(lk, deadline, [&] { return slots[i]->done; });
+        if (slots[i]->done) out[i] = slots[i]->rep;
+    }
+    return out;
+}
+
+// ---------------------------------------------------------------------------
 // 编排检索：retrieval_fetch
 // ---------------------------------------------------------------------------
 
@@ -1117,6 +1174,14 @@ struct RetrievalOptions {
     int max_search_hits = 8;
     int max_fetch_pages = 3;      // 最多拉取前 2~3 页正文
     int timeout_ms = 15000;
+    // 2026-11-08（1.1.4-beta7 速度）：分阶段预算。旧实现 search/fetch/llm 各自硬编码 60s，
+    // 慢 provider 会把三段串行叠加成 25s+ 的"莫名卡死"（用户反馈的"AI 检索太慢"）。
+    // 这些值只限制**单次 HTTP 等待**，不放宽任何校验：材料少一页只会少一段正文，
+    // 引用仍然只认 allowed_urls 里的真实 URL，绝不允许编造。
+    int search_timeout_ms = 12000;     // 单次 ds_search（含第三方 search）HTTP 超时
+    int fetch_deadline_ms = 6000;      // 并行 fetch 阶段总等待上限：到点用已回来的页
+    int fetch_page_timeout_ms = 10000; // 单页 ds_fetch HTTP 超时
+    int llm_timeout_ms = 45000;        // 单次 llm_chat HTTP 超时（综合 + AI 整理兜底）
     LlmConfig llm_cfg;
     FilterOptions filter_opts;
     std::string artist;           // 针对 Release 的艺术家辅助（用于 Wikipedia 与 Discogs 检索消歧）
@@ -1216,7 +1281,8 @@ inline SummaryResult parse_ai_only_reply(const std::string& text) {
 inline SummaryResult summary_ai_only_generate(const std::string& entityName,
                                               const std::string& kindLabel,
                                               const std::string& lang,
-                                              const LlmConfig& cfg) {
+                                              const LlmConfig& cfg,
+                                              int timeout_ms = 60000) {
     const std::vector<LlmMessage> base_msgs = build_ai_only_prompt(entityName, kindLabel, lang);
     SummaryResult parsed;
     std::string last_err;
@@ -1228,7 +1294,7 @@ inline SummaryResult summary_ai_only_generate(const std::string& entityName,
                 "{\"sections\":[{\"heading\":\"简介\",\"paragraphs\":[{\"text\":\"……\"}]}]}，不要任何其它文字。" });
         }
         retrieval_rate_limiter().acquire();
-        const LlmReply rep = llm_chat(cfg, msgs, 2000, 0.3f, true);
+        const LlmReply rep = llm_chat(cfg, msgs, 2000, 0.3f, true, timeout_ms);
         if (!rep.ok) { last_err = rep.error; continue; }
         parsed = parse_ai_only_reply(rep.content);
         if (parsed.ok) break;
@@ -1316,7 +1382,8 @@ inline SummaryResult retrieval_fetch_track(const std::string& title,
             query = (artist.empty() ? title : (artist + " " + title)) + " song credits release lyrics";
         }
         retrieval_rate_limiter().acquire();
-        const DsSearchReply s_rep = ds_search(cfg, query, opts.max_search_hits > 0 ? opts.max_search_hits : 8);
+        const DsSearchReply s_rep = ds_search(cfg, query, opts.max_search_hits > 0 ? opts.max_search_hits : 8,
+                                             opts.search_timeout_ms);
         trk_search_ms = (long long)std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::steady_clock::now() - t_trk0).count();
         if (s_rep.ok) {
@@ -1331,19 +1398,14 @@ inline SummaryResult retrieval_fetch_track(const std::string& title,
             hits = std::move(fr.hits);
             const size_t fetch_count = std::min(hits.size(), (size_t)2);
             const auto t_f0 = std::chrono::steady_clock::now();
-            const LlmConfig cfg_f = cfg;
-            std::vector<std::future<DsFetchReply>> futs;
+            std::vector<std::string> fetch_urls;
+            fetch_urls.reserve(fetch_count);
+            for (size_t i = 0; i < fetch_count; ++i) fetch_urls.push_back(hits[i].url);
+            // 2026-11-08（beta7 速度）：并行 + 软截止（旧实现等最慢那页，实测可达 10s）
+            const std::vector<DsFetchReply> fetch_reps = retrieval_fetch_pages(
+                fetch_urls, cfg, opts.fetch_page_timeout_ms, opts.fetch_deadline_ms);
             for (size_t i = 0; i < fetch_count; ++i) {
-                const std::string fu = hits[i].url;
-                const auto* cancelToken = rta::net::http_detail::current_cancellation_token();
-                futs.push_back(std::async(std::launch::async, [fu, cfg_f, cancelToken]() {
-                    rta::net::HttpCancellationScope cancelScope(cancelToken);
-                    retrieval_rate_limiter().acquire();
-                    return ds_fetch(cfg_f, fu, 10000);
-                }));
-            }
-            for (size_t i = 0; i < fetch_count; ++i) {
-                const DsFetchReply f_rep = futs[i].get();
+                const DsFetchReply& f_rep = fetch_reps[i];
                 if (f_rep.ok && !f_rep.content.empty()) {
                     hits[i].snippet = f_rep.content.substr(0, 1200);
                     if (!f_rep.title.empty()) hits[i].title = f_rep.title;
@@ -1365,7 +1427,7 @@ inline SummaryResult retrieval_fetch_track(const std::string& title,
             }
             retrieval_rate_limiter().acquire();
             const auto t_l0 = std::chrono::steady_clock::now();
-            const LlmReply rep = llm_chat(cfg, msgs, 2200, 0.3f, true);
+            const LlmReply rep = llm_chat(cfg, msgs, 2200, 0.3f, true, opts.llm_timeout_ms);
             trk_llm_ms = (long long)std::chrono::duration_cast<std::chrono::milliseconds>(
                 std::chrono::steady_clock::now() - t_l0).count();
             if (!rep.ok) { last_err = rep.error; continue; }
@@ -1376,7 +1438,12 @@ inline SummaryResult retrieval_fetch_track(const std::string& title,
     }
     if (!sr.ok) {
         // 检索不到材料 → 退回 AI 自有知识（仍标 unverified，UI 只显示「AI 整理」）
-        sr = summary_ai_only_generate(artist.empty() ? title : (artist + " - " + title), "歌曲", lang, cfg);
+        // 2026-11-08（beta7）：兜底 LLM 也是关键路径耗时，必须计入 diag.llm（旧实现漏计 → 日志像 1s 完成）
+        const auto t_ai0 = std::chrono::steady_clock::now();
+        sr = summary_ai_only_generate(artist.empty() ? title : (artist + " - " + title), "歌曲", lang, cfg,
+                                      opts.llm_timeout_ms);
+        trk_llm_ms += (long long)std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - t_ai0).count();
     } else {
         sr.unverified = true;   // 检索正文未做逐段引用校验 → 仍按"AI 整理"标注
         sr.disclaimer = "AI 整理";
@@ -1485,6 +1552,22 @@ inline SummaryResult retrieval_fetch(EntityKind kind,
         return false;
     };
     if (kind == EntityKind::Release) {
+        // 2026-11-08（1.1.4-beta7 速度）：Discogs 与 Wikipedia 互不依赖，改成**并行**。
+        // 旧实现串行追加，实测 Discogs 单次 1~3s 完整叠在维基之后；现在与维基检索同时起跑，
+        // 最后统一 join（材料顺序只影响提示词排列，不影响引用校验）。
+        std::future<KnowledgeMaterial> f_discogs;
+        try {
+            const std::string dname = name;
+            const std::string dartist = opts.artist;
+            const int dtimeout = opts.timeout_ms;
+            const auto* dcancel = rta::net::http_detail::current_cancellation_token();
+            f_discogs = std::async(std::launch::async, [dname, dartist, dtimeout, dcancel]() {
+                rta::net::HttpCancellationScope cancelScope(dcancel);
+                return retrieval_fetch_discogs_release(dname, dartist, dtimeout);
+            });
+        } catch (...) {
+            // 起不了线程 → 下面退回串行，行为与旧版一致
+        }
         // 2026-10-23 DEBUG：Release 原先直接调 knowledge_wikipedia（纯网络、不读不写 L2 缓存），
         // 同一张专辑每次生成都要重打维基（失败还串行换写法再打两轮）。改回带缓存的 knowledge_fetch，
         // 只有拿不到「非消歧义」正文时，才用「艺术家+专辑名」限定再试（罕见路径，最多 2 次）。
@@ -1499,7 +1582,12 @@ inline SummaryResult retrieval_fetch(EntityKind kind,
                 }
             }
         }
-        KnowledgeMaterial dm = retrieval_fetch_discogs_release(name, opts.artist, opts.timeout_ms);
+        KnowledgeMaterial dm;
+        if (f_discogs.valid()) {
+            try { dm = f_discogs.get(); } catch (...) { dm = KnowledgeMaterial(); }
+        } else {
+            dm = retrieval_fetch_discogs_release(name, opts.artist, opts.timeout_ms);
+        }
         if (!dm.url.empty()) {
             kr.materials.push_back(std::move(dm));
         }
@@ -1572,7 +1660,8 @@ inline SummaryResult retrieval_fetch(EntityKind kind,
         }
 
         retrieval_rate_limiter().acquire();
-        const DsSearchReply s_rep = ds_search(cfg, query, opts.max_search_hits > 0 ? opts.max_search_hits : 5);
+        const DsSearchReply s_rep = ds_search(cfg, query, opts.max_search_hits > 0 ? opts.max_search_hits : 5,
+                                             opts.search_timeout_ms);
         diag_search_ms = ms_since(t_search0);
         if (s_rep.ok) {
             std::vector<SearchHit> raw_hits;
@@ -1599,21 +1688,15 @@ inline SummaryResult retrieval_fetch(EntityKind kind,
             const size_t fetch_count = std::min(valid_hits.size(),
                 (size_t)std::max(1, std::min(opts.max_fetch_pages, 4)));
             const auto t_fetch0 = std::chrono::steady_clock::now();
-            const LlmConfig cfg_fetch = cfg;
-            std::vector<std::future<DsFetchReply>> fetch_futs;
-            fetch_futs.reserve(fetch_count);
-            for (size_t i = 0; i < fetch_count; ++i) {
-                const std::string fu = valid_hits[i].url;
-                const auto* cancelToken = rta::net::http_detail::current_cancellation_token();
-                fetch_futs.push_back(std::async(std::launch::async, [fu, cfg_fetch, cancelToken]() {
-                    rta::net::HttpCancellationScope cancelScope(cancelToken);
-                    retrieval_rate_limiter().acquire();
-                    return ds_fetch(cfg_fetch, fu, 12000);   // 12s 超时：慢页不拖累整体
-                }));
-            }
+            std::vector<std::string> fetch_urls;
+            fetch_urls.reserve(fetch_count);
+            for (size_t i = 0; i < fetch_count; ++i) fetch_urls.push_back(valid_hits[i].url);
+            // 2026-11-08（beta7 速度）：并行 + 软截止。旧实现按序 get() 等最慢页（实测 10.2s）。
+            const std::vector<DsFetchReply> fetch_reps = retrieval_fetch_pages(
+                fetch_urls, cfg, opts.fetch_page_timeout_ms, opts.fetch_deadline_ms);
             for (size_t i = 0; i < fetch_count; ++i) {
                 SearchHit fh = valid_hits[i];
-                const DsFetchReply f_rep = fetch_futs[i].get();
+                const DsFetchReply& f_rep = fetch_reps[i];
                 if (f_rep.ok && !f_rep.content.empty()) {
                     fh.snippet = f_rep.content.substr(0, 1500);
                     if (!f_rep.title.empty()) fh.title = f_rep.title;
@@ -1666,7 +1749,7 @@ inline SummaryResult retrieval_fetch(EntityKind kind,
             // 2026-10-24（261024-04 #4）：这条兜底路径以前**不带 diag**，于是日志里只剩
             // "unverified=1"、看不出时间花在哪。AI 整理同样是 10~30s 的 LLM 调用，必须计时。
             const auto t_ai0 = std::chrono::steady_clock::now();
-            SummaryResult ai_res = summary_ai_only_generate(label, kind_label, lang, cfg);
+            SummaryResult ai_res = summary_ai_only_generate(label, kind_label, lang, cfg, opts.llm_timeout_ms);
             diag_llm_ms += (long long)std::chrono::duration_cast<std::chrono::milliseconds>(
                 std::chrono::steady_clock::now() - t_ai0).count();
             if (ai_res.ok) {
@@ -1728,7 +1811,8 @@ inline SummaryResult retrieval_fetch(EntityKind kind,
         }
         retrieval_rate_limiter().acquire();
         const auto t_llm0 = std::chrono::steady_clock::now();
-        const LlmReply chat_rep = llm_chat(cfg, attempt_msgs, attempt_tokens, 0.2f, true);
+        const LlmReply chat_rep = llm_chat(cfg, attempt_msgs, attempt_tokens, 0.2f, true,
+                                          opts.llm_timeout_ms);
         const long long llm_ms = (long long)std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::steady_clock::now() - t_llm0).count();
         if (!chat_rep.ok) {
@@ -1751,7 +1835,7 @@ inline SummaryResult retrieval_fetch(EntityKind kind,
             return cached;
         }
         SummaryResult ai_fb = summary_ai_only_generate(promptEntityName,
-            (kind == EntityKind::Release) ? "专辑" : "艺术家", lang, cfg);
+            (kind == EntityKind::Release) ? "专辑" : "艺术家", lang, cfg, opts.llm_timeout_ms);
         if (ai_fb.ok) {
             ai_fb.error = "权威综合失败，已用 AI 自有知识整理（" + last_err + "）";
             ai_fb.diag = "fallback=ai_only; " + last_err;

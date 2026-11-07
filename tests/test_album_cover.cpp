@@ -501,6 +501,64 @@ int main(int argc, char** argv) {
            "got " + std::to_string(b.size()) + " B / want " + std::to_string(tinyOk.size()) + " B");
     }
 
+    // =====================================================================
+    // [G] 单曲 → 所属专辑键反查（2026-11-08，1.1.4-beta7 #2 封面兜底的基础设施）
+    //     判据：专辑内每一首都能反查回同一个专辑键；库外路径/空路径返回 false 且清空输出。
+    // =====================================================================
+    {
+        const fs::path d = tmp / "G";
+        const fs::path p1 = d / "01.wav", p2 = d / "02.wav", orphan = d / "99.wav";
+        writeFile(p1, buildWav("G One", {}));
+        writeFile(p2, buildWav("G Two", coverA));
+        writeIndex(tmp / "libG", {
+            { U8(p1), "Album G", "Artist G", "Artist G", "G One", 1, 1, 2020, 44100, 16, 2, 1.0, 1 },
+            { U8(p2), "Album G", "Artist G", "Artist G", "G Two", 2, 1, 2020, 44100, 16, 2, 1.0, 1 },
+        });
+        ::setenv("RLPLAYER_LIBRARY_DIR", U8(tmp / "libG").c_str(), 1);
+        Library& lib = Library::instance();
+        lib.load();
+        const std::string key = albumKeyOf(lib, "Album G", "Artist G");
+        ck(!key.empty(), "[G] 找到专辑 Album G / Artist G");
+        std::string got;
+        const bool ok1 = lib.albumKeyOfTrack(U8(p1), got);
+        ck(ok1 && got == key, "[G] 曲目路径 → 所属专辑键（首曲）", "got=" + got + " want=" + key);
+        std::string got2;
+        const bool ok2 = lib.albumKeyOfTrack(U8(p2), got2);
+        ck(ok2 && got2 == key, "[G] 曲目路径 → 所属专辑键（次曲）", "got=" + got2);
+        std::string got3 = "dirty";
+        ck(!lib.albumKeyOfTrack(U8(orphan), got3) && got3.empty(),
+           "[G] 不在库里的路径返回 false，且清空输出（不返回脏值）", "got=" + got3);
+        std::string got4 = "dirty";
+        ck(!lib.albumKeyOfTrack("", got4) && got4.empty(), "[G] 空路径返回 false 且清空输出");
+        int mapped = 0;
+        for (size_t i = 0; i < lib.trackCount(); ++i) {
+            rta::net::LibTrack t;
+            if (!lib.trackAt(i, t)) continue;
+            std::string k;
+            if (lib.albumKeyOfTrack(t.path, k) && k == key) ++mapped;
+        }
+        ck(mapped == 2, "[G] 专辑内 2 首曲目都能反查回同一个专辑键", std::to_string(mapped));
+    }
+
+    // =====================================================================
+    // [H] 兜底来源判定矩阵（纯函数，零 IO）：本曲有图不兜底；人工 > 专辑内嵌 > 在线缓存；
+    //     全都没有 → None（保持空白/首字母占位，绝不造假图）。
+    // =====================================================================
+    {
+        using rta::net::LibCoverFallback;
+        using rta::net::lib_cover_fallback_source;
+        ck(lib_cover_fallback_source(true, true, true, true) == LibCoverFallback::None,
+           "[H] 本曲已有封面时不兜底（不许用专辑图覆盖本曲自己的图）");
+        ck(lib_cover_fallback_source(false, true, true, true) == LibCoverFallback::AlbumManual,
+           "[H] 人工封面最优先（与 /api/lib/cover 同序）");
+        ck(lib_cover_fallback_source(false, true, false, true) == LibCoverFallback::AlbumEmbedded,
+           "[H] 无人工时专辑内嵌图优先于在线缓存");
+        ck(lib_cover_fallback_source(false, false, false, true) == LibCoverFallback::AlbumOnline,
+           "[H] 专辑无内嵌图时有在线抓取缓存可兜底");
+        ck(lib_cover_fallback_source(false, false, false, false) == LibCoverFallback::None,
+           "[H] 四种来源都没有 → None（返回 404/首字母占位，绝不造假图）");
+    }
+
     fs::remove_all(tmp, ec);
     std::printf("\n%s（通过 %d 项，失败 %d 项，跳过 %d 项）\n",
                 g_fail == 0 ? "全部通过" : "存在失败", g_pass, g_fail, g_skip);

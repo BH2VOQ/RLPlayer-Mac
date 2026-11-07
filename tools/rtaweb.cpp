@@ -5064,6 +5064,69 @@ static const char* cover_mime_of(const std::vector<unsigned char>& b) {
     return rta::cover::cover_mime_of(b);
 }
 
+// 2026-11-08（1.1.4-beta7 #2）：单曲封面兜底 —— 本曲没有可用的内嵌/同目录封面时，回退到所属专辑封面。
+// 与 /api/lib/cover 三条来源**同序**（人工 > 专辑内嵌 > 在线抓取缓存），且全部零网络：
+//   * manual/<albumKey>.jpg      用户手工设置（永久优先）
+//   * Library::albumCover()      专辑内 cv=1 曲目优先；内部 12s 预算 + 并发闸门 + embedcache
+//   * covercache/<albumKey>.jpg  在线抓取的正缓存
+// 返回 true 时 bytes/mime 可直接回给 /api/cover；false = 确实没有可兜底的图（保持 404，不造假图）。
+static bool cover_track_album_fallback(const std::string& file, std::vector<unsigned char>& bytes,
+                                       std::string& mime, std::string* source) {
+    auto& lib = Library::instance();
+    std::string albumKey;
+    if (!lib.albumKeyOfTrack(file, albumKey) || albumKey.empty()) return false;
+    rta::net::LibAlbum alb;
+    const bool albumHasEmbed = lib.album(albumKey, alb) && alb.hasCover;
+    const bool albumManual = rta::cover::cover_has_disk_in(cover_manual_dir(), albumKey);
+    const bool albumOnline = rta::cover::cover_has_disk_in(cover_cache_dir(), albumKey);
+    if (rta::net::lib_cover_fallback_source(false, albumHasEmbed, albumManual, albumOnline) ==
+        rta::net::LibCoverFallback::None) {
+        return false;
+    }
+    bytes.clear();
+    if (cover_read_manual(albumKey, bytes) && !bytes.empty()) {
+        mime = cover_mime_of(bytes);
+        if (source) *source = "album-manual";
+        return true;
+    }
+    bytes.clear();
+    if (albumHasEmbed) {
+        std::string localSource;
+        bool busy = false;
+        if (lib.albumCover(albumKey, bytes, mime, &localSource, &busy) && !bytes.empty()) {
+            if (source) *source = std::string("album-") + localSource;
+            return true;
+        }
+        bytes.clear();
+        mime = "image/png";
+    }
+    if (cover_read_cached(albumKey, bytes) && !bytes.empty()) {
+        mime = cover_mime_of(bytes);
+        if (source) *source = "album-net";
+        return true;
+    }
+    bytes.clear();
+    return false;
+}
+
+// /api/meta 专用：**便宜**地问「本曲缺封面时，专辑有没有可兜底的图」。
+// 绝不在这里跑 ffmpeg（内嵌图抽取由 /api/cover 在 <img> 加载时按需做）；只读扫描期
+// hasCover 标志 + 两次 stat，保证 /api/meta 的延迟不被封面拖累。
+static bool cover_track_album_available(const std::string& file) {
+    auto& lib = Library::instance();
+    std::string albumKey;
+    if (!lib.albumKeyOfTrack(file, albumKey) || albumKey.empty()) return false;
+    rta::net::LibAlbum alb;
+    // 快路径：专辑扫描期 hasCover=1（专辑内有内嵌流/同目录封面）→ 一定有图可兜底，零 stat。
+    // 这是绝大多数命中路径（/api/meta 在切歌时调用，慢卷上两次 stat 就要 10ms+）。
+    if (lib.album(albumKey, alb) && alb.hasCover) return true;
+    return rta::net::lib_cover_fallback_source(
+               false, false,
+               rta::cover::cover_has_disk_in(cover_manual_dir(), albumKey),
+               rta::cover::cover_has_disk_in(cover_cache_dir(), albumKey)) !=
+           rta::net::LibCoverFallback::None;
+}
+
 static std::string cover_env_host() {
     const char* v = std::getenv("RLPLAYER_COVER_HOST");
     std::string host = v ? std::string(v) : std::string();
@@ -6606,13 +6669,79 @@ static std::string llm_models_json(const std::string& path) {
 // 简介返回 JSON 附带「实体种类 / 是否来自缓存」标志（2026-10-23 用户 261023-03 #2/#3）：
 // 前端据此决定加载态与是否重复请求；summary_to_json 本体是缓存文件格式，不掺入运行时标志。
 static std::string summary_json_with_flags(const rta::meta::SummaryResult& sr,
-                                           const std::string& kind, bool cached) {
+                                           const std::string& kind, bool cached,
+                                           bool stale = false) {
     std::string js = rta::meta::summary_to_json(sr);
     const size_t close = js.find_last_of('}');
     if (close == std::string::npos) return js;
+    // 2026-11-08（1.1.4-beta7 速度，stale-while-revalidate）：
+    //   summaryStale=true 表示"这是过期的磁盘缓存，后台正在重新生成"（summaryCached 仍为 true，
+    //   语义诚实：内容确实来自缓存）。旧前端不认这两个字段也能正常渲染，只是不会自动再拉一次。
     js.insert(close, ",\"summaryKind\":\"" + jesc(kind) + "\",\"summaryCached\":" +
-                     (cached ? "true" : "false") + ",\"summaryAvailable\":true");
+                     (cached ? "true" : "false") + ",\"summaryAvailable\":true" +
+                     (stale ? ",\"summaryStale\":true,\"summaryRefreshing\":true" : ""));
     return js;
+}
+
+// 2026-11-08（beta7 速度）：pending 响应带轮询建议（前端可据此把 2s 轮询降到 ~300ms，
+// 平均少等 0~1.7s）。字段全部可选，旧前端忽略即可；retryAfterMs 钳在 200..1500。
+static std::string summary_pending_json(const std::string& kind, long long elapsed_ms) {
+    if (elapsed_ms < 0) elapsed_ms = 0;
+    long long retry = 300;
+    if (elapsed_ms > 8000) retry = 600;
+    if (elapsed_ms > 20000) retry = 1000;
+    if (retry < 200) retry = 200;
+    if (retry > 1500) retry = 1500;
+    return "{\"ok\":false,\"pending\":true,\"error\":\"正在整理资料\",\"summaryKind\":\"" + jesc(kind) +
+           "\",\"summaryCached\":false,\"retryAfterMs\":" + std::to_string(retry) +
+           ",\"elapsedMs\":" + std::to_string(elapsed_ms) + "}";
+}
+
+
+// 2026-11-08（1.1.4-beta8 性能）：/api/meta 的探测结果内存缓存。
+// 实测（5867 首库、/Volumes/Music）：/api/meta p50 8.5ms、max 29ms —— probe_media 内部要
+// 起 ffprobe 子进程，而 /api/meta 在每次切歌/页面重绘/打开单曲页时都会被前端调一次。
+// 同一首歌在一次会话里反复被问，每次都 fork 一个 ffprobe 完全没必要。
+// 缓存键 = 路径 + mtime + 文件大小：文件被写回/替换 ⟹ mtime/size 变 ⟹ 自动失效。
+// 只缓存**纯探测结果**；MetaStore 的字段覆盖仍按原逻辑每次叠加（写回后文件 mtime 必变）。
+struct MetaProbeMemoEntry {
+    long long mtime = 0;
+    long long size = 0;
+    MediaInfo mi;
+};
+static std::mutex g_metaprobe_mu;
+static std::map<std::string, MetaProbeMemoEntry> g_metaprobe;
+
+static MediaInfo probe_media_memoized(const std::string& file) {
+    long long mtime = 0, size = 0;
+    bool statOk = false;
+    {
+        std::error_code ec;
+        const fs::path p = fs::u8path(file);
+        const auto mt = fs::last_write_time(p, ec);
+        if (!ec) {
+            const auto fsz = fs::file_size(p, ec);
+            if (!ec) {
+                mtime = (long long)std::chrono::duration_cast<std::chrono::seconds>(
+                            mt.time_since_epoch()).count();
+                size = (long long)fsz;
+                statOk = true;
+            }
+        }
+    }
+    if (statOk) {
+        std::lock_guard<std::mutex> lk(g_metaprobe_mu);
+        auto it = g_metaprobe.find(file);
+        if (it != g_metaprobe.end() && it->second.mtime == mtime && it->second.size == size)
+            return it->second.mi;
+    }
+    MediaInfo mi = probe_media(file);
+    if (statOk) {
+        std::lock_guard<std::mutex> lk(g_metaprobe_mu);
+        if (g_metaprobe.size() >= 512) g_metaprobe.clear();   // 简单上限：满了整批清（会话级缓存）
+        g_metaprobe[file] = MetaProbeMemoEntry{mtime, size, mi};
+    }
+    return mi;
 }
 
 // ---------------- 资料简介后台生成（不阻塞单线程 HTTP accept）----------------
@@ -7141,6 +7270,9 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
             rta::net::webui_set_status(502);
             return "{\"ok\":false,\"error\":\"取回的内容不是有效图片（无 JPEG/PNG 魔数）\"}";
         }
+        // 2026-11-08（beta7 #3）：头像命中同样长缓存（本地 artistcache 化名，1h 内不重复拉取；
+        // refresh=1 会换 URL 语义以外的内容，但 1h 的旧图可接受，且用户可手动刷新）。
+        rta::net::webui_set_cache_control("public, max-age=3600");
         return r.bytes;
     }
 
@@ -7836,9 +7968,19 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
             if (std::string(src) == "none") {
                 ct = "image/jpeg";
                 rta::net::webui_set_status(404);
+                // 2026-11-08（beta7 #3）：负结果（含 .none 负缓存）绝不能被浏览器长缓存，
+                // 否则后续在线补图/人工设图都会被旧 404 挡住；短缓存也够挡住翻页抖动。
+                rta::net::webui_set_cache_control("no-store");
                 return std::string();          // 404 + 空 body：<img onerror> 露回首字母
             }
             ct = mime;
+            // 2026-11-08（beta7 #3 封面翻页闪白）：成功结果长缓存。
+            //   * manual  = 用户手工设的图（同一 URL 会被 /api/lib/cover/set 覆盖）⟹ 必须每次复核，
+            //               否则"设置后立刻可见"会回归（用 no-cache 而不是 no-store：仍走本地缓存校验）。
+            //   * embed/net = 内嵌图/在线抓取正缓存，字节不可变（新图走 .part→rename 原子替换）⟹ immutable。
+            rta::net::webui_set_cache_control(std::string(src) == "manual"
+                ? "no-cache, max-age=0, must-revalidate"
+                : "public, max-age=31536000, immutable");
             return std::string(bytes.begin(), bytes.end());
         }
         // 播放整张专辑（?k=专辑键&i=起始曲序），队列被换成这张专辑
@@ -9295,11 +9437,19 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
         if (q != std::string::npos) file = urlDecode(rq.path.substr(q + 6));
         if (file.empty()) return "{\"ok\":false,\"error\":\"未指定文件\"}";
         if (!valid_utf8(file)) return utf8_path_reject(file);   // F1：probe_media/get_cover 内部有 u8path
-        const MediaInfo mi = probe_media(file);
+        const MediaInfo mi = probe_media_memoized(file);   // beta8：mtime/size 键缓存，切歌不再重新 fork ffprobe
         std::string mime;
         // 只探测有没有封面（不把图片塞进 JSON）
         auto c = get_cover(file, mime);
-        const bool hasCover = c.size() > 128;
+        bool hasCover = c.size() > 128;
+        // 2026-11-08（1.1.4-beta7 #2）：本曲没有可用封面时回退到所属专辑封面。
+        // 前端 loadMeta 只在 hasCover 为真时才请求 /api/cover?file=…，所以这里必须与
+        // 封面端点同口径；否则后端能兜底、前端却根本不发请求，用户看到的还是空白。
+        bool coverFromAlbum = false;
+        if (!hasCover && !file.empty() && cover_track_album_available(file)) {
+            hasCover = true;
+            coverFromAlbum = true;
+        }
         // MetaStore 补全结果覆盖输出(P1):记录里值非空才覆盖;albumArtist/year/lyrics 是新增键
         rta::meta::TrackMeta tm;
         const bool haveMeta = rta::meta::MetaStore::instance().load(file, tm, true);
@@ -9387,6 +9537,7 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
           << ",\"channels\":" << mi.channels
           << ",\"bits\":" << mi.bits
           << ",\"hasCover\":" << (hasCover ? "true" : "false")
+          << ",\"coverFromAlbum\":" << (coverFromAlbum ? "true" : "false")
           << ",\"meta\":{\"enriched\":" << (meta_enriched(tm) ? "true" : "false")   // F2：真被在线补过才算
           << ",\"sources\":{";
         {
@@ -9591,20 +9742,30 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
                        "\"summaryKind\":\"track\",\"summaryCached\":false}";
             }
             const std::string metabaseT = path_in_exe_dir("rlplayer-meta");
+            // 2026-11-08（1.1.4-beta7 速度，stale-while-revalidate）：过期缓存不再让用户干等
+            // 10~20s 重新生成 —— 先秒回过期内容（summaryCached=true + summaryStale=true，
+            // 语义诚实：内容确实来自磁盘缓存），同时后台刷新并写回缓存。只接受 v3+ 缓存
+            //（旧格式可能是消歧义垃圾，见 retrieval_fetch 的 v3 说明）。
+            rta::meta::SummaryResult staleT;
+            bool haveStaleT = false;
             if (!refresh) {
                 rta::meta::SummaryResult cached;
                 std::string cErr;
-                if (rta::meta::summary_load_cache(metabaseT, eidTrack, lang, cached, &cErr) && cached.ok &&
-                    !rta::meta::summary_is_expired(cached)) {
-                    cached.from_cache = true;
-                    return summary_json_with_flags(cached, "track", true);
+                if (rta::meta::summary_load_cache(metabaseT, eidTrack, lang, cached, &cErr) && cached.ok) {
+                    if (!rta::meta::summary_is_expired(cached)) {
+                        cached.from_cache = true;
+                        return summary_json_with_flags(cached, "track", true);
+                    }
+                    if (cached.cache_ver >= 3) { haveStaleT = true; staleT = cached; }
                 }
             }
             rta::meta::RetrievalOptions ropts;
             ropts.metabase = metabaseT;
             ropts.refresh = refresh;
+            ropts.timeout_ms = 25000;
             ropts.llm_cfg = rta::meta::llm_config_load(llm_conf_path());
             const std::string jobKey = eidTrack + "|" + lang;
+            long long elapsedMs = 0;
             {
                 std::lock_guard<std::mutex> lk(g_summ_mu);
                 const long long now = (long long)std::time(nullptr);
@@ -9624,13 +9785,22 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
                     job.running = true;
                     job.started_at = now;
                     g_summ_jobs[jobKey] = job;
-                    play_log("SUMMARY generate(async) kind=track name=" + name);
+                    play_log("SUMMARY generate(async) kind=track name=" + name +
+                             (haveStaleT ? " stale-refresh=1" : ""));
                     summary_job_start_fn(jobKey, "track", name, [name, artist, lang, ropts]() {
                         return rta::meta::retrieval_fetch_track(name, artist, lang, ropts);
                     });
                 }
+                if (haveStaleT) {
+                    auto jt = g_summ_jobs.find(jobKey);
+                    if (jt != g_summ_jobs.end() && jt->second.started_at > 0)
+                        elapsedMs = (now - jt->second.started_at) * 1000;
+                    staleT.from_cache = true;
+                    play_log("SUMMARY stale-served kind=track name=" + name + " eid=" + eidTrack);
+                    return summary_json_with_flags(staleT, "track", true, true);
+                }
             }
-            return "{\"ok\":false,\"pending\":true,\"error\":\"正在整理资料\",\"summaryKind\":\"track\",\"summaryCached\":false}";
+            return summary_pending_json("track", elapsedMs);
         }
         if (kindStr == "album") kindStr = "release";
         rta::meta::EntityKind ek = rta::meta::EntityKind::Person;
@@ -9653,14 +9823,22 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
         }
 
         // 2. 缓存命中（TTL 7 天）→ 直接返回，绝不再调 LLM（用户 261023-03 #2：生成后保存为缓存）
+        // 2026-11-08（1.1.4-beta7 速度，stale-while-revalidate）：过期缓存秒回 + 后台刷新。
+        // 旧行为：过期后本次请求直接 pending，用户干等 10~30s 重新生成。新行为：先返回过期内容
+        //（summaryCached=true + summaryStale=true，语义诚实），后台重新生成并写回缓存。
+        // 显式 refresh=1 不走这条（用户点了刷新就该拿到新结果，不能被旧缓存糊弄）。
+        rta::meta::SummaryResult stale;
+        bool haveStale = false;
         if (!refresh) {
             rta::meta::SummaryResult cached;
             std::string cache_err;
-            if (rta::meta::summary_load_cache(metabaseDir, eid, lang, cached, &cache_err) && cached.ok &&
-                !rta::meta::summary_is_expired(cached)) {
-                cached.from_cache = true;
-                play_log("SUMMARY cache-hit kind=" + kindStr + " name=" + name + " eid=" + eid);
-                return summary_json_with_flags(cached, kindStr, true);
+            if (rta::meta::summary_load_cache(metabaseDir, eid, lang, cached, &cache_err) && cached.ok) {
+                if (!rta::meta::summary_is_expired(cached)) {
+                    cached.from_cache = true;
+                    play_log("SUMMARY cache-hit kind=" + kindStr + " name=" + name + " eid=" + eid);
+                    return summary_json_with_flags(cached, kindStr, true);
+                }
+                if (cached.cache_ver >= 3) { haveStale = true; stale = cached; }
             }
         }
 
@@ -9675,6 +9853,7 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
         ropts.llm_cfg = rta::meta::llm_config_load(llm_conf_path());   // 与设置页写的 key 同一份
 
         const std::string jobKey = eid + "|" + lang;
+        long long elapsedMs = 0;
         {
             std::lock_guard<std::mutex> lk(g_summ_mu);
             // 清理 10 分钟前的陈旧任务，避免 map 无限增长（正常前端拿到结果就会取走）
@@ -9695,12 +9874,20 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
                 job.running = true;
                 job.started_at = now;
                 g_summ_jobs[jobKey] = job;
-                play_log("SUMMARY generate(async) kind=" + kindStr + " name=" + name + " eid=" + eid);
+                play_log("SUMMARY generate(async) kind=" + kindStr + " name=" + name + " eid=" + eid +
+                         (haveStale ? " stale-refresh=1" : ""));
                 summary_job_start(jobKey, ek, name, lang, kindStr, ropts);
             }
+            if (haveStale) {
+                auto jt = g_summ_jobs.find(jobKey);
+                if (jt != g_summ_jobs.end() && jt->second.started_at > 0)
+                    elapsedMs = (now - jt->second.started_at) * 1000;
+                stale.from_cache = true;
+                play_log("SUMMARY stale-served kind=" + kindStr + " name=" + name + " eid=" + eid);
+                return summary_json_with_flags(stale, kindStr, true, true);
+            }
         }
-        return "{\"ok\":false,\"pending\":true,\"error\":\"正在整理资料\",\"summaryKind\":\"" +
-               jesc(kindStr) + "\",\"summaryCached\":false}";
+        return summary_pending_json(kindStr, elapsedMs);
     }
 
     // ---------------- 资料层(P3④b Discogs L4 古典作品版本推荐): GET /api/entity/versions ----------------
@@ -9759,7 +9946,23 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
                 mime = mm;
             }
         }
+        // 2026-11-08（1.1.4-beta7 #2）：单曲没有自己的封面 → 回退到所属专辑封面。
+        // 用户反馈「没有封面的歌整块空白，但同专辑明明有封面」。与 /api/meta 的 hasCover
+        // 同口径（那边负责让前端愿意发这个请求），不联网、不写用户数据。
+        if (!file.empty() && bytes.size() <= 128) {
+            std::vector<unsigned char> ab;
+            std::string am, asrc;
+            if (cover_track_album_fallback(file, ab, am, &asrc) && !ab.empty()) {
+                play_log("COVERALBUMFALLBACK file=" + file + " src=" + asrc +
+                         " bytes=" + std::to_string((long long)ab.size()));
+                bytes = std::move(ab);
+                mime = am;
+            }
+        }
         ct = mime;
+        // 2026-11-08（beta7 #3 / beta8）：单曲封面 URL 只含文件路径，文件可能被写回替换或
+        // 后来补上封面 ⟹ 用中短缓存（1h）而不是 immutable；占位图（≤128B）不缓存。
+        rta::net::webui_set_cache_control(bytes.size() > 128 ? "public, max-age=3600" : "no-store");
         return std::string(bytes.begin(), bytes.end());
     }
 

@@ -1101,6 +1101,31 @@ function head(title, subtitle, toolsHtml) {
 // 两个在途请求与后端抽图闸门一致，冷首屏不会把几十张图同时打进 busy。
 // 不改 class/style/布局，也不接管其他 API 或艺术家头像的加载。
 var COVER_IMAGES = new WeakMap(), COVER_QUEUE = [], COVER_ACTIVE = 0;
+// 1.1.4-beta7（用户反馈：明明封面已缓存，翻页/重绘时仍先看到空白封面）：
+// 旧实现每次重绘都重新 fetch→blob→objectURL→解码，且解码后立刻 revoke；
+// 封面区并发上限只有 2，翻一页等于把可见图重跑一遍，期间格子只能是首字母占位。
+// 现在加一层**内存 blob URL 缓存**（url → objectURL）：重绘时同步命中、立即给 img.src，
+// 不再发请求、不再有空白帧；超过上限按插入顺序淘汰并 revoke（已被解码进 img 的图不受影响）。
+// 后端同时给 /api/lib/cover 的 200 响应加了 immutable 缓存头（beta7），刷新/重开也能直接命中浏览器缓存。
+var COVER_BLOB = new Map(), COVER_BLOB_MAX = 400;
+function coverBlobGet(url) {
+  if (!COVER_BLOB.has(url)) return '';
+  var v = COVER_BLOB.get(url);
+  COVER_BLOB.delete(url); COVER_BLOB.set(url, v);   // LRU：命中即移到队尾
+  return v;
+}
+function coverBlobPut(url, objectUrl) {
+  var old = COVER_BLOB.get(url);
+  if (old && old !== objectUrl) { try { URL.revokeObjectURL(old); } catch (e) { } }
+  COVER_BLOB.delete(url);
+  COVER_BLOB.set(url, objectUrl);
+  while (COVER_BLOB.size > COVER_BLOB_MAX) {
+    var first = COVER_BLOB.keys().next().value;
+    var v = COVER_BLOB.get(first);
+    COVER_BLOB.delete(first);
+    if (v) { try { URL.revokeObjectURL(v); } catch (e) { } }
+  }
+}
 function coverImageLocal(url) {
   try {
     var u = new URL(url, location.href);
@@ -1111,7 +1136,8 @@ function coverImageAlive(s) {
   return !s.dead && s.img.isConnected && COVER_IMAGES.get(s.img) === s;
 }
 function coverImageRelease(s) {
-  if (s.objectUrl) { URL.revokeObjectURL(s.objectUrl); s.objectUrl = ''; }
+  // 1.1.4-beta7：object URL 归 COVER_BLOB 所有（重绘要复用），这里只解除引用，绝不 revoke。
+  s.objectUrl = '';
 }
 function coverImageCancel(img) {
   var s = COVER_IMAGES.get(img);
@@ -1169,12 +1195,12 @@ function coverImageFetch(s) {
     coverImageRelease(s);
     var objectUrl = URL.createObjectURL(blob);
     s.objectUrl = objectUrl;
-    // 浏览器原生解码与 load/error 事件照旧；解码结束即可释放 Blob URL。
+    coverBlobPut(s.url, objectUrl);   // 1.1.4-beta7：进共享缓存，后续重绘同步命中
+    // 浏览器原生解码与 load/error 事件照旧；object URL 由 COVER_BLOB 管理，解码后**不** revoke。
     function decoded() {
       s.img.removeEventListener('load', decoded);
       s.img.removeEventListener('error', decoded);
       s.decoded = null;
-      if (s.objectUrl === objectUrl) coverImageRelease(s);
     }
     s.decoded = decoded;
     s.img.addEventListener('load', decoded);
@@ -1203,6 +1229,9 @@ function coverImageObserve(img) {
   if (old && !old.dead && old.url === url) return;
   coverImageCancel(img);
   if (!coverImageLocal(url)) { img.src = url; return; }
+  // 1.1.4-beta7：内存里已有解码过的同一封面 → 同步赋值，这一帧就有图（消除"已缓存仍空白"）
+  var cached = coverBlobGet(url);
+  if (cached) { img.src = cached; return; }   // 同步命中：这一帧就有图，无空白闪烁
   var s = { img: img, url: url, retries: 0, timer: 0, queued: false, dead: false, objectUrl: '', controller: null };
   COVER_IMAGES.set(img, s);
   if (img.loading === 'lazy' && COVER_VISIBLE) COVER_VISIBLE.observe(img);
@@ -1288,6 +1317,29 @@ function pollCoverProgress() {
   }, 700);
 }
 
+// 1.1.4-beta7（用户反馈）：从专辑详情返回首页时，列表总是回到第一张专辑。
+// 原因：.main 是唯一滚动容器，进入详情时内容被整块替换，scrollTop 自然归零；
+// 返回时又重新渲染全量列表、没人恢复滚动位置。
+// 做法：进详情前记住 .main.scrollTop；只有"从专辑详情返回"这一条路径恢复（导航去别的页会清标记），
+// 避免用户从艺术家/曲目页点「专辑」时莫名停在半路。恢复在 rAF 里重复两次，等列表高度落地。
+var ALBUM_RET = { active: false, top: 0, key: '' };
+function albumScrollSave() {
+  var m = document.querySelector('.main');
+  ALBUM_RET.top = m ? m.scrollTop : 0;
+  ALBUM_RET.active = true;
+}
+function albumScrollRestore(q) {
+  if (!ALBUM_RET.active || q) return;
+  var top = ALBUM_RET.top;
+  ALBUM_RET.active = false;
+  var m = document.querySelector('.main');
+  if (!m || top <= 0) return;
+  m.scrollTop = top;
+  requestAnimationFrame(function () {
+    m.scrollTop = top;
+    requestAnimationFrame(function () { m.scrollTop = top; });
+  });
+}
 function loadAlbums(q, title) {
   S.view = 'albums';
   startCoverPrefetch();     // 进库页就开跑（没有缺图时后端立即返回 queued=0）
@@ -1643,6 +1695,7 @@ function renderAlbumsFrom(j, q, title) {
     };
     e.oncontextmenu = function (ev) { ev.preventDefault(); enqueueAlbum(a.k); };
   });
+  albumScrollRestore(q);   // 1.1.4-beta7：从专辑详情返回时恢复滚动位置（搜索/换页不恢复）
 }
 
 /* ---------------- 收藏（心形喜好标记 / 261023-03 第5条） ---------------- */
@@ -2039,6 +2092,7 @@ function bindCopyChips(container) {
 }
 
 function openAlbum(k) {
+  albumScrollSave();   // 1.1.4-beta7：记住专辑网格的滚动位置，返回时恢复
   S.view = 'album';
   api('/api/lib/album?k=' + encodeURIComponent(k)).then(function (j) {
     if (S.view !== 'album') return;   // 已切走 → 丢弃（否则会把别页内容覆写成专辑页）
@@ -5548,6 +5602,8 @@ function setView(v) {
   if (typeof searchTimer !== 'undefined' && searchTimer) { clearTimeout(searchTimer); searchTimer = 0; }
   // 作品页入口收进单曲页后，仍在内部使用 works 视图；离开 works 时清掉"从正在播放返回"的标记
   if (v !== 'works') S.worksFrom = '';
+  // 1.1.4-beta7：只有「专辑详情 → 专辑列表」这一条路径恢复滚动位置；去别的页面时清标记
+  if (v !== 'album' && v !== 'albums' && typeof ALBUM_RET !== 'undefined') ALBUM_RET.active = false;
   Array.prototype.forEach.call(document.querySelectorAll('.nav'), function (e) {
     e.classList.toggle('on', e.dataset.v === v || (v === 'artist' && e.dataset.v === 'artists') || (v === 'work' && e.dataset.v === 'works'));
   });
@@ -12682,6 +12738,32 @@ function npRailHint() {
     el.innerHTML = '';
   }
 }
+/* 1.1.4-beta7（AI 检索过慢）：后端对过期缓存改为 stale-while-revalidate —— 旧内容立刻返回
+   （summaryStale:true + summaryRefreshing:true）并在后台重新生成。前端先把旧内容画出来，
+   再静默轮询同一个 URL（不带 refresh=1）直到拿到新内容后原地替换，用户不必再等 12~20 秒。
+   纪律：只在同一 req（未切歌/未关页）内写回；最多 4 次、每次 4 秒；失败静默（旧内容仍在）。 */
+function npStaleRefresh(kind, reqAtStart, tries) {
+  tries = tries || 0;
+  if (tries > 4) return;
+  setTimeout(function () {
+    if (!D('npPage') || !D('npPage').classList.contains('on')) return;
+    if (NP_DATA.req !== reqAtStart) return;
+    var t = npDataTab(kind); if (!t) return;
+    var url = npSummUrl(kind, t);
+    fetchSummary(url, function (s) {
+      if (NP_DATA.req !== reqAtStart) return;
+      if (!s || s.pending) { npStaleRefresh(kind, reqAtStart, tries + 1); return; }
+      if (!summHas(s)) return;
+      if (s.summaryStale) { npStaleRefresh(kind, reqAtStart, tries + 1); return; }
+      SUMC.cache[url] = s;
+      if (NP_DATA.cache[kind] && NP_DATA.cache[kind].state === 'ok') NP_DATA.cache[kind] = { state: 'ok', data: s };
+      NP_DATA.tabSig = null;
+      npDataRenderTabs();
+      npRailHint();
+      if (NP_DATA.active === kind) npDataRenderBody();
+    }, 0, Date.now());
+  }, 4000);
+}
 function npDataEnsure(kind, force) {
   var t = npDataTab(kind); if (!t) return;
   var st = NP_DATA.cache[kind];
@@ -12709,6 +12791,8 @@ function npDataEnsure(kind, force) {
     npDataRenderTabs();
     npRailHint();
     if (NP_DATA.active === kind) npDataRenderBody();
+    // 1.1.4-beta7：过期缓存已先显示（SWR），后台刷新完成后静默替换成新内容
+    if (data && data.summaryStale) npStaleRefresh(kind, req, 0);
   }
   if (kind === 'work') {
     api('/api/entity/versions?kind=work&name=' + encodeURIComponent(t.name) +

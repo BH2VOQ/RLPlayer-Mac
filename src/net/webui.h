@@ -207,6 +207,17 @@ inline std::atomic<int>* webui_status_slot() {
 }
 inline void webui_set_status(int code) { webui_status_slot()->store(code); }
 
+// 2026-11-08（1.1.4-beta7 #3 封面闪白）：响应 Cache-Control 覆盖槽（线程本地，每请求复位）。
+// 背景：本文件的响应头固定写 "Cache-Control: no-store" ⟹ 浏览器对同一张封面在每次重绘/
+// 翻页时都重新发请求，前端 <img> 必须等新响应才有像素 —— 这是"已缓存封面翻页闪白"的后端一半。
+// 封面字节不可变（新图走 .part → rename 原子替换），可以长缓存；handler 里调一次
+// webui_set_cache_control("public, max-age=..., immutable")，未设置 = 保持 no-store 旧行为。
+inline std::string* webui_cache_control_slot() {
+    static thread_local std::string s;
+    return &s;
+}
+inline void webui_set_cache_control(const std::string& v) { webui_cache_control_slot()->assign(v); }
+
 inline bool WebUi::start(uint16_t port, Handler h, bool loopbackOnly) {
     handler_ = std::make_shared<Handler>(std::move(h));
     conns_ = std::make_shared<ConnTable>();
@@ -499,6 +510,7 @@ inline void WebUi::handle(socket_t c, const Handler& h, bool lan, const std::str
                 body.resize(want);
                 req.body.swap(body);
                 webui_status_slot()->store(200);      // 每次请求前复位（handler 可能提前 return）
+                webui_cache_control_slot()->clear();  // 同理：Cache-Control 覆盖槽每请求复位
                 payload = h ? h(req, ctype) : std::string("{}");
                 status = webui_status_slot()->exchange(200);
             }
@@ -510,7 +522,10 @@ inline void WebUi::handle(socket_t c, const Handler& h, bool lan, const std::str
          << "Content-Type: " << ctype << "\r\n"
          << "Content-Length: " << payload.size() << "\r\n";
     if (status == 503) resp << "Retry-After: 2\r\n";
-    resp << "Cache-Control: no-store\r\nConnection: close\r\n\r\n"
+    // 2026-11-08（beta7 #3）：handler 可用 webui_set_cache_control() 覆盖；默认仍是 no-store。
+    const std::string& cacheControl = *webui_cache_control_slot();
+    resp << "Cache-Control: " << (cacheControl.empty() ? "no-store" : cacheControl)
+         << "\r\nConnection: close\r\n\r\n"
          << payload;
     const std::string s = resp.str();
     // 整包发送：send() 可能只写出一部分（大响应 + 并发时发送缓冲更容易满）。

@@ -301,6 +301,12 @@ target_include_directories(test_retrieval PRIVATE ${CMAKE_SOURCE_DIR}/src)
 target_link_libraries(test_retrieval PRIVATE ${RL_PLATFORM_LIBS})
 add_test(NAME retrieval COMMAND test_retrieval)
 
+# 2026-11-08（1.1.4-beta7 #1 AI 检索速度）：并行 fetch 软截止的行为契约（离线 mock transport）
+add_executable(test_retrieval_speed tests/test_retrieval_speed.cpp)
+target_include_directories(test_retrieval_speed PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(test_retrieval_speed PRIVATE ${RL_PLATFORM_LIBS})
+add_test(NAME retrieval_speed COMMAND test_retrieval_speed)
+
 # 2026-10-24（用户 261024-04 #6/#4 后端侧）：实体资料缓存是否**共用**、第二次是否**零 LLM 调用**、
 # 命中是否 ≤300ms。全离线：L2 材料直接写缓存，chat/search/fetch 走计数型 mock transport
 # （LlmConfig::transport 钩子），判据是"调用计数不变"而不是"耗时不抖"。

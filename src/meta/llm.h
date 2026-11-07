@@ -1145,7 +1145,8 @@ inline LlmReply llm_parse_chat_response(const std::string& text) {
 // 261107：按 llm_base_candidates 顺序试，但**只有 404/405（路径不存在）才换下一条**；
 // 401/403/429/5xx/网络失败一律不重试。用量只在最终成功那一次记一次。
 inline LlmReply llm_chat(const LlmConfig& cfg, const std::vector<LlmMessage>& msgs,
-                         int maxTokens = 800, float temperature = 0.2f, bool jsonObject = false) {
+                         int maxTokens = 800, float temperature = 0.2f, bool jsonObject = false,
+                         int timeout_ms = 60000) {
     rta::net::HttpDiagScope httpDiag(rta::diag::Stage::Llm);
     LlmReply r;
     if (cfg.apiKey.empty()) {
@@ -1192,7 +1193,9 @@ inline LlmReply llm_chat(const LlmConfig& cfg, const std::vector<LlmMessage>& ms
         if (cfg.transport) {
             resp = cfg.transport(url, body, headers);
         } else {
-            resp = rta::net::http_post(url, body, headers, "application/json", 60000);
+            // 2026-11-08（1.1.4-beta7 速度）：超时改为可传参。旧行为 60s 会与 search/fetch
+            // 串行叠加成 25s+ 的"莫名卡死"；检索层现在按阶段预算传入（见 RetrievalOptions）。
+            resp = rta::net::http_post(url, body, headers, "application/json", timeout_ms);
         }
 
         if (resp.status == 0) {                    // 网络底层失败：不重试、不换路径
@@ -1522,7 +1525,8 @@ inline DsFetchReply ds_parse_external_fetch(const std::string& provider, const s
 }
 
 // 第三方 search 网络函数：单次调用不重试、不套 DeepSeek 月度配额、keyless 不因 apiKey 空报错。
-inline DsSearchReply ds_search_external(const LlmConfig& cfg, const std::string& query, int count) {
+inline DsSearchReply ds_search_external(const LlmConfig& cfg, const std::string& query, int count,
+                                        int timeout_ms = 60000) {
     DsSearchReply r;
     const std::string provider = ds_provider_of(cfg);
     const std::string secret   = ds_secret_of(cfg, provider);
@@ -1533,7 +1537,7 @@ inline DsSearchReply ds_search_external(const LlmConfig& cfg, const std::string&
     if (cfg.transport) {
         resp = cfg.transport(url, body, headers);
     } else {
-        resp = rta::net::http_post(url, body, headers, "application/json", 60000);
+        resp = rta::net::http_post(url, body, headers, "application/json", timeout_ms);
     }
     if (resp.status == 0) { r.error = llm_redact(secret, "网络请求失败: " + resp.error); return r; }
     const std::string text(resp.body.begin(), resp.body.end());
@@ -1572,8 +1576,9 @@ inline DsFetchReply ds_fetch_external(const LlmConfig& cfg, const std::string& u
 
 // POST {llm_tools_base}/v1/tools/search，超时 60s，单次调用不重试
 // （base 里的 /v1 由 llm_tools_base 先剥掉，见文件头 llm_tools_base 的说明）
-inline DsSearchReply ds_search(const LlmConfig& cfg, const std::string& query, int count = 5) {
-    if (ds_is_external(cfg)) return ds_search_external(cfg, query, count);  // 1.1.4-beta4 端点分派
+inline DsSearchReply ds_search(const LlmConfig& cfg, const std::string& query, int count = 5,
+                               int timeout_ms = 60000) {
+    if (ds_is_external(cfg)) return ds_search_external(cfg, query, count, timeout_ms);  // 1.1.4-beta4 端点分派
     DsSearchReply r;
     if (cfg.apiKey.empty()) {
         rta::diag::diag_emit("llm.config",rta::diag::Stage::Llm,rta::diag::find_code("llm.not_configured"),{{"key_present","false",rta::diag::KvKind::Bool}});
@@ -1596,7 +1601,8 @@ inline DsSearchReply ds_search(const LlmConfig& cfg, const std::string& query, i
     if (cfg.transport) {
         resp = cfg.transport(url, body, headers);
     } else {
-        resp = rta::net::http_post(url, body, headers, "application/json", 60000);
+        // 2026-11-08（beta7 速度）：检索层传入阶段预算（默认 60s 保持旧契约）。
+        resp = rta::net::http_post(url, body, headers, "application/json", timeout_ms);
     }
 
     if (resp.status == 0) {
