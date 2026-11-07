@@ -1,8 +1,8 @@
 {
-  "version": "1.1.4-beta6",
-  "notes": "The now-playing side panels can be fully hidden, every AI summary section shows condensed content on the panel, the summary popup now uses the app's card style, and a layout pass fixes truncated titles, the settings save bar, blank no-lyric columns and hidden horizontal overflow. · 播放界面左右侧栏可完全隐藏；AI 资料每栏显示精简的已整理内容；资料浮层改为与程序弹窗同款卡片；并修复顶栏标题截断、设置页保存栏、无歌词空白列与隐藏横向溢出等排版问题。",
-  "download_url": "https://github.com/BH2VOQ/RLPlayer-Mac/releases/download/v1.1.4-beta6/RLPlayer-1.1.4-beta6-macOS-arm64.dmg",
-  "sha256": "b78adb49f657121efbb81dfa70d8c098b610508ef686a521963db9a2d363a677",
-  "size": 8050377,
-  "published_at": "2026-11-07T20:27:55Z"
+  "version": "1.1.4-beta7",
+  "notes": "AI summaries appear instantly from cache and refresh in the background, songs without their own cover fall back to the album cover, cached covers no longer flash blank when paging, and returning from an album restores the grid position. · AI 整理过期缓存立即显示并后台刷新；无自身封面的曲目回落到专辑封面；已缓存封面翻页不再空白；从专辑详情返回恢复网格位置。",
+  "download_url": "https://github.com/BH2VOQ/RLPlayer-Mac/releases/download/v1.1.4-beta7/RLPlayer-1.1.4-beta7-macOS-arm64.dmg",
+  "sha256": "d867bcc6b9c2341fcbbae8e6000c1559a169d04658e31d204351c8713beed178",
+  "size": 8060345,
+  "published_at": "2026-11-07T21:21:29Z"
 }
