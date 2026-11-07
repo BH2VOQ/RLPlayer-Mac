@@ -204,6 +204,70 @@ int main() {
     @autoreleasepool {
         std::printf("=== mac transport 离线门禁 ===\n");
 
+        // Menu objects only: no launch callback, window, responder action or input event.
+        {
+            const char *oldState = std::getenv("RLPLAYER_STATE_DIR");
+            const bool hadState = oldState != nullptr;
+            const std::string savedState = oldState ? oldState : "";
+            NSString *state = [NSTemporaryDirectory() stringByAppendingPathComponent:
+                [@"rlplayer-menu-" stringByAppendingString:NSUUID.UUID.UUIDString]];
+            NSFileManager *fm = NSFileManager.defaultManager;
+            const BOOL created = [fm createDirectoryAtPath:state withIntermediateDirectories:NO
+                                               attributes:nil error:nil];
+            ck(created, "menu language fixture directory created");
+            if (created) {
+                NSApplication *app = [NSApplication sharedApplication];
+                NSMenu *savedMenu = app.mainMenu;
+                HostAppDelegate *delegate = [[HostAppDelegate alloc] init];
+                const BOOL isolated = setenv("RLPLAYER_STATE_DIR", state.fileSystemRepresentation, 1) == 0;
+                ck(isolated, "menu language fixture isolated from user settings");
+                if (isolated) for (NSString *lang in @[@"zh", @"en"]) {
+                    const BOOL en = [lang isEqualToString:@"en"];
+                    const BOOL wrote = [[@"lang=" stringByAppendingString:lang]
+                        writeToFile:[state stringByAppendingPathComponent:@"rlplayer-settings.conf"]
+                        atomically:YES encoding:NSUTF8StringEncoding error:nil];
+                    ck(wrote && native_ui_lang_is_en() == en, "native menu language fixture", lang.UTF8String);
+                    [delegate buildMenu];
+                    NSMenu *bar = app.mainMenu;
+                    NSMenuItem *editItem = bar.numberOfItems > 1 ? [bar itemAtIndex:1] : nil;
+                    NSMenu *edit = editItem.submenu;
+                    NSString *title = en ? @"Edit" : @"编辑";
+                    ck(bar.numberOfItems == 2 && [editItem.title isEqualToString:title] &&
+                       [edit.title isEqualToString:title], "localized Edit menu follows app menu", lang.UTF8String);
+                    ck(edit != nil && edit.autoenablesItems, "Edit menu uses automatic validation", lang.UTF8String);
+                    ck(edit.numberOfItems == 8 && [edit itemAtIndex:2].separatorItem &&
+                       [edit itemAtIndex:6].separatorItem, "Edit groups undo/redo, clipboard, select-all", lang.UTF8String);
+                    const SEL actions[] = {@selector(undo:), @selector(redo:), @selector(cut:),
+                        @selector(copy:), @selector(paste:), @selector(selectAll:)};
+                    NSArray<NSString *> *keys = @[@"z", @"z", @"x", @"c", @"v", @"a"];
+                    const NSInteger positions[] = {0, 1, 3, 4, 5, 7};
+                    for (int i = 0; i < 6; ++i) {
+                        NSMenuItem *item = edit.numberOfItems > positions[i] ?
+                            [edit itemAtIndex:positions[i]] : nil;
+                        const NSEventModifierFlags mask = NSEventModifierFlagCommand |
+                            (i == 1 ? NSEventModifierFlagShift : 0);
+                        ck(item != nil && !item.separatorItem && item.action == actions[i] &&
+                           item.target == nil && [item.keyEquivalent isEqualToString:keys[i]] &&
+                           item.keyEquivalentModifierMask == mask,
+                           "standard Edit action/key/modifiers/nil target",
+                           std::string(lang.UTF8String) + ":" + sel_getName(actions[i]));
+                    }
+                    NSMenu *appMenu = bar.numberOfItems ? [bar itemAtIndex:0].submenu : nil;
+                    NSMenuItem *quit = [appMenu itemWithTitle:en ? @"Quit RLPlayer" : @"退出 RLPlayer"];
+                    ck(quit != nil && quit.action == @selector(terminate:) && quit.target == nil &&
+                       [quit.keyEquivalent isEqualToString:@"q"] &&
+                       quit.keyEquivalentModifierMask == NSEventModifierFlagCommand,
+                       "app Quit remains Cmd+Q", lang.UTF8String);
+                    ck(delegate.window == nil && delegate.web == nil,
+                       "buildMenu does not create window or WebView", lang.UTF8String);
+                }
+                app.mainMenu = savedMenu;
+                ck(hadState ? setenv("RLPLAYER_STATE_DIR", savedState.c_str(), 1) == 0 :
+                   unsetenv("RLPLAYER_STATE_DIR") == 0, "menu test restores state environment");
+                ck([fm removeItemAtPath:state error:nil], "menu language fixture removed");
+            }
+        }
+
         // 1. /api/ping
         {
             rta::net::HttpRequest r; r.method = "GET"; r.path = "/api/ping";

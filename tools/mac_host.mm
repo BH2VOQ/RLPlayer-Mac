@@ -1004,6 +1004,29 @@ static bool native_ui_lang_is_en() {
     [appMenu addItemWithTitle:(en ? @"Quit RLPlayer" : @"退出 RLPlayer") action:@selector(terminate:) keyEquivalent:@"q"];
     appItem.submenu = appMenu;
     [bar addItem:appItem];
+
+    // Standard editing commands must enter the first-responder chain, including
+    // WebKit's focused editor and native text fields in sheets. Keep automatic
+    // validation and never pin these actions to the host or a particular web view.
+    NSString *editTitle = en ? @"Edit" : @"编辑";
+    NSMenuItem *editItem = [[NSMenuItem alloc] initWithTitle:editTitle action:nil keyEquivalent:@""];
+    NSMenu *editMenu = [[NSMenu alloc] initWithTitle:editTitle];
+    auto addEditItem = [&](NSString *title, SEL action, NSString *key, NSEventModifierFlags modifiers) {
+        NSMenuItem *item = [editMenu addItemWithTitle:title action:action keyEquivalent:key];
+        item.target = nil;
+        item.keyEquivalentModifierMask = modifiers;
+    };
+    addEditItem(en ? @"Undo" : @"撤销", NSSelectorFromString(@"undo:"), @"z", NSEventModifierFlagCommand);
+    addEditItem(en ? @"Redo" : @"重做", NSSelectorFromString(@"redo:"), @"z",
+                NSEventModifierFlagCommand | NSEventModifierFlagShift);
+    [editMenu addItem:[NSMenuItem separatorItem]];
+    addEditItem(en ? @"Cut" : @"剪切", @selector(cut:), @"x", NSEventModifierFlagCommand);
+    addEditItem(en ? @"Copy" : @"拷贝", @selector(copy:), @"c", NSEventModifierFlagCommand);
+    addEditItem(en ? @"Paste" : @"粘贴", @selector(paste:), @"v", NSEventModifierFlagCommand);
+    [editMenu addItem:[NSMenuItem separatorItem]];
+    addEditItem(en ? @"Select All" : @"全选", @selector(selectAll:), @"a", NSEventModifierFlagCommand);
+    editItem.submenu = editMenu;
+    [bar addItem:editItem];
     [NSApp setMainMenu:bar];
 }
 
