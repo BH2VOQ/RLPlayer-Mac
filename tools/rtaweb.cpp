@@ -6875,6 +6875,8 @@ static bool is_side_effect_path(const std::string& p) {
         // 专辑封面预热（2026-10-26）：会落盘 covercache + 打网络。
         // 只读端点是 /api/lib/cover（单张）与 /api/lib/cover/progress（进度）。
         "/api/lib/cover/prefetch", "/api/lib/cover/set",
+        // 1.1.4-beta10 页面内自检：会把结果落盘（副作用），必须 POST
+        "/api/selftest/report",
     };
     for (const char* k : kNeedPost) {
         const size_t n = std::strlen(k);
@@ -7433,6 +7435,26 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
             return "{\"ok\":true,\"started\":true,\"warning\":\"" + jesc(plan.warning) + "\"}";
         }
         return "{\"ok\":false,\"error\":\"unknown roomcorr api\"}";
+    }
+
+    // ---------------- 页面内自检结果落盘（1.1.4-beta10） ----------------
+    // 为什么需要它：本机规则禁止自起无头浏览器，UI 判据改由**页面自己**跑（见 ui_script.h 的
+    // selftestRun / selftestPaint，?selftest=1 触发）。页面跑完 POST 一份结果到这里，
+    // 落成 <state>/selftest-last.json —— 这样"判据到底过没过"是可 grep 的文件证据，
+    // 不依赖谁去截图，也不需要在应用外再挂一个浏览器进程。
+    // 只收 POST（is_side_effect_path 已登记），body 上限沿用全局；字段只取 total/pass/fail/rows。
+    if (rq.path.rfind("/api/selftest/report", 0) == 0) {
+        ct = "application/json; charset=utf-8";
+        if (rq.method != "POST") return "{\"ok\":false,\"error\":\"只接受 POST\"}";
+        if (rq.body.empty()) return "{\"ok\":false,\"error\":\"空 body\"}";
+        const auto doc = rta::net::json_parse(rq.body);
+        if (doc.type != rta::net::Json::Obj) return "{\"ok\":false,\"error\":\"body 不是 JSON 对象\"}";
+        const std::string path = runtime_state_dir() + "/selftest-last.json";
+        std::ofstream f(path, std::ios::trunc);
+        if (!f) return "{\"ok\":false,\"error\":\"写入失败\"}";
+        f << rq.body;
+        f.close();
+        return "{\"ok\":true,\"saved\":\"" + jesc(path) + "\"}";
     }
 
     // F-8: call both the analyzer and scorer; importing the header alone exposes no feature.

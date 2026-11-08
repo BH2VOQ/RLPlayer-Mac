@@ -2397,6 +2397,72 @@ function enqueueAlbum(k) {
 }
 
 /* ---------------- 艺术家 ---------------- */
+/* 1.1.4-beta10（用户反馈，附首页艺术家截图）：「多个艺术家合作的专辑应该归于各个艺术家的栏目下，
+   而不是新增一个 a&b 的艺术家」。
+   数据事实：库里的专辑署名是**一个字符串**（library.h 取 albumArtist 优先、退回 artist），
+   所以「椎名林檎, 斎藤ネコ」「澤野 弘之 & SennaRin」这类合作署名会自成一位"艺术家"。
+   这里把它们拆回真实的人，首页艺术家栏、艺术家资料的「查看专辑」、头像兜底三处共用这一份规则
+   （绝不能各写一份 —— 三处口径不一致就是"卡片点进去是空列表"）。
+   拆分规则（都带明确理由，别随手加）：
+     · 分隔符只在**括号外**生效：REIJINGSIGNAL(CV：Lynn、芹澤 優、鈴木みのり) 里的顿号是成员表，
+       拆开会变成三个虚构的艺术家；括号内的逗号同理。
+     · 分隔符集合：、 , ， ; ； & / 与 feat. / featuring（英文合作署名常见）。
+       不拆 " with " / " x "：这两个词在真实艺人名里太常见（如 "With You"、单字母 x）。
+     · 同一串里重复出现的名字去重（Lunity;Lunity;Lunity… 是标签写坏的真实样本）。
+     · 名字里带格式/文件名垃圾的括号（"(2ALAC+cue+log+png)"）整段剔除；"音楽：X" 这类
+       "标签:名字"前缀也剥掉（两者都是真实库里出现过的标签残留，不是名字的一部分）。
+     · 拆完只剩 1 个 ⟹ 返回这一个（可能与原文不同：被剔掉的是垃圾，不是名字）。
+   只影响**首页艺术家的归属**：专辑卡片上的署名仍显示原始字符串（那是唱片本身的 credit）。 */
+// 分隔符集合刻意**不含** "/"：真实乐队名 AC/DC 这类会被切坏；本库 159 位艺术家里 0 个用 /
+var NP_ARTIST_SEP = /[、,，;；&]|\s(?:feat\.?|featuring|ft\.)\s/i;
+// 标签残留里出现这些词 ⟹ 整段括号是文件名/编码垃圾，不是名字的一部分
+var NP_ARTIST_JUNK_PAREN = /\s*[（(][^()（）]*(?:ALAC|FLAC|MP3|WAV|APE|cue|log|png|jpg|jpeg|webp|DSD|DSF)[^()（）]*[)）]/gi;
+// "音楽：小林俊太郎" 这类"标签:名字"前缀（真实库里出现过），只剥这几个明确是标签的词
+var NP_ARTIST_LABEL = /^(?:音楽|音乐|Music|作曲|編曲|作词|作詞|演奏)\s*[：:]\s*/i;
+function npArtistClean(s) {
+  var v = String(s == null ? '' : s);
+  v = v.replace(NP_ARTIST_JUNK_PAREN, ' ');
+  v = v.replace(NP_ARTIST_LABEL, '');
+  return v.replace(/\s+/g, ' ').trim();
+}
+function npSplitArtists(s) {
+  var raw = String(s == null ? '' : s).trim();
+  if (!raw) return [];
+  var cleaned = npArtistClean(raw);                    // 先剔标签残留，再判断要不要拆
+  if (!cleaned) return [];
+  if (!NP_ARTIST_SEP.test(cleaned)) return [cleaned];
+  // 第 1 刀：逐字符扫，只切**括号深度 0** 的分隔符（成员表 / 译名 / 版本注记都在括号里）
+  var parts = [], depth = 0, cur = '';
+  for (var i = 0; i < cleaned.length; ++i) {
+    var c = cleaned.charAt(i);
+    if (c === '(' || c === '（' || c === '[' || c === '【') { depth++; cur += c; continue; }
+    if (c === ')' || c === '）' || c === ']' || c === '】') { if (depth > 0) depth--; cur += c; continue; }
+    if (depth === 0 && (c === '、' || c === ',' || c === '，' || c === ';' || c === '；' || c === '&')) {
+      parts.push(cur); cur = ''; continue;
+    }
+    cur += c;
+  }
+  parts.push(cur);
+  // 第 2 刀：英文合作署名 "LiSA feat. PABLO" / "FictionJunction featuring LiSA"（单词边界，逐字符切不了）
+  var out = [], seen = {};
+  parts.forEach(function (seg) {
+    String(seg).split(/\s+(?:feat\.?|featuring|ft\.)\s+/i).forEach(function (one) {
+      var v = npArtistClean(one);
+      if (!v) return;
+      var lk = v.toLowerCase();
+      if (seen[lk]) return;      // "Lunity;Lunity;Lunity…" 这类写坏的标签：同一个名字只留一次
+      seen[lk] = 1;
+      out.push(v);
+    });
+  });
+  // 拆完只剩一个 ⟹ 返回这一个（可能与原文不同：被剔掉的是标签垃圾，不是名字）
+  return out.length ? out : [cleaned];
+}
+// 专辑 → 它应该出现在哪几位艺术家下（首页艺术家栏、艺术家资料的专辑列表、头像兜底三处共用）
+function npAlbumArtists(a) {
+  var names = npSplitArtists((a && a.artist) || '');
+  return names.length ? names : ['未知艺术家'];
+}
 function loadArtists(q) {
   S.view = 'artists';
   S.artistsQuery = q || '';
@@ -2418,11 +2484,15 @@ function renderArtistsFrom(j, q) {
   var m = {}, order = [];
   var filterQ = (q || '').trim().toLowerCase();
   ((j && j.albums) || []).forEach(function (a) {
-    var k = a.artist || '未知艺术家';
-    if (filterQ && k.toLowerCase().indexOf(filterQ) === -1) return;
-    if (!m[k]) { m[k] = { n: 0, d: 0, cv: false, key: a.k }; order.push(k); }
-    m[k].n++; m[k].d += a.dur;
-    if (a.cv) m[k].cv = true, m[k].key = a.k;
+    // 1.1.4-beta10：一张合作专辑要**同时**计入参与它的每一位艺术家（用户要求
+    // 「多个艺术家合作的专辑应该归于各个艺术家的栏目下，而不是新增一个 a&b 的艺术家」）。
+    // 专辑卡片本身仍显示原始署名串，这里只决定"归属到哪些艺术家卡片"。
+    npAlbumArtists(a).forEach(function (k) {
+      if (filterQ && k.toLowerCase().indexOf(filterQ) === -1) return;
+      if (!m[k]) { m[k] = { n: 0, d: 0, cv: false, key: a.k }; order.push(k); }
+      m[k].n++; m[k].d += a.dur;
+      if (a.cv) { m[k].cv = true; m[k].key = a.k; }
+    });
   });
   order.sort(function (x, y) { return strCompare(x, y); });
   head(q ? ('艺术家（搜索：' + q + '）') : '艺术家', order.length + ' 位', '');
@@ -2518,7 +2588,8 @@ function artistAvatarFallback(img) {
 function artistCoverKey(who) {
   if (!(S.albums && S.albums.length)) return '';
   for (var i = 0; i < S.albums.length; i++) {
-    if ((S.albums[i].artist || '') === who && S.albums[i].cv) return S.albums[i].k;
+    // 1.1.4-beta10：合作专辑也算（"椎名林檎, 斎藤ネコ" 的封面可给两边的头像兜底）
+    if (npAlbumArtists(S.albums[i]).indexOf(who) >= 0 && S.albums[i].cv) return S.albums[i].k;
   }
   return '';
 }
@@ -2581,7 +2652,8 @@ function bindArtistButtons(who) {
   if (D('bArtistAlbums')) {
     D('bArtistAlbums').onclick = function () {
       api('/api/lib/albums').then(function (jj) {
-        S.albums = (jj.albums || []).filter(function (a) { return (a.artist || '未知艺术家') === who; });
+        // 1.1.4-beta10：与首页艺术家栏同一套归属规则（合作专辑同时属于每一位参与者）
+        S.albums = (jj.albums || []).filter(function (a) { return npAlbumArtists(a).indexOf(who) >= 0; });
         renderAlbumSubset(who);
       });
     };
@@ -8355,10 +8427,13 @@ function anlPaint() {
   }
   var tg = D('npAnlToggle');
   if (tg) {
-    // 按钮文案写的是**点下去会发生什么**（L0 → 详细 → 全部指标 → 收起）
+    // 文案写的是**点下去会发生什么**（L0 → 详细 → 全部指标 → 收起）
     tg.textContent = (lvl === 0) ? '详细' : (lvl === 1 ? '全部指标' : '收起');
     tg.title = (lvl === 0) ? '展开：每张卡显示指标（2 列）'
       : (lvl === 1 ? '展开：显示全部原始指标' : '收起：只留一行摘要');
+    // 1.1.4-beta10 第 2 轮：分段控件里"当前不是摘要态"要看得出来（.on 高亮），
+    // 否则三个字并排时用户分不清现在是哪一档。
+    tg.classList.toggle('on', lvl !== 0);
   }
   body.innerHTML = anlCardsHtml(h, p, lvl);
 }
@@ -8394,14 +8469,24 @@ function anlToggleAuto() {
   }
 }
 
+// 1.1.4-beta10 第 2 轮：分段控件用的是 <b role=button>（不是 <button>），
+// 浏览器不会替我们处理 Enter / Space —— 这里补齐，键盘可达性与原按钮一致。
+function anlBindKey(el, fn) {
+  if (!el) return;
+  el.onclick = fn;
+  el.onkeydown = function (ev) {
+    if (ev.key === 'Enter' || ev.key === ' ' || ev.key === 'Spacebar') { ev.preventDefault(); fn(); }
+  };
+}
+
 // 绑定（onclick 赋值 ⟹ 天然幂等；每次打开单曲页重绑一次也无害）
 function anlBind() {
   var tg = D('npAnlToggle');
-  if (tg) tg.onclick = function () { anlSetLvl((ANL.lvl + 1) % 3); };
+  if (tg) anlBindKey(tg, function () { anlSetLvl((ANL.lvl + 1) % 3); });
   var run = D('npAnlRun');
-  if (run) run.onclick = anlRunManual;
+  if (run) anlBindKey(run, anlRunManual);
   var au = D('npAnlAuto');
-  if (au) au.onclick = anlToggleAuto;
+  if (au) anlBindKey(au, anlToggleAuto);
   var stat = D('npAnlStat');
   if (stat) stat.onclick = function () { if (ANL.err && anlIsLocal(ANL.cur)) anlAnalyze(ANL.cur, false); };
   var body = D('npAnlBody');
@@ -12509,25 +12594,36 @@ function npRailPick(fields, keys, limit) {
 // 从实体摘要里取一段「简介」正文（1.1.4-beta10）：优先结构化字段，其次 sections 首段。
 // 卡片只有一行（.npchip-p1 是 nowrap + ellipsis），所以这里就收成一句短文：
 // 超过 26 字截断并补省略号，点开浮层仍能看到完整简介。
-function npRailBio(d) {
-  if (!d) return '';
-  var f = d.fields || {};
+// who 非空时把艺术家名字**带进简介正文**（用户 2026-11-08：「右侧栏的艺术家，简介要带上
+// 艺术家的名字」）。为什么不是另起一行显示名字：卡片只有两行，名字单独占一行会把简介挤掉；
+// 首行写成「AQUAPLUS：业务涵盖……」，一句话既说清是谁、又说清是什么，与「歌曲」卡的
+// 「演唱 Aimer · 作曲 …」是同一种"字段+值"的读法。
+function npRailBio(d, who) {
   var v = '';
-  if (f['简介'] !== undefined && f['简介'] !== null) v = efValueText(f['简介']);
-  if (!v) {
-    var secs = d.sections || [];
-    for (var i = 0; i < secs.length; ++i) {
-      var ps = secs[i].paragraphs || [];
-      for (var k = 0; k < ps.length; ++k) {
-        var t = efValueText(ps[k] && ps[k].text);
-        if (t) { v = t; break; }
+  if (d) {
+    var f = d.fields || {};
+    if (f['简介'] !== undefined && f['简介'] !== null) v = efValueText(f['简介']);
+    if (!v) {
+      var secs = d.sections || [];
+      for (var i = 0; i < secs.length && !v; ++i) {
+        var ps = secs[i].paragraphs || [];
+        for (var k = 0; k < ps.length; ++k) {
+          var t = efValueText(ps[k] && ps[k].text);
+          if (t) { v = t; break; }
+        }
       }
-      if (v) break;
     }
   }
   v = String(v).replace(/\s+/g, ' ').trim();
-  if (v.length > 26) v = v.slice(0, 25).replace(/[，,、;；。\s]+$/, '') + '…';
-  return v;
+  var who2 = String(who == null ? '' : who).trim();
+  // 简介自己已经以名字开头（"AQUAPLUS 是……"）时不再重复一遍，避免「X：X 是……」
+  if (v && who2 && v.indexOf(who2) !== 0) v = who2 + '：' + v;
+  if (v) {
+    // 卡片一行现在要同时装下「名字 + 简介」，因此上限从 26 提到 40 字；点开浮层仍是全文。
+    if (v.length > 40) v = v.slice(0, 39).replace(/[，,、;；。\s]+$/, '') + '…';
+    return v;
+  }
+  return who2;   // 完全没有简介 → 只留名字（调用方的兜底也会走到这里）
 }
 function npRailLocalTrack(m) {
   var a = [], b = [];
@@ -12577,7 +12673,10 @@ function npRailPreview(kind, st) {
     //     ② 没有则退到 sections 正文的首段（旧缓存/纯叙述路径，AI 只给了段落没给字段）；
     //     ③ 都没有才退回本地事实（艺术家名），绝不显示「国籍」当主内容。
     //   第二行保留可扫读的属性（风格 / 代表作品），国籍不再占卡片的主位。
-    p1 = npRailBio(d);
+    // 名字进简介正文（见 npRailBio 注释）；页面上的实体名以右栏栏目为准（艺术家页/合辑时
+    // m.artist 可能是歌手的名字而不是这位艺术家），所以优先取栏目名，再退回曲目元数据。
+    var pTab = npDataTab('person');
+    p1 = npRailBio(d, (pTab && pTab.name) || m.albumArtist || m.artist || '');
     if (!p1) p1 = npRailPick(fields, ['活跃年代'], 1);   // 没有简介时也不要拿「国籍」充数
     p2 = npRailPick(fields, ['风格', '代表作品'], 2);
     if (!p1) p1 = (m.albumArtist || m.artist || '');   // 兜底本地事实，绝不空白
@@ -13348,6 +13447,218 @@ document.addEventListener('visibilitychange', function () {
   document.head.appendChild(st);
 })();
 
+/* ---------------- 页面内自检（1.1.4-beta10） ----------------
+   背景（2026-11-08 用户钦定的规则）：**禁止自起无头浏览器**。需要浏览器时只走 DSH 侧边栏。
+   这条规则把"UI 判据怎么自动跑"堵死了：CDP 脚本（tools/uibrowser.js）会起 Edge 子进程。
+   解法不是放弃判据，而是把判据搬进**页面自己**：
+     · 页面里已经加载了全部生产函数（跟用户在用的完全同一份 JS）；
+     · 检测用例在本文件末尾注册进 window.__SELFTEST；
+     · 侧边栏里打开页面 → 地址后加 ?selftest=1 → 页面跑完把结果表格画在自己身上，
+       同时 POST 回 /api/selftest/report 落盘（便于事后 grep，不依赖任何人肉截图）。
+   🔴 铁律 3：每条判据必须能红。每个用例自带 want/actual，页面直接把两者并排画出来，
+      不看"有没有数字"、只看"want 是否等于 actual"。 */
+var SELFTEST = { cases: [] };
+function selftestAdd(name, fn) { SELFTEST.cases.push({ name: name, fn: fn }); }
+function selftestRun() {
+  var rows = [];
+  for (var i = 0; i < SELFTEST.cases.length; ++i) {
+    var c = SELFTEST.cases[i], r;
+    try { r = c.fn() || {}; }
+    catch (e) { r = { ok: false, want: '不抛异常', got: '抛错：' + ((e && e.message) || e) }; }
+    rows.push({ name: c.name, ok: r.ok === true, want: String(r.want === undefined ? '' : r.want),
+                got: String(r.got === undefined ? '' : r.got) });
+  }
+  var pass = 0;
+  rows.forEach(function (x) { if (x.ok) pass++; });
+  return { total: rows.length, pass: pass, fail: rows.length - pass, rows: rows };
+}
+// 把结果画成一张表：贴在最上层、可滚动；每行 want/got 并排 —— 红的那几行一眼看得出差在哪。
+function selftestPaint(res) {
+  var old = D('selftestBox');
+  if (old) old.remove();
+  var box = document.createElement('div');
+  box.id = 'selftestBox';
+  box.style.cssText = 'position:fixed;inset:0;z-index:9999;background:rgba(8,9,12,.94);color:#e8ecf4;' +
+    'font:12px/1.55 ui-monospace,Menlo,monospace;padding:18px 20px;overflow:auto';
+  var h = '<div style="font-size:15px;font-weight:700;margin-bottom:10px">页面内自检 ' +
+          (res.fail === 0 ? '✅' : '❌') + ' ' + res.pass + '/' + res.total + ' 通过</div>' +
+          '<div style="color:#8b94a3;margin-bottom:12px">本表由页面自己生成（无外部浏览器进程）。' +
+          '关闭：Esc 或右上角 ×</div>';
+  res.rows.forEach(function (r) {
+    h += '<div style="padding:5px 0;border-bottom:1px solid rgba(255,255,255,.07)">' +
+         '<span style="color:' + (r.ok ? '#4ade80' : '#f87171') + ';font-weight:700">' +
+         (r.ok ? 'PASS' : 'FAIL') + '</span> ' + esc(r.name) +
+         (r.ok ? '' : '<div style="color:#fca5a5;padding-left:52px">want: ' + esc(r.want) +
+                      '<br>got&nbsp;: ' + esc(r.got) + '</div>') +
+         '</div>';
+  });
+  box.innerHTML = h;
+  var close = document.createElement('button');
+  close.textContent = '×';
+  close.style.cssText = 'position:fixed;top:10px;right:14px;width:30px;height:30px;border-radius:50%;' +
+    'background:rgba(255,255,255,.12);border:0;color:#fff;font-size:18px;cursor:pointer;z-index:10000';
+  close.onclick = function () { box.remove(); };
+  box.appendChild(close);
+  document.body.appendChild(box);
+  document.addEventListener('keydown', function escClose(ev) {
+    if (ev.key === 'Escape') { box.remove(); document.removeEventListener('keydown', escClose); }
+  });
+  return box;
+}
+// ?selftest=1 时自动跑；结果顺手 POST 回后端落盘（服务端见 tools/rtaweb.cpp 的 /api/selftest/report）
+function selftestMaybeAutoRun() {
+  var on = false;
+  try { on = /(?:^|[?&])selftest=1(?:&|$)/.test(location.search || ''); } catch (e) { }
+  if (!on) return;
+  var res = selftestRun();
+  try { selftestPaint(res); } catch (e) { }
+  try {
+    fetch('/api/selftest/report', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+                                    body: JSON.stringify(res) });
+  } catch (e) { }
+  try { window.__selftestResult = res; } catch (e) { }
+}
+
+/* ---------------- 页面内自检用例（1.1.4-beta10 四条反馈） ----------------
+   这些用例量的是**真实 DOM 的真实几何**（正是 CDP 脚本原来量那些），只是换了个执行者：
+   页面自己量自己。判据与 tools/check_b10_logic.js 的分工：
+     · 纯函数（拆分 / 简介拼接 / 归属）→ check_b10_logic.js（进 ctest，无需浏览器）；
+     · 几何与点击行为（按钮排布、开关联动、返回滚动位置）→ 这里（页面内自检）。 */
+selftestAdd('C1 左栏头部：三个动作在同一个分段控件里（外框恰 1 个）', function () {
+  var seg = document.querySelectorAll('#npAnal .anlseg');
+  return { want: '1 个分段控件', got: seg.length + ' 个', ok: seg.length === 1 };
+});
+selftestAdd('C1 左栏头部：自动 / 详细 / 分析 三段同一父节点且顺序不变', function () {
+  var seg = document.querySelector('#npAnal .anlseg');
+  var ids = seg ? Array.prototype.map.call(seg.children, function (b) { return b.id; }) : [];
+  return { want: 'npAnlAuto,npAnlToggle,npAnlRun', got: ids.join(','), ok: ids.join(',') === 'npAnlAuto,npAnlToggle,npAnlRun' };
+});
+selftestAdd('C1 左栏头部：除分段控件外没有别的带边框元素（三枚药丸已消失）', function () {
+  var head = document.querySelector('#npAnal .anlhead'), seg = document.querySelector('#npAnal .anlseg');
+  var n = 0;
+  if (head) Array.prototype.forEach.call(head.querySelectorAll('*'), function (el) {
+    if (el === seg) return;
+    var cs = getComputedStyle(el);
+    if ((parseFloat(cs.borderTopWidth) || 0) > 0 && cs.borderTopStyle !== 'none') n++;
+  });
+  return { want: '0 个', got: n + ' 个', ok: n === 0 };
+});
+selftestAdd('C1 左栏头部：三段落在面板内、同处一行（不换行、不溢出右缘）', function () {
+  var panel = document.getElementById('npAnal'), seg = document.querySelector('#npAnal .anlseg');
+  if (!panel || !seg) return { want: '存在', got: '缺元素', ok: false };
+  var pb = panel.getBoundingClientRect();
+  var tops = [], inside = true, minTop = 1e9, maxTop = -1e9;
+  Array.prototype.forEach.call(seg.children, function (b) {
+    var r = b.getBoundingClientRect();
+    if (r.top < minTop) minTop = r.top;
+    if (r.top > maxTop) maxTop = r.top;
+    if (r.right > pb.right - 4 || r.left < pb.left + 4) inside = false;
+  });
+  var spread = Math.round(maxTop - minTop);
+  return { want: 'spread=0 且 inside', got: 'spread=' + spread + ' inside=' + inside,
+           ok: spread <= 1 && inside };
+});
+selftestAdd('C6 收起键与右栏隐藏键同尺寸同圆角（同一枚圆形图标键）', function () {
+  var a = document.getElementById('npAnalHide'), b = document.getElementById('npRailHide');
+  if (!a || !b) return { want: '两个键都在', got: '缺元素', ok: false };
+  var ra = a.getBoundingClientRect(), rb = b.getBoundingClientRect();
+  var ca = getComputedStyle(a), cb = getComputedStyle(b);
+  var ok = Math.abs(ra.width - rb.width) <= 1 && Math.abs(ra.height - rb.height) <= 1 &&
+           ca.borderRadius === cb.borderRadius;
+  return { want: '同宽同高同圆角', got: Math.round(ra.width) + 'x' + Math.round(ra.height) + ' r=' + ca.borderRadius +
+           ' vs ' + Math.round(rb.width) + 'x' + Math.round(rb.height) + ' r=' + cb.borderRadius, ok: ok };
+});
+selftestAdd('C6 左栏标题与右栏标题同字号同字距', function () {
+  var a = document.querySelector('#npAnal .anllab'), b = document.querySelector('#npRail .nprailcap');
+  if (!a || !b) return { want: '两个标题都在', got: '缺元素', ok: false };
+  var ca = getComputedStyle(a), cb = getComputedStyle(b);
+  return { want: ca.fontSize + ' / ' + ca.letterSpacing, got: cb.fontSize + ' / ' + cb.letterSpacing,
+           ok: ca.fontSize === cb.fontSize && ca.letterSpacing === cb.letterSpacing };
+});
+selftestAdd('C2 面板「自动」开关与 ANL.auto / ADV.autoanl 同步', function () {
+  var el = document.getElementById('npAnlAuto');
+  if (!el) return { want: '存在', got: '缺元素', ok: false };
+  var before = ANL.auto;
+  el.click();
+  var after = ANL.auto, adv = ADV.autoanl, pressed = el.getAttribute('aria-pressed');
+  el.click();   // 还原，避免污染后续用例
+  var ok = after === (before ? 0 : 1) && Number(adv) === after &&
+           pressed === (after ? 'true' : 'false');
+  return { want: 'auto/adv/aria 一起变', got: 'auto=' + after + ' adv=' + adv + ' aria=' + pressed, ok: ok };
+});
+selftestAdd('C2 关闭自动后 anlTick 不再发分析请求', function () {
+  var saved = ANL.auto, savedDone = ANL.autoDone, savedCur = ANL.cur;
+  ANL.auto = 0; ANL.autoDone = '';
+  var before = 0;
+  try { anlTick('/__selftest__/nope.flac', true); } catch (e) { before = -1; }
+  ANL.auto = saved; ANL.autoDone = savedDone; ANL.cur = savedCur;
+  return { want: '不抛异常且不发请求', got: before === 0 ? 'OK' : '异常', ok: before === 0 };
+});
+selftestAdd('C4 右栏「艺术家」卡首行是「名字：简介」，不含国籍', function () {
+  var saved = NP_DATA, savedMeta = S.curMeta;
+  try {
+    S.curMeta = { title: 'T', artist: 'Aimer', album: 'A', albumArtist: 'Aimer' };
+    NP_DATA = { tabs: [{ k: 'person', label: '艺术家', name: 'Aimer', artist: '' }], cache: {}, active: '', req: 0 };
+    var pv = npRailPreview('person', { state: 'ok', data: { ok: true, fields: {
+      '国籍': '日本', '简介': '日本女性创作歌手。', '风格': 'J-POP' } } });
+    var ok = /^Aimer：日本女性创作歌手/.test(pv.p1) && !/国籍/.test(pv.p1);
+    return { want: 'Aimer：日本女性创作歌手…', got: pv.p1, ok: ok };
+  } finally { NP_DATA = saved; S.curMeta = savedMeta; }
+});
+selftestAdd('C5 艺术家列表：返回后恢复滚动位置', function () {
+  var sc = document.querySelector('.main');
+  if (!sc) return { want: '.main 滚动容器', got: '缺元素', ok: false };
+  var albums = [], i;
+  for (i = 0; i < 60; i++) albums.push({ k: 'st' + i, name: 'A' + i, artist: 'Artist-' + i, dur: 100, cv: false });
+  var savedView = S.view, savedCache = VIEWC.m['albums|'];
+  try {
+    viewCachePut('albums|', { albums: albums });
+    setView('artists'); loadArtists('');
+    sc.scrollTop = 480;
+    var want = sc.scrollTop;
+    var cards = document.querySelectorAll('#list .card');
+    if (!cards.length) return { want: '有卡片', got: '0 张', ok: false };
+    cards[Math.min(8, cards.length - 1)].click();      // 进资料页
+    var back = document.getElementById('bBackArtistsTop') || document.getElementById('bBackArtists');
+    if (!back) return { want: '返回按钮', got: '缺元素', ok: false };
+    back.click();
+    var got = sc.scrollTop;
+    return { want: 'scrollTop=' + want, got: 'scrollTop=' + got, ok: Math.abs(got - want) <= 2 };
+  } finally {
+    if (savedCache === undefined) delete VIEWC.m['albums|']; else VIEWC.m['albums|'] = savedCache;
+    try { setView(savedView || 'albums'); } catch (e) { }
+  }
+});
+selftestAdd('C7 合作署名拆分（括号内不拆 / & 、 feat. 拆 / 去重 / 单名原样）', function () {
+  var cases = [
+    ['椎名林檎, 斎藤ネコ', ['椎名林檎', '斎藤ネコ']],
+    ['澤野 弘之 & SennaRin', ['澤野 弘之', 'SennaRin']],
+    ['LiSA feat. PABLO', ['LiSA', 'PABLO']],
+    ['REIJINGSIGNAL(CV：Lynn、芹澤 優)', ['REIJINGSIGNAL(CV：Lynn、芹澤 優)']],
+    ['Lunity;Lunity;Lunity', ['Lunity']],
+    ['AC/DC', ['AC/DC']],
+    ['Aimer', ['Aimer']]
+  ];
+  var bad = cases.filter(function (c) { return JSON.stringify(npSplitArtists(c[0])) !== JSON.stringify(c[1]); });
+  return { want: '7 个样例全对', got: bad.length ? JSON.stringify(bad) : '全对', ok: bad.length === 0 };
+});
+selftestAdd('C7 首页艺术家：合作专辑同时计入每位参与者，且不再有「A & B」', function () {
+  var savedView = S.view, savedCache = VIEWC.m['albums|'];
+  try {
+    viewCachePut('albums|', { albums: [
+      { k: 'x1', name: '合作', artist: '椎名林檎, 斎藤ネコ', dur: 100, cv: false },
+      { k: 'x2', name: '个人', artist: '椎名林檎', dur: 100, cv: false }] });
+    setView('artists'); loadArtists('');
+    var names = Array.prototype.map.call(document.querySelectorAll('#list .card'), function (c) { return c.dataset.a; });
+    var ok = names.indexOf('椎名林檎') >= 0 && names.indexOf('斎藤ネコ') >= 0 &&
+             names.indexOf('椎名林檎, 斎藤ネコ') < 0;
+    return { want: '两位都在且无合成署名', got: JSON.stringify(names), ok: ok };
+  } finally {
+    if (savedCache === undefined) delete VIEWC.m['albums|']; else VIEWC.m['albums|'] = savedCache;
+    try { setView(savedView || 'albums'); } catch (e) { }
+  }
+});
+
 /* ---------------- 启动 ---------------- */
 initFavs();
 renderSavedQueues();
@@ -13382,6 +13693,12 @@ try {
   window.anlSetLvl = anlSetLvl;
   window.anlCardsHtml = anlCardsHtml;
   window.anlIsLocal = anlIsLocal;
+  // 1.1.4-beta10：页面内自检（侧边栏通道）—— 侧边栏控制台里可直接
+  //    window.selftestRun() 再 window.selftestPaint(window.selftestRun())
+  window.selftestRun = selftestRun;
+  window.selftestPaint = selftestPaint;
+  window.selftestAdd = selftestAdd;
+  window.SELFTEST = SELFTEST;
 } catch (e) { }
 if (D('npFavBtn')) D('npFavBtn').onclick = function (ev) { if (S.lastCur) toggleFav(S.lastCur, ev); };
 // 2026-10-26 F-1/B-3：底栏跑马灯。必须在 DOM 就绪后挂，且失败绝不能影响启动 —
@@ -13406,6 +13723,8 @@ loadSrcConfig();
 anlInit();
 tick();
 pollStart();
+// 1.1.4-beta10：?selftest=1 时自动跑页面内自检（侧边栏验收通道；不起任何外部浏览器进程）
+try { selftestMaybeAutoRun(); } catch (e) { }
 
 /* ---------------- 语言切换后的视图恢复 ----------------
    语言切换会整页重载（最省事、也最不容易留下半翻状态）。重载本身会把视图重置成

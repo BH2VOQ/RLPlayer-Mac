@@ -859,31 +859,42 @@ h += "#npPage .npedge{display:none}";
          "overflow:hidden}";
     // 1.1.4-beta6（审计 L8）：栏头「收起」键改绝对定位在面板右上角，避免在窄栏里被 flex-wrap
     // 挤到第二行、变成一个孤立的 ‹ 按钮。
-    // 1.1.4-beta10（用户反馈「音频分析部分，调整一下按钮的布局」，附截图）：
-    //   旧版把「标题 + 状态 + 详细 + 分析 + 收起」全塞进一行 flex-wrap：340px 窄栏里状态文字
-    //   被挤成省略号、三个按钮贴着状态尾巴，收起键还会掉到第二行；截图里就是这样一堆小按钮
-    //   挤在标题右边。现在分成**两行**：
-    //     第 1 行 = 标题 + 状态（状态右对齐、超出省略）—— 只读信息一行读完；
-    //     第 2 行 = 操作按钮组（自动 / 详细 / 分析）右对齐 —— 手部操作集中在一处，与状态分开。
-    //   「收起」仍是绝对定位在面板右上角的图标键（既有审计 L8 的结论，不改）。
-    h += ".anlhead{display:flex;flex-direction:column;align-items:stretch;gap:7px;flex:none;min-width:0}";
-    h += ".anlheadtop{display:flex;align-items:baseline;gap:8px;min-width:0;padding-right:26px}";
-    h += ".anlacts{display:flex;align-items:center;gap:6px;justify-content:flex-end;min-width:0}";
-    h += ".anlhide{position:absolute;top:7px;right:8px;padding:3px 6px}";
-    h += ".anllab{font-size:11px;letter-spacing:.6px;font-weight:700;color:var(--txt2);flex:none}";
-    h += "#npAnlStat{font-size:10.5px;color:var(--mut2);flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;"
-         "white-space:nowrap;font-variant-numeric:tabular-nums;text-align:right}";
-    h += ".anlbtn{font-size:10.5px;padding:3px 10px;border-radius:8px;background:var(--hov);color:var(--txt2);"
-         "border:1px solid var(--line);cursor:pointer;transition:.13s;white-space:nowrap;flex:none}";
-    h += ".anlbtn:hover{background:var(--hov2);color:var(--txt);border-color:var(--acc)}";
-    h += ".anlbtn:active{transform:scale(.97)}";
-    h += ".anlbtn.pri{color:var(--acc-text);background:var(--acc-weak);border-color:var(--acc-weak);font-weight:600}";
-    // 自动分析开关（1.1.4-beta10）：与设置页「播放时自动分析」同一个真相源（conf 的 autoanl），
-    // 放在面板里是为了**就地可开**，不用翻设置页找。开启态用主题的强调色描边 + 实心点，
-    // 关闭态与普通次级按钮同款，两态一眼可分。
-    h += ".anlbtn.auto.on{color:var(--ok-text);background:var(--ok-bg);border-color:var(--ok-line);font-weight:600}";
-    h += ".anlbtn.auto.on::before{content:'';display:inline-block;width:5px;height:5px;border-radius:50%;"
-         "background:currentColor;margin-right:5px;vertical-align:1px}";
+    // 1.1.4-beta10 第 2 轮（用户对照截图）：「左面的这个按钮排布没有右面的和谐」。
+    //   右栏（AI 整理）之所以和谐：**一行小标题 + 右边缘一枚淡圆形图标键**，没有多余边框；
+    //   而左栏当时是 标题 + 状态 + 三枚各自带描边的小药丸 + 一枚带描边的收起键 ——
+    //   300px 的窄头里堆了 5 个有边框的东西，视觉上全是「按钮」，自然不和谐。
+    //   现在改成与右栏**同一套语言**：
+    //     ① 标题用右栏 .nprailcap 同款字号字距（9.5px / 1.5px），不与正文抢层级；
+    //     ② 收起键换成与 .nprailhide 完全相同的 22px 圆形图标键（无边框，悬停才出色块）；
+    //     ③ 三个动作合并成**一个分段控件** .anlseg（一个外框 + 内部发丝分隔），
+    //        从「三枚药丸」变成「一个控件里的三段」，边框数量 3 → 1；
+    //     ④ 状态文字移到标题行右端（收起键左侧），比按钮更弱一档。
+    //   判据见 tools/check_b10_ui.js 的 C6（外框恰 1 个、三段落同框、收起键与右栏同尺寸同圆角）。
+    h += ".anlhead{display:flex;flex-direction:column;align-items:stretch;gap:8px;flex:none;min-width:0}";
+    h += ".anlheadtop{display:flex;align-items:center;gap:8px;min-width:0;padding-right:26px}";
+    h += ".anlacts{display:flex;align-items:center;justify-content:flex-end;min-width:0}";
+    h += ".anlseg{display:inline-flex;align-items:stretch;border:1px solid var(--line);border-radius:9px;"
+         "overflow:hidden;background:var(--hov);max-width:100%;min-width:0}";
+    h += ".anlseg>b{font-size:10.5px;font-weight:600;padding:3px 11px;color:var(--txt2);cursor:pointer;"
+         "white-space:nowrap;transition:.13s;display:inline-flex;align-items:center;gap:5px;"
+         "border-left:1px solid var(--line);min-width:0}";
+    h += ".anlseg>b:first-child{border-left:0}";
+    h += ".anlseg>b:hover{background:var(--hov2);color:var(--txt)}";
+    h += ".anlseg>b.on{color:var(--ok-text);background:var(--ok-bg)}";
+    h += ".anlseg>b.pri{color:var(--acc-text)}";
+    h += ".anlseg>b.pri:hover{background:var(--acc-weak);color:var(--acc)}";
+    h += "html[data-theme=light] .anlseg,html[data-theme=blue] .anlseg{border-color:rgba(15,23,42,.14);background:rgba(15,23,42,.03)}";
+    h += "html[data-theme=light] .anlseg>b,html[data-theme=blue] .anlseg>b{border-left-color:rgba(15,23,42,.12)}";
+    // 收起键：与右栏 .nprailhide 同一枚圆形图标键（同尺寸、同圆角、同悬停反馈）
+    h += ".anlhide{position:absolute;top:7px;right:8px;width:22px;height:22px;border-radius:50%;display:grid;"
+         "place-items:center;color:var(--mut2);padding:0;transition:.13s;flex:none;background:transparent;border:0;cursor:pointer}";
+    h += ".anlhide:hover{background:var(--hov2);color:var(--txt)}";
+    h += ".anllab{font-size:9.5px;letter-spacing:1.5px;color:var(--mut2);font-weight:700;flex:none;padding:0 2px}";
+    h += "#npAnlStat{font-size:10px;color:var(--mut2);flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;"
+         "white-space:nowrap;font-variant-numeric:tabular-nums;text-align:right;padding-right:2px}";
+    // 自动开启态：段内一枚 5px 实心点（与右栏卡片状态点同一套视觉）
+    h += ".anlseg>b.auto.on::before{content:'';display:inline-block;width:5px;height:5px;border-radius:50%;"
+         "background:currentColor;flex:none}";
     // 卡片区：左竖栏窄 ⟹ 单列纵向堆叠（旧通栏用 auto-fit 多列），头部固定、卡片区自己滚。
     h += "#npAnlBody{min-height:0;overflow:auto;display:grid;grid-template-columns:minmax(0,1fr);"
          "gap:8px;align-content:start;padding-right:2px;scrollbar-width:thin}";
@@ -1640,14 +1651,15 @@ h += "#npPage .npedge{display:none}";
     h += "<span class=anllab>音频分析</span>";
     h += "<span id=npAnlStat title='当前曲目的分析状态'>未播放</span>";
     h += "</div>";
-    h += "<div class=anlacts>";
-    // 自动分析开关就地可开（同一个 autoanl 真相源；文案写「自动」，开启后状态点变色）
-    h += "<button class='anlbtn auto' id=npAnlAuto title='播放时自动分析（每首只跑一次，切歌立即取消）' aria-pressed=false>自动</button>";
-    h += "<button class=anlbtn id=npAnlToggle title='切换详细程度：摘要 → 详细 → 全部指标' aria-label='切换详细程度'>详细</button>";
-    h += "<button class='anlbtn pri' id=npAnlRun title='重新分析当前曲目（强制重算，忽略缓存）'>分析</button>";
-    h += "</div>";
+    // 1.1.4-beta10 第 2 轮：三枚独立药丸 → 一个分段控件（一个外框、内部发丝分隔）。
+    // 用 <b>：它是纯文字段而非"按钮造型"，观感与右栏的克制一致；点击行为完全不变。
+    h += "<div class=anlacts><div class=anlseg>";
+    h += "<b class=auto id=npAnlAuto title='播放时自动分析（每首只跑一次，切歌立即取消）' role=button tabindex=0 aria-pressed=false>自动</b>";
+    h += "<b id=npAnlToggle title='切换详细程度：摘要 → 详细 → 全部指标' role=button tabindex=0 aria-label='切换详细程度'>详细</b>";
+    h += "<b class=pri id=npAnlRun title='重新分析当前曲目（强制重算，忽略缓存）' role=button tabindex=0>分析</b>";
+    h += "</div></div>";
     // 1.1.4-beta6：面板头部也能收起（与右上角开关同源状态），收起后完全隐藏。
-    h += "<button class='anlbtn anlhide' id=npAnalHide title='隐藏音频分析面板，可在右上角重新显示' aria-label='隐藏音频分析面板'>"
+    h += "<button class=anlhide id=npAnalHide title='隐藏音频分析面板，可在右上角重新显示' aria-label='隐藏音频分析面板'>"
          "<svg width=11 height=11 viewBox='0 0 24 24' fill=none stroke=currentColor stroke-width=2.4 stroke-linecap=round stroke-linejoin=round><path d='M14 6l-6 6 6 6'/></svg></button>";
     h += "</div>";
     h += "<div id=npAnlBody></div>";

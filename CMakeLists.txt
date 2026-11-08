@@ -736,6 +736,10 @@ if(NODE_EXECUTABLE)
   # 选中 → POST /api/llm model=… 。全部 mock fetch，绝不连真实网关。
   add_test(NAME llm_ui COMMAND ${NODE_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tests/test_llm_ui.js)
   set_tests_properties(llm_ui PROPERTIES WORKING_DIRECTORY ${CMAKE_SOURCE_DIR} TIMEOUT 30)
+  # 1.1.4-beta10：合作艺术家拆分 / 艺术家卡简介 / 首页艺术家归属 —— 纯逻辑，不需要浏览器
+  # （本机规则：禁止自起无头浏览器；能离线证明的先证明，几何量测改为侧边栏目视验收）
+  add_test(NAME b10_logic COMMAND ${NODE_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/check_b10_logic.js)
+  set_tests_properties(b10_logic PROPERTIES WORKING_DIRECTORY ${CMAKE_SOURCE_DIR} TIMEOUT 30)
 endif()
 
 # i18n 门禁：docs/i18n/*.en.tsv → src/net/i18n_table.h 必须与生成物一致

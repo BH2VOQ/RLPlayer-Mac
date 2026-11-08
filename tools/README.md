@@ -80,7 +80,7 @@
 | `make_icon_mac.swift` | 由 `res/rlplayer-256.png` 生成带透明留白的全档 iconset（打包脚本调用） | `swift tools/make_icon_mac.swift res/rlplayer-256.png /tmp/RLPlayer.iconset` |
 | `check_seekdrag.js` | 进度条拖动验收：按下即预览 / 1:1 跟手 / 拖动中零请求 / 不被轮询回拉 / 松手单次提交 / 真跳转 / 无 0.18 s 补间 / rAF 推进 / 整页同套 / 相对跳转基准；`--red` 用旧实现证明判据有效 | `node tools/check_seekdrag.js http://127.0.0.1:19099 /tmp/rlp-seekdrag [--red]` |
 | `check_volume_db.js` | 音量 dB 验收：0.5 dB 固定档位 / 静音逃逸 / 顶端夹紧 / 0.1 dB 细档 / 滚轮 / 双击归零 / 下发一致 / 标签一致 / 全档位换算互逆；`--red` 跑旧公式证明判据有效 | `node tools/check_volume_db.js http://127.0.0.1:19099 /tmp/rlp-volume [--red]` |
-| `check_b10_ui.js` | 1.1.4-beta10 四条反馈验收：音频分析按钮分两行（几何判据：三按钮同行、在状态行下方、不溢出）+ 面板内「自动」开关（与设置页同一真相源、落盘 autoanl=1、点开即补跑）+ AI 整理「艺术家」卡的简介替代国籍（fields/sections/兜底三条路径）+ 艺术家列表返回恢复滚动位置（含"从别处导航不恢复"的反向判据）；对 beta9 构建跑得 18/21 失败（红→绿取证） | `node tools/check_b10_ui.js http://127.0.0.1:19152/` |
+| `check_b10_logic.js` | 1.1.4-beta10 反馈的**纯逻辑**判据（不需要浏览器）：合作署名拆分（括号内不拆 / & 、 ; feat. 拆 / 重复去重 / 标签垃圾剔除）、艺术家卡简介带名字、首页艺术家归属（合作专辑同时计入每位参与者且不新增「A & B」）| `node tools/check_b10_logic.js` |
 
 **2026-10-28 新增的三个工具**都在 `make_app_mac.sh` 的打包链上或与之配套：
 `make_icon_mac.swift` 出图、`iconcheck.py` 判几何、`tipcheck.js` 判气泡不越界。
