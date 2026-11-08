@@ -12319,7 +12319,12 @@ function npBindEqChips() {
   if (ir) ir.onclick = function () { closeNowPlaying(); openSettingsTab('eq'); };
 }
 function npDataReset() {
-  NP_DATA = { key: '', active: '', tabs: [], cache: {}, inflight: {}, req: 0, bodyKey: '', tabSig: null };
+  // 1.1.4-beta9（用户：切换专辑后 AI 整理窗口还显示上一张专辑的信息，要及时刷新）：
+  // 世代号必须**跨切歌单调递增**。旧实现重置为 0、再由 updateNpData ++ 成 1，于是每次切歌/切专辑
+  // 后的世代号都是 1；上一张专辑仍在飞的 summary 迟到时会被误判成「当前世代」而写进新专辑的卡片
+  // （串台）。AI 首次整理要 10~30s，用户看到的就是「切了专辑还显示之前的信息」。
+  var gen = (NP_DATA && NP_DATA.req) || 0;
+  NP_DATA = { key: '', active: '', tabs: [], cache: {}, inflight: {}, req: gen + 1, bodyKey: '', tabSig: null };
   var b = D('npDataBody'); if (b) b.innerHTML = '';
   var t = D('npTabs'); if (t) t.innerHTML = '';
   var s = D('npDataStat'); if (s) s.textContent = '';
@@ -12379,6 +12384,13 @@ function npDataTargets(m) {
 }
 function npDataCan(m) {
   return !!(META.summary && m && (m.summaryAvailable || m.summaryCached || m.summaryCacheOk || META.hasLlmKey === true));
+}
+// 1.1.4-beta9：实体的稳定指纹。切歌由世代号（NP_DATA.req）拦截；但同一首曲目上元数据可能
+// 「两拍」回来（先旧 meta 后新 meta，例如打开单曲页时 loadMeta 还没返回），此时 lastCur 不变、
+// 世代号也不变，仅靠世代号挡不住旧实体迟到的 summary ⟹ 每个请求都带上实体指纹，写回前再核对
+// 当前栏目是否仍是同一实体。
+function npDataFp(kind, t) {
+  return kind + '|' + ((t && t.name) || '') + '|' + ((t && t.artist) || '') + '|' + ((t && t.composer) || '');
 }
 function npDataTab(kind) {
   var tabs = NP_DATA.tabs || [];
@@ -12659,16 +12671,20 @@ function npPrefetchPerson() {
   for (var i = 0; i < tabs.length; ++i) if (tabs[i].k === 'person') per = tabs[i];
   if (!per || !per.name) return;
   var st0 = NP_DATA.cache['person'];
-  if (st0 && (st0.state === 'ok' || st0.state === 'loading')) return;
+  // 1.1.4-beta9：缓存条目带实体指纹 —— 只有「同一实体的已取到/正在取」才跳过；旧实体的 loading
+  // 不能被当成当前实体的 loading（否则元数据两拍时新实体永远等不到请求）。
+  var perFp = npDataFp('person', per);
+  if (st0 && st0.fp === perFp && (st0.state === 'ok' || st0.state === 'loading')) return;
   var myTrack = S.lastCur || '';
   var key = myTrack + '|' + per.name;
   if (NPPREF_PERSON.key === key) return;
   NPPREF_PERSON.key = key;
   summaryOnce(npSummUrl('person', per), function (s) {
     if (NPPREF_PERSON.key !== key || (S.lastCur || '') !== myTrack) return;   // 切歌 → 丢弃
+    if (npDataFp('person', npDataTab('person')) !== perFp) return;             // 实体已换 → 丢弃
     if (!summHas(s)) return;                                                 // 失败静默
     if (NP_DATA.cache['person'] && NP_DATA.cache['person'].state === 'ok') return;
-    NP_DATA.cache['person'] = { state: 'ok', data: s };
+    NP_DATA.cache['person'] = { state: 'ok', data: s, fp: perFp };
     NP_DATA.tabSig = null;  // 强制重算签名：预览内容变了必须重绘
     npDataRenderTabs();
     if (NP_DATA.active === 'person') npDataRenderBody();
@@ -12691,13 +12707,18 @@ function npPrefetchRelease() {
   var key = myTrack + '|' + rel.name + '|' + (rel.artist || '');
   if (NPPREF.key === key) return;
   NPPREF.key = key;
+  var relFp = npDataFp('release', rel);
   var u = npSummUrl('release', rel);
   summaryOnce(u, function (s) {
     if (NPPREF.key !== key || (S.lastCur || '') !== myTrack) return;   // 切歌 → 丢弃
+    if (npDataFp('release', npDataTab('release')) !== relFp) return;   // 实体已换 → 丢弃
     if (!summHas(s)) return;                                          // 失败静默
     var finish = function () {
+      // npLocalAlbum 是异步的：回来时再核一次，期间切了歌/换了实体就不写
+      if (NPPREF.key !== key || (S.lastCur || '') !== myTrack) return;
+      if (npDataFp('release', npDataTab('release')) !== relFp) return;
       if (NP_DATA.cache['release'] && NP_DATA.cache['release'].state === 'ok') return;  // 用户已自己取到
-      NP_DATA.cache['release'] = { state: 'ok', data: s };
+      NP_DATA.cache['release'] = { state: 'ok', data: s, fp: relFp };
       npDataRenderTabs();
       if (NP_DATA.active === 'release') npDataRenderBody();
     };
@@ -12713,9 +12734,12 @@ function npPrefetchRelease() {
 function npAutoSummary() {
   if (META.summary != 1) return;
   if (META.hasLlmKey !== true && META.summaryEnabled !== true) return;
-  if (!npDataTab('track')) return;
+  var tr = npDataTab('track');
+  if (!tr) return;
   var st = NP_DATA.cache['track'];
-  if (st && (st.state === 'ok' || st.state === 'loading' || st.state === 'error')) { npRailHint(); return; }
+  // 1.1.4-beta9：只认「当前实体」的状态。旧实体遗留的 loading/ok/error 不能挡住新实体的自动整理
+  // （元数据两拍回来时会出现这种局面：lastCur 没变、实体已经换了）。
+  if (st && st.fp === npDataFp('track', tr) && (st.state === 'ok' || st.state === 'loading' || st.state === 'error')) { npRailHint(); return; }
   npDataEnsure('track', false);
   npRailHint();
 }
@@ -12749,14 +12773,16 @@ function npStaleRefresh(kind, reqAtStart, tries) {
     if (!D('npPage') || !D('npPage').classList.contains('on')) return;
     if (NP_DATA.req !== reqAtStart) return;
     var t = npDataTab(kind); if (!t) return;
+    var fp = npDataFp(kind, t);
     var url = npSummUrl(kind, t);
     fetchSummary(url, function (s) {
       if (NP_DATA.req !== reqAtStart) return;
+      if (npDataFp(kind, npDataTab(kind)) !== fp) return;   // 实体已换 → 旧轮询作废
       if (!s || s.pending) { npStaleRefresh(kind, reqAtStart, tries + 1); return; }
       if (!summHas(s)) return;
       if (s.summaryStale) { npStaleRefresh(kind, reqAtStart, tries + 1); return; }
       SUMC.cache[url] = s;
-      if (NP_DATA.cache[kind] && NP_DATA.cache[kind].state === 'ok') NP_DATA.cache[kind] = { state: 'ok', data: s };
+      if (NP_DATA.cache[kind] && NP_DATA.cache[kind].state === 'ok') NP_DATA.cache[kind] = { state: 'ok', data: s, fp: fp };
       NP_DATA.tabSig = null;
       npDataRenderTabs();
       npRailHint();
@@ -12766,13 +12792,15 @@ function npStaleRefresh(kind, reqAtStart, tries) {
 }
 function npDataEnsure(kind, force) {
   var t = npDataTab(kind); if (!t) return;
+  var fp = npDataFp(kind, t);
   var st = NP_DATA.cache[kind];
-  if (!force && st && (st.state === 'loading' || st.state === 'ok')) return;
-  var fp = kind + '|' + t.name + '|' + (t.artist || '') + '|' + (t.composer || '');
+  // 1.1.4-beta9：只有「同一实体」的 loading/ok 才算已就绪。旧实体的状态不能把新实体挡在请求之外
+  // （元数据两拍回来时 lastCur 没变、实体已经换了）。
+  if (!force && st && st.fp === fp && (st.state === 'loading' || st.state === 'ok')) return;
   if (!force && NP_DATA.inflight[fp]) return;
   NP_DATA.inflight[fp] = 1;
   var req = NP_DATA.req;
-  NP_DATA.cache[kind] = { state: 'loading' };
+  NP_DATA.cache[kind] = { state: 'loading', fp: fp };
   // 1.1.4-beta6：右栏卡片的状态点/预览必须跟着状态机走。旧实现只在 renderNp（进页 / meta 回来时
   // 才调用，不是每 400ms 轮询）里刷标签，异步 summary 完成后没人重绘 ⟹ 卡片停在"整理中"、
   // 状态行「正在后台整理…」永不消失。这里在请求开始/完成两处都强制重绘标签与状态行。
@@ -12783,10 +12811,11 @@ function npDataEnsure(kind, force) {
 
   function done(data, err) {
     delete NP_DATA.inflight[fp];
-    if (NP_DATA.req !== req) return;               // 已切歌 → 丢弃过期结果
+    if (NP_DATA.req !== req) return;                        // 已切歌 → 丢弃过期结果
+    if (npDataFp(kind, npDataTab(kind)) !== fp) return;     // 实体已换（元数据两拍）→ 丢弃过期结果
     if (!D('npPage') || !D('npPage').classList.contains('on')) return;
-    if (data) NP_DATA.cache[kind] = { state: 'ok', data: data };
-    else NP_DATA.cache[kind] = { state: 'error', error: err || '' };
+    if (data) NP_DATA.cache[kind] = { state: 'ok', data: data, fp: fp };
+    else NP_DATA.cache[kind] = { state: 'error', error: err || '', fp: fp };
     NP_DATA.tabSig = null;
     npDataRenderTabs();
     npRailHint();
@@ -12834,7 +12863,8 @@ function updateNpData(m) {
   var rail = D('npRail'), grid = D('npGrid');
   if (!rail) return;
   var key = S.lastCur || '';
-  if (NP_DATA.key !== key) { npDataReset(); NP_DATA.key = key; NP_DATA.req++; }
+  // 世代号由 npDataReset 内部单调递增（切歌/切专辑即一次新世代），这里不再额外 ++。
+  if (NP_DATA.key !== key) { npDataReset(); NP_DATA.key = key; }
   var can = npDataCan(m);
   var tabs = can ? npDataTargets(m) : [];
   if (!can || !tabs.length) {
