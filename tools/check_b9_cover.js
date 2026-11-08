@@ -7,7 +7,7 @@
 // check_b9_cover.js — 1.1.4-beta9「封面图片加载依然非常慢」UI 判据
 //
 // 背景（实测，不是推测）：
-//   * 用户曲库 /Volumes/Music 是 SMB 卷；旧 /api/lib/cover 每个请求都要对曲目逐次 stat
+//   * 用户曲库在外置 SMB 卷上；旧 /api/lib/cover 每个请求都要对曲目逐次 stat
 //     （缓存命中 p50 28 ms / p90 97 ms / p99 939 ms），而且响应是内嵌原图
 //     （用户 538 张缓存：均值 1.1 MB / p90 2.5 MB / 最大 19.6 MB），卡片只有 ~152px。
 //   * 原生 WKWebView 的 scheme handler 旧实现还把 Cache-Control 写死 no-cache。
