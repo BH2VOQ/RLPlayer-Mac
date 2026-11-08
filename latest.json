@@ -1,8 +1,8 @@
 {
-  "version": "1.1.4-beta9",
-  "notes": "Cover and AI-panel responsiveness pass: album cards now get cached 512 px JPEG thumbnails instead of the embedded originals, cutting first-screen cover transfer from 16.99 MB to 1.23 MB and first-screen paint of 18 covers from 1013 ms to 112 ms on a 5,867-track library; the AI panel refreshes immediately when you switch albums instead of showing the previous album's facts for 10-30 s; and the now-playing side rails stay pinned to the window's left and right edges at every window size with a constant 16 px gutter. · 封面与 AI 面板响应优化：专辑卡片改用缓存 512 px JPEG 缩略图，不再下发内嵌原图——5,867 首曲库上首屏封面传输 16.99 MB→1.23 MB、18 张首屏封面绘制 1013 ms→112 ms；切换专辑后 AI 整理栏立即刷新，不再显示上一张专辑的资料 10–30 s；单曲页左右竖栏在任意窗口尺寸下都贴住窗口最左/最右，边距恒为 16 px。",
-  "download_url": "https://github.com/BH2VOQ/RLPlayer-Mac/releases/download/v1.1.4-beta9/RLPlayer-1.1.4-beta9-macOS-arm64.dmg",
-  "sha256": "25de437966e2852f3aed3a89eab09a351ed6e1a6a3aafdbfe6b5467978c42c72",
-  "size": 8064760,
-  "published_at": "2026-11-08T04:23:12Z"
+  "version": "1.1.4",
+  "notes": "Single-track audio analysis panel with true peak dBTP (4× oversampling); symmetric side rails pinned to window edges with a brief/detail density toggle for the AI panel; instant cached cover thumbnails and monotonic AI refresh on album switch; standard Edit menu shortcuts across all inputs. · 单曲页音频分析面板与真峰 dBTP（4×过采样）；单曲页左右竖栏贴边与 AI 整理栏「详细/简略」两档密度切换；专辑封面 512px 缩略图缓存秒开与切专辑时 AI 整理即时刷新；全输入框标准编辑快捷键支持。",
+  "download_url": "https://github.com/BH2VOQ/RLPlayer-Mac/releases/download/v1.1.4/RLPlayer-1.1.4-macOS-arm64.dmg",
+  "sha256": "34b9305bf597228c2181f7e1ca3fc29675c8a774b88e976442acc1f0c7568761",
+  "size": 8073906,
+  "published_at": "2026-11-08T16:53:00Z"
 }
