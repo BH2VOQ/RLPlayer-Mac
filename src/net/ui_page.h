@@ -680,17 +680,41 @@ h += "#npPage .npedge{display:none}";
     //     开关在右上角（#npAnalToggle / #npRailToggle，状态记 localStorage），每个面板头部也有隐藏键。
     //     单侧隐藏时仍保留三列模板（隐藏列留空）⟹ 歌词继续严格居中于页面（沿用 beta4 用户硬约束）；
     //     两侧同时隐藏时中列占满整行，歌词仍居中（单列时容器中心 == 页面中心）。
-    h += ".npgrid{position:relative;z-index:2;height:100%;display:grid;grid-template-rows:auto minmax(0,1fr) auto;gap:18px;padding:44px 40px 18px;box-sizing:border-box;max-width:1240px;margin:0 auto}";
+    // 1.1.4-beta9（用户反馈，附截图）：「左右侧窗口在放大状态下，没有同时变换到窗口的
+    //   最左侧最右侧，这两个窗口需要一直贴在最左侧最右侧，无论窗口的具体大小」。
+    //   根因：整页网格 max-width:1240px + margin:0 auto —— 窗口宽于 1240 时整块内容居中，
+    //   两侧留白随窗口线性增长（旧版实测左栏左缘：1280 档 60px、1576 档 208px、
+    //   1920 档 380px、2560 档 700px），竖栏跟着内容块往里缩，视觉上就是"没有贴边"。
+    //   修法：网格不再限宽、不再自动居中；左右只留一个**全宽度恒定**的小边距
+    //   --npgut（16px），不随窗口大小变化 ⟹ 两栏在任何宽度下都贴住窗口最左/最右。
+    //   2026-11-08 用户第二轮反馈「不能 0px 0px 的视觉效果太差了」：0px 会让面板卡片
+    //   直接抵住窗口边线，圆角与描边被窗框切掉，所以保留 16px 这段视觉呼吸位；
+    //   关键是这个边距**恒定**，不是以前那种随窗口放大线性增长的居中留白。
+    //   两栏自身 max-width:340px 封顶、各自贴住外侧列缘（见 #npAnal/#npRail），
+    //   列模板仍是 1fr|2fr|1fr（左右等宽）⟹ 歌词中心 == 页面中心这条 beta4 硬约束不动。
+    h += ":root{--npgut:16px}";
+    h += ".npgrid{position:relative;z-index:2;height:100%;display:grid;grid-template-rows:auto minmax(0,1fr) auto;gap:18px;padding:44px var(--npgut) 18px;box-sizing:border-box}";
     // 无歌词：1.1.4-beta6 起不再把整列 display:none（那会在页面正中留一大块空白，看起来像排版错乱），
     // 改为保留列并显示居中的「暂无歌词」提示（.nplyric2.empty 已经负责垂直居中）。
     h += ".npgrid.nolyric #npLyric{display:block}";
     // 行2：左竖栏（音频分析）| 中（歌词，恒居中）| 右竖栏（AI 整理），左右等宽对称。
     h += ".npbody{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,2fr) minmax(0,1fr);gap:18px;min-height:0;align-items:stretch}";
-    h += "#npAnal{grid-column:1;grid-row:1}";
+    // 1.1.4-beta9：两栏贴住**列的外侧**（左栏靠左、右栏靠右），窗口放大时列跟着变宽，
+    //   但栏本身不被拉成薄饼 —— max-width:340px 封顶（旧版 1240px 内容块下实测 281px，
+    //   340 是本机 2560 档仍不被拉宽的合理上限，也与 .nprailcard 的内边距观感一致）。
+    //   两端贴着列缘 ⟹ 无论窗口多宽，左栏左缘 == 页面左内边距、右栏右缘 == 页面右内边距。
+    h += "#npAnal{grid-column:1;grid-row:1;justify-self:start;width:100%;max-width:340px}";
     h += "#npLyric{grid-column:2;grid-row:1}";
-    h += "#npRail{grid-column:3;grid-row:1}";
+    h += "#npRail{grid-column:3;grid-row:1;justify-self:end;width:100%;max-width:340px}";
     h += ".nprail{display:block;min-height:0}";
     h += ".nprail.on{display:block}";
+    // 行1（封面+标题）跟着竖栏一起贴边：用户截图里封面左缘与左栏左缘本来就对齐，
+    //   只让栏贴边而封面留在中间会把这个对齐拆开（1576 档封面 208、左栏 40）。
+    //   标题区是 minmax(0,1fr) 且文本左对齐 ⟹ 封面贴左、标题跟在封面右边，右侧自然留白。
+    h += ".nphero{width:100%}";
+    // 行3（进度+控制）仍旧限宽 1160px 居中：横跨两千多像素的进度条既难拖也不好看，
+    //   而控制键居中本来就是用户 261024-01 #3b 的硬要求（时间/控制/音量同一行、键在正中）。
+    h += ".npctl2{width:100%;max-width:1160px;margin-left:auto;margin-right:auto}";
     // 1.1.4-beta6：左右竖栏完全隐藏。隐藏时不占位也不留边条；
     // 单侧隐藏保留空列（歌词恒居中），双侧隐藏时歌词列占满整行。
     h += ".npgrid.noanal #npAnal{display:none}";
@@ -986,8 +1010,8 @@ h += "#npPage .npedge{display:none}";
     h += "html.machost .npclose{top:16px;right:20px}";
     h += "html.machost .nppanels{right:68px}";
     // 窄/矮窗口（用户 261023-04 #6 的 1024x640）：压缩行高与留白，但行间距不小于 12px
-    h += "@media (max-height:720px){.npgrid{padding:36px 24px 10px;gap:12px}.nphero{gap:16px}.npcover{height:clamp(108px,22vh,164px)}.npkind{margin-bottom:5px}.nptit{font-size:19px}.npsub{font-size:11.5px;margin-top:5px}.npmline{margin-top:6px;min-height:20px}.npctl2{gap:8px}.npdbody{font-size:12px;line-height:1.6}}";
-    h += "@media (max-width:1120px){.npgrid{padding:38px 24px 12px}.nphero{gap:16px}.npcover{height:clamp(108px,20vh,180px)}}";
+    h += "@media (max-height:720px){.npgrid{padding:36px var(--npgut) 10px;gap:12px}.nphero{gap:16px}.npcover{height:clamp(108px,22vh,164px)}.npkind{margin-bottom:5px}.nptit{font-size:19px}.npsub{font-size:11.5px;margin-top:5px}.npmline{margin-top:6px;min-height:20px}.npctl2{gap:8px}.npdbody{font-size:12px;line-height:1.6}}";
+    h += "@media (max-width:1120px){.npgrid{padding:38px var(--npgut) 12px}.nphero{gap:16px}.npcover{height:clamp(108px,20vh,180px)}}";
     // 浅色/浅蓝主题：整页跟随主题，Windows 原生标题栏（已按同一主题上色）才不会
     // 出现"上面一条浅色、下面一整块深色"的割裂感。
     h += "html[data-theme=light] .npbg,html[data-theme=blue] .npbg{filter:blur(64px) saturate(1.05) brightness(1.12)}";
