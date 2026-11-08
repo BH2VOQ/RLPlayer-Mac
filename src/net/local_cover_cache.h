@@ -5,6 +5,7 @@
 // 完整条款见仓库根目录的 LICENSE 文件。
 #pragma once
 #include "platform/path.h"
+#include "platform/image_thumb.h"
 #include <algorithm>
 #include <atomic>
 #include <cerrno>
@@ -203,4 +204,124 @@ struct Flight {
     Flight(const Flight&) = delete;
     Flight& operator=(const Flight&) = delete;
 };
+
+// ===========================================================================
+// 缩略图磁盘缓存（2026-11 beta9 封面加载性能：网格卡片只取 <=512px JPEG）
+//
+// 为什么要单独一层、单独一个目录：全尺寸内嵌封面缓存（上面 read/write 那套）继续服务
+// 详情页/下载，它的文件名、命中口径、字节上限一律不动；网格只需要小图，另存
+// <coverdir>/thumb/（coverdir = root() 的父目录；RLPLAYER_COVER_DIR 覆盖时随之隔离）。
+//
+// 失效口径：token = 源音频文件的 "<mtime_sec>:<mtime_nsec>:<size>"。源文件一改
+// （换封面/重新刮削/重新编码），token 立刻变化，旧缩略图自然失配而不是误命中。
+// 提交顺序：先 rename .jpg 再 rename .meta（meta 最后提交）—— 崩溃/并发最多让两文件
+// 失配（下次重新生成），不可能把半张图当命中。
+// ===========================================================================
+constexpr int kThumbMaxEdge = 512;
+constexpr int kThumbQuality = 80;
+constexpr size_t kMinThumbBytes = 64;
+constexpr size_t kMaxThumbBytes = 4 * 1024 * 1024;
+struct ThumbEntry {
+    std::string token, mime;
+    std::vector<unsigned char> bytes;
+};
+// <coverdir>/thumb：root() 的父目录是 coverdir（root() 本身是 coverdir/embed）。
+inline std::string thumb_root() {
+    return (fs::path(root()).parent_path() / "thumb").string();
+}
+// 源文件印章：只认普通文件；缺失/目录/其它类型一律 false（token 清空，不返回脏值）。
+inline bool source_stamp(const std::string& srcPath, std::string& token) {
+    token.clear();
+    if (srcPath.empty()) return false;
+    struct stat st{};
+    if (::stat(srcPath.c_str(), &st) != 0 || !S_ISREG(st.st_mode)) return false;
+    token = std::to_string(st.st_mtimespec.tv_sec) + ":" + std::to_string(st.st_mtimespec.tv_nsec) + ":" +
+            std::to_string(st.st_size);
+    return true;
+}
+// 全尺寸图片字节 -> <=512px JPEG（真正解码/缩放/EXIF 方向在 platform/image_thumb）。
+inline bool make_thumb(const std::vector<unsigned char>& src, std::vector<unsigned char>& jpeg) {
+    jpeg.clear();
+    if (src.empty() || src.size() > kMaxImageBytes) return false;
+    std::vector<unsigned char> encoded;
+    if (!rta::platform::make_jpeg_thumb(src.data(), src.size(), kThumbMaxEdge, kThumbQuality, encoded))
+        return false;
+    if (encoded.size() < kMinThumbBytes || encoded.size() > kMaxThumbBytes) return false;
+    if (encoded[0] != 0xff || encoded[1] != 0xd8 || encoded[2] != 0xff) return false;
+    jpeg = std::move(encoded);
+    return true;
+}
+// 读缓存：token 必须与调用方刚算出的源文件印章逐字节相等；meta 行序固定
+// （RLPlayerCoverThumb1 / token / mime / size / fnv hash），图片按缩略图自己的
+// 64 B..4 MB 口径校验，不借用 read_image() 的 32 MB 全尺寸上限。
+inline bool read_thumb(const std::string& key, const std::string& token, ThumbEntry& out) {
+    if (!valid_key(key) || token.empty()) return false;
+    const std::string base = (fs::path(thumb_root()) / key).string();
+    std::ifstream meta(base + ".meta", std::ios::binary | std::ios::ate);
+    if (!meta) return false;
+    const auto metaSize = meta.tellg();
+    if (metaSize <= 0 || metaSize > 8192) return false;
+    meta.seekg(0);
+    std::string version, gotToken, mime;
+    long long recorded = 0;
+    uint64_t digest = 0;
+    if (!std::getline(meta, version) || version != "RLPlayerCoverThumb1" ||
+        !std::getline(meta, gotToken) || !std::getline(meta, mime) || !(meta >> recorded >> digest))
+        return false;
+    if (gotToken != token || mime != "image/jpeg" || recorded < (long long)kMinThumbBytes ||
+        recorded > (long long)kMaxThumbBytes)
+        return false;
+    std::ifstream img(base + ".jpg", std::ios::binary | std::ios::ate);
+    if (!img) return false;
+    const auto imgSize = img.tellg();
+    if (imgSize < (std::streamoff)kMinThumbBytes || imgSize > (std::streamoff)kMaxThumbBytes ||
+        imgSize != (std::streamoff)recorded)
+        return false;
+    std::vector<unsigned char> bytes((size_t)imgSize);
+    img.seekg(0);
+    if (!img.read((char*)bytes.data(), (std::streamsize)imgSize)) return false;
+    if (bytes[0] != 0xff || bytes[1] != 0xd8 || bytes[2] != 0xff) return false;
+    if (digest != hash(bytes.data(), bytes.size())) return false;
+    out.token = gotToken;
+    out.mime = mime;
+    out.bytes = std::move(bytes);
+    return true;
+}
+// 原子写缓存：.jpg.part + .meta.part（pid+序号后缀）各写完、rename 图片、最后 rename meta。
+// meta 一旦可见就代表图片已就位；任何一步失败清掉临时文件返回 false，绝不留下半个缓存。
+inline bool write_thumb(const std::string& key, const std::string& token,
+                        const std::vector<unsigned char>& jpeg) {
+    if (!valid_key(key) || token.empty() || jpeg.size() < kMinThumbBytes ||
+        jpeg.size() > kMaxThumbBytes)
+        return false;
+    if (jpeg[0] != 0xff || jpeg[1] != 0xd8 || jpeg[2] != 0xff) return false;
+    std::error_code ec;
+    fs::create_directories(thumb_root(), ec);
+    if (ec) return false;
+    const std::string base = (fs::path(thumb_root()) / key).string();
+    static std::atomic<uint64_t> seq{0};
+    const std::string suffix = "." + std::to_string(getpid()) + "." + std::to_string(seq.fetch_add(1)) + ".part";
+    const std::string img = base + ".jpg" + suffix, meta = base + ".meta" + suffix;
+    auto cleanup = [&] { fs::remove(img, ec); fs::remove(meta, ec); };
+    {
+        std::ofstream f(img, std::ios::binary | std::ios::trunc);
+        f.write((const char*)jpeg.data(), (std::streamsize)jpeg.size());
+        f.close();
+        if (!f) { cleanup(); return false; }
+    }
+    {
+        std::ofstream f(meta, std::ios::binary | std::ios::trunc);
+        f << "RLPlayerCoverThumb1\n" << token << '\n' << "image/jpeg" << '\n' << jpeg.size() << '\n'
+          << hash(jpeg.data(), jpeg.size()) << '\n';
+        f.close();
+        if (!f) { cleanup(); return false; }
+    }
+    fs::rename(img, base + ".jpg", ec);
+    if (ec) { cleanup(); return false; }
+    fs::rename(meta, base + ".meta", ec);
+    const bool ok = !ec;
+    cleanup();
+    return ok;
+}
+
 } // namespace rta::net::local_cover

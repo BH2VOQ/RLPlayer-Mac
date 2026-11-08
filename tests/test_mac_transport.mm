@@ -80,6 +80,17 @@ std::string dispatch(const rta::net::HttpRequest& req, std::string& ct) {
     } else if (req.path == "/api/ping") {
         ct = "application/json; charset=utf-8";
         res = "{\"ok\":true,\"pong\":true}";
+    } else if (req.path == "/api/cover_immutable") {
+        // 1.1.4-beta9：/api/lib/cover 的 immutable 头必须穿透 WKURLSchemeHandler
+        // （旧实现把 scheme 响应的 Cache-Control 写死 no-cache，beta7 的封面缓存头白做）。
+        rta::net::webui_set_cache_control("public, max-age=31536000, immutable");
+        ct = "image/jpeg";
+        res = std::string("\xff\xd8\xffthumb", 8);
+    } else if (req.path == "/api/cover_manual") {
+        // 人工封面必须保持 no-cache（同一 URL 会被 /api/lib/cover/set 覆盖）。
+        rta::net::webui_set_cache_control("no-cache, max-age=0, must-revalidate");
+        ct = "image/jpeg";
+        res = std::string("\xff\xd8\xffmanual", 9);
     } else if (req.path.rfind("/api/utf8_test", 0) == 0) {
         ct = "application/json; charset=utf-8";
         res = "{\"ok\":true,\"received_path\":\"" + req.path + "\"}";
@@ -611,6 +622,36 @@ int main() {
                        [[response valueForHTTPHeaderField:@"Content-Type"] hasPrefix:@"application/json"],
                        "scheme HTTP503 retains JSON body and MIME");
                 }
+            }
+            // 1.1.4-beta9：Cache-Control 覆盖槽穿透 + 下一条普通请求复位为 no-cache。
+            {
+                MockSchemeTask *t = [[MockSchemeTask alloc]
+                    initWithURLString:@"rlplayer://app/api/cover_immutable"];
+                [handler webView:dummyView startURLSchemeTask:t];
+                for (int i = 0; i < 200 && t.finishCount == 0; ++i)
+                    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+                NSHTTPURLResponse *r = (NSHTTPURLResponse *)t.receivedResponse;
+                ck(t.finishCount == 1 &&
+                   [[r valueForHTTPHeaderField:@"Cache-Control"] isEqualToString:@"public, max-age=31536000, immutable"],
+                   "scheme forwards handler Cache-Control (cover thumbnail immutable)");
+                MockSchemeTask *tm = [[MockSchemeTask alloc]
+                    initWithURLString:@"rlplayer://app/api/cover_manual"];
+                [handler webView:dummyView startURLSchemeTask:tm];
+                for (int i = 0; i < 200 && tm.finishCount == 0; ++i)
+                    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+                NSHTTPURLResponse *rm = (NSHTTPURLResponse *)tm.receivedResponse;
+                ck(tm.finishCount == 1 &&
+                   [[rm valueForHTTPHeaderField:@"Cache-Control"] isEqualToString:@"no-cache, max-age=0, must-revalidate"],
+                   "scheme forwards manual-cover no-cache");
+                MockSchemeTask *tp = [[MockSchemeTask alloc]
+                    initWithURLString:@"rlplayer://app/api/ping"];
+                [handler webView:dummyView startURLSchemeTask:tp];
+                for (int i = 0; i < 200 && tp.finishCount == 0; ++i)
+                    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+                NSHTTPURLResponse *rp = (NSHTTPURLResponse *)tp.receivedResponse;
+                ck(tp.finishCount == 1 &&
+                   [[rp valueForHTTPHeaderField:@"Cache-Control"] isEqualToString:@"no-cache"],
+                   "scheme resets Cache-Control to no-cache for ordinary handlers");
             }
             ck([handler waitForInFlightTasksWithTimeout:1.0], "status scheme handler drains");
 

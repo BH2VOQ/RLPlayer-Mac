@@ -63,6 +63,12 @@ inline std::atomic<int>* webui_status_slot() {
     return &status;
 }
 inline void webui_set_status(int code) { webui_status_slot()->store(code); }
+// 1.1.4-beta9：scheme handler 也要能拿到 handler 设置的 Cache-Control（封面 immutable）。
+// 无 web 传输头的精简构建里保持空串 = 回退到原来的 no-cache。
+inline std::string* webui_cache_control_slot() {
+    static thread_local std::string value;
+    return &value;
+}
 }
 namespace rlapp {
 bool start_embedded();
@@ -479,6 +485,9 @@ static NSString *const kShim = @
         dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
             std::string contentType;
             std::string respBody;
+            // 1.1.4-beta9：handler 的 Cache-Control 覆盖值（beta7 的封面 immutable 头只进了
+            // 独立 HTTP CLI，原生 App 这条 scheme 通道一直硬编码 no-cache ⟹ 封面每次都重下）。
+            std::string cacheControl;
             int responseStatus = 200;
             try {
                 // RAII 保护业务计数：只要离开业务分发范围，无论正常返回、抛异常还是提前返回，必须递减
@@ -500,10 +509,14 @@ static NSString *const kShim = @
                 httpReq.body = std::move(body);
 
                 try {
+                    // 线程本地的覆盖槽每请求复位；dispatch 内部可能设置（/api/lib/cover 的 immutable）。
+                    rta::net::webui_cache_control_slot()->clear();
                     respBody = rlapp::dispatch(httpReq, contentType);
                     responseStatus = rta::net::webui_status_slot()->exchange(200);
+                    cacheControl = *rta::net::webui_cache_control_slot();
                 } catch (...) {
                     rta::net::webui_status_slot()->store(200);
+                    rta::net::webui_cache_control_slot()->clear();
                     responseStatus = 500;
                     respBody = "{\"ok\":false,\"error\":\"internal error\"}";
                     contentType = "application/json; charset=utf-8";
@@ -524,11 +537,15 @@ static NSString *const kShim = @
             }
 
             NSData *respData = [NSData dataWithBytes:respBody.data() length:respBody.size()];
+            NSString *cacheControlHeader = cacheControl.empty()
+                ? @"no-cache"
+                : [NSString stringWithUTF8String:cacheControl.c_str()];
+            if (!cacheControlHeader) cacheControlHeader = @"no-cache";
             NSMutableDictionary *headers = [@{
                 @"Content-Type": [NSString stringWithUTF8String:contentType.c_str()],
                 @"Content-Length": [NSString stringWithFormat:@"%zu", respBody.size()],
                 @"Access-Control-Allow-Origin": @"*",
-                @"Cache-Control": @"no-cache"
+                @"Cache-Control": cacheControlHeader
             } mutableCopy];
             if (responseStatus == 503) headers[@"Retry-After"] = @"2";
             NSHTTPURLResponse *httpResp = [[NSHTTPURLResponse alloc] initWithURL:url

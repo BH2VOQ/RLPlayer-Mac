@@ -4987,6 +4987,10 @@ static std::string path_in_exe_dir(const std::string& name) { return path_in_exe
 //        ② <coverdir>/<key>.jpg（网图/人工设置的正缓存）
 //        ③ <coverdir>/<key>.none（负缓存，7 天有效）
 //        三者都没有 → 404 + 空 body（前端 <img onerror> 露回首字母占位）
+//        ★ 1.1.4-beta9：命中后统一改发 <coverdir>/thumb/<key>.jpg（<=512px JPEG，几十 KB）；
+//          缩略图缺失/过期时用完整字节现场生成并落盘，生成失败照旧发原图。
+//          指纹校验保持原频率（mtime/大小/同目录换图立刻失效的既有用例不许放宽）——
+//          本层只削减下发字节与 WebKit 解码成本，不改变封面失效语义。
 //   GET  /api/lib/cover/progress      **只读**：{"ok":true,"running":bool,"done","total",
 //                                     "hit","miss","fail","lastName"}
 //   POST /api/lib/cover/prefetch      **副作用端点**（进 kNeedPost）：立刻返回
@@ -7929,35 +7933,90 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
             std::string mime = "image/jpeg";
             const char* src = "none";
             bool busy = false;
+            bool thumb = false;          // 1.1.4-beta9：本响应是不是 512px 磁盘缩略图（证据字段）
             std::string localSource;
+            // 1.1.4-beta9（用户反馈「封面图片的加载依然非常慢」）：专辑网格卡片只有 ~152px，
+            // 旧实现每次都发内嵌原图（用户缓存 538 张：均值 1.1 MB / p90 2.5 MB / 最大 19.6 MB），
+            // WebKit 每张都要完整下载 + 全尺寸解码。现在按**完整图源文件**的 stat token 缓存
+            // 512px JPEG 缩略图：图源变了（.part→rename 原子替换）token 必变，绝不发旧缩略图。
+            const std::string thumbSrcManual = rta::cover::cover_paths_in(cover_manual_dir(), key).jpg;
+            const std::string thumbSrcNet    = rta::cover::cover_paths_in(cover_cache_dir(), key).jpg;
+            const std::string thumbSrcEmbed  = rta::net::local_cover::root() + "/" + key + ".img";
+            // token 带 source 种类前缀：manual/net/embed 的缩略图共用 thumb/<key>.jpg 一个命名
+            // 空间，若只比较 mtime+size，极端情况下跨来源碰撞会把另一来源的图当命中发出去。
+            auto thumb_token = [](const std::string& srcPath, const char* kind, std::string& token) -> bool {
+                std::string raw;
+                if (!rta::net::local_cover::source_stamp(srcPath, raw)) return false;
+                token = std::string(kind) + ":" + raw;
+                return true;
+            };
+            auto serve_thumb = [&](const std::string& srcPath, const char* kind) -> bool {
+                if (key.empty()) return false;
+                std::string token;
+                if (!thumb_token(srcPath, kind, token)) return false;
+                rta::net::local_cover::ThumbEntry th;
+                if (!rta::net::local_cover::read_thumb(key, token, th)) return false;
+                bytes = std::move(th.bytes);
+                mime = th.mime.empty() ? "image/jpeg" : th.mime;
+                thumb = true;
+                return true;
+            };
+            // 缩略图缺失/过期时用已解析出的完整字节现场生成并落盘；失败就照旧发原图
+            // —— 缩略图只是加速层，任何失败都不能让封面消失。
+            auto make_thumb_now = [&](const std::string& srcPath, const char* kind) -> bool {
+                if (key.empty() || bytes.empty()) return false;
+                std::string token;
+                if (!thumb_token(srcPath, kind, token)) return false;
+                std::vector<unsigned char> jpeg;
+                if (!rta::net::local_cover::make_thumb(bytes, jpeg)) return false;
+                if (!rta::net::local_cover::write_thumb(key, token, jpeg)) return false;
+                bytes = std::move(jpeg);
+                mime = "image/jpeg";
+                thumb = true;
+                return true;
+            };
             // 人工选择永久优先，且与在线/内嵌命名空间隔离。
-            if (cover_read_manual(key, bytes)) {
+            if (serve_thumb(thumbSrcManual, "manual")) {
+                src = "manual";
+            } else if (cover_read_manual(key, bytes)) {
                 src = "manual";
                 mime = cover_mime_of(bytes);
+                make_thumb_now(thumbSrcManual, "manual");
             } else {
                 // hasCover=0 不启动抽图；本地缓存查验在 albumCover 内且早于并发闸门。
+                // 指纹校验每次都做（不缓存——local_cover 的既有用例要求 mtime/大小/同目录
+                // 换图立刻失效），缩略图只按下发字节降本，不改变失效语义。
                 rta::net::LibAlbum a;
                 const bool hasEmbedded = !key.empty() && lib.album(key, a) && a.hasCover;
                 if (hasEmbedded && lib.albumCover(key, bytes, mime, &localSource, &busy) && !bytes.empty()) {
                     src = localSource.c_str();
+                    // 先读磁盘缩略图；只有缺失/过期才用刚取到的完整字节现做并落盘。
+                    // （旧写法只 make 不读：每张内嵌封面都在重复解码+编码 10-25 ms。）
+                    if (!serve_thumb(thumbSrcEmbed, "embed")) make_thumb_now(thumbSrcEmbed, "embed");
                 } else {
                     bytes.clear();
                     mime = "image/jpeg";
-                    if (cover_read_cached(key, bytes)) { src = "net"; mime = cover_mime_of(bytes); }
-                    else if (busy) src = "busy";
+                    if (serve_thumb(thumbSrcNet, "net")) {
+                        src = "net";
+                    } else if (cover_read_cached(key, bytes)) {
+                        src = "net"; mime = cover_mime_of(bytes);
+                        make_thumb_now(thumbSrcNet, "net");
+                    } else if (busy) src = "busy";
                 }
             }
             const double ms = std::chrono::duration<double, std::milli>(
                                   std::chrono::steady_clock::now() - t0).count();
-            // 日志节流：专辑页一次渲染就会打上百次这个端点，且响应头是 Cache-Control: no-store
-            // （浏览器每次都重新要）⟹ 每张都写日志等于给播放日志灌噪声 + 给每个请求加一次文件 I/O。
-            // 规则：本进程前 60 次全记（排查"谁 404 / 走哪条路"够用），之后只记 ≥5 ms 的慢请求。
+            // 日志节流：专辑页一次渲染就会打上百次这个端点（原生 App 的 scheme 通道还会因
+            // WKWebView 自定义 scheme 不缓存而反复请求）⟹ 每张都写日志等于给播放日志灌噪声 +
+            // 给每个请求加一次文件 I/O。规则：本进程前 60 次全记（排查"谁 404 / 走哪条路"够用），
+            // 之后只记 ≥5 ms 的慢请求。
             static std::atomic<int> s_coverGetSeq{0};
             const int seq = s_coverGetSeq.fetch_add(1);
             if (seq < 60 || ms >= 5.0) {
                 char msbuf[24];
                 std::snprintf(msbuf, sizeof(msbuf), "%.2f", ms);
                 play_log(std::string("COVERGET n=") + std::to_string(seq + 1) + " k=" + key + " src=" + src +
+                         " thumb=" + (thumb ? "1" : "0") +
                          " bytes=" + std::to_string(bytes.size()) + " ms=" + msbuf);
             }
             if (std::string(src) == "busy") {

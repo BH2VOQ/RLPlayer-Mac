@@ -137,14 +137,19 @@ if(APPLE)
   enable_language(OBJCXX)
   set(RL_LOOPBACK_SRC src/platform/macos/process_tap_bridge.mm)
   set_source_files_properties(${RL_LOOPBACK_SRC} PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
+  # 1.1.4-beta9：封面缩略图（ImageIO 下采样，~10-25 ms/张，进程内、不起子进程）。
+  # App 与 CLI 共用同一份实现（rlapp_core 通过 #include rtaweb.cpp 共享业务代码）。
+  set(RL_IMAGE_THUMB_SRC src/platform/macos/image_thumb.mm)
+  set_source_files_properties(${RL_IMAGE_THUMB_SRC} PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
+  set(RL_IMAGE_FRAMEWORKS "-framework ImageIO" "-framework CoreGraphics" "-framework UniformTypeIdentifiers")
 
-  add_library(rlapp_core STATIC tools/rlapp_core.cpp ${RL_LOOPBACK_SRC})
+  add_library(rlapp_core STATIC tools/rlapp_core.cpp ${RL_LOOPBACK_SRC} ${RL_IMAGE_THUMB_SRC})
   target_include_directories(rlapp_core PUBLIC ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tools)
-  target_link_libraries(rlapp_core PUBLIC ${RL_PLATFORM_LIBS} "-framework Foundation")
+  target_link_libraries(rlapp_core PUBLIC ${RL_PLATFORM_LIBS} "-framework Foundation" ${RL_IMAGE_FRAMEWORKS})
 
-  add_executable(rtaweb tools/rtaweb.cpp ${RL_LOOPBACK_SRC})
+  add_executable(rtaweb tools/rtaweb.cpp ${RL_LOOPBACK_SRC} ${RL_IMAGE_THUMB_SRC})
   target_include_directories(rtaweb PRIVATE ${CMAKE_SOURCE_DIR}/src)
-  target_link_libraries(rtaweb PRIVATE ${RL_PLATFORM_LIBS} "-framework Foundation")
+  target_link_libraries(rtaweb PRIVATE ${RL_PLATFORM_LIBS} "-framework Foundation" ${RL_IMAGE_FRAMEWORKS})
 
   # macOS 原生壳（§9 第 9 条 / §10 契约）：单进程内直连 |rlapp::dispatch|。
   # mac_host.mm 用 ARC 语义（WKURLSchemeTask/block 对象生命周期不能被 MRR 误释放）。
@@ -481,9 +486,9 @@ target_link_libraries(test_hog_exclusive PRIVATE ${RL_PLATFORM_LIBS})
 add_test(NAME hog_exclusive COMMAND test_hog_exclusive)
 
 # ---------------- 2026-10-25：耳机 EQ（OPRA 预设）切换实时生效与热重载回归 ----------------
-add_executable(test_eq_reload tests/test_eq_reload.cpp ${RL_LOOPBACK_SRC})
+add_executable(test_eq_reload tests/test_eq_reload.cpp ${RL_LOOPBACK_SRC} ${RL_IMAGE_THUMB_SRC})
 target_include_directories(test_eq_reload PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tools)
-target_link_libraries(test_eq_reload PRIVATE rtadsp ${RL_PLATFORM_LIBS} "-framework Foundation")
+target_link_libraries(test_eq_reload PRIVATE rtadsp ${RL_PLATFORM_LIBS} "-framework Foundation" ${RL_IMAGE_FRAMEWORKS})
 add_test(NAME eq_reload COMMAND test_eq_reload)
 
 # ---------------- 1.1.2 DSD 播放可靠性热修（P0-1 / P0-2）----------------
@@ -494,9 +499,9 @@ add_executable(test_direct_dsd_plan tests/test_direct_dsd_plan.cpp)
 target_include_directories(test_direct_dsd_plan PRIVATE ${CMAKE_SOURCE_DIR}/src)
 add_test(NAME direct_dsd_plan COMMAND test_direct_dsd_plan)
 
-add_executable(test_dsd_production tests/test_dsd_production.cpp ${RL_LOOPBACK_SRC})
+add_executable(test_dsd_production tests/test_dsd_production.cpp ${RL_LOOPBACK_SRC} ${RL_IMAGE_THUMB_SRC})
 target_include_directories(test_dsd_production PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tools)
-target_link_libraries(test_dsd_production PRIVATE rtadsp ${RL_PLATFORM_LIBS} "-framework Foundation")
+target_link_libraries(test_dsd_production PRIVATE rtadsp ${RL_PLATFORM_LIBS} "-framework Foundation" ${RL_IMAGE_FRAMEWORKS})
 add_test(NAME dsd_production COMMAND test_dsd_production)
 
 # ---------------- 20 段参数均衡 PEQ（261024-02 #6）：0dB 直通 / 6dB@fc / Q 带宽 /
@@ -835,6 +840,18 @@ add_executable(test_cover_fetch tests/test_cover_fetch.cpp)
 target_include_directories(test_cover_fetch PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tools)
 add_test(NAME cover_fetch COMMAND test_cover_fetch)
 
+# 1.1.4-beta9：封面缩略图（ImageIO 下采样 + 磁盘缓存 token 校验 + meta 指纹）。
+# 判据全部离线自生成夹具（BMP -> JPEG），不依赖 ffmpeg/真实曲库；ENVIRONMENT 显式隔离，
+# 绝不写用户 ~/Library/Application Support/RLPlayer 的封面缓存。
+if(APPLE)
+  add_executable(test_cover_thumb tests/test_cover_thumb.cpp ${RL_IMAGE_THUMB_SRC})
+  target_include_directories(test_cover_thumb PRIVATE ${CMAKE_SOURCE_DIR}/src)
+  target_link_libraries(test_cover_thumb PRIVATE ${RL_PLATFORM_LIBS} "-framework Foundation" ${RL_IMAGE_FRAMEWORKS})
+  add_test(NAME cover_thumb COMMAND test_cover_thumb)
+  set_tests_properties(cover_thumb PROPERTIES ENVIRONMENT
+    "HOME=${CMAKE_BINARY_DIR}/test-env/cover_thumb/home;RLPLAYER_STATE_DIR=${CMAKE_BINARY_DIR}/test-env/cover_thumb/state;RLPLAYER_COVER_DIR=${CMAKE_BINARY_DIR}/test-env/cover_thumb/covers")
+endif()
+
 # F-2 音频体检（上游 8001dbb + 99dd012，mac 移植：health_store 文件 IO 按 POSIX 重写）
 add_executable(test_dynamics tests/test_dynamics.cpp)
 target_include_directories(test_dynamics PRIVATE ${CMAKE_SOURCE_DIR}/src)
@@ -986,9 +1003,9 @@ add_test(NAME cast_service COMMAND test_cast_service)
 set_tests_properties(cast_service PROPERTIES TIMEOUT 90)
 
 # Actual embedded dispatcher + loopback RAOP worker: no physical output.
-add_executable(test_cast_status tests/test_cast_status.cpp ${RL_LOOPBACK_SRC})
+add_executable(test_cast_status tests/test_cast_status.cpp ${RL_LOOPBACK_SRC} ${RL_IMAGE_THUMB_SRC})
 target_include_directories(test_cast_status PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tools)
-target_link_libraries(test_cast_status PRIVATE rtadsp ${RL_PLATFORM_LIBS} "-framework Foundation")
+target_link_libraries(test_cast_status PRIVATE rtadsp ${RL_PLATFORM_LIBS} "-framework Foundation" ${RL_IMAGE_FRAMEWORKS})
 add_test(NAME cast_status COMMAND test_cast_status)
 set_tests_properties(cast_status PROPERTIES TIMEOUT 45)
 

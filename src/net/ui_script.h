@@ -1098,9 +1098,14 @@ function head(title, subtitle, toolsHtml) {
 
 /* ---------------- 本地专辑封面加载 ---------------- */
 // <img> 看不到 HTTP status；只对本地专辑封面用 fetch→Blob，503 才延迟重试一次。
-// 两个在途请求与后端抽图闸门一致，冷首屏不会把几十张图同时打进 busy。
+// 1.1.4-beta9（用户反馈「封面图片的加载依然非常慢」）：
+// 后端 /api/lib/cover 现在命中缩略图磁盘缓存（512px JPEG，几十 KB），下发字节从
+// 1.1 MB 均值降到几十 KB、WebKit 解码成本同步下降；单请求仍保留原有指纹校验
+// （SMB 库首次访问的 stat 是 I/O 成本，缓存命中后再问就是毫秒级）。在途上限从 2
+// 提到 6（对齐 WebKit 同源连接数），首屏/翻页不再排成十几轮。冷抽取仍受后端
+// 2 路 ffmpeg 闸门约束，所以提高上限不会把几十张原图同时打进 busy。
 // 不改 class/style/布局，也不接管其他 API 或艺术家头像的加载。
-var COVER_IMAGES = new WeakMap(), COVER_QUEUE = [], COVER_ACTIVE = 0;
+var COVER_IMAGES = new WeakMap(), COVER_QUEUE = [], COVER_ACTIVE = 0, COVER_ACTIVE_MAX = 6;
 // 1.1.4-beta7（用户反馈：明明封面已缓存，翻页/重绘时仍先看到空白封面）：
 // 旧实现每次重绘都重新 fetch→blob→objectURL→解码，且解码后立刻 revoke；
 // 封面区并发上限只有 2，翻一页等于把可见图重跑一遍，期间格子只能是首字母占位。
@@ -1166,7 +1171,7 @@ function coverImageEnqueue(s) {
   coverImagePump();
 }
 function coverImagePump() {
-  while (COVER_ACTIVE < 2 && COVER_QUEUE.length) {
+  while (COVER_ACTIVE < COVER_ACTIVE_MAX && COVER_QUEUE.length) {
     var s = COVER_QUEUE.shift();
     s.queued = false;
     if (!coverImageAlive(s)) continue;
@@ -1179,7 +1184,10 @@ function coverImageFetch(s) {
   var opts = s.controller ? { signal: s.controller.signal } : {};
   fetch(s.url, opts).then(function (r) {
     if (!coverImageAlive(s)) return null;
-    if (r.status === 503 && s.retries === 0) {
+    // 1.1.4-beta9：在途上限提到 6 后，冷抽取仍只有后端 2 路闸门，最多 4 张会先拿 503；
+    // 旧实现只重试一次，若重试时抽取仍在跑（单次最长 6 s）这张封面就空白到下次重绘。
+    // 给两次有界重试（间隔仍按 Retry-After，最多 10 s），覆盖 6 s 抽取窗口。
+    if (r.status === 503 && s.retries < 2) {
       ++s.retries;
       var raw = r.headers.get('Retry-After'), delay = Number(raw);
       if (!raw || !isFinite(delay)) delay = raw ? (Date.parse(raw) - Date.now()) / 1000 : 2;
