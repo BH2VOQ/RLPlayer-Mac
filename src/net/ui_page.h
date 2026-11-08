@@ -758,6 +758,8 @@ h += "#npPage .npedge{display:none}";
     h += ".npchip-p1{font-size:11.5px;color:var(--txt2);min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}";
     h += ".npchip-p2{font-size:10.5px;color:var(--mut2);min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}";
     h += ".npchip-p1.mut{color:var(--mut2)}";
+    h += ".npchipwrap[data-detail=\"1\"] .npchip-p1{white-space:normal;display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:5;line-clamp:5;line-height:1.35;overflow:hidden;word-break:break-word}";
+    h += ".npchipwrap[data-detail=\"1\"] .npchip-p2{white-space:normal;display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:2;line-clamp:2;line-height:1.35;overflow:hidden}";
     h += ".nprailempty{font-size:10.5px;line-height:1.6;color:var(--mut2);padding:2px 4px 4px;white-space:normal}";
     // 资料来源脚注：只有 AI 整理才有引用；这行不参与滚动内容，固定在卡片底部
     h += ".nprailsrc{margin-top:auto;font-size:9.5px;color:var(--mut2);padding:0 4px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}";
@@ -881,25 +883,25 @@ h += "#npPage .npedge{display:none}";
     //   现在改成与右栏**同一套语言**：
     //     ① 标题用右栏 .nprailcap 同款字号字距（9.5px / 1.5px），不与正文抢层级；
     //     ② 收起键换成与 .nprailhide 完全相同的 22px 圆形图标键（无边框，悬停才出色块）；
-    //     ③ 三个动作合并成**一个分段控件** .anlseg（一个外框 + 内部发丝分隔），
-    //        从「三枚药丸」变成「一个控件里的三段」，边框数量 3 → 1；
+    //     ③ 三个动作合并成**一个分段控件**，左分析头与右 AI 栏头共用同一套 .npseg 规则
+    //        （一个外框 + 内部发丝分隔），从「三枚药丸」变成「一个控件里的三段」，边框数量 3 → 1；
     //     ④ 状态文字移到标题行右端（收起键左侧），比按钮更弱一档。
     //   判据见 tools/check_b10_ui.js 的 C6（外框恰 1 个、三段落同框、收起键与右栏同尺寸同圆角）。
     h += ".anlhead{display:flex;flex-direction:column;align-items:stretch;gap:8px;flex:none;min-width:0}";
     h += ".anlheadtop{display:flex;align-items:center;gap:8px;min-width:0;padding-right:26px}";
     h += ".anlacts{display:flex;align-items:center;justify-content:flex-end;min-width:0}";
-    h += ".anlseg{display:inline-flex;align-items:stretch;border:1px solid var(--line);border-radius:9px;"
-         "overflow:hidden;background:var(--hov);max-width:100%;min-width:0}";
-    h += ".anlseg>b{font-size:10.5px;font-weight:600;padding:3px 11px;color:var(--txt2);cursor:pointer;"
+    h += ".npseg{display:inline-flex;align-items:stretch;border:1px solid var(--line);border-radius:9px;"
+         "overflow:hidden;background:var(--hov);max-width:100%;min-width:0;flex:none}";
+    h += ".npseg>b{font-size:10.5px;font-weight:600;padding:3px 11px;color:var(--txt2);cursor:pointer;"
          "white-space:nowrap;transition:.13s;display:inline-flex;align-items:center;gap:5px;"
          "border-left:1px solid var(--line);min-width:0}";
-    h += ".anlseg>b:first-child{border-left:0}";
-    h += ".anlseg>b:hover{background:var(--hov2);color:var(--txt)}";
-    h += ".anlseg>b.on{color:var(--ok-text);background:var(--ok-bg)}";
-    h += ".anlseg>b.pri{color:var(--acc-text)}";
-    h += ".anlseg>b.pri:hover{background:var(--acc-weak);color:var(--acc)}";
-    h += "html[data-theme=light] .anlseg,html[data-theme=blue] .anlseg{border-color:rgba(15,23,42,.14);background:rgba(15,23,42,.03)}";
-    h += "html[data-theme=light] .anlseg>b,html[data-theme=blue] .anlseg>b{border-left-color:rgba(15,23,42,.12)}";
+    h += ".npseg>b:first-child{border-left:0}";
+    h += ".npseg>b:hover{background:var(--hov2);color:var(--txt)}";
+    h += ".npseg>b.on{color:var(--ok-text);background:var(--ok-bg)}";
+    h += ".npseg>b.pri{color:var(--acc-text)}";
+    h += ".npseg>b.pri:hover{background:var(--acc-weak);color:var(--acc)}";
+    h += "html[data-theme=light] .npseg,html[data-theme=blue] .npseg{border-color:rgba(15,23,42,.14);background:rgba(15,23,42,.03)}";
+    h += "html[data-theme=light] .npseg>b,html[data-theme=blue] .npseg>b{border-left-color:rgba(15,23,42,.12)}";
     // 收起键：与右栏 .nprailhide 同一枚圆形图标键（同尺寸、同圆角、同悬停反馈）
     h += ".anlhide{position:absolute;top:7px;right:8px;width:22px;height:22px;border-radius:50%;display:grid;"
          "place-items:center;color:var(--mut2);padding:0;transition:.13s;flex:none;background:transparent;border:0;cursor:pointer}";
@@ -908,7 +910,7 @@ h += "#npPage .npedge{display:none}";
     h += "#npAnlStat{font-size:10px;color:var(--mut2);flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;"
          "white-space:nowrap;font-variant-numeric:tabular-nums;text-align:right;padding-right:2px}";
     // 自动开启态：段内一枚 5px 实心点（与右栏卡片状态点同一套视觉）
-    h += ".anlseg>b.auto.on::before{content:'';display:inline-block;width:5px;height:5px;border-radius:50%;"
+    h += ".npseg>b.auto.on::before{content:'';display:inline-block;width:5px;height:5px;border-radius:50%;"
          "background:currentColor;flex:none}";
     // 卡片区：左竖栏窄 ⟹ 单列纵向堆叠（旧通栏用 auto-fit 多列），头部固定、卡片区自己滚。
     h += "#npAnlBody{min-height:0;overflow:auto;display:grid;grid-template-columns:minmax(0,1fr);"
@@ -1668,7 +1670,7 @@ h += "#npPage .npedge{display:none}";
     h += "</div>";
     // 1.1.4-beta10 第 2 轮：三枚独立药丸 → 一个分段控件（一个外框、内部发丝分隔）。
     // 用 <b>：它是纯文字段而非"按钮造型"，观感与右栏的克制一致；点击行为完全不变。
-    h += "<div class=anlacts><div class=anlseg>";
+    h += "<div class=anlacts><div class=\"npseg anlseg\">";
     h += "<b class=auto id=npAnlAuto title='播放时自动分析（每首只跑一次，切歌立即取消）' role=button tabindex=0 aria-pressed=false>自动</b>";
     h += "<b id=npAnlToggle title='切换详细程度：摘要 → 详细 → 全部指标' role=button tabindex=0 aria-label='切换详细程度'>详细</b>";
     h += "<b class=pri id=npAnlRun title='重新分析当前曲目（强制重算，忽略缓存）' role=button tabindex=0>分析</b>";
@@ -1685,10 +1687,14 @@ h += "#npPage .npedge{display:none}";
     //   （优先 AI 缓存/自动整理出的字段，缺失时回落到本地曲库事实），不再只有一排空药丸。
     h += "<aside class=nprail id=npRail><div class=nprailcard>";
     h += "<div class=nprailhead><div class=nprailcap>AI 整理</div>";
+    h += "<div class=\"npseg railseg\" id=npRailSeg role=group aria-label='AI 整理详细程度'>";
+    h += "<b id=npRailBrief class=on role=button tabindex=0 aria-pressed=true title='简略：每栏两行摘要'>简略</b>";
+    h += "<b id=npRailDetail role=button tabindex=0 aria-pressed=false title='详细：多行简介与更多字段'>详细</b>";
+    h += "</div>";
     h += "<button class=nprailhide id=npRailHide title='隐藏 AI 资料面板，可在右上角重新显示' aria-label='隐藏 AI 资料面板'>"
          "<svg width=11 height=11 viewBox='0 0 24 24' fill=none stroke=currentColor stroke-width=2.4 stroke-linecap=round stroke-linejoin=round><path d='M10 6l6 6-6 6'/></svg></button>";
     h += "</div>";
-    h += "<div class=npchipwrap id=npTabs></div>";
+    h += "<div class=npchipwrap id=npTabs data-detail=0></div>";
     // 261024-04 #7：自动加载的状态/失败重试行（正常态 display:none，不打扰版面）
     h += "<div id=npSummHint class=nprailhint style='display:none'></div></div></aside>";
     h += "</div>";

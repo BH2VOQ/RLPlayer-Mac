@@ -12575,6 +12575,51 @@ function npDataTab(kind) {
 // 这样即使 AI 还没返回/没配置 key，面板也不会只剩一枚空药丸；AI 结果到了再原地刷新。
 // 状态点语义不变：灰=没取过 / 脉冲=整理中 / 绿=已有内容 / 黄=取不到。
 var NP_PREV = {};   // 本次签名计算出的预览，渲染时复用（避免重复算）
+/* 1.1.4-beta11：右侧 AI 整理栏「简略 / 详细」两档。
+   用户原话：「右侧 ai 整理栏目的空间还有很多，只要保证不出现翻页的情况下，可以简介尽量塞满，
+   就做到左侧音质分析栏那样，有详细跟简略的可选项」。
+   纪律：
+     · 档位是**纯展示**状态，绝不重新取数：切换只改 NP_RAILDETAIL + 重绘卡片区，
+       NP_DATA / NP_DATA.cache 连引用都不动（判据 R4/L6d 会量对象同一性）；
+     · 简略（默认）= 现状每卡两行 nowrap+省略号，简介 40 字、p2 取 2 字段；
+     · 详细 = 简介不截断（交给 CSS -webkit-line-clamp 限 5 行）、p2 取 4 字段，
+       卡片区仍是 `.npchipwrap` 自己滚，栏头与 #npSummHint 不许被顶出容器；
+     · 持久化到 localStorage('rta-np-raildetail')，与 rta-np-anal / rta-np-rail 同一套做法。 */
+var NP_RAILDETAIL = 0;
+function npRailLimits() {
+  return NP_RAILDETAIL ? { bio: 0, pick: 4 } : { bio: 40, pick: 2 };
+}
+function npRailDetailLoad() {
+  try { NP_RAILDETAIL = localStorage.getItem('rta-np-raildetail') === '1' ? 1 : 0; } catch (e) { NP_RAILDETAIL = 0; }
+  npRailDetailPaint();
+}
+function npRailDetailPaint() {
+  var on = !!NP_RAILDETAIL;
+  var brief = D('npRailBrief'), detail = D('npRailDetail'), tabs = D('npTabs');
+  if (brief) { brief.classList.toggle('on', !on); brief.setAttribute('aria-pressed', on ? 'false' : 'true'); }
+  if (detail) { detail.classList.toggle('on', on); detail.setAttribute('aria-pressed', on ? 'true' : 'false'); }
+  if (tabs) tabs.setAttribute('data-detail', on ? '1' : '0');
+}
+function npRailDetailSet(v) {
+  NP_RAILDETAIL = (v === 1 || v === '1' || v === true) ? 1 : 0;
+  try { localStorage.setItem('rta-np-raildetail', NP_RAILDETAIL ? '1' : '0'); } catch (e) { }
+  npRailDetailPaint();
+  // 只重绘卡片区：签名作废 → npDataRenderTabs 重新算预览；不碰 NP_DATA、不发任何请求。
+  NP_DATA.tabSig = null;
+  npDataRenderTabs();
+}
+function npRailDetailBind() {
+  function bind(id, v) {
+    var el = D(id); if (!el) return;
+    el.onclick = function () { npRailDetailSet(v); };
+    el.onkeydown = function (ev) {
+      if (ev.key === 'Enter' || ev.key === ' ' || ev.key === 'Spacebar') { ev.preventDefault(); npRailDetailSet(v); }
+    };
+  }
+  bind('npRailBrief', 0); bind('npRailDetail', 1);
+}
+npRailDetailLoad();
+npRailDetailBind();
 function npRailShort(v, n) {
   var s = efValueText(v).replace(/\s+/g, ' ').trim();
   if (!s) return '';
@@ -12592,13 +12637,13 @@ function npRailPick(fields, keys, limit) {
   return out.join(' · ');
 }
 // 从实体摘要里取一段「简介」正文（1.1.4-beta10）：优先结构化字段，其次 sections 首段。
-// 卡片只有一行（.npchip-p1 是 nowrap + ellipsis），所以这里就收成一句短文：
-// 超过 26 字截断并补省略号，点开浮层仍能看到完整简介。
+// 简略档卡片只有一行（.npchip-p1 是 nowrap + ellipsis），所以这里收成一句短文：
+// 默认 40 字截断并补省略号；详细档传 limit=0 → 不截断，交给 CSS -webkit-line-clamp 限高。
 // who 非空时把艺术家名字**带进简介正文**（用户 2026-11-08：「右侧栏的艺术家，简介要带上
 // 艺术家的名字」）。为什么不是另起一行显示名字：卡片只有两行，名字单独占一行会把简介挤掉；
 // 首行写成「AQUAPLUS：业务涵盖……」，一句话既说清是谁、又说清是什么，与「歌曲」卡的
 // 「演唱 Aimer · 作曲 …」是同一种"字段+值"的读法。
-function npRailBio(d, who) {
+function npRailBio(d, who, limit) {
   var v = '';
   if (d) {
     var f = d.fields || {};
@@ -12619,8 +12664,10 @@ function npRailBio(d, who) {
   // 简介自己已经以名字开头（"AQUAPLUS 是……"）时不再重复一遍，避免「X：X 是……」
   if (v && who2 && v.indexOf(who2) !== 0) v = who2 + '：' + v;
   if (v) {
-    // 卡片一行现在要同时装下「名字 + 简介」，因此上限从 26 提到 40 字；点开浮层仍是全文。
-    if (v.length > 40) v = v.slice(0, 39).replace(/[，,、;；。\s]+$/, '') + '…';
+    // limit 只在简略档为正数（40 字）；详细档传 0 → 整段简介原样交给 CSS -webkit-line-clamp 限高。
+    // 旧实现只有一个写死的 40，两档各写一份必然漂移，所以在这里一处按档取值。
+    var n = (limit === undefined || limit === null) ? 40 : (limit | 0);
+    if (n > 0 && v.length > n) v = v.slice(0, n - 1).replace(/[，,、;；。\s]+$/, '') + '…';
     return v;
   }
   return who2;   // 完全没有简介 → 只留名字（调用方的兜底也会走到这里）
@@ -12642,11 +12689,14 @@ function npRailPreview(kind, st) {
   var m = S.curMeta || {};
   var d = (st && st.data) || null;
   var fields = (d && d.fields) || null;
+  // 1.1.4-beta11：两档的内容量差异只在这一处取参数，下面所有 p2 共用同一个 lim.pick，
+  // 详细档 4 字段 / 简略档 2 字段；简介上限 lim.bio（详细 0 = 不截断）。
+  var lim = npRailLimits();
   var p1 = '', p2 = '';
   if (kind === 'track') {
     var loc = npRailLocalTrack(m);
-    p1 = npRailPick(fields, ['演唱', '作曲', '作词', '编曲'], 2);
-    p2 = npRailPick(fields, ['歌曲风格', '发行时间', '所属专辑', '衍生作品'], 2);
+    p1 = npRailPick(fields, ['演唱', '作曲', '作词', '编曲'], lim.pick);
+    p2 = npRailPick(fields, ['歌曲风格', '发行时间', '所属专辑', '衍生作品'], lim.pick);
     if (!p1) p1 = loc.p1 || (m.title || '');
     if (!p2) p2 = loc.p2;
   } else if (kind === 'release') {
@@ -12663,7 +12713,7 @@ function npRailPreview(kind, st) {
       lp.push(fmtDurLong(S.dur));
     }
     p1 = lp.join(' · ');
-    p2 = npRailPick(fields, ['出版方', '专辑类型', '语种', '发行时间'], 2);
+    p2 = npRailPick(fields, ['出版方', '专辑类型', '语种', '发行时间'], lim.pick);
     if (!p2 && alb && alb.sr) p2 = fmtTag(alb.sr, alb.bits);
   } else if (kind === 'person') {
     // 1.1.4-beta10（用户反馈，附截图红框）：「ai 整理的艺术家部分显示歌手或者作曲家的简介，
@@ -12676,14 +12726,14 @@ function npRailPreview(kind, st) {
     // 名字进简介正文（见 npRailBio 注释）；页面上的实体名以右栏栏目为准（艺术家页/合辑时
     // m.artist 可能是歌手的名字而不是这位艺术家），所以优先取栏目名，再退回曲目元数据。
     var pTab = npDataTab('person');
-    p1 = npRailBio(d, (pTab && pTab.name) || m.albumArtist || m.artist || '');
-    if (!p1) p1 = npRailPick(fields, ['活跃年代'], 1);   // 没有简介时也不要拿「国籍」充数
-    p2 = npRailPick(fields, ['风格', '代表作品'], 2);
+    p1 = npRailBio(d, (pTab && pTab.name) || m.albumArtist || m.artist || '', lim.bio);
+    if (!p1) p1 = npRailPick(fields, ['活跃年代'], lim.pick);   // 没有简介时也不要拿「国籍」充数
+    p2 = npRailPick(fields, ['风格', '代表作品'], lim.pick);
     if (!p1) p1 = (m.albumArtist || m.artist || '');   // 兜底本地事实，绝不空白
   } else if (kind === 'work') {
     var wt = npWorkTarget(m);
-    p1 = npRailPick(fields, ['作曲家', '创作年代'], 2) || (wt.composer || '');
-    p2 = npRailPick(fields, ['体裁'], 1);
+    p1 = npRailPick(fields, ['作曲家', '创作年代'], lim.pick) || (wt.composer || '');
+    p2 = npRailPick(fields, ['体裁'], lim.pick);
   }
   var stText = '';
   if (!st || st.state === 'idle') stText = '';
@@ -12704,7 +12754,8 @@ function npDataTabsSig() {
 }
 function npDataRenderTabs() {
   var el = D('npTabs'); if (!el) return;
-  var sig = npDataTabsSig();
+  el.setAttribute('data-detail', NP_RAILDETAIL ? '1' : '0');   // 档位每次渲染都同步（签名去重挡不住纯档位切换）
+  var sig = npDataTabsSig() + '|d' + NP_RAILDETAIL;              // 档位进签名：内容量变了必须重绘卡片
   // 1.1.4-beta6：tabSig 初始为 null（不是空串）——空标签集的签名也是空串，
   // 若初始也用空串，第一次"没有栏目"时会被误判为"没变化"而留着上一首的旧卡片。
   if (NP_DATA.tabSig !== null && sig === NP_DATA.tabSig) return;   // renderNp 每 400ms 调一次：没变化绝不重绘（否则悬停会闪）
@@ -13676,6 +13727,132 @@ selftestAdd('C7 首页艺术家：合作专辑同时计入每位参与者，且�
     if (savedCache === undefined) delete VIEWC.m['albums|']; else VIEWC.m['albums|'] = savedCache;
     try { setView(savedView || 'albums'); } catch (e) { }
   }
+});
+
+/* ---------------- 页面内自检 R1–R5（1.1.4-beta11 右栏「详细 / 简略」） ----------------
+   为什么放在最后：前面的 C5/C7 会切视图，但 #npPage 覆盖层始终 .on；R3 量的是真实几何，
+   必须保证单曲页可见。判据分「没量到（不可见/缺元素）」与「量到了但不合格」两种结论，
+   沿用 C1 那条「隐藏页量到 0 会假红」的教训。 */
+function railVisible() {
+  try {
+    if (!D('npPage') || !D('npPage').classList.contains('on')) openNowPlaying();
+    npPanelsSet('rail', true);           // 隔离实例可能残留 rta-np-rail=0，先显式恢复
+  } catch (e) { }
+  var card = document.querySelector('.nprailcard');
+  return !!(card && card.getBoundingClientRect().width > 40);
+}
+function railFixture() {
+  return { meta: S.curMeta, data: NP_DATA, detail: NP_RAILDETAIL };
+}
+function railFixtureRestore(f) {
+  S.curMeta = f.meta; NP_DATA = f.data;
+  npRailDetailSet(f.detail);
+}
+function railFixtureApply() {
+  S.curMeta = { title: 'T', artist: 'Aimer', album: 'A', albumArtist: 'Aimer' };
+  NP_DATA = { key: '', active: '', req: 0, bodyKey: '', tabSig: null, inflight: {},
+              tabs: [{ k: 'person', label: '艺术家', name: 'Aimer', artist: '' }],
+              cache: { person: { state: 'ok', data: { ok: true, fields: {
+                '简介': new Array(20).join('这是一段很长的艺术家简介文字，用来证明详细档不再被 40 字截断。'),
+                '风格': 'J-POP', '代表作品': '单曲', '活跃年代': '2011 年至今', '国籍': '日本' } } } } };
+}
+selftestAdd('R1 右栏栏头：与左栏共用同一条 .npseg 规则，外框恰 1 个', function () {
+  railVisible();
+  var head = document.querySelector('#npRail .nprailhead');
+  var segs = head ? head.querySelectorAll('.npseg') : [];
+  var l = document.querySelector('#npAnal .npseg'), r = segs[0];
+  if (!l || !r) return { want: '左右各 1 个 .npseg', got: 'left=' + !!l + ' right=' + !!r, ok: false };
+  var cl = getComputedStyle(l), cr = getComputedStyle(r), otherBorders = 0;
+  if (head) Array.prototype.forEach.call(head.querySelectorAll('*'), function (el) {
+    if (el === r) return;
+    var cs = getComputedStyle(el);
+    if ((parseFloat(cs.borderTopWidth) || 0) > 0 && cs.borderTopStyle !== 'none') otherBorders++;
+  });
+  var ids = Array.prototype.map.call(r.children, function (b) { return b.id; }).join(',');
+  var ok = segs.length === 1 && otherBorders === 0 &&
+           cl.borderRadius === cr.borderRadius && cl.borderTopWidth === cr.borderTopWidth &&
+           ids === 'npRailBrief,npRailDetail';
+  return { want: '1 个外框 / 与左栏同圆角同描边 / 两段 id=npRailBrief,npRailDetail',
+           got: 'segs=' + segs.length + ' otherBorders=' + otherBorders +
+                ' right=' + cr.borderRadius + '/' + cr.borderTopWidth +
+                ' left=' + cl.borderRadius + '/' + cl.borderTopWidth + ' ids=' + ids, ok: ok };
+});
+selftestAdd('R2 点详细 → data-detail=1 且 p1 换行；点简略 → 回 nowrap', function () {
+  railVisible();
+  var f = railFixture();
+  try {
+    railFixtureApply();
+    npRailDetailSet(0);
+    var wrap = D('npTabs');
+    function state() {
+      var p1 = document.querySelector('#npTabs .npchip-p1');
+      return (wrap ? wrap.getAttribute('data-detail') : '(missing)') + '/' +
+             (p1 ? getComputedStyle(p1).whiteSpace : '(missing)');
+    }
+    var a = state();
+    var db = D('npRailDetail'); if (db) db.click();
+    var b = state();
+    var bb = D('npRailBrief'); if (bb) bb.click();
+    var c = state();
+    return { want: '0/nowrap → 1/normal → 0/nowrap', got: a + ' → ' + b + ' → ' + c,
+             ok: a === '0/nowrap' && b === '1/normal' && c === '0/nowrap' };
+  } finally { railFixtureRestore(f); }
+});
+selftestAdd('R3 两档下 .nprailcard 的 clientHeight 不变、栏头与 #npSummHint 仍在容器内（不翻页）', function () {
+  var visible = railVisible();
+  var f = railFixture();
+  var hint = D('npSummHint'), savedDisplay = hint ? hint.style.display : '', savedHtml = hint ? hint.innerHTML : '';
+  try {
+    railFixtureApply();
+    // 状态行正常是 display:none（矩形全 0 会假红）：为了真的量到它，临时显形，量完还原。
+    if (hint) { hint.style.display = ''; hint.innerHTML = '<span>自检占位</span>'; }
+    npRailDetailSet(0);
+    var card = document.querySelector('.nprailcard');
+    var h0 = card ? card.clientHeight : -1;
+    npRailDetailSet(1);
+    var h1 = card ? card.clientHeight : -1;
+    var cr = card ? card.getBoundingClientRect() : null;
+    function inside(el) {
+      if (!el || !cr) return false;
+      var r = el.getBoundingClientRect();
+      return r.height > 0 && r.top >= cr.top - 1 && r.bottom <= cr.bottom + 1;
+    }
+    var headIn = inside(document.querySelector('.nprailhead')), hintIn = inside(hint);
+    var pager = document.querySelectorAll('#npRail .pager, #npRail .pagination, #npRail .npchipwrap [class*=page]');
+    var ok = visible && h0 > 0 && h0 === h1 && headIn && hintIn && pager.length === 0;
+    return { want: 'visible & clientHeight 相同 & 栏头/状态行在容器内 & 无分页控件',
+             got: 'visible=' + visible + ' h(brief)=' + h0 + ' h(detail)=' + h1 +
+                  ' headIn=' + headIn + ' hintIn=' + hintIn + ' pager=' + pager.length, ok: ok };
+  } finally {
+    if (hint) { hint.style.display = savedDisplay; hint.innerHTML = savedHtml; }
+    railFixtureRestore(f);
+  }
+});
+selftestAdd('R4 切换档位前后 NP_DATA.cache 对象引用相同（没重新取数）', function () {
+  var f = railFixture();
+  try {
+    var cacheRef = NP_DATA.cache, dataRef = NP_DATA;
+    npRailDetailSet(1); npRailDetailSet(0);
+    var same = (NP_DATA.cache === cacheRef) && (NP_DATA === dataRef);
+    return { want: 'cache 与 NP_DATA 都是同一引用', got: 'cache=' + (NP_DATA.cache === cacheRef) +
+            ' data=' + (NP_DATA === dataRef), ok: same };
+  } finally { railFixtureRestore(f); }
+});
+selftestAdd('R5 档位写进 localStorage，按启动加载路径复原（等价于刷新）', function () {
+  var f = railFixture();
+  try {
+    npRailDetailSet(1);
+    var s1 = localStorage.getItem('rta-np-raildetail');
+    NP_RAILDETAIL = 0; npRailDetailLoad();          // 模拟刷新后内存归零，只认 localStorage
+    var a1 = NP_RAILDETAIL;
+    npRailDetailSet(0);
+    var s0 = localStorage.getItem('rta-np-raildetail');
+    NP_RAILDETAIL = 1; npRailDetailLoad();
+    var a0 = NP_RAILDETAIL;
+    var ok = s1 === '1' && a1 === 1 && s0 === '0' && a0 === 0;
+    return { want: "'1'→恢复 1，'0'→恢复 0", got: 'stored1=' + s1 + ' after1=' + a1 +
+            ' stored0=' + s0 + ' after0=' + a0, ok: ok };
+  } finally { railFixtureRestore(f); }
 });
 
 /* ---------------- 启动 ---------------- */

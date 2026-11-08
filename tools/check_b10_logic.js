@@ -190,5 +190,105 @@ ck(order.indexOf('椎名林檎, 斎藤ネコ') < 0 && order.indexOf('澤野 弘�
   'L5 不再新增「A & B」合成艺术家', J(order));
 ck(m2['椎名林檎'].n === 2, 'L5 个人 + 合作专辑合并计数（椎名林檎 = 2 张）', 'n=' + (m2['椎名林檎'] || {}).n);
 
+/* ---------------- L6：右栏详细/简略两档（纯逻辑） ---------------- */
+console.log('L6 右栏详细/简略两档（纯逻辑）');
+// 档位切换必须能在 createEnv() 的最小 DOM 沙箱里跑：mkEl() 的 querySelectorAll() 返回 []、
+// setAttribute() 只存属性。这里**不给沙箱补任何 DOM**；npRailDetailSet 在沙箱里抛错就记 FAIL，
+// 不掩盖。api/fetch 只做计数打桩，出段前在 finally 里把状态全部还原。
+const l6Saved = {
+  hadRail: Object.prototype.hasOwnProperty.call(env, 'NP_RAILDETAIL'),
+  rail: env.NP_RAILDETAIL,
+  data: env.NP_DATA,
+  api: env.api,
+  fetch: env.fetch,
+  ls: env.localStorage
+};
+const l6Store = {};
+env.localStorage = {
+  getItem(k) { return Object.prototype.hasOwnProperty.call(l6Store, k) ? l6Store[k] : null; },
+  setItem(k, v) { l6Store[k] = String(v); },
+  removeItem(k) { delete l6Store[k]; }
+};
+function l6call(name, fn) {
+  try { return fn(); }
+  catch (e) {
+    ck(false, name, 'EXCEPTION: ' + ((e && e.message) || String(e)));
+    return undefined;
+  }
+}
+const l6Has = (n) => typeof env[n] === 'function';
+try {
+  /* (a) npRailLimits：简略 bio=40/pick=2，详细 bio=0/pick=4，且两档取值都不同 */
+  ck(l6Has('npRailLimits'), 'L6a npRailLimits 存在于生产代码中');
+  ck(l6Has('npRailDetailSet'), 'L6a npRailDetailSet 存在于生产代码中');
+  l6call('L6a 切到简略档 NP_RAILDETAIL=0', () => env.npRailDetailSet(0));
+  const limB = l6call('L6a 简略档 npRailLimits()', () => env.npRailLimits());
+  ck(!!limB && limB.bio === 40 && limB.pick === 2, 'L6a 简略档 → {bio:40,pick:2}', J(limB));
+  l6call('L6a 切到详细档 NP_RAILDETAIL=1', () => env.npRailDetailSet(1));
+  const limD = l6call('L6a 详细档 npRailLimits()', () => env.npRailLimits());
+  ck(!!limD && limD.bio === 0 && limD.pick === 4, 'L6a 详细档 → {bio:0,pick:4}', J(limD));
+  ck(!!limB && !!limD && limB.bio !== limD.bio, 'L6a 两档 bio 截断上限不同',
+     'brief=' + (limB && limB.bio) + ' detail=' + (limD && limD.bio));
+  ck(!!limB && !!limD && limB.pick !== limD.pick, 'L6a 两档 pick 字段数不同',
+     'brief=' + (limB && limB.pick) + ' detail=' + (limD && limD.pick));
+
+  /* (b) 长简介：简略截断补省略号，详细不截断（CSS -webkit-line-clamp 是唯一限制） */
+  env.NP_DATA = { tabs: [{ k: 'person', label: '艺术家', name: 'N', artist: '' }],
+                  cache: {}, active: '', req: 0, tabSig: null };
+  const stLong = { state: 'ok', data: { ok: true, fields: { '简介': 'x'.repeat(300) } } };
+  l6call('L6b 切到简略档', () => env.npRailDetailSet(0));
+  const p1B = l6call('L6b 简略档 npRailPreview(person)', () => env.npRailPreview('person', stLong).p1);
+  ck(typeof p1B === 'string' && /…$/.test(p1B) && p1B.length <= 41,
+     'L6b 简略档长简介截断并补省略号（长度≤41）',
+     'len=' + (p1B && p1B.length) + ' tail=' + J(typeof p1B === 'string' ? p1B.slice(-2) : p1B));
+  l6call('L6b 切到详细档', () => env.npRailDetailSet(1));
+  const p1D = l6call('L6b 详细档 npRailPreview(person)', () => env.npRailPreview('person', stLong).p1);
+  ck(typeof p1D === 'string' && p1D.length > 200 && !/…$/.test(p1D),
+     'L6b 详细档长简介不截断（>200 字且不以省略号结尾）',
+     'len=' + (p1D && p1D.length) + ' tail=' + J(typeof p1D === 'string' ? p1D.slice(-2) : p1D));
+  ck(typeof p1B === 'string' && typeof p1D === 'string' && p1B.length !== p1D.length,
+     'L6b 两档 p1 长度不同', 'brief=' + (p1B && p1B.length) + ' detail=' + (p1D && p1D.length));
+
+  /* (c) kind='track' 第二行字段数：简略 2 段，详细 4 段（split by ' · '） */
+  const stTrack = { state: 'ok', data: { ok: true, fields: {
+    '歌曲风格': 'J-POP', '发行时间': '2020', '所属专辑': 'A', '衍生作品': 'B'
+  } } };
+  l6call('L6c 切到简略档', () => env.npRailDetailSet(0));
+  const pvB = l6call('L6c 简略档 npRailPreview(track)', () => env.npRailPreview('track', stTrack));
+  const segB = pvB && typeof pvB.p2 === 'string' ? pvB.p2.split(' · ').length : -1;
+  ck(segB === 2, 'L6c 简略档 p2 = 2 段', J(pvB && pvB.p2) + ' segs=' + segB);
+  l6call('L6c 切到详细档', () => env.npRailDetailSet(1));
+  const pvD = l6call('L6c 详细档 npRailPreview(track)', () => env.npRailPreview('track', stTrack));
+  const segD = pvD && typeof pvD.p2 === 'string' ? pvD.p2.split(' · ').length : -1;
+  ck(segD === 4, 'L6c 详细档 p2 = 4 段', J(pvD && pvD.p2) + ' segs=' + segD);
+  ck(segB >= 0 && segD > segB, 'L6c 详细档字段数 > 简略档', 'brief=' + segB + ' detail=' + segD);
+
+  /* (d) 切档不重新取数：api/fetch 计数 + NP_DATA.cache 严格引用不变 */
+  let summaryCalls = 0;
+  const origApi = l6Saved.api, origFetch = l6Saved.fetch;
+  const countUrl = (u) => { if (typeof u === 'string' && u.indexOf('/api/entity/summary') === 0) summaryCalls++; };
+  env.api = function (u) { countUrl(u); return origApi.apply(this, arguments); };
+  env.fetch = function (u) { countUrl(u); return origFetch.apply(this, arguments); };
+  const cacheRef = { track: { state: 'ok', data: { ok: true, fields: {} } } };
+  env.NP_DATA = { key: '', active: '', tabs: [{ k: 'person', label: '艺术家', name: 'N', artist: '' }],
+                  cache: cacheRef, inflight: {}, req: 0, bodyKey: '', tabSig: null };
+  const cacheSeen = env.NP_DATA.cache;
+  l6call('L6d npRailDetailSet(1) → npRailDetailSet(0)（沙箱内不得抛错）', () => {
+    env.npRailDetailSet(1);
+    env.npRailDetailSet(0);
+  });
+  ck(summaryCalls === 0, 'L6d 切档 0 次 /api/entity/summary 请求', 'calls=' + summaryCalls);
+  ck(env.NP_DATA.cache === cacheSeen, 'L6d 切档不重分配 NP_DATA.cache（严格同一引用）');
+} catch (e) {
+  ck(false, 'L6 段内未捕获异常', 'EXCEPTION: ' + ((e && e.message) || String(e)));
+} finally {
+  env.api = l6Saved.api;
+  env.fetch = l6Saved.fetch;
+  env.localStorage = l6Saved.ls;
+  env.NP_DATA = l6Saved.data;
+  if (l6Saved.hadRail) env.NP_RAILDETAIL = l6Saved.rail;
+  else delete env.NP_RAILDETAIL;
+}
+
 console.log('\n=== 结果：' + (pass + fail) + ' 项，' + fail + ' 失败 ===');
 process.exit(fail === 0 ? 0 : 1);
