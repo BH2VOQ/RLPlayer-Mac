@@ -1348,6 +1348,34 @@ function albumScrollRestore(q) {
     requestAnimationFrame(function () { m.scrollTop = top; });
   });
 }
+/* 1.1.4-beta10（用户要求）：「首页的艺术家栏目，也要做到点进一个艺术家，再点击返回，
+   应该返回到那个艺术家的位置」。与 1.1.4-beta7 的专辑网格完全同一条思路，只是换一个容器：
+     · 进艺术家资料页前记住 .main.scrollTop；
+     · 返回艺术家列表（loadArtists）时恢复；
+     · 从别处导航进艺术家页（导航栏、搜索、清空搜索）不恢复，避免"莫名停在半路"。
+   为什么单独一份状态而不是复用 ALBUM_RET：两张列表的返回时机与守卫条件不同
+   （专辑列表还带搜索词守卫 q），共用一份会让两条路径互相清标记，实测会丢位置。 */
+var ARTIST_RET = { active: false, top: 0, q: '' };
+function artistScrollSave(q) {
+  var m = document.querySelector('.main');
+  ARTIST_RET.top = m ? m.scrollTop : 0;
+  ARTIST_RET.q = q || '';
+  ARTIST_RET.active = true;
+}
+function artistScrollRestore(q) {
+  // 只有「同一份列表」才恢复：搜索词变了（含从搜索结果回到全量）位置就没有意义
+  if (!ARTIST_RET.active || (ARTIST_RET.q || '') !== (q || '')) return;
+  var top = ARTIST_RET.top;
+  ARTIST_RET.active = false;
+  var m = document.querySelector('.main');
+  if (!m || top <= 0) return;
+  // 与专辑网格一致：先同步写一次，再在两个 rAF 里各补一次，等网格高度真正落地。
+  m.scrollTop = top;
+  requestAnimationFrame(function () {
+    m.scrollTop = top;
+    requestAnimationFrame(function () { m.scrollTop = top; });
+  });
+}
 function loadAlbums(q, title) {
   S.view = 'albums';
   startCoverPrefetch();     // 进库页就开跑（没有缺图时后端立即返回 queued=0）
@@ -2439,9 +2467,13 @@ function renderArtistsFrom(j, q) {
   Array.prototype.forEach.call(D('list').querySelectorAll('.card'), function (e) {
     e.onclick = function () {
       var who = e.dataset.a;
+      // 1.1.4-beta10：从**艺术家列表**点进资料页前记住滚动位置（返回时回到这一位艺术家）。
+      // 只在这一条入口记录 —— 从专辑子集/单曲页点「艺术家资料」不该把列表位置写脏。
+      artistScrollSave(q);
       openArtistProfile(who);
     };
   });
+  artistScrollRestore(q);   // 1.1.4-beta10：从艺术家资料页返回时恢复滚动位置（搜索时不恢复）
 }
 function renderAlbumSubset(who) {
   S.view = 'albums';
@@ -5612,6 +5644,8 @@ function setView(v) {
   if (v !== 'works') S.worksFrom = '';
   // 1.1.4-beta7：只有「专辑详情 → 专辑列表」这一条路径恢复滚动位置；去别的页面时清标记
   if (v !== 'album' && v !== 'albums' && typeof ALBUM_RET !== 'undefined') ALBUM_RET.active = false;
+  // 1.1.4-beta10：艺术家列表同理 —— 只有「艺术家资料 → 艺术家列表」这一条路径恢复位置
+  if (v !== 'artist' && v !== 'artists' && typeof ARTIST_RET !== 'undefined') ARTIST_RET.active = false;
   Array.prototype.forEach.call(document.querySelectorAll('.nav'), function (e) {
     e.classList.toggle('on', e.dataset.v === v || (v === 'artist' && e.dataset.v === 'artists') || (v === 'work' && e.dataset.v === 'works'));
   });
@@ -8016,7 +8050,9 @@ function anlCard(key, title, badge, summary, body) {
          (body || '') + '</div>';
 }
 function anlEmptyBody(L) {
-  return L > 0 ? ('<div class=anlgrid>' + anlNote('点「分析」手动分析，或在设置 → 通用 → 播放 里开启「播放时自动分析」') + '</div>') : '';
+  // 1.1.4-beta10：面板里已经有「自动」开关，提示语跟着改成就近可点的说法
+  //（设置页那个复选框仍然是同一个真相源，不再拿它当唯一入口）。
+  return L > 0 ? ('<div class=anlgrid>' + anlNote('点「分析」手动分析；点上方「自动」可让每首曲目播放时自动分析') + '</div>') : '';
 }
 
 // ① 动态：DR / LUFS / LRA / 样本峰值 / 真峰 / 声道（L1）；L2 追加采样规格与分析元数据
@@ -8303,7 +8339,11 @@ function anlPaint() {
   var busy = !!(p && ANL.busy[p]);
   var lvl = ANL.lvl | 0;
   var at = (h && typeof h.analyzed_at_ms === 'number') ? h.analyzed_at_ms : 0;
+  // 1.1.4-beta10：自动分析开关的状态**不进**重绘签名，而是每帧单独同步一次（见下）。
+  //   为什么：把它塞进签名会让"点一下开关"等价于整块卡片区重绘 —— 用户刚滚到的分析卡片
+  //   会被打回顶部。按钮只有一个 class/属性要改，单独画一次最省且没有副作用。
   var sig = p + '|' + lvl + '|' + (busy ? 1 : 0) + '|' + (ANL.err || '') + '|' + at + '|' + ((m && m.cached) ? 1 : 0);
+  anlPaintAuto();          // 开关外观跟着 ANL.auto 走（400 ms 轮询每拍都会同步一次）
   if (sig === ANL.paintSig) return;
   ANL.paintSig = sig;
   var stat = D('npAnlStat');
@@ -8323,12 +8363,45 @@ function anlPaint() {
   body.innerHTML = anlCardsHtml(h, p, lvl);
 }
 
+/* 1.1.4-beta10（用户要求「可以设置里加一个自动分析开关，开了之后每首歌自动分析」）：
+   设置页的「播放时自动分析（后台）」**一直都在**（1.1.4 就有了），但用户找不到 ⟹ 面板里
+   再给一个就地开关。两边是同一个真相源：
+     · 内存 ANL.auto       —— anlTick 唯一读的那个开关；
+     · ADV.autoanl / conf  —— 落盘（saveSettings 走 SET_KEYS 的 ['sp_autoanl','autoanl']）。
+   顺序固定为「先改两处内存 → 立刻重绘 → 落盘 → 若刚开启且当前正在播本地曲目，立刻补跑一次」，
+   与设置页复选框的 onchange 完全同一条路径（重复触发由 anlTick 的每曲一次去重兜住）。 */
+function anlPaintAuto() {
+  var b = D('npAnlAuto');
+  if (!b) return;
+  var on = !!ANL.auto;
+  b.classList.toggle('on', on);
+  b.setAttribute('aria-pressed', on ? 'true' : 'false');
+  b.title = on ? '已开启：播放时每首本地曲目自动分析一次（点击关闭）'
+               : '已关闭：点击开启后，播放时每首本地曲目自动分析一次';
+}
+function anlToggleAuto() {
+  ANL.auto = ANL.auto ? 0 : 1;
+  ADV.autoanl = ANL.auto;
+  var c = D('sp_autoanl');
+  if (c) c.checked = !!ANL.auto;      // 设置页已渲染时同步勾选（同一真相源，不许两处不一致）
+  anlPaint();                         // 重画：anlPaint 内部每帧同步一次开关外观（不动卡片区）
+  try { saveSettings(); } catch (e) { }
+  toast(ANL.auto ? '已开启自动分析：每首本地曲目播放时分析一次'
+                 : '已关闭自动分析');
+  if (ANL.auto) {
+    // 立刻补跑一次，否则用户会以为"开了没反应"（要等下一次切歌才生效）
+    try { anlTick(S.lastCur || '', !!(S.playing && !S.paused)); } catch (e) { }
+  }
+}
+
 // 绑定（onclick 赋值 ⟹ 天然幂等；每次打开单曲页重绑一次也无害）
 function anlBind() {
   var tg = D('npAnlToggle');
   if (tg) tg.onclick = function () { anlSetLvl((ANL.lvl + 1) % 3); };
   var run = D('npAnlRun');
   if (run) run.onclick = anlRunManual;
+  var au = D('npAnlAuto');
+  if (au) au.onclick = anlToggleAuto;
   var stat = D('npAnlStat');
   if (stat) stat.onclick = function () { if (ANL.err && anlIsLocal(ANL.cur)) anlAnalyze(ANL.cur, false); };
   var body = D('npAnlBody');
@@ -8344,6 +8417,7 @@ function anlBind() {
 function anlInit() {
   ANL_API_PROD = (typeof window.api === 'function') ? window.api : null;
   try { anlBind(); } catch (e) { }
+  try { anlPaintAuto(); } catch (e) { }   // 1.1.4-beta10：面板内自动开关的初始状态
   try { anlPaint(); } catch (e) { }
 }
 
@@ -10297,6 +10371,9 @@ function renderSettingsPage() {
       ADV.autoanl = this.checked ? 1 : 0;
       ANL.auto = this.checked ? 1 : 0;
       saveSettings();
+      // 1.1.4-beta10：单曲页面板里的「自动」按钮是同一个真相源 ⟹ 这里也把它重绘一次
+      //（否则从设置页打开开关后回到单曲页，按钮还是旧的关闭态）。
+      try { anlPaintAuto(); } catch (e) { }
       if (ANL.auto) anlTick(S.lastCur || '', !!(S.playing && !S.paused));
     };
   }
@@ -12429,6 +12506,29 @@ function npRailPick(fields, keys, limit) {
   });
   return out.join(' · ');
 }
+// 从实体摘要里取一段「简介」正文（1.1.4-beta10）：优先结构化字段，其次 sections 首段。
+// 卡片只有一行（.npchip-p1 是 nowrap + ellipsis），所以这里就收成一句短文：
+// 超过 26 字截断并补省略号，点开浮层仍能看到完整简介。
+function npRailBio(d) {
+  if (!d) return '';
+  var f = d.fields || {};
+  var v = '';
+  if (f['简介'] !== undefined && f['简介'] !== null) v = efValueText(f['简介']);
+  if (!v) {
+    var secs = d.sections || [];
+    for (var i = 0; i < secs.length; ++i) {
+      var ps = secs[i].paragraphs || [];
+      for (var k = 0; k < ps.length; ++k) {
+        var t = efValueText(ps[k] && ps[k].text);
+        if (t) { v = t; break; }
+      }
+      if (v) break;
+    }
+  }
+  v = String(v).replace(/\s+/g, ' ').trim();
+  if (v.length > 26) v = v.slice(0, 25).replace(/[，,、;；。\s]+$/, '') + '…';
+  return v;
+}
 function npRailLocalTrack(m) {
   var a = [], b = [];
   if (m && m.artist) a.push(m.artist);
@@ -12470,9 +12570,17 @@ function npRailPreview(kind, st) {
     p2 = npRailPick(fields, ['出版方', '专辑类型', '语种', '发行时间'], 2);
     if (!p2 && alb && alb.sr) p2 = fmtTag(alb.sr, alb.bits);
   } else if (kind === 'person') {
-    p1 = npRailPick(fields, ['国籍', '活跃年代'], 2);
+    // 1.1.4-beta10（用户反馈，附截图红框）：「ai 整理的艺术家部分显示歌手或者作曲家的简介，
+    //   而不是显示国籍」。旧预览首行取的是「国籍 · 活跃年代」，卡片上只有「国籍 日本」这种
+    //   信息量极低的短字段，看起来像没整理。现在**首行固定给简介**：
+    //     ① fields['简介']（AI 整理的结构化字段）；
+    //     ② 没有则退到 sections 正文的首段（旧缓存/纯叙述路径，AI 只给了段落没给字段）；
+    //     ③ 都没有才退回本地事实（艺术家名），绝不显示「国籍」当主内容。
+    //   第二行保留可扫读的属性（风格 / 代表作品），国籍不再占卡片的主位。
+    p1 = npRailBio(d);
+    if (!p1) p1 = npRailPick(fields, ['活跃年代'], 1);   // 没有简介时也不要拿「国籍」充数
     p2 = npRailPick(fields, ['风格', '代表作品'], 2);
-    if (!p1) p1 = (m.albumArtist || m.artist || '');
+    if (!p1) p1 = (m.albumArtist || m.artist || '');   // 兜底本地事实，绝不空白
   } else if (kind === 'work') {
     var wt = npWorkTarget(m);
     p1 = npRailPick(fields, ['作曲家', '创作年代'], 2) || (wt.composer || '');

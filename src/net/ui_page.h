@@ -859,16 +859,31 @@ h += "#npPage .npedge{display:none}";
          "overflow:hidden}";
     // 1.1.4-beta6（审计 L8）：栏头「收起」键改绝对定位在面板右上角，避免在窄栏里被 flex-wrap
     // 挤到第二行、变成一个孤立的 ‹ 按钮。
-    h += ".anlhead{display:flex;align-items:center;gap:8px;flex-wrap:wrap;flex:none;min-width:0;padding-right:26px}";
+    // 1.1.4-beta10（用户反馈「音频分析部分，调整一下按钮的布局」，附截图）：
+    //   旧版把「标题 + 状态 + 详细 + 分析 + 收起」全塞进一行 flex-wrap：340px 窄栏里状态文字
+    //   被挤成省略号、三个按钮贴着状态尾巴，收起键还会掉到第二行；截图里就是这样一堆小按钮
+    //   挤在标题右边。现在分成**两行**：
+    //     第 1 行 = 标题 + 状态（状态右对齐、超出省略）—— 只读信息一行读完；
+    //     第 2 行 = 操作按钮组（自动 / 详细 / 分析）右对齐 —— 手部操作集中在一处，与状态分开。
+    //   「收起」仍是绝对定位在面板右上角的图标键（既有审计 L8 的结论，不改）。
+    h += ".anlhead{display:flex;flex-direction:column;align-items:stretch;gap:7px;flex:none;min-width:0}";
+    h += ".anlheadtop{display:flex;align-items:baseline;gap:8px;min-width:0;padding-right:26px}";
+    h += ".anlacts{display:flex;align-items:center;gap:6px;justify-content:flex-end;min-width:0}";
     h += ".anlhide{position:absolute;top:7px;right:8px;padding:3px 6px}";
     h += ".anllab{font-size:11px;letter-spacing:.6px;font-weight:700;color:var(--txt2);flex:none}";
     h += "#npAnlStat{font-size:10.5px;color:var(--mut2);flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;"
-         "white-space:nowrap;font-variant-numeric:tabular-nums}";
-    h += ".anlbtn{font-size:11px;padding:3px 9px;border-radius:8px;background:var(--hov);color:var(--txt2);"
+         "white-space:nowrap;font-variant-numeric:tabular-nums;text-align:right}";
+    h += ".anlbtn{font-size:10.5px;padding:3px 10px;border-radius:8px;background:var(--hov);color:var(--txt2);"
          "border:1px solid var(--line);cursor:pointer;transition:.13s;white-space:nowrap;flex:none}";
     h += ".anlbtn:hover{background:var(--hov2);color:var(--txt);border-color:var(--acc)}";
     h += ".anlbtn:active{transform:scale(.97)}";
     h += ".anlbtn.pri{color:var(--acc-text);background:var(--acc-weak);border-color:var(--acc-weak);font-weight:600}";
+    // 自动分析开关（1.1.4-beta10）：与设置页「播放时自动分析」同一个真相源（conf 的 autoanl），
+    // 放在面板里是为了**就地可开**，不用翻设置页找。开启态用主题的强调色描边 + 实心点，
+    // 关闭态与普通次级按钮同款，两态一眼可分。
+    h += ".anlbtn.auto.on{color:var(--ok-text);background:var(--ok-bg);border-color:var(--ok-line);font-weight:600}";
+    h += ".anlbtn.auto.on::before{content:'';display:inline-block;width:5px;height:5px;border-radius:50%;"
+         "background:currentColor;margin-right:5px;vertical-align:1px}";
     // 卡片区：左竖栏窄 ⟹ 单列纵向堆叠（旧通栏用 auto-fit 多列），头部固定、卡片区自己滚。
     h += "#npAnlBody{min-height:0;overflow:auto;display:grid;grid-template-columns:minmax(0,1fr);"
          "gap:8px;align-content:start;padding-right:2px;scrollbar-width:thin}";
@@ -1620,10 +1635,17 @@ h += "#npPage .npedge{display:none}";
     //   #npAnlToggle = 三级折叠（0→1→2→0）；#npAnlRun = 手动强制重算（force=1）
     h += "<div class=npAnal id=npAnal>";
     h += "<div class=anlhead>";
+    // 1.1.4-beta10：第 1 行只读（标题 + 状态），第 2 行才是操作 —— 与上面的 CSS 注释对应。
+    h += "<div class=anlheadtop>";
     h += "<span class=anllab>音频分析</span>";
     h += "<span id=npAnlStat title='当前曲目的分析状态'>未播放</span>";
+    h += "</div>";
+    h += "<div class=anlacts>";
+    // 自动分析开关就地可开（同一个 autoanl 真相源；文案写「自动」，开启后状态点变色）
+    h += "<button class='anlbtn auto' id=npAnlAuto title='播放时自动分析（每首只跑一次，切歌立即取消）' aria-pressed=false>自动</button>";
     h += "<button class=anlbtn id=npAnlToggle title='切换详细程度：摘要 → 详细 → 全部指标' aria-label='切换详细程度'>详细</button>";
     h += "<button class='anlbtn pri' id=npAnlRun title='重新分析当前曲目（强制重算，忽略缓存）'>分析</button>";
+    h += "</div>";
     // 1.1.4-beta6：面板头部也能收起（与右上角开关同源状态），收起后完全隐藏。
     h += "<button class='anlbtn anlhide' id=npAnalHide title='隐藏音频分析面板，可在右上角重新显示' aria-label='隐藏音频分析面板'>"
          "<svg width=11 height=11 viewBox='0 0 24 24' fill=none stroke=currentColor stroke-width=2.4 stroke-linecap=round stroke-linejoin=round><path d='M14 6l-6 6 6 6'/></svg></button>";

@@ -1,0 +1,7 @@
+自动	Auto	1.1.4-beta10 单曲页音频分析面板内联开关
+播放时自动分析（每首只跑一次，切歌立即取消）	Auto-analyze during playback (once per track, cancelled on track change)	1.1.4-beta10 单曲页音频分析面板内联开关
+已开启：播放时每首本地曲目自动分析一次（点击关闭）	On: each local track is analyzed once during playback (click to turn off)	1.1.4-beta10 单曲页音频分析面板内联开关
+已关闭：点击开启后，播放时每首本地曲目自动分析一次	Off: click to analyze each local track once during playback	1.1.4-beta10 单曲页音频分析面板内联开关
+已开启自动分析：每首本地曲目播放时分析一次	Auto-analysis on: each local track is analyzed once during playback	1.1.4-beta10 单曲页音频分析面板内联开关
+已关闭自动分析	Auto-analysis off	1.1.4-beta10 单曲页音频分析面板内联开关
+点「分析」手动分析；点上方「自动」可让每首曲目播放时自动分析	Click Analyze, or click Auto above to analyze each track on playback	1.1.4-beta10 单曲页音频分析面板内联开关
