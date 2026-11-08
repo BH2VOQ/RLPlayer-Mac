@@ -24,6 +24,21 @@
 
 namespace rta::net {
 
+// 1.1.4-beta10 页面内自检的触发标志：<state>/selftest-request 存在 ⟹ 页面加载时自动跑用例。
+// 由 tools/rtaweb.cpp 的 /api/selftest/request 创建、/api/selftest/report 删除（一次性）。
+inline bool selftest_flag_present() {
+    std::string dir;
+    if (const char* env = std::getenv("RLPLAYER_STATE_DIR")) { if (*env) dir = env; }
+    if (dir.empty()) {
+        const std::string cfg = platform::config_dir_utf8();
+        dir = cfg.empty() ? platform::module_dir_utf8() : cfg;
+    }
+    while (!dir.empty() && (dir.back() == '/' || dir.back() == '\\')) dir.pop_back();
+    if (dir.empty()) return false;
+    std::ifstream f(dir + "/selftest-request");
+    return f.good();
+}
+
 // 读 state 目录下 rlplayer-settings.conf 的单个键（小写、去空白）。缺失返回空串。
 // 这是**界面偏好的唯一持久化位置**：配置在 Application Support 里，跟着用户走，不跟版本走。
 inline std::string read_conf_value(const char* key) {
@@ -1724,6 +1739,11 @@ h += "#npPage .npedge{display:none}";
 
     h += "<div id=modal><div class=mcard><div class=mhead><b id=mtitle>信号链</b><span class=sp></span><button class=ibtn id=mclose><svg width=15 height=15 viewBox='0 0 24 24' fill=none stroke=currentColor stroke-width=2><path d='M18 6L6 18M6 6l12 12'/></svg></button></div><div class=mbody id=mbody></div></div></div>";
     h += "<div class=toast id=toast></div></div>";
+    // 1.1.4-beta10：页面内自检的服务端触发开关。
+    // 为什么不用 URL 参数：DSH 侧边栏对地址做过规范化，?selftest=1 会被丢掉，页面根本读不到
+    // ⟹ 表现为"点了没反应"。改成服务端标志文件后，**任何**一次页面加载都会带上这个开关，
+    // 与宿主怎么改写 URL 无关。
+    if (selftest_flag_present()) h += "<script>window.__SELFTEST_AUTO=1;</script>";
     h += "<script src=/app.js></script>";
     h += rta_i18n_body_script();
     h += "</body></html>";

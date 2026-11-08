@@ -24,11 +24,24 @@
 //      C4c 什么都没有 → 回落本地事实（艺术家名），**任何情况下都不出现「国籍 X」当主内容**。
 //   C5 从艺术家列表点进资料页再返回，回到原来那位艺术家的位置（scrollTop 恢复）；
 //      从别处导航进艺术家列表**不恢复**（不会有"莫名停在半路"）。
+//   C6 左栏头部与右栏同一套视觉语言（用户第二张截图：「左面的这个按钮排布没有右面的和谐」）：
+//      三个动作在**同一个分段控件外框**里（外框恰 1 个、三段同一父节点）、边框总数从 3 降到 1；
+//      收起键与右栏 #npRailHide **同尺寸同圆角**；标题字号与右栏标题一致。
+//   C7 合作署名拆分与归属：npSplitArtists 的纯函数判据（括号内不拆 / & 与 、 拆 / feat. 拆 /
+//      重复去重 / 单个名字原样）+ renderArtistsFrom 里同一张合作专辑**同时**出现在每位参与者下，
+//      且不再多出一位「A & B」。
+//   C8 右栏「艺术家」卡的简介**带艺术家名字**（用户：「右侧栏的艺术家，简介要带上艺术家的名字」）。
 //
 // 🔴 铁律 1：全程 headless，不播放任何音频（不调 /api/play，settings 预置 backend=null）。
 // 🔴 铁律 2：浏览器由 uibrowser 核验属主后 SIGTERM；测试服务器由调用方起好，本脚本不碰它。
 //
 // 用法：node tools/check_b10_ui.js http://127.0.0.1:19151/
+// ⛔ 本脚本已**停用**（2026-11-08 用户钦定：禁止自起无头浏览器，需要浏览器时只走 DSH 侧边栏）。
+// 它依赖 uibrowser.js 起 headless Edge —— 那会常驻上百进程并污染用户的浏览器。
+// 同一批判据已迁移到两处，请用它们：
+//   · 纯逻辑 → node tools/check_b10_logic.js（进 ctest 的 b10_logic 用例）
+//   · 几何/点击 → 页面内自检：POST /api/selftest/request 后打开页面，结果落 <state>/selftest-last.json
+// 保留本文件只为留下历史判据文本，**不要执行**。
 'use strict';
 const ub = require('./uibrowser');
 
@@ -262,6 +275,143 @@ const J = (o) => JSON.stringify(o);
     })()`);
     ck(c5neg && c5neg.active === false && Math.abs(c5neg.top - 640) > 40,
       'C5 从别处导航进艺术家列表不恢复旧位置（不会莫名停在半路）', J(c5neg));
+
+
+    /* ---------------- C6：左栏头部与右栏同一套视觉语言 ---------------- */
+    const c6 = await ev(`(function(){
+      var seg=document.querySelector('#npAnal .anlseg');
+      var kids=seg?Array.prototype.slice.call(seg.children):[];
+      var ids=kids.map(function(b){return b.id;});
+      var sameParent=kids.length===3 && kids.every(function(b){return b.parentElement===seg;});
+      // 头部里带 1px 实线边框的元素个数（分段控件外框 = 1；旧版是三枚药丸各 1 个 = 3）
+      var head=document.querySelector('#npAnal .anlhead');
+      var bordered=0;
+      if(head) Array.prototype.forEach.call(head.querySelectorAll('*'), function(el){
+        var cs=getComputedStyle(el);
+        var w=parseFloat(cs.borderTopWidth)||0;
+        if(w>0 && cs.borderTopStyle!=='none' && el!==seg) bordered++;
+      });
+      var aHide=document.getElementById('npAnalHide'), rHide=document.getElementById('npRailHide');
+      function box(el){ if(!el) return null; var r=el.getBoundingClientRect(), cs=getComputedStyle(el);
+        return {w:Math.round(r.width), h:Math.round(r.height), radius:cs.borderRadius,
+                border:parseFloat(cs.borderTopWidth)||0, disp:cs.display}; }
+      var lab=document.querySelector('#npAnal .anllab'), cap=document.querySelector('#npRail .nprailcap');
+      return {
+        segCount: document.querySelectorAll('#npAnal .anlseg').length,
+        kidCount: kids.length, ids: ids, sameParent: sameParent,
+        bordered: bordered,
+        segBorder: seg ? (parseFloat(getComputedStyle(seg).borderTopWidth)||0) : -1,
+        aHide: box(aHide), rHide: box(rHide),
+        labFont: lab ? getComputedStyle(lab).fontSize : '', labLs: lab ? getComputedStyle(lab).letterSpacing : '',
+        capFont: cap ? getComputedStyle(cap).fontSize : '', capLs: cap ? getComputedStyle(cap).letterSpacing : ''
+      };
+    })()`);
+    ck(c6 && c6.segCount === 1 && c6.kidCount === 3 && c6.sameParent,
+      'C6 三个动作在同一个分段控件里（外框恰 1 个，三段同一父节点）',
+      c6 ? J({ seg: c6.segCount, kids: c6.kidCount, same: c6.sameParent, ids: c6.ids }) : '');
+    ck(c6 && c6.ids.join(',') === 'npAnlAuto,npAnlToggle,npAnlRun',
+      'C6 分段顺序是 自动 → 详细 → 分析（与旧版一致，没被打乱）', c6 ? c6.ids.join(',') : '');
+    ck(c6 && c6.bordered === 0 && c6.segBorder >= 1,
+      'C6 头部只剩分段控件这 1 个外框（三枚各自描边的药丸已消失）',
+      c6 ? J({ extraBordered: c6.bordered, segBorder: c6.segBorder }) : '');
+    ck(c6 && c6.aHide && c6.rHide && Math.abs(c6.aHide.w - c6.rHide.w) <= 1 &&
+       Math.abs(c6.aHide.h - c6.rHide.h) <= 1 && c6.aHide.radius === c6.rHide.radius &&
+       c6.aHide.border === 0,
+      'C6 收起键与右栏隐藏键同尺寸、同圆角、无边框（同一枚圆形图标键）',
+      c6 && c6.aHide && c6.rHide ? J({ anl: c6.aHide, rail: c6.rHide }) : '');
+    ck(c6 && c6.labFont && c6.labFont === c6.capFont && c6.labLs === c6.capLs,
+      'C6 左栏标题与右栏标题同字号同字距（不再是"比正文大一档"的粗标题）',
+      c6 ? J({ lab: c6.labFont + '/' + c6.labLs, cap: c6.capFont + '/' + c6.capLs }) : '');
+
+    /* ---------------- C7：合作署名拆分与归属 ---------------- */
+    const c7split = await ev(`(function(){
+      var cases = [
+        ['椎名林檎, 斎藤ネコ', ['椎名林檎','斎藤ネコ']],
+        ['澤野 弘之 & SennaRin', ['澤野 弘之','SennaRin']],
+        ['LiSA feat. PABLO', ['LiSA','PABLO']],
+        ['FictionJunction featuring LiSA', ['FictionJunction','LiSA']],
+        ['Lunity;Lunity;Lunity;Lunity', ['Lunity']],
+        ['REIJINGSIGNAL(CV：Lynn、芹澤 優、鈴木みのり)', ['REIJINGSIGNAL(CV：Lynn、芹澤 優、鈴木みのり)']],
+        ['Aimer', ['Aimer']],
+        ['阿保 剛、いとうかなこ、Zwei、佐々木恵梨', ['阿保 剛','いとうかなこ','Zwei','佐々木恵梨']],
+        ['アクアプラス(2ALAC+cue+log+png)', ['アクアプラス']]
+      ];
+      return cases.map(function(c){
+        var got = npSplitArtists(c[0]);
+        return {inp:c[0], got:got, want:c[1], ok: JSON.stringify(got)===JSON.stringify(c[1])};
+      });
+    })()`);
+    const c7bad = (c7split || []).filter(function (x) { return !x.ok; });
+    ck(c7bad.length === 0, 'C7 npSplitArtists：括号内不拆 / & 与 、 与 feat. 拆 / 重复去重 / 单名原样 / 标签残留剔除',
+      c7bad.length ? J(c7bad) : (c7split || []).length + ' 个样例全对');
+    ck(c7split && c7split.length > 0, 'C7 拆分样例集非空（防止判据空跑）', c7split ? String(c7split.length) : '');
+
+    const c7attr = await ev(`(function(){
+      var albums=[
+        {k:'k1', name:'合作专辑', artist:'椎名林檎, 斎藤ネコ', dur:100, n:2, cv:false},
+        {k:'k2', name:'个人专辑', artist:'椎名林檎', dur:100, n:2, cv:false},
+        {k:'k3', name:'双人专辑', artist:'澤野 弘之 & SennaRin', dur:100, n:2, cv:false}
+      ];
+      window.viewCachePut('albums|', {albums:albums});
+      window.setView('artists');
+      window.loadArtists('');
+      var names=[];
+      Array.prototype.forEach.call(document.querySelectorAll('#list .card'), function(c){ names.push(c.dataset.a); });
+      var counts={};
+      Array.prototype.forEach.call(document.querySelectorAll('#list .card'), function(c){
+        counts[c.dataset.a]=((c.querySelector('.ar')||{}).textContent||'');
+      });
+      return {names:names, counts:counts, total:names.length};
+    })()`);
+    ck(c7attr && c7attr.names.indexOf('椎名林檎') >= 0 && c7attr.names.indexOf('斎藤ネコ') >= 0 &&
+       c7attr.names.indexOf('澤野 弘之') >= 0 && c7attr.names.indexOf('SennaRin') >= 0,
+      'C7 合作专辑同时归到每位参与者名下（各位都出现了）', c7attr ? J(c7attr.names) : '');
+    ck(c7attr && c7attr.names.indexOf('椎名林檎, 斎藤ネコ') < 0 && c7attr.names.indexOf('澤野 弘之 & SennaRin') < 0,
+      'C7 不再新增「A & B」这种合成艺术家', c7attr ? J(c7attr.names) : '');
+    ck(c7attr && /2 张专辑/.test(c7attr.counts['椎名林檎'] || ''),
+      'C7 个人专辑与合作专辑合并计数（椎名林檎 = 2 张）', c7attr ? J(c7attr.counts) : '');
+
+    // 「查看专辑」必须用同一套归属规则（否则点进合作艺术家是空列表）
+    const c7subset = await ev(`(function(){
+      var hit=null;
+      Array.prototype.forEach.call(document.querySelectorAll('#list .card'), function(c){
+        if(c.dataset.a==='斎藤ネコ') hit=c;
+      });
+      if(!hit) return {missing:true};
+      hit.click();
+      return {ok:true};
+    })()`);
+    await ub.sleep(900);
+    const c7list = await ev(`(function(){
+      return {view: window.S.view, names: (window.S.albums||[]).map(function(a){return a.name;}),
+              cards: document.querySelectorAll('#list .card').length,
+              head: (document.getElementById('pth')||{}).textContent};
+    })()`);
+    ck(c7subset && c7subset.ok && c7list && c7list.cards >= 1 && c7list.names.indexOf('合作专辑') >= 0,
+      'C7 合作艺术家的「查看专辑」不是空列表（与首页同一套归属规则）', c7list ? J(c7list) : '');
+    await ev("(function(){ if(typeof setView==='function') setView('albums'); return 1; })()");
+    await ub.sleep(300);
+
+    /* ---------------- C8：右栏艺术家简介带名字 ---------------- */
+    const c8 = await ev(`(function(){
+      window.S.curMeta = {title:'残響散歌', artist:'Aimer', album:'X', albumArtist:'Aimer'};
+      NP_DATA.tabs=[{k:'person', label:'艺术家', name:'Aimer', artist:''}];
+      // a) 简介不以名字开头 → 应加上「Aimer：」
+      var a = npRailPreview('person', {state:'ok', data:{ok:true, fields:{
+        '国籍':'日本', '简介':'日本女性创作歌手，2011 年出道。'}}});
+      // b) 简介本来就以名字开头 → 不重复
+      var b = npRailPreview('person', {state:'ok', data:{ok:true, fields:{
+        '简介':'Aimer 日本女性创作歌手，2011 年出道。'}}});
+      // c) 完全没有简介 → 至少是名字
+      var c = npRailPreview('person', {state:'idle', data:null});
+      return {a:a, b:b, c:c};
+    })()`);
+    ck(c8 && /^Aimer：日本女性创作歌手/.test(c8.a.p1),
+      'C8 艺术家卡首行是「名字：简介」（简介带上艺术家名字）', c8 ? J(c8.a) : '');
+    ck(c8 && /^Aimer 日本女性创作歌手/.test(c8.b.p1) && (c8.b.p1.match(/Aimer/g) || []).length === 1,
+      'C8 简介本身以名字开头时不重复名字（不会出现「X：X 是……」）', c8 ? JSON.stringify(c8.b.p1) : '');
+    ck(c8 && c8.c.p1 === 'Aimer', 'C8 没有简介时至少显示艺术家名字', c8 ? J(c8.c) : '');
+    await ev('(function(){ if(typeof npDataReset==="function") npDataReset(); return 1; })()');
 
   } finally {
     await s.close();

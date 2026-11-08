@@ -81,6 +81,7 @@
 | `check_seekdrag.js` | 进度条拖动验收：按下即预览 / 1:1 跟手 / 拖动中零请求 / 不被轮询回拉 / 松手单次提交 / 真跳转 / 无 0.18 s 补间 / rAF 推进 / 整页同套 / 相对跳转基准；`--red` 用旧实现证明判据有效 | `node tools/check_seekdrag.js http://127.0.0.1:19099 /tmp/rlp-seekdrag [--red]` |
 | `check_volume_db.js` | 音量 dB 验收：0.5 dB 固定档位 / 静音逃逸 / 顶端夹紧 / 0.1 dB 细档 / 滚轮 / 双击归零 / 下发一致 / 标签一致 / 全档位换算互逆；`--red` 跑旧公式证明判据有效 | `node tools/check_volume_db.js http://127.0.0.1:19099 /tmp/rlp-volume [--red]` |
 | `check_b10_logic.js` | 1.1.4-beta10 反馈的**纯逻辑**判据（不需要浏览器）：合作署名拆分（括号内不拆 / & 、 ; feat. 拆 / 重复去重 / 标签垃圾剔除）、艺术家卡简介带名字、首页艺术家归属（合作专辑同时计入每位参与者且不新增「A & B」）| `node tools/check_b10_logic.js` |
+| `check_b10_ui.js` | ⛔ **已停用**（禁止自起无头浏览器）。判据迁至 `check_b10_logic.js` + 页面内自检（`POST /api/selftest/request` → 页面跑完 `POST /api/selftest/report` 落 `<state>/selftest-last.json`）。保留仅为历史文本，不要执行 | — |
 
 **2026-10-28 新增的三个工具**都在 `make_app_mac.sh` 的打包链上或与之配套：
 `make_icon_mac.swift` 出图、`iconcheck.py` 判几何、`tipcheck.js` 判气泡不越界。

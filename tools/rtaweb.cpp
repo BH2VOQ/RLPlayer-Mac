@@ -6876,7 +6876,7 @@ static bool is_side_effect_path(const std::string& p) {
         // 只读端点是 /api/lib/cover（单张）与 /api/lib/cover/progress（进度）。
         "/api/lib/cover/prefetch", "/api/lib/cover/set",
         // 1.1.4-beta10 页面内自检：会把结果落盘（副作用），必须 POST
-        "/api/selftest/report",
+        "/api/selftest/report", "/api/selftest/request",
     };
     for (const char* k : kNeedPost) {
         const size_t n = std::strlen(k);
@@ -7443,6 +7443,23 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
     // 落成 <state>/selftest-last.json —— 这样"判据到底过没过"是可 grep 的文件证据，
     // 不依赖谁去截图，也不需要在应用外再挂一个浏览器进程。
     // 只收 POST（is_side_effect_path 已登记），body 上限沿用全局；字段只取 total/pass/fail/rows。
+    // 自检**请求**端点：创建 <state>/selftest-request 标志；下一次（或正在进行的）页面加载
+    // 会带上 window.__SELFTEST_AUTO=1 自动跑用例并 POST 回报，回报时删标志（一次性）。
+    // 为什么要有它：DSH 侧边栏改写 URL，?selftest=1 到不了页面 —— 只能用服务端状态触发。
+    if (rq.path.rfind("/api/selftest/request", 0) == 0) {
+        ct = "application/json; charset=utf-8";
+        if (rq.method != "POST") return "{\"ok\":false,\"error\":\"只接受 POST\"}";
+        const std::string flag = runtime_state_dir() + "/selftest-request";
+        const std::string last = runtime_state_dir() + "/selftest-last.json";
+        std::error_code ec;
+        std::filesystem::remove(last, ec);       // 上一次的结果作废，避免把旧结论当新结论
+        std::ofstream f(flag, std::ios::trunc);
+        if (!f) return "{\"ok\":false,\"error\":\"无法写标志文件\"}";
+        f << "1";
+        f.close();
+        return "{\"ok\":true,\"armed\":\"" + jesc(flag) + "\"}";
+    }
+
     if (rq.path.rfind("/api/selftest/report", 0) == 0) {
         ct = "application/json; charset=utf-8";
         if (rq.method != "POST") return "{\"ok\":false,\"error\":\"只接受 POST\"}";
@@ -7454,6 +7471,9 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
         if (!f) return "{\"ok\":false,\"error\":\"写入失败\"}";
         f << rq.body;
         f.close();
+        // 一次性：回报即解除触发标志，避免每次刷新页面都重跑（自检会改一点视图状态）
+        std::error_code ec;
+        std::filesystem::remove(runtime_state_dir() + "/selftest-request", ec);
         return "{\"ok\":true,\"saved\":\"" + jesc(path) + "\"}";
     }
 

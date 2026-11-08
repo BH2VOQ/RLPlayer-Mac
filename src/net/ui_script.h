@@ -13506,10 +13506,26 @@ function selftestPaint(res) {
   return box;
 }
 // ?selftest=1 时自动跑；结果顺手 POST 回后端落盘（服务端见 tools/rtaweb.cpp 的 /api/selftest/report）
+// 跑之前先切到单曲页：C1/C6 量的是 #npAnal 的真实几何，隐藏元素量不到东西。
+// 用生产入口 openNowPlaying()（与用户点封面进单曲页完全同一条路径）。
+function selftestEnsureNowPlaying() {
+  try {
+    var page = D('npPage');
+    if (page && page.classList.contains('on')) return;
+    if (typeof openNowPlaying === 'function') openNowPlaying();
+  } catch (e) { }
+}
 function selftestMaybeAutoRun() {
   var on = false;
-  try { on = /(?:^|[?&])selftest=1(?:&|$)/.test(location.search || ''); } catch (e) { }
+  try {
+    // 同时认 query 与 hash：侧边栏/宿主对 URL 的规范化方式不统一，两种写法都支持才不至于"点了没反应"
+    // ① 服务端标志（首选：DSH 侧边栏会改写/丢弃 URL 参数，只有它能稳定生效）
+    on = (typeof window !== 'undefined' && window.__SELFTEST_AUTO === 1) ||
+         /(?:^|[?&])selftest=1(?:&|$)/.test(location.search || '') ||
+         /(?:^|[&#])selftest=1(?:&|$)/.test(location.hash || '');
+  } catch (e) { }
   if (!on) return;
+  selftestEnsureNowPlaying();
   var res = selftestRun();
   try { selftestPaint(res); } catch (e) { }
   try {
@@ -13547,6 +13563,9 @@ selftestAdd('C1 左栏头部：三段落在面板内、同处一行（不换行�
   var panel = document.getElementById('npAnal'), seg = document.querySelector('#npAnal .anlseg');
   if (!panel || !seg) return { want: '存在', got: '缺元素', ok: false };
   var pb = panel.getBoundingClientRect();
+  // 面板隐藏（不在单曲页）时所有矩形都是 0，断言"溢出与否"没有意义 —— 必须先把
+  // 「没量到」和「量到了但不合格」分开，否则这条判据会在非单曲页上永远假红。
+  if (pb.width < 40) return { want: '面板可见（宽 >40px）', got: '宽=' + Math.round(pb.width) + '（不在单曲页）', ok: false };
   var tops = [], inside = true, minTop = 1e9, maxTop = -1e9;
   Array.prototype.forEach.call(seg.children, function (b) {
     var r = b.getBoundingClientRect();
