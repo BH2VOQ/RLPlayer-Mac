@@ -290,6 +290,63 @@ try {
   else delete env.NP_RAILDETAIL;
 }
 
+/* ---------------- L8：艺术家简介「点进去」也不丢（1.1.5-beta3） ----------------
+   用户 2026-11-09：右栏艺术家卡有简介，点开「完整 AI 整理资料」浮层却只剩国籍/风格等短标签。
+   成因：AI 把整段简介写进 sections，fields 只有短标签；renderSummaryContent 在 fields 非空时
+   不渲染 sections。判据覆盖：补全函数、不改动原对象、与右栏同源、浮层正文真的出现简介、
+   fields 为空/已有简介/非 person 三种情况都不被误改。 */
+console.log('L8 艺术家简介：右栏有、浮层也要有（sections → fields 补全）');
+const ENS = env.npSummaryEnsureBio;
+ck(typeof ENS === 'function', 'L8a npSummaryEnsureBio 存在于生产代码中');
+const bioLong = 'Goose house 是活跃于 2010 年代的日本男女混合音乐组合，以翻唱热门流行歌曲起家。';
+const st8 = { ok: true, fields: { '国籍': '日本', '风格': 'J-Pop' },
+              sections: [{ heading: '简介', paragraphs: [{ text: bioLong }] }] };
+const ens8 = (typeof ENS === 'function') ? ENS(st8) : null;
+ck(!!ens8 && ens8.fields && ens8.fields['简介'] === bioLong,
+   'L8b sections 首段补成 fields 简介（整段、不截断、不加名字前缀）',
+   ens8 && ens8.fields ? J(ens8.fields['简介']) : 'no fields');
+ck(!!ens8 && ens8.fields['国籍'] === '日本' && ens8.fields['风格'] === 'J-Pop',
+   'L8b 原有短标签不丢', ens8 ? J(ens8.fields) : 'null');
+ck(st8.fields && !Object.prototype.hasOwnProperty.call(st8.fields, '简介'),
+   'L8c 不改动原 summary 对象（不写回缓存）', J(st8.fields));
+const rail8 = env.npRailBio(st8, 'Goose house', 0);
+ck(rail8 === bioLong && !!ens8 && ens8.fields['简介'] === bioLong && rail8 === ens8.fields['简介'],
+   'L8d 浮层简介与右栏 npRailBio 同源（同一段文字）', 'rail=' + J(rail8) + ' ens=' + (ens8 ? J(ens8.fields['简介']) : 'null'));
+// 浮层真实渲染路径：npDataSummaryBody / npDataRenderBody 都走 renderSummaryContent
+const body8 = env.npDataSummaryBody(st8, 'person');
+ck(typeof body8 === 'string' && body8.indexOf(bioLong) >= 0 && body8.indexOf('>简介<') >= 0,
+   'L8e npDataSummaryBody(person) 含「简介」行与简介正文',
+   typeof body8 === 'string' ? ('bio=' + body8.includes(bioLong) + ' label=' + body8.includes('>简介<')) : String(body8));
+(function () {
+  var saved = env.NP_DATA;
+  try {
+    env.NP_DATA = { active: 'person', tabs: [{ k: 'person', label: '艺术家', name: 'Goose house', artist: '' }],
+                    cache: { person: { state: 'ok', data: st8 } }, req: 0, bodyKey: '' };
+    env.npDataRenderBody(true);
+    var html = env.document.getElementById('npDataBody').innerHTML;
+    ck(typeof html === 'string' && html.indexOf(bioLong) >= 0,
+       'L8f npDataRenderBody 写进 #npDataBody 的浮层正文含简介',
+       typeof html === 'string' ? ('bio=' + html.includes(bioLong)) : String(html));
+  } catch (e) { ck(false, 'L8f npDataRenderBody 不抛异常', 'EXCEPTION: ' + ((e && e.message) || String(e))); }
+  finally { env.NP_DATA = saved; }
+})();
+const onlyFields8 = { ok: true, fields: { '国籍': '日本' } };
+function ENS8(x) { return typeof ENS === 'function' ? ENS(x) : null; }
+ck(ENS8(onlyFields8) === onlyFields8, 'L8g 没有 sections 简介时不补（原对象原样返回）');
+const hasBio8 = { ok: true, fields: { '简介': '已有简介。' }, sections: [{ paragraphs: [{ text: '另一段' }] }] };
+ck(ENS8(hasBio8) === hasBio8, 'L8h fields 已有简介时不重复补');
+const noFields8 = { ok: true, sections: [{ paragraphs: [{ text: bioLong }] }] };
+ck(ENS8(noFields8) === noFields8, 'L8i fields 为空时不补（sections 整段叙述照常渲染）');
+const track8 = env.npDataSummaryBody(st8, 'track');
+ck(typeof track8 === 'string' && track8.indexOf(bioLong) < 0,
+   'L8j 非 person 实体不受影响（track 不注入简介）',
+   typeof track8 === 'string' ? ('bio=' + track8.includes(bioLong)) : String(track8));
+// 艺术家详情页：词条简介已在下方「简介」区展示时传 skip:{'简介':1}，AI 网格不得重复出现同一段
+const skip8 = env.renderSummaryContent(st8, 'AI 整理', 'person', { skip: { '简介': 1 } });
+ck(typeof skip8 === 'string' && skip8.indexOf(bioLong) < 0 && skip8.indexOf('>简介<') < 0,
+   'L8k 详情页 skip 简介时不重复渲染（词条简介已单独展示）',
+   typeof skip8 === 'string' ? ('bio=' + skip8.includes(bioLong) + ' label=' + skip8.includes('>简介<')) : String(skip8));
+
 /* ---------------- L7：设置页 .setfoot 随内容滚动（非 sticky/fixed） ---------------- */
 console.log('L7 设置页 .setfoot 样式契约（随页面滚动，禁止 sticky/fixed 固定吸底）');
 const uiPagePath = path.resolve(__dirname, '../src/net/ui_page.h');
