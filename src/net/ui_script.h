@@ -1986,14 +1986,42 @@ function renderFieldGrid(fields, kind, opts) {
   }
   return rows ? ('<div class=efields>' + rows + '</div>') : '';
 }
+// 1.1.5-beta3（用户 2026-11-09）：「外面有简介，点进去就看不到了」。
+// AI 常把整段简介写进 sections 首段、fields 只给国籍/风格等短标签；右栏 npRailBio 有
+// sections 兜底所以看得到简介，而浮层/详情页的 renderSummaryContent 一旦 fields 非空就只渲染
+// 标签网格、把整段叙述丢掉。这里在**渲染前**给 person 实体补一个 fields['简介']：
+//   · 与右栏 npRailBio 同源：fields['简介'] 优先，否则取 sections 首段（不截断、不加名字前缀）；
+//   · 返回浅拷贝副本，绝不写回 NP_DATA.cache / SUMC.cache（缓存里仍是后端原始数据）；
+//   · 只在 fields 非空且缺「简介」时补：fields 为空时 sections 会照常整段渲染，补了反而重复。
+// 非 person 实体完全不碰。
+function npSummaryEnsureBio(summary) {
+  if (!summary || typeof summary !== 'object') return summary;
+  var f = summary.fields;
+  if (!f || typeof f !== 'object') return summary;
+  if (f['简介'] !== undefined && f['简介'] !== null && String(efValueText(f['简介'])).trim()) return summary;
+  var bio = npRailBio(summary, '', 0);
+  if (!bio || bio === '') return summary;
+  var out = {}, k;
+  for (k in f) if (Object.prototype.hasOwnProperty.call(f, k)) out[k] = f[k];
+  out['简介'] = bio;
+  var copy = {};
+  for (k in summary) if (Object.prototype.hasOwnProperty.call(summary, k)) copy[k] = summary[k];
+  copy.fields = out;
+  return copy;
+}
 // 简介类区块的统一渲染：优先 fields 网格，兜底 sections 段落。
 // title 非空时作为小标题（内容全是 AI 整理的板块一律传「AI 整理」，全站同一措辞 —— 261024-01 #2）。
 function renderSummaryContent(summary, title, kind, opts) {
   if (!summary) return '';
-  var sections = (summary.sections || []);
-  var body = renderFieldGrid(summary.fields, (summary.kind || kind || ''), opts);
+  // 1.1.5-beta3：所有 person 实体（单曲页浮层 / 艺术家详情页 AI 整理区 / 专辑页）
+  // 统一在此补简介，调用点不必各写一遍。副本不写回缓存，sections 原样保留。
+  // 详情页若已在下方展示词条简介（opts.skip['简介']），则不注入、也不让 sections 兜底再出一遍。
+  var skipBio = !!(opts && opts.skip && opts.skip['简介']);
+  var s = ((summary.kind || kind || '') === 'person' && !skipBio) ? npSummaryEnsureBio(summary) : summary;
+  var sections = (s.sections || []);
+  var body = renderFieldGrid(s.fields, (s.kind || kind || ''), opts);
   if (!body) {
-    if (!(summary.ok && sections.length)) return '';
+    if (skipBio || !(summary.ok && sections.length)) return '';
     var citMap0 = {};
     (summary.citations || []).forEach(function (c, idx) { citMap0[c.id] = idx + 1; });
     var b0 = '';
@@ -12953,6 +12981,8 @@ function npDataSummaryBody(d, kind) {
     opts.tracklist = trs;
     opts.drop = { '曲目列表': 1 };   // 用下面的对齐表格替代 AI 的一行文本
   }
+  // 1.1.5-beta3：person 简介的补全统一在 renderSummaryContent 一处完成（唯一真源），
+  // 这里不再另写一份，避免两处各补一次、以后改一处忘一处。
   var h = renderSummaryContent(d || {}, '', kind, opts);
   if (!h) h = '<div class=npdhint>该实体暂无可用的 AI 整理资料。</div>';
   return h;
@@ -14094,6 +14124,37 @@ selftestAdd('C8 音频分析三档：卡片同宽、右缘不被滚动条遮挡'
             ' L1溢出=' + L[1].overflow + 'px L2溢出=' + L[2].overflow + 'px';
   var ok = spread <= 0.5 && minClear >= 8;
   return { want: '三档卡片同宽（spread≤0.5px）且卡片右缘距滚动条 ≥8px', got: got, ok: ok };
+});
+
+// 1.1.5-beta3（用户 2026-11-09）：「AI 整理的艺术家栏目外面有简介，点进去就看不到了」。
+// 这里不靠网络/缓存：把右栏那类数据（fields 只有短标签、整段简介在 sections 首段）塞进
+// NP_DATA.cache.person，走**真实浮层渲染入口** npDataRenderBody，再量 #npDataBody 的 DOM。
+// 判据：① 浮层出现「简介」行；② 正文含与 npRailBio 完全同一段的简介；
+// ③ 原有短标签仍在；④ 缓存里的原始 summary 没被写回（fields 里仍无简介）。
+selftestAdd('B1 艺术家「完整 AI 整理资料」浮层与右栏同源显示简介（不写回缓存）', function () {
+  var body = D('npDataBody');
+  if (!body) return { want: '存在 #npDataBody（先切到单曲页）', got: '缺元素', ok: false };
+  var saved = NP_DATA, savedSig = body.innerHTML;
+  var bio = 'Goose house 是活跃于 2010 年代的日本男女混合音乐组合，以翻唱热门流行歌曲起家。';
+  var raw = { ok: true, from_cache: true, fields: { '国籍': '日本', '风格': 'J-Pop、民谣流行' },
+              sections: [{ heading: '简介', paragraphs: [{ text: bio }] }] };
+  try {
+    NP_DATA = { active: 'person', tabs: [{ k: 'person', label: '艺术家', name: 'Goose house', artist: '' }],
+                cache: { person: { state: 'ok', data: raw } }, req: 1, bodyKey: '', tabSig: null };
+    npDataRenderBody(true);
+    var h = body.innerHTML || '';
+    var rail = npRailBio(raw, 'Goose house', 0);
+    var label = h.indexOf('>简介<') >= 0, hasBio = h.indexOf(bio) >= 0,
+        sameAsRail = h.indexOf(rail) >= 0, keepsTag = h.indexOf('国籍') >= 0,
+        noWriteback = !Object.prototype.hasOwnProperty.call(raw.fields, '简介');
+    var ok = label && hasBio && sameAsRail && keepsTag && noWriteback;
+    return { want: '浮层有「简介」行 + 同一段简介 + 短标签仍在 + 原始缓存未被写回',
+             got: 'label=' + label + ' bio=' + hasBio + ' sameAsRail=' + sameAsRail +
+                  ' keepsTag=' + keepsTag + ' noWriteback=' + noWriteback, ok: ok };
+  } finally {
+    NP_DATA = saved;
+    body.innerHTML = savedSig;
+  }
 });
 
 /* ---------------- 启动 ---------------- */

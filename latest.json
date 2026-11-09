@@ -1,8 +1,8 @@
 {
-  "version": "1.1.5-beta2",
-  "notes": "Album-aware track lookup with per-album query and cache keys; page classification and strict attribution reject cross-entity material and citations; summary/knowledge caches migrated to v6 with stale-while-revalidate and per-language knowledge files; /api/entity/knowledge returns pending immediately and deduplicates concurrent jobs; missing-tag tracks fall back to filename parsing, with an insufficient-metadata state and zero network requests for pure track numbers. · 单曲检索纳入专辑上下文并按专辑分 query 与缓存键；新增页面分类与严格归属校验，跨实体材料与引用整份拒收；summary/knowledge 缓存迁移至 v6，旧代际标记过期并后台重算，knowledge 按语言分文件；/api/entity/knowledge 立即返回 pending 且并发任务去重；无标签曲目改用文件名解析，纯曲号明确提示「资料不足」且 0 次网络请求。",
-  "download_url": "https://github.com/BH2VOQ/RLPlayer-Mac/releases/download/v1.1.5-beta2/RLPlayer-1.1.5-beta2-macOS-arm64.dmg",
-  "sha256": "a1284e689455d519ea17cdaca4ce2b11e2fefb149ed254e9e1b122bb95f6f2e4",
-  "size": 8107640,
-  "published_at": "2026-11-09T10:45:00Z"
+  "version": "1.1.5-beta3",
+  "notes": "Fixed the artist full-summary view dropping the biography: it now shows the same untruncated bio as the right-rail card, ahead of the short field grid, without mutating the summary cache; the artist profile page shares the same data and suppresses duplicates. · 修复艺术家「完整 AI 整理资料」丢失简介的问题：现在显示与右栏卡片同一段未截断的简介，排在短标签网格之前，且不写回摘要缓存；艺术家详情页共用同一份数据并去重。",
+  "download_url": "https://github.com/BH2VOQ/RLPlayer-Mac/releases/download/v1.1.5-beta3/RLPlayer-1.1.5-beta3-macOS-arm64.dmg",
+  "sha256": "30e5855333c9cac272dc39b78cde5fda48a83c5bdec1254b9f42610867cf0e69",
+  "size": 8108446,
+  "published_at": "2026-11-09T12:20:06Z"
 }

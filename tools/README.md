@@ -80,8 +80,16 @@
 | `make_icon_mac.swift` | 由 `res/rlplayer-256.png` 生成带透明留白的全档 iconset（打包脚本调用） | `swift tools/make_icon_mac.swift res/rlplayer-256.png /tmp/RLPlayer.iconset` |
 | `check_seekdrag.js` | 进度条拖动验收：按下即预览 / 1:1 跟手 / 拖动中零请求 / 不被轮询回拉 / 松手单次提交 / 真跳转 / 无 0.18 s 补间 / rAF 推进 / 整页同套 / 相对跳转基准；`--red` 用旧实现证明判据有效 | `node tools/check_seekdrag.js http://127.0.0.1:19099 /tmp/rlp-seekdrag [--red]` |
 | `check_volume_db.js` | 音量 dB 验收：0.5 dB 固定档位 / 静音逃逸 / 顶端夹紧 / 0.1 dB 细档 / 滚轮 / 双击归零 / 下发一致 / 标签一致 / 全档位换算互逆；`--red` 跑旧公式证明判据有效 | `node tools/check_volume_db.js http://127.0.0.1:19099 /tmp/rlp-volume [--red]` |
-| `check_b10_logic.js` | 1.1.4-beta10/11 反馈的**纯逻辑**判据（不需要浏览器）：合作署名拆分（括号内不拆 / & 、 ; feat. 拆 / 重复去重 / 标签垃圾剔除）、艺术家卡简介带名字、首页艺术家归属（合作专辑同时计入每位参与者且不新增「A & B」）、**L6 右栏详细/简略两档**（`npRailLimits` 两档上限不同、长简介详细档不截断、`p2` 详细档多取字段、切档 0 次 `/api/entity/summary` 且 `NP_DATA.cache` 同一引用）| `node tools/check_b10_logic.js` |
+| `check_b10_logic.js` | 1.1.4-beta10/11 反馈的**纯逻辑**判据（不需要浏览器）：合作署名拆分（括号内不拆 / & 、 ; feat. 拆 / 重复去重 / 标签垃圾剔除）、艺术家卡简介带名字、首页艺术家归属（合作专辑同时计入每位参与者且不新增「A & B」）、**L6 右栏详细/简略两档**（`npRailLimits` 两档上限不同、长简介详细档不截断、`p2` 详细档多取字段、切档 0 次 `/api/entity/summary` 且 `NP_DATA.cache` 同一引用）、**L8 艺术家简介点进去不丢**（`npSummaryEnsureBio` 补渲染副本、不写回缓存、与右栏 `npRailBio` 同源、`skip` 路径不重复、非 person 不受影响） | `node tools/check_b10_logic.js` |
 | `check_b10_ui.js` | ⛔ **已停用**（禁止自起无头浏览器）。判据迁至 `check_b10_logic.js` + 页面内自检（`POST /api/selftest/request` → 页面跑完 `POST /api/selftest/report` 落 `<state>/selftest-last.json`）。保留仅为历史文本，不要执行 | — |
+
+**2026-11-09（1.1.5-beta3）艺术家简介「点进去」也不丢**：右栏 `npRailBio` 会从 `sections`
+首段兜底取简介，而 `renderSummaryContent` 一旦 `fields` 非空就只渲染短标签网格、把整段叙述丢掉，
+于是出现「外面有简介、点开完整 AI 整理资料却只剩国籍/风格」。新增 `npSummaryEnsureBio` 在渲染前
+补一份 `fields['简介']` 副本（不写回 `NP_DATA.cache` / `SUMC.cache`），`renderSummaryContent` 对所有
+person 实体统一生效；艺术家详情页已在下方展示词条简介时传 `skip:{'简介':1}`，不重复注入。判据：
+纯逻辑 L8a–L8k（先红后绿，62/62）、页面内自检 B1（真实 `#npDataBody` DOM 量「简介」行 / 同一段正文 /
+短标签仍在 / 原始缓存未被写回）。红→绿对照：去掉 `npSummaryEnsureBio` 的调用即 L8e/L8f/B1 全红。
 
 **2026-11-09（1.1.5-beta1）音频分析三档卡片同宽 / 滚动条不遮挡圆角**：页面内自检新增 C8
 （L0/L1/L2 三档卡片宽度差 ≤0.5px、卡片右缘距滚动条沟槽 ≥8px；用固定 health 夹具渲染，
