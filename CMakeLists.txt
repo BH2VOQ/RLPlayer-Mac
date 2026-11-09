@@ -342,6 +342,14 @@ add_executable(test_decide_route tests/test_decide_route.cpp)
 target_include_directories(test_decide_route PRIVATE ${CMAKE_SOURCE_DIR}/src)
 add_test(NAME decide_route COMMAND test_decide_route)
 
+# 2026-11-09（用户反馈「共享模式必然不是 bit-perfect，程序却显示是」）：
+# bit-perfect 结论的唯一实现 src/audio/bp_verdict.h。纯函数、不开设备、不发声。
+# 判据含一条「先跑红」用例：把旧判据逐字复刻，断言它在共享场景下返回 yes（BUG 复现），
+# 同一段再断言新判据返回 no —— 证明这条判据真能抓住那个错误，而不是"看起来更严"。
+add_executable(test_bp_verdict tests/test_bp_verdict.cpp)
+target_include_directories(test_bp_verdict PRIVATE ${CMAKE_SOURCE_DIR}/src)
+add_test(NAME bp_verdict COMMAND test_bp_verdict)
+
 add_executable(test_host_msg tests/test_host_msg.cpp)
 target_link_libraries(test_host_msg PRIVATE rtadsp)
 add_test(NAME host_msg COMMAND test_host_msg)

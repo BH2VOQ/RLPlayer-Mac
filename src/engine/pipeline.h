@@ -231,6 +231,14 @@ public:
         if (cfg_.shaper != dsp::Shaper::None) return true;
         if (cfg_.volumeEnabled && cfg_.volumeDb != 0.0) return true;
         if (cfg_.replayGainDb != 0.0) return true;
+        // ★ 2026-11-09 真 BUG 修复（用户反馈「走 DSP 却报 bit-perfect」时连带查出）：
+        //   preAttenDb 是 ISP 过采样峰值保护给的**预衰减**（见 tools/rtaweb.cpp 的
+        //   cfg.preAttenDb = preAtten）。它原本**不在**这个判据里，于是：
+        //     峰值超满幅 ⟹ 算了预衰减 ⟹ 但 willBeBitPerfect() 仍返回 true ⟹
+        //     走路径 1 直接 memcpy 原始样本 ⟹ **衰减根本没被应用**，
+        //   而界面上却已经把这一曲标成"做了预衰减保护"。
+        //   这不是"少判了一个标志"，是「以为在保护、实际没保护」，满幅瞬态会削顶。
+        if (cfg_.preAttenDb != 0.0) return true;
         for (const auto& c : cfg_.channel) {
             if (!c.eq.empty() || c.delaySamples != 0 || !c.ir.empty() || c.gainDb != 0.0) return true;
         }

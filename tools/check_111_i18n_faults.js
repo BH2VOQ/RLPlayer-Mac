@@ -10,7 +10,7 @@
 //   1) LLM 连接拒绝/重置 (Connection reset / connection refused)
 //   2) LLM HTTP 状态码故障 (401 / 404 / 429)
 //   3) UPnP 协商失败 (SOAP SetAVTransportURI 拒绝，绝不播放)
-//   4) 独占采样率不支持 (backend=wasapi rate=12345 真实 caps 拒绝，先于 sink.open)
+//   4) 独占采样率不支持 (backend=coreaudio rate=12345 真实 caps 拒绝，先于 sink.open)
 //
 // 铁律执行与安全约束：
 //   - 隔离端口：rtaweb=19106, stub=19105, browser CDP=9713；绝不碰 8899 / 19101
@@ -564,7 +564,7 @@ async function startRtaweb() {
     // 场景 4: 独占采样率不支持错误 (12345 Hz 真实 caps 拒绝)
     // ==========================================
     console.log('\n--- Scenario 4: Exclusive Unsupported Rate (12345 Hz) ---');
-    // 使用真实 /api/play backend=wasapi rate=12345 bits=24 volume=-120 hogExclusive=0
+    // 使用真实 /api/play backend=coreaudio rate=12345 bits=24 volume=-120 hogExclusive=0
     // 目标率 12345 绝对不在任何真实 CoreAudio caps 中，必定触发硬拒绝，且失败先于 sink.open
     const devices = await (await fetch(`http://127.0.0.1:${port}/api/devices`)).json();
     // Refuse the hardware path unless real read-only caps establish rejection.
@@ -576,7 +576,7 @@ async function startRtaweb() {
       await fetch(`http://127.0.0.1:${port}/api/play`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-        body: `file=${encodeURIComponent(silenceWav)}&backend=wasapi&rate=12345&bits=24&volume=-120&hogExclusive=0`,
+        body: `file=${encodeURIComponent(silenceWav)}&backend=coreaudio&rate=12345&bits=24&volume=-120&hogExclusive=0`,
       })
     ).json();
 

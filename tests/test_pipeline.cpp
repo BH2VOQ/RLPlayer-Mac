@@ -198,6 +198,42 @@ static int run_tests() {
         check(onGrid, "样本严格落在 16-bit 量化网格上");
     }
 
+    printf("\n=== 6. 预衰减不得被直通吞掉（2026-11-09）===\n");
+    {
+        // 背景（真 BUG）：ISP 过采样峰值保护会给出 cfg.preAttenDb（负数）。
+        // 旧 hasAnyProcessing() **不看** preAttenDb ⟹ willBeBitPerfect() 返回 true
+        // ⟹ 走路径 1 直接 memcpy 原始样本 ⟹ **衰减根本没被应用**，
+        // 而信号链里已经写着"检测到峰值超满幅 → 预衰减 X dB"。这不是少判一个标志，
+        // 是"以为在保护、实际没保护"：满幅瞬态照样削顶。
+        //
+        // 判据（两条缺一不可）：
+        //  ① 不能再自称逐位直通（st.bitPerfect 必须 false）；
+        //  ② 输出必须真的被衰减了（峰值按 10^(db/20) 缩放），而不是原样搬运。
+        auto a = make_test(44100, 2, 16, 2000, 11);
+        int32_t pk = 0;
+        for (int32_t v : a.raw) pk = std::max(pk, v < 0 ? -v : v);
+
+        PipelineConfig cfg;
+        cfg.preAttenDb = -6.0;                 // 20*log10(0.5012) ≈ -6 dB
+        Pipeline pl(cfg);
+        PipelineStats st;
+        auto o = pl.process(a, &st);
+
+        check(!st.bitPerfect, "带预衰减时不得报逐位直通（旧实现会报 true = 假直通）");
+        check(!st.zeroPad, "带预衰减时也不得走无损展宽旁路");
+
+        int32_t po = 0;
+        for (int32_t v : o.raw) po = std::max(po, v < 0 ? -v : v);
+        const double g = std::pow(10.0, cfg.preAttenDb / 20.0);
+        const double want = (double)pk * g;
+        // 允许 ±2 LSB：路径 3 是 double 平面 + llround 量化
+        const bool scaled = std::fabs((double)po - want) <= 2.0;
+        char buf[160];
+        std::snprintf(buf, sizeof(buf), "(输入峰值 %d -> 输出 %d，期望 %.1f)", pk, po, want);
+        check(scaled, "预衰减真的作用到了样本上", buf);
+        check(po < pk, "输出峰值必须小于输入峰值（否则衰减是假的）", buf);
+    }
+
     printf("\n%s (失败项 %d)\n", fails == 0 ? "全部通过" : "存在失败", fails);
     return fails == 0 ? 0 : 1;
 }

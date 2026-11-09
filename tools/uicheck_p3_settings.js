@@ -14,7 +14,7 @@ try{
   s=await ub.open({url:base,width:1300,height:900});
   await s.waitFor('window.S && typeof setView==="function"',15000);
   const init=await s.eval('({b:ADV.backend,v:S.vol})');
-  ck(init.b==='null','config loaded into memory on first load (not default wasapi)',init);
+  ck(init.b==='null','config loaded into memory on first load (not default coreaudio)',init);
   await s.eval(`(function(){var n=document.querySelector('.nav[data-v=settings]');if(n)n.click();})()`);
   await ub.sleep(700);
   await s.eval(`(function(){var t=document.querySelector('#setpage .stab[data-g=eq]');if(t)t.click();})()`);

@@ -648,13 +648,14 @@ async function gotoFiles() {
   ck(await evalJs("(function(){var page=document.getElementById('setpage');var eq=document.querySelector('#setpage .spane[data-g=eq]');if(!eq)return false;var t=document.getElementById('sp_taps'),a=document.getElementById('sp_atten'),ir=document.getElementById('sp_ir'),e=document.getElementById('sp_eq'),g=document.getElementById('sp_irgpu'),dup=document.getElementById('bSaveRoomEq');return !!(t&&a&&page.contains(t)&&page.contains(a)&&ir&&e&&g&&eq.contains(ir)&&eq.contains(e)&&eq.contains(g)&&!dup);})()"),
      '抽头/衰减在设置页，EQ 文件/IR/GPU 卷积在「EQ」页签内，且无重复保存按钮');
   ck(await evalJs("document.querySelectorAll('#sp_device option').length > 1"), '输出设备下拉有内容', (await evalJs("document.querySelectorAll('#sp_device option').length")) + ' 项');
-  // ---- 本轮新增：WASAPI 共享后端（选项存在 / 说明文案 / 能保存；!! 跑完必须还原，
+  // ---- 共享后端（选项存在 / 说明文案 / 能保存；!! 跑完必须还原，
   //      与 taps 同一原则 —— 自检不许改用户的输出后端）----
-  const origBackend = String(await evalJs("fetch('/api/settings').then(r=>r.json()).then(j=>j.kv.backend||'wasapi')"));
-  ck(await evalJs("(function(){var s=document.getElementById('sp_backend');if(!s)return false;for(var i=0;i<s.options.length;++i)if(s.options[i].value==='wasapi-shared')return true;return false})()"), '后端下拉含「WASAPI 共享」选项');
-  await evalJs("var s=document.getElementById('sp_backend'); s.value='wasapi-shared'; if (s.onchange) s.onchange(); else s.dispatchEvent(new Event('change'));");
-  ck(await waitFor("(function(){var t=(document.getElementById('sp_backendmsg')||{textContent:''}).textContent; return t.indexOf('共享')>=0 && t.indexOf('bit-perfect')>=0 && ADV.backend==='wasapi-shared';})()", 6000), '选共享后端出现说明文案且 ADV.backend 更新');
-  ck(await waitFor("fetch('/api/settings').then(r=>r.json()).then(j=>j.kv.backend==='wasapi-shared')", 6000), '共享后端能保存到后端');
+  // 2026-11-09：value 已从 wasapi-shared 改名为 coreaudio-shared（mac 没有 WASAPI）。
+  const origBackend = String(await evalJs("fetch('/api/settings').then(r=>r.json()).then(j=>j.kv.backend||'coreaudio')"));
+  ck(await evalJs("(function(){var s=document.getElementById('sp_backend');if(!s)return false;for(var i=0;i<s.options.length;++i)if(s.options[i].value==='coreaudio-shared')return true;return false})()"), '后端下拉含「CoreAudio 共享」选项');
+  await evalJs("var s=document.getElementById('sp_backend'); s.value='coreaudio-shared'; if (s.onchange) s.onchange(); else s.dispatchEvent(new Event('change'));");
+  ck(await waitFor("(function(){var t=(document.getElementById('sp_backendmsg')||{textContent:''}).textContent; return t.indexOf('共享')>=0 && t.indexOf('bit-perfect')>=0 && ADV.backend==='coreaudio-shared';})()", 6000), '选共享后端出现说明文案且 ADV.backend 更新');
+  ck(await waitFor("fetch('/api/settings').then(r=>r.json()).then(j=>j.kv.backend==='coreaudio-shared')", 6000), '共享后端能保存到后端');
   await evalJs("var s=document.getElementById('sp_backend'); s.value='" + origBackend + "'; if (s.onchange) s.onchange(); else s.dispatchEvent(new Event('change'));");
   ck(await waitFor("fetch('/api/settings').then(r=>r.json()).then(j=>j.kv.backend==='" + origBackend + "')", 6000), '自检跑完后把输出后端还原');
   // 改一个参数并保存，验证后端确实收到。

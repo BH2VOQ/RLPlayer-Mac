@@ -486,7 +486,7 @@ async function installMock() {
     await ensureNpOpen();
     await sleep(400);
     // /api/settings 是整文件重写：绝不能只 POST 一个键（那会把 backend/volume 清成默认值，
-    // 2026-10-23 已因此让测试实例回落 wasapi 并对真实设备发声过一次）。这里整包读改写。
+    // 2026-10-23 已因此让测试实例回落 coreaudio 并对真实设备发声过一次）。这里整包读改写。
     const origKv = await evalJs("fetch('/api/settings').then(function(r){return r.json();}).then(function(j){return JSON.stringify(j.kv||{});})");
     const setEq = async function (v) {
       await evalJs("(function(){var kv=" + origKv + ";kv.eq=" + JSON.stringify(v) + ";var body=Object.keys(kv).map(function(k){return encodeURIComponent(k)+'='+encodeURIComponent(kv[k]);}).join('&');return fetch('/api/settings',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:body}).then(function(r){return r.json();});})()");

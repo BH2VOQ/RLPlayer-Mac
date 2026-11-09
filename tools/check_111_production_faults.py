@@ -48,7 +48,7 @@ for scenario in ('truncated_flac','unsupported_rate','llm_missing','room_cancel'
    expected='decode.flac_truncated'
   elif scenario=='unsupported_rate':
    # Actual CoreAudio read-only caps hard rejection precedes opening any device.
-   req('/api/play',{'file':str(wav),'backend':'wasapi','rate':12345,'bits':24,'volume':-120,'hogExclusive':0})
+   req('/api/play',{'file':str(wav),'backend':'coreaudio','rate':12345,'bits':24,'volume':-120,'hogExclusive':0})
    for _ in range(100):
     status,body=req('/api/status');state=json.loads(body)
     if state.get('error'):break

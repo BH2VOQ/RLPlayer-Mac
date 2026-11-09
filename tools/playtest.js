@@ -60,7 +60,7 @@ const ck=(ok,what,detail)=>{ console.log((ok?'  [PASS] ':'  [FAIL] ')+what+(deta
 
   // 5) 还原
   await ev("document.getElementById('bStop').click()");
-  await api('/api/settings','backend=' + encodeURIComponent(await ev("(function(){var e=document.getElementById('sRate'); return 'wasapi';})()")));
+  await api('/api/settings','backend=' + encodeURIComponent(await ev("(function(){var e=document.getElementById('sRate'); return 'coreaudio';})()")));
   await api('/api/clear','');
   console.log('');
   console.log(pass + ' passed, ' + fail + ' failed');

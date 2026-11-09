@@ -181,8 +181,10 @@ var ADV = {
   // 2026-10-25（默认值纠正）：NAA 已从界面移除，naaHost 不再给 127.0.0.1:43210 这种
   // 永远连不上的假默认值（macOS 无 NAA 驱动体系）。字段保留以兼容老 conf 与后端契约，
   // 默认置空 = 未选择，语义诚实。
-  // 2026-10-25（方案 C）：Hog 独占开关，默认 0 = 不抢（系统音量可用）
-  backend: 'wasapi', hogExclusive: 0, channels: 0, naaHost: '', upnpDev: '',
+  // Hog 独占开关。★ 2026-11-09 用户要求「独占功能要默认开启」⟹ 默认 1（抢 Hog）。
+  // 代价必须记住：Hog 中系统音量条 / 音量键失效（macOS 机制限制，实测确认），
+  // 音量只能用本程序音量条调；其它 App 的声音会被屏蔽。
+  backend: 'coreaudio', hogExclusive: 1, channels: 0, naaHost: '', upnpDev: '',
   trim0: 0, trim1: 0, trim2: 0, trim3: 0, trim4: 0, trim5: 0, trim6: 0, trim7: 0,
   // 输入
   inBackend: 'none', inDev: '', inOffset: 0, inBuf: 100, inMonitor: 0, inSeconds: 0, inOut: '',
@@ -887,7 +889,7 @@ function params() {
          '&ir=' + encodeURIComponent(ADV.ir || '') +
          '&irgpu=' + (ADV.irgpu || 0) +
          '&ramp=' + (ADV.ramp || 0) +
-         '&backend=' + encodeURIComponent(ADV.backend || 'wasapi') +
+         '&backend=' + encodeURIComponent(ADV.backend || 'coreaudio') +
          '&channels=' + (ADV.channels || 0) +
          '&naahost=' + encodeURIComponent(ADV.naaHost || '') +
          '&upnpdev=' + encodeURIComponent(ADV.upnpDev || '') +
@@ -4293,13 +4295,34 @@ function bpBadgeInfo() {
     return { text: t, cls: c, title: title };
   }
   var allWhy = whyFb + ' ' + whyBp;
-  // 只对**本地播放**做文案推断：投放（airplay/upnp）已在上面各自返回，
+  // 只对**本地播放**做方向判定：投放（airplay/upnp）已在上面各自返回，
   // 且它们的原因句里本来就会出现「重采样」字样，这里再退一道，防止将来文案改动又把它带回来。
   var isCastOut = (S.bpTransport === 'airplay' || S.bpTransport === 'upnp' ||
                    S.bpOutMode === 'airplay' || S.bpOutMode === 'upnp');
-  if (!isCastOut && allWhy.indexOf('重采样') >= 0) {
+  // ---- 2026-11-09（用户截图：48000→44100 显示「GPU 升频」）----
+  // 旧判据是「why 文案里含『重采样』三个字 ⟹ 升频」，方向完全没有证据：
+  // 降采样与升采样的原因句长得一模一样，于是降频被标成升频（把降质说成升级）。
+  // 现在**先看后端给的两端速率**（inRate/outRate，本地播放也已给真值）：
+  //   out < in ⟹ 「PCM 降采样」（黄标 bp-no，与 AirPlay/UPnP 的降采样分支同一形态）
+  //   out > in ⟹ 「PCM-PCM 升频」
+  //   两端拿不到 ⟹ 才回落到旧文案匹配，且**绝不**在缺证据时声称方向。
+  var bpIn = (typeof S.bpInRate === 'number') ? S.bpInRate : 0;
+  var bpOut = (typeof S.bpOutRate === 'number') ? S.bpOutRate : 0;
+  if (!isCastOut && bpIn > 0 && bpOut > 0 && bpOut !== bpIn) {
+    if (bpOut < bpIn) {
+      t = 'PCM 降采样'; c = 'bp-no';
+      if (!title) title = '源 ' + bpIn + ' → ' + bpOut + ' Hz（降采样），非 bit-perfect';
+      return { text: t, cls: c, title: title };
+    }
     t = 'PCM-PCM 升频'; c = 'bp-up';
-    if (!title) title = 'PCM 源 → 更高 PCM 采样率';
+    if (!title) title = 'PCM 源 ' + bpIn + ' → ' + bpOut + ' Hz（升采样）';
+    return { text: t, cls: c, title: title };
+  }
+  if (!isCastOut && allWhy.indexOf('重采样') >= 0) {
+    // 走到这里说明后端没给两端速率（老版本 / 未知源率）。历史上这条一律写「升频」，
+    // 现在改为如实标注方向未知 —— 宁可少说，也不能再把降采样说成升频。
+    t = '非 bit-perfect'; c = 'bp-no';
+    if (!title) title = '已变更采样率（后端未给出两端速率，方向未确认）';
     return { text: t, cls: c, title: title };
   }
   t = '非 bit-perfect'; c = 'bp-no';
@@ -4346,6 +4369,12 @@ function tick() {
     S.bpOutRate = (typeof j.servedRate === 'number' && j.servedRate > 0)
       ? j.servedRate
       : ((S.bpDsd > 0) ? 0 : ((typeof j.outRate === 'number') ? j.outRate : 0));
+    // 2026-11-09（用户截图：48000→44100 被标成升频）：本地播放若解码容器位深 > 源位深，
+    // outRate 仍是**真实输出率**，可直接用于方向判定；这里只在两端都已知时给出方向，
+    // 缺失一律 Unknown —— 绝不按传输类型或文案猜（见 bpBadgeInfo 的注释）。
+    S.bpRateDir = (S.bpInRate > 0 && S.bpOutRate > 0)
+      ? ((S.bpOutRate < S.bpInRate) ? 'down' : ((S.bpOutRate > S.bpInRate) ? 'up' : 'same'))
+      : 'unknown';
     S.bpResampled = (j.resampled === true);
     // 强制升频：目标率未经渲染器声明验证 —— 徽标与信号链都要如实标注，不能混成普通升频。
     S.bpForced = (j.upsampleForced === true);
@@ -4506,7 +4535,7 @@ function tick() {
 // 为什么需要：ASIO 是 Windows 专有驱动协议，macOS 的 CoreAudio 从内核层就是低延迟 / bit-perfect，
 // 没有需要绕过的东西 ⟹ ASIO 在 macOS 不是「做不到」而是「不需要」。后端删了，但老用户的 conf
 // 里可能还留着 backend=asio，直接沿用会让播放失败、下拉也选不中（白屏级别的体验事故）。
-// 处置：落回默认后端（wasapi = CoreAudio 独占），并明确 toast 告知原因，绝不静默改。
+// 处置：落回默认后端（coreaudio = CoreAudio 独占），并明确 toast 告知原因，绝不静默改。
 var REMOVED_BACKENDS = {
   asio: 'ASIO 已移除（macOS 使用 CoreAudio）',
   // 2026-10-25（用户指令「不可用的要隐藏」）：NAA / RTANet 在 macOS 上没有驱动体系，
@@ -4514,9 +4543,16 @@ var REMOVED_BACKENDS = {
   // 否则下拉选不中（该 option 已不存在）+ 播放直接失败，是白屏级别的体验事故。
   naa: 'macOS 不支持 NAA 推流，已切到 CoreAudio 独占'
 };
+// 2026-11-09（用户指令「不应该在没有这个东西的情况下搞这个命名」）：
+// backend 的 value 从 wasapi / wasapi-shared 改成 coreaudio / coreaudio-shared。
+// macOS 上从来没有过 WASAPI —— 这两个字符串只是当年「不改 UI 契约」留下的内部值，
+// 让配置、日志、后端分派一路说着一个本机并不存在的东西。
+// 老 conf 里存着旧值时必须继续认（静默映射，不弹 toast：语义完全没变，用户无需知道）。
+var BACKEND_ALIASES = { 'wasapi': 'coreaudio', 'wasapi-shared': 'coreaudio-shared' };
 var _removedBackendNotified = {};
 function migrateRemovedBackend(v) {
   var k = String(v || '').toLowerCase();
+  if (BACKEND_ALIASES.hasOwnProperty(k)) return BACKEND_ALIASES[k];
   if (REMOVED_BACKENDS.hasOwnProperty(k)) {
     // 每次页面生命周期只提示一次，避免多处调用把 toast 刷成复读机。
     if (!_removedBackendNotified[k]) {
@@ -4524,9 +4560,9 @@ function migrateRemovedBackend(v) {
       // 稍等一拍：启动期还有别的 toast，立刻弹会被盖掉，用户就看不到原因了。
       setTimeout(function () { toast(REMOVED_BACKENDS[k]); }, 1200);
     }
-    return 'wasapi';
+    return 'coreaudio';
   }
-  return v || 'wasapi';
+  return v || 'coreaudio';
 }
 
 // 2026-10-25（用户指令「A1 隐藏」）：老配置里若存过 dsdpack=nat，加载时降级到 dop 并提示一次。
@@ -4592,7 +4628,7 @@ function saveSettings(immediate) {
         + '&eq=' + encodeURIComponent(ADV.eq || '')
         + '&ir=' + encodeURIComponent(ADV.ir || '') + '&irgpu=' + (ADV.irgpu || 0)
         + '&ramp=' + (ADV.ramp || 0)
-        + '&backend=' + encodeURIComponent(ADV.backend || 'wasapi')
+        + '&backend=' + encodeURIComponent(ADV.backend || 'coreaudio')
         + '&channels=' + (ADV.channels || 0)
         + '&naahost=' + encodeURIComponent(ADV.naaHost || '')
         + '&upnpdev=' + encodeURIComponent(ADV.upnpDev || '')
@@ -4993,11 +5029,11 @@ function isAirPlayDevice(d) {
 }
 function devMixChannels(id) { var d = devMixOf(id); return (d && d.channels) || 0; }
 function effectiveChannels() {
-  var bk = (D('sp_backend') && D('sp_backend').value) || ADV.backend || 'wasapi';
+  var bk = (D('sp_backend') && D('sp_backend').value) || ADV.backend || 'coreaudio';
   var setCh = parseInt(ADV.channels, 10) || 0;
   var devCh = devMixChannels(ADV.device);
   // 共享模式：输出经 CoreAudio 系统混音，恒等于设备混音声道数（系统混音器决定），设置项不参与
-  if (bk === 'wasapi-shared') return devCh || setCh || 2;
+  if (bk === 'coreaudio-shared') return devCh || setCh || 2;
   // 硬件直通 / Null / UPnP：显式选了 2/6/8 就用它；「跟随源」(0) 用设备混音声道数做预览
   return setCh > 0 ? setCh : (devCh || 2);
 }
@@ -5026,16 +5062,16 @@ function updateDevMixHint() {
   var n = effectiveChannels();
   var devCh = devMixChannels(ADV.device);
   var t = devMixText(ADV.device);
-  var bk = (D('sp_backend') && D('sp_backend').value) || ADV.backend || 'wasapi';
+  var bk = (D('sp_backend') && D('sp_backend').value) || ADV.backend || 'coreaudio';
   // 这段话横跨 <b> 与多段拼接，单靠词条替换译出来是 "Per 2 channels Display: …" 这种生硬句子
   // （1.1.1-beta2 校对实录）。所以这里整句按语言二选一，别让引擎去猜句子结构。
   var isEn = (document.documentElement.dataset.lang === 'en');
   var tail;
   if (parseInt(ADV.channels, 10) > 0) tail = isEn ? ('; Output Channels = ' + parseInt(ADV.channels, 10) + ' (authoritative)')
                                                   : ('；「输出声道数」= ' + parseInt(ADV.channels, 10) + '，以此为准');
-  else if (bk === 'wasapi-shared') tail = isEn ? '; Shared mode is mixed by CoreAudio, so it always equals the device channel count'
+  else if (bk === 'coreaudio-shared') tail = isEn ? '; Shared mode is mixed by CoreAudio, so it always equals the device channel count'
                                                : '；共享模式输出经 CoreAudio 系统混音，恒等于设备声道数';
-  else if (bk === 'wasapi') tail = isEn ? '; Output Channels = Follow source; in exclusive mode the actual channels follow the source file'
+  else if (bk === 'coreaudio') tail = isEn ? '; Output Channels = Follow source; in exclusive mode the actual channels follow the source file'
                                         : '；「输出声道数」= 跟随源，硬件直通播放时实际声道随源文件变化';
   else tail = isEn ? '; Output Channels = Follow source' : '；「输出声道数」= 跟随源';
   var head = isEn ? ('Showing <b>' + n + ' channels</b>') : ('按 <b>' + n + ' 声道</b> 显示');
@@ -5084,7 +5120,7 @@ function applyAirPlayUIConstraints() {
 }
 
 function loadDeviceList(force) {
-  var bk = ADV.backend || 'wasapi';
+  var bk = ADV.backend || 'coreaudio';
   return api('/api/devices' + (force ? '?reload=1' : '')).then(function (j) {
     var list = (j && j.devices) || [];
     var defaultDev = null;
@@ -5119,8 +5155,8 @@ function loadDeviceList(force) {
     var sel2 = D('sp_device');
     if (!sel2) { updateDevMixHint(); applyAirPlayUIConstraints(); return; }
     var isEn = (typeof document !== 'undefined' && document.documentElement && document.documentElement.dataset.lang === 'en');
-    var defText = (bk === 'wasapi' || bk === 'wasapi-shared') ? (isEn ? 'Default Device' : '默认设备') : (isEn ? '(This backend has no local devices)' : '（此后端没有本地设备）');
-    if ((bk === 'wasapi' || bk === 'wasapi-shared') && defaultDev) {
+    var defText = (bk === 'coreaudio' || bk === 'coreaudio-shared') ? (isEn ? 'Default Device' : '默认设备') : (isEn ? '(This backend has no local devices)' : '（此后端没有本地设备）');
+    if ((bk === 'coreaudio' || bk === 'coreaudio-shared') && defaultDev) {
       var defAir = (defaultDev.transport === 'airplay');
       if (defAir) {
         var defLat = (defaultDev.latencyKnown && typeof defaultDev.latencyMs === 'number')
@@ -5171,7 +5207,7 @@ function loadDeviceList(force) {
     sel2.onchange = function () {
       ADV.device = this.value;
       var picked = devMixOf(this.value);
-      if (bk === 'wasapi') loadRates();   // 只有 CoreAudio 独占能查设备支持的采样率
+      if (bk === 'coreaudio') loadRates();   // 只有 CoreAudio 独占能查设备支持的采样率
       saveSettings();
       repaintTrims();
       applyAirPlayUIConstraints();
@@ -6821,7 +6857,23 @@ function showChain() {
         });
       }
     }
-    else if (p.resample) nodes.push({ k: '采样率转换', v: (p.filter || 'Kaiser sinc') + '  \u00b7  ' + p.phase + '  \u00b7  ' + p.taps + ' 抽头' + (p.twoStage ? '  \u00b7  两段式' : '') + '  \u2192  ' + p.outRate + ' Hz' + (sigGpuUsed ? '  \u00b7  GPU' : ''), gpu: !!sigGpuUsed, badge: sigGpuUsed ? 'GPU 升频' : '64-Bit 升频', kind: sigGpuUsed ? 'gpu' : 'dsp' });
+    // 2026-11-09（用户截图：48000→44100 显示「GPU 升频」）：徽标必须按**方向**说话。
+    // 旧实现只看「GPU 有没有参与」⟹ 降采样也盖升频章，把降质说成升级。
+    // 方向只认后端两端速率（p.inRate / p.outRate），两侧缺失才退回中性文案。
+    else if (p.resample) {
+      // 优先用后端给的方向（rateDir，两端速率算好的结论）；后端没给才用两端数字兜底。
+      var rd = (typeof p.rateDir === 'string' && p.rateDir) ? p.rateDir
+        : ((typeof p.inRate === 'number' && p.inRate > 0 && typeof p.outRate === 'number' && p.outRate > 0)
+           ? ((p.outRate < p.inRate) ? 'down' : ((p.outRate > p.inRate) ? 'up' : 'same')) : 'unknown');
+      var rdText = rd === 'down' ? '降采样' : (rd === 'up' ? '升频' : '重采样');
+      var rdBadge = rd === 'down' ? (sigGpuUsed ? 'GPU 降采样' : '64-Bit 降采样')
+                                 : (sigGpuUsed ? 'GPU 升频' : '64-Bit 升频');
+      // 降采样 = 丢信息，绝不给绿点/GPU 蓝点那种「赚了」的观感；用 DSP 色（蓝）。
+      nodes.push({ k: '采样率转换', v: rdText + '：' + (p.filter || 'Kaiser sinc') + '  \u00b7  ' + p.phase +
+        '  \u00b7  ' + p.taps + ' 抽头' + (p.twoStage ? '  \u00b7  两段式' : '') + '  ' + p.inRate + ' \u2192 ' +
+        p.outRate + ' Hz' + (sigGpuUsed ? '  \u00b7  GPU' : ''), gpu: !!sigGpuUsed,
+        badge: rdBadge, kind: sigGpuUsed ? 'gpu' : 'dsp' });
+    }
     else nodes.push({ k: '采样率转换', v: '旁路（源采样率与输出一致，逐位直通）', badge: '逐位旁路', kind: 'lossless' });
     if (p.eq || p.conv) {
       var eqParts = [];
@@ -6846,7 +6898,7 @@ function showChain() {
     // 1.1.2 AP-1.2/AP-1.7：输出节点必须如实说明"送到哪里、走什么传输、延迟从哪来"。
     // 判定只用后端给的真值（p.transport / p.sharedOnly），不从后端名猜、不写死延迟。
     var isAirPlayOut = (p.transport === 'airplay') || (S.bpTransport === 'airplay');
-    var isSharedOut = (ADV.backend === 'wasapi-shared') || (p.sharedOnly === true) || isAirPlayOut;
+    var isSharedOut = (ADV.backend === 'coreaudio-shared') || (p.sharedOnly === true) || isAirPlayOut;
     var latText = '';
     // AirPlay 的延迟来自**发送端设定的 RAOP 缓冲**，不是 CoreAudio 的设备属性；
     // 以前统一写「系统属性延迟」，等于把两种完全不同来源的数字贴同一个标签（用户 2026-11-04 截图可见）。
@@ -6974,20 +7026,20 @@ function backendHint() {
       '接收端解码后的重采样与模拟输出无法从本机验证；' + latMsg + '；不支持严格独占（Hog）与 DoP/Native DSD。';
     return;
   }
-  var bk = (D('sp_backend') && D('sp_backend').value) || 'wasapi';
-  if (bk === 'wasapi') {
+  var bk = (D('sp_backend') && D('sp_backend').value) || 'coreaudio';
+  if (bk === 'coreaudio') {
     // 2026-10-25（方案 C）：如实说明当前是否真的抢 Hog，而不是笼统说"独占/接管"。
     var hog = (typeof ADV !== 'undefined' && ADV.hogExclusive == 1);
     m.textContent = hog
       ? '硬件直通 + 严格独占（Hog）：播放期间屏蔽其它 App 声音；系统音量条会失效，请用本程序音量条调音量。'
       : '硬件直通 · bit-perfect；不抢 Hog ⟹ 系统音量条 / 音量键全程可用。如需彻底独占（屏蔽其它 App 声音），请勾选「严格独占」。';
-  } else if (bk === 'wasapi-shared') {
+  } else if (bk === 'coreaudio-shared') {
     m.textContent = 'CoreAudio 共享：经系统混音，非 bit-perfect；不支持 DoP / DSD。';
   } else if (bk === 'null') {
     m.textContent = 'Null output：跑完整 DSP，不出声。';
   } else if (bk === 'naa') {
     // 2026-10-25（用户指令「不可用的要隐藏」）：NAA 已从后端下拉移除，正常路径走不到这里。
-    // 保留分支只为兜底老 conf（migrateRemovedBackend 已把它降级为 wasapi）与直接调 API 的
+    // 保留分支只为兜底老 conf（migrateRemovedBackend 已把它降级为 coreaudio）与直接调 API 的
     // 场景，如实说明不可用，而不是静默给一句看似正常的提示。
     m.textContent = 'NAA / RTANet 在 macOS 上不可用（无驱动体系），已回退 CoreAudio 独占。';
   } else if (bk === 'upnp') {
@@ -7495,7 +7547,7 @@ function _setFieldVisible(id, on) {
   if (f) f.style.display = on ? '' : 'none';
 }
 function applyBackendState() {
-  var bk = (D('sp_backend') && D('sp_backend').value) || 'wasapi';
+  var bk = (D('sp_backend') && D('sp_backend').value) || 'coreaudio';
   // 2026-10-25（用户指令「不可用的要隐藏」）：NAA 端点块已从设置页移除，保留存在性守卫。
   if (D('sp_naawrap')) D('sp_naawrap').style.display = 'none';
   var upnpBox = D('sp_upnpwrap'); if (upnpBox) upnpBox.style.display = (bk === 'upnp') ? '' : 'none';
@@ -7547,8 +7599,8 @@ function initCastControls() {
        流媒体页推送区块）全部由 applyCastUi(st) 从同一份状态刷新，不各存一份。
      * 推送 = ADV.backend='upnp' + ADV.upnpDev=<描述URL> 落盘，然后按新参数重放当前曲目
        ⟹ 之后的切歌/暂停/seek 全部由后端路由到同一条投放会话（"所有播放都走 UPNP"）。
-     * 再点一次 = 停止投放 + 回到推送前的输出后端（默认 wasapi），并恢复本地播放。
-       （刻意记 prevBackend 而不是硬编码 wasapi：测试实例是 null，硬编码会把安全设置冲掉。） */
+     * 再点一次 = 停止投放 + 回到推送前的输出后端（默认 coreaudio），并恢复本地播放。
+       （刻意记 prevBackend 而不是硬编码 coreaudio：测试实例是 null，硬编码会把安全设置冲掉。） */
 var CAST = { state: null, prevBackend: '', seq: 0, runningSeq: 0 };
 // 2026-10-30 用户实测 bug（B2）：「点完投送，投送到设备按钮没有实时切换到设备，
 //   还保持着图示状态，退出重进才正常。」
@@ -9555,7 +9607,7 @@ function renderSettingsPage() {
   // Nx 下拉必须带上"跟随 1x"（空值），否则重建后浏览器退回第一项，一保存就把 Nx 改掉
   var filtsNx = '<option value="">跟随 1x（不单独指定）</option>' + filts;
   var shaps = D('sShap') ? D('sShap').innerHTML : '';
-  var BK = ADV.backend || 'wasapi';
+  var BK = ADV.backend || 'coreaudio';
   var CH = String(ADV.channels || 0);
   var h = '';
 
@@ -9605,13 +9657,14 @@ function renderSettingsPage() {
        + '<div style="flex:1 1 auto;min-width:180px">'
        + '<label>后端' + tip('选到当前不可用的后端时，播放会直接返回原因，不会假装出声') + '</label>'
        + '<select id=sp_backend>'
-       // 2026-10-25（用户指令「能使用的要用它真正的名字」）：macOS 单平台，UI 的 value
-       // 仍是 wasapi / wasapi-shared（rtaweb.cpp 的 make_sink() 靠这两个字符串分派），
-       // 但它们背后已不是 WASAPI —— 是 CoreAudio 的两种模式。面向用户的标签必须是真名。
+       // 2026-11-09（用户指令「不应该在没有这个东西的情况下搞这个命名」）：
+       // value 已从 wasapi / wasapi-shared 改成 coreaudio / coreaudio-shared —— macOS 上
+       // 从来没有过 WASAPI，让配置/日志/后端分派一路说着一个本机不存在的东西是笔技术债。
+       // 老 conf 的旧值由 migrateRemovedBackend() 的 BACKEND_ALIASES 静默映射，不影响升级。
        // 2026-10-25（方案 C）：Hog 独占已拆成独立开关（sp_hogexcl），
        // 后端标签不能再写「Hog Mode」—— 否则用户会以为选了后端就等于独占。
-       +   opt('wasapi', 'CoreAudio（硬件直通）', BK)
-       +   opt('wasapi-shared', 'CoreAudio 共享（系统混音）', BK)
+       +   opt('coreaudio', 'CoreAudio（硬件直通）', BK)
+       +   opt('coreaudio-shared', 'CoreAudio 共享（系统混音）', BK)
        // 2026-10-25（用户指令「不可用的要隐藏」）：NAA / RTANet 在 macOS 上没有驱动体系，
        // make_sink() 对 backend=="naa" 直接返回必然 open 失败的 UnavailableSink。
        // 呈现一个永远不可能工作的选项 = 骗用户，故整项移除（后端拒绝分支保留）。
@@ -9754,9 +9807,9 @@ function renderSettingsPage() {
   // ---------- 输入 ----------
   h += '<div class=spane data-g=in>'
      + sgroup('输入设备与采集', 'CoreAudio 采集 / 录制与直通监听',
-         // 2026-10-25（用户指令「能使用的要用它真正的名字」）：value 仍是 wasapi
+         // 2026-11-09：value 已改名为 coreaudio / coreaudio-shared（历史别名见 BACKEND_ALIASES）
          // （rtaweb.cpp 的输入采集分派靠它），但实际后端已是 CoreAudio 的 AUHAL 输入侧。
-         sel('sp_inbackend', '输入后端', opt('none', '[none]', ADV.inBackend || 'none') + opt('wasapi', 'CoreAudio', ADV.inBackend || 'none'),
+         sel('sp_inbackend', '输入后端', opt('none', '[none]', ADV.inBackend || 'none') + opt('coreaudio', 'CoreAudio', ADV.inBackend || 'none'),
              '选 CoreAudio 后可以采集线路输入 / 麦克风 / 系统混音回环')
        + sel('sp_indev', '输入设备', '<option value="">（未选择 / 默认设备）</option>', '包含物理采集设备与系统混音回环端点（标注「回环」的那一项）')
        + sel('sp_inch', '声道偏移', opt('0', '0', ADV.inOffset || 0) + opt('1', '1', ADV.inOffset || 0) +
@@ -10159,7 +10212,7 @@ function renderSettingsPage() {
       } else if (b.dataset.g === 'out') {
         applyBackendState();
         // 只有"输出后端 = UPnP"时才需要渲染器列表（目标设备下拉在输出页里）
-        if (((D('sp_backend') && D('sp_backend').value) || 'wasapi') === 'upnp') scanCastDevices(false);
+        if (((D('sp_backend') && D('sp_backend').value) || 'coreaudio') === 'upnp') scanCastDevices(false);
       } else if (b.dataset.g === 'stream') {
         loadSrcConfig();
         scanCastDevices(false);   // 推送区块的设备列表
@@ -10196,7 +10249,7 @@ function renderSettingsPage() {
   // 2026-10-24（261024-02 #8）：一键切到 bit-perfect 直通。
   // 用户只看到"非 bit-perfect"，不知道是哪一环：这里把判定口径对应的控件一次改到位。
   if (D('sp_bpfix')) D('sp_bpfix').onclick = function () {
-    if (D('sp_backend')) { D('sp_backend').value = 'wasapi'; ADV.backend = 'wasapi'; }
+    if (D('sp_backend')) { D('sp_backend').value = 'coreaudio'; ADV.backend = 'coreaudio'; }
     if (D('sp_outmode')) D('sp_outmode').value = 'pcm';
     if (D('sp_rate')) D('sp_rate').value = 'src';
     if (D('sRate')) D('sRate').value = 'src';
@@ -10364,7 +10417,7 @@ function renderSettingsPage() {
   applyDsdState();
   if (D('sp_inbackend')) D('sp_inbackend').onchange = function () {
     ADV.inBackend = this.value; saveSettings();
-    if (this.value === 'wasapi') loadInputDevices(); else if (D('sp_inmsg')) D('sp_inmsg').textContent = '';
+    if (this.value === 'coreaudio') loadInputDevices(); else if (D('sp_inmsg')) D('sp_inmsg').textContent = '';
   };
   if (D('sp_indev')) D('sp_indev').onchange = function () { ADV.inDev = this.value; saveSettings(); };
   if (D('sp_inch')) D('sp_inch').onchange = function () { ADV.inOffset = parseInt(this.value, 10) || 0; saveSettings(); };
@@ -10415,7 +10468,7 @@ function renderSettingsPage() {
          : (j.metalUsable === false ? '后端已就位，本机不可用（会回退 CPU）' : '后端已就位')) + '）';
     }
   }).catch(function () { });
-  if (ADV.inBackend === 'wasapi') loadInputDevices();
+  if (ADV.inBackend === 'coreaudio') loadInputDevices();
   // 流媒体页（用户 261024-01 #5）：列表 / 添加 / 编辑 / 删除 / 启用 / 测试 —— 全部即时落盘
   bindSrcPage();
   loadSrcConfig();
@@ -10424,8 +10477,11 @@ function renderSettingsPage() {
   bindFootActions();
   function _resetAll() {
     if (!confirm('把所有参数恢复成默认值？')) return;
+    // ★ 2026-11-09：hogExclusive 也要写（= 1，与默认一致）。漏掉它时 ADV.hogExclusive
+    //   会变成 undefined，/api/play 的 hogexcl=0 —— 「恢复默认」反而把用户悄悄踢出独占，
+    //   与"默认开启"自相矛盾。
     ADV = { device: '', bits: 0, taps: 0, atten: 0, transition: 0, phase: '', modcut: 0, moddith: -1, ir: '', irgpu: 0, ramp: 0, theme: S.theme, modorder: 5, modfamily: 'dsd', directsdm: 0, dsdKind: 'fir', dsdConv: 'narrow',
-            backend: 'wasapi', channels: 0, naaHost: '', autoanl: 0,
+            backend: 'coreaudio', hogExclusive: 1, channels: 0, naaHost: '', autoanl: 0,
             inBackend: 'none', inDev: '', inOffset: 0, inBuf: 100, inMonitor: 0, inSeconds: 0, inOut: '' };
     // 1.1.4：「恢复默认」必须把**内存里的**自动分析开关一并关掉 —— 复选框会跟着 ADV 重建为未勾选，
     //   若 ANL.auto 不同步归零，界面显示"关"而实际还在后台分析（比不重置更糟）。
@@ -12136,7 +12192,7 @@ function collectSettings() {
   ensureGpuOption(ADV.gpuvendor);
   if (D('sGpu')) D('sGpu').value = ADV.gpuvendor;
   // 输出后端 / 声道 / 每声道微调
-  if (D('sp_backend')) ADV.backend = D('sp_backend').value || 'wasapi';
+  if (D('sp_backend')) ADV.backend = D('sp_backend').value || 'coreaudio';
   if (D('sp_hogexcl')) ADV.hogExclusive = D('sp_hogexcl').checked ? 1 : 0;
   // 261024-01 #11：NAA 端点优先取自动发现的下拉；手动框（折叠兜底）有值则以它为准
   if (D('sp_naa_dev') && D('sp_naa_dev').value) ADV.naaHost = D('sp_naa_dev').value;

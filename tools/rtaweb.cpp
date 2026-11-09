@@ -17,8 +17,8 @@
 // ---------------- macOS 移植（2026-10-25，PLATFORM.md §13.12）----------------
 // 2026-10-25：Windows 专属件已随平台删除（项目转 macOS 单平台）；macOS 侧：
 //   * 输出后端 = platform::CoreAudioOutput（§13.9/§13.10 已实测 0 LSB 逐位直通）
-//     UI 的 backend 值不动（§10 契约"不要改 UI"）："wasapi"/空 → CoreAudio 独占（Hog+物理格式），
-//     "wasapi-shared" → CoreAudio shared（OpenSpec.shared 就是照 WASAPI 共享语义设计的）；
+//     UI 的 backend 值不动（§10 契约"不要改 UI"）："coreaudio"/空 → CoreAudio 独占（Hog+物理格式），
+//     "coreaudio-shared" → CoreAudio shared（OpenSpec.shared 就是照 WASAPI 共享语义设计的）；
 //   * naa / upnp / input(采集) / crash_dump / rt_tune(MMCSS)：macOS 首版不支持，
 //     API 路由保留并明确报错（页面顶部本来就承诺"选到不可用后端会直接返回原因"）；
 //   * ASIO（2026-10-25 task-12）：**整个后端与 /api/asio* 路由已删除**。ASIO 是 Steinberg
@@ -55,6 +55,7 @@ using rta::net::SubEntry;
 #include "audio/audio_loader.h"
 #include "audio/media_info.h"
 #include "audio/output_bit_depth.h"
+#include "audio/bp_verdict.h"      // bit-perfect 结论的唯一实现（信号链 / status / 诊断共用）
 #include "audio/render_loop.h"     // 渲染主循环(含 RENDERFAIL 遥测;测试与 rtaweb 共用同一份)
 class CoreAudioSink;   // 本文件后部定义；render_loop 的 mac 遥测分支要用（前向声明）
 #include "audio/rate_pick.h"       // 输出采样率选择的纯逻辑(可离线单测;2026-10-22 第二首按 44100 开流事故)
@@ -346,24 +347,29 @@ struct PlayParams {
     std::string sdmFilterNx;          // SDM 用的 Nx 滤波器；空 = 沿用 filterNx
     // 2026-10-25（默认值纠正）：这些 value 名是 UI 契约（前端下拉的 value 未变），
     // 但 macOS 上的真实语义已经不同 —— 注释必须说清，否则后来者会以为还在用 WASAPI。
-    //   "wasapi"        → CoreAudio 独占（AUHAL + Hog Mode）
-    //   "wasapi-shared" → CoreAudio 共享（系统混音）
+    //   "coreaudio"        → CoreAudio 独占（AUHAL + Hog Mode）
+    //   "coreaudio-shared" → CoreAudio 共享（系统混音）
     //   "naa"           → macOS 不可用（make_sink 返回必然 open 失败的 sink；UI 已移除该项）
     //   "upnp"          → UPnP/DLNA 投放（CastManager）
     //   "null"          → 只跑 DSP 不出声
-    // 2026-10-25（方案 C，用户选择）：Hog 独占做成独立开关。
-    //   默认 false = 不抢 Hog ⟹ **系统音量条 / 音量键全程可用**（用户明确要求）；
-    //   true      = 抢 Hog ⟹ 真独占（其他 App 声音被屏蔽），但系统音量失效 ——
-    //               这是 macOS Hog Mode 的机制限制（实测：Hog 中其它进程改音量无效）。
-    bool hogExclusive = false;
-    std::string backend = "wasapi";   // 默认 = CoreAudio 独占（等价 WASAPI 独占语义）
+    // Hog 独占是独立开关（2026-10-25 从 shared 拆出来，方案 C）。
+    //   true  = 抢 Hog ⟹ 真独占（其他 App 声音被屏蔽）；代价是系统音量条 / 音量键失效 ——
+    //           这是 macOS Hog Mode 的机制限制（实测：Hog 中其它进程改音量无效），
+    //           音量只能用本程序的音量条调。
+    //   false = 不抢 Hog ⟹ 系统音量全程可用，但设备所有权不独占。
+    // ★ 2026-11-09 用户明确要求「独占功能要默认开启」⟹ 默认改为 true。
+    //   这与"bit-perfect 不要求 Hog"并不矛盾：Hog 只保证设备所有权独占，
+    //   位流是否被改由采样率/位深/增益/处理链决定（见 src/audio/bp_verdict.h）。
+    //   Hog 打开的真实价值是「别的声音不会插进来一起播」，代价是系统音量失效。
+    bool hogExclusive = true;
+    std::string backend = "coreaudio";   // 默认 = CoreAudio 独占（等价 WASAPI 独占语义）
     std::string naaHost;              // NAA 端点 host:port（macOS 不可用，仅老 conf 兼容）
     std::string upnpDev;              // UPnP/DLNA 渲染器（设备描述 URL；后端 = upnp 时使用）
     int    outChannels = 0;           // 0 = 跟随源
     double trim[8] = {0,0,0,0,0,0,0,0};   // 每声道增益 dB
 
     // ---- 输入 ----
-    std::string inBackend = "none";   // none | wasapi（macOS 上 "wasapi" = CoreAudio 输入）
+    std::string inBackend = "none";   // none | wasapi（macOS 上 "coreaudio" = CoreAudio 输入）
     std::string inDevice;
     int    inOffset = 0;
     int    inBufferMs = 100;
@@ -472,6 +478,12 @@ struct PlayerState {
     bool        outSharedOnly = false;      // AirPlay 等仅共享端点
     double outRate = 0;
     int    outBits = 0;
+    // 2026-11-09（用户截图：48000→44100 被标成「GPU 升频」）：
+    // 底栏与信号链要判"升频还是降采样"，就必须拿到**源采样率**。
+    // 以前 /api/status 的 inRate 只在投放模式给值，本地恒为 0 ⟹ 前端只能靠
+    // why 文案里有没有「重采样」三个字猜方向，于是降采样被标成升频。
+    // 这里与 outRate 同源同时机写入（起播时一次），不增加轮询开销。
+    uint32_t inRate = 0;
     // ---- ReplayGain / Album Gain 状态 ----
     std::string rgMode = "off";
     double      rgAppliedDb = 0.0;
@@ -699,6 +711,10 @@ static void params_store(const PlayParams& p) {
     std::lock_guard<std::mutex> lk(g_paramsMtx);
     g_params = p;
 }
+
+// 后端标识历史别名的规范化函数（定义在文件后部 out_mode_of_backend 之前）。
+// 前置声明：parseForm / apply_conf_defaults_for_play 都在它之前就要用。
+static std::string normalize_backend_id(const std::string& v);
 
 // ---------------- 可观测性（1.0.5）：运行时长 / 构建时间 ----------------
 static const std::chrono::steady_clock::time_point g_startTp = std::chrono::steady_clock::now();
@@ -1244,7 +1260,7 @@ static PlayParams parseForm(const std::string& body, std::set<std::string>* seen
         else if (k == "ramp")     p.volRamp = atof(v.c_str());
         else if (k == "sdmfilt")   p.sdmFilter = v;
         else if (k == "sdmfiltnx") p.sdmFilterNx = v;
-        else if (k == "backend") p.backend = v;
+        else if (k == "backend") p.backend = normalize_backend_id(v);
         else if (k == "naahost") p.naaHost = v;
         else if (k == "upnpdev")  p.upnpDev = v;
         else if (k == "channels") p.outChannels = atoi(v.c_str());
@@ -1395,7 +1411,7 @@ static PlayParams apply_conf_defaults_for_play(const PlayParams& in, const std::
         p.outChannels = atoi(getConf("channels").c_str());
     }
     if (seen.find("backend") == seen.end() && hasConf("backend")) {
-        p.backend = getConf("backend");
+        p.backend = normalize_backend_id(getConf("backend"));
     }
     if (seen.find("upnpdev") == seen.end() && hasConf("upnpdev")) {
         p.upnpDev = getConf("upnpdev");
@@ -1463,8 +1479,8 @@ static bool ui_lang_en();
 
 // ---------------- CoreAudio 输出后端（macOS）----------------
 // 包装 platform::CoreAudioOutput（PLATFORM.md §13.9 真机实测 16/24/32 bit 0 LSB）。
-// UI 的 backend 值（§10 契约不改 UI）："wasapi"/空 → 独占（Hog+物理格式，等价 WASAPI 独占语义）；
-// "wasapi-shared" → OpenSpec.shared（等价 WASAPI 共享语义：不抢 Hog、不改物理格式）。
+// UI 的 backend 值（§10 契约不改 UI）："coreaudio"/空 → 独占（Hog+物理格式，等价 WASAPI 独占语义）；
+// "coreaudio-shared" → OpenSpec.shared（等价 WASAPI 共享语义：不抢 Hog、不改物理格式）。
 class CoreAudioSink : public OutSink {
 public:
     bool open(const SinkOpenOpts& o, uint32_t rate, int ch, int bits) override {
@@ -1832,16 +1848,30 @@ static std::string stem_or_self(const std::string& file) {
     return pathToUtf8(fs::u8path(file).stem());
 }
 
+// 后端标识的**历史别名** → 现名（2026-11-09 改名）。
+//
+// 为什么要这一层、而不是把字面量全局替换干净就算完：
+//   老用户的 rlplayer-settings.conf 里存着 backend=wasapi / wasapi-shared。
+//   字面量一改，这些配置会解析成"未知后端"——在 make_sink 里那等于落回 CoreAudio 独占，
+//   看着能用，但**共享模式的用户会被静默升格成独占**（抢 Hog、屏蔽其它 App）。
+//   macOS 上从来没有过 WASAPI，这两个字符串只是当年"不改 UI 契约"留下的内部值；
+//   名字该改，老配置该继续认。
+static std::string normalize_backend_id(const std::string& v) {
+    if (v == "wasapi-shared") return "coreaudio-shared";
+    if (v == "wasapi")        return "coreaudio";
+    return v;
+}
+
 // 输出通道模式（F-5 的 outMode 取值）—— **mac 口径**，不是上游的 pcm|dop|native。
 //   上游 outMode 表达的是"1-bit 通路怎么走"；mac 没有 ASIO 原生 DSD 通道，
 //   Native DSD 在 /api/play 就被明确拒绝（见那里的 dsdnative 门），
 //   所以这里表达的是**输出通道的独占/共享语义**，DSD 与否由 dsd/dsdRate 单独表达。
-//   ★ 绝不允许出现 "wasapi" / "asio" / "native"：那是 Windows 的虚构通路（A-5 事故教训）。
+//   ★ 绝不允许出现 "coreaudio" / "asio" / "native"：那是 Windows 的虚构通路（A-5 事故教训）。
 static std::string out_mode_of_backend(const std::string& backend) {
-    if (backend == "wasapi-shared") return "shared";   // CoreAudio 共享（系统混音）
+    if (backend == "coreaudio-shared") return "shared";   // CoreAudio 共享（系统混音）
     if (backend == "null")          return "null";     // 只跑 DSP 不出声
     if (backend == "upnp")          return "upnp";     // 投放：格式由远端渲染器决定
-    // 空 / "wasapi" / 未知历史值（含老 conf 的 "asio"）一律落到 CoreAudio 独占 ——
+    // 空 / "coreaudio" / 未知历史值（含老 conf 的 "asio"）一律落到 CoreAudio 独占 ——
     // 与 make_sink 的第二道闸完全同一口径（那边也是 else → CoreAudioSink 独占）。
     return "coreaudio";
 }
@@ -1852,8 +1882,8 @@ static std::unique_ptr<OutSink> make_sink(const PlayParams& p) {
     if (p.backend == "upnp")           return std::make_unique<NullSink>();
     if (p.backend == "null")           return std::make_unique<NullSink>();
     // macOS（§10 契约不改 UI）：UI 的 backend 值映射到 CoreAudio 的两种模式。
-    // "wasapi"/空 → 独占（Hog+物理格式，等价 WASAPI 独占语义）；
-    // "wasapi-shared" → shared（OpenSpec.shared 按 WASAPI 共享语义设计）。
+    // "coreaudio"/空 → 独占（Hog+物理格式，等价 WASAPI 独占语义）；
+    // "coreaudio-shared" → shared（OpenSpec.shared 按 WASAPI 共享语义设计）。
     // naa 在 macOS 无驱动体系：造一个必然 open 失败的 sink，把"不支持"如实报到界面。
     if (p.backend == "naa")
         return std::make_unique<UnavailableSink>("macOS 版暂不支持 NAA / RTANet 推流（Windows 专属后端）");
@@ -1861,11 +1891,11 @@ static std::unique_ptr<OutSink> make_sink(const PlayParams& p) {
     // 一律落到 CoreAudio 独占 —— 前端 migrateRemovedBackend() 会先把它降级成 wasapi 并提示，
     // 这里是第二道闸：即便绕过 UI 直接调 /api/play，也不会落到一个空指针或假装成功。
     auto s = std::make_unique<CoreAudioSink>();
-    s->set_shared(p.backend == "wasapi-shared");
+    s->set_shared(p.backend == "coreaudio-shared");
     // 1.1.2：DSD 档位 >= 64 即 DoP 承载（DirectSDM 也走 DoP 装箱）。
     s->set_dop(p.dsd >= 64);
     // 2026-10-25（方案 C）：Hog 独占开关。共享模式本来就不该抢 Hog。
-    s->set_exclusive(p.hogExclusive && p.backend != "wasapi-shared");
+    s->set_exclusive(p.hogExclusive && p.backend != "coreaudio-shared");
     return s;
 }
 
@@ -2073,7 +2103,7 @@ static bool play_one_direct(const std::string& file, const PlayParams& p) {
         }
         // 共享模式不支持 DoP/DSD：共享会经系统混音引擎重采样，DoP 载波（0x05/0xFA 标记）
         // 一旦被重采样就不再是合法 DoP，接收端判非法并静音 —— 必须明确报错而不是降质播放。
-        if (p.backend == "wasapi-shared") {
+        if (p.backend == "coreaudio-shared") {
             std::lock_guard<std::mutex> lk(ps.mtx);
             ps.error = "共享模式不支持 DoP/DSD（共享会重采样破坏 DoP 载波），请切换到独占模式。";
             return false;
@@ -2098,7 +2128,7 @@ static bool play_one_direct(const std::string& file, const PlayParams& p) {
                     //   41.6 秒（DSD_RATE rt=5.78、ms=41628），然后才报"设备不支持 352800 Hz"。
                     //   结果：用户看到"正在播放 0:00"的假象近一分钟，白算一遍、白占一份内存。
                     //   探测是只读的、毫秒级，必须在贵的操作之前完成。
-                    if (p.backend.empty() || p.backend == "wasapi") {
+                    if (p.backend.empty() || p.backend == "coreaudio") {
                         const uint32_t wantCarrier = targetRate / 16u;
                         const std::vector<uint32_t> pre = probe_exclusive_rates(p.device, 24, src.channels);
                         bool okPre = false;
@@ -2194,7 +2224,7 @@ static bool play_one_direct(const std::string& file, const PlayParams& p) {
         // 设备能力：DoP 载波率是源 DSD/16，本机 DAC 不一定支持（DSD256 要 705.6 kHz）。
         // HF-01 接线（2026-10-22）：空支持列表一律当「不支持/端点异常」，绝不静默放行（交接单 §6）。
         // DoP 固定 24-bit 容器，不参与位深回退（维持现状）。
-        if (p.backend.empty() || p.backend == "wasapi") {
+        if (p.backend.empty() || p.backend == "coreaudio") {
             const std::vector<uint32_t> rates = probe_exclusive_rates(p.device, 24, ch);
             bool ok = false;
             for (auto r : rates) if (r == carrier) ok = true;
@@ -2238,7 +2268,7 @@ static bool play_one_direct(const std::string& file, const PlayParams& p) {
             // 1.1.2 AP-1.8：直通分支也要带出传输与延迟事实（与 PCM 分支同源同口径）。
             // 只读 caps，不开流；AirPlay/共享端点已在入口被拒绝，这里只是记录。
             rta::platform::DeviceCaps dc;
-            if (p.backend.empty() || p.backend == "wasapi" || p.backend == "wasapi-shared") {
+            if (p.backend.empty() || p.backend == "coreaudio" || p.backend == "coreaudio-shared") {
                 auto pr = rta::platform::create_audio_output();
                 if (pr) dc = pr->caps(p.device);
             }
@@ -2681,7 +2711,8 @@ static rta::engine::DeviceCaps preset_probe_caps() {
     if (rates.empty()) {
         c.probeNote = "CoreAudio 独占/支持率探测为空（端点被占用/禁用/不支持所选位深）：按能力未知处理";
     }
-    if (!savedBackend.empty() && savedBackend != "coreaudio" && savedBackend != "wasapi" && savedBackend != "wasapi-shared") {
+    if (!savedBackend.empty() && normalize_backend_id(savedBackend) != "coreaudio" &&
+        normalize_backend_id(savedBackend) != "coreaudio-shared") {
         c.probeNote += (c.probeNote.empty() ? std::string() : std::string("；")) +
                        "当前后端是「" + savedBackend + "」（非本地独占设备）：能力按 CoreAudio 默认端点报，"
                        "原生 DSD 恒为 false";
@@ -3119,7 +3150,7 @@ static bool play_one_impl(const std::string& file, const PlayParams& pIn, rta::a
     rta::platform::DeviceCaps targetCaps;
     bool targetIsAirPlay = false;
     {
-        const bool localBackend = (pE.backend.empty() || pE.backend == "wasapi" || pE.backend == "wasapi-shared");
+        const bool localBackend = (pE.backend.empty() || pE.backend == "coreaudio" || pE.backend == "coreaudio-shared");
         if (localBackend) {
             if (pE.device.empty()) {
                 for (const auto& d : mac_enum_devices()) {
@@ -3133,10 +3164,10 @@ static bool play_one_impl(const std::string& file, const PlayParams& pIn, rta::a
     }
     if (targetIsAirPlay) {
         // AP-1.3：AirPlay 只走系统共享输出 —— 不抢 Hog、不改设备物理格式。
-        if (pE.backend != "wasapi-shared") {
+        if (pE.backend != "coreaudio-shared") {
             airplayNote = "AirPlay 设备只支持系统共享输出，已自动由独占改为共享（非 bit-perfect）";
             appendFallback(airplayNote);
-            pE.backend = "wasapi-shared";
+            pE.backend = "coreaudio-shared";
         }
         pE.hogExclusive = false;
         // AP-1.4：拒绝 DoP / Native DSD。注意这里**不是**"DSD 永久不能播"：
@@ -3208,7 +3239,7 @@ static bool play_one_impl(const std::string& file, const PlayParams& pIn, rta::a
         // 共享模式不支持 DoP/DSD 输出：共享经系统混音引擎重采样，DoP 载波（0x05/0xFA
         // 标记）被重采样后即非法，接收端判非法并静音 —— 直接明确报错，不降质播放。
         // （DirectSDM 路径在 play_one_direct 里另有一个相同的门。）
-        if (p.backend == "wasapi-shared" && p.dsd >= 64) {
+        if (p.backend == "coreaudio-shared" && p.dsd >= 64) {
             std::lock_guard<std::mutex> lk(ps.mtx);
             ps.error = "共享模式不支持 DoP/DSD（共享会重采样破坏 DoP 载波），请切换到独占模式。";
             return false;
@@ -3454,7 +3485,7 @@ static bool play_one_impl(const std::string& file, const PlayParams& pIn, rta::a
         // ---- 采样率（选择逻辑在 src/audio/rate_pick.h，纯函数、可离线单测）----
         // 只有 WASAPI 独占有"设备支持哪些采样率"可查。NAA / Null 没有本地设备，共享模式由
         // 系统混音率决定，这三者都把 "max" 当"跟随源"（想升频就直接选具体数值）。
-        const bool wasapiExcl = (p.backend.empty() || p.backend == "wasapi");
+        const bool wasapiExcl = (p.backend.empty() || p.backend == "coreaudio");
         // 非 WASAPI 独占（NAA / Null / 共享）没有"设备采样率"可查，follow 与 max 一样
         // 归一成"跟随源"；否则 pick_output_rate("follow") 会因为 systemRate==0 退回源率
         // 并打一条 SYSRATE_EMPTY，日志噪音且语义含糊。
@@ -3626,7 +3657,7 @@ static bool play_one_impl(const std::string& file, const PlayParams& pIn, rta::a
         //     16/24/32 各自支持列表（不再只丢 UNSUPPORTED_FORMAT）；
         //   * 降位深必须在信号链 note 与 PLAY 日志明示，不能悄悄变（交接单 §3 风险注）；
         //   * deviceRate==0（解析不出设备率）防御：错误带 inRate/frames/rate/dsd（HF-04）。
-        if (p.backend.empty() || p.backend == "wasapi") {
+        if (p.backend.empty() || p.backend == "coreaudio") {
             // deviceRate 为 0 表示"跟随源"——设备真正会打开的率是 in.rate（与下方 outRate 解析一致）。
             // DoP 时 deviceRate 已是 DoP 载波，必非 0。
             const uint32_t wantDevRate = dop ? deviceRate : (deviceRate ? deviceRate : in.rate);
@@ -3641,7 +3672,7 @@ static bool play_one_impl(const std::string& file, const PlayParams& pIn, rta::a
             }
             // 错误文案带上源采样率与后端：日志要能自证（哪首源、哪个后端、请求的什么率）
             const std::string srcDesc = "（源采样率 " + std::to_string(in.rate) + " Hz，后端 " +
-                                        (p.backend.empty() ? std::string("wasapi") : p.backend) + "）";
+                                        (p.backend.empty() ? std::string("coreaudio") : p.backend) + "）";
             if (dop) {
                 // DoP 路径：24-bit 容器固定，不参与位深回退（维持现状）；空列表不再当成功。
                 // 载波率不可变（DoP 的 0x05/0xFA 标记依赖精确的 DSD/16），所以这里保持硬失败。
@@ -3777,7 +3808,7 @@ static bool play_one_impl(const std::string& file, const PlayParams& pIn, rta::a
                            << (pEff.device.empty() ? std::string("(default endpoint)") : pEff.device)
                            << "; CoreAudio supported rates: " << join(rl, "none")
                            << " (source sample rate " << in.rate << " Hz, backend "
-                           << (p.backend.empty() ? std::string("wasapi") : p.backend) << ")";
+                           << (p.backend.empty() ? std::string("coreaudio") : p.backend) << ")";
                         if (!rateAuto) {
                             // 与 dec.userMessage 同一事实（明确选择档不自动改率），只是语言不同
                             en << ". You explicitly selected this sample rate, so RLPlayer reports the"
@@ -3822,7 +3853,7 @@ static bool play_one_impl(const std::string& file, const PlayParams& pIn, rta::a
         uint32_t mixRate = 0;
         int      mixCh   = 0;
         bool     mixFloat = false;
-        if (p.backend == "wasapi-shared") {
+        if (p.backend == "coreaudio-shared") {
             std::string mixErr;
             // macOS 共享模式：CoreAudio 混音域恒为 float32、声道取设备输出流声道数（实测 2ch），
             // 率取设备当前标称率（§13.10.3：共享路径数值在 |v|<2^24 时逐位精确）。
@@ -3988,7 +4019,7 @@ static bool play_one_impl(const std::string& file, const PlayParams& pIn, rta::a
         // ★ CUE 分轨：总长按**本区间**（srcCount）算，不是整轨 —— 否则 /api/status 的 dur 与
         //   进度条都会是"整轨"的（实测会看到 dur=10s 而实际只播 4s）。
         const size_t   totalOut = (size_t)((double)srcCount * (double)deviceRate / (double)in.rate + 0.5);
-        ps.outRate = deviceRate; ps.outBits = outBits;
+        ps.outRate = deviceRate; ps.outBits = outBits; ps.inRate = in.rate;
         // F-5：把本曲**最终的**输出格式自证写进 ps（PCM 路径）。
         // 走 DoP 的分支上面已经写过一次（含 level/码率/族）；这里补的是：
         //   * PCM 路径：dsd=0 / dsdRate=0 / carrierRate=0 / modFamily 空 / modOrder=0
@@ -4035,6 +4066,39 @@ static bool play_one_impl(const std::string& file, const PlayParams& pIn, rta::a
             mac_find_dev(pEff.device, dev, devId);
         }
 
+        // ---- bit-perfect 结论（一次性算好，信号链与 /api/status 共用）----
+        // 2026-11-09（用户反馈「共享模式必然不是 bit-perfect，程序却显示是」）：
+        // 判定式收敛到 src/audio/bp_verdict.h（唯一实现）。这里只负责**如实填事实**，
+        // 不再各自写一遍 if 链 —— 旧的两份复制都漏了「经系统混音」这一票否决。
+        rta::audio::BpInputs bpin;
+        bpin.directSdmOk = (p.directSdm && directNote.empty());
+        bpin.viaAirPlay  = targetIsAirPlay;
+        // 共享：后端字符串是**请求**的真相；AirPlay 恒为共享（后端强制，见 open() 里的 isAirPlay 归一）。
+        // 开流之后还会用后端自证（shared_mode()）再校一次，见下方 sinkGuard 之后。
+        bpin.sharedMixer = targetIsAirPlay || (p.backend == "coreaudio-shared") ||
+                           (targetCaps.sharedOnly && !targetIsAirPlay);
+        bpin.inRate      = in.rate;
+        bpin.outRate     = outRate;
+        bpin.volumeDb    = p.volume;
+        bpin.shaperOn    = (cfg.shaper != rta::dsp::Shaper::None);
+        bpin.preAttenDb  = cfg.preAttenDb;
+        bpin.eqOn        = eqLoaded;
+        bpin.convOn      = convLoaded;
+        bpin.dopCarrier   = dop;
+        bpin.srcBits      = srcBitsEff;
+        bpin.outBits      = outBits;
+        bpin.replayGainDb = cfg.replayGainDb;
+        // 等响度：Loudness 在"实际听音电平 >= 上界(0 dB)"时自动旁路（loudness.h:72），
+        // 所以"用户开了开关"≠"真的有提升"。这里按后端同一公式算，避免把旁路当处理。
+        bpin.loudnessOn  = p.loudness &&
+                           (rta::dsp::replaygain::loudness_volume_db(0.0, cfg.replayGainDb) < -1e-9);
+        bpin.channelMix  = (outCh != in.channels);
+        bpin.floatSource = in.isFloat;
+        const rta::audio::BpVerdict bpv = rta::audio::bp_verdict(bpin);
+        // 方向（降采样/升采样）必须有后端证据才敢说。旧代码靠 why 文案里"重采样"三个字
+        // 反推方向 ⟹ 48000→44100 被标成「PCM-PCM 升频」（用户 2026-11-09 截图）。
+        const rta::audio::RateDirection bpDir = rta::audio::rate_direction(in.rate, outRate);
+
         // 信号链快照：源文件 -> 解码 -> 重采样 -> 抖动 -> 音量 -> 设备
         {
             const MediaInfo mi = probe_media(file);
@@ -4073,6 +4137,11 @@ static bool play_one_impl(const std::string& file, const PlayParams& pIn, rta::a
             << ",\"deviceCurrentChannels\":" << targetCaps.currentChannels
             << ",\"deviceCurrentBufferFrames\":" << targetCaps.currentBufferFrames
             << ",\"bitsFallback\":\"" << jesc(bitNote) << "\""
+            // 2026-11-09：方向由后端给定，前端不再从 why 文案反推（降采样曾被标成升频）。
+            // unknown = 两端速率没拿全 ⟹ 前端也不许声称方向。
+            << ",\"rateDir\":\"" << (bpDir == rta::audio::RateDirection::Downsample ? "down"
+                                      : bpDir == rta::audio::RateDirection::Upsample ? "up"
+                                      : bpDir == rta::audio::RateDirection::Same ? "same" : "unknown") << "\""
                 // 2026-10-23（用户 261023-02 #1）：信号链要在显眼处给出**权威的 bit-perfect 结论**，
                 // 而不是让用户自己从 resample/volume/shaper/eq 等一堆字段里推。
                 // 判定口径（严格）：①不重采样（outRate == in.rate）②音量增益为 0 dB ③无抖动/整形器
@@ -4125,49 +4194,14 @@ static bool play_one_impl(const std::string& file, const PlayParams& pIn, rta::a
                 << ",\"rgClip\":" << (ps.rgClipLimited ? "true" : "false")
                 << ",\"rgSource\":\"" << jesc(ps.rgSource) << "\""
                 << ",\"rgNote\":\"" << jesc(ps.rgNote) << "\""
-                // ---- bit-perfect 权威结论（用户 261023-02 #1）----
-                // 三态：direct（DirectSDM 1-bit 直通，最严格）/ yes / no（附原因）
-                // 口径：①不重采样 ②音量 0 dB ③无抖动/整形 ④无衰减 ⑤无 EQ/IR ⑥非 DoP ⑦位深未降
-                // 2026-10-24（261024-02 #8）：位深判据用"源文件真实位深"（见下方 srcBitsEff 声明）
-                << ",\"bitPerfect\":\"" << ([&] {
-                       if (p.directSdm && directNote.empty()) return std::string("direct");
-                       // 1.1.2 AP-1.2：AirPlay 端到端逐位一致**未获验证**（系统混音 + 网络重封装），
-                       // 一票否决。不这么做的话，"44.1k/16 + 音量 0 + 无 EQ"会让底栏亮出
-                       // 一个假的绿色 BIT-PERFECT 徽标 —— 那正是路线图点名要修的错误结论。
-                       if (targetIsAirPlay) return std::string("no");
-                       if (outRate != in.rate) return std::string("no");
-                       if (std::fabs(p.volume) > 1e-9) return std::string("no");
-                       if (cfg.shaper != rta::dsp::Shaper::None) return std::string("no");
-                       // 2026-10-24（261024-02 #8）：attenDb 是**滤波器阻带衰减设计值**（如 120 dB），
-                       // 不是信号增益！以前拿它判"衰减"⟹ 只要选了滤波器预设就永远非 bit-perfect（误报）。
-                       // 真正的信号衰减是 preAttenDb（ISP/调制器余量预衰减）。
-                       if (cfg.preAttenDb > 1e-9) return std::string("no");
-                       if (eqLoaded || convLoaded || dop) return std::string("no");
-                       if (srcBitsEff > 0 && outBits > 0 && outBits < srcBitsEff) return std::string("no");
-                       if (std::fabs(cfg.replayGainDb) > 1e-9) return std::string("no");
-                       return std::string("yes");
-                   }()) << "\""
-                << ",\"bitPerfectWhy\":\"" << jesc([&] {
-                       if (p.directSdm && directNote.empty()) return std::string("DirectSDM：1-bit 直通，跳过 PCM 与调制");
-                       std::vector<std::string> why;
-                       if (targetIsAirPlay) why.push_back("AirPlay 网络传输（发送端逐位无损；接收端解码后的输出无法验证）");
-                       if (outRate != in.rate) why.push_back("重采样 " + std::to_string(in.rate) + "→" + std::to_string(outRate) + " Hz");
-                       if (std::fabs(p.volume) > 1e-9) why.push_back("音量 " + std::to_string((int)std::lround(p.volume)) + " dB");
-                       if (cfg.shaper != rta::dsp::Shaper::None) why.push_back("抖动/整形");
-                       if (cfg.preAttenDb > 1e-9) why.push_back("预衰减");
-                       if (eqLoaded) why.push_back("EQ");
-                       if (convLoaded) why.push_back("IR 卷积");
-                       if (dop) why.push_back("DoP 载波");
-                       if (srcBitsEff > 0 && outBits > 0 && outBits < srcBitsEff) why.push_back("位深降低");
-                       if (std::fabs(cfg.replayGainDb) > 1e-9) {
-                           char rgb[64];
-                           std::snprintf(rgb, sizeof(rgb), "ReplayGain (%+.2f dB)", cfg.replayGainDb);
-                           why.push_back(rgb);
-                       }
-                       if (why.empty()) return std::string("源→解码→输出全程逐位一致");
-                       std::string s; for (size_t i = 0; i < why.size(); ++i) { if (i) s += "、"; s += why[i]; }
-                       return s;
-                   }()) << "\""
+                // ---- bit-perfect 权威结论（唯一实现：src/audio/bp_verdict.h）----
+                // 2026-11-09（用户反馈「共享模式必然不是 bit-perfect，程序却显示是」）：
+                // 这里原本是一份**内联复制**的判定式，下面给 ps.bpState 还有第二份复制。
+                // 两份都漏了「经系统混音」一票否决 —— 后端 CoreAudioOutput::bit_perfect()
+                // 一直据此报 false，但它的结论从来没被界面取用 ⟹ 共享 + 源率==混音率 + 0 dB
+                // 会亮出假的绿色 BIT-PERFECT。现在统一调 bp_verdict()：判据改一处，三处同步。
+                << ",\"bitPerfect\":\"" << jesc(bpv.state) << "\""
+                << ",\"bitPerfectWhy\":\"" << jesc(bpv.why) << "\""
                 << ",\"decodeMs\":" << note.totalMs
                 << ",\"ffmpegMs\":" << note.ffmpegMs
                 << ",\"wavReadMs\":" << note.wavReadMs
@@ -4175,32 +4209,13 @@ static bool play_one_impl(const std::string& file, const PlayParams& pIn, rta::a
                 << "}";
             recent_add(file, mi.title.empty() ? stem_or_self(file) : mi.title,
                        mi.artist, mi.album);
-            // 把结论写进 ps 供 /api/status 带出（用同一个判定，避免两处口径漂移）
+            // 把结论写进 ps 供 /api/status 带出。
+            // 2026-11-09：这里原本是**第二份复制**的判定式（与信号链那份并列维护）。
+            // 两份都漏「经系统混音」⟹ 徽标与详情页会一起说假话，而且改一处忘一处。
+            // 现在两者共用同一个 bpv（见上方 bp_verdict 调用点），不存在口径漂移。
             {
-                std::string bps = "no", bpw = "见信号链";
-                if (p.directSdm && directNote.empty()) { bps = "direct"; bpw = "DirectSDM：1-bit 直通，跳过 PCM 与调制"; }
-                else {
-                    std::vector<std::string> why;
-                    // 与信号链 JSON 同一口径（两处必须一致，否则徽标与详情页会互相打脸）
-                    if (targetIsAirPlay) why.push_back("AirPlay 网络传输（发送端逐位无损；接收端解码后的输出无法验证）");
-                    if (outRate != in.rate) why.push_back("重采样 " + std::to_string(in.rate) + "→" + std::to_string(outRate) + " Hz");
-                    if (std::fabs(p.volume) > 1e-9) why.push_back("音量 " + std::to_string((int)std::lround(p.volume)) + " dB");
-                    if (cfg.shaper != rta::dsp::Shaper::None) why.push_back("抖动/整形");
-                    if (cfg.preAttenDb > 1e-9) why.push_back("预衰减");   // 见上方口径注：attenDb 是滤波设计值
-                    if (eqLoaded) why.push_back("EQ");
-                    if (convLoaded) why.push_back("IR 卷积");
-                    if (dop) why.push_back("DoP 载波");
-                    if (srcBitsEff > 0 && outBits > 0 && outBits < srcBitsEff) why.push_back("位深降低");
-                    if (std::fabs(cfg.replayGainDb) > 1e-9) {
-                        char rgb[64];
-                        std::snprintf(rgb, sizeof(rgb), "ReplayGain (%+.2f dB)", cfg.replayGainDb);
-                        why.push_back(rgb);
-                    }
-                    if (why.empty()) { bps = "yes"; bpw = "源→解码→输出全程逐位一致"; }
-                    else { std::string s; for (size_t i = 0; i < why.size(); ++i) { if (i) s += "、"; s += why[i]; } bpw = s; }
-                }
                 std::lock_guard<std::mutex> lk(ps.mtx);
-                ps.bpState = bps; ps.bpWhy = bpw;
+                ps.bpState = bpv.state; ps.bpWhy = bpv.why;
             }
             dlog("stage recent-ok");
             play_log(std::string("PLAY v") + RLPLAYER_VERSION + " " + sig.str());
@@ -4499,11 +4514,11 @@ static bool play_one_impl(const std::string& file, const PlayParams& pIn, rta::a
         rl.dlogFn = [](const std::string& s) { dlog(s); };
         rl.deviceLabel = dev;
         rl.deviceIdDesc = devId;
-        rl.onShared = (p.backend == "wasapi-shared");
+        rl.onShared = (p.backend == "coreaudio-shared");
         // 只有「默认走 WASAPI 独占」的普通 PCM 播放才允许自动回退共享；
         // DoP/DSD 绝不回退（共享会重采样破坏 DoP 载波），NAA/Null 与共享本身无关。
         rl.fallbackEligible = (sharedFallback != nullptr) && !dop &&
-                              (p.backend.empty() || p.backend == "wasapi");
+                              (p.backend.empty() || p.backend == "coreaudio");
         rl.dop = dop;
         // 1.1.2 P0-3：DoP 的 EOS 尾块不能补零（高 8 位标记会变成 0x00，接收端判非法 DoP）。
         // 相位从 pend 里最后**一帧真实数据**接上，而不是每段都从 0x05 重来 ——
@@ -4594,7 +4609,7 @@ static bool play_one(const std::string& file, const PlayParams& p, rta::audio::A
     }
 
     PlayParams p2 = p;
-    p2.backend = "wasapi-shared";
+    p2.backend = "coreaudio-shared";
     p2.shaper = "none";                 // 共享模式不追求 bit-perfect，关掉抖动整形
     const bool resume = (frac > 0.0 && frac < 1.0 && totalFrames > 0);
     if (resume) p2.initialSeekFrac = frac;
@@ -7116,7 +7131,7 @@ static std::string diag_snapshot_json(bool withProbe) {
     // 设置摘要：只取六个白名单键（不回显 ir/eq 等文件路径内容）
     {
         std::ifstream f(path_in_exe_dir("rlplayer-settings.conf"));
-        std::string line, backend = "wasapi", rate, bits, filter, shaper, metaon = "1";
+        std::string line, backend = "coreaudio", rate, bits, filter, shaper, metaon = "1";
         while (std::getline(f, line)) {
             if (!line.empty() && line.back() == '\r') line.pop_back();
             const size_t e = line.find('=');
@@ -12225,10 +12240,13 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
           << ",\"pos\":" << pos
           << ",\"dur\":" << dur
           << ",\"outRate\":" << rateStat
-          // 升频判定必须有后端证据（源速率 vs 供源/输出速率），不能靠传输类型猜：
-          // 投放将来若真的先升频再供源，这里 resampled 会变 true，徽标自动变成「升频」。
-          << ",\"inRate\":" << (castMode ? (castTransition ? 0u : castSt.sourceRate) : 0u)
-          << ",\"resampled\":" << ((castMode && !castTransition && castSt.resampled) ? "true" : "false")
+          // 升频/降采样判定必须有后端证据（源速率 vs 输出速率），不能靠传输类型猜。
+          // 2026-11-09（用户截图：48000→44100 被标成「GPU 升频」）：本地播放这条路
+          // 以前恒给 0/false ⟹ 前端拿不到两端数字，只能对 why 文案做"含「重采样」"的
+          // 子串匹配来猜方向，于是降采样被当成升频。现在本地也给真值（ps.inRate/outRate）。
+          << ",\"inRate\":" << (castMode ? (castTransition ? 0u : castSt.sourceRate) : ps.inRate)
+          << ",\"resampled\":" << (castMode ? ((!castTransition && castSt.resampled) ? "true" : "false")
+                                             : ((ps.inRate > 0 && rateStat > 0 && (uint32_t)rateStat != ps.inRate) ? "true" : "false"))
           << ",\"upsampleApplied\":" << ((castMode && !castTransition && castSt.upsampleApplied) ? "true" : "false")
           << ",\"upsampleForced\":" << ((castMode && !castTransition && castSt.upsampleForced) ? "true" : "false")
           << ",\"servedRate\":" << (castMode ? (castTransition ? 0u : castSt.servedRate) : 0u)

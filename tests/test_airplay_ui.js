@@ -563,7 +563,10 @@ async function runTests() {
     check('UPnP 投放说明里点明本机不做升频、远端不由本机判断',
           String(bp.title).indexOf('升频') >= 0, String(bp.title));
 
-    // 负向对照：本地播放真的重采样时，必须仍然显示升频（不能为了修投放把这条判据一起废掉）
+    // 负向对照：本地播放真的**升**采样时，必须仍然显示升频（不能为了修投放把这条判据一起废掉）。
+    // 2026-11-09 修正：本用例以前只给 why 文案、不给两端速率，靠「文案含『重采样』」猜方向。
+    // 那正是把 48000→44100 判成升频的**同一个缺陷**（用户截图）。方向必须有后端证据：
+    // 现在后端在 /api/status 里给 inRate/outRate（本地播放也给真值），判据只认这两个数。
     statusResponse = {
       ok: true,
       playing: true,
@@ -575,12 +578,29 @@ async function runTests() {
       outMode: 'coreaudio',
       castMode: false,
       sharedOnly: false,
+      inRate: 44100,
+      outRate: 384000,
       bitPerfect: 'no',
       bitPerfectWhy: '重采样 44100→384000 Hz'
     };
     await env.tick();
     bp = env.bpBadgeInfo();
-    check('本地播放真重采样仍显示 PCM-PCM 升频（负向对照）', bp.text === 'PCM-PCM 升频', bp.text);
+    check('本地播放真升采样显示 PCM-PCM 升频（负向对照）', bp.text === 'PCM-PCM 升频', bp.text);
+
+    // ★ 2026-11-09 新增：用户截图里的那条链路 —— 48000 Hz 源经系统混音率 44100 Hz 输出。
+    // 旧判据把它标成「GPU 升频」/「PCM-PCM 升频」，是把**降质说成升级**。
+    statusResponse = {
+      ok: true, playing: true, paused: false, current: '/Music/track.flac',
+      dur: 240, pos: 12, transport: 'coreaudio', outMode: 'coreaudio',
+      castMode: false, sharedOnly: false,
+      inRate: 48000, outRate: 44100, resampled: true,
+      bitPerfect: 'no', bitPerfectWhy: '重采样 48000→44100 Hz'
+    };
+    await env.tick();
+    bp = env.bpBadgeInfo();
+    check('本地降采样绝不显示升频字样', bp.text.indexOf('升频') < 0, bp.text);
+    check('本地降采样如实显示「PCM 降采样」', bp.text === 'PCM 降采样', bp.text);
+    check('降采样悬停写出两端真实速率', bp.title.indexOf('48000') >= 0 && bp.title.indexOf('44100') >= 0, bp.title);
 
     // 负向对照 2：投放**真的**先升频再供源时，徽标必须显示升频（而不是无脑写死"非 bit-perfect"）。
     statusResponse = {

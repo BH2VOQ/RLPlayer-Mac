@@ -44,9 +44,9 @@ static void ck(bool cond, const char* desc, const std::string& detail = "") {
 }
 
 // ---------------- 构造器 ----------------
-static DeviceCaps wasapi_caps(std::vector<uint32_t> rates, int bits = 24, int ch = 2) {
+static DeviceCaps coreaudio_caps(std::vector<uint32_t> rates, int bits = 24, int ch = 2) {
     DeviceCaps c;
-    c.backend = "wasapi";
+    c.backend = "coreaudio";
     c.rates = std::move(rates);
     c.maxRate = c.rates.empty() ? 0u : c.rates.back();
     c.exclusive = !c.rates.empty();
@@ -59,7 +59,7 @@ static DeviceCaps wasapi_caps(std::vector<uint32_t> rates, int bits = 24, int ch
 }
 static DeviceCaps asio_caps(std::vector<uint32_t> rates, const std::string& nativeMax,
                             int bits = 24, int ch = 2) {
-    DeviceCaps c = wasapi_caps(std::move(rates), bits, ch);
+    DeviceCaps c = coreaudio_caps(std::move(rates), bits, ch);
     c.backend = "asio";
     c.exclusive = true;
     c.dsdNative = !nativeMax.empty();
@@ -140,7 +140,7 @@ int main() {
 
     // ---- ① 原音直通：PCM 源必须满足七条件 ----
     {
-        const DeviceCaps c = wasapi_caps(kFull);
+        const DeviceCaps c = coreaudio_caps(kFull);
         const SourceInfo src = pcm_src(44100, 16);
         const PresetSettings s = plan_preset(PresetProfile::BitPerfect, c, src);
         ck(s.rate == "follow", "Case 1: bitperfect/PCM ⟹ rate=follow（不重采样）");
@@ -156,7 +156,7 @@ int main() {
 
     // ---- ② 原音直通：设备只有 96k 也照样满足七条件（follow 不需要支持列表） ----
     {
-        const DeviceCaps c = wasapi_caps(k96k);
+        const DeviceCaps c = coreaudio_caps(k96k);
         const SourceInfo src = pcm_src(44100, 24);
         const PresetSettings s = plan_preset(PresetProfile::BitPerfect, c, src);
         const BitPerfectCheck bp = check_bit_perfect(s, c, src);
@@ -165,7 +165,7 @@ int main() {
 
     // ---- ③ 负向对照：位深降低必须被判出来（证明七条件不是摆设） ----
     {
-        const DeviceCaps c = wasapi_caps(kFull, 16);
+        const DeviceCaps c = coreaudio_caps(kFull, 16);
         const SourceInfo src = pcm_src(96000, 24);
         const PresetSettings s = plan_preset(PresetProfile::BitPerfect, c, src);
         const BitPerfectCheck bp = check_bit_perfect(s, c, src);
@@ -190,7 +190,7 @@ int main() {
 
     // ---- ⑤ 原音直通：无原生但 DoP 够 ⟹ 仍按 1-bit 直通 ----
     {
-        const DeviceCaps c = wasapi_caps(k192k);      // 176400 载波 ⟹ dopMax=dsd64
+        const DeviceCaps c = coreaudio_caps(k192k);      // 176400 载波 ⟹ dopMax=dsd64
         const SourceInfo src = dsd_src(64);
         const PresetSettings s = plan_preset(PresetProfile::BitPerfect, c, src);
         ck(s.dsd == 64 && s.directSdm == 1, "Case 5: bitperfect/DSD64 + DoP ⟹ dsd=64 且 directSdm=1");
@@ -199,7 +199,7 @@ int main() {
 
     // ---- ⑥ 原音直通：源位率超出设备承载 ⟹ 降级 + note，且必须不再声称 bit-perfect ----
     {
-        const DeviceCaps c = wasapi_caps(k192k);      // DoP 只到 dsd64
+        const DeviceCaps c = coreaudio_caps(k192k);      // DoP 只到 dsd64
         const SourceInfo src = dsd_src(256);
         const PresetSettings s = plan_preset(PresetProfile::BitPerfect, c, src);
         ck(s.dsd == 64, "Case 6: bitperfect/DSD256 超能力 ⟹ 降级到 DSD64");
@@ -211,7 +211,7 @@ int main() {
 
     // ---- ⑦ 原音直通：能力未知（探测为空）⟹ 保守不承诺直通 ----
     {
-        const DeviceCaps c = wasapi_caps({});
+        const DeviceCaps c = coreaudio_caps({});
         const SourceInfo src = dsd_src(64);
         const PresetSettings s = plan_preset(PresetProfile::BitPerfect, c, src);
         ck(s.dsd == 64 && s.directSdm == 0, "Case 7: bitperfect/能力未知 ⟹ dsd=64 但 directSdm=0（保守）");
@@ -220,7 +220,7 @@ int main() {
 
     // ---- ⑧ PCM 升频：96k 设备不许写 384000 ----
     {
-        const DeviceCaps c = wasapi_caps(k96k);
+        const DeviceCaps c = coreaudio_caps(k96k);
         const PresetSettings s = plan_preset(PresetProfile::Pcm, c, pcm_src(44100, 16));
         ck(s.rate == "96000", "Case 8: pcm/96k 设备 ⟹ rate=96000（不写 384000）", s.rate);
         ck(s.rate != "384000", "Case 8: pcm/96k 设备 ⟹ rate 不是 384000");
@@ -234,7 +234,7 @@ int main() {
 
     // ---- ⑨ PCM 升频：设备有 705.6k 也要按 384k 封顶并说明 ----
     {
-        const DeviceCaps c = wasapi_caps(kFull);
+        const DeviceCaps c = coreaudio_caps(kFull);
         const PresetSettings s = plan_preset(PresetProfile::Pcm, c, pcm_src(44100, 16));
         ck(s.rate == "384000", "Case 9: pcm/705.6k 设备 ⟹ rate 封顶 384000", s.rate);
         ck(has_note(s, "封顶"), "Case 9: note 写明封顶（不是偷偷降档）");
@@ -243,7 +243,7 @@ int main() {
 
     // ---- ⑩ PCM 升频：探测为空 ⟹ follow + note（不假装支持） ----
     {
-        const DeviceCaps c = wasapi_caps({});
+        const DeviceCaps c = coreaudio_caps({});
         const PresetSettings s = plan_preset(PresetProfile::Pcm, c, pcm_src(44100, 16));
         ck(s.rate == "follow", "Case 10: pcm/探测为空 ⟹ rate=follow", s.rate);
         ck(has_note(s, "探测为空"), "Case 10: note 写明探测为空、已降级");
@@ -257,7 +257,7 @@ int main() {
             kFull, k96k, k192k, {44100}, {48000, 96000}, {44100, 768000}, {768000}, {}
         };
         for (const auto& rs : sets) {
-            const DeviceCaps c = wasapi_caps(rs);
+            const DeviceCaps c = coreaudio_caps(rs);
             const PresetSettings s = plan_preset(PresetProfile::Pcm, c, pcm_src(44100, 16));
             const uint32_t v = rate_num(s.rate);
             if (v > kPresetRateCap) { allOk = false; bad = s.rate; }
@@ -267,7 +267,7 @@ int main() {
 
     // ---- ⑫ DSD 升频：设备没有 DSD 通路 ⟹ 降级为 PCM 升频 + note ----
     {
-        DeviceCaps noDsd = wasapi_caps(k192k);
+        DeviceCaps noDsd = coreaudio_caps(k192k);
         noDsd.dop = false;
         noDsd.dopMax.clear();
         const PresetSettings s = plan_preset(PresetProfile::Dsd, noDsd, pcm_src(44100, 16));
@@ -296,7 +296,7 @@ int main() {
 
     // ---- ⑭ DSD 升频：没有原生 ⟹ 退 DoP 最高档 ----
     {
-        const DeviceCaps c = wasapi_caps(kFull);      // 705600 载波 ⟹ dopMax=dsd256
+        const DeviceCaps c = coreaudio_caps(kFull);      // 705600 载波 ⟹ dopMax=dsd256
         const PresetSettings s = plan_preset(PresetProfile::Dsd, c, pcm_src(44100, 16));
         ck(s.dsd == 256, "Case 14: dsd/DoP ⟹ 目标 DSD256（705600/16）");
         ck(has_note(s, "DoP"), "Case 14: note 写明退 DoP");
@@ -327,12 +327,12 @@ int main() {
     {
         struct Case { const char* name; DeviceCaps c; };
         std::vector<Case> cases;
-        cases.push_back({ "wasapi-full", wasapi_caps(kFull) });
-        cases.push_back({ "wasapi-96k", wasapi_caps(k96k) });
-        cases.push_back({ "wasapi-192k", wasapi_caps(k192k) });
-        cases.push_back({ "wasapi-empty", wasapi_caps({}) });
+        cases.push_back({ "coreaudio-full", coreaudio_caps(kFull) });
+        cases.push_back({ "coreaudio-96k", coreaudio_caps(k96k) });
+        cases.push_back({ "coreaudio-192k", coreaudio_caps(k192k) });
+        cases.push_back({ "coreaudio-empty", coreaudio_caps({}) });
         cases.push_back({ "asio-native-dsd512", asio_caps(kFull, "dsd512") });
-        DeviceCaps shared = wasapi_caps(kFull);
+        DeviceCaps shared = coreaudio_caps(kFull);
         shared.exclusive = false;
         cases.push_back({ "shared-non-exclusive", shared });
         std::vector<SourceInfo> srcs;
@@ -389,7 +389,7 @@ int main() {
 
     // ---- ⑲ pcm2dsd：有 DoP 能力 ⟹ dsd>0 + EC-7 + tight + 512 ----
     {
-        const DeviceCaps c = wasapi_caps(kFull);     // 705600 载波 ⟹ dopMax=dsd256
+        const DeviceCaps c = coreaudio_caps(kFull);     // 705600 载波 ⟹ dopMax=dsd256
         const SourceInfo src = pcm_src(44100, 16);
         const PresetSettings s = plan_preset(PresetProfile::PcmToDsd, c, src);
         ck(s.dsd > 0, "Case 19: pcm2dsd/有 DoP ⟹ dsd>0（真的输出 DSD）", std::to_string(s.dsd));
@@ -425,7 +425,7 @@ int main() {
     // 这条是**最关键的防回归判据**：rtaweb 的 preset_probe_caps 把 dsdNative 硬编码 false，
     // 但只要 plan_preset 里还有一条 caps.dsdNative 分支，将来有人"顺手"改探测就会复活虚构通路。
     {
-        DeviceCaps c = wasapi_caps(k192k);           // DoP 只到 dsd64
+        DeviceCaps c = coreaudio_caps(k192k);           // DoP 只到 dsd64
         c.dsdNative = true;                          // 故意注入本平台不存在的能力
         c.dsdNativeMax = "dsd256";
         const PresetSettings s = plan_preset(PresetProfile::PcmToDsd, c, pcm_src(44100, 16));
@@ -434,7 +434,7 @@ int main() {
         ck(!settings_claim_native_pathway(s),
            "Case 20[负向]: 注入原生能力后 notes 仍未声称原生通路", first_native_claim(s));
         // 连"没有 DoP、只有原生"的设备也必须降级 —— 证明原生分支真的不存在
-        DeviceCaps onlyNative = wasapi_caps(k96k);
+        DeviceCaps onlyNative = coreaudio_caps(k96k);
         onlyNative.dop = false;
         onlyNative.dopMax.clear();
         onlyNative.dsdNative = true;
@@ -447,7 +447,7 @@ int main() {
 
     // ---- ㉑ pcm2dsd：无 DSD 通路 ⟹ dsd=0 + 明确降级为 PCM 升频 ----
     {
-        const DeviceCaps c = wasapi_caps(k96k);      // 96k 没有 DoP 载波
+        const DeviceCaps c = coreaudio_caps(k96k);      // 96k 没有 DoP 载波
         const PresetSettings s = plan_preset(PresetProfile::PcmToDsd, c, pcm_src(44100, 16));
         ck(s.dsd == 0, "Case 21: pcm2dsd/无 DSD 通路 ⟹ dsd=0", std::to_string(s.dsd));
         ck(has_note(s, "降级为 PCM 升频"), "Case 21: note 明确写「降级为 PCM 升频」");
@@ -461,7 +461,7 @@ int main() {
 
     // ---- ㉒ pcm2dsd：探测全空 ⟹ dsd=0 + follow + note（不假装支持） ----
     {
-        const DeviceCaps c = wasapi_caps({});
+        const DeviceCaps c = coreaudio_caps({});
         const PresetSettings s = plan_preset(PresetProfile::PcmToDsd, c, pcm_src(44100, 16));
         ck(s.dsd == 0 && s.rate == "follow", "Case 22: pcm2dsd/探测为空 ⟹ dsd=0 且 rate=follow",
            s.rate);
@@ -501,10 +501,10 @@ int main() {
     {
         struct Dev { const char* name; DeviceCaps c; };
         std::vector<Dev> devs;
-        devs.push_back({ "full", wasapi_caps(kFull) });
-        devs.push_back({ "96k", wasapi_caps(k96k) });
-        devs.push_back({ "192k", wasapi_caps(k192k) });
-        devs.push_back({ "empty", wasapi_caps({}) });
+        devs.push_back({ "full", coreaudio_caps(kFull) });
+        devs.push_back({ "96k", coreaudio_caps(k96k) });
+        devs.push_back({ "192k", coreaudio_caps(k192k) });
+        devs.push_back({ "empty", coreaudio_caps({}) });
         devs.push_back({ "asio256", asio_caps(kFull, "dsd256") });
         devs.push_back({ "asio1024", asio_caps(kFull, "dsd1024") });
         std::vector<SourceInfo> srcs;
