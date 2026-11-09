@@ -1,8 +1,8 @@
 {
-  "version": "1.1.4",
-  "notes": "Single-track audio analysis panel with true peak dBTP (4× oversampling); symmetric side rails pinned to window edges with a brief/detail density toggle for the AI panel; instant cached cover thumbnails and monotonic AI refresh on album switch; standard Edit menu shortcuts across all inputs. · 单曲页音频分析面板与真峰 dBTP（4×过采样）；单曲页左右竖栏贴边与 AI 整理栏「详细/简略」两档密度切换；专辑封面 512px 缩略图缓存秒开与切专辑时 AI 整理即时刷新；全输入框标准编辑快捷键支持。",
-  "download_url": "https://github.com/BH2VOQ/RLPlayer-Mac/releases/download/v1.1.4/RLPlayer-1.1.4-macOS-arm64.dmg",
-  "sha256": "34b9305bf597228c2181f7e1ca3fc29675c8a774b88e976442acc1f0c7568761",
-  "size": 8073906,
-  "published_at": "2026-11-08T16:53:00Z"
+  "version": "1.1.4.1",
+  "notes": "布局修复：解决设置页页脚固定遮挡问题；版本升级至 1.1.4.1。",
+  "download_url": "https://github.com/BH2VOQ/RLPlayer-Mac/releases/download/v1.1.4.1/RLPlayer-1.1.4.1-macOS-arm64.dmg",
+  "sha256": "",
+  "size": NaN,
+  "published_at": "2026-11-09T01:45:59.135Z"
 }
