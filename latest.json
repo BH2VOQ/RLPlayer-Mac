@@ -1,8 +1,8 @@
 {
-  "version": "1.1.5-beta3",
-  "notes": "Fixed the artist full-summary view dropping the biography: it now shows the same untruncated bio as the right-rail card, ahead of the short field grid, without mutating the summary cache; the artist profile page shares the same data and suppresses duplicates. · 修复艺术家「完整 AI 整理资料」丢失简介的问题：现在显示与右栏卡片同一段未截断的简介，排在短标签网格之前，且不写回摘要缓存；艺术家详情页共用同一份数据并去重。",
-  "download_url": "https://github.com/BH2VOQ/RLPlayer-Mac/releases/download/v1.1.5-beta3/RLPlayer-1.1.5-beta3-macOS-arm64.dmg",
-  "sha256": "30e5855333c9cac272dc39b78cde5fda48a83c5bdec1254b9f42610867cf0e69",
-  "size": 8108446,
-  "published_at": "2026-11-09T12:20:06Z"
+  "version": "1.1.5-beta4",
+  "notes": "True bit-perfect on macOS: the exclusive path now locks the hardware physical format (kAudioStreamPropertyPhysicalFormat) and reads it back, instead of only setting the HAL virtual format. Endpoints whose physical layer offers only float32 (built-in speakers, virtual devices) keep playing but honestly report “not bit-perfect” with the reason. Hog mode now defaults on, and its hint states that Hog does not block other apps. · macOS 真 bit-perfect：独占路径改为锁定硬件物理格式（kAudioStreamPropertyPhysicalFormat）并真实读回，不再只设 HAL 虚拟层。物理层只有 float32 的端点（内置扬声器、虚拟声卡）照常播放，但如实报「非 bit-perfect」并给出理由。Hog 独占默认开启，提示文案更正为「Hog 不能阻止其它 App 播放」。",
+  "download_url": "https://github.com/BH2VOQ/RLPlayer-Mac/releases/download/v1.1.5-beta4/RLPlayer-1.1.5-beta4-macOS-arm64.dmg",
+  "sha256": "951651b551c79f32c0d1c30397ecfa40b46407f92c5e7d61ebf9cd33329e94e7",
+  "size": 8113408,
+  "published_at": "2026-11-09T18:30:00Z"
 }
