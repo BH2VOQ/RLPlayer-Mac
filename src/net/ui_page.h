@@ -913,8 +913,18 @@ h += "#npPage .npedge{display:none}";
     h += ".npseg>b.auto.on::before{content:'';display:inline-block;width:5px;height:5px;border-radius:50%;"
          "background:currentColor;flex:none}";
     // 卡片区：左竖栏窄 ⟹ 单列纵向堆叠（旧通栏用 auto-fit 多列），头部固定、卡片区自己滚。
-    h += "#npAnlBody{min-height:0;overflow:auto;display:grid;grid-template-columns:minmax(0,1fr);"
-         "gap:8px;align-content:start;padding-right:2px;scrollbar-width:thin}";
+    // 1.1.5-beta1（用户 2026-11-09 反馈「音质分析栏目三挡显示，中间档的右侧卡片圆角
+    //   部分被滚动条挡住了，需要同步这三档的卡片尺寸」）：
+    //   ① 卡片变高的档（L1 详细 / L2 全部指标）才会溢出出滚动条；macOS 的 WKWebView 用
+    //      **覆盖式**滚动条，滚动时它画在内容上面 ⟹ 卡片右侧 10px 圆角被压住；
+    //      Chromium 的自绘滚动条（::-webkit-scrollbar）则占 6px 布局宽度；
+    //   ② 于是「摘要档无滚动条 / 详细档有」还会让卡片宽度跟着跳。
+    //   修法：滚动区**恒定**预留一条 13px 的滚动条沟槽 —— overflow-y:scroll 让滚动条从
+    //   L0 起就存在（三档卡片同宽），负外边距把这条沟槽放进 #npAnal 自己的右内边距里，
+    //   卡片右缘因此仍与左缘对称（≈12px），滚动条只画在沟槽上、永远不压圆角。
+    //   判据见页面内自检 C8（width(L0)==width(L1)==width(L2) 且卡片右缘距滚动条 ≥8px）。
+    h += "#npAnlBody{min-height:0;overflow-y:scroll;display:grid;grid-template-columns:minmax(0,1fr);"
+         "gap:8px;align-content:start;padding-right:13px;margin-right:-11px;scrollbar-width:thin}";
     h += "#npAnlBody::-webkit-scrollbar{width:6px}";
     h += "#npAnlBody::-webkit-scrollbar-thumb{background:var(--line);border-radius:3px}";
     h += ".anlcard{min-width:0;border-radius:10px;border:1px solid var(--line);background:var(--bg2);"

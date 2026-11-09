@@ -13872,6 +13872,65 @@ selftestAdd('S1 设置页各页签「保存设置 / 恢复默认」栏为 static
            ok: ok };
 });
 
+// 1.1.5-beta1（用户 2026-11-09 反馈）：音质分析栏目三档（L0 摘要 / L1 指标 / L2 全部原始值）
+// 的卡片右侧圆角会被滚动条盖住，且三档卡片宽度会随滚动条出现/消失跳变。
+// 判据直接量真实 DOM：#npAnlBody 的滚动区 + .anlcard 的 getBoundingClientRect。
+// 这里用一份**固定 health 夹具**渲染（anlCardsHtml 对同一份 health 是纯函数，见其注释），
+// L2 一定会把卡片区撑出滚动条 —— 不依赖当前是否正在播曲目/后端是否分析完。
+selftestAdd('C8 音频分析三档：卡片同宽、右缘不被滚动条遮挡', function () {
+  selftestEnsureNowPlaying();
+  var body = D('npAnlBody');
+  if (!body) return { want: '存在 #npAnlBody', got: '缺失', ok: false };
+  var br = body.getBoundingClientRect();
+  if (!(br.width > 60)) return { want: '面板可见（宽 > 60px）', got: '宽 ' + Math.round(br.width) + 'px', ok: false };
+  var path = '/__selftest__/anl-fixture.flac';
+  var h = { status: 'ready', fs: 44100, bits: 16, channels: 2, duration_sec: 200,
+            dr_db: 12.5, dr_available: true, lufs: -14.2, lufs_available: true, lra: 7.5, lra_available: true,
+            peak_dbfs: -0.2, true_peak_dbtp: -0.1, true_peak_available: true,
+            lossless_suspected: false, fake24: false, cutoff_hz: 0, confidence: 0, reason: '',
+            quality: { available: true, clipped_samples: 12, clipped_pct: 0.001, clipped_runs: 2,
+                       longest_clip_run: 5, crest_db: 12.3, snr_db: 80.1, centroid_hz: 2500,
+                       noise_floor_dbfs: -90.2, hf_ratio_10k_db: -30, hf_ratio_10k_available: true,
+                       channel_corr: 0.5, stereo: true, mono_loss_db: -1.2, side_mid_db: -10,
+                       side_mid_available: true, thdn_db: -60, thdn_pct: 0.1, thdn_available: true,
+                       thdn_method: 'notch', imd_db: -50, imd_available: true, non_tonal_db: -55,
+                       spectral_min_dbfs: -100, rms_dbfs: -16, silence_pct: 0.1, tilt_db_per_oct: -2.5,
+                       rolloff95_hz: 16000, dyn_p95_p10_db: 14, dyn_centroid_dbfs: -18,
+                       quiet_p10_dbfs: -40, spectral_windows: 12, note: '' } };
+  var hadCache = Object.prototype.hasOwnProperty.call(ANL.cache, path);
+  var savedCache = ANL.cache[path], savedCur = ANL.cur, savedLvl = ANL.lvl;
+  function measure(lvl) {
+    ANL.cur = path; ANL.cache[path] = h; ANL.busy[path] = false; ANL.err = '';
+    ANL.lvl = lvl; ANL.paintSig = ''; anlPaint();
+    var cards = [].slice.call(body.querySelectorAll('.anlcard'));
+    if (cards.length !== 3) return null;
+    var bb = body.getBoundingClientRect();
+    // clientRight = 内容区右缘（已扣掉滚动条占位）；卡片右缘到它的距离 = 预留沟槽
+    var clientRight = bb.left + body.clientLeft + body.clientWidth;
+    var ws = [], clear = 1e9;
+    cards.forEach(function (c) {
+      var r = c.getBoundingClientRect();
+      ws.push(Math.round(r.width * 10) / 10);
+      clear = Math.min(clear, clientRight - r.right);
+    });
+    return { w: ws[0], clear: Math.round(clear * 10) / 10,
+             overflow: Math.max(0, body.scrollHeight - body.clientHeight) };
+  }
+  var L = [measure(0), measure(1), measure(2)];
+  if (hadCache) ANL.cache[path] = savedCache; else { try { delete ANL.cache[path]; } catch (e) { ANL.cache[path] = null; } }
+  ANL.cur = savedCur || ''; ANL.lvl = savedLvl | 0; ANL.paintSig = ''; anlPaint();
+  if (L[0] === null || L[1] === null || L[2] === null) {
+    return { want: '三档都渲染出 3 张卡片', got: '渲染失败', ok: false };
+  }
+  var spread = Math.max(L[0].w, L[1].w, L[2].w) - Math.min(L[0].w, L[1].w, L[2].w);
+  var minClear = Math.min(L[0].clear, L[1].clear, L[2].clear);
+  var got = 'w=' + L[0].w + '/' + L[1].w + '/' + L[2].w + 'px spread=' + (Math.round(spread * 10) / 10) +
+            ' 右缘留白=' + L[0].clear + '/' + L[1].clear + '/' + L[2].clear + 'px' +
+            ' L1溢出=' + L[1].overflow + 'px L2溢出=' + L[2].overflow + 'px';
+  var ok = spread <= 0.5 && minClear >= 8;
+  return { want: '三档卡片同宽（spread≤0.5px）且卡片右缘距滚动条 ≥8px', got: got, ok: ok };
+});
+
 /* ---------------- 启动 ---------------- */
 initFavs();
 renderSavedQueues();

@@ -83,6 +83,11 @@
 | `check_b10_logic.js` | 1.1.4-beta10/11 反馈的**纯逻辑**判据（不需要浏览器）：合作署名拆分（括号内不拆 / & 、 ; feat. 拆 / 重复去重 / 标签垃圾剔除）、艺术家卡简介带名字、首页艺术家归属（合作专辑同时计入每位参与者且不新增「A & B」）、**L6 右栏详细/简略两档**（`npRailLimits` 两档上限不同、长简介详细档不截断、`p2` 详细档多取字段、切档 0 次 `/api/entity/summary` 且 `NP_DATA.cache` 同一引用）| `node tools/check_b10_logic.js` |
 | `check_b10_ui.js` | ⛔ **已停用**（禁止自起无头浏览器）。判据迁至 `check_b10_logic.js` + 页面内自检（`POST /api/selftest/request` → 页面跑完 `POST /api/selftest/report` 落 `<state>/selftest-last.json`）。保留仅为历史文本，不要执行 | — |
 
+**2026-11-09（1.1.5-beta1）音频分析三档卡片同宽 / 滚动条不遮挡圆角**：页面内自检新增 C8
+（L0/L1/L2 三档卡片宽度差 ≤0.5px、卡片右缘距滚动条沟槽 ≥8px；用固定 health 夹具渲染，
+不依赖当前是否在播曲目）。判据在**页面内**量真实 DOM；红→绿对照：把 `#npAnlBody` 的
+`padding-right` 从 13px 改回 2px（或去掉 `margin-right:-11px`）应使 C8 变红。
+
 **2026-11-08（1.1.4-beta11）右栏「详细 / 简略」两档**：页面内自检新增 R1–R5
 （R1 左右共用同一条 `.npseg` 规则且右栏只有一个外框、R2 点档位改 `data-detail` 与 `p1` 换行、
 R3 两档 `.nprailcard.clientHeight` 不变且栏头/`#npSummHint` 不被顶出、R4 `NP_DATA.cache` 引用不变、
