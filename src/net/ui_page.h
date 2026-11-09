@@ -1201,7 +1201,7 @@ h += "#npPage .npedge{display:none}";
     h += "#setpage{display:none;flex:1;min-height:0;flex-direction:column;overflow:hidden}";
     h += "#setpage.on{display:flex}";
     // .sbody = 唯一的滚动容器。padding 在这里给，左右 24px 与页签条对齐。
-    h += ".sbody{flex:1;min-height:0;overflow-y:auto;overflow-x:hidden;padding:0 24px 80px}";
+    h += ".sbody{flex:1;min-height:0;overflow-y:auto;overflow-x:hidden;padding:0 24px 24px}";
     h += ".sgroup{margin-bottom:22px;border:1px solid var(--line);border-radius:12px;background:var(--bg2);overflow:visible}";
     h += ".sghead{display:flex;align-items:center;gap:9px;padding:11px 16px;border-bottom:1px solid var(--line);font-weight:650;font-size:12.5px;background:var(--bg3);border-radius:11px 11px 0 0}";
     h += ".sghead .hint{font-weight:400;font-size:11px;color:var(--mut2)}";
@@ -1401,11 +1401,9 @@ h += "#npPage .npedge{display:none}";
     //   间距改成上下各 16px，与 .sgroup 的 22px 底部间距协调，视觉上是一块"页脚动作区"。
     // margin-top:16px 是最小间距；.spane.on 是 flex 列时，auto 会把保存栏推到该页底部。
     // 用 margin-top:auto 时 16px 会失效，所以改用 padding-top 保证最小间距。
-    // 1.1.4-beta6（审计 L7）：保存栏原来是每个页签内容末尾的静态元素 —— 长页签（高级/元数据）
-    // 必须滚到底才看得到「保存」。改为 sticky 吸底（仍是每个页签自己的保存/恢复默认，作用域不变）：
-    // 任何页签、任何窗口高度下保存入口都常驻可见。
-    h += ".setfoot{display:flex;gap:10px;align-items:center;padding:16px 2px 16px;margin-top:auto;background:var(--bg);border-top:1px solid var(--line);z-index:6}";
-    h += ".sbody{flex:1;min-height:0;overflow-y:auto;overflow-x:hidden;padding:0 24px 80px}";
+    // 1.1.4.1：保存栏恢复为每个页签内容末尾的静态元素（去掉 position:sticky），随页面自然滚动，
+    // 不再固定吸底遮挡页签下方的表单控件；短页仍由 .spane.on 的 flex 列 + margin-top:auto 推到底部。
+    h += ".setfoot{display:flex;gap:10px;align-items:center;padding:14px 2px 6px;margin-top:auto;background:transparent;border-top:1px solid var(--line);z-index:6}";
     // 诊断 / 流媒体两页不放保存栏：它们的动作全部即时生效，没有"待保存"的概念
     //（2026-10-24 #5 与评审 #12 的既有决策，本次改成"每页各一份"后仍要保留这条）。
     h += ".spane[data-g=diag] .setfoot,.spane[data-g=stream] .setfoot{display:none}";

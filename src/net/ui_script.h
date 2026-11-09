@@ -10098,10 +10098,8 @@ function renderSettingsPage() {
       Array.prototype.forEach.call(document.querySelectorAll('#setpage .spane'), function (p) {
         p.classList.toggle('on', p.dataset.g === b.dataset.g);
       });
-      // 评审 #12：诊断页是纯操作页（导出/写回），底部「保存设置/恢复默认」在这里没有意义 → 隐藏。
-      // 2026-10-24 #5：流媒体页的增删改/启用都是即时落盘，同样不需要底部保存。
-      var foot = document.querySelector('#setpage .setfoot');
-      if (foot) foot.style.display = (b.dataset.g === 'diag' || b.dataset.g === 'stream') ? 'none' : '';
+      // 诊断页与流媒体页的 .setfoot 由 CSS (.spane[data-g=diag|stream] .setfoot{display:none}) 按各自页签隐藏，
+      // 这里不再用 querySelector('#setpage .setfoot') 改第一个页签（out）的 display。
       if (b.dataset.g === 'in') {
         loadInputDevices();
         pollInputState();
@@ -13853,6 +13851,25 @@ selftestAdd('R5 档位写进 localStorage，按启动加载路径复原（等价
     return { want: "'1'→恢复 1，'0'→恢复 0", got: 'stored1=' + s1 + ' after1=' + a1 +
             ' stored0=' + s0 + ' after0=' + a0, ok: ok };
   } finally { railFixtureRestore(f); }
+});
+selftestAdd('S1 设置页各页签「保存设置 / 恢复默认」栏为 static 且随页面滚动', function () {
+  if (typeof renderSettingsPage === 'function' && (!D('setpage') || !D('setpage').querySelector('.spane'))) {
+    renderSettingsPage();
+  }
+  var sp = D('setpage');
+  var panes = sp ? sp.querySelectorAll('.spane') : [];
+  var posBad = [], missing = [];
+  ['adv', 'in', 'out', 'pcm', 'sdm', 'eq', 'cal', 'meta'].forEach(function (g) {
+    var p = sp ? sp.querySelector('.spane[data-g=' + g + ']') : null;
+    var f = p ? p.querySelector('.setfoot') : null;
+    if (!f) { missing.push(g); return; }
+    var pos = getComputedStyle(f).position;
+    if (pos !== 'static') posBad.push(g + ':' + pos);
+  });
+  var ok = panes.length >= 8 && missing.length === 0 && posBad.length === 0;
+  return { want: '8 个设置页签均有 .setfoot 且 position===static',
+           got: 'panes=' + panes.length + ' missing=[' + missing.join(',') + '] posBad=[' + posBad.join(',') + ']',
+           ok: ok };
 });
 
 /* ---------------- 启动 ---------------- */

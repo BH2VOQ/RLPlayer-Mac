@@ -1,8 +1,8 @@
 {
   "version": "1.1.4.1",
-  "notes": "布局修复：解决设置页页脚固定遮挡问题；版本升级至 1.1.4.1。",
+  "notes": "Settings save/restore-defaults action bar now scrolls with each tab instead of sticking over form controls at the bottom. · 修复设置页各页签「保存设置 / 恢复默认」按键栏固定吸底遮挡下方表单控件的问题，改为随页面自然滚动。",
   "download_url": "https://github.com/BH2VOQ/RLPlayer-Mac/releases/download/v1.1.4.1/RLPlayer-1.1.4.1-macOS-arm64.dmg",
   "sha256": "de3abe2ba7c436c1b3c8e865c0495f5f0e1adb1c48396b54b69a8ad6d621761e",
   "size": 8073960,
-  "published_at": "2026-11-09T01:45:59.135Z"
+  "published_at": "2026-11-09T02:26:05Z"
 }

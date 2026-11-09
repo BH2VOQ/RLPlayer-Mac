@@ -290,5 +290,16 @@ try {
   else delete env.NP_RAILDETAIL;
 }
 
+/* ---------------- L7：设置页 .setfoot 随内容滚动（非 sticky/fixed） ---------------- */
+console.log('L7 设置页 .setfoot 样式契约（随页面滚动，禁止 sticky/fixed 固定吸底）');
+const uiPagePath = path.resolve(__dirname, '../src/net/ui_page.h');
+const rawPage = fs.readFileSync(uiPagePath, 'utf8');
+const setfootRules = rawPage.match(/\.setfoot\{[^}]*\}/g) || [];
+ck(setfootRules.length >= 1, 'L7a ui_page.h 存在 .setfoot 规则', J(setfootRules));
+const hasStickyOrFixed = setfootRules.some((r) => /position\s*:\s*(sticky|fixed)/i.test(r));
+ck(!hasStickyOrFixed, 'L7b .setfoot 不含 position:sticky 或 position:fixed', J(setfootRules));
+const hasAutoMargin = setfootRules.some((r) => /margin-top\s*:\s*auto/i.test(r));
+ck(hasAutoMargin, 'L7c .setfoot 保留 margin-top:auto（短页贴底、长页随内容滚）', J(setfootRules));
+
 console.log('\n=== 结果：' + (pass + fail) + ' 项，' + fail + ' 失败 ===');
 process.exit(fail === 0 ? 0 : 1);
