@@ -1619,6 +1619,43 @@ public:
     }
     bool hog_requested() const { return ao_ ? ao_->hog_requested() : false; }
     bool hog_acquired() const { return ao_ ? ao_->hog_acquired() : false; }
+    // ---- 2026-11-09：物理格式与"设备被谁用"的自证 ----
+    // 这两项是「真 bit-perfect」判据的输入：物理层没锁上就一定有 HAL 转换；
+    // 有别的客户端在跑就一定会被求和混音。见 src/audio/bp_verdict.h。
+    bool physical_format_ok() const {
+        if (auto* ca = dynamic_cast<rta::platform::CoreAudioOutput*>(ao_.get())) return ca->physical_format_ok();
+        return false;
+    }
+    std::string physical_note() const {
+        if (auto* ca = dynamic_cast<rta::platform::CoreAudioOutput*>(ao_.get())) return ca->physical_note();
+        return std::string();
+    }
+    uint32_t physical_rate() const {
+        if (auto* ca = dynamic_cast<rta::platform::CoreAudioOutput*>(ao_.get())) return ca->physical_rate();
+        return 0;
+    }
+    int physical_bits() const {
+        if (auto* ca = dynamic_cast<rta::platform::CoreAudioOutput*>(ao_.get())) return ca->physical_bits();
+        return 0;
+    }
+    bool device_shared_with_others() const {
+        if (auto* ca = dynamic_cast<rta::platform::CoreAudioOutput*>(ao_.get())) return ca->device_shared_with_others();
+        return false;
+    }
+    bool container_lossy() const {
+        if (auto* ca = dynamic_cast<rta::platform::CoreAudioOutput*>(ao_.get())) return ca->container_lossy();
+        return false;
+    }
+    // 后端自证的"是否经系统混音"（比 backend 字符串更可靠：AirPlay 会被后端强制成共享）
+    bool shared_output_mode() const {
+        if (auto* ca = dynamic_cast<rta::platform::CoreAudioOutput*>(ao_.get())) return ca->shared_mode();
+        return shared_;
+    }
+    // 后端渲染增益（线性）。用于校验"实际写出的增益是否真的是 1.0"。
+    double render_gain() const {
+        if (auto* ca = dynamic_cast<rta::platform::CoreAudioOutput*>(ao_.get())) return ca->render_gain();
+        return 1.0;
+    }
     rta::platform::OutputError last_error_class() const { return ao_ ? ao_->last_error_class() : rta::platform::OutputError::None; }
     std::string last_error_for_lang(bool en) const {
         if (en && ao_) {
@@ -4066,6 +4103,31 @@ static bool play_one_impl(const std::string& file, const PlayParams& pIn, rta::a
             mac_find_dev(pEff.device, dev, devId);
         }
 
+        // ---- 开流**之前**的只读探测：物理格式能否锁到源格式、设备上有没有别的客户端 ----
+        // 这两项必须在 verdict 之前拿到（verdict 要在信号链 JSON 里落盘），而锁物理格式
+        // 发生在 sink->open() 里（更晚）。所以这里做**只读预测**：
+        //   · 可用物理格式列表 + 纯函数 pick_physical_format ⟹ 预测能否锁定
+        //   · kAudioDevicePropertyDeviceIsRunningSomewhere ⟹ 别人是不是正在用这个设备
+        // 开流之后再用后端实测值校对（见 sinkGuard 之后），预测错了会当场纠正并记日志，
+        // 绝不让"预测"顶替"实测"。
+        bool devicePhysOkBeforeOpen = false;
+        bool otherClientsBeforeOpen = false;
+        {
+            const bool isLocalBackend = (p.backend == "coreaudio");
+            const bool isSharedReq = targetIsAirPlay || (p.backend == "coreaudio-shared") ||
+                                     (targetCaps.sharedOnly && !targetIsAirPlay);
+            if (isLocalBackend && !isSharedReq) {
+                const rta::platform::macos_probe::DeviceId devId =
+                    rta::platform::macos_probe::resolve_audio_device(pEff.device);
+                if (devId != 0) {
+                    otherClientsBeforeOpen = rta::platform::macos_probe::device_running_somewhere(devId);
+                    const auto sid = rta::platform::macos_probe::first_output_stream(devId);
+                    const auto avail = rta::platform::macos_probe::available_physical_formats(sid);
+                    const auto pk = rta::audio::pick_physical_format(avail, in.rate, srcBitsEff);
+                    devicePhysOkBeforeOpen = pk.ok;
+                }
+            }
+        }
         // ---- bit-perfect 结论（一次性算好，信号链与 /api/status 共用）----
         // 2026-11-09（用户反馈「共享模式必然不是 bit-perfect，程序却显示是」）：
         // 判定式收敛到 src/audio/bp_verdict.h（唯一实现）。这里只负责**如实填事实**，
@@ -4094,6 +4156,12 @@ static bool play_one_impl(const std::string& file, const PlayParams& pIn, rta::a
                            (rta::dsp::replaygain::loudness_volume_db(0.0, cfg.replayGainDb) < -1e-9);
         bpin.channelMix  = (outCh != in.channels);
         bpin.floatSource = in.isFloat;
+        // ---- 物理格式与"设备被谁用"（2026-11-09：真 bit-perfect 的两条硬条件）----
+        // 这两项**只有后端知道**，所以必须由后端自证，不能在这里凭 backend 字符串猜。
+        // 共享模式不锁物理层 ⟹ physStateKnown=false，由 sharedMixer 那条一票否决兜住。
+        bpin.physStateKnown = !bpin.sharedMixer;
+        bpin.physLocked     = bpin.sharedMixer ? false : devicePhysOkBeforeOpen;
+        bpin.otherClients   = otherClientsBeforeOpen;
         const rta::audio::BpVerdict bpv = rta::audio::bp_verdict(bpin);
         // 方向（降采样/升采样）必须有后端证据才敢说。旧代码靠 why 文案里"重采样"三个字
         // 反推方向 ⟹ 48000→44100 被标成「PCM-PCM 升频」（用户 2026-11-09 截图）。
@@ -4452,6 +4520,44 @@ static bool play_one_impl(const std::string& file, const PlayParams& pIn, rta::a
         if (ca) {
             ps.hogRequested.store(ca->hog_requested());
             ps.hogAcquired.store(ca->hog_acquired());
+
+            // ---- 2026-11-09：用**后端实测值**校正开流前的预测 ----
+            // 预测（devicePhysOkBeforeOpen / otherClientsBeforeOpen）来自只读探测，
+            // 实测来自 CoreAudioOutput 锁完物理格式后的读回。两者不一致时以实测为准，
+            // 并记一行 PVFIX 便于事后核对"预测器有没有骗人"。
+            const bool physMeasured = ca->physical_format_ok();
+            const bool sharedNow    = ca->shared_output_mode();
+            const rta::audio::BpInputs bpin2 = [&] {
+                rta::audio::BpInputs b = bpin;
+                b.physStateKnown = !sharedNow;
+                b.physLocked     = physMeasured;
+                b.gainNotUnity   = (std::abs(ca->render_gain() - 1.0) > 1e-12);
+                // 容器丢位（源 32-bit 走 float32 / 物理位深不足）也必须进判据，
+                // 否则"数值接近"又会被当成逐位一致。
+                if (ca->container_lossy()) b.formatFallback = true;
+                return b;
+            }();
+            const rta::audio::BpVerdict bpv2 = rta::audio::bp_verdict(bpin2);
+            if (bpv2.state != bpv.state) {
+                play_log("PVFIX verdict " + bpv.state + " -> " + bpv2.state +
+                         " (physPred=" + (devicePhysOkBeforeOpen ? "1" : "0") +
+                         " physMeas=" + (physMeasured ? "1" : "0") +
+                         " shared=" + (sharedNow ? "1" : "0") + ")");
+                {
+                    std::lock_guard<std::mutex> lk(ps.mtx);
+                    ps.bpState = bpv2.state;
+                    ps.bpWhy = bpv2.why;
+                    // 信号链里的结论也要同步改写，否则详情页与底栏会不一致
+                    std::string s = ps.signal;
+                    const std::string from = "\"bitPerfect\":\"" + bpv.state + "\"";
+                    const std::string to   = "\"bitPerfect\":\"" + bpv2.state + "\"";
+                    if (auto at = s.find(from); at != std::string::npos) s.replace(at, from.size(), to);
+                    const std::string fromW = "\"bitPerfectWhy\":\"" + bpv.why + "\"";
+                    const std::string toW   = "\"bitPerfectWhy\":\"" + bpv2.why + "\"";
+                    if (auto at2 = s.find(fromW); at2 != std::string::npos) s.replace(at2, fromW.size(), toW);
+                    ps.signal = s;
+                }
+            }
         }
         // 2026-10-23 真机 DEBUG：打开成功也要如实带出「驱动实际接受的是哪种独占格式」。
         // 之前这句只有失败时才有，成功时用户只看到"32-bit"，根本不知道内部是紧凑24还是32容器，

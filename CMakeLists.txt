@@ -350,6 +350,19 @@ add_executable(test_bp_verdict tests/test_bp_verdict.cpp)
 target_include_directories(test_bp_verdict PRIVATE ${CMAKE_SOURCE_DIR}/src)
 add_test(NAME bp_verdict COMMAND test_bp_verdict)
 
+# 物理格式选择判据 src/audio/phys_format.h：真 bit-perfect 的前提
+# （锁不上硬件物理格式时 HAL 一定在转换，此时不可能逐位直通）。纯函数、不开设备。
+add_executable(test_phys_format tests/test_phys_format.cpp)
+target_include_directories(test_phys_format PRIVATE ${CMAKE_SOURCE_DIR}/src)
+add_test(NAME phys_format COMMAND test_phys_format)
+
+# 真机：物理格式锁定是否真的生效（不启动 IOProc、不写样本，open 后立即 close）。
+# 用 --device 显式指定端点；不带参数时测默认设备（可能是内置扬声器，那时判据是"如实报否"）。
+add_executable(test_physlock_device tests/test_physlock_device.cpp)
+target_include_directories(test_physlock_device PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(test_physlock_device PRIVATE
+    "-framework CoreAudio" "-framework AudioToolbox" "-framework CoreFoundation")
+
 add_executable(test_host_msg tests/test_host_msg.cpp)
 target_link_libraries(test_host_msg PRIVATE rtadsp)
 add_test(NAME host_msg COMMAND test_host_msg)

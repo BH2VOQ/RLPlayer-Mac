@@ -4306,6 +4306,18 @@ function bpBadgeInfo() {
   //   out < in ⟹ 「PCM 降采样」（黄标 bp-no，与 AirPlay/UPnP 的降采样分支同一形态）
   //   out > in ⟹ 「PCM-PCM 升频」
   //   两端拿不到 ⟹ 才回落到旧文案匹配，且**绝不**在缺证据时声称方向。
+  // 2026-11-09：两条新的硬否决要有**具体**文案，不能混在笼统的"非 bit-perfect"里。
+  // 用户要的是"能看出为什么不是"，而不是一个黄点。放在 isCastOut 定义之后即可安全引用。
+  if (!isCastOut && whyBp.indexOf('物理格式未锁定') >= 0) {
+    t = '非 bit-perfect'; c = 'bp-no';
+    if (!title) title = whyBp + '（端点没有可锁定的整数物理格式，HAL 必然转换）';
+    return { text: t, cls: c, title: title };
+  }
+  if (!isCastOut && whyBp.indexOf('其它程序') >= 0) {
+    t = '非 bit-perfect'; c = 'bp-no';
+    if (!title) title = whyBp + '（macOS 混音器为 float32 求和，别的程序一出声就改变样本值）';
+    return { text: t, cls: c, title: title };
+  }
   var bpIn = (typeof S.bpInRate === 'number') ? S.bpInRate : 0;
   var bpOut = (typeof S.bpOutRate === 'number') ? S.bpOutRate : 0;
   if (!isCastOut && bpIn > 0 && bpOut > 0 && bpOut !== bpIn) {
@@ -9693,9 +9705,11 @@ function renderSettingsPage() {
        // 诚实说明副作用 —— 实测确认 Hog 会阻断其它进程改硬件音量（系统音量条失效），
        // 这是 macOS 机制限制，不是本程序的 bug，所以必须写清楚让用户自己权衡。
        + chk('sp_hogexcl', '严格独占（抢 Hog Mode）', ADV.hogExclusive == 1,
-             '勾选 = 真独占：屏蔽其它 App 声音、设备所有权归本程序；' +
+             '勾选 = 抢设备所有权：其它程序改不了硬件音量，' +
              '**但系统音量条 / 音量键会失效**（macOS Hog 机制限制，实测确认），' +
-             '音量只能用本程序的音量条调。不勾 = 系统音量全程可用（默认）。', true)
+             '音量只能用本程序的音量条调。不勾 = 系统音量全程可用。' +
+             '注意 Hog **不能**阻止其它 App 播放（macOS 机制，实测确认）；' +
+             '逐位直通靠的是锁定设备物理格式，两者独立。默认开启。', true)
        + sel('sp_outmode', '输出模式',
              opt('pcm', 'PCM', outModeOf()) + opt('dsd', 'DSD（SDM）', outModeOf()),
              'DSD 的比特率与封装（DoP / Native）在 SDM 页设置')

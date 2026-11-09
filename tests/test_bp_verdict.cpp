@@ -166,6 +166,58 @@ int main() {
         ck(v.why.find("补零") != std::string::npos, "说明里要点明补零", v.why);
     }
 
+    // ---------------- [7] 物理格式未锁定：必须判否（2026-11-09 新增）----------------
+    std::printf("\n[7] 物理格式未锁定 = HAL 在转换 = 不是 bit-perfect\n");
+    {
+        BpInputs x = clean_bitperfect();
+        x.physStateKnown = true;
+        x.physLocked = false;          // 只设了 HAL 虚拟层，物理层是 176400 而源是 44100
+        const BpVerdict v = bp_verdict(x);
+        ck(v.state == "no", "物理层未锁定必须判否", v.state);
+        bool hit = false;
+        for (const auto& s : v.violations) if (s.find("物理格式") != std::string::npos) hit = true;
+        ck(hit, "理由里要点明物理格式未锁定", v.why);
+    }
+    {
+        BpInputs x = clean_bitperfect();
+        x.physStateKnown = true;
+        x.physLocked = true;
+        const BpVerdict v = bp_verdict(x);
+        ck(v.state == "yes", "物理层锁定时不误判", v.state);
+    }
+    // 共享模式下后端不锁物理层 ⟹ physStateKnown=false，不能因此误判
+    {
+        BpInputs x = clean_bitperfect();
+        x.physStateKnown = false;
+        x.physLocked = false;
+        const BpVerdict v = bp_verdict(x);
+        ck(v.state == "yes", "physStateKnown=false 时不拿未锁定当违规", v.state);
+    }
+
+    // ---------------- [8] 设备上有其它客户端：混音必然改变样本值 ----------------
+    std::printf("\n[8] 开流前设备已被其它程序使用\n");
+    {
+        BpInputs x = clean_bitperfect();
+        x.otherClients = true;
+        const BpVerdict v = bp_verdict(x);
+        ck(v.state == "no", "有其它客户端必须判否", v.state);
+        bool hit = false;
+        for (const auto& s : v.violations) if (s.find("其它程序") != std::string::npos) hit = true;
+        ck(hit, "理由里要点明其它程序在播放", v.why);
+    }
+
+    // ---------------- [9] 三个新字段的组合：干净 + 全锁 = yes ----------------
+    std::printf("\n[9] 全部条件齐备才算逐位直通\n");
+    {
+        BpInputs x = clean_bitperfect();
+        x.physStateKnown = true;
+        x.physLocked = true;
+        x.otherClients = false;
+        x.gainNotUnity = false;
+        const BpVerdict v = bp_verdict(x);
+        ck(v.state == "yes", "物理锁定 + 无其它客户端 + 增益 1.0 = yes", v.state);
+    }
+
     std::printf("\n========== %d/%d passed ==========\n", g_total - g_fail, g_total);
     return g_fail == 0 ? 0 : 1;
 }

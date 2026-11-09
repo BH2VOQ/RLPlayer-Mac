@@ -74,7 +74,7 @@ This chain is not an illustration: every item is visible with the actual values 
 
 ### 🔊 Output
 
-- **CoreAudio exclusive (Hog)** — AUHAL + Hog preemption + physical format lock, avoiding resampling by the system mixer; reports real `DeviceBusy` and blocking PID on collision instead of misleading format errors
+- **CoreAudio exclusive (Hog, on by default)** — AUHAL + Hog preemption + **physical format lock** (`kAudioStreamPropertyPhysicalFormat`, read back and verified), avoiding resampling by the system mixer; reports real `DeviceBusy` and blocking PID on collision instead of misleading format errors
 - **CoreAudio shared** — the fallback when exclusive mode is unavailable; `bit_perfect()` explicitly returns false and says so; 16/24/32-bit measured deviation **0 LSB**
 - **DoP** — DSD wrapped in a 24-bit carrier, the only DSD output path on macOS; in DoP mode it never silently falls back to shared
 - **UPnP / DLNA** — SSDP discovery, AVTransport control and local file serving; track changes, playback state and errors follow the remote session. Source sample rate and bit depth are retained unless conversion is requested; the receiver may apply its own processing.
@@ -302,7 +302,9 @@ flowchart TB
 - **UPnP casting cannot play CUE-split tracks** — a renderer can only stream discrete files; clicking a CUE track during cast explicitly reports an error rather than falling back silently
 - **The room measurement wizard is currently hidden** — 7 transport-layer defects are fixed; the wizard and real microphone measurement are planned for **1.2.0**; the existing manual “EQ file / room correction IR” loading still works
 - **Hog is not exclusive kernel audio** — Hog takes over the device but does not block I/O from other processes; the real bit-perfect guarantee comes from the physical format lock
-- **The exclusive path cannot prove itself bit-for-bit** — a device-side loopback tap conflicts with Hog, so the exclusive path currently has only indirect evidence
+- **Bit-perfect requires a lockable integer physical format** — endpoints whose physical layer offers only `float32` (built-in speakers, virtual devices) cannot pass integer samples bit-for-bit; the app plays there but reports "not bit-perfect" with the reason, never a green badge
+- **Other clients are sampled once, before the stream opens** — Hog does not block other processes from playing (measured); if another app starts playback mid-stream the summing mixer changes sample values and this is not detected live
+- **Changing tracks may change the hardware sample rate** — locking the physical format means a 44.1k → 96k switch makes the DAC click; Roon/Audirvana behave the same way
 - **GPU convolution is slower in production shape** — see the previous section
 - **GPU upsampling is not bit-exact** — Apple GPUs have no double precision, so it uses the float path; the difference from CPU is on the order of −132.6 dB
 - **7th-order 1-bit modulators** — automatically drop to 5th order below DSD128; the Chebyshev family always uses 5th order

@@ -64,6 +64,19 @@ struct BpInputs {
     //   gainNotUnity    = 后端渲染增益 != 1.0（已在 volumeDb 之外再确认一次，纵深防御）
     bool     formatFallback = false;
     bool     gainNotUnity   = false;
+
+    // ---- 2026-11-09 新增：物理格式锁定与真独占自证 ----
+    // 用户明确要求「不能是接近」。物理层（kAudioStreamPropertyPhysicalFormat）没锁到源格式时，
+    // HAL 一定在中间做转换（重采样或 int→float），此时无论数值多接近都不是逐位直通。
+    //   physStateKnown = 后端是否给出了结论（共享模式下不锁物理层，此项为 false，别误判）
+    //   physLocked     = 后端读回物理格式 == 源格式（整数、同率、位深 >= 源）
+    bool     physStateKnown = false;
+    bool     physLocked     = false;
+    // 开流**之前**设备上是否已有其它客户端在跑（kAudioDevicePropertyDeviceIsRunningSomewhere）。
+    // 为什么是"开流之前"：该属性在设备被任意进程使用期间都为 1，含本程序自己；
+    // 所以只有开流前的读数能说明"别人也在用"。Hog Mode 并不能挡住别的进程
+    // （PLATFORM.md §13.10.5 实测：独占期间第三进程 IOProc 照常运行）。
+    bool     otherClients   = false;
 };
 
 struct BpVerdict {
@@ -120,6 +133,17 @@ inline BpVerdict bp_verdict(const BpInputs& x) {
     if (x.floatSource) bad("浮点解码容器（需重新量化）");
     if (x.formatFallback) bad("设备层容器转换（实际格式与源不一致）");
     if (x.gainNotUnity)   bad("输出级增益非 1.0");
+
+    // 物理格式没锁上 ⟹ HAL 必然在转换。这条是「真 bit-perfect」的核心判据：
+    // 只设虚拟层时，物理层若是 176400 而源是 44100，HAL 正在重采样，而旧代码照样报 yes。
+    if (x.physStateKnown && !x.physLocked) {
+        bad("设备物理格式未锁定（HAL 在中间做转换）");
+    }
+    // 开流前设备上已有其它客户端：Hog 挡不住它们在开流后插进来，
+    // 求和混音一旦发生就不是逐位直通（macOS 混音器恒为 float32 求和）。
+    if (x.otherClients) {
+        bad("设备上有其它程序在播放（混音会改变样本值）");
+    }
 
     if (r.violations.empty()) {
         r.state = "yes";

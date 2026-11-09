@@ -40,6 +40,7 @@
 // 成因分解是 RENDERFAIL 判据本体（tests/test_renderfail.cpp 直接驱动它），
 // macOS 侧必须继续提供同一套可观测性，否则等于把该能力弄丢而不是"删掉平台实现"。
 #include "audio/write_attrib.h"
+#include "audio/phys_format.h"   // 设备物理格式选择判据（真 bit-perfect 的前提）
 #include "platform/macos/pcm_format_validation.h"
 #include "platform/macos/airplay_policy.h"
 #include "platform/macos/dop_silence_fill.h"   // 1.1.2 P0-3：欠载时的合法 DoP 静音帧
@@ -350,6 +351,104 @@ inline void hw_volume_restore(AudioDeviceID dev, const HwVolumeState& st) {
     if (!st.saved) return;
     hw_volume_set(dev, st.scalar);
     if (st.muteSaved) hw_mute_set(dev, st.mute);
+}
+
+// ---------------- 设备物理格式（硬件真正跑的那一层）----------------
+// 为什么必须区分两层（2026-11-09，用户质问「HQPlayer 能 bit-perfect」）：
+//   kAudioDevicePropertyStreamFormat   = HAL 虚拟/混音层（我们此前只写这一层）
+//   kAudioStreamPropertyPhysicalFormat = 硬件流的物理格式（真正决定 DAC 吃什么）
+// 只设虚拟层时，物理层若不同，HAL 会在中间做采样率转换或 int→float32 ——
+// 位流已被改动，但代码从不读物理层，所以 bit_perfect() 照样报 true。
+// 本机实测（只读探针，未播放任何声音）：
+//   Pocket Master (USB)  物理层只有 44100/16 整数
+//   M140F2 (DisplayPort) 物理层 21 档，全为整数 24/20
+//   Mac mini 扬声器       物理层只有 float32（物理上不可能整数直通）
+//   Oray 虚拟设备         物理层只有 float32（同上）
+// 四台设备的物理层 settable 全为 YES ⟹ 锁定这条路是通的，只是此前没走。
+inline AudioStreamID first_output_stream(AudioDeviceID dev) {
+    AudioObjectPropertyAddress addr{kAudioDevicePropertyStreams,
+                                    kAudioDevicePropertyScopeOutput,
+                                    kAudioObjectPropertyElementMain};
+    UInt32 size = 0;
+    if (::AudioObjectGetPropertyDataSize(dev, &addr, 0, nullptr, &size) != noErr ||
+        size < sizeof(AudioStreamID)) return kAudioObjectUnknown;
+    AudioStreamID sid = kAudioObjectUnknown;
+    UInt32 n = sizeof(sid);
+    if (::AudioObjectGetPropertyData(dev, &addr, 0, nullptr, &n, &sid) != noErr) return kAudioObjectUnknown;
+    return sid;
+}
+
+// 读设备当前物理格式
+inline bool get_physical_format(AudioStreamID sid, AudioStreamBasicDescription& out) {
+    if (sid == kAudioObjectUnknown) return false;
+    AudioObjectPropertyAddress addr{kAudioStreamPropertyPhysicalFormat,
+                                    kAudioObjectPropertyScopeGlobal,
+                                    kAudioObjectPropertyElementMain};
+    UInt32 size = sizeof(out);
+    std::memset(&out, 0, sizeof(out));
+    return ::AudioObjectGetPropertyData(sid, &addr, 0, nullptr, &size, &out) == noErr;
+}
+
+// 写设备物理格式（真正锁硬件）。失败说明该格式不被硬件接受。
+inline bool set_physical_format(AudioStreamID sid, const AudioStreamBasicDescription& asbd) {
+    if (sid == kAudioObjectUnknown) return false;
+    AudioObjectPropertyAddress addr{kAudioStreamPropertyPhysicalFormat,
+                                    kAudioObjectPropertyScopeGlobal,
+                                    kAudioObjectPropertyElementMain};
+    return ::AudioObjectSetPropertyData(sid, &addr, 0, nullptr, sizeof(asbd), &asbd) == noErr;
+}
+
+// 枚举设备物理层支持的格式（供 pick_physical_format 决策）
+inline std::vector<rta::audio::PhysFormat> available_physical_formats(AudioStreamID sid) {
+    std::vector<rta::audio::PhysFormat> out;
+    if (sid == kAudioObjectUnknown) return out;
+    AudioObjectPropertyAddress addr{kAudioStreamPropertyAvailablePhysicalFormats,
+                                    kAudioObjectPropertyScopeGlobal,
+                                    kAudioObjectPropertyElementMain};
+    UInt32 size = 0;
+    if (::AudioObjectGetPropertyDataSize(sid, &addr, 0, nullptr, &size) != noErr || size == 0) return out;
+    std::vector<AudioStreamRangedDescription> list(size / sizeof(AudioStreamRangedDescription));
+    UInt32 got = size;
+    if (::AudioObjectGetPropertyData(sid, &addr, 0, nullptr, &got, list.data()) != noErr) return out;
+    const size_t n = got / sizeof(AudioStreamRangedDescription);
+    for (size_t i = 0; i < n; ++i) {
+        const AudioStreamBasicDescription& f = list[i].mFormat;
+        if (f.mFormatID != kAudioFormatLinearPCM) continue;
+        rta::audio::PhysFormat p;
+        p.rate = (uint32_t)std::llround(f.mSampleRate);
+        p.bits = (int)f.mBitsPerChannel;
+        p.isFloat = (f.mFormatFlags & kAudioFormatFlagIsFloat) != 0;
+        out.push_back(p);
+    }
+    return out;
+}
+
+// 其它进程是否正在使用该设备（kAudioDevicePropertyDeviceIsRunningSomewhere）
+// Hog Mode 在 macOS 上**不能**阻止其它进程播放（PLATFORM.md 13.10.5 实测：
+// 独占期间第三进程 IOProc 照常运行、成功抓录 1.5 秒）。所以真独占必须显式检测，
+// 不能把 Hog 的登记归属当成保证。
+inline bool device_running_somewhere(AudioDeviceID dev) {
+    AudioObjectPropertyAddress addr{kAudioDevicePropertyDeviceIsRunningSomewhere,
+                                    kAudioObjectPropertyScopeGlobal,
+                                    kAudioObjectPropertyElementMain};
+    UInt32 v = 0;
+    UInt32 size = sizeof(v);
+    if (::AudioObjectGetPropertyData(dev, &addr, 0, nullptr, &size, &v) != noErr) return false;
+    return v != 0;
+}
+
+// 把 pick 结果转成 ASBD（交错整数 + packed）
+inline AudioStreamBasicDescription make_int_asbd(uint32_t rate, int bits, int channels) {
+    AudioStreamBasicDescription a{};
+    a.mSampleRate = (Float64)rate;
+    a.mFormatID = kAudioFormatLinearPCM;
+    a.mFormatFlags = kAudioFormatFlagIsSignedInteger | kAudioFormatFlagIsPacked;
+    a.mBytesPerPacket = (UInt32)(bits / 8) * (UInt32)channels;
+    a.mFramesPerPacket = 1;
+    a.mBytesPerFrame  = (UInt32)(bits / 8) * (UInt32)channels;
+    a.mChannelsPerFrame = (UInt32)channels;
+    a.mBitsPerChannel = (UInt32)bits;
+    return a;
 }
 
 // 读取设备当前 StreamFormat（虚拟/混音层 ASBD）
@@ -757,6 +856,74 @@ public:
         formatFallbackNote_.clear();
 
         if (!shared_) {
+            // ---- 2a) 先锁**硬件物理格式**（kAudioStreamPropertyPhysicalFormat）----
+            // 2026-11-09：这是「真 bit-perfect」与「看起来 bit-perfect」的分界线。
+            // 之前只写虚拟层（下面那段），物理层不受控 ⟹ HAL 在中间做重采样/int→float，
+            // 位流已被改动而代码不知道。现在按源格式把物理层也锁到同一档，并真实读回校验。
+            //
+            // 策略来自纯函数 rta::audio::pick_physical_format（tests/test_phys_format.cpp 钉住）：
+            //   · 采样率必须精确相等（绝不重采样）
+            //   · 位深优先精确相等，否则补零（数值不变）
+            //   · 端点只有 float32 ⟹ 判否（用户明确要求「不能是接近」）
+            physStream_ = detail::first_output_stream(device_);
+            physLocked_ = false;
+            physNote_.clear();
+            {
+                const auto avail = detail::available_physical_formats(physStream_);
+                const auto pk = rta::audio::pick_physical_format(avail, rate_, bits_);
+                // ⚠️ 锁不上时**不阻止播放**，只如实降级为"非 bit-perfect"。
+                // 理由：锁不上的典型场景是内置扬声器 / 虚拟声卡（物理层只有 float32），
+                // 那里根本没插听音 DAC。若在这种端点上直接拒绝播放，等于让笔记本外放
+                // 完全不能用 —— 那不是保真，是把程序弄坏。用户要的是"别谎报"，
+                // 判据由 physLocked_ 如实传给界面（→ 黄标 + 具体理由）。
+                if (!pk.ok) {
+                    physNote_ = "物理格式未锁定：" + pk.why;
+                    formatFallbackNote_ = physNote_;
+                    physDeviceBits_ = bits_;   // 客户端仍按请求位深打包
+                } else {
+                    const AudioStreamBasicDescription wantAsbd =
+                        detail::make_int_asbd(pk.pick.rate, pk.pick.bits, channels_);
+                    bool wrote = detail::set_physical_format(physStream_, wantAsbd);
+                    AudioStreamBasicDescription got{};
+                    const bool readback = wrote && detail::get_physical_format(physStream_, got);
+                    if (!readback) {
+                        physNote_ = "物理格式锁定失败（SetProperty=" +
+                                    std::string(wrote ? "ok" : "fail") + "，读回=" +
+                                    std::string(readback ? "ok" : "fail") + "）";
+                        formatFallbackNote_ = physNote_;
+                        physDeviceBits_ = bits_;
+                    } else {
+                        const bool rateOk = ((uint32_t)std::llround(got.mSampleRate) == rate_);
+                        const bool intOk  = (got.mFormatFlags & kAudioFormatFlagIsFloat) == 0;
+                        const int  gotBits = (int)got.mBitsPerChannel;
+                        physReadRate_ = (uint32_t)std::llround(got.mSampleRate);
+                        physReadBits_ = gotBits;
+                        physReadFloat_ = !intOk;
+                        // 逐位直通的物理条件：同率 + 整数 + 位深 >= 源位深
+                        physLocked_ = rateOk && intOk && gotBits >= bits_;
+                        // 容器是否丢源位深的有效位：
+                        //   · 物理层是整数且位深 >= 源位深 ⟹ 不丢（补零只是把 0 填进低位）
+                        //   · 物理位深 < 源位深 ⟹ 真的丢位（上面的 physLocked_ 已判否，这里双保险）
+                        // 注意：HAL 虚拟层静默用 float32 容器**不算**丢位（尾数 24 位），
+                        // 但源是 32-bit 整型时 float32 确实装不下 32 位 —— 那条在下面判。
+                        containerLossy_ = (gotBits < bits_);
+                        if (!physLocked_) {
+                            physNote_ = "物理格式读回与请求不符：请求 " + std::to_string(rate_) +
+                                        " Hz/" + std::to_string(bits_) + " bit 整数，读回 " +
+                                        std::to_string(physReadRate_) + " Hz/" +
+                                        std::to_string(physReadBits_) +
+                                        (physReadFloat_ ? " bit 浮点" : " bit 整数");
+                            formatFallbackNote_ = physNote_;
+                            physDeviceBits_ = bits_;
+                        } else {
+                            // 锁定成功：客户端必须按**物理位深**打包（补零在此发生）
+                            physDeviceBits_ = physReadBits_;
+                            if (pk.zeroPad) physNote_ = pk.why;   // 补零要如实告知，但不影响物理锁定
+                        }
+                    }
+                }
+            }
+
             if (!detail::set_device_format(device_, rate_, bits_, channels_)) {
                 // 回滚 hog
                 if (hogged_) { detail::set_hog_mode(device_, false); hogged_ = false; }
@@ -799,6 +966,15 @@ public:
                 deviceContainerBits_ = neg.containerBits;
                 deviceIsFloat_ = neg.isFloat;
                 formatFallbackNote_ = neg.fallbackNote;
+                // 第二判据（纵深防御）：HAL 混音容器是 float32 时，只有源位深 <= 24 才无损。
+                // CoreAudio 的混音域恒为 float32，这不是"降级"而是架构；但源是 32-bit 整型时
+                // 尾数装不下全部 32 位 ⟹ 真的会丢低位。这一条必须判否，否则又成了"接近"。
+                if (neg.isFloat && bits_ > 24) {
+                    containerLossy_ = true;
+                    if (formatFallbackNote_.empty())
+                        formatFallbackNote_ = "HAL 混音容器为 float32（尾数 24 位），"
+                                              "装不下 " + std::to_string(bits_) + "-bit 源样本";
+                }
             } else {
                 // 设备层格式认不出来（例如非交错/异常 ASBD）也只记录，不拒绝：AUHAL 仍会做转换。
                 devicePacking_ = macos::ContainerPacking::Invalid;
@@ -941,14 +1117,22 @@ public:
             return false;
         }
 
-        // 5) 在输出总线上设我们的流格式（int32 交错，按请求位深打包）
+        // 5) 在输出总线上设我们的流格式（交错整数，按**物理位深**打包）
+        //
+        // ⚠️ 2026-11-09：这里用 physDeviceBits_ 而不是 bits_。
+        // 原因：物理层锁到的是设备真实位深（例如源 16-bit、设备只有 24-bit 整数物理格式），
+        // 客户端必须按物理位深打包并**低位补零**，否则 AUHAL 会在 client↔device 之间
+        // 再做一次转换，那正是我们刚刚锁物理层要消除的东西。
+        // 独占路径上 physDeviceBits_ 已由 pick_physical_format 校验过（>= bits_）；
+        // 共享路径没有锁物理层，退回 bits_（那里本来就如实标注非 bit-perfect）。
+        const int clientPackBits = (!shared_ && physDeviceBits_ >= bits_) ? physDeviceBits_ : bits_;
         AudioStreamBasicDescription asbd{};
         asbd.mSampleRate = (Float64)rate_;
         asbd.mFormatID = kAudioFormatLinearPCM;
         asbd.mFormatFlags = kAudioFormatFlagIsSignedInteger | kAudioFormatFlagIsPacked;
-        asbd.mBytesPerFrame = (UInt32)(bits_ / 8) * (UInt32)channels_;
+        asbd.mBytesPerFrame = (UInt32)(clientPackBits / 8) * (UInt32)channels_;
         asbd.mChannelsPerFrame = (UInt32)channels_;
-        asbd.mBitsPerChannel = (UInt32)bits_;
+        asbd.mBitsPerChannel = (UInt32)clientPackBits;
         asbd.mFramesPerPacket = 1;
         asbd.mBytesPerPacket = asbd.mBytesPerFrame;
         st = ::AudioUnitSetProperty(unit_, kAudioUnitProperty_StreamFormat,
@@ -971,22 +1155,24 @@ public:
                  "无法读回音频单元客户端流格式（OSStatus=" + std::to_string((int)st) + "）");
             return false;
         }
-        // 严格匹配 client 打包参数
+        // 严格匹配 client 打包参数（位深按 clientPackBits，其余与请求一致）
         if ((uint32_t)clientReadback.mSampleRate != rate_ ||
             clientReadback.mChannelsPerFrame != (UInt32)channels_ ||
-            clientReadback.mBitsPerChannel != (UInt32)bits_ ||
+            clientReadback.mBitsPerChannel != (UInt32)clientPackBits ||
             clientReadback.mBytesPerFrame != asbd.mBytesPerFrame ||
             clientReadback.mFormatFlags != asbd.mFormatFlags) {
             close_locked();
             fail(OutputError::UnsupportedFormat,
-                 "音频单元读回格式与客户端打包要求不匹配（AUHAL 自动重协商偏离）");
+                 "音频单元读回格式与客户端打包要求不匹配（AUHAL 自动重协商偏离）："
+                 "请求 " + std::to_string(clientPackBits) + "-bit 整数，" +
+                 "读回 " + std::to_string((int)clientReadback.mBitsPerChannel) + "-bit");
             return false;
         }
 
-        if (bits_ == 16) clientPacking_ = macos::ContainerPacking::Packed16;
-        else if (bits_ == 24) clientPacking_ = macos::ContainerPacking::Packed24;
+        if (clientPackBits == 16) clientPacking_ = macos::ContainerPacking::Packed16;
+        else if (clientPackBits == 24) clientPacking_ = macos::ContainerPacking::Packed24;
         else clientPacking_ = macos::ContainerPacking::Int32;
-        clientBits_ = (uint32_t)bits_;
+        clientBits_ = (uint32_t)clientPackBits;
 
         // 6) 缓冲帧数：
         // 若为 AirPlay 设备（isAirPlay），严禁硬套本地 bufferMs，采用设备实际 buffer size
@@ -1246,7 +1432,25 @@ public:
         //
         // 若发生了 24-in-32 或 Float32 等回退，尽管精度未丢但容器改变或需转换，不视为严格 bit-perfect。
         // 反过来，抢了 Hog 但走了 DSP/增益，依然不是 bit-perfect —— 那个由引擎层判。
-        return opened_ && !shared_ && formatFallbackNote_.empty() &&
+        // 2026-11-09：新增 physLocked_ —— 物理层没锁到源格式就**不可能**逐位直通。
+        // 这条是本轮的核心：此前只看虚拟层，物理层若是 176400 而源是 44100，
+        // HAL 正在重采样，代码却报 true（用户实测质疑「HQPlayer 能做到，为什么我们不行」）。
+        // 判据（2026-11-09 真机实测后收紧，每一条都能被设备读回值证伪）：
+        //   1. opened_ && !shared_      不经系统混音
+        //   2. physLocked_              物理层锁到「同率 + 整数 + 位深 >= 源位深」
+        //   3. !containerLossy_         中间容器不丢源位深的任何一位
+        //   4. gain == 1.0              渲染增益真的是 1.0
+        //
+        // 为什么**不再**要求 formatFallbackNote_ 为空（真机实测推翻的旧判据）：
+        //   CoreAudio 的 HAL 混音域恒为 float32 —— Pocket Master 物理层是 44100/16 整数，
+        //   而虚拟层读回 float32。旧的 validate_and_negotiate_format 把这件事写进
+        //   formatFallbackNote_（"由 AUHAL/HAL 进行设备转换"），于是接一台**能**做
+        //   逐位直通的 USB DAC 也永远报 false。真正要问的是：
+        //   float32 装 int16/int24 会不会丢位？—— 不会（IEEE-754 尾数 24 位，
+        //   24 bit 以内全部整数可精确表示，这正是 PLATFORM.md 13.10.3 实测 0 LSB 的原因）。
+        //   会丢位的情形是容器**有效精度低于源位深**（如源 32 bit 走 float32），
+        //   那条由 containerLossy_ 单独判。
+        return opened_ && !shared_ && physLocked_ && !containerLossy_ &&
                (gain_.load(std::memory_order_relaxed) == 1.0);
     }
 
@@ -1322,6 +1526,31 @@ public:
         return info;
     }
 
+    // 物理格式自证（2026-11-09）：给上层判据填 BpInputs::formatFallback 用。
+    // 返回 true 表示"物理层已锁定且与源格式一致"，false 表示存在转换/未锁。
+    // ⚠️ 只看物理层，**不看** formatFallbackNote_。
+    // 原因（2026-11-09 真机实测暴露）：CoreAudio 的 HAL 混音域恒为 float32，
+    // 所以 kAudioDevicePropertyStreamFormat 读回 float32 是**正常架构**，不是降级 ——
+    // 它由 validate_and_negotiate_format 写成 formatFallbackNote_，
+    // 若把那条当失败，接 Pocket Master（物理层 44100/16 整数、虚拟层 float32）
+    // 会永远报"未锁定"。float32 是否精确由 bit_perfect() 单独判（见那里）。
+    bool physical_format_ok() const {
+        std::lock_guard<std::mutex> lk(mu_);
+        return opened_ && physLocked_;
+    }
+    uint32_t physical_rate() const { std::lock_guard<std::mutex> lk(mu_); return physReadRate_; }
+    int      physical_bits() const { std::lock_guard<std::mutex> lk(mu_); return physReadBits_; }
+    bool     physical_is_float() const { std::lock_guard<std::mutex> lk(mu_); return physReadFloat_; }
+    std::string physical_note() const { std::lock_guard<std::mutex> lk(mu_); return physNote_; }
+    // 其它进程是否正在使用本设备（Hog 挡不住别的进程，见 device_running_somewhere 注释）
+    bool device_shared_with_others() const {
+        return device_ != kAudioObjectUnknown && detail::device_running_somewhere(device_);
+    }
+    // 渲染增益（线性）。判据用它确认"实际写出去的增益确实是 1.0"（纵深防御）。
+    double render_gain() const { return gain_.load(std::memory_order_relaxed); }
+    // 中间容器是否丢掉源位深的有效位（物理位深不足 / float32 装 32-bit 源）
+    bool container_lossy() const { std::lock_guard<std::mutex> lk(mu_); return containerLossy_; }
+
     // 格式回退说明（若格式与请求真正完全一致则为空；非空表示存在回退或说明）
     std::string bits_fallback_note() const {
         std::lock_guard<std::mutex> lk(mu_);
@@ -1332,6 +1561,14 @@ public:
     const std::string& last_error() const override { return err_text_; }
     const std::string& last_error_en() const { return err_text_en_; }
 
+private:
+public:
+    // 供只读探测（platform/audio_out_factory.h::macos_probe）在**开流之前**解析设备号。
+    // 返回 0 表示"无有效设备号"（留空表示默认端点，由 open() 内部解析）。
+    static unsigned int probe_resolve_device(const std::string& id) {
+        if (id.empty()) return static_cast<unsigned int>(detail::default_output_device());
+        return static_cast<unsigned int>(resolve_device(id));
+    }
 private:
     static AudioDeviceID resolve_device(const std::string& id) {
         if (id.empty()) return detail::default_output_device();
@@ -1381,7 +1618,14 @@ private:
         //    曾经这里直接 memcpy(sizeof(int32_t)*ch)，16bit 时会把 8 字节/帧写进
         //    设备要的 4 字节/帧缓冲 —— 既越界又全是噪声。
         auto* out = static_cast<uint8_t*>(io->mBuffers[0].mData);
-        const size_t bytes_per_sample = (size_t)(bits_ / 8);
+        // ⚠️ 2026-11-09：打包宽度必须跟**客户端流格式**（clientBits_）走，不能用 bits_。
+        // 独占路径把物理层锁到设备真实位深后，客户端也是按那个位深打包的
+        // （例如源 16-bit、设备物理只有 24-bit 整数 ⟹ 客户端写 24-bit 并低位补零）。
+        // 若这里仍按 bits_=16 打包，AUHAL 收到的字节数和它要的对不上：
+        // 要么越界写、要么把相邻样本当数据 —— 这正是当年 memcpy 事故的同型错误。
+        // clientBits_ 为 0 表示尚未 open（理论上不会进 render），退回 bits_。
+        const int packBits = (clientBits_ > 0) ? (int)clientBits_ : bits_;
+        const size_t bytes_per_sample = (size_t)(packBits / 8);
         const size_t frame_bytes = bytes_per_sample * ch;
         // 设备请求的帧数 = 字节数 / 每帧字节数（不能用 int32 宽度反推！）
         const size_t out_frames = frame_bytes ? (io->mBuffers[0].mDataByteSize / frame_bytes) : 0;
@@ -1414,7 +1658,14 @@ private:
             const int32_t* src = &ring_[((read_pos_ + i) % capacity) * ch];
             uint8_t* dst = out + i * frame_bytes;
             for (size_t c = 0; c < ch; ++c) {
-                const int32_t s = scale_sample_i32(src[c], bits_, g);
+                int32_t s = scale_sample_i32(src[c], bits_, g);
+                // 低位补零：客户端容器比源位深宽时，必须左移对齐到容器满量程，
+                // 否则 -32768..32767 写进 24-bit 容器只等于 -128..127 的满量程比例 —— 声音会小 48 dB。
+                // 左移只是把已知的 0 填进低位，**数值不变**（这正是"补零不破坏逐位"的含义）。
+                if (packBits > bits_) {
+                    const int sh = packBits - bits_;
+                    if (sh < 32) s = (int32_t)((uint32_t)s << sh);
+                }
                 if (bytes_per_sample == 2) {
                     const uint16_t v = (uint16_t)(s & 0xFFFF);          // 低 16 位
                     std::memcpy(dst + c * 2, &v, 2);
@@ -1496,6 +1747,16 @@ private:
         clientPacking_ = macos::ContainerPacking::Packed16;
         clientBits_ = 0;
         formatFallbackNote_.clear();
+        // 物理格式锁定状态归位（close 不还原硬件物理格式：那是系统级共享属性，
+        // 别的客户端可能依赖当前值；Roon/Audirvana 同样不还原）。
+        physStream_ = kAudioObjectUnknown;
+        physLocked_ = false;
+        physReadRate_ = 0;
+        physReadBits_ = 0;
+        physReadFloat_ = false;
+        physDeviceBits_ = 0;
+        physNote_.clear();
+        containerLossy_ = false;
     }
 
     mutable std::mutex mu_;
@@ -1516,6 +1777,15 @@ private:
     bool hog_requested_ = false;
     bool hogged_ = false;
     bool shared_ = false;
+    // ---- 物理格式锁定状态（2026-11-09，真 bit-perfect 的关键）----
+    AudioStreamID physStream_ = kAudioObjectUnknown;  // 首个输出流的 AudioStreamID
+    bool physLocked_ = false;      // 物理层已锁到源格式（读回校验通过）
+    uint32_t physReadRate_ = 0;    // 读回的物理采样率
+    int  physReadBits_ = 0;        // 读回的物理位深
+    bool physReadFloat_ = false;   // 读回的物理格式是否浮点
+    int  physDeviceBits_ = 0;      // 设备物理位深（客户端按此打包，补零在此发生）
+    std::string physNote_;         // 补零等说明（非空 = 有需要如实告知的点）
+    bool containerLossy_ = false;  // 中间容器是否丢源位深有效位（float32 + 32-bit 源 / 位深不足）
     // 1.1.2：本次 open 是否请求 DoP 承载（供自证/诊断；AirPlay 与共享模式在
     // validate_open_spec 里已被前置拒绝，绝不会走到写硬件）。
     // 原子：open() 在控制线程写，render() 在实时线程读，set_gain() 也可能从 UI 线程读。

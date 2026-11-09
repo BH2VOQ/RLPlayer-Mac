@@ -44,4 +44,33 @@ inline constexpr bool has_audio_output_adapter() {
 #endif
 }
 
+#if defined(__APPLE__)
+// ---------------------------------------------------------------------------
+// 只读探测（2026-11-09）。给**开流之前**的判据用：
+//   resolve_audio_device       deviceId 字符串 → AudioDeviceID（0 = 找不到/用默认）
+//   first_output_stream        首个输出流的 AudioStreamID
+//   available_physical_formats 物理层支持的格式列表
+//   device_running_somewhere   是否有**任意**客户端在跑（含本进程；开流前读才有意义）
+// 为什么必须放在这里而不是直接 include CoreAudio 头：tools/rtaweb.cpp 只想拿结论，
+// 不该把 AUHAL 的细节摊到 UI 层；这里做一层薄封装，签名只用 POD 类型。
+// ---------------------------------------------------------------------------
+namespace macos_probe {
+using DeviceId = unsigned int;   // 与 AudioDeviceID 同宽（UInt32）
+
+// deviceId 字符串 → 设备号；空串或非法值返回 0（表示"用默认设备"，由后端 resolve）
+inline DeviceId resolve_audio_device(const std::string& deviceId) {
+    return static_cast<DeviceId>(CoreAudioOutput::probe_resolve_device(deviceId));
+}
+inline unsigned int first_output_stream(DeviceId dev) {
+    return static_cast<unsigned int>(detail::first_output_stream(static_cast<AudioDeviceID>(dev)));
+}
+inline std::vector<rta::audio::PhysFormat> available_physical_formats(unsigned int sid) {
+    return detail::available_physical_formats(static_cast<AudioStreamID>(sid));
+}
+inline bool device_running_somewhere(DeviceId dev) {
+    return detail::device_running_somewhere(static_cast<AudioDeviceID>(dev));
+}
+}  // namespace macos_probe
+#endif
+
 } // namespace rta::platform
