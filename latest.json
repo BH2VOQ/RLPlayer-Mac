@@ -1,8 +1,8 @@
 {
-  "version": "1.1.4.1",
-  "notes": "Settings save/restore-defaults action bar now scrolls with each tab instead of sticking over form controls at the bottom. · 修复设置页各页签「保存设置 / 恢复默认」按键栏固定吸底遮挡下方表单控件的问题，改为随页面自然滚动。",
-  "download_url": "https://github.com/BH2VOQ/RLPlayer-Mac/releases/download/v1.1.4.1/RLPlayer-1.1.4.1-macOS-arm64.dmg",
-  "sha256": "de3abe2ba7c436c1b3c8e865c0495f5f0e1adb1c48396b54b69a8ad6d621761e",
-  "size": 8073960,
-  "published_at": "2026-11-09T02:26:05Z"
+  "version": "1.1.5-beta1",
+  "notes": "Unified card widths across all three audio-analysis levels (L0 summary, L1 metrics, L2 all metrics) and reserved a constant 13 px scrollbar gutter so the scrollbar no longer covers the cards' rounded corners; planned the 1.1.5 roadmap for album context retrieval, page classification, attribution checks, cache v6 migration, and async knowledge fetching. · 统一音频分析栏目三档（L0 摘要、L1 详细指标、L2 全部指标）卡片尺寸并预留恒定 13 px 滚动条沟槽，滚动条不再遮挡卡片右侧圆角；完成 1.1.5 路线图规划（专辑上下文检索、页面分类、引用归属校验、v6 缓存迁移与异步知识拉取）。",
+  "download_url": "https://github.com/BH2VOQ/RLPlayer-Mac/releases/download/v1.1.5-beta1/RLPlayer-1.1.5-beta1-macOS-arm64.dmg",
+  "sha256": "f2ea9daaa7e85fa1af2ecc35bbf26740f450174a70ac76404fa1c79a58302909",
+  "size": 8075417,
+  "published_at": "2026-11-09T06:30:00Z"
 }
