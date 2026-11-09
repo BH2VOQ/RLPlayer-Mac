@@ -756,6 +756,11 @@ function api(u, body) {
     u.indexOf('/api/lib/albums') === 0 || u.indexOf('/api/lib/album?') === 0 ||
     u.indexOf('/api/files?') === 0 || u.indexOf('/api/meta?') === 0 ||
     u === '/api/cast/state' || u.indexOf('/api/cast/devices') === 0 ||
+    // 1.1.5-beta2：资料接口都是 GET。旧 api() 把未列入白名单的 /api 路径一律当 POST，
+    // 而 /api/entity/knowledge 以前走裸 fetch（GET）；改走 knowledgeOnce → api() 后必须补上，
+    // 否则 M-12 的 pending 轮询会被当写请求，后端 GET 语义也拿不到。
+    u.indexOf('/api/entity/knowledge') === 0 || u.indexOf('/api/entity/summary') === 0 ||
+    u.indexOf('/api/entity/versions') === 0 ||
     u === '/api/input/devices' || u === '/api/input/state' ||
     u === '/api/src/config' || u === '/api/src/ping' || u.indexOf('/api/src/ping?') === 0 ||
     u.indexOf('/api/src/browse') === 0
@@ -2039,19 +2044,28 @@ function renderSummaryContent(summary, title, kind, opts) {
 // {"pending":true}，这里按 2s 轮询同一个 URL 直到出结果/超时。这样自动生成期间
 // /api/status（400ms 轮询）与播放控制不会被单线程 HTTP 后端堵住（以前会整站卡死）。
 function fetchSummary(url, onDone, tries, startedAt) {
-  // 1.1.4-beta6（AI 整理体感，用户反馈"检索太慢"）：
-  //   原实现固定 2000ms 轮询 —— 后台任务完成后，界面平均还要空等 1s、最多 2s 才显示结果。
-  //   现在优先听后端建议（pending 响应里的 retryAfterMs，CLAMP 150..2000），缺省 400ms；
-  //   120s 总超时上限保持不变（按墙钟判断，不再按 2s×60 次数）。
-  //   注意 startedAt 必须**按请求传递**（不能挂在函数上）：单曲页同时有 track/release/person
-  //   三条 summary 在飞，共享一个计时器会让后发起的请求提前超时。
+  // 1.1.5-beta2：轮询语义抽成 fetchJsonPendingOnce(url, opts, onDone, tries, startedAt)，供
+  //   summary 与 /api/entity/knowledge（knowledgeOnce）共用。本函数保持旧签名/旧行为，
+  //   所有既有调用（npStaleRefresh 等）逐字不变。
+  fetchJsonPendingOnce(url, { fetcher: api, timeoutMsg: '资料整理超时' }, onDone, tries, startedAt);
+}
+/* 1.1.5-beta2（M-12）：后端 job 化的接口统一 pending 轮询。
+     · j.pending → 按后端建议的 retryAfterMs 夹 150..2000 轮询（缺省 400）；
+     · 120s 墙钟超时按**每个请求自己的 startedAt** 判断，绝不共享计时器；
+     · done 后把整份响应交回；fetcher 永不 reject（api 自带兜底，knowledgeOnce 另加 catch）。
+   抽出来而不是复制一份，是为了让 summary 与 knowledge 的「同一份缓存 / 单飞」纪律只有一套实现。 */
+function fetchJsonPendingOnce(url, opts, onDone, tries, startedAt) {
+  var fetcher = (opts && opts.fetcher) || api;
+  var timeoutMsg = (opts && opts.timeoutMsg) || '资料整理超时';
   tries = tries || 0;
   if (!startedAt) startedAt = Date.now();
-  api(url).then(function (j) {
+  var p;
+  try { p = fetcher(url); } catch (e) { onDone({ ok: false, error: String(e) }); return; }
+  Promise.resolve(p).then(function (j) {
     if (j && j.pending) {
-      if (Date.now() - startedAt > 120000) { onDone({ ok: false, error: '资料整理超时' }); return; }
+      if (Date.now() - startedAt > 120000) { onDone({ ok: false, error: timeoutMsg }); return; }
       var delay = (typeof j.retryAfterMs === 'number' && j.retryAfterMs >= 150 && j.retryAfterMs <= 2000) ? j.retryAfterMs : 400;
-      setTimeout(function () { fetchSummary(url, onDone, tries + 1, startedAt); }, delay);
+      setTimeout(function () { fetchJsonPendingOnce(url, opts, onDone, tries + 1, startedAt); }, delay);
       return;
     }
     onDone(j);
@@ -2086,9 +2100,38 @@ function summaryOnce(url, cb, refresh) {
   q = SUMC.inflight[url] = [cb];
   fetchSummary(url, function (s) {
     delete SUMC.inflight[url];
-    SUMC.cache[url] = s;
+    // 1.1.5-beta2（M-13）：insufficient 是「这份资料没法查」的终局结论，不是可复用的 ok。
+    // 不写缓存：既避免把错误态当命中，也避免下次点开直接复用成自动重试死循环。
+    if (!(s && s.insufficient)) SUMC.cache[url] = s;
     for (var i = 0; i < q.length; ++i) { try { q[i](s); } catch (e) { } }
   });
+}
+/* 1.1.5-beta2（M-12）：/api/entity/knowledge 的 pending 轮询 + 单飞 + 完成缓存。
+   与 summaryOnce 同一套纪律（同 URL 在飞请求合并、done 后缓存、refresh 绕过缓存），
+   但**不复用** summary 的缓存表：两个端点的响应结构不同，混用会把 materials 当 fields 渲染。
+   pending 期间调用方照常先出基础骨架（artistBaseHtml），不闪空白；切实体后的旧响应由
+   调用方现有的 who / 指纹守卫丢弃（本函数只管交付，不碰面板）。 */
+var KNOWC = { cache: {}, inflight: {} };
+function knowledgeOnce(url, cb, refresh) {
+  cb = cb || function () { };
+  if (refresh) delete KNOWC.cache[url];
+  else if (Object.prototype.hasOwnProperty.call(KNOWC.cache, url)) {
+    var hit = KNOWC.cache[url];
+    setTimeout(function () { cb(hit); }, 0);
+    return;
+  }
+  var q = KNOWC.inflight[url];
+  if (q) { q.push(cb); return; }
+  q = KNOWC.inflight[url] = [cb];
+  fetchJsonPendingOnce(url, { fetcher: api, timeoutMsg: '资料获取超时' }, function (res) {
+    delete KNOWC.inflight[url];
+    KNOWC.cache[url] = res;   // 与 summaryOnce 一样：失败也计完成，由调用方决定是否留重试入口
+    for (var i = 0; i < q.length; ++i) { try { q[i](res); } catch (e) { } }
+  });
+}
+// 1.1.5-beta2（M-13）：后端判定「连艺术家与曲名都没有」时的明确文案。
+function npInsufficientText(s) {
+  return (s && s.error) ? String(s.error) : '资料不足：缺少艺术家与曲名';
 }
 
 // 261024-02 #2：引用 chip 拆成两个动作 —— 点 chip 本体 = 用系统浏览器打开；点右侧「复制」= 复制链接。
@@ -2220,6 +2263,9 @@ function openAlbum(k) {
         if (albHtml) {
           el.innerHTML = albHtml;
           bindCopyChips(el);
+        } else if (s && s.insufficient) {
+          // 1.1.5-beta2：资料不足是终局结论（无艺术家/曲名），不自动重试、不给重试入口。
+          el.innerHTML = '<div class="summ-retry">' + esc(npInsufficientText(s)) + '</div>';
         } else if (s && (s.error || s.pending)) {
           // 261024-04 #7：失败不弹错，只留一行可点击重试
           el.innerHTML = '<div class="summ-retry" id=albumSummRetry role=button tabindex=0>' +
@@ -2330,11 +2376,22 @@ function openAlbum(k) {
      * 失败也计入进度（不是一直转），不留错误提示（曲目级本来就没人盯着看）。 */
 var ALBPREF = { key: '', total: 0, done: 0, active: 0, queue: [], timer: 0 };
 function albPrefKey(a) { return String((a && a.k) || '') + '|' + String((a && a.name) || ''); }
-// 曲目级 URL 的拼法与单曲页抽屉（npDataEnsure）保持一致，才能命中同一份缓存
+// 1.1.5-beta2：曲目级 URL 必须与单曲页抽屉（npSummUrl('track', …)）**逐字一致**，
+// 包括 album/file/genre 三个上下文参数 —— 后端把 album 写进实体键、file 做标签兜底，
+// 少一个就是另一份缓存、另一笔模型调用。纪律：同一份缓存，两处只能共用同一个构造函数，
+// 绝不在这里另拼一遍 URL。
+//   · name   = t.title；artist = t.artist 或 alb.artist（与 npDataTargets 的口径一致）
+//   · album  = alb.name（专辑页的权威专辑名；单曲页来自 m.album）
+//   · file   = t.path 若有（后端 probe_media 做文件名兜底）
+//   · genre  = 专辑/曲目 genre，退回当前播放曲目的 genre
 function albumTrackUrl(t, alb) {
-  var ar = (t && t.artist) || (alb && alb.artist) || '';
-  return '/api/entity/summary?kind=track&name=' + encodeURIComponent((t && t.title) || '') +
-         (ar ? ('&artist=' + encodeURIComponent(ar)) : '') + '&lang=zh';
+  return npSummUrl('track', {
+    name: (t && t.title) || '',
+    artist: (t && t.artist) || (alb && alb.artist) || '',
+    album: (alb && alb.name) || '',
+    file: (t && t.path) || '',
+    genre: (t && t.genre) || (alb && alb.genre) || (S.curMeta && S.curMeta.genre) || ''
+  });
 }
 function albPrefRender() {
   var box = D('albProgWrap');
@@ -2352,6 +2409,8 @@ function albPrefPump() {
     var it = ALBPREF.queue.shift();
     ALBPREF.active++;
     summaryOnce(it.url, function () {
+      // 1.1.5-beta2：insufficient 也计入完成（后端 0 请求直接判缺艺术家/曲名），
+      // 曲目级预取本来就是纯后台：不弹错、不留红字、不重试。
       ALBPREF.active--;
       ALBPREF.done++;
       albPrefRender();
@@ -2566,9 +2625,10 @@ function renderAlbumSubset(who) {
    261024-04 #5：以前 openArtistProfile 先把整页写成「正在获取权威资料…」，等 /api/entity/knowledge
    回来才渲染 ⟹ 慢网下整页空白好几秒。现在：
      ① **立刻**渲染基础页（名字 + 返回按钮 + 头像 + 资料区块），「正在获取资料…」只出现在**资料区块**里；
-     ② 资料回来后只重绘这几块；③ 切走再回来：同 who 的请求 in-flight ⟹ 挂回调复用，
-        已有结果 ⟹ 直接渲染，绝不重复请求（费用纪律）。 */
-var ARTIST_KNOW = {};    // who -> { state: 'loading'|'done', res, waiters: [] }
+     ② 资料回来后只重绘这几块；③ 切走再回来：同 URL 的请求 in-flight 由 knowledgeOnce
+        挂回调复用，已有结果直接渲染，绝不重复请求（费用纪律）。
+   1.1.5-beta2：缓存/单飞统一到 knowledgeOnce 的 KNOWC（按 URL，含 refresh 语义）；
+   旧 ARTIST_KNOW 按 who 缓存会丢 refresh=1 的区别，也不处理 pending，故不再使用。 */
 // F-4：头像三层降级的第二层 —— 头像端点失败时退到专辑封面，再失败就露首字母。
 // 单独成函数（而不是内联 onerror）是因为要读 dataset 且只降一级，内联写不下且易错。
 function artistAvatarFallback(img) {
@@ -2700,6 +2760,10 @@ function openArtistProfile(who, refresh) {
       el.style.display = '';
       el.innerHTML = renderSummaryContent(ss, 'AI 整理', 'person', { skip: (summState.skipBio ? { '简介': 1 } : {}) });
       bindCopyChips(el);
+    } else if (ss && ss.insufficient) {
+      // 1.1.5-beta2：资料不足是终局结论，不自动重试、不给重试入口。
+      el.style.display = '';
+      el.innerHTML = '<div class="summ-retry">' + esc(npInsufficientText(ss)) + '</div>';
     } else if (ss && (ss.error || ss.pending)) {
       // 261024-04 #7：失败不弹错，只留一行可点击重试
       el.style.display = '';
@@ -2718,22 +2782,11 @@ function openArtistProfile(who, refresh) {
     bindArtistButtons(who);
   }
 
-  // ② 知识/资料：同 who 的在飞请求复用，已有结果直接渲染（不重复请求）
-  var kc = ARTIST_KNOW[who];
-  if (!refresh && kc && kc.state === 'done') {
-    paintKnow(kc.res);
-  } else if (!refresh && kc && kc.state === 'loading') {
-    kc.waiters.push(paintKnow);
-  } else {
-    var rec = ARTIST_KNOW[who] = { state: 'loading', res: null, waiters: [paintKnow] };
-    var uKnow = '/api/entity/knowledge?kind=person&name=' + encodeURIComponent(who) + (refresh ? '&refresh=1' : '');
-    api(uKnow).catch(function (err) { return { ok: false, error: String(err), materials: [] }; })
-      .then(function (res) {
-        rec.state = 'done'; rec.res = res;
-        var ws = rec.waiters; rec.waiters = [];
-        ws.forEach(function (f) { try { f(res); } catch (e) { } });
-      });
-  }
+  // ② 知识/资料：1.1.5-beta2 起走 knowledgeOnce —— 同 URL 在飞请求合并、done 后缓存、
+  //   pending → retryAfterMs 轮询（后端 M-12 异步 job）。pending 期间基础页（artistBaseHtml）
+  //   已经先出，不闪空白；切走再回来 / 切换艺术家后的旧响应由 paintKnow 的 who 守卫丢弃。
+  var uKnow = '/api/entity/knowledge?kind=person&name=' + encodeURIComponent(who) + (refresh ? '&refresh=1' : '');
+  knowledgeOnce(uKnow, paintKnow, refresh);
 
   // ③ 简介（AI 整理）：与知识并行，谁先到都不丢；summaryOnce 保证同一实体只请求一次
   if (wantSumm) summaryOnce(uSumm, onSumm, refresh);
@@ -12537,7 +12590,9 @@ function npDataTargets(m) {
   var album = String((m && m.album) || '');
   var albumArtist = String((m && m.albumArtist) || '');
   var artist = String((m && m.artist) || '');
-  if (title) out.push({ k: 'track', label: '歌曲', name: title, artist: artist });
+  // 1.1.5-beta2：track 的实体键带 album（后端 summary_track_entity_id）。file 路径沿用
+  // S.lastCur，genre 沿用 S.curMeta.genre，都由 npSummUrl 在构造 URL 时读取（同一份缓存纪律）。
+  if (title) out.push({ k: 'track', label: '歌曲', name: title, artist: artist, album: album });
   if (album && album !== title) {
     var relArtist = (m && m.summaryArtist) || albumArtist || artist;
     out.push({ k: 'release', label: '专辑', name: album, artist: relArtist });
@@ -12558,7 +12613,10 @@ function npDataCan(m) {
 // 世代号也不变，仅靠世代号挡不住旧实体迟到的 summary ⟹ 每个请求都带上实体指纹，写回前再核对
 // 当前栏目是否仍是同一实体。
 function npDataFp(kind, t) {
-  return kind + '|' + ((t && t.name) || '') + '|' + ((t && t.artist) || '') + '|' + ((t && t.composer) || '');
+  // 1.1.5-beta2：album 进 track 实体键（§1.1）⟹ 同名同艺术家但不同专辑属于不同实体，
+  // 指纹必须包含 album，否则换专辑后旧响应会串进新面板。非 track 没有 album 字段 = 旧指纹不变。
+  return kind + '|' + ((t && t.name) || '') + '|' + ((t && t.artist) || '') + '|' +
+         ((t && t.composer) || '') + '|' + ((t && t.album) || '');
 }
 function npDataTab(kind) {
   var tabs = NP_DATA.tabs || [];
@@ -12691,6 +12749,11 @@ function npRailPreview(kind, st) {
   // 详细档 4 字段 / 简略档 2 字段；简介上限 lim.bio（详细 0 = 不截断）。
   var lim = npRailLimits();
   var p1 = '', p2 = '';
+  // 1.1.5-beta2（M-13）：资料不足是终局结论 —— 右栏卡片直接写清缺什么，不显示本地兜底字段
+  // 假装"有资料"，也不给重试入口。抽屉正文另有同一文案（npDataRenderBody）。
+  if (st && st.state === 'insufficient') {
+    return { p1: npInsufficientText(st.data), p2: '', st: '资料不足' };
+  }
   if (kind === 'track') {
     var loc = npRailLocalTrack(m);
     p1 = npRailPick(fields, ['演唱', '作曲', '作词', '编曲'], lim.pick);
@@ -12736,6 +12799,7 @@ function npRailPreview(kind, st) {
   var stText = '';
   if (!st || st.state === 'idle') stText = '';
   else if (st.state === 'loading') stText = '整理中…';
+  else if (st.state === 'insufficient') stText = '资料不足：缺少艺术家与曲名';
   else if (st.state === 'error') stText = '暂无资料';
   else stText = (d && d.from_cache) ? '已缓存' : '已整理';
   return { p1: p1 || '', p2: p2 || '', st: stText };
@@ -12767,7 +12831,8 @@ function npDataRenderTabs() {
   tabs.forEach(function (t) {
     var st = NP_DATA.cache[t.k] || { state: 'idle' };
     var pv = NP_PREV[t.k] || npRailPreview(t.k, st);
-    var cls = st.state === 'ok' ? ' ok' : (st.state === 'loading' ? ' busy' : (st.state === 'error' ? ' err' : ''));
+    var cls = st.state === 'ok' ? ' ok' : (st.state === 'loading' ? ' busy' :
+            ((st.state === 'error' || st.state === 'insufficient') ? ' err' : ''));
     h += '<button class="npchip' + cls + (NP_DATA.active === t.k ? ' on' : '') + '" data-k="' + esc(t.k) + '"' +
          ' title="' + esc(t.label + '：' + (t.name || '') + '（点击查看完整 AI 整理资料）') + '">' +
          '<span class=npchip-top><i class=dot></i><span class=npchip-name>' + esc(t.label) + '</span>' +
@@ -12789,6 +12854,7 @@ function npDataToggle(kind) {
 }
 function npDataStatHtml(kind, st) {
   if (!st || st.state === 'idle' || st.state === 'loading') return '整理中…';
+  if (st.state === 'insufficient') return '资料不足';
   if (st.state === 'error') return '暂无资料';
   var d = st.data || {};
   if (kind === 'work') {
@@ -12873,11 +12939,18 @@ function npDataRenderBody(force) {
   var st = NP_DATA.cache[kind] || { state: 'idle' };
   npDataHeader(kind, st);
   // renderNp 400ms 一次：内容没变就不重绘（否则抽屉里的滚动位置会被反复重置）
-  var sig = kind + '|' + st.state + '|' + (st.data ? (st.data.generated_at || (st.data.summaryCached ? 'c' : 'f')) : (st.error || ''));
+  var sig = kind + '|' + st.state + '|' + (st.data ? (st.data.generated_at ||
+            ((st.data.summaryCached ? 'c' : 'f') + (st.data.insufficient ? '|i' : ''))) : (st.error || ''));
   var need = (sig !== NP_DATA.bodyKey);
   if (!need && !force) return;
   NP_DATA.bodyKey = sig;
   if (st.state === 'idle' || st.state === 'loading') { body.innerHTML = npDataCaption(kind, st) + npDataSkeleton(); return; }
+  // 1.1.5-beta2（M-13）：insufficient 是终局结论，不是失败 —— 明确写清缺什么，
+  // 且**不给「重试」按钮**（文件名本身没有艺术家/曲名，重试只会 0 请求地循环）。
+  if (st.state === 'insufficient') {
+    body.innerHTML = npDataCaption(kind, st) + '<div class=npdhint>' + esc(npInsufficientText(st.data)) + '</div>';
+    return;
+  }
   if (st.state === 'error') {
     body.innerHTML = npDataCaption(kind, st) + '<div class=npdhint>暂无该实体的资料。' + (st.error ? ('（' + esc(st.error) + '）') : '') + '</div>' +
       '<div style="margin-top:10px"><button class=btn id=npDataRetry>重试</button></div>';
@@ -12956,10 +13029,23 @@ function npPrefetchPerson() {
 }
 
 // 单曲页各类资料的 URL 只在这里拼（抽屉 / 预取 / 自动加载共用，才能命中同一份 summaryOnce 缓存）
+// 1.1.5-beta2：kind==='track' 追加三项上下文，全部 encodeURIComponent：
+//   · album = t.album（npDataTargets 从 m.album 带上；专辑页由 albumTrackUrl 传 alb.name）
+//   · file  = t.file 或 S.lastCur（后端 probe_media 读标签做文件名兜底，见 §1.6）
+//   · genre = t.genre 或 S.curMeta.genre（进 album_tags 的 query 提示）
+// 非 track 保持旧 URL 形状（避免破坏 b10_logic / 其它已注册判据与缓存）。
 function npSummUrl(kind, t, force) {
-  return '/api/entity/summary?kind=' + kind + '&name=' + encodeURIComponent((t && t.name) || '') +
-         ((t && t.artist) ? ('&artist=' + encodeURIComponent(t.artist)) : '') + '&lang=zh' +
-         (force ? '&refresh=1' : '');
+  var u = '/api/entity/summary?kind=' + kind + '&name=' + encodeURIComponent((t && t.name) || '') +
+          ((t && t.artist) ? ('&artist=' + encodeURIComponent(t.artist)) : '');
+  if (kind === 'track') {
+    var alb = (t && t.album) || '';
+    var file = (t && t.file) || S.lastCur || '';
+    var genre = (t && t.genre) || (S.curMeta && S.curMeta.genre) || '';
+    if (alb) u += '&album=' + encodeURIComponent(alb);
+    if (file) u += '&file=' + encodeURIComponent(file);
+    if (genre) u += '&genre=' + encodeURIComponent(genre);
+  }
+  return u + '&lang=zh' + (force ? '&refresh=1' : '');
 }
 function npPrefetchRelease() {
   if (META.summary != 1) return;
@@ -13003,7 +13089,8 @@ function npAutoSummary() {
   var st = NP_DATA.cache['track'];
   // 1.1.4-beta9：只认「当前实体」的状态。旧实体遗留的 loading/ok/error 不能挡住新实体的自动整理
   // （元数据两拍回来时会出现这种局面：lastCur 没变、实体已经换了）。
-  if (st && st.fp === npDataFp('track', tr) && (st.state === 'ok' || st.state === 'loading' || st.state === 'error')) { npRailHint(); return; }
+  if (st && st.fp === npDataFp('track', tr) &&
+      (st.state === 'ok' || st.state === 'loading' || st.state === 'error' || st.state === 'insufficient')) { npRailHint(); return; }
   npDataEnsure('track', false);
   npRailHint();
 }
@@ -13012,7 +13099,10 @@ function npRailHint() {
   var el = D('npSummHint');
   if (!el) return;
   var st = NP_DATA.cache['track'];
-  if (st && st.state === 'error') {
+  if (st && st.state === 'insufficient') {
+    el.style.display = '';
+    el.innerHTML = '<span class=nprailerr>' + esc(npInsufficientText(st.data)) + '</span>';
+  } else if (st && st.state === 'error') {
     el.style.display = '';
     el.innerHTML = '<span class=nprailerr id=npSummRetry role=button tabindex=0 title="重新请求这首歌的 AI 整理">' +
                    '歌曲资料未能取到 · 点击重试</span>';
@@ -13060,7 +13150,8 @@ function npDataEnsure(kind, force) {
   var st = NP_DATA.cache[kind];
   // 1.1.4-beta9：只有「同一实体」的 loading/ok 才算已就绪。旧实体的状态不能把新实体挡在请求之外
   // （元数据两拍回来时 lastCur 没变、实体已经换了）。
-  if (!force && st && st.fp === fp && (st.state === 'loading' || st.state === 'ok')) return;
+  if (!force && st && st.fp === fp &&
+      (st.state === 'loading' || st.state === 'ok' || st.state === 'insufficient')) return;
   if (!force && NP_DATA.inflight[fp]) return;
   NP_DATA.inflight[fp] = 1;
   var req = NP_DATA.req;
@@ -13073,12 +13164,14 @@ function npDataEnsure(kind, force) {
   npRailHint();
   if (NP_DATA.active === kind) npDataRenderBody();
 
-  function done(data, err) {
+  function done(data, err, insufficient) {
     delete NP_DATA.inflight[fp];
     if (NP_DATA.req !== req) return;                        // 已切歌 → 丢弃过期结果
     if (npDataFp(kind, npDataTab(kind)) !== fp) return;     // 实体已换（元数据两拍）→ 丢弃过期结果
     if (!D('npPage') || !D('npPage').classList.contains('on')) return;
-    if (data) NP_DATA.cache[kind] = { state: 'ok', data: data, fp: fp };
+    // 1.1.5-beta2（M-13）：insufficient 单独成态 —— 有明确文案，没有重试按钮，不自动重发。
+    if (insufficient) NP_DATA.cache[kind] = { state: 'insufficient', data: data || {}, fp: fp };
+    else if (data) NP_DATA.cache[kind] = { state: 'ok', data: data, fp: fp };
     else NP_DATA.cache[kind] = { state: 'error', error: err || '', fp: fp };
     NP_DATA.tabSig = null;
     npDataRenderTabs();
@@ -13097,6 +13190,8 @@ function npDataEnsure(kind, force) {
   // 261024-04 #7：走 summaryOnce —— 同一实体只请求一次（专辑页/单曲页/预取共用同一份缓存）
   var u = npSummUrl(kind, t, force);
   summaryOnce(u, function (s) {
+    // 1.1.5-beta2（M-13）：后端 0 网络请求直接判资料不足，这里按终局态呈现，不重试、不写缓存。
+    if (s && s.insufficient) { done(s, '', true); return; }
     // 261024-01 #4：后端新增结构化 fields（可能没有 sections）⟹ 有 fields 也算有资料
     if (!summHas(s)) { done(null, (s && s.error) || ''); return; }
     // 261024-02 #3：把本地曲库的真实时长/曲目挂到结果上（AI 的时长/曲目列表一律不采信）

@@ -29,6 +29,7 @@
 
 #include "meta/discogs.h"
 #include "meta/entities.h"
+#include "meta/entity_classify.h"
 #include "meta/knowledge.h"
 #include "meta/llm.h"
 #include "meta/store.h"
@@ -122,6 +123,60 @@ struct SummaryResult {
     std::string diag;
     int cache_ver = 0;   // 从磁盘缓存加载时的格式版本（0 = 不是从缓存来的 / 旧格式）
 };
+
+// ---------------------------------------------------------------------------
+// 1.1.5-beta2 #21c：summary 缓存代际 v6（归属语义变更后，v3/v4/v5 按过期处理）
+// ---------------------------------------------------------------------------
+inline constexpr int kSummaryCacheVer = 6;
+
+inline bool summary_cache_current(const SummaryResult& sr) {
+    return sr.cache_ver >= kSummaryCacheVer;
+}
+
+// ---------------------------------------------------------------------------
+// 1.1.5-beta2 U5：track 实体 id / query（album 空 = 完全旧行为）
+// ---------------------------------------------------------------------------
+
+// album 为空 -> 旧键 entity_make_id("track", norm(artist)+"\x1f"+norm(title))；
+// album 非空 -> 末尾再追加 "\x1f"+norm(album)，同曲不同专辑命中不同缓存文件。
+inline std::string summary_track_entity_id(const std::string& title,
+                                           const std::string& artist,
+                                           const std::string& album) {
+    std::string key = entity_norm(artist) + "\x1f" + entity_norm(title);
+    if (!album.empty()) key += "\x1f" + entity_norm(album);
+    return entity_make_id("track", key);
+}
+
+// album 为空时逐字沿用旧 query；album 非空时按 PLAN §1.1 模板：
+//   album + " " + title，仅当 album+title 里没有 artist 才追加 artist，再接语言后缀。
+// album_tags[genre] 只作为 query 提示追加在末尾，不参与实体键。
+inline std::string build_track_query(
+    const std::string& title, const std::string& artist, const std::string& album,
+    const std::vector<std::pair<std::string, std::string>>& album_tags,
+    const std::string& lang) {
+    std::string q;
+    if (album.empty()) {
+        q = artist.empty() ? title : (artist + " " + title);
+    } else {
+        q = album + " " + title;
+        if (!artist.empty()) {
+            const std::string ctx = entity_norm(album + " " + title);
+            const std::string ar = entity_norm(artist);
+            if (ar.empty() || ctx.find(ar) == std::string::npos) q += " " + artist;
+        }
+    }
+    if (lang == "ja") q += " 楽曲 作詞 作曲 編曲";
+    else if (lang == "zh" || lang.empty()) q += " 歌曲 作词 作曲 编曲 发行";
+    else q += " song credits release lyrics";
+    if (!album.empty()) {
+        for (const auto& kv : album_tags) {
+            std::string key = kv.first;
+            for (char& c : key) if (c >= 'A' && c <= 'Z') c = (char)(c - 'A' + 'a');
+            if (key == "genre" && !kv.second.empty()) q += " " + kv.second;
+        }
+    }
+    return q;
+}
 
 // ---------------------------------------------------------------------------
 // 域名白名单与 URL 纯函数
@@ -499,6 +554,106 @@ inline std::vector<LlmMessage> build_synthesis_prompt(
 }
 
 // ---------------------------------------------------------------------------
+// 1.1.5-beta2 #21a：严格归属路径（默认不启用，见 PLAN §1.4 兼容铁律）
+// ---------------------------------------------------------------------------
+
+struct CitationAttribution {
+    PageKind kind = PageKind::Unknown;
+    bool belongs = false;
+    std::string reason;
+};
+
+// normalize_url_for_compare(url) -> 归属证明
+using AttributionMap = std::map<std::string, CitationAttribution>;
+
+struct PromptMaterialSelection {
+    std::vector<KnowledgeMaterial> materials;   // 可进综合 prompt 的材料
+    std::vector<SearchHit> hits;                // 可进综合 prompt 的检索命中
+    AttributionMap attribution;
+    int dropped_incompatible = 0;
+    int dropped_unattributed = 0;
+    std::string diag() const {
+        return "kdrop=" + std::to_string(dropped_incompatible) +
+               " udrop=" + std::to_string(dropped_unattributed);
+    }
+};
+
+// 不兼容（跨实体页面）计 kdrop、兼容但无法证明归属计 udrop；只给 survivors 建 attribution。
+inline PromptMaterialSelection select_prompt_materials(
+    EntityKind kind, const std::string& name, const std::string& artist,
+    const std::string& album,
+    const std::vector<KnowledgeMaterial>& materials,
+    const std::vector<SearchHit>& hits) {
+    PromptMaterialSelection sel;
+    auto keep = [&](const PageAttribution& a, const std::string& url) {
+        CitationAttribution ca;
+        ca.kind = a.kind;
+        ca.belongs = true;
+        ca.reason.clear();
+        sel.attribution[normalize_url_for_compare(url)] = ca;
+    };
+    for (const auto& m : materials) {
+        const PageAttribution a = attribute_page(kind, name, artist, album,
+                                                 m.url, m.title, m.text);
+        if (!page_kind_compatible(kind, a.kind)) { sel.dropped_incompatible++; continue; }
+        if (!a.belongs) { sel.dropped_unattributed++; continue; }
+        sel.materials.push_back(m);
+        keep(a, m.url);
+    }
+    for (const auto& h : hits) {
+        const std::string body = h.snippet.empty() ? h.summary : h.snippet;
+        const PageAttribution a = attribute_page(kind, name, artist, album,
+                                                 h.url, h.title, body);
+        if (!page_kind_compatible(kind, a.kind)) { sel.dropped_incompatible++; continue; }
+        if (!a.belongs) { sel.dropped_unattributed++; continue; }
+        sel.hits.push_back(h);
+        keep(a, h.url);
+    }
+    return sel;
+}
+
+// 新增函数：与 build_synthesis_prompt 同 system 消息，materials 块额外给每个 survivor
+// 追加一行「页面类型: <page_kind 中文名>」。旧 build_synthesis_prompt 一字不改。
+inline std::vector<LlmMessage> build_synthesis_prompt_attributed(
+    const std::string& entity,
+    const std::vector<KnowledgeMaterial>& materials,
+    const std::vector<SearchHit>& hits,
+    const std::string& lang,
+    const std::string& kindLabel,
+    const AttributionMap& attribution) {
+    std::vector<LlmMessage> msgs = build_synthesis_prompt(entity, materials, hits, lang, kindLabel);
+    std::ostringstream u;
+    u << "请为音乐实体【" << entity << "】整理结构化音乐资料概述。\n\n"
+      << "【给定参考材料列表】（编号 [M1], [M2] ...）：\n";
+    int mat_idx = 1;
+    for (const auto& m : materials) {
+        u << "\n[M" << mat_idx << "] 来源: " << m.source
+          << " | 标题: " << m.title
+          << " | 链接: " << m.url
+          << " | 取回时间: " << m.fetched_at << "\n";
+        const auto it = attribution.find(normalize_url_for_compare(m.url));
+        if (it != attribution.end())
+            u << "页面类型: " << page_kind_label(it->second.kind) << "\n";
+        u << "正文:\n" << m.text << "\n";
+        mat_idx++;
+    }
+    for (const auto& h : hits) {
+        u << "\n[M" << mat_idx << "] 来源: search-fetch"
+          << " | 标题: " << h.title
+          << " | 链接: " << h.url
+          << " | 日期: " << h.date << "\n";
+        const auto it = attribution.find(normalize_url_for_compare(h.url));
+        if (it != attribution.end())
+            u << "页面类型: " << page_kind_label(it->second.kind) << "\n";
+        u << "摘要/正文:\n" << (h.snippet.empty() ? h.summary : h.snippet) << "\n";
+        mat_idx++;
+    }
+    u << "\n请严格遵守约束：只依据材料，输出严格 JSON，每条引用必须真实有效，每段至少 1 条引用，引用必须对应 [M1] 等编号并在 citations 中完整保留真实 url。";
+    if (msgs.size() >= 2) msgs[1].content = u.str();
+    return msgs;
+}
+
+// ---------------------------------------------------------------------------
 // 综合响应解析与引用校验：parse_synthesis_reply
 // ---------------------------------------------------------------------------
 
@@ -752,6 +907,43 @@ inline SummaryResult parse_synthesis_reply(const std::string& text,
     return parse_synthesis_reply(text, v, true);
 }
 
+// 1.1.5-beta2 #21b：在既有 ①–⑤ 之后追加 ⑥ 归属硬门。
+//   * citation.url 归一化后必须在 attribution 中且 belongs==true，否则整份拒绝（不允许部分接受）；
+//   * error 写清 url + 具体原因，diag 记 attribution_reject=<url>；
+//   * attribution==nullptr / 空 map 时与旧重载行为完全一致。
+// 旧重载签名与行为一律不变。
+inline SummaryResult parse_synthesis_reply(const std::string& text,
+                                           const std::vector<std::string>& allowed_urls,
+                                           bool enforce_allowed_urls,
+                                           const AttributionMap* attribution) {
+    if (!attribution || attribution->empty())
+        return parse_synthesis_reply(text, allowed_urls, enforce_allowed_urls);
+    SummaryResult r = parse_synthesis_reply(text, allowed_urls, enforce_allowed_urls);
+    if (!r.ok) return r;                      // ①–⑤ 已拒绝，保留原原因
+    for (const auto& c : r.citations) {
+        const std::string key = normalize_url_for_compare(c.url);
+        const auto it = attribution->find(key);
+        std::string reason;
+        if (it == attribution->end()) {
+            reason = "引用缺少归属证明（不在归属表中）";
+        } else if (!it->second.belongs) {
+            reason = it->second.reason.empty() ? "引用归属校验未通过" : it->second.reason;
+        } else {
+            continue;
+        }
+        r.ok = false;
+        r.error = "引用未通过归属校验: " + c.url + " " + reason;
+        r.diag = (r.diag.empty() ? "" : r.diag + "; ") + "attribution_reject=" + c.url;
+        r.sections.clear();
+        r.citations.clear();
+        r.fields.clear();
+        r.materials_used.clear();
+        r.validation_ok = false;
+        return r;                              // 任何一条跨实体引用 -> 整份拒绝
+    }
+    return r;
+}
+
 // ---------------------------------------------------------------------------
 // 缓存序列化、反序列化、落盘与路径
 // ---------------------------------------------------------------------------
@@ -767,9 +959,10 @@ inline fsx::path summary_cache_path(const std::string& baseDir,
 inline std::string summary_to_json(const SummaryResult& sr) {
     std::ostringstream o;
     o << "{\n"
-      // 2026-10-24（261024-01 #4）：缓存格式版本。v2 起才有结构化 fields；旧缓存（无 v 或 v<2）
-      // 在读取时直接判过期，让下次请求重新生成 —— 否则升级后老用户永远看不到标签网格。
-      << "  \"v\": 3,\n"
+      // 2026-10-24（261024-01 #4）：缓存格式版本。v2 起才有结构化 fields；
+      // 1.1.5-beta2 起 v6 才有归属语义：v<6 的缓存在读取时 expires_at=1 判过期（内容仍解析，
+      // 供 stale-while-revalidate 秒回），后台重算写 v6，不删除旧文件。
+      << "  \"v\": " << kSummaryCacheVer << ",\n"
       << "  \"ok\": " << (sr.ok ? "true" : "false") << ",\n"
       << "  \"ai\": " << (sr.ai ? "true" : "false") << ",\n"
       << "  \"model\": \"" << meta_jesc(sr.model) << "\",\n"
@@ -851,13 +1044,11 @@ inline bool summary_from_json(const std::string& text,
     if (sr_out.expires_at <= 0 && sr_out.generated_at > 0) {
         sr_out.expires_at = sr_out.generated_at + 7 * 86400; // 默认 TTL 7 天
     }
-    // 2026-10-24（261024-01 #4）：v2 之前的缓存没有结构化标签 → 视为已过期，重新生成一次
-    //（否则升级后老用户永远看不到标签网格）。
+    // 1.1.5-beta2：v<6 的旧代际（含无 v 字段 / v3 / v4 / v5）统一按过期处理，
+    // 但**仍能解析出内容**（返回 true）供 stale 秒回。用 1（1970 年）而不是 0：
+    // summary_is_expired 对 expires_at<=0 会回退到 generated_at+7d，设 0 等于「永不过期」。
     sr_out.cache_ver = (int)j["v"].n();
-    // v3：消歧义过滤 + 400 降级链 + 输出精简（旧内容可能质量差/来自误判，统一重生成一次）
-    // 注意用 1（1970 年）而不是 0：summary_is_expired 对 expires_at<=0 会回退到 generated_at+7d，
-    // 设 0 等于"永不过期"（2026-10-24 实测：缓存 v2 文件一直 cache-hit，v3 失效没生效）。
-    if ((int)j["v"].n() < 3) sr_out.expires_at = 1;
+    if (!summary_cache_current(sr_out)) sr_out.expires_at = 1;
     sr_out.disclaimer = j["disclaimer"].s();
     if (j.has("from_cache")) sr_out.from_cache = j["from_cache"].b;
     if (j.has("offline")) sr_out.offline = j["offline"].b;
@@ -1186,6 +1377,11 @@ struct RetrievalOptions {
     FilterOptions filter_opts;
     std::string artist;           // 针对 Release 的艺术家辅助（用于 Wikipedia 与 Discogs 检索消歧）
     std::string entity_id;        // 显式指定实体 ID（为空则自动计算）
+    // 1.1.5-beta2 U5：曲目所属专辑 + 已知标签（如 genre）。默认空 = 完全旧行为；
+    // album 参与 track 实体键与 query，album_tags 只作 query 提示、不参与缓存键。
+    // 二者任一非空即在 retrieval_fetch / retrieval_fetch_track 启用严格归属路径。
+    std::string album;
+    std::vector<std::pair<std::string, std::string>> album_tags;
 };
 
 // ---------------------------------------------------------------------------
@@ -1349,11 +1545,18 @@ inline SummaryResult retrieval_fetch_track(const std::string& title,
                                            const std::string& artist,
                                            const std::string& lang,
                                            const RetrievalOptions& opts) {
+    // 1.1.5-beta2 M-13：入口硬保护，title 为空直接 insufficient，0 次网络请求。
+    if (title.empty()) {
+        SummaryResult err;
+        err.error = "资料不足：缺少艺术家与曲名";
+        return err;
+    }
+    const bool strict = !opts.album.empty() || !opts.album_tags.empty();
     const std::string baseDir = !opts.metabase.empty() ? opts.metabase : EntityStore::instance().baseDir();
-    const std::string eid = entity_make_id("track", entity_norm(artist) + "\x1f" + entity_norm(title));
+    const std::string eid = summary_track_entity_id(title, artist, opts.album);
     SummaryResult cached;
     if (summary_load_cache(baseDir, eid, lang, cached) && cached.ok && !opts.refresh &&
-        !summary_is_expired(cached)) {
+        summary_cache_current(cached) && !summary_is_expired(cached)) {
         cached.from_cache = true;
         return cached;
     }
@@ -1373,14 +1576,8 @@ inline SummaryResult retrieval_fetch_track(const std::string& title,
     // 而不是只凭模型记忆（用户对"AI 只会瞎编"的批评就来自这里）。
     std::vector<SearchHit> hits;
     if (opts.enable_search) {
-        std::string query;
-        if (lang == "zh" || lang.empty()) {
-            query = (artist.empty() ? title : (artist + " " + title)) + " 歌曲 作词 作曲 编曲 发行";
-        } else if (lang == "ja") {
-            query = (artist.empty() ? title : (artist + " " + title)) + " 楽曲 作詞 作曲 編曲";
-        } else {
-            query = (artist.empty() ? title : (artist + " " + title)) + " song credits release lyrics";
-        }
+        // album 空时逐字沿用旧 query；非空时按 §1.1 模板（含 album_tags[genre] 提示）。
+        const std::string query = build_track_query(title, artist, opts.album, opts.album_tags, lang);
         retrieval_rate_limiter().acquire();
         const DsSearchReply s_rep = ds_search(cfg, query, opts.max_search_hits > 0 ? opts.max_search_hits : 8,
                                              opts.search_timeout_ms);
@@ -1416,6 +1613,17 @@ inline SummaryResult retrieval_fetch_track(const std::string& title,
         }
     }
 
+    // 1.1.5-beta2：严格归属路径只在这里启用（默认 album/album_tags 为空 -> 旧行为原样）。
+    // 剔除不兼容/无法证明归属的命中，allowed_urls 只从 survivors 生成，并把 attribution 传给
+    // 新解析重载（track prompt 无 citations 时自动回退宽松解析，不改变旧行为）。
+    PromptMaterialSelection sel;
+    std::vector<std::string> allowed_urls;
+    if (strict) {
+        sel = select_prompt_materials(EntityKind::Track, title, artist, opts.album, {}, hits);
+        hits = sel.hits;
+        for (const auto& h : hits) if (!h.url.empty()) allowed_urls.push_back(h.url);
+    }
+
     SummaryResult sr;
     if (!hits.empty()) {
         std::string last_err;
@@ -1432,6 +1640,12 @@ inline SummaryResult retrieval_fetch_track(const std::string& title,
                 std::chrono::steady_clock::now() - t_l0).count();
             if (!rep.ok) { last_err = rep.error; continue; }
             sr = parse_ai_only_reply(rep.content);
+            if (strict) {
+                // 严格路径：回包若带 citations，必须过 ⑥ 归属硬门；否则沿用宽松解析。
+                const SummaryResult strict_parsed =
+                    parse_synthesis_reply(rep.content, allowed_urls, false, &sel.attribution);
+                if (strict_parsed.ok) sr = strict_parsed;
+            }
             if (sr.ok) break;
             last_err = sr.error;
         }
@@ -1452,7 +1666,8 @@ inline SummaryResult retrieval_fetch_track(const std::string& title,
         sr.generated_at = (long long)std::time(nullptr);
         sr.expires_at = sr.generated_at + 7 * 86400;
         sr.diag = "search=" + std::to_string(trk_search_ms) + "ms fetch=" + std::to_string(trk_fetch_ms) +
-                  "ms llm=" + std::to_string(trk_llm_ms) + "ms hits=" + std::to_string(hits.size());
+                  "ms llm=" + std::to_string(trk_llm_ms) + "ms hits=" + std::to_string(hits.size()) +
+                  (strict ? " " + sel.diag() : "");
         summary_save_cache(baseDir, eid, lang, sr);
     }
     return sr;
@@ -1475,7 +1690,14 @@ inline SummaryResult retrieval_fetch(EntityKind kind,
     std::string cache_err;
     const bool have_cache = summary_load_cache(baseDir, eid, lang, cached, &cache_err);
     const long long now_sec = (long long)std::time(nullptr);
-    const bool cache_unexpired = have_cache && cached.ok && !summary_is_expired(cached, now_sec);
+    // 主命中：v6 当前代际 + 未过期 才算 fresh；v3/v4/v5 旧代际即使磁盘上 expires 很新，
+    // summary_from_json 已把 expires_at 置 1，这里双重把关，只允许以后台重算形式刷新。
+    const bool cache_unexpired = have_cache && cached.ok &&
+                                 summary_cache_current(cached) && !summary_is_expired(cached, now_sec);
+    // 1.1.5-beta2：显式带 album / album_tags 才启用严格归属路径（默认沿用旧路径，
+    // 否则 metacache 的 mock 夹具会因不含实体名被误剔）。
+    const bool strict = !opts.album.empty() || !opts.album_tags.empty();
+    PromptMaterialSelection sel;
 
     // 显式离线模式：直接读缓存并打上 offline 标识
     if (opts.offline) {
@@ -1647,6 +1869,12 @@ inline SummaryResult retrieval_fetch(EntityKind kind,
             } else {
                 query = qTarget + " EP album release date tracklist credits";
             }
+            // release 检索可把 album_tags[genre] 追加到 query 末尾（无标签时一字不变）。
+            for (const auto& kv : opts.album_tags) {
+                std::string key = kv.first;
+                for (char& ch : key) if (ch >= 'A' && ch <= 'Z') ch = (char)(ch - 'A' + 'a');
+                if (key == "genre" && !kv.second.empty()) query += " " + kv.second;
+            }
         } else {
             std::string qn = name;
             for (char& ch : qn) if (ch == '/' || ch == '&' || ch == '|' || ch == '+') ch = ' ';
@@ -1722,6 +1950,14 @@ inline SummaryResult retrieval_fetch(EntityKind kind,
             if (diag_knowledge_ms == 0) diag_knowledge_ms = ms_since(t_stage0);
         }
     }
+    // 1.1.5-beta2 严格归属路径：组装 prompt 之前先过滤，survivors 才进 prompt / allowed_urls /
+    // attribution map。默认（无 album、无 album_tags）跳过，旧行为逐字不变。
+    if (strict) {
+        sel = select_prompt_materials(kind, name, opts.artist, opts.album,
+                                      kr.materials, fetched_hits);
+        kr.materials = sel.materials;
+        fetched_hits = sel.hits;
+    }
     for (const auto& m : kr.materials) {
         if (!m.url.empty()) allowed_urls.push_back(m.url);
     }
@@ -1729,6 +1965,7 @@ inline SummaryResult retrieval_fetch(EntityKind kind,
     for (const auto& h : fetched_hits) {
         if (!h.url.empty()) allowed_urls.push_back(h.url);
     }
+    const std::string strict_diag = strict ? (" " + sel.diag()) : "";
 
     // 若 L2 和 L3 均无材料：
     //   旧逻辑直接拒绝综合 → 用户实测「塞壬唱片」这类没有维基条目的实体，页面永远空白
@@ -1736,8 +1973,9 @@ inline SummaryResult retrieval_fetch(EntityKind kind,
     //   现改为：有旧缓存先用缓存；否则若配了 key，退到 AI 自有知识整理（unverified=true，UI 必须标注），
     //   结果写缓存 7 天，第二次打开不再调用。有材料时仍走严格引用路径，不受影响。
     if (kr.materials.empty() && fetched_hits.empty()) {
-        // 2026-10-24（261024-02 #1）：同样只回退 v3+ 缓存（旧缓存可能是消歧义垃圾，见下方说明）
-        if (have_cache && cached.ok && cached.cache_ver >= 3) {
+        // 2026-10-24（261024-02 #1）：同样只回退 v6 当前代际缓存（旧格式可能是消歧义垃圾
+        // 或错归属内容，见 PLAN §1.4 兼容铁律）。
+        if (have_cache && cached.ok && summary_cache_current(cached)) {
             cached.from_cache = true;
             cached.offline = true;
             cached.error = "未检索到任何权威材料，已回退至本地缓存";
@@ -1756,7 +1994,7 @@ inline SummaryResult retrieval_fetch(EntityKind kind,
                 ai_res.diag = "knowledge=" + std::to_string(diag_knowledge_ms) + "ms search=" +
                               std::to_string(diag_search_ms) + "ms fetch=" +
                               std::to_string(diag_fetch_ms) + "ms llm=" +
-                              std::to_string(diag_llm_ms) + "ms hits=0 fallback=ai_only";
+                              std::to_string(diag_llm_ms) + "ms hits=0 fallback=ai_only" + strict_diag;
                 summary_save_cache(baseDir, eid, lang, ai_res);
                 return ai_res;
             }
@@ -1776,9 +2014,14 @@ inline SummaryResult retrieval_fetch(EntityKind kind,
     const std::string promptEntityName = (!opts.artist.empty() && kind == EntityKind::Release)
         ? (opts.artist + " - " + name)
         : name;
-    const std::vector<LlmMessage> msgs = build_synthesis_prompt(
-        promptEntityName, kr.materials, fetched_hits, lang,
-        (kind == EntityKind::Release) ? "专辑" : "艺术家");
+    // 默认路径：旧 build_synthesis_prompt 一字不改（test_retrieval 的字符串断言依赖）。
+    // 严格路径：用新增的 ..._attributed 变体，给 survivors 追加「页面类型: ...」行。
+    const std::string promptKindLabel = (kind == EntityKind::Release) ? "专辑" : "艺术家";
+    const std::vector<LlmMessage> msgs = strict
+        ? build_synthesis_prompt_attributed(promptEntityName, kr.materials, fetched_hits,
+                                            lang, promptKindLabel, sel.attribution)
+        : build_synthesis_prompt(promptEntityName, kr.materials, fetched_hits,
+                                 lang, promptKindLabel);
     SummaryResult parsed;
     std::string last_err;
     // 2026-10-24（261024-02 #1）：400/非 JSON 的降级链。
@@ -1800,8 +2043,11 @@ inline SummaryResult retrieval_fetch(EntityKind kind,
         if (attempt == 0) {
             attempt_msgs = msgs;
         } else if (attempt == 1) {
-            attempt_msgs = build_synthesis_prompt(promptEntityName, reduced_mats, reduced_hits, lang,
-                                                  (kind == EntityKind::Release) ? "专辑" : "艺术家");
+            attempt_msgs = strict
+                ? build_synthesis_prompt_attributed(promptEntityName, reduced_mats, reduced_hits,
+                                                    lang, promptKindLabel, sel.attribution)
+                : build_synthesis_prompt(promptEntityName, reduced_mats, reduced_hits, lang,
+                                         promptKindLabel);
             attempt_tokens = 2000;
             attempt_msgs.push_back(LlmMessage{ "user",
                 "上一次请求失败（" + last_err + "）。请用更短的篇幅输出严格 JSON："
@@ -1821,14 +2067,16 @@ inline SummaryResult retrieval_fetch(EntityKind kind,
             continue;
         }
         diag_llm_ms += llm_ms;
-        parsed = parse_synthesis_reply(chat_rep.content, allowed_urls);
+        parsed = strict
+            ? parse_synthesis_reply(chat_rep.content, allowed_urls, true, &sel.attribution)
+            : parse_synthesis_reply(chat_rep.content, allowed_urls);
         if (parsed.ok) break;
         last_err = "综合结果校验失败: " + parsed.error;
     }
     if (!parsed.ok) {
-        // 2026-10-24（261024-02 #1）：只回退 **v3+** 的缓存。旧格式缓存内容可能是消歧义垃圾
-        //（实测 Irotas：v2 缓存里是"页面仅显示多个候选标题…"），拿它当兜底等于把坏内容永久固化。
-        if (have_cache && cached.ok && cached.cache_ver >= 3) {
+        // 2026-10-24（261024-02 #1）：只回退 **v6 当前代际** 缓存。旧格式缓存内容可能是
+        // 消歧义垃圾或错归属（实测 Irotas v2 / 1.1.5 归属语义变更），拿它当兜底等于固化坏内容。
+        if (have_cache && cached.ok && summary_cache_current(cached)) {
             cached.from_cache = true;
             cached.offline = true;
             cached.error = "综合校验失败 (" + last_err + ")，已回退至本地缓存";
@@ -1838,7 +2086,7 @@ inline SummaryResult retrieval_fetch(EntityKind kind,
             (kind == EntityKind::Release) ? "专辑" : "艺术家", lang, cfg, opts.llm_timeout_ms);
         if (ai_fb.ok) {
             ai_fb.error = "权威综合失败，已用 AI 自有知识整理（" + last_err + "）";
-            ai_fb.diag = "fallback=ai_only; " + last_err;
+            ai_fb.diag = "fallback=ai_only; " + last_err + strict_diag;
             ai_fb.generated_at = now_sec;
             ai_fb.expires_at = now_sec + 3 * 86400;   // 兜底内容 TTL 短一些，方便恢复后重生成
             summary_save_cache(baseDir, eid, lang, ai_fb);
@@ -1861,7 +2109,7 @@ inline SummaryResult retrieval_fetch(EntityKind kind,
     parsed.diag = "knowledge=" + std::to_string(diag_knowledge_ms) + "ms search=" +
                   std::to_string(diag_search_ms) + "ms fetch=" + std::to_string(diag_fetch_ms) +
                   "ms llm=" + std::to_string(diag_llm_ms) + "ms hits=" +
-                  std::to_string(fetched_hits.size());
+                  std::to_string(fetched_hits.size()) + strict_diag;
     summary_save_cache(baseDir, eid, lang, parsed);
 
     return parsed;

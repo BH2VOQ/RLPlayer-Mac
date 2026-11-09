@@ -10,7 +10,8 @@
 // 对应 docs/元数据补全调研与规划.md §3「内容分级」L2 与 §4 P3 里程碑②：
 //   * 维基百科 + 萌娘百科权威文本直连（生平/简介/消歧义）
 //   * 每条材料必带来源 URL 与取回时间（fetched_at）
-//   * 本地缓存落盘：<metabase>/entities/<entity_id>/knowledge.json（原子写 tmp + rename）
+//   * 本地缓存落盘：<metabase>/entities/<entity_id>/knowledge-<lang-token>.json（原子写 tmp + rename）
+//     （1.1.5-beta2 #21c：v6 起分语言落盘；旧 knowledge.json 不读、不写、不删）
 //   * 缓存 TTL 默认 30 天，过期离线回退（from_cache=true, offline=true）
 //   * 多源材料互不覆盖，同 URL 严格去重
 //   * 令牌桶限频（~1 req/s）+ 连续 3 次失败熔断（30s 冷却）
@@ -46,6 +47,35 @@ namespace rta::meta {
 namespace fsx = std::filesystem;
 
 // ---------------------------------------------------------------------------
+// 缓存代际（1.1.5-beta2 #21c）
+//
+// v6 起按语言分文件：旧代际（无 "v" 或 v<6）内容仍能解析出来供离线回退，
+// 但绝不能算 fresh —— 归属语义变更后旧内容可能是错归属（PLAN §1.4）。
+// ---------------------------------------------------------------------------
+inline constexpr int kKnowledgeCacheVer = 6;
+
+// lang token：小写字母 / 数字 / '_' / '-' 原样保留，其余字节 %XX；空串 = "zh"。
+// 用于把任意语言代码折成安全、确定、互不串味的单个文件名片段。
+inline std::string knowledge_lang_token(const std::string& lang) {
+    if (lang.empty()) return "zh";
+    static const char* hex = "0123456789ABCDEF";
+    std::string o;
+    o.reserve(lang.size());
+    for (unsigned char c : lang) {
+        const bool keep = (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') ||
+                          c == '_' || c == '-';
+        if (keep) {
+            o += (char)c;
+        } else {
+            o += '%';
+            o += hex[c >> 4];
+            o += hex[c & 0x0F];
+        }
+    }
+    return o.empty() ? "zh" : o;
+}
+
+// ---------------------------------------------------------------------------
 // 数据结构
 // ---------------------------------------------------------------------------
 
@@ -69,6 +99,9 @@ struct KnowledgeResult {
     std::vector<std::pair<std::string, std::string>> errors; // source → error 逐源错误
     bool from_cache = false;
     bool offline = false;
+    // 1.1.5-beta2 #21c：加在末尾，不破坏既有聚合初始化。
+    int  cache_ver = 0;     // 读到的缓存代际（0=无缓存/未知；6=当前）
+    bool stale = false;     // 只在离线回退旧代际（v<6）缓存时置 true
 };
 
 struct KnowledgeOpts {
@@ -270,9 +303,19 @@ inline bool is_disambiguation_page(const std::string& title, const std::string& 
 // 缓存序列化、反序列化、合并与路径
 // ---------------------------------------------------------------------------
 
-inline fsx::path knowledge_cache_path(const std::string& baseDir, const std::string& entity_id) {
+// 1.1.5-beta2 #21c：v6 新路径，按语言分文件。旧 knowledge.json 不读、不写、不删。
+inline fsx::path knowledge_cache_path(const std::string& baseDir, const std::string& entity_id,
+                                      const std::string& lang) {
     const std::string b = baseDir.empty() ? EntityStore::instance().baseDir() : baseDir;
-    return meta_path_of(b) / "entities" / entity_id / "knowledge.json";
+    return meta_path_of(b) / "entities" / entity_id /
+           ("knowledge-" + knowledge_lang_token(lang) + ".json");
+}
+
+// 兼容旧签名（142 条旧用例直接调用且用于损坏容错）：默认 lang="zh"。
+// 它返回的是「该实体当前实际使用的 knowledge 缓存文件」，即 knowledge-zh.json，
+// 不再是历史遗留的 knowledge.json（后者全代码路径零读零写零删）。
+inline fsx::path knowledge_cache_path(const std::string& baseDir, const std::string& entity_id) {
+    return knowledge_cache_path(baseDir, entity_id, "zh");
 }
 
 inline std::string knowledge_to_json(const std::vector<KnowledgeMaterial>& materials,
@@ -281,6 +324,7 @@ inline std::string knowledge_to_json(const std::vector<KnowledgeMaterial>& mater
     std::ostringstream o;
     const long long now_sec = (long long)std::time(nullptr);
     o << "{\n"
+      << "  \"v\": " << kKnowledgeCacheVer << ",\n"
       << "  \"entity_id\": \"" << meta_jesc(entity_id) << "\",\n"
       << "  \"subject\": \"" << meta_jesc(subject) << "\",\n"
       << "  \"updated_at\": " << now_sec << ",\n"
@@ -304,16 +348,23 @@ inline std::string knowledge_to_json(const std::vector<KnowledgeMaterial>& mater
     return o.str();
 }
 
+// 兼容旧签名（第 5 参 err_out）；新增可选第 6 参回传读到的缓存代际。
+// v<6 或没有 "v" 字段：解析本身仍返回 true（旧缓存能读出来供离线回退），
+// 只是 cache_ver_out 回传旧代际值，由调用方判 stale，绝不冒充 fresh。
 inline bool knowledge_from_json(const std::string& text,
                                 std::vector<KnowledgeMaterial>& materials_out,
                                 std::string& entity_id_out,
                                 std::string& subject_out,
-                                std::string* err_out = nullptr) {
+                                std::string* err_out = nullptr,
+                                int* cache_ver_out = nullptr) {
+    if (cache_ver_out) *cache_ver_out = 0;
     const rta::net::Json j = rta::net::json_parse(text);
     if (j.type != rta::net::Json::Obj) {
         if (err_out) *err_out = "knowledge cache corrupted: not a JSON object";
         return false;
     }
+    const int ver = j.has("v") ? (int)j["v"].n() : 0;
+    if (cache_ver_out) *cache_ver_out = ver;
     entity_id_out = j["entity_id"].s();
     subject_out = j["subject"].s();
     const rta::net::Json& arr = j["materials"];
@@ -375,29 +426,86 @@ inline bool knowledge_has_unexpired(const std::vector<KnowledgeMaterial>& materi
     return false;
 }
 
+// 带 lang 的新重载（1.1.5-beta2 #21c）：写 knowledge-<lang-token>.json。
 inline bool knowledge_save_cache(const std::string& baseDir,
                                  const std::string& entity_id,
                                  const std::string& subject,
-                                 const std::vector<KnowledgeMaterial>& materials) {
+                                 const std::vector<KnowledgeMaterial>& materials,
+                                 const std::string& lang) {
     if (entity_id.empty()) return false;
-    const fsx::path p = knowledge_cache_path(baseDir, entity_id);
+    const fsx::path p = knowledge_cache_path(baseDir, entity_id, lang);
     const std::string content = knowledge_to_json(materials, entity_id, subject);
     return entity_write_atomic(p, content);
 }
 
+// 旧签名保持不变（默认 lang="zh"），仅落盘路径改为新文件。
+inline bool knowledge_save_cache(const std::string& baseDir,
+                                 const std::string& entity_id,
+                                 const std::string& subject,
+                                 const std::vector<KnowledgeMaterial>& materials) {
+    return knowledge_save_cache(baseDir, entity_id, subject, materials, "zh");
+}
+
+// 带 lang 的新重载（第 4 参是语言，第 5 参是可选错误出参）。
+inline bool knowledge_load_cache(const std::string& baseDir,
+                                 const std::string& entity_id,
+                                 std::vector<KnowledgeMaterial>& materials_out,
+                                 const std::string& lang,
+                                 std::string* err_out = nullptr,
+                                 int* cache_ver_out = nullptr) {
+    if (entity_id.empty()) return false;
+    const fsx::path p = knowledge_cache_path(baseDir, entity_id, lang);
+    std::string text;
+    if (!entity_read_file(p, text)) {
+        if (err_out) *err_out = "cache file not found or empty";
+        if (cache_ver_out) *cache_ver_out = 0;
+        return false;
+    }
+    std::string id_out, sub_out;
+    return knowledge_from_json(text, materials_out, id_out, sub_out, err_out, cache_ver_out);
+}
+
+// 旧签名保持不变（默认 lang="zh"）。
 inline bool knowledge_load_cache(const std::string& baseDir,
                                  const std::string& entity_id,
                                  std::vector<KnowledgeMaterial>& materials_out,
                                  std::string* err_out = nullptr) {
-    if (entity_id.empty()) return false;
-    const fsx::path p = knowledge_cache_path(baseDir, entity_id);
+    return knowledge_load_cache(baseDir, entity_id, materials_out, "zh", err_out, nullptr);
+}
+
+// API handler 用：纯磁盘读、不联网、不写盘。<10ms。
+// 返回 true = 缓存文件存在且可解析（内容仍读出到 materials_out）；
+// fresh_out = v6 且未过期（可直接秒回），stale_out = 可读但不够 fresh（旧代际/过期）。
+inline bool knowledge_peek_cache(const std::string& baseDir,
+                                 const std::string& entity_id,
+                                 const std::string& lang,
+                                 std::vector<KnowledgeMaterial>& materials_out,
+                                 bool& fresh_out,
+                                 bool& stale_out,
+                                 int* cache_ver_out,
+                                 std::string* err_out) {
+    fresh_out = false;
+    stale_out = false;
+    if (cache_ver_out) *cache_ver_out = 0;
+    if (err_out) err_out->clear();
+    if (entity_id.empty()) {
+        if (err_out) *err_out = "empty entity id";
+        return false;
+    }
+    const fsx::path p = knowledge_cache_path(baseDir, entity_id, lang);
     std::string text;
     if (!entity_read_file(p, text)) {
         if (err_out) *err_out = "cache file not found or empty";
         return false;
     }
     std::string id_out, sub_out;
-    return knowledge_from_json(text, materials_out, id_out, sub_out, err_out);
+    int ver = 0;
+    if (!knowledge_from_json(text, materials_out, id_out, sub_out, err_out, &ver)) return false;
+    if (cache_ver_out) *cache_ver_out = ver;
+    const bool current = ver >= kKnowledgeCacheVer;
+    fresh_out = current && !materials_out.empty() && knowledge_has_unexpired(materials_out);
+    stale_out = !fresh_out;
+    return true;
 }
 
 // ---------------------------------------------------------------------------
@@ -405,19 +513,23 @@ inline bool knowledge_load_cache(const std::string& baseDir,
 //
 // 用户实测：打开艺术家「塞壬唱片」每次都提示「暂无权威资料或网络连接失败 wikipedia: 未找到匹配候选条目」，
 // 而且每次打开都要等一次网络往返 —— 因为旧实现只缓存**成功**，失败不缓存，于是每次都重打 2~3 次维基。
-// 这里落一个 knowledge.miss.json 标记，默认 6 小时内直接返回"近期未找到"，不再联网；成功后清除。
+// 这里落一个 knowledge.miss-<lang>.json 标记，默认 6 小时内直接返回"近期未找到"，不再联网；成功后清除。
+// 1.1.5-beta2：负缓存也按语言分文件，避免 zh 查不到压制 en 查询（语言互不串）。
 // ---------------------------------------------------------------------------
 
-inline fsx::path knowledge_miss_path(const std::string& baseDir, const std::string& entity_id) {
+inline fsx::path knowledge_miss_path(const std::string& baseDir, const std::string& entity_id,
+                                     const std::string& lang = "zh") {
     const std::string b = baseDir.empty() ? EntityStore::instance().baseDir() : baseDir;
-    return meta_path_of(b) / "entities" / entity_id / "knowledge.miss.json";
+    return meta_path_of(b) / "entities" / entity_id /
+           ("knowledge.miss-" + knowledge_lang_token(lang) + ".json");
 }
 
 inline bool knowledge_recent_miss(const std::string& baseDir, const std::string& entity_id,
-                                  long long ttl_sec, long long* at_out = nullptr) {
+                                  long long ttl_sec, const std::string& lang,
+                                  long long* at_out = nullptr) {
     if (entity_id.empty() || ttl_sec <= 0) return false;
     std::string text;
-    if (!entity_read_file(knowledge_miss_path(baseDir, entity_id), text)) return false;
+    if (!entity_read_file(knowledge_miss_path(baseDir, entity_id, lang), text)) return false;
     const rta::net::Json j = rta::net::json_parse(text);
     if (j.type != rta::net::Json::Obj) return false;
     const long long at = (long long)j["at"].n();
@@ -426,19 +538,27 @@ inline bool knowledge_recent_miss(const std::string& baseDir, const std::string&
     return ((long long)std::time(nullptr) - at) < ttl_sec;
 }
 
+// 兼容旧签名（第 4 参 at_out）。
+inline bool knowledge_recent_miss(const std::string& baseDir, const std::string& entity_id,
+                                  long long ttl_sec, long long* at_out = nullptr) {
+    return knowledge_recent_miss(baseDir, entity_id, ttl_sec, "zh", at_out);
+}
+
 inline void knowledge_mark_miss(const std::string& baseDir, const std::string& entity_id,
-                                const std::string& subject, const std::string& error) {
+                                const std::string& subject, const std::string& error,
+                                const std::string& lang = "zh") {
     if (entity_id.empty()) return;
     std::ostringstream o;
     o << "{\"entity_id\":\"" << meta_jesc(entity_id) << "\",\"subject\":\"" << meta_jesc(subject)
       << "\",\"at\":" << (long long)std::time(nullptr) << ",\"error\":\"" << meta_jesc(error) << "\"}\n";
-    entity_write_atomic(knowledge_miss_path(baseDir, entity_id), o.str());
+    entity_write_atomic(knowledge_miss_path(baseDir, entity_id, lang), o.str());
 }
 
-inline void knowledge_clear_miss(const std::string& baseDir, const std::string& entity_id) {
+inline void knowledge_clear_miss(const std::string& baseDir, const std::string& entity_id,
+                                 const std::string& lang = "zh") {
     if (entity_id.empty()) return;
     std::error_code ec;
-    fsx::remove(knowledge_miss_path(baseDir, entity_id), ec);
+    fsx::remove(knowledge_miss_path(baseDir, entity_id, lang), ec);
 }
 
 // ---------------------------------------------------------------------------
@@ -820,35 +940,41 @@ inline KnowledgeResult knowledge_get(const std::string& entity_id,
     const std::string baseDir = !opts.metabase.empty()
                                     ? opts.metabase
                                     : EntityStore::instance().baseDir();
-    const fsx::path cache_path = knowledge_cache_path(baseDir, entity_id);
+    const fsx::path cache_path = knowledge_cache_path(baseDir, entity_id, opts.lang);
 
     std::vector<KnowledgeMaterial> cached_materials;
     std::string cache_id, cache_sub, cache_err;
     std::string cache_bytes;
     const bool cache_file_exists = entity_read_file(cache_path, cache_bytes);
+    int cache_ver = 0;
     bool cache_valid = false;
     if (cache_file_exists) {
-        if (knowledge_from_json(cache_bytes, cached_materials, cache_id, cache_sub, &cache_err)) {
+        if (knowledge_from_json(cache_bytes, cached_materials, cache_id, cache_sub,
+                                &cache_err, &cache_ver)) {
             cache_valid = true;
         }
     }
+    res.cache_ver = cache_ver;
 
     const long long now_sec = (long long)std::time(nullptr);
+    const bool current_gen = cache_valid && cache_ver >= kKnowledgeCacheVer;
     const bool has_unexpired = cache_valid && knowledge_has_unexpired(cached_materials, now_sec);
 
     // 0) 失败负缓存（6 小时）：上一次已经确认「没有权威材料」→ 直接返回，不再联网
     //    （用户 261023-04 #14：每次打开艺术家页都重打维基，既慢又什么都出不来）
     long long miss_at = 0;
-    if (!opts.refresh && knowledge_recent_miss(baseDir, entity_id, 6 * 3600, &miss_at)) {
+    if (!opts.refresh && knowledge_recent_miss(baseDir, entity_id, 6 * 3600, opts.lang, &miss_at)) {
         res.from_cache = true;
         res.offline = false;
         res.error = "近期未找到权威材料（6 小时内不再重试；可在资料页点「刷新资料」强制重试）";
         return res;
     }
 
-    // 1) 命中未过期缓存且未要求 refresh -> 直接返回缓存
-    if (!opts.refresh && has_unexpired) {
-        knowledge_clear_miss(baseDir, entity_id);
+    // 1) 命中「当前代际 v6」且未过期缓存且未要求 refresh -> 直接返回缓存。
+    //    旧代际（v<6 / 无 v）即使 TTL 未到也不算 fresh：归属语义变更后旧内容可能是错归属，
+    //    只在步骤 4 的离线回退里以 stale=true 形式诚实给出（PLAN §1.4）。
+    if (!opts.refresh && current_gen && has_unexpired) {
+        knowledge_clear_miss(baseDir, entity_id, opts.lang);
         res.materials = cached_materials;
         res.from_cache = true;
         res.offline = false;
@@ -882,22 +1008,26 @@ inline KnowledgeResult knowledge_get(const std::string& entity_id,
 
     // 3) 处理网络拉取成功结果
     if (!fresh_materials.empty()) {
-        knowledge_clear_miss(baseDir, entity_id);
+        knowledge_clear_miss(baseDir, entity_id, opts.lang);
         std::vector<KnowledgeMaterial> merged = cached_materials;
         knowledge_merge_materials(merged, fresh_materials);
-        knowledge_save_cache(baseDir, entity_id, subject, merged);
+        knowledge_save_cache(baseDir, entity_id, subject, merged, opts.lang);
 
         res.materials = std::move(merged);
         res.from_cache = false;
         res.offline = false;
+        res.cache_ver = kKnowledgeCacheVer;
+        res.stale = false;
         return res;
     }
 
-    // 4) 网络未产出新材料时：若有缓存（即使过期），离线回退！
+    // 4) 网络未产出新材料时：若有缓存（即使过期/旧代际），离线回退！
     if (cache_valid && !cached_materials.empty()) {
         res.materials = std::move(cached_materials);
         res.from_cache = true;
         res.offline = true;
+        // 旧代际（v<6 / 无 v）内容可读但归属语义未达 v6，标 stale 供 API/前端诚实显示。
+        res.stale = !current_gen;
         if (!net_errors.empty()) {
             res.error = "网络拉取无新材料，已离线回退到缓存: " + net_errors[0];
         }
@@ -920,7 +1050,7 @@ inline KnowledgeResult knowledge_get(const std::string& entity_id,
         res.error = "未找到任何相关权威材料";
     }
     // 落失败标记：下一次（6 小时内）不再联网重试
-    if (!opts.refresh) knowledge_mark_miss(baseDir, entity_id, subject, res.error);
+    if (!opts.refresh) knowledge_mark_miss(baseDir, entity_id, subject, res.error, opts.lang);
     return res;
 }
 

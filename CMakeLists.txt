@@ -312,6 +312,16 @@ target_include_directories(test_retrieval_speed PRIVATE ${CMAKE_SOURCE_DIR}/src)
 target_link_libraries(test_retrieval_speed PRIVATE ${RL_PLATFORM_LIBS})
 add_test(NAME retrieval_speed COMMAND test_retrieval_speed)
 
+# 1.1.5-beta2（U5 专辑上下文 / #21a 页面类型分类 / #21b 归属与引用校验 / #21c 缓存 v6 /
+# M-12 异步 job 状态机 / M-13 文件名兜底）。每个 target 的判据见 tests/*.cpp 头注释与
+# 工作区 PLAN-1.1.5-beta2.md。骨架期由 Lead 预置为必红（exit 1），实现后转绿。
+foreach(_t115 entity_classify retrieval_v6 track_identity knowledge_v6 async_job)
+  add_executable(test_${_t115} tests/test_${_t115}.cpp)
+  target_include_directories(test_${_t115} PRIVATE ${CMAKE_SOURCE_DIR}/src)
+  target_link_libraries(test_${_t115} PRIVATE ${RL_PLATFORM_LIBS})
+  add_test(NAME ${_t115} COMMAND test_${_t115})
+endforeach()
+
 # 2026-10-24（用户 261024-04 #6/#4 后端侧）：实体资料缓存是否**共用**、第二次是否**零 LLM 调用**、
 # 命中是否 ≤300ms。全离线：L2 材料直接写缓存，chat/search/fetch 走计数型 mock transport
 # （LlmConfig::transport 钩子），判据是"调用计数不变"而不是"耗时不抖"。
@@ -740,6 +750,9 @@ if(NODE_EXECUTABLE)
   # （本机规则：禁止自起无头浏览器；能离线证明的先证明，几何量测改为侧边栏目视验收）
   add_test(NAME b10_logic COMMAND ${NODE_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/check_b10_logic.js)
   set_tests_properties(b10_logic PROPERTIES WORKING_DIRECTORY ${CMAKE_SOURCE_DIR} TIMEOUT 30)
+  # 1.1.5-beta2：UI 资料检索契约（album/file 传参、knowledge 轮询单飞、资料不足态）——纯逻辑
+  add_test(NAME retrieval_ui COMMAND ${NODE_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/check_115_logic.js)
+  set_tests_properties(retrieval_ui PROPERTIES WORKING_DIRECTORY ${CMAKE_SOURCE_DIR} TIMEOUT 30)
 endif()
 
 # i18n 门禁：docs/i18n/*.en.tsv → src/net/i18n_table.h 必须与生成物一致

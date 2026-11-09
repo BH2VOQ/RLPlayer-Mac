@@ -72,6 +72,8 @@ using rta::render::SinkOpenOpts;
 #include "meta/enrich.h"            // 单曲元数据补全编排(播放触发 + /api/enrich + /api/meta 兜底)
 #include "meta/writeback.h"         // P2 标签写回(remux + PCM 逐位门禁;/api/writeback 三端点)
 #include "meta/knowledge.h"         // P3 资料层直连与缓存(/api/entity/knowledge)
+#include "meta/async_job.h"          // 1.1.5-beta2 M-12：knowledge 后台 job 去重状态机（纯逻辑）
+#include "meta/track_identity.h"    // 1.1.5-beta2 M-13：文件名兜底解析（纯逻辑）
 #include "meta/retrieval.h"         // P3 资料层③ AI 综合检索(/api/entity/summary)
 #include "meta/discogs.h"           // P3 资料层④b Discogs 版本推荐(/api/entity/versions)
 #include "meta/statusflags.h"       // gpu/gpuUsed 组合语义（用户 261024-04 #8，/api/status 与 /api/signal 同源）
@@ -626,9 +628,15 @@ static rta::diag::DiagStartResult g_diagStartup; // initialized before request e
 static std::atomic<int> g_bgJobs{0};
 static std::mutex g_bgMx;
 static std::condition_variable g_bgCv;
+// 1.1.5-beta2 M-12：knowledge 后台 job 去重状态机（纯逻辑在 meta/async_job.h）。
+// rtaweb 只负责起线程 / 取结果 / 退出闸门，判据全在 JobRegistry 里可单测。
+static rta::meta::JobRegistry g_knowledge_jobs;
 
 // 尽早置位全局退出标志，与 g_bgMx 互斥锁保护，彻底杜绝 check-then-act 竞态
+// 1.1.5-beta2 M-12：同时关掉 knowledge job 表的派发闸门（不 force-kill 在途任务，
+// 在途任务仍可 finish；BgJobGuard 负责协作收尾）。
 static void set_shutdown_flag() {
+    g_knowledge_jobs.shutdown();
     std::lock_guard<std::mutex> lk(g_bgMx);
     g_shutdown.store(true);
 }
@@ -6687,6 +6695,17 @@ static std::string summary_json_with_flags(const rta::meta::SummaryResult& sr,
     return js;
 }
 
+// 1.1.5-beta2 M-13：track 响应可选附带 identity 对象（解析出的 title/artist/album/source）。
+// extra 是已经拼好的 ",\"identity\":{...}" 前缀片段，插在 JSON 对象的最后一个 '}' 之前。
+static std::string summary_with_extra(const std::string& body, const std::string& extra) {
+    if (extra.empty()) return body;
+    const size_t close = body.find_last_of('}');
+    if (close == std::string::npos) return body;
+    std::string out = body;
+    out.insert(close, extra);
+    return out;
+}
+
 // 2026-11-08（beta7 速度）：pending 响应带轮询建议（前端可据此把 2s 轮询降到 ~300ms，
 // 平均少等 0~1.7s）。字段全部可选，旧前端忽略即可；retryAfterMs 钳在 200..1500。
 static std::string summary_pending_json(const std::string& kind, long long elapsed_ms) {
@@ -6746,6 +6765,106 @@ static MediaInfo probe_media_memoized(const std::string& file) {
         g_metaprobe[file] = MetaProbeMemoEntry{mtime, size, mi};
     }
     return mi;
+}
+
+// ---------------------------------------------------------------------------
+// 1.1.5-beta2 M-12：/api/entity/knowledge 后台 job
+//
+// 判据（PLAN §1.5）：handler 线程绝不做网络；命中 fresh v6 缓存同步秒回；
+// 未命中起/复用后台 job（key=eid|lang），立即返回 pending；轮询到 done 一次性交付后移除。
+// 退出安全沿用 BgJobGuard + g_shutdown + HttpCancellationScope 模式（见 summary_job_start_fn），
+// 绝不 force-kill。JobRegistry 的 shutdown() 与 set_shutdown_flag 同处关闭新派发。
+// ---------------------------------------------------------------------------
+static std::string knowledge_json_from_result(const rta::meta::KnowledgeResult& kr,
+                                              const std::string& entId,
+                                              const std::string& kindTag,
+                                              const std::string& name,
+                                              bool pending) {
+    const bool ok = !kr.materials.empty();
+    std::ostringstream j;
+    j << "{\"ok\":" << (ok ? "true" : "false")
+      << ",\"pending\":" << (pending ? "true" : "false")
+      << (pending ? ",\"knowledge\":true" : "")
+      << ",\"entity\":{"
+      << "\"id\":\"" << jesc(entId) << "\","
+      << "\"kind\":\"" << jesc(kindTag) << "\","
+      << "\"name\":\"" << jesc(name) << "\""
+      << "},"
+      << "\"materials\":[";
+    for (size_t i = 0; i < kr.materials.size(); ++i) {
+        if (i) j << ",";
+        const auto& m = kr.materials[i];
+        j << "{"
+          << "\"source\":\"" << jesc(m.source) << "\","
+          << "\"kind\":\"" << jesc(m.kind) << "\","
+          << "\"subject\":\"" << jesc(m.subject) << "\","
+          << "\"title\":\"" << jesc(m.title) << "\","
+          << "\"text\":\"" << jesc(m.text) << "\","
+          << "\"url\":\"" << jesc(m.url) << "\","
+          << "\"lang\":\"" << jesc(m.lang) << "\","
+          << "\"fetched_at\":" << m.fetched_at << ","
+          << "\"expires_at\":" << m.expires_at << ","
+          << "\"authority\":" << m.authority
+          << "}";
+    }
+    j << "],\"errors\":[";
+    bool firstErr = true;
+    for (const auto& ep : kr.errors) {
+        if (!firstErr) j << ",";
+        firstErr = false;
+        j << "{\"source\":\"" << jesc(ep.first) << "\",\"error\":\"" << jesc(ep.second) << "\"}";
+    }
+    if (!ok && !pending && kr.errors.empty()) {
+        const std::string errText = !kr.error.empty() ? kr.error : "未找到任何相关权威材料";
+        j << "{\"source\":\"general\",\"error\":\"" << jesc(errText) << "\"}";
+    }
+    j << "],"
+      << "\"from_cache\":" << (kr.from_cache ? "true" : "false") << ","
+      << "\"offline\":" << (kr.offline ? "true" : "false") << ","
+      << "\"stale\":" << (kr.stale ? "true" : "false") << ","
+      << "\"cache_ver\":" << kr.cache_ver
+      << "}";
+    return j.str();
+}
+
+// 后台线程：只调 knowledge_fetch（网络 + 原子写 v6 缓存），结果交给 JobRegistry。
+static void knowledge_job_start_fn(const std::string& key, std::uint64_t generation,
+                                   const std::string& label,
+                                   const std::string& entId, const std::string& kindTag,
+                                   const std::string& name,
+                                   std::function<rta::meta::KnowledgeResult()> work) {
+    auto guard = std::make_shared<BgJobGuard>();
+    if (!guard->active()) {   // 退出已开始：拒绝派发，落一条 done 让轮询收尾（不假装成功）
+        rta::meta::KnowledgeResult kr;
+        kr.error = "系统退出，任务取消";
+        g_knowledge_jobs.finish(key, generation,
+            knowledge_json_from_result(kr, entId, kindTag, name, false));
+        return;
+    }
+    std::thread([key, generation, label, entId, kindTag, name, work, guard,
+                 rid = rta::diag::current_rid()]() {
+        rta::diag::ScopedRid diagRid(rid);
+        rta::net::HttpCancellationScope httpCancel(&g_shutdown);
+        rta::meta::KnowledgeResult kr;
+        kr.entityId = entId;
+        try {
+            kr = work();
+            if (kr.entityId.empty()) kr.entityId = entId;
+        } catch (const std::exception& e) {
+            kr = rta::meta::KnowledgeResult();
+            kr.entityId = entId;
+            kr.error = std::string("资料拉取异常：") + e.what();
+        } catch (...) {
+            kr = rta::meta::KnowledgeResult();
+            kr.entityId = entId;
+            kr.error = "资料拉取未知异常";
+        }
+        // g_shutdown 置位后仍允许 finish（协作收尾）；BgJobGuard 析构保证 bg_job_end 归零，
+        // stop_embedded 的有界等待能收干净。迟到结果由 key+generation 判定，JobRegistry 丢弃。
+        (void)g_knowledge_jobs.finish(key, generation,
+            knowledge_json_from_result(kr, entId, kindTag, name, false));
+        (void)label;
+    }).detach();
 }
 
 // ---------------- 资料简介后台生成（不阻塞单线程 HTTP accept）----------------
@@ -9757,51 +9876,66 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
         opts.refresh = refresh;
         if (!lang.empty()) opts.lang = lang;
 
-        const rta::meta::KnowledgeResult kr = rta::meta::knowledge_fetch(ek, name, opts);
-        const bool ok = !kr.materials.empty();
-        const std::string entId = kr.entityId.empty() ? rta::meta::entity_id(ek, name) : kr.entityId;
+        const std::string entId = rta::meta::entity_id(ek, name);
         const std::string kindTag = rta::meta::entity_kind_tag(ek);
+        const std::string jobKey = entId + "|" + opts.lang;
 
-        std::ostringstream j;
-        j << "{\"ok\":" << (ok ? "true" : "false")
-          << ",\"entity\":{"
+        // 1.1.5-beta2 M-12：handler 线程绝不做网络。
+        // (a) fresh v6 缓存（按 lang 分文件）→ 同步秒回，from_cache=true + cache_ver。
+        if (!refresh) {
+            std::vector<rta::meta::KnowledgeMaterial> cached;
+            bool fresh = false, stale = false;
+            int cacheVer = 0;
+            std::string peekErr;
+            if (rta::meta::knowledge_peek_cache(opts.metabase, entId, opts.lang,
+                                                cached, fresh, stale, &cacheVer, &peekErr) && fresh) {
+                rta::meta::KnowledgeResult kr;
+                kr.entityId = entId;
+                kr.materials = std::move(cached);
+                kr.from_cache = true;
+                kr.offline = false;
+                kr.stale = false;
+                kr.cache_ver = cacheVer;
+                return knowledge_json_from_result(kr, entId, kindTag, name, false);
+            }
+        }
+
+        // (b) 已有 done 结果：一次性交付后 JobRegistry 会移除记录（下次走 fresh 缓存）。
+        std::string doneBody;
+        if (g_knowledge_jobs.takeDone(jobKey, doneBody)) return doneBody;
+
+        // (c) 起/复用后台 job（refresh=1 也复用正在跑的同一 job，避免连点放大）。
+        g_knowledge_jobs.reapDone(600000);   // 10 分钟前无人取走的 done 记录，避免表无限增长
+        std::uint64_t generation = 0;
+        const bool started = g_knowledge_jobs.tryStart(jobKey, generation);
+        if (started) {
+            play_log("KNOWLEDGE generate(async) kind=" + kindStr + " name=" + name +
+                     " eid=" + entId + " lang=" + opts.lang +
+                     (refresh ? " refresh=1" : ""));
+            knowledge_job_start_fn(jobKey, generation, name, entId, kindTag, name,
+                [ek, name, opts]() { return rta::meta::knowledge_fetch(ek, name, opts); });
+        } else if (g_knowledge_jobs.isShutdown()) {
+            // 退出已开始且没有在途/已完成结果：明确回错误，绝不留一个永远 pending 的轮询。
+            return "{\"ok\":false,\"pending\":false,\"error\":\"系统退出中\","
+                   "\"entity\":{\"id\":\"" + jesc(entId) + "\",\"kind\":\"" + jesc(kindTag) +
+                   "\",\"name\":\"" + jesc(name) + "\"},"
+                   "\"materials\":[],\"errors\":[],\"from_cache\":false,\"offline\":false,"
+                   "\"stale\":false,\"cache_ver\":0}";
+        }
+        // 否则：同一 key 已有 job 在跑 → 复用，直接返回 pending（连点 5 次只 1 个任务）。
+
+        // (d) 立即返回 pending（<50ms）：retryAfterMs 钳在 250..1500，elapsedMs 单调递增。
+        const long long elapsedMs = g_knowledge_jobs.elapsedMs(jobKey);
+        const long long retryMs = g_knowledge_jobs.retryAfterMs(jobKey);
+        std::ostringstream p;
+        p << "{\"ok\":false,\"pending\":true,\"knowledge\":true,"
+          << "\"entity\":{"
           << "\"id\":\"" << jesc(entId) << "\","
           << "\"kind\":\"" << jesc(kindTag) << "\","
-          << "\"name\":\"" << jesc(name) << "\""
-          << "},"
-          << "\"materials\":[";
-        for (size_t i = 0; i < kr.materials.size(); ++i) {
-            if (i) j << ",";
-            const auto& m = kr.materials[i];
-            j << "{"
-              << "\"source\":\"" << jesc(m.source) << "\","
-              << "\"kind\":\"" << jesc(m.kind) << "\","
-              << "\"subject\":\"" << jesc(m.subject) << "\","
-              << "\"title\":\"" << jesc(m.title) << "\","
-              << "\"text\":\"" << jesc(m.text) << "\","
-              << "\"url\":\"" << jesc(m.url) << "\","
-              << "\"lang\":\"" << jesc(m.lang) << "\","
-              << "\"fetched_at\":" << m.fetched_at << ","
-              << "\"expires_at\":" << m.expires_at << ","
-              << "\"authority\":" << m.authority
-              << "}";
-        }
-        j << "],\"errors\":[";
-        bool firstErr = true;
-        for (const auto& ep : kr.errors) {
-            if (!firstErr) j << ",";
-            firstErr = false;
-            j << "{\"source\":\"" << jesc(ep.first) << "\",\"error\":\"" << jesc(ep.second) << "\"}";
-        }
-        if (!ok && kr.errors.empty()) {
-            const std::string errText = !kr.error.empty() ? kr.error : "未找到任何相关权威材料";
-            j << "{\"source\":\"general\",\"error\":\"" << jesc(errText) << "\"}";
-        }
-        j << "],"
-          << "\"from_cache\":" << (kr.from_cache ? "true" : "false") << ","
-          << "\"offline\":" << (kr.offline ? "true" : "false")
-          << "}";
-        return j.str();
+          << "\"name\":\"" << jesc(name) << "\"},"
+          << "\"retryAfterMs\":" << retryMs
+          << ",\"elapsedMs\":" << elapsedMs << "}";
+        return p.str();
     }
 
     // ---------------- 资料层(P3③ 检索综合): GET /api/entity/summary ----------------
@@ -9811,6 +9945,11 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
         std::string name;
         std::string artist;
         std::string lang = "zh";
+        // 1.1.5-beta2 M-13 / U5：track 的文件名兜底与专辑上下文；非 track 路径 album 也透
+        // 传进 ropts.album 作为 release 检索上下文（无参数时保持旧行为）。
+        std::string album;
+        std::string genre;
+        std::string file;
         bool refresh = false;
 
         const size_t qpos = rq.path.find('?');
@@ -9827,6 +9966,9 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
                 else if (k == "artist") artist = v;
                 else if (k == "refresh") refresh = (v == "1" || v == "true");
                 else if (k == "lang") lang = v;
+                else if (k == "album") album = v;
+                else if (k == "genre") genre = v;
+                else if (k == "file") file = v;
             }
         }
         if (name.empty()) {
@@ -9835,18 +9977,65 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
         // ---- 歌曲级简介（261023-04 #7）：没有任何权威源可引，走 AI 自有知识 + unverified 标注，
         //      按 artist+title 归键缓存；同样把这个耗时操作放后台线程，前端轮询。 ----
         if (kindStr == "track" || kindStr == "song") {
-            const std::string eidTrack = rta::meta::entity_make_id(
-                "track", rta::meta::entity_norm(artist) + "\x1f" + rta::meta::entity_norm(name));
+            // 1.1.5-beta2 M-13（Lead 集成修正，API smoke 红→绿）：
+            // name/artist/album 是前端按 /api/meta（ffprobe + MetaStore 补全后的合并结果）
+            // 拼出来的实体身份；CUE 虚拟轨 / 在线补全的曲目，标签可能根本不在音频文件里。
+            // 因此 file= 的语义是「**仅当 UI 身份不足时**才用文件名兜底」，绝不能反过来
+            // 用 probe_media(file) 的原始标签覆盖 UI 身份 —— 那会把 U5 要解决的「同名异曲」
+            // 变回「整轨文件名」，而且纯曲号文件名会误判 insufficient（实测 [A] 红）。
+            //
+            // 只有一种例外：UI 的 name 就是文件名本身（loadMeta 在 /api/meta 没有 title 时
+            // 用 nam(f) 兜底）。这时 name 不是真标签，要交给 resolve_track_identity 拆成
+            // artist/title；判据是「name 等于 file 的 basename 或去扩展名 stem」。
+            std::string trackTitle = name;
+            std::string trackArtist = artist;
+            std::string trackAlbum = album;
+            std::string identityJson;
+            if (!file.empty()) {
+                std::string base = file, stem = file;
+                const size_t slash = base.find_last_of("/\\");
+                if (slash != std::string::npos) base = base.substr(slash + 1);
+                stem = base;
+                const size_t dot = stem.find_last_of('.');
+                if (dot != std::string::npos && dot > 0) stem = stem.substr(0, dot);
+                const bool nameIsFilename = !name.empty() && (name == base || name == stem);
+                const bool uiHasIdentity = !nameIsFilename && !name.empty();
+
+                const MediaInfo mi = probe_media_memoized(file);
+                // tag 侧只喂 probe 结果（可能全空）；UI 的有效身份作为「已知字段」传进去，
+                // resolve_track_identity 的 tag 优先规则会保留它，只在缺字段时补文件名。
+                const rta::meta::TrackIdentity ti = rta::meta::resolve_track_identity(
+                    uiHasIdentity ? name : mi.title,
+                    uiHasIdentity ? artist : mi.artist,
+                    uiHasIdentity ? album : mi.album,
+                    file);
+                if (!ti.sufficient) {
+                    const std::string reason = ti.reason.empty() ? "资料不足：缺少艺术家与曲名" : ti.reason;
+                    return "{\"ok\":false,\"insufficient\":true,\"error\":\"" + jesc(reason) +
+                           "\",\"summaryKind\":\"track\",\"summaryCached\":false}";
+                }
+                trackTitle = ti.title;
+                trackArtist = ti.artist;
+                trackAlbum = ti.album;
+                if (trackAlbum.empty()) trackAlbum = album;
+                std::ostringstream ij;
+                ij << ",\"identity\":{"
+                   << "\"title\":\"" << jesc(ti.title) << "\","
+                   << "\"artist\":\"" << jesc(ti.artist) << "\","
+                   << "\"album\":\"" << jesc(ti.album) << "\","
+                   << "\"source\":\"" << jesc(ti.source) << "\"}";
+                identityJson = ij.str();
+            }
+            // U5：album 参与实体键（album 空时逐字沿用旧键，兼容既有缓存）。
+            const std::string eidTrack = rta::meta::summary_track_entity_id(
+                trackTitle, trackArtist, trackAlbum);
             const MetaSettings msT = meta_settings_load();
             if (!msT.summary) {
                 return "{\"ok\":false,\"error\":\"未开启在线资料整理\",\"summaryEnabled\":false,"
                        "\"summaryKind\":\"track\",\"summaryCached\":false}";
             }
             const std::string metabaseT = path_in_exe_dir("rlplayer-meta");
-            // 2026-11-08（1.1.4-beta7 速度，stale-while-revalidate）：过期缓存不再让用户干等
-            // 10~20s 重新生成 —— 先秒回过期内容（summaryCached=true + summaryStale=true，
-            // 语义诚实：内容确实来自磁盘缓存），同时后台刷新并写回缓存。只接受 v3+ 缓存
-            //（旧格式可能是消歧义垃圾，见 retrieval_fetch 的 v3 说明）。
+            // 1.1.5-beta2：v3/v4/v5 摘要在归属语义变更前生成，不再拿来当 stale 显示。
             rta::meta::SummaryResult staleT;
             bool haveStaleT = false;
             if (!refresh) {
@@ -9855,15 +10044,21 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
                 if (rta::meta::summary_load_cache(metabaseT, eidTrack, lang, cached, &cErr) && cached.ok) {
                     if (!rta::meta::summary_is_expired(cached)) {
                         cached.from_cache = true;
-                        return summary_json_with_flags(cached, "track", true);
+                        return summary_with_extra(
+                            summary_json_with_flags(cached, "track", true), identityJson);
                     }
-                    if (cached.cache_ver >= 3) { haveStaleT = true; staleT = cached; }
+                    if (cached.cache_ver >= rta::meta::kSummaryCacheVer) {
+                        haveStaleT = true;
+                        staleT = cached;
+                    }
                 }
             }
             rta::meta::RetrievalOptions ropts;
             ropts.metabase = metabaseT;
             ropts.refresh = refresh;
             ropts.timeout_ms = 25000;
+            ropts.album = trackAlbum;
+            if (!genre.empty()) ropts.album_tags.push_back({ "genre", genre });
             ropts.llm_cfg = rta::meta::llm_config_load(llm_conf_path());
             const std::string jobKey = eidTrack + "|" + lang;
             long long elapsedMs = 0;
@@ -9879,7 +10074,7 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
                 if (it != g_summ_jobs.end() && it->second.done) {
                     std::string body = it->second.body;
                     g_summ_jobs.erase(it);
-                    return body;
+                    return summary_with_extra(body, identityJson);
                 }
                 if (it == g_summ_jobs.end() || !it->second.running) {
                     SummaryJob job;
@@ -9888,9 +10083,10 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
                     g_summ_jobs[jobKey] = job;
                     play_log("SUMMARY generate(async) kind=track name=" + name +
                              (haveStaleT ? " stale-refresh=1" : ""));
-                    summary_job_start_fn(jobKey, "track", name, [name, artist, lang, ropts]() {
-                        return rta::meta::retrieval_fetch_track(name, artist, lang, ropts);
-                    });
+                    summary_job_start_fn(jobKey, "track", name,
+                        [trackTitle, trackArtist, lang, ropts]() {
+                            return rta::meta::retrieval_fetch_track(trackTitle, trackArtist, lang, ropts);
+                        });
                 }
                 if (haveStaleT) {
                     auto jt = g_summ_jobs.find(jobKey);
@@ -9898,10 +10094,11 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
                         elapsedMs = (now - jt->second.started_at) * 1000;
                     staleT.from_cache = true;
                     play_log("SUMMARY stale-served kind=track name=" + name + " eid=" + eidTrack);
-                    return summary_json_with_flags(staleT, "track", true, true);
+                    return summary_with_extra(
+                        summary_json_with_flags(staleT, "track", true, true), identityJson);
                 }
             }
-            return summary_pending_json("track", elapsedMs);
+            return summary_with_extra(summary_pending_json("track", elapsedMs), identityJson);
         }
         if (kindStr == "album") kindStr = "release";
         rta::meta::EntityKind ek = rta::meta::EntityKind::Person;
@@ -9939,7 +10136,10 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
                     play_log("SUMMARY cache-hit kind=" + kindStr + " name=" + name + " eid=" + eid);
                     return summary_json_with_flags(cached, kindStr, true);
                 }
-                if (cached.cache_ver >= 3) { haveStale = true; stale = cached; }
+                if (cached.cache_ver >= rta::meta::kSummaryCacheVer) {
+                    haveStale = true;
+                    stale = cached;
+                }
             }
         }
 
@@ -9948,6 +10148,7 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
         rta::meta::RetrievalOptions ropts;
         ropts.metabase = metabaseDir;
         ropts.artist = artist;
+        ropts.album = album;              // 1.1.5-beta2：非 track 路径也透传（release 检索上下文）
         ropts.entity_id = eid;
         ropts.refresh = refresh;
         ropts.timeout_ms = 25000;
