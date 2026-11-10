@@ -1,8 +1,8 @@
 {
   "version": "1.1.5-beta4",
-  "notes": "True bit-perfect on macOS: the exclusive path now locks the hardware physical format (kAudioStreamPropertyPhysicalFormat) and reads it back, instead of only setting the HAL virtual format. Endpoints whose physical layer offers only float32 (built-in speakers, virtual devices) keep playing but honestly report “not bit-perfect” with the reason. Hog mode now defaults on, and its hint states that Hog does not block other apps. · macOS 真 bit-perfect：独占路径改为锁定硬件物理格式（kAudioStreamPropertyPhysicalFormat）并真实读回，不再只设 HAL 虚拟层。物理层只有 float32 的端点（内置扬声器、虚拟声卡）照常播放，但如实报「非 bit-perfect」并给出理由。Hog 独占默认开启，提示文案更正为「Hog 不能阻止其它 App 播放」。",
+  "notes": "True bit-perfect on macOS (revision 2): exclusive output locks the hardware physical format using the device own available ASBD flags, preferring the NonMixable (0x40) integer variant, and verifies nsrt/sfmt/pft three-layer rate equality on every status poll so a mid-playback rate change degrades the badge immediately. Endpoints whose physical layer offers only float32 keep playing but report not bit-perfect with the reason. Hog exclusive defaults on and its hint states that Hog does not block other apps. · macOS 真 bit-perfect（修订二）：独占路径用设备 available 档的原样 ASBD 标志锁定物理格式，同率同位深时优先选带 NonMixable(0x40) 的整数档；并在每次状态轮询核对 nsrt/sfmt/pft 三层同率，播放中设备率被改回去时徽标当场降级。物理层只有 float32 的端点照常播放但如实报「非 bit-perfect」并给出理由。Hog 独占默认开启，提示文案已更正为「Hog 不能阻止其它 App 播放」。",
   "download_url": "https://github.com/BH2VOQ/RLPlayer-Mac/releases/download/v1.1.5-beta4/RLPlayer-1.1.5-beta4-macOS-arm64.dmg",
-  "sha256": "951651b551c79f32c0d1c30397ecfa40b46407f92c5e7d61ebf9cd33329e94e7",
-  "size": 8113408,
-  "published_at": "2026-11-09T18:30:00Z"
+  "sha256": "a1d5b42f1951c611f7e566546f754560862087e832b0c7d8f2c96cbe7a39b3bf",
+  "size": 8113915,
+  "published_at": "2026-11-10T03:45:00Z"
 }
