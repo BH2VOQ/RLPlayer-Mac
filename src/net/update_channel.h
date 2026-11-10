@@ -33,6 +33,8 @@
 #include <string>
 #include <vector>
 
+#include "net/json.h"   // 后台签名清单（JWS 信封 + payload）解析
+
 namespace rta::update {
 
 // ---------------------------------------------------------------------------
@@ -158,37 +160,222 @@ struct ChannelObject {
     std::string path;       // 解包后在整包内的相对路径
 };
 
+// 2026-11-10：后台新增「全量包」通道（DMG / ZIP 整包直链）。
+//   与增量对象（files[]）**并存、互不替代**：增量省流量是日常，全量包用于
+//   装新机 / 回滚 / 兜底，不再依赖百度网盘。
+//   下载：GET /api/v1/update/macos/packages/<sha256>.dmg（200/206、ETag）
+//   清单里是**可选**字段：
+//     "package": {"kind":"dmg","name":"RLPlayer-3.2.3.dmg","sha256":"<64hex>","size":12345678}
+//   ⚠️ sha256 必须等于 URL 里的那段（服务端上传时已强校验，客户端仍要复核本地字节）。
+namespace detail_channel {
+// 64 位 hex（sha256）。放在 ChannelPackage 之前，避免结构体内静态函数的声明顺序问题。
+inline bool is_hex64(const std::string& s) {
+    if (s.size() != 64) return false;
+    for (unsigned char c : s) if (!std::isxdigit(c)) return false;
+    return true;
+}
+} // namespace detail_channel
+
+struct ChannelPackage {
+    std::string kind;       // "dmg" / "zip"
+    std::string name;       // 文件名（Content-Disposition 用；客户端只用来回显）
+    std::string sha256;     // 包内容摘要，也用于拼下载 URL
+    long long   size = 0;
+
+    bool valid() const {
+        return (kind == "dmg" || kind == "zip") &&
+               detail_channel::is_hex64(sha256) && size > 0;
+    }
+    // 下载地址由 sha256 + kind 决定，**不接受清单直接给 URL**
+    //（否则等于让服务端指定客户端去下载任意地址）。
+    std::string download_url() const {
+        if (!valid()) return std::string();
+        std::string u = "https://";
+        u += kChinaHost;
+        u += "/api/v1/update/macos/packages/";
+        u += sha256;
+        u += ".";
+        u += kind;
+        return u;
+    }
+};
+
 struct ChannelManifest {
     // —— 与现有 Manifest 等价的判定字段（版本比较 / 校验全复用 update_check.h 的纯函数）——
     std::string version;
-    std::string sha256;     // 重组后整包 dmg 的 sha256（最终校验用）
+    std::string sha256;     // 整包 dmg 的 sha256（全量包路径用它）
     long long   size = 0;
     std::string notes;
 
     // —— 后台特有 ——
-    std::string signature;                   // PS256 签名（本轮不验）
-    std::string kid;                         // 验签公钥 id（本轮不用）
-    std::vector<ChannelObject> objects;      // files[] 等价：对象列表
+    std::string signature;                   // PS256 签名
+    std::string kid;                         // 验签公钥 id
+    std::string installMode;                 // "incremental" / "manual" / ...
+    std::vector<ChannelObject> objects;      // files[] 等价：增量对象列表
+    ChannelPackage package;                  // 全量包（可选；空 = 该清单没提供）
 
-    // 顺序闸门：只有后台接入并真实完成后才允许置 true。
+    // 顺序闸门：只有验签完成后才允许置 true。
     bool signatureVerified = false;          // ② 验签完成
-    bool objectsAssembled  = false;          // ④ 解包 + 整包重组完成
+    bool objectsAssembled  = false;          // ④ 增量对象解包 + 整包重组完成
 
-    // 「整包已就绪、可以进入既有 verify→mount→replace 链路」的唯一判据。
-    // 框架阶段永远返回 false（未验签 / 未重组 / 摘要为空）。
+    // 「可以进入既有 verify→mount→replace 链路」的唯一判据。
+    // 两条路径二选一：全量包（package 合法）或增量重组完成。
     bool ready() const {
-        return signatureVerified && objectsAssembled &&
-               !version.empty() && !sha256.empty() && size > 0;
+        if (!signatureVerified) return false;
+        if (!version.empty() && !sha256.empty() && size > 0 && objectsAssembled) return true;
+        return has_package();
     }
+    bool has_package() const { return package.valid(); }
 };
 
 // ---------------------------------------------------------------------------
-// 5. 框架阶段：中国大陆通道不可用的诚实提示
+// 5. 中国大陆通道「不可用」时的诚实提示
 //
 // 绝不冒充「已是最新」，绝不引导百度网盘（用户 2026-11-09 定的语义）。
-// 这条文案是 cn 分支 check() 唯一的对外结论，等后台就绪后由真实结果取代。
+// 后台就绪后正常路径不再用它；仅当后台真的取不到清单时才回这条。
 // ---------------------------------------------------------------------------
 inline constexpr const char kChinaChannelUnavailableMessage[] =
-    "中国大陆更新通道后台准备中，暂不可用，请稍后重试，或切换为全球通道";
+    "中国大陆更新通道暂时不可用，请稍后重试，或切换为全球通道";
+
+// ---------------------------------------------------------------------------
+// 6. 后台签名清单（JWS 信封）解析 —— 纯函数、无 IO、可离线单测
+//
+// 线上形态（2026-11-10 实测）：
+//   {"alg":"PS256","kid":"rlplayer-macos-...","payload":"<base64url>","signature":"<base64url>"}
+// payload 解出来的 JSON：
+//   {schema, platform, channel, version, install_mode, notes, files[], manual, package?}
+//
+// ⚠️ **本函数只解包与解析，不做验签**。验签必须在调用方（Security.framework）完成，
+//    并且必须在解包 / 安装之前（由 ChannelManifest::signatureVerified 闸门保证）。
+//    解析失败一律返回 valid=false —— 绝不"读不到就当最新"。
+// ---------------------------------------------------------------------------
+struct ManifestParse {
+    bool valid = false;
+    std::string error;       // 人类可读，**不含**凭据
+    ChannelManifest manifest;
+    std::string payloadJson; // 解出来的 payload 原文（验签要对它做 PSS-verify）
+};
+
+namespace detail_channel {
+
+inline int b64url_val(char c) {
+    if (c >= 'A' && c <= 'Z') return c - 'A';
+    if (c >= 'a' && c <= 'z') return c - 'a' + 26;
+    if (c >= '0' && c <= '9') return c - '0' + 52;
+    if (c == '-') return 62;
+    if (c == '_') return 63;
+    return -1;
+}
+
+// base64url 解码（容忍缺失的 '=' 填充；遇到非法字符即失败）。
+inline bool b64url_decode(const std::string& in, std::string& out) {
+    out.clear();
+    if (in.size() % 4 == 1) return false;
+    unsigned int buf = 0;
+    int bits = 0;
+    for (char ch : in) {
+        if (ch == '=') break;                       // 填充：忽略
+        if (ch == '\n' || ch == '\r' || ch == ' ' || ch == '\t') continue;
+        const int v = b64url_val(ch);
+        if (v < 0) return false;
+        buf = (buf << 6) | (unsigned int)v;
+        bits += 6;
+        if (bits >= 8) {
+            bits -= 8;
+            out.push_back((char)((buf >> bits) & 0xFF));
+        }
+    }
+    return true;
+}
+
+// base64url 编码（无填充）。**生产路径不用它** —— 只用给测试构造信封、
+// 以及将来若需要回传签名数据。客户端永远不签名（私钥不在客户端）。
+inline std::string b64url_encode(const std::string& in) {
+    static const char* kAlphabet =
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+    std::string out;
+    out.reserve((in.size() * 4 + 2) / 3);
+    unsigned int buf = 0;
+    int bits = 0;
+    for (unsigned char c : in) {
+        buf = (buf << 8) | c;
+        bits += 8;
+        while (bits >= 6) {
+            bits -= 6;
+            out.push_back(kAlphabet[(buf >> bits) & 0x3F]);
+        }
+    }
+    if (bits > 0) out.push_back(kAlphabet[(buf << (6 - bits)) & 0x3F]);
+    return out;
+}
+
+} // namespace detail_channel
+
+// 解析后台清单信封 + payload。这一步**不含验签**。
+inline ManifestParse parse_china_manifest(const std::string& json) {
+    ManifestParse r;
+    const rta::net::Json j = rta::net::json_parse(json);
+    if (j.type != rta::net::Json::Obj) { r.error = "清单不是 JSON 对象"; return r; }
+
+    const std::string alg = j["alg"].s();
+    const std::string payloadB64 = j["payload"].s();
+    if (payloadB64.empty()) { r.error = "清单缺少 payload"; return r; }
+    if (!alg.empty() && alg != "PS256") { r.error = "清单 alg 不是 PS256"; return r; }
+
+    std::string payload;
+    if (!detail_channel::b64url_decode(payloadB64, payload) || payload.empty()) {
+        r.error = "清单 payload 不是合法 base64url";
+        return r;
+    }
+    const rta::net::Json p = rta::net::json_parse(payload);
+    if (p.type != rta::net::Json::Obj) { r.error = "payload 不是 JSON 对象"; return r; }
+
+    ChannelManifest m;
+    m.kid = j["kid"].s();
+    m.signature = j["signature"].s();
+    m.version = p["version"].s();
+    m.notes = p["notes"].s();
+    m.installMode = p["install_mode"].s();
+
+    // version 必须是合法版本号，否则视为清单非法（绝不"读不到就当最新"）
+    if (m.version.empty()) { r.error = "清单缺少 version"; return r; }
+
+    // 增量对象列表（可选）
+    const rta::net::Json& files = p["files"];
+    if (files.type == rta::net::Json::Arr) {
+        for (size_t i = 0; i < files.size(); ++i) {
+            const rta::net::Json& f = files.at(i);
+            if (f.type != rta::net::Json::Obj) continue;
+            ChannelObject o;
+            o.sha256 = f["sha256"].s();
+            o.path = f["path"].s();
+            if (f.has("size") && f["size"].type == rta::net::Json::Num)
+                o.size = (long long)f["size"].n();
+            if (!o.sha256.empty()) m.objects.push_back(o);
+        }
+    }
+
+    // 全量包（可选）：package{kind,name,sha256,size}
+    const rta::net::Json& pk = p["package"];
+    if (pk.type == rta::net::Json::Obj) {
+        ChannelPackage cp;
+        cp.kind = pk["kind"].s();
+        cp.name = pk["name"].s();
+        cp.sha256 = pk["sha256"].s();
+        if (pk.has("size") && pk["size"].type == rta::net::Json::Num)
+            cp.size = (long long)pk["size"].n();
+        if (cp.valid()) {
+            m.package = cp;
+            // 有合法全量包时，判定用的 sha256/size 用它（与增量路径字段同义）
+            m.sha256 = cp.sha256;
+            m.size = cp.size;
+        }
+    }
+
+    r.valid = true;
+    r.manifest = m;
+    r.payloadJson = payload;
+    return r;
+}
 
 } // namespace rta::update

@@ -175,7 +175,8 @@ if(APPLE)
   # 免得 mac_feedback.mm 里再抄一份版本字符串（抄了迟早不同步）。
   target_compile_definitions(rlplayer_mac PRIVATE
     RLPLAYER_VERSION_STR="${RLPLAYER_VERSION_FOR_APP}")
-  target_link_libraries(rlplayer_mac PRIVATE rlapp_core "-framework AppKit" "-framework WebKit")
+  # 1.1.5.1：中国大陆更新通道用 Security.framework 做 PS256 验签
+  target_link_libraries(rlplayer_mac PRIVATE rlapp_core "-framework AppKit" "-framework WebKit" "-framework Security")
 endif()
 
 # ---------------- 测试 ----------------
@@ -266,7 +267,7 @@ if(APPLE)
   set_source_files_properties(tests/test_mac_update.mm tools/mac_update.mm
                               PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
   target_include_directories(test_mac_update PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tools)
-  target_link_libraries(test_mac_update PRIVATE ${RL_PLATFORM_LIBS} "-framework AppKit" "-framework Foundation")
+  target_link_libraries(test_mac_update PRIVATE ${RL_PLATFORM_LIBS} "-framework AppKit" "-framework Foundation" "-framework Security")
   add_test(NAME mac_update COMMAND test_mac_update)
 
   add_test(NAME embedded_api COMMAND test_embedded_api)

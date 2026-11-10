@@ -448,6 +448,117 @@ int main() {
     }
 
     // =====================================================================
+    // 9. 后台签名清单（JWS 信封）解析 —— 2026-11-10 新增
+    //    判据要点：只解包不验签；解析失败绝不放行；package 与 files[] 并存不互斥。
+    // =====================================================================
+    std::printf("\n=== 9. 后台签名清单（JWS）解析 ===\n");
+    {
+        // 9.1 base64url 解码：带 '-' '_' 与缺失填充都要能吃
+        {
+            std::string out;
+            ck(detail_channel::b64url_decode("eyJhIjoxfQ", out) && out == "{\"a\":1}",
+               "base64url 无填充解码", out);
+            std::string o2;
+            ck(detail_channel::b64url_decode("eyJhIjoxfQ==", o2) && o2 == "{\"a\":1}",
+               "base64url 带填充解码", o2);
+            std::string o3;
+            ck(!detail_channel::b64url_decode("!!!not-base64!!!", o3),
+               "base64url 含非法字符 ⟹ 解码失败");
+        }
+
+        // 9.2 信封不是 JSON / 缺 payload / alg 不对 ⟹ 一律非法
+        ck(!parse_china_manifest("not json").valid, "信封不是 JSON ⟹ 非法");
+        ck(!parse_china_manifest("{}").valid, "信封缺 payload ⟹ 非法");
+        ck(!parse_china_manifest("{\"alg\":\"RS256\",\"payload\":\"eyJ2ZXJzaW9uIjoiMS4wIn0\"}").valid,
+           "alg 不是 PS256 ⟹ 非法");
+        ck(!parse_china_manifest("{\"payload\":\"!!!\"}").valid, "payload 非 base64url ⟹ 非法");
+        // payload 解出来不是 JSON 对象
+        ck(!parse_china_manifest("{\"payload\":\"bnVt\"}").valid, "payload 不是 JSON 对象 ⟹ 非法");
+        // 缺 version
+        ck(!parse_china_manifest("{\"payload\":\"eyJmaWxlcyI6W119\"}").valid,
+           "payload 缺 version ⟹ 非法（绝不版本缺失就当最新）");
+
+        // 9.3 正常信封：增量对象 + 无 package
+        {
+            // payload = {"version":"1.1.6","install_mode":"incremental",
+            //            "files":[{"path":"a","sha256":"<64a>","size":10}]}
+            const std::string aSha(64, 'a');
+            const std::string payloadJson =
+                "{\"version\":\"1.1.6\",\"install_mode\":\"incremental\",\"files\":"
+                "[{\"path\":\"T.app/Contents/Info.plist\",\"sha256\":\"" + aSha + "\",\"size\":39}]}";
+            const std::string env =
+                "{\"alg\":\"PS256\",\"kid\":\"" + std::string("rlplayer-macos-98bf03f24bf3054d") +
+                "\",\"payload\":\"" + detail_channel::b64url_encode(payloadJson) +
+                "\",\"signature\":\"AAAA\"}";
+            const ManifestParse mp = parse_china_manifest(env);
+            ck(mp.valid, "正常信封 ⟹ 解析成功", mp.error);
+            ck(mp.manifest.version == "1.1.6", "version 正确读出", mp.manifest.version);
+            ck(mp.manifest.installMode == "incremental", "install_mode 正确读出");
+            ck(mp.manifest.objects.size() == 1, "files[] 读成 1 个对象");
+            ck(!mp.manifest.has_package(), "无 package 字段 ⟹ has_package()==false");
+            ck(!mp.manifest.ready(), "未验签 ⟹ ready()==false（解析成功不等于可安装）");
+            ck(mp.payloadJson == payloadJson, "payloadJson 原样保留（验签必须对它做 PSS）");
+        }
+
+        // 9.4 带 package（全量包）：sha256/size 来自 package，且下载地址由 sha+kind 构造
+        {
+            const std::string dmgSha(64, 'b');
+            const std::string payloadJson =
+                "{\"version\":\"1.1.6\",\"install_mode\":\"full\",\"files\":[],"
+                "\"package\":{\"kind\":\"dmg\",\"name\":\"RLPlayer-1.1.6.dmg\","
+                "\"sha256\":\"" + dmgSha + "\",\"size\":12345678}}";
+            const std::string env =
+                "{\"alg\":\"PS256\",\"payload\":\"" + detail_channel::b64url_encode(payloadJson) + "\"}";
+            const ManifestParse mp = parse_china_manifest(env);
+            ck(mp.valid && mp.manifest.has_package(), "合法 package ⟹ has_package()==true");
+            ck(mp.manifest.sha256 == dmgSha, "判定用 sha256 取自 package");
+            ck(mp.manifest.size == 12345678, "判定用 size 取自 package");
+            const std::string url = mp.manifest.package.download_url();
+            ck(url == "https://rlplayer.rainlain.com/api/v1/update/macos/packages/" + dmgSha + ".dmg",
+               "下载地址由 sha256+kind 构造", url);
+            ck(update_download_url_allowed(url), "构造出的全量包地址过白名单");
+            // 顺序闸门：仅验签通过即可安装（全量包不需要 objectsAssembled）
+            ChannelManifest m2 = mp.manifest;
+            ck(!m2.ready(), "全量包未验签 ⟹ ready()==false");
+            m2.signatureVerified = true;
+            ck(m2.ready(), "全量包 + 已验签 ⟹ ready()==true（不需要 objectsAssembled）");
+            m2.signatureVerified = false;
+            ck(!m2.ready(), "撤销验签 ⟹ 立刻不可安装（闸门是活的）");
+        }
+
+        // 9.5 package 非法值必须被忽略（不能靠畸形 package 绕过）
+        {
+            const std::string payloadJson =
+                "{\"version\":\"1.1.6\",\"package\":{\"kind\":\"exe\",\"sha256\":\""
+                + std::string(64, 'c') + "\",\"size\":1}}";
+            const std::string env =
+                "{\"payload\":\"" + detail_channel::b64url_encode(payloadJson) + "\"}";
+            const ManifestParse mp = parse_china_manifest(env);
+            ck(mp.valid && !mp.manifest.has_package(), "kind=exe ⟹ package 不被接受");
+            ck(mp.manifest.package.download_url().empty(), "非法 package 构造不出下载地址");
+        }
+        {
+            // sha256 不是 64 hex
+            const std::string payloadJson =
+                "{\"version\":\"1.1.6\",\"package\":{\"kind\":\"dmg\",\"sha256\":\"short\",\"size\":1}}";
+            const std::string env =
+                "{\"payload\":\"" + detail_channel::b64url_encode(payloadJson) + "\"}";
+            const ManifestParse mp = parse_china_manifest(env);
+            ck(mp.valid && !mp.manifest.has_package(), "package.sha256 非 64hex ⟹ 不被接受");
+        }
+        {
+            // size 缺失/为 0
+            const std::string payloadJson =
+                "{\"version\":\"1.1.6\",\"package\":{\"kind\":\"dmg\",\"sha256\":\""
+                + std::string(64, 'd') + "\"}}";
+            const std::string env =
+                "{\"payload\":\"" + detail_channel::b64url_encode(payloadJson) + "\"}";
+            const ManifestParse mp = parse_china_manifest(env);
+            ck(mp.valid && !mp.manifest.has_package(), "package 无 size ⟹ 不被接受（无法校验截断）");
+        }
+    }
+
+    // =====================================================================
     // 汇总
     // =====================================================================
     std::printf("\n=== 汇总：%d 通过 / %d 失败 ===\n", g_pass, g_fail);

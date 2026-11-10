@@ -819,7 +819,9 @@ inline bool lib_fingerprint_parse(const std::string& text, const std::string& in
     if (end == std::string::npos || text.substr(end) != "#end\t" + fnv_hex(text.substr(0, end)) + "\n") return false;
     std::istringstream in(text.substr(0, end)); std::string line;
     if (!std::getline(in, line) || line != "#libDirsV\t1\t" + fnv_hex(indexText) ||
-        !(indexText.rfind("#libIndexV\t4\n", 0) == 0 || indexText.rfind("#libIndexV\t5\n", 0) == 0)) return false;
+        !(indexText.rfind("#libIndexV\t4\n", 0) == 0 ||
+          indexText.rfind("#libIndexV\t5\n", 0) == 0 ||
+          indexText.rfind("#libIndexV\t6\n", 0) == 0)) return false;
     while (std::getline(in, line)) {
         std::string path;
         if (line.rfind("R\t", 0) == 0) {
@@ -1275,14 +1277,18 @@ inline void Library::load() {
     // 2026-10-23：索引格式版本校验。旧索引（无 #libIndexV 或版本不符）直接丢弃，
     // 本次扫描会全量重建 —— 否则升级后「扫描逻辑改了但旧索引被复用」，修复永远不生效。
     // 代价：升级后首次启动会全量扫一遍（653 首约 10 秒，并行 8 线程），之后照旧增量。
-    // 1.1.5.1：升 v5。v4 索引**不整份丢弃**（那会清空用户库结构），而是置 idxIsV4_
-    // 让 startScan 的复用分支「留结构、重探标签」；v3 及更早仍整份丢弃（CUE 分轨契约）。
+    // 1.1.5.1：升 v5 让 v4 重探标签；**1.1.5.1+ 再升 v6**：v5 里的乱码是旧判据
+    // （要求「完全没有 ASCII 字母」）产出的，像 "?????... DISC 1" 这种带尾部 ASCII 字母的
+    // 专辑名当时没被识别，值已经落盘。判据修好后必须让 v5 也重探一次，否则用户升级后
+    // 界面还是满屏问号。v4/v5 都**不整份丢弃**（那会清空用户库结构），只置 needsRetag_
+    // 走「留结构、重探标签」；v3 及更早仍整份丢弃（CUE 分轨契约）。
     {
+        const bool isV6 = (idx.find("#libIndexV\t6") != std::string::npos);
         const bool isV5 = (idx.find("#libIndexV\t5") != std::string::npos);
         const bool isV4 = (idx.find("#libIndexV\t4") != std::string::npos);
         const bool hasHeader = (idx.find("#libIndexV\t") != std::string::npos);
-        if (!idx.empty() && !isV5 && !isV4) idx.clear();
-        idxIsV4_ = (!idx.empty() && isV4 && !isV5);
+        if (!idx.empty() && !isV6 && !isV5 && !isV4) idx.clear();
+        idxIsV4_ = (!idx.empty() && !isV6);      // 保留旧名，语义 = 「索引口径需要重探」
         (void)hasHeader;
     }
     std::vector<LibTrack> loaded;
@@ -1453,7 +1459,7 @@ inline std::string Library::buildIndexLocked() const {
     // 索引格式版本：改动「扫描产出字段」时必须 +1，否则旧索引会因为 mtime+size 未变而被整份复用，
     // 新逻辑永远不生效（2026-10-23 真机踩到：加了内嵌封面判定，用户那首 cv 仍是 false）。
     // v2 = 2026-10-23 起 hasCover 同时覆盖「内嵌封面流」与「同目录封面文件」。
-    s += "#libIndexV\t5\n";   // v5 = 1.1.5.1 混合型乱码标签修复（见 load() 的 idxIsV4_ 重探）
+    s += "#libIndexV\t6\n";   // v6 = 1.1.5.1+ 乱码判据放宽（带尾部 ASCII 字母也算乱码）⟹ v5 需重探
     s += "#path\tmtime\tsize\talbum\talbumArtist\tartist\ttitle\ttrack\tdisc\tyear\tsr\tbits\tch\tdur\thasCover\tgenre"
          "\tcue\tcueN\tcueOff\tcueLen\n";
     char buf[256];

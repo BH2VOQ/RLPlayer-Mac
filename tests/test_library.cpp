@@ -503,7 +503,7 @@ int main() {
             };
             const std::string textA = readAll(idxA);
             // 1.1.5.1：索引升 v5（混合型乱码标签修复 + v4 旧记录强制重探）。
-            ck(textA.find("#libIndexV\t5") != std::string::npos, "落盘版本头 = #libIndexV 5");
+            ck(textA.find("#libIndexV\t6") != std::string::npos, "落盘版本头 = #libIndexV 6");
             std::string headA;
             std::vector<std::vector<std::string>> rowsA;
             {

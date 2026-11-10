@@ -42,6 +42,7 @@
 
 #import <Foundation/Foundation.h>
 #import <AppKit/AppKit.h>
+#import <Security/Security.h>   // 中国大陆通道 PS256 验签
 
 #include <cctype>
 #include <cerrno>
@@ -66,6 +67,7 @@
 
 #include "mac_update.h"        // 本模块的公开接口（本文件提供实现）
 #include "net/http_client.h"    // rta::net::http_get（平台层 libcurl，阻塞同步）
+#include "net/macos_update_pubkey.h"  // 内置验签公钥（硬编码，绝不动态取）
 #include "net/update_check.h"
 #include "platform/path.h"     // config_dir_utf8 / module_dir_utf8 / temp_dir_utf8 / join
 
@@ -199,6 +201,10 @@ didCompleteWithError:(NSError*)e {
 
 namespace rta::update {
 
+// 前向声明：中国大陆通道的真实实现（定义在 detail_native::Fetch 之后）。
+// check_china_channel() 在文件较早处调用它，而实现依赖 Fetch / 验签函数。
+inline CheckResult check_china_channel_impl();
+
 namespace detail_native {
 
 // 读 settings 配置中的 updbeta：默认 false
@@ -321,9 +327,9 @@ inline std::string ConfKeyNormalize(const std::string& s) {
 //   不引导百度网盘，error 里不含任何 URL / token / 凭据。
 // ---------------------------------------------------------------------------
 inline CheckResult check_china_channel() {
-    // 框架阶段：①②③④ 全未实现 ⟹ 不碰网络、不碰文件系统、不碰 SecKey / zlib。
-    // 等后台 dmg 就绪，把上面六步按序填进这里，并保持返回类型与失败语义不变。
-    return evaluate_china_channel_placeholder();
+    // 真实实现见下方「中国大陆通道：取清单 → 验签 → 判定」（需要 Fetch / 验签函数，
+    // 它们定义在文件更后面，所以这里只做前向声明式的调用）。
+    return check_china_channel_impl();
 }
 
 // ---------------- HTTP ----------------
@@ -347,6 +353,64 @@ inline HttpOutcome Fetch(const std::string& url, const std::string& token, int t
     out.error = RedactToken(r.error, token);              // ← ① 脱敏
     out.body.assign(r.body.begin(), r.body.end());
     return out;
+}
+
+// ---------------------------------------------------------------------------
+// 2026-11-10：中国大陆通道 —— 取签名清单 → PS256 验签 → 判定
+//
+// 顺序是安全边界，不许重排：
+//   ① GET kChinaManifestUrl 拿 JWS 信封
+//   ② **验签**（SecKeyCreateWithData + PKCS#1 DER + PSS-SHA256）
+//      ↳ 验签失败 ⟹ 一律 FailedParse，绝不看里面的版本号、绝不下载
+//   ③ 解析 payload（version / files[] / package）
+//   ④ 有 package（全量包）⟹ 用它的 sha256+size+下载地址构成 CheckResult
+//      否则（只有 files[] 增量）⟹ 本轮仍返回「暂不可用」诚实态（增量重组未实现）
+//   ⑤ 版本比较复用 evaluate_update_check 的同一套纯函数（不另立一套）
+//
+// error 文案**不含** URL / token / 凭据；失败绝不落到 UpToDate。
+// ---------------------------------------------------------------------------
+
+// 验签：用内置公钥校验 JWS 信封。成功返回 true。
+// ⚠️ 公钥硬编码（src/net/macos_update_pubkey.h），绝不从服务器动态取。
+inline bool verify_china_manifest(const std::string& payload,
+                                  const std::string& signatureB64,
+                                  const std::string& kid,
+                                  std::string& err) {
+    err.clear();
+    using namespace rta::update;
+    // kid 必须是我们认识的那一把，不做"换把钥匙试试"
+    if (kid != kMacosUpdateKid) { err = "清单 kid 与内置公钥不匹配"; return false; }
+
+    std::string sigRaw;
+    if (!rta::update::detail_channel::b64url_decode(signatureB64, sigRaw) || sigRaw.empty()) {
+        err = "清单签名不是合法 base64url";
+        return false;
+    }
+
+    NSData* der = [NSData dataWithBytes:kMacosUpdatePubKeyDer length:kMacosUpdatePubKeyDerLen];
+    NSDictionary* attrs = @{
+        (id)kSecAttrKeyType  : (id)kSecAttrKeyTypeRSA,
+        (id)kSecAttrKeyClass : (id)kSecAttrKeyClassPublic
+    };
+    CFErrorRef kerr = NULL;
+    SecKeyRef key = SecKeyCreateWithData((__bridge CFDataRef)der,
+                                         (__bridge CFDictionaryRef)attrs, &kerr);
+    if (!key) {
+        if (kerr) CFRelease(kerr);
+        err = "内置公钥无法加载";
+        return false;
+    }
+    NSData* msg = [NSData dataWithBytes:payload.data() length:payload.size()];
+    NSData* sig = [NSData dataWithBytes:sigRaw.data() length:sigRaw.size()];
+    CFErrorRef verr = NULL;
+    const bool ok = SecKeyVerifySignature(key,
+                                          kSecKeyAlgorithmRSASignatureMessagePSSSHA256,
+                                          (__bridge CFDataRef)msg,
+                                          (__bridge CFDataRef)sig, &verr) == true;
+    CFRelease(key);
+    if (verr) CFRelease(verr);
+    if (!ok) err = "清单验签失败（签名与内置公钥不符）";
+    return ok;
 }
 
 // ---------------- 流式下载（NSURLSession）----------------
@@ -580,6 +644,109 @@ inline bool IsLoopbackUrl(const std::string& url) {
 }
 
 } // namespace detail_native
+
+// ---------------------------------------------------------------------------
+// 中国大陆通道的真实实现（必须在 detail_native 之外：它要调 detail_native::Fetch）
+// ---------------------------------------------------------------------------
+inline CheckResult check_china_channel_impl() {
+    using namespace rta::update;
+
+    CheckResult result;
+    const auto man = detail_native::Fetch(kChinaManifestUrl, std::string(), 15000);
+
+    // ① 传输层
+    if (!man.ok && man.status == 0) {
+        result.decision = Decision::FailedNetwork;
+        result.status = 0;
+        result.error = kChinaChannelUnavailableMessage;
+        return result;
+    }
+    // ② HTTP 层（401/403 先于普通 http 错误判定）
+    if (man.status == 401 || man.status == 403) {
+        result.decision = Decision::FailedAuth;
+        result.status = man.status;
+        result.error = "鉴权失败（中国大陆更新通道）";
+        return result;
+    }
+    if (!man.ok || man.status < 200 || man.status >= 300) {
+        result.decision = Decision::FailedHttp;
+        result.status = man.status;
+        result.error = man.status == 404 ? kChinaChannelUnavailableMessage
+                                         : "更新服务器返回 HTTP " + std::to_string(man.status);
+        return result;
+    }
+
+    // ③ 解析信封 + payload
+    const ManifestParse mp = parse_china_manifest(man.body);
+    if (!mp.valid) {
+        result.decision = Decision::FailedParse;
+        result.status = man.status;
+        result.error = mp.error;
+        return result;
+    }
+
+    // ④ **验签必须在解析结果被采信、下载/安装之前**
+    {
+        std::string verr;
+        if (!detail_native::verify_china_manifest(mp.payloadJson, mp.manifest.signature,
+                                   mp.manifest.kid, verr)) {
+            result.decision = Decision::FailedParse;
+            result.status = man.status;
+            result.error = verr;                  // 不含 URL/凭据
+            return result;
+        }
+    }
+
+    // ⑤ 版本比较：复用与全球通道同一套（本地版本从 RLPLAYER_VERSION 来）
+    const bool allowBeta = detail_native::LoadUpdBeta();
+    if (!parse_version(mp.manifest.version).valid) {
+        result.decision = Decision::FailedParse;
+        result.status = man.status;
+        result.error = "清单 version 非法";
+        return result;
+    }
+
+    // 全量包路径（后台 2026-11-10 新增）：清单里有合法 package{} 就能整包安装
+    if (mp.manifest.has_package()) {
+        const ChannelPackage& pk = mp.manifest.package;
+        const std::string url = pk.download_url();
+        if (url.empty()) {
+            result.decision = Decision::FailedBadUrl;
+            result.status = man.status;
+            result.error = "全量包地址无法由 sha256 构造";
+            return result;
+        }
+        if (!update_download_url_allowed(url)) {   // 白名单最后一道闸门
+            result.decision = Decision::FailedBadUrl;
+            result.status = man.status;
+            result.error = "全量包地址不在白名单";
+            return result;
+        }
+        result.status = man.status;
+        result.remoteVersion = mp.manifest.version;
+        result.downloadUrl = url;
+        result.sha256 = pk.sha256;
+        result.size = pk.size;
+        result.notes = mp.manifest.notes;
+
+        if (!parse_version(RLPLAYER_VERSION).valid) {
+            result.decision = Decision::FailedParse;
+            result.error = "本地版本号无法解析";
+            return result;
+        }
+        result.decision = update_available(mp.manifest.version, RLPLAYER_VERSION, allowBeta)
+                              ? Decision::UpdateAvailable
+                              : Decision::UpToDate;
+        return result;
+    }
+
+    // 只有增量对象（files[]）：解包 / 整包重组本轮未实现 ⟹ 诚实失败，绝不冒充最新。
+    result.decision = Decision::FailedNetwork;
+    result.status = man.status;
+    result.error = kChinaChannelUnavailableMessage;
+    return result;
+}
+
 
 // ---------------------------------------------------------------------------
 // 公开接口：路径 / 模板 / 脱敏（供 mac_host.mm 与测试使用）

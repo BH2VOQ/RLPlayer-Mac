@@ -1280,6 +1280,32 @@ static void unitTests(const fs::path& dir) {
             ck(tq.title == kv.second, "1.1.5.1 负向：[" + kv.second + "] 原样保留",
                "得到 [" + tq.title + "]");
         }
+
+        // ---- 2026-11-11（用户实测补）：尾部带 ASCII 字母的混合型乱码 ----
+        // 现场：专辑名真实值「『魔法少女ノ魔女裁判』 コン…DISC 1」被写盘工具逐字换成 '?'，
+        //   但 "DISC 1" 是原文 ASCII 字母 ⟹ 老判据（要求"完全没有 ASCII 字母"）判它「合法」，
+        //   于是专辑名一直停在 "??????????? ??????????????????? DISC 1"，
+        //   而同样受损的歌曲名（无字母）已修好。
+        // 新判据：maxRun>=3（问号成段）且 q>=letters（问号数不少于字母数）。
+        //   负向三条（Who? / ????? (Chinese Tea) / Kokoro ~???~）必须仍判「合法」，
+        //   见上面那组循环 —— 这条与它们同文件，互为反证。
+        {
+            const std::string kScrDisc = "??????????? ??????????????????? DISC 1";
+            const std::string kRealAlbum = "『魔法少女ノ魔女裁判』 コンプリートオリジナルサウンドトラック DISC 1";
+            WavSpec v2;
+            v2.frames = 441;
+            v2.info = { {"INAM", "x"}, {"IPRD", kScrDisc} };
+            v2.id3chunk = true;
+            v2.id3Title = "x";
+            v2.id3Album = kRealAlbum;
+            const fs::path p2 = dir / "qm_scrambled_album_disc.wav";
+            writeFile(p2, buildWav(v2));
+            TagInfo t2; std::string why2;
+            ck(probeNative(p2, t2, why2), "1.1.5.1+ 带 DISC 的乱码专辑名 WAV 解析成功", why2);
+            ck(t2.album == kRealAlbum,
+               "1.1.5.1+ 尾部含 ASCII 字母的乱码专辑名也让位给真名",
+               "得到 [" + t2.album + "]");
+        }
     }
 }
 

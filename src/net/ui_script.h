@@ -448,7 +448,10 @@ function onUpdateStatus(obj) {
     updMsg(obj.message || ('未知状态：' + stage));
   }
 }
-// 底栏/顶栏的「有新版」徽标。空串 = 隐藏。
+// 底栏的「有新版」徽标。空串 = 隐藏。
+// 2026-11-11（1.1.5.1）：曾加过右下角浮动提示卡，用户实测后判定「很不合理」已移除 ——
+//   更新提示只保留底栏这一枚徽标（点击进「设置 → 诊断」的更新卡片）。
+//   教训：不要把"提醒"做成常驻浮层；底栏徽标已经足够，且不遮挡内容。
 function setUpdateBadge(text) {
   var b = D('updateBadge');
   if (!b) return;
@@ -456,6 +459,35 @@ function setUpdateBadge(text) {
   b.style.display = '';
   b.textContent = text;
   b.title = '发现新版本 ' + text + '，点这里去更新';
+}
+// 跳转到「设置 → 诊断」里的更新卡片。
+// 为什么不在徽标上直接装：安装会替换 .app，用户必须先在卡片上看见版本号与说明。
+function goUpdatePage() {
+  try { openSettingsTab('diag'); } catch (e) { }
+}
+
+// 2026-11-11（1.1.5.1 真机 bug）：底栏「发现新版本」徽标**偶发点了没反应**。
+//   根因：徽标的 onclick 原先只在 bindUpdateCard() 里赋值，而 bindUpdateCard() 只在
+//   renderSettingsPage() 里调用。用户没打开过设置页时，renderSettingsPage 从未执行
+//   ⟹ 徽标上**根本没有 onclick**；一旦打开过设置页就绑上了，之后"无论在哪都能跳"。
+//   这解释了"偶发失灵"：它不是概率问题，而是"本次运行有没有进过设置页"。
+//   修法：把徽标绑定抽成幂等函数，**启动时也调一次**（见 initFavs 之后的启动段），
+//   不再依赖设置页是否渲染过。重复赋值同一个 onClick 无副作用。
+function bindUpdateBadge() {
+  var b = D('updateBadge');
+  if (!b) return;
+  b.onclick = function () { goUpdatePage(); };
+  // 键盘可达（与其它可点元素一致）
+  b.onkeydown = function (ev) {
+    if (ev && (ev.key === 'Enter' || ev.key === ' ')) { ev.preventDefault(); goUpdatePage(); }
+  };
+  // 防御式：DOM 沙箱（纯逻辑测试）里 mock 元素没有 hasAttribute/setAttribute，
+  // 这里调用会抛异常并让整个生产 JS 加载失败（实测把 llm_ui / cast_contract 打红）。
+  // 无障碍属性只是锦上添花，取不到就跳过，绝不影响跳转这个主功能。
+  try {
+    if (typeof b.hasAttribute === 'function' && !b.hasAttribute('tabindex')) b.setAttribute('tabindex', '0');
+    if (typeof b.hasAttribute === 'function' && !b.hasAttribute('role')) b.setAttribute('role', 'button');
+  } catch (e) { }
 }
 function updCheck(manual) {
   if (!IS_MAC_HOST) {
@@ -517,7 +549,7 @@ function bindUpdateCard() {
       wcmd('update:channel:' + v);
       try { localStorage.setItem('rta-updchannel', v); } catch (e) { }
       updMsg(v === 'cn'
-        ? '已切换为中国大陆通道（后台准备中，检查更新会明确提示暂不可用）'
+        ? '已切换为中国大陆通道，点「检查更新」生效'
         : '已切换为全球通道，点「检查更新」生效');
       // 切通道后旧的检查结果/安装计划作废（换了清单来源，旧结论不再代表当前通道）。
       // 徽标也要一起撤掉：那是**上一个通道**查到的版本，留着会指向另一条清单里的版本。
@@ -541,11 +573,8 @@ function bindUpdateCard() {
       saveSettings(true);
     };
   }
-  var b = D('updateBadge');
-  if (b) b.onclick = function () {
-    // 点徽标 = 直接去「诊断」页看更新卡片（不静默装，装之前要让用户看见版本号与说明）
-    try { openSettingsTab('diag'); } catch (e) { }
-  };
+  // 底栏徽标的跳转绑定（幂等；启动时也绑一次，见 bindUpdateBadge 注释）
+  bindUpdateBadge();
 }
 
 // ============================================================================
@@ -10099,10 +10128,10 @@ function renderSettingsPage() {
          //   回显顺序：loadSettings 若有 kv.channel 以它为准；否则由 bindUpdateCard 从
          //   localStorage('rta-updchannel') 兜底（/api/settings 的键白名单未必收 channel）。
          '<div class=sfld><label>更新通道'
-       + tip('全球 = 现有 GitHub 更新通道；中国大陆 = 后台通道（当前后台准备中，切换后检查更新会明确提示暂不可用）。本选项只切换通道，不含任何下载地址。')
+       + tip('全球 = 现有 GitHub 更新通道；中国大陆 = 国内后台通道（国内网络更快）。本选项只切换清单来源，不含任何下载地址。')
        + '</label><select id=sp_updchannel>'
-       + '<option value=global' + (ADV.channel === 'cn' ? '' : ' selected') + '>全球（GitHub）</option>'
-       + '<option value=cn' + (ADV.channel === 'cn' ? ' selected' : '') + '>中国大陆（后台）</option>'
+       + '<option value=global' + (ADV.channel === 'cn' ? '' : ' selected') + '>全球</option>'
+       + '<option value=cn' + (ADV.channel === 'cn' ? ' selected' : '') + '>中国大陆</option>'
        + '</select></div>'
        + '<div class="sfld wide" style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">'
        + '<span style="font-size:11.5px;color:var(--mut)">当前版本</span>'
@@ -14233,6 +14262,10 @@ selftestAdd('B1 艺术家「完整 AI 整理资料」浮层与右栏同源显示
 });
 
 /* ---------------- 启动 ---------------- */
+// 2026-11-11（1.1.5.1）：底栏更新徽标的跳转绑定必须在启动时就做好。
+//   它原先只随 renderSettingsPage() 绑定 ⟹ 没进过设置页时徽标没有 onclick，
+//   用户点「发现新版本」完全没反应（真机 bug）。这里补一次，之后设置页重建时再绑也幂等。
+bindUpdateBadge();
 initFavs();
 renderSavedQueues();
 try {

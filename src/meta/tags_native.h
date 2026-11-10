@@ -245,13 +245,31 @@ inline bool tag_is_placeholder(const std::string& s) {
 //   规则根本不触发，值原样保留（"宁可留 '?'，不给错名"不被打破）。
 inline bool tag_looks_scrambled(const std::string& s) {
     if (tag_is_placeholder(s)) return false;   // 纯占位：既有 B-2 判据负责，不在此重复
-    bool sawQ = false, sawOther = false;
+    size_t q = 0, letters = 0, run = 0, maxRun = 0;
+    bool sawNonAscii = false;
     for (unsigned char c : s) {
-        if (c == '?') { sawQ = true; continue; }
-        if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || c >= 0x80) return false;
-        sawOther = true;   // 数字 / 空白 / ASCII 标点（如 '-'），证明是混合型
+        if (c == '?') {
+            ++q; ++run;
+            if (run > maxRun) maxRun = run;
+            continue;
+        }
+        run = 0;
+        if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z')) { ++letters; continue; }
+        if (c >= 0x80) { sawNonAscii = true; }
     }
-    return sawQ && sawOther;
+    if (sawNonAscii) return false;             // 有真 CJK ⟹ 真名还在，不动
+    if (q == 0) return false;
+    // 2026-11-11（用户实测补）：原判据要求「完全没有 ASCII 字母」，于是
+    //   "??????????? ??????????????????? DISC 1"（真名「『魔法少女ノ魔女裁判』
+    //   コン...」被逐字替换、尾部 "DISC 1" 是原文 ASCII）逃过判定，专辑名留在乱码上。
+    //   改成「问号成段」+「问号数不少于字母数」两条同时成立 —— 能证伪：
+    //     · "Who?"                    q=1 letters=3  run=1 → 否（合法）
+    //     · "????? (Chinese Tea)"     q=5 letters=11 run=5 → 否（字母更多，合法）
+    //     · "Kokoro no Ame ~???~"     q=3 letters=13 run=3 → 否（合法）
+    //     · "???????... DISC 1"       q=19 letters=4 run=11 → 是（乱码）
+    //   「成段」(run>=3) 是关键：合法名字里的问号通常是 1~2 个（"?!" / "???"），
+    //   且不会与字母数量倒挂。
+    return maxRun >= 3 && q >= letters;
 }
 
 // UTF-16（LE/BE）→ UTF-8。失败（非法代理对外的超长/截断）返回 false ⟹ 调用方回退。
