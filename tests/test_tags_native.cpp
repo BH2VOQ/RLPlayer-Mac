@@ -1223,6 +1223,63 @@ static void unitTests(const fs::path& dir) {
         const AbResult ru = abOne(U8(up));
         ckFf(ru.diffs.empty(), "B-2 对照：正常 INAM 与 ffprobe 逐字段一致",
              ru.diffs.empty() ? "" : ru.diffs[0]);
+
+        // ---- 1.1.5.1 混合型乱码（kScr）：真名从 id3 块上位 ----
+        // 离线 A/B 复现：写盘工具把非 ASCII 逐字符换成 ?，ASCII 的 - 保留
+        // ⟹ INAM = "?????" "-?-"（原名「交々のいと-絡-」）。tag_is_placeholder 一见 - 就判
+        // 「非占位」，跨块先到先得稳定吃到乱码；尾部 id3 块的 TIT2 是 UTF-16 真名。
+        // 播放侧 -of json 经 std::map 后者覆盖恰好吃到真名，扫描侧 -of default 先到先得
+        // 吃到乱码 ⟹ 这就是「专辑页满屏问号、播放时正常」的根因。
+        // 字面量拆成两段拼接：避免 "??-" 被当成 C++ trigraph。
+        const std::string kScr = "?????" "-?-";
+        {
+            WavSpec v;
+            v.frames = 441;
+            v.info = { {"INAM", kScr}, {"IART", "?????"} };
+            v.id3chunk = true;
+            v.id3Title = "交々のいと-絡-";
+            v.id3Artist = "Acacia";
+            const fs::path vp = dir / "qm_scrambled_id3.wav";
+            writeFile(vp, buildWav(v));
+            TagInfo tv; std::string whyv;
+            ck(probeNative(vp, tv, whyv), "1.1.5.1 混合型乱码 WAV 原生解析成功", whyv);
+            ck(tv.title == "交々のいと-絡-", "1.1.5.1 原生：乱码不占位、真名上位", "得到 [" + tv.title + "]");
+            ck(tv.artist == "Acacia", "1.1.5.1 同一规则作用于 artist", "得到 [" + tv.artist + "]");
+            const AbResult rv = abOne(U8(vp));
+            ck(rv.ff.title == "交々のいと-絡-", "1.1.5.1 ffprobe 通道也得到真名（两条通路一致）",
+               "ffprobe=[" + rv.ff.title + "]");
+            ck(rv.nt.title == "交々のいと-絡-", "1.1.5.1 原生通道得到真名",
+               "native=[" + rv.nt.title + "]");
+        }
+        // ---- 负向①：单值乱码（无第二来源）必须原样保留，不许清空 ----
+        {
+            WavSpec w;
+            w.frames = 441;
+            w.info = { {"INAM", kScr} };
+            const fs::path wp = dir / "qm_scrambled_single.wav";
+            writeFile(wp, buildWav(w));
+            TagInfo tw; std::string whyw;
+            ck(probeNative(wp, tw, whyw), "1.1.5.1 单值乱码 WAV 解析成功", whyw);
+            ck(tw.title == kScr, "1.1.5.1 单值乱码原样保留（无真名可让位，规则不触发）",
+               "得到 [" + tw.title + "]");
+            const AbResult rw = abOne(U8(wp));
+            ck(rw.ff.title == kScr, "1.1.5.1 单值乱码：ffprobe 通道也原样保留",
+               "ffprobe=[" + rw.ff.title + "]");
+        }
+        // ---- 负向②：本来就带 ? 的合法单值名字，一个字都不许改 ----
+        for (const auto& kv : std::vector<std::pair<std::string, std::string>>{
+                 { "qm_legal_who", "Who?" },
+                 { "qm_legal_mix", "????? (Chinese Tea)" },
+                 { "qm_legal_tilde", "Kokoro no Ame ~???~" } }) {
+            WavSpec qq; qq.frames = 441;
+            qq.info = { {"INAM", kv.second} };
+            const fs::path qp = dir / (kv.first + ".wav");
+            writeFile(qp, buildWav(qq));
+            TagInfo tq; std::string whyq;
+            ck(probeNative(qp, tq, whyq), "1.1.5.1 合法问号名单值解析成功（" + kv.first + "）", whyq);
+            ck(tq.title == kv.second, "1.1.5.1 负向：[" + kv.second + "] 原样保留",
+               "得到 [" + tq.title + "]");
+        }
     }
 }
 

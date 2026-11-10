@@ -228,6 +228,32 @@ inline bool tag_is_placeholder(const std::string& s) {
     return sawQ;                            // 全是问号/数字/空白，且至少一个问号
 }
 
+// tag_looks_scrambled —— 1.1.5.1：**混合型乱码**（写盘工具把非 ASCII 逐字符换成 '?'，
+//   但保留了 ASCII 标点/数字，例如 "?????-?-" 来自「交々のいと-絡-」）。
+//   它填补 tag_is_placeholder 的缺口：后者一见到 '-' 就判「非占位」，于是跨块先到先得
+//   稳定选中乱码，尾部 id3 块的 TIT2 真名永远上不了位（专辑页满屏问号、播放时却正常）。
+//
+//   判据（铁律 3，必须能被单独否定）—— 全部满足才算：
+//     ① 不是纯占位（tag_is_placeholder=false）：纯占位交给既有 B-2 口径，不重复处理；
+//     ② 至少一个 '?'；③ 至少一个其它 ASCII 标点/数字/空白（证明「混合」）；
+//     ④ 完全没有 ASCII 字母 [A-Za-z]，也完全没有 >=0x80 的字节。
+//   为什么④是关键：合法带问号名（"Who?" / "Kokoro no Ame ~???~" / "????? (Chinese Tea)"）
+//   有字母 ⇒ 不命中；真名还在（"交々のいと-絡-?"）有非 ASCII ⇒ 不命中。
+//
+//   ⚠️ 只在「同字段有 >=2 个来源」时才被用来让位：TagMerger::absorb 是跨块合并、
+//   lib_probe_one 的 put() 是 ffprobe 多值解析，二者都只在槽待让位时生效。单值文件里
+//   规则根本不触发，值原样保留（"宁可留 '?'，不给错名"不被打破）。
+inline bool tag_looks_scrambled(const std::string& s) {
+    if (tag_is_placeholder(s)) return false;   // 纯占位：既有 B-2 判据负责，不在此重复
+    bool sawQ = false, sawOther = false;
+    for (unsigned char c : s) {
+        if (c == '?') { sawQ = true; continue; }
+        if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || c >= 0x80) return false;
+        sawOther = true;   // 数字 / 空白 / ASCII 标点（如 '-'），证明是混合型
+    }
+    return sawQ && sawOther;
+}
+
 // UTF-16（LE/BE）→ UTF-8。失败（非法代理对外的超长/截断）返回 false ⟹ 调用方回退。
 inline bool utf16_to_utf8(const unsigned char* p, size_t n, bool big, std::string* out) {
     out->clear();
@@ -628,9 +654,13 @@ struct TagValues {
 struct TagMerger {
     TagValues acc;                 // 已入库的（每个键的第一个非空值）
     bool genreNumeric = false;     // 已入库的 genre 来自 ID3 的数字流派引用 ⟹ 需要回退
+    // 1.1.5.1：记录某字段当前值是不是「弱值」（混合型乱码）。弱值允许被后续块的真值替换，
+    //   但**始终没有更好来源时要原样保留** —— 不能像纯占位那样直接清空（否则单值乱码文件
+    //   会连仅有的值都丢掉，比显示问号更糟）。
+    std::map<std::string, bool> weak;
     void absorb(const TagValues& v, bool vGenreNumeric = false) {
-        // 占位值按「空」处理。用一个拷贝而不是逐字段判空，是为了让下面 8 行判断**保持原样**
-        // （「先到先得」的语义一个字都没改，改的只是"什么算空"）。
+        // 纯占位值按「空」处理（既有 B-2 口径，逐字节不变）。混合型乱码**不**在这里清，
+        // 交给下面的 take() 做「弱占槽 + 可被真值替换」。
         TagValues vv = v;
         auto killPlaceholder = [](std::string& dst) {
             if (!dst.empty() && tag_is_placeholder(dst)) dst.clear();
@@ -644,15 +674,22 @@ struct TagMerger {
         killPlaceholder(vv.track);
         killPlaceholder(vv.disc);
 
-        bool tookGenre = false;
-        if (!acc.hasTitle && !vv.title.empty())             { acc.title = vv.title; acc.hasTitle = true; }
-        if (!acc.hasArtist && !vv.artist.empty())           { acc.artist = vv.artist; acc.hasArtist = true; }
-        if (!acc.hasAlbum && !vv.album.empty())             { acc.album = vv.album; acc.hasAlbum = true; }
-        if (!acc.hasAlbumArtist && !vv.albumArtist.empty()) { acc.albumArtist = vv.albumArtist; acc.hasAlbumArtist = true; }
-        if (!acc.hasGenre && !vv.genre.empty())             { acc.genre = vv.genre; acc.hasGenre = true; tookGenre = true; }
-        if (!acc.hasDate && !vv.date.empty())               { acc.date = vv.date; acc.hasDate = true; }
-        if (!acc.hasTrack && !vv.track.empty())             { acc.track = vv.track; acc.hasTrack = true; }
-        if (!acc.hasDisc && !vv.disc.empty())               { acc.disc = vv.disc; acc.hasDisc = true; }
+        // 返回「本次 src 是否成为该字段最终值」，供 genreNumeric 跟随最终来源。
+        auto take = [&](const char* name, std::string& dst, bool& has, const std::string& src) -> bool {
+            if (src.empty()) return false;
+            const bool srcWeak = tag_looks_scrambled(src);
+            if (!has) { dst = src; has = true; weak[name] = srcWeak; return true; }
+            if (weak[name] && !srcWeak) { dst = src; weak[name] = false; return true; }  // 真值上位
+            return false;                                                                 // 先到先得
+        };
+        take("title", acc.title, acc.hasTitle, vv.title);
+        take("artist", acc.artist, acc.hasArtist, vv.artist);
+        take("album", acc.album, acc.hasAlbum, vv.album);
+        take("albumArtist", acc.albumArtist, acc.hasAlbumArtist, vv.albumArtist);
+        const bool tookGenre = take("genre", acc.genre, acc.hasGenre, vv.genre);
+        take("date", acc.date, acc.hasDate, vv.date);
+        take("track", acc.track, acc.hasTrack, vv.track);
+        take("disc", acc.disc, acc.hasDisc, vv.disc);
         if (tookGenre) genreNumeric = vGenreNumeric;
     }
 };

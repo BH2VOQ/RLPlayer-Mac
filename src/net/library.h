@@ -501,6 +501,10 @@ private:
     std::mutex indexWriteMtx_;
     uint64_t rootsRevision_ = 0; // protected by mtx_
     bool fingerprintInvalidated_ = false; // protected by mtx_; invalidation IO succeeded
+    // 1.1.5.1：索引从 v4 升 v5（混合型乱码标签修复）。v4 旧记录保留 path/mtime/size，
+    // 但标签必须重探，否则已落盘的 '?' 会被增量扫描原样复用（用户机器「满屏问号」）。
+    // 不整份丢弃索引：那会让外挂卷未挂载时用户曲库凭空变空（上游真机事故）。
+    bool idxIsV4_ = false;
     std::thread th_;
     std::atomic<bool> scanning_{false};
     std::atomic<bool> cancel_{false};
@@ -815,7 +819,7 @@ inline bool lib_fingerprint_parse(const std::string& text, const std::string& in
     if (end == std::string::npos || text.substr(end) != "#end\t" + fnv_hex(text.substr(0, end)) + "\n") return false;
     std::istringstream in(text.substr(0, end)); std::string line;
     if (!std::getline(in, line) || line != "#libDirsV\t1\t" + fnv_hex(indexText) ||
-        indexText.rfind("#libIndexV\t4\n", 0) != 0) return false;
+        !(indexText.rfind("#libIndexV\t4\n", 0) == 0 || indexText.rfind("#libIndexV\t5\n", 0) == 0)) return false;
     while (std::getline(in, line)) {
         std::string path;
         if (line.rfind("R\t", 0) == 0) {
@@ -1053,8 +1057,13 @@ inline LibTrack lib_probe_one(const std::string& file, const std::string& ffprob
                 for (auto& c : k) c = (char)std::tolower((unsigned char)c);
                 if (k.compare(0, 4, "tag:") == 0) k = k.substr(4);
                 // format 段 = 真标签，覆盖；stream 段 = 只填空（OGG/Opus 的 Vorbis Comment 在这里）
+                // 1.1.5.1：混合型乱码（如 "?????-?-"）允许被后面的真值替掉。
+                // ffprobe -of default 会把同一字段的多来源逐行打出来（LIST/INFO 与 id3 块
+                // 各一行），旧 put() 先到先得 ⟹ 稳定吃到乱码；播放侧 -of json 经
+                // std::map 后者覆盖恰好吃到真名，二者因此不一致。这里只在「已有值是
+                // 混合型乱码」时让位，纯占位与合法带问号名一律保持旧行为。
                 auto put = [&](std::string& dst) {
-                    if (!dst.empty()) return;
+                    if (!dst.empty() && !rta::meta::native::detail::tag_looks_scrambled(dst)) return;
                     dst = v; while (!dst.empty() && (dst.back() == '\r' || dst.back() == ' ')) dst.pop_back(); };
                 // 2026-10-23：内嵌封面判定 —— 出现任意 codec_type=video 的流即视为有封面
                 if (k == "codec_type") {
@@ -1266,9 +1275,15 @@ inline void Library::load() {
     // 2026-10-23：索引格式版本校验。旧索引（无 #libIndexV 或版本不符）直接丢弃，
     // 本次扫描会全量重建 —— 否则升级后「扫描逻辑改了但旧索引被复用」，修复永远不生效。
     // 代价：升级后首次启动会全量扫一遍（653 首约 10 秒，并行 8 线程），之后照旧增量。
+    // 1.1.5.1：升 v5。v4 索引**不整份丢弃**（那会清空用户库结构），而是置 idxIsV4_
+    // 让 startScan 的复用分支「留结构、重探标签」；v3 及更早仍整份丢弃（CUE 分轨契约）。
     {
-        const bool fresh = (idx.find("#libIndexV\t4") != std::string::npos);
-        if (!fresh && !idx.empty()) idx.clear();
+        const bool isV5 = (idx.find("#libIndexV\t5") != std::string::npos);
+        const bool isV4 = (idx.find("#libIndexV\t4") != std::string::npos);
+        const bool hasHeader = (idx.find("#libIndexV\t") != std::string::npos);
+        if (!idx.empty() && !isV5 && !isV4) idx.clear();
+        idxIsV4_ = (!idx.empty() && isV4 && !isV5);
+        (void)hasHeader;
     }
     std::vector<LibTrack> loaded;
     if (!idx.empty()) {
@@ -1438,7 +1453,7 @@ inline std::string Library::buildIndexLocked() const {
     // 索引格式版本：改动「扫描产出字段」时必须 +1，否则旧索引会因为 mtime+size 未变而被整份复用，
     // 新逻辑永远不生效（2026-10-23 真机踩到：加了内嵌封面判定，用户那首 cv 仍是 false）。
     // v2 = 2026-10-23 起 hasCover 同时覆盖「内嵌封面流」与「同目录封面文件」。
-    s += "#libIndexV\t4\n";   // v4 = 2026-10-25 起 CUE 虚拟分轨：前 16 列不变 + 末尾 4 列
+    s += "#libIndexV\t5\n";   // v5 = 1.1.5.1 混合型乱码标签修复（见 load() 的 idxIsV4_ 重探）
     s += "#path\tmtime\tsize\talbum\talbumArtist\tartist\ttitle\ttrack\tdisc\tyear\tsr\tbits\tch\tdur\thasCover\tgenre"
          "\tcue\tcueN\tcueOff\tcueLen\n";
     char buf[256];
@@ -2001,9 +2016,11 @@ inline bool Library::startScanWorker(bool forceFull, bool startup, StartupScanCa
     { std::lock_guard<std::mutex> lk(msgMtx_); scanMsg_ = "正在遍历目录…"; }
 
     const size_t thCount = this->scanThreads();
+    // 1.1.5.1：v4 索引的标签必须重探（保留 path/mtime/size，不整份丢弃）。
+    const bool retagV4 = idxIsV4_;
 
     try {
-    th_ = std::thread([this, forceFull, thCount, startup, callback = std::move(callback)]() {
+    th_ = std::thread([this, forceFull, retagV4, thCount, startup, callback = std::move(callback)]() {
         const auto notify = [&](const std::string& reason, bool scan) {
             if (callback) { try { callback(reason, scan); } catch (...) {} }
         };
@@ -2037,6 +2054,9 @@ inline bool Library::startScanWorker(bool forceFull, bool startup, StartupScanCa
                 if (rootsRevision_ != revision || roots_ != roots) reason = "roots-changed";
             }
             if (cancel_.load()) { notify("cancelled", false); scanning_.store(false); return; }
+            // 1.1.5.1：v4 旧索引即使目录指纹未变，也必须走一次扫描把标签重探成 v5 口径，
+            // 否则「代码改了、界面仍旧满屏问号」。idxIsV4_ 只在 load() 读到 v4 头时为真。
+            if (reason == "unchanged" && idxIsV4_) reason = "retag-v4";
             if (reason == "unchanged") {
                 scanComplete_.store(true);
                 directoryUnchanged_.store(true);
@@ -2184,6 +2204,8 @@ inline bool Library::startScanWorker(bool forceFull, bool startup, StartupScanCa
                 text = indexTextLocked();
             }
             indexWritesOk = writeIndex(text) && indexWritesOk;
+        // 1.1.5.1：v5 索引已落盘 ⟹ 清掉 v4 重探标记，下次启动恢复正常的增量复用。
+        if (indexWritesOk) idxIsV4_ = false;
             std::string dirtyWhy = !indexWritesOk ? "index-write-failed"
                                  : !baseline.complete ? "dirs-incomplete"
                                  : !failedDirs.empty() ? "failed-dirs"
@@ -2284,7 +2306,7 @@ inline bool Library::startScanWorker(bool forceFull, bool startup, StartupScanCa
 
         for (int i = 0; i < n; ++i) {
             if (cancel_.load()) break;
-            const bool submitted = pool->submit([this, i, n, &walked, &oldByPath, &old, &oldRetries, forceFull, &ffprobe,
+            const bool submitted = pool->submit([this, i, n, &walked, &oldByPath, &old, &oldRetries, forceFull, retagV4, &ffprobe,
                                                  &fresh, &completed, &probedCount, &cachedCount, &probeUnreadable, &retryMtx, &nextRetries, &lastMsg,
                                                  &cueCand, &cueProbeMtx, &cueProbeMap]() {
                 if (cancel_.load()) return;
@@ -2301,7 +2323,8 @@ inline bool Library::startScanWorker(bool forceFull, bool startup, StartupScanCa
                 const std::string pkey = lib_path_key(p);
                 const bool cueOwned = (cueCand.count(pkey) != 0);
                 auto oit = oldByPath.find(p);
-                if (!forceFull && !cueOwned && !oldRetries.count(p) && oit != oldByPath.end()) {
+                // 1.1.5.1：retagV4 时不走「mtime+size 复用」分支，强制 lib_probe_one 重探标签。
+                if (!forceFull && !retagV4 && !cueOwned && !oldRetries.count(p) && oit != oldByPath.end()) {
                     const LibTrack& o = old[oit->second];
                     if (!o.isCueTrack() && o.sampleRate > 0 && o.channels > 0 && o.mtime == mt && o.size == sz) {
                         fresh[(size_t)i] = o;
