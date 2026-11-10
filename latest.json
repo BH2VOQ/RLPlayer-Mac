@@ -1,8 +1,8 @@
 {
-  "version": "1.1.5-beta4",
-  "notes": "True bit-perfect on macOS (revision 2): exclusive output locks the hardware physical format using the device own available ASBD flags, preferring the NonMixable (0x40) integer variant, and verifies nsrt/sfmt/pft three-layer rate equality on every status poll so a mid-playback rate change degrades the badge immediately. Endpoints whose physical layer offers only float32 keep playing but report not bit-perfect with the reason. Hog exclusive defaults on and its hint states that Hog does not block other apps. · macOS 真 bit-perfect（修订二）：独占路径用设备 available 档的原样 ASBD 标志锁定物理格式，同率同位深时优先选带 NonMixable(0x40) 的整数档；并在每次状态轮询核对 nsrt/sfmt/pft 三层同率，播放中设备率被改回去时徽标当场降级。物理层只有 float32 的端点照常播放但如实报「非 bit-perfect」并给出理由。Hog 独占默认开启，提示文案已更正为「Hog 不能阻止其它 App 播放」。",
-  "download_url": "https://github.com/BH2VOQ/RLPlayer-Mac/releases/download/v1.1.5-beta4/RLPlayer-1.1.5-beta4-macOS-arm64.dmg",
-  "sha256": "a1d5b42f1951c611f7e566546f754560862087e832b0c7d8f2c96cbe7a39b3bf",
-  "size": 8113915,
-  "published_at": "2026-11-10T03:45:00Z"
+  "version": "1.1.5",
+  "notes": "True bit-perfect on macOS: exclusive output locks the hardware physical format using the device own available ASBD flags, prefers the NonMixable (0x40) integer variant, and verifies nsrt/sfmt/pft three-layer rate equality on every status poll. Endpoints with a float32-only physical layer keep playing but report not bit-perfect with the reason. Shared mode no longer claims bit-perfect; 48000→44100 is labelled as downsampling; Hog exclusive defaults on. AI retrieval gained album-aware queries, strict attribution and v6 cache migration. · macOS 真 bit-perfect：独占路径用设备 available 档的原样 ASBD 标志锁定硬件物理格式，优先选带 NonMixable(0x40) 的整数档，并在每次状态轮询核对 nsrt/sfmt/pft 三层同率。物理层仅有 float32 的端点照常播放但如实报「非 bit-perfect」。共享模式不再谎报 bit-perfect；48000→44100 如实标降采样；Hog 独占默认开启。AI 检索新增专辑感知查询、严格归因与 v6 缓存迁移。",
+  "download_url": "https://github.com/BH2VOQ/RLPlayer-Mac/releases/download/v1.1.5/RLPlayer-1.1.5-macOS-arm64.dmg",
+  "sha256": "f97b83eb242aef0c0c7b0ffe2d6ad0f4692371ca640286e7f56dcf84299a985e",
+  "size": 8113336,
+  "published_at": "2026-11-10T05:30:00Z"
 }
