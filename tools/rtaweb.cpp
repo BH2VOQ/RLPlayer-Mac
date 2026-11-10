@@ -1644,22 +1644,20 @@ public:
     }
     // 2026-11-10：三层同率 + 整数自证（AUHAL 语义），供上层 bp_verdict 使用。
     // 每次调用重新读 nsrt/sfmt/pft，播放中被改回去能发现。
-    bool three_layer_ok() const {
+    // 一次查询拿完整结论（ok + why），避免 /api/status 为拿两个字段各做一遍
+    // 3 次 AudioObjectGetPropertyData（400ms 轮询下原本是 6 次，且两次结果可能不一致）。
+    rta::audio::LayerVerdict three_layer_check() const {
         if (auto* ca = dynamic_cast<rta::platform::CoreAudioOutput*>(ao_.get())) {
             auto t = ca->three_layer_state();
             t.requireVirtualInt = false;   // AUHAL 虚拟层恒 float32 是架构
-            return rta::audio::three_layer_verdict(t).ok;
+            return rta::audio::three_layer_verdict(t);
         }
-        return false;
+        rta::audio::LayerVerdict v;
+        v.why = "三层格式读数未知";
+        return v;
     }
-    std::string three_layer_why() const {
-        if (auto* ca = dynamic_cast<rta::platform::CoreAudioOutput*>(ao_.get())) {
-            auto t = ca->three_layer_state();
-            t.requireVirtualInt = false;
-            return rta::audio::three_layer_verdict(t).why;
-        }
-        return "三层格式读数未知";
-    }
+    bool three_layer_ok() const { return three_layer_check().ok; }
+    std::string three_layer_why() const { return three_layer_check().why; }
     bool physical_non_mixable_requested() const {
         if (auto* ca = dynamic_cast<rta::platform::CoreAudioOutput*>(ao_.get()))
             return ca->physical_non_mixable_requested();
@@ -12310,7 +12308,13 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
         {
             if (OutSink* s = g_activeSink.load()) {
                 if (auto* ca = dynamic_cast<CoreAudioSink*>(s)) {
-                    if (!ca->three_layer_ok()) liveLayerWhy = ca->three_layer_why();
+                    // 只对**独占**路径用三层理由覆盖：共享模式本来就因「经系统混音」
+                    // 判 no（bp_verdict 的 sharedMixer 一票否决），那里若再写
+                    // 「设备格式变化」会把真正原因盖掉，属误导。
+                    if (!ca->shared_output_mode()) {
+                        const auto lv = ca->three_layer_check();
+                        if (!lv.ok) liveLayerWhy = lv.why;
+                    }
                 }
             }
         }

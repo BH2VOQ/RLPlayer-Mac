@@ -358,6 +358,13 @@ add_test(NAME phys_format COMMAND test_phys_format)
 
 # 真机：物理格式锁定是否真的生效（不启动 IOProc、不写样本，open 后立即 close）。
 # 用 --device 显式指定端点；不带参数时测默认设备（可能是内置扬声器，那时判据是"如实报否"）。
+# 三层查询在独占/共享/停止三态下的回归（不启 IOProc、不写样本）
+add_executable(test_three_layer_states tests/test_three_layer_states.cpp)
+target_include_directories(test_three_layer_states PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(test_three_layer_states PRIVATE
+    "-framework CoreAudio" "-framework AudioToolbox" "-framework CoreFoundation")
+add_test(NAME three_layer_states COMMAND test_three_layer_states --device 101)
+
 add_executable(test_physlock_device tests/test_physlock_device.cpp)
 target_include_directories(test_physlock_device PRIVATE ${CMAKE_SOURCE_DIR}/src)
 target_link_libraries(test_physlock_device PRIVATE
