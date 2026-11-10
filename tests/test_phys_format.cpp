@@ -59,6 +59,61 @@ int main() {
         ck(!p.ok, "源采样率未知必须拒绝");
     }
 
+
+    // ---------------- [8] 2026-11-10：三层同率 + NonMixable 选取（HQPlayer 反编译结论吸收）----------------
+    // Pocket Master 物理层同时有 44100/16 int 的 0x0c（可混音）与 0x4c（NonMixable）两档；
+    // 旧 make_int_asbd 写死 0x0c，正好选中可混音档。HQPlayer 是「整数 + 非混音格式」。
+    // 边界：0x40 由 HAL 在启动 IOProc 时隐式进入，受控探针证明未启 IOProc 时写不进也读不回，
+    // 所以只要求「优先选带标志的档」，不要求「读回必须带标志」（否则是假判据）。
+    std::printf("\n[8] NonMixable 优先选取 + 三层同率自证\n");
+    {
+        const std::vector<PhysFormat> pk = { {44100, 16, false, false}, {44100, 16, false, true} };
+        auto p = pick_physical_format(pk, 44100, 16);
+        ck(p.ok, "两档同格式仍可锁");
+        ck(p.pick.nonMixable, "应优先选带 NonMixable(0x40) 的那一档");
+    }
+    {
+        rta::audio::ThreeLayer ok{};
+        ok.known = true; ok.nominalRate = 44100; ok.virtualRate = 44100; ok.physicalRate = 44100;
+        ok.virtualInt = true; ok.physicalInt = true; ok.physicalBits = 16; ok.srcRate = 44100; ok.srcBits = 16;
+        auto v = rta::audio::three_layer_verdict(ok);
+        ck(v.ok, "三层同率 + 整数 => ok");
+        ck(v.why.empty(), "通过时无理由");
+    }
+    {
+        rta::audio::ThreeLayer bad{};
+        bad.known = true; bad.nominalRate = 48000; bad.virtualRate = 44100; bad.physicalRate = 44100;
+        bad.virtualInt = true; bad.physicalInt = true; bad.physicalBits = 16; bad.srcRate = 44100; bad.srcBits = 16;
+        auto v = rta::audio::three_layer_verdict(bad);
+        ck(!v.ok, "nominal rate 被改回去 => 判否");
+        ck(v.why.find("nominal") != std::string::npos || v.why.find("采样率") != std::string::npos,
+           "理由要点明是采样率不一致");
+    }
+    {
+        rta::audio::ThreeLayer bad{};
+        bad.known = true; bad.nominalRate = 44100; bad.virtualRate = 44100; bad.physicalRate = 44100;
+        bad.virtualInt = false; bad.physicalInt = true; bad.physicalBits = 16; bad.srcRate = 44100; bad.srcBits = 16;
+        auto v = rta::audio::three_layer_verdict(bad);
+        ck(!v.ok, "虚拟层是浮点 => 判否（经 HAL 混音域）");
+    }
+    {
+        rta::audio::ThreeLayer unknown{};
+        auto v = rta::audio::three_layer_verdict(unknown);
+        ck(!v.ok, "三层读数未知 => 判否（不许拿未知当通过）");
+    }
+    {
+        // AUHAL 语义：虚拟层 float32 是架构（真机 Pocket Master 实测），不应判否；
+        // 但仍要求三层同率 + 物理层整数。
+        rta::audio::ThreeLayer auhal{};
+        auhal.known = true; auhal.nominalRate = 44100; auhal.virtualRate = 44100; auhal.physicalRate = 44100;
+        auhal.virtualInt = false; auhal.physicalInt = true; auhal.physicalBits = 16;
+        auhal.srcRate = 44100; auhal.srcBits = 16; auhal.requireVirtualInt = false;
+        auto v = rta::audio::three_layer_verdict(auhal);
+        ck(v.ok, "AUHAL 虚拟层 float32 是架构 => 仍通过（三层同率 + 物理整数）");
+        auhal.nominalRate = 48000;
+        auto v2 = rta::audio::three_layer_verdict(auhal);
+        ck(!v2.ok, "AUHAL 语义下 nominal 被改回去仍必须判否");
+    }
     std::printf("\n%s (%d failures)\n", fails ? "RED" : "GREEN", fails);
     return fails ? 1 : 0;
 }

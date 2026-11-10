@@ -1642,6 +1642,29 @@ public:
         if (auto* ca = dynamic_cast<rta::platform::CoreAudioOutput*>(ao_.get())) return ca->device_shared_with_others();
         return false;
     }
+    // 2026-11-10：三层同率 + 整数自证（AUHAL 语义），供上层 bp_verdict 使用。
+    // 每次调用重新读 nsrt/sfmt/pft，播放中被改回去能发现。
+    bool three_layer_ok() const {
+        if (auto* ca = dynamic_cast<rta::platform::CoreAudioOutput*>(ao_.get())) {
+            auto t = ca->three_layer_state();
+            t.requireVirtualInt = false;   // AUHAL 虚拟层恒 float32 是架构
+            return rta::audio::three_layer_verdict(t).ok;
+        }
+        return false;
+    }
+    std::string three_layer_why() const {
+        if (auto* ca = dynamic_cast<rta::platform::CoreAudioOutput*>(ao_.get())) {
+            auto t = ca->three_layer_state();
+            t.requireVirtualInt = false;
+            return rta::audio::three_layer_verdict(t).why;
+        }
+        return "三层格式读数未知";
+    }
+    bool physical_non_mixable_requested() const {
+        if (auto* ca = dynamic_cast<rta::platform::CoreAudioOutput*>(ao_.get()))
+            return ca->physical_non_mixable_requested();
+        return false;
+    }
     bool container_lossy() const {
         if (auto* ca = dynamic_cast<rta::platform::CoreAudioOutput*>(ao_.get())) return ca->container_lossy();
         return false;
@@ -12278,6 +12301,19 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
         ct = "application/json; charset=utf-8";
         // 261024-01 #9：后端 = UPnP 时，播放器状态唯一来源 = 投放会话（一条会话、一个数字），
         // 否则底栏与「投放实时状态」会各显示一套进度，互相打架。
+        // ---- 2026-11-10：播放中三层同率实时自证（HQPlayer 环节 2 判据化）----
+        // ps.bpState 是开流那一刻的静态结论；若设备采样率在播放中途被别的进程改回去，
+        // HAL 会开始重采样，而旧代码毫无察觉。这里对活动 sink 每次查询重读
+        // nsrt/sfmt/pft，broken 时把徽标当场降级为 no（并写具体理由）。
+        // 用 g_activeSink 现成的原子指针，不新开线程、不进实时回调。
+        std::string liveLayerWhy;
+        {
+            if (OutSink* s = g_activeSink.load()) {
+                if (auto* ca = dynamic_cast<CoreAudioSink*>(s)) {
+                    if (!ca->three_layer_ok()) liveLayerWhy = ca->three_layer_why();
+                }
+            }
+        }
         rta::net::CastState castSt = rta::net::CastManager::instance().get_state();
         bool castMode = false;
         bool castTransition = false;
@@ -12403,8 +12439,9 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
           << ",\"scanMs\":" << Library::instance().lastScanMs()
           // 2026-10-23（用户 261023-02 #1）：status 也带上 bit-perfect 结论，
           // 让底栏徽标不用额外请求 /api/signal 就能显示（轮询已经是 400ms 一次）。
-          << ",\"bitPerfect\":\"" << jesc(castMode ? "no" : ps.bpState) << "\""
-          << ",\"bitPerfectWhy\":\"" << jesc(castMode ? (isAirPlayCast ? "AirPlay 投放：44100 Hz / 16 bit ALAC，端到端逐位未获验证" : "UPnP 投放：源文件按原采样率供源，本机不做升频；接收端是否重采样由对方决定（本机 DSP 未介入）") : ps.bpWhy) << "\""
+          // 2026-11-10：播放中三层被改回去 ⟹ 当场降级（覆盖开流时的静态结论）
+          << ",\"bitPerfect\":\"" << jesc(castMode ? "no" : (liveLayerWhy.empty() ? ps.bpState : std::string("no"))) << "\""
+          << ",\"bitPerfectWhy\":\"" << jesc(castMode ? (isAirPlayCast ? "AirPlay 投放：44100 Hz / 16 bit ALAC，端到端逐位未获验证" : "UPnP 投放：源文件按原采样率供源，本机不做升频；接收端是否重采样由对方决定（本机 DSP 未介入）") : (liveLayerWhy.empty() ? ps.bpWhy : ("播放中设备格式变化：" + liveLayerWhy))) << "\""
           // ---- 输出格式自证（2026-10-26 F-5，mac 口径）----
           // 为什么底栏只拿到 outRate 会误判：DoP 的 outRate 是**载波率**
           // （DSD128/48k 族 = 6144000/16 = 384000），和"PCM 升频到 384k"数字完全一样。

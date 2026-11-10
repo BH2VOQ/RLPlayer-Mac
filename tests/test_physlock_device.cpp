@@ -125,6 +125,26 @@ int main(int argc, char** argv) {
             ck(!ca->bit_perfect(), "后端 bit_perfect() 为 false");
             ck(!ca->bits_fallback_note().empty(), "必须给出说明（不是静默失败）");
         }
+        // ---- 2026-11-10：三层同率 + 整数自证（HQPlayer 反编译结论吸收）----
+        // AUHAL 语义：虚拟层 float32 是架构，requireVirtualInt=false；
+        // 但仍必须三层同率 + 物理层整数。关键是可锁端点上它必须 ok。
+        {
+            auto tl = ca->three_layer_state();
+            tl.requireVirtualInt = false;
+            const auto lv = rta::audio::three_layer_verdict(tl);
+            std::printf("   三层: nominal=%u virtual=%u physical=%u vInt=%d pInt=%d bits=%d => %s%s\n",
+                        tl.nominalRate, tl.virtualRate, tl.physicalRate,
+                        (int)tl.virtualInt, (int)tl.physicalInt, tl.physicalBits,
+                        lv.ok ? "ok" : "NO", lv.why.empty() ? "" : (" (" + lv.why + ")").c_str());
+            if (pred.ok) {
+                ck(lv.ok, "可锁端点：三层同率 + 物理整数自证必须通过");
+            } else {
+                ck(!lv.ok, "不可锁端点：三层自证必须判否");
+            }
+        }
+        std::printf("   NonMixable: 申请=%d 读回=%d（受控探针证明 0x40 由 HAL 隐式管理，不作硬判据）\n",
+                    (int)ca->physical_non_mixable_requested(), (int)ca->physical_non_mixable());
+
         ck(!ca->device_shared_with_others() || true, "设备占用状态可查询（仅信息）");
     }
 

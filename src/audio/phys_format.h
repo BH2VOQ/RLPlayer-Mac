@@ -1,31 +1,17 @@
 // SPDX-FileCopyrightText: 2026 BH2VOQ <https://github.com/BH2VOQ>
 // SPDX-License-Identifier: GPL-3.0-or-later
 //
-// 本文件是 RLPlayer 的一部分，以 GNU 通用公共许可证第 3 版（或更新版本）发布。
-// 完整条款见仓库根目录的 LICENSE 文件。
-//
 // phys_format.h —— 「能不能锁到源格式原样的硬件物理格式」的唯一判据（纯函数）
 //
-// 为什么需要它（2026-11-09，用户追问「HQPlayer 明明能做到 bit-perfect」）：
-//   在此之前，独占路径写的是 kAudioDevicePropertyStreamFormat —— 那是 **HAL 虚拟/混音层**，
-//   硬件真正跑的格式是 kAudioStreamPropertyPhysicalFormat。两层不一致时 HAL 会做一次转换
-//   （采样率转换 或 int→float32），位流已被改动，但代码从未读过物理层，
-//   于是 bit_perfect() 照样报 true。
+// 2026-11-10 吸收 HQPlayer 5.13 反编译结论：HQPlayer 把 nsrt/sfmt/pft 三层全锁到
+// 与源一致的整数 PCM，带 SignedInteger(0x4) 与 NonMixable(0x40)。本机只读实测：
+// Pocket Master 物理层同时有 44100/16 int 的 0x0c（可混音）与 0x4c（NonMixable）两档，
+// 旧 make_int_asbd 写死 0x0c，正好选中可混音档。
 //
-//   本机只读实测（未播放任何声音）：
-//     · Pocket Master (USB)   物理层只有 44100/16 整数  ← 整数直通可行
-//     · M140F2 (DisplayPort)  物理层 21 档，全整数 24/20 ← 整数直通可行
-//     · Mac mini 扬声器        物理层只有 float32        ← 无整数通路
-//     · Oray 虚拟设备          物理层只有 float32        ← 无整数通路
-//   四台设备物理层 settable 全为 YES ⟹ 锁定这条路是通的，只是此前没走。
-//
-// 判据（任何一条不满足 ⟹ 不能宣称逐位直通）：
-//   1. 采样率必须**完全等于**源采样率 —— 不等就是让 HAL 重采样，采样点已不是原值
-//   2. 位深不能低于源真实位深 —— 降位深是真实信息丢失
-//   3. 端点必须提供**整数**物理格式。只有 float32 的端点一律判否：即使 24 bit 以内的
-//      整数值在 IEEE-754 尾数里可精确表示，DAC 侧仍存在一次不可观测的转换，
-//      「数值相等」不等于「送到转换器的是同一串位」。用户明确要求「不能是接近」。
-// 允许：设备整数位深高于源位深（低位补零，数值逐个不变），但必须标记 zeroPad 以便如实告知。
+// 边界（受控探针实测，未启 IOProc、未写样本、已还原）：0x40 是 HAL 在启动 IOProc 时
+// 隐式进入的模式状态，不是应用能持久写入/必须读回的属性位。五种写法读回全是
+// 0x09/0x0c，0x40 被清掉，Hog owner 恒 -1。所以只做「优先选带标志的 available 档」，
+// 绝不把「读回必须带 0x40」做成硬判据 —— 那会假红且语义错误。
 #pragma once
 #include <cstdint>
 #include <string>
@@ -33,44 +19,77 @@
 
 namespace rta::audio {
 
-// 一个设备物理格式候选（来自 kAudioStreamPropertyAvailablePhysicalFormats）
 struct PhysFormat {
     uint32_t rate = 0;
     int      bits = 0;
     bool     isFloat = false;
+    bool     nonMixable = false;   // 该档 available ASBD 是否带 0x40（只用于优先选取）
+    uint32_t flags = 0;            // 原始 mFormatFlags（用于原样写回）
 };
 
 struct PhysPick {
-    bool       ok = false;        // 能否锁到「源格式原样」的整数物理格式
-    PhysFormat pick{};            // 选中的物理格式（ok=true 时有效）
-    bool       zeroPad = false;   // 设备位深 > 源位深（低位补零，数值不变）
-    bool       floatOnly = false; // 该采样率下只有浮点格式（区分「没有这档率」与「只有浮点」）
-    std::string why;              // ok=false 时是拒绝理由；ok=true 且有话要说时是说明
+    bool       ok = false;
+    PhysFormat pick{};
+    bool       zeroPad = false;
+    bool       floatOnly = false;
+    bool       nonMixable = false;
+    std::string why;
 };
 
-// 选择策略：
-//   · 采样率必须精确相等（绝不重采样）
-//   · 位深：优先精确相等；否则取「大于源位深且最小」的那一档（补零）
-//   · 该采样率下没有整数格式（只有 float）⟹ 拒绝，floatOnly=true
-//   · 该采样率下什么都没有 ⟹ 拒绝，floatOnly=false
+struct ThreeLayer {
+    bool     known = false;
+    uint32_t nominalRate = 0;
+    uint32_t virtualRate = 0;
+    uint32_t physicalRate = 0;
+    bool     virtualInt = false;
+    bool     physicalInt = false;
+    int      physicalBits = 0;
+    uint32_t srcRate = 0;
+    int      srcBits = 0;
+    // true = 裸 IOProc / HQPlayer 语义（sfmt 必须整数）；
+    // false = AUHAL 语义：HAL 虚拟层恒为 float32 是架构而非降级，
+    //         仍严格核对三层同率 + 物理层整数 + 物理位深。
+    bool     requireVirtualInt = true;
+};
+
+struct LayerVerdict {
+    bool        ok = false;
+    std::string why;
+};
+
+// 三层同率 + 整数自证。每次查询重读 nominal rate，播放中被改回去可发现。
+inline LayerVerdict three_layer_verdict(const ThreeLayer& x) {
+    LayerVerdict v;
+    if (!x.known) { v.why = "设备三层格式读数未知（无法确认同率与整数容器）"; return v; }
+    if (x.srcRate == 0 || x.srcBits <= 0) { v.why = "源采样率或位深未知"; return v; }
+    if (x.nominalRate != x.srcRate || x.virtualRate != x.srcRate || x.physicalRate != x.srcRate) {
+        v.why = "三层采样率不一致（nominal=" + std::to_string(x.nominalRate) +
+                " virtual=" + std::to_string(x.virtualRate) +
+                " physical=" + std::to_string(x.physicalRate) +
+                " src=" + std::to_string(x.srcRate) + " Hz）：HAL 会重采样，不能逐位直通";
+        return v;
+    }
+    if (x.requireVirtualInt && !x.virtualInt) {
+        v.why = "HAL 虚拟层为浮点格式（经混音域），不是整数逐位通路"; return v;
+    }
+    if (!x.physicalInt) { v.why = "设备物理层为浮点格式，不存在整数逐位直通通路"; return v; }
+    if (x.physicalBits < x.srcBits) {
+        v.why = "物理位深 " + std::to_string(x.physicalBits) + " bit 低于源 " +
+                std::to_string(x.srcBits) + " bit，会丢有效位";
+        return v;
+    }
+    v.ok = true;
+    return v;
+}
+
 inline PhysPick pick_physical_format(const std::vector<PhysFormat>& avail,
                                      uint32_t srcRate, int srcBits) {
     PhysPick r;
-    if (srcRate == 0 || srcBits <= 0) {
-        r.why = "源采样率或位深未知，无法确认设备物理格式";
-        return r;
-    }
-    if (avail.empty()) {
-        r.why = "读不到设备的可用物理格式列表";
-        return r;
-    }
-
-    bool sawRate = false;
-    bool sawIntAtRate = false;
-    bool sawFloatAtRate = false;
-    int  bestExact = -1;
-    int  bestAbove = -1;
-
+    if (srcRate == 0 || srcBits <= 0) { r.why = "源采样率或位深未知，无法确认设备物理格式"; return r; }
+    if (avail.empty()) { r.why = "读不到设备的可用物理格式列表"; return r; }
+    bool sawRate = false, sawIntAtRate = false, sawFloatAtRate = false;
+    int  bestExact = -1, bestAbove = -1;
+    PhysFormat exactPick{}, abovePick{};
     for (const PhysFormat& f : avail) {
         if (f.rate != srcRate) continue;
         sawRate = true;
@@ -78,12 +97,14 @@ inline PhysPick pick_physical_format(const std::vector<PhysFormat>& avail,
         if (f.bits <= 0) continue;
         sawIntAtRate = true;
         if (f.bits == srcBits) {
-            if (bestExact < 0 || f.bits < bestExact) bestExact = f.bits;
+            if (bestExact < 0 || f.bits < bestExact ||
+                (f.bits == bestExact && f.nonMixable && !exactPick.nonMixable)) {
+                bestExact = f.bits; exactPick = f;
+            }
         } else if (f.bits > srcBits) {
-            if (bestAbove < 0 || f.bits < bestAbove) bestAbove = f.bits;
+            if (bestAbove < 0 || f.bits < bestAbove) { bestAbove = f.bits; abovePick = f; }
         }
     }
-
     if (!sawRate) {
         r.why = "设备物理层没有 " + std::to_string(srcRate) +
                 " Hz 这一档（锁物理格式才能避免 HAL 重采样，此处不做静默转换）";
@@ -95,16 +116,13 @@ inline PhysPick pick_physical_format(const std::vector<PhysFormat>& avail,
         return r;
     }
     if (bestExact > 0) {
-        r.ok = true;
-        r.pick = PhysFormat{srcRate, bestExact, false};
+        r.ok = true; r.pick = exactPick; r.nonMixable = exactPick.nonMixable;
         return r;
     }
     if (bestAbove > 0) {
-        r.ok = true;
-        r.pick = PhysFormat{srcRate, bestAbove, false};
+        r.ok = true; r.pick = abovePick; r.nonMixable = abovePick.nonMixable;
         r.zeroPad = true;
-        r.why = std::to_string(srcBits) + "→" + std::to_string(bestAbove) +
-                " bit 低位补零，数值逐个不变";
+        r.why = std::to_string(srcBits) + "→" + std::to_string(bestAbove) + " bit 低位补零，数值逐个不变";
         return r;
     }
     r.why = "设备在此采样率下的整数物理格式位深低于源位深（" +

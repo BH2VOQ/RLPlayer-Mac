@@ -418,6 +418,10 @@ inline std::vector<rta::audio::PhysFormat> available_physical_formats(AudioStrea
         p.rate = (uint32_t)std::llround(f.mSampleRate);
         p.bits = (int)f.mBitsPerChannel;
         p.isFloat = (f.mFormatFlags & kAudioFormatFlagIsFloat) != 0;
+        // 2026-11-10（HQPlayer 反编译结论）：记录 NonMixable(0x40) 与原始 flags。
+        // Pocket Master 同一率同位深有 0x0c / 0x4c 两档，优先选带 0x40 的。
+        p.nonMixable = (f.mFormatFlags & kAudioFormatFlagIsNonMixable) != 0;
+        p.flags = (uint32_t)f.mFormatFlags;
         out.push_back(p);
     }
     return out;
@@ -437,12 +441,19 @@ inline bool device_running_somewhere(AudioDeviceID dev) {
     return v != 0;
 }
 
-// 把 pick 结果转成 ASBD（交错整数 + packed）
-inline AudioStreamBasicDescription make_int_asbd(uint32_t rate, int bits, int channels) {
+// 把 pick 结果转成 ASBD（交错整数 + packed）。
+// flagsOverride != 0 时直接用设备 available 档的原始 mFormatFlags —— 这样能保留
+// kAudioFormatFlagIsNonMixable(0x40) 等驱动要求的位（HQPlayer 是整数+非混音格式）。
+// 默认 0 = 旧行为（SignedInteger|Packed = 0x0c）。
+// ⚠️ 边界：0x40 由 HAL 在启动 IOProc 时隐式进入，未启 IOProc 时写入会被清掉读不回；
+// 这里只是「按设备提供的档原样申请」，不构成「读回必须带 0x40」的判据。
+inline AudioStreamBasicDescription make_int_asbd(uint32_t rate, int bits, int channels,
+                                                  uint32_t flagsOverride = 0) {
     AudioStreamBasicDescription a{};
     a.mSampleRate = (Float64)rate;
     a.mFormatID = kAudioFormatLinearPCM;
-    a.mFormatFlags = kAudioFormatFlagIsSignedInteger | kAudioFormatFlagIsPacked;
+    a.mFormatFlags = flagsOverride ? flagsOverride
+                                   : (kAudioFormatFlagIsSignedInteger | kAudioFormatFlagIsPacked);
     a.mBytesPerPacket = (UInt32)(bits / 8) * (UInt32)channels;
     a.mFramesPerPacket = 1;
     a.mBytesPerFrame  = (UInt32)(bits / 8) * (UInt32)channels;
@@ -881,8 +892,11 @@ public:
                     formatFallbackNote_ = physNote_;
                     physDeviceBits_ = bits_;   // 客户端仍按请求位深打包
                 } else {
+                    // 用设备 available 档的**原始 flags** 申请（含 0x40 时一并带上），
+                    // 不再自己拼 0x0c —— 旧做法正好选中 Pocket Master 的可混音档。
                     const AudioStreamBasicDescription wantAsbd =
-                        detail::make_int_asbd(pk.pick.rate, pk.pick.bits, channels_);
+                        detail::make_int_asbd(pk.pick.rate, pk.pick.bits, channels_, pk.pick.flags);
+                    physNonMixableRequested_ = pk.nonMixable;
                     bool wrote = detail::set_physical_format(physStream_, wantAsbd);
                     AudioStreamBasicDescription got{};
                     const bool readback = wrote && detail::get_physical_format(physStream_, got);
@@ -894,12 +908,16 @@ public:
                         physDeviceBits_ = bits_;
                     } else {
                         const bool rateOk = ((uint32_t)std::llround(got.mSampleRate) == rate_);
-                        const bool intOk  = (got.mFormatFlags & kAudioFormatFlagIsFloat) == 0;
+                        // 2026-11-10：必须仍是 SignedInteger（不只是"非 float"）。
+                        // 若 HAL 把容器换成别的，都不能算锁上。
+                        const bool intOk  = (got.mFormatFlags & kAudioFormatFlagIsSignedInteger) != 0 &&
+                                            (got.mFormatFlags & kAudioFormatFlagIsFloat) == 0;
                         const int  gotBits = (int)got.mBitsPerChannel;
                         physReadRate_ = (uint32_t)std::llround(got.mSampleRate);
                         physReadBits_ = gotBits;
                         physReadFloat_ = !intOk;
-                        // 逐位直通的物理条件：同率 + 整数 + 位深 >= 源位深
+                        physReadNonMixable_ = (got.mFormatFlags & kAudioFormatFlagIsNonMixable) != 0;
+                        // 逐位直通的物理条件：同率 + 有符号整数 + 位深 >= 源位深
                         physLocked_ = rateOk && intOk && gotBits >= bits_;
                         // 容器是否丢源位深的有效位：
                         //   · 物理层是整数且位深 >= 源位深 ⟹ 不丢（补零只是把 0 填进低位）
@@ -1450,7 +1468,14 @@ public:
         //   24 bit 以内全部整数可精确表示，这正是 PLATFORM.md 13.10.3 实测 0 LSB 的原因）。
         //   会丢位的情形是容器**有效精度低于源位深**（如源 32 bit 走 float32），
         //   那条由 containerLossy_ 单独判。
-        return opened_ && !shared_ && physLocked_ && !containerLossy_ &&
+        // 2026-11-10：加入三层同率自证（HQPlayer 环节 2）。每次查询都重新读
+        // nsrt/sfmt/pft，播放中设备率被别的进程改回去会当场判否。
+        // AUHAL 架构下虚拟层恒为 float32，所以 requireVirtualInt=false ——
+        // 仍严格核对三层同率 + 物理层整数 + 物理位深（见 three_layer_state 注释）。
+        rta::audio::ThreeLayer tl = three_layer_state();
+        tl.requireVirtualInt = false;
+        const bool layersOk = rta::audio::three_layer_verdict(tl).ok;
+        return opened_ && !shared_ && physLocked_ && !containerLossy_ && layersOk &&
                (gain_.load(std::memory_order_relaxed) == 1.0);
     }
 
@@ -1550,6 +1575,45 @@ public:
     double render_gain() const { return gain_.load(std::memory_order_relaxed); }
     // 中间容器是否丢掉源位深的有效位（物理位深不足 / float32 装 32-bit 源）
     bool container_lossy() const { std::lock_guard<std::mutex> lk(mu_); return containerLossy_; }
+
+    // ---- 2026-11-10：三层同率 + 整数自证（HQPlayer 环节 2 判据化）----
+    // 每次调用都**重新读** nsrt / sfmt / pft 三个属性，不缓存：
+    // 播放中若别的进程把设备采样率改回去，下一次 /api/status 查询就能发现并判否。
+    // 旧实现只在 open() 里读一次物理层，之后 nominal rate 变了毫不知情。
+    rta::audio::ThreeLayer three_layer_state() const {
+        rta::audio::ThreeLayer t;
+        std::lock_guard<std::mutex> lk(mu_);
+        if (!opened_) return t;
+        t.srcRate = rate_;
+        t.srcBits = bits_;
+        t.nominalRate = detail::device_current_rate(device_);
+        AudioStreamBasicDescription v{};
+        if (detail::get_device_stream_format(device_, v)) {
+            t.virtualRate = (uint32_t)std::llround(v.mSampleRate);
+            t.virtualInt = (v.mFormatFlags & kAudioFormatFlagIsSignedInteger) != 0 &&
+                           (v.mFormatFlags & kAudioFormatFlagIsFloat) == 0;
+        }
+        AudioStreamBasicDescription p{};
+        if (detail::get_physical_format(physStream_, p)) {
+            t.physicalRate = (uint32_t)std::llround(p.mSampleRate);
+            t.physicalInt = (p.mFormatFlags & kAudioFormatFlagIsSignedInteger) != 0 &&
+                            (p.mFormatFlags & kAudioFormatFlagIsFloat) == 0;
+            t.physicalBits = (int)p.mBitsPerChannel;
+        }
+        t.known = (t.nominalRate > 0 && t.virtualRate > 0 && t.physicalRate > 0);
+        return t;
+    }
+    rta::audio::LayerVerdict three_layer_verdict() const {
+        return rta::audio::three_layer_verdict(three_layer_state());
+    }
+    bool physical_non_mixable() const {
+        std::lock_guard<std::mutex> lk(mu_);
+        return physReadNonMixable_;
+    }
+    bool physical_non_mixable_requested() const {
+        std::lock_guard<std::mutex> lk(mu_);
+        return physNonMixableRequested_;
+    }
 
     // 格式回退说明（若格式与请求真正完全一致则为空；非空表示存在回退或说明）
     std::string bits_fallback_note() const {
@@ -1754,6 +1818,8 @@ private:
         physReadRate_ = 0;
         physReadBits_ = 0;
         physReadFloat_ = false;
+        physReadNonMixable_ = false;
+        physNonMixableRequested_ = false;
         physDeviceBits_ = 0;
         physNote_.clear();
         containerLossy_ = false;
@@ -1783,6 +1849,8 @@ private:
     uint32_t physReadRate_ = 0;    // 读回的物理采样率
     int  physReadBits_ = 0;        // 读回的物理位深
     bool physReadFloat_ = false;   // 读回的物理格式是否浮点
+    bool physReadNonMixable_ = false;      // 读回的物理格式是否带 0x40（尽力记录，非必要条件）
+    bool physNonMixableRequested_ = false; // 申请的档是否带 0x40
     int  physDeviceBits_ = 0;      // 设备物理位深（客户端按此打包，补零在此发生）
     std::string physNote_;         // 补零等说明（非空 = 有需要如实告知的点）
     bool containerLossy_ = false;  // 中间容器是否丢源位深有效位（float32 + 32-bit 源 / 位深不足）
