@@ -172,6 +172,13 @@ var ADV = {
   modcut: 0, moddith: -1, ir: '', irgpu: 0, ramp: 0, theme: 'dark', uiStyle: 'apple', lang: 'zh',
   eq: '', modorder: 5, modfamily: 'dsd', gpuvendor: 'auto', directsdm: 0, dsdKind: 'fir', dsdConv: 'narrow',
   updbeta: 0,
+  // 1.1.5.1：更新通道。框架阶段默认 'global'（后台 dmg 未适配，默认切大陆会立刻不可用；
+  // 最终产品语义「中国大陆默认走后台」等后台就绪后由宿主侧 kDefaultChannel 统一改，
+  // 页面不写第二份默认值 —— 这里只是**UI 显示镜像**）。
+  // 真相源 = 宿主 .app 外的 update.conf（channel=global|cn），由 wcmd('update:channel:*') 写入；
+  // /api/settings 的键白名单未必收 channel，所以本字段**不随 saveSettings 下发**，
+  // 重渲染后的回显靠 localStorage('rta-updchannel') 兜底。
+  channel: 'global',
   // 1.1.4：播放时自动音频分析。**默认关**（后台解码 + FFT 是纯 CPU 开销，不该在用户没同意时发生）。
   // 只分析本地文件；每曲只自动跑一次；切歌立即取消（见 ANL 状态机）。
   autoanl: 0,
@@ -253,6 +260,15 @@ var SEP = (function () {
     var dl = document.documentElement.dataset.lang;
     if (dl === 'en' || dl === 'zh') ADV.lang = dl;
   }
+  // 1.1.5.1：更新通道的本地兜底。真相源是宿主 .app 外的 update.conf（channel=global|cn），
+  //   但 /api/settings 的键白名单未必收 channel，读不到 kv.channel 时如果只靠重渲染，
+  //   下拉会退回默认 global —— 用户看到的就不是自己上次选的通道了。
+  //   所以这里先按 localStorage 恢复显示镜像（只认两个字面量）；/api/settings 若带回
+  //   kv.channel，loadSettings 会以它为准覆盖（配置永远是真相源）。
+  try {
+    var chn = localStorage.getItem('rta-updchannel');
+    if (chn === 'global' || chn === 'cn') ADV.channel = chn;
+  } catch (e) { }
 })();
 
 function strCompare(a, b) {
@@ -479,6 +495,39 @@ function bindUpdateCard() {
   if (c) c.onclick = function () { updCheck(true); };
   var i = D('sp_updinstall');
   if (i) i.onclick = function () { updInstall(); };
+  // 1.1.5.1：更新通道。真相源在宿主 .app 外的 update.conf（channel=global|cn），
+  //   页面这份 ADV.channel 只是显示镜像；/api/settings 的键白名单未必收 channel，
+  //   所以重渲染后的回显靠 localStorage('rta-updchannel') 兜底（只接受两个字面量）。
+  var ch = D('sp_updchannel');
+  if (ch) {
+    ch.value = (ADV.channel === 'cn') ? 'cn' : 'global';
+    ch.onchange = function () {
+      // 没有宿主通道时如实拒绝：通道只有在宿主写进 .app 外的 update.conf 后才真正生效，
+      // 浏览器直开（rtaweb 开发界面 / 无壳）时点了也不会有任何效果 —— 不许谎报"已切换"
+      // （与 updCheck / updInstall 的 IS_MAC_HOST 分支同一口径），并把下拉退回原值。
+      if (!IS_MAC_HOST) {
+        this.value = (ADV.channel === 'cn') ? 'cn' : 'global';
+        updMsg('浏览器里不支持切换更新通道（需要桌面客户端）', 'err');
+        return;
+      }
+      var v = (this.value === 'cn') ? 'cn' : 'global';   // 只认两个字面量
+      ADV.channel = v;
+      // 命令里**只有**通道枚举：宿主据此写 update.conf（真正生效）。
+      // 绝不带 URL / token / 任意下载参数 —— 否则等于让页面决定宿主去下载什么。
+      wcmd('update:channel:' + v);
+      try { localStorage.setItem('rta-updchannel', v); } catch (e) { }
+      updMsg(v === 'cn'
+        ? '已切换为中国大陆通道（后台准备中，检查更新会明确提示暂不可用）'
+        : '已切换为全球通道，点「检查更新」生效');
+      // 切通道后旧的检查结果/安装计划作废（换了清单来源，旧结论不再代表当前通道）。
+      // 徽标也要一起撤掉：那是**上一个通道**查到的版本，留着会指向另一条清单里的版本。
+      // 只清页面状态，不动宿主：宿主下次 check() 自己按新通道重判。
+      UPD.stage = ''; UPD.info = null;
+      updInstallBtn(false);
+      setUpdateBadge('');
+      saveSettings(true);
+    };
+  }
   var beta = D('sp_updbeta');
   if (beta) {
     beta.checked = (ADV.updbeta == 1);
@@ -4732,6 +4781,12 @@ function loadSettings() {
     if (kv.updbeta !== undefined) {
       ADV.updbeta = (kv.updbeta === '1' || kv.updbeta === 'true') ? 1 : 0;
       if (D('sp_updbeta')) D('sp_updbeta').checked = (ADV.updbeta === 1);
+    }
+    // 1.1.5.1：更新通道回显。只有合法值才覆盖（非法/缺失一律保留 localStorage 兜底的现值，
+    // 绝不因为读到脏值就把下拉重置成某个"猜的"通道）。真相源仍是宿主 update.conf。
+    if (kv.channel === 'global' || kv.channel === 'cn') {
+      ADV.channel = kv.channel;
+      if (D('sp_updchannel')) D('sp_updchannel').value = ADV.channel;
     }
     SET_KEYS.forEach(function (p) {
       if (kv[p[1]] !== undefined) ADV[p[1]] = kv[p[1]];
@@ -10038,7 +10093,18 @@ function renderSettingsPage() {
      // 真正有新版本时由底栏徽标（updateBadge）主动提示，点这里进来装。
      // 浏览器直开（无宿主）时整块隐藏 —— 装了也没法替换 .app，不能假装能装。
      + sgroup('软件更新', '检查新版本，一键更新',
-         '<div class="sfld wide" style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">'
+         // 1.1.5.1：更新通道（中国大陆 / 全球）。框架阶段默认 global（后台 dmg 未适配）。
+         //   只发抽象枚举命令 update:channel:global|cn，宿主写 .app 外的 update.conf 才是真正生效；
+         //   本下拉**绝不含** URL / token / 任意下载参数（契约见本文件顶部 F-4 段与 ui_script.h:347）。
+         //   回显顺序：loadSettings 若有 kv.channel 以它为准；否则由 bindUpdateCard 从
+         //   localStorage('rta-updchannel') 兜底（/api/settings 的键白名单未必收 channel）。
+         '<div class=sfld><label>更新通道'
+       + tip('全球 = 现有 GitHub 更新通道；中国大陆 = 后台通道（当前后台准备中，切换后检查更新会明确提示暂不可用）。本选项只切换通道，不含任何下载地址。')
+       + '</label><select id=sp_updchannel>'
+       + '<option value=global' + (ADV.channel === 'cn' ? '' : ' selected') + '>全球（GitHub）</option>'
+       + '<option value=cn' + (ADV.channel === 'cn' ? ' selected' : '') + '>中国大陆（后台）</option>'
+       + '</select></div>'
+       + '<div class="sfld wide" style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">'
        + '<span style="font-size:11.5px;color:var(--mut)">当前版本</span>'
        + '<b style="font-size:12.5px" id=sp_vercur></b>'
        + '<button class=btn id=sp_updcheck>检查更新</button>'
@@ -12260,6 +12326,15 @@ function collectSettings() {
   if (D('sp_inseconds')) ADV.inSeconds = parseFloat(D('sp_inseconds').value) || 0;
   if (D('sp_inout')) ADV.inOut = (D('sp_inout').value || '').trim();
   if (D('sp_updbeta')) ADV.updbeta = D('sp_updbeta').checked ? 1 : 0;
+  // 1.1.5.1：更新通道。这里只把下拉的当前值同步到显示镜像 ADV.channel；
+  //   **不发 wcmd、不写 update.conf** —— 真正生效只发生在用户改下拉的 onchange（bindUpdateCard）。
+  //   原因：collectSettings 会被「保存设置 / 恢复默认」等入口调用，若在这里下发命令，
+  //   一次普通保存就会把通道回写成"当前显示值"，用户没动过下拉也可能覆盖宿主的配置。
+  //   仍只认两个字面量：任何异常值都落到 global。
+  if (D('sp_updchannel')) {
+    var cv = D('sp_updchannel').value;
+    ADV.channel = (cv === 'cn') ? 'cn' : 'global';
+  }
   // 同步回快捷面板
 
   D('sRate').value = D('sp_rate').value;

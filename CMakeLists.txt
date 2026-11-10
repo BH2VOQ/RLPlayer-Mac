@@ -396,6 +396,14 @@ add_executable(test_update_check tests/test_update_check.cpp)
 target_link_libraries(test_update_check PRIVATE rtadsp)
 add_test(NAME update_check COMMAND test_update_check)
 
+# 1.1.5.1：更新通道（中国大陆 / 全球）纯逻辑层离线门禁
+# 判据：默认值 Global、通道解析真值表（含 URL 冒充通道值的对抗用例）、通道→清单来源、
+# 后台域名白名单（形近/端口/userinfo/非 https 全拒 + 原有两条规则不放宽）、
+# cn 不可用绝不等于「已是最新」、两套通道版本/sha256 比较一致、ChannelManifest::ready() 顺序闸门。
+add_executable(test_update_channel tests/test_update_channel.cpp)
+target_link_libraries(test_update_channel PRIVATE rtadsp)
+add_test(NAME update_channel COMMAND test_update_channel)
+
 # B-8：真实回环慢 HTTP 的取消/线程隔离/嵌套作用域验证，不访问外网或音频设备。
 if(APPLE)
   add_executable(test_http_cancel tests/test_http_cancel.cpp)

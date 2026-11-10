@@ -35,6 +35,7 @@
 #include <vector>
 
 #include "net/json.h"
+#include "net/update_channel.h"   // 1.1.5.1：更新通道（中国大陆 / 全球）纯逻辑层
 
 namespace rta::update {
 
@@ -68,6 +69,13 @@ inline constexpr const char kAllowedHost[] = "raw.githubusercontent.com";
 //   但**清单里写的是** github.com/...（重定向由 curl/NSURLSession 自己跟随），
 //   所以白名单只需要放行 github.com。
 inline constexpr const char kAllowedDownloadHost[] = "github.com";
+
+// 1.1.5.1：中国大陆更新通道的后台主机（签名清单 + files[] 对象）。
+//   本轮**只做框架**：把它加进下载白名单是「通道来源可解析」的一部分，
+//   不代表现在就向它发请求（真实网络/验签/解包等后台适配后再接）。
+//   取值与 update_channel.h 的 kChinaHost 相同；这里保留 update_check.h 内的
+//   编译期常量，是为了让白名单判定**不依赖**任何运行时来源（安全闸门要求）。
+inline constexpr const char kAllowedChinaHost[] = "rlplayer.rainlain.com";
 
 // 仓库标识（拼 API 路径用）
 inline constexpr const char kRepoOwner[] = "BH2VOQ";
@@ -419,10 +427,16 @@ inline bool is_hex64(const std::string& s) {
 //
 // 规则（全部满足才放行）：
 //   ① 必须以 "https://" 开头（大小写不敏感）—— http / file / data 一律拒绝
-//   ② host 部分（到第一个 '/' 为止）必须**精确等于** kAllowedHost 或 kAllowedDownloadHost
+//   ② host 部分（到第一个 '/' 为止）必须**精确等于**以下三个编译期常量之一：
+//       kAllowedHost / kAllowedDownloadHost / kAllowedChinaHost
 //       ⟹ 天然拒绝 github.com.evil.com / evilgithub.com / github.com:8080 / user@github.com
+//          / rlplayer.rainlain.com.evil.com / rlplayer.rainlain.com:8080
 //   ③ 必须有非空路径，且不得含空白与换行（防注入/请求拆分）
 //   ④ 长度上限 4096
+//
+// 1.1.5.1：新增第三个主机 rlplayer.rainlain.com（中国大陆后台）。**精确匹配**规则不变，
+//   只是多放一个写死的主机名 —— 形近域名后缀伪装、端口变体、userinfo 依旧被拒
+//   （见 tests/test_update_check.cpp 与 tests/test_update_channel.cpp 的对抗用例）。
 // ---------------------------------------------------------------------------
 inline bool update_download_url_allowed(const std::string& url) {
     if (url.empty() || url.size() > 4096) return false;
@@ -440,13 +454,15 @@ inline bool update_download_url_allowed(const std::string& url) {
     const size_t slash = rest.find('/');
     if (slash == std::string::npos || slash == 0) return false;      // 必须有主机名 + 路径
     const std::string host = detail::lower(rest.substr(0, slash));
-    // ← 精确主机（②）。两个主机都要放行，但**都在编译期写死**，不接受运行时来源：
+    // ← 精确主机（②）。三个主机都要放行，但**都在编译期写死**，不接受运行时来源：
     //   · raw.githubusercontent.com = 清单文件（匿名读，不吃 API 速率限制）
     //   · github.com               = release 附件下载（dmg 走这里，体积大不进 git 历史）
+    //   · rlplayer.rainlain.com    = 中国大陆后台（1.1.5.1 框架，签名清单 + files[] 对象）
     // 注意：GitHub 的 release 下载会 302 到 objects.githubusercontent.com，
     // 但**清单里写的是 github.com**，重定向由 NSURLSession 自己跟随，
     // 所以白名单只需要放行起始地址，不必把 objects.* 也加进来。
-    if (host != kAllowedHost && host != kAllowedDownloadHost) return false;
+    if (host != kAllowedHost && host != kAllowedDownloadHost &&
+        host != kAllowedChinaHost) return false;
     if (slash + 1 >= rest.size()) return false;                      // ③ 路径非空
     return true;
 }
@@ -667,6 +683,29 @@ inline CheckResult evaluate_update_check(const std::string& localVersion,
 }
 
 // ---------------------------------------------------------------------------
+// 5a. 1.1.5.1：中国大陆通道框架阶段的「检查更新」结论（纯函数、可离线单测）
+//
+// 后台 dmg 未适配，本轮**不发起真实请求**。cn 分支走这里的唯一结论：
+//   Decision::FailedNetwork 等价的诚实失败态 + 「后台准备中/暂不可用」提示。
+// 硬约束（用户 2026-11-09 语义）：绝不 UpToDate（不谎报已是最新）、
+//   绝不 UpdateAvailable、绝不引导百度网盘、error 不含任何 URL/token/凭据。
+//
+// 为什么放纯逻辑层而不是直接写在 mac_update.mm 的 check() 里：
+//   ① 「不可用时不返回 up-to-date」这条判据必须能离线单测（见 test_update_channel.cpp）；
+//   ② 等后台就绪，只需用真实「取签名清单 → PS256 验签 → 取 files[] 对象 →
+//      deflate 解包 → 整包重组 → evaluate_update_check」替换本函数体，
+//      **调用点与 CheckResult 失败语义完全不变**（与全球通道同一条回传链路）；
+//   ③ 诚实文案是 update_channel.h 的单一常量 kChinaChannelUnavailableMessage。
+// ---------------------------------------------------------------------------
+inline CheckResult evaluate_china_channel_placeholder() {
+    CheckResult r;
+    r.decision = Decision::FailedNetwork;   // 诚实失败态，绝不是「已是最新」
+    r.error    = kChinaChannelUnavailableMessage;
+    r.status   = 0;                          // 传输层根本没发生（本轮不发请求）
+    return r;
+}
+
+// ---------------------------------------------------------------------------
 // 5b. 安装前门禁：verify_downloaded_file —— **篡改/截断必失败**
 //
 // 这是整条更新链上唯一决定"要不要覆盖 /Applications 里的 .app"的函数。
@@ -807,7 +846,8 @@ inline ReleaseAssetLookup find_manifest_asset_in_releases(const std::string& jso
 //   * token 只允许出现在这个 .app 外的文件里（0600），**绝不硬编码**，
 //     绝不写日志 / 错误信息 / UI 文案（本结构体的 error 与回显字段都不含 token）
 //
-// 文件格式：`key=value`，'#' 开头为注释，键名固定 token / manifest_url。
+// 文件格式：`key=value`，'#' 开头为注释，键名固定 token / manifest_url / channel。
+//   1.1.5.1 新增 channel=global|cn：缺省 / 非法值安全回退 kDefaultChannel（见 update_channel.h）。
 // ---------------------------------------------------------------------------
 struct Config {
     bool  fileExists = false;
@@ -815,6 +855,9 @@ struct Config {
     std::string token;          // ⚠️ 只在内存里活一次请求，用完即弃；绝不外传
     std::string manifestUrl = kDefaultManifestUrl;
     bool  manifestUrlValid = true;   // 给了但不在白名单 → false（拒绝，不静默回退）
+    // 1.1.5.1：更新通道。**单一真相源** = kDefaultChannel（update_channel.h），
+    // 不在这里另写默认值，避免两处分叉。
+    UpdateChannel channel = kDefaultChannel;
     std::string warning;        // 配置层面的提示（不含 token）
 };
 
@@ -849,6 +892,12 @@ inline Config parse_update_config(const std::string& text) {
                         c.manifestUrl = v;
                         c.warning = "update.conf: manifest_url 不在白名单（必须 https://raw.githubusercontent.com/）";
                     }
+                } else if (k == "channel") {
+                    // 1.1.5.1：非法值安全回退到默认通道，并把 warning 透出（绝不静默选未知通道）。
+                    // 已有的 manifest_url 警告优先级更高：不被 channel 的警告覆盖。
+                    const ChannelParseResult cr = parse_channel(v);
+                    c.channel = cr.channel;
+                    if (!cr.valid && c.warning.empty()) c.warning = cr.warning;
                 }
             }
         }
@@ -873,6 +922,13 @@ inline std::string default_update_conf_template() {
     s += "# manifest_url：公开更新清单地址（必须 https://raw.githubusercontent.com/ 前缀）\n";
     s += "manifest_url=";
     s += kDefaultManifestUrl;
+    s += "\n";
+    s += "#\n";
+    s += "# channel：更新通道。global = 全球（GitHub，现有行为）；cn = 中国大陆（后台）。\n";
+    s += "#        1.1.5.1 框架阶段：中国大陆后台尚未适配，选 cn 会明确提示「暂不可用」，\n";
+    s += "#        不会谎报「已是最新」。留空或填非法值 = 安全回退 global。\n";
+    s += "channel=";
+    s += channel_config_value(kDefaultChannel);
     s += "\n";
     return s;
 }

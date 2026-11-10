@@ -1249,6 +1249,21 @@ static bool native_ui_lang_is_en() {
 #endif
             break;
         }
+        // ---------------- 2026-11-05（1.1.5.1）更新通道切换 ----------------
+        // 只把**抽象枚举值**交给 mac_update 写进 .app 外的 update.conf 的 channel= 键。
+        // 这里不做任何判定、不解析 URL、不碰页面给的其它内容：
+        //   parse_host_message 已把命令白名单化成 global / cn，非法值根本不会到这里。
+        case HostAction::UpdateSetChannel: {
+#ifdef RL_HAVE_MAC_UPDATE
+            std::string cerr;
+            if (!rta::update::set_update_channel(hm.arg, cerr)) {
+                fprintf(stderr, "RLPlayer: 写入更新通道失败：%s\n", cerr.c_str());
+            }
+#else
+            (void)hm;
+#endif
+            break;
+        }
         case HostAction::UpdateInstall: {
 #ifdef RL_HAVE_MAC_UPDATE
             // 用最近一次 check 的结果作为安装计划（避免安装时被页面塞新的 URL）

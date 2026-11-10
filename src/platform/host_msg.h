@@ -29,6 +29,10 @@ enum class HostAction {
     // 2026-10-26 F-4 自动更新（用户要求「云端发布更新 → 自动提示 → 客户端一键更新」）
     UpdateCheck,  // 查一次更新（异步：结果通过 update:status:* 回传页面）
     UpdateInstall,// 一键更新：下载 → 校验 sha256 → 挂载 dmg → 替换 .app → 提示重启
+    // 1.1.5.1：设置页切换「更新通道」。arg 只允许 global / cn 两个**抽象枚举值**。
+    //   ⚠️ 与上面两条同理：绝不接受页面传 URL / token / 任意下载参数 ——
+    //   宿主只把它写进 .app 外的 update.conf 的 channel= 键，清单地址仍是代码常量。
+    UpdateSetChannel,
     // 2026-10-26 邮件反馈通道（客户端写反馈 → 诊断包作附件）
     //
     // ⚠️ 安全设计的核心：**收件人不在消息里**。
@@ -125,6 +129,20 @@ inline HostMessage parse_host_message(const std::string& m) {
     // **绝不接受页面传 URL** —— 否则网页侧任何脚本都能命令宿主下载任意文件。
     if (m == "update:check")   { r.action = HostAction::UpdateCheck;   return r; }
     if (m == "update:install") { r.action = HostAction::UpdateInstall; return r; }
+    // 2026-11-05（1.1.5.1）：更新通道切换。**只认两个字面量**，其余一律 None。
+    //   "update:channel:global" → arg="global"
+    //   "update:channel:cn"     → arg="cn"（容错 "china" → 规范化成 "cn"）
+    // 为什么是白名单而不是"取冒号后的全部"：这条命令最终会被写成配置文件，
+    //   放任任意字符串等于让页面决定"配置文件里写什么"（哪怕不是 URL 也不该）。
+    if (m.rfind("update:channel:", 0) == 0) {
+        const std::string v = m.substr(15);            // "update:channel:" 共 15 字节
+        if (v == "global") { r.action = HostAction::UpdateSetChannel; r.arg = "global"; return r; }
+        if (v == "cn")     { r.action = HostAction::UpdateSetChannel; r.arg = "cn";     return r; }
+        if (v == "china")  { r.action = HostAction::UpdateSetChannel; r.arg = "cn";     return r; }
+        r.action = HostAction::None;
+        r.reason = "unknown update channel";
+        return r;
+    }
 
     // ---------------- 2026-10-26 邮件反馈通道 ----------------
     // 协议形态（**收件人永远不出现** —— 那是代码常量）：

@@ -186,8 +186,17 @@ int main() {
         "https://github.com/BH2VOQ/RLPlayer-Mac/releases/download/v1.0.4/x.dmg",
         "https://raw.githubusercontent.com/BH2VOQ/RLPlayer-Mac/main/latest.json",
         "HTTPS://RAW.GITHUBUSERCONTENT.COM/x/y.dmg",     // scheme/host 大小写不敏感
+        // 1.1.5.1：中国大陆后台主机（精确匹配）——清单地址与对象地址都必须放行
+        "https://rlplayer.rainlain.com/api/v1/update/macos/latest",
     };
     for (const char* u : allow) ck(update_download_url_allowed(u), std::string("放行：") + u);
+    // 对象地址要拼 64 hex，无法写成 const char* 字面量，单独一条 ck()（判据等价）
+    {
+        const std::string objUrl =
+            std::string("https://rlplayer.rainlain.com/api/v1/update/macos/objects/") +
+            std::string(64, 'a') + ".zip";
+        ck(update_download_url_allowed(objUrl), std::string("放行：") + objUrl);
+    }
 
     const char* deny[] = {
         "http://raw.githubusercontent.com/x/y.dmg",               // 非 https
@@ -203,6 +212,12 @@ int main() {
         "javascript:alert(1)",                                    // 脚本
         "",                                                       // 空
         "https://raw.githubusercontent.com/x/y.dmg\nHost: evil.com",  // CRLF 注入
+        // 1.1.5.1：中国大陆后台主机 —— 精确匹配，形近/端口/userinfo/无路径全拒
+        "https://rlplayer.rainlain.com.evil.com/x/y.zip",
+        "https://evilrlplayer.rainlain.com/x/y.zip",
+        "https://rlplayer.rainlain.com:8443/x/y.zip",
+        "https://user@rlplayer.rainlain.com/x/y.zip",
+        "http://rlplayer.rainlain.com/x/y.zip",
     };
     for (const char* u : deny) ck(!update_download_url_allowed(u), std::string("拒绝：") + u);
 

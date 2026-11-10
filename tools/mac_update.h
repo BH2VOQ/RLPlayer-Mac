@@ -237,6 +237,13 @@ std::string update_conf_path();
 // 首次运行写出 0600 的模板（token 为空 ⟹ 匿名路径）。已存在则不动。
 bool ensure_conf_template(std::string& err);
 
+// 1.1.5.1：设置页切换「更新通道」时，把抽象枚举值写进 .app 外的 update.conf 的 channel= 键。
+// ⚠️ 硬边界的一部分：页面只发 update:channel:global|cn 这种抽象枚举命令，
+//    **URL / token 从不下发**；本函数也只接受 global / cn / china（用 parse_channel 校验），
+//    绝不把 URL / token / 任意字符串写进配置文件，只替换或追加 channel=<global|cn> 一行。
+// 返回 true=成功；err 填原因（不含凭据）。实现见 mac_update.mm。
+bool set_update_channel(const std::string& channelValue, std::string& err);
+
 // 测试/诊断用：把可能含 token 的字符串脱敏（连长度都不暴露）。
 std::string redact_token(const std::string& input, const std::string& token);
 

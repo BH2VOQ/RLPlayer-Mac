@@ -280,6 +280,52 @@ inline bool EnsureConfTemplate(const std::string& path, std::string& err) {
     return true;
 }
 
+// 1.1.5.1：写 channel= 时判断「等号前的键」用。trim + lower，别把注释行
+// （"  # channel=..."）误判成配置行；也别和 src/net/update_check.h 的 detail 命名空间耦合。
+inline std::string ConfKeyNormalize(const std::string& s) {
+    size_t b = 0, e = s.size();
+    while (b < e && std::isspace((unsigned char)s[b])) ++b;
+    while (e > b && std::isspace((unsigned char)s[e - 1])) --e;
+    std::string out = s.substr(b, e - b);
+    for (char& c : out) c = (char)std::tolower((unsigned char)c);
+    return out;
+}
+
+// ---------------------------------------------------------------------------
+// 1.1.5.1：中国大陆更新通道的「检查更新」骨架（本轮只返回诚实失败态）
+//
+// ⚠️ 本轮**不发起任何网络请求、不验签、不解包、不重组整包**。后台 dmg 适配好之后，
+//    只需填实本函数（与对象获取），页面 / 配置 / 回传链路都不用再改。
+//
+// 「切到大陆后也能做到现有的更新效果」——既有链路的每一步调用点与失败语义在这里钉住
+// （顺序本身就是安全边界，不许重排；同 tools/mac_update.h 的 install_from_local_dmg）：
+//   ① 取签名清单            GET kChinaManifestUrl → ChannelManifest（后台 PS256 签名清单）
+//   ② PS256 验签            ← **必须先于 ③④**；通过后置 ChannelManifest::signatureVerified=true。
+//                             验签/清单失败按 Decision::FailedParse / FailedAuth 等诚实失败处理，
+//                             绝不落到 UpToDate，也绝不落到 UpdateAvailable。
+//   ③ 按 files[] 取对象      GET /api/v1/update/macos/objects/<sha256>.zip
+//                             ↔ ChannelManifest::objects / ChannelObject
+//   ④ deflate 解包 + 整包重组（macOS 只做**全量更新**，不做本地 sha 差异）→ 得到完整 .dmg；
+//                             完成后置 ChannelManifest::objectsAssembled=true。
+//                             ChannelManifest::ready() 为 false 时**绝不**进入 ⑤⑥，
+//                             也不得返回 UpdateAvailable / UpToDate。
+//   ⑤ verify_downloaded_file(sha256+size)  ← **必须在 mount 之前**
+//                             （与既有 install_from_local_dmg 固定顺序一致；失败即丢弃临时文件）
+//   ⑥ install_from_local_dmg（mount_image → install_app_bundle → unmount_image）
+//                             →「检查→提示→下载→校验→挂载→整包替换 .app」既有链路。
+//
+// cn 与 global **共用** CheckResult / update:status 回传链路与失败语义：
+//   只有清单 / 对象来源不同；Decision::FailedNetwork / FailedAuth / FailedHttp /
+//   FailedParse / FailedBadUrl 五种失败**都不得等于 UpToDate**（也不得等于 UpdateAvailable）。
+//   本轮唯一结论由纯逻辑层 evaluate_china_channel_placeholder() 给出：FailedNetwork + 诚实提示，
+//   不引导百度网盘，error 里不含任何 URL / token / 凭据。
+// ---------------------------------------------------------------------------
+inline CheckResult check_china_channel() {
+    // 框架阶段：①②③④ 全未实现 ⟹ 不碰网络、不碰文件系统、不碰 SecKey / zlib。
+    // 等后台 dmg 就绪，把上面六步按序填进这里，并保持返回类型与失败语义不变。
+    return evaluate_china_channel_placeholder();
+}
+
 // ---------------- HTTP ----------------
 struct HttpOutcome {
     bool ok = false;
@@ -544,6 +590,107 @@ bool ensure_conf_template(std::string& err) {
     return detail_native::EnsureConfTemplate(detail_native::UpdateConfPath(), err);
 }
 
+// ---------------------------------------------------------------------------
+// 1.1.5.1：把「用户选的更新通道」写进 .app 外的 update.conf 的 channel= 键
+//
+// 分工（硬边界）：页面只发 update:channel:global|cn 这种**抽象枚举命令**，
+//   本函数也只接受 global / cn / china（用 parse_channel 校验），
+//   **绝不**把 URL / token / 任意字符串写进配置文件 —— 只写 channel=<global|cn> 一行。
+//
+// 为什么必须写 update.conf 而不是只存 /api/settings：
+//   begin_check() 读的是 update.conf（detail_native::LoadConfig）；页面设置走的是另一个
+//   文件 rlplayer-settings.conf。只存后者 ⟹ 通道选择永远不会生效。
+//
+// 保留文件其它内容：逐行扫描，只替换「等号前键 == channel」的那一行（注释行
+// "  # channel=..." 不算，由 ConfKeyNormalize 处理）；没有就追加在末尾。
+// 权限：保持 0600（不存在时先按模板 0600 创建，绝不 0644 落地后 chmod）。
+// ---------------------------------------------------------------------------
+bool set_update_channel(const std::string& channelValue, std::string& err) {
+    err.clear();
+    // ① 只接受抽象枚举值。非法值直接拒绝，**绝不**把原串写进文件。
+    const ChannelParseResult cr = parse_channel(channelValue);
+    if (channelValue.empty() || !cr.valid) {
+        err = "通道取值非法（只接受 global / cn）";
+        return false;
+    }
+    const std::string canonical = channel_config_value(cr.channel);
+
+    const std::string path = detail_native::UpdateConfPath();
+    if (path.empty()) { err = "配置目录不可用"; return false; }
+
+    // ② 读现有内容。文件不存在 ⟹ 先用**模板**打底（token / manifest_url 的注释与缺省值
+    //    都在模板里；只写一行 channel= 会让用户拿到一个没有任何说明的残缺配置文件）。
+    std::string text;
+    {
+        struct stat st {};
+        if (::stat(path.c_str(), &st) == 0) {
+            std::ifstream f(path, std::ios::binary);
+            if (!f) { err = "无法读取 update.conf"; return false; }
+            text.assign((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+        } else {
+            text = default_update_conf_template();   // 模板本身已含 channel=<默认值>
+        }
+    }
+    const bool existed = !text.empty() || ::access(path.c_str(), F_OK) == 0;
+
+    // ③ 逐行重建：命中 channel 键就替换，否则原样保留
+    std::string out;
+    out.reserve(text.size() + 64);
+    bool replaced = false;
+    size_t pos = 0;
+    while (pos <= text.size()) {
+        const size_t nl = text.find('\n', pos);
+        const std::string line = (nl == std::string::npos) ? text.substr(pos)
+                                                          : text.substr(pos, nl - pos);
+        const size_t eq = line.find('=');
+        bool isChannelKey = false;
+        if (eq != std::string::npos) {
+            isChannelKey = (detail_native::ConfKeyNormalize(line.substr(0, eq)) == "channel");
+        }
+        if (isChannelKey) {
+            out += "channel=";
+            out += canonical;
+            out += "\n";
+            replaced = true;
+        } else {
+            out += line;
+            out += "\n";
+        }
+        if (nl == std::string::npos) break;
+        pos = nl + 1;
+    }
+    if (!replaced) {
+        // 末尾没有换行时先补一个，避免和上一行粘在一起
+        if (!out.empty() && out.back() != '\n') out += "\n";
+        out += "channel=";
+        out += canonical;
+        out += "\n";
+    }
+
+    // ④ 原子落地：同目录临时文件 + rename，全程 0600
+    const std::string tmp = path + ".tmp";
+    ::unlink(tmp.c_str());
+    const int fd = ::open(tmp.c_str(), O_WRONLY | O_CREAT | O_EXCL, 0600);
+    if (fd < 0) { err = "无法写入 update.conf"; return false; }
+    ssize_t written = ::write(fd, out.data(), out.size());
+    ::close(fd);
+    if (written < 0 || (size_t)written != out.size()) {
+        ::unlink(tmp.c_str());
+        err = "写入 update.conf 失败";
+        return false;
+    }
+    if (::rename(tmp.c_str(), path.c_str()) != 0) {
+        ::unlink(tmp.c_str());
+        err = "替换 update.conf 失败";
+        return false;
+    }
+    // 已存在的旧文件可能在别处被放宽过权限；这里显式收回 0600（幂等）
+    ::chmod(path.c_str(), 0600);
+
+    (void)existed;
+    return true;
+}
+
 std::string redact_token(const std::string& input, const std::string& token) {
     return detail_native::RedactToken(input, token);
 }
@@ -560,6 +707,23 @@ void begin_check(ProgressFn progress, DoneFn done) {
         const bool useToken = cfg.hasToken;
 
         CheckResult result;
+
+        // ---- 1.1.5.1：按「更新通道」分流 ----
+        // global = 现有 GitHub 路径，下面的代码**一字不变**（用户硬要求：行为与原版完全一致）。
+        // cn     = 中国大陆后台：本轮只有骨架（不联网、不验签、不解包），
+        //          结论是诚实失败态（FailedNetwork + 「后台准备中」），绝不冒充「已是最新」。
+        // 两条通道共用 CheckResult / update:status 回传链路与失败语义，只有清单/对象来源不同。
+        if (cfg.channel == UpdateChannel::ChinaMainland) {
+            result = detail_native::check_china_channel();
+            char line[512];
+            std::snprintf(line, sizeof line, "UPDATE_CHECK_FAIL status=%d decision=%s channel=cn err=%s\n",
+                          result.status, result.code(), result.error.c_str());
+            fprintf(stderr, "RLPlayer: 更新检查失败 %s", line);
+            detail_native::AppendUpdateLog(line);
+            if (done) done(result);
+            return;
+        }
+
         if (!cfg.manifestUrlValid) {
             // 配置文件里写了非白名单地址 ⟹ 拒绝（不静默回退，免得用户以为在查公开清单）
             result.decision = Decision::FailedBadUrl;
