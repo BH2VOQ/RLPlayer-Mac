@@ -13,6 +13,7 @@
 //   B2  不适用的信号链节点必须真的灰掉（PCM 路径下的 SDM、DoP 下的 shaper）。
 #import <AppKit/AppKit.h>
 #import "RLPWorkbench.h"
+#import "RLPSignalChain.h"
 #import "RLPWorkbenchViewController.h"
 #import "RLPSupport.h"
 
@@ -257,6 +258,19 @@ int main() {
             if ([b.title rangeOfString:RLPTr(@"设置")].location != NSNotFound) [bad addObject:b.title];
         }
         CK(bad.count == 0, "B5 工作台没有跳设置页的入口（当场可切）", [bad componentsJoinedByString:@","]);
+
+        // ---- B11 信号链详情入口（对齐 web 的「信号链」弹窗）：静态链之外还能看真实播放路径 ----
+        NSButton *chainDetail = nil;
+        for (NSView *v in all) {
+            if ([v isKindOfClass:[NSButton class]] && [v.identifier isEqualToString:@"wb.chaindetail"])
+                chainDetail = (NSButton *)v;
+        }
+        CK(chainDetail != nil, "B11a 有「本次播放路径」详情按钮", @"");
+        CK(chainDetail != nil && chainDetail.title.length > 0, "B11b 详情按钮标题可读",
+           chainDetail.title ?: @"nil");
+        // 纯函数模块链接在位：给一份 ok:false 响应，节点数必须是 0（未播放不填假节点）。
+        CK([RLPSignalChain nodesForResponse:@{@"ok": @NO}].count == 0,
+           "B11c 信号链纯函数已链接（未播放不填假节点）", @"");
 
         std::printf("\n%s（%d 项失败）\n", gFail == 0 ? "workbench 全部通过" : "workbench 有失败", gFail);
         return gFail == 0 ? 0 : 1;

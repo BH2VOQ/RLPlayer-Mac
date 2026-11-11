@@ -2070,6 +2070,8 @@ inline const I18nPair* i18n_table(std::size_t* count) {
         {"已拉到 %ld 个模型", "Loaded %ld models"},
         {"已拉到 %ld 个模型，但当前模型不在列表里，建议重新选择（不会自动改配置）", "Loaded %ld models, but the current model is not in the list; please reselect (config is unchanged)"},
         {"当前值，不在列表中", "current, not in list"},
+        {"本次播放路径…", "Current playback path…"},
+        {"读取信号链…", "Loading signal chain…"},
         {"网络请求失败", "Network request failed"},
         {"尚未配置 API Key", "API key is not configured yet"},
         {"未选择 UPnP / DLNA 渲染器：设置 → 输出 → 目标渲染器（点「重新发现」刷新列表）", "No UPnP / DLNA renderer selected: Settings → Output → Target renderer (click Discover again to refresh the list)"},

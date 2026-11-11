@@ -17,6 +17,7 @@
 #import "RLPEqualizerView.h"
 #import "RLPSupport.h"
 #import "RLPTheme.h"
+#import "RLPSignalChain.h"
 
 static NSString *const kABSlotsKey = @"RLPWorkbenchABSlots";
 static const NSInteger kABSlotCount = 4;
@@ -187,10 +188,117 @@ static const NSInteger kABSlotCount = 4;
     [NSLayoutConstraint activateConstraints:cs];
 }
 
+#pragma mark - 信号链详情（/api/signal 真实播放路径，对齐 web showChain）
+
+/// 点「本次播放路径…」：拉 /api/signal，用 RLPSignalChain 纯函数生成节点并排版成弹层。
+/// - 没开始播放（ok:false）⟹ 如实写「还没有开始播放」，不填假节点。
+/// - 节点种类决定圆点颜色（lossless 绿 / dsp 蓝 / gpu 蓝绿 / tel 灰），与 web .cnode 同口径。
+- (void)showSignalChainDetail:(NSButton *)sender {
+    RLPTheme *t = [RLPTheme current];
+    NSStackView *card = [[NSStackView alloc] init];
+    card.orientation = NSUserInterfaceLayoutOrientationVertical;
+    card.alignment = NSLayoutAttributeLeading;
+    card.spacing = 6;
+    card.edgeInsets = NSEdgeInsetsMake(16, 18, 16, 18);
+    card.translatesAutoresizingMaskIntoConstraints = NO;
+    [[card.widthAnchor constraintEqualToConstant:560] setActive:YES];
+
+    NSTextField *hero = RLPLabel(RLPTr(@"读取信号链…"),
+        [NSFont systemFontOfSize:14 weight:NSFontWeightSemibold], t.text);
+    hero.maximumNumberOfLines = 2;
+    hero.lineBreakMode = NSLineBreakByWordWrapping;
+    [[hero.widthAnchor constraintEqualToConstant:520] setActive:YES];
+    [card addArrangedSubview:hero];
+
+    NSStackView *nodeList = [[NSStackView alloc] init];
+    nodeList.orientation = NSUserInterfaceLayoutOrientationVertical;
+    nodeList.alignment = NSLayoutAttributeLeading;
+    nodeList.spacing = 5;
+    nodeList.translatesAutoresizingMaskIntoConstraints = NO;
+    [[nodeList.widthAnchor constraintEqualToConstant:520] setActive:YES];
+    [card addArrangedSubview:nodeList];
+
+    NSViewController *vc = RLPCardController(card, 580, 320);
+    NSView *anchor = sender ?: self.view;
+    RLPShowCardPopover(anchor, vc, 580);
+
+    __weak __typeof__(self) weakSelf = self;
+    [[RLPCoreClient shared] getJSON:@"/api/signal" completion:^(NSDictionary * _Nullable json) {
+        __typeof__(self) self_ = weakSelf;
+        (void)self_;
+        NSDictionary *resp = json ?: @{};
+        NSString *why = nil;
+        NSString *title = [RLPSignalChain heroTitleForResponse:resp why:&why];
+        hero.stringValue = [title stringByAppendingFormat:@"\n%@", why ?: @""];
+        hero.textColor = ([title rangeOfString:@"BIT-PERFECT"].location != NSNotFound) ? t.ok
+                       : ([title rangeOfString:@"非 Bit-Perfect"].location != NSNotFound ? t.warn : t.text);
+
+        for (NSView *v in [nodeList.arrangedSubviews copy]) {
+            [nodeList removeArrangedSubview:v];
+            [v removeFromSuperview];
+        }
+        NSArray<RLPSignalNode *> *nodes = [RLPSignalChain nodesForResponse:resp];
+        if (!nodes.count) {
+            NSTextField *empty = RLPLabel(RLPTr(@"还没有开始播放"), t.body, t.mut);
+            [nodeList addArrangedSubview:empty];
+            return;
+        }
+        for (RLPSignalNode *n in nodes) {
+            NSStackView *row = [[NSStackView alloc] init];
+            row.orientation = NSUserInterfaceLayoutOrientationHorizontal;
+            row.alignment = NSLayoutAttributeTop;
+            row.spacing = 8;
+            // 圆点：颜色 = 节点种类
+            NSView *dot = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 8, 8)];
+            dot.wantsLayer = YES;
+            dot.layer.cornerRadius = 4;
+            NSColor *dotColor = n.kind == RLPSignalNodeLossless ? t.ok
+                              : (n.kind == RLPSignalNodeGpu ? t.accent : t.mut);
+            dot.layer.backgroundColor = dotColor.CGColor;
+            [dot.widthAnchor constraintEqualToConstant:8].active = YES;
+            [dot.heightAnchor constraintEqualToConstant:8].active = YES;
+            [row addArrangedSubview:dot];
+
+            NSStackView *text = [[NSStackView alloc] init];
+            text.orientation = NSUserInterfaceLayoutOrientationVertical;
+            text.alignment = NSLayoutAttributeLeading;
+            text.spacing = 1;
+            NSString *head = n.badge.length
+                ? [NSString stringWithFormat:@"%@   ·   %@", n.key, n.badge] : n.key;
+            NSTextField *k = RLPLabel(head, [NSFont systemFontOfSize:12 weight:NSFontWeightSemibold], t.text);
+            NSTextField *v = RLPLabel(n.value, t.small, t.text2);
+            v.lineBreakMode = NSLineBreakByWordWrapping;
+            v.maximumNumberOfLines = 3;
+            [[v.widthAnchor constraintEqualToConstant:480] setActive:YES];
+            [text addArrangedSubview:k];
+            [text addArrangedSubview:v];
+            [row addArrangedSubview:text];
+            [nodeList addArrangedSubview:row];
+        }
+    }];
+}
+
 #pragma mark - ① 信号链
 
 - (void)buildChain {
     RLPTheme *t = [RLPTheme current];
+    // 信号链详情入口（对齐 web 的「信号链」弹窗 / bChain）：
+    // 下面 7 个节点是**按设置推导**的静态链；这里再给一个按钮打开 /api/signal 的
+    // **本次真实播放路径**（逐节点真值 + bit-perfect 结论），两者不互相冒充。
+    NSStackView *chainHead = [[NSStackView alloc] init];
+    chainHead.orientation = NSUserInterfaceLayoutOrientationHorizontal;
+    chainHead.alignment = NSLayoutAttributeCenterY;
+    chainHead.spacing = 10;
+    NSTextField *chainTitle = RLPLabel(RLPTr(@"信号链"),
+        [NSFont systemFontOfSize:14 weight:NSFontWeightSemibold], t.text);
+    [chainHead addArrangedSubview:chainTitle];
+    NSButton *detail = [NSButton buttonWithTitle:RLPTr(@"本次播放路径…")
+        target:self action:@selector(showSignalChainDetail:)];
+    detail.bezelStyle = NSBezelStyleRounded;
+    detail.identifier = @"wb.chaindetail";
+    [chainHead addArrangedSubview:detail];
+    [self addFullWidth:chainHead height:22];
+
     self.bpLine = RLPLabel(@"", t.small, t.mut);
     self.bpLine.translatesAutoresizingMaskIntoConstraints = NO;
     self.bpLine.maximumNumberOfLines = 2;

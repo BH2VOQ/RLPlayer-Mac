@@ -223,7 +223,7 @@ if(APPLE)
     tools/native_ui/RLPListeningRoom.mm
     tools/native_ui/RLPTrackActions.mm
     tools/native_ui/RLPWorkbench.mm
-    tools/native_ui/RLPWorkbenchViewController.mm
+    tools/native_ui/RLPWorkbenchViewController.mm tools/native_ui/RLPSignalChain.mm
     tools/mac_update.mm)
   set_source_files_properties(
     tools/mac_update.mm
@@ -249,7 +249,7 @@ if(APPLE)
     tools/native_ui/RLPKnowledgeView.mm tools/native_ui/RLPFunctionalAudit.mm
     tools/native_ui/RLPAnalysisSummary.mm tools/native_ui/RLPListeningRoom.mm
     tools/native_ui/RLPTrackActions.mm tools/native_ui/RLPWorkbench.mm
-    tools/native_ui/RLPWorkbenchViewController.mm
+    tools/native_ui/RLPWorkbenchViewController.mm tools/native_ui/RLPSignalChain.mm
     PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
   target_include_directories(rlplayer_native PRIVATE
     ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tools ${CMAKE_SOURCE_DIR}/tools/native_ui)
@@ -342,7 +342,7 @@ if(APPLE)
   # B2 钉住"不适用的信号链节点必须真的灰掉"（PCM 下的 SDM、DoP 下的 shaper）。
   add_executable(test_workbench tests/test_workbench.mm
     tools/native_ui/RLPWorkbench.mm
-    tools/native_ui/RLPWorkbenchViewController.mm
+    tools/native_ui/RLPWorkbenchViewController.mm tools/native_ui/RLPSignalChain.mm
     tools/native_ui/RLPEqualizerView.mm
     tools/native_ui/RLPPageViewController.mm
     tools/native_ui/RLPSupport.mm
@@ -353,7 +353,7 @@ if(APPLE)
   )
   set_source_files_properties(tests/test_workbench.mm
     tools/native_ui/RLPWorkbench.mm
-    tools/native_ui/RLPWorkbenchViewController.mm
+    tools/native_ui/RLPWorkbenchViewController.mm tools/native_ui/RLPSignalChain.mm
     tools/native_ui/RLPEqualizerView.mm
     tools/native_ui/RLPPageViewController.mm
     tools/native_ui/RLPSupport.mm
@@ -426,6 +426,19 @@ if(APPLE)
     "-framework AppKit" "-framework Security")
   add_test(NAME servers_view COMMAND test_servers_view)
   set_tests_properties(servers_view PROPERTIES TIMEOUT 180)
+
+  # 2026-11-12：信号链详情（对齐 web showChain 的 /api/signal 语义）。
+  # JSON→节点是纯函数（不碰 AppKit/网络），逐分支钉住升/降采样方向、GPU、DSD、AirPlay、
+  # bit-perfect 结论、空响应不填假节点。UI 只排版，不再自己算语义。
+  add_executable(test_signal_chain tests/test_signal_chain.mm
+    tools/native_ui/RLPSignalChain.mm)
+  set_source_files_properties(tests/test_signal_chain.mm
+    tools/native_ui/RLPSignalChain.mm
+    PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
+  target_include_directories(test_signal_chain PRIVATE ${CMAKE_SOURCE_DIR}/tools/native_ui)
+  target_link_libraries(test_signal_chain PRIVATE "-framework Foundation")
+  add_test(NAME signal_chain COMMAND test_signal_chain)
+  set_tests_properties(signal_chain PROPERTIES TIMEOUT 60)
 
   # 2026-11-11：曲目右键菜单完整性（对齐 web trackActionMenu 四项核心动作）。
   # 触发原因：原生曲目页只有两项、专辑详情完全没有右键菜单、队列只有两项。

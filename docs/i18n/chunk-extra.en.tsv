@@ -520,3 +520,5 @@ AI 资料补全与音频输入采集：在左侧「设置」里调整。	AI meta
 已拉到 %ld 个模型	Loaded %ld models	AI 模型下拉成功提示
 已拉到 %ld 个模型，但当前模型不在列表里，建议重新选择（不会自动改配置）	Loaded %ld models, but the current model is not in the list; please reselect (config is unchanged)	AI 模型当前值不在列表提示
 当前值，不在列表中	current, not in list	AI 模型下拉当前值项后缀
+本次播放路径…	Current playback path…	工作台信号链详情入口
+读取信号链…	Loading signal chain…	信号链详情弹层初始态
