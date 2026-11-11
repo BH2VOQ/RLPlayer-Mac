@@ -94,7 +94,13 @@ static const CGFloat kTopbarHeight = 46.0;
     win.backgroundColor = t.bg;
     win.minSize = NSMakeSize(900, 600);
     win.appearance = [NSAppearance appearanceNamed:t.isLight ? NSAppearanceNameAqua : NSAppearanceNameDarkAqua];
-    [win setFrameAutosaveName:@"RLPNativeMainWindow"];
+    // 默认尺寸 1180×760（用户 2026-11-11 明确满意的 web 版尺寸）。
+    // autosave 键**换名**：旧键 RLPNativeMainWindow 里存着开发期离屏审计写坏的宽度
+    // （1257/1361…），沿用旧键会让用户一直看到错尺寸。换键即丢弃那批脏记录，
+    // 同时保留"用户之后自己调整的大小仍被记住"这一正常行为。
+    [win setFrameAutosaveName:@"RLPNativeMainWindow.v2"];
+    if (![[NSUserDefaults standardUserDefaults] stringForKey:@"NSWindow Frame RLPNativeMainWindow.v2"])
+        [win setFrame:NSMakeRect(0, 0, 1180, 760) display:NO];
     [win center];
 
     self = [super initWithWindow:win];
@@ -156,11 +162,11 @@ static const CGFloat kTopbarHeight = 46.0;
     _modeSwitch.toolTip = RLPTr(@"聆听模式：安静听歌，设置就在这一页；专业模式：信号链、滤波与升频快速切换、A/B 对比");
     [_topbar addSubview:_modeSwitch];
 
-    NSButton *queueBtn = RLPSymbolButton(@"list.bullet", @"播放队列", self, @selector(onQueue:));
+    NSButton *queueBtn = RLPSymbolButton(@"list.bullet", RLPTr(@"播放队列"), self, @selector(onQueue:));
     queueBtn.translatesAutoresizingMaskIntoConstraints = NO;
     [_topbar addSubview:queueBtn];
 
-    NSButton *npBtn = RLPSymbolButton(@"play.rectangle", @"正在播放", self, @selector(onNowPlaying:));
+    NSButton *npBtn = RLPSymbolButton(@"play.rectangle", RLPTr(@"正在播放"), self, @selector(onNowPlaying:));
     npBtn.translatesAutoresizingMaskIntoConstraints = NO;
     [_topbar addSubview:npBtn];
 

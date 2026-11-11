@@ -253,7 +253,7 @@
 }
 
 - (void)onNew:(id)sender {
-    NSString *name = [self promptName:@"新建歌单" initial:@""];
+    NSString *name = [self promptName:RLPTr(@"新建歌单") initial:@""];
     if (!name) return;
     NSString *url = [NSString stringWithFormat:@"/api/sq/add?name=%@", RLPEnc(name)];
     __weak __typeof__(self) weakSelf = self;
@@ -266,7 +266,7 @@
 }
 
 - (void)onSaveCurrent:(id)sender {
-    NSString *name = [self promptName:@"把当前队列存为歌单" initial:@""];
+    NSString *name = [self promptName:RLPTr(@"把当前队列存为歌单") initial:@""];
     if (!name) return;
     NSString *url = [NSString stringWithFormat:@"/api/sq/save?name=%@", RLPEnc(name)];
     __weak __typeof__(self) weakSelf = self;
@@ -280,7 +280,7 @@
 
 - (void)onRename:(id)sender {
     if (!self.selectedName.length) return;
-    NSString *to = [self promptName:@"重命名歌单" initial:self.selectedName];
+    NSString *to = [self promptName:RLPTr(@"重命名歌单") initial:self.selectedName];
     if (!to || [to isEqualToString:self.selectedName]) return;
     NSString *url = [NSString stringWithFormat:@"/api/sq/rename?from=%@&to=%@",
                      RLPEnc(self.selectedName), RLPEnc(to)];

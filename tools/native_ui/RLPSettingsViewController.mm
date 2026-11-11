@@ -1,7 +1,10 @@
 // SPDX-FileCopyrightText: 2026 BH2VOQ <https://github.com/BH2VOQ>
 // SPDX-License-Identifier: GPL-3.0-or-later
 //
-// RLPSettingsViewController.mm — 设置页（纯 AppKit，10 个页签）
+// RLPSettingsViewController.mm — 设置页（纯 AppKit，7 个页签）
+//
+// 1.1.7.1：输出/PCM/SDM/均衡四页已整体迁入「专业工作台」（当场可切），设置不再重复。
+// 剩余按"工作台没有的"归类：播放 / 输入 / 校准 / 流媒体 / 元数据 / 高级 / 诊断。
 //
 // 设计取舍（照 web 版设置页的真实结构，不自己发明）：
 //   * 页签划分与 web 完全一致（data-g）：输出 / PCM / SDM / 输入 / 高级 / 均衡 / 校准 / 流媒体 / 诊断 / 元数据。
@@ -25,13 +28,16 @@
 
 #pragma mark - 页签定义
 
+// 1.1.7.1：输出 / PCM / SDM / 均衡四页的选项**已全部进专业工作台**（当场可切），
+// 设置里不再重复显示。剩下的按"工作台没有的"重新归类：
+//   播放（音量/响度补偿/预衰减 —— 工作台未覆盖，功能不能删）
+//   输入 / 校准 / 流媒体 / 元数据 / 高级 / 诊断
 typedef NS_ENUM(NSInteger, RLPSTab) {
-    RLPSTabOut = 0, RLPSTabPcm, RLPSTabSdm, RLPSTabIn, RLPSTabAdv,
-    RLPSTabEq, RLPSTabCal, RLPSTabStream, RLPSTabDiag, RLPSTabMeta
+    RLPSTabPlay = 0, RLPSTabIn, RLPSTabCal, RLPSTabStream, RLPSTabMeta, RLPSTabAdv, RLPSTabDiag
 };
 
-static NSString *const kTabKeys[] = { @"out", @"pcm", @"sdm", @"in", @"adv",
-                                      @"eq", @"cal", @"stream", @"diag", @"meta" };
+static NSString *const kTabKeys[] = { @"play", @"in", @"cal", @"stream", @"meta", @"adv", @"diag" };
+static const NSInteger kTabCount = 7;
 
 #pragma mark - 小工具
 
@@ -100,6 +106,7 @@ static NSView *RLPSGroup(NSString *title, NSString *desc, RLPTheme *t) {
 @property (nonatomic, strong) NSSwitch *betaSwitch;
 /// 播放时自动分析（autoanl）。1.1.7.1：开关从播放页挪到这里，播放页只留一行分析结果。
 @property (nonatomic, strong) NSSwitch *autoAnlSwitch;
+@property (nonatomic, strong) NSTextField *attenField;
 @property (nonatomic, strong) NSSwitch *streamSwitch;
 // 流媒体
 @property (nonatomic, strong) NSTextField *serverTableNote;
@@ -130,7 +137,7 @@ static NSView *RLPSGroup(NSString *title, NSString *desc, RLPTheme *t) {
     if (self) {
         _paneCache = [NSMutableDictionary dictionary];
         _loadedKeys = [NSMutableSet set];
-        _tab = RLPSTabOut;
+        _tab = RLPSTabPlay;
     }
     return self;
 }
@@ -142,11 +149,10 @@ static NSView *RLPSGroup(NSString *title, NSString *desc, RLPTheme *t) {
     NSView *host = self.contentView;
 
     self.tabs = [[NSSegmentedControl alloc] initWithFrame:NSZeroRect];
-    self.tabs.segmentCount = 10;
-    NSArray<NSString *> *names = @[ RLPTr(@"输出"), RLPTr(@"PCM"), RLPTr(@"SDM"), RLPTr(@"输入"),
-                                    RLPTr(@"高级"), RLPTr(@"均衡"), RLPTr(@"校准"), RLPTr(@"流媒体"),
-                                    RLPTr(@"诊断"), RLPTr(@"元数据") ];
-    for (NSInteger i = 0; i < (NSInteger)names.count && i < 10; ++i)
+    self.tabs.segmentCount = kTabCount;
+    NSArray<NSString *> *names = @[ RLPTr(@"播放"), RLPTr(@"输入"), RLPTr(@"校准"), RLPTr(@"流媒体"),
+                                    RLPTr(@"元数据"), RLPTr(@"高级"), RLPTr(@"诊断") ];
+    for (NSInteger i = 0; i < (NSInteger)names.count && i < kTabCount; ++i)
         [self.tabs setLabel:names[i] forSegment:i];
     self.tabs.trackingMode = NSSegmentSwitchTrackingSelectOne;
     self.tabs.selectedSegment = 0;
@@ -176,7 +182,7 @@ static NSView *RLPSGroup(NSString *title, NSString *desc, RLPTheme *t) {
         [self.statusLine.bottomAnchor constraintEqualToAnchor:host.bottomAnchor constant:-10],
     ]];
 
-    [self showTab:RLPSTabOut];
+    [self showTab:RLPSTabPlay];
 }
 
 - (void)onTabChanged:(id)sender {
@@ -184,8 +190,13 @@ static NSView *RLPSGroup(NSString *title, NSString *desc, RLPTheme *t) {
 }
 
 - (void)selectPane:(NSString *)key {
-    for (NSInteger i = 0; i < 10; ++i) {
-        if ([kTabKeys[i] isEqualToString:key]) {
+    // 旧 key 兼容：out/pcm/sdm/eq 的选项已迁往专业工作台，
+    // 老入口（通知/菜单）仍可能发这些 key —— 映射到「播放」页而不是静默丢弃。
+    NSString *k = key;
+    if ([k isEqualToString:@"out"] || [k isEqualToString:@"pcm"] ||
+        [k isEqualToString:@"sdm"] || [k isEqualToString:@"eq"]) k = @"play";
+    for (NSInteger i = 0; i < kTabCount; ++i) {
+        if ([kTabKeys[i] isEqualToString:k]) {
             self.tabs.selectedSegment = i;
             [self showTab:(RLPSTab)i];
             return;
@@ -226,26 +237,35 @@ static NSView *RLPSGroup(NSString *title, NSString *desc, RLPTheme *t) {
     stack.spacing = 14;
     stack.edgeInsets = NSEdgeInsetsMake(6, 24, 24, 24);
     stack.translatesAutoresizingMaskIntoConstraints = NO;
+    NSView *spacer = [[NSView alloc] initWithFrame:NSZeroRect];
+    spacer.translatesAutoresizingMaskIntoConstraints = NO;
+    [spacer setContentHuggingPriority:NSLayoutPriorityDefaultLow forOrientation:NSLayoutConstraintOrientationVertical];
+    [spacer setContentCompressionResistancePriority:NSLayoutPriorityDefaultLow forOrientation:NSLayoutConstraintOrientationVertical];
     scroll.documentView = stack;
+    // contentView 默认与可视区同高，内容少时 stack 会被垂直居中（离屏截图实测：
+    // 播放页只有三行，结果整块被推到窗口底部）。让 stack 至少撑满可视高度即可顶对齐。
     [NSLayoutConstraint activateConstraints:@[
         [stack.leadingAnchor constraintEqualToAnchor:scroll.contentView.leadingAnchor],
         [stack.trailingAnchor constraintEqualToAnchor:scroll.contentView.trailingAnchor],
         [stack.topAnchor constraintEqualToAnchor:scroll.contentView.topAnchor],
         [stack.widthAnchor constraintEqualToAnchor:scroll.contentView.widthAnchor],
+        [stack.heightAnchor constraintGreaterThanOrEqualToAnchor:scroll.contentView.heightAnchor],
+        // NSStackView 在"被拉高但内容少"时会把行间距均分（实测：三行控件被推到窗口底）。
+        // 末尾加一个可伸展的空白占位，把真实内容压在顶部。
+        [spacer.heightAnchor constraintGreaterThanOrEqualToConstant:0],
     ]];
 
     switch (tab) {
-        case RLPSTabOut:    [self fillOutput:stack t:t]; break;
-        case RLPSTabPcm:    [self fillPcm:stack t:t]; break;
-        case RLPSTabSdm:    [self fillSdm:stack t:t]; break;
+        case RLPSTabPlay:   [self fillPlayback:stack t:t]; break;
         case RLPSTabIn:     [self fillInputReal:stack t:t]; break;
-        case RLPSTabAdv:    [self fillAdvanced:stack t:t]; break;
-        case RLPSTabEq:     [self fillEqualizer:stack t:t]; break;
         case RLPSTabCal:    [self fillCalibration:stack t:t]; break;
         case RLPSTabStream: [self fillStream:stack t:t]; break;
-        case RLPSTabDiag:   [self fillDiag:stack t:t]; break;
         case RLPSTabMeta:   [self fillMeta:stack t:t]; break;
+        case RLPSTabAdv:    [self fillAdvanced:stack t:t]; break;
+        case RLPSTabDiag:   [self fillDiag:stack t:t]; break;
     }
+    // 占位放在**所有真实内容之后**，才能把内容压到顶部（放前面会占住顶部）。
+    [stack addArrangedSubview:spacer];
     return scroll;
 }
 
@@ -294,6 +314,10 @@ static NSView *RLPSGroup(NSString *title, NSString *desc, RLPTheme *t) {
     }];
 }
 
+- (void)onAtten:(NSTextField *)sender {
+    [self postKey:@"atten" value:sender.stringValue];
+}
+
 - (void)onSwitch:(NSSwitch *)sender {
     NSString *key = sender.identifier;
     if (!key.length) return;
@@ -320,6 +344,39 @@ static NSView *RLPSGroup(NSString *title, NSString *desc, RLPTheme *t) {
 
 #pragma mark - 输出
 
+/// 播放：工作台**没有**的听感项留在这里（音量/响度补偿/预衰减）。
+/// 输出设备、后端、Hog、采样率、滤波、DSD、调制器、EQ 都在专业工作台当场可切，
+/// 这里不再重复一份（用户 2026-11-11 明确要求）。
+- (void)fillPlayback:(NSStackView *)stack t:(RLPTheme *)t {
+    [stack addArrangedSubview:RLPSGroup(RLPTr(@"播放"),
+        RLPTr(@"输出设备 / 独占 / 升频 / 滤波 / DSD / 均衡都在「专业工作台」当场切换，这里只放它没有的项。"), t)];
+
+    self.volumeSlider = [[NSSlider alloc] initWithFrame:NSZeroRect];
+    self.volumeSlider.minValue = -60;
+    self.volumeSlider.maxValue = 0;
+    self.volumeSlider.doubleValue = -12;
+    self.volumeSlider.continuous = NO;
+    self.volumeSlider.target = self;
+    self.volumeSlider.action = @selector(onVolume:);
+    self.volumeSlider.translatesAutoresizingMaskIntoConstraints = NO;
+    [[self.volumeSlider.widthAnchor constraintEqualToConstant:240] setActive:YES];
+    [stack addArrangedSubview:RLPSRow(RLPTr(@"音量 (dB)"), self.volumeSlider, nil, t)];
+
+    self.loudSwitch = [self switchWithAction:@selector(onSwitch:) key:@"loudness"];
+    [stack addArrangedSubview:RLPSRow(RLPTr(@"响度补偿"), self.loudSwitch,
+        RLPTr(@"按等响曲线补偿小音量下的低频与高频"), t)];
+
+    self.attenField = [[NSTextField alloc] initWithFrame:NSZeroRect];
+    self.attenField.placeholderString = RLPTr(@"例如 -3");
+    self.attenField.translatesAutoresizingMaskIntoConstraints = NO;
+    [[self.attenField.widthAnchor constraintEqualToConstant:120] setActive:YES];
+    self.attenField.target = self;
+    self.attenField.action = @selector(onAtten:);
+    [stack addArrangedSubview:RLPSRow(RLPTr(@"预衰减 (dB)"), self.attenField,
+        RLPTr(@"整体降一点电平，给 EQ 提升留余量"), t)];
+}
+
+/// 旧的输出页（选项已迁往工作台）：保留实现但不再挂页签，避免删掉将来要复用的控件构造。
 - (void)fillOutput:(NSStackView *)stack t:(RLPTheme *)t {
     [stack addArrangedSubview:RLPSGroup(RLPTr(@"输出后端"),
         RLPTr(@"独占 = bit-perfect；共享 = 兼容性最好（虚拟机 / 远程桌面）"), t)];
@@ -918,6 +975,8 @@ static NSView *RLPSGroup(NSString *title, NSString *desc, RLPTheme *t) {
         [self_ applyKV:kv toSwitch:self_.inMonitorSwitch key:@"inmon"];
         [self_ applyKV:kv toSwitch:self_.betaSwitch key:@"updbeta"];
         [self_ applyKV:kv toSwitch:self_.autoAnlSwitch key:@"autoanl"];
+        if (self_.attenField && [kv[@"atten"] isKindOfClass:[NSString class]])
+            self_.attenField.stringValue = kv[@"atten"];
         [self_ applyKV:kv toSwitch:self_.streamSwitch key:@"streamdecode"];
         [self_ applyKV:kv toSwitch:self_.metaOnSwitch key:@"metaon"];
         [self_ applyKV:kv toSwitch:self_.metaLlmSwitch key:@"metallm"];

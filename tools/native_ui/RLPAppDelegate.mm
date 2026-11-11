@@ -347,7 +347,8 @@ int RLPAppDelegateRunSelfTest(void) {
     {
         RLPSettingsViewController *vc = [[RLPSettingsViewController alloc] init];
         STCheck(vc.view != nil, "设置页可离线构建", @"");
-        // 10 个页签是"功能不删减"的硬指标：少一个就是少了一整块功能。
+        // 页签数是"功能不删减"的硬指标：1.1.7.1 起输出/PCM/SDM/均衡迁往专业工作台，
+        // 设置剩 7 页；被迁走的键必须仍在工作台可改（见 test_workbench）。
         NSMutableArray<NSView *> *sv = [NSMutableArray array];
         CollectViews(vc.view, sv);
         NSSegmentedControl *seg = nil;
@@ -355,7 +356,7 @@ int RLPAppDelegateRunSelfTest(void) {
             if ([v isKindOfClass:[NSSegmentedControl class]]) { seg = (NSSegmentedControl *)v; break; }
         }
         STCheck(seg != nil, "设置页有页签控件", @"");
-        STCheck(seg.segmentCount == 10, "设置页 10 个页签（与 web 版一致）",
+        STCheck(seg.segmentCount == 7, "设置页 7 个页签（输出/PCM/SDM/均衡已迁往工作台）",
                 seg ? [NSString stringWithFormat:@"segments=%ld", (long)seg.segmentCount] : @"nil");
     }
     {

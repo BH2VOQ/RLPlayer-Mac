@@ -331,7 +331,7 @@ static const NSUserInterfaceItemIdentifier kArtistAlbumItemID = @"RLPArtistAlbum
 
     NSString *target = [self.artistName stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
     if (target.length == 0) {
-        target = @"未知艺术家";
+        target = RLPTr(@"未知艺术家");
     }
 
     __weak __typeof__(self) weakSelf = self;

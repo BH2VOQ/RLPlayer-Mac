@@ -116,7 +116,7 @@ static const NSUserInterfaceItemIdentifier kAlbumItemID = @"RLPAlbumItem";
 - (void)setAlbum:(RLPAlbum *)album cover:(NSImage *)cover {
     RLPTheme *t = [RLPTheme current];
     self.albumKey = album.key;
-    self.nameLabel.stringValue = album.name.length ? album.name : @"未知专辑";
+    self.nameLabel.stringValue = album.name.length ? album.name : RLPTr(@"未知专辑");
     // 副标题与 web 一致：艺术家 · 年份 · 采样率/位深（缺的段不拼空串）
     NSMutableArray<NSString *> *sub = [NSMutableArray array];
     if (album.artist.length) [sub addObject:album.artist];
@@ -127,7 +127,7 @@ static const NSUserInterfaceItemIdentifier kAlbumItemID = @"RLPAlbumItem";
             : [NSString stringWithFormat:@"%.1fk", album.sampleRate / 1000.0];
         [sub addObject:(album.bits > 0 ? [NSString stringWithFormat:@"%@/%ld", sr, (long)album.bits] : sr)];
     }
-    self.artistLabel.stringValue = sub.count ? [sub componentsJoinedByString:@" · "] : @"未知艺术家";
+    self.artistLabel.stringValue = sub.count ? [sub componentsJoinedByString:@" · "] : RLPTr(@"未知艺术家");
     self.coverView.image = cover;
     self.coverView.layer.backgroundColor = t.bg2.CGColor;
     self.placeholderLabel.hidden = (cover != nil);
@@ -275,7 +275,7 @@ static const NSUserInterfaceItemIdentifier kAlbumItemID = @"RLPAlbumItem";
 - (void)reload {
     if (![RLPCoreClient shared].started) {
         [self.albums removeAllObjects];
-        self.countLabel.stringValue = @"核心未启动";
+        self.countLabel.stringValue = RLPTr(@"核心未启动");
         [self.collection reloadData];
         return;
     }
@@ -284,7 +284,7 @@ static const NSUserInterfaceItemIdentifier kAlbumItemID = @"RLPAlbumItem";
         __typeof__(self) self_ = weakSelf;
         if (!self_) return;
         if (!json || ![json[@"ok"] boolValue]) {
-            self_.countLabel.stringValue = @"加载失败";
+            self_.countLabel.stringValue = RLPTr(@"加载失败");
             return;
         }
         NSArray<RLPAlbum *> *list = [RLPAlbum albumsFromJSON:json];

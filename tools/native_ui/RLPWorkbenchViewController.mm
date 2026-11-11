@@ -1364,7 +1364,7 @@ static const NSInteger kABSlotCount = 4;
     const BOOL dsd = [self str:@"dsd" def:@"0"].integerValue > 0;
     NSDictionary *vals = @{
         @"src": fs ? [NSString stringWithFormat:@"%@ Hz / %@ bit", fs, bits] : (dsd ? @"DSD" : @"—"),
-        @"resample": [NSString stringWithFormat:@"%@ · %@", [self str:@"rate" def:@"follow"], [self str:@"filter" def:@"默认"]],
+        @"resample": [NSString stringWithFormat:@"%@ · %@", [self str:@"rate" def:@"follow"], [self str:@"filter" def:RLPTr(@"默认")]],
         @"eq": [[self str:@"eq" def:@"0"] isEqualToString:@"1"] ? RLPTr(@"开") : RLPTr(@"旁路"),
         @"ir": [self str:@"ir" def:@"0"],
         @"shaper": dsd ? @"none (DoP)" : [self str:@"shaper" def:@"auto"],
@@ -1394,7 +1394,7 @@ static const NSInteger kABSlotCount = 4;
     NSString *stage = [st[@"filter"] isKindOfClass:[NSString class]] ? st[@"filter"] : nil;
     if (dsd && stage.length) {
         self.pipelineStageLine.stringValue = [NSString stringWithFormat:@"%@%@ · %@%@",
-            RLPTr(@"管线阶段："), stage, RLPTr(@"你选的滤波："), [self str:@"filter" def:@"默认"]];
+            RLPTr(@"管线阶段："), stage, RLPTr(@"你选的滤波："), [self str:@"filter" def:RLPTr(@"默认")]];
     } else {
         self.pipelineStageLine.stringValue = @"";
     }

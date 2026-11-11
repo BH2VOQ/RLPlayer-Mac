@@ -45,6 +45,11 @@
 @property (nonatomic, strong) RLPCommitSlider *progress;
 @property (nonatomic, strong) RLPCommitSlider *volume;
 @property (nonatomic, strong) NSImageView *volIconView;
+@property (nonatomic, strong) NSImageView *coverView;      // 封面缩略图（web 底栏左侧）
+@property (nonatomic, strong) NSTextField *bpBadge;        // BIT-PERFECT 绿色徽标
+@property (nonatomic, copy) NSString *coverPath;
+@property (nonatomic, assign) NSUInteger coverSeq;
+@property (nonatomic, copy) NSString *metaPath;
 @property (nonatomic, strong) RLPPlaybackStatus *lastStatus;
 /// 播放模式：**唯一真相源**是 /api/playmode 的 mode（0=顺序 1=列表循环 2=单曲循环 3=随机）。
 /// /api/repeat 与 /api/shuffle 在核心侧只是它的派生写入口，没有独立存储 ——
@@ -104,9 +109,29 @@
     self.playBtn.layer.backgroundColor = t.accent.CGColor;
     self.playBtn.contentTintColor = NSColor.whiteColor;
 
+    // 封面缩略图（web 底栏最左）
+    self.coverView = [[NSImageView alloc] initWithFrame:NSZeroRect];
+    self.coverView.imageScaling = NSImageScaleProportionallyUpOrDown;
+    self.coverView.wantsLayer = YES;
+    self.coverView.layer.cornerRadius = 6;
+    self.coverView.layer.masksToBounds = YES;
+    self.coverView.layer.backgroundColor = t.bg3.CGColor;
+    [self addSubview:self.coverView];
+
+    // BIT-PERFECT 徽标（只在后端确实判定位完美时显示）
+    self.bpBadge = [self labelWithFont:[NSFont systemFontOfSize:9.5 weight:NSFontWeightBold] color:t.ok];
+    self.bpBadge.stringValue = @"BIT-PERFECT";
+    self.bpBadge.wantsLayer = YES;
+    self.bpBadge.layer.cornerRadius = 4;
+    self.bpBadge.layer.borderWidth = 1;
+    self.bpBadge.layer.borderColor = t.ok.CGColor;
+    self.bpBadge.alignment = NSTextAlignmentCenter;
+    self.bpBadge.hidden = YES;
+    [self addSubview:self.bpBadge];
+
     self.titleLabel = [self labelWithFont:[NSFont systemFontOfSize:13 weight:NSFontWeightSemibold]
                                     color:t.text];
-    self.titleLabel.stringValue = @"未播放";
+    self.titleLabel.stringValue = RLPTr(@"未播放");
     self.subLabel = [self labelWithFont:t.small color:t.mut];
     self.subLabel.stringValue = @"—";
     self.timeLabel = [self labelWithFont:t.mono color:t.mut];
@@ -158,9 +183,10 @@
     const CGFloat cy = H / 2.0;
     void (^place)(NSView *, CGFloat, CGFloat, CGFloat, CGFloat) =
         ^(NSView *v, CGFloat x, CGFloat y, CGFloat w, CGFloat h) { v.frame = NSMakeRect(x, y, w, h); };
-    // 左：标题/副标题
-    place(self.titleLabel, 18, cy - 16, 210, 18);
-    place(self.subLabel, 18, cy + 2, 210, 14);
+    // 左：封面缩略图 + 标题/副标题（web 底栏同结构）
+    place(self.coverView, 14, cy - 21, 42, 42);
+    place(self.titleLabel, 66, cy - 16, 180, 18);
+    place(self.subLabel, 66, cy + 2, 180, 14);
     // 中：控制键一排（垂直居中）
     CGFloat x = 250;
     place(self.shuffleBtn, x, cy - 12, 24, 24); x += 24 + 8;
@@ -169,11 +195,14 @@
     place(self.nextBtn,   x, cy - 14, 28, 28); x += 28 + 8;
     place(self.stopBtn,   x, cy - 12, 24, 24); x += 24 + 8;
     place(self.repeatBtn, x, cy - 12, 24, 24); x += 24;
-    // 右：时间 + 音量图标 + 音量条
-    const CGFloat rightZone = 16 + 96 + 8 + 16 + 12 + 88;
+    // 右：BIT-PERFECT 徽标 + 时间 + 音量图标 + 音量条
+    const CGFloat badgeW = self.bpBadge.hidden ? 0 : 84;
+    const CGFloat rightZone = 16 + 96 + 8 + 16 + 12 + 88 + (badgeW ? badgeW + 10 : 0);
+    if (!self.bpBadge.hidden)
+        place(self.bpBadge, W - rightZone, cy - 9, badgeW, 18);
     place(self.volume, W - 16 - 96, cy - 8, 96, 16);
     place(self.volIconView, W - 16 - 96 - 8 - 16, cy - 8, 16, 16);
-    place(self.timeLabel, W - rightZone, cy - 8, 88, 16);
+    place(self.timeLabel, W - rightZone + (badgeW ? badgeW + 10 : 0), cy - 8, 88, 16);
     // 进度条：控制键下方，横跨中区
     place(self.progress, 250, H - 16, MAX(120, W - 250 - rightZone - 12), 12);
 }
@@ -183,9 +212,9 @@
     b.bordered = NO;
     b.imagePosition = NSImageOnly;
     b.imageScaling = NSImageScaleProportionallyDown;
-    b.image = [NSImage imageWithSystemSymbolName:symbol accessibilityDescription:tip];
+    b.image = [NSImage imageWithSystemSymbolName:symbol accessibilityDescription:RLPTr(tip)];
     b.contentTintColor = [RLPTheme current].text;
-    b.toolTip = tip;
+    b.toolTip = RLPTr(tip);   // 多语言：tooltip 也必须过词表
     b.target = self;
     return b;
 }
@@ -344,19 +373,31 @@
 
     BOOL playing = st.playing && !st.paused;
     self.playBtn.image = [NSImage imageWithSystemSymbolName:(playing ? @"pause.fill" : @"play.fill")
-                                   accessibilityDescription:@"播放 / 暂停"];
+                                   accessibilityDescription:RLPTr(@"播放 / 暂停")];
 
     NSString *name = st.currentPath.lastPathComponent;
-    if (name.length == 0) name = st.playing ? @"未命名曲目" : @"未播放";
+    if (name.length == 0) name = st.playing ? RLPTr(@"未命名曲目") : RLPTr(@"未播放");
     self.titleLabel.stringValue = name;
 
     if (st.error.length) {
         self.subLabel.stringValue = st.error;
         self.subLabel.textColor = [RLPTheme current].danger;
     } else {
-        NSString *bp = [st.bitPerfect isEqualToString:@"yes"] ? @"bit-perfect" : @"—";
-        self.subLabel.stringValue = bp;
+        // 副标题 = 艺术家 · 专辑（web 底栏同口径）；bit-perfect 改用独立徽标显示。
         self.subLabel.textColor = [RLPTheme current].mut;
+        [self refreshMetaForPath:st.currentPath];
+    }
+    // BIT-PERFECT 徽标：只在后端确实判定 yes 时出现（不自己猜）
+    const BOOL bpOK = [st.bitPerfect isEqualToString:@"yes"];
+    if (self.bpBadge.hidden == bpOK) {
+        self.bpBadge.hidden = !bpOK;
+        self.bpBadge.toolTip = st.bitPerfectWhy.length ? st.bitPerfectWhy : nil;
+        self.needsLayout = YES;
+    }
+    // 封面：切歌才重新取（避免每 500ms 拉一次图）
+    if (![st.currentPath isEqualToString:self.coverPath ?: @""]) {
+        self.coverPath = st.currentPath;
+        [self loadCoverForPath:st.currentPath];
     }
 
     double dur = st.duration > 0 ? st.duration : 0;
@@ -369,6 +410,36 @@
     if (!self.volume.dragging && st.volumeDb <= 0.0 && st.volumeDb >= -60.0) {
         self.volume.doubleValue = st.volumeDb;
     }
+}
+
+/// 封面（/api/cover?file=…，与单曲页同一端点）；请求序号丢弃过期结果。
+- (void)loadCoverForPath:(NSString *)path {
+    if (!path.length) { self.coverView.image = nil; return; }
+    const NSUInteger seq = ++self.coverSeq;
+    NSString *url = [NSString stringWithFormat:@"/api/cover?file=%@", RLPEnc(path)];
+    __weak __typeof__(self) weakSelf = self;
+    [[RLPCoreClient shared] getData:url completion:^(NSData * _Nullable data) {
+        __typeof__(self) self_ = weakSelf;
+        if (!self_ || seq != self_.coverSeq) return;
+        self_.coverView.image = data.length ? [[NSImage alloc] initWithData:data] : nil;
+    }];
+}
+
+/// 副标题：艺术家 · 专辑（/api/meta?file=…）。同曲不重复请求。
+- (void)refreshMetaForPath:(NSString *)path {
+    if (!path.length) { self.subLabel.stringValue = @"—"; return; }
+    if ([path isEqualToString:self.metaPath ?: @""]) return;
+    self.metaPath = path;
+    NSString *url = [NSString stringWithFormat:@"/api/meta?file=%@", RLPEnc(path)];
+    __weak __typeof__(self) weakSelf = self;
+    [[RLPCoreClient shared] getJSON:url completion:^(NSDictionary * _Nullable json) {
+        __typeof__(self) self_ = weakSelf;
+        if (!self_ || ![path isEqualToString:self_.metaPath ?: @""]) return;
+        NSMutableArray<NSString *> *p = [NSMutableArray array];
+        if ([json[@"artist"] isKindOfClass:[NSString class]] && [json[@"artist"] length]) [p addObject:json[@"artist"]];
+        if ([json[@"album"] isKindOfClass:[NSString class]] && [json[@"album"] length]) [p addObject:json[@"album"]];
+        self_.subLabel.stringValue = p.count ? [p componentsJoinedByString:@" · "] : @"—";
+    }];
 }
 
 - (NSString *)mmss:(double)sec {

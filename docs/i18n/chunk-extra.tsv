@@ -187,3 +187,12 @@ PCM 输出（关）	PCM output (off)	1.1.7.1 功能对齐补充
 还没有 EQ 文件：设置里选一个，或用上面的 PEQ 预设	No EQ file yet: pick one in Settings, or use a PEQ preset above	1.1.7.1 功能对齐补充
 （空 = 不卷积）	(empty = no convolution)	1.1.7.1 功能对齐补充
 （空 = 没有 EQ）	(empty = no EQ)	1.1.7.1 功能对齐补充
+播放 / 暂停	Play / Pause	1.1.7.1 多语言补漏
+重新检测设备	Rescan devices	1.1.7.1 多语言补漏
+默认	Default	1.1.7.1 多语言补漏
+例如 -3	e.g. -3	1.1.7.1 设置重组与详情页
+按等响曲线补偿小音量下的低频与高频	Compensate bass and treble at low volume using equal-loudness curves	1.1.7.1 设置重组与详情页
+整体降一点电平，给 EQ 提升留余量	Lower the overall level to leave headroom for EQ boosts	1.1.7.1 设置重组与详情页
+输出设备 / 独占 / 升频 / 滤波 / DSD / 均衡都在「专业工作台」当场切换，这里只放它没有的项。	Output device, exclusive mode, upsampling, filters, DSD and EQ all switch live on the Pro Workbench; only items it lacks are here.	1.1.7.1 设置重组与详情页
+返回专辑	Back to albums	1.1.7.1 设置重组与详情页
+预衰减 (dB)	Pre-attenuation (dB)	1.1.7.1 设置重组与详情页

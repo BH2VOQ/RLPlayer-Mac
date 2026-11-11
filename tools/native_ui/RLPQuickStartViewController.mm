@@ -139,7 +139,7 @@
     self.devicePopup.action = @selector(onDeviceChanged:);
     self.devicePopup.font = t.body;
     [self.devicePopup addItemWithTitle:RLPTr(@"系统默认")];
-    NSButton *devRefresh = RLPSymbolButton(@"arrow.clockwise", @"重新检测设备", self, @selector(onReloadDevices:));
+    NSButton *devRefresh = RLPSymbolButton(@"arrow.clockwise", RLPTr(@"重新检测设备"), self, @selector(onReloadDevices:));
     devRefresh.translatesAutoresizingMaskIntoConstraints = NO;
     [self.deviceCard addSubview:d1];
     [self.deviceCard addSubview:self.devicePopup];

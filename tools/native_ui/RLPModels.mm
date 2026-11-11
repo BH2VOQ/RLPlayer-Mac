@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: 2026 BH2VOQ <https://github.com/BH2VOQ>
 // SPDX-License-Identifier: GPL-3.0-or-later
 #import "RLPModels.h"
+#import "RLPSupport.h"   // RLPTr（多语言）
 
 static NSString *Str(NSDictionary *d, NSString *k) {
     id v = d[k];
@@ -17,7 +18,7 @@ static BOOL Bool(NSDictionary *d, NSString *k) {
 
 NSArray<NSString *> *RLPSplitArtistNames(NSString *raw) {
     NSString *s = [raw ?: @"" stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
-    if (!s.length) return @[@"未知艺术家"];
+    if (!s.length) return @[RLPTr(@"未知艺术家")];
     // 括号内不拆：先把 (...) / （...） 里的分隔符暂时换成占位符。
     NSMutableString *masked = [s mutableCopy];
     NSRegularExpression *paren = [NSRegularExpression regularExpressionWithPattern:@"[\\(（][^\\)）]*[\\)）]" options:0 error:nil];
@@ -150,6 +151,7 @@ NSArray<NSString *> *RLPSplitArtistNames(NSString *raw) {
     s.volumeDb = Num(json, @"volDb");
     s.error = Str(json, @"error");
     s.bitPerfect = Str(json, @"bitPerfect");
+    s.bitPerfectWhy = Str(json, @"bitPerfectWhy");
     return s;
 }
 @end

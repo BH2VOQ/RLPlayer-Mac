@@ -190,7 +190,7 @@
         else if ([json[@"fields"] isKindOfClass:[NSDictionary class]]) {
             // 有些实现把简介放在 fields 里：按"简介/概述"取，取不到就不显示
             NSDictionary *f = json[@"fields"];
-            for (NSString *k in @[ @"简介", @"概述", @"Summary" ]) {
+            for (NSString *k in @[ RLPTr(@"简介"), RLPTr(@"概述"), @"Summary" ]) {
                 if ([f[k] isKindOfClass:[NSString class]]) { text = f[k]; break; }
             }
         }

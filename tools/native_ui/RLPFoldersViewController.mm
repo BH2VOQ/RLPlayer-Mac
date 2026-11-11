@@ -23,7 +23,7 @@
 @implementation RLPFoldersViewController
 
 - (instancetype)init {
-    self = [super initWithTitle:@"文件夹"];
+    self = [super initWithTitle:RLPTr(@"文件夹")];
     if (self) {
         _dirs = @[];
         _files = @[];
@@ -35,11 +35,11 @@
     RLPTheme *t = [RLPTheme current];
     NSView *host = self.contentView;
 
-    self.upBtn = RLPSymbolButton(@"arrow.up", @"上一级", self, @selector(onUp:));
+    self.upBtn = RLPSymbolButton(@"arrow.up", RLPTr(@"上一级"), self, @selector(onUp:));
     self.upBtn.translatesAutoresizingMaskIntoConstraints = NO;
     [host addSubview:self.upBtn];
 
-    NSButton *refresh = RLPSymbolButton(@"arrow.clockwise", @"刷新", self, @selector(onRefresh:));
+    NSButton *refresh = RLPSymbolButton(@"arrow.clockwise", RLPTr(@"刷新"), self, @selector(onRefresh:));
     refresh.translatesAutoresizingMaskIntoConstraints = NO;
     [host addSubview:refresh];
 
@@ -105,7 +105,7 @@
 
 - (void)loadDir:(NSString *)dir {
     if (![RLPCoreClient shared].started) {
-        [self setSubtitle:@"核心未启动"];
+        [self setSubtitle:RLPTr(@"核心未启动")];
         return;
     }
     NSString *path = dir.length ? [NSString stringWithFormat:@"/api/files?dir=%@", RLPEnc(dir)]
@@ -116,7 +116,7 @@
         if (!strongSelf) return;
         strongSelf.loaded = YES;
         if (!json || ![json[@"ok"] boolValue]) {
-            [strongSelf setSubtitle:@"读取失败"];
+            [strongSelf setSubtitle:RLPTr(@"读取失败")];
             RLPToast(RLPTr(@"目录读取失败"));
             return;
         }

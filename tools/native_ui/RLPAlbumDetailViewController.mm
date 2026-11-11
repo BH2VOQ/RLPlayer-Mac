@@ -21,6 +21,10 @@
 @property (nonatomic, strong) NSTextField *nameLabel;
 @property (nonatomic, strong) NSTextField *artistLabel;
 @property (nonatomic, strong) NSTextField *metaLabel;
+@property (nonatomic, strong) NSTextField *kindLabel;
+@property (nonatomic, strong) NSButton *playAllBtn;
+@property (nonatomic, strong) NSTextField *tracksTitle;
+@property (nonatomic, strong) NSTextField *tracksMeta;
 @property (nonatomic, strong) NSTextField *emptyLabel;
 @property (nonatomic, strong) NSTableView *table;
 @property (nonatomic, strong) NSScrollView *scroll;
@@ -29,7 +33,7 @@
 @implementation RLPAlbumDetailViewController
 
 - (instancetype)initWithAlbumKey:(NSString *)key {
-    self = [super initWithTitle:@"专辑"];
+    self = [super initWithTitle:RLPTr(@"专辑")];
     if (self) _albumKey = [key copy];
     return self;
 }
@@ -38,7 +42,12 @@
     RLPTheme *t = [RLPTheme current];
     NSView *host = self.contentView;
 
-    NSButton *back = RLPSymbolButton(@"chevron.left", @"返回", self, @selector(onBack:));
+    // 返回按钮带文案（web 顶栏是「← 返回专辑」，不是裸箭头）
+    NSButton *back = [NSButton buttonWithTitle:RLPTr(@"返回专辑") target:self action:@selector(onBack:)];
+    back.bezelStyle = NSBezelStyleRounded;
+    back.image = [NSImage imageWithSystemSymbolName:@"chevron.left" accessibilityDescription:RLPTr(@"返回专辑")];
+    back.imagePosition = NSImageLeading;
+    back.font = t.small;
     back.translatesAutoresizingMaskIntoConstraints = NO;
     [host addSubview:back];
 
@@ -51,14 +60,22 @@
     self.cover.translatesAutoresizingMaskIntoConstraints = NO;
     [host addSubview:self.cover];
 
-    self.nameLabel = RLPLabel(@"", [NSFont systemFontOfSize:22 weight:NSFontWeightSemibold], t.text);
+    // ALBUM 小标签（web 详情页专辑名上方的 eyebrow）
+    self.kindLabel = RLPLabel(RLPTr(@"专辑"), [NSFont systemFontOfSize:10.5 weight:NSFontWeightSemibold], t.mut);
+    self.kindLabel.translatesAutoresizingMaskIntoConstraints = NO;
+    [host addSubview:self.kindLabel];
+
+    self.nameLabel = RLPLabel(@"", [NSFont systemFontOfSize:24 weight:NSFontWeightBold], t.text);
     self.nameLabel.maximumNumberOfLines = 2;
     self.nameLabel.lineBreakMode = NSLineBreakByTruncatingTail;
     self.nameLabel.translatesAutoresizingMaskIntoConstraints = NO;
     [host addSubview:self.nameLabel];
 
+    // web 详情区只有一行元信息（艺术家 · 年份 · N 首 · 总时长），
+    // 不再单独画一行艺术家（否则与 metaLabel 重复显示同一个名字）。
     self.artistLabel = RLPLabel(@"", [NSFont systemFontOfSize:14], t.mut);
     self.artistLabel.translatesAutoresizingMaskIntoConstraints = NO;
+    self.artistLabel.hidden = YES;
     [host addSubview:self.artistLabel];
 
     self.metaLabel = RLPLabel(@"", [NSFont systemFontOfSize:12], t.mut);
@@ -68,6 +85,21 @@
     NSButton *playAll = [NSButton buttonWithTitle:RLPTr(@"播放全部") target:self action:@selector(onPlayAll:)];
     playAll.bezelStyle = NSBezelStyleRounded;
     playAll.translatesAutoresizingMaskIntoConstraints = NO;
+    // 主按钮：红色实心 + 白字 + 播放图标（web .btn.pri 同口径）
+    playAll.wantsLayer = YES;
+    playAll.layer.backgroundColor = t.accent.CGColor;
+    playAll.layer.cornerRadius = 8;
+    // 借鉴上游 .btn.pri 的柔和投影（颜色仍用 mac 的珊瑚红，不照抄 Windows 蓝紫）
+    playAll.layer.shadowColor = t.accent.CGColor;
+    playAll.layer.shadowOpacity = 0.28;
+    playAll.layer.shadowRadius = 6;
+    playAll.layer.shadowOffset = CGSizeMake(0, -2);
+    playAll.layer.masksToBounds = NO;
+    playAll.contentTintColor = NSColor.whiteColor;
+    playAll.image = [NSImage imageWithSystemSymbolName:@"play.fill" accessibilityDescription:RLPTr(@"播放全部")];
+    playAll.imagePosition = NSImageLeading;
+    playAll.font = [NSFont systemFontOfSize:13 weight:NSFontWeightSemibold];
+    self.playAllBtn = playAll;
     [host addSubview:playAll];
 
     NSButton *shuffle = [NSButton buttonWithTitle:RLPTr(@"随机播放") target:self action:@selector(onShuffle:)];
@@ -86,6 +118,14 @@
     setCover.translatesAutoresizingMaskIntoConstraints = NO;
     [host addSubview:setCover];
 
+    // 曲目列表标题行（web：左「曲目列表」右「N 首 · 总时长 …」）
+    self.tracksTitle = RLPLabel(RLPTr(@"曲目列表"), [NSFont systemFontOfSize:13 weight:NSFontWeightSemibold], t.text);
+    self.tracksTitle.translatesAutoresizingMaskIntoConstraints = NO;
+    [host addSubview:self.tracksTitle];
+    self.tracksMeta = RLPLabel(@"", t.small, t.mut);
+    self.tracksMeta.translatesAutoresizingMaskIntoConstraints = NO;
+    [host addSubview:self.tracksMeta];
+
     self.emptyLabel = RLPLabel(@"", t.body, t.mut);
     self.emptyLabel.translatesAutoresizingMaskIntoConstraints = NO;
     [host addSubview:self.emptyLabel];
@@ -93,7 +133,7 @@
     self.table = [[NSTableView alloc] initWithFrame:NSZeroRect];
     self.table.backgroundColor = [NSColor clearColor];
     self.table.headerView = nil;
-    self.table.rowHeight = 30;
+    self.table.rowHeight = 38;
     self.table.intercellSpacing = NSMakeSize(0, 1);
     self.table.selectionHighlightStyle = NSTableViewSelectionHighlightStyleRegular;
     self.table.dataSource = self;
@@ -103,12 +143,15 @@
     // 双击保留兼容；两者指向同一动作，重复触发幂等。
     self.table.action = @selector(onRowDoubleClick:);
     self.table.doubleAction = @selector(onRowDoubleClick:);
-    for (NSString *ident in @[@"n", @"title", @"artist", @"dur"]) {
+    // 列顺序与 web 一致：序号 → 收藏爱心 → 曲名 → 艺术家 → 时长 → 入队「+」
+    for (NSString *ident in @[@"n", @"fav", @"title", @"artist", @"dur", @"add"]) {
         NSTableColumn *col = [[NSTableColumn alloc] initWithIdentifier:ident];
-        if ([ident isEqualToString:@"n"]) col.width = 38;
-        else if ([ident isEqualToString:@"title"]) col.width = 360;
-        else if ([ident isEqualToString:@"artist"]) col.width = 200;
-        else col.width = 70;
+        if ([ident isEqualToString:@"n"]) col.width = 34;
+        else if ([ident isEqualToString:@"fav"]) col.width = 30;
+        else if ([ident isEqualToString:@"title"]) col.width = 340;
+        else if ([ident isEqualToString:@"artist"]) col.width = 190;
+        else if ([ident isEqualToString:@"dur"]) col.width = 64;
+        else col.width = 34;
         [self.table addTableColumn:col];
     }
     self.scroll = [[NSScrollView alloc] initWithFrame:NSZeroRect];
@@ -122,16 +165,18 @@
     [NSLayoutConstraint activateConstraints:@[
         [back.leadingAnchor constraintEqualToAnchor:host.leadingAnchor constant:16],
         [back.topAnchor constraintEqualToAnchor:host.topAnchor constant:6],
-        [back.widthAnchor constraintEqualToConstant:24],
-        [back.heightAnchor constraintEqualToConstant:24],
+        [back.heightAnchor constraintEqualToConstant:26],
 
         [self.cover.leadingAnchor constraintEqualToAnchor:host.leadingAnchor constant:24],
         [self.cover.topAnchor constraintEqualToAnchor:back.bottomAnchor constant:10],
-        [self.cover.widthAnchor constraintEqualToConstant:140],
-        [self.cover.heightAnchor constraintEqualToConstant:140],
+        [self.cover.widthAnchor constraintEqualToConstant:175],
+        [self.cover.heightAnchor constraintEqualToConstant:175],
 
-        [self.nameLabel.leadingAnchor constraintEqualToAnchor:self.cover.trailingAnchor constant:18],
-        [self.nameLabel.topAnchor constraintEqualToAnchor:self.cover.topAnchor constant:2],
+        // ALBUM 小标签在专辑名上方（web eyebrow）
+        [self.kindLabel.leadingAnchor constraintEqualToAnchor:self.cover.trailingAnchor constant:20],
+        [self.kindLabel.topAnchor constraintEqualToAnchor:self.cover.topAnchor constant:2],
+        [self.nameLabel.leadingAnchor constraintEqualToAnchor:self.cover.trailingAnchor constant:20],
+        [self.nameLabel.topAnchor constraintEqualToAnchor:self.kindLabel.bottomAnchor constant:4],
         [self.nameLabel.trailingAnchor constraintEqualToAnchor:host.trailingAnchor constant:-24],
         [self.artistLabel.leadingAnchor constraintEqualToAnchor:self.nameLabel.leadingAnchor],
         [self.artistLabel.topAnchor constraintEqualToAnchor:self.nameLabel.bottomAnchor constant:6],
@@ -152,9 +197,13 @@
         [self.emptyLabel.leadingAnchor constraintEqualToAnchor:self.cover.leadingAnchor],
         [self.emptyLabel.topAnchor constraintEqualToAnchor:self.cover.bottomAnchor constant:18],
 
+        [self.tracksTitle.leadingAnchor constraintEqualToAnchor:host.leadingAnchor constant:24],
+        [self.tracksTitle.topAnchor constraintEqualToAnchor:self.cover.bottomAnchor constant:16],
+        [self.tracksMeta.trailingAnchor constraintEqualToAnchor:host.trailingAnchor constant:-24],
+        [self.tracksMeta.firstBaselineAnchor constraintEqualToAnchor:self.tracksTitle.firstBaselineAnchor],
         [self.scroll.leadingAnchor constraintEqualToAnchor:host.leadingAnchor constant:24],
         [self.scroll.trailingAnchor constraintEqualToAnchor:host.trailingAnchor constant:-24],
-        [self.scroll.topAnchor constraintEqualToAnchor:self.cover.bottomAnchor constant:16],
+        [self.scroll.topAnchor constraintEqualToAnchor:self.tracksTitle.bottomAnchor constant:8],
         [self.scroll.bottomAnchor constraintEqualToAnchor:host.bottomAnchor constant:-12],
     ]];
 }
@@ -165,8 +214,8 @@
 
 - (void)reloadData {
     if (![RLPCoreClient shared].started) {
-        [self setSubtitle:@"核心未启动"];
-        self.emptyLabel.stringValue = RLPTr(@"核心未启动");
+        [self setSubtitle:RLPTr(@"核心未启动")];
+        self.emptyLabel.stringValue = RLPTr(RLPTr(@"核心未启动"));
         return;
     }
     if (!self.albumKey.length) {
@@ -180,8 +229,8 @@
         if (!self_) return;
         if (!json || ![json[@"ok"] boolValue]) {
             self_.loaded = YES;
-            [self_ setSubtitle:@"读取失败"];
-            self_.emptyLabel.stringValue = RLPTr(@"读取失败");
+            [self_ setSubtitle:RLPTr(@"读取失败")];
+            self_.emptyLabel.stringValue = RLPTr(RLPTr(@"读取失败"));
             RLPToast(RLPTr(@"专辑读取失败"));
             return;
         }
@@ -190,14 +239,20 @@
         self_.tracks = [RLPTrack tracksFromJSON:json key:@"tracks"];
         self_.loaded = YES;
 
-        self_.titleLabel.stringValue = album.name.length ? album.name : RLPTr(@"专辑");
+        self_.titleLabel.stringValue = album.name.length ? album.name : RLPTr(RLPTr(@"专辑"));
         self_.nameLabel.stringValue = album.name.length ? album.name : RLPTr(@"未知专辑");
         self_.artistLabel.stringValue = album.artist.length ? album.artist : RLPTr(@"未知艺术家");
         double totalDur = 0;
         for (RLPTrack *t in self_.tracks) totalDur += (t.duration > 0 ? t.duration : 0);
-        self_.metaLabel.stringValue = [NSString stringWithFormat:@"%@ · %ld %@ · %@",
-            album.year > 0 ? [NSString stringWithFormat:@"%ld", (long)album.year] : @"—",
-            (long)self_.tracks.count, RLPTr(@"首"), RLPFmtDuration(totalDur)];
+        // 与 web 同口径：艺术家 · 年份 · N 首 · 总时长
+        NSMutableArray<NSString *> *mi = [NSMutableArray array];
+        if (album.artist.length) [mi addObject:album.artist];
+        if (album.year > 0) [mi addObject:[NSString stringWithFormat:@"%ld", (long)album.year]];
+        [mi addObject:[NSString stringWithFormat:@"%ld %@", (long)self_.tracks.count, RLPTr(@"首")]];
+        [mi addObject:RLPFmtDuration(totalDur)];
+        self_.metaLabel.stringValue = [mi componentsJoinedByString:@" · "];
+        self_.tracksMeta.stringValue = [NSString stringWithFormat:@"%ld %@ · %@ %@",
+            (long)self_.tracks.count, RLPTr(@"首"), RLPTr(@"总时长"), RLPFmtDuration(totalDur)];
         [self_ setSubtitle:[NSString stringWithFormat:@"%ld %@", (long)self_.tracks.count, RLPTr(@"首")]];
 
         self_.emptyLabel.stringValue = self_.tracks.count ? @"" : RLPTr(@"没有曲目");
@@ -222,6 +277,29 @@
     RLPTheme *t = [RLPTheme current];
     RLPTrack *tr = self.tracks[(NSUInteger)row];
     NSString *ident = col.identifier;
+    // 收藏 / 入队是**按钮**列（web 每行都有空心爱心与「+」）
+    if ([ident isEqualToString:@"fav"] || [ident isEqualToString:@"add"]) {
+        NSButton *b = [tableView makeViewWithIdentifier:ident owner:self];
+        if (!b) {
+            b = [NSButton buttonWithTitle:@"" target:self
+                        action:[ident isEqualToString:@"fav"] ? @selector(onRowFav:) : @selector(onRowAdd:)];
+            b.identifier = ident;
+            b.bordered = NO;
+            b.imagePosition = NSImageOnly;
+            b.imageScaling = NSImageScaleProportionallyDown;
+        }
+        b.tag = row;
+        if ([ident isEqualToString:@"fav"]) {
+            b.image = [NSImage imageWithSystemSymbolName:@"heart" accessibilityDescription:RLPTr(@"收藏")];
+            b.contentTintColor = t.mut;
+            b.toolTip = RLPTr(@"收藏");
+        } else {
+            b.image = [NSImage imageWithSystemSymbolName:@"plus" accessibilityDescription:RLPTr(@"加入队列")];
+            b.contentTintColor = t.mut;
+            b.toolTip = RLPTr(@"加入队列");
+        }
+        return b;
+    }
     NSTextField *label = [tableView makeViewWithIdentifier:ident owner:self];
     if (!label) {
         label = RLPLabel(@"", t.body, t.text);
@@ -242,6 +320,29 @@
         label.textColor = t.mut;
     }
     return label;
+}
+
+/// 单曲收藏（/api/fav?file=…&on=1，与 web 行内爱心同一端点）。
+- (void)onRowFav:(NSButton *)sender {
+    const NSInteger row = sender.tag;
+    if (row < 0 || row >= (NSInteger)self.tracks.count) return;
+    RLPTrack *tr = self.tracks[(NSUInteger)row];
+    NSString *url = [NSString stringWithFormat:@"/api/fav?file=%@&on=1", RLPEnc(tr.path)];
+    [[RLPCoreClient shared] postJSON:url body:@"" completion:^(NSDictionary * _Nullable json) {
+        if (json && [json[@"ok"] boolValue]) {
+            sender.image = [NSImage imageWithSystemSymbolName:@"heart.fill" accessibilityDescription:RLPTr(@"已收藏")];
+            sender.contentTintColor = [RLPTheme current].accent;
+            RLPToast(RLPTr(@"已收藏"));
+        } else RLPToast(RLPTr(@"收藏失败"));
+    }];
+}
+
+/// 单曲入队（/api/add，不打断当前播放）。
+- (void)onRowAdd:(NSButton *)sender {
+    const NSInteger row = sender.tag;
+    if (row < 0 || row >= (NSInteger)self.tracks.count) return;
+    RLPEnqueuePath(self.tracks[(NSUInteger)row].path);
+    RLPToast(RLPTr(@"已加入队列"));
 }
 
 - (void)onRowDoubleClick:(id)sender {
@@ -300,6 +401,11 @@
     RLPTheme *t = [RLPTheme current];
     self.cover.layer.backgroundColor = t.bg2.CGColor;
     self.nameLabel.textColor = t.text;
+    self.kindLabel.textColor = t.mut;
+    self.tracksTitle.textColor = t.text;
+    self.tracksMeta.textColor = t.mut;
+    self.playAllBtn.layer.backgroundColor = t.accent.CGColor;
+    self.playAllBtn.contentTintColor = NSColor.whiteColor;
     self.artistLabel.textColor = t.mut;
     self.metaLabel.textColor = t.mut;
     self.emptyLabel.textColor = t.mut;

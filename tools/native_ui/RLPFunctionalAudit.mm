@@ -290,7 +290,7 @@ int RLPRunFunctionalAudit(NSString *outDir) {
              [NSString stringWithUTF8String:r.file]], CGSizeMake(1180, 760));
     }
 
-    // ---- ④ 专业模式：工作台 + 设置页 10 个页签 ----
+    // ---- ④ 专业模式：工作台 + 设置页 7 个页签 ----
     RLPSetAppMode(RLPAppModePro);
     [wc.sidebar reloadForModeChange];
     Pump(0.5);
@@ -303,7 +303,7 @@ int RLPRunFunctionalAudit(NSString *outDir) {
     Pump(0.5);
     RLPSettingsViewController *sv = (RLPSettingsViewController *)wc.currentContent;
     if ([sv isKindOfClass:[RLPSettingsViewController class]]) {
-        const char *keys[] = { "out","pcm","sdm","in","adv","eq","cal","stream","diag","meta" };
+        const char *keys[] = { "play","in","cal","stream","meta","adv","diag" };
         NSInteger i = 0;
         for (const char *k : keys) {
             [sv selectPane:[NSString stringWithUTF8String:k]];
@@ -312,7 +312,7 @@ int RLPRunFunctionalAudit(NSString *outDir) {
             Snap(wc.window.contentView, [outDir stringByAppendingPathComponent:fn], CGSizeMake(1180, 760));
             ++i;
         }
-        CK(i == 10, "设置页 10 个页签均已切换并截图", [NSString stringWithFormat:@"panes=%ld", (long)i]);
+        CK(i == 7, "设置页 7 个页签均已切换并截图", [NSString stringWithFormat:@"panes=%ld", (long)i]);
     } else {
         CK(NO, "设置页类型正确", NSStringFromClass(wc.currentContent.class));
     }

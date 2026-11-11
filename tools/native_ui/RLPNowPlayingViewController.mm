@@ -87,7 +87,7 @@
 @implementation RLPNowPlayingViewController
 
 - (instancetype)init {
-    self = [super initWithTitle:@"正在播放"];
+    self = [super initWithTitle:RLPTr(@"正在播放")];
     return self;
 }
 
@@ -131,7 +131,7 @@
     // 音频分析改为一行（1.1.7.1）：动态 / 音质 / 假无损 / 展开，四个元素同一行。
     // 「自动分析」开关已挪到设置·高级；「重新分析」只在展开后出现，不摆在面上。
 
-    NSTextField *lyricsTitle = RLPLabel(@"歌词", [NSFont systemFontOfSize:13 weight:NSFontWeightSemibold], t.text);
+    NSTextField *lyricsTitle = RLPLabel(RLPTr(@"歌词"), [NSFont systemFontOfSize:13 weight:NSFontWeightSemibold], t.text);
     lyricsTitle.translatesAutoresizingMaskIntoConstraints = NO;
     [host addSubview:lyricsTitle];
 
@@ -280,7 +280,7 @@
 - (void)startPolling {
     if (self.polling) return;
     if (![RLPCoreClient shared].started) {
-        [self setSubtitle:@"核心未启动"];
+        [self setSubtitle:RLPTr(@"核心未启动")];
         return;
     }
     self.polling = YES;
@@ -513,8 +513,8 @@
         }
         NSMutableString *out = [NSMutableString string];
         if ([r[@"sameTrack"] boolValue] == NO)
-            [out appendString:RLPTr(@"⚠ 包络相关偏低，这些文件可能不是同一首曲子\n")];
-        [out appendString:RLPTr(@"排序（好 → 差）\n")];
+            [out appendFormat:@"%@\n", RLPTr(@"⚠ 包络相关偏低，这些文件可能不是同一首曲子")];
+        [out appendFormat:@"%@\n", RLPTr(@"排序（好 → 差）")];
         NSArray *vs = [r[@"versions"] isKindOfClass:[NSArray class]] ? r[@"versions"] : @[];
         NSArray *ranking = [r[@"ranking"] isKindOfClass:[NSArray class]] ? r[@"ranking"] : @[];
         for (id idx in ranking) {

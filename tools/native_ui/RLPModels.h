@@ -70,6 +70,8 @@ NSArray<NSString *> *RLPSplitArtistNames(NSString * _Nullable raw);
 @property (nonatomic) double volumeDb;
 @property (nonatomic, copy) NSString *error;
 @property (nonatomic, copy) NSString *bitPerfect;
+/// 后端给的位完美判定原因（照实显示，不自己编）。
+@property (nonatomic, copy) NSString *bitPerfectWhy;
 + (nullable instancetype)statusFromJSON:(NSDictionary *)json;
 @end
 
