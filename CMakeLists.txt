@@ -177,6 +177,43 @@ if(APPLE)
     RLPLAYER_VERSION_STR="${RLPLAYER_VERSION_FOR_APP}")
   # 1.1.5.1：中国大陆更新通道用 Security.framework 做 PS256 验签
   target_link_libraries(rlplayer_mac PRIVATE rlapp_core "-framework AppKit" "-framework WebKit" "-framework Security")
+
+  # ---------------- 2026-11-11：纯 AppKit 原生客户端（1.1.7.1 起，从零实现） ----------------
+  # 与 web 版并行：rlplayer_mac 保持默认/回退；rlplayer_native 是新的原生客户端，
+  # 主内容区**没有任何 WKWebView**（--selftest 会断言 webviews=0）。
+  # 业务核心复用 rlapp_core（同一份 /api dispatch），UI 层不复制播放/曲库真相。
+  add_executable(rlplayer_native
+    tools/native_ui/main.mm
+    tools/native_ui/RLPAppDelegate.mm
+    tools/native_ui/RLPMainWindowController.mm
+    tools/native_ui/RLPSidebarViewController.mm
+    tools/native_ui/RLPAlbumsViewController.mm
+    tools/native_ui/RLPPlaybackBarView.mm
+    tools/native_ui/RLPPlaceholderViewController.mm
+    tools/native_ui/RLPCoreClient.mm
+    tools/native_ui/RLPModels.mm
+    tools/native_ui/RLPTheme.mm)
+  set_source_files_properties(
+    tools/native_ui/main.mm tools/native_ui/RLPAppDelegate.mm
+    tools/native_ui/RLPMainWindowController.mm tools/native_ui/RLPSidebarViewController.mm
+    tools/native_ui/RLPAlbumsViewController.mm tools/native_ui/RLPPlaybackBarView.mm
+    tools/native_ui/RLPPlaceholderViewController.mm tools/native_ui/RLPCoreClient.mm
+    tools/native_ui/RLPModels.mm tools/native_ui/RLPTheme.mm
+    PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
+  target_include_directories(rlplayer_native PRIVATE
+    ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tools ${CMAKE_SOURCE_DIR}/tools/native_ui)
+  target_compile_definitions(rlplayer_native PRIVATE
+    RLPLAYER_VERSION_STR="${RLPLAYER_VERSION_FOR_APP}")
+  target_link_libraries(rlplayer_native PRIVATE rlapp_core "-framework AppKit" "-framework Security")
+
+  # 原生 UI 的两条离线门禁（不联网、不开窗口、不发声）：
+  #   native_ui_selftest = 视图树契约（10 项，含 webviews=0）
+  #   native_ui_smoke    = ObjC 桥 → C++ 核心的真实链路（隔离 state/library，拉 ping/albums/status）
+  add_test(NAME native_ui_selftest COMMAND rlplayer_native --selftest)
+  set_tests_properties(native_ui_selftest PROPERTIES
+    ENVIRONMENT "RLPLAYER_STATE_DIR=${CMAKE_BINARY_DIR}/native-selftest-state" TIMEOUT 60)
+  add_test(NAME native_ui_smoke COMMAND rlplayer_native --smoke)
+  set_tests_properties(native_ui_smoke PROPERTIES TIMEOUT 120)
 endif()
 
 # ---------------- 测试 ----------------
