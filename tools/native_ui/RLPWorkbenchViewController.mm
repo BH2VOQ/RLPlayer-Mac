@@ -27,6 +27,11 @@ static const NSInteger kABSlotCount = 4;
 @property (nonatomic, strong) NSStackView *chainRow;
 @property (nonatomic, strong) NSMutableDictionary<NSString *, NSView *> *chainNodes;
 @property (nonatomic, strong) NSMutableDictionary<NSString *, NSTextField *> *chainValues;
+/// 节点上的"点击接收器"。节点不适用时它必须 enabled==NO —— 这是 B2 可断言的那一个属性。
+@property (nonatomic, strong) NSMutableDictionary<NSString *, NSButton *> *chainHits;
+/// DSD 路径下 status.filter 是**管线阶段名**（DsdRateConverter/DirectSDM），
+/// 不是用户选的滤波。两者同屏时必须标清楚哪个是哪个。
+@property (nonatomic, strong) NSTextField *pipelineStageLine;
 @property (nonatomic, strong) NSTextField *bpLine;
 // 快速切换
 @property (nonatomic, strong) NSStackView *filterQuick;
@@ -89,6 +94,7 @@ static const NSInteger kABSlotCount = 4;
     if (self) {
         _chainNodes = [NSMutableDictionary dictionary];
         _chainValues = [NSMutableDictionary dictionary];
+        _chainHits = [NSMutableDictionary dictionary];
         _abButtons = [NSMutableArray array];
         _abSummaries = [NSMutableArray array];
         _abActive = -1;
@@ -223,11 +229,32 @@ static const NSInteger kABSlotCount = 4;
         ]];
         self.chainNodes[key] = node;
         self.chainValues[key] = val;
+        self.chainHits[key] = hit;
+        // 初始态就要安全：默认 PCM（dsd=0）⟹ SDM 节点先禁用。
+        // 只在 refreshChain 里禁会漏掉"还没拿到设置"的那段时间（判据 B2j 抓到的）。
+        {
+            NSString *why0 = RLPChainNodeDisabledReason(key, @{});
+            if (why0.length) {
+                hit.enabled = NO;
+                hit.toolTip = why0;
+                node.alphaValue = 0.55;
+            }
+        }
         // 不适用原因用 tag 关联的 label 取回（identifier 已被节点占用）
         why.identifier = [NSString stringWithFormat:@"wb.why.%@", key];
         [self.chainRow addArrangedSubview:node];
     }
     [self addFullWidth:self.chainRow height:74];
+
+    // DSD 路径专用的一行：管线阶段名 vs 用户选的滤波。
+    // 后端 /api/status 的 filter 在 DSD 路径下是 "DsdRateConverter"/"DirectSDM"（阶段名），
+    // 拿它当"用户选的滤波"显示是错的 —— 那一栏必须来自 /api/settings。
+    self.pipelineStageLine = RLPLabel(@"", [NSFont systemFontOfSize:10], t.mut);
+    self.pipelineStageLine.identifier = @"wb.pipelinestage";
+    self.pipelineStageLine.translatesAutoresizingMaskIntoConstraints = NO;
+    self.pipelineStageLine.maximumNumberOfLines = 2;
+    self.pipelineStageLine.lineBreakMode = NSLineBreakByWordWrapping;
+    [self addFullWidth:self.pipelineStageLine height:0];
 }
 
 #pragma mark - ② A/B 配置槽
@@ -1034,11 +1061,24 @@ static const NSInteger kABSlotCount = 4;
         self.chainValues[key].textColor = applies ? t.text : t.mut;
         node.layer.borderColor = applies ? t.line.CGColor : t.line2.CGColor;
         node.alphaValue = applies ? 1.0 : 0.55;
+        // 不只是"看起来灰"：点击接收器必须真的禁用，否则用户点了会弹出一个改不动的层。
+        // 这也是 B2 能断言的那一个属性（enabled==NO）。
+        NSButton *hit = self.chainHits[key];
+        if (hit) { hit.enabled = applies; hit.toolTip = applies ? RLPTr(@"点击看当前值") : why; }
         for (NSView *sub in node.subviews) {
             if ([sub.identifier isEqualToString:[NSString stringWithFormat:@"wb.why.%@", key]])
                 ((NSTextField *)sub).stringValue = why ?: @"";
         }
     }
+    // DSD 路径：status.filter 是管线阶段名，不是用户选的滤波 —— 同屏必须标清楚。
+    NSString *stage = [st[@"filter"] isKindOfClass:[NSString class]] ? st[@"filter"] : nil;
+    if (dsd && stage.length) {
+        self.pipelineStageLine.stringValue = [NSString stringWithFormat:@"%@%@ · %@%@",
+            RLPTr(@"管线阶段："), stage, RLPTr(@"你选的滤波："), [self str:@"filter" def:@"默认"]];
+    } else {
+        self.pipelineStageLine.stringValue = @"";
+    }
+
     NSString *bp = [st[@"bitPerfect"] isKindOfClass:[NSString class]] ? st[@"bitPerfect"] : nil;
     NSString *why = [st[@"bitPerfectWhy"] isKindOfClass:[NSString class]] ? st[@"bitPerfectWhy"] : nil;
     if (bp.length) {

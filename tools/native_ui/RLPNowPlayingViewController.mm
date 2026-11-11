@@ -40,6 +40,7 @@
 @property (nonatomic, assign) BOOL anlCached;              // 上次结果是缓存命中（只影响文案）
 @property (nonatomic, copy) NSString *anlError;            // 上次失败原因（如实显示）
 @property (nonatomic, assign) BOOL anlAutoEnabled;         // 来自 settings.autoanl
+@property (nonatomic, assign) NSTimeInterval anlAutoSettingAt;  // 上次读 settings 的时刻（节流）
 @property (nonatomic, assign) NSUInteger anlSeq;           // 丢弃过期回调
 @property (nonatomic, strong) NSLayoutConstraint *anlDetailHeight;
 /// 封面请求序号：快速切歌时用它丢弃过期回调（慢请求回来不能盖掉新封面）。
@@ -237,6 +238,13 @@
     [self.knowledge cancelLoading];
     [super viewDidDisappear];
     [self stopPolling];
+    // 离开单曲页：让服务器也停下在跑的分析（与 web 版离开页面时的 anlCancelServer 同语义）。
+    if (self.anlBusy) {
+        [[RLPCoreClient shared] postJSON:@"/api/anl/cancel" body:@""
+                              completion:^(NSDictionary * _Nullable r) { (void)r; }];
+        self.anlBusy = NO;
+        self.anlSeq++;                  // 在途回调作废
+    }
 }
 
 - (void)startPolling {
@@ -246,20 +254,8 @@
         return;
     }
     self.polling = YES;
-    // 自动分析开关的真相源是 settings.autoanl（开关本身在设置·高级页签）。
-    // 这里只读一次并缓存，避免每 0.8s 都拉一遍设置。
-    {
-        __weak __typeof__(self) ws = self;
-        [[RLPCoreClient shared] getJSON:@"/api/settings" completion:^(NSDictionary * _Nullable json) {
-            __typeof__(self) s = ws;
-            if (!s) return;
-            // 值在 kv 子对象里（读顶层会永远读成"关"）。
-            NSDictionary *kv = [json[@"kv"] isKindOfClass:[NSDictionary class]] ? json[@"kv"] : json;
-            id v = kv[@"autoanl"];
-            s.anlAutoEnabled = [v isKindOfClass:[NSString class]] ? [v isEqualToString:@"1"]
-                              : ([v isKindOfClass:[NSNumber class]] ? [v boolValue] : NO);
-        }];
-    }
+    // 自动分析开关的真相源是 settings.autoanl（开关本身在设置·高级页签，播放页不再显示）。
+    [self anlRefreshAutoSettingIfStale];
     __weak __typeof__(self) weakSelf = self;
     self.poll = [NSTimer scheduledTimerWithTimeInterval:0.8 repeats:YES block:^(NSTimer *timer) {
         (void)timer;
@@ -293,20 +289,58 @@
             [self_ loadLyricsForPath:path];
             [self_ loadCoverForPath:path];
             [self_ loadMetaAndKnowledgeForPath:path];
-            // 切歌：清掉上一首的结果与层级，并按 settings.autoanl 自动分析一次（每曲一次）。
+            // 切歌：清掉上一首的结果与层级。
             self_.anlHealth = nil;
             self_.anlPath = nil;
+            self_.anlError = nil;
+            self_.anlCached = NO;
             self_.anlSeq++;                 // 让上一首的在途回调作废
             self_.anlBusy = NO;
+            self_.anlAutoDonePath = nil;
             [self_ anlOpenLevel:RLPAnlLevelCollapsed];
-            const BOOL playing = st.playing && !st.paused;
-            if (RLPAnlShouldAutoAnalyze(path, playing, self_.anlAutoEnabled,
-                                        self_.anlAutoDonePath, NO, NO)) {
-                self_.anlAutoDonePath = path;
-                [self_ anlAnalyzePath:path force:NO];
+            // 切歌要让**服务器**也停下上一首的分析（/api/anl/cancel，与 web 版 anlTick 同语义：
+            // 否则 CPU 继续烧在没人看的结果上）。
+            if (path.length) {
+                [[RLPCoreClient shared] postJSON:@"/api/anl/cancel" body:@""
+                                      completion:^(NSDictionary * _Nullable r) { (void)r; }];
             }
         }
+        // 每轮都跑一次"该不该自动分析"的判定（与 web 版 anlTick 同口径）。
+        // ⚠️ 这里绝不无条件发 /api/health：那是整曲解码 + FFT 的重活。
+        // 只有「autoanl=1 且正在播放 且 本地文件 且 无缓存 且 没在跑 且 本曲还没自动跑过」才发一次。
+        [self_ anlAutoTickForPath:path playing:st.playing paused:st.paused];
     }];
+}
+
+/// settings.autoanl 的读取节流：它不是热路径（用户在设置页偶尔改一次），
+/// 但读一次就永久缓存会让"刚勾上却要等到切歌才生效"。10 s 一次足够，且绝不进 0.8 s 的忙碌路径。
+- (void)anlRefreshAutoSettingIfStale {
+    const NSTimeInterval now = [NSDate timeIntervalSinceReferenceDate];
+    if (self.anlAutoSettingAt > 0 && (now - self.anlAutoSettingAt) < 10.0) return;
+    self.anlAutoSettingAt = now;
+    __weak __typeof__(self) ws = self;
+    [[RLPCoreClient shared] getJSON:@"/api/settings" completion:^(NSDictionary * _Nullable json) {
+        __typeof__(self) s = ws;
+        if (!s) return;
+        // 值在 kv 子对象里（读顶层会永远读成"关"）。
+        NSDictionary *kv = [json[@"kv"] isKindOfClass:[NSDictionary class]] ? json[@"kv"] : nil;
+        if (!kv) return;
+        id v = kv[@"autoanl"];
+        if ([v isKindOfClass:[NSString class]]) s.anlAutoEnabled = [(NSString *)v isEqualToString:@"1"];
+        else if ([v isKindOfClass:[NSNumber class]]) s.anlAutoEnabled = [(NSNumber *)v boolValue];
+    }];
+}
+
+/// 对齐 web 版 anlTick：每曲只自动跑一次；暂停/继续/拖动进度都不重新触发。
+- (void)anlAutoTickForPath:(NSString *)path playing:(BOOL)playing paused:(BOOL)paused {
+    [self anlRefreshAutoSettingIfStale];
+    const BOOL active = playing && !paused;
+    if (RLPAnlShouldAutoAnalyze(path, active, self.anlAutoEnabled,
+                                self.anlAutoDonePath, self.anlBusy,
+                                self.anlHealth.count > 0 && [path isEqualToString:self.anlPath ?: @""])) {
+        self.anlAutoDonePath = path;
+        [self anlAnalyzePath:path force:NO];
+    }
 }
 
 - (void)loadLyricsForPath:(NSString *)path {

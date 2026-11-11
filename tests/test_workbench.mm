@@ -181,6 +181,22 @@ int main() {
             for (NSView *v in all) if ([v.identifier isEqualToString:k]) found = YES;
             CK(found, [[NSString stringWithFormat:@"B1d A/B 控件存在 %@", k] UTF8String], @"缺失");
         }
+        // B2j 灰节点必须**真的禁用点击**（不只是 alpha 低）：
+        // 默认 PCM ⟹ SDM 节点的点击接收器 enabled 必须为 NO，否则点了会弹出改不动的层。
+        {
+            NSButton *sdmHit = nil, *outHit = nil;
+            for (NSView *v in all) {
+                if (![v isKindOfClass:[NSButton class]]) continue;
+                NSButton *b = (NSButton *)v;
+                if ([b.identifier isEqualToString:@"sdm"]) sdmHit = b;
+                if ([b.identifier isEqualToString:@"out"]) outHit = b;
+            }
+            CK(sdmHit != nil && !sdmHit.enabled, "B2j PCM 下 SDM 节点点击被禁用",
+               sdmHit ? [NSString stringWithFormat:@"enabled=%d", (int)sdmHit.enabled] : @"未找到接收器");
+            CK(outHit != nil && outHit.enabled, "B2k 输出节点始终可点",
+               outHit ? [NSString stringWithFormat:@"enabled=%d", (int)outHit.enabled] : @"未找到接收器");
+        }
+
         // B7 四项"发烧友会反复调"的控件必须在位（子代理复核指出的真缺口，已补）
         {
             NSArray *need = @[@"wb.phase", @"wb.filtersearch", @"wb.modorder", @"wb.eqpreset"];

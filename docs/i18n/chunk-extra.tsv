@@ -155,3 +155,10 @@ UPnP 投放	UPnP cast	1.1.7.1 双模式 UI
 线性	Linear	1.1.7.1 工作台快速控件
 调制阶数（ec 常用 7）	Modulator order (7 is typical for ec)	1.1.7.1 工作台快速控件
 阶数	Order	1.1.7.1 工作台快速控件
+95%% 滚降点	95%% rolloff	1.1.7.1 工作台与分析补充
+你选的滤波：	Your filter: 	1.1.7.1 工作台与分析补充
+削波占比	Clipped share	1.1.7.1 工作台与分析补充
+点击看当前值	Click to see the current value	1.1.7.1 工作台与分析补充
+管线阶段：	Pipeline stage: 	1.1.7.1 工作台与分析补充
+缓存命中	cache hit	1.1.7.1 工作台与分析补充
+音质指标	Quality metrics	1.1.7.1 工作台与分析补充
