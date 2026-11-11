@@ -38,6 +38,31 @@ BOOL RLPAnlShouldAutoAnalyze(NSString *_Nullable path,
                              NSString *_Nullable alreadyDonePath,
                              BOOL busy,
                              BOOL cached);
+// ---------------------------------------------------------------------------
+// 数值口径（铁律 3）：后端用 -300 表示"不适用哨兵"（src/analysis/dynamics.h:266/301，
+// src/analysis/track_health.h:346），而 RLPAnlHas 只判"是不是有限数字" ⟹ 单靠它会把这个哨兵
+// 原样排成 "-300.00 dB"，看上去像一次真实测量。另外 *_available=false 时数值即使存在也不可信
+// （dr_available=false ⟹ 动态不适用）。下面几个函数就是"哨兵 + 可用性"双判的唯一出口。
+BOOL RLPAnlAvail(id _Nullable v);                            // 有限且 > -299
+NSString *RLPAnlVal(id _Nullable v, NSInteger digits, NSString *_Nullable unit);
+// flagKey 非空时该旗标必须为 true；否则只看哨兵。
+NSString *RLPAnlValFlag(NSDictionary *_Nullable h, NSString *key, NSString *_Nullable flagKey,
+                        NSInteger digits, NSString *_Nullable unit);
+// 计数类：0 是真实值，缺失才 NA。
+NSString *RLPAnlCount(id _Nullable v);
+
+// 解开 /api/health 的外层。
+// 后端返回的是 {ok, usable, cached, ms, stats, health:{…}}（tools/rtaweb.cpp 的
+// handle_health_analysis，缓存命中与实算两条路径都这样）。摘要函数要的是 health 里面的扁平字段；
+// 直接把外层当 health 会让 dr_db / quality 全部读不到 ⟹ 一首 DR 14.2、零削波的歌
+// 被显示成「素材过短 · 动态不适用 / 不适用 · 样本不足」。inner 缺失时退回外层。
+NSDictionary *_Nullable RLPAnlUnwrapHealth(NSDictionary *_Nullable json);
+
+// 展开后的详情文本（纯函数：同一份 health 永远得到同一份输出，便于单测）。
+// 数字全部来自后端；不可用一律 NA。error 只用于"没有结果"时的如实解释。
+NSString *RLPAnlDetailText(NSDictionary *_Nullable health, NSInteger level, BOOL cached,
+                           NSString *_Nullable error, NSString *_Nullable path);
+
 /// 是否本地文件（可分析）。流媒体/远端路径不可分析。
 BOOL RLPAnlIsLocalPath(NSString *_Nullable path);
 

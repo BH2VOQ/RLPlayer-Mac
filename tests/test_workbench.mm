@@ -115,6 +115,35 @@ int main() {
         for (NSDictionary *it in fs) if (RLPWorkbenchFilterUsesNx(it)) nxFound = YES;
         CK(nxFound, "B4c forNx 项被识别（要写 filterNx 键）", @"");
 
+        // ---------- B6 相位快切（同家族，不跨家族乱切）----------
+        {
+            NSArray *pf = @[
+                @{@"name": @"poly-sinc-gauss-long",    @"phase": @"linear",       @"forNx": @NO},
+                @{@"name": @"poly-sinc-gauss-long-mp", @"phase": @"minimum",      @"forNx": @NO},
+                @{@"name": @"poly-sinc-gauss-long-ip", @"phase": @"intermediate", @"forNx": @NO},
+                @{@"name": @"poly-sinc-short",         @"phase": @"linear",       @"forNx": @NO},
+                @{@"name": @"poly-sinc-short-mp",      @"phase": @"minimum",      @"forNx": @NO},
+            ];
+            CK([RLPFilterWithPhase(@"poly-sinc-gauss-long", @"minimum", pf) isEqualToString:@"poly-sinc-gauss-long-mp"],
+               "B6a 线性→最小相位（同家族）", RLPFilterWithPhase(@"poly-sinc-gauss-long", @"minimum", pf) ?: @"nil");
+            CK([RLPFilterWithPhase(@"poly-sinc-gauss-long-mp", @"linear", pf) isEqualToString:@"poly-sinc-gauss-long"],
+               "B6b 最小→线性（回得去）", RLPFilterWithPhase(@"poly-sinc-gauss-long-mp", @"linear", pf) ?: @"nil");
+            CK([RLPFilterWithPhase(@"poly-sinc-gauss-long", @"intermediate", pf) isEqualToString:@"poly-sinc-gauss-long-ip"],
+               "B6c 线性→混合相位", @"");
+            // ★ 负向：不许跨家族（gauss-long 没有的相位不能切到 short 上去）
+            CK(RLPFilterWithPhase(@"poly-sinc-gauss-long", @"minimum", pf) != nil &&
+               ![RLPFilterWithPhase(@"poly-sinc-short", @"intermediate", pf) length],
+               "B6d 同家族无该相位 ⟹ nil（不跨家族乱切）",
+               RLPFilterWithPhase(@"poly-sinc-short", @"intermediate", pf) ?: @"nil");
+            CK(RLPFilterWithPhase(@"nonexistent-filter", @"linear", pf) == nil,
+               "B6e 未知滤波 ⟹ nil", @"");
+            CK(RLPFilterWithPhase(@"poly-sinc-gauss-long", @"linear", @[]) == nil,
+               "B6f 空名单 ⟹ nil", @"");
+            // 长度档不能被当成相位后缀吃掉（short/long 是不同滤波）
+            CK(![RLPFilterFamilyKey(@"poly-sinc-short") isEqualToString:RLPFilterFamilyKey(@"poly-sinc-long")],
+               "B6g short 与 long 是不同家族（长度档不混）", @"");
+        }
+
         // ---------- B2 信号链节点适用性 ----------
         CK(!RLPChainNodeApplies(@"sdm", full), "B2a PCM 路径下 SDM 节点不适用", @"");
         CK(RLPChainNodeDisabledReason(@"sdm", full).length > 0, "B2b 不适用必须给原因", @"");
@@ -152,6 +181,21 @@ int main() {
             for (NSView *v in all) if ([v.identifier isEqualToString:k]) found = YES;
             CK(found, [[NSString stringWithFormat:@"B1d A/B 控件存在 %@", k] UTF8String], @"缺失");
         }
+        // B7 四项"发烧友会反复调"的控件必须在位（子代理复核指出的真缺口，已补）
+        {
+            NSArray *need = @[@"wb.phase", @"wb.filtersearch", @"wb.modorder", @"wb.eqpreset"];
+            for (NSString *k in need) {
+                BOOL found = NO;
+                for (NSView *v in all) if ([v.identifier isEqualToString:k]) found = YES;
+                CK(found, [[NSString stringWithFormat:@"B7 快速控件存在 %@", k] UTF8String], @"缺失");
+            }
+            // PCM 路径下（默认 dsd=0）调制阶数必须禁用 —— 与信号链 SDM 灰显同口径
+            NSPopUpButton *mo = nil;
+            for (NSView *v in all) if ([v.identifier isEqualToString:@"wb.modorder"]) mo = (NSPopUpButton *)v;
+            if (mo) CK(!mo.enabled, "B7e PCM 下调制阶数禁用（不经过调制器）",
+                       [NSString stringWithFormat:@"enabled=%d", (int)mo.enabled]);
+        }
+
         // 不许有跳设置页的入口
         NSMutableArray<NSString *> *bad = [NSMutableArray array];
         for (NSView *v in all) {

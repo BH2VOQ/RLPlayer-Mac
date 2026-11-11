@@ -40,6 +40,16 @@ NSArray<NSDictionary *> *RLPFilterGroups(NSArray<NSDictionary *> *_Nullable item
 /// 该滤波项是否写 filterNx 键。
 BOOL RLPWorkbenchFilterUsesNx(NSDictionary *_Nullable item);
 
+/// 相位快切：在**同家族**里找指定相位的对应项（发烧友常来回比线性/最小相位的瞬态）。
+/// family 判定按名字去掉相位后缀后的前缀；找不到同家族同相位项时返回 nil（不跨家族乱切）。
+/// wantPhase ∈ linear / minimum / intermediate。
+NSString *_Nullable RLPFilterWithPhase(NSString *_Nullable currentName,
+                                      NSString *wantPhase,
+                                      NSArray<NSDictionary *> *_Nullable items);
+
+/// 从滤波名推它的家族键（用于同家族匹配）。空名返回空串。
+NSString *RLPFilterFamilyKey(NSString *_Nullable name);
+
 /// 信号链节点在给定设置下是否适用（不适用要灰掉并说明原因）。
 /// node ∈ src/resample/eq/ir/shaper/sdm/out
 BOOL RLPChainNodeApplies(NSString *node, NSDictionary *_Nullable settings);

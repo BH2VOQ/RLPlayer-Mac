@@ -37,6 +37,8 @@
 @property (nonatomic, copy) NSString *anlPath;             // 结果对应的曲目
 @property (nonatomic, copy) NSString *anlAutoDonePath;     // 每曲一次去重
 @property (nonatomic, assign) BOOL anlBusy;
+@property (nonatomic, assign) BOOL anlCached;              // 上次结果是缓存命中（只影响文案）
+@property (nonatomic, copy) NSString *anlError;            // 上次失败原因（如实显示）
 @property (nonatomic, assign) BOOL anlAutoEnabled;         // 来自 settings.autoanl
 @property (nonatomic, assign) NSUInteger anlSeq;           // 丢弃过期回调
 @property (nonatomic, strong) NSLayoutConstraint *anlDetailHeight;
@@ -429,6 +431,8 @@
         dyn = qual = fake = RLPTr(@"仅本地文件可分析");
     } else if (self.anlBusy) {
         dyn = qual = fake = RLPTr(@"正在分析…");
+    } else if (self.anlError.length) {
+        dyn = qual = fake = [NSString stringWithFormat:@"%@：%@", RLPTr(@"分析失败"), self.anlError];
     } else if (!h) {
         dyn = qual = fake = RLPTr(@"未分析");
     }
@@ -438,48 +442,9 @@
     self.anlDyn.toolTip = dyn; self.anlQual.toolTip = qual; self.anlFake.toolTip = fake;
 
     if (self.anlLevel == RLPAnlLevelCollapsed) { self.anlDetail.string = @""; return; }
-    self.anlDetail.string = [self anlDetailText:h level:self.anlLevel];
-}
-
-/// 指标明细：数字全部来自后端，UI 只做单位与排版（不可用 ⟹ NA）。
-- (NSString *)anlDetailText:(NSDictionary *)h level:(RLPAnlLevel)level {
-    if (![h isKindOfClass:[NSDictionary class]]) return RLPTr(@"未分析");
-    NSDictionary *q = [h[@"quality"] isKindOfClass:[NSDictionary class]] ? h[@"quality"] : @{};
-    NSMutableString *s = [NSMutableString string];
-    [s appendFormat:@"%@\n", RLPTr(@"动态")];
-    [s appendFormat:@"  %@ %@\n", RLPTr(@"动态范围 DR"), RLPAnlFmt(h[@"dr_db"], 2, @" dB")];
-    [s appendFormat:@"  %@ %@\n", RLPTr(@"响度 (LUFS)"), RLPAnlFmt(h[@"lufs"], 2, @" LUFS")];
-    [s appendFormat:@"  %@ %@\n", RLPTr(@"响度范围 LRA"), RLPAnlFmt(h[@"lra"], 2, @" LU")];
-    [s appendFormat:@"  %@ %@\n", RLPTr(@"真峰 (dBTP)"), RLPAnlFmt(h[@"true_peak_dbtp"], 2, @" dBTP")];
-    [s appendFormat:@"  %@ %@\n", RLPTr(@"样本峰值"), RLPAnlFmt(h[@"peak_dbfs"], 2, @" dBFS")];
-    [s appendFormat:@"  %@ %@\n", RLPTr(@"声道"), RLPAnlHas(h[@"channels"]) ? [NSString stringWithFormat:@"%@ ch", h[@"channels"]] : @"NA"];
-    [s appendFormat:@"\n%@\n", RLPTr(@"音质")];
-    [s appendFormat:@"  %@ %@\n", RLPTr(@"削波样本"), RLPAnlFmt(q[@"clipped_samples"], 0, nil)];
-    [s appendFormat:@"  %@ %@\n", RLPTr(@"最长连续削波"), RLPAnlFmt(q[@"longest_clip_run"], 0, nil)];
-    [s appendFormat:@"  %@ %@\n", RLPTr(@"峰值因子"), RLPAnlFmt(q[@"crest_db"], 2, @" dB")];
-    [s appendFormat:@"  %@ %@\n", RLPTr(@"信噪比"), RLPAnlFmt(q[@"snr_db"], 2, @" dB")];
-    [s appendFormat:@"  %@ %@\n", RLPTr(@"频谱重心"), RLPAnlFmt(q[@"centroid_hz"], 0, @" Hz")];
-    [s appendFormat:@"\n%@\n", RLPTr(@"假无损")];
-    [s appendFormat:@"  %@ %@\n", RLPTr(@"判定"), RLPAnlSumFake(h)];
-    [s appendFormat:@"  %@ %@\n", RLPTr(@"截止频率"), RLPAnlFmt(h[@"cutoff_hz"], 1, @" Hz")];
-    [s appendFormat:@"  %@ %@\n", RLPTr(@"置信度"), RLPAnlFmt(h[@"confidence"], 3, nil)];
-    [s appendFormat:@"  %@ %@\n", RLPTr(@"24bit 实为低位深"),
-        [h[@"fake24"] isKindOfClass:[NSNumber class]] ? ([h[@"fake24"] boolValue] ? RLPTr(@"是") : RLPTr(@"否")) : @"NA"];
-    if (level == RLPAnlLevelFull) {
-        [s appendFormat:@"\n%@\n", RLPTr(@"采样规格与分析记录")];
-        [s appendFormat:@"  %@ %@\n", RLPTr(@"采样率"), RLPAnlFmt(h[@"fs"], 0, @" Hz")];
-        [s appendFormat:@"  %@ %@\n", RLPTr(@"位深"), RLPAnlFmt(h[@"bits"], 0, @" bit")];
-        [s appendFormat:@"  %@ %@\n", RLPTr(@"分析状态"),
-            [h[@"status"] isKindOfClass:[NSString class]] ? h[@"status"] : @"NA"];
-        [s appendFormat:@"  %@ %@\n", RLPTr(@"谱窗数"), RLPAnlFmt(q[@"spectral_windows"], 0, nil)];
-        [s appendFormat:@"  %@ %@\n", RLPTr(@"RMS"), RLPAnlFmt(q[@"rms_dbfs"], 2, @" dBFS")];
-        [s appendFormat:@"  %@ %@\n", RLPTr(@"动态重心"), RLPAnlFmt(q[@"dyn_centroid_dbfs"], 2, @" dBFS")];
-        if ([h[@"reason"] isKindOfClass:[NSString class]] && [h[@"reason"] length])
-            [s appendFormat:@"\n%@：%@\n", RLPTr(@"判定依据"), h[@"reason"]];
-        if ([h[@"error"] isKindOfClass:[NSString class]] && [h[@"error"] length])
-            [s appendFormat:@"%@：%@\n", RLPTr(@"后端说明"), h[@"error"]];
-    }
-    return s;
+    // 详情文本是纯函数（RLPAnalysisSummary）：同一份 health 永远同一份输出，可离线单测。
+    self.anlDetail.string = RLPAnlDetailText(h, (NSInteger)self.anlLevel, self.anlCached,
+                                             self.anlError, self.currentPath);
 }
 
 /// 真的取数。**只由切歌自动分析或用户点「重新分析」触发**，绝不进轮询。
@@ -487,6 +452,8 @@
     if (!RLPAnlIsLocalPath(path)) return;
     const NSUInteger seq = ++self.anlSeq;
     self.anlBusy = YES;
+    self.anlError = nil;                 // 新一轮开始：清掉上一次的失败原因
+    self.anlCached = NO;
     [self anlPaint];
     NSString *url = [NSString stringWithFormat:@"/api/health?file=%@%@", RLPEnc(path), force ? @"&force=1" : @""];
     __weak __typeof__(self) weakSelf = self;
@@ -495,10 +462,24 @@
         if (!self_ || seq != self_.anlSeq) return;    // 过期结果直接丢（切歌后不能盖掉新曲）
         self_.anlBusy = NO;
         if (json && [json[@"ok"] boolValue]) {
-            self_.anlHealth = json;
+            // ⚠️ 后端返回的是**外层**：{ok, usable, cached, ms, stats, health:{…}}
+            // （tools/rtaweb.cpp 的 handle_health_analysis，缓存命中与实算两条路径都这样）。
+            // 摘要函数要的是 health 里面的扁平字段，直接存外层会让 dr_db/quality 全部读不到 ⟹
+            // 一首 DR 14.2、零削波的歌被显示成「素材过短 · 动态不适用 / 不适用 · 样本不足」。
+            // 内层缺失（异常响应）时退回外层，至少不丢已有字段。
+            NSDictionary *inner = [json[@"health"] isKindOfClass:[NSDictionary class]] ? json[@"health"] : nil;
+            self_.anlHealth = inner ?: json;
             self_.anlPath = path;
+            // 缓存命中标记只用于状态文案（不影响任何指标）
+            id cached = json[@"cached"];
+            self_.anlCached = [cached isKindOfClass:[NSNumber class]] && [cached boolValue];
         } else {
             self_.anlHealth = nil;
+            self_.anlCached = NO;
+            // 如实报错，不要把失败显示成"未分析"让人以为还没跑
+            id err = json[@"error"];
+            self_.anlError = [err isKindOfClass:[NSString class]] ? err : nil;
+            if (!self_.anlError.length) self_.anlError = RLPTr(@"分析失败");
         }
         [self_ anlPaint];
     }];

@@ -90,6 +90,41 @@ NSArray<NSDictionary *> *RLPFilterGroups(NSArray<NSDictionary *> *items) {
     return out;
 }
 
+NSString *RLPFilterFamilyKey(NSString *name) {
+    if (![name isKindOfClass:[NSString class]] || !name.length) return @"";
+    NSString *n = [name lowercaseString];
+    // 相位/长度变体后缀去掉后就是家族：poly-sinc-gauss-long-2s / -mp / -ip 同属 gauss-long。
+    // 只去掉**明确的相位与两段后缀**，不动 short/long/hires 这些"长度档"——
+    // 它们是不同滤波，混为一谈会让相位快切把用户切到另一个长度档上去。
+    NSArray *suffixes = @[@"-mp", @"-ip", @"-lp", @"-2s"];
+    BOOL changed = YES;
+    while (changed) {
+        changed = NO;
+        for (NSString *s in suffixes) {
+            if ([n hasSuffix:s]) { n = [n substringToIndex:n.length - s.length]; changed = YES; }
+        }
+    }
+    return n;
+}
+
+NSString *RLPFilterWithPhase(NSString *currentName, NSString *wantPhase, NSArray<NSDictionary *> *items) {
+    if (![currentName isKindOfClass:[NSString class]] || !currentName.length) return nil;
+    if (![wantPhase isKindOfClass:[NSString class]] || !wantPhase.length) return nil;
+    if (![items isKindOfClass:[NSArray class]]) return nil;
+    NSString *fam = RLPFilterFamilyKey(currentName);
+    if (!fam.length) return nil;
+    for (id it in items) {
+        if (![it isKindOfClass:[NSDictionary class]]) continue;
+        NSString *n = [it[@"name"] isKindOfClass:[NSString class]] ? it[@"name"] : nil;
+        NSString *ph = [it[@"phase"] isKindOfClass:[NSString class]] ? it[@"phase"] : nil;
+        if (!n.length || !ph.length) continue;
+        if (![ph isEqualToString:wantPhase]) continue;
+        if (![RLPFilterFamilyKey(n) isEqualToString:fam]) continue;   // 不跨家族
+        return n;
+    }
+    return nil;   // 同家族没有该相位 ⟹ 如实返回 nil，UI 禁用那一档
+}
+
 BOOL RLPWorkbenchFilterUsesNx(NSDictionary *item) {
     return [item isKindOfClass:[NSDictionary class]] && [item[@"forNx"] boolValue];
 }

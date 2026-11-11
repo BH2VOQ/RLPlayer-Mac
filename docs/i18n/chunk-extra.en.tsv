@@ -431,3 +431,13 @@ UPnP 投放	UPnP cast	1.1.7.1 双模式 UI
 采样规格与分析记录	Sample format and analysis record	1.1.7.1 双模式 UI
 重新分析	Re-analyze	1.1.7.1 双模式 UI
 音乐目录已就绪 · 可重新扫描更新专辑与封面	Music folder ready · rescan to refresh albums and covers	1.1.7.1 双模式 UI
+加载预设…	Load preset…	1.1.7.1 工作台快速控件
+在当前滤波的同家族内切换相位；同家族没有该相位时该档不可用	Switch phase within the current filter's family; unavailable when that family has no such phase	1.1.7.1 工作台快速控件
+已加载	Loaded	1.1.7.1 工作台快速控件
+当前滤波的同家族没有这个相位	The current filter's family has no such phase	1.1.7.1 工作台快速控件
+搜索滤波名	Search filter name	1.1.7.1 工作台快速控件
+最小	Minimum	1.1.7.1 工作台快速控件
+混合	Intermediate	1.1.7.1 工作台快速控件
+线性	Linear	1.1.7.1 工作台快速控件
+调制阶数（ec 常用 7）	Modulator order (7 is typical for ec)	1.1.7.1 工作台快速控件
+阶数	Order	1.1.7.1 工作台快速控件

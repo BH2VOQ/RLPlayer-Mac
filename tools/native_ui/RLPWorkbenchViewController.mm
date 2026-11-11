@@ -31,6 +31,12 @@ static const NSInteger kABSlotCount = 4;
 // 快速切换
 @property (nonatomic, strong) NSStackView *filterQuick;
 @property (nonatomic, strong) NSPopUpButton *filterAll;
+@property (nonatomic, strong) NSSegmentedControl *phaseSeg;      // 相位快切（同家族）
+@property (nonatomic, strong) NSSearchField *filterSearch;       // 几十项滤波要能搜
+@property (nonatomic, strong) NSPopUpButton *modOrderPopup;      // 调制阶数（DSD 路径）
+@property (nonatomic, strong) NSPopUpButton *eqPresetPopup;      // PEQ 预设快速加载
+@property (nonatomic, copy) NSArray<NSString *> *eqPresetNames;
+@property (nonatomic, copy) NSString *filterQuery;
 @property (nonatomic, strong) NSPopUpButton *ratePopup;
 @property (nonatomic, strong) NSSegmentedControl *dsdSeg;
 @property (nonatomic, strong) NSPopUpButton *shaperPopup;
@@ -66,6 +72,8 @@ static const NSInteger kABSlotCount = 4;
 - (void)refreshChain;
 - (void)refreshAB;
 - (void)rebuildFilterControls;
+- (void)reloadEqPresets;
+- (void)syncPhaseSeg;
 - (void)syncOutputControls;
 - (NSDictionary *)currentDeviceDict;
 - (NSTextField *)inlineLabel:(NSString *)text;
@@ -376,8 +384,23 @@ static const NSInteger kABSlotCount = 4;
     self.filterAll.action = @selector(onFilterAllChanged:);
     self.filterAll.font = t.small;
     [[self.filterAll.widthAnchor constraintEqualToConstant:300] setActive:YES];
-    for (NSView *v in @[ti, note, self.filterQuick, self.filterAll]) [card addSubview:v];
-    [self addFullWidth:card height:132];
+    // 相位快切：发烧友常来回比线性/最小相位的瞬态与预回声。
+    self.phaseSeg = [NSSegmentedControl segmentedControlWithLabels:@[RLPTr(@"线性"), RLPTr(@"最小"), RLPTr(@"混合")]
+        trackingMode:NSSegmentSwitchTrackingSelectOne target:self action:@selector(onPhaseChanged:)];
+    self.phaseSeg.translatesAutoresizingMaskIntoConstraints = NO;
+    self.phaseSeg.identifier = @"wb.phase";
+    self.phaseSeg.toolTip = RLPTr(@"在当前滤波的同家族内切换相位；同家族没有该相位时该档不可用");
+    // 滤波有几十项，必须能搜（否则下拉里翻半天）
+    self.filterSearch = [[NSSearchField alloc] initWithFrame:NSZeroRect];
+    self.filterSearch.placeholderString = RLPTr(@"搜索滤波名");
+    self.filterSearch.identifier = @"wb.filtersearch";
+    self.filterSearch.translatesAutoresizingMaskIntoConstraints = NO;
+    self.filterSearch.target = self;
+    self.filterSearch.action = @selector(onFilterSearch:);
+    self.filterSearch.font = t.small;
+    [[self.filterSearch.widthAnchor constraintEqualToConstant:200] setActive:YES];
+    for (NSView *v in @[ti, note, self.filterQuick, self.filterAll, self.phaseSeg, self.filterSearch]) [card addSubview:v];
+    [self addFullWidth:card height:170];
     [NSLayoutConstraint activateConstraints:@[
         [ti.leadingAnchor constraintEqualToAnchor:card.leadingAnchor constant:14],
         [ti.topAnchor constraintEqualToAnchor:card.topAnchor constant:12],
@@ -388,6 +411,10 @@ static const NSInteger kABSlotCount = 4;
         [self.filterQuick.topAnchor constraintEqualToAnchor:note.bottomAnchor constant:8],
         [self.filterAll.leadingAnchor constraintEqualToAnchor:card.leadingAnchor constant:10],
         [self.filterAll.topAnchor constraintEqualToAnchor:self.filterQuick.bottomAnchor constant:6],
+        [self.filterSearch.leadingAnchor constraintEqualToAnchor:self.filterAll.trailingAnchor constant:10],
+        [self.filterSearch.centerYAnchor constraintEqualToAnchor:self.filterAll.centerYAnchor],
+        [self.phaseSeg.leadingAnchor constraintEqualToAnchor:self.filterSearch.trailingAnchor constant:12],
+        [self.phaseSeg.centerYAnchor constraintEqualToAnchor:self.filterAll.centerYAnchor],
     ]];
 }
 
@@ -398,7 +425,18 @@ static const NSInteger kABSlotCount = 4;
         [self.filterQuick removeArrangedSubview:v]; [v removeFromSuperview];
     }
     NSString *cur = [self str:@"filter" def:@""];
-    NSArray<NSDictionary *> *groups = RLPFilterGroups(self.filters);
+    // 搜索过滤：只影响下拉列表，不影响快捷区（快捷区是"常用"，不该被搜索词清空）。
+    NSArray<NSDictionary *> *pool = self.filters;
+    if (self.filterQuery.length) {
+        NSString *q = self.filterQuery.lowercaseString;
+        NSMutableArray *hit = [NSMutableArray array];
+        for (NSDictionary *it in self.filters) {
+            NSString *n = [it[@"name"] isKindOfClass:[NSString class]] ? it[@"name"] : @"";
+            if ([n.lowercaseString rangeOfString:q].location != NSNotFound) [hit addObject:it];
+        }
+        pool = hit;
+    }
+    NSArray<NSDictionary *> *groups = RLPFilterGroups(pool);
     [self.filterAll removeAllItems];
     NSInteger quick = 0;
     for (NSDictionary *g in groups) {
@@ -414,7 +452,7 @@ static const NSInteger kABSlotCount = 4;
             [[self.filterAll lastItem] setRepresentedObject:@{@"name": n, @"nx": @(RLPWorkbenchFilterUsesNx(it))}];
             // **每组各取前 2 个**进快捷区：按分组顺序取前 6 会全落在 gauss 组，
             // 锐利族一个都点不到（离屏截图实测到的真缺陷）。
-            if (perGroup < 2 && quick < 8) {
+            if (perGroup < 2 && quick < 8 && !self.filterQuery.length) {
                 NSButton *b = [NSButton buttonWithTitle:n target:self action:@selector(onFilterQuick:)];
                 b.bezelStyle = NSBezelStyleRounded;
                 b.font = [NSFont systemFontOfSize:10];
@@ -435,6 +473,44 @@ static const NSInteger kABSlotCount = 4;
             [self.filterAll selectItemAtIndex:i]; break;
         }
     }
+    [self syncPhaseSeg];
+}
+
+#pragma mark 相位快切 / 滤波搜索
+
+/// 相位档回显 + 可用性：同家族没有该相位就禁用那一档（不假装能切）。
+- (void)syncPhaseSeg {
+    NSString *cur = [self str:@"filter" def:@""];
+    NSArray *phases = @[@"linear", @"minimum", @"intermediate"];
+    NSString *curPhase = nil;
+    for (NSDictionary *it in self.filters)
+        if ([it[@"name"] isEqualToString:cur]) curPhase = it[@"phase"];
+    for (NSInteger i = 0; i < (NSInteger)phases.count; ++i) {
+        NSString *target = RLPFilterWithPhase(cur, phases[i], self.filters);
+        // 当前相位那一档始终可选（它就是当前值）
+        const BOOL avail = (target.length > 0) || [phases[i] isEqualToString:curPhase ?: @""];
+        [self.phaseSeg setEnabled:avail forSegment:i];
+    }
+    NSInteger idx = curPhase ? [phases indexOfObject:curPhase] : NSNotFound;
+    if (idx != NSNotFound) self.phaseSeg.selectedSegment = idx;
+}
+
+- (void)onPhaseChanged:(NSSegmentedControl *)sender {
+    NSArray *phases = @[@"linear", @"minimum", @"intermediate"];
+    const NSInteger i = sender.selectedSegment;
+    if (i < 0 || i >= (NSInteger)phases.count) return;
+    NSString *cur = [self str:@"filter" def:@""];
+    NSString *target = RLPFilterWithPhase(cur, phases[i], self.filters);
+    if (!target.length) { RLPToast(RLPTr(@"当前滤波的同家族没有这个相位")); [self syncPhaseSeg]; return; }
+    if ([target isEqualToString:cur]) return;
+    BOOL nx = NO;
+    for (NSDictionary *it in self.filters) if ([it[@"name"] isEqualToString:target]) nx = RLPWorkbenchFilterUsesNx(it);
+    [self postSettings:@{(nx ? @"filterNx" : @"filter"): target}];
+}
+
+- (void)onFilterSearch:(NSSearchField *)sender {
+    self.filterQuery = sender.stringValue;
+    [self rebuildFilterControls];
 }
 
 - (void)onFilterQuick:(NSButton *)sender {
@@ -488,13 +564,29 @@ static const NSInteger kABSlotCount = 4;
     [self.modFamilyPopup addItemsWithTitles:@[@"dsd", @"chebyshev", @"ec", @"ahm"]];
     [[self.modFamilyPopup.widthAnchor constraintEqualToConstant:120] setActive:YES];
 
+    // 调制阶数：DSD 路径下发烧友会反复试（ec 常用 7）
+    self.modOrderPopup = [[NSPopUpButton alloc] initWithFrame:NSZeroRect pullsDown:NO];
+    self.modOrderPopup.translatesAutoresizingMaskIntoConstraints = NO;
+    self.modOrderPopup.target = self; self.modOrderPopup.action = @selector(onModOrderChanged:);
+    self.modOrderPopup.identifier = @"wb.modorder";
+    self.modOrderPopup.font = t.small;
+    [self.modOrderPopup addItemsWithTitles:@[@"5", @"6", @"7", @"8", @"9"]];
+    [[self.modOrderPopup.widthAnchor constraintEqualToConstant:70] setActive:YES];
+    // 初始按 PCM 处理（默认 dsd=0）：调制器族与阶数先禁用，读到真实设置后再按 dsd 放开。
+    // 只在回调里禁会留一个"看起来能调其实不生效"的控件（判据 B7e 抓到的）。
+    self.modOrderPopup.enabled = NO;
+    self.modFamilyPopup.enabled = NO;
+    self.modOrderPopup.toolTip = RLPTr(@"PCM 输出不经过调制器");
+    self.modFamilyPopup.toolTip = RLPTr(@"PCM 输出不经过调制器");
+
     NSStackView *r1 = [[NSStackView alloc] init];
     r1.orientation = NSUserInterfaceLayoutOrientationHorizontal;
     r1.spacing = 10;
     r1.translatesAutoresizingMaskIntoConstraints = NO;
     for (NSView *v in @[[self inlineLabel:RLPTr(@"采样率")], self.ratePopup,
                         [self inlineLabel:RLPTr(@"抖动")], self.shaperPopup,
-                        [self inlineLabel:RLPTr(@"调制器")], self.modFamilyPopup])
+                        [self inlineLabel:RLPTr(@"调制器")], self.modFamilyPopup,
+                        [self inlineLabel:RLPTr(@"阶数")], self.modOrderPopup])
         [r1 addArrangedSubview:v];
     NSStackView *r2 = [[NSStackView alloc] init];
     r2.orientation = NSUserInterfaceLayoutOrientationHorizontal;
@@ -517,7 +609,8 @@ static const NSInteger kABSlotCount = 4;
         [r3 addArrangedSubview:b];
     }
     for (NSView *v in @[ti, note, r1, r2, r3]) [card addSubview:v];
-    [self addFullWidth:card height:186];
+    // 高度要容得下三行控件 + 标题说明：186 会把底部预设行裁掉（离屏截图实测）。
+    [self addFullWidth:card height:200];
     [NSLayoutConstraint activateConstraints:@[
         [ti.leadingAnchor constraintEqualToAnchor:card.leadingAnchor constant:14],
         [ti.topAnchor constraintEqualToAnchor:card.topAnchor constant:12],
@@ -555,6 +648,9 @@ static const NSInteger kABSlotCount = 4;
 }
 - (void)onModFamilyChanged:(NSPopUpButton *)sender {
     [self postSettings:@{@"modfamily": sender.titleOfSelectedItem ?: @"ec"}];
+}
+- (void)onModOrderChanged:(NSPopUpButton *)sender {
+    [self postSettings:@{@"modorder": sender.titleOfSelectedItem ?: @"7"}];
 }
 - (void)onPresetApply:(NSButton *)sender {
     NSString *path = [NSString stringWithFormat:@"/api/preset/apply?profile=%@", RLPEnc(sender.identifier)];
@@ -639,20 +735,66 @@ static const NSInteger kABSlotCount = 4;
     self.eqBypass.bezelStyle = NSBezelStyleRounded;
     self.eqBypass.font = t.small;
     self.eqBypass.translatesAutoresizingMaskIntoConstraints = NO;
+    // PEQ 预设快速加载（名单来自 GET /api/peq 的 presets，不硬编码）
+    self.eqPresetPopup = [[NSPopUpButton alloc] initWithFrame:NSZeroRect pullsDown:NO];
+    self.eqPresetPopup.translatesAutoresizingMaskIntoConstraints = NO;
+    self.eqPresetPopup.target = self; self.eqPresetPopup.action = @selector(onEqPresetLoad:);
+    self.eqPresetPopup.identifier = @"wb.eqpreset";
+    self.eqPresetPopup.font = t.small;
+    [self.eqPresetPopup addItemWithTitle:RLPTr(@"加载预设…")];
+    [[self.eqPresetPopup.widthAnchor constraintEqualToConstant:200] setActive:YES];
     self.eqView = [[RLPEqualizerView alloc] initWithFrame:NSMakeRect(0, 0, 900, 260)];
     self.eqView.translatesAutoresizingMaskIntoConstraints = NO;
-    for (NSView *v in @[ti, self.eqBypass, self.eqView]) [card addSubview:v];
+    for (NSView *v in @[ti, self.eqBypass, self.eqPresetPopup, self.eqView]) [card addSubview:v];
     [self addFullWidth:card height:310];
     [NSLayoutConstraint activateConstraints:@[
         [ti.leadingAnchor constraintEqualToAnchor:card.leadingAnchor constant:14],
         [ti.topAnchor constraintEqualToAnchor:card.topAnchor constant:12],
         [self.eqBypass.trailingAnchor constraintEqualToAnchor:card.trailingAnchor constant:-14],
         [self.eqBypass.centerYAnchor constraintEqualToAnchor:ti.centerYAnchor],
+        [self.eqPresetPopup.trailingAnchor constraintEqualToAnchor:self.eqBypass.leadingAnchor constant:-10],
+        [self.eqPresetPopup.centerYAnchor constraintEqualToAnchor:ti.centerYAnchor],
         [self.eqView.leadingAnchor constraintEqualToAnchor:card.leadingAnchor constant:14],
         [self.eqView.trailingAnchor constraintEqualToAnchor:card.trailingAnchor constant:-14],
         [self.eqView.topAnchor constraintEqualToAnchor:ti.bottomAnchor constant:8],
         [self.eqView.heightAnchor constraintEqualToConstant:250],
     ]];
+}
+
+/// PEQ 预设名单：GET /api/peq 的 presets（内置 + 用户），UI 不硬编码第二份。
+- (void)reloadEqPresets {
+    __weak __typeof__(self) weakSelf = self;
+    [[RLPCoreClient shared] getJSON:@"/api/peq" completion:^(NSDictionary * _Nullable json) {
+        __typeof__(self) self_ = weakSelf;
+        if (!self_) return;
+        NSArray *names = [json[@"presets"] isKindOfClass:[NSArray class]] ? json[@"presets"] : @[];
+        self_.eqPresetNames = names;
+        [self_.eqPresetPopup removeAllItems];
+        [self_.eqPresetPopup addItemWithTitle:RLPTr(@"加载预设…")];
+        for (id n in names) if ([n isKindOfClass:[NSString class]]) [self_.eqPresetPopup addItemWithTitle:n];
+        [self_.eqPresetPopup selectItemAtIndex:0];
+    }];
+}
+
+- (void)onEqPresetLoad:(NSPopUpButton *)sender {
+    const NSInteger i = sender.indexOfSelectedItem;
+    if (i <= 0) return;                       // 第 0 项是占位标题
+    NSString *name = sender.titleOfSelectedItem;
+    if (!name.length) return;
+    NSString *body = [NSString stringWithFormat:@"action=load&name=%@", RLPEnc(name)];
+    __weak __typeof__(self) weakSelf = self;
+    [[RLPCoreClient shared] postJSON:@"/api/peq/preset" body:body completion:^(NSDictionary * _Nullable json) {
+        __typeof__(self) self_ = weakSelf;
+        if (!self_) return;
+        if (json && [json[@"ok"] boolValue]) {
+            RLPToast([NSString stringWithFormat:@"%@ %@", RLPTr(@"已加载"), name]);
+            [self_.eqView reload];
+            [self_ reloadSettings];
+        } else {
+            RLPToast([json[@"error"] isKindOfClass:[NSString class]] ? json[@"error"] : RLPTr(@"加载失败"));
+        }
+        [self_.eqPresetPopup selectItemAtIndex:0];
+    }];
 }
 
 /// 旁路 EQ：发烧友 A/B 时最常用的动作之一（不删曲线，只切 eq 开关）。
@@ -743,6 +885,7 @@ static const NSInteger kABSlotCount = 4;
     [self reloadSettings];
     [self reloadStatus];
     [self.eqView reload];
+    [self reloadEqPresets];
 }
 
 - (void)reloadFilters {
@@ -818,6 +961,12 @@ static const NSInteger kABSlotCount = 4;
         self_.dsdSeg.selectedSegment = (idx == NSNotFound) ? 0 : idx;
         [self_.shaperPopup selectItemWithTitle:[self_ str:@"shaper" def:@"auto"]];
         [self_.modFamilyPopup selectItemWithTitle:[self_ str:@"modfamily" def:@"ec"]];
+        [self_.modOrderPopup selectItemWithTitle:[self_ str:@"modorder" def:@"7"]];
+        // PCM 输出不经过调制器 ⟹ 族与阶数都禁用（与信号链 SDM 节点灰显同口径）
+        const BOOL dsdOn = [self_ str:@"dsd" def:@"0"].integerValue > 0;
+        self_.modFamilyPopup.enabled = dsdOn;
+        self_.modOrderPopup.enabled = dsdOn;
+        self_.modOrderPopup.toolTip = dsdOn ? RLPTr(@"调制阶数（ec 常用 7）") : RLPTr(@"PCM 输出不经过调制器");
         NSDictionary *d = [self_ currentDeviceDict];
         const BOOL hasDop = d && [d[@"dopCarrierRate"] isKindOfClass:[NSNumber class]] && [d[@"dopCarrierRate"] doubleValue] > 0;
         for (NSInteger i = 1; i < 5; ++i) [self_.dsdSeg setEnabled:hasDop forSegment:i];
