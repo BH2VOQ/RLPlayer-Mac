@@ -160,7 +160,7 @@ var S = {
   rstack: [],
   q: { items: [], index: 0 }, cur: '', playing: false, paused: false,
   vol: 0, loud: false, lastCur: '', roots: [], scanning: false, dur: 0, pos: 0,
-  volDb: 0, startDb: 0, theme: 'light', uiStyle: 'apple', queueHidden: false,
+  volDb: 0, startDb: 0, theme: 'dark', uiStyle: 'apple', queueHidden: false,
   // 261024-04 #8：GUP 相关的两个运行时状态（gpuOn = 有 GPU；gpuUsed = 本次播放真的用了 GPU）
   gpuOn: false, gpuUsed: false
 };
@@ -169,7 +169,7 @@ var S = {
 // 老用户的 conf 里可能还留着 backend=asio —— 由 migrateRemovedBackend() 在加载时优雅降级。
 var ADV = {
   device: '', bits: 0, taps: 0, atten: 0, transition: 0, phase: '',
-  modcut: 0, moddith: -1, ir: '', irgpu: 0, ramp: 0, theme: 'light', uiStyle: 'apple', lang: 'zh',
+  modcut: 0, moddith: -1, ir: '', irgpu: 0, ramp: 0, theme: 'dark', uiStyle: 'apple', lang: 'zh',
   eq: '', modorder: 5, modfamily: 'dsd', gpuvendor: 'auto', directsdm: 0, dsdKind: 'fir', dsdConv: 'narrow',
   updbeta: 0,
   // 1.1.5.1：更新通道。框架阶段默认 'global'（后台 dmg 未适配，默认切大陆会立刻不可用；
@@ -243,7 +243,7 @@ var SEP = (function () {
   if (!(d0.dataset && d0.dataset.uistyleSrc === 'conf')) {
     d0.dataset.uistyle = (u === 'classic') ? 'classic' : 'apple';
   }
-  S.theme = d0.dataset.theme || 'light';
+  S.theme = d0.dataset.theme || 'dark';
   S.uiStyle = d0.dataset.uistyle || 'apple';
   ADV.theme = S.theme;
   ADV.uiStyle = S.uiStyle;
@@ -980,7 +980,7 @@ function params() {
 }
 /* ---------------- 主题 ---------------- */
 function setTheme(t, persist) {
-  if (t !== 'dark' && t !== 'light' && t !== 'blue') t = 'light';
+  if (t !== 'dark' && t !== 'light' && t !== 'blue') t = 'dark';
   document.documentElement.dataset.theme = t;
   S.theme = t; ADV.theme = t;
   Array.prototype.forEach.call(document.querySelectorAll('.sw'), function (e) {
@@ -990,7 +990,7 @@ function setTheme(t, persist) {
   // 标题栏配色跟着主题走（Edge 应用窗口用 theme-color 画标题栏）
   // 2026-10-25（Apple Music 风格重构）：取值必须与 ui_page.h 的 --bg 逐字节一致 ——
   //   旧值 #0c0e13 是深色主题改版前的底色，留着会让 Windows 标题栏与页面本体出现一道色差。
-  var tc = { dark: '#161618', light: '#ffffff', blue: '#f8faff' }[t] || '#ffffff';
+  var tc = { dark: '#161618', light: '#ffffff', blue: '#f8faff' }[t] || '#161618';
   var meta = document.querySelector('meta[name=theme-color]');
   if (!meta) { meta = document.createElement('meta'); meta.setAttribute('name', 'theme-color'); document.head.appendChild(meta); }
   meta.setAttribute('content', tc);
@@ -998,6 +998,9 @@ function setTheme(t, persist) {
   try { localStorage.setItem('rta-theme', t); } catch (e) { }
   if (persist !== false) saveSettings();
 }
+Array.prototype.forEach.call(document.querySelectorAll('.sw'), function (e) {
+  e.onclick = function () { setTheme(e.dataset.theme); };
+});
 function setUiStyle(u, persist) {
   u = (u === 'classic') ? 'classic' : 'apple';
   document.documentElement.dataset.uistyle = u;
@@ -4733,7 +4736,7 @@ function saveSettings(immediate) {
     body += p[1] + '=' + encodeURIComponent(v);
   });
   body += '&volume=' + S.vol + '&loudness=' + (D('sLoud').checked ? '1' : '0');
-  body += '&theme=' + encodeURIComponent(S.theme || 'light');
+  body += '&theme=' + encodeURIComponent(S.theme || 'dark');
   body += '&uistyle=' + encodeURIComponent(S.uiStyle || 'apple');
   body += '&device=' + encodeURIComponent(ADV.device || '') + '&bits=' + (ADV.bits !== undefined && ADV.bits !== null ? ADV.bits : 0)
         + '&taps=' + (ADV.taps || 0) + '&atten=' + (ADV.atten || 0)
@@ -4912,7 +4915,7 @@ function loadSettings() {
     var dEl = document.documentElement;
     var themeConf = !!(dEl.dataset && dEl.dataset.themeSrc === 'conf');
     var styleConf = !!(dEl.dataset && dEl.dataset.uistyleSrc === 'conf');
-    setTheme(themeConf ? (kv.theme || 'light') : (t || kv.theme || 'light'), false);
+    setTheme(themeConf ? (kv.theme || 'dark') : (t || kv.theme || 'dark'), false);
     setUiStyle(styleConf ? (kv.uistyle || 'apple') : (u || kv.uistyle || 'apple'), false);
     // 用户 261023-04 #4：EQ/IR 芯片读的是上面刚填好的 ADV.eq / ADV.ir ——
     // 设置页保存后立刻重绘单曲页（清空 EQ 后芯片要马上消失，不用重开页面）。
@@ -9979,8 +9982,8 @@ function renderSettingsPage() {
        // 2026-10-28（用户同一反馈续）：选项里的括号说明也是错的，连同括号一起去掉，只留风格名。
        + opt('apple', 'Apple Music 风格', S.uiStyle || 'apple') + opt('classic', '经典 Hi-Fi 工作台', S.uiStyle || 'apple')
        + '</select></div>'
-       + '<div class=sfld><label>主题' + tip('主题色只在这里切换，顶栏与菜单不再提供快速切换') + '</label><select id=sp_theme>'
-       + opt('light', '白色（默认）', S.theme) + opt('dark', '深色', S.theme) + opt('blue', '浅蓝色', S.theme)
+       + '<div class=sfld><label>主题' + tip('顶栏右侧的小圆点也可以快速切换主题') + '</label><select id=sp_theme>'
+       + opt('dark', '深色（默认）', S.theme) + opt('light', '白色', S.theme) + opt('blue', '浅蓝色', S.theme)
        + '</select></div>'
        + '<div class=sfld><label>语言' + tip('切换界面显示语言，保存后刷新生效') + '</label><select id=sp_lang>'
        + opt('zh', '中文', ADV.lang || 'zh') + opt('en', 'English', ADV.lang || 'zh')

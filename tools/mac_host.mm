@@ -44,11 +44,6 @@
 
 #if __has_include("rlapp_core.h")
 #include "rlapp_core.h"
-
-// 1.1.7 P1：native 构建下起纯 AppKit 界面（不创建 WKWebView 主内容区）。
-#if defined(RLPLAYER_UI_NATIVE)
-#include "native/native_host.h"
-#endif
 #elif __has_include("net/webui.h")
 #include "net/webui.h"
 namespace rlapp {
@@ -911,14 +906,6 @@ static bool native_ui_lang_is_en() {
     }
 
     [self buildMenu];
-
-#if defined(RLPLAYER_UI_NATIVE)
-    // 纯 AppKit 路径：rlapp 核心已起（start_embedded 成功），把主线程交给 AppKit 应用。
-    // 不在本进程创建任何 WKWebView；退出收尾仍走本文件的 applicationWillTerminate /
-    // rlapp::stop_embedded 协作流程，不 force-kill。
-    (void)rlnative_start();
-    return;
-#endif
 
     NSRect frame = NSMakeRect(0, 0, 1180, 760);
     self.window = [[NSWindow alloc] initWithContentRect:frame

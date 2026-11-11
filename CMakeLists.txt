@@ -129,20 +129,6 @@ if(APPLE)
   endif()
 endif()
 
-# ---------------------------------------------------------------------------
-# 1.1.7 P1：双 UI 并行开关（功能不删除）。
-#   web    = 现有 WKWebView 界面（默认，发布包行为不变）
-#   native = 纯 AppKit（Objective-C++）界面，不创建 WKWebView 主内容区
-# 纯 AppKit 不需要 Swift/Ninja：沿用现有 Unix Makefiles + OBJCXX。
-# 两个构建共用同一份 rlapp_core，C++ 核心仍是唯一状态真相源。
-# ---------------------------------------------------------------------------
-set(RLPLAYER_UI "web" CACHE STRING "UI 实现：web（WKWebView）或 native（纯 AppKit）")
-set_property(CACHE RLPLAYER_UI PROPERTY STRINGS web native)
-if(NOT RLPLAYER_UI STREQUAL "web" AND NOT RLPLAYER_UI STREQUAL "native")
-  message(FATAL_ERROR "RLPLAYER_UI 只支持 web 或 native，当前='${RLPLAYER_UI}'")
-endif()
-message(STATUS "RLPlayer UI 实现：${RLPLAYER_UI}")
-
 if(APPLE)
   # 2026-10-25（系统混音回环）：Process Tap 是 ObjC++ 门控（CATapDescription /
   # AudioHardwareCreateProcessTap 只在 __OBJC__ 下可见），拆成薄包装给纯 C++ 的
@@ -160,12 +146,6 @@ if(APPLE)
   add_library(rlapp_core STATIC tools/rlapp_core.cpp ${RL_LOOPBACK_SRC} ${RL_IMAGE_THUMB_SRC})
   target_include_directories(rlapp_core PUBLIC ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tools)
   target_link_libraries(rlapp_core PUBLIC ${RL_PLATFORM_LIBS} "-framework Foundation" ${RL_IMAGE_FRAMEWORKS})
-
-  # 1.1.7 P1：原生 UI ↔ 核心的类型化门面（纯 C++，可进 ctest；不依赖 AppKit）。
-  # 它复用 rlapp::dispatch() 打现有 /api/*，不改任何端点语义。
-  add_library(rlnative_bridge STATIC src/native/core_bridge.cpp)
-  target_include_directories(rlnative_bridge PUBLIC ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tools)
-  target_link_libraries(rlnative_bridge PUBLIC rlapp_core)
 
   add_executable(rtaweb tools/rtaweb.cpp ${RL_LOOPBACK_SRC} ${RL_IMAGE_THUMB_SRC})
   target_include_directories(rtaweb PRIVATE ${CMAKE_SOURCE_DIR}/src)
@@ -196,24 +176,7 @@ if(APPLE)
   target_compile_definitions(rlplayer_mac PRIVATE
     RLPLAYER_VERSION_STR="${RLPLAYER_VERSION_FOR_APP}")
   # 1.1.5.1：中国大陆更新通道用 Security.framework 做 PS256 验签
-  if(RLPLAYER_UI STREQUAL "native")
-    # 纯 AppKit 界面：宿主仍复用 mac_host.mm 的生命周期/更新/反馈/菜单解析，
-    # 但用 RLPLAYER_UI_NATIVE 让 applicationDidFinishLaunching 起 AppKit UI 而非 WKWebView。
-    # 新增 TU 全部 -fobjc-arc（与既有壳一致）。
-    target_sources(rlplayer_mac PRIVATE tools/native/native_host.mm)
-    set_source_files_properties(tools/native/native_host.mm PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
-    target_compile_definitions(rlplayer_mac PRIVATE RLPLAYER_UI_NATIVE=1)
-    target_link_libraries(rlplayer_mac PRIVATE rlnative_bridge "-framework MediaPlayer" "-framework QuartzCore")
-  endif()
   target_link_libraries(rlplayer_mac PRIVATE rlapp_core "-framework AppKit" "-framework WebKit" "-framework Security")
-endif()
-
-# 1.1.7 P1：桥层纯逻辑单测（不开发声设备、不开窗口、不联网）。
-if(APPLE AND RLPLAYER_UI STREQUAL "native")
-  add_executable(test_native_bridge tests/test_native_bridge.cpp)
-  target_include_directories(test_native_bridge PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tools)
-  target_link_libraries(test_native_bridge PRIVATE rlnative_bridge)
-  add_test(NAME native_bridge COMMAND test_native_bridge)
 endif()
 
 # ---------------- 测试 ----------------
@@ -1045,11 +1008,6 @@ add_executable(test_ffmpeg_matrix tests/test_ffmpeg_matrix.cpp)
 target_include_directories(test_ffmpeg_matrix PRIVATE ${CMAKE_SOURCE_DIR}/src)
 target_compile_definitions(test_ffmpeg_matrix PRIVATE RTA_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
 add_test(NAME ffmpeg_matrix COMMAND test_ffmpeg_matrix)
-# 1.1.7：ffmpeg_matrix 默认按「<exe 目录>/ffmpeg-lite」找精简版工具。新开的构建目录
-# （build-native 等）没有这份产物就会假红 —— 与 embedded_api / media_duration 等既有的
-# 做法一致，把源树里已构建好的 arm64 精简版绝对路径传给它；判据本身不变（仍真跑全矩阵）。
-set_tests_properties(ffmpeg_matrix PROPERTIES
-  ENVIRONMENT "RTA_FFMPEG_LITE_DIR=${CMAKE_SOURCE_DIR}/build-mac/ffmpeg-lite")
 add_executable(test_writeback tests/test_writeback.cpp)
 target_include_directories(test_writeback PRIVATE ${CMAKE_SOURCE_DIR}/src)
 add_test(NAME writeback COMMAND test_writeback)
