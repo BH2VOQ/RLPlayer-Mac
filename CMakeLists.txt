@@ -192,19 +192,50 @@ if(APPLE)
     tools/native_ui/RLPPlaceholderViewController.mm
     tools/native_ui/RLPCoreClient.mm
     tools/native_ui/RLPModels.mm
-    tools/native_ui/RLPTheme.mm)
+    tools/native_ui/RLPTheme.mm
+    tools/native_ui/RLPSupport.mm
+    tools/native_ui/RLPPageViewController.mm
+    tools/native_ui/RLPNativeI18n.mm
+    tools/native_ui/RLPAlbumDetailViewController.mm
+    tools/native_ui/RLPArtistDetailViewController.mm
+    tools/native_ui/RLPArtistsViewController.mm
+    tools/native_ui/RLPTracksViewController.mm
+    tools/native_ui/RLPFoldersViewController.mm
+    tools/native_ui/RLPQueueViewController.mm
+    tools/native_ui/RLPRecentViewController.mm
+    tools/native_ui/RLPFavoritesViewController.mm
+    tools/native_ui/RLPSettingsViewController.mm
+    tools/native_ui/RLPNowPlayingViewController.mm
+    tools/native_ui/RLPUpdateWindowController.mm
+    tools/native_ui/RLPStreamingViewController.mm
+    tools/native_ui/RLPQuickStartViewController.mm
+    tools/mac_update.mm)
   set_source_files_properties(
+    tools/mac_update.mm
     tools/native_ui/main.mm tools/native_ui/RLPAppDelegate.mm
     tools/native_ui/RLPMainWindowController.mm tools/native_ui/RLPSidebarViewController.mm
     tools/native_ui/RLPAlbumsViewController.mm tools/native_ui/RLPPlaybackBarView.mm
     tools/native_ui/RLPPlaceholderViewController.mm tools/native_ui/RLPCoreClient.mm
     tools/native_ui/RLPModels.mm tools/native_ui/RLPTheme.mm
+    tools/native_ui/RLPSupport.mm tools/native_ui/RLPPageViewController.mm
+    tools/native_ui/RLPNativeI18n.mm
+    tools/native_ui/RLPAlbumDetailViewController.mm tools/native_ui/RLPArtistDetailViewController.mm
+    tools/native_ui/RLPArtistsViewController.mm tools/native_ui/RLPTracksViewController.mm
+    tools/native_ui/RLPFoldersViewController.mm tools/native_ui/RLPQueueViewController.mm
+    tools/native_ui/RLPRecentViewController.mm tools/native_ui/RLPFavoritesViewController.mm
+    tools/native_ui/RLPSettingsViewController.mm tools/native_ui/RLPNowPlayingViewController.mm
+    tools/native_ui/RLPUpdateWindowController.mm
+    tools/native_ui/RLPStreamingViewController.mm tools/native_ui/RLPQuickStartViewController.mm
     PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
   target_include_directories(rlplayer_native PRIVATE
     ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tools ${CMAKE_SOURCE_DIR}/tools/native_ui)
   target_compile_definitions(rlplayer_native PRIVATE
+    RL_WITH_UPDATE=1
     RLPLAYER_VERSION_STR="${RLPLAYER_VERSION_FOR_APP}")
-  target_link_libraries(rlplayer_native PRIVATE rlapp_core "-framework AppKit" "-framework Security")
+  # MediaPlayer：媒体键（MPRemoteCommandCenter）与锁屏正在播放信息。原生客户端的必备能力，
+  # web 版做不到（页面 JS 拿不到系统媒体键）。
+  target_link_libraries(rlplayer_native PRIVATE rlapp_core
+    "-framework AppKit" "-framework Security" "-framework MediaPlayer")
 
   # 原生 UI 的两条离线门禁（不联网、不开窗口、不发声）：
   #   native_ui_selftest = 视图树契约（10 项，含 webviews=0）
@@ -214,6 +245,16 @@ if(APPLE)
     ENVIRONMENT "RLPLAYER_STATE_DIR=${CMAKE_BINARY_DIR}/native-selftest-state" TIMEOUT 60)
   add_test(NAME native_ui_smoke COMMAND rlplayer_native --smoke)
   set_tests_properties(native_ui_smoke PROPERTIES TIMEOUT 120)
+
+  # 2026-11-11（1.1.7.1）：/api/settings 的"写了就是写了"判据。
+  # 触发原因是一个真 BUG：白名单漏了 hogexcl ⟹ POST 回 ok:true 却不落盘、读回为空，
+  # web 版设置页的「严格独占」勾选因此从不保存。判据是黑盒三连（回显/读回/conf 原文），
+  # 只断言 ok:true 会漏掉它 —— 见 tests/test_settings_persist.cpp 头注释。
+  add_executable(test_settings_persist tests/test_settings_persist.cpp)
+  target_include_directories(test_settings_persist PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tools)
+  target_link_libraries(test_settings_persist PRIVATE rlapp_core)
+  add_test(NAME settings_persist COMMAND test_settings_persist)
+  set_tests_properties(settings_persist PROPERTIES TIMEOUT 120)
 endif()
 
 # ---------------- 测试 ----------------

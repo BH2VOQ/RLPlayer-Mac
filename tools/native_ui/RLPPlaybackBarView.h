@@ -19,6 +19,16 @@ NS_ASSUME_NONNULL_BEGIN
 /// selftest 用：是否已挂上状态轮询。
 @property (nonatomic, readonly) BOOL polling;
 
+/// 当前是否在播（取自最近一次 /api/status）。媒体键的 play/pause 幂等语义要用它。
+@property (nonatomic, readonly) BOOL isPlaying;
+
+/// 媒体键/锁屏拖动进度：跳到指定秒数（内部换算成 0..1 的比例再走 /api/seek）。
+/// 没有正在播放的曲目时安全空转（不崩、不发请求）。
+- (void)seekToSeconds:(double)seconds;
+
+/// 主题切换后刷新自建颜色。
+- (void)applyTheme;
+
 @end
 
 NS_ASSUME_NONNULL_END

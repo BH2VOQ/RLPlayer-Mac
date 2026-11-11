@@ -31,3 +31,140 @@
 留空自动存至 Application Support/RLPlayer/recordings	Leave empty to auto-save to Application Support/RLPlayer/recordings	录制输出路径 placeholder 前缀
 cap-时间戳.wav	cap-timestamp.wav	录制输出默认文件名
 时间戳	timestamp	文件名占位词
+%@ 已被忽略	%@ was ignored
+%ld 位艺术家	%ld artists
+%ld 张专辑	%ld albums
+%ld 项	%ld items
+%ld 首	%ld tracks
+%ld 首 · 当前第 %ld 首 · %@	%ld tracks · track %ld · %@
+1x 滤波器	1x filter
+44.1 / 48 kHz 音源使用	Used for 44.1 / 48 kHz sources
+88.2 kHz 及以上音源使用	Used for 88.2 kHz and above
+AI 综合简介	AI summary
+AI 补封面歌词	AI artwork & lyrics
+DSD → DSD 升频	DSD → DSD upsampling
+DSD 原生	Native DSD
+DSD 目标	DSD target
+ISP 扫描	ISP scanning
+Nx 滤波器	Nx filter
+PCM → DSD	PCM → DSD
+PCM → PCM 升频	PCM → PCM upsampling
+一个 zip 打包全部日志 / 系统信息 / 设置摘要（已脱敏）	One zip with all logs, system info and a settings summary (redacted)
+一键应用	Apply
+一键把输出链路调到合适档位；改动会写入设置并立即生效	Set the output chain to a suitable profile in one click; changes are saved and take effect immediately
+不升频	No upsampling
+专辑读取失败	Failed to load album
+严格独占	Strict exclusive (Hog Mode)
+个文件夹	folders
+中文	Chinese
+主题只有深色与浅色两种；改这里立即生效	Only dark and light themes are available; changes take effect immediately
+使用中	In use
+例如 /Volumes/Music	e.g. /Volumes/Music
+保存成功	Saved
+允许 AI 辅助	Allow AI assistance
+全量重扫	Full rescan
+写入失败	Write failed
+准备下载…	Preparing download…
+切换后需重开窗口生效	Takes effect after reopening the window
+刷新服务器列表	Refresh server list
+加载失败	Failed to load
+勾选后系统音量条失效，请用本程序音量条	When enabled the system volume keys stop working; use this app's volume slider
+原音直通（PCM 直出 / DSD 直通）	Bit-perfect passthrough (PCM direct / DSD direct)
+反馈	Feedback
+反馈窗口迁移中	Feedback window is being migrated
+反馈窗口迁移中，当前请使用 web 版「设置 → 诊断」的反馈表单。	Feedback window is being migrated; please use the web version's Settings → Diagnostics form for now.
+发现新版本 %@	Version %@ is available
+取消下载	Cancel download
+只用公开数据源，不调用 AI，不产生费用	Uses only public data sources, no AI, no cost
+可独占	Exclusive capable
+启用流式解码	Enable streaming decode
+响度补偿	Loudness compensation
+均衡	Equalizer
+均衡（20 段 PEQ / OPRA）界面迁移中，当前请在 web 版设置里编辑	The 20-band PEQ / OPRA editor is being migrated; please edit it in the web version's settings for now
+增量扫描	Incremental scan
+好	OK
+已保存	Saved
+已切换到随机并开始播放	Switched to shuffle and started playback
+已取消下载	Download cancelled
+已导出 %@	Exported %@
+已应用 ·	Applied ·
+已开始全量重扫	Full rescan started
+已开始增量扫描	Incremental scan started
+已忽略 %@	%@ ignored
+已收藏	Added to favorites
+已清理缺失曲目	Missing tracks removed
+开启后输入会被送到输出设备，请注意电平和回声	Input will be routed to the output device; mind the level and feedback
+忽略此版本	Ignore this version
+房间校正（测量向导 / IR WAV）界面迁移中，当前请在 web 版设置里操作	Room correction (measurement wizard / IR WAV) is being migrated; please use the web version's settings for now
+手动下载	Manual download
+打开反馈窗口	Open feedback window
+接收测试版	Receive beta builds
+搜索曲目 / 专辑 / 艺术家	Search tracks, albums, artists
+播放全部	Play all
+收藏失败	Failed to add favorite
+更新失败	Update failed
+更新已安装	Update installed
+更新计划已失效，请重新检查	The update plan has expired; please check again
+最高	Max
+服务器列表读取失败	Failed to load server list
+未命名	Untitled
+未命名曲目	Untitled track
+未在播放	Not playing
+未知设备	Unknown device
+未配置服务器	No server configured
+本构建未启用更新模块	The update module is not enabled in this build
+校准	Calibration
+核心未启动	Core is not running
+检查更新失败	Failed to check for updates
+歌单名称	Playlist name
+正在安装…	Installing…
+正在应用…	Applying…
+正在读取歌词…	Loading lyrics…
+没有曲目	No tracks
+没有正在播放的曲目	Nothing is playing
+流式解码	Streaming decode
+浏览失败	Failed to browse
+清单未提供下载地址	The manifest provides no download URL
+清理缺失	Remove missing
+清空	Clear
+点击「音质体检」分析当前曲目	Click 'Track checkup' to analyze the current track
+目录读取失败	Failed to read directory
+目标采样率	Target sample rate
+直接 SDM	Direct SDM
+直通监听	Direct monitoring
+确定清空播放队列？	Clear the play queue?
+稍后	Later
+缺少专辑标识	Missing album identifier
+自动 = 跟随源文件	Auto = follow the source file
+自动补全	Auto-complete
+设置…	Settings…
+设置已加载	Settings loaded
+设置读取失败	Failed to load settings
+诊断包	Diagnostics bundle
+诊断包导出失败	Failed to export the diagnostics bundle
+请在「设置 → 流媒体」中添加服务器	Add a server in Settings → Streaming
+请稍后重试，或用「手动下载」安装。	Please try again later, or install via 'Manual download'.
+读取中…	Loading…
+超大文件边下边解，避免先整份读入内存	Stream large files while decoding instead of reading them fully into memory
+跟随源	Follow source
+迁移中	Being migrated
+过采样峰值预衰减，防止升频后削波	Pre-attenuates oversampled peaks to prevent clipping after upsampling
+还没有配置流媒体服务器	No streaming server configured yet
+这个艺术家还没有专辑	This artist has no albums yet
+这首曲目没有歌词	This track has no lyrics
+重启	Relaunch
+随机	Shuffle
+随机播放（已开启）	Shuffle (on)
+音乐库	Music library
+音乐目录	Music folder
+音量 (dB)	Volume (dB)
+顺序	Sequential
+预设已应用	Preset applied
+预设能力读取失败：请检查输出设备	Failed to read preset capabilities; please check the output device
+默认输入设备	Default input device
+默认音频设备	Default audio device
+PCM	PCM
+SDM	SDM
+搜索艺术家...	Search artists...
+曲库为空	The library is empty
+#	#

@@ -39,6 +39,11 @@
 
 - (NSInteger)rowCount { return (NSInteger)_menuItems.count; }
 
+- (NSInteger)selectedRow {
+    // selftest 期间可能还没建表（loadView 未触发），此时安全返回 -1
+    return _tableView ? _tableView.selectedRow : -1;
+}
+
 - (void)loadView {
     RLPTheme *t = [RLPTheme current];
     NSView *view = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 232, 700)];
@@ -180,6 +185,13 @@
     if (row < 0 || row >= (NSInteger)_menuItems.count) return;
     if (_tableView.selectedRow == row) return;
     [_tableView selectRowIndexes:[NSIndexSet indexSetWithIndex:(NSUInteger)row] byExtendingSelection:NO];
+}
+
+- (void)applyTheme {
+    RLPTheme *t = [RLPTheme current];
+    self.view.layer.backgroundColor = t.bg2.CGColor;
+    [_tableView reloadData];
+    [self.view setNeedsDisplay:YES];
 }
 
 @end

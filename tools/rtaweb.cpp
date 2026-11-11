@@ -11419,6 +11419,13 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
                 if (k.empty() || v.size() > 512) continue;
                 bool okKey = false;
                 for (const char* allow : { "rate", "filter", "filterNx", "shaper", "dsd", "modorder",
+                                           // 2026-11-11（1.1.7.1）：严格独占（Hog Mode）开关。
+                                           // 旧白名单漏了这一个键 ⟹ POST /api/settings hogexcl=1 被
+                                           // **静默丢弃**（实测：/api/settings 回 ok:true merged:true
+                                           // 但 conf 里没有该键、/api/settings 读回也没有）。
+                                           // web 版设置页的 sp_hogexcl 勾选因此从不落盘，重启后
+                                           // 回落到 PlayParams 默认值 true —— 勾选状态与真实行为脱节。
+                                           "hogexcl",
                                            "buffer", "volume", "loudness", "isp", "twostage",
                                            "device", "bits", "taps", "atten", "transition", "phase",
                                            "modfamily", "oobgain", "ahmbits", "modcut", "moddith", "ir", "irgpu", "ramp", "theme", "uistyle", "lang", "remoteview", "eq",

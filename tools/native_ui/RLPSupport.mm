@@ -1,0 +1,190 @@
+// SPDX-FileCopyrightText: 2026 BH2VOQ <https://github.com/BH2VOQ>
+// SPDX-License-Identifier: GPL-3.0-or-later
+#import "RLPSupport.h"
+#import "RLPCoreClient.h"
+#import "RLPTheme.h"
+
+static NSString *gLang = @"zh";
+
+NSString *RLPLanguage(void) { return gLang; }
+
+void RLPSetLanguage(NSString *lang) {
+    if ([lang isEqualToString:@"en"] || [lang isEqualToString:@"zh"]) gLang = [lang copy];
+    else gLang = @"zh";
+}
+
+NSString *RLPTr(NSString *zh) {
+    if (!zh.length || ![gLang isEqualToString:@"en"]) return zh;
+    // 词表由 tools/gen_native_i18n.py 生成（RLPNativeI18n.mm）；未生成时函数返回 nil ⟹ 回落中文。
+    extern NSDictionary * _Nullable RLPNativeI18nTable(void);
+    NSDictionary *table = RLPNativeI18nTable();
+    NSString *en = table[zh];
+    return en.length ? en : zh;
+}
+
+NSString *RLPFmtDuration(double seconds) {
+    if (!(seconds > 0) || !isfinite(seconds)) seconds = 0;
+    long total = lround(seconds);
+    long h = total / 3600, m = (total % 3600) / 60, s = total % 60;
+    if (h > 0) return [NSString stringWithFormat:@"%ld:%02ld:%02ld", h, m, s];
+    return [NSString stringWithFormat:@"%ld:%02ld", m, s];
+}
+
+NSString *RLPFmtBytes(double bytes) {
+    if (bytes < 1024) return [NSString stringWithFormat:@"%.0f B", bytes];
+    if (bytes < 1024 * 1024) return [NSString stringWithFormat:@"%.1f KB", bytes / 1024.0];
+    if (bytes < 1024.0 * 1024 * 1024) return [NSString stringWithFormat:@"%.1f MB", bytes / (1024.0 * 1024)];
+    return [NSString stringWithFormat:@"%.2f GB", bytes / (1024.0 * 1024 * 1024)];
+}
+
+NSString *RLPEnc(NSString *s) {
+    return [s stringByAddingPercentEncodingWithAllowedCharacters:[NSCharacterSet URLQueryAllowedCharacterSet]] ?: @"";
+}
+
+#pragma mark - 封面缓存
+
+@implementation RLPCoverLoader {
+    NSCache<NSString *, NSImage *> *_cache;
+    dispatch_queue_t _loadQueue;
+}
++ (instancetype)shared {
+    static RLPCoverLoader *s;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{ s = [[RLPCoverLoader alloc] init]; });
+    return s;
+}
+- (instancetype)init {
+    if ((self = [super init])) {
+        _cache = [[NSCache alloc] init];
+        _cache.countLimit = 500;
+        _loadQueue = dispatch_queue_create("rlplayer.native.covers", DISPATCH_QUEUE_CONCURRENT);
+    }
+    return self;
+}
+- (nullable NSImage *)cachedCoverForAlbumKey:(NSString *)key {
+    return key.length ? [_cache objectForKey:key] : nil;
+}
+- (void)coverForAlbumKey:(NSString *)key completion:(void (^)(NSImage * _Nullable))completion {
+    if (!key.length) { if (completion) dispatch_async(dispatch_get_main_queue(), ^{ completion(nil); }); return; }
+    NSImage *hit = [_cache objectForKey:key];
+    if (hit) { if (completion) dispatch_async(dispatch_get_main_queue(), ^{ completion(hit); }); return; }
+    NSString *path = [NSString stringWithFormat:@"/api/lib/cover?k=%@", RLPEnc(key)];
+    [[RLPCoreClient shared] getData:path completion:^(NSData * _Nullable data) {
+        NSImage *img = data.length ? [[NSImage alloc] initWithData:data] : nil;
+        if (img) [self->_cache setObject:img forKey:key];
+        if (completion) completion(img);
+    }];
+}
+@end
+
+#pragma mark - 轻提示
+
+void RLPToast(NSString *message) {
+    if (!message.length) return;
+    NSWindow *win = NSApp.keyWindow ?: NSApp.mainWindow;
+    if (!win) return;
+    RLPTheme *t = [RLPTheme current];
+    NSTextField *label = [NSTextField labelWithString:RLPTr(message)];
+    label.font = [NSFont systemFontOfSize:12.5 weight:NSFontWeightMedium];
+    label.textColor = t.text;
+    [label sizeToFit];
+    const CGFloat padX = 14, padY = 8;
+    NSView *box = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, label.frame.size.width + padX * 2, label.frame.size.height + padY * 2)];
+    box.wantsLayer = YES;
+    box.layer.backgroundColor = [t.bg2 colorWithAlphaComponent:0.96].CGColor;
+    box.layer.cornerRadius = 9;
+    box.layer.borderWidth = 1;
+    box.layer.borderColor = t.line.CGColor;
+    label.frame = NSMakeRect(padX, padY, label.frame.size.width, label.frame.size.height);
+    [box addSubview:label];
+    NSView *content = win.contentView;
+    box.frame = NSMakeRect((content.bounds.size.width - box.frame.size.width) / 2,
+                           content.bounds.size.height - box.frame.size.height - 96,
+                           box.frame.size.width, box.frame.size.height);
+    box.autoresizingMask = NSViewMinXMargin | NSViewMaxXMargin | NSViewMinYMargin;
+    [content addSubview:box];
+    box.alphaValue = 0;
+    [NSAnimationContext runAnimationGroup:^(NSAnimationContext *ctx) {
+        ctx.duration = 0.12;
+        box.animator.alphaValue = 1;
+    } completionHandler:nil];
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.8 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        [NSAnimationContext runAnimationGroup:^(NSAnimationContext *ctx) {
+            ctx.duration = 0.25;
+            box.animator.alphaValue = 0;
+        } completionHandler:^{ [box removeFromSuperview]; }];
+    });
+}
+
+void RLPAlert(NSString *title, NSString *message) {
+    NSAlert *a = [[NSAlert alloc] init];
+    a.messageText = RLPTr(title);
+    a.informativeText = RLPTr(message);
+    [a addButtonWithTitle:RLPTr(@"好")];
+    [a runModal];
+}
+
+NSButton *RLPSymbolButton(NSString *symbol, NSString *tooltip, id target, SEL action) {
+    NSButton *b = [[NSButton alloc] initWithFrame:NSZeroRect];
+    b.bordered = NO;
+    b.imagePosition = NSImageOnly;
+    b.imageScaling = NSImageScaleProportionallyDown;
+    b.image = [NSImage imageWithSystemSymbolName:symbol accessibilityDescription:tooltip];
+    b.contentTintColor = [RLPTheme current].text;
+    b.toolTip = RLPTr(tooltip);
+    if (target && action) { b.target = target; b.action = action; }
+    return b;
+}
+
+NSTextField *RLPLabel(NSString *text, NSFont *font, NSColor *color) {
+    // nil 必须挡在这里：+[NSTextField labelWithString:] 传 nil 会抛
+    // NSInternalInconsistencyException（"stringValue != nil"）直接崩进程。
+    // 触发场景很自然——比如空态文案来自后端字段、某个分支里写成了 nil。
+    // 一个 UI 辅助函数不该因为少判一次 nil 就把整个 app 带走，所以统一归零成空串。
+    NSString *safe = text ?: @"";
+    NSTextField *l = [NSTextField labelWithString:RLPTr(safe)];
+    l.font = font;
+    l.textColor = color;
+    l.lineBreakMode = NSLineBreakByTruncatingTail;
+    l.maximumNumberOfLines = 1;
+    return l;
+}
+
+#pragma mark - 导航
+
+NSNotificationName const RLPOpenAlbumNotification = @"RLPOpenAlbumNotification";
+NSNotificationName const RLPOpenArtistNotification = @"RLPOpenArtistNotification";
+NSNotificationName const RLPBackNotification = @"RLPBackNotification";
+
+void RLPRequestOpenAlbum(NSString *albumKey) {
+    if (!albumKey.length) return;
+    [[NSNotificationCenter defaultCenter] postNotificationName:RLPOpenAlbumNotification object:albumKey];
+}
+void RLPRequestOpenArtist(NSString *artistName) {
+    if (!artistName.length) return;
+    [[NSNotificationCenter defaultCenter] postNotificationName:RLPOpenArtistNotification object:artistName];
+}
+void RLPRequestBack(void) {
+    [[NSNotificationCenter defaultCenter] postNotificationName:RLPBackNotification object:nil];
+}
+
+#pragma mark - 播放动作
+
+void RLPPostJSON(NSString *path, NSString *body) {
+    [[RLPCoreClient shared] postJSON:path body:body ?: @"" completion:nil];
+}
+
+void RLPPlayPath(NSString *path) {
+    if (!path.length) return;
+    RLPPostJSON(@"/api/play", [NSString stringWithFormat:@"file=%@", RLPEnc(path)]);
+}
+
+void RLPPlayAlbum(NSString *albumKey, NSInteger startIndex) {
+    if (!albumKey.length) return;
+    RLPPostJSON(@"/api/lib/play", [NSString stringWithFormat:@"k=%@&i=%ld", RLPEnc(albumKey), (long)startIndex]);
+}
+
+void RLPEnqueuePath(NSString *path) {
+    if (!path.length) return;
+    RLPPostJSON(@"/api/add", [NSString stringWithFormat:@"file=%@", RLPEnc(path)]);
+}

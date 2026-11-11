@@ -13,8 +13,14 @@ NS_ASSUME_NONNULL_BEGIN
 /// 当前导航项数（selftest/自检用）。
 @property (nonatomic, readonly) NSInteger rowCount;
 
+/// 当前选中的导航行（-1 = 未选中）。详情页返回时用它对回原列表页。
+@property (nonatomic, readonly) NSInteger selectedRow;
+
 /// 以代码方式选中某一行（不触发 onSelect 以外的副作用由实现保证幂等）。
 - (void)selectRow:(NSInteger)row;
+
+/// 主题切换后刷新自建颜色（背景/文字/选中态）。
+- (void)applyTheme;
 
 @end
 

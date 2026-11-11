@@ -24,15 +24,24 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 BUILD="${1:-$ROOT/build-mac}"
 OUT="$ROOT/dist-mac"
-APP="$OUT/RLPlayer.app"
 
-[[ -x "$BUILD/rlplayer_mac" ]] || { echo "!! rlplayer_mac 不存在，请先在 $BUILD 构建"; exit 1; }
+# 1.1.7.1：可选择打包**纯 AppKit 原生客户端**（rlplayer_native）。
+# 默认仍是 rlplayer_mac（web 壳）—— parity 未全绿前不切换默认。
+#   RL_NATIVE_APP=1 tools/make_app_mac.sh
+# 产物名也区分：RLPlayer.app（web） / RLPlayer-Native.app（原生），
+# 这样两个包可以同时装在机器上对比，不会互相覆盖。
+APP_BIN_NAME="${RL_NATIVE_APP:+rlplayer_native}"
+APP_BIN_NAME="${APP_BIN_NAME:-rlplayer_mac}"
+APP_DIR_NAME="${RL_NATIVE_APP:+RLPlayer-Native}"
+APP_DIR_NAME="${APP_DIR_NAME:-RLPlayer}"
+[[ -x "$BUILD/$APP_BIN_NAME" ]] || { echo "!! $APP_BIN_NAME 不存在，请先在 $BUILD 构建"; exit 1; }
+APP="$OUT/$APP_DIR_NAME.app"
 
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 
 # 1) 主可执行 = 原生单进程 App
-cp "$BUILD/rlplayer_mac" "$APP/Contents/MacOS/RLPlayer"
+cp "$BUILD/$APP_BIN_NAME" "$APP/Contents/MacOS/RLPlayer"
 chmod +x "$APP/Contents/MacOS/RLPlayer"
 
 # 2) 数据（OPRA 耳机 EQ 索引；path_in_exe_dir 约定 = exe 同目录）
