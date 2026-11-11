@@ -329,6 +329,33 @@ int main() {
             }
         }
 
+        // ---- S12 整列顺序播放（对齐 web playWholeListFrom / /api/queue/set）----
+        // 旧原生最爱页双击只播单曲。这里验证：给定路径列表 → 队列被建立为整列。
+        {
+            NSArray<NSString *> *list = @[
+                @"/music/a.flac", @"/music/b.flac", @"/music/c.flac"
+            ];
+            // 起播会用 backend=null（夹具已设），不会出声；RlpPlayWholeListFrom 先读 playmode。
+            RLPPlayWholeListFrom(list, 1);
+            Pump(1.0);
+            NSDictionary *q = [core jsonWithMethod:@"GET" path:@"/api/queue?meta=1" body:nil];
+            NSArray *items = [q[@"items"] isKindOfClass:[NSArray class]] ? q[@"items"] : @[];
+            CK(items.count == 3, "S12a /api/queue/set 用整列建立了队列（3 首）",
+               [NSString stringWithFormat:@"n=%lu", (unsigned long)items.count]);
+            // 队列里第 2 首应是 b.flac（items 是路径字符串数组，顺序保持）。
+            NSString *second = items.count >= 2 && [items[1] isKindOfClass:[NSString class]] ? items[1] : nil;
+            CK([second containsString:@"b.flac"], "S12b 队列顺序与传入列表一致", second ?: @"nil");
+            // 空列表/越界 start 不崩、不建空队列（防御分支）。
+            NSUInteger before = items.count;
+            RLPPlayWholeListFrom(@[], 0);
+            RLPPlayWholeListFrom(list, 99);   // 越界夹到最后一首
+            Pump(0.6);
+            NSDictionary *q2 = [core jsonWithMethod:@"GET" path:@"/api/queue?meta=1" body:nil];
+            NSArray *items2 = [q2[@"items"] isKindOfClass:[NSArray class]] ? q2[@"items"] : @[];
+            CK(items2.count == before, "S12c 空列表不发建队列请求（越界 start 被夹取仍建整列）",
+               [NSString stringWithFormat:@"before=%lu after=%lu", (unsigned long)before, (unsigned long)items2.count]);
+        }
+
         [core shutdown];
         [fm removeItemAtPath:root error:nil];
         std::printf("\n%s（%d 项失败）\n", gFail == 0 ? "servers_view 全部通过" : "servers_view 有失败", gFail);

@@ -254,3 +254,42 @@ void RLPEnqueuePath(NSString *path) {
     if (!path.length) return;
     RLPPostJSON(@"/api/add", [NSString stringWithFormat:@"file=%@", RLPEnc(path)]);
 }
+
+/// 建队列并从 start 起播（RLPPlayWholeListFrom 的后半段；独立函数避免 block 自捕循环引用）。
+static void RLPSetQueueAndPlay(NSArray<NSString *> *clean, NSInteger i) {
+    NSString *body = [NSString stringWithFormat:@"files=%@",
+                      RLPEnc([clean componentsJoinedByString:@"\n"])];
+    [[RLPCoreClient shared] postJSON:@"/api/queue/set" body:body
+                          completion:^(NSDictionary * _Nullable j) {
+        if (!j || [j[@"ok"] boolValue] == NO) {
+            NSString *err = [j[@"error"] isKindOfClass:[NSString class]] ? j[@"error"] : RLPTr(@"建立队列失败");
+            RLPToast(err);
+            return;
+        }
+        RLPPlayPath(clean[(NSUInteger)i]);
+    }];
+}
+
+void RLPPlayWholeListFrom(NSArray<NSString *> *files, NSInteger start) {
+    if (!files.count) return;
+    // 过滤空串（web playWholeListFrom 的 filter），夹取 start 到合法范围。
+    NSMutableArray<NSString *> *clean = [NSMutableArray array];
+    for (NSString *f in files) if ([f isKindOfClass:[NSString class]] && f.length) [clean addObject:f];
+    if (!clean.count) return;
+    NSInteger i = start;
+    if (i < 0) i = 0;
+    if (i >= (NSInteger)clean.count) i = (NSInteger)clean.count - 1;
+
+    // 单曲循环（mode=2）会让"播放整列"卡在第一首：先读当前模式，是 2 就切回列表循环 1。
+    // 读到 mode 之前不盲目写，避免把用户的随机/顺序设置也改掉。
+    [[RLPCoreClient shared] getJSON:@"/api/playmode" completion:^(NSDictionary * _Nullable modeJson) {
+        NSInteger mode = [modeJson[@"mode"] respondsToSelector:@selector(integerValue)]
+                       ? [modeJson[@"mode"] integerValue] : 0;
+        if (mode == 2) {
+            [[RLPCoreClient shared] postJSON:@"/api/playmode?mode=1" body:nil
+                                  completion:^(NSDictionary * _Nullable) { RLPSetQueueAndPlay(clean, i); }];
+        } else {
+            RLPSetQueueAndPlay(clean, i);
+        }
+    }];
+}

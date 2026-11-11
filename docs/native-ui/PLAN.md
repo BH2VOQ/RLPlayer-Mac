@@ -75,13 +75,13 @@
 | 端点 | 为什么没接 |
 |---|---|
 | /api/lib/stats | 已接（2026-11-12：设置·高级页本地音乐库统计卡，曲目/专辑/扫描线程/上次扫描/扫描进度轮询） |
-| /api/rates、/api/gpu、/api/net | 只读能力查询，原生页当前不展示这些面板 |
+| /api/rates | 已接（专业工作台采样率下拉）；/api/gpu、/api/net 只读能力查询，原生页当前不展示这些面板 |
 | /api/signal | 已接（2026-11-12：RLPSignalChain 纯函数 + 工作台「本次播放路径」弹层，真实播放路径逐节点 + bit-perfect 结论，对齐 web showChain） |
 | /api/providers、/api/llm/models | 已接（2026-11-12：providers → RLPMetaSourcesView 逐源开关+优先级；llm/models → 设置·元数据模型下拉，拉不到降级手填） |
 | /api/lib/rmdir、/api/lib/rmdirinfo | 目录删除（破坏性），未迁移 |
-| /api/queue/set | 整体替换队列（拖动排序已用 qmove 覆盖主要场景） |
+| /api/queue/set | 已接（2026-11-12：RLPPlayWholeListFrom 整列顺序播放，我的最爱页双击从该曲起播整个收藏列表，单曲循环自动切回列表循环） |
 | /api/compare | 已接（RLPShowCompareSheet / 单曲页版本对比）；/api/entity/versions（Discogs 版本推荐）未迁移 |
-| /api/anl/cancel | 取消后台分析（原生未做自动分析触发） |
+| /api/anl/cancel | 已接（单曲页 viewDidDisappear 取消在跑的分析，与 web anlCancelServer 同语义） |
 | /api/diag/upload、/api/upload | 旧诊断上传通道；原生反馈走 feedback_api 直连后台 |
 | /api/src/cover | 已接（2026-11-12：流媒体网格/列表封面卡片，coverForSourceId 共享缓存） |
 | /api/selftest/report、/api/ui/events | web 专用自检回传 / SSE 事件流，原生不需要 |

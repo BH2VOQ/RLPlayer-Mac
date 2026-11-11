@@ -109,8 +109,14 @@ static const NSUserInterfaceItemIdentifier kFavTableID = @"RLPFavTable";
 
 - (void)onDoubleClick:(id)sender {
     NSInteger row = [_tableView clickedRow];
-    if (row < 0) return;
-    RLPPlayPath(_tracks[row].path);
+    if (row < 0 || row >= (NSInteger)_tracks.count) return;
+    // 与 web 我的最爱页同语义：双击不是只播这一首，而是把整个收藏列表建成队列、
+    // 从被点那首开始顺序播放（/api/queue/set → playPath）。单曲循环模式会被切回列表循环。
+    NSMutableArray<NSString *> *paths = [NSMutableArray array];
+    for (RLPTrack *t in _tracks) if (t.path.length) [paths addObject:t.path];
+    // start 要用"在过滤后列表里的位置"；_tracks 全有 path 时与 row 一致。
+    NSInteger start = row;
+    RLPPlayWholeListFrom(paths, start);
 }
 
 - (void)onPlay:(id)sender {

@@ -81,4 +81,10 @@ void RLPPlayAlbum(NSString *albumKey, NSInteger startIndex);
 void RLPEnqueuePath(NSString *path);
 void RLPPostJSON(NSString *path, NSString * _Nullable body);
 
+/// 整列顺序播放（对齐 web playWholeListFrom）：先用 /api/queue/set 以给定路径列表建队列，
+/// 成功后从 start 起播。files 为空不做任何事；单曲循环模式（2）先切回列表循环（1），
+/// 否则播完第一首会一直重复，与"顺序播放整列"的心智相悖（web ensureSequentialMode 同口径）。
+/// 供「我的最爱」双击等"从某行起播整个列表"的场景使用。
+void RLPPlayWholeListFrom(NSArray<NSString *> *files, NSInteger start);
+
 NS_ASSUME_NONNULL_END
