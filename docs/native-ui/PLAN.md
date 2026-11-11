@@ -41,7 +41,7 @@
 | 播放队列 | 右键移除、拖动排序、按标题/艺术家排序、恢复默认、存为歌单、清空 |
 | 歌单 | 列表 + 曲目表 + 新建/重命名/删除/存当前队列；CUE 分轨 cs/ce 不丢 |
 | 最近 / 最爱 | 表格 + 双击播放 + 右键菜单 |
-| 流媒体 | 服务器下拉 + 面包屑 + 目录浏览 + 双击播放 + 测试连接 |
+| 流媒体 | 服务器下拉 + 面包屑 + 封面网格/列表两档（remoteview 偏好）+ 单击进入/播放 + 测试连接 |
 | 快速开始 | 三张能力卡 + 官方推荐预设（?profile=）+ 四个快捷入口 |
 | 设置 · 输出/PCM/SDM/高级/元数据 | 设备/采样率/滤波/独占/音量/主题/语言/更新/流式解码/元数据开关 |
 | 设置 · 均衡 | 20 段可编辑 PEQ + 后端算出的频响曲线 + 260ms 节流 + 预设增删改 + OPRA 耳机曲线 |
@@ -79,7 +79,7 @@
 | /api/compare | 已接（RLPShowCompareSheet / 单曲页版本对比）；/api/entity/versions（Discogs 版本推荐）未迁移 |
 | /api/anl/cancel | 取消后台分析（原生未做自动分析触发） |
 | /api/diag/upload、/api/upload | 旧诊断上传通道；原生反馈走 feedback_api 直连后台 |
-| /api/src/cover | 流媒体封面（原生流媒体页本轮不做封面） |
+| /api/src/cover | 已接（2026-11-12：流媒体网格/列表封面卡片，coverForSourceId 共享缓存） |
 | /api/selftest/report、/api/ui/events | web 专用自检回传 / SSE 事件流，原生不需要 |
 | /api/writeback/status | 已接（2026-11-12：wbPoll 800ms 轮询 + wbSyncBusy 进页恢复忙态） |
 | /api/v1、/api/v1/feedback/macos | 后台路径前缀，原生由 feedback_api.h 常量直接持有 |

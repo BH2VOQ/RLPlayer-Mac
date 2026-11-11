@@ -340,6 +340,18 @@ int RLPAppDelegateRunSelfTest(void) {
         RLPStreamingViewController *vc = [[RLPStreamingViewController alloc] init];
         STCheck(vc.view != nil, "流媒体页可离线构建", @"");
         STCheck(vc.pageTitle.length > 0, "流媒体页有标题", vc.pageTitle ?: @"");
+        // 2026-11-12：对齐 web 远程页 —— 默认网格（封面卡片）+ 网格/列表两档切换。
+        // 旧实现只有裸文本列表，这里钉住网格与切换控件真的在位。
+        NSMutableArray<NSView *> *sv = [NSMutableArray array];
+        CollectViews(vc.view, sv);
+        BOOL hasGrid = NO, hasToggle = NO;
+        for (NSView *v in sv) {
+            if ([v isKindOfClass:[NSCollectionView class]]) hasGrid = YES;
+            if ([v isKindOfClass:[NSSegmentedControl class]] &&
+                ((NSSegmentedControl *)v).segmentCount == 2) hasToggle = YES;
+        }
+        STCheck(hasGrid, "流媒体页有封面网格（web 远程页同款）", @"");
+        STCheck(hasToggle, "流媒体页有网格/列表切换", @"");
     }
     {
         RLPQuickStartViewController *vc = [[RLPQuickStartViewController alloc] init];

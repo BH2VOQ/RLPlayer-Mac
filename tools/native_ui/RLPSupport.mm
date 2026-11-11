@@ -75,6 +75,18 @@ NSString *RLPEnc(NSString *s) {
         if (completion) completion(img);
     }];
 }
+- (void)coverForSourceId:(NSString *)coverId completion:(void (^)(NSImage * _Nullable))completion {
+    if (!coverId.length) { if (completion) dispatch_async(dispatch_get_main_queue(), ^{ completion(nil); }); return; }
+    NSString *key = [@"src:" stringByAppendingString:coverId];
+    NSImage *hit = [_cache objectForKey:key];
+    if (hit) { if (completion) dispatch_async(dispatch_get_main_queue(), ^{ completion(hit); }); return; }
+    NSString *path = [NSString stringWithFormat:@"/api/src/cover?id=%@", RLPEnc(coverId)];
+    [[RLPCoreClient shared] getData:path completion:^(NSData * _Nullable data) {
+        NSImage *img = data.length ? [[NSImage alloc] initWithData:data] : nil;
+        if (img) [self->_cache setObject:img forKey:key];
+        if (completion) completion(img);
+    }];
+}
 @end
 
 #pragma mark - 轻提示

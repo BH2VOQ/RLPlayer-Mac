@@ -28,6 +28,8 @@ NSString *RLPEnc(NSString *s);
 /// completion 在主线程；失败回 nil（不重试、不阻塞）。
 - (void)coverForAlbumKey:(NSString *)key completion:(void (^)(NSImage * _Nullable image))completion;
 - (nullable NSImage *)cachedCoverForAlbumKey:(NSString *)key;
+/// 流媒体封面（/api/src/cover?id=coverId）。与专辑封面同一缓存，key 加 src: 前缀避免撞。
+- (void)coverForSourceId:(NSString *)coverId completion:(void (^)(NSImage * _Nullable image))completion;
 @end
 
 /// 轻提示（非模态，1.8s 淡出）。用于"已加入队列""已收藏"这类反馈。
