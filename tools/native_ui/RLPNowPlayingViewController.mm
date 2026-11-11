@@ -11,6 +11,7 @@
 #import "RLPSupport.h"
 #import "RLPTheme.h"
 #import "RLPKnowledgeView.h"
+#import "RLPAnalysisSummary.h"
 
 @interface RLPNowPlayingViewController ()
 @property (nonatomic, strong) NSTimer *poll;
@@ -22,8 +23,23 @@
 @property (nonatomic, strong) NSTextField *metaLabel;
 @property (nonatomic, strong) NSTextView *lyricsView;
 @property (nonatomic, strong) NSTextField *lyricsEmpty;
-@property (nonatomic, strong) NSTextView *healthView;
-@property (nonatomic, strong) NSTextField *healthEmpty;
+// ---- 音频分析：一行四元素（动态 / 音质 / 假无损 / 展开）----
+@property (nonatomic, strong) NSView *anlRow;
+@property (nonatomic, strong) NSButton *anlDyn;
+@property (nonatomic, strong) NSButton *anlQual;
+@property (nonatomic, strong) NSButton *anlFake;
+@property (nonatomic, strong) NSButton *anlExpand;
+@property (nonatomic, strong) NSScrollView *anlDetailScroll;
+@property (nonatomic, strong) NSTextView *anlDetail;
+@property (nonatomic, strong) NSButton *anlReanalyze;      // 只在展开后可见
+@property (nonatomic, assign) RLPAnlLevel anlLevel;
+@property (nonatomic, copy) NSDictionary *anlHealth;       // 后端给的原始结果（唯一真相）
+@property (nonatomic, copy) NSString *anlPath;             // 结果对应的曲目
+@property (nonatomic, copy) NSString *anlAutoDonePath;     // 每曲一次去重
+@property (nonatomic, assign) BOOL anlBusy;
+@property (nonatomic, assign) BOOL anlAutoEnabled;         // 来自 settings.autoanl
+@property (nonatomic, assign) NSUInteger anlSeq;           // 丢弃过期回调
+@property (nonatomic, strong) NSLayoutConstraint *anlDetailHeight;
 /// 封面请求序号：快速切歌时用它丢弃过期回调（慢请求回来不能盖掉新封面）。
 @property (nonatomic, assign) NSUInteger coverSeq;
 @property (nonatomic, strong) RLPKnowledgeView *knowledge;
@@ -67,10 +83,8 @@
     fav.translatesAutoresizingMaskIntoConstraints = NO;
     [host addSubview:fav];
 
-    NSButton *health = [NSButton buttonWithTitle:RLPTr(@"音质体检") target:self action:@selector(onHealth:)];
-    health.bezelStyle = NSBezelStyleRounded;
-    health.translatesAutoresizingMaskIntoConstraints = NO;
-    [host addSubview:health];
+    // 音频分析改为一行（1.1.7.1）：动态 / 音质 / 假无损 / 展开，四个元素同一行。
+    // 「自动分析」开关已挪到设置·高级；「重新分析」只在展开后出现，不摆在面上。
 
     NSTextField *lyricsTitle = RLPLabel(@"歌词", [NSFont systemFontOfSize:13 weight:NSFontWeightSemibold], t.text);
     lyricsTitle.translatesAutoresizingMaskIntoConstraints = NO;
@@ -89,22 +103,42 @@
     self.lyricsEmpty.translatesAutoresizingMaskIntoConstraints = NO;
     [host addSubview:self.lyricsEmpty];
 
-    NSTextField *healthTitle = RLPLabel(@"音质体检", [NSFont systemFontOfSize:13 weight:NSFontWeightSemibold], t.text);
-    healthTitle.translatesAutoresizingMaskIntoConstraints = NO;
-    [host addSubview:healthTitle];
+    // ---- 一行分析条 ----
+    self.anlRow = [[NSView alloc] initWithFrame:NSZeroRect];
+    self.anlRow.translatesAutoresizingMaskIntoConstraints = NO;
+    self.anlRow.identifier = @"anl.row";
+    [host addSubview:self.anlRow];
 
-    self.healthView = [self makeTextView];
-    NSScrollView *hScroll = [[NSScrollView alloc] initWithFrame:NSZeroRect];
-    hScroll.drawsBackground = NO;
-    hScroll.hasVerticalScroller = YES;
-    hScroll.autohidesScrollers = YES;
-    hScroll.documentView = self.healthView;
-    hScroll.translatesAutoresizingMaskIntoConstraints = NO;
-    [host addSubview:hScroll];
+    self.anlDyn = [self anlChipWithIdentifier:@"anl.dyn" action:@selector(onAnlDyn:)];
+    self.anlQual = [self anlChipWithIdentifier:@"anl.qual" action:@selector(onAnlQual:)];
+    self.anlFake = [self anlChipWithIdentifier:@"anl.fake" action:@selector(onAnlFake:)];
+    self.anlExpand = [NSButton buttonWithTitle:RLPTr(@"展开") target:self action:@selector(onAnlExpand:)];
+    self.anlExpand.bezelStyle = NSBezelStyleRounded;
+    self.anlExpand.identifier = @"anl.expand";
+    self.anlExpand.translatesAutoresizingMaskIntoConstraints = NO;
+    self.anlExpand.font = t.small;
+    for (NSView *v in @[self.anlDyn, self.anlQual, self.anlFake, self.anlExpand])
+        [self.anlRow addSubview:v];
 
-    self.healthEmpty = RLPLabel(@"", t.small, t.mut);
-    self.healthEmpty.translatesAutoresizingMaskIntoConstraints = NO;
-    [host addSubview:self.healthEmpty];
+    // ---- 展开后的详情（默认收起：高度 0 + hidden）----
+    self.anlDetail = [self makeTextView];
+    self.anlDetailScroll = [[NSScrollView alloc] initWithFrame:NSZeroRect];
+    self.anlDetailScroll.drawsBackground = NO;
+    self.anlDetailScroll.hasVerticalScroller = YES;
+    self.anlDetailScroll.autohidesScrollers = YES;
+    self.anlDetailScroll.documentView = self.anlDetail;
+    self.anlDetailScroll.translatesAutoresizingMaskIntoConstraints = NO;
+    self.anlDetailScroll.hidden = YES;
+    [host addSubview:self.anlDetailScroll];
+
+    self.anlReanalyze = [NSButton buttonWithTitle:RLPTr(@"重新分析") target:self action:@selector(onAnlReanalyze:)];
+    self.anlReanalyze.bezelStyle = NSBezelStyleRounded;
+    self.anlReanalyze.font = t.small;
+    self.anlReanalyze.translatesAutoresizingMaskIntoConstraints = NO;
+    self.anlReanalyze.hidden = YES;   // 收起态不可见（用户要求不摆在面上）
+    [host addSubview:self.anlReanalyze];
+
+    self.anlDetailHeight = [self.anlDetailScroll.heightAnchor constraintEqualToConstant:0];
 
     // AI 资料层（知识卡 + 简介）：放在右栏下半，与音质体检分开
     self.knowledge = [[RLPKnowledgeView alloc] initWithFrame:NSMakeRect(0, 0, 400, 300)];
@@ -128,8 +162,33 @@
         [self.metaLabel.trailingAnchor constraintEqualToAnchor:self.titleLabel2.trailingAnchor],
         [fav.leadingAnchor constraintEqualToAnchor:self.titleLabel2.leadingAnchor],
         [fav.topAnchor constraintEqualToAnchor:self.metaLabel.bottomAnchor constant:14],
-        [health.leadingAnchor constraintEqualToAnchor:fav.trailingAnchor constant:10],
-        [health.centerYAnchor constraintEqualToAnchor:fav.centerYAnchor],
+        // 一行分析条：独占一行（收藏按钮下方），左对齐封面右缘、右到窗口边界。
+        // 不与标题/收藏同行 —— 标题是可变长文本，会把这一行挤成 0 宽（判据 C2b 抓到的真缺陷）。
+        [self.anlRow.leadingAnchor constraintEqualToAnchor:self.titleLabel2.leadingAnchor],
+        [self.anlRow.trailingAnchor constraintEqualToAnchor:host.trailingAnchor constant:-24],
+        [self.anlRow.topAnchor constraintEqualToAnchor:fav.bottomAnchor constant:10],
+        [self.anlRow.heightAnchor constraintEqualToConstant:26],
+
+        [self.anlDyn.leadingAnchor constraintEqualToAnchor:self.anlRow.leadingAnchor],
+        [self.anlDyn.centerYAnchor constraintEqualToAnchor:self.anlRow.centerYAnchor],
+        [self.anlQual.leadingAnchor constraintEqualToAnchor:self.anlDyn.trailingAnchor constant:8],
+        [self.anlQual.centerYAnchor constraintEqualToAnchor:self.anlRow.centerYAnchor],
+        [self.anlFake.leadingAnchor constraintEqualToAnchor:self.anlQual.trailingAnchor constant:8],
+        [self.anlFake.centerYAnchor constraintEqualToAnchor:self.anlRow.centerYAnchor],
+        [self.anlExpand.leadingAnchor constraintGreaterThanOrEqualToAnchor:self.anlFake.trailingAnchor constant:8],
+        [self.anlExpand.trailingAnchor constraintEqualToAnchor:self.anlRow.trailingAnchor],
+        [self.anlExpand.centerYAnchor constraintEqualToAnchor:self.anlRow.centerYAnchor],
+        // 摘要块等分剩余宽度；文字过长截断 + tooltip 全文（绝不换行成两行）。
+        // 必须显式给宽度：无边框 NSButton 标题为空时内在宽度为 0，会整行塌成 0（判据 C2b 抓到的）。
+        [self.anlQual.widthAnchor constraintEqualToAnchor:self.anlDyn.widthAnchor],
+        [self.anlFake.widthAnchor constraintEqualToAnchor:self.anlDyn.widthAnchor],
+        [self.anlExpand.widthAnchor constraintEqualToConstant:56],
+        [self.anlDyn.widthAnchor constraintEqualToAnchor:self.anlRow.widthAnchor
+                                             multiplier:(1.0 / 3.0) constant:-27],
+        // 高度也必须显式给：无边框 NSButton 空标题时内在高度为 0 ⟹ 量得到宽度但看不见。
+        [self.anlDyn.heightAnchor constraintEqualToConstant:22],
+        [self.anlQual.heightAnchor constraintEqualToConstant:22],
+        [self.anlFake.heightAnchor constraintEqualToConstant:22],
 
         [lyricsTitle.leadingAnchor constraintEqualToAnchor:host.leadingAnchor constant:24],
         [lyricsTitle.topAnchor constraintEqualToAnchor:self.cover.bottomAnchor constant:18],
@@ -140,19 +199,17 @@
         [self.lyricsEmpty.leadingAnchor constraintEqualToAnchor:lyScroll.leadingAnchor],
         [self.lyricsEmpty.topAnchor constraintEqualToAnchor:lyScroll.topAnchor constant:4],
 
-        [healthTitle.leadingAnchor constraintEqualToAnchor:lyScroll.trailingAnchor constant:24],
-        [healthTitle.topAnchor constraintEqualToAnchor:lyricsTitle.topAnchor],
-        [hScroll.leadingAnchor constraintEqualToAnchor:healthTitle.leadingAnchor],
-        [hScroll.trailingAnchor constraintEqualToAnchor:host.trailingAnchor constant:-24],
-        [hScroll.topAnchor constraintEqualToAnchor:healthTitle.bottomAnchor constant:6],
-        // 右栏上半 = 音质体检（40%），下半 = AI 资料层
-        [hScroll.heightAnchor constraintEqualToAnchor:lyScroll.heightAnchor multiplier:0.4],
-        [self.healthEmpty.leadingAnchor constraintEqualToAnchor:hScroll.leadingAnchor],
-        [self.healthEmpty.topAnchor constraintEqualToAnchor:hScroll.topAnchor constant:4],
+        // 右栏：展开的分析详情在上（收起时高度 0），AI 资料层在下
+        [self.anlDetailScroll.leadingAnchor constraintEqualToAnchor:lyScroll.trailingAnchor constant:24],
+        [self.anlDetailScroll.trailingAnchor constraintEqualToAnchor:host.trailingAnchor constant:-24],
+        [self.anlDetailScroll.topAnchor constraintEqualToAnchor:lyricsTitle.topAnchor],
+        self.anlDetailHeight,
+        [self.anlReanalyze.leadingAnchor constraintEqualToAnchor:self.anlDetailScroll.leadingAnchor],
+        [self.anlReanalyze.topAnchor constraintEqualToAnchor:self.anlDetailScroll.bottomAnchor constant:4],
 
-        [self.knowledge.leadingAnchor constraintEqualToAnchor:healthTitle.leadingAnchor],
+        [self.knowledge.leadingAnchor constraintEqualToAnchor:self.anlDetailScroll.leadingAnchor],
         [self.knowledge.trailingAnchor constraintEqualToAnchor:host.trailingAnchor constant:-24],
-        [self.knowledge.topAnchor constraintEqualToAnchor:hScroll.bottomAnchor constant:12],
+        [self.knowledge.topAnchor constraintEqualToAnchor:self.anlDetailScroll.bottomAnchor constant:12],
         [self.knowledge.bottomAnchor constraintEqualToAnchor:lyScroll.bottomAnchor],
     ]];
 }
@@ -187,6 +244,20 @@
         return;
     }
     self.polling = YES;
+    // 自动分析开关的真相源是 settings.autoanl（开关本身在设置·高级页签）。
+    // 这里只读一次并缓存，避免每 0.8s 都拉一遍设置。
+    {
+        __weak __typeof__(self) ws = self;
+        [[RLPCoreClient shared] getJSON:@"/api/settings" completion:^(NSDictionary * _Nullable json) {
+            __typeof__(self) s = ws;
+            if (!s) return;
+            // 值在 kv 子对象里（读顶层会永远读成"关"）。
+            NSDictionary *kv = [json[@"kv"] isKindOfClass:[NSDictionary class]] ? json[@"kv"] : json;
+            id v = kv[@"autoanl"];
+            s.anlAutoEnabled = [v isKindOfClass:[NSString class]] ? [v isEqualToString:@"1"]
+                              : ([v isKindOfClass:[NSNumber class]] ? [v boolValue] : NO);
+        }];
+    }
     __weak __typeof__(self) weakSelf = self;
     self.poll = [NSTimer scheduledTimerWithTimeInterval:0.8 repeats:YES block:^(NSTimer *timer) {
         (void)timer;
@@ -220,8 +291,18 @@
             [self_ loadLyricsForPath:path];
             [self_ loadCoverForPath:path];
             [self_ loadMetaAndKnowledgeForPath:path];
-            self_.healthView.string = @"";
-            self_.healthEmpty.stringValue = RLPTr(@"点击「音质体检」分析当前曲目");
+            // 切歌：清掉上一首的结果与层级，并按 settings.autoanl 自动分析一次（每曲一次）。
+            self_.anlHealth = nil;
+            self_.anlPath = nil;
+            self_.anlSeq++;                 // 让上一首的在途回调作废
+            self_.anlBusy = NO;
+            [self_ anlOpenLevel:RLPAnlLevelCollapsed];
+            const BOOL playing = st.playing && !st.paused;
+            if (RLPAnlShouldAutoAnalyze(path, playing, self_.anlAutoEnabled,
+                                        self_.anlAutoDonePath, NO, NO)) {
+                self_.anlAutoDonePath = path;
+                [self_ anlAnalyzePath:path force:NO];
+            }
         }
     }];
 }
@@ -300,27 +381,132 @@
     }];
 }
 
-- (void)onHealth:(id)sender {
-    if (!self.currentPath.length) { RLPToast(RLPTr(@"没有正在播放的曲目")); return; }
-    self.healthEmpty.stringValue = RLPTr(@"正在分析…");
-    // track/health 是 19 项完整版（含 quality）；health 是简版。
-    // 数字全部来自后端实测，UI 只做单位与排版，不再计算（铁律 3）。
-    NSString *url = [NSString stringWithFormat:@"/api/track/health?file=%@", RLPEnc(self.currentPath)];
+#pragma mark - 音频分析（一行四元素）
+
+/// 摘要块：无边框、单行、过长截断 + tooltip 全文。
+/// 为什么不许换行：用户明确要求「改成 1 行显示」，换行就是没做到。
+- (NSButton *)anlChipWithIdentifier:(NSString *)ident action:(SEL)action {
+    NSButton *b = [NSButton buttonWithTitle:@"" target:self action:action];
+    b.bordered = NO;
+    b.identifier = ident;
+    b.font = [RLPTheme current].small;
+    b.translatesAutoresizingMaskIntoConstraints = NO;
+    b.alignment = NSTextAlignmentLeft;
+    [(NSButtonCell *)b.cell setLineBreakMode:NSLineBreakByTruncatingTail];
+    b.contentTintColor = [RLPTheme current].text2;
+    return b;
+}
+
+- (void)onAnlDyn:(id)sender { [self anlOpenLevel:RLPAnlLevelMetrics]; }
+- (void)onAnlQual:(id)sender { [self anlOpenLevel:RLPAnlLevelMetrics]; }
+- (void)onAnlFake:(id)sender { [self anlOpenLevel:RLPAnlLevelMetrics]; }
+
+/// 「展开」循环三档：收起 → 指标 → 全量 → 收起（与 web 版 anlSetLvl 同口径）。
+- (void)onAnlExpand:(id)sender {
+    RLPAnlLevel next = (self.anlLevel == RLPAnlLevelCollapsed) ? RLPAnlLevelMetrics
+                     : (self.anlLevel == RLPAnlLevelMetrics ? RLPAnlLevelFull : RLPAnlLevelCollapsed);
+    [self anlOpenLevel:next];
+}
+
+- (void)anlOpenLevel:(RLPAnlLevel)level {
+    self.anlLevel = level;
+    const BOOL open = (level != RLPAnlLevelCollapsed);
+    self.anlDetailScroll.hidden = !open;
+    self.anlReanalyze.hidden = !open;      // 重新分析只在展开后出现
+    self.anlDetailHeight.constant = open ? 200 : 0;
+    [self.anlExpand setTitle:(level == RLPAnlLevelCollapsed ? RLPTr(@"展开")
+                             : (level == RLPAnlLevelMetrics ? RLPTr(@"更多") : RLPTr(@"收起")))];
+    [self anlPaint];
+}
+
+/// 只刷文案，不重新取数（0.8s 轮询会调它，绝不能在这里发分析请求）。
+- (void)anlPaint {
+    NSDictionary *h = self.anlHealth;
+    NSString *dyn = RLPAnlSumDyn(h), *qual = RLPAnlSumQual(h), *fake = RLPAnlSumFake(h);
+    if (!self.currentPath.length) {
+        dyn = qual = fake = RLPTr(@"未播放");
+    } else if (!RLPAnlIsLocalPath(self.currentPath)) {
+        dyn = qual = fake = RLPTr(@"仅本地文件可分析");
+    } else if (self.anlBusy) {
+        dyn = qual = fake = RLPTr(@"正在分析…");
+    } else if (!h) {
+        dyn = qual = fake = RLPTr(@"未分析");
+    }
+    [self.anlDyn setTitle:[NSString stringWithFormat:@"%@ %@", RLPTr(@"动态"), dyn]];
+    [self.anlQual setTitle:[NSString stringWithFormat:@"%@ %@", RLPTr(@"音质"), qual]];
+    [self.anlFake setTitle:[NSString stringWithFormat:@"%@ %@", RLPTr(@"假无损"), fake]];
+    self.anlDyn.toolTip = dyn; self.anlQual.toolTip = qual; self.anlFake.toolTip = fake;
+
+    if (self.anlLevel == RLPAnlLevelCollapsed) { self.anlDetail.string = @""; return; }
+    self.anlDetail.string = [self anlDetailText:h level:self.anlLevel];
+}
+
+/// 指标明细：数字全部来自后端，UI 只做单位与排版（不可用 ⟹ NA）。
+- (NSString *)anlDetailText:(NSDictionary *)h level:(RLPAnlLevel)level {
+    if (![h isKindOfClass:[NSDictionary class]]) return RLPTr(@"未分析");
+    NSDictionary *q = [h[@"quality"] isKindOfClass:[NSDictionary class]] ? h[@"quality"] : @{};
+    NSMutableString *s = [NSMutableString string];
+    [s appendFormat:@"%@\n", RLPTr(@"动态")];
+    [s appendFormat:@"  %@ %@\n", RLPTr(@"动态范围 DR"), RLPAnlFmt(h[@"dr_db"], 2, @" dB")];
+    [s appendFormat:@"  %@ %@\n", RLPTr(@"响度 (LUFS)"), RLPAnlFmt(h[@"lufs"], 2, @" LUFS")];
+    [s appendFormat:@"  %@ %@\n", RLPTr(@"响度范围 LRA"), RLPAnlFmt(h[@"lra"], 2, @" LU")];
+    [s appendFormat:@"  %@ %@\n", RLPTr(@"真峰 (dBTP)"), RLPAnlFmt(h[@"true_peak_dbtp"], 2, @" dBTP")];
+    [s appendFormat:@"  %@ %@\n", RLPTr(@"样本峰值"), RLPAnlFmt(h[@"peak_dbfs"], 2, @" dBFS")];
+    [s appendFormat:@"  %@ %@\n", RLPTr(@"声道"), RLPAnlHas(h[@"channels"]) ? [NSString stringWithFormat:@"%@ ch", h[@"channels"]] : @"NA"];
+    [s appendFormat:@"\n%@\n", RLPTr(@"音质")];
+    [s appendFormat:@"  %@ %@\n", RLPTr(@"削波样本"), RLPAnlFmt(q[@"clipped_samples"], 0, nil)];
+    [s appendFormat:@"  %@ %@\n", RLPTr(@"最长连续削波"), RLPAnlFmt(q[@"longest_clip_run"], 0, nil)];
+    [s appendFormat:@"  %@ %@\n", RLPTr(@"峰值因子"), RLPAnlFmt(q[@"crest_db"], 2, @" dB")];
+    [s appendFormat:@"  %@ %@\n", RLPTr(@"信噪比"), RLPAnlFmt(q[@"snr_db"], 2, @" dB")];
+    [s appendFormat:@"  %@ %@\n", RLPTr(@"频谱重心"), RLPAnlFmt(q[@"centroid_hz"], 0, @" Hz")];
+    [s appendFormat:@"\n%@\n", RLPTr(@"假无损")];
+    [s appendFormat:@"  %@ %@\n", RLPTr(@"判定"), RLPAnlSumFake(h)];
+    [s appendFormat:@"  %@ %@\n", RLPTr(@"截止频率"), RLPAnlFmt(h[@"cutoff_hz"], 1, @" Hz")];
+    [s appendFormat:@"  %@ %@\n", RLPTr(@"置信度"), RLPAnlFmt(h[@"confidence"], 3, nil)];
+    [s appendFormat:@"  %@ %@\n", RLPTr(@"24bit 实为低位深"),
+        [h[@"fake24"] isKindOfClass:[NSNumber class]] ? ([h[@"fake24"] boolValue] ? RLPTr(@"是") : RLPTr(@"否")) : @"NA"];
+    if (level == RLPAnlLevelFull) {
+        [s appendFormat:@"\n%@\n", RLPTr(@"采样规格与分析记录")];
+        [s appendFormat:@"  %@ %@\n", RLPTr(@"采样率"), RLPAnlFmt(h[@"fs"], 0, @" Hz")];
+        [s appendFormat:@"  %@ %@\n", RLPTr(@"位深"), RLPAnlFmt(h[@"bits"], 0, @" bit")];
+        [s appendFormat:@"  %@ %@\n", RLPTr(@"分析状态"),
+            [h[@"status"] isKindOfClass:[NSString class]] ? h[@"status"] : @"NA"];
+        [s appendFormat:@"  %@ %@\n", RLPTr(@"谱窗数"), RLPAnlFmt(q[@"spectral_windows"], 0, nil)];
+        [s appendFormat:@"  %@ %@\n", RLPTr(@"RMS"), RLPAnlFmt(q[@"rms_dbfs"], 2, @" dBFS")];
+        [s appendFormat:@"  %@ %@\n", RLPTr(@"动态重心"), RLPAnlFmt(q[@"dyn_centroid_dbfs"], 2, @" dBFS")];
+        if ([h[@"reason"] isKindOfClass:[NSString class]] && [h[@"reason"] length])
+            [s appendFormat:@"\n%@：%@\n", RLPTr(@"判定依据"), h[@"reason"]];
+        if ([h[@"error"] isKindOfClass:[NSString class]] && [h[@"error"] length])
+            [s appendFormat:@"%@：%@\n", RLPTr(@"后端说明"), h[@"error"]];
+    }
+    return s;
+}
+
+/// 真的取数。**只由切歌自动分析或用户点「重新分析」触发**，绝不进轮询。
+- (void)anlAnalyzePath:(NSString *)path force:(BOOL)force {
+    if (!RLPAnlIsLocalPath(path)) return;
+    const NSUInteger seq = ++self.anlSeq;
+    self.anlBusy = YES;
+    [self anlPaint];
+    NSString *url = [NSString stringWithFormat:@"/api/health?file=%@%@", RLPEnc(path), force ? @"&force=1" : @""];
     __weak __typeof__(self) weakSelf = self;
     [[RLPCoreClient shared] getJSON:url completion:^(NSDictionary * _Nullable json) {
         __typeof__(self) self_ = weakSelf;
-        if (!self_) return;
-        if (!json || ![json[@"ok"] boolValue]) {
-            self_.healthEmpty.stringValue = RLPTr(@"分析失败");
-            return;
+        if (!self_ || seq != self_.anlSeq) return;    // 过期结果直接丢（切歌后不能盖掉新曲）
+        self_.anlBusy = NO;
+        if (json && [json[@"ok"] boolValue]) {
+            self_.anlHealth = json;
+            self_.anlPath = path;
+        } else {
+            self_.anlHealth = nil;
         }
-        NSData *data = [NSJSONSerialization dataWithJSONObject:json
-                                                       options:NSJSONWritingPrettyPrinted | NSJSONWritingSortedKeys
-                                                         error:nil];
-        NSString *text = data ? [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding] : @"";
-        self_.healthView.string = text ?: @"";
-        self_.healthEmpty.stringValue = @"";
+        [self_ anlPaint];
     }];
+}
+
+- (void)onAnlReanalyze:(id)sender {
+    if (!self.currentPath.length) { RLPToast(RLPTr(@"没有正在播放的曲目")); return; }
+    [self anlAnalyzePath:self.currentPath force:YES];
 }
 
 - (void)applyTheme {
@@ -331,12 +517,12 @@
     self.artistLabel2.textColor = t.mut;
     self.metaLabel.textColor = t.mut;
     [self.knowledge applyTheme];
-    for (NSTextView *tv in @[self.lyricsView, self.healthView]) {
+    for (NSButton *b in @[self.anlDyn, self.anlQual, self.anlFake]) b.contentTintColor = t.text2;
+    for (NSTextView *tv in @[self.lyricsView, self.anlDetail]) {
         tv.textColor = t.text;
         tv.font = t.body;
     }
     self.lyricsEmpty.textColor = t.mut;
-    self.healthEmpty.textColor = t.mut;
 }
 
 @end

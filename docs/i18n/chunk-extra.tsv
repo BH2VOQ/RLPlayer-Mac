@@ -31,3 +31,117 @@
 留空自动存至 Application Support/RLPlayer/recordings	Leave empty to auto-save to Application Support/RLPlayer/recordings	录制输出路径 placeholder 前缀
 cap-时间戳.wav	cap-timestamp.wav	录制输出默认文件名
 时间戳	timestamp	文件名占位词
+聆听模式	Listening	顶栏模式切换：面向安静听歌
+专业模式	Pro	顶栏模式切换：面向发烧友
+聆听室	Listening Room	聆听模式首页
+专业工作台	Pro Workbench	专业模式首页
+聆听模式：安静听歌，设置就在这一页；专业模式：信号链、滤波与升频快速切换、A/B 对比	Listening: just play music, settings live on this page. Pro: signal chain, quick filter and upsampling switching, A/B compare.	顶栏模式切换 tooltip
+A/B 对比	A/B Compare	1.1.7.1 双模式 UI
+AI 资料补全与音频输入采集：到专业模式调整。	AI metadata fill and audio input capture: adjust these in Pro mode.	1.1.7.1 双模式 UI
+A⇄B 来回	Toggle A⇄B	1.1.7.1 双模式 UI
+DSD 走 DoP 承载	DSD is carried over DoP	1.1.7.1 双模式 UI
+DSD/DoP 路径强制无抖动	DSD/DoP path forces dither off	1.1.7.1 双模式 UI
+DSD→DSD	DSD→DSD	1.1.7.1 双模式 UI
+EQ	EQ	1.1.7.1 双模式 UI
+EQ 关	EQ off	1.1.7.1 双模式 UI
+EQ 已旁路	EQ bypassed	1.1.7.1 双模式 UI
+EQ 开	EQ on	1.1.7.1 双模式 UI
+Hog 会让系统音量条失效（macOS 机制）	Hog disables the system volume slider (macOS behavior)	1.1.7.1 双模式 UI
+PCM 输出不经过调制器	PCM output does not pass through the modulator	1.1.7.1 双模式 UI
+PCM→DSD	PCM→DSD	1.1.7.1 双模式 UI
+RMS	RMS	1.1.7.1 双模式 UI
+UPnP 投放	UPnP cast	1.1.7.1 双模式 UI
+不出声（仅分析）	Silent (analysis only)	1.1.7.1 双模式 UI
+不用懂滤波：往温和走声音更柔顺，往锐利走更清亮。	No filter knowledge needed: warmer is smoother, sharper is brighter.	1.1.7.1 双模式 UI
+不确定就选「原音直通」：文件是什么就播什么。	Not sure? Pick Direct: plays the file exactly as it is.	1.1.7.1 双模式 UI
+严格独占（Hog）	Strict exclusive (Hog)	1.1.7.1 双模式 UI
+从下面的专辑挑一张开始	Pick an album below to start	1.1.7.1 双模式 UI
+信号链：源 → 重采样 → EQ → 卷积 → 抖动 → 调制 → 输出（点节点看当前值）	Signal chain: source → resample → EQ → convolution → dither → modulator → output (click a node for its current value)	1.1.7.1 双模式 UI
+先把 A 与 B 都存好，再来回对比	Save both A and B first, then toggle to compare	1.1.7.1 双模式 UI
+共享播放	Shared playback	1.1.7.1 双模式 UI
+关闭时可在播放页展开分析详情后手动分析	When off, expand the analysis details on the playback page to analyze manually	1.1.7.1 双模式 UI
+其它	Other	1.1.7.1 双模式 UI
+分析未完成	Analysis incomplete	1.1.7.1 双模式 UI
+切换失败	Switch failed	1.1.7.1 双模式 UI
+升频与调制	Upsampling and modulation	1.1.7.1 双模式 UI
+卷积 IR	Convolution IR	1.1.7.1 双模式 UI
+后端说明	Backend note	1.1.7.1 双模式 UI
+听音风格	Sound style	1.1.7.1 双模式 UI
+启用 EQ	Enable EQ	1.1.7.1 双模式 UI
+和其它 App 一起出声，兼容性最好	Plays alongside other apps; best compatibility	1.1.7.1 双模式 UI
+均衡自然	Balanced	1.1.7.1 双模式 UI
+均衡（20 段 PEQ）	Equalizer (20-band PEQ)	1.1.7.1 双模式 UI
+存为	Save as	1.1.7.1 双模式 UI
+局域网投放	LAN cast	1.1.7.1 双模式 UI
+展开	Expand	1.1.7.1 双模式 UI
+已切到	Switched to	1.1.7.1 双模式 UI
+已存为	Saved as	1.1.7.1 双模式 UI
+已添加目录，开始扫描	Folder added; scanning started	1.1.7.1 双模式 UI
+已生效	Applied	1.1.7.1 双模式 UI
+已重新检测设备	Devices refreshed	1.1.7.1 双模式 UI
+开	On	1.1.7.1 双模式 UI
+开启后每首本地曲目播放时自动分析一次（动态 / 音质 / 假无损）。分析是整曲解码，较吃 CPU。	When on, each local track is analyzed once on playback (dynamics / quality / fake lossless). Analysis decodes the whole track and is CPU-heavy.	1.1.7.1 双模式 UI
+开启后系统音量条与音量键会失效，只能用本程序的音量条；它不能阻止其它 App 播放。	When on, the system volume slider and keys stop working; use this app's volume slider. It cannot stop other apps from playing.	1.1.7.1 双模式 UI
+开启后系统音量条与音量键失效，只能用本程序音量条；不能阻止其它 App 播放。	When on, the system volume slider and keys stop working; use this app's slider. It cannot stop other apps from playing.	1.1.7.1 双模式 UI
+当前是 DSD 文件：DSD 升频会走 DSD→DSD。	Current file is DSD: DSD upsampling will use DSD→DSD.	1.1.7.1 双模式 UI
+当前真实值如下；用下面各区的快速控件即可当场切换。	Current real values below; use the quick controls in each section to switch instantly.	1.1.7.1 双模式 UI
+当前设备	Current device	1.1.7.1 双模式 UI
+打开曲目详情	Open track details	1.1.7.1 双模式 UI
+打开流媒体页	Open streaming page	1.1.7.1 双模式 UI
+打开音乐库	Open library	1.1.7.1 双模式 UI
+把当前设置存成多套配置，点着就能切、边听边比。只切听感相关项，不动输出设备。	Save the current settings as several presets and switch between them while listening. Only tone-related items change; the output device is left alone.	1.1.7.1 双模式 UI
+把普通高清音源提升到设备支持的更高采样率	Raise ordinary hi-res sources to a higher rate your device supports	1.1.7.1 双模式 UI
+投到支持 UPnP/DLNA 的播放器	Cast to a UPnP/DLNA renderer	1.1.7.1 双模式 UI
+投放到局域网设备	Cast to a LAN device	1.1.7.1 双模式 UI
+抖动	Dither	1.1.7.1 双模式 UI
+播放 DSD 文件时，DSD 升频会自动改用 DSD→DSD。	When playing a DSD file, DSD upsampling switches to DSD→DSD automatically.	1.1.7.1 双模式 UI
+播放方式	Playback mode	1.1.7.1 双模式 UI
+播放时自动分析	Auto-analyze on playback	1.1.7.1 双模式 UI
+支持 FLAC · DSD (DSF/DFF) · ALAC · WAV · APE	Supports FLAC · DSD (DSF/DFF) · ALAC · WAV · APE	1.1.7.1 双模式 UI
+文件是什么就播什么，不做任何加工	Plays the file as is, with no processing	1.1.7.1 双模式 UI
+旁路 EQ	Bypass EQ	1.1.7.1 双模式 UI
+无可用滤波	No filter available	1.1.7.1 双模式 UI
+是	Yes	1.1.7.1 双模式 UI
+暂停	Pause	1.1.7.1 双模式 UI
+更多	More	1.1.7.1 双模式 UI
+未保存	Not saved	1.1.7.1 双模式 UI
+未加载卷积 IR	No convolution IR loaded	1.1.7.1 双模式 UI
+本机 · 共享播放	This Mac · shared	1.1.7.1 双模式 UI
+本机 · 独占播放	This Mac · exclusive	1.1.7.1 双模式 UI
+柔和温润	Warm	1.1.7.1 双模式 UI
+查看全部	View all	1.1.7.1 双模式 UI
+没有可用滤波	No filter available	1.1.7.1 双模式 UI
+流媒体在这里挂载；AI 资料与音频输入的开关在专业模式。	Mount streaming here; AI metadata and audio input switches live in Pro mode.	1.1.7.1 双模式 UI
+清亮锐利	Sharp	1.1.7.1 双模式 UI
+源	Source	1.1.7.1 双模式 UI
+滤波	Filter	1.1.7.1 双模式 UI
+滤波列表读取失败，请稍后重试	Could not load the filter list; try again later	1.1.7.1 双模式 UI
+点击选择听感风格	Click to choose a sound style	1.1.7.1 双模式 UI
+点击选择播放方式	Click to choose a playback mode	1.1.7.1 双模式 UI
+点击选择输出方式	Click to choose an output mode	1.1.7.1 双模式 UI
+点即切换。gauss 族更柔顺，poly-sinc/tight 更锐利；相位影响瞬态与预回声。	Click to switch. The gauss family is smoother, poly-sinc/tight is sharper; phase affects transients and pre-ringing.	1.1.7.1 双模式 UI
+独占播放	Exclusive playback	1.1.7.1 双模式 UI
+独占播放音质最稳；共享播放和其它 App 一起出声。	Exclusive gives the most stable quality; shared plays alongside other apps.	1.1.7.1 双模式 UI
+独占设备，音质最稳（推荐）	Takes over the device; most stable quality (recommended)	1.1.7.1 双模式 UI
+硬件直通（独占）	Hardware direct (exclusive)	1.1.7.1 双模式 UI
+系统混音（共享）	System mixer (shared)	1.1.7.1 双模式 UI
+系统默认	System default	1.1.7.1 双模式 UI
+继续播放	Resume	1.1.7.1 双模式 UI
+设置还没读到	Settings not loaded yet	1.1.7.1 双模式 UI
+该设备无 DoP 载波，DSD 档不可用	This device has no DoP carrier; DSD rates are unavailable	1.1.7.1 双模式 UI
+调制器	Modulator	1.1.7.1 双模式 UI
+调整	Adjust	1.1.7.1 双模式 UI
+跟随源，不做重采样	Following the source; no resampling	1.1.7.1 双模式 UI
+跟随默认	Using default	1.1.7.1 双模式 UI
+转换成 DSD 信号输出，声音更绵密（需要设备支持 DoP）	Convert to DSD output for a denser sound (requires DoP support)	1.1.7.1 双模式 UI
+轻微削波 ·	Minor clipping ·	1.1.7.1 双模式 UI
+输出方式	Output mode	1.1.7.1 双模式 UI
+还没有专辑 · 先添加音乐目录	No albums yet · add a music folder first	1.1.7.1 双模式 UI
+还没有在播放的音乐	Nothing playing yet	1.1.7.1 双模式 UI
+这个槽还没保存 · 点「存为」把当前设置存进来	This slot is empty · click Save as to store the current settings	1.1.7.1 双模式 UI
+选择	Choose	1.1.7.1 双模式 UI
+选择存放音乐的目录	Choose the folder that holds your music	1.1.7.1 双模式 UI
+采样率只列设备真正支持的档；DSD 需要设备有 DoP 载波。	Only rates your device actually supports are listed; DSD needs a DoP carrier.	1.1.7.1 双模式 UI
+采样规格与分析记录	Sample format and analysis record	1.1.7.1 双模式 UI
+重新分析	Re-analyze	1.1.7.1 双模式 UI
+音乐目录已就绪 · 可重新扫描更新专辑与封面	Music folder ready · rescan to refresh albums and covers	1.1.7.1 双模式 UI

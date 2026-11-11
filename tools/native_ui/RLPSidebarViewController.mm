@@ -53,6 +53,34 @@
 }
 @end
 
+/// 导航项 = 模式的函数。**这是"两个模式差别在能做什么"的落点之一**：
+/// 聆听模式没有「设置」（用户明确要求：需要动设置的人请他去专业模式），
+/// 首页是「聆听室」；专业模式首页是「专业工作台」，并保留设置入口。
+/// 曲库浏览与播放相关项两个模式都有 —— 合并页签不等于砍功能。
+static NSArray<NSDictionary *> *RLPSidebarItemsForMode(RLPAppMode mode) {
+    NSMutableArray *items = [NSMutableArray array];
+    if (mode == RLPAppModePro) {
+        [items addObject:@{@"name": @"专业工作台", @"icon": @"slider.horizontal.3", @"key": @"workbench"}];
+    } else {
+        [items addObject:@{@"name": @"聆听室", @"icon": @"headphones", @"key": @"room"}];
+    }
+    [items addObjectsFromArray:@[
+        @{@"name": @"专辑",     @"icon": @"square.stack", @"key": @"albums"},
+        @{@"name": @"艺术家",   @"icon": @"person.2",     @"key": @"artists"},
+        @{@"name": @"曲目",     @"icon": @"music.note",   @"key": @"tracks"},
+        @{@"name": @"文件夹",   @"icon": @"folder",       @"key": @"folders"},
+        @{@"name": @"流媒体",   @"icon": @"antenna.radiowaves.left.and.right", @"key": @"streaming"},
+        @{@"name": @"播放队列", @"icon": @"list.bullet",  @"key": @"queue"},
+        @{@"name": @"最近播放", @"icon": @"clock",        @"key": @"recent"},
+        @{@"name": @"我的最爱", @"icon": @"heart",        @"key": @"favorites"},
+        @{@"name": @"歌单",     @"icon": @"music.note.list", @"key": @"playlists"},
+    ]];
+    // 设置只在专业模式出现。聆听模式里想改设置 ⟹ 顶栏切到专业模式。
+    if (mode == RLPAppModePro)
+        [items addObject:@{@"name": @"设置", @"icon": @"gearshape", @"key": @"settings"}];
+    return items;
+}
+
 @implementation RLPSidebarViewController
 
 - (instancetype)init {
@@ -62,19 +90,7 @@
         _hoverRow = -1;
         _pendingRow = -1;
         _selectedRow = -1;
-        _menuItems = @[
-            @{@"name": @"专辑", @"icon": @"square.stack"},
-            @{@"name": @"艺术家", @"icon": @"person.2"},
-            @{@"name": @"曲目", @"icon": @"music.note"},
-            @{@"name": @"文件夹", @"icon": @"folder"},
-            @{@"name": @"流媒体", @"icon": @"antenna.radiowaves.left.and.right"},
-            @{@"name": @"播放队列", @"icon": @"list.bullet"},
-            @{@"name": @"最近播放", @"icon": @"clock"},
-            @{@"name": @"我的最爱", @"icon": @"heart"},
-            @{@"name": @"歌单", @"icon": @"music.note.list"},
-            @{@"name": @"快速开始", @"icon": @"sparkles"},
-            @{@"name": @"设置", @"icon": @"gearshape"}
-        ];
+        _menuItems = RLPSidebarItemsForMode(RLPCurrentAppMode());
     }
     return self;
     // 选中必须在**表格已经有行之后**才设：reloadData 之前 selectRowIndexes 会被丢弃，
@@ -272,6 +288,39 @@
     _lastSelectedRow = row;
     [_tableView reloadData];
     if (self.onSelect) self.onSelect(row);
+    NSString *k = [self keyForRow:row];
+    if (k.length && self.onSelectKey) self.onSelectKey(k);
+}
+
+#pragma mark - 符号 key 路由（模式切换后行号会错位，所以对外一律用 key）
+
+- (NSString *)keyForRow:(NSInteger)row {
+    if (row < 0 || row >= (NSInteger)_menuItems.count) return nil;
+    NSString *k = _menuItems[row][@"key"];
+    return [k isKindOfClass:[NSString class]] ? k : nil;
+}
+
+- (NSString *)selectedKey { return [self keyForRow:_selectedRow]; }
+
+- (BOOL)selectKey:(NSString *)key {
+    if (!key.length) return NO;
+    for (NSInteger i = 0; i < (NSInteger)_menuItems.count; ++i) {
+        if ([_menuItems[i][@"key"] isEqualToString:key]) { [self selectRow:i]; return YES; }
+    }
+    return NO;
+}
+
+- (void)reloadForModeChange {
+    // 记住"当前在哪一页"，模式切换后若那页还在就留在原地（不把用户踢回首页）。
+    NSString *keep = [self selectedKey];
+    _menuItems = RLPSidebarItemsForMode(RLPCurrentAppMode());
+    _selectedRow = -1;
+    _lastSelectedRow = -1;
+    _hoverRow = -1;
+    if (!_tableView) { _pendingRow = 0; return; }
+    [_tableView reloadData];
+    if (keep.length && [self selectKey:keep]) return;
+    [self selectRow:0];   // 那页在新模式里不存在（如聆听模式下的设置）⟹ 回该模式首页
 }
 
 /// 表格把鼠标位置转进来：只在行号变化时刷新受影响的两行，不整表 reload

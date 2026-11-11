@@ -98,6 +98,8 @@ static NSView *RLPSGroup(NSString *title, NSString *desc, RLPTheme *t) {
 @property (nonatomic, strong) NSPopUpButton *langPopup;
 @property (nonatomic, strong) NSTextField *rootField;
 @property (nonatomic, strong) NSSwitch *betaSwitch;
+/// 播放时自动分析（autoanl）。1.1.7.1：开关从播放页挪到这里，播放页只留一行分析结果。
+@property (nonatomic, strong) NSSwitch *autoAnlSwitch;
 @property (nonatomic, strong) NSSwitch *streamSwitch;
 // 流媒体
 @property (nonatomic, strong) NSTextField *serverTableNote;
@@ -421,6 +423,13 @@ static NSView *RLPSGroup(NSString *title, NSString *desc, RLPTheme *t) {
     [self.langPopup selectItemAtIndex:[RLPLanguage() isEqualToString:@"en"] ? 1 : 0];
     [stack addArrangedSubview:RLPSRow(RLPTr(@"语言"), self.langPopup,
         RLPTr(@"切换后需重开窗口生效"), t)];
+
+    // 分析（1.1.7.1）：播放页不再摆开关，真相源在这里（键 autoanl，与 web 版同一个）。
+    [stack addArrangedSubview:RLPSGroup(RLPTr(@"音频分析"),
+        RLPTr(@"开启后每首本地曲目播放时自动分析一次（动态 / 音质 / 假无损）。分析是整曲解码，较吃 CPU。"), t)];
+    self.autoAnlSwitch = [self switchWithAction:@selector(onSwitch:) key:@"autoanl"];
+    [stack addArrangedSubview:RLPSRow(RLPTr(@"播放时自动分析"), self.autoAnlSwitch,
+        RLPTr(@"关闭时可在播放页展开分析详情后手动分析"), t)];
 
     [stack addArrangedSubview:RLPSGroup(RLPTr(@"音乐库"), nil, t)];
     self.rootField = [[NSTextField alloc] initWithFrame:NSZeroRect];
@@ -908,6 +917,7 @@ static NSView *RLPSGroup(NSString *title, NSString *desc, RLPTheme *t) {
         [self_ applyKV:kv toSwitch:self_.directSdmSwitch key:@"directsdm"];
         [self_ applyKV:kv toSwitch:self_.inMonitorSwitch key:@"inmon"];
         [self_ applyKV:kv toSwitch:self_.betaSwitch key:@"updbeta"];
+        [self_ applyKV:kv toSwitch:self_.autoAnlSwitch key:@"autoanl"];
         [self_ applyKV:kv toSwitch:self_.streamSwitch key:@"streamdecode"];
         [self_ applyKV:kv toSwitch:self_.metaOnSwitch key:@"metaon"];
         [self_ applyKV:kv toSwitch:self_.metaLlmSwitch key:@"metallm"];

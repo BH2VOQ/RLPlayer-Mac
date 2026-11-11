@@ -217,6 +217,10 @@ if(APPLE)
     tools/native_ui/RLPFeedbackWindowController.mm
     tools/native_ui/RLPKnowledgeView.mm
     tools/native_ui/RLPFunctionalAudit.mm
+    tools/native_ui/RLPAnalysisSummary.mm
+    tools/native_ui/RLPListeningRoom.mm
+    tools/native_ui/RLPWorkbench.mm
+    tools/native_ui/RLPWorkbenchViewController.mm
     tools/mac_update.mm)
   set_source_files_properties(
     tools/mac_update.mm
@@ -265,6 +269,118 @@ if(APPLE)
   add_test(NAME native_ui_functional
            COMMAND rlplayer_native --audit ${CMAKE_BINARY_DIR}/native-audit-shots)
   set_tests_properties(native_ui_functional PROPERTIES TIMEOUT 300)
+
+  # 2026-11-11（1.1.7.1）：播放页音频分析「一行」的判据。
+  # 摘要判读是纯函数（构造 health 字典钉边界，含"不许用 snr_db"负向判据）；
+  # 一行几何先断言"量到了"再断言"同一行"，避免未布局时 frame 全 0 假红。
+  add_executable(test_analysis_row tests/test_analysis_row.mm
+    tools/native_ui/RLPAnalysisSummary.mm
+    tools/native_ui/RLPNowPlayingViewController.mm
+    tools/native_ui/RLPPageViewController.mm
+    tools/native_ui/RLPSupport.mm
+    tools/native_ui/RLPTheme.mm
+    tools/native_ui/RLPModels.mm
+    tools/native_ui/RLPCoreClient.mm
+    tools/native_ui/RLPKnowledgeView.mm
+    tools/native_ui/RLPNativeI18n.mm)
+  set_source_files_properties(tests/test_analysis_row.mm
+    tools/native_ui/RLPAnalysisSummary.mm
+    tools/native_ui/RLPNowPlayingViewController.mm
+    tools/native_ui/RLPPageViewController.mm
+    tools/native_ui/RLPSupport.mm
+    tools/native_ui/RLPTheme.mm
+    tools/native_ui/RLPModels.mm
+    tools/native_ui/RLPCoreClient.mm
+    tools/native_ui/RLPKnowledgeView.mm
+    tools/native_ui/RLPNativeI18n.mm PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
+  target_include_directories(test_analysis_row PRIVATE
+    ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tools ${CMAKE_SOURCE_DIR}/tools/native_ui)
+  target_link_libraries(test_analysis_row PRIVATE rlapp_core "-framework AppKit")
+  add_test(NAME analysis_row COMMAND test_analysis_row)
+  set_tests_properties(analysis_row PROPERTIES TIMEOUT 120)
+
+  # 2026-11-11（1.1.7.1）：聆听室合并页的判据。
+  # A3「没有跳设置页的入口」在旧快速开始页上必然红（旧页有四个跳设置按钮）；
+  # A4/A5 是纯函数：档位只能选后端真实存在的滤波、DSD 档按源类型分流。
+  add_executable(test_listening_room tests/test_listening_room.mm
+    tools/native_ui/RLPListeningRoom.mm
+    tools/native_ui/RLPQuickStartViewController.mm
+    tools/native_ui/RLPPageViewController.mm
+    tools/native_ui/RLPSupport.mm
+    tools/native_ui/RLPTheme.mm
+    tools/native_ui/RLPModels.mm
+    tools/native_ui/RLPCoreClient.mm
+    tools/native_ui/RLPNativeI18n.mm
+  )
+  set_source_files_properties(tests/test_listening_room.mm
+    tools/native_ui/RLPListeningRoom.mm
+    tools/native_ui/RLPQuickStartViewController.mm
+    tools/native_ui/RLPPageViewController.mm
+    tools/native_ui/RLPSupport.mm
+    tools/native_ui/RLPTheme.mm
+    tools/native_ui/RLPModels.mm
+    tools/native_ui/RLPCoreClient.mm
+    tools/native_ui/RLPNativeI18n.mm
+    PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
+  target_include_directories(test_listening_room PRIVATE
+    ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tools ${CMAKE_SOURCE_DIR}/tools/native_ui)
+  target_link_libraries(test_listening_room PRIVATE rlapp_core "-framework AppKit")
+  add_test(NAME listening_room COMMAND test_listening_room)
+  set_tests_properties(listening_room PROPERTIES TIMEOUT 120)
+
+  # 2026-11-11（1.1.7.1）：专业工作台的判据。
+  # B3a/B3d 是**安全性判据**：A/B 快照绝不能含 device/backend/hogexcl，
+  # 否则 A/B 对比时会切输出设备、抢独占、爆音。
+  # B2 钉住"不适用的信号链节点必须真的灰掉"（PCM 下的 SDM、DoP 下的 shaper）。
+  add_executable(test_workbench tests/test_workbench.mm
+    tools/native_ui/RLPWorkbench.mm
+    tools/native_ui/RLPWorkbenchViewController.mm
+    tools/native_ui/RLPEqualizerView.mm
+    tools/native_ui/RLPPageViewController.mm
+    tools/native_ui/RLPSupport.mm
+    tools/native_ui/RLPTheme.mm
+    tools/native_ui/RLPModels.mm
+    tools/native_ui/RLPCoreClient.mm
+    tools/native_ui/RLPNativeI18n.mm
+  )
+  set_source_files_properties(tests/test_workbench.mm
+    tools/native_ui/RLPWorkbench.mm
+    tools/native_ui/RLPWorkbenchViewController.mm
+    tools/native_ui/RLPEqualizerView.mm
+    tools/native_ui/RLPPageViewController.mm
+    tools/native_ui/RLPSupport.mm
+    tools/native_ui/RLPTheme.mm
+    tools/native_ui/RLPModels.mm
+    tools/native_ui/RLPCoreClient.mm
+    tools/native_ui/RLPNativeI18n.mm
+    PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
+  target_include_directories(test_workbench PRIVATE
+    ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tools ${CMAKE_SOURCE_DIR}/tools/native_ui)
+  target_link_libraries(test_workbench PRIVATE rlapp_core "-framework AppKit")
+  add_test(NAME workbench COMMAND test_workbench)
+  set_tests_properties(workbench PROPERTIES TIMEOUT 120)
+
+  # 2026-11-11（1.1.7.1）：双模式页面的「设置读回」真链路判据。
+  # 触发原因是真 BUG：/api/settings 的值在 kv 子对象里，而新页面最初读顶层
+  # ⟹ 全部静默回落默认值、A/B 快照抓空。三条离线判据都不启动核心，抓不到它。
+  # 纪律：隔离 state/library + backend=null + volume=-120，不开设备、不出声。
+  add_executable(test_mode_settings_readback tests/test_mode_settings_readback.mm
+    tools/native_ui/RLPCoreClient.mm
+    tools/native_ui/RLPWorkbench.mm
+    tools/native_ui/RLPListeningRoom.mm
+    tools/native_ui/RLPSupport.mm
+    tools/native_ui/RLPTheme.mm
+    tools/native_ui/RLPNativeI18n.mm)
+  set_source_files_properties(tests/test_mode_settings_readback.mm
+    tools/native_ui/RLPCoreClient.mm tools/native_ui/RLPWorkbench.mm
+    tools/native_ui/RLPListeningRoom.mm tools/native_ui/RLPSupport.mm
+    tools/native_ui/RLPTheme.mm tools/native_ui/RLPNativeI18n.mm
+    PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
+  target_include_directories(test_mode_settings_readback PRIVATE
+    ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tools ${CMAKE_SOURCE_DIR}/tools/native_ui)
+  target_link_libraries(test_mode_settings_readback PRIVATE rlapp_core "-framework AppKit")
+  add_test(NAME mode_settings_readback COMMAND test_mode_settings_readback)
+  set_tests_properties(mode_settings_readback PROPERTIES TIMEOUT 180)
 
   # 2026-11-11（1.1.7.1）：/api/settings 的"写了就是写了"判据。
   # 触发原因是一个真 BUG：白名单漏了 hogexcl ⟹ POST 回 ok:true 却不落盘、读回为空，

@@ -292,8 +292,32 @@ int RLPAppDelegateRunSelfTest(void) {
         STCheck([win.contentView isKindOfClass:[NSView class]], "contentView 是原生 NSView", @"");
     }
     STCheck(wc.sidebar != nil, "侧栏导航已创建", @"");
-    STCheck(wc.sidebar.rowCount == 11, "侧栏导航 11 项（web 版 10 项 + 歌单入口）",
-            [NSString stringWithFormat:@"rows=%ld", (long)wc.sidebar.rowCount]);
+    // 1.1.7.1：导航项**随模式变化**，所以不能再断言一个固定数字。
+    // 聆听模式 10 项（首页聆听室 + 9 个曲库/播放项，**没有设置**）；
+    // 专业模式 11 项（首页专业工作台 + 9 个曲库/播放项 + 设置）。
+    // 这条判据的意义是"两个模式差别在能做什么"，不是"看起来不一样"。
+    {
+        RLPSetAppMode(RLPAppModeListening);
+        [wc.sidebar reloadForModeChange];
+        STCheck(wc.sidebar.rowCount == 10, "聆听模式侧栏 10 项（无设置入口）",
+                [NSString stringWithFormat:@"rows=%ld", (long)wc.sidebar.rowCount]);
+        STCheck([wc.sidebar selectKey:@"settings"] == NO, "聆听模式没有设置入口（用户硬要求）",
+                @"selectKey:settings 竟然成功了");
+        STCheck([[wc.sidebar keyForRow:0] isEqualToString:@"room"], "聆听模式首页是聆听室",
+                [wc.sidebar keyForRow:0] ?: @"nil");
+        STCheck([wc.sidebar selectKey:@"albums"] == YES, "聆听模式仍能浏览专辑（合并页签不等于砍功能）", @"");
+
+        RLPSetAppMode(RLPAppModePro);
+        [wc.sidebar reloadForModeChange];
+        STCheck(wc.sidebar.rowCount == 11, "专业模式侧栏 11 项（工作台 + 设置）",
+                [NSString stringWithFormat:@"rows=%ld", (long)wc.sidebar.rowCount]);
+        STCheck([wc.sidebar selectKey:@"settings"] == YES, "专业模式有设置入口", @"");
+        STCheck([[wc.sidebar keyForRow:0] isEqualToString:@"workbench"], "专业模式首页是专业工作台",
+                [wc.sidebar keyForRow:0] ?: @"nil");
+        // 回到默认模式，后续判据在聆听模式下跑（默认必须是聆听）
+        RLPSetAppMode(RLPAppModeListening);
+        [wc.sidebar reloadForModeChange];
+    }
     STCheck(wc.albums != nil, "专辑网格已创建", @"");
     STCheck(wc.playbackBar != nil, "播放条已创建", @"");
     STCheck(wc.playbackBar.polling == NO, "selftest 不启动状态轮询（无核心时不发请求）", @"");

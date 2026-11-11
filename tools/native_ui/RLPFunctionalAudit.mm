@@ -229,6 +229,12 @@ int RLPRunFunctionalAudit(NSString *outDir) {
     Pump(1.2);
 
     // ---- ① 专辑页真的有卡片，不是空壳 ----
+    // 1.1.7.1：首页不再是专辑页（聆听模式首页=聆听室），所以必须**显式导航到专辑页**
+    // 再验"点专辑→详情→返回"。否则返回栈记的是聆听室，断言"回到专辑页"就是判据本身错了。
+    CK([wc.sidebar selectKey:@"albums"], "能导航到专辑页", @"侧栏没有 albums");
+    Pump(0.6);
+    CK([wc.currentContent isKindOfClass:[RLPAlbumsViewController class]], "当前内容是专辑页",
+       NSStringFromClass(wc.currentContent.class));
     CK(wc.albums.albumCount >= 3, "专辑页拿到 >= 3 张专辑",
        [NSString stringWithFormat:@"albumCount=%ld", (long)wc.albums.albumCount]);
     CK(Snap(wc.window.contentView, [outDir stringByAppendingPathComponent:@"01-albums.png"],
@@ -256,21 +262,25 @@ int RLPRunFunctionalAudit(NSString *outDir) {
     }
 
     // ---- ③ 逐个导航项：切过去必须有内容 + 截图 ----
-    struct RowSpec { NSInteger row; const char *name; const char *file; };
+    // 1.1.7.1：按**符号 key** 遍历，不用裸行号 —— 导航项随模式变化，行号会错位。
+    // 聆听模式先走一遍（含聆听室），再切专业模式验工作台与设置。
+    struct RowSpec { const char *key; const char *name; const char *file; };
     const RowSpec rows[] = {
-        { 1, "artists",   "03-artists.png" },
-        { 2, "tracks",    "04-tracks.png" },
-        { 3, "folders",   "05-folders.png" },
-        { 4, "streaming", "06-streaming.png" },
-        { 5, "queue",     "07-queue.png" },
-        { 6, "recent",    "08-recent.png" },
-        { 7, "favorites", "09-favorites.png" },
-        { 8, "playlists", "10-playlists.png" },
-        { 9, "quickstart","11-quickstart.png" },
-        {10, "settings",  "12-settings.png" },
+        { "artists",   "artists",   "03-artists.png" },
+        { "tracks",    "tracks",    "04-tracks.png" },
+        { "folders",   "folders",   "05-folders.png" },
+        { "streaming", "streaming", "06-streaming.png" },
+        { "queue",     "queue",     "07-queue.png" },
+        { "recent",    "recent",    "08-recent.png" },
+        { "favorites", "favorites", "09-favorites.png" },
+        { "playlists", "playlists", "10-playlists.png" },
+        { "room",      "room",      "11-listening-room.png" },
     };
+    RLPSetAppMode(RLPAppModeListening);
+    [wc.sidebar reloadForModeChange];
+    Pump(0.4);
     for (const RowSpec &r : rows) {
-        [wc.sidebar selectRow:r.row];
+        CK([wc.sidebar selectKey:[NSString stringWithUTF8String:r.key]], r.name, @"侧栏没有这个 key");
         Pump(0.7);
         NSViewController *cur = wc.currentContent;
         CK(cur != nil, r.name, @"currentContent 为 nil");
@@ -280,8 +290,16 @@ int RLPRunFunctionalAudit(NSString *outDir) {
              [NSString stringWithUTF8String:r.file]], CGSizeMake(1180, 760));
     }
 
-    // ---- ④ 设置页 10 个页签逐个切换：每个都要有内容 + 截图 ----
-    [wc.sidebar selectRow:10];
+    // ---- ④ 专业模式：工作台 + 设置页 10 个页签 ----
+    RLPSetAppMode(RLPAppModePro);
+    [wc.sidebar reloadForModeChange];
+    Pump(0.5);
+    CK([wc.sidebar selectKey:@"workbench"], "专业模式能进工作台", @"侧栏没有 workbench");
+    Pump(0.7);
+    CK(wc.currentContent != nil, "工作台有内容", @"currentContent 为 nil");
+    Snap(wc.window.contentView, [outDir stringByAppendingPathComponent:@"13-workbench.png"],
+         CGSizeMake(1180, 760));
+    CK([wc.sidebar selectKey:@"settings"], "专业模式能进设置", @"侧栏没有 settings");
     Pump(0.5);
     RLPSettingsViewController *sv = (RLPSettingsViewController *)wc.currentContent;
     if ([sv isKindOfClass:[RLPSettingsViewController class]]) {
@@ -321,7 +339,7 @@ int RLPRunFunctionalAudit(NSString *outDir) {
 
     [RLPTheme setThemeName:@"light"];
     Pump(0.6);
-    [wc.sidebar selectRow:0];
+    [wc.sidebar selectKey:@"albums"];
     Pump(0.9);
     Snap(wc.window.contentView, lightShot, CGSizeMake(1180, 760));
     CK(ShotIsLight(lightShot), "浅色主题下主页渲染为浅色（像素判定）", lightShot);
@@ -335,7 +353,7 @@ int RLPRunFunctionalAudit(NSString *outDir) {
 
     [RLPTheme setThemeName:@"dark"];
     Pump(0.6);
-    [wc.sidebar selectRow:0];
+    [wc.sidebar selectKey:@"albums"];
     Pump(0.9);
     Snap(wc.window.contentView, darkShot, CGSizeMake(1180, 760));
     CK(!ShotIsLight(darkShot), "深色主题下主页渲染为深色（像素判定）", darkShot);

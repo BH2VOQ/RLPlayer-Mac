@@ -41,6 +41,29 @@ NSButton *RLPSymbolButton(NSString *symbol, NSString *tooltip, id _Nullable targ
 /// 单行标签（默认 13px；颜色/字体可后改）。
 NSTextField *RLPLabel(NSString *text, NSFont *font, NSColor *color);
 
+/// ── 界面模式（1.1.7.1）─────────────────────────────────────────────
+/// 聆听模式 = 只想安静听歌的人；专业模式 = 发烧友。
+/// 差别体现在**能做什么**（侧栏项、页内能力），不是换皮。
+/// 这是模式的唯一真相源：UI 各处只读它，不各自存一份 BOOL。
+typedef NS_ENUM(NSInteger, RLPAppMode) {
+    RLPAppModeListening = 0,   // 聆听模式（默认）
+    RLPAppModePro       = 1,   // 专业模式
+};
+extern NSNotificationName const RLPAppModeDidChangeNotification;
+/// 当前模式（持久化在 NSUserDefaults，属 UI 偏好，不是业务真相）。
+RLPAppMode RLPCurrentAppMode(void);
+/// 切换模式（同值不发通知）。会广播 RLPAppModeDidChangeNotification。
+void RLPSetAppMode(RLPAppMode mode);
+/// 模式的人话名字（已翻译）。
+NSString *RLPAppModeName(RLPAppMode mode);
+
+/// 卡片式弹层（NSPopover 封装）：从 anchorView 下方弹出一张卡片，选完即时生效。
+/// 用户要求「全部就在这一栏里用卡片式弹层完成」——不是模态 sheet、不是跳设置页。
+/// content 由调用方搭好（自己负责约束与主题）；返回 popover 以便调用方主动关闭。
+NSPopover *RLPShowCardPopover(NSView *anchorView, NSViewController *content, CGFloat width);
+/// 便捷：把一个普通 NSView 包成弹层内容控制器（高度按约束自适应，给定最小高度）。
+NSViewController *RLPCardController(NSView *card, CGFloat width, CGFloat minHeight);
+
 /// 页面间导航（广播）：专辑详情 / 艺术家详情 / 返回。
 /// 用通知而不是互相持有：页面只发意图，主窗口负责路由与返回栈。
 extern NSNotificationName const RLPOpenAlbumNotification;   // object = album key(NSString)

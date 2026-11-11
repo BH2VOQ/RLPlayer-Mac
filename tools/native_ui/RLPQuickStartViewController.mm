@@ -1,41 +1,62 @@
 // SPDX-FileCopyrightText: 2026 BH2VOQ <https://github.com/BH2VOQ>
 // SPDX-License-Identifier: GPL-3.0-or-later
 //
-// RLPQuickStartViewController.mm — 快速开始（原生首页）
+// RLPQuickStartViewController.mm — 聆听室（1.1.7.1 合并页）
 //
-// 三段的真相源（全部来自既有后端，UI 不发明第二套）：
-//   ① 三张能力卡：音乐库状态来自 /api/lib/roots（有根 ⟹ "目录已就绪"）。
-//   ② 官方推荐预设：**端点与取值都以 rtaweb 为准**
-//        GET  /api/preset/caps            → {"ok":true,"device":{…},"readonly":true,"notes":[…]}
-//        POST /api/preset/apply?profile=  → profile ∈ bitperfect | pcm | dsd | pcm2dsd
-//      （2026-11-11 核实：不是 name=，也没有 conservative/balanced/aggressive/max 这四档 ——
-//       那四档是另一套"决策档位"的内部概念，从未作为 API 取值存在。）
-//   ③ 四个快捷入口：如实跳转到设置页对应页签，不发不存在的通知。
+// 用户要求（逐条对应）：
+//   ① 聆听室与快速开始**合并成一页**（不再是两个模块）。
+//   ② 页内设置**全部用卡片式弹层就地完成**，不跳设置页。
+//   ③ 这一页能直接做：当前设备下拉切换 / 输出（含独占）/ 播放三档 / 听音风格。
+//   ④ 聆听模式里**没有「设置」入口**（要动设置去专业模式）。
+//
+// 面向"只想安静听歌的人"：文案说人话，滤波真名只作副标题小字。
+// 真相源全部来自既有后端，UI 不发明第二套状态：
+//   /api/devices /api/settings /api/filters /api/preset/apply /api/status /api/queue /api/lib/*
 #import "RLPQuickStartViewController.h"
 #import "RLPCoreClient.h"
-#import "RLPSettingsViewController.h"
+#import "RLPListeningRoom.h"
+#import "RLPModels.h"
 #import "RLPSupport.h"
 #import "RLPTheme.h"
 
-/// 预设档位（与 src/engine/preset_profiles.h 的 PresetProfile 规范名一一对应）。
-static NSString *const kPresetKeys[] = { @"bitperfect", @"pcm", @"dsd", @"pcm2dsd" };
-
 @interface RLPQuickStartViewController ()
 @property (nonatomic, strong) NSStackView *stack;
-@property (nonatomic, strong) NSTextField *libDesc;      // 卡 1 的说明文字
-@property (nonatomic, strong) NSButton *libButton;       // 卡 1 的按钮
-@property (nonatomic, strong) NSPopUpButton *presetPopup;
-@property (nonatomic, strong) NSButton *presetApply;
-@property (nonatomic, strong) NSTextField *presetStatus;
-@property (nonatomic, strong) NSTextField *deviceLine;   // 预设卡上的设备摘要
+// 四张卡
+@property (nonatomic, strong) NSView *deviceCard;
+@property (nonatomic, strong) NSView *outputCard;
+@property (nonatomic, strong) NSView *playCard;
+@property (nonatomic, strong) NSView *styleCard;
+@property (nonatomic, strong) NSPopUpButton *devicePopup;
+@property (nonatomic, strong) NSTextField *outputValue;
+@property (nonatomic, strong) NSTextField *playValue;
+@property (nonatomic, strong) NSTextField *styleValue;
+@property (nonatomic, strong) NSTextField *styleSub;
+@property (nonatomic, strong) NSTextField *presetNotes;
+// 正在播放 / 队列 / 专辑
+@property (nonatomic, strong) NSImageView *npCover;
+@property (nonatomic, strong) NSTextField *npTitle;
+@property (nonatomic, strong) NSTextField *npSub;
+@property (nonatomic, strong) NSTextField *npState;
+@property (nonatomic, strong) NSButton *npToggle;
+@property (nonatomic, strong) NSStackView *queueList;
+@property (nonatomic, strong) NSStackView *albumRow;
+@property (nonatomic, strong) NSButton *libButton;
+@property (nonatomic, strong) NSTextField *libDesc;
+// 数据缓存（全部来自后端）
+@property (nonatomic, copy) NSArray<NSDictionary *> *devices;
+@property (nonatomic, copy) NSArray<NSDictionary *> *filters;
+@property (nonatomic, copy) NSDictionary *settings;
+@property (nonatomic, copy) NSString *currentPath;
 @property (nonatomic, assign) BOOL hasRoots;
-/// /api/preset/caps 读到的目标采样率表（用于给用户看清"这台设备能到多少"）
-@property (nonatomic, copy) NSString *capsSummary;
+@property (nonatomic, assign) BOOL playing;
+@property (nonatomic, strong) NSPopover *popover;
+@property (nonatomic, assign) NSUInteger coverSeq;
+@property (nonatomic, strong) NSTimer *poll;
 @end
 
 @implementation RLPQuickStartViewController
 
-- (instancetype)init { return [super initWithTitle:RLPTr(@"快速开始")]; }
+- (instancetype)init { return [super initWithTitle:RLPTr(@"聆听室")]; }
 
 #pragma mark - 骨架
 
@@ -51,11 +72,14 @@ static NSString *const kPresetKeys[] = { @"bitperfect", @"pcm", @"dsd", @"pcm2ds
     self.stack = [[NSStackView alloc] initWithFrame:NSZeroRect];
     self.stack.orientation = NSUserInterfaceLayoutOrientationVertical;
     self.stack.alignment = NSLayoutAttributeLeading;
-    self.stack.spacing = 16;
-    self.stack.edgeInsets = NSEdgeInsetsMake(8, 24, 24, 24);
+    self.stack.spacing = 14;
+    self.stack.edgeInsets = NSEdgeInsetsMake(4, 24, 20, 24);
     self.stack.translatesAutoresizingMaskIntoConstraints = NO;
     scroll.documentView = self.stack;
 
+    // ⚠️ documentView **只钉 leading/trailing/top/width，不钉 bottom**：
+    // 钉了 bottom 会把纵向 stack 拉伸到填满可视高度，卡片之间被撑出大片空白
+    // （本轮离屏截图实测到的真缺陷：标题与首卡之间约 200px 空白）。
     [NSLayoutConstraint activateConstraints:@[
         [scroll.leadingAnchor constraintEqualToAnchor:host.leadingAnchor],
         [scroll.trailingAnchor constraintEqualToAnchor:host.trailingAnchor],
@@ -67,328 +91,922 @@ static NSString *const kPresetKeys[] = { @"bitperfect", @"pcm", @"dsd", @"pcm2ds
         [self.stack.widthAnchor constraintEqualToAnchor:scroll.contentView.widthAnchor],
     ]];
 
-    [self buildCapabilityCards];
-    [self buildPresetCard];
-    [self buildQuickEntries];
+    [self buildFourCards];
+    [self buildNowPlayingAndQueue];
+    [self buildAlbumRow];
+    [self buildLibraryCard];
 }
 
-#pragma mark - ① 三张能力卡
-
-- (NSView *)cardWithBadge:(NSString *)badge
-                    title:(NSString *)title
-                     desc:(NSTextField *)desc
-                   button:(NSButton *)button {
+/// 卡片外壳（圆角 + 边框，颜色在 applyTheme 里重刷）。
+- (NSView *)cardWithIdentifier:(NSString *)ident {
     RLPTheme *t = [RLPTheme current];
-    NSView *card = [[NSView alloc] initWithFrame:NSZeroRect];
-    card.wantsLayer = YES;
-    card.layer.cornerRadius = 12;
-    card.layer.backgroundColor = t.bg2.CGColor;
-    card.layer.borderWidth = 1;
-    card.layer.borderColor = t.line.CGColor;
-    card.translatesAutoresizingMaskIntoConstraints = NO;
-
-    NSTextField *badgeLabel = RLPLabel(badge, t.small, t.mut);
-    badgeLabel.translatesAutoresizingMaskIntoConstraints = NO;
-    NSTextField *titleLabel = RLPLabel(title, [NSFont systemFontOfSize:16 weight:NSFontWeightSemibold], t.text);
-    titleLabel.translatesAutoresizingMaskIntoConstraints = NO;
-    desc.translatesAutoresizingMaskIntoConstraints = NO;
-    desc.maximumNumberOfLines = 2;
-    desc.lineBreakMode = NSLineBreakByWordWrapping;
-    button.translatesAutoresizingMaskIntoConstraints = NO;
-    button.bezelStyle = NSBezelStyleRounded;
-
-    [card addSubview:badgeLabel];
-    [card addSubview:titleLabel];
-    [card addSubview:desc];
-    [card addSubview:button];
-    [NSLayoutConstraint activateConstraints:@[
-        [badgeLabel.leadingAnchor constraintEqualToAnchor:card.leadingAnchor constant:16],
-        [badgeLabel.topAnchor constraintEqualToAnchor:card.topAnchor constant:14],
-        [titleLabel.leadingAnchor constraintEqualToAnchor:card.leadingAnchor constant:16],
-        [titleLabel.trailingAnchor constraintEqualToAnchor:card.trailingAnchor constant:-16],
-        [titleLabel.topAnchor constraintEqualToAnchor:badgeLabel.bottomAnchor constant:8],
-        [desc.leadingAnchor constraintEqualToAnchor:card.leadingAnchor constant:16],
-        [desc.trailingAnchor constraintEqualToAnchor:card.trailingAnchor constant:-16],
-        [desc.topAnchor constraintEqualToAnchor:titleLabel.bottomAnchor constant:8],
-        [button.leadingAnchor constraintEqualToAnchor:card.leadingAnchor constant:16],
-        [button.topAnchor constraintEqualToAnchor:desc.bottomAnchor constant:12],
-        [button.bottomAnchor constraintEqualToAnchor:card.bottomAnchor constant:-14],
-        [card.heightAnchor constraintGreaterThanOrEqualToConstant:170],
-    ]];
-    return card;
+    NSView *c = [[NSView alloc] initWithFrame:NSZeroRect];
+    c.identifier = ident;
+    c.wantsLayer = YES;
+    c.layer.cornerRadius = t.rMd;
+    c.layer.backgroundColor = t.bg2.CGColor;
+    c.layer.borderWidth = 1;
+    c.layer.borderColor = t.line.CGColor;
+    c.translatesAutoresizingMaskIntoConstraints = NO;
+    return c;
 }
 
-- (void)buildCapabilityCards {
-    RLPTheme *t = [RLPTheme current];
+#pragma mark - ① 四张卡
 
+- (void)buildFourCards {
+    RLPTheme *t = [RLPTheme current];
     NSView *row = [[NSView alloc] initWithFrame:NSZeroRect];
     row.translatesAutoresizingMaskIntoConstraints = NO;
 
-    // 卡 1：无损音乐库
-    self.libDesc = RLPLabel(@"", t.small, t.mut);
-    self.libButton = [NSButton buttonWithTitle:RLPTr(@"添加音乐目录")
-                                        target:self
-                                        action:@selector(onLibraryAction:)];
-    NSView *c1 = [self cardWithBadge:@"Hi-Fi Library"
-                               title:RLPTr(@"无损音乐库")
-                                desc:self.libDesc
-                              button:self.libButton];
+    // ---- 卡 1：当前设备（就地下拉切换）----
+    self.deviceCard = [self cardWithIdentifier:@"room.device"];
+    NSTextField *d1 = RLPLabel(RLPTr(@"当前设备"), t.small, t.mut);
+    d1.translatesAutoresizingMaskIntoConstraints = NO;
+    self.devicePopup = [[NSPopUpButton alloc] initWithFrame:NSZeroRect pullsDown:NO];
+    self.devicePopup.translatesAutoresizingMaskIntoConstraints = NO;
+    self.devicePopup.target = self;
+    self.devicePopup.action = @selector(onDeviceChanged:);
+    self.devicePopup.font = t.body;
+    [self.devicePopup addItemWithTitle:RLPTr(@"系统默认")];
+    NSButton *devRefresh = RLPSymbolButton(@"arrow.clockwise", @"重新检测设备", self, @selector(onReloadDevices:));
+    devRefresh.translatesAutoresizingMaskIntoConstraints = NO;
+    [self.deviceCard addSubview:d1];
+    [self.deviceCard addSubview:self.devicePopup];
+    [self.deviceCard addSubview:devRefresh];
 
-    // 卡 2：独占直通引擎
-    NSTextField *d2 = RLPLabel(RLPTr(@"Bit-Perfect 硬件独占 · 自动跟随源采样率 · DoP / SDM 调制器"),
-                               t.small, t.mut);
-    NSButton *b2 = [NSButton buttonWithTitle:RLPTr(@"配置输出设备") target:self
-                                      action:@selector(onGoOutput:)];
-    NSView *c2 = [self cardWithBadge:@"CoreAudio · Hog Mode"
-                               title:RLPTr(@"独占直通引擎") desc:d2 button:b2];
+    // ---- 卡 2：输出（弹层）----
+    self.outputCard = [self cardWithIdentifier:@"room.output"];
+    NSTextField *d2 = RLPLabel(RLPTr(@"输出"), t.small, t.mut);
+    d2.translatesAutoresizingMaskIntoConstraints = NO;
+    self.outputValue = RLPLabel(RLPTr(@"读取中…"), t.body, t.text);
+    self.outputValue.translatesAutoresizingMaskIntoConstraints = NO;
+    NSButton *outBtn = [NSButton buttonWithTitle:@"" target:self action:@selector(onOpenOutput:)];
+    outBtn.bordered = NO;
+    outBtn.translatesAutoresizingMaskIntoConstraints = NO;
+    outBtn.toolTip = RLPTr(@"点击选择输出方式");
+    [self.outputCard addSubview:d2];
+    [self.outputCard addSubview:self.outputValue];
+    [self.outputCard addSubview:outBtn];
 
-    // 卡 3：PEQ 与 OPRA
-    NSTextField *d3 = RLPLabel(RLPTr(@"内置 6200+ 款耳机 OPRA 目标曲线 · 卷积房间校正 IR · 响度分析"),
-                               t.small, t.mut);
-    NSButton *b3 = [NSButton buttonWithTitle:RLPTr(@"打开均衡与校正") target:self
-                                      action:@selector(onGoEq:)];
-    NSView *c3 = [self cardWithBadge:@"DSP · 64-Bit Float"
-                               title:RLPTr(@"20 段 PEQ 与 OPRA") desc:d3 button:b3];
+    // ---- 卡 3：播放（三档，弹层）----
+    self.playCard = [self cardWithIdentifier:@"room.play"];
+    NSTextField *d3 = RLPLabel(RLPTr(@"播放"), t.small, t.mut);
+    d3.translatesAutoresizingMaskIntoConstraints = NO;
+    self.playValue = RLPLabel(RLPTr(@"原音直通"), t.body, t.text);
+    self.playValue.translatesAutoresizingMaskIntoConstraints = NO;
+    NSButton *playBtn = [NSButton buttonWithTitle:@"" target:self action:@selector(onOpenPlay:)];
+    playBtn.bordered = NO;
+    playBtn.translatesAutoresizingMaskIntoConstraints = NO;
+    playBtn.toolTip = RLPTr(@"点击选择播放方式");
+    [self.playCard addSubview:d3];
+    [self.playCard addSubview:self.playValue];
+    [self.playCard addSubview:playBtn];
 
-    for (NSView *c in @[ c1, c2, c3 ]) [row addSubview:c];
+    // ---- 卡 4：听音风格（新增，弹层）----
+    self.styleCard = [self cardWithIdentifier:@"room.style"];
+    NSTextField *d4 = RLPLabel(RLPTr(@"听音风格"), t.small, t.mut);
+    d4.translatesAutoresizingMaskIntoConstraints = NO;
+    self.styleValue = RLPLabel(RLPTr(@"均衡自然"), t.body, t.text);
+    self.styleValue.translatesAutoresizingMaskIntoConstraints = NO;
+    self.styleSub = RLPLabel(@"", t.small, t.mut);
+    self.styleSub.translatesAutoresizingMaskIntoConstraints = NO;
+    NSButton *styleBtn = [NSButton buttonWithTitle:@"" target:self action:@selector(onOpenStyle:)];
+    styleBtn.bordered = NO;
+    styleBtn.translatesAutoresizingMaskIntoConstraints = NO;
+    styleBtn.toolTip = RLPTr(@"点击选择听感风格");
+    [self.styleCard addSubview:d4];
+    [self.styleCard addSubview:self.styleValue];
+    [self.styleCard addSubview:self.styleSub];
+    [self.styleCard addSubview:styleBtn];
+
+    for (NSView *c in @[self.deviceCard, self.outputCard, self.playCard, self.styleCard])
+        [row addSubview:c];
     [self.stack addArrangedSubview:row];
 
-    [NSLayoutConstraint activateConstraints:@[
+    // 四卡等宽一行；每张卡内部：小标题在上、值在下。
+    NSMutableArray *cs = [NSMutableArray array];
+    [cs addObjectsFromArray:@[
         [row.widthAnchor constraintEqualToAnchor:self.stack.widthAnchor constant:-48],
-        [c1.leadingAnchor constraintEqualToAnchor:row.leadingAnchor],
-        [c1.topAnchor constraintEqualToAnchor:row.topAnchor],
-        [c1.bottomAnchor constraintEqualToAnchor:row.bottomAnchor],
-        [c2.leadingAnchor constraintEqualToAnchor:c1.trailingAnchor constant:14],
-        [c2.topAnchor constraintEqualToAnchor:row.topAnchor],
-        [c2.bottomAnchor constraintEqualToAnchor:row.bottomAnchor],
-        [c3.leadingAnchor constraintEqualToAnchor:c2.trailingAnchor constant:14],
-        [c3.trailingAnchor constraintEqualToAnchor:row.trailingAnchor],
-        [c3.topAnchor constraintEqualToAnchor:row.topAnchor],
-        [c3.bottomAnchor constraintEqualToAnchor:row.bottomAnchor],
-        [c2.widthAnchor constraintEqualToAnchor:c1.widthAnchor],
-        [c3.widthAnchor constraintEqualToAnchor:c1.widthAnchor],
+        [row.heightAnchor constraintEqualToConstant:76],
+        [self.deviceCard.leadingAnchor constraintEqualToAnchor:row.leadingAnchor],
+        [self.outputCard.leadingAnchor constraintEqualToAnchor:self.deviceCard.trailingAnchor constant:12],
+        [self.playCard.leadingAnchor constraintEqualToAnchor:self.outputCard.trailingAnchor constant:12],
+        [self.styleCard.leadingAnchor constraintEqualToAnchor:self.playCard.trailingAnchor constant:12],
+        [self.styleCard.trailingAnchor constraintEqualToAnchor:row.trailingAnchor],
+        [self.outputCard.widthAnchor constraintEqualToAnchor:self.deviceCard.widthAnchor],
+        [self.playCard.widthAnchor constraintEqualToAnchor:self.deviceCard.widthAnchor],
+        [self.styleCard.widthAnchor constraintEqualToAnchor:self.deviceCard.widthAnchor],
     ]];
+    for (NSView *c in @[self.deviceCard, self.outputCard, self.playCard, self.styleCard]) {
+        [cs addObjectsFromArray:@[
+            [c.topAnchor constraintEqualToAnchor:row.topAnchor],
+            [c.bottomAnchor constraintEqualToAnchor:row.bottomAnchor],
+        ]];
+    }
+    // 卡内布局
+    [cs addObjectsFromArray:@[
+        [d1.leadingAnchor constraintEqualToAnchor:self.deviceCard.leadingAnchor constant:14],
+        [d1.topAnchor constraintEqualToAnchor:self.deviceCard.topAnchor constant:10],
+        [self.devicePopup.leadingAnchor constraintEqualToAnchor:self.deviceCard.leadingAnchor constant:10],
+        [self.devicePopup.topAnchor constraintEqualToAnchor:d1.bottomAnchor constant:4],
+        [self.devicePopup.trailingAnchor constraintEqualToAnchor:devRefresh.leadingAnchor constant:-4],
+        [devRefresh.trailingAnchor constraintEqualToAnchor:self.deviceCard.trailingAnchor constant:-10],
+        [devRefresh.centerYAnchor constraintEqualToAnchor:self.devicePopup.centerYAnchor],
+        [devRefresh.widthAnchor constraintEqualToConstant:22],
+    ]];
+    NSArray *pairs = @[@[d2, self.outputValue, self.outputCard, outBtn],
+                       @[d3, self.playValue, self.playCard, playBtn],
+                       @[d4, self.styleValue, self.styleCard, styleBtn]];
+    for (NSArray *p in pairs) {
+        NSTextField *lab = p[0], *val = p[1];
+        NSView *card = p[2]; NSButton *btn = p[3];
+        [cs addObjectsFromArray:@[
+            [lab.leadingAnchor constraintEqualToAnchor:card.leadingAnchor constant:14],
+            [lab.topAnchor constraintEqualToAnchor:card.topAnchor constant:10],
+            [val.leadingAnchor constraintEqualToAnchor:card.leadingAnchor constant:14],
+            [val.topAnchor constraintEqualToAnchor:lab.bottomAnchor constant:6],
+            [val.trailingAnchor constraintEqualToAnchor:card.trailingAnchor constant:-14],
+            // 整卡可点（透明按钮盖满），符合"卡片式"心智
+            [btn.leadingAnchor constraintEqualToAnchor:card.leadingAnchor],
+            [btn.trailingAnchor constraintEqualToAnchor:card.trailingAnchor],
+            [btn.topAnchor constraintEqualToAnchor:card.topAnchor],
+            [btn.bottomAnchor constraintEqualToAnchor:card.bottomAnchor],
+        ]];
+    }
+    [cs addObjectsFromArray:@[
+        [self.styleSub.leadingAnchor constraintEqualToAnchor:self.styleCard.leadingAnchor constant:14],
+        [self.styleSub.trailingAnchor constraintEqualToAnchor:self.styleCard.trailingAnchor constant:-14],
+        [self.styleSub.topAnchor constraintEqualToAnchor:self.styleValue.bottomAnchor constant:2],
+    ]];
+    [NSLayoutConstraint activateConstraints:cs];
+
+    // 预设说明（后端 notes 照实显示）
+    self.presetNotes = RLPLabel(@"", t.small, t.mut);
+    self.presetNotes.translatesAutoresizingMaskIntoConstraints = NO;
+    self.presetNotes.maximumNumberOfLines = 2;
+    self.presetNotes.lineBreakMode = NSLineBreakByWordWrapping;
+    [self.stack addArrangedSubview:self.presetNotes];
+    [[self.presetNotes.widthAnchor constraintEqualToAnchor:self.stack.widthAnchor constant:-48] setActive:YES];
 }
 
-#pragma mark - ② 官方推荐预设
+#pragma mark - ② 正在播放 + 队列预览
 
-- (void)buildPresetCard {
+- (void)buildNowPlayingAndQueue {
     RLPTheme *t = [RLPTheme current];
-    NSView *card = [[NSView alloc] initWithFrame:NSZeroRect];
-    card.wantsLayer = YES;
-    card.layer.cornerRadius = 12;
-    card.layer.backgroundColor = t.bg2.CGColor;
-    card.layer.borderWidth = 1;
-    card.layer.borderColor = t.line.CGColor;
-    card.translatesAutoresizingMaskIntoConstraints = NO;
-
-    NSTextField *title = RLPLabel(RLPTr(@"官方推荐预设"),
-        [NSFont systemFontOfSize:14 weight:NSFontWeightSemibold], t.text);
-    title.translatesAutoresizingMaskIntoConstraints = NO;
-    NSTextField *desc = RLPLabel(RLPTr(@"一键把输出链路调到合适档位；改动会写入设置并立即生效"),
-        t.small, t.mut);
-    desc.translatesAutoresizingMaskIntoConstraints = NO;
-
-    self.presetPopup = [[NSPopUpButton alloc] initWithFrame:NSZeroRect pullsDown:NO];
-    // 四个规范名，与 preset_profiles.h 一一对应（顺序也照它的枚举）
-    [self.presetPopup addItemWithTitle:RLPTr(@"原音直通（PCM 直出 / DSD 直通）")];
-    [self.presetPopup addItemWithTitle:RLPTr(@"PCM → PCM 升频")];
-    [self.presetPopup addItemWithTitle:RLPTr(@"DSD → DSD 升频")];
-    [self.presetPopup addItemWithTitle:RLPTr(@"PCM → DSD")];
-    self.presetPopup.translatesAutoresizingMaskIntoConstraints = NO;
-    [[self.presetPopup.widthAnchor constraintEqualToConstant:260] setActive:YES];
-
-    self.presetApply = [NSButton buttonWithTitle:RLPTr(@"一键应用") target:self
-                                          action:@selector(onApplyPreset:)];
-    self.presetApply.bezelStyle = NSBezelStyleRounded;
-    self.presetApply.translatesAutoresizingMaskIntoConstraints = NO;
-
-    self.presetStatus = RLPLabel(@"", t.small, t.mut);
-    self.presetStatus.translatesAutoresizingMaskIntoConstraints = NO;
-    self.presetStatus.maximumNumberOfLines = 2;
-    self.presetStatus.lineBreakMode = NSLineBreakByWordWrapping;
-
-    self.deviceLine = RLPLabel(@"", t.small, t.mut);
-    self.deviceLine.translatesAutoresizingMaskIntoConstraints = NO;
-    self.deviceLine.maximumNumberOfLines = 2;
-    self.deviceLine.lineBreakMode = NSLineBreakByWordWrapping;
-
-    for (NSView *v in @[ title, desc, self.presetPopup, self.presetApply,
-                         self.deviceLine, self.presetStatus ])
-        [card addSubview:v];
-
-    [self.stack addArrangedSubview:card];
-    [NSLayoutConstraint activateConstraints:@[
-        [card.widthAnchor constraintEqualToAnchor:self.stack.widthAnchor constant:-48],
-        [title.leadingAnchor constraintEqualToAnchor:card.leadingAnchor constant:16],
-        [title.topAnchor constraintEqualToAnchor:card.topAnchor constant:16],
-        [desc.leadingAnchor constraintEqualToAnchor:title.leadingAnchor],
-        [desc.trailingAnchor constraintEqualToAnchor:card.trailingAnchor constant:-16],
-        [desc.topAnchor constraintEqualToAnchor:title.bottomAnchor constant:4],
-        [self.presetPopup.leadingAnchor constraintEqualToAnchor:title.leadingAnchor],
-        [self.presetPopup.topAnchor constraintEqualToAnchor:desc.bottomAnchor constant:12],
-        [self.presetApply.leadingAnchor constraintEqualToAnchor:self.presetPopup.trailingAnchor constant:10],
-        [self.presetApply.centerYAnchor constraintEqualToAnchor:self.presetPopup.centerYAnchor],
-        [self.deviceLine.leadingAnchor constraintEqualToAnchor:title.leadingAnchor],
-        [self.deviceLine.trailingAnchor constraintEqualToAnchor:card.trailingAnchor constant:-16],
-        [self.deviceLine.topAnchor constraintEqualToAnchor:self.presetPopup.bottomAnchor constant:10],
-        [self.presetStatus.leadingAnchor constraintEqualToAnchor:title.leadingAnchor],
-        [self.presetStatus.trailingAnchor constraintEqualToAnchor:card.trailingAnchor constant:-16],
-        [self.presetStatus.topAnchor constraintEqualToAnchor:self.deviceLine.bottomAnchor constant:6],
-        [self.presetStatus.bottomAnchor constraintEqualToAnchor:card.bottomAnchor constant:-16],
-    ]];
-}
-
-#pragma mark - ③ 四个快捷入口
-
-- (void)buildQuickEntries {
-    RLPTheme *t = [RLPTheme current];
-    NSArray<NSArray<NSString *> *> *items = @[
-        @[ @"folder",        RLPTr(@"设置文件夹位置"),   @"adv" ],
-        @[ @"cloud",         RLPTr(@"挂载流媒体服务"),   @"stream" ],
-        @[ @"sparkles",      RLPTr(@"AI 资料与封面补全"), @"meta" ],
-        @[ @"mic",           RLPTr(@"音频输入采集"),     @"in" ],
-    ];
-    NSStackView *row = [[NSStackView alloc] init];
-    row.orientation = NSUserInterfaceLayoutOrientationHorizontal;
-    row.spacing = 10;
-    row.distribution = NSStackViewDistributionFillEqually;
+    NSView *row = [[NSView alloc] initWithFrame:NSZeroRect];
     row.translatesAutoresizingMaskIntoConstraints = NO;
 
-    for (NSArray<NSString *> *it in items) {
-        NSButton *b = [NSButton buttonWithTitle:it[1] target:self action:@selector(onQuickEntry:)];
-        b.bezelStyle = NSBezelStyleRounded;
-        b.image = [NSImage imageWithSystemSymbolName:it[0] accessibilityDescription:it[1]];
-        b.imagePosition = NSImageLeading;
-        b.identifier = it[2];   // 目标页签 key
-        b.font = t.body;
-        [row addArrangedSubview:b];
-    }
+    NSView *np = [self cardWithIdentifier:@"room.nowplaying"];
+    self.npCover = [[NSImageView alloc] initWithFrame:NSZeroRect];
+    self.npCover.imageScaling = NSImageScaleProportionallyUpOrDown;
+    self.npCover.wantsLayer = YES;
+    self.npCover.layer.cornerRadius = t.rSm;
+    self.npCover.layer.masksToBounds = YES;
+    self.npCover.layer.backgroundColor = t.bg3.CGColor;
+    self.npCover.translatesAutoresizingMaskIntoConstraints = NO;
+    self.npState = RLPLabel(RLPTr(@"未播放"), t.small, t.mut);
+    self.npState.translatesAutoresizingMaskIntoConstraints = NO;
+    self.npTitle = RLPLabel(RLPTr(@"还没有在播放的音乐"), [NSFont systemFontOfSize:18 weight:NSFontWeightSemibold], t.text);
+    self.npTitle.translatesAutoresizingMaskIntoConstraints = NO;
+    self.npTitle.maximumNumberOfLines = 2;
+    self.npTitle.lineBreakMode = NSLineBreakByWordWrapping;
+    self.npSub = RLPLabel(RLPTr(@"从下面的专辑挑一张开始"), t.small, t.mut);
+    self.npSub.translatesAutoresizingMaskIntoConstraints = NO;
+    self.npToggle = [NSButton buttonWithTitle:RLPTr(@"继续播放") target:self action:@selector(onTogglePlay:)];
+    self.npToggle.bezelStyle = NSBezelStyleRounded;
+    self.npToggle.translatesAutoresizingMaskIntoConstraints = NO;
+    NSButton *npOpen = [NSButton buttonWithTitle:RLPTr(@"打开曲目详情") target:self action:@selector(onOpenNowPlaying:)];
+    npOpen.bezelStyle = NSBezelStyleRounded;
+    npOpen.translatesAutoresizingMaskIntoConstraints = NO;
+    for (NSView *v in @[self.npCover, self.npState, self.npTitle, self.npSub, self.npToggle, npOpen])
+        [np addSubview:v];
+
+    NSView *qcard = [self cardWithIdentifier:@"room.queue"];
+    NSTextField *qt = RLPLabel(RLPTr(@"播放队列"), [NSFont systemFontOfSize:14 weight:NSFontWeightSemibold], t.text);
+    qt.translatesAutoresizingMaskIntoConstraints = NO;
+    NSButton *qAll = [NSButton buttonWithTitle:RLPTr(@"查看全部") target:self action:@selector(onOpenQueue:)];
+    qAll.bezelStyle = NSBezelStyleRounded;
+    qAll.translatesAutoresizingMaskIntoConstraints = NO;
+    self.queueList = [[NSStackView alloc] init];
+    self.queueList.orientation = NSUserInterfaceLayoutOrientationVertical;
+    self.queueList.alignment = NSLayoutAttributeLeading;
+    self.queueList.spacing = 6;
+    self.queueList.translatesAutoresizingMaskIntoConstraints = NO;
+    for (NSView *v in @[qt, qAll, self.queueList]) [qcard addSubview:v];
+
+    [row addSubview:np];
+    [row addSubview:qcard];
     [self.stack addArrangedSubview:row];
+
     [NSLayoutConstraint activateConstraints:@[
         [row.widthAnchor constraintEqualToAnchor:self.stack.widthAnchor constant:-48],
+        [row.heightAnchor constraintEqualToConstant:210],
+        [np.leadingAnchor constraintEqualToAnchor:row.leadingAnchor],
+        [np.topAnchor constraintEqualToAnchor:row.topAnchor],
+        [np.bottomAnchor constraintEqualToAnchor:row.bottomAnchor],
+        [qcard.leadingAnchor constraintEqualToAnchor:np.trailingAnchor constant:12],
+        [qcard.trailingAnchor constraintEqualToAnchor:row.trailingAnchor],
+        [qcard.topAnchor constraintEqualToAnchor:row.topAnchor],
+        [qcard.bottomAnchor constraintEqualToAnchor:row.bottomAnchor],
+        [qcard.widthAnchor constraintEqualToConstant:300],
+
+        [self.npCover.leadingAnchor constraintEqualToAnchor:np.leadingAnchor constant:16],
+        [self.npCover.centerYAnchor constraintEqualToAnchor:np.centerYAnchor],
+        [self.npCover.widthAnchor constraintEqualToConstant:170],
+        [self.npCover.heightAnchor constraintEqualToConstant:170],
+        [self.npState.leadingAnchor constraintEqualToAnchor:self.npCover.trailingAnchor constant:16],
+        [self.npState.topAnchor constraintEqualToAnchor:np.topAnchor constant:24],
+        [self.npTitle.leadingAnchor constraintEqualToAnchor:self.npState.leadingAnchor],
+        [self.npTitle.trailingAnchor constraintEqualToAnchor:np.trailingAnchor constant:-16],
+        [self.npTitle.topAnchor constraintEqualToAnchor:self.npState.bottomAnchor constant:6],
+        [self.npSub.leadingAnchor constraintEqualToAnchor:self.npState.leadingAnchor],
+        [self.npSub.trailingAnchor constraintEqualToAnchor:np.trailingAnchor constant:-16],
+        [self.npSub.topAnchor constraintEqualToAnchor:self.npTitle.bottomAnchor constant:6],
+        [self.npToggle.leadingAnchor constraintEqualToAnchor:self.npState.leadingAnchor],
+        [self.npToggle.topAnchor constraintEqualToAnchor:self.npSub.bottomAnchor constant:14],
+        [npOpen.leadingAnchor constraintEqualToAnchor:self.npToggle.trailingAnchor constant:8],
+        [npOpen.centerYAnchor constraintEqualToAnchor:self.npToggle.centerYAnchor],
+
+        [qt.leadingAnchor constraintEqualToAnchor:qcard.leadingAnchor constant:14],
+        [qt.topAnchor constraintEqualToAnchor:qcard.topAnchor constant:14],
+        [qAll.trailingAnchor constraintEqualToAnchor:qcard.trailingAnchor constant:-14],
+        [qAll.centerYAnchor constraintEqualToAnchor:qt.centerYAnchor],
+        [self.queueList.leadingAnchor constraintEqualToAnchor:qcard.leadingAnchor constant:14],
+        [self.queueList.trailingAnchor constraintEqualToAnchor:qcard.trailingAnchor constant:-14],
+        [self.queueList.topAnchor constraintEqualToAnchor:qt.bottomAnchor constant:10],
     ]];
 }
 
-#pragma mark - 动作
+#pragma mark - ③ 专辑行
 
-- (void)onLibraryAction:(id)sender {
-    if (self.hasRoots) {
-        RLPPostJSON(@"/api/lib/scan?full=1", nil);
-        RLPToast(RLPTr(@"已开始全量重扫"));
-    } else {
-        [self openSettingsTab:@"adv"];
+- (void)buildAlbumRow {
+    RLPTheme *t = [RLPTheme current];
+    NSView *head = [[NSView alloc] initWithFrame:NSZeroRect];
+    head.translatesAutoresizingMaskIntoConstraints = NO;
+    NSTextField *at = RLPLabel(RLPTr(@"专辑"), [NSFont systemFontOfSize:14 weight:NSFontWeightSemibold], t.text);
+    at.translatesAutoresizingMaskIntoConstraints = NO;
+    NSButton *openLib = [NSButton buttonWithTitle:RLPTr(@"打开音乐库") target:self action:@selector(onOpenAlbums:)];
+    openLib.bezelStyle = NSBezelStyleRounded;
+    openLib.translatesAutoresizingMaskIntoConstraints = NO;
+    [head addSubview:at];
+    [head addSubview:openLib];
+    [self.stack addArrangedSubview:head];
+
+    self.albumRow = [[NSStackView alloc] init];
+    self.albumRow.orientation = NSUserInterfaceLayoutOrientationHorizontal;
+    self.albumRow.spacing = 12;
+    self.albumRow.translatesAutoresizingMaskIntoConstraints = NO;
+    [self.stack addArrangedSubview:self.albumRow];
+
+    [NSLayoutConstraint activateConstraints:@[
+        [head.widthAnchor constraintEqualToAnchor:self.stack.widthAnchor constant:-48],
+        [head.heightAnchor constraintEqualToConstant:28],
+        [at.leadingAnchor constraintEqualToAnchor:head.leadingAnchor],
+        [at.centerYAnchor constraintEqualToAnchor:head.centerYAnchor],
+        [openLib.trailingAnchor constraintEqualToAnchor:head.trailingAnchor],
+        [openLib.centerYAnchor constraintEqualToAnchor:head.centerYAnchor],
+        [self.albumRow.widthAnchor constraintEqualToAnchor:self.stack.widthAnchor constant:-48],
+        [self.albumRow.heightAnchor constraintEqualToConstant:120],
+    ]];
+}
+
+#pragma mark - ④ 音乐库（就地弹层，不跳设置）
+
+- (void)buildLibraryCard {
+    RLPTheme *t = [RLPTheme current];
+    NSView *c = [self cardWithIdentifier:@"room.library"];
+    self.libDesc = RLPLabel(@"", t.small, t.mut);
+    self.libDesc.translatesAutoresizingMaskIntoConstraints = NO;
+    self.libDesc.maximumNumberOfLines = 2;
+    self.libDesc.lineBreakMode = NSLineBreakByWordWrapping;
+    self.libButton = [NSButton buttonWithTitle:RLPTr(@"添加音乐目录") target:self action:@selector(onLibraryAction:)];
+    self.libButton.bezelStyle = NSBezelStyleRounded;
+    self.libButton.translatesAutoresizingMaskIntoConstraints = NO;
+    // 更多入口：功能不能删，但聆听室里不放「设置」字样。
+    NSButton *more = [NSButton buttonWithTitle:RLPTr(@"更多") target:self action:@selector(onOpenMore:)];
+    more.bezelStyle = NSBezelStyleRounded;
+    more.translatesAutoresizingMaskIntoConstraints = NO;
+    for (NSView *v in @[self.libDesc, self.libButton, more]) [c addSubview:v];
+    [self.stack addArrangedSubview:c];
+    [NSLayoutConstraint activateConstraints:@[
+        [c.widthAnchor constraintEqualToAnchor:self.stack.widthAnchor constant:-48],
+        [c.heightAnchor constraintEqualToConstant:64],
+        [self.libDesc.leadingAnchor constraintEqualToAnchor:c.leadingAnchor constant:14],
+        [self.libDesc.topAnchor constraintEqualToAnchor:c.topAnchor constant:12],
+        [self.libDesc.trailingAnchor constraintEqualToAnchor:more.leadingAnchor constant:-12],
+        [self.libButton.leadingAnchor constraintEqualToAnchor:c.leadingAnchor constant:14],
+        [self.libButton.topAnchor constraintEqualToAnchor:self.libDesc.bottomAnchor constant:6],
+        [more.trailingAnchor constraintEqualToAnchor:c.trailingAnchor constant:-14],
+        [more.centerYAnchor constraintEqualToAnchor:c.centerYAnchor],
+        [more.widthAnchor constraintEqualToConstant:72],
+    ]];
+}
+
+
+#pragma mark - 卡片式弹层（就地改设置，不跳设置页）
+
+/// 弹层里的一个可选行（标题 + 说明 + 勾选态）。
+- (NSButton *)popRowWithTitle:(NSString *)title note:(NSString *)note on:(BOOL)on action:(SEL)action ident:(NSString *)ident {
+    RLPTheme *t = [RLPTheme current];
+    NSButton *b = [NSButton buttonWithTitle:title target:self action:action];
+    b.bordered = NO;
+    b.identifier = ident;
+    b.alignment = NSTextAlignmentLeft;
+    b.font = [NSFont systemFontOfSize:13 weight:on ? NSFontWeightSemibold : NSFontWeightRegular];
+    b.contentTintColor = on ? t.accentText : t.text;
+    b.translatesAutoresizingMaskIntoConstraints = NO;
+    b.toolTip = note;
+    return b;
+}
+
+- (void)showPopoverFrom:(NSView *)anchor withCard:(NSView *)card width:(CGFloat)w minH:(CGFloat)h {
+    [self.popover close];
+    NSViewController *vc = RLPCardController(card, w, h);
+    self.popover = RLPShowCardPopover(anchor, vc, w);
+}
+
+/// 弹层内容骨架：标题 + 说明 + 纵向选项容器。
+- (NSStackView *)popStackWithTitle:(NSString *)title note:(NSString *)note {
+    RLPTheme *t = [RLPTheme current];
+    NSStackView *s = [[NSStackView alloc] init];
+    s.orientation = NSUserInterfaceLayoutOrientationVertical;
+    s.alignment = NSLayoutAttributeLeading;
+    s.spacing = 8;
+    s.translatesAutoresizingMaskIntoConstraints = NO;
+    NSTextField *ti = RLPLabel(title, [NSFont systemFontOfSize:14 weight:NSFontWeightSemibold], t.text);
+    [s addArrangedSubview:ti];
+    if (note.length) {
+        NSTextField *no = RLPLabel(note, t.small, t.mut);
+        no.maximumNumberOfLines = 0;
+        no.lineBreakMode = NSLineBreakByWordWrapping;
+        no.preferredMaxLayoutWidth = 330;
+        [s addArrangedSubview:no];
     }
+    return s;
 }
 
-- (void)onGoOutput:(id)sender { [self openSettingsTab:@"out"]; }
-- (void)onGoEq:(id)sender { [self openSettingsTab:@"eq"]; }
+#pragma mark 输出弹层
 
-- (void)onQuickEntry:(NSButton *)sender {
-    [self openSettingsTab:sender.identifier];
+- (void)onOpenOutput:(id)sender {
+    NSString *bk = [self.settings[@"backend"] isKindOfClass:[NSString class]] ? self.settings[@"backend"] : @"coreaudio";
+    const BOOL hog = [self str:@"hogexcl" def:@"1"].boolValue;
+    NSStackView *s = [self popStackWithTitle:RLPTr(@"输出方式")
+        note:RLPTr(@"独占播放音质最稳；共享播放和其它 App 一起出声。")];
+    NSArray *opts = @[
+        @[@"coreaudio", RLPTr(@"本机 · 独占播放"), RLPTr(@"独占设备，音质最稳（推荐）")],
+        @[@"coreaudio-shared", RLPTr(@"本机 · 共享播放"), RLPTr(@"和其它 App 一起出声，兼容性最好")],
+        @[@"upnp", RLPTr(@"投放到局域网设备"), RLPTr(@"投到支持 UPnP/DLNA 的播放器")],
+    ];
+    for (NSArray *o in opts) {
+        NSButton *b = [self popRowWithTitle:o[1] note:o[2] on:[bk isEqualToString:o[0]]
+                                     action:@selector(onPickBackend:) ident:o[0]];
+        [s addArrangedSubview:b];
+        [[b.widthAnchor constraintEqualToConstant:330] setActive:YES];
+        NSTextField *sub = RLPLabel(o[2], [RLPTheme current].small, [RLPTheme current].mut);
+        [s addArrangedSubview:sub];
+        [[sub.widthAnchor constraintEqualToConstant:330] setActive:YES];
+    }
+    // 严格独占：副作用必须如实写清（macOS Hog 机制限制，实测确认）
+    NSButton *hogBtn = [NSButton checkboxWithTitle:RLPTr(@"严格独占（抢 Hog Mode）") target:self action:@selector(onToggleHog:)];
+    hogBtn.state = hog ? NSControlStateValueOn : NSControlStateValueOff;
+    hogBtn.translatesAutoresizingMaskIntoConstraints = NO;
+    [s addArrangedSubview:hogBtn];
+    NSTextField *hogNote = RLPLabel(RLPTr(@"开启后系统音量条与音量键会失效，只能用本程序的音量条；它不能阻止其它 App 播放。"),
+        [RLPTheme current].small, [RLPTheme current].warn);
+    hogNote.maximumNumberOfLines = 0;
+    hogNote.lineBreakMode = NSLineBreakByWordWrapping;
+    hogNote.preferredMaxLayoutWidth = 330;
+    [s addArrangedSubview:hogNote];
+    [[hogNote.widthAnchor constraintEqualToConstant:330] setActive:YES];
+    [self showPopoverFrom:self.outputCard withCard:s width:360 minH:280];
 }
 
-/// 跳到设置页对应页签：走通知（主窗口负责切到设置行并选中页签），
-/// 页面之间不互相持有实例。
-- (void)openSettingsTab:(NSString *)key {
-    if (!key.length) return;
-    [[NSNotificationCenter defaultCenter] postNotificationName:@"RLPOpenSettingsPaneNotification"
-                                                        object:key];
+- (void)onPickBackend:(NSButton *)sender {
+    [self postSettings:@{@"backend": sender.identifier}];
+    [self.popover close];
+}
+- (void)onToggleHog:(NSButton *)sender {
+    [self postSettings:@{@"hogexcl": (sender.state == NSControlStateValueOn ? @"1" : @"0")}];
 }
 
-- (void)onApplyPreset:(id)sender {
-    const NSInteger idx = self.presetPopup.indexOfSelectedItem;
-    if (idx < 0 || idx > 3) return;
-    NSString *profile = kPresetKeys[idx];
-    self.presetApply.enabled = NO;
-    self.presetStatus.stringValue = RLPTr(@"正在应用…");
+#pragma mark 播放弹层（三档）
 
+- (void)onOpenPlay:(id)sender {
+    const BOOL isDsd = RLPPathIsDsd(self.currentPath);
+    NSStackView *s = [self popStackWithTitle:RLPTr(@"播放方式")
+        note:RLPTr(@"不确定就选「原音直通」：文件是什么就播什么。")];
+    NSArray *opts = @[
+        @[@0, RLPTr(@"原音直通"), RLPTr(@"文件是什么就播什么，不做任何加工")],
+        @[@1, RLPTr(@"PCM 升频"), RLPTr(@"把普通高清音源提升到设备支持的更高采样率")],
+        @[@2, RLPTr(@"DSD 升频"), RLPTr(@"转换成 DSD 信号输出，声音更绵密（需要设备支持 DoP）")],
+    ];
+    for (NSArray *o in opts) {
+        NSButton *b = [self popRowWithTitle:o[1] note:o[2] on:NO action:@selector(onPickPlayMode:) ident:[o[0] stringValue]];
+        [s addArrangedSubview:b];
+        [[b.widthAnchor constraintEqualToConstant:330] setActive:YES];
+        NSTextField *sub = RLPLabel(o[2], [RLPTheme current].small, [RLPTheme current].mut);
+        sub.maximumNumberOfLines = 0;
+        sub.lineBreakMode = NSLineBreakByWordWrapping;
+        sub.preferredMaxLayoutWidth = 330;
+        [s addArrangedSubview:sub];
+        [[sub.widthAnchor constraintEqualToConstant:330] setActive:YES];
+    }
+    NSTextField *dsdNote = RLPLabel(isDsd
+        ? RLPTr(@"当前是 DSD 文件：DSD 升频会走 DSD→DSD。")
+        : RLPTr(@"播放 DSD 文件时，DSD 升频会自动改用 DSD→DSD。"),
+        [RLPTheme current].small, [RLPTheme current].mut);
+    dsdNote.maximumNumberOfLines = 0;
+    dsdNote.lineBreakMode = NSLineBreakByWordWrapping;
+    dsdNote.preferredMaxLayoutWidth = 330;
+    [s addArrangedSubview:dsdNote];
+    [[dsdNote.widthAnchor constraintEqualToConstant:330] setActive:YES];
+    [self showPopoverFrom:self.playCard withCard:s width:360 minH:260];
+}
+
+- (void)onPickPlayMode:(NSButton *)sender {
+    const RLPPlayMode3 mode = (RLPPlayMode3)sender.identifier.integerValue;
+    NSString *profile = RLPProfileForPlayMode(mode, RLPPathIsDsd(self.currentPath));
+    [self.popover close];
+    self.playValue.stringValue = (mode == RLPPlayMode3Direct ? RLPTr(@"原音直通")
+                                 : mode == RLPPlayMode3Pcm ? RLPTr(@"PCM 升频") : RLPTr(@"DSD 升频"));
+    self.presetNotes.stringValue = RLPTr(@"正在应用…");
     NSString *path = [NSString stringWithFormat:@"/api/preset/apply?profile=%@", RLPEnc(profile)];
     __weak __typeof__(self) weakSelf = self;
     [[RLPCoreClient shared] postJSON:path body:nil completion:^(NSDictionary * _Nullable json) {
         __typeof__(self) self_ = weakSelf;
         if (!self_) return;
-        self_.presetApply.enabled = YES;
         if (json && [json[@"ok"] boolValue]) {
-            // notes 是后端给的决策说明（为什么这么设），照实显示 —— 不自己编"已优化"。
+            // notes 是后端给的决策说明（含降级原因），照实显示，不自己编"已优化"。
             NSArray *notes = [json[@"notes"] isKindOfClass:[NSArray class]] ? json[@"notes"] : @[];
-            NSString *noteText = notes.count ? [notes componentsJoinedByString:@"；"] : @"";
-            self_.presetStatus.stringValue = noteText.length
-                ? [NSString stringWithFormat:@"%@ %@", RLPTr(@"已应用 ·"), noteText]
-                : RLPTr(@"已应用");
-            RLPToast(RLPTr(@"预设已应用"));
+            self_.presetNotes.stringValue = notes.count ? [notes componentsJoinedByString:@"；"] : RLPTr(@"已应用");
+            RLPToast(RLPTr(@"已应用"));
+            [self_ reloadSettings];
         } else {
-            NSString *err = [json[@"error"] isKindOfClass:[NSString class]] ? json[@"error"]
-                                                                          : RLPTr(@"应用失败");
-            self_.presetStatus.stringValue = err;
+            NSString *err = [json[@"error"] isKindOfClass:[NSString class]] ? json[@"error"] : RLPTr(@"应用失败");
+            self_.presetNotes.stringValue = err;
             RLPToast(err);
         }
     }];
 }
 
-#pragma mark - 数据
+#pragma mark 听音风格弹层
 
-- (void)activate { [self reloadData]; }
+- (void)onOpenStyle:(id)sender {
+    NSStackView *s = [self popStackWithTitle:RLPTr(@"听音风格")
+        note:RLPTr(@"不用懂滤波：往温和走声音更柔顺，往锐利走更清亮。")];
+    if (!self.filters.count) {
+        NSTextField *na = RLPLabel(RLPTr(@"滤波列表读取失败，请稍后重试"), [RLPTheme current].small, [RLPTheme current].warn);
+        [s addArrangedSubview:na];
+        [[na.widthAnchor constraintEqualToConstant:330] setActive:YES];
+    }
+    NSString *curFilter = [self str:@"filter" def:@""];
+    for (NSInteger i = RLPToneStyleSharp; i <= RLPToneStyleWarm; ++i) {
+        NSString *name = RLPFilterForToneStyle((RLPToneStyle)i, self.filters);
+        NSButton *b = [self popRowWithTitle:RLPToneStyleName((RLPToneStyle)i) note:name ?: @""
+                                          on:[curFilter isEqualToString:name ?: @""]
+                                      action:@selector(onPickStyle:) ident:[@(i) stringValue]];
+        [s addArrangedSubview:b];
+        [[b.widthAnchor constraintEqualToConstant:330] setActive:YES];
+        // 滤波真名只作副标题小字：让人不用懂滤波也能挑
+        NSTextField *sub = RLPLabel(name ?: RLPTr(@"无可用滤波"), [RLPTheme current].small, [RLPTheme current].mut);
+        [s addArrangedSubview:sub];
+        [[sub.widthAnchor constraintEqualToConstant:330] setActive:YES];
+    }
+    [self showPopoverFrom:self.styleCard withCard:s width:360 minH:230];
+}
 
-- (void)reloadData {
-    if (![RLPCoreClient shared].started) {
-        self.presetStatus.stringValue = RLPTr(@"核心未启动");
+- (void)onPickStyle:(NSButton *)sender {
+    const RLPToneStyle st = (RLPToneStyle)sender.identifier.integerValue;
+    NSString *name = RLPFilterForToneStyle(st, self.filters);
+    if (!name.length) { RLPToast(RLPTr(@"没有可用滤波")); return; }
+    // forNx 项要写 filterNx 键，写错键会被后端静默丢弃。
+    NSString *key = RLPFilterUsesNxKey(name, self.filters) ? @"filterNx" : @"filter";
+    [self postSettings:@{key: name}];
+    [self.popover close];
+}
+
+#pragma mark 更多入口（功能不删，但不放「设置」字样）
+
+- (void)onOpenMore:(id)sender {
+    NSStackView *s = [self popStackWithTitle:RLPTr(@"更多")
+        note:RLPTr(@"流媒体在这里挂载；AI 资料与音频输入的开关在专业模式。")];
+    NSButton *stream = [self popRowWithTitle:RLPTr(@"挂载流媒体服务") note:RLPTr(@"打开流媒体页") on:NO
+                                       action:@selector(onOpenStreaming:) ident:@"more.stream"];
+    [s addArrangedSubview:stream];
+    [[stream.widthAnchor constraintEqualToConstant:330] setActive:YES];
+    NSTextField *ro = RLPLabel(RLPTr(@"AI 资料补全与音频输入采集：到专业模式调整。"),
+        [RLPTheme current].small, [RLPTheme current].mut);
+    ro.maximumNumberOfLines = 0;
+    ro.lineBreakMode = NSLineBreakByWordWrapping;
+    ro.preferredMaxLayoutWidth = 330;
+    [s addArrangedSubview:ro];
+    [[ro.widthAnchor constraintEqualToConstant:330] setActive:YES];
+    [self showPopoverFrom:self.libButton withCard:s width:360 minH:150];
+}
+
+
+#pragma mark - 动作
+
+- (NSString *)str:(NSString *)key def:(NSString *)def {
+    id v = self.settings[key];
+    if ([v isKindOfClass:[NSString class]]) return (NSString *)v;
+    if ([v isKindOfClass:[NSNumber class]]) return [(NSNumber *)v stringValue];
+    return def;
+}
+
+/// 写设置：一次 POST 多个键，然后**读回校验**（不维护第二套状态）。
+- (void)postSettings:(NSDictionary<NSString *, NSString *> *)kv {
+    if (!kv.count) return;
+    NSMutableArray *parts = [NSMutableArray array];
+    for (NSString *k in kv) [parts addObject:[NSString stringWithFormat:@"%@=%@", k, RLPEnc(kv[k])]];
+    NSString *body = [parts componentsJoinedByString:@"&"];
+    __weak __typeof__(self) weakSelf = self;
+    [[RLPCoreClient shared] postJSON:@"/api/settings" body:body completion:^(NSDictionary * _Nullable json) {
+        __typeof__(self) self_ = weakSelf;
+        if (!self_) return;
+        if (json && [json[@"ok"] boolValue]) {
+            RLPToast(RLPTr(@"已生效"));
+            [self_ reloadSettings];
+        } else {
+            RLPToast(RLPTr(@"保存失败"));
+        }
+    }];
+}
+
+- (void)onDeviceChanged:(NSPopUpButton *)sender {
+    const NSInteger idx = sender.indexOfSelectedItem;
+    if (idx < 0) return;
+    // 第 0 项是"系统默认"（device 空串）；其余对应 devices[idx-1]
+    NSString *devId = @"";
+    if (idx > 0 && (idx - 1) < (NSInteger)self.devices.count) {
+        NSDictionary *d = self.devices[idx - 1];
+        devId = [d[@"id"] isKindOfClass:[NSString class]] ? d[@"id"] : @"";
+    }
+    [self postSettings:@{@"device": devId}];
+}
+
+- (void)onReloadDevices:(id)sender { [self reloadDevices]; RLPToast(RLPTr(@"已重新检测设备")); }
+
+- (void)onTogglePlay:(id)sender {
+    // 与播放条同一条路径：/api/pause?on=1 暂停、on=0 继续。
+    // ⚠️ 不能用 /api/play 当"继续" —— 那会从头重播当前曲目。
+    NSString *path = [NSString stringWithFormat:@"/api/pause?on=%d", self.playing ? 1 : 0];
+    RLPPostJSON(path, nil);
+}
+- (void)onOpenNowPlaying:(id)sender {
+    // 正在播放页由主窗口的顶栏入口承载；这里发既有通知，不新造路由。
+    [[NSNotificationCenter defaultCenter] postNotificationName:@"RLPOpenNowPlayingNotification" object:nil];
+}
+- (void)onOpenQueue:(id)sender {
+    [[NSNotificationCenter defaultCenter] postNotificationName:@"RLPNavigateKeyNotification" object:@"queue"];
+}
+- (void)onOpenAlbums:(id)sender {
+    [[NSNotificationCenter defaultCenter] postNotificationName:@"RLPNavigateKeyNotification" object:@"albums"];
+}
+- (void)onOpenStreaming:(id)sender {
+    [self.popover close];
+    [[NSNotificationCenter defaultCenter] postNotificationName:@"RLPNavigateKeyNotification" object:@"streaming"];
+}
+
+/// 音乐库：就地弹层选目录（NSOpenPanel），不跳设置页。
+- (void)onLibraryAction:(id)sender {
+    if (self.hasRoots) {
+        RLPPostJSON(@"/api/lib/scan?full=1", nil);
+        RLPToast(RLPTr(@"已开始全量重扫"));
         return;
     }
+    NSOpenPanel *p = [NSOpenPanel openPanel];
+    p.canChooseDirectories = YES;
+    p.canChooseFiles = NO;
+    p.allowsMultipleSelection = NO;
+    p.prompt = RLPTr(@"选择");
+    p.message = RLPTr(@"选择存放音乐的目录");
     __weak __typeof__(self) weakSelf = self;
+    [p beginWithCompletionHandler:^(NSInteger result) {
+        __typeof__(self) self_ = weakSelf;
+        if (!self_ || result != NSModalResponseOK) return;
+        NSString *path = p.URL.path;
+        if (!path.length) return;
+        [[RLPCoreClient shared] postJSON:@"/api/lib/roots"
+            body:[NSString stringWithFormat:@"add=%@", RLPEnc(path)]
+            completion:^(NSDictionary * _Nullable json) {
+            __typeof__(self) s2 = weakSelf;
+            if (!s2) return;
+            if (json && [json[@"ok"] boolValue]) {
+                RLPPostJSON(@"/api/lib/scan?full=1", nil);
+                RLPToast(RLPTr(@"已添加目录，开始扫描"));
+                [s2 reloadLibrary];
+            } else {
+                NSString *err = [json[@"error"] isKindOfClass:[NSString class]] ? json[@"error"] : RLPTr(@"添加失败");
+                RLPToast(err);
+            }
+        }];
+    }];
+}
 
+#pragma mark - 数据
+
+- (void)activate {
+    [self reloadAll];
+    if (!self.poll && [RLPCoreClient shared].started) {
+        __weak __typeof__(self) weakSelf = self;
+        self.poll = [NSTimer scheduledTimerWithTimeInterval:1.0 repeats:YES block:^(NSTimer *t) {
+            (void)t; [weakSelf reloadStatus];
+        }];
+    }
+}
+
+- (void)viewDidDisappear {
+    [self.poll invalidate];
+    self.poll = nil;
+    [super viewDidDisappear];
+}
+
+- (void)reloadData { [self reloadAll]; }
+
+- (void)reloadAll {
+    if (![RLPCoreClient shared].started) { [self setSubtitle:RLPTr(@"核心未启动")]; return; }
+    [self reloadDevices];
+    [self reloadSettings];
+    [self reloadFilters];
+    [self reloadLibrary];
+    [self reloadStatus];
+    [self reloadQueue];
+    [self reloadAlbums];
+}
+
+- (void)reloadDevices {
+    __weak __typeof__(self) weakSelf = self;
+    [[RLPCoreClient shared] getJSON:@"/api/devices" completion:^(NSDictionary * _Nullable json) {
+        __typeof__(self) self_ = weakSelf;
+        if (!self_) return;
+        self_.devices = [json[@"devices"] isKindOfClass:[NSArray class]] ? json[@"devices"] : @[];
+        [self_.devicePopup removeAllItems];
+        [self_.devicePopup addItemWithTitle:RLPTr(@"系统默认")];
+        NSString *defName = nil;
+        for (NSDictionary *d in self_.devices) {
+            NSString *n = [d[@"name"] isKindOfClass:[NSString class]] ? d[@"name"] : RLPTr(@"未知设备");
+            [self_.devicePopup addItemWithTitle:n];
+            if ([d[@"default"] boolValue]) defName = n;
+        }
+        if (defName.length) [[self_.devicePopup itemAtIndex:0] setTitle:[NSString stringWithFormat:@"%@（%@）", RLPTr(@"系统默认"), defName]];
+        [self_ syncDeviceSelection];
+    }];
+}
+
+- (void)syncDeviceSelection {
+    NSString *cur = [self str:@"device" def:@""];
+    if (!cur.length) { [self.devicePopup selectItemAtIndex:0]; return; }
+    for (NSInteger i = 0; i < (NSInteger)self.devices.count; ++i) {
+        if ([self.devices[i][@"id"] isEqualToString:cur]) { [self.devicePopup selectItemAtIndex:i + 1]; return; }
+    }
+    [self.devicePopup selectItemAtIndex:0];
+}
+
+- (void)reloadSettings {
+    __weak __typeof__(self) weakSelf = self;
+    [[RLPCoreClient shared] getJSON:@"/api/settings" completion:^(NSDictionary * _Nullable json) {
+        __typeof__(self) self_ = weakSelf;
+        if (!self_) return;
+        // ⚠️ /api/settings 的值在 **kv** 子对象里（与设置页同一口径）。
+        // 直接读顶层会全部取不到 ⟹ 静默回落默认值，界面显示与真实设置脱节。
+        self_.settings = [json[@"kv"] isKindOfClass:[NSDictionary class]] ? json[@"kv"] : @{};
+        [self_ syncDeviceSelection];
+        // 输出摘要（人话）
+        NSString *bk = [self_ str:@"backend" def:@"coreaudio"];
+        NSString *bkName = [bk isEqualToString:@"coreaudio-shared"] ? RLPTr(@"共享播放")
+                         : [bk isEqualToString:@"upnp"] ? RLPTr(@"局域网投放")
+                         : [bk isEqualToString:@"null"] ? RLPTr(@"不出声（仅分析）") : RLPTr(@"独占播放");
+        const BOOL hog = [self_ str:@"hogexcl" def:@"1"].boolValue;
+        self_.outputValue.stringValue = [NSString stringWithFormat:@"%@%@", bkName,
+            ([bk isEqualToString:@"coreaudio"] && hog) ? @" · Hog" : @""];
+        // 播放档位摘要：从 dsd/rate 反推（不维护第二套状态）
+        const NSInteger dsd = [self_ str:@"dsd" def:@"0"].integerValue;
+        NSString *rate = [self_ str:@"rate" def:@"follow"];
+        self_.playValue.stringValue = dsd > 0 ? RLPTr(@"DSD 升频")
+            : ([rate isEqualToString:@"follow"] || !rate.length ? RLPTr(@"原音直通") : RLPTr(@"PCM 升频"));
+        // 听音风格回显
+        NSString *f = [self_ str:@"filter" def:@""];
+        NSInteger st = RLPToneStyleForFilter(f, self_.filters);
+        self_.styleValue.stringValue = (st >= 0) ? RLPToneStyleName((RLPToneStyle)st) : RLPTr(@"自定义");
+        self_.styleSub.stringValue = f.length ? f : RLPTr(@"跟随默认");
+    }];
+}
+
+- (void)reloadFilters {
+    __weak __typeof__(self) weakSelf = self;
+    [[RLPCoreClient shared] getJSON:@"/api/filters" completion:^(NSDictionary * _Nullable json) {
+        __typeof__(self) self_ = weakSelf;
+        if (!self_) return;
+        self_.filters = [json[@"items"] isKindOfClass:[NSArray class]] ? json[@"items"] : @[];
+        NSString *f = [self_ str:@"filter" def:@""];
+        NSInteger st = RLPToneStyleForFilter(f, self_.filters);
+        self_.styleValue.stringValue = (st >= 0) ? RLPToneStyleName((RLPToneStyle)st) : RLPTr(@"自定义");
+        self_.styleSub.stringValue = f.length ? f : RLPTr(@"跟随默认");
+    }];
+}
+
+- (void)reloadLibrary {
+    __weak __typeof__(self) weakSelf = self;
     [[RLPCoreClient shared] getJSON:@"/api/lib/roots" completion:^(NSDictionary * _Nullable json) {
         __typeof__(self) self_ = weakSelf;
         if (!self_) return;
         NSArray *roots = [json[@"roots"] isKindOfClass:[NSArray class]] ? json[@"roots"] : @[];
         self_.hasRoots = roots.count > 0;
         self_.libDesc.stringValue = self_.hasRoots
-            ? RLPTr(@"目录已就绪 · 点击重新扫描建立专辑与封面索引")
-            : RLPTr(@"支持 FLAC · DSD (DSF/DFF) · ALAC · WAV · APE · 多碟盒装自动聚合");
-        [self_.libButton setTitle:self_.hasRoots ? RLPTr(@"重新扫描音乐库")
-                                                 : RLPTr(@"添加音乐目录")];
-    }];
-
-    // 预设能力：只读探测（后端不开流、不抢设备）。读不到就把按钮禁用并说明，不填假数据。
-    [[RLPCoreClient shared] getJSON:@"/api/preset/caps" completion:^(NSDictionary * _Nullable json) {
-        __typeof__(self) self_ = weakSelf;
-        if (!self_) return;
-        NSDictionary *dev = [json[@"device"] isKindOfClass:[NSDictionary class]] ? json[@"device"] : nil;
-        if (!dev) {
-            self_.presetApply.enabled = NO;
-            self_.deviceLine.stringValue = RLPTr(@"预设能力读取失败：请检查输出设备");
-            return;
-        }
-        self_.presetApply.enabled = YES;
-        NSString *name = [dev[@"name"] isKindOfClass:[NSString class]] ? dev[@"name"] : RLPTr(@"未知设备");
-        NSArray *rates = [dev[@"rates"] isKindOfClass:[NSArray class]] ? dev[@"rates"] : @[];
-        NSMutableArray<NSString *> *parts = [NSMutableArray array];
-        [parts addObject:name];
-        if (rates.count) {
-            id maxRate = rates.lastObject;
-            [parts addObject:[NSString stringWithFormat:@"%@ %@ Hz", RLPTr(@"最高"), maxRate]];
-        }
-        if ([dev[@"dop"] boolValue]) [parts addObject:@"DoP"];
-        if ([dev[@"dsdNative"] boolValue]) [parts addObject:RLPTr(@"DSD 原生")];
-        if ([dev[@"exclusive"] boolValue]) [parts addObject:RLPTr(@"可独占")];
-        self_.deviceLine.stringValue = [parts componentsJoinedByString:@" · "];
+            ? RLPTr(@"音乐目录已就绪 · 可重新扫描更新专辑与封面")
+            : RLPTr(@"支持 FLAC · DSD (DSF/DFF) · ALAC · WAV · APE");
+        [self_.libButton setTitle:self_.hasRoots ? RLPTr(@"重新扫描音乐库") : RLPTr(@"添加音乐目录")];
     }];
 }
+
+- (void)reloadStatus {
+    __weak __typeof__(self) weakSelf = self;
+    [[RLPCoreClient shared] getJSON:@"/api/status" completion:^(NSDictionary * _Nullable json) {
+        __typeof__(self) self_ = weakSelf;
+        if (!self_) return;
+        RLPPlaybackStatus *st = [RLPPlaybackStatus statusFromJSON:json];
+        if (!st) return;
+        self_.playing = st.playing && !st.paused;
+        NSString *path = st.currentPath ?: @"";
+        [self_.npToggle setTitle:self_.playing ? RLPTr(@"暂停") : RLPTr(@"继续播放")];
+        self_.npState.stringValue = path.length ? (self_.playing ? RLPTr(@"正在播放") : RLPTr(@"已暂停")) : RLPTr(@"未播放");
+        if (![path isEqualToString:self_.currentPath ?: @""]) {
+            self_.currentPath = path;
+            self_.npTitle.stringValue = path.length ? path.lastPathComponent.stringByDeletingPathExtension : RLPTr(@"还没有在播放的音乐");
+            self_.npSub.stringValue = path.length ? @"" : RLPTr(@"从下面的专辑挑一张开始");
+            [self_ loadCoverForPath:path];
+            [self_ loadMetaForPath:path];
+        }
+    }];
+}
+
+- (void)loadCoverForPath:(NSString *)path {
+    if (!path.length) { self.npCover.image = nil; return; }
+    const NSUInteger seq = ++self.coverSeq;
+    NSString *url = [NSString stringWithFormat:@"/api/cover?file=%@", RLPEnc(path)];
+    __weak __typeof__(self) weakSelf = self;
+    [[RLPCoreClient shared] getData:url completion:^(NSData * _Nullable data) {
+        __typeof__(self) self_ = weakSelf;
+        if (!self_ || seq != self_.coverSeq) return;
+        self_.npCover.image = data.length ? [[NSImage alloc] initWithData:data] : nil;
+    }];
+}
+
+- (void)loadMetaForPath:(NSString *)path {
+    if (!path.length) return;
+    NSString *url = [NSString stringWithFormat:@"/api/meta?file=%@", RLPEnc(path)];
+    __weak __typeof__(self) weakSelf = self;
+    [[RLPCoreClient shared] getJSON:url completion:^(NSDictionary * _Nullable json) {
+        __typeof__(self) self_ = weakSelf;
+        if (!self_ || ![path isEqualToString:self_.currentPath ?: @""]) return;
+        NSString *title = [json[@"title"] isKindOfClass:[NSString class]] ? json[@"title"] : @"";
+        NSString *artist = [json[@"artist"] isKindOfClass:[NSString class]] ? json[@"artist"] : @"";
+        NSString *album = [json[@"album"] isKindOfClass:[NSString class]] ? json[@"album"] : @"";
+        if (title.length) self_.npTitle.stringValue = title;
+        NSMutableArray *p = [NSMutableArray array];
+        if (album.length) [p addObject:album];
+        if (artist.length) [p addObject:artist];
+        self_.npSub.stringValue = [p componentsJoinedByString:@" · "];
+    }];
+}
+
+- (void)reloadQueue {
+    RLPTheme *t = [RLPTheme current];
+    __weak __typeof__(self) weakSelf = self;
+    // 队列契约：GET /api/queue?meta=1 → {items:[路径…], metas:[{t,a,al,d}…], index}
+    // （键是 items，不是 queue；读错键会永远显示"队列是空的"）
+    [[RLPCoreClient shared] getJSON:@"/api/queue?meta=1" completion:^(NSDictionary * _Nullable json) {
+        __typeof__(self) self_ = weakSelf;
+        if (!self_) return;
+        NSArray *items = [json[@"items"] isKindOfClass:[NSArray class]] ? json[@"items"] : @[];
+        NSArray *metas = [json[@"metas"] isKindOfClass:[NSArray class]] ? json[@"metas"] : @[];
+        for (NSView *v in [self_.queueList.arrangedSubviews copy]) [self_.queueList removeArrangedSubview:v], [v removeFromSuperview];
+        if (!items.count) {
+            NSTextField *e = RLPLabel(RLPTr(@"队列是空的"), t.small, t.mut);
+            [self_.queueList addArrangedSubview:e];
+            return;
+        }
+        NSInteger n = 0;
+        for (id it in items) {
+            if (n >= 5) break;
+            NSString *name = nil;
+            if (n < (NSInteger)metas.count && [metas[n] isKindOfClass:[NSDictionary class]]) {
+                NSString *t = [metas[n][@"t"] isKindOfClass:[NSString class]] ? metas[n][@"t"] : nil;
+                if (t.length) name = t;
+            }
+            if (!name.length) {
+                if ([it isKindOfClass:[NSString class]])
+                    name = [(NSString *)it lastPathComponent].stringByDeletingPathExtension;
+                else if ([it isKindOfClass:[NSDictionary class]]) {
+                    NSString *p = [it[@"path"] isKindOfClass:[NSString class]] ? it[@"path"] : it[@"file"];
+                    name = p.lastPathComponent.stringByDeletingPathExtension;
+                }
+            }
+            NSTextField *l = RLPLabel([NSString stringWithFormat:@"%ld  %@", (long)(n + 1), name ?: @""], t.small, t.text);
+            l.translatesAutoresizingMaskIntoConstraints = NO;
+            [self_.queueList addArrangedSubview:l];
+            [[l.widthAnchor constraintLessThanOrEqualToConstant:270] setActive:YES];
+            ++n;
+        }
+    }];
+}
+
+- (void)reloadAlbums {
+    RLPTheme *t = [RLPTheme current];
+    __weak __typeof__(self) weakSelf = self;
+    [[RLPCoreClient shared] getJSON:@"/api/lib/albums" completion:^(NSDictionary * _Nullable json) {
+        __typeof__(self) self_ = weakSelf;
+        if (!self_) return;
+        NSArray *albs = [json[@"albums"] isKindOfClass:[NSArray class]] ? json[@"albums"] : @[];
+        for (NSView *v in [self_.albumRow.arrangedSubviews copy]) [self_.albumRow removeArrangedSubview:v], [v removeFromSuperview];
+        NSInteger n = 0;
+        for (id it in albs) {
+            if (n >= 6) break;
+            if (![it isKindOfClass:[NSDictionary class]]) continue;
+            NSString *key = [it[@"k"] isKindOfClass:[NSString class]] ? it[@"k"] : nil;
+            if (!key.length) continue;
+            // /api/lib/albums 的专辑名字段是 name（al 是队列 metas 里的字段，别混）
+            NSString *name = [it[@"name"] isKindOfClass:[NSString class]] ? it[@"name"] : nil;
+            // 封面卡：封面图 + 专辑名（点任意处进详情）。只有文字按钮不像"音乐库"。
+            NSView *cell = [[NSView alloc] initWithFrame:NSZeroRect];
+            cell.translatesAutoresizingMaskIntoConstraints = NO;
+            NSImageView *iv = [[NSImageView alloc] initWithFrame:NSZeroRect];
+            iv.imageScaling = NSImageScaleProportionallyUpOrDown;
+            iv.wantsLayer = YES;
+            iv.layer.cornerRadius = t.rSm;
+            iv.layer.masksToBounds = YES;
+            iv.layer.backgroundColor = t.bg3.CGColor;
+            iv.translatesAutoresizingMaskIntoConstraints = NO;
+            iv.identifier = [NSString stringWithFormat:@"room.albumcover.%ld", (long)n];
+            NSTextField *nm = RLPLabel(name ?: RLPTr(@"未知专辑"), t.small, t.text);
+            nm.translatesAutoresizingMaskIntoConstraints = NO;
+            nm.lineBreakMode = NSLineBreakByTruncatingTail;
+            NSButton *hit = [NSButton buttonWithTitle:@"" target:self_ action:@selector(onAlbumClicked:)];
+            hit.bordered = NO;
+            hit.identifier = key;
+            hit.translatesAutoresizingMaskIntoConstraints = NO;
+            hit.toolTip = name ?: @"";
+            for (NSView *v in @[iv, nm, hit]) [cell addSubview:v];
+            [NSLayoutConstraint activateConstraints:@[
+                [cell.widthAnchor constraintEqualToConstant:104],
+                [cell.heightAnchor constraintEqualToConstant:120],
+                [iv.leadingAnchor constraintEqualToAnchor:cell.leadingAnchor],
+                [iv.topAnchor constraintEqualToAnchor:cell.topAnchor],
+                [iv.widthAnchor constraintEqualToConstant:104],
+                [iv.heightAnchor constraintEqualToConstant:96],
+                [nm.leadingAnchor constraintEqualToAnchor:cell.leadingAnchor],
+                [nm.trailingAnchor constraintEqualToAnchor:cell.trailingAnchor],
+                [nm.topAnchor constraintEqualToAnchor:iv.bottomAnchor constant:4],
+                [hit.leadingAnchor constraintEqualToAnchor:cell.leadingAnchor],
+                [hit.trailingAnchor constraintEqualToAnchor:cell.trailingAnchor],
+                [hit.topAnchor constraintEqualToAnchor:cell.topAnchor],
+                [hit.bottomAnchor constraintEqualToAnchor:cell.bottomAnchor],
+            ]];
+            [self_.albumRow addArrangedSubview:cell];
+            // 封面走共享缓存（后端 /api/lib/cover?k=…），失败留占位底色，不重试不阻塞
+            [[RLPCoverLoader shared] coverForAlbumKey:key completion:^(NSImage * _Nullable image) {
+                if (image) iv.image = image;
+            }];
+            ++n;
+        }
+        if (!n) {
+            NSTextField *e = RLPLabel(RLPTr(@"还没有专辑 · 先添加音乐目录"), t.small, t.mut);
+            [self_.albumRow addArrangedSubview:e];
+        }
+    }];
+}
+
+- (void)onAlbumClicked:(NSButton *)sender { RLPRequestOpenAlbum(sender.identifier); }
 
 #pragma mark - 主题
 
 - (void)applyTheme {
     [super applyTheme];
     RLPTheme *t = [RLPTheme current];
-    // 卡片的圆角底/边框是 layer 颜色，不会自动跟随主题：重扫一遍已建视图。
     for (NSView *v in self.stack.arrangedSubviews) {
-        if (!v.wantsLayer || v.layer.cornerRadius <= 0) continue;
-        v.layer.backgroundColor = t.bg2.CGColor;
-        v.layer.borderColor = t.line.CGColor;
+        if (v.wantsLayer && v.layer.cornerRadius > 0) {
+            v.layer.backgroundColor = t.bg2.CGColor;
+            v.layer.borderColor = t.line.CGColor;
+        }
+        for (NSView *s in v.subviews) {
+            if (s.wantsLayer && s.layer.cornerRadius > 0) {
+                s.layer.backgroundColor = t.bg2.CGColor;
+                s.layer.borderColor = t.line.CGColor;
+            }
+        }
     }
+    self.npCover.layer.backgroundColor = t.bg3.CGColor;
     self.libDesc.textColor = t.mut;
-    self.presetStatus.textColor = t.mut;
-    self.deviceLine.textColor = t.mut;
+    self.presetNotes.textColor = t.mut;
+    self.styleSub.textColor = t.mut;
+    self.npState.textColor = t.mut;
+    self.npSub.textColor = t.mut;
+    self.npTitle.textColor = t.text;
+    self.outputValue.textColor = t.text;
+    self.playValue.textColor = t.text;
+    self.styleValue.textColor = t.text;
 }
 
 @end
+

@@ -150,6 +150,60 @@ NSTextField *RLPLabel(NSString *text, NSFont *font, NSColor *color) {
     return l;
 }
 
+#pragma mark - 界面模式（唯一真相源）
+
+NSNotificationName const RLPAppModeDidChangeNotification = @"RLPAppModeDidChangeNotification";
+static NSString *const kAppModeKey = @"RLPAppMode";
+
+RLPAppMode RLPCurrentAppMode(void) {
+    // 默认聆听模式：第一次打开的人先看到"能听歌的那一页"，不是一堆专业开关。
+    NSInteger v = [[NSUserDefaults standardUserDefaults] integerForKey:kAppModeKey];
+    return (v == RLPAppModePro) ? RLPAppModePro : RLPAppModeListening;
+}
+
+void RLPSetAppMode(RLPAppMode mode) {
+    if (mode != RLPAppModeListening && mode != RLPAppModePro) return;
+    if (RLPCurrentAppMode() == mode) return;
+    [[NSUserDefaults standardUserDefaults] setInteger:mode forKey:kAppModeKey];
+    [[NSNotificationCenter defaultCenter] postNotificationName:RLPAppModeDidChangeNotification
+                                                        object:@(mode)];
+}
+
+NSString *RLPAppModeName(RLPAppMode mode) {
+    return mode == RLPAppModePro ? RLPTr(@"专业模式") : RLPTr(@"聆听模式");
+}
+
+#pragma mark - 卡片式弹层
+
+NSViewController *RLPCardController(NSView *card, CGFloat width, CGFloat minHeight) {
+    NSViewController *vc = [[NSViewController alloc] initWithNibName:nil bundle:nil];
+    NSView *root = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, width, minHeight)];
+    root.translatesAutoresizingMaskIntoConstraints = NO;
+    card.translatesAutoresizingMaskIntoConstraints = NO;
+    [root addSubview:card];
+    [NSLayoutConstraint activateConstraints:@[
+        [root.widthAnchor constraintEqualToConstant:width],
+        [root.heightAnchor constraintGreaterThanOrEqualToConstant:minHeight],
+        [card.leadingAnchor constraintEqualToAnchor:root.leadingAnchor constant:14],
+        [card.trailingAnchor constraintEqualToAnchor:root.trailingAnchor constant:-14],
+        [card.topAnchor constraintEqualToAnchor:root.topAnchor constant:14],
+        [card.bottomAnchor constraintEqualToAnchor:root.bottomAnchor constant:-14],
+    ]];
+    vc.view = root;
+    return vc;
+}
+
+NSPopover *RLPShowCardPopover(NSView *anchorView, NSViewController *content, CGFloat width) {
+    if (!anchorView || !content) return nil;
+    (void)width;   // 宽度由 content 自己的约束决定（RLPCardController 已钉）
+    NSPopover *p = [[NSPopover alloc] init];
+    p.behavior = NSPopoverBehaviorTransient;      // 点外面自动关，符合"卡片弹层"心智
+    p.animates = YES;
+    p.contentViewController = content;
+    [p showRelativeToRect:anchorView.bounds ofView:anchorView preferredEdge:NSRectEdgeMaxY];
+    return p;
+}
+
 #pragma mark - 导航
 
 NSNotificationName const RLPOpenAlbumNotification = @"RLPOpenAlbumNotification";
