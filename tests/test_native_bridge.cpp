@@ -90,6 +90,22 @@ int main(int argc, char** argv) {
     ck(kvDoc["kv"].has("lang") && kvDoc["kv"]["lang"].s() == "zh",
        "theme write keeps unrelated settings key (merge-write)");
 
+    // 7) 全量移植新增门面的只读判据（不打开设备、不联网）
+    {
+        const auto peq = rlnative::peq_state();
+        ck(peq.ok, "peq_state() reads current PEQ config");
+        const auto outs = rlnative::output_devices();
+        ck(true, "output_devices() enumerates without opening a stream");
+        const auto rooms = rta::net::json_parse(rlnative::room_layouts_json());
+        ck(rooms.has("layouts") && rooms["layouts"].size() > 0, "room_layouts_json() returns layouts");
+        const auto prov = rta::net::json_parse(rlnative::providers_json());
+        ck(prov.has("items") && prov["items"].size() > 0, "providers_json() returns metadata providers");
+        const auto hs = rta::net::json_parse(rlnative::health_stats_json());
+        ck(hs.has("stats") && hs["stats"].has("cache"), "health_stats_json() returns analysis stats");
+        const auto src = rlnative::source_config();
+        ck(src.kind.size() < 64 && src.base.size() < 4096, "source_config() parses sane values");
+    }
+
     rlapp::request_shutdown();
     rlapp::stop_embedded();
     (void)::system(("rm -rf '" + root + "'").c_str());

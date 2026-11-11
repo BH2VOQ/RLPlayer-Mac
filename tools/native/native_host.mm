@@ -23,13 +23,18 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstdio>
 #include <map>
 #include <string>
 #include <vector>
 
 #include "native/core_bridge.h"
 #include "native/native_host.h"
+#include "mac_feedback.h"
 #include "mac_update.h"
+#include "net/i18n_table.h"
+#include "net/json.h"
+#include "net/webui.h"
 #include "rlapp_core.h"
 
 // ===========================================================================
@@ -186,13 +191,124 @@ BOOL nm_file_exists(NSString* path) {
 @end
 
 // 主题只能按值临时传递；用全局当前主题避免跨文件生命周期问题。
+// ⚠️ Theme 里是 __unsafe_unretained 颜色指针（ARC 不允许 C++ 结构里强引用对象），
+// 必须额外强持有这些 NSColor，否则自动释放池一空就变悬垂指针 —— 实测崩溃表现为
+// -[NSConcretePointerArray CGColor] unrecognized selector（随机对象收到 CGColor）。
 static Theme g_theme;
+static NSArray<NSColor*>* g_themeKeepAlive = nil;
 static void nm_set_theme_by_name(NSString* name) {
-    if ([name isEqualToString:@"dark"]) g_theme = theme_dark();
-    else if ([name isEqualToString:@"blue"]) g_theme = theme_blue();
-    else g_theme = theme_light();
+    Theme t;
+    if ([name isEqualToString:@"dark"]) t = theme_dark();
+    else if ([name isEqualToString:@"blue"]) t = theme_blue();
+    else t = theme_light();
+    g_themeKeepAlive = @[t.bg, t.sidebar, t.content, t.card, t.text, t.muted,
+                         t.accent, t.separator, t.selection, t.playerBar, t.hover, t.badge];
+    g_theme = t;
 }
 static Theme nm_theme(void) { return g_theme; }
+
+// NSControl/NSImageView 在成为 layer-backed 之前，-layer 可能返回私有代理对象；
+// 直接给 .layer 属性赋值会抛 -[NSControlAuxiliary CGColor] unrecognized selector（真实崩溃）。
+// 统一走这个守卫：只有拿到真正的 CALayer 才设置，绝不假定 -layer 的类型。
+static void nm_layer_config(NSView* v, void (^cfg)(CALayer*)) {
+    if (!v || !cfg) return;
+    [v setWantsLayer:YES];
+    id l = v.layer;
+    if ([l isKindOfClass:[CALayer class]]) cfg((CALayer*)l);
+}
+static void nm_round_view(NSView* v, CGFloat radius, NSColor* bg) {
+    nm_layer_config(v, ^(CALayer* l) {
+        l.cornerRadius = radius;
+        l.masksToBounds = YES;
+        if (bg) l.backgroundColor = bg.CGColor;
+    });
+}
+static void nm_set_background(NSView* v, NSColor* bg) {
+    nm_layer_config(v, ^(CALayer* l) { l.backgroundColor = bg.CGColor; });
+}
+static void nm_set_border(NSView* v, CGFloat width, NSColor* color) {
+    nm_layer_config(v, ^(CALayer* l) { l.borderWidth = width; l.borderColor = color.CGColor; });
+}
+
+// ---------------------------------------------------------------------------
+// 语言：复用 1.1.6 的 i18n 词表（中文源串 → 英文），再加原生界面补充词条。
+// 界面字符串仍以中文为源；切英文时对已建好的视图树做一次精确匹配替换，重建页面时再翻一次。
+// ---------------------------------------------------------------------------
+static BOOL g_langEn = NO;
+static NSDictionary<NSString*, NSString*>* g_i18nDict(void) {
+    static NSMutableDictionary* d = nil;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        d = [NSMutableDictionary dictionary];
+        std::size_t n = 0;
+        const auto* table = rta::net::i18n_table(&n);
+        for (std::size_t i = 0; i < n; ++i) {
+            NSString* zh = [NSString stringWithUTF8String:table[i].zh];
+            NSString* en = [NSString stringWithUTF8String:table[i].en];
+            if (zh && en) d[zh] = en;
+        }
+        NSDictionary* extra = @{
+            @"快速开始": @"Quick Start", @"资料库": @"Library", @"播放列表": @"Playlists",
+            @"音频引擎": @"Audio Engine", @"正在播放": @"Now Playing", @"音频分析": @"Audio Analysis",
+            @"曲目信息": @"Track Info", @"分析当前曲目": @"Analyze Current Track",
+            @"尚未分析": @"Not analyzed", @"立即播放": @"Play Now", @"从队列删除": @"Remove from Queue",
+            @"上移": @"Move Up", @"下移": @"Move Down", @"在 Finder 中显示": @"Reveal in Finder",
+            @"复制文件路径": @"Copy File Path", @"载入": @"Load", @"重命名…": @"Rename…",
+            @"服务器配置": @"Server Settings", @"上一级": @"Up", @"刷新": @"Refresh",
+            @"增量扫描": @"Scan", @"全量重扫": @"Full Rescan", @"看看刚听过的曲目": @"Recently played",
+            @"生成 zip 供排查": @"Export diagnostics zip", @"邮件 + 诊断附件": @"Email + diagnostics",
+            @"播放全部": @"Play All", @"随机播放": @"Shuffle", @"返回": @"Back",
+            @"当前播放": @"Now Playing", @"收藏 / 取消收藏": @"Favorite / Unfavorite",
+            @"重置缓冲": @"Reset Buffer", @"复位缓冲 (buffer/reset)": @"Reset Buffer (buffer/reset)",
+            @"导出诊断 zip": @"Export diagnostics zip", @"撰写反馈邮件（附诊断）": @"Compose feedback email",
+            @"开始测量（会发声）": @"Start measurement (audible)", @"取消测量": @"Cancel measurement",
+            @"开始采集": @"Start capture", @"停止采集": @"Stop capture", @"开始投放当前曲目": @"Cast current track",
+            @"停止投放": @"Stop casting", @"重新扫描设备": @"Rescan devices",
+            @"分析当前曲目（CPU 密集）": @"Analyze current track (CPU heavy)",
+            @"补全当前曲目元数据": @"Enrich current track metadata",
+            @"打开流媒体浏览页": @"Open streaming browser", @"保存并测试连接": @"Save & test connection",
+            @"搜索 OPRA 预设": @"Search OPRA presets", @"应用所选 OPRA 预设": @"Apply selected OPRA preset",
+            @"保存 PEQ": @"Save PEQ", @"设为默认": @"Set as default",
+            @"诊断包": @"Diagnostics bundle", @"反馈": @"Feedback", @"关于": @"About",
+            @"通用": @"General", @"输出": @"Output", @"升频 (PCM)": @"Upsampling (PCM)", @"DSD": @"DSD",
+            @"PEQ / EQ": @"PEQ / EQ", @"耳机 EQ (OPRA)": @"Headphone EQ (OPRA)", @"流媒体": @"Streaming",
+            @"分析 / AI": @"Analysis / AI", @"设备投放": @"Cast Devices", @"输入采集": @"Input Capture",
+            @"房间校正": @"Room Correction", @"更新": @"Updates", @"诊断与反馈": @"Diagnostics & Feedback",
+        };
+        [d addEntriesFromDictionary:extra];
+    });
+    return d;
+}
+static NSString* NMTR(NSString* zh) {
+    if (!g_langEn || zh.length == 0) return zh;
+    NSString* en = g_i18nDict()[zh];
+    return en.length ? en : zh;
+}
+static void nm_translate_menu(NSMenu* menu) {
+    if (!g_langEn || !menu) return;
+    for (NSMenuItem* it in menu.itemArray) {
+        if (it.title.length) it.title = NMTR(it.title);
+        if (it.submenu) nm_translate_menu(it.submenu);
+    }
+}
+static void nm_translate_view(NSView* v) {
+    if (!g_langEn || !v) return;
+    if ([v isKindOfClass:[NSTextField class]]) {
+        NSTextField* t = (NSTextField*)v;
+        if (t.stringValue.length) t.stringValue = NMTR(t.stringValue);
+        if (t.placeholderString.length) t.placeholderString = NMTR(t.placeholderString);
+    } else if ([v isKindOfClass:[NSButton class]]) {
+        NSButton* b = (NSButton*)v;
+        if (b.title.length) b.title = NMTR(b.title);
+        if (b.toolTip.length) b.toolTip = NMTR(b.toolTip);
+    } else if ([v isKindOfClass:[NSPopUpButton class]]) {
+        NSPopUpButton* p = (NSPopUpButton*)v;
+        for (NSMenuItem* it in p.itemArray) if (it.title.length) it.title = NMTR(it.title);
+    } else if ([v isKindOfClass:[NSTableView class]]) {
+        [(NSTableView*)v reloadData];
+    }
+    for (NSView* sub in v.subviews) nm_translate_view(sub);
+}
 
 // 封面缓存：key -> NSImage；nil 占位避免重复请求。
 static NSCache<NSString*, NSImage*>* nm_cover_cache(void) {
@@ -220,7 +336,8 @@ enum class Cmd : int {
     ModeSequential, ModeListLoop, ModeSingleLoop, ModeShuffle, CycleMode,
     ToggleSidebar, ToggleQueueRail, FocusSearch, OpenSettings, CheckUpdate,
     ShowNowPlaying, ShowQueue, ShowAlbums, ShowArtists, ShowTracks,
-    ShowRecent, ShowFavorites, ShowFolders, ShowStreaming, Rescan, Scan,
+    ShowRecent, ShowFavorites, ShowFolders, ShowStreaming, ShowStation, Rescan, Scan,
+    PlayAlbum, ToggleLyrics, OpenCast, OpenInput, OpenRoom, ExportDiag, SendFeedback, ToggleMini,
     AddFavorites, RemoveFavorites, SaveQueue, ClearQueue, SortQueue,
     MiniPlayer, FullScreen,
 };
@@ -249,7 +366,7 @@ static NSString* nm_mode_symbol(int m) {
 typedef NS_ENUM(NSInteger, NMPage) {
     NMPageAlbums = 0, NMPageAlbumDetail, NMPageArtists, NMPageTracks,
     NMPageRecent, NMPageFavorites, NMPageFolders, NMPageStreaming,
-    NMPageQueue, NMPageSavedQueue, NMPageSearch,
+    NMPageQueue, NMPageSavedQueue, NMPageSearch, NMPageStation, NMPageArtistDetail, NMPageRemoteDetail,
 };
 
 @interface RLNativeAppDelegate : NSObject <NSApplicationDelegate, NSWindowDelegate,
@@ -278,6 +395,8 @@ typedef NS_ENUM(NSInteger, NMPage) {
 @property (nonatomic, strong) NSTableView* trackTable;
 @property (nonatomic, strong) NSTableView* queueTable;
 @property (nonatomic, strong) NSTableView* railTable;
+@property (nonatomic, strong) NSTableView* filesTable;
+@property (nonatomic, strong) NSTableView* remoteTable;
 @property (nonatomic, strong) NSTextField* contentTitle;
 @property (nonatomic, strong) NSTextField* contentSubtitle;
 @property (nonatomic, strong) NSView* contentBody;
@@ -318,6 +437,27 @@ typedef NS_ENUM(NSInteger, NMPage) {
 @property (nonatomic, copy) NSString* albumDetailKey;
 @property (nonatomic, copy) NSString* savedQueueName;
 @property (nonatomic, copy) NSString* query;
+@property (nonatomic, copy) NSString* filesPath;
+@property (nonatomic, copy) NSString* remotePath;
+@property (nonatomic, copy) NSString* artistWho;
+@property (nonatomic, strong) NSMutableArray<NSString*>* remoteTrail;
+@property (nonatomic, copy) NSString* remoteQuery;
+@property (nonatomic, strong) NSWindow* miniPlayer;
+@property (nonatomic, strong) NSTableView* settingsSections;
+@property (nonatomic, strong) NSMutableArray<NSView*>* settingsPages;
+@property (nonatomic, assign) NSInteger settingsSectionIndex;
+@property (nonatomic, strong) NSScrollView* settingsScroll;
+@property (nonatomic, strong) NSView* npAnalysisPanel;
+@property (nonatomic, strong) NSView* npInfoPanel;
+@property (nonatomic, strong) NSTextField* npInfoLabel;
+@property (nonatomic, strong) NSTextField* npAnalysisLabel;
+@property (nonatomic, strong) NSPopUpButton* settingsDevicePopup;
+@property (nonatomic, strong) NSPopUpButton* settingsCastPopup;
+@property (nonatomic, strong) NSPopUpButton* settingsInputPopup;
+@property (nonatomic, strong) NSTextView* settingsPeqEditor;
+@property (nonatomic, strong) NSTableView* settingsPresetTable;
+@property (nonatomic, strong) NSMutableArray<NSString*>* settingsPresets;
+@property (nonatomic, strong) NSMutableArray<NSString*>* folderNames;
 @end
 
 // ===========================================================================
@@ -358,6 +498,39 @@ static void nm_load_cover(NSString* key, NSImageView* iv) {
     });
 }
 
+@interface NMPeqCurveView : NSView
+@property (nonatomic, assign) std::vector<std::pair<double, double>> points;
+@end
+@implementation NMPeqCurveView
+- (BOOL)isFlipped { return NO; }
+- (void)drawRect:(NSRect)dirty {
+    (void)dirty;
+    [[g_theme.card colorWithAlphaComponent:0.6] setFill];
+    NSBezierPath* bg = [NSBezierPath bezierPathWithRoundedRect:self.bounds xRadius:8 yRadius:8];
+    [bg fill];
+    if (_points.size() < 2) return;
+    double mn = 0, mx = 0;
+    for (const auto& p : _points) { mn = std::min(mn, p.second); mx = std::max(mx, p.second); }
+    mn = std::min(mn, -6.0); mx = std::max(mx, 6.0);
+    NSBezierPath* path = [NSBezierPath bezierPath];
+    for (size_t i = 0; i < _points.size(); ++i) {
+        const double x = self.bounds.size.width * (double)i / (double)(_points.size() - 1);
+        const double y = self.bounds.size.height * (_points[i].second - mn) / (mx - mn);
+        if (i == 0) [path moveToPoint:NSMakePoint(x, y)];
+        else [path lineToPoint:NSMakePoint(x, y)];
+    }
+    [g_theme.accent setStroke];
+    path.lineWidth = 1.8;
+    [path stroke];
+    [[g_theme.separator colorWithAlphaComponent:0.5] setStroke];
+    NSBezierPath* zero = [NSBezierPath bezierPath];
+    const double zy = self.bounds.size.height * (0 - mn) / (mx - mn);
+    [zero moveToPoint:NSMakePoint(0, zy)];
+    [zero lineToPoint:NSMakePoint(self.bounds.size.width, zy)];
+    [zero stroke];
+}
+@end
+
 @implementation NMAlbumItem
 - (void)loadView {
     NSView* v = [[NSView alloc] init];
@@ -365,10 +538,7 @@ static void nm_load_cover(NSString* key, NSImageView* iv) {
     self.view = v;
     _cover = [[NSImageView alloc] initWithFrame:NSMakeRect(0, 0, 158, 158)];
     _cover.imageScaling = NSImageScaleProportionallyUpOrDown;
-    _cover.wantsLayer = YES;
-    _cover.layer.cornerRadius = 10;
-    _cover.layer.masksToBounds = YES;
-    _cover.layer.backgroundColor = g_theme.card.CGColor;
+    nm_round_view(_cover, 10, g_theme.card);
     [v addSubview:_cover];
     _name = nm_label(@"", 12.5, NSFontWeightSemibold, g_theme.text);
     _artist = nm_label(@"", 11, NSFontWeightRegular, g_theme.muted);
@@ -393,10 +563,7 @@ static void nm_load_cover(NSString* key, NSImageView* iv) {
     self.view = v;
     _cover = [[NSImageView alloc] initWithFrame:NSMakeRect(20, 0, 96, 96)];
     _cover.imageScaling = NSImageScaleProportionallyUpOrDown;
-    _cover.wantsLayer = YES;
-    _cover.layer.cornerRadius = 48;
-    _cover.layer.masksToBounds = YES;
-    _cover.layer.backgroundColor = g_theme.card.CGColor;
+    nm_round_view(_cover, 48, g_theme.card);
     [v addSubview:_cover];
     _name = nm_label(@"", 12.5, NSFontWeightSemibold, g_theme.text);
     _count = nm_label(@"", 10.5, NSFontWeightRegular, g_theme.muted);
@@ -437,6 +604,14 @@ static rlnative::AlbumDetail g_detail;
     NSMutableArray<NSNumber*>* _navStack;
     NSInteger _lyricHighlight;
     NSInteger _activeLyricRow;
+    std::vector<rlnative::RemoteEntry> _remoteItems;
+    std::vector<rlnative::AlbumDetail> _artistAlbums;
+    std::vector<rlnative::PeqBand> _peqBands;
+    std::vector<rlnative::CastDevice> _castDevices;
+    std::vector<rlnative::DeviceInfo> _outputDevices;
+    std::vector<rlnative::DeviceInfo> _inputDevices;
+    std::string _filesDir;
+    std::map<std::string,std::string> _uiValues;
 }
 
 static const CGFloat kSidebarWidth = 224.0;
@@ -453,6 +628,10 @@ static const CGFloat kPlayerHeight = 78.0;
         _sideRows = [NSMutableArray array];
         _modeMenuItems = [NSMutableArray array];
         _navStack = [NSMutableArray array];
+        _remoteTrail = [NSMutableArray array];
+        _settingsPresets = [NSMutableArray array];
+        _settingsPages = [NSMutableArray array];
+        _folderNames = [NSMutableArray array];
     }
     return self;
 }
@@ -462,6 +641,9 @@ static const CGFloat kPlayerHeight = 78.0;
 // ---------------------------------------------------------------------------
 - (void)applicationDidFinishLaunching:(NSNotification*)n {
     (void)n;
+    const auto settings0 = rlnative::settings();
+    const auto langIt = settings0.find("lang");
+    g_langEn = (langIt != settings0.end() && langIt->second == "en");
     const std::string theme = rlnative::get_theme();
     nm_set_theme_by_name([NSString stringWithUTF8String:theme.c_str()]);
     if (theme == "dark") _themeIndex = 0;
@@ -471,6 +653,7 @@ static const CGFloat kPlayerHeight = 78.0;
 
     [self buildMenu];
     [self buildWindow];
+    if (g_langEn) { nm_translate_menu(NSApp.mainMenu); nm_translate_view(self.window.contentView); }
     [self setupMediaKeys];
     [self reloadSettings];
     [self reloadAlbums];
@@ -502,7 +685,45 @@ static const CGFloat kPlayerHeight = 78.0;
             if ([v isKindOfClass:NSClassFromString(@"WKWebView")]) webviews++;
             for (NSView* sub in v.subviews) scan(sub);
         };
+        NSSetUncaughtExceptionHandler([](NSException* e) {
+            std::fprintf(stderr, "SELFTEST uncaught %s: %s\n",
+                         e.name.UTF8String ?: "?", e.reason.UTF8String ?: "?");
+            std::fflush(stderr);
+        });
         if (s.window.contentView) scan(s.window.contentView);
+        // 页面级自检：逐个切页并打开设置各分区，任何一步抛异常/空页都算失败。
+        NSInteger pageFails = 0;
+        NSArray<NSNumber*>* pages = @[@(NMPageAlbums), @(NMPageArtists), @(NMPageTracks),
+            @(NMPageRecent), @(NMPageFavorites), @(NMPageFolders), @(NMPageStreaming),
+            @(NMPageQueue), @(NMPageStation), @(NMPageSearch)];
+        for (NSNumber* pn in pages) {
+            @try {
+                [s showPage:(NMPage)pn.integerValue pushHistory:NO];
+                if (!s.contentScroll.documentView) pageFails++;
+            } @catch (NSException* e) {
+                std::fprintf(stderr, "SELFTEST page exception %ld: %s / %s\n", (long)pn.integerValue,
+                             e.name.UTF8String ?: "?", e.reason.UTF8String ?: "?");
+                std::fflush(stderr);
+                pageFails++;
+            }
+        }
+        NSInteger sectionFails = 0;
+        @try {
+            [s openSettings];
+            for (NSInteger i = 0; i < 15; ++i) {
+                @try { [s showSettingsSection:i]; if (!s.settingsScroll.documentView) sectionFails++;
+                }
+                @catch (NSException* e) {
+                    std::fprintf(stderr, "SELFTEST section exception %ld: %s / %s\n", (long)i,
+                                 e.name.UTF8String ?: "?", e.reason.UTF8String ?: "?");
+                    std::fflush(stderr);
+                    sectionFails++;
+                }
+            }
+        } @catch (NSException* e) { (void)e; sectionFails = 15; }
+        // 收尾回到专辑页，避免自检改变最终界面
+        [s showPage:NMPageAlbums pushHistory:NO];
+
         NSMutableArray<NSNumber*>* checks = [NSMutableArray array];
         [checks addObject:@(s.window != nil && s.window.visible)];
         [checks addObject:@(s.sidebar != nil && s.sidebar.superview != nil)];
@@ -510,19 +731,23 @@ static const CGFloat kPlayerHeight = 78.0;
         [checks addObject:@(s.queueRail != nil && s.queueRail.superview != nil)];
         [checks addObject:@(s.contentScroll.documentView != nil)];
         [checks addObject:@(webviews == 0)];
+        [checks addObject:@(pageFails == 0)];
+        [checks addObject:@(sectionFails == 0)];
         NSInteger pass = 0;
         for (NSNumber* n in checks) if (n.boolValue) pass++;
         std::fprintf(stderr,
                      "NATIVE_SELFTEST {\"pass\":%ld,\"total\":%lu,\"window\":%s,"
                      "\"sidebar\":%s,\"player\":%s,\"queue\":%s,\"page\":%s,"
-                     "\"webviews\":%ld,\"albums\":%zu,\"queueItems\":%zu}\n",
+                     "\"webviews\":%ld,\"albums\":%zu,\"queueItems\":%zu,"
+                     "\"pageFails\":%ld,\"sectionFails\":%ld}\n",
                      (long)pass, (unsigned long)checks.count,
                      (s.window && s.window.visible) ? "true" : "false",
                      (s.sidebar.superview != nil) ? "true" : "false",
                      (s.playerBar.superview != nil) ? "true" : "false",
                      (s.queueRail.superview != nil) ? "true" : "false",
                      (s.contentScroll.documentView != nil) ? "true" : "false",
-                     (long)webviews, s->_albums.size(), s->_queue.size());
+                     (long)webviews, s->_albums.size(), s->_queue.size(),
+                     (long)pageFails, (long)sectionFails);
         std::fflush(stderr);
         [NSApp terminate:nil];
     });
@@ -623,6 +848,20 @@ static const CGFloat kPlayerHeight = 78.0;
     [windowMenu addItemWithTitle:@"关闭" action:@selector(performClose:) keyEquivalent:@"w"];
     windowItem.submenu = windowMenu;
     [bar addItem:windowItem];
+
+    NSMenuItem* helpItem = [[NSMenuItem alloc] initWithTitle:@"帮助" action:nil keyEquivalent:@""];
+    NSMenu* help = [[NSMenu alloc] initWithTitle:@"帮助"];
+    NSMenuItem* shortcuts = [help addItemWithTitle:@"键盘快捷键" action:@selector(cmdShowShortcuts:) keyEquivalent:@"/"];
+    shortcuts.target = self;
+    [help addItem:[NSMenuItem separatorItem]];
+    NSMenuItem* fb = [help addItemWithTitle:@"反馈问题…" action:@selector(dispatchCmd:) keyEquivalent:@""];
+    fb.target = self; fb.tag = (NSInteger)Cmd::SendFeedback;
+    NSMenuItem* diag = [help addItemWithTitle:@"导出诊断包" action:@selector(dispatchCmd:) keyEquivalent:@""];
+    diag.target = self; diag.tag = (NSInteger)Cmd::ExportDiag;
+    [help addItem:[NSMenuItem separatorItem]];
+    [help addItemWithTitle:@"关于 RLPlayer" action:@selector(orderFrontStandardAboutPanel:) keyEquivalent:@""];
+    helpItem.submenu = help;
+    [bar addItem:helpItem];
 
     [NSApp setMainMenu:bar];
 }
@@ -730,9 +969,7 @@ static const CGFloat kPlayerHeight = 78.0;
     b.contentTintColor = g_theme.text;
     b.tag = tag;
     b.translatesAutoresizingMaskIntoConstraints = NO;
-    b.wantsLayer = YES;
-    b.layer.cornerRadius = 7.0;
-    b.layer.backgroundColor = [NSColor clearColor].CGColor;
+    nm_round_view(b, 7.0, nil);
     if (indent) b.title = [@"   " stringByAppendingString:title];
     [b.heightAnchor constraintEqualToConstant:30].active = YES;
     [b.widthAnchor constraintEqualToConstant:(indent ? 196 : 208)].active = YES;
@@ -793,6 +1030,7 @@ static const CGFloat kPlayerHeight = 78.0;
     stack.edgeInsets = NSEdgeInsetsMake(4, 8, 8, 8);
     stack.translatesAutoresizingMaskIntoConstraints = NO;
 
+    [stack addArrangedSubview:[self sideRow:@"快速开始" symbol:@"sparkles" tag:(NSInteger)Cmd::ShowStation indent:NO]];
     NSTextField* libTitle = [self sideSection:@"资料库"];
     [stack addArrangedSubview:libTitle];
     [stack setCustomSpacing:4 afterView:libTitle];
@@ -837,7 +1075,7 @@ static const CGFloat kPlayerHeight = 78.0;
     const NSInteger active = [self cmdForPage:_page_];
     for (NSButton* b in _sideRows) {
         const BOOL on = (active != 0 && b.tag == active);
-        b.layer.backgroundColor = on ? g_theme.selection.CGColor : [NSColor clearColor].CGColor;
+        nm_set_background(b, on ? g_theme.selection : nil);
         b.contentTintColor = on ? g_theme.accent : g_theme.text;
         b.font = [NSFont systemFontOfSize:13 weight:on ? NSFontWeightSemibold : NSFontWeightRegular];
     }
@@ -853,6 +1091,9 @@ static const CGFloat kPlayerHeight = 78.0;
         case NMPageFolders: return (NSInteger)Cmd::ShowFolders;
         case NMPageStreaming: return (NSInteger)Cmd::ShowStreaming;
         case NMPageQueue: case NMPageSavedQueue: return (NSInteger)Cmd::ShowQueue;
+        case NMPageStation: return (NSInteger)Cmd::ShowStation;
+        case NMPageArtistDetail: return (NSInteger)Cmd::ShowArtists;
+        case NMPageRemoteDetail: return (NSInteger)Cmd::ShowStreaming;
         default: return 0;
     }
 }
@@ -924,17 +1165,13 @@ static const CGFloat kPlayerHeight = 78.0;
     bar.blendingMode = NSVisualEffectBlendingModeWithinWindow;
     bar.translatesAutoresizingMaskIntoConstraints = NO;
     bar.wantsLayer = YES;
-    bar.layer.borderWidth = 1.0;
-    bar.layer.borderColor = g_theme.separator.CGColor;
+    nm_set_border(bar, 1.0, g_theme.separator);
 
     // 左：封面 + 信息
     _barCover = [[NSImageView alloc] init];
     _barCover.translatesAutoresizingMaskIntoConstraints = NO;
     _barCover.imageScaling = NSImageScaleProportionallyUpOrDown;
-    _barCover.wantsLayer = YES;
-    _barCover.layer.cornerRadius = 6.0;
-    _barCover.layer.masksToBounds = YES;
-    _barCover.layer.backgroundColor = g_theme.card.CGColor;
+    nm_round_view(_barCover, 6.0, g_theme.card);
     [bar addSubview:_barCover];
     [NSLayoutConstraint activateConstraints:@[
         [_barCover.leadingAnchor constraintEqualToAnchor:bar.leadingAnchor constant:16],
@@ -972,9 +1209,7 @@ static const CGFloat kPlayerHeight = 78.0;
     _barPlay.bezelStyle = NSBezelStyleCircular;
     _barPlay.bordered = NO;
     _barPlay.translatesAutoresizingMaskIntoConstraints = NO;
-    _barPlay.wantsLayer = YES;
-    _barPlay.layer.cornerRadius = 17;
-    _barPlay.layer.backgroundColor = g_theme.accent.CGColor;
+    nm_round_view(_barPlay, 17, g_theme.accent);
     _barPlay.contentTintColor = NSColor.whiteColor;
     _barPlay.accessibilityLabel = @"播放或暂停";
     [bar addSubview:_barPlay];
@@ -1028,6 +1263,18 @@ static const CGFloat kPlayerHeight = 78.0;
     _barVolume.accessibilityLabel = @"音量";
     NSButton* volIcon = nm_symbol_button(@"speaker.wave.2", self, @selector(dispatchCmd:), @"音量");
     volIcon.tag = (NSInteger)Cmd::VolumeUp;
+    NSButton* lyricsBtn = nm_symbol_button(@"quote.bubble", self, @selector(dispatchCmd:), @"歌词 / 正在播放");
+    lyricsBtn.tag = (NSInteger)Cmd::ToggleLyrics;
+    NSButton* queueBtn = nm_symbol_button(@"list.bullet", self, @selector(dispatchCmd:), @"显示 / 隐藏队列");
+    queueBtn.tag = (NSInteger)Cmd::ToggleQueueRail;
+    NSButton* miniBtn = nm_symbol_button(@"pip", self, @selector(dispatchCmd:), @"迷你播放器");
+    miniBtn.tag = (NSInteger)Cmd::ToggleMini;
+    NSButton* castBtn = nm_symbol_button(@"airplayvideo", self, @selector(dispatchCmd:), @"投放到设备");
+    castBtn.tag = (NSInteger)Cmd::OpenCast;
+    [bar addSubview:lyricsBtn];
+    [bar addSubview:queueBtn];
+    [bar addSubview:miniBtn];
+    [bar addSubview:castBtn];
     [bar addSubview:_barMode];
     [bar addSubview:volIcon];
     [bar addSubview:_barVolume];
@@ -1039,6 +1286,14 @@ static const CGFloat kPlayerHeight = 78.0;
         [_barVolume.widthAnchor constraintEqualToConstant:90],
         [volIcon.trailingAnchor constraintEqualToAnchor:_barVolume.leadingAnchor constant:-2],
         [volIcon.centerYAnchor constraintEqualToAnchor:bar.centerYAnchor],
+        [lyricsBtn.trailingAnchor constraintEqualToAnchor:volIcon.leadingAnchor constant:-4],
+        [lyricsBtn.centerYAnchor constraintEqualToAnchor:bar.centerYAnchor],
+        [queueBtn.trailingAnchor constraintEqualToAnchor:lyricsBtn.leadingAnchor constant:-2],
+        [queueBtn.centerYAnchor constraintEqualToAnchor:bar.centerYAnchor],
+        [miniBtn.trailingAnchor constraintEqualToAnchor:queueBtn.leadingAnchor constant:-2],
+        [miniBtn.centerYAnchor constraintEqualToAnchor:bar.centerYAnchor],
+        [castBtn.trailingAnchor constraintEqualToAnchor:miniBtn.leadingAnchor constant:-2],
+        [castBtn.centerYAnchor constraintEqualToAnchor:bar.centerYAnchor],
     ]];
 
     return bar;
@@ -1047,14 +1302,40 @@ static const CGFloat kPlayerHeight = 78.0;
 // ---------------------------------------------------------------------------
 // 队列栏
 // ---------------------------------------------------------------------------
+- (NSMenu*)queueMenu {
+    NSMenu* m = [[NSMenu alloc] init];
+    NSMenuItem* play = [m addItemWithTitle:@"立即播放" action:@selector(queuePlayNow:) keyEquivalent:@""];
+    play.target = self;
+    NSMenuItem* del = [m addItemWithTitle:@"从队列删除" action:@selector(queueDelete:) keyEquivalent:@""];
+    del.target = self;
+    [m addItem:[NSMenuItem separatorItem]];
+    NSMenuItem* up = [m addItemWithTitle:@"上移" action:@selector(queueMoveUp:) keyEquivalent:@""];
+    up.target = self;
+    NSMenuItem* down = [m addItemWithTitle:@"下移" action:@selector(queueMoveDown:) keyEquivalent:@""];
+    down.target = self;
+    return m;
+}
+
+- (NSMenu*)trackMenu {
+    NSMenu* m = [[NSMenu alloc] init];
+    NSMenuItem* play = [m addItemWithTitle:@"播放" action:@selector(trackPlayMenu:) keyEquivalent:@""];
+    play.target = self;
+    NSMenuItem* fav = [m addItemWithTitle:@"收藏 / 取消收藏" action:@selector(trackFavMenu:) keyEquivalent:@""];
+    fav.target = self;
+    [m addItem:[NSMenuItem separatorItem]];
+    NSMenuItem* reveal = [m addItemWithTitle:@"在 Finder 中显示" action:@selector(trackRevealMenu:) keyEquivalent:@""];
+    reveal.target = self;
+    NSMenuItem* copy = [m addItemWithTitle:@"复制文件路径" action:@selector(trackCopyMenu:) keyEquivalent:@""];
+    copy.target = self;
+    return m;
+}
+
 - (NSView*)buildQueueRail {
     NSVisualEffectView* v = [[NSVisualEffectView alloc] init];
     v.material = NSVisualEffectMaterialSidebar;
     v.blendingMode = NSVisualEffectBlendingModeWithinWindow;
     v.translatesAutoresizingMaskIntoConstraints = NO;
-    v.wantsLayer = YES;
-    v.layer.borderWidth = 1.0;
-    v.layer.borderColor = g_theme.separator.CGColor;
+    nm_set_border(v, 1.0, g_theme.separator);
 
     NSTextField* title = nm_label(@"当前播放", 13, NSFontWeightSemibold, g_theme.text);
     NSTextField* count = nm_label(@"0 首", 10, NSFontWeightRegular, g_theme.muted);
@@ -1081,6 +1362,8 @@ static const CGFloat kPlayerHeight = 78.0;
     _railTable.delegate = self;
     _railTable.target = self;
     _railTable.doubleAction = @selector(railDoubleClick:);
+    _railTable.menu = [self queueMenu];
+    [_railTable registerForDraggedTypes:@[NSPasteboardTypeString]];
     NSScrollView* scroll = [[NSScrollView alloc] init];
     scroll.translatesAutoresizingMaskIntoConstraints = NO;
     scroll.hasVerticalScroller = YES;
@@ -1243,6 +1526,15 @@ static const CGFloat kPlayerHeight = 78.0;
         case Cmd::ShowFolders: [self showPage:NMPageFolders pushHistory:YES]; break;
         case Cmd::ShowStreaming: [self showPage:NMPageStreaming pushHistory:YES]; break;
         case Cmd::ShowQueue: [self showPage:NMPageQueue pushHistory:YES]; break;
+        case Cmd::ShowStation: [self showPage:NMPageStation pushHistory:YES]; break;
+        case Cmd::ToggleLyrics: [self toggleNowPlaying]; break;
+        case Cmd::PlayAlbum: break;
+        case Cmd::OpenCast: [self showSettingsSection:9]; break;
+        case Cmd::OpenInput: [self showSettingsSection:10]; break;
+        case Cmd::OpenRoom: [self showSettingsSection:11]; break;
+        case Cmd::ExportDiag: [self exportDiagnostics]; break;
+        case Cmd::SendFeedback: [self sendFeedback]; break;
+        case Cmd::ToggleMini: [self toggleMiniPlayer]; break;
         case Cmd::Rescan:
             rlnative::scan_library(true);
             [self toast:@"已开始重新扫描音乐库"];
@@ -1268,6 +1560,14 @@ static const CGFloat kPlayerHeight = 78.0;
 
 - (void)cmdSetMode:(NSMenuItem*)sender { rlnative::set_mode((int)sender.tag); [self tick]; }
 - (void)cmdFocusSearch:(id)s { (void)s; [_window makeFirstResponder:_searchField]; }
+- (void)cmdShowShortcuts:(id)s {
+    (void)s;
+    NSAlert* a = [[NSAlert alloc] init];
+    a.messageText = @"键盘快捷键";
+    a.informativeText = @"空格 播放/暂停\n← / → 上一首 / 下一首\n⌘F 搜索\n⌘, 设置\n⌘P 正在播放\n⌘2 队列\n⌘S 侧栏\n⌘R 重新扫描\n⌘1 专辑  ⌘3 艺术家  ⌘4 曲目  ⌘5 最近  ⌘6 最爱\n⌘0 快速开始";
+    [a addButtonWithTitle:@"好"];
+    [a runModal];
+}
 - (void)cmdBack:(id)s {
     if (_navStack.count == 0) return;
     NSNumber* n = _navStack.lastObject;
@@ -1342,6 +1642,14 @@ static const CGFloat kPlayerHeight = 78.0;
         b.contentTintColor = g_theme.muted;
         b.identifier = name;
         b.toolTip = @"载入这个歌单";
+        NSMenu* qm = [[NSMenu alloc] init];
+        NSMenuItem* mi1 = [qm addItemWithTitle:@"载入" action:@selector(savedQueueMenuLoad:) keyEquivalent:@""];
+        mi1.target = self; mi1.representedObject = name;
+        NSMenuItem* mi2 = [qm addItemWithTitle:@"重命名…" action:@selector(savedQueueMenuRename:) keyEquivalent:@""];
+        mi2.target = self; mi2.representedObject = name;
+        NSMenuItem* mi3 = [qm addItemWithTitle:@"删除" action:@selector(savedQueueMenuDelete:) keyEquivalent:@""];
+        mi3.target = self; mi3.representedObject = name;
+        b.menu = qm;
         b.translatesAutoresizingMaskIntoConstraints = NO;
         [b.heightAnchor constraintEqualToConstant:26].active = YES;
         [b.widthAnchor constraintEqualToConstant:200].active = YES;
@@ -1351,6 +1659,32 @@ static const CGFloat kPlayerHeight = 78.0;
         NSTextField* empty = nm_label(@"暂无保存的歌单", 11, NSFontWeightRegular, g_theme.muted);
         [_savedQueueStack addArrangedSubview:empty];
     }
+}
+
+- (void)savedQueueMenuLoad:(NSMenuItem*)mi {
+    const bool ok = rlnative::saved_queue_play(std::string([mi.representedObject UTF8String]), 0);
+    if (ok) { _savedQueueName = mi.representedObject; [self loadQueue]; [self showPage:NMPageSavedQueue pushHistory:YES]; }
+}
+- (void)savedQueueMenuRename:(NSMenuItem*)mi {
+    NSString* old = mi.representedObject;
+    NSAlert* a = [[NSAlert alloc] init];
+    a.messageText = [NSString stringWithFormat:@"重命名歌单：%@", old];
+    [a addButtonWithTitle:@"重命名"];
+    [a addButtonWithTitle:@"取消"];
+    NSTextField* f = [[NSTextField alloc] initWithFrame:NSMakeRect(0, 0, 260, 24)];
+    f.stringValue = old;
+    a.accessoryView = f;
+    if ([a runModal] != NSAlertFirstButtonReturn) return;
+    NSString* nn = [f.stringValue stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
+    if (nn.length == 0 || [nn isEqualToString:old]) return;
+    rta::net::HttpRequest rq; rq.method = "POST";
+    rq.path = "/api/sq/rename?from=" + std::string([old UTF8String]) + "&to=" + std::string([nn UTF8String]);
+    std::string ct; (void)rlapp::dispatch(rq, ct);
+    [self reloadSavedQueues];
+}
+- (void)savedQueueMenuDelete:(NSMenuItem*)mi {
+    rlnative::saved_queue_delete(std::string([mi.representedObject UTF8String]));
+    [self reloadSavedQueues];
 }
 
 - (void)savedQueueClicked:(NSButton*)sender {
@@ -1488,27 +1822,52 @@ static const CGFloat kPlayerHeight = 78.0;
 - (NSView*)pageArtists {
     const CGFloat w = [self contentWidth];
     NMFlippedView* page = [[NMFlippedView alloc] initWithFrame:NSMakeRect(0, 0, w, 400)];
-    NSString* sub = [NSString stringWithFormat:@"%zu 位艺术家", _artists.size()];
-    [page addSubview:[self headerWithTitle:@"艺术家" subtitle:sub actions:@[] width:w]];
-    const CGFloat itemW = 136, itemH = 140, gap = 18;
+    [page addSubview:[self headerWithTitle:@"艺术家"
+                                 subtitle:[NSString stringWithFormat:@"%zu 位艺术家", _artists.size()]
+                                  actions:@[] width:w]];
+    const CGFloat itemW = 126, itemH = 152, gap = 16;
     const NSInteger cols = MAX(1, (NSInteger)((w - 52 + gap) / (itemW + gap)));
-    const NSInteger n = (NSInteger)_artists.size();
-    const NSInteger rows = (n + cols - 1) / cols;
-    const CGFloat gridH = MAX(1, rows) * itemH + MAX(0, rows - 1) * gap;
-    NSCollectionViewFlowLayout* flow = [[NSCollectionViewFlowLayout alloc] init];
-    flow.itemSize = NSMakeSize(itemW, itemH);
-    flow.minimumInteritemSpacing = gap;
-    flow.minimumLineSpacing = gap;
-    NSCollectionView* grid = [[NSCollectionView alloc] initWithFrame:NSMakeRect(26, 100, w - 52, gridH)];
-    grid.collectionViewLayout = flow;
-    grid.dataSource = self;
-    grid.delegate = self;
-    [grid registerClass:[NMArtistItem class] forItemWithIdentifier:@"artist"];
-    [page addSubview:grid];
-    _albumGrid = grid;
-    if (n == 0) [page addSubview:[self emptyState:@"还没有艺术家信息" width:w]];
-    page.frame = NSMakeRect(0, 0, w, 100 + gridH + 30);
+    NSInteger idx = 0;
+    for (const auto& a : _artists) {
+        const NSInteger col = idx % cols, row = idx / cols;
+        const CGFloat x = 26 + col * (itemW + gap);
+        const CGFloat y = 100 + row * (itemH + gap);
+        NSString* name = [NSString stringWithUTF8String:a.first.c_str()];
+        NSString* key = (std::size_t)idx < _artistKeys.size()
+            ? [NSString stringWithUTF8String:_artistKeys[(std::size_t)idx].c_str()] : @"";
+        NSButton* hit = [NSButton buttonWithTitle:@"" target:self action:@selector(artistCardClicked:)];
+        hit.bordered = NO; hit.bezelStyle = NSBezelStyleInline; hit.tag = idx;
+        hit.frame = NSMakeRect(x, y, itemW, itemH);
+        hit.toolTip = [NSString stringWithFormat:@"%@ · %d 张专辑", name, a.second];
+        [page addSubview:hit];
+        NSImageView* avatar = [[NSImageView alloc] initWithFrame:NSMakeRect(x + (itemW - 92) / 2, y, 92, 92)];
+        avatar.imageScaling = NSImageScaleProportionallyUpOrDown;
+        nm_round_view(avatar, 46, g_theme.card);
+        if (key.length) nm_load_cover(key, avatar);
+        else avatar.image = nm_placeholder(name, NSMakeSize(92, 92));
+        [page addSubview:avatar];
+        NSTextField* n = nm_label(name, 12.5, NSFontWeightSemibold, g_theme.text);
+        n.alignment = NSTextAlignmentCenter;
+        n.frame = NSMakeRect(x, y + 100, itemW, 18);
+        [page addSubview:n];
+        NSTextField* c = nm_label([NSString stringWithFormat:@"%d 张专辑", a.second], 10.5,
+                                  NSFontWeightRegular, g_theme.muted);
+        c.alignment = NSTextAlignmentCenter;
+        c.frame = NSMakeRect(x, y + 120, itemW, 15);
+        [page addSubview:c];
+        idx++;
+    }
+    const NSInteger rows = (idx + cols - 1) / cols;
+    if (idx == 0) [page addSubview:[self emptyState:@"还没有艺术家信息" width:w]];
+    page.frame = NSMakeRect(0, 0, w, 100 + MAX(0, rows) * (itemH + gap) + 20);
     return page;
+}
+
+- (void)artistCardClicked:(NSButton*)sender {
+    const NSInteger i = sender.tag;
+    if (i < 0 || (std::size_t)i >= _artists.size()) return;
+    _artistWho = [NSString stringWithUTF8String:_artists[(std::size_t)i].first.c_str()];
+    [self showPage:NMPageArtistDetail pushHistory:YES];
 }
 
 - (NSView*)pageTracks {
@@ -1539,6 +1898,8 @@ static const CGFloat kPlayerHeight = 78.0;
     const CGFloat tableH = MIN((CGFloat)_tracks.size() * 42 + 8, 560);
     _trackTable = [self makeTable:NSMakeRect(0, 0, w - 40, tableH) rowHeight:42];
     _trackTable.doubleAction = @selector(trackDoubleClick:);
+    _trackTable.menu = [self trackMenu];
+    [_trackTable registerForDraggedTypes:@[NSPasteboardTypeString]];
     _trackTable.target = self;
     NSScrollView* scroll = [self scrollForTable:_trackTable frame:NSMakeRect(20, 100, w - 40, tableH)];
     [page addSubview:scroll];
@@ -1551,10 +1912,7 @@ static const CGFloat kPlayerHeight = 78.0;
     NMFlippedView* page = [[NMFlippedView alloc] initWithFrame:NSMakeRect(0, 0, w, 500)];
     NSImageView* cover = [[NSImageView alloc] initWithFrame:NSMakeRect(26, 18, 168, 168)];
     cover.imageScaling = NSImageScaleProportionallyUpOrDown;
-    cover.wantsLayer = YES;
-    cover.layer.cornerRadius = 10;
-    cover.layer.masksToBounds = YES;
-    cover.layer.backgroundColor = g_theme.card.CGColor;
+    nm_round_view(cover, 10, g_theme.card);
     [page addSubview:cover];
     NSString* key = [NSString stringWithUTF8String:g_detail.album.key.c_str()];
     nm_load_cover(key, cover);
@@ -1592,6 +1950,8 @@ static const CGFloat kPlayerHeight = 78.0;
     const CGFloat tableH = MIN((CGFloat)g_detail.tracks.size() * 42 + 8, 460);
     _trackTable = [self makeTable:NSMakeRect(0, 0, w - 40, tableH) rowHeight:42];
     _trackTable.doubleAction = @selector(trackDoubleClick:);
+    _trackTable.menu = [self trackMenu];
+    [_trackTable registerForDraggedTypes:@[NSPasteboardTypeString]];
     _trackTable.target = self;
     NSScrollView* scroll = [self scrollForTable:_trackTable frame:NSMakeRect(20, 200, w - 40, tableH)];
     [page addSubview:scroll];
@@ -1616,6 +1976,8 @@ static const CGFloat kPlayerHeight = 78.0;
     _queueTable = [self makeTable:NSMakeRect(0, 0, w - 40, tableH) rowHeight:42];
     _queueTable.doubleAction = @selector(queueDoubleClick:);
     _queueTable.target = self;
+    _queueTable.menu = [self queueMenu];
+    [_queueTable registerForDraggedTypes:@[NSPasteboardTypeString]];
     NSScrollView* scroll = [self scrollForTable:_queueTable frame:NSMakeRect(20, 100, w - 40, tableH)];
     [page addSubview:scroll];
     page.frame = NSMakeRect(0, 0, w, 100 + tableH + 30);
@@ -1638,6 +2000,8 @@ static const CGFloat kPlayerHeight = 78.0;
     _queueTable = [self makeTable:NSMakeRect(0, 0, w - 40, tableH) rowHeight:42];
     _queueTable.doubleAction = @selector(queueDoubleClick:);
     _queueTable.target = self;
+    _queueTable.menu = [self queueMenu];
+    [_queueTable registerForDraggedTypes:@[NSPasteboardTypeString]];
     [page addSubview:[self scrollForTable:_queueTable frame:NSMakeRect(20, 100, w - 40, tableH)]];
     page.frame = NSMakeRect(0, 0, w, 100 + tableH + 30);
     return page;
@@ -1645,15 +2009,60 @@ static const CGFloat kPlayerHeight = 78.0;
 
 - (NSView*)pageFolders {
     const CGFloat w = [self contentWidth];
-    NMFlippedView* page = [[NMFlippedView alloc] initWithFrame:NSMakeRect(0, 0, w, 420)];
+    NMFlippedView* page = [[NMFlippedView alloc] initWithFrame:NSMakeRect(0, 0, w, 460)];
+    NSButton* up = [self pillButton:@"上一级" symbol:@"arrow.up" action:@selector(cmdFilesUp:)];
     NSButton* inc = [self pillButton:@"增量扫描" symbol:@"arrow.triangle.2.circlepath" action:@selector(cmdScanLibrary:)];
     NSButton* full = [self pillButton:@"全量重扫" symbol:@"arrow.clockwise" action:@selector(cmdRescanLibrary:)];
-    [page addSubview:[self headerWithTitle:@"文件夹" subtitle:@"资料库根目录与扫描状态" actions:@[inc, full] width:w]];
-    NMFlippedView* body = [[NMFlippedView alloc] initWithFrame:NSMakeRect(24, 100, w - 48, 280)];
-    body.identifier = @"foldersBody";
-    [page addSubview:body];
-    page.frame = NSMakeRect(0, 0, w, 420);
+    [page addSubview:[self headerWithTitle:@"文件夹" subtitle:@"按目录浏览本地音乐库（与网页端同一目录树）" actions:@[inc, full, up] width:w]];
+
+    const auto listing = rlnative::list_files(std::string(_filesPath.UTF8String ?: ""));
+    _filesDir = listing.dir;
+    NSTextField* path = nm_label([NSString stringWithUTF8String:listing.dir.c_str()], 10.5,
+                                NSFontWeightRegular, g_theme.muted);
+    path.frame = NSMakeRect(26, 96, w - 52, 16);
+    [page addSubview:path];
+
+    NSMutableArray* names = [NSMutableArray array];
+    for (const auto& d : listing.dirs) [names addObject:[NSString stringWithFormat:@"📁 %s", d.name.c_str()]];
+    for (const auto& f : listing.files) [names addObject:[NSString stringWithUTF8String:f.name.c_str()]];
+    _folderNames = names;
+
+    const CGFloat tableH = MIN(MAX((CGFloat)names.count * 30 + 8, 120), 520);
+    _filesTable = [self makeTable:NSMakeRect(0, 0, w - 40, tableH) rowHeight:30];
+    _filesTable.doubleAction = @selector(filesDoubleClick:);
+    _filesTable.target = self;
+    _filesTable.dataSource = self;
+    [page addSubview:[self scrollForTable:_filesTable frame:NSMakeRect(20, 118, w - 40, tableH)]];
+    if (names.count == 0) [page addSubview:[self emptyState:@"目录为空或不可读" width:w]];
+    page.frame = NSMakeRect(0, 0, w, 118 + tableH + 30);
     return page;
+}
+
+- (void)cmdFilesUp:(id)s {
+    (void)s;
+    std::string p = std::string(_filesPath.UTF8String ?: "");
+    if (p.empty()) return;
+    const size_t slash = p.find_last_of('/');
+    p = slash == std::string::npos ? "" : p.substr(0, slash);
+    _filesPath = [NSString stringWithUTF8String:p.c_str()];
+    [self showPage:NMPageFolders pushHistory:NO];
+}
+
+- (void)filesDoubleClick:(id)s {
+    (void)s;
+    const NSInteger row = _filesTable.clickedRow;
+    if (row < 0 || (NSUInteger)row >= _folderNames.count) return;
+    NSString* name = _folderNames[(NSUInteger)row];
+    const auto listing = rlnative::list_files(std::string(_filesPath.UTF8String ?: ""));
+    NSString* dir = [NSString stringWithUTF8String:listing.dir.c_str()];
+    if ([name hasPrefix:@"📁 "]) {
+        NSString* sub = [name substringFromIndex:3];
+        _filesPath = dir.length ? [dir stringByAppendingPathComponent:sub] : sub;
+        [self showPage:NMPageFolders pushHistory:NO];
+    } else {
+        NSString* full = dir.length ? [dir stringByAppendingPathComponent:name] : name;
+        rlnative::play_path(std::string(full.UTF8String));
+    }
 }
 
 - (void)refreshFoldersStats {
@@ -1687,32 +2096,225 @@ static const CGFloat kPlayerHeight = 78.0;
 - (NSView*)pageStreaming {
     const CGFloat w = [self contentWidth];
     NMFlippedView* page = [[NMFlippedView alloc] initWithFrame:NSMakeRect(0, 0, w, 460)];
-    [page addSubview:[self headerWithTitle:@"流媒体" subtitle:@"Subsonic / Emby 服务器（与网页端共用同一配置）" actions:@[] width:w]];
-    const auto cfg = rlnative::source_config();
-    CGFloat y = 120;
-    NSArray* labels = @[@"类型", @"服务器地址", @"用户名"];
-    NSArray* values = @[[NSString stringWithUTF8String:cfg.kind.c_str()],
-                       [NSString stringWithUTF8String:cfg.base.c_str()],
-                       [NSString stringWithUTF8String:cfg.user.c_str()]];
-    for (NSUInteger i = 0; i < labels.count; ++i) {
-        NSTextField* k = nm_label(labels[i], 12, NSFontWeightMedium, g_theme.muted);
-        k.frame = NSMakeRect(26, y, 90, 18);
-        [page addSubview:k];
-        NSTextField* f = nm_label(((NSString*)values[i]).length ? (NSString*)values[i] : @"未配置", 12.5, NSFontWeightMedium, g_theme.text);
-        f.frame = NSMakeRect(130, y, w - 170, 18);
-        [page addSubview:f];
-        y += 32;
+    NSString* sub = [NSString stringWithFormat:@"%zu 项 · 与网页端共用同一条源配置", _remoteItems.size()];
+    NSButton* cfg = [self pillButton:@"服务器配置" symbol:@"gearshape" action:@selector(cmdOpenStreamingSettings:)];
+    NSButton* addAll = [self pillButton:@"全部加入队列" symbol:@"text.badge.plus" action:@selector(cmdRemoteAddAll:)];
+    NSButton* up = [self pillButton:@"上一级" symbol:@"arrow.up" action:@selector(cmdRemoteUp:)];
+    [page addSubview:[self headerWithTitle:@"流媒体" subtitle:sub actions:@[cfg, addAll, up] width:w]];
+
+    if (_remoteItems.empty()) {
+        NSTextField* hint = nm_label(@"未配置或未连接流媒体服务器。点「服务器配置」填写地址/账号，保存后点刷新。",
+                                     12, NSFontWeightRegular, g_theme.muted);
+        hint.frame = NSMakeRect(26, 130, w - 52, 40);
+        hint.maximumNumberOfLines = 2;
+        [page addSubview:hint];
+        NSButton* refresh = [self pillButton:@"刷新" symbol:@"arrow.clockwise" action:@selector(cmdRemoteRefresh:)];
+        refresh.frame = NSMakeRect(26, 186, 110, 28);
+        [page addSubview:refresh];
+        page.frame = NSMakeRect(0, 0, w, 420);
+        return page;
     }
-    NSTextField* pass = nm_label(cfg.hasPass ? @"密码：已保存（不回显）" : @"密码：未设置", 12, NSFontWeightRegular, g_theme.muted);
-    pass.frame = NSMakeRect(26, y, w - 60, 18);
-    [page addSubview:pass];
-    y += 36;
-    NSTextField* hint = nm_label(@"在网页端设置页完成登录与浏览。原生页只展示当前配置，不重写流媒体协议。",
-                                 11, NSFontWeightRegular, g_theme.muted);
-    hint.frame = NSMakeRect(26, y, w - 60, 18);
-    [page addSubview:hint];
-    page.frame = NSMakeRect(0, 0, w, 460);
+    const CGFloat tableH = MIN(MAX((CGFloat)_remoteItems.size() * 44 + 8, 120), 600);
+    _remoteTable = [self makeTable:NSMakeRect(0, 0, w - 40, tableH) rowHeight:44];
+    _remoteTable.doubleAction = @selector(remoteDoubleClick:);
+    _remoteTable.target = self;
+    _remoteTable.dataSource = self;
+    [page addSubview:[self scrollForTable:_remoteTable frame:NSMakeRect(20, 100, w - 40, tableH)]];
+    page.frame = NSMakeRect(0, 0, w, 100 + tableH + 30);
     return page;
+}
+
+- (void)cmdOpenStreamingSettings:(id)s { (void)s; [self showSettingsSection:6]; }
+- (void)cmdRemoteAddAll:(id)s {
+    (void)s;
+    NSInteger n = 0;
+    for (const auto& e : _remoteItems) if (!e.dir && rlnative::enqueue_remote(e)) n++;
+    [self loadQueue];
+    [self toast:[NSString stringWithFormat:@"已加入 %ld 首", (long)n]];
+}
+- (void)cmdRemoteRefresh:(id)s {
+    (void)s;
+    _remoteItems = rlnative::remote_browse("", false, "");
+    [self showPage:NMPageStreaming pushHistory:NO];
+}
+- (void)cmdRemoteUp:(id)s {
+    (void)s;
+    if (_remoteTrail.count > 0) [_remoteTrail removeLastObject];
+    NSString* parent = _remoteTrail.lastObject ?: @"";
+    _remoteItems = rlnative::remote_browse(std::string(parent.UTF8String), false, "");
+    [self showPage:NMPageStreaming pushHistory:NO];
+}
+- (void)remoteDoubleClick:(id)s {
+    (void)s;
+    const NSInteger row = _remoteTable.clickedRow;
+    if (row < 0 || (NSUInteger)row >= _remoteItems.size()) return;
+    const auto& e = _remoteItems[(NSUInteger)row];
+    if (e.dir) {
+        [_remoteTrail addObject:[NSString stringWithUTF8String:e.id.c_str()]];
+        _remoteItems = rlnative::remote_browse(e.id, false, "");
+        [self showPage:NMPageStreaming pushHistory:NO];
+    } else {
+        rlnative::play_remote(e);
+        [self loadQueue];
+    }
+}
+
+- (NSView*)pageStation {
+    const CGFloat w = [self contentWidth];
+    NMFlippedView* page = [[NMFlippedView alloc] initWithFrame:NSMakeRect(0, 0, w, 560)];
+    [page addSubview:[self headerWithTitle:@"快速开始" subtitle:@"常用操作与系统状态" actions:@[] width:w]];
+    const auto st = rlnative::library_stats();
+    NSString* nowPlaying = _snap.current.empty() ? @"未播放" :
+        [[NSString stringWithUTF8String:_snap.current.c_str()] lastPathComponent];
+    NSArray* cards = @[
+        @[@"继续播放", nowPlaying, @"play.circle", @((int)Cmd::PlayPause)],
+        @[@"最近播放", @"看看刚听过的曲目", @"clock.arrow.circlepath", @((int)Cmd::ShowRecent)],
+        @[@"我的最爱", [NSString stringWithFormat:@"%zu 首", rlnative::favorite_tracks().size()], @"heart", @((int)Cmd::ShowFavorites)],
+        @[@"重新扫描", [NSString stringWithFormat:@"%d 首 · %d 张专辑", st.tracks, st.albums], @"arrow.triangle.2.circlepath", @((int)Cmd::Rescan)],
+        @[@"检查更新", [NSString stringWithFormat:@"当前 %s", RLPLAYER_VERSION_STR], @"arrow.down.circle", @((int)Cmd::CheckUpdate)],
+        @[@"导出诊断包", @"生成 zip 供排查", @"stethoscope", @((int)Cmd::ExportDiag)],
+        @[@"反馈问题", @"邮件 + 诊断附件", @"envelope", @((int)Cmd::SendFeedback)],
+        @[@"设置", @"输出 / 升频 / DSD / EQ", @"gearshape", @((int)Cmd::OpenSettings)],
+    ];
+    const CGFloat cardW = (w - 52 - 18) / 2.0;
+    for (NSUInteger i = 0; i < cards.count; ++i) {
+        NSArray* c = cards[i];
+        const CGFloat x = 26 + (i % 2) * (cardW + 18);
+        const CGFloat y = 104 + (i / 2) * 96;
+        NSButton* b = [NSButton buttonWithTitle:@"" target:self action:@selector(stationCardClicked:)];
+        b.bordered = NO;
+        b.bezelStyle = NSBezelStyleInline;
+        nm_round_view(b, 10, g_theme.card);
+        b.frame = NSMakeRect(x, y, cardW, 84);
+        b.tag = [c[3] integerValue];
+        b.toolTip = c[1];
+        [page addSubview:b];
+        NSImageView* icon = [[NSImageView alloc] initWithFrame:NSMakeRect(x + 16, y + 26, 30, 30)];
+        icon.image = nm_symbol(c[2], 24);
+        icon.contentTintColor = g_theme.accent;
+        [page addSubview:icon];
+        NSTextField* t = nm_label(c[0], 14, NSFontWeightSemibold, g_theme.text);
+        t.frame = NSMakeRect(x + 58, y + 34, cardW - 74, 20);
+        [page addSubview:t];
+        NSTextField* d = nm_label(c[1], 11, NSFontWeightRegular, g_theme.muted);
+        d.frame = NSMakeRect(x + 58, y + 54, cardW - 74, 16);
+        [page addSubview:d];
+    }
+    NSTextField* status = nm_label([NSString stringWithFormat:
+        @"模式 %@ · 音量 %.1f dB · 队列 %zu 首 · 曲库 %d 首/%d 专辑",
+        nm_mode_title(_snap.mode), _snap.volDb, _queue.size(), st.tracks, st.albums],
+        11, NSFontWeightRegular, g_theme.muted);
+    status.frame = NSMakeRect(26, 104 + ((cards.count + 1) / 2) * 96 + 4, w - 52, 18);
+    [page addSubview:status];
+    page.frame = NSMakeRect(0, 0, w, 104 + ((cards.count + 1) / 2) * 96 + 40);
+    return page;
+}
+
+- (void)stationCardClicked:(NSButton*)sender { [self handleCmd:(Cmd)(int)sender.tag]; }
+
+- (void)toggleMiniPlayer {
+    if (_miniPlayer) {
+        [_miniPlayer orderOut:nil];
+        _miniPlayer = nil;
+        return;
+    }
+    NSWindow* w = [[NSWindow alloc] initWithContentRect:NSMakeRect(0, 0, 360, 132)
+        styleMask:NSWindowStyleMaskTitled | NSWindowStyleMaskClosable | NSWindowStyleMaskUtilityWindow
+        backing:NSBackingStoreBuffered defer:NO];
+    w.title = @"迷你播放器";
+    w.level = NSFloatingWindowLevel;
+    w.backgroundColor = g_theme.card;
+    NSView* v = w.contentView;
+    NSImageView* cover = [[NSImageView alloc] initWithFrame:NSMakeRect(14, 34, 64, 64)];
+    cover.imageScaling = NSImageScaleProportionallyUpOrDown;
+    nm_round_view(cover, 6, nil);
+    [self loadCoverForPath:(_snap.current.empty() ? @"" : [NSString stringWithUTF8String:_snap.current.c_str()]) into:cover];
+    [v addSubview:cover];
+    NSTextField* t = nm_label(_barTitle.stringValue, 13, NSFontWeightSemibold, g_theme.text);
+    t.frame = NSMakeRect(90, 74, 250, 18);
+    [v addSubview:t];
+    NSTextField* a = nm_label(_barArtist.stringValue, 11, NSFontWeightRegular, g_theme.muted);
+    a.frame = NSMakeRect(90, 56, 250, 16);
+    [v addSubview:a];
+    NSButton* prev = nm_symbol_button(@"backward.fill", self, @selector(dispatchCmd:), @"上一首");
+    prev.tag = (NSInteger)Cmd::Previous;
+    prev.frame = NSMakeRect(90, 16, 28, 28);
+    [v addSubview:prev];
+    NSButton* pp = [NSButton buttonWithImage:nm_symbol(@"play.fill", 14) target:self action:@selector(dispatchCmd:)];
+    pp.tag = (NSInteger)Cmd::PlayPause; pp.bordered = NO;
+    pp.frame = NSMakeRect(126, 14, 32, 32);
+    [v addSubview:pp];
+    NSButton* next = nm_symbol_button(@"forward.fill", self, @selector(dispatchCmd:), @"下一首");
+    next.tag = (NSInteger)Cmd::Next;
+    next.frame = NSMakeRect(166, 16, 28, 28);
+    [v addSubview:next];
+    NSButton* close = nm_symbol_button(@"xmark", self, @selector(cmdCloseMini:), @"关闭迷你窗");
+    close.frame = NSMakeRect(322, 100, 24, 24);
+    [v addSubview:close];
+    _miniPlayer = w;
+    [w makeKeyAndOrderFront:nil];
+}
+
+- (void)cmdCloseMini:(id)s { (void)s; [_miniPlayer orderOut:nil]; _miniPlayer = nil; }
+
+- (NSView*)pageArtistDetail {
+    const CGFloat w = [self contentWidth];
+    NMFlippedView* page = [[NMFlippedView alloc] initWithFrame:NSMakeRect(0, 0, w, 520)];
+    NSString* who = _artistWho ?: @"";
+    _tracks = rlnative::search_tracks(std::string(who.UTF8String ?: ""), 200);
+    _artistAlbums.clear();
+    for (const auto& a : _albums) if (a.artist == std::string(who.UTF8String ?: "")) {
+        _artistAlbums.push_back(rlnative::album_detail(a.key));
+    }
+    NSButton* back = [self pillButton:@"返回" symbol:@"chevron.left" action:@selector(cmdBack:)];
+    [page addSubview:[self headerWithTitle:who
+                                 subtitle:[NSString stringWithFormat:@"%zu 张专辑 · %zu 首曲目",
+                                           _artistAlbums.size(), _tracks.size()]
+                                  actions:@[back] width:w]];
+    CGFloat y = 96;
+    NSInteger shown = 0;
+    for (const auto& ad : _artistAlbums) {
+        if (shown >= 8) break;
+        NSButton* b = [NSButton buttonWithTitle:@"" target:self action:@selector(artistAlbumClicked:)];
+        b.bordered = NO; b.bezelStyle = NSBezelStyleInline;
+        b.frame = NSMakeRect(26 + shown * 112, y, 100, 130);
+        b.tag = shown;
+        b.toolTip = [NSString stringWithUTF8String:ad.album.name.c_str()];
+        [page addSubview:b];
+        NSImageView* cover = [[NSImageView alloc] initWithFrame:NSMakeRect(26 + shown * 112, y, 100, 100)];
+        cover.imageScaling = NSImageScaleProportionallyUpOrDown;
+        nm_round_view(cover, 8, nil);
+        nm_load_cover([NSString stringWithUTF8String:ad.album.key.c_str()], cover);
+        [page addSubview:cover];
+        NSTextField* n = nm_label([NSString stringWithUTF8String:ad.album.name.c_str()], 10.5,
+                                 NSFontWeightMedium, g_theme.text);
+        n.frame = NSMakeRect(26 + shown * 112, y + 104, 100, 16);
+        [page addSubview:n];
+        shown++;
+    }
+    if (shown > 0) y += 150;
+    if (!_tracks.empty()) {
+        const CGFloat tableH = MIN((CGFloat)_tracks.size() * 42 + 8, 380);
+        _trackTable = [self makeTable:NSMakeRect(0, 0, w - 40, tableH) rowHeight:42];
+        _trackTable.doubleAction = @selector(trackDoubleClick:);
+    _trackTable.menu = [self trackMenu];
+    [_trackTable registerForDraggedTypes:@[NSPasteboardTypeString]];
+        _trackTable.target = self;
+        _trackTable.dataSource = self;
+        [page addSubview:[self scrollForTable:_trackTable frame:NSMakeRect(20, y, w - 40, tableH)]];
+        y += tableH + 20;
+    } else {
+        [page addSubview:[self emptyState:@"没有该艺术家的曲目" width:w]];
+        y += 80;
+    }
+    page.frame = NSMakeRect(0, 0, w, y + 20);
+    return page;
+}
+
+- (void)artistAlbumClicked:(NSButton*)sender {
+    if (sender.tag < 0 || (NSUInteger)sender.tag >= _artistAlbums.size()) return;
+    g_detail = _artistAlbums[(NSUInteger)sender.tag];
+    [self showPage:NMPageAlbumDetail pushHistory:YES];
 }
 
 - (NSView*)pageSearch {
@@ -1730,6 +2332,8 @@ static const CGFloat kPlayerHeight = 78.0;
     const CGFloat tableH = MIN((CGFloat)_tracks.size() * 42 + 8, 560);
     _trackTable = [self makeTable:NSMakeRect(0, 0, w - 40, tableH) rowHeight:42];
     _trackTable.doubleAction = @selector(trackDoubleClick:);
+    _trackTable.menu = [self trackMenu];
+    [_trackTable registerForDraggedTypes:@[NSPasteboardTypeString]];
     _trackTable.target = self;
     [page addSubview:[self scrollForTable:_trackTable frame:NSMakeRect(20, 100, w - 40, tableH)]];
     page.frame = NSMakeRect(0, 0, w, 100 + tableH + 30);
@@ -1740,6 +2344,9 @@ static const CGFloat kPlayerHeight = 78.0;
 // 页面切换
 // ---------------------------------------------------------------------------
 - (void)showPage:(NMPage)p pushHistory:(BOOL)push {
+    if ((p == NMPageStreaming || p == NMPageRemoteDetail) && _remoteItems.empty() && _remoteTrail.count == 0) {
+        _remoteItems = rlnative::remote_browse("", false, "");
+    }
     if (push && p != _page_) [_navStack addObject:@(_page_)];
     _page_ = p;
     _backButton.enabled = _navStack.count > 0;
@@ -1758,8 +2365,12 @@ static const CGFloat kPlayerHeight = 78.0;
         case NMPageQueue: [self loadQueue]; page = [self pageQueue]; break;
         case NMPageSavedQueue: [self loadQueue]; page = [self pageSavedQueue]; break;
         case NMPageSearch: page = [self pageSearch]; break;
+        case NMPageStation: page = [self pageStation]; break;
+        case NMPageArtistDetail: page = [self pageArtistDetail]; break;
+        case NMPageRemoteDetail: page = [self pageStreaming]; break;
     }
     _contentScroll.documentView = page;
+    if (g_langEn) nm_translate_view(page);
     if (p == NMPageFolders) [self refreshFoldersStats];
     [_contentScroll.contentView scrollToPoint:NSZeroPoint];
     [_contentScroll reflectScrolledClipView:_contentScroll.contentView];
@@ -1817,6 +2428,64 @@ static const CGFloat kPlayerHeight = 78.0;
         }
     }
 }
+- (NSInteger)queueRowForMenu {
+    if (_queueTable.clickedRow >= 0) return _queueTable.clickedRow;
+    if (_railTable.clickedRow >= 0) return _railTable.clickedRow;
+    return -1;
+}
+- (void)queuePlayNow:(id)s { (void)s; const NSInteger r = [self queueRowForMenu]; if (r >= 0) rlnative::queue_play_index((std::size_t)r); }
+- (void)queueDelete:(id)s {
+    (void)s;
+    const NSInteger r = [self queueRowForMenu];
+    if (r < 0) return;
+    rlnative::queue_remove((std::size_t)r);
+    [self loadQueue];
+    [self reloadVisibleQueue];
+}
+- (void)queueMoveUp:(id)s {
+    (void)s;
+    const NSInteger r = [self queueRowForMenu];
+    if (r <= 0) return;
+    rlnative::queue_move((std::size_t)r, (std::size_t)(r - 1));
+    [self loadQueue];
+    [self reloadVisibleQueue];
+}
+- (void)queueMoveDown:(id)s {
+    (void)s;
+    const NSInteger r = [self queueRowForMenu];
+    if (r < 0 || (std::size_t)(r + 1) >= _queue.size()) return;
+    rlnative::queue_move((std::size_t)r, (std::size_t)(r + 1));
+    [self loadQueue];
+    [self reloadVisibleQueue];
+}
+
+- (id<NSPasteboardWriting>)tableView:(NSTableView*)tv pasteboardWriterForRow:(NSInteger)row {
+    if (tv != _railTable && tv != _queueTable) return nil;
+    NSPasteboardItem* it = [[NSPasteboardItem alloc] init];
+    [it setString:[NSString stringWithFormat:@"%ld", (long)row] forType:NSPasteboardTypeString];
+    return it;
+}
+- (NSDragOperation)tableView:(NSTableView*)tv validateDrop:(id<NSDraggingInfo>)info
+                 proposedRow:(NSInteger)row proposedDropOperation:(NSTableViewDropOperation)op {
+    (void)info; (void)op;
+    return (tv == _railTable || tv == _queueTable) ? NSDragOperationMove : NSDragOperationNone;
+}
+- (BOOL)tableView:(NSTableView*)tv acceptDrop:(id<NSDraggingInfo>)info row:(NSInteger)row
+   dropOperation:(NSTableViewDropOperation)op {
+    (void)op;
+    if (tv != _railTable && tv != _queueTable) return NO;
+    NSString* s = [[info draggingPasteboard] stringForType:NSPasteboardTypeString];
+    if (s.length == 0) return NO;
+    NSInteger from = s.integerValue;
+    NSInteger to = row;
+    if (to > from) to -= 1;
+    if (from < 0 || to < 0 || from == to) return NO;
+    rlnative::queue_move((std::size_t)from, (std::size_t)to);
+    [self loadQueue];
+    [self reloadVisibleQueue];
+    return YES;
+}
+
 - (void)queueDoubleClick:(id)s {
     const NSInteger row = _queueTable.clickedRow;
     if (row < 0) return;
@@ -1827,6 +2496,50 @@ static const CGFloat kPlayerHeight = 78.0;
     if (row < 0) return;
     rlnative::queue_play_index((std::size_t)row);
 }
+- (NSInteger)trackRowForMenu {
+    if (_trackTable.clickedRow >= 0) return _trackTable.clickedRow;
+    return _trackTable.selectedRow;
+}
+- (void)trackPlayMenu:(id)s {
+    (void)s;
+    const NSInteger r = [self trackRowForMenu];
+    if (r < 0) return;
+    if (_page_ == NMPageAlbumDetail) rlnative::play_album(g_detail.album.key, (int)r);
+    else if ((std::size_t)r < _tracks.size()) rlnative::play_path(_tracks[(std::size_t)r].path);
+}
+- (void)trackFavMenu:(id)s {
+    (void)s;
+    const NSInteger r = [self trackRowForMenu];
+    if (r < 0) return;
+    std::string path = (_page_ == NMPageAlbumDetail && (std::size_t)r < g_detail.tracks.size())
+        ? g_detail.tracks[(std::size_t)r].path
+        : ((std::size_t)r < _tracks.size() ? _tracks[(std::size_t)r].path : std::string());
+    if (!path.empty()) rlnative::favorite_toggle(path);
+}
+- (void)trackRevealMenu:(id)s {
+    (void)s;
+    const NSInteger r = [self trackRowForMenu];
+    if (r < 0) return;
+    std::string path = (_page_ == NMPageAlbumDetail && (std::size_t)r < g_detail.tracks.size())
+        ? g_detail.tracks[(std::size_t)r].path
+        : ((std::size_t)r < _tracks.size() ? _tracks[(std::size_t)r].path : std::string());
+    if (path.empty()) return;
+    NSString* p = [NSString stringWithUTF8String:path.c_str()];
+    [[NSWorkspace sharedWorkspace] selectFile:p inFileViewerRootedAtPath:@""];
+}
+- (void)trackCopyMenu:(id)s {
+    (void)s;
+    const NSInteger r = [self trackRowForMenu];
+    if (r < 0) return;
+    std::string path = (_page_ == NMPageAlbumDetail && (std::size_t)r < g_detail.tracks.size())
+        ? g_detail.tracks[(std::size_t)r].path
+        : ((std::size_t)r < _tracks.size() ? _tracks[(std::size_t)r].path : std::string());
+    if (path.empty()) return;
+    NSPasteboard* pb = [NSPasteboard generalPasteboard];
+    [pb clearContents];
+    [pb setString:[NSString stringWithUTF8String:path.c_str()] forType:NSPasteboardTypeString];
+}
+
 - (void)trackDoubleClick:(id)s {
     (void)s;
     NSInteger row = _trackTable.clickedRow;
@@ -1851,6 +2564,10 @@ static const CGFloat kPlayerHeight = 78.0;
 // ---------------------------------------------------------------------------
 - (NSInteger)numberOfRowsInTableView:(NSTableView*)tv {
     if (tv == _npLyrics) return (NSInteger)_lyrics.size();
+    if (tv == _filesTable) return (NSInteger)_folderNames.count;
+    if (tv == _remoteTable) return (NSInteger)_remoteItems.size();
+    if (tv == _settingsSections) return [self settingsSectionTitles].count;
+    if (tv == _settingsPresetTable) return (NSInteger)_settingsPresets.count;
     if (tv == _railTable || tv == _queueTable) return (NSInteger)_queue.size();
     if (tv == _trackTable) {
         if (_page_ == NMPageAlbumDetail) return (NSInteger)g_detail.tracks.size();
@@ -1888,6 +2605,44 @@ static const CGFloat kPlayerHeight = 78.0;
                                   (row == _activeLyricRow) ? g_theme.accent : g_theme.text);
         l.alignment = NSTextAlignmentCenter;
         l.frame = NSMakeRect(10, 7, w - 20, 20);
+        [cell addSubview:l];
+        return cell;
+    }
+    if (tv == _filesTable) {
+        NSTableCellView* cell = [[NSTableCellView alloc] initWithFrame:NSMakeRect(0, 0, w, 30)];
+        NSString* name = (row >= 0 && (NSUInteger)row < _folderNames.count) ? _folderNames[(NSUInteger)row] : @"";
+        NSTextField* l = nm_label(name, 12.5, NSFontWeightRegular, g_theme.text);
+        l.frame = NSMakeRect(8, 6, w - 20, 18);
+        [cell addSubview:l];
+        return cell;
+    }
+    if (tv == _remoteTable) {
+        if (row < 0 || (NSUInteger)row >= _remoteItems.size()) return nil;
+        const auto& e = _remoteItems[(NSUInteger)row];
+        NSString* title = [NSString stringWithUTF8String:e.title.c_str()];
+        NSString* sub = e.dir ? @"目录" : [NSString stringWithFormat:@"%s · %s",
+            e.artist.c_str(), e.album.c_str()];
+        NSTableCellView* cell = [self cellWithTitle:title sub:sub right:nm_time(e.dur) width:w];
+        NSTextField* icon = nm_label(e.dir ? @"📁" : @"♪", 12, NSFontWeightRegular, g_theme.muted);
+        icon.frame = NSMakeRect(6, 12, 18, 18);
+        [cell addSubview:icon];
+        for (NSView* v in cell.subviews) {
+            if ([v isKindOfClass:[NSTextField class]] && v.frame.origin.x == 8) v.frame = NSMakeRect(28, v.frame.origin.y, v.frame.size.width - 20, v.frame.size.height);
+        }
+        return cell;
+    }
+    if (tv == _settingsSections) {
+        NSString* title = [self settingsSectionTitles][(NSUInteger)row];
+        NSTableCellView* cell = [[NSTableCellView alloc] initWithFrame:NSMakeRect(0, 0, w, 34)];
+        NSTextField* l = nm_label(title, 12.5, NSFontWeightMedium, g_theme.text);
+        l.frame = NSMakeRect(12, 8, w - 20, 18);
+        [cell addSubview:l];
+        return cell;
+    }
+    if (tv == _settingsPresetTable) {
+        NSTableCellView* cell = [[NSTableCellView alloc] initWithFrame:NSMakeRect(0, 0, w, 26)];
+        NSTextField* l = nm_label(_settingsPresets[(NSUInteger)row], 12, NSFontWeightRegular, g_theme.text);
+        l.frame = NSMakeRect(8, 4, w - 16, 18);
         [cell addSubview:l];
         return cell;
     }
@@ -1969,7 +2724,19 @@ static const CGFloat kPlayerHeight = 78.0;
 
 - (NSCollectionViewItem*)collectionView:(NSCollectionView*)cv itemForRepresentedObjectAtIndexPath:(NSIndexPath*)ip {
     if (_page_ == NMPageArtists) {
-        NMArtistItem* item = [cv makeItemWithIdentifier:@"artist" forIndexPath:ip];
+        NMArtistItem* item = nil;
+        @try {
+            item = [cv makeItemWithIdentifier:@"artist" forIndexPath:ip];
+        } @catch (NSException* e) {
+            std::fprintf(stderr, "ARTITEM make exception: %s / %s\n",
+                         e.name.UTF8String ?: "?", e.reason.UTF8String ?: "?");
+            std::fflush(stderr);
+        }
+        if (!item) {
+            item = [[NMArtistItem alloc] init];
+            item.identifier = @"artist";
+            [item loadView];
+        }
         const NSInteger i = ip.item;
         if (i >= 0 && (std::size_t)i < _artists.size()) {
             NSString* name = [NSString stringWithUTF8String:_artists[(size_t)i].first.c_str()];
@@ -1990,9 +2757,9 @@ static const CGFloat kPlayerHeight = 78.0;
     NSIndexPath* ip = paths.anyObject;
     if (!ip) return;
     if (_page_ == NMPageArtists) {
-        if ((std::size_t)ip.item < _artistKeys.size()) {
-            g_detail = rlnative::album_detail(_artistKeys[(size_t)ip.item]);
-            [self showPage:NMPageAlbumDetail pushHistory:YES];
+        if ((std::size_t)ip.item < _artists.size()) {
+            _artistWho = [NSString stringWithUTF8String:_artists[(size_t)ip.item].first.c_str()];
+            [self showPage:NMPageArtistDetail pushHistory:YES];
         }
         return;
     }
@@ -2013,6 +2780,13 @@ static const CGFloat kPlayerHeight = 78.0;
 - (void)controlTextDidChange:(NSNotification*)note {
     if (note.object != _searchField) return;
     _query = _searchField.stringValue;
+    if (_page_ == NMPageStreaming || _page_ == NMPageRemoteDetail) {
+        _remoteItems = _query.length ? rlnative::remote_browse("", true, std::string(_query.UTF8String))
+                                     : rlnative::remote_browse("", false, "");
+        [self showPage:NMPageStreaming pushHistory:NO];
+        return;
+    }
+    if (_page_ == NMPageFolders) return;
     if (_query.length == 0) {
         [self showPage:NMPageAlbums pushHistory:NO];
         return;
@@ -2033,7 +2807,7 @@ static const CGFloat kPlayerHeight = 78.0;
     NSView* overlay = [[NSView alloc] init];
     overlay.translatesAutoresizingMaskIntoConstraints = NO;
     overlay.wantsLayer = YES;
-    overlay.layer.backgroundColor = g_theme.bg.CGColor;
+    nm_set_background(overlay, g_theme.bg);
 
     NSImageView* backdrop = [[NSImageView alloc] initWithFrame:NSMakeRect(0, 0, 1000, 700)];
     backdrop.imageScaling = NSImageScaleAxesIndependently;
@@ -2048,25 +2822,64 @@ static const CGFloat kPlayerHeight = 78.0;
     veil.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
     [overlay addSubview:veil];
 
-    _npCover = [[NSImageView alloc] initWithFrame:NSMakeRect(90, 150, 300, 300)];
+    // 左：音频分析 + 曲目信息（1.1.6 单曲页左栏）
+    _npAnalysisPanel = [[NSView alloc] initWithFrame:NSMakeRect(24, 90, 216, 420)];
+    _npAnalysisPanel.wantsLayer = YES;
+    nm_round_view(_npAnalysisPanel, 10, [g_theme.card colorWithAlphaComponent:0.7]);
+    _npAnalysisPanel.autoresizingMask = NSViewMaxXMargin | NSViewMinYMargin;
+    [overlay addSubview:_npAnalysisPanel];
+    NSTextField* anlTitle = nm_label(@"音频分析", 13, NSFontWeightSemibold, g_theme.text);
+    anlTitle.frame = NSMakeRect(14, 386, 180, 18);
+    [_npAnalysisPanel addSubview:anlTitle];
+    NSButton* anlRun = [NSButton buttonWithTitle:@"分析当前曲目" target:self action:@selector(cmdNpAnalyze:)];
+    anlRun.bezelStyle = NSBezelStyleRounded;
+    anlRun.frame = NSMakeRect(12, 350, 140, 28);
+    [_npAnalysisPanel addSubview:anlRun];
+    NSButton* anlDetail = [NSButton buttonWithTitle:@"详细" target:self action:@selector(cmdNpAnalyzeDetailed:)];
+    anlDetail.bezelStyle = NSBezelStyleRounded;
+    anlDetail.frame = NSMakeRect(158, 350, 46, 28);
+    [_npAnalysisPanel addSubview:anlDetail];
+    NSButton* autoBtn = [NSButton buttonWithTitle:@"播放即分析" target:self action:@selector(cmdNpAutoToggle:)];
+    autoBtn.bezelStyle = NSBezelStyleRounded;
+    autoBtn.frame = NSMakeRect(12, 318, 140, 26);
+    [_npAnalysisPanel addSubview:autoBtn];
+    NSButton* aiBtn = [NSButton buttonWithTitle:@"AI 资料" target:self action:@selector(cmdNpEntity:)];
+    aiBtn.bezelStyle = NSBezelStyleRounded;
+    aiBtn.frame = NSMakeRect(158, 318, 60, 26);
+    [_npAnalysisPanel addSubview:aiBtn];
+    NSTextField* anlHint = nm_label(@"分析只读文件；不写标签。", 10, NSFontWeightRegular, g_theme.muted);
+    anlHint.frame = NSMakeRect(12, 330, 190, 14);
+    [_npAnalysisPanel addSubview:anlHint];
+    _npAnalysisLabel = nm_label(@"尚未分析", 10.5, NSFontWeightRegular, g_theme.text);
+    _npAnalysisLabel.frame = NSMakeRect(12, 220, 192, 100);
+    _npAnalysisLabel.maximumNumberOfLines = 6;
+    _npAnalysisLabel.lineBreakMode = NSLineBreakByWordWrapping;
+    [_npAnalysisPanel addSubview:_npAnalysisLabel];
+    NSTextField* infoTitle = nm_label(@"曲目信息", 13, NSFontWeightSemibold, g_theme.text);
+    infoTitle.frame = NSMakeRect(14, 190, 180, 18);
+    [_npAnalysisPanel addSubview:infoTitle];
+    _npInfoLabel = nm_label(@"", 10.5, NSFontWeightRegular, g_theme.muted);
+    _npInfoLabel.frame = NSMakeRect(12, 40, 192, 140);
+    _npInfoLabel.maximumNumberOfLines = 8;
+    _npInfoLabel.lineBreakMode = NSLineBreakByWordWrapping;
+    [_npAnalysisPanel addSubview:_npInfoLabel];
+
+    _npCover = [[NSImageView alloc] initWithFrame:NSMakeRect(320, 150, 280, 280)];
     _npCover.imageScaling = NSImageScaleProportionallyUpOrDown;
-    _npCover.wantsLayer = YES;
-    _npCover.layer.cornerRadius = 14;
-    _npCover.layer.masksToBounds = YES;
-    _npCover.layer.backgroundColor = g_theme.card.CGColor;
+    nm_round_view(_npCover, 14, g_theme.card);
     _npCover.autoresizingMask = NSViewMaxXMargin | NSViewMinYMargin;
     [overlay addSubview:_npCover];
 
-    _npTitle = nm_label(@"未播放", 26, NSFontWeightBold, g_theme.text);
-    _npTitle.frame = NSMakeRect(90, 470, 460, 34);
+    _npTitle = nm_label(@"未播放", 24, NSFontWeightBold, g_theme.text);
+    _npTitle.frame = NSMakeRect(320, 448, 420, 32);
     _npTitle.autoresizingMask = NSViewMaxXMargin | NSViewMinYMargin;
     [overlay addSubview:_npTitle];
-    _npArtist = nm_label(@"", 15, NSFontWeightRegular, g_theme.muted);
-    _npArtist.frame = NSMakeRect(92, 506, 460, 22);
+    _npArtist = nm_label(@"", 14, NSFontWeightRegular, g_theme.muted);
+    _npArtist.frame = NSMakeRect(322, 482, 420, 20);
     _npArtist.autoresizingMask = NSViewMaxXMargin | NSViewMinYMargin;
     [overlay addSubview:_npArtist];
 
-    _npLyrics = [[NSTableView alloc] initWithFrame:NSMakeRect(560, 120, 420, 420)];
+    _npLyrics = [[NSTableView alloc] initWithFrame:NSMakeRect(640, 120, 360, 420)];
     _npLyrics.headerView = nil;
     _npLyrics.rowHeight = 34;
     _npLyrics.backgroundColor = [NSColor clearColor];
@@ -2075,9 +2888,9 @@ static const CGFloat kPlayerHeight = 78.0;
     _npLyrics.delegate = self;
     _npLyrics.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
     NSTableColumn* lc = [[NSTableColumn alloc] initWithIdentifier:@"lyric"];
-    lc.width = 400;
+    lc.width = 380;
     [_npLyrics addTableColumn:lc];
-    NSScrollView* lscroll = [[NSScrollView alloc] initWithFrame:NSMakeRect(560, 120, 420, 420)];
+    NSScrollView* lscroll = [[NSScrollView alloc] initWithFrame:NSMakeRect(640, 120, 360, 420)];
     lscroll.drawsBackground = NO;
     lscroll.hasVerticalScroller = YES;
     lscroll.scrollerStyle = NSScrollerStyleOverlay;
@@ -2093,21 +2906,19 @@ static const CGFloat kPlayerHeight = 78.0;
 
     NSButton* prev = nm_symbol_button(@"backward.fill", self, @selector(dispatchCmd:), @"上一首");
     prev.tag = (NSInteger)Cmd::Previous;
-    prev.frame = NSMakeRect(90, 60, 28, 28);
+    prev.frame = NSMakeRect(320, 52, 28, 28);
     [overlay addSubview:prev];
     NSButton* pp = [NSButton buttonWithImage:nm_symbol(@"play.fill", 20) target:self action:@selector(dispatchCmd:)];
     pp.tag = (NSInteger)Cmd::PlayPause;
     pp.bezelStyle = NSBezelStyleCircular;
     pp.bordered = NO;
-    pp.wantsLayer = YES;
-    pp.layer.cornerRadius = 22;
-    pp.layer.backgroundColor = g_theme.accent.CGColor;
+    nm_round_view(pp, 22, g_theme.accent);
     pp.contentTintColor = NSColor.whiteColor;
-    pp.frame = NSMakeRect(132, 52, 44, 44);
+    pp.frame = NSMakeRect(356, 44, 44, 44);
     [overlay addSubview:pp];
     NSButton* next = nm_symbol_button(@"forward.fill", self, @selector(dispatchCmd:), @"下一首");
     next.tag = (NSInteger)Cmd::Next;
-    next.frame = NSMakeRect(190, 60, 28, 28);
+    next.frame = NSMakeRect(408, 52, 28, 28);
     [overlay addSubview:next];
     return overlay;
 }
@@ -2116,6 +2927,34 @@ static const CGFloat kPlayerHeight = 78.0;
     _nowPlayingVisible = !_nowPlayingVisible;
     _nowPlayingOverlay.hidden = !_nowPlayingVisible;
     if (_nowPlayingVisible) [self refreshNowPlaying];
+}
+
+- (void)cmdNpEntity:(id)s {
+    (void)s;
+    NSString* artist = _barArtist.stringValue;
+    if (artist.length == 0) { [self toast:@"当前曲目没有艺术家信息"]; return; }
+    const auto doc = rta::net::json_parse(rlnative::entity_summary("person", std::string(artist.UTF8String)));
+    NSString* text = [NSString stringWithUTF8String:(doc["summary"].s().empty() ? doc["error"].s() : doc["summary"].s()).c_str()];
+    _npInfoLabel.stringValue = text.length ? text : @"没有返回资料";
+}
+- (void)cmdNpAnalyzeDetailed:(id)s { (void)s; [self cmdNpAnalyze:nil]; }
+- (void)cmdNpAutoToggle:(id)s {
+    (void)s;
+    const bool on = [[self uiValue:@"autoanl"] isEqualToString:@"1"];
+    rlnative::settings_save({{"autoanl", on ? "0" : "1"}});
+    _uiValues["autoanl"] = on ? "0" : "1";
+    [self toast:on ? @"已关闭播放即分析" : @"已开启播放即分析"];
+}
+- (void)cmdNpAnalyze:(id)s {
+    (void)s;
+    if (_snap.current.empty()) return;
+    const auto doc = rta::net::json_parse(rlnative::health_report_json(_snap.current));
+    const auto h = doc["health"];
+    _npAnalysisLabel.stringValue = [NSString stringWithFormat:
+        @"LRA %.1f LU · 峰值 %.2f dBFS\nRMS %.2f dBFS · 响度 %.1f LUFS\n削波 %.2f%% · DR %.1f dB\n%@",
+        h["lra"].n(), h["peak_dbfs"].n(), h["rms_dbfs"].n(), h["lufs"].n(),
+        h["clipped_pct"].n(), h["dr_db"].n(),
+        h["lossless_suspected"].b ? @"疑似假无损" : @"未发现假无损迹象"];
 }
 
 - (void)cmdCloseNowPlaying:(id)s {
@@ -2138,6 +2977,10 @@ static const CGFloat kPlayerHeight = 78.0;
     NSImageView* backdrop = nil;
     for (NSView* v in _nowPlayingOverlay.subviews) if ([v.identifier isEqualToString:@"npOverlay"]) backdrop = (NSImageView*)v;
     _lyrics = rlnative::lyrics(_snap.current);
+    _npInfoLabel.stringValue = [NSString stringWithFormat:@"%@\n时长 %@\n艺术家 %@",
+                                path.length ? path.lastPathComponent : @"未播放",
+                                nm_time(_snap.dur),
+                                _barArtist.stringValue.length ? _barArtist.stringValue : @"—"];
     [_npLyrics reloadData];
     _activeLyricRow = -1;
     if (path.length) {
@@ -2198,6 +3041,10 @@ static const CGFloat kPlayerHeight = 78.0;
     info[MPMediaItemPropertyPlaybackDuration] = @(_snap.dur);
     info[MPNowPlayingInfoPropertyElapsedPlaybackTime] = @(_snap.pos);
     info[MPNowPlayingInfoPropertyPlaybackRate] = @(_snap.playing && !_snap.paused ? 1.0 : 0.0);
+    if (_barCover.image) {
+        info[MPMediaItemPropertyArtwork] = [[MPMediaItemArtwork alloc] initWithBoundsSize:_barCover.image.size
+            requestHandler:^NSImage*(CGSize size) { (void)size; return _barCover.image; }];
+    }
     [MPNowPlayingInfoCenter defaultCenter].nowPlayingInfo = info;
 }
 
@@ -2210,10 +3057,22 @@ static const CGFloat kPlayerHeight = 78.0;
     return l;
 }
 
+- (NSString*)uiValue:(NSString*)key {
+    auto it = _uiValues.find(std::string(key.UTF8String));
+    if (it != _uiValues.end()) return [NSString stringWithUTF8String:it->second.c_str()];
+    auto sit = _settings.find(std::string(key.UTF8String));
+    return sit == _settings.end() ? @"" : [NSString stringWithUTF8String:sit->second.c_str()];
+}
+
 - (NSTextField*)formField:(NSString*)key width:(CGFloat)w {
-    const auto it = _settings.find(std::string(key.UTF8String));
     NSTextField* f = [[NSTextField alloc] initWithFrame:NSMakeRect(0, 0, w, 24)];
-    f.stringValue = it == _settings.end() ? @"" : [NSString stringWithUTF8String:it->second.c_str()];
+    const auto it = _uiValues.find(std::string(key.UTF8String));
+    if (it != _uiValues.end()) {
+        f.stringValue = [NSString stringWithUTF8String:it->second.c_str()];
+    } else {
+        const auto sit = _settings.find(std::string(key.UTF8String));
+        f.stringValue = sit == _settings.end() ? @"" : [NSString stringWithUTF8String:sit->second.c_str()];
+    }
     f.identifier = key;
     f.target = self;
     f.action = @selector(settingChanged:);
@@ -2228,8 +3087,7 @@ static const CGFloat kPlayerHeight = 78.0;
         [p addItemWithTitle:(i < titles.count ? titles[i] : values[i])];
         p.lastItem.representedObject = values[i];
     }
-    const auto it = _settings.find(std::string(key.UTF8String));
-    NSString* cur = it == _settings.end() ? @"" : [NSString stringWithUTF8String:it->second.c_str()];
+    NSString* cur = [self uiValue:key];
     NSInteger idx = 0;
     for (NSInteger i = 0; i < p.numberOfItems; ++i) {
         if ([[p itemAtIndex:i].representedObject isEqualToString:cur]) { idx = i; break; }
@@ -2266,65 +3124,578 @@ static const CGFloat kPlayerHeight = 78.0;
     return item;
 }
 
-- (void)openSettings {
-    if (_settingsWindow) { [_settingsWindow makeKeyAndOrderFront:nil]; return; }
+- (NSArray<NSString*>*)settingsSectionTitles {
+    return @[@"通用", @"输出", @"升频 (PCM)", @"DSD", @"PEQ / EQ", @"耳机 EQ (OPRA)",
+             @"资料库", @"流媒体", @"分析 / AI", @"设备投放", @"输入采集",
+             @"房间校正", @"更新", @"诊断与反馈", @"关于"];
+}
+
+- (NSView*)sectionPage:(NSArray<NSView*>*)rows {
+    CGFloat h = 20;
+    for (NSView* r in rows) h += r.frame.size.height + 4;
+    NMFlippedView* v = [[NMFlippedView alloc] initWithFrame:NSMakeRect(0, 0, 620, MAX(h, 380))];
+    CGFloat y = 16;
+    for (NSView* r in rows) {
+        r.frame = NSMakeRect(24, y, 572, r.frame.size.height);
+        [v addSubview:r];
+        y += r.frame.size.height + 4;
+    }
+    return v;
+}
+
+- (NSButton*)sectionButton:(NSString*)title action:(SEL)action {
+    NSButton* b = [NSButton buttonWithTitle:title target:self action:action];
+    b.bezelStyle = NSBezelStyleRounded;
+    b.frame = NSMakeRect(0, 0, 150, 28);
+    return b;
+}
+
+- (NSTextField*)infoText:(NSString*)text {
+    NSTextField* l = nm_label(text, 11.5, NSFontWeightRegular, g_theme.muted);
+    l.frame = NSMakeRect(0, 0, 560, 18);
+    return l;
+}
+
+- (NSArray<NSView*>*)settingsRowsForSection:(NSInteger)idx {
+    NSMutableArray<NSView*>* rows = [NSMutableArray array];
     [self reloadSettings];
-    NSWindow* w = [[NSWindow alloc] initWithContentRect:NSMakeRect(0, 0, 700, 480)
-        styleMask:NSWindowStyleMaskTitled | NSWindowStyleMaskClosable backing:NSBackingStoreBuffered defer:NO];
+    switch (idx) {
+        case 0: {
+            [rows addObject:[self formRow:@"主题色" control:[self formPopup:@"theme" values:@[@"light", @"dark", @"blue"] titles:@[@"白色（默认）", @"深色", @"浅蓝色"] width:220] y:0 width:572]];
+            [rows addObject:[self formRow:@"语言" control:[self formPopup:@"lang" values:@[@"zh", @"en"] titles:@[@"中文", @"English"] width:220] y:0 width:572]];
+            [rows addObject:[self formRow:@"界面风格" control:[self formPopup:@"uistyle" values:@[@"apple", @"classic"] titles:@[@"Apple Music 风格", @"经典 Hi-Fi 工作台"] width:220] y:0 width:572]];
+            [rows addObject:[self infoText:@"主题即时生效；语言在网页界面重启后生效（原生文案当前为中文）。"]];
+            break;
+        }
+        case 1: {
+            if (_uiValues["backend"].empty()) _uiValues["backend"] = [self selectedSettingsValue:@"backend" fallback:@"coreaudio"].UTF8String;
+            _outputDevices = rlnative::output_devices();
+            NSMutableArray* names = [NSMutableArray array];
+            NSMutableArray* ids = [NSMutableArray array];
+            for (const auto& d : _outputDevices) {
+                [names addObject:[NSString stringWithFormat:@"%s%@", d.name.c_str(), d.isDefault ? @"（默认）" : @""]];
+                [ids addObject:[NSString stringWithUTF8String:d.id.c_str()]];
+            }
+            if (names.count == 0) { [names addObject:@"（未枚举到输出设备）"]; [ids addObject:@""]; }
+            NSPopUpButton* dev = [self formPopup:@"device" values:ids titles:names width:300];
+            [rows addObject:[self formRow:@"输出设备" control:dev y:0 width:572]];
+            [rows addObject:[self formRow:@"输出后端" control:[self formPopup:@"backend" values:@[@"coreaudio", @"hog", @"null", @"upnp"] titles:@[@"CoreAudio", @"独占 (Hog)", @"静音 (null)", @"UPnP 投放"] width:220] y:0 width:572]];
+            [rows addObject:[self formRow:@"缓冲 (ms)" control:[self formField:@"buffer" width:120] y:0 width:572]];
+            [rows addObject:[self formRow:@"音量 (dB)" control:[self formField:@"volume" width:120] y:0 width:572]];
+            [rows addObject:[self formRow:@"响度" control:[self formPopup:@"loudness" values:@[@"0", @"1"] titles:@[@"关闭", @"开启"] width:160] y:0 width:572]];
+            [rows addObject:[self formRow:@"声道数" control:[self formField:@"channels" width:120] y:0 width:572]];
+            [rows addObject:[self formRow:@"声道微调" control:[self formField:@"trim" width:300] y:0 width:572]];
+            [rows addObject:[self formRow:@"ReplayGain" control:[self formPopup:@"rgmode" values:@[@"off", @"track", @"album"] titles:@[@"关闭", @"按曲目", @"按专辑"] width:200] y:0 width:572]];
+            [rows addObject:[self formRow:@"RG 前级 (dB)" control:[self formField:@"rgpreamp" width:120] y:0 width:572]];
+            [rows addObject:[self formRow:@"RG 防削波" control:[self formPopup:@"rgpreventclip" values:@[@"0", @"1"] titles:@[@"关闭", @"开启"] width:160] y:0 width:572]];
+            [rows addObject:[self formRow:@"GPU 后端" control:[self formPopup:@"gpuvendor" values:@[@"auto", @"metal", @"cpu"] titles:@[@"自动", @"Metal GPU", @"CPU"] width:200] y:0 width:572]];
+            [rows addObject:[self formRow:@"缓冲" control:[self sectionButton:@"复位缓冲 (buffer/reset)" action:@selector(cmdResetBuffer:)] y:0 width:572]];
+            break;
+        }
+        case 2: {
+            [rows addObject:[self formRow:@"目标采样率" control:[self formField:@"rate" width:160] y:0 width:572]];
+            [rows addObject:[self formRow:@"滤波器" control:[self formField:@"filter" width:260] y:0 width:572]];
+            [rows addObject:[self formRow:@"滤波器 (Nx)" control:[self formField:@"filterNx" width:260] y:0 width:572]];
+            [rows addObject:[self formRow:@"taps" control:[self formField:@"taps" width:120] y:0 width:572]];
+            [rows addObject:[self formRow:@"衰减 (dB)" control:[self formField:@"atten" width:120] y:0 width:572]];
+            [rows addObject:[self formRow:@"过渡带" control:[self formField:@"transition" width:160] y:0 width:572]];
+            [rows addObject:[self formRow:@"相位" control:[self formField:@"phase" width:160] y:0 width:572]];
+            [rows addObject:[self formRow:@"噪声整形" control:[self formField:@"shaper" width:200] y:0 width:572]];
+            [rows addObject:[self formRow:@"两段式" control:[self formPopup:@"twostage" values:@[@"0", @"1"] titles:@[@"关闭", @"开启"] width:160] y:0 width:572]];
+            [rows addObject:[self formRow:@"ISP" control:[self formPopup:@"isp" values:@[@"0", @"1"] titles:@[@"关闭", @"开启"] width:160] y:0 width:572]];
+            [rows addObject:[self formRow:@"流式解码" control:[self formPopup:@"streamdecode" values:@[@"0", @"1"] titles:@[@"关闭", @"开启"] width:160] y:0 width:572]];
+            [rows addObject:[self formRow:@"流式阈值 (MB)" control:[self formField:@"stream_threshold_mb" width:120] y:0 width:572]];
+            [rows addObject:[self formRow:@"峰值预扫 (s)" control:[self formField:@"isp_prescan_sec" width:120] y:0 width:572]];
+            break;
+        }
+        case 3: {
+            [rows addObject:[self formRow:@"DSD 输出" control:[self formPopup:@"dsd" values:@[@"0", @"1", @"2"] titles:@[@"关闭", @"DoP", @"Native"] width:200] y:0 width:572]];
+            [rows addObject:[self formRow:@"调制器阶数" control:[self formField:@"modorder" width:120] y:0 width:572]];
+            [rows addObject:[self formRow:@"调制器族" control:[self formField:@"modfamily" width:160] y:0 width:572]];
+            [rows addObject:[self formRow:@"out-of-band 增益" control:[self formField:@"oobgain" width:160] y:0 width:572]];
+            [rows addObject:[self formRow:@"AHM 位深" control:[self formField:@"ahmbits" width:160] y:0 width:572]];
+            [rows addObject:[self formRow:@"调制器 cut" control:[self formField:@"modcut" width:160] y:0 width:572]];
+            [rows addObject:[self formRow:@"调制器抖动" control:[self formField:@"moddith" width:160] y:0 width:572]];
+            [rows addObject:[self formRow:@"ramp" control:[self formField:@"ramp" width:120] y:0 width:572]];
+            [rows addObject:[self formRow:@"DSD Native" control:[self formPopup:@"dsdnative" values:@[@"0", @"1"] titles:@[@"关闭", @"开启"] width:160] y:0 width:572]];
+            [rows addObject:[self formRow:@"DirectSDM" control:[self formPopup:@"directsdm" values:@[@"0", @"1"] titles:@[@"关闭", @"开启"] width:160] y:0 width:572]];
+            [rows addObject:[self formRow:@"DSD 类型" control:[self formField:@"dsdkind" width:200] y:0 width:572]];
+            [rows addObject:[self formRow:@"DSD 转换" control:[self formField:@"dsdconv" width:200] y:0 width:572]];
+            [rows addObject:[self formRow:@"两段式 DSD" control:[self formPopup:@"dsd2stage" values:@[@"0", @"1"] titles:@[@"关闭", @"开启"] width:160] y:0 width:572]];
+            [rows addObject:[self formRow:@"SDM 源滤波" control:[self formField:@"sdmfilt" width:220] y:0 width:572]];
+            [rows addObject:[self formRow:@"SDM 源滤波 (Nx)" control:[self formField:@"sdmfiltnx" width:220] y:0 width:572]];
+            break;
+        }
+        case 4: {
+            const auto peq = rlnative::peq_state();
+            _peqBands = peq.bands;
+            [rows addObject:[self formRow:@"PEQ 旁路" control:[self formPopup:@"peqbypass" values:@[@"0", @"1"] titles:@[@"启用", @"旁路"] width:160] y:0 width:572]];
+            [rows addObject:[self formRow:@"前级 (dB)" control:[self formField:@"peqpreamp" width:120] y:0 width:572]];
+            NSMutableArray* presets = [NSMutableArray arrayWithObject:@"—"];
+            for (const auto& n : peq.presets) [presets addObject:[NSString stringWithUTF8String:n.c_str()]];
+            NSPopUpButton* pp = [self formPopup:@"peqpreset" values:presets titles:presets width:260];
+            pp.target = self;
+            pp.action = @selector(cmdPeqApplyPreset:);
+            [rows addObject:[self formRow:@"预设" control:pp y:0 width:572]];
+            NSMutableString* text = [NSMutableString string];
+            for (const auto& b : _peqBands) {
+                [text appendFormat:@"%d,%s,%.2f,%.2f,%.3f,%s\n", b.index, b.type.c_str(), b.freq,
+                 b.gain, b.q, b.on ? "on" : "off"];
+            }
+            _settingsPeqEditor = [[NSTextView alloc] initWithFrame:NSMakeRect(0, 0, 552, 220)];
+            _settingsPeqEditor.string = text.length ? text : @"（当前没有 PEQ 频段）";
+            _settingsPeqEditor.font = [NSFont monospacedSystemFontOfSize:11.5 weight:NSFontWeightRegular];
+            NSScrollView* es = [[NSScrollView alloc] initWithFrame:NSMakeRect(0, 0, 552, 220)];
+            es.hasVerticalScroller = YES;
+            es.documentView = _settingsPeqEditor;
+            [rows addObject:[self formRow:@"频段" control:es y:0 width:572]];
+            NMPeqCurveView* curve = [[NMPeqCurveView alloc] initWithFrame:NSMakeRect(0, 0, 552, 150)];
+            curve.points = rlnative::peq_curve();
+            NSView* curveRow = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 572, 170)];
+            NSTextField* cl = nm_label(@"频响曲线（只读；改频段用下方文本）", 11.5, NSFontWeightMedium, g_theme.muted);
+            cl.frame = NSMakeRect(0, 152, 400, 18);
+            [curveRow addSubview:cl];
+            curve.frame = NSMakeRect(0, 0, 552, 148);
+            [curveRow addSubview:curve];
+            [rows addObject:curveRow];
+            [rows addObject:[self formRow:@"保存" control:[self sectionButton:@"保存 PEQ" action:@selector(cmdPeqSave:)] y:0 width:572]];
+            [rows addObject:[self formRow:@"EQ 文件" control:[self formField:@"eq" width:400] y:0 width:572]];
+            [rows addObject:[self formRow:@"卷积 IR" control:[self formField:@"ir" width:400] y:0 width:572]];
+            [rows addObject:[self formRow:@"IR 用 GPU" control:[self formPopup:@"irgpu" values:@[@"0", @"1"] titles:@[@"关闭", @"开启"] width:160] y:0 width:572]];
+            [rows addObject:[self infoText:@"格式：序号,类型,频率,增益,Q,on/off；每行一段。"]];
+            break;
+        }
+        case 5: {
+            [rows addObject:[self formRow:@"耳机型号 (productId)" control:[self formField:@"opraproduct" width:300] y:0 width:572]];
+            [rows addObject:[self formRow:@"搜索" control:[self sectionButton:@"搜索 OPRA 预设" action:@selector(cmdOpraSearch:)] y:0 width:572]];
+            _settingsPresetTable = [[NSTableView alloc] initWithFrame:NSMakeRect(0, 0, 552, 160)];
+            _settingsPresetTable.headerView = nil;
+            _settingsPresetTable.rowHeight = 26;
+            _settingsPresetTable.dataSource = self;
+            _settingsPresetTable.delegate = self;
+            NSTableColumn* c = [[NSTableColumn alloc] initWithIdentifier:@"p"];
+            c.width = 540;
+            [_settingsPresetTable addTableColumn:c];
+            NSScrollView* ps = [[NSScrollView alloc] initWithFrame:NSMakeRect(0, 0, 552, 160)];
+            ps.hasVerticalScroller = YES;
+            ps.documentView = _settingsPresetTable;
+            [rows addObject:[self formRow:@"预设列表" control:ps y:0 width:572]];
+            [rows addObject:[self formRow:@"应用" control:[self sectionButton:@"应用所选 OPRA 预设" action:@selector(cmdOpraApply:)] y:0 width:572]];
+            [rows addObject:[self infoText:@"应用后会写入 EQ 配置；OPRA 数据来自内置 opra_index.json。"]];
+            break;
+        }
+        case 6: {
+            const auto st = rlnative::library_stats();
+            [rows addObject:[self infoText:[NSString stringWithFormat:@"曲目 %d · 专辑 %d · 扫描 %s · 失败目录 %d",
+                                            st.tracks, st.albums, st.scanning ? "进行中" : "空闲", st.failedDirs]]];
+            [rows addObject:[self formRow:@"扫描线程" control:[self formField:@"scanthreads" width:120] y:0 width:572]];
+            [rows addObject:[self formRow:@"增量扫描" control:[self sectionButton:@"开始增量扫描" action:@selector(cmdScanLibrary:)] y:0 width:572]];
+            [rows addObject:[self formRow:@"全量重扫" control:[self sectionButton:@"开始全量重扫" action:@selector(cmdRescanLibrary:)] y:0 width:572]];
+            [rows addObject:[self formRow:@"元数据补全" control:[self formPopup:@"metaon" values:@[@"0", @"1"] titles:@[@"关闭", @"开启"] width:160] y:0 width:572]];
+            [rows addObject:[self formRow:@"LLM 整理" control:[self formPopup:@"metallm" values:@[@"0", @"1"] titles:@[@"关闭", @"开启"] width:160] y:0 width:572]];
+            [rows addObject:[self formRow:@"AI 综合" control:[self formPopup:@"metasummary" values:@[@"0", @"1"] titles:@[@"关闭", @"开启"] width:160] y:0 width:572]];
+            [rows addObject:[self formRow:@"AI 填充" control:[self formPopup:@"metaaifill" values:@[@"0", @"1"] titles:@[@"关闭", @"开启"] width:160] y:0 width:572]];
+            [rows addObject:[self formRow:@"源顺序" control:[self formField:@"metasrcorder" width:400] y:0 width:572]];
+            [rows addObject:[self formRow:@"根目录" control:[self sectionButton:@"添加根目录…" action:@selector(cmdAddRoot:)] y:0 width:572]];
+            [rows addObject:[self formRow:@"清理" control:[self sectionButton:@"清理缺失曲目" action:@selector(cmdPrune:)] y:0 width:572]];
+            [rows addObject:[self formRow:@"封面" control:[self sectionButton:@"预热全部专辑封面" action:@selector(cmdPrefetchCovers:)] y:0 width:572]];
+            {
+                const auto prov = rta::net::json_parse(rlnative::providers_json());
+                for (const auto& it : prov["items"].arr) {
+                    NSString* key = [NSString stringWithFormat:@"metasrc_%s", it["id"].s().c_str()];
+                    NSString* label = [NSString stringWithFormat:@"数据源：%s", it["name"].s().c_str()];
+                    if (_uiValues[std::string(key.UTF8String)] .empty())
+                        _uiValues[std::string(key.UTF8String)] = it["on"].b ? "1" : "0";
+                    [rows addObject:[self formRow:label
+                                          control:[self formPopup:key values:@[@"1", @"0"] titles:@[@"开启", @"关闭"] width:160]
+                                                y:0 width:572]];
+                }
+            }
+            break;
+        }
+        case 7: {
+            if (_uiValues["srckind"].empty()) {
+                const auto cfg = rlnative::source_config();
+                _uiValues["srckind"] = cfg.kind.empty() ? "subsonic" : cfg.kind;
+                _uiValues["srcbase"] = cfg.base;
+                _uiValues["srcuser"] = cfg.user;
+                _uiValues["srcpass"] = "";
+            }
+            [rows addObject:[self formRow:@"类型" control:[self formField:@"srckind" width:180] y:0 width:572]];
+            [rows addObject:[self formRow:@"服务器地址" control:[self formField:@"srcbase" width:320] y:0 width:572]];
+            [rows addObject:[self formRow:@"用户名" control:[self formField:@"srcuser" width:220] y:0 width:572]];
+            [rows addObject:[self formRow:@"密码" control:[self formField:@"srcpass" width:220] y:0 width:572]];
+            [rows addObject:[self formRow:@"保存" control:[self sectionButton:@"保存并测试连接" action:@selector(cmdSourceSave:)] y:0 width:572]];
+            [rows addObject:[self formRow:@"浏览" control:[self sectionButton:@"打开流媒体浏览页" action:@selector(cmdOpenRemotePage:)] y:0 width:572]];
+            [rows addObject:[self infoText:@"支持 Subsonic / Emby（与网页端同一 SourceManager）。"]];
+            break;
+        }
+        case 8: {
+            const auto stats = rta::net::json_parse(rlnative::health_stats_json());
+            [rows addObject:[self infoText:[NSString stringWithFormat:@"分析缓存 %d · 命中 %d · 运行 %d · 取消 %d",
+                                            (int)stats["cache"].n(), (int)stats["hits"].n(),
+                                            (int)stats["runs"].n(), (int)stats["cancelled"].n()]]];
+            [rows addObject:[self formRow:@"播放即分析" control:[self formPopup:@"autoanl" values:@[@"0", @"1"] titles:@[@"关闭", @"开启"] width:160] y:0 width:572]];
+            [rows addObject:[self formRow:@"分析当前曲目" control:[self sectionButton:@"分析当前曲目（CPU 密集）" action:@selector(cmdAnalyzeCurrent:)] y:0 width:572]];
+            _npAnalysisLabel = nm_label(@"", 11.5, NSFontWeightRegular, g_theme.muted);
+            _npAnalysisLabel.frame = NSMakeRect(0, 0, 552, 80);
+            _npAnalysisLabel.maximumNumberOfLines = 4;
+            [rows addObject:[self formRow:@"结果" control:_npAnalysisLabel y:0 width:572]];
+            [rows addObject:[self formRow:@"元数据补全" control:[self sectionButton:@"补全当前曲目元数据" action:@selector(cmdEnrichCurrent:)] y:0 width:572]];
+            [rows addObject:[self formRow:@"LLM 月配额" control:[self formField:@"llmmonthlycap" width:140] y:0 width:572]];
+            [rows addObject:[self infoText:@"分析只读取文件、不写标签；结果只进内存缓存。"]];
+            break;
+        }
+        case 9: {
+            _castDevices = rlnative::cast_devices();
+            NSMutableArray* names = [NSMutableArray array];
+            NSMutableArray* ids = [NSMutableArray array];
+            for (const auto& d : _castDevices) {
+                [names addObject:[NSString stringWithFormat:@"%s%s", d.name.c_str(), d.airplay ? @" (AirPlay)" : @" (UPnP)"]];
+                [ids addObject:[NSString stringWithUTF8String:d.id.c_str()]];
+            }
+            if (names.count == 0) { [names addObject:@"（未发现投放设备）"]; [ids addObject:@""]; }
+            [rows addObject:[self formRow:@"设备" control:[self formPopup:@"castdev" values:ids titles:names width:320] y:0 width:572]];
+            [rows addObject:[self formRow:@"操作" control:[self sectionButton:@"开始投放当前曲目" action:@selector(cmdCastStart:)] y:0 width:572]];
+            [rows addObject:[self formRow:@"停止" control:[self sectionButton:@"停止投放" action:@selector(cmdCastStop:)] y:0 width:572]];
+            [rows addObject:[self formRow:@"扫描" control:[self sectionButton:@"重新扫描设备" action:@selector(cmdCastScan:)] y:0 width:572]];
+            [rows addObject:[self formRow:@"状态" control:[self infoText:[[NSString alloc] initWithUTF8String:rlnative::cast_state_json().c_str()]] y:0 width:572]];
+            [rows addObject:[self formRow:@"投放升频" control:[self formPopup:@"cast_upsample" values:@[@"0", @"1"] titles:@[@"关闭", @"开启"] width:160] y:0 width:572]];
+            [rows addObject:[self formRow:@"NAA 主机" control:[self formField:@"naahost" width:300] y:0 width:572]];
+            [rows addObject:[self formRow:@"UPnP 设备" control:[self formField:@"upnpdev" width:300] y:0 width:572]];
+            break;
+        }
+        case 10: {
+            if (_uiValues["inmode"].empty()) _uiValues["inmode"] = "record";
+            _inputDevices = rlnative::input_devices();
+            NSMutableArray* names = [NSMutableArray array];
+            NSMutableArray* ids = [NSMutableArray array];
+            for (const auto& d : _inputDevices) {
+                [names addObject:[NSString stringWithFormat:@"%s%@", d.name.c_str(), d.loopback ? @"（回环）" : @""]];
+                [ids addObject:[NSString stringWithUTF8String:d.id.c_str()]];
+            }
+            if (names.count == 0) { [names addObject:@"（未枚举到输入设备）"]; [ids addObject:@""]; }
+            [rows addObject:[self formRow:@"输入设备" control:[self formPopup:@"indev" values:ids titles:names width:300] y:0 width:572]];
+            [rows addObject:[self formRow:@"模式" control:[self formPopup:@"inmode" values:@[@"record", @"monitor", @"null"] titles:@[@"录制", @"监听（会出声）", @"空跑"] width:220] y:0 width:572]];
+            [rows addObject:[self formRow:@"时长 (s)" control:[self formField:@"inseconds" width:120] y:0 width:572]];
+            [rows addObject:[self formRow:@"开始" control:[self sectionButton:@"开始采集" action:@selector(cmdInputStart:)] y:0 width:572]];
+            [rows addObject:[self formRow:@"停止" control:[self sectionButton:@"停止采集" action:@selector(cmdInputStop:)] y:0 width:572]];
+            [rows addObject:[self formRow:@"输出" control:[self formField:@"inout" width:300] y:0 width:572]];
+            [rows addObject:[self formRow:@"后端" control:[self formField:@"inbackend" width:220] y:0 width:572]];
+            [rows addObject:[self formRow:@"缓冲" control:[self formField:@"inbuf" width:120] y:0 width:572]];
+            [rows addObject:[self formRow:@"偏移" control:[self formField:@"inoffset" width:120] y:0 width:572]];
+            [rows addObject:[self formRow:@"监听" control:[self formPopup:@"inmon" values:@[@"0", @"1"] titles:@[@"关闭", @"开启"] width:160] y:0 width:572]];
+            break;
+        }
+        case 11: {
+            const auto layouts = rta::net::json_parse(rlnative::room_layouts_json());
+            NSMutableArray* names = [NSMutableArray array];
+            for (const auto& l : layouts["layouts"].arr) {
+                NSString* n = [NSString stringWithUTF8String:l["name"].s().c_str()];
+                [names addObject:[NSString stringWithFormat:@"%@ (%d ch)", n, (int)l["ch"].n()]];
+            }
+            if (names.count == 0) [names addObject:@"（无可用布局）"];
+            if (_uiValues["roomlayout"].empty()) _uiValues["roomlayout"] = ((NSString*)names.firstObject).UTF8String ?: "";
+            if (_uiValues["roomsec"].empty()) _uiValues["roomsec"] = "6";
+            [rows addObject:[self formRow:@"布局" control:[self formPopup:@"roomlayout" values:names titles:names width:260] y:0 width:572]];
+            [rows addObject:[self formRow:@"扫频时长 (s)" control:[self formField:@"roomsec" width:120] y:0 width:572]];
+            [rows addObject:[self formRow:@"开始测量" control:[self sectionButton:@"开始测量（会发声）" action:@selector(cmdRoomMeasure:)] y:0 width:572]];
+            [rows addObject:[self formRow:@"取消" control:[self sectionButton:@"取消测量" action:@selector(cmdRoomCancel:)] y:0 width:572]];
+            const auto st = rta::net::json_parse(rlnative::room_status_json());
+            [rows addObject:[self formRow:@"状态" control:[self infoText:[NSString stringWithFormat:@"%s/%s · %d/%d",
+                st["phase"].s().c_str(), st["currentChannel"].s().c_str(),
+                (int)st["channelsDone"].n(), (int)st["channelsTotal"].n()]] y:0 width:572]];
+            [rows addObject:[self infoText:@"测量会通过扬声器播放扫频，测试前请确认音量。"]];
+            break;
+        }
+        case 12: {
+            [rows addObject:[self infoText:[NSString stringWithFormat:@"当前版本 %s（arm64）", RLPLAYER_VERSION_STR]]];
+            [rows addObject:[self formRow:@"更新通道" control:[self formPopup:@"updatechannel" values:@[@"global", @"cn"] titles:@[@"全球通道（GitHub）", @"中国大陆通道"] width:240] y:0 width:572]];
+            [rows addObject:[self formRow:@"预发布" control:[self formPopup:@"updbeta" values:@[@"0", @"1"] titles:@[@"不接收 beta", @"接收 beta"] width:200] y:0 width:572]];
+            [rows addObject:[self formRow:@"检查" control:[self sectionButton:@"检查更新…" action:@selector(cmdCheckUpdate:)] y:0 width:572]];
+            [rows addObject:[self infoText:@"更新会下载 DMG → 校验 sha256/size → 挂载 → 替换 .app。"]];
+            break;
+        }
+        case 13: {
+            [rows addObject:[self formRow:@"诊断包" control:[self sectionButton:@"导出诊断 zip" action:@selector(cmdExportDiag:)] y:0 width:572]];
+            [rows addObject:[self formRow:@"反馈" control:[self sectionButton:@"撰写反馈邮件（附诊断）" action:@selector(cmdSendFeedback:)] y:0 width:572]];
+            [rows addObject:[self infoText:@"诊断包含版本、系统、日志与设置快照；不包含音乐文件内容。"]];
+            break;
+        }
+        default: {
+            [rows addObject:[self infoText:[NSString stringWithFormat:@"RLPlayer %s · arm64 · GPL-3.0-or-later", RLPLAYER_VERSION_STR]]];
+            [rows addObject:[self infoText:@"上游 rainlain（okhuoyanyan）/ macOS 分支 BH2VOQ"]];
+            [rows addObject:[self infoText:@"纯 AppKit 原生界面；播放核心与网页端共用同一 C++ 实现。"]];
+            [rows addObject:[self formRow:@"项目主页" control:[self infoText:@"github.com/BH2VOQ/RLPlayer-Mac"] y:0 width:572]];
+            break;
+        }
+    }
+    return rows;
+}
+
+- (void)showSettingsSection:(NSInteger)idx {
+    if (!_settingsWindow) { [self openSettings]; idx = MAX(0, MIN(idx, 14)); }
+    _settingsSectionIndex = MAX(0, MIN(idx, 14));
+    [_settingsSections selectRowIndexes:[NSIndexSet indexSetWithIndex:(NSUInteger)_settingsSectionIndex]
+                  byExtendingSelection:NO];
+    NSView* page = [self sectionPage:[self settingsRowsForSection:_settingsSectionIndex]];
+    _settingsScroll.documentView = page;
+}
+
+- (void)tableViewSelectionDidChange:(NSNotification*)note {
+    if (note.object == _settingsSections) {
+        const NSInteger row = _settingsSections.selectedRow;
+        if (row >= 0 && row != _settingsSectionIndex) { _settingsSectionIndex = row; [self showSettingsSection:row]; }
+        return;
+    }
+}
+
+- (void)settingsSectionSelected:(id)s {
+    (void)s;
+    const NSInteger row = _settingsSections.selectedRow;
+    if (row < 0) return;
+    _settingsSectionIndex = row;
+    [self showSettingsSection:row];
+}
+
+- (void)openSettings {
+    if (_settingsWindow) { [_settingsWindow makeKeyAndOrderFront:nil]; [self showSettingsSection:_settingsSectionIndex]; return; }
+    [self reloadSettings];
+    NSWindow* w = [[NSWindow alloc] initWithContentRect:NSMakeRect(0, 0, 880, 620)
+        styleMask:NSWindowStyleMaskTitled | NSWindowStyleMaskClosable | NSWindowStyleMaskResizable
+        backing:NSBackingStoreBuffered defer:NO];
     w.title = @"设置";
+    w.minSize = NSMakeSize(760, 520);
     [w center];
     _settingsWindow = w;
+    NSView* root = w.contentView;
 
-    NSTabView* tabs = [[NSTabView alloc] initWithFrame:NSMakeRect(16, 16, 668, 448)];
-    tabs.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
+    _settingsSections = [[NSTableView alloc] initWithFrame:NSMakeRect(0, 0, 190, 620)];
+    _settingsSections.headerView = nil;
+    _settingsSections.rowHeight = 34;
+    _settingsSections.style = NSTableViewStyleSourceList;
+    _settingsSections.dataSource = self;
+    _settingsSections.delegate = self;
+    _settingsSections.target = self;
+    _settingsSections.action = @selector(settingsSectionSelected:);
+    NSTableColumn* c = [[NSTableColumn alloc] initWithIdentifier:@"s"];
+    c.width = 180;
+    [_settingsSections addTableColumn:c];
+    NSScrollView* ls = [[NSScrollView alloc] initWithFrame:NSMakeRect(0, 0, 190, 620)];
+    ls.hasVerticalScroller = YES;
+    ls.drawsBackground = NO;
+    ls.documentView = _settingsSections;
+    [root addSubview:ls];
 
-    NSArray* appearance = @[
-        [self formRow:@"主题色" control:[self formPopup:@"theme" values:@[@"light", @"dark", @"blue"] titles:@[@"白色（默认）", @"深色", @"浅蓝色"] width:200] y:0 width:592],
-        [self formRow:@"语言" control:[self formPopup:@"lang" values:@[@"zh", @"en"] titles:@[@"中文", @"English"] width:200] y:0 width:592],
-        [self formRow:@"说明" control:nm_label(@"原生界面目前为中文；语言设置影响网页界面。", 11, NSFontWeightRegular, g_theme.muted) y:0 width:592],
-    ];
-    NSArray* output = @[
-        [self formRow:@"输出后端" control:[self formPopup:@"backend" values:@[@"coreaudio", @"hog", @"null", @"upnp"] titles:@[@"CoreAudio", @"独占 (Hog)", @"静音 (null)", @"UPnP 投放"] width:200] y:0 width:592],
-        [self formRow:@"输出设备" control:[self formField:@"device" width:360] y:0 width:592],
-        [self formRow:@"缓冲 (ms)" control:[self formField:@"buffer" width:120] y:0 width:592],
-        [self formRow:@"音量 (dB)" control:[self formField:@"volume" width:120] y:0 width:592],
-    ];
-    NSArray* pcm = @[
-        [self formRow:@"目标采样率" control:[self formField:@"rate" width:160] y:0 width:592],
-        [self formRow:@"滤波器" control:[self formField:@"filter" width:260] y:0 width:592],
-        [self formRow:@"taps" control:[self formField:@"taps" width:120] y:0 width:592],
-        [self formRow:@"衰减 (dB)" control:[self formField:@"atten" width:120] y:0 width:592],
-        [self formRow:@"相位" control:[self formField:@"phase" width:160] y:0 width:592],
-        [self formRow:@"噪声整形" control:[self formField:@"shaper" width:200] y:0 width:592],
-    ];
-    NSArray* dsd = @[
-        [self formRow:@"DSD 开关" control:[self formPopup:@"dsd" values:@[@"0", @"1"] titles:@[@"关闭", @"开启"] width:160] y:0 width:592],
-        [self formRow:@"调制器阶数" control:[self formField:@"modorder" width:120] y:0 width:592],
-        [self formRow:@"调制器族" control:[self formField:@"modfamily" width:160] y:0 width:592],
-        [self formRow:@"DirectSDM" control:[self formPopup:@"directsdm" values:@[@"0", @"1"] titles:@[@"关闭", @"开启"] width:160] y:0 width:592],
-        [self formRow:@"DSD 类型" control:[self formField:@"dsdkind" width:160] y:0 width:592],
-        [self formRow:@"DSD 转换" control:[self formField:@"dsdconv" width:160] y:0 width:592],
-    ];
-    NSArray* library = @[
-        [self formRow:@"资料库" control:nm_label(@"在「文件夹」页查看统计并触发增量/全量扫描。", 12, NSFontWeightRegular, g_theme.muted) y:0 width:592],
-        [self formRow:@"EQ 预设" control:[self formField:@"eq" width:360] y:0 width:592],
-        [self formRow:@"卷积 IR" control:[self formField:@"ir" width:360] y:0 width:592],
-    ];
-    NSArray* about = @[
-        [self formRow:@"版本" control:nm_label([NSString stringWithFormat:@"%s（arm64）", RLPLAYER_VERSION_STR], 12, NSFontWeightMedium, g_theme.text) y:0 width:592],
-        [self formRow:@"更新通道" control:[self formPopup:@"updatechannel" values:@[@"global", @"china"] titles:@[@"全球通道（GitHub）", @"中国大陆通道"] width:220] y:0 width:592],
-        [self formRow:@"许可" control:nm_label(@"GPL-3.0-or-later · 上游 rainlain / macOS BH2VOQ", 12, NSFontWeightRegular, g_theme.muted) y:0 width:592],
-    ];
+    _settingsScroll = [[NSScrollView alloc] initWithFrame:NSMakeRect(190, 0, 690, 620)];
+    _settingsScroll.hasVerticalScroller = YES;
+    _settingsScroll.drawsBackground = NO;
+    [root addSubview:_settingsScroll];
 
-    [tabs addTabViewItem:[self settingsTab:@"外观" rows:appearance]];
-    [tabs addTabViewItem:[self settingsTab:@"输出" rows:output]];
-    [tabs addTabViewItem:[self settingsTab:@"升频 (PCM)" rows:pcm]];
-    [tabs addTabViewItem:[self settingsTab:@"DSD" rows:dsd]];
-    [tabs addTabViewItem:[self settingsTab:@"资料库与 EQ" rows:library]];
-    [tabs addTabViewItem:[self settingsTab:@"更新与关于" rows:about]];
-    w.contentView = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 700, 480)];
-    [w.contentView addSubview:tabs];
     [w makeKeyAndOrderFront:nil];
+    [self showSettingsSection:0];
+}
+
+- (NSString*)selectedSettingsValue:(NSString*)key fallback:(NSString*)fb {
+    const auto it = _settings.find(std::string(key.UTF8String));
+    return it == _settings.end() ? fb : [NSString stringWithUTF8String:it->second.c_str()];
+}
+
+- (void)cmdResetBuffer:(id)s {
+    (void)s;
+    rta::net::HttpRequest rq; rq.method = "POST"; rq.path = "/api/buffer/reset";
+    std::string ct; (void)rlapp::dispatch(rq, ct);
+    [self toast:@"缓冲已复位"];
+}
+
+- (void)cmdPeqApplyPreset:(NSPopUpButton*)sender {
+    NSString* name = [sender.titleOfSelectedItem stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
+    if (name.length && ![name isEqualToString:@"—"]) {
+        rlnative::peq_apply_preset(std::string(name.UTF8String));
+        [self showSettingsSection:4];
+    }
+}
+- (void)cmdPeqSave:(id)s {
+    (void)s;
+    std::vector<rlnative::PeqBand> bands;
+    NSString* text = _settingsPeqEditor.string;
+    for (NSString* line in [text componentsSeparatedByCharactersInSet:[NSCharacterSet newlineCharacterSet]]) {
+        if (line.length == 0 || [line hasPrefix:@"（"]) continue;
+        char type[16] = {0};
+        int idx = 0; double f = 1000, g = 0, q = 1.41; char tail[16] = {0};
+        if (std::sscanf(line.UTF8String, "%d,%15[^,],%lf,%lf,%lf,%15s", &idx, type, &f, &g, &q, tail) >= 4) {
+            rlnative::PeqBand b;
+            b.index = idx > 0 ? idx : (int)bands.size() + 1;
+            b.type = type;
+            b.freq = f; b.gain = g; b.q = q;
+            b.on = std::string(tail).find("off") == std::string::npos;
+            bands.push_back(b);
+        }
+    }
+    if (bands.empty()) { [self toast:@"没有可解析的 PEQ 频段"]; return; }
+    const bool bypass = [[self uiValue:@"peqbypass"] isEqualToString:@"1"];
+    const bool ok = rlnative::peq_save(bands, bypass, [[self uiValue:@"peqpreamp"] doubleValue], "native");
+    [self toast:ok ? @"PEQ 已保存" : @"PEQ 保存失败"];
+    [self showSettingsSection:4];
+}
+- (void)cmdOpraSearch:(id)s {
+    (void)s;
+    rlnative::settings_save({{"opraproduct", std::string([self selectedSettingsValue:@"opraproduct" fallback:@"" ].UTF8String)}});
+    NSString* product = [self selectedSettingsValue:@"opraproduct" fallback:@""];
+    const auto presets = rlnative::opra_presets(std::string(product.UTF8String));
+    [_settingsPresets removeAllObjects];
+    for (const auto& p : presets) [_settingsPresets addObject:[NSString stringWithFormat:@"%s  (%s)", p.name.c_str(), p.id.c_str()]];
+    if (_settingsPresets.count == 0) [_settingsPresets addObject:@"（没有匹配的 OPRA 预设）"];
+    [self showSettingsSection:5];
+}
+- (void)cmdOpraApply:(id)s {
+    const NSInteger row = _settingsPresetTable.selectedRow;
+    if (row < 0 || (NSUInteger)row >= _settingsPresets.count) return;
+    NSString* line = _settingsPresets[(NSUInteger)row];
+    NSRange r = [line rangeOfString:@"("];
+    if (r.location == NSNotFound) { [self toast:@"请选择一个 OPRA 预设"]; return; }
+    NSString* pid = [[line substringFromIndex:r.location + 1] stringByReplacingOccurrencesOfString:@")" withString:@""];
+    pid = [pid stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
+    NSString* product = [self uiValue:@"opraproduct"];
+    const bool ok = rlnative::opra_apply(std::string(product.UTF8String), std::string(pid.UTF8String));
+    [self toast:ok ? @"已应用 OPRA 预设" : @"应用失败"];
+}
+- (void)cmdSourceSave:(id)s {
+    (void)s;
+    NSString* kind = [self selectedSettingsValue:@"srckind" fallback:@"subsonic"];
+    NSString* base = [self selectedSettingsValue:@"srcbase" fallback:@""];
+    NSString* user = [self selectedSettingsValue:@"srcuser" fallback:@""];
+    NSString* pass = [self selectedSettingsValue:@"srcpass" fallback:@""];
+    const bool ok = rlnative::source_save(std::string(kind.UTF8String), std::string(base.UTF8String),
+                                          std::string(user.UTF8String), std::string(pass.UTF8String));
+    [self toast:ok ? @"流媒体配置已保存" : @"保存失败"];
+}
+- (void)cmdOpenRemotePage:(id)s { (void)s; [self showPage:NMPageStreaming pushHistory:YES]; }
+- (void)cmdAnalyzeCurrent:(id)s {
+    (void)s;
+    if (_snap.current.empty()) { [self toast:@"当前没有播放曲目"]; return; }
+    const std::string j = rlnative::health_report_json(_snap.current);
+    const auto doc = rta::net::json_parse(j);
+    const auto h = doc["health"];
+    _npAnalysisLabel.stringValue = [NSString stringWithFormat:
+        @"LRA %.1f LU · 峰值 %.2f dBFS · RMS %.2f dBFS\n响度 %.1f LUFS · 削波 %.2f%% · DR %.1f dB%\n%@",
+        h["lra"].n(), h["peak_dbfs"].n(), h["rms_dbfs"].n(), h["lufs"].n(),
+        h["clipped_pct"].n(), h["dr_db"].n(),
+        h["lossless_suspected"].b ? @"疑似假无损" : @""];
+}
+- (void)cmdEnrichCurrent:(id)s {
+    if (_snap.current.empty()) { [self toast:@"当前没有播放曲目"]; return; }
+    const bool ok = rlnative::enrich_track(_snap.current);
+    [self toast:ok ? @"已请求元数据补全" : @"补全失败"];
+}
+- (void)cmdCastStart:(id)s {
+    NSString* dev = [self selectedSettingsValue:@"castdev" fallback:@""];
+    if (dev.length == 0) { [self toast:@"先选择一个投放设备"]; return; }
+    std::string err;
+    [self toast:rlnative::cast_start(std::string(dev.UTF8String), err) ?
+        @"投放已开始（本地播放已停止）" : [NSString stringWithFormat:@"投放失败：%s", err.c_str()]];
+    [self showSettingsSection:9];
+}
+- (void)cmdCastStop:(id)s { (void)s; rlnative::cast_stop(); [self showSettingsSection:9]; }
+- (void)cmdCastScan:(id)s { (void)s; _castDevices = rlnative::cast_devices(); [self showSettingsSection:9]; }
+- (void)cmdInputStart:(id)s {
+    NSString* dev = [self selectedSettingsValue:@"indev" fallback:@""];
+    NSString* mode = [self selectedSettingsValue:@"inmode" fallback:@"record"];
+    if ([mode isEqualToString:@"monitor"]) {
+        NSAlert* a = [[NSAlert alloc] init];
+        a.messageText = @"监听模式会把输入直接送到输出设备（可能出声）";
+        [a addButtonWithTitle:@"继续"];
+        [a addButtonWithTitle:@"取消"];
+        if ([a runModal] != NSAlertFirstButtonReturn) return;
+    }
+    std::string err;
+    [self toast:rlnative::input_start(std::string(dev.UTF8String), std::string(mode.UTF8String), err) ?
+        @"采集已开始" : [NSString stringWithFormat:@"采集失败：%s", err.c_str()]];
+}
+- (void)cmdInputStop:(id)s { (void)s; rlnative::input_stop(); [self showSettingsSection:10]; }
+- (void)cmdRoomMeasure:(id)s {
+    NSString* layout = [self selectedSettingsValue:@"roomlayout" fallback:@""];
+    NSAlert* a = [[NSAlert alloc] init];
+    a.messageText = @"房间测量会通过扬声器播放扫频";
+    a.informativeText = @"请确认当前音量可接受；测量期间请保持安静。";
+    [a addButtonWithTitle:@"开始测量"];
+    [a addButtonWithTitle:@"取消"];
+    if ([a runModal] != NSAlertFirstButtonReturn) return;
+    std::string err;
+    const bool ok = rlnative::room_measure(std::string(layout.UTF8String), 6.0, err);
+    [self toast:ok ? @"测量已开始" : [NSString stringWithFormat:@"测量失败：%s", err.c_str()]];
+    [self showSettingsSection:11];
+}
+- (void)cmdRoomCancel:(id)s { (void)s; rlnative::room_cancel(); [self showSettingsSection:11]; }
+- (void)cmdAddRoot:(id)s {
+    (void)s;
+    NSAlert* a = [[NSAlert alloc] init];
+    a.messageText = @"添加音乐库根目录";
+    [a addButtonWithTitle:@"添加"];
+    [a addButtonWithTitle:@"取消"];
+    NSTextField* f = [[NSTextField alloc] initWithFrame:NSMakeRect(0, 0, 420, 24)];
+    f.placeholderString = @"/Users/you/Music";
+    a.accessoryView = f;
+    if ([a runModal] != NSAlertFirstButtonReturn) return;
+    NSString* path = [f.stringValue stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
+    if (path.length == 0) return;
+    rta::net::HttpRequest rq; rq.method = "POST"; rq.path = "/api/lib/roots";
+    rq.body = "add=" + std::string(path.UTF8String);
+    std::string ct; (void)rlapp::dispatch(rq, ct);
+    rlnative::scan_library(false);
+    [self toast:@"已添加根目录并开始扫描"];
+}
+- (void)cmdPrefetchCovers:(id)s {
+    (void)s;
+    [self toast:rlnative::cover_prefetch_all() ? @"已开始后台抓取封面" : @"启动失败"];
+}
+- (void)cmdPrune:(id)s {
+    (void)s;
+    rta::net::HttpRequest rq; rq.method = "POST"; rq.path = "/api/lib/prune";
+    std::string ct; const auto j = rta::net::json_parse(rlapp::dispatch(rq, ct));
+    [self toast:[NSString stringWithFormat:@"已清理 %d 首缺失曲目", (int)j["removed"].n()]];
+}
+
+- (void)cmdExportDiag:(id)s { (void)s; [self exportDiagnostics]; }
+- (void)cmdSendFeedback:(id)s { (void)s; [self sendFeedback]; }
+- (void)exportDiagnostics {
+    std::string path;
+    if (rlnative::diag_export(path).empty()) { [self toast:@"诊断包导出失败"]; return; }
+    NSString* p = [NSString stringWithUTF8String:path.c_str()];
+    [[NSWorkspace sharedWorkspace] selectFile:p inFileViewerRootedAtPath:@""];
+    [self toast:[NSString stringWithFormat:@"诊断包已导出：%@", p]];
+}
+- (void)sendFeedback {
+    NSAlert* a = [[NSAlert alloc] init];
+    a.messageText = @"反馈问题";
+    a.informativeText = @"描述问题与复现步骤；可附上诊断包（不含音乐内容）。";
+    [a addButtonWithTitle:@"打开发送窗口"];
+    [a addButtonWithTitle:@"取消"];
+    NSView* box = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 460, 150)];
+    NSTextField* subject = [[NSTextField alloc] initWithFrame:NSMakeRect(0, 118, 460, 24)];
+    subject.stringValue = [NSString stringWithFormat:@"RLPlayer %s 反馈", RLPLAYER_VERSION_STR];
+    [box addSubview:subject];
+    NSTextView* body = [[NSTextView alloc] initWithFrame:NSMakeRect(0, 34, 460, 78)];
+    body.string = @"请描述：\\n1) 发生了什么\\n2) 复现步骤\\n3) 期望结果\\n";
+    NSScrollView* bs = [[NSScrollView alloc] initWithFrame:NSMakeRect(0, 34, 460, 78)];
+    bs.hasVerticalScroller = YES;
+    bs.documentView = body;
+    [box addSubview:bs];
+    NSButton* attach = [NSButton checkboxWithTitle:@"附上诊断包" target:nil action:nil];
+    attach.frame = NSMakeRect(0, 6, 200, 20);
+    attach.state = NSControlStateValueOn;
+    [box addSubview:attach];
+    a.accessoryView = box;
+    if ([a runModal] != NSAlertFirstButtonReturn) return;
+
+    std::string zip;
+    std::vector<std::string> atts;
+    if (attach.state == NSControlStateValueOn && !rlnative::diag_export(zip).empty()) atts.push_back(zip);
+    const auto r = rta::feedback::open_compose_window(std::string(subject.stringValue.UTF8String),
+                                                     std::string(body.string.UTF8String), atts, "");
+    [self toast:r.outcome == rta::feedback::ComposeOutcome::Opened ? @"已打开发送窗口（不会自动发送）"
+            : r.outcome == rta::feedback::ComposeOutcome::FellBackToEml ? @"已保存 .eml 兜底文件"
+            : @"无法打开邮件窗口"];
 }
 
 - (void)settingChanged:(id)sender {
@@ -2341,6 +3712,14 @@ static const CGFloat kPlayerHeight = 78.0;
             _themeIndex = [value isEqualToString:@"dark"] ? 0 : [value isEqualToString:@"blue"] ? 2 : 1;
             [self applyThemeToViews];
             return;
+        } else if ([key isEqualToString:@"lang"]) {
+            g_langEn = [value isEqualToString:@"en"];
+            rlnative::settings_save({{"lang", std::string(value.UTF8String)}});
+            nm_translate_menu(NSApp.mainMenu);
+            nm_translate_view(self.window.contentView);
+            [self showPage:_page_ pushHistory:NO];
+            if (_settingsWindow) nm_translate_view(_settingsWindow.contentView);
+            return;
         } else if ([key isEqualToString:@"updatechannel"]) {
             std::string err;
             rta::update::set_update_channel(std::string(value.UTF8String ?: "global"), err);
@@ -2350,6 +3729,14 @@ static const CGFloat kPlayerHeight = 78.0;
         value = ((NSTextField*)sender).stringValue;
     }
     if (value.length == 0) return;
+    _uiValues[std::string(key.UTF8String)] = std::string(value.UTF8String);
+    if ([key hasPrefix:@"peq"] || [key hasPrefix:@"src"] || [key isEqualToString:@"castdev"] ||
+        [key isEqualToString:@"indev"] || [key isEqualToString:@"inmode"] ||
+        [key isEqualToString:@"inseconds"] || [key isEqualToString:@"inout"] ||
+        [key isEqualToString:@"roomlayout"] || [key isEqualToString:@"roomsec"] ||
+        [key hasPrefix:@"room"]) {
+        return;   // 伪键：由各自动作保存，不写 rlplayer-settings.conf
+    }
     rlnative::settings_save({{std::string(key.UTF8String), std::string(value.UTF8String)}});
 }
 
@@ -2362,11 +3749,11 @@ static const CGFloat kPlayerHeight = 78.0;
     _window.appearance = [NSAppearance appearanceNamed:(_themeIndex == 0 ? NSAppearanceNameDarkAqua : NSAppearanceNameAqua)];
     _window.backgroundColor = g_theme.bg;
     if (_playerBar) {
-        _playerBar.layer.borderColor = g_theme.separator.CGColor;
+        nm_set_border(_playerBar, 1.0, g_theme.separator);
         _playerBar.needsDisplay = YES;
     }
     if (_queueRail) {
-        _queueRail.layer.borderColor = g_theme.separator.CGColor;
+        nm_set_border(_queueRail, 1.0, g_theme.separator);
         _queueRail.needsDisplay = YES;
     }
     [_contentScroll.documentView setNeedsDisplay:YES];

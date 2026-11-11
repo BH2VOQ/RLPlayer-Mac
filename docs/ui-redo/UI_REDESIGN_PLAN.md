@@ -2150,10 +2150,11 @@ rg -n 'crossfade|gapless|MPRemoteCommandCenter|MPNowPlayingInfoCenter' src tools
 |---|---|
 | `RLPLAYER_UI=native` 构建 | 0 error |
 | `RLPLAYER_UI=web` 构建 | 0 error |
-| 桥层单测 `test_native_bridge` | 17/17 PASS（模式去重/revision/非法回落/主题持久化/合并写不丢键） |
+| 桥层单测 `test_native_bridge` | 23/23 PASS（去重/revision/回落/主题/合并写 + PEQ/房间布局/数据源/健康分析只读判据） |
 | web 全量 ctest | **152/152 PASS** |
 | native 全量 ctest | 见执行记录（含 `native_bridge`） |
-| 原生启动自检 `RLPLAYER_NATIVE_SELFTEST=1` | `pass 6/6`，窗口/侧栏/播放条/队列/内容页存在，`webviews=0`，读到 235 张专辑 |
+| 原生启动自检 `RLPLAYER_NATIVE_SELFTEST=1` | `pass 8/8`：10 个页面 + 15 个设置分区逐一构建 0 异常，`webviews=0`，235 张专辑 |
 | 实机点击/听感/VoiceOver | **未做**（归用户；方案 §11 清单） |
 
-> 自检只证明「界面真的建起来了、没有 WKWebView」，不证明每个按钮的交互与视觉细节；后者必须实机。
+> 自检只证明「界面与分区都能真实构建、没有 WKWebView」，不证明每个按钮的交互与视觉细节；后者必须实机。
+> 1.1.6 逐项移植状态见 `docs/ui-redo/NATIVE_PARITY_1_1_6.md`。

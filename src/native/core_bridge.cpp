@@ -14,6 +14,9 @@
 #include <cstdio>
 #include <cstdlib>
 #include <mutex>
+#include <cstdio>
+#include <ctime>
+#include <fstream>
 #include <sstream>
 
 #include "net/json.h"
@@ -329,6 +332,254 @@ bool source_save(const std::string& kind, const std::string& base,
                        "&user=" + url_encode(user);
     if (!pass.empty()) body += "&pass=" + url_encode(pass);
     return response_ok(dispatch("POST", "/api/src/config", body));
+}
+
+// ---------------------------------------------------------------------------
+// 全量功能移植：文件/流媒体/设备/PEQ/OPRA/健康分析/房间校正/诊断
+// ---------------------------------------------------------------------------
+namespace {
+rta::net::Json get_json(const std::string& path) {
+    return rta::net::json_parse(dispatch("GET", path));
+}
+bool post_ok(const std::string& path, const std::string& body = std::string()) {
+    return response_ok(dispatch("POST", path, body));
+}
+std::string file_name(const std::string& p) {
+    const size_t s = p.find_last_of("/\\");
+    return s == std::string::npos ? p : p.substr(s + 1);
+}
+} // namespace
+
+FilesListing list_files(const std::string& path) {
+    FilesListing out;
+    std::string url = "/api/files";
+    if (!path.empty()) url += "?path=" + url_encode(path);
+    const auto j = get_json(url);
+    if (!(j.has("ok") && j["ok"].b)) return out;
+    out.ok = true;
+    out.dir = j["dir"].s();
+    for (const auto& d : j["dirs"].arr) {
+        FileEntry e; e.name = d.s(); e.path = out.dir.empty() ? e.name : out.dir + "/" + e.name; e.dir = true;
+        out.dirs.push_back(std::move(e));
+    }
+    for (const auto& f : j["files"].arr) {
+        FileEntry e; e.name = file_name(f.s()); e.path = out.dir.empty() ? f.s() : out.dir + "/" + f.s(); e.dir = false;
+        out.files.push_back(std::move(e));
+    }
+    return out;
+}
+
+std::vector<RemoteEntry> remote_browse(const std::string& id, bool search, const std::string& q) {
+    std::vector<RemoteEntry> out;
+    const std::string url = search ? ("/api/src/search?q=" + url_encode(q))
+                                   : ("/api/src/browse?id=" + url_encode(id));
+    const auto j = get_json(url);
+    if (!(j.has("ok") && j["ok"].b)) return out;
+    for (const auto& it : j["items"].arr) {
+        RemoteEntry e;
+        e.ok = true;
+        e.id = it["id"].s();
+        e.title = it["t"].s();
+        e.artist = it["ar"].s();
+        e.album = it["al"].s();
+        e.suffix = it["sf"].s();
+        e.dur = it["dur"].n();
+        e.dir = it["dir"].b;
+        e.coverId = it["cv"].s();
+        out.push_back(std::move(e));
+    }
+    return out;
+}
+
+bool play_remote(const RemoteEntry& e) {
+    if (e.id.empty()) return false;
+    std::string body = "rid=" + url_encode(e.id) + "&rsuffix=" + url_encode(e.suffix) +
+                       "&rtitle=" + url_encode(e.title);
+    return post_ok("/api/play", body);
+}
+
+bool enqueue_remote(const RemoteEntry& e) {
+    if (e.id.empty()) return false;
+    std::string body = "rid=" + url_encode(e.id) + "&rsuffix=" + url_encode(e.suffix) +
+                       "&rtitle=" + url_encode(e.title);
+    return post_ok("/api/add", body);
+}
+
+std::vector<DeviceInfo> output_devices() {
+    std::vector<DeviceInfo> out;
+    const auto j = get_json("/api/devices");
+    for (const auto& d : j["devices"].arr) {
+        DeviceInfo i;
+        i.id = d["id"].s(); i.name = d["name"].s(); i.mixFmt = d["mixFmt"].s();
+        i.channels = (int)d["channels"].n();
+        i.mixRate = (int)d["mixRate"].n();
+        i.mixBits = (int)d["mixBits"].n();
+        i.isDefault = d["default"].b;
+        out.push_back(std::move(i));
+    }
+    return out;
+}
+
+std::vector<DeviceInfo> input_devices() {
+    std::vector<DeviceInfo> out;
+    const auto j = get_json("/api/indevices");
+    for (const auto& d : j["devices"].arr) {
+        DeviceInfo i;
+        i.id = d["id"].s(); i.name = d["name"].s();
+        i.isDefault = d["default"].b;
+        i.loopback = d["loopback"].b;
+        out.push_back(std::move(i));
+    }
+    return out;
+}
+
+bool input_start(const std::string& id, const std::string& mode, std::string& err) {
+    const std::string body = "dev=" + url_encode(id) + "&mode=" + url_encode(mode.empty() ? "record" : mode);
+    const auto j = rta::net::json_parse(dispatch("POST", "/api/input/start", body));
+    if (j.has("ok") && j["ok"].b) return true;
+    err = j.has("error") ? j["error"].s() : std::string("采集启动失败");
+    return false;
+}
+bool input_stop() { return post_ok("/api/input/stop"); }
+std::string input_state_json() { return dispatch("GET", "/api/input/state"); }
+
+std::vector<CastDevice> cast_devices() {
+    std::vector<CastDevice> out;
+    const auto j = get_json("/api/cast/devices");
+    for (const auto& d : j["devices"].arr) {
+        CastDevice c;
+        c.id = d["location"].s();
+        if (c.id.empty()) c.id = d["dev"].s();
+        c.name = d["friendlyName"].s();
+        if (c.name.empty()) c.name = d["name"].s();
+        c.airplay = d["kind"].s() == "airplay";
+        out.push_back(std::move(c));
+    }
+    return out;
+}
+bool cast_start(const std::string& id, std::string& err) {
+    const auto q = queue(false);
+    std::string file;
+    if (q.index < q.items.size()) file = q.items[q.index].path;
+    if (file.empty()) { err = "当前没有可投放的曲目"; return false; }
+    const std::string body = "dev=" + url_encode(id) + "&file=" + url_encode(file);
+    const auto j = rta::net::json_parse(dispatch("POST", "/api/cast/start", body));
+    if (j.has("ok") && j["ok"].b) return true;
+    err = j.has("error") ? j["error"].s() : std::string("投放启动失败");
+    return false;
+}
+bool cast_stop() { return post_ok("/api/cast/stop"); }
+std::string cast_state_json() { return dispatch("GET", "/api/cast/state"); }
+
+PeqState peq_state() {
+    PeqState out;
+    const auto j = get_json("/api/peq");
+    if (!(j.has("ok") && j["ok"].b)) return out;
+    out.ok = true;
+    out.bypass = j["bypass"].n() != 0.0;
+    out.preamp = j["preamp"].n();
+    out.fs = j["fs"].n();
+    out.name = j["name"].s();
+    for (const auto& b : j["bands"].arr) {
+        PeqBand x;
+        x.index = (int)b["i"].n();
+        x.on = b["on"].n() != 0.0;
+        x.type = b["type"].s();
+        x.freq = b["freq"].n(); x.gain = b["gain"].n(); x.q = b["q"].n();
+        out.bands.push_back(std::move(x));
+    }
+    for (const auto& p : j["presets"].arr) out.presets.push_back(p.s());
+    return out;
+}
+std::vector<std::pair<double, double>> peq_curve() {
+    std::vector<std::pair<double, double>> out;
+    const auto j = get_json("/api/peq");
+    for (const auto& pt : j["points"].arr) {
+        if (pt.size() >= 2) out.emplace_back(pt.at(0).n(), pt.at(1).n());
+    }
+    return out;
+}
+
+bool cover_prefetch_all() { return post_ok("/api/lib/cover/prefetch"); }
+
+bool peq_save(const std::vector<PeqBand>& bands, bool bypass, double preamp, const std::string& name) {
+    std::string spec;
+    for (const auto& b : bands) {
+        if (!spec.empty()) spec += ";";
+        char buf[160];
+        std::snprintf(buf, sizeof(buf), "%d,%s,%.2f,%.2f,%.3f,%s", b.index, b.type.c_str(), b.freq, b.gain, b.q, b.on ? "on" : "off");
+        spec += buf;
+    }
+    std::string body = "bands=" + url_encode(spec) + "&bypass=" + (bypass ? "1" : "0");
+    body += "&preamp=" + std::to_string(preamp);
+    if (!name.empty()) body += "&name=" + url_encode(name);
+    return post_ok("/api/peq", body);
+}
+bool peq_apply_preset(const std::string& name) {
+    return post_ok("/api/peq/preset", "action=load&name=" + url_encode(name));
+}
+
+std::vector<OpraPreset> opra_presets(const std::string& product) {
+    std::vector<OpraPreset> out;
+    const auto j = get_json("/api/opra/presets?productId=" + url_encode(product));
+    for (const auto& p : j["items"].arr) {
+        OpraPreset x;
+        x.id = p["id"].s();
+        x.name = p["name"].s();
+        if (x.name.empty()) x.name = x.id;
+        x.product = product;
+        out.push_back(std::move(x));
+    }
+    return out;
+}
+bool opra_apply(const std::string& productId, const std::string& presetId) {
+    if (productId.empty() || presetId.empty()) return false;
+    return post_ok("/api/opra/apply", "productId=" + url_encode(productId) +
+                                     "&presetId=" + url_encode(presetId));
+}
+
+std::string health_stats_json() { return dispatch("GET", "/api/anl/stats"); }
+std::string health_report_json(const std::string& file) {
+    return dispatch("GET", "/api/health?file=" + url_encode(file));
+}
+bool enrich_track(const std::string& file) {
+    return post_ok("/api/enrich?file=" + url_encode(file));
+}
+std::string meta_json(const std::string& file) { return dispatch("GET", "/api/meta?file=" + url_encode(file)); }
+
+std::string room_status_json() { return dispatch("GET", "/api/roomcorr/status"); }
+std::string room_layouts_json() { return dispatch("GET", "/api/roomcorr/layouts"); }
+bool room_measure(const std::string& layout, double seconds, std::string& err) {
+    char buf[64];
+    std::snprintf(buf, sizeof(buf), "%.1f", seconds);
+    const std::string url = "/api/roomcorr/measure?confirm=1&layout=" + url_encode(layout) + "&sec=" + buf;
+    const auto j = rta::net::json_parse(dispatch("POST", url));
+    if (j.has("ok") && j["ok"].b) return true;
+    err = j.has("error") ? j["error"].s() : std::string("测量启动失败");
+    return false;
+}
+bool room_cancel() { return post_ok("/api/roomcorr/cancel"); }
+
+std::string diag_export(std::string& zipPath) {
+    std::string ct;
+    const std::string body = dispatch_ct("GET", "/api/diagzip", &ct);
+    if (body.size() < 4 || ct.find("zip") == std::string::npos) return std::string();
+    char tmpl[] = "/tmp/rlplayer-diag-XXXXXX";
+    int fd = ::mkstemp(tmpl);
+    if (fd < 0) return std::string();
+    std::string path = std::string(tmpl) + ".zip";
+    std::rename(tmpl, path.c_str());
+    std::ofstream f(path, std::ios::binary);
+    if (!f) return std::string();
+    f.write(body.data(), (std::streamsize)body.size());
+    f.close();
+    zipPath = path;
+    return path;
+}
+std::string signal_json() { return dispatch("GET", "/api/signal"); }
+std::string providers_json() { return dispatch("GET", "/api/providers"); }
+std::string entity_summary(const std::string& kind, const std::string& name) {
+    return dispatch("GET", "/api/entity/summary?kind=" + url_encode(kind) + "&name=" + url_encode(name) + "&lang=zh");
 }
 
 bool set_mode(int want) {

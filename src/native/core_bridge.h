@@ -150,6 +150,70 @@ bool settings_save(const std::map<std::string, std::string>& kv); // 合并写
 std::string get_theme();
 bool set_theme(const std::string& theme);
 
+// ---- 全量功能移植所需的数据/动作 ----
+struct FileEntry { std::string name, path; bool dir = false; };
+struct FilesListing { std::string dir; std::vector<FileEntry> dirs, files; bool ok = false; };
+FilesListing list_files(const std::string& path);      // /api/files[?path=]
+
+struct RemoteEntry {
+    std::string id, title, artist, album, suffix, coverId;
+    double dur = 0.0;
+    bool dir = false, ok = false;
+};
+std::vector<RemoteEntry> remote_browse(const std::string& id, bool search, const std::string& q);
+bool play_remote(const RemoteEntry& e);                // /api/play?rid=&rsuffix=&rtitle=
+bool enqueue_remote(const RemoteEntry& e);             // /api/add?rid=&rsuffix=&rtitle=
+
+struct DeviceInfo {
+    std::string id, name, mixFmt;
+    int channels = 0, mixRate = 0, mixBits = 0;
+    bool isDefault = false, loopback = false;
+};
+std::vector<DeviceInfo> output_devices();              // /api/devices
+std::vector<DeviceInfo> input_devices();               // /api/indevices
+bool input_start(const std::string& id, const std::string& mode, std::string& err); // /api/input/start
+bool input_stop();                                     // /api/input/stop
+
+struct CastDevice { std::string id, name; bool airplay = false; };
+std::vector<CastDevice> cast_devices();
+bool cast_start(const std::string& id, std::string& err);  // /api/cast/start
+bool cast_stop();
+std::string cast_state_json();                         // /api/cast/state
+std::string cast_devices_json();                       // 供"推送到设备"页显示诊断
+
+struct PeqBand { int index = 0; bool on = true; std::string type; double freq = 1000, gain = 0, q = 0.7; };
+struct PeqState {
+    bool ok = false, bypass = false;
+    double preamp = 0.0, fs = 0.0;
+    std::string name;
+    std::vector<PeqBand> bands;
+    std::vector<std::string> presets;
+};
+PeqState peq_state();                                  // GET /api/peq
+std::vector<std::pair<double, double>> peq_curve();     // GET /api/peq 的 points（20Hz..20kHz 频响）
+bool peq_save(const std::vector<PeqBand>& bands, bool bypass, double preamp, const std::string& name);
+bool peq_apply_preset(const std::string& name);
+
+struct OpraPreset { std::string id, name, product; };
+std::vector<OpraPreset> opra_presets(const std::string& product);
+bool opra_apply(const std::string& productId, const std::string& presetId); // POST /api/opra/apply
+
+std::string health_stats_json();                       // /api/anl/stats
+std::string health_report_json(const std::string& file);   // /api/health?file=
+bool enrich_track(const std::string& file);            // POST /api/enrich?file=
+std::string meta_json(const std::string& file);        // /api/meta?file=
+
+std::string room_status_json();                        // /api/roomcorr/status
+std::string room_layouts_json();                       // /api/roomcorr/layouts
+bool room_measure(const std::string& layout, double seconds, std::string& err); // 会发声，需 UI 明确确认
+bool room_cancel();
+
+std::string diag_export(std::string& zipPath);         // GET /api/diagzip → 写临时文件
+std::string signal_json();                             // /api/signal
+std::string providers_json();                          // /api/providers
+std::string entity_summary(const std::string& kind, const std::string& name);  // /api/entity/summary
+bool cover_prefetch_all();                             // POST /api/lib/cover/prefetch
+
 // ---- 诊断/测试辅助 ----
 void reset_bridge_state();
 
