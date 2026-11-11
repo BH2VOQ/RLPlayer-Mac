@@ -50,6 +50,19 @@ extern NSNotificationName const RLPThemeDidChangeNotification;
 @property (nonatomic, readonly) NSColor *phFrom;
 @property (nonatomic, readonly) NSColor *phTo;
 
+// ── 美术层令牌（2026-11-12：对齐 web 观感，两个模式共用同一套 light/dark）──
+// 大标题 / 卡片层次 / 细线。色值随主题走，模式不另分叉：
+// dark 取"墨绿青"质感（参考聆听室目标图），light 取温润瓷白，均保住层次与呼吸感。
+@property (nonatomic, readonly) NSColor *hero;        // 大标题（比 text 更亮/更沉）
+@property (nonatomic, readonly) NSColor *card;        // 主卡片底（比 bg2 略浮起）
+@property (nonatomic, readonly) NSColor *cardAlt;     // 次级卡片 / 分组底
+@property (nonatomic, readonly) NSColor *hairline;    // 极细分隔线（比 line 更淡）
+@property (nonatomic, readonly) NSColor *chip;        // 徽标 / 标签底
+@property (nonatomic, readonly) NSFont *display;      // 超大衬线标题（聆听室 / 工作台）
+@property (nonatomic, readonly) NSFont *heading;      // 分区标题（大号衬线）
+@property (nonatomic, readonly) NSFont *serif;        // 正文衬线（曲名）
+@property (nonatomic, readonly) NSFont *caption;     // 小号说明
+
 @property (nonatomic, readonly) NSFont *body;
 @property (nonatomic, readonly) NSFont *small;
 @property (nonatomic, readonly) NSFont *title;

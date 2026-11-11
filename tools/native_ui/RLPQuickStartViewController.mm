@@ -66,7 +66,13 @@
 
 @implementation RLPQuickStartViewController
 
-- (instancetype)init { return [super initWithTitle:RLPTr(@"聆听室")]; }
+- (instancetype)init {
+    self = [super initWithTitle:RLPTr(@"聆听室")];
+    if (self) {
+        _dynamicLabels = [NSMutableArray array];
+    }
+    return self;
+}
 
 #pragma mark - 骨架
 
@@ -100,6 +106,19 @@
         [self.stack.topAnchor constraintEqualToAnchor:scroll.contentView.topAnchor],
         [self.stack.widthAnchor constraintEqualToAnchor:scroll.contentView.widthAnchor],
     ]];
+
+    RLPTheme *t = [RLPTheme current];
+    NSTextField *title = RLPLabel(RLPTr(@"聆听室"), t.display, t.hero);
+    title.translatesAutoresizingMaskIntoConstraints = NO;
+    title.tag = 0;   // 0=正文（applyTheme 里按 t.text 重刷）
+    NSTextField *subtitle = RLPLabel(RLPTr(@"微调每一组声音，随时对比同一片段"), t.body, t.mut);
+    subtitle.translatesAutoresizingMaskIntoConstraints = NO;
+    subtitle.tag = 1;   // 1=次要（t.mut）
+    // 登记到 dynamicLabels：切主题时这两个常驻标签也要跟着重刷（A6 判据会抓漏刷）。
+    [self.dynamicLabels addObject:title];
+    [self.dynamicLabels addObject:subtitle];
+    [self.stack addArrangedSubview:title];
+    [self.stack addArrangedSubview:subtitle];
 
     [self buildFourCards];
     [self buildNowPlayingAndQueue];
@@ -197,26 +216,33 @@
         [row addSubview:c];
     [self.stack addArrangedSubview:row];
 
-    // 四卡等宽一行；每张卡内部：小标题在上、值在下。
-    NSMutableArray *cs = [NSMutableArray array];
-    [cs addObjectsFromArray:@[
+    [NSLayoutConstraint activateConstraints:@[
         [row.widthAnchor constraintEqualToAnchor:self.stack.widthAnchor constant:-48],
-        [row.heightAnchor constraintEqualToConstant:76],
+        [row.heightAnchor constraintEqualToConstant:100],
         [self.deviceCard.leadingAnchor constraintEqualToAnchor:row.leadingAnchor],
+        [self.deviceCard.widthAnchor constraintEqualToAnchor:row.widthAnchor multiplier:0.24],
+        [self.deviceCard.topAnchor constraintEqualToAnchor:row.topAnchor],
+        [self.deviceCard.bottomAnchor constraintEqualToAnchor:row.bottomAnchor],
+        
         [self.outputCard.leadingAnchor constraintEqualToAnchor:self.deviceCard.trailingAnchor constant:12],
+        [self.outputCard.widthAnchor constraintEqualToAnchor:self.deviceCard.widthAnchor],
+        [self.outputCard.topAnchor constraintEqualToAnchor:row.topAnchor],
+        [self.outputCard.bottomAnchor constraintEqualToAnchor:row.bottomAnchor],
+
         [self.playCard.leadingAnchor constraintEqualToAnchor:self.outputCard.trailingAnchor constant:12],
+        [self.playCard.widthAnchor constraintEqualToAnchor:self.deviceCard.widthAnchor],
+        [self.playCard.topAnchor constraintEqualToAnchor:row.topAnchor],
+        [self.playCard.bottomAnchor constraintEqualToAnchor:row.bottomAnchor],
+
         [self.styleCard.leadingAnchor constraintEqualToAnchor:self.playCard.trailingAnchor constant:12],
         [self.styleCard.trailingAnchor constraintEqualToAnchor:row.trailingAnchor],
-        [self.outputCard.widthAnchor constraintEqualToAnchor:self.deviceCard.widthAnchor],
-        [self.playCard.widthAnchor constraintEqualToAnchor:self.deviceCard.widthAnchor],
-        [self.styleCard.widthAnchor constraintEqualToAnchor:self.deviceCard.widthAnchor],
+        [self.styleCard.topAnchor constraintEqualToAnchor:row.topAnchor],
+        [self.styleCard.bottomAnchor constraintEqualToAnchor:row.bottomAnchor],
     ]];
-    for (NSView *c in @[self.deviceCard, self.outputCard, self.playCard, self.styleCard]) {
-        [cs addObjectsFromArray:@[
-            [c.topAnchor constraintEqualToAnchor:row.topAnchor],
-            [c.bottomAnchor constraintEqualToAnchor:row.bottomAnchor],
-        ]];
-    }
+
+    // 行级几何（等宽一行、加高卡片）已在上面 activateConstraints 统一设定，
+    // 这里只放**卡内**布局，不再重复 row.width/height 与四卡 leading/width（重复会冲突）。
+    NSMutableArray *cs = [NSMutableArray array];
     // 卡内布局
     [cs addObjectsFromArray:@[
         [d1.leadingAnchor constraintEqualToAnchor:self.deviceCard.leadingAnchor constant:14],
@@ -278,9 +304,10 @@
     self.npCover.layer.masksToBounds = YES;
     self.npCover.layer.backgroundColor = t.bg3.CGColor;
     self.npCover.translatesAutoresizingMaskIntoConstraints = NO;
+    [self showCoverPlaceholder];   // 第一帧就有音符占位，不闪空白方块
     self.npState = RLPLabel(RLPTr(@"未播放"), t.small, t.mut);
     self.npState.translatesAutoresizingMaskIntoConstraints = NO;
-    self.npTitle = RLPLabel(RLPTr(@"还没有在播放的音乐"), [NSFont systemFontOfSize:18 weight:NSFontWeightSemibold], t.text);
+    self.npTitle = RLPLabel(RLPTr(@"还没有在播放的音乐"), t.serif, t.text);
     self.npTitle.translatesAutoresizingMaskIntoConstraints = NO;
     self.npTitle.maximumNumberOfLines = 2;
     self.npTitle.lineBreakMode = NSLineBreakByWordWrapping;
@@ -296,9 +323,8 @@
         [np addSubview:v];
 
     NSView *qcard = [self cardWithIdentifier:@"room.queue"];
-    NSTextField *qt = RLPLabel(RLPTr(@"播放队列"), [NSFont systemFontOfSize:14 weight:NSFontWeightSemibold], t.text);
-    self.queueCaption = qt;
-    qt.translatesAutoresizingMaskIntoConstraints = NO;
+    self.queueCaption = RLPLabel(RLPTr(@"播放队列"), t.heading, t.text);
+    self.queueCaption.translatesAutoresizingMaskIntoConstraints = NO;
     NSButton *qAll = [NSButton buttonWithTitle:RLPTr(@"查看全部") target:self action:@selector(onOpenQueue:)];
     qAll.bezelStyle = NSBezelStyleRounded;
     qAll.translatesAutoresizingMaskIntoConstraints = NO;
@@ -307,7 +333,7 @@
     self.queueList.alignment = NSLayoutAttributeLeading;
     self.queueList.spacing = 6;
     self.queueList.translatesAutoresizingMaskIntoConstraints = NO;
-    for (NSView *v in @[qt, qAll, self.queueList]) [qcard addSubview:v];
+    for (NSView *v in @[self.queueCaption, qAll, self.queueList]) [qcard addSubview:v];
 
     [row addSubview:np];
     [row addSubview:qcard];
@@ -315,40 +341,44 @@
 
     [NSLayoutConstraint activateConstraints:@[
         [row.widthAnchor constraintEqualToAnchor:self.stack.widthAnchor constant:-48],
-        [row.heightAnchor constraintEqualToConstant:210],
+        [row.heightAnchor constraintEqualToConstant:240],
         [np.leadingAnchor constraintEqualToAnchor:row.leadingAnchor],
         [np.topAnchor constraintEqualToAnchor:row.topAnchor],
         [np.bottomAnchor constraintEqualToAnchor:row.bottomAnchor],
+        [np.trailingAnchor constraintEqualToAnchor:row.trailingAnchor constant:-312],
         [qcard.leadingAnchor constraintEqualToAnchor:np.trailingAnchor constant:12],
         [qcard.trailingAnchor constraintEqualToAnchor:row.trailingAnchor],
         [qcard.topAnchor constraintEqualToAnchor:row.topAnchor],
         [qcard.bottomAnchor constraintEqualToAnchor:row.bottomAnchor],
-        [qcard.widthAnchor constraintEqualToConstant:300],
-
-        [self.npCover.leadingAnchor constraintEqualToAnchor:np.leadingAnchor constant:16],
+        
+        [self.npCover.leadingAnchor constraintEqualToAnchor:np.leadingAnchor constant:20],
         [self.npCover.centerYAnchor constraintEqualToAnchor:np.centerYAnchor],
-        [self.npCover.widthAnchor constraintEqualToConstant:170],
-        [self.npCover.heightAnchor constraintEqualToConstant:170],
-        [self.npState.leadingAnchor constraintEqualToAnchor:self.npCover.trailingAnchor constant:16],
-        [self.npState.topAnchor constraintEqualToAnchor:np.topAnchor constant:24],
+        [self.npCover.widthAnchor constraintEqualToConstant:200],
+        [self.npCover.heightAnchor constraintEqualToConstant:200],
+
+        // 右侧文字列：状态 → 大曲名 → 副标题 → 两个按钮（每个都必须显式定位，
+        // 否则无约束控件全堆在 (0,0) 重叠成一团 —— 离屏截图实测到的真 bug）。
+        [self.npState.leadingAnchor constraintEqualToAnchor:self.npCover.trailingAnchor constant:20],
+        [self.npState.topAnchor constraintEqualToAnchor:np.topAnchor constant:34],
+        [self.npState.trailingAnchor constraintLessThanOrEqualToAnchor:np.trailingAnchor constant:-20],
         [self.npTitle.leadingAnchor constraintEqualToAnchor:self.npState.leadingAnchor],
-        [self.npTitle.trailingAnchor constraintEqualToAnchor:np.trailingAnchor constant:-16],
-        [self.npTitle.topAnchor constraintEqualToAnchor:self.npState.bottomAnchor constant:6],
+        [self.npTitle.trailingAnchor constraintEqualToAnchor:np.trailingAnchor constant:-20],
+        [self.npTitle.topAnchor constraintEqualToAnchor:self.npState.bottomAnchor constant:8],
         [self.npSub.leadingAnchor constraintEqualToAnchor:self.npState.leadingAnchor],
-        [self.npSub.trailingAnchor constraintEqualToAnchor:np.trailingAnchor constant:-16],
-        [self.npSub.topAnchor constraintEqualToAnchor:self.npTitle.bottomAnchor constant:6],
+        [self.npSub.trailingAnchor constraintEqualToAnchor:np.trailingAnchor constant:-20],
+        [self.npSub.topAnchor constraintEqualToAnchor:self.npTitle.bottomAnchor constant:8],
         [self.npToggle.leadingAnchor constraintEqualToAnchor:self.npState.leadingAnchor],
-        [self.npToggle.topAnchor constraintEqualToAnchor:self.npSub.bottomAnchor constant:14],
-        [npOpen.leadingAnchor constraintEqualToAnchor:self.npToggle.trailingAnchor constant:8],
+        [self.npToggle.topAnchor constraintEqualToAnchor:self.npSub.bottomAnchor constant:16],
+        [npOpen.leadingAnchor constraintEqualToAnchor:self.npToggle.trailingAnchor constant:10],
         [npOpen.centerYAnchor constraintEqualToAnchor:self.npToggle.centerYAnchor],
 
-        [qt.leadingAnchor constraintEqualToAnchor:qcard.leadingAnchor constant:14],
-        [qt.topAnchor constraintEqualToAnchor:qcard.topAnchor constant:14],
+        [self.queueCaption.leadingAnchor constraintEqualToAnchor:qcard.leadingAnchor constant:14],
+        [self.queueCaption.topAnchor constraintEqualToAnchor:qcard.topAnchor constant:14],
         [qAll.trailingAnchor constraintEqualToAnchor:qcard.trailingAnchor constant:-14],
-        [qAll.centerYAnchor constraintEqualToAnchor:qt.centerYAnchor],
+        [qAll.centerYAnchor constraintEqualToAnchor:self.queueCaption.centerYAnchor],
         [self.queueList.leadingAnchor constraintEqualToAnchor:qcard.leadingAnchor constant:14],
         [self.queueList.trailingAnchor constraintEqualToAnchor:qcard.trailingAnchor constant:-14],
-        [self.queueList.topAnchor constraintEqualToAnchor:qt.bottomAnchor constant:10],
+        [self.queueList.topAnchor constraintEqualToAnchor:self.queueCaption.bottomAnchor constant:10],
     ]];
 }
 
@@ -358,7 +388,7 @@
     RLPTheme *t = [RLPTheme current];
     NSView *head = [[NSView alloc] initWithFrame:NSZeroRect];
     head.translatesAutoresizingMaskIntoConstraints = NO;
-    NSTextField *at = RLPLabel(RLPTr(@"专辑"), [NSFont systemFontOfSize:14 weight:NSFontWeightSemibold], t.text);
+    NSTextField *at = RLPLabel(RLPTr(@"专辑"), t.heading, t.text);
     self.albumCaption = at;
     at.translatesAutoresizingMaskIntoConstraints = NO;
     NSButton *openLib = [NSButton buttonWithTitle:RLPTr(@"打开音乐库") target:self action:@selector(onOpenAlbums:)];
@@ -857,15 +887,32 @@
     }];
 }
 
+/// 空态/无封面时给一个音符占位，避免左侧是纯空白方块（目标图有唱片质感）。
+- (void)showCoverPlaceholder {
+    NSImage *sym = [NSImage imageWithSystemSymbolName:@"music.note" accessibilityDescription:RLPTr(@"封面")];
+    self.npCover.image = sym;
+    self.npCover.contentTintColor = [RLPTheme current].mut;
+    self.npCover.imageScaling = NSImageScaleProportionallyDown;
+}
+
 - (void)loadCoverForPath:(NSString *)path {
-    if (!path.length) { self.npCover.image = nil; return; }
+    if (!path.length) { [self showCoverPlaceholder]; return; }
     const NSUInteger seq = ++self.coverSeq;
     NSString *url = [NSString stringWithFormat:@"/api/cover?file=%@", RLPEnc(path)];
     __weak __typeof__(self) weakSelf = self;
     [[RLPCoreClient shared] getData:url completion:^(NSData * _Nullable data) {
         __typeof__(self) self_ = weakSelf;
         if (!self_ || seq != self_.coverSeq) return;
-        self_.npCover.image = data.length ? [[NSImage alloc] initWithData:data] : nil;
+        if (data.length) {
+            NSImage *img = [[NSImage alloc] initWithData:data];
+            if (img) {
+                self_.npCover.image = img;
+                self_.npCover.imageScaling = NSImageScaleProportionallyUpOrDown;
+                self_.npCover.contentTintColor = nil;
+                return;
+            }
+        }
+        [self_ showCoverPlaceholder];
     }];
 }
 

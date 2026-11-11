@@ -78,6 +78,16 @@ static const NSInteger kABSlotCount = 4;
 @property (nonatomic, copy) NSDictionary *status;
 @property (nonatomic, strong) NSPopover *popover;
 @property (nonatomic, strong) NSTimer *poll;
+// 页头大标题 / 当前曲目卡（图一「数字音乐台」核心区块，数据全部来自 /api/status）
+@property (nonatomic, strong) NSTextField *headerTitle;
+@property (nonatomic, strong) NSTextField *headerSubtitle;
+@property (nonatomic, strong) NSImageView *trackCover;
+@property (nonatomic, strong) NSTextField *trackTitle;
+@property (nonatomic, strong) NSTextField *trackSub;
+@property (nonatomic, strong) NSTextField *sigSrc;
+@property (nonatomic, strong) NSTextField *sigDsp;
+@property (nonatomic, strong) NSTextField *sigOut;
+@property (nonatomic, strong) NSMutableArray<NSTextField *> *headerLabels;
 // 前向声明：ObjC 里"先用后定义"的私有方法必须在这里声明，否则报 no visible @interface。
 - (NSString *)str:(NSString *)key def:(NSString *)def;
 - (void)postSettings:(NSDictionary<NSString *, NSString *> *)kv;
@@ -98,6 +108,9 @@ static const NSInteger kABSlotCount = 4;
 - (NSView *)cardWithIdentifier:(NSString *)ident;
 - (NSTextField *)sectionTitle:(NSString *)text;
 - (void)addFullWidth:(NSView *)v height:(CGFloat)h;
+- (void)buildTrackCard;
+- (void)refreshTrackCard;
+- (void)onTrackCardPlay:(id)sender;
 - (void)buildMoreSection;
 - (void)refreshMoreControls;
 - (void)syncEqOnCheck;
@@ -111,6 +124,7 @@ static const NSInteger kABSlotCount = 4;
         _chainNodes = [NSMutableDictionary dictionary];
         _chainValues = [NSMutableDictionary dictionary];
         _chainHits = [NSMutableDictionary dictionary];
+        _headerLabels = [NSMutableArray array];
         _abButtons = [NSMutableArray array];
         _abSummaries = [NSMutableArray array];
         _abActive = -1;
@@ -152,6 +166,8 @@ static const NSInteger kABSlotCount = 4;
         [self.stack.widthAnchor constraintEqualToAnchor:scroll.contentView.widthAnchor],
     ]];
 
+    [self buildHeader];
+    [self buildTrackCard];
     [self buildChain];
     [self buildABSlots];
     [self buildFilterSection];
@@ -159,6 +175,165 @@ static const NSInteger kABSlotCount = 4;
     [self buildOutputSection];
     [self buildEqSection];
     [self buildMoreSection];
+}
+
+- (void)buildHeader {
+    RLPTheme *t = [RLPTheme current];
+    NSStackView *header = [[NSStackView alloc] init];
+    header.orientation = NSUserInterfaceLayoutOrientationVertical;
+    header.alignment = NSLayoutAttributeLeading;
+    header.spacing = 4;
+    header.translatesAutoresizingMaskIntoConstraints = NO;
+
+    self.headerTitle = RLPLabel(RLPTr(@"数字音乐台"), t.display, t.hero);
+    self.headerTitle.translatesAutoresizingMaskIntoConstraints = NO;
+    self.headerTitle.tag = 0;
+    [header addArrangedSubview:self.headerTitle];
+
+    self.headerSubtitle = RLPLabel(RLPTr(@"微调每一组声音，随时对比同一片段"), t.body, t.mut);
+    self.headerSubtitle.translatesAutoresizingMaskIntoConstraints = NO;
+    self.headerSubtitle.tag = 1;
+    [header addArrangedSubview:self.headerSubtitle];
+
+    [self.headerLabels addObjectsFromArray:@[self.headerTitle, self.headerSubtitle]];
+    [self addFullWidth:header height:0];
+}
+
+/// 图一「当前曲目 + 实际信号路径」大卡：全部数值来自 /api/status，UI 只排版不臆造。
+- (void)buildTrackCard {
+    RLPTheme *t = [RLPTheme current];
+    NSView *card = [self cardWithIdentifier:@"wb.trackcard"];
+    card.layer.backgroundColor = t.card.CGColor;
+    card.layer.borderColor = t.hairline.CGColor;
+
+    self.trackCover = [[NSImageView alloc] initWithFrame:NSZeroRect];
+    self.trackCover.wantsLayer = YES;
+    self.trackCover.layer.cornerRadius = t.rSm;
+    self.trackCover.layer.masksToBounds = YES;
+    self.trackCover.layer.backgroundColor = t.cardAlt.CGColor;
+    self.trackCover.imageScaling = NSImageScaleProportionallyDown;
+    self.trackCover.image = [NSImage imageWithSystemSymbolName:@"music.note" accessibilityDescription:RLPTr(@"封面")];
+    self.trackCover.contentTintColor = t.mut;
+    self.trackCover.translatesAutoresizingMaskIntoConstraints = NO;
+    [card addSubview:self.trackCover];
+
+    self.trackTitle = RLPLabel(RLPTr(@"还没有在播放的音乐"), t.heading, t.hero);
+    self.trackTitle.translatesAutoresizingMaskIntoConstraints = NO;
+    self.trackTitle.tag = 0;
+    self.trackTitle.maximumNumberOfLines = 2;
+    self.trackTitle.lineBreakMode = NSLineBreakByTruncatingTail;
+    [card addSubview:self.trackTitle];
+
+    self.trackSub = RLPLabel(RLPTr(@"挑一张专辑开始聆听"), t.small, t.mut);
+    self.trackSub.translatesAutoresizingMaskIntoConstraints = NO;
+    self.trackSub.tag = 1;
+    [card addSubview:self.trackSub];
+
+    // 红色主按钮「播放」：与图一同款；点了走 /api/pause?on=0（继续），不重头播。
+    NSButton *playBtn = [NSButton buttonWithTitle:RLPTr(@"播放") target:self action:@selector(onTrackCardPlay:)];
+    playBtn.bezelStyle = NSBezelStyleRounded;
+    playBtn.wantsLayer = YES;
+    playBtn.layer.backgroundColor = t.accent.CGColor;
+    playBtn.layer.cornerRadius = t.rSm;
+    playBtn.contentTintColor = NSColor.whiteColor;
+    playBtn.translatesAutoresizingMaskIntoConstraints = NO;
+    playBtn.identifier = @"wb.trackplay";
+    [card addSubview:playBtn];
+
+    // 「实际信号路径」三列：源文件 / 声音处理 / 设备输出。
+    NSView *sig = [[NSView alloc] initWithFrame:NSZeroRect];
+    sig.translatesAutoresizingMaskIntoConstraints = NO;
+    sig.wantsLayer = YES;
+    sig.layer.borderWidth = 1;
+    sig.layer.borderColor = t.hairline.CGColor;
+    sig.layer.cornerRadius = t.rSm;
+    [card addSubview:sig];
+    NSArray<NSString *> *caps = @[RLPTr(@"源文件"), RLPTr(@"声音处理"), RLPTr(@"设备输出")];
+    NSMutableArray<NSTextField *> *vals = [NSMutableArray array];
+    NSMutableArray<NSTextField *> *labs = [NSMutableArray array];
+    for (NSString *cap in caps) {
+        NSTextField *lab = RLPLabel(cap, t.caption, t.mut);
+        lab.translatesAutoresizingMaskIntoConstraints = NO;
+        lab.tag = 1;
+        NSTextField *val = RLPLabel(@"—", t.body, t.text);
+        val.translatesAutoresizingMaskIntoConstraints = NO;
+        val.tag = 0;
+        val.maximumNumberOfLines = 2;
+        val.lineBreakMode = NSLineBreakByTruncatingTail;
+        [sig addSubview:lab]; [sig addSubview:val];
+        [labs addObject:lab]; [vals addObject:val];
+        [self.headerLabels addObject:lab];
+        [self.headerLabels addObject:val];
+    }
+    self.sigSrc = vals[0]; self.sigDsp = vals[1]; self.sigOut = vals[2];
+    [self.headerLabels addObjectsFromArray:@[self.trackTitle, self.trackSub]];
+
+    [self addFullWidth:card height:190];
+    [NSLayoutConstraint activateConstraints:@[
+        [self.trackCover.leadingAnchor constraintEqualToAnchor:card.leadingAnchor constant:18],
+        [self.trackCover.topAnchor constraintEqualToAnchor:card.topAnchor constant:16],
+        [self.trackCover.widthAnchor constraintEqualToConstant:72],
+        [self.trackCover.heightAnchor constraintEqualToConstant:72],
+        [self.trackTitle.leadingAnchor constraintEqualToAnchor:self.trackCover.trailingAnchor constant:16],
+        [self.trackTitle.topAnchor constraintEqualToAnchor:card.topAnchor constant:22],
+        [self.trackTitle.trailingAnchor constraintLessThanOrEqualToAnchor:playBtn.leadingAnchor constant:-16],
+        [self.trackSub.leadingAnchor constraintEqualToAnchor:self.trackTitle.leadingAnchor],
+        [self.trackSub.topAnchor constraintEqualToAnchor:self.trackTitle.bottomAnchor constant:6],
+        [self.trackSub.trailingAnchor constraintEqualToAnchor:self.trackTitle.trailingAnchor],
+        [playBtn.trailingAnchor constraintEqualToAnchor:card.trailingAnchor constant:-18],
+        [playBtn.centerYAnchor constraintEqualToAnchor:self.trackCover.centerYAnchor],
+        [playBtn.widthAnchor constraintEqualToConstant:84],
+        [sig.leadingAnchor constraintEqualToAnchor:card.leadingAnchor constant:16],
+        [sig.trailingAnchor constraintEqualToAnchor:card.trailingAnchor constant:-16],
+        [sig.topAnchor constraintEqualToAnchor:self.trackCover.bottomAnchor constant:14],
+        [sig.heightAnchor constraintEqualToConstant:64],
+    ]];
+    // 三列等宽 + 列内标签在上值在下
+    NSArray<NSTextField *> *allLabs = labs;
+    for (NSInteger i = 0; i < 3; ++i) {
+        NSTextField *lab = allLabs[i], *val = vals[i];
+        NSLayoutXAxisAnchor *x = (i == 0) ? sig.leadingAnchor : vals[i - 1].trailingAnchor;
+        [NSLayoutConstraint activateConstraints:@[
+            [lab.leadingAnchor constraintEqualToAnchor:x constant:14],
+            [lab.topAnchor constraintEqualToAnchor:sig.topAnchor constant:10],
+            [val.leadingAnchor constraintEqualToAnchor:lab.leadingAnchor],
+            [val.topAnchor constraintEqualToAnchor:lab.bottomAnchor constant:4],
+            [val.widthAnchor constraintEqualToAnchor:sig.widthAnchor multiplier:0.30],
+        ]];
+    }
+}
+
+/// 图一红色「播放」：继续当前播放（/api/pause?on=0），不重头播。
+- (void)onTrackCardPlay:(id)sender {
+    (void)sender;
+    RLPPostJSON(@"/api/pause?on=0", nil);
+}
+
+/// 用 /api/status 真值刷新当前曲目卡与三列信号路径（绝不臆造数值）。
+- (void)refreshTrackCard {
+    NSDictionary *st = self.status ?: @{};
+    NSString *path = [st[@"file"] isKindOfClass:[NSString class]] ? st[@"file"] : nil;
+    NSString *title = [st[@"title"] isKindOfClass:[NSString class]] ? st[@"title"] : nil;
+    NSString *artist = [st[@"artist"] isKindOfClass:[NSString class]] ? st[@"artist"] : nil;
+    NSString *album = [st[@"album"] isKindOfClass:[NSString class]] ? st[@"album"] : nil;
+    if (title.length) self.trackTitle.stringValue = title;
+    else if (path.length) self.trackTitle.stringValue = path.lastPathComponent.stringByDeletingPathExtension;
+    else self.trackTitle.stringValue = RLPTr(@"还没有在播放的音乐");
+    NSMutableArray<NSString *> *sub = [NSMutableArray array];
+    if (artist.length) [sub addObject:artist];
+    if (album.length) [sub addObject:album];
+    self.trackSub.stringValue = sub.count ? [sub componentsJoinedByString:@" · "] : RLPTr(@"挑一张专辑开始聆听");
+
+    const double fs = [st[@"fs"] respondsToSelector:@selector(doubleValue)] ? [st[@"fs"] doubleValue] : 0.0;
+    const NSInteger bits = [st[@"bits"] respondsToSelector:@selector(integerValue)] ? [st[@"bits"] integerValue] : 0;
+    self.sigSrc.stringValue = (fs > 0)
+        ? [NSString stringWithFormat:@"%.1f kHz / %ld bit", fs / 1000.0, (long)bits]
+        : @"—";
+    NSString *bp = [st[@"bitPerfect"] isKindOfClass:[NSString class]] ? st[@"bitPerfect"] : nil;
+    self.sigDsp.stringValue = bp.length ? [NSString stringWithFormat:@"bit-perfect: %@", bp] : @"—";
+    NSString *dev = self.devicePopup.titleOfSelectedItem;
+    NSString *backend = [self str:@"backend" def:@"coreaudio"];
+    self.sigOut.stringValue = [NSString stringWithFormat:@"%@ · %@", dev.length ? dev : RLPTr(@"默认设备"), backend];
 }
 
 - (NSView *)cardWithIdentifier:(NSString *)ident {
@@ -403,44 +578,68 @@ static const NSInteger kABSlotCount = 4;
     for (NSInteger i = 0; i < kABSlotCount; ++i) {
         NSView *slot = [[NSView alloc] initWithFrame:NSZeroRect];
         slot.translatesAutoresizingMaskIntoConstraints = NO;
-        NSButton *pick = [NSButton buttonWithTitle:names[i] target:self action:@selector(onABPick:)];
+        slot.wantsLayer = YES;
+        slot.layer.cornerRadius = t.rMd;
+        slot.layer.backgroundColor = t.card.CGColor;
+        slot.layer.borderWidth = 1;
+        slot.layer.borderColor = t.hairline.CGColor;
+        slot.identifier = [NSString stringWithFormat:@"wb.abslot.%ld", (long)i];
+        // 大组名（图一四张独立调音卡）。名字就是槽位字母，不编造"流行/女声"之类
+        // 用户没存过的流派 —— 真实配置摘要由 refreshAB 从 abSlots 快照填。
+        NSTextField *big = RLPLabel(names[i], t.heading, t.hero);
+        big.translatesAutoresizingMaskIntoConstraints = NO;
+        big.tag = 0;
+        NSTextField *cap = RLPLabel(RLPTr(@"独立配置 · 自动保存"), t.caption, t.mut);
+        cap.translatesAutoresizingMaskIntoConstraints = NO;
+        cap.tag = 1;
+        [self.headerLabels addObject:big];
+        [self.headerLabels addObject:cap];
+        NSButton *pick = [NSButton buttonWithTitle:RLPTr(@"切换") target:self action:@selector(onABPick:)];
         pick.bezelStyle = NSBezelStyleRounded;
         pick.identifier = [NSString stringWithFormat:@"wb.ab.%ld", (long)i];
         pick.tag = i;
+        pick.font = t.small;
         pick.translatesAutoresizingMaskIntoConstraints = NO;
         NSButton *save = [NSButton buttonWithTitle:RLPTr(@"存为") target:self action:@selector(onABSave:)];
         save.bezelStyle = NSBezelStyleRounded;
         save.tag = i;
         save.font = t.small;
         save.translatesAutoresizingMaskIntoConstraints = NO;
-        NSTextField *sum = RLPLabel(RLPTr(@"未保存"), [NSFont systemFontOfSize:10], t.mut);
+        NSTextField *sum = RLPLabel(RLPTr(@"未保存"), t.caption, t.mut);
         sum.translatesAutoresizingMaskIntoConstraints = NO;
         sum.lineBreakMode = NSLineBreakByTruncatingTail;
         sum.identifier = [NSString stringWithFormat:@"wb.absum.%ld", (long)i];
-        for (NSView *v in @[pick, save, sum]) [slot addSubview:v];
+        for (NSView *v in @[big, cap, pick, save, sum]) [slot addSubview:v];
         [NSLayoutConstraint activateConstraints:@[
-            [slot.widthAnchor constraintEqualToConstant:190],
-            [slot.heightAnchor constraintEqualToConstant:62],
-            [pick.leadingAnchor constraintEqualToAnchor:slot.leadingAnchor],
-            [pick.topAnchor constraintEqualToAnchor:slot.topAnchor],
-            [pick.widthAnchor constraintEqualToConstant:44],
+            [slot.heightAnchor constraintEqualToConstant:118],
+            [big.leadingAnchor constraintEqualToAnchor:slot.leadingAnchor constant:14],
+            [big.topAnchor constraintEqualToAnchor:slot.topAnchor constant:12],
+            [cap.leadingAnchor constraintEqualToAnchor:big.leadingAnchor],
+            [cap.topAnchor constraintEqualToAnchor:big.bottomAnchor constant:2],
+            [cap.trailingAnchor constraintEqualToAnchor:slot.trailingAnchor constant:-10],
+            [pick.leadingAnchor constraintEqualToAnchor:big.leadingAnchor],
+            [pick.topAnchor constraintEqualToAnchor:cap.bottomAnchor constant:10],
             [save.leadingAnchor constraintEqualToAnchor:pick.trailingAnchor constant:6],
             [save.centerYAnchor constraintEqualToAnchor:pick.centerYAnchor],
-            [sum.leadingAnchor constraintEqualToAnchor:slot.leadingAnchor],
-            [sum.trailingAnchor constraintEqualToAnchor:slot.trailingAnchor],
-            [sum.topAnchor constraintEqualToAnchor:pick.bottomAnchor constant:4],
+            [sum.leadingAnchor constraintEqualToAnchor:big.leadingAnchor],
+            [sum.trailingAnchor constraintEqualToAnchor:slot.trailingAnchor constant:-10],
+            [sum.topAnchor constraintEqualToAnchor:pick.bottomAnchor constant:6],
         ]];
         [self.abButtons addObject:pick];
         [self.abSummaries addObject:sum];
         [row addArrangedSubview:slot];
     }
+    // 四卡等宽（去掉固定 190pt，让它随窗口铺满，与图一同观感）。
+    [row.heightAnchor constraintEqualToConstant:118].active = YES;
+    for (NSInteger i = 1; i < (NSInteger)row.arrangedSubviews.count; ++i)
+        [row.arrangedSubviews[i].widthAnchor constraintEqualToAnchor:row.arrangedSubviews[0].widthAnchor].active = YES;
     self.abToggle = [NSButton buttonWithTitle:RLPTr(@"A⇄B 来回") target:self action:@selector(onABToggle:)];
     self.abToggle.bezelStyle = NSBezelStyleRounded;
     self.abToggle.identifier = @"wb.ab.toggle";
     self.abToggle.translatesAutoresizingMaskIntoConstraints = NO;
     [card addSubview:self.abToggle];
 
-    [self addFullWidth:card height:150];
+    [self addFullWidth:card height:210];
     [NSLayoutConstraint activateConstraints:@[
         [ti.leadingAnchor constraintEqualToAnchor:card.leadingAnchor constant:14],
         [ti.topAnchor constraintEqualToAnchor:card.topAnchor constant:12],
@@ -448,7 +647,8 @@ static const NSInteger kABSlotCount = 4;
         [note.trailingAnchor constraintEqualToAnchor:card.trailingAnchor constant:-14],
         [note.topAnchor constraintEqualToAnchor:ti.bottomAnchor constant:2],
         [row.leadingAnchor constraintEqualToAnchor:card.leadingAnchor constant:14],
-        [row.topAnchor constraintEqualToAnchor:note.bottomAnchor constant:8],
+        [row.trailingAnchor constraintEqualToAnchor:card.trailingAnchor constant:-14],
+        [row.topAnchor constraintEqualToAnchor:note.bottomAnchor constant:10],
         [self.abToggle.trailingAnchor constraintEqualToAnchor:card.trailingAnchor constant:-14],
         [self.abToggle.topAnchor constraintEqualToAnchor:card.topAnchor constant:12],
     ]];
@@ -1459,6 +1659,7 @@ static const NSInteger kABSlotCount = 4;
         if (!self_) return;
         self_.status = json ?: @{};
         [self_ refreshChain];
+        [self_ refreshTrackCard];   // 当前曲目卡 + 三列信号路径（真值，不臆造）
     }];
 }
 
@@ -1530,8 +1731,25 @@ static const NSInteger kABSlotCount = 4;
         }
     }
     for (NSString *k in self.chainNodes) self.chainNodes[k].layer.backgroundColor = t.bg2.CGColor;
+    // 页头大标题 / 曲目卡 / 三列信号路径：新增常驻标签必须跟着主题重刷，
+    // 否则浅底配深灰几乎看不见（聆听室 A6 同款真故障）。
+    for (NSTextField *l in self.headerLabels)
+        l.textColor = (l.tag == 1) ? t.mut : t.text;
+    self.headerTitle.textColor = t.hero;
+    self.trackTitle.textColor = t.hero;
+    if (self.trackCover) {
+        self.trackCover.layer.backgroundColor = t.cardAlt.CGColor;
+        self.trackCover.contentTintColor = t.mut;
+    }
+    for (NSView *v in self.stack.arrangedSubviews) {
+        if ([v.identifier isEqualToString:@"wb.trackcard"]) {
+            v.layer.backgroundColor = t.card.CGColor;
+            v.layer.borderColor = t.hairline.CGColor;
+        }
+    }
     [self.eqView applyTheme];
     [self refreshChain];
+    [self refreshTrackCard];
     [self refreshAB];
 }
 

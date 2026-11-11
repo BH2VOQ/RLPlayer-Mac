@@ -216,6 +216,7 @@ if(APPLE)
     tools/native_ui/RLPCalibrationView.mm
     tools/native_ui/RLPServersView.mm
     tools/native_ui/RLPMetaSourcesView.mm tools/native_ui/RLPLibStatsView.mm
+    tools/native_ui/RLPRemoveDir.mm
     tools/native_ui/RLPFeedbackWindowController.mm
     tools/native_ui/RLPKnowledgeView.mm
     tools/native_ui/RLPFunctionalAudit.mm
@@ -245,6 +246,7 @@ if(APPLE)
     tools/native_ui/RLPInputView.mm tools/native_ui/RLPCastView.mm
     tools/native_ui/RLPCalibrationView.mm tools/native_ui/RLPServersView.mm
     tools/native_ui/RLPMetaSourcesView.mm tools/native_ui/RLPLibStatsView.mm
+    tools/native_ui/RLPRemoveDir.mm
     tools/native_ui/RLPFeedbackWindowController.mm
     tools/native_ui/RLPKnowledgeView.mm tools/native_ui/RLPFunctionalAudit.mm
     tools/native_ui/RLPAnalysisSummary.mm tools/native_ui/RLPListeningRoom.mm
@@ -440,6 +442,26 @@ if(APPLE)
   target_link_libraries(test_signal_chain PRIVATE "-framework Foundation")
   add_test(NAME signal_chain COMMAND test_signal_chain)
   set_tests_properties(signal_chain PROPERTIES TIMEOUT 60)
+
+  # 2026-11-12：删除磁盘目录的安全判据（用户授权移植）。**绝不真删磁盘**：
+  # 纯函数钉确认文案（路径/数量/不可恢复/移出库提示），真核心钉库外目录被
+  # rmdirinfo/rmdir 双重拒绝（后端 checkRemovableDirLocked 防线）。
+  add_executable(test_remove_dir tests/test_remove_dir.mm
+    tools/native_ui/RLPRemoveDir.mm
+    tools/native_ui/RLPSupport.mm
+    tools/native_ui/RLPCoreClient.mm
+    tools/native_ui/RLPTheme.mm
+    tools/native_ui/RLPNativeI18n.mm)
+  set_source_files_properties(tests/test_remove_dir.mm
+    tools/native_ui/RLPRemoveDir.mm tools/native_ui/RLPSupport.mm
+    tools/native_ui/RLPCoreClient.mm tools/native_ui/RLPTheme.mm
+    tools/native_ui/RLPNativeI18n.mm
+    PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
+  target_include_directories(test_remove_dir PRIVATE
+    ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tools ${CMAKE_SOURCE_DIR}/tools/native_ui)
+  target_link_libraries(test_remove_dir PRIVATE rlapp_core "-framework AppKit")
+  add_test(NAME remove_dir COMMAND test_remove_dir)
+  set_tests_properties(remove_dir PROPERTIES TIMEOUT 120)
 
   # 2026-11-11：曲目右键菜单完整性（对齐 web trackActionMenu 四项核心动作）。
   # 触发原因：原生曲目页只有两项、专辑详情完全没有右键菜单、队列只有两项。

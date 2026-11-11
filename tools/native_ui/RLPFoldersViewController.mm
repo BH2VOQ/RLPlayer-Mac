@@ -9,8 +9,9 @@
 #import "RLPCoreClient.h"
 #import "RLPSupport.h"
 #import "RLPTheme.h"
+#import "RLPRemoveDir.h"
 
-@interface RLPFoldersViewController () <NSTableViewDataSource, NSTableViewDelegate>
+@interface RLPFoldersViewController () <NSTableViewDataSource, NSTableViewDelegate, NSMenuDelegate>
 @property (nonatomic, copy) NSString *dir;
 @property (nonatomic, strong) NSArray<NSString *> *dirs;
 @property (nonatomic, strong) NSArray<NSString *> *files;
@@ -70,6 +71,11 @@
     NSMenu *menu = [[NSMenu alloc] init];
     NSMenuItem *mi = [menu addItemWithTitle:RLPTr(@"播放") action:@selector(ctxPlay:) keyEquivalent:@""];
     mi.target = self;
+    // 目录行的「删除磁盘目录」（对齐 web .fdel）：走统计 → 二次确认 → 真删。
+    // 破坏性操作，仅对目录行显示（菜单按被点行动态重建，见 menuForEvent 等价处理）。
+    NSMenuItem *del = [menu addItemWithTitle:RLPTr(@"删除磁盘目录…") action:@selector(ctxRemoveDir:) keyEquivalent:@""];
+    del.target = self;
+    menu.delegate = self;
     self.table.menu = menu;
 
     NSScrollView *scroll = [[NSScrollView alloc] initWithFrame:NSZeroRect];
@@ -195,6 +201,78 @@
     if (row < (NSInteger)self.dirs.count || row < 0) return;
     NSString *leaf = self.files[(NSUInteger)(row - (NSInteger)self.dirs.count)];
     RLPPlayPath([self.dir stringByAppendingPathComponent:leaf]);
+}
+
+#pragma mark - 删除磁盘目录（破坏性；统计 → 二次确认 → 真删）
+
+/// 菜单按被点行动态更新：只有目录行才显示「删除磁盘目录…」与「播放」互斥。
+- (void)menuNeedsUpdate:(NSMenu *)menu {
+    const NSInteger row = self.table.clickedRow;
+    const BOOL isDir = (row >= 0 && row < (NSInteger)self.dirs.count);
+    for (NSMenuItem *item in menu.itemArray) {
+        if (!item.action) continue;
+        // SEL 是 C 指针，不能用 -isEqual:；用 NSStringFromSelector 比较。
+        NSString *act = NSStringFromSelector(item.action);
+        if ([act isEqualToString:@"ctxRemoveDir:"]) item.hidden = !isDir;
+        if ([act isEqualToString:@"ctxPlay:"]) item.hidden = isDir;
+    }
+}
+
+/// 右键目录行 → 先统计（后端安全校验：库根之下/非库根/非符号链接），拿到数字才弹确认。
+- (void)ctxRemoveDir:(id)sender {
+    (void)sender;
+    const NSInteger row = self.table.clickedRow;
+    if (row < 0 || row >= (NSInteger)self.dirs.count) return;   // 文件行绝不删
+    NSString *child = self.dirs[(NSUInteger)row];
+    NSString *target = [self.dir stringByAppendingPathComponent:child];
+    if (!target.length) return;
+
+    RLPToast(RLPTr(@"正在统计要删除的文件…"));
+    NSString *body = [NSString stringWithFormat:@"dir=%@", RLPEnc(target)];
+    __weak __typeof__(self) weakSelf = self;
+    [[RLPCoreClient shared] postJSON:@"/api/lib/rmdirinfo" body:body
+                          completion:^(NSDictionary * _Nullable json) {
+        __typeof__(self) self_ = weakSelf;
+        if (!self_) return;
+        // 拿不到数字（后端拒绝：库外 / 库根 / 含软链 / 不存在）⟹ 绝不继续，原因如实告诉用户。
+        if (!json || ![json[@"ok"] boolValue]) {
+            NSString *err = [json[@"error"] isKindOfClass:[NSString class]] ? json[@"error"] : RLPTr(@"无法统计该目录，已取消");
+            RLPToast(err);
+            return;
+        }
+        const NSInteger files = [json[@"files"] respondsToSelector:@selector(integerValue)] ? [json[@"files"] integerValue] : 0;
+        const NSInteger dirs  = [json[@"dirs"] respondsToSelector:@selector(integerValue)] ? [json[@"dirs"] integerValue] : 0;
+        [self_ confirmRemoveDir:target files:files dirs:dirs];
+    }];
+}
+
+/// 二次确认。**最左按钮是「取消」**（回车默认落到取消，避免误触删盘），确认按钮在右侧。
+- (void)confirmRemoveDir:(NSString *)target files:(NSInteger)files dirs:(NSInteger)dirs {
+    NSAlert *a = [[NSAlert alloc] init];
+    a.messageText = RLPRemoveDirAlertTitle();
+    a.informativeText = RLPRemoveDirAlertBody(target, files, dirs);
+    [a addButtonWithTitle:RLPTr(@"取消")];                       // 最左 = 默认 = 安全
+    [a addButtonWithTitle:RLPRemoveDirConfirmButtonTitle(files)];
+    // 破坏性操作用 caution 图标，视觉上再拦一道。
+    a.alertStyle = NSAlertStyleCritical;
+    if ([a runModal] != NSAlertSecondButtonReturn) return;     // 只有明确点「删除 N 个文件」才继续
+
+    NSString *body = [NSString stringWithFormat:@"dir=%@", RLPEnc(target)];
+    __weak __typeof__(self) weakSelf = self;
+    [[RLPCoreClient shared] postJSON:@"/api/lib/rmdir" body:body
+                          completion:^(NSDictionary * _Nullable json) {
+        __typeof__(self) self_ = weakSelf;
+        if (!self_) return;
+        if (!json || ![json[@"ok"] boolValue]) {
+            NSString *err = [json[@"error"] isKindOfClass:[NSString class]] ? json[@"error"] : RLPTr(@"删除失败");
+            RLPToast(err);
+            return;
+        }
+        const NSInteger n = [json[@"files"] respondsToSelector:@selector(integerValue)] ? [json[@"files"] integerValue] : files;
+        const NSInteger removed = [json[@"removedTracks"] respondsToSelector:@selector(integerValue)] ? [json[@"removedTracks"] integerValue] : 0;
+        RLPToast(RLPRemoveDirSuccessText(n, removed));
+        [self_ loadDir:self_.dir];   // 刷新当前目录（被删子目录消失）
+    }];
 }
 
 - (void)applyTheme {

@@ -236,3 +236,17 @@ AI 资料补全与音频输入采集：在左侧「设置」里调整。	AI meta
 当前值，不在列表中	current, not in list	AI 模型下拉当前值项后缀
 本次播放路径…	Current playback path…	工作台信号链详情入口
 读取信号链…	Loading signal chain…	信号链详情弹层初始态
+删除磁盘目录…	Delete Directory from Disk…	文件夹页目录右键菜单
+将删除 %ld 个文件、%ld 个子目录。	Will delete %ld files and %ld subdirectories.	删除目录确认框正文
+将删除 %ld 个文件。	Will delete %ld files.	删除目录确认框正文（无子目录）
+删除 %ld 个文件	Delete %ld files	删除目录确认按钮
+已删除 %ld 个文件	Deleted %ld files	删除目录成功提示
+即将从磁盘永久删除下面这个目录：	The following directory will be permanently deleted from disk:	删除目录确认框标题行
+同时清掉 %ld 首索引记录	also removed %ld index entries	删除目录成功提示（附加）
+数字音乐台	Digital Music Console	专业工作台页内大标题
+微调每一组声音，随时对比同一片段	Fine-tune every sound, compare the same passage anytime	两首页副标题
+挑一张专辑开始聆听	Pick an album to start listening	当前曲目卡空态副标题
+声音处理	Sound Processing	实际信号路径三列之一
+设备输出	Device Output	实际信号路径三列之一
+独立配置 · 自动保存	Independent config · Auto-saved	A/B 槽位卡说明
+切换	Switch	A/B 槽位切换按钮
