@@ -507,3 +507,9 @@ AI 资料补全与音频输入采集：在左侧「设置」里调整。	AI meta
 写回进行中 %ld/%ld…	Write-back in progress %ld/%ld…	标签写回轮询进度
 写入 %ld，跳过 %ld，失败 %ld	Wrote %ld, skipped %ld, failed %ld	标签写回完成汇总
 %ld 首可写，%ld 首跳过	%ld writable, %ld skipped	标签写回预览汇总
+数据源优先级	Source priority	元数据数据源区块标题
+顺序已保存	Order saved	数据源排序保存提示
+上移	Move up	数据源上移按钮 tooltip
+下移	Move down	数据源下移按钮 tooltip
+越靠上优先级越高	Higher on the list means higher priority	数据源优先级说明
+读取数据源失败	Failed to load sources	数据源注册表读取失败

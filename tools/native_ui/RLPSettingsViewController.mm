@@ -29,6 +29,7 @@
 #import "RLPCalibrationView.h"
 #import "RLPFeedbackWindowController.h"
 #import "RLPServersView.h"
+#import "RLPMetaSourcesView.h"
 
 #pragma mark - 页签定义
 
@@ -164,6 +165,8 @@ static NSView *RLPSGroup(NSString *title, NSString *desc, RLPTheme *t) {
 @property (nonatomic, strong) NSSwitch *streamSwitch;
 // 流媒体
 @property (nonatomic, strong) RLPServersView *serversView;
+// 元数据数据源（动态注册表 + 优先级）
+@property (nonatomic, strong) RLPMetaSourcesView *metaSourcesView;
 // 元数据
 @property (nonatomic, strong) NSSwitch *metaOnSwitch;
 @property (nonatomic, strong) NSSwitch *metaLlmSwitch;
@@ -728,6 +731,15 @@ static NSView *RLPSGroup(NSString *title, NSString *desc, RLPTheme *t) {
     self.metaAiFillSwitch = [self switchWithAction:@selector(onSwitch:) key:@"metaaifill"];
     [stack addArrangedSubview:RLPSRow(RLPTr(@"AI 补封面歌词"), self.metaAiFillSwitch, nil, t)];
 
+    // 数据源开关 + 优先级（对齐 web sp_metasrc：按注册表动态渲染，新增源前端零改动）。
+    self.metaSourcesView = [[RLPMetaSourcesView alloc] initWithFrame:NSMakeRect(0, 0, 620, 200)];
+    self.metaSourcesView.translatesAutoresizingMaskIntoConstraints = NO;
+    [stack addArrangedSubview:self.metaSourcesView];
+    [NSLayoutConstraint activateConstraints:@[
+        [self.metaSourcesView.widthAnchor constraintEqualToAnchor:stack.widthAnchor constant:-4],
+    ]];
+    [self.metaSourcesView reload];
+
     // AI 模型端点：密钥红线 —— GET 只回掩码，输入框留空 = 不改已存的 key
     [stack addArrangedSubview:RLPSGroup(RLPTr(@"AI 模型端点"),
         RLPTr(@"用于资料整理与简介。密钥只在本机保存，界面永不回显明文；留空表示不修改。"), t)];
@@ -1192,6 +1204,7 @@ static NSView *RLPSGroup(NSString *title, NSString *desc, RLPTheme *t) {
     }];
 
     [self.serversView reload];
+    [self.metaSourcesView reload];
     [self loadLlmConfig];
 }
 
@@ -1214,6 +1227,7 @@ static NSView *RLPSGroup(NSString *title, NSString *desc, RLPTheme *t) {
     [self.castView applyTheme];
     [self.calView applyTheme];
     [self.serversView applyTheme];
+    [self.metaSourcesView applyTheme];
 }
 
 @end

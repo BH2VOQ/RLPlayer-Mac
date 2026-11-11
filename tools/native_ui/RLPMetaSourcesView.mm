@@ -1,0 +1,280 @@
+// SPDX-FileCopyrightText: 2026 BH2VOQ <https://github.com/BH2VOQ>
+// SPDX-License-Identifier: GPL-3.0-or-later
+//
+// RLPMetaSourcesView.mm — 元数据数据源开关 + 优先级排序（契约见 .h）
+//
+// 为什么单独一个视图：逐源开关 + 上移/下移 + 恢复默认自成一块，抽出来便于判据直接构造。
+// 纪律：开关/顺序都走 /api/settings 的 metasrc_<id> / metasrcorder 键（后端白名单已放行）；
+// 顺序原样写回后端给的规范化排列，不在前端另算一套。
+#import "RLPMetaSourcesView.h"
+#import "RLPCoreClient.h"
+#import "RLPSupport.h"
+#import "RLPTheme.h"
+
+@interface RLPMetaSource : NSObject
+@property (nonatomic, copy) NSString *sid;
+@property (nonatomic, copy) NSString *name;
+@property (nonatomic, assign) BOOL on;
+@property (nonatomic, assign) BOOL canSearch;
+@property (nonatomic, assign) BOOL canLyric;
+@end
+@implementation RLPMetaSource
+@end
+
+@interface RLPMetaSourcesView ()
+@property (nonatomic, strong) NSStackView *listStack;
+@property (nonatomic, strong) NSButton *resetBtn;
+@property (nonatomic, strong) NSTextField *msg;
+@property (nonatomic, strong) NSMutableArray<RLPMetaSource *> *sources;   // 按当前优先级顺序
+@property (nonatomic, strong) NSArray<NSString *> *defaultOrder;
+@property (nonatomic, assign) NSUInteger seq;
+@end
+
+@implementation RLPMetaSourcesView
+
+- (instancetype)initWithFrame:(NSRect)frame {
+    self = [super initWithFrame:frame];
+    if (self) {
+        _sources = [NSMutableArray array];
+        _defaultOrder = @[];
+        [self buildUI];
+    }
+    return self;
+}
+
+- (void)buildUI {
+    RLPTheme *t = [RLPTheme current];
+    self.translatesAutoresizingMaskIntoConstraints = NO;
+
+    NSStackView *root = [[NSStackView alloc] initWithFrame:NSZeroRect];
+    root.orientation = NSUserInterfaceLayoutOrientationVertical;
+    root.alignment = NSLayoutAttributeLeading;
+    root.spacing = 8;
+    root.translatesAutoresizingMaskIntoConstraints = NO;
+    [self addSubview:root];
+    [NSLayoutConstraint activateConstraints:@[
+        [root.leadingAnchor constraintEqualToAnchor:self.leadingAnchor],
+        [root.trailingAnchor constraintEqualToAnchor:self.trailingAnchor],
+        [root.topAnchor constraintEqualToAnchor:self.topAnchor],
+        [root.bottomAnchor constraintEqualToAnchor:self.bottomAnchor],
+    ]];
+
+    NSStackView *head = [[NSStackView alloc] initWithFrame:NSZeroRect];
+    head.orientation = NSUserInterfaceLayoutOrientationHorizontal;
+    head.alignment = NSLayoutAttributeCenterY;
+    head.spacing = 10;
+    NSTextField *title = RLPLabel(RLPTr(@"数据源优先级"),
+        [NSFont systemFontOfSize:13 weight:NSFontWeightSemibold], t.text);
+    [head addArrangedSubview:title];
+    self.resetBtn = [NSButton buttonWithTitle:RLPTr(@"恢复默认") target:self action:@selector(onReset:)];
+    self.resetBtn.bezelStyle = NSBezelStyleRounded;
+    self.resetBtn.identifier = @"metasrc.reset";
+    [head addArrangedSubview:self.resetBtn];
+    [root addArrangedSubview:head];
+
+    self.listStack = [[NSStackView alloc] initWithFrame:NSZeroRect];
+    self.listStack.orientation = NSUserInterfaceLayoutOrientationVertical;
+    self.listStack.alignment = NSLayoutAttributeLeading;
+    self.listStack.spacing = 6;
+    self.listStack.translatesAutoresizingMaskIntoConstraints = NO;
+    self.listStack.identifier = @"metasrc.list";
+    [root addArrangedSubview:self.listStack];
+    [self.listStack.widthAnchor constraintEqualToAnchor:root.widthAnchor].active = YES;
+
+    self.msg = RLPLabel(@"", t.small, t.mut);
+    self.msg.identifier = @"metasrc.msg";
+    self.msg.maximumNumberOfLines = 2;
+    self.msg.lineBreakMode = NSLineBreakByWordWrapping;
+    [[self.msg.widthAnchor constraintEqualToConstant:520] setActive:YES];
+    [root addArrangedSubview:self.msg];
+}
+
+#pragma mark - 数据
+
+- (void)reload {
+    if (![RLPCoreClient shared].started) {
+        self.msg.stringValue = RLPTr(@"核心未启动");
+        return;
+    }
+    const NSUInteger seq = ++self.seq;
+    __weak __typeof__(self) weakSelf = self;
+    [[RLPCoreClient shared] getJSON:@"/api/providers" completion:^(NSDictionary * _Nullable json) {
+        __typeof__(self) self_ = weakSelf;
+        if (!self_ || seq != self_.seq) return;
+        if (!json || ![json[@"ok"] boolValue]) {
+            self_.msg.stringValue = RLPTr(@"读取数据源失败");
+            return;
+        }
+        NSArray *items = [json[@"items"] isKindOfClass:[NSArray class]] ? json[@"items"] : @[];
+        // items 已按用户顺序返回（后端 pv_ordered）；直接按数组顺序建。
+        [self_.sources removeAllObjects];
+        for (id x in items) {
+            if (![x isKindOfClass:[NSDictionary class]]) continue;
+            RLPMetaSource *s = [[RLPMetaSource alloc] init];
+            s.sid  = [x[@"id"] isKindOfClass:[NSString class]] ? x[@"id"] : @"";
+            s.name = [x[@"name"] isKindOfClass:[NSString class]] ? x[@"name"] : s.sid;
+            s.on = ![x[@"on"] respondsToSelector:@selector(boolValue)] || [x[@"on"] boolValue];
+            s.canSearch = [x[@"canSearch"] respondsToSelector:@selector(boolValue)] && [x[@"canSearch"] boolValue];
+            s.canLyric = [x[@"canLyric"] respondsToSelector:@selector(boolValue)] && [x[@"canLyric"] boolValue];
+            if (s.sid.length) [self_.sources addObject:s];
+        }
+        NSString *def = [json[@"defaultOrder"] isKindOfClass:[NSString class]] ? json[@"defaultOrder"] : @"";
+        self_.defaultOrder = def.length ? [def componentsSeparatedByString:@","] : @[];
+        self_.msg.stringValue = RLPTr(@"越靠上优先级越高");
+        [self_ renderRows];
+    }];
+}
+
+- (NSString *)capabilityText:(RLPMetaSource *)s {
+    if (s.canSearch && s.canLyric) return RLPTr(@"标签 / 封面 / 歌词");
+    if (s.canSearch) return RLPTr(@"标签 / 封面");
+    return RLPTr(@"歌词（独立歌词源）");
+}
+
+- (void)renderRows {
+    for (NSView *v in self.listStack.arrangedSubviews) {
+        [self.listStack removeArrangedSubview:v];
+        [v removeFromSuperview];
+    }
+    RLPTheme *t = [RLPTheme current];
+    const NSInteger n = (NSInteger)self.sources.count;
+    for (NSInteger i = 0; i < n; ++i) {
+        RLPMetaSource *s = self.sources[(NSUInteger)i];
+        NSStackView *row = [[NSStackView alloc] initWithFrame:NSZeroRect];
+        row.orientation = NSUserInterfaceLayoutOrientationHorizontal;
+        row.alignment = NSLayoutAttributeCenterY;
+        row.spacing = 8;
+        row.translatesAutoresizingMaskIntoConstraints = NO;
+        row.wantsLayer = YES;
+        row.layer.cornerRadius = 8;
+        row.layer.borderWidth = 1;
+        row.layer.borderColor = t.line.CGColor;
+        row.layer.backgroundColor = t.field.CGColor;
+        row.edgeInsets = NSEdgeInsetsMake(6, 10, 6, 10);
+        row.identifier = [@"metasrc.row." stringByAppendingString:s.sid];
+
+        // 优先级序号
+        NSTextField *idx = RLPLabel([NSString stringWithFormat:@"%ld", (long)(i + 1)], t.small, t.mut);
+        [[idx.widthAnchor constraintEqualToConstant:18] setActive:YES];
+        idx.alignment = NSTextAlignmentRight;
+        [row addArrangedSubview:idx];
+
+        // 开关 + 名称 + 能力说明
+        NSSwitch *sw = [[NSSwitch alloc] initWithFrame:NSZeroRect];
+        sw.state = s.on ? NSControlStateValueOn : NSControlStateValueOff;
+        sw.target = self;
+        sw.action = @selector(onToggle:);
+        sw.identifier = s.sid;
+        [row addArrangedSubview:sw];
+
+        NSStackView *text = [[NSStackView alloc] initWithFrame:NSZeroRect];
+        text.orientation = NSUserInterfaceLayoutOrientationVertical;
+        text.alignment = NSLayoutAttributeLeading;
+        text.spacing = 1;
+        NSTextField *nm = RLPLabel(s.name, t.body, t.text);
+        NSTextField *cap = RLPLabel([self capabilityText:s], t.small, t.mut);
+        [text addArrangedSubview:nm];
+        [text addArrangedSubview:cap];
+        [row addArrangedSubview:text];
+
+        // 上移 / 下移（到顶/到底禁用，web 同口径）
+        NSButton *up = [NSButton buttonWithTitle:@"▲" target:self action:@selector(onMoveUp:)];
+        up.bezelStyle = NSBezelStyleRounded;
+        up.identifier = s.sid;
+        up.enabled = (i > 0);
+        up.toolTip = RLPTr(@"上移");
+        [row addArrangedSubview:up];
+        NSButton *dn = [NSButton buttonWithTitle:@"▼" target:self action:@selector(onMoveDown:)];
+        dn.bezelStyle = NSBezelStyleRounded;
+        dn.identifier = s.sid;
+        dn.enabled = (i < n - 1);
+        dn.toolTip = RLPTr(@"下移");
+        [row addArrangedSubview:dn];
+
+        [self.listStack addArrangedSubview:row];
+        [row.widthAnchor constraintEqualToAnchor:self.listStack.widthAnchor].active = YES;
+    }
+}
+
+#pragma mark - 动作
+
+/// 当前顺序 → metasrcorder 值（逗号分隔 id）。
+- (NSString *)orderString {
+    NSMutableArray<NSString *> *ids = [NSMutableArray array];
+    for (RLPMetaSource *s in self.sources) [ids addObject:s.sid];
+    return [ids componentsJoinedByString:@","];
+}
+
+/// 落盘：逐源开关 + 顺序，一次 /api/settings（web saveSettings 同口径）。
+- (void)persist {
+    NSMutableString *body = [NSMutableString string];
+    for (RLPMetaSource *s in self.sources)
+        [body appendFormat:@"&metasrc_%@=%@", s.sid, s.on ? @"1" : @"0"];
+    if (self.sources.count)
+        [body appendFormat:@"&metasrcorder=%@", RLPEnc([self orderString])];
+    // 去掉开头的 &
+    NSString *b = body.length ? [body substringFromIndex:1] : @"";
+    [[RLPCoreClient shared] postJSON:@"/api/settings" body:b completion:nil];
+}
+
+- (void)onToggle:(NSSwitch *)sender {
+    for (RLPMetaSource *s in self.sources) {
+        if ([s.sid isEqualToString:sender.identifier]) {
+            s.on = (sender.state == NSControlStateValueOn);
+            break;
+        }
+    }
+    [self persist];
+}
+
+- (NSInteger)indexOfId:(NSString *)sid {
+    for (NSInteger i = 0; i < (NSInteger)self.sources.count; ++i)
+        if ([self.sources[(NSUInteger)i].sid isEqualToString:sid]) return i;
+    return -1;
+}
+
+- (void)moveId:(NSString *)sid delta:(NSInteger)delta {
+    NSInteger i = [self indexOfId:sid];
+    NSInteger j = i + delta;
+    if (i < 0 || j < 0 || j >= (NSInteger)self.sources.count) return;
+    RLPMetaSource *s = self.sources[(NSUInteger)i];
+    [self.sources removeObjectAtIndex:(NSUInteger)i];
+    [self.sources insertObject:s atIndex:(NSUInteger)j];
+    [self renderRows];
+    [self persist];
+    // 顺序已保存：给出可读的优先级链（web metaOrderCommit 同口径）。
+    NSMutableArray<NSString *> *names = [NSMutableArray array];
+    for (RLPMetaSource *x in self.sources) [names addObject:x.name];
+    self.msg.stringValue = [RLPTr(@"顺序已保存") stringByAppendingFormat:@"：%@",
+                            [names componentsJoinedByString:@" → "]];
+}
+
+- (void)onMoveUp:(NSButton *)sender { [self moveId:sender.identifier delta:-1]; }
+- (void)onMoveDown:(NSButton *)sender { [self moveId:sender.identifier delta:+1]; }
+
+- (void)onReset:(id)sender {
+    (void)sender;
+    if (!self.defaultOrder.count) return;
+    // 按出厂顺序重排（只动顺序，不动各源开关）。
+    NSMutableDictionary<NSString *, RLPMetaSource *> *byId = [NSMutableDictionary dictionary];
+    for (RLPMetaSource *s in self.sources) byId[s.sid] = s;
+    NSMutableArray<RLPMetaSource *> *reordered = [NSMutableArray array];
+    for (NSString *sid in self.defaultOrder) {
+        RLPMetaSource *s = byId[sid];
+        if (s) { [reordered addObject:s]; [byId removeObjectForKey:sid]; }
+    }
+    // 注册表里新增、defaultOrder 没有的源排在末尾（不丢）。
+    for (RLPMetaSource *s in self.sources) if (byId[s.sid]) [reordered addObject:s];
+    [self.sources setArray:reordered];
+    [self renderRows];
+    [self persist];
+    self.msg.stringValue = RLPTr(@"顺序已保存");
+}
+
+#pragma mark - 主题
+
+- (void)applyTheme {
+    [self renderRows];
+}
+
+@end

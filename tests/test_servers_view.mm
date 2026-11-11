@@ -14,6 +14,7 @@
 //   S7 设置·流媒体页真的嵌了管理视图（不是只读文本）
 #import <AppKit/AppKit.h>
 #import "RLPServersView.h"
+#import "RLPMetaSourcesView.h"
 #import "RLPSettingsViewController.h"
 #import "RLPCoreClient.h"
 #import "RLPSupport.h"
@@ -207,6 +208,60 @@ int main() {
             CK(wbMsg != nil, "S8d 预览结果用「N 首可写，M 首跳过」口径（或如实报错）",
                wbMsg.stringValue ?: @"未找到结果文案");
             CK(dry.enabled && apply.enabled, "S8e 预览结束后按钮恢复可用", @"");
+        }
+
+        // ---- S9 元数据数据源：动态注册表 + 优先级排序（对齐 web sp_metasrc）----
+        // 旧实现只有 4 个固定开关，没有逐源开关/排序。这里钉住真核心读注册表 + 写后读回。
+        {
+            RLPMetaSourcesView *mv = [[RLPMetaSourcesView alloc] initWithFrame:NSMakeRect(0, 0, 640, 300)];
+            [mv layoutSubtreeIfNeeded];
+            [mv reload];
+            Pump(0.8);
+            NSMutableArray<NSView *> *mall = [NSMutableArray array];
+            CollectViews(mv, mall);
+            NSInteger switches = 0, rows = 0;
+            NSButton *reset = nil;
+            for (NSView *v in mall) {
+                if ([v isKindOfClass:[NSSwitch class]]) ++switches;
+                if ([v.identifier hasPrefix:@"metasrc.row."]) ++rows;
+                if ([v.identifier isEqualToString:@"metasrc.reset"]) reset = (NSButton *)v;
+            }
+            // 后端注册表至少有几个源（qq/netease/…）；逐源开关数 == 行数 == 注册表大小。
+            NSDictionary *prov = [core jsonWithMethod:@"GET" path:@"/api/providers" body:nil];
+            NSArray *pitems = [prov[@"items"] isKindOfClass:[NSArray class]] ? prov[@"items"] : @[];
+            CK(pitems.count > 0, "S9a 后端注册表非空",
+               [NSString stringWithFormat:@"n=%lu", (unsigned long)pitems.count]);
+            CK(rows == (NSInteger)pitems.count, "S9b 逐源行数 == 注册表大小（动态渲染）",
+               [NSString stringWithFormat:@"rows=%ld want=%lu", (long)rows, (unsigned long)pitems.count]);
+            CK(switches == (NSInteger)pitems.count, "S9c 每源一个开关",
+               [NSString stringWithFormat:@"switches=%ld", (long)switches]);
+            CK(reset != nil, "S9d 有「恢复默认」按钮", @"");
+
+            // 关掉第一个源 → 读回 metasrc_<id>=0
+            NSString *firstId = [pitems.firstObject[@"id"] isKindOfClass:[NSString class]] ? pitems.firstObject[@"id"] : @"";
+            NSSwitch *firstSw = nil;
+            for (NSView *v in mall)
+                if ([v isKindOfClass:[NSSwitch class]] && [v.identifier isEqualToString:firstId]) firstSw = (NSSwitch *)v;
+            CK(firstSw != nil, "S9e 找到第一源开关", firstId);
+            if (firstSw) {
+                // performClick 会自己翻转 state 并触发 action；不要预先设 state（否则会翻回去）。
+                // 注册表默认 on=1 ⟹ 点一下变 off。
+                [firstSw performClick:nil];
+                Pump(0.6);
+                NSDictionary *kv = [core jsonWithMethod:@"GET" path:@"/api/settings" body:nil][@"kv"];
+                NSString *key = [@"metasrc_" stringByAppendingString:firstId];
+                CK([kv[key] isEqualToString:@"0"], "S9f 关源后 metasrc_<id>=0 落盘",
+                   [NSString stringWithFormat:@"%@=%@", key, kv[key] ?: @"nil"]);
+            }
+
+            // 设置·元数据页真的嵌了数据源视图
+            [settings selectPane:@"meta"];
+            [settings.view layoutSubtreeIfNeeded];
+            NSMutableArray<NSView *> *metaAll = [NSMutableArray array];
+            CollectViews(settings.view, metaAll);
+            BOOL hasMetaSources = NO;
+            for (NSView *v in metaAll) if ([v isKindOfClass:[RLPMetaSourcesView class]]) hasMetaSources = YES;
+            CK(hasMetaSources, "S9g 设置·元数据页嵌入数据源视图（不再只有固定开关）", @"");
         }
 
         [core shutdown];
