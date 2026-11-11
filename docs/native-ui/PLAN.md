@@ -51,7 +51,7 @@
 | 设置 · 输入 | CoreAudio 采集：后端/设备/模式/时长/输出/直通监听（二次确认） |
 | 设置 · 流媒体 | 服务器增删改/启用/测试（RLPServersView，密码留空=不改）+ 投放面板（AirPlay / UPnP，1s 轮询 cast/state） |
 | 设置 · 诊断 | 诊断包导出 + 反馈窗口入口 |
-| 设置 · 元数据 | 四个开关 + 数据源逐源开关/优先级排序/恢复默认（RLPMetaSourcesView）+ AI 模型端点（密钥留空不改、存完即清） |
+| 设置 · 元数据 | 四个开关 + 数据源逐源开关/优先级排序/恢复默认（RLPMetaSourcesView）+ AI 模型端点（模型下拉 /api/llm/models 选中即保存、密钥留空不改、存完即清） |
 | 设置 · 高级（续） | 联网补齐封面 + 进度、标签写回（预览 → 执行） |
 | 正在播放 | 封面 + 歌词 + 收藏 + 19 项音质体检 + AI 资料层（知识卡 + 简介，pending 轮询） |
 | 更新窗口 | 一窗两视图 + 5 出口；忽略落盘 |
@@ -75,7 +75,7 @@
 | 端点 | 为什么没接 |
 |---|---|
 | /api/lib/stats、/api/rates、/api/gpu、/api/net、/api/signal | 只读诊断/能力查询，原生页当前不展示这些面板 |
-| /api/providers | 已接（2026-11-12：RLPMetaSourcesView 逐源开关 + 优先级排序 + 恢复默认）；/api/llm/models 模型列表下拉未迁移（原生手填） |
+| /api/providers、/api/llm/models | 已接（2026-11-12：providers → RLPMetaSourcesView 逐源开关+优先级；llm/models → 设置·元数据模型下拉，拉不到降级手填） |
 | /api/lib/rmdir、/api/lib/rmdirinfo | 目录删除（破坏性），未迁移 |
 | /api/queue/set | 整体替换队列（拖动排序已用 qmove 覆盖主要场景） |
 | /api/compare | 已接（RLPShowCompareSheet / 单曲页版本对比）；/api/entity/versions（Discogs 版本推荐）未迁移 |

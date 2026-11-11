@@ -22,6 +22,9 @@ NS_ASSUME_NONNULL_BEGIN
 /// 当前页签的符号 key（判据用：证明 selectPane 真的切到位，不是静默映射走）。
 - (NSString *)currentPaneKey;
 
+/// 拉取 /api/llm/models 刷新模型下拉；力刷走 ?refresh=1。进页自动调一次（判据也可显式触发）。
+- (void)loadLlmModels:(BOOL)force;
+
 @end
 
 NS_ASSUME_NONNULL_END

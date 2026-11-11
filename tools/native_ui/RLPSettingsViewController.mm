@@ -189,6 +189,10 @@ static NSView *RLPSGroup(NSString *title, NSString *desc, RLPTheme *t) {
 @property (nonatomic, strong) NSTextField *llmBase;
 @property (nonatomic, strong) NSSecureTextField *llmKey;
 @property (nonatomic, strong) NSTextField *llmModel;
+/// /api/llm/models 拉到列表时显示下拉（选中即保存）；拉不到时隐藏，保留手填框。
+@property (nonatomic, strong) NSPopUpButton *llmModelPopup;
+@property (nonatomic, strong) NSButton *llmModelRefresh;
+@property (nonatomic, strong) NSTextField *llmModelMsg;
 @property (nonatomic, strong) NSTextField *llmStatus;
 @end
 
@@ -754,6 +758,32 @@ static NSView *RLPSGroup(NSString *title, NSString *desc, RLPTheme *t) {
     [[self.llmModel.widthAnchor constraintEqualToConstant:220] setActive:YES];
     [stack addArrangedSubview:RLPSRow(RLPTr(@"模型"), self.llmModel, nil, t)];
 
+    // 模型下拉（对齐 web llmModelRender）：拉到 /api/llm/models 就显示动态列表并「选中即保存」；
+    // 拉不到自动降级到上面的手填框 + 如实写出原因，绝不因网关缺 /models 而崩。
+    self.llmModelPopup = [[NSPopUpButton alloc] initWithFrame:NSZeroRect pullsDown:NO];
+    self.llmModelPopup.target = self;
+    self.llmModelPopup.action = @selector(onLlmModelPicked:);
+    self.llmModelPopup.identifier = @"llm.modelpopup";
+    self.llmModelPopup.hidden = YES;
+    [self.llmModelPopup.widthAnchor constraintEqualToConstant:320].active = YES;
+    self.llmModelRefresh = [NSButton buttonWithTitle:RLPTr(@"刷新模型列表")
+        target:self action:@selector(onLlmModelRefresh:)];
+    self.llmModelRefresh.bezelStyle = NSBezelStyleRounded;
+    self.llmModelRefresh.identifier = @"llm.modelrefresh";
+    NSStackView *modelRow = [[NSStackView alloc] init];
+    modelRow.orientation = NSUserInterfaceLayoutOrientationHorizontal;
+    modelRow.spacing = 8;
+    [modelRow addArrangedSubview:self.llmModelPopup];
+    [modelRow addArrangedSubview:self.llmModelRefresh];
+    [stack addArrangedSubview:modelRow];
+
+    self.llmModelMsg = RLPLabel(RLPTr(@"模型列表读取中"), t.small, t.mut);
+    self.llmModelMsg.maximumNumberOfLines = 2;
+    self.llmModelMsg.lineBreakMode = NSLineBreakByWordWrapping;
+    self.llmModelMsg.identifier = @"llm.modelmsg";
+    [[self.llmModelMsg.widthAnchor constraintEqualToConstant:560] setActive:YES];
+    [stack addArrangedSubview:self.llmModelMsg];
+
     self.llmKey = [[NSSecureTextField alloc] initWithFrame:NSZeroRect];
     self.llmKey.placeholderString = RLPTr(@"留空 = 保持已保存的密钥");
     [[self.llmKey.widthAnchor constraintEqualToConstant:320] setActive:YES];
@@ -879,6 +909,88 @@ static NSView *RLPSGroup(NSString *title, NSString *desc, RLPTheme *t) {
 
 #pragma mark - AI 模型端点
 
+#pragma mark - AI 模型列表（/api/llm/models，对齐 web llmModelsLoad）
+
+/// 拉取模型列表。纪律与 web 一致：拉不到降级手填、不擅自改用户当前 model、选中即保存。
+- (void)loadLlmModels:(BOOL)force {
+    if (![RLPCoreClient shared].started || !self.llmModelPopup) return;
+    if (force) self.llmModelMsg.stringValue = RLPTr(@"正在重新拉取模型列表…");
+    NSString *url = force ? @"/api/llm/models?refresh=1" : @"/api/llm/models";
+    __weak __typeof__(self) weakSelf = self;
+    [[RLPCoreClient shared] getJSON:url completion:^(NSDictionary * _Nullable json) {
+        __typeof__(self) self_ = weakSelf;
+        if (!self_) return;
+        NSArray *models = [json[@"models"] isKindOfClass:[NSArray class]] ? json[@"models"] : @[];
+        const BOOL ok = json && [json[@"ok"] boolValue] && models.count > 0;
+        NSString *cur = [json[@"current"] isKindOfClass:[NSString class]] ? json[@"current"]
+                        : (self_.llmModel.stringValue ?: @"");
+        if (!ok) {
+            // 降级：隐藏下拉、保留手填（值填当前 model，用户可改可留空）。
+            self_.llmModelPopup.hidden = YES;
+            if (!self_.llmModel.stringValue.length) self_.llmModel.stringValue = cur;
+            NSString *err = [json[@"error"] isKindOfClass:[NSString class]] ? json[@"error"] : @"";
+            self_.llmModelMsg.stringValue = err.length
+                ? [RLPTr(@"拉取模型列表失败") stringByAppendingFormat:@"：%@", err]
+                : RLPTr(@"服务端没有返回任何模型，可直接手填模型 id");
+            self_.llmModelMsg.textColor = [RLPTheme current].warn;
+            return;
+        }
+        // 动态列表：按 id 建项；当前 model 不在列表里时额外插一条（不改配置，提示重选）。
+        [self_.llmModelPopup removeAllItems];
+        BOOL hasCurrent = NO;
+        NSMutableArray<NSString *> *ids = [NSMutableArray array];
+        for (id m in models) {
+            NSString *mid = [m isKindOfClass:[NSDictionary class]] && [m[@"id"] isKindOfClass:[NSString class]]
+                            ? m[@"id"] : nil;
+            if (!mid.length) continue;
+            [ids addObject:mid];
+            if ([mid isEqualToString:cur]) hasCurrent = YES;
+            [self_.llmModelPopup addItemWithTitle:
+                [mid isEqualToString:cur] ? [mid stringByAppendingFormat:@" %@", RLPTr(@"（当前）")] : mid];
+        }
+        if (!hasCurrent && cur.length)
+            [self_.llmModelPopup addItemWithTitle:[cur stringByAppendingFormat:@" %@",
+                                                   RLPTr(@"当前值，不在列表中")]];
+        if (cur.length && [self_.llmModelPopup itemWithTitle:cur])
+            [self_.llmModelPopup selectItemWithTitle:cur];
+        else if (cur.length)
+            [self_.llmModelPopup selectItemAtIndex:self_.llmModelPopup.numberOfItems - 1];
+        self_.llmModel.stringValue = cur;
+        self_.llmModelPopup.hidden = NO;
+        const NSInteger n = (NSInteger)ids.count;
+        if (cur.length && !hasCurrent) {
+            self_.llmModelMsg.stringValue = [NSString stringWithFormat:
+                RLPTr(@"已拉到 %ld 个模型，但当前模型不在列表里，建议重新选择（不会自动改配置）"), (long)n];
+            self_.llmModelMsg.textColor = [RLPTheme current].warn;
+        } else {
+            self_.llmModelMsg.stringValue = [NSString stringWithFormat:
+                RLPTr(@"已拉到 %ld 个模型"), (long)n];
+            self_.llmModelMsg.textColor = [RLPTheme current].mut;
+        }
+    }];
+}
+
+- (void)onLlmModelRefresh:(id)sender { (void)sender; [self loadLlmModels:YES]; }
+
+/// 下拉选中即保存（web llmModelRender 同语义）：POST /api/llm model=…
+- (void)onLlmModelPicked:(NSPopUpButton *)sender {
+    NSString *title = sender.titleOfSelectedItem;
+    // 去掉「（当前）」「当前值，不在列表中」后缀，拿到纯 model id。
+    for (NSString *suffix in @[RLPTr(@"（当前）"), RLPTr(@"当前值，不在列表中")])
+        title = [title stringByReplacingOccurrencesOfString:[@" " stringByAppendingString:suffix]
+                                                withString:@""];
+    if (!title.length) return;
+    self.llmModel.stringValue = title;
+    NSString *body = [NSString stringWithFormat:@"model=%@", RLPEnc(title)];
+    __weak __typeof__(self) weakSelf = self;
+    [[RLPCoreClient shared] postJSON:@"/api/llm" body:body completion:^(NSDictionary * _Nullable json) {
+        __typeof__(self) self_ = weakSelf;
+        if (!self_) return;
+        self_.llmStatus.stringValue = (json && [json[@"ok"] boolValue])
+            ? RLPTr(@"已保存") : (([json[@"error"] isKindOfClass:[NSString class]] ? json[@"error"] : RLPTr(@"保存失败")));
+    }];
+}
+
 - (void)onLlmSave:(id)sender {
     if (![RLPCoreClient shared].started) return;
     NSMutableString *body = [NSMutableString stringWithFormat:@"base_url=%@&model=%@",
@@ -933,6 +1045,8 @@ static NSView *RLPSGroup(NSString *title, NSString *desc, RLPTheme *t) {
         self_.llmStatus.stringValue = configured
             ? [NSString stringWithFormat:@"%@ %@", RLPTr(@"已配置密钥"), masked]
             : RLPTr(@"尚未配置密钥");
+        // 进页顺带拉一次模型列表（web llmModelsLoad(false) 同口径）。
+        [self_ loadLlmModels:NO];
     }];
 }
 

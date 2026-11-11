@@ -262,6 +262,32 @@ int main() {
             BOOL hasMetaSources = NO;
             for (NSView *v in metaAll) if ([v isKindOfClass:[RLPMetaSourcesView class]]) hasMetaSources = YES;
             CK(hasMetaSources, "S9g 设置·元数据页嵌入数据源视图（不再只有固定开关）", @"");
+
+            // ---- S10 AI 模型下拉（对齐 web llmModelRender：拉不到降级手填、不崩）----
+            // 旧实现只有手填框、没有 /api/llm/models 下拉。这里钉住控件在位 + 降级路径可跑。
+            NSView *popup = nil, *refresh = nil, *modelMsg = nil;
+            for (NSView *v in metaAll) {
+                if ([v.identifier isEqualToString:@"llm.modelpopup"]) popup = v;
+                if ([v.identifier isEqualToString:@"llm.modelrefresh"]) refresh = v;
+                if ([v.identifier isEqualToString:@"llm.modelmsg"]) modelMsg = v;
+            }
+            CK([popup isKindOfClass:[NSPopUpButton class]], "S10a 模型下拉控件在位", @"");
+            CK([refresh isKindOfClass:[NSButton class]], "S10b 有刷新模型列表按钮", @"");
+            CK([modelMsg isKindOfClass:[NSTextField class]], "S10c 有模型列表状态文案", @"");
+            // 未配置 key 时 /api/llm/models 会 ok:false；降级路径必须隐藏下拉、保留手填。
+            [settings loadLlmModels:NO];
+            Pump(1.0);
+            CK(popup.isHidden == YES, "S10d 拉不到列表时下拉隐藏（降级手填，不崩）",
+               @"下拉仍显示");
+            NSTextField *mm = (NSTextField *)modelMsg;
+            CK(mm.stringValue.length > 0, "S10e 降级时如实写出原因", mm.stringValue ?: @"空");
+            // 手填框仍然可编辑（功能不因降级消失）。
+            NSTextField *modelField = nil;
+            for (NSView *v in metaAll)
+                if ([v isKindOfClass:[NSTextField class]] &&
+                    [((NSTextField *)v).placeholderString isEqualToString:@"deepseek-chat"])
+                    modelField = (NSTextField *)v;
+            CK(modelField != nil && modelField.isEditable, "S10f 降级时手填模型框仍可用", @"");
         }
 
         [core shutdown];

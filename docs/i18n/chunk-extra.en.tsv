@@ -513,3 +513,10 @@ AI 资料补全与音频输入采集：在左侧「设置」里调整。	AI meta
 下移	Move down	数据源下移按钮 tooltip
 越靠上优先级越高	Higher on the list means higher priority	数据源优先级说明
 读取数据源失败	Failed to load sources	数据源注册表读取失败
+刷新模型列表	Refresh model list	AI 模型端点：刷新下拉
+模型列表读取中	Loading model list...	AI 模型下拉初始态
+拉取模型列表失败	Failed to load model list	AI 模型下拉降级提示前缀
+服务端没有返回任何模型，可直接手填模型 id	No models returned; you can type a model id manually	AI 模型下拉降级提示
+已拉到 %ld 个模型	Loaded %ld models	AI 模型下拉成功提示
+已拉到 %ld 个模型，但当前模型不在列表里，建议重新选择（不会自动改配置）	Loaded %ld models, but the current model is not in the list; please reselect (config is unchanged)	AI 模型当前值不在列表提示
+当前值，不在列表中	current, not in list	AI 模型下拉当前值项后缀
