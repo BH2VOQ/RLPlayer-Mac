@@ -1029,6 +1029,11 @@ add_executable(test_install_id tests/test_install_id.cpp)
 target_include_directories(test_install_id PRIVATE ${CMAKE_SOURCE_DIR}/src)
 add_test(NAME install_id COMMAND test_install_id)
 
+# 1.1.7.1：随机播放排列（一轮不重复 / 重洗不立刻重复上一首 / 均匀性）。
+add_executable(test_shuffle_order tests/test_shuffle_order.cpp)
+target_include_directories(test_shuffle_order PRIVATE ${CMAKE_SOURCE_DIR}/src)
+add_test(NAME shuffle_order COMMAND test_shuffle_order)
+
 # 真实后台端到端（默认 SKIP，不联网；RLPLAYER_FEEDBACK_LIVE=1 才建单，结束自动删除）。
 # 证明的是纯逻辑层证明不了的四件事：后台真的接受这份请求体、幂等重放同号、
 # client 能取回诊断包且逐字节一致、7 天内自助删除可用。

@@ -43,6 +43,7 @@
 #include "net/feedback_redact.h"   // 诊断包脱敏**唯一入口**（F-7 2026-10-27：吸收上游 feedback.h 的规则清单）
 #include "net/http_client.h"       // 封面在线抓取：http_get/http_post（platform/http.h 的平台封装）
 #include "net/json.h"              // /api/lib/cover/prefetch 解析网易 type=10 专辑搜索响应(2026-10-26)
+#include "net/shuffle_order.h"     // 随机播放排列（纯逻辑，tests/test_shuffle_order.cpp 覆盖）
 #include "cover_fetch.h"           // 封面抓取**纯逻辑**（目录穿越/Dice/图片头/负缓存过期，可离线单测）
 using rta::net::Library;
 using rta::net::SourceManager;
@@ -4840,13 +4841,29 @@ static size_t queue_reindex_locked(const QItem& cur) {
     return g_q.index;
 }
 
-static std::mt19937& queue_rng() {
-    static thread_local std::mt19937 rng([] {
-        std::random_device rd;
-        const auto ns = (unsigned)std::chrono::high_resolution_clock::now().time_since_epoch().count();
-        return (unsigned)(rd() ^ ns);
+static std::mt19937_64& queue_rng() {
+    static thread_local std::mt19937_64 rng([] {
+        // 1.1.7.1：随机播放的种子改用系统 CSPRNG（arc4random_buf）。
+        // 旧实现用 random_device ^ 高精度时钟凑熵 —— 在容器/沙箱里 random_device 可能退化成
+        // 确定性序列，叠加时钟后仍可能撞种子；撞种子 = 两次启动听到同一个"随机"顺序。
+        std::uint64_t seed = 0;
+        arc4random_buf(&seed, sizeof seed);
+        return seed;
     }());
     return rng;
+}
+
+// 按原索引排列重排队列；avoid 是"刚播完/正在播的那一项的原索引"，
+// 保证重洗后的第一首不是它（用户最容易被"随机完又放同一首"激怒）。
+// 前置：调用方持有 g_q.mtx。
+static void queue_shuffle_locked(std::size_t avoid) {
+    const std::size_t n = g_q.items.size();
+    if (n < 2) return;
+    const auto order = rta::playback::make_shuffle_order(n, queue_rng(), avoid);
+    std::vector<QItem> out;
+    out.reserve(n);
+    for (std::size_t k : order) out.push_back(std::move(g_q.items[k]));
+    g_q.items = std::move(out);
 }
 
 static void queue_set_mode_locked(int want) {
@@ -4856,9 +4873,9 @@ static void queue_set_mode_locked(int want) {
     const bool wantShuffle = (want == 3);
     if (wantShuffle && !wasShuffle) {
         g_q.base = g_q.items;
-        if (g_q.items.size() > 1) {
-            std::shuffle(g_q.items.begin(), g_q.items.end(), queue_rng());
-        }
+        // 切进随机：整表 Fisher–Yates（与竞品同机制），且不把当前曲排到第一（避免"一开随机就跳歌"的错觉）；
+        // 当前曲在重排后重新定位，播放不中断。
+        queue_shuffle_locked(g_q.index);
     } else if (!wantShuffle && wasShuffle) {
         if (!g_q.base.empty()) {
             g_q.items = g_q.base;
@@ -4948,15 +4965,9 @@ static bool queue_advance_locked(const QItem& finishedCur, size_t fallbackIdx, s
             g_q.index = outIdx;
             return true;
         } else {
-            std::shuffle(g_q.items.begin(), g_q.items.end(), queue_rng());
-            if (g_q.items[0].same(finishedCur)) {
-                for (size_t k = 1; k < g_q.items.size(); ++k) {
-                    if (!g_q.items[k].same(finishedCur)) {
-                        std::swap(g_q.items[0], g_q.items[k]);
-                        break;
-                    }
-                }
-            }
+            // 一轮走完：整表重洗，且新顺序的第一首不是刚播完的那首。
+            // （判据：tests/test_shuffle_order.cpp 的 avoid 用例；本函数只负责调用顺序）
+            queue_shuffle_locked(curIdx);
             outIdx = 0;
             g_q.index = 0;
             return true;
@@ -10671,8 +10682,17 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
             std::lock_guard<std::mutex> lk(g_q.mtx);
             if (g_q.items.empty()) return "{\"ok\":false,\"error\":\"队列为空\"}";
             if (dir > 0) {
-                if (g_q.index + 1 < g_q.items.size()) { target = g_q.index + 1; ok = true; }
-                else if (g_q.mode != 0) { target = 0; ok = true; }   // R-4：循环/随机都可回绕
+                if (g_q.index + 1 < g_q.items.size()) {
+                    target = g_q.index + 1;
+                    ok = true;
+                } else if (g_q.mode == 3) {
+                    // 随机模式手动"下一首"走到末首：与自动续播同一语义 —— 先重洗再回第一首。
+                    // 旧实现直接跳回第 0 首、沿用上一轮顺序（且第 0 首可能正是刚播完的）⟹
+                    // 手动与自动两种推进在边界上行为不一致，用户听到的就是"随机坏了"。
+                    queue_shuffle_locked(g_q.index);
+                    target = 0;
+                    ok = true;
+                } else if (g_q.mode != 0) { target = 0; ok = true; }   // 列表循环可回绕
             } else {
                 if (g_q.index > 0) { target = g_q.index - 1; ok = true; }
                 else if (g_q.mode != 0) { target = g_q.items.size() - 1; ok = true; }
