@@ -30,6 +30,7 @@
             @{@"name": @"播放队列", @"icon": @"list.bullet"},
             @{@"name": @"最近播放", @"icon": @"clock"},
             @{@"name": @"我的最爱", @"icon": @"heart"},
+            @{@"name": @"歌单", @"icon": @"music.note.list"},
             @{@"name": @"快速开始", @"icon": @"sparkles"},
             @{@"name": @"设置", @"icon": @"gearshape"}
         ];

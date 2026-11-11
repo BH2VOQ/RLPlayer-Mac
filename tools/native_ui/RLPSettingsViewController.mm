@@ -17,6 +17,11 @@
 #import "RLPSupport.h"
 #import "RLPTheme.h"
 #import "RLPUpdateWindowController.h"
+#import "RLPEqualizerView.h"
+#import "RLPInputView.h"
+#import "RLPCastView.h"
+#import "RLPCalibrationView.h"
+#import "RLPFeedbackWindowController.h"
 
 #pragma mark - 页签定义
 
@@ -101,6 +106,19 @@ static NSView *RLPSGroup(NSString *title, NSString *desc, RLPTheme *t) {
 @property (nonatomic, strong) NSSwitch *metaLlmSwitch;
 @property (nonatomic, strong) NSSwitch *metaSummarySwitch;
 @property (nonatomic, strong) NSSwitch *metaAiFillSwitch;
+// 已迁移的子界面（均衡 / 输入 / 投放）
+@property (nonatomic, strong) RLPEqualizerView *eqView;
+@property (nonatomic, strong) RLPInputView *inputView;
+@property (nonatomic, strong) RLPCastView *castView;
+@property (nonatomic, strong) RLPCalibrationView *calView;
+@property (nonatomic, strong) NSTextField *coverProgress;
+@property (nonatomic, strong) NSTextField *writebackStatus;
+@property (nonatomic, strong) NSTimer *coverTimer;
+// LLM（AI 资料层用的模型端点）
+@property (nonatomic, strong) NSTextField *llmBase;
+@property (nonatomic, strong) NSSecureTextField *llmKey;
+@property (nonatomic, strong) NSTextField *llmModel;
+@property (nonatomic, strong) NSTextField *llmStatus;
 @end
 
 @implementation RLPSettingsViewController
@@ -218,12 +236,10 @@ static NSView *RLPSGroup(NSString *title, NSString *desc, RLPTheme *t) {
         case RLPSTabOut:    [self fillOutput:stack t:t]; break;
         case RLPSTabPcm:    [self fillPcm:stack t:t]; break;
         case RLPSTabSdm:    [self fillSdm:stack t:t]; break;
-        case RLPSTabIn:     [self fillInput:stack t:t]; break;
+        case RLPSTabIn:     [self fillInputReal:stack t:t]; break;
         case RLPSTabAdv:    [self fillAdvanced:stack t:t]; break;
-        case RLPSTabEq:     [self fillPlaceholder:stack t:t
-                                       reason:RLPTr(@"均衡（20 段 PEQ / OPRA）界面迁移中，当前请在 web 版设置里编辑")]; break;
-        case RLPSTabCal:    [self fillPlaceholder:stack t:t
-                                       reason:RLPTr(@"房间校正（测量向导 / IR WAV）界面迁移中，当前请在 web 版设置里操作")]; break;
+        case RLPSTabEq:     [self fillEqualizer:stack t:t]; break;
+        case RLPSTabCal:    [self fillCalibration:stack t:t]; break;
         case RLPSTabStream: [self fillStream:stack t:t]; break;
         case RLPSTabDiag:   [self fillDiag:stack t:t]; break;
         case RLPSTabMeta:   [self fillMeta:stack t:t]; break;
@@ -427,6 +443,37 @@ static NSView *RLPSGroup(NSString *title, NSString *desc, RLPTheme *t) {
     }
     [stack addArrangedSubview:btns];
 
+    // 封面补齐：后端立即返回、网络在后台跑，所以必须给进度，否则用户以为卡死
+    NSStackView *covRow = [[NSStackView alloc] init];
+    covRow.orientation = NSUserInterfaceLayoutOrientationHorizontal;
+    covRow.spacing = 8;
+    NSButton *covBtn = [NSButton buttonWithTitle:RLPTr(@"联网补齐封面") target:self
+                                          action:@selector(onCoverPrefetch:)];
+    covBtn.bezelStyle = NSBezelStyleRounded;
+    [covRow addArrangedSubview:covBtn];
+    self.coverProgress = RLPLabel(@"", t.small, t.mut);
+    [covRow addArrangedSubview:self.coverProgress];
+    [stack addArrangedSubview:covRow];
+
+    // 标签写回：先 dry 预览再执行（后端有 PCM 逐位门禁，不能跳过预览直接写）
+    [stack addArrangedSubview:RLPSGroup(RLPTr(@"标签写回"),
+        RLPTr(@"把补全到的标签写回文件。先看预览，确认后再执行。"), t)];
+    NSStackView *wbRow = [[NSStackView alloc] init];
+    wbRow.orientation = NSUserInterfaceLayoutOrientationHorizontal;
+    wbRow.spacing = 8;
+    NSButton *wbDry = [NSButton buttonWithTitle:RLPTr(@"预览") target:self action:@selector(onWritebackDry:)];
+    wbDry.bezelStyle = NSBezelStyleRounded;
+    NSButton *wbApply = [NSButton buttonWithTitle:RLPTr(@"执行写回") target:self action:@selector(onWritebackApply:)];
+    wbApply.bezelStyle = NSBezelStyleRounded;
+    [wbRow addArrangedSubview:wbDry];
+    [wbRow addArrangedSubview:wbApply];
+    [stack addArrangedSubview:wbRow];
+    self.writebackStatus = RLPLabel(@"", t.small, t.mut);
+    self.writebackStatus.maximumNumberOfLines = 3;
+    self.writebackStatus.lineBreakMode = NSLineBreakByWordWrapping;
+    [[self.writebackStatus.widthAnchor constraintEqualToConstant:560] setActive:YES];
+    [stack addArrangedSubview:self.writebackStatus];
+
     [stack addArrangedSubview:RLPSGroup(RLPTr(@"软件更新"), nil, t)];
     NSStackView *upRow = [[NSStackView alloc] init];
     upRow.orientation = NSUserInterfaceLayoutOrientationHorizontal;
@@ -459,6 +506,16 @@ static NSView *RLPSGroup(NSString *title, NSString *desc, RLPTheme *t) {
     [stack addArrangedSubview:RLPLabel(
         RLPTr(@"新增 / 编辑 / 删除服务器（含密码）在当前版本仍需使用 web 版设置页；"
               @"本页只读取并显示已保存的服务器。"), t.small, t.mut)];
+
+    // 投放（AirPlay / UPnP）：与 web 版设置→流媒体页的推送区块同源
+    self.castView = [[RLPCastView alloc] initWithFrame:NSMakeRect(0, 0, 560, 200)];
+    self.castView.translatesAutoresizingMaskIntoConstraints = NO;
+    [stack addArrangedSubview:self.castView];
+    [NSLayoutConstraint activateConstraints:@[
+        [self.castView.heightAnchor constraintEqualToConstant:200],
+        [self.castView.widthAnchor constraintEqualToAnchor:stack.widthAnchor constant:-4],
+    ]];
+    [self.castView reload];
 }
 
 #pragma mark - 诊断
@@ -480,7 +537,7 @@ static NSView *RLPSGroup(NSString *title, NSString *desc, RLPTheme *t) {
     fb.bezelStyle = NSBezelStyleRounded;
     [stack addArrangedSubview:fb];
     [stack addArrangedSubview:RLPLabel(
-        RLPTr(@"反馈窗口迁移中，当前请使用 web 版「设置 → 诊断」的反馈表单。"), t.small, t.mut)];
+        RLPTr(@"反馈会连同版本与系统信息提交到后台；附诊断包时内容已脱敏。"), t.small, t.mut)];
 }
 
 #pragma mark - 元数据
@@ -497,6 +554,77 @@ static NSView *RLPSGroup(NSString *title, NSString *desc, RLPTheme *t) {
     [stack addArrangedSubview:RLPSRow(RLPTr(@"AI 综合简介"), self.metaSummarySwitch, nil, t)];
     self.metaAiFillSwitch = [self switchWithAction:@selector(onSwitch:) key:@"metaaifill"];
     [stack addArrangedSubview:RLPSRow(RLPTr(@"AI 补封面歌词"), self.metaAiFillSwitch, nil, t)];
+
+    // AI 模型端点：密钥红线 —— GET 只回掩码，输入框留空 = 不改已存的 key
+    [stack addArrangedSubview:RLPSGroup(RLPTr(@"AI 模型端点"),
+        RLPTr(@"用于资料整理与简介。密钥只在本机保存，界面永不回显明文；留空表示不修改。"), t)];
+
+    self.llmBase = [[NSTextField alloc] initWithFrame:NSZeroRect];
+    self.llmBase.placeholderString = @"https://api.deepseek.com";
+    [[self.llmBase.widthAnchor constraintEqualToConstant:320] setActive:YES];
+    [stack addArrangedSubview:RLPSRow(RLPTr(@"接口地址"), self.llmBase, nil, t)];
+
+    self.llmModel = [[NSTextField alloc] initWithFrame:NSZeroRect];
+    self.llmModel.placeholderString = @"deepseek-chat";
+    [[self.llmModel.widthAnchor constraintEqualToConstant:220] setActive:YES];
+    [stack addArrangedSubview:RLPSRow(RLPTr(@"模型"), self.llmModel, nil, t)];
+
+    self.llmKey = [[NSSecureTextField alloc] initWithFrame:NSZeroRect];
+    self.llmKey.placeholderString = RLPTr(@"留空 = 保持已保存的密钥");
+    [[self.llmKey.widthAnchor constraintEqualToConstant:320] setActive:YES];
+    [stack addArrangedSubview:RLPSRow(RLPTr(@"密钥"), self.llmKey, nil, t)];
+
+    NSStackView *llmBtns = [[NSStackView alloc] init];
+    llmBtns.orientation = NSUserInterfaceLayoutOrientationHorizontal;
+    llmBtns.spacing = 8;
+    NSButton *save = [NSButton buttonWithTitle:RLPTr(@"保存端点") target:self action:@selector(onLlmSave:)];
+    save.bezelStyle = NSBezelStyleRounded;
+    NSButton *test = [NSButton buttonWithTitle:RLPTr(@"测试连通") target:self action:@selector(onLlmTest:)];
+    test.bezelStyle = NSBezelStyleRounded;
+    [llmBtns addArrangedSubview:save];
+    [llmBtns addArrangedSubview:test];
+    [stack addArrangedSubview:llmBtns];
+
+    self.llmStatus = RLPLabel(@"", t.small, t.mut);
+    self.llmStatus.maximumNumberOfLines = 2;
+    self.llmStatus.lineBreakMode = NSLineBreakByWordWrapping;
+    [[self.llmStatus.widthAnchor constraintEqualToConstant:560] setActive:YES];
+    [stack addArrangedSubview:self.llmStatus];
+}
+
+#pragma mark - 均衡 / 输入（已迁移的子界面）
+
+- (void)fillEqualizer:(NSStackView *)stack t:(RLPTheme *)t {
+    self.eqView = [[RLPEqualizerView alloc] initWithFrame:NSMakeRect(0, 0, 620, 720)];
+    self.eqView.translatesAutoresizingMaskIntoConstraints = NO;
+    [stack addArrangedSubview:self.eqView];
+    [NSLayoutConstraint activateConstraints:@[
+        [self.eqView.heightAnchor constraintEqualToConstant:720],
+        [self.eqView.widthAnchor constraintEqualToAnchor:stack.widthAnchor constant:-4],
+    ]];
+    [self.eqView reload];
+}
+
+- (void)fillCalibration:(NSStackView *)stack t:(RLPTheme *)t {
+    self.calView = [[RLPCalibrationView alloc] initWithFrame:NSMakeRect(0, 0, 620, 620)];
+    self.calView.translatesAutoresizingMaskIntoConstraints = NO;
+    [stack addArrangedSubview:self.calView];
+    [NSLayoutConstraint activateConstraints:@[
+        [self.calView.heightAnchor constraintEqualToConstant:620],
+        [self.calView.widthAnchor constraintEqualToAnchor:stack.widthAnchor constant:-4],
+    ]];
+    [self.calView reload];
+}
+
+- (void)fillInputReal:(NSStackView *)stack t:(RLPTheme *)t {
+    self.inputView = [[RLPInputView alloc] initWithFrame:NSMakeRect(0, 0, 620, 460)];
+    self.inputView.translatesAutoresizingMaskIntoConstraints = NO;
+    [stack addArrangedSubview:self.inputView];
+    [NSLayoutConstraint activateConstraints:@[
+        [self.inputView.heightAnchor constraintEqualToConstant:460],
+        [self.inputView.widthAnchor constraintEqualToAnchor:stack.widthAnchor constant:-4],
+    ]];
+    [self.inputView reload];
 }
 
 #pragma mark - 动作
@@ -564,6 +692,138 @@ static NSView *RLPSGroup(NSString *title, NSString *desc, RLPTheme *t) {
     }
 }
 
+#pragma mark - AI 模型端点
+
+- (void)onLlmSave:(id)sender {
+    if (![RLPCoreClient shared].started) return;
+    NSMutableString *body = [NSMutableString stringWithFormat:@"base_url=%@&model=%@",
+        RLPEnc(self.llmBase.stringValue ?: @""), RLPEnc(self.llmModel.stringValue ?: @"")];
+    // 密钥留空就不带这个键 —— 后端据此保持已存的 key（改端点不清密钥）
+    NSString *key = self.llmKey.stringValue ?: @"";
+    if (key.length) [body appendFormat:@"&api_key=%@", RLPEnc(key)];
+    self.llmStatus.stringValue = RLPTr(@"保存中…");
+    __weak __typeof__(self) weakSelf = self;
+    [[RLPCoreClient shared] postJSON:@"/api/llm" body:body completion:^(NSDictionary * _Nullable json) {
+        __typeof__(self) self_ = weakSelf;
+        if (!self_) return;
+        if (json && [json[@"ok"] boolValue]) {
+            self_.llmKey.stringValue = @"";   // 存完立刻清掉输入框，不留明文在界面上
+            self_.llmStatus.stringValue = RLPTr(@"已保存");
+            [self_ loadLlmConfig];
+        } else {
+            self_.llmStatus.stringValue = [json[@"error"] isKindOfClass:[NSString class]]
+                ? json[@"error"] : RLPTr(@"保存失败");
+        }
+    }];
+}
+
+- (void)onLlmTest:(id)sender {
+    if (![RLPCoreClient shared].started) return;
+    self.llmStatus.stringValue = RLPTr(@"正在测试…");
+    __weak __typeof__(self) weakSelf = self;
+    [[RLPCoreClient shared] postJSON:@"/api/llm/test" body:nil completion:^(NSDictionary * _Nullable json) {
+        __typeof__(self) self_ = weakSelf;
+        if (!self_) return;
+        if (json && [json[@"ok"] boolValue]) {
+            NSString *note = [json[@"note"] isKindOfClass:[NSString class]] ? json[@"note"] : @"";
+            self_.llmStatus.stringValue = note.length ? note : RLPTr(@"连通正常");
+        } else {
+            self_.llmStatus.stringValue = [json[@"error"] isKindOfClass:[NSString class]]
+                ? json[@"error"] : RLPTr(@"测试失败");
+        }
+    }];
+}
+
+- (void)loadLlmConfig {
+    if (![RLPCoreClient shared].started || !self.llmStatus) return;
+    __weak __typeof__(self) weakSelf = self;
+    [[RLPCoreClient shared] getJSON:@"/api/llm" completion:^(NSDictionary * _Nullable json) {
+        __typeof__(self) self_ = weakSelf;
+        if (!self_ || !json) return;
+        // 只覆盖响应里真有的字段（POST 回包与 GET 未必同形，缺字段不当成清空）
+        if ([json[@"baseUrl"] isKindOfClass:[NSString class]]) self_.llmBase.stringValue = json[@"baseUrl"];
+        if ([json[@"model"] isKindOfClass:[NSString class]]) self_.llmModel.stringValue = json[@"model"];
+        NSString *masked = [json[@"masked"] isKindOfClass:[NSString class]] ? json[@"masked"] : @"";
+        const BOOL configured = [json[@"configured"] respondsToSelector:@selector(boolValue)] && [json[@"configured"] boolValue];
+        self_.llmStatus.stringValue = configured
+            ? [NSString stringWithFormat:@"%@ %@", RLPTr(@"已配置密钥"), masked]
+            : RLPTr(@"尚未配置密钥");
+    }];
+}
+
+#pragma mark - 封面补齐 / 标签写回
+
+- (void)onCoverPrefetch:(id)sender {
+    if (![RLPCoreClient shared].started) { RLPToast(RLPTr(@"核心未启动")); return; }
+    RLPPostJSON(@"/api/lib/cover/prefetch", nil);
+    self.coverProgress.stringValue = RLPTr(@"已开始补齐…");
+    [self.coverTimer invalidate];
+    __weak __typeof__(self) weakSelf = self;
+    self.coverTimer = [NSTimer scheduledTimerWithTimeInterval:1.0 repeats:YES block:^(NSTimer *tm) {
+        __typeof__(self) self_ = weakSelf;
+        if (!self_) { [tm invalidate]; return; }
+        [[RLPCoreClient shared] getJSON:@"/api/lib/cover/progress" completion:^(NSDictionary * _Nullable json) {
+            __typeof__(self) s2 = weakSelf;
+            if (!s2) return;
+            const BOOL running = [json[@"running"] respondsToSelector:@selector(boolValue)] && [json[@"running"] boolValue];
+            const NSInteger done = [json[@"done"] respondsToSelector:@selector(integerValue)] ? [json[@"done"] integerValue] : 0;
+            const NSInteger total = [json[@"total"] respondsToSelector:@selector(integerValue)] ? [json[@"total"] integerValue] : 0;
+            const NSInteger hit = [json[@"hit"] respondsToSelector:@selector(integerValue)] ? [json[@"hit"] integerValue] : 0;
+            const NSInteger fail = [json[@"fail"] respondsToSelector:@selector(integerValue)] ? [json[@"fail"] integerValue] : 0;
+            s2.coverProgress.stringValue = [NSString stringWithFormat:@"%ld/%ld · %@ %ld · %@ %ld",
+                (long)done, (long)total, RLPTr(@"命中"), (long)hit, RLPTr(@"失败"), (long)fail];
+            if (!running) {
+                [s2.coverTimer invalidate];
+                s2.coverTimer = nil;
+                RLPToast(RLPTr(@"封面补齐结束"));
+            }
+        }];
+    }];
+}
+
+- (void)onWritebackDry:(id)sender {
+    if (![RLPCoreClient shared].started) return;
+    self.writebackStatus.stringValue = RLPTr(@"正在生成预览…");
+    __weak __typeof__(self) weakSelf = self;
+    [[RLPCoreClient shared] getJSON:@"/api/writeback?dry=1" completion:^(NSDictionary * _Nullable json) {
+        __typeof__(self) self_ = weakSelf;
+        if (!self_) return;
+        if (!json || ![json[@"ok"] boolValue]) {
+            self_.writebackStatus.stringValue = [json[@"error"] isKindOfClass:[NSString class]]
+                ? json[@"error"] : RLPTr(@"预览失败");
+            return;
+        }
+        const NSInteger n = [json[@"count"] respondsToSelector:@selector(integerValue)] ? [json[@"count"] integerValue] : 0;
+        NSString *note = [json[@"note"] isKindOfClass:[NSString class]] ? json[@"note"] : @"";
+        self_.writebackStatus.stringValue = note.length ? note
+            : [NSString stringWithFormat:RLPTr(@"待写回 %ld 个文件"), (long)n];
+    }];
+}
+
+- (void)onWritebackApply:(id)sender {
+    if (![RLPCoreClient shared].started) return;
+    NSAlert *a = [[NSAlert alloc] init];
+    a.messageText = RLPTr(@"执行标签写回？");
+    a.informativeText = RLPTr(@"会改写音乐文件的标签。建议先点「预览」确认范围。");
+    [a addButtonWithTitle:RLPTr(@"执行")];
+    [a addButtonWithTitle:RLPTr(@"取消")];
+    if ([a runModal] != NSAlertFirstButtonReturn) return;
+    self.writebackStatus.stringValue = RLPTr(@"正在写回…");
+    __weak __typeof__(self) weakSelf = self;
+    [[RLPCoreClient shared] postJSON:@"/api/writeback" body:@"{\"apply\":true}"
+                          completion:^(NSDictionary * _Nullable json) {
+        __typeof__(self) self_ = weakSelf;
+        if (!self_) return;
+        if (!json || ![json[@"ok"] boolValue]) {
+            self_.writebackStatus.stringValue = [json[@"error"] isKindOfClass:[NSString class]]
+                ? json[@"error"] : RLPTr(@"写回失败");
+            return;
+        }
+        self_.writebackStatus.stringValue = RLPTr(@"写回已开始，可用「预览」查看剩余");
+        RLPToast(RLPTr(@"写回已开始"));
+    }];
+}
+
 - (void)onCheckUpdate:(id)sender {
     [[RLPUpdateWindowController shared] checkManually:YES];
 }
@@ -588,7 +848,7 @@ static NSView *RLPSGroup(NSString *title, NSString *desc, RLPTheme *t) {
     }];
 }
 
-- (void)onOpenFeedback:(id)sender { RLPToast(RLPTr(@"反馈窗口迁移中")); }
+- (void)onOpenFeedback:(id)sender { [[RLPFeedbackWindowController shared] showAndFocus]; }
 - (void)onReloadServers:(id)sender { [self loadServersForStreamPane]; }
 
 #pragma mark - 数据
@@ -680,6 +940,7 @@ static NSView *RLPSGroup(NSString *title, NSString *desc, RLPTheme *t) {
     }];
 
     [self loadServersForStreamPane];
+    [self loadLlmConfig];
 }
 
 - (void)loadServersForStreamPane {
@@ -731,6 +992,10 @@ static NSView *RLPSGroup(NSString *title, NSString *desc, RLPTheme *t) {
         [self.themePopup selectItemAtIndex:[[RLPTheme themeName] isEqualToString:@"light"] ? 1 : 0];
     }
     self.statusLine.textColor = t.mut;
+    [self.eqView applyTheme];
+    [self.inputView applyTheme];
+    [self.castView applyTheme];
+    [self.calView applyTheme];
 }
 
 @end

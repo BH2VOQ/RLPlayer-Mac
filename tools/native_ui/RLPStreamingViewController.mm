@@ -42,6 +42,11 @@
     
     NSButton *refreshBtn = RLPSymbolButton(@"arrow.clockwise", RLPTr(@"刷新"), self, @selector(refresh:));
     [toolbar addView:refreshBtn inGravity:NSStackViewGravityLeading];
+
+    // 测速：POST /api/src/ping?id=N（测已保存的那台）。连不上要如实说，不假装成功。
+    NSButton *pingBtn = [NSButton buttonWithTitle:RLPTr(@"测试连接") target:self action:@selector(onPing:)];
+    pingBtn.bezelStyle = NSBezelStyleRounded;
+    [toolbar addView:pingBtn inGravity:NSStackViewGravityLeading];
     
     _backButton = RLPSymbolButton(@"arrow.left", RLPTr(@"上一级"), self, @selector(goBack:));
     _backButton.enabled = NO;
@@ -50,6 +55,7 @@
     _pathBreadcrumb = RLPLabel(@"", [NSFont systemFontOfSize:12], RLPTheme.current.mut);
     [toolbar addView:_pathBreadcrumb inGravity:NSStackViewGravityLeading];
     
+    toolbar.translatesAutoresizingMaskIntoConstraints = NO;
     [self.contentView addSubview:toolbar];
     
     _tableView = [[NSTableView alloc] initWithFrame:self.contentView.bounds];
@@ -61,10 +67,24 @@
     NSTableColumn *col = [[NSTableColumn alloc] initWithIdentifier:@"main"];
     [_tableView addTableColumn:col];
     
-    _scrollView = [[NSScrollView alloc] initWithFrame:self.contentView.bounds];
+    _scrollView = [[NSScrollView alloc] initWithFrame:NSZeroRect];
     _scrollView.documentView = _tableView;
     _scrollView.hasVerticalScroller = YES;
+    _scrollView.drawsBackground = NO;
+    _scrollView.translatesAutoresizingMaskIntoConstraints = NO;
     [self.contentView addSubview:_scrollView];
+
+    // 之前 toolbar / scrollView 都没上约束：工具栏不显示、表格与它重叠。
+    // 这里补齐（与队列页同一套布局口径）。
+    [NSLayoutConstraint activateConstraints:@[
+        [toolbar.leadingAnchor constraintEqualToAnchor:self.contentView.leadingAnchor constant:16],
+        [toolbar.trailingAnchor constraintLessThanOrEqualToAnchor:self.contentView.trailingAnchor constant:-16],
+        [toolbar.topAnchor constraintEqualToAnchor:self.contentView.topAnchor constant:8],
+        [_scrollView.leadingAnchor constraintEqualToAnchor:self.contentView.leadingAnchor constant:16],
+        [_scrollView.trailingAnchor constraintEqualToAnchor:self.contentView.trailingAnchor constant:-16],
+        [_scrollView.topAnchor constraintEqualToAnchor:toolbar.bottomAnchor constant:10],
+        [_scrollView.bottomAnchor constraintEqualToAnchor:self.contentView.bottomAnchor constant:-12],
+    ]];
 }
 
 - (void)reloadData {
@@ -110,6 +130,26 @@
             [self setSubtitle:[NSString stringWithFormat:RLPTr(@"%ld 项"), (long)self->_items.count]];
         }
         [self->_tableView reloadData];
+    }];
+}
+
+/// 测试当前选中服务器的连通性。POST /api/src/ping?id=N。
+- (void)onPing:(id)sender {
+    if (![RLPCoreClient shared].started) { RLPToast(RLPTr(@"核心未启动")); return; }
+    const NSInteger idx = _serverPicker.indexOfSelectedItem;
+    if (idx < 0 || idx >= (NSInteger)_servers.count) { RLPToast(RLPTr(@"请先选择一台服务器")); return; }
+    NSString *sid = [_servers[idx][@"id"] isKindOfClass:[NSString class]] ? _servers[idx][@"id"] : @"";
+    if (!sid.length) { RLPToast(RLPTr(@"这台服务器没有可用标识")); return; }
+    NSString *url = [NSString stringWithFormat:@"/api/src/ping?id=%@", RLPEnc(sid)];
+    RLPToast(RLPTr(@"正在测试连接…"));
+    [[RLPCoreClient shared] postJSON:url body:nil completion:^(NSDictionary * _Nullable json) {
+        if (json && [json[@"ok"] boolValue]) {
+            NSString *note = [json[@"note"] isKindOfClass:[NSString class]] ? json[@"note"] : @"";
+            RLPToast(note.length ? note : RLPTr(@"连接正常"));
+        } else {
+            NSString *err = [json[@"error"] isKindOfClass:[NSString class]] ? json[@"error"] : RLPTr(@"连接失败");
+            RLPToast(err);
+        }
     }];
 }
 

@@ -12,6 +12,7 @@
 #import "RLPPlaceholderViewController.h"
 #import "RLPStreamingViewController.h"
 #import "RLPQuickStartViewController.h"
+#import "RLPPlaylistsViewController.h"
 #import "RLPAlbumDetailViewController.h"
 #import "RLPArtistDetailViewController.h"
 #import "RLPArtistsViewController.h"
@@ -203,8 +204,9 @@ static const CGFloat kTopbarHeight = 46.0;
             case 5: vc = [[RLPQueueViewController alloc] init]; break;
             case 6: vc = [[RLPRecentViewController alloc] init]; break;
             case 7: vc = [[RLPFavoritesViewController alloc] init]; break;
-            case 8: vc = [[RLPQuickStartViewController alloc] init]; break;
-            case 9: vc = [[RLPSettingsViewController alloc] init]; break;
+            case 8: vc = [[RLPPlaylistsViewController alloc] init]; break;
+            case 9: vc = [[RLPQuickStartViewController alloc] init]; break;
+            case 10: vc = [[RLPSettingsViewController alloc] init]; break;
             default: vc = self.albums; break;
         }
         self.pageCache[@(row)] = vc;
@@ -248,8 +250,8 @@ static const CGFloat kTopbarHeight = 46.0;
 
 - (void)onOpenSettingsPane:(NSNotification *)note {
     if (![note.object isKindOfClass:[NSString class]]) return;
-    [self.sidebar selectRow:9];
-    RLPSettingsViewController *settings = (RLPSettingsViewController *)self.pageCache[@(9)];
+    [self.sidebar selectRow:10];
+    RLPSettingsViewController *settings = (RLPSettingsViewController *)self.pageCache[@(10)];
     if (![settings isKindOfClass:[RLPSettingsViewController class]]) return;
     [settings selectPane:(NSString *)note.object];
 }

@@ -51,6 +51,7 @@
 @property (nonatomic, assign) NSInteger playMode;
 @property (nonatomic, strong) NSButton *shuffleBtn;
 @property (nonatomic, strong) NSButton *repeatBtn;
+@property (nonatomic, strong) NSButton *stopBtn;
 /// 进随机之前的模式：退出随机时回到它（而不是硬编码回顺序）。
 @property (nonatomic, assign) NSInteger modeBeforeShuffle;
 /// 播放模式的读取节流计数（每 4 次状态轮询读一次 /api/playmode）。
@@ -93,7 +94,11 @@
     self.repeatBtn = [self symbolButton:@"repeat" tip:@"列表循环"];
     self.repeatBtn.target = self;
     self.repeatBtn.action = @selector(toggleRepeat:);
-    for (NSButton *b in @[self.prevBtn, self.playBtn, self.nextBtn, self.shuffleBtn, self.repeatBtn])
+    // 停止（与暂停不同：停止会释放设备，web 版底栏也有这个键）
+    self.stopBtn = [self symbolButton:@"stop.fill" tip:@"停止"];
+    self.stopBtn.target = self;
+    self.stopBtn.action = @selector(stopPlayback:);
+    for (NSButton *b in @[self.prevBtn, self.playBtn, self.nextBtn, self.stopBtn, self.shuffleBtn, self.repeatBtn])
         [self addSubview:b];
     self.playBtn.imageScaling = NSImageScaleProportionallyDown;
 
@@ -158,7 +163,11 @@
         [self.nextBtn.centerYAnchor constraintEqualToAnchor:self.centerYAnchor],
         [self.nextBtn.widthAnchor constraintEqualToConstant:30],
         [self.nextBtn.heightAnchor constraintEqualToConstant:30],
-        [self.shuffleBtn.leadingAnchor constraintEqualToAnchor:self.nextBtn.trailingAnchor constant:10],
+        [self.stopBtn.leadingAnchor constraintEqualToAnchor:self.nextBtn.trailingAnchor constant:8],
+        [self.stopBtn.centerYAnchor constraintEqualToAnchor:self.centerYAnchor],
+        [self.stopBtn.widthAnchor constraintEqualToConstant:26],
+        [self.stopBtn.heightAnchor constraintEqualToConstant:26],
+        [self.shuffleBtn.leadingAnchor constraintEqualToAnchor:self.stopBtn.trailingAnchor constant:10],
         [self.shuffleBtn.centerYAnchor constraintEqualToAnchor:self.centerYAnchor],
         [self.shuffleBtn.widthAnchor constraintEqualToConstant:26],
         [self.shuffleBtn.heightAnchor constraintEqualToConstant:26],
@@ -235,6 +244,16 @@
     double clamped = MAX(0.0, MIN(seconds, st.duration));
     self.progress.doubleValue = clamped / st.duration;
     [self commitSeek];
+}
+
+/// 停止播放：释放设备（与暂停不同）。走 /api/stop，与 web 版底栏同一个端点。
+- (void)stopPlayback:(id)sender {
+    if (![RLPCoreClient shared].started) return;
+    __weak __typeof__(self) weakSelf = self;
+    [[RLPCoreClient shared] postJSON:@"/api/stop" body:nil completion:^(NSDictionary * _Nullable json) {
+        (void)json;
+        [weakSelf fetchStatus];
+    }];
 }
 
 #pragma mark - 播放模式

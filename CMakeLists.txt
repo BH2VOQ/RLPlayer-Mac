@@ -209,6 +209,13 @@ if(APPLE)
     tools/native_ui/RLPUpdateWindowController.mm
     tools/native_ui/RLPStreamingViewController.mm
     tools/native_ui/RLPQuickStartViewController.mm
+    tools/native_ui/RLPPlaylistsViewController.mm
+    tools/native_ui/RLPEqualizerView.mm
+    tools/native_ui/RLPInputView.mm
+    tools/native_ui/RLPCastView.mm
+    tools/native_ui/RLPCalibrationView.mm
+    tools/native_ui/RLPFeedbackWindowController.mm
+    tools/native_ui/RLPKnowledgeView.mm
     tools/mac_update.mm)
   set_source_files_properties(
     tools/mac_update.mm
@@ -226,6 +233,10 @@ if(APPLE)
     tools/native_ui/RLPSettingsViewController.mm tools/native_ui/RLPNowPlayingViewController.mm
     tools/native_ui/RLPUpdateWindowController.mm
     tools/native_ui/RLPStreamingViewController.mm tools/native_ui/RLPQuickStartViewController.mm
+    tools/native_ui/RLPPlaylistsViewController.mm tools/native_ui/RLPEqualizerView.mm
+    tools/native_ui/RLPInputView.mm tools/native_ui/RLPCastView.mm
+    tools/native_ui/RLPCalibrationView.mm tools/native_ui/RLPFeedbackWindowController.mm
+    tools/native_ui/RLPKnowledgeView.mm
     PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
   target_include_directories(rlplayer_native PRIVATE
     ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tools ${CMAKE_SOURCE_DIR}/tools/native_ui)

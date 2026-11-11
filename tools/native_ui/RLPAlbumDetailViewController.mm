@@ -75,6 +75,17 @@
     shuffle.translatesAutoresizingMaskIntoConstraints = NO;
     [host addSubview:shuffle];
 
+    // 整张专辑入队（不打断当前播放）+ 人工换封面
+    NSButton *enqueue = [NSButton buttonWithTitle:RLPTr(@"加入队列") target:self action:@selector(onEnqueueAlbum:)];
+    enqueue.bezelStyle = NSBezelStyleRounded;
+    enqueue.translatesAutoresizingMaskIntoConstraints = NO;
+    [host addSubview:enqueue];
+
+    NSButton *setCover = [NSButton buttonWithTitle:RLPTr(@"更换封面") target:self action:@selector(onSetCover:)];
+    setCover.bezelStyle = NSBezelStyleRounded;
+    setCover.translatesAutoresizingMaskIntoConstraints = NO;
+    [host addSubview:setCover];
+
     self.emptyLabel = RLPLabel(@"", t.body, t.mut);
     self.emptyLabel.translatesAutoresizingMaskIntoConstraints = NO;
     [host addSubview:self.emptyLabel];
@@ -130,6 +141,10 @@
         [playAll.topAnchor constraintEqualToAnchor:self.metaLabel.bottomAnchor constant:12],
         [shuffle.leadingAnchor constraintEqualToAnchor:playAll.trailingAnchor constant:10],
         [shuffle.centerYAnchor constraintEqualToAnchor:playAll.centerYAnchor],
+        [enqueue.leadingAnchor constraintEqualToAnchor:shuffle.trailingAnchor constant:10],
+        [enqueue.centerYAnchor constraintEqualToAnchor:playAll.centerYAnchor],
+        [setCover.leadingAnchor constraintEqualToAnchor:enqueue.trailingAnchor constant:10],
+        [setCover.centerYAnchor constraintEqualToAnchor:playAll.centerYAnchor],
 
         [self.emptyLabel.leadingAnchor constraintEqualToAnchor:self.cover.leadingAnchor],
         [self.emptyLabel.topAnchor constraintEqualToAnchor:self.cover.bottomAnchor constant:18],
@@ -234,6 +249,36 @@
 
 - (void)onPlayAll:(id)sender {
     RLPPlayAlbum(self.albumKey, 0);
+}
+
+/// 整张专辑加入队列（POST /api/lib/enqueue?k=…）：不打断当前播放。
+- (void)onEnqueueAlbum:(id)sender {
+    if (!self.albumKey.length || ![RLPCoreClient shared].started) return;
+    NSString *url = [NSString stringWithFormat:@"/api/lib/enqueue?k=%@", RLPEnc(self.albumKey)];
+    [[RLPCoreClient shared] postJSON:url body:nil completion:^(NSDictionary * _Nullable json) {
+        if (json && [json[@"ok"] boolValue]) RLPToast(RLPTr(@"整张专辑已加入队列"));
+        else RLPToast([json[@"error"] isKindOfClass:[NSString class]] ? json[@"error"] : RLPTr(@"加入失败"));
+    }];
+}
+
+/// 人工设置封面：POST /api/lib/cover/set?k=… body = 图片原始字节。
+/// 走 setData（不是 postJSON）—— 这个端点收的是二进制，不是表单。
+- (void)onSetCover:(id)sender {
+    if (!self.albumKey.length || ![RLPCoreClient shared].started) return;
+    NSOpenPanel *p = [NSOpenPanel openPanel];
+    p.canChooseFiles = YES;
+    p.canChooseDirectories = NO;
+    p.allowsMultipleSelection = NO;
+    p.message = RLPTr(@"选择一张图片作为专辑封面");
+    if ([p runModal] != NSModalResponseOK || !p.URL) return;
+    NSData *data = [NSData dataWithContentsOfURL:p.URL];
+    if (!data.length) { RLPToast(RLPTr(@"图片读取失败")); return; }
+    NSString *url = [NSString stringWithFormat:@"/api/lib/cover/set?k=%@", RLPEnc(self.albumKey)];
+    [[RLPCoreClient shared] postData:url body:data contentType:@"image/jpeg"
+                          completion:^(NSDictionary * _Nullable json) {
+        if (json && [json[@"ok"] boolValue]) RLPToast(RLPTr(@"封面已设置"));
+        else RLPToast([json[@"error"] isKindOfClass:[NSString class]] ? json[@"error"] : RLPTr(@"设置失败"));
+    }];
 }
 
 - (void)onShuffle:(id)sender {

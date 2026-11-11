@@ -146,6 +146,8 @@ static const NSUserInterfaceItemIdentifier kArtistAlbumItemID = @"RLPArtistAlbum
 @property (nonatomic) BOOL loaded;
 
 @property (nonatomic, strong) NSView *avatarView;
+@property (nonatomic, strong) NSImageView *avatarImage;
+@property (nonatomic, assign) NSUInteger avatarSeq;
 @property (nonatomic, strong) NSTextField *initialLabel;
 @property (nonatomic, strong) NSTextField *nameLabel;
 @property (nonatomic, strong) NSTextField *statsLabel;
@@ -191,6 +193,21 @@ static const NSUserInterfaceItemIdentifier kArtistAlbumItemID = @"RLPArtistAlbum
     _initialLabel.alignment = NSTextAlignmentCenter;
     _initialLabel.translatesAutoresizingMaskIntoConstraints = NO;
     [_avatarView addSubview:_initialLabel];
+
+    // 真头像盖在首字母之上：拿到图就显示，拿不到就露出首字母占位。
+    // 与 web 版同序（/api/artist/image → 专辑封面兜底 → 首字母），
+    // 后端已实现兜底逻辑，这里只发一次请求，不自己再拼第二套。
+    _avatarImage = [[NSImageView alloc] initWithFrame:NSZeroRect];
+    _avatarImage.imageScaling = NSImageScaleProportionallyUpOrDown;
+    _avatarImage.translatesAutoresizingMaskIntoConstraints = NO;
+    _avatarImage.hidden = YES;
+    [_avatarView addSubview:_avatarImage];
+    [NSLayoutConstraint activateConstraints:@[
+        [_avatarImage.leadingAnchor constraintEqualToAnchor:_avatarView.leadingAnchor],
+        [_avatarImage.trailingAnchor constraintEqualToAnchor:_avatarView.trailingAnchor],
+        [_avatarImage.topAnchor constraintEqualToAnchor:_avatarView.topAnchor],
+        [_avatarImage.bottomAnchor constraintEqualToAnchor:_avatarView.bottomAnchor],
+    ]];
 
     // 3. 名字（24 semibold）
     _nameLabel = RLPLabel(_artistName.length ? _artistName : RLPTr(@"未知艺术家"),
@@ -277,6 +294,24 @@ static const NSUserInterfaceItemIdentifier kArtistAlbumItemID = @"RLPArtistAlbum
     if (!self.loaded) {
         [self reloadData];
     }
+    [self loadAvatar];
+}
+
+/// 艺术家真头像。/api/artist/image 内部已做「真头像 → 专辑封面」兜底，
+/// 所以这里只发一次；失败就保留首字母占位（不显示破图图标）。
+- (void)loadAvatar {
+    if (!self.artistName.length || ![RLPCoreClient shared].started) return;
+    const NSUInteger seq = ++self.avatarSeq;
+    NSString *url = [NSString stringWithFormat:@"/api/artist/image?who=%@", RLPEnc(self.artistName)];
+    __weak __typeof__(self) weakSelf = self;
+    [[RLPCoreClient shared] getData:url completion:^(NSData * _Nullable data) {
+        __typeof__(self) self_ = weakSelf;
+        if (!self_ || seq != self_.avatarSeq) return;
+        NSImage *img = data.length ? [[NSImage alloc] initWithData:data] : nil;
+        self_.avatarImage.image = img;
+        self_.avatarImage.hidden = (img == nil);
+        self_.initialLabel.hidden = (img != nil);
+    }];
 }
 
 - (void)reloadData {

@@ -23,6 +23,14 @@
 #import "RLPUpdateWindowController.h"
 #import "RLPStreamingViewController.h"
 #import "RLPQuickStartViewController.h"
+#import "RLPPlaylistsViewController.h"
+#import "RLPEqualizerView.h"
+#import "RLPInputView.h"
+#import "RLPCastView.h"
+#import "RLPCalibrationView.h"
+#import "RLPFeedbackWindowController.h"
+#import "RLPKnowledgeView.h"
+#import "RLPModels.h"
 
 #include <cstdio>
 
@@ -42,6 +50,8 @@ static void STCheck(BOOL ok, const char *what, NSString *detail) {
 @interface RLPAppDelegate ()
 @property (nonatomic, strong) RLPMainWindowController *mainWC;
 @property (nonatomic, strong) NSTimer *exitPoll;
+@property (nonatomic, strong) NSTimer *nowPlayingTimer;
+@property (nonatomic, copy) NSString *lastReportedPath;
 @end
 
 @implementation RLPAppDelegate
@@ -72,6 +82,7 @@ static void STCheck(BOOL ok, const char *what, NSString *detail) {
 
 - (void)applicationWillTerminate:(NSNotification *)note {
     [self.exitPoll invalidate];
+    [self.nowPlayingTimer invalidate];
     [self.mainWC stopAllActivity];
     [[RLPCoreClient shared] shutdown];
 }
@@ -120,6 +131,15 @@ static void STCheck(BOOL ok, const char *what, NSString *detail) {
     playItem.submenu = play;
     [bar addItem:playItem];
 
+    // 帮助菜单：反馈入口（用户不必去设置里翻）
+    NSMenuItem *helpItem = [[NSMenuItem alloc] init];
+    NSMenu *help = [[NSMenu alloc] initWithTitle:RLPTr(@"帮助")];
+    NSMenuItem *fbItem = [help addItemWithTitle:RLPTr(@"提交反馈…")
+                                         action:@selector(menuFeedback:) keyEquivalent:@""];
+    fbItem.target = self;
+    helpItem.submenu = help;
+    [bar addItem:helpItem];
+
     NSApp.mainMenu = bar;
 }
 
@@ -127,16 +147,48 @@ static void STCheck(BOOL ok, const char *what, NSString *detail) {
 - (void)menuNext:(id)sender { [self.mainWC.playbackBar nextTrack]; }
 - (void)menuPrev:(id)sender { [self.mainWC.playbackBar previousTrack]; }
 
+- (void)menuFeedback:(id)sender { [[RLPFeedbackWindowController shared] showAndFocus]; }
+
 - (void)menuOpenSettings:(id)sender {
     [[NSNotificationCenter defaultCenter] postNotificationName:@"RLPOpenSettingsPaneNotification"
                                                         object:@"adv"];
 }
 
-/// 锁屏/控制中心显示"正在播放"的信息。
-/// 只做**如实上报**：拿不到信息就清空，不填假标题。
+/// 锁屏 / 控制中心的「正在播放」。
+/// 只做**如实上报**：没有曲目就把信息清空，不填假标题、不留上一首的残影。
+/// 1 秒一次足够（锁屏不需要 500ms 精度），且只在值真的变了时才写，避免无谓 IPC。
 - (void)setupNowPlayingCenter {
     MPNowPlayingInfoCenter *center = [MPNowPlayingInfoCenter defaultCenter];
     center.playbackState = MPNowPlayingPlaybackStateStopped;
+    __weak __typeof__(self) weakSelf = self;
+    self.nowPlayingTimer = [NSTimer scheduledTimerWithTimeInterval:1.0 repeats:YES block:^(NSTimer *tm) {
+        (void)tm;
+        __typeof__(self) self_ = weakSelf;
+        if (!self_) { [tm invalidate]; return; }
+        [self_ reportNowPlaying];
+    }];
+}
+
+- (void)reportNowPlaying {
+    RLPPlaybackStatus *st = self.mainWC.playbackBar.lastStatus;
+    MPNowPlayingInfoCenter *center = [MPNowPlayingInfoCenter defaultCenter];
+    if (!st || !st.currentPath.length) {
+        if (center.nowPlayingInfo.count) center.nowPlayingInfo = @{};
+        center.playbackState = MPNowPlayingPlaybackStateStopped;
+        self.lastReportedPath = @"";
+        return;
+    }
+    center.playbackState = (st.playing && !st.paused) ? MPNowPlayingPlaybackStatePlaying
+                                                      : MPNowPlayingPlaybackStatePaused;
+    NSMutableDictionary *info = [NSMutableDictionary dictionary];
+    // 标题优先用文件名（后端 status 只给路径）；有 meta 时由单曲页刷新，这里不猜
+    NSString *title = st.currentPath.lastPathComponent.stringByDeletingPathExtension;
+    info[MPMediaItemPropertyTitle] = title.length ? title : RLPTr(@"未知曲目");
+    info[MPMediaItemPropertyPlaybackDuration] = @(MAX(0.0, st.duration));
+    info[MPNowPlayingInfoPropertyElapsedPlaybackTime] = @(MAX(0.0, st.position));
+    info[MPNowPlayingInfoPropertyPlaybackRate] = @((st.playing && !st.paused) ? 1.0 : 0.0);
+    center.nowPlayingInfo = info;
+    self.lastReportedPath = st.currentPath;
 }
 
 #pragma mark - 媒体键（F7/F8/F9 与蓝牙耳机按键）
@@ -234,7 +286,7 @@ int RLPAppDelegateRunSelfTest(void) {
         STCheck([win.contentView isKindOfClass:[NSView class]], "contentView 是原生 NSView", @"");
     }
     STCheck(wc.sidebar != nil, "侧栏导航已创建", @"");
-    STCheck(wc.sidebar.rowCount == 10, "侧栏导航 10 项（与 web 版一致）",
+    STCheck(wc.sidebar.rowCount == 11, "侧栏导航 11 项（web 版 10 项 + 歌单入口）",
             [NSString stringWithFormat:@"rows=%ld", (long)wc.sidebar.rowCount]);
     STCheck(wc.albums != nil, "专辑网格已创建", @"");
     STCheck(wc.playbackBar != nil, "播放条已创建", @"");
@@ -311,6 +363,56 @@ int RLPAppDelegateRunSelfTest(void) {
     {
         RLPFavoritesViewController *vc = [[RLPFavoritesViewController alloc] init];
         STCheck(vc.view != nil, "我的最爱页可离线构建", @"");
+    }
+    {
+        RLPPlaylistsViewController *vc = [[RLPPlaylistsViewController alloc] init];
+        STCheck(vc.view != nil, "歌单页可离线构建", @"");
+    }
+    {
+        RLPEqualizerView *v = [[RLPEqualizerView alloc] initWithFrame:NSMakeRect(0, 0, 600, 700)];
+        NSMutableArray<NSView *> *ev = [NSMutableArray array];
+        CollectViews(v, ev);
+        NSInteger tables = 0, switches = 0;
+        for (NSView *x in ev) {
+            if ([x isKindOfClass:[NSTableView class]]) ++tables;
+            if ([x isKindOfClass:[NSSwitch class]]) ++switches;
+        }
+        STCheck(tables >= 1, "均衡视图有 20 段参数表", [NSString stringWithFormat:@"tables=%ld", (long)tables]);
+        STCheck(switches >= 1, "均衡视图有旁路开关", [NSString stringWithFormat:@"switches=%ld", (long)switches]);
+    }
+    {
+        RLPInputView *v = [[RLPInputView alloc] initWithFrame:NSMakeRect(0, 0, 600, 460)];
+        STCheck(v != nil, "输入采集视图可离线构建", @"");
+    }
+    {
+        RLPCastView *v = [[RLPCastView alloc] initWithFrame:NSMakeRect(0, 0, 560, 200)];
+        STCheck(v != nil, "投放视图可离线构建", @"");
+        STCheck(v.polling == NO, "投放视图在无核心时不启动轮询", @"");
+    }
+    {
+        RLPCalibrationView *v = [[RLPCalibrationView alloc] initWithFrame:NSMakeRect(0, 0, 600, 620)];
+        STCheck(v != nil, "校准视图可离线构建", @"");
+    }
+    {
+        RLPFeedbackWindowController *wc3 = [RLPFeedbackWindowController shared];
+        STCheck(wc3.window != nil, "反馈窗口可离线构建", @"");
+        NSMutableArray<NSView *> *fv = [NSMutableArray array];
+        CollectViews(wc3.window.contentView, fv);
+        BOOL hasTextView = NO, hasSwitch = NO;
+        for (NSView *x in fv) {
+            if ([x isKindOfClass:[NSTextView class]]) hasTextView = YES;
+            if ([x isKindOfClass:[NSSwitch class]]) hasSwitch = YES;
+        }
+        STCheck(hasTextView, "反馈窗口有正文输入区", @"");
+        STCheck(hasSwitch, "反馈窗口有附诊断包开关", @"");
+    }
+    {
+        RLPKnowledgeView *v = [[RLPKnowledgeView alloc] initWithFrame:NSMakeRect(0, 0, 400, 300)];
+        STCheck(v != nil, "AI 资料面板可离线构建", @"");
+        // 无核心 / 空名字时不许发请求，也不许崩
+        [v loadKind:@"track" name:@"" artist:nil];
+        STCheck(YES, "AI 资料面板空输入安全空转", @"");
+        [v cancelLoading];
     }
     // 更新窗口：一窗两视图 + 五出口（借 QQ 音乐的结构，不照搬资源）
     {

@@ -10,6 +10,7 @@
 #import "RLPModels.h"
 #import "RLPSupport.h"
 #import "RLPTheme.h"
+#import "RLPKnowledgeView.h"
 
 @interface RLPNowPlayingViewController ()
 @property (nonatomic, strong) NSTimer *poll;
@@ -25,6 +26,7 @@
 @property (nonatomic, strong) NSTextField *healthEmpty;
 /// 封面请求序号：快速切歌时用它丢弃过期回调（慢请求回来不能盖掉新封面）。
 @property (nonatomic, assign) NSUInteger coverSeq;
+@property (nonatomic, strong) RLPKnowledgeView *knowledge;
 @end
 
 @implementation RLPNowPlayingViewController
@@ -104,6 +106,11 @@
     self.healthEmpty.translatesAutoresizingMaskIntoConstraints = NO;
     [host addSubview:self.healthEmpty];
 
+    // AI 资料层（知识卡 + 简介）：放在右栏下半，与音质体检分开
+    self.knowledge = [[RLPKnowledgeView alloc] initWithFrame:NSMakeRect(0, 0, 400, 300)];
+    self.knowledge.translatesAutoresizingMaskIntoConstraints = NO;
+    [host addSubview:self.knowledge];
+
     [NSLayoutConstraint activateConstraints:@[
         [self.cover.leadingAnchor constraintEqualToAnchor:host.leadingAnchor constant:24],
         [self.cover.topAnchor constraintEqualToAnchor:host.topAnchor constant:8],
@@ -138,9 +145,15 @@
         [hScroll.leadingAnchor constraintEqualToAnchor:healthTitle.leadingAnchor],
         [hScroll.trailingAnchor constraintEqualToAnchor:host.trailingAnchor constant:-24],
         [hScroll.topAnchor constraintEqualToAnchor:healthTitle.bottomAnchor constant:6],
-        [hScroll.bottomAnchor constraintEqualToAnchor:lyScroll.bottomAnchor],
+        // 右栏上半 = 音质体检（40%），下半 = AI 资料层
+        [hScroll.heightAnchor constraintEqualToAnchor:lyScroll.heightAnchor multiplier:0.4],
         [self.healthEmpty.leadingAnchor constraintEqualToAnchor:hScroll.leadingAnchor],
         [self.healthEmpty.topAnchor constraintEqualToAnchor:hScroll.topAnchor constant:4],
+
+        [self.knowledge.leadingAnchor constraintEqualToAnchor:healthTitle.leadingAnchor],
+        [self.knowledge.trailingAnchor constraintEqualToAnchor:host.trailingAnchor constant:-24],
+        [self.knowledge.topAnchor constraintEqualToAnchor:hScroll.bottomAnchor constant:12],
+        [self.knowledge.bottomAnchor constraintEqualToAnchor:lyScroll.bottomAnchor],
     ]];
 }
 
@@ -162,6 +175,7 @@
 }
 
 - (void)viewDidDisappear {
+    [self.knowledge cancelLoading];
     [super viewDidDisappear];
     [self stopPolling];
 }
@@ -205,6 +219,7 @@
             self_.currentPath = path;
             [self_ loadLyricsForPath:path];
             [self_ loadCoverForPath:path];
+            [self_ loadMetaAndKnowledgeForPath:path];
             self_.healthView.string = @"";
             self_.healthEmpty.stringValue = RLPTr(@"点击「音质体检」分析当前曲目");
         }
@@ -253,6 +268,29 @@
     }];
 }
 
+/// 取当前曲的标题/艺术家，再据此拉 AI 资料层。
+/// 为什么要先 /api/meta：/api/status 只给路径，资料层要的是"实体名"。
+- (void)loadMetaAndKnowledgeForPath:(NSString *)path {
+    if (!path.length) {
+        [self.knowledge loadKind:@"track" name:@"" artist:nil];
+        return;
+    }
+    NSString *url = [NSString stringWithFormat:@"/api/meta?file=%@", RLPEnc(path)];
+    __weak __typeof__(self) weakSelf = self;
+    [[RLPCoreClient shared] getJSON:url completion:^(NSDictionary * _Nullable json) {
+        __typeof__(self) self_ = weakSelf;
+        if (!self_) return;
+        // 异步回来时可能已切歌：路径不一致就丢弃
+        if (![path isEqualToString:self_.currentPath ?: @""]) return;
+        NSString *title = [json[@"title"] isKindOfClass:[NSString class]] ? json[@"title"] : @"";
+        NSString *artist = [json[@"artist"] isKindOfClass:[NSString class]] ? json[@"artist"] : @"";
+        if (!title.length) title = path.lastPathComponent.stringByDeletingPathExtension;
+        if (title.length) self_.titleLabel2.stringValue = title;
+        if (artist.length) self_.artistLabel2.stringValue = artist;
+        [self_.knowledge loadKind:@"track" name:title artist:artist];
+    }];
+}
+
 - (void)onFav:(id)sender {
     if (!self.currentPath.length) { RLPToast(RLPTr(@"没有正在播放的曲目")); return; }
     NSString *url = [NSString stringWithFormat:@"/api/fav?file=%@&on=1", RLPEnc(self.currentPath)];
@@ -265,7 +303,9 @@
 - (void)onHealth:(id)sender {
     if (!self.currentPath.length) { RLPToast(RLPTr(@"没有正在播放的曲目")); return; }
     self.healthEmpty.stringValue = RLPTr(@"正在分析…");
-    NSString *url = [NSString stringWithFormat:@"/api/health?file=%@", RLPEnc(self.currentPath)];
+    // track/health 是 19 项完整版（含 quality）；health 是简版。
+    // 数字全部来自后端实测，UI 只做单位与排版，不再计算（铁律 3）。
+    NSString *url = [NSString stringWithFormat:@"/api/track/health?file=%@", RLPEnc(self.currentPath)];
     __weak __typeof__(self) weakSelf = self;
     [[RLPCoreClient shared] getJSON:url completion:^(NSDictionary * _Nullable json) {
         __typeof__(self) self_ = weakSelf;
@@ -290,6 +330,7 @@
     self.titleLabel2.textColor = t.text;
     self.artistLabel2.textColor = t.mut;
     self.metaLabel.textColor = t.mut;
+    [self.knowledge applyTheme];
     for (NSTextView *tv in @[self.lyricsView, self.healthView]) {
         tv.textColor = t.text;
         tv.font = t.body;

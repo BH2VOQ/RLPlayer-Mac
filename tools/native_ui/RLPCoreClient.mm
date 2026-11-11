@@ -102,4 +102,31 @@
     });
 }
 
+- (void)postData:(NSString *)path
+            body:(NSData *)body
+     contentType:(NSString *)contentType
+      completion:(nullable RLPJSONCompletion)completion {
+    // HttpRequest.body 是 std::string，但这里塞的是**原始字节**（图片）。
+    // std::string 能承载任意字节（含 \0），dispatch 侧按字节取用，不做 UTF-8 解释。
+    const std::string p = path.UTF8String ?: "";
+    const std::string bytes((const char *)body.bytes, (size_t)body.length);
+    dispatch_async(_ioQueue, ^{
+        rta::net::HttpRequest req;
+        req.method = "POST";
+        req.path = p;
+        req.body = bytes;
+        std::string ct;
+        const std::string out = rlapp::dispatch(req, ct);
+        NSDictionary *j = nil;
+        if (!out.empty()) {
+            NSData *d = [NSData dataWithBytes:out.data() length:out.size()];
+            id parsed = [NSJSONSerialization JSONObjectWithData:d options:0 error:nil];
+            if ([parsed isKindOfClass:[NSDictionary class]]) j = parsed;
+        }
+        (void)contentType;   // 端点按路径判定，不依赖请求头；保留参数以便将来扩展
+        if (!completion) return;
+        dispatch_async(dispatch_get_main_queue(), ^{ completion(j); });
+    });
+}
+
 @end

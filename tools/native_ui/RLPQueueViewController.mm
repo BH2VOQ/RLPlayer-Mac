@@ -1,113 +1,345 @@
 // SPDX-FileCopyrightText: 2026 BH2VOQ <https://github.com/BH2VOQ>
 // SPDX-License-Identifier: GPL-3.0-or-later
+//
+// RLPQueueViewController.mm — 播放队列（含编辑）
+//
+// 后端契约（已核实）：
+//   GET  /api/queue?meta=1 → {"ok":true,"items":[路径…],"index":N,"mode":0..3,
+//                             "metas":[{"t":标题,"a":艺术家,"al":专辑,"d":秒}…]}
+//   POST /api/qdel?i=N            移除第 N 项
+//   POST /api/qmove?from=A&to=B   拖动排序
+//   POST /api/qorder  body "files=<换行分隔的全量路径>"  整体重排（排序用）
+//   POST /api/qsort?by=default    恢复默认顺序
+//   POST /api/clear               清空
+//   POST /api/sq/save?name=…      把当前队列存成歌单（**不是 sq/add**，那是新建空歌单）
+//
+// 右键纪律（web 版反馈 #9）：右击**只弹菜单**，绝不立刻删除。
+// 用户只是想看看右键能干什么，行就消失了 —— 那是与"加入队列"完全相反的破坏性默认。
 #import "RLPQueueViewController.h"
 #import "RLPCoreClient.h"
 #import "RLPModels.h"
 #import "RLPSupport.h"
 #import "RLPTheme.h"
 
-@interface RLPQueueViewController () {
-    NSTableView *_tableView;
-    NSScrollView *_scrollView;
-    RLPQueueSnapshot *_snapshot;
-    NSArray<NSDictionary *> *_metas;
-}
+static NSString *const kQueueDragType = @"RLPQueueRowDrag";
+
+@interface RLPQueueViewController () <NSTableViewDataSource, NSTableViewDelegate>
+@property (nonatomic, strong) NSTableView *table;
+@property (nonatomic, strong) NSTextField *empty;
+@property (nonatomic, copy) NSArray<NSString *> *paths;
+@property (nonatomic, copy) NSArray<NSDictionary *> *metas;
+@property (nonatomic, assign) NSInteger currentIndex;
+@property (nonatomic, assign) NSInteger mode;
+@property (nonatomic, assign) NSUInteger seq;
 @end
 
 @implementation RLPQueueViewController
 
-- (void)buildContent {
-    [super buildContent];
-    
-    // 工具栏
-    NSStackView *toolbar = [NSStackView stackViewWithViews:@[
-        RLPSymbolButton(@"arrow.clockwise", RLPTr(@"刷新"), self, @selector(refresh:)),
-        RLPSymbolButton(@"trash", RLPTr(@"清空"), self, @selector(clearQueue:)),
-        RLPSymbolButton(@"arrow.down.doc", RLPTr(@"保存为歌单"), self, @selector(savePlaylist:))
-    ]];
-    toolbar.spacing = 10;
-    toolbar.edgeInsets = NSEdgeInsetsMake(0, 0, 10, 0);
-    [self.contentView addSubview:toolbar];
-    
-    // 表格
-    _tableView = [[NSTableView alloc] initWithFrame:self.contentView.bounds];
-    _tableView.delegate = self;
-    _tableView.dataSource = self;
-    _tableView.headerView = [[NSTableHeaderView alloc] init];
-    _tableView.doubleAction = @selector(doubleClick:);
-    
-    NSArray *columns = @[RLPTr(@"#"), RLPTr(@"标题"), RLPTr(@"艺术家"), RLPTr(@"专辑"), RLPTr(@"时长")];
-    for (int i = 0; i < 5; i++) {
-        NSTableColumn *col = [[NSTableColumn alloc] initWithIdentifier:[NSString stringWithFormat:@"%d", i]];
-        col.title = columns[i];
-        [_tableView addTableColumn:col];
-    }
-    
-    _scrollView = [[NSScrollView alloc] initWithFrame:self.contentView.bounds];
-    _scrollView.documentView = _tableView;
-    _scrollView.hasVerticalScroller = YES;
-    [self.contentView addSubview:_scrollView];
+- (instancetype)init {
+    self = [super initWithTitle:RLPTr(@"播放队列")];
+    if (self) { _paths = @[]; _metas = @[]; _currentIndex = -1; }
+    return self;
 }
 
-- (void)reloadData {
-    [super reloadData];
-    [RLPCoreClient.shared getJSON:@"/api/queue?meta=1" completion:^(NSDictionary * _Nullable json) {
-        if (!json || ![json[@"ok"] boolValue]) return;
-        self->_snapshot = [RLPQueueSnapshot snapshotFromJSON:json];
-        self->_metas = json[@"metas"];
-        [self->_tableView reloadData];
-        
-        NSString *modeName = @[RLPTr(@"顺序"), RLPTr(@"列表循环"), RLPTr(@"单曲循环"), RLPTr(@"随机")][self->_snapshot.mode % 4];
-        [self setSubtitle:[NSString stringWithFormat:RLPTr(@"%ld 首 · 当前第 %ld 首 · %@"), (long)self->_snapshot.paths.count, (long)self->_snapshot.index + 1, modeName]];
+- (void)buildContent {
+    RLPTheme *t = [RLPTheme current];
+    NSView *host = self.contentView;
+
+    NSStackView *bar = [[NSStackView alloc] init];
+    bar.orientation = NSUserInterfaceLayoutOrientationHorizontal;
+    bar.spacing = 8;
+    bar.translatesAutoresizingMaskIntoConstraints = NO;
+    NSArray *acts = @[
+        @[ RLPTr(@"刷新"), @"refresh" ],
+        @[ RLPTr(@"按标题排序"), @"title" ],
+        @[ RLPTr(@"按艺术家排序"), @"artist" ],
+        @[ RLPTr(@"恢复默认顺序"), @"default" ],
+        @[ RLPTr(@"存为歌单"), @"save" ],
+        @[ RLPTr(@"清空"), @"clear" ],
+    ];
+    for (NSArray *a in acts) {
+        NSButton *b = [NSButton buttonWithTitle:a[0] target:self action:@selector(onAction:)];
+        b.bezelStyle = NSBezelStyleRounded;
+        b.identifier = a[1];
+        [bar addArrangedSubview:b];
+    }
+    [host addSubview:bar];
+
+    self.table = [[NSTableView alloc] initWithFrame:NSZeroRect];
+    self.table.dataSource = self;
+    self.table.delegate = self;
+    self.table.usesAlternatingRowBackgroundColors = YES;
+    self.table.rowHeight = 26;
+    self.table.backgroundColor = t.bg;
+    NSArray *titles = @[ @"#", RLPTr(@"标题"), RLPTr(@"艺术家"), RLPTr(@"专辑"), RLPTr(@"时长") ];
+    NSArray *ws = @[ @40, @320, @180, @200, @70 ];
+    for (NSInteger i = 0; i < (NSInteger)titles.count; ++i) {
+        NSTableColumn *c = [[NSTableColumn alloc] initWithIdentifier:[NSString stringWithFormat:@"c%ld", (long)i]];
+        c.title = titles[i];
+        c.width = [ws[i] doubleValue];
+        [self.table addTableColumn:c];
+    }
+    self.table.doubleAction = @selector(onDouble:);
+    self.table.target = self;
+
+    // 右键菜单：只弹菜单，删除必须显式再点一次
+    NSMenu *menu = [[NSMenu alloc] init];
+    [menu addItemWithTitle:RLPTr(@"播放") action:@selector(onMenuPlay:) keyEquivalent:@""];
+    [menu addItemWithTitle:RLPTr(@"从队列移除") action:@selector(onMenuRemove:) keyEquivalent:@""];
+    for (NSMenuItem *mi in menu.itemArray) mi.target = self;
+    self.table.menu = menu;
+
+    // 拖动排序
+    [self.table registerForDraggedTypes:@[ kQueueDragType ]];
+    self.table.draggingDestinationFeedbackStyle = NSTableViewDraggingDestinationFeedbackStyleGap;
+
+    NSScrollView *sc = [[NSScrollView alloc] initWithFrame:NSZeroRect];
+    sc.documentView = self.table;
+    sc.hasVerticalScroller = YES;
+    sc.drawsBackground = NO;
+    sc.translatesAutoresizingMaskIntoConstraints = NO;
+    [host addSubview:sc];
+
+    self.empty = RLPLabel(RLPTr(@"队列是空的"), t.body, t.mut);
+    self.empty.translatesAutoresizingMaskIntoConstraints = NO;
+    self.empty.hidden = YES;
+    [host addSubview:self.empty];
+
+    [NSLayoutConstraint activateConstraints:@[
+        [bar.leadingAnchor constraintEqualToAnchor:host.leadingAnchor constant:16],
+        [bar.topAnchor constraintEqualToAnchor:host.topAnchor constant:8],
+        [sc.leadingAnchor constraintEqualToAnchor:host.leadingAnchor constant:16],
+        [sc.trailingAnchor constraintEqualToAnchor:host.trailingAnchor constant:-16],
+        [sc.topAnchor constraintEqualToAnchor:bar.bottomAnchor constant:10],
+        [sc.bottomAnchor constraintEqualToAnchor:host.bottomAnchor constant:-12],
+        [self.empty.centerXAnchor constraintEqualToAnchor:sc.centerXAnchor],
+        [self.empty.centerYAnchor constraintEqualToAnchor:sc.centerYAnchor],
+    ]];
+}
+
+#pragma mark - 表格
+
+- (NSInteger)numberOfRowsInTableView:(NSTableView *)tv { return (NSInteger)self.paths.count; }
+
+- (NSDictionary *)metaAt:(NSInteger)row {
+    if (row < 0 || row >= (NSInteger)self.metas.count) return @{};
+    id m = self.metas[row];
+    return [m isKindOfClass:[NSDictionary class]] ? m : @{};
+}
+
+- (NSView *)tableView:(NSTableView *)tv viewForTableColumn:(NSTableColumn *)col row:(NSInteger)row {
+    RLPTheme *t = [RLPTheme current];
+    NSString *ident = col.identifier;
+    NSTextField *l = [tv makeViewWithIdentifier:ident owner:self];
+    if (!l) { l = RLPLabel(@"", t.body, t.text); l.identifier = ident; }
+    if (row < 0 || row >= (NSInteger)self.paths.count) { l.stringValue = @""; return l; }
+    NSDictionary *m = [self metaAt:row];
+    NSString *path = self.paths[row];
+    NSString *title = [m[@"t"] isKindOfClass:[NSString class]] ? m[@"t"] : @"";
+    if (!title.length) title = path.lastPathComponent.stringByDeletingPathExtension;
+    if ([ident isEqualToString:@"c0"]) l.stringValue = [NSString stringWithFormat:@"%ld", (long)(row + 1)];
+    else if ([ident isEqualToString:@"c1"]) l.stringValue = title;
+    else if ([ident isEqualToString:@"c2"]) l.stringValue = [m[@"a"] isKindOfClass:[NSString class]] ? m[@"a"] : @"";
+    else if ([ident isEqualToString:@"c3"]) l.stringValue = [m[@"al"] isKindOfClass:[NSString class]] ? m[@"al"] : @"";
+    else l.stringValue = RLPFmtDuration([m[@"d"] respondsToSelector:@selector(doubleValue)] ? [m[@"d"] doubleValue] : 0);
+    // 当前曲用强调色标出来（用户要知道"正在播的是哪一行"）
+    l.textColor = (row == self.currentIndex) ? t.accent : t.text;
+    return l;
+}
+
+#pragma mark - 拖动排序
+
+- (id<NSPasteboardWriting>)tableView:(NSTableView *)tv pasteboardWriterForRow:(NSInteger)row {
+    NSPasteboardItem *item = [[NSPasteboardItem alloc] init];
+    [item setString:[NSString stringWithFormat:@"%ld", (long)row] forType:kQueueDragType];
+    return item;
+}
+
+- (NSDragOperation)tableView:(NSTableView *)tv validateDrop:(id<NSDraggingInfo>)info
+                 proposedRow:(NSInteger)row proposedDropOperation:(NSTableViewDropOperation)op {
+    // 只接受"插到某行之前"，不接受"覆盖某行"
+    if (op != NSTableViewDropAbove) return NSDragOperationNone;
+    return [info.draggingPasteboard.types containsObject:kQueueDragType] ? NSDragOperationMove : NSDragOperationNone;
+}
+
+- (BOOL)tableView:(NSTableView *)tv acceptDrop:(id<NSDraggingInfo>)info
+              row:(NSInteger)row dropOperation:(NSTableViewDropOperation)op {
+    NSString *s = [info.draggingPasteboard stringForType:kQueueDragType];
+    if (!s.length) return NO;
+    const NSInteger from = s.integerValue;
+    if (from < 0 || from >= (NSInteger)self.paths.count) return NO;
+    // DropAbove row 表示插到 row 之前；从前面往后拖时要减 1（源行会先被移走）
+    NSInteger to = row;
+    if (from < to) to -= 1;
+    to = MAX(0, MIN(to, (NSInteger)self.paths.count - 1));
+    if (from == to) return NO;
+    NSString *url = [NSString stringWithFormat:@"/api/qmove?from=%ld&to=%ld", (long)from, (long)to];
+    __weak __typeof__(self) weakSelf = self;
+    [[RLPCoreClient shared] postJSON:url body:nil completion:^(NSDictionary * _Nullable json) {
+        (void)json;
+        [weakSelf reloadData];
+    }];
+    return YES;
+}
+
+#pragma mark - 动作
+
+- (void)onDouble:(id)sender {
+    const NSInteger row = self.table.clickedRow;
+    if (row < 0 || row >= (NSInteger)self.paths.count) return;
+    [self playRow:row];
+}
+
+- (void)onMenuPlay:(id)sender {
+    const NSInteger row = self.table.clickedRow;
+    if (row >= 0) [self playRow:row];
+}
+
+- (void)onMenuRemove:(id)sender {
+    const NSInteger row = self.table.clickedRow;
+    if (row < 0 || row >= (NSInteger)self.paths.count) return;
+    NSString *url = [NSString stringWithFormat:@"/api/qdel?i=%ld", (long)row];
+    __weak __typeof__(self) weakSelf = self;
+    [[RLPCoreClient shared] postJSON:url body:nil completion:^(NSDictionary * _Nullable json) {
+        __typeof__(self) self_ = weakSelf;
+        if (!self_) return;
+        if (json && ![json[@"ok"] boolValue]) {
+            RLPToast([json[@"error"] isKindOfClass:[NSString class]] ? json[@"error"] : RLPTr(@"移除失败"));
+        } else {
+            RLPToast(RLPTr(@"已移除"));
+        }
+        [self_ reloadData];
     }];
 }
 
-- (void)doubleClick:(id)sender {
-    NSInteger row = [_tableView clickedRow];
-    if (row >= 0 && row < (NSInteger)_snapshot.paths.count) {
-        RLPPlayPath(_snapshot.paths[row]);
-    }
+- (void)playRow:(NSInteger)row {
+    if (row < 0 || row >= (NSInteger)self.paths.count) return;
+    RLPPlayPath(self.paths[row]);
 }
 
-- (NSInteger)numberOfRowsInTableView:(NSTableView *)tableView {
-    return _snapshot ? (NSInteger)_snapshot.paths.count : 0;
-}
-
-- (NSView *)tableView:(NSTableView *)tableView viewForTableColumn:(NSTableColumn *)tableColumn row:(NSInteger)row {
-    NSTextField *tf = RLPLabel(@"", [NSFont systemFontOfSize:13], RLPTheme.current.text);
-    NSDictionary *m = _metas[row];
-    switch ([tableColumn.identifier intValue]) {
-        case 0: tf.stringValue = [NSString stringWithFormat:@"%ld", (long)row + 1]; break;
-        case 1: tf.stringValue = m[@"t"] ?: @""; break;
-        case 2: tf.stringValue = m[@"a"] ?: @""; break;
-        case 3: tf.stringValue = m[@"al"] ?: @""; break;
-        case 4: tf.stringValue = RLPFmtDuration([m[@"d"] doubleValue]); break;
-    }
-    return tf;
-}
-
-- (void)refresh:(id)sender { [self reloadData]; }
-
-- (void)clearQueue:(id)sender {
-    NSAlert *alert = [[NSAlert alloc] init];
-    alert.messageText = RLPTr(@"确定清空播放队列？");
-    if ([alert runModal] == NSModalResponseOK) {
-        [RLPCoreClient.shared postJSON:@"/api/clear" body:nil completion:^(NSDictionary * _Nullable j){ [self reloadData]; }];
-    }
-}
-
-- (void)savePlaylist:(id)sender {
-    NSAlert *alert = [[NSAlert alloc] init];
-    alert.messageText = RLPTr(@"歌单名称");
-    NSTextField *input = [[NSTextField alloc] initWithFrame:NSMakeRect(0, 0, 200, 24)];
-    alert.accessoryView = input;
-    if ([alert runModal] == NSModalResponseOK) {
-        NSString *name = RLPEnc(input.stringValue);
-        [RLPCoreClient.shared postJSON:[NSString stringWithFormat:@"/api/sq/add?name=%@", name] body:nil completion:^(NSDictionary * _Nullable j){
-            RLPToast(j[@"ok"] ? RLPTr(@"保存成功") : RLPTr(@"保存失败"));
-            [self reloadData];
+- (void)onAction:(NSButton *)sender {
+    NSString *a = sender.identifier;
+    if ([a isEqualToString:@"refresh"]) { [self reloadData]; return; }
+    if ([a isEqualToString:@"clear"]) { [self confirmClear]; return; }
+    if ([a isEqualToString:@"save"]) { [self saveAsPlaylist]; return; }
+    if ([a isEqualToString:@"default"]) {
+        __weak __typeof__(self) weakSelf = self;
+        [[RLPCoreClient shared] postJSON:@"/api/qsort?by=default" body:nil completion:^(NSDictionary * _Nullable json) {
+            (void)json;
+            [weakSelf reloadData];
         }];
+        return;
     }
+    // 按标题 / 艺术家排序：本地算出新顺序，再整体提交 /api/qorder
+    [self sortBy:a];
+}
+
+- (void)sortBy:(NSString *)key {
+    if (!self.paths.count) { RLPToast(RLPTr(@"队列是空的")); return; }
+    NSMutableArray<NSNumber *> *idx = [NSMutableArray array];
+    for (NSInteger i = 0; i < (NSInteger)self.paths.count; ++i) [idx addObject:@(i)];
+    __weak __typeof__(self) weakSelf = self;
+    NSArray<NSDictionary *> *metas = self.metas;
+    NSArray<NSString *> *paths = self.paths;
+    NSString *mk = [key isEqualToString:@"artist"] ? @"a" : @"t";
+    [idx sortUsingComparator:^NSComparisonResult(NSNumber *x, NSNumber *y) {
+        const NSInteger a = x.integerValue, b = y.integerValue;
+        NSDictionary *ma = (a < (NSInteger)metas.count && [metas[a] isKindOfClass:[NSDictionary class]]) ? metas[a] : @{};
+        NSDictionary *mb = (b < (NSInteger)metas.count && [metas[b] isKindOfClass:[NSDictionary class]]) ? metas[b] : @{};
+        NSString *sa = [ma[mk] isKindOfClass:[NSString class]] ? ma[mk] : @"";
+        NSString *sb = [mb[mk] isKindOfClass:[NSString class]] ? mb[mk] : @"";
+        if (!sa.length) sa = paths[a].lastPathComponent;
+        if (!sb.length) sb = paths[b].lastPathComponent;
+        return [sa localizedStandardCompare:sb];
+    }];
+    NSMutableArray<NSString *> *ordered = [NSMutableArray array];
+    for (NSNumber *n in idx) [ordered addObject:paths[n.integerValue]];
+    NSString *body = [NSString stringWithFormat:@"files=%@",
+                      RLPEnc([ordered componentsJoinedByString:@"\n"])];
+    [[RLPCoreClient shared] postJSON:@"/api/qorder" body:body completion:^(NSDictionary * _Nullable json) {
+        __typeof__(self) self_ = weakSelf;
+        if (!self_) return;
+        if (json && ![json[@"ok"] boolValue]) {
+            RLPToast([json[@"error"] isKindOfClass:[NSString class]] ? json[@"error"] : RLPTr(@"排序失败"));
+        }
+        [self_ reloadData];
+    }];
+}
+
+- (void)confirmClear {
+    NSAlert *a = [[NSAlert alloc] init];
+    a.messageText = RLPTr(@"确定清空播放队列？");
+    a.informativeText = RLPTr(@"只清队列，不删磁盘上的音乐文件。");
+    [a addButtonWithTitle:RLPTr(@"清空")];
+    [a addButtonWithTitle:RLPTr(@"取消")];
+    if ([a runModal] != NSAlertFirstButtonReturn) return;
+    __weak __typeof__(self) weakSelf = self;
+    [[RLPCoreClient shared] postJSON:@"/api/clear" body:nil completion:^(NSDictionary * _Nullable json) {
+        (void)json;
+        [weakSelf reloadData];
+    }];
+}
+
+- (void)saveAsPlaylist {
+    NSAlert *a = [[NSAlert alloc] init];
+    a.messageText = RLPTr(@"把当前队列存为歌单");
+    [a addButtonWithTitle:RLPTr(@"保存")];
+    [a addButtonWithTitle:RLPTr(@"取消")];
+    NSTextField *tf = [[NSTextField alloc] initWithFrame:NSMakeRect(0, 0, 260, 24)];
+    tf.placeholderString = RLPTr(@"歌单名称");
+    a.accessoryView = tf;
+    if ([a runModal] != NSAlertFirstButtonReturn) return;
+    NSString *name = [tf.stringValue stringByTrimmingCharactersInSet:
+                      [NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    if (!name.length) { RLPToast(RLPTr(@"请先填写歌单名称")); return; }
+    // sq/save = 存当前队列；sq/add 是新建空歌单（两者不能混）
+    NSString *url = [NSString stringWithFormat:@"/api/sq/save?name=%@", RLPEnc(name)];
+    [[RLPCoreClient shared] postJSON:url body:nil completion:^(NSDictionary * _Nullable json) {
+        if (json && [json[@"ok"] boolValue]) RLPToast(RLPTr(@"已保存歌单"));
+        else RLPToast([json[@"error"] isKindOfClass:[NSString class]] ? json[@"error"] : RLPTr(@"保存失败"));
+    }];
+}
+
+#pragma mark - 数据
+
+- (void)activate { [self reloadData]; }
+
+- (void)reloadData {
+    if (![RLPCoreClient shared].started) { [self setSubtitle:RLPTr(@"核心未启动")]; return; }
+    const NSUInteger seq = ++self.seq;
+    __weak __typeof__(self) weakSelf = self;
+    [[RLPCoreClient shared] getJSON:@"/api/queue?meta=1" completion:^(NSDictionary * _Nullable json) {
+        __typeof__(self) self_ = weakSelf;
+        if (!self_ || seq != self_.seq) return;
+        if (!json || ![json[@"ok"] boolValue]) {
+            [self_ setSubtitle:RLPTr(@"读取失败")];
+            return;
+        }
+        NSArray *items = [json[@"items"] isKindOfClass:[NSArray class]] ? json[@"items"] : @[];
+        NSMutableArray<NSString *> *ps = [NSMutableArray array];
+        for (id x in items) if ([x isKindOfClass:[NSString class]]) [ps addObject:x];
+        self_.paths = ps;
+        NSArray *ms = [json[@"metas"] isKindOfClass:[NSArray class]] ? json[@"metas"] : @[];
+        NSMutableArray<NSDictionary *> *mm = [NSMutableArray array];
+        for (id x in ms) [mm addObject:[x isKindOfClass:[NSDictionary class]] ? x : @{}];
+        self_.metas = mm;
+        self_.currentIndex = [json[@"index"] respondsToSelector:@selector(integerValue)] ? [json[@"index"] integerValue] : -1;
+        self_.mode = [json[@"mode"] respondsToSelector:@selector(integerValue)] ? [json[@"mode"] integerValue] : 0;
+        [self_.table reloadData];
+        self_.empty.hidden = ps.count > 0;
+        NSArray *names = @[ RLPTr(@"顺序"), RLPTr(@"列表循环"), RLPTr(@"单曲循环"), RLPTr(@"随机") ];
+        NSString *mn = names[MIN(MAX(self_.mode, 0), 3)];
+        [self_ setSubtitle:[NSString stringWithFormat:RLPTr(@"%ld 首 · 当前第 %ld 首 · %@"),
+                            (long)ps.count, (long)(self_.currentIndex + 1), mn]];
+    }];
+}
+
+- (void)applyTheme {
+    [super applyTheme];
+    RLPTheme *t = [RLPTheme current];
+    self.table.backgroundColor = t.bg;
+    self.empty.textColor = t.mut;
+    [self.table reloadData];
 }
 
 @end

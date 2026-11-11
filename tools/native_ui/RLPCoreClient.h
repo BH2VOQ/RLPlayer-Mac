@@ -49,6 +49,13 @@ typedef void (^RLPDataCompletion)(NSData * _Nullable data);
 /// 异步取原始字节（封面）。completion 在主线程。
 - (void)getData:(NSString *)path completion:(nullable RLPDataCompletion)completion;
 
+/// 异步 POST **原始字节**（人工设置封面：/api/lib/cover/set 收图片二进制，不是表单）。
+/// completion 在主线程；返回解析后的 JSON（失败为 nil）。
+- (void)postData:(NSString *)path
+            body:(NSData *)body
+     contentType:(NSString *)contentType
+      completion:(nullable RLPJSONCompletion)completion;
+
 @end
 
 NS_ASSUME_NONNULL_END
