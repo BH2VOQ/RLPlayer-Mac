@@ -216,6 +216,7 @@ if(APPLE)
     tools/native_ui/RLPCalibrationView.mm
     tools/native_ui/RLPFeedbackWindowController.mm
     tools/native_ui/RLPKnowledgeView.mm
+    tools/native_ui/RLPFunctionalAudit.mm
     tools/mac_update.mm)
   set_source_files_properties(
     tools/mac_update.mm
@@ -236,7 +237,7 @@ if(APPLE)
     tools/native_ui/RLPPlaylistsViewController.mm tools/native_ui/RLPEqualizerView.mm
     tools/native_ui/RLPInputView.mm tools/native_ui/RLPCastView.mm
     tools/native_ui/RLPCalibrationView.mm tools/native_ui/RLPFeedbackWindowController.mm
-    tools/native_ui/RLPKnowledgeView.mm
+    tools/native_ui/RLPKnowledgeView.mm tools/native_ui/RLPFunctionalAudit.mm
     PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
   target_include_directories(rlplayer_native PRIVATE
     ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tools ${CMAKE_SOURCE_DIR}/tools/native_ui)
@@ -256,6 +257,14 @@ if(APPLE)
     ENVIRONMENT "RLPLAYER_STATE_DIR=${CMAKE_BINARY_DIR}/native-selftest-state" TIMEOUT 60)
   add_test(NAME native_ui_smoke COMMAND rlplayer_native --smoke)
   set_tests_properties(native_ui_smoke PROPERTIES TIMEOUT 120)
+
+  # 2026-11-11：功能级验收（真数据 + 真导航 + 像素级主题判定 + 离屏截图）。
+  # native_ui_selftest 只问"页面能不能构造"，抓不到
+  # "专辑页双击直接播放、永远进不去详情"和"选了浅色主页还是黑的"这两类故障。
+  # 这条会真的点进去、真的量渲染出来的颜色。
+  add_test(NAME native_ui_functional
+           COMMAND rlplayer_native --audit ${CMAKE_BINARY_DIR}/native-audit-shots)
+  set_tests_properties(native_ui_functional PROPERTIES TIMEOUT 300)
 
   # 2026-11-11（1.1.7.1）：/api/settings 的"写了就是写了"判据。
   # 触发原因是一个真 BUG：白名单漏了 hogexcl ⟹ POST 回 ok:true 却不落盘、读回为空，

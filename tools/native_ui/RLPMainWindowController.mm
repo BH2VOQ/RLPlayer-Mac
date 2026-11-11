@@ -329,6 +329,12 @@ static const CGFloat kTopbarHeight = 46.0;
     self.pageHost.layer.backgroundColor = t.bg.CGColor;
     [self.sidebar applyTheme];
     [self.playbackBar applyTheme];
+    // **所有缓存页**都要刷，不只是当前页：否则切到浅色后再点别的导航项，
+    // 那一页还是深色的（用户实测的"主页还是黑的"就是这个）。
+    for (NSNumber *key in self.pageCache) {
+        NSViewController *vc = self.pageCache[key];
+        if ([vc respondsToSelector:@selector(applyTheme)]) [(id)vc applyTheme];
+    }
     if ([self.currentContent respondsToSelector:@selector(applyTheme)]) [(id)self.currentContent applyTheme];
 }
 

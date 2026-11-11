@@ -12,6 +12,7 @@
 #import <Foundation/Foundation.h>
 #import "RLPAppDelegate.h"
 #import "RLPCoreClient.h"
+#import "RLPFunctionalAudit.h"
 
 #include <cstdio>
 #include <cstring>
@@ -61,12 +62,20 @@ static int RunSmoke(void) {
 int main(int argc, const char *argv[]) {
     @autoreleasepool {
         BOOL selftest = NO, smoke = NO;
+        NSString *auditDir = nil;
         for (int i = 1; i < argc; ++i) {
             if (std::strcmp(argv[i], "--selftest") == 0) selftest = YES;
             if (std::strcmp(argv[i], "--smoke") == 0) smoke = YES;
+            if (std::strcmp(argv[i], "--audit") == 0) {
+                // --audit [目录]：功能级验收 + 离屏截图（不弹窗、不出声）
+                auditDir = (i + 1 < argc && argv[i + 1][0] != '-')
+                    ? [NSString stringWithUTF8String:argv[++i]]
+                    : [NSTemporaryDirectory() stringByAppendingPathComponent:@"rlp-native-audit"];
+            }
         }
         if (selftest) return RLPAppDelegateRunSelfTest();
         if (smoke) return RunSmoke();
+        if (auditDir) return RLPRunFunctionalAudit(auditDir);
 
         NSApplication *app = [NSApplication sharedApplication];
         [app setActivationPolicy:NSApplicationActivationPolicyRegular];

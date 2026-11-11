@@ -10,8 +10,20 @@
 #import "RLPCoreClient.h"
 #import "RLPModels.h"
 #import "RLPTheme.h"
+#import "RLPSupport.h"
 
 static const NSUserInterfaceItemIdentifier kAlbumItemID = @"RLPAlbumItem";
+
+#pragma mark - 卡片视图（承载 tracking area）
+
+// tracking area 属于 NSView。NSCollectionViewItem 是控制器，收不到 mouseEntered，
+// 所以用一个视图子类把悬停事件转回 item。
+@class RLPAlbumItem;
+@interface RLPAlbumCardView : NSView
+@property (nonatomic, weak) RLPAlbumItem *item;
+@end
+
+
 
 #pragma mark - 专辑卡片
 
@@ -21,14 +33,37 @@ static const NSUserInterfaceItemIdentifier kAlbumItemID = @"RLPAlbumItem";
 @property (nonatomic, strong) NSTextField *artistLabel;
 @property (nonatomic, strong) NSTextField *placeholderLabel;
 @property (nonatomic, copy) NSString *albumKey;
+- (void)applyTheme;
+- (void)cardHoverChanged:(BOOL)on;
 @end
 
-@implementation RLPAlbumItem
+@implementation RLPAlbumCardView {
+    NSTrackingArea *_area;
+}
+- (void)updateTrackingAreas {
+    [super updateTrackingAreas];
+    if (_area) { [self removeTrackingArea:_area]; _area = nil; }
+    _area = [[NSTrackingArea alloc] initWithRect:self.bounds
+                                        options:(NSTrackingMouseEnteredAndExited |
+                                                 NSTrackingActiveInKeyWindow |
+                                                 NSTrackingInVisibleRect)
+                                          owner:self userInfo:nil];
+    [self addTrackingArea:_area];
+}
+- (void)mouseEntered:(NSEvent *)e { (void)e; [self.item cardHoverChanged:YES]; }
+- (void)mouseExited:(NSEvent *)e { (void)e; [self.item cardHoverChanged:NO]; }
+@end
+
+@implementation RLPAlbumItem {
+    BOOL _hovered;
+}
 
 - (void)loadView {
     RLPTheme *t = [RLPTheme current];
-    NSView *v = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 168, 214)];
+    RLPAlbumCardView *v = [[RLPAlbumCardView alloc] initWithFrame:NSMakeRect(0, 0, 168, 214)];
+    v.item = self;
     v.wantsLayer = YES;
+    v.layer.masksToBounds = NO;   // 阴影要能画到卡片外
     self.view = v;
 
     _coverView = [[NSImageView alloc] initWithFrame:NSZeroRect];
@@ -87,7 +122,39 @@ static const NSUserInterfaceItemIdentifier kAlbumItemID = @"RLPAlbumItem";
     self.coverView.layer.backgroundColor = t.bg2.CGColor;
     self.placeholderLabel.hidden = (cover != nil);
     self.placeholderLabel.stringValue = album.name.length ? [album.name substringToIndex:1] : @"♪";
+    [self applyTheme];
 }
+
+// 卡片自己也要能换肤：NSCollectionView 复用 item，切主题时不重刷就会留着旧色文字。
+- (void)applyTheme {
+    RLPTheme *t = [RLPTheme current];
+    self.nameLabel.textColor = t.text;
+    self.artistLabel.textColor = t.mut;
+    self.placeholderLabel.textColor = t.mut;
+    self.coverView.layer.backgroundColor = t.bg2.CGColor;
+    [self refreshHighlight];
+}
+
+// 悬停/选中时给封面加一圈强调边 + 轻微阴影（web 版 .card:hover 的观感）。
+// 只改 layer 属性，不重建视图 —— 网格上百张卡，重建会卡。
+// NSCollectionViewItem 没有 highlighted 属性，所以悬停自己用 tracking area 管。
+- (void)refreshHighlight {
+    RLPTheme *t = [RLPTheme current];
+    const BOOL on = _hovered || self.selected;
+    self.coverView.layer.borderWidth = on ? 2.0 : 0.0;
+    self.coverView.layer.borderColor = on ? t.accent.CGColor : NSColor.clearColor.CGColor;
+    self.view.layer.shadowOpacity = on ? 0.16 : 0.0;
+    self.view.layer.shadowRadius = on ? 7 : 0;
+    self.view.layer.shadowOffset = CGSizeMake(0, -2);
+    self.view.layer.shadowColor = NSColor.blackColor.CGColor;
+}
+
+- (void)setSelected:(BOOL)selected {
+    [super setSelected:selected];
+    [self refreshHighlight];
+}
+
+- (void)cardHoverChanged:(BOOL)on { _hovered = on; [self refreshHighlight]; }
 
 @end
 
@@ -95,6 +162,7 @@ static const NSUserInterfaceItemIdentifier kAlbumItemID = @"RLPAlbumItem";
 
 @interface RLPAlbumsViewController () <NSCollectionViewDataSource, NSCollectionViewDelegate>
 @property (nonatomic, strong) NSCollectionView *collection;
+@property (nonatomic, strong) NSTextField *titleLabel;
 @property (nonatomic, strong) NSTextField *countLabel;
 @property (nonatomic, strong) NSMutableArray<RLPAlbum *> *albums;
 @property (nonatomic, strong) NSCache<NSString *, NSImage *> *coverCache;
@@ -121,11 +189,12 @@ static const NSUserInterfaceItemIdentifier kAlbumItemID = @"RLPAlbumItem";
     root.layer.backgroundColor = t.bg.CGColor;
     self.view = root;
 
-    NSTextField *title = [NSTextField labelWithString:@"专辑"];
-    title.font = [NSFont systemFontOfSize:17 weight:NSFontWeightSemibold];
-    title.textColor = t.text;
-    title.translatesAutoresizingMaskIntoConstraints = NO;
-    [root addSubview:title];
+    self.titleLabel = [NSTextField labelWithString:RLPTr(@"专辑")];
+    self.titleLabel.font = [NSFont systemFontOfSize:17 weight:NSFontWeightSemibold];
+    self.titleLabel.textColor = t.text;
+    self.titleLabel.translatesAutoresizingMaskIntoConstraints = NO;
+    [root addSubview:self.titleLabel];
+    NSTextField *title = self.titleLabel;
 
     self.countLabel = [NSTextField labelWithString:@"—"];
     self.countLabel.font = t.small;
@@ -149,9 +218,21 @@ static const NSUserInterfaceItemIdentifier kAlbumItemID = @"RLPAlbumItem";
     self.collection.backgroundColors = @[NSColor.clearColor];
     [self.collection registerClass:[RLPAlbumItem class] forItemWithIdentifier:kAlbumItemID];
 
-    NSClickGestureRecognizer *dbl = [[NSClickGestureRecognizer alloc] initWithTarget:self action:@selector(onDoubleClick:)];
-    dbl.numberOfClicksRequired = 2;
-    [self.collection addGestureRecognizer:dbl];
+    // 与 web 版同语义：**点专辑 = 进详情页**（不是直接播放）。
+    // 之前双击直接调 onPlayAlbum，导致专辑详情页永远进不去 —— 这是本轮修的核心故障。
+    // 单击进详情；双击也进详情（用户习惯双击打开，不该变成播放）。
+    NSClickGestureRecognizer *single = [[NSClickGestureRecognizer alloc] initWithTarget:self
+                                                                                action:@selector(onOpenItem:)];
+    single.numberOfClicksRequired = 1;
+    [self.collection addGestureRecognizer:single];
+
+    // 右键菜单：想直接播放/入队的人走这里，不占用主点击语义
+    NSMenu *itemMenu = [[NSMenu alloc] init];
+    [itemMenu addItemWithTitle:RLPTr(@"打开") action:@selector(onMenuOpen:) keyEquivalent:@""];
+    [itemMenu addItemWithTitle:RLPTr(@"播放整张") action:@selector(onMenuPlay:) keyEquivalent:@""];
+    [itemMenu addItemWithTitle:RLPTr(@"加入队列") action:@selector(onMenuEnqueue:) keyEquivalent:@""];
+    for (NSMenuItem *mi in itemMenu.itemArray) mi.target = self;
+    self.collection.menu = itemMenu;
 
     NSScrollView *scroll = [[NSScrollView alloc] initWithFrame:NSZeroRect];
     scroll.drawsBackground = NO;
@@ -245,12 +326,59 @@ static const NSUserInterfaceItemIdentifier kAlbumItemID = @"RLPAlbumItem";
 
 #pragma mark - 双击播放
 
-- (void)onDoubleClick:(NSClickGestureRecognizer *)g {
-    NSPoint p = [g locationInView:self.collection];
+/// 命中测试：把点击位置换算成专辑；点空白处返回 nil。
+- (RLPAlbum *)albumAtPoint:(NSPoint)p {
     NSIndexPath *ip = [self.collection indexPathForItemAtPoint:p];
-    if (!ip || ip.item >= (NSInteger)self.albums.count) return;
-    RLPAlbum *album = self.albums[(NSUInteger)ip.item];
-    if (album.key.length && self.onPlayAlbum) self.onPlayAlbum(album.key);
+    if (!ip || ip.item < 0 || ip.item >= (NSInteger)self.albums.count) return nil;
+    return self.albums[(NSUInteger)ip.item];
+}
+
+- (void)onOpenItem:(NSClickGestureRecognizer *)g {
+    RLPAlbum *album = [self albumAtPoint:[g locationInView:self.collection]];
+    if (album.key.length) RLPRequestOpenAlbum(album.key);
+}
+
+/// 右键菜单的三项：以**右键那一行**为准（clickedItem 可能为空，回退到选中项）。
+- (RLPAlbum *)menuItemAlbum {
+    NSPoint p = [self.collection convertPoint:[self.collection.window mouseLocationOutsideOfEventStream]
+                                    fromView:nil];
+    RLPAlbum *a = [self albumAtPoint:p];
+    if (a) return a;
+    NSIndexPath *sel = self.collection.selectionIndexPaths.anyObject;
+    if (sel && sel.item >= 0 && sel.item < (NSInteger)self.albums.count)
+        return self.albums[(NSUInteger)sel.item];
+    return nil;
+}
+
+- (void)onMenuOpen:(id)sender {
+    RLPAlbum *a = [self menuItemAlbum];
+    if (a.key.length) RLPRequestOpenAlbum(a.key);
+}
+
+- (void)onMenuPlay:(id)sender {
+    RLPAlbum *a = [self menuItemAlbum];
+    if (a.key.length) RLPPlayAlbum(a.key, 0);
+}
+
+// 换肤：根背景 + 标题 + 计数 + **所有已实例化的卡片**。
+// 只刷 visibleItems 不够（滚动出去再回来会复用旧色 item），所以直接 reloadData。
+- (void)applyTheme {
+    RLPTheme *t = [RLPTheme current];
+    self.view.layer.backgroundColor = t.bg.CGColor;
+    self.titleLabel.textColor = t.text;
+    self.countLabel.textColor = t.mut;
+    self.collection.backgroundColors = @[ NSColor.clearColor ];
+    [self.collection reloadData];
+}
+
+- (void)onMenuEnqueue:(id)sender {
+    RLPAlbum *a = [self menuItemAlbum];
+    if (!a.key.length || ![RLPCoreClient shared].started) return;
+    NSString *url = [NSString stringWithFormat:@"/api/lib/enqueue?k=%@", RLPEnc(a.key)];
+    [[RLPCoreClient shared] postJSON:url body:nil completion:^(NSDictionary * _Nullable json) {
+        if (json && [json[@"ok"] boolValue]) RLPToast(RLPTr(@"整张专辑已加入队列"));
+        else RLPToast([json[@"error"] isKindOfClass:[NSString class]] ? json[@"error"] : RLPTr(@"加入失败"));
+    }];
 }
 
 @end

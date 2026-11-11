@@ -16,6 +16,10 @@ NS_ASSUME_NONNULL_BEGIN
 /// 当前选中的导航行（-1 = 未选中）。详情页返回时用它对回原列表页。
 @property (nonatomic, readonly) NSInteger selectedRow;
 
+/// 当前悬停行（-1 = 无）。侧栏表格把鼠标位置转进来，用于画悬停底色。
+@property (nonatomic, readonly) NSInteger hoverRow;
+- (void)sidebarHoverAtPoint:(NSPoint)point;
+
 /// 以代码方式选中某一行（不触发 onSelect 以外的副作用由实现保证幂等）。
 - (void)selectRow:(NSInteger)row;
 

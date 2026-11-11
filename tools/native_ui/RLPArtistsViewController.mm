@@ -124,8 +124,10 @@ static const NSUserInterfaceItemIdentifier kArtistItemID = @"RLPArtistItem";
     self.collection.selectable = YES;
     [self.collection registerClass:[RLPArtistItem class] forItemWithIdentifier:kArtistItemID];
 
+    // 与 web 版同语义：**单击**进艺术家详情（web 的卡片 onclick 就是单击）。
+    // 原来要双击，用户点一下没反应会以为坏了。
     NSClickGestureRecognizer *dbl = [[NSClickGestureRecognizer alloc] initWithTarget:self action:@selector(onDoubleClick:)];
-    dbl.numberOfClicksRequired = 2;
+    dbl.numberOfClicksRequired = 1;
     [self.collection addGestureRecognizer:dbl];
 
     NSScrollView *scroll = [[NSScrollView alloc] initWithFrame:NSZeroRect];

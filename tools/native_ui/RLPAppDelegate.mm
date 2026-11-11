@@ -58,8 +58,14 @@ static void STCheck(BOOL ok, const char *what, NSString *detail) {
 
 - (void)applicationDidFinishLaunching:(NSNotification *)note {
     [self buildMenu];
+    // 主题：没存过就用默认（light）。**无条件调一次**并同步全局 appearance ——
+    // setThemeName 对同名会 early-return 不发通知，只靠它会出现
+    // "设置里显示浅色、主页却还是黑的"（用户实测反馈）。
     NSString *savedTheme = [[NSUserDefaults standardUserDefaults] stringForKey:@"RLPThemeName"];
-    if (savedTheme.length) [RLPTheme setThemeName:savedTheme];
+    [RLPTheme setThemeName:savedTheme.length ? savedTheme : [RLPTheme themeName]];
+    RLPTheme *t0 = [RLPTheme current];
+    NSApp.appearance = [NSAppearance appearanceNamed:t0.isLight ? NSAppearanceNameAqua
+                                                                : NSAppearanceNameDarkAqua];
     [[RLPCoreClient shared] startEmbedded];
 
     self.mainWC = [[RLPMainWindowController alloc] init];

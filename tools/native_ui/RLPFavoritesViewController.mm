@@ -47,6 +47,9 @@ static const NSUserInterfaceItemIdentifier kFavTableID = @"RLPFavTable";
     [self.contentView addSubview:scroll];
     
     // 双击播放
+    // 与 web 版一致：**单击**即触发（web 的行 onclick 就是单击）。
+    // 双击保留兼容；两者指向同一动作，重复触发幂等。
+    _tableView.action = @selector(onDoubleClick:);
     _tableView.doubleAction = @selector(onDoubleClick:);
     _tableView.target = self;
     
@@ -95,19 +98,19 @@ static const NSUserInterfaceItemIdentifier kFavTableID = @"RLPFavTable";
 }
 
 - (void)onPlay:(id)sender {
-    NSInteger row = [_tableView selectedRow];
+    NSInteger row = _tableView.clickedRow >= 0 ? _tableView.clickedRow : _tableView.selectedRow;
     if (row < 0) return;
     RLPPlayPath(_tracks[row].path);
 }
 
 - (void)onEnqueue:(id)sender {
-    NSInteger row = [_tableView selectedRow];
+    NSInteger row = _tableView.clickedRow >= 0 ? _tableView.clickedRow : _tableView.selectedRow;
     if (row < 0) return;
     RLPEnqueuePath(_tracks[row].path);
 }
 
 - (void)onUnfav:(id)sender {
-    NSInteger row = [_tableView selectedRow];
+    NSInteger row = _tableView.clickedRow >= 0 ? _tableView.clickedRow : _tableView.selectedRow;
     if (row < 0) return;
     NSString *path = _tracks[row].path;
     NSString *url = [NSString stringWithFormat:@"/api/fav?file=%@&on=0", RLPEnc(path)];

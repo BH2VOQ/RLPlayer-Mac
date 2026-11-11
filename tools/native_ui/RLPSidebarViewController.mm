@@ -6,12 +6,50 @@
 // 注意：窗口是 FullSizeContentView，侧栏会从窗口最顶端开始 ⟹ 品牌区必须让开 macOS
 // 红绿灯（x≈12..70、y≈19..32），所以文字从 x=80 起，避免被遮挡。
 #import "RLPSidebarViewController.h"
+#import "RLPSupport.h"
 #import "RLPTheme.h"
 
 @interface RLPSidebarViewController () <NSTableViewDataSource, NSTableViewDelegate> {
     NSTableView *_tableView;
     NSInteger _lastSelectedRow;
     NSArray<NSDictionary *> *_menuItems;
+    NSInteger _hoverRow;
+    // 待落地的选中行：selectRow: 可能在 loadView 之前被调用（主窗口 init 里就是），
+    // 那时 _tableView 还是 nil，选中会**静默丢失** ⟹ 侧栏永远没有高亮。
+    NSInteger _pendingRow;
+    NSInteger _selectedRow;   // 业务选中态（唯一真相，见 selectRow: 注释）
+    NSTrackingArea *_tracking;
+}
+@end
+
+#pragma mark - 侧栏表格（自己管 tracking area）
+
+// tracking area 属于 NSView 而非控制器，放这里才收得到 mouseMoved。
+@interface RLPSidebarTable : NSTableView
+@property (nonatomic, weak) RLPSidebarViewController *ownerVC;
+@end
+
+@implementation RLPSidebarTable {
+    NSTrackingArea *_area;
+}
+
+- (void)updateTrackingAreas {
+    [super updateTrackingAreas];
+    if (_area) { [self removeTrackingArea:_area]; _area = nil; }
+    _area = [[NSTrackingArea alloc] initWithRect:self.bounds
+                                        options:(NSTrackingMouseMoved | NSTrackingMouseEnteredAndExited |
+                                                 NSTrackingActiveInKeyWindow | NSTrackingInVisibleRect)
+                                          owner:self userInfo:nil];
+    [self addTrackingArea:_area];
+}
+
+- (void)mouseMoved:(NSEvent *)event {
+    [self.ownerVC sidebarHoverAtPoint:[self convertPoint:event.locationInWindow fromView:nil]];
+}
+
+- (void)mouseExited:(NSEvent *)event {
+    (void)event;
+    [self.ownerVC sidebarHoverAtPoint:NSMakePoint(-1, -1)];
 }
 @end
 
@@ -21,6 +59,9 @@
     self = [super initWithNibName:nil bundle:nil];
     if (self) {
         _lastSelectedRow = -1;
+        _hoverRow = -1;
+        _pendingRow = -1;
+        _selectedRow = -1;
         _menuItems = @[
             @{@"name": @"专辑", @"icon": @"square.stack"},
             @{@"name": @"艺术家", @"icon": @"person.2"},
@@ -36,14 +77,22 @@
         ];
     }
     return self;
+    // 选中必须在**表格已经有行之后**才设：reloadData 之前 selectRowIndexes 会被丢弃，
+    // 侧栏于是永远没有高亮（本轮实测到的真故障：selectedRow 恒为 -1）。
+    [_tableView reloadData];
+    if (_pendingRow >= 0 && _pendingRow < (NSInteger)_menuItems.count) {
+        const NSInteger want = _pendingRow;
+        _pendingRow = -1;
+        _selectedRow = want;
+        _lastSelectedRow = want;
+        [_tableView reloadData];
+    }
+
 }
 
 - (NSInteger)rowCount { return (NSInteger)_menuItems.count; }
 
-- (NSInteger)selectedRow {
-    // selftest 期间可能还没建表（loadView 未触发），此时安全返回 -1
-    return _tableView ? _tableView.selectedRow : -1;
-}
+- (NSInteger)selectedRow { return _selectedRow; }
 
 - (void)loadView {
     RLPTheme *t = [RLPTheme current];
@@ -83,7 +132,9 @@
     scroll.autohidesScrollers = YES;
     [view addSubview:scroll];
 
-    _tableView = [[NSTableView alloc] initWithFrame:NSZeroRect];
+    RLPSidebarTable *tv = [[RLPSidebarTable alloc] initWithFrame:NSZeroRect];
+    tv.ownerVC = self;
+    _tableView = tv;
     _tableView.backgroundColor = [NSColor clearColor];
     _tableView.headerView = nil;
     _tableView.rowHeight = 34;
@@ -92,6 +143,8 @@
     _tableView.delegate = self;
     _tableView.dataSource = self;
     _tableView.focusRingType = NSFocusRingTypeNone;
+    _tableView.target = self;
+    _tableView.action = @selector(onRowClicked:);
     NSTableColumn *col = [[NSTableColumn alloc] initWithIdentifier:@"SidebarCol"];
     col.resizingMask = NSTableColumnAutoresizingMask;
     [_tableView addTableColumn:col];
@@ -130,6 +183,21 @@
         cell.identifier = @"Cell";
         cell.wantsLayer = YES;
 
+        // 选中/悬停的底是**内缩的圆角胶囊**（web 版 .nav 就是 margin 8 + radius 8），
+        // 铺满整行会显得像表格而不是导航。
+        NSView *pill = [[NSView alloc] initWithFrame:NSZeroRect];
+        pill.identifier = @"pill";
+        pill.wantsLayer = YES;
+        pill.layer.cornerRadius = 8;
+        pill.translatesAutoresizingMaskIntoConstraints = NO;
+        [cell addSubview:pill];
+        [NSLayoutConstraint activateConstraints:@[
+            [pill.leadingAnchor constraintEqualToAnchor:cell.leadingAnchor constant:8],
+            [pill.trailingAnchor constraintEqualToAnchor:cell.trailingAnchor constant:-8],
+            [pill.topAnchor constraintEqualToAnchor:cell.topAnchor constant:1],
+            [pill.bottomAnchor constraintEqualToAnchor:cell.bottomAnchor constant:-1],
+        ]];
+
         NSImageView *iconView = [[NSImageView alloc] initWithFrame:NSZeroRect];
         iconView.identifier = @"icon";
         iconView.imageScaling = NSImageScaleProportionallyDown;
@@ -144,7 +212,7 @@
         [cell addSubview:label];
 
         [NSLayoutConstraint activateConstraints:@[
-            [iconView.leadingAnchor constraintEqualToAnchor:cell.leadingAnchor constant:16],
+            [iconView.leadingAnchor constraintEqualToAnchor:cell.leadingAnchor constant:20],
             [iconView.centerYAnchor constraintEqualToAnchor:cell.centerYAnchor],
             [iconView.widthAnchor constraintEqualToConstant:16],
             [iconView.heightAnchor constraintEqualToConstant:16],
@@ -162,30 +230,63 @@
         if ([sub.identifier isEqualToString:@"label"]) label = (NSTextField *)sub;
     }
 
-    BOOL selected = (_tableView.selectedRow == row);
+    const BOOL selected = (_selectedRow == row);
+    const BOOL hovered = (self.hoverRow == row);
     iconView.image = [NSImage imageWithSystemSymbolName:item[@"icon"] accessibilityDescription:item[@"name"]];
     iconView.contentTintColor = selected ? t.accent : t.mut;
-    label.stringValue = item[@"name"];
-    label.textColor = selected ? t.accent : t.text;
-    cell.layer.backgroundColor = selected
-        ? [t.accent colorWithAlphaComponent:0.16].CGColor
-        : NSColor.clearColor.CGColor;
-    cell.layer.cornerRadius = 7;
+    label.stringValue = RLPTr(item[@"name"]);
+    label.font = selected ? [NSFont systemFontOfSize:13 weight:NSFontWeightSemibold]
+                          : [NSFont systemFontOfSize:13];
+    label.textColor = selected ? t.accentText : t.text;
+
+    NSView *pill = nil;
+    for (NSView *sub in cell.subviews)
+        if ([sub.identifier isEqualToString:@"pill"]) pill = sub;
+    pill.layer.backgroundColor = selected ? t.accentWeak.CGColor
+                                : (hovered ? t.hov.CGColor : NSColor.clearColor.CGColor);
+    cell.layer.backgroundColor = NSColor.clearColor.CGColor;
     return cell;
 }
 
+// 鼠标点击：用 action 回调（不依赖 selectionDidChange，理由同 selectRow:）。
+- (void)onRowClicked:(id)sender {
+    (void)sender;
+    const NSInteger row = _tableView.clickedRow;
+    if (row >= 0) [self selectRow:row];
+}
+
 - (void)tableViewSelectionDidChange:(NSNotification *)notification {
-    NSInteger row = _tableView.selectedRow;
-    if (row < 0 || row == _lastSelectedRow) return;
+    (void)notification;
+    const NSInteger row = _tableView.selectedRow;
+    if (row >= 0 && row != _selectedRow) [self selectRow:row];
+}
+
+// 选中态**自己持有**，不依赖 NSTableView.selectedRow。
+// 实测：表格不在 key window 里时 selectRowIndexes 会静默失败（调用后 selectedRow 仍是 -1），
+// 于是侧栏永远没有高亮。导航选中是业务状态，本来就不该托付给控件的焦点相关行为。
+- (void)selectRow:(NSInteger)row {
+    if (row < 0 || row >= (NSInteger)_menuItems.count) return;
+    if (!_tableView) { _pendingRow = row; return; }
+    if (_selectedRow == row) return;
+    _selectedRow = row;
     _lastSelectedRow = row;
     [_tableView reloadData];
     if (self.onSelect) self.onSelect(row);
 }
 
-- (void)selectRow:(NSInteger)row {
-    if (row < 0 || row >= (NSInteger)_menuItems.count) return;
-    if (_tableView.selectedRow == row) return;
-    [_tableView selectRowIndexes:[NSIndexSet indexSetWithIndex:(NSUInteger)row] byExtendingSelection:NO];
+/// 表格把鼠标位置转进来：只在行号变化时刷新受影响的两行，不整表 reload
+/// （整表 reload 会让滚动位置与选中态抖动）。
+- (void)sidebarHoverAtPoint:(NSPoint)p {
+    const NSInteger row = (p.x < 0) ? -1 : [_tableView rowAtPoint:p];
+    if (row == _hoverRow) return;
+    const NSInteger old = _hoverRow;
+    _hoverRow = row;
+    NSMutableIndexSet *rows = [NSMutableIndexSet indexSet];
+    if (old >= 0 && old < (NSInteger)_menuItems.count) [rows addIndex:(NSUInteger)old];
+    if (row >= 0 && row < (NSInteger)_menuItems.count) [rows addIndex:(NSUInteger)row];
+    if (rows.count) {
+        [_tableView reloadDataForRowIndexes:rows columnIndexes:[NSIndexSet indexSetWithIndex:0]];
+    }
 }
 
 - (void)applyTheme {

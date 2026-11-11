@@ -32,6 +32,9 @@
     _tableView.headerView = [[NSTableHeaderView alloc] initWithFrame:NSZeroRect];
     _tableView.backgroundColor = NSColor.clearColor;
     _tableView.selectionHighlightStyle = NSTableViewSelectionHighlightStyleRegular;
+    // 与 web 版一致：**单击**即触发（web 的行 onclick 就是单击）。
+    // 双击保留兼容；两者指向同一动作，重复触发幂等。
+    _tableView.action = @selector(onDoubleClick:);
     _tableView.doubleAction = @selector(onDoubleClick:);
     _tableView.target = self;
     

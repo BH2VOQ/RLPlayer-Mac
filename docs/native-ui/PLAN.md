@@ -81,6 +81,25 @@
 | /api/selftest/report、/api/ui/events | web 专用自检回传 / SSE 事件流，原生不需要 |
 | /api/writeback/status | 写回进度轮询（原生用预览查看剩余） |
 | /api/v1、/api/v1/feedback/macos | 后台路径前缀，原生由 feedback_api.h 常量直接持有 |
+## 2.4 本轮（用户实测反馈后）修掉的真故障
+
+用户反馈：「专辑页进不去」「大部分功能失灵」「默认要 light，切 light 主页还是黑的」「布局不够美观」。
+这些都不是"没做完"，是**做错了**。逐条根因：
+
+| 现象 | 根因 | 修法 |
+|---|---|---|
+| 专辑页点不进去 | 双击直接调 onPlayAlbum，**从不发打开详情的通知** | 单击进详情（web 同语义），播放/入队移到右键 |
+| 大部分功能"失灵" | 8 个列表页都只接 doubleAction，而 web 版是**单击**触发 | 全部补 action=单击，双击保留兼容 |
+| 切 light 主页还是黑的 | ① 默认 dark ② 专辑页**没有 applyTheme** ③ 主窗口只刷当前页、缓存页不刷 | 默认 light + 无条件同步 NSApp.appearance + 卡片/页面 applyTheme + 刷所有缓存页 |
+| 侧栏永远没有高亮 | NSTableView 在非 key window 下 selectRowIndexes **静默失败**（实测调用后 selectedRow 仍 -1） | 选中态改为业务自持，不托付控件焦点行为 |
+| 右键菜单有时不生效 | 依赖 selectedRow（同样可能 -1） | 优先 clickedRow |
+| 强调色不对 | 原生用蓝色，web 是 Apple Music 珊瑚红 #fa2d48 | 主题令牌逐值对照 web 的 :root / light 重写 |
+| 观感偏硬 | 选中底铺满整行、无悬停反馈 | 内缩圆角胶囊 + 悬停底色 + 卡片强调边与阴影 |
+
+**为什么旧门禁没抓到**：旧 selftest 只问"页面能不能构造出来"。
+上面每一条都是"构造成功但行为错"，它一条都抓不到。
+所以新增 native_ui_functional（见 §3），判据改成问"点了之后发生了什么""渲染出来是什么颜色"。
+
 ## 3. 判据
 
 - native_ui_selftest：28 条断言。除视图树契约（10 导航项、窗口尺寸、webviews=0）外，
@@ -90,6 +109,11 @@
   > 走 initWithNibName:bundle: 绕过了 initWithTitle:，_pageTitle 为 nil ⟹ labelWithString:nil
   > 抛异常。修法是基类兜底 + RLPLabel 归零 nil，不是给某个页面打补丁。
 - native_ui_smoke：隔离 state/library 下启动核心，/api/ping、/api/lib/albums、/api/status 均 ok。
+- **native_ui_functional（新）**：38 条断言。造隔离夹具曲库（3 专辑 6 曲）→ 真的发通知/切导航 →
+  断言 currentContent 变成期望类型、页面有实际内容、返回能回到原页；
+  并把每页离屏渲染成 PNG，用**像素**判定明暗与强调色是否真的画出来。
+  产物在 build-mac/native-audit-shots/，可人眼复核布局。
+  运行：`./build-mac/rlplayer_native --audit <目录>`（不弹窗、不出声）。
 - 随机播放：shuffle_order（排列合法性、CSPRNG 可注入、重洗规避、均匀性）。
 - 设置持久化：settings_persist（回显 / 读回 / conf 原文三连）。
 

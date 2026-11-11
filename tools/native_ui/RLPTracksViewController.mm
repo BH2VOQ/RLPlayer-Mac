@@ -109,6 +109,9 @@ static NSString * const kColDuration = @"ColDuration";
     _tableView.headerView = [[NSTableHeaderView alloc] initWithFrame:NSZeroRect];
     _tableView.backgroundColor = [NSColor clearColor];
     _tableView.target = self;
+    // web 版曲目行是**单击播放**（trow.onclick = playPath）。原生改成单击，
+    // 双击也保留（老习惯）。tableView.action 在单击时触发。
+    _tableView.action = @selector(onSingleClickRow:);
     _tableView.doubleAction = @selector(onDoubleClickRow:);
     _tableView.columnAutoresizingStyle = NSTableViewUniformColumnAutoresizingStyle;
 
@@ -359,7 +362,18 @@ static NSString * const kColDuration = @"ColDuration";
     [self fetchTracks];
 }
 
-#pragma mark - 双击与右键菜单动作
+#pragma mark - 单击 / 双击 / 右键菜单动作
+
+/// 单击播放（与 web 版 trow.onclick 一致）。
+/// 注意：NSTableView 在双击时会先触发 action 再触发 doubleAction，
+/// 两者都指向"播放这一首"，所以重复触发是幂等的，不会播两次不同的歌。
+- (void)onSingleClickRow:(id)sender {
+    (void)sender;
+    NSInteger row = _tableView.clickedRow;
+    if (row < 0 || row >= (NSInteger)_tracks.count) return;
+    RLPTrack *t = _tracks[(NSUInteger)row];
+    if (t.path.length) RLPPlayPath(t.path);
+}
 
 - (void)onDoubleClickRow:(id)sender {
     (void)sender;
@@ -373,7 +387,7 @@ static NSString * const kColDuration = @"ColDuration";
 
 - (void)onPlayContextMenu:(id)sender {
     (void)sender;
-    NSInteger row = _tableView.selectedRow;
+    NSInteger row = _tableView.clickedRow >= 0 ? _tableView.clickedRow : _tableView.selectedRow;
     if (row < 0 || row >= (NSInteger)_tracks.count) return;
     RLPTrack *t = _tracks[(NSUInteger)row];
     if (t.path.length) {
@@ -383,7 +397,7 @@ static NSString * const kColDuration = @"ColDuration";
 
 - (void)onEnqueueContextMenu:(id)sender {
     (void)sender;
-    NSInteger row = _tableView.selectedRow;
+    NSInteger row = _tableView.clickedRow >= 0 ? _tableView.clickedRow : _tableView.selectedRow;
     if (row < 0 || row >= (NSInteger)_tracks.count) return;
     RLPTrack *t = _tracks[(NSUInteger)row];
     if (t.path.length) {

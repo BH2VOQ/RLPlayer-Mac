@@ -79,6 +79,9 @@ static NSString *const kQueueDragType = @"RLPQueueRowDrag";
         c.width = [ws[i] doubleValue];
         [self.table addTableColumn:c];
     }
+    // 与 web 版一致：**单击**即触发（web 的行 onclick 就是单击）。
+    // 双击保留兼容；两者指向同一动作，重复触发幂等。
+    self.table.action = @selector(onDouble:);
     self.table.doubleAction = @selector(onDouble:);
     self.table.target = self;
 

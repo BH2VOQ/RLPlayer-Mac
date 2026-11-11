@@ -15,6 +15,9 @@ NS_ASSUME_NONNULL_BEGIN
 @property (nonatomic, strong, readonly) RLPAlbumsViewController *albums;
 @property (nonatomic, strong, readonly) RLPPlaybackBarView *playbackBar;
 
+/// 当前显示的内容页（功能审计断言"点进去到底换了没有"用）。
+@property (nonatomic, strong, readonly, nullable) NSViewController *currentContent;
+
 /// 核心启动后调用：加载首批数据（专辑）并启动播放条轮询。
 - (void)loadInitialData;
 

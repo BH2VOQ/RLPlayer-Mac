@@ -109,6 +109,9 @@
         c.width = widths[i].doubleValue;
         [self.itemTable addTableColumn:c];
     }
+    // 与 web 版一致：**单击**即触发（web 的行 onclick 就是单击）。
+    // 双击保留兼容；两者指向同一动作，重复触发幂等。
+    self.itemTable.action = @selector(onItemDouble:);
     self.itemTable.doubleAction = @selector(onItemDouble:);
     self.itemTable.target = self;
 
@@ -187,7 +190,7 @@
 #pragma mark - 动作
 
 - (void)onListSelect:(id)sender {
-    const NSInteger row = self.listTable.selectedRow;
+    const NSInteger row = self.listTable.clickedRow >= 0 ? self.listTable.clickedRow : self.listTable.selectedRow;
     if (row < 0 || row >= (NSInteger)self.playlists.count) return;
     [self openPlaylist:self.playlists[row].name];
 }

@@ -56,6 +56,9 @@
     self.table.dataSource = self;
     self.table.delegate = self;
     self.table.target = self;
+    // 与 web 版一致：**单击**即触发（web 的行 onclick 就是单击）。
+    // 双击保留兼容；两者指向同一动作，重复触发幂等。
+    self.table.action = @selector(onRowDoubleClick:);
     self.table.doubleAction = @selector(onRowDoubleClick:);
     NSTableColumn *icon = [[NSTableColumn alloc] initWithIdentifier:@"icon"];
     icon.width = 26;
