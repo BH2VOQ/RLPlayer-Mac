@@ -56,8 +56,17 @@
         _playlists = [NSMutableArray array];
         _items = [NSMutableArray array];
         _selectedName = @"";
+        // 侧栏「+ 新建」发来的请求（侧栏不持有本页实例，用通知广播）
+        [[NSNotificationCenter defaultCenter] addObserver:self
+                                                 selector:@selector(onNewPlaylistNote:)
+                                                     name:@"RLPNewPlaylistNotification" object:nil];
     }
     return self;
+}
+
+- (void)onNewPlaylistNote:(NSNotification *)note {
+    (void)note;
+    [self onNew:nil];   // 复用页内「新建」按钮的同一条路径
 }
 
 - (void)buildContent {

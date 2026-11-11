@@ -33,6 +33,10 @@ static const NSUserInterfaceItemIdentifier kAlbumItemID = @"RLPAlbumItem";
 @property (nonatomic, strong) NSTextField *artistLabel;
 @property (nonatomic, strong) NSTextField *placeholderLabel;
 @property (nonatomic, copy) NSString *albumKey;
+/// 悬停时浮起的红色圆形播放键（web .card .cv .pl 同款：右下角 32px 圆、默认隐藏）
+@property (nonatomic, strong) NSButton *playBadge;
+/// 点播放键时回调（控制器注入；item 不该直接持有控制器）
+@property (nonatomic, copy, nullable) void (^onPlayRequested)(NSString *albumKey);
 - (void)applyTheme;
 - (void)cardHoverChanged:(BOOL)on;
 @end
@@ -97,6 +101,23 @@ static const NSUserInterfaceItemIdentifier kAlbumItemID = @"RLPAlbumItem";
     _artistLabel.translatesAutoresizingMaskIntoConstraints = NO;
     [v addSubview:_artistLabel];
 
+    // 悬停浮起的红色圆形播放键（web .card .cv .pl：32px 圆、右下 7px、默认 opacity:0）
+    _playBadge = [[NSButton alloc] initWithFrame:NSZeroRect];
+    _playBadge.bordered = NO;
+    _playBadge.imagePosition = NSImageOnly;
+    _playBadge.imageScaling = NSImageScaleProportionallyDown;
+    _playBadge.image = [NSImage imageWithSystemSymbolName:@"play.fill" accessibilityDescription:RLPTr(@"播放整张")];
+    _playBadge.contentTintColor = NSColor.whiteColor;
+    _playBadge.toolTip = RLPTr(@"播放整张");
+    _playBadge.target = self;
+    _playBadge.action = @selector(onPlayBadge:);
+    _playBadge.wantsLayer = YES;
+    _playBadge.layer.cornerRadius = 16;
+    _playBadge.layer.backgroundColor = t.accent.CGColor;
+    _playBadge.hidden = YES;
+    _playBadge.translatesAutoresizingMaskIntoConstraints = NO;
+    [v addSubview:_playBadge];
+
     [NSLayoutConstraint activateConstraints:@[
         [_coverView.leadingAnchor constraintEqualToAnchor:v.leadingAnchor],
         [_coverView.trailingAnchor constraintEqualToAnchor:v.trailingAnchor],
@@ -104,6 +125,10 @@ static const NSUserInterfaceItemIdentifier kAlbumItemID = @"RLPAlbumItem";
         [_coverView.heightAnchor constraintEqualToConstant:180],
         [_placeholderLabel.centerXAnchor constraintEqualToAnchor:_coverView.centerXAnchor],
         [_placeholderLabel.centerYAnchor constraintEqualToAnchor:_coverView.centerYAnchor],
+        [_playBadge.trailingAnchor constraintEqualToAnchor:_coverView.trailingAnchor constant:-8],
+        [_playBadge.bottomAnchor constraintEqualToAnchor:_coverView.bottomAnchor constant:-8],
+        [_playBadge.widthAnchor constraintEqualToConstant:32],
+        [_playBadge.heightAnchor constraintEqualToConstant:32],
         [_nameLabel.leadingAnchor constraintEqualToAnchor:v.leadingAnchor constant:2],
         [_nameLabel.trailingAnchor constraintEqualToAnchor:v.trailingAnchor constant:-2],
         [_nameLabel.topAnchor constraintEqualToAnchor:_coverView.bottomAnchor constant:8],
@@ -164,7 +189,17 @@ static const NSUserInterfaceItemIdentifier kAlbumItemID = @"RLPAlbumItem";
     [self refreshHighlight];
 }
 
-- (void)cardHoverChanged:(BOOL)on { _hovered = on; [self refreshHighlight]; }
+- (void)cardHoverChanged:(BOOL)on {
+    _hovered = on;
+    self.playBadge.hidden = !on;   // 悬停才浮现（web 的 opacity 过渡等效）
+    [self refreshHighlight];
+}
+
+/// 点卡片上的播放键 = 播放整张（不经过详情页）。
+- (void)onPlayBadge:(id)sender {
+    (void)sender;
+    if (self.albumKey.length && self.onPlayRequested) self.onPlayRequested(self.albumKey);
+}
 
 @end
 
@@ -272,6 +307,16 @@ static const NSUserInterfaceItemIdentifier kAlbumItemID = @"RLPAlbumItem";
 
 #pragma mark - 数据
 
+/// 每次切到本页都重报一次计数（主窗口 sync 会先清空计数）。
+- (void)activate {
+    if (self.albums.count) {
+        [[NSNotificationCenter defaultCenter] postNotificationName:@"RLPPageCountNotification"
+            object:[NSString stringWithFormat:@"%ld 张专辑", (long)self.albums.count]];
+    } else {
+        [self reload];
+    }
+}
+
 - (void)reload {
     if (![RLPCoreClient shared].started) {
         [self.albums removeAllObjects];
@@ -308,6 +353,7 @@ static const NSUserInterfaceItemIdentifier kAlbumItemID = @"RLPAlbumItem";
     RLPAlbumItem *item = (RLPAlbumItem *)[collectionView makeItemWithIdentifier:kAlbumItemID forIndexPath:indexPath];
     if (indexPath.item >= (NSInteger)self.albums.count) return item;
     RLPAlbum *album = self.albums[(NSUInteger)indexPath.item];
+    item.onPlayRequested = self.onPlayAlbum;
     [item setAlbum:album cover:[self.coverCache objectForKey:album.key]];
     if (album.hasCover) [self loadCoverForAlbum:album atIndexPath:indexPath];
     return item;

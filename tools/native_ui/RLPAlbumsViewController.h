@@ -13,6 +13,10 @@ NS_ASSUME_NONNULL_BEGIN
 /// 重新拉取专辑列表（核心未启动时安全空转）。
 - (void)reload;
 
+/// 切到本页时调用：重新上报计数（顶栏标题旁的"N 张专辑"）。
+/// 主窗口每次路由都会调 activate；只有 reload 时上报会让计数在换页后被清空。
+- (void)activate;
+
 /// 已有专辑数（selftest/自检用）。
 @property (nonatomic, readonly) NSInteger albumCount;
 

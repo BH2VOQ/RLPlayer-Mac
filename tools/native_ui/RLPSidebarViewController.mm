@@ -309,13 +309,29 @@ static BOOL RLPRowIsSection(NSArray<NSDictionary *> *items, NSInteger row) {
         }
         sec.stringValue = RLPTr(item[@"sec"]);
         sec.textColor = [RLPTheme current].mut;
+        (void)0;
         // 用一个容器包住以便左缩进
         NSTableCellView *wrap = [[NSTableCellView alloc] initWithFrame:NSMakeRect(0, 0, 232, 26)];
         [wrap addSubview:sec];
-        [NSLayoutConstraint activateConstraints:@[
+        NSMutableArray *cs = [NSMutableArray arrayWithObjects:
             [sec.leadingAnchor constraintEqualToAnchor:wrap.leadingAnchor constant:20],
-            [sec.centerYAnchor constraintEqualToAnchor:wrap.centerYAnchor constant:3],
-        ]];
+            [sec.centerYAnchor constraintEqualToAnchor:wrap.centerYAnchor constant:3], nil];
+        // 「我的歌单」右侧给「+ 新建」（web .sqnew-btn 同位置同语义）
+        if ([item[@"sec"] isEqualToString:@"我的歌单"]) {
+            NSButton *plus = [NSButton buttonWithTitle:RLPTr(@"+ 新建") target:self
+                                                action:@selector(onNewPlaylist:)];
+            plus.bordered = NO;
+            plus.identifier = @"side.newplaylist";
+            plus.font = [NSFont systemFontOfSize:11];
+            plus.contentTintColor = [RLPTheme current].accent;
+            plus.translatesAutoresizingMaskIntoConstraints = NO;
+            [wrap addSubview:plus];
+            [cs addObjectsFromArray:@[
+                [plus.trailingAnchor constraintEqualToAnchor:wrap.trailingAnchor constant:-12],
+                [plus.centerYAnchor constraintEqualToAnchor:sec.centerYAnchor],
+            ]];
+        }
+        [NSLayoutConstraint activateConstraints:cs];
         return wrap;
     }
     NSImageView *iconView = nil;
@@ -417,6 +433,13 @@ static BOOL RLPRowIsSection(NSArray<NSDictionary *> *items, NSInteger row) {
     if (rows.count) {
         [_tableView reloadDataForRowIndexes:rows columnIndexes:[NSIndexSet indexSetWithIndex:0]];
     }
+}
+
+/// 侧栏「+ 新建」：切到歌单页并发一次新建请求（歌单页自己弹命名框）。
+- (void)onNewPlaylist:(id)sender {
+    (void)sender;
+    [[NSNotificationCenter defaultCenter] postNotificationName:@"RLPNavigateKeyNotification" object:@"playlists"];
+    [[NSNotificationCenter defaultCenter] postNotificationName:@"RLPNewPlaylistNotification" object:nil];
 }
 
 - (void)applyTheme {

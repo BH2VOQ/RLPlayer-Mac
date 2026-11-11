@@ -261,6 +261,7 @@ static const CGFloat kTopbarHeight = 46.0;
         [v.topAnchor constraintEqualToAnchor:self.pageHost.topAnchor],
         [v.bottomAnchor constraintEqualToAnchor:self.pageHost.bottomAnchor],
     ]];
+    [self syncTopbarTitle];
     if ([vc respondsToSelector:@selector(activate)]) [(id)vc activate];
 }
 
@@ -291,6 +292,8 @@ static const CGFloat kTopbarHeight = 46.0;
         self.pageCache[key] = vc;
     }
     if (vc == self.currentContent) {
+        // 同页再次点选：也要重设标题并按需重新上报计数
+        [self syncTopbarTitle];
         if ([vc respondsToSelector:@selector(activate)]) [(id)vc activate];
         return;
     }
@@ -306,8 +309,9 @@ static const CGFloat kTopbarHeight = 46.0;
         [v.topAnchor constraintEqualToAnchor:self.pageHost.topAnchor],
         [v.bottomAnchor constraintEqualToAnchor:self.pageHost.bottomAnchor],
     ]];
-    if ([vc respondsToSelector:@selector(activate)]) [(id)vc activate];
+    // 顺序重要：先同步标题（会清空计数），再 activate（页面此时上报计数）
     [self syncTopbarTitle];
+    if ([vc respondsToSelector:@selector(activate)]) [(id)vc activate];
 }
 
 /// 顶栏页标题 = 当前页的 pageTitle；详情页也用它自己的标题。
@@ -316,7 +320,9 @@ static const CGFloat kTopbarHeight = 46.0;
     if ([self.currentContent respondsToSelector:@selector(pageTitle)])
         title = [(id)self.currentContent pageTitle];
     self.pageTitle.stringValue = title.length ? RLPTr(title) : @"";
-    self.pageCount.stringValue = @"";   // 计数等页上报（RLPPageCountNotification）
+    // 计数先清空，随后由页面的 activate 重新上报（调用点保证"先 sync 再 activate"）。
+    // 之前顺序反了（activate 上报 → sync 清空）⟹ 顶栏计数一直是空的。
+    self.pageCount.stringValue = @"";
     // 离屏渲染时 intrinsic-size 约束不会及时重算（实测宽度停在旧值），
     // 直接 sizeToFit 设 frame，保证标题在任何渲染路径下都画得出来。
     [self.pageTitle sizeToFit];
@@ -447,8 +453,8 @@ static const CGFloat kTopbarHeight = 46.0;
         [v.topAnchor constraintEqualToAnchor:self.pageHost.topAnchor],
         [v.bottomAnchor constraintEqualToAnchor:self.pageHost.bottomAnchor],
     ]];
-    if ([vc respondsToSelector:@selector(activate)]) [(id)vc activate];
     [self syncTopbarTitle];
+    if ([vc respondsToSelector:@selector(activate)]) [(id)vc activate];
 }
 
 #pragma mark - 顶栏动作
