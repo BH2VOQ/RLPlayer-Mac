@@ -27,6 +27,8 @@ NS_ASSUME_NONNULL_BEGIN
 
 /// 当前导航项数（selftest/自检用）。
 @property (nonatomic, readonly) NSInteger rowCount;
+/// 只数导航行（不含分组标题行）。
+@property (nonatomic, readonly) NSInteger navRowCount;
 
 /// 当前选中的导航行（-1 = 未选中）。详情页返回时用它对回原列表页。
 @property (nonatomic, readonly) NSInteger selectedRow;

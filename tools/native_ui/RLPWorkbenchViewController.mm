@@ -32,6 +32,18 @@ static const NSInteger kABSlotCount = 4;
 /// DSD 路径下 status.filter 是**管线阶段名**（DsdRateConverter/DirectSDM），
 /// 不是用户选的滤波。两者同屏时必须标清楚哪个是哪个。
 @property (nonatomic, strong) NSTextField *pipelineStageLine;
+// ⑦ 更多快速开关（折叠区：发烧友偶尔调、但确实会调的那些）
+@property (nonatomic, strong) NSButton *moreToggle;
+@property (nonatomic, strong) NSStackView *moreBox;
+@property (nonatomic, assign) BOOL moreExpanded;
+@property (nonatomic, strong) NSPopUpButton *bitsPopup;
+@property (nonatomic, strong) NSPopUpButton *tapsPopup;
+@property (nonatomic, strong) NSPopUpButton *bufferPopup;
+@property (nonatomic, strong) NSButton *twoStageCheck;
+@property (nonatomic, strong) NSButton *directSdmCheck;
+@property (nonatomic, strong) NSButton *ispCheck;
+// ⑤ EQ 开关（eq=1/0）与"旁路"按钮是两件不同的事，必须分开。
+@property (nonatomic, strong) NSButton *eqOnCheck;
 @property (nonatomic, strong) NSTextField *bpLine;
 // 快速切换
 @property (nonatomic, strong) NSStackView *filterQuick;
@@ -85,6 +97,9 @@ static const NSInteger kABSlotCount = 4;
 - (NSView *)cardWithIdentifier:(NSString *)ident;
 - (NSTextField *)sectionTitle:(NSString *)text;
 - (void)addFullWidth:(NSView *)v height:(CGFloat)h;
+- (void)buildMoreSection;
+- (void)refreshMoreControls;
+- (void)syncEqOnCheck;
 @end
 
 @implementation RLPWorkbenchViewController
@@ -142,6 +157,7 @@ static const NSInteger kABSlotCount = 4;
     [self buildUpsampleSection];
     [self buildOutputSection];
     [self buildEqSection];
+    [self buildMoreSection];
 }
 
 - (NSView *)cardWithIdentifier:(NSString *)ident {
@@ -770,15 +786,23 @@ static const NSInteger kABSlotCount = 4;
     self.eqPresetPopup.font = t.small;
     [self.eqPresetPopup addItemWithTitle:RLPTr(@"加载预设…")];
     [[self.eqPresetPopup.widthAnchor constraintEqualToConstant:200] setActive:YES];
+    // EQ 开关（写 eq=<路径> / eq= 空）。与「旁路」按钮是同一件事的两个方向，
+    // 但开关让"现在是开还是关"有明确的状态回显（按钮只能表达动作）。
+    self.eqOnCheck = [NSButton checkboxWithTitle:RLPTr(@"EQ 开") target:self action:@selector(onEqOnChanged:)];
+    self.eqOnCheck.identifier = @"wb.eqon";
+    self.eqOnCheck.font = t.small;
+    self.eqOnCheck.translatesAutoresizingMaskIntoConstraints = NO;
     self.eqView = [[RLPEqualizerView alloc] initWithFrame:NSMakeRect(0, 0, 900, 260)];
     self.eqView.translatesAutoresizingMaskIntoConstraints = NO;
-    for (NSView *v in @[ti, self.eqBypass, self.eqPresetPopup, self.eqView]) [card addSubview:v];
+    for (NSView *v in @[ti, self.eqOnCheck, self.eqBypass, self.eqPresetPopup, self.eqView]) [card addSubview:v];
     [self addFullWidth:card height:310];
     [NSLayoutConstraint activateConstraints:@[
         [ti.leadingAnchor constraintEqualToAnchor:card.leadingAnchor constant:14],
         [ti.topAnchor constraintEqualToAnchor:card.topAnchor constant:12],
         [self.eqBypass.trailingAnchor constraintEqualToAnchor:card.trailingAnchor constant:-14],
         [self.eqBypass.centerYAnchor constraintEqualToAnchor:ti.centerYAnchor],
+        [self.eqOnCheck.trailingAnchor constraintEqualToAnchor:self.eqPresetPopup.leadingAnchor constant:-10],
+        [self.eqOnCheck.centerYAnchor constraintEqualToAnchor:ti.centerYAnchor],
         [self.eqPresetPopup.trailingAnchor constraintEqualToAnchor:self.eqBypass.leadingAnchor constant:-10],
         [self.eqPresetPopup.centerYAnchor constraintEqualToAnchor:ti.centerYAnchor],
         [self.eqView.leadingAnchor constraintEqualToAnchor:card.leadingAnchor constant:14],
@@ -824,10 +848,161 @@ static const NSInteger kABSlotCount = 4;
     }];
 }
 
+- (void)onEqOnChanged:(NSButton *)sender {
+    const BOOL want = sender.state == NSControlStateValueOn;
+    NSString *cur = [self str:@"eq" def:@""];
+    if (want && !cur.length) {
+        // 没有 EQ 文件时"开启"写什么都不对：如实说明，绝不写一个空值假装已开。
+        RLPToast(RLPTr(@"还没有 EQ 文件：设置里选一个，或用上面的 PEQ 预设"));
+        sender.state = NSControlStateValueOff;
+        return;
+    }
+    [self postSettings:@{@"eq": want ? cur : @""}];
+}
+
 /// 旁路 EQ：发烧友 A/B 时最常用的动作之一（不删曲线，只切 eq 开关）。
 - (void)onEqBypass:(id)sender {
     const BOOL on = [[self str:@"eq" def:@"0"] isEqualToString:@"1"];
     [self postSettings:@{@"eq": on ? @"0" : @"1"}];
+}
+
+#pragma mark - ⑦ 更多快速开关（折叠区，别把页面堆成大杂烩）
+
+/// 这些键都在后端 /api/settings 的白名单里，也都是发烧友真会去动的。
+/// 但它们不是每次听歌都要调，所以收在一个折叠区里，而不是跟信号链抢位置。
+- (void)buildMoreSection {
+    RLPTheme *t = [RLPTheme current];
+    NSView *card = [self cardWithIdentifier:@"wb.more"];
+    self.moreToggle = [NSButton buttonWithTitle:RLPTr(@"更多快速开关 ▸")
+                                          target:self action:@selector(onMoreToggle:)];
+    self.moreToggle.bezelStyle = NSBezelStyleInline;
+    self.moreToggle.identifier = @"wb.more.toggle";
+    self.moreToggle.translatesAutoresizingMaskIntoConstraints = NO;
+
+    self.moreBox = [[NSStackView alloc] init];
+    self.moreBox.orientation = NSUserInterfaceLayoutOrientationVertical;
+    self.moreBox.alignment = NSLayoutAttributeLeading;
+    self.moreBox.spacing = 8;
+    self.moreBox.hidden = YES;
+    self.moreBox.translatesAutoresizingMaskIntoConstraints = NO;
+
+    NSStackView *r1 = [[NSStackView alloc] init];
+    r1.orientation = NSUserInterfaceLayoutOrientationHorizontal;
+    r1.spacing = 10;
+    r1.translatesAutoresizingMaskIntoConstraints = NO;
+
+    self.bitsPopup = [[NSPopUpButton alloc] initWithFrame:NSZeroRect pullsDown:NO];
+    self.bitsPopup.identifier = @"wb.bits";
+    self.bitsPopup.target = self; self.bitsPopup.action = @selector(onBitsChanged:);
+    self.bitsPopup.font = t.small;
+    // -1 = 跟随源；0 = 24bit（后端语义：0 与 24 等价，这里只摆真正不同的档）
+    [self.bitsPopup addItemsWithTitles:@[RLPTr(@"跟随源 (-1)"), @"16 bit", @"24 bit", @"32 bit"]];
+    [[self.bitsPopup.widthAnchor constraintEqualToConstant:130] setActive:YES];
+
+    self.tapsPopup = [[NSPopUpButton alloc] initWithFrame:NSZeroRect pullsDown:NO];
+    self.tapsPopup.identifier = @"wb.taps";
+    self.tapsPopup.target = self; self.tapsPopup.action = @selector(onTapsChanged:);
+    self.tapsPopup.font = t.small;
+    [self.tapsPopup addItemsWithTitles:@[RLPTr(@"跟随预设 (0)"), @"4095", @"32767", @"262143", @"1048575"]];
+    [[self.tapsPopup.widthAnchor constraintEqualToConstant:140] setActive:YES];
+
+    self.bufferPopup = [[NSPopUpButton alloc] initWithFrame:NSZeroRect pullsDown:NO];
+    self.bufferPopup.identifier = @"wb.buffer";
+    self.bufferPopup.target = self; self.bufferPopup.action = @selector(onBufferChanged:);
+    self.bufferPopup.font = t.small;
+    [self.bufferPopup addItemsWithTitles:@[@"50", @"100", @"200", @"500", @"1000"]];
+    [[self.bufferPopup.widthAnchor constraintEqualToConstant:100] setActive:YES];
+
+    for (NSView *v in @[[self inlineLabel:RLPTr(@"输出位深")], self.bitsPopup,
+                        [self inlineLabel:RLPTr(@"抽头预算")], self.tapsPopup,
+                        [self inlineLabel:RLPTr(@"缓冲 (ms)")], self.bufferPopup])
+        [r1 addArrangedSubview:v];
+
+    NSStackView *r2 = [[NSStackView alloc] init];
+    r2.orientation = NSUserInterfaceLayoutOrientationHorizontal;
+    r2.spacing = 14;
+    r2.translatesAutoresizingMaskIntoConstraints = NO;
+    self.twoStageCheck = [NSButton checkboxWithTitle:RLPTr(@"两段式升频")
+                                              target:self action:@selector(onTwoStageChanged:)];
+    self.twoStageCheck.identifier = @"wb.twostage";
+    self.twoStageCheck.font = t.small;
+    self.directSdmCheck = [NSButton checkboxWithTitle:RLPTr(@"DSD 直通（DirectSDM）")
+                                               target:self action:@selector(onDirectSdmChanged:)];
+    self.directSdmCheck.identifier = @"wb.directsdm";
+    self.directSdmCheck.font = t.small;
+    self.directSdmCheck.toolTip = RLPTr(@"仅当 DSD 源与目标同速率、且无 EQ/IR/音量处理时才能真正直通，否则后端会降级并给出原因。");
+    self.ispCheck = [NSButton checkboxWithTitle:RLPTr(@"ISP 峰值预衰减")
+                                         target:self action:@selector(onIspChanged:)];
+    self.ispCheck.identifier = @"wb.isp";
+    self.ispCheck.font = t.small;
+    self.ispCheck.toolTip = RLPTr(@"升频后可能削波时提前降一点电平（过采样峰值预扫）。");
+    for (NSView *v in @[self.twoStageCheck, self.directSdmCheck, self.ispCheck]) [r2 addArrangedSubview:v];
+
+    for (NSView *v in @[self.moreToggle, self.moreBox]) [card addSubview:v];
+    [self.moreBox addArrangedSubview:r1];
+    [self.moreBox addArrangedSubview:r2];
+    [self addFullWidth:card height:0];
+    [NSLayoutConstraint activateConstraints:@[
+        [self.moreToggle.leadingAnchor constraintEqualToAnchor:card.leadingAnchor constant:14],
+        [self.moreToggle.topAnchor constraintEqualToAnchor:card.topAnchor constant:8],
+        [self.moreBox.leadingAnchor constraintEqualToAnchor:card.leadingAnchor constant:14],
+        [self.moreBox.trailingAnchor constraintLessThanOrEqualToAnchor:card.trailingAnchor constant:-14],
+        [self.moreBox.topAnchor constraintEqualToAnchor:self.moreToggle.bottomAnchor constant:6],
+        [card.bottomAnchor constraintEqualToAnchor:self.moreBox.bottomAnchor constant:12],
+    ]];
+}
+
+- (void)onMoreToggle:(id)sender {
+    self.moreExpanded = !self.moreExpanded;
+    self.moreBox.hidden = !self.moreExpanded;
+    self.moreToggle.title = self.moreExpanded ? RLPTr(@"更多快速开关 ▾") : RLPTr(@"更多快速开关 ▸");
+}
+
+- (void)onBitsChanged:(NSPopUpButton *)sender {
+    NSArray *vals = @[@"-1", @"16", @"24", @"32"];
+    const NSInteger i = sender.indexOfSelectedItem;
+    if (i < 0 || i >= (NSInteger)vals.count) return;
+    [self postSettings:@{@"bits": vals[i]}];
+}
+- (void)onTapsChanged:(NSPopUpButton *)sender {
+    NSArray *vals = @[@"0", @"4095", @"32767", @"262143", @"1048575"];
+    const NSInteger i = sender.indexOfSelectedItem;
+    if (i < 0 || i >= (NSInteger)vals.count) return;
+    [self postSettings:@{@"taps": vals[i]}];
+}
+- (void)onBufferChanged:(NSPopUpButton *)sender {
+    NSString *v = sender.titleOfSelectedItem;
+    if (v.length) [self postSettings:@{@"buffer": v}];
+}
+- (void)onTwoStageChanged:(NSButton *)s {
+    [self postSettings:@{@"twostage": s.state == NSControlStateValueOn ? @"1" : @"0"}];
+}
+- (void)onDirectSdmChanged:(NSButton *)s {
+    [self postSettings:@{@"directsdm": s.state == NSControlStateValueOn ? @"1" : @"0"}];
+}
+- (void)onIspChanged:(NSButton *)s {
+    [self postSettings:@{@"isp": s.state == NSControlStateValueOn ? @"1" : @"0"}];
+}
+
+/// 折叠区回显：全部按 /api/settings 的真实值，不猜默认。
+- (void)refreshMoreControls {
+    NSArray *bits = @[@"-1", @"16", @"24", @"32"];
+    NSInteger bi = [bits indexOfObject:[self str:@"bits" def:@"-1"]];
+    [self.bitsPopup selectItemAtIndex:(bi == NSNotFound) ? 0 : bi];
+    NSArray *taps = @[@"0", @"4095", @"32767", @"262143", @"1048575"];
+    NSInteger ti = [taps indexOfObject:[self str:@"taps" def:@"0"]];
+    [self.tapsPopup selectItemAtIndex:(ti == NSNotFound) ? 0 : ti];
+    NSString *buf = [self str:@"buffer" def:@""];
+    if (buf.length && [self.bufferPopup itemWithTitle:buf]) [self.bufferPopup selectItemWithTitle:buf];
+    self.twoStageCheck.state = [[self str:@"twostage" def:@"0"] isEqualToString:@"1"] ? NSControlStateValueOn : NSControlStateValueOff;
+    self.directSdmCheck.state = [[self str:@"directsdm" def:@"0"] isEqualToString:@"1"] ? NSControlStateValueOn : NSControlStateValueOff;
+    self.ispCheck.state = [[self str:@"isp" def:@"0"] isEqualToString:@"1"] ? NSControlStateValueOn : NSControlStateValueOff;
+}
+
+/// EQ 开关回显（eq 键存的是 EQ 文本路径；空 = 没有 EQ）。
+- (void)syncEqOnCheck {
+    const BOOL on = [self str:@"eq" def:@""].length > 0;
+    self.eqOnCheck.state = on ? NSControlStateValueOn : NSControlStateValueOff;
 }
 
 #pragma mark - 信号链节点点击（就地弹层看/改这一项）
@@ -850,20 +1025,165 @@ static const NSInteger kABSlotCount = 4;
     hint.preferredMaxLayoutWidth = 300;
     [s addArrangedSubview:hint];
     [[hint.widthAnchor constraintEqualToConstant:300] setActive:YES];
-    NSDictionary *keysForNode = @{
-        @"resample": @[@"rate", @"filter", @"taps"],
-        @"eq": @[@"eq"], @"ir": @[@"ir"], @"shaper": @[@"shaper"],
-        @"sdm": @[@"dsd", @"modfamily", @"modorder"],
-        @"out": @[@"backend", @"device", @"hogexcl"], @"src": @[],
-    };
-    for (NSString *k in (keysForNode[key] ?: @[])) {
-        NSTextField *l = RLPLabel([NSString stringWithFormat:@"%@ = %@", k, [self str:k def:@"—"]], t.small, t.text);
-        [s addArrangedSubview:l];
-        [[l.widthAnchor constraintEqualToConstant:300] setActive:YES];
+    // ---- 就地可改：每个节点给自己的那一个真控件，改完立即 POST ----
+    if ([key isEqualToString:@"resample"]) {
+        // 目标采样率（只列设备真支持的档）+ 当前滤波（从 /api/filters 取，不硬编码）
+        NSMutableArray<NSString *> *rateVals = [NSMutableArray arrayWithObject:@"follow"];
+        NSMutableArray<NSString *> *rateTitles = [NSMutableArray arrayWithObject:RLPTr(@"跟随源")];
+        for (id r in self.rates) {
+            [rateVals addObject:[r stringValue]];
+            [rateTitles addObject:[NSString stringWithFormat:@"%@ Hz", r]];
+        }
+        NSPopUpButton *ratePop = [self popoverPopupWithValues:rateVals titles:rateTitles
+                                                       action:@selector(onNodeRate:)];
+        NSString *curRate = [self str:@"rate" def:@"follow"];
+        NSInteger ri = [rateVals indexOfObject:curRate];
+        [ratePop selectItemAtIndex:(ri == NSNotFound) ? 0 : ri];
+        [s addArrangedSubview:[self inlineLabel:RLPTr(@"目标采样率")]];
+        [s addArrangedSubview:ratePop];
+
+        NSMutableArray<NSString *> *fVals = [NSMutableArray array];
+        NSMutableArray<NSString *> *fTitles = [NSMutableArray array];
+        for (NSDictionary *it in self.filters) {
+            NSString *n = it[@"name"];
+            if (![n isKindOfClass:[NSString class]] || !n.length) continue;
+            [fVals addObject:n];
+            [fTitles addObject:[NSString stringWithFormat:@"%@ · %@ · %@ taps · %@", n,
+                                it[@"phaseName"] ?: @"", it[@"taps"] ?: @0,
+                                RLPWorkbenchFilterUsesNx(it) ? @"filterNx" : @"filter"]];
+        }
+        NSPopUpButton *filtPop = [self popoverPopupWithValues:fVals titles:fTitles
+                                                       action:@selector(onNodeFilter:)];
+        NSString *curFilter = [self str:@"filter" def:@""];
+        NSInteger fi = [fVals indexOfObject:curFilter];
+        [filtPop selectItemAtIndex:(fi == NSNotFound) ? 0 : fi];
+        [s addArrangedSubview:[self inlineLabel:RLPTr(@"滤波（1x / Nx 写的键不同）")]];
+        [s addArrangedSubview:filtPop];
+    } else if ([key isEqualToString:@"eq"]) {
+        NSButton *on = [NSButton checkboxWithTitle:RLPTr(@"EQ 开") target:self action:@selector(onEqOnToggleFromNode:)];
+        on.identifier = @"wb.node.eq.on";
+        on.state = [self str:@"eq" def:@""].length ? NSControlStateValueOn : NSControlStateValueOff;
+        [s addArrangedSubview:on];
+        [s addArrangedSubview:[self inlineLabel:[NSString stringWithFormat:@"eq = %@",
+            [self str:@"eq" def:RLPTr(@"（空 = 没有 EQ）")]]]];
+    } else if ([key isEqualToString:@"ir"]) {
+        NSButton *off = [NSButton buttonWithTitle:RLPTr(@"关闭卷积（清空 IR）")
+                                           target:self action:@selector(onNodeIrOff:)];
+        off.bezelStyle = NSBezelStyleRounded;
+        off.enabled = [self str:@"ir" def:@""].length > 0;
+        [s addArrangedSubview:off];
+        [s addArrangedSubview:[self inlineLabel:[NSString stringWithFormat:@"ir = %@",
+            [self str:@"ir" def:RLPTr(@"（空 = 不卷积）")]]]];
+    } else if ([key isEqualToString:@"shaper"]) {
+        NSArray *shapers = @[@"none", @"auto", @"NS1", @"NS4", @"NS5", @"NS9", @"LNS15", @"TPDF"];
+        NSPopUpButton *p = [self popoverPopupWithValues:shapers titles:shapers action:@selector(onNodeShaper:)];
+        NSInteger i = [shapers indexOfObject:[self str:@"shaper" def:@"none"]];
+        [p selectItemAtIndex:(i == NSNotFound) ? 0 : i];
+        [s addArrangedSubview:p];
+    } else if ([key isEqualToString:@"sdm"]) {
+        NSArray *vals = @[@"0", @"64", @"128", @"256", @"512"];
+        NSArray *titles = @[RLPTr(@"PCM 输出（关）"), @"DSD64", @"DSD128", @"DSD256", @"DSD512"];
+        NSPopUpButton *p = [self popoverPopupWithValues:vals titles:titles action:@selector(onNodeDsd:)];
+        NSInteger i = [vals indexOfObject:[self str:@"dsd" def:@"0"]];
+        [p selectItemAtIndex:(i == NSNotFound) ? 0 : i];
+        [s addArrangedSubview:p];
+        NSArray *fams = @[@"dsd", @"ec", @"chebyshev", @"ahm"];
+        NSPopUpButton *fp = [self popoverPopupWithValues:fams titles:fams action:@selector(onNodeModFamily:)];
+        NSInteger f = [fams indexOfObject:[self str:@"modfamily" def:@"dsd"]];
+        [fp selectItemAtIndex:(f == NSNotFound) ? 0 : f];
+        [s addArrangedSubview:fp];
+    } else if ([key isEqualToString:@"out"]) {
+        NSArray *bvals = @[@"coreaudio", @"coreaudio-shared", @"upnp"];
+        NSArray *btitles = @[RLPTr(@"硬件直通（独占）"), RLPTr(@"系统混音（共享）"), RLPTr(@"UPnP 投放")];
+        NSPopUpButton *bp = [self popoverPopupWithValues:bvals titles:btitles action:@selector(onNodeBackend:)];
+        NSInteger bi = [bvals indexOfObject:[self str:@"backend" def:@"coreaudio"]];
+        [bp selectItemAtIndex:(bi == NSNotFound) ? 0 : bi];
+        [s addArrangedSubview:bp];
+        NSMutableArray<NSString *> *dvals = [NSMutableArray arrayWithObject:@""];
+        NSMutableArray<NSString *> *dtitles = [NSMutableArray arrayWithObject:RLPTr(@"系统默认")];
+        for (NSDictionary *d in self.devices) {
+            [dvals addObject:d[@"id"] ?: @""];
+            [dtitles addObject:d[@"name"] ?: RLPTr(@"未知设备")];
+        }
+        NSPopUpButton *dp = [self popoverPopupWithValues:dvals titles:dtitles action:@selector(onNodeDevice:)];
+        NSInteger di = [dvals indexOfObject:[self str:@"device" def:@""]];
+        [dp selectItemAtIndex:(di == NSNotFound) ? 0 : di];
+        [s addArrangedSubview:dp];
+        NSButton *hog = [NSButton checkboxWithTitle:RLPTr(@"严格独占（Hog，会让系统音量条失效）")
+                                             target:self action:@selector(onNodeHog:)];
+        hog.state = [[self str:@"hogexcl" def:@"0"] isEqualToString:@"1"] ? NSControlStateValueOn : NSControlStateValueOff;
+        [s addArrangedSubview:hog];
+    } else if ([key isEqualToString:@"ir"]) {
+        NSButton *off = [NSButton buttonWithTitle:RLPTr(@"关闭卷积") target:self action:@selector(onNodeIrOff:)];
+        off.bezelStyle = NSBezelStyleRounded;
+        [s addArrangedSubview:off];
+    } else {
+        // src：源规格由曲目决定，没有可调项 —— 如实说，不摆一个改不了的控件。
+        [s addArrangedSubview:[self inlineLabel:RLPTr(@"源规格由当前曲目决定，没有可调项。")]];
     }
     [self.popover close];
     NSView *anchor = self.chainNodes[key] ?: self.view;
     self.popover = RLPShowCardPopover(anchor, RLPCardController(s, 330, 120), 330);
+}
+
+#pragma mark - 节点弹层控件（就地可改）
+
+/// 弹层里的下拉：representedObject 存真实值，title 给人看。
+- (NSPopUpButton *)popoverPopupWithValues:(NSArray<NSString *> *)values
+                                   titles:(NSArray<NSString *> *)titles
+                                   action:(SEL)action {
+    NSPopUpButton *p = [[NSPopUpButton alloc] initWithFrame:NSZeroRect pullsDown:NO];
+    p.translatesAutoresizingMaskIntoConstraints = NO;
+    p.font = [RLPTheme current].small;
+    p.target = self;
+    p.action = action;
+    for (NSUInteger i = 0; i < values.count; ++i) {
+        [p addItemWithTitle:(i < titles.count ? titles[i] : values[i])];
+        [[p lastItem] setRepresentedObject:values[i]];
+    }
+    [[p.widthAnchor constraintEqualToConstant:300] setActive:YES];
+    return p;
+}
+
+- (void)onNodeRate:(NSPopUpButton *)s {
+    NSString *v = s.selectedItem.representedObject;
+    if ([v isKindOfClass:[NSString class]]) [self postSettings:@{@"rate": v}];
+}
+- (void)onNodeFilter:(NSPopUpButton *)s {
+    NSString *n = s.selectedItem.representedObject;
+    if (![n isKindOfClass:[NSString class]] || !n.length) return;
+    BOOL nx = NO;
+    for (NSDictionary *it in self.filters) if ([it[@"name"] isEqualToString:n]) nx = RLPWorkbenchFilterUsesNx(it);
+    [self postSettings:@{(nx ? @"filterNx" : @"filter"): n}];
+}
+- (void)onNodeShaper:(NSPopUpButton *)s {
+    NSString *v = s.selectedItem.representedObject;
+    if ([v isKindOfClass:[NSString class]]) [self postSettings:@{@"shaper": v}];
+}
+- (void)onNodeDsd:(NSPopUpButton *)s {
+    NSString *v = s.selectedItem.representedObject;
+    if ([v isKindOfClass:[NSString class]]) [self postSettings:@{@"dsd": v}];
+}
+- (void)onNodeModFamily:(NSPopUpButton *)s {
+    NSString *v = s.selectedItem.representedObject;
+    if ([v isKindOfClass:[NSString class]]) [self postSettings:@{@"modfamily": v}];
+}
+- (void)onNodeBackend:(NSPopUpButton *)s {
+    NSString *v = s.selectedItem.representedObject;
+    if ([v isKindOfClass:[NSString class]]) [self postSettings:@{@"backend": v}];
+}
+- (void)onNodeDevice:(NSPopUpButton *)s {
+    NSString *v = s.selectedItem.representedObject;
+    if ([v isKindOfClass:[NSString class]]) [self postSettings:@{@"device": v}];
+    [self reloadRates];
+}
+- (void)onNodeHog:(NSButton *)s {
+    [self postSettings:@{@"hogexcl": (s.state == NSControlStateValueOn ? @"1" : @"0")}];
+}
+- (void)onNodeIrOff:(id)s {
+    (void)s;
+    [self postSettings:@{@"ir": @"0"}];
+    [self.popover close];
 }
 
 #pragma mark - 数据

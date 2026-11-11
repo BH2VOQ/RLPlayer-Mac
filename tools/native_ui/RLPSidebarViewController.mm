@@ -8,6 +8,7 @@
 #import "RLPSidebarViewController.h"
 #import "RLPSupport.h"
 #import "RLPTheme.h"
+#include "version.h"
 
 @interface RLPSidebarViewController () <NSTableViewDataSource, NSTableViewDelegate> {
     NSTableView *_tableView;
@@ -59,26 +60,38 @@
 /// 曲库浏览与播放相关项两个模式都有 —— 合并页签不等于砍功能。
 static NSArray<NSDictionary *> *RLPSidebarItemsForMode(RLPAppMode mode) {
     NSMutableArray *items = [NSMutableArray array];
+    // sec = 分组小标题（web 版 .sec：资料库/播放列表/我的歌单/音频引擎）。
+    // 首页（聆听室/工作台）不挂组标题，直接置顶，与 web 的 station 位置一致。
     if (mode == RLPAppModePro) {
         [items addObject:@{@"name": @"专业工作台", @"icon": @"slider.horizontal.3", @"key": @"workbench"}];
     } else {
         [items addObject:@{@"name": @"聆听室", @"icon": @"headphones", @"key": @"room"}];
     }
     [items addObjectsFromArray:@[
+        @{@"sec": @"资料库"},
         @{@"name": @"专辑",     @"icon": @"square.stack", @"key": @"albums"},
         @{@"name": @"艺术家",   @"icon": @"person.2",     @"key": @"artists"},
         @{@"name": @"曲目",     @"icon": @"music.note",   @"key": @"tracks"},
         @{@"name": @"文件夹",   @"icon": @"folder",       @"key": @"folders"},
         @{@"name": @"流媒体",   @"icon": @"antenna.radiowaves.left.and.right", @"key": @"streaming"},
+        @{@"sec": @"播放列表"},
         @{@"name": @"播放队列", @"icon": @"list.bullet",  @"key": @"queue"},
         @{@"name": @"最近播放", @"icon": @"clock",        @"key": @"recent"},
         @{@"name": @"我的最爱", @"icon": @"heart",        @"key": @"favorites"},
+        @{@"sec": @"我的歌单"},
         @{@"name": @"歌单",     @"icon": @"music.note.list", @"key": @"playlists"},
+        @{@"sec": @"音频引擎"},
     ]];
     // 设置只在专业模式出现。聆听模式里想改设置 ⟹ 顶栏切到专业模式。
     if (mode == RLPAppModePro)
         [items addObject:@{@"name": @"设置", @"icon": @"gearshape", @"key": @"settings"}];
     return items;
+}
+
+/// 行是不是分组标题行（不可选中）。
+static BOOL RLPRowIsSection(NSArray<NSDictionary *> *items, NSInteger row) {
+    if (row < 0 || row >= (NSInteger)items.count) return NO;
+    return items[row][@"sec"] != nil;
 }
 
 @implementation RLPSidebarViewController
@@ -108,6 +121,12 @@ static NSArray<NSDictionary *> *RLPSidebarItemsForMode(RLPAppMode mode) {
 
 - (NSInteger)rowCount { return (NSInteger)_menuItems.count; }
 
+- (NSInteger)navRowCount {
+    NSInteger n = 0;
+    for (NSDictionary *it in _menuItems) if (!it[@"sec"]) ++n;
+    return n;
+}
+
 - (NSInteger)selectedRow { return _selectedRow; }
 
 - (void)loadView {
@@ -117,28 +136,53 @@ static NSArray<NSDictionary *> *RLPSidebarItemsForMode(RLPAppMode mode) {
     view.layer.backgroundColor = t.bg2.CGColor;
     self.view = view;
 
-    // ---- 品牌区（让开红绿灯） ----
-    NSView *brand = [[NSView alloc] initWithFrame:NSZeroRect];
-    brand.translatesAutoresizingMaskIntoConstraints = NO;
-    [view addSubview:brand];
-
-    NSTextField *title = [NSTextField labelWithString:@"RLPlayer"];
-    title.font = [NSFont systemFontOfSize:16 weight:NSFontWeightSemibold];
-    title.textColor = t.text;
-    title.translatesAutoresizingMaskIntoConstraints = NO;
-    [brand addSubview:title];
-
-    NSTextField *sub = [NSTextField labelWithString:@"AppKit"];
-    sub.font = [NSFont systemFontOfSize:11];
-    sub.textColor = t.mut;
-    sub.translatesAutoresizingMaskIntoConstraints = NO;
-    [brand addSubview:sub];
-
+    // ---- 顶部只留导航（让开红绿灯），品牌区移到**最底部** ----
+    // web 版 .side-brand 就在侧栏最底（Apple Music 左下角个人徽标的位置），
+    // 视觉重心与 web 一致；顶部不再放品牌，避免与红绿灯挤在一起。
     NSView *hair1 = [[NSView alloc] initWithFrame:NSZeroRect];
     hair1.wantsLayer = YES;
     hair1.layer.backgroundColor = t.line.CGColor;
     hair1.translatesAutoresizingMaskIntoConstraints = NO;
     [view addSubview:hair1];
+
+    NSView *brand = [[NSView alloc] initWithFrame:NSZeroRect];
+    brand.translatesAutoresizingMaskIntoConstraints = NO;
+    brand.identifier = @"side.brand";
+    [view addSubview:brand];
+    NSView *hairB = [[NSView alloc] initWithFrame:NSZeroRect];
+    hairB.wantsLayer = YES;
+    hairB.layer.backgroundColor = t.line.CGColor;
+    hairB.translatesAutoresizingMaskIntoConstraints = NO;
+    [brand addSubview:hairB];
+
+    NSImageView *logo = [[NSImageView alloc] initWithFrame:NSZeroRect];
+    logo.image = [NSImage imageWithSystemSymbolName:@"waveform" accessibilityDescription:@"RLPlayer"];
+    logo.contentTintColor = t.accent;
+    logo.wantsLayer = YES;
+    logo.layer.cornerRadius = 7;
+    logo.translatesAutoresizingMaskIntoConstraints = NO;
+    [brand addSubview:logo];
+
+    NSTextField *title = [NSTextField labelWithString:@"RLPlayer"];
+    title.font = [NSFont systemFontOfSize:13 weight:NSFontWeightSemibold];
+    title.textColor = t.text;
+    title.translatesAutoresizingMaskIntoConstraints = NO;
+    [brand addSubview:title];
+
+    NSTextField *ver = [NSTextField labelWithString:[NSString stringWithFormat:@"v%s", RLPLAYER_VERSION]];
+    ver.font = [NSFont systemFontOfSize:10];
+    ver.textColor = t.mut;
+    ver.wantsLayer = YES;
+    ver.layer.cornerRadius = 8;
+    ver.layer.backgroundColor = t.hov.CGColor;
+    ver.translatesAutoresizingMaskIntoConstraints = NO;
+    [brand addSubview:ver];
+
+    NSTextField *sub = [NSTextField labelWithString:@"HI-FI AUDIO ENGINE"];
+    sub.font = [NSFont systemFontOfSize:9.5 weight:NSFontWeightMedium];
+    sub.textColor = t.mut;
+    sub.translatesAutoresizingMaskIntoConstraints = NO;
+    [brand addSubview:sub];
 
     // ---- 导航表 ----
     NSScrollView *scroll = [[NSScrollView alloc] initWithFrame:NSZeroRect];
@@ -167,29 +211,44 @@ static NSArray<NSDictionary *> *RLPSidebarItemsForMode(RLPAppMode mode) {
     scroll.documentView = _tableView;
 
     [NSLayoutConstraint activateConstraints:@[
-        [brand.leadingAnchor constraintEqualToAnchor:view.leadingAnchor],
-        [brand.trailingAnchor constraintEqualToAnchor:view.trailingAnchor],
-        [brand.topAnchor constraintEqualToAnchor:view.topAnchor],
-        [brand.heightAnchor constraintEqualToConstant:52],
-        [title.leadingAnchor constraintEqualToAnchor:brand.leadingAnchor constant:80],
-        [title.centerYAnchor constraintEqualToAnchor:brand.centerYAnchor],
-        [sub.leadingAnchor constraintEqualToAnchor:title.trailingAnchor constant:8],
-        [sub.trailingAnchor constraintLessThanOrEqualToAnchor:brand.trailingAnchor constant:-12],
-        [sub.firstBaselineAnchor constraintEqualToAnchor:title.firstBaselineAnchor],
-
+        // 顶部 52pt 让开红绿灯；其下是导航
         [hair1.leadingAnchor constraintEqualToAnchor:view.leadingAnchor],
         [hair1.trailingAnchor constraintEqualToAnchor:view.trailingAnchor],
-        [hair1.topAnchor constraintEqualToAnchor:brand.bottomAnchor],
+        [hair1.topAnchor constraintEqualToAnchor:view.topAnchor constant:52],
         [hair1.heightAnchor constraintEqualToConstant:1],
 
         [scroll.leadingAnchor constraintEqualToAnchor:view.leadingAnchor],
         [scroll.trailingAnchor constraintEqualToAnchor:view.trailingAnchor],
-        [scroll.topAnchor constraintEqualToAnchor:hair1.bottomAnchor constant:6],
-        [scroll.bottomAnchor constraintEqualToAnchor:view.bottomAnchor],
+        [scroll.topAnchor constraintEqualToAnchor:hair1.bottomAnchor constant:2],
+        [scroll.bottomAnchor constraintEqualToAnchor:brand.topAnchor],
+
+        // 品牌区贴底（web .side-brand）
+        [brand.leadingAnchor constraintEqualToAnchor:view.leadingAnchor],
+        [brand.trailingAnchor constraintEqualToAnchor:view.trailingAnchor],
+        [brand.bottomAnchor constraintEqualToAnchor:view.bottomAnchor],
+        [brand.heightAnchor constraintEqualToConstant:56],
+        [hairB.leadingAnchor constraintEqualToAnchor:brand.leadingAnchor],
+        [hairB.trailingAnchor constraintEqualToAnchor:brand.trailingAnchor],
+        [hairB.topAnchor constraintEqualToAnchor:brand.topAnchor],
+        [hairB.heightAnchor constraintEqualToConstant:1],
+        [logo.leadingAnchor constraintEqualToAnchor:brand.leadingAnchor constant:14],
+        [logo.centerYAnchor constraintEqualToAnchor:brand.centerYAnchor constant:2],
+        [logo.widthAnchor constraintEqualToConstant:28],
+        [logo.heightAnchor constraintEqualToConstant:28],
+        [title.leadingAnchor constraintEqualToAnchor:logo.trailingAnchor constant:9],
+        [title.topAnchor constraintEqualToAnchor:brand.topAnchor constant:12],
+        [ver.leadingAnchor constraintEqualToAnchor:title.trailingAnchor constant:6],
+        [ver.centerYAnchor constraintEqualToAnchor:title.centerYAnchor],
+        [sub.leadingAnchor constraintEqualToAnchor:title.leadingAnchor],
+        [sub.topAnchor constraintEqualToAnchor:title.bottomAnchor constant:1],
     ]];
 }
 
 - (NSInteger)numberOfRowsInTableView:(NSTableView *)tableView { return (NSInteger)_menuItems.count; }
+
+- (CGFloat)tableView:(NSTableView *)tableView heightOfRow:(NSInteger)row {
+    return RLPRowIsSection(_menuItems, row) ? 26 : 34;
+}
 
 - (NSView *)tableView:(NSTableView *)tableView viewForTableColumn:(NSTableColumn *)tableColumn row:(NSInteger)row {
     RLPTheme *t = [RLPTheme current];
@@ -239,6 +298,26 @@ static NSArray<NSDictionary *> *RLPSidebarItemsForMode(RLPAppMode mode) {
     }
 
     NSDictionary *item = _menuItems[row];
+    // 分组标题行：11px 灰字、无图标无胶囊（web .sec 同口径）。
+    if (RLPRowIsSection(_menuItems, row)) {
+        NSTextField *sec = [tableView makeViewWithIdentifier:@"Sec" owner:self];
+        if (!sec) {
+            sec = [NSTextField labelWithString:@""];
+            sec.identifier = @"Sec";
+            sec.font = [NSFont systemFontOfSize:11 weight:NSFontWeightSemibold];
+            sec.translatesAutoresizingMaskIntoConstraints = NO;
+        }
+        sec.stringValue = RLPTr(item[@"sec"]);
+        sec.textColor = [RLPTheme current].mut;
+        // 用一个容器包住以便左缩进
+        NSTableCellView *wrap = [[NSTableCellView alloc] initWithFrame:NSMakeRect(0, 0, 232, 26)];
+        [wrap addSubview:sec];
+        [NSLayoutConstraint activateConstraints:@[
+            [sec.leadingAnchor constraintEqualToAnchor:wrap.leadingAnchor constant:20],
+            [sec.centerYAnchor constraintEqualToAnchor:wrap.centerYAnchor constant:3],
+        ]];
+        return wrap;
+    }
     NSImageView *iconView = nil;
     NSTextField *label = nil;
     for (NSView *sub in cell.subviews) {
@@ -268,7 +347,7 @@ static NSArray<NSDictionary *> *RLPSidebarItemsForMode(RLPAppMode mode) {
 - (void)onRowClicked:(id)sender {
     (void)sender;
     const NSInteger row = _tableView.clickedRow;
-    if (row >= 0) [self selectRow:row];
+    if (row >= 0 && !RLPRowIsSection(_menuItems, row)) [self selectRow:row];
 }
 
 - (void)tableViewSelectionDidChange:(NSNotification *)notification {
@@ -282,8 +361,10 @@ static NSArray<NSDictionary *> *RLPSidebarItemsForMode(RLPAppMode mode) {
 // 于是侧栏永远没有高亮。导航选中是业务状态，本来就不该托付给控件的焦点相关行为。
 - (void)selectRow:(NSInteger)row {
     if (row < 0 || row >= (NSInteger)_menuItems.count) return;
+    if (RLPRowIsSection(_menuItems, row)) return;   // 标题行不可选中
     if (!_tableView) { _pendingRow = row; return; }
-    if (_selectedRow == row) return;
+    // 注意：即使行号没变也要发 onSelect —— 详情页压栈后 currentContent 已不是
+    // 侧栏选中行对应的页，点同一行必须能路由回去（否则顶栏标题会被清成空）。
     _selectedRow = row;
     _lastSelectedRow = row;
     [_tableView reloadData];

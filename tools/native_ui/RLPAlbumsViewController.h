@@ -16,6 +16,9 @@ NS_ASSUME_NONNULL_BEGIN
 /// 已有专辑数（selftest/自检用）。
 @property (nonatomic, readonly) NSInteger albumCount;
 
+/// 页标题（顶栏承载；与 RLPPageViewController.pageTitle 同语义）。
+@property (nonatomic, copy, readonly) NSString *pageTitle;
+
 @end
 
 NS_ASSUME_NONNULL_END

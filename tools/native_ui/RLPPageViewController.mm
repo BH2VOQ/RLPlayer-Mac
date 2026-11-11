@@ -40,6 +40,9 @@
 
     _title = RLPLabel(_pageTitle, [NSFont systemFontOfSize:17 weight:NSFontWeightSemibold], t.text);
     _title.translatesAutoresizingMaskIntoConstraints = NO;
+    // 标题统一由主窗口顶栏承载（web #pth 同口径）；页内不再画大标题，
+    // 但保留 18+17+12 的顶部留白，内容起始位置与 web 一致。
+    _title.hidden = YES;
     [_root addSubview:_title];
 
     _subtitle = RLPLabel(@"", t.small, t.mut);

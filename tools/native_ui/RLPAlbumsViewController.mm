@@ -101,7 +101,7 @@ static const NSUserInterfaceItemIdentifier kAlbumItemID = @"RLPAlbumItem";
         [_coverView.leadingAnchor constraintEqualToAnchor:v.leadingAnchor],
         [_coverView.trailingAnchor constraintEqualToAnchor:v.trailingAnchor],
         [_coverView.topAnchor constraintEqualToAnchor:v.topAnchor],
-        [_coverView.heightAnchor constraintEqualToConstant:168],
+        [_coverView.heightAnchor constraintEqualToConstant:180],
         [_placeholderLabel.centerXAnchor constraintEqualToAnchor:_coverView.centerXAnchor],
         [_placeholderLabel.centerYAnchor constraintEqualToAnchor:_coverView.centerYAnchor],
         [_nameLabel.leadingAnchor constraintEqualToAnchor:v.leadingAnchor constant:2],
@@ -117,7 +117,17 @@ static const NSUserInterfaceItemIdentifier kAlbumItemID = @"RLPAlbumItem";
     RLPTheme *t = [RLPTheme current];
     self.albumKey = album.key;
     self.nameLabel.stringValue = album.name.length ? album.name : @"未知专辑";
-    self.artistLabel.stringValue = album.artist.length ? album.artist : @"未知艺术家";
+    // 副标题与 web 一致：艺术家 · 年份 · 采样率/位深（缺的段不拼空串）
+    NSMutableArray<NSString *> *sub = [NSMutableArray array];
+    if (album.artist.length) [sub addObject:album.artist];
+    if (album.year > 0) [sub addObject:[NSString stringWithFormat:@"%ld", (long)album.year]];
+    if (album.sampleRate > 0) {
+        NSString *sr = (album.sampleRate % 1000 == 0)
+            ? [NSString stringWithFormat:@"%ldk", (long)(album.sampleRate / 1000)]
+            : [NSString stringWithFormat:@"%.1fk", album.sampleRate / 1000.0];
+        [sub addObject:(album.bits > 0 ? [NSString stringWithFormat:@"%@/%ld", sr, (long)album.bits] : sr)];
+    }
+    self.artistLabel.stringValue = sub.count ? [sub componentsJoinedByString:@" · "] : @"未知艺术家";
     self.coverView.image = cover;
     self.coverView.layer.backgroundColor = t.bg2.CGColor;
     self.placeholderLabel.hidden = (cover != nil);
@@ -173,6 +183,7 @@ static const NSUserInterfaceItemIdentifier kAlbumItemID = @"RLPAlbumItem";
 - (instancetype)init {
     self = [super initWithNibName:nil bundle:nil];
     if (self) {
+        _pageTitle = RLPTr(@"专辑");
         _albums = [NSMutableArray array];
         _coverCache = [[NSCache alloc] init];
         _coverCache.countLimit = 400;
@@ -193,6 +204,8 @@ static const NSUserInterfaceItemIdentifier kAlbumItemID = @"RLPAlbumItem";
     self.titleLabel.font = [NSFont systemFontOfSize:17 weight:NSFontWeightSemibold];
     self.titleLabel.textColor = t.text;
     self.titleLabel.translatesAutoresizingMaskIntoConstraints = NO;
+    // 标题与计数统一由主窗口顶栏承载（web #pth/#cnt 同口径），页内不再画。
+    self.titleLabel.hidden = YES;
     [root addSubview:self.titleLabel];
     NSTextField *title = self.titleLabel;
 
@@ -201,13 +214,14 @@ static const NSUserInterfaceItemIdentifier kAlbumItemID = @"RLPAlbumItem";
     self.countLabel.textColor = t.mut;
     self.countLabel.alignment = NSTextAlignmentRight;
     self.countLabel.translatesAutoresizingMaskIntoConstraints = NO;
+    self.countLabel.hidden = YES;   // 计数走顶栏 RLPPageCountNotification
     [root addSubview:self.countLabel];
 
     NSCollectionViewFlowLayout *layout = [[NSCollectionViewFlowLayout alloc] init];
-    layout.itemSize = NSMakeSize(168, 214);
+    layout.itemSize = NSMakeSize(180, 230);
     layout.sectionInset = NSEdgeInsetsMake(20, 24, 24, 24);
-    layout.minimumInteritemSpacing = 18;
-    layout.minimumLineSpacing = 22;
+    layout.minimumInteritemSpacing = 16;
+    layout.minimumLineSpacing = 20;
 
     self.collection = [[NSCollectionView alloc] initWithFrame:NSZeroRect];
     self.collection.collectionViewLayout = layout;
@@ -277,6 +291,9 @@ static const NSUserInterfaceItemIdentifier kAlbumItemID = @"RLPAlbumItem";
         [self_.albums setArray:list];
         [self_.collection reloadData];
         self_.countLabel.stringValue = [NSString stringWithFormat:@"%ld 张专辑", (long)list.count];
+        // 顶栏计数（web #cnt 同口径）：页加载完上报，主窗口显示在页标题旁。
+        [[NSNotificationCenter defaultCenter] postNotificationName:@"RLPPageCountNotification"
+            object:[NSString stringWithFormat:@"%ld 张专辑", (long)list.count]];
     }];
 }
 

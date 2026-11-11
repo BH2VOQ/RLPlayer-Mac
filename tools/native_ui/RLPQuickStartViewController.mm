@@ -31,6 +31,16 @@
 @property (nonatomic, strong) NSTextField *playValue;
 @property (nonatomic, strong) NSTextField *styleValue;
 @property (nonatomic, strong) NSTextField *styleSub;
+// 卡片小标题与分区标题：必须在 applyTheme 里重刷颜色。它们是 RLPLabel 建出来的一次性标签，
+// 漏刷就停在旧主题的灰上 —— 浅底配深灰几乎看不见字（本轮实测到的真故障）。
+@property (nonatomic, strong) NSTextField *deviceCaption;
+@property (nonatomic, strong) NSTextField *outputCaption;
+@property (nonatomic, strong) NSTextField *playCaption;
+@property (nonatomic, strong) NSTextField *styleCaption;
+@property (nonatomic, strong) NSTextField *queueCaption;
+@property (nonatomic, strong) NSTextField *albumCaption;
+// 动态建出来的标签（队列行 / 专辑名 / 空态）登记在这里，主题切换时一并重刷。
+@property (nonatomic, strong) NSMutableArray<NSTextField *> *dynamicLabels;
 @property (nonatomic, strong) NSTextField *presetNotes;
 // 正在播放 / 队列 / 专辑
 @property (nonatomic, strong) NSImageView *npCover;
@@ -120,7 +130,8 @@
 
     // ---- 卡 1：当前设备（就地下拉切换）----
     self.deviceCard = [self cardWithIdentifier:@"room.device"];
-    NSTextField *d1 = RLPLabel(RLPTr(@"当前设备"), t.small, t.mut);
+    self.deviceCaption = RLPLabel(RLPTr(@"当前设备"), t.small, t.mut);
+    NSTextField *d1 = self.deviceCaption;
     d1.translatesAutoresizingMaskIntoConstraints = NO;
     self.devicePopup = [[NSPopUpButton alloc] initWithFrame:NSZeroRect pullsDown:NO];
     self.devicePopup.translatesAutoresizingMaskIntoConstraints = NO;
@@ -136,7 +147,8 @@
 
     // ---- 卡 2：输出（弹层）----
     self.outputCard = [self cardWithIdentifier:@"room.output"];
-    NSTextField *d2 = RLPLabel(RLPTr(@"输出"), t.small, t.mut);
+    self.outputCaption = RLPLabel(RLPTr(@"输出"), t.small, t.mut);
+    NSTextField *d2 = self.outputCaption;
     d2.translatesAutoresizingMaskIntoConstraints = NO;
     self.outputValue = RLPLabel(RLPTr(@"读取中…"), t.body, t.text);
     self.outputValue.translatesAutoresizingMaskIntoConstraints = NO;
@@ -150,7 +162,8 @@
 
     // ---- 卡 3：播放（三档，弹层）----
     self.playCard = [self cardWithIdentifier:@"room.play"];
-    NSTextField *d3 = RLPLabel(RLPTr(@"播放"), t.small, t.mut);
+    self.playCaption = RLPLabel(RLPTr(@"播放"), t.small, t.mut);
+    NSTextField *d3 = self.playCaption;
     d3.translatesAutoresizingMaskIntoConstraints = NO;
     self.playValue = RLPLabel(RLPTr(@"原音直通"), t.body, t.text);
     self.playValue.translatesAutoresizingMaskIntoConstraints = NO;
@@ -164,7 +177,8 @@
 
     // ---- 卡 4：听音风格（新增，弹层）----
     self.styleCard = [self cardWithIdentifier:@"room.style"];
-    NSTextField *d4 = RLPLabel(RLPTr(@"听音风格"), t.small, t.mut);
+    self.styleCaption = RLPLabel(RLPTr(@"听音风格"), t.small, t.mut);
+    NSTextField *d4 = self.styleCaption;
     d4.translatesAutoresizingMaskIntoConstraints = NO;
     self.styleValue = RLPLabel(RLPTr(@"均衡自然"), t.body, t.text);
     self.styleValue.translatesAutoresizingMaskIntoConstraints = NO;
@@ -283,6 +297,7 @@
 
     NSView *qcard = [self cardWithIdentifier:@"room.queue"];
     NSTextField *qt = RLPLabel(RLPTr(@"播放队列"), [NSFont systemFontOfSize:14 weight:NSFontWeightSemibold], t.text);
+    self.queueCaption = qt;
     qt.translatesAutoresizingMaskIntoConstraints = NO;
     NSButton *qAll = [NSButton buttonWithTitle:RLPTr(@"查看全部") target:self action:@selector(onOpenQueue:)];
     qAll.bezelStyle = NSBezelStyleRounded;
@@ -344,6 +359,7 @@
     NSView *head = [[NSView alloc] initWithFrame:NSZeroRect];
     head.translatesAutoresizingMaskIntoConstraints = NO;
     NSTextField *at = RLPLabel(RLPTr(@"专辑"), [NSFont systemFontOfSize:14 weight:NSFontWeightSemibold], t.text);
+    self.albumCaption = at;
     at.translatesAutoresizingMaskIntoConstraints = NO;
     NSButton *openLib = [NSButton buttonWithTitle:RLPTr(@"打开音乐库") target:self action:@selector(onOpenAlbums:)];
     openLib.bezelStyle = NSBezelStyleRounded;
@@ -883,7 +899,7 @@
         NSArray *metas = [json[@"metas"] isKindOfClass:[NSArray class]] ? json[@"metas"] : @[];
         for (NSView *v in [self_.queueList.arrangedSubviews copy]) [self_.queueList removeArrangedSubview:v], [v removeFromSuperview];
         if (!items.count) {
-            NSTextField *e = RLPLabel(RLPTr(@"队列是空的"), t.small, t.mut);
+            NSTextField *e = [self_ trackedLabel:RLPTr(@"队列是空的") font:t.small role:1];
             [self_.queueList addArrangedSubview:e];
             return;
         }
@@ -903,7 +919,7 @@
                     name = p.lastPathComponent.stringByDeletingPathExtension;
                 }
             }
-            NSTextField *l = RLPLabel([NSString stringWithFormat:@"%ld  %@", (long)(n + 1), name ?: @""], t.small, t.text);
+            NSTextField *l = [self_ trackedLabel:[NSString stringWithFormat:@"%ld  %@", (long)(n + 1), name ?: @""] font:t.small role:0];
             l.translatesAutoresizingMaskIntoConstraints = NO;
             [self_.queueList addArrangedSubview:l];
             [[l.widthAnchor constraintLessThanOrEqualToConstant:270] setActive:YES];
@@ -939,7 +955,7 @@
             iv.layer.backgroundColor = t.bg3.CGColor;
             iv.translatesAutoresizingMaskIntoConstraints = NO;
             iv.identifier = [NSString stringWithFormat:@"room.albumcover.%ld", (long)n];
-            NSTextField *nm = RLPLabel(name ?: RLPTr(@"未知专辑"), t.small, t.text);
+            NSTextField *nm = [self_ trackedLabel:(name ?: RLPTr(@"未知专辑")) font:t.small role:0];
             nm.translatesAutoresizingMaskIntoConstraints = NO;
             nm.lineBreakMode = NSLineBreakByTruncatingTail;
             NSButton *hit = [NSButton buttonWithTitle:@"" target:self_ action:@selector(onAlbumClicked:)];
@@ -971,7 +987,7 @@
             ++n;
         }
         if (!n) {
-            NSTextField *e = RLPLabel(RLPTr(@"还没有专辑 · 先添加音乐目录"), t.small, t.mut);
+            NSTextField *e = [self_ trackedLabel:RLPTr(@"还没有专辑 · 先添加音乐目录") font:t.small role:1];
             [self_.albumRow addArrangedSubview:e];
         }
     }];
@@ -980,6 +996,18 @@
 - (void)onAlbumClicked:(NSButton *)sender { RLPRequestOpenAlbum(sender.identifier); }
 
 #pragma mark - 主题
+
+/// 运行时建出来的标签登记进来：主题切换时静态清单够不着它们。
+/// role: 0=正文 1=次要文字 2=警示
+- (NSTextField *)trackedLabel:(NSString *)text font:(NSFont *)font role:(NSInteger)role {
+    RLPTheme *t = [RLPTheme current];
+    NSColor *c = (role == 1) ? t.mut : (role == 2 ? t.warn : t.text);
+    NSTextField *l = RLPLabel(text, font, c);
+    l.tag = role;
+    if (!self.dynamicLabels) self.dynamicLabels = [NSMutableArray array];
+    [self.dynamicLabels addObject:l];
+    return l;
+}
 
 - (void)applyTheme {
     [super applyTheme];
@@ -1006,6 +1034,16 @@
     self.outputValue.textColor = t.text;
     self.playValue.textColor = t.text;
     self.styleValue.textColor = t.text;
+    // 卡片小标题 / 分区标题（之前漏刷：浅色主题下它们仍是深色主题的灰，几乎看不见）
+    for (NSTextField *l in @[ self.deviceCaption, self.outputCaption, self.playCaption, self.styleCaption ])
+        l.textColor = t.mut;
+    self.queueCaption.textColor = t.text;
+    self.albumCaption.textColor = t.text;
+    // 动态行（队列预览 / 专辑名 / 空态）：运行时建出来的，静态清单里没有它们。
+    // 角色记在 NSView.tag 上（0=正文 1=次要 2=警示），不另存第二套状态。
+    for (NSTextField *l in self.dynamicLabels) {
+        l.textColor = (l.tag == 1) ? t.mut : (l.tag == 2 ? t.warn : t.text);
+    }
 }
 
 @end

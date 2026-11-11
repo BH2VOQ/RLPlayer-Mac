@@ -13,6 +13,7 @@
 #import "RLPListeningRoom.h"
 #import "RLPQuickStartViewController.h"
 #import "RLPSupport.h"
+#import "RLPTheme.h"
 
 #include <cstdio>
 
@@ -115,6 +116,72 @@ int main() {
         }
         CK(bad.count == 0, "A3 聆听室没有跳设置页的入口（用户硬要求）",
            [bad componentsJoinedByString:@", "]);
+
+        // ---------- A6 主题切换：自建颜色必须重刷（历史真故障）----------
+        // 为什么必须单独判：切到浅色后，卡片里那些 applyTheme 漏掉的标签会继续停在深色主题的
+        // 颜色上 —— 浅底浅字/深底深字，肉眼几乎看不见字，而"能构造出来"之类的判据全绿。
+        // 判据口径：把上一主题的调色板与当前主题的调色板都算出来；某个标签的颜色若只属于
+        // **上一主题**而不属于当前主题，就说明它没被重刷。
+        {
+            [RLPTheme setThemeName:@"dark"];
+            RLPTheme *darkT = [RLPTheme current];
+            RLPQuickStartViewController *tv = [[RLPQuickStartViewController alloc] init];
+            tv.view.frame = NSMakeRect(0, 0, 1100, 760);
+            [tv.view layoutSubtreeIfNeeded];
+
+            NSMutableArray<NSView *> *tvAll = [NSMutableArray array];
+            CollectViews(tv.view, tvAll);
+            // 快照：切主题前每个文本标签的颜色（只取页内**常驻**标签，不含空态占位）
+            NSMutableArray<NSArray *> *labels = [NSMutableArray array];
+            for (NSView *v in tvAll) {
+                if (![v isKindOfClass:[NSTextField class]]) continue;
+                NSTextField *tf = (NSTextField *)v;
+                if (!tf.stringValue.length || !tf.textColor) continue;
+                [labels addObject:@[ tf, tf.stringValue, tf.textColor ]];
+            }
+            CK(labels.count > 0, "A6 页内确实有文字标签（否则本判据空转）",
+               [NSString stringWithFormat:@"labels=%lu", (unsigned long)labels.count]);
+
+            [RLPTheme setThemeName:@"light"];
+            RLPTheme *lightT = [RLPTheme current];
+            [tv applyTheme];
+            [tv.view layoutSubtreeIfNeeded];
+
+            // 上一主题的"专属色"：只出现在 dark 调色板、不出现在 light 调色板的颜色。
+            NSArray<NSColor *> *darkPalette = @[ darkT.text, darkT.text2, darkT.mut ];
+            NSArray<NSColor *> *lightPalette = @[ lightT.text, lightT.text2, lightT.mut,
+                                                  lightT.accentText, lightT.accent ];
+            NSMutableArray<NSString *> *stuck = [NSMutableArray array];
+            for (NSArray *row in labels) {
+                NSTextField *tf = row[0];
+                NSColor *before = row[2];
+                NSColor *now = tf.textColor;
+                BOOL onlyInDark = NO;
+                for (NSColor *d in darkPalette) if ([before isEqual:d]) onlyInDark = YES;
+                for (NSColor *l in lightPalette) if ([before isEqual:l]) onlyInDark = NO;
+                BOOL inLight = NO;
+                for (NSColor *l in lightPalette) if ([now isEqual:l]) inLight = YES;
+                if (onlyInDark && !inLight)
+                    [stuck addObject:[NSString stringWithFormat:@"\"%@\"", row[1]]];
+            }
+            CK(stuck.count == 0,
+               "A6 切到浅色后没有标签停留在深色主题的颜色上",
+               [stuck componentsJoinedByString:@", "]);
+
+            // 卡片的 layer 底色也必须跟着走（否则浅色主题下是一块块深色板）
+            NSMutableArray<NSString *> *stuckLayers = [NSMutableArray array];
+            for (NSView *v in tvAll) {
+                if (!v.wantsLayer || !v.layer.backgroundColor || !v.identifier.length) continue;
+                NSColor *bg = [NSColor colorWithCGColor:v.layer.backgroundColor];
+                if ([bg isEqual:darkT.bg2] && ![bg isEqual:lightT.bg2])
+                    [stuckLayers addObject:v.identifier];
+            }
+            CK(stuckLayers.count == 0,
+               "A6 切到浅色后卡片的 layer 底色跟着重刷",
+               [stuckLayers componentsJoinedByString:@", "]);
+
+            [RLPTheme setThemeName:@"dark"];
+        }
 
         std::printf("\n%s（%d 项失败）\n", gFail == 0 ? "listening_room 全部通过" : "listening_room 有失败", gFail);
         return gFail == 0 ? 0 : 1;

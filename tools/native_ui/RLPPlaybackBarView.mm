@@ -44,6 +44,7 @@
 @property (nonatomic, strong) NSTextField *timeLabel;
 @property (nonatomic, strong) RLPCommitSlider *progress;
 @property (nonatomic, strong) RLPCommitSlider *volume;
+@property (nonatomic, strong) NSImageView *volIconView;
 @property (nonatomic, strong) RLPPlaybackStatus *lastStatus;
 /// 播放模式：**唯一真相源**是 /api/playmode 的 mode（0=顺序 1=列表循环 2=单曲循环 3=随机）。
 /// /api/repeat 与 /api/shuffle 在核心侧只是它的派生写入口，没有独立存储 ——
@@ -77,11 +78,7 @@
     self.wantsLayer = YES;
     self.layer.backgroundColor = t.barBg.CGColor;
 
-    NSView *hair = [[NSView alloc] initWithFrame:NSZeroRect];
-    hair.wantsLayer = YES;
-    hair.layer.backgroundColor = t.line.CGColor;
-    hair.translatesAutoresizingMaskIntoConstraints = NO;
-    [self addSubview:hair];
+    // 悬浮卡片形态：边框/圆角/阴影由主窗口设置，这里不再画贴边细线。
 
     self.prevBtn = [self symbolButton:@"backward.fill" tip:@"上一首"];
     self.playBtn = [self symbolButton:@"play.fill" tip:@"播放 / 暂停"];
@@ -101,6 +98,11 @@
     for (NSButton *b in @[self.prevBtn, self.playBtn, self.nextBtn, self.stopBtn, self.shuffleBtn, self.repeatBtn])
         [self addSubview:b];
     self.playBtn.imageScaling = NSImageScaleProportionallyDown;
+    // 红色实心圆播放键（web 底栏的视觉锚点）
+    self.playBtn.wantsLayer = YES;
+    self.playBtn.layer.cornerRadius = 20;
+    self.playBtn.layer.backgroundColor = t.accent.CGColor;
+    self.playBtn.contentTintColor = NSColor.whiteColor;
 
     self.titleLabel = [self labelWithFont:[NSFont systemFontOfSize:13 weight:NSFontWeightSemibold]
                                     color:t.text];
@@ -127,6 +129,7 @@
     volView.image = volIcon;
     volView.contentTintColor = t.mut;
     volView.translatesAutoresizingMaskIntoConstraints = NO;
+    self.volIconView = volView;
 
     self.volume = [[RLPCommitSlider alloc] initWithFrame:NSZeroRect];
     self.volume.minValue = -60.0;
@@ -143,70 +146,36 @@
         [self addSubview:v];
     }
 
-    [NSLayoutConstraint activateConstraints:@[
-        // 顶部 1px 分隔线
-        [hair.leadingAnchor constraintEqualToAnchor:self.leadingAnchor],
-        [hair.trailingAnchor constraintEqualToAnchor:self.trailingAnchor],
-        [hair.topAnchor constraintEqualToAnchor:self.topAnchor],
-        [hair.heightAnchor constraintEqualToConstant:1],
-
-        // 左：上一首 / 播放 / 下一首
-        [self.prevBtn.leadingAnchor constraintEqualToAnchor:self.leadingAnchor constant:16],
-        [self.prevBtn.centerYAnchor constraintEqualToAnchor:self.centerYAnchor],
-        [self.prevBtn.widthAnchor constraintEqualToConstant:30],
-        [self.prevBtn.heightAnchor constraintEqualToConstant:30],
-        [self.playBtn.leadingAnchor constraintEqualToAnchor:self.prevBtn.trailingAnchor constant:4],
-        [self.playBtn.centerYAnchor constraintEqualToAnchor:self.centerYAnchor],
-        [self.playBtn.widthAnchor constraintEqualToConstant:34],
-        [self.playBtn.heightAnchor constraintEqualToConstant:34],
-        [self.nextBtn.leadingAnchor constraintEqualToAnchor:self.playBtn.trailingAnchor constant:4],
-        [self.nextBtn.centerYAnchor constraintEqualToAnchor:self.centerYAnchor],
-        [self.nextBtn.widthAnchor constraintEqualToConstant:30],
-        [self.nextBtn.heightAnchor constraintEqualToConstant:30],
-        [self.stopBtn.leadingAnchor constraintEqualToAnchor:self.nextBtn.trailingAnchor constant:8],
-        [self.stopBtn.centerYAnchor constraintEqualToAnchor:self.centerYAnchor],
-        [self.stopBtn.widthAnchor constraintEqualToConstant:26],
-        [self.stopBtn.heightAnchor constraintEqualToConstant:26],
-        [self.shuffleBtn.leadingAnchor constraintEqualToAnchor:self.stopBtn.trailingAnchor constant:10],
-        [self.shuffleBtn.centerYAnchor constraintEqualToAnchor:self.centerYAnchor],
-        [self.shuffleBtn.widthAnchor constraintEqualToConstant:26],
-        [self.shuffleBtn.heightAnchor constraintEqualToConstant:26],
-        [self.repeatBtn.leadingAnchor constraintEqualToAnchor:self.shuffleBtn.trailingAnchor constant:2],
-        [self.repeatBtn.centerYAnchor constraintEqualToAnchor:self.centerYAnchor],
-        [self.repeatBtn.widthAnchor constraintEqualToConstant:26],
-        [self.repeatBtn.heightAnchor constraintEqualToConstant:26],
-
-        // 右：音量图标 + 音量条
-        [self.volume.trailingAnchor constraintEqualToAnchor:self.trailingAnchor constant:-16],
-        [self.volume.centerYAnchor constraintEqualToAnchor:self.centerYAnchor],
-        [self.volume.widthAnchor constraintEqualToConstant:96],
-        [volView.trailingAnchor constraintEqualToAnchor:self.volume.leadingAnchor constant:-8],
-        [volView.centerYAnchor constraintEqualToAnchor:self.centerYAnchor],
-        [volView.widthAnchor constraintEqualToConstant:16],
-        [volView.heightAnchor constraintEqualToConstant:16],
-
-        // 中：标题 / 副标题 / 进度
-        [self.titleLabel.leadingAnchor constraintEqualToAnchor:self.repeatBtn.trailingAnchor constant:18],
-        [self.titleLabel.topAnchor constraintEqualToAnchor:self.topAnchor constant:14],
-        [self.subLabel.leadingAnchor constraintEqualToAnchor:self.titleLabel.leadingAnchor],
-        [self.subLabel.topAnchor constraintEqualToAnchor:self.titleLabel.bottomAnchor constant:2],
-        [self.subLabel.trailingAnchor constraintLessThanOrEqualToAnchor:self.timeLabel.leadingAnchor constant:-12],
-
-        [self.timeLabel.trailingAnchor constraintEqualToAnchor:volView.leadingAnchor constant:-14],
-        [self.timeLabel.centerYAnchor constraintEqualToAnchor:self.titleLabel.centerYAnchor],
-        [self.timeLabel.widthAnchor constraintEqualToConstant:88],
-
-        [self.progress.leadingAnchor constraintEqualToAnchor:self.titleLabel.leadingAnchor],
-        [self.progress.trailingAnchor constraintEqualToAnchor:self.timeLabel.trailingAnchor],
-        [self.progress.topAnchor constraintEqualToAnchor:self.subLabel.bottomAnchor constant:4],
-        [self.progress.heightAnchor constraintEqualToConstant:16],
-    ]];
+    // 内部不用 Auto Layout：固定 66px 高的悬浮条，手动布局最稳
+    // （约束方案在本机出现过控制键被挤出卡片的问题，见 layoutSubviews）。
 }
 
-/// 首次显示时按默认模式（顺序）着色，避免两个按钮都是灰的看不出来。
-- (void)viewDidMoveToWindow {
-    [super viewDidMoveToWindow];
-    if (self.window) [self refreshModeButtons];
+/// 手动布局（66px 悬浮条）：左=曲目信息，中=控制键+进度，右=时间+音量。
+- (void)layout {
+    [super layout];
+    const CGFloat W = self.bounds.size.width, H = self.bounds.size.height;
+    if (W < 100 || H < 40) return;
+    const CGFloat cy = H / 2.0;
+    void (^place)(NSView *, CGFloat, CGFloat, CGFloat, CGFloat) =
+        ^(NSView *v, CGFloat x, CGFloat y, CGFloat w, CGFloat h) { v.frame = NSMakeRect(x, y, w, h); };
+    // 左：标题/副标题
+    place(self.titleLabel, 18, cy - 16, 210, 18);
+    place(self.subLabel, 18, cy + 2, 210, 14);
+    // 中：控制键一排（垂直居中）
+    CGFloat x = 250;
+    place(self.shuffleBtn, x, cy - 12, 24, 24); x += 24 + 8;
+    place(self.prevBtn,   x, cy - 14, 28, 28); x += 28 + 6;
+    place(self.playBtn,   x, cy - 20, 40, 40); x += 40 + 6;
+    place(self.nextBtn,   x, cy - 14, 28, 28); x += 28 + 8;
+    place(self.stopBtn,   x, cy - 12, 24, 24); x += 24 + 8;
+    place(self.repeatBtn, x, cy - 12, 24, 24); x += 24;
+    // 右：时间 + 音量图标 + 音量条
+    const CGFloat rightZone = 16 + 96 + 8 + 16 + 12 + 88;
+    place(self.volume, W - 16 - 96, cy - 8, 96, 16);
+    place(self.volIconView, W - 16 - 96 - 8 - 16, cy - 8, 16, 16);
+    place(self.timeLabel, W - rightZone, cy - 8, 88, 16);
+    // 进度条：控制键下方，横跨中区
+    place(self.progress, 250, H - 16, MAX(120, W - 250 - rightZone - 12), 12);
 }
 
 - (NSButton *)symbolButton:(NSString *)symbol tip:(NSString *)tip {
@@ -338,7 +307,11 @@
     self.titleLabel.textColor = t.text;
     self.subLabel.textColor = t.mut;
     self.timeLabel.textColor = t.mut;
-    for (NSButton *b in @[self.prevBtn, self.playBtn, self.nextBtn]) b.contentTintColor = t.text;
+    for (NSButton *b in @[self.prevBtn, self.nextBtn, self.stopBtn, self.shuffleBtn, self.repeatBtn])
+        b.contentTintColor = t.text;
+    self.playBtn.contentTintColor = NSColor.whiteColor;
+    self.playBtn.layer.backgroundColor = t.accent.CGColor;
+    self.layer.borderColor = t.line.CGColor;
 }
 
 - (void)fetchStatus {

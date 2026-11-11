@@ -299,8 +299,8 @@ int RLPAppDelegateRunSelfTest(void) {
     {
         RLPSetAppMode(RLPAppModeListening);
         [wc.sidebar reloadForModeChange];
-        STCheck(wc.sidebar.rowCount == 10, "聆听模式侧栏 10 项（无设置入口）",
-                [NSString stringWithFormat:@"rows=%ld", (long)wc.sidebar.rowCount]);
+        STCheck([wc.sidebar navRowCount] == 10, "聆听模式侧栏 10 个导航项（无设置入口）",
+                [NSString stringWithFormat:@"nav=%ld", (long)[wc.sidebar navRowCount]]);
         STCheck([wc.sidebar selectKey:@"settings"] == NO, "聆听模式没有设置入口（用户硬要求）",
                 @"selectKey:settings 竟然成功了");
         STCheck([[wc.sidebar keyForRow:0] isEqualToString:@"room"], "聆听模式首页是聆听室",
@@ -309,8 +309,8 @@ int RLPAppDelegateRunSelfTest(void) {
 
         RLPSetAppMode(RLPAppModePro);
         [wc.sidebar reloadForModeChange];
-        STCheck(wc.sidebar.rowCount == 11, "专业模式侧栏 11 项（工作台 + 设置）",
-                [NSString stringWithFormat:@"rows=%ld", (long)wc.sidebar.rowCount]);
+        STCheck([wc.sidebar navRowCount] == 11, "专业模式侧栏 11 个导航项（工作台 + 设置）",
+                [NSString stringWithFormat:@"nav=%ld", (long)[wc.sidebar navRowCount]]);
         STCheck([wc.sidebar selectKey:@"settings"] == YES, "专业模式有设置入口", @"");
         STCheck([[wc.sidebar keyForRow:0] isEqualToString:@"workbench"], "专业模式首页是专业工作台",
                 [wc.sidebar keyForRow:0] ?: @"nil");

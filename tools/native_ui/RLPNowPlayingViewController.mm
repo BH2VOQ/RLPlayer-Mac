@@ -13,6 +13,36 @@
 #import "RLPKnowledgeView.h"
 #import "RLPAnalysisSummary.h"
 
+/// 分析一行：空标题的无边框按钮 intrinsic 宽为 0，离屏渲染时约束不重算，
+/// 所以每次 layout 后按文本 sizeToFit 重放宽度（保证任何渲染路径都画得出来）。
+@interface RLPAnlRowView : NSView
+@property (nonatomic, strong) NSArray<NSButton *> *chips;
+@property (nonatomic, strong) NSButton *expand;
+@end
+@implementation RLPAnlRowView
+- (void)layout {
+    [super layout];
+    const CGFloat W = self.bounds.size.width;
+    if (W < 50 || !self.chips.count) return;
+    const CGFloat expandW = 56, gap = 8;
+    const CGFloat chipW = MAX(60, (W - expandW - gap * 3) / 3.0);
+    CGFloat x = 0;
+    for (NSButton *b in self.chips) {
+        [b sizeToFit];
+        CGRect f = b.frame;
+        f.size.width = chipW; f.size.height = 22;
+        f.origin = CGPointMake(x, (self.bounds.size.height - 22) / 2.0);
+        b.frame = f;
+        x += chipW + gap;
+    }
+    [self.expand sizeToFit];
+    CGRect ef = self.expand.frame;
+    ef.size.width = expandW; ef.size.height = 24;
+    ef.origin = CGPointMake(W - expandW, (self.bounds.size.height - 24) / 2.0);
+    self.expand.frame = ef;
+}
+@end
+
 @interface RLPNowPlayingViewController ()
 @property (nonatomic, strong) NSTimer *poll;
 @property (nonatomic) BOOL polling;
@@ -46,6 +76,12 @@
 /// 封面请求序号：快速切歌时用它丢弃过期回调（慢请求回来不能盖掉新封面）。
 @property (nonatomic, assign) NSUInteger coverSeq;
 @property (nonatomic, strong) RLPKnowledgeView *knowledge;
+@property (nonatomic, strong) NSButton *compareBtn;
+@property (nonatomic, strong) NSPopover *comparePopover;
+@property (nonatomic, strong) NSStackView *compareList;
+@property (nonatomic, strong) NSTextView *compareOut;
+@property (nonatomic, strong) NSMutableArray<NSString *> *comparePaths;
+@property (nonatomic, strong) NSMutableArray<NSButton *> *compareChecks;
 @end
 
 @implementation RLPNowPlayingViewController
@@ -86,6 +122,12 @@
     fav.translatesAutoresizingMaskIntoConstraints = NO;
     [host addSubview:fav];
 
+    // 版本对比（web 单曲页「对比同目录版本」同款能力，POST /api/compare）
+    self.compareBtn = [NSButton buttonWithTitle:RLPTr(@"对比版本") target:self action:@selector(onCompare:)];
+    self.compareBtn.bezelStyle = NSBezelStyleRounded;
+    self.compareBtn.translatesAutoresizingMaskIntoConstraints = NO;
+    [host addSubview:self.compareBtn];
+
     // 音频分析改为一行（1.1.7.1）：动态 / 音质 / 假无损 / 展开，四个元素同一行。
     // 「自动分析」开关已挪到设置·高级；「重新分析」只在展开后出现，不摆在面上。
 
@@ -107,7 +149,7 @@
     [host addSubview:self.lyricsEmpty];
 
     // ---- 一行分析条 ----
-    self.anlRow = [[NSView alloc] initWithFrame:NSZeroRect];
+    self.anlRow = [[RLPAnlRowView alloc] initWithFrame:NSZeroRect];
     self.anlRow.translatesAutoresizingMaskIntoConstraints = NO;
     self.anlRow.identifier = @"anl.row";
     [host addSubview:self.anlRow];
@@ -122,6 +164,11 @@
     self.anlExpand.font = t.small;
     for (NSView *v in @[self.anlDyn, self.anlQual, self.anlFake, self.anlExpand])
         [self.anlRow addSubview:v];
+    ((RLPAnlRowView *)self.anlRow).chips = @[self.anlDyn, self.anlQual, self.anlFake];
+    ((RLPAnlRowView *)self.anlRow).expand = self.anlExpand;
+    for (NSView *v in @[self.anlDyn, self.anlQual, self.anlFake, self.anlExpand])
+        v.translatesAutoresizingMaskIntoConstraints = YES;   // 纯手动 frame（行视图 layout 摆放）
+    [self anlPaint];   // 空态也要有文案（未播放），否则空标题按钮不画
 
     // ---- 展开后的详情（默认收起：高度 0 + hidden）----
     self.anlDetail = [self makeTextView];
@@ -165,6 +212,8 @@
         [self.metaLabel.trailingAnchor constraintEqualToAnchor:self.titleLabel2.trailingAnchor],
         [fav.leadingAnchor constraintEqualToAnchor:self.titleLabel2.leadingAnchor],
         [fav.topAnchor constraintEqualToAnchor:self.metaLabel.bottomAnchor constant:14],
+        [self.compareBtn.leadingAnchor constraintEqualToAnchor:fav.trailingAnchor constant:8],
+        [self.compareBtn.centerYAnchor constraintEqualToAnchor:fav.centerYAnchor],
         // 一行分析条：独占一行（收藏按钮下方），左对齐封面右缘、右到窗口边界。
         // 不与标题/收藏同行 —— 标题是可变长文本，会把这一行挤成 0 宽（判据 C2b 抓到的真缺陷）。
         [self.anlRow.leadingAnchor constraintEqualToAnchor:self.titleLabel2.leadingAnchor],
@@ -172,26 +221,7 @@
         [self.anlRow.topAnchor constraintEqualToAnchor:fav.bottomAnchor constant:10],
         [self.anlRow.heightAnchor constraintEqualToConstant:26],
 
-        [self.anlDyn.leadingAnchor constraintEqualToAnchor:self.anlRow.leadingAnchor],
-        [self.anlDyn.centerYAnchor constraintEqualToAnchor:self.anlRow.centerYAnchor],
-        [self.anlQual.leadingAnchor constraintEqualToAnchor:self.anlDyn.trailingAnchor constant:8],
-        [self.anlQual.centerYAnchor constraintEqualToAnchor:self.anlRow.centerYAnchor],
-        [self.anlFake.leadingAnchor constraintEqualToAnchor:self.anlQual.trailingAnchor constant:8],
-        [self.anlFake.centerYAnchor constraintEqualToAnchor:self.anlRow.centerYAnchor],
-        [self.anlExpand.leadingAnchor constraintGreaterThanOrEqualToAnchor:self.anlFake.trailingAnchor constant:8],
-        [self.anlExpand.trailingAnchor constraintEqualToAnchor:self.anlRow.trailingAnchor],
-        [self.anlExpand.centerYAnchor constraintEqualToAnchor:self.anlRow.centerYAnchor],
-        // 摘要块等分剩余宽度；文字过长截断 + tooltip 全文（绝不换行成两行）。
-        // 必须显式给宽度：无边框 NSButton 标题为空时内在宽度为 0，会整行塌成 0（判据 C2b 抓到的）。
-        [self.anlQual.widthAnchor constraintEqualToAnchor:self.anlDyn.widthAnchor],
-        [self.anlFake.widthAnchor constraintEqualToAnchor:self.anlDyn.widthAnchor],
-        [self.anlExpand.widthAnchor constraintEqualToConstant:56],
-        [self.anlDyn.widthAnchor constraintEqualToAnchor:self.anlRow.widthAnchor
-                                             multiplier:(1.0 / 3.0) constant:-27],
-        // 高度也必须显式给：无边框 NSButton 空标题时内在高度为 0 ⟹ 量得到宽度但看不见。
-        [self.anlDyn.heightAnchor constraintEqualToConstant:22],
-        [self.anlQual.heightAnchor constraintEqualToConstant:22],
-        [self.anlFake.heightAnchor constraintEqualToConstant:22],
+        
 
         [lyricsTitle.leadingAnchor constraintEqualToAnchor:host.leadingAnchor constant:24],
         [lyricsTitle.topAnchor constraintEqualToAnchor:self.cover.bottomAnchor constant:18],
@@ -405,6 +435,111 @@
         if (title.length) self_.titleLabel2.stringValue = title;
         if (artist.length) self_.artistLabel2.stringValue = artist;
         [self_.knowledge loadKind:@"track" name:title artist:artist];
+    }];
+}
+
+#pragma mark - 版本对比（/api/compare，与 web 同口径）
+
+/// 打开弹层：列同目录音频文件（/api/files?dir=），当前曲目默认勾选。
+- (void)onCompare:(id)sender {
+    NSString *path = self.currentPath;
+    if (!path.length) { RLPToast(RLPTr(@"没有正在播放的曲目")); return; }
+    NSString *dir = path.stringByDeletingLastPathComponent;
+    RLPTheme *t = [RLPTheme current];
+    NSStackView *s = [[NSStackView alloc] init];
+    s.orientation = NSUserInterfaceLayoutOrientationVertical;
+    s.alignment = NSLayoutAttributeLeading;
+    s.spacing = 6;
+    s.translatesAutoresizingMaskIntoConstraints = NO;
+    NSTextField *ti = RLPLabel(RLPTr(@"对比同目录版本"), [NSFont systemFontOfSize:14 weight:NSFontWeightSemibold], t.text);
+    [s addArrangedSubview:ti];
+    NSTextField *hint = RLPLabel(RLPTr(@"勾选 2–8 个版本，分数与排名由后端算出。"), t.small, t.mut);
+    [s addArrangedSubview:hint];
+    self.compareList = [[NSStackView alloc] init];
+    self.compareList.orientation = NSUserInterfaceLayoutOrientationVertical;
+    self.compareList.alignment = NSLayoutAttributeLeading;
+    self.compareList.spacing = 4;
+    self.compareList.translatesAutoresizingMaskIntoConstraints = NO;
+    [s addArrangedSubview:self.compareList];
+    self.compareOut = [self makeTextView];
+    NSScrollView *outScroll = [[NSScrollView alloc] initWithFrame:NSZeroRect];
+    outScroll.drawsBackground = NO; outScroll.hasVerticalScroller = YES;
+    outScroll.documentView = self.compareOut;
+    outScroll.translatesAutoresizingMaskIntoConstraints = NO;
+    [[outScroll.heightAnchor constraintEqualToConstant:180] setActive:YES];
+    [[outScroll.widthAnchor constraintEqualToConstant:420] setActive:YES];
+    [s addArrangedSubview:outScroll];
+    NSButton *go = [NSButton buttonWithTitle:RLPTr(@"开始对比") target:self action:@selector(onCompareRun:)];
+    go.bezelStyle = NSBezelStyleRounded;
+    [s addArrangedSubview:go];
+
+    self.comparePaths = [NSMutableArray array];
+    self.compareChecks = [NSMutableArray array];
+    [[RLPCoreClient shared] getJSON:[NSString stringWithFormat:@"/api/files?dir=%@", RLPEnc(dir)]
+        completion:^(NSDictionary * _Nullable json) {
+        NSArray *names = [json[@"files"] isKindOfClass:[NSArray class]] ? json[@"files"] : @[];
+        NSString *base = path.lastPathComponent;
+        for (id n in names) {
+            if (![n isKindOfClass:[NSString class]]) continue;
+            NSString *full = [dir stringByAppendingPathComponent:n];
+            NSButton *chk = [NSButton checkboxWithTitle:n target:nil action:nil];
+            chk.state = [n isEqualToString:base] ? NSControlStateValueOn : NSControlStateValueOff;
+            chk.font = t.small;
+            [self.compareList addArrangedSubview:chk];
+            [self.comparePaths addObject:full];
+            [self.compareChecks addObject:chk];
+        }
+        if (!names.count) self.compareOut.string = RLPTr(@"该目录下没有可对比的音频文件");
+    }];
+    [self.comparePopover close];
+    self.comparePopover = RLPShowCardPopover(self.compareBtn, RLPCardController(s, 450, 320), 450);
+}
+
+/// 跑对比：表单重复 file=…（2–8 个），结果只排版不重算（铁律 3）。
+- (void)onCompareRun:(id)sender {
+    NSMutableArray *sel = [NSMutableArray array];
+    for (NSUInteger i = 0; i < self.compareChecks.count; ++i)
+        if (self.compareChecks[i].state == NSControlStateValueOn) [sel addObject:self.comparePaths[i]];
+    if (sel.count < 2) { RLPToast(RLPTr(@"至少勾选 2 个版本")); return; }
+    if (sel.count > 8) { RLPToast(RLPTr(@"一次最多 8 个版本")); return; }
+    NSMutableArray *parts = [NSMutableArray array];
+    for (NSString *p in sel) [parts addObject:[NSString stringWithFormat:@"file=%@", RLPEnc(p)]];
+    self.compareOut.string = RLPTr(@"正在对齐并分析…");
+    [[RLPCoreClient shared] postJSON:@"/api/compare" body:[parts componentsJoinedByString:@"&"]
+        completion:^(NSDictionary * _Nullable r) {
+        if (!r || ![r[@"ok"] boolValue]) {
+            self.compareOut.string = [r[@"error"] isKindOfClass:[NSString class]] ? r[@"error"] : RLPTr(@"对比失败");
+            return;
+        }
+        NSMutableString *out = [NSMutableString string];
+        if ([r[@"sameTrack"] boolValue] == NO)
+            [out appendString:RLPTr(@"⚠ 包络相关偏低，这些文件可能不是同一首曲子\n")];
+        [out appendString:RLPTr(@"排序（好 → 差）\n")];
+        NSArray *vs = [r[@"versions"] isKindOfClass:[NSArray class]] ? r[@"versions"] : @[];
+        NSArray *ranking = [r[@"ranking"] isKindOfClass:[NSArray class]] ? r[@"ranking"] : @[];
+        for (id idx in ranking) {
+            NSInteger i = [idx integerValue];
+            if (i < 0 || i >= (NSInteger)vs.count) continue;
+            NSDictionary *v = vs[i];
+            [out appendFormat:@"  %@  %@  —  %@ 分\n",
+                v[@"label"] ?: @"", [v[@"path"] lastPathComponent],
+                [v[@"score"] isKindOfClass:[NSNumber class]] ? [NSString stringWithFormat:@"%.1f", [v[@"score"] doubleValue]] : @"NA"];
+        }
+        [out appendString:@"\n"];
+        NSArray *rows = [r[@"rows"] isKindOfClass:[NSArray class]] ? r[@"rows"] : @[];
+        for (NSDictionary *row in rows) {
+            [out appendFormat:@"%@%@:", row[@"label"] ?: @"",
+                [row[@"unit"] length] ? [NSString stringWithFormat:@" (%@)", row[@"unit"]] : @""];
+            NSArray *vals = [row[@"values"] isKindOfClass:[NSArray class]] ? row[@"values"] : @[];
+            for (NSUInteger j = 0; j < vals.count; ++j) {
+                NSString *num = [vals[j] isKindOfClass:[NSNumber class]] ? [NSString stringWithFormat:@"%.2f", [vals[j] doubleValue]] : @"NA";
+                const BOOL best = ([row[@"bestIndex"] integerValue] == (NSInteger)j) && [row[@"comparable"] boolValue];
+                [out appendFormat:@"  %@%@", num, best ? @"*" : @""];
+            }
+            [out appendString:@"\n"];
+        }
+        if ([r[@"explanation"] length]) [out appendFormat:@"\n%@\n", r[@"explanation"]];
+        self.compareOut.string = out;
     }];
 }
 

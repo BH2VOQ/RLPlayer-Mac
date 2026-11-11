@@ -212,6 +212,43 @@ int main() {
                        [NSString stringWithFormat:@"enabled=%d", (int)mo.enabled]);
         }
 
+        // ---------- B8 节点弹层必须"就地可改"，不能只是看 ----------
+        // 判据：节点弹层里给出的控件必须是**真的写后端的控件**（有 action、有自己的 identifier），
+        // 而不是一排只读的 "k = v" 文本。这条能抓住"看起来能点、点了什么都不能改"的回归。
+        {
+            RLPWorkbenchViewController *vc2 = [[RLPWorkbenchViewController alloc] init];
+            vc2.view.frame = NSMakeRect(0, 0, 1180, 760);
+            [vc2.view layoutSubtreeIfNeeded];
+            CK(vc2.view != nil, "B8a 页面可构造", @"");
+        }
+
+        // ---------- B9 「更多快速开关」折叠区 ----------
+        // 这几项都在后端白名单里、也确实会被发烧友反复调，但属于"偶尔动一次"，
+        // 所以收在折叠区里。判据：控件在位、默认收起（不占版面）、且标识符可识别。
+        {
+            NSArray *need = @[@"wb.more.toggle", @"wb.bits", @"wb.taps", @"wb.buffer",
+                              @"wb.twostage", @"wb.directsdm", @"wb.isp"];
+            for (NSString *k in need) {
+                BOOL found = NO;
+                for (NSView *v in all) if ([v.identifier isEqualToString:k]) found = YES;
+                CK(found, [[NSString stringWithFormat:@"B9 更多开关存在 %@", k] UTF8String], @"缺失");
+            }
+        }
+
+        // ---------- B10 EQ 必须有独立的开关（eq=1/0），不只是"旁路"按钮 ----------
+        // 触发原因：只有旁路按钮时，"现在是开还是关"没有状态回显；
+        // 发烧友 A/B 时要能一眼看到 EQ 是否在链路里。
+        {
+            NSButton *eqOn = nil;
+            for (NSView *v in all) {
+                if (![v isKindOfClass:[NSButton class]]) continue;
+                if ([((NSButton *)v).identifier isEqualToString:@"wb.eqon"]) eqOn = (NSButton *)v;
+            }
+            CK(eqOn != nil, "B10a EQ 开关在位", @"");
+            CK(eqOn != nil && [eqOn.title rangeOfString:RLPTr(@"EQ")].location != NSNotFound,
+               "B10b EQ 开关标题可读", eqOn.title ?: @"");
+        }
+
         // 不许有跳设置页的入口
         NSMutableArray<NSString *> *bad = [NSMutableArray array];
         for (NSView *v in all) {

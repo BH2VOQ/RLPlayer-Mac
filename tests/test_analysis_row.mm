@@ -242,17 +242,41 @@ int main() {
             }
         }
 
-        // 面上不许有自动分析开关；收起态不许有可见的「重新分析」
+        // 面上不许有自动分析开关；收起态不许有可见的「重新分析」。
+        // "NSButton-like" 一律算：NSSwitch / NSPopUpButton / NSSegmentedControl 的开关形态
+        // 都能承载一个"自动分析"选项，只查 NSButton 会漏。
         BOOL hasAuto = NO, hasReanalyzeVisible = NO;
+        NSMutableArray<NSString *> *autoFindings = [NSMutableArray array];
         for (NSView *v in all) {
-            if (![v isKindOfClass:[NSButton class]]) continue;
-            NSButton *b = (NSButton *)v;
-            NSString *title = b.title ?: @"";
-            if (Has(title, @"自动")) hasAuto = YES;
-            if (Has(title, @"重新分析") && !b.hidden && b.alphaValue > 0.01) hasReanalyzeVisible = YES;
+            NSString *title = nil;
+            BOOL visible = !v.hidden && v.alphaValue > 0.01;
+            if ([v isKindOfClass:[NSButton class]]) title = ((NSButton *)v).title;
+            else if ([v isKindOfClass:[NSPopUpButton class]]) title = ((NSPopUpButton *)v).titleOfSelectedItem;
+            else if ([v isKindOfClass:[NSTextField class]]) title = ((NSTextField *)v).stringValue;
+            if (!title.length) continue;
+            // 开关类控件只要出现「自动」就算违规（开关必须只在设置页）
+            if (Has(title, @"自动")) {
+                const BOOL controlLike = [v isKindOfClass:[NSButton class]] ||
+                                         [v isKindOfClass:[NSPopUpButton class]] ||
+                                         [v isKindOfClass:[NSSegmentedControl class]] ||
+                                         [v isKindOfClass:[NSSwitch class]];
+                if (controlLike) { hasAuto = YES; [autoFindings addObject:title]; }
+            }
+            if ([v isKindOfClass:[NSButton class]] && Has(title, @"重新分析") && visible) {
+                hasReanalyzeVisible = YES;
+            }
         }
         CK(!hasAuto, "C3a 播放页没有自动分析开关（已挪到设置）", @"发现标题含「自动」的按钮");
         CK(!hasReanalyzeVisible, "C3b 收起态没有摆在外面的「重新分析」", @"发现可见的重新分析按钮");
+
+        // 「重新分析」功能不能删：收起态必须存在但不可见（位置搬了，功能没少）
+        {
+            NSButton *re = nil;
+            for (NSView *v in all)
+                if ([v isKindOfClass:[NSButton class]] && Has(((NSButton *)v).title, @"重新分析")) { re = (NSButton *)v; break; }
+            CK(re != nil, "C3c 「重新分析」按钮仍在视图树里（功能没删，只是不摆在面上）", @"找不到该按钮");
+            if (re) CK(re.hidden || re.alphaValue <= 0.01, "C3c 收起态下它不可见", @"仍然可见");
+        }
 
         std::printf("\n%s（%d 项失败）\n", gFail == 0 ? "analysis_row 全部通过" : "analysis_row 有失败", gFail);
         return gFail == 0 ? 0 : 1;

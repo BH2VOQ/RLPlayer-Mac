@@ -162,3 +162,28 @@ UPnP 投放	UPnP cast	1.1.7.1 双模式 UI
 管线阶段：	Pipeline stage: 	1.1.7.1 工作台与分析补充
 缓存命中	cache hit	1.1.7.1 工作台与分析补充
 音质指标	Quality metrics	1.1.7.1 工作台与分析补充
+DSD 直通（DirectSDM）	DSD direct (DirectSDM)	1.1.7.1 功能对齐补充
+ISP 峰值预衰减	ISP peak pre-attenuation	1.1.7.1 功能对齐补充
+PCM 输出（关）	PCM output (off)	1.1.7.1 功能对齐补充
+严格独占（Hog，会让系统音量条失效）	Strict exclusive (Hog; disables the system volume slider)	1.1.7.1 功能对齐补充
+仅当 DSD 源与目标同速率、且无 EQ/IR/音量处理时才能真正直通，否则后端会降级并给出原因。	True direct only when the DSD source matches the target rate and there is no EQ/IR/volume processing; otherwise the backend falls back and explains why.	1.1.7.1 功能对齐补充
+关闭卷积	Disable convolution	1.1.7.1 功能对齐补充
+关闭卷积（清空 IR）	Disable convolution (clear IR)	1.1.7.1 功能对齐补充
+勾选 2–8 个版本，分数与排名由后端算出。	Pick 2-8 versions; scores and ranking are computed by the backend.	1.1.7.1 功能对齐补充
+升频后可能削波时提前降一点电平（过采样峰值预扫）。	Lower the level a little ahead of time when upsampling may clip (oversampled peak prescan).	1.1.7.1 功能对齐补充
+对比同目录版本	Compare versions in this folder	1.1.7.1 功能对齐补充
+打开	Open	1.1.7.1 功能对齐补充
+抽头预算	Tap budget	1.1.7.1 功能对齐补充
+播放整张	Play whole album	1.1.7.1 功能对齐补充
+更多快速开关 ▸	More quick switches ▸	1.1.7.1 功能对齐补充
+更多快速开关 ▾	More quick switches ▾	1.1.7.1 功能对齐补充
+正在对齐并分析…	Aligning and analyzing…	1.1.7.1 功能对齐补充
+源规格由当前曲目决定，没有可调项。	Source format is set by the current track; nothing to adjust.	1.1.7.1 功能对齐补充
+滤波（1x / Nx 写的键不同）	Filter (1x / Nx use different keys)	1.1.7.1 功能对齐补充
+缓冲 (ms)	Buffer (ms)	1.1.7.1 功能对齐补充
+跟随源 (-1)	Follow source (-1)	1.1.7.1 功能对齐补充
+跟随预设 (0)	Follow preset (0)	1.1.7.1 功能对齐补充
+输出位深	Output bit depth	1.1.7.1 功能对齐补充
+还没有 EQ 文件：设置里选一个，或用上面的 PEQ 预设	No EQ file yet: pick one in Settings, or use a PEQ preset above	1.1.7.1 功能对齐补充
+（空 = 不卷积）	(empty = no convolution)	1.1.7.1 功能对齐补充
+（空 = 没有 EQ）	(empty = no EQ)	1.1.7.1 功能对齐补充

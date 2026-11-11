@@ -31,6 +31,31 @@
 #import "RLPTheme.h"
 #import "RLPSupport.h"
 
+/// 顶栏：标题/计数是纯 frame 子视图，Auto Layout pass 会把它们归零，
+/// 所以每次 layout 后重放一次位置（离屏渲染也走这条路）。
+@interface RLPTopbarView : NSView
+@property (nonatomic, weak) NSTextField *title;
+@property (nonatomic, weak) NSTextField *count;
+@end
+@implementation RLPTopbarView
+- (void)layout {
+    [super layout];
+    if (self.title) {
+        [self.title sizeToFit];
+        CGRect f = self.title.frame;
+        f.origin = CGPointMake(20, (self.bounds.size.height - f.size.height) / 2.0);
+        self.title.frame = f;
+    }
+    if (self.count) {
+        [self.count sizeToFit];
+        CGRect f = self.count.frame;
+        f.origin = CGPointMake(CGRectGetMaxX(self.title.frame) + 8,
+                               (self.bounds.size.height - f.size.height) / 2.0);
+        self.count.frame = f;
+    }
+}
+@end
+
 static const CGFloat kSidebarWidth = 232.0;
 static const CGFloat kPlaybackHeight = 76.0;
 static const CGFloat kTopbarHeight = 46.0;
@@ -42,6 +67,8 @@ static const CGFloat kTopbarHeight = 46.0;
 @property (nonatomic, strong) NSView *topbar;
 @property (nonatomic, strong) NSView *pageHost;
 @property (nonatomic, strong) NSSearchField *search;
+@property (nonatomic, strong) NSTextField *pageTitle;   // 顶栏页标题（web #pth）
+@property (nonatomic, strong) NSTextField *pageCount;   // 计数（web #cnt）
 @property (nonatomic, strong) NSViewController *currentContent;
 @property (nonatomic, strong) NSMutableDictionary<NSString *, NSViewController *> *pageCache;
 /// 详情页的返回栈（只存"从哪个列表页进来"），返回时回到原列表页。
@@ -82,7 +109,15 @@ static const CGFloat kTopbarHeight = 46.0;
     _sidebar = [[RLPSidebarViewController alloc] init];
     _albums = [[RLPAlbumsViewController alloc] init];
     _playbackBar = [[RLPPlaybackBarView alloc] init];
-    _topbar = [[NSView alloc] initWithFrame:NSZeroRect];
+    _playbackBar.wantsLayer = YES;
+    _playbackBar.layer.cornerRadius = 16;
+    _playbackBar.layer.borderWidth = 1;
+    _playbackBar.layer.masksToBounds = NO;
+    _playbackBar.layer.shadowColor = NSColor.blackColor.CGColor;
+    _playbackBar.layer.shadowOpacity = 0.13;
+    _playbackBar.layer.shadowRadius = 19;
+    _playbackBar.layer.shadowOffset = CGSizeMake(0, -6);
+    _topbar = [[RLPTopbarView alloc] initWithFrame:NSZeroRect];
     _topbar.wantsLayer = YES;
     _topbar.layer.backgroundColor = t.bg.CGColor;
     _pageHost = [[NSView alloc] initWithFrame:NSZeroRect];
@@ -95,6 +130,16 @@ static const CGFloat kTopbarHeight = 46.0;
     }
 
     // ---- 顶栏内容 ----
+    // 页标题+计数在左（web 顶栏同口径），搜索框在它们右边。
+    // 顶栏标题/计数用**纯 frame**（不参与 Auto Layout）：
+    // 离屏渲染时 intrinsic-size 约束重算不及时，标题会画不出来（实测）。
+    _pageTitle = RLPLabel(@"", [NSFont systemFontOfSize:17 weight:NSFontWeightBold], t.text);
+    [_topbar addSubview:_pageTitle];
+    _pageCount = RLPLabel(@"", t.small, t.mut);
+    [_topbar addSubview:_pageCount];
+    ((RLPTopbarView *)_topbar).title = _pageTitle;
+    ((RLPTopbarView *)_topbar).count = _pageCount;
+
     _search = [[NSSearchField alloc] initWithFrame:NSZeroRect];
     _search.placeholderString = RLPTr(@"搜索曲目 / 专辑 / 艺术家");
     _search.translatesAutoresizingMaskIntoConstraints = NO;
@@ -130,7 +175,7 @@ static const CGFloat kTopbarHeight = 46.0;
         [_topbar.topAnchor constraintEqualToAnchor:root.topAnchor],
         [_topbar.heightAnchor constraintEqualToConstant:kTopbarHeight],
 
-        [_search.leadingAnchor constraintEqualToAnchor:_topbar.leadingAnchor constant:16],
+        [_search.leadingAnchor constraintEqualToAnchor:_topbar.leadingAnchor constant:210],
         [_search.centerYAnchor constraintEqualToAnchor:_topbar.centerYAnchor],
         [_search.widthAnchor constraintEqualToConstant:300],
 
@@ -144,15 +189,17 @@ static const CGFloat kTopbarHeight = 46.0;
         [queueBtn.centerYAnchor constraintEqualToAnchor:_topbar.centerYAnchor],
         [queueBtn.widthAnchor constraintEqualToConstant:28],
 
-        [_playbackBar.leadingAnchor constraintEqualToAnchor:_sidebar.view.trailingAnchor],
-        [_playbackBar.trailingAnchor constraintEqualToAnchor:root.trailingAnchor],
-        [_playbackBar.bottomAnchor constraintEqualToAnchor:root.bottomAnchor],
-        [_playbackBar.heightAnchor constraintEqualToConstant:kPlaybackHeight],
+        // 悬浮播放条（web .bar）：左右 24 / 底 14 / 高 66 / 圆角 16。
+        // 内容区底也停在播放条顶之上 14，避免专辑网格被悬浮条遮住。
+        [_playbackBar.leadingAnchor constraintEqualToAnchor:_sidebar.view.trailingAnchor constant:24],
+        [_playbackBar.trailingAnchor constraintEqualToAnchor:root.trailingAnchor constant:-24],
+        [_playbackBar.bottomAnchor constraintEqualToAnchor:root.bottomAnchor constant:-14],
+        [_playbackBar.heightAnchor constraintEqualToConstant:66],
 
         [_pageHost.leadingAnchor constraintEqualToAnchor:_sidebar.view.trailingAnchor],
         [_pageHost.trailingAnchor constraintEqualToAnchor:root.trailingAnchor],
         [_pageHost.topAnchor constraintEqualToAnchor:_topbar.bottomAnchor],
-        [_pageHost.bottomAnchor constraintEqualToAnchor:_playbackBar.topAnchor],
+        [_pageHost.bottomAnchor constraintEqualToAnchor:_playbackBar.topAnchor constant:-14],
     ]];
 
     __weak __typeof__(self) weakSelf = self;
@@ -180,6 +227,8 @@ static const CGFloat kTopbarHeight = 46.0;
                                                  name:@"RLPNavigateKeyNotification" object:nil];
     [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(onOpenNowPlayingNote:)
                                                  name:@"RLPOpenNowPlayingNotification" object:nil];
+    [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(onPageCount:)
+                                                 name:@"RLPPageCountNotification" object:nil];
 
     // 首页随模式：聆听 ⟹ 聆听室；专业 ⟹ 专业工作台。
     [_sidebar selectRow:0];
@@ -252,6 +301,32 @@ static const CGFloat kTopbarHeight = 46.0;
         [v.bottomAnchor constraintEqualToAnchor:self.pageHost.bottomAnchor],
     ]];
     if ([vc respondsToSelector:@selector(activate)]) [(id)vc activate];
+    [self syncTopbarTitle];
+}
+
+/// 顶栏页标题 = 当前页的 pageTitle；详情页也用它自己的标题。
+- (void)syncTopbarTitle {
+    NSString *title = nil;
+    if ([self.currentContent respondsToSelector:@selector(pageTitle)])
+        title = [(id)self.currentContent pageTitle];
+    self.pageTitle.stringValue = title.length ? RLPTr(title) : @"";
+    self.pageCount.stringValue = @"";   // 计数等页上报（RLPPageCountNotification）
+    // 离屏渲染时 intrinsic-size 约束不会及时重算（实测宽度停在旧值），
+    // 直接 sizeToFit 设 frame，保证标题在任何渲染路径下都画得出来。
+    [self.pageTitle sizeToFit];
+    CGRect f = self.pageTitle.frame;
+    f.origin = CGPointMake(20, (self.topbar.bounds.size.height - f.size.height) / 2.0);
+    self.pageTitle.frame = f;
+}
+
+- (void)onPageCount:(NSNotification *)note {
+    if (![note.object isKindOfClass:[NSString class]]) return;
+    self.pageCount.stringValue = (NSString *)note.object;
+    [self.pageCount sizeToFit];
+    CGRect f = self.pageCount.frame;
+    f.origin = CGPointMake(CGRectGetMaxX(self.pageTitle.frame) + 8,
+                           (self.topbar.bounds.size.height - f.size.height) / 2.0);
+    self.pageCount.frame = f;
 }
 
 #pragma mark - 页面导航（详情页压栈；返回回原列表页）
@@ -367,6 +442,7 @@ static const CGFloat kTopbarHeight = 46.0;
         [v.bottomAnchor constraintEqualToAnchor:self.pageHost.bottomAnchor],
     ]];
     if ([vc respondsToSelector:@selector(activate)]) [(id)vc activate];
+    [self syncTopbarTitle];
 }
 
 #pragma mark - 顶栏动作
@@ -404,6 +480,9 @@ static const CGFloat kTopbarHeight = 46.0;
     self.pageHost.layer.backgroundColor = t.bg.CGColor;
     [self.sidebar applyTheme];
     [self.playbackBar applyTheme];
+    self.playbackBar.layer.borderColor = t.line.CGColor;
+    self.pageTitle.textColor = t.text;
+    self.pageCount.textColor = t.mut;
     [self.modeSwitch setLabel:RLPTr(@"聆听模式") forSegment:0];
     [self.modeSwitch setLabel:RLPTr(@"专业模式") forSegment:1];
     // **所有缓存页**都要刷，不只是当前页：否则切到浅色后再点别的导航项，
