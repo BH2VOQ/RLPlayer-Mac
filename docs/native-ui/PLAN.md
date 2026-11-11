@@ -76,12 +76,12 @@
 | /api/providers、/api/llm/models | 数据源注册表 / 模型列表下拉，原生用固定项 + 手填 |
 | /api/lib/rmdir、/api/lib/rmdirinfo | 目录删除（破坏性），未迁移 |
 | /api/queue/set | 整体替换队列（拖动排序已用 qmove 覆盖主要场景） |
-| /api/compare、/api/entity/versions | 版本对比 / Discogs 版本推荐，未迁移 |
+| /api/compare | 已接（RLPShowCompareSheet / 单曲页版本对比）；/api/entity/versions（Discogs 版本推荐）未迁移 |
 | /api/anl/cancel | 取消后台分析（原生未做自动分析触发） |
 | /api/diag/upload、/api/upload | 旧诊断上传通道；原生反馈走 feedback_api 直连后台 |
 | /api/src/cover | 流媒体封面（原生流媒体页本轮不做封面） |
 | /api/selftest/report、/api/ui/events | web 专用自检回传 / SSE 事件流，原生不需要 |
-| /api/writeback/status | 写回进度轮询（原生用预览查看剩余） |
+| /api/writeback/status | 已接（2026-11-12：wbPoll 800ms 轮询 + wbSyncBusy 进页恢复忙态） |
 | /api/v1、/api/v1/feedback/macos | 后台路径前缀，原生由 feedback_api.h 常量直接持有 |
 ## 2.4 本轮（用户实测反馈后）修掉的真故障
 
