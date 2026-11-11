@@ -1322,14 +1322,19 @@ int main() {
             ck(wait_until([&]() { return mgr.get_state().paused; }, 1.0), "set_paused(true) 生效");
             ck(raopMock.saw_method("FLUSH"), "暂停通过 RTSP FLUSH 让对端静音（协议层契约）");
 
+            // 基线必须在 paused **真正生效之后**抓：set_paused 到生效之间有一段调度延迟，
+            // 那段时间进度本就会继续走（实测 0.03~0.05s）。拿暂停前的旧值当基线，
+            // 会把"生效前的正常前进"误判成"暂停期间没冻结"（本条曾偶发假红）。
+            // 冻结判据的语义是「生效后不再前进」，阈值仍 0.03，不放宽。
+            const double posFrozen = mgr.get_state().positionSec;
             std::this_thread::sleep_for(std::chrono::milliseconds(400));
             {
                 auto st = mgr.get_state();
                 ck(st.running, "暂停 0.4 s 后会话仍在运行（没有在暂停里把歌「播完」）");
                 ck(st.paused, "暂停 0.4 s 后 paused 仍为 true");
-                ck(std::abs(st.positionSec - posBefore) <= 0.03,
+                ck(std::abs(st.positionSec - posFrozen) <= 0.03,
                    "暂停期间进度冻结（不前进、不跳变）",
-                   std::to_string(posBefore) + " -> " + std::to_string(st.positionSec));
+                   std::to_string(posFrozen) + " -> " + std::to_string(st.positionSec));
                 ck(st.positionSec < kDurationSec - 0.005,
                    "暂停期间进度未到达曲目末尾", std::to_string(st.positionSec));
             }

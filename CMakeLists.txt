@@ -215,7 +215,7 @@ if(APPLE)
     tools/native_ui/RLPCastView.mm
     tools/native_ui/RLPCalibrationView.mm
     tools/native_ui/RLPServersView.mm
-    tools/native_ui/RLPMetaSourcesView.mm
+    tools/native_ui/RLPMetaSourcesView.mm tools/native_ui/RLPLibStatsView.mm
     tools/native_ui/RLPFeedbackWindowController.mm
     tools/native_ui/RLPKnowledgeView.mm
     tools/native_ui/RLPFunctionalAudit.mm
@@ -244,7 +244,7 @@ if(APPLE)
     tools/native_ui/RLPPlaylistsViewController.mm tools/native_ui/RLPEqualizerView.mm
     tools/native_ui/RLPInputView.mm tools/native_ui/RLPCastView.mm
     tools/native_ui/RLPCalibrationView.mm tools/native_ui/RLPServersView.mm
-    tools/native_ui/RLPMetaSourcesView.mm
+    tools/native_ui/RLPMetaSourcesView.mm tools/native_ui/RLPLibStatsView.mm
     tools/native_ui/RLPFeedbackWindowController.mm
     tools/native_ui/RLPKnowledgeView.mm tools/native_ui/RLPFunctionalAudit.mm
     tools/native_ui/RLPAnalysisSummary.mm tools/native_ui/RLPListeningRoom.mm
@@ -396,7 +396,7 @@ if(APPLE)
   # 纪律：隔离 state/library + backend=null + volume=-120，不开设备、不出声。
   add_executable(test_servers_view tests/test_servers_view.mm
     tools/native_ui/RLPServersView.mm
-    tools/native_ui/RLPMetaSourcesView.mm
+    tools/native_ui/RLPMetaSourcesView.mm tools/native_ui/RLPLibStatsView.mm
     tools/native_ui/RLPSettingsViewController.mm
     tools/native_ui/RLPEqualizerView.mm
     tools/native_ui/RLPInputView.mm
@@ -412,6 +412,7 @@ if(APPLE)
     tools/mac_update.mm)
   set_source_files_properties(tests/test_servers_view.mm
     tools/native_ui/RLPServersView.mm tools/native_ui/RLPMetaSourcesView.mm
+    tools/native_ui/RLPLibStatsView.mm
     tools/native_ui/RLPSettingsViewController.mm
     tools/native_ui/RLPEqualizerView.mm tools/native_ui/RLPInputView.mm
     tools/native_ui/RLPCastView.mm tools/native_ui/RLPCalibrationView.mm

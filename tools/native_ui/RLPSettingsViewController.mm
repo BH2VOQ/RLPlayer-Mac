@@ -30,6 +30,7 @@
 #import "RLPFeedbackWindowController.h"
 #import "RLPServersView.h"
 #import "RLPMetaSourcesView.h"
+#import "RLPLibStatsView.h"
 
 #pragma mark - 页签定义
 
@@ -167,6 +168,8 @@ static NSView *RLPSGroup(NSString *title, NSString *desc, RLPTheme *t) {
 @property (nonatomic, strong) RLPServersView *serversView;
 // 元数据数据源（动态注册表 + 优先级）
 @property (nonatomic, strong) RLPMetaSourcesView *metaSourcesView;
+// 本地音乐库统计卡（/api/lib/stats）
+@property (nonatomic, strong) RLPLibStatsView *libStatsView;
 // 元数据
 @property (nonatomic, strong) NSSwitch *metaOnSwitch;
 @property (nonatomic, strong) NSSwitch *metaLlmSwitch;
@@ -218,6 +221,7 @@ static NSView *RLPSGroup(NSString *title, NSString *desc, RLPTheme *t) {
     [[NSNotificationCenter defaultCenter] removeObserver:self];
     [_wbTimer invalidate];
     [_coverTimer invalidate];
+    [_libStatsView stopPolling];
 }
 
 - (void)onAppModeChanged:(NSNotification *)note {
@@ -600,6 +604,15 @@ static NSView *RLPSGroup(NSString *title, NSString *desc, RLPTheme *t) {
         RLPTr(@"关闭时可在播放页展开分析详情后手动分析"), t)];
 
     [stack addArrangedSubview:RLPSGroup(RLPTr(@"音乐库"), nil, t)];
+    // 曲库统计卡（对齐 web sp_libstats / renderLibStats）：曲目/专辑/扫描线程/上次扫描，
+    // 扫描中额外显示进度并轮询。数字全部来自 /api/lib/stats。
+    self.libStatsView = [[RLPLibStatsView alloc] initWithFrame:NSMakeRect(0, 0, 560, 120)];
+    self.libStatsView.translatesAutoresizingMaskIntoConstraints = NO;
+    [stack addArrangedSubview:self.libStatsView];
+    [NSLayoutConstraint activateConstraints:@[
+        [self.libStatsView.widthAnchor constraintEqualToConstant:560],
+    ]];
+    [self.libStatsView reload];
     self.rootField = [[NSTextField alloc] initWithFrame:NSZeroRect];
     self.rootField.placeholderString = RLPTr(@"例如 /Volumes/Music");
     self.rootField.translatesAutoresizingMaskIntoConstraints = NO;
@@ -1319,6 +1332,7 @@ static NSView *RLPSGroup(NSString *title, NSString *desc, RLPTheme *t) {
 
     [self.serversView reload];
     [self.metaSourcesView reload];
+    [self.libStatsView reload];
     [self loadLlmConfig];
 }
 
@@ -1342,6 +1356,7 @@ static NSView *RLPSGroup(NSString *title, NSString *desc, RLPTheme *t) {
     [self.calView applyTheme];
     [self.serversView applyTheme];
     [self.metaSourcesView applyTheme];
+    [self.libStatsView applyTheme];
 }
 
 @end

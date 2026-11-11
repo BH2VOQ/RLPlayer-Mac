@@ -15,6 +15,7 @@
 #import <AppKit/AppKit.h>
 #import "RLPServersView.h"
 #import "RLPMetaSourcesView.h"
+#import "RLPLibStatsView.h"
 #import "RLPSettingsViewController.h"
 #import "RLPCoreClient.h"
 #import "RLPSupport.h"
@@ -288,6 +289,44 @@ int main() {
                     [((NSTextField *)v).placeholderString isEqualToString:@"deepseek-chat"])
                     modelField = (NSTextField *)v;
             CK(modelField != nil && modelField.isEditable, "S10f 降级时手填模型框仍可用", @"");
+        }
+
+        // ---- S11 本地音乐库统计卡（对齐 web sp_libstats / renderLibStats）----
+        // 旧原生设置·高级页只有"音乐目录/扫描"按钮，没有曲目/专辑/线程/上次扫描数字。
+        {
+            // 后端真值：夹具曲库已被核心读到（本测试启动核心时为空库，写一条再读）。
+            NSDictionary *stats = [core jsonWithMethod:@"GET" path:@"/api/lib/stats" body:nil];
+            CK([stats[@"ok"] boolValue] && [stats[@"tracks"] respondsToSelector:@selector(integerValue)],
+               "S11a /api/lib/stats 返回真字段", stats.description ?: @"nil");
+
+            // 设置·高级页嵌入统计卡，且卡内显示来自后端的数字。
+            [settings selectPane:@"adv"];
+            [settings.view layoutSubtreeIfNeeded];
+            [settings activate];   // 触发 reloadData，统计卡拉真值
+            Pump(0.8);
+            NSMutableArray<NSView *> *advAll = [NSMutableArray array];
+            CollectViews(settings.view, advAll);
+            RLPLibStatsView *statsView = nil;
+            for (NSView *v in advAll) if ([v isKindOfClass:[RLPLibStatsView class]]) statsView = (RLPLibStatsView *)v;
+            CK(statsView != nil, "S11b 设置·高级页嵌入曲库统计卡", @"");
+            if (statsView) {
+                // 卡里至少 4 行（曲目/专辑/扫描线程/上次扫描），值不是占位"—"或空。
+                NSMutableArray<NSView *> *inner = [NSMutableArray array];
+                CollectViews(statsView, inner);
+                NSInteger valueLabels = 0;
+                BOOL hasRealNumber = NO;
+                for (NSView *v in inner) {
+                    if (![v isKindOfClass:[NSTextField class]]) continue;
+                    NSString *s = ((NSTextField *)v).stringValue;
+                    if (!s.length) continue;
+                    ++valueLabels;
+                    if ([s rangeOfCharacterFromSet:[NSCharacterSet decimalDigitCharacterSet]].location != NSNotFound &&
+                        ![s isEqualToString:@"—"]) hasRealNumber = YES;
+                }
+                CK(valueLabels >= 4, "S11c 统计卡有 >= 4 行数字/标签",
+                   [NSString stringWithFormat:@"labels=%ld", (long)valueLabels]);
+                CK(hasRealNumber, "S11d 统计卡显示来自后端的真实数字（不是全占位）", @"");
+            }
         }
 
         [core shutdown];

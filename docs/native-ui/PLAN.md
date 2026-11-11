@@ -74,7 +74,8 @@
 
 | 端点 | 为什么没接 |
 |---|---|
-| /api/lib/stats、/api/rates、/api/gpu、/api/net | 只读诊断/能力查询，原生页当前不展示这些面板 |
+| /api/lib/stats | 已接（2026-11-12：设置·高级页本地音乐库统计卡，曲目/专辑/扫描线程/上次扫描/扫描进度轮询） |
+| /api/rates、/api/gpu、/api/net | 只读能力查询，原生页当前不展示这些面板 |
 | /api/signal | 已接（2026-11-12：RLPSignalChain 纯函数 + 工作台「本次播放路径」弹层，真实播放路径逐节点 + bit-perfect 结论，对齐 web showChain） |
 | /api/providers、/api/llm/models | 已接（2026-11-12：providers → RLPMetaSourcesView 逐源开关+优先级；llm/models → 设置·元数据模型下拉，拉不到降级手填） |
 | /api/lib/rmdir、/api/lib/rmdirinfo | 目录删除（破坏性），未迁移 |
