@@ -19,6 +19,7 @@
 #import "RLPCoreClient.h"
 #import "RLPModels.h"
 #import "RLPSupport.h"
+#import "RLPTrackActions.h"
 #import "RLPTheme.h"
 
 static NSString *const kQueueDragType = @"RLPQueueRowDrag";
@@ -65,7 +66,7 @@ static NSString *const kQueueDragType = @"RLPQueueRowDrag";
     }
     [host addSubview:bar];
 
-    self.table = [[NSTableView alloc] initWithFrame:NSZeroRect];
+    self.table = [[RLPTrackActionTableView alloc] initWithFrame:NSZeroRect];
     self.table.dataSource = self;
     self.table.delegate = self;
     self.table.usesAlternatingRowBackgroundColors = YES;
@@ -91,6 +92,18 @@ static NSString *const kQueueDragType = @"RLPQueueRowDrag";
     [menu addItemWithTitle:RLPTr(@"从队列移除") action:@selector(onMenuRemove:) keyEquivalent:@""];
     for (NSMenuItem *mi in menu.itemArray) mi.target = self;
     self.table.menu = menu;
+    // 右键改用共享菜单（与 web 一致：播放/入队/收藏/存歌单/体检/对比 + 从队列移除）
+    {
+        __weak __typeof__(self) ws = self;
+        RLPTrackActionTableView *tv = (RLPTrackActionTableView *)self.table;
+        tv.pathForRow = ^NSString *(NSInteger row) {
+            __typeof__(self) s = ws;
+            if (!s || row < 0 || row >= (NSInteger)s.paths.count) return nil;
+            return s.paths[(NSUInteger)row];
+        };
+        tv.removeAction = @selector(onMenuRemove:);
+        tv.removeTarget = self;
+    }
 
     // 拖动排序
     [self.table registerForDraggedTypes:@[ kQueueDragType ]];
@@ -196,6 +209,11 @@ static NSString *const kQueueDragType = @"RLPQueueRowDrag";
 - (void)onMenuPlay:(id)sender {
     const NSInteger row = self.table.clickedRow;
     if (row >= 0) [self playRow:row];
+}
+
+/// 共享右键菜单的动作入口。
+- (void)rlp_trackMenuAction:(NSMenuItem *)sender {
+    RLPHandleTrackAction(sender, self.view);
 }
 
 - (void)onMenuRemove:(id)sender {

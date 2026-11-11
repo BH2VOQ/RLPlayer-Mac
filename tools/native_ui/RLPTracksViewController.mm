@@ -7,6 +7,7 @@
 #import "RLPCoreClient.h"
 #import "RLPModels.h"
 #import "RLPSupport.h"
+#import "RLPTrackActions.h"
 #import "RLPTheme.h"
 
 static NSString * const kColIndex = @"ColIndex";
@@ -18,6 +19,8 @@ static NSString * const kColDuration = @"ColDuration";
 #pragma mark - 支持右键选中行的表格视图
 
 @interface RLPTrackTableView : NSTableView
+/// 按行取路径：右键菜单必须针对**被点的那一行**，不能用静态菜单。
+@property (nonatomic, copy) NSString *_Nullable (^pathForRow)(NSInteger row);
 @end
 
 @implementation RLPTrackTableView
@@ -29,7 +32,10 @@ static NSString * const kColDuration = @"ColDuration";
         if (![self isRowSelected:row]) {
             [self selectRowIndexes:[NSIndexSet indexSetWithIndex:(NSUInteger)row] byExtendingSelection:NO];
         }
-        return self.menu;
+        // 与 web trackActionMenu 同一套：播放/入队/收藏/存歌单/体检/对比
+        NSString *path = self.pathForRow ? self.pathForRow(row) : nil;
+        NSMenu *m = RLPTrackMenuForPath(path, self, nil, nil);
+        return m ?: self.menu;
     }
     return nil;
 }
@@ -129,6 +135,13 @@ static NSString * const kColDuration = @"ColDuration";
     enqueueItem.target = self;
     [contextMenu addItem:enqueueItem];
     _tableView.menu = contextMenu;
+    // 动态菜单按被点行取路径（静态菜单只对第一次选中的行有效，是错的）
+    __weak __typeof__(self) weakSelf = self;
+    ((RLPTrackTableView *)_tableView).pathForRow = ^NSString *(NSInteger row) {
+        __typeof__(self) s = weakSelf;
+        if (!s) return nil;
+        return [s pathAtRow:row];
+    };
 
     // 表头：# / 标题 / 艺术家 / 专辑 / 时长
     NSTableColumn *colIndex = [[NSTableColumn alloc] initWithIdentifier:kColIndex];
@@ -383,6 +396,17 @@ static NSString * const kColDuration = @"ColDuration";
     if (t.path.length) {
         RLPPlayPath(t.path);
     }
+}
+
+/// 供动态右键菜单按行取路径。
+- (NSString *)pathAtRow:(NSInteger)row {
+    if (row < 0 || row >= (NSInteger)_tracks.count) return nil;
+    return _tracks[(NSUInteger)row].path;
+}
+
+/// 共享菜单的动作入口（RLPTrackMenuForPath 的项走 responder chain 到这里）。
+- (void)rlp_trackMenuAction:(NSMenuItem *)sender {
+    RLPHandleTrackAction(sender, self.view);
 }
 
 - (void)onPlayContextMenu:(id)sender {

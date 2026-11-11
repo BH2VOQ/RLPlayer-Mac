@@ -6,6 +6,7 @@
 #import "RLPModels.h"
 #import "RLPTheme.h"
 #import "RLPSupport.h"
+#import "RLPTrackActions.h"
 
 static const NSUserInterfaceItemIdentifier kFavTableID = @"RLPFavTable";
 
@@ -27,9 +28,19 @@ static const NSUserInterfaceItemIdentifier kFavTableID = @"RLPFavTable";
 - (void)buildContent {
 
     
-    _tableView = [[NSTableView alloc] initWithFrame:self.contentView.bounds];
+    _tableView = [[RLPTrackActionTableView alloc] initWithFrame:self.contentView.bounds];
     _tableView.dataSource = self;
     _tableView.delegate = self;
+    // 右键 = 与 web 一致的完整曲目动作（播放/入队/收藏/存歌单/体检/对比）
+    {
+        __weak __typeof__(self) ws = self;
+        ((RLPTrackActionTableView *)_tableView).pathForRow = ^NSString *(NSInteger row) {
+            __typeof__(self) s = ws;
+            NSArray<RLPTrack *> *ts = self.tracks;
+            if (!s || row < 0 || row >= (NSInteger)ts.count) return nil;
+            return ts[(NSUInteger)row].path;
+        };
+    }
     _tableView.headerView = [[NSTableHeaderView alloc] initWithFrame:NSMakeRect(0, 0, 0, 24)];
     _tableView.usesAlternatingRowBackgroundColors = YES;
     
@@ -90,6 +101,11 @@ static const NSUserInterfaceItemIdentifier kFavTableID = @"RLPFavTable";
 }
 
 #pragma mark - Actions
+
+/// 共享右键菜单的动作入口。
+- (void)rlp_trackMenuAction:(NSMenuItem *)sender {
+    RLPHandleTrackAction(sender, self.view);
+}
 
 - (void)onDoubleClick:(id)sender {
     NSInteger row = [_tableView clickedRow];

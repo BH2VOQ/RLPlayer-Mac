@@ -219,6 +219,7 @@ if(APPLE)
     tools/native_ui/RLPFunctionalAudit.mm
     tools/native_ui/RLPAnalysisSummary.mm
     tools/native_ui/RLPListeningRoom.mm
+    tools/native_ui/RLPTrackActions.mm
     tools/native_ui/RLPWorkbench.mm
     tools/native_ui/RLPWorkbenchViewController.mm
     tools/mac_update.mm)
@@ -242,6 +243,9 @@ if(APPLE)
     tools/native_ui/RLPInputView.mm tools/native_ui/RLPCastView.mm
     tools/native_ui/RLPCalibrationView.mm tools/native_ui/RLPFeedbackWindowController.mm
     tools/native_ui/RLPKnowledgeView.mm tools/native_ui/RLPFunctionalAudit.mm
+    tools/native_ui/RLPAnalysisSummary.mm tools/native_ui/RLPListeningRoom.mm
+    tools/native_ui/RLPTrackActions.mm tools/native_ui/RLPWorkbench.mm
+    tools/native_ui/RLPWorkbenchViewController.mm
     PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
   target_include_directories(rlplayer_native PRIVATE
     ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tools ${CMAKE_SOURCE_DIR}/tools/native_ui)
@@ -381,6 +385,23 @@ if(APPLE)
   target_link_libraries(test_mode_settings_readback PRIVATE rlapp_core "-framework AppKit")
   add_test(NAME mode_settings_readback COMMAND test_mode_settings_readback)
   set_tests_properties(mode_settings_readback PROPERTIES TIMEOUT 180)
+
+  # 2026-11-11：曲目右键菜单完整性（对齐 web trackActionMenu 四项核心动作）。
+  # 触发原因：原生曲目页只有两项、专辑详情完全没有右键菜单、队列只有两项。
+  add_executable(test_track_actions tests/test_track_actions.mm
+    tools/native_ui/RLPTrackActions.mm tools/native_ui/RLPAnalysisSummary.mm
+    tools/native_ui/RLPCoreClient.mm tools/native_ui/RLPSupport.mm
+    tools/native_ui/RLPTheme.mm tools/native_ui/RLPNativeI18n.mm)
+  set_source_files_properties(tests/test_track_actions.mm
+    tools/native_ui/RLPTrackActions.mm tools/native_ui/RLPAnalysisSummary.mm
+    tools/native_ui/RLPCoreClient.mm tools/native_ui/RLPSupport.mm
+    tools/native_ui/RLPTheme.mm tools/native_ui/RLPNativeI18n.mm
+    PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
+  target_include_directories(test_track_actions PRIVATE
+    ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tools ${CMAKE_SOURCE_DIR}/tools/native_ui)
+  target_link_libraries(test_track_actions PRIVATE rlapp_core "-framework AppKit")
+  add_test(NAME track_actions COMMAND test_track_actions)
+  set_tests_properties(track_actions PROPERTIES TIMEOUT 120)
 
   # 2026-11-11（1.1.7.1）：/api/settings 的"写了就是写了"判据。
   # 触发原因是一个真 BUG：白名单漏了 hogexcl ⟹ POST 回 ok:true 却不落盘、读回为空，

@@ -45,14 +45,26 @@
 - (void)build {
     RLPTheme *t = [RLPTheme current];
     self.stack = [[NSStackView alloc] initWithFrame:self.bounds];
-    self.stack.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
+    // 用约束铺满，不用 autoresizingMask：本视图自身是被 Auto Layout 定位的，
+    // 混用两者会让内容按"初始 bounds"缩放而错位（艺术家页实测：按钮压到统计行上）。
+    self.stack.translatesAutoresizingMaskIntoConstraints = NO;
     self.stack.orientation = NSUserInterfaceLayoutOrientationVertical;
     self.stack.alignment = NSLayoutAttributeLeading;
     self.stack.spacing = 8;
     [self addSubview:self.stack];
+    [NSLayoutConstraint activateConstraints:@[
+        [self.stack.leadingAnchor constraintEqualToAnchor:self.leadingAnchor],
+        [self.stack.trailingAnchor constraintEqualToAnchor:self.trailingAnchor],
+        [self.stack.topAnchor constraintEqualToAnchor:self.topAnchor],
+        [self.stack.bottomAnchor constraintLessThanOrEqualToAnchor:self.bottomAnchor],
+    ]];
 
     NSStackView *hdr = [[NSStackView alloc] init];
+    // 作为 arrangedSubview 必须关掉 autoresizing 翻译，否则与 stack 的约束打架
+    // （实测：按钮被挤到统计行上）。
+    hdr.translatesAutoresizingMaskIntoConstraints = NO;
     hdr.orientation = NSUserInterfaceLayoutOrientationHorizontal;
+    hdr.alignment = NSLayoutAttributeCenterY;
     hdr.spacing = 8;
     self.title = RLPLabel(RLPTr(@"AI 资料"),
         [NSFont systemFontOfSize:13 weight:NSFontWeightSemibold], t.text);
@@ -69,6 +81,7 @@
     [self.stack addArrangedSubview:self.status];
 
     self.fieldStack = [[NSStackView alloc] init];
+    self.fieldStack.translatesAutoresizingMaskIntoConstraints = NO;
     self.fieldStack.orientation = NSUserInterfaceLayoutOrientationVertical;
     self.fieldStack.alignment = NSLayoutAttributeLeading;
     self.fieldStack.spacing = 3;

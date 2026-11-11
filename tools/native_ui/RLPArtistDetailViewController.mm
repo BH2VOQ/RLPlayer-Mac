@@ -9,6 +9,7 @@
 #import "RLPCoreClient.h"
 #import "RLPModels.h"
 #import "RLPSupport.h"
+#import "RLPKnowledgeView.h"
 #import "RLPTheme.h"
 
 static const NSUserInterfaceItemIdentifier kArtistAlbumItemID = @"RLPArtistAlbumItem";
@@ -155,6 +156,7 @@ static const NSUserInterfaceItemIdentifier kArtistAlbumItemID = @"RLPArtistAlbum
 @property (nonatomic, strong) NSScrollView *scroll;
 @property (nonatomic, strong) NSCollectionView *collection;
 @property (nonatomic, strong) NSMutableArray<RLPAlbum *> *albums;
+@property (nonatomic, strong) RLPKnowledgeView *knowledge;
 @end
 
 @implementation RLPArtistDetailViewController
@@ -174,7 +176,12 @@ static const NSUserInterfaceItemIdentifier kArtistAlbumItemID = @"RLPArtistAlbum
     NSView *host = self.contentView;
 
     // 1. 顶部返回按钮
-    NSButton *back = RLPSymbolButton(@"chevron.left", RLPTr(@"返回"), self, @selector(onBack:));
+    // 返回带文案（web 是「返回艺术家列表」，不是裸箭头）
+    NSButton *back = [NSButton buttonWithTitle:RLPTr(@"返回艺术家列表") target:self action:@selector(onBack:)];
+    back.bezelStyle = NSBezelStyleRounded;
+    back.image = [NSImage imageWithSystemSymbolName:@"chevron.left" accessibilityDescription:RLPTr(@"返回艺术家列表")];
+    back.imagePosition = NSImageLeading;
+    back.font = t.small;
     back.translatesAutoresizingMaskIntoConstraints = NO;
     [host addSubview:back];
 
@@ -252,6 +259,12 @@ static const NSUserInterfaceItemIdentifier kArtistAlbumItemID = @"RLPArtistAlbum
     [host addSubview:_scroll];
 
     // 6. 空状态
+    // AI 资料层（web 艺术家页有简介/流派/相似艺术家）：复用单曲页同一个面板，
+    // kind=person。不另写一套检索逻辑。
+    _knowledge = [[RLPKnowledgeView alloc] initWithFrame:NSMakeRect(0, 0, 520, 120)];
+    _knowledge.translatesAutoresizingMaskIntoConstraints = NO;
+    [host addSubview:_knowledge];
+
     _emptyLabel = RLPLabel(@"", t.body, t.mut);
     _emptyLabel.alignment = NSTextAlignmentCenter;
     _emptyLabel.translatesAutoresizingMaskIntoConstraints = NO;
@@ -261,8 +274,7 @@ static const NSUserInterfaceItemIdentifier kArtistAlbumItemID = @"RLPArtistAlbum
     [NSLayoutConstraint activateConstraints:@[
         [back.leadingAnchor constraintEqualToAnchor:host.leadingAnchor constant:16],
         [back.topAnchor constraintEqualToAnchor:host.topAnchor constant:6],
-        [back.widthAnchor constraintEqualToConstant:24],
-        [back.heightAnchor constraintEqualToConstant:24],
+        [back.heightAnchor constraintEqualToConstant:26],
 
         [_avatarView.leadingAnchor constraintEqualToAnchor:host.leadingAnchor constant:24],
         [_avatarView.topAnchor constraintEqualToAnchor:back.bottomAnchor constant:10],
@@ -280,9 +292,15 @@ static const NSUserInterfaceItemIdentifier kArtistAlbumItemID = @"RLPArtistAlbum
         [_statsLabel.topAnchor constraintEqualToAnchor:_nameLabel.bottomAnchor constant:8],
         [_statsLabel.trailingAnchor constraintEqualToAnchor:_nameLabel.trailingAnchor],
 
+        [_knowledge.leadingAnchor constraintEqualToAnchor:_nameLabel.leadingAnchor],
+        [_knowledge.trailingAnchor constraintEqualToAnchor:host.trailingAnchor constant:-24],
+        [_knowledge.topAnchor constraintEqualToAnchor:_statsLabel.bottomAnchor constant:8],
+        // 面板内含 150px 文本区 + 标题/状态/字段行，110 装不下会挤错位
+        [_knowledge.heightAnchor constraintEqualToConstant:215],
+
         [_scroll.leadingAnchor constraintEqualToAnchor:host.leadingAnchor],
         [_scroll.trailingAnchor constraintEqualToAnchor:host.trailingAnchor],
-        [_scroll.topAnchor constraintEqualToAnchor:_avatarView.bottomAnchor constant:16],
+        [_scroll.topAnchor constraintEqualToAnchor:_knowledge.bottomAnchor constant:12],
         [_scroll.bottomAnchor constraintEqualToAnchor:host.bottomAnchor],
 
         [_emptyLabel.centerXAnchor constraintEqualToAnchor:_scroll.centerXAnchor],
@@ -295,6 +313,7 @@ static const NSUserInterfaceItemIdentifier kArtistAlbumItemID = @"RLPArtistAlbum
         [self reloadData];
     }
     [self loadAvatar];
+    if (_artistName.length) [_knowledge loadKind:@"person" name:_artistName artist:nil];
 }
 
 /// 艺术家真头像。/api/artist/image 内部已做「真头像 → 专辑封面」兜底，

@@ -482,3 +482,17 @@ PCM 输出（关）	PCM output (off)	1.1.7.1 功能对齐补充
 输出设备 / 独占 / 升频 / 滤波 / DSD / 均衡都在「专业工作台」当场切换，这里只放它没有的项。	Output device, exclusive mode, upsampling, filters, DSD and EQ all switch live on the Pro Workbench; only items it lacks are here.	1.1.7.1 设置重组与详情页
 返回专辑	Back to albums	1.1.7.1 设置重组与详情页
 预衰减 (dB)	Pre-attenuation (dB)	1.1.7.1 设置重组与详情页
+仅本地文件可对比	Only local files can be compared	1.1.7.1 曲目动作对齐
+已加入歌单	Added to playlist	1.1.7.1 曲目动作对齐
+已补全：	Filled: 	1.1.7.1 曲目动作对齐
+已跳过（资料已完整或未开启补全）	Skipped (metadata already complete or enrichment is off)	1.1.7.1 曲目动作对齐
+新歌单名	New playlist name	1.1.7.1 曲目动作对齐
+正在补全资料…	Enriching metadata…	1.1.7.1 曲目动作对齐
+没有可补全的字段	No fields to fill	1.1.7.1 曲目动作对齐
+补全失败	Enrichment failed	1.1.7.1 曲目动作对齐
+请先选歌单或填新名字	Pick a playlist or enter a new name first	1.1.7.1 曲目动作对齐
+选一个歌单，或新建一个。	Pick a playlist, or create a new one.	1.1.7.1 曲目动作对齐
+（还没有歌单，请在下面新建）	(No playlists yet — create one below)	1.1.7.1 曲目动作对齐
+AI 补全资料	AI metadata enrichment	1.1.7.1 曲目动作对齐
+保存	Save	1.1.7.1 曲目动作对齐
+读取中…	Loading…	1.1.7.1 曲目动作对齐

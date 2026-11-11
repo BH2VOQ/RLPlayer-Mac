@@ -9,6 +9,7 @@
 #import "RLPCoreClient.h"
 #import "RLPModels.h"
 #import "RLPSupport.h"
+#import "RLPTrackActions.h"
 #import "RLPTheme.h"
 
 @interface RLPAlbumDetailViewController () <NSTableViewDataSource, NSTableViewDelegate>
@@ -130,7 +131,8 @@
     self.emptyLabel.translatesAutoresizingMaskIntoConstraints = NO;
     [host addSubview:self.emptyLabel];
 
-    self.table = [[NSTableView alloc] initWithFrame:NSZeroRect];
+    // 用共享曲目表格：右键得到与 web 一致的完整动作（含体检/对比/存歌单）
+    self.table = [[RLPTrackActionTableView alloc] initWithFrame:NSZeroRect];
     self.table.backgroundColor = [NSColor clearColor];
     self.table.headerView = nil;
     self.table.rowHeight = 38;
@@ -153,6 +155,15 @@
         else if ([ident isEqualToString:@"dur"]) col.width = 64;
         else col.width = 34;
         [self.table addTableColumn:col];
+    }
+    {
+        __weak __typeof__(self) ws = self;
+        RLPTrackActionTableView *tv = (RLPTrackActionTableView *)self.table;
+        tv.pathForRow = ^NSString *(NSInteger row) {
+            __typeof__(self) s = ws;
+            if (!s || row < 0 || row >= (NSInteger)s.tracks.count) return nil;
+            return s.tracks[(NSUInteger)row].path;
+        };
     }
     self.scroll = [[NSScrollView alloc] initWithFrame:NSZeroRect];
     self.scroll.drawsBackground = NO;
@@ -320,6 +331,11 @@
         label.textColor = t.mut;
     }
     return label;
+}
+
+/// 共享右键菜单的动作入口。
+- (void)rlp_trackMenuAction:(NSMenuItem *)sender {
+    RLPHandleTrackAction(sender, self.view);
 }
 
 /// 单曲收藏（/api/fav?file=…&on=1，与 web 行内爱心同一端点）。

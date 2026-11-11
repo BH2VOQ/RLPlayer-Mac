@@ -261,6 +261,28 @@ int RLPRunFunctionalAudit(NSString *outDir) {
            "返回后回到专辑页", NSStringFromClass(wc.currentContent.class));
     }
 
+    // ---- ②b 艺术家详情：必须能进、有内容、AI 资料层在位 ----
+    {
+        NSString *who = nil;
+        for (id a in arr) {
+            if (![a isKindOfClass:[NSDictionary class]]) continue;
+            NSString *ar = [a[@"artist"] isKindOfClass:[NSString class]] ? a[@"artist"] : nil;
+            if (ar.length) { who = ar; break; }
+        }
+        if (who.length) {
+            RLPRequestOpenArtist(who);
+            Pump(0.8);
+            CK([wc.currentContent isKindOfClass:[RLPArtistDetailViewController class]],
+               "点艺术家进入艺术家详情页", NSStringFromClass(wc.currentContent.class));
+            CK(NonEmptyLabels(wc.currentContent.view) >= 2, "艺术家详情页有实际内容",
+               [NSString stringWithFormat:@"labels=%ld", (long)NonEmptyLabels(wc.currentContent.view)]);
+            Snap(wc.window.contentView, [outDir stringByAppendingPathComponent:@"02b-artist-detail.png"],
+                 CGSizeMake(1180, 760));
+            RLPRequestBack();
+            Pump(0.4);
+        }
+    }
+
     // ---- ③ 逐个导航项：切过去必须有内容 + 截图 ----
     // 1.1.7.1：按**符号 key** 遍历，不用裸行号 —— 导航项随模式变化，行号会错位。
     // 聆听模式先走一遍（含聆听室），再切专业模式验工作台与设置。
