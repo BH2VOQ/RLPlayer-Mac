@@ -1,0 +1,217 @@
+// SPDX-FileCopyrightText: 2026 BH2VOQ <https://github.com/BH2VOQ>
+// SPDX-License-Identifier: GPL-3.0-or-later
+//
+// test_servers_view.mm — 流媒体服务器管理的真链路判据（2026-11-12 对齐 web SRC 区块）
+//
+// 触发原因：原生设置·流媒体页此前**只读**（交接单 §2.2 挂账），web 版能增删改/启用/测试。
+// 离线判据抓不到"写了没落盘"，所以这里起真核心（隔离目录、backend=null、不出声）：
+//   S1 表单骨架在位（添加按钮 + 名称/类型/地址/用户/密码 + 保存/测试/取消）
+//   S2 校验与 web srcSave 同口径（地址必填、http(s) 前缀、用户名必填）
+//   S3 add → GET 读回（含 kind/base/user，密码不回明文）
+//   S4 update 留空密码 = 保持原密码（后端 keepPass 语义）
+//   S5 active 切换 → 读回 active 标记
+//   S6 remove → 读回消失
+//   S7 设置·流媒体页真的嵌了管理视图（不是只读文本）
+#import <AppKit/AppKit.h>
+#import "RLPServersView.h"
+#import "RLPSettingsViewController.h"
+#import "RLPCoreClient.h"
+#import "RLPSupport.h"
+
+#include <cstdio>
+#include <cstdlib>
+#include <unistd.h>
+
+static int gFail = 0, gPass = 0;
+static void CK(BOOL ok, const char *what, NSString *detail) {
+    if (ok) { ++gPass; std::printf("  [PASS] %s\n", what); }
+    else { ++gFail; std::printf("  [FAIL] %s — %s\n", what, detail.UTF8String ?: ""); }
+}
+static void CollectViews(NSView *v, NSMutableArray<NSView *> *out) {
+    if (!v) return;
+    [out addObject:v];
+    for (NSView *s in v.subviews) CollectViews(s, out);
+}
+static NSView *FindById(NSView *root, NSString *ident) {
+    NSMutableArray<NSView *> *all = [NSMutableArray array];
+    CollectViews(root, all);
+    for (NSView *v in all) if ([v.identifier isEqualToString:ident]) return v;
+    return nil;
+}
+/// 主线程 runloop 转一会儿，等异步回调落地。
+static void Pump(NSTimeInterval s) {
+    NSDate *until = [NSDate dateWithTimeIntervalSinceNow:s];
+    while ([until timeIntervalSinceNow] > 0)
+        [[NSRunLoop currentRunLoop] runMode:NSDefaultRunLoopMode
+                                 beforeDate:[NSDate dateWithTimeIntervalSinceNow:0.02]];
+}
+
+int main() {
+    @autoreleasepool {
+        NSApplication *app = [NSApplication sharedApplication];
+        [app setActivationPolicy:NSApplicationActivationPolicyAccessory];
+        std::printf("=== test_servers_view（真核心 · 隔离目录 · 不出声）===\n");
+
+        NSString *root = [NSTemporaryDirectory() stringByAppendingPathComponent:
+            [NSString stringWithFormat:@"rlp-servers-%d", (int)getpid()]];
+        NSString *state = [root stringByAppendingPathComponent:@"state"];
+        NSString *lib = [root stringByAppendingPathComponent:@"lib"];
+        NSFileManager *fm = [NSFileManager defaultManager];
+        [fm createDirectoryAtPath:state withIntermediateDirectories:YES attributes:nil error:nil];
+        [fm createDirectoryAtPath:lib withIntermediateDirectories:YES attributes:nil error:nil];
+        setenv("RLPLAYER_STATE_DIR", state.fileSystemRepresentation, 1);
+        setenv("RLPLAYER_LIBRARY_DIR", lib.fileSystemRepresentation, 1);
+
+        RLPCoreClient *core = [RLPCoreClient shared];
+        if (![core startEmbedded]) { std::printf("  [FAIL] 核心启动失败\n"); return 1; }
+        [core jsonWithMethod:@"POST" path:@"/api/settings" body:@"backend=null&volume=-120"];
+
+        // ---- S1 表单骨架 ----
+        RLPServersView *sv = [[RLPServersView alloc] initWithFrame:NSMakeRect(0, 0, 640, 400)];
+        [sv layoutSubtreeIfNeeded];
+        CK(FindById(sv, @"srv.add") != nil, "S1a 有「添加服务器」按钮", @"");
+        // 点开表单（新增态）
+        NSButton *add = (NSButton *)FindById(sv, @"srv.add");
+        [add performClick:nil];
+        for (NSString *ident in @[ @"srv.form.name", @"srv.form.kind", @"srv.form.base",
+                                   @"srv.form.user", @"srv.form.pass", @"srv.form.save",
+                                   @"srv.form.test", @"srv.form.cancel" ]) {
+            CK(FindById(sv, ident) != nil,
+               [[NSString stringWithFormat:@"S1b 表单含 %@", ident] UTF8String], @"缺失");
+        }
+        NSView *form = FindById(sv, @"srv.form");
+        CK(form && !form.isHidden, "S1c 点添加后表单展开", @"");
+        NSSecureTextField *pass = (NSSecureTextField *)FindById(sv, @"srv.form.pass");
+        CK([pass isKindOfClass:[NSSecureTextField class]], "S1d 密码是安全输入框", @"");
+
+        // ---- S2 校验（与 web srcSave 同口径）----
+        // 用 KVC 取私有校验方法会脆；改为直接驱动保存按钮看 formMsg。
+        NSTextField *base = (NSTextField *)FindById(sv, @"srv.form.base");
+        NSTextField *user = (NSTextField *)FindById(sv, @"srv.form.user");
+        NSTextField *msg = (NSTextField *)FindById(sv, @"srv.form.msg");
+        NSButton *save = (NSButton *)FindById(sv, @"srv.form.save");
+        base.stringValue = @""; user.stringValue = @"u";
+        [save performClick:nil];
+        CK([msg.stringValue isEqualToString:RLPTr(@"请填写服务器地址")],
+           "S2a 空地址被拦（与 web 同文案）", msg.stringValue ?: @"nil");
+        base.stringValue = @"ftp://x"; user.stringValue = @"u";
+        [save performClick:nil];
+        CK([msg.stringValue isEqualToString:RLPTr(@"地址要以 http:// 或 https:// 开头")],
+           "S2b 非 http(s) 地址被拦", msg.stringValue ?: @"nil");
+        base.stringValue = @"https://x"; user.stringValue = @"";
+        [save performClick:nil];
+        CK([msg.stringValue isEqualToString:RLPTr(@"请填写用户名")],
+           "S2c 空用户名被拦", msg.stringValue ?: @"nil");
+
+        // ---- S3 add → 读回 ----
+        base.stringValue = @"https://music.example.com";
+        user.stringValue = @"alice";
+        pass.stringValue = @"secret-pass";
+        NSTextField *name = (NSTextField *)FindById(sv, @"srv.form.name");
+        name.stringValue = @"测试服";
+        [save performClick:nil];
+        Pump(0.8);
+        NSDictionary *cfg = [core jsonWithMethod:@"GET" path:@"/api/src/config" body:nil];
+        NSArray *servers = [cfg[@"servers"] isKindOfClass:[NSArray class]] ? cfg[@"servers"] : @[];
+        CK(servers.count == 1, "S3a add 后读回 1 台",
+           [NSString stringWithFormat:@"n=%lu", (unsigned long)servers.count]);
+        NSDictionary *s0 = servers.firstObject;
+        CK([s0[@"base"] isEqualToString:@"https://music.example.com"], "S3b base 落盘", s0[@"base"] ?: @"nil");
+        CK([s0[@"user"] isEqualToString:@"alice"], "S3c user 落盘", s0[@"user"] ?: @"nil");
+        CK([s0[@"hasPass"] boolValue], "S3d 密码已存（hasPass=true）", @"");
+        CK(s0[@"pass"] == nil, "S3e GET 不回密码明文（红线）", @"");
+        CK(form.isHidden, "S3f 保存成功后表单收起", @"");
+        NSString *sid = [s0[@"id"] isKindOfClass:[NSString class]] ? s0[@"id"] : @"";
+        CK(sid.length > 0, "S3g 拿到服务器 id", @"");
+
+        // ---- S4 update：留空密码 = 保持原密码 ----
+        // 直接走后端契约（UI 的 update 路径与 add 共用 formBody，这里钉后端语义 + UI 编辑回填）。
+        [core jsonWithMethod:@"POST" path:@"/api/src/config"
+                        body:[NSString stringWithFormat:@"action=update&id=%@&kind=subsonic&name=%@&base=%@&user=%@&pass=",
+                              RLPEnc(sid), RLPEnc(@"改名服"), RLPEnc(@"https://music.example.com"), RLPEnc(@"alice")]];
+        NSDictionary *cfg2 = [core jsonWithMethod:@"GET" path:@"/api/src/config" body:nil];
+        NSArray *ss2 = cfg2[@"servers"];
+        NSDictionary *u0 = ss2.firstObject;
+        CK([u0[@"name"] isEqualToString:@"改名服"], "S4a update 改名落盘", u0[@"name"] ?: @"nil");
+        CK([u0[@"hasPass"] boolValue], "S4b 留空密码后原密码仍在（keepPass）", @"");
+        // UI 编辑态：密码框必须清空、占位符提示"留空 = 保持原密码"
+        [sv reload]; Pump(0.6);
+        NSButton *editBtn = nil;
+        NSMutableArray<NSView *> *all = [NSMutableArray array];
+        CollectViews(sv, all);
+        for (NSView *v in all)
+            if ([v isKindOfClass:[NSButton class]] && [v.identifier isEqualToString:sid] &&
+                [((NSButton *)v).title isEqualToString:RLPTr(@"编辑")]) editBtn = (NSButton *)v;
+        CK(editBtn != nil, "S4c 列表行有「编辑」按钮", @"");
+        [editBtn performClick:nil];
+        CK([pass.stringValue isEqualToString:@""], "S4d 编辑时密码框不回填", pass.stringValue ?: @"nil");
+        CK([pass.placeholderString isEqualToString:RLPTr(@"留空 = 保持原密码")],
+           "S4e 编辑时密码占位符提示保持原密码", pass.placeholderString ?: @"nil");
+        NSButton *cancel = (NSButton *)FindById(sv, @"srv.form.cancel");
+        [cancel performClick:nil];
+
+        // ---- S5 active ----
+        [core jsonWithMethod:@"POST" path:@"/api/src/config"
+                        body:[@"action=active&id=" stringByAppendingString:RLPEnc(sid)]];
+        NSDictionary *cfg3 = [core jsonWithMethod:@"GET" path:@"/api/src/config" body:nil];
+        CK([cfg3[@"active"] isEqualToString:sid], "S5a active 切换落盘", cfg3[@"active"] ?: @"nil");
+
+        // ---- S6 remove ----
+        [core jsonWithMethod:@"POST" path:@"/api/src/config"
+                        body:[@"action=remove&id=" stringByAppendingString:RLPEnc(sid)]];
+        NSDictionary *cfg4 = [core jsonWithMethod:@"GET" path:@"/api/src/config" body:nil];
+        NSArray *ss4 = [cfg4[@"servers"] isKindOfClass:[NSArray class]] ? cfg4[@"servers"] : @[];
+        CK(ss4.count == 0, "S6a remove 后读回 0 台",
+           [NSString stringWithFormat:@"n=%lu", (unsigned long)ss4.count]);
+
+        // ---- S7 设置·流媒体页嵌了管理视图 ----
+        RLPSettingsViewController *settings = [[RLPSettingsViewController alloc] init];
+        // 先触发 loadView（App 里 addSubview 时才建视图树）；paneHost 未建时 selectPane 会崩。
+        [settings.view layoutSubtreeIfNeeded];
+        [settings selectPane:@"stream"];
+        [settings.view layoutSubtreeIfNeeded];
+        NSMutableArray<NSView *> *sall = [NSMutableArray array];
+        CollectViews(settings.view, sall);
+        BOOL hasServersView = NO;
+        for (NSView *v in sall) if ([v isKindOfClass:[RLPServersView class]]) hasServersView = YES;
+        CK(hasServersView, "S7 设置·流媒体页嵌入服务器管理视图（不再只读）", @"");
+
+        // ---- S8 标签写回：忙态/轮询骨架（对齐 web WB_BUSY/wbPoll/wbSyncBusy）----
+        // 旧实现没有 wbPoll/wbSyncBusy，执行后不轮询、按钮不禁用 —— 这里钉住方法在位。
+        [settings selectPane:@"adv"];
+        [settings.view layoutSubtreeIfNeeded];
+        CK([settings respondsToSelector:@selector(wbPoll)], "S8a 有写回轮询（wbPoll）", @"");
+        CK([settings respondsToSelector:@selector(wbSyncBusy)], "S8b 进页同步在跑状态（wbSyncBusy）", @"");
+        NSMutableArray<NSView *> *aall = [NSMutableArray array];
+        CollectViews(settings.view, aall);
+        NSButton *dry = nil, *apply = nil;
+        for (NSView *v in aall) {
+            if (![v isKindOfClass:[NSButton class]]) continue;
+            if ([v.identifier isEqualToString:@"wb.dry"]) dry = (NSButton *)v;
+            if ([v.identifier isEqualToString:@"wb.apply"]) apply = (NSButton *)v;
+        }
+        CK(dry != nil && apply != nil, "S8c 预览/执行按钮带标识（忙态要禁用它们）", @"");
+        // 空 MetaBase 下预览：必须走 writable/skipped 口径（旧实现读不存在的 count/note）。
+        if (dry) {
+            [dry performClick:nil];
+            Pump(1.0);
+            NSMutableArray<NSView *> *aall2 = [NSMutableArray array];
+            CollectViews(settings.view, aall2);
+            NSTextField *wbMsg = nil;
+            for (NSView *v in aall2) {
+                if (![v isKindOfClass:[NSTextField class]]) continue;
+                NSString *s = ((NSTextField *)v).stringValue;
+                if ([s rangeOfString:RLPTr(@"首可写")].location != NSNotFound ||
+                    [s rangeOfString:RLPTr(@"预览失败")].location != NSNotFound) wbMsg = (NSTextField *)v;
+            }
+            CK(wbMsg != nil, "S8d 预览结果用「N 首可写，M 首跳过」口径（或如实报错）",
+               wbMsg.stringValue ?: @"未找到结果文案");
+            CK(dry.enabled && apply.enabled, "S8e 预览结束后按钮恢复可用", @"");
+        }
+
+        [core shutdown];
+        [fm removeItemAtPath:root error:nil];
+        std::printf("\n%s（%d 项失败）\n", gFail == 0 ? "servers_view 全部通过" : "servers_view 有失败", gFail);
+        return gFail == 0 ? 0 : 1;
+    }
+}

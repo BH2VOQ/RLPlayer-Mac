@@ -28,6 +28,7 @@
 #import "RLPCastView.h"
 #import "RLPCalibrationView.h"
 #import "RLPFeedbackWindowController.h"
+#import "RLPServersView.h"
 
 #pragma mark - 页签定义
 
@@ -162,7 +163,7 @@ static NSView *RLPSGroup(NSString *title, NSString *desc, RLPTheme *t) {
 @property (nonatomic, strong) NSTextField *attenField;
 @property (nonatomic, strong) NSSwitch *streamSwitch;
 // 流媒体
-@property (nonatomic, strong) NSTextField *serverTableNote;
+@property (nonatomic, strong) RLPServersView *serversView;
 // 元数据
 @property (nonatomic, strong) NSSwitch *metaOnSwitch;
 @property (nonatomic, strong) NSSwitch *metaLlmSwitch;
@@ -175,6 +176,11 @@ static NSView *RLPSGroup(NSString *title, NSString *desc, RLPTheme *t) {
 @property (nonatomic, strong) RLPCalibrationView *calView;
 @property (nonatomic, strong) NSTextField *coverProgress;
 @property (nonatomic, strong) NSTextField *writebackStatus;
+@property (nonatomic, strong) NSButton *wbDryBtn;
+@property (nonatomic, strong) NSButton *wbApplyBtn;
+/// 写回批次的忙态与轮询（对齐 web WB_BUSY/wbPoll：执行期间禁按钮、800ms 轮询到 done）。
+@property (nonatomic, assign) BOOL wbBusy;
+@property (nonatomic, strong) NSTimer *wbTimer;
 @property (nonatomic, strong) NSTimer *coverTimer;
 // LLM（AI 资料层用的模型端点）
 @property (nonatomic, strong) NSTextField *llmBase;
@@ -203,6 +209,8 @@ static NSView *RLPSGroup(NSString *title, NSString *desc, RLPTheme *t) {
 
 - (void)dealloc {
     [[NSNotificationCenter defaultCenter] removeObserver:self];
+    [_wbTimer invalidate];
+    [_coverTimer invalidate];
 }
 
 - (void)onAppModeChanged:(NSNotification *)note {
@@ -625,8 +633,12 @@ static NSView *RLPSGroup(NSString *title, NSString *desc, RLPTheme *t) {
     wbRow.spacing = 8;
     NSButton *wbDry = [NSButton buttonWithTitle:RLPTr(@"预览") target:self action:@selector(onWritebackDry:)];
     wbDry.bezelStyle = NSBezelStyleRounded;
+    wbDry.identifier = @"wb.dry";
     NSButton *wbApply = [NSButton buttonWithTitle:RLPTr(@"执行写回") target:self action:@selector(onWritebackApply:)];
     wbApply.bezelStyle = NSBezelStyleRounded;
+    wbApply.identifier = @"wb.apply";
+    self.wbDryBtn = wbDry;
+    self.wbApplyBtn = wbApply;
     [wbRow addArrangedSubview:wbDry];
     [wbRow addArrangedSubview:wbApply];
     [stack addArrangedSubview:wbRow];
@@ -659,15 +671,14 @@ static NSView *RLPSGroup(NSString *title, NSString *desc, RLPTheme *t) {
 - (void)fillStream:(NSStackView *)stack t:(RLPTheme *)t {
     [stack addArrangedSubview:RLPSGroup(RLPTr(@"流媒体服务器"),
         RLPTr(@"可保存多台，同一时刻启用一台；只取原始文件，不转码"), t)];
-    self.serverTableNote = RLPLabel(RLPTr(@"读取中…"), t.body, t.mut);
-    [stack addArrangedSubview:self.serverTableNote];
-    NSButton *refresh = [NSButton buttonWithTitle:RLPTr(@"刷新服务器列表") target:self
-                                          action:@selector(onReloadServers:)];
-    refresh.bezelStyle = NSBezelStyleRounded;
-    [stack addArrangedSubview:refresh];
-    [stack addArrangedSubview:RLPLabel(
-        RLPTr(@"新增 / 编辑 / 删除服务器（含密码）在当前版本仍需使用 web 版设置页；"
-              @"本页只读取并显示已保存的服务器。"), t.small, t.mut)];
+    // 2026-11-12：增删改/启用/测试补齐（对齐 web SRC 区块），不再只读。
+    self.serversView = [[RLPServersView alloc] initWithFrame:NSMakeRect(0, 0, 620, 240)];
+    self.serversView.translatesAutoresizingMaskIntoConstraints = NO;
+    [stack addArrangedSubview:self.serversView];
+    [NSLayoutConstraint activateConstraints:@[
+        [self.serversView.widthAnchor constraintEqualToAnchor:stack.widthAnchor constant:-4],
+    ]];
+    [self.serversView reload];
 
     // 投放（AirPlay / UPnP）：与 web 版设置→流媒体页的推送区块同源
     self.castView = [[RLPCastView alloc] initWithFrame:NSMakeRect(0, 0, 560, 200)];
@@ -943,46 +954,123 @@ static NSView *RLPSGroup(NSString *title, NSString *desc, RLPTheme *t) {
     }];
 }
 
+#pragma mark - 标签写回（对齐 web：忙态禁按钮 + 800ms 轮询 status 到 done）
+
+- (void)wbSetBusy:(BOOL)busy {
+    self.wbBusy = busy;
+    self.wbDryBtn.enabled = !busy;
+    self.wbApplyBtn.enabled = !busy;
+    if (!busy) { [self.wbTimer invalidate]; self.wbTimer = nil; }
+}
+
+/// 轮询 /api/writeback/status：running 时显示 done/total 并续轮；结束时报 写入/跳过/失败。
+- (void)wbPoll {
+    if (![RLPCoreClient shared].started) { [self wbSetBusy:NO]; return; }
+    __weak __typeof__(self) weakSelf = self;
+    [[RLPCoreClient shared] getJSON:@"/api/writeback/status" completion:^(NSDictionary * _Nullable json) {
+        __typeof__(self) self_ = weakSelf;
+        if (!self_) return;
+        if (!json || ![json[@"ok"] boolValue]) { [self_ wbSetBusy:NO]; self_.writebackStatus.stringValue = @""; return; }
+        const BOOL running = [json[@"running"] respondsToSelector:@selector(boolValue)] && [json[@"running"] boolValue];
+        if (running) {
+            const NSInteger done = [json[@"done"] respondsToSelector:@selector(integerValue)] ? [json[@"done"] integerValue] : 0;
+            const NSInteger total = [json[@"total"] respondsToSelector:@selector(integerValue)] ? [json[@"total"] integerValue] : 0;
+            self_.writebackStatus.stringValue = [NSString stringWithFormat:RLPTr(@"写回进行中 %ld/%ld…"), (long)done, (long)total];
+            return;   // 定时器下一轮继续
+        }
+        [self_ wbSetBusy:NO];
+        NSString *err = [json[@"error"] isKindOfClass:[NSString class]] ? json[@"error"] : @"";
+        if (err.length) {
+            self_.writebackStatus.stringValue = [RLPTr(@"写回未执行：") stringByAppendingString:err];
+            RLPToast([RLPTr(@"写回未执行：") stringByAppendingString:err]);
+            return;
+        }
+        const NSInteger written = [json[@"written"] respondsToSelector:@selector(integerValue)] ? [json[@"written"] integerValue] : 0;
+        const NSInteger skipped = [json[@"skipped"] respondsToSelector:@selector(integerValue)] ? [json[@"skipped"] integerValue] : 0;
+        const NSInteger failed = [json[@"failed"] respondsToSelector:@selector(integerValue)] ? [json[@"failed"] integerValue] : 0;
+        NSString *summary = [NSString stringWithFormat:RLPTr(@"写入 %ld，跳过 %ld，失败 %ld"),
+                             (long)written, (long)skipped, (long)failed];
+        self_.writebackStatus.stringValue = summary;
+        RLPToast(summary);
+    }];
+}
+
+- (void)wbStartPolling {
+    [self.wbTimer invalidate];
+    __weak __typeof__(self) weakSelf = self;
+    self.wbTimer = [NSTimer scheduledTimerWithTimeInterval:0.8 repeats:YES block:^(NSTimer *tm) {
+        __typeof__(self) self_ = weakSelf;
+        if (!self_ || !self_.wbBusy) { [tm invalidate]; return; }
+        [self_ wbPoll];
+    }];
+    [self wbPoll];
+}
+
+/// 页面（重）打开时同步一次在跑状态：中途切走再回来也能接上轮询（web wbSyncBusy 同口径）。
+- (void)wbSyncBusy {
+    if (![RLPCoreClient shared].started || self.wbBusy) return;
+    __weak __typeof__(self) weakSelf = self;
+    [[RLPCoreClient shared] getJSON:@"/api/writeback/status" completion:^(NSDictionary * _Nullable json) {
+        __typeof__(self) self_ = weakSelf;
+        if (!self_ || self_.wbBusy) return;
+        if (!json || ![json[@"ok"] boolValue]) return;
+        const BOOL running = [json[@"running"] respondsToSelector:@selector(boolValue)] && [json[@"running"] boolValue];
+        if (!running) return;
+        [self_ wbSetBusy:YES];
+        self_.writebackStatus.stringValue = RLPTr(@"写回批次进行中…");
+        [self_ wbStartPolling];
+    }];
+}
+
 - (void)onWritebackDry:(id)sender {
-    if (![RLPCoreClient shared].started) return;
-    self.writebackStatus.stringValue = RLPTr(@"正在生成预览…");
+    (void)sender;
+    if (![RLPCoreClient shared].started || self.wbBusy) return;
+    [self wbSetBusy:YES];
+    self.writebackStatus.stringValue = RLPTr(@"正在扫描 MetaBase…");
     __weak __typeof__(self) weakSelf = self;
     [[RLPCoreClient shared] getJSON:@"/api/writeback?dry=1" completion:^(NSDictionary * _Nullable json) {
         __typeof__(self) self_ = weakSelf;
         if (!self_) return;
+        [self_ wbSetBusy:NO];
         if (!json || ![json[@"ok"] boolValue]) {
-            self_.writebackStatus.stringValue = [json[@"error"] isKindOfClass:[NSString class]]
-                ? json[@"error"] : RLPTr(@"预览失败");
+            NSString *err = [json[@"error"] isKindOfClass:[NSString class]] ? json[@"error"] : RLPTr(@"未知错误");
+            self_.writebackStatus.stringValue = @"";
+            RLPToast([RLPTr(@"预览失败：") stringByAppendingString:err]);
             return;
         }
-        const NSInteger n = [json[@"count"] respondsToSelector:@selector(integerValue)] ? [json[@"count"] integerValue] : 0;
-        NSString *note = [json[@"note"] isKindOfClass:[NSString class]] ? json[@"note"] : @"";
-        self_.writebackStatus.stringValue = note.length ? note
-            : [NSString stringWithFormat:RLPTr(@"待写回 %ld 个文件"), (long)n];
+        const NSInteger writable = [json[@"writable"] respondsToSelector:@selector(integerValue)] ? [json[@"writable"] integerValue] : 0;
+        const NSInteger skipped = [json[@"skipped"] respondsToSelector:@selector(integerValue)] ? [json[@"skipped"] integerValue] : 0;
+        NSString *msg = [NSString stringWithFormat:RLPTr(@"%ld 首可写，%ld 首跳过"), (long)writable, (long)skipped];
+        self_.writebackStatus.stringValue = msg;
+        RLPToast(msg);
     }];
 }
 
 - (void)onWritebackApply:(id)sender {
-    if (![RLPCoreClient shared].started) return;
+    (void)sender;
+    if (![RLPCoreClient shared].started || self.wbBusy) return;
     NSAlert *a = [[NSAlert alloc] init];
     a.messageText = RLPTr(@"执行标签写回？");
     a.informativeText = RLPTr(@"会改写音乐文件的标签。建议先点「预览」确认范围。");
     [a addButtonWithTitle:RLPTr(@"执行")];
     [a addButtonWithTitle:RLPTr(@"取消")];
     if ([a runModal] != NSAlertFirstButtonReturn) return;
-    self.writebackStatus.stringValue = RLPTr(@"正在写回…");
+    [self wbSetBusy:YES];
+    self.writebackStatus.stringValue = RLPTr(@"写回批次已启动…");
     __weak __typeof__(self) weakSelf = self;
     [[RLPCoreClient shared] postJSON:@"/api/writeback" body:@"{\"apply\":true}"
                           completion:^(NSDictionary * _Nullable json) {
         __typeof__(self) self_ = weakSelf;
         if (!self_) return;
-        if (!json || ![json[@"ok"] boolValue]) {
-            self_.writebackStatus.stringValue = [json[@"error"] isKindOfClass:[NSString class]]
-                ? json[@"error"] : RLPTr(@"写回失败");
+        const BOOL started = json && [json[@"ok"] boolValue] && [json[@"started"] boolValue];
+        if (!started) {
+            [self_ wbSetBusy:NO];
+            NSString *err = [json[@"error"] isKindOfClass:[NSString class]] ? json[@"error"] : RLPTr(@"未知错误");
+            self_.writebackStatus.stringValue = @"";
+            RLPToast([RLPTr(@"无法启动写回：") stringByAppendingString:err]);
             return;
         }
-        self_.writebackStatus.stringValue = RLPTr(@"写回已开始，可用「预览」查看剩余");
-        RLPToast(RLPTr(@"写回已开始"));
+        [self_ wbStartPolling];
     }];
 }
 
@@ -1011,11 +1099,10 @@ static NSView *RLPSGroup(NSString *title, NSString *desc, RLPTheme *t) {
 }
 
 - (void)onOpenFeedback:(id)sender { [[RLPFeedbackWindowController shared] showAndFocus]; }
-- (void)onReloadServers:(id)sender { [self loadServersForStreamPane]; }
 
 #pragma mark - 数据
 
-- (void)activate { [self reloadData]; }
+- (void)activate { [self reloadData]; [self wbSyncBusy]; }
 
 - (void)reloadData {
     if (![RLPCoreClient shared].started) {
@@ -1104,43 +1191,8 @@ static NSView *RLPSGroup(NSString *title, NSString *desc, RLPTheme *t) {
         self_.statusLine.stringValue = RLPTr(@"设置已加载");
     }];
 
-    [self loadServersForStreamPane];
+    [self.serversView reload];
     [self loadLlmConfig];
-}
-
-- (void)loadServersForStreamPane {
-    if (!self.serverTableNote) return;
-    if (![RLPCoreClient shared].started) {
-        self.serverTableNote.stringValue = RLPTr(@"核心未启动");
-        return;
-    }
-    __weak __typeof__(self) weakSelf = self;
-    [[RLPCoreClient shared] getJSON:@"/api/src/config" completion:^(NSDictionary * _Nullable json) {
-        __typeof__(self) self_ = weakSelf;
-        if (!self_) return;
-        if (!json) { self_.serverTableNote.stringValue = RLPTr(@"服务器列表读取失败"); return; }
-        NSArray *servers = [json[@"servers"] isKindOfClass:[NSArray class]] ? json[@"servers"] : @[];
-        if (!servers.count) {
-            self_.serverTableNote.stringValue = RLPTr(@"还没有配置流媒体服务器");
-            return;
-        }
-        NSMutableArray<NSString *> *lines = [NSMutableArray array];
-        for (id s in servers) {
-            if (![s isKindOfClass:[NSDictionary class]]) continue;
-            NSString *name = s[@"name"];
-            NSString *base = s[@"base"];
-            BOOL active = [s[@"active"] boolValue];
-            [lines addObject:[NSString stringWithFormat:@"%@ %@ — %@%@",
-                              active ? @"●" : @"○",
-                              name.length ? name : RLPTr(@"未命名"),
-                              base.length ? base : @"",
-                              active ? ([@" · " stringByAppendingString:RLPTr(@"使用中")]) : @""]];
-        }
-        // 换行用 @"\n" 常量拼：直接在源码里写裸换行会变成跨行的 Objective-C 字符串字面量（编译报错）。
-        static NSString *const kLineSep = @"\n";
-        self_.serverTableNote.stringValue = lines.count ? [lines componentsJoinedByString:kLineSep]
-                                                       : RLPTr(@"还没有配置流媒体服务器");
-    }];
 }
 
 #pragma mark - 主题
@@ -1161,6 +1213,7 @@ static NSView *RLPSGroup(NSString *title, NSString *desc, RLPTheme *t) {
     [self.inputView applyTheme];
     [self.castView applyTheme];
     [self.calView applyTheme];
+    [self.serversView applyTheme];
 }
 
 @end

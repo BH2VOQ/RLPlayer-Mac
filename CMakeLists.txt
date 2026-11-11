@@ -214,6 +214,7 @@ if(APPLE)
     tools/native_ui/RLPInputView.mm
     tools/native_ui/RLPCastView.mm
     tools/native_ui/RLPCalibrationView.mm
+    tools/native_ui/RLPServersView.mm
     tools/native_ui/RLPFeedbackWindowController.mm
     tools/native_ui/RLPKnowledgeView.mm
     tools/native_ui/RLPFunctionalAudit.mm
@@ -241,7 +242,8 @@ if(APPLE)
     tools/native_ui/RLPStreamingViewController.mm tools/native_ui/RLPQuickStartViewController.mm
     tools/native_ui/RLPPlaylistsViewController.mm tools/native_ui/RLPEqualizerView.mm
     tools/native_ui/RLPInputView.mm tools/native_ui/RLPCastView.mm
-    tools/native_ui/RLPCalibrationView.mm tools/native_ui/RLPFeedbackWindowController.mm
+    tools/native_ui/RLPCalibrationView.mm tools/native_ui/RLPServersView.mm
+    tools/native_ui/RLPFeedbackWindowController.mm
     tools/native_ui/RLPKnowledgeView.mm tools/native_ui/RLPFunctionalAudit.mm
     tools/native_ui/RLPAnalysisSummary.mm tools/native_ui/RLPListeningRoom.mm
     tools/native_ui/RLPTrackActions.mm tools/native_ui/RLPWorkbench.mm
@@ -385,6 +387,41 @@ if(APPLE)
   target_link_libraries(test_mode_settings_readback PRIVATE rlapp_core "-framework AppKit")
   add_test(NAME mode_settings_readback COMMAND test_mode_settings_readback)
   set_tests_properties(mode_settings_readback PROPERTIES TIMEOUT 180)
+
+  # 2026-11-12：流媒体服务器增删改/启用/测试（对齐 web SRC 区块，补交接单 §2.2 只读挂账）。
+  # 真核心判据：add/update(keepPass)/active/remove 全部写后读回；密码红线（GET 不回明文、
+  # 编辑不回填）。设置页依赖闭包较大（均衡/输入/投放/校准/更新/反馈子视图），逐一列出。
+  # 纪律：隔离 state/library + backend=null + volume=-120，不开设备、不出声。
+  add_executable(test_servers_view tests/test_servers_view.mm
+    tools/native_ui/RLPServersView.mm
+    tools/native_ui/RLPSettingsViewController.mm
+    tools/native_ui/RLPEqualizerView.mm
+    tools/native_ui/RLPInputView.mm
+    tools/native_ui/RLPCastView.mm
+    tools/native_ui/RLPCalibrationView.mm
+    tools/native_ui/RLPUpdateWindowController.mm
+    tools/native_ui/RLPFeedbackWindowController.mm
+    tools/native_ui/RLPPageViewController.mm
+    tools/native_ui/RLPCoreClient.mm
+    tools/native_ui/RLPSupport.mm
+    tools/native_ui/RLPTheme.mm
+    tools/native_ui/RLPNativeI18n.mm
+    tools/mac_update.mm)
+  set_source_files_properties(tests/test_servers_view.mm
+    tools/native_ui/RLPServersView.mm tools/native_ui/RLPSettingsViewController.mm
+    tools/native_ui/RLPEqualizerView.mm tools/native_ui/RLPInputView.mm
+    tools/native_ui/RLPCastView.mm tools/native_ui/RLPCalibrationView.mm
+    tools/native_ui/RLPUpdateWindowController.mm tools/native_ui/RLPFeedbackWindowController.mm
+    tools/native_ui/RLPPageViewController.mm tools/native_ui/RLPCoreClient.mm
+    tools/native_ui/RLPSupport.mm tools/native_ui/RLPTheme.mm
+    tools/native_ui/RLPNativeI18n.mm tools/mac_update.mm
+    PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
+  target_include_directories(test_servers_view PRIVATE
+    ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tools ${CMAKE_SOURCE_DIR}/tools/native_ui)
+  target_link_libraries(test_servers_view PRIVATE rlapp_core
+    "-framework AppKit" "-framework Security")
+  add_test(NAME servers_view COMMAND test_servers_view)
+  set_tests_properties(servers_view PROPERTIES TIMEOUT 180)
 
   # 2026-11-11：曲目右键菜单完整性（对齐 web trackActionMenu 四项核心动作）。
   # 触发原因：原生曲目页只有两项、专辑详情完全没有右键菜单、队列只有两项。

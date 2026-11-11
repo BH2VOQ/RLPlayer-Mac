@@ -498,3 +498,12 @@ AI 资料补全与音频输入采集：在左侧「设置」里调整。	AI meta
 流媒体在这里挂载；AI 资料与音频输入在左侧「设置」里调整。	Mount streaming here; AI metadata and audio input live in Settings on the left.	聆听室「更多」弹层副标题（两模式都有设置页）
 聆听模式：安静听歌，常用设置在聆听室卡片里；专业模式：信号链、滤波与升频快速切换、A/B 对比	Listening: just play music, common settings live on the room cards. Pro: signal chain, quick filter and upsampling switching, A/B compare.	顶栏模式切换 tooltip（两模式都有设置页）
 音量 / 响度补偿 / 预衰减；输出、升频、滤波、DSD 与均衡在上方页签里切换。	Volume / loudness / pre-attenuation; output, upsampling, filters, DSD and EQ switch on the tabs above.	聆听模式设置·播放页说明
+编辑服务器	Edit Server	流媒体服务器表单标题（编辑态）
+名称（可选）	Name (optional)	流媒体服务器表单名称占位符
+启用失败	Failed to enable	流媒体服务器启用失败提示
+只删配置，不动已下载缓存。	Only the configuration is removed; downloaded cache is untouched.	删除流媒体服务器确认说明
+删除服务器「%@」？	Delete server '%@'?	删除流媒体服务器确认标题
+已启用「%@」	Enabled '%@'	启用流媒体服务器成功提示
+写回进行中 %ld/%ld…	Write-back in progress %ld/%ld…	标签写回轮询进度
+写入 %ld，跳过 %ld，失败 %ld	Wrote %ld, skipped %ld, failed %ld	标签写回完成汇总
+%ld 首可写，%ld 首跳过	%ld writable, %ld skipped	标签写回预览汇总
