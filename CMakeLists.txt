@@ -191,7 +191,7 @@ target_link_libraries(test_diag_run_marker PRIVATE rtadsp)
 add_test(NAME diag_run_marker COMMAND test_diag_run_marker)
 add_executable(rtadiag tools/rtadiag.cpp)
 target_link_libraries(rtadiag PRIVATE rtadsp)
-foreach(_diag_test diag_bundle diag_http diag_questions rtadiag float_decode quality_edges health_store lyrics_cache ir_resample)
+foreach(_diag_test diag_bundle diag_bundle_json diag_http diag_questions rtadiag float_decode quality_edges health_store lyrics_cache ir_resample)
   add_executable(test_${_diag_test} tests/test_${_diag_test}.cpp)
   target_link_libraries(test_${_diag_test} PRIVATE rtadsp ${RL_PLATFORM_LIBS})
   add_test(NAME ${_diag_test} COMMAND test_${_diag_test})
@@ -980,6 +980,25 @@ add_test(NAME dsd_rate_convert COMMAND test_dsd_rate_convert)
 add_executable(test_feedback_redact tests/test_feedback_redact.cpp)
 target_include_directories(test_feedback_redact PRIVATE ${CMAKE_SOURCE_DIR}/src)
 add_test(NAME feedback_redact COMMAND test_feedback_redact)
+
+# 2026-11-11：反馈接入 rlplayer.rainlain.com 后台的纯逻辑层（零网络 / 零磁盘 / 零 ObjC）。
+# 判据：请求体字段与上限（字节不是字符）、JSON 转义往返、诊断 base64 往返、
+#       响应解析（HTTP 200 + ok:false 必须判失败）、错误码→中文与可重试性、
+#       幂等键格式、安装 ID 形态（宿主侧持久化另由 mac_transport/实机覆盖）。
+add_executable(test_feedback_api tests/test_feedback_api.cpp)
+target_include_directories(test_feedback_api PRIVATE ${CMAKE_SOURCE_DIR}/src)
+add_test(NAME feedback_api COMMAND test_feedback_api)
+add_executable(test_install_id tests/test_install_id.cpp)
+target_include_directories(test_install_id PRIVATE ${CMAKE_SOURCE_DIR}/src)
+add_test(NAME install_id COMMAND test_install_id)
+
+# 真实后台端到端（默认 SKIP，不联网；RLPLAYER_FEEDBACK_LIVE=1 才建单，结束自动删除）。
+# 证明的是纯逻辑层证明不了的四件事：后台真的接受这份请求体、幂等重放同号、
+# client 能取回诊断包且逐字节一致、7 天内自助删除可用。
+add_executable(test_feedback_live tests/test_feedback_live.cpp)
+target_include_directories(test_feedback_live PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(test_feedback_live PRIVATE ${RL_PLATFORM_LIBS})
+add_test(NAME feedback_live COMMAND test_feedback_live)
 
 # R-1：房间测量的 mac 传输层（CoreAudio）。
 # §1 算法链零设备（默认跑）；§2/§3 真开设备需 RTA_ROOM_HW=1，§3 真出声还需 RTA_ROOM_AUDIBLE=1

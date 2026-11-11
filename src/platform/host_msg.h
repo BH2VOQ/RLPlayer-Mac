@@ -40,7 +40,16 @@ enum class HostAction {
     //    页面即便被注入脚本也改不了"发给谁"。同理页面的任何输入都只能进"正文"与"诊断包路径"，
     //    两者都在宿主侧被清洗（长度/控制字符/路径白名单），不可能是任意收件人或任意文件。
     FeedbackCompose,    // 写反馈：body 见 HostMessage::arg，是否附诊断包见 attach_diag
-    FeedbackDiagOnly    // 只发诊断包（不写正文）：走同一套检查，正文用固定说明
+    FeedbackDiagOnly,   // 只发诊断包（不写正文）：走同一套检查，正文用固定说明
+    // 2026-11-11：反馈接入 rlplayer.rainlain.com 后台（macOS 独立命名空间，JSON over HTTPS）
+    //
+    // 与上面两条邮件命令的关键区别：**没有路径段**。
+    //   * 邮件通道要读页面事先写好的 .zip，所以必须传 diag_path；
+    //   * 后台通道的请求体就是 JSON，诊断包由宿主在本进程内组装（复用 /api/diagzip 的同一套
+    //     组装与脱敏代码），页面既不能指定要读哪个文件，也不需要把几 MB 的字节搬进 JS。
+    // 发送/回传都在宿主：结果走 "feedback:status:<JSON>"（与 update:status 同一套通道）。
+    FeedbackSubmit,     // 提交反馈：正文见 arg；attach_diag = 是否附带诊断包
+    FeedbackWatchdog    // 探活：提交前 GET /api/v1/feedback/macos/watchdog（200+ok 才让提交按钮可用）
 };
 
 struct HostMessage {
@@ -162,6 +171,34 @@ inline HostMessage parse_host_message(const std::string& m) {
     //    宿主侧 sanitize_body 会把它判成"空反馈"并拒绝发信（不会静默发一封空邮件）。
     if (m.rfind("feedback:", 0) == 0) {
         std::string rest = m.substr(9);          // "compose" / "compose:..." / "diagonly..."
+        // ---- 2026-11-11 反馈后台（macOS 命名空间，https://rlplayer.rainlain.com） ----
+        // 形态（**必须先于下面的 "|diag:" 切分**：这两条命令没有路径段，
+        //   正文里出现 "|diag:" 也只是正文的一部分，不能被当成路径分隔符）：
+        //   "feedback:watchdog"               → 探活
+        //   "feedback:submit"                 → 空正文（宿主判 empty_text 并拒绝）
+        //   "feedback:submit:<正文>"           → 提交，不带诊断包
+        //   "feedback:submit+diag"            → 提交，附诊断包
+        //   "feedback:submit+diag:<正文>"      → 提交 + 诊断包
+        // ⚠️ 这里同样**不做**正文合法性判断：长度/编码/空串由宿主与 rta::feedback 纯逻辑层判，
+        //    不认识形态一律 None（reason 进 launcher.log），绝不"猜一个"发出去。
+        if (rest == "watchdog") { r.action = HostAction::FeedbackWatchdog; return r; }
+        if (rest == "submit") { r.action = HostAction::FeedbackSubmit; return r; }
+        if (rest == "submit+diag") {
+            r.action = HostAction::FeedbackSubmit;
+            r.attach_diag = true;
+            return r;
+        }
+        if (rest.rfind("submit:", 0) == 0) {
+            r.action = HostAction::FeedbackSubmit;
+            r.arg = rest.substr(7);              // 正文原值（未清洗）
+            return r;
+        }
+        if (rest.rfind("submit+diag:", 0) == 0) {
+            r.action = HostAction::FeedbackSubmit;
+            r.arg = rest.substr(12);             // "submit+diag:" 共 12 字节
+            r.attach_diag = true;
+            return r;
+        }
         // 先切出可选的 "|diag:<path>" 尾巴
         std::string diag;
         const std::string dtag = "|diag:";

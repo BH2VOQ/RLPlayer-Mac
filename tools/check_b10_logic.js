@@ -358,5 +358,77 @@ ck(!hasStickyOrFixed, 'L7b .setfoot 不含 position:sticky 或 position:fixed', 
 const hasAutoMargin = setfootRules.some((r) => /margin-top\s*:\s*auto/i.test(r));
 ck(hasAutoMargin, 'L7c .setfoot 保留 margin-top:auto（短页贴底、长页随内容滚）', J(setfootRules));
 
+/* ---------------- L9：反馈通道接入后台（1.1.7） ----------------
+   判据只碰纯逻辑：字节上限（后台上限是 16384 字节，不是字符）、探活门控、
+   宿主命令形态（页面不能指定 URL/路径/收件人）、成功/失败回传的表现。
+   不联网、不打包、不点真按钮；真实后台端到端由 tests/test_feedback_live.cpp（默认 SKIP）覆盖。 */
+console.log('L9 反馈通道：字节上限 / 探活门控 / 宿主命令形态');
+(function () {
+  try {
+    const t = env.document.getElementById('sp_fbtext');
+    const btn = env.document.getElementById('sp_fbsend');
+    const msg = env.document.getElementById('sp_fbmsg');
+    const chan = env.document.getElementById('sp_fbchan');
+    const cb = env.document.getElementById('sp_fbdiag');
+    const sent = [];
+    const allSent = [];   // 不清空：最后统一断言"页面发出过的命令里没有任何 URL/收件人"
+    env.WV = { postMessage: function (c) { sent.push(c); allSent.push(c); } };
+
+    ck(env.fbBytes('abc') === 3, 'L9.1 ASCII 3 字节');
+    ck(env.fbBytes('反馈') === 6, 'L9.2 中文按 UTF-8 3 字节/字', String(env.fbBytes('反馈')));
+    ck(env.fbBytes('🙂') === 4, 'L9.3 emoji 按 4 字节', String(env.fbBytes('🙂')));
+
+    env.IS_MAC_HOST = true;
+    env.FB.busy = false; env.FB.serverOk = true;
+
+    sent.length = 0; t.value = '   ';
+    ck(env.fbSend() === false && sent.length === 0, 'L9.4 空正文拒绝且不发命令');
+
+    sent.length = 0; t.value = 'x'.repeat(16385);
+    ck(env.fbSend() === false && sent.length === 0, 'L9.5 超 16384 字节拒绝');
+
+    env.IS_MAC_HOST = false; sent.length = 0; t.value = '测试';
+    ck(env.fbSend() === false && sent.length === 0, 'L9.6 没有宿主通道（浏览器直开）拒绝提交');
+    env.IS_MAC_HOST = true;
+
+    sent.length = 0; t.value = '播放破音'; cb.checked = false; env.FB.busy = false;
+    const ok7 = env.fbSend();
+    ck(ok7 === true && sent.length === 1 && sent[0] === 'feedback:submit:播放破音',
+       'L9.7 提交命令形态与正文原样', sent[0] || '(none)');
+    ck(btn.disabled === true, 'L9.8 提交中按钮禁用（防连点）');
+
+    env.FB.busy = false; sent.length = 0; t.value = '卡顿'; cb.checked = true;
+    env.fbSend();
+    ck(sent[0] === 'feedback:submit+diag:卡顿', 'L9.9 附带诊断包命令形态', sent[0] || '');
+
+    env.FB.busy = false; env.FB.serverOk = null; sent.length = 0; t.value = 'x';
+    ck(env.fbSend() === false && sent.length === 0, 'L9.10 未探活成功（null）也不允许提交');
+
+    env.onFeedbackStatus({ stage: 'watchdog', ok: true, ratePerMinute: 5 });
+    ck(env.FB.serverOk === true && btn.disabled === false, 'L9.11 探活成功后按钮可用');
+    ck(chan.textContent.indexOf('5') >= 0, 'L9.12 状态行显示服务端限速', String(chan.textContent));
+
+    env.onFeedbackStatus({ stage: 'watchdog', ok: false, message: '网络错误' });
+    ck(env.FB.serverOk === false && btn.disabled === true, 'L9.13 探活失败按钮禁用（不假装可用）');
+
+    env.FB.busy = true; env.FB.serverOk = true; t.value = 'x';
+    env.onFeedbackStatus({ stage: 'sent', id: 'FB-20261111-ABCDEF0123', diagStored: true });
+    ck(t.value === '' && String(msg.textContent).indexOf('FB-20261111-ABCDEF0123') >= 0,
+       'L9.14 发送成功显示工单号并清空正文', String(msg.textContent));
+
+    env.onFeedbackStatus({ stage: 'failed', code: 'request_too_large', message: '内容超限' });
+    ck(String(msg.textContent).indexOf('发送失败') >= 0 &&
+       String(msg.textContent).indexOf('附带诊断包') >= 0,
+       'L9.15 413 失败提示给出可操作建议（取消勾选诊断包）', String(msg.textContent));
+
+    // 命令里绝不能出现 URL / 收件人 / 文件路径：页面只能给正文
+    ck(allSent.length >= 2 &&
+       allSent.every(function (c) { return c.indexOf('http') < 0 && c.indexOf('@') < 0; }),
+       'L9.16 页面发出的命令不含 URL / 收件人', J(allSent));
+  } catch (e) {
+    ck(false, 'L9 反馈通道纯逻辑用例不抛异常', 'EXCEPTION: ' + ((e && e.message) || String(e)));
+  }
+})();
+
 console.log('\n=== 结果：' + (pass + fail) + ' 项，' + fail + ' 失败 ===');
 process.exit(fail === 0 ? 0 : 1);

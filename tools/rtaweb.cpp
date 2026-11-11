@@ -7347,6 +7347,83 @@ static std::string diag_snapshot_json(bool withProbe) {
     return j.str();
 }
 
+// ===========================================================================
+// 诊断包组装（2026-11-11 抽出：/api/diagzip、/api/diagjson 与宿主反馈上传共用）
+//
+// 为什么必须抽出来共用：脱敏规则与预算只能写一遍。分叉一次就意味着
+// 「用户导出的没问题、随反馈上传的漏了脱敏」—— feedback_redact.h 头注里记录过同类分叉。
+// 三个入口只决定最后一步：zip_of()（导出压缩包）还是 bundle_json()（反馈后台上传）。
+//
+// 前提：diag_bundle_items() 里的日志已逐条脱敏（redact_text），本层不做第二次清洗。
+// ===========================================================================
+static rta::diag::BundleSpec diag_bundle_spec() {
+    rta::diag::BundleSpec spec;
+    spec.case_id = diag_case_id();
+    spec.app_version = RLPLAYER_VERSION;
+    spec.app_build = g_buildTime;
+    spec.platform.os = rta::diag::os_version_string();
+    spec.platform.arch = "arm64";
+    spec.platform.cpu = rta::diag::cpu_brand();
+    spec.run.pid = current_pid();
+    spec.run.run_id = diag_sid();
+    const auto previous = rta::diag::run_marker().previous();
+    spec.run.known = previous.found;
+    spec.run.clean_exit = previous.clean;
+    spec.run.exit_reason = previous.found ? previous.reason_class() : "unknown_no_previous_marker";
+    spec.cs.origin = "rtaweb";
+    if (g_diagStartup.secondary)
+        spec.notes.push_back("Secondary instance: this process runs while another instance owns the state dir; "
+                             "its event log is isolated under instances/<sid>/ and must not be read as the primary session.");
+    spec.redaction_note = "Structured fields and legacy logs are redacted before packaging; private bodies excluded.";
+    if (!previous.found) spec.notes.push_back("Previous exit unknown: no previous marker; clean_exit is not proof of a prior clean shutdown.");
+    return spec;
+}
+
+static std::vector<rta::diag::BundleEntry> diag_bundle_items() {
+    std::vector<rta::diag::BundleEntry> items;
+    items.push_back(rta::diag::make_entry("diag.json", diag_snapshot_json(true), rta::diag::EntryKind::Json, 100));
+    auto event_text = [](rta::diag::EventLog& log) {
+        return log.snapshot_text(); // full retained source; bundle records all trimming
+    };
+    items.push_back(rta::diag::make_entry("events.jsonl", event_text(rta::diag::event_log()), rta::diag::EntryKind::Jsonl, 80));
+    items.push_back(rta::diag::make_entry("uievents.jsonl", event_text(diag_ui_log()), rta::diag::EntryKind::Jsonl, 60));
+    // ★ 红线：只挑**已知文件名**，绝不整目录打包（避免把 rlplayer-llm.conf 之类带 key 的文件顺手塞进去）。
+    for (const char* leaf : {"rlplayer-playback.log", "rlplayer-playback.log.1", "rlplayer-playback.log.2", "launcher.log"}) {
+        std::ifstream f(path_in_exe_dir(leaf), std::ios::binary);
+        if (!f) continue;
+        std::string text((std::istreambuf_iterator<char>(f)), {});
+        text = rta::diag::redact_text(utf8_sanitize(text), nullptr, false);
+        items.push_back(rta::diag::make_entry(leaf, std::move(text), rta::diag::EntryKind::Log, 40));
+    }
+    return items;
+}
+
+static rta::diag::AssembleResult diag_bundle_assemble(rta::diag::BundleSpec spec,
+                                                      std::vector<rta::diag::BundleEntry> items) {
+    return rta::diag::assemble_with_report(spec, std::move(items),
+        [&spec](const std::vector<rta::diag::MaterializedEntry>& entries) {
+            return rta::diag::render_report_text_for_bundle(entries, spec,
+                [](const std::string& code, rta::diag::CodeInfo& info) {
+                    const auto* c = rta::diag::find_code(code);
+                    if (!c) return false;
+                    info.code = c->code;
+                    info.stage = rta::diag::stage_name(c->stage);
+                    info.name_zh = c->zh;
+                    return true;
+                });
+        });
+}
+
+// 反馈后台上传用的单文件 JSON（契约见 tools/rlapp_core.h）。
+// 失败（组装失败 / 超预算 / 无法序列化）一律返回空串，调用方据此拒绝上传。
+std::string rlapp::diag_json(std::size_t budget_bytes) {
+    auto spec = diag_bundle_spec();
+    if (budget_bytes > 0) spec.budget_bytes = budget_bytes;
+    auto result = diag_bundle_assemble(spec, diag_bundle_items());
+    if (!result.ok || result.over_budget) return std::string();
+    return rta::diag::bundle_json(result);
+}
+
 static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
     auto& ps = g_ps;
 
@@ -11979,46 +12056,7 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
     }
     if (path_no_query(rq.path) == "/api/diagzip") {
         ct = "application/zip";
-        rta::diag::BundleSpec spec;
-        spec.case_id = diag_case_id();
-        spec.app_version = RLPLAYER_VERSION;
-        spec.app_build = g_buildTime;
-        spec.platform.os = rta::diag::os_version_string();
-        spec.platform.arch = "arm64";
-        spec.platform.cpu = rta::diag::cpu_brand();
-        spec.run.pid = current_pid();
-        spec.run.run_id = diag_sid();
-        const auto previous = rta::diag::run_marker().previous();
-        spec.run.known = previous.found;
-        spec.run.clean_exit = previous.clean;
-        spec.run.exit_reason = previous.found ? previous.reason_class() : "unknown_no_previous_marker";
-        spec.cs.origin = "rtaweb";
-        if (g_diagStartup.secondary)
-            spec.notes.push_back("Secondary instance: this process runs while another instance owns the state dir; "
-                                 "its event log is isolated under instances/<sid>/ and must not be read as the primary session.");
-        spec.redaction_note = "Structured fields and legacy logs are redacted before packaging; private bodies excluded.";
-        if (!previous.found) spec.notes.push_back("Previous exit unknown: no previous marker; clean_exit is not proof of a prior clean shutdown.");
-        std::vector<rta::diag::BundleEntry> items;
-        items.push_back(rta::diag::make_entry("diag.json", diag_snapshot_json(true), rta::diag::EntryKind::Json, 100));
-        auto event_text = [](rta::diag::EventLog& log) {
-            return log.snapshot_text(); // full retained source; bundle records all trimming
-        };
-        items.push_back(rta::diag::make_entry("events.jsonl", event_text(rta::diag::event_log()), rta::diag::EntryKind::Jsonl, 80));
-        items.push_back(rta::diag::make_entry("uievents.jsonl", event_text(diag_ui_log()), rta::diag::EntryKind::Jsonl, 60));
-        for (const char* leaf : {"rlplayer-playback.log", "rlplayer-playback.log.1", "rlplayer-playback.log.2", "launcher.log"}) {
-            std::ifstream f(path_in_exe_dir(leaf), std::ios::binary);
-            if (!f) continue;
-            std::string text((std::istreambuf_iterator<char>(f)), {});
-            text = rta::diag::redact_text(utf8_sanitize(text), nullptr, false);
-            items.push_back(rta::diag::make_entry(leaf, std::move(text), rta::diag::EntryKind::Log, 40));
-        }
-        auto result = rta::diag::assemble_with_report(spec, std::move(items),
-            [&spec](const std::vector<rta::diag::MaterializedEntry>& entries) {
-                return rta::diag::render_report_text_for_bundle(entries, spec, [](const std::string& code,rta::diag::CodeInfo& info){
-                    const auto* c=rta::diag::find_code(code);if(!c)return false;
-                    info.code=c->code;info.stage=rta::diag::stage_name(c->stage);info.name_zh=c->zh;return true;
-                });
-            });
+        auto result = diag_bundle_assemble(diag_bundle_spec(), diag_bundle_items());
         if (!result.ok || result.over_budget) {
             ct = "application/json";
             rta::net::webui_set_status(500);
@@ -12026,6 +12064,25 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
         }
         return rta::diag::zip_of(result);
     }
+
+    // 2026-11-11：单文件 JSON 诊断（反馈后台上传同款；rtaweb 里也方便直接用脚本读，
+    // 不必先解 ZIP）。结构与配套判据见 src/diag/bundle.h 的 bundle_json() +
+    // tests/test_diag_bundle_json.cpp。
+    if (path_no_query(rq.path) == "/api/diagjson") {
+        ct = "application/json; charset=utf-8";
+        auto result = diag_bundle_assemble(diag_bundle_spec(), diag_bundle_items());
+        if (!result.ok || result.over_budget) {
+            rta::net::webui_set_status(500);
+            return "{\"ok\":false,\"code\":\"diag.package_incomplete\",\"error\":\"" + jesc(result.err.empty() ? "诊断包超过预算" : result.err) + "\"}";
+        }
+        std::string out = rta::diag::bundle_json(result);
+        if (out.empty()) {
+            rta::net::webui_set_status(500);
+            return "{\"ok\":false,\"code\":\"diag.json_unavailable\",\"error\":\"诊断包无法序列化为 JSON\"}";
+        }
+        return out;
+    }
+
     if (path_no_query(rq.path) == "/api/diag") {
         ct = "application/json; charset=utf-8";
         return diag_snapshot_json(true);

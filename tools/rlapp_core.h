@@ -46,6 +46,7 @@
 // 走同一份 handle()。
 #pragma once
 
+#include <cstddef>
 #include <string>
 
 #include "net/webui.h"      // rta::net::HttpRequest（-I src 提供；本头文件不自己定义它）
@@ -73,6 +74,14 @@ void stop_embedded();
 
 // 原 rtaweb 的 main()。保留独立 HTTP 服务与「自动打开浏览器」行为。
 int cli_main(int argc, char** argv);
+
+// 2026-11-11：诊断包的单文件 JSON 表示（反馈后台上传用）。
+// 与 /api/diagzip 共用**同一套**组装、预算与脱敏代码（只在这里写一遍），
+// 只是最后一步从 zip_of() 换成 bundle_json()。
+//   * budget_bytes = 0 表示用默认预算（12 MiB）；反馈上传传 6 MiB 给 base64 膨胀留余量。
+//   * 组装失败/超预算返回空串 —— 调用方据此拒绝上传，绝不产出坏 JSON。
+//   * 允许任意线程调用（与 dispatch 同一条并发契约）；内部不持有全局请求锁。
+std::string diag_json(std::size_t budget_bytes = 0);
 
 // ---------------------------------------------------------------------------
 // 并发观测（诊断用；dispatch 内部只做几次原子操作，无锁、无 syscall）
