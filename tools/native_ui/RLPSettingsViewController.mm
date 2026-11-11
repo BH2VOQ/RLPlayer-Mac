@@ -1,10 +1,13 @@
 // SPDX-FileCopyrightText: 2026 BH2VOQ <https://github.com/BH2VOQ>
 // SPDX-License-Identifier: GPL-3.0-or-later
 //
-// RLPSettingsViewController.mm — 设置页（纯 AppKit，7 个页签）
+// RLPSettingsViewController.mm — 设置页（纯 AppKit，页签随模式）
 //
-// 1.1.7.1：输出/PCM/SDM/均衡四页已整体迁入「专业工作台」（当场可切），设置不再重复。
-// 剩余按"工作台没有的"归类：播放 / 输入 / 校准 / 流媒体 / 元数据 / 高级 / 诊断。
+// 2026-11-11 用户要求：**两个模式都要有设置页**。
+//   专业模式 7 页：播放 / 输入 / 校准 / 流媒体 / 元数据 / 高级 / 诊断
+//     （输出/PCM/SDM/均衡在专业工作台当场可切，设置不重复）。
+//   聆听模式 11 页：播放 / 输出 / PCM / SDM / 均衡 / 输入 / 校准 / 流媒体 / 元数据 / 高级 / 诊断
+//     （没有工作台 ⟹ 四页挂回设置，功能不因模式而不可达）。
 //
 // 设计取舍（照 web 版设置页的真实结构，不自己发明）：
 //   * 页签划分与 web 完全一致（data-g）：输出 / PCM / SDM / 输入 / 高级 / 均衡 / 校准 / 流媒体 / 诊断 / 元数据。
@@ -28,16 +31,66 @@
 
 #pragma mark - 页签定义
 
-// 1.1.7.1：输出 / PCM / SDM / 均衡四页的选项**已全部进专业工作台**（当场可切），
-// 设置里不再重复显示。剩下的按"工作台没有的"重新归类：
-//   播放（音量/响度补偿/预衰减 —— 工作台未覆盖，功能不能删）
-//   输入 / 校准 / 流媒体 / 元数据 / 高级 / 诊断
+// 页签**随模式**（2026-11-11 用户要求：两个模式都要有设置页）：
+//   专业模式 7 页：播放 / 输入 / 校准 / 流媒体 / 元数据 / 高级 / 诊断
+//     —— 输出/PCM/SDM/均衡的选项在专业工作台当场可切，设置不重复。
+//   聆听模式 11 页：播放 / 输出 / PCM / SDM / 均衡 / 输入 / 校准 / 流媒体 / 元数据 / 高级 / 诊断
+//     —— 聆听模式没有工作台，这四页必须挂回设置，否则功能不可达（铁律：功能不能删）。
+// 页签是**索引 → key 的运行时表**，不再是编译期常量数组：切模式时重建。
 typedef NS_ENUM(NSInteger, RLPSTab) {
-    RLPSTabPlay = 0, RLPSTabIn, RLPSTabCal, RLPSTabStream, RLPSTabMeta, RLPSTabAdv, RLPSTabDiag
+    RLPSTabPlay = 0, RLPSTabOut, RLPSTabPcm, RLPSTabSdm, RLPSTabEq,
+    RLPSTabIn, RLPSTabCal, RLPSTabStream, RLPSTabMeta, RLPSTabAdv, RLPSTabDiag
 };
 
-static NSString *const kTabKeys[] = { @"play", @"in", @"cal", @"stream", @"meta", @"adv", @"diag" };
-static const NSInteger kTabCount = 7;
+/// 当前模式下的页签 key 顺序（唯一真相源；buildContent/selectPane/currentPaneKey 都从这里取）。
+static NSArray<NSString *> *RLPSettingsTabKeys(void) {
+    if (RLPCurrentAppMode() == RLPAppModePro)
+        return @[ @"play", @"in", @"cal", @"stream", @"meta", @"adv", @"diag" ];
+    return @[ @"play", @"out", @"pcm", @"sdm", @"eq", @"in", @"cal", @"stream", @"meta", @"adv", @"diag" ];
+}
+
+static NSString *RLPSettingsTabLabel(NSString *key) {
+    static NSDictionary *labels;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        labels = @{ @"play": @"播放", @"out": @"输出", @"pcm": @"PCM", @"sdm": @"SDM",
+                    @"eq": @"均衡", @"in": @"输入", @"cal": @"校准", @"stream": @"流媒体",
+                    @"meta": @"元数据", @"adv": @"高级", @"diag": @"诊断" };
+    });
+    return labels[key] ?: key;
+}
+
+/// key → 枚举（内部 buildPane 分发用）。
+static RLPSTab RLPSTabForKey(NSString *key) {
+    static NSDictionary *map;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        map = @{ @"play": @(RLPSTabPlay), @"out": @(RLPSTabOut), @"pcm": @(RLPSTabPcm),
+                 @"sdm": @(RLPSTabSdm), @"eq": @(RLPSTabEq), @"in": @(RLPSTabIn),
+                 @"cal": @(RLPSTabCal), @"stream": @(RLPSTabStream), @"meta": @(RLPSTabMeta),
+                 @"adv": @(RLPSTabAdv), @"diag": @(RLPSTabDiag) };
+    });
+    NSNumber *n = map[key];
+    return n ? (RLPSTab)n.integerValue : RLPSTabPlay;
+}
+
+/// 枚举 → key（currentPaneKey / 模式切换回退用）。
+static NSString *RLPSettingsKeyForTab(RLPSTab tab) {
+    switch (tab) {
+        case RLPSTabPlay:   return @"play";
+        case RLPSTabOut:    return @"out";
+        case RLPSTabPcm:    return @"pcm";
+        case RLPSTabSdm:    return @"sdm";
+        case RLPSTabEq:     return @"eq";
+        case RLPSTabIn:     return @"in";
+        case RLPSTabCal:    return @"cal";
+        case RLPSTabStream: return @"stream";
+        case RLPSTabMeta:   return @"meta";
+        case RLPSTabAdv:    return @"adv";
+        case RLPSTabDiag:   return @"diag";
+    }
+    return @"play";
+}
 
 #pragma mark - 小工具
 
@@ -138,8 +191,28 @@ static NSView *RLPSGroup(NSString *title, NSString *desc, RLPTheme *t) {
         _paneCache = [NSMutableDictionary dictionary];
         _loadedKeys = [NSMutableSet set];
         _tab = RLPSTabPlay;
+        // 模式切换时页签集合会变（聆听 11 页 / 专业 7 页）。设置页是缓存页，
+        // 不监听的话切模式后页签还停在旧集合上。
+        [[NSNotificationCenter defaultCenter] addObserver:self
+                                                 selector:@selector(onAppModeChanged:)
+                                                     name:RLPAppModeDidChangeNotification
+                                                   object:nil];
     }
     return self;
+}
+
+- (void)dealloc {
+    [[NSNotificationCenter defaultCenter] removeObserver:self];
+}
+
+- (void)onAppModeChanged:(NSNotification *)note {
+    (void)note;
+    if (!self.tabs) return;   // 视图还没建：buildContent 自会按当前模式建
+    // 当前页在新模式里没有（专业模式下的 out/pcm/sdm/eq）⟹ 回「播放」。
+    NSString *curKey = RLPSettingsKeyForTab(self.tab);
+    if (![RLPSettingsTabKeys() containsObject:curKey]) _tab = RLPSTabPlay;
+    [self rebuildTabs];
+    [self reloadData];
 }
 
 #pragma mark - 骨架
@@ -149,17 +222,12 @@ static NSView *RLPSGroup(NSString *title, NSString *desc, RLPTheme *t) {
     NSView *host = self.contentView;
 
     self.tabs = [[NSSegmentedControl alloc] initWithFrame:NSZeroRect];
-    self.tabs.segmentCount = kTabCount;
-    NSArray<NSString *> *names = @[ RLPTr(@"播放"), RLPTr(@"输入"), RLPTr(@"校准"), RLPTr(@"流媒体"),
-                                    RLPTr(@"元数据"), RLPTr(@"高级"), RLPTr(@"诊断") ];
-    for (NSInteger i = 0; i < (NSInteger)names.count && i < kTabCount; ++i)
-        [self.tabs setLabel:names[i] forSegment:i];
     self.tabs.trackingMode = NSSegmentSwitchTrackingSelectOne;
-    self.tabs.selectedSegment = 0;
     self.tabs.target = self;
     self.tabs.action = @selector(onTabChanged:);
     self.tabs.translatesAutoresizingMaskIntoConstraints = NO;
     [host addSubview:self.tabs];
+    [self rebuildTabs];
 
     self.paneHost = [[NSView alloc] initWithFrame:NSZeroRect];
     self.paneHost.translatesAutoresizingMaskIntoConstraints = NO;
@@ -182,35 +250,53 @@ static NSView *RLPSGroup(NSString *title, NSString *desc, RLPTheme *t) {
         [self.statusLine.bottomAnchor constraintEqualToAnchor:host.bottomAnchor constant:-10],
     ]];
 
-    [self showTab:RLPSTabPlay];
+    [self showTab:self.tab];
+}
+
+/// 按当前模式重建页签集合（聆听 11 页 / 专业 7 页），并保持当前页选中。
+- (void)rebuildTabs {
+    NSArray<NSString *> *keys = RLPSettingsTabKeys();
+    self.tabs.segmentCount = (NSInteger)keys.count;
+    for (NSInteger i = 0; i < (NSInteger)keys.count; ++i)
+        [self.tabs setLabel:RLPTr(RLPSettingsTabLabel(keys[i])) forSegment:i];
+    NSUInteger idx = [keys indexOfObject:RLPSettingsKeyForTab(self.tab)];
+    self.tabs.selectedSegment = (idx == NSNotFound) ? 0 : (NSInteger)idx;
 }
 
 - (void)onTabChanged:(id)sender {
-    [self showTab:(RLPSTab)self.tabs.selectedSegment];
+    NSArray<NSString *> *keys = RLPSettingsTabKeys();
+    NSInteger sel = self.tabs.selectedSegment;
+    if (sel < 0 || sel >= (NSInteger)keys.count) return;
+    [self showTab:RLPSTabForKey(keys[sel])];
 }
 
 - (void)selectPane:(NSString *)key {
-    // 旧 key 兼容：out/pcm/sdm/eq 的选项已迁往专业工作台，
-    // 老入口（通知/菜单）仍可能发这些 key —— 映射到「播放」页而不是静默丢弃。
     NSString *k = key;
-    if ([k isEqualToString:@"out"] || [k isEqualToString:@"pcm"] ||
-        [k isEqualToString:@"sdm"] || [k isEqualToString:@"eq"]) k = @"play";
-    for (NSInteger i = 0; i < kTabCount; ++i) {
-        if ([kTabKeys[i] isEqualToString:k]) {
-            self.tabs.selectedSegment = i;
-            [self showTab:(RLPSTab)i];
-            return;
-        }
-    }
+    NSArray<NSString *> *keys = RLPSettingsTabKeys();
+    // 专业模式：out/pcm/sdm/eq 的选项在工作台，老入口发这些 key 时映射到「播放」。
+    // 聆听模式：四页就在设置里，直接切过去（不再映射）。
+    if (![keys containsObject:k] &&
+        ([k isEqualToString:@"out"] || [k isEqualToString:@"pcm"] ||
+         [k isEqualToString:@"sdm"] || [k isEqualToString:@"eq"])) k = @"play";
+    NSUInteger idx = [keys indexOfObject:k];
+    if (idx == NSNotFound) return;
+    self.tabs.selectedSegment = (NSInteger)idx;
+    [self showTab:RLPSTabForKey(k)];
+}
+
+- (NSString *)currentPaneKey {
+    return RLPSettingsKeyForTab(self.tab);
 }
 
 - (void)showTab:(RLPSTab)tab {
     self.tab = tab;
     NSView *pane = self.paneCache[@(tab)];
+    BOOL freshlyBuilt = NO;
     if (!pane) {
         pane = [self buildPane:tab];
         if (!pane) return;
         self.paneCache[@(tab)] = pane;
+        freshlyBuilt = YES;
     }
     for (NSView *v in self.paneHost.subviews) [v removeFromSuperview];
     pane.translatesAutoresizingMaskIntoConstraints = NO;
@@ -221,6 +307,10 @@ static NSView *RLPSGroup(NSString *title, NSString *desc, RLPTheme *t) {
         [pane.topAnchor constraintEqualToAnchor:self.paneHost.topAnchor],
         [pane.bottomAnchor constraintEqualToAnchor:self.paneHost.bottomAnchor],
     ]];
+    // 新建的页签控件还是 UI 默认值（设备/滤波下拉是空的、开关是默认态）。
+    // activate 只在进页时跑一次，之后才点开的页签必须在这里补一次读回，
+    // 否则输出/PCM/SDM 页会显示空下拉与默认值，而不是用户真实设置。
+    if (freshlyBuilt && [RLPCoreClient shared].started) [self reloadData];
 }
 
 /// 每个页签 = 一个纵向滚动的 NSStackView。
@@ -257,6 +347,10 @@ static NSView *RLPSGroup(NSString *title, NSString *desc, RLPTheme *t) {
 
     switch (tab) {
         case RLPSTabPlay:   [self fillPlayback:stack t:t]; break;
+        case RLPSTabOut:    [self fillOutput:stack t:t]; break;
+        case RLPSTabPcm:    [self fillPcm:stack t:t]; break;
+        case RLPSTabSdm:    [self fillSdm:stack t:t]; break;
+        case RLPSTabEq:     [self fillEqualizer:stack t:t]; break;
         case RLPSTabIn:     [self fillInputReal:stack t:t]; break;
         case RLPSTabCal:    [self fillCalibration:stack t:t]; break;
         case RLPSTabStream: [self fillStream:stack t:t]; break;
@@ -344,12 +438,14 @@ static NSView *RLPSGroup(NSString *title, NSString *desc, RLPTheme *t) {
 
 #pragma mark - 输出
 
-/// 播放：工作台**没有**的听感项留在这里（音量/响度补偿/预衰减）。
-/// 输出设备、后端、Hog、采样率、滤波、DSD、调制器、EQ 都在专业工作台当场可切，
-/// 这里不再重复一份（用户 2026-11-11 明确要求）。
+/// 播放：听感项（音量/响度补偿/预衰减）。
+/// 专业模式下输出/升频/滤波/DSD/EQ 在工作台当场可切，这里不重复；
+/// 聆听模式下它们在设置的其余页签里（说明文案随模式，不误导用户去找不存在的工作台）。
 - (void)fillPlayback:(NSStackView *)stack t:(RLPTheme *)t {
-    [stack addArrangedSubview:RLPSGroup(RLPTr(@"播放"),
-        RLPTr(@"输出设备 / 独占 / 升频 / 滤波 / DSD / 均衡都在「专业工作台」当场切换，这里只放它没有的项。"), t)];
+    NSString *desc = (RLPCurrentAppMode() == RLPAppModePro)
+        ? RLPTr(@"输出设备 / 独占 / 升频 / 滤波 / DSD / 均衡都在「专业工作台」当场切换，这里只放它没有的项。")
+        : RLPTr(@"音量 / 响度补偿 / 预衰减；输出、升频、滤波、DSD 与均衡在上方页签里切换。");
+    [stack addArrangedSubview:RLPSGroup(RLPTr(@"播放"), desc, t)];
 
     self.volumeSlider = [[NSSlider alloc] initWithFrame:NSZeroRect];
     self.volumeSlider.minValue = -60;
@@ -376,7 +472,7 @@ static NSView *RLPSGroup(NSString *title, NSString *desc, RLPTheme *t) {
         RLPTr(@"整体降一点电平，给 EQ 提升留余量"), t)];
 }
 
-/// 旧的输出页（选项已迁往工作台）：保留实现但不再挂页签，避免删掉将来要复用的控件构造。
+/// 输出页：聆听模式挂页签；专业模式不挂（选项在工作台当场可切），实现保留共用。
 - (void)fillOutput:(NSStackView *)stack t:(RLPTheme *)t {
     [stack addArrangedSubview:RLPSGroup(RLPTr(@"输出后端"),
         RLPTr(@"独占 = bit-perfect；共享 = 兼容性最好（虚拟机 / 远程桌面）"), t)];
@@ -1055,7 +1151,7 @@ static NSView *RLPSGroup(NSString *title, NSString *desc, RLPTheme *t) {
     // 主题切换后已建页签里的控件颜色全部过时：清缓存，下次进入时按新主题重建。
     // 比逐控件改色更不容易漏，而页签切换本来就是低频操作。
     [self.paneCache removeAllObjects];
-    self.tabs.selectedSegment = (NSInteger)self.tab;
+    [self rebuildTabs];
     [self showTab:self.tab];
     if (self.themePopup) {
         [self.themePopup selectItemAtIndex:[[RLPTheme themeName] isEqualToString:@"light"] ? 1 : 0];

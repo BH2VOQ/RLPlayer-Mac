@@ -388,12 +388,15 @@ if(APPLE)
 
   # 2026-11-11：曲目右键菜单完整性（对齐 web trackActionMenu 四项核心动作）。
   # 触发原因：原生曲目页只有两项、专辑详情完全没有右键菜单、队列只有两项。
+  # 2026-11-12：歌单页曲目表也接共享菜单（T14），故把歌单页与基类编进本测试。
   add_executable(test_track_actions tests/test_track_actions.mm
     tools/native_ui/RLPTrackActions.mm tools/native_ui/RLPAnalysisSummary.mm
+    tools/native_ui/RLPPlaylistsViewController.mm tools/native_ui/RLPPageViewController.mm
     tools/native_ui/RLPCoreClient.mm tools/native_ui/RLPSupport.mm
     tools/native_ui/RLPTheme.mm tools/native_ui/RLPNativeI18n.mm)
   set_source_files_properties(tests/test_track_actions.mm
     tools/native_ui/RLPTrackActions.mm tools/native_ui/RLPAnalysisSummary.mm
+    tools/native_ui/RLPPlaylistsViewController.mm tools/native_ui/RLPPageViewController.mm
     tools/native_ui/RLPCoreClient.mm tools/native_ui/RLPSupport.mm
     tools/native_ui/RLPTheme.mm tools/native_ui/RLPNativeI18n.mm
     PROPERTIES COMPILE_OPTIONS "-fobjc-arc")

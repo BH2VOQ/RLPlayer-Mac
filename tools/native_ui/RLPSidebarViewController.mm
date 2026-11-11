@@ -55,8 +55,8 @@
 @end
 
 /// 导航项 = 模式的函数。**这是"两个模式差别在能做什么"的落点之一**：
-/// 聆听模式没有「设置」（用户明确要求：需要动设置的人请他去专业模式），
-/// 首页是「聆听室」；专业模式首页是「专业工作台」，并保留设置入口。
+/// 首页聆听模式是「聆听室」、专业模式是「专业工作台」。
+/// 2026-11-11 用户要求：**两个模式都要有设置页**（取代早前"聆听无设置"的要求）。
 /// 曲库浏览与播放相关项两个模式都有 —— 合并页签不等于砍功能。
 static NSArray<NSDictionary *> *RLPSidebarItemsForMode(RLPAppMode mode) {
     NSMutableArray *items = [NSMutableArray array];
@@ -81,10 +81,10 @@ static NSArray<NSDictionary *> *RLPSidebarItemsForMode(RLPAppMode mode) {
         @{@"sec": @"我的歌单"},
         @{@"name": @"歌单",     @"icon": @"music.note.list", @"key": @"playlists"},
         @{@"sec": @"音频引擎"},
+        // 设置两个模式都有（用户 2026-11-11 明确要求）。
+        // 差别在设置页内部：聆听模式挂全 11 页；专业模式 7 页（另四页在工作台）。
+        @{@"name": @"设置",     @"icon": @"gearshape", @"key": @"settings"},
     ]];
-    // 设置只在专业模式出现。聆听模式里想改设置 ⟹ 顶栏切到专业模式。
-    if (mode == RLPAppModePro)
-        [items addObject:@{@"name": @"设置", @"icon": @"gearshape", @"key": @"settings"}];
     return items;
 }
 
@@ -417,7 +417,7 @@ static BOOL RLPRowIsSection(NSArray<NSDictionary *> *items, NSInteger row) {
     if (!_tableView) { _pendingRow = 0; return; }
     [_tableView reloadData];
     if (keep.length && [self selectKey:keep]) return;
-    [self selectRow:0];   // 那页在新模式里不存在（如聆听模式下的设置）⟹ 回该模式首页
+    [self selectRow:0];   // 那页在新模式里不存在（如聆听模式下的工作台）⟹ 回该模式首页
 }
 
 /// 表格把鼠标位置转进来：只在行号变化时刷新受影响的两行，不整表 reload

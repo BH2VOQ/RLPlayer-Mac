@@ -9,6 +9,7 @@
 #import <AppKit/AppKit.h>
 #import "RLPTrackActions.h"
 #import "RLPSupport.h"
+#import "RLPPlaylistsViewController.h"
 
 #include <cstdio>
 
@@ -70,6 +71,32 @@ int main() {
         // ---- 分派：入队/播放这类不需要 UI 的动作要能被处理 ----
         NSMenuItem *enq = ItemFor(m, @"加入播放队列");
         CK(enq != nil && enq.tag == RLPTrackActionEnqueue, "T13 入队项 tag 正确", @"");
+
+        // ---- T14 歌单页曲目表必须接共享菜单（交接单列的未对齐项）----
+        // 旧实现 itemTable 是裸 NSTableView：右键只有系统菜单，七项动作一个都没有。
+        // 判据问"右键会生成什么"，不是"对象存在吗"。
+        {
+            RLPPlaylistsViewController *pl = [[RLPPlaylistsViewController alloc] init];
+            pl.view.frame = NSMakeRect(0, 0, 1100, 700);
+            [pl.view layoutSubtreeIfNeeded];
+            // 找到曲目表（双表结构：左歌单列表 / 右曲目表）。曲目表 = 接了共享菜单的那张。
+            NSMutableArray<NSTableView *> *tables = [NSMutableArray array];
+            NSMutableArray<NSView *> *stack = [NSMutableArray arrayWithObject:pl.view];
+            while (stack.count) {
+                NSView *v = stack.lastObject; [stack removeLastObject];
+                if ([v isKindOfClass:[NSTableView class]]) [tables addObject:(NSTableView *)v];
+                [stack addObjectsFromArray:v.subviews];
+            }
+            RLPTrackActionTableView *itemTable = nil;
+            for (NSTableView *tv in tables)
+                if ([tv isKindOfClass:[RLPTrackActionTableView class]]) itemTable = (RLPTrackActionTableView *)tv;
+            CK(itemTable != nil, "T14a 歌单曲目表是共享动作表格（右键有完整菜单）",
+               [NSString stringWithFormat:@"tables=%lu shared=0", (unsigned long)tables.count]);
+            CK(itemTable.pathForRow != nil, "T14b 曲目表接了 pathForRow（按被点行取路径）", @"nil");
+            // 页面必须能分派菜单动作（responder chain 的落点），否则菜单点了没反应。
+            CK([pl respondsToSelector:@selector(rlp_trackMenuAction:)],
+               "T14c 歌单页实现菜单动作分派", @"缺 rlp_trackMenuAction:");
+        }
 
         std::printf("\n%s（%d 项失败）\n", gFail == 0 ? "track_actions 全部通过" : "track_actions 有失败", gFail);
         return gFail == 0 ? 0 : 1;

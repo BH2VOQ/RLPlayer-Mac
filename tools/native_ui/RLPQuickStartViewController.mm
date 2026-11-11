@@ -605,12 +605,12 @@
 
 - (void)onOpenMore:(id)sender {
     NSStackView *s = [self popStackWithTitle:RLPTr(@"更多")
-        note:RLPTr(@"流媒体在这里挂载；AI 资料与音频输入的开关在专业模式。")];
+        note:RLPTr(@"流媒体在这里挂载；AI 资料与音频输入在左侧「设置」里调整。")];
     NSButton *stream = [self popRowWithTitle:RLPTr(@"挂载流媒体服务") note:RLPTr(@"打开流媒体页") on:NO
                                        action:@selector(onOpenStreaming:) ident:@"more.stream"];
     [s addArrangedSubview:stream];
     [[stream.widthAnchor constraintEqualToConstant:330] setActive:YES];
-    NSTextField *ro = RLPLabel(RLPTr(@"AI 资料补全与音频输入采集：到专业模式调整。"),
+    NSTextField *ro = RLPLabel(RLPTr(@"AI 资料补全与音频输入采集：在左侧「设置」里调整。"),
         [RLPTheme current].small, [RLPTheme current].mut);
     ro.maximumNumberOfLines = 0;
     ro.lineBreakMode = NSLineBreakByWordWrapping;

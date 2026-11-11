@@ -124,6 +124,12 @@ static NSInteger NonEmptyLabels(NSView *v) {
     return n;
 }
 
+static void CollectAllViews(NSView *v, NSMutableArray<NSView *> *out) {
+    if (!v) return;
+    [out addObject:v];
+    for (NSView *s in v.subviews) CollectAllViews(s, out);
+}
+
 #pragma mark - 隔离曲库
 
 // 造 3 张专辑 / 6 首曲子的最小真实库，让页面有真数据可渲染。
@@ -297,6 +303,8 @@ int RLPRunFunctionalAudit(NSString *outDir) {
         { "favorites", "favorites", "09-favorites.png" },
         { "playlists", "playlists", "10-playlists.png" },
         { "room",      "room",      "11-listening-room.png" },
+        // 2026-11-11 用户要求：两个模式都要有设置页 ⟹ 聆听模式也必须能进设置。
+        { "settings",  "settings",  "12-listening-settings.png" },
     };
     RLPSetAppMode(RLPAppModeListening);
     [wc.sidebar reloadForModeChange];
@@ -337,6 +345,51 @@ int RLPRunFunctionalAudit(NSString *outDir) {
         CK(i == 7, "设置页 7 个页签均已切换并截图", [NSString stringWithFormat:@"panes=%ld", (long)i]);
     } else {
         CK(NO, "设置页类型正确", NSStringFromClass(wc.currentContent.class));
+    }
+
+    // ---- ④b 聆听模式的设置页必须能改输出/升频/滤波/SDM/均衡 ----
+    // 专业模式把这四页迁去了工作台，聆听模式没有工作台 ⟹ 设置页必须把四页挂回来，
+    // 否则这些功能在聆听模式下不可达（铁律：功能不能删）。旧实现在这里必然红。
+    {
+        RLPSetAppMode(RLPAppModeListening);
+        [wc.sidebar reloadForModeChange];
+        Pump(0.4);
+        CK([wc.sidebar selectKey:@"settings"], "聆听模式能进设置", @"侧栏没有 settings");
+        Pump(0.5);
+        CK(RLPCurrentAppMode() == RLPAppModeListening, "进聆听设置不偷偷切到专业模式",
+           [NSString stringWithFormat:@"mode=%ld", (long)RLPCurrentAppMode()]);
+        RLPSettingsViewController *lv = (RLPSettingsViewController *)wc.currentContent;
+        CK([lv isKindOfClass:[RLPSettingsViewController class]], "聆听设置页类型正确",
+           NSStringFromClass(wc.currentContent.class));
+        if ([lv isKindOfClass:[RLPSettingsViewController class]]) {
+            NSSegmentedControl *seg = nil;
+            NSMutableArray<NSView *> *vs = [NSMutableArray array];
+            CollectAllViews(lv.view, vs);
+            for (NSView *v in vs)
+                if ([v isKindOfClass:[NSSegmentedControl class]]) { seg = (NSSegmentedControl *)v; break; }
+            CK(seg != nil && seg.segmentCount == 11,
+               "聆听模式设置页 11 个页签（含输出/PCM/SDM/均衡）",
+               seg ? [NSString stringWithFormat:@"tabs=%ld", (long)seg.segmentCount] : @"无页签控件");
+            const char *lkeys[] = { "out", "pcm", "sdm", "eq" };
+            NSInteger reached = 0;
+            for (const char *k : lkeys) {
+                [lv selectPane:[NSString stringWithUTF8String:k]];
+                Pump(0.4);
+                // 动态取 currentPaneKey：判据要能在旧代码上编译并跑红（旧代码没有这个方法，
+                // 且 selectPane 会把 out/pcm/sdm/eq 静默映射回 play —— 正是要抓的故障）。
+                if ([lv respondsToSelector:@selector(currentPaneKey)]) {
+                    NSString *cur = [lv performSelector:@selector(currentPaneKey)];
+                    if ([cur isEqualToString:[NSString stringWithUTF8String:k]]) ++reached;
+                }
+                NSString *fn = [NSString stringWithFormat:@"21-listening-settings-%s.png", k];
+                Snap(wc.window.contentView, [outDir stringByAppendingPathComponent:fn], CGSizeMake(1180, 760));
+            }
+            CK(reached == 4, "聆听设置能真正切到输出/PCM/SDM/均衡（不是映射回播放）",
+               [NSString stringWithFormat:@"reached=%ld", (long)reached]);
+        }
+        RLPSetAppMode(RLPAppModePro);
+        [wc.sidebar reloadForModeChange];
+        Pump(0.3);
     }
 
     // ---- ⑤ 单曲页 + 播放条 ----

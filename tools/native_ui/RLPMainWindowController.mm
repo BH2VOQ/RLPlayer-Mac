@@ -159,7 +159,7 @@ static const CGFloat kTopbarHeight = 46.0;
         trackingMode:NSSegmentSwitchTrackingSelectOne target:self action:@selector(onModeChanged:)];
     _modeSwitch.selectedSegment = (RLPCurrentAppMode() == RLPAppModePro) ? 1 : 0;
     _modeSwitch.translatesAutoresizingMaskIntoConstraints = NO;
-    _modeSwitch.toolTip = RLPTr(@"聆听模式：安静听歌，设置就在这一页；专业模式：信号链、滤波与升频快速切换、A/B 对比");
+    _modeSwitch.toolTip = RLPTr(@"聆听模式：安静听歌，常用设置在聆听室卡片里；专业模式：信号链、滤波与升频快速切换、A/B 对比");
     [_topbar addSubview:_modeSwitch];
 
     NSButton *queueBtn = RLPSymbolButton(@"list.bullet", RLPTr(@"播放队列"), self, @selector(onQueue:));
@@ -266,7 +266,7 @@ static const CGFloat kTopbarHeight = 46.0;
 }
 
 /// 行号 → 符号 key → 页面。**行号只在当前模式内有意义**，缓存一律按 key 存，
-/// 否则切模式后同一个行号会指向另一页（聆听模式 11 项 / 专业模式 12 项，下标会错位）。
+/// 否则切模式后同一个行号会指向另一页（首页不同：聆听室 / 专业工作台，下标会错位）。
 - (void)showContentForRow:(NSInteger)row {
     NSString *key = [self.sidebar keyForRow:row];
     [self showContentForKey:key.length ? key : @"albums"];
@@ -361,11 +361,7 @@ static const CGFloat kTopbarHeight = 46.0;
 
 - (void)onOpenSettingsPane:(NSNotification *)note {
     if (![note.object isKindOfClass:[NSString class]]) return;
-    // 设置只存在于专业模式：从聆听模式发来的跳转请求要先切模式，否则请求会被静默丢弃。
-    if (RLPCurrentAppMode() != RLPAppModePro) {
-        RLPSetAppMode(RLPAppModePro);
-        [self applyModeChange];
-    }
+    // 2026-11-11 起两个模式都有设置页：不再强制切到专业模式（切模式会打断用户的上下文）。
     [self.sidebar selectKey:@"settings"];
     RLPSettingsViewController *settings = (RLPSettingsViewController *)self.pageCache[@"settings"];
     if (![settings isKindOfClass:[RLPSettingsViewController class]]) return;
@@ -375,10 +371,10 @@ static const CGFloat kTopbarHeight = 46.0;
 - (void)onNavigateKey:(NSNotification *)note {
     if (![note.object isKindOfClass:[NSString class]]) return;
     NSString *key = (NSString *)note.object;
-    // 目标页在当前模式不存在（如聆听模式下的 settings）⟹ 交给设置跳转逻辑处理切模式。
+    // 目标页在当前模式不存在 ⟹ 交回首页（两个模式都有 settings，正常不会走到兜底）。
     if ([self.sidebar selectKey:key]) return;
     if ([key isEqualToString:@"settings"]) {
-        [[NSNotificationCenter defaultCenter] postNotificationName:@"RLPOpenSettingsPaneNotification" object:@"out"];
+        [[NSNotificationCenter defaultCenter] postNotificationName:@"RLPOpenSettingsPaneNotification" object:@"play"];
     }
 }
 

@@ -19,6 +19,7 @@
 #import "RLPCoreClient.h"
 #import "RLPSupport.h"
 #import "RLPTheme.h"
+#import "RLPTrackActions.h"
 
 @interface RLPPlaylistRow : NSObject
 @property (nonatomic, copy) NSString *name;
@@ -104,7 +105,17 @@
     [lbar addArrangedSubview:saveBtn];
     [host addSubview:lbar];
 
-    self.itemTable = [[NSTableView alloc] initWithFrame:NSZeroRect];
+    // 曲目表接**共享动作表格**：右键 = 与 web 一致的完整曲目动作
+    // （播放/入队/收藏/存歌单/体检/对比/AI 补全）。交接单列的未对齐项，2026-11-12 补上。
+    self.itemTable = [[RLPTrackActionTableView alloc] initWithFrame:NSZeroRect];
+    {
+        __weak __typeof__(self) ws = self;
+        ((RLPTrackActionTableView *)self.itemTable).pathForRow = ^NSString *(NSInteger row) {
+            __typeof__(self) s = ws;
+            if (!s || row < 0 || row >= (NSInteger)s.items.count) return nil;
+            return s.items[(NSUInteger)row].file;
+        };
+    }
     self.itemTable.dataSource = self;
     self.itemTable.delegate = self;
     self.itemTable.usesAlternatingRowBackgroundColors = YES;
@@ -218,6 +229,21 @@
     const NSInteger row = self.itemTable.clickedRow;
     if (row < 0) return;
     [self playFromIndex:row];
+}
+
+/// 共享曲目菜单的分派落点（responder chain）。
+/// 「播放」在歌单语境 = 载入整列并从该曲起播（带 CUE cs/ce），与单击/双击同语义；
+/// 其余动作（入队/收藏/存歌单/体检/对比/AI）走共享实现，不另写一套。
+- (void)rlp_trackMenuAction:(NSMenuItem *)sender {
+    if (sender.tag == RLPTrackActionPlay) {
+        NSString *path = [sender.representedObject isKindOfClass:[NSString class]] ? sender.representedObject : nil;
+        if (path.length) {
+            for (NSInteger i = 0; i < (NSInteger)self.items.count; ++i) {
+                if ([self.items[(NSUInteger)i].file isEqualToString:path]) { [self playFromIndex:i]; return; }
+            }
+        }
+    }
+    RLPHandleTrackAction(sender, self.view);
 }
 
 - (void)onPlayAll:(id)sender { [self playFromIndex:0]; }
