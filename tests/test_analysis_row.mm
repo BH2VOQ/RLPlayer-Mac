@@ -108,6 +108,80 @@ int main() {
         }
         CK([RLPAnlFmt(nil, 2, @" dB") isEqualToString:@"NA"], "C1t 不可用值 ⟹ NA（不是\"不适用 dB\"）", RLPAnlFmt(nil, 2, @" dB"));
 
+        // ---------- ③b 后端 -300 是"不适用"哨兵，绝不能排成 -300.00 dB ----------
+        // 依据：src/analysis/dynamics.h:266/301 与 track_health.h:346 —— 不可用时 JSON 写 -300。
+        // 这一条抓的是"看着像测量值其实是哨兵"：RLPAnlHas 只判有限数字，会放过 -300。
+        CK(!RLPAnlAvail(@(-300)), "C1u -300 哨兵不算可用值", @"");
+        CK([RLPAnlVal(@(-300), 2, @" dB") isEqualToString:@"NA"], "C1u -300 ⟹ NA（不是 -300.00 dB）",
+           RLPAnlVal(@(-300), 2, @" dB"));
+        CK([RLPAnlVal(@(-3.5), 2, @" dB") isEqualToString:@"-3.50 dB"], "C1u -3.5 是真实值 ⟹ 正常格式化",
+           RLPAnlVal(@(-3.5), 2, @" dB"));
+        // *_available=false 时数值即使存在也不可信（dr_available=false ⟹ 动态不适用）
+        {
+            NSDictionary *h = @{@"dr_db": @14.2, @"dr_available": @NO};
+            NSString *v = RLPAnlValFlag(h, @"dr_db", @"dr_available", 2, @" dB");
+            CK([v isEqualToString:@"NA"], "C1v dr_available=false ⟹ 详情 NA（哪怕 dr_db=14.2）", v);
+        }
+        {
+            NSDictionary *h = @{@"dr_db": @14.2, @"dr_available": @YES};
+            NSString *v = RLPAnlValFlag(h, @"dr_db", @"dr_available", 2, @" dB");
+            CK([v isEqualToString:@"14.20 dB"], "C1v dr_available=true ⟹ 正常显示", v);
+        }
+        CK([RLPAnlCount(@0) isEqualToString:@"0"], "C1w 计数 0 是真实值（不当成缺失）", RLPAnlCount(@0));
+        CK([RLPAnlCount(nil) isEqualToString:@"NA"], "C1w 计数缺失 ⟹ NA", RLPAnlCount(nil));
+
+        // ---------- ③c /api/health 是外层包 health，必须解开 ----------
+        // 依据：tools/rtaweb.cpp 的 handle_health_analysis 两条返回路径都是
+        //   {"ok":true,"usable":true,"cached":…,"ms":…,"stats":{…},"health":{…}}
+        // 不拆外层的后果（实测）：一首 DR 14.2、零削波的歌被显示成
+        //   「素材过短 · 动态不适用」+「不适用 · 样本不足」—— 全是假的。
+        {
+            NSDictionary *env = @{ @"ok": @YES, @"usable": @YES, @"cached": @YES,
+                @"health": @{ @"dr_db": @14.2, @"dr_available": @YES, @"status": @"ready",
+                              @"quality": @{ @"available": @YES, @"peak_dbfs_q": @-1.0,
+                                             @"rms_dbfs": @-20.0, @"clipped_samples": @0 } } };
+            NSDictionary *inner = RLPAnlUnwrapHealth(env);
+            CK([inner isEqualToDictionary:env[@"health"]], "C1x 解开外层 ⟹ 拿到内层 health", @"");
+            CK(Has(RLPAnlSumDyn(inner), @"良好动态"), "C1x 解外层后动态摘要正确",
+               RLPAnlSumDyn(inner));
+            CK(Has(RLPAnlSumQual(inner), @"干净"), "C1x 解外层后音质摘要正确",
+               RLPAnlSumQual(inner));
+            // 反向判据：直接把外层喂给摘要函数必须**读不到**（证明这条不是安慰剂）
+            CK(Has(RLPAnlSumDyn(env), @"不适用"), "C1x 未解外层会误报「不适用」（这就是要修的 bug）",
+               RLPAnlSumDyn(env));
+            CK(RLPAnlUnwrapHealth(@{@"ok": @YES})[@"dr_db"] == nil, "C1x 没有内层时退回外层（不崩）", @"");
+            CK(RLPAnlUnwrapHealth(nil) == nil, "C1x nil 输入 ⟹ nil", @"");
+        }
+
+        // ---------- ③d 详情文本：NA 口径 + 分组 ----------
+        {
+            NSDictionary *env = @{ @"ok": @YES, @"health": @{
+                @"dr_db": @14.2, @"dr_available": @YES, @"lufs": @(-300), @"lufs_available": @NO,
+                @"status": @"ready", @"fs": @44100, @"bits": @16, @"channels": @2,
+                @"peak_dbfs": @(-300), @"duration_sec": @200.0,
+                @"lossless_suspected": @NO, @"cutoff_hz": @0, @"fake24": @NO,
+                @"quality": @{ @"available": @YES, @"peak_dbfs_q": @-1.0, @"rms_dbfs": @-20.0,
+                               @"clipped_samples": @0, @"longest_clip_run": @0, @"stereo": @YES,
+                               @"snr_db": @16.0, @"centroid_hz": @2500.0 } } };
+            NSDictionary *h = RLPAnlUnwrapHealth(env);
+            NSString *l1 = RLPAnlDetailText(h, 1, NO, nil, @"/m/a.flac");
+            CK(Has(l1, @"动态") && Has(l1, @"音质") && Has(l1, @"假无损"), "C1y 详情含三组", l1);
+            CK(Has(l1, @"14.20 dB"), "C1y 真实 DR 正常显示", l1);
+            CK(!Has(l1, @"-300"), "C1y 详情里绝不出现 -300 哨兵", l1);
+            CK(Has(l1, @"未检出"), "C1y cutoff_hz=0 ⟹ 未检出（不是 0.0 kHz）", l1);
+            // 层级 2 才出现原始证据
+            NSString *l0 = RLPAnlDetailText(h, 0, NO, nil, @"/m/a.flac");
+            NSString *l2 = RLPAnlDetailText(h, 2, YES, nil, @"/m/a.flac");
+            CK(!Has(l0, @"原始证据"), "C1y L0 不显示原始证据", @"");
+            CK(Has(l2, @"原始证据"), "C1y L2 显示原始证据", l2);
+            CK(Has(l2, @"缓存命中"), "C1y L2 显示缓存命中标记", l2);
+            CK(Has(l2, @"判定依据") || !h[@"reason"], "C1y 有 reason 时显示判定依据", l2);
+            // 空态必须如实
+            CK(Has(RLPAnlDetailText(nil, 1, NO, nil, @""), @"未播放"), "C1y 无曲目 ⟹ 未播放", @"");
+            CK(Has(RLPAnlDetailText(nil, 1, NO, nil, @"https://x/y"), @"仅本地"), "C1y 网络曲目 ⟹ 仅本地文件可分析", @"");
+            CK(Has(RLPAnlDetailText(nil, 1, NO, @"解码失败", @"/m/a.flac"), @"解码失败"), "C1y 失败如实显示原因", @"");
+        }
+
         // ---------- ④ 自动分析去重（每曲一次） ----------
         CK(RLPAnlShouldAutoAnalyze(@"/m/a.flac", YES, YES, nil, NO, NO), "C4a 首次 ⟹ 触发", @"");
         CK(!RLPAnlShouldAutoAnalyze(@"/m/a.flac", YES, YES, @"/m/a.flac", NO, NO), "C4b 同曲已跑 ⟹ 不再触发", @"");
@@ -149,6 +223,23 @@ int main() {
             }
             CK((maxY - minY) <= 44.0, "C2b 四个元素在同一行（总高 <= 44pt）",
                [NSString stringWithFormat:@"span=%.1f", maxY - minY]);
+        }
+
+        // 分析条容器高度必须 <= 单行阈值。
+        // 阈值取 40pt：一行 22pt 的摘要块 + 上下各 2pt 边距就够，40 已是宽松上限；
+        // 超过它说明这一块已经变成两行（用户明确要求：不许换行变两行）。
+        {
+            NSView *bar = nil;
+            for (NSView *v in all)
+                if ([v.identifier isEqualToString:@"anl.row"] || [v.identifier isEqualToString:@"anl.bar"]) { bar = v; break; }
+            if (!bar) {
+                CK(NO, "C2c 分析条容器存在", @"缺 identifier anl.row/anl.bar");
+            } else if (bar.frame.size.height <= 0) {
+                CK(NO, "C2c 分析条几何：没量到（高度 0）", [NSString stringWithFormat:@"h=%.1f", bar.frame.size.height]);
+            } else {
+                CK(bar.frame.size.height <= 40.0, "C2c 分析条是单行（容器高 <= 40pt）",
+                   [NSString stringWithFormat:@"h=%.1f", bar.frame.size.height]);
+            }
         }
 
         // 面上不许有自动分析开关；收起态不许有可见的「重新分析」
