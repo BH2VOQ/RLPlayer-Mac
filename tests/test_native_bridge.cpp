@@ -16,6 +16,8 @@
 #include <cstdlib>
 #include <string>
 
+#include "net/json.h"
+#include "net/webui.h"
 #include "rlapp_core.h"
 
 namespace {
@@ -72,6 +74,21 @@ int main(int argc, char** argv) {
     ck(q.mode == 0 || q.mode == 1 || q.mode == 2 || q.mode == 3, "queue() mode is valid 0..3");
     const auto albums = rlnative::albums("");
     ck(true, "albums() parses without crashing");
+
+    // 6) 主题：默认 light（用户 2026-11-11 定）；写入后读回；非法值不写入。
+    const std::string t0 = rlnative::get_theme();
+    ck(t0 == "light" || t0 == "dark" || t0 == "blue", "get_theme() returns valid palette");
+    ck(rlnative::set_theme("blue"), "set_theme(blue) ok");
+    ck(rlnative::get_theme() == "blue", "theme persists via merged /api/settings write");
+    ck(!rlnative::set_theme("neon"), "set_theme(invalid) rejected");
+    ck(rlnative::get_theme() == "blue", "invalid theme leaves persisted value intact");
+    // 合并写：settings 里原有键不能被 theme 提交抹掉（写前插入一个哨兵键）
+    rta::net::HttpRequest put; put.method = "POST"; put.path = "/api/settings"; put.body = "lang=zh";
+    std::string ct; (void)rlapp::dispatch(put, ct);
+    (void)rlnative::set_theme("light");
+    const auto kvDoc = rta::net::json_parse(rlapp::dispatch(rta::net::HttpRequest{"GET", "/api/settings", "", ""}, ct));
+    ck(kvDoc["kv"].has("lang") && kvDoc["kv"]["lang"].s() == "zh",
+       "theme write keeps unrelated settings key (merge-write)");
 
     rlapp::request_shutdown();
     rlapp::stop_embedded();

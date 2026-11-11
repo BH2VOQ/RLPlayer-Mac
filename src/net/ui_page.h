@@ -89,7 +89,7 @@ inline std::string rta_ui_page(const std::string& lang = "zh") {
     // 主题与界面风格同样以配置为准：这样换版本、清 WebKit 缓存都不会把用户的外观打回默认。
     std::string conf_theme = read_conf_value("theme");
     const bool theme_from_conf = (conf_theme == "dark" || conf_theme == "light" || conf_theme == "blue");
-    const std::string theme = theme_from_conf ? conf_theme : "dark";
+    const std::string theme = theme_from_conf ? conf_theme : "light";
     std::string conf_style = read_conf_value("uistyle");
     const bool style_from_conf = (conf_style == "apple" || conf_style == "classic");
     const std::string style = style_from_conf ? conf_style : "apple";
@@ -103,8 +103,8 @@ inline std::string rta_ui_page(const std::string& lang = "zh") {
          "><head><meta charset=utf-8>";
     h += "<meta name=viewport content='width=device-width,initial-scale=1'>";
     h += "<title>RLPlayer</title>";
-    // theme-color 决定 Edge「应用窗口」标题栏/边框的颜色；不设就是系统白，跟深色本体割裂。
-    h += "<meta name=theme-color content='#161618'>";
+    // theme-color 决定 Edge「应用窗口」标题栏/边框的颜色；默认 light 与页面底色一致。
+    h += "<meta name=theme-color content='#ffffff'>";
     h += "<link rel=icon type='image/png' href='/favicon.png'>";
     h += rta_i18n_head_script();
     // Apply remembered theme before CSS/first paint, not only at body-end app.js.
@@ -1502,9 +1502,7 @@ h += "#npPage .npedge{display:none}";
     h += "<input id=q placeholder='搜索专辑 / 艺术家 / 曲目…' autocomplete=off spellcheck=false>";
     h += "<button id=qClear class=q-clear title='清空搜索' style='display:none'>&times;</button></div><div class=sp></div>";
     h += "<span id=tools class=ptools></span>";
-    h += "<div class=themes><button class=sw data-theme=light title='浅色'></button>";
-    h += "<button class='sw on' data-theme=dark title='深色'></button><button class=sw data-theme=blue title='浅蓝'></button></div>";
-    h += "<button class=ibtn id=bHelp title='快捷键与技巧'><svg width=16 height=16 viewBox='0 0 24 24' fill=none stroke=currentColor stroke-width=2><circle cx='12' cy='12' r='9'/><path d='M9.5 9a2.5 2.5 0 015 .5c0 1.5-2.5 2-2.5 3.5'/><circle cx='12' cy='17' r='.7' fill='currentColor'/></svg></button>";
+        h += "<button class=ibtn id=bHelp title='快捷键与技巧'><svg width=16 height=16 viewBox='0 0 24 24' fill=none stroke=currentColor stroke-width=2><circle cx='12' cy='12' r='9'/><path d='M9.5 9a2.5 2.5 0 015 .5c0 1.5-2.5 2-2.5 3.5'/><circle cx='12' cy='17' r='.7' fill='currentColor'/></svg></button>";
     h += "<button class=ibtn id=bScan title='重新扫描音乐库'><svg width=16 height=16 viewBox='0 0 24 24' fill=none stroke=currentColor stroke-width=2><path d='M21 12a9 9 0 1 1-3-6.7'/><path d='M21 4v5h-5'/></svg></button>";
     h += "<button class=ibtn id=tq title='显示或隐藏队列' style='position:relative'><svg width=17 height=17 viewBox='0 0 24 24' fill=none stroke=currentColor stroke-width=2><path d='M4 6h16M4 12h16M4 18h10'/></svg><span id=tqBadge class=nav-badge style='display:none'></span></button>";
     h += "<div class=wctl><button class=wbtn id=wMin title='最小化'><svg viewBox='0 0 24 24' fill=none stroke=currentColor stroke-width=2><path d='M5 12h14'/></svg></button>";
