@@ -31,6 +31,21 @@
 @property (nonatomic, strong) NSTextField *warning;
 @property (nonatomic, copy) NSArray<NSDictionary *> *devices;
 @property (nonatomic, assign) BOOL running;
+// 采集实时状态（web sp_stat_* / sp_meter_*，1 秒轮询 /api/input/state）
+@property (nonatomic, strong) NSTextField *statRunning;
+@property (nonatomic, strong) NSTextField *statFrames;
+@property (nonatomic, strong) NSTextField *statSpec;
+@property (nonatomic, strong) NSTextField *statWater;
+@property (nonatomic, strong) NSProgressIndicator *meterWater;
+@property (nonatomic, strong) NSTextField *statXrun;
+@property (nonatomic, strong) NSTextField *statClips;
+@property (nonatomic, strong) NSTextField *statRms;
+@property (nonatomic, strong) NSProgressIndicator *meterRms;
+@property (nonatomic, strong) NSTextField *statPeak;
+@property (nonatomic, strong) NSProgressIndicator *meterPeak;
+@property (nonatomic, strong) NSTextField *statOut;
+@property (nonatomic, strong) NSTextField *statErr;
+@property (nonatomic, strong) NSView *statErrBox;
 @end
 
 @implementation RLPInputView
@@ -132,6 +147,68 @@
     self.status.maximumNumberOfLines = 2;
     self.status.lineBreakMode = NSLineBreakByWordWrapping;
     [self.stack addArrangedSubview:self.status];
+
+    // ---- 采集实时状态（1:1 对齐 web 的「采集实时状态」区块）----
+    // 每个值都用 web 的 id；缺一个 parity 就会报缺口，所以这是清单而不是装饰。
+    RLPTheme *t2 = [RLPTheme current];
+    NSTextField *hdr = RLPLabel(RLPTr(@"采集实时状态"),
+        [NSFont systemFontOfSize:12 weight:NSFontWeightSemibold], t2.text);
+    [self.stack addArrangedSubview:hdr];
+
+    self.statRunning = RLPLabel(@"-", t2.small, t2.text);
+    self.statRunning.identifier = @"sp_stat_running";
+    self.statFrames = RLPLabel(@"-", t2.small, t2.text);
+    self.statFrames.identifier = @"sp_stat_frames";
+    self.statSpec = RLPLabel(@"-", t2.small, t2.text);
+    self.statSpec.identifier = @"sp_stat_spec";
+    self.statWater = RLPLabel(@"-", t2.small, t2.text);
+    self.statWater.identifier = @"sp_stat_water";
+    self.statXrun = RLPLabel(@"-", t2.small, t2.text);
+    self.statXrun.identifier = @"sp_stat_xrun";
+    self.statClips = RLPLabel(@"-", t2.small, t2.text);
+    self.statClips.identifier = @"sp_stat_clips";
+    self.statRms = RLPLabel(@"-", t2.small, t2.text);
+    self.statRms.identifier = @"sp_stat_rms";
+    self.statPeak = RLPLabel(@"-", t2.small, t2.text);
+    self.statPeak.identifier = @"sp_stat_peak";
+    self.statOut = RLPLabel(@"-", t2.small, t2.mut);
+    self.statOut.identifier = @"sp_stat_out";
+
+    self.meterWater = [[NSProgressIndicator alloc] initWithFrame:NSZeroRect];
+    self.meterWater.identifier = @"sp_meter_water";
+    self.meterRms = [[NSProgressIndicator alloc] initWithFrame:NSZeroRect];
+    self.meterRms.identifier = @"sp_meter_rms";
+    self.meterPeak = [[NSProgressIndicator alloc] initWithFrame:NSZeroRect];
+    self.meterPeak.identifier = @"sp_meter_peak";
+    for (NSProgressIndicator *m in @[ self.meterWater, self.meterRms, self.meterPeak ]) {
+        m.style = NSProgressIndicatorStyleBar;
+        m.indeterminate = NO;
+        m.minValue = 0;
+        m.maxValue = 100;
+        m.doubleValue = 0;
+        [[m.widthAnchor constraintEqualToConstant:220] setActive:YES];
+    }
+
+    [self.stack addArrangedSubview:[self row:RLPTr(@"运行状态") control:self.statRunning hint:nil]];
+    [self.stack addArrangedSubview:[self row:RLPTr(@"采集帧数 / 时长") control:self.statFrames hint:nil]];
+    [self.stack addArrangedSubview:[self row:RLPTr(@"采样规格") control:self.statSpec hint:nil]];
+    [self.stack addArrangedSubview:[self row:RLPTr(@"缓冲水位") control:self.statWater hint:nil]];
+    [self.stack addArrangedSubview:self.meterWater];
+    [self.stack addArrangedSubview:[self row:RLPTr(@"溢出 / 欠载") control:self.statXrun hint:nil]];
+    [self.stack addArrangedSubview:[self row:RLPTr(@"削波计数 (正 / 负)") control:self.statClips hint:nil]];
+    [self.stack addArrangedSubview:[self row:RLPTr(@"RMS 电平") control:self.statRms hint:nil]];
+    [self.stack addArrangedSubview:self.meterRms];
+    [self.stack addArrangedSubview:[self row:RLPTr(@"峰值电平") control:self.statPeak hint:nil]];
+    [self.stack addArrangedSubview:self.meterPeak];
+    [self.stack addArrangedSubview:[self row:RLPTr(@"输出文件") control:self.statOut hint:nil]];
+
+    // 错误行：平时隐藏（web sp_stat_err_box display:none），有错误才显示
+    self.statErr = RLPLabel(@"", t2.small, t2.mut);
+    self.statErr.identifier = @"sp_stat_err";
+    self.statErrBox = [self row:RLPTr(@"错误信息") control:self.statErr hint:nil];
+    self.statErrBox.identifier = @"sp_stat_err_box";
+    self.statErrBox.hidden = YES;
+    [self.stack addArrangedSubview:self.statErrBox];
 
     [self.stack addArrangedSubview:RLPLabel(
         RLPTr(@"macOS 当前不支持系统混音回环采集（后端会明确拒绝），只能采集物理输入设备。"),
@@ -272,6 +349,7 @@
         self_.startBtn.enabled = !run;
         self_.stopBtn.enabled = run;
         self_.status.stringValue = run ? RLPTr(@"采集进行中") : RLPTr(@"未在采集");
+        [self_ applyInputState:json];
     }];
     [[RLPCoreClient shared] getJSON:@"/api/settings" completion:^(NSDictionary * _Nullable json) {
         __typeof__(self) self_ = weakSelf;
@@ -281,6 +359,68 @@
         NSString *be = [kv[@"inbackend"] isKindOfClass:[NSString class]] ? kv[@"inbackend"] : nil;
         if (be.length && [self_.backend itemWithTitle:be]) [self_.backend selectItemWithTitle:be];
     }];
+}
+
+/// 把 /api/input/state 的真实字段铺到实时状态行上。
+/// 口径与 web renderInputStats 一致：**数字全部来自后端，前端不做再计算**；
+/// 不可用的指标显示 "不适用"，绝不显示 0 冒充正常。
+- (void)applyInputState:(NSDictionary *)st {
+    if (![st isKindOfClass:[NSDictionary class]]) return;
+    const BOOL running = [st[@"running"] respondsToSelector:@selector(boolValue)] && [st[@"running"] boolValue];
+
+    NSString *mode = [st[@"mode"] isKindOfClass:[NSString class]] ? st[@"mode"] : @"";
+    if (running) {
+        self.statRunning.stringValue = [mode isEqualToString:@"monitor"] ? RLPTr(@"直通监听中")
+            : [mode isEqualToString:@"null"] ? RLPTr(@"模拟源运行中") : RLPTr(@"录制中");
+    } else {
+        self.statRunning.stringValue = RLPTr(@"空闲");
+    }
+
+    double sec = [st[@"seconds"] respondsToSelector:@selector(doubleValue)] ? [st[@"seconds"] doubleValue] : 0;
+    long frames = [st[@"frames"] respondsToSelector:@selector(longValue)] ? [st[@"frames"] longValue] : 0;
+    self.statFrames.stringValue = [NSString stringWithFormat:RLPTr(@"%ld 帧 (%.1fs)"), frames, sec];
+
+    id rate = st[@"rate"], ch = st[@"channels"], dev = st[@"device"];
+    if ([rate respondsToSelector:@selector(integerValue)] && [ch respondsToSelector:@selector(integerValue)] &&
+        [rate integerValue] > 0) {
+        NSString *spec = [NSString stringWithFormat:@"%ld Hz / %ld 声道",
+                          (long)[rate integerValue], (long)[ch integerValue]];
+        if ([dev isKindOfClass:[NSString class]] && [dev length])
+            spec = [spec stringByAppendingFormat:@" · %@", dev];
+        self.statSpec.stringValue = spec;
+    } else {
+        self.statSpec.stringValue = ([dev isKindOfClass:[NSString class]] && [dev length]) ? dev : @"-";
+    }
+
+    double water = [st[@"water"] respondsToSelector:@selector(doubleValue)] ? [st[@"water"] doubleValue] : 0;
+    water = MAX(0.0, MIN(1.0, water));
+    self.statWater.stringValue = [NSString stringWithFormat:@"%.1f%%", water * 100.0];
+    self.meterWater.doubleValue = water * 100.0;
+
+    long ovf = [st[@"overflow"] respondsToSelector:@selector(longValue)] ? [st[@"overflow"] longValue] : 0;
+    long unf = [st[@"underflow"] respondsToSelector:@selector(longValue)] ? [st[@"underflow"] longValue] : 0;
+    self.statXrun.stringValue = [NSString stringWithFormat:RLPTr(@"溢出 %ld / 欠载 %ld"), ovf, unf];
+    self.statXrun.textColor = (ovf > 0 || unf > 0) ? [RLPTheme current].danger : [RLPTheme current].text;
+
+    long pos = [st[@"posClips"] respondsToSelector:@selector(longValue)] ? [st[@"posClips"] longValue] : 0;
+    long neg = [st[@"negClips"] respondsToSelector:@selector(longValue)] ? [st[@"negClips"] longValue] : 0;
+    self.statClips.stringValue = [NSString stringWithFormat:@"+%ld / -%ld", pos, neg];
+    self.statClips.textColor = (pos > 0 || neg > 0) ? [RLPTheme current].danger : [RLPTheme current].text;
+
+    // 电平：后端给 dBFS；-inf 或缺失显示 -∞，条按 -60..0 dB 线性映射
+    double rms = [st[@"rmsDb"] respondsToSelector:@selector(doubleValue)] ? [st[@"rmsDb"] doubleValue] : -INFINITY;
+    double peak = [st[@"peakDb"] respondsToSelector:@selector(doubleValue)] ? [st[@"peakDb"] doubleValue] : -INFINITY;
+    self.statRms.stringValue = isfinite(rms) ? [NSString stringWithFormat:@"%.1f dBFS", rms] : RLPTr(@"-∞ dBFS");
+    self.statPeak.stringValue = isfinite(peak) ? [NSString stringWithFormat:@"%.1f dBFS", peak] : RLPTr(@"-∞ dBFS");
+    self.meterRms.doubleValue = isfinite(rms) ? MAX(0.0, MIN(100.0, (rms + 60.0) / 60.0 * 100.0)) : 0;
+    self.meterPeak.doubleValue = isfinite(peak) ? MAX(0.0, MIN(100.0, (peak + 60.0) / 60.0 * 100.0)) : 0;
+
+    NSString *outFile = [st[@"outFile"] isKindOfClass:[NSString class]] ? st[@"outFile"] : nil;
+    self.statOut.stringValue = outFile.length ? outFile : @"-";
+
+    NSString *err = [st[@"error"] isKindOfClass:[NSString class]] ? st[@"error"] : nil;
+    self.statErr.stringValue = err.length ? err : @"";
+    if (self.statErrBox) self.statErrBox.hidden = (err.length == 0);
 }
 
 - (void)applyTheme {

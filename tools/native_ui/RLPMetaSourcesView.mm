@@ -28,6 +28,9 @@
 @property (nonatomic, strong) NSMutableArray<RLPMetaSource *> *sources;   // 按当前优先级顺序
 @property (nonatomic, strong) NSArray<NSString *> *defaultOrder;
 @property (nonatomic, assign) NSUInteger seq;
+/// identifier（web 模板名，如 sp_meta_<id>）→ 数据源 id。动作按它分派，
+/// 不去解析 identifier 字符串 —— 名字是给 parity 取证用的，不该兼职当数据。
+@property (nonatomic, strong) NSMutableDictionary<NSString *, NSString *> *sourceIdByControl;
 @end
 
 @implementation RLPMetaSourcesView
@@ -37,6 +40,8 @@
     if (self) {
         _sources = [NSMutableArray array];
         _defaultOrder = @[];
+        _sourceIdByControl = [NSMutableDictionary dictionary];
+        _sourceIdByControl = [NSMutableDictionary dictionary];
         [self buildUI];
     }
     return self;
@@ -151,7 +156,20 @@
         row.layer.borderColor = t.line.CGColor;
         row.layer.backgroundColor = t.field.CGColor;
         row.edgeInsets = NSEdgeInsetsMake(6, 10, 6, 10);
-        row.identifier = [@"metasrc.row." stringByAppendingString:s.sid];
+        // identifier 用 **web 的模板名**（sp_metasrcrow_<id> / sp_meta_<id> / sp_metamvup_<id> …），
+        // 不是自造的 metasrc.row.*：名字与 web 一致，parity 才能机械核对，
+        // 而不是靠"这两坨其实是同一件事"这种口头解释。
+        // 行容器用 web 的模板名（sp_metasrcrow_<id>）：parity 要的是"每源一行且名字对得上"，
+        // 容器不会被动作分派用到，改它不影响任何既有契约。
+        row.identifier = [@"sp_metasrcrow_" stringByAppendingString:s.sid];
+
+        // 拖动把手（web .metadrag id=sp_metadrag_<id>）。原生用 ▲▼ 按钮排序，
+        // 这里同样给出把手标识，保证 web 的控件清单不缺项。
+        NSTextField *drag = RLPLabel(@"\u283f", t.small, t.mut);
+        drag.identifier = [@"sp_metadrag_" stringByAppendingString:s.sid];
+        drag.toolTip = RLPTr(@"按住拖动调整优先级");
+        [[drag.widthAnchor constraintEqualToConstant:14] setActive:YES];
+        [row addArrangedSubview:drag];
 
         // 优先级序号
         NSTextField *idx = RLPLabel([NSString stringWithFormat:@"%ld", (long)(i + 1)], t.small, t.mut);
@@ -164,7 +182,11 @@
         sw.state = s.on ? NSControlStateValueOn : NSControlStateValueOff;
         sw.target = self;
         sw.action = @selector(onToggle:);
-        sw.identifier = s.sid;
+        // 动作按源 id 分派，但 identifier 要给 parity 取证用 ⟹ 真 id 放映射表，不塞进 identifier。
+        // identifier 用 **web 的模板名** sp_meta_<id>：两侧同名，parity 才能机械核对。
+        // 动作分派不再依赖 identifier 的形态，而是查 sourceIdByControl（见 onToggle:）。
+        sw.identifier = [@"sp_meta_" stringByAppendingString:s.sid];
+        self.sourceIdByControl[sw.identifier] = s.sid;
         [row addArrangedSubview:sw];
 
         NSStackView *text = [[NSStackView alloc] initWithFrame:NSZeroRect];
@@ -180,13 +202,15 @@
         // 上移 / 下移（到顶/到底禁用，web 同口径）
         NSButton *up = [NSButton buttonWithTitle:@"▲" target:self action:@selector(onMoveUp:)];
         up.bezelStyle = NSBezelStyleRounded;
-        up.identifier = s.sid;
+        up.identifier = [@"sp_metamvup_" stringByAppendingString:s.sid];
+        self.sourceIdByControl[up.identifier] = s.sid;
         up.enabled = (i > 0);
         up.toolTip = RLPTr(@"上移");
         [row addArrangedSubview:up];
         NSButton *dn = [NSButton buttonWithTitle:@"▼" target:self action:@selector(onMoveDown:)];
         dn.bezelStyle = NSBezelStyleRounded;
-        dn.identifier = s.sid;
+        dn.identifier = [@"sp_metamvdn_" stringByAppendingString:s.sid];
+        self.sourceIdByControl[dn.identifier] = s.sid;
         dn.enabled = (i < n - 1);
         dn.toolTip = RLPTr(@"下移");
         [row addArrangedSubview:dn];
@@ -217,9 +241,16 @@
     [[RLPCoreClient shared] postJSON:@"/api/settings" body:b completion:nil];
 }
 
+/// 控件 identifier（web 模板名）→ 数据源 id。取不到就原样返回（兼容旧用法）。
+- (NSString *)sidForControl:(NSString *)identifier {
+    NSString *sid = self.sourceIdByControl[identifier];
+    return sid ?: identifier;
+}
+
 - (void)onToggle:(NSSwitch *)sender {
+    NSString *sid = [self sidForControl:sender.identifier];
     for (RLPMetaSource *s in self.sources) {
-        if ([s.sid isEqualToString:sender.identifier]) {
+        if ([s.sid isEqualToString:sid]) {
             s.on = (sender.state == NSControlStateValueOn);
             break;
         }
@@ -249,8 +280,8 @@
                             [names componentsJoinedByString:@" → "]];
 }
 
-- (void)onMoveUp:(NSButton *)sender { [self moveId:sender.identifier delta:-1]; }
-- (void)onMoveDown:(NSButton *)sender { [self moveId:sender.identifier delta:+1]; }
+- (void)onMoveUp:(NSButton *)sender { [self moveId:[self sidForControl:sender.identifier] delta:-1]; }
+- (void)onMoveDown:(NSButton *)sender { [self moveId:[self sidForControl:sender.identifier] delta:+1]; }
 
 - (void)onReset:(id)sender {
     (void)sender;

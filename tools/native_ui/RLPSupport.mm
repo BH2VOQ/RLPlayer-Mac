@@ -162,29 +162,6 @@ NSTextField *RLPLabel(NSString *text, NSFont *font, NSColor *color) {
     return l;
 }
 
-#pragma mark - 界面模式（唯一真相源）
-
-NSNotificationName const RLPAppModeDidChangeNotification = @"RLPAppModeDidChangeNotification";
-static NSString *const kAppModeKey = @"RLPAppMode";
-
-RLPAppMode RLPCurrentAppMode(void) {
-    // 默认聆听模式：第一次打开的人先看到"能听歌的那一页"，不是一堆专业开关。
-    NSInteger v = [[NSUserDefaults standardUserDefaults] integerForKey:kAppModeKey];
-    return (v == RLPAppModePro) ? RLPAppModePro : RLPAppModeListening;
-}
-
-void RLPSetAppMode(RLPAppMode mode) {
-    if (mode != RLPAppModeListening && mode != RLPAppModePro) return;
-    if (RLPCurrentAppMode() == mode) return;
-    [[NSUserDefaults standardUserDefaults] setInteger:mode forKey:kAppModeKey];
-    [[NSNotificationCenter defaultCenter] postNotificationName:RLPAppModeDidChangeNotification
-                                                        object:@(mode)];
-}
-
-NSString *RLPAppModeName(RLPAppMode mode) {
-    return mode == RLPAppModePro ? RLPTr(@"专业模式") : RLPTr(@"聆听模式");
-}
-
 #pragma mark - 卡片式弹层
 
 NSViewController *RLPCardController(NSView *card, CGFloat width, CGFloat minHeight) {

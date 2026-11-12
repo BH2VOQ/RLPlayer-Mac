@@ -281,4 +281,24 @@
     [self.table reloadData];
 }
 
+
+/// POST /api/upload?name=<文件名>，body = 文件原始字节。
+/// 用途与 web 的拖拽上传一致：**当调用方拿不到真实路径时**，先上传到本机服务再由它入队。
+/// 原生拖拽通常能拿到 path（走 /api/add 即可），但在沙盒/网络卷下会拿不到 ——
+/// 那时这条路径就是唯一能工作的方式，不能因为"平时用不到"就删掉。
+- (void)uploadFileAtURL:(NSURL *)url completion:(void (^)(NSString * _Nullable path))completion {
+    if (!url || !url.lastPathComponent.length) { if (completion) completion(nil); return; }
+    NSData *data = [NSData dataWithContentsOfURL:url];
+    if (!data.length) { if (completion) completion(nil); return; }
+    NSString *path = [NSString stringWithFormat:@"/api/upload?name=%@", RLPEnc(url.lastPathComponent)];
+    __weak __typeof__(self) weakSelf = self;
+    [[RLPCoreClient shared] postData:path body:data contentType:@"application/octet-stream"
+                          completion:^(NSDictionary * _Nullable json) {
+        __typeof__(self) weakSelf2 = weakSelf;
+        (void)weakSelf2;
+        NSString *p = [json[@"path"] isKindOfClass:[NSString class]] ? json[@"path"] : nil;
+        if (completion) completion(p);
+    }];
+}
+
 @end

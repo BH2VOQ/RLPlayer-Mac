@@ -195,6 +195,37 @@ static void Pump(NSTimeInterval seconds) {
 
 #pragma mark - 主流程
 
+
+/// 把本轮功能验收的结论回传给后端（web 用 /api/selftest/report 落盘页面自检结果）。
+/// 为什么要有：web 的页面自检跑完会把 want/actual 落盘，便于事后 grep 与对比；
+/// 原生这边是 --audit，结论同样应该落盘到同一个地方，否则两边的"验收证据"躺在两个世界。
+static void ReportAuditResult(NSString *summary, NSInteger pass, NSInteger fail) {
+    if (![RLPCoreClient shared].started) return;
+    NSDictionary *payload = @{ @"schema": @1,
+                               @"kind": @"native-audit",
+                               @"pass": @(pass),
+                               @"fail": @(fail),
+                               @"summary": summary ?: @"" };
+    NSData *body = [NSJSONSerialization dataWithJSONObject:payload options:0 error:nil];
+    [[RLPCoreClient shared] postData:@"/api/selftest/report"
+                                body:body ?: [NSData data]
+                         contentType:@"application/json"
+                          completion:nil];
+}
+
+/// 回传一条 UI 动作事件（web 的 uiTrace 做的是同一件事：把页面动作/异常批量落盘）。
+/// 原生的"页面动作"就是导航与页签切换，这里在关键路径上记一笔。
+static void TraceUiEvent(NSString *kind, NSDictionary *detail) {
+    if (![RLPCoreClient shared].started) return;
+    NSDictionary *ev = @{ @"schema": @1, @"events": @[ @{ @"k": kind ?: @"",
+                                                          @"d": detail ?: @{} } ] };
+    NSData *body = [NSJSONSerialization dataWithJSONObject:ev options:0 error:nil];
+    [[RLPCoreClient shared] postData:@"/api/ui/events"
+                                body:body ?: [NSData data]
+                         contentType:@"application/json"
+                          completion:nil];
+}
+
 int RLPRunFunctionalAudit(NSString *outDir) {
     gFail = 0; gPass = 0;
     std::printf("=== rlplayer_native 功能级验收（真数据 + 真导航 + 截图）===\n");
@@ -302,15 +333,14 @@ int RLPRunFunctionalAudit(NSString *outDir) {
         { "recent",    "recent",    "08-recent.png" },
         { "favorites", "favorites", "09-favorites.png" },
         { "playlists", "playlists", "10-playlists.png" },
-        { "room",      "room",      "11-listening-room.png" },
-        // 2026-11-11 用户要求：两个模式都要有设置页 ⟹ 聆听模式也必须能进设置。
-        { "settings",  "settings",  "12-listening-settings.png" },
+        // web data-v=station（标题「快速开始」）。原生侧曾叫 room/聆听室，已按 web 改名。
+        { "station",   "station",   "11-station.png" },
+        { "settings",  "settings",  "12-settings.png" },
     };
-    RLPSetAppMode(RLPAppModeListening);
-    [wc.sidebar reloadForModeChange];
     Pump(0.4);
     for (const RowSpec &r : rows) {
         CK([wc.sidebar selectKey:[NSString stringWithUTF8String:r.key]], r.name, @"侧栏没有这个 key");
+        TraceUiEvent(@"nav", @{ @"key": [NSString stringWithUTF8String:r.key] });
         Pump(0.7);
         NSViewController *cur = wc.currentContent;
         CK(cur != nil, r.name, @"currentContent 为 nil");
@@ -320,76 +350,114 @@ int RLPRunFunctionalAudit(NSString *outDir) {
              [NSString stringWithUTF8String:r.file]], CGSizeMake(1180, 760));
     }
 
-    // ---- ④ 专业模式：工作台 + 设置页 7 个页签 ----
-    RLPSetAppMode(RLPAppModePro);
-    [wc.sidebar reloadForModeChange];
-    Pump(0.5);
-    CK([wc.sidebar selectKey:@"workbench"], "专业模式能进工作台", @"侧栏没有 workbench");
-    Pump(0.7);
-    CK(wc.currentContent != nil, "工作台有内容", @"currentContent 为 nil");
-    Snap(wc.window.contentView, [outDir stringByAppendingPathComponent:@"13-workbench.png"],
-         CGSizeMake(1180, 760));
-    CK([wc.sidebar selectKey:@"settings"], "专业模式能进设置", @"侧栏没有 settings");
+    // ---- ④ 设置页：web 的 10 个页签逐页切换并截图 ----
+    // 判据要能在旧代码上跑红：旧实现只有「播放/输出/PCM/SDM/均衡/输入/校准/流媒体/元数据/高级/诊断」
+    // 且按模式分叉，没有 stream 之外的 web 页签顺序，也没有 sp_* 的 identifier。
+    CK([wc.sidebar selectKey:@"settings"], "能进设置", @"侧栏没有 settings");
     Pump(0.5);
     RLPSettingsViewController *sv = (RLPSettingsViewController *)wc.currentContent;
     if ([sv isKindOfClass:[RLPSettingsViewController class]]) {
-        const char *keys[] = { "play","in","cal","stream","meta","adv","diag" };
-        NSInteger i = 0;
+        NSSegmentedControl *seg = nil;
+        NSMutableArray<NSView *> *vs = [NSMutableArray array];
+        CollectAllViews(sv.view, vs);
+        for (NSView *v in vs)
+            if ([v isKindOfClass:[NSSegmentedControl class]]) { seg = (NSSegmentedControl *)v; break; }
+        CK(seg != nil && seg.segmentCount == 10,
+           "设置页 10 个页签（web data-g 清单）",
+           seg ? [NSString stringWithFormat:@"tabs=%ld", (long)seg.segmentCount] : @"无页签控件");
+
+        // 顺序必须与 web 的 .stabs 一致：adv / in / out / pcm / sdm / eq / cal / meta / stream / diag
+        const char *keys[] = { "adv", "in", "out", "pcm", "sdm", "eq", "cal", "meta", "stream", "diag" };
+        NSInteger reached = 0;
         for (const char *k : keys) {
-            [sv selectPane:[NSString stringWithUTF8String:k]];
-            Pump(0.5);
+            NSString *want = [NSString stringWithUTF8String:k];
+            [sv selectPane:want];
+            Pump(0.4);
+            if ([[sv currentPaneKey] isEqualToString:want]) ++reached;
             NSString *fn = [NSString stringWithFormat:@"20-settings-%s.png", k];
             Snap(wc.window.contentView, [outDir stringByAppendingPathComponent:fn], CGSizeMake(1180, 760));
-            ++i;
         }
-        CK(i == 7, "设置页 7 个页签均已切换并截图", [NSString stringWithFormat:@"panes=%ld", (long)i]);
+        CK(reached == 10, "设置页 10 个页签都能真正切到位",
+           [NSString stringWithFormat:@"reached=%ld", (long)reached]);
+
+        // 控件 identifier 的运行时核对：**必须先切到那一页再收集**。
+        // 页签内容是惰性构建的（buildPane 只在首次 showTab 时跑），
+        // 在别的页签上收集当然找不到 —— 那是判据写错，不是实现缺失
+        // （本轮实测踩过：这条一开始全红，红的原因是判据没切页签）。
+        NSMutableDictionary<NSString *, NSMutableSet<NSString *> *> *idsByPane =
+            [NSMutableDictionary dictionary];
+        const char *probeKeys[] = { "out", "stream", "meta", "adv" };
+        for (const char *k : probeKeys) {
+            NSString *key = [NSString stringWithUTF8String:k];
+            [sv selectPane:key];
+            Pump(0.35);
+            NSMutableArray<NSView *> *paneViews = [NSMutableArray array];
+            CollectAllViews(sv.view, paneViews);
+            NSMutableSet<NSString *> *ids = [NSMutableSet set];
+            for (NSView *v in paneViews)
+                if (v.identifier.length) [ids addObject:v.identifier];
+            idsByPane[key] = ids;
+        }
+        // 每页至少要有 web 的代表性控件（全都逐条核对见 parity 表；这里抽 4 条防"整页没接"）。
+        CK([idsByPane[@"out"] containsObject:@"sp_backend"],
+           "输出页有 sp_backend（web data-g=out 的代表控件）", @"缺少 identifier");
+        CK([idsByPane[@"stream"] containsObject:@"sp_cast_dev"],
+           "流媒体页有 sp_cast_dev（投放面板）", @"缺少 identifier");
+        CK([idsByPane[@"meta"] containsObject:@"sp_metaon"],
+           "元数据页有 sp_metaon", @"缺少 identifier");
+        CK([idsByPane[@"adv"] containsObject:@"sp_uistyle"],
+           "通用页有 sp_uistyle（界面风格）", @"缺少 identifier");
+        // ---- 运行时核对：每个页签的代表性控件必须真的在视图树里 ----
+        // 逐页抽查（全量核对见 parity 表）。抽样而不是全量，是因为全量需要把
+        // 181 个 identifier 抄进测试代码里 —— 那正是"手抄清单"，表格已经机器生成了。
+        {
+            struct PaneProbe { const char *pane; const char *ident; const char *what; };
+            const PaneProbe probes[] = {
+                { "out",    "sp_backend",        "输出后端下拉" },
+                { "out",    "sp_bpfix",          "bit-perfect 直通按钮" },
+                { "out",    "sp_ramp",           "音量渐变" },
+                { "out",    "sp_trimwrap",       "声道微调容器" },
+                { "pcm",    "sp_phase",          "相位覆盖" },
+                { "pcm",    "sp_transition",     "过渡带占比" },
+                { "pcm",    "sp_shaper",         "抖动/噪声整形" },
+                { "sdm",    "sp_dsdkind",        "DSD 源抽取器" },
+                { "sdm",    "sp_modcut",         "噪声整形拐点" },
+                { "in",     "sp_inbuf",          "输入缓冲" },
+                { "in",     "sp_inout",          "录制输出路径" },
+                { "adv",    "sp_uistyle",        "界面风格" },
+                { "adv",    "sp_scanthreads",    "扫描线程数" },
+                { "adv",    "sp_rep",            "循环模式" },
+                { "diag",   "sp_updchannel",     "更新通道" },
+                { "diag",   "sp_fbtext",         "反馈正文" },
+                { "meta",   "sp_metaon",         "元数据总开关" },
+                { "meta",   "sp_wbdry",          "写回预览" },
+            };
+            for (const PaneProbe &probe : probes) {
+                NSString *pane = [NSString stringWithUTF8String:probe.pane];
+                NSString *ident = [NSString stringWithUTF8String:probe.ident];
+                [sv selectPane:pane];
+                Pump(0.3);
+                NSMutableArray<NSView *> *pv = [NSMutableArray array];
+                CollectAllViews(sv.view, pv);
+                BOOL found = NO;
+                for (NSView *v in pv)
+                    if ([v.identifier isEqualToString:ident]) { found = YES; break; }
+                CK(found, [[NSString stringWithFormat:@"运行时 %s 页真的有 %@（%s）",
+                            probe.pane, ident, probe.what] UTF8String],
+                   [NSString stringWithFormat:@"视图树里找不到 %@", ident]);
+            }
+        }
+
+        // 顺带核对容器锚点：设置页每个页签的根视图都要带 tab.<key>
+        NSMutableArray<NSView *> *allPanes = [NSMutableArray array];
+        CollectAllViews(sv.view, allPanes);
+        NSUInteger tabAnchors = 0;
+        for (NSView *v in allPanes)
+            if ([v.identifier hasPrefix:@"tab."]) ++tabAnchors;
+        CK(tabAnchors >= 1, "设置页有 tab.<key> 页签锚点（parity 取证用）",
+           [NSString stringWithFormat:@"anchors=%lu", (unsigned long)tabAnchors]);
     } else {
         CK(NO, "设置页类型正确", NSStringFromClass(wc.currentContent.class));
-    }
-
-    // ---- ④b 聆听模式的设置页必须能改输出/升频/滤波/SDM/均衡 ----
-    // 专业模式把这四页迁去了工作台，聆听模式没有工作台 ⟹ 设置页必须把四页挂回来，
-    // 否则这些功能在聆听模式下不可达（铁律：功能不能删）。旧实现在这里必然红。
-    {
-        RLPSetAppMode(RLPAppModeListening);
-        [wc.sidebar reloadForModeChange];
-        Pump(0.4);
-        CK([wc.sidebar selectKey:@"settings"], "聆听模式能进设置", @"侧栏没有 settings");
-        Pump(0.5);
-        CK(RLPCurrentAppMode() == RLPAppModeListening, "进聆听设置不偷偷切到专业模式",
-           [NSString stringWithFormat:@"mode=%ld", (long)RLPCurrentAppMode()]);
-        RLPSettingsViewController *lv = (RLPSettingsViewController *)wc.currentContent;
-        CK([lv isKindOfClass:[RLPSettingsViewController class]], "聆听设置页类型正确",
-           NSStringFromClass(wc.currentContent.class));
-        if ([lv isKindOfClass:[RLPSettingsViewController class]]) {
-            NSSegmentedControl *seg = nil;
-            NSMutableArray<NSView *> *vs = [NSMutableArray array];
-            CollectAllViews(lv.view, vs);
-            for (NSView *v in vs)
-                if ([v isKindOfClass:[NSSegmentedControl class]]) { seg = (NSSegmentedControl *)v; break; }
-            CK(seg != nil && seg.segmentCount == 11,
-               "聆听模式设置页 11 个页签（含输出/PCM/SDM/均衡）",
-               seg ? [NSString stringWithFormat:@"tabs=%ld", (long)seg.segmentCount] : @"无页签控件");
-            const char *lkeys[] = { "out", "pcm", "sdm", "eq" };
-            NSInteger reached = 0;
-            for (const char *k : lkeys) {
-                [lv selectPane:[NSString stringWithUTF8String:k]];
-                Pump(0.4);
-                // 动态取 currentPaneKey：判据要能在旧代码上编译并跑红（旧代码没有这个方法，
-                // 且 selectPane 会把 out/pcm/sdm/eq 静默映射回 play —— 正是要抓的故障）。
-                if ([lv respondsToSelector:@selector(currentPaneKey)]) {
-                    NSString *cur = [lv performSelector:@selector(currentPaneKey)];
-                    if ([cur isEqualToString:[NSString stringWithUTF8String:k]]) ++reached;
-                }
-                NSString *fn = [NSString stringWithFormat:@"21-listening-settings-%s.png", k];
-                Snap(wc.window.contentView, [outDir stringByAppendingPathComponent:fn], CGSizeMake(1180, 760));
-            }
-            CK(reached == 4, "聆听设置能真正切到输出/PCM/SDM/均衡（不是映射回播放）",
-               [NSString stringWithFormat:@"reached=%ld", (long)reached]);
-        }
-        RLPSetAppMode(RLPAppModePro);
-        [wc.sidebar reloadForModeChange];
-        Pump(0.3);
     }
 
     // ---- ⑤ 单曲页 + 播放条 ----

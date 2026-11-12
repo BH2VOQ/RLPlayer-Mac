@@ -292,32 +292,18 @@ int RLPAppDelegateRunSelfTest(void) {
         STCheck([win.contentView isKindOfClass:[NSView class]], "contentView 是原生 NSView", @"");
     }
     STCheck(wc.sidebar != nil, "侧栏导航已创建", @"");
-    // 导航项**随模式变化**，所以不能断言一个固定数字。
-    // 2026-11-11 用户要求：**两个模式都要有设置页**（取代早前"聆听无设置"的要求）。
-    // 聆听模式 11 项（聆听室 + 9 个曲库/播放项 + 设置）；
-    // 专业模式 11 项（专业工作台 + 9 个曲库/播放项 + 设置）。
-    // 模式差别仍在首页与页内能力（聆听室卡片 vs 工作台信号链），不再靠"藏设置"体现。
+    // 导航项 = web 版左导航的 1:1 副本（ui_page.h 的 .side）：11 项 + 3 个分组标题。
+    // web 没有聆听/专业双模式，所以这里断言的是**web 的那份清单**，不是模式变体。
     {
-        RLPSetAppMode(RLPAppModeListening);
-        [wc.sidebar reloadForModeChange];
-        STCheck([wc.sidebar navRowCount] == 11, "聆听模式侧栏 11 个导航项（含设置入口）",
+        STCheck([wc.sidebar navRowCount] == 11, "侧栏 11 个导航项（对齐 web .nav 清单）",
                 [NSString stringWithFormat:@"nav=%ld", (long)[wc.sidebar navRowCount]]);
-        STCheck([wc.sidebar selectKey:@"settings"] == YES, "聆听模式有设置入口（用户要求两模式都有设置页）",
-                @"selectKey:settings 失败了");
-        STCheck([[wc.sidebar keyForRow:0] isEqualToString:@"room"], "聆听模式首页是聆听室",
-                [wc.sidebar keyForRow:0] ?: @"nil");
-        STCheck([wc.sidebar selectKey:@"albums"] == YES, "聆听模式仍能浏览专辑（合并页签不等于砍功能）", @"");
-
-        RLPSetAppMode(RLPAppModePro);
-        [wc.sidebar reloadForModeChange];
-        STCheck([wc.sidebar navRowCount] == 11, "专业模式侧栏 11 个导航项（工作台 + 设置）",
-                [NSString stringWithFormat:@"nav=%ld", (long)[wc.sidebar navRowCount]]);
-        STCheck([wc.sidebar selectKey:@"settings"] == YES, "专业模式有设置入口", @"");
-        STCheck([[wc.sidebar keyForRow:0] isEqualToString:@"workbench"], "专业模式首页是专业工作台",
-                [wc.sidebar keyForRow:0] ?: @"nil");
-        // 回到默认模式，后续判据在聆听模式下跑（默认必须是聆听）
-        RLPSetAppMode(RLPAppModeListening);
-        [wc.sidebar reloadForModeChange];
+        // 第 0 行是分组标题「资料库」（web 的 .sec），第一个**导航项**才是专辑。
+        // 判据用导航项而不是裸行号：行号会被分组标题挤动，key 不会。
+        STCheck([wc.sidebar selectKey:@"albums"] == YES, "有专辑入口（web data-v=albums）", @"");
+        STCheck([wc.sidebar selectKey:@"settings"] == YES, "有设置入口（web data-v=settings）", @"");
+        STCheck([wc.sidebar selectKey:@"station"] == YES, "有快速开始入口（web data-v=station）", @"");
+        STCheck([wc.sidebar selectKey:@"streaming"] == YES, "有流媒体入口（web data-v=remote）", @"");
+        [wc.sidebar selectRow:0];
     }
     STCheck(wc.albums != nil, "专辑网格已创建", @"");
     STCheck(wc.playbackBar != nil, "播放条已创建", @"");
@@ -358,10 +344,7 @@ int RLPAppDelegateRunSelfTest(void) {
         STCheck(vc.view != nil, "快速开始页可离线构建", @"");
     }
     {
-        // 设置页签随模式（2026-11-11 用户要求两模式都有设置页）：
-        // 专业模式 7 页（输出/PCM/SDM/均衡在工作台当场切）；
-        // 聆听模式没有工作台 ⟹ 设置必须挂全 11 页，否则这些功能不可达（功能不能删）。
-        RLPSetAppMode(RLPAppModePro);
+        // 设置页签 = web 的 data-g 清单（10 页，顺序一致）。
         RLPSettingsViewController *vc = [[RLPSettingsViewController alloc] init];
         STCheck(vc.view != nil, "设置页可离线构建", @"");
         NSMutableArray<NSView *> *sv = [NSMutableArray array];
@@ -371,20 +354,16 @@ int RLPAppDelegateRunSelfTest(void) {
             if ([v isKindOfClass:[NSSegmentedControl class]]) { seg = (NSSegmentedControl *)v; break; }
         }
         STCheck(seg != nil, "设置页有页签控件", @"");
-        STCheck(seg.segmentCount == 7, "专业模式设置页 7 个页签（输出/PCM/SDM/均衡在工作台）",
+        STCheck(seg.segmentCount == 10,
+                "设置页 10 个页签（web data-g：通用/输入/输出/PCM/SDM/EQ/声音校准/元数据/流媒体/诊断）",
                 seg ? [NSString stringWithFormat:@"segments=%ld", (long)seg.segmentCount] : @"nil");
-
-        RLPSetAppMode(RLPAppModeListening);
-        RLPSettingsViewController *lvc = [[RLPSettingsViewController alloc] init];
-        NSMutableArray<NSView *> *lv = [NSMutableArray array];
-        CollectViews(lvc.view, lv);
-        NSSegmentedControl *lseg = nil;
-        for (NSView *v in lv) {
-            if ([v isKindOfClass:[NSSegmentedControl class]]) { lseg = (NSSegmentedControl *)v; break; }
+        // 每个页签必须真的能切过去（不是只有按钮）
+        for (NSString *k in @[ @"adv", @"in", @"out", @"pcm", @"sdm", @"eq", @"cal", @"meta", @"stream", @"diag" ]) {
+            [vc selectPane:k];
+            STCheck([[vc currentPaneKey] isEqualToString:k],
+                    [[NSString stringWithFormat:@"设置页签 %@ 可切换", k] UTF8String],
+                    [NSString stringWithFormat:@"got=%@", [vc currentPaneKey]]);
         }
-        STCheck(lseg != nil && lseg.segmentCount == 11,
-                "聆听模式设置页 11 个页签（含输出/PCM/SDM/均衡，功能不因模式而不可达）",
-                lseg ? [NSString stringWithFormat:@"segments=%ld", (long)lseg.segmentCount] : @"nil");
     }
     {
         RLPAlbumDetailViewController *vc = [[RLPAlbumDetailViewController alloc] initWithAlbumKey:@"selftest"];

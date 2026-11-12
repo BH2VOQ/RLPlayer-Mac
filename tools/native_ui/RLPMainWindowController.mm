@@ -76,9 +76,32 @@ static const CGFloat kTopbarHeight = 46.0;
 @property (nonatomic, strong) NSMutableArray<NSString *> *rowStack;
 @property (nonatomic, strong) RLPNowPlayingViewController *npPage;
 @property (nonatomic, strong) RLPWorksViewController *worksPage;
-/// 顶栏的模式切换（聆听 / 专业）。这是两个模式的唯一入口。
-@property (nonatomic, strong) NSSegmentedControl *modeSwitch;
 @end
+
+/// 视图根节点的 identifier 表 —— **字面量**，不做字符串拼接。
+/// 原因：parity 扫描器（tools/native_ui/parity_scan.py）只认源码里的字面量；
+/// 拼接出来的值它看不见，会把一整批**已实现**的视图误报成 missing（假缺口）。
+/// key = 原生路由 key；value = web 的 view key 对应的原生锚点。
+static NSString *RLPPageIdentifier(NSString *key) {
+    static NSDictionary<NSString *, NSString *> *m;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        m = @{
+            @"albums":    @"page.albums",     // web data-v=albums
+            @"artists":   @"page.artists",    // web data-v=artists
+            @"tracks":    @"page.tracks",     // web data-v=tracks
+            @"folders":   @"page.files",      // web data-v=files
+            @"streaming": @"page.remote",     // web data-v=remote
+            @"queue":     @"page.queue",      // web data-v=queue
+            @"recent":    @"page.recent",     // web data-v=recent
+            @"favorites": @"page.favs",       // web data-v=favs
+            @"playlists": @"page.sq",         // web data-v=sq
+            @"station":   @"page.station",    // web data-v=station
+            @"settings":  @"page.settings",   // web data-v=settings
+        };
+    });
+    return m[key];
+}
 
 @implementation RLPMainWindowController
 
@@ -155,15 +178,6 @@ static const CGFloat kTopbarHeight = 46.0;
     _search.action = @selector(onSearch:);
     [_topbar addSubview:_search];
 
-    // ---- 模式切换（聆听 / 专业）----
-    // 差别在"能做什么"：切模式会重建侧栏项与首页（聆听室 / 专业工作台），不是换皮。
-    _modeSwitch = [NSSegmentedControl segmentedControlWithLabels:@[RLPTr(@"聆听模式"), RLPTr(@"专业模式")]
-        trackingMode:NSSegmentSwitchTrackingSelectOne target:self action:@selector(onModeChanged:)];
-    _modeSwitch.selectedSegment = (RLPCurrentAppMode() == RLPAppModePro) ? 1 : 0;
-    _modeSwitch.translatesAutoresizingMaskIntoConstraints = NO;
-    _modeSwitch.toolTip = RLPTr(@"聆听模式：安静听歌，常用设置在聆听室卡片里；专业模式：信号链、滤波与升频快速切换、A/B 对比");
-    [_topbar addSubview:_modeSwitch];
-
     NSButton *queueBtn = RLPSymbolButton(@"list.bullet", RLPTr(@"播放队列"), self, @selector(onQueue:));
     queueBtn.translatesAutoresizingMaskIntoConstraints = NO;
     [_topbar addSubview:queueBtn];
@@ -186,9 +200,6 @@ static const CGFloat kTopbarHeight = 46.0;
         [_search.leadingAnchor constraintEqualToAnchor:_topbar.leadingAnchor constant:210],
         [_search.centerYAnchor constraintEqualToAnchor:_topbar.centerYAnchor],
         [_search.widthAnchor constraintEqualToConstant:300],
-
-        [_modeSwitch.trailingAnchor constraintEqualToAnchor:queueBtn.leadingAnchor constant:-14],
-        [_modeSwitch.centerYAnchor constraintEqualToAnchor:_topbar.centerYAnchor],
 
         [npBtn.trailingAnchor constraintEqualToAnchor:_topbar.trailingAnchor constant:-16],
         [npBtn.centerYAnchor constraintEqualToAnchor:_topbar.centerYAnchor],
@@ -237,8 +248,6 @@ static const CGFloat kTopbarHeight = 46.0;
                                                  name:RLPBackNotification object:nil];
     [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(onOpenSettingsPane:)
                                                  name:@"RLPOpenSettingsPaneNotification" object:nil];
-    [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(onAppModeChanged:)
-                                                 name:RLPAppModeDidChangeNotification object:nil];
     // 页面里发"去某个导航页"的意图（聆听室的查看全部/打开音乐库等），按 key 路由。
     [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(onNavigateKey:)
                                                  name:@"RLPNavigateKeyNotification" object:nil];
@@ -251,7 +260,6 @@ static const CGFloat kTopbarHeight = 46.0;
     [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(onPageCount:)
                                                  name:@"RLPPageCountNotification" object:nil];
 
-    // 首页随模式：聆听 ⟹ 聆听室；专业 ⟹ 专业工作台。
     [_sidebar selectRow:0];
     [self showContentForRow:0];
     return self;
@@ -268,6 +276,11 @@ static const CGFloat kTopbarHeight = 46.0;
     if (self.currentContent) [self.currentContent.view removeFromSuperview];
     self.currentContent = vc;
     NSView *v = vc.view;
+    // 详情页也有稳定锚点（web 的 album / artist / works 视图）：
+    // 页面类型 → 锚点，同样是字面量表。没有这张表，「专辑详情页存在」就只剩口头声明。
+    if ([vc isKindOfClass:[RLPAlbumDetailViewController class]])         v.identifier = @"page.album";
+    else if ([vc isKindOfClass:[RLPArtistDetailViewController class]])   v.identifier = @"page.artist";
+    else if ([vc isKindOfClass:[RLPWorksViewController class]])          v.identifier = @"page.works";
     v.translatesAutoresizingMaskIntoConstraints = NO;
     [self.pageHost addSubview:v];
     [NSLayoutConstraint activateConstraints:@[
@@ -280,8 +293,8 @@ static const CGFloat kTopbarHeight = 46.0;
     if ([vc respondsToSelector:@selector(activate)]) [(id)vc activate];
 }
 
-/// 行号 → 符号 key → 页面。**行号只在当前模式内有意义**，缓存一律按 key 存，
-/// 否则切模式后同一个行号会指向另一页（首页不同：聆听室 / 专业工作台，下标会错位）。
+/// 行号 → 符号 key → 页面。缓存一律按 key 存，不按行号 ——
+/// 行号会随导航项顺序变化而错位（web 也是按 data-v 的 key 路由）。
 - (void)showContentForRow:(NSInteger)row {
     NSString *key = [self.sidebar keyForRow:row];
     [self showContentForKey:key.length ? key : @"albums"];
@@ -300,8 +313,7 @@ static const CGFloat kTopbarHeight = 46.0;
         else if ([key isEqualToString:@"recent"])    vc = [[RLPRecentViewController alloc] init];
         else if ([key isEqualToString:@"favorites"]) vc = [[RLPFavoritesViewController alloc] init];
         else if ([key isEqualToString:@"playlists"]) vc = [[RLPPlaylistsViewController alloc] init];
-        else if ([key isEqualToString:@"room"])      vc = [[RLPQuickStartViewController alloc] init];
-        else if ([key isEqualToString:@"workbench"]) vc = [self makeWorkbench];
+        else if ([key isEqualToString:@"station"])   vc = [[RLPQuickStartViewController alloc] init];
         else if ([key isEqualToString:@"settings"])  vc = [[RLPSettingsViewController alloc] init];
         else vc = self.albums;
         self.pageCache[key] = vc;
@@ -316,6 +328,10 @@ static const CGFloat kTopbarHeight = 46.0;
     self.currentContent = vc;
 
     NSView *v = vc.view;
+    // 页面根视图的 identifier = "page.<web view key>"（字面量表 RLPPageIdentifier）。
+    // 这不是装饰：parity 表靠字面量机械抽取原生侧事实，页面没有稳定锚点就没法证明
+    // 「web 的某个视图在原生存在」，只能靠人记 —— 那就等于没证据。
+    v.identifier = RLPPageIdentifier(key);
     v.translatesAutoresizingMaskIntoConstraints = NO;
     [self.pageHost addSubview:v];
     [NSLayoutConstraint activateConstraints:@[
@@ -376,7 +392,6 @@ static const CGFloat kTopbarHeight = 46.0;
 
 - (void)onOpenSettingsPane:(NSNotification *)note {
     if (![note.object isKindOfClass:[NSString class]]) return;
-    // 2026-11-11 起两个模式都有设置页：不再强制切到专业模式（切模式会打断用户的上下文）。
     [self.sidebar selectKey:@"settings"];
     RLPSettingsViewController *settings = (RLPSettingsViewController *)self.pageCache[@"settings"];
     if (![settings isKindOfClass:[RLPSettingsViewController class]]) return;
@@ -386,7 +401,7 @@ static const CGFloat kTopbarHeight = 46.0;
 - (void)onNavigateKey:(NSNotification *)note {
     if (![note.object isKindOfClass:[NSString class]]) return;
     NSString *key = (NSString *)note.object;
-    // 目标页在当前模式不存在 ⟹ 交回首页（两个模式都有 settings，正常不会走到兜底）。
+    // 目标页不存在 ⟹ 退回设置页的默认页签。
     if ([self.sidebar selectKey:key]) return;
     if ([key isEqualToString:@"settings"]) {
         [[NSNotificationCenter defaultCenter] postNotificationName:@"RLPOpenSettingsPaneNotification" object:@"play"];
@@ -406,34 +421,6 @@ static const CGFloat kTopbarHeight = 46.0;
     if (!self.worksPage) self.worksPage = [[RLPWorksViewController alloc] init];
     [self pushDetail:self.worksPage];
     [self.worksPage loadWork:title composer:composer fromNowPlaying:YES];
-}
-
-#pragma mark - 模式切换
-
-- (void)onModeChanged:(NSSegmentedControl *)sender {
-    RLPSetAppMode(sender.selectedSegment == 1 ? RLPAppModePro : RLPAppModeListening);
-    [self applyModeChange];
-}
-
-/// 模式变了：重建侧栏项、同步分段控件、把内容切到该模式仍存在的页（不存在则回首页）。
-- (void)applyModeChange {
-    self.modeSwitch.selectedSegment = (RLPCurrentAppMode() == RLPAppModePro) ? 1 : 0;
-    NSString *before = self.sidebar.selectedKey;
-    [self.sidebar reloadForModeChange];
-    NSString *after = self.sidebar.selectedKey;
-    // 侧栏选中项没变（那页两个模式都有）⟹ 内容不用动；变了则跟着走。
-    if (![before isEqualToString:after ?: @""]) [self showContentForKey:after ?: @"albums"];
-}
-
-- (void)onAppModeChanged:(NSNotification *)note {
-    (void)note;
-    // 别处（如设置跳转）改了模式时，顶栏与侧栏也要跟上。
-    [self applyModeChange];
-}
-
-/// 专业工作台（专业模式首页）：信号链 + 快速切换 + A/B 槽位。
-- (NSViewController *)makeWorkbench {
-    return [[RLPWorkbenchViewController alloc] init];
 }
 
 - (void)pushDetail:(NSViewController *)detail {
@@ -516,8 +503,6 @@ static const CGFloat kTopbarHeight = 46.0;
     self.playbackBar.layer.borderColor = t.line.CGColor;
     self.pageTitle.textColor = t.text;
     self.pageCount.textColor = t.mut;
-    [self.modeSwitch setLabel:RLPTr(@"聆听模式") forSegment:0];
-    [self.modeSwitch setLabel:RLPTr(@"专业模式") forSegment:1];
     // **所有缓存页**都要刷，不只是当前页：否则切到浅色后再点别的导航项，
     // 那一页还是深色的（用户实测的"主页还是黑的"就是这个）。
     for (NSString *key in self.pageCache) {

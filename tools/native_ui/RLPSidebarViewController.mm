@@ -54,19 +54,20 @@
 }
 @end
 
-/// 导航项 = 模式的函数。**这是"两个模式差别在能做什么"的落点之一**：
-/// 首页聆听模式是「聆听室」、专业模式是「专业工作台」。
-/// 2026-11-11 用户要求：**两个模式都要有设置页**（取代早前"聆听无设置"的要求）。
-/// 曲库浏览与播放相关项两个模式都有 —— 合并页签不等于砍功能。
-static NSArray<NSDictionary *> *RLPSidebarItemsForMode(RLPAppMode mode) {
+/// 导航项 = **web 版左导航的 1:1 副本**（ui_page.h 的 .side 结构）。
+///
+/// 分组与顺序逐条对齐 web：
+///   资料库   : 专辑 / 艺术家 / 曲目 / 文件夹 / 流媒体（web data-v=remote）
+///   播放列表 : 播放队列 / 最近播放 / 我的最爱 / 保存的队列（web #sqList，动态）
+///   音频引擎 : 快速开始（web data-v=station）/ 设置
+///
+/// 为什么不再按"模式"分叉：web 版没有聆听/专业双模式，那是本仓库自己发明的，
+/// 会让「web 有的我是否都有」无法机械验证。双模式留到 parity 全绿后作为薄表现层回归，
+/// 现在先把地基做平（见 docs/native-ui/PLAN.md）。
+static NSArray<NSDictionary *> *RLPSidebarItems(void) {
     NSMutableArray *items = [NSMutableArray array];
-    // sec = 分组小标题（web 版 .sec：资料库/播放列表/我的歌单/音频引擎）。
-    // 首页（聆听室/工作台）不挂组标题，直接置顶，与 web 的 station 位置一致。
-    if (mode == RLPAppModePro) {
-        [items addObject:@{@"name": @"专业工作台", @"icon": @"slider.horizontal.3", @"key": @"workbench"}];
-    } else {
-        [items addObject:@{@"name": @"聆听室", @"icon": @"headphones", @"key": @"room"}];
-    }
+
+    // sec = 分组小标题（web 版 .sec：资料库 / 播放列表 / 音频引擎）。
     [items addObjectsFromArray:@[
         @{@"sec": @"资料库"},
         @{@"name": @"专辑",     @"icon": @"square.stack", @"key": @"albums"},
@@ -78,11 +79,11 @@ static NSArray<NSDictionary *> *RLPSidebarItemsForMode(RLPAppMode mode) {
         @{@"name": @"播放队列", @"icon": @"list.bullet",  @"key": @"queue"},
         @{@"name": @"最近播放", @"icon": @"clock",        @"key": @"recent"},
         @{@"name": @"我的最爱", @"icon": @"heart",        @"key": @"favorites"},
-        @{@"sec": @"我的歌单"},
-        @{@"name": @"歌单",     @"icon": @"music.note.list", @"key": @"playlists"},
+        // web 在这里渲染 #sqList（保存的队列，动态）。原生用独立页承载同一份数据。
+        @{@"name": @"保存的队列", @"icon": @"music.note.list", @"key": @"playlists"},
         @{@"sec": @"音频引擎"},
-        // 设置两个模式都有（用户 2026-11-11 明确要求）。
-        // 差别在设置页内部：聆听模式挂全 11 页；专业模式 7 页（另四页在工作台）。
+        // web data-v=station 的标题就是「快速开始」。
+        @{@"name": @"快速开始", @"icon": @"play.square.stack", @"key": @"station"},
         @{@"name": @"设置",     @"icon": @"gearshape", @"key": @"settings"},
     ]];
     return items;
@@ -103,7 +104,7 @@ static BOOL RLPRowIsSection(NSArray<NSDictionary *> *items, NSInteger row) {
         _hoverRow = -1;
         _pendingRow = -1;
         _selectedRow = -1;
-        _menuItems = RLPSidebarItemsForMode(RLPCurrentAppMode());
+        _menuItems = RLPSidebarItems();
     }
     return self;
     // 选中必须在**表格已经有行之后**才设：reloadData 之前 selectRowIndexes 会被丢弃，
@@ -389,7 +390,7 @@ static BOOL RLPRowIsSection(NSArray<NSDictionary *> *items, NSInteger row) {
     if (k.length && self.onSelectKey) self.onSelectKey(k);
 }
 
-#pragma mark - 符号 key 路由（模式切换后行号会错位，所以对外一律用 key）
+#pragma mark - 符号 key 路由（对外一律用 key，不用裸行号）
 
 - (NSString *)keyForRow:(NSInteger)row {
     if (row < 0 || row >= (NSInteger)_menuItems.count) return nil;
@@ -405,19 +406,6 @@ static BOOL RLPRowIsSection(NSArray<NSDictionary *> *items, NSInteger row) {
         if ([_menuItems[i][@"key"] isEqualToString:key]) { [self selectRow:i]; return YES; }
     }
     return NO;
-}
-
-- (void)reloadForModeChange {
-    // 记住"当前在哪一页"，模式切换后若那页还在就留在原地（不把用户踢回首页）。
-    NSString *keep = [self selectedKey];
-    _menuItems = RLPSidebarItemsForMode(RLPCurrentAppMode());
-    _selectedRow = -1;
-    _lastSelectedRow = -1;
-    _hoverRow = -1;
-    if (!_tableView) { _pendingRow = 0; return; }
-    [_tableView reloadData];
-    if (keep.length && [self selectKey:keep]) return;
-    [self selectRow:0];   // 那页在新模式里不存在（如聆听模式下的工作台）⟹ 回该模式首页
 }
 
 /// 表格把鼠标位置转进来：只在行号变化时刷新受影响的两行，不整表 reload

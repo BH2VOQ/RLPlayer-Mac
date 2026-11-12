@@ -281,6 +281,31 @@ if(APPLE)
            COMMAND rlplayer_native --audit ${CMAKE_BINARY_DIR}/native-audit-shots)
   set_tests_properties(native_ui_functional PROPERTIES TIMEOUT 300)
 
+  # 2026-11-12：原生 vs web 的**机器生成**对照表门禁。
+  # 判据只有一条：missing 必须为 0，且每条 na 都要能在 web 前端源码里复核
+  # （web 真的没调用那个端点）。手抄清单不算数 —— 这张表由脚本从两侧源码抽出来。
+  find_package(Python3 COMPONENTS Interpreter)
+  if(Python3_Interpreter_FOUND)
+    add_test(NAME native_ui_parity
+             COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/native_ui/parity_scan.py --check)
+    set_tests_properties(native_ui_parity PROPERTIES TIMEOUT 120)
+
+  # 2026-11-12：设置键「能读能写」的真核心判据。
+  # 控件在界面上 ≠ 值能落盘：/api/settings 是白名单 + 合并写，白名单外的键被**静默丢弃**
+  # （回 ok:true 但 conf 里没有），界面一切正常、重启后回到默认值。
+  # 这条对 web 设置页真实使用的键逐个写 → 读回，有一个被吞掉就红。
+  add_executable(test_native_settings_keys tests/test_native_settings_keys.mm
+    tools/native_ui/RLPCoreClient.mm)
+  set_source_files_properties(tests/test_native_settings_keys.mm
+    tools/native_ui/RLPCoreClient.mm PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
+  target_include_directories(test_native_settings_keys PRIVATE
+    ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tools ${CMAKE_SOURCE_DIR}/tools/native_ui)
+  target_link_libraries(test_native_settings_keys PRIVATE rlapp_core
+    "-framework AppKit" "-framework Security")
+  add_test(NAME native_settings_keys COMMAND test_native_settings_keys)
+  set_tests_properties(native_settings_keys PROPERTIES TIMEOUT 180)
+  endif()
+
   # 2026-11-11（1.1.7.1）：播放页音频分析「一行」的判据。
   # 摘要判读是纯函数（构造 health 字典钉边界，含"不许用 snr_db"负向判据）；
   # 一行几何先断言"量到了"再断言"同一行"，避免未布局时 frame 全 0 假红。

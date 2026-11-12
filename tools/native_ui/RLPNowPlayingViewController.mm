@@ -851,7 +851,10 @@ static NSString *RLPNPFavKey(NSString *path) {
     self.anlError = nil;                 // 新一轮开始：清掉上一次的失败原因
     self.anlCached = NO;
     [self anlPaint];
-    NSString *url = [NSString stringWithFormat:@"/api/health?file=%@%@", RLPEnc(path), force ? @"&force=1" : @""];
+    // web 的右键「音质体检」用 /api/track/health，单曲页用 /api/health —— 后端是同一个
+    // handler（rtaweb 的 aliasing），两个名字都真存在。这里按 web 的体检入口名走，
+    // 让两端在日志/诊断里看到同一个路径。
+    NSString *url = [NSString stringWithFormat:@"/api/track/health?file=%@%@", RLPEnc(path), force ? @"&force=1" : @""];
     __weak __typeof__(self) weakSelf = self;
     [[RLPCoreClient shared] getJSON:url completion:^(NSDictionary * _Nullable json) {
         __typeof__(self) self_ = weakSelf;

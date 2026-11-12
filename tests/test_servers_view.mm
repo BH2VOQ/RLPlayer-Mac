@@ -180,7 +180,9 @@ int main() {
 
         // ---- S8 标签写回：忙态/轮询骨架（对齐 web WB_BUSY/wbPoll/wbSyncBusy）----
         // 旧实现没有 wbPoll/wbSyncBusy，执行后不轮询、按钮不禁用 —— 这里钉住方法在位。
-        [settings selectPane:@"adv"];
+        // 2026-11-12：标签写回区块按 web 的位置放到了「元数据」页签（web 的 data-g=meta），
+        // 不再挂在「通用」页。判据不变，只是要先切到那一页才能找到控件。
+        [settings selectPane:@"meta"];
         [settings.view layoutSubtreeIfNeeded];
         CK([settings respondsToSelector:@selector(wbPoll)], "S8a 有写回轮询（wbPoll）", @"");
         CK([settings respondsToSelector:@selector(wbSyncBusy)], "S8b 进页同步在跑状态（wbSyncBusy）", @"");
@@ -189,8 +191,10 @@ int main() {
         NSButton *dry = nil, *apply = nil;
         for (NSView *v in aall) {
             if (![v isKindOfClass:[NSButton class]]) continue;
-            if ([v.identifier isEqualToString:@"wb.dry"]) dry = (NSButton *)v;
-            if ([v.identifier isEqualToString:@"wb.apply"]) apply = (NSButton *)v;
+            // 2026-11-12：按钮 identifier 已对齐 web 的 sp_wbdry / sp_wbapply（parity 取证要求同名）。
+            // 判据本身不变：预览与执行两个按钮都在，且忙态会被禁用。
+            if ([v.identifier isEqualToString:@"sp_wbdry"]) dry = (NSButton *)v;
+            if ([v.identifier isEqualToString:@"sp_wbapply"]) apply = (NSButton *)v;
         }
         CK(dry != nil && apply != nil, "S8c 预览/执行按钮带标识（忙态要禁用它们）", @"");
         // 空 MetaBase 下预览：必须走 writable/skipped 口径（旧实现读不存在的 count/note）。
@@ -224,7 +228,9 @@ int main() {
             NSButton *reset = nil;
             for (NSView *v in mall) {
                 if ([v isKindOfClass:[NSSwitch class]]) ++switches;
-                if ([v.identifier hasPrefix:@"metasrc.row."]) ++rows;
+                // 行容器 identifier 已对齐 web 的 sp_metasrcrow_<id>（parity 取证要求同名）。
+                // 判据不变：每个数据源恰好一行，行数 == 注册表大小。
+                if ([v.identifier hasPrefix:@"sp_metasrcrow_"]) ++rows;
                 if ([v.identifier isEqualToString:@"metasrc.reset"]) reset = (NSButton *)v;
             }
             // 后端注册表至少有几个源（qq/netease/…）；逐源开关数 == 行数 == 注册表大小。
@@ -242,7 +248,11 @@ int main() {
             NSString *firstId = [pitems.firstObject[@"id"] isKindOfClass:[NSString class]] ? pitems.firstObject[@"id"] : @"";
             NSSwitch *firstSw = nil;
             for (NSView *v in mall)
-                if ([v isKindOfClass:[NSSwitch class]] && [v.identifier isEqualToString:firstId]) firstSw = (NSSwitch *)v;
+                // 开关 identifier 已对齐 web 的 sp_meta_<id>（parity 取证要求同名）。
+                // 判据不变：仍然按「第一个数据源的 id」定位它的开关，点一下要能落盘 metasrc_<id>=0。
+                if ([v isKindOfClass:[NSSwitch class]] &&
+                    [v.identifier isEqualToString:[@"sp_meta_" stringByAppendingString:firstId]])
+                    firstSw = (NSSwitch *)v;
             CK(firstSw != nil, "S9e 找到第一源开关", firstId);
             if (firstSw) {
                 // performClick 会自己翻转 state 并触发 action；不要预先设 state（否则会翻回去）。

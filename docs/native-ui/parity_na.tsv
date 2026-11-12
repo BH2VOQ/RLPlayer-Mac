@@ -1,0 +1,24 @@
+# kind	web_id	reason
+# na = 「web 侧有这个字符串，原生按设计不需要」。理由必须具体，且必须能复核。
+# 空理由会让 parity_scan.py 直接报错退出（不允许"因为麻烦所以 na"）。
+#
+# 判定方法（可复核）：在 src/net/ui_script.h / ui_page.h 里 grep 该路径。
+# 若 web **前端从不调用**（只在 tools/rtaweb.cpp 里作为后端路由存在），
+# 那它就不是"web 有的功能"，而是后端内部/CLI 的能力 —— 按 na 处理并写明依据。
+
+api	/api/anl/stats	web 前端 0 次引用（grep api/anl/stats src/net/ui_script.h）；它是 /api/anl/cancel 同组的后端统计路由，前端不用。原生已有 /api/anl/cancel。
+api	/api/buffer/reset	web 前端 0 次引用；后端运维路由（清空缓冲），UI 无入口。
+api	/api/dbg	web 前端 0 次引用；调试用的后端路由，不在产品界面里。
+api	/api/diag/save	web 前端 0 次引用；诊断落盘由 /api/diagzip 承担（原生已接）。
+api	/api/indevices	已被 /api/input/devices 取代的旧名（web 前端用后者，原生已接 /api/input/devices）。
+api	/api/lib/remove	web 前端 0 次引用；破坏性目录删除走 /api/lib/rmdir（原生已接，含 rmdirinfo 预检）。
+api	/api/lib/status	web 前端 0 次引用；扫描进度前端改用 /api/lib/stats（原生已接）。
+api	/api/pl	精确词元匹配 0 次（此前的 7 次是 /api/play 的子串误报）。歌单能力由 /api/sq/* 承担，web 与原生都用 sq/*，原生已接全套。
+api	/api/pl/load	web 前端 0 次引用；同属 /api/pl 旧歌单通道，被 /api/sq/play 取代（原生已接）。
+api	/api/quit	web 前端 0 次引用；CLI 退出命令（rtaweb 专用），GUI 不该有"退出后端"入口。
+api	/api/roomcorr/layouts	web 前端 0 次引用；房间测量向导在 web 里已被显式隐藏（ui_script.h calSettingsHtml：「房间测量正在重做，本版暂不提供」），布局列表页随之不可达。
+api	/api/search/get	web 前端 0 次引用；后端出站检索的内部路由，不是界面能力。
+api	/api/selftest/request	web 侧"武装自检"的标志文件端点。原生自检由命令行参数直接触发，无此需要。
+api	/api/shutdown	web 前端 0 次引用；CLI 关闭命令，同 /api/quit。
+api	/api/src/search	web 前端 0 次引用；流媒体服务器的服务端搜索由 /api/src/browse 承担（原生已接 browse 与 src/cover）。
+api	/api/writeback/dry	与 /api/writeback?dry=1 是同一能力的两个别名；原生与 web 前端一致使用 ?dry=1（已接），不重复接别名。

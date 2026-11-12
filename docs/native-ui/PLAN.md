@@ -153,3 +153,84 @@
 2. **P2**：艺术家/曲目/文件夹 + 队列 + 播放模式按钮 + 菜单/媒体键。完成。
 3. **P3**：Now Playing + 设置 10 页签 + 更新窗口 + 诊断导出。部分（均衡/校准/反馈窗口未迁移）。
 4. **P4**：流媒体/快速开始 + i18n/主题 + parity 全量验收 -> 原生默认。页面已通，parity 待收口。
+## 7. 2026-11-12 地基轮：parity 收口到 0 缺口
+
+本轮的判据与上一轮不同：**不再靠人列清单**，而是机器从两侧源码抽事实。
+
+### 7.1 双模式已移除
+
+「聆听模式 / 专业模式」是 web 没有的发明，会让「web 有的我是否都有」无法机械验证。
+本轮把它整层拆掉（枚举 / 顶栏切换 / 侧栏分叉 / 设置页签随模式 / 工作台首页），
+留档在 `dualmode-baseline-1.1.7.5`（tag）与 `archive/dualmode-1.1.7.5`（分支）。
+双模式留到 parity 全绿之后，作为**薄表现层**回归（不改变页面与控件集合）。
+
+侧栏与设置页签现在是 web 的 1:1 副本：
+
+| 结构 | web（只读参考） | 原生 |
+|---|---|---|
+| 左导航 | `.nav` 11 项 + 3 个 `.sec` | 11 项 + 3 个分组，key 用 web 的 data-v |
+| 设置页签 | `data-g` 10 页 | 10 页，顺序一致（adv/in/out/pcm/sdm/eq/cal/meta/stream/diag） |
+
+### 7.2 对照表（本轮的交付物）
+
+| 文件 | 谁维护 | 作用 |
+|---|---|---|
+| `tools/native_ui/parity_scan.py` | 人写一次，机器执行 | 从源码抽两侧事实，生成 parity.tsv；`--check` 是门禁 |
+| `docs/native-ui/parity.tsv` | **生成物，勿手改** | 317 行：view / tab / ctrl / api 各 done/missing/na |
+| `docs/native-ui/parity_map.tsv` | 人 | 命名消歧（web_id -> native_identifier），逐条带证据 |
+| `docs/native-ui/parity_na.tsv` | 人 | 每行一个具体理由，**脚本会复核** |
+
+当前结果：**done=301 / missing=0 / na=16**。
+
+### 7.3 na 不是免罪符
+
+`na` 的语义是"web 有这个字符串，但原生按设计不需要"，它同样是**一种断言**。
+所以扫描器对每条 na 做源码复核：把 web 前端（ui_script.h + ui_page.h，剥注释）
+里该路径的**精确词元**出现次数数出来，>0 就判定 na 不成立、直接失败。
+
+这条机制本轮抓到过我自己的 2 条错判（`/api/selftest/report`、`/api/ui/events`：
+web 确实调用了），已改为真实现而不是 na。另有 1 条子串误报（`/api/pl` 撞 `/api/play`），
+改用精确词元后消失 —— 说明"能复核"这件事本身也要写对。
+
+### 7.4 本轮补的缺口（按任务书顺序）
+
+1. **视图**：11 个导航视图 + 3 个详情视图（album / artist / works）都有 `page.<key>` 锚点。
+2. **设置页签与键位**：10 页 181 个控件，identifier 就是 web 的 `sp_*`。
+   任务书点名的 19 个已知缺口（opraproduct / oprapreset / scanthreads / upnpdev / dsdkind /
+   dsdconv / sdmfilt / sdmfiltnx / modcut / moddith / ramp / transition / trim / uistyle /
+   naahost / inbuf / inseconds / inoffset / inout）全部落地，
+   并有真核心判据 `native_settings_keys` 逐个写→读回。
+3. **投放面板**：`RLPCastView` 重写为 web 的 sp_cast_* 全套
+   （设备下拉 / 重新发现 / 推送 / 停止 / 升频三件套 / 11 项实时状态 + 3 个容器）。
+4. **端点**：/api/net、/api/cast/devices、/api/upnp、/api/naa/discover、/api/preset/caps、
+   /api/track/health、/api/upload、/api/shuffle、/api/repeat、/api/rescan 等接入。
+5. **页面观感**：三处真 bug 由运行时判据抓出（见 7.5）。
+
+### 7.5 判据抓到的真故障（不是"没做完"，是"做错了"）
+
+| 现象 | 根因 | 判据 |
+|---|---|---|
+| 输入页缺 `sp_inbuf` / `sp_inout` | 页签分派到旧的 `fillInputReal`（只嵌 RLPInputView），新写的 `fillInput` 从未被调用 | `--audit` 的运行时 identifier 探针（静态表全绿也能抓到） |
+| 写回按钮 / GPU 下拉判据红 | identifier 改成 web 名后，既有测试按旧名找控件 | servers_view S8c / llm_endpoint L5a 先红后绿 |
+| 每源开关找不到 | identifier 同时承担"动作分派"与"parity 取证"两个职责 | S9e 按 id 定位，动作改走 `sourceIdByControl` 映射 |
+
+**教训**：静态表（源码里有没有赋值）与运行时探针（跑起来挂没挂上）缺一不可。
+本轮 181 个控件的静态表全绿时，输入页仍然是坏的 —— 只有运行时那条抓到了。
+
+### 7.6 扫描器自身修掉的两个缺陷
+
+1. **块注释吞换行**：剥注释后行号与真实文件错位，表里的 `file:line` 证据指不到东西。
+   修法：块注释里的换行照抄进输出。
+2. **`num({ id: 'sp_x' })` 形态漏抓**：web 有 10 个数值控件用的是对象字面量调用，
+   只认 `num('sp_x')` 会漏掉它们（atten/buffer/inbuf/inseconds/modcut/moddith/ramp/
+   scanthreads/taps/transition）——这批会永远显示成 missing，是**假缺口**。
+
+### 7.7 门禁
+
+```
+native_ui_selftest   视图树契约（含 web 的 11 导航项 / 10 页签 / 每页签可切换）
+native_ui_smoke      ObjC 桥 -> C++ 核心真链路
+native_ui_functional --audit：77 项（含运行时 identifier 探针 + 像素级主题判定）
+native_ui_parity     parity_scan.py --check（missing=0 且 na 全部可复核）
+native_settings_keys 设置键逐个写->读回（白名单外的键必须被丢弃，证明判据不是恒真）
+```

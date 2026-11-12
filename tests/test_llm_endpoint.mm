@@ -205,9 +205,10 @@ int main() {
             [settings.view layoutSubtreeIfNeeded];
             [settings activate];
             Pump(0.8);
-            NSView *gpuView = FindById(settings.view, @"gpu.vendor");
+            // 2026-11-12：GPU 下拉/状态行的 identifier 已对齐 web 的 sp_gpu / sp_gpumsg。
+            NSView *gpuView = FindById(settings.view, @"sp_gpu");
             CK([gpuView isKindOfClass:[NSPopUpButton class]], "L5a 有 GPU 后端下拉", @"");
-            NSView *gpuMsg = FindById(settings.view, @"gpu.status");
+            NSView *gpuMsg = FindById(settings.view, @"sp_gpumsg");
             CK([gpuMsg isKindOfClass:[NSTextField class]], "L5b 有 GPU 真实状态行", @"");
             if ([gpuView isKindOfClass:[NSPopUpButton class]]) {
                 NSPopUpButton *g = (NSPopUpButton *)gpuView;

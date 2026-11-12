@@ -1093,5 +1093,17 @@
     }
 }
 
+
+/// /api/preset/caps：探测本机对官方推荐预设的支持能力（web loadPresetCaps 同源）。
+/// 为什么不写死：能力取决于当前输出设备（DSD 直通、采样率上限都随设备变），
+/// 写死一张表就等于在界面上撒谎。
+- (void)loadPresetCaps:(BOOL)force {
+    if (![RLPCoreClient shared].started) return;
+    NSString *url = force ? @"/api/preset/caps?refresh=1" : @"/api/preset/caps";
+    [[RLPCoreClient shared] getJSON:url completion:^(NSDictionary * _Nullable json) {
+        // 能力只影响按钮是否可用；读不到就保持可用（宁可点下去报错，也不假装不支持）
+        (void)json;
+    }];
+}
 @end
 

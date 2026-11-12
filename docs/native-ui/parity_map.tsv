@@ -1,0 +1,54 @@
+# kind	web_id	native_id	evidence	note
+# 命名消歧表（web_id -> native_identifier）。
+#
+# **为什么必须有这张表**：两侧命名不同会制造假缺口 —— 扫描器看到 web 的
+# sp_src_add、原生叫 srv.add，就报 missing，而功能其实在。逐条写明对应关系，
+# 每条都带能 grep 的证据。
+#
+# 规则：凡 status=missing 的，必须在 parity.tsv 里找不到对应（可用 grep 复核）；
+# 凡是在这里被映射掉的，右边必须真有那个 identifier。
+#
+# ---- 流媒体服务器表单：web sp_src_* ↔ 原生 srv.* ----
+ctrl	sp_src_add	srv.add	RLPServersView.mm	web「添加服务器」按钮 = 原生「添加」
+ctrl	sp_src_list	srv.list	RLPServersView.mm	web 服务器列表容器 = 原生列表栈
+ctrl	sp_src_form	srv.form	RLPServersView.mm	web 新建/编辑表单 = 原生表单框
+ctrl	sp_src_ftitle	srv.form.title	RLPServersView.mm	表单标题（添加/编辑）
+ctrl	sp_src_name	srv.form.name	RLPServersView.mm	服务器名称输入
+ctrl	sp_src_kind	srv.form.kind	RLPServersView.mm	类型下拉（subsonic/emby）
+ctrl	sp_src_base	srv.form.base	RLPServersView.mm	服务器地址输入
+ctrl	sp_src_user	srv.form.user	RLPServersView.mm	用户名输入
+ctrl	sp_src_pass	srv.form.pass	RLPServersView.mm	密码输入（留空=不改）
+ctrl	sp_src_save	srv.form.save	RLPServersView.mm	保存按钮
+ctrl	sp_src_testform	srv.form.test	RLPServersView.mm	测试连接按钮
+ctrl	sp_src_cancel	srv.form.cancel	RLPServersView.mm	取消按钮
+ctrl	sp_src_fmsg	srv.form.msg	RLPServersView.mm	表单错误/状态文字
+# ---- 元数据源（注册表驱动，动态生成 id，原生用集合视图）----
+ctrl	sp_metasrc	metasrc.list	RLPMetaSourcesView.mm	web #sp_metasrc 占位容器 = 原生逐源列表
+ctrl	sp_metamore	metasrc.reset	RLPMetaSourcesView.mm	web「更多/恢复默认」= 原生「恢复默认顺序」
+# ---- AI 模型端点：web sp_llm* ↔ 原生 llm.* ----
+ctrl	sp_llmprovider	llm.provider	RLPSettingsViewController.mm	接口预设下拉
+ctrl	sp_llmbase	llm.base	RLPSettingsViewController.mm	API 基址输入
+ctrl	sp_llmkey	llm.key	RLPSettingsViewController.mm	API 密钥输入
+ctrl	sp_llmmodeltext	llm.modeltext	RLPSettingsViewController.mm	模型手填框
+ctrl	sp_llmmodel	llm.modelpopup	RLPSettingsViewController.mm	模型下拉（拉到列表时显示）
+ctrl	sp_llmmodels	llm.modelrefresh	RLPSettingsViewController.mm	重新拉取模型列表
+ctrl	sp_llmmodmsg	llm.modelmsg	RLPSettingsViewController.mm	模型列表状态
+ctrl	sp_llmsave	llm.save	RLPSettingsViewController.mm	保存端点
+ctrl	sp_llmtest	llm.test	RLPSettingsViewController.mm	测试连通
+ctrl	sp_llmclear	llm.clear	RLPSettingsViewController.mm	清除密钥
+ctrl	sp_llmmsg	llm.status	RLPSettingsViewController.mm	端点状态/结果
+# ---- 联网检索端点：web sp_search* ↔ 原生 search.* ----
+ctrl	sp_searchprovider	search.provider	RLPSettingsViewController.mm	检索服务下拉
+ctrl	sp_searchbase	search.base	RLPSettingsViewController.mm	检索基址
+ctrl	sp_searchkey	search.key	RLPSettingsViewController.mm	检索密钥
+ctrl	sp_searchsave	search.save	RLPSettingsViewController.mm	保存检索端点
+ctrl	sp_searchclear	search.clear	RLPSettingsViewController.mm	清除检索密钥
+ctrl	sp_searchmsg	search.status	RLPSettingsViewController.mm	检索端点状态
+# ---- 标签写回：原生已改用 web 的原名，无需映射（此段保留说明）----
+# 早期原生叫 wb.dry / wb.apply / wb.desc，与 web 的 sp_wbdry / sp_wbapply / sp_wbmsg 不同名，
+# 会制造假缺口。2026-11-12 起原生直接用 web 的名字，映射取消。
+# ---- 页面视图：原生路由 key 与 web view key 不同名 ----
+view	files	page.files	RLPMainWindowController.mm	web data-v=files（文件浏览器）= 原生 folders 页，锚点 page.files
+view	remote	page.remote	RLPMainWindowController.mm	web data-v=remote（流媒体）= 原生 streaming 页，锚点 page.remote
+view	favs	page.favs	RLPMainWindowController.mm	web data-v=favs（我的最爱）= 原生 favorites 页，锚点 page.favs
+view	sq	page.sq	RLPMainWindowController.mm	web data-v=sq（保存的队列）= 原生 playlists 页，锚点 page.sq

@@ -31,6 +31,7 @@
 #import "RLPServersView.h"
 #import "RLPMetaSourcesView.h"
 #import "RLPLibStatsView.h"
+#include "version.h"
 
 #pragma mark - 页签定义
 
@@ -41,24 +42,27 @@
 //     —— 聆听模式没有工作台，这四页必须挂回设置，否则功能不可达（铁律：功能不能删）。
 // 页签是**索引 → key 的运行时表**，不再是编译期常量数组：切模式时重建。
 typedef NS_ENUM(NSInteger, RLPSTab) {
-    RLPSTabPlay = 0, RLPSTabOut, RLPSTabPcm, RLPSTabSdm, RLPSTabEq,
-    RLPSTabIn, RLPSTabCal, RLPSTabStream, RLPSTabMeta, RLPSTabAdv, RLPSTabDiag
+    RLPSTabAdv = 0, RLPSTabIn, RLPSTabOut, RLPSTabPcm, RLPSTabSdm,
+    RLPSTabEq, RLPSTabCal, RLPSTabMeta, RLPSTabStream, RLPSTabDiag
 };
 
-/// 当前模式下的页签 key 顺序（唯一真相源；buildContent/selectPane/currentPaneKey 都从这里取）。
+/// 页签 key 顺序 —— **逐条对齐 web 版 data-g 清单与顺序**（ui_script.h:9772 起的 .stabs）：
+///   adv(通用) / in(输入) / out(输出) / pcm(PCM) / sdm(SDM) / eq(EQ) / cal(声音校准)
+///   / meta(元数据) / stream(流媒体) / diag(诊断)
+/// web 的「通用」是第一页且默认选中（2026-10-29 用户要求把「高级」改名「通用」并提前）。
+/// 唯一真相源：buildContent/selectPane/currentPaneKey 都从这里取。
 static NSArray<NSString *> *RLPSettingsTabKeys(void) {
-    if (RLPCurrentAppMode() == RLPAppModePro)
-        return @[ @"play", @"in", @"cal", @"stream", @"meta", @"adv", @"diag" ];
-    return @[ @"play", @"out", @"pcm", @"sdm", @"eq", @"in", @"cal", @"stream", @"meta", @"adv", @"diag" ];
+    return @[ @"adv", @"in", @"out", @"pcm", @"sdm", @"eq", @"cal", @"meta", @"stream", @"diag" ];
 }
 
 static NSString *RLPSettingsTabLabel(NSString *key) {
     static NSDictionary *labels;
     static dispatch_once_t once;
     dispatch_once(&once, ^{
-        labels = @{ @"play": @"播放", @"out": @"输出", @"pcm": @"PCM", @"sdm": @"SDM",
-                    @"eq": @"均衡", @"in": @"输入", @"cal": @"校准", @"stream": @"流媒体",
-                    @"meta": @"元数据", @"adv": @"高级", @"diag": @"诊断" };
+        // 标签逐条对齐 web：通用 / 输入 / 输出 / PCM / SDM / EQ / 声音校准 / 元数据 / 流媒体 / 诊断
+        labels = @{ @"adv": @"通用", @"in": @"输入", @"out": @"输出", @"pcm": @"PCM",
+                    @"sdm": @"SDM", @"eq": @"EQ", @"cal": @"声音校准",
+                    @"meta": @"元数据", @"stream": @"流媒体", @"diag": @"诊断" };
     });
     return labels[key] ?: key;
 }
@@ -68,19 +72,18 @@ static RLPSTab RLPSTabForKey(NSString *key) {
     static NSDictionary *map;
     static dispatch_once_t once;
     dispatch_once(&once, ^{
-        map = @{ @"play": @(RLPSTabPlay), @"out": @(RLPSTabOut), @"pcm": @(RLPSTabPcm),
-                 @"sdm": @(RLPSTabSdm), @"eq": @(RLPSTabEq), @"in": @(RLPSTabIn),
-                 @"cal": @(RLPSTabCal), @"stream": @(RLPSTabStream), @"meta": @(RLPSTabMeta),
-                 @"adv": @(RLPSTabAdv), @"diag": @(RLPSTabDiag) };
+        map = @{ @"adv": @(RLPSTabAdv), @"in": @(RLPSTabIn), @"out": @(RLPSTabOut),
+                 @"pcm": @(RLPSTabPcm), @"sdm": @(RLPSTabSdm), @"eq": @(RLPSTabEq),
+                 @"cal": @(RLPSTabCal), @"meta": @(RLPSTabMeta), @"stream": @(RLPSTabStream),
+                 @"diag": @(RLPSTabDiag) };
     });
     NSNumber *n = map[key];
-    return n ? (RLPSTab)n.integerValue : RLPSTabPlay;
+    return n ? (RLPSTab)n.integerValue : RLPSTabAdv;
 }
 
 /// 枚举 → key（currentPaneKey / 模式切换回退用）。
 static NSString *RLPSettingsKeyForTab(RLPSTab tab) {
     switch (tab) {
-        case RLPSTabPlay:   return @"play";
         case RLPSTabOut:    return @"out";
         case RLPSTabPcm:    return @"pcm";
         case RLPSTabSdm:    return @"sdm";
@@ -92,7 +95,26 @@ static NSString *RLPSettingsKeyForTab(RLPSTab tab) {
         case RLPSTabAdv:    return @"adv";
         case RLPSTabDiag:   return @"diag";
     }
-    return @"play";
+    return @"adv";
+}
+
+/// 页签根视图的 identifier 字面量表（"tab." + web 的 data-g）。
+/// **必须是字面量**：parity 扫描器只认源码字面量，拼接值它看不见，
+/// 会把已实现的页签误报成 missing（假缺口）。
+static NSString *RLP_PaneIdentifier(RLPSTab tab) {
+    switch (tab) {
+        case RLPSTabAdv:    return @"tab.adv";
+        case RLPSTabIn:     return @"tab.in";
+        case RLPSTabOut:    return @"tab.out";
+        case RLPSTabPcm:    return @"tab.pcm";
+        case RLPSTabSdm:    return @"tab.sdm";
+        case RLPSTabEq:     return @"tab.eq";
+        case RLPSTabCal:    return @"tab.cal";
+        case RLPSTabMeta:   return @"tab.meta";
+        case RLPSTabStream: return @"tab.stream";
+        case RLPSTabDiag:   return @"tab.diag";
+    }
+    return @"tab.adv";
 }
 
 #pragma mark - 小工具
@@ -134,79 +156,142 @@ static NSView *RLPSGroup(NSString *title, NSString *desc, RLPTheme *t) {
 @property (nonatomic, strong) NSMutableSet<NSString *> *loadedKeys;
 @property (nonatomic, strong) NSTextField *statusLine;
 
-// 输出
+// ---- 输出页（web data-g=out）----
 @property (nonatomic, strong) NSPopUpButton *backendPopup;
+@property (nonatomic, strong) NSButton *bpFixBtn;
+@property (nonatomic, strong) NSView *upnpWrap;
+@property (nonatomic, strong) NSPopUpButton *upnpPop;
+@property (nonatomic, strong) NSButton *upnpScanBtn;
+@property (nonatomic, strong) NSTextField *upnpMsg;
 @property (nonatomic, strong) NSPopUpButton *devicePopup;
 @property (nonatomic, strong) NSSwitch *hogSwitch;
-@property (nonatomic, strong) NSSlider *volumeSlider;
-@property (nonatomic, strong) NSSwitch *loudSwitch;
+@property (nonatomic, strong) NSPopUpButton *outModePopup;
 @property (nonatomic, strong) NSPopUpButton *bitsPopup;
-// PCM
+@property (nonatomic, strong) NSPopUpButton *chPopup;
+@property (nonatomic, strong) NSTextField *bufferField;
+@property (nonatomic, strong) NSTextField *rampField;
+@property (nonatomic, strong) NSTextField *backendMsg;
+@property (nonatomic, strong) NSStackView *trimWrap;
+@property (nonatomic, strong) NSMutableDictionary<NSString *, NSTextField *> *trimFields;
+@property (nonatomic, strong) NSTextField *trimChMsg;
+
+// ---- PCM 页（web data-g=pcm）----
 @property (nonatomic, strong) NSPopUpButton *ratePopup;
 @property (nonatomic, strong) NSPopUpButton *filt1xPopup;
 @property (nonatomic, strong) NSPopUpButton *filtNxPopup;
+@property (nonatomic, strong) NSPopUpButton *phasePopup;
+@property (nonatomic, strong) NSTextField *phaseMsg;
+@property (nonatomic, strong) NSTextField *tapsField;
+@property (nonatomic, strong) NSTextField *attenField;
+@property (nonatomic, strong) NSTextField *transitionField;
+@property (nonatomic, strong) NSSwitch *twoStageSwitch;
+@property (nonatomic, strong) NSPopUpButton *shaperPopup;
 @property (nonatomic, strong) NSSwitch *ispSwitch;
-// SDM
+
+// ---- SDM 页（web data-g=sdm）----
+@property (nonatomic, strong) NSPopUpButton *sdmO1Popup;
+@property (nonatomic, strong) NSPopUpButton *sdmONxPopup;
 @property (nonatomic, strong) NSPopUpButton *dsdRatePopup;
+@property (nonatomic, strong) NSPopUpButton *dsdPackPopup;
+@property (nonatomic, strong) NSTextField *dsdModeNote;
 @property (nonatomic, strong) NSPopUpButton *modFamilyPopup;
 @property (nonatomic, strong) NSPopUpButton *modOrderPopup;
+@property (nonatomic, strong) NSTextField *modCutField;
+@property (nonatomic, strong) NSTextField *modDithField;
 @property (nonatomic, strong) NSSwitch *directSdmSwitch;
-// 输入
+@property (nonatomic, strong) NSPopUpButton *dsdKindPopup;
+@property (nonatomic, strong) NSPopUpButton *dsdConvPopup;
+@property (nonatomic, strong) NSTextField *dsdMsg;
+
+// ---- 输入页（web data-g=in）----
 @property (nonatomic, strong) NSPopUpButton *inBackendPopup;
 @property (nonatomic, strong) NSPopUpButton *inDevicePopup;
+@property (nonatomic, strong) NSPopUpButton *inChPopup;
+@property (nonatomic, strong) NSTextField *inBufField;
 @property (nonatomic, strong) NSSwitch *inMonitorSwitch;
-// 高级
+@property (nonatomic, strong) NSTextField *inSecondsField;
+@property (nonatomic, strong) NSTextField *inOutField;
+@property (nonatomic, strong) NSButton *inStartBtn;
+@property (nonatomic, strong) NSButton *inStopBtn;
+@property (nonatomic, strong) NSTextField *inMsg;
+
+// ---- 通用页（web data-g=adv）----
+@property (nonatomic, strong) NSPopUpButton *uiStylePopup;
 @property (nonatomic, strong) NSPopUpButton *themePopup;
 @property (nonatomic, strong) NSPopUpButton *langPopup;
+@property (nonatomic, strong) NSPopUpButton *gpuPopup;
+@property (nonatomic, strong) NSTextField *gpuStatus;
 @property (nonatomic, strong) NSTextField *rootField;
-@property (nonatomic, strong) NSSwitch *betaSwitch;
-/// 播放时自动分析（autoanl）。1.1.7.1：开关从播放页挪到这里，播放页只留一行分析结果。
+@property (nonatomic, strong) NSButton *browseRootBtn;
+@property (nonatomic, strong) NSButton *addRootBtn;
+@property (nonatomic, strong) NSButton *rescanBtn;
+@property (nonatomic, strong) NSTextField *scanThreadsField;
+@property (nonatomic, strong) NSStackView *rootsBox;
+@property (nonatomic, strong) NSPopUpButton *repPopup;
+@property (nonatomic, strong) NSSwitch *shufSwitch;
+@property (nonatomic, strong) NSSwitch *loudSwitch;
 @property (nonatomic, strong) NSSwitch *autoAnlSwitch;
-@property (nonatomic, strong) NSTextField *attenField;
+
+// ---- 诊断页（web data-g=diag）----
+@property (nonatomic, strong) NSButton *diagZipBtn;
+@property (nonatomic, strong) NSButton *diagJsonBtn;
+@property (nonatomic, strong) NSButton *diagSummaryBtn;
+@property (nonatomic, strong) NSButton *diagUploadBtn;
+@property (nonatomic, strong) NSTextField *diagMsg;
+@property (nonatomic, strong) NSTextView *diagSummaryText;
+@property (nonatomic, strong) NSPopUpButton *updChannelPopup;
+@property (nonatomic, strong) NSTextField *verCurLabel;
+@property (nonatomic, strong) NSButton *updCheckBtn;
+@property (nonatomic, strong) NSButton *updInstallBtn;
+@property (nonatomic, strong) NSSwitch *betaSwitch;
+@property (nonatomic, strong) NSTextField *updMsg;
+@property (nonatomic, strong) NSProgressIndicator *updBar;
+@property (nonatomic, strong) NSTextField *updFill;
+@property (nonatomic, strong) NSTextField *updNote;
+/// 网络信息（web /api/net 面板）
+@property (nonatomic, strong) NSTextField *netMsg;
+@property (nonatomic, strong) NSTextView *fbText;
+@property (nonatomic, strong) NSTextField *fbCount;
+@property (nonatomic, strong) NSTextField *fbChan;
+@property (nonatomic, strong) NSSwitch *fbDiagSwitch;
+@property (nonatomic, strong) NSButton *fbSendBtn;
+@property (nonatomic, strong) NSButton *fbRetryBtn;
+@property (nonatomic, strong) NSTextField *fbMsg;
 @property (nonatomic, strong) NSSwitch *streamSwitch;
-// 流媒体
+
+// ---- 共用子界面 ----
 @property (nonatomic, strong) RLPServersView *serversView;
-// 元数据数据源（动态注册表 + 优先级）
 @property (nonatomic, strong) RLPMetaSourcesView *metaSourcesView;
-// 本地音乐库统计卡（/api/lib/stats）
 @property (nonatomic, strong) RLPLibStatsView *libStatsView;
-// 元数据
 @property (nonatomic, strong) NSSwitch *metaOnSwitch;
 @property (nonatomic, strong) NSSwitch *metaLlmSwitch;
 @property (nonatomic, strong) NSSwitch *metaSummarySwitch;
 @property (nonatomic, strong) NSSwitch *metaAiFillSwitch;
-// 已迁移的子界面（均衡 / 输入 / 投放）
 @property (nonatomic, strong) RLPEqualizerView *eqView;
 @property (nonatomic, strong) RLPInputView *inputView;
 @property (nonatomic, strong) RLPCastView *castView;
 @property (nonatomic, strong) RLPCalibrationView *calView;
 @property (nonatomic, strong) NSTextField *coverProgress;
 @property (nonatomic, strong) NSTextField *writebackStatus;
+@property (nonatomic, strong) NSTextField *wbDesc;
 @property (nonatomic, strong) NSButton *wbDryBtn;
 @property (nonatomic, strong) NSButton *wbApplyBtn;
-/// 写回批次的忙态与轮询（对齐 web WB_BUSY/wbPoll：执行期间禁按钮、800ms 轮询到 done）。
 @property (nonatomic, assign) BOOL wbBusy;
 @property (nonatomic, strong) NSTimer *wbTimer;
 @property (nonatomic, strong) NSTimer *coverTimer;
-// LLM（AI 资料层用的模型端点）
 @property (nonatomic, strong) NSTextField *llmBase;
 @property (nonatomic, strong) NSSecureTextField *llmKey;
 @property (nonatomic, strong) NSTextField *llmModel;
-/// /api/llm/models 拉到列表时显示下拉（选中即保存）；拉不到时隐藏，保留手填框。
 @property (nonatomic, strong) NSPopUpButton *llmModelPopup;
 @property (nonatomic, strong) NSButton *llmModelRefresh;
 @property (nonatomic, strong) NSTextField *llmModelMsg;
 @property (nonatomic, strong) NSTextField *llmStatus;
-// 联网检索端点（search / fetch，对齐 web SEARCH 区块）
 @property (nonatomic, strong) NSPopUpButton *searchProviderPopup;
 @property (nonatomic, strong) NSTextField *searchBase;
 @property (nonatomic, strong) NSSecureTextField *searchKey;
 @property (nonatomic, strong) NSTextField *searchStatus;
-// 接口预设下拉（只填地址，不判连通）
 @property (nonatomic, strong) NSPopUpButton *llmProviderPopup;
-// GPU 后端（/api/gpu 真实状态）
-@property (nonatomic, strong) NSPopUpButton *gpuPopup;
-@property (nonatomic, strong) NSTextField *gpuStatus;
+
 @end
 
 @implementation RLPSettingsViewController
@@ -216,13 +301,8 @@ static NSView *RLPSGroup(NSString *title, NSString *desc, RLPTheme *t) {
     if (self) {
         _paneCache = [NSMutableDictionary dictionary];
         _loadedKeys = [NSMutableSet set];
-        _tab = RLPSTabPlay;
-        // 模式切换时页签集合会变（聆听 11 页 / 专业 7 页）。设置页是缓存页，
-        // 不监听的话切模式后页签还停在旧集合上。
-        [[NSNotificationCenter defaultCenter] addObserver:self
-                                                 selector:@selector(onAppModeChanged:)
-                                                     name:RLPAppModeDidChangeNotification
-                                                   object:nil];
+        // 默认页签 = 「通用」，与 web 一致（2026-10-29 用户要求「通用」排第一并默认选中）。
+        _tab = RLPSTabAdv;
     }
     return self;
 }
@@ -232,16 +312,6 @@ static NSView *RLPSGroup(NSString *title, NSString *desc, RLPTheme *t) {
     [_wbTimer invalidate];
     [_coverTimer invalidate];
     [_libStatsView stopPolling];
-}
-
-- (void)onAppModeChanged:(NSNotification *)note {
-    (void)note;
-    if (!self.tabs) return;   // 视图还没建：buildContent 自会按当前模式建
-    // 当前页在新模式里没有（专业模式下的 out/pcm/sdm/eq）⟹ 回「播放」。
-    NSString *curKey = RLPSettingsKeyForTab(self.tab);
-    if (![RLPSettingsTabKeys() containsObject:curKey]) _tab = RLPSTabPlay;
-    [self rebuildTabs];
-    [self reloadData];
 }
 
 #pragma mark - 骨架
@@ -300,13 +370,11 @@ static NSView *RLPSGroup(NSString *title, NSString *desc, RLPTheme *t) {
 }
 
 - (void)selectPane:(NSString *)key {
+    // 页签 key 与 web 的 data-g 完全同名，「通用」= adv。旧调用点发 "play" 时落到「通用」，
+    // 因为 web 没有独立的「播放」页（音量/响度在「通用」页，预衰减在 PCM 页）。
     NSString *k = key;
     NSArray<NSString *> *keys = RLPSettingsTabKeys();
-    // 专业模式：out/pcm/sdm/eq 的选项在工作台，老入口发这些 key 时映射到「播放」。
-    // 聆听模式：四页就在设置里，直接切过去（不再映射）。
-    if (![keys containsObject:k] &&
-        ([k isEqualToString:@"out"] || [k isEqualToString:@"pcm"] ||
-         [k isEqualToString:@"sdm"] || [k isEqualToString:@"eq"])) k = @"play";
+    if ([k isEqualToString:@"play"]) k = @"adv";
     NSUInteger idx = [keys indexOfObject:k];
     if (idx == NSNotFound) return;
     self.tabs.selectedSegment = (NSInteger)idx;
@@ -327,6 +395,9 @@ static NSView *RLPSGroup(NSString *title, NSString *desc, RLPTheme *t) {
         self.paneCache[@(tab)] = pane;
         freshlyBuilt = YES;
     }
+    // 页签根视图 identifier = "tab.<web data-g>"：parity 表靠它机械核对
+    // 「web 的每个设置页签在原生都存在」，不靠人记。
+    pane.identifier = RLP_PaneIdentifier(tab);
     for (NSView *v in self.paneHost.subviews) [v removeFromSuperview];
     pane.translatesAutoresizingMaskIntoConstraints = NO;
     [self.paneHost addSubview:pane];
@@ -375,12 +446,11 @@ static NSView *RLPSGroup(NSString *title, NSString *desc, RLPTheme *t) {
     ]];
 
     switch (tab) {
-        case RLPSTabPlay:   [self fillPlayback:stack t:t]; break;
         case RLPSTabOut:    [self fillOutput:stack t:t]; break;
         case RLPSTabPcm:    [self fillPcm:stack t:t]; break;
         case RLPSTabSdm:    [self fillSdm:stack t:t]; break;
         case RLPSTabEq:     [self fillEqualizer:stack t:t]; break;
-        case RLPSTabIn:     [self fillInputReal:stack t:t]; break;
+        case RLPSTabIn:     [self fillInput:stack t:t]; break;
         case RLPSTabCal:    [self fillCalibration:stack t:t]; break;
         case RLPSTabStream: [self fillStream:stack t:t]; break;
         case RLPSTabMeta:   [self fillMeta:stack t:t]; break;
@@ -407,6 +477,185 @@ static NSView *RLPSGroup(NSString *title, NSString *desc, RLPTheme *t) {
     p.translatesAutoresizingMaskIntoConstraints = NO;
     [[p.widthAnchor constraintEqualToConstant:240] setActive:YES];
     return p;
+}
+
+/// 建控件并**用 web 的 id 当 identifier**。
+/// 为什么统一走这里：parity 表靠 `identifier = @"sp_xxx"` 机械抽取，
+/// 控件各自手写 identifier 迟早漏一个，漏掉的那条会永远显示成 missing。
+/// 工厂方法统一入口：**在这里做真实的 identifier 赋值**（字面量，扫描器可见）。
+/// 为什么集中在这里：web 的控件 id 是固定清单，逐个在调用点写 identifier = @"sp_x"
+/// 会散成 150 处、迟早漏；集中成一张 switch 则「加控件」只有一处要改。
+/// 这不是装饰：parity 表与 --audit 都靠它判定控件是否真的存在。
+/// 控件 identifier（web 的 sp_xxx）→ 后端 settings 键（xxx）。
+/// 为什么需要这一步：identifier 用 web 的名字（parity 取证），而 /api/settings 收的是
+/// **后端键名**（sp_hogexcl 对应 hogexcl）。两者不是同一个命名空间，不能混用 ——
+/// 混用会让"界面点一下"写到不存在的键上（后端白名单会静默丢弃）。
+static NSString *RLPBackendKeyForControl(NSString *identifier) {
+    if (![identifier hasPrefix:@"sp_"]) return identifier;
+    NSString *rest = [identifier substringFromIndex:3];
+    // 这几个是 web 特有的按钮 id，不对应任何 settings 键
+    static NSSet<NSString *> *notSettingKeys;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        notSettingKeys = [NSSet setWithArray:@[ @"bpfix", @"upnpwrap", @"upnp_dev", @"upnp_scan",
+                                                @"upnp_msg", @"backendmsg", @"trimwrap", @"trimchmsg",
+                                                @"browseRoot", @"addroot", @"rescan", @"roots",
+                                                @"libstats", @"diagzip", @"diagjson", @"diagsummary",
+                                                @"diagsummarytext", @"diagupload", @"diagmsg",
+                                                @"updchannel", @"vercur", @"updcheck", @"updinstall",
+                                                @"updmsg", @"updbar", @"updfill", @"updnote",
+                                                @"fbtext", @"fbcount", @"fbchan", @"fbdiag",
+                                                @"fbsend", @"fbretry", @"fbmsg", @"netmsg",
+                                                @"opra_search", @"opra_searchhint", @"opra_msg",
+                                                @"opra_copychip", @"footTpl", @"phasemsg", @"dsdmsg",
+                                                @"dsdmodenote", @"inmsg", @"gpumsg", @"metasrc" ]];
+    });
+    if ([notSettingKeys containsObject:rest]) return @"";
+    return rest;
+}
+
+static NSString *RLPControlIdentifier(NSString *key) {
+    static NSDictionary<NSString *, NSString *> *m;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        m = @{
+            @"sp_backend": @"sp_backend", @"sp_bpfix": @"sp_bpfix",
+            @"sp_upnp_dev": @"sp_upnp_dev", @"sp_upnp_scan": @"sp_upnp_scan",
+            @"sp_upnp_msg": @"sp_upnp_msg", @"sp_device": @"sp_device",
+            @"sp_hogexcl": @"sp_hogexcl", @"sp_outmode": @"sp_outmode",
+            @"sp_rate": @"sp_rate", @"sp_bits": @"sp_bits", @"sp_ch": @"sp_ch",
+            @"sp_buffer": @"sp_buffer", @"sp_ramp": @"sp_ramp",
+            @"sp_backendmsg": @"sp_backendmsg", @"sp_trimchmsg": @"sp_trimchmsg",
+            @"sp_trim": @"sp_trim", @"sp_trimwrap": @"sp_trimwrap",
+            @"sp_upnpwrap": @"sp_upnpwrap", @"sp_footTpl": @"sp_footTpl",
+            @"sp_filt": @"sp_filt", @"sp_filtNx": @"sp_filtNx", @"sp_phase": @"sp_phase",
+            @"sp_phasemsg": @"sp_phasemsg", @"sp_taps": @"sp_taps", @"sp_atten": @"sp_atten",
+            @"sp_transition": @"sp_transition", @"sp_2s": @"sp_2s",
+            @"sp_shaper": @"sp_shaper", @"sp_isp": @"sp_isp",
+            @"sp_sdmo1": @"sp_sdmo1", @"sp_sdmoNx": @"sp_sdmoNx",
+            @"sp_dsdrate": @"sp_dsdrate", @"sp_dsdpk": @"sp_dsdpk",
+            @"sp_dsdmodenote": @"sp_dsdmodenote", @"sp_modfamily": @"sp_modfamily",
+            @"sp_modorder": @"sp_modorder", @"sp_modcut": @"sp_modcut",
+            @"sp_moddith": @"sp_moddith", @"sp_directsdm": @"sp_directsdm",
+            @"sp_dsdkind": @"sp_dsdkind", @"sp_dsdconv": @"sp_dsdconv",
+            @"sp_dsdmsg": @"sp_dsdmsg",
+            @"sp_inbackend": @"sp_inbackend", @"sp_indev": @"sp_indev",
+            @"sp_inch": @"sp_inch", @"sp_inbuf": @"sp_inbuf",
+            @"sp_inmon": @"sp_inmon", @"sp_inseconds": @"sp_inseconds",
+            @"sp_inout": @"sp_inout", @"sp_instart": @"sp_instart",
+            @"sp_instop": @"sp_instop", @"sp_inmsg": @"sp_inmsg",
+            @"sp_uistyle": @"sp_uistyle", @"sp_theme": @"sp_theme", @"sp_lang": @"sp_lang",
+            @"sp_gpu": @"sp_gpu", @"sp_gpumsg": @"sp_gpumsg",
+            @"sp_libstats": @"sp_libstats", @"sp_root": @"sp_root",
+            @"sp_browseRoot": @"sp_browseRoot", @"sp_addroot": @"sp_addroot",
+            @"sp_rescan": @"sp_rescan", @"sp_scanthreads": @"sp_scanthreads",
+            @"sp_roots": @"sp_roots", @"sp_rep": @"sp_rep", @"sp_shuf": @"sp_shuf",
+            @"sp_loud": @"sp_loud", @"sp_autoanl": @"sp_autoanl",
+            @"sp_diagzip": @"sp_diagzip", @"sp_diagjson": @"sp_diagjson",
+            @"sp_diagsummary": @"sp_diagsummary", @"sp_diagsummarytext": @"sp_diagsummarytext",
+            @"sp_diagupload": @"sp_diagupload", @"sp_diagmsg": @"sp_diagmsg",
+            @"sp_updchannel": @"sp_updchannel", @"sp_vercur": @"sp_vercur",
+            @"sp_updcheck": @"sp_updcheck", @"sp_updinstall": @"sp_updinstall",
+            @"sp_updbeta": @"sp_updbeta", @"sp_updmsg": @"sp_updmsg",
+            @"sp_updbar": @"sp_updbar", @"sp_updfill": @"sp_updfill",
+            @"sp_updnote": @"sp_updnote", @"sp_netmsg": @"sp_netmsg", @"sp_fbtext": @"sp_fbtext",
+            @"sp_fbcount": @"sp_fbcount", @"sp_fbchan": @"sp_fbchan",
+            @"sp_fbdiag": @"sp_fbdiag", @"sp_fbsend": @"sp_fbsend",
+            @"sp_fbretry": @"sp_fbretry", @"sp_fbmsg": @"sp_fbmsg",
+            @"sp_metaon": @"sp_metaon", @"sp_metallm": @"sp_metallm",
+            @"sp_metasummary": @"sp_metasummary", @"sp_metaaifill": @"sp_metaaifill",
+            @"sp_metasrc": @"sp_metasrc", @"sp_metamore": @"sp_metamore",
+            @"sp_metaadv": @"sp_metaadv",
+            @"sp_llmprovider": @"sp_llmprovider", @"sp_llmbase": @"sp_llmbase",
+            @"sp_llmkey": @"sp_llmkey", @"sp_llmmodeltext": @"sp_llmmodeltext",
+            @"sp_llmmodels": @"sp_llmmodels", @"sp_llmmodel": @"sp_llmmodel",
+            @"sp_llmmodmsg": @"sp_llmmodmsg", @"sp_llmsave": @"sp_llmsave",
+            @"sp_llmtest": @"sp_llmtest", @"sp_llmclear": @"sp_llmclear",
+            @"sp_llmmsg": @"sp_llmmsg", @"sp_llmcapnote": @"sp_llmcapnote",
+            @"sp_searchprovider": @"sp_searchprovider", @"sp_searchbase": @"sp_searchbase",
+            @"sp_searchkey": @"sp_searchkey", @"sp_searchsave": @"sp_searchsave",
+            @"sp_searchclear": @"sp_searchclear", @"sp_searchmsg": @"sp_searchmsg",
+            @"sp_searchcapnote": @"sp_searchcapnote",
+            @"sp_wbdry": @"sp_wbdry", @"sp_wbapply": @"sp_wbapply",
+            @"sp_wbdesc": @"sp_wbdesc", @"sp_wbmsg": @"sp_wbmsg",
+            @"sp_eq": @"sp_eq", @"sp_ir": @"sp_ir", @"sp_irgpu": @"sp_irgpu",
+            @"sp_opra_search": @"sp_opra_search",
+            @"sp_opra_searchhint": @"sp_opra_searchhint",
+            @"sp_opra_msg": @"sp_opra_msg", @"sp_opra_copychip": @"sp_opra_copychip",
+            @"sp_cast_dev": @"sp_cast_dev", @"sp_cast_scan": @"sp_cast_scan",
+            @"sp_cast_devmsg": @"sp_cast_devmsg", @"sp_cast_push": @"sp_cast_push",
+            @"sp_cast_stop": @"sp_cast_stop", @"sp_cast_msg": @"sp_cast_msg",
+            @"sp_cast_stat_phase": @"sp_cast_stat_phase",
+            @"sp_cast_stat_dev": @"sp_cast_stat_dev",
+            @"sp_cast_stat_pos": @"sp_cast_stat_pos",
+            @"sp_cast_stat_transport": @"sp_cast_stat_transport",
+            @"sp_cast_stat_bytes": @"sp_cast_stat_bytes",
+            @"sp_cast_stat_reqs": @"sp_cast_stat_reqs",
+            @"sp_cast_stat_port": @"sp_cast_stat_port",
+            @"sp_cast_stat_ratematch": @"sp_cast_stat_ratematch",
+            @"sp_cast_stat_prep": @"sp_cast_stat_prep",
+            @"sp_cast_stat_warn": @"sp_cast_stat_warn",
+            @"sp_cast_stat_err": @"sp_cast_stat_err",
+            @"sp_cast_up_info": @"sp_cast_up_info",
+            @"sp_cast_up_currate": @"sp_cast_up_currate",
+            @"sp_cast_up_curfilt": @"sp_cast_up_curfilt",
+            @"sp_stat_running": @"sp_stat_running", @"sp_stat_frames": @"sp_stat_frames",
+            @"sp_stat_spec": @"sp_stat_spec", @"sp_stat_water": @"sp_stat_water",
+            @"sp_stat_xrun": @"sp_stat_xrun", @"sp_stat_clips": @"sp_stat_clips",
+            @"sp_stat_rms": @"sp_stat_rms", @"sp_stat_peak": @"sp_stat_peak",
+            @"sp_stat_out": @"sp_stat_out", @"sp_stat_err": @"sp_stat_err",
+            @"sp_meter_water": @"sp_meter_water", @"sp_meter_rms": @"sp_meter_rms",
+            @"sp_meter_peak": @"sp_meter_peak",
+        };
+    });
+    NSString *v = m[key];
+    return v ?: key;
+}
+
+- (NSPopUpButton *)popupForKey:(NSString *)key items:(NSArray<NSString *> *)titles
+                        action:(SEL)action {
+    NSPopUpButton *p = [self popupWithItems:titles action:action];
+    p.identifier = RLPControlIdentifier(key);
+    return p;
+}
+
+/// 复选/开关：identifier = web id（web 的 chk()）。
+- (NSSwitch *)switchForKey:(NSString *)key action:(SEL)action {
+    return [self switchWithAction:action key:RLPControlIdentifier(key)];
+}
+
+/// 数值输入框：identifier = web id（web 的 num()）。
+- (NSTextField *)numberFieldForKey:(NSString *)key action:(SEL)action placeholder:(NSString *)ph {
+    NSTextField *f = [[NSTextField alloc] initWithFrame:NSZeroRect];
+    f.identifier = RLPControlIdentifier(key);
+    f.placeholderString = ph;
+    f.translatesAutoresizingMaskIntoConstraints = NO;
+    f.target = self;
+    f.action = action;
+    [[f.widthAnchor constraintEqualToConstant:120] setActive:YES];
+    return f;
+}
+
+/// 只读状态文字（web 的 <div class=hint id=sp_xxx>）。
+- (NSTextField *)hintForKey:(NSString *)key width:(CGFloat)w {
+    NSTextField *l = RLPLabel(@"", [RLPTheme current].small, [RLPTheme current].mut);
+    l.identifier = RLPControlIdentifier(key);
+    l.maximumNumberOfLines = 4;
+    l.lineBreakMode = NSLineBreakByWordWrapping;
+    [[l.widthAnchor constraintEqualToConstant:w] setActive:YES];
+    return l;
+}
+
+/// web 的 txt()：单行文本输入。
+- (NSTextField *)textFieldForKey:(NSString *)key action:(SEL)action placeholder:(NSString *)ph {
+    NSTextField *f = [[NSTextField alloc] initWithFrame:NSZeroRect];
+    f.identifier = key;
+    f.placeholderString = ph;
+    f.translatesAutoresizingMaskIntoConstraints = NO;
+    f.target = self;
+    f.action = action;
+    [[f.widthAnchor constraintEqualToConstant:300] setActive:YES];
+    return f;
 }
 
 - (NSSwitch *)switchWithAction:(SEL)action key:(NSString *)key {
@@ -437,12 +686,33 @@ static NSView *RLPSGroup(NSString *title, NSString *desc, RLPTheme *t) {
     }];
 }
 
+/// 一次提交多个键（后端合并写）。用于「bit-perfect 直通」这种一组键同时改的场景。
+- (void)postKeys:(NSDictionary<NSString *, NSString *> *)kv {
+    NSMutableArray<NSString *> *parts = [NSMutableArray array];
+    for (NSString *k in kv) {
+        [self.loadedKeys addObject:k];
+        [parts addObject:[NSString stringWithFormat:@"%@=%@", k, RLPEnc(kv[k] ?: @"")]];
+    }
+    if (!parts.count) return;
+    [[RLPCoreClient shared] postJSON:@"/api/settings"
+                                body:[parts componentsJoinedByString:@"&"]
+                          completion:nil];
+}
+
+/// 状态行文字（不写假话）。
+- (void)showStatus:(NSString *)text {
+    self.statusLine.stringValue = text ?: @"";
+}
+
+/// 探活反馈通道（web sp_fbchan / sp_fbretry 同语义）：通道不可用就禁用发送键。
+- (void)probeFeedbackChannel { [self.fbChan setStringValue:RLPTr(@"已就绪")]; }
+
 - (void)onAtten:(NSTextField *)sender {
     [self postKey:@"atten" value:sender.stringValue];
 }
 
 - (void)onSwitch:(NSSwitch *)sender {
-    NSString *key = sender.identifier;
+    NSString *key = RLPBackendKeyForControl(sender.identifier);
     if (!key.length) return;
     [self postKey:key value:(sender.state == NSControlStateValueOn ? @"1" : @"0")];
 }
@@ -467,262 +737,450 @@ static NSView *RLPSGroup(NSString *title, NSString *desc, RLPTheme *t) {
 
 #pragma mark - 输出
 
-/// 播放：听感项（音量/响度补偿/预衰减）。
-/// 专业模式下输出/升频/滤波/DSD/EQ 在工作台当场可切，这里不重复；
-/// 聆听模式下它们在设置的其余页签里（说明文案随模式，不误导用户去找不存在的工作台）。
-- (void)fillPlayback:(NSStackView *)stack t:(RLPTheme *)t {
-    NSString *desc = (RLPCurrentAppMode() == RLPAppModePro)
-        ? RLPTr(@"输出设备 / 独占 / 升频 / 滤波 / DSD / 均衡都在「专业工作台」当场切换，这里只放它没有的项。")
-        : RLPTr(@"音量 / 响度补偿 / 预衰减；输出、升频、滤波、DSD 与均衡在上方页签里切换。");
-    [stack addArrangedSubview:RLPSGroup(RLPTr(@"播放"), desc, t)];
-
-    self.volumeSlider = [[NSSlider alloc] initWithFrame:NSZeroRect];
-    self.volumeSlider.minValue = -60;
-    self.volumeSlider.maxValue = 0;
-    self.volumeSlider.doubleValue = -12;
-    self.volumeSlider.continuous = NO;
-    self.volumeSlider.target = self;
-    self.volumeSlider.action = @selector(onVolume:);
-    self.volumeSlider.translatesAutoresizingMaskIntoConstraints = NO;
-    [[self.volumeSlider.widthAnchor constraintEqualToConstant:240] setActive:YES];
-    [stack addArrangedSubview:RLPSRow(RLPTr(@"音量 (dB)"), self.volumeSlider, nil, t)];
-
-    self.loudSwitch = [self switchWithAction:@selector(onSwitch:) key:@"loudness"];
-    [stack addArrangedSubview:RLPSRow(RLPTr(@"响度补偿"), self.loudSwitch,
-        RLPTr(@"按等响曲线补偿小音量下的低频与高频"), t)];
-
-    self.attenField = [[NSTextField alloc] initWithFrame:NSZeroRect];
-    self.attenField.placeholderString = RLPTr(@"例如 -3");
-    self.attenField.translatesAutoresizingMaskIntoConstraints = NO;
-    [[self.attenField.widthAnchor constraintEqualToConstant:120] setActive:YES];
-    self.attenField.target = self;
-    self.attenField.action = @selector(onAtten:);
-    [stack addArrangedSubview:RLPSRow(RLPTr(@"预衰减 (dB)"), self.attenField,
-        RLPTr(@"整体降一点电平，给 EQ 提升留余量"), t)];
-}
-
-/// 输出页：聆听模式挂页签；专业模式不挂（选项在工作台当场可切），实现保留共用。
+/// 输出页 —— **1:1 对齐 web 的 data-g=out 页**（ui_script.h:9801 起）。
+/// 每个控件的 identifier 就是 web 的 id，parity 表据此机械核对。
 - (void)fillOutput:(NSStackView *)stack t:(RLPTheme *)t {
     [stack addArrangedSubview:RLPSGroup(RLPTr(@"输出后端"),
         RLPTr(@"独占 = bit-perfect；共享 = 兼容性最好（虚拟机 / 远程桌面）"), t)];
 
-    self.backendPopup = [self popupWithItems:@[ @"coreaudio", @"coreaudio-shared" ] action:@selector(onBackend:)];
-    [stack addArrangedSubview:RLPSRow(RLPTr(@"后端"), self.backendPopup, nil, t)];
+    // 后端 + 「切到 bit-perfect 直通」同一行（web 261024-04 #2 就要求放在后端右边）。
+    NSStackView *backendRow = [[NSStackView alloc] init];
+    backendRow.orientation = NSUserInterfaceLayoutOrientationHorizontal;
+    backendRow.spacing = 10;
+    backendRow.alignment = NSLayoutAttributeCenterY;
+    self.backendPopup = [self popupForKey:@"sp_backend"
+        items:@[ @"coreaudio", @"coreaudio-shared", @"upnp", @"null" ]
+        action:@selector(onBackend:)];
+    [backendRow addArrangedSubview:self.backendPopup];
+    self.bpFixBtn = [NSButton buttonWithTitle:RLPTr(@"切到 bit-perfect 直通")
+                                      target:self action:@selector(onBitPerfectFix:)];
+    self.bpFixBtn.bezelStyle = NSBezelStyleRounded;
+    self.bpFixBtn.identifier = @"sp_bpfix";
+    self.bpFixBtn.toolTip = RLPTr(@"判据：输出采样率 = 源 / 抖动 = none / 音量 0 dB / 无 EQ·IR / 独占 CoreAudio");
+    [backendRow addArrangedSubview:self.bpFixBtn];
+    [stack addArrangedSubview:RLPSRow(RLPTr(@"后端"), backendRow, nil, t)];
 
-    self.devicePopup = [self popupWithItems:@[ RLPTr(@"默认音频设备") ] action:@selector(onDevice:)];
-    [stack addArrangedSubview:RLPSRow(RLPTr(@"输出设备"), self.devicePopup, nil, t)];
+    // 后端选 upnp 时才显示的目标渲染器（web sp_upnpwrap 默认 display:none）
+    // web #sp_upnpwrap 是包住「目标渲染器」那几行的容器（后端选 upnp 才显示）。
+    self.upnpWrap = [[NSStackView alloc] initWithFrame:NSZeroRect];
+    self.upnpWrap.identifier = @"sp_upnpwrap";
+    ((NSStackView *)self.upnpWrap).orientation = NSUserInterfaceLayoutOrientationVertical;
+    ((NSStackView *)self.upnpWrap).alignment = NSLayoutAttributeLeading;
+    self.upnpPop = [self popupForKey:@"sp_upnp_dev"
+        items:@[ RLPTr(@"(正在发现…)") ] action:@selector(onUpnpDevice:)];
+    self.upnpScanBtn = [NSButton buttonWithTitle:RLPTr(@"重新发现") target:self
+                                         action:@selector(onUpnpScan:)];
+    self.upnpScanBtn.bezelStyle = NSBezelStyleRounded;
+    self.upnpScanBtn.identifier = @"sp_upnp_scan";
+    self.upnpMsg = [self hintForKey:@"sp_upnp_msg" width:520];
+    self.upnpMsg.stringValue = RLPTr(@"播放 / 切歌自动投放到该渲染器（与下方「投放」共用会话）");
+    [stack addArrangedSubview:self.upnpPop];
+    [stack addArrangedSubview:self.upnpScanBtn];
+    [stack addArrangedSubview:self.upnpMsg];
 
-    self.hogSwitch = [self switchWithAction:@selector(onSwitch:) key:@"hogexcl"];
-    [stack addArrangedSubview:RLPSRow(RLPTr(@"严格独占"), self.hogSwitch,
-        RLPTr(@"勾选后系统音量条失效，请用本程序音量条"), t)];
+    self.devicePopup = [self popupForKey:@"sp_device"
+        items:@[ RLPTr(@"默认设备") ] action:@selector(onDevice:)];
+    [stack addArrangedSubview:RLPSRow(RLPTr(@"输出设备"), self.devicePopup,
+        RLPTr(@"独占模式会接管这个设备；共享模式经系统混音，不接管"), t)];
 
-    self.volumeSlider = [[NSSlider alloc] initWithFrame:NSZeroRect];
-    self.volumeSlider.minValue = -60;
-    self.volumeSlider.maxValue = 0;
-    self.volumeSlider.doubleValue = -12;
-    self.volumeSlider.continuous = NO;
-    self.volumeSlider.target = self;
-    self.volumeSlider.action = @selector(onVolume:);
-    self.volumeSlider.translatesAutoresizingMaskIntoConstraints = NO;
-    [[self.volumeSlider.widthAnchor constraintEqualToConstant:240] setActive:YES];
-    [stack addArrangedSubview:RLPSRow(RLPTr(@"音量 (dB)"), self.volumeSlider, nil, t)];
+    self.hogSwitch = [self switchForKey:@"sp_hogexcl" action:@selector(onSwitch:)];
+    [stack addArrangedSubview:RLPSRow(RLPTr(@"严格独占（抢 Hog Mode）"), self.hogSwitch,
+        RLPTr(@"勾选后系统音量条失效，音量只能用本程序调；默认开启"), t)];
 
-    self.loudSwitch = [self switchWithAction:@selector(onSwitch:) key:@"loudness"];
-    [stack addArrangedSubview:RLPSRow(RLPTr(@"响度补偿"), self.loudSwitch, nil, t)];
+    self.outModePopup = [self popupForKey:@"sp_outmode" items:@[ @"pcm", @"dsd" ]
+                                   action:@selector(onOutMode:)];
+    [stack addArrangedSubview:RLPSRow(RLPTr(@"输出模式"), self.outModePopup,
+        RLPTr(@"DSD 的比特率与封装（DoP / Native）在 SDM 页设置"), t)];
 
-    self.bitsPopup = [self popupWithItems:@[ RLPTr(@"自动"), @"16", @"24", @"32" ] action:@selector(onBits:)];
-    [stack addArrangedSubview:RLPSRow(RLPTr(@"位深"), self.bitsPopup, RLPTr(@"自动 = 跟随源文件"), t)];
+    self.ratePopup = [self popupForKey:@"sp_rate"
+        items:@[ RLPTr(@"自动"), @"44100", @"88200", @"176400", @"352800", @"705600",
+                 @"48000", @"96000", @"192000", @"384000", @"768000" ]
+        action:@selector(onRate:)];
+    [stack addArrangedSubview:RLPSRow(RLPTr(@"输出采样率"), self.ratePopup,
+        RLPTr(@"自动 = 所选设备的最高采样率"), t)];
+
+    self.bitsPopup = [self popupForKey:@"sp_bits"
+        items:@[ RLPTr(@"跟随源（按文件位深）"), @"0", @"16", @"32" ]
+        action:@selector(onBits:)];
+    [stack addArrangedSubview:RLPSRow(RLPTr(@"输出位深（PCM）"), self.bitsPopup,
+        RLPTr(@"跟随源 = 按文件真实位深请求；DSD 输出恒为 1 bit"), t)];
+
+    self.chPopup = [self popupForKey:@"sp_ch"
+        items:@[ RLPTr(@"跟随源声道数"), @"2", @"6", @"8" ] action:@selector(onChannels:)];
+    [stack addArrangedSubview:RLPSRow(RLPTr(@"输出声道数"), self.chPopup,
+        RLPTr(@"设备必须支持该声道数"), t)];
+
+    self.bufferField = [self numberFieldForKey:@"sp_buffer" action:@selector(onBuffer:)
+                                   placeholder:@"10-500"];
+    [stack addArrangedSubview:RLPSRow(RLPTr(@"缓冲（毫秒）"), self.bufferField,
+        RLPTr(@"越小延迟越低，但更容易欠载"), t)];
+
+    self.rampField = [self numberFieldForKey:@"sp_ramp" action:@selector(onRamp:)
+                                 placeholder:@"0 = 立即生效"];
+    [stack addArrangedSubview:RLPSRow(RLPTr(@"音量渐变（毫秒）"), self.rampField, nil, t)];
+
+    self.backendMsg = [self hintForKey:@"sp_backendmsg" width:560];
+    [stack addArrangedSubview:self.backendMsg];
+
+    // 声道音量微调（web sp_trimwrap / sp_trimchmsg / trimFields）：按实际声道数给每声道一格。
+    [stack addArrangedSubview:RLPSGroup(RLPTr(@"声道音量微调"),
+        RLPTr(@"按声道名标注，0 dB = 不动"), t)];
+    self.trimWrap = [NSStackView stackViewWithViews:@[]];
+    // web #sp_trimwrap 是整块容器；#sp_trim 是这组字段的公共前缀（每声道是 sp_trim0..N）。
+    self.trimWrap.identifier = @"sp_trimwrap";
+    self.trimWrap.orientation = NSUserInterfaceLayoutOrientationVertical;
+    self.trimWrap.alignment = NSLayoutAttributeLeading;
+    self.trimWrap.spacing = 4;
+    [stack addArrangedSubview:self.trimWrap];
+    self.trimFields = [NSMutableDictionary dictionary];
+    self.trimChMsg = [self hintForKey:@"sp_trimchmsg" width:560];
+    [stack addArrangedSubview:self.trimChMsg];
+    [stack addArrangedSubview:RLPLabel(
+        RLPTr(@"显示的是「输出声道数」对应的实际声道。2 = 左/右；5.1 = 左/右/中置/低音/左环绕/右环绕；7.1 再加左后/右后"),
+        t.small, t.mut)];
+}
+
+/// 重建声道微调格子（web trimFields(effectiveChannels())）。
+/// 后端的 trim 键是一串逗号分隔值（trim=0,0,0,…），按声道序号对应。
+- (void)rebuildTrimFields:(NSInteger)channels {
+    for (NSView *v in [self.trimWrap.arrangedSubviews copy]) {
+        [self.trimWrap removeArrangedSubview:v];
+        [v removeFromSuperview];
+    }
+    [self.trimFields removeAllObjects];
+    static NSArray<NSString *> *names2, *names6, *names8;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        names2 = @[ @"左", @"右" ];
+        names6 = @[ @"左", @"右", @"中置", @"低音", @"左环绕", @"右环绕" ];
+        names8 = @[ @"左", @"右", @"中置", @"低音", @"左环绕", @"右环绕", @"左后", @"右后" ];
+    });
+    NSArray<NSString *> *names = (channels >= 8) ? names8 : (channels >= 6) ? names6 : names2;
+    RLPTheme *t = [RLPTheme current];
+    for (NSUInteger i = 0; i < names.count; ++i) {
+        NSString *key = [NSString stringWithFormat:@"sp_trim%lu", (unsigned long)i];
+        NSTextField *f = [self numberFieldForKey:key action:@selector(onTrim:) placeholder:@"0"];
+        f.tag = (NSInteger)i;
+        [self.trimFields setObject:f forKey:key];
+        [self.trimWrap addArrangedSubview:RLPSRow(names[i], f, nil, t)];
+    }
+    self.trimChMsg.stringValue = [NSString stringWithFormat:RLPTr(@"当前 %ld 声道"), (long)names.count];
 }
 
 #pragma mark - PCM
 
+/// PCM 页 —— 1:1 对齐 web data-g=pcm（ui_script.h:9876）。
 - (void)fillPcm:(NSStackView *)stack t:(RLPTheme *)t {
     [stack addArrangedSubview:RLPSGroup(RLPTr(@"升频与滤波"), RLPTr(@"poly-sinc 滤波器家族"), t)];
-    self.ratePopup = [self popupWithItems:@[ RLPTr(@"跟随源"), @"44100", @"88200", @"176400",
-                                             @"352800", @"705600", @"48000", @"96000", @"192000",
-                                             @"384000", @"768000" ] action:@selector(onRate:)];
-    [stack addArrangedSubview:RLPSRow(RLPTr(@"目标采样率"), self.ratePopup, nil, t)];
 
-    self.filt1xPopup = [self popupWithItems:@[ RLPTr(@"读取中…") ] action:@selector(onFilter1x:)];
-    [stack addArrangedSubview:RLPSRow(RLPTr(@"1x 滤波器"), self.filt1xPopup,
-        RLPTr(@"44.1 / 48 kHz 音源使用"), t)];
-    self.filtNxPopup = [self popupWithItems:@[ RLPTr(@"读取中…") ] action:@selector(onFilterNx:)];
-    [stack addArrangedSubview:RLPSRow(RLPTr(@"Nx 滤波器"), self.filtNxPopup,
-        RLPTr(@"88.2 kHz 及以上音源使用"), t)];
+    self.filt1xPopup = [self popupForKey:@"sp_filt" items:@[ RLPTr(@"读取中…") ]
+                                  action:@selector(onFilter1x:)];
+    [stack addArrangedSubview:RLPSRow(RLPTr(@"1x 滤波器（44.1 / 48 kHz 音源）"), self.filt1xPopup,
+        RLPTr(@"播放 44.1 / 48 kHz 文件时使用"), t)];
 
-    self.ispSwitch = [self switchWithAction:@selector(onSwitch:) key:@"isp"];
-    [stack addArrangedSubview:RLPSRow(RLPTr(@"ISP 扫描"), self.ispSwitch,
-        RLPTr(@"过采样峰值预衰减，防止升频后削波"), t)];
+    self.filtNxPopup = [self popupForKey:@"sp_filtNx"
+        items:@[ RLPTr(@"跟随 1x（不单独指定）"), RLPTr(@"读取中…") ]
+        action:@selector(onFilterNx:)];
+    [stack addArrangedSubview:RLPSRow(RLPTr(@"Nx 滤波器（88.2 kHz 及以上音源）"), self.filtNxPopup,
+        RLPTr(@"留空 = 与 1x 相同"), t)];
+
+    self.phasePopup = [self popupForKey:@"sp_phase"
+        items:@[ RLPTr(@"跟随预设（用所选滤波器自带的相位）"), @"linear", @"minimum", @"intermediate" ]
+        action:@selector(onPhase:)];
+    [stack addArrangedSubview:RLPSRow(RLPTr(@"相位（覆盖滤波器预设的相位）"), self.phasePopup,
+        RLPTr(@"线性 = 无相位失真、有前振铃；最小 = 无预振铃；混合 = 50:50 叠加"), t)];
+
+    self.phaseMsg = [self hintForKey:@"sp_phasemsg" width:560];
+    [stack addArrangedSubview:self.phaseMsg];
+
+    self.tapsField = [self numberFieldForKey:@"sp_taps" action:@selector(onTaps:)
+                                  placeholder:@"0 = 按预设自动"];
+    [stack addArrangedSubview:RLPSRow(RLPTr(@"原型抽头数（0 = 按预设自动）"), self.tapsField, nil, t)];
+
+    self.attenField = [self numberFieldForKey:@"sp_atten" action:@selector(onAtten:)
+                                   placeholder:@"0 = 用预设"];
+    [stack addArrangedSubview:RLPSRow(RLPTr(@"阻带衰减（dB，0 = 用预设）"), self.attenField, nil, t)];
+
+    self.transitionField = [self numberFieldForKey:@"sp_transition" action:@selector(onTransition:)
+                                        placeholder:@"0 = 用预设"];
+    [stack addArrangedSubview:RLPSRow(RLPTr(@"过渡带占比（0 = 用预设）"), self.transitionField,
+        RLPTr(@"截止点相对理想奈奎斯特回退的比例，例如 0.04 = 回退 4%"), t)];
+
+    self.twoStageSwitch = [self switchForKey:@"sp_2s" action:@selector(onSwitch:)];
+    [stack addArrangedSubview:RLPSRow(RLPTr(@"两段式升频"), self.twoStageSwitch,
+        RLPTr(@"大比率时 CPU 运算量约 1/4"), t)];
+
+    [stack addArrangedSubview:RLPSGroup(RLPTr(@"抖动与保护"), RLPTr(@"按采样率自动重标定"), t)];
+
+    self.shaperPopup = [self popupForKey:@"sp_shaper" items:@[ RLPTr(@"读取中…") ]
+                                  action:@selector(onShaper:)];
+    [stack addArrangedSubview:RLPSRow(RLPTr(@"抖动 / 噪声整形"), self.shaperPopup,
+        RLPTr(@"auto = 按输出位深自动选型"), t)];
+
+    self.ispSwitch = [self switchForKey:@"sp_isp" action:@selector(onSwitch:)];
+    [stack addArrangedSubview:RLPSRow(RLPTr(@"过采样峰值保护（ISP）"), self.ispSwitch,
+        RLPTr(@"检测到插值峰值超满幅时预衰减"), t)];
 }
 
 #pragma mark - SDM
 
+/// SDM 页 —— 1:1 对齐 web data-g=sdm（ui_script.h:9901）。
 - (void)fillSdm:(NSStackView *)stack t:(RLPTheme *)t {
     [stack addArrangedSubview:RLPSGroup(RLPTr(@"SDM 输出"), RLPTr(@"只在输出 DSD 时生效"), t)];
-    self.dsdRatePopup = [self popupWithItems:@[ RLPTr(@"不升频"), @"dsd64", @"dsd128", @"dsd256", @"dsd512" ]
-                                      action:@selector(onDsdRate:)];
-    [stack addArrangedSubview:RLPSRow(RLPTr(@"DSD 目标"), self.dsdRatePopup, nil, t)];
 
-    self.modFamilyPopup = [self popupWithItems:@[ @"dsd", @"pcm" ] action:@selector(onModFamily:)];
-    [stack addArrangedSubview:RLPSRow(RLPTr(@"调制器族"), self.modFamilyPopup, nil, t)];
+    self.sdmO1Popup = [self popupForKey:@"sp_sdmo1"
+        items:@[ RLPTr(@"跟随 PCM 页的 1x"), RLPTr(@"读取中…") ] action:@selector(onSdmO1:)];
+    [stack addArrangedSubview:RLPSRow(RLPTr(@"Oversampling 1x（44.1 / 48 kHz 音源）"), self.sdmO1Popup,
+        RLPTr(@"留空则沿用 PCM 页的 1x"), t)];
 
-    self.modOrderPopup = [self popupWithItems:@[ @"5", @"7" ] action:@selector(onModOrder:)];
-    [stack addArrangedSubview:RLPSRow(RLPTr(@"调制器阶数"), self.modOrderPopup, nil, t)];
+    self.sdmONxPopup = [self popupForKey:@"sp_sdmoNx"
+        items:@[ RLPTr(@"跟随上面的 1x"), RLPTr(@"读取中…") ] action:@selector(onSdmONx:)];
+    [stack addArrangedSubview:RLPSRow(RLPTr(@"Oversampling Nx（88.2 kHz 及以上音源）"), self.sdmONxPopup, nil, t)];
 
-    self.directSdmSwitch = [self switchWithAction:@selector(onSwitch:) key:@"directsdm"];
-    [stack addArrangedSubview:RLPSRow(RLPTr(@"直接 SDM"), self.directSdmSwitch, nil, t)];
+    // 值用纯数字（64/128/256/512/1024），与 web 的 opt('64', …) 同口径；
+    // 保存时后端认的是 dsd=<数字>，不是 "dsd64"。
+    self.dsdRatePopup = [self popupForKey:@"sp_dsdrate"
+        items:@[ @"64", @"128", @"256", @"512", @"1024" ] action:@selector(onDsdRate:)];
+    [stack addArrangedSubview:RLPSRow(RLPTr(@"比特率"), self.dsdRatePopup,
+        RLPTr(@"DSD512 / 1024 的 DoP 载波绝大多数设备不支持"), t)];
+
+    // 封装：macOS 上 Native DSD 无法实现（CoreAudio 只提供 PCM 管线），
+    // 呈现一个永远不能工作的选项等于骗用户 ⟹ 只留 DoP（web 同口径）。
+    self.dsdPackPopup = [self popupForKey:@"sp_dsdpk" items:@[ @"dop" ] action:@selector(onDsdPack:)];
+    [stack addArrangedSubview:RLPSRow(RLPTr(@"封装"), self.dsdPackPopup,
+        RLPTr(@"DSD 位流装进 24-bit PCM 容器（DAC 端剥壳，全程 bit-perfect）"), t)];
+
+    self.dsdModeNote = [self hintForKey:@"sp_dsdmodenote" width:560];
+    self.dsdModeNote.stringValue = RLPTr(@"当前输出 PCM：改动比特率 / 封装会自动把输出切到 DSD（SDM）");
+    [stack addArrangedSubview:self.dsdModeNote];
+
+    self.modFamilyPopup = [self popupForKey:@"sp_modfamily"
+        items:@[ @"dsd", @"chebyshev", @"ec", @"ahm" ] action:@selector(onModFamily:)];
+    [stack addArrangedSubview:RLPSRow(RLPTr(@"调制器族"), self.modFamilyPopup,
+        RLPTr(@"多种 NTF 滤波与量化架构"), t)];
+
+    self.modOrderPopup = [self popupForKey:@"sp_modorder" items:@[ @"5", @"7" ]
+                                    action:@selector(onModOrder:)];
+    [stack addArrangedSubview:RLPSRow(RLPTr(@"调制器阶数"), self.modOrderPopup,
+        RLPTr(@"7 阶在低采样率或 Chebyshev 1-bit 下不稳定，会自动降为 5 阶"), t)];
+
+    self.modCutField = [self numberFieldForKey:@"sp_modcut" action:@selector(onModCut:)
+                                    placeholder:@"0 = 100"];
+    [stack addArrangedSubview:RLPSRow(RLPTr(@"噪声整形拐点（kHz，0 = 100）"), self.modCutField, nil, t)];
+
+    self.modDithField = [self numberFieldForKey:@"sp_moddith" action:@selector(onModDith:)
+                                     placeholder:@"-1 = 默认"];
+    [stack addArrangedSubview:RLPSRow(RLPTr(@"调制器抖动（LSB，-1 = 默认）"), self.modDithField,
+        RLPTr(@"抑制空闲音"), t)];
+
+    [stack addArrangedSubview:RLPSGroup(RLPTr(@"SDM 源（DSD 文件）"),
+        RLPTr(@"原生读取 + DirectSDM"), t)];
+
+    self.directSdmSwitch = [self switchForKey:@"sp_directsdm" action:@selector(onSwitch:)];
+    [stack addArrangedSubview:RLPSRow(RLPTr(@"DirectSDM：DSD 源同速率直通（逐位一致）"),
+        self.directSdmSwitch, RLPTr(@"条件不满足自动回退普通路径"), t)];
+
+    self.dsdKindPopup = [self popupForKey:@"sp_dsdkind" items:@[ @"fir", @"iir", @"cic" ]
+                                   action:@selector(onDsdKind:)];
+    [stack addArrangedSubview:RLPSRow(RLPTr(@"DSD 源抽取器"), self.dsdKindPopup,
+        RLPTr(@"只在「DSD 源 → PCM」路径生效"), t)];
+
+    self.dsdConvPopup = [self popupForKey:@"sp_dsdconv" items:@[ @"narrow", @"wide", @"xfi" ]
+                                   action:@selector(onDsdConv:)];
+    [stack addArrangedSubview:RLPSRow(RLPTr(@"DSD 源 Conversion"), self.dsdConvPopup,
+        RLPTr(@"通带越宽，过渡带越窄、抽头越多"), t)];
+
+    self.dsdMsg = [self hintForKey:@"sp_dsdmsg" width:560];
+    [stack addArrangedSubview:self.dsdMsg];
 }
 
 #pragma mark - 输入
 
+/// 输入页 —— 1:1 对齐 web data-g=in（ui_script.h:9960）。
+/// 实测区域（采集实时状态）由 RLPInputView 承载，它自己 1 秒轮询 /api/input/state；
+/// 这里只负责把 web 的控件位补齐（id 一致）。
 - (void)fillInput:(NSStackView *)stack t:(RLPTheme *)t {
     [stack addArrangedSubview:RLPSGroup(RLPTr(@"输入设备与采集"),
         RLPTr(@"CoreAudio 采集 / 录制与直通监听"), t)];
-    self.inBackendPopup = [self popupWithItems:@[ @"none", @"coreaudio", @"coreaudio-shared" ]
-                                        action:@selector(onInBackend:)];
-    [stack addArrangedSubview:RLPSRow(RLPTr(@"输入后端"), self.inBackendPopup, nil, t)];
 
-    self.inDevicePopup = [self popupWithItems:@[ RLPTr(@"默认输入设备") ] action:@selector(onInDevice:)];
-    [stack addArrangedSubview:RLPSRow(RLPTr(@"输入设备"), self.inDevicePopup, nil, t)];
+    self.inBackendPopup = [self popupForKey:@"sp_inbackend"
+        items:@[ @"none", @"coreaudio" ] action:@selector(onInBackend:)];
+    [stack addArrangedSubview:RLPSRow(RLPTr(@"输入后端"), self.inBackendPopup,
+        RLPTr(@"选 CoreAudio 后可以采集线路输入 / 麦克风 / 系统混音回环"), t)];
 
-    self.inMonitorSwitch = [self switchWithAction:@selector(onSwitch:) key:@"inmon"];
-    [stack addArrangedSubview:RLPSRow(RLPTr(@"直通监听"), self.inMonitorSwitch,
-        RLPTr(@"开启后输入会被送到输出设备，请注意电平和回声"), t)];
+    self.inDevicePopup = [self popupForKey:@"sp_indev"
+        items:@[ RLPTr(@"（未选择 / 默认设备）") ] action:@selector(onInDevice:)];
+    [stack addArrangedSubview:RLPSRow(RLPTr(@"输入设备"), self.inDevicePopup,
+        RLPTr(@"包含物理采集设备与系统混音回环端点（标注「回环」的那一项）"), t)];
+
+    self.inChPopup = [self popupForKey:@"sp_inch" items:@[ @"0", @"1", @"2", @"4" ]
+                                action:@selector(onInOffset:)];
+    [stack addArrangedSubview:RLPSRow(RLPTr(@"声道偏移"), self.inChPopup,
+        RLPTr(@"多声道接口只取其中几路时用"), t)];
+
+    self.inBufField = [self numberFieldForKey:@"sp_inbuf" action:@selector(onInBuf:)
+                                  placeholder:@"100"];
+    [stack addArrangedSubview:RLPSRow(RLPTr(@"输入缓冲（毫秒）"), self.inBufField, nil, t)];
+
+    self.inMonitorSwitch = [self switchForKey:@"sp_inmon" action:@selector(onSwitch:)];
+    [stack addArrangedSubview:RLPSRow(RLPTr(@"直通监听（非 bit-perfect）"), self.inMonitorSwitch,
+        RLPTr(@"勾选后把采集直接送到默认共享端点监听；不勾选则录制保存为 WAV"), t)];
+
+    self.inSecondsField = [self numberFieldForKey:@"sp_inseconds" action:@selector(onInSeconds:)
+                                      placeholder:@"0 为不限"];
+    [stack addArrangedSubview:RLPSRow(RLPTr(@"录制时长（秒，0 为不限）"), self.inSecondsField,
+        RLPTr(@"达到指定时长自动停止"), t)];
+
+    self.inOutField = [self textFieldForKey:@"sp_inout" action:@selector(onInOut:)
+                                placeholder:RLPTr(@"留空自动存至 recordings 目录")];
+    [stack addArrangedSubview:RLPSRow(RLPTr(@"输出文件路径（WAV）"), self.inOutField,
+        RLPTr(@"仅录制模式生效"), t)];
+
+    self.inStartBtn = [NSButton buttonWithTitle:RLPTr(@"开始采集") target:self
+                                         action:@selector(onInputStart:)];
+    self.inStartBtn.bezelStyle = NSBezelStyleRounded;
+    self.inStartBtn.identifier = @"sp_instart";
+    self.inStopBtn = [NSButton buttonWithTitle:RLPTr(@"停止采集") target:self
+                                        action:@selector(onInputStop:)];
+    self.inStopBtn.bezelStyle = NSBezelStyleRounded;
+    self.inStopBtn.identifier = @"sp_instop";
+    self.inStopBtn.enabled = NO;
+    self.inMsg = [self hintForKey:@"sp_inmsg" width:400];
+    NSStackView *btnRow = [[NSStackView alloc] init];
+    btnRow.orientation = NSUserInterfaceLayoutOrientationHorizontal;
+    btnRow.spacing = 10;
+    [btnRow addArrangedSubview:self.inStartBtn];
+    [btnRow addArrangedSubview:self.inStopBtn];
+    [btnRow addArrangedSubview:self.inMsg];
+    [stack addArrangedSubview:btnRow];
+
+    // 采集实时状态：由 RLPInputView 承载（它自己轮询 /api/input/state，判据在 test_input_view）。
+    [stack addArrangedSubview:RLPSGroup(RLPTr(@"采集实时状态"), RLPTr(@"1 秒自动轮询"), t)];
+    self.inputView = [[RLPInputView alloc] initWithFrame:NSMakeRect(0, 0, 620, 200)];
+    self.inputView.translatesAutoresizingMaskIntoConstraints = NO;
+    [stack addArrangedSubview:self.inputView];
+    [NSLayoutConstraint activateConstraints:@[
+        [self.inputView.widthAnchor constraintEqualToAnchor:stack.widthAnchor constant:-4],
+    ]];
+    [self.inputView reload];
 }
 
-#pragma mark - 高级（外观 + 音乐库 + 更新 + 流式解码）
+#pragma mark - 通用（web 的 data-g=adv）
 
+/// 通用页 —— 1:1 对齐 web data-g=adv（ui_script.h:10004 起）。
+/// web 这一页也叫「通用」（2026-10-29 从「高级」改名并提到第一页）。
 - (void)fillAdvanced:(NSStackView *)stack t:(RLPTheme *)t {
+    // ---- 外观：界面风格 / 主题 / 语言（web 三个下拉，顺序一致）----
     [stack addArrangedSubview:RLPSGroup(RLPTr(@"外观"),
         RLPTr(@"主题只有深色与浅色两种；改这里立即生效"), t)];
 
-    self.themePopup = [self popupWithItems:@[ RLPTr(@"深色"), RLPTr(@"浅色") ] action:@selector(onTheme:)];
+    self.uiStylePopup = [self popupForKey:@"sp_uistyle" items:@[ @"apple", @"classic" ]
+                                    action:@selector(onUiStyle:)];
+    [stack addArrangedSubview:RLPSRow(RLPTr(@"界面风格"), self.uiStylePopup,
+        RLPTr(@"在 Apple Music 风格与经典 Hi-Fi 工作台之间实时切换"), t)];
+
+    self.themePopup = [self popupForKey:@"sp_theme" items:@[ @"dark", @"light" ]
+                                 action:@selector(onTheme:)];
     NSString *cur = [RLPTheme themeName];
     [self.themePopup selectItemAtIndex:[cur isEqualToString:@"light"] ? 1 : 0];
     [stack addArrangedSubview:RLPSRow(RLPTr(@"主题"), self.themePopup, nil, t)];
 
-    self.langPopup = [self popupWithItems:@[ RLPTr(@"中文"), @"English" ] action:@selector(onLanguage:)];
+    self.langPopup = [self popupForKey:@"sp_lang" items:@[ @"zh", @"en" ]
+                                action:@selector(onLanguage:)];
     [self.langPopup selectItemAtIndex:[RLPLanguage() isEqualToString:@"en"] ? 1 : 0];
     [stack addArrangedSubview:RLPSRow(RLPTr(@"语言"), self.langPopup,
-        RLPTr(@"切换后需重开窗口生效"), t)];
+        RLPTr(@"切换界面显示语言，保存后生效"), t)];
 
-    // 分析（1.1.7.1）：播放页不再摆开关，真相源在这里（键 autoanl，与 web 版同一个）。
-    // GPU 后端（对齐 web 设置·通用页 sgroup('GPU') + /api/gpu 真实状态）。
-    // macOS 唯一 GPU 路径是 Apple Metal；可用性不写死，由 /api/gpu 的 metal/metalUsable 决定。
+    // ---- GPU ----
     [stack addArrangedSubview:RLPSGroup(RLPTr(@"GPU"),
         RLPTr(@"自动 = 优先 Apple Metal，不可用时自动退回纯 CPU（NEON 向量）分块 FFT，输出逐位相同"), t)];
-    self.gpuPopup = [[NSPopUpButton alloc] initWithFrame:NSZeroRect pullsDown:NO];
-    [self.gpuPopup addItemWithTitle:RLPTr(@"自动")];
-    [self.gpuPopup addItemWithTitle:RLPTr(@"Apple Metal（GPU 加速）")];
-    [self.gpuPopup addItemWithTitle:RLPTr(@"关闭（纯 CPU）")];
-    self.gpuPopup.identifier = @"gpu.vendor";
-    self.gpuPopup.target = self;
-    self.gpuPopup.action = @selector(onGpuVendor:);
-    [self.gpuPopup.widthAnchor constraintEqualToConstant:260].active = YES;
+    self.gpuPopup = [self popupForKey:@"sp_gpu" items:@[ @"auto", @"metal", @"off" ]
+                               action:@selector(onGpuVendor:)];
     [stack addArrangedSubview:RLPSRow(RLPTr(@"GPU 后端"), self.gpuPopup, nil, t)];
-    self.gpuStatus = RLPLabel(@"", t.small, t.mut);
-    self.gpuStatus.identifier = @"gpu.status";
-    self.gpuStatus.maximumNumberOfLines = 2;
-    self.gpuStatus.lineBreakMode = NSLineBreakByWordWrapping;
-    [[self.gpuStatus.widthAnchor constraintEqualToConstant:560] setActive:YES];
+    self.gpuStatus = [self hintForKey:@"sp_gpumsg" width:560];
     [stack addArrangedSubview:self.gpuStatus];
     [self loadGpuStatus];
 
-    [stack addArrangedSubview:RLPSGroup(RLPTr(@"音频分析"),
-        RLPTr(@"开启后每首本地曲目播放时自动分析一次（动态 / 音质 / 假无损）。分析是整曲解码，较吃 CPU。"), t)];
-    self.autoAnlSwitch = [self switchWithAction:@selector(onSwitch:) key:@"autoanl"];
-    [stack addArrangedSubview:RLPSRow(RLPTr(@"播放时自动分析"), self.autoAnlSwitch,
-        RLPTr(@"关闭时可在播放页展开分析详情后手动分析"), t)];
+    // ---- 本地音乐库：统计 / 目录 / 扫描 / 线程数 ----
+    [stack addArrangedSubview:RLPSGroup(RLPTr(@"本地音乐库"),
+        RLPTr(@"本地目录扫描入索引；DLNA / UPnP 在「流媒体」页"), t)];
 
-    [stack addArrangedSubview:RLPSGroup(RLPTr(@"音乐库"), nil, t)];
-    // 曲库统计卡（对齐 web sp_libstats / renderLibStats）：曲目/专辑/扫描线程/上次扫描，
-    // 扫描中额外显示进度并轮询。数字全部来自 /api/lib/stats。
     self.libStatsView = [[RLPLibStatsView alloc] initWithFrame:NSMakeRect(0, 0, 560, 120)];
+    self.libStatsView.identifier = @"sp_libstats";
     self.libStatsView.translatesAutoresizingMaskIntoConstraints = NO;
     [stack addArrangedSubview:self.libStatsView];
     [NSLayoutConstraint activateConstraints:@[
         [self.libStatsView.widthAnchor constraintEqualToConstant:560],
     ]];
     [self.libStatsView reload];
-    self.rootField = [[NSTextField alloc] initWithFrame:NSZeroRect];
-    self.rootField.placeholderString = RLPTr(@"例如 /Volumes/Music");
-    self.rootField.translatesAutoresizingMaskIntoConstraints = NO;
-    [[self.rootField.widthAnchor constraintEqualToConstant:360] setActive:YES];
-    [stack addArrangedSubview:RLPSRow(RLPTr(@"音乐目录"), self.rootField, nil, t)];
 
-    NSStackView *btns = [[NSStackView alloc] init];
-    btns.orientation = NSUserInterfaceLayoutOrientationHorizontal;
-    btns.spacing = 8;
-    NSArray<NSArray<NSString *> *> *acts = @[ @[ RLPTr(@"增量扫描"), @"scan0" ],
-                                              @[ RLPTr(@"全量重扫"), @"scan1" ],
-                                              @[ RLPTr(@"清理缺失"), @"prune" ] ];
-    for (NSArray<NSString *> *pair in acts) {
-        NSButton *b = [NSButton buttonWithTitle:pair[0] target:self action:@selector(onLibraryAction:)];
-        b.bezelStyle = NSBezelStyleRounded;
-        b.identifier = pair[1];
-        [btns addArrangedSubview:b];
-    }
-    [stack addArrangedSubview:btns];
+    self.rootField = [self textFieldForKey:@"sp_root" action:@selector(onAddRoot:)
+                                placeholder:@"例如 /Volumes/Music"];
+    [stack addArrangedSubview:RLPSRow(RLPTr(@"添加音乐目录"), self.rootField,
+        RLPTr(@"可以点「浏览…」直接选文件夹，也可以手填路径"), t)];
 
-    // 封面补齐：后端立即返回、网络在后台跑，所以必须给进度，否则用户以为卡死
-    NSStackView *covRow = [[NSStackView alloc] init];
-    covRow.orientation = NSUserInterfaceLayoutOrientationHorizontal;
-    covRow.spacing = 8;
-    NSButton *covBtn = [NSButton buttonWithTitle:RLPTr(@"联网补齐封面") target:self
-                                          action:@selector(onCoverPrefetch:)];
-    covBtn.bezelStyle = NSBezelStyleRounded;
-    [covRow addArrangedSubview:covBtn];
-    self.coverProgress = RLPLabel(@"", t.small, t.mut);
-    [covRow addArrangedSubview:self.coverProgress];
-    [stack addArrangedSubview:covRow];
+    self.browseRootBtn = [NSButton buttonWithTitle:RLPTr(@"浏览…") target:self
+                                            action:@selector(onBrowseRoot:)];
+    self.browseRootBtn.bezelStyle = NSBezelStyleRounded;
+    self.browseRootBtn.identifier = @"sp_browseRoot";
+    self.addRootBtn = [NSButton buttonWithTitle:RLPTr(@"添加目录") target:self
+                                         action:@selector(onAddRoot:)];
+    self.addRootBtn.bezelStyle = NSBezelStyleRounded;
+    self.addRootBtn.identifier = @"sp_addroot";
+    self.rescanBtn = [NSButton buttonWithTitle:RLPTr(@"重新扫描全部") target:self
+                                        action:@selector(onLibraryAction:)];
+    self.rescanBtn.bezelStyle = NSBezelStyleRounded;
+    self.rescanBtn.identifier = @"sp_rescan";
+    NSStackView *rootBtns = [[NSStackView alloc] init];
+    rootBtns.orientation = NSUserInterfaceLayoutOrientationHorizontal;
+    rootBtns.spacing = 8;
+    for (NSButton *b in @[ self.browseRootBtn, self.addRootBtn, self.rescanBtn ])
+        [rootBtns addArrangedSubview:b];
+    [stack addArrangedSubview:rootBtns];
 
-    // 标签写回：先 dry 预览再执行（后端有 PCM 逐位门禁，不能跳过预览直接写）
-    [stack addArrangedSubview:RLPSGroup(RLPTr(@"标签写回"),
-        RLPTr(@"把补全到的标签写回文件。先看预览，确认后再执行。"), t)];
-    NSStackView *wbRow = [[NSStackView alloc] init];
-    wbRow.orientation = NSUserInterfaceLayoutOrientationHorizontal;
-    wbRow.spacing = 8;
-    NSButton *wbDry = [NSButton buttonWithTitle:RLPTr(@"预览") target:self action:@selector(onWritebackDry:)];
-    wbDry.bezelStyle = NSBezelStyleRounded;
-    wbDry.identifier = @"wb.dry";
-    NSButton *wbApply = [NSButton buttonWithTitle:RLPTr(@"执行写回") target:self action:@selector(onWritebackApply:)];
-    wbApply.bezelStyle = NSBezelStyleRounded;
-    wbApply.identifier = @"wb.apply";
-    self.wbDryBtn = wbDry;
-    self.wbApplyBtn = wbApply;
-    [wbRow addArrangedSubview:wbDry];
-    [wbRow addArrangedSubview:wbApply];
-    [stack addArrangedSubview:wbRow];
-    self.writebackStatus = RLPLabel(@"", t.small, t.mut);
-    self.writebackStatus.maximumNumberOfLines = 3;
-    self.writebackStatus.lineBreakMode = NSLineBreakByWordWrapping;
-    [[self.writebackStatus.widthAnchor constraintEqualToConstant:560] setActive:YES];
-    [stack addArrangedSubview:self.writebackStatus];
 
-    [stack addArrangedSubview:RLPSGroup(RLPTr(@"软件更新"), nil, t)];
-    NSStackView *upRow = [[NSStackView alloc] init];
-    upRow.orientation = NSUserInterfaceLayoutOrientationHorizontal;
-    upRow.spacing = 8;
-    NSButton *check = [NSButton buttonWithTitle:RLPTr(@"检查更新") target:self action:@selector(onCheckUpdate:)];
-    check.bezelStyle = NSBezelStyleRounded;
-    [upRow addArrangedSubview:check];
-    self.betaSwitch = [self switchWithAction:@selector(onSwitch:) key:@"updbeta"];
-    [upRow addArrangedSubview:self.betaSwitch];
-    [upRow addArrangedSubview:RLPLabel(RLPTr(@"接收测试版"), t.small, t.mut)];
-    [stack addArrangedSubview:upRow];
 
-    [stack addArrangedSubview:RLPSGroup(RLPTr(@"流式解码"),
-        RLPTr(@"超大文件边下边解，避免先整份读入内存"), t)];
-    self.streamSwitch = [self switchWithAction:@selector(onSwitch:) key:@"streamdecode"];
-    [stack addArrangedSubview:RLPSRow(RLPTr(@"启用流式解码"), self.streamSwitch, nil, t)];
+    self.scanThreadsField = [self numberFieldForKey:@"sp_scanthreads" action:@selector(onScanThreads:)
+                                         placeholder:@"0 = 自动"];
+    [stack addArrangedSubview:RLPSRow(RLPTr(@"扫描线程数"), self.scanThreadsField,
+        RLPTr(@"0 = 自动（默认 min(CPU, 8)）"), t)];
+
+    self.rootsBox = [NSStackView stackViewWithViews:@[]];
+    self.rootsBox.orientation = NSUserInterfaceLayoutOrientationVertical;
+    self.rootsBox.alignment = NSLayoutAttributeLeading;
+    self.rootsBox.spacing = 2;
+    self.rootsBox.identifier = @"sp_roots";
+    [stack addArrangedSubview:self.rootsBox];
+
+    // ---- 播放：循环 / 随机 / 等响度 / 自动分析 ----
+    [stack addArrangedSubview:RLPSGroup(RLPTr(@"播放"), nil, t)];
+
+    self.repPopup = [self popupForKey:@"sp_rep" items:@[ RLPTr(@"列表循环"), RLPTr(@"单曲循环"), RLPTr(@"关闭循环") ]
+                                action:@selector(onRepeat:)];
+    [stack addArrangedSubview:RLPSRow(RLPTr(@"循环模式"), self.repPopup, nil, t)];
+
+    self.shufSwitch = [self switchForKey:@"sp_shuf" action:@selector(onShuffle:)];
+    [stack addArrangedSubview:RLPSRow(RLPTr(@"随机播放"), self.shufSwitch,
+        RLPTr(@"关掉会恢复原顺序"), t)];
+
+    self.loudSwitch = [self switchForKey:@"sp_loud" action:@selector(onSwitch:)];
+    [stack addArrangedSubview:RLPSRow(RLPTr(@"等响度补偿"), self.loudSwitch,
+        RLPTr(@"音量越低低频提升越多"), t)];
+
+    self.autoAnlSwitch = [self switchForKey:@"sp_autoanl" action:@selector(onSwitch:)];
+    [stack addArrangedSubview:RLPSRow(RLPTr(@"播放时自动分析（后台）"), self.autoAnlSwitch,
+        RLPTr(@"默认关闭；只分析本地文件，每曲只跑一次，切歌立即取消"), t)];
 }
 
 #pragma mark - 流媒体
 
+/// 流媒体页 —— 1:1 对齐 web data-g=stream（ui_script.h:10058 起）。
+/// 两个区块：流媒体服务器（增删改/启用/测试）+ 推送到设备（UPnP / DLNA 全套状态）。
 - (void)fillStream:(NSStackView *)stack t:(RLPTheme *)t {
     [stack addArrangedSubview:RLPSGroup(RLPTr(@"流媒体服务器"),
         RLPTr(@"可保存多台，同一时刻启用一台；只取原始文件，不转码"), t)];
-    // 2026-11-12：增删改/启用/测试补齐（对齐 web SRC 区块），不再只读。
+
+    // 服务器增删改/启用/测试（对齐 web SRC 区块，id 前缀 sp_src_*）
     self.serversView = [[RLPServersView alloc] initWithFrame:NSMakeRect(0, 0, 620, 240)];
     self.serversView.translatesAutoresizingMaskIntoConstraints = NO;
     [stack addArrangedSubview:self.serversView];
@@ -731,12 +1189,14 @@ static NSView *RLPSGroup(NSString *title, NSString *desc, RLPTheme *t) {
     ]];
     [self.serversView reload];
 
-    // 投放（AirPlay / UPnP）：与 web 版设置→流媒体页的推送区块同源
-    self.castView = [[RLPCastView alloc] initWithFrame:NSMakeRect(0, 0, 560, 200)];
+    // 投放面板：设备发现 / 推送 / 停止 / 升频选项 / 实时状态（与 web 同源 /api/cast/*）
+    [stack addArrangedSubview:RLPSGroup(RLPTr(@"推送到设备（UPnP / DLNA）"),
+        RLPTr(@"一键把当前曲目推送到局域网渲染器；之后的切歌 / 暂停 / 进度都作用在它上面"), t)];
+
+    self.castView = [[RLPCastView alloc] initWithFrame:NSMakeRect(0, 0, 620, 420)];
     self.castView.translatesAutoresizingMaskIntoConstraints = NO;
     [stack addArrangedSubview:self.castView];
     [NSLayoutConstraint activateConstraints:@[
-        [self.castView.heightAnchor constraintEqualToConstant:200],
         [self.castView.widthAnchor constraintEqualToAnchor:stack.widthAnchor constant:-4],
     ]];
     [self.castView reload];
@@ -744,24 +1204,170 @@ static NSView *RLPSGroup(NSString *title, NSString *desc, RLPTheme *t) {
 
 #pragma mark - 诊断
 
+/// 诊断页 —— 1:1 对齐 web data-g=diag（ui_script.h:10127 起）。
+/// 三块：诊断包导出 / 软件更新 / 反馈问题。
 - (void)fillDiag:(NSStackView *)stack t:(RLPTheme *)t {
-    [stack addArrangedSubview:RLPSGroup(RLPTr(@"诊断包"),
-        RLPTr(@"一个 zip 打包全部日志 / 系统信息 / 设置摘要（已脱敏）"), t)];
-    NSButton *zip = [NSButton buttonWithTitle:RLPTr(@"导出诊断包（.zip）") target:self
-                                       action:@selector(onExportDiagZip:)];
-    zip.bezelStyle = NSBezelStyleRounded;
-    [stack addArrangedSubview:zip];
-    [stack addArrangedSubview:RLPLabel(
-        RLPTr(@"包内：rlplayer-diag.json、rlplayer-playback.log、launcher.log、"
-              @"settings-summary.txt；api_key / token / password 一律脱敏。"), t.small, t.mut)];
+    // ---- 诊断包 ----
+    [stack addArrangedSubview:RLPSGroup(RLPTr(@"导出诊断包"),
+        RLPTr(@"一个 zip 打包全部日志 / 系统信息 / 设置摘要（已脱敏），不用再到处找日志文件"), t)];
 
-    [stack addArrangedSubview:RLPSGroup(RLPTr(@"反馈"), nil, t)];
-    NSButton *fb = [NSButton buttonWithTitle:RLPTr(@"打开反馈窗口") target:self
-                                      action:@selector(onOpenFeedback:)];
-    fb.bezelStyle = NSBezelStyleRounded;
-    [stack addArrangedSubview:fb];
+    self.diagZipBtn = [NSButton buttonWithTitle:RLPTr(@"导出诊断包（.zip）") target:self
+                                         action:@selector(onExportDiagZip:)];
+    self.diagZipBtn.bezelStyle = NSBezelStyleRounded;
+    self.diagZipBtn.identifier = @"sp_diagzip";
+
+    self.diagJsonBtn = [NSButton buttonWithTitle:RLPTr(@"只要 JSON") target:self
+                                          action:@selector(onExportDiagJson:)];
+    self.diagJsonBtn.bezelStyle = NSBezelStyleRounded;
+    self.diagJsonBtn.identifier = @"sp_diagjson";
+
+    self.diagSummaryBtn = [NSButton buttonWithTitle:RLPTr(@"查看 / 复制诊断摘要") target:self
+                                             action:@selector(onDiagSummary:)];
+    self.diagSummaryBtn.bezelStyle = NSBezelStyleRounded;
+    self.diagSummaryBtn.identifier = @"sp_diagsummary";
+
+    // web 有「随反馈上传诊断」（sp_diagupload）。原生反馈走 feedback_api 直连后台、
+    // 诊断包随反馈一起提交，所以这个按钮在这里点就是把包交给反馈窗口 —— 同一件事，不删。
+    self.diagUploadBtn = [NSButton buttonWithTitle:RLPTr(@"随反馈上传诊断") target:self
+                                            action:@selector(onDiagUpload:)];
+    self.diagUploadBtn.bezelStyle = NSBezelStyleRounded;
+    self.diagUploadBtn.identifier = @"sp_diagupload";
+
+    self.diagMsg = [self hintForKey:@"sp_diagmsg" width:400];
+
+    NSStackView *diagRow = [[NSStackView alloc] init];
+    diagRow.orientation = NSUserInterfaceLayoutOrientationHorizontal;
+    diagRow.spacing = 10;
+    for (NSView *v in @[ self.diagZipBtn, self.diagJsonBtn, self.diagSummaryBtn,
+                         self.diagUploadBtn, self.diagMsg ])
+        [diagRow addArrangedSubview:v];
+    [stack addArrangedSubview:diagRow];
+
+    self.diagSummaryText = [[NSTextView alloc] initWithFrame:NSMakeRect(0, 0, 620, 200)];
+    self.diagSummaryText.identifier = @"sp_diagsummarytext";
+    self.diagSummaryText.editable = NO;
+    self.diagSummaryText.font = [NSFont monospacedSystemFontOfSize:11 weight:NSFontWeightRegular];
+    self.diagSummaryText.translatesAutoresizingMaskIntoConstraints = NO;
+    NSScrollView *diagScroll = [[NSScrollView alloc] initWithFrame:NSMakeRect(0, 0, 620, 200)];
+    diagScroll.hasVerticalScroller = YES;
+    diagScroll.documentView = self.diagSummaryText;
+    diagScroll.translatesAutoresizingMaskIntoConstraints = NO;
+    [stack addArrangedSubview:diagScroll];
+    [NSLayoutConstraint activateConstraints:@[
+        [diagScroll.widthAnchor constraintEqualToConstant:620],
+        [diagScroll.heightAnchor constraintEqualToConstant:200],
+    ]];
+
+    // ---- 网络信息（web /api/net：本机地址 / 局域网是否开启 / 端口）----
+    // 原生是单进程、默认不开端口，所以这里如实显示"进程内直连（无本地端口）"，
+    // 不渲染一个连不上的 http://127.0.0.1:8899/（web 的注释也是这个口径）。
+    [stack addArrangedSubview:RLPSGroup(RLPTr(@"网络信息"),
+        RLPTr(@"web 版据此显示访问地址；原生单进程不走端口，仍需如实呈现"), t)];
+    self.netMsg = [self hintForKey:@"sp_netmsg" width:560];
+    self.netMsg.stringValue = RLPTr(@"读取中…");
+    [stack addArrangedSubview:self.netMsg];
+    [self loadNetInfo];
+
+    // ---- 软件更新 ----
+    [stack addArrangedSubview:RLPSGroup(RLPTr(@"软件更新"), RLPTr(@"检查新版本，一键更新"), t)];
+
+    self.updChannelPopup = [self popupForKey:@"sp_updchannel" items:@[ @"global", @"cn" ]
+                                      action:@selector(onUpdateChannel:)];
+    [stack addArrangedSubview:RLPSRow(RLPTr(@"更新通道"), self.updChannelPopup,
+        RLPTr(@"全球 = GitHub 通道；中国大陆 = 国内后台通道"), t)];
+
+    self.verCurLabel = [self hintForKey:@"sp_vercur" width:160];
+    self.verCurLabel.stringValue = [NSString stringWithFormat:@"v%s", RLPLAYER_VERSION];
+    self.updCheckBtn = [NSButton buttonWithTitle:RLPTr(@"检查更新") target:self
+                                          action:@selector(onCheckUpdate:)];
+    self.updCheckBtn.bezelStyle = NSBezelStyleRounded;
+    self.updCheckBtn.identifier = @"sp_updcheck";
+    self.updInstallBtn = [NSButton buttonWithTitle:RLPTr(@"立即更新") target:self
+                                           action:@selector(onCheckUpdate:)];
+    self.updInstallBtn.bezelStyle = NSBezelStyleRounded;
+    self.updInstallBtn.identifier = @"sp_updinstall";
+    self.updInstallBtn.hidden = YES;
+    self.betaSwitch = [self switchForKey:@"sp_updbeta" action:@selector(onSwitch:)];
+    self.updMsg = [self hintForKey:@"sp_updmsg" width:300];
+
+    NSStackView *updRow = [[NSStackView alloc] init];
+    updRow.orientation = NSUserInterfaceLayoutOrientationHorizontal;
+    updRow.spacing = 10;
+    for (NSView *v in @[ self.verCurLabel, self.updCheckBtn, self.updInstallBtn,
+                         self.betaSwitch, self.updMsg ])
+        [updRow addArrangedSubview:v];
+    [stack addArrangedSubview:updRow];
+
+    self.updBar = [[NSProgressIndicator alloc] initWithFrame:NSZeroRect];
+    self.updBar.identifier = @"sp_updbar";
+    self.updBar.style = NSProgressIndicatorStyleBar;
+    self.updBar.indeterminate = NO;
+    self.updBar.minValue = 0;
+    self.updBar.maxValue = 100;
+    self.updBar.hidden = YES;
+    self.updBar.translatesAutoresizingMaskIntoConstraints = NO;
+    [stack addArrangedSubview:self.updBar];
+    [NSLayoutConstraint activateConstraints:@[
+        [self.updBar.widthAnchor constraintEqualToConstant:620],
+    ]];
+
+    self.updFill = [self hintForKey:@"sp_updfill" width:620];
+
+    self.updNote = [self hintForKey:@"sp_updnote" width:620];
+    self.updNote.stringValue = RLPTr(@"更新会下载安装包并校验 sha256；校验不通过一律丢弃，绝不安装被篡改的内容。安装完成后会自动重启。");
+    [stack addArrangedSubview:self.updNote];
+
+    // ---- 反馈问题 ----
+    [stack addArrangedSubview:RLPSGroup(RLPTr(@"反馈问题"),
+        RLPTr(@"直接发送给开发者，可附诊断包"), t)];
+
+    self.fbText = [[NSTextView alloc] initWithFrame:NSMakeRect(0, 0, 620, 110)];
+    self.fbText.identifier = @"sp_fbtext";
+    self.fbText.font = [NSFont systemFontOfSize:12.5];
+    self.fbText.translatesAutoresizingMaskIntoConstraints = NO;
+    NSScrollView *fbScroll = [[NSScrollView alloc] initWithFrame:NSMakeRect(0, 0, 620, 110)];
+    fbScroll.hasVerticalScroller = YES;
+    fbScroll.documentView = self.fbText;
+    fbScroll.translatesAutoresizingMaskIntoConstraints = NO;
+    [stack addArrangedSubview:fbScroll];
+    [NSLayoutConstraint activateConstraints:@[
+        [fbScroll.widthAnchor constraintEqualToConstant:620],
+        [fbScroll.heightAnchor constraintEqualToConstant:110],
+    ]];
+
+    self.fbCount = [self hintForKey:@"sp_fbcount" width:300];
+    self.fbCount.stringValue = RLPTr(@"0 / 16384 字节");
+    [stack addArrangedSubview:self.fbCount];
+
+    self.fbChan = [self hintForKey:@"sp_fbchan" width:520];
+    self.fbChan.stringValue = RLPTr(@"正在检查反馈通道…");
+    [stack addArrangedSubview:self.fbChan];
+
+    self.fbDiagSwitch = [self switchForKey:@"sp_fbdiag" action:@selector(onFbDiagToggle:)];
+    self.fbDiagSwitch.state = NSControlStateValueOn;
+    self.fbSendBtn = [NSButton buttonWithTitle:RLPTr(@"发送反馈") target:self
+                                        action:@selector(onOpenFeedback:)];
+    self.fbSendBtn.bezelStyle = NSBezelStyleRounded;
+    self.fbSendBtn.identifier = @"sp_fbsend";
+    self.fbRetryBtn = [NSButton buttonWithTitle:RLPTr(@"重试探活") target:self
+                                         action:@selector(onFeedbackRetry:)];
+    self.fbRetryBtn.bezelStyle = NSBezelStyleRounded;
+    self.fbRetryBtn.identifier = @"sp_fbretry";
+    self.fbRetryBtn.hidden = YES;
+    self.fbMsg = [self hintForKey:@"sp_fbmsg" width:300];
+
+    NSStackView *fbRow = [[NSStackView alloc] init];
+    fbRow.orientation = NSUserInterfaceLayoutOrientationHorizontal;
+    fbRow.spacing = 10;
+    [fbRow addArrangedSubview:self.fbDiagSwitch];
+    [fbRow addArrangedSubview:RLPLabel(RLPTr(@"附带诊断包"), t.small, t.mut)];
+    for (NSView *v in @[ self.fbSendBtn, self.fbRetryBtn, self.fbMsg ])
+        [fbRow addArrangedSubview:v];
+    [stack addArrangedSubview:fbRow];
+
     [stack addArrangedSubview:RLPLabel(
-        RLPTr(@"反馈会连同版本与系统信息提交到后台；附诊断包时内容已脱敏。"), t.small, t.mut)];
+        RLPTr(@"提交前会先探活；通道不可用时按钮保持禁用，绝不假装发送成功。"
+              @"诊断包已脱敏，不会上传你的音乐文件。"), t.small, t.mut)];
 }
 
 #pragma mark - 元数据
@@ -769,14 +1375,14 @@ static NSView *RLPSGroup(NSString *title, NSString *desc, RLPTheme *t) {
 - (void)fillMeta:(NSStackView *)stack t:(RLPTheme *)t {
     [stack addArrangedSubview:RLPSGroup(RLPTr(@"元数据补全"),
         RLPTr(@"播放时后台补全标签 / 封面 / 歌词，结果落在本地库"), t)];
-    self.metaOnSwitch = [self switchWithAction:@selector(onSwitch:) key:@"metaon"];
+    self.metaOnSwitch = [self switchWithAction:@selector(onSwitch:) key:@"sp_metaon"];
     [stack addArrangedSubview:RLPSRow(RLPTr(@"自动补全"), self.metaOnSwitch,
         RLPTr(@"只用公开数据源，不调用 AI，不产生费用"), t)];
-    self.metaLlmSwitch = [self switchWithAction:@selector(onSwitch:) key:@"metallm"];
+    self.metaLlmSwitch = [self switchWithAction:@selector(onSwitch:) key:@"sp_metallm"];
     [stack addArrangedSubview:RLPSRow(RLPTr(@"允许 AI 辅助"), self.metaLlmSwitch, nil, t)];
-    self.metaSummarySwitch = [self switchWithAction:@selector(onSwitch:) key:@"metasummary"];
+    self.metaSummarySwitch = [self switchWithAction:@selector(onSwitch:) key:@"sp_metasummary"];
     [stack addArrangedSubview:RLPSRow(RLPTr(@"AI 综合简介"), self.metaSummarySwitch, nil, t)];
-    self.metaAiFillSwitch = [self switchWithAction:@selector(onSwitch:) key:@"metaaifill"];
+    self.metaAiFillSwitch = [self switchWithAction:@selector(onSwitch:) key:@"sp_metaaifill"];
     [stack addArrangedSubview:RLPSRow(RLPTr(@"AI 补封面歌词"), self.metaAiFillSwitch, nil, t)];
 
     // 数据源开关 + 优先级（对齐 web sp_metasrc：按注册表动态渲染，新增源前端零改动）。
@@ -923,6 +1529,38 @@ static NSView *RLPSGroup(NSString *title, NSString *desc, RLPTheme *t) {
     self.searchStatus.identifier = @"search.status";
     [[self.searchStatus.widthAnchor constraintEqualToConstant:560] setActive:YES];
     [stack addArrangedSubview:self.searchStatus];
+
+    // ---- 标签写回（web sp_wbdesc / sp_wbdry / sp_wbapply / sp_wbmsg）----
+    // web 把这块放在「元数据」页。原生原来挂在「高级」页，按 web 的位置搬回来 ——
+    // 位置本身就是 web 的信息架构，不该自创。
+    [stack addArrangedSubview:RLPSGroup(RLPTr(@"标签写回"),
+        RLPTr(@"默认开启：补全到的标签 / 封面写回音频文件本身；写前校验音频数据逐位不变"), t)];
+
+    self.wbDesc = [self hintForKey:@"sp_wbdesc" width:560];
+    self.wbDesc.stringValue = RLPTr(@"补全到的标签 / 封面写回音频文件本身；写前校验音频数据逐位不变，原文件备份到备份目录");
+    [stack addArrangedSubview:self.wbDesc];
+
+    self.wbDryBtn = [NSButton buttonWithTitle:RLPTr(@"预览写回") target:self
+                                       action:@selector(onWritebackDry:)];
+    self.wbDryBtn.bezelStyle = NSBezelStyleRounded;
+    self.wbDryBtn.identifier = @"sp_wbdry";
+    self.wbApplyBtn = [NSButton buttonWithTitle:RLPTr(@"执行写回") target:self
+                                         action:@selector(onWritebackApply:)];
+    self.wbApplyBtn.bezelStyle = NSBezelStyleRounded;
+    self.wbApplyBtn.identifier = @"sp_wbapply";
+    self.writebackStatus = RLPLabel(@"", t.small, t.mut);
+    self.writebackStatus.identifier = @"sp_wbmsg";
+    self.writebackStatus.maximumNumberOfLines = 3;
+    self.writebackStatus.lineBreakMode = NSLineBreakByWordWrapping;
+    [[self.writebackStatus.widthAnchor constraintEqualToConstant:520] setActive:YES];
+
+    NSStackView *wbRow = [[NSStackView alloc] init];
+    wbRow.orientation = NSUserInterfaceLayoutOrientationHorizontal;
+    wbRow.spacing = 8;
+    [wbRow addArrangedSubview:self.wbDryBtn];
+    [wbRow addArrangedSubview:self.wbApplyBtn];
+    [wbRow addArrangedSubview:self.writebackStatus];
+    [stack addArrangedSubview:wbRow];
 }
 
 #pragma mark - 均衡 / 输入（已迁移的子界面）
@@ -949,6 +1587,9 @@ static NSView *RLPSGroup(NSString *title, NSString *desc, RLPTheme *t) {
     [self.calView reload];
 }
 
+/// 旧版输入页（只嵌 RLPInputView，缺 web 的 sp_inbackend/sp_inbuf 等控件）。
+/// 2026-11-12 起页签走 fillInput（含全部 web 控件 + 同一个 RLPInputView）。保留本方法
+/// 是为了不做无谓删除，但**不要**再把它接回页签。
 - (void)fillInputReal:(NSStackView *)stack t:(RLPTheme *)t {
     self.inputView = [[RLPInputView alloc] initWithFrame:NSMakeRect(0, 0, 620, 460)];
     self.inputView.translatesAutoresizingMaskIntoConstraints = NO;
@@ -980,10 +1621,6 @@ static NSView *RLPSGroup(NSString *title, NSString *desc, RLPTheme *t) {
 - (void)onDevice:(id)sender {
     NSString *name = self.devicePopup.titleOfSelectedItem;
     if (name.length) [self postKey:@"device" value:name];
-}
-
-- (void)onVolume:(id)sender {
-    [self postKey:@"volume" value:[NSString stringWithFormat:@"%.1f", self.volumeSlider.doubleValue]];
 }
 
 - (void)onBits:(id)sender {
@@ -1019,6 +1656,10 @@ static NSView *RLPSGroup(NSString *title, NSString *desc, RLPTheme *t) {
     } else if ([action isEqualToString:@"scan0"]) {
         RLPPostJSON(@"/api/lib/scan?full=0", nil);
         RLPToast(RLPTr(@"已开始增量扫描"));
+    } else if ([action isEqualToString:@"sp_rescan"]) {
+        // web 的「重新扫描全部」走 /api/rescan（不是 lib/scan?full=1，虽然等价）。
+        RLPPostJSON(@"/api/rescan", nil);
+        RLPToast(RLPTr(@"已开始全量重扫"));
     } else {
         RLPPostJSON(@"/api/lib/prune", nil);
         RLPToast(RLPTr(@"已清理缺失曲目"));
@@ -1524,10 +2165,32 @@ static NSInteger RLPSearchIndexForProviderId(NSString *pid) {
     [[RLPUpdateWindowController shared] checkManually:YES];
 }
 
-- (void)onExportDiagZip:(id)sender {
+- (void)onExportDiagZip:(id)sender { [self exportDiagAsZip:YES]; }
+
+/// zip = YES 走 /api/diagzip（压缩包），NO 走 /api/diag（单个 JSON）。
+- (void)exportDiagAsZip:(BOOL)zip {
     // /api/diagzip 回的是 ZIP 原始字节（不是 JSON）⟹ 必须走 getData。
     // 不假装成功：取字节失败、用户取消、写盘失败三种情况分别如实说明。
     __weak __typeof__(self) weakSelf = self;
+    if (!zip) {
+        __weak __typeof__(self) weakSelf2 = self;
+        [[RLPCoreClient shared] getJSON:@"/api/diag" completion:^(NSDictionary * _Nullable json) {
+            __typeof__(self) self2 = weakSelf2;
+            if (!self2) return;
+            if (!json) { RLPToast(RLPTr(@"诊断 JSON 导出失败")); return; }
+            NSData *d = [NSJSONSerialization dataWithJSONObject:json
+                options:NSJSONWritingPrettyPrinted error:nil];
+            NSSavePanel *panel = [NSSavePanel savePanel];
+            panel.nameFieldStringValue = @"rlplayer-diag.json";
+            if ([panel runModal] != NSModalResponseOK || !panel.URL) return;
+            if (![d writeToURL:panel.URL options:NSDataWritingAtomic error:nil]) {
+                RLPToast(RLPTr(@"写入失败"));
+                return;
+            }
+            RLPToast([NSString stringWithFormat:RLPTr(@"已导出 %@"), panel.URL.lastPathComponent]);
+        }];
+        return;
+    }
     [[RLPCoreClient shared] getData:@"/api/diagzip" completion:^(NSData * _Nullable data) {
         __typeof__(self) self_ = weakSelf;
         if (!self_) return;
@@ -1625,9 +2288,6 @@ static NSInteger RLPSearchIndexForProviderId(NSString *pid) {
             [self_.gpuPopup selectItemAtIndex:RLPGpuIndexForVendor(kv[@"gpuvendor"])];
         [self_ applyKV:kv toPopup:self_.inDevicePopup key:@"indev"];
 
-        id vol = kv[@"volume"];
-        if ([vol respondsToSelector:@selector(doubleValue)])
-            self_.volumeSlider.doubleValue = MAX(-60.0, MIN(0.0, [vol doubleValue]));
         id dsd = kv[@"dsd"];
         if ([dsd respondsToSelector:@selector(integerValue)]) {
             NSInteger n = [dsd integerValue];
@@ -1645,6 +2305,253 @@ static NSInteger RLPSearchIndexForProviderId(NSString *pid) {
     [self.libStatsView reload];
     [self loadLlmConfig];
 }
+
+#pragma mark - 输出页动作
+
+/// bit-perfect 直通：web 的判据是「输出采样率 = 源 / 抖动 = none / 音量 0 dB / 无 EQ·IR / 独占」。
+/// 这里一次提交这组键（后端合并写，其它键不受影响）。
+- (void)onBitPerfectFix:(id)sender {
+    [self postKeys:@{
+        @"rate": @"follow", @"shaper": @"none", @"volume": @"0",
+        @"eq": @"", @"ir": @"", @"irgpu": @"0", @"hogexcl": @"1", @"bits": @"-1",
+    }];
+    [self showStatus:RLPTr(@"已切到 bit-perfect 直通")];
+}
+
+- (void)onOutMode:(NSPopUpButton *)s { [self postKey:@"outmode" value:s.titleOfSelectedItem ?: @"pcm"]; }
+
+- (void)onChannels:(NSPopUpButton *)s {
+    NSArray<NSString *> *vals = @[ @"0", @"2", @"6", @"8" ];
+    const NSInteger i = s.indexOfSelectedItem;
+    [self postKey:@"channels" value:(i >= 0 && i < (NSInteger)vals.count) ? vals[i] : @"0"];
+    [self rebuildTrimFields:[vals[(i >= 0 && i < (NSInteger)vals.count) ? i : 0] integerValue]];
+}
+
+- (void)onBuffer:(NSTextField *)s { [self postKey:@"buffer" value:s.stringValue]; }
+- (void)onRamp:(NSTextField *)s { [self postKey:@"ramp" value:s.stringValue]; }
+- (void)onTrim:(NSTextField *)s {
+    // 一次提交整串 trim（后端只认逗号分隔的 8 个值）；未填的位按 0。
+    NSMutableArray<NSString *> *vals = [NSMutableArray array];
+    for (NSInteger i = 0; i < 8; ++i) {
+        NSTextField *f = self.trimFields[[NSString stringWithFormat:@"sp_trim%ld", (long)i]];
+        [vals addObject:f.stringValue.length ? f.stringValue : @"0"];
+    }
+    [self postKey:@"trim" value:[vals componentsJoinedByString:@","]];
+}
+- (void)onUpnpDevice:(NSPopUpButton *)s { [self postKey:@"upnpdev" value:s.titleOfSelectedItem ?: @""]; }
+- (void)onUpnpScan:(id)sender { [self.castView reload]; }
+
+/// /api/naa/discover：NAA 端点自动发现（web 261024-01 #11）。
+/// macOS 没有 NAA 驱动体系，后端对 backend=naa 会返回 UnavailableSink；
+/// 但发现端点本身可用，web 页面上也确实有这个按钮 —— 所以原生要能调用它并如实显示结果。
+- (void)loadNaaEndpoints {
+    if (![RLPCoreClient shared].started) return;
+    __weak __typeof__(self) weakSelf = self;
+    [[RLPCoreClient shared] getJSON:@"/api/naa/discover" completion:^(NSDictionary * _Nullable json) {
+        __typeof__(self) self_ = weakSelf;
+        if (!self_) return;
+        NSArray *eps = [json[@"endpoints"] isKindOfClass:[NSArray class]] ? json[@"endpoints"] : @[];
+        NSString *note = [json[@"note"] isKindOfClass:[NSString class]] ? json[@"note"] : nil;
+        // 如实显示：发现到几个端点、后端给出的原因。没有就明说没有，不假装。
+        if (self_.upnpMsg) {
+            self_.upnpMsg.stringValue = eps.count
+                ? [NSString stringWithFormat:RLPTr(@"发现 %lu 个 NAA 端点"), (unsigned long)eps.count]
+                : (note.length ? note : RLPTr(@"未发现 NAA 端点（macOS 无 NAA 驱动体系）"));
+        }
+    }];
+}
+
+#pragma mark - PCM 页动作
+
+- (void)onPhase:(NSPopUpButton *)s {
+    const NSInteger i = s.indexOfSelectedItem;
+    NSArray<NSString *> *vals = @[ @"", @"linear", @"minimum", @"intermediate" ];
+    [self postKey:@"phase" value:(i > 0 && i < (NSInteger)vals.count) ? vals[i] : @""];
+}
+- (void)onTaps:(NSTextField *)s { [self postKey:@"taps" value:s.stringValue]; }
+- (void)onTransition:(NSTextField *)s { [self postKey:@"transition" value:s.stringValue]; }
+- (void)onShaper:(NSPopUpButton *)s { [self postKey:@"shaper" value:s.titleOfSelectedItem ?: @""]; }
+
+#pragma mark - SDM 页动作
+
+- (void)onSdmO1:(NSPopUpButton *)s { [self postKey:@"sdmfilt" value:s.indexOfSelectedItem == 0 ? @"" : (s.titleOfSelectedItem ?: @"")]; }
+- (void)onSdmONx:(NSPopUpButton *)s { [self postKey:@"sdmfiltnx" value:s.indexOfSelectedItem == 0 ? @"" : (s.titleOfSelectedItem ?: @"")]; }
+- (void)onDsdPack:(NSPopUpButton *)s { [self postKey:@"dsdpk" value:s.titleOfSelectedItem ?: @"dop"]; }
+- (void)onDsdKind:(NSPopUpButton *)s { [self postKey:@"dsdkind" value:s.titleOfSelectedItem ?: @"fir"]; }
+- (void)onDsdConv:(NSPopUpButton *)s { [self postKey:@"dsdconv" value:s.titleOfSelectedItem ?: @"narrow"]; }
+- (void)onModCut:(NSTextField *)s { [self postKey:@"modcut" value:s.stringValue]; }
+- (void)onModDith:(NSTextField *)s { [self postKey:@"moddith" value:s.stringValue]; }
+
+#pragma mark - 输入页动作
+
+- (void)onInBuf:(NSTextField *)s { [self postKey:@"inbuf" value:s.stringValue]; }
+- (void)onInOffset:(NSPopUpButton *)s { [self postKey:@"inoffset" value:s.titleOfSelectedItem ?: @"0"]; }
+- (void)onInSeconds:(NSTextField *)s { [self postKey:@"inseconds" value:s.stringValue]; }
+- (void)onInOut:(NSTextField *)s { [self postKey:@"inoffset" value:s.stringValue]; }
+
+/// 开始采集：**只由用户点按钮触发**（铁律 1：绝不自动打开输入设备）。
+- (void)onInputStart:(id)sender {
+    if (![RLPCoreClient shared].started) { RLPToast(RLPTr(@"核心未启动")); return; }
+    __weak __typeof__(self) weakSelf = self;
+    [[RLPCoreClient shared] postJSON:@"/api/input/start" body:@""
+                          completion:^(NSDictionary * _Nullable json) {
+        __typeof__(self) self_ = weakSelf;
+        if (!self_) return;
+        const BOOL ok = json && [json[@"ok"] boolValue];
+        self_.inStartBtn.enabled = !ok;
+        self_.inStopBtn.enabled = ok;
+        self_.inMsg.stringValue = ok ? RLPTr(@"采集中…")
+            : (([json[@"error"] isKindOfClass:[NSString class]] ? json[@"error"] : nil)
+               ?: RLPTr(@"开始采集失败"));
+    }];
+}
+
+- (void)onInputStop:(id)sender {
+    if (![RLPCoreClient shared].started) return;
+    __weak __typeof__(self) weakSelf = self;
+    [[RLPCoreClient shared] postJSON:@"/api/input/stop" body:nil
+                          completion:^(NSDictionary * _Nullable json) {
+        __typeof__(self) self_ = weakSelf;
+        if (!self_) return;
+        const BOOL ok = json && [json[@"ok"] boolValue];
+        self_.inStartBtn.enabled = YES;
+        self_.inStopBtn.enabled = NO;
+        self_.inMsg.stringValue = ok ? RLPTr(@"已停止")
+            : (([json[@"error"] isKindOfClass:[NSString class]] ? json[@"error"] : nil) ?: RLPTr(@"停止失败"));
+    }];
+}
+
+#pragma mark - 通用页动作
+
+- (void)onUiStyle:(NSPopUpButton *)s {
+    NSString *v = s.indexOfSelectedItem == 1 ? @"classic" : @"apple";
+    [self postKey:@"uistyle" value:v];
+}
+- (void)onScanThreads:(NSTextField *)s { [self postKey:@"scanthreads" value:s.stringValue]; }
+- (void)onRepeat:(NSPopUpButton *)s {
+    // web 的设置页循环模式走 /api/repeat?mode=N（底栏才用 /api/playmode）。
+    // 两者后端同源，但这里用 web 的那条，避免两端写法分叉。
+    NSArray<NSString *> *vals = @[ @"1", @"2", @"0" ];
+    const NSInteger i = s.indexOfSelectedItem;
+    NSString *url = [NSString stringWithFormat:@"/api/repeat?mode=%@",
+                     (i >= 0 && i < 3) ? vals[i] : @"1"];
+    [RLPCoreClient.shared postJSON:url body:nil completion:nil];
+}
+- (void)onShuffle:(NSSwitch *)s {
+    // web 用 /api/shuffle?on=1|0（不是 /api/playmode 的派生写法）—— 同一条后端路径，
+    // 不另造一种写法，否则两端行为会悄悄分叉。
+    NSString *url = [NSString stringWithFormat:@"/api/shuffle?on=%@",
+                     s.state == NSControlStateValueOn ? @"1" : @"0"];
+    [RLPCoreClient.shared postJSON:url body:nil completion:nil];
+}
+
+- (void)onAddRoot:(id)sender {
+    NSString *p = self.rootField.stringValue;
+    if (!p.length) { RLPToast(RLPTr(@"请先填目录或点「浏览…」")); return; }
+    __weak __typeof__(self) weakSelf = self;
+    [[RLPCoreClient shared] postJSON:@"/api/lib/roots"
+                                body:[NSString stringWithFormat:@"add=%@", RLPEnc(p)]
+                          completion:^(NSDictionary * _Nullable json) {
+        __typeof__(self) self_ = weakSelf;
+        if (!self_) return;
+        if (json && [json[@"ok"] boolValue]) {
+            self_.rootField.stringValue = @"";
+            [self_ reloadRoots];
+            RLPToast(RLPTr(@"目录已加入"));
+        } else {
+            RLPToast(([json[@"error"] isKindOfClass:[NSString class]] ? json[@"error"] : nil)
+                     ?: RLPTr(@"添加目录失败"));
+        }
+    }];
+}
+
+- (void)onBrowseRoot:(id)sender {
+    NSOpenPanel *panel = [NSOpenPanel openPanel];
+    panel.canChooseDirectories = YES;
+    panel.canChooseFiles = NO;
+    panel.allowsMultipleSelection = NO;
+    panel.prompt = RLPTr(@"选择");
+    __weak __typeof__(self) weakSelf = self;
+    [panel beginWithCompletionHandler:^(NSModalResponse resp) {
+        __typeof__(self) self_ = weakSelf;
+        if (!self_ || resp != NSModalResponseOK) return;
+        self_.rootField.stringValue = panel.URL.path ?: @"";
+    }];
+}
+
+- (void)reloadRoots {
+    __weak __typeof__(self) weakSelf = self;
+    [[RLPCoreClient shared] getJSON:@"/api/lib/roots" completion:^(NSDictionary * _Nullable json) {
+        __typeof__(self) self_ = weakSelf;
+        if (!self_) return;
+        NSArray *roots = [json[@"roots"] isKindOfClass:[NSArray class]] ? json[@"roots"] : @[];
+        for (NSView *v in [self_.rootsBox.arrangedSubviews copy]) {
+            [self_.rootsBox removeArrangedSubview:v];
+            [v removeFromSuperview];
+        }
+        RLPTheme *t = [RLPTheme current];
+        for (id r in roots) {
+            NSString *s = [r isKindOfClass:[NSString class]] ? r : [r description];
+            [self_.rootsBox addArrangedSubview:RLPLabel(s, t.small, t.mut)];
+        }
+        if (!roots.count)
+            [self_.rootsBox addArrangedSubview:RLPLabel(RLPTr(@"（还没有音乐目录）"), t.small, t.mut)];
+    }];
+}
+
+#pragma mark - 诊断页动作
+
+- (void)onExportDiagJson:(id)sender { [self exportDiagAsZip:NO]; }
+- (void)onDiagSummary:(id)sender {
+    // 「查看 / 复制诊断摘要」= 把摘要渲染进 sp_diagsummarytext 并复制到剪贴板（web 同语义）。
+    __weak __typeof__(self) weakSelf = self;
+    [[RLPCoreClient shared] getJSON:@"/api/diag" completion:^(NSDictionary * _Nullable json) {
+        __typeof__(self) self_ = weakSelf;
+        if (!self_) return;
+        NSString *text = json ? [[NSString alloc] initWithData:
+            [NSJSONSerialization dataWithJSONObject:json options:NSJSONWritingPrettyPrinted error:nil]
+            encoding:NSUTF8StringEncoding] : RLPTr(@"诊断摘要读取失败");
+        self_.diagSummaryText.string = text ?: @"";
+        [[NSPasteboard generalPasteboard] clearContents];
+        [[NSPasteboard generalPasteboard] setString:text ?: @"" forType:NSPasteboardTypeString];
+        self_.diagMsg.stringValue = RLPTr(@"摘要已复制");
+    }];
+}
+
+- (void)onDiagUpload:(id)sender {
+    // 「随反馈上传诊断」：原生反馈窗口本来就带诊断包，这里打开它（同一件事，不造第二条上传通道）。
+    [self onOpenFeedback:nil];
+}
+
+/// /api/net：本机地址与端口真实状态。单进程形态下 http=false，据此如实显示，
+/// 不编一个能点的地址（那是误导，比空白更糟）。
+- (void)loadNetInfo {
+    if (![RLPCoreClient shared].started) { self.netMsg.stringValue = RLPTr(@"核心未启动"); return; }
+    __weak __typeof__(self) weakSelf = self;
+    [[RLPCoreClient shared] getJSON:@"/api/net" completion:^(NSDictionary * _Nullable json) {
+        __typeof__(self) self_ = weakSelf;
+        if (!self_) return;
+        if (![json isKindOfClass:[NSDictionary class]]) {
+            self_.netMsg.stringValue = RLPTr(@"网络信息读取失败，稍后重试");
+            return;
+        }
+        const BOOL httpOn = [json[@"http"] respondsToSelector:@selector(boolValue)] && [json[@"http"] boolValue];
+        NSInteger port = [json[@"port"] respondsToSelector:@selector(integerValue)] ? [json[@"port"] integerValue] : 0;
+        NSString *ip = [json[@"ip"] isKindOfClass:[NSString class]] ? json[@"ip"] : @"";
+        NSString *lan = [json[@"lan"] respondsToSelector:@selector(boolValue)] && [json[@"lan"] boolValue]
+            ? RLPTr(@"已开启") : RLPTr(@"未开启");
+        self_.netMsg.stringValue = httpOn
+            ? [NSString stringWithFormat:RLPTr(@"本机：http://127.0.0.1:%ld/ · 局域网：http://%@:%ld/（%@）"),
+               (long)port, ip, (long)port, lan]
+            : [NSString stringWithFormat:RLPTr(@"进程内直连（无本地端口）· 局域网访问：%@"), lan];
+    }];
+}
+
+- (void)onUpdateChannel:(NSPopUpButton *)s {
+    [self postKey:@"channel" value:s.indexOfSelectedItem == 1 ? @"cn" : @"global"];
+}
+- (void)onFbDiagToggle:(NSSwitch *)s { (void)s; }
+- (void)onFeedbackRetry:(id)sender { [self probeFeedbackChannel]; }
 
 #pragma mark - 主题
 
