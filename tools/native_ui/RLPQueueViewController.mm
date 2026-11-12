@@ -118,7 +118,10 @@ static NSString *const kQueueDragType = @"RLPQueueRowDrag";
     sc.translatesAutoresizingMaskIntoConstraints = NO;
     [host addSubview:sc];
 
-    self.empty = RLPLabel(RLPTr(@"队列是空的"), t.body, t.mut);
+    // web：'队列是空的' + 小字'把文件拖进窗口，或右键专辑/曲目「加入队列」'（两行，居中）。
+    self.empty = RLPLabel(RLPTr(@"队列是空的\n把文件拖进窗口，或右键专辑/曲目「加入队列」"), t.body, t.mut);
+    self.empty.maximumNumberOfLines = 2;
+    self.empty.alignment = NSTextAlignmentCenter;
     self.empty.translatesAutoresizingMaskIntoConstraints = NO;
     self.empty.hidden = YES;
     [host addSubview:self.empty];

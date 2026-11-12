@@ -646,6 +646,38 @@ int RLPRunFunctionalAudit(NSString *outDir) {
         NSString *fShot = [outDir stringByAppendingPathComponent:@"09-favorites.png"];
         CK(Snap(wc.window.contentView, fShot, CGSizeMake(1180, 760)), "收藏页截图已落盘", outDir);
         CK(ShotRowsAreaIsUniform(fShot), "空收藏页没有交替行灰条", @"右侧空白列亮度沿 y 跳变");
+        // web 空态：'还没有收藏' + '在曲目行或单曲页点心形，就会出现在这里'
+        {
+            NSMutableArray<NSView *> *fv = [NSMutableArray array];
+            CollectAllViews(wc.currentContent.view, fv);
+            NSTextField *fe = nil;
+            for (NSView *v in fv) if ([v.identifier isEqualToString:@"fav.empty"]) fe = (NSTextField *)v;
+            CK(fe != nil && !fe.hidden && [fe.stringValue containsString:@"还没有收藏"],
+               "空收藏页有指导性空态（web：还没有收藏 + 怎么做）", fe ? fe.stringValue : @"缺 fav.empty");
+        }
+        [wc.sidebar selectKey:@"recent"];
+        Pump(0.6);
+        {
+            NSMutableArray<NSView *> *rv2 = [NSMutableArray array];
+            CollectAllViews(wc.currentContent.view, rv2);
+            NSTextField *re = nil;
+            for (NSView *v in rv2) if ([v.identifier isEqualToString:@"recent.empty"]) re = (NSTextField *)v;
+            CK(re != nil && !re.hidden, "空『最近播放』页有空态（web：还没有播放记录）",
+               re ? re.stringValue : @"缺 recent.empty");
+        }
+        // 队列空态必须带"下一步怎么做"（web 的第二行小字），不能只有一句"队列是空的"
+        [wc.sidebar selectKey:@"queue"];
+        Pump(0.6);
+        {
+            NSMutableArray<NSView *> *qv = [NSMutableArray array];
+            CollectAllViews(wc.currentContent.view, qv);
+            NSTextField *qe = nil;
+            for (NSView *v in qv)
+                if ([v isKindOfClass:[NSTextField class]] &&
+                    [((NSTextField *)v).stringValue containsString:@"队列是空的"]) { qe = (NSTextField *)v; break; }
+            CK(qe != nil && [qe.stringValue containsString:@"加入队列"],
+               "空队列空态含下一步提示（web 第二行）", qe ? qe.stringValue : @"缺空态");
+        }
     }
 
     // ---- ④ 设置页：web 的 10 个页签逐页切换并截图 ----

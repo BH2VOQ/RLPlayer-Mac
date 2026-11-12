@@ -9,6 +9,7 @@
 #import "RLPTheme.h"
 
 @interface RLPRecentViewController () <NSTableViewDataSource, NSTableViewDelegate>
+@property (nonatomic, strong) NSTextField *emptyLabel;   // web：还没有播放记录
 @property (nonatomic, strong) NSTableView *tableView;
 @property (nonatomic, strong) NSMutableArray<RLPTrack *> *tracks;
 @end
@@ -58,6 +59,17 @@
     }
     
     scroll.documentView = _tableView;
+
+    _emptyLabel = RLPLabel(RLPTr(@"还没有播放记录"), [NSFont systemFontOfSize:13], [RLPTheme current].mut);
+    _emptyLabel.identifier = @"recent.empty";
+    _emptyLabel.alignment = NSTextAlignmentCenter;
+    _emptyLabel.translatesAutoresizingMaskIntoConstraints = NO;
+    _emptyLabel.hidden = YES;
+    [self.contentView addSubview:_emptyLabel];
+    [NSLayoutConstraint activateConstraints:@[
+        [_emptyLabel.centerXAnchor constraintEqualToAnchor:self.contentView.centerXAnchor],
+        [_emptyLabel.centerYAnchor constraintEqualToAnchor:self.contentView.centerYAnchor],
+    ]];
     
     [NSLayoutConstraint activateConstraints:@[
         [scroll.leadingAnchor constraintEqualToAnchor:self.contentView.leadingAnchor],
@@ -95,6 +107,7 @@
         [self_.tracks addObjectsFromArray:tracks];
         [self_.tableView reloadData];
         [self_ setSubtitle:[NSString stringWithFormat:RLPTr(@"%ld 首"), (long)tracks.count]];
+        self_.emptyLabel.hidden = self_.tracks.count > 0;
     }];
 }
 

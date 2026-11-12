@@ -13,6 +13,8 @@ static const NSUserInterfaceItemIdentifier kFavTableID = @"RLPFavTable";
 @interface RLPFavoritesViewController () <NSTableViewDataSource, NSTableViewDelegate>
 @property (nonatomic, strong) NSTableView *tableView;
 @property (nonatomic, strong) NSMutableArray<RLPTrack *> *tracks;
+@property (nonatomic, strong) NSTextField *hintLabel;    // web .favhint：双击顺序播放整个最爱列表
+@property (nonatomic, strong) NSTextField *emptyLabel;   // web 空态：还没有收藏 + 怎么做
 @end
 
 @implementation RLPFavoritesViewController
@@ -71,6 +73,31 @@ static const NSUserInterfaceItemIdentifier kFavTableID = @"RLPFavTable";
     [menu addItemWithTitle:RLPTr(@"加入队列") action:@selector(onEnqueue:) keyEquivalent:@""];
     [menu addItemWithTitle:RLPTr(@"取消收藏") action:@selector(onUnfav:) keyEquivalent:@""];
     _tableView.menu = menu;
+
+    // web .favhint：列表顶部一句"双击 = 从这个开始顺序播放整个最爱列表（N 首）"。
+    // 用**约束**而不是 frame：本页 contentView 由外层 pageHost 给尺寸，
+    // frame 布局时算出来的 y 会落到页面下沿（实测空态文字被压到播放条上）。
+    _hintLabel = RLPLabel(@"", [NSFont systemFontOfSize:12], [RLPTheme current].text2);
+    _hintLabel.identifier = @"fav.hint";
+    _hintLabel.translatesAutoresizingMaskIntoConstraints = NO;
+    [self.contentView addSubview:_hintLabel];
+    // web 空态：还没有收藏 / 在曲目行或单曲页点心形，就会出现在这里
+    _emptyLabel = RLPLabel(RLPTr(@"还没有收藏\n在曲目行或单曲页点心形，就会出现在这里"),
+                           [NSFont systemFontOfSize:13], [RLPTheme current].mut);
+    _emptyLabel.identifier = @"fav.empty";
+    _emptyLabel.alignment = NSTextAlignmentCenter;
+    _emptyLabel.maximumNumberOfLines = 2;
+    _emptyLabel.hidden = YES;
+    _emptyLabel.translatesAutoresizingMaskIntoConstraints = NO;
+    [self.contentView addSubview:_emptyLabel];
+    [NSLayoutConstraint activateConstraints:@[
+        [_hintLabel.leadingAnchor constraintEqualToAnchor:self.contentView.leadingAnchor constant:16],
+        [_hintLabel.trailingAnchor constraintLessThanOrEqualToAnchor:self.contentView.trailingAnchor constant:-16],
+        [_hintLabel.topAnchor constraintEqualToAnchor:self.contentView.topAnchor constant:4],
+        [_emptyLabel.centerXAnchor constraintEqualToAnchor:self.contentView.centerXAnchor],
+        [_emptyLabel.centerYAnchor constraintEqualToAnchor:self.contentView.centerYAnchor],
+        [_emptyLabel.widthAnchor constraintLessThanOrEqualToAnchor:self.contentView.widthAnchor constant:-40],
+    ]];
 }
 
 - (void)reloadData {
@@ -98,6 +125,9 @@ static const NSUserInterfaceItemIdentifier kFavTableID = @"RLPFavTable";
         self_.tracks = tracks;
         [self_ setSubtitle:[NSString stringWithFormat:RLPTr(@"%ld 首"), (long)tracks.count]];
         [self_.tableView reloadData];
+        const NSInteger n = (NSInteger)tracks.count;
+        self_.hintLabel.stringValue = n ? [NSString stringWithFormat:RLPTr(@"双击任意一首，从这首开始顺序播放整个最爱列表（%ld 首）"), (long)n] : @"";
+        self_.emptyLabel.hidden = n > 0;
     }];
 }
 
