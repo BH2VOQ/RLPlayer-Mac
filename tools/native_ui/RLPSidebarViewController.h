@@ -38,6 +38,30 @@ NS_ASSUME_NONNULL_BEGIN
 /// 以代码方式选中某一行（不触发 onSelect 以外的副作用由实现保证幂等）。
 - (void)selectRow:(NSInteger)row;
 
+/// 判据负向对照（只给 --audit 用）：YES 时忽略 /api/sq/list，等价于
+/// 2026-11-13 之前的「静态一行保存的队列」旧实现。用来证明侧栏动态列表的判据
+/// 在这份实现上**确实是红的**，而不是恒真的摆设。
+@property (nonatomic, assign) BOOL ignoreSavedQueues;
+
+/// 重新拉取「我的歌单」（GET /api/sq/list）并重建导航行。
+/// 核心启动后由主窗口调一次；歌单变更时由 RLPSavedQueuesChangedNotification 触发。
+- (void)reloadSavedQueues;
+
+/// 已渲染的歌单行数（不含分组标题与空态行）。运行时判据用。
+@property (nonatomic, readonly) NSInteger savedQueueRowCount;
+/// 已渲染的歌单名（顺序与侧栏一致）。运行时判据用。
+@property (nonatomic, copy, readonly) NSArray<NSString *> *savedQueueNames;
+/// 按歌单下标重命名（✎ 按钮走同一实现）。完成后重建行并广播变更通知。
+- (void)renameSavedQueueAtIndex:(NSInteger)index to:(NSString *)newName;
+/// 按歌单下标删除（× 按钮走同一实现）。
+- (void)deleteSavedQueueAtIndex:(NSInteger)index;
+
+/// 新建歌单（对话框与判据共用同一条落库路径：POST /api/sq/add → toast 带名字 → 进该歌单页）。
+- (void)createSavedQueueNamed:(NSString *)name;
+
+/// 点选某份歌单（侧栏行点击 / 新建成功后沿用 web 的 renderSavedQueuePage(name) 语义）。
+- (void)openSavedQueueNamed:(NSString *)name;
+
 /// 主题切换后刷新自建颜色（背景/文字/选中态）。
 - (void)applyTheme;
 

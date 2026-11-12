@@ -32,6 +32,73 @@
 }
 @end
 
+// 底栏封面：web 的 #cv 本身没有 click 绑定（进播放页靠 #npOpen），但用户明确要求
+// 「播放栏点击作品封面需要可以跳转到播放页」⟹ 两边都该多这个入口，原生先做。
+// 用 mouseDown 直接处理而不是手势识别器：手势在离屏/非 key window 下容易不触发，
+// 而这里要的判据恰恰是"点下去真的开了播放页"。
+@interface RLPBarCoverView : NSImageView
+@property (nonatomic, copy, nullable) void (^onClick)(void);
+@property (nonatomic, assign) BOOL hovered;
+@end
+
+@implementation RLPBarCoverView {
+    NSTrackingArea *_hoverArea;
+}
+- (void)updateTrackingAreas {
+    [super updateTrackingAreas];
+    if (_hoverArea) { [self removeTrackingArea:_hoverArea]; _hoverArea = nil; }
+    _hoverArea = [[NSTrackingArea alloc] initWithRect:self.bounds
+                                              options:(NSTrackingMouseEnteredAndExited | NSTrackingActiveInKeyWindow)
+                                                owner:self userInfo:nil];
+    [self addTrackingArea:_hoverArea];
+}
+- (void)mouseEntered:(NSEvent *)event {
+    (void)event;
+    self.hovered = YES;
+    [[NSCursor pointingHandCursor] set];   // 可点的视觉提示（不可点的话用户根本不会去点）
+    [self setNeedsDisplay:YES];
+}
+- (void)mouseExited:(NSEvent *)event {
+    (void)event;
+    self.hovered = NO;
+    [self setNeedsDisplay:YES];
+}
+- (void)mouseDown:(NSEvent *)event {
+    // 单击由 mouseDown/mouseUp 一对构成；这里在按下时就开页，与 web #npOpen 的 onclick 同观感。
+    (void)event;
+    if (self.onClick) self.onClick();
+}
+- (void)drawRect:(NSRect)dirtyRect {
+    [super drawRect:dirtyRect];
+    if (!self.hovered || !self.image) return;
+    // 悬停时压一层很淡的亮色（圆角由 layer masksToBounds 裁掉）——告诉用户这块能点。
+    NSColor *c = (NSApp.effectiveAppearance.name == NSAppearanceNameDarkAqua)
+               ? [NSColor colorWithWhite:1 alpha:0.10] : [NSColor colorWithWhite:0 alpha:0.06];
+    [c setFill];
+    [[NSBezierPath bezierPathWithRoundedRect:self.bounds xRadius:8 yRadius:8] fill];
+}
+@end
+
+// Keep NSSlider's native keyboard/accessibility/tracking, but not its OS-blue paint.
+@interface RLPBarSliderCell : NSSliderCell
+@end
+@implementation RLPBarSliderCell
+- (void)drawBarInside:(NSRect)rect flipped:(BOOL)flipped {
+    NSRect track = NSMakeRect(rect.origin.x, NSMidY(rect)-2, rect.size.width, 4);
+    [[RLPTheme current].track setFill];
+    [[NSBezierPath bezierPathWithRoundedRect:track xRadius:2 yRadius:2] fill];
+    double fraction = (self.doubleValue-self.minValue)/MAX(1e-9,self.maxValue-self.minValue);
+    track.size.width *= MAX(0,MIN(1,fraction));
+    [[RLPTheme current].accent setFill];
+    [[NSBezierPath bezierPathWithRoundedRect:track xRadius:2 yRadius:2] fill];
+}
+- (void)drawKnob:(NSRect)rect {
+    [[RLPTheme current].accent setFill];
+    NSRect knob = NSMakeRect(NSMidX(rect)-5,NSMidY(rect)-5,10,10);
+    [[NSBezierPath bezierPathWithOvalInRect:knob] fill];
+}
+@end
+
 #pragma mark - 播放条
 
 @interface RLPPlaybackBarView ()
@@ -55,6 +122,9 @@
 @property (nonatomic, copy) NSString *coverPath;
 @property (nonatomic, assign) NSUInteger coverSeq;
 @property (nonatomic, copy) NSString *metaPath;
+@property (nonatomic, copy) NSString *metaTitle;
+@property (nonatomic, copy) NSDictionary *statusDetails;
+@property (nonatomic, strong) NSTextField *gpuBadge;
 @property (nonatomic, strong) RLPPlaybackStatus *lastStatus;
 /// 播放模式：**唯一真相源**是 /api/playmode 的 mode（0=顺序 1=列表循环 2=单曲循环 3=随机）。
 /// /api/repeat 与 /api/shuffle 在核心侧只是它的派生写入口，没有独立存储 ——
@@ -93,6 +163,9 @@
     self.prevBtn = [self symbolButton:@"backward.fill" tip:@"上一首"];
     self.playBtn = [self symbolButton:@"play.fill" tip:@"播放 / 暂停"];
     self.nextBtn = [self symbolButton:@"forward.fill" tip:@"下一首"];
+    self.prevBtn.action = @selector(previousTrack);
+    self.playBtn.action = @selector(playPause);
+    self.nextBtn.action = @selector(nextTrack);
     // 播放模式：随机（Fisher–Yates 整表乱序，核心侧已实现）与列表循环。
     // 放在播放键左侧，与 QQ 音乐 / Spotify 的位置习惯一致。
     self.shuffleBtn = [self symbolButton:@"shuffle" tip:@"随机播放"];
@@ -111,15 +184,23 @@
     // 红色实心圆播放键（web 底栏的视觉锚点）
     self.playBtn.wantsLayer = YES;
     self.playBtn.layer.cornerRadius = 17;
+    self.shuffleBtn.hidden = YES; // API preserved; four-mode repeat control is the visible entry.
     self.playBtn.layer.backgroundColor = t.accent.CGColor;
     self.playBtn.contentTintColor = NSColor.whiteColor;
     self.playBtn.identifier = @"pb.play";
 
     // 封面缩略图（web 底栏最左）
-    self.coverView = [[NSImageView alloc] initWithFrame:NSZeroRect];
+    RLPBarCoverView *cv = [[RLPBarCoverView alloc] initWithFrame:NSZeroRect];
+    __weak __typeof__(self) weakCoverBar = self;
+    cv.onClick = ^{
+        __typeof__(self) s = weakCoverBar;
+        if (s) [s openNowPlaying:nil];
+    };
+    cv.toolTip = RLPTr(@"打开正在播放");
+    self.coverView = cv;
     self.coverView.imageScaling = NSImageScaleProportionallyUpOrDown;
     self.coverView.wantsLayer = YES;
-    self.coverView.layer.cornerRadius = 6;
+    self.coverView.layer.cornerRadius = 8;
     self.coverView.layer.masksToBounds = YES;
     self.coverView.layer.backgroundColor = t.bg3.CGColor;
     self.coverView.identifier = @"pb.cover";
@@ -133,7 +214,9 @@
     self.bpBadge.layer.borderWidth = 1;
     self.bpBadge.layer.borderColor = t.ok.CGColor;
     self.bpBadge.alignment = NSTextAlignmentCenter;
-    self.bpBadge.hidden = YES;
+    self.bpBadge.identifier = @"pb.bp";
+    self.bpBadge.stringValue = RLPTr(@"待播放验证");
+    self.bpBadge.hidden = NO;
     [self addSubview:self.bpBadge];
 
     self.titleLabel = [self labelWithFont:[NSFont systemFontOfSize:13 weight:NSFontWeightSemibold]
@@ -159,6 +242,11 @@
     self.fmtBadge = [self labelWithFont:[NSFont systemFontOfSize:9.5 weight:NSFontWeightSemibold]
                                   color:t.accentText];
     self.fmtBadge.stringValue = @"--";
+    self.gpuBadge = [self labelWithFont:[NSFont systemFontOfSize:9.5 weight:NSFontWeightBold] color:t.okText];
+    self.gpuBadge.stringValue = @"GPU";
+    self.gpuBadge.identifier = @"pb.gpu";
+    self.gpuBadge.hidden = YES;
+    [self addSubview:self.gpuBadge];
     self.fmtBadge.identifier = @"pb.fmt";
     self.fmtBadge.alignment = NSTextAlignmentCenter;
     self.fmtBadge.wantsLayer = YES;
@@ -179,6 +267,7 @@
     self.chainBtn.action = @selector(showSignalChain:);
 
     self.progress = [[RLPCommitSlider alloc] initWithFrame:NSZeroRect];
+    self.progress.cell = [[RLPBarSliderCell alloc] init];
     self.progress.minValue = 0.0;
     self.progress.maxValue = 1.0;
     self.progress.doubleValue = 0.0;
@@ -201,6 +290,7 @@
     // 音量滑块改用**位置刻度 0..1000**（web 2026-10-25 修过的曲线）：
     // 旧实现是线性 dB 刻度，拖到中间就 -30 dB（只剩 3% 振幅），用户会以为"没声音"。
     self.volume = [[RLPCommitSlider alloc] initWithFrame:NSZeroRect];
+    self.volume.cell = [[RLPBarSliderCell alloc] init];
     self.volume.minValue = 0.0;
     self.volume.maxValue = 1000.0;
     self.volume.doubleValue = 1000.0;
@@ -240,92 +330,62 @@ static double RLPVolDbToPos(double db) {
     return round(1000.0 * (1.0 - pow(-db / fabs(kVolMinDb), 1.0 / 1.6)));
 }
 
-/// 底栏布局：严格照 web `.bar` 的三列 grid（1.1fr / 1.6fr / 1.1fr，最大 1120，gap 14，padding 18）。
-///   左列：44pt 封面 + 曲名/艺术家两行
-///   中列：控制键（居中）+ 下方进度行（当前时间 / 滑杆 / 总时长）
-///   右列：歌词 / 信号链 / bit-perfect / 格式 / 音量（从右往左排，放不下时按优先级隐藏——与 web 媒体查询同思路）
+/// Web .bar/.ctr/.keys/.vol: five keys, measured status cluster, no width-based badge hiding.
 - (void)layout {
     [super layout];
-    const CGFloat W = self.bounds.size.width, H = self.bounds.size.height;
-    if (W < 400 || H < 40) return;
-    void (^place)(NSView *, CGFloat, CGFloat, CGFloat, CGFloat) =
-        ^(NSView *v, CGFloat x, CGFloat y, CGFloat w, CGFloat h) { v.frame = NSMakeRect(x, y, w, h); };
-
-    const CGFloat pad = 18.0, gap = 14.0;
-    CGFloat avail = W - pad * 2 - gap * 2;
-    if (avail < 300) avail = 300;
-    CGFloat centerW = avail * (1.6 / 3.8);
-    if (centerW > 440.0) centerW = 440.0;
-    const CGFloat sideW = (avail - centerW) / 2.0;
-    const CGFloat leftX = pad;
-    const CGFloat centerX = pad + sideW + gap;
-    const CGFloat rightX = centerX + centerW + gap;
-
-    // ── 左列：封面 44（web .cv2）+ 两行文本 ──
-    place(self.coverView, leftX, (H - 44) / 2.0, 44, 44);
-    const CGFloat tx = leftX + 44 + 11;
-    const CGFloat tw = MAX(80.0, sideW - 44 - 11 - 8);
-    place(self.titleLabel, tx, H / 2.0 + 2, tw, 17);
-    place(self.subLabel, tx, H / 2.0 - 16, tw, 15);
-
-    // ── 中列上层：六个控制键（随机 / 上一首 / 播放 / 下一首 / 停止 / 循环）──
-    // 尺寸与 web 一致：普通键 32、主键 34；gap 6。整组在列内水平居中。
-    const CGFloat keyGap = 6.0, small = 32.0, big = 34.0;
-    const CGFloat keysW = small * 5 + big + keyGap * 5;
-    CGFloat kx = centerX + (centerW - keysW) / 2.0;
-    const CGFloat rowCY = H - 7.0 - 17.0;   // 上层垂直中心 = 42（H=66）
-    place(self.shuffleBtn, kx, rowCY - small / 2, small, small); kx += small + keyGap;
-    place(self.prevBtn,    kx, rowCY - small / 2, small, small); kx += small + keyGap;
-    place(self.playBtn,    kx, rowCY - big / 2,   big,   big);   kx += big + keyGap;
-    place(self.nextBtn,    kx, rowCY - small / 2, small, small); kx += small + keyGap;
-    place(self.stopBtn,    kx, rowCY - small / 2, small, small); kx += small + keyGap;
-    place(self.repeatBtn,  kx, rowCY - small / 2, small, small);
-
-    // ── 中列下层：进度行（时间 / 滑杆 / 时间），贴底 7pt ──
-    const CGFloat progY = 7.0, progH = 16.0, timeW = 34.0, timeGap = 8.0;
-    place(self.posLabel, centerX, progY, timeW, progH);
-    place(self.durLabel, centerX + centerW - timeW, progY, timeW, progH);
-    const CGFloat sliderX = centerX + timeW + timeGap;
-    const CGFloat sliderW = MAX(80.0, centerW - (timeW + timeGap) * 2);
-    place(self.progress, sliderX, progY, sliderW, progH);
-
-    // ── 右列：从右往左排，放不下按优先级隐藏（音量 > 歌词/信号链 > bit-perfect > 格式）──
-    CGFloat rx = W - pad;                       // 当前已占用的最左缘（从右往左）
-    const CGFloat volW = (sideW < 330.0) ? 76.0 : 88.0;
-    rx -= volW;
-    place(self.volume, rx, rowCY - 8, volW, 16);
-    rx -= 8 + 14;
-    place(self.volIconView, rx, rowCY - 7, 14, 14);
-
-    const BOOL showFmt = (sideW >= 330.0);
-    const BOOL showBp  = (sideW >= 292.0);
-    const BOOL showIcons = (sideW >= 210.0);
-    if (showFmt) {
-        rx -= 8 + 50;
-        place(self.fmtBadge, rx, rowCY - 9, 50, 18);
-        self.fmtBadge.hidden = NO;
-    } else {
-        // 放不下就**真的藏起来**。之前只是"不摆放"，控件保留默认零帧留在原点，
-        // 于是播放条左下角出现一个孤立的 "--" 小胶囊（实测截图里那个红点）。
-        self.fmtBadge.hidden = YES;
+    CGFloat W=NSWidth(self.bounds), H=NSHeight(self.bounds);
+    if (W<=0 || H<=0) return;
+    void (^place)(NSView *,CGFloat,CGFloat,CGFloat,CGFloat)=^(NSView *v,CGFloat x,CGFloat y,CGFloat w,CGFloat h){ v.frame=NSMakeRect(x,y,MAX(0,w),h); };
+    CGFloat pad=18, gap=14, itemGap=6;
+    CGFloat bpW=ceil(self.bpBadge.intrinsicContentSize.width)+14;
+    CGFloat fmtW=MAX(40,ceil(self.fmtBadge.intrinsicContentSize.width)+12);
+    CGFloat gpuW=self.gpuBadge.hidden?0:34;
+    CGFloat volW=76, iconW=32;
+    CGFloat rightW=32*2+bpW+fmtW+14+volW+itemGap*5+(gpuW?gpuW+itemGap:0);
+    CGFloat available=W-2*pad-2*gap;
+    CGFloat centerW=MIN(440,available*1.6/3.8);
+    // Equal left/right columns keep the five-key group centered on the whole bar.
+    // Expand BOTH side columns for content, never steal only from the left column.
+    centerW=MIN(centerW,available-2*rightW);
+    BOOL wrap=centerW<198;
+    if (wrap) {
+        volW=48;
+        CGFloat sideBudget=(available-198)/2;
+        iconW=MIN(32,MAX(24,(sideBudget-bpW-2*itemGap)/2));
+        CGFloat topW=2*iconW+bpW+itemGap*2;
+        CGFloat bottomW=fmtW+14+volW+itemGap*2+(gpuW?gpuW+itemGap:0);
+        rightW=MAX(topW,bottomW);
+        centerW=MAX(198,MIN(440,MIN(available*1.6/3.8,available-2*rightW)));
     }
-    if (showBp && !self.bpBadge.hidden) {
-        rx -= 8 + 76;
-        place(self.bpBadge, rx, rowCY - 9, 76, 18);
+    CGFloat leftW=(available-centerW)/2;
+    CGFloat cx=(W-centerW)/2, rx=cx+centerW+gap;
+    place(self.coverView,pad,(H-44)/2,44,44);
+    place(self.titleLabel,pad+55,H/2+2,leftW-55,17);
+    place(self.subLabel,pad+55,H/2-16,leftW-55,15);
+    CGFloat small=32,big=34,keyGap=6,keysW=small*4+big+keyGap*4;
+    CGFloat x=cx+(centerW-keysW)/2, cy=H-24;
+    for (NSButton *key in @[self.repeatBtn,self.prevBtn,self.playBtn,self.nextBtn,self.stopBtn]) {
+        CGFloat size=key==self.playBtn?big:small;
+        place(key,x,cy-size/2,size,size); x+=size+keyGap;
     }
-    if (showIcons) {
-        rx -= 8 + small;
-        place(self.chainBtn, rx, rowCY - small / 2, small, small);
-        rx -= 6 + small;
-        place(self.lyricBtn, rx, rowCY - small / 2, small, small);
-        self.chainBtn.hidden = NO;
-        self.lyricBtn.hidden = NO;
-    } else {
-        // 用 hidden 而不是"挪到 -100 且尺寸 0"：后者仍在视图树里参与命中测试与无障碍遍历。
-        self.chainBtn.hidden = YES;
-        self.lyricBtn.hidden = YES;
+    self.shuffleBtn.hidden=YES;
+    CGFloat timeW=34,timeGap=8;
+    place(self.posLabel,cx,7,timeW,16);
+    place(self.progress,cx+timeW+timeGap,7,centerW-2*(timeW+timeGap),16);
+    place(self.durLabel,cx+centerW-timeW,7,timeW,16);
+    NSArray *rows=wrap?@[@[self.lyricBtn,self.chainBtn,self.bpBadge],
+                         @[self.fmtBadge,self.gpuBadge,self.volIconView,self.volume]]:
+                        @[@[self.lyricBtn,self.chainBtn,self.bpBadge,self.fmtBadge,self.gpuBadge,self.volIconView,self.volume]];
+    for (NSUInteger row=0;row<rows.count;++row) {
+        CGFloat rowX=rx;
+        for (NSView *v in rows[row]) {
+            if (v==self.gpuBadge && v.hidden) continue;
+            CGFloat w=v==self.volume?volW:v==self.volIconView?14:v==self.bpBadge?bpW:v==self.fmtBadge?fmtW:v==self.gpuBadge?gpuW:iconW;
+            CGFloat h=(v==self.lyricBtn || v==self.chainBtn)?32:v==self.volume?16:20;
+            CGFloat rowCY=wrap?(row==0?H-21:13):H/2;
+            place(v,rowX,rowCY-h/2,w,h); rowX+=w+itemGap;
+        }
     }
-    (void)rightX;
 }
 
 - (NSButton *)symbolButton:(NSString *)symbol tip:(NSString *)tip {
@@ -379,10 +439,8 @@ static double RLPVolDbToPos(double db) {
 
 // 四种模式（见 rtaweb.cpp 的 QueueState.mode）：
 //   0 顺序（播到末尾停） 1 列表循环 2 单曲循环 3 随机
-// 两个按钮各管一个维度，但**写入同一个 mode**：
-//   * 随机键：在「随机(3)」与「进随机前的模式」之间切；
-//   * 循环键：0 → 1 → 2 → 0 轮转。
-// 这样先开随机再关掉，不会丢掉用户原本选的循环方式（与 QQ 音乐/Spotify 手感一致）。
+// 五键布局只有一个可见模式键：0 → 1 → 2 → 3 → 0。
+// toggleShuffle: 仍保留原调用语义，所有入口只写 /api/playmode 一个真相源。
 - (void)toggleShuffle:(id)sender {
     if (self.playMode == 3) {
         [self applyPlayMode:self.modeBeforeShuffle];
@@ -397,14 +455,16 @@ static double RLPVolDbToPos(double db) {
     switch (self.playMode) {
         case 0: next = 1; break;   // 顺序 → 列表循环
         case 1: next = 2; break;   // 列表循环 → 单曲循环
-        case 2: next = 0; break;   // 单曲循环 → 顺序
-        default: next = 1; break;  // 随机下点循环：落到列表循环（随机与循环互斥）
+        case 2: next = 3; break;   // 单曲循环 → 随机
+        default: next = 0; break;  // 随机 → 顺序
     }
     [self applyPlayMode:next];
 }
 
 - (void)applyPlayMode:(NSInteger)mode {
     self.playMode = mode;
+    [self refreshModeButtons];
+    if (![RLPCoreClient shared].started) return;
     __weak __typeof__(self) weakSelf = self;
     [[RLPCoreClient shared] postJSON:[NSString stringWithFormat:@"/api/playmode?mode=%ld", (long)mode]
                                 body:nil
@@ -427,8 +487,10 @@ static double RLPVolDbToPos(double db) {
     self.shuffleBtn.contentTintColor = (self.playMode == 3) ? t.accent : t.mut;
     self.repeatBtn.contentTintColor = (self.playMode == 1 || self.playMode == 2) ? t.accent : t.mut;
     self.shuffleBtn.toolTip = (self.playMode == 3) ? RLPTr(@"随机播放（已开启）") : RLPTr(@"随机播放");
-    self.repeatBtn.toolTip = (self.playMode == 1) ? RLPTr(@"列表循环")
-                           : (self.playMode == 2) ? RLPTr(@"单曲循环") : RLPTr(@"列表循环");
+    NSString *symbol=self.playMode==3?@"shuffle":self.playMode==2?@"repeat.1":@"repeat";
+    self.repeatBtn.image=[NSImage imageWithSystemSymbolName:symbol accessibilityDescription:nil];
+    self.repeatBtn.contentTintColor=self.playMode==0?t.mut:t.accent;
+    self.repeatBtn.toolTip=RLPTr(@[@"顺序播放",@"列表循环",@"单曲循环",@"随机播放"][self.playMode]);
 }
 
 #pragma mark - 轮询
@@ -470,12 +532,49 @@ static double RLPVolDbToPos(double db) {
     self.lyricBtn.contentTintColor = t.mut;
     self.chainBtn.contentTintColor = t.mut;
     self.volIconView.contentTintColor = t.mut;
+    [self refreshModeButtons];
+    [self refreshBadges];
+    self.volume.needsDisplay=YES; self.progress.needsDisplay=YES;
+}
+
+- (void)refreshBadges {
+    RLPTheme *t=RLPTheme.current;
+    RLPPlaybackStatus *st=self.lastStatus;
+    NSDictionary *d=self.statusDetails ?: @{};
+    NSString *state=st.bitPerfect ?: @"", *why=st.bitPerfectWhy ?: @"";
+    NSString *fallback=[d[@"fallbackWhy"] isKindOfClass:NSString.class]?d[@"fallbackWhy"]:@"";
+    NSString *tip=fallback.length?[NSString stringWithFormat:@"降级原因：%@%@",fallback,(why.length && ![why isEqual:fallback])?[@"；" stringByAppendingString:why]:@""]:why;
+    NSString *text=@"待播放验证"; NSColor *color=t.mut;
+    if ([state isEqual:@"direct"]) { text=@"BIT-PERFECT·1bit"; color=t.bpDirect; }
+    else if ([state isEqual:@"yes"]) { text=@"BIT-PERFECT"; color=t.okText; }
+    else if (state.length) {
+        text=@"非 bit-perfect"; color=t.warn;
+        double input=[d[@"inRate"] doubleValue], output=st.outRate;
+        NSString *transport=[d[@"transport"] isKindOfClass:NSString.class]?d[@"transport"]:@"";
+        NSString *outMode=[d[@"outMode"] isKindOfClass:NSString.class]?d[@"outMode"]:@"";
+        BOOL cast=[@[@"airplay",@"upnp"] containsObject:transport] || [@[@"airplay",@"upnp"] containsObject:outMode] || [why containsString:@"AirPlay"] || [why containsString:@"UPnP"];
+        BOOL hardVeto=[why containsString:@"物理格式未锁定"] || [why containsString:@"其它程序"];
+        if (!cast && [d[@"dsd"] doubleValue]>0) {
+            NSString *ext=st.currentPath.pathExtension.lowercaseString;
+            text=([@[@"dsf",@"dff",@"dsd",@"iso"] containsObject:ext])?@"DSD-DSD 升频":@"PCM-DSD 升频"; color=t.accent;
+        } else if ((!cast || [d[@"resampled"] boolValue]) && (cast || !hardVeto) && input>0 && output>0 && input!=output) {
+            text=output<input?@"PCM 降采样":@"PCM-PCM 升频";
+            color=output<input?t.warn:t.accent;
+        }
+    }
+    self.bpBadge.stringValue=RLPTr(text); self.bpBadge.hidden=NO;
+    self.bpBadge.textColor=color; self.bpBadge.layer.borderColor=color.CGColor;
+    self.bpBadge.layer.backgroundColor=([state isEqual:@"yes"]?t.okBg:t.hov).CGColor;
+    self.bpBadge.toolTip=tip.length?tip:([state length]?RLPTr(text):RLPTr(@"当前预设已保存，但尚未播放。bit-perfect 结论只对实际播放生效"));
+    self.gpuBadge.hidden=!st.gpuUsed; self.gpuBadge.textColor=t.okText;
+    self.needsLayout=YES;
 }
 
 - (void)fetchStatus {
     __weak __typeof__(self) weakSelf = self;
     [[RLPCoreClient shared] getJSON:@"/api/status" completion:^(NSDictionary * _Nullable json) {
         RLPPlaybackStatus *st = [RLPPlaybackStatus statusFromJSON:json];
+        if (st) weakSelf.statusDetails = json;
         [weakSelf applyStatus:st];
     }];
     // 播放模式不在 /api/status 里（它属于队列，不是播放状态），必须单独读 /api/playmode。
@@ -512,7 +611,7 @@ static double RLPVolDbToPos(double db) {
 
     NSString *name = st.currentPath.lastPathComponent;
     if (name.length == 0) name = st.playing ? RLPTr(@"未命名曲目") : RLPTr(@"未播放");
-    self.titleLabel.stringValue = name;
+    self.titleLabel.stringValue = ([st.currentPath isEqualToString:self.metaPath] && self.metaTitle.length) ? self.metaTitle : name;
 
     if (st.error.length) {
         self.subLabel.stringValue = st.error;
@@ -522,13 +621,7 @@ static double RLPVolDbToPos(double db) {
         self.subLabel.textColor = [RLPTheme current].mut;
         [self refreshMetaForPath:st.currentPath];
     }
-    // BIT-PERFECT 徽标：只在后端确实判定 yes 时出现（不自己猜）
-    const BOOL bpOK = [st.bitPerfect isEqualToString:@"yes"];
-    if (self.bpBadge.hidden == bpOK) {
-        self.bpBadge.hidden = !bpOK;
-        self.bpBadge.toolTip = st.bitPerfectWhy.length ? st.bitPerfectWhy : nil;
-        self.needsLayout = YES;
-    }
+    [self refreshBadges];
     // 封面：切歌才重新取（避免每 500ms 拉一次图）
     if (![st.currentPath isEqualToString:self.coverPath ?: @""]) {
         self.coverPath = st.currentPath;
@@ -562,7 +655,7 @@ static double RLPVolDbToPos(double db) {
 
 /// 封面（/api/cover?file=…，与单曲页同一端点）；请求序号丢弃过期结果。
 - (void)loadCoverForPath:(NSString *)path {
-    if (!path.length) { self.coverView.image = nil; return; }
+    if (!path.length) { ++self.coverSeq; self.coverView.image = nil; return; }
     const NSUInteger seq = ++self.coverSeq;
     NSString *url = [NSString stringWithFormat:@"/api/cover?file=%@", RLPEnc(path)];
     __weak __typeof__(self) weakSelf = self;
@@ -575,14 +668,18 @@ static double RLPVolDbToPos(double db) {
 
 /// 副标题：艺术家 · 专辑（/api/meta?file=…）。同曲不重复请求。
 - (void)refreshMetaForPath:(NSString *)path {
-    if (!path.length) { self.subLabel.stringValue = @"—"; return; }
+    if (!path.length) { self.metaPath=@""; self.metaTitle=@""; self.subLabel.stringValue = @"—"; return; }
     if ([path isEqualToString:self.metaPath ?: @""]) return;
     self.metaPath = path;
+    self.metaTitle = @"";
+    self.subLabel.stringValue = @"—";
     NSString *url = [NSString stringWithFormat:@"/api/meta?file=%@", RLPEnc(path)];
     __weak __typeof__(self) weakSelf = self;
     [[RLPCoreClient shared] getJSON:url completion:^(NSDictionary * _Nullable json) {
         __typeof__(self) self_ = weakSelf;
         if (!self_ || ![path isEqualToString:self_.metaPath ?: @""]) return;
+        self_.metaTitle = [json[@"title"] isKindOfClass:NSString.class] ? json[@"title"] : @"";
+        if (self_.metaTitle.length) self_.titleLabel.stringValue = self_.metaTitle;
         NSMutableArray<NSString *> *p = [NSMutableArray array];
         if ([json[@"artist"] isKindOfClass:[NSString class]] && [json[@"artist"] length]) [p addObject:json[@"artist"]];
         if ([json[@"album"] isKindOfClass:[NSString class]] && [json[@"album"] length]) [p addObject:json[@"album"]];

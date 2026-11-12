@@ -296,11 +296,17 @@ int RLPAppDelegateRunSelfTest(void) {
         STCheck([win.contentView isKindOfClass:[NSView class]], "contentView 是原生 NSView", @"");
     }
     STCheck(wc.sidebar != nil, "侧栏导航已创建", @"");
-    // 导航项 = web 版左导航的 1:1 副本（ui_page.h 的 .side）：11 项 + 3 个分组标题。
+    // 导航项 = web 版左导航的 1:1 副本（ui_page.h 的 .side）。
+    // web 的静态 .nav 是 **10 项**（专辑/艺术家/曲目/文件夹/流媒体/播放队列/最近/最爱/
+    // 快速开始/设置）；第 11 个「保存的队列」是原生自己加的死条目，
+    // 2026-11-13 已按 web 改成「我的歌单」动态区（#sqList，条数由 /api/sq/list 决定，
+    // 无核心的 selftest 里为 0 ⟹ 这里断言的是**静态 10 项**）。
     // web 没有聆听/专业双模式，所以这里断言的是**web 的那份清单**，不是模式变体。
     {
-        STCheck([wc.sidebar navRowCount] == 11, "侧栏 11 个导航项（对齐 web .nav 清单）",
+        STCheck([wc.sidebar navRowCount] == 10, "侧栏 10 个静态导航项（对齐 web .nav 清单）",
                 [NSString stringWithFormat:@"nav=%ld", (long)[wc.sidebar navRowCount]]);
+        STCheck([wc.sidebar savedQueueRowCount] == 0,
+                "无核心时不发 /api/sq/list（不假装有歌单）", @"");
         // 第 0 行是分组标题「资料库」（web 的 .sec），第一个**导航项**才是专辑。
         // 判据用导航项而不是裸行号：行号会被分组标题挤动，key 不会。
         STCheck([wc.sidebar selectKey:@"albums"] == YES, "有专辑入口（web data-v=albums）", @"");

@@ -86,6 +86,8 @@ static const CGFloat kTopbarHeight = 60.0;    // .top height（classic 52，见 
 @property (nonatomic, strong) NSMutableArray<NSString *> *rowStack;
 @property (nonatomic, strong) RLPNowPlayingViewController *npPage;
 @property (nonatomic, strong) RLPWorksViewController *worksPage;
+@property (nonatomic, readwrite) BOOL nowPlayingOverlayVisible;
+@property (nonatomic,strong) NSButton *webBackButton;
 @end
 
 /// 视图根节点的 identifier 表 —— **字面量**，不做字符串拼接。
@@ -281,6 +283,7 @@ static NSString *RLPPageIdentifier(NSString *key) {
                                                  name:@"RLPNavigateKeyNotification" object:nil];
     [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(onOpenNowPlayingNote:)
                                                  name:@"RLPOpenNowPlayingNotification" object:nil];
+    [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(onCloseNowPlaying:) name:@"RLPCloseNowPlayingNotification" object:nil];
     // 古典作品 · 演绎版本（web 只从单曲页「作品」tab 进入，左导航不放入口）。
     // object = @{@"title":…, @"composer":…}；从单曲页进来时给返回按钮。
     [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(onOpenWorksNote:)
@@ -381,6 +384,9 @@ static NSString *RLPPageIdentifier(NSString *key) {
 
 /// 顶栏页标题 = 当前页的 pageTitle；详情页也用它自己的标题。
 - (void)syncTopbarTitle {
+    if(!self.webBackButton){self.webBackButton=[NSButton buttonWithTitle:RLPTr(@"← 返回专辑") target:self action:@selector(onTopbarBack:)];self.webBackButton.bezelStyle=NSBezelStyleRounded;self.webBackButton.identifier=@"top.back";[self.topbar addSubview:self.webBackButton];}
+    self.webBackButton.frame=NSMakeRect(MAX(600,self.topbar.bounds.size.width-230),14,100,32);
+    self.webBackButton.hidden=self.rowStack.count==0;
     NSString *title = nil;
     if ([self.currentContent respondsToSelector:@selector(pageTitle)])
         title = [(id)self.currentContent pageTitle];
@@ -395,6 +401,8 @@ static NSString *RLPPageIdentifier(NSString *key) {
     f.origin = CGPointMake(20, (self.topbar.bounds.size.height - f.size.height) / 2.0);
     self.pageTitle.frame = f;
 }
+
+- (void)onTopbarBack:(id)sender { [self popDetail]; }
 
 - (void)onPageCount:(NSNotification *)note {
     if (![note.object isKindOfClass:[NSString class]]) return;
@@ -421,6 +429,7 @@ static NSString *RLPPageIdentifier(NSString *key) {
 }
 
 - (void)onBack:(NSNotification *)note {
+    if(self.nowPlayingOverlayVisible){[self onCloseNowPlaying:nil];return;}
     [self popDetail];
 }
 
@@ -449,6 +458,7 @@ static NSString *RLPPageIdentifier(NSString *key) {
 
 /// 打开古典作品页并检索（对齐 web loadWorksView(title, composer, fromNp)）。
 - (void)onOpenWorksNote:(NSNotification *)note {
+    if(self.nowPlayingOverlayVisible)[self onCloseNowPlaying:nil];
     NSDictionary *info = [note.object isKindOfClass:[NSDictionary class]] ? note.object : @{};
     NSString *title = [info[@"title"] isKindOfClass:[NSString class]] ? info[@"title"] : @"";
     NSString *composer = [info[@"composer"] isKindOfClass:[NSString class]] ? info[@"composer"] : @"";
@@ -547,10 +557,23 @@ static NSString *RLPPageIdentifier(NSString *key) {
     [self.rightDrawer showTab:@"l"];
 }
 
+// npPage is a full content-window overlay, not a page inside the sidebar grid.
 - (void)onNowPlaying:(id)sender {
-    if (!self.npPage) self.npPage = [[RLPNowPlayingViewController alloc] init];
-    [self pushDetail:self.npPage];
+    if(self.nowPlayingOverlayVisible)return;
+    if(!self.npPage)self.npPage=[RLPNowPlayingViewController new];
+    _nowPlayingPage = self.npPage;   // 判据用只读出口（覆盖页是懒创建的）
+    NSView *root=self.window.contentView,*v=self.npPage.view;
+    self.nowPlayingOverlayVisible=YES;v.translatesAutoresizingMaskIntoConstraints=NO;
+    [root addSubview:v positioned:NSWindowAbove relativeTo:nil];
+    [NSLayoutConstraint activateConstraints:@[[v.leadingAnchor constraintEqualToAnchor:root.leadingAnchor],[v.trailingAnchor constraintEqualToAnchor:root.trailingAnchor],[v.topAnchor constraintEqualToAnchor:root.topAnchor],[v.bottomAnchor constraintEqualToAnchor:root.bottomAnchor]]];
+    [self.npPage activate];
+    [self.window makeFirstResponder:v];
 }
+- (void)onCloseNowPlaying:(NSNotification *)note {
+    if(!self.nowPlayingOverlayVisible)return;
+    [self.npPage viewDidDisappear];[self.npPage.view removeFromSuperview];self.nowPlayingOverlayVisible=NO;
+}
+
 
 #pragma mark - 主题
 
@@ -566,6 +589,7 @@ static NSString *RLPPageIdentifier(NSString *key) {
     [self.sidebar applyTheme];
     [self.playbackBar applyTheme];
     [self.rightDrawer applyTheme];
+    if(self.npPage.isViewLoaded)[self.npPage applyTheme];
     self.playbackBar.layer.borderColor = t.line.CGColor;
     self.pageTitle.textColor = t.text;
     self.pageCount.textColor = t.mut;
@@ -583,6 +607,8 @@ static NSString *RLPPageIdentifier(NSString *key) {
 - (void)loadInitialData {
     if (![RLPCoreClient shared].started) return;
     [self.albums reload];
+    // 侧栏「我的歌单」是 /api/sq/list 的动态列表（web #sqList），核心起来后拉一次。
+    [self.sidebar reloadSavedQueues];
     [self.playbackBar startPolling];
     // 启动检查更新：延迟 3 秒（先让界面出来），自动模式不打扰——只在有新版本时弹窗
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3.0 * NSEC_PER_SEC)),
@@ -593,6 +619,8 @@ static NSString *RLPPageIdentifier(NSString *key) {
 
 - (void)stopAllActivity {
     [self.playbackBar stopPolling];
+    [self.rightDrawer deactivate];
+    [self.npPage stopPolling];
 }
 
 @end

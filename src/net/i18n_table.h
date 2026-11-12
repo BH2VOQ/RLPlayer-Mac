@@ -2108,6 +2108,8 @@ inline const I18nPair* i18n_table(std::size_t* count) {
         {"例如 Maurice Ravel / Beethoven", "e.g. Maurice Ravel / Beethoven"},
         {"古典作品版本", "Classical Work Versions"},
         {"（未命名版本）", "(untitled version)"},
+        {"首歌曲", "songs"},
+        {"的其他作品", "'s Other Works"},
         {"网络请求失败", "Network request failed"},
         {"尚未配置 API Key", "API key is not configured yet"},
         {"未选择 UPnP / DLNA 渲染器：设置 → 输出 → 目标渲染器（点「重新发现」刷新列表）", "No UPnP / DLNA renderer selected: Settings → Output → Target renderer (click Discover again to refresh the list)"},

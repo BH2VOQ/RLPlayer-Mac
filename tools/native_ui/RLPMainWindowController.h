@@ -27,6 +27,11 @@ NS_ASSUME_NONNULL_BEGIN
 /// 打开抽屉并切到歌词页（底栏歌词键 = web #bLyric）。
 - (void)openLyricDrawer;
 
+/// 全屏「正在播放」覆盖页当前是否打开（判据：点播放条封面 → 必须变成 YES）。
+@property (nonatomic, assign, readonly) BOOL nowPlayingOverlayVisible;
+/// 当前正在播放覆盖页（未打开时 nil）。
+@property (nonatomic, strong, readonly, nullable) NSViewController *nowPlayingPage;
+
 /// 核心启动后调用：加载首批数据（专辑）并启动播放条轮询。
 - (void)loadInitialData;
 

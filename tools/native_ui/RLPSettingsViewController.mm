@@ -281,6 +281,9 @@ static NSStackView *RLPSRow(NSString *label, NSView *control, NSString *hint, RL
 @property (nonatomic, strong) NSSwitch *shufSwitch;
 @property (nonatomic, strong) NSSwitch *loudSwitch;
 @property (nonatomic, strong) NSSwitch *autoAnlSwitch;
+/// 网络信息（web #bNet → #netMsg）：web 是**点按钮才查**，原生也按需，不做常驻占位。
+@property (nonatomic, strong) NSButton *netBtn;
+@property (nonatomic, strong) NSTextField *netMsg;
 
 // ---- 诊断页（web data-g=diag）----
 @property (nonatomic, strong) NSButton *diagZipBtn;
@@ -298,8 +301,6 @@ static NSStackView *RLPSRow(NSString *label, NSView *control, NSString *hint, RL
 @property (nonatomic, strong) NSProgressIndicator *updBar;
 @property (nonatomic, strong) NSTextField *updFill;
 @property (nonatomic, strong) NSTextField *updNote;
-/// 网络信息（web /api/net 面板）
-@property (nonatomic, strong) NSTextField *netMsg;
 @property (nonatomic, strong) NSTextView *fbText;
 @property (nonatomic, strong) NSTextField *fbCount;
 @property (nonatomic, strong) NSTextField *fbChan;
@@ -1228,6 +1229,20 @@ static NSString *RLPControlIdentifier(NSString *key) {
     self.autoAnlSwitch = [self switchForKey:@"sp_autoanl" action:@selector(onSwitch:)];
     [stack addArrangedSubview:RLPSRow(RLPTr(@"播放时自动分析（后台）"), self.autoAnlSwitch,
         RLPTr(@"默认关闭；只分析本地文件，每曲只跑一次，切歌立即取消"), t)];
+
+    // ---- 网络信息（web #bNet → #netMsg）----
+    // web 侧这里是**按钮触发**：点 #bNet 才 api('/api/net') 并把结果写进 #netMsg。
+    // 原生原先做成了常驻分组 + 一行灰字，待机时白占一大片 —— 改成同样的按需形态。
+    [stack addArrangedSubview:RLPSGroup(RLPTr(@"网络信息"),
+        RLPTr(@"点按钮查询本机地址与局域网访问状态"), t)];
+    self.netBtn = [NSButton buttonWithTitle:RLPTr(@"查询网络信息") target:self
+                                     action:@selector(onNetInfo:)];
+    self.netBtn.bezelStyle = NSBezelStyleRounded;
+    self.netBtn.identifier = @"sp_netbtn";
+    [stack addArrangedSubview:self.netBtn];
+    self.netMsg = [self hintForKey:@"sp_netmsg" width:560];
+    self.netMsg.hidden = YES;   // 未点击前不占视觉，与 web #netMsg 初始空态一致
+    [stack addArrangedSubview:self.netMsg];
 }
 
 #pragma mark - 流媒体
@@ -1315,16 +1330,6 @@ static NSString *RLPControlIdentifier(NSString *key) {
         [diagScroll.widthAnchor constraintEqualToConstant:620],
         [diagScroll.heightAnchor constraintEqualToConstant:200],
     ]];
-
-    // ---- 网络信息（web /api/net：本机地址 / 局域网是否开启 / 端口）----
-    // 原生是单进程、默认不开端口，所以这里如实显示"进程内直连（无本地端口）"，
-    // 不渲染一个连不上的 http://127.0.0.1:8899/（web 的注释也是这个口径）。
-    [stack addArrangedSubview:RLPSGroup(RLPTr(@"网络信息"),
-        RLPTr(@"web 版据此显示访问地址；原生单进程不走端口，仍需如实呈现"), t)];
-    self.netMsg = [self hintForKey:@"sp_netmsg" width:560];
-    self.netMsg.stringValue = RLPTr(@"读取中…");
-    [stack addArrangedSubview:self.netMsg];
-    [self loadNetInfo];
 
     // ---- 软件更新 ----
     [stack addArrangedSubview:RLPSGroup(RLPTr(@"软件更新"), RLPTr(@"检查新版本，一键更新"), t)];
@@ -2588,10 +2593,12 @@ static NSInteger RLPSearchIndexForProviderId(NSString *pid) {
     [self onOpenFeedback:nil];
 }
 
-/// /api/net：本机地址与端口真实状态。单进程形态下 http=false，据此如实显示，
-/// 不编一个能点的地址（那是误导，比空白更糟）。
-- (void)loadNetInfo {
+/// web #bNet 同语义：**点击才查询** /api/net，结果写进 sp_netmsg。
+/// 单进程形态下 http=false，据此如实显示，不编一个能点的地址（那是误导，比空白更糟）。
+- (void)onNetInfo:(id)sender {
+    self.netMsg.hidden = NO;
     if (![RLPCoreClient shared].started) { self.netMsg.stringValue = RLPTr(@"核心未启动"); return; }
+    self.netMsg.stringValue = RLPTr(@"读取中…");
     __weak __typeof__(self) weakSelf = self;
     [[RLPCoreClient shared] getJSON:@"/api/net" completion:^(NSDictionary * _Nullable json) {
         __typeof__(self) self_ = weakSelf;

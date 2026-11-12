@@ -6,6 +6,8 @@
 // 注意：窗口是 FullSizeContentView，侧栏会从窗口最顶端开始 ⟹ 品牌区必须让开 macOS
 // 红绿灯（x≈12..70、y≈19..32），所以文字从 x=80 起，避免被遮挡。
 #import "RLPSidebarViewController.h"
+#import <QuartzCore/QuartzCore.h>
+#import "RLPCoreClient.h"
 #import "RLPSupport.h"
 #import "RLPTheme.h"
 #include "version.h"
@@ -13,14 +15,67 @@
 @interface RLPSidebarViewController () <NSTableViewDataSource, NSTableViewDelegate> {
     NSTableView *_tableView;
     NSInteger _lastSelectedRow;
-    NSArray<NSDictionary *> *_menuItems;
+    NSMutableArray<NSDictionary *> *_menuItems;
     NSInteger _hoverRow;
     // 待落地的选中行：selectRow: 可能在 loadView 之前被调用（主窗口 init 里就是），
     // 那时 _tableView 还是 nil，选中会**静默丢失** ⟹ 侧栏永远没有高亮。
     NSInteger _pendingRow;
     NSInteger _selectedRow;   // 业务选中态（唯一真相，见 selectRow: 注释）
     NSTrackingArea *_tracking;
+    // 「我的歌单」动态行（web #sqList = /api/sq/list 的结果，不是硬编码条目）。
+    NSArray<NSDictionary *> *_savedQueues;   // @{@"name":…, @"n":…}
+    NSUInteger _sqSeq;                       // 异步竞态序号：晚到的旧响应直接丢弃
+    NSString *_pendingSavedQueueName;        // 详情页压栈时记住目标歌单（页面可能尚未创建）
 }
+@end
+
+#pragma mark - 虚线边框盒（web .sqempty 的 border:1px dashed）
+
+/// NSView 的 backing layer 默认是 CALayer。web 的「＋ 新建歌单」是**虚线**框，
+/// 用 CAShapeLayer 才能画虚线；所以这里换 backing layer 类，其余不动。
+@interface RLPDashedBox : NSView
+@property (nonatomic, strong) NSColor *strokeColor;
+@property (nonatomic, strong) NSColor *fillColor;
+@end
+
+@interface RLPDashedLayer : CAShapeLayer
+@end
+
+@implementation RLPDashedLayer
+@end
+
+@implementation RLPDashedBox
+
+- (CALayer *)makeBackingLayer {
+    RLPDashedLayer *l = [RLPDashedLayer layer];
+    l.cornerRadius = 8;
+    l.lineWidth = 1;
+    l.lineDashPattern = @[@4, @3];
+    l.fillColor = NSColor.clearColor.CGColor;
+    l.strokeColor = [RLPTheme current].line.CGColor;
+    return l;
+}
+
+- (void)setStrokeColor:(NSColor *)strokeColor {
+    _strokeColor = strokeColor;
+    ((CAShapeLayer *)self.layer).strokeColor = strokeColor.CGColor;
+    [self setNeedsLayout:YES];
+}
+
+- (void)setFillColor:(NSColor *)fillColor {
+    _fillColor = fillColor;
+    ((CAShapeLayer *)self.layer).fillColor = fillColor.CGColor;
+}
+
+- (void)layout {
+    [super layout];
+    // 虚线路径要跟着 bounds 走；只画边框（fill 由 layer.fillColor 负责）。
+    CGMutablePathRef path = CGPathCreateMutable();
+    CGPathAddRect(path, NULL, self.bounds);
+    ((CAShapeLayer *)self.layer).path = path;
+    CGPathRelease(path);
+}
+
 @end
 
 #pragma mark - 侧栏表格（自己管 tracking area）
@@ -58,17 +113,21 @@
 ///
 /// 分组与顺序逐条对齐 web：
 ///   资料库   : 专辑 / 艺术家 / 曲目 / 文件夹 / 流媒体（web data-v=remote）
-///   播放列表 : 播放队列 / 最近播放 / 我的最爱 / 保存的队列（web #sqList，动态）
+///   播放列表 : 播放队列 / 最近播放 / 我的最爱
+///   我的歌单 : web #sqList —— 标题「我的歌单」+「＋ 新建」，下方是**动态**歌单行；
+///             空态是一整行可点的「＋ 新建歌单」（web .sqempty）
 ///   音频引擎 : 快速开始（web data-v=station）/ 设置
 ///
 /// 为什么不再按"模式"分叉：web 版没有聆听/专业双模式，那是本仓库自己发明的，
 /// 会让「web 有的我是否都有」无法机械验证。双模式留到 parity 全绿后作为薄表现层回归，
 /// 现在先把地基做平（见 docs/native-ui/PLAN.md）。
+///
+/// 2026-11-13：原来这里是**静态**的一行「保存的队列」，而 web 的「我的歌单」是
+/// 内联渲染的动态列表（paintSavedQueues，ui_script.h:3753-3798）。
+/// 侧栏因此少了 条目 / ✎ 重命名 / × 删除 / 空态整行 —— 用户图二演示的正是动态条目。
+/// 现在把这一层按 web 复刻；歌单行由 /api/sq/list 填充，不再是硬编码条目。
 static NSArray<NSDictionary *> *RLPSidebarItems(void) {
-    NSMutableArray *items = [NSMutableArray array];
-
-    // sec = 分组小标题（web 版 .sec：资料库 / 播放列表 / 音频引擎）。
-    [items addObjectsFromArray:@[
+    return @[
         @{@"sec": @"资料库"},
         @{@"name": @"专辑",     @"icon": @"square.stack", @"key": @"albums"},
         @{@"name": @"艺术家",   @"icon": @"person.2",     @"key": @"artists"},
@@ -79,15 +138,15 @@ static NSArray<NSDictionary *> *RLPSidebarItems(void) {
         @{@"name": @"播放队列", @"icon": @"list.bullet",  @"key": @"queue"},
         @{@"name": @"最近播放", @"icon": @"clock",        @"key": @"recent"},
         @{@"name": @"我的最爱", @"icon": @"heart",        @"key": @"favorites"},
-        // web 在这里渲染 #sqList（保存的队列，动态）。原生用独立页承载同一份数据。
-        @{@"name": @"保存的队列", @"icon": @"music.note.list", @"key": @"playlists"},
         @{@"sec": @"音频引擎"},
         // web data-v=station 的标题就是「快速开始」。
         @{@"name": @"快速开始", @"icon": @"play.square.stack", @"key": @"station"},
         @{@"name": @"设置",     @"icon": @"gearshape", @"key": @"settings"},
-    ]];
-    return items;
+    ];
 }
+
+/// 侧栏「我的歌单」区块的锚点分组标题（web .sqhd 的标题行；含右侧「＋ 新建」）。
+static NSString * const kSQSavedQueueSection = @"我的歌单";
 
 /// 行是不是分组标题行（不可选中）。
 static BOOL RLPRowIsSection(NSArray<NSDictionary *> *items, NSInteger row) {
@@ -104,7 +163,14 @@ static BOOL RLPRowIsSection(NSArray<NSDictionary *> *items, NSInteger row) {
         _hoverRow = -1;
         _pendingRow = -1;
         _selectedRow = -1;
-        _menuItems = RLPSidebarItems();
+        _savedQueues = @[];
+        _menuItems = [NSMutableArray array];
+        [self rebuildMenuItems];
+        // 歌单在别处被新建/改名/删除后，侧栏必须跟着变（web paintSavedQueues 同语义）。
+        [[NSNotificationCenter defaultCenter] addObserver:self
+                                                 selector:@selector(onSavedQueuesChangedNote:)
+                                                     name:@"RLPSavedQueuesChangedNotification"
+                                                   object:nil];
     }
     return self;
     // 选中必须在**表格已经有行之后**才设：reloadData 之前 selectRowIndexes 会被丢弃，
@@ -123,9 +189,155 @@ static BOOL RLPRowIsSection(NSArray<NSDictionary *> *items, NSInteger row) {
 - (NSInteger)rowCount { return (NSInteger)_menuItems.count; }
 
 - (NSInteger)navRowCount {
+    // 「我的歌单」的空态行（web .sqempty）是可点入口但不是 .nav，不计入导航项。
     NSInteger n = 0;
-    for (NSDictionary *it in _menuItems) if (!it[@"sec"]) ++n;
+    for (NSDictionary *it in _menuItems)
+        if (!it[@"sec"] && ![it[@"empty"] boolValue]) ++n;
     return n;
+}
+
+#pragma mark - 「我的歌单」：web #sqList 的原生复刻
+
+/// 把「我的歌单」分组插进静态清单：分组标题 + （歌单行 | 空态行）。
+/// web 结构（ui_page.h:1484 + ui_script.h paintSavedQueues）：
+///   `<div id=sqList class=sqlist>` → 标题行 .sqhd / 歌单行 .sqrow(name + ✎ + ×) / 空态 .sqempty
+- (void)rebuildMenuItems {
+    NSArray *base = RLPSidebarItems();
+    NSMutableArray *out = [NSMutableArray array];
+    NSString *prevSec = nil;
+    BOOL inserted = NO;
+    for (NSDictionary *it in base) {
+        // 「我的歌单」插在「播放列表」分组的最后一项（我的最爱）之后、音频引擎之前。
+        if (!inserted && it[@"sec"] && prevSec && [it[@"sec"] isEqualToString:@"音频引擎"]) {
+            [self appendSavedQueueItemsTo:out];
+            inserted = YES;
+        }
+        [out addObject:it];
+        if (it[@"sec"]) prevSec = it[@"sec"];
+    }
+    if (!inserted) [self appendSavedQueueItemsTo:out];   // 兜底：清单改了也不会丢这一组
+    _menuItems = out;
+}
+
+- (void)appendSavedQueueItemsTo:(NSMutableArray *)out {
+    [out addObject:@{@"sec": kSQSavedQueueSection}];
+    if (!_savedQueues.count) {
+        // 空态：web 用**一整行可点**的占位（不是"去右上角点新建"的提示文字）。
+        [out addObject:@{@"empty": @YES, @"name": @"＋ 新建歌单", @"key": @"playlists"}];
+        return;
+    }
+    for (NSUInteger i = 0; i < _savedQueues.count; ++i) {
+        NSDictionary *q = _savedQueues[i];
+        [out addObject:@{@"sqindex": @(i),
+                         @"name": q[@"name"] ?: @"",
+                         @"count": q[@"n"] ?: @0,
+                         @"key": @"playlists"}];
+    }
+}
+
+- (void)reloadSavedQueues {
+    RLPCoreClient *core = [RLPCoreClient shared];
+    if (self.ignoreSavedQueues) {
+        _savedQueues = @[];
+        [self rebuildMenuItems];
+        [_tableView reloadData];
+        return;
+    }
+    if (!core.started) {
+        // 没有核心（selftest / 纯视图树）时不发请求，保持 0 个歌单。
+        _savedQueues = @[];
+        [self rebuildMenuItems];
+        [_tableView reloadData];
+        return;
+    }
+    const NSUInteger seq = ++_sqSeq;
+    __weak __typeof__(self) weakSelf = self;
+    [core getJSON:@"/api/sq/list" completion:^(NSDictionary * _Nullable json) {
+        __typeof__(self) self_ = weakSelf;
+        if (!self_ || seq != self_->_sqSeq) return;
+        NSArray *qs = [json[@"queues"] isKindOfClass:[NSArray class]] ? json[@"queues"] : @[];
+        NSMutableArray *rows = [NSMutableArray array];
+        for (id x in qs) {
+            if (![x isKindOfClass:[NSDictionary class]]) continue;
+            NSString *name = [x[@"name"] isKindOfClass:[NSString class]] ? x[@"name"] : @"";
+            if (!name.length) continue;
+            [rows addObject:@{@"name": name,
+                              @"n": [x[@"n"] respondsToSelector:@selector(integerValue)] ? x[@"n"] : @0}];
+        }
+        self_->_savedQueues = rows;
+        [self_ rebuildMenuItems];
+        [self_->_tableView reloadData];
+    }];
+}
+
+- (void)onSavedQueuesChangedNote:(NSNotification *)note {
+    (void)note;
+    [self reloadSavedQueues];
+}
+
+- (NSInteger)savedQueueRowCount { return (NSInteger)_savedQueues.count; }
+- (NSArray<NSString *> *)savedQueueNames {
+    NSMutableArray *names = [NSMutableArray array];
+    for (NSDictionary *q in _savedQueues) [names addObject:q[@"name"] ?: @""];
+    return names;
+}
+
+- (BOOL)validSavedQueueIndex:(NSInteger)index {
+    return index >= 0 && index < (NSInteger)_savedQueues.count;
+}
+
+- (void)postSavedQueuesChanged {
+    // 侧栏自己刷新 + 通知歌单页（页面缓存里的实例也要跟着重拉，否则两处数据会分叉）。
+    [self reloadSavedQueues];
+    [[NSNotificationCenter defaultCenter] postNotificationName:@"RLPSavedQueuesChangedNotification"
+                                                        object:nil];
+}
+
+- (void)renameSavedQueueAtIndex:(NSInteger)index to:(NSString *)newName {
+    if (![self validSavedQueueIndex:index] || !newName.length) return;
+    NSString *from = _savedQueues[index][@"name"] ?: @"";
+    if ([newName isEqualToString:from]) return;
+    NSString *url = [NSString stringWithFormat:@"/api/sq/rename?from=%@&to=%@",
+                     RLPEnc(from), RLPEnc(newName)];
+    __weak __typeof__(self) weakSelf = self;
+    [[RLPCoreClient shared] postJSON:url body:nil completion:^(NSDictionary * _Nullable json) {
+        __typeof__(self) self_ = weakSelf;
+        if (!self_) return;
+        if (json && [json[@"ok"] boolValue]) {
+            RLPToast(RLPTr(@"已重命名"));
+            [self_ postSavedQueuesChanged];
+        } else {
+            RLPToast([json[@"error"] isKindOfClass:[NSString class]] ? json[@"error"] : RLPTr(@"重命名失败"));
+        }
+    }];
+}
+
+- (void)deleteSavedQueueAtIndex:(NSInteger)index {
+    if (![self validSavedQueueIndex:index]) return;
+    NSString *name = _savedQueues[index][@"name"] ?: @"";
+    NSString *url = [NSString stringWithFormat:@"/api/sq/delete?name=%@", RLPEnc(name)];
+    __weak __typeof__(self) weakSelf = self;
+    [[RLPCoreClient shared] postJSON:url body:nil completion:^(NSDictionary * _Nullable json) {
+        __typeof__(self) self_ = weakSelf;
+        if (!self_) return;
+        if (json && [json[@"ok"] boolValue]) {
+            RLPToast(RLPTr(@"已删除歌单"));
+            [self_ postSavedQueuesChanged];
+        } else {
+            RLPToast([json[@"error"] isKindOfClass:[NSString class]] ? json[@"error"] : RLPTr(@"删除失败"));
+        }
+    }];
+}
+
+/// 点歌单行：先按 key 路由到歌单页，再把目标歌单名交给页面（页面可能刚刚才被创建，
+/// 所以用通知而不是直接调方法 —— 创建顺序由主窗口决定，侧栏不该依赖页面实例存在）。
+- (void)openSavedQueueNamed:(NSString *)name {
+    if (!name.length) return;
+    _pendingSavedQueueName = name;
+    [[NSNotificationCenter defaultCenter] postNotificationName:@"RLPNavigateKeyNotification"
+                                                        object:@"playlists"];
+    [[NSNotificationCenter defaultCenter] postNotificationName:@"RLPSelectSavedQueueNotification"
+                                                        object:name];
 }
 
 - (NSInteger)selectedRow { return _selectedRow; }
@@ -249,11 +461,167 @@ static BOOL RLPRowIsSection(NSArray<NSDictionary *> *items, NSInteger row) {
 - (NSInteger)numberOfRowsInTableView:(NSTableView *)tableView { return (NSInteger)_menuItems.count; }
 
 - (CGFloat)tableView:(NSTableView *)tableView heightOfRow:(NSInteger)row {
+    // 「我的歌单」标题行 web .sqhd 是 14px 上边距，比普通 .sec 略高，但仍用同一行高。
     return RLPRowIsSection(_menuItems, row) ? 26 : 34;
 }
 
-- (NSView *)tableView:(NSTableView *)tableView viewForTableColumn:(NSTableColumn *)tableColumn row:(NSInteger)row {
+/// 分组标题行（web .sec；「我的歌单」这一组额外带右侧「＋ 新建」= web .sqnew-btn）。
+- (NSView *)sectionCellForTableView:(NSTableView *)tableView item:(NSDictionary *)item {
+    NSTextField *sec = [NSTextField labelWithString:RLPTr(item[@"sec"])];
+    sec.font = [NSFont systemFontOfSize:11 weight:NSFontWeightSemibold];
+    sec.textColor = [RLPTheme current].mut;   // web .sec color:var(--mut)
+    sec.translatesAutoresizingMaskIntoConstraints = NO;
+
+    NSTableCellView *wrap = [[NSTableCellView alloc] initWithFrame:NSMakeRect(0, 0, 232, 26)];
+    wrap.identifier = @"SecWrap";
+    [wrap addSubview:sec];
+    NSMutableArray *cs = [NSMutableArray arrayWithObjects:
+        [sec.leadingAnchor constraintEqualToAnchor:wrap.leadingAnchor constant:20],
+        [sec.centerYAnchor constraintEqualToAnchor:wrap.centerYAnchor constant:3], nil];
+    if ([item[@"sec"] isEqualToString:kSQSavedQueueSection]) {
+        NSButton *plus = [NSButton buttonWithTitle:RLPTr(@"＋ 新建") target:self
+                                            action:@selector(onCreateSavedQueue:)];
+        plus.bordered = NO;
+        plus.identifier = @"sq.new";
+        plus.font = [NSFont systemFontOfSize:11.5 weight:NSFontWeightMedium];
+        plus.contentTintColor = [RLPTheme current].mut;   // web .sqnew-btn color:var(--mut)
+        plus.translatesAutoresizingMaskIntoConstraints = NO;
+        [wrap addSubview:plus];
+        [cs addObjectsFromArray:@[
+            [plus.trailingAnchor constraintEqualToAnchor:wrap.trailingAnchor constant:-12],
+            [plus.centerYAnchor constraintEqualToAnchor:sec.centerYAnchor],
+        ]];
+    }
+    [NSLayoutConstraint activateConstraints:cs];
+    return wrap;
+}
+
+/// 空态行（web .sqempty：虚线边框 + 「＋ 新建歌单」整行可点）。
+- (NSView *)emptySavedQueueCellForTableView:(NSTableView *)tableView {
+    NSTableCellView *cell = [tableView makeViewWithIdentifier:@"SQEmpty" owner:self];
+    if (!cell) {
+        cell = [[NSTableCellView alloc] initWithFrame:NSMakeRect(0, 0, 232, 34)];
+        cell.identifier = @"SQEmpty";
+        RLPDashedBox *box = [[RLPDashedBox alloc] initWithFrame:NSZeroRect];
+        box.identifier = @"sq.empty";
+        box.translatesAutoresizingMaskIntoConstraints = NO;
+        [cell addSubview:box];
+        NSTextField *lab = [NSTextField labelWithString:RLPTr(@"＋ 新建歌单")];
+        lab.identifier = @"sq.empty.label";
+        lab.font = [NSFont systemFontOfSize:13];
+        lab.translatesAutoresizingMaskIntoConstraints = NO;
+        [cell addSubview:lab];
+        [NSLayoutConstraint activateConstraints:@[
+            // web .sqempty 的边框盒子与 .nav 同左沿（8），内部文字与导航文字同基线（20）。
+            [box.leadingAnchor constraintEqualToAnchor:cell.leadingAnchor constant:8],
+            [box.trailingAnchor constraintEqualToAnchor:cell.trailingAnchor constant:-8],
+            [box.topAnchor constraintEqualToAnchor:cell.topAnchor constant:1],
+            [box.bottomAnchor constraintEqualToAnchor:cell.bottomAnchor constant:-1],
+            [lab.leadingAnchor constraintEqualToAnchor:cell.leadingAnchor constant:20],
+            [lab.centerYAnchor constraintEqualToAnchor:cell.centerYAnchor],
+            [lab.trailingAnchor constraintLessThanOrEqualToAnchor:cell.trailingAnchor constant:-16],
+        ]];
+    }
     RLPTheme *t = [RLPTheme current];
+    RLPDashedBox *box = nil;
+    NSTextField *lab = nil;
+    for (NSView *s in cell.subviews) {
+        if ([s.identifier isEqualToString:@"sq.empty"]) box = (RLPDashedBox *)s;
+        if ([s.identifier isEqualToString:@"sq.empty.label"]) lab = (NSTextField *)s;
+    }
+    box.strokeColor = t.line;
+    box.fillColor = (_hoverRow == [tableView rowForView:cell] && _hoverRow >= 0) ? t.hov : NSColor.clearColor;
+    lab.textColor = t.mut;
+    cell.toolTip = RLPTr(@"新建歌单");
+    return cell;
+}
+
+/// 歌单行（web .sqrow：名字 + ✎ + ×，选中态 .on）。
+- (NSView *)savedQueueCellForTableView:(NSTableView *)tableView row:(NSInteger)row item:(NSDictionary *)item {
+    NSTableCellView *cell = [tableView makeViewWithIdentifier:@"SQRow" owner:self];
+    if (!cell) {
+        cell = [[NSTableCellView alloc] initWithFrame:NSMakeRect(0, 0, 232, 34)];
+        cell.identifier = @"SQRow";
+        NSView *pill = [[NSView alloc] initWithFrame:NSZeroRect];
+        pill.identifier = @"gain";   // 与普通导航行同名 pill，颜色更新路径一致
+        pill.wantsLayer = YES;
+        pill.layer.cornerRadius = 8;
+        pill.translatesAutoresizingMaskIntoConstraints = NO;
+        [cell addSubview:pill];
+        NSTextField *lab = RLPLabel(@"", [NSFont systemFontOfSize:13], [RLPTheme current].text);
+        lab.identifier = @"label";
+        lab.translatesAutoresizingMaskIntoConstraints = NO;
+        [cell addSubview:lab];
+        NSButton *ren = [NSButton buttonWithTitle:@"\u270e" target:self action:@selector(onRenameSavedQueue:)];
+        ren.bordered = NO;
+        ren.identifier = @"sq.ren";
+        ren.font = [NSFont systemFontOfSize:12];
+        ren.translatesAutoresizingMaskIntoConstraints = NO;
+        [cell addSubview:ren];
+        NSButton *del = [NSButton buttonWithTitle:@"\u00d7" target:self action:@selector(onDeleteSavedQueue:)];
+        del.bordered = NO;
+        del.identifier = @"sq.del";
+        del.font = [NSFont systemFontOfSize:12];
+        del.translatesAutoresizingMaskIntoConstraints = NO;
+        [cell addSubview:del];
+        [NSLayoutConstraint activateConstraints:@[
+            [pill.leadingAnchor constraintEqualToAnchor:cell.leadingAnchor constant:8],
+            [pill.trailingAnchor constraintEqualToAnchor:cell.trailingAnchor constant:-8],
+            [pill.topAnchor constraintEqualToAnchor:cell.topAnchor constant:1],
+            [pill.bottomAnchor constraintEqualToAnchor:cell.bottomAnchor constant:-1],
+            [del.trailingAnchor constraintEqualToAnchor:cell.trailingAnchor constant:-12],
+            [del.centerYAnchor constraintEqualToAnchor:cell.centerYAnchor],
+            [del.widthAnchor constraintEqualToConstant:18],
+            [del.heightAnchor constraintEqualToConstant:18],
+            [ren.trailingAnchor constraintEqualToAnchor:del.leadingAnchor constant:-4],
+            [ren.centerYAnchor constraintEqualToAnchor:cell.centerYAnchor],
+            [ren.widthAnchor constraintEqualToConstant:18],
+            [ren.heightAnchor constraintEqualToConstant:18],
+            [lab.leadingAnchor constraintEqualToAnchor:cell.leadingAnchor constant:20],
+            [lab.centerYAnchor constraintEqualToAnchor:cell.centerYAnchor],
+            [lab.trailingAnchor constraintLessThanOrEqualToAnchor:ren.leadingAnchor constant:-6],
+        ]];
+    }
+    RLPTheme *t = [RLPTheme current];
+    NSView *pill = nil;
+    NSTextField *lab = nil;
+    NSButton *ren = nil, *del = nil;
+    for (NSView *s in cell.subviews) {
+        if ([s.identifier isEqualToString:@"gain"]) pill = s;
+        if ([s.identifier isEqualToString:@"label"]) lab = (NSTextField *)s;
+        if ([s.identifier isEqualToString:@"sq.ren"]) ren = (NSButton *)s;
+        if ([s.identifier isEqualToString:@"sq.del"]) del = (NSButton *)s;
+    }
+    NSString *name = item[@"name"] ?: @"";
+    const BOOL selected = (_selectedRow == row);
+    const BOOL hovered = (_hoverRow == row);
+    lab.stringValue = name;
+    lab.toolTip = name;
+    lab.font = selected ? [NSFont systemFontOfSize:13 weight:NSFontWeightSemibold]
+                        : [NSFont systemFontOfSize:13];
+    lab.textColor = selected ? t.accentText : t.text;
+    pill.layer.backgroundColor = selected ? t.accentWeak.CGColor
+                                : (hovered ? t.hov.CGColor : NSColor.clearColor.CGColor);
+    ren.tag = del.tag = [item[@"sqindex"] integerValue];
+    ren.contentTintColor = t.mut;
+    del.contentTintColor = t.mut;
+    ren.toolTip = RLPTr(@"重命名");
+    del.toolTip = RLPTr(@"删除");
+    cell.layer.backgroundColor = NSColor.clearColor.CGColor;
+    return cell;
+}
+
+- (NSView *)tableView:(NSTableView *)tableView viewForTableColumn:(NSTableColumn *)tableColumn row:(NSInteger)row {
+    (void)tableColumn;
+    RLPTheme *t = [RLPTheme current];
+    NSDictionary *item = _menuItems[row];
+
+    // 分组标题行（web .sec）：11px 灰字、无图标无胶囊。
+    if (RLPRowIsSection(_menuItems, row)) return [self sectionCellForTableView:tableView item:item];
+    // 「我的歌单」空态整行（web .sqempty）+ 动态歌单行（web .sqrow）。
+    if ([item[@"empty"] boolValue]) return [self emptySavedQueueCellForTableView:tableView];
+    if (item[@"sqindex"]) return [self savedQueueCellForTableView:tableView row:row item:item];
+
     NSTableCellView *cell = [tableView makeViewWithIdentifier:@"Cell" owner:self];
     if (!cell) {
         cell = [[NSTableCellView alloc] initWithFrame:NSMakeRect(0, 0, 232, 34)];
@@ -299,43 +667,6 @@ static BOOL RLPRowIsSection(NSArray<NSDictionary *> *items, NSInteger row) {
         ]];
     }
 
-    NSDictionary *item = _menuItems[row];
-    // 分组标题行：11px 灰字、无图标无胶囊（web .sec 同口径）。
-    if (RLPRowIsSection(_menuItems, row)) {
-        NSTextField *sec = [tableView makeViewWithIdentifier:@"Sec" owner:self];
-        if (!sec) {
-            sec = [NSTextField labelWithString:@""];
-            sec.identifier = @"Sec";
-            sec.font = [NSFont systemFontOfSize:11 weight:NSFontWeightSemibold];
-            sec.translatesAutoresizingMaskIntoConstraints = NO;
-        }
-        sec.stringValue = RLPTr(item[@"sec"]);
-        sec.textColor = [RLPTheme current].mut;
-        (void)0;
-        // 用一个容器包住以便左缩进
-        NSTableCellView *wrap = [[NSTableCellView alloc] initWithFrame:NSMakeRect(0, 0, 232, 26)];
-        [wrap addSubview:sec];
-        NSMutableArray *cs = [NSMutableArray arrayWithObjects:
-            [sec.leadingAnchor constraintEqualToAnchor:wrap.leadingAnchor constant:20],
-            [sec.centerYAnchor constraintEqualToAnchor:wrap.centerYAnchor constant:3], nil];
-        // 「我的歌单」右侧给「+ 新建」（web .sqnew-btn 同位置同语义）
-        if ([item[@"sec"] isEqualToString:@"我的歌单"]) {
-            NSButton *plus = [NSButton buttonWithTitle:RLPTr(@"+ 新建") target:self
-                                                action:@selector(onNewPlaylist:)];
-            plus.bordered = NO;
-            plus.identifier = @"side.newplaylist";
-            plus.font = [NSFont systemFontOfSize:11];
-            plus.contentTintColor = [RLPTheme current].accent;
-            plus.translatesAutoresizingMaskIntoConstraints = NO;
-            [wrap addSubview:plus];
-            [cs addObjectsFromArray:@[
-                [plus.trailingAnchor constraintEqualToAnchor:wrap.trailingAnchor constant:-12],
-                [plus.centerYAnchor constraintEqualToAnchor:sec.centerYAnchor],
-            ]];
-        }
-        [NSLayoutConstraint activateConstraints:cs];
-        return wrap;
-    }
     NSImageView *iconView = nil;
     NSTextField *label = nil;
     for (NSView *sub in cell.subviews) {
@@ -344,7 +675,7 @@ static BOOL RLPRowIsSection(NSArray<NSDictionary *> *items, NSInteger row) {
     }
 
     const BOOL selected = (_selectedRow == row);
-    const BOOL hovered = (self.hoverRow == row);
+    const BOOL hovered = (_hoverRow == row);
     iconView.image = [NSImage imageWithSystemSymbolName:item[@"icon"] accessibilityDescription:item[@"name"]];
     iconView.contentTintColor = selected ? t.accent : t.mut;
     label.stringValue = RLPTr(item[@"name"]);
@@ -365,7 +696,14 @@ static BOOL RLPRowIsSection(NSArray<NSDictionary *> *items, NSInteger row) {
 - (void)onRowClicked:(id)sender {
     (void)sender;
     const NSInteger row = _tableView.clickedRow;
-    if (row >= 0 && !RLPRowIsSection(_menuItems, row)) [self selectRow:row];
+    if (row < 0 || row >= (NSInteger)_menuItems.count) return;
+    if (RLPRowIsSection(_menuItems, row)) return;
+    NSDictionary *item = _menuItems[row];
+    // web .sqempty：整行点击 ⟹ 直接弹「新建歌单」对话框（不是去右上角找按钮）。
+    if ([item[@"empty"] boolValue]) { [self onCreateSavedQueue:nil]; return; }
+    // web .sqrow：点击 ⟹ renderSavedQueuePage(q.name)。
+    if (item[@"sqindex"]) { [self selectRow:row]; [self openSavedQueueNamed:item[@"name"]]; return; }
+    [self selectRow:row];
 }
 
 - (void)tableViewSelectionDidChange:(NSNotification *)notification {
@@ -389,6 +727,13 @@ static BOOL RLPRowIsSection(NSArray<NSDictionary *> *items, NSInteger row) {
     if (self.onSelect) self.onSelect(row);
     NSString *k = [self keyForRow:row];
     if (k.length && self.onSelectKey) self.onSelectKey(k);
+    // 选中某份歌单时把目标名广播给歌单页（web 进入 sq 页必然知道 sqName）。
+    NSString *sqName = _menuItems[row][@"sqindex"] ? _menuItems[row][@"name"] : nil;
+    if (sqName.length) {
+        _pendingSavedQueueName = sqName;
+        [[NSNotificationCenter defaultCenter] postNotificationName:@"RLPSelectSavedQueueNotification"
+                                                            object:sqName];
+    }
 }
 
 #pragma mark - 符号 key 路由（对外一律用 key，不用裸行号）
@@ -424,11 +769,61 @@ static BOOL RLPRowIsSection(NSArray<NSDictionary *> *items, NSInteger row) {
     }
 }
 
-/// 侧栏「+ 新建」：切到歌单页并发一次新建请求（歌单页自己弹命名框）。
-- (void)onNewPlaylist:(id)sender {
+#pragma mark - 「我的歌单」动作（web newSavedQueueDialog / renameQueueDialog / deleteSavedQueue）
+
+/// 「＋ 新建」（分组标题右侧与空态整行共用；web .sqnew-btn / .sqempty 同一个 newSavedQueueDialog）。
+- (void)onCreateSavedQueue:(id)sender {
     (void)sender;
-    [[NSNotificationCenter defaultCenter] postNotificationName:@"RLPNavigateKeyNotification" object:@"playlists"];
-    [[NSNotificationCenter defaultCenter] postNotificationName:@"RLPNewPlaylistNotification" object:nil];
+    // web newSavedQueueDialog 的原生同构：标题「新建歌单」/ 主按钮「创建」/ 占位符 / 提示小字。
+    NSString *name = RLPAskText(@"新建歌单", @"创建", @"",
+                                @"例如 睡眠专区",
+                                @"创建一份空歌单；可通过右键歌曲或单曲页「添加到歌单」加歌");
+    if (!name) return;
+    [self createSavedQueueNamed:name];
+}
+
+- (void)createSavedQueueNamed:(NSString *)name {
+    if (!name.length) return;
+    NSString *url = [NSString stringWithFormat:@"/api/sq/add?name=%@", RLPEnc(name)];
+    __weak __typeof__(self) weakSelf = self;
+    [[RLPCoreClient shared] postJSON:url body:nil completion:^(NSDictionary * _Nullable json) {
+        __typeof__(self) self_ = weakSelf;
+        if (!self_) return;
+        if (!json || ![json[@"ok"] boolValue]) {
+            RLPToast([json[@"error"] isKindOfClass:[NSString class]] ? json[@"error"] : RLPTr(@"创建失败"));
+            return;
+        }
+        // web：toast('已新建歌单：' + j.name) —— 必须带歌单名（旧实现只写「已新建歌单」）。
+        NSString *created = [json[@"name"] isKindOfClass:[NSString class]] ? json[@"name"] : name;
+        RLPToast([NSString stringWithFormat:@"%@%@", RLPTr(@"已新建歌单："), created]);
+        [self_ postSavedQueuesChanged];
+        [self_ openSavedQueueNamed:created];   // web renderSavedQueuePage(j.name)
+    }];
+}
+
+/// 歌单行 ✎（web .sqb.ren → renameQueueDialog）。
+- (void)onRenameSavedQueue:(id)sender {
+    const NSInteger idx = [(NSButton *)sender tag];
+    if (![self validSavedQueueIndex:idx]) return;
+    NSString *from = _savedQueues[(NSUInteger)idx][@"name"] ?: @"";
+    NSString *to = RLPAskText(@"重命名歌单", @"改名", from, nil,
+                              @"改名后立刻写入 rlplayer-savedqueues.conf（重启后是新名字）");
+    if (!to) return;
+    [self renameSavedQueueAtIndex:idx to:to];
+}
+
+/// 歌单行 ×（web .sqb.del → deleteSavedQueue，先确认）。
+- (void)onDeleteSavedQueue:(id)sender {
+    const NSInteger idx = [(NSButton *)sender tag];
+    if (![self validSavedQueueIndex:idx]) return;
+    NSString *name = _savedQueues[(NSUInteger)idx][@"name"] ?: @"";
+    NSAlert *a = [[NSAlert alloc] init];
+    a.messageText = [NSString stringWithFormat:@"%@%@」？", RLPTr(@"删除歌单「"), name];
+    a.informativeText = RLPTr(@"只删歌单记录，不删磁盘上的音乐文件。");
+    [a addButtonWithTitle:RLPTr(@"删除")];
+    [a addButtonWithTitle:RLPTr(@"取消")];
+    if ([a runModal] != NSAlertFirstButtonReturn) return;
+    [self deleteSavedQueueAtIndex:idx];
 }
 
 - (void)applyTheme {

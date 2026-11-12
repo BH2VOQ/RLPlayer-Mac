@@ -39,6 +39,11 @@
 #import "RLPSupport.h"
 #import "RLPTheme.h"
 
+@interface RLPNowPlayingViewController (OfflineAuditProjection)
+- (void)applyLyricText:(NSString *)text forPath:(NSString *)path;
+- (void)updateLyricPosition:(double)pos;
+@end
+
 #include <cstdio>
 #include <cstdlib>
 
@@ -300,6 +305,86 @@ int RLPRunFunctionalAudit(NSString *outDir) {
            "返回后回到专辑页", NSStringFromClass(wc.currentContent.class));
     }
 
+    // ---- ②a2 专辑页图一信息层：发布信息 + 其他作品（Apple Music 式）----
+    // 用户 2026-11-12：专辑页面按照图一（Apple Music 专辑页）做。图一在曲目表下方有
+    // "N 首歌曲，X 分钟 / ℗ 年份"，以及一条「同艺人其他作品」的横向封面卡。
+    // 旧实现两者都没有 ⟹ 判据必须能在旧实现上红。
+    // 特意选 John Coltrane 的专辑（隔离夹具里他有 2 张）：其他作品至少 1 张卡，判据不是空的。
+    {
+        NSString *coltraneKey = nil;
+        NSArray *albumDicts = [albs[@"albums"] isKindOfClass:[NSArray class]] ? albs[@"albums"] : @[];
+        for (NSDictionary *d in albumDicts)
+            if ([d[@"artist"] isEqual:@"John Coltrane"] && coltraneKey.length == 0) {
+                coltraneKey = [d[@"k"] isKindOfClass:[NSString class]] ? d[@"k"] : nil;
+            }
+        CK(coltraneKey.length > 0, "夹具里有 John Coltrane 的专辑（其他作品判据的前提）",
+           [albumDicts componentsJoinedByString:@"|"]);
+        if (coltraneKey.length) {
+            RLPRequestOpenAlbum(coltraneKey);
+            Pump(1.0);
+            RLPAlbumDetailViewController *ad =
+                [wc.currentContent isKindOfClass:[RLPAlbumDetailViewController class]]
+                ? (RLPAlbumDetailViewController *)wc.currentContent : nil;
+            CK(ad != nil, "已进入 John Coltrane 的专辑详情", NSStringFromClass(wc.currentContent.class));
+            if (ad) {
+                NSMutableArray<NSView *> *av = [NSMutableArray array];
+                CollectAllViews(ad.view, av);
+                NSMutableDictionary *aById = [NSMutableDictionary dictionary];
+                for (NSView *v in av) if (v.identifier.length) aById[v.identifier] = v;
+
+                // ① 曲目表下方的发布信息：N 首歌曲，X 分钟 + ℗ 年份
+                NSTextField *fc = aById[@"album.footer.count"];
+                NSTextField *cr = aById[@"album.footer.copyright"];
+                CK(fc != nil && fc.stringValue.length > 0, "曲目表下方有『N 首歌曲，X 分钟』",
+                   fc ? fc.stringValue : @"缺 album.footer.count");
+                CK(fc && [fc.stringValue containsString:@"2"], "发布信息里的曲目数与真实曲目数一致",
+                   fc ? fc.stringValue : @"nil");
+                CK(cr != nil && !cr.hidden && [cr.stringValue containsString:@"\u2117"],
+                   "版权行渲染出来了（℗ 年份，图一底部那段）",
+                   cr ? cr.stringValue : @"缺 album.footer.copyright");
+                // 几何：发布信息必须在曲目表下方（不是叠在表格上）
+                NSView *tableV = nil;
+                for (NSView *v in av) if ([v isKindOfClass:[NSTableView class]]) { tableV = v; break; }
+                CK(tableV != nil, "曲目表在视图树里", @"找不到 NSTableView");
+                if (tableV && fc) {
+                    // 统一到**翻转的**文档视图再比：专辑文档 isFlipped=YES（y 向下增长），
+                    // 所以「在下方」= y 更大。两个视图若用各自坐标系比较，量出来的是两套数字（本判据假红过一次）。
+                    NSView *doc = tableV;
+                    while (doc && !doc.isFlipped) doc = doc.superview;
+                    if (doc) {
+                        const CGFloat fy = [fc convertPoint:NSZeroPoint toView:doc].y;
+                        const CGFloat ty = [tableV convertPoint:NSZeroPoint toView:doc].y;
+                        CK(fy > ty, "发布信息在曲目表下方（flipped 文档里 y 更大）",
+                           [NSString stringWithFormat:@"footer.y=%.0f table.y=%.0f", fy, ty]);
+                    } else {
+                        CK(NO, "能定位到翻转的专辑文档视图（几何判据的前提）", @"找不到 flipped 祖先");
+                    }
+                }
+
+                // ② 其他作品：标题 + >=1 张可点封面卡
+                NSTextField *owt = aById[@"album.otherworks.title"];
+                CK(owt != nil && !owt.hidden && owt.stringValue.length > 0,
+                   "『其他作品』区标题已渲染（图一那条横排的标题）",
+                   owt ? owt.stringValue : @"缺 album.otherworks.title");
+                NSInteger cards = 0;
+                for (NSView *v in av) if ([v.identifier isEqualToString:@"album.workcard"]) ++cards;
+                CK(cards >= 1, "『其他作品』区有 >= 1 张封面卡（同艺人另一张专辑）",
+                   [NSString stringWithFormat:@"cards=%ld", (long)cards]);
+                // 卡必须是可点的真按钮（点了能进那张专辑），不是一张装饰图
+                NSView *firstCard = nil;
+                for (NSView *v in av) if ([v.identifier isEqualToString:@"album.workcard"]) { firstCard = v; break; }
+                CK([firstCard isKindOfClass:[NSButton class]] &&
+                   ((NSButton *)firstCard).action != NULL,
+                   "其他作品卡是可点按钮（有真实 action）",
+                   firstCard ? NSStringFromClass(firstCard.class) : @"nil");
+                CK(Snap(wc.window.contentView, [outDir stringByAppendingPathComponent:@"02c-album-works.png"],
+                        CGSizeMake(1180, 760)), "专辑页（含其他作品）截图已落盘", outDir);
+            }
+        }
+        // 回到第一张专辑，后续断言仍按原假设走
+        if (firstKey.length) { RLPRequestOpenAlbum(firstKey); Pump(0.8); }
+    }
+
     // ---- ②b 艺术家详情：必须能进、有内容、AI 资料层在位 ----
     {
         NSString *who = nil;
@@ -320,6 +405,130 @@ int RLPRunFunctionalAudit(NSString *outDir) {
             RLPRequestBack();
             Pump(0.4);
         }
+    }
+
+    // ---- ②c 侧栏「我的歌单」是动态列表（web #sqList）----
+    // 旧实现（2026-11-13 前）侧栏只有一行静态「保存的队列」，一条歌单条目都没有：
+    // 没有 条目 / ✎ 重命名 / × 删除 / 空态整行。判据必须能区分"静态一行"与"动态列表"，
+    // 所以整段用**真实核心 API** 造歌单，再看侧栏行有没有跟着变。
+    {
+        // 负向对照：模拟旧静态实现。带该环境变量跑一遍，本段必须整体红 ——
+        // 否则说明判据恒真（本仓库历史上最多次的失败原因）。
+        if (getenv("RLP_AUDIT_NEGATIVE_CONTROL")) wc.sidebar.ignoreSavedQueues = YES;
+
+        NSMutableArray<NSView *> *sv = [NSMutableArray array];
+        CollectAllViews(wc.sidebar.view, sv);
+        NSMutableDictionary *byId = [NSMutableDictionary dictionary];
+        for (NSView *v in sv) if (v.identifier.length) byId[v.identifier] = v;
+
+        // ① 隔离夹具里初始没有歌单 ⟹ 侧栏必须是**一整行可点**的空态（web .sqempty），
+        //    并且「我的歌单」标题行右侧有「＋ 新建」（web .sqnew-btn）。
+        [wc.sidebar reloadSavedQueues];
+        Pump(0.4);
+        CK([wc.sidebar savedQueueRowCount] == 0, "初始 0 个歌单（隔离夹具）",
+           [NSString stringWithFormat:@"sq=%ld", (long)[wc.sidebar savedQueueRowCount]]);
+        CK(byId[@"sq.empty"] != nil, "空态整行『＋ 新建歌单』在视图树里（web .sqempty）", @"缺 sq.empty");
+        CK(byId[@"sq.new"] != nil, "『我的歌单』标题行有『＋ 新建』（web .sqnew-btn）", @"缺 sq.new");
+        CK(byId[@"sq.empty"] && [byId[@"sq.empty"] isKindOfClass:[NSView class]] &&
+           ((NSView *)byId[@"sq.empty"]).frame.size.width > 0,
+           "空态行有真实宽度（不是塌成 0 的摆设）",
+           NSStringFromRect(((NSView *)byId[@"sq.empty"]).frame));
+
+        // ② 走**生产入口**新建一份歌单（web newSavedQueueDialog 的原生同构路径）：
+        //    不仅要落库，toast 还必须带上歌单名 —— web 是 `已新建歌单：<name>`，
+        //    旧实现只写「已新建歌单」，用户在图六里看到的差别就是这个。
+        NSString *madeByUi = @"侧栏新建演示";
+        [wc.sidebar createSavedQueueNamed:madeByUi];
+        Pump(0.8);
+        {
+            NSMutableArray<NSView *> *wv = [NSMutableArray array];
+            CollectAllViews(wc.window.contentView, wv);
+            BOOL sawToast = NO;
+            for (NSView *v in wv) {
+                if (![v isKindOfClass:[NSTextField class]]) continue;
+                NSString *s = ((NSTextField *)v).stringValue;
+                if ([s containsString:@"已新建歌单："] && [s containsString:madeByUi]) sawToast = YES;
+            }
+            CK(sawToast, "新建歌单 toast 带上歌单名（web：已新建歌单：<name>；旧实现只有「已新建歌单」)", madeByUi);
+            NSDictionary *l = [[RLPCoreClient shared] jsonWithMethod:@"GET" path:@"/api/sq/list" body:nil];
+            BOOL inBackend = NO;
+            for (NSDictionary *q in (l[@"queues"] ?: @[])) if ([q[@"name"] isEqual:madeByUi]) inBackend = YES;
+            CK(inBackend, "生产入口新建的歌单真的落库（不是只弹了个 toast）", @"");
+            // 清掉这份演示歌单，后面的断言从干净状态开始
+            [[RLPCoreClient shared] postJSON:[NSString stringWithFormat:@"/api/sq/delete?name=%@", RLPEnc(madeByUi)]
+                                       body:nil completion:nil];
+            Pump(0.4);
+        }
+
+        // ② 通过真实核心造 2 个歌单（web 走 /api/sq/add，同一后端路径）。
+        NSArray<NSString *> *want = @[@"睡眠专区", @"通勤"];
+        for (NSString *name in want) {
+            NSDictionary *r = [[RLPCoreClient shared] jsonWithMethod:@"POST"
+                                                                path:[NSString stringWithFormat:@"/api/sq/add?name=%@",
+                                                                      RLPEnc(name)]
+                                                                body:nil];
+            CK([r[@"ok"] boolValue], "后端已创建歌单", name);
+        }
+        // 侧栏靠广播刷新（web 每次 mutate 后都重拉 /api/sq/list 同语义）
+        [[NSNotificationCenter defaultCenter] postNotificationName:@"RLPSavedQueuesChangedNotification"
+                                                            object:nil];
+        Pump(0.7);
+
+        // ③ 侧栏出现 2 行，名字与顺序都对
+        CK([wc.sidebar savedQueueRowCount] == 2, "侧栏出现 2 行歌单（动态渲染）",
+           [NSString stringWithFormat:@"rows=%ld", (long)[wc.sidebar savedQueueRowCount]]);
+        CK([wc.sidebar.savedQueueNames isEqualToArray:want], "侧栏歌单名与后端一致且顺序一致",
+           [wc.sidebar.savedQueueNames componentsJoinedByString:@","]);
+        // 每一行都必须真的建出了 ✎ / ×（web .sqrow 的两个动作），不是只有名字
+        {
+            NSInteger ren = 0, del = 0;
+            NSMutableArray<NSView *> *sv2 = [NSMutableArray array];
+            CollectAllViews(wc.sidebar.view, sv2);
+            for (NSView *v in sv2) {
+                if ([v.identifier isEqualToString:@"sq.ren"]) ++ren;
+                if ([v.identifier isEqualToString:@"sq.del"]) ++del;
+            }
+            CK(ren == 2 && del == 2, "每行歌单都有 ✎ 与 ×（web .sqb ren/del）",
+               [NSString stringWithFormat:@"ren=%ld del=%ld", (long)ren, (long)del]);
+        }
+        CK(Snap(wc.window.contentView, [outDir stringByAppendingPathComponent:@"10b-sidebar-sqlist.png"],
+                CGSizeMake(1180, 760)), "侧栏歌单区块截图已落盘", outDir);
+
+        // ④ ✎ 改名：行文本必须跟着变（web renameQueueDialog）
+        [wc.sidebar renameSavedQueueAtIndex:0 to:@"深夜聆听"];
+        Pump(0.7);
+        NSArray<NSString *> *afterRename = wc.sidebar.savedQueueNames;
+        CK(afterRename.count == 2 && [afterRename[0] isEqualToString:@"深夜聆听"],
+           "✎ 改名后侧栏行文本变成新名字", [afterRename componentsJoinedByString:@","]);
+        NSDictionary *info = [[RLPCoreClient shared] jsonWithMethod:@"GET"
+            path:[NSString stringWithFormat:@"/api/sq/list"] body:nil];
+        NSArray *qs = info[@"queues"];
+        BOOL backendRenamed = NO;
+        for (NSDictionary *q in qs) if ([q[@"name"] isEqual:@"深夜聆听"]) backendRenamed = YES;
+        CK(backendRenamed, "改名真的落到后端（不是只改了侧栏内存里的字符串）", @"");
+
+        // ⑤ × 删除：该行必须消失（web deleteSavedQueue）
+        [wc.sidebar deleteSavedQueueAtIndex:1];
+        Pump(0.7);
+        NSArray<NSString *> *afterDelete = wc.sidebar.savedQueueNames;
+        CK(afterDelete.count == 1, "× 删除后侧栏只剩 1 行",
+           [NSString stringWithFormat:@"rows=%ld", (long)afterDelete.count]);
+        CK(![afterDelete containsObject:@"通勤"], "被删的歌单不再出现在侧栏",
+           [afterDelete componentsJoinedByString:@","]);
+
+        // ⑥ 点歌单行必须真的进歌单页，并且页面拿到的是**这份**歌单（web renderSavedQueuePage(name)）
+        NSString *walk = afterDelete.firstObject;
+        [wc.sidebar openSavedQueueNamed:walk];
+        Pump(0.8);
+        CK([wc.currentContent isKindOfClass:[RLPPlaylistsViewController class]],
+           "点歌单行后内容是歌单页", NSStringFromClass(wc.currentContent.class));
+        // KVC 只在真的进了歌单页时取，否则 NSUnknownKeyException 会把整轮审计带走（负向对照跑出来的）。
+        NSString *sel = [wc.currentContent isKindOfClass:[RLPPlaylistsViewController class]]
+                      ? [wc.currentContent valueForKey:@"selectedName"] : nil;
+        CK([sel isEqual:walk], "歌单页被选中到被点的那一份",
+           [NSString stringWithFormat:@"selected=%@", sel ?: @"(nil)"]);
+        CK(Snap(wc.window.contentView, [outDir stringByAppendingPathComponent:@"10c-playlist-page.png"],
+                CGSizeMake(1180, 760)), "歌单页截图已落盘", outDir);
     }
 
     // ---- ③ 逐个导航项：切过去必须有内容 + 截图 ----
@@ -411,6 +620,26 @@ int RLPRunFunctionalAudit(NSString *outDir) {
                 CK(list.frame.size.height + 1 >= need,
                    "数据源列表高度容得下全部行（不被裁切）",
                    [NSString stringWithFormat:@"h=%.1f need=%.1f", list.frame.size.height, need]);
+            }
+            // 图三（用户参考图）里整块最下面是「越靠上优先级越高」。异步行到达后，
+            // 面板自身也要重算高度 —— 旧实现挂载时按 0 行算高度（60），行回来仍是 60，
+            // 第 2 行以后连同底部提示一起被裁掉（2026-11-13 截图抓到的真故障）。
+            NSTextField *hint = nil;
+            for (NSView *v in mv3)
+                if ([v.identifier isEqualToString:@"metasrc.msg"]) hint = (NSTextField *)v;
+            CK(hint != nil && hint.stringValue.length > 0 && !hint.hidden,
+               "底部提示『越靠上优先级越高』在（图三最后一行）",
+               hint ? hint.stringValue : @"缺 metasrc.msg");
+            NSView *panel = hint ? hint.superview.superview : nil;
+            CK(panel != nil, "数据源面板容器可定位", panel ? NSStringFromClass(panel.class) : @"nil");
+            if (panel) {
+                const CGFloat want = panel.intrinsicContentSize.height;
+                CK(panel.frame.size.height + 1 >= want,
+                   "数据源面板高度随异步行数重算（底部提示不被裁）",
+                   [NSString stringWithFormat:@"h=%.1f want=%.1f", panel.frame.size.height, want]);
+                CK(hint.frame.size.height > 0,
+                   "底部提示有真实高度（没被 stack 压成 0）",
+                   [NSString stringWithFormat:@"hintH=%.1f", hint.frame.size.height]);
             }
             Snap(wc.window.contentView, [outDir stringByAppendingPathComponent:@"21-settings-meta-settled.png"],
                  CGSizeMake(1180, 760));
@@ -570,10 +799,18 @@ int RLPRunFunctionalAudit(NSString *outDir) {
 
     // ---- ⑤ 单曲页 + 播放条 ----
     RLPNowPlayingViewController *np = [[RLPNowPlayingViewController alloc] init];
-    np.view.frame = NSMakeRect(0, 0, 1100, 700);
+    np.view.frame = NSMakeRect(0, 0, 1180, 760);
     [np.view layoutSubtreeIfNeeded];
+    // Clearly-labelled offline UI fixture: same production LRC projection, no device playback.
+    [np setValue:@"/offline/UI-fixture.flac" forKey:@"currentPath"];
+    [(NSTextField *)[np valueForKey:@"titleLabel2"] setStringValue:@"离线布局夹具 · UI fixture"];
+    [(NSTextField *)[np valueForKey:@"artistLabel2"] setStringValue:@"仅验证布局，不代表真实播放取证"];
+    [np applyLyricText:@"[00:01.00]第一行 / first line\n[00:03.00]当前歌词 / active line\n[00:05.00]下一行 / next line" forPath:@"/offline/UI-fixture.flac"];
+    [np updateLyricPosition:3.2];
+    [np performSelector:@selector(anlPaint)];
+    np.view.needsLayout=YES;[np.view layoutSubtreeIfNeeded];
     Pump(0.5);
-    Snap(np.view, [outDir stringByAppendingPathComponent:@"30-nowplaying.png"], CGSizeMake(1100, 700));
+    Snap(np.view, [outDir stringByAppendingPathComponent:@"30-nowplaying.png"], CGSizeMake(1180, 760));
     CK(NonEmptyLabels(np.view) >= 3, "单曲页有实际内容",
        [NSString stringWithFormat:@"labels=%ld", (long)NonEmptyLabels(np.view)]);
 
@@ -583,6 +820,47 @@ int RLPRunFunctionalAudit(NSString *outDir) {
     const CGFloat barW = wc.playbackBar.bounds.size.width > 100 ? wc.playbackBar.bounds.size.width : 1180;
     Snap(wc.playbackBar, [outDir stringByAppendingPathComponent:@"31-playbar.png"], CGSizeMake(barW, 76));
     CK(barW >= 900, "播放条宽度铺满窗口", [NSString stringWithFormat:@"w=%.0f", barW]);
+
+    // ---- ⑤b 播放条封面必须可点进播放页（用户 2026-11-12 明确要求）----
+    // web 的底栏 #cv 没有 click 绑定（进播放页靠 #npOpen）——所以这是**改进**，不是复刻。
+    // 判据走"真事件链"：造一个鼠标按下事件投给封面视图，再看正在播放页是否真的被打开。
+    // 只断言"有手势/target"是假判据：绑了 handler 但点击路径断了照样过。
+    {
+        NSMutableArray<NSView *> *bv = [NSMutableArray array];
+        CollectAllViews(wc.playbackBar, bv);
+        NSView *cover = nil;
+        for (NSView *v in bv) if ([v.identifier isEqualToString:@"pb.cover"]) { cover = v; break; }
+        CK(cover != nil, "播放条封面在视图树里（web #cv）", @"缺 pb.cover");
+        CK(cover.frame.size.width > 0 && cover.frame.size.height > 0,
+           "封面有真实尺寸（可点击前提）", cover ? NSStringFromRect(cover.frame) : @"nil");
+        CK([cover acceptsFirstResponder] || [cover isKindOfClass:[NSImageView class]],
+           "封面是可命中的图片视图", NSStringFromClass(cover.class));
+
+        const BOOL wasOpen = wc.nowPlayingOverlayVisible;
+        if (wasOpen) [[NSNotificationCenter defaultCenter]
+                        postNotificationName:@"RLPCloseNowPlayingNotification" object:nil];
+        Pump(0.3);
+        // 投一个真实的左键按下事件（不是直接调 handler）：能证明"点击这块视图"这条路通。
+        NSEvent *ev = [NSEvent mouseEventWithType:NSEventTypeLeftMouseDown
+                                        location:[cover convertPoint:NSMakePoint(cover.bounds.size.width / 2,
+                                                                                cover.bounds.size.height / 2)
+                                                             toView:nil]
+                                   modifierFlags:0
+                                       timestamp:0
+                                    windowNumber:wc.window.windowNumber
+                                         context:nil
+                                     eventNumber:1
+                                      clickCount:1
+                                        pressure:1.0];
+        [cover mouseDown:ev];
+        Pump(0.6);
+        CK(wc.nowPlayingOverlayVisible, "点播放条封面 → 打开正在播放页",
+           [NSString stringWithFormat:@"overlay=%d", (int)wc.nowPlayingOverlayVisible]);
+        CK(wc.nowPlayingPage != nil, "正在播放页被真正创建（不是只翻了个标志位）",
+           NSStringFromClass(wc.nowPlayingPage.class));
+        [[NSNotificationCenter defaultCenter] postNotificationName:@"RLPCloseNowPlayingNotification" object:nil];
+        Pump(0.4);
+    }
 
     // ---- ⑥ 主题必须真的换得动：用**渲染像素**判定，不看属性自述 ----
     NSString *lightShot = [outDir stringByAppendingPathComponent:@"40-albums-light.png"];

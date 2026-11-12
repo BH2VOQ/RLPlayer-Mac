@@ -114,6 +114,20 @@ static const CGFloat kBodyPadY = 14.0;
         [self.superview setNeedsUpdateConstraints:YES];
 }
 
+#pragma mark - 异步内容到位（数据源行 / 表格返回后）
+
+/// 数据是**异步**到的：挂载时按 0 行量高度，行回来之后必须重算一次，
+/// 否则整块被按"0 行"裁掉 —— 底部提示「越靠上优先级越高」就是这么消失的
+/// （2026-11-13 在元数据页截图里抓到：卡片只有标题行那么高，数据源行溢出卡片）。
+/// 这里显式清掉"宽/项数未变"的短路，重算项高度，再让父卡片重新协商自身高度。
+- (void)contentDidChange {
+    self.lastItemCount = -1;
+    [self relayout];
+    [self invalidateIntrinsicContentSize];
+    if ([self.superview respondsToSelector:@selector(contentDidChange)])
+        [(id)self.superview contentDidChange];
+}
+
 - (void)setFrameSize:(NSSize)s {
     const BOOL changed = fabs(s.width - self.bounds.size.width) > 0.5;
     [super setFrameSize:s];

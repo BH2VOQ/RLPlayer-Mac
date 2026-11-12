@@ -270,6 +270,25 @@ if(APPLE)
   target_link_libraries(rlplayer_native PRIVATE rlapp_core
     "-framework AppKit" "-framework Security" "-framework MediaPlayer")
 
+  # Offline contracts for the frozen web album and mini bar.
+  add_executable(test_native_album_web tests/test_native_album_web.mm
+    tools/native_ui/RLPAlbumDetailViewController.mm tools/native_ui/RLPPageViewController.mm
+    tools/native_ui/RLPModels.mm tools/native_ui/RLPSupport.mm tools/native_ui/RLPTheme.mm
+    tools/native_ui/RLPNativeI18n.mm tools/native_ui/RLPTrackActions.mm
+    tools/native_ui/RLPAnalysisSummary.mm tools/native_ui/RLPCoreClient.mm)
+  add_executable(test_native_bar_web tests/test_native_bar_web.mm
+    tools/native_ui/RLPPlaybackBarView.mm tools/native_ui/RLPSignalChain.mm
+    tools/native_ui/RLPSupport.mm tools/native_ui/RLPModels.mm
+    tools/native_ui/RLPTheme.mm tools/native_ui/RLPNativeI18n.mm)
+  foreach(t IN ITEMS test_native_album_web test_native_bar_web)
+    target_compile_options(${t} PRIVATE -fobjc-arc)
+    target_include_directories(${t} PRIVATE src tools tools/native_ui)
+    target_link_libraries(${t} PRIVATE "-framework AppKit")
+  endforeach()
+  target_link_libraries(test_native_album_web PRIVATE rlapp_core)
+  add_test(NAME native_album_web COMMAND test_native_album_web)
+  add_test(NAME native_bar_web COMMAND test_native_bar_web)
+
   # 原生 UI 的两条离线门禁（不联网、不开窗口、不发声）：
   #   native_ui_selftest = 视图树契约（10 项，含 webviews=0）
   #   native_ui_smoke    = ObjC 桥 → C++ 核心的真实链路（隔离 state/library，拉 ping/albums/status）
@@ -356,6 +375,17 @@ if(APPLE)
     ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tools ${CMAKE_SOURCE_DIR}/tools/native_ui)
   target_link_libraries(test_analysis_row PRIVATE rlapp_core "-framework AppKit")
   add_test(NAME analysis_row COMMAND test_analysis_row)
+  target_sources(test_analysis_row PRIVATE tools/native_ui/RLPLyrics.mm tools/native_ui/RLPTrackActions.mm)
+  target_link_libraries(test_analysis_row PRIVATE "-framework CoreImage" "-framework QuartzCore")
+  target_link_libraries(rlplayer_native PRIVATE "-framework CoreImage" "-framework QuartzCore")
+  get_target_property(_np_web_sources test_analysis_row SOURCES)
+  list(FILTER _np_web_sources EXCLUDE REGEX "tests/test_analysis_row.mm$")
+  add_executable(test_native_nowplaying_web tests/test_native_nowplaying_web.mm ${_np_web_sources})
+  target_compile_options(test_native_nowplaying_web PRIVATE -fobjc-arc)
+  target_include_directories(test_native_nowplaying_web PRIVATE src tools tools/native_ui)
+  target_link_libraries(test_native_nowplaying_web PRIVATE rlapp_core "-framework AppKit" "-framework CoreImage" "-framework QuartzCore")
+  add_test(NAME native_nowplaying_web COMMAND test_native_nowplaying_web)
+
   set_tests_properties(analysis_row PROPERTIES TIMEOUT 120)
 
   # 2026-11-11（1.1.7.1）：聆听室合并页的判据。

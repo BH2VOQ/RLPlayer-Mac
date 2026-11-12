@@ -20,6 +20,8 @@ NS_ASSUME_NONNULL_BEGIN
 
 /// 子类在这里搭内容（loadView 期间调用一次）。
 - (void)buildContent;
+/// Pages with their own web header (album hero) start immediately below the topbar.
+- (BOOL)usesPageHeaderSpacing;
 /// 页面激活时刷新（默认空实现；子类按需覆盖）。
 - (void)reloadData;
 /// 切到前台。

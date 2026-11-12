@@ -62,13 +62,14 @@
         [_subtitle.leadingAnchor constraintGreaterThanOrEqualToAnchor:_title.trailingAnchor constant:12],
         [_content.leadingAnchor constraintEqualToAnchor:_root.leadingAnchor],
         [_content.trailingAnchor constraintEqualToAnchor:_root.trailingAnchor],
-        [_content.topAnchor constraintEqualToAnchor:_title.bottomAnchor constant:12],
+        [self usesPageHeaderSpacing] ? [_content.topAnchor constraintEqualToAnchor:_title.bottomAnchor constant:12] : [_content.topAnchor constraintEqualToAnchor:_root.topAnchor],
         [_content.bottomAnchor constraintEqualToAnchor:_root.bottomAnchor],
     ]];
 
     [self buildContent];
 }
 
+- (BOOL)usesPageHeaderSpacing { return YES; }
 - (void)buildContent {}
 - (void)reloadData {}
 - (void)activate { [self reloadData]; }

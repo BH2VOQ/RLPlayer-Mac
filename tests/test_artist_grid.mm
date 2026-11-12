@@ -81,7 +81,7 @@ int main() {
         for (NSView *v in allD) if ([v isKindOfClass:[NSTableView class]]) { tv = (NSTableView *)v; break; }
         CK(tv != nil, "A2b 有曲目表", @"");
         if (tv) {
-            CK(tv.numberOfColumns == 6, "A2c 六列齐全（序号/收藏/曲名/艺术家/时长/入队）",
+            CK(tv.numberOfColumns == 7, "A2c web 七列齐全（含可响应隐藏的规格列）",
                [NSString stringWithFormat:@"n=%ld", (long)tv.numberOfColumns]);
             // 关键：所有列宽之和必须 ≤ 表格可视宽度，否则最右列被裁掉。
             CGFloat sum = 0;
@@ -100,12 +100,10 @@ int main() {
                 }
             }
             CK(allPositive, "A2e 没有列被压成 0 宽（时长/加号必须可见）", zero);
-            // 曲名列是唯一吸收窗口宽度的列：它必须是弹性列
-            BOOL titleFlexible = NO;
-            for (NSTableColumn *c in tv.tableColumns)
-                if ([c.identifier isEqualToString:@"title"] &&
-                    (c.resizingMask & NSTableColumnAutoresizingMask)) titleFlexible = YES;
-            CK(titleFlexible, "A2f 曲名列是弹性列（其余列宽恒定 ⟹ 图标位置稳定）", @"");
+            // Web fr-columns are computed explicitly, not by NSTableColumnAutoresizingMask.
+            NSTableColumn *measuredTitle=nil;
+            for(NSTableColumn *c in tv.tableColumns)if([c.identifier isEqual:@"title"])measuredTitle=c;
+            CK(measuredTitle.width>=120,"A2f 曲名保留 web minmax(120px,fr) 下界",@"");
 
             // A2g/A2h：用户 1.1.7.4 实测「曲名后面甩出约 400px 空白」。
             // web 专辑曲目表是 grid `28 24 minmax(120px,1.6fr) minmax(0,1fr) 92 58 26`，
@@ -124,14 +122,15 @@ int main() {
                    "A2g 曲名列与艺术家列之间没有大空白（≤24pt）",
                    [NSString stringWithFormat:@"gap=%.1f", gap]);
                 // 两列都必须是弹性列（按 fr 比例分剩余宽度），而不是固定宽度。
-                CK((tCol.resizingMask & NSTableColumnAutoresizingMask) &&
-                   (aCol.resizingMask & NSTableColumnAutoresizingMask),
-                   "A2h 曲名与艺术家都按比例吸收宽度（web 1.6fr : 1fr 同口径）", @"");
+                CGFloat titleBefore=tCol.width,artistBefore=aCol.width;
+                dv.view.frame=NSMakeRect(0,0,1280,760);[dv.view layoutSubtreeIfNeeded];[dv performSelector:@selector(layoutAlbum)];
+                CK(tCol.width>titleBefore && aCol.width>artistBefore,
+                   "A2h 改窗口宽度后曲名与艺术家两列真实吸收剩余宽度", @"");
             }
             // A2i：行高必须紧凑。web `.trow{padding:8px 20px;font-size:12.5px}` ≈ 33pt；
             // 旧实现 38(+1) 让六行显得又高又散，是「图标与曲目对不齐」观感的一部分。
-            CK(tv.rowHeight <= 36.0,
-               "A2i 曲目行高紧凑（≤36pt，web 同口径）",
+            CK(fabs(tv.rowHeight - 38.0) < .1,
+               "A2i 曲目行高严格匹配用户 web 截图的 38pt 节奏",
                [NSString stringWithFormat:@"rowHeight=%.1f", tv.rowHeight]);
             CK(tv.intercellSpacing.width >= 6.0,
                "A2j 列间有水平间隔（web grid gap:8px，图标与文字不粘在一起）",

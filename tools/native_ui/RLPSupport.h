@@ -38,6 +38,11 @@ void RLPToast(NSString *message);
 /// 模态提示（必须让用户看见的失败；例如更新失败）。主线程调用。
 void RLPAlert(NSString *title, NSString *message);
 
+/// 文本输入对话框（web 版 askText 的原生对应：标题 / 输入框 + 占位符 / 提示小字 / 确定·取消）。
+/// 返回 nil = 取消或输入为空（两侧都 trim）。主线程调用。
+NSString * _Nullable RLPAskText(NSString *title, NSString *okTitle, NSString *value,
+                                NSString * _Nullable placeholder, NSString * _Nullable hint);
+
 /// 系统符号按钮（无边框、模板着色）。
 NSButton *RLPSymbolButton(NSString *symbol, NSString *tooltip, id _Nullable target, SEL _Nullable action);
 /// 单行标签（默认 13px；颜色/字体可后改）。

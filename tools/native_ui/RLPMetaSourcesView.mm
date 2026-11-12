@@ -7,6 +7,7 @@
 // 纪律：开关/顺序都走 /api/settings 的 metasrc_<id> / metasrcorder 键（后端白名单已放行）；
 // 顺序原样写回后端给的规范化排列，不在前端另算一套。
 #import "RLPMetaSourcesView.h"
+#import "RLPSettingsLayout.h"
 #import "RLPCoreClient.h"
 #import "RLPSupport.h"
 #import "RLPTheme.h"
@@ -32,6 +33,7 @@
 /// identifier（web 模板名，如 sp_meta_<id>）→ 数据源 id。动作按它分派，
 /// 不去解析 identifier 字符串 —— 名字是给 parity 取证用的，不该兼职当数据。
 @property (nonatomic, strong) NSMutableDictionary<NSString *, NSString *> *sourceIdByControl;
+- (void)notifyLayoutChanged;
 @end
 
 @implementation RLPMetaSourcesView
@@ -112,6 +114,20 @@
 
 - (void)invalidateIntrinsic { [self invalidateIntrinsicContentSize]; }
 
+/// 向上找到能重算高度的容器（RLPFormGrid / 设置卡片），让它重新协商高度。
+/// 只标脏 + 显式重算，不在这里做布局，避免在约束求解里重入（本仓库踩过栈溢出）。
+- (void)notifyLayoutChanged {
+    NSView *v = self.superview;
+    for (NSInteger depth = 0; v && depth < 8; ++depth, v = v.superview) {
+        if ([v respondsToSelector:@selector(contentDidChange)]) {
+            [(id)v contentDidChange];
+            break;
+        }
+        if ([v respondsToSelector:@selector(setNeedsUpdateConstraints:)])
+            [v setNeedsUpdateConstraints:YES];
+    }
+}
+
 #pragma mark - 数据
 
 - (void)reload {
@@ -145,6 +161,9 @@
         self_.defaultOrder = def.length ? [def componentsSeparatedByString:@","] : @[];
         self_.msg.stringValue = RLPTr(@"越靠上优先级越高");
         [self_ renderRows];
+        // 行数是**异步**决定的：挂载时按 0 行算高度，行回来后必须让外层重算，
+        // 否则卡片按 0 行裁高度，数据源行溢出、底部提示被吃掉（实测于元数据页截图）。
+        [self_ notifyLayoutChanged];
     }];
 }
 
@@ -238,6 +257,7 @@
     }
     // 行数变了 ⟹ 通知外层重算高度（设置卡片据此长高，不再裁行）
     [self invalidateIntrinsicContentSize];
+    [self notifyLayoutChanged];
 }
 
 #pragma mark - 动作

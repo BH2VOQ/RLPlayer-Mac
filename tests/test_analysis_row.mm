@@ -192,92 +192,21 @@ int main() {
         CK(!RLPAnlShouldAutoAnalyze(@"/m/a.flac", YES, YES, nil, YES, NO), "C4g 正在跑 ⟹ 不触发", @"");
         CK(!RLPAnlShouldAutoAnalyze(@"/m/a.flac", YES, YES, nil, NO, YES), "C4h 已缓存 ⟹ 不触发", @"");
 
-        // ---------- ⑤ 一行几何 + 面上没有自动分析/重新分析 ----------
-        RLPNowPlayingViewController *np = [[RLPNowPlayingViewController alloc] init];
-        np.view.frame = NSMakeRect(0, 0, 1100, 700);
-        [np.view layoutSubtreeIfNeeded];
-        NSMutableArray<NSView *> *all = [NSMutableArray array];
-        CollectViews(np.view, all);
-
-        NSArray<NSString *> *ids = @[@"anl.dyn", @"anl.qual", @"anl.fake", @"anl.expand"];
-        NSMutableDictionary<NSString *, NSView *> *found = [NSMutableDictionary dictionary];
-        for (NSView *v in all) if (v.identifier.length && [ids containsObject:v.identifier]) found[v.identifier] = v;
-        for (NSString *k in ids)
-            CK(found[k] != nil, [[NSString stringWithFormat:@"C2a 分析行元素存在 %@", k] UTF8String], @"缺失");
-
-        // 几何：先断言"量到了"，再断言"在同一行"
-        BOOL measured = found.count == 4;
-        // 宽**和高**都必须 > 0：无边框 NSButton 只给宽度约束时高度会塌成 0，
-        // 那是"量到了但其实看不见"，只查宽会漏（本轮真踩到）。
-        for (NSString *k in ids) {
-            NSRect f = found[k].frame;
-            if (f.size.width <= 0 || f.size.height <= 0) measured = NO;
-        }
-        if (!measured) {
-            CK(NO, "C2b 分析行几何：没量到（未布局/元素缺失）", @"width<=0，先修可见性再谈一行");
-        } else {
-            CGFloat minY = CGFLOAT_MAX, maxY = -CGFLOAT_MAX;
-            for (NSString *k in ids) {
-                NSRect f = found[k].frame;
-                minY = MIN(minY, f.origin.y); maxY = MAX(maxY, f.origin.y + f.size.height);
-            }
-            CK((maxY - minY) <= 44.0, "C2b 四个元素在同一行（总高 <= 44pt）",
-               [NSString stringWithFormat:@"span=%.1f", maxY - minY]);
-        }
-
-        // 分析条容器高度必须 <= 单行阈值。
-        // 阈值取 40pt：一行 22pt 的摘要块 + 上下各 2pt 边距就够，40 已是宽松上限；
-        // 超过它说明这一块已经变成两行（用户明确要求：不许换行变两行）。
-        {
-            NSView *bar = nil;
-            for (NSView *v in all)
-                if ([v.identifier isEqualToString:@"anl.row"] || [v.identifier isEqualToString:@"anl.bar"]) { bar = v; break; }
-            if (!bar) {
-                CK(NO, "C2c 分析条容器存在", @"缺 identifier anl.row/anl.bar");
-            } else if (bar.frame.size.height <= 0) {
-                CK(NO, "C2c 分析条几何：没量到（高度 0）", [NSString stringWithFormat:@"h=%.1f", bar.frame.size.height]);
-            } else {
-                CK(bar.frame.size.height <= 40.0, "C2c 分析条是单行（容器高 <= 40pt）",
-                   [NSString stringWithFormat:@"h=%.1f", bar.frame.size.height]);
-            }
-        }
-
-        // 面上不许有自动分析开关；收起态不许有可见的「重新分析」。
-        // "NSButton-like" 一律算：NSSwitch / NSPopUpButton / NSSegmentedControl 的开关形态
-        // 都能承载一个"自动分析"选项，只查 NSButton 会漏。
-        BOOL hasAuto = NO, hasReanalyzeVisible = NO;
-        NSMutableArray<NSString *> *autoFindings = [NSMutableArray array];
-        for (NSView *v in all) {
-            NSString *title = nil;
-            BOOL visible = !v.hidden && v.alphaValue > 0.01;
-            if ([v isKindOfClass:[NSButton class]]) title = ((NSButton *)v).title;
-            else if ([v isKindOfClass:[NSPopUpButton class]]) title = ((NSPopUpButton *)v).titleOfSelectedItem;
-            else if ([v isKindOfClass:[NSTextField class]]) title = ((NSTextField *)v).stringValue;
-            if (!title.length) continue;
-            // 开关类控件只要出现「自动」就算违规（开关必须只在设置页）
-            if (Has(title, @"自动")) {
-                const BOOL controlLike = [v isKindOfClass:[NSButton class]] ||
-                                         [v isKindOfClass:[NSPopUpButton class]] ||
-                                         [v isKindOfClass:[NSSegmentedControl class]] ||
-                                         [v isKindOfClass:[NSSwitch class]];
-                if (controlLike) { hasAuto = YES; [autoFindings addObject:title]; }
-            }
-            if ([v isKindOfClass:[NSButton class]] && Has(title, @"重新分析") && visible) {
-                hasReanalyzeVisible = YES;
-            }
-        }
-        CK(!hasAuto, "C3a 播放页没有自动分析开关（已挪到设置）", @"发现标题含「自动」的按钮");
-        CK(!hasReanalyzeVisible, "C3b 收起态没有摆在外面的「重新分析」", @"发现可见的重新分析按钮");
-
-        // 「重新分析」功能不能删：收起态必须存在但不可见（位置搬了，功能没少）
-        {
-            NSButton *re = nil;
-            for (NSView *v in all)
-                if ([v isKindOfClass:[NSButton class]] && Has(((NSButton *)v).title, @"重新分析")) { re = (NSButton *)v; break; }
-            CK(re != nil, "C3c 「重新分析」按钮仍在视图树里（功能没删，只是不摆在面上）", @"找不到该按钮");
-            if (re) CK(re.hidden || re.alphaValue <= 0.01, "C3c 收起态下它不可见", @"仍然可见");
-        }
-
+        // 2026-11-12: user reference #1 and frozen web .npbody explicitly replace
+        // the old "single analysis row / no auto switch" design. Preserve C1/C4
+        // numeric and auto-dedup checks above; geometry now checks vertical cards.
+        RLPNowPlayingViewController *np = [RLPNowPlayingViewController new];
+        np.view.frame=NSMakeRect(0,0,1180,760);[np.view layoutSubtreeIfNeeded];
+        NSMutableArray<NSView *> *all=[NSMutableArray array];CollectViews(np.view,all);
+        NSMutableDictionary<NSString *,NSView *> *byId=[NSMutableDictionary dictionary];
+        for(NSView *v in all)if(v.identifier.length)byId[v.identifier]=v;
+        NSView *panel=byId[@"npAnal"];
+        CK(panel && panel.frame.size.width>0 && panel.frame.size.height>0,"C2a web vertical analysis panel visible",NSStringFromRect(panel.frame));
+        CGFloat lastTop=CGFLOAT_MAX;
+        for(NSString *key in @[@"anl.dyn",@"anl.qual",@"anl.fake"]){NSView *v=byId[key];BOOL visible=v&&!v.hidden&&v.frame.size.width>0&&v.frame.size.height>0;CK(visible,[[NSString stringWithFormat:@"C2b %@ real summary card visible",key] UTF8String],NSStringFromRect(v.frame));CK(NSMaxY(v.frame)<=lastTop,"C2c cards stack without overlap",NSStringFromRect(v.frame));lastTop=NSMinY(v.frame);}
+        CK(byId[@"npAnlAuto"]!=nil,"C3a web automatic analysis segment exists",@"");
+        CK(byId[@"npAnlRun"]!=nil,"C3b web force analysis segment exists",@"");
+        CK(byId[@"npAnlToggle"]!=nil,"C3c web detail level segment exists",@"");
         std::printf("\n%s（%d 项失败）\n", gFail == 0 ? "analysis_row 全部通过" : "analysis_row 有失败", gFail);
         return gFail == 0 ? 0 : 1;
     }

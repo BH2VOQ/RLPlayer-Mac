@@ -61,6 +61,14 @@
         [[NSNotificationCenter defaultCenter] addObserver:self
                                                  selector:@selector(onNewPlaylistNote:)
                                                      name:@"RLPNewPlaylistNotification" object:nil];
+        // 侧栏点某份歌单：页面按名字选中并加载（web renderSavedQueuePage(name)）。
+        [[NSNotificationCenter defaultCenter] addObserver:self
+                                                 selector:@selector(onSelectSavedQueueNote:)
+                                                     name:@"RLPSelectSavedQueueNotification" object:nil];
+        // 别处（侧栏 ✎/×）改了歌单：本页也要重拉，否则两处数据分叉。
+        [[NSNotificationCenter defaultCenter] addObserver:self
+                                                 selector:@selector(onSavedQueuesChangedNote:)
+                                                     name:@"RLPSavedQueuesChangedNotification" object:nil];
     }
     return self;
 }
@@ -68,6 +76,32 @@
 - (void)onNewPlaylistNote:(NSNotification *)note {
     (void)note;
     [self onNew:nil];   // 复用页内「新建」按钮的同一条路径
+}
+
+- (void)onSelectSavedQueueNote:(NSNotification *)note {
+    id obj = note.object;
+    if (![obj isKindOfClass:[NSString class]] || ![obj length]) return;
+    self.selectedName = obj;
+    // 先把列表里对应的行选中（列表可能还没拉到 ⟹ reloadData 之后由 reloadData 的 stillThere 分支补）
+    [self selectRowForName:obj];
+    [self loadItems];
+}
+
+- (void)onSavedQueuesChangedNote:(NSNotification *)note {
+    (void)note;
+    [self reloadData];
+}
+
+/// 在左侧列表里按名字选中（找不到就清空选中，不硬造行）。
+- (void)selectRowForName:(NSString *)name {
+    NSInteger hit = -1;
+    for (NSUInteger i = 0; i < self.playlists.count; ++i)
+        if ([self.playlists[i].name isEqualToString:name]) { hit = (NSInteger)i; break; }
+    if (hit >= 0) {
+        [self.listTable selectRowIndexes:[NSIndexSet indexSetWithIndex:(NSUInteger)hit]
+                     byExtendingSelection:NO];
+        [self.listTable scrollRowToVisible:hit];
+    }
 }
 
 - (void)buildContent {
@@ -288,15 +322,27 @@
 }
 
 - (void)onNew:(id)sender {
-    NSString *name = [self promptName:RLPTr(@"新建歌单") initial:@""];
+    // 与 web newSavedQueueDialog 同口径：标题「新建歌单」/ 主按钮「创建」/ 占位符 + 提示小字。
+    NSString *name = RLPAskText(@"新建歌单", @"创建", @"",
+                                @"例如 睡眠专区",
+                                @"创建一份空歌单；可通过右键歌曲或单曲页「添加到歌单」加歌");
     if (!name) return;
     NSString *url = [NSString stringWithFormat:@"/api/sq/add?name=%@", RLPEnc(name)];
     __weak __typeof__(self) weakSelf = self;
     [[RLPCoreClient shared] postJSON:url body:nil completion:^(NSDictionary * _Nullable json) {
         __typeof__(self) self_ = weakSelf;
         if (!self_) return;
-        if (json && [json[@"ok"] boolValue]) { RLPToast(RLPTr(@"已新建歌单")); [self_ reloadData]; }
-        else RLPToast([json[@"error"] isKindOfClass:[NSString class]] ? json[@"error"] : RLPTr(@"新建失败"));
+        if (json && [json[@"ok"] boolValue]) {
+            NSString *created = [json[@"name"] isKindOfClass:[NSString class]] ? json[@"name"] : name;
+            // web toast 带歌单名（旧实现丢了这个名字，用户图六能看到区别）。
+            RLPToast([NSString stringWithFormat:@"%@%@", RLPTr(@"已新建歌单："), created]);
+            self_.selectedName = created;
+            [self_ reloadData];
+            [[NSNotificationCenter defaultCenter] postNotificationName:@"RLPSavedQueuesChangedNotification"
+                                                                object:nil];
+        } else {
+            RLPToast([json[@"error"] isKindOfClass:[NSString class]] ? json[@"error"] : RLPTr(@"新建失败"));
+        }
     }];
 }
 
@@ -308,7 +354,12 @@
     [[RLPCoreClient shared] postJSON:url body:nil completion:^(NSDictionary * _Nullable json) {
         __typeof__(self) self_ = weakSelf;
         if (!self_) return;
-        if (json && [json[@"ok"] boolValue]) { RLPToast(RLPTr(@"已保存歌单")); [self_ reloadData]; }
+        if (json && [json[@"ok"] boolValue]) {
+            RLPToast(RLPTr(@"已保存歌单"));
+            [self_ reloadData];
+            [[NSNotificationCenter defaultCenter] postNotificationName:@"RLPSavedQueuesChangedNotification"
+                                                                object:nil];
+        }
         else RLPToast([json[@"error"] isKindOfClass:[NSString class]] ? json[@"error"] : RLPTr(@"保存失败"));
     }];
 }
@@ -327,6 +378,8 @@
             self_.selectedName = to;
             RLPToast(RLPTr(@"已重命名"));
             [self_ reloadData];
+            [[NSNotificationCenter defaultCenter] postNotificationName:@"RLPSavedQueuesChangedNotification"
+                                                                object:nil];
         } else {
             RLPToast([json[@"error"] isKindOfClass:[NSString class]] ? json[@"error"] : RLPTr(@"重命名失败"));
         }
@@ -355,6 +408,8 @@
             self_.deleteBtn.enabled = NO;
             RLPToast(RLPTr(@"已删除歌单"));
             [self_ reloadData];
+            [[NSNotificationCenter defaultCenter] postNotificationName:@"RLPSavedQueuesChangedNotification"
+                                                                object:nil];
         } else {
             RLPToast([json[@"error"] isKindOfClass:[NSString class]] ? json[@"error"] : RLPTr(@"删除失败"));
         }

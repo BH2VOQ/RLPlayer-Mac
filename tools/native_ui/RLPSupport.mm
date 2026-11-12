@@ -38,7 +38,12 @@ NSString *RLPFmtBytes(double bytes) {
 }
 
 NSString *RLPEnc(NSString *s) {
-    return [s stringByAddingPercentEncodingWithAllowedCharacters:[NSCharacterSet URLQueryAllowedCharacterSet]] ?: @"";
+    // Web uses encodeURIComponent, not URLQueryAllowedCharacterSet. The latter
+    // leaves &, +, =, ? and / intact, corrupting form fields and filenames.
+    static NSCharacterSet *componentSafe;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{ componentSafe = [NSCharacterSet characterSetWithCharactersInString:@"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_.!~*'()"]; });
+    return [(s ?: @"") stringByAddingPercentEncodingWithAllowedCharacters:componentSafe] ?: @"";
 }
 
 #pragma mark - 封面缓存
@@ -93,7 +98,14 @@ NSString *RLPEnc(NSString *s) {
 
 void RLPToast(NSString *message) {
     if (!message.length) return;
+    // 取窗口的兜底顺序：key → main → 任何带 contentView 的可见窗口 → 任何窗口。
+    // 只有前两级的话，「应用不在前台 / 离屏审计（窗口没有 orderFront）」时轻提示会被**静默丢掉** ——
+    // 用户看不到反馈，判据也抓不到（本仓库用离屏审计验 toast 文案时就踩到）。
     NSWindow *win = NSApp.keyWindow ?: NSApp.mainWindow;
+    if (!win) {
+        for (NSWindow *w in NSApp.windows) if (w.isVisible && w.contentView) { win = w; break; }
+    }
+    if (!win) for (NSWindow *w in NSApp.windows) if (w.contentView) { win = w; break; }
     if (!win) return;
     RLPTheme *t = [RLPTheme current];
     NSTextField *label = [NSTextField labelWithString:RLPTr(message)];
@@ -134,6 +146,28 @@ void RLPAlert(NSString *title, NSString *message) {
     a.informativeText = RLPTr(message);
     [a addButtonWithTitle:RLPTr(@"好")];
     [a runModal];
+}
+
+NSString *RLPAskText(NSString *title, NSString *okTitle, NSString *value,
+                     NSString *placeholder, NSString *hint) {
+    NSAlert *a = [[NSAlert alloc] init];
+    a.messageText = RLPTr(title);
+    // web askText 的 hint 在输入框下方；NSAlert 只有 informativeText 一个位置，
+    // 放这里与 web 的视觉层级一致（标题 → 输入 → 说明 → 按钮）。
+    if (hint.length) a.informativeText = RLPTr(hint);
+    // 按钮顺序：web 是 [取消][创建]，mac 惯例把主操作放右边；NSAlert 第一个按钮在右边 ⟹
+    // 先加 okTitle。判据只看"两个按钮都在、主按钮是 okTitle"。
+    [a addButtonWithTitle:RLPTr(okTitle)];
+    [a addButtonWithTitle:RLPTr(@"取消")];
+    NSTextField *tf = [[NSTextField alloc] initWithFrame:NSMakeRect(0, 0, 300, 24)];
+    tf.stringValue = value ?: @"";
+    tf.placeholderString = RLPTr(placeholder ?: @"");
+    a.accessoryView = tf;
+    a.window.initialFirstResponder = tf;   // 打开即可输入（web 同：输入框自动聚焦）
+    if ([a runModal] != NSAlertFirstButtonReturn) return nil;
+    NSString *v = [tf.stringValue stringByTrimmingCharactersInSet:
+                   [NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    return v.length ? v : nil;
 }
 
 NSButton *RLPSymbolButton(NSString *symbol, NSString *tooltip, id target, SEL action) {
