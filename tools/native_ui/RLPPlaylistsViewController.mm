@@ -37,7 +37,7 @@
 @end
 
 @interface RLPPlaylistsViewController () <NSTableViewDataSource, NSTableViewDelegate>
-@property (nonatomic, strong) NSTableView *listTable;
+// 页内不再持有歌单列表：列表在侧栏（web #sqList 同址）。页面只负责"当前这份歌单"。
 @property (nonatomic, strong) NSTableView *itemTable;
 @property (nonatomic, strong) NSMutableArray<RLPPlaylistRow *> *playlists;
 @property (nonatomic, strong) NSMutableArray<RLPPlaylistItem *> *items;
@@ -45,6 +45,7 @@
 @property (nonatomic, strong) NSButton *playAllBtn;
 @property (nonatomic, strong) NSButton *renameBtn;
 @property (nonatomic, strong) NSButton *deleteBtn;
+@property (nonatomic, strong) NSTextField *emptyLabel;   // web 空态「这个歌单是空的」
 @property (nonatomic, assign) NSUInteger listSeq;
 @property (nonatomic, assign) NSUInteger itemSeq;
 @end
@@ -92,52 +93,51 @@
     [self reloadData];
 }
 
-/// 在左侧列表里按名字选中（找不到就清空选中，不硬造行）。
+/// 按名字定位歌单（页内已没有列表：真实列表在侧栏；这里只负责记下当前名）。
 - (void)selectRowForName:(NSString *)name {
-    NSInteger hit = -1;
-    for (NSUInteger i = 0; i < self.playlists.count; ++i)
-        if ([self.playlists[i].name isEqualToString:name]) { hit = (NSInteger)i; break; }
-    if (hit >= 0) {
-        [self.listTable selectRowIndexes:[NSIndexSet indexSetWithIndex:(NSUInteger)hit]
-                     byExtendingSelection:NO];
-        [self.listTable scrollRowToVisible:hit];
-    }
+    (void)name;
 }
 
 - (void)buildContent {
     RLPTheme *t = [RLPTheme current];
     NSView *host = self.contentView;
 
-    self.listTable = [[NSTableView alloc] initWithFrame:NSZeroRect];
-    self.listTable.dataSource = self;
-    self.listTable.delegate = self;
-    self.listTable.headerView = nil;
-    self.listTable.rowHeight = 28;
-    self.listTable.backgroundColor = t.bg2;
-    NSTableColumn *lc = [[NSTableColumn alloc] initWithIdentifier:@"name"];
-    lc.width = 200;
-    [self.listTable addTableColumn:lc];
-    self.listTable.target = self;
-    self.listTable.action = @selector(onListSelect:);
-
-    NSScrollView *ls = [[NSScrollView alloc] initWithFrame:NSZeroRect];
-    ls.documentView = self.listTable;
-    ls.hasVerticalScroller = YES;
-    ls.drawsBackground = NO;
-    ls.translatesAutoresizingMaskIntoConstraints = NO;
-    [host addSubview:ls];
-
-    NSStackView *lbar = [[NSStackView alloc] init];
-    lbar.orientation = NSUserInterfaceLayoutOrientationHorizontal;
-    lbar.spacing = 6;
-    lbar.translatesAutoresizingMaskIntoConstraints = NO;
+    // 结构对齐 web renderSavedQueuePage（ui_script.h:3760+）：
+    //   head(name, N 首, [播放整列][重命名][删除])  →  曲目表（# / 标题 / 所在目录）
+    //   →  空态整块 "这个歌单是空的"
+    // **不再有页内左侧歌单列表**：web 的歌单列表在**左导航**（#sqList），原生同一份也在侧栏。
+    // 页内再放一份等于两处真相源（点哪边都改选中，选中态还会分叉）。
+    // 「新建」「存当前队列」是原生侧保留的入口（功能不能删），并入同一行按钮，位置向 web 靠拢。
+    NSButton *playAll = [NSButton buttonWithTitle:RLPTr(@"播放整列") target:self action:@selector(onPlayAll:)];
+    NSButton *rename = [NSButton buttonWithTitle:RLPTr(@"重命名") target:self action:@selector(onRename:)];
+    NSButton *del = [NSButton buttonWithTitle:RLPTr(@"删除") target:self action:@selector(onDelete:)];
     NSButton *newBtn = [NSButton buttonWithTitle:RLPTr(@"新建") target:self action:@selector(onNew:)];
-    newBtn.bezelStyle = NSBezelStyleRounded;
     NSButton *saveBtn = [NSButton buttonWithTitle:RLPTr(@"存当前队列") target:self action:@selector(onSaveCurrent:)];
-    saveBtn.bezelStyle = NSBezelStyleRounded;
-    [lbar addArrangedSubview:newBtn];
-    [lbar addArrangedSubview:saveBtn];
-    [host addSubview:lbar];
+    self.playAllBtn = playAll; self.renameBtn = rename; self.deleteBtn = del;
+    playAll.identifier = @"sq.playall";
+    rename.identifier = @"sq.rename";
+    del.identifier = @"sq.delete";
+    newBtn.identifier = @"sq.new";
+    saveBtn.identifier = @"sq.savecurrent";
+    NSStackView *bar = [[NSStackView alloc] init];
+    bar.orientation = NSUserInterfaceLayoutOrientationHorizontal;
+    bar.spacing = 8;
+    bar.translatesAutoresizingMaskIntoConstraints = NO;
+    bar.identifier = @"sq.header";
+    for (NSButton *b in @[ playAll, rename, del, newBtn, saveBtn ]) {
+        b.bezelStyle = NSBezelStyleRounded;
+        b.controlSize = NSControlSizeSmall;
+        [bar addArrangedSubview:b];
+    }
+    playAll.enabled = NO; rename.enabled = NO; del.enabled = NO;
+    [host addSubview:bar];
+
+    // 空态：web `D('list').innerHTML = '<div class=empty>这个歌单是空的</div>'`
+    self.emptyLabel = RLPLabel(RLPTr(@"这个歌单是空的"), t.body, t.mut);
+    self.emptyLabel.identifier = @"sq.empty.list";
+    self.emptyLabel.alignment = NSTextAlignmentCenter;
+    self.emptyLabel.translatesAutoresizingMaskIntoConstraints = NO;
+    self.emptyLabel.hidden = YES;   // 真正 addSubview 在表格之后（见下），这里是先建对象
 
     // 曲目表接**共享动作表格**：右键 = 与 web 一致的完整曲目动作
     // （播放/入队/收藏/存歌单/体检/对比/AI 补全）。交接单列的未对齐项，2026-11-12 补上。
@@ -152,11 +152,11 @@
     }
     self.itemTable.dataSource = self;
     self.itemTable.delegate = self;
-    self.itemTable.usesAlternatingRowBackgroundColors = YES;
-    self.itemTable.rowHeight = 26;
+    self.itemTable.usesAlternatingRowBackgroundColors = NO;   // web 的行没有斑马底（截图里的条带就是它）
+    self.itemTable.rowHeight = 30;
     self.itemTable.backgroundColor = t.bg;
     NSArray<NSString *> *cols = @[ @"#", RLPTr(@"标题"), RLPTr(@"所在目录") ];
-    NSArray<NSNumber *> *widths = @[ @40, @420, @300 ];
+    NSArray<NSNumber *> *widths = @[ @44, @520, @360 ];
     for (NSInteger i = 0; i < (NSInteger)cols.count; ++i) {
         NSTableColumn *c = [[NSTableColumn alloc] initWithIdentifier:[NSString stringWithFormat:@"c%ld", (long)i]];
         c.title = cols[i];
@@ -175,41 +175,28 @@
     is.drawsBackground = NO;
     is.translatesAutoresizingMaskIntoConstraints = NO;
     [host addSubview:is];
-
-    NSStackView *ibar = [[NSStackView alloc] init];
-    ibar.orientation = NSUserInterfaceLayoutOrientationHorizontal;
-    ibar.spacing = 8;
-    ibar.translatesAutoresizingMaskIntoConstraints = NO;
-    self.playAllBtn = [NSButton buttonWithTitle:RLPTr(@"播放整列") target:self action:@selector(onPlayAll:)];
-    self.renameBtn = [NSButton buttonWithTitle:RLPTr(@"重命名") target:self action:@selector(onRename:)];
-    self.deleteBtn = [NSButton buttonWithTitle:RLPTr(@"删除") target:self action:@selector(onDelete:)];
-    for (NSButton *b in @[ self.playAllBtn, self.renameBtn, self.deleteBtn ]) {
-        b.bezelStyle = NSBezelStyleRounded;
-        b.enabled = NO;
-        [ibar addArrangedSubview:b];
-    }
-    [host addSubview:ibar];
+    // 空态文字必须在表格之上：表格背景是不透明主题色，先加就会被它整个盖住
+    // （2026-11-13 截图里"这个歌单是空的"看不到就是这个原因，不是没渲染）。
+    [host addSubview:self.emptyLabel positioned:NSWindowAbove relativeTo:is];
 
     [NSLayoutConstraint activateConstraints:@[
-        [ls.leadingAnchor constraintEqualToAnchor:host.leadingAnchor constant:16],
-        [ls.widthAnchor constraintEqualToConstant:220],
-        [ls.topAnchor constraintEqualToAnchor:host.topAnchor constant:8],
-        [ls.bottomAnchor constraintEqualToAnchor:lbar.topAnchor constant:-8],
-        [lbar.leadingAnchor constraintEqualToAnchor:ls.leadingAnchor],
-        [lbar.bottomAnchor constraintEqualToAnchor:host.bottomAnchor constant:-12],
-        [ibar.leadingAnchor constraintEqualToAnchor:ls.trailingAnchor constant:16],
-        [ibar.topAnchor constraintEqualToAnchor:host.topAnchor constant:8],
-        [is.leadingAnchor constraintEqualToAnchor:ibar.leadingAnchor],
+        [bar.leadingAnchor constraintEqualToAnchor:host.leadingAnchor constant:16],
+        [bar.topAnchor constraintEqualToAnchor:host.topAnchor constant:8],
+        [bar.trailingAnchor constraintLessThanOrEqualToAnchor:host.trailingAnchor constant:-16],
+        [is.leadingAnchor constraintEqualToAnchor:host.leadingAnchor constant:16],
         [is.trailingAnchor constraintEqualToAnchor:host.trailingAnchor constant:-16],
-        [is.topAnchor constraintEqualToAnchor:ibar.bottomAnchor constant:8],
+        [is.topAnchor constraintEqualToAnchor:bar.bottomAnchor constant:8],
         [is.bottomAnchor constraintEqualToAnchor:host.bottomAnchor constant:-12],
+        [self.emptyLabel.centerXAnchor constraintEqualToAnchor:host.centerXAnchor],
+        [self.emptyLabel.topAnchor constraintEqualToAnchor:host.topAnchor constant:120],
     ]];
 }
 
 #pragma mark - 表格
 
 - (NSInteger)numberOfRowsInTableView:(NSTableView *)tv {
-    return tv == self.listTable ? (NSInteger)self.playlists.count : (NSInteger)self.items.count;
+    (void)tv;
+    return (NSInteger)self.items.count;
 }
 
 - (NSView *)tableView:(NSTableView *)tv viewForTableColumn:(NSTableColumn *)col row:(NSInteger)row {
@@ -219,13 +206,6 @@
     if (!label) {
         label = RLPLabel(@"", t.body, t.text);
         label.identifier = ident;
-    }
-    if (tv == self.listTable) {
-        if (row < 0 || row >= (NSInteger)self.playlists.count) return label;
-        RLPPlaylistRow *pl = self.playlists[row];
-        label.stringValue = [NSString stringWithFormat:@"%@  (%ld)", pl.name, (long)pl.count];
-        label.textColor = [pl.name isEqualToString:self.selectedName] ? t.accent : t.text;
-        return label;
     }
     if (row < 0 || row >= (NSInteger)self.items.count) return label;
     RLPPlaylistItem *it = self.items[row];
@@ -243,10 +223,9 @@
 
 #pragma mark - 动作
 
+/// 兼容旧入口（页内列表已移除，列表在侧栏）：仍然可用于按名字切换当前歌单。
 - (void)onListSelect:(id)sender {
-    const NSInteger row = self.listTable.clickedRow >= 0 ? self.listTable.clickedRow : self.listTable.selectedRow;
-    if (row < 0 || row >= (NSInteger)self.playlists.count) return;
-    [self openPlaylist:self.playlists[row].name];
+    (void)sender;
 }
 
 - (void)openPlaylist:(NSString *)name {
@@ -255,7 +234,6 @@
     self.playAllBtn.enabled = has;
     self.renameBtn.enabled = has;
     self.deleteBtn.enabled = has;
-    [self.listTable reloadData];
     [self loadItems];
 }
 
@@ -436,7 +414,6 @@
             r.count = [x[@"n"] respondsToSelector:@selector(integerValue)] ? [x[@"n"] integerValue] : 0;
             if (r.name.length) [self_.playlists addObject:r];
         }
-        [self_.listTable reloadData];
         [self_ setSubtitle:[NSString stringWithFormat:RLPTr(@"%ld 个歌单"), (long)self_.playlists.count]];
         BOOL stillThere = NO;
         for (RLPPlaylistRow *r in self_.playlists)
@@ -478,6 +455,8 @@
             if (it.file.length) [self_.items addObject:it];
         }
         [self_.itemTable reloadData];
+        // web：空歌单整块显示「这个歌单是空的」（不是一行小字，也不是空表格）
+        self_.emptyLabel.hidden = self_.items.count > 0;
         [self_ setSubtitle:[NSString stringWithFormat:RLPTr(@"%ld 首"), (long)self_.items.count]];
     }];
 }
@@ -485,9 +464,8 @@
 - (void)applyTheme {
     [super applyTheme];
     RLPTheme *t = [RLPTheme current];
-    self.listTable.backgroundColor = t.bg2;
     self.itemTable.backgroundColor = t.bg;
-    [self.listTable reloadData];
+    self.emptyLabel.textColor = t.mut;
     [self.itemTable reloadData];
 }
 

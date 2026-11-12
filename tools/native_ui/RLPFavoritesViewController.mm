@@ -42,7 +42,8 @@ static const NSUserInterfaceItemIdentifier kFavTableID = @"RLPFavTable";
         };
     }
     _tableView.headerView = [[NSTableHeaderView alloc] initWithFrame:NSMakeRect(0, 0, 0, 24)];
-    _tableView.usesAlternatingRowBackgroundColors = YES;
+    // 同队列页：web 无斑马底；空表时交替色会在空白区域铺出条带。
+    _tableView.usesAlternatingRowBackgroundColors = NO;
     
     NSArray *cols = @[@"#", RLPTr(@"标题"), RLPTr(@"艺术家"), RLPTr(@"专辑"), RLPTr(@"时长")];
     for (NSInteger i = 0; i < (NSInteger)cols.count; i++) {

@@ -42,6 +42,7 @@
 @interface RLPNowPlayingViewController (OfflineAuditProjection)
 - (void)applyLyricText:(NSString *)text forPath:(NSString *)path;
 - (void)updateLyricPosition:(double)pos;
+- (void)renderMetaChipsFromMeta:(NSDictionary *)json;
 @end
 
 #include <cstdio>
@@ -99,6 +100,32 @@ static BOOL ShotIsLight(NSString *path) {
 // 统计截图里"珊瑚红强调色"的像素占比（#fa2d48 附近）。
 // 用途：侧栏选中态、当前曲高亮都靠它。占比为 0 说明**强调色根本没画出来**，
 // 而不是"颜色淡看不出来" —— 这是可量化的观感判据。
+/// 截图的指定区域是否**没有横向条带**（亮度沿 y 的最大/最小差很小）。
+/// 为什么需要：NSTableView 的 usesAlternatingRowBackgroundColors 在空表时
+/// 会把表区域铺成一屏灰条（0 首队列/收藏都会出现），属性自述"只是交替色"看不出坏。
+/// 只采样右侧空白列（x=宽度的 88%），避开空态文字与表头。
+static BOOL ShotRowsAreaIsUniform(NSString *path) {
+    NSImage *img = [[NSImage alloc] initWithContentsOfFile:path];
+    if (!img) return NO;
+    NSBitmapImageRep *rep = nil;
+    for (NSImageRep *r in img.representations)
+        if ([r isKindOfClass:[NSBitmapImageRep class]]) { rep = (NSBitmapImageRep *)r; break; }
+    if (!rep) return NO;
+    const NSInteger W = rep.pixelsWide, H = rep.pixelsHigh;
+    double mn = 1.0, mx = 0.0;
+    // 表体区域：y 从 30% 到 80%（**必须避开底部播放条**：它从 ~84% 起，
+    // 里面还有红色音量滑杆与徽标，采到就会假红——第一版就踩了这个），x 固定 88%。
+    for (NSInteger y = (NSInteger)(H * 0.30); y < (NSInteger)(H * 0.80); y += 4) {
+        NSColor *c = [rep colorAtX:(NSInteger)(W * 0.88) y:y];
+        NSColor *rgb = [c colorUsingColorSpace:[NSColorSpace sRGBColorSpace]];
+        if (!rgb) continue;
+        const double lum = 0.299 * rgb.redComponent + 0.587 * rgb.greenComponent + 0.114 * rgb.blueComponent;
+        mn = MIN(mn, lum); mx = MAX(mx, lum);
+    }
+    if (mx <= 0.0) return NO;
+    return (mx - mn) < 0.02;   // 条带会让亮度在 ~0.06 范围内来回跳
+}
+
 static double AccentRatio(NSString *path) {
     NSImage *img = [[NSImage alloc] initWithContentsOfFile:path];
     if (!img) return -1;
@@ -561,6 +588,23 @@ int RLPRunFunctionalAudit(NSString *outDir) {
              [NSString stringWithUTF8String:r.file]], CGSizeMake(1180, 760));
     }
 
+    // ---- ③a 空表页不许出现横向灰条（NSTableView 交替行底色在 0 行时的副作用）----
+    // web 的队列/收藏都是纯背景 + 居中空态；交替色一开，空表区域会被铺成一屏条带
+    // （2026-11-13 队列页截图里 8 条灰带就是这么来的，用户会当成"页面坏掉"）。
+    {
+        [wc.sidebar selectKey:@"queue"];
+        Pump(0.6);
+        NSString *qShot = [outDir stringByAppendingPathComponent:@"07-queue.png"];
+        CK(Snap(wc.window.contentView, qShot, CGSizeMake(1180, 760)), "队列页截图已落盘", outDir);
+        CK(ShotRowsAreaIsUniform(qShot), "空队列没有交替行灰条（web：纯背景 + 居中空态）",
+           @"右侧空白列亮度沿 y 跳变 ⟹ 有空表条带");
+        [wc.sidebar selectKey:@"favorites"];
+        Pump(0.6);
+        NSString *fShot = [outDir stringByAppendingPathComponent:@"09-favorites.png"];
+        CK(Snap(wc.window.contentView, fShot, CGSizeMake(1180, 760)), "收藏页截图已落盘", outDir);
+        CK(ShotRowsAreaIsUniform(fShot), "空收藏页没有交替行灰条", @"右侧空白列亮度沿 y 跳变");
+    }
+
     // ---- ④ 设置页：web 的 10 个页签逐页切换并截图 ----
     // 判据要能在旧代码上跑红：旧实现只有「播放/输出/PCM/SDM/均衡/输入/校准/流媒体/元数据/高级/诊断」
     // 且按模式分叉，没有 stream 之外的 web 页签顺序，也没有 sp_* 的 identifier。
@@ -809,6 +853,55 @@ int RLPRunFunctionalAudit(NSString *outDir) {
     [np updateLyricPosition:3.2];
     [np performSelector:@selector(anlPaint)];
     np.view.needsLayout=YES;[np.view layoutSubtreeIfNeeded];
+
+    // ---- ⑤a 补全芯片（web #npMeta / buildNpMetaHtml）----
+    // 判据用**合成 meta**喂生产投影函数：真实夹具没联网补全，/api/meta 不会 enriched，
+    // 但芯片的渲染契约（只在 enriched 出、字段与来源对、没补全就不出现）必须可验。
+    {
+        NSMutableArray<NSView *> *nv = [NSMutableArray array];
+        CollectAllViews(np.view, nv);
+        NSMutableDictionary *nById = [NSMutableDictionary dictionary];
+        for (NSView *v in nv) if (v.identifier.length) nById[v.identifier] = v;
+
+        // ① 负向：enriched=false ⟹ 整行隐藏（不许拿「暂无资料」冒充）
+        [np renderMetaChipsFromMeta:@{ @"meta": @{ @"enriched": @NO } }];
+        [np.view layoutSubtreeIfNeeded];
+        CK(((NSView *)nById[@"npMeta"]).hidden, "未补全时补全芯片行隐藏（不假装有资料）", @"");
+
+        // ② 正向：enriched=true + 年份/流派/专辑艺术家 ⟹ 三个值芯片 + 「已补全」徽标
+        [np renderMetaChipsFromMeta:@{
+            @"year": @2019, @"genre": @"日本流行楽", @"albumArtist": @"Aimer",
+            @"meta": @{ @"enriched": @YES, @"sources": @{ @"year": @"Discogs" } }
+        }];
+        [np.view layoutSubtreeIfNeeded];
+        CK(!((NSView *)nById[@"npMeta"]).hidden, "补全后芯片行显示", @"");
+        NSMutableArray<NSButton *> *chips = [NSMutableArray array];
+        for (NSView *v in nv) if ([v.identifier hasPrefix:@"npMeta."]) [chips addObject:(NSButton *)v];
+        NSInteger shown = 0;
+        for (NSButton *b in chips) if (!b.hidden && b.title.length) ++shown;
+        CK(shown == 4, "补全芯片 = 年份 + 流派 + 专辑艺术家 + 已补全（4 个）",
+           [NSString stringWithFormat:@"shown=%ld", (long)shown]);
+        BOOL hasEnriched = NO;
+        for (NSButton *b in chips)
+            if ([b.identifier isEqualToString:@"npMeta.enriched"] && !b.hidden &&
+                [b.title isEqualToString:RLPTr(@"已补全")]) hasEnriched = YES;
+        CK(hasEnriched, "「已补全」徽标文案正确（web .badge.g）", @"");
+        // 来源提示必须来自 meta.sources（缺失时写「本地标签」，不编造来源）
+        BOOL sourceOk = NO;
+        for (NSButton *b in chips)
+            if ([b.identifier isEqualToString:@"npMeta.year"]) sourceOk = [b.toolTip containsString:@"Discogs"];
+        CK(sourceOk, "年份芯片的来源提示来自 meta.sources", @"");
+
+        // 证据截图：补全态下的芯片行（与 web 5dda1c5b 的对照）
+        [np.view layoutSubtreeIfNeeded];
+        Pump(0.3);
+        CK(Snap(np.view, [outDir stringByAppendingPathComponent:@"30b-nowplaying-meta.png"],
+                CGSizeMake(1180, 760)), "补全芯片态截图已落盘", outDir);
+
+        // ③ 复位成空态，避免影响后面的截图/断言
+        [np renderMetaChipsFromMeta:nil];
+        Pump(0.3);
+    }
     Pump(0.5);
     Snap(np.view, [outDir stringByAppendingPathComponent:@"30-nowplaying.png"], CGSizeMake(1180, 760));
     CK(NonEmptyLabels(np.view) >= 3, "单曲页有实际内容",

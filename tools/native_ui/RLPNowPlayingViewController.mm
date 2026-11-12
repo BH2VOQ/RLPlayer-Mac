@@ -50,6 +50,9 @@
 
 @interface RLPNowPlayingViewController (CanvasLayout)
 - (void)layoutWebPlayback;
+/// web buildNpMetaHtml 的同构投影（补全芯片行）。审计用它喂合成 meta 验渲染，
+/// 真实路径由 /api/meta 异步驱动。
+- (void)renderMetaChipsFromMeta:(NSDictionary *)json;
 - (NSMenu *)playbackContextMenu;
 - (void)onClosePlayback:(id)sender;
 @end
@@ -322,6 +325,10 @@ static NSString *RLPNPFavKey(NSString *path) {
 @property(nonatomic,strong) NSButton *railToggle;
 @property(nonatomic,strong) NSButton *favoriteButton;
 @property(nonatomic,strong) NSButton *castButton;
+// web buildNpMetaHtml 的补全芯片（年份 / 流派 / 专辑艺术家 + 「已补全」）。
+// 只在 meta.enriched===true 时出现 —— 没补全就不假装有资料。
+@property(nonatomic,strong) NSView *metaChipsRow;
+@property(nonatomic,strong) NSArray<NSButton *> *metaChips;
 @property(nonatomic,strong) NSButton *saveButton;
 @property(nonatomic,strong) NSTextField *railTitle;
 @property(nonatomic,strong) NSSegmentedControl *railDensity;
@@ -406,6 +413,17 @@ static NSString *RLPNPFavKey(NSString *path) {
     self.artistLabel2=RLPLabel(@"",[NSFont systemFontOfSize:13],t.mut); self.artistLabel2.identifier=@"npSub";
     self.metaLabel=RLPLabel(@"",[NSFont systemFontOfSize:12],t.mut2); self.metaLabel.identifier=@"npNextTrackHero";
     for(NSView *v in @[self.kindLabel,self.titleLabel2,self.artistLabel2,self.metaLabel]) [host addSubview:v];
+    // 补全芯片行（web #npMeta）：年份 · 流派 · 专辑艺术家 · 已补全。
+    self.metaChipsRow=[[NSView alloc] initWithFrame:NSZeroRect]; self.metaChipsRow.identifier=@"npMeta";
+    self.metaChipsRow.hidden=YES; [host addSubview:self.metaChipsRow];
+    NSMutableArray *mc=[NSMutableArray array];
+    for(NSString *ident in @[@"npMeta.year",@"npMeta.genre",@"npMeta.albumArtist",@"npMeta.enriched"]) {
+        NSButton *b=[NSButton buttonWithTitle:@"" target:nil action:nil];
+        b.identifier=ident; b.bordered=NO; b.wantsLayer=YES; b.layer.cornerRadius=10; b.layer.borderWidth=1;
+        b.font=[NSFont systemFontOfSize:11]; b.hidden=YES;
+        [self.metaChipsRow addSubview:b]; [mc addObject:b];
+    }
+    self.metaChips=mc;
     self.favoriteButton=[self webButton:@"♡" identifier:@"npFavBtn" action:@selector(onFav:) parent:host]; self.favoriteButton.bordered=NO;self.favoriteButton.font=[NSFont systemFontOfSize:22];
     self.castButton=[self webButton:@"推送到设备" identifier:@"npCastBtn" action:@selector(onCastCurrent:) parent:host];
     self.saveButton=[self webButton:@"＋ 添加到歌单" identifier:@"npAddSq" action:@selector(onSaveCurrent:) parent:host];
@@ -453,6 +471,46 @@ static NSString *RLPNPFavKey(NSString *path) {
     self.railPanel.hidden=[[NSUserDefaults standardUserDefaults] boolForKey:@"RLPNPRailHidden"];
     [self applyTheme];[self anlPaint];[self layoutWebPlayback];
 }
+/// web buildNpMetaHtml 的原生同构：`meta.enriched === true` 才出芯片；
+/// 年份/流派/专辑艺术家取 /api/meta 的同名字段，值后面跟来源提示（meta.sources）。
+/// 没补全就整行隐藏 —— 不写「暂无资料」占位，也不假装有标签。
+- (void)renderMetaChipsFromMeta:(NSDictionary *)json {
+    NSDictionary *meta = [json[@"meta"] isKindOfClass:[NSDictionary class]] ? json[@"meta"] : nil;
+    const BOOL enriched = [meta[@"enriched"] respondsToSelector:@selector(boolValue)] &&
+                          [meta[@"enriched"] boolValue];
+    RLPTheme *t=[RLPTheme current];
+    NSDictionary *sources=[meta[@"sources"] isKindOfClass:[NSDictionary class]]?meta[@"sources"]:@{};
+    NSArray *specs=@[@[@"year",RLPTr(@"年份")],@[@"genre",RLPTr(@"流派")],@[@"albumArtist",RLPTr(@"专辑艺术家")]];
+    BOOL any=NO;
+    for(NSUInteger i=0;i<self.metaChips.count;i++) {
+        NSButton *b=self.metaChips[i];
+        b.layer.backgroundColor=t.bg2.CGColor; b.layer.borderColor=t.line.CGColor;
+        [b setAttributedTitle:[[NSAttributedString alloc] initWithString:@"" attributes:@{}]];
+        b.contentTintColor=t.text2; b.hidden=YES;
+    }
+    if(!enriched) { self.metaChipsRow.hidden=YES; return; }
+    for(NSUInteger i=0;i<specs.count;i++) {
+        NSString *key=specs[i][0], *label=specs[i][1];
+        id v=json[key];
+        if(![v respondsToSelector:@selector(description)]) continue;
+        NSString *text=[v description]; if(!text.length) continue;
+        NSButton *b=self.metaChips[i];
+        b.title=[NSString stringWithFormat:@"%@  %@",label,text];
+        b.toolTip=[NSString stringWithFormat:@"%@: %@",RLPTr(@"来源"),
+                   ([sources[key] isKindOfClass:[NSString class]] && [sources[key] length])?sources[key]:RLPTr(@"本地标签")];
+        b.hidden=NO; any=YES;
+    }
+    // 「已补全」徽标（web .badge.g 绿色）：标签/封面/歌词已由在线来源补全。
+    NSButton *en= self.metaChips.lastObject;
+    en.title=RLPTr(@"已补全");
+    en.toolTip=RLPTr(@"标签/封面/歌词已由在线来源补全，可在设置-元数据补全关闭");
+    en.contentTintColor=[NSColor colorWithSRGBRed:0.10 green:0.55 blue:0.28 alpha:1];
+    en.layer.borderColor=[NSColor colorWithSRGBRed:0.10 green:0.55 blue:0.28 alpha:0.55].CGColor;
+    en.hidden=NO;
+    self.metaChipsRow.hidden = !any && en.hidden;
+    [self layoutWebPlayback];
+}
+
 - (void)layoutWebPlayback {
     CGFloat w=self.webCanvas.bounds.size.width,h=self.webCanvas.bounds.size.height;
     CGFloat c=MIN(236,MAX(132,h*.24)), gutter=16, top=44, by=top+c+18, bottom=MAX(by+60,h-86);
@@ -462,6 +520,18 @@ static NSString *RLPNPFavKey(NSString *path) {
     [self.titleLabel2 sizeToFit];self.titleLabel2.frame=NSMakeRect(x,infoY+25,MIN(MAX(100,self.titleLabel2.frame.size.width),iw-44),30);
     self.favoriteButton.frame=NSMakeRect(NSMaxX(self.titleLabel2.frame)+8,infoY+24,28,30);
     self.artistLabel2.frame=NSMakeRect(x,infoY+63,iw,21);self.metaLabel.frame=NSMakeRect(x,infoY+88,iw,18);
+    // 芯片行占 metaLabel 的位置（metaLabel 在本页从未被赋过文案，是历史占位）；
+    // 有补全芯片时把它让出来，没有时保持空行不显示。
+    self.metaChipsRow.frame=NSMakeRect(x,infoY+84,iw,22);
+    {
+        CGFloat cx=0;
+        for(NSButton *b in self.metaChips) {
+            if(b.hidden) continue;
+            NSSize ts=[b.title sizeWithAttributes:@{NSFontAttributeName:b.font}];
+            const CGFloat bw=ceil(ts.width)+18;
+            b.frame=NSMakeRect(cx,0,bw,22); cx+=bw+6;
+        }
+    }
     CGFloat bx=x;for(NSButton *b in @[self.castButton,self.saveButton,self.compareBtn,self.worksBtn]){CGFloat bw=b==self.worksBtn?100:(b==self.saveButton?112:94);b.frame=NSMakeRect(bx,infoY+113,bw,24);bx+=bw+6;}
     self.closeButton.frame=NSMakeRect(w-56,16,38,38);self.railToggle.frame=NSMakeRect(w-100,18,34,34);self.analysisToggle.frame=NSMakeRect(w-142,18,34,34);
     CGFloat col=(w-2*gutter-36)/4, side=MIN(340,col), bodyH=MAX(60,bottom-by);
@@ -717,7 +787,7 @@ static NSString *RLPNPFavKey(NSString *path) {
 /// 为什么要先 /api/meta：/api/status 只给路径，资料层要的是"实体名"。
 - (void)loadMetaAndKnowledgeForPath:(NSString *)path {
     if (!path.length) {
-        self.trackMetadata=@{};[self renderRailMetadata];
+        self.trackMetadata=@{};[self renderMetaChipsFromMeta:nil];[self renderRailMetadata];
         [self.knowledge loadKind:@"track" name:@"" artist:nil];
         return;
     }
@@ -733,6 +803,7 @@ static NSString *RLPNPFavKey(NSString *path) {
         if (!title.length) title = path.lastPathComponent.stringByDeletingPathExtension;
         if (title.length) self_.titleLabel2.stringValue = title;
         self_.trackMetadata=json?:@{};
+        [self_ renderMetaChipsFromMeta:json];
         NSString *album=[json[@"album"] isKindOfClass:NSString.class]?json[@"album"]:@"";
         self_.artistLabel2.stringValue=[NSString stringWithFormat:@"%@%@%@",artist,album.length?@" · ":@"",album];
         NSMutableArray *format=[NSMutableArray array];if([json[@"codec"] isKindOfClass:NSString.class])[format addObject:[json[@"codec"] uppercaseString]];

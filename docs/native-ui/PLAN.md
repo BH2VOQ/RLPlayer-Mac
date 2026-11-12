@@ -234,3 +234,27 @@ native_ui_functional --audit：77 项（含运行时 identifier 探针 + 像素�
 native_ui_parity     parity_scan.py --check（missing=0 且 na 全部可复核）
 native_settings_keys 设置键逐个写->读回（白名单外的键必须被丢弃，证明判据不是恒真）
 ```
+
+## 8. 2026-11-13 第二轮：用户反馈清单 A–E 落地
+
+基准：`src/version.h = 1.1.7.9`，上一轮 179/179 ctest 全绿；本轮继续 179/179，
+`native_ui_functional --audit` 从 97 → **146 项**（新增的每一条都能在旧实现上跑红）。
+
+| # | 项 | 落地 | 判据（新增，都是运行时） |
+|---|---|---|---|
+| A | 侧栏「我的歌单」动态列表（web #sqList） | 歌单行 + ✎/× + 空态整行「＋ 新建歌单」+ 点行进页；删除静态「保存的队列」一行 | 造 2 个歌单 → 侧栏 2 行且名字顺序一致；✎ 改名后行文本变且后端同步；× 删除后消失；点行进歌单页且 `selectedName` 是那一份 |
+| B | 播放条封面可点进播放页 | `RLPBarCoverView`：mouseDown → `RLPOpenNowPlayingNotification`；悬停手指 + 淡色覆盖 | 合成左键按下事件投给 `pb.cover` → `nowPlayingOverlayVisible=YES` 且页面真被创建 |
+| C | 专辑页图一信息层 | 曲目表下方「N 首歌曲，X 分钟」+「℗ 年份」；「同艺人其他作品」横向封面卡（点击进详情）；随机键改圆形图标键 | 发布信息在曲目表**下方**（flipped 坐标比较）；其他作品 ≥1 张可点卡；版权行含 ℗ |
+| D | 元数据源排版（图三） | 修复真故障：异步行到达后面板高度不重算 ⟹ 第 2 行起与「越靠上优先级越高」被裁 | 面板 frame 高度 ≥ intrinsicContentSize；底部提示有真实高度且不隐藏 |
+| E | 新建歌单对话框 + toast | 共用 `RLPAskText`（标题/主按钮/占位符/提示小字，与 web askText 同构）；toast 带歌单名 | 走生产入口新建 → toast 文本含「已新建歌单：<名字>」且后端真落库 |
+
+顺手修掉两处**用户可见的假象**（都有像素判据）：
+- NSTableView `usesAlternatingRowBackgroundColors` 在 0 行时把空表区域铺成一屏灰条
+  （队列页截图里 8 条灰带）。web 没有斑马底 ⟹ 关掉，判据量右侧空白列亮度沿 y 是否跳变。
+- 歌单页去掉页内左侧列表（web 列表就在左导航），空态从「一行小字」改成 web 的整块
+  「这个歌单是空的」——**先前它被表格不透明背景盖住，等于没显示**。
+
+### 负向对照（证明判据不是恒真）
+
+`RLP_AUDIT_NEGATIVE_CONTROL=1 ./build-mac/rlplayer_native --audit <dir>` 会关掉侧栏动态歌单，
+模拟旧静态实现 ⟹ 该段 8 条断言全部转红（实测：rows=0、ren=0/del=0、改名无效、进页失败）。

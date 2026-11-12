@@ -69,7 +69,9 @@ static NSString *const kQueueDragType = @"RLPQueueRowDrag";
     self.table = [[RLPTrackActionTableView alloc] initWithFrame:NSZeroRect];
     self.table.dataSource = self;
     self.table.delegate = self;
-    self.table.usesAlternatingRowBackgroundColors = YES;
+    // web 的行没有斑马底：开交替色时 AppKit 会把空表区域也铺满条带
+    // （0 首队列也会出现一屏灰条，截图里非常明显，用户会以为是坏掉）。
+    self.table.usesAlternatingRowBackgroundColors = NO;
     self.table.rowHeight = 26;
     self.table.backgroundColor = t.bg;
     NSArray *titles = @[ @"#", RLPTr(@"标题"), RLPTr(@"艺术家"), RLPTr(@"专辑"), RLPTr(@"时长") ];
