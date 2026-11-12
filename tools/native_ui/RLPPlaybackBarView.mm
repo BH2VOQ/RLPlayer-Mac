@@ -175,36 +175,47 @@
     // （约束方案在本机出现过控制键被挤出卡片的问题，见 layoutSubviews）。
 }
 
-/// 手动布局（66px 悬浮条）：左=曲目信息，中=控制键+进度，右=时间+音量。
+/// 手动布局（66px 悬浮条）：左=曲目信息，**中=控制键（真居中）**，右=时间+音量，
+/// 进度条作为细线贴底贯穿（图三要求：比例协调、不再压着按钮）。
 - (void)layout {
     [super layout];
     const CGFloat W = self.bounds.size.width, H = self.bounds.size.height;
-    if (W < 100 || H < 40) return;
+    if (W < 400 || H < 40) return;
     const CGFloat cy = H / 2.0;
     void (^place)(NSView *, CGFloat, CGFloat, CGFloat, CGFloat) =
         ^(NSView *v, CGFloat x, CGFloat y, CGFloat w, CGFloat h) { v.frame = NSMakeRect(x, y, w, h); };
-    // 左：封面缩略图 + 标题/副标题（web 底栏同结构）
+
+    // 左：封面 + 标题/副标题
     place(self.coverView, 14, cy - 21, 42, 42);
     place(self.titleLabel, 66, cy - 16, 180, 18);
     place(self.subLabel, 66, cy + 2, 180, 14);
-    // 中：控制键一排（垂直居中）
-    CGFloat x = 250;
-    place(self.shuffleBtn, x, cy - 12, 24, 24); x += 24 + 8;
-    place(self.prevBtn,   x, cy - 14, 28, 28); x += 28 + 6;
-    place(self.playBtn,   x, cy - 20, 40, 40); x += 40 + 6;
-    place(self.nextBtn,   x, cy - 14, 28, 28); x += 28 + 8;
-    place(self.stopBtn,   x, cy - 12, 24, 24); x += 24 + 8;
-    place(self.repeatBtn, x, cy - 12, 24, 24); x += 24;
-    // 右：BIT-PERFECT 徽标 + 时间 + 音量图标 + 音量条
+
+    // 中：控制键一组**按窗口宽度居中**（旧实现从 x=250 硬编码起排 ⟹ 宽窗口下整组偏左，
+    // 用户实测「播放条的比例也不对」的直接原因）。
+    const CGFloat keyW = 24 + 8 + 28 + 6 + 44 + 6 + 28 + 8 + 24 + 8 + 24;  // 合计
+    CGFloat x = (W - keyW) / 2.0;
+    if (x < 250) x = 250;   // 窄窗口时给左侧信息区让位
+    const CGFloat ccy = cy - 3;   // 略上移，给贴底进度条留呼吸
+    place(self.shuffleBtn, x, ccy - 12, 24, 24); x += 24 + 8;
+    place(self.prevBtn,   x, ccy - 14, 28, 28); x += 28 + 6;
+    place(self.playBtn,   x, ccy - 22, 44, 44); x += 44 + 6;
+    place(self.nextBtn,   x, ccy - 14, 28, 28); x += 28 + 8;
+    place(self.stopBtn,   x, ccy - 12, 24, 24); x += 24 + 8;
+    place(self.repeatBtn, x, ccy - 12, 24, 24);
+
+    // 右：时间 + 音量图标 + 音量条（BIT-PERFECT 徽标在时间左侧）
     const CGFloat badgeW = self.bpBadge.hidden ? 0 : 84;
-    const CGFloat rightZone = 16 + 96 + 8 + 16 + 12 + 88 + (badgeW ? badgeW + 10 : 0);
-    if (!self.bpBadge.hidden)
-        place(self.bpBadge, W - rightZone, cy - 9, badgeW, 18);
-    place(self.volume, W - 16 - 96, cy - 8, 96, 16);
+    place(self.volume, W - 16 - 96, cy - 8, 96, 14);
     place(self.volIconView, W - 16 - 96 - 8 - 16, cy - 8, 16, 16);
-    place(self.timeLabel, W - rightZone + (badgeW ? badgeW + 10 : 0), cy - 8, 88, 16);
-    // 进度条：控制键下方，横跨中区
-    place(self.progress, 250, H - 16, MAX(120, W - 250 - rightZone - 12), 12);
+    place(self.timeLabel, W - 16 - 96 - 8 - 16 - 8 - 92, cy - 8, 92, 16);
+    if (!self.bpBadge.hidden)
+        place(self.bpBadge, W - 16 - 96 - 8 - 16 - 8 - 92 - 10 - badgeW, cy - 9, badgeW, 18);
+
+    // 进度条：控制键下方的独立一条，**给足高度**（8pt 细线贴底边既看不见也拖不动；
+    // 目标图里它是明显的可拖动滑杆）。左右与信息区/音量区对齐。
+    const CGFloat progL = 66 + 180 + 20;
+    const CGFloat progR = W - 16 - 96 - 8 - 16 - 12;
+    place(self.progress, progL, 6, MAX(120, progR - progL), 18);
 }
 
 - (NSButton *)symbolButton:(NSString *)symbol tip:(NSString *)tip {

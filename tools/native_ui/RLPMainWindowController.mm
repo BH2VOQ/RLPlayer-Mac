@@ -24,6 +24,7 @@
 #import "RLPFavoritesViewController.h"
 #import "RLPSettingsViewController.h"
 #import "RLPNowPlayingViewController.h"
+#import "RLPWorksViewController.h"
 #import "RLPUpdateWindowController.h"
 #import "RLPAlbumDetailViewController.h"
 #import "RLPArtistDetailViewController.h"
@@ -74,6 +75,7 @@ static const CGFloat kTopbarHeight = 46.0;
 /// 详情页的返回栈（只存"从哪个列表页进来"），返回时回到原列表页。
 @property (nonatomic, strong) NSMutableArray<NSString *> *rowStack;
 @property (nonatomic, strong) RLPNowPlayingViewController *npPage;
+@property (nonatomic, strong) RLPWorksViewController *worksPage;
 /// 顶栏的模式切换（聆听 / 专业）。这是两个模式的唯一入口。
 @property (nonatomic, strong) NSSegmentedControl *modeSwitch;
 @end
@@ -233,6 +235,10 @@ static const CGFloat kTopbarHeight = 46.0;
                                                  name:@"RLPNavigateKeyNotification" object:nil];
     [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(onOpenNowPlayingNote:)
                                                  name:@"RLPOpenNowPlayingNotification" object:nil];
+    // 古典作品 · 演绎版本（web 只从单曲页「作品」tab 进入，左导航不放入口）。
+    // object = @{@"title":…, @"composer":…}；从单曲页进来时给返回按钮。
+    [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(onOpenWorksNote:)
+                                                 name:@"RLPOpenWorksNotification" object:nil];
     [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(onPageCount:)
                                                  name:@"RLPPageCountNotification" object:nil];
 
@@ -381,6 +387,16 @@ static const CGFloat kTopbarHeight = 46.0;
 - (void)onOpenNowPlayingNote:(NSNotification *)note {
     (void)note;
     [self onNowPlaying:nil];
+}
+
+/// 打开古典作品页并检索（对齐 web loadWorksView(title, composer, fromNp)）。
+- (void)onOpenWorksNote:(NSNotification *)note {
+    NSDictionary *info = [note.object isKindOfClass:[NSDictionary class]] ? note.object : @{};
+    NSString *title = [info[@"title"] isKindOfClass:[NSString class]] ? info[@"title"] : @"";
+    NSString *composer = [info[@"composer"] isKindOfClass:[NSString class]] ? info[@"composer"] : @"";
+    if (!self.worksPage) self.worksPage = [[RLPWorksViewController alloc] init];
+    [self pushDetail:self.worksPage];
+    [self.worksPage loadWork:title composer:composer fromNowPlaying:YES];
 }
 
 #pragma mark - 模式切换

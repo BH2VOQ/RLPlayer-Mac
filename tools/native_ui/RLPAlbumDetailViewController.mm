@@ -29,6 +29,7 @@
 @property (nonatomic, strong) NSTextField *emptyLabel;
 @property (nonatomic, strong) NSTableView *table;
 @property (nonatomic, strong) NSScrollView *scroll;
+- (void)layoutColumns;
 @end
 
 @implementation RLPAlbumDetailViewController
@@ -146,16 +147,37 @@
     self.table.action = @selector(onRowDoubleClick:);
     self.table.doubleAction = @selector(onRowDoubleClick:);
     // 列顺序与 web 一致：序号 → 收藏爱心 → 曲名 → 艺术家 → 时长 → 入队「+」
+    // 2026-11-12 用户实测「图标与曲目对应不整齐」根因：六列宽度全写死（合计 692pt），
+    // 表格铺满窗口时**多余空间被 NSTableView 均摊到每一列** ⟹ 序号/爱心/曲名逐列漂移，
+    // 视觉上与行内容错位。修法同曲目页（已验证）：小列钉死禁止拉伸，只有曲名列吃剩余宽度。
     for (NSString *ident in @[@"n", @"fav", @"title", @"artist", @"dur", @"add"]) {
         NSTableColumn *col = [[NSTableColumn alloc] initWithIdentifier:ident];
-        if ([ident isEqualToString:@"n"]) col.width = 34;
-        else if ([ident isEqualToString:@"fav"]) col.width = 30;
-        else if ([ident isEqualToString:@"title"]) col.width = 340;
-        else if ([ident isEqualToString:@"artist"]) col.width = 190;
-        else if ([ident isEqualToString:@"dur"]) col.width = 64;
-        else col.width = 34;
+        if ([ident isEqualToString:@"n"]) {
+            col.width = 40; col.minWidth = 34; col.maxWidth = 52;
+            col.resizingMask = NSTableColumnNoResizing;
+        } else if ([ident isEqualToString:@"fav"]) {
+            col.width = 36; col.minWidth = 30; col.maxWidth = 44;
+            col.resizingMask = NSTableColumnNoResizing;
+        } else if ([ident isEqualToString:@"title"]) {
+            col.width = 340; col.minWidth = 200; col.maxWidth = 520;   // 有上限，否则独占全部留白
+            col.resizingMask = NSTableColumnAutoresizingMask;           // 唯一弹性列
+        } else if ([ident isEqualToString:@"artist"]) {
+            col.width = 200; col.minWidth = 120; col.maxWidth = 280;
+            col.resizingMask = NSTableColumnUserResizingMask;
+        } else if ([ident isEqualToString:@"dur"]) {
+            col.width = 72; col.minWidth = 60; col.maxWidth = 88;
+            col.resizingMask = NSTableColumnNoResizing;
+        } else {
+            col.width = 40; col.minWidth = 34; col.maxWidth = 52;
+            col.resizingMask = NSTableColumnNoResizing;
+        }
         [self.table addTableColumn:col];
     }
+    // 关掉均摊：否则多余宽度又被平均分给所有列（含序号/爱心），上面的钉死等于白做。
+    // 用 NoColumnAutoresizing + 自己把剩余宽度只给曲名列（见 layoutColumns），
+    // 而不是 LastColumnOnly（那会把空白全塞给行尾的「+」，图标反而被推得更远）。
+    self.table.columnAutoresizingStyle = NSTableViewNoColumnAutoresizing;
+    self.table.usesAlternatingRowBackgroundColors = NO;
     {
         __weak __typeof__(self) ws = self;
         RLPTrackActionTableView *tv = (RLPTrackActionTableView *)self.table;
@@ -221,6 +243,31 @@
 
 - (void)activate {
     if (!self.loaded) [self reloadData];
+    [self layoutColumns];
+}
+
+/// 列宽分配：从右往左塞固定列，曲名列吃中间剩余宽度。
+/// 之前的版本把艺术家列拉宽，结果把右侧「时长」和「+」挤出可视区（自测截图里时长变成 0、
+/// 加号消失）。现在的规则更稳：**右侧四列宽恒定**，只让曲名吸收窗口宽度变化。
+- (void)layoutColumns {
+    NSTableView *tv = self.table;
+    if (!tv || tv.numberOfColumns < 6) return;
+    const CGFloat avail = tv.bounds.size.width;
+    if (avail < 360) return;
+    NSTableColumn *titleCol = nil;
+    CGFloat other = 0;
+    for (NSTableColumn *c in tv.tableColumns) {
+        if ([c.identifier isEqualToString:@"title"]) { titleCol = c; continue; }
+        other += c.width;
+    }
+    if (!titleCol) return;
+    const CGFloat w = MAX(titleCol.minWidth, MIN(titleCol.maxWidth, avail - other - 2));
+    if (fabs(titleCol.width - w) > 0.5) titleCol.width = w;
+}
+
+- (void)viewDidLayout {
+    [super viewDidLayout];
+    [self layoutColumns];
 }
 
 - (void)reloadData {

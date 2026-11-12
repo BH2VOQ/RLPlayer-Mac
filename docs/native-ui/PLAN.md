@@ -84,7 +84,7 @@
 | /api/providers、/api/llm/models | 已接（2026-11-12：providers → RLPMetaSourcesView 逐源开关+优先级；llm/models → 设置·元数据模型下拉，拉不到降级手填） |
 | /api/lib/rmdir、/api/lib/rmdirinfo | 目录删除（破坏性），未迁移 |
 | /api/queue/set | 已接（2026-11-12：RLPPlayWholeListFrom 整列顺序播放，我的最爱页双击从该曲起播整个收藏列表，单曲循环自动切回列表循环） |
-| /api/compare | 已接（RLPShowCompareSheet / 单曲页版本对比）；/api/entity/versions（Discogs 版本推荐）未迁移 |
+| /api/compare、/api/entity/versions | 已接（compare → RLPShowCompareSheet / 单曲页版本对比；entity/versions → 古典作品页 RLPWorksViewController，单曲页「古典作品版本」入口，2026-11-12） |
 | /api/anl/cancel | 已接（单曲页 viewDidDisappear 取消在跑的分析，与 web anlCancelServer 同语义） |
 | /api/diag/upload、/api/upload | 旧诊断上传通道；原生反馈走 feedback_api 直连后台 |
 | /api/src/cover | 已接（2026-11-12：流媒体网格/列表封面卡片，coverForSourceId 共享缓存） |

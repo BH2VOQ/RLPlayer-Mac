@@ -205,7 +205,7 @@ if(APPLE)
     tools/native_ui/RLPRecentViewController.mm
     tools/native_ui/RLPFavoritesViewController.mm
     tools/native_ui/RLPSettingsViewController.mm
-    tools/native_ui/RLPNowPlayingViewController.mm
+    tools/native_ui/RLPNowPlayingViewController.mm tools/native_ui/RLPWorksViewController.mm
     tools/native_ui/RLPUpdateWindowController.mm
     tools/native_ui/RLPStreamingViewController.mm
     tools/native_ui/RLPQuickStartViewController.mm
@@ -240,6 +240,7 @@ if(APPLE)
     tools/native_ui/RLPFoldersViewController.mm tools/native_ui/RLPQueueViewController.mm
     tools/native_ui/RLPRecentViewController.mm tools/native_ui/RLPFavoritesViewController.mm
     tools/native_ui/RLPSettingsViewController.mm tools/native_ui/RLPNowPlayingViewController.mm
+    tools/native_ui/RLPWorksViewController.mm
     tools/native_ui/RLPUpdateWindowController.mm
     tools/native_ui/RLPStreamingViewController.mm tools/native_ui/RLPQuickStartViewController.mm
     tools/native_ui/RLPPlaylistsViewController.mm tools/native_ui/RLPEqualizerView.mm
@@ -494,6 +495,52 @@ if(APPLE)
     "-framework AppKit" "-framework Security")
   add_test(NAME llm_endpoint COMMAND test_llm_endpoint)
   set_tests_properties(llm_endpoint PROPERTIES TIMEOUT 180)
+
+  # 2026-11-12：古典作品页（补齐 web setView('works') / Discogs 演绎版本）。
+  # 只验 UI 契约与输入校验，**不连外网**（离线也必须跑绿）。
+  add_executable(test_works_view tests/test_works_view.mm
+    tools/native_ui/RLPWorksViewController.mm
+    tools/native_ui/RLPPageViewController.mm
+    tools/native_ui/RLPCoreClient.mm
+    tools/native_ui/RLPSupport.mm
+    tools/native_ui/RLPTheme.mm
+    tools/native_ui/RLPNativeI18n.mm)
+  set_source_files_properties(tests/test_works_view.mm
+    tools/native_ui/RLPWorksViewController.mm tools/native_ui/RLPPageViewController.mm
+    tools/native_ui/RLPCoreClient.mm tools/native_ui/RLPSupport.mm
+    tools/native_ui/RLPTheme.mm tools/native_ui/RLPNativeI18n.mm
+    PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
+  target_include_directories(test_works_view PRIVATE
+    ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tools ${CMAKE_SOURCE_DIR}/tools/native_ui)
+  target_link_libraries(test_works_view PRIVATE rlapp_core "-framework AppKit")
+  add_test(NAME works_view COMMAND test_works_view)
+  set_tests_properties(works_view PROPERTIES TIMEOUT 120)
+
+  # 2026-11-12：艺术家网格 / 专辑曲目表 / 播放条的**几何**判据。
+  # 这三处都是「能构造但布局错」，只有量 frame 才抓得住（前两版列宽修法都改坏了）。
+  add_executable(test_artist_grid tests/test_artist_grid.mm
+    tools/native_ui/RLPArtistsViewController.mm
+    tools/native_ui/RLPAlbumDetailViewController.mm
+    tools/native_ui/RLPPlaybackBarView.mm
+    tools/native_ui/RLPTrackActions.mm tools/native_ui/RLPAnalysisSummary.mm
+    tools/native_ui/RLPPageViewController.mm
+    tools/native_ui/RLPCoreClient.mm tools/native_ui/RLPSupport.mm
+    tools/native_ui/RLPModels.mm
+    tools/native_ui/RLPTheme.mm tools/native_ui/RLPNativeI18n.mm)
+  set_source_files_properties(tests/test_artist_grid.mm
+    tools/native_ui/RLPArtistsViewController.mm tools/native_ui/RLPAlbumDetailViewController.mm
+    tools/native_ui/RLPPlaybackBarView.mm
+    tools/native_ui/RLPTrackActions.mm tools/native_ui/RLPAnalysisSummary.mm
+    tools/native_ui/RLPPageViewController.mm
+    tools/native_ui/RLPCoreClient.mm tools/native_ui/RLPSupport.mm
+    tools/native_ui/RLPModels.mm
+    tools/native_ui/RLPTheme.mm tools/native_ui/RLPNativeI18n.mm
+    PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
+  target_include_directories(test_artist_grid PRIVATE
+    ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tools ${CMAKE_SOURCE_DIR}/tools/native_ui)
+  target_link_libraries(test_artist_grid PRIVATE rlapp_core "-framework AppKit")
+  add_test(NAME artist_grid COMMAND test_artist_grid)
+  set_tests_properties(artist_grid PROPERTIES TIMEOUT 120)
 
   # 2026-11-11：曲目右键菜单完整性（对齐 web trackActionMenu 四项核心动作）。
   # 触发原因：原生曲目页只有两项、专辑详情完全没有右键菜单、队列只有两项。

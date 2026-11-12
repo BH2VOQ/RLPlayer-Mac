@@ -11,10 +11,17 @@
 
 static const NSUserInterfaceItemIdentifier kArtistItemID = @"RLPArtistItem";
 
+/// 艺术家卡片尺寸（图一：大圆头像 + 下方名称/专辑数）。
+static const CGFloat kCardW = 168;
+static const CGFloat kCardH = 196;
+static const CGFloat kAvatar = 116;
+
+
 #pragma mark - 艺术家卡片
 
 @interface RLPArtistItem : NSCollectionViewItem
 @property (nonatomic, strong) NSView *avatarView;
+@property (nonatomic, strong) NSImageView *coverView;
 @property (nonatomic, strong) NSTextField *initialLabel;
 @property (nonatomic, strong) NSTextField *nameLabel;
 @property (nonatomic, strong) NSTextField *countLabel;
@@ -23,36 +30,55 @@ static const NSUserInterfaceItemIdentifier kArtistItemID = @"RLPArtistItem";
 
 @implementation RLPArtistItem
 
+/// 卡片尺寸：图一（web 艺术家页）= 大圆头像 + 下方两行文字。
+/// 头像 116pt 圆形、整卡 168×196；原来 48pt 小头像挤在左侧一行里，
+/// 与 web 观感差太远（用户实测「希望是图一的效果」）。
+
 - (void)loadView {
     RLPTheme *t = [RLPTheme current];
-    NSView *v = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 168, 74)];
+    NSView *v = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, kCardW, kCardH)];
     v.wantsLayer = YES;
     self.view = v;
 
-    _avatarView = [[NSView alloc] initWithFrame:NSMakeRect(10, 13, 48, 48)];
+    const CGFloat ax = (kCardW - kAvatar) / 2.0;
+    _avatarView = [[NSView alloc] initWithFrame:NSMakeRect(ax, kCardH - kAvatar - 8, kAvatar, kAvatar)];
     _avatarView.wantsLayer = YES;
-    _avatarView.layer.cornerRadius = 24;
+    _avatarView.layer.cornerRadius = kAvatar / 2.0;
+    _avatarView.layer.masksToBounds = YES;
     _avatarView.layer.backgroundColor = t.bg2.CGColor;
+    _avatarView.layer.borderWidth = 1;
+    _avatarView.layer.borderColor = t.hairline.CGColor;
     [v addSubview:_avatarView];
 
+    // 真封面（/api/artist/cover）盖在圆形占位上；没有封面时露出首字母。
+    _coverView = [[NSImageView alloc] initWithFrame:NSMakeRect(0, 0, kAvatar, kAvatar)];
+    _coverView.imageScaling = NSImageScaleProportionallyUpOrDown;
+    _coverView.wantsLayer = YES;
+    _coverView.layer.cornerRadius = kAvatar / 2.0;
+    _coverView.layer.masksToBounds = YES;
+    [_avatarView addSubview:_coverView];
+
     _initialLabel = [NSTextField labelWithString:@""];
-    _initialLabel.font = [NSFont systemFontOfSize:20 weight:NSFontWeightMedium];
-    _initialLabel.textColor = t.text;
+    _initialLabel.font = [NSFont systemFontOfSize:40 weight:NSFontWeightMedium];
+    _initialLabel.textColor = t.mut;
     _initialLabel.alignment = NSTextAlignmentCenter;
-    _initialLabel.frame = NSMakeRect(0, 8, 48, 32);
+    _initialLabel.frame = NSMakeRect(0, (kAvatar - 44) / 2.0, kAvatar, 44);
     [_avatarView addSubview:_initialLabel];
 
     _nameLabel = [NSTextField labelWithString:@""];
-    _nameLabel.font = [NSFont systemFontOfSize:14 weight:NSFontWeightSemibold];
+    _nameLabel.font = [NSFont systemFontOfSize:13.5 weight:NSFontWeightSemibold];
     _nameLabel.textColor = t.text;
+    _nameLabel.alignment = NSTextAlignmentCenter;
     _nameLabel.lineBreakMode = NSLineBreakByTruncatingTail;
-    _nameLabel.frame = NSMakeRect(68, 38, 90, 20);
+    _nameLabel.frame = NSMakeRect(4, 36, kCardW - 8, 18);
     [v addSubview:_nameLabel];
 
     _countLabel = [NSTextField labelWithString:@""];
     _countLabel.font = [NSFont systemFontOfSize:11.5];
     _countLabel.textColor = t.mut;
-    _countLabel.frame = NSMakeRect(68, 18, 90, 20);
+    _countLabel.alignment = NSTextAlignmentCenter;
+    _countLabel.lineBreakMode = NSLineBreakByTruncatingTail;
+    _countLabel.frame = NSMakeRect(4, 16, kCardW - 8, 16);
     [v addSubview:_countLabel];
 }
 
@@ -61,6 +87,21 @@ static const NSUserInterfaceItemIdentifier kArtistItemID = @"RLPArtistItem";
     self.nameLabel.stringValue = artist.name;
     self.countLabel.stringValue = [NSString stringWithFormat:RLPTr(@"%ld 张专辑"), (long)artist.albumCount];
     self.initialLabel.stringValue = artist.name.length ? [artist.name substringToIndex:1].uppercaseString : @"?";
+    self.coverView.image = nil;
+    // 真封面（/api/artist/image?who=…，与 web 艺术家卡片同端点）。取不到就保留首字母占位，
+    // 这不是错误状态、也不报 toast —— 大量本地曲库本来就没有艺术家图。
+    if (!artist.name.length) return;
+    NSString *who = artist.name;
+    NSString *url = [NSString stringWithFormat:@"/api/artist/image?who=%@", RLPEnc(who)];
+    __weak __typeof__(self) weakSelf = self;
+    [[RLPCoreClient shared] getData:url completion:^(NSData * _Nullable data) {
+        __typeof__(self) self_ = weakSelf;
+        if (!self_ || data.length == 0) return;
+        // 复用回来的 item 可能已被换给别的艺术家：名字不一致就丢弃。
+        if (![self_.artistName isEqualToString:who]) return;
+        NSImage *img = [[NSImage alloc] initWithData:data];
+        if (img) self_.coverView.image = img;
+    }];
 }
 
 @end
@@ -112,10 +153,11 @@ static const NSUserInterfaceItemIdentifier kArtistItemID = @"RLPArtistItem";
     [root addSubview:self.countLabel];
 
     NSCollectionViewFlowLayout *layout = [[NSCollectionViewFlowLayout alloc] init];
-    layout.itemSize = NSMakeSize(168, 74);
-    layout.sectionInset = NSEdgeInsetsMake(20, 24, 24, 24);
-    layout.minimumInteritemSpacing = 10;
-    layout.minimumLineSpacing = 10;
+    // 大圆头像网格（图一）：168×196 卡，间距 18/22，与 web minmax(150px,1fr)+gap16 同观感。
+    layout.itemSize = NSMakeSize(kCardW, kCardH);
+    layout.sectionInset = NSEdgeInsetsMake(18, 24, 28, 24);
+    layout.minimumInteritemSpacing = 18;
+    layout.minimumLineSpacing = 22;
 
     self.collection = [[NSCollectionView alloc] initWithFrame:NSZeroRect];
     self.collection.collectionViewLayout = layout;

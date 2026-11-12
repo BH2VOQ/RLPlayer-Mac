@@ -77,6 +77,7 @@
 @property (nonatomic, assign) NSUInteger coverSeq;
 @property (nonatomic, strong) RLPKnowledgeView *knowledge;
 @property (nonatomic, strong) NSButton *compareBtn;
+@property (nonatomic, strong) NSButton *worksBtn;
 @property (nonatomic, strong) NSPopover *comparePopover;
 @property (nonatomic, strong) NSStackView *compareList;
 @property (nonatomic, strong) NSTextView *compareOut;
@@ -127,6 +128,14 @@
     self.compareBtn.bezelStyle = NSBezelStyleRounded;
     self.compareBtn.translatesAutoresizingMaskIntoConstraints = NO;
     [host addSubview:self.compareBtn];
+
+    // 古典作品 · 演绎版本入口（web 单曲页「作品」tab 的原生落点）。
+    // 不假装自动判定古典：点了就带当前曲名/艺术家去作品页检索，结果由后端说话。
+    self.worksBtn = [NSButton buttonWithTitle:RLPTr(@"古典作品版本") target:self action:@selector(onOpenWorks:)];
+    self.worksBtn.bezelStyle = NSBezelStyleRounded;
+    self.worksBtn.identifier = @"np.works";
+    self.worksBtn.translatesAutoresizingMaskIntoConstraints = NO;
+    [host addSubview:self.worksBtn];
 
     // 音频分析改为一行（1.1.7.1）：动态 / 音质 / 假无损 / 展开，四个元素同一行。
     // 「自动分析」开关已挪到设置·高级；「重新分析」只在展开后出现，不摆在面上。
@@ -214,6 +223,8 @@
         [fav.topAnchor constraintEqualToAnchor:self.metaLabel.bottomAnchor constant:14],
         [self.compareBtn.leadingAnchor constraintEqualToAnchor:fav.trailingAnchor constant:8],
         [self.compareBtn.centerYAnchor constraintEqualToAnchor:fav.centerYAnchor],
+        [self.worksBtn.leadingAnchor constraintEqualToAnchor:self.compareBtn.trailingAnchor constant:8],
+        [self.worksBtn.centerYAnchor constraintEqualToAnchor:fav.centerYAnchor],
         // 一行分析条：独占一行（收藏按钮下方），左对齐封面右缘、右到窗口边界。
         // 不与标题/收藏同行 —— 标题是可变长文本，会把这一行挤成 0 宽（判据 C2b 抓到的真缺陷）。
         [self.anlRow.leadingAnchor constraintEqualToAnchor:self.titleLabel2.leadingAnchor],
@@ -441,6 +452,18 @@
 #pragma mark - 版本对比（/api/compare，与 web 同口径）
 
 /// 打开弹层：列同目录音频文件（/api/files?dir=），当前曲目默认勾选。
+/// 打开古典作品页：带当前曲名与艺术家（作曲家可空，后端按作品名检索）。
+/// web 的「作品」tab 只在古典曲目出现；原生不假装自动判定，入口常在、结果由后端说话。
+- (void)onOpenWorks:(id)sender {
+    (void)sender;
+    NSString *title = self.titleLabel2.stringValue ?: @"";
+    NSString *artist = self.artistLabel2.stringValue ?: @"";
+    if (!title.length && self.currentPath.length)
+        title = self.currentPath.lastPathComponent.stringByDeletingPathExtension;
+    [[NSNotificationCenter defaultCenter] postNotificationName:@"RLPOpenWorksNotification"
+        object:@{@"title": title, @"composer": artist}];
+}
+
 - (void)onCompare:(id)sender {
     NSString *path = self.currentPath;
     if (!path.length) { RLPToast(RLPTr(@"没有正在播放的曲目")); return; }
