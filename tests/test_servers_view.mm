@@ -17,12 +17,18 @@
 #import "RLPMetaSourcesView.h"
 #import "RLPLibStatsView.h"
 #import "RLPSettingsViewController.h"
+#import "RLPCastView.h"
 #import "RLPCoreClient.h"
 #import "RLPSupport.h"
 
 #include <cstdio>
 #include <cstdlib>
 #include <unistd.h>
+#include <objc/runtime.h>
+
+// S13 用：注入合成 AirPlay 接收器验证后端 /api/cast/devices 真实回包字段
+// （set_airplay_devices_for_test 不触发 Bonjour 扫描，也不连接任何设备）。
+#include "net/cast_service.h"
 
 static int gFail = 0, gPass = 0;
 static void CK(BOOL ok, const char *what, NSString *detail) {
@@ -46,6 +52,55 @@ static void Pump(NSTimeInterval s) {
     while ([until timeIntervalSinceNow] > 0)
         [[NSRunLoop currentRunLoop] runMode:NSDefaultRunLoopMode
                                  beforeDate:[NSDate dateWithTimeIntervalSinceNow:0.02]];
+}
+
+#pragma mark - S13 投放面板桩
+// 只在 S13 段安装：拦截异步 GET/POST，记录请求路径并回假 JSON。
+// 目的：钉住「设备来源是 /api/cast/devices」「推送/停止端点与表单键正确」，
+// 同时**绝不真的发起投放**（真起投放会连设备/出声，违反项目铁律）。
+static NSMutableArray<NSString *> *gCastReq = nil;
+static NSMutableDictionary<NSString *, NSDictionary *> *gCastResp = nil;
+static BOOL gCastStubOn = NO;
+
+@interface RLPCoreClient (CastTestStub)
+- (void)castStub_getJSON:(NSString *)path completion:(nullable RLPJSONCompletion)completion;
+- (void)castStub_postJSON:(NSString *)path body:(nullable NSString *)body completion:(nullable RLPJSONCompletion)completion;
+@end
+
+@implementation RLPCoreClient (CastTestStub)
+- (void)castStub_getJSON:(NSString *)path completion:(nullable RLPJSONCompletion)completion {
+    if (gCastReq) [gCastReq addObject:[@"GET " stringByAppendingString:path]];
+    if (completion) completion(gCastResp[path]);
+}
+- (void)castStub_postJSON:(NSString *)path body:(nullable NSString *)body completion:(nullable RLPJSONCompletion)completion {
+    if (gCastReq) [gCastReq addObject:[NSString stringWithFormat:@"POST %@ %@", path, body ?: @""]];
+    if (completion) completion(gCastResp[[@"POST " stringByAppendingString:path]]);
+}
+@end
+
+static void CastStubInstall(void) {
+    if (gCastStubOn) return;
+    gCastReq = [NSMutableArray array];
+    gCastResp = [NSMutableDictionary dictionary];
+    method_exchangeImplementations(
+        class_getInstanceMethod([RLPCoreClient class], @selector(getJSON:completion:)),
+        class_getInstanceMethod([RLPCoreClient class], @selector(castStub_getJSON:completion:)));
+    method_exchangeImplementations(
+        class_getInstanceMethod([RLPCoreClient class], @selector(postJSON:body:completion:)),
+        class_getInstanceMethod([RLPCoreClient class], @selector(castStub_postJSON:body:completion:)));
+    gCastStubOn = YES;
+}
+static void CastStubUninstall(void) {
+    if (!gCastStubOn) return;
+    method_exchangeImplementations(
+        class_getInstanceMethod([RLPCoreClient class], @selector(getJSON:completion:)),
+        class_getInstanceMethod([RLPCoreClient class], @selector(castStub_getJSON:completion:)));
+    method_exchangeImplementations(
+        class_getInstanceMethod([RLPCoreClient class], @selector(postJSON:body:completion:)),
+        class_getInstanceMethod([RLPCoreClient class], @selector(castStub_postJSON:body:completion:)));
+    gCastStubOn = NO;
+    gCastReq = nil;
+    gCastResp = nil;
 }
 
 int main() {
@@ -354,6 +409,185 @@ int main() {
             NSArray *items2 = [q2[@"items"] isKindOfClass:[NSArray class]] ? q2[@"items"] : @[];
             CK(items2.count == before, "S12c 空列表不发建队列请求（越界 start 被夹取仍建整列）",
                [NSString stringWithFormat:@"before=%lu after=%lu", (unsigned long)before, (unsigned long)items2.count]);
+        }
+
+        // ---- S13 投放面板：AirPlay + UPnP 同一设备列表（parity 审计 P0-1）----
+        // 背景：原生投放面板此前只调 /api/upnp（只回 UPnP），AirPlay 接收器永远发现不了。
+        // web 口径：ui_script.h:7594 scanCastDevices → /api/cast/devices；castDevValue() 用
+        // location 当设备标识；castDevLabel() 带 [AirPlay]/[UPnP] 前缀。
+        // 本段两层判据：
+        //   ① 真后端契约：注入合成 AirPlay 设备（不触发 Bonjour、不连设备）看真实回包字段；
+        //   ② UI 契约：/api/cast/* 全走桩，断言请求端点/表单键/状态识别，绝不真起投放。
+        {
+            rta::net::AirPlayDevice apDev;
+            apDev.id = "AA:BB:CC:DD:EE:FF@测试 AirPlay 音箱";
+            apDev.name = "测试 AirPlay 音箱";
+            apDev.host = "192.0.2.20";
+            apDev.port = 7000;
+            apDev.sampleRate = 44100;
+            apDev.sampleSize = 16;
+            apDev.supportsAlac = true;
+            apDev.model = "AudioAccessory5,1";
+            rta::net::CastManager::instance().set_airplay_devices_for_test({apDev});
+            NSDictionary *realDev = [core jsonWithMethod:@"GET" path:@"/api/cast/devices" body:nil];
+            rta::net::CastManager::instance().set_airplay_devices_for_test({});
+            CK([realDev isKindOfClass:[NSDictionary class]] && [realDev[@"ok"] boolValue],
+               "S13a 后端 /api/cast/devices 真实回包 ok=true", realDev.description ?: @"nil");
+            NSArray *realArr = [realDev[@"devices"] isKindOfClass:[NSArray class]] ? realDev[@"devices"] : @[];
+            NSDictionary *airEntry = nil;
+            for (id x in realArr)
+                if ([x isKindOfClass:[NSDictionary class]] && [x[@"kind"] isEqualToString:@"airplay"]) {
+                    airEntry = (NSDictionary *)x;
+                    break;
+                }
+            CK(airEntry != nil, "S13b AirPlay 接收器与 UPnP 在同一个 devices 列表里",
+               [NSString stringWithFormat:@"n=%lu", (unsigned long)realArr.count]);
+            CK([airEntry[@"location"] hasPrefix:@"airplay://192.0.2.20:7000"],
+               "S13c AirPlay 设备标识是 airplay://host:port（web castDevValue 取 location）",
+               airEntry[@"location"] ?: @"nil");
+            CK([airEntry[@"name"] isEqualToString:@"测试 AirPlay 音箱"],
+               "S13d 设备名原样透出", airEntry[@"name"] ?: @"nil");
+
+            RLPCastView *cv = [[RLPCastView alloc] initWithFrame:NSMakeRect(0, 0, 620, 200)];
+            [cv layoutSubtreeIfNeeded];
+            NSPopUpButton *castPop = (NSPopUpButton *)FindById(cv, @"cast.device");
+            NSButton *castRefresh = (NSButton *)FindById(cv, @"cast.refresh");
+            NSButton *castPush = (NSButton *)FindById(cv, @"cast.push");
+            NSButton *castStop = (NSButton *)FindById(cv, @"cast.stop");
+            NSTextField *castStatus = (NSTextField *)FindById(cv, @"cast.status");
+            CK(castPop && castRefresh && castPush && castStop && castStatus,
+               "S13e 投放面板控件带标识（设备下拉/刷新/推送/停止/状态）", @"缺失");
+            if (castPop && castRefresh && castPush && castStop && castStatus) {
+                NSDictionary *mixed = @{
+                    @"ok" : @YES, @"n" : @2,
+                    @"devices" : @[
+                        @{ @"name" : @"客厅 UPnP 渲染器", @"friendlyName" : @"客厅 UPnP 渲染器",
+                           @"model" : @"DMR-1", @"host" : @"192.0.2.10", @"port" : @49494,
+                           @"location" : @"http://192.0.2.10:49494/desc.xml", @"kind" : @"upnp" },
+                        @{ @"name" : @"HomePod 客厅", @"friendlyName" : @"HomePod 客厅",
+                           @"model" : @"AirPlay · AudioAccessory5,1 · 44100 Hz/16 bit",
+                           @"host" : @"192.0.2.20", @"port" : @7000,
+                           @"location" : @"airplay://192.0.2.20:7000", @"kind" : @"airplay",
+                           @"supportsAlac" : @YES },
+                    ]
+                };
+                CastStubInstall();
+                NSMutableArray<NSString *> *req = gCastReq;
+                gCastResp[@"/api/cast/devices"] = mixed;
+                gCastResp[@"/api/cast/state"] = @{ @"ok" : @YES, @"running" : @NO };
+                [req removeAllObjects];
+                [cv reload];
+                Pump(0.2);
+                BOOL castPath = NO, upnpPath = NO, posted = NO;
+                for (NSString *p in req) {
+                    if ([p hasPrefix:@"GET /api/cast/devices"]) castPath = YES;
+                    if ([p hasPrefix:@"GET /api/upnp"]) upnpPath = YES;
+                    if ([p hasPrefix:@"POST "]) posted = YES;
+                }
+                CK(castPath, "S13f 设备发现走 /api/cast/devices", req.description ?: @"nil");
+                CK(!upnpPath, "S13g 成功路径不再走只回 UPnP 的旧 /api/upnp", req.description ?: @"nil");
+                CK(!posted, "S13h 打开面板绝不自动投放（无 POST /api/cast/*）", req.description ?: @"nil");
+                CK(castPop.numberOfItems == 2, "S13i 下拉同时列出 AirPlay 与 UPnP（同一列表）",
+                   [NSString stringWithFormat:@"items=%ld", (long)castPop.numberOfItems]);
+                NSInteger apIdx = -1, upIdx = -1;
+                for (NSInteger i = 0; i < castPop.numberOfItems; ++i) {
+                    NSString *t = [castPop itemTitleAtIndex:i];
+                    if ([t containsString:@"[AirPlay]"] && [t containsString:@"HomePod 客厅"]) apIdx = i;
+                    if ([t containsString:@"[UPnP]"] && [t containsString:@"客厅 UPnP 渲染器"]) upIdx = i;
+                }
+                CK(apIdx >= 0, "S13j AirPlay 设备带 [AirPlay] 前缀显示（web castDevLabel 同口径）",
+                   castPop.itemTitles.description ?: @"");
+                CK(upIdx >= 0, "S13k UPnP 设备带 [UPnP] 前缀显示",
+                   castPop.itemTitles.description ?: @"");
+
+                gCastResp[@"POST /api/cast/start"] = @{ @"ok" : @YES, @"started" : @YES };
+                gCastResp[@"POST /api/cast/stop"] = @{ @"ok" : @YES, @"stopped" : @YES };
+                gCastResp[@"/api/cast/state"] = @{
+                    @"ok" : @YES, @"running" : @YES, @"device" : @"airplay://192.0.2.20:7000",
+                    @"sourceRate" : @44100, @"servedRate" : @44100, @"resampled" : @NO
+                };
+                if (apIdx >= 0) [castPop selectItemAtIndex:apIdx];
+                [req removeAllObjects];
+                [castPush performClick:nil];
+                Pump(0.2);
+                NSString *startAir = nil;
+                for (NSString *p in req) if ([p hasPrefix:@"POST /api/cast/start"]) startAir = p;
+                CK(startAir != nil, "S13l 推送调用 POST /api/cast/start", req.description ?: @"nil");
+                CK([startAir containsString:@"airplay://192.0.2.20:7000"] ||
+                   [startAir containsString:@"airplay%3A%2F%2F192.0.2.20%3A7000"],
+                   "S13m 推送 dev 用 location 标识（airplay://host:port，web 同口径）",
+                   startAir ?: @"nil");
+                CK([castStatus.stringValue containsString:@"AirPlay"],
+                   "S13n 状态按 device 前缀识别 AirPlay（/api/cast/state 没有 airplay 字段）",
+                   castStatus.stringValue ?: @"nil");
+                CK([castStatus.stringValue containsString:@"端到端 bit-perfect 未获验证"],
+                   "S13o AirPlay 如实标注端到端未验证（不谎称 bit-perfect）",
+                   castStatus.stringValue ?: @"nil");
+                CK(castStop.enabled, "S13p 投放中「停止投放」可用", @"");
+
+                [req removeAllObjects];
+                [castStop performClick:nil];
+                Pump(0.2);
+                BOOL stopHit = NO;
+                for (NSString *p in req) if ([p hasPrefix:@"POST /api/cast/stop"]) stopHit = YES;
+                CK(stopHit, "S13q 停止调用 POST /api/cast/stop", req.description ?: @"nil");
+
+                // UPnP 不回归：同一套发现/推送/状态路径下 UPnP 设备仍能推送并显示 UPnP 状态。
+                gCastResp[@"/api/cast/state"] = @{
+                    @"ok" : @YES, @"running" : @YES,
+                    @"device" : @"http://192.0.2.10:49494/desc.xml",
+                    @"sourceRate" : @96000, @"servedRate" : @96000, @"resampled" : @NO
+                };
+                if (upIdx >= 0) [castPop selectItemAtIndex:upIdx];
+                [req removeAllObjects];
+                [castPush performClick:nil];
+                Pump(0.2);
+                NSString *startUpnp = nil;
+                for (NSString *p in req) if ([p hasPrefix:@"POST /api/cast/start"]) startUpnp = p;
+                CK([startUpnp containsString:@"http://192.0.2.10:49494/desc.xml"],
+                   "S13r UPnP 推送仍用 location（旧行为不回归）", startUpnp ?: @"nil");
+                CK([castStatus.stringValue containsString:@"UPnP"],
+                   "S13s UPnP 投放状态仍按原行为展示", castStatus.stringValue ?: @"nil");
+
+                // 空列表：必须说清为什么，而不是只给一个空下拉。
+                gCastResp[@"/api/cast/devices"] = @{
+                    @"ok" : @YES, @"n" : @0, @"devices" : @[],
+                    @"hint" : @"未发现 UPnP/DLNA 渲染器（确认设备已开机并开启 DLNA/UPnP）"
+                };
+                gCastResp[@"/api/cast/state"] = @{ @"ok" : @YES, @"running" : @NO };
+                [req removeAllObjects];
+                [cv reload];
+                Pump(0.2);
+                CK(castPop.numberOfItems == 1, "S13t 空列表只显示占位项",
+                   [NSString stringWithFormat:@"items=%ld", (long)castPop.numberOfItems]);
+                CK(!castPush.enabled, "S13u 无设备时推送按钮禁用", @"");
+                CK([castStatus.stringValue containsString:@"未发现 UPnP/DLNA 渲染器"],
+                   "S13v 空列表如实显示后端 hint（说明为什么没搜到）",
+                   castStatus.stringValue ?: @"nil");
+
+                // 刷新必须强制重扫（web 的刷新按钮就是 ?scan=1）。
+                gCastResp[@"/api/cast/devices"] = mixed;
+                [req removeAllObjects];
+                [castRefresh performClick:nil];
+                Pump(0.2);
+                BOOL scanForced = NO;
+                for (NSString *p in req)
+                    if ([p isEqualToString:@"GET /api/cast/devices?scan=1"]) scanForced = YES;
+                CK(scanForced, "S13w 刷新设备强制重扫（?scan=1，与 web 刷新同口径）",
+                   req.description ?: @"nil");
+
+                // 端点无响应：如实报扫描失败，不静默成空列表。
+                [gCastResp removeAllObjects];
+                gCastResp[@"/api/cast/state"] = @{ @"ok" : @YES, @"running" : @NO };
+                [req removeAllObjects];
+                [cv reload];
+                Pump(0.3);
+                CK([castStatus.stringValue containsString:@"扫描失败"],
+                   "S13x /api/cast/devices 无响应时如实报扫描失败",
+                   castStatus.stringValue ?: @"nil");
+
+                CastStubUninstall();
+            }
         }
 
         [core shutdown];

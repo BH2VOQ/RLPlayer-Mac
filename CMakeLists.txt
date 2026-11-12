@@ -521,7 +521,7 @@ if(APPLE)
   add_executable(test_artist_grid tests/test_artist_grid.mm
     tools/native_ui/RLPArtistsViewController.mm
     tools/native_ui/RLPAlbumDetailViewController.mm
-    tools/native_ui/RLPPlaybackBarView.mm
+    tools/native_ui/RLPPlaybackBarView.mm tools/native_ui/RLPSignalChain.mm
     tools/native_ui/RLPTrackActions.mm tools/native_ui/RLPAnalysisSummary.mm
     tools/native_ui/RLPPageViewController.mm
     tools/native_ui/RLPCoreClient.mm tools/native_ui/RLPSupport.mm
@@ -529,7 +529,7 @@ if(APPLE)
     tools/native_ui/RLPTheme.mm tools/native_ui/RLPNativeI18n.mm)
   set_source_files_properties(tests/test_artist_grid.mm
     tools/native_ui/RLPArtistsViewController.mm tools/native_ui/RLPAlbumDetailViewController.mm
-    tools/native_ui/RLPPlaybackBarView.mm
+    tools/native_ui/RLPPlaybackBarView.mm tools/native_ui/RLPSignalChain.mm
     tools/native_ui/RLPTrackActions.mm tools/native_ui/RLPAnalysisSummary.mm
     tools/native_ui/RLPPageViewController.mm
     tools/native_ui/RLPCoreClient.mm tools/native_ui/RLPSupport.mm

@@ -72,6 +72,12 @@ NSArray<NSString *> *RLPSplitArtistNames(NSString * _Nullable raw);
 @property (nonatomic, copy) NSString *bitPerfect;
 /// 后端给的位完美判定原因（照实显示，不自己编）。
 @property (nonatomic, copy) NSString *bitPerfectWhy;
+/// 本次播放的实际输出格式（/api/status 的 outRate / outBits，底栏 #fmt 徽标用；
+/// 与 web 同字段：还没有开始播放时后端不回这两个键 ⟹ 0 ⟹ 徽标显示 "--"）。
+@property (nonatomic) double outRate;
+@property (nonatomic) NSInteger outBits;
+/// 本次播放 GPU 是否真的参与（web #gpub 同口径；没上线/未参与时 false）。
+@property (nonatomic) BOOL gpuUsed;
 + (nullable instancetype)statusFromJSON:(NSDictionary *)json;
 @end
 

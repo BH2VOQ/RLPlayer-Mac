@@ -43,6 +43,210 @@
 }
 @end
 
+#pragma mark - 底部控制区（web #npPage .npctl2 的原生落点）
+
+/// 拖动提交滑杆：拖动期间 0.8s 轮询**不得**回写（否则滑块被"橡皮筋"拉回去），
+/// 松手只提交一次（进度 = /api/seek，音量 = /api/volume；每像素发一个请求会堆请求）。
+/// 与底栏 RLPPlaybackBarView 的 RLPCommitSlider 同一手法。
+@interface RLPNPSlider : NSSlider
+@property (nonatomic, assign, readonly) BOOL dragging;
+@property (nonatomic, copy, nullable) void (^onCommit)(void);
+@end
+
+@implementation RLPNPSlider
+- (void)mouseDown:(NSEvent *)event {
+    _dragging = YES;
+    [super mouseDown:event];      // NSSlider 在这里跑完整个拖动循环
+    _dragging = NO;
+    if (self.onCommit) self.onCommit();
+}
+@end
+
+/// 音量滑块是**位置刻度 0..1000**，不是 dB。曲线逐字对齐 web ui_script.h 的
+/// volPosToDb / volDbToPos（-55·(1-p)^1.6；pos≤5 = -120 dB 真静音）。
+/// 为什么不能用线性 dB：线性刻度中点 = -30 dB（约 3% 振幅），用户会以为"拖到中间就没声音"
+/// —— 这正是 web 2026-10-25 修掉的事故，原生不能原样退回去。
+static const double kNPVolMinDb = -55.0;      // 曲线 dB 下限（不是静音位）
+static const double kNPVolSilentDb = -120.0;  // 真静音：后端把 ≤-120 dB 映射成增益 0
+static const int kNPVolSilentPos = 5;         // 位置 ≤5（0.5% 行程）判定为静音档
+
+static double RLPNPVolPosToDb(double pos) {
+    if (!isfinite(pos)) return kNPVolSilentDb;
+    const double p = fmax(0.0, fmin(1000.0, pos)) / 1000.0;
+    if (pos <= kNPVolSilentPos) return kNPVolSilentDb;
+    return -fabs(kNPVolMinDb) * pow(1.0 - p, 1.6);
+}
+
+static double RLPNPVolDbToPos(double db) {
+    if (!isfinite(db) || db >= 0.0) return 1000.0;
+    if (db <= kNPVolMinDb) return 0.0;    // ≤ -55 dB（含 -120 静音档）全部落在最左端
+    return round(1000.0 * (1.0 - pow(-db / fabs(kNPVolMinDb), 1.0 / 1.6)));
+}
+
+/// 标签说结果而不是内部编码：静音档写「静音」（-120 dB 对用户没有意义），其余保留 1 位小数。
+static NSString *RLPNPVolDbLabel(double db) {
+    if (!isfinite(db) || db <= -59.5) return RLPTr(@"静音");
+    if (fabs(db) < 0.05) db = 0.0;
+    return [NSString stringWithFormat:@"%@%.1f dB", db > 0.0 ? @"+" : @"", db];
+}
+
+/// 收藏路径规范化：后端 /api/fav 的收藏键沿用了跨平台的 "\\" 分隔符
+/// （实测 POST /api/fav?file=/a/b.flac 后 /api/fav/list 回 "\\a\\b.flac"），
+/// 而 /api/status 的 current 是 "…/a/b.flac" ⟹ 逐字比较永远不相等、心形永远空心。
+/// 两侧统一成 "/" 再比；不改后端语义，也不臆造第二个收藏存储。
+static NSString *RLPNPFavKey(NSString *path) {
+    if (![path isKindOfClass:[NSString class]]) return @"";
+    return [path stringByReplacingOccurrencesOfString:@"\\" withString:@"/"];
+}
+
+/// 底部控制条：进度滑杆一行 + 「当前/总时长 · 循环/上一首/播放/下一首/停止 · 音量」一行，
+/// 与 web #npPage 的 .npseek + .npctlrow 同结构。内部纯手动布局（固定高度，约束只有外层四条）。
+@interface RLPNPControlBar : NSView
+@property (nonatomic, strong) RLPNPSlider *seek;
+@property (nonatomic, strong) RLPNPSlider *volume;
+@property (nonatomic, strong) NSTextField *posLabel;
+@property (nonatomic, strong) NSTextField *sepLabel;
+@property (nonatomic, strong) NSTextField *durLabel;
+@property (nonatomic, strong) NSTextField *volLabel;
+@property (nonatomic, strong) NSButton *repBtn;
+@property (nonatomic, strong) NSButton *prevBtn;
+@property (nonatomic, strong) NSButton *playBtn;
+@property (nonatomic, strong) NSButton *nextBtn;
+@property (nonatomic, strong) NSButton *stopBtn;
+@property (nonatomic, strong) NSImageView *volIcon;
+- (void)applyTheme;
+@end
+
+@implementation RLPNPControlBar
+
+- (instancetype)initWithFrame:(NSRect)frameRect {
+    self = [super initWithFrame:frameRect];
+    if (!self) return nil;
+    RLPTheme *t = [RLPTheme current];
+    self.wantsLayer = YES;
+    self.layer.cornerRadius = 10;
+    self.layer.backgroundColor = t.barBg.CGColor;
+    self.layer.borderWidth = 1;
+    self.layer.borderColor = t.hairline.CGColor;
+    self.identifier = @"np.controls";
+
+    self.seek = [[RLPNPSlider alloc] initWithFrame:NSZeroRect];
+    self.seek.minValue = 0.0;
+    self.seek.maxValue = 1.0;
+    self.seek.doubleValue = 0.0;
+    self.seek.continuous = YES;
+    self.seek.controlSize = NSControlSizeSmall;
+    self.seek.identifier = @"np.seek";
+    self.seek.toolTip = RLPTr(@"进度");
+
+    NSFont *timeFont = [NSFont monospacedDigitSystemFontOfSize:11 weight:NSFontWeightRegular];
+    self.posLabel = RLPLabel(@"0:00", timeFont, t.mut);
+    self.posLabel.identifier = @"np.pos";
+    self.posLabel.alignment = NSTextAlignmentRight;
+    self.sepLabel = RLPLabel(@"/", timeFont, t.mut);
+    self.sepLabel.alignment = NSTextAlignmentCenter;
+    self.durLabel = RLPLabel(@"0:00", timeFont, t.mut);
+    self.durLabel.identifier = @"np.dur";
+
+    self.repBtn = [NSButton buttonWithTitle:RLPTr(@"顺序") target:nil action:nil];
+    self.repBtn.bezelStyle = NSBezelStyleRounded;
+    self.repBtn.controlSize = NSControlSizeSmall;
+    self.repBtn.font = t.small;
+    self.repBtn.identifier = @"np.rep";
+    self.repBtn.toolTip = RLPTr(@"循环方式");
+
+    self.prevBtn = RLPSymbolButton(@"backward.fill", @"上一首", nil, nil);
+    self.prevBtn.identifier = @"np.prev";
+    self.playBtn = RLPSymbolButton(@"play.fill", @"播放 / 暂停", nil, nil);
+    self.playBtn.identifier = @"np.play";
+    self.nextBtn = RLPSymbolButton(@"forward.fill", @"下一首", nil, nil);
+    self.nextBtn.identifier = @"np.next";
+    self.stopBtn = RLPSymbolButton(@"stop.fill", @"停止", nil, nil);
+    self.stopBtn.identifier = @"np.stop";
+
+    self.volIcon = [[NSImageView alloc] initWithFrame:NSZeroRect];
+    self.volIcon.image = [NSImage imageWithSystemSymbolName:@"speaker.wave.2"
+                                   accessibilityDescription:RLPTr(@"音量")];
+    self.volIcon.contentTintColor = t.mut;
+
+    self.volume = [[RLPNPSlider alloc] initWithFrame:NSZeroRect];
+    self.volume.minValue = 0.0;
+    self.volume.maxValue = 1000.0;      // 位置刻度，不是 dB
+    self.volume.doubleValue = 1000.0;
+    self.volume.continuous = YES;
+    self.volume.controlSize = NSControlSizeSmall;
+    self.volume.identifier = @"np.vol";
+    self.volume.toolTip = RLPTr(@"音量");
+    self.volLabel = RLPLabel(@"0.0 dB",
+        [NSFont monospacedDigitSystemFontOfSize:10.5 weight:NSFontWeightRegular], t.mut);
+    self.volLabel.identifier = @"np.vollab";
+    self.volLabel.alignment = NSTextAlignmentRight;
+
+    for (NSView *v in @[self.seek, self.posLabel, self.sepLabel, self.durLabel, self.repBtn,
+                        self.prevBtn, self.playBtn, self.nextBtn, self.stopBtn,
+                        self.volIcon, self.volume, self.volLabel]) {
+        [self addSubview:v];
+    }
+    return self;
+}
+
+- (void)layout {
+    [super layout];
+    const CGFloat W = self.bounds.size.width, H = self.bounds.size.height;
+    if (W < 280 || H < 56) return;
+    const CGFloat pad = 14.0;
+
+    // 上排：进度滑杆铺满（web #npSeek 占满整行）
+    const CGFloat seekH = 16.0;
+    const CGFloat seekY = H - 9.0 - seekH;
+    self.seek.frame = NSMakeRect(pad, seekY, MAX(80.0, W - pad * 2), seekH);
+
+    // 下排：时间（左）· 控制键（中，恒居中）· 音量（右）
+    const CGFloat rowCY = seekY / 2.0;
+    const CGFloat timeW = 46.0, sepW = 10.0;
+    CGFloat x = pad;
+    self.posLabel.frame = NSMakeRect(x, rowCY - 8, timeW, 16); x += timeW + 2;
+    self.sepLabel.frame = NSMakeRect(x, rowCY - 8, sepW, 16); x += sepW + 2;
+    self.durLabel.frame = NSMakeRect(x, rowCY - 8, timeW, 16);
+
+    const CGFloat repW = 68.0, keyS = 28.0, playS = 32.0, keyGap = 8.0;
+    const CGFloat keysW = repW + keyGap + keyS + keyGap + playS + keyGap + keyS + keyGap + keyS;
+    CGFloat kx = (W - keysW) / 2.0;
+    self.repBtn.frame = NSMakeRect(kx, rowCY - 12, repW, 24); kx += repW + keyGap;
+    self.prevBtn.frame = NSMakeRect(kx, rowCY - keyS / 2.0, keyS, keyS); kx += keyS + keyGap;
+    self.playBtn.frame = NSMakeRect(kx, rowCY - playS / 2.0, playS, playS); kx += playS + keyGap;
+    self.nextBtn.frame = NSMakeRect(kx, rowCY - keyS / 2.0, keyS, keyS); kx += keyS + keyGap;
+    self.stopBtn.frame = NSMakeRect(kx, rowCY - keyS / 2.0, keyS, keyS);
+
+    const CGFloat volLabW = 56.0, iconW = 14.0, volGap = 6.0;
+    CGFloat sliderW = 118.0;
+    const CGFloat minIconX = kx + 12.0;                 // 绝不压住中键区
+    const CGFloat labelX = W - pad - volLabW;
+    CGFloat sliderX = labelX - volGap - sliderW;
+    CGFloat iconX = sliderX - volGap - iconW;
+    if (iconX < minIconX) {
+        sliderW = MAX(56.0, sliderW - (minIconX - iconX));
+        sliderX = labelX - volGap - sliderW;
+        iconX = sliderX - volGap - iconW;
+    }
+    self.volIcon.frame = NSMakeRect(iconX, rowCY - 7, iconW, 14);
+    self.volume.frame = NSMakeRect(sliderX, rowCY - 9, sliderW, 18);
+    self.volLabel.frame = NSMakeRect(labelX, rowCY - 8, volLabW, 16);
+}
+
+- (void)applyTheme {
+    RLPTheme *t = [RLPTheme current];
+    self.layer.backgroundColor = t.barBg.CGColor;
+    self.layer.borderColor = t.hairline.CGColor;
+    for (NSTextField *l in @[self.posLabel, self.sepLabel, self.durLabel, self.volLabel])
+        l.textColor = t.mut;
+    for (NSButton *b in @[self.prevBtn, self.playBtn, self.nextBtn, self.stopBtn])
+        b.contentTintColor = t.text;
+    self.volIcon.contentTintColor = t.mut;
+}
+
+@end
+
 @interface RLPNowPlayingViewController ()
 @property (nonatomic, strong) NSTimer *poll;
 @property (nonatomic) BOOL polling;

@@ -152,6 +152,9 @@ NSArray<NSString *> *RLPSplitArtistNames(NSString *raw) {
     s.error = Str(json, @"error");
     s.bitPerfect = Str(json, @"bitPerfect");
     s.bitPerfectWhy = Str(json, @"bitPerfectWhy");
+    s.outRate = Num(json, @"outRate");
+    s.outBits = (NSInteger)Num(json, @"outBits");
+    s.gpuUsed = Bool(json, @"gpuUsed");
     return s;
 }
 @end

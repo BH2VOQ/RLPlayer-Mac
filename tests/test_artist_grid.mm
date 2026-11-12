@@ -106,30 +106,94 @@ int main() {
                 if ([c.identifier isEqualToString:@"title"] &&
                     (c.resizingMask & NSTableColumnAutoresizingMask)) titleFlexible = YES;
             CK(titleFlexible, "A2f 曲名列是弹性列（其余列宽恒定 ⟹ 图标位置稳定）", @"");
+
+            // A2g/A2h：用户 1.1.7.4 实测「曲名后面甩出约 400px 空白」。
+            // web 专辑曲目表是 grid `28 24 minmax(120px,1.6fr) minmax(0,1fr) 92 58 26`，
+            // 曲名与艺术家**按 1.6:1 分剩余宽度**、中间只隔 gap 8 ⟹ 不会出现大空白。
+            // 判据：曲名列右缘与艺术家列左缘之间的空隙必须很小（≤ 24pt）。
+            NSTableColumn *tCol = nil, *aCol = nil;
+            CGFloat x = 0, titleRight = 0, artistLeft = -1;
+            for (NSTableColumn *c in tv.tableColumns) {
+                if ([c.identifier isEqualToString:@"title"]) { tCol = c; titleRight = x + c.width; }
+                if ([c.identifier isEqualToString:@"artist"]) { aCol = c; artistLeft = x; }
+                x += c.width;
+            }
+            if (tCol && aCol) {
+                const CGFloat gap = artistLeft - titleRight;
+                CK(gap <= 24.0,
+                   "A2g 曲名列与艺术家列之间没有大空白（≤24pt）",
+                   [NSString stringWithFormat:@"gap=%.1f", gap]);
+                // 两列都必须是弹性列（按 fr 比例分剩余宽度），而不是固定宽度。
+                CK((tCol.resizingMask & NSTableColumnAutoresizingMask) &&
+                   (aCol.resizingMask & NSTableColumnAutoresizingMask),
+                   "A2h 曲名与艺术家都按比例吸收宽度（web 1.6fr : 1fr 同口径）", @"");
+            }
+            // A2i：行高必须紧凑。web `.trow{padding:8px 20px;font-size:12.5px}` ≈ 33pt；
+            // 旧实现 38(+1) 让六行显得又高又散，是「图标与曲目对不齐」观感的一部分。
+            CK(tv.rowHeight <= 36.0,
+               "A2i 曲目行高紧凑（≤36pt，web 同口径）",
+               [NSString stringWithFormat:@"rowHeight=%.1f", tv.rowHeight]);
+            CK(tv.intercellSpacing.width >= 6.0,
+               "A2j 列间有水平间隔（web grid gap:8px，图标与文字不粘在一起）",
+               [NSString stringWithFormat:@"spacing=%.1f", tv.intercellSpacing.width]);
         }
 
-        // ---- A3 播放条：控制键组必须居中（不是硬编码 x=250 偏左） ----
+        // ---- A3 播放条：按 web .bar 三列结构（左信息 / 中控制+进度 / 右徽标+音量）----
         RLPPlaybackBarView *bar = [[RLPPlaybackBarView alloc] initWithFrame:NSMakeRect(0, 0, 1180, 66)];
-        [bar layoutSubtreeIfNeeded];
         bar.frame = NSMakeRect(0, 0, 1180, 66);
         [bar layout];
         NSMutableArray<NSView *> *allB = [NSMutableArray array];
         CollectViews(bar, allB);
-        NSButton *play = nil;
-        for (NSView *v in allB) {
-            if ([v isKindOfClass:[NSButton class]]) {
-                NSButton *b = (NSButton *)v;
-                if (b.frame.size.width >= 40 && b.frame.size.height >= 40) { play = b; break; }
-            }
-        }
-        CK(play != nil, "A3a 播放条有 44pt 主按钮", @"");
+        NSButton *play = (NSButton *)FindById(bar, @"pb.play");
+        CK(play != nil && play.frame.size.width >= 30 && play.frame.size.height >= 30,
+           "A3a 播放条有 34pt 主按钮（web .k.big 同尺寸）", @"");
         if (play) {
             const CGFloat mid = NSMidX(play.frame);
             const CGFloat center = 1180 / 2.0;
-            CK(fabs(mid - center) < 120,
-               "A3b 主按钮接近窗口中线（控制键组居中，不再硬编码偏左）",
+            CK(fabs(mid - center) < 40,
+               "A3b 主按钮在窗口中线（控制键组整组居中）",
                [NSString stringWithFormat:@"mid=%.1f center=%.1f", mid, center]);
         }
+
+        NSSlider *prog = (NSSlider *)FindById(bar, @"pb.progress");
+        NSSlider *vol = (NSSlider *)FindById(bar, @"pb.vol");
+        NSTextField *posLbl = (NSTextField *)FindById(bar, @"pb.pos");
+        NSTextField *durLbl = (NSTextField *)FindById(bar, @"pb.dur");
+        NSTextField *fmtLbl = (NSTextField *)FindById(bar, @"pb.fmt");
+        NSButton *lyricBtn = (NSButton *)FindById(bar, @"pb.lyric");
+        NSButton *chainBtn = (NSButton *)FindById(bar, @"pb.chain");
+
+        // A3c/A3d：用户 1.1.7.4 实测「进度条被甩到按钮下方很远处、中间一大块空白」。
+        // 判据：进度条顶边与控制键（主按钮）底边之间不得有大于 12pt 的空隙。
+        CK(prog != nil, "A3c 播放条有进度滑杆", @"");
+        if (prog && play) {
+            const CGFloat gap = NSMinY(prog.frame) - NSMaxY(play.frame);   // AppKit 原点在左下
+            CK(gap <= 12.0,
+               "A3d 进度条紧接控制键下方（空隙 ≤12pt，不再甩到底部）",
+               [NSString stringWithFormat:@"gap=%.1f", gap]);
+        }
+        // A3e/A3f：web 进度行是「当前时间 | 滑杆 | 总时长」，两段时间分列两侧。
+        // 旧实现把时间挤成一条「0:00 / 0:00」放在右侧、滑杆却横穿过去 ⟹ 文字与滑杆重叠。
+        CK(posLbl != nil && durLbl != nil, "A3e 进度条两端有独立时间标签", @"缺失");
+        if (prog && posLbl && durLbl) {
+            CK(!NSIntersectsRect(posLbl.frame, prog.frame) &&
+               !NSIntersectsRect(durLbl.frame, prog.frame),
+               "A3f 时间标签与进度滑杆不重叠",
+               [NSString stringWithFormat:@"pos=%@ prog=%@ dur=%@",
+                NSStringFromRect(posLbl.frame), NSStringFromRect(prog.frame), NSStringFromRect(durLbl.frame)]);
+            CK(fabs(NSMidX(prog.frame) - 1180 / 2.0) < 80,
+               "A3g 进度滑杆在中列（不偏向左右信息区）",
+               [NSString stringWithFormat:@"mid=%.1f", NSMidX(prog.frame)]);
+        }
+        // A3h：web 底栏右侧有歌词 / 信号链两个图标入口（原生旧实现没有 ⟹ 功能不对等）
+        CK(lyricBtn != nil && chainBtn != nil, "A3h 底栏有歌词/信号链入口（web #bLyric/#bChain 同款）", @"缺失");
+        // A3i：web #fmt 徽标（44.1k/24），空态显示 "--"
+        CK(fmtLbl != nil && [fmtLbl.stringValue isEqualToString:@"--"],
+           "A3i 底栏有格式徽标（无播放时显示 --）", fmtLbl.stringValue ?: @"缺失");
+        // A3j：音量滑杆必须是**位置刻度 0..1000**（web 261024-10 曲线），不是线性 dB
+        CK(vol != nil && vol.maxValue >= 1000.0,
+           "A3j 音量滑杆用位置刻度（0..1000），拖到中间不会突然很小声",
+           [NSString stringWithFormat:@"max=%.1f", vol.maxValue]);
 
         std::printf("\n%s（%d 项失败）\n", gFail == 0 ? "artist_grid 全部通过" : "artist_grid 有失败", gFail);
         return gFail == 0 ? 0 : 1;

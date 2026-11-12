@@ -197,18 +197,27 @@ static const CGFloat kTopbarHeight = 46.0;
         [queueBtn.centerYAnchor constraintEqualToAnchor:_topbar.centerYAnchor],
         [queueBtn.widthAnchor constraintEqualToConstant:28],
 
-        // 悬浮播放条（web .bar）：左右 24 / 底 14 / 高 66 / 圆角 16。
-        // 内容区底也停在播放条顶之上 14，避免专辑网格被悬浮条遮住。
-        [_playbackBar.leadingAnchor constraintEqualToAnchor:_sidebar.view.trailingAnchor constant:24],
-        [_playbackBar.trailingAnchor constraintEqualToAnchor:root.trailingAnchor constant:-24],
+        // 悬浮播放条（web .bar）：最大宽 1120 **居中**、底 14 / 高 66 / 圆角 16。
+        // 旧实现钉死左右各 24 ⟹ 宽窗口下播放条比 web 版宽，右侧状态簇被拉散，
+        // 用户看到的「播放条比例不对」有一部分来自这里（web 是 max-width:1120;margin:auto）。
+        // 宽度用低优先级等式给足可用宽，再用 required 的 ≤1120 与左右边距兜底。
+        [_playbackBar.centerXAnchor constraintEqualToAnchor:_pageHost.centerXAnchor],
         [_playbackBar.bottomAnchor constraintEqualToAnchor:root.bottomAnchor constant:-14],
         [_playbackBar.heightAnchor constraintEqualToConstant:66],
+        [_playbackBar.leadingAnchor constraintGreaterThanOrEqualToAnchor:_sidebar.view.trailingAnchor constant:24],
+        [_playbackBar.trailingAnchor constraintLessThanOrEqualToAnchor:root.trailingAnchor constant:-24],
 
         [_pageHost.leadingAnchor constraintEqualToAnchor:_sidebar.view.trailingAnchor],
         [_pageHost.trailingAnchor constraintEqualToAnchor:root.trailingAnchor],
         [_pageHost.topAnchor constraintEqualToAnchor:_topbar.bottomAnchor],
         [_pageHost.bottomAnchor constraintEqualToAnchor:_playbackBar.topAnchor constant:-14],
     ]];
+    {
+        NSLayoutConstraint *fill = [_playbackBar.widthAnchor constraintEqualToAnchor:_pageHost.widthAnchor constant:-48];
+        fill.priority = NSLayoutPriorityDefaultHigh;   // 750：窄窗口按可用宽度铺满
+        NSLayoutConstraint *cap = [_playbackBar.widthAnchor constraintLessThanOrEqualToConstant:1120];
+        [NSLayoutConstraint activateConstraints:@[fill, cap]];
+    }
 
     __weak __typeof__(self) weakSelf = self;
     _sidebar.onSelect = ^(NSInteger row) { [weakSelf showContentForRow:row]; };

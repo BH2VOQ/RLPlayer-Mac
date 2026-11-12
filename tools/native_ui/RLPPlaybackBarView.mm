@@ -14,6 +14,7 @@
 #import "RLPModels.h"
 #import "RLPTheme.h"
 #import "RLPSupport.h"   // RLPTr / RLPToast / RLPPostJSON（播放模式按钮用）
+#import "RLPSignalChain.h"   // 底栏「信号链」弹层（与工作台同一份纯函数）
 
 #pragma mark - 可拖动滑块（区分"用户正在拖"与"轮询回写"）
 
@@ -41,7 +42,11 @@
 @property (nonatomic, strong) NSButton *nextBtn;
 @property (nonatomic, strong) NSTextField *titleLabel;
 @property (nonatomic, strong) NSTextField *subLabel;
-@property (nonatomic, strong) NSTextField *timeLabel;
+@property (nonatomic, strong) NSTextField *posLabel;    // 进度左端「当前时间」
+@property (nonatomic, strong) NSTextField *durLabel;    // 进度右端「总时长」
+@property (nonatomic, strong) NSTextField *fmtBadge;    // 「44.1k/24」格式徽标（web #fmt）
+@property (nonatomic, strong) NSButton *lyricBtn;       // 歌词（web #bLyric）
+@property (nonatomic, strong) NSButton *chainBtn;       // 信号链（web #bChain）
 @property (nonatomic, strong) RLPCommitSlider *progress;
 @property (nonatomic, strong) RLPCommitSlider *volume;
 @property (nonatomic, strong) NSImageView *volIconView;
@@ -105,9 +110,10 @@
     self.playBtn.imageScaling = NSImageScaleProportionallyDown;
     // 红色实心圆播放键（web 底栏的视觉锚点）
     self.playBtn.wantsLayer = YES;
-    self.playBtn.layer.cornerRadius = 20;
+    self.playBtn.layer.cornerRadius = 17;
     self.playBtn.layer.backgroundColor = t.accent.CGColor;
     self.playBtn.contentTintColor = NSColor.whiteColor;
+    self.playBtn.identifier = @"pb.play";
 
     // 封面缩略图（web 底栏最左）
     self.coverView = [[NSImageView alloc] initWithFrame:NSZeroRect];
@@ -116,6 +122,7 @@
     self.coverView.layer.cornerRadius = 6;
     self.coverView.layer.masksToBounds = YES;
     self.coverView.layer.backgroundColor = t.bg3.CGColor;
+    self.coverView.identifier = @"pb.cover";
     [self addSubview:self.coverView];
 
     // BIT-PERFECT 徽标（只在后端确实判定位完美时显示）
@@ -131,11 +138,44 @@
 
     self.titleLabel = [self labelWithFont:[NSFont systemFontOfSize:13 weight:NSFontWeightSemibold]
                                     color:t.text];
+    // 与 web .np 同口径：底栏左侧只放两行（曲名 + 艺术家·专辑），技术信息不进底栏左侧。
+    self.titleLabel.lineBreakMode = NSLineBreakByTruncatingTail;
     self.titleLabel.stringValue = RLPTr(@"未播放");
-    self.subLabel = [self labelWithFont:t.small color:t.mut];
+    self.subLabel = [self labelWithFont:[NSFont systemFontOfSize:11] color:t.mut];
     self.subLabel.stringValue = @"—";
-    self.timeLabel = [self labelWithFont:t.mono color:t.mut];
-    self.timeLabel.stringValue = @"0:00 / 0:00";
+
+    // 进度两端的当前时间 / 总时长（web #tpos / #tdur：分列在滑杆两侧，不再挤成一行）。
+    self.posLabel = [self labelWithFont:[NSFont monospacedDigitSystemFontOfSize:10.5 weight:NSFontWeightRegular]
+                                  color:t.mut];
+    self.posLabel.stringValue = @"0:00";
+    self.posLabel.alignment = NSTextAlignmentRight;
+    self.posLabel.identifier = @"pb.pos";
+    self.durLabel = [self labelWithFont:[NSFont monospacedDigitSystemFontOfSize:10.5 weight:NSFontWeightRegular]
+                                  color:t.mut];
+    self.durLabel.stringValue = @"0:00";
+    self.durLabel.identifier = @"pb.dur";
+
+    // 格式徽标（web #fmt：「44.1k/24」）。没有开始播放时显示 "--"，与 web 一致。
+    self.fmtBadge = [self labelWithFont:[NSFont systemFontOfSize:9.5 weight:NSFontWeightSemibold]
+                                  color:t.accentText];
+    self.fmtBadge.stringValue = @"--";
+    self.fmtBadge.identifier = @"pb.fmt";
+    self.fmtBadge.alignment = NSTextAlignmentCenter;
+    self.fmtBadge.wantsLayer = YES;
+    self.fmtBadge.layer.cornerRadius = 4;
+    self.fmtBadge.layer.borderWidth = 1;
+    self.fmtBadge.layer.borderColor = t.accentWeak.CGColor;
+    self.fmtBadge.layer.backgroundColor = t.accentWeak.CGColor;
+
+    // 歌词 / 信号链（web #bLyric / #bChain，两个 32pt 图标键）
+    self.lyricBtn = [self symbolButton:@"music.note.list" tip:@"歌词"];
+    self.lyricBtn.identifier = @"pb.lyric";
+    self.lyricBtn.target = self;
+    self.lyricBtn.action = @selector(openNowPlaying:);
+    self.chainBtn = [self symbolButton:@"waveform.path" tip:@"信号链"];
+    self.chainBtn.identifier = @"pb.chain";
+    self.chainBtn.target = self;
+    self.chainBtn.action = @selector(showSignalChain:);
 
     self.progress = [[RLPCommitSlider alloc] initWithFrame:NSZeroRect];
     self.progress.minValue = 0.0;
@@ -147,6 +187,7 @@
     self.progress.action = @selector(progressChanged:);
     __weak __typeof__(self) weakSelf = self;
     self.progress.onCommit = ^{ [weakSelf commitSeek]; };
+    self.progress.identifier = @"pb.progress";
 
     NSImage *volIcon = [NSImage imageWithSystemSymbolName:@"speaker.wave.2"
                                  accessibilityDescription:@"音量"];
@@ -156,66 +197,126 @@
     volView.translatesAutoresizingMaskIntoConstraints = NO;
     self.volIconView = volView;
 
+    // 音量滑块改用**位置刻度 0..1000**（web 2026-10-25 修过的曲线）：
+    // 旧实现是线性 dB 刻度，拖到中间就 -30 dB（只剩 3% 振幅），用户会以为"没声音"。
     self.volume = [[RLPCommitSlider alloc] initWithFrame:NSZeroRect];
-    self.volume.minValue = -60.0;
-    self.volume.maxValue = 0.0;
-    self.volume.doubleValue = -12.0;
+    self.volume.minValue = 0.0;
+    self.volume.maxValue = 1000.0;
+    self.volume.doubleValue = 1000.0;
     self.volume.continuous = YES;
     self.volume.controlSize = NSControlSizeSmall;
     self.volume.target = self;
     self.volume.action = @selector(volumeChanged:);
     self.volume.onCommit = ^{ [weakSelf commitVolume]; };
+    self.volume.identifier = @"pb.vol";
 
-    for (NSView *v in @[self.titleLabel, self.subLabel, self.timeLabel, self.progress, volView, self.volume]) {
+    for (NSView *v in @[self.titleLabel, self.subLabel, self.posLabel, self.durLabel, self.fmtBadge,
+                        self.lyricBtn, self.chainBtn, self.progress, volView, self.volume]) {
         v.translatesAutoresizingMaskIntoConstraints = NO;
         [self addSubview:v];
     }
 
     // 内部不用 Auto Layout：固定 66px 高的悬浮条，手动布局最稳
-    // （约束方案在本机出现过控制键被挤出卡片的问题，见 layoutSubviews）。
+    // （约束方案在本机出现过控制键被挤出卡片的问题，见 layout）。
 }
 
-/// 手动布局（66px 悬浮条）：左=曲目信息，**中=控制键（真居中）**，右=时间+音量，
-/// 进度条作为细线贴底贯穿（图三要求：比例协调、不再压着按钮）。
+/// 音量位置刻度 ↔ dB 的互逆曲线（逐字对齐 web ui_script.h 的 volPosToDb / volDbToPos）。
+/// pos=0..5 为静音档（-120 dB），其余按 -55·(1-p)^1.6；见 web 注释里"拖到中间没声音"的事故。
+static const double kVolMinDb = -55.0;
+static const double kVolSilentDb = -120.0;
+static const int kVolSilentPos = 5;
+
+static double RLPVolPosToDb(double pos) {
+    if (!isfinite(pos)) return kVolSilentDb;
+    double p = fmax(0.0, fmin(1000.0, pos)) / 1000.0;
+    if (pos <= kVolSilentPos) return kVolSilentDb;
+    return -fabs(kVolMinDb) * pow(1.0 - p, 1.6);
+}
+
+static double RLPVolDbToPos(double db) {
+    if (!isfinite(db) || db >= 0.0) return 1000.0;
+    if (db <= kVolMinDb) return 0.0;
+    return round(1000.0 * (1.0 - pow(-db / fabs(kVolMinDb), 1.0 / 1.6)));
+}
+
+/// 底栏布局：严格照 web `.bar` 的三列 grid（1.1fr / 1.6fr / 1.1fr，最大 1120，gap 14，padding 18）。
+///   左列：44pt 封面 + 曲名/艺术家两行
+///   中列：控制键（居中）+ 下方进度行（当前时间 / 滑杆 / 总时长）
+///   右列：歌词 / 信号链 / bit-perfect / 格式 / 音量（从右往左排，放不下时按优先级隐藏——与 web 媒体查询同思路）
 - (void)layout {
     [super layout];
     const CGFloat W = self.bounds.size.width, H = self.bounds.size.height;
     if (W < 400 || H < 40) return;
-    const CGFloat cy = H / 2.0;
     void (^place)(NSView *, CGFloat, CGFloat, CGFloat, CGFloat) =
         ^(NSView *v, CGFloat x, CGFloat y, CGFloat w, CGFloat h) { v.frame = NSMakeRect(x, y, w, h); };
 
-    // 左：封面 + 标题/副标题
-    place(self.coverView, 14, cy - 21, 42, 42);
-    place(self.titleLabel, 66, cy - 16, 180, 18);
-    place(self.subLabel, 66, cy + 2, 180, 14);
+    const CGFloat pad = 18.0, gap = 14.0;
+    CGFloat avail = W - pad * 2 - gap * 2;
+    if (avail < 300) avail = 300;
+    CGFloat centerW = avail * (1.6 / 3.8);
+    if (centerW > 440.0) centerW = 440.0;
+    const CGFloat sideW = (avail - centerW) / 2.0;
+    const CGFloat leftX = pad;
+    const CGFloat centerX = pad + sideW + gap;
+    const CGFloat rightX = centerX + centerW + gap;
 
-    // 中：控制键一组**按窗口宽度居中**（旧实现从 x=250 硬编码起排 ⟹ 宽窗口下整组偏左，
-    // 用户实测「播放条的比例也不对」的直接原因）。
-    const CGFloat keyW = 24 + 8 + 28 + 6 + 44 + 6 + 28 + 8 + 24 + 8 + 24;  // 合计
-    CGFloat x = (W - keyW) / 2.0;
-    if (x < 250) x = 250;   // 窄窗口时给左侧信息区让位
-    const CGFloat ccy = cy - 3;   // 略上移，给贴底进度条留呼吸
-    place(self.shuffleBtn, x, ccy - 12, 24, 24); x += 24 + 8;
-    place(self.prevBtn,   x, ccy - 14, 28, 28); x += 28 + 6;
-    place(self.playBtn,   x, ccy - 22, 44, 44); x += 44 + 6;
-    place(self.nextBtn,   x, ccy - 14, 28, 28); x += 28 + 8;
-    place(self.stopBtn,   x, ccy - 12, 24, 24); x += 24 + 8;
-    place(self.repeatBtn, x, ccy - 12, 24, 24);
+    // ── 左列：封面 44（web .cv2）+ 两行文本 ──
+    place(self.coverView, leftX, (H - 44) / 2.0, 44, 44);
+    const CGFloat tx = leftX + 44 + 11;
+    const CGFloat tw = MAX(80.0, sideW - 44 - 11 - 8);
+    place(self.titleLabel, tx, H / 2.0 + 2, tw, 17);
+    place(self.subLabel, tx, H / 2.0 - 16, tw, 15);
 
-    // 右：时间 + 音量图标 + 音量条（BIT-PERFECT 徽标在时间左侧）
-    const CGFloat badgeW = self.bpBadge.hidden ? 0 : 84;
-    place(self.volume, W - 16 - 96, cy - 8, 96, 14);
-    place(self.volIconView, W - 16 - 96 - 8 - 16, cy - 8, 16, 16);
-    place(self.timeLabel, W - 16 - 96 - 8 - 16 - 8 - 92, cy - 8, 92, 16);
-    if (!self.bpBadge.hidden)
-        place(self.bpBadge, W - 16 - 96 - 8 - 16 - 8 - 92 - 10 - badgeW, cy - 9, badgeW, 18);
+    // ── 中列上层：六个控制键（随机 / 上一首 / 播放 / 下一首 / 停止 / 循环）──
+    // 尺寸与 web 一致：普通键 32、主键 34；gap 6。整组在列内水平居中。
+    const CGFloat keyGap = 6.0, small = 32.0, big = 34.0;
+    const CGFloat keysW = small * 5 + big + keyGap * 5;
+    CGFloat kx = centerX + (centerW - keysW) / 2.0;
+    const CGFloat rowCY = H - 7.0 - 17.0;   // 上层垂直中心 = 42（H=66）
+    place(self.shuffleBtn, kx, rowCY - small / 2, small, small); kx += small + keyGap;
+    place(self.prevBtn,    kx, rowCY - small / 2, small, small); kx += small + keyGap;
+    place(self.playBtn,    kx, rowCY - big / 2,   big,   big);   kx += big + keyGap;
+    place(self.nextBtn,    kx, rowCY - small / 2, small, small); kx += small + keyGap;
+    place(self.stopBtn,    kx, rowCY - small / 2, small, small); kx += small + keyGap;
+    place(self.repeatBtn,  kx, rowCY - small / 2, small, small);
 
-    // 进度条：控制键下方的独立一条，**给足高度**（8pt 细线贴底边既看不见也拖不动；
-    // 目标图里它是明显的可拖动滑杆）。左右与信息区/音量区对齐。
-    const CGFloat progL = 66 + 180 + 20;
-    const CGFloat progR = W - 16 - 96 - 8 - 16 - 12;
-    place(self.progress, progL, 6, MAX(120, progR - progL), 18);
+    // ── 中列下层：进度行（时间 / 滑杆 / 时间），贴底 7pt ──
+    const CGFloat progY = 7.0, progH = 16.0, timeW = 34.0, timeGap = 8.0;
+    place(self.posLabel, centerX, progY, timeW, progH);
+    place(self.durLabel, centerX + centerW - timeW, progY, timeW, progH);
+    const CGFloat sliderX = centerX + timeW + timeGap;
+    const CGFloat sliderW = MAX(80.0, centerW - (timeW + timeGap) * 2);
+    place(self.progress, sliderX, progY, sliderW, progH);
+
+    // ── 右列：从右往左排，放不下按优先级隐藏（音量 > 歌词/信号链 > bit-perfect > 格式）──
+    CGFloat rx = W - pad;                       // 当前已占用的最左缘（从右往左）
+    const CGFloat volW = (sideW < 330.0) ? 76.0 : 88.0;
+    rx -= volW;
+    place(self.volume, rx, rowCY - 8, volW, 16);
+    rx -= 8 + 14;
+    place(self.volIconView, rx, rowCY - 7, 14, 14);
+
+    const BOOL showFmt = (sideW >= 330.0);
+    const BOOL showBp  = (sideW >= 292.0);
+    const BOOL showIcons = (sideW >= 210.0);
+    if (showFmt) {
+        rx -= 8 + 50;
+        place(self.fmtBadge, rx, rowCY - 9, 50, 18);
+    }
+    if (showBp && !self.bpBadge.hidden) {
+        rx -= 8 + 76;
+        place(self.bpBadge, rx, rowCY - 9, 76, 18);
+    }
+    if (showIcons) {
+        rx -= 8 + small;
+        place(self.chainBtn, rx, rowCY - small / 2, small, small);
+        rx -= 6 + small;
+        place(self.lyricBtn, rx, rowCY - small / 2, small, small);
+    } else {
+        place(self.chainBtn, -100, 0, 0, 0);
+        place(self.lyricBtn, -100, 0, 0, 0);
+    }
+    (void)rightX;
 }
 
 - (NSButton *)symbolButton:(NSString *)symbol tip:(NSString *)tip {
@@ -346,12 +447,20 @@
     self.layer.backgroundColor = t.barBg.CGColor;
     self.titleLabel.textColor = t.text;
     self.subLabel.textColor = t.mut;
-    self.timeLabel.textColor = t.mut;
+    self.posLabel.textColor = t.mut;
+    self.durLabel.textColor = t.mut;
     for (NSButton *b in @[self.prevBtn, self.nextBtn, self.stopBtn, self.shuffleBtn, self.repeatBtn])
         b.contentTintColor = t.text;
     self.playBtn.contentTintColor = NSColor.whiteColor;
     self.playBtn.layer.backgroundColor = t.accent.CGColor;
     self.layer.borderColor = t.line.CGColor;
+    self.fmtBadge.textColor = t.accentText;
+    self.fmtBadge.layer.borderColor = t.accentWeak.CGColor;
+    self.fmtBadge.layer.backgroundColor = t.accentWeak.CGColor;
+    self.bpBadge.layer.borderColor = t.ok.CGColor;
+    self.lyricBtn.contentTintColor = t.mut;
+    self.chainBtn.contentTintColor = t.mut;
+    self.volIconView.contentTintColor = t.mut;
 }
 
 - (void)fetchStatus {
@@ -412,14 +521,27 @@
     }
 
     double dur = st.duration > 0 ? st.duration : 0;
-    self.timeLabel.stringValue = [NSString stringWithFormat:@"%@ / %@",
-        [self mmss:st.position], [self mmss:dur]];
+    self.posLabel.stringValue = [self mmss:st.position];
+    self.durLabel.stringValue = [self mmss:dur];
+
+    // 格式徽标：与 web #fmt 同字段同格式（44100 → "44.1k/24"；48000 → "48k/24"）。
+    if (st.outRate > 0 && st.outBits > 0) {
+        const double k = round(st.outRate / 100.0) / 10.0;
+        NSString *kstr = (fabs(k - round(k)) < 1e-6)
+            ? [NSString stringWithFormat:@"%.0fk", k]
+            : [NSString stringWithFormat:@"%.1fk", k];
+        self.fmtBadge.stringValue = [NSString stringWithFormat:@"%@/%ld", kstr, (long)st.outBits];
+    } else {
+        self.fmtBadge.stringValue = @"--";
+    self.fmtBadge.identifier = @"pb.fmt";
+    }
 
     if (!self.progress.dragging) {
         self.progress.doubleValue = (dur > 0) ? (st.position / dur) : 0.0;
     }
-    if (!self.volume.dragging && st.volumeDb <= 0.0 && st.volumeDb >= -60.0) {
-        self.volume.doubleValue = st.volumeDb;
+    // 音量滑块是**位置刻度 0..1000**（不是 dB），必须换算；sb 静音档 -120 也要能落回最左端。
+    if (!self.volume.dragging && isfinite(st.volumeDb)) {
+        self.volume.doubleValue = RLPVolDbToPos(st.volumeDb);
     }
 }
 
@@ -482,8 +604,8 @@
     // 拖动期间只更新时间预览；真正的 seek 在松手（onCommit）时提交一次。
     double dur = self.lastStatus.duration;
     if (dur > 0) {
-        self.timeLabel.stringValue = [NSString stringWithFormat:@"%@ / %@",
-            [self mmss:self.progress.doubleValue * dur], [self mmss:dur]];
+        self.posLabel.stringValue = [self mmss:self.progress.doubleValue * dur];
+        self.durLabel.stringValue = [self mmss:dur];
     }
 }
 
@@ -504,11 +626,98 @@
 
 - (void)commitVolume {
     if (!self.polling) return;
-    double db = self.volume.doubleValue;
+    // 位置 → dB（web volPosToDb 同曲线）：最左端是**真静音 -120**，不是 -55/-60 的"很小声"。
+    double db = RLPVolPosToDb(self.volume.doubleValue);
     if (db > 0) db = 0;
-    if (db < -60) db = -60;
+    if (db < kVolSilentDb) db = kVolSilentDb;
     NSString *path = [NSString stringWithFormat:@"/api/volume?db=%.1f", db];
     [[RLPCoreClient shared] postJSON:path body:nil completion:nil];
+}
+
+#pragma mark - 歌词 / 信号链（web 底栏同款两个图标键）
+
+- (void)openNowPlaying:(id)sender {
+    (void)sender;
+    [[NSNotificationCenter defaultCenter] postNotificationName:@"RLPOpenNowPlayingNotification" object:nil];
+}
+
+/// 底栏「信号链」：与工作台同一个 /api/signal + RLPSignalChain 纯函数，弹层逐节点列真值。
+/// 不在 UI 里另算语义（bit-perfect 结论也来自后端）。
+- (void)showSignalChain:(NSButton *)sender {
+    RLPTheme *t = [RLPTheme current];
+    NSStackView *card = [[NSStackView alloc] init];
+    card.orientation = NSUserInterfaceLayoutOrientationVertical;
+    card.alignment = NSLayoutAttributeLeading;
+    card.spacing = 6;
+    card.edgeInsets = NSEdgeInsetsMake(14, 16, 14, 16);
+    card.translatesAutoresizingMaskIntoConstraints = NO;
+    [[card.widthAnchor constraintEqualToConstant:520] setActive:YES];
+
+    NSTextField *hero = RLPLabel(RLPTr(@"读取信号链…"),
+        [NSFont systemFontOfSize:13 weight:NSFontWeightSemibold], t.text);
+    hero.maximumNumberOfLines = 2;
+    hero.lineBreakMode = NSLineBreakByWordWrapping;
+    [[hero.widthAnchor constraintEqualToConstant:488] setActive:YES];
+    [card addArrangedSubview:hero];
+
+    NSStackView *nodes = [[NSStackView alloc] init];
+    nodes.orientation = NSUserInterfaceLayoutOrientationVertical;
+    nodes.alignment = NSLayoutAttributeLeading;
+    nodes.spacing = 4;
+    nodes.translatesAutoresizingMaskIntoConstraints = NO;
+    [[nodes.widthAnchor constraintEqualToConstant:488] setActive:YES];
+    [card addArrangedSubview:nodes];
+
+    NSViewController *vc = RLPCardController(card, 540, 260);
+    RLPShowCardPopover(sender ?: self, vc, 540);
+
+    __weak __typeof__(self) weakSelf = self;
+    [[RLPCoreClient shared] getJSON:@"/api/signal" completion:^(NSDictionary * _Nullable json) {
+        __typeof__(self) self_ = weakSelf;
+        (void)self_;
+        NSDictionary *resp = json ?: @{};
+        NSString *why = nil;
+        NSString *title = [RLPSignalChain heroTitleForResponse:resp why:&why];
+        hero.stringValue = why.length ? [title stringByAppendingFormat:@"\n%@", why] : title;
+        for (NSView *v in [nodes.arrangedSubviews copy]) {
+            [nodes removeArrangedSubview:v];
+            [v removeFromSuperview];
+        }
+        NSArray<RLPSignalNode *> *list = [RLPSignalChain nodesForResponse:resp];
+        if (!list.count) {
+            [nodes addArrangedSubview:RLPLabel(RLPTr(@"还没有开始播放"), [NSFont systemFontOfSize:12], t.mut)];
+            return;
+        }
+        for (RLPSignalNode *n in list) {
+            NSStackView *row = [[NSStackView alloc] init];
+            row.orientation = NSUserInterfaceLayoutOrientationHorizontal;
+            row.alignment = NSLayoutAttributeTop;
+            row.spacing = 8;
+            NSView *dot = [[NSView alloc] initWithFrame:NSZeroRect];
+            dot.wantsLayer = YES;
+            dot.layer.cornerRadius = 4;
+            NSColor *c = n.kind == RLPSignalNodeLossless ? t.ok
+                        : (n.kind == RLPSignalNodeGpu ? t.accent : t.mut);
+            dot.layer.backgroundColor = c.CGColor;
+            [dot.widthAnchor constraintEqualToConstant:8].active = YES;
+            [dot.heightAnchor constraintEqualToConstant:8].active = YES;
+            [row addArrangedSubview:dot];
+            NSStackView *txt = [[NSStackView alloc] init];
+            txt.orientation = NSUserInterfaceLayoutOrientationVertical;
+            txt.alignment = NSLayoutAttributeLeading;
+            txt.spacing = 1;
+            NSString *head = n.badge.length ? [NSString stringWithFormat:@"%@   ·   %@", n.key, n.badge] : n.key;
+            NSTextField *k = RLPLabel(head, [NSFont systemFontOfSize:11.5 weight:NSFontWeightSemibold], t.text);
+            NSTextField *v = RLPLabel(n.value, [NSFont systemFontOfSize:11], t.text2);
+            v.maximumNumberOfLines = 2;
+            v.lineBreakMode = NSLineBreakByWordWrapping;
+            [[v.widthAnchor constraintEqualToConstant:450] setActive:YES];
+            [txt addArrangedSubview:k];
+            [txt addArrangedSubview:v];
+            [row addArrangedSubview:txt];
+            [nodes addArrangedSubview:row];
+        }
+    }];
 }
 
 @end

@@ -32,6 +32,17 @@
 #import "RLPMetaSourcesView.h"
 #import "RLPLibStatsView.h"
 
+#include <cctype>
+#include <fstream>
+#include <sstream>
+
+// 更新通道（P0-3）：真实读写 .app 外的 update.conf，复用 mac_update 的实现（与更新窗口同一个）。
+// 与 RLPUpdateWindowController.mm 同一套 __has_include 守卫：只装 AppKit 的构建不会引用它。
+#if __has_include("mac_update.h")
+#define RLP_SETTINGS_HAVE_UPDATE 1
+#include "mac_update.h"
+#endif
+
 #pragma mark - 页签定义
 
 // 页签**随模式**（2026-11-11 用户要求：两个模式都要有设置页）：
@@ -125,6 +136,96 @@ static NSView *RLPSGroup(NSString *title, NSString *desc, RLPTheme *t) {
     return box;
 }
 
+#pragma mark - 设置页纯逻辑小函数（P0-2 / P0-3 / P1-1）
+
+static NSString *RLPSettingsTrim(NSString *s) {
+    return [(s ?: @"") stringByTrimmingCharactersInSet:
+            [NSCharacterSet whitespaceAndNewlineCharacterSet]];
+}
+
+/// 读 .app 外 update.conf 的 channel=（global / cn）。读不到 / 没写 → 返回 @""。
+/// 与后端 ConfKeyNormalize 同口径：去空白、大小写不敏感、跳过注释行、只看等号前键。
+static NSString *RLPSettingsReadUpdateChannel(void) {
+#ifdef RLP_SETTINGS_HAVE_UPDATE
+    const std::string path = rta::update::update_conf_path();
+    if (path.empty()) return @"";
+    std::ifstream f(path);
+    if (!f) return @"";
+    std::string line;
+    while (std::getline(f, line)) {
+        if (!line.empty() && line.back() == '\r') line.pop_back();
+        std::string k = line;
+        while (!k.empty() && (k.front() == ' ' || k.front() == '\t')) k.erase(k.begin());
+        if (k.empty() || k[0] == '#' || k[0] == ';') continue;   // 注释行不算
+        const size_t eq = k.find('=');
+        if (eq == std::string::npos) continue;
+        std::string key = k.substr(0, eq);
+        while (!key.empty() && (key.back() == ' ' || key.back() == '\t')) key.pop_back();
+        for (char& c : key) c = (char)std::tolower((unsigned char)c);
+        if (key != "channel") continue;
+        std::string v = k.substr(eq + 1);
+        while (!v.empty() && (v.front() == ' ' || v.front() == '\t')) v.erase(v.begin());
+        while (!v.empty() && (v.back() == ' ' || v.back() == '\t')) v.pop_back();
+        for (char& c : v) c = (char)std::tolower((unsigned char)c);
+        return [NSString stringWithUTF8String:v.c_str()] ?: @"";
+    }
+#endif
+    return @"";
+}
+
+/// ZIP 头校验（PK\x03\x04）。后端在打包失败时回的是 JSON，直接存就会得到一个坏包——
+/// 与 web exportDiagZip 同一条判据：宁可不给，也不假装成功。
+static BOOL RLPSettingsDataLooksLikeZip(NSData *data) {
+    if (data.length < 4) return NO;
+    const unsigned char *b = (const unsigned char *)data.bytes;
+    return b[0] == 0x50 && b[1] == 0x4B && b[2] == 0x03 && b[3] == 0x04;
+}
+
+/// 导出文件名用时间戳（web diagStamp 同口径；避免重复导出互相覆盖）。
+static NSString *RLPSettingsStamp(void) {
+    NSDateFormatter *df = [[NSDateFormatter alloc] init];
+    df.locale = [NSLocale localeWithLocaleIdentifier:@"en_US_POSIX"];
+    df.dateFormat = @"yyyyMMdd-HHmmss";
+    return [df stringFromDate:[NSDate date]];
+}
+
+/// 诊断摘要文本（/api/diag 的真实字段：case_id / version / runState.lastExit / events.recent）。
+/// 只做排版，不编字段：缺哪个就写 unknown，绝不填假数字。
+static NSString *RLPSettingsDiagSummaryText(NSDictionary *j) {
+    if (![j isKindOfClass:[NSDictionary class]] || ![j[@"ok"] boolValue]) return nil;
+    NSMutableString *s = [NSMutableString string];
+    NSString *caseId = [j[@"case_id"] isKindOfClass:[NSString class]] ? j[@"case_id"]
+                     : ([j[@"caseId"] isKindOfClass:[NSString class]] ? j[@"caseId"] : @"unknown");
+    NSString *ver = [j[@"version"] isKindOfClass:[NSString class]] ? j[@"version"] : @"unknown";
+    NSString *lastExit = @"unknown";
+    if ([j[@"runState"] isKindOfClass:[NSDictionary class]]) {
+        id le = j[@"runState"][@"lastExit"];
+        if ([le isKindOfClass:[NSString class]]) lastExit = le;
+    }
+    [s appendFormat:@"case_id: %@\n", caseId];
+    [s appendFormat:@"版本: %@\n", ver];
+    [s appendFormat:@"上次运行: %@\n", lastExit];
+    NSArray *rows = nil;
+    if ([j[@"events"] isKindOfClass:[NSDictionary class]] &&
+        [j[@"events"][@"recent"] isKindOfClass:[NSArray class]]) {
+        rows = j[@"events"][@"recent"];
+    }
+    NSArray *tail = rows.count > 20 ? [rows subarrayWithRange:NSMakeRange(rows.count - 20, 20)] : (rows ?: @[]);
+    for (id e in tail) {
+        if (![e isKindOfClass:[NSDictionary class]]) continue;
+        NSMutableArray<NSString *> *cols = [NSMutableArray array];
+        for (NSString *k in @[ @"ts", @"rid", @"stage", @"evt", @"code" ]) {
+            id v = e[k];
+            [cols addObject:[v isKindOfClass:[NSString class]] ? v
+                            : ([v respondsToSelector:@selector(stringValue)] ? [v stringValue] : @"")];
+        }
+        [s appendString:[cols componentsJoinedByString:@" "]];
+        [s appendString:@"\n"];
+    }
+    if (!tail.count) [s appendString:@"最近事件证据缺失\n"];
+    return s;
+}
+
 @interface RLPSettingsViewController ()
 @property (nonatomic, strong) NSSegmentedControl *tabs;
 @property (nonatomic, strong) NSView *paneHost;
@@ -160,6 +261,17 @@ static NSView *RLPSGroup(NSString *title, NSString *desc, RLPTheme *t) {
 @property (nonatomic, strong) NSPopUpButton *langPopup;
 @property (nonatomic, strong) NSTextField *rootField;
 @property (nonatomic, strong) NSSwitch *betaSwitch;
+// 高级·音乐库目录管理（P0-2，对齐 web sp_roots / sp_addroot / sp_scanthreads）
+@property (nonatomic, strong) NSStackView *rootsStack;
+@property (nonatomic, strong) NSTextField *rootMsg;
+@property (nonatomic, strong) NSTextField *scanThreadsField;
+@property (nonatomic, copy) NSArray<NSString *> *libraryRoots;
+// 诊断（P1-1）
+@property (nonatomic, strong) NSTextField *diagMsg;
+@property (nonatomic, strong) NSTextView *diagSummaryView;
+// 更新通道（P0-3）
+@property (nonatomic, strong) NSPopUpButton *updateChannelPopup;
+@property (nonatomic, strong) NSTextField *updateChannelMsg;
 /// 播放时自动分析（autoanl）。1.1.7.1：开关从播放页挪到这里，播放页只留一行分析结果。
 @property (nonatomic, strong) NSSwitch *autoAnlSwitch;
 @property (nonatomic, strong) NSTextField *attenField;
@@ -644,11 +756,68 @@ static NSView *RLPSGroup(NSString *title, NSString *desc, RLPTheme *t) {
         [self.libStatsView.widthAnchor constraintEqualToConstant:560],
     ]];
     [self.libStatsView reload];
+    // ── 音乐目录管理（P0-2，对齐 web 设置·高级「本地音乐库」）──
+    // web：sp_root 手填 + sp_browseRoot 浏览 + sp_addroot 添加 + sp_roots 列表逐条移除
+    //      + sp_rescan 重新扫描 + sp_scanthreads 扫描线程数（ui_script.h:10032-10041）。
+    [stack addArrangedSubview:RLPSGroup(RLPTr(@"音乐目录"),
+        RLPTr(@"添加 / 移除只改曲库索引，移除不会删除磁盘文件"), t)];
+    self.rootsStack = [[NSStackView alloc] init];
+    self.rootsStack.orientation = NSUserInterfaceLayoutOrientationVertical;
+    self.rootsStack.alignment = NSLayoutAttributeLeading;
+    self.rootsStack.spacing = 4;
+    self.rootsStack.identifier = @"roots.list";
+    self.rootsStack.translatesAutoresizingMaskIntoConstraints = NO;
+    [stack addArrangedSubview:self.rootsStack];
+    [[self.rootsStack.widthAnchor constraintEqualToConstant:560] setActive:YES];
+
     self.rootField = [[NSTextField alloc] initWithFrame:NSZeroRect];
     self.rootField.placeholderString = RLPTr(@"例如 /Volumes/Music");
+    self.rootField.identifier = @"root.field";
     self.rootField.translatesAutoresizingMaskIntoConstraints = NO;
     [[self.rootField.widthAnchor constraintEqualToConstant:360] setActive:YES];
-    [stack addArrangedSubview:RLPSRow(RLPTr(@"音乐目录"), self.rootField, nil, t)];
+    NSButton *rootBrowse = [NSButton buttonWithTitle:RLPTr(@"浏览…") target:self
+                                             action:@selector(onBrowseRoot:)];
+    rootBrowse.bezelStyle = NSBezelStyleRounded;
+    rootBrowse.identifier = @"root.browse";
+    NSButton *rootAdd = [NSButton buttonWithTitle:RLPTr(@"添加目录") target:self
+                                           action:@selector(onAddRoot:)];
+    rootAdd.bezelStyle = NSBezelStyleRounded;
+    rootAdd.identifier = @"root.add";
+    NSStackView *rootRow = [[NSStackView alloc] init];
+    rootRow.orientation = NSUserInterfaceLayoutOrientationHorizontal;
+    rootRow.spacing = 8;
+    [rootRow addArrangedSubview:self.rootField];
+    [rootRow addArrangedSubview:rootBrowse];
+    [rootRow addArrangedSubview:rootAdd];
+    [stack addArrangedSubview:rootRow];
+    self.rootMsg = RLPLabel(@"", t.small, t.mut);
+    self.rootMsg.identifier = @"root.msg";
+    self.rootMsg.maximumNumberOfLines = 2;
+    self.rootMsg.lineBreakMode = NSLineBreakByWordWrapping;
+    [[self.rootMsg.widthAnchor constraintEqualToConstant:560] setActive:YES];
+    [stack addArrangedSubview:self.rootMsg];
+
+    // 扫描线程数（web sp_scanthreads 同键 scanthreads：0 = 自动 min(CPU,8)，1..32）
+    NSStackView *threadRow = [[NSStackView alloc] init];
+    threadRow.orientation = NSUserInterfaceLayoutOrientationHorizontal;
+    threadRow.spacing = 8;
+    [threadRow addArrangedSubview:RLPLabel(RLPTr(@"扫描线程数"), t.body, t.text)];
+    self.scanThreadsField = [[NSTextField alloc] initWithFrame:NSZeroRect];
+    self.scanThreadsField.placeholderString = @"0";
+    self.scanThreadsField.identifier = @"scan.threads";
+    self.scanThreadsField.target = self;
+    self.scanThreadsField.action = @selector(onSaveScanThreads:);
+    self.scanThreadsField.translatesAutoresizingMaskIntoConstraints = NO;
+    [[self.scanThreadsField.widthAnchor constraintEqualToConstant:72] setActive:YES];
+    [threadRow addArrangedSubview:self.scanThreadsField];
+    NSButton *threadSave = [NSButton buttonWithTitle:RLPTr(@"保存") target:self
+                                              action:@selector(onSaveScanThreads:)];
+    threadSave.bezelStyle = NSBezelStyleRounded;
+    threadSave.identifier = @"scan.threads.save";
+    [threadRow addArrangedSubview:threadSave];
+    [threadRow addArrangedSubview:RLPLabel(RLPTr(@"0 = 自动（默认 min(CPU, 8)）"), t.small, t.mut)];
+    [stack addArrangedSubview:threadRow];
+    [self reloadRoots];
 
     NSStackView *btns = [[NSStackView alloc] init];
     btns.orientation = NSUserInterfaceLayoutOrientationHorizontal;

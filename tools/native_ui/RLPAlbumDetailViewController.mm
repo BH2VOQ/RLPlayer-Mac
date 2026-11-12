@@ -136,8 +136,11 @@
     self.table = [[RLPTrackActionTableView alloc] initWithFrame:NSZeroRect];
     self.table.backgroundColor = [NSColor clearColor];
     self.table.headerView = nil;
-    self.table.rowHeight = 38;
-    self.table.intercellSpacing = NSMakeSize(0, 1);
+    // 行高/字号照 web 专辑曲目表：`.trow{padding:8px 20px;font-size:12.5px}`，
+    // 实测行高约 33pt。旧值 38(+1 spacing) 让 6 行看起来又高又散，用户截图里
+    // 「图标与曲目对应不整齐」有一部分就是行高和字号（13-15pt）放大了错位感。
+    self.table.rowHeight = 34;
+    self.table.intercellSpacing = NSMakeSize(8, 0);   // web grid gap:8px
     self.table.selectionHighlightStyle = NSTableViewSelectionHighlightStyleRegular;
     self.table.dataSource = self;
     self.table.delegate = self;
@@ -147,35 +150,35 @@
     self.table.action = @selector(onRowDoubleClick:);
     self.table.doubleAction = @selector(onRowDoubleClick:);
     // 列顺序与 web 一致：序号 → 收藏爱心 → 曲名 → 艺术家 → 时长 → 入队「+」
-    // 2026-11-12 用户实测「图标与曲目对应不整齐」根因：六列宽度全写死（合计 692pt），
-    // 表格铺满窗口时**多余空间被 NSTableView 均摊到每一列** ⟹ 序号/爱心/曲名逐列漂移，
-    // 视觉上与行内容错位。修法同曲目页（已验证）：小列钉死禁止拉伸，只有曲名列吃剩余宽度。
+    // 列宽比例严格照抄 web 专辑曲目表：
+    //   grid-template-columns:28px 24px minmax(120px,1.6fr) minmax(0,1fr) 92px 58px 26px; gap:8px
+    // 关键：曲名与艺术家都按 **fr 比例**分剩余宽度（1.6:1），中间没有固定空档
+    // ⟹ 不会出现「曲名后甩出 500px 空白、艺术家被推到很远」（用户 1.1.7.4 实测）。
     for (NSString *ident in @[@"n", @"fav", @"title", @"artist", @"dur", @"add"]) {
         NSTableColumn *col = [[NSTableColumn alloc] initWithIdentifier:ident];
         if ([ident isEqualToString:@"n"]) {
-            col.width = 40; col.minWidth = 34; col.maxWidth = 52;
+            col.width = 28; col.minWidth = 28; col.maxWidth = 28;
             col.resizingMask = NSTableColumnNoResizing;
         } else if ([ident isEqualToString:@"fav"]) {
-            col.width = 36; col.minWidth = 30; col.maxWidth = 44;
+            col.width = 24; col.minWidth = 24; col.maxWidth = 24;
             col.resizingMask = NSTableColumnNoResizing;
         } else if ([ident isEqualToString:@"title"]) {
-            col.width = 340; col.minWidth = 200; col.maxWidth = 520;   // 有上限，否则独占全部留白
-            col.resizingMask = NSTableColumnAutoresizingMask;           // 唯一弹性列
+            col.width = 300; col.minWidth = 120;
+            col.resizingMask = NSTableColumnAutoresizingMask;   // 1.6fr
         } else if ([ident isEqualToString:@"artist"]) {
-            col.width = 200; col.minWidth = 120; col.maxWidth = 280;
-            col.resizingMask = NSTableColumnUserResizingMask;
+            col.width = 188; col.minWidth = 60;
+            col.resizingMask = NSTableColumnAutoresizingMask;   // 1fr
         } else if ([ident isEqualToString:@"dur"]) {
-            col.width = 72; col.minWidth = 60; col.maxWidth = 88;
+            col.width = 58; col.minWidth = 58; col.maxWidth = 58;
             col.resizingMask = NSTableColumnNoResizing;
         } else {
-            col.width = 40; col.minWidth = 34; col.maxWidth = 52;
+            col.width = 34; col.minWidth = 34; col.maxWidth = 34;
             col.resizingMask = NSTableColumnNoResizing;
         }
         [self.table addTableColumn:col];
     }
-    // 关掉均摊：否则多余宽度又被平均分给所有列（含序号/爱心），上面的钉死等于白做。
-    // 用 NoColumnAutoresizing + 自己把剩余宽度只给曲名列（见 layoutColumns），
-    // 而不是 LastColumnOnly（那会把空白全塞给行尾的「+」，图标反而被推得更远）。
+    // 关闭 NSTableView 的自动均摊，改用 layoutColumns 按 1.6:1 手工分配
+    // （自动均摊会把余量平摊给所有列，序号/爱心也跟着变宽 ⟹ 图标漂移）。
     self.table.columnAutoresizingStyle = NSTableViewNoColumnAutoresizing;
     self.table.usesAlternatingRowBackgroundColors = NO;
     {
@@ -246,23 +249,32 @@
     [self layoutColumns];
 }
 
-/// 列宽分配：从右往左塞固定列，曲名列吃中间剩余宽度。
-/// 之前的版本把艺术家列拉宽，结果把右侧「时长」和「+」挤出可视区（自测截图里时长变成 0、
-/// 加号消失）。现在的规则更稳：**右侧四列宽恒定**，只让曲名吸收窗口宽度变化。
+/// 列宽分配：把剩余宽度按 **1.6 : 1** 分给曲名与艺术家（严格照 web 的
+/// `minmax(120px,1.6fr) minmax(0,1fr)`），其余四列宽度恒定。
+/// 这样两列紧邻铺满，中间不会留出大片空白，序号/爱心/时长/「+」也不会漂移。
 - (void)layoutColumns {
     NSTableView *tv = self.table;
     if (!tv || tv.numberOfColumns < 6) return;
     const CGFloat avail = tv.bounds.size.width;
     if (avail < 360) return;
-    NSTableColumn *titleCol = nil;
-    CGFloat other = 0;
+    NSTableColumn *tCol = nil, *aCol = nil;
+    CGFloat fixed = 0;
     for (NSTableColumn *c in tv.tableColumns) {
-        if ([c.identifier isEqualToString:@"title"]) { titleCol = c; continue; }
-        other += c.width;
+        if ([c.identifier isEqualToString:@"title"]) { tCol = c; continue; }
+        if ([c.identifier isEqualToString:@"artist"]) { aCol = c; continue; }
+        fixed += c.width;
     }
-    if (!titleCol) return;
-    const CGFloat w = MAX(titleCol.minWidth, MIN(titleCol.maxWidth, avail - other - 2));
-    if (fabs(titleCol.width - w) > 0.5) titleCol.width = w;
+    if (!tCol || !aCol) return;
+    // NSTableView 的列间还隔着 intercellSpacing（web gap 8）⟹ 可用宽度要扣掉
+    const CGFloat gaps = tv.intercellSpacing.width * (CGFloat)(tv.numberOfColumns - 1);
+    const CGFloat flex = MAX(0, avail - fixed - gaps - 2);
+    // 1.6 : 1 分（同时尊重各自 minWidth）
+    CGFloat tw = flex * (1.6 / 2.6);
+    CGFloat aw = flex - tw;
+    if (tw < tCol.minWidth) { tw = tCol.minWidth; aw = MAX(aCol.minWidth, flex - tw); }
+    if (aw < aCol.minWidth) { aw = aCol.minWidth; tw = MAX(tCol.minWidth, flex - aw); }
+    if (fabs(tCol.width - tw) > 0.5) tCol.width = tw;
+    if (fabs(aCol.width - aw) > 0.5) aCol.width = aw;
 }
 
 - (void)viewDidLayout {
@@ -347,12 +359,20 @@
             b.imageScaling = NSImageScaleProportionallyDown;
         }
         b.tag = row;
+        // web 行内图标是 13px 量级（.add-btn / 爱心 svg）；默认符号尺寸偏大，
+        // 会与 12.5px 的曲名在视觉上"不齐"。
         if ([ident isEqualToString:@"fav"]) {
-            b.image = [NSImage imageWithSystemSymbolName:@"heart" accessibilityDescription:RLPTr(@"收藏")];
+            NSImageSymbolConfiguration *cfg =
+                [NSImageSymbolConfiguration configurationWithPointSize:12 weight:NSFontWeightRegular];
+            b.image = [[NSImage imageWithSystemSymbolName:@"heart" accessibilityDescription:RLPTr(@"收藏")]
+                       imageWithSymbolConfiguration:cfg];
             b.contentTintColor = t.mut;
             b.toolTip = RLPTr(@"收藏");
         } else {
-            b.image = [NSImage imageWithSystemSymbolName:@"plus" accessibilityDescription:RLPTr(@"加入队列")];
+            NSImageSymbolConfiguration *cfg =
+                [NSImageSymbolConfiguration configurationWithPointSize:12 weight:NSFontWeightRegular];
+            b.image = [[NSImage imageWithSystemSymbolName:@"plus" accessibilityDescription:RLPTr(@"加入队列")]
+                       imageWithSymbolConfiguration:cfg];
             b.contentTintColor = t.mut;
             b.toolTip = RLPTr(@"加入队列");
         }
@@ -360,20 +380,28 @@
     }
     NSTextField *label = [tableView makeViewWithIdentifier:ident owner:self];
     if (!label) {
-        label = RLPLabel(@"", t.body, t.text);
+        label = RLPLabel(@"", [NSFont systemFontOfSize:12.5], t.text);
         label.identifier = ident;
-        label.font = [ident isEqualToString:@"dur"] ? t.mono : t.body;
     }
+    // 字体/对齐逐项照 web：曲名 12.5、艺术家/时长 11.5、序号右对齐、时长右对齐。
     if ([ident isEqualToString:@"n"]) {
+        label.font = [NSFont monospacedDigitSystemFontOfSize:11.5 weight:NSFontWeightRegular];
+        label.alignment = NSTextAlignmentRight;
         label.stringValue = [NSString stringWithFormat:@"%ld", (long)(tr.number > 0 ? tr.number : row + 1)];
         label.textColor = t.mut;
     } else if ([ident isEqualToString:@"title"]) {
+        label.font = [NSFont systemFontOfSize:12.5];
+        label.alignment = NSTextAlignmentLeft;
         label.stringValue = tr.title.length ? tr.title : RLPTr(@"未命名曲目");
         label.textColor = t.text;
     } else if ([ident isEqualToString:@"artist"]) {
+        label.font = [NSFont systemFontOfSize:11.5];
+        label.alignment = NSTextAlignmentLeft;
         label.stringValue = tr.artist.length ? tr.artist : (self.album.artist ?: @"");
         label.textColor = t.mut;
     } else {
+        label.font = [NSFont monospacedDigitSystemFontOfSize:11.5 weight:NSFontWeightRegular];
+        label.alignment = NSTextAlignmentRight;
         label.stringValue = RLPFmtDuration(tr.duration);
         label.textColor = t.mut;
     }
