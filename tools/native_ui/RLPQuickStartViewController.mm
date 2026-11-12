@@ -21,17 +21,16 @@
 
 @interface RLPQuickStartViewController ()
 @property (nonatomic, strong) NSStackView *stack;
-// 四张卡（目标图版式：一行四张、等宽；小标签在上、大字值在下、右侧 chevron）
+// 四张卡
 @property (nonatomic, strong) NSView *deviceCard;
 @property (nonatomic, strong) NSView *outputCard;
 @property (nonatomic, strong) NSView *playCard;
 @property (nonatomic, strong) NSView *styleCard;
-@property (nonatomic, strong) NSButton *deviceValue;   // 无边框大字按钮：显示真实设备名，点击出菜单
+@property (nonatomic, strong) NSPopUpButton *devicePopup;
 @property (nonatomic, strong) NSTextField *outputValue;
 @property (nonatomic, strong) NSTextField *playValue;
 @property (nonatomic, strong) NSTextField *styleValue;
-@property (nonatomic, strong) NSButton *musicFolderButton;
-@property (nonatomic, strong) NSTextField *heroTitle;
+@property (nonatomic, strong) NSTextField *styleSub;
 // 卡片小标题与分区标题：必须在 applyTheme 里重刷颜色。它们是 RLPLabel 建出来的一次性标签，
 // 漏刷就停在旧主题的灰上 —— 浅底配深灰几乎看不见字（本轮实测到的真故障）。
 @property (nonatomic, strong) NSTextField *deviceCaption;
@@ -42,19 +41,13 @@
 @property (nonatomic, strong) NSTextField *albumCaption;
 // 动态建出来的标签（队列行 / 专辑名 / 空态）登记在这里，主题切换时一并重刷。
 @property (nonatomic, strong) NSMutableArray<NSTextField *> *dynamicLabels;
-/// 细线（队列行分隔 / 专辑行分隔）：主题切换要跟着重刷，否则浅色主题下是深色线。
-@property (nonatomic, strong) NSMutableArray<NSView *> *hairlines;
-/// 卡片右侧 chevron（模板图，颜色随主题）。
-@property (nonatomic, strong) NSMutableArray<NSImageView *> *chevrons;
 @property (nonatomic, strong) NSTextField *presetNotes;
 // 正在播放 / 队列 / 专辑
 @property (nonatomic, strong) NSImageView *npCover;
 @property (nonatomic, strong) NSTextField *npTitle;
 @property (nonatomic, strong) NSTextField *npSub;
 @property (nonatomic, strong) NSTextField *npState;
-@property (nonatomic, strong) NSButton *npFav;
-@property (nonatomic, strong) NSButton *npOpen;
-@property (nonatomic, assign) BOOL npFavOn;
+@property (nonatomic, strong) NSButton *npToggle;
 @property (nonatomic, strong) NSStackView *queueList;
 @property (nonatomic, strong) NSStackView *albumRow;
 @property (nonatomic, strong) NSButton *libButton;
@@ -77,8 +70,6 @@
     self = [super initWithTitle:RLPTr(@"聆听室")];
     if (self) {
         _dynamicLabels = [NSMutableArray array];
-        _hairlines = [NSMutableArray array];
-        _chevrons = [NSMutableArray array];
     }
     return self;
 }
@@ -116,41 +107,23 @@
         [self.stack.widthAnchor constraintEqualToAnchor:scroll.contentView.widthAnchor],
     ]];
 
-    // 头部：大标题 + 右上「音乐文件夹」。
-    // 目标图没有副标题；旧版副标题与页面实际能力不符，已删。
-    // 「音乐文件夹」沿用既有导航（文件夹页）与既有 /api/lib/* 动作，不新造后端。
-    NSView *head = [[NSView alloc] initWithFrame:NSZeroRect];
-    head.translatesAutoresizingMaskIntoConstraints = NO;
-    NSFont *heroFont = [NSFont fontWithName:@"Georgia-Bold" size:38];
-    if (!heroFont) heroFont = t.display;
-    NSTextField *title = RLPLabel(RLPTr(@"聆听室"), heroFont, t.hero);
+    RLPTheme *t = [RLPTheme current];
+    NSTextField *title = RLPLabel(RLPTr(@"聆听室"), t.display, t.hero);
     title.translatesAutoresizingMaskIntoConstraints = NO;
-    title.identifier = @"room.hero";
-    self.heroTitle = title;
-    self.musicFolderButton = [NSButton buttonWithTitle:RLPTr(@"音乐文件夹")
-                                                target:self action:@selector(onOpenMusicFolder:)];
-    self.musicFolderButton.bezelStyle = NSBezelStyleRounded;
-    self.musicFolderButton.identifier = @"room.musicfolder";
-    self.musicFolderButton.translatesAutoresizingMaskIntoConstraints = NO;
-    [head addSubview:title];
-    [head addSubview:self.musicFolderButton];
-    [self.stack addArrangedSubview:head];
-
-    [NSLayoutConstraint activateConstraints:@[
-        [head.widthAnchor constraintEqualToAnchor:self.stack.widthAnchor constant:-48],
-        [head.heightAnchor constraintEqualToConstant:52],
-        [title.leadingAnchor constraintEqualToAnchor:head.leadingAnchor],
-        [title.centerYAnchor constraintEqualToAnchor:head.centerYAnchor],
-        [title.trailingAnchor constraintLessThanOrEqualToAnchor:self.musicFolderButton.leadingAnchor constant:-12],
-        [self.musicFolderButton.trailingAnchor constraintEqualToAnchor:head.trailingAnchor],
-        [self.musicFolderButton.centerYAnchor constraintEqualToAnchor:title.centerYAnchor],
-        [self.musicFolderButton.heightAnchor constraintEqualToConstant:28],
-        [self.musicFolderButton.widthAnchor constraintGreaterThanOrEqualToConstant:92],
-    ]];
+    title.tag = 0;   // 0=正文（applyTheme 里按 t.text 重刷）
+    NSTextField *subtitle = RLPLabel(RLPTr(@"微调每一组声音，随时对比同一片段"), t.body, t.mut);
+    subtitle.translatesAutoresizingMaskIntoConstraints = NO;
+    subtitle.tag = 1;   // 1=次要（t.mut）
+    // 登记到 dynamicLabels：切主题时这两个常驻标签也要跟着重刷（A6 判据会抓漏刷）。
+    [self.dynamicLabels addObject:title];
+    [self.dynamicLabels addObject:subtitle];
+    [self.stack addArrangedSubview:title];
+    [self.stack addArrangedSubview:subtitle];
 
     [self buildFourCards];
     [self buildNowPlayingAndQueue];
     [self buildAlbumRow];
+    [self buildLibraryCard];
 }
 
 /// 卡片外壳（圆角 + 边框，颜色在 applyTheme 里重刷）。
@@ -160,7 +133,7 @@
     c.identifier = ident;
     c.wantsLayer = YES;
     c.layer.cornerRadius = t.rMd;
-    c.layer.backgroundColor = (t.isLight ? t.bg2 : t.card).CGColor;
+    c.layer.backgroundColor = t.bg2.CGColor;
     c.layer.borderWidth = 1;
     c.layer.borderColor = t.line.CGColor;
     c.translatesAutoresizingMaskIntoConstraints = NO;
@@ -169,166 +142,149 @@
 
 #pragma mark - ① 四张卡
 
-/// 卡面小标签（小字在上，目标图版式）。
-- (NSTextField *)cardCaption:(NSString *)text card:(NSView *)card {
-    RLPTheme *t = [RLPTheme current];
-    NSTextField *l = RLPLabel(text, t.small, t.mut);
-    l.translatesAutoresizingMaskIntoConstraints = NO;
-    [card addSubview:l];
-    [NSLayoutConstraint activateConstraints:@[
-        [l.leadingAnchor constraintEqualToAnchor:card.leadingAnchor constant:14],
-        [l.topAnchor constraintEqualToAnchor:card.topAnchor constant:10],
-    ]];
-    return l;
-}
-
-/// 卡面右侧 chevron（模板图，颜色在 applyTheme 里重刷）。centerY 由调用方钉到值上。
-- (NSImageView *)chevronInCard:(NSView *)card down:(BOOL)down {
-    NSImage *img = [NSImage imageWithSystemSymbolName:(down ? @"chevron.down" : @"chevron.right")
-                            accessibilityDescription:nil];
-    NSImageView *iv = [[NSImageView alloc] initWithFrame:NSZeroRect];
-    iv.image = img;
-    iv.contentTintColor = [RLPTheme current].mut;
-    iv.imageScaling = NSImageScaleProportionallyDown;
-    iv.translatesAutoresizingMaskIntoConstraints = NO;
-    [card addSubview:iv];
-    [self.chevrons addObject:iv];
-    [NSLayoutConstraint activateConstraints:@[
-        [iv.trailingAnchor constraintEqualToAnchor:card.trailingAnchor constant:-14],
-        [iv.widthAnchor constraintEqualToConstant:12],
-        [iv.heightAnchor constraintEqualToConstant:12],
-    ]];
-    return iv;
-}
-
-/// 卡面大字值（在标签下；目标图是大字，不是 13px 正文）。
-- (NSTextField *)cardValue:(NSString *)text card:(NSView *)card caption:(NSTextField *)caption
-                     ident:(NSString *)ident chevron:(NSImageView *)chevron {
-    RLPTheme *t = [RLPTheme current];
-    NSTextField *v = RLPLabel(text, [NSFont systemFontOfSize:17 weight:NSFontWeightSemibold], t.text);
-    v.identifier = ident;
-    v.lineBreakMode = NSLineBreakByTruncatingTail;
-    v.maximumNumberOfLines = 1;
-    v.translatesAutoresizingMaskIntoConstraints = NO;
-    [card addSubview:v];
-    [NSLayoutConstraint activateConstraints:@[
-        [v.leadingAnchor constraintEqualToAnchor:card.leadingAnchor constant:14],
-        [v.topAnchor constraintEqualToAnchor:caption.bottomAnchor constant:4],
-        [v.trailingAnchor constraintEqualToAnchor:chevron.leadingAnchor constant:-8],
-        [chevron.centerYAnchor constraintEqualToAnchor:v.centerYAnchor],
-    ]];
-    return v;
-}
-
-/// 整卡可点（透明按钮盖满，点开卡片式弹层）。
-- (NSButton *)cardHitButton:(NSView *)card action:(SEL)action tip:(NSString *)tip {
-    NSButton *b = [NSButton buttonWithTitle:@"" target:self action:action];
-    b.bordered = NO;
-    b.translatesAutoresizingMaskIntoConstraints = NO;
-    b.toolTip = tip;
-    [card addSubview:b];
-    [NSLayoutConstraint activateConstraints:@[
-        [b.leadingAnchor constraintEqualToAnchor:card.leadingAnchor],
-        [b.trailingAnchor constraintEqualToAnchor:card.trailingAnchor],
-        [b.topAnchor constraintEqualToAnchor:card.topAnchor],
-        [b.bottomAnchor constraintEqualToAnchor:card.bottomAnchor],
-    ]];
-    return b;
-}
-
 - (void)buildFourCards {
     RLPTheme *t = [RLPTheme current];
     NSView *row = [[NSView alloc] initWithFrame:NSZeroRect];
     row.translatesAutoresizingMaskIntoConstraints = NO;
-    row.identifier = @"room.cardrow";
 
-    // ---- 卡 1：当前设备（大字 = /api/devices 里的真实设备名；值可点出下拉菜单）----
+    // ---- 卡 1：当前设备（就地下拉切换）----
     self.deviceCard = [self cardWithIdentifier:@"room.device"];
-    self.deviceCaption = [self cardCaption:RLPTr(@"当前设备") card:self.deviceCard];
+    self.deviceCaption = RLPLabel(RLPTr(@"当前设备"), t.small, t.mut);
+    NSTextField *d1 = self.deviceCaption;
+    d1.translatesAutoresizingMaskIntoConstraints = NO;
+    self.devicePopup = [[NSPopUpButton alloc] initWithFrame:NSZeroRect pullsDown:NO];
+    self.devicePopup.translatesAutoresizingMaskIntoConstraints = NO;
+    self.devicePopup.target = self;
+    self.devicePopup.action = @selector(onDeviceChanged:);
+    self.devicePopup.font = t.body;
+    [self.devicePopup addItemWithTitle:RLPTr(@"系统默认")];
     NSButton *devRefresh = RLPSymbolButton(@"arrow.clockwise", RLPTr(@"重新检测设备"), self, @selector(onReloadDevices:));
     devRefresh.translatesAutoresizingMaskIntoConstraints = NO;
-    devRefresh.identifier = @"room.device.refresh";
+    [self.deviceCard addSubview:d1];
+    [self.deviceCard addSubview:self.devicePopup];
     [self.deviceCard addSubview:devRefresh];
-    // 名单未到时显示「系统默认」（这是选择语义，不是设备名）；拿到名单后替换为真实默认设备名。
-    self.deviceValue = [NSButton buttonWithTitle:RLPTr(@"系统默认") target:self action:@selector(onDeviceMenu:)];
-    self.deviceValue.bordered = NO;
-    self.deviceValue.alignment = NSTextAlignmentLeft;
-    self.deviceValue.font = [NSFont systemFontOfSize:17 weight:NSFontWeightSemibold];
-    self.deviceValue.contentTintColor = t.text;
-    self.deviceValue.identifier = @"room.device.value";
-    [(NSButtonCell *)self.deviceValue.cell setLineBreakMode:NSLineBreakByTruncatingTail];
-    self.deviceValue.translatesAutoresizingMaskIntoConstraints = NO;
-    [self.deviceCard addSubview:self.deviceValue];
-    NSImageView *downChevron = [self chevronInCard:self.deviceCard down:YES];
-    [NSLayoutConstraint activateConstraints:@[
-        [self.deviceValue.leadingAnchor constraintEqualToAnchor:self.deviceCard.leadingAnchor constant:14],
-        [self.deviceValue.topAnchor constraintEqualToAnchor:self.deviceCaption.bottomAnchor constant:4],
-        [self.deviceValue.trailingAnchor constraintLessThanOrEqualToAnchor:downChevron.leadingAnchor constant:-8],
-        [downChevron.centerYAnchor constraintEqualToAnchor:self.deviceValue.centerYAnchor],
-        [devRefresh.trailingAnchor constraintEqualToAnchor:self.deviceCard.trailingAnchor constant:-12],
-        [devRefresh.centerYAnchor constraintEqualToAnchor:self.deviceCaption.centerYAnchor],
-        [devRefresh.widthAnchor constraintEqualToConstant:20],
-        [devRefresh.heightAnchor constraintEqualToConstant:20],
-        [self.deviceCaption.trailingAnchor constraintLessThanOrEqualToAnchor:devRefresh.leadingAnchor constant:-6],
-    ]];
 
     // ---- 卡 2：输出（弹层）----
     self.outputCard = [self cardWithIdentifier:@"room.output"];
-    self.outputCaption = [self cardCaption:RLPTr(@"输出") card:self.outputCard];
-    NSImageView *outChevron = [self chevronInCard:self.outputCard down:NO];
-    self.outputValue = [self cardValue:RLPTr(@"读取中…") card:self.outputCard caption:self.outputCaption
-                                 ident:@"room.output.value" chevron:outChevron];
-    [self cardHitButton:self.outputCard action:@selector(onOpenOutput:) tip:RLPTr(@"点击选择输出方式")];
+    self.outputCaption = RLPLabel(RLPTr(@"输出"), t.small, t.mut);
+    NSTextField *d2 = self.outputCaption;
+    d2.translatesAutoresizingMaskIntoConstraints = NO;
+    self.outputValue = RLPLabel(RLPTr(@"读取中…"), t.body, t.text);
+    self.outputValue.translatesAutoresizingMaskIntoConstraints = NO;
+    NSButton *outBtn = [NSButton buttonWithTitle:@"" target:self action:@selector(onOpenOutput:)];
+    outBtn.bordered = NO;
+    outBtn.translatesAutoresizingMaskIntoConstraints = NO;
+    outBtn.toolTip = RLPTr(@"点击选择输出方式");
+    [self.outputCard addSubview:d2];
+    [self.outputCard addSubview:self.outputValue];
+    [self.outputCard addSubview:outBtn];
 
-    // ---- 卡 3：播放方式（三档，弹层）----
+    // ---- 卡 3：播放（三档，弹层）----
     self.playCard = [self cardWithIdentifier:@"room.play"];
-    self.playCaption = [self cardCaption:RLPTr(@"播放方式") card:self.playCard];
-    NSImageView *playChevron = [self chevronInCard:self.playCard down:NO];
-    self.playValue = [self cardValue:RLPTr(@"原音直通") card:self.playCard caption:self.playCaption
-                               ident:@"room.play.value" chevron:playChevron];
-    [self cardHitButton:self.playCard action:@selector(onOpenPlay:) tip:RLPTr(@"点击选择播放方式")];
+    self.playCaption = RLPLabel(RLPTr(@"播放"), t.small, t.mut);
+    NSTextField *d3 = self.playCaption;
+    d3.translatesAutoresizingMaskIntoConstraints = NO;
+    self.playValue = RLPLabel(RLPTr(@"原音直通"), t.body, t.text);
+    self.playValue.translatesAutoresizingMaskIntoConstraints = NO;
+    NSButton *playBtn = [NSButton buttonWithTitle:@"" target:self action:@selector(onOpenPlay:)];
+    playBtn.bordered = NO;
+    playBtn.translatesAutoresizingMaskIntoConstraints = NO;
+    playBtn.toolTip = RLPTr(@"点击选择播放方式");
+    [self.playCard addSubview:d3];
+    [self.playCard addSubview:self.playValue];
+    [self.playCard addSubview:playBtn];
 
-    // ---- 卡 4：听音风格（弹层）----
+    // ---- 卡 4：听音风格（新增，弹层）----
     self.styleCard = [self cardWithIdentifier:@"room.style"];
-    self.styleCaption = [self cardCaption:RLPTr(@"听音风格") card:self.styleCard];
-    NSImageView *styleChevron = [self chevronInCard:self.styleCard down:NO];
-    self.styleValue = [self cardValue:RLPTr(@"均衡自然") card:self.styleCard caption:self.styleCaption
-                                ident:@"room.style.value" chevron:styleChevron];
-    [self cardHitButton:self.styleCard action:@selector(onOpenStyle:) tip:RLPTr(@"点击选择听感风格")];
+    self.styleCaption = RLPLabel(RLPTr(@"听音风格"), t.small, t.mut);
+    NSTextField *d4 = self.styleCaption;
+    d4.translatesAutoresizingMaskIntoConstraints = NO;
+    self.styleValue = RLPLabel(RLPTr(@"均衡自然"), t.body, t.text);
+    self.styleValue.translatesAutoresizingMaskIntoConstraints = NO;
+    self.styleSub = RLPLabel(@"", t.small, t.mut);
+    self.styleSub.translatesAutoresizingMaskIntoConstraints = NO;
+    NSButton *styleBtn = [NSButton buttonWithTitle:@"" target:self action:@selector(onOpenStyle:)];
+    styleBtn.bordered = NO;
+    styleBtn.translatesAutoresizingMaskIntoConstraints = NO;
+    styleBtn.toolTip = RLPTr(@"点击选择听感风格");
+    [self.styleCard addSubview:d4];
+    [self.styleCard addSubview:self.styleValue];
+    [self.styleCard addSubview:self.styleSub];
+    [self.styleCard addSubview:styleBtn];
 
     for (NSView *c in @[self.deviceCard, self.outputCard, self.playCard, self.styleCard])
         [row addSubview:c];
     [self.stack addArrangedSubview:row];
 
-    // 目标图：四张卡同一行、等宽铺满。用"四卡互相等宽 + 间距 12 + 首尾贴边"表达，
-    // 不再用 0.24 的百分比（百分比会让最后一张差出 4%，肉眼可见不齐）。
     [NSLayoutConstraint activateConstraints:@[
         [row.widthAnchor constraintEqualToAnchor:self.stack.widthAnchor constant:-48],
-        [row.heightAnchor constraintEqualToConstant:64],
+        [row.heightAnchor constraintEqualToConstant:100],
         [self.deviceCard.leadingAnchor constraintEqualToAnchor:row.leadingAnchor],
-        [self.outputCard.leadingAnchor constraintEqualToAnchor:self.deviceCard.trailingAnchor constant:12],
-        [self.playCard.leadingAnchor constraintEqualToAnchor:self.outputCard.trailingAnchor constant:12],
-        [self.styleCard.leadingAnchor constraintEqualToAnchor:self.playCard.trailingAnchor constant:12],
-        [self.styleCard.trailingAnchor constraintEqualToAnchor:row.trailingAnchor],
-        [self.deviceCard.widthAnchor constraintEqualToAnchor:self.outputCard.widthAnchor],
-        [self.outputCard.widthAnchor constraintEqualToAnchor:self.playCard.widthAnchor],
-        [self.playCard.widthAnchor constraintEqualToAnchor:self.styleCard.widthAnchor],
+        [self.deviceCard.widthAnchor constraintEqualToAnchor:row.widthAnchor multiplier:0.24],
         [self.deviceCard.topAnchor constraintEqualToAnchor:row.topAnchor],
         [self.deviceCard.bottomAnchor constraintEqualToAnchor:row.bottomAnchor],
+        
+        [self.outputCard.leadingAnchor constraintEqualToAnchor:self.deviceCard.trailingAnchor constant:12],
+        [self.outputCard.widthAnchor constraintEqualToAnchor:self.deviceCard.widthAnchor],
         [self.outputCard.topAnchor constraintEqualToAnchor:row.topAnchor],
         [self.outputCard.bottomAnchor constraintEqualToAnchor:row.bottomAnchor],
+
+        [self.playCard.leadingAnchor constraintEqualToAnchor:self.outputCard.trailingAnchor constant:12],
+        [self.playCard.widthAnchor constraintEqualToAnchor:self.deviceCard.widthAnchor],
         [self.playCard.topAnchor constraintEqualToAnchor:row.topAnchor],
         [self.playCard.bottomAnchor constraintEqualToAnchor:row.bottomAnchor],
+
+        [self.styleCard.leadingAnchor constraintEqualToAnchor:self.playCard.trailingAnchor constant:12],
+        [self.styleCard.trailingAnchor constraintEqualToAnchor:row.trailingAnchor],
         [self.styleCard.topAnchor constraintEqualToAnchor:row.topAnchor],
         [self.styleCard.bottomAnchor constraintEqualToAnchor:row.bottomAnchor],
     ]];
 
-    // 预设说明（后端 notes 照实显示；没有就不占版面，目标图这里没有这一行）。
+    // 行级几何（等宽一行、加高卡片）已在上面 activateConstraints 统一设定，
+    // 这里只放**卡内**布局，不再重复 row.width/height 与四卡 leading/width（重复会冲突）。
+    NSMutableArray *cs = [NSMutableArray array];
+    // 卡内布局
+    [cs addObjectsFromArray:@[
+        [d1.leadingAnchor constraintEqualToAnchor:self.deviceCard.leadingAnchor constant:14],
+        [d1.topAnchor constraintEqualToAnchor:self.deviceCard.topAnchor constant:10],
+        [self.devicePopup.leadingAnchor constraintEqualToAnchor:self.deviceCard.leadingAnchor constant:10],
+        [self.devicePopup.topAnchor constraintEqualToAnchor:d1.bottomAnchor constant:4],
+        [self.devicePopup.trailingAnchor constraintEqualToAnchor:devRefresh.leadingAnchor constant:-4],
+        [devRefresh.trailingAnchor constraintEqualToAnchor:self.deviceCard.trailingAnchor constant:-10],
+        [devRefresh.centerYAnchor constraintEqualToAnchor:self.devicePopup.centerYAnchor],
+        [devRefresh.widthAnchor constraintEqualToConstant:22],
+    ]];
+    NSArray *pairs = @[@[d2, self.outputValue, self.outputCard, outBtn],
+                       @[d3, self.playValue, self.playCard, playBtn],
+                       @[d4, self.styleValue, self.styleCard, styleBtn]];
+    for (NSArray *p in pairs) {
+        NSTextField *lab = p[0], *val = p[1];
+        NSView *card = p[2]; NSButton *btn = p[3];
+        [cs addObjectsFromArray:@[
+            [lab.leadingAnchor constraintEqualToAnchor:card.leadingAnchor constant:14],
+            [lab.topAnchor constraintEqualToAnchor:card.topAnchor constant:10],
+            [val.leadingAnchor constraintEqualToAnchor:card.leadingAnchor constant:14],
+            [val.topAnchor constraintEqualToAnchor:lab.bottomAnchor constant:6],
+            [val.trailingAnchor constraintEqualToAnchor:card.trailingAnchor constant:-14],
+            // 整卡可点（透明按钮盖满），符合"卡片式"心智
+            [btn.leadingAnchor constraintEqualToAnchor:card.leadingAnchor],
+            [btn.trailingAnchor constraintEqualToAnchor:card.trailingAnchor],
+            [btn.topAnchor constraintEqualToAnchor:card.topAnchor],
+            [btn.bottomAnchor constraintEqualToAnchor:card.bottomAnchor],
+        ]];
+    }
+    [cs addObjectsFromArray:@[
+        [self.styleSub.leadingAnchor constraintEqualToAnchor:self.styleCard.leadingAnchor constant:14],
+        [self.styleSub.trailingAnchor constraintEqualToAnchor:self.styleCard.trailingAnchor constant:-14],
+        [self.styleSub.topAnchor constraintEqualToAnchor:self.styleValue.bottomAnchor constant:2],
+    ]];
+    [NSLayoutConstraint activateConstraints:cs];
+
+    // 预设说明（后端 notes 照实显示）
     self.presetNotes = RLPLabel(@"", t.small, t.mut);
     self.presetNotes.translatesAutoresizingMaskIntoConstraints = NO;
     self.presetNotes.maximumNumberOfLines = 2;
     self.presetNotes.lineBreakMode = NSLineBreakByWordWrapping;
-    self.presetNotes.hidden = YES;
     [self.stack addArrangedSubview:self.presetNotes];
     [[self.presetNotes.widthAnchor constraintEqualToAnchor:self.stack.widthAnchor constant:-48] setActive:YES];
 }
@@ -339,11 +295,9 @@
     RLPTheme *t = [RLPTheme current];
     NSView *row = [[NSView alloc] initWithFrame:NSZeroRect];
     row.translatesAutoresizingMaskIntoConstraints = NO;
-    row.identifier = @"room.nprow";
 
     NSView *np = [self cardWithIdentifier:@"room.nowplaying"];
     self.npCover = [[NSImageView alloc] initWithFrame:NSZeroRect];
-    self.npCover.identifier = @"room.np.cover";
     self.npCover.imageScaling = NSImageScaleProportionallyUpOrDown;
     self.npCover.wantsLayer = YES;
     self.npCover.layer.cornerRadius = t.rSm;
@@ -351,41 +305,21 @@
     self.npCover.layer.backgroundColor = t.bg3.CGColor;
     self.npCover.translatesAutoresizingMaskIntoConstraints = NO;
     [self showCoverPlaceholder];   // 第一帧就有音符占位，不闪空白方块
-
-    self.npState = RLPLabel(RLPTr(@"未播放"), [NSFont systemFontOfSize:12 weight:NSFontWeightSemibold], t.mut);
-    self.npState.identifier = @"room.np.state";
+    self.npState = RLPLabel(RLPTr(@"未播放"), t.small, t.mut);
     self.npState.translatesAutoresizingMaskIntoConstraints = NO;
-
-    // 大号衬线曲名（目标图是 Georgia Bold，可两行）
-    NSFont *npFont = [NSFont fontWithName:@"Georgia-Bold" size:28];
-    if (!npFont) npFont = t.serif;
-    self.npTitle = RLPLabel(RLPTr(@"还没有在播放的音乐"), npFont, t.text);
-    self.npTitle.identifier = @"room.np.title";
+    self.npTitle = RLPLabel(RLPTr(@"还没有在播放的音乐"), t.serif, t.text);
     self.npTitle.translatesAutoresizingMaskIntoConstraints = NO;
     self.npTitle.maximumNumberOfLines = 2;
     self.npTitle.lineBreakMode = NSLineBreakByWordWrapping;
-
-    self.npSub = RLPLabel(RLPTr(@"从下面的专辑挑一张开始"), t.body, t.mut);
-    self.npSub.identifier = @"room.np.sub";
+    self.npSub = RLPLabel(RLPTr(@"从下面的专辑挑一张开始"), t.small, t.mut);
     self.npSub.translatesAutoresizingMaskIntoConstraints = NO;
-    self.npSub.lineBreakMode = NSLineBreakByTruncatingTail;
-    self.npSub.maximumNumberOfLines = 1;
-
-    // 收藏：/api/fav（与专辑页、单曲页同一端点，不新造后端）。未播放时禁用并如实空态。
-    self.npFav = [NSButton buttonWithTitle:RLPTr(@"收藏") target:self action:@selector(onFav:)];
-    self.npFav.identifier = @"room.np.fav";
-    self.npFav.bezelStyle = NSBezelStyleRounded;
-    self.npFav.image = [NSImage imageWithSystemSymbolName:@"heart" accessibilityDescription:RLPTr(@"收藏")];
-    self.npFav.imagePosition = NSImageLeading;
-    self.npFav.enabled = NO;
-    self.npFav.translatesAutoresizingMaskIntoConstraints = NO;
-
-    self.npOpen = [NSButton buttonWithTitle:RLPTr(@"打开曲目详情") target:self action:@selector(onOpenNowPlaying:)];
-    self.npOpen.identifier = @"room.np.open";
-    self.npOpen.bezelStyle = NSBezelStyleRounded;
-    self.npOpen.translatesAutoresizingMaskIntoConstraints = NO;
-
-    for (NSView *v in @[self.npCover, self.npState, self.npTitle, self.npSub, self.npFav, self.npOpen])
+    self.npToggle = [NSButton buttonWithTitle:RLPTr(@"继续播放") target:self action:@selector(onTogglePlay:)];
+    self.npToggle.bezelStyle = NSBezelStyleRounded;
+    self.npToggle.translatesAutoresizingMaskIntoConstraints = NO;
+    NSButton *npOpen = [NSButton buttonWithTitle:RLPTr(@"打开曲目详情") target:self action:@selector(onOpenNowPlaying:)];
+    npOpen.bezelStyle = NSBezelStyleRounded;
+    npOpen.translatesAutoresizingMaskIntoConstraints = NO;
+    for (NSView *v in @[self.npCover, self.npState, self.npTitle, self.npSub, self.npToggle, npOpen])
         [np addSubview:v];
 
     NSView *qcard = [self cardWithIdentifier:@"room.queue"];
@@ -393,12 +327,11 @@
     self.queueCaption.translatesAutoresizingMaskIntoConstraints = NO;
     NSButton *qAll = [NSButton buttonWithTitle:RLPTr(@"查看全部") target:self action:@selector(onOpenQueue:)];
     qAll.bezelStyle = NSBezelStyleRounded;
-    qAll.identifier = @"room.queue.all";
     qAll.translatesAutoresizingMaskIntoConstraints = NO;
     self.queueList = [[NSStackView alloc] init];
     self.queueList.orientation = NSUserInterfaceLayoutOrientationVertical;
     self.queueList.alignment = NSLayoutAttributeLeading;
-    self.queueList.spacing = 0;
+    self.queueList.spacing = 6;
     self.queueList.translatesAutoresizingMaskIntoConstraints = NO;
     for (NSView *v in @[self.queueCaption, qAll, self.queueList]) [qcard addSubview:v];
 
@@ -408,42 +341,36 @@
 
     [NSLayoutConstraint activateConstraints:@[
         [row.widthAnchor constraintEqualToAnchor:self.stack.widthAnchor constant:-48],
-        // 目标图：左卡高约 335（1180 宽窗口下 300 上下），右栏队列卡同高
-        [row.heightAnchor constraintEqualToConstant:300],
+        [row.heightAnchor constraintEqualToConstant:240],
         [np.leadingAnchor constraintEqualToAnchor:row.leadingAnchor],
         [np.topAnchor constraintEqualToAnchor:row.topAnchor],
         [np.bottomAnchor constraintEqualToAnchor:row.bottomAnchor],
-        [np.trailingAnchor constraintEqualToAnchor:row.trailingAnchor constant:-322],
+        [np.trailingAnchor constraintEqualToAnchor:row.trailingAnchor constant:-312],
         [qcard.leadingAnchor constraintEqualToAnchor:np.trailingAnchor constant:12],
         [qcard.trailingAnchor constraintEqualToAnchor:row.trailingAnchor],
         [qcard.topAnchor constraintEqualToAnchor:row.topAnchor],
         [qcard.bottomAnchor constraintEqualToAnchor:row.bottomAnchor],
-
-        // 左封面：目标图封面几乎占满卡高（>=180 是硬判据），居中留 30 边距
-        [self.npCover.leadingAnchor constraintEqualToAnchor:np.leadingAnchor constant:30],
+        
+        [self.npCover.leadingAnchor constraintEqualToAnchor:np.leadingAnchor constant:20],
         [self.npCover.centerYAnchor constraintEqualToAnchor:np.centerYAnchor],
-        [self.npCover.widthAnchor constraintEqualToConstant:240],
-        [self.npCover.heightAnchor constraintEqualToConstant:240],
+        [self.npCover.widthAnchor constraintEqualToConstant:200],
+        [self.npCover.heightAnchor constraintEqualToConstant:200],
 
-        // 右侧文字列：状态 → 大曲名 → 艺术家·专辑 → 两个按钮（每个都必须显式定位，
+        // 右侧文字列：状态 → 大曲名 → 副标题 → 两个按钮（每个都必须显式定位，
         // 否则无约束控件全堆在 (0,0) 重叠成一团 —— 离屏截图实测到的真 bug）。
-        [self.npState.leadingAnchor constraintEqualToAnchor:self.npCover.trailingAnchor constant:24],
-        [self.npState.topAnchor constraintEqualToAnchor:np.topAnchor constant:28],
-        [self.npState.trailingAnchor constraintLessThanOrEqualToAnchor:np.trailingAnchor constant:-24],
+        [self.npState.leadingAnchor constraintEqualToAnchor:self.npCover.trailingAnchor constant:20],
+        [self.npState.topAnchor constraintEqualToAnchor:np.topAnchor constant:34],
+        [self.npState.trailingAnchor constraintLessThanOrEqualToAnchor:np.trailingAnchor constant:-20],
         [self.npTitle.leadingAnchor constraintEqualToAnchor:self.npState.leadingAnchor],
-        [self.npTitle.trailingAnchor constraintEqualToAnchor:np.trailingAnchor constant:-24],
+        [self.npTitle.trailingAnchor constraintEqualToAnchor:np.trailingAnchor constant:-20],
         [self.npTitle.topAnchor constraintEqualToAnchor:self.npState.bottomAnchor constant:8],
         [self.npSub.leadingAnchor constraintEqualToAnchor:self.npState.leadingAnchor],
-        [self.npSub.trailingAnchor constraintEqualToAnchor:np.trailingAnchor constant:-24],
-        [self.npSub.topAnchor constraintGreaterThanOrEqualToAnchor:self.npTitle.bottomAnchor constant:8],
-        [self.npSub.bottomAnchor constraintLessThanOrEqualToAnchor:self.npFav.topAnchor constant:-14],
-        [self.npFav.leadingAnchor constraintEqualToAnchor:self.npState.leadingAnchor],
-        [self.npFav.bottomAnchor constraintEqualToAnchor:np.bottomAnchor constant:-24],
-        [self.npFav.heightAnchor constraintEqualToConstant:30],
-        [self.npOpen.leadingAnchor constraintEqualToAnchor:self.npFav.trailingAnchor constant:10],
-        [self.npOpen.centerYAnchor constraintEqualToAnchor:self.npFav.centerYAnchor],
-        [self.npOpen.heightAnchor constraintEqualToConstant:30],
-        [self.npOpen.trailingAnchor constraintLessThanOrEqualToAnchor:np.trailingAnchor constant:-24],
+        [self.npSub.trailingAnchor constraintEqualToAnchor:np.trailingAnchor constant:-20],
+        [self.npSub.topAnchor constraintEqualToAnchor:self.npTitle.bottomAnchor constant:8],
+        [self.npToggle.leadingAnchor constraintEqualToAnchor:self.npState.leadingAnchor],
+        [self.npToggle.topAnchor constraintEqualToAnchor:self.npSub.bottomAnchor constant:16],
+        [npOpen.leadingAnchor constraintEqualToAnchor:self.npToggle.trailingAnchor constant:10],
+        [npOpen.centerYAnchor constraintEqualToAnchor:self.npToggle.centerYAnchor],
 
         [self.queueCaption.leadingAnchor constraintEqualToAnchor:qcard.leadingAnchor constant:14],
         [self.queueCaption.topAnchor constraintEqualToAnchor:qcard.topAnchor constant:14],
@@ -452,87 +379,7 @@
         [self.queueList.leadingAnchor constraintEqualToAnchor:qcard.leadingAnchor constant:14],
         [self.queueList.trailingAnchor constraintEqualToAnchor:qcard.trailingAnchor constant:-14],
         [self.queueList.topAnchor constraintEqualToAnchor:self.queueCaption.bottomAnchor constant:10],
-        [self.queueList.bottomAnchor constraintLessThanOrEqualToAnchor:qcard.bottomAnchor constant:-12],
     ]];
-}
-
-/// 队列行：编号 + 曲名 + 底部细线（目标图版式）。current 行用强调绿高亮。
-- (NSView *)queueRowWithNumber:(NSInteger)number name:(NSString *)name current:(BOOL)current {
-    RLPTheme *t = [RLPTheme current];
-    NSView *r = [[NSView alloc] initWithFrame:NSZeroRect];
-    r.translatesAutoresizingMaskIntoConstraints = NO;
-    r.identifier = [NSString stringWithFormat:@"room.queue.row.%ld", (long)(number - 1)];
-    if (current) r.tag = 1;   // 判据用：当前行
-
-    NSTextField *num = [self trackedLabel:[NSString stringWithFormat:@"%ld", (long)number]
-                                     font:t.small role:(current ? 3 : 1)];
-    num.alignment = NSTextAlignmentRight;
-    num.identifier = [NSString stringWithFormat:@"room.queue.num.%ld", (long)(number - 1)];
-    NSTextField *nm = [self trackedLabel:(name.length ? name : @"")
-                                    font:[NSFont systemFontOfSize:13 weight:(current ? NSFontWeightSemibold : NSFontWeightRegular)]
-                                    role:(current ? 3 : 0)];
-    nm.lineBreakMode = NSLineBreakByTruncatingTail;
-    nm.identifier = [NSString stringWithFormat:@"room.queue.name.%ld", (long)(number - 1)];
-
-    NSView *sep = [[NSView alloc] initWithFrame:NSZeroRect];
-    sep.wantsLayer = YES;
-    sep.layer.backgroundColor = t.hairline.CGColor;
-    sep.translatesAutoresizingMaskIntoConstraints = NO;
-    sep.identifier = [NSString stringWithFormat:@"room.queue.sep.%ld", (long)(number - 1)];
-    [self.hairlines addObject:sep];
-
-    for (NSView *v in @[num, nm, sep]) [r addSubview:v];
-    [NSLayoutConstraint activateConstraints:@[
-        [r.heightAnchor constraintEqualToConstant:36],
-        [num.leadingAnchor constraintEqualToAnchor:r.leadingAnchor],
-        [num.widthAnchor constraintEqualToConstant:20],
-        [num.centerYAnchor constraintEqualToAnchor:r.centerYAnchor],
-        [nm.leadingAnchor constraintEqualToAnchor:num.trailingAnchor constant:12],
-        [nm.trailingAnchor constraintEqualToAnchor:r.trailingAnchor constant:-14],
-        [nm.centerYAnchor constraintEqualToAnchor:r.centerYAnchor],
-        [sep.leadingAnchor constraintEqualToAnchor:r.leadingAnchor],
-        [sep.trailingAnchor constraintEqualToAnchor:r.trailingAnchor],
-        [sep.bottomAnchor constraintEqualToAnchor:r.bottomAnchor],
-        [sep.heightAnchor constraintEqualToConstant:1],
-    ]];
-    return r;
-}
-
-/// 渲染真实队列（/api/queue?meta=1 的 items/metas/index）。空队列如实提示，不占位造数。
-- (void)renderQueueWithItems:(NSArray *)items metas:(NSArray *)metas index:(NSInteger)index {
-    RLPTheme *t = [RLPTheme current];
-    [self.hairlines removeAllObjects];
-    for (NSView *v in [self.queueList.arrangedSubviews copy]) {
-        [self.queueList removeArrangedSubview:v];
-        [v removeFromSuperview];
-    }
-    if (!items.count) {
-        NSTextField *e = [self trackedLabel:RLPTr(@"队列是空的") font:t.small role:1];
-        e.identifier = @"room.queue.empty";
-        [self.queueList addArrangedSubview:e];
-        return;
-    }
-    NSInteger n = 0;
-    for (id it in items) {
-        if (n >= 5) break;
-        NSString *name = nil;
-        if (n < (NSInteger)metas.count && [metas[n] isKindOfClass:[NSDictionary class]]) {
-            NSString *mt = [metas[n][@"t"] isKindOfClass:[NSString class]] ? metas[n][@"t"] : nil;
-            if (mt.length) name = mt;
-        }
-        if (!name.length) {
-            if ([it isKindOfClass:[NSString class]]) {
-                name = [(NSString *)it lastPathComponent];
-            } else if ([it isKindOfClass:[NSDictionary class]]) {
-                NSString *p = [it[@"path"] isKindOfClass:[NSString class]] ? it[@"path"] : it[@"file"];
-                name = [p lastPathComponent];
-            }
-        }
-        NSView *r = [self queueRowWithNumber:n + 1 name:name current:(index == n)];
-        [self.queueList addArrangedSubview:r];
-        [[r.widthAnchor constraintEqualToAnchor:self.queueList.widthAnchor] setActive:YES];
-        ++n;
-    }
 }
 
 #pragma mark - ③ 专辑行
@@ -545,7 +392,6 @@
     self.albumCaption = at;
     at.translatesAutoresizingMaskIntoConstraints = NO;
     NSButton *openLib = [NSButton buttonWithTitle:RLPTr(@"打开音乐库") target:self action:@selector(onOpenAlbums:)];
-    openLib.identifier = @"room.album.openlibrary";
     openLib.bezelStyle = NSBezelStyleRounded;
     openLib.translatesAutoresizingMaskIntoConstraints = NO;
     [head addSubview:at];
@@ -554,172 +400,54 @@
 
     self.albumRow = [[NSStackView alloc] init];
     self.albumRow.orientation = NSUserInterfaceLayoutOrientationHorizontal;
-    self.albumRow.distribution = NSStackViewDistributionFillEqually;   // 目标图：三列等宽横排
-    self.albumRow.alignment = NSLayoutAttributeTop;
-    self.albumRow.spacing = 24;
+    self.albumRow.spacing = 12;
     self.albumRow.translatesAutoresizingMaskIntoConstraints = NO;
     [self.stack addArrangedSubview:self.albumRow];
 
     [NSLayoutConstraint activateConstraints:@[
         [head.widthAnchor constraintEqualToAnchor:self.stack.widthAnchor constant:-48],
-        [head.heightAnchor constraintEqualToConstant:30],
+        [head.heightAnchor constraintEqualToConstant:28],
         [at.leadingAnchor constraintEqualToAnchor:head.leadingAnchor],
         [at.centerYAnchor constraintEqualToAnchor:head.centerYAnchor],
         [openLib.trailingAnchor constraintEqualToAnchor:head.trailingAnchor],
-        [openLib.centerYAnchor constraintEqualToAnchor:at.centerYAnchor],
+        [openLib.centerYAnchor constraintEqualToAnchor:head.centerYAnchor],
         [self.albumRow.widthAnchor constraintEqualToAnchor:self.stack.widthAnchor constant:-48],
-        [self.albumRow.heightAnchor constraintEqualToConstant:76],
+        [self.albumRow.heightAnchor constraintEqualToConstant:120],
     ]];
 }
 
-/// 一列专辑：封面 + 名字 + 底部细线（目标图是"表格行"质感，不是大封面卡片）。
-- (NSView *)albumCellWithKey:(NSString *)key name:(NSString *)name index:(NSInteger)idx {
+#pragma mark - ④ 音乐库（就地弹层，不跳设置）
+
+- (void)buildLibraryCard {
     RLPTheme *t = [RLPTheme current];
-    NSView *cell = [[NSView alloc] initWithFrame:NSZeroRect];
-    cell.translatesAutoresizingMaskIntoConstraints = NO;
-    cell.identifier = [NSString stringWithFormat:@"room.album.%ld", (long)idx];
-
-    NSImageView *iv = [[NSImageView alloc] initWithFrame:NSZeroRect];
-    iv.identifier = [NSString stringWithFormat:@"room.albumcover.%ld", (long)idx];
-    iv.imageScaling = NSImageScaleProportionallyUpOrDown;
-    iv.wantsLayer = YES;
-    iv.layer.cornerRadius = t.rSm;
-    iv.layer.masksToBounds = YES;
-    iv.layer.backgroundColor = t.bg3.CGColor;
-    iv.translatesAutoresizingMaskIntoConstraints = NO;
-    // 先放音符占位：封面异步加载失败时不留空白方块（目标图每格都有封面）
-    NSImage *ph = [NSImage imageWithSystemSymbolName:@"music.note" accessibilityDescription:RLPTr(@"封面")];
-    iv.image = ph;
-    iv.contentTintColor = t.mut;
-    iv.imageScaling = NSImageScaleProportionallyDown;
-
-    NSFont *nameFont = [NSFont fontWithName:@"Georgia-Bold" size:16];
-    if (!nameFont) nameFont = t.title;
-    NSTextField *nm = [self trackedLabel:(name.length ? name : RLPTr(@"未知专辑")) font:nameFont role:0];
-    nm.identifier = [NSString stringWithFormat:@"room.album.name.%ld", (long)idx];
-    nm.lineBreakMode = NSLineBreakByTruncatingTail;
-    nm.maximumNumberOfLines = 1;
-    nm.translatesAutoresizingMaskIntoConstraints = NO;
-
-    NSView *sep = [[NSView alloc] initWithFrame:NSZeroRect];
-    sep.wantsLayer = YES;
-    sep.layer.backgroundColor = t.hairline.CGColor;
-    sep.translatesAutoresizingMaskIntoConstraints = NO;
-    sep.identifier = [NSString stringWithFormat:@"room.album.sep.%ld", (long)idx];
-    [self.hairlines addObject:sep];
-
-    NSButton *hit = [NSButton buttonWithTitle:@"" target:self action:@selector(onAlbumClicked:)];
-    hit.bordered = NO;
-    hit.identifier = key;
-    hit.translatesAutoresizingMaskIntoConstraints = NO;
-    hit.toolTip = name ?: @"";
-
-    for (NSView *v in @[iv, nm, sep, hit]) [cell addSubview:v];
-    [NSLayoutConstraint activateConstraints:@[
-        [iv.leadingAnchor constraintEqualToAnchor:cell.leadingAnchor],
-        [iv.centerYAnchor constraintEqualToAnchor:cell.centerYAnchor],
-        [iv.widthAnchor constraintEqualToConstant:60],
-        [iv.heightAnchor constraintEqualToConstant:60],
-        [nm.leadingAnchor constraintEqualToAnchor:iv.trailingAnchor constant:12],
-        [nm.trailingAnchor constraintEqualToAnchor:cell.trailingAnchor constant:-8],
-        [nm.centerYAnchor constraintEqualToAnchor:cell.centerYAnchor],
-        [sep.leadingAnchor constraintEqualToAnchor:cell.leadingAnchor],
-        [sep.trailingAnchor constraintEqualToAnchor:cell.trailingAnchor],
-        [sep.bottomAnchor constraintEqualToAnchor:cell.bottomAnchor],
-        [sep.heightAnchor constraintEqualToConstant:1],
-        [hit.leadingAnchor constraintEqualToAnchor:cell.leadingAnchor],
-        [hit.trailingAnchor constraintEqualToAnchor:cell.trailingAnchor],
-        [hit.topAnchor constraintEqualToAnchor:cell.topAnchor],
-        [hit.bottomAnchor constraintEqualToAnchor:cell.bottomAnchor],
-    ]];
-
-    // 封面走共享缓存（后端 /api/lib/cover?k=…）；后端没起来（纯离线单测）就不发请求。
-    if ([RLPCoreClient shared].started) {
-        [[RLPCoverLoader shared] coverForAlbumKey:key completion:^(NSImage * _Nullable image) {
-            if (!image) return;
-            iv.image = image;
-            iv.contentTintColor = nil;
-        }];
-    }
-    return cell;
-}
-
-- (void)renderAlbums:(NSArray *)albums {
-    RLPTheme *t = [RLPTheme current];
-    for (NSView *v in [self.albumRow.arrangedSubviews copy]) {
-        [self.albumRow removeArrangedSubview:v];
-        [v removeFromSuperview];
-    }
-    [self.hairlines removeAllObjects];
-    NSInteger n = 0;
-    for (id it in albums) {
-        if (n >= 3) break;   // 目标图一屏三列；完整列表在「打开音乐库」里
-        if (![it isKindOfClass:[NSDictionary class]]) continue;
-        NSString *key = [it[@"k"] isKindOfClass:[NSString class]] ? it[@"k"] : nil;
-        if (!key.length) continue;
-        // /api/lib/albums 的专辑名字段是 name（al 是队列 metas 里的字段，别混）
-        NSString *name = [it[@"name"] isKindOfClass:[NSString class]] ? it[@"name"] : RLPTr(@"未知专辑");
-        [self.albumRow addArrangedSubview:[self albumCellWithKey:key name:name index:n]];
-        ++n;
-    }
-    // 固定三列：缺的列补空视图，保证列宽不随专辑数跳动（与目标图一致）
-    while (n > 0 && n < 3) {
-        NSView *pad = [[NSView alloc] initWithFrame:NSZeroRect];
-        pad.translatesAutoresizingMaskIntoConstraints = NO;
-        [self.albumRow addArrangedSubview:pad];
-        ++n;
-    }
-    if (n == 0) {
-        NSTextField *e = [self trackedLabel:RLPTr(@"还没有专辑 · 先添加音乐目录") font:t.small role:1];
-        e.identifier = @"room.album.empty";
-        [self.albumRow addArrangedSubview:e];
-    }
-}
-
-#pragma mark - ④ 音乐文件夹（右上入口；沿用既有导航与既有 /api/lib/* 动作，不新造后端）
-
-/// 右上「音乐文件夹」：卡片式弹层。目标图把旧页面的"音乐库卡"收进了这个入口 ——
-/// 功能一个没删（文件夹页 / 添加目录 / 重新扫描 / 更多都在），只是不再占页面版面。
-- (void)onOpenMusicFolder:(id)sender {
-    RLPTheme *t = [RLPTheme current];
-    NSStackView *s = [self popStackWithTitle:RLPTr(@"音乐文件夹")
-        note:RLPTr(@"浏览曲库目录、添加音乐目录或重新扫描；流媒体等入口在「更多」里。")];
-
-    NSButton *browse = [NSButton buttonWithTitle:RLPTr(@"文件夹") target:self action:@selector(onOpenFolders:)];
-    browse.bezelStyle = NSBezelStyleRounded;
-    browse.identifier = @"room.musicfolder.browse";
-    browse.translatesAutoresizingMaskIntoConstraints = NO;
-    [s addArrangedSubview:browse];
-    [[browse.widthAnchor constraintEqualToConstant:330] setActive:YES];
-
+    NSView *c = [self cardWithIdentifier:@"room.library"];
     self.libDesc = RLPLabel(@"", t.small, t.mut);
+    self.libDesc.translatesAutoresizingMaskIntoConstraints = NO;
     self.libDesc.maximumNumberOfLines = 2;
     self.libDesc.lineBreakMode = NSLineBreakByWordWrapping;
-    self.libDesc.preferredMaxLayoutWidth = 330;
-    self.libDesc.translatesAutoresizingMaskIntoConstraints = NO;
-    [s addArrangedSubview:self.libDesc];
-    [[self.libDesc.widthAnchor constraintEqualToConstant:330] setActive:YES];
-
-    self.libButton = [NSButton buttonWithTitle:(self.hasRoots ? RLPTr(@"重新扫描音乐库") : RLPTr(@"添加音乐目录"))
-                                        target:self action:@selector(onLibraryAction:)];
+    self.libButton = [NSButton buttonWithTitle:RLPTr(@"添加音乐目录") target:self action:@selector(onLibraryAction:)];
     self.libButton.bezelStyle = NSBezelStyleRounded;
-    self.libButton.identifier = @"room.musicfolder.library";
     self.libButton.translatesAutoresizingMaskIntoConstraints = NO;
-    [s addArrangedSubview:self.libButton];
-    [[self.libButton.widthAnchor constraintEqualToConstant:190] setActive:YES];
-
+    // 更多入口：功能不能删，但聆听室里不放「设置」字样。
     NSButton *more = [NSButton buttonWithTitle:RLPTr(@"更多") target:self action:@selector(onOpenMore:)];
     more.bezelStyle = NSBezelStyleRounded;
     more.translatesAutoresizingMaskIntoConstraints = NO;
-    [s addArrangedSubview:more];
-    [[more.widthAnchor constraintEqualToConstant:120] setActive:YES];
-
-    // 文案与当前曲库状态一致（根目录数量来自 /api/lib/roots）
-    self.libDesc.stringValue = self.hasRoots
-        ? RLPTr(@"音乐目录已就绪 · 可重新扫描更新专辑与封面")
-        : RLPTr(@"支持 FLAC · DSD (DSF/DFF) · ALAC · WAV · APE");
-    [self showPopoverFrom:self.musicFolderButton withCard:s width:360 minH:220];
+    for (NSView *v in @[self.libDesc, self.libButton, more]) [c addSubview:v];
+    [self.stack addArrangedSubview:c];
+    [NSLayoutConstraint activateConstraints:@[
+        [c.widthAnchor constraintEqualToAnchor:self.stack.widthAnchor constant:-48],
+        [c.heightAnchor constraintEqualToConstant:64],
+        [self.libDesc.leadingAnchor constraintEqualToAnchor:c.leadingAnchor constant:14],
+        [self.libDesc.topAnchor constraintEqualToAnchor:c.topAnchor constant:12],
+        [self.libDesc.trailingAnchor constraintEqualToAnchor:more.leadingAnchor constant:-12],
+        [self.libButton.leadingAnchor constraintEqualToAnchor:c.leadingAnchor constant:14],
+        [self.libButton.topAnchor constraintEqualToAnchor:self.libDesc.bottomAnchor constant:6],
+        [more.trailingAnchor constraintEqualToAnchor:c.trailingAnchor constant:-14],
+        [more.centerYAnchor constraintEqualToAnchor:c.centerYAnchor],
+        [more.widthAnchor constraintEqualToConstant:72],
+    ]];
 }
+
 
 #pragma mark - 卡片式弹层（就地改设置，不跳设置页）
 
@@ -847,7 +575,6 @@
     [self.popover close];
     self.playValue.stringValue = (mode == RLPPlayMode3Direct ? RLPTr(@"原音直通")
                                  : mode == RLPPlayMode3Pcm ? RLPTr(@"PCM 升频") : RLPTr(@"DSD 升频"));
-    self.presetNotes.hidden = NO;
     self.presetNotes.stringValue = RLPTr(@"正在应用…");
     NSString *path = [NSString stringWithFormat:@"/api/preset/apply?profile=%@", RLPEnc(profile)];
     __weak __typeof__(self) weakSelf = self;
@@ -857,13 +584,11 @@
         if (json && [json[@"ok"] boolValue]) {
             // notes 是后端给的决策说明（含降级原因），照实显示，不自己编"已优化"。
             NSArray *notes = [json[@"notes"] isKindOfClass:[NSArray class]] ? json[@"notes"] : @[];
-            self_.presetNotes.hidden = NO;
             self_.presetNotes.stringValue = notes.count ? [notes componentsJoinedByString:@"；"] : RLPTr(@"已应用");
             RLPToast(RLPTr(@"已应用"));
             [self_ reloadSettings];
         } else {
             NSString *err = [json[@"error"] isKindOfClass:[NSString class]] ? json[@"error"] : RLPTr(@"应用失败");
-            self_.presetNotes.hidden = NO;
             self_.presetNotes.stringValue = err;
             RLPToast(err);
         }
@@ -922,7 +647,7 @@
     ro.preferredMaxLayoutWidth = 330;
     [s addArrangedSubview:ro];
     [[ro.widthAnchor constraintEqualToConstant:330] setActive:YES];
-    [self showPopoverFrom:self.musicFolderButton withCard:s width:360 minH:150];
+    [self showPopoverFrom:self.libButton withCard:s width:360 minH:150];
 }
 
 
@@ -954,105 +679,27 @@
     }];
 }
 
-/// 设备大字值被点：弹出真实设备菜单（/api/devices），选完走既有 /api/settings 写回。
-/// 不用 NSPopUpButton 的默认外观：目标图卡面是"大字 + chevron"，popup 的蓝灰胶囊会破坏版式。
-- (void)onDeviceMenu:(id)sender {
-    NSMenu *menu = [[NSMenu alloc] initWithTitle:RLPTr(@"当前设备")];
-    NSString *cur = [self str:@"device" def:@""];
-    NSString *defName = nil;
-    for (NSDictionary *d in self.devices)
-        if ([d[@"default"] boolValue]) {
-            defName = [d[@"name"] isKindOfClass:[NSString class]] ? d[@"name"] : nil;
-            break;
-        }
-    NSString *defTitle = defName.length
-        ? [NSString stringWithFormat:@"%@（%@）", RLPTr(@"系统默认"), defName] : RLPTr(@"系统默认");
-    NSMenuItem *defItem = [menu addItemWithTitle:defTitle action:@selector(onPickDevice:) keyEquivalent:@""];
-    defItem.target = self;
-    defItem.representedObject = @"";
-    defItem.state = cur.length ? NSControlStateValueOff : NSControlStateValueOn;
-    for (NSDictionary *d in self.devices) {
-        NSString *did = [d[@"id"] isKindOfClass:[NSString class]] ? d[@"id"] : @"";
-        NSString *nm = [d[@"name"] isKindOfClass:[NSString class]] ? d[@"name"] : RLPTr(@"未知设备");
-        NSMenuItem *it = [menu addItemWithTitle:nm action:@selector(onPickDevice:) keyEquivalent:@""];
-        it.target = self;
-        it.representedObject = did;
-        it.state = [cur isEqualToString:did] ? NSControlStateValueOn : NSControlStateValueOff;
+- (void)onDeviceChanged:(NSPopUpButton *)sender {
+    const NSInteger idx = sender.indexOfSelectedItem;
+    if (idx < 0) return;
+    // 第 0 项是"系统默认"（device 空串）；其余对应 devices[idx-1]
+    NSString *devId = @"";
+    if (idx > 0 && (idx - 1) < (NSInteger)self.devices.count) {
+        NSDictionary *d = self.devices[idx - 1];
+        devId = [d[@"id"] isKindOfClass:[NSString class]] ? d[@"id"] : @"";
     }
-    if (!self.devices.count) {
-        NSMenuItem *none = [menu addItemWithTitle:RLPTr(@"读取中…") action:nil keyEquivalent:@""];
-        none.enabled = NO;
-    }
-    [menu popUpMenuPositioningItem:nil atLocation:NSMakePoint(0, NSMaxY(self.deviceValue.bounds))
-                            inView:self.deviceValue];
-}
-
-- (void)onPickDevice:(NSMenuItem *)sender {
-    NSString *devId = [sender.representedObject isKindOfClass:[NSString class]]
-        ? (NSString *)sender.representedObject : @"";
     [self postSettings:@{@"device": devId}];
 }
 
 - (void)onReloadDevices:(id)sender { [self reloadDevices]; RLPToast(RLPTr(@"已重新检测设备")); }
 
-#pragma mark 收藏（/api/fav，与专辑页、单曲页同一端点）
-
-- (void)updateFavButton {
-    RLPTheme *t = [RLPTheme current];
-    NSString *title = self.npFavOn ? RLPTr(@"已收藏") : RLPTr(@"收藏");
-    [self.npFav setTitle:title];
-    self.npFav.image = [NSImage imageWithSystemSymbolName:(self.npFavOn ? @"heart.fill" : @"heart")
-                                  accessibilityDescription:title];
-    self.npFav.contentTintColor = self.npFavOn ? t.accent : nil;
-    self.npFav.enabled = (self.currentPath.length > 0);
+- (void)onTogglePlay:(id)sender {
+    // 与播放条同一条路径：/api/pause?on=1 暂停、on=0 继续。
+    // ⚠️ 不能用 /api/play 当"继续" —— 那会从头重播当前曲目。
+    NSString *path = [NSString stringWithFormat:@"/api/pause?on=%d", self.playing ? 1 : 0];
+    RLPPostJSON(path, nil);
 }
-
-/// 收藏态回读：/api/fav/list?meta=1 里有没有当前曲目（不在 UI 里私存一份收藏表）。
-- (void)reloadFavState {
-    NSString *path = self.currentPath ?: @"";
-    if (!path.length) {
-        self.npFavOn = NO;
-        [self updateFavButton];
-        return;
-    }
-    __weak __typeof__(self) weakSelf = self;
-    [[RLPCoreClient shared] getJSON:@"/api/fav/list?meta=1" completion:^(NSDictionary * _Nullable json) {
-        __typeof__(self) self_ = weakSelf;
-        if (!self_) return;
-        if (![path isEqualToString:self_.currentPath ?: @""]) return;   // 过期回调不动新状态
-        NSArray *files = [json[@"files"] isKindOfClass:[NSArray class]] ? json[@"files"] : @[];
-        BOOL on = NO;
-        for (id it in files) {
-            NSString *p = nil;
-            if ([it isKindOfClass:[NSDictionary class]]) p = it[@"path"];
-            else if ([it isKindOfClass:[NSString class]]) p = it;
-            if ([p isEqualToString:path]) { on = YES; break; }
-        }
-        self_.npFavOn = on;
-        [self_ updateFavButton];
-    }];
-}
-
-- (void)onFav:(id)sender {
-    if (!self.currentPath.length) { RLPToast(RLPTr(@"没有正在播放的曲目")); return; }
-    const BOOL nextOn = !self.npFavOn;
-    NSString *url = [NSString stringWithFormat:@"/api/fav?file=%@&on=%d",
-                     RLPEnc(self.currentPath), nextOn ? 1 : 0];
-    __weak __typeof__(self) weakSelf = self;
-    [[RLPCoreClient shared] postJSON:url body:@"" completion:^(NSDictionary * _Nullable json) {
-        __typeof__(self) self_ = weakSelf;
-        if (!self_) return;
-        if (json && [json[@"ok"] boolValue]) {
-            self_.npFavOn = nextOn;
-            [self_ updateFavButton];
-            RLPToast(nextOn ? RLPTr(@"已收藏") : RLPTr(@"已取消收藏"));
-        } else {
-            RLPToast(nextOn ? RLPTr(@"收藏失败") : RLPTr(@"取消收藏失败"));
-        }
-    }];
-}
-
-- (void)onOpenNowPlaying:(id)sender {- (void)onOpenNowPlaying:(id)sender {
+- (void)onOpenNowPlaying:(id)sender {
     // 正在播放页由主窗口的顶栏入口承载；这里发既有通知，不新造路由。
     [[NSNotificationCenter defaultCenter] postNotificationName:@"RLPOpenNowPlayingNotification" object:nil];
 }
@@ -1065,11 +712,6 @@
 - (void)onOpenStreaming:(id)sender {
     [self.popover close];
     [[NSNotificationCenter defaultCenter] postNotificationName:@"RLPNavigateKeyNotification" object:@"streaming"];
-}
-/// 「音乐文件夹」里的浏览入口：走既有文件夹页（不新造路由）。
-- (void)onOpenFolders:(id)sender {
-    [self.popover close];
-    [[NSNotificationCenter defaultCenter] postNotificationName:@"RLPNavigateKeyNotification" object:@"folders"];
 }
 
 /// 音乐库：就地弹层选目录（NSOpenPanel），不跳设置页。
@@ -1145,33 +787,26 @@
         __typeof__(self) self_ = weakSelf;
         if (!self_) return;
         self_.devices = [json[@"devices"] isKindOfClass:[NSArray class]] ? json[@"devices"] : @[];
-        [self_ refreshDeviceSummary];
+        [self_.devicePopup removeAllItems];
+        [self_.devicePopup addItemWithTitle:RLPTr(@"系统默认")];
+        NSString *defName = nil;
+        for (NSDictionary *d in self_.devices) {
+            NSString *n = [d[@"name"] isKindOfClass:[NSString class]] ? d[@"name"] : RLPTr(@"未知设备");
+            [self_.devicePopup addItemWithTitle:n];
+            if ([d[@"default"] boolValue]) defName = n;
+        }
+        if (defName.length) [[self_.devicePopup itemAtIndex:0] setTitle:[NSString stringWithFormat:@"%@（%@）", RLPTr(@"系统默认"), defName]];
+        [self_ syncDeviceSelection];
     }];
 }
 
-/// 设备大字值 ← /api/devices + /api/settings.device（唯一真相源；UI 不写死任何设备名）。
-/// 规则：device 非空 ⟹ 找同 id 的设备名；device 为空 ⟹ /api/devices 里 default=1 的设备名；
-/// 名单还没到 ⟹ 「系统默认」（选择语义，不是设备名）。
-- (void)refreshDeviceSummary {
+- (void)syncDeviceSelection {
     NSString *cur = [self str:@"device" def:@""];
-    NSString *name = nil;
-    if (cur.length) {
-        for (NSDictionary *d in self.devices) {
-            NSString *did = [d[@"id"] isKindOfClass:[NSString class]] ? d[@"id"] : nil;
-            if ([did isEqualToString:cur]) {
-                name = [d[@"name"] isKindOfClass:[NSString class]] ? d[@"name"] : nil;
-                break;
-            }
-        }
-    } else {
-        for (NSDictionary *d in self.devices) {
-            if ([d[@"default"] boolValue]) {
-                name = [d[@"name"] isKindOfClass:[NSString class]] ? d[@"name"] : nil;
-                break;
-            }
-        }
+    if (!cur.length) { [self.devicePopup selectItemAtIndex:0]; return; }
+    for (NSInteger i = 0; i < (NSInteger)self.devices.count; ++i) {
+        if ([self.devices[i][@"id"] isEqualToString:cur]) { [self.devicePopup selectItemAtIndex:i + 1]; return; }
     }
-    [self.deviceValue setTitle:(name.length ? name : RLPTr(@"系统默认"))];
+    [self.devicePopup selectItemAtIndex:0];
 }
 
 - (void)reloadSettings {
@@ -1182,7 +817,7 @@
         // ⚠️ /api/settings 的值在 **kv** 子对象里（与设置页同一口径）。
         // 直接读顶层会全部取不到 ⟹ 静默回落默认值，界面显示与真实设置脱节。
         self_.settings = [json[@"kv"] isKindOfClass:[NSDictionary class]] ? json[@"kv"] : @{};
-        [self_ refreshDeviceSummary];
+        [self_ syncDeviceSelection];
         // 输出摘要（人话）
         NSString *bk = [self_ str:@"backend" def:@"coreaudio"];
         NSString *bkName = [bk isEqualToString:@"coreaudio-shared"] ? RLPTr(@"共享播放")
@@ -1196,11 +831,11 @@
         NSString *rate = [self_ str:@"rate" def:@"follow"];
         self_.playValue.stringValue = dsd > 0 ? RLPTr(@"DSD 升频")
             : ([rate isEqualToString:@"follow"] || !rate.length ? RLPTr(@"原音直通") : RLPTr(@"PCM 升频"));
-        // 听音风格回显：大字是档位人话，滤波真名只作 tooltip（目标图卡面只有一行大字）
+        // 听音风格回显
         NSString *f = [self_ str:@"filter" def:@""];
         NSInteger st = RLPToneStyleForFilter(f, self_.filters);
         self_.styleValue.stringValue = (st >= 0) ? RLPToneStyleName((RLPToneStyle)st) : RLPTr(@"自定义");
-        self_.styleValue.toolTip = f.length ? f : RLPTr(@"跟随默认");
+        self_.styleSub.stringValue = f.length ? f : RLPTr(@"跟随默认");
     }];
 }
 
@@ -1213,7 +848,7 @@
         NSString *f = [self_ str:@"filter" def:@""];
         NSInteger st = RLPToneStyleForFilter(f, self_.filters);
         self_.styleValue.stringValue = (st >= 0) ? RLPToneStyleName((RLPToneStyle)st) : RLPTr(@"自定义");
-        self_.styleValue.toolTip = f.length ? f : RLPTr(@"跟随默认");
+        self_.styleSub.stringValue = f.length ? f : RLPTr(@"跟随默认");
     }];
 }
 
@@ -1240,21 +875,14 @@
         if (!st) return;
         self_.playing = st.playing && !st.paused;
         NSString *path = st.currentPath ?: @"";
-        // 目标图的状态标签是「播放中」；未播放/暂停如实显示，不用假绿点冒充在播。
-        self_.npState.stringValue = path.length ? (self_.playing ? RLPTr(@"播放中") : RLPTr(@"已暂停"))
-                                                : RLPTr(@"未播放");
-        self_.npState.textColor = self_.playing ? [RLPTheme current].ok : [RLPTheme current].mut;
-        if (!path.length) {
-            self_.npFavOn = NO;
-            [self_ updateFavButton];
-        }
+        [self_.npToggle setTitle:self_.playing ? RLPTr(@"暂停") : RLPTr(@"继续播放")];
+        self_.npState.stringValue = path.length ? (self_.playing ? RLPTr(@"正在播放") : RLPTr(@"已暂停")) : RLPTr(@"未播放");
         if (![path isEqualToString:self_.currentPath ?: @""]) {
             self_.currentPath = path;
             self_.npTitle.stringValue = path.length ? path.lastPathComponent.stringByDeletingPathExtension : RLPTr(@"还没有在播放的音乐");
             self_.npSub.stringValue = path.length ? @"" : RLPTr(@"从下面的专辑挑一张开始");
             [self_ loadCoverForPath:path];
             [self_ loadMetaForPath:path];
-            [self_ reloadFavState];
         }
     }];
 }
@@ -1299,15 +927,15 @@
         NSString *artist = [json[@"artist"] isKindOfClass:[NSString class]] ? json[@"artist"] : @"";
         NSString *album = [json[@"album"] isKindOfClass:[NSString class]] ? json[@"album"] : @"";
         if (title.length) self_.npTitle.stringValue = title;
-        // 目标图副标题是「艺术家 · 专辑」（不是专辑 · 艺术家）
         NSMutableArray *p = [NSMutableArray array];
-        if (artist.length) [p addObject:artist];
         if (album.length) [p addObject:album];
+        if (artist.length) [p addObject:artist];
         self_.npSub.stringValue = [p componentsJoinedByString:@" · "];
     }];
 }
 
 - (void)reloadQueue {
+    RLPTheme *t = [RLPTheme current];
     __weak __typeof__(self) weakSelf = self;
     // 队列契约：GET /api/queue?meta=1 → {items:[路径…], metas:[{t,a,al,d}…], index}
     // （键是 items，不是 queue；读错键会永远显示"队列是空的"）
@@ -1316,19 +944,99 @@
         if (!self_) return;
         NSArray *items = [json[@"items"] isKindOfClass:[NSArray class]] ? json[@"items"] : @[];
         NSArray *metas = [json[@"metas"] isKindOfClass:[NSArray class]] ? json[@"metas"] : @[];
-        // index 是"当前在播的第几首"（0 基）。缺这个键就当作没有当前行，不臆造高亮。
-        NSInteger idx = [json[@"index"] isKindOfClass:[NSNumber class]] ? [json[@"index"] integerValue] : -1;
-        [self_ renderQueueWithItems:items metas:metas index:idx];
+        for (NSView *v in [self_.queueList.arrangedSubviews copy]) [self_.queueList removeArrangedSubview:v], [v removeFromSuperview];
+        if (!items.count) {
+            NSTextField *e = [self_ trackedLabel:RLPTr(@"队列是空的") font:t.small role:1];
+            [self_.queueList addArrangedSubview:e];
+            return;
+        }
+        NSInteger n = 0;
+        for (id it in items) {
+            if (n >= 5) break;
+            NSString *name = nil;
+            if (n < (NSInteger)metas.count && [metas[n] isKindOfClass:[NSDictionary class]]) {
+                NSString *t = [metas[n][@"t"] isKindOfClass:[NSString class]] ? metas[n][@"t"] : nil;
+                if (t.length) name = t;
+            }
+            if (!name.length) {
+                if ([it isKindOfClass:[NSString class]])
+                    name = [(NSString *)it lastPathComponent].stringByDeletingPathExtension;
+                else if ([it isKindOfClass:[NSDictionary class]]) {
+                    NSString *p = [it[@"path"] isKindOfClass:[NSString class]] ? it[@"path"] : it[@"file"];
+                    name = p.lastPathComponent.stringByDeletingPathExtension;
+                }
+            }
+            NSTextField *l = [self_ trackedLabel:[NSString stringWithFormat:@"%ld  %@", (long)(n + 1), name ?: @""] font:t.small role:0];
+            l.translatesAutoresizingMaskIntoConstraints = NO;
+            [self_.queueList addArrangedSubview:l];
+            [[l.widthAnchor constraintLessThanOrEqualToConstant:270] setActive:YES];
+            ++n;
+        }
     }];
 }
 
 - (void)reloadAlbums {
+    RLPTheme *t = [RLPTheme current];
     __weak __typeof__(self) weakSelf = self;
     [[RLPCoreClient shared] getJSON:@"/api/lib/albums" completion:^(NSDictionary * _Nullable json) {
         __typeof__(self) self_ = weakSelf;
         if (!self_) return;
         NSArray *albs = [json[@"albums"] isKindOfClass:[NSArray class]] ? json[@"albums"] : @[];
-        [self_ renderAlbums:albs];
+        for (NSView *v in [self_.albumRow.arrangedSubviews copy]) [self_.albumRow removeArrangedSubview:v], [v removeFromSuperview];
+        NSInteger n = 0;
+        for (id it in albs) {
+            if (n >= 6) break;
+            if (![it isKindOfClass:[NSDictionary class]]) continue;
+            NSString *key = [it[@"k"] isKindOfClass:[NSString class]] ? it[@"k"] : nil;
+            if (!key.length) continue;
+            // /api/lib/albums 的专辑名字段是 name（al 是队列 metas 里的字段，别混）
+            NSString *name = [it[@"name"] isKindOfClass:[NSString class]] ? it[@"name"] : nil;
+            // 封面卡：封面图 + 专辑名（点任意处进详情）。只有文字按钮不像"音乐库"。
+            NSView *cell = [[NSView alloc] initWithFrame:NSZeroRect];
+            cell.translatesAutoresizingMaskIntoConstraints = NO;
+            NSImageView *iv = [[NSImageView alloc] initWithFrame:NSZeroRect];
+            iv.imageScaling = NSImageScaleProportionallyUpOrDown;
+            iv.wantsLayer = YES;
+            iv.layer.cornerRadius = t.rSm;
+            iv.layer.masksToBounds = YES;
+            iv.layer.backgroundColor = t.bg3.CGColor;
+            iv.translatesAutoresizingMaskIntoConstraints = NO;
+            iv.identifier = [NSString stringWithFormat:@"room.albumcover.%ld", (long)n];
+            NSTextField *nm = [self_ trackedLabel:(name ?: RLPTr(@"未知专辑")) font:t.small role:0];
+            nm.translatesAutoresizingMaskIntoConstraints = NO;
+            nm.lineBreakMode = NSLineBreakByTruncatingTail;
+            NSButton *hit = [NSButton buttonWithTitle:@"" target:self_ action:@selector(onAlbumClicked:)];
+            hit.bordered = NO;
+            hit.identifier = key;
+            hit.translatesAutoresizingMaskIntoConstraints = NO;
+            hit.toolTip = name ?: @"";
+            for (NSView *v in @[iv, nm, hit]) [cell addSubview:v];
+            [NSLayoutConstraint activateConstraints:@[
+                [cell.widthAnchor constraintEqualToConstant:104],
+                [cell.heightAnchor constraintEqualToConstant:120],
+                [iv.leadingAnchor constraintEqualToAnchor:cell.leadingAnchor],
+                [iv.topAnchor constraintEqualToAnchor:cell.topAnchor],
+                [iv.widthAnchor constraintEqualToConstant:104],
+                [iv.heightAnchor constraintEqualToConstant:96],
+                [nm.leadingAnchor constraintEqualToAnchor:cell.leadingAnchor],
+                [nm.trailingAnchor constraintEqualToAnchor:cell.trailingAnchor],
+                [nm.topAnchor constraintEqualToAnchor:iv.bottomAnchor constant:4],
+                [hit.leadingAnchor constraintEqualToAnchor:cell.leadingAnchor],
+                [hit.trailingAnchor constraintEqualToAnchor:cell.trailingAnchor],
+                [hit.topAnchor constraintEqualToAnchor:cell.topAnchor],
+                [hit.bottomAnchor constraintEqualToAnchor:cell.bottomAnchor],
+            ]];
+            [self_.albumRow addArrangedSubview:cell];
+            // 封面走共享缓存（后端 /api/lib/cover?k=…），失败留占位底色，不重试不阻塞
+            [[RLPCoverLoader shared] coverForAlbumKey:key completion:^(NSImage * _Nullable image) {
+                if (image) iv.image = image;
+            }];
+            ++n;
+        }
+        if (!n) {
+            NSTextField *e = [self_ trackedLabel:RLPTr(@"还没有专辑 · 先添加音乐目录") font:t.small role:1];
+            [self_.albumRow addArrangedSubview:e];
+        }
     }];
 }
 
@@ -1337,10 +1045,10 @@
 #pragma mark - 主题
 
 /// 运行时建出来的标签登记进来：主题切换时静态清单够不着它们。
-/// role: 0=正文 1=次要文字 2=警示 3=强调（当前播放行）
+/// role: 0=正文 1=次要文字 2=警示
 - (NSTextField *)trackedLabel:(NSString *)text font:(NSFont *)font role:(NSInteger)role {
     RLPTheme *t = [RLPTheme current];
-    NSColor *c = (role == 1) ? t.mut : (role == 2 ? t.warn : (role == 3 ? t.ok : t.text));
+    NSColor *c = (role == 1) ? t.mut : (role == 2 ? t.warn : t.text);
     NSTextField *l = RLPLabel(text, font, c);
     l.tag = role;
     if (!self.dynamicLabels) self.dynamicLabels = [NSMutableArray array];
@@ -1348,55 +1056,42 @@
     return l;
 }
 
-/// 递归重刷带圆角/边框的图层：卡片底色、封面占位底色、细线。
-/// 为什么递归：专辑封面在 cell 里（stack → cell → image），静态两层遍历够不到。
-- (void)tintLayersInView:(NSView *)v cardBg:(NSColor *)cardBg coverBg:(NSColor *)coverBg line:(NSColor *)line {
-    for (NSView *s in v.subviews) {
-        if (s.wantsLayer && s.layer.cornerRadius > 0) {
-            const BOOL isCover = [s.identifier hasPrefix:@"room.albumcover"] ||
-                                 [s.identifier isEqualToString:@"room.np.cover"];
-            s.layer.backgroundColor = (isCover ? coverBg : cardBg).CGColor;
-            if (s.layer.borderWidth > 0) s.layer.borderColor = line.CGColor;
-        }
-        [self tintLayersInView:s cardBg:cardBg coverBg:coverBg line:line];
-    }
-}
-
 - (void)applyTheme {
     [super applyTheme];
     RLPTheme *t = [RLPTheme current];
-    [self tintLayersInView:self.stack
-                    cardBg:(t.isLight ? t.bg2 : t.card)
-                   coverBg:t.bg3
-                      line:t.line];
-    self.heroTitle.textColor = t.hero;
+    for (NSView *v in self.stack.arrangedSubviews) {
+        if (v.wantsLayer && v.layer.cornerRadius > 0) {
+            v.layer.backgroundColor = t.bg2.CGColor;
+            v.layer.borderColor = t.line.CGColor;
+        }
+        for (NSView *s in v.subviews) {
+            if (s.wantsLayer && s.layer.cornerRadius > 0) {
+                s.layer.backgroundColor = t.bg2.CGColor;
+                s.layer.borderColor = t.line.CGColor;
+            }
+        }
+    }
     self.npCover.layer.backgroundColor = t.bg3.CGColor;
-    if (self.libDesc) self.libDesc.textColor = t.mut;
+    self.libDesc.textColor = t.mut;
     self.presetNotes.textColor = t.mut;
-    self.npState.textColor = self.playing ? t.ok : t.mut;
+    self.styleSub.textColor = t.mut;
+    self.npState.textColor = t.mut;
     self.npSub.textColor = t.mut;
     self.npTitle.textColor = t.text;
     self.outputValue.textColor = t.text;
     self.playValue.textColor = t.text;
     self.styleValue.textColor = t.text;
-    self.deviceValue.contentTintColor = t.text;
-    for (NSImageView *iv in self.chevrons) iv.contentTintColor = t.mut;
     // 卡片小标题 / 分区标题（之前漏刷：浅色主题下它们仍是深色主题的灰，几乎看不见）
     for (NSTextField *l in @[ self.deviceCaption, self.outputCaption, self.playCaption, self.styleCaption ])
         l.textColor = t.mut;
     self.queueCaption.textColor = t.text;
     self.albumCaption.textColor = t.text;
-    for (NSView *line in self.hairlines) {
-        line.wantsLayer = YES;
-        line.layer.backgroundColor = t.hairline.CGColor;
-    }
     // 动态行（队列预览 / 专辑名 / 空态）：运行时建出来的，静态清单里没有它们。
-    // 角色记在 NSView.tag 上（0=正文 1=次要 2=警示 3=强调），不另存第二套状态。
+    // 角色记在 NSView.tag 上（0=正文 1=次要 2=警示），不另存第二套状态。
     for (NSTextField *l in self.dynamicLabels) {
-        l.textColor = (l.tag == 1) ? t.mut : (l.tag == 2 ? t.warn : (l.tag == 3 ? t.ok : t.text));
+        l.textColor = (l.tag == 1) ? t.mut : (l.tag == 2 ? t.warn : t.text);
     }
 }
-@end
 
 @end
 
