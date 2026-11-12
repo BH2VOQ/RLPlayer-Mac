@@ -197,6 +197,16 @@ static NSView *RLPSGroup(NSString *title, NSString *desc, RLPTheme *t) {
 @property (nonatomic, strong) NSButton *llmModelRefresh;
 @property (nonatomic, strong) NSTextField *llmModelMsg;
 @property (nonatomic, strong) NSTextField *llmStatus;
+// 联网检索端点（search / fetch，对齐 web SEARCH 区块）
+@property (nonatomic, strong) NSPopUpButton *searchProviderPopup;
+@property (nonatomic, strong) NSTextField *searchBase;
+@property (nonatomic, strong) NSSecureTextField *searchKey;
+@property (nonatomic, strong) NSTextField *searchStatus;
+// 接口预设下拉（只填地址，不判连通）
+@property (nonatomic, strong) NSPopUpButton *llmProviderPopup;
+// GPU 后端（/api/gpu 真实状态）
+@property (nonatomic, strong) NSPopUpButton *gpuPopup;
+@property (nonatomic, strong) NSTextField *gpuStatus;
 @end
 
 @implementation RLPSettingsViewController
@@ -597,6 +607,27 @@ static NSView *RLPSGroup(NSString *title, NSString *desc, RLPTheme *t) {
         RLPTr(@"切换后需重开窗口生效"), t)];
 
     // 分析（1.1.7.1）：播放页不再摆开关，真相源在这里（键 autoanl，与 web 版同一个）。
+    // GPU 后端（对齐 web 设置·通用页 sgroup('GPU') + /api/gpu 真实状态）。
+    // macOS 唯一 GPU 路径是 Apple Metal；可用性不写死，由 /api/gpu 的 metal/metalUsable 决定。
+    [stack addArrangedSubview:RLPSGroup(RLPTr(@"GPU"),
+        RLPTr(@"自动 = 优先 Apple Metal，不可用时自动退回纯 CPU（NEON 向量）分块 FFT，输出逐位相同"), t)];
+    self.gpuPopup = [[NSPopUpButton alloc] initWithFrame:NSZeroRect pullsDown:NO];
+    [self.gpuPopup addItemWithTitle:RLPTr(@"自动")];
+    [self.gpuPopup addItemWithTitle:RLPTr(@"Apple Metal（GPU 加速）")];
+    [self.gpuPopup addItemWithTitle:RLPTr(@"关闭（纯 CPU）")];
+    self.gpuPopup.identifier = @"gpu.vendor";
+    self.gpuPopup.target = self;
+    self.gpuPopup.action = @selector(onGpuVendor:);
+    [self.gpuPopup.widthAnchor constraintEqualToConstant:260].active = YES;
+    [stack addArrangedSubview:RLPSRow(RLPTr(@"GPU 后端"), self.gpuPopup, nil, t)];
+    self.gpuStatus = RLPLabel(@"", t.small, t.mut);
+    self.gpuStatus.identifier = @"gpu.status";
+    self.gpuStatus.maximumNumberOfLines = 2;
+    self.gpuStatus.lineBreakMode = NSLineBreakByWordWrapping;
+    [[self.gpuStatus.widthAnchor constraintEqualToConstant:560] setActive:YES];
+    [stack addArrangedSubview:self.gpuStatus];
+    [self loadGpuStatus];
+
     [stack addArrangedSubview:RLPSGroup(RLPTr(@"音频分析"),
         RLPTr(@"开启后每首本地曲目播放时自动分析一次（动态 / 音质 / 假无损）。分析是整曲解码，较吃 CPU。"), t)];
     self.autoAnlSwitch = [self switchWithAction:@selector(onSwitch:) key:@"autoanl"];
@@ -761,13 +792,31 @@ static NSView *RLPSGroup(NSString *title, NSString *desc, RLPTheme *t) {
     [stack addArrangedSubview:RLPSGroup(RLPTr(@"AI 模型端点"),
         RLPTr(@"用于资料整理与简介。密钥只在本机保存，界面永不回显明文；留空表示不修改。"), t)];
 
+    // 接口预设（对齐 web LLM_PROVIDERS / sp_llmprovider）：只负责「填地址」，
+    // 不做连通性判断 —— 能不能用由「测试连通」回答。custom 留空，绝不覆盖用户已填地址。
+    self.llmProviderPopup = [[NSPopUpButton alloc] initWithFrame:NSZeroRect pullsDown:NO];
+    for (NSString *n in @[ @"DeepSeek", @"OpenAI", @"OpenRouter",
+                           RLPTr(@"SiliconFlow（硅基流动）"), RLPTr(@"Ollama（本机）"), RLPTr(@"自定义") ])
+        [self.llmProviderPopup addItemWithTitle:n];
+    self.llmProviderPopup.identifier = @"llm.provider";
+    self.llmProviderPopup.target = self;
+    self.llmProviderPopup.action = @selector(onLlmProviderPicked:);
+    [self.llmProviderPopup.widthAnchor constraintEqualToConstant:240].active = YES;
+    [stack addArrangedSubview:RLPSRow(RLPTr(@"接口预设"), self.llmProviderPopup, nil, t)];
+
     self.llmBase = [[NSTextField alloc] initWithFrame:NSZeroRect];
     self.llmBase.placeholderString = @"https://api.deepseek.com";
+    self.llmBase.identifier = @"llm.base";
     [[self.llmBase.widthAnchor constraintEqualToConstant:320] setActive:YES];
     [stack addArrangedSubview:RLPSRow(RLPTr(@"接口地址"), self.llmBase, nil, t)];
 
     self.llmModel = [[NSTextField alloc] initWithFrame:NSZeroRect];
     self.llmModel.placeholderString = @"deepseek-chat";
+    self.llmModel.identifier = @"llm.modeltext";
+    // 手填模型也要能存（web sp_llmmodeltext 的 Enter → llmSaveModel 同口径）。
+    // 拉不到模型列表时这是唯一入口，漏了它等于"降级到手填却存不进去"。
+    self.llmModel.target = self;
+    self.llmModel.action = @selector(onLlmModelTyped:);
     [[self.llmModel.widthAnchor constraintEqualToConstant:220] setActive:YES];
     [stack addArrangedSubview:RLPSRow(RLPTr(@"模型"), self.llmModel, nil, t)];
 
@@ -799,6 +848,7 @@ static NSView *RLPSGroup(NSString *title, NSString *desc, RLPTheme *t) {
 
     self.llmKey = [[NSSecureTextField alloc] initWithFrame:NSZeroRect];
     self.llmKey.placeholderString = RLPTr(@"留空 = 保持已保存的密钥");
+    self.llmKey.identifier = @"llm.key";
     [[self.llmKey.widthAnchor constraintEqualToConstant:320] setActive:YES];
     [stack addArrangedSubview:RLPSRow(RLPTr(@"密钥"), self.llmKey, nil, t)];
 
@@ -807,17 +857,72 @@ static NSView *RLPSGroup(NSString *title, NSString *desc, RLPTheme *t) {
     llmBtns.spacing = 8;
     NSButton *save = [NSButton buttonWithTitle:RLPTr(@"保存端点") target:self action:@selector(onLlmSave:)];
     save.bezelStyle = NSBezelStyleRounded;
+    save.identifier = @"llm.save";
     NSButton *test = [NSButton buttonWithTitle:RLPTr(@"测试连通") target:self action:@selector(onLlmTest:)];
     test.bezelStyle = NSBezelStyleRounded;
+    test.identifier = @"llm.test";
+    NSButton *clearKey = [NSButton buttonWithTitle:RLPTr(@"清除密钥") target:self action:@selector(onLlmClearKey:)];
+    clearKey.bezelStyle = NSBezelStyleRounded;
+    clearKey.identifier = @"llm.clear";
     [llmBtns addArrangedSubview:save];
     [llmBtns addArrangedSubview:test];
+    [llmBtns addArrangedSubview:clearKey];
     [stack addArrangedSubview:llmBtns];
 
     self.llmStatus = RLPLabel(@"", t.small, t.mut);
     self.llmStatus.maximumNumberOfLines = 2;
     self.llmStatus.lineBreakMode = NSLineBreakByWordWrapping;
+    self.llmStatus.identifier = @"llm.status";
     [[self.llmStatus.widthAnchor constraintEqualToConstant:560] setActive:YES];
     [stack addArrangedSubview:self.llmStatus];
+
+    // ── 联网检索端点（search / fetch 一起切换，对齐 web SEARCH 区块）──
+    // 用户 2026-11-12 实测反馈：原生缺这组选项。配置存同一份 rlplayer-llm.conf 的
+    // search_* 三行，走 /api/llm 同一条 POST；Key 只存本机、界面永不回显明文。
+    [stack addArrangedSubview:RLPSGroup(RLPTr(@"联网检索端点"),
+        RLPTr(@"「AI 增强」整理资料时用的 search / fetch 端点。DeepSeek 为默认；切到 AnySearch / Tavily 后，非 DeepSeek 的 AI 接口也能联网检索。"), t)];
+
+    self.searchProviderPopup = [[NSPopUpButton alloc] initWithFrame:NSZeroRect pullsDown:NO];
+    [self.searchProviderPopup addItemWithTitle:RLPTr(@"DeepSeek（默认）")];
+    [self.searchProviderPopup addItemWithTitle:@"AnySearch"];
+    [self.searchProviderPopup addItemWithTitle:@"Tavily"];
+    self.searchProviderPopup.identifier = @"search.provider";
+    self.searchProviderPopup.target = self;
+    self.searchProviderPopup.action = @selector(onSearchProviderChanged:);
+    [self.searchProviderPopup.widthAnchor constraintEqualToConstant:240].active = YES;
+    [stack addArrangedSubview:RLPSRow(RLPTr(@"检索端点"), self.searchProviderPopup, nil, t)];
+
+    self.searchBase = [[NSTextField alloc] initWithFrame:NSZeroRect];
+    self.searchBase.placeholderString = RLPTr(@"留空 = 用该厂商默认地址");
+    self.searchBase.identifier = @"search.base";
+    [[self.searchBase.widthAnchor constraintEqualToConstant:320] setActive:YES];
+    [stack addArrangedSubview:RLPSRow(RLPTr(@"检索地址"), self.searchBase, nil, t)];
+
+    self.searchKey = [[NSSecureTextField alloc] initWithFrame:NSZeroRect];
+    self.searchKey.placeholderString = RLPTr(@"留空 = 保持已保存的检索 Key");
+    self.searchKey.identifier = @"search.key";
+    [[self.searchKey.widthAnchor constraintEqualToConstant:320] setActive:YES];
+    [stack addArrangedSubview:RLPSRow(RLPTr(@"检索 Key"), self.searchKey, nil, t)];
+
+    NSStackView *searchBtns = [[NSStackView alloc] init];
+    searchBtns.orientation = NSUserInterfaceLayoutOrientationHorizontal;
+    searchBtns.spacing = 8;
+    NSButton *sSave = [NSButton buttonWithTitle:RLPTr(@"保存端点") target:self action:@selector(onSearchSave:)];
+    sSave.bezelStyle = NSBezelStyleRounded;
+    sSave.identifier = @"search.save";
+    NSButton *sClear = [NSButton buttonWithTitle:RLPTr(@"清除检索 Key") target:self action:@selector(onSearchClearKey:)];
+    sClear.bezelStyle = NSBezelStyleRounded;
+    sClear.identifier = @"search.clear";
+    [searchBtns addArrangedSubview:sSave];
+    [searchBtns addArrangedSubview:sClear];
+    [stack addArrangedSubview:searchBtns];
+
+    self.searchStatus = RLPLabel(@"", t.small, t.mut);
+    self.searchStatus.maximumNumberOfLines = 2;
+    self.searchStatus.lineBreakMode = NSLineBreakByWordWrapping;
+    self.searchStatus.identifier = @"search.status";
+    [[self.searchStatus.widthAnchor constraintEqualToConstant:560] setActive:YES];
+    [stack addArrangedSubview:self.searchStatus];
 }
 
 #pragma mark - 均衡 / 输入（已迁移的子界面）
@@ -985,6 +1090,22 @@ static NSView *RLPSGroup(NSString *title, NSString *desc, RLPTheme *t) {
 
 - (void)onLlmModelRefresh:(id)sender { (void)sender; [self loadLlmModels:YES]; }
 
+/// 手填模型回车即保存（只发 model=，不动 base/key）。留空不写，避免把已存模型清空。
+- (void)onLlmModelTyped:(NSTextField *)sender {
+    NSString *m = [sender.stringValue stringByTrimmingCharactersInSet:
+                   [NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    if (!m.length || ![RLPCoreClient shared].started) return;
+    NSString *body = [NSString stringWithFormat:@"model=%@", RLPEnc(m)];
+    __weak __typeof__(self) weakSelf = self;
+    [[RLPCoreClient shared] postJSON:@"/api/llm" body:body completion:^(NSDictionary * _Nullable json) {
+        __typeof__(self) self_ = weakSelf;
+        if (!self_) return;
+        self_.llmStatus.stringValue = (json && [json[@"ok"] boolValue])
+            ? [NSString stringWithFormat:@"%@ %@", RLPTr(@"已保存"), m]
+            : ([json[@"error"] isKindOfClass:[NSString class]] ? json[@"error"] : RLPTr(@"保存失败"));
+    }];
+}
+
 /// 下拉选中即保存（web llmModelRender 同语义）：POST /api/llm model=…
 - (void)onLlmModelPicked:(NSPopUpButton *)sender {
     NSString *title = sender.titleOfSelectedItem;
@@ -1004,13 +1125,25 @@ static NSView *RLPSGroup(NSString *title, NSString *desc, RLPTheme *t) {
     }];
 }
 
+/// 「保存端点」= 只发 base_url（key 非空时一并发），**绝不带 model**。
+/// 用户 2026-11-12 实测故障①：旧实现每次都发 model=，而模型框可能是空/过期值
+/// ⟹ 把用户已选模型覆盖成默认。web llmSave 只发 base_url/key，模型由下拉单独保存。
+/// 故障②：旧实现发 api_key=，后端只认 key= ⟹ 密钥从未落盘 ⟹ 测试连接必然失败。
 - (void)onLlmSave:(id)sender {
+    (void)sender;
     if (![RLPCoreClient shared].started) return;
-    NSMutableString *body = [NSMutableString stringWithFormat:@"base_url=%@&model=%@",
-        RLPEnc(self.llmBase.stringValue ?: @""), RLPEnc(self.llmModel.stringValue ?: @"")];
-    // 密钥留空就不带这个键 —— 后端据此保持已存的 key（改端点不清密钥）
-    NSString *key = self.llmKey.stringValue ?: @"";
-    if (key.length) [body appendFormat:@"&api_key=%@", RLPEnc(key)];
+    NSString *base = [self.llmBase.stringValue stringByTrimmingCharactersInSet:
+                      [NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    NSString *key = [self.llmKey.stringValue stringByTrimmingCharactersInSet:
+                     [NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    NSMutableString *body = [NSMutableString string];
+    if (base.length) [body appendFormat:@"base_url=%@", RLPEnc(base)];
+    // 密钥留空就不带这个键 —— 后端据此保持已存的 key（改端点不清密钥）。
+    if (key.length) [body appendFormat:@"%@key=%@", body.length ? @"&" : @"", RLPEnc(key)];
+    if (!body.length) {
+        self.llmStatus.stringValue = RLPTr(@"先填 API 地址或 API Key；两项都空不会改动现有配置");
+        return;
+    }
     self.llmStatus.stringValue = RLPTr(@"保存中…");
     __weak __typeof__(self) weakSelf = self;
     [[RLPCoreClient shared] postJSON:@"/api/llm" body:body completion:^(NSDictionary * _Nullable json) {
@@ -1018,8 +1151,12 @@ static NSView *RLPSGroup(NSString *title, NSString *desc, RLPTheme *t) {
         if (!self_) return;
         if (json && [json[@"ok"] boolValue]) {
             self_.llmKey.stringValue = @"";   // 存完立刻清掉输入框，不留明文在界面上
-            self_.llmStatus.stringValue = RLPTr(@"已保存");
+            self_.llmStatus.stringValue = key.length ? RLPTr(@"API Key 已保存（界面只显示掩码）")
+                                                     : RLPTr(@"API 地址已保存");
+            // 端点可能换了 ⟹ 模型清单必然过期，强制重拉；再顺手测一次连通（web llmSave 同口径）。
             [self_ loadLlmConfig];
+            [self_ loadLlmModels:YES];
+            [self_ runLlmTestSilently];
         } else {
             self_.llmStatus.stringValue = [json[@"error"] isKindOfClass:[NSString class]]
                 ? json[@"error"] : RLPTr(@"保存失败");
@@ -1027,19 +1164,174 @@ static NSView *RLPSGroup(NSString *title, NSString *desc, RLPTheme *t) {
     }];
 }
 
-- (void)onLlmTest:(id)sender {
+/// 清除 API Key（web llmClear：POST clear=1）。
+- (void)onLlmClearKey:(id)sender {
+    (void)sender;
     if (![RLPCoreClient shared].started) return;
-    self.llmStatus.stringValue = RLPTr(@"正在测试…");
     __weak __typeof__(self) weakSelf = self;
-    [[RLPCoreClient shared] postJSON:@"/api/llm/test" body:nil completion:^(NSDictionary * _Nullable json) {
+    [[RLPCoreClient shared] postJSON:@"/api/llm" body:@"clear=1" completion:^(NSDictionary * _Nullable json) {
+        __typeof__(self) self_ = weakSelf;
+        if (!self_) return;
+        self_.llmStatus.stringValue = (json && [json[@"ok"] boolValue])
+            ? RLPTr(@"已清除 API Key（可随时重新填入）")
+            : ([json[@"error"] isKindOfClass:[NSString class]] ? json[@"error"] : RLPTr(@"清除失败"));
+        [self_ loadLlmConfig];
+    }];
+}
+
+#pragma mark - GPU 后端（/api/gpu）
+
+/// 下拉下标 → gpuvendor 值（与 web opt 顺序一致：auto / metal / off）。
+static NSString *RLPGpuVendorAtIndex(NSInteger i) {
+    switch (i) { case 1: return @"metal"; case 2: return @"off"; default: return @"auto"; }
+}
+static NSInteger RLPGpuIndexForVendor(NSString *v) {
+    if ([v isEqualToString:@"metal"]) return 1;
+    if ([v isEqualToString:@"off"]) return 2;
+    return 0;
+}
+
+- (void)onGpuVendor:(NSPopUpButton *)sender {
+    [self postKey:@"gpuvendor" value:RLPGpuVendorAtIndex(sender.indexOfSelectedItem)];
+    // 偏好改了，真实可用性要重读（后端会按新偏好重新判定）。
+    [self loadGpuStatus];
+}
+
+/// 读 /api/gpu 真实状态：metal=库就位、metalUsable=本机真能跑。
+/// 两者分开报，绝不把"文件在"说成"能用"（web 261024-01 #7 的教训）。
+- (void)loadGpuStatus {
+    if (![RLPCoreClient shared].started || !self.gpuStatus) return;
+    __weak __typeof__(self) weakSelf = self;
+    [[RLPCoreClient shared] getJSON:@"/api/gpu" completion:^(NSDictionary * _Nullable json) {
+        __typeof__(self) self_ = weakSelf;
+        if (!self_ || !json) return;
+        const BOOL metal = [json[@"metal"] respondsToSelector:@selector(boolValue)] && [json[@"metal"] boolValue];
+        const BOOL usable = [json[@"metalUsable"] respondsToSelector:@selector(boolValue)] && [json[@"metalUsable"] boolValue];
+        const BOOL available = [json[@"available"] respondsToSelector:@selector(boolValue)] && [json[@"available"] boolValue];
+        NSString *metalInfo = !metal ? RLPTr(@"后端库未就位")
+                            : (usable ? RLPTr(@"已就位（可用）") : RLPTr(@"已就位（本机不可用）"));
+        self_.gpuStatus.stringValue = [NSString stringWithFormat:@"%@ · Apple Metal %@",
+            available ? RLPTr(@"GPU 可用") : RLPTr(@"走 CPU（未找到可执行的 GPU 后端）"), metalInfo];
+        // Metal 项的标题带上真实状态（web 同款：能用的用真名字，不可用的说清楚）。
+        NSString *metalTitle = !metal
+            ? [RLPTr(@"Apple Metal（GPU 加速）") stringByAppendingString:RLPTr(@" · 后端库未就位")]
+            : (usable ? RLPTr(@"Apple Metal（GPU 加速）")
+                      : [RLPTr(@"Apple Metal（GPU 加速）") stringByAppendingString:RLPTr(@" · 已就位，本机未检测到可用 Metal 设备（会自动回退）")]);
+        NSMenuItem *item = [self_.gpuPopup itemAtIndex:1];
+        if (item) item.title = metalTitle;
+    }];
+}
+
+#pragma mark - 联网检索端点（search / fetch）
+
+/// 接口预设 → 地址（与 web LLM_PROVIDERS 逐项对应）。custom 返回空串 = 不覆盖用户已填。
+static NSString *RLPLlmPresetUrlAtIndex(NSInteger i) {
+    switch (i) {
+        case 0: return @"https://api.deepseek.com";
+        case 1: return @"https://api.openai.com/v1";
+        case 2: return @"https://openrouter.ai/api/v1";
+        case 3: return @"https://api.siliconflow.cn/v1";
+        case 4: return @"http://127.0.0.1:11434/v1";
+        default: return @"";   // 自定义
+    }
+}
+
+/// 选中预设只填地址，不保存、不测连通（web llmApplyProvider 同口径）。
+- (void)onLlmProviderPicked:(NSPopUpButton *)sender {
+    NSString *url = RLPLlmPresetUrlAtIndex(sender.indexOfSelectedItem);
+    if (!url.length) return;   // 自定义：绝不覆盖用户已填的地址
+    self.llmBase.stringValue = url;
+    self.llmStatus.stringValue = RLPTr(@"已填入预设地址，点「保存端点」生效");
+}
+
+/// 三个 provider 与 web SEARCH_PROVIDERS 一一对应（顺序即下标）。
+static NSString *RLPSearchProviderIdAtIndex(NSInteger i) {
+    switch (i) { case 1: return @"anysearch"; case 2: return @"tavily"; default: return @"deepseek"; }
+}
+static NSInteger RLPSearchIndexForProviderId(NSString *pid) {
+    if ([pid isEqualToString:@"anysearch"]) return 1;
+    if ([pid isEqualToString:@"tavily"]) return 2;
+    return 0;
+}
+
+- (void)onSearchProviderChanged:(id)sender {
+    (void)sender;
+    // 只切下拉不立刻落盘（与 web 一致：要点「保存端点」才写），但状态行给出提示。
+    const BOOL third = (self.searchProviderPopup.indexOfSelectedItem != 0);
+    self.searchStatus.stringValue = third
+        ? RLPTr(@"第三方检索端点与「AI 接入」的端点互不依赖；点「保存端点」生效。")
+        : RLPTr(@"DeepSeek 为默认检索端点。");
+}
+
+/// 保存检索端点：provider + base（留空发空串=清默认）+ 可选 key（留空不带=保持已存）。
+- (void)onSearchSave:(id)sender {
+    (void)sender;
+    if (![RLPCoreClient shared].started) return;
+    NSString *prov = RLPSearchProviderIdAtIndex(self.searchProviderPopup.indexOfSelectedItem);
+    NSString *base = [self.searchBase.stringValue stringByTrimmingCharactersInSet:
+                      [NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    NSString *key = [self.searchKey.stringValue stringByTrimmingCharactersInSet:
+                     [NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    NSMutableString *body = [NSMutableString stringWithFormat:@"search_provider=%@&search_base_url=%@",
+                             RLPEnc(prov), RLPEnc(base)];
+    if (key.length) [body appendFormat:@"&search_key=%@", RLPEnc(key)];
+    self.searchStatus.stringValue = RLPTr(@"保存中…");
+    __weak __typeof__(self) weakSelf = self;
+    [[RLPCoreClient shared] postJSON:@"/api/llm" body:body completion:^(NSDictionary * _Nullable json) {
         __typeof__(self) self_ = weakSelf;
         if (!self_) return;
         if (json && [json[@"ok"] boolValue]) {
-            NSString *note = [json[@"note"] isKindOfClass:[NSString class]] ? json[@"note"] : @"";
-            self_.llmStatus.stringValue = note.length ? note : RLPTr(@"连通正常");
+            self_.searchKey.stringValue = @"";   // 明文绝不留在界面上
+            self_.searchStatus.stringValue = RLPTr(@"检索端点已保存");
+            [self_ loadLlmConfig];
         } else {
-            self_.llmStatus.stringValue = [json[@"error"] isKindOfClass:[NSString class]]
-                ? json[@"error"] : RLPTr(@"测试失败");
+            self_.searchStatus.stringValue = [json[@"error"] isKindOfClass:[NSString class]]
+                ? json[@"error"] : RLPTr(@"保存失败");
+        }
+    }];
+}
+
+/// 清除检索 Key（web searchClear：POST search_key_clear=1，与清 LLM key 分开）。
+- (void)onSearchClearKey:(id)sender {
+    (void)sender;
+    if (![RLPCoreClient shared].started) return;
+    __weak __typeof__(self) weakSelf = self;
+    [[RLPCoreClient shared] postJSON:@"/api/llm" body:@"search_key_clear=1"
+                          completion:^(NSDictionary * _Nullable json) {
+        __typeof__(self) self_ = weakSelf;
+        if (!self_) return;
+        self_.searchStatus.stringValue = (json && [json[@"ok"] boolValue])
+            ? RLPTr(@"已清除检索 Key")
+            : ([json[@"error"] isKindOfClass:[NSString class]] ? json[@"error"] : RLPTr(@"清除失败"));
+        [self_ loadLlmConfig];
+    }];
+}
+
+/// 测试连接：GET /api/llm/test（web llmTest 同口径；该端点在 GET 白名单里）。
+/// 成功要报出模型与耗时，失败要报后端原因 —— 不能只说"连通正常"。
+- (void)onLlmTest:(id)sender {
+    (void)sender;
+    if (![RLPCoreClient shared].started) return;
+    self.llmStatus.stringValue = RLPTr(@"正在测试…");
+    [self runLlmTestSilently];
+}
+
+/// 真正发测试请求并把结果写进状态行。保存端点成功后也会调它（web llmSave 顺手测一次）。
+- (void)runLlmTestSilently {
+    if (![RLPCoreClient shared].started) return;
+    __weak __typeof__(self) weakSelf = self;
+    [[RLPCoreClient shared] getJSON:@"/api/llm/test" completion:^(NSDictionary * _Nullable json) {
+        __typeof__(self) self_ = weakSelf;
+        if (!self_) return;
+        if (json && [json[@"ok"] boolValue]) {
+            NSString *model = [json[@"model"] isKindOfClass:[NSString class]] ? json[@"model"] : @"";
+            const NSInteger ms = [json[@"latencyMs"] respondsToSelector:@selector(integerValue)]
+                               ? [json[@"latencyMs"] integerValue] : 0;
+            self_.llmStatus.stringValue = [NSString stringWithFormat:
+                RLPTr(@"连接成功：模型 %@，耗时 %ld ms（key 有效）"), model, (long)ms];
+        } else {
+            NSString *err = [json[@"error"] isKindOfClass:[NSString class]] ? json[@"error"] : RLPTr(@"未知错误");
+            self_.llmStatus.stringValue = [RLPTr(@"连接失败：") stringByAppendingString:err];
         }
     }];
 }
@@ -1058,6 +1350,21 @@ static NSView *RLPSGroup(NSString *title, NSString *desc, RLPTheme *t) {
         self_.llmStatus.stringValue = configured
             ? [NSString stringWithFormat:@"%@ %@", RLPTr(@"已配置密钥"), masked]
             : RLPTr(@"尚未配置密钥");
+        // 联网检索端点状态（同一回包的 searchProvider / searchBaseUrl / searchMasked）。
+        // 只覆盖响应里真有的字段，缺字段不当成清空（web searchRender 同口径）。
+        if ([json[@"searchProvider"] isKindOfClass:[NSString class]]) {
+            [self_.searchProviderPopup selectItemAtIndex:
+                RLPSearchIndexForProviderId(json[@"searchProvider"])];
+        }
+        if ([json[@"searchBaseUrl"] isKindOfClass:[NSString class]] &&
+            !self_.searchBase.stringValue.length) {
+            self_.searchBase.stringValue = json[@"searchBaseUrl"];
+        }
+        NSString *sMasked = [json[@"searchMasked"] isKindOfClass:[NSString class]] ? json[@"searchMasked"] : @"";
+        NSString *provName = self_.searchProviderPopup.titleOfSelectedItem ?: @"DeepSeek";
+        self_.searchStatus.stringValue = sMasked.length
+            ? [NSString stringWithFormat:@"%@ · Key %@", provName, sMasked]
+            : provName;
         // 进页顺带拉一次模型列表（web llmModelsLoad(false) 同口径）。
         [self_ loadLlmModels:NO];
     }];
@@ -1313,6 +1620,9 @@ static NSView *RLPSGroup(NSString *title, NSString *desc, RLPTheme *t) {
         [self_ applyKV:kv toPopup:self_.modFamilyPopup key:@"modfamily"];
         [self_ applyKV:kv toPopup:self_.modOrderPopup key:@"modorder"];
         [self_ applyKV:kv toPopup:self_.inBackendPopup key:@"inbackend"];
+        // GPU 后端偏好回填（值 auto/metal/off → 下拉下标）。
+        if ([kv[@"gpuvendor"] isKindOfClass:[NSString class]])
+            [self_.gpuPopup selectItemAtIndex:RLPGpuIndexForVendor(kv[@"gpuvendor"])];
         [self_ applyKV:kv toPopup:self_.inDevicePopup key:@"indev"];
 
         id vol = kv[@"volume"];

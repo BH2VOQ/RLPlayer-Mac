@@ -463,6 +463,38 @@ if(APPLE)
   add_test(NAME remove_dir COMMAND test_remove_dir)
   set_tests_properties(remove_dir PROPERTIES TIMEOUT 120)
 
+  # 2026-11-12：AI 接入 / 联网检索端点真链路判据（用户实测报的两个真故障）。
+  # ① 保存端点把模型重置成默认（原生多发 model=，web 只发 base_url/key）；
+  # ② 测试连接失灵（原生发 api_key=，后端只认 key= ⟹ 密钥从未落盘）；
+  # ③ fetch/search 端点选项缺失（search_provider/search_base_url/search_key）。
+  # 纪律：隔离目录 + backend=null，**不连外网**（只验配置落盘与读回）。
+  add_executable(test_llm_endpoint tests/test_llm_endpoint.mm
+    tools/native_ui/RLPSettingsViewController.mm
+    tools/native_ui/RLPServersView.mm
+    tools/native_ui/RLPMetaSourcesView.mm tools/native_ui/RLPLibStatsView.mm
+    tools/native_ui/RLPEqualizerView.mm tools/native_ui/RLPInputView.mm
+    tools/native_ui/RLPCastView.mm tools/native_ui/RLPCalibrationView.mm
+    tools/native_ui/RLPUpdateWindowController.mm tools/native_ui/RLPFeedbackWindowController.mm
+    tools/native_ui/RLPPageViewController.mm tools/native_ui/RLPCoreClient.mm
+    tools/native_ui/RLPSupport.mm tools/native_ui/RLPTheme.mm
+    tools/native_ui/RLPNativeI18n.mm tools/mac_update.mm)
+  set_source_files_properties(tests/test_llm_endpoint.mm
+    tools/native_ui/RLPSettingsViewController.mm tools/native_ui/RLPServersView.mm
+    tools/native_ui/RLPMetaSourcesView.mm tools/native_ui/RLPLibStatsView.mm
+    tools/native_ui/RLPEqualizerView.mm tools/native_ui/RLPInputView.mm
+    tools/native_ui/RLPCastView.mm tools/native_ui/RLPCalibrationView.mm
+    tools/native_ui/RLPUpdateWindowController.mm tools/native_ui/RLPFeedbackWindowController.mm
+    tools/native_ui/RLPPageViewController.mm tools/native_ui/RLPCoreClient.mm
+    tools/native_ui/RLPSupport.mm tools/native_ui/RLPTheme.mm
+    tools/native_ui/RLPNativeI18n.mm tools/mac_update.mm
+    PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
+  target_include_directories(test_llm_endpoint PRIVATE
+    ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tools ${CMAKE_SOURCE_DIR}/tools/native_ui)
+  target_link_libraries(test_llm_endpoint PRIVATE rlapp_core
+    "-framework AppKit" "-framework Security")
+  add_test(NAME llm_endpoint COMMAND test_llm_endpoint)
+  set_tests_properties(llm_endpoint PROPERTIES TIMEOUT 180)
+
   # 2026-11-11：曲目右键菜单完整性（对齐 web trackActionMenu 四项核心动作）。
   # 触发原因：原生曲目页只有两项、专辑详情完全没有右键菜单、队列只有两项。
   # 2026-11-12：歌单页曲目表也接共享菜单（T14），故把歌单页与基类编进本测试。
