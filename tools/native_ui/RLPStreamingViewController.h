@@ -3,4 +3,6 @@
 #import "RLPPageViewController.h"
 
 @interface RLPStreamingViewController : RLPPageViewController
+/// 未配置服务器时的整页空态卡是否可见（运行时判据用）。
+@property (nonatomic, readonly) BOOL emptyStateVisible;
 @end

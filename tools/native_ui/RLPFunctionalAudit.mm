@@ -588,6 +588,49 @@ int RLPRunFunctionalAudit(NSString *outDir) {
              [NSString stringWithUTF8String:r.file]], CGSizeMake(1180, 760));
     }
 
+    // ---- ②d 流媒体未配置时必须有整页空态卡（web loadRemote err 分支）----
+    // 旧实现只弹一个 toast，内容区留白：用户不知道下一步做什么，也不知道支持哪些协议。
+    {
+        [wc.sidebar selectKey:@"streaming"];
+        Pump(0.9);
+        RLPStreamingViewController *svc = [wc.currentContent isKindOfClass:[RLPStreamingViewController class]]
+                         ? (RLPStreamingViewController *)wc.currentContent : nil;
+        CK(svc != nil, "能进流媒体页", NSStringFromClass(wc.currentContent.class));
+        if (svc) {
+            CK(svc.emptyStateVisible, "未配置服务器时显示整页空态卡（不是只弹 toast）", @"emptyState hidden");
+            NSMutableArray<NSView *> *rv = [NSMutableArray array];
+            CollectAllViews(svc.view, rv);
+            NSMutableDictionary *rById = [NSMutableDictionary dictionary];
+            for (NSView *v in rv) if (v.identifier.length) rById[v.identifier] = v;
+            NSTextField *rt = rById[@"remote.empty.title"];
+            NSTextField *rh = rById[@"remote.empty.hint"];
+            CK(rt != nil && !rt.hidden && rt.stringValue.length > 0,
+               "空态卡有标题（web：还没有可浏览的流媒体服务器）", rt ? rt.stringValue : @"缺标题");
+            CK(rh != nil && [rh.stringValue containsString:@"Navidrome"],
+               "空态卡说明写了支持的协议与下一步（web 同一段）", rh ? rh.stringValue : @"缺说明");
+            NSButton *go = (NSButton *)rById[@"remote.empty.goset"];
+            NSButton *retry = (NSButton *)rById[@"remote.empty.retry"];
+            CK(go != nil && go.action != NULL, "空态卡有『去设置里配置』按钮", go ? NSStringFromSelector(go.action) : @"缺");
+            CK(retry != nil && retry.action != NULL, "空态卡有『重试』按钮", retry ? NSStringFromSelector(retry.action) : @"缺");
+            // 空态卡本体的证据截图（必须在点按钮**之前**拍：点完就跳到设置页了）
+            CK(Snap(wc.window.contentView, [outDir stringByAppendingPathComponent:@"06b-streaming-empty.png"],
+                    CGSizeMake(1180, 760)), "流媒体空态卡截图已落盘", outDir);
+            // 点「去设置里配置」→ 真的切到设置页的「流媒体」页签（web remoteGoSet 同语义）
+            [go performClick:nil];
+            Pump(0.8);
+            CK([wc.currentContent isKindOfClass:[RLPSettingsViewController class]],
+               "点『去设置里配置』进入设置页", NSStringFromClass(wc.currentContent.class));
+            if ([wc.currentContent isKindOfClass:[RLPSettingsViewController class]]) {
+                RLPSettingsViewController *set = (RLPSettingsViewController *)wc.currentContent;
+                NSString *pane = [set currentPaneKey];
+                CK([pane isEqual:@"stream"],
+                   "设置页落在『流媒体』页签", [NSString stringWithFormat:@"pane=%@", pane ?: @"nil"]);
+                CK(Snap(wc.window.contentView, [outDir stringByAppendingPathComponent:@"06c-settings-stream.png"],
+                        CGSizeMake(1180, 760)), "设置·流媒体页截图已落盘", outDir);
+            }
+        }
+    }
+
     // ---- ③a 空表页不许出现横向灰条（NSTableView 交替行底色在 0 行时的副作用）----
     // web 的队列/收藏都是纯背景 + 居中空态；交替色一开，空表区域会被铺成一屏条带
     // （2026-11-13 队列页截图里 8 条灰带就是这么来的，用户会当成"页面坏掉"）。

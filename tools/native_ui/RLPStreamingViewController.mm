@@ -210,6 +210,9 @@
     NSArray<NSDictionary *> *_items;
     NSUInteger _requestSeq;
     BOOL _gridMode;
+    // 未配置服务器时的整页空态卡（web loadRemote 的 err 分支：标题 + 说明 + 去设置 + 重试）。
+    NSView *_emptyCard;
+    NSTextField *_emptyHint;
 }
 @end
 
@@ -296,6 +299,52 @@
     _gridScroll.translatesAutoresizingMaskIntoConstraints = NO;
     [self.contentView addSubview:_gridScroll];
 
+    // ---- 未配置服务器的空态卡（web：'还没有可浏览的流媒体服务器' + 说明 + 去设置里配置/重试）----
+    _emptyCard = [[NSView alloc] initWithFrame:NSZeroRect];
+    _emptyCard.identifier = @"remote.empty";
+    _emptyCard.wantsLayer = YES;
+    _emptyCard.hidden = YES;
+    _emptyCard.translatesAutoresizingMaskIntoConstraints = NO;
+    [self.contentView addSubview:_emptyCard];
+    {
+        NSTextField *title = RLPLabel(RLPTr(@"还没有可浏览的流媒体服务器"),
+                                      [NSFont systemFontOfSize:14 weight:NSFontWeightSemibold],
+                                      RLPTheme.current.text);
+        title.identifier = @"remote.empty.title";
+        title.translatesAutoresizingMaskIntoConstraints = NO;
+        NSTextField *hint = RLPLabel(@"", [NSFont systemFontOfSize:12.5], RLPTheme.current.mut);
+        hint.identifier = @"remote.empty.hint";
+        hint.maximumNumberOfLines = 0;
+        hint.lineBreakMode = NSLineBreakByWordWrapping;
+        hint.translatesAutoresizingMaskIntoConstraints = NO;
+        NSButton *go = [NSButton buttonWithTitle:RLPTr(@"去设置里配置") target:self action:@selector(onGoConfigureServer:)];
+        go.bezelStyle = NSBezelStyleRounded;
+        go.identifier = @"remote.empty.goset";
+        go.translatesAutoresizingMaskIntoConstraints = NO;
+        NSButton *retry = [NSButton buttonWithTitle:RLPTr(@"重试") target:self action:@selector(onRetryRemote:)];
+        retry.bezelStyle = NSBezelStyleRounded;
+        retry.identifier = @"remote.empty.retry";
+        retry.translatesAutoresizingMaskIntoConstraints = NO;
+        for (NSView *v in @[title, hint, go, retry]) [_emptyCard addSubview:v];
+        _emptyHint = hint;
+        [NSLayoutConstraint activateConstraints:@[
+            [title.leadingAnchor constraintEqualToAnchor:_emptyCard.leadingAnchor constant:26],
+            [title.trailingAnchor constraintEqualToAnchor:_emptyCard.trailingAnchor constant:-26],
+            [title.topAnchor constraintEqualToAnchor:_emptyCard.topAnchor constant:24],
+            [hint.leadingAnchor constraintEqualToAnchor:title.leadingAnchor],
+            [hint.trailingAnchor constraintEqualToAnchor:title.trailingAnchor],
+            [hint.topAnchor constraintEqualToAnchor:title.bottomAnchor constant:8],
+            [go.leadingAnchor constraintEqualToAnchor:hint.leadingAnchor],
+            [go.topAnchor constraintEqualToAnchor:hint.bottomAnchor constant:14],
+            [retry.leadingAnchor constraintEqualToAnchor:go.trailingAnchor constant:8],
+            [retry.centerYAnchor constraintEqualToAnchor:go.centerYAnchor],
+            [_emptyCard.bottomAnchor constraintEqualToAnchor:go.bottomAnchor constant:20],
+        ]];
+    }
+    [self.contentView addConstraint:[_emptyCard.widthAnchor constraintEqualToConstant:560]];
+    [self.contentView addConstraint:[_emptyCard.centerXAnchor constraintEqualToAnchor:self.contentView.centerXAnchor]];
+    [self.contentView addConstraint:[_emptyCard.topAnchor constraintEqualToAnchor:toolbar.bottomAnchor constant:40]];
+
     [NSLayoutConstraint activateConstraints:@[
         [toolbar.leadingAnchor constraintEqualToAnchor:self.contentView.leadingAnchor constant:16],
         [toolbar.trailingAnchor constraintLessThanOrEqualToAnchor:self.contentView.trailingAnchor constant:-16],
@@ -310,6 +359,32 @@
         [_gridScroll.bottomAnchor constraintEqualToAnchor:self.contentView.bottomAnchor constant:-12],
     ]];
     [self applyViewMode];
+}
+
+/// web 的空态卡：未配置时整页给「还没有可浏览的流媒体服务器」+ 说明 + 去设置 + 重试。
+/// 旧实现只弹一个 toast、内容区留白 —— 用户看不出下一步该做什么（评审 #7 在 web 侧修过同样的问题）。
+- (void)showEmptyStateForConfigured:(BOOL)configured reason:(NSString *)reason {
+    _emptyCard.hidden = configured;
+    _gridScroll.hidden = !configured || !_gridMode;
+    _listScroll.hidden = !configured || _gridMode;
+    if (configured) return;
+    _emptyHint.stringValue = [NSString stringWithFormat:@"%@\n%@",
+        reason.length ? reason : RLPTr(@"还没有流媒体服务器"),
+        RLPTr(@"支持 Navidrome / Subsonic / Emby（只取原始文件，不转码）。先在「设置 → 流媒体」添加并启用一台服务器，保存后回到这里即可浏览。")];
+}
+
+/// 判据入口：空态卡当前是否可见（运行时探针用，不改业务状态）。
+- (BOOL)emptyStateVisible { return _emptyCard != nil && !_emptyCard.hidden; }
+
+- (void)onGoConfigureServer:(id)sender {
+    (void)sender;
+    [[NSNotificationCenter defaultCenter] postNotificationName:@"RLPOpenSettingsPaneNotification"
+                                                        object:@"stream"];
+}
+
+- (void)onRetryRemote:(id)sender {
+    (void)sender;
+    [self reloadData];
 }
 
 - (void)applyViewMode {
@@ -350,9 +425,10 @@
             self->_items = nil;
             [self reloadItems];
             [self setSubtitle:RLPTr(@"未配置服务器")];
-            RLPToast(RLPTr(@"请在「设置 → 流媒体」中添加服务器"));
+            [self showEmptyStateForConfigured:NO reason:RLPTr(@"还没有流媒体服务器")];
             return;
         }
+        [self showEmptyStateForConfigured:YES reason:@""];
 
         [self browseId:@""];
     }];
