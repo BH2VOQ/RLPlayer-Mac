@@ -205,6 +205,7 @@ if(APPLE)
     tools/native_ui/RLPRecentViewController.mm
     tools/native_ui/RLPFavoritesViewController.mm
     tools/native_ui/RLPSettingsViewController.mm
+    tools/native_ui/RLPSettingsLayout.mm
     tools/native_ui/RLPNowPlayingViewController.mm tools/native_ui/RLPWorksViewController.mm
     tools/native_ui/RLPUpdateWindowController.mm
     tools/native_ui/RLPStreamingViewController.mm
@@ -221,6 +222,8 @@ if(APPLE)
     tools/native_ui/RLPKnowledgeView.mm
     tools/native_ui/RLPFunctionalAudit.mm
     tools/native_ui/RLPAnalysisSummary.mm
+    tools/native_ui/RLPLyrics.mm tools/native_ui/RLPRightDrawer.mm
+    tools/native_ui/RLPSettingsLayout.mm
     tools/native_ui/RLPListeningRoom.mm
     tools/native_ui/RLPTrackActions.mm
     tools/native_ui/RLPWorkbench.mm
@@ -240,11 +243,14 @@ if(APPLE)
     tools/native_ui/RLPFoldersViewController.mm tools/native_ui/RLPQueueViewController.mm
     tools/native_ui/RLPRecentViewController.mm tools/native_ui/RLPFavoritesViewController.mm
     tools/native_ui/RLPSettingsViewController.mm tools/native_ui/RLPNowPlayingViewController.mm
+    tools/native_ui/RLPSettingsLayout.mm
     tools/native_ui/RLPWorksViewController.mm
     tools/native_ui/RLPUpdateWindowController.mm
     tools/native_ui/RLPStreamingViewController.mm tools/native_ui/RLPQuickStartViewController.mm
     tools/native_ui/RLPPlaylistsViewController.mm tools/native_ui/RLPEqualizerView.mm
     tools/native_ui/RLPInputView.mm tools/native_ui/RLPCastView.mm
+    tools/native_ui/RLPLyrics.mm tools/native_ui/RLPRightDrawer.mm
+    tools/native_ui/RLPSettingsLayout.mm
     tools/native_ui/RLPCalibrationView.mm tools/native_ui/RLPServersView.mm
     tools/native_ui/RLPMetaSourcesView.mm tools/native_ui/RLPLibStatsView.mm
     tools/native_ui/RLPRemoveDir.mm
@@ -289,6 +295,12 @@ if(APPLE)
     add_test(NAME native_ui_parity
              COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/native_ui/parity_scan.py --check)
     set_tests_properties(native_ui_parity PROPERTIES TIMEOUT 120)
+    # 2026-11-12：主题令牌逐值核对 web CSS（色值/圆角/侧栏宽）。
+    # 上一轮只验"identifier 存在"，验不出"dark 底色是墨绿而 web 是近黑"这类真偏差。
+    add_test(NAME native_ui_theme
+             COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/native_ui/theme_parity.py
+                     --bin $<TARGET_FILE:rlplayer_native> --check)
+    set_tests_properties(native_ui_theme PROPERTIES TIMEOUT 120)
 
   # 2026-11-12：设置键「能读能写」的真核心判据。
   # 控件在界面上 ≠ 值能落盘：/api/settings 是白名单 + 合并写，白名单外的键被**静默丢弃**
@@ -304,6 +316,17 @@ if(APPLE)
     "-framework AppKit" "-framework Security")
   add_test(NAME native_settings_keys COMMAND test_native_settings_keys)
   set_tests_properties(native_settings_keys PROPERTIES TIMEOUT 180)
+
+  # 2026-11-12：LRC 解析必须与 web parseLrc 逐条一致（offset 量纲/多时间戳/纯文本 t=-1）。
+  # 纯函数判据，不启核心、不联网、不出声。
+  add_executable(test_native_lyrics tests/test_native_lyrics.mm
+    tools/native_ui/RLPLyrics.mm)
+  set_source_files_properties(tests/test_native_lyrics.mm
+    tools/native_ui/RLPLyrics.mm PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
+  target_include_directories(test_native_lyrics PRIVATE ${CMAKE_SOURCE_DIR}/tools/native_ui)
+  target_link_libraries(test_native_lyrics PRIVATE "-framework Foundation")
+  add_test(NAME native_lyrics COMMAND test_native_lyrics)
+  set_tests_properties(native_lyrics PROPERTIES TIMEOUT 60)
   endif()
 
   # 2026-11-11（1.1.7.1）：播放页音频分析「一行」的判据。
@@ -426,6 +449,7 @@ if(APPLE)
     tools/native_ui/RLPServersView.mm
     tools/native_ui/RLPMetaSourcesView.mm tools/native_ui/RLPLibStatsView.mm
     tools/native_ui/RLPSettingsViewController.mm
+    tools/native_ui/RLPSettingsLayout.mm
     tools/native_ui/RLPEqualizerView.mm
     tools/native_ui/RLPInputView.mm
     tools/native_ui/RLPCastView.mm
@@ -442,6 +466,7 @@ if(APPLE)
     tools/native_ui/RLPServersView.mm tools/native_ui/RLPMetaSourcesView.mm
     tools/native_ui/RLPLibStatsView.mm
     tools/native_ui/RLPSettingsViewController.mm
+    tools/native_ui/RLPSettingsLayout.mm
     tools/native_ui/RLPEqualizerView.mm tools/native_ui/RLPInputView.mm
     tools/native_ui/RLPCastView.mm tools/native_ui/RLPCalibrationView.mm
     tools/native_ui/RLPUpdateWindowController.mm tools/native_ui/RLPFeedbackWindowController.mm
@@ -496,6 +521,7 @@ if(APPLE)
   # 纪律：隔离目录 + backend=null，**不连外网**（只验配置落盘与读回）。
   add_executable(test_llm_endpoint tests/test_llm_endpoint.mm
     tools/native_ui/RLPSettingsViewController.mm
+    tools/native_ui/RLPSettingsLayout.mm
     tools/native_ui/RLPServersView.mm
     tools/native_ui/RLPMetaSourcesView.mm tools/native_ui/RLPLibStatsView.mm
     tools/native_ui/RLPEqualizerView.mm tools/native_ui/RLPInputView.mm
@@ -506,6 +532,7 @@ if(APPLE)
     tools/native_ui/RLPNativeI18n.mm tools/mac_update.mm)
   set_source_files_properties(tests/test_llm_endpoint.mm
     tools/native_ui/RLPSettingsViewController.mm tools/native_ui/RLPServersView.mm
+    tools/native_ui/RLPSettingsLayout.mm
     tools/native_ui/RLPMetaSourcesView.mm tools/native_ui/RLPLibStatsView.mm
     tools/native_ui/RLPEqualizerView.mm tools/native_ui/RLPInputView.mm
     tools/native_ui/RLPCastView.mm tools/native_ui/RLPCalibrationView.mm

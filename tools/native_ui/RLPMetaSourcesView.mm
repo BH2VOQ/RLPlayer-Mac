@@ -23,6 +23,7 @@
 
 @interface RLPMetaSourcesView ()
 @property (nonatomic, strong) NSStackView *listStack;
+@property (nonatomic, strong) NSStackView *rootStack;
 @property (nonatomic, strong) NSButton *resetBtn;
 @property (nonatomic, strong) NSTextField *msg;
 @property (nonatomic, strong) NSMutableArray<RLPMetaSource *> *sources;   // 按当前优先级顺序
@@ -92,7 +93,24 @@
     self.msg.lineBreakMode = NSLineBreakByWordWrapping;
     [[self.msg.widthAnchor constraintEqualToConstant:520] setActive:YES];
     [root addArrangedSubview:self.msg];
+    self.rootStack = root;
 }
+
+/// 内容高度由内部 stack 决定：外层（设置卡片网格）按 fittingSize 给高度，
+/// 没有这个就只会拿到 0 → 回退成一个矮桩，把数据源行裁掉（实测过的真故障）。
+- (NSSize)intrinsicContentSize {
+    // 绝不在这里调 layoutSubtreeIfNeeded / fittingSize：AppKit 在**约束求解过程中**
+    // 会问 intrinsicContentSize，此时再触发布局就会重入求解器 ⟹ 崩溃
+    // （实测 test_servers_view S9 段 exit 139）。
+    // 改为按行数算：标题行 28 + 间距 8 + N×(行高 40 + 间距 6) + 消息行 16。
+    const NSInteger n = (NSInteger)self.sources.count;
+    CGFloat h = 28 + 8;
+    if (n > 0) h += n * 40 + (n - 1) * 6;
+    h += 8 + 16;
+    return NSMakeSize(NSViewNoIntrinsicMetric, MAX(40, h));
+}
+
+- (void)invalidateIntrinsic { [self invalidateIntrinsicContentSize]; }
 
 #pragma mark - 数据
 
@@ -218,6 +236,8 @@
         [self.listStack addArrangedSubview:row];
         [row.widthAnchor constraintEqualToAnchor:self.listStack.widthAnchor].active = YES;
     }
+    // 行数变了 ⟹ 通知外层重算高度（设置卡片据此长高，不再裁行）
+    [self invalidateIntrinsicContentSize];
 }
 
 #pragma mark - 动作

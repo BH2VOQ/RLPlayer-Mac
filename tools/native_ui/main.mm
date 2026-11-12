@@ -13,6 +13,7 @@
 #import "RLPAppDelegate.h"
 #import "RLPCoreClient.h"
 #import "RLPFunctionalAudit.h"
+#import "RLPTheme.h"
 
 #include <cstdio>
 #include <cstring>
@@ -71,6 +72,21 @@ int main(int argc, const char *argv[]) {
                 auditDir = (i + 1 < argc && argv[i + 1][0] != '-')
                     ? [NSString stringWithUTF8String:argv[++i]]
                     : [NSTemporaryDirectory() stringByAppendingPathComponent:@"rlp-native-audit"];
+            }
+        }
+        // --dump-theme <apple|classic> <dark|light>：把主题令牌以 JSON 打到 stdout。
+        // 用途：tools/native_ui/theme_parity.py 逐 token 与 web 的 CSS 值比对。
+        // 为什么要有这个出口：色值对不对不能靠人眼看截图，必须能机械核对。
+        for (int i = 1; i < argc; ++i) {
+            if (std::strcmp(argv[i], "--dump-theme") == 0 && i + 2 < argc) {
+                [RLPTheme setUiStyle:[NSString stringWithUTF8String:argv[i + 1]]];
+                [RLPTheme setThemeName:[NSString stringWithUTF8String:argv[i + 2]]];
+                NSDictionary *dump = [[RLPTheme current] tokenDump];
+                NSData *j = [NSJSONSerialization dataWithJSONObject:dump
+                    options:NSJSONWritingSortedKeys error:nil];
+                if (j) fwrite(j.bytes, 1, j.length, stdout);
+                printf("\n");
+                return 0;
             }
         }
         if (selftest) return RLPAppDelegateRunSelfTest();

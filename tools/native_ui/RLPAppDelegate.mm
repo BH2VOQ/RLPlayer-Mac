@@ -63,6 +63,10 @@ static void STCheck(BOOL ok, const char *what, NSString *detail) {
     // "设置里显示浅色、主页却还是黑的"（用户实测反馈）。
     NSString *savedTheme = [[NSUserDefaults standardUserDefaults] stringForKey:@"RLPThemeName"];
     [RLPTheme setThemeName:savedTheme.length ? savedTheme : [RLPTheme themeName]];
+    // 界面风格同理：classic 换的是整套令牌，必须在建窗口**之前**恢复，
+    // 否则窗口按 apple 的 60px 顶栏建好，之后再切会闪一下。
+    NSString *savedStyle = [[NSUserDefaults standardUserDefaults] stringForKey:@"RLPUiStyle"];
+    [RLPTheme setUiStyle:savedStyle.length ? savedStyle : [RLPTheme uiStyle]];
     RLPTheme *t0 = [RLPTheme current];
     NSApp.appearance = [NSAppearance appearanceNamed:t0.isLight ? NSAppearanceNameAqua
                                                                 : NSAppearanceNameDarkAqua];

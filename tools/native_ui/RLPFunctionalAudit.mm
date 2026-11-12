@@ -34,6 +34,8 @@
 #import "RLPFoldersViewController.h"
 #import "RLPArtistsViewController.h"
 #import "RLPPlaybackBarView.h"
+#import "RLPRightDrawer.h"
+#import "RLPLyrics.h"
 #import "RLPSupport.h"
 #import "RLPTheme.h"
 
@@ -377,6 +379,42 @@ int RLPRunFunctionalAudit(NSString *outDir) {
             NSString *fn = [NSString stringWithFormat:@"20-settings-%s.png", k];
             Snap(wc.window.contentView, [outDir stringByAppendingPathComponent:fn], CGSizeMake(1180, 760));
         }
+        // 元数据页的数据源行是**异步**到达的（/api/providers）。
+        // 截图必须等内容落定后再拍，否则拍到的是"只有一行"的中间态 —— 那不是缺陷，
+        // 但也不能拿中间态当验收证据。这里显式等到行数稳定。
+        [sv selectPane:@"meta"];
+        NSInteger lastRows = -1;
+        for (int spin = 0; spin < 20; ++spin) {
+            Pump(0.25);
+            NSMutableArray<NSView *> *mv2 = [NSMutableArray array];
+            CollectAllViews(sv.view, mv2);
+            NSInteger rows = 0;
+            for (NSView *v in mv2)
+                if ([v.identifier hasPrefix:@"sp_metasrcrow_"]) ++rows;
+            if (rows > 0 && rows == lastRows) break;
+            lastRows = rows;
+        }
+        {
+            NSMutableArray<NSView *> *mv3 = [NSMutableArray array];
+            CollectAllViews(sv.view, mv3);
+            NSInteger rows = 0;
+            NSView *list = nil;
+            for (NSView *v in mv3) {
+                if ([v.identifier hasPrefix:@"sp_metasrcrow_"]) ++rows;
+                if ([v.identifier isEqualToString:@"metasrc.list"]) list = v;
+            }
+            CK(rows >= 2, "元数据页数据源逐行渲染（异步到达后）",
+               [NSString stringWithFormat:@"rows=%ld", (long)rows]);
+            // 列表容器必须真的容得下所有行（之前被裁成只显示第一行）
+            if (list) {
+                CGFloat need = list.fittingSize.height;
+                CK(list.frame.size.height + 1 >= need,
+                   "数据源列表高度容得下全部行（不被裁切）",
+                   [NSString stringWithFormat:@"h=%.1f need=%.1f", list.frame.size.height, need]);
+            }
+            Snap(wc.window.contentView, [outDir stringByAppendingPathComponent:@"21-settings-meta-settled.png"],
+                 CGSizeMake(1180, 760));
+        }
         CK(reached == 10, "设置页 10 个页签都能真正切到位",
            [NSString stringWithFormat:@"reached=%ld", (long)reached]);
 
@@ -458,6 +496,76 @@ int RLPRunFunctionalAudit(NSString *outDir) {
            [NSString stringWithFormat:@"anchors=%lu", (unsigned long)tabAnchors]);
     } else {
         CK(NO, "设置页类型正确", NSStringFromClass(wc.currentContent.class));
+    }
+
+    // ---- ④c 右侧抽屉（web #right）：之前原生完全没有这个面板 ----
+    {
+        NSMutableArray<NSView *> *wv = [NSMutableArray array];
+        CollectAllViews(wc.window.contentView, wv);
+        RLPRightDrawer *drawer = nil;
+        for (NSView *v in wv) if ([v isKindOfClass:[RLPRightDrawer class]]) drawer = (RLPRightDrawer *)v;
+        CK(drawer != nil, "右侧抽屉已创建（web #right）", @"视图树里没有 RLPRightDrawer");
+        if (drawer) {
+            CK([drawer.identifier isEqualToString:@"right"], "抽屉 identifier = right", drawer.identifier ?: @"nil");
+            CK(drawer.hidden, "抽屉默认收起（web #right 基础态 display:none）", @"应默认隐藏");
+            CK(!drawer.polling, "收起时不轮询（不在后台空转）", @"polling 应为 NO");
+
+            // 打开 → 应可见 + 开始轮询；两个页签都要在
+            [wc toggleDrawer];
+            Pump(0.5);
+            CK(!drawer.hidden, "顶栏队列键能打开抽屉", @"抽屉仍隐藏");
+            CK(drawer.polling, "打开后开始 1s 轮询（web pollSchedule）", @"polling 应为 YES");
+            NSMutableArray<NSView *> *dv = [NSMutableArray array];
+            CollectAllViews(drawer, dv);
+            NSMutableSet<NSString *> *dids = [NSMutableSet set];
+            for (NSView *v in dv) if (v.identifier.length) [dids addObject:v.identifier];
+            CK([dids containsObject:@"right.tab.q"], "抽屉有队列页签", @"缺 right.tab.q");
+            CK([dids containsObject:@"right.tab.l"], "抽屉有歌词页签", @"缺 right.tab.l");
+            CK([dids containsObject:@"right.count"], "抽屉有计数（web #rcnt）", @"缺 right.count");
+            CK([dids containsObject:@"right.clear"], "抽屉有清除键（web #qclr）", @"缺 right.clear");
+            CK([dids containsObject:@"right.qlist"], "抽屉有队列列表（web #qlist）", @"缺 right.qlist");
+            CK([dids containsObject:@"right.lyricbox"], "抽屉有歌词容器（web #lyricbox）", @"缺 right.lyricbox");
+
+            Snap(wc.window.contentView, [outDir stringByAppendingPathComponent:@"14-drawer-queue.png"],
+                 CGSizeMake(1180, 760));
+            [drawer showTab:@"l"];
+            Pump(0.4);
+            CK([[drawer tab] isEqualToString:@"l"], "能切到歌词页签", [drawer tab] ?: @"nil");
+            Snap(wc.window.contentView, [outDir stringByAppendingPathComponent:@"15-drawer-lyrics.png"],
+                 CGSizeMake(1180, 760));
+
+            // 几何：web width:320 / right:18 / top:68 / bottom:92
+            NSRect f = drawer.frame;
+            NSRect host = wc.window.contentView.bounds;
+            CK(fabs(f.size.width - 320) < 0.5, "抽屉宽 320（web width:320px）",
+               @(f.size.width).stringValue);
+            CK(fabs((host.size.width - f.origin.x - f.size.width) - 18) < 0.5,
+               "抽屉右边距 18（web right:18px）", @(host.size.width - f.origin.x - f.size.width).stringValue);
+
+            [wc toggleDrawer];
+            Pump(0.3);
+            CK(drawer.hidden && !drawer.polling, "再点一次收起并停轮询", @"应隐藏且停轮询");
+        }
+    }
+
+    // ---- ④d 主题令牌：uistyle 必须真的改变外观，不是只存偏好 ----
+    {
+        NSString *savedStyle = [RLPTheme uiStyle];
+        NSString *savedTheme = [RLPTheme themeName];
+        [RLPTheme setThemeName:@"dark"];
+        [RLPTheme setUiStyle:@"apple"];
+        NSColor *appleAcc = [RLPTheme current].accent;
+        CGFloat appleTop = [RLPTheme current].topH;
+        [RLPTheme setUiStyle:@"classic"];
+        NSColor *classicAcc = [RLPTheme current].accent;
+        CGFloat classicTop = [RLPTheme current].topH;
+        CK(![appleAcc isEqual:classicAcc],
+           "切 classic 后强调色真的变了（web --acc 珊瑚红→蓝）", @"强调色没变");
+        CK(appleTop == 60 && classicTop == 52,
+           "切 classic 后顶栏高度 60→52（web #app rows）",
+           [NSString stringWithFormat:@"apple=%g classic=%g", appleTop, classicTop]);
+        [RLPTheme setUiStyle:savedStyle];
+        [RLPTheme setThemeName:savedTheme];
     }
 
     // ---- ⑤ 单曲页 + 播放条 ----

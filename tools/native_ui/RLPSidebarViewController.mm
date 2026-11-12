@@ -140,11 +140,12 @@ static BOOL RLPRowIsSection(NSArray<NSDictionary *> *items, NSInteger row) {
     // ---- 顶部只留导航（让开红绿灯），品牌区移到**最底部** ----
     // web 版 .side-brand 就在侧栏最底（Apple Music 左下角个人徽标的位置），
     // 视觉重心与 web 一致；顶部不再放品牌，避免与红绿灯挤在一起。
-    NSView *hair1 = [[NSView alloc] initWithFrame:NSZeroRect];
-    hair1.wantsLayer = YES;
-    hair1.layer.backgroundColor = t.line.CGColor;
-    hair1.translatesAutoresizingMaskIntoConstraints = NO;
-    [view addSubview:hair1];
+    // web .side-top 是**红绿灯安全区**（machost 下 height:38px），不是一条分隔线。
+    // 之前原生在这里画了 1px 横线，web 没有 ⟹ 侧栏顶部多出一条杂线（实测截图可见）。
+    NSView *sideTop = [[NSView alloc] initWithFrame:NSZeroRect];
+    sideTop.identifier = @"side.top";
+    sideTop.translatesAutoresizingMaskIntoConstraints = NO;
+    [view addSubview:sideTop];
 
     NSView *brand = [[NSView alloc] initWithFrame:NSZeroRect];
     brand.translatesAutoresizingMaskIntoConstraints = NO;
@@ -212,15 +213,15 @@ static BOOL RLPRowIsSection(NSArray<NSDictionary *> *items, NSInteger row) {
     scroll.documentView = _tableView;
 
     [NSLayoutConstraint activateConstraints:@[
-        // 顶部 52pt 让开红绿灯；其下是导航
-        [hair1.leadingAnchor constraintEqualToAnchor:view.leadingAnchor],
-        [hair1.trailingAnchor constraintEqualToAnchor:view.trailingAnchor],
-        [hair1.topAnchor constraintEqualToAnchor:view.topAnchor constant:52],
-        [hair1.heightAnchor constraintEqualToConstant:1],
+        // 顶部安全区 38pt（web html.machost .side-top height:38px）+ 4pt 下外边距
+        [sideTop.leadingAnchor constraintEqualToAnchor:view.leadingAnchor],
+        [sideTop.trailingAnchor constraintEqualToAnchor:view.trailingAnchor],
+        [sideTop.topAnchor constraintEqualToAnchor:view.topAnchor],
+        [sideTop.heightAnchor constraintEqualToConstant:38],
 
         [scroll.leadingAnchor constraintEqualToAnchor:view.leadingAnchor],
         [scroll.trailingAnchor constraintEqualToAnchor:view.trailingAnchor],
-        [scroll.topAnchor constraintEqualToAnchor:hair1.bottomAnchor constant:2],
+        [scroll.topAnchor constraintEqualToAnchor:sideTop.bottomAnchor constant:4],
         [scroll.bottomAnchor constraintEqualToAnchor:brand.topAnchor],
 
         // 品牌区贴底（web .side-brand）

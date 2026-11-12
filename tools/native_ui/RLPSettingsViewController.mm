@@ -31,6 +31,7 @@
 #import "RLPServersView.h"
 #import "RLPMetaSourcesView.h"
 #import "RLPLibStatsView.h"
+#import "RLPSettingsLayout.h"
 #include "version.h"
 
 #pragma mark - 页签定义
@@ -119,34 +120,83 @@ static NSString *RLP_PaneIdentifier(RLPSTab tab) {
 
 #pragma mark - 小工具
 
-/// 一行「标签 + 控件」，标签等宽（与 web 的 .sfld 同观感）。
-static NSStackView *RLPSRow(NSString *label, NSView *control, NSString *hint, RLPTheme *t) {
-    NSStackView *row = [[NSStackView alloc] init];
-    row.orientation = NSUserInterfaceLayoutOrientationHorizontal;
-    row.alignment = NSLayoutAttributeCenterY;
-    row.spacing = 10;
-    row.translatesAutoresizingMaskIntoConstraints = NO;
+// ── 布局桥：把既有的 RLPSGroup / RLPSRow 调用接到 web 的卡片网格上 ──
+//
+// 为什么不逐个改 1000 处调用点：那样改动面太大、容易漏。这里让 RLPSGroup **开一张卡片**，
+// 之后的 RLPSRow / RLPSwitchRow 自动落进这张卡片的响应式网格里。
+// 视觉与 web 一致（.sgroup 边框卡片 + .sgbody 响应式列 + .sfld 标签在上），
+// 而调用点一行都不用动。
 
-    NSTextField *l = RLPLabel(label, t.body, t.text);
-    l.translatesAutoresizingMaskIntoConstraints = NO;
-    [[l.widthAnchor constraintEqualToConstant:200] setActive:YES];
-    [row addArrangedSubview:l];
-    [row addArrangedSubview:control];
-    if (hint.length) [row addArrangedSubview:RLPLabel(hint, t.small, t.mut)];
-    return row;
+/// 占位哨兵：标记"这一行的真实内容已经进卡片了"，收尾时统一从 stack 摘除。
+@interface RLPLayoutSentinel : NSStackView
+@end
+@implementation RLPLayoutSentinel
+@end
+
+/// 把 stack 里的占位哨兵摘掉（否则它们照样吃 spacing，凭空撑出空白）。
+static void RLPStripSentinels(NSStackView *stack) {
+    if (!stack) return;
+    for (NSView *v in [stack.arrangedSubviews copy]) {
+        if ([v isKindOfClass:[RLPLayoutSentinel class]]) {
+            [stack removeArrangedSubview:v];
+            [v removeFromSuperview];
+        }
+    }
 }
 
-/// 分区标题 + 一句说明（对应 web 的 sgroup）。
+/// 当前正在填充的分组卡片（buildPane 期间有效）。
+static RLPSettingsGroup *gCurrentGroup = nil;
+/// 当前分组的宿主 stack（用于把卡片按顺序加进去）。
+static NSStackView *gCurrentStack = nil;
+
+/// 分区标题 = 开一张 web .sgroup 卡片。
 static NSView *RLPSGroup(NSString *title, NSString *desc, RLPTheme *t) {
+    RLPStripSentinels(gCurrentStack);
+    RLPSettingsGroup *g = [[RLPSettingsGroup alloc] initWithTitle:title hint:desc];
+    gCurrentGroup = g;
+    if (gCurrentStack) {
+        [gCurrentStack addArrangedSubview:g];
+        [g.widthAnchor constraintEqualToAnchor:gCurrentStack.widthAnchor constant:-48].active = YES;
+    }
+    // 返回卡片本身：调用点会 addArrangedSubview 它，NSStackView 对已在其中的视图是幂等的。
+    return g;
+}
+
+/// 一行「标签 + 控件」= web .sfld（标签在上、控件在下、说明在最下）。
+/// 旧实现是左标签 200px 的横排 + 写死宽度，窗口一窄就横向溢出。
+static NSStackView *RLPSRow(NSString *label, NSView *control, NSString *hint, RLPTheme *t) {
+    // 控件不再写死宽度：由字段网格按列宽拉伸（web .sfld input{width:100%}）。
+    for (NSLayoutConstraint *c in control.constraints) {
+        if (c.firstAttribute == NSLayoutAttributeWidth && c.secondItem == nil) c.active = NO;
+    }
+    if (gCurrentGroup) {
+        // 开关类控件走 .chk 行（开关在左、文字在右），其余走 .sfld（标签在上）。
+        if ([control isKindOfClass:[NSSwitch class]]) {
+            [gCurrentGroup addCheck:label control:control hint:hint];
+        } else {
+            [gCurrentGroup addField:label control:control hint:hint];
+        }
+        // 返回一个"哨兵"占位：调用点仍会 addArrangedSubview 它，但我们在下一次
+        // RLPSGroup / 收尾时把它从 stack 里**摘掉**。
+        // 为什么必须摘掉：NSStackView 会给**每个** arrangedSubview 加 spacing，
+        // 留着 N 个 0 高占位就凭空多出 N×22px 空白（实测截图里那条大空档）。
+        RLPLayoutSentinel *ph = [[RLPLayoutSentinel alloc] initWithFrame:NSZeroRect];
+        ph.translatesAutoresizingMaskIntoConstraints = NO;
+        [ph.heightAnchor constraintEqualToConstant:0].active = YES;
+        return ph;
+    }
+    // 没有卡片上下文（少数直接调用）：退回竖排字段，仍不写死宽度。
     NSStackView *box = [[NSStackView alloc] init];
     box.orientation = NSUserInterfaceLayoutOrientationVertical;
     box.alignment = NSLayoutAttributeLeading;
-    box.spacing = 2;
-    [box addArrangedSubview:RLPLabel(title, [NSFont systemFontOfSize:13 weight:NSFontWeightSemibold], t.text)];
-    if (desc.length) [box addArrangedSubview:RLPLabel(desc, t.small, t.mut)];
+    box.spacing = 5;
+    box.translatesAutoresizingMaskIntoConstraints = NO;
+    if (label.length) [box addArrangedSubview:RLPLabel(label, [NSFont systemFontOfSize:11], t.mut)];
+    control.translatesAutoresizingMaskIntoConstraints = NO;
+    [box addArrangedSubview:control];
+    if (hint.length) [box addArrangedSubview:RLPLabel(hint, [NSFont systemFontOfSize:10.5], t.mut2)];
     return box;
 }
-
 @interface RLPSettingsViewController ()
 @property (nonatomic, strong) NSSegmentedControl *tabs;
 @property (nonatomic, strong) NSView *paneHost;
@@ -424,8 +474,8 @@ static NSView *RLPSGroup(NSString *title, NSString *desc, RLPTheme *t) {
     NSStackView *stack = [[NSStackView alloc] initWithFrame:NSZeroRect];
     stack.orientation = NSUserInterfaceLayoutOrientationVertical;
     stack.alignment = NSLayoutAttributeLeading;
-    stack.spacing = 14;
-    stack.edgeInsets = NSEdgeInsetsMake(6, 24, 24, 24);
+    stack.spacing = 22;                                  // web .sgroup margin-bottom:22px
+    stack.edgeInsets = NSEdgeInsetsMake(6, 24, 24, 24);   // web .sbody padding:0 24px 24px
     stack.translatesAutoresizingMaskIntoConstraints = NO;
     NSView *spacer = [[NSView alloc] initWithFrame:NSZeroRect];
     spacer.translatesAutoresizingMaskIntoConstraints = NO;
@@ -445,6 +495,9 @@ static NSView *RLPSGroup(NSString *title, NSString *desc, RLPTheme *t) {
         [spacer.heightAnchor constraintGreaterThanOrEqualToConstant:0],
     ]];
 
+    // 布局上下文：fill* 里的 RLPSGroup 会开卡片、RLPSRow 会落进卡片网格。
+    gCurrentStack = stack;
+    gCurrentGroup = nil;
     switch (tab) {
         case RLPSTabOut:    [self fillOutput:stack t:t]; break;
         case RLPSTabPcm:    [self fillPcm:stack t:t]; break;
@@ -457,6 +510,9 @@ static NSView *RLPSGroup(NSString *title, NSString *desc, RLPTheme *t) {
         case RLPSTabAdv:    [self fillAdvanced:stack t:t]; break;
         case RLPSTabDiag:   [self fillDiag:stack t:t]; break;
     }
+    RLPStripSentinels(stack);
+    gCurrentStack = nil;
+    gCurrentGroup = nil;
     // 占位放在**所有真实内容之后**，才能把内容压到顶部（放前面会占住顶部）。
     [stack addArrangedSubview:spacer];
     return scroll;
@@ -1076,6 +1132,8 @@ static NSString *RLPControlIdentifier(NSString *key) {
 
     self.uiStylePopup = [self popupForKey:@"sp_uistyle" items:@[ @"apple", @"classic" ]
                                     action:@selector(onUiStyle:)];
+    // 回显当前真实生效的风格（不是固定选第一项）
+    [self.uiStylePopup selectItemAtIndex:[[RLPTheme uiStyle] isEqualToString:@"classic"] ? 1 : 0];
     [stack addArrangedSubview:RLPSRow(RLPTr(@"界面风格"), self.uiStylePopup,
         RLPTr(@"在 Apple Music 风格与经典 Hi-Fi 工作台之间实时切换"), t)];
 
@@ -1386,12 +1444,15 @@ static NSString *RLPControlIdentifier(NSString *key) {
     [stack addArrangedSubview:RLPSRow(RLPTr(@"AI 补封面歌词"), self.metaAiFillSwitch, nil, t)];
 
     // 数据源开关 + 优先级（对齐 web sp_metasrc：按注册表动态渲染，新增源前端零改动）。
+    // web 把它放在「元数据补全」这张卡片**里面**，不是裸挂在页面上。
     self.metaSourcesView = [[RLPMetaSourcesView alloc] initWithFrame:NSMakeRect(0, 0, 620, 200)];
     self.metaSourcesView.translatesAutoresizingMaskIntoConstraints = NO;
-    [stack addArrangedSubview:self.metaSourcesView];
-    [NSLayoutConstraint activateConstraints:@[
-        [self.metaSourcesView.widthAnchor constraintEqualToAnchor:stack.widthAnchor constant:-4],
-    ]];
+    if (gCurrentGroup) {
+        [gCurrentGroup addFullRow:self.metaSourcesView];
+    } else {
+        [stack addArrangedSubview:self.metaSourcesView];
+        [self.metaSourcesView.widthAnchor constraintEqualToAnchor:stack.widthAnchor constant:-48].active = YES;
+    }
     [self.metaSourcesView reload];
 
     // AI 模型端点：密钥红线 —— GET 只回掩码，输入框留空 = 不改已存的 key
@@ -2425,7 +2486,11 @@ static NSInteger RLPSearchIndexForProviderId(NSString *pid) {
 
 - (void)onUiStyle:(NSPopUpButton *)s {
     NSString *v = s.indexOfSelectedItem == 1 ? @"classic" : @"apple";
+    // 先落盘，再**真的切**：web 的 classic 换的是整套令牌（强调色变蓝、圆角收紧、
+    // 顶栏 52px）。之前只 POST 不改界面 —— 用户点了没反应，那是假实现。
     [self postKey:@"uistyle" value:v];
+    [RLPTheme setUiStyle:v];
+    [[NSUserDefaults standardUserDefaults] setObject:v forKey:@"RLPUiStyle"];
 }
 - (void)onScanThreads:(NSTextField *)s { [self postKey:@"scanthreads" value:s.stringValue]; }
 - (void)onRepeat:(NSPopUpButton *)s {

@@ -171,7 +171,8 @@
     self.lyricBtn = [self symbolButton:@"music.note.list" tip:@"歌词"];
     self.lyricBtn.identifier = @"pb.lyric";
     self.lyricBtn.target = self;
-    self.lyricBtn.action = @selector(openNowPlaying:);
+    // web #bLyric 打开的是右侧抽屉的歌词页，不是单曲页。
+    self.lyricBtn.action = @selector(openLyricDrawer:);
     self.chainBtn = [self symbolButton:@"waveform.path" tip:@"信号链"];
     self.chainBtn.identifier = @"pb.chain";
     self.chainBtn.target = self;
@@ -302,6 +303,11 @@ static double RLPVolDbToPos(double db) {
     if (showFmt) {
         rx -= 8 + 50;
         place(self.fmtBadge, rx, rowCY - 9, 50, 18);
+        self.fmtBadge.hidden = NO;
+    } else {
+        // 放不下就**真的藏起来**。之前只是"不摆放"，控件保留默认零帧留在原点，
+        // 于是播放条左下角出现一个孤立的 "--" 小胶囊（实测截图里那个红点）。
+        self.fmtBadge.hidden = YES;
     }
     if (showBp && !self.bpBadge.hidden) {
         rx -= 8 + 76;
@@ -312,9 +318,12 @@ static double RLPVolDbToPos(double db) {
         place(self.chainBtn, rx, rowCY - small / 2, small, small);
         rx -= 6 + small;
         place(self.lyricBtn, rx, rowCY - small / 2, small, small);
+        self.chainBtn.hidden = NO;
+        self.lyricBtn.hidden = NO;
     } else {
-        place(self.chainBtn, -100, 0, 0, 0);
-        place(self.lyricBtn, -100, 0, 0, 0);
+        // 用 hidden 而不是"挪到 -100 且尺寸 0"：后者仍在视图树里参与命中测试与无障碍遍历。
+        self.chainBtn.hidden = YES;
+        self.lyricBtn.hidden = YES;
     }
     (void)rightX;
 }
@@ -491,6 +500,12 @@ static double RLPVolDbToPos(double db) {
     if (!st) return;
     self.lastStatus = st;
 
+    // 把位置/时长广播出去：右抽屉的歌词高亮靠它（web 用同一次状态轮询驱动 syncLyrics）。
+    // 用通知而不是相互持有：播放条不该知道抽屉存在。
+    [[NSNotificationCenter defaultCenter] postNotificationName:@"RLPPlaybackTickNotification"
+        object:nil userInfo:@{ @"pos": @(st.position), @"dur": @(st.duration),
+                               @"path": st.currentPath ?: @"" }];
+
     BOOL playing = st.playing && !st.paused;
     self.playBtn.image = [NSImage imageWithSystemSymbolName:(playing ? @"pause.fill" : @"play.fill")
                                    accessibilityDescription:RLPTr(@"播放 / 暂停")];
@@ -639,6 +654,11 @@ static double RLPVolDbToPos(double db) {
 - (void)openNowPlaying:(id)sender {
     (void)sender;
     [[NSNotificationCenter defaultCenter] postNotificationName:@"RLPOpenNowPlayingNotification" object:nil];
+}
+
+/// 歌词键 → 主窗口打开右抽屉并切到歌词页。
+- (void)openLyricDrawer:(id)sender {
+    [[NSNotificationCenter defaultCenter] postNotificationName:@"RLPOpenLyricDrawerNotification" object:nil];
 }
 
 /// 底栏「信号链」：与工作台同一个 /api/signal + RLPSignalChain 纯函数，弹层逐节点列真值。

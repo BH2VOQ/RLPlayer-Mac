@@ -9,6 +9,7 @@
 #import "RLPSidebarViewController.h"
 #import "RLPAlbumsViewController.h"
 #import "RLPPlaybackBarView.h"
+#import "RLPRightDrawer.h"
 #import "RLPPlaceholderViewController.h"
 #import "RLPStreamingViewController.h"
 #import "RLPQuickStartViewController.h"
@@ -57,9 +58,12 @@
 }
 @end
 
-static const CGFloat kSidebarWidth = 232.0;
-static const CGFloat kPlaybackHeight = 76.0;
-static const CGFloat kTopbarHeight = 46.0;
+// 几何一律取 web 的确切值（ui_page.h）：--sidew:226 / .top height:60 / .bar height:66。
+// 之前原生写 232/46/76 是自造的，导致侧栏偏宽、顶栏偏矮、播放条偏高。
+// classic 风格顶栏是 52（html[data-uistyle=classic] #app grid-template-rows:52px）。
+static const CGFloat kSidebarWidth = 226.0;   // --sidew
+static const CGFloat kPlaybackHeight = 66.0;  // .bar height
+static const CGFloat kTopbarHeight = 60.0;    // .top height（classic 52，见 topbarHeight()）
 
 @interface RLPMainWindowController ()
 @property (nonatomic, strong, readwrite) RLPSidebarViewController *sidebar;
@@ -67,6 +71,12 @@ static const CGFloat kTopbarHeight = 46.0;
 @property (nonatomic, strong, readwrite) RLPPlaybackBarView *playbackBar;
 @property (nonatomic, strong) NSView *topbar;
 @property (nonatomic, strong) NSView *pageHost;
+/// 顶栏高度约束：classic 风格是 52，apple 是 60（web #app grid-template-rows）。
+/// 存下来才能在切风格时实时改，而不是只存偏好值不生效。
+@property (nonatomic, strong) NSLayoutConstraint *topbarHeightConstraint;
+/// 右侧抽屉（web #right）：队列 / 歌词，悬浮毛玻璃卡片。
+@property (nonatomic, strong) RLPRightDrawer *rightDrawer;
+@property (nonatomic, assign) BOOL drawerOpen;
 @property (nonatomic, strong) NSSearchField *search;
 @property (nonatomic, strong) NSTextField *pageTitle;   // 顶栏页标题（web #pth）
 @property (nonatomic, strong) NSTextField *pageCount;   // 计数（web #cnt）
@@ -195,7 +205,8 @@ static NSString *RLPPageIdentifier(NSString *key) {
         [_topbar.leadingAnchor constraintEqualToAnchor:_sidebar.view.trailingAnchor],
         [_topbar.trailingAnchor constraintEqualToAnchor:root.trailingAnchor],
         [_topbar.topAnchor constraintEqualToAnchor:root.topAnchor],
-        [_topbar.heightAnchor constraintEqualToConstant:kTopbarHeight],
+        // 占位：真正的约束在下面单独建并存起来（切 classic 时要改它）
+
 
         [_search.leadingAnchor constraintEqualToAnchor:_topbar.leadingAnchor constant:210],
         [_search.centerYAnchor constraintEqualToAnchor:_topbar.centerYAnchor],
@@ -224,7 +235,24 @@ static NSString *RLPPageIdentifier(NSString *key) {
         [_pageHost.bottomAnchor constraintEqualToAnchor:_playbackBar.topAnchor constant:-14],
     ]];
     {
-        NSLayoutConstraint *fill = [_playbackBar.widthAnchor constraintEqualToAnchor:_pageHost.widthAnchor constant:-48];
+        // ---- 右侧抽屉（web #right）----
+    // web: position:fixed; top:68px; right:18px; bottom:92px; width:320px。
+    // 它是**悬浮**卡片，不占网格列 ⟹ 打开时主内容区宽度不变（web 明确修过这一点）。
+    _rightDrawer = [[RLPRightDrawer alloc] initWithFrame:NSZeroRect];
+    _rightDrawer.translatesAutoresizingMaskIntoConstraints = NO;
+    _rightDrawer.hidden = YES;
+    [root addSubview:_rightDrawer];
+    [NSLayoutConstraint activateConstraints:@[
+        [_rightDrawer.trailingAnchor constraintEqualToAnchor:root.trailingAnchor constant:-18],
+        [_rightDrawer.topAnchor constraintEqualToAnchor:root.topAnchor constant:68],
+        [_rightDrawer.bottomAnchor constraintEqualToAnchor:root.bottomAnchor constant:-92],
+        [_rightDrawer.widthAnchor constraintEqualToConstant:320],
+    ]];
+
+    _topbarHeightConstraint = [_topbar.heightAnchor constraintEqualToConstant:[RLPTheme current].topH];
+    _topbarHeightConstraint.active = YES;
+
+    NSLayoutConstraint *fill = [_playbackBar.widthAnchor constraintEqualToAnchor:_pageHost.widthAnchor constant:-48];
         fill.priority = NSLayoutPriorityDefaultHigh;   // 750：窄窗口按可用宽度铺满
         NSLayoutConstraint *cap = [_playbackBar.widthAnchor constraintLessThanOrEqualToConstant:1120];
         [NSLayoutConstraint activateConstraints:@[fill, cap]];
@@ -259,6 +287,12 @@ static NSString *RLPPageIdentifier(NSString *key) {
                                                  name:@"RLPOpenWorksNotification" object:nil];
     [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(onPageCount:)
                                                  name:@"RLPPageCountNotification" object:nil];
+    // 播放位置心跳 → 抽屉歌词高亮（web 用同一次轮询驱动 syncLyrics）
+    [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(onPlaybackTick:)
+                                                 name:@"RLPPlaybackTickNotification" object:nil];
+    // 底栏歌词键 → 打开抽屉的歌词页
+    [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(onOpenLyricDrawerNote:)
+                                                 name:@"RLPOpenLyricDrawerNotification" object:nil];
 
     [_sidebar selectRow:0];
     [self showContentForRow:0];
@@ -480,8 +514,37 @@ static NSString *RLPPageIdentifier(NSString *key) {
     [(RLPTracksViewController *)tracks searchWithQuery:q ?: @""];
 }
 
+/// 顶栏队列键 = **切换右侧抽屉**（web #bQueue 切 #app.qopen）。
+/// 之前原生把它做成"跳到队列页"，那是另一个东西：web 的队列页与右抽屉是两个入口，
+/// 抽屉是"边听边看"，队列页是"整理队列"。两者都要有。
 - (void)onQueue:(id)sender {
-    [self.sidebar selectKey:@"queue"];
+    [self toggleDrawer];
+}
+
+- (void)toggleDrawer {
+    self.drawerOpen = !self.drawerOpen;
+    self.rightDrawer.hidden = !self.drawerOpen;
+    if (self.drawerOpen) {
+        [self.rightDrawer activate];
+        // 打开时浮到最上层（web z-index:20）
+        [self.rightDrawer.superview addSubview:self.rightDrawer positioned:NSWindowAbove relativeTo:nil];
+    } else {
+        [self.rightDrawer deactivate];
+    }
+}
+
+- (void)onPlaybackTick:(NSNotification *)note {
+    if (!self.drawerOpen) return;   // 抽屉没开就不做无用的布局计算
+    NSDictionary *u = note.userInfo;
+    [self.rightDrawer updatePosition:[u[@"pos"] doubleValue] duration:[u[@"dur"] doubleValue]];
+}
+
+- (void)onOpenLyricDrawerNote:(NSNotification *)note { [self openLyricDrawer]; }
+
+/// 底栏歌词键 → 打开抽屉并切到歌词页（web #bLyric 同语义）。
+- (void)openLyricDrawer {
+    if (!self.drawerOpen) [self toggleDrawer];
+    [self.rightDrawer showTab:@"l"];
 }
 
 - (void)onNowPlaying:(id)sender {
@@ -496,10 +559,13 @@ static NSString *RLPPageIdentifier(NSString *key) {
     self.window.backgroundColor = t.bg;
     self.window.appearance = [NSAppearance appearanceNamed:t.isLight ? NSAppearanceNameAqua : NSAppearanceNameDarkAqua];
     self.window.contentView.layer.backgroundColor = t.bg.CGColor;
-    self.topbar.layer.backgroundColor = t.bg.CGColor;
+    // web .top 的背景是 --topbg（半透明 + backdrop-blur），不是 --bg。
+    self.topbar.layer.backgroundColor = t.topBg.CGColor;
+    self.topbarHeightConstraint.constant = t.topH;   // apple 60 / classic 52
     self.pageHost.layer.backgroundColor = t.bg.CGColor;
     [self.sidebar applyTheme];
     [self.playbackBar applyTheme];
+    [self.rightDrawer applyTheme];
     self.playbackBar.layer.borderColor = t.line.CGColor;
     self.pageTitle.textColor = t.text;
     self.pageCount.textColor = t.mut;

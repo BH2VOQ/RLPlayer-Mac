@@ -5,6 +5,7 @@
 @class RLPSidebarViewController;
 @class RLPAlbumsViewController;
 @class RLPPlaybackBarView;
+@class RLPRightDrawer;
 
 NS_ASSUME_NONNULL_BEGIN
 
@@ -17,6 +18,14 @@ NS_ASSUME_NONNULL_BEGIN
 
 /// 当前显示的内容页（功能审计断言"点进去到底换了没有"用）。
 @property (nonatomic, strong, readonly, nullable) NSViewController *currentContent;
+
+/// 右侧抽屉（web #right）：队列 / 歌词。判据要能拿到它核对几何与页签。
+@property (nonatomic, strong, readonly) RLPRightDrawer *rightDrawer;
+@property (nonatomic, assign, readonly) BOOL drawerOpen;
+/// 切换抽屉（顶栏队列键 = web #bQueue 切 #app.qopen）。
+- (void)toggleDrawer;
+/// 打开抽屉并切到歌词页（底栏歌词键 = web #bLyric）。
+- (void)openLyricDrawer;
 
 /// 核心启动后调用：加载首批数据（专辑）并启动播放条轮询。
 - (void)loadInitialData;

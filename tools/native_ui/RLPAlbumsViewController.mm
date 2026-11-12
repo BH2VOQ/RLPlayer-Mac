@@ -252,11 +252,14 @@ static const NSUserInterfaceItemIdentifier kAlbumItemID = @"RLPAlbumItem";
     self.countLabel.hidden = YES;   // 计数走顶栏 RLPPageCountNotification
     [root addSubview:self.countLabel];
 
+    // web .grid：repeat(auto-fill, minmax(152px,1fr)) / gap:16 / padding:18。
+    // 之前原生写死 180×230 + inset 20/24 + lineSpacing 20，卡片比 web 宽、行距也更大。
+    // 现在按可用宽度算列数（与 CSS auto-fill 同算法），列宽随之拉伸填满。
     NSCollectionViewFlowLayout *layout = [[NSCollectionViewFlowLayout alloc] init];
-    layout.itemSize = NSMakeSize(180, 230);
-    layout.sectionInset = NSEdgeInsetsMake(20, 24, 24, 24);
-    layout.minimumInteritemSpacing = 16;
-    layout.minimumLineSpacing = 20;
+    layout.itemSize = NSMakeSize(152, 214);      // 152 封面 + 9 + 16(标题) + 2 + 14(艺术家) ≈ 214
+    layout.sectionInset = NSEdgeInsetsMake(18, 18, 18, 18);   // .grid padding:18
+    layout.minimumInteritemSpacing = 16;         // .grid gap:16
+    layout.minimumLineSpacing = 16;
 
     self.collection = [[NSCollectionView alloc] initWithFrame:NSZeroRect];
     self.collection.collectionViewLayout = layout;
@@ -425,6 +428,28 @@ static const NSUserInterfaceItemIdentifier kAlbumItemID = @"RLPAlbumItem";
 
 // 换肤：根背景 + 标题 + 计数 + **所有已实例化的卡片**。
 // 只刷 visibleItems 不够（滚动出去再回来会复用旧色 item），所以直接 reloadData。
+/// 按可用宽度重算卡片尺寸 —— CSS repeat(auto-fill,minmax(152px,1fr)) 的等价算法：
+/// 先算能放几列（列下限 152、间距 16），再把剩余宽度均分给各列（1fr）。
+/// 不这么做的话卡片恒为 152 宽，右侧留一条空白，与 web 铺满的观感不一致。
+- (void)relayoutGridForWidth:(CGFloat)w {
+    if (![self.collection.collectionViewLayout isKindOfClass:[NSCollectionViewFlowLayout class]]) return;
+    NSCollectionViewFlowLayout *l = (NSCollectionViewFlowLayout *)self.collection.collectionViewLayout;
+    const CGFloat pad = 18, gap = 16, minW = 152;
+    const CGFloat avail = w - pad * 2;
+    if (avail < minW) return;
+    NSInteger cols = (NSInteger)floor((avail + gap) / (minW + gap));
+    if (cols < 1) cols = 1;
+    const CGFloat itemW = floor((avail - gap * (cols - 1)) / cols);
+    if (fabs(l.itemSize.width - itemW) < 0.5) return;
+    l.itemSize = NSMakeSize(itemW, itemW + 62);   // 封面正方形 + 文字区 62
+    [l invalidateLayout];
+}
+
+- (void)viewDidLayout {
+    [super viewDidLayout];
+    [self relayoutGridForWidth:self.view.bounds.size.width];
+}
+
 - (void)applyTheme {
     RLPTheme *t = [RLPTheme current];
     self.view.layer.backgroundColor = t.bg.CGColor;
