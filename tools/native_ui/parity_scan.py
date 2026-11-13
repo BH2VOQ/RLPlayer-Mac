@@ -46,6 +46,13 @@ NATIVE_DIR = os.path.join(ROOT, "tools/native_ui")
 DOCS_DIR = os.path.join(ROOT, "docs/native-ui")
 MAP_PATH = os.path.join(DOCS_DIR, "parity_map.tsv")
 NA_PATH = os.path.join(DOCS_DIR, "parity_na.tsv")
+# 用户明确要求删掉的界面元素（web 有、原生**故意**没有）。
+# 为什么需要第三张表，而不是塞进 parity_na.tsv：
+#   na = "web 没有/前端不调用，所以原生不需要"；它只对 api 行开放，且要源码复核。
+#   removed = "web 有，但用户明确要求原生不要"。这是**相反**的断言，
+#   复核方式也不同：要证明 web 确实有它（我们没凭空造规则），且原生确实已经没有（删除真的生效）。
+#   把两者混在一起会让 na 的语义失效，也会让「删功能」这种本项目铁律①最敏感的动作失去留痕。
+REMOVED_PATH = os.path.join(DOCS_DIR, "parity_removed.tsv")
 OUT_PATH = os.path.join(DOCS_DIR, "parity.tsv")
 
 NL = chr(10)
@@ -313,14 +320,62 @@ def verify_na_claims():
     return ok, bad
 
 
+def load_removed():
+    """parity_removed.tsv columns: kind, web_id, removed_on, reason.
+
+    每一行都是一条**双向可复核**的断言：
+      · web 侧确实有这个 id（否则说明我们凭空立了一条规则）；
+      · 原生侧确实已经**没有**这个 identifier（否则说明"删除"没生效 / 又被加回来了）。
+    两边任一不成立就报 removed_bad，门禁红。
+    """
+    out = {}
+    for cols in _load_tsv(REMOVED_PATH):
+        if len(cols) < 3:
+            continue
+        out[(cols[0], cols[1])] = {"removed_on": cols[2],
+                                   "reason": " ".join(cols[3:]).strip()}
+    return out
+
+
+def verify_removed_claims(web, nat):
+    removed = load_removed()
+    bad = []
+    ok = 0
+    for (kind, item), meta in sorted(removed.items()):
+        reason = meta["reason"]
+        when = meta["removed_on"]
+        if not reason.strip():
+            bad.append("%s %s: removed without a reason" % (kind, item))
+            continue
+        if not when.strip():
+            bad.append("%s %s: removed without a date" % (kind, item))
+            continue
+        if item not in web.get(kind, {}):
+            bad.append("%s %s: web does not have it -- the removal claim is invented"
+                       % (kind, item))
+            continue
+        if nat["ident"].get(item):
+            bad.append("%s %s: native still has this identifier -- removal did not take effect"
+                       % (kind, item))
+            continue
+        ok += 1
+    return ok, bad
+
+
 def build_rows():
     web = scan_web()
     nat = scan_native()
     mp = load_map()
     na = load_na()
+    removed = load_removed()
     rows = []
     for kind in ("view", "tab", "ctrl", "api"):
         for item in sorted(web.get(kind, {})):
+            rem = removed.get((kind, item))
+            if rem is not None:
+                rows.append((kind, item, "--", "removed",
+                             "%s: %s" % (rem["removed_on"], rem["reason"])))
+                continue
             reason = na.get((kind, item))
             if reason is not None:
                 if not reason:
@@ -367,7 +422,9 @@ def main():
     rows = build_rows()
     missing = [r for r in rows if r[3] == "missing"]
     na_ok, na_bad = verify_na_claims()
+    rem_ok, rem_bad = verify_removed_claims(scan_web(), scan_native())
     nas = [r for r in rows if r[3] == "na"]
+    rems = [r for r in rows if r[3] == "removed"]
     done = [r for r in rows if r[3] == "done"]
 
     if not args.check:
@@ -378,17 +435,20 @@ def main():
             for r in rows:
                 f.write("\t".join(r) + NL)
 
-    print("parity: total=%d done=%d missing=%d na=%d" % (
-        len(rows), len(done), len(missing), len(nas)))
+    print("parity: total=%d done=%d missing=%d removed=%d na=%d" % (
+        len(rows), len(done), len(missing), len(rems), len(nas)))
     by_kind = {}
     for r in rows:
-        by_kind.setdefault(r[0], {"done": 0, "missing": 0, "na": 0})
+        by_kind.setdefault(r[0], {"done": 0, "missing": 0, "na": 0, "removed": 0})
         by_kind[r[0]][r[3]] += 1
     for k in ("view", "tab", "ctrl", "api"):
         if k in by_kind:
-            print("  %-5s done=%-4d missing=%-4d na=%d" % (
-                k, by_kind[k]["done"], by_kind[k]["missing"], by_kind[k]["na"]))
+            print("  %-5s done=%-4d missing=%-4d removed=%-3d na=%d" % (
+                k, by_kind[k]["done"], by_kind[k]["missing"],
+                by_kind[k]["removed"], by_kind[k]["na"]))
     print("  na verified against web front-end source: %d ok, %d bad" % (na_ok, len(na_bad)))
+    print("  removed verified (web has it / native no longer does): %d ok, %d bad"
+          % (rem_ok, len(rem_bad)))
     if missing and not args.quiet:
         print("")
         print("missing detail:")
@@ -399,7 +459,12 @@ def main():
         print("na claim failures:")
         for b in na_bad:
             print("  " + b)
-    return 1 if (missing or na_bad) else 0
+    if rem_bad:
+        print("")
+        print("removed claim failures:")
+        for b in rem_bad:
+            print("  " + b)
+    return 1 if (missing or na_bad or rem_bad) else 0
 
 
 if __name__ == "__main__":

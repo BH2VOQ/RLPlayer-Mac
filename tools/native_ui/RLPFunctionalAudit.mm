@@ -176,6 +176,23 @@ static void CollectAllViews(NSView *v, NSMutableArray<NSView *> *out) {
     for (NSView *s in v.subviews) CollectAllViews(s, out);
 }
 
+/// 真·可见：自身与**全部祖先**都未隐藏，且自身 frame 有面积、有非零 alpha。
+///
+/// 为什么必须是这个函数而不是「!v.hidden」：2026-11-13 的第一次判据只看了 v.hidden，
+/// 于是「把控件收进 hidden=YES 的容器」这种形态在旧实现上**照样 PASS**
+/// —— 正是铁律④说的"测试通过 ≠ 测对了东西"。这里把祖先链一起判。
+static BOOL RLPViewActuallyVisible(NSView *v) {
+    if (!v) return NO;
+    if (v.hidden) return NO;
+    if (v.frame.size.width < 1 || v.frame.size.height < 1) return NO;
+    if (v.alphaValue < 0.01) return NO;
+    for (NSView *p = v.superview; p; p = p.superview) {
+        if (p.hidden) return NO;
+        if (p.alphaValue < 0.01) return NO;
+    }
+    return YES;
+}
+
 #pragma mark - 隔离曲库
 
 // 造 3 张专辑 / 6 首曲子的最小真实库，让页面有真数据可渲染。
@@ -545,16 +562,21 @@ int RLPRunFunctionalAudit(NSString *outDir) {
         //    旧实现只写「已新建歌单」，用户在图六里看到的差别就是这个。
         NSString *madeByUi = @"侧栏新建演示";
         [wc.sidebar createSavedQueueNamed:madeByUi];
-        Pump(0.8);
-        {
+        // toast 是异步落地（/api/sq/add 回调 + 0.12s 淡入，1.8s 后自动消失）。
+        // 固定 Pump(0.8) 在机器忙时会在回调之前就检查 ⟹ **假红**。
+        // 这里改成轮询到出现或超时 3s：判据强度不变（仍要求文案带歌单名），只去掉时序抖动。
+        BOOL sawToast = NO;
+        for (int i = 0; i < 30 && !sawToast; ++i) {
+            Pump(0.1);
             NSMutableArray<NSView *> *wv = [NSMutableArray array];
             CollectAllViews(wc.window.contentView, wv);
-            BOOL sawToast = NO;
             for (NSView *v in wv) {
                 if (![v isKindOfClass:[NSTextField class]]) continue;
                 NSString *s = ((NSTextField *)v).stringValue;
-                if ([s containsString:@"已新建歌单："] && [s containsString:madeByUi]) sawToast = YES;
+                if ([s containsString:@"已新建歌单："] && [s containsString:madeByUi]) { sawToast = YES; break; }
             }
+        }
+        {
             CK(sawToast, "新建歌单 toast 带上歌单名（web：已新建歌单：<name>；旧实现只有「已新建歌单」)", madeByUi);
             NSDictionary *l = [[RLPCoreClient shared] jsonWithMethod:@"GET" path:@"/api/sq/list" body:nil];
             BOOL inBackend = NO;
@@ -1497,53 +1519,162 @@ int RLPRunFunctionalAudit(NSString *outDir) {
             CK(bands != nil && bands.dataSource != nil && bands.delegate != nil,
                "参数表有真实数据源（曲线可编辑前提）", @"dataSource/delegate 为空");
 
-            // (5b) 诊断/反馈选项收进气泡窗：入口键在页面上，原控件仍在视图树里（隐藏容器）
+            // (5b) 诊断/反馈区（2026-11-13 用户实机：气泡里空白 / 要求改成 web 内联填写窗）
+            //
+            // ⚠️ 旧判据为什么是假绿：它只断言「把控件搬进 NSPopover 的内容容器」这一步，
+            //    完全不检查气泡**显示出来之后**这些控件是否可见。真实故障恰恰在这里 ——
+            //    RLPCardController 只钉宽、没给 preferredContentSize，搬进去的 620pt 宽
+            //    NSScrollView 又没有宽度约束 ⟹ 气泡塌成空框，用户看到一条空白。
+            //    所以本轮判据换成：**不点任何东西**，直接量设置页上真实子视图是否可见。
             [svm selectPane:@"diag"];
-            Pump(0.6);
-            NSMutableArray<NSView *> *dsv = [NSMutableArray array];
-            CollectAllViews(svm.view, dsv);
-            NSButton *diagMore = nil, *fbMore = nil;
-            BOOL fbTextStillThere = NO;
-            for (NSView *v in dsv) {
-                if ([v.identifier isEqualToString:@"sp_diagmore"]) diagMore = (NSButton *)v;
-                if ([v.identifier isEqualToString:@"sp_fbmore"]) fbMore = (NSButton *)v;
-                if ([v.identifier isEqualToString:@"sp_fbtext"]) fbTextStillThere = YES;
-            }
-            CK(diagMore != nil && diagMore.target && diagMore.action,
-               "诊断页有「诊断包选项」气泡窗入口且有 action", @"缺 sp_diagmore");
-            CK(fbMore != nil && fbMore.target && fbMore.action,
-               "诊断页有「填写反馈」气泡窗入口且有 action", @"缺 sp_fbmore");
-            CK(fbTextStillThere, "反馈正文仍在视图树里（收进隐藏容器，未删功能）", @"找不到 sp_fbtext");
+            Pump(0.7);
+            CK(!svm.view.isHidden && svm.view.window != nil,
+               "诊断页真的显示在窗口里（可见性判据的前提）",
+               svm.view.window ? @"window 存在" : @"视图不在任何窗口里，后面的可见性断言无意义");
 
-            // (5c) 气泡窗内容装配：离屏审计无法可靠显示 NSPopover（窗口不 key），
-            // 所以只验证"把同一批真实控件搬进气泡窗内容容器"这一步 —— 搬进去/搬回来都在同一批
-            // identifier 上，证明不是复制第二份控件、也不是只有入口没有内容。
-            if ([svm respondsToSelector:NSSelectorFromString(@"auditDiagPopoverContent")]) {
-                NSViewController *vc = [svm performSelector:NSSelectorFromString(@"auditDiagPopoverContent")];
-                BOOL contentHasAll = NO;
-                if (vc && [vc isKindOfClass:[NSViewController class]]) {
-                    NSMutableArray<NSView *> *pcv = [NSMutableArray array];
-                    CollectAllViews(vc.view, pcv);
-                    NSMutableSet<NSString *> *pids = [NSMutableSet set];
-                    for (NSView *v in pcv) if (v.identifier.length) [pids addObject:v.identifier];
-                    contentHasAll = [pids containsObject:@"sp_diagzip"] &&
-                                    [pids containsObject:@"sp_diagjson"] &&
-                                    [pids containsObject:@"sp_diagsummary"] &&
-                                    [pids containsObject:@"sp_diagupload"] &&
-                                    [pids containsObject:@"sp_diagsummarytext"];
-                }
-                CK(contentHasAll, "气泡窗内容容器里是同一批诊断控件（不是空壳/第二份）",
-                   @"内容容器里缺少 sp_diagzip 等");
-                [svm performSelector:NSSelectorFromString(@"auditRestoreDiagPopover")];
-                Pump(0.3);
-                NSMutableArray<NSView *> *restored = [NSMutableArray array];
-                CollectAllViews(svm.view, restored);
-                BOOL back = NO;
-                for (NSView *v in restored)
-                    if ([v.identifier isEqualToString:@"sp_diagzip"]) { back = YES; break; }
-                CK(back, "还原后诊断控件回到主窗口视图树（状态/identifier 不重复）",
-                   @"主视图树里找不到 sp_diagzip");
+            // 通用「可见」判定：自身与全部祖先未隐藏，且 frame 有面积、落在某个祖先可视区内。
+            // 注意不能用 convertRect 到窗口（离屏审计里窗口可能没显示），用**祖先链可见性 + 面积**。
+            __block NSInteger visibleButtons = 0;
+            NSMutableSet<NSString *> *visIds = [NSMutableSet set];
+            NSMutableArray<NSView *> *allD = [NSMutableArray array];
+            CollectAllViews(svm.view, allD);
+            for (NSView *v in allD) {
+                if (v.hidden || v.frame.size.width < 1 || v.frame.size.height < 1) continue;
+                BOOL anc = YES;
+                for (NSView *p = v.superview; p; p = p.superview) if (p.hidden) { anc = NO; break; }
+                if (!anc) continue;
+                if ([v isKindOfClass:[NSButton class]]) ++visibleButtons;
+                if (v.identifier.length) [visIds addObject:v.identifier];
             }
+
+            // ---- 第十一项：三个按钮逐字文案 + 不在气泡里 + 无「随反馈上传诊断」----
+            NSArray *wantTitles = @[ @"导出诊断包（.zip）", @"只要 JSON", @"查看 / 复制诊断摘要" ];
+            // 同名按钮可能出现在隐藏容器里（旧实现就是这样）⟹ 只在「真可见」的里面找，
+            // 否则「有按钮」会退化成「藏起来的那个也算有」。
+            NSMutableDictionary<NSString *, NSButton *> *byTitle = [NSMutableDictionary dictionary];
+            for (NSView *v in allD) {
+                if (![v isKindOfClass:[NSButton class]]) continue;
+                NSString *t = ((NSButton *)v).title;
+                if (!t.length) continue;
+                if (!RLPViewActuallyVisible(v)) continue;
+                byTitle[t] = (NSButton *)v;
+            }
+            for (NSString *want in wantTitles) {
+                NSButton *b = byTitle[want];
+                BOOL vis = RLPViewActuallyVisible(b);
+                NSString *detail = b
+                    ? [NSString stringWithFormat:@"存在但不可见 frame=%@", NSStringFromRect(b.frame)]
+                    : @"视图树里找不到该文案的按钮";
+                CK(vis, [NSString stringWithFormat:@"诊断页无需点击就有可见按钮「%@」", want].UTF8String,
+                   detail);
+            }
+            // 主按钮必须是红底白字（web .btn.pri）
+            NSButton *zipBtn = byTitle[wantTitles[0]];
+            BOOL zipIsAccent = zipBtn && zipBtn.wantsLayer && zipBtn.layer.backgroundColor != NULL &&
+                CGColorGetAlpha(zipBtn.layer.backgroundColor) > 0.5;
+            if (zipIsAccent) {
+                const CGFloat *comp = CGColorGetComponents(zipBtn.layer.backgroundColor);
+                zipIsAccent = comp && comp[0] > 0.7 && comp[1] < 0.5;   // 红通道高、绿低 ≈ 珊瑚红
+            }
+            CK(zipIsAccent, "「导出诊断包（.zip）」是红底主按钮（web .btn.pri 视觉）",
+               zipBtn ? [NSString stringWithFormat:@"bg=%@", zipBtn.layer.backgroundColor] : @"缺按钮");
+
+            // 「随反馈上传诊断」必须真的没了（文案 + identifier 双重断言，防回退）
+            BOOL uploadByTitle = byTitle[RLPTr(@"随反馈上传诊断")] != nil;
+            BOOL uploadById = NO;
+            for (NSView *v in allD)
+                if ([v.identifier isEqualToString:@"sp_diagupload"]) { uploadById = YES; break; }
+            CK(!uploadByTitle && !uploadById,
+               "「随反馈上传诊断」按钮已删除（用户明确要求去掉）",
+               [NSString stringWithFormat:@"byTitle=%d byIdentifier=%d", (int)uploadByTitle, (int)uploadById]);
+
+            // ---- 第十项：反馈表单内联、默认可见、计数可用 ----
+            NSTextView *fbText = nil; NSTextField *fbCount = nil;
+            for (NSView *v in allD) {
+                if ([v.identifier isEqualToString:@"sp_fbtext"] && [v isKindOfClass:[NSTextView class]])
+                    fbText = (NSTextView *)v;
+                if ([v.identifier isEqualToString:@"sp_fbcount"] && [v isKindOfClass:[NSTextField class]])
+                    fbCount = (NSTextField *)v;
+            }
+            CK(RLPViewActuallyVisible(fbText) && fbText.frame.size.height >= 100,
+               "反馈正文文本域内联可见且够高（约 8 行，用户要求）",
+               fbText ? [NSString stringWithFormat:@"h=%.0f hidden=%d", fbText.frame.size.height, (int)fbText.hidden]
+                      : @"找不到 sp_fbtext");
+            CK(RLPViewActuallyVisible(fbCount),
+               "反馈字数计数内联可见", fbCount ? @"ok" : @"找不到 sp_fbcount");
+            // 计数真的跟随输入：写入 12 个字符后断言 12 / 16384
+            if (fbText && fbCount && [svm respondsToSelector:NSSelectorFromString(@"updateFbCount")]) {
+                fbText.string = @"ABCDEFGHIJKL";       // 12 个 ASCII = 12 字节
+                [svm performSelector:NSSelectorFromString(@"updateFbCount")];
+                Pump(0.1);
+                CK([fbCount.stringValue hasPrefix:@"12 / 16384"],
+                   "输入 12 个字符后计数显示 12 / 16384", fbCount.stringValue);
+                // 中文按字节计（web fbBytes 同口径）：6 个汉字 = 18 字节，不是 6。
+                fbText.string = @"一二三四五六";
+                [svm performSelector:NSSelectorFromString(@"updateFbCount")];
+                Pump(0.1);
+                CK([fbCount.stringValue hasPrefix:@"18 / 16384"],
+                   "中文按 UTF-8 字节计数（6 个汉字 = 18 字节，不是 6）", fbCount.stringValue);
+                fbText.string = @"";
+                [svm performSelector:NSSelectorFromString(@"updateFbCount")];
+            }
+            // 附带诊断包默认勾选 + 发送按钮
+            NSSwitch *fbDiag = nil;
+            for (NSView *v in allD)
+                if ([v.identifier isEqualToString:@"sp_fbdiag"] && [v isKindOfClass:[NSSwitch class]])
+                    fbDiag = (NSSwitch *)v;
+            CK(RLPViewActuallyVisible(fbDiag) && fbDiag.state == NSControlStateValueOn,
+               "「附带诊断包」默认勾选（web checked 同态）",
+               fbDiag ? [NSString stringWithFormat:@"state=%ld", (long)fbDiag.state] : @"缺 sp_fbdiag");
+            NSButton *fbSend = nil;
+            for (NSView *v in allD)
+                if ([v.identifier isEqualToString:@"sp_fbsend"]) fbSend = (NSButton *)v;
+            CK(RLPViewActuallyVisible(fbSend) && [fbSend.title isEqualToString:RLPTr(@"发送反馈")],
+               "「发送反馈」按钮内联可见、文案逐字一致",
+               fbSend ? fbSend.title : @"缺 sp_fbsend");
+
+            // ---- 第9/10/11 共通防线：整页不得再用 NSPopover 承载诊断/反馈 ----
+            // 遍历窗口的**已附着 popover**：showing 的一律算违规；同时断言源码里那两个
+            // 「选项收进气泡」入口已不存在（sp_diagmore / sp_fbmore）。
+            __block NSInteger shownPopovers = 0;
+            for (NSWindow *w in [NSApp windows]) {
+                for (NSWindow *child in w.childWindows)
+                    if ([child isKindOfClass:[NSPanel class]] && child.isVisible) ++shownPopovers;
+            }
+            BOOL hasLegacyPopoverEntry = visIds.count > 0 &&
+                ([visIds containsObject:@"sp_diagmore"] || [visIds containsObject:@"sp_fbmore"]);
+            CK(shownPopovers == 0 && !hasLegacyPopoverEntry,
+               "诊断/反馈不再由 NSPopover 承载（无显示中的气泡、无 ▾ 气泡入口）",
+               [NSString stringWithFormat:@"shownPopovers=%ld legacyEntry=%d",
+                (long)shownPopovers, (int)hasLegacyPopoverEntry]);
+
+            // ---- 第九项收口：点「查看 / 复制诊断摘要」后摘要面板**就地展开**（不是气泡）----
+            NSScrollView *diagSummary = nil;
+            for (NSView *v in allD)
+                if ([v.identifier isEqualToString:@"sp_diagscroll"] && [v isKindOfClass:[NSScrollView class]])
+                    diagSummary = (NSScrollView *)v;
+            CK(diagSummary != nil && !RLPViewActuallyVisible(diagSummary),
+               "诊断摘要面板默认收起（不占页面高度）",
+               diagSummary ? @"ok" : @"缺 sp_diagscroll");
+            if (diagSummary && [svm respondsToSelector:NSSelectorFromString(@"setDiagSummaryVisible:")]) {
+                NSMethodSignature *sig = [svm methodSignatureForSelector:NSSelectorFromString(@"setDiagSummaryVisible:")];
+                NSInvocation *inv = [NSInvocation invocationWithMethodSignature:sig];
+                [inv setTarget:svm];
+                [inv setSelector:NSSelectorFromString(@"setDiagSummaryVisible:")];
+                BOOL yes = YES;
+                [inv setArgument:&yes atIndex:2];
+                [inv invoke];
+                Pump(0.2);
+                CK(RLPViewActuallyVisible(diagSummary) && diagSummary.frame.size.height >= 100,
+                   "调用后摘要面板就地展开且有真实高度（不是零高空气泡）",
+                   [NSString stringWithFormat:@"h=%.0f hidden=%d",
+                    diagSummary.frame.size.height, (int)diagSummary.hidden]);
+            }
+            // 证据截图：诊断页（三按钮 + 内联反馈表单都在页面上）
+            [svm.view layoutSubtreeIfNeeded];
+            Pump(0.2);
+            CK(Snap(svm.view, [outDir stringByAppendingPathComponent:@"21d-settings-diag-inline.png"],
+                    CGSizeMake(1180, 760)), "诊断/反馈内联形态截图已落盘", outDir);
         }
 
         // (6) 文件夹页地址栏（web #fPath/#fGo/#fRoot）：旧实现只有只读路径文字

@@ -201,7 +201,7 @@ static NSStackView *RLPSRow(NSString *label, NSView *control, NSString *hint, RL
     if (hint.length) [box addArrangedSubview:RLPLabel(hint, [NSFont systemFontOfSize:10.5], t.mut2)];
     return box;
 }
-@interface RLPSettingsViewController () <NSPopoverDelegate>
+@interface RLPSettingsViewController () <NSTextViewDelegate>
 @property (nonatomic, strong) NSSegmentedControl *tabs;
 @property (nonatomic, strong) NSView *paneHost;
 @property (nonatomic, assign) RLPSTab tab;
@@ -293,17 +293,14 @@ static NSStackView *RLPSRow(NSString *label, NSView *control, NSString *hint, RL
 @property (nonatomic, strong) NSButton *diagZipBtn;
 @property (nonatomic, strong) NSButton *diagJsonBtn;
 @property (nonatomic, strong) NSButton *diagSummaryBtn;
-@property (nonatomic, strong) NSButton *diagUploadBtn;
 @property (nonatomic, strong) NSTextField *diagMsg;
-// 诊断/反馈的「选项收进气泡窗」（用户实测：这些选项不该平铺在页面上）。
-// 默认隐藏的容器仍留在视图树里（审计/parity 的 identifier 锚点不因气泡而消失）；
-// 点开时把真实控件搬进 NSPopover，关闭时搬回隐藏容器（状态不丢、不复制第二份）。
-@property (nonatomic, strong) NSStackView *diagToolsBox;
+// 2026-11-13（第九/十/十一项）：诊断与反馈**不再用 NSPopover 承载**。
+// 旧实现把真实控件搬进气泡，而 RLPCardController 只钉宽、没给 preferredContentSize，
+// 搬进去的 620pt 宽 NSScrollView 又没有宽度约束 ⟹ 气泡塌成空框（用户截图：空白气泡）。
+// 现在全部内联在设置页上、默认可见。fbBox 保留为 nil 只为不破坏既有引用点；
+// 任何「又把它做回气泡」的改动都会被 audit 的 NSPopover 判据打红。
 @property (nonatomic, strong) NSStackView *fbBox;
-@property (nonatomic, strong) NSPopover *diagPopover;
-@property (nonatomic, strong) NSPopover *fbPopover;
-@property (nonatomic, strong) NSStackView *diagPopoverContent;
-@property (nonatomic, strong) NSStackView *fbPopoverContent;
+@property (nonatomic, strong) NSScrollView *diagSummaryScroll;
 @property (nonatomic, strong) NSTextView *diagSummaryText;
 @property (nonatomic, strong) NSPopUpButton *updChannelPopup;
 @property (nonatomic, strong) NSTextField *verCurLabel;
@@ -633,7 +630,7 @@ static NSString *RLPControlIdentifier(NSString *key) {
             @"sp_loud": @"sp_loud", @"sp_autoanl": @"sp_autoanl",
             @"sp_diagzip": @"sp_diagzip", @"sp_diagjson": @"sp_diagjson",
             @"sp_diagsummary": @"sp_diagsummary", @"sp_diagsummarytext": @"sp_diagsummarytext",
-            @"sp_diagupload": @"sp_diagupload", @"sp_diagmsg": @"sp_diagmsg",
+            @"sp_diagmsg": @"sp_diagmsg",
             @"sp_updchannel": @"sp_updchannel", @"sp_vercur": @"sp_vercur",
             @"sp_updcheck": @"sp_updcheck", @"sp_updinstall": @"sp_updinstall",
             @"sp_updbeta": @"sp_updbeta", @"sp_updmsg": @"sp_updmsg",
@@ -1316,55 +1313,105 @@ static NSString *RLPControlIdentifier(NSString *key) {
 
 /// 诊断页 —— 1:1 对齐 web data-g=diag（ui_script.h:10127 起）。
 /// 三块：诊断包导出 / 软件更新 / 反馈问题。
+- (NSButton *)primaryButton:(NSString *)title
+                     ident:(NSString *)ident
+                    action:(SEL)action {
+    // web .btn.pri：红底白字（--acc 渐变到 --acc2）。原生用实心 accent + 白字，
+    // 与专辑详情页 playAllBtn / 底栏播放键同一个视觉规范，不另立一套。
+    RLPTheme *t = [RLPTheme current];
+    NSButton *b = [NSButton buttonWithTitle:RLPTr(title) target:self action:action];
+    b.bezelStyle = NSBezelStyleRounded;
+    b.bordered = NO;
+    b.identifier = ident;
+    b.wantsLayer = YES;
+    b.layer.cornerRadius = 7;              // web .btn{border-radius:7px}
+    b.layer.backgroundColor = t.accent.CGColor;
+    b.contentTintColor = NSColor.whiteColor;
+    NSMutableParagraphStyle *ps = [[NSMutableParagraphStyle alloc] init];
+    ps.alignment = NSTextAlignmentCenter;
+    b.attributedTitle = [[NSAttributedString alloc] initWithString:RLPTr(title)
+        attributes:@{NSFontAttributeName:[NSFont systemFontOfSize:12.5 weight:NSFontWeightSemibold],
+                     NSForegroundColorAttributeName:NSColor.whiteColor,
+                     NSParagraphStyleAttributeName:ps}];
+    [[b.widthAnchor constraintGreaterThanOrEqualToConstant:132] setActive:YES];
+    [[b.heightAnchor constraintEqualToConstant:30] setActive:YES];
+    return b;
+}
+
+- (NSButton *)secondaryButton:(NSString *)title
+                        ident:(NSString *)ident
+                       action:(SEL)action {
+    RLPTheme *t = [RLPTheme current];
+    NSButton *b = [NSButton buttonWithTitle:RLPTr(title) target:self action:action];
+    b.bezelStyle = NSBezelStyleRounded;
+    b.identifier = ident;
+    b.wantsLayer = YES;
+    b.layer.cornerRadius = 7;
+    b.layer.backgroundColor = t.hov.CGColor;      // web .btn{background:var(--hov)}
+    b.layer.borderWidth = 1;
+    b.layer.borderColor = t.line.CGColor;
+    b.contentTintColor = t.text;
+    return b;
+}
+
+/// 小标题（web .sfld label：11px / --mut）。
+- (NSTextField *)fieldLabel:(NSString *)text {
+    NSTextField *l = RLPLabel(text, [NSFont systemFontOfSize:11 weight:NSFontWeightMedium],
+                              [RLPTheme current].mut);
+    l.translatesAutoresizingMaskIntoConstraints = NO;
+    return l;
+}
+
 - (void)fillDiag:(NSStackView *)stack t:(RLPTheme *)t {
-    // ---- 诊断包 ----
-    RLPSettingsGroup *diagGroup = (RLPSettingsGroup *)RLPSGroup(RLPTr(@"导出诊断包"),
-        RLPTr(@"一个 zip 打包全部日志 / 系统信息 / 设置摘要（已脱敏），不用再到处找日志文件"), t);
+    // ---- 导出诊断包（web #sgroup「导出诊断包」形态：标题行 + 三个按钮 + 两行说明）----
+    //
+    // 2026-11-13 用户反馈（第九/十一项）：旧实现把这三个按钮塞进 NSPopover，
+    // 气泡里是空白。根因是 RLPCardController 只钉了宽 660、没给 preferredContentSize，
+    // 而搬进气泡的 content stack 子控件（620pt 宽的 NSScrollView）没有宽度约束 ⟹
+    // 气泡高度塌成几乎为 0，用户只看到一条空框。现在**不再用气泡**：
+    // 三个按钮直接内联在卡片体里，默认可见（web 就是这样）。
+    RLPSettingsGroup *diagGroup = (RLPSettingsGroup *)RLPSGroup(RLPTr(@"导出诊断包"), nil, t);
+    diagGroup.identifier = @"sp_diaggroup";
     [stack addArrangedSubview:diagGroup];
-    NSMutableArray<NSView *> *diagBoxViews = [NSMutableArray array];
 
-    self.diagZipBtn = [NSButton buttonWithTitle:RLPTr(@"导出诊断包（.zip）") target:self
-                                         action:@selector(onExportDiagZip:)];
-    self.diagZipBtn.bezelStyle = NSBezelStyleRounded;
-    self.diagZipBtn.identifier = @"sp_diagzip";
-
-    self.diagJsonBtn = [NSButton buttonWithTitle:RLPTr(@"只要 JSON") target:self
-                                          action:@selector(onExportDiagJson:)];
-    self.diagJsonBtn.bezelStyle = NSBezelStyleRounded;
-    self.diagJsonBtn.identifier = @"sp_diagjson";
-
-    self.diagSummaryBtn = [NSButton buttonWithTitle:RLPTr(@"查看 / 复制诊断摘要") target:self
-                                             action:@selector(onDiagSummary:)];
-    self.diagSummaryBtn.bezelStyle = NSBezelStyleRounded;
-    self.diagSummaryBtn.identifier = @"sp_diagsummary";
-
-    // web 有「随反馈上传诊断」（sp_diagupload）。原生反馈走 feedback_api 直连后台、
-    // 诊断包随反馈一起提交，所以这个按钮在这里点就是把包交给反馈窗口 —— 同一件事，不删。
-    self.diagUploadBtn = [NSButton buttonWithTitle:RLPTr(@"随反馈上传诊断") target:self
-                                            action:@selector(onDiagUpload:)];
-    self.diagUploadBtn.bezelStyle = NSBezelStyleRounded;
-    self.diagUploadBtn.identifier = @"sp_diagupload";
-
-    self.diagMsg = [self hintForKey:@"sp_diagmsg" width:400];
+    self.diagZipBtn = [self primaryButton:@"导出诊断包（.zip）" ident:@"sp_diagzip"
+                                   action:@selector(onExportDiagZip:)];
+    self.diagJsonBtn = [self secondaryButton:@"只要 JSON" ident:@"sp_diagjson"
+                                      action:@selector(onExportDiagJson:)];
+    self.diagSummaryBtn = [self secondaryButton:@"查看 / 复制诊断摘要" ident:@"sp_diagsummary"
+                                         action:@selector(onDiagSummary:)];
+    // ⛔ 「随反馈上传诊断」（web sp_diagupload）已按用户明确要求删除：
+    //   「诊断包这里我也希望用图示的 web 版的效果，不过要去掉随反馈上传诊断的按钮」。
+    //   反馈表单自带「附带诊断包」勾选，诊断包随反馈一起提交，这个独立按钮是重复入口。
 
     NSStackView *diagRow = [[NSStackView alloc] init];
     diagRow.orientation = NSUserInterfaceLayoutOrientationHorizontal;
+    diagRow.alignment = NSLayoutAttributeCenterY;
     diagRow.spacing = 10;
-    for (NSView *v in @[ self.diagZipBtn, self.diagJsonBtn, self.diagSummaryBtn,
-                         self.diagUploadBtn, self.diagMsg ])
+    for (NSView *v in @[ self.diagZipBtn, self.diagJsonBtn, self.diagSummaryBtn ])
         [diagRow addArrangedSubview:v];
-    [diagBoxViews addObject:diagRow];
+    self.diagMsg = [self hintForKey:@"sp_diagmsg" width:300];
+    [diagRow addArrangedSubview:self.diagMsg];
+    [diagGroup addFullRow:diagRow];
 
+    // 两行说明（web 原文，逐字）：第一行主文案，第二行补「已脱敏」。
+    [diagGroup addNote:RLPTr(@"一个 zip 打包全部日志 / 系统信息 / 设置摘要")];
+    [diagGroup addNote:RLPTr(@"（已脱敏），不用再到处找日志文件")];
+
+    // 诊断摘要正文：默认收起，点「查看 / 复制诊断摘要」后**就地展开**（不再进气泡）。
     self.diagSummaryText = [[NSTextView alloc] initWithFrame:NSMakeRect(0, 0, 620, 200)];
     self.diagSummaryText.identifier = @"sp_diagsummarytext";
     self.diagSummaryText.editable = NO;
     self.diagSummaryText.font = [NSFont monospacedSystemFontOfSize:11 weight:NSFontWeightRegular];
     self.diagSummaryText.translatesAutoresizingMaskIntoConstraints = NO;
     NSScrollView *diagScroll = [[NSScrollView alloc] initWithFrame:NSMakeRect(0, 0, 620, 200)];
+    diagScroll.identifier = @"sp_diagscroll";
     diagScroll.hasVerticalScroller = YES;
     diagScroll.documentView = self.diagSummaryText;
     diagScroll.translatesAutoresizingMaskIntoConstraints = NO;
-    [diagBoxViews addObject:diagScroll];
+    diagScroll.hidden = YES;
+    self.diagSummaryScroll = diagScroll;
+    [diagGroup addFullRow:diagScroll];
     [NSLayoutConstraint activateConstraints:@[
         [diagScroll.widthAnchor constraintEqualToConstant:620],
         [diagScroll.heightAnchor constraintEqualToConstant:200],
@@ -1419,147 +1466,97 @@ static NSString *RLPControlIdentifier(NSString *key) {
     self.updNote.stringValue = RLPTr(@"更新会下载安装包并校验 sha256；校验不通过一律丢弃，绝不安装被篡改的内容。安装完成后会自动重启。");
     [stack addArrangedSubview:self.updNote];
 
-    // ---- 反馈问题 ----
+    // ---- 反馈问题（web 形态：内联填写窗，默认展开，不再用气泡）----
+    //
+    // 2026-11-13 用户明确要求：「填写反馈这里我希望做成 web 版的效果，直接给用户填写窗就行了」。
+    // 旧实现把整块塞进 NSPopover（点「填写反馈 ▾」才出现），而气泡内容是搬进去的空壳
+    // ⟹ 用户看到的是空白框（第九项同源）。现在默认就内联在页面上：
+    //   问题描述标签 + 大文本域（8 行）+ 0 / 16384 字节计数 + 底部一行（附带诊断包 + 发送反馈）。
     RLPSettingsGroup *fbGroup = (RLPSettingsGroup *)RLPSGroup(RLPTr(@"反馈问题"),
         RLPTr(@"直接发送给开发者，可附诊断包"), t);
+    fbGroup.identifier = @"sp_fbgroup";
     [stack addArrangedSubview:fbGroup];
-    NSMutableArray<NSView *> *fbBoxViews = [NSMutableArray array];
 
-    self.fbText = [[NSTextView alloc] initWithFrame:NSMakeRect(0, 0, 620, 110)];
+    NSTextField *fbLabel = [self fieldLabel:RLPTr(@"问题描述")];
+    fbLabel.identifier = @"sp_fblabel";
+    [fbGroup addFullRow:fbLabel];
+
+    self.fbText = [[NSTextView alloc] initWithFrame:NSMakeRect(0, 0, 620, 150)];
     self.fbText.identifier = @"sp_fbtext";
     self.fbText.font = [NSFont systemFontOfSize:12.5];
+    self.fbText.editable = YES;
+    self.fbText.selectable = YES;
+    self.fbText.richText = NO;
+    self.fbText.allowsUndo = YES;
+    // web <textarea rows=5 min-height:88px> 高度按约 8 行给（用户要求「约 8 行」）。
     self.fbText.translatesAutoresizingMaskIntoConstraints = NO;
-    NSScrollView *fbScroll = [[NSScrollView alloc] initWithFrame:NSMakeRect(0, 0, 620, 110)];
+    self.fbText.delegate = self;
+    NSScrollView *fbScroll = [[NSScrollView alloc] initWithFrame:NSMakeRect(0, 0, 620, 150)];
+    fbScroll.identifier = @"sp_fbscroll";
+    // 文本域自身的内部滚动保留（多行输入必须有），但它只吃**焦点内**的滚轮：
+    // 内容不足一行高时不产生可滚区域，不会把页面滚动拐走（task-2 的单层滚动判据会核对）。
     fbScroll.hasVerticalScroller = YES;
+    fbScroll.autohidesScrollers = YES;
+    fbScroll.drawsBackground = YES;
+    fbScroll.backgroundColor = t.field;
+    fbScroll.wantsLayer = YES;
+    fbScroll.layer.cornerRadius = 7;
+    fbScroll.layer.borderWidth = 1;
+    fbScroll.layer.borderColor = t.line.CGColor;
     fbScroll.documentView = self.fbText;
     fbScroll.translatesAutoresizingMaskIntoConstraints = NO;
-    [fbBoxViews addObject:fbScroll];
+    [fbGroup addFullRow:fbScroll];
     [NSLayoutConstraint activateConstraints:@[
         [fbScroll.widthAnchor constraintEqualToConstant:620],
-        [fbScroll.heightAnchor constraintEqualToConstant:110],
+        [fbScroll.heightAnchor constraintEqualToConstant:150],
     ]];
 
     self.fbCount = [self hintForKey:@"sp_fbcount" width:300];
     self.fbCount.stringValue = RLPTr(@"0 / 16384 字节");
-    [fbBoxViews addObject:self.fbCount];
+    [fbGroup addFullRow:self.fbCount];
 
     self.fbChan = [self hintForKey:@"sp_fbchan" width:520];
     self.fbChan.stringValue = RLPTr(@"正在检查反馈通道…");
-    [fbBoxViews addObject:self.fbChan];
+    [fbGroup addFullRow:self.fbChan];
 
+    // 底部操作行：☑ 附带诊断包（默认勾选，web checked）+ 红底「发送反馈」+ 重试探活
     self.fbDiagSwitch = [self switchForKey:@"sp_fbdiag" action:@selector(onFbDiagToggle:)];
     self.fbDiagSwitch.state = NSControlStateValueOn;
-    self.fbSendBtn = [NSButton buttonWithTitle:RLPTr(@"发送反馈") target:self
-                                        action:@selector(onOpenFeedback:)];
-    self.fbSendBtn.bezelStyle = NSBezelStyleRounded;
-    self.fbSendBtn.identifier = @"sp_fbsend";
-    self.fbRetryBtn = [NSButton buttonWithTitle:RLPTr(@"重试探活") target:self
-                                         action:@selector(onFeedbackRetry:)];
-    self.fbRetryBtn.bezelStyle = NSBezelStyleRounded;
-    self.fbRetryBtn.identifier = @"sp_fbretry";
+    self.fbSendBtn = [self primaryButton:@"发送反馈" ident:@"sp_fbsend"
+                                  action:@selector(onOpenFeedback:)];
+    self.fbRetryBtn = [self secondaryButton:@"重试探活" ident:@"sp_fbretry"
+                                     action:@selector(onFeedbackRetry:)];
     self.fbRetryBtn.hidden = YES;
     self.fbMsg = [self hintForKey:@"sp_fbmsg" width:300];
 
     NSStackView *fbRow = [[NSStackView alloc] init];
     fbRow.orientation = NSUserInterfaceLayoutOrientationHorizontal;
+    fbRow.alignment = NSLayoutAttributeCenterY;
     fbRow.spacing = 10;
     [fbRow addArrangedSubview:self.fbDiagSwitch];
     [fbRow addArrangedSubview:RLPLabel(RLPTr(@"附带诊断包"), t.small, t.mut)];
     for (NSView *v in @[ self.fbSendBtn, self.fbRetryBtn, self.fbMsg ])
         [fbRow addArrangedSubview:v];
-    [fbBoxViews addObject:fbRow];
+    [fbGroup addFullRow:fbRow];
 
-    [stack addArrangedSubview:RLPLabel(
-        RLPTr(@"提交前会先探活；通道不可用时按钮保持禁用，绝不假装发送成功。"
-              @"诊断包已脱敏，不会上传你的音乐文件。"), t.small, t.mut)];
+    [fbGroup addNote:RLPTr(@"提交前会先探活；通道不可用时按钮保持禁用，绝不假装发送成功。")];
+    [fbGroup addNote:RLPTr(@"诊断包已脱敏，不会上传你的音乐文件。")];
 
-    // 两个隐藏容器 + 各自的「打开气泡窗」入口行（web 设置页行式交互：选项收进气泡窗）
-    self.diagToolsBox = [self hiddenPopoverBox:diagBoxViews inStack:stack];
-    self.fbBox = [self hiddenPopoverBox:fbBoxViews inStack:stack];
-    NSButton *diagMore = [NSButton buttonWithTitle:RLPTr(@"诊断包选项 ▾")
-                                             target:self action:@selector(onDiagMore:)];
-    diagMore.bezelStyle = NSBezelStyleRounded;
-    diagMore.identifier = @"sp_diagmore";
-    [diagGroup addButtonRow:@[ diagMore ]];
-    NSButton *fbMore = [NSButton buttonWithTitle:RLPTr(@"填写反馈 ▾")
-                                           target:self action:@selector(onFbMore:)];
-    fbMore.bezelStyle = NSBezelStyleRounded;
-    fbMore.identifier = @"sp_fbmore";
-    [fbGroup addButtonRow:@[ fbMore ]];
+    // 旧的「填写反馈 ▾」气泡入口已随内联化一并删除（用户要求直接给填写窗）。
 }
 
-/// 把一组控件放进默认隐藏的容器（仍在视图树里，identifier 锚点不丢），由气泡窗按钮搬进/搬出。
-- (NSStackView *)hiddenPopoverBox:(NSArray<NSView *> *)views inStack:(NSStackView *)stack {
-    NSStackView *box = [[NSStackView alloc] init];
-    box.orientation = NSUserInterfaceLayoutOrientationVertical;
-    box.alignment = NSLayoutAttributeLeading;
-    box.spacing = 10;
-    box.translatesAutoresizingMaskIntoConstraints = NO;
-    box.hidden = YES;
-    for (NSView *v in views) [box addArrangedSubview:v];
-    [stack addArrangedSubview:box];
-    [box.widthAnchor constraintEqualToAnchor:stack.widthAnchor constant:-48].active = YES;
-    return box;
-}
+#pragma mark - 诊断摘要就地展开（不再用气泡）
 
-- (void)moveViewsFrom:(NSStackView *)from to:(NSStackView *)to {
-    for (NSView *v in [from.arrangedSubviews copy]) {
-        [from removeArrangedSubview:v];
-        [to addArrangedSubview:v];
-    }
-}
-
-/// 把隐藏容器里的真实控件搬进一个气泡窗内容容器（不显示）。
-- (NSStackView *)detachPopoverContentFromBox:(NSStackView *)box {
-    NSStackView *content = [[NSStackView alloc] init];
-    content.orientation = NSUserInterfaceLayoutOrientationVertical;
-    content.alignment = NSLayoutAttributeLeading;
-    content.spacing = 10;
-    content.translatesAutoresizingMaskIntoConstraints = NO;
-    [content.widthAnchor constraintGreaterThanOrEqualToConstant:600].active = YES;
-    [self moveViewsFrom:box to:content];
-    return content;
-}
-
-- (void)onDiagMore:(NSButton *)sender {
-    if (self.diagPopover) { [self.diagPopover close]; return; }
-    NSStackView *content = [self detachPopoverContentFromBox:self.diagToolsBox];
-    NSViewController *vc = RLPCardController(content, 660, 120);
-    self.diagPopover = RLPShowCardPopover(sender, vc, 660);
-    self.diagPopover.delegate = self;
-    self.diagPopoverContent = content;
-}
-
-- (void)onFbMore:(NSButton *)sender {
-    if (self.fbPopover) { [self.fbPopover close]; return; }
-    NSStackView *content = [self detachPopoverContentFromBox:self.fbBox];
-    NSViewController *vc = RLPCardController(content, 660, 120);
-    self.fbPopover = RLPShowCardPopover(sender, vc, 660);
-    self.fbPopover.delegate = self;
-    self.fbPopoverContent = content;
-}
-
-/// 审计入口：不显示气泡窗，只做「搬进内容容器」这一步 —— 证明气泡窗里的确实是同一批控件。
-- (NSViewController *)auditDiagPopoverContent {
-    if (self.diagPopover) return nil;
-    NSStackView *content = [self detachPopoverContentFromBox:self.diagToolsBox];
-    self.diagPopoverContent = content;
-    return RLPCardController(content, 660, 120);
-}
-
-- (void)auditRestoreDiagPopover {
-    if (self.diagPopoverContent) [self moveViewsFrom:self.diagPopoverContent to:self.diagToolsBox];
-    self.diagPopoverContent = nil;
-}
-
-- (void)popoverDidClose:(NSNotification *)note {
-    NSPopover *p = note.object;
-    if (p == self.diagPopover) {
-        [self moveViewsFrom:self.diagPopoverContent to:self.diagToolsBox];
-        self.diagPopover = nil; self.diagPopoverContent = nil;
-    } else if (p == self.fbPopover) {
-        [self moveViewsFrom:self.fbPopoverContent to:self.fbBox];
-        self.fbPopover = nil; self.fbPopoverContent = nil;
+/// 「查看 / 复制诊断摘要」：摘要正文就地展开（web 是把结果写进同一块面板，不是弹窗）。
+/// 收起再点一次即可。内容由既有 onDiagSummary: 逻辑填充（不复制第二份）。
+- (void)setDiagSummaryVisible:(BOOL)visible {
+    self.diagSummaryScroll.hidden = !visible;
+    [self.diagSummaryScroll.superview setNeedsLayout:YES];
+    if (visible) {
+        NSView *g = self.diagSummaryScroll.superview;
+        while (g && ![g isKindOfClass:NSClassFromString(@"RLPSettingsGroup")]) g = g.superview;
+        if ([g respondsToSelector:NSSelectorFromString(@"contentDidChange")])
+            [g performSelector:NSSelectorFromString(@"contentDidChange")];
     }
 }
 
@@ -2798,15 +2795,12 @@ static NSInteger RLPSearchIndexForProviderId(NSString *pid) {
             [NSJSONSerialization dataWithJSONObject:json options:NSJSONWritingPrettyPrinted error:nil]
             encoding:NSUTF8StringEncoding] : RLPTr(@"诊断摘要读取失败");
         self_.diagSummaryText.string = text ?: @"";
+        // 就地展开（web 把摘要写进同一块面板，不弹窗）。摘要是空的就不假装"已复制"。
+        [self_ setDiagSummaryVisible:(text.length > 0)];
         [[NSPasteboard generalPasteboard] clearContents];
         [[NSPasteboard generalPasteboard] setString:text ?: @"" forType:NSPasteboardTypeString];
-        self_.diagMsg.stringValue = RLPTr(@"摘要已复制");
+        self_.diagMsg.stringValue = text.length ? RLPTr(@"摘要已复制") : RLPTr(@"诊断摘要读取失败");
     }];
-}
-
-- (void)onDiagUpload:(id)sender {
-    // 「随反馈上传诊断」：原生反馈窗口本来就带诊断包，这里打开它（同一件事，不造第二条上传通道）。
-    [self onOpenFeedback:nil];
 }
 
 /// web #bNet 同语义：**点击才查询** /api/net，结果写进 sp_netmsg。
@@ -2839,6 +2833,24 @@ static NSInteger RLPSearchIndexForProviderId(NSString *pid) {
     [self postKey:@"channel" value:s.indexOfSelectedItem == 1 ? @"cn" : @"global"];
 }
 - (void)onFbDiagToggle:(NSSwitch *)s { (void)s; }
+
+#pragma mark - 反馈字数（web fbCount 同口径：按 UTF-8 **字节**计，上限 16384）
+
+static NSUInteger RLPUTF8Bytes(NSString *s) {
+    return [s lengthOfBytesUsingEncoding:NSUTF8StringEncoding];
+}
+
+- (void)updateFbCount {
+    const NSUInteger n = RLPUTF8Bytes(self.fbText.string ?: @"");
+    self.fbCount.stringValue = [NSString stringWithFormat:@"%lu / 16384 字节", (unsigned long)n];
+    // 超限立刻标红（web fbCount 同一行为），不悄悄截断。
+    self.fbCount.textColor = (n > 16384) ? [RLPTheme current].warn : [RLPTheme current].mut2;
+}
+
+- (void)textDidChange:(NSNotification *)note {
+    if (note.object == self.fbText) [self updateFbCount];
+}
+
 - (void)onFeedbackRetry:(id)sender { [self probeFeedbackChannel]; }
 
 #pragma mark - 主题
@@ -2855,6 +2867,23 @@ static NSInteger RLPSearchIndexForProviderId(NSString *pid) {
         [self.themePopup selectItemAtIndex:[[RLPTheme themeName] isEqualToString:@"light"] ? 1 : 0];
     }
     self.statusLine.textColor = t.mut;
+    // 2026-11-13：诊断/反馈区内联化后新增的主/次按钮要跟着主题走
+    // （否则切浅色后红底主按钮仍是深色主题的 accent 快照）。
+    if (self.diagZipBtn) {
+        self.diagZipBtn.layer.backgroundColor = t.accent.CGColor;
+        self.diagZipBtn.contentTintColor = NSColor.whiteColor;
+    }
+    if (self.fbSendBtn) {
+        self.fbSendBtn.layer.backgroundColor = t.accent.CGColor;
+        self.fbSendBtn.contentTintColor = NSColor.whiteColor;
+    }
+    for (NSButton *b in @[self.diagJsonBtn, self.diagSummaryBtn, self.fbRetryBtn]) {
+        if (!b) continue;
+        b.layer.backgroundColor = t.hov.CGColor;
+        b.layer.borderColor = t.line.CGColor;
+        b.contentTintColor = t.text;
+    }
+    if (self.fbCount) [self updateFbCount];
     [self.eqView applyTheme];
     [self.inputView applyTheme];
     [self.castView applyTheme];
