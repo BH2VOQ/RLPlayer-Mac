@@ -214,3 +214,28 @@ behavior actionable=0；i18n **2318 pairs**。
 **如实挂账**：第 4 张「作品」卡、抽屉 vs 气泡、`npSummHint`/`nprailempty` 未做。
 
 **下一步**：轮次 2 = 正在播放页「音频分析」面板对齐 web（单分段控件/卡片排版/展开后指标网格）。
+
+### 2026-11-14 05:42 —— 轮次 2（1.1.7.25）：正在播放音频分析面板 = web #npAnal
+
+**现场**：基线 `2b88e1d`（1.1.7.24）；全绿后开改。任务：头部独立小标题+单框分段控件+右对齐状态；
+摘要卡 10.5/700 kern .8、摘要 11.5/1.45、内边距 7/9/8、按文本长高、多声道徽章；展开档保留三卡、
+卡内 2 列标签-值指标网格（替代旧「藏卡+纯文本」）。
+
+**红→绿**：新 ctest `native_analysis_panel`（129 条）旧码 **29P/37F** → 新码 **129P/0F**；
+日志 `native-analysis-panel-red-20261114.log` / `-green-20261114.log`；Lead 独立复跑 129/0。
+
+**实现**：`RLPAnalysisSummary` 新增 health→行模型 API（sec/row/warn/note，L0/L1/L2，复用既有 NA/-300 口径）；
+`RLPNowPlayingViewController` 新 `RLPNPAnalBody` 卡区 + `RLPAnlCardView` 子视图卡 + 单框分段 + 卡内网格排版 + 滚轮滚动；
+旧自绘 NSButton 卡与「展开藏卡换文本」路径移除；无 health 的等价文本解释保留。
+
+**门禁（提交前，Lead 复跑）**：build 0 error（`native-analysis-panel-build.log`）；
+ctest **188/188**（370.55s，`native-analysis-panel-lead-ctest-188.log`）；
+audit **246/0**（`native-analysis-panel-audit-246.log`）；parity missing=0 removed=2 na=16 ok；
+behavior actionable=0；i18n OK（2318）。
+
+**证据**：`evidence/native-analysis-panel-20261114.md`。
+**如实挂账**：卡区无可见滚动条；多声道徽章按 web channels>2（任务文字写 >1，取 web）；
+i18n 存量缺「可用性/THD+N 方法/side-mid」；L1/L2 仅离屏几何（无 health 截图）；
+audit 5 跑中 1 次在专辑详情导航处偶发段错误（未复现，其余 246/0）；实机未验。
+
+**下一步**：轮次 3 = 曲目页行几何/格式列对齐 web `.trow-track`。
