@@ -6191,8 +6191,15 @@ static std::mutex g_favMu;
 static std::set<std::string> g_favFiles;
 static bool g_favLoaded = false;
 
+/// 收藏路径规范形 = **'/' 分隔**（macOS 唯一实现）。
+///
+/// 历史坑：这里曾是 Windows 时代的「'/' 统一成 '\\'」，Windows 平台层删掉后没改回来 ⟹
+/// 收藏落盘成 `\var\folders\…`，而曲库/前端用的都是 `/var/folders/…`：
+///   · 前端 FAV_SET.has(path) 永远 false ⟹ 行内心形恒空心、最爱页条目解析成整串路径；
+///   · 判据侧 2026-11-13 在曲目页点心形后查 /api/fav/list 直接对不上（红出来的真故障）。
+/// 读回时把旧文件的 `\\` 换回 `/`，老用户的历史收藏继续有效（不用手工迁移）。
 static std::string normalize_fav_path(std::string p) {
-    for (char& c : p) { if (c == '/') c = '\\'; }
+    for (char& c : p) { if (c == '\\') c = '/'; }
     return p;
 }
 

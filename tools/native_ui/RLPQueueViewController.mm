@@ -26,6 +26,7 @@ static NSString *const kQueueDragType = @"RLPQueueRowDrag";
 
 @interface RLPQueueViewController () <NSTableViewDataSource, NSTableViewDelegate>
 @property (nonatomic, strong) NSTableView *table;
+@property (nonatomic, strong) NSScrollView *tableScroll;
 @property (nonatomic, strong) NSTextField *empty;
 @property (nonatomic, copy) NSArray<NSString *> *paths;
 @property (nonatomic, copy) NSArray<NSDictionary *> *metas;
@@ -74,14 +75,23 @@ static NSString *const kQueueDragType = @"RLPQueueRowDrag";
     self.table.usesAlternatingRowBackgroundColors = NO;
     self.table.rowHeight = 26;
     self.table.backgroundColor = t.bg;
-    NSArray *titles = @[ @"#", RLPTr(@"标题"), RLPTr(@"艺术家"), RLPTr(@"专辑"), RLPTr(@"时长") ];
-    NSArray *ws = @[ @40, @320, @180, @200, @70 ];
+    // 与 web 队列行同比：句首 #、标题、艺术家、专辑、时长，**行尾 × 移除**
+    //（web .qdel 每个队列行常显一个 ×；旧实现只有右键菜单，用户看不到"怎么删"）。
+    NSArray *titles = @[ @"#", RLPTr(@"标题"), RLPTr(@"艺术家"), RLPTr(@"专辑"), RLPTr(@"时长"), @"" ];
+    // 列宽总和必须明显小于可视宽度（922@1180）：NSTableView 的行内 cell 间距会再吃掉几十 pt，
+    // 贴着上限算会让最后一列（行尾 ×）刚好落到视口外（2026-11-13 实测：x=1157 > 可视右沿）。
+    NSArray *ws = @[ @34, @300, @150, @170, @64, @28 ];
     for (NSInteger i = 0; i < (NSInteger)titles.count; ++i) {
         NSTableColumn *c = [[NSTableColumn alloc] initWithIdentifier:[NSString stringWithFormat:@"c%ld", (long)i]];
         c.title = titles[i];
+        c.minWidth = 0; c.maxWidth = 10000;
         c.width = [ws[i] doubleValue];
         [self.table addTableColumn:c];
     }
+    // 关键：**不要**让 NSTableView 把多余宽度摊到各列。
+    // 默认(均匀)分配会把行尾 × 列推到表格右边界之外 —— 表格比滚动视口宽时，
+    // 这一列就整列看不见（2026-11-13 截图抓到的：x=1157 而可视右沿只有 1150）。
+    self.table.columnAutoresizingStyle = NSTableViewNoColumnAutoresizing;
     // 与 web 版一致：**单击**即触发（web 的行 onclick 就是单击）。
     // 双击保留兼容；两者指向同一动作，重复触发幂等。
     self.table.action = @selector(onDouble:);
@@ -112,6 +122,7 @@ static NSString *const kQueueDragType = @"RLPQueueRowDrag";
     self.table.draggingDestinationFeedbackStyle = NSTableViewDraggingDestinationFeedbackStyleGap;
 
     NSScrollView *sc = [[NSScrollView alloc] initWithFrame:NSZeroRect];
+    self.tableScroll = sc;
     sc.documentView = self.table;
     sc.hasVerticalScroller = YES;
     sc.drawsBackground = NO;
@@ -136,6 +147,19 @@ static NSString *const kQueueDragType = @"RLPQueueRowDrag";
         [self.empty.centerXAnchor constraintEqualToAnchor:sc.centerXAnchor],
         [self.empty.centerYAnchor constraintEqualToAnchor:sc.centerYAnchor],
     ]];
+}
+
+#pragma mark - 布局
+
+/// 表格宽度必须等于滚动视口的宽度：NSTableView 的列布局按**表格自己的 frame** 算，
+/// 表格比视口宽时，最右侧的列会落到视口外（行尾 × 就是这么消失的）。
+- (void)viewDidLayout {
+    [super viewDidLayout];
+    NSScrollView *sc = self.tableScroll;
+    if (!sc) return;
+    const NSSize clip = sc.contentSize;
+    if (clip.width < 1 || clip.height < 1) return;
+    [self syncTableWidth];
 }
 
 #pragma mark - 表格
@@ -163,9 +187,51 @@ static NSString *const kQueueDragType = @"RLPQueueRowDrag";
     else if ([ident isEqualToString:@"c2"]) l.stringValue = [m[@"a"] isKindOfClass:[NSString class]] ? m[@"a"] : @"";
     else if ([ident isEqualToString:@"c3"]) l.stringValue = [m[@"al"] isKindOfClass:[NSString class]] ? m[@"al"] : @"";
     else l.stringValue = RLPFmtDuration([m[@"d"] respondsToSelector:@selector(doubleValue)] ? [m[@"d"] doubleValue] : 0);
+    if ([ident isEqualToString:@"c5"]) {
+        // 行尾 ×（web .qdel）：点一下**只删这一行**，不触发播放（行点击由 action 处理）。
+        NSTableCellView *cell = [tv makeViewWithIdentifier:@"qdel" owner:self];
+        if (!cell) {
+            cell = [[NSTableCellView alloc] initWithFrame:NSMakeRect(0, 0, 34, 26)];
+            cell.identifier = @"qdel";
+            NSButton *b = [NSButton buttonWithTitle:@"\u00d7" target:self action:@selector(onRowDelete:)];
+            b.bordered = NO;
+            b.identifier = @"q.del";
+            b.font = [NSFont systemFontOfSize:13];
+            b.tag = -1;
+            b.frame = NSMakeRect(4, 1, 26, 24);
+            b.autoresizingMask = NSViewMinXMargin;
+            [cell addSubview:b];
+            cell.textField = nil;
+        }
+        NSButton *btn = nil;
+        for (NSView *v in cell.subviews) if ([v isKindOfClass:[NSButton class]]) btn = (NSButton *)v;
+        btn.tag = row;
+        btn.contentTintColor = t.mut;
+        btn.toolTip = RLPTr(@"从队列移除");
+        cell.frame = NSMakeRect(0, 0, 34, tv.rowHeight);
+        return cell;
+    }
     // 当前曲用强调色标出来（用户要知道"正在播的是哪一行"）
     l.textColor = (row == self.currentIndex) ? t.accent : t.text;
     return l;
+}
+
+/// 行尾 ×：只删这一行（web .qdel），与右键菜单是两条入口，语义相同。
+- (void)onRowDelete:(NSButton *)sender {
+    const NSInteger row = sender.tag;
+    if (row < 0 || row >= (NSInteger)self.paths.count) return;
+    NSString *url = [NSString stringWithFormat:@"/api/qdel?i=%ld", (long)row];
+    __weak __typeof__(self) weakSelf = self;
+    [[RLPCoreClient shared] postJSON:url body:nil completion:^(NSDictionary * _Nullable json) {
+        __typeof__(self) self_ = weakSelf;
+        if (!self_) return;
+        if (json && ![json[@"ok"] boolValue]) {
+            RLPToast([json[@"error"] isKindOfClass:[NSString class]] ? json[@"error"] : RLPTr(@"移除失败"));
+        } else {
+            RLPToast(RLPTr(@"已从队列移除"));
+        }
+        [self_ reloadData];
+    }];
 }
 
 #pragma mark - 拖动排序
@@ -330,6 +396,18 @@ static NSString *const kQueueDragType = @"RLPQueueRowDrag";
 
 - (void)activate { [self reloadData]; }
 
+/// 让表格宽度严格等于滚动视口宽度（见 viewDidLayout 注释）。
+- (void)syncTableWidth {
+    NSScrollView *sc = self.tableScroll;
+    if (!sc || !self.table) return;
+    const NSSize cs = sc.contentSize;
+    if (cs.width < 1) return;
+    NSRect f = self.table.frame;
+    if (fabs(f.size.width - cs.width) > 0.5) f.size.width = cs.width;
+    f.size.height = MAX(cs.height, (CGFloat)self.paths.count * self.table.rowHeight);
+    if (!NSEqualRects(f, self.table.frame)) self.table.frame = f;
+}
+
 - (void)reloadData {
     if (![RLPCoreClient shared].started) { [self setSubtitle:RLPTr(@"核心未启动")]; return; }
     const NSUInteger seq = ++self.seq;
@@ -357,6 +435,7 @@ static NSString *const kQueueDragType = @"RLPQueueRowDrag";
         NSString *mn = names[MIN(MAX(self_.mode, 0), 3)];
         [self_ setSubtitle:[NSString stringWithFormat:RLPTr(@"%ld 首 · 当前第 %ld 首 · %@"),
                             (long)ps.count, (long)(self_.currentIndex + 1), mn]];
+        [self_ syncTableWidth];
     }];
 }
 

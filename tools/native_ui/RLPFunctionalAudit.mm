@@ -280,6 +280,18 @@ int RLPRunFunctionalAudit(NSString *outDir) {
     // 首次扫描把空库当真，专辑数恒为 0，后面所有页面断言都失去意义。
     setenv("RLPLAYER_LIBRARY_DIR", root.fileSystemRepresentation, 1);
     setenv("RLPLAYER_COVER_DIR", [root stringByAppendingPathComponent:@"covers"].fileSystemRepresentation, 1);
+    // 历史收藏文件（Windows 时代遗留的 '\' 分隔路径）：必须在读回时被规范成 '/'，
+    // 否则老用户的收藏在 macOS 上永远对不上曲库（详见 rtaweb.cpp normalize_fav_path 注释）。
+    {
+        NSString *legacyPath = [music stringByAppendingPathComponent:@"Kind of Blue/01.aiff"];
+        NSString *legacyForm = [legacyPath stringByReplacingOccurrencesOfString:@"/" withString:@"\\"];
+        NSData *favJson = [NSJSONSerialization dataWithJSONObject:@[ legacyForm ] options:0 error:nil];
+        NSString *legacyFile = [[root stringByAppendingPathComponent:@"state"]
+                                stringByAppendingPathComponent:@"rlplayer-favs.json"];
+        [[NSFileManager defaultManager] createDirectoryAtPath:[legacyFile stringByDeletingLastPathComponent]
+                                 withIntermediateDirectories:YES attributes:nil error:nil];
+        if (favJson) [favJson writeToFile:legacyFile atomically:YES];
+    }
 
     NSApplication *app = [NSApplication sharedApplication];
     [app setActivationPolicy:NSApplicationActivationPolicyAccessory];  // 不抢焦点、不进 Dock
@@ -298,6 +310,25 @@ int RLPRunFunctionalAudit(NSString *outDir) {
     [wc.window layoutIfNeeded];
     [wc loadInitialData];
     Pump(1.2);
+
+    // ---- ⓪ 历史收藏文件迁移：'\' 分隔的旧路径读回后必须是 '/'（判据先红后绿的那条）----
+    {
+        NSDictionary *favs = [[RLPCoreClient shared] jsonWithMethod:@"GET" path:@"/api/fav/list" body:nil];
+        NSArray *files = [favs[@"files"] isKindOfClass:[NSArray class]] ? favs[@"files"] : @[];
+        CK(files.count == 1, "旧收藏文件被读进来了（1 条）",
+           [NSString stringWithFormat:@"n=%ld", (long)files.count]);
+        NSString *f0 = files.count ? [files[0] description] : @"";
+        CK([f0 hasPrefix:@"/"] && ![f0 containsString:@"\\"],
+           "旧收藏路径被规范成正斜杠（Windows 遗留 '\' 已迁移）", f0);
+        CK([f0 containsString:@"/Kind of Blue/01.aiff"], "迁移后的路径与曲库路径同形", f0);
+        // 清掉这条，后面的空态断言要干净的收藏集合
+        [[RLPCoreClient shared] postJSON:[NSString stringWithFormat:@"/api/fav?file=%@&on=0", RLPEnc(f0)]
+                                   body:@"" completion:nil];
+        Pump(0.4);
+        NSDictionary *empty = [[RLPCoreClient shared] jsonWithMethod:@"GET" path:@"/api/fav/list" body:nil];
+        CK([empty[@"files"] isKindOfClass:[NSArray class]] && [empty[@"files"] count] == 0,
+           "取消收藏后列表清空", [NSString stringWithFormat:@"n=%lu", (unsigned long)[empty[@"files"] count]]);
+    }
 
     // ---- ① 专辑页真的有卡片，不是空壳 ----
     // 1.1.7.1：首页不再是专辑页（聆听模式首页=聆听室），所以必须**显式导航到专辑页**
@@ -631,6 +662,79 @@ int RLPRunFunctionalAudit(NSString *outDir) {
         }
     }
 
+    // ---- ②e 曲目页行内动作：收藏心形 + 入队「+」（web .trow-track 第 2 / 第 7 列）----
+    // 旧实现只有 5 列，收藏/入队**只能右键** ⟹ 页面上等于没有入口（用户不会去右键试）。
+    {
+        [wc.sidebar selectKey:@"tracks"];
+        Pump(0.9);
+        RLPTracksViewController *tv = [wc.currentContent isKindOfClass:[RLPTracksViewController class]]
+                                    ? (RLPTracksViewController *)wc.currentContent : nil;
+        CK(tv != nil, "能进曲目页", NSStringFromClass(wc.currentContent.class));
+        if (tv) {
+            NSMutableArray<NSView *> *vv = [NSMutableArray array];
+            CollectAllViews(tv.view, vv);
+            NSInteger favBtns = 0, addBtns = 0, favUsable = 0, addUsable = 0;
+            for (NSView *v in vv) {
+                if ([v.identifier isEqualToString:@"track.fav"]) { ++favBtns; if (v.frame.size.width > 0 && v.frame.size.height > 0) ++favUsable; }
+                if ([v.identifier isEqualToString:@"track.add"]) { ++addBtns; if (v.frame.size.width > 0 && v.frame.size.height > 0) ++addUsable; }
+            }
+            NSArray *rows = [tv valueForKey:@"_tracks"];
+            CK(rows.count > 0, "曲目页有真实数据（判据前提）", [NSString stringWithFormat:@"rows=%ld", (long)rows.count]);
+            CK(favBtns >= 1 && addBtns >= 1, "每行都有收藏心形与入队 +（web 第 2/7 列）",
+               [NSString stringWithFormat:@"fav=%ld add=%ld", (long)favBtns, (long)addBtns]);
+            CK(favUsable >= 1 && addUsable >= 1, "行内按钮有真实尺寸（不是隐形控件）",
+               [NSString stringWithFormat:@"favUsable=%ld addUsable=%ld", (long)favUsable, (long)addUsable]);
+            CK(Snap(wc.window.contentView, [outDir stringByAppendingPathComponent:@"04b-tracks-actions.png"],
+                    CGSizeMake(1180, 760)), "曲目页行内动作截图已落盘", outDir);
+            // 点心形 → 后端真的收藏（不是只换图标）
+            // 必须拿**第 0 行**的按钮（tag 就是行号）：随便抓一个可能是回收 cell 上的旧 tag，
+            // 点了等于没点（第一版判据就是这么假红的）。
+            NSInteger maxFavTag = -1, maxAddTag = -1;
+            for (NSView *v in vv) {
+                if ([v.identifier isEqualToString:@"track.fav"]) maxFavTag = MAX(maxFavTag, ((NSButton *)v).tag);
+                if ([v.identifier isEqualToString:@"track.add"]) maxAddTag = MAX(maxAddTag, ((NSButton *)v).tag);
+            }
+            CK(maxFavTag >= 0 && maxAddTag >= 0, "行内按钮的 tag 指向真实行号（点击可落到那一行）",
+               [NSString stringWithFormat:@"favTag=%ld addTag=%ld", (long)maxFavTag, (long)maxAddTag]);
+            NSString *firstPath = rows.count ? [[rows[0] valueForKey:@"path"] description] : nil;
+            NSButton *favBtn = nil, *addBtn = nil;
+            for (NSView *v in vv) {
+                if ([v.identifier isEqualToString:@"track.fav"] && ((NSButton *)v).tag == 0) favBtn = (NSButton *)v;
+                if ([v.identifier isEqualToString:@"track.add"] && ((NSButton *)v).tag == 0) addBtn = (NSButton *)v;
+            }
+            CK(favBtn != nil && addBtn != nil, "第 0 行的心形与 + 都能定位到", @"tag==0 的按钮缺失");
+            if (favBtn && firstPath.length) {
+                [favBtn performClick:nil];
+                Pump(0.7);
+                NSDictionary *favJson = [[RLPCoreClient shared] jsonWithMethod:@"GET" path:@"/api/fav/list" body:nil];
+                BOOL nowFav = NO;
+                for (id f in (favJson[@"files"] ?: @[])) {
+                    NSString *p = [f isKindOfClass:[NSString class]] ? f : ([f isKindOfClass:[NSDictionary class]] ? f[@"file"] : nil);
+                    if ([p isEqual:firstPath]) nowFav = YES;
+                }
+                CK(nowFav, "点心形后该曲真的进了收藏（/api/fav?on=1）", firstPath);
+                // 再点一次取消，恢复现场（表格已 reload，按钮对象是新的一批 ⟹ 重新取）
+                NSMutableArray<NSView *> *vv2 = [NSMutableArray array];
+                CollectAllViews(tv.view, vv2);
+                NSButton *favBtn2 = nil;
+                for (NSView *v in vv2)
+                    if ([v.identifier isEqualToString:@"track.fav"] && ((NSButton *)v).tag == 0) favBtn2 = (NSButton *)v;
+                if (favBtn2) [favBtn2 performClick:nil];
+                Pump(0.6);
+            }
+            if (addBtn && firstPath.length) {
+                [addBtn performClick:nil];
+                Pump(0.6);
+                NSDictionary *queue = [[RLPCoreClient shared] jsonWithMethod:@"GET" path:@"/api/queue" body:nil];
+                NSArray *items = [queue[@"items"] isKindOfClass:[NSArray class]] ? queue[@"items"] : @[];
+                BOOL queued = [items containsObject:firstPath];
+                CK(queued, "点 + 后该曲真的进了队列（/api/add）", firstPath);
+                [[RLPCoreClient shared] postJSON:@"/api/clear" body:nil completion:nil];
+                Pump(0.4);
+            }
+        }
+    }
+
     // ---- ③a 空表页不许出现横向灰条（NSTableView 交替行底色在 0 行时的副作用）----
     // web 的队列/收藏都是纯背景 + 居中空态；交替色一开，空表区域会被铺成一屏条带
     // （2026-11-13 队列页截图里 8 条灰带就是这么来的，用户会当成"页面坏掉"）。
@@ -677,6 +781,69 @@ int RLPRunFunctionalAudit(NSString *outDir) {
                     [((NSTextField *)v).stringValue containsString:@"队列是空的"]) { qe = (NSTextField *)v; break; }
             CK(qe != nil && [qe.stringValue containsString:@"加入队列"],
                "空队列空态含下一步提示（web 第二行）", qe ? qe.stringValue : @"缺空态");
+        }
+
+        // 队列行必须带行尾 ×（web .qdel）；点一下只删这一行，不是"点了没反应"。
+        // 先真的入队 2 首（/api/add，与专辑/曲目页「加入队列」同一条后端路径）。
+        {
+            NSArray *albumList = [albs[@"albums"] isKindOfClass:[NSArray class]] ? albs[@"albums"] : @[];
+            NSString *albumKey = albumList.count ? albumList[0][@"k"] : nil;
+            NSDictionary *detail = albumKey.length ? [[RLPCoreClient shared] jsonWithMethod:@"GET"
+                path:[NSString stringWithFormat:@"/api/lib/album?k=%@", RLPEnc(albumKey)] body:nil] : nil;
+            NSArray *tracks = [detail[@"tracks"] isKindOfClass:[NSArray class]] ? detail[@"tracks"] : @[];
+            NSInteger used = MIN(2, (NSInteger)tracks.count);
+            for (NSInteger i = 0; i < used; ++i) {
+                NSString *p = tracks[(NSUInteger)i][@"path"];
+                if ([p isKindOfClass:[NSString class]]) RLPEnqueuePath(p);
+            }
+            Pump(0.7);
+            [[NSNotificationCenter defaultCenter] postNotificationName:@"RLPNavigateKeyNotification" object:@"queue"];
+            Pump(0.6);
+            RLPQueueViewController *qp = [wc.currentContent isKindOfClass:[RLPQueueViewController class]]
+                                       ? (RLPQueueViewController *)wc.currentContent : nil;
+            NSArray *paths = [qp valueForKey:@"paths"];
+            CK(paths.count >= 1, "队列里至少有 1 首（入队真的落到后端）",
+               [NSString stringWithFormat:@"n=%ld", (long)paths.count]);
+            NSMutableArray<NSView *> *rv = [NSMutableArray array];
+            CollectAllViews(qp.view, rv);
+            NSInteger delButtons = 0, delUsable = 0;
+            NSTableView *qtv = nil;
+            for (NSView *v in rv) if ([v isKindOfClass:[NSTableView class]]) { qtv = (NSTableView *)v; break; }
+            NSMutableArray<NSNumber *> *delXs = [NSMutableArray array];
+            for (NSView *v in rv) if ([v.identifier isEqualToString:@"q.del"]) {
+                ++delButtons;
+                // 存在 ≠ 看得见：必须真的有尺寸，并且落在表格可见区域内
+                if (v.frame.size.width > 0 && v.frame.size.height > 0) ++delUsable;
+                if (qtv) {
+                    NSRect inTable = [v convertRect:v.bounds toView:qtv];
+                    [delXs addObject:@(inTable.origin.x)];
+                }
+            }
+            CK(delButtons >= 1, "队列每行都有行尾 ×（web .qdel）",
+               [NSString stringWithFormat:@"btns=%ld", (long)delButtons]);
+            CK(delUsable == delButtons, "行尾 × 有真实尺寸（不是 0 宽 0 高的隐形控件）",
+               [NSString stringWithFormat:@"usable=%ld/%ld", (long)delUsable, (long)delButtons]);
+            CK(delXs.count && [delXs[0] doubleValue] > 0 &&
+               [delXs[0] doubleValue] < qtv.frame.size.width,
+               "行尾 × 落在表格可见宽度内（没有被挤到列外）",
+               [NSString stringWithFormat:@"x=%@ tableW=%.0f", delXs.firstObject ?: @(-1), qtv ? qtv.frame.size.width : 0]);
+            CK(Snap(wc.window.contentView, [outDir stringByAppendingPathComponent:@"07b-queue-rows.png"],
+                    CGSizeMake(1180, 760)), "队列行截图已落盘", outDir);
+            // 点第一行的 ×：必须真的少一行（旧实现这一列根本不存在 ⟹ 判据红）
+            if (delButtons >= 1) {
+                NSButton *del = nil;
+                for (NSView *v in rv) if ([v.identifier isEqualToString:@"q.del"]) { del = (NSButton *)v; break; }
+                const NSInteger before = (NSInteger)paths.count;
+                [del performClick:nil];
+                Pump(0.7);
+                NSArray *after = [qp valueForKey:@"paths"];
+                CK((NSInteger)after.count == before - 1,
+                   "点行尾 × 后队列少一首（真的调 /api/qdel）",
+                   [NSString stringWithFormat:@"before=%ld after=%ld", (long)before, (long)after.count]);
+            }
+            // 清空，后面的断言从空队列开始（与 web 清空按钮同一端点）
+            [[RLPCoreClient shared] postJSON:@"/api/clear" body:nil completion:nil];
+            Pump(0.5);
         }
     }
 

@@ -15,6 +15,10 @@ static NSString * const kColTitle = @"ColTitle";
 static NSString * const kColArtist = @"ColArtist";
 static NSString * const kColAlbum = @"ColAlbum";
 static NSString * const kColDuration = @"ColDuration";
+// web .trow-track 的第 2 列（收藏心形 24px）与第 7 列（入队 + 26px）。
+// 旧实现只有 5 列：页面上**没有任何收藏/入队入口**，只能右键——等于没有入口。
+static NSString * const kColFav = @"ColFav";
+static NSString * const kColAdd = @"ColAdd";
 
 #pragma mark - 支持右键选中行的表格视图
 
@@ -62,6 +66,7 @@ static NSString * const kColDuration = @"ColDuration";
     BOOL _hasLoaded;
     NSInteger _searchSeq;
     NSTimer *_debounceTimer;
+    NSMutableSet<NSString *> *_favoritePaths;   // /api/fav/list 的路径集合（心形实心/空心）
 }
 
 - (instancetype)init {
@@ -72,6 +77,7 @@ static NSString * const kColDuration = @"ColDuration";
         _totalCount = 0;
         _hasLoaded = NO;
         _searchSeq = 0;
+        _favoritePaths = [NSMutableSet set];
     }
     return self;
 }
@@ -84,6 +90,7 @@ static NSString * const kColDuration = @"ColDuration";
         _totalCount = 0;
         _hasLoaded = NO;
         _searchSeq = 0;
+        _favoritePaths = [NSMutableSet set];
     }
     return self;
 }
@@ -152,6 +159,13 @@ static NSString * const kColDuration = @"ColDuration";
     colIndex.resizingMask = NSTableColumnNoResizing;
     [_tableView addTableColumn:colIndex];
 
+    // web：第 2 列是收藏心形（24px，实心=已收藏）
+    NSTableColumn *colFav = [[NSTableColumn alloc] initWithIdentifier:kColFav];
+    colFav.title = @"";
+    colFav.width = 26.0; colFav.minWidth = 24.0; colFav.maxWidth = 30.0;
+    colFav.resizingMask = NSTableColumnNoResizing;
+    [_tableView addTableColumn:colFav];
+
     NSTableColumn *colTitle = [[NSTableColumn alloc] initWithIdentifier:kColTitle];
     colTitle.title = RLPTr(@"标题");
     colTitle.width = 240.0;
@@ -180,6 +194,13 @@ static NSString * const kColDuration = @"ColDuration";
     colDuration.maxWidth = 90.0;
     colDuration.resizingMask = NSTableColumnNoResizing;
     [_tableView addTableColumn:colDuration];
+
+    // web：第 7 列是「+」入队（26px）
+    NSTableColumn *colAdd = [[NSTableColumn alloc] initWithIdentifier:kColAdd];
+    colAdd.title = @"";
+    colAdd.width = 30.0; colAdd.minWidth = 26.0; colAdd.maxWidth = 34.0;
+    colAdd.resizingMask = NSTableColumnNoResizing;
+    [_tableView addTableColumn:colAdd];
 
     _scrollView = [[NSScrollView alloc] initWithFrame:NSZeroRect];
     _scrollView.drawsBackground = NO;
@@ -321,6 +342,24 @@ static NSString * const kColDuration = @"ColDuration";
         }
 
         [self_ updateFooterVisibility];
+        [self_ loadFavoriteSet];
+        [self_->_tableView reloadData];
+    }];
+}
+
+/// 收藏集合（/api/fav/list）——心形实心/空心的事实源；不自己猜。
+- (void)loadFavoriteSet {
+    __weak __typeof__(self) weakSelf = self;
+    [[RLPCoreClient shared] getJSON:@"/api/fav/list" completion:^(NSDictionary * _Nullable json) {
+        __typeof__(self) self_ = weakSelf;
+        if (!self_) return;
+        [self_->_favoritePaths removeAllObjects];
+        NSArray *files = [json[@"files"] isKindOfClass:[NSArray class]] ? json[@"files"] : @[];
+        for (id f in files) {
+            if ([f isKindOfClass:[NSString class]]) [self_->_favoritePaths addObject:f];
+            else if ([f isKindOfClass:[NSDictionary class]] && [f[@"file"] isKindOfClass:[NSString class]])
+                [self_->_favoritePaths addObject:f[@"file"]];
+        }
         [self_->_tableView reloadData];
     }];
 }
@@ -442,6 +481,34 @@ static NSString * const kColDuration = @"ColDuration";
     RLPTrack *t = _tracks[(NSUInteger)row];
     RLPTheme *theme = [RLPTheme current];
 
+    if ([tableColumn.identifier isEqualToString:kColFav] || [tableColumn.identifier isEqualToString:kColAdd]) {
+        const BOOL isFavCol = [tableColumn.identifier isEqualToString:kColFav];
+        NSTableCellView *bc = [tableView makeViewWithIdentifier:tableColumn.identifier owner:self];
+        if (!bc) {
+            bc = [[NSTableCellView alloc] initWithFrame:NSMakeRect(0, 0, tableColumn.width, 24)];
+            bc.identifier = tableColumn.identifier;
+            NSButton *b = [NSButton buttonWithTitle:@"" target:self
+                                             action:isFavCol ? @selector(onRowFav:) : @selector(onRowAdd:)];
+            b.bordered = NO;
+            b.imagePosition = NSImageOnly;
+            b.imageScaling = NSImageScaleProportionallyDown;
+            b.identifier = isFavCol ? @"track.fav" : @"track.add";
+            b.frame = NSMakeRect(2, 1, tableColumn.width - 4, 22);
+            b.autoresizingMask = NSViewWidthSizable;
+            [bc addSubview:b];
+            bc.textField = nil;
+        }
+        NSButton *btn = nil;
+        for (NSView *v in bc.subviews) if ([v isKindOfClass:[NSButton class]]) btn = (NSButton *)v;
+        const BOOL fav = [_favoritePaths containsObject:t.path];
+        btn.tag = row;
+        btn.image = [NSImage imageWithSystemSymbolName:(isFavCol ? (fav ? @"heart.fill" : @"heart") : @"plus")
+                              accessibilityDescription:isFavCol ? RLPTr(@"收藏") : RLPTr(@"加入队列")];
+        btn.contentTintColor = fav ? [RLPTheme current].accent : [RLPTheme current].mut;
+        btn.toolTip = isFavCol ? (fav ? RLPTr(@"取消收藏") : RLPTr(@"收藏")) : RLPTr(@"加入队列");
+        return bc;
+    }
+
     NSTableCellView *cell = [tableView makeViewWithIdentifier:tableColumn.identifier owner:self];
     if (!cell) {
         cell = [[NSTableCellView alloc] initWithFrame:NSMakeRect(0, 0, tableColumn.width, 24)];
@@ -489,6 +556,36 @@ static NSString * const kColDuration = @"ColDuration";
     }
 
     return cell;
+}
+
+#pragma mark - 行内动作（web favIconHtml / 第 7 列 +）
+
+- (void)onRowFav:(NSButton *)sender {
+    const NSInteger row = sender.tag;
+    if (row < 0 || row >= (NSInteger)_tracks.count) return;
+    RLPTrack *t = _tracks[(NSUInteger)row];
+    const BOOL was = [_favoritePaths containsObject:t.path];
+    NSString *url = [NSString stringWithFormat:@"/api/fav?file=%@&on=%d", RLPEnc(t.path), was ? 0 : 1];
+    __weak __typeof__(self) weakSelf = self;
+    [[RLPCoreClient shared] postJSON:url body:@"" completion:^(NSDictionary * _Nullable json) {
+        __typeof__(self) self_ = weakSelf;
+        if (!self_) return;
+        if (json && [json[@"ok"] boolValue]) {
+            if (was) [self_->_favoritePaths removeObject:t.path];
+            else [self_->_favoritePaths addObject:t.path];
+            [self_->_tableView reloadData];
+            RLPToast(was ? RLPTr(@"已取消收藏") : RLPTr(@"已收藏"));
+        } else {
+            RLPToast(RLPTr(@"收藏失败"));
+        }
+    }];
+}
+
+- (void)onRowAdd:(NSButton *)sender {
+    const NSInteger row = sender.tag;
+    if (row < 0 || row >= (NSInteger)_tracks.count) return;
+    RLPEnqueuePath(_tracks[(NSUInteger)row].path);
+    RLPToast(RLPTr(@"已加入队列"));
 }
 
 @end

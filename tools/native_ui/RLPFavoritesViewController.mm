@@ -9,6 +9,8 @@
 #import "RLPTrackActions.h"
 
 static const NSUserInterfaceItemIdentifier kFavTableID = @"RLPFavTable";
+// web .favhead 第 5 列：行尾心形（实心 ⟹ 点一下取消收藏）。
+static NSString * const kFavColHeart = @"ColFavHeart";
 
 @interface RLPFavoritesViewController () <NSTableViewDataSource, NSTableViewDelegate>
 @property (nonatomic, strong) NSTableView *tableView;
@@ -47,10 +49,14 @@ static const NSUserInterfaceItemIdentifier kFavTableID = @"RLPFavTable";
     // 同队列页：web 无斑马底；空表时交替色会在空白区域铺出条带。
     _tableView.usesAlternatingRowBackgroundColors = NO;
     
-    NSArray *cols = @[@"#", RLPTr(@"标题"), RLPTr(@"艺术家"), RLPTr(@"专辑"), RLPTr(@"时长")];
+    NSArray *cols = @[@"#", RLPTr(@"标题"), RLPTr(@"艺术家"), RLPTr(@"专辑"), RLPTr(@"时长"), @""];
     for (NSInteger i = 0; i < (NSInteger)cols.count; i++) {
         NSTableColumn *c = [[NSTableColumn alloc] initWithIdentifier:[NSString stringWithFormat:@"col%ld", (long)i]];
         c.title = cols[i];
+        if (i == 5) {
+            c.identifier = kFavColHeart;
+            c.width = 30; c.minWidth = 26; c.maxWidth = 34;
+        }
         [_tableView addTableColumn:c];
     }
     
@@ -186,6 +192,29 @@ static const NSUserInterfaceItemIdentifier kFavTableID = @"RLPFavTable";
 }
 
 - (NSView *)tableView:(NSTableView *)tableView viewForTableColumn:(NSTableColumn *)tableColumn row:(NSInteger)row {
+    if (row < 0 || row >= (NSInteger)_tracks.count) return nil;
+    // 行尾心形（web .fav-btn）：最爱页里的心永远是实心，点一下 = 取消收藏。
+    if ([tableColumn.identifier isEqualToString:kFavColHeart]) {
+        NSTableCellView *cell = [tableView makeViewWithIdentifier:kFavColHeart owner:self];
+        if (!cell) {
+            cell = [[NSTableCellView alloc] initWithFrame:NSMakeRect(0, 0, 30, 24)];
+            cell.identifier = kFavColHeart;
+            NSButton *b = [NSButton buttonWithTitle:@"" target:self action:@selector(onRowUnfav:)];
+            b.bordered = NO; b.imagePosition = NSImageOnly; b.imageScaling = NSImageScaleProportionallyDown;
+            b.identifier = @"fav.heart";
+            b.frame = NSMakeRect(2, 1, 26, 22);
+            b.autoresizingMask = NSViewWidthSizable;
+            [cell addSubview:b];
+            cell.textField = nil;
+        }
+        NSButton *btn = nil;
+        for (NSView *v in cell.subviews) if ([v isKindOfClass:[NSButton class]]) btn = (NSButton *)v;
+        btn.tag = row;
+        btn.image = [NSImage imageWithSystemSymbolName:@"heart.fill" accessibilityDescription:RLPTr(@"取消收藏")];
+        btn.contentTintColor = [RLPTheme current].accent;
+        btn.toolTip = RLPTr(@"取消收藏");
+        return cell;
+    }
     RLPTrack *t = _tracks[row];
     NSString *cid = tableColumn.identifier;
     NSString *val = @"";
@@ -197,6 +226,25 @@ static const NSUserInterfaceItemIdentifier kFavTableID = @"RLPFavTable";
     
     NSTextField *tf = RLPLabel(val, [RLPTheme current].body, [RLPTheme current].text);
     return tf;
+}
+
+/// 行尾心形：取消收藏（web unfavFromFavs 同端点）。
+- (void)onRowUnfav:(NSButton *)sender {
+    const NSInteger row = sender.tag;
+    if (row < 0 || row >= (NSInteger)_tracks.count) return;
+    RLPTrack *t = _tracks[(NSUInteger)row];
+    NSString *url = [NSString stringWithFormat:@"/api/fav?file=%@&on=0", RLPEnc(t.path)];
+    __weak __typeof__(self) weakSelf = self;
+    [[RLPCoreClient shared] postJSON:url body:@"" completion:^(NSDictionary * _Nullable json) {
+        __typeof__(self) self_ = weakSelf;
+        if (!self_) return;
+        if (json && [json[@"ok"] boolValue]) {
+            RLPToast(RLPTr(@"已取消收藏"));
+            [self_ reloadData];
+        } else {
+            RLPToast(RLPTr(@"取消收藏失败"));
+        }
+    }];
 }
 
 @end
