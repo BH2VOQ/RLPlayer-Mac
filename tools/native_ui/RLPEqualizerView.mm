@@ -10,15 +10,22 @@
 //   POST /api/peq  body "bypass=0&preamp=<n>&bands=<f,g,q,type;…>"（20 段全量）
 //                  → 返回**完整新状态**，必须用它刷新曲线（web 版踩过的坑）
 //   POST /api/peq/preset  body "action=list|save|load|delete&name=…"
-//   GET  /api/opra/index?q=…      → {"ok":true,"items":[{"id","name","vendor"}]}
-//   GET  /api/opra/presets?productId=… → {"ok":true,"items":[{"id","name"}]}
+//   GET  /api/opra/index          → {"ok":true,"items":[["id","vendor","name"],…]}
+//                                    （**不带 q**：web 全量拉一次做本地过滤；items 是数组三元组）
+//        也接受 ?q= 的历史形态，但原生不再用它（第8项：旧实现按字典解析数组 ⟹ 搜索结果恒空）
+//   GET  /api/opra/presets?productId=… → {"ok":true,"items":[
+//                                    {"id","author","details","link","gainDb","bandsCount"}]}
+//                                    （**没有 name 字段**：显示名 = author · details）
 //   POST /api/opra/apply  body "productId=…&presetId=…" → {"ok":true,"path":…}
+//        成功后必须写回 POST /api/settings 的 eq=/opraproduct=/oprapreset=（web saveSettings(true)），
+//        否则后端热重载不触发（第8项断点③/④）
 //
 // 节流：文字输入 260ms 后才 POST。每敲一个字符打一次后端会把正在播的歌反复重启。
 #import "RLPEqualizerView.h"
 #import "RLPCoreClient.h"
 #import "RLPSupport.h"
 #import "RLPTheme.h"
+#import "RLPTargetCurve.h"
 
 #include <cmath>
 #include <initializer_list>
@@ -31,6 +38,10 @@
 @property (nonatomic, copy) NSArray<NSNumber *> *bandFreqs;
 /// 手动拖拽曲线：返回 (段索引, 目标增益 dB)。web 版 PEQ_DRAG 同语义。
 @property (nonatomic, copy) void (^onDragBand)(NSInteger index, double gainDb);
+/// 耳机目标曲线图层（第8项）。web 用 `.tc-curve` + targetCurveSvg 画在预设卡片/说明区；
+/// 原生直接叠加到 EQ 图上，用户能看到"我选的目标曲线长这样"以及它与当前 PEQ 的关系。
+/// nil = 不画（没选预设时不该假装有目标）。
+@property (nonatomic, strong, nullable) RLPTargetCurve *targetCurve;   // 曲线表是共享只读数据，不 copy（RLPTargetCurve 不是 NSCopying）
 @end
 
 @implementation RLPEQCurveView
@@ -100,6 +111,41 @@
         [msg drawAtPoint:NSMakePoint(NSMidX(plot) - sz.width / 2, NSMidY(plot) - sz.height / 2)
           withAttributes:attrs];
         return;
+    }
+
+    // ---- 耳机目标曲线图层（第8项）----
+    // 画在 PEQ 主曲线**之前**：主曲线压在上面，用户能同时看到"当前 EQ"与"目标形状"。
+    // 竖直量程用 web 的 MAXDB=9 / MINDB=-2（映射到同一 plot 高度），与 web 的示意一致；
+    // 用虚线 + 次级色，避免与实线 PEQ 混淆。
+    if (self.targetCurve) {
+        const double kMaxDb = 9.0, kMinDb = -2.0;
+        NSMutableArray<NSValue *> *tpts = [NSMutableArray array];
+        for (NSArray<NSNumber *> *p in self.targetCurve.points) {
+            if (p.count < 2) continue;
+            const double x = MAX(0.0, MIN(1.0, p[0].doubleValue));
+            const double db = MAX(kMinDb, MIN(kMaxDb, p[1].doubleValue));
+            const CGFloat px = plot.origin.x + (CGFloat)x * plot.size.width;
+            const CGFloat py = plot.origin.y + (CGFloat)((kMaxDb - db) / (kMaxDb - kMinDb)) * plot.size.height;
+            [tpts addObject:[NSValue valueWithPoint:NSMakePoint(px, py)]];
+        }
+        if (tpts.count >= 2) {
+            NSBezierPath *tc = [NSBezierPath bezierPath];
+            [tc moveToPoint:tpts[0].pointValue];
+            for (NSUInteger i = 1; i < tpts.count; ++i) [tc lineToPoint:tpts[i].pointValue];
+            tc.lineWidth = 1.4;
+            CGFloat dash[2] = { 4.0, 3.0 };
+            [tc setLineDash:dash count:2 phase:0];
+            [(t.accent2 ?: t.accent) setStroke];
+            [tc stroke];
+            // 端点小圆点（web targetCurveSvg 的首尾 circle）
+            for (NSValue *vv in @[ tpts.firstObject, tpts.lastObject ]) {
+                const NSPoint pt = vv.pointValue;
+                NSBezierPath *dot = [NSBezierPath bezierPathWithOvalInRect:
+                                     NSMakeRect(pt.x - 2, pt.y - 2, 4, 4)];
+                [(t.accent2 ?: t.accent) setFill];
+                [dot fill];
+            }
+        }
     }
 
     NSBezierPath *curve = [NSBezierPath bezierPath];
@@ -183,6 +229,9 @@
 @property (nonatomic, strong) NSMutableArray<NSMutableDictionary *> *bands;
 @property (nonatomic, strong) NSTimer *applyTimer;
 @property (nonatomic, assign) BOOL loading;
+- (void)applyOpraQuery:(NSString *)qq;
+- (void)previewTargetCurveForPreset:(nullable NSDictionary *)p;
+- (void)resetTargetCurvePreview;
 @property (nonatomic, strong) NSPopUpButton *presetPop;
 @property (nonatomic, strong) NSTextField *presetName;
 @property (nonatomic, strong) NSTextField *opraQuery;
@@ -191,6 +240,12 @@
 @property (nonatomic, strong) NSTextField *opraStatus;
 @property (nonatomic, copy) NSArray<NSDictionary *> *opraItems;
 @property (nonatomic, copy) NSArray<NSDictionary *> *opraPresets;
+/// /api/opra/index 的一次性缓存（web loadOpraIndex 同语义：**不带 q**，全量拉一次，前端本地过滤）。
+@property (nonatomic, copy, nullable) NSArray<NSDictionary *> *opraIndexCache;
+/// 型号切换竞态守卫（web OPRA_CUR_PRODUCT：只认最后一次选择）。
+@property (nonatomic, assign) NSInteger opraProductSeq;
+/// 目标曲线说明（web showTargetCurveInfo 的原生同构：名称/是什么/适合谁/增益与段数）。
+@property (nonatomic, strong) NSTextField *opraInfo;
 @end
 
 @implementation RLPEqualizerView
@@ -201,6 +256,8 @@
         _bands = [NSMutableArray array];
         _opraItems = @[];
         _opraPresets = @[];
+        _opraIndexCache = nil;
+        _opraProductSeq = 0;
         [self build];
     }
     return self;
@@ -257,6 +314,7 @@
     [self.stack addArrangedSubview:self.status];
 
     self.curve = [[RLPEQCurveView alloc] initWithFrame:NSZeroRect];
+    self.curve.identifier = @"eq.curve";          // 判据（第8项像素采样）用它定位曲线视图
     self.curve.wantsLayer = YES;
     self.curve.layer.cornerRadius = 8;
     self.curve.translatesAutoresizingMaskIntoConstraints = NO;
@@ -345,12 +403,14 @@
     r1.spacing = 8;
     self.opraQuery = [[NSTextField alloc] initWithFrame:NSZeroRect];
     self.opraQuery.placeholderString = RLPTr(@"例如 HD650");
+    self.opraQuery.identifier = @"opra.query";
     self.opraQuery.target = self;
     self.opraQuery.action = @selector(onOpraSearch:);
     [[self.opraQuery.widthAnchor constraintEqualToConstant:220] setActive:YES];
     [r1 addArrangedSubview:self.opraQuery];
     NSButton *sb = [NSButton buttonWithTitle:RLPTr(@"搜索") target:self action:@selector(onOpraSearch:)];
     sb.bezelStyle = NSBezelStyleRounded;
+    sb.identifier = @"opra.search";
     [r1 addArrangedSubview:sb];
     [self.stack addArrangedSubview:r1];
 
@@ -358,20 +418,36 @@
     r2.orientation = NSUserInterfaceLayoutOrientationHorizontal;
     r2.spacing = 8;
     self.opraProduct = [[NSPopUpButton alloc] initWithFrame:NSZeroRect pullsDown:NO];
+    self.opraProduct.identifier = @"opra.product";
     self.opraProduct.target = self;
     self.opraProduct.action = @selector(onOpraProduct:);
     [[self.opraProduct.widthAnchor constraintEqualToConstant:260] setActive:YES];
     [r2 addArrangedSubview:self.opraProduct];
     self.opraPreset = [[NSPopUpButton alloc] initWithFrame:NSZeroRect pullsDown:NO];
+    self.opraPreset.identifier = @"opra.preset";
+    self.opraPreset.target = self;
+    self.opraPreset.action = @selector(onOpraPreset:);
     [[self.opraPreset.widthAnchor constraintEqualToConstant:200] setActive:YES];
     [r2 addArrangedSubview:self.opraPreset];
     NSButton *ab = [NSButton buttonWithTitle:RLPTr(@"应用") target:self action:@selector(onOpraApply:)];
     ab.bezelStyle = NSBezelStyleRounded;
+    ab.identifier = @"opra.apply";
     [r2 addArrangedSubview:ab];
     [self.stack addArrangedSubview:r2];
 
     self.opraStatus = RLPLabel(@"", t.small, t.mut);
+    self.opraStatus.identifier = @"opra.status";
     [self.stack addArrangedSubview:self.opraStatus];
+
+    // web showTargetCurveInfo：选中的目标曲线要给出「名称 / 是什么 / 适合谁 / 前级增益 / 段数」。
+    // 原生是下拉框而不是预设卡片墙，所以曲线示意图只能叠加到 EQ 图上（没有 .tc-curve 小图的位置），
+    // 但**说明文字**必须与 web 同源（RLPTargetCurveLibrary 逐字移植）。
+    self.opraInfo = RLPLabel(@"", t.small, t.mut);
+    self.opraInfo.identifier = @"opra.info";
+    self.opraInfo.maximumNumberOfLines = 6;
+    self.opraInfo.lineBreakMode = NSLineBreakByWordWrapping;
+    [[self.opraInfo.widthAnchor constraintEqualToConstant:600] setActive:YES];
+    [self.stack addArrangedSubview:self.opraInfo];
 }
 
 #pragma mark - 20 段表格（可编辑）
@@ -589,37 +665,134 @@
     }];
 }
 
-#pragma mark - OPRA
+#pragma mark - OPRA（耳机目标曲线）
+
+// web 的三条纪律，逐条照抄：
+//   ① 索引**只拉一次且不带 q**（web loadOpraIndex：`api('/api/opra/index')`），
+//      之后在本地按 `vendor name id` 全 token 子串过滤（web doSearch）；
+//      空输入**不发起任何请求**（261023-03 #6）。
+//   ② 预设列表返回的字段是 id/author/details/link/gainDb/bandsCount（**没有 name**），
+//      显示名 = `author · details`（web preset-card 的 b 标签）。
+//   ③ 选中/应用预设后展示目标曲线说明（web showTargetCurveInfo），并同步写回
+//      settings 的 opraproduct/oprapreset/eq（web applyOpraPreset → saveSettings(true)）。
+
+/// 把 /api/opra/index 的两种历史形态统一成 @{id,vendor,name}：
+/// 现在后端返回的是 **[id, vendor, name] 数组三元组**（tools/rtaweb.cpp:11285），
+/// 旧实现只认 NSDictionary ⟹ 搜索结果恒为空 —— 这是第8项①层断点的直接原因。
+static NSDictionary *RLPOpraIndexItem(id x) {
+    if ([x isKindOfClass:[NSArray class]]) {
+        NSArray *a = (NSArray *)x;
+        if (a.count < 3) return nil;
+        NSMutableArray *vals = [NSMutableArray array];
+        for (id v in a) [vals addObject:[v isKindOfClass:[NSString class]] ? v : @""];
+        return @{ @"id": vals[0], @"vendor": vals[1], @"name": vals[2] };
+    }
+    if ([x isKindOfClass:[NSDictionary class]]) {
+        NSDictionary *d = (NSDictionary *)x;
+        NSMutableDictionary *m = [NSMutableDictionary dictionary];
+        m[@"id"] = [d[@"id"] isKindOfClass:[NSString class]] ? d[@"id"] : @"";
+        m[@"vendor"] = [d[@"vendor"] isKindOfClass:[NSString class]] ? d[@"vendor"] : @"";
+        m[@"name"] = [d[@"name"] isKindOfClass:[NSString class]] ? d[@"name"] : @"";
+        return [(NSString *)m[@"id"] length] ? m : nil;
+    }
+    return nil;
+}
+
+/// web doSearch 的过滤口径：query 按空白切 token，**每个 token** 都要出现在
+/// `vendor name id`（小写）里；命中最多 30 条（web 的 `slice(0,30)`）。
+static NSArray<NSDictionary *> *RLPOpraFilter(NSArray<NSDictionary *> *index, NSString *query) {
+    NSString *q = [(query ?: @"") stringByTrimmingCharactersInSet:
+                   [NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    if (!q.length) return @[];
+    NSMutableArray<NSString *> *tokens = [NSMutableArray array];
+    for (NSString *t in [[q lowercaseString] componentsSeparatedByCharactersInSet:
+                         [NSCharacterSet whitespaceAndNewlineCharacterSet]])
+        if (t.length) [tokens addObject:t];
+    NSMutableArray<NSDictionary *> *hits = [NSMutableArray array];
+    for (NSDictionary *it in index) {
+        NSString *haystack = [[NSString stringWithFormat:@"%@ %@ %@",
+                               it[@"vendor"] ?: @"", it[@"name"] ?: @"", it[@"id"] ?: @""] lowercaseString];
+        BOOL match = YES;
+        for (NSString *t in tokens) if ([haystack rangeOfString:t].location == NSNotFound) { match = NO; break; }
+        if (!match) continue;
+        [hits addObject:it];
+        if (hits.count >= 30) break;
+    }
+    return hits;
+}
+
+- (void)resetTargetCurvePreview {
+    self.curve.targetCurve = nil;
+    self.opraInfo.stringValue = @"";
+    [self.curve setNeedsDisplay:YES];
+}
+
+/// web showTargetCurveInfo(p)：曲线名称 + 「是什么 / 适合谁」+ 前级增益/段数/预设名。
+- (void)previewTargetCurveForPreset:(NSDictionary *)p {
+    if (!p) { [self resetTargetCurvePreview]; return; }
+    NSString *details = [p[@"details"] isKindOfClass:[NSString class]] ? p[@"details"] : @"";
+    NSString *author = [p[@"author"] isKindOfClass:[NSString class]] ? p[@"author"] : @"";
+    RLPTargetCurve *curve = [RLPTargetCurveLibrary curveForKind:
+                             [RLPTargetCurveLibrary kindForDetails:details]];
+    self.curve.targetCurve = curve;
+    NSString *name = [RLPTargetCurveLibrary targetCurveNameForDetails:details author:author];
+    NSString *scene = [RLPTargetCurveLibrary targetCurveSceneForDetails:details author:author];
+    NSString *tech = [RLPTargetCurveLibrary targetCurveTechForDetails:details author:author];
+    const double gain = [p[@"gainDb"] respondsToSelector:@selector(doubleValue)] ? [p[@"gainDb"] doubleValue] : 0.0;
+    const NSInteger bands = [p[@"bandsCount"] respondsToSelector:@selector(integerValue)] ? [p[@"bandsCount"] integerValue] : 0;
+    self.opraInfo.stringValue = [NSString stringWithFormat:
+        @"%@\n%@%@\n%@%@\n%@%.1f dB · %@%ld %@ · %@%@",
+        [NSString stringWithFormat:RLPTr(@"目标曲线：%@"), name],
+        RLPTr(@"是什么："), tech,
+        RLPTr(@"适合谁："), scene,
+        RLPTr(@"前级增益："), gain, RLPTr(@"滤波段数："), (long)bands, RLPTr(@"段"),
+        RLPTr(@"预设："), details.length ? details : (p[@"id"] ?: @"")];
+    self.opraInfo.textColor = [RLPTheme current].mut;
+    [self.curve setNeedsDisplay:YES];
+}
 
 - (void)onOpraSearch:(id)sender {
     NSString *qq = [self.opraQuery.stringValue stringByTrimmingCharactersInSet:
-                   [NSCharacterSet whitespaceAndNewlineCharacterSet]];
-    // 空关键词不发请求（web 版明确纪律：避免一进页面就拉整个索引）
+                    [NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    // 空关键词不发请求（web 261023-03 第6条：避免一进页面就拉整个索引）
     if (!qq.length) { self.opraStatus.stringValue = RLPTr(@"请输入耳机型号"); return; }
     if (![RLPCoreClient shared].started) return;
-    self.opraStatus.stringValue = RLPTr(@"搜索中…");
-    NSString *url = [NSString stringWithFormat:@"/api/opra/index?q=%@", RLPEnc(qq)];
+    [self resetTargetCurvePreview];
+    self.opraItems = @[];
+    [self.opraProduct removeAllItems];
+    [self.opraPreset removeAllItems];
+    self.opraPresets = @[];
+    if (self.opraIndexCache) { [self applyOpraQuery:qq]; return; }
+    self.opraStatus.stringValue = RLPTr(@"正在加载耳机数据库…");
     __weak __typeof__(self) weakSelf = self;
-    [[RLPCoreClient shared] getJSON:url completion:^(NSDictionary * _Nullable json) {
+    [[RLPCoreClient shared] getJSON:@"/api/opra/index" completion:^(NSDictionary * _Nullable json) {
         __typeof__(self) self_ = weakSelf;
         if (!self_) return;
-        NSArray *items = [json[@"items"] isKindOfClass:[NSArray class]] ? json[@"items"] : @[];
-        NSMutableArray<NSDictionary *> *good = [NSMutableArray array];
-        for (id x in items) if ([x isKindOfClass:[NSDictionary class]]) [good addObject:x];
-        self_.opraItems = good;
-        [self_.opraProduct removeAllItems];
-        [self_.opraPreset removeAllItems];
-        for (NSDictionary *x in good) {
-            NSString *nm = [x[@"name"] isKindOfClass:[NSString class]] ? x[@"name"] : @"";
-            NSString *vd = [x[@"vendor"] isKindOfClass:[NSString class]] ? x[@"vendor"] : @"";
-            NSString *title = vd.length ? [NSString stringWithFormat:@"%@ · %@", vd, nm] : nm;
-            if (title.length) [self_.opraProduct addItemWithTitle:title];
-        }
-        self_.opraStatus.stringValue = good.count
-            ? [NSString stringWithFormat:RLPTr(@"%ld 个结果"), (long)good.count]
-            : RLPTr(@"没有匹配的耳机");
-        if (good.count) [self_ onOpraProduct:nil];
+        NSArray *raw = [json[@"items"] isKindOfClass:[NSArray class]] ? json[@"items"] : @[];
+        NSMutableArray<NSDictionary *> *idx = [NSMutableArray array];
+        for (id x in raw) { NSDictionary *it = RLPOpraIndexItem(x); if (it) [idx addObject:it]; }
+        self_.opraIndexCache = idx;
+        [self_ applyOpraQuery:qq];
     }];
+}
+
+- (void)applyOpraQuery:(NSString *)qq {
+    NSArray<NSDictionary *> *hits = RLPOpraFilter(self.opraIndexCache ?: @[], qq);
+    self.opraItems = hits;
+    [self.opraProduct removeAllItems];
+    for (NSDictionary *x in hits) {
+        NSString *nm = [x[@"name"] isKindOfClass:[NSString class]] ? x[@"name"] : @"";
+        NSString *vd = [x[@"vendor"] isKindOfClass:[NSString class]] ? x[@"vendor"] : @"";
+        NSString *title = vd.length ? [NSString stringWithFormat:@"%@ · %@", vd, nm] : nm;
+        if (title.length) [self.opraProduct addItemWithTitle:title];
+    }
+    self.opraStatus.stringValue = hits.count
+        ? [NSString stringWithFormat:RLPTr(@"%ld 个结果"), (long)hits.count]
+        : RLPTr(@"未找到匹配的耳机型号，请尝试不同关键词");
+    if (hits.count) {
+        [self.opraProduct selectItemAtIndex:0];
+        [self onOpraProduct:self.opraProduct];
+    }
 }
 
 - (void)onOpraProduct:(id)sender {
@@ -627,22 +800,42 @@
     if (idx < 0 || idx >= (NSInteger)self.opraItems.count) return;
     NSString *pid = self.opraItems[idx][@"id"];
     if (![pid isKindOfClass:[NSString class]] || !pid.length) return;
+    const NSInteger seq = ++self.opraProductSeq;   // 只认最后一次选择（web OPRA_CUR_PRODUCT）
+    [self resetTargetCurvePreview];
     NSString *url = [NSString stringWithFormat:@"/api/opra/presets?productId=%@", RLPEnc(pid)];
     __weak __typeof__(self) weakSelf = self;
     [[RLPCoreClient shared] getJSON:url completion:^(NSDictionary * _Nullable json) {
         __typeof__(self) self_ = weakSelf;
-        if (!self_) return;
+        if (!self_ || seq != self_.opraProductSeq) return;
         NSArray *items = [json[@"items"] isKindOfClass:[NSArray class]] ? json[@"items"] : @[];
         NSMutableArray<NSDictionary *> *good = [NSMutableArray array];
         for (id x in items) if ([x isKindOfClass:[NSDictionary class]]) [good addObject:x];
         self_.opraPresets = good;
         [self_.opraPreset removeAllItems];
         for (NSDictionary *x in good) {
-            NSString *nm = [x[@"name"] isKindOfClass:[NSString class]] ? x[@"name"] : @"";
-            if (nm.length) [self_.opraPreset addItemWithTitle:nm];
+            // 后端 /api/opra/presets **没有 name 字段**（只有 id/author/details/gainDb/bandsCount），
+            // 旧实现读 x[@"name"] ⟹ 下拉框恒为空、永远无法应用 —— 第8项③层断点。
+            NSString *author = [x[@"author"] isKindOfClass:[NSString class]] ? x[@"author"] : @"";
+            NSString *details = [x[@"details"] isKindOfClass:[NSString class]] ? x[@"details"] : @"";
+            NSString *title = author.length ? author : @"OPRA";
+            if (details.length) title = [title stringByAppendingFormat:@" · %@", details];
+            [self_.opraPreset addItemWithTitle:title];
         }
-        if (!good.count) self_.opraStatus.stringValue = RLPTr(@"这款耳机没有可用曲线");
+        if (!good.count) {
+            self_.opraStatus.stringValue = RLPTr(@"这款耳机没有可用曲线");
+            return;
+        }
+        self_.opraStatus.stringValue = [NSString stringWithFormat:RLPTr(@"%ld 种调音目标"), (long)good.count];
+        [self_.opraPreset selectItemAtIndex:0];
+        // web：presets 到位后立刻 `showTargetCurveInfo(presets.find(oprapreset) || presets[0])`
+        [self_ previewTargetCurveForPreset:good[0]];
     }];
+}
+
+- (void)onOpraPreset:(id)sender {
+    const NSInteger idx = self.opraPreset.indexOfSelectedItem;
+    if (idx < 0 || idx >= (NSInteger)self.opraPresets.count) return;
+    [self previewTargetCurveForPreset:self.opraPresets[idx]];
 }
 
 - (void)onOpraApply:(id)sender {
@@ -656,6 +849,7 @@
     NSString *pid = self.opraItems[pi][@"id"];
     NSString *eid = self.opraPresets[ei][@"id"];
     if (![pid isKindOfClass:[NSString class]] || ![eid isKindOfClass:[NSString class]]) return;
+    // 与 web applyOpraPreset 的请求体逐字段一致：productId=…&presetId=…（两者都做 encodeURIComponent）。
     NSString *body = [NSString stringWithFormat:@"productId=%@&presetId=%@", RLPEnc(pid), RLPEnc(eid)];
     self.opraStatus.stringValue = RLPTr(@"应用中…");
     __weak __typeof__(self) weakSelf = self;
@@ -669,8 +863,19 @@
         }
         self_.opraStatus.stringValue = RLPTr(@"已应用耳机曲线");
         RLPToast(RLPTr(@"已应用耳机曲线"));
+        // web applyOpraPreset：成功路径是 `j.path`（eqPath 仅兼容），随后 **saveSettings(true)**
+        // 把 eq / opraproduct / oprapreset 一起落盘。原生以前只 reload 了 /api/peq，
+        // **没写回 settings 的 eq** ⟹ 后端热重载根本不触发（用户听不到新 EQ）。
+        NSString *appliedPath = [json[@"path"] isKindOfClass:[NSString class]] ? json[@"path"]
+                               : ([json[@"eqPath"] isKindOfClass:[NSString class]] ? json[@"eqPath"] : nil);
+        if (appliedPath.length) {
+            NSString *settings = [NSString stringWithFormat:@"eq=%@&opraproduct=%@&oprapreset=%@",
+                                  RLPEnc(appliedPath), RLPEnc(pid), RLPEnc(eid)];
+            [[RLPCoreClient shared] postJSON:@"/api/settings" body:settings completion:nil];
+        }
         // EQ 已被换成耳机曲线 ⟹ 必须重新拉 /api/peq 才能看到真实新状态
         [self_ reload];
+        [self_ previewTargetCurveForPreset:self_.opraPresets[ei]];
     }];
 }
 
@@ -699,6 +904,7 @@
     self.bandTable.backgroundColor = t.bg;
     self.status.textColor = t.mut;
     self.opraStatus.textColor = t.mut;
+    self.opraInfo.textColor = t.mut;
     [self.bandTable reloadData];
     [self.curve setNeedsDisplay:YES];
 }

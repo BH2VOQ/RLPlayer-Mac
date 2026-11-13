@@ -1750,14 +1750,20 @@ static NSString *RLPControlIdentifier(NSString *key) {
     [adv addArrangedSubview:self.searchStatus];
 
     // ---- 标签写回（web sp_wbdesc / sp_wbdry / sp_wbapply / sp_wbmsg）----
-    // web 把这块放在「元数据」页。原生原来挂在「高级」页，按 web 的位置搬回来 ——
-    // 位置本身就是 web 的信息架构，不该自创。
-    [adv addArrangedSubview:RLPSGroup(RLPTr(@"标签写回"),
-        RLPTr(@"默认开启：补全到的标签 / 封面写回音频文件本身；写前校验音频数据逐位不变"), t)];
+    // web 把这块放在「元数据 · AI 接入」**同一张卡体内**（.mh.sub 子段，ui_script.h:10264-10272）。
+    // 旧原生做成一张空卡片 + 页面并列的说明/按钮 ⟹ 用户实测「标题条 + 断裂说明 + 两个按钮，散落」。
+    // 本轮并回 AI 卡片体：标题/说明/按钮成为**同一个卡片容器的共同后代**，内边距/间距/按钮规格
+    // 都由卡片的字段网格统一给（不再有自己写死的 560pt 宽）。
+    [aiGroup addSubHeader:RLPTr(@"标签写回") hint:RLPTr(@"默认开启")];
 
-    self.wbDesc = [self hintForKey:@"sp_wbdesc" width:560];
+    // 说明行不再用 hintForKey（那个辅助函数会给标签钉死 560pt 宽，是旧横向布局的遗留）：
+    // 进卡片后宽度必须由字段网格给，否则 Auto Layout 会在两条宽度约束之间折中，把左内边距压成 14。
+    self.wbDesc = RLPLabel(@"", t.small, t.mut);
+    self.wbDesc.identifier = @"sp_wbdesc";
+    self.wbDesc.maximumNumberOfLines = 4;
+    self.wbDesc.lineBreakMode = NSLineBreakByWordWrapping;
     self.wbDesc.stringValue = RLPTr(@"补全到的标签 / 封面写回音频文件本身；写前校验音频数据逐位不变，原文件备份到备份目录");
-    [adv addArrangedSubview:self.wbDesc];
+    [aiGroup addNoteView:self.wbDesc];
 
     self.wbDryBtn = [NSButton buttonWithTitle:RLPTr(@"预览写回") target:self
                                        action:@selector(onWritebackDry:)];
@@ -1773,13 +1779,14 @@ static NSString *RLPControlIdentifier(NSString *key) {
     self.writebackStatus.lineBreakMode = NSLineBreakByWordWrapping;
     [[self.writebackStatus.widthAnchor constraintEqualToConstant:520] setActive:YES];
 
-    NSStackView *wbRow = [[NSStackView alloc] init];
-    wbRow.orientation = NSUserInterfaceLayoutOrientationHorizontal;
-    wbRow.spacing = 8;
-    [wbRow addArrangedSubview:self.wbDryBtn];
-    [wbRow addArrangedSubview:self.wbApplyBtn];
-    [wbRow addArrangedSubview:self.writebackStatus];
-    [adv addArrangedSubview:wbRow];
+    // 两个动作按钮走卡片的通用按钮行（与「保存并连接 / 测试连通 / 清除 Key」同一原语，
+    // 间距 8、按钮规格一致）；状态行单独一行在下面。
+    // 为什么不再把 status 塞进同一行：NSStackView 横向撑满时，状态标签的内在宽度会把按钮压扁
+    // （实测离屏图里「预览写回」被挤成 0 宽、"执行写回" 被截断成「执行…」）。
+    [aiGroup addButtonRow:@[self.wbDryBtn, self.wbApplyBtn]];
+    self.writebackStatus.maximumNumberOfLines = 3;
+    self.writebackStatus.lineBreakMode = NSLineBreakByWordWrapping;
+    [aiGroup addNoteView:self.writebackStatus];
 
     // web `.meta-adv-grid`：数据源 / AI 接入 **左右两列**（>=1100px 时两列，窄屏回落单列）。
     // 摘掉两张卡各自的「整宽」约束，放进等宽的横向 stack；窄窗口由 stack 自动压缩。

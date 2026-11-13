@@ -336,6 +336,172 @@ static NSString *RLPNPFavKey(NSString *path) {
 }
 @end
 
+#pragma mark - 「AI 整理」栏卡片（第5项：几何与排版对齐 web .npchip）
+
+// web 的真实几何（src/net/ui_page.h:742-763），逐条照抄：
+//   .nprailcard padding:10px, gap:8px   → 栏内左右 10、栏头→首卡 8
+//   .npchipwrap  gap:6px                → 卡片之间 6
+//   .npchip      padding:8px 10px 9px, border-radius:11px, gap:2px
+//   .npchip-top  gap:7px / .dot 5px     → 圆点 5、点与名称间距 7
+//   name 11.5/700、.npchip-st 9.5、p1 11.5、p2 10.5、line-height:1.45
+static const CGFloat kRailHeadPadTop = 10.0;
+static const CGFloat kRailHeadPadX   = 10.0;
+static const CGFloat kRailHeadGap    = 8.0;
+static const CGFloat kRailChipGap    = 6.0;
+static const CGFloat kRailChipPadTop = 8.0;
+static const CGFloat kRailChipPadX   = 10.0;
+static const CGFloat kRailChipPadBottom = 9.0;
+static const CGFloat kRailChipRadius = 11.0;
+static const CGFloat kRailRowGap     = 2.0;
+static const CGFloat kRailDotSize    = 5.0;
+static const CGFloat kRailDotGap     = 7.0;
+static const CGFloat kRailRow1H      = 17.0;   // 11.5 × 1.45 ≈ 16.7
+static const CGFloat kRailP1H        = 17.0;
+static const CGFloat kRailP2H        = 15.0;   // 10.5 × 1.45 ≈ 15.2
+
+/// 为什么不用 NSButton（旧实现就是 NSButton + 多行 attributedTitle）：
+/// AppKit 把 NSButton 的多行标题画在**卡片左下角**，卡片上半部全空 ——
+/// 左栏音频分析卡（d717ef0）踩过同一个坑。web 的 chip 是「标题在左上、
+/// 正文在下、四周内边距 8/10/9」的结构，只能自己排子视图。
+/// 子视图化还有一个好处：判据能**量真实几何**（inset / 行距 / 字号），
+/// 而不是对着 drawRect 里的常量自证。
+@interface RLPRailChipView : NSView {
+    NSView *_dot;
+    NSTextField *_nameLabel;
+    NSTextField *_statusLabel;
+    NSTextField *_p1Label;
+    NSTextField *_p2Label;
+}
+@property (nonatomic, assign) NSInteger chipIndex;
+@property (nonatomic, copy, nullable) void (^onTap)(RLPRailChipView *chip);
+- (void)setNameText:(NSString *)name status:(NSString *)status
+                  p1:(NSString *)p1 p2:(NSString *)p2;
+- (CGFloat)preferredHeight;
+- (void)applyTheme;
+@end
+
+@implementation RLPRailChipView
+
+- (NSTextField *)labelWithFont:(NSFont *)font color:(NSColor *)color ident:(NSString *)ident {
+    NSTextField *l = [NSTextField labelWithString:@""];
+    l.font = font;
+    l.textColor = color;
+    l.identifier = ident;
+    l.alignment = NSTextAlignmentLeft;
+    l.lineBreakMode = NSLineBreakByTruncatingTail;
+    l.usesSingleLineMode = YES;
+    l.maximumNumberOfLines = 1;
+    l.translatesAutoresizingMaskIntoConstraints = YES;
+    [self addSubview:l];
+    return l;
+}
+
+- (instancetype)initWithFrame:(NSRect)frameRect {
+    self = [super initWithFrame:frameRect];
+    if (!self) return nil;
+    RLPTheme *t = [RLPTheme current];
+    self.wantsLayer = YES;
+    self.layer.cornerRadius = kRailChipRadius;
+    self.layer.borderWidth = 1;
+
+    _dot = [[NSView alloc] initWithFrame:NSZeroRect];
+    _dot.identifier = @"npChip.dot";
+    _dot.wantsLayer = YES;
+    _dot.layer.cornerRadius = kRailDotSize / 2.0;
+    [self addSubview:_dot];
+
+    _nameLabel = [self labelWithFont:[NSFont systemFontOfSize:11.5 weight:NSFontWeightBold]
+                               color:t.text2 ident:@"npChip.name"];
+    NSMutableParagraphStyle *ps = [[NSMutableParagraphStyle alloc] init];
+    ps.lineBreakMode = NSLineBreakByTruncatingTail;
+    _nameLabel.attributedStringValue = [[NSAttributedString alloc]
+        initWithString:@"" attributes:@{ NSFontAttributeName: [NSFont systemFontOfSize:11.5 weight:NSFontWeightBold],
+                                         NSForegroundColorAttributeName: t.text2,
+                                         NSKernAttributeName: @0.4,
+                                         NSParagraphStyleAttributeName: ps }];
+    _statusLabel = [self labelWithFont:[NSFont systemFontOfSize:9.5 weight:NSFontWeightSemibold]
+                                 color:t.mut2 ident:@"npChip.st"];
+    _statusLabel.alignment = NSTextAlignmentRight;
+    _p1Label = [self labelWithFont:[NSFont systemFontOfSize:11.5] color:t.text2 ident:@"npChip.p1"];
+    _p2Label = [self labelWithFont:[NSFont systemFontOfSize:10.5] color:t.mut2 ident:@"npChip.p2"];
+    [self applyTheme];
+    return self;
+}
+
+- (BOOL)isFlipped { return NO; }
+
+- (void)setNameText:(NSString *)name status:(NSString *)status p1:(NSString *)p1 p2:(NSString *)p2 {
+    _nameLabel.stringValue = name ?: @"";
+    _statusLabel.stringValue = status ?: @"";
+    _p1Label.stringValue = p1 ?: @"";
+    _p2Label.stringValue = p2 ?: @"";
+    _p2Label.hidden = (p2.length == 0);
+    [self relayout];
+}
+
+- (CGFloat)preferredHeight {
+    CGFloat h = kRailChipPadTop + kRailRow1H + kRailRowGap + kRailP1H;
+    if (_p2Label.stringValue.length) h += kRailRowGap + kRailP2H;
+    return h + kRailChipPadBottom;
+}
+
+/// 非翻转坐标（origin 在左下）：所有 y 都由「卡片高度 - 从顶部算的 offset」求出，
+/// 这样卡片高度变化时 inset 永远还是 8/10/9。
+- (void)relayout {
+    const CGFloat H = self.bounds.size.height, W = self.bounds.size.width;
+    if (W < 20 || H < 20) return;
+    const CGFloat row1Y = H - kRailChipPadTop - kRailRow1H;
+    const CGFloat statusW = MIN(W * 0.5,
+        ceil([_statusLabel.stringValue sizeWithAttributes:@{ NSFontAttributeName: _statusLabel.font }].width));
+    const CGFloat statusX = W - kRailChipPadX - statusW;
+    const CGFloat nameX = kRailChipPadX + kRailDotSize + kRailDotGap;
+    _dot.frame = NSMakeRect(kRailChipPadX, row1Y + (kRailRow1H - kRailDotSize) / 2.0,
+                            kRailDotSize, kRailDotSize);
+    _nameLabel.frame = NSMakeRect(nameX, row1Y, MAX(10, statusX - 6 - nameX), kRailRow1H);
+    _statusLabel.frame = NSMakeRect(statusX, row1Y, statusW, kRailRow1H);
+    const CGFloat p1Y = row1Y - kRailRowGap - kRailP1H;
+    _p1Label.frame = NSMakeRect(kRailChipPadX, p1Y, MAX(10, W - kRailChipPadX * 2), kRailP1H);
+    if (!_p2Label.hidden) {
+        const CGFloat p2Y = p1Y - kRailRowGap - kRailP2H;
+        _p2Label.frame = NSMakeRect(kRailChipPadX, p2Y, MAX(10, W - kRailChipPadX * 2), kRailP2H);
+    }
+}
+
+- (void)setFrameSize:(NSSize)newSize {
+    [super setFrameSize:newSize];
+    [self relayout];
+}
+
+- (void)applyTheme {
+    RLPTheme *t = [RLPTheme current];
+    // 对齐 web .npchip 的半透明底 + 细描边（浅色主题改深色低透明度，见 ui_page.h:766）。
+    self.layer.backgroundColor = (t.isLight
+        ? [NSColor colorWithSRGBRed:15/255. green:23/255. blue:42/255. alpha:.03]
+        : [NSColor colorWithWhite:1 alpha:.03]).CGColor;
+    self.layer.borderColor = (t.isLight
+        ? [NSColor colorWithSRGBRed:15/255. green:23/255. blue:42/255. alpha:.08]
+        : [NSColor colorWithWhite:1 alpha:.06]).CGColor;
+    _dot.layer.backgroundColor = t.mut2.CGColor;
+    _nameLabel.textColor = t.text2;
+    _statusLabel.textColor = t.mut2;
+    _p1Label.textColor = t.text2;
+    _p2Label.textColor = t.mut2;
+    [self relayout];
+}
+
+/// 名称/正文标签盖在卡片上：不做 hitTest 劫持的话，点击会落到 NSTextField 上，
+/// 卡片自己的 mouseDown 收不到（或先冒泡到别处）。
+- (NSView *)hitTest:(NSPoint)point {
+    NSPoint p = [self convertPoint:point fromView:self.superview];
+    return NSPointInRect(p, self.bounds) ? self : nil;
+}
+- (void)mouseDown:(NSEvent *)event {
+    (void)event;
+    if (self.onTap) self.onTap(self);
+}
+
+@end
+
 @interface RLPNowPlayingViewController ()
 
 @property(nonatomic,strong) RLPNPCanvas *webCanvas;
@@ -367,7 +533,7 @@ static NSString *RLPNPFavKey(NSString *path) {
 @property(nonatomic,strong) NSButton *saveButton;
 @property(nonatomic,strong) NSTextField *railTitle;
 @property(nonatomic,strong) NSSegmentedControl *railDensity;
-@property(nonatomic,strong) NSArray<NSButton *> *railCards;
+@property(nonatomic,strong) NSArray<RLPRailChipView *> *railCards;
 @property(nonatomic,copy) NSDictionary *trackMetadata;
 @property(nonatomic,strong) NSPopover *knowledgePopover;
 @property(nonatomic,strong) RLPPlaybackStatus *webStatus;
@@ -484,9 +650,33 @@ static NSString *RLPNPFavKey(NSString *path) {
     [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(onLyricScrolled:) name:NSViewBoundsDidChangeNotification object:self.lyricScroll.contentView];
     self.lyricRows=[NSMutableArray array];self.lyricLines=@[];self.lyricActiveIndex=-1;
     self.lyricsEmpty=RLPLabel(RLPTr(@"还没有在播放"),[NSFont systemFontOfSize:14],t.mut2);self.lyricsEmpty.alignment=NSTextAlignmentCenter;[self.lyricDocument addSubview:self.lyricsEmpty];
-    self.railTitle=RLPLabel(RLPTr(@"AI 整理"),[NSFont systemFontOfSize:9.5 weight:NSFontWeightSemibold],t.mut2);[self.railPanel addSubview:self.railTitle];
+    self.railTitle=RLPLabel(RLPTr(@"AI 整理"),[NSFont systemFontOfSize:9.5 weight:NSFontWeightSemibold],t.mut2);
+    self.railTitle.identifier=@"npRailCap";
+    // web .nprailcap：font-size:9.5px; letter-spacing:1.5px（大写小标题的疏排感，判据要量）
+    {
+        NSMutableParagraphStyle *ps=[[NSMutableParagraphStyle alloc] init];ps.lineBreakMode=NSLineBreakByTruncatingTail;
+        self.railTitle.attributedStringValue=[[NSAttributedString alloc] initWithString:RLPTr(@"AI 整理")
+            attributes:@{NSFontAttributeName:[NSFont systemFontOfSize:9.5 weight:NSFontWeightSemibold],
+                         NSForegroundColorAttributeName:t.mut2,
+                         NSKernAttributeName:@1.5,
+                         NSParagraphStyleAttributeName:ps}];
+    }
+    [self.railPanel addSubview:self.railTitle];
     self.railDensity=[NSSegmentedControl segmentedControlWithLabels:@[RLPTr(@"简略"),RLPTr(@"详细")] trackingMode:NSSegmentSwitchTrackingSelectOne target:self action:@selector(onRailDensity:)];self.railDensity.identifier=@"npRailSeg";self.railDensity.selectedSegment=0;[self.railPanel addSubview:self.railDensity];
-    NSMutableArray *cards=[NSMutableArray array];for(NSString *name in @[@"歌曲",@"专辑",@"艺术家"]){NSButton *b=[self webButton:name identifier:[@"npChip." stringByAppendingString:name] action:@selector(onRailCard:) parent:self.railPanel]; b.tag=cards.count;b.bordered=NO;b.wantsLayer=YES;b.layer.cornerRadius=12;b.layer.borderWidth=1;[(NSButtonCell *)b.cell setLineBreakMode:NSLineBreakByWordWrapping];b.cell.wraps=YES;b.alignment=NSTextAlignmentLeft;[cards addObject:b];}self.railCards=cards;
+    // 三张卡（歌曲/专辑/艺术家）= web `.npchip`。旧实现是 NSButton 多行标题，
+    // AppKit 把文字画在卡片左下角（上半部全空）⟹ 用户报「排版散」。
+    NSMutableArray<RLPRailChipView *> *cards=[NSMutableArray array];
+    __weak __typeof__(self) wsRail=self;
+    NSUInteger railIdx=0;
+    for(NSString *name in @[@"歌曲",@"专辑",@"艺术家"]){
+        RLPRailChipView *c=[[RLPRailChipView alloc] initWithFrame:NSZeroRect];
+        c.identifier=[@"npChip." stringByAppendingString:name];
+        c.chipIndex=(NSInteger)railIdx++;
+        c.onTap=^(RLPRailChipView *chip){ __typeof__(self) s=wsRail; if(s)[s onRailCard:chip]; };
+        [self.railPanel addSubview:c];
+        [cards addObject:c];
+    }
+    self.railCards=cards;
     self.knowledge=[[RLPKnowledgeView alloc] initWithFrame:NSMakeRect(0,0,420,380)];
     self.webControls=[[RLPNPControlBar alloc] initWithFrame:NSZeroRect];[host addSubview:self.webControls];
     self.webControls.autoresizingMask=NSViewNotSizable;
@@ -579,9 +769,17 @@ static NSString *RLPNPFavKey(NSString *path) {
     CGFloat available=MAX(90,bodyH-96),firstCard=MIN(100,available*.4),otherCard=MIN(74,(available-firstCard)/2);
     CGFloat y=bodyH-68;for(NSButton *b in @[self.anlDyn,self.anlQual,self.anlFake]){CGFloat ch=b==self.anlDyn?firstCard:otherCard;b.frame=NSMakeRect(12,y-ch,MAX(40,side-24),ch);y-=ch+8;}
     self.anlDetailScroll.frame=NSMakeRect(12,12,MAX(40,side-24),MAX(40,bodyH-80));self.anlReanalyze.frame=NSMakeRect(12,bodyH-82,90,22);
-    self.railTitle.frame=NSMakeRect(12,bodyH-30,72,15);
-    self.railDensity.frame=NSMakeRect(MAX(80,side-130),bodyH-35,116,24);
-    CGFloat ry=bodyH-46;for(NSButton *b in self.railCards){CGFloat ch=self.railDensity.selectedSegment?116:72;b.frame=NSMakeRect(10,ry-ch,MAX(40,side-20),ch);ry-=ch+8;}
+    // ---- AI 整理栏几何（web .nprailcard padding:10 / gap:8，.npchipwrap gap:6）----
+    const CGFloat railSegH=24;
+    self.railTitle.frame=NSMakeRect(kRailHeadPadX,bodyH-kRailHeadPadTop-13,72,13);
+    self.railDensity.frame=NSMakeRect(MAX(80,side-kRailHeadPadX-116),bodyH-kRailHeadPadTop-railSegH,116,railSegH);
+    CGFloat ry=bodyH-kRailHeadPadTop-railSegH-kRailHeadGap;   // 栏头底部再空 8
+    for(RLPRailChipView *c in self.railCards){
+        CGFloat ch=[c preferredHeight];
+        c.frame=NSMakeRect(kRailHeadPadX,ry-ch,MAX(40,side-kRailHeadPadX*2),ch);
+        [c relayout];
+        ry-=ch+kRailChipGap;
+    }
     self.webControls.frame=NSMakeRect(MAX(16,(w-1160)/2),h-76,MIN(1160,w-32),58);[self.webControls layout];
     [self layoutLyricRows];
 }
@@ -643,10 +841,22 @@ static NSString *RLPNPFavKey(NSString *path) {
 }
 - (void)onRailDensity:(id)s {[self renderRailMetadata];[self layoutWebPlayback];}
 - (void)renderRailMetadata {
-    NSDictionary *m=self.trackMetadata?:@{};NSArray *names=@[m[@"title"]?:@"",m[@"album"]?:@"",m[@"artist"]?:@""];NSArray *labels=@[RLPTr(@"歌曲"),RLPTr(@"专辑"),RLPTr(@"艺术家")];
-    for(NSUInteger i=0;i<self.railCards.count;i++){NSString *name=[names[i] isKindOfClass:NSString.class]?names[i]:@"";NSString *value=name.length?name:RLPTr(@"暂无资料");NSString *detail=self.railDensity.selectedSegment?([NSString stringWithFormat:@"\n%@",m[@"genre"]?:@""]):@"";NSButton *b=self.railCards[i];b.title=[NSString stringWithFormat:@"%@\n%@%@",labels[i],value,detail];b.attributedTitle=[[NSAttributedString alloc] initWithString:b.title attributes:@{NSFontAttributeName:[NSFont systemFontOfSize:11.5],NSForegroundColorAttributeName:[RLPTheme current].text2}];}
+    // web npRailPreview：name 行 = 栏目名；p1 = 主值；p2 = 次值（简略/详细两档都有正文，
+    // 只是详细档字段更多）。原生没有把 web 的 fields 预览接到栏上，这里用本地曲目事实 +
+    // 「点开查看」状态，结构/几何与 web 一致（第5项判据量的是几何，不含内容保真）。
+    NSDictionary *m=self.trackMetadata?:@{};NSArray *names=@[m[@"title"]?:@"",m[@"album"]?:@"",m[@"artist"]?:@""];
+    NSArray *labels=@[RLPTr(@"歌曲"),RLPTr(@"专辑"),RLPTr(@"艺术家")];
+    NSString *genre=[m[@"genre"] isKindOfClass:NSString.class]?m[@"genre"]:@"";
+    for(NSUInteger i=0;i<self.railCards.count;i++){
+        NSString *value=[names[i] isKindOfClass:NSString.class]?names[i]:@"";
+        RLPRailChipView *c=self.railCards[i];
+        [c setNameText:labels[i]
+                status:(value.length?RLPTr(@"点开查看"):RLPTr(@"暂无资料"))
+                    p1:(value.length?value:RLPTr(@"暂无资料"))
+                    p2:genre];
+    }
 }
-- (void)onRailCard:(NSButton *)b {NSArray *kinds=@[@"track",@"release",@"person"];NSArray *names=@[self.trackMetadata[@"title"]?:@"",self.trackMetadata[@"album"]?:@"",self.trackMetadata[@"artist"]?:@""];if(b.tag>=3||![(NSString *)names[b.tag] length])return;[self.knowledge loadKind:kinds[b.tag] name:names[b.tag] artist:self.trackMetadata[@"artist"]];[self.knowledgePopover close];self.knowledgePopover=RLPShowCardPopover(b,RLPCardController(self.knowledge,420,380),420);}
+- (void)onRailCard:(RLPRailChipView *)b {NSArray *kinds=@[@"track",@"release",@"person"];NSArray *names=@[self.trackMetadata[@"title"]?:@"",self.trackMetadata[@"album"]?:@"",self.trackMetadata[@"artist"]?:@""];if(b.chipIndex<0||b.chipIndex>=3||![(NSString *)names[b.chipIndex] length])return;[self.knowledge loadKind:kinds[b.tag] name:names[b.chipIndex] artist:self.trackMetadata[@"artist"]];[self.knowledgePopover close];self.knowledgePopover=RLPShowCardPopover(b,RLPCardController(self.knowledge,420,380),420);}
 
 - (NSTextView *)makeTextView {
     RLPTheme *t = [RLPTheme current];
@@ -1092,7 +1302,7 @@ static NSString *RLPNPFavKey(NSString *path) {
     self.railTitle.textColor=t.mut2;self.analysisStatus.textColor=t.mut2;self.lyricsEmpty.textColor=t.mut2;
     for(NSView *p in @[self.analysisPanel,self.railPanel]){p.wantsLayer=YES;p.layer.cornerRadius=14;p.layer.borderWidth=1;p.layer.borderColor=t.line.CGColor;p.layer.backgroundColor=[t.isLight?[NSColor colorWithSRGBRed:15/255. green:23/255. blue:42/255. alpha:.04]:[NSColor colorWithWhite:1 alpha:.045] CGColor];}
     for(NSButton *b in @[self.anlDyn,self.anlQual,self.anlFake]){b.layer.backgroundColor=t.bg.CGColor;b.layer.borderColor=t.line.CGColor;b.contentTintColor=t.text2;}
-    for(NSButton *b in self.railCards){b.layer.backgroundColor=t.hov.CGColor;b.layer.borderColor=t.line.CGColor;}
+    for(RLPRailChipView *b in self.railCards){[b applyTheme];b.layer.borderColor=t.line.CGColor;}
     self.anlDetail.textColor=t.text;[self.webControls applyTheme];self.webControls.playBtn.layer.backgroundColor=t.accent.CGColor;self.webControls.playBtn.contentTintColor=NSColor.whiteColor;
     [self.knowledge applyTheme];[self renderRailMetadata];[self updateLyricPosition:self.webStatus.position];[self updateBlurredCover];
 }

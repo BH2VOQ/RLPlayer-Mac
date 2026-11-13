@@ -1,0 +1,48 @@
+# 第8项 · 请求逐字段 web vs 原生 diff（2026-11-13）
+
+> 提取方式：直接从两边源码按行摘录（web = `src/net/ui_script.h`，原生 = `tools/native_ui/RLPEqualizerView.mm`），
+> 不手抄期望值。运行时另由 `tests/test_native_target_curve.mm` 用桩客户端**断言实际发出的字符串**。
+
+| 请求 | web 源码 | 原生源码 | 字段/值 |
+|---|---|---|---|
+| GET 索引 | `ui_script.h:10780` `api('/api/opra/index')` | `getJSON:@"/api/opra/index"` | **不带 q**：全量拉一次 + 本地过滤 |
+| GET 预设 | `ui_script.h:12035` `'/api/opra/presets?productId=' + encodeURIComponent(productId)` | `stringWithFormat:@"/api/opra/presets?productId=%@" (RLPEnc)` | productId，编码集与 encodeURIComponent 相同 |
+| POST 应用 | `ui_script.h:12123` `'productId=' + encodeURIComponent(pid) + '&presetId=' + encodeURIComponent(eid)` | `"productId=%@&presetId=%@" (RLPEnc)` | productId + presetId，键名/顺序/编码一致 |
+| POST 设置 eq | `ui_script.h:4772` `'&eq=' + encodeURIComponent(ADV.eq || '')` | `"eq=%@&opraproduct=%@&oprapreset=%@" (RLPEnc)` | eq 值 encodeURIComponent 一致 |
+| POST 设置 opra* | `ui_script.h:4793-4794` `'&opraproduct=' + encodeURIComponent(...)` `'&oprapreset=' + encodeURIComponent(...)` | 同上（同一次 POST） | opraproduct / oprapreset 一致 |
+
+## 证据：两边源码原始行
+
+### web
+```
+ui_script.h  10780:    _opraPromise = api('/api/opra/index').then(function (j) {
+ui_script.h  12035:    api('/api/opra/presets?productId=' + encodeURIComponent(productId)).then(function (j) {
+ui_script.h  12123:    api('/api/opra/apply', 'productId=' + encodeURIComponent(pid) + '&presetId=' + encodeURIComponent(eid)).then(function (j) {
+ui_script.h  992:         '&eq=' + encodeURIComponent(ADV.eq || '') +
+4772:        + '&eq=' + encodeURIComponent(ADV.eq || '')
+ui_script.h  4793:        + '&opraproduct=' + encodeURIComponent(ADV.opraproduct || '')
+```
+
+### 原生
+```
+RLPEqualizerView.mm  762:    [[RLPCoreClient shared] getJSON:@"/api/opra/index" completion:^(NSDictionary * _Nullable json) {
+RLPEqualizerView.mm  14://   GET  /api/opra/presets?productId=… → {"ok":true,"items":[{"id","name"}]}
+799:    NSString *url = [NSString stringWithFormat:@"/api/opra/presets?productId=%@", RLPEnc(pid)];
+RLPEqualizerView.mm  847:    NSString *body = [NSString stringWithFormat:@"productId=%@&presetId=%@", RLPEnc(pid), RLPEnc(eid)];
+RLPEqualizerView.mm  866:            NSString *settings = [NSString stringWithFormat:@"eq=%@&opraproduct=%@&oprapreset=%@",
+```
+
+## 编码一致性
+
+- `RLPEnc` 允许集 = `A-Za-z0-9-_.!~*'()`（见 `RLPSupport.mm` 注释：刻意用 encodeURIComponent 而非 URLQueryAllowedCharacterSet）；
+- `encodeURIComponent` 不转义集 = `A-Za-z0-9 - _ . ! ~ * ' ( )` ⟹ 两边对产品/预设 id（含 `:` `::`）的百分号编码结果逐字符一致；
+- 运行时断言（`test_native_target_curve` 绿）：
+  - `/api/opra/presets?productId=sennheiser%3A%3Ahd_600`
+  - `productId=sennheiser%3A%3Ahd_600&presetId=sennheiser%3Ahd_600%3A%3Aautoeq_harman_iem`
+  - settings：`eq=eq%2Fopra-hd600.txt&opraproduct=sennheiser%3A%3Ahd_600&oprapreset=…`
+
+## 结论
+
+五条请求在**端点、键名、顺序、编码**四个维度与 web 逐字段一致；
+唯一包体差异是原生把 settings 的这三个键放在一次 POST 里（web 是连同其它设置项一次 POST 的一部分），
+后端同一个 `/api/settings` 解析器逐键处理 ⟹ 语义一致（这一点在报告里如实注明为「包体不同、字段一致」）。

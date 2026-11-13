@@ -310,6 +310,59 @@ static const CGFloat kBodyPadY = 14.0;
     [self syncHeight];
 }
 
+- (void)addSubHeader:(NSString *)title hint:(NSString *)hint {
+    RLPTheme *t = [RLPTheme current];
+    NSView *box = [[NSView alloc] initWithFrame:NSZeroRect];
+    box.translatesAutoresizingMaskIntoConstraints = NO;
+    box.identifier = @"set.subhead";
+    NSTextField *titleL = RLPLabel(title ?: @"", [NSFont systemFontOfSize:12.5 weight:NSFontWeightSemibold], t.text);
+    titleL.translatesAutoresizingMaskIntoConstraints = NO;
+    titleL.identifier = @"set.subhead.title";
+    titleL.lineBreakMode = NSLineBreakByTruncatingTail;
+    [box addSubview:titleL];
+    NSView *line = [[NSView alloc] initWithFrame:NSZeroRect];
+    line.translatesAutoresizingMaskIntoConstraints = NO;
+    line.wantsLayer = YES;
+    line.layer.backgroundColor = t.line.CGColor;
+    line.identifier = @"set.subhead.line";
+    [box addSubview:line];
+    NSMutableArray<NSLayoutConstraint *> *cs = [NSMutableArray arrayWithArray:@[
+        [titleL.leadingAnchor constraintEqualToAnchor:box.leadingAnchor],
+        [titleL.topAnchor constraintEqualToAnchor:box.topAnchor],
+        [line.leadingAnchor constraintEqualToAnchor:box.leadingAnchor],
+        [line.trailingAnchor constraintEqualToAnchor:box.trailingAnchor],
+        [line.topAnchor constraintEqualToAnchor:titleL.bottomAnchor constant:8],
+        [line.heightAnchor constraintEqualToConstant:1],
+        [line.bottomAnchor constraintEqualToAnchor:box.bottomAnchor],
+    ]];
+    if (hint.length) {
+        NSTextField *h = RLPLabel(hint, [NSFont systemFontOfSize:11], t.mut2);
+        h.translatesAutoresizingMaskIntoConstraints = NO;
+        h.identifier = @"set.subhead.hint";
+        [box addSubview:h];
+        [cs addObjectsFromArray:@[
+            [h.leadingAnchor constraintEqualToAnchor:titleL.trailingAnchor constant:9],
+            [h.centerYAnchor constraintEqualToAnchor:titleL.centerYAnchor],
+            [h.trailingAnchor constraintLessThanOrEqualToAnchor:box.trailingAnchor],
+        ]];
+    }
+    [NSLayoutConstraint activateConstraints:cs];
+    [self.grid addItem:box span:YES];
+    [self syncHeight];
+}
+
+- (void)addNoteView:(NSTextField *)note {
+    if (!note) return;
+    // hintForKey 当年为了老横向布局写死了 560pt；进卡片后必须改由网格给宽度，
+    // 否则窄窗口下会横向溢出（第12项同时要修的就是这个"散块"来源之一）。
+    for (NSLayoutConstraint *c in note.constraints.copy) {
+        if (c.firstAttribute == NSLayoutAttributeWidth && c.secondItem == nil) c.active = NO;
+    }
+    note.translatesAutoresizingMaskIntoConstraints = NO;
+    [self.grid addItem:note span:YES];
+    [self syncHeight];
+}
+
 - (void)addNote:(NSString *)text {
     NSTextField *l = RLPLabel(text ?: @"", [NSFont systemFontOfSize:10.5], [RLPTheme current].mut2);
     l.translatesAutoresizingMaskIntoConstraints = NO;

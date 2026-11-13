@@ -41,6 +41,11 @@ NS_ASSUME_NONNULL_BEGIN
 - (void)addCheck:(NSString *)label control:(NSView *)control hint:(nullable NSString *)hint;
 - (void)addButtonRow:(NSArray<NSView *> *)buttons;
 - (void)addNote:(NSString *)text;
+/// 子标题（web `.meta-card .mh.sub`：12.5/650 + 底部 1px 分隔线 + 下方 8pt 内边距）。
+/// 用于同一张卡体内的第二段区块（如「AI 接入」卡里的「标签写回」）。
+- (void)addSubHeader:(NSString *)title hint:(nullable NSString *)hint;
+/// 调用方自带 identifier 的说明行（web `.hint`）——保住 parity 表里的 sp_wbdesc。
+- (void)addNoteView:(NSTextField *)note;
 - (void)addFullRow:(NSView *)view;
 @property (nonatomic, readonly) NSInteger columnCount;
 - (void)applyTheme;
