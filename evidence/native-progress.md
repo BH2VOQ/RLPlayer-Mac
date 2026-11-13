@@ -239,3 +239,22 @@ i18n 存量缺「可用性/THD+N 方法/side-mid」；L1/L2 仅离屏几何（�
 audit 5 跑中 1 次在专辑详情导航处偶发段错误（未复现，其余 246/0）；实机未验。
 
 **下一步**：轮次 3 = 曲目页行几何/格式列对齐 web `.trow-track`。
+
+### 2026-11-14 06:07 —— 轮次 3（1.1.7.26）：曲目页行几何/内容 = web `.trow-track`
+
+**现场**：基线 `36ce2fa`（1.1.7.25）；门禁全绿后开改。任务：7 格列（序号/心形/标题/`artist — album` 合并格/
+规格/时长/+）、断点列宽、行高 34、去列头、规格 `fmtTag`。
+**实现**：`RLPTracksViewController.mm` 7 列 + 三档响应式（>1400 / 1121-1400 / ≤1120）+ 行高 34 + 字号 12.5/11.5/9.5
++ 合并艺术家格（U+2014）+ 规格列（96k/24）+ `headerView=nil` + 心形/+ 行为保留。
+
+**红→绿**：新 ctest `native_tracks_rows` 旧码 **20P/70F** → 新码 **109P/0F**；
+日志 `native-tracks-rows-red-20261114.log` / `-green-20261114.log`。
+**审查修正**：旧判据用 `table.bounds.width` 算剩余宽，但 plain style 尾部多 8pt gap ⟹ 恒差 8；
+改为用「列和+可见列间隙=内容宽」计算（非改生产迁就判据）。
+
+**门禁**：build 0 error；audit **246 passed / 0 failed**（`native-tracks-rows-audit-246.log`）；
+ctest 结果回填中；parity/behavior/i18n 待回填。
+**证据**：`evidence/native-tracks-rows-20261114.md`。
+**如实挂账**：规格列仅表格宽 >1400 可见（web 媒体查询同口径）；离屏单测，实机未验。
+
+**下一步**：轮次 4 = 正在播放 npMeta 芯片行（web badge 规格 + EQ/IR 芯片 + 推送/加歌单）。
