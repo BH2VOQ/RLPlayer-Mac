@@ -416,6 +416,20 @@ if(APPLE)
   add_test(NAME native_queue_rows COMMAND test_native_queue_rows)
   set_tests_properties(native_queue_rows PROPERTIES TIMEOUT 120)
 
+  # 专辑页 / 文件夹页空态 = web emptyStateHtml（非 classic）：0 张专辑时空态卡
+  # （有/无 roots 两套文案 + 三个入口）与「此目录没有音频文件」。对 1.1.7.29 先跑红。
+  add_executable(test_native_empty_states tests/test_native_empty_states.mm
+    tools/native_ui/RLPAlbumsViewController.mm tools/native_ui/RLPFoldersViewController.mm
+    tools/native_ui/RLPPageViewController.mm tools/native_ui/RLPSupport.mm
+    tools/native_ui/RLPModels.mm tools/native_ui/RLPTheme.mm
+    tools/native_ui/RLPNativeI18n.mm tools/native_ui/RLPRemoveDir.mm)
+  target_compile_options(test_native_empty_states PRIVATE -fobjc-arc)
+  target_include_directories(test_native_empty_states PRIVATE src tools tools/native_ui)
+  target_link_libraries(test_native_empty_states PRIVATE
+    "-framework AppKit" "-framework QuartzCore" "-framework CoreImage")
+  add_test(NAME native_empty_states COMMAND test_native_empty_states)
+  set_tests_properties(native_empty_states PROPERTIES TIMEOUT 120)
+
   # 曲目页行几何/内容 = web `.trow-track`：7 列（无独立专辑列、有规格列）、响应式
   # 1.6/1.8/1:0.9、无列头、rowHeight 34、artist — album 单格。对 1.1.7.25 先跑红。
   add_executable(test_native_tracks_rows tests/test_native_tracks_rows.mm

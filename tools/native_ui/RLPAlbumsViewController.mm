@@ -216,6 +216,14 @@ static const NSUserInterfaceItemIdentifier kAlbumItemID = @"RLPAlbumItem";
 @property (nonatomic, strong) NSTextField *countLabel;
 @property (nonatomic, strong) NSMutableArray<RLPAlbum *> *albums;
 @property (nonatomic, strong) NSCache<NSString *, NSImage *> *coverCache;
+// 专辑页空态（web emptyStateHtml 的非 classic 分支）：只在曲库 0 张专辑时出现。
+@property (nonatomic, strong) NSView *emptyCard;
+@property (nonatomic, strong) NSTextField *emptyTitleLabel;
+@property (nonatomic, strong) NSTextField *emptyHintLabel;
+@property (nonatomic, strong) NSTextField *emptyRootLabel;
+@property (nonatomic, strong) NSButton *emptyAddBtn;
+@property (nonatomic, strong) NSButton *emptyScanBtn;
+@property (nonatomic, strong) NSButton *emptyStationBtn;
 @end
 
 @implementation RLPAlbumsViewController
@@ -299,6 +307,80 @@ static const NSUserInterfaceItemIdentifier kAlbumItemID = @"RLPAlbumItem";
     scroll.translatesAutoresizingMaskIntoConstraints = NO;
     [root addSubview:scroll];
 
+    // ---- 空态卡（web .empty-guide-card）：0 张专辑时盖在网格区上方，说明 + 三个入口 ----
+    self.emptyCard = [[NSView alloc] initWithFrame:NSZeroRect];
+    self.emptyCard.translatesAutoresizingMaskIntoConstraints = NO;
+    self.emptyCard.wantsLayer = YES;
+    self.emptyCard.layer.cornerRadius = 12;
+    self.emptyCard.layer.borderWidth = 1;
+    self.emptyCard.hidden = YES;
+    [root addSubview:self.emptyCard];
+
+    NSStackView *emptyStack = [[NSStackView alloc] initWithFrame:NSZeroRect];
+    emptyStack.orientation = NSUserInterfaceLayoutOrientationVertical;
+    emptyStack.alignment = NSLayoutAttributeCenterX;
+    emptyStack.spacing = 8;
+    emptyStack.translatesAutoresizingMaskIntoConstraints = NO;
+    [self.emptyCard addSubview:emptyStack];
+
+    NSTextField *emoji = [NSTextField labelWithString:@"\U0001F3B5"];   // 🎵
+    emoji.font = [NSFont systemFontOfSize:36];
+    emoji.alignment = NSTextAlignmentCenter;
+    [emptyStack addArrangedSubview:emoji];
+
+    self.emptyTitleLabel = RLPLabel(RLPTr(@"还没有添加音乐目录"),
+                                    [NSFont systemFontOfSize:15 weight:NSFontWeightSemibold], t.text);
+    self.emptyTitleLabel.alignment = NSTextAlignmentCenter;
+    self.emptyTitleLabel.maximumNumberOfLines = 2;
+    self.emptyTitleLabel.lineBreakMode = NSLineBreakByWordWrapping;
+    [emptyStack addArrangedSubview:self.emptyTitleLabel];
+
+    self.emptyHintLabel = RLPLabel(@"", [NSFont systemFontOfSize:12.5], t.mut2);
+    self.emptyHintLabel.alignment = NSTextAlignmentCenter;
+    self.emptyHintLabel.maximumNumberOfLines = 4;
+    self.emptyHintLabel.lineBreakMode = NSLineBreakByWordWrapping;
+    [[self.emptyHintLabel.widthAnchor constraintEqualToConstant:460] setActive:YES];
+    [emptyStack addArrangedSubview:self.emptyHintLabel];
+
+    self.emptyRootLabel = RLPLabel(@"", [NSFont systemFontOfSize:11], t.mut2);
+    self.emptyRootLabel.alignment = NSTextAlignmentCenter;
+    self.emptyRootLabel.lineBreakMode = NSLineBreakByTruncatingMiddle;
+    self.emptyRootLabel.maximumNumberOfLines = 1;
+    self.emptyRootLabel.hidden = YES;
+    [emptyStack addArrangedSubview:self.emptyRootLabel];
+
+    NSStackView *emptyRow = [[NSStackView alloc] initWithFrame:NSZeroRect];
+    emptyRow.orientation = NSUserInterfaceLayoutOrientationHorizontal;
+    emptyRow.spacing = 12;
+    emptyRow.translatesAutoresizingMaskIntoConstraints = NO;
+    self.emptyAddBtn = [NSButton buttonWithTitle:RLPTr(@"添加音乐目录") target:self
+                                         action:@selector(onEmptyAddRoot:)];
+    self.emptyAddBtn.bezelStyle = NSBezelStyleRounded;
+    self.emptyAddBtn.identifier = @"albums.emptyAdd";
+    self.emptyAddBtn.keyEquivalent = @"\r";
+    self.emptyScanBtn = [NSButton buttonWithTitle:RLPTr(@"扫描目录") target:self
+                                           action:@selector(onEmptyScan:)];
+    self.emptyScanBtn.bezelStyle = NSBezelStyleRounded;
+    self.emptyScanBtn.identifier = @"albums.emptyScan";
+    self.emptyStationBtn = [NSButton buttonWithTitle:RLPTr(@"打开快速开始") target:self
+                                              action:@selector(onEmptyStation:)];
+    self.emptyStationBtn.bezelStyle = NSBezelStyleRounded;
+    self.emptyStationBtn.identifier = @"albums.emptyStation";
+    [emptyRow addArrangedSubview:self.emptyAddBtn];
+    [emptyRow addArrangedSubview:self.emptyScanBtn];
+    [emptyRow addArrangedSubview:self.emptyStationBtn];
+    [emptyStack addArrangedSubview:emptyRow];
+
+    [NSLayoutConstraint activateConstraints:@[
+        [self.emptyCard.centerXAnchor constraintEqualToAnchor:root.centerXAnchor],
+        [self.emptyCard.topAnchor constraintEqualToAnchor:scroll.topAnchor constant:40],
+        [self.emptyCard.widthAnchor constraintEqualToConstant:520],
+        [emptyStack.leadingAnchor constraintEqualToAnchor:self.emptyCard.leadingAnchor constant:28],
+        [emptyStack.trailingAnchor constraintEqualToAnchor:self.emptyCard.trailingAnchor constant:-28],
+        [emptyStack.topAnchor constraintEqualToAnchor:self.emptyCard.topAnchor constant:32],
+        [emptyStack.bottomAnchor constraintEqualToAnchor:self.emptyCard.bottomAnchor constant:-32],
+    ]];
+
     [NSLayoutConstraint activateConstraints:@[
         [title.leadingAnchor constraintEqualToAnchor:root.leadingAnchor constant:24],
         [title.topAnchor constraintEqualToAnchor:root.topAnchor constant:18],
@@ -314,6 +396,67 @@ static const NSUserInterfaceItemIdentifier kAlbumItemID = @"RLPAlbumItem";
 }
 
 #pragma mark - 数据
+#pragma mark - 空态（web emptyStateHtml 非 classic 分支）
+
+- (void)onEmptyAddRoot:(id)sender {
+    (void)sender;
+    // web bEmptyAddRoot：openSettingsTab('adv') —— 目录管理在「通用」页。
+    [[NSNotificationCenter defaultCenter] postNotificationName:@"RLPOpenSettingsPaneNotification" object:@"adv"];
+}
+
+- (void)onEmptyScan:(id)sender {
+    (void)sender;
+    // web bEmptyScan：触发顶栏 bScan（POST /api/lib/scan）。
+    [[RLPCoreClient shared] postJSON:@"/api/lib/scan" body:@"" completion:nil];
+    RLPToast(RLPTr(@"开始重新扫描"));
+}
+
+- (void)onEmptyStation:(id)sender {
+    (void)sender;
+    // web emptyGoStation：打开快速开始页（原生导航 key "sq"）。
+    [[NSNotificationCenter defaultCenter] postNotificationName:@"RLPNavigateKeyNotification" object:@"sq"];
+}
+
+/// 空态显隐：0 张专辑时卡片可见，网格滚动区隐藏（不留一块空网格底）。
+- (void)setEmptyStateVisible:(BOOL)visible {
+    self.emptyCard.hidden = !visible;
+    self.collection.enclosingScrollView.hidden = visible;
+    if (!visible) return;
+    // 先用「无目录」默认文案，再拉 roots 决定「有目录但没歌」的变体（web S.roots 同源）。
+    [self refreshEmptyStateWithRoots:@[]];
+    __weak __typeof__(self) ws = self;
+    [[RLPCoreClient shared] getJSON:@"/api/lib/stats" completion:^(NSDictionary * _Nullable json) {
+        __typeof__(self) s = ws;
+        if (!s) return;
+        NSArray *roots = [json[@"roots"] isKindOfClass:[NSArray class]] ? json[@"roots"] : @[];
+        [s refreshEmptyStateWithRoots:roots];
+    }];
+}
+
+- (void)refreshEmptyStateWithRoots:(NSArray *)roots {
+    NSString *rootPath = @"";
+    for (id r in roots) {
+        if ([r isKindOfClass:[NSString class]] && [(NSString *)r length]) { rootPath = r; break; }
+    }
+    const BOOL hasRoots = rootPath.length > 0;
+    self.emptyTitleLabel.stringValue = hasRoots
+        ? RLPTr(@"已添加音乐目录，但未找到音频文件")
+        : RLPTr(@"还没有添加音乐目录");
+    if (hasRoots) {
+        self.emptyHintLabel.stringValue = RLPTr(@"当前目录中未发现可识别的音频文件，请确认音频格式或更换目录。");
+        self.emptyRootLabel.stringValue = rootPath;
+        self.emptyRootLabel.hidden = NO;
+    } else {
+        self.emptyHintLabel.stringValue = [NSString stringWithFormat:@"%@\n%@",
+            RLPTr(@"RLPlayer 会自动为您建立高保真音乐库并整理专辑与元数据。"),
+            RLPTr(@"支持 FLAC、DSD (DSF/DFF)、WAV、ALAC、CUE 分轨等格式。")];
+        self.emptyRootLabel.stringValue = @"";
+        self.emptyRootLabel.hidden = YES;
+    }
+    [self.emptyAddBtn setTitle:(hasRoots ? RLPTr(@"管理音乐目录") : RLPTr(@"添加音乐目录"))];
+    [self.emptyScanBtn setTitle:(hasRoots ? RLPTr(@"重新扫描") : RLPTr(@"扫描目录"))];
+}
+
 
 /// 每次切到本页都重报一次计数（主窗口 sync 会先清空计数）。
 - (void)activate {
@@ -344,6 +487,7 @@ static const NSUserInterfaceItemIdentifier kAlbumItemID = @"RLPAlbumItem";
         [self_.albums setArray:list];
         [self_.collection reloadData];
         self_.countLabel.stringValue = [NSString stringWithFormat:@"%ld 张专辑", (long)list.count];
+        [self_ setEmptyStateVisible:(list.count == 0)];
         // 顶栏计数（web #cnt 同口径）：页加载完上报，主窗口显示在页标题旁。
         [[NSNotificationCenter defaultCenter] postNotificationName:@"RLPPageCountNotification"
             object:[NSString stringWithFormat:@"%ld 张专辑", (long)list.count]];

@@ -21,6 +21,8 @@
 @property (nonatomic, strong) NSButton *goBtn;              // web #fGo
 @property (nonatomic, strong) NSButton *upBtn;
 @property (nonatomic) BOOL loaded;
+// web 空态：`此目录没有音频文件`（只有目录/文件都为空时出现，dirs 非空不算空）。
+@property (nonatomic, strong) NSTextField *emptyLabel;
 @end
 
 @implementation RLPFoldersViewController
@@ -109,6 +111,13 @@
     scroll.translatesAutoresizingMaskIntoConstraints = NO;
     [host addSubview:scroll];
 
+    self.emptyLabel = RLPLabel(RLPTr(@"此目录没有音频文件"), t.body, t.mut2);
+    self.emptyLabel.identifier = @"folders.empty";
+    self.emptyLabel.alignment = NSTextAlignmentCenter;
+    self.emptyLabel.translatesAutoresizingMaskIntoConstraints = NO;
+    self.emptyLabel.hidden = YES;
+    [host addSubview:self.emptyLabel];
+
     [NSLayoutConstraint activateConstraints:@[
         [self.upBtn.leadingAnchor constraintEqualToAnchor:host.leadingAnchor constant:24],
         [self.upBtn.topAnchor constraintEqualToAnchor:host.topAnchor constant:6],
@@ -131,6 +140,8 @@
         [scroll.trailingAnchor constraintEqualToAnchor:host.trailingAnchor constant:-24],
         [scroll.topAnchor constraintEqualToAnchor:self.upBtn.bottomAnchor constant:10],
         [scroll.bottomAnchor constraintEqualToAnchor:host.bottomAnchor constant:-12],
+        [self.emptyLabel.centerXAnchor constraintEqualToAnchor:scroll.centerXAnchor],
+        [self.emptyLabel.centerYAnchor constraintEqualToAnchor:scroll.centerYAnchor],
     ]];
 }
 
@@ -203,6 +214,7 @@
         strongSelf.pathField.stringValue = strongSelf.dir;
         strongSelf.upBtn.enabled = strongSelf.dir.length > 1 && ![strongSelf.dir isEqualToString:@"/"];
         [strongSelf.table reloadData];
+        strongSelf.emptyLabel.hidden = ((strongSelf.dirs.count + strongSelf.files.count) > 0);
         [strongSelf setSubtitle:[NSString stringWithFormat:@"%ld %@ · %ld %@",
             (long)strongSelf.dirs.count, RLPTr(@"个文件夹"),
             (long)strongSelf.files.count, RLPTr(@"首")]];
