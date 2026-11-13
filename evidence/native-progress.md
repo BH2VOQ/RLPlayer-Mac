@@ -192,3 +192,25 @@ C：点发送后窗口 1→2（标题「反馈」）、无 POST、通道永远�
 **收尾**：A/B/C/D 四项全部完成并各自红→绿（数字见 §00:55 表）；
 证据汇总 `evidence/native-3-settings-cards-20261114.md`，逐页对比图 `native-3-compare-*.png`。
 **下一步（交用户）**：实机验收（见报告 §5）；真实反馈 POST 未真发（测试接缝抓包验证端点/请求体/回包）。
+
+### 2026-11-14 04:10 —— 轮次 1（1.1.7.24）：AI 整理右栏内容预览（web npRailPreview 移植）
+
+**现场**：基线 `938d50f`（1.1.7.23）；门禁全绿后开改（ctest 186/186、audit 246/246、parity missing=0、behavior 0、i18n 2316）。
+**任务**：右栏三卡 = web 的真实内容预览（不是本地事实占位）；点击卡打开正确实体（旧码 `b.tag` 恒 0，专辑/艺术家卡都打开歌曲）。
+
+**红→绿**：新 ctest `native_rail_preview`（45 条，桩客户端）旧码 **8P/37F** → 新码 **45P/0F**；
+日志 `evidence/native-rail-preview-red-20261114.log` / `-green-20261114.log`；Lead 独立复跑 45/0。
+
+**实现**：取数闸门（meta.summaryEnabled+可用/key）、三实体目标、web 同形 summary URL、
+pending 轮询（150-2000ms/120s）、URL 缓存+单飞、insufficient 终局态、五态状态短语、
+track/release/person 预览逐分支（含本地兜底与 npLocalAlbum）、详细档（pick 4、简介不截断、
+p1 5 行/p2 2 行、卡高实测）、档位持久化（`RLPNPRailDetail`）。
+
+**门禁（提交前）**：build 0 error；ctest **187/187**（366s，`native-rail-preview-ctest-187.log`）；
+audit **246/0**（`native-rail-preview-audit-246.log`）；parity missing=0 removed=2 na=16 ok；
+behavior actionable=0；i18n **2318 pairs**。
+
+**证据**：`evidence/native-rail-preview-20261114.md`；前后图 `native-rail-before/after-20261114.png`。
+**如实挂账**：第 4 张「作品」卡、抽屉 vs 气泡、`npSummHint`/`nprailempty` 未做。
+
+**下一步**：轮次 2 = 正在播放页「音频分析」面板对齐 web（单分段控件/卡片排版/展开后指标网格）。
