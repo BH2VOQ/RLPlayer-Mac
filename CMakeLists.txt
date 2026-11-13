@@ -337,6 +337,21 @@ if(APPLE)
   add_test(NAME native_rail_cards COMMAND test_native_rail_cards)
   set_tests_properties(native_rail_cards PROPERTIES TIMEOUT 120)
 
+  # 「AI 整理」栏内容级判据：三卡的 summary 预览/两档/点击实体类型/URL 形状。
+  # 对旧码先跑红（旧码只显示本地事实 + 点开查看、点击 kind 恒为 track），改完再跑绿。
+  add_executable(test_native_rail_preview tests/test_native_rail_preview.mm
+    tools/native_ui/RLPNowPlayingViewController.mm tools/native_ui/RLPPageViewController.mm
+    tools/native_ui/RLPSupport.mm tools/native_ui/RLPModels.mm
+    tools/native_ui/RLPTheme.mm tools/native_ui/RLPNativeI18n.mm
+    tools/native_ui/RLPKnowledgeView.mm tools/native_ui/RLPAnalysisSummary.mm
+    tools/native_ui/RLPLyrics.mm tools/native_ui/RLPTrackActions.mm)
+  target_compile_options(test_native_rail_preview PRIVATE -fobjc-arc)
+  target_include_directories(test_native_rail_preview PRIVATE src tools tools/native_ui)
+  target_link_libraries(test_native_rail_preview PRIVATE
+    "-framework AppKit" "-framework QuartzCore" "-framework CoreImage")
+  add_test(NAME native_rail_preview COMMAND test_native_rail_preview)
+  set_tests_properties(native_rail_preview PROPERTIES TIMEOUT 120)
+
   # 第12项「标签写回」结构+几何判据：真设置页（隔离目录、backend=null）、离屏、不出声。
   add_executable(test_native_writeback_card tests/test_native_writeback_card.mm
     tools/native_ui/RLPSettingsViewController.mm tools/native_ui/RLPSettingsLayout.mm

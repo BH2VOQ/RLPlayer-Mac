@@ -2342,6 +2342,8 @@ inline const I18nPair* i18n_table(std::size_t* count) {
         {"点开查看完整 AI 整理资料", "Open the full AI summary"},
         {"点开查看整理资料", "Open summary"},
         {"已整理", "Summarized"},
+        {"资料不足", "Insufficient data"},
+        {"资料不足：缺少艺术家与曲名", "Insufficient data: missing artist and track title"},
     };
     if (count) *count = sizeof(k) / sizeof(k[0]);
     return k;

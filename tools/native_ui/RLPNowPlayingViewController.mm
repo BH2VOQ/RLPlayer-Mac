@@ -373,10 +373,15 @@ static const CGFloat kRailP2H        = 15.0;   // 10.5 × 1.45 ≈ 15.2
     NSTextField *_p2Label;
 }
 @property (nonatomic, assign) NSInteger chipIndex;
+/// 详细档：p1 最多 5 行、p2 最多 2 行（web `.npchipwrap[data-detail=1]` 的 line-clamp），
+/// 简介不再按 40 字截断；高度由文本实测撑开。默认（简略）保持既有的单行几何。
+@property (nonatomic, assign) BOOL detailMode;
 @property (nonatomic, copy, nullable) void (^onTap)(RLPRailChipView *chip);
 - (void)setNameText:(NSString *)name status:(NSString *)status
                   p1:(NSString *)p1 p2:(NSString *)p2;
 - (CGFloat)preferredHeight;
+/// 详细档要按真实卡宽量文本；layout 里先知道宽度再定卡片高度。
+- (CGFloat)preferredHeightForWidth:(CGFloat)width;
 - (void)applyTheme;
 @end
 
@@ -435,21 +440,64 @@ static const CGFloat kRailP2H        = 15.0;   // 10.5 × 1.45 ≈ 15.2
     _statusLabel.stringValue = status ?: @"";
     _p1Label.stringValue = p1 ?: @"";
     _p2Label.stringValue = p2 ?: @"";
-    _p2Label.hidden = (p2.length == 0);
+    // 空 p2 = web 不渲染 `<span class=npchip-p2>`，卡片高度也不留那 15px 空行。
+    // 从视图树里摘掉而不是只 hidden：离屏几何判据按 identifier 找子视图，
+    // hidden 的 p2 会让它继续按「有第二行」量（旧的单行卡就靠这一点区分）。
+    if (_p2Label.stringValue.length) {
+        if (_p2Label.superview != self) [self addSubview:_p2Label];
+        _p2Label.hidden = NO;
+    } else {
+        if (_p2Label.superview == self) [_p2Label removeFromSuperview];
+        _p2Label.hidden = YES;
+    }
     [self relayout];
 }
 
-- (CGFloat)preferredHeight {
-    CGFloat h = kRailChipPadTop + kRailRow1H + kRailRowGap + kRailP1H;
-    if (_p2Label.stringValue.length) h += kRailRowGap + kRailP2H;
+/// 详细档的行高：web `line-height:1.35`。简略档仍用既有常量 17/15（11.5×1.45 / 10.5×1.45）。
+static const CGFloat kRailDetailLineHeight = 1.35;
+
+- (CGFloat)measuredTextHeight:(NSTextField *)label cap:(NSInteger)cap width:(CGFloat)width {
+    NSString *s = label.stringValue;
+    if (!s.length || width < 10) return 0;
+    const CGFloat lh = label.font.pointSize * kRailDetailLineHeight;
+    NSMutableParagraphStyle *ps = [[NSMutableParagraphStyle alloc] init];
+    ps.lineBreakMode = NSLineBreakByWordWrapping;
+    ps.minimumLineHeight = lh;
+    ps.maximumLineHeight = lh;
+    NSDictionary *attrs = @{ NSFontAttributeName: label.font, NSParagraphStyleAttributeName: ps };
+    NSRect r = [s boundingRectWithSize:NSMakeSize(width, CGFLOAT_MAX)
+                               options:NSStringDrawingUsesLineFragmentOrigin | NSStringDrawingUsesFontLeading
+                            attributes:attrs];
+    const CGFloat h = ceil(r.size.height);
+    return MAX(lh, MIN(h, lh * (CGFloat)cap));
+}
+
+- (CGFloat)preferredHeight { return [self preferredHeightForWidth:self.bounds.size.width]; }
+
+- (CGFloat)preferredHeightForWidth:(CGFloat)width {
+    const CGFloat contentW = MAX(10, width - kRailChipPadX * 2);
+    CGFloat p1H = kRailP1H, p2H = kRailP2H;
+    if (_detailMode) {
+        p1H = [self measuredTextHeight:_p1Label cap:5 width:contentW];
+        p2H = [self measuredTextHeight:_p2Label cap:2 width:contentW];
+    }
+    CGFloat h = kRailChipPadTop + kRailRow1H + kRailRowGap + p1H;
+    if (_p2Label.stringValue.length) h += kRailRowGap + p2H;
     return h + kRailChipPadBottom;
 }
 
 /// 非翻转坐标（origin 在左下）：所有 y 都由「卡片高度 - 从顶部算的 offset」求出，
 /// 这样卡片高度变化时 inset 永远还是 8/10/9。
+/// 详细档把 p1/p2 的行高换成实测值（同一处量、同一处排，避免两档各写一份公式漂移）。
 - (void)relayout {
     const CGFloat H = self.bounds.size.height, W = self.bounds.size.width;
     if (W < 20 || H < 20) return;
+    const CGFloat contentW = MAX(10, W - kRailChipPadX * 2);
+    CGFloat p1H = kRailP1H, p2H = kRailP2H;
+    if (_detailMode) {
+        p1H = [self measuredTextHeight:_p1Label cap:5 width:contentW];
+        p2H = [self measuredTextHeight:_p2Label cap:2 width:contentW];
+    }
     const CGFloat row1Y = H - kRailChipPadTop - kRailRow1H;
     const CGFloat statusW = MIN(W * 0.5,
         ceil([_statusLabel.stringValue sizeWithAttributes:@{ NSFontAttributeName: _statusLabel.font }].width));
@@ -459,12 +507,27 @@ static const CGFloat kRailP2H        = 15.0;   // 10.5 × 1.45 ≈ 15.2
                             kRailDotSize, kRailDotSize);
     _nameLabel.frame = NSMakeRect(nameX, row1Y, MAX(10, statusX - 6 - nameX), kRailRow1H);
     _statusLabel.frame = NSMakeRect(statusX, row1Y, statusW, kRailRow1H);
-    const CGFloat p1Y = row1Y - kRailRowGap - kRailP1H;
-    _p1Label.frame = NSMakeRect(kRailChipPadX, p1Y, MAX(10, W - kRailChipPadX * 2), kRailP1H);
-    if (!_p2Label.hidden) {
-        const CGFloat p2Y = p1Y - kRailRowGap - kRailP2H;
-        _p2Label.frame = NSMakeRect(kRailChipPadX, p2Y, MAX(10, W - kRailChipPadX * 2), kRailP2H);
+    const CGFloat p1Y = row1Y - kRailRowGap - p1H;
+    _p1Label.frame = NSMakeRect(kRailChipPadX, p1Y, contentW, p1H);
+    if (_p2Label.superview == self) {
+        const CGFloat p2Y = p1Y - kRailRowGap - p2H;
+        _p2Label.frame = NSMakeRect(kRailChipPadX, p2Y, contentW, p2H);
     }
+}
+
+- (void)setDetailMode:(BOOL)detail {
+    if (_detailMode == detail) {
+        [self relayout];
+        return;
+    }
+    _detailMode = detail;
+    _p1Label.maximumNumberOfLines = detail ? 5 : 1;
+    _p2Label.maximumNumberOfLines = detail ? 2 : 1;
+    _p1Label.usesSingleLineMode = !detail;
+    _p2Label.usesSingleLineMode = !detail;
+    _p1Label.lineBreakMode = detail ? NSLineBreakByWordWrapping : NSLineBreakByTruncatingTail;
+    _p2Label.lineBreakMode = detail ? NSLineBreakByWordWrapping : NSLineBreakByTruncatingTail;
+    [self relayout];
 }
 
 - (void)setFrameSize:(NSSize)newSize {
@@ -502,6 +565,90 @@ static const CGFloat kRailP2H        = 15.0;   // 10.5 × 1.45 ≈ 15.2
 
 @end
 
+#pragma mark - web npRailPreview / npSummUrl 的同构投影（内容唯一真相源）
+
+/// web efValueText：字符串原样、数字/布尔转字符串、数组按行拼接（简介段落有时是数组）。
+static NSString *RLPRailValueText(id v) {
+    if (!v || [v isKindOfClass:[NSNull class]]) return @"";
+    if ([v isKindOfClass:[NSString class]]) return v;
+    if ([v isKindOfClass:[NSNumber class]]) return [(NSNumber *)v stringValue];
+    if ([v isKindOfClass:[NSArray class]]) {
+        NSMutableArray *out = [NSMutableArray array];
+        for (id e in (NSArray *)v) {
+            NSString *s = RLPRailValueText(e);
+            if (s.length) [out addObject:s];
+        }
+        return [out componentsJoinedByString:@"\n"];
+    }
+    if ([v isKindOfClass:[NSDictionary class]]) {
+        // 字段值正常只有字符串/数组；对象极少见，退回 description（与 web JSON.stringify 同为兜底）。
+        return [v description] ?: @"";
+    }
+    return [v description] ?: @"";
+}
+
+/// web `npRailShort(v,n).replace(/\s+/g,' ').trim()`：折叠空白。
+static NSString *RLPRailCollapse(id value) {
+    NSString *s = RLPRailValueText(value);
+    if (!s.length) return @"";
+    NSArray *parts = [s componentsSeparatedByCharactersInSet:
+                      [NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    NSMutableArray *keep = [NSMutableArray array];
+    for (NSString *p in parts) if (p.length) [keep addObject:p];
+    return [keep componentsJoinedByString:@" "];
+}
+
+/// web npRailShort：截到 n 字（先切 n-1，再剥末尾标点/空白，补 …）。
+static NSString *RLPRailShort(id value, NSInteger n) {
+    NSString *s = RLPRailCollapse(value);
+    if (!s.length) return @"";
+    if (n > 0 && (NSInteger)s.length > n) {
+        NSString *head = [s substringToIndex:(NSUInteger)(n - 1)];
+        NSMutableCharacterSet *trim = [[NSCharacterSet whitespaceAndNewlineCharacterSet] mutableCopy];
+        [trim addCharactersInString:@"，,、;；。"];
+        NSInteger end = (NSInteger)head.length;
+        while (end > 0 && [trim characterIsMember:[head characterAtIndex:(NSUInteger)(end - 1)]]) --end;
+        s = [[head substringToIndex:(NSUInteger)end] stringByAppendingString:@"…"];
+    }
+    return s;
+}
+
+/// web npRailPick：按 key 顺序拼「标签 值」，` · ` 分隔，最多 limit 项，单值 24 字。
+static NSString *RLPRailPick(NSDictionary *fields, NSArray<NSString *> *keys, NSInteger limit) {
+    if (![fields isKindOfClass:[NSDictionary class]] || !keys.count) return @"";
+    NSMutableArray *out = [NSMutableArray array];
+    for (NSString *k in keys) {
+        if ((NSInteger)out.count >= limit) break;
+        NSString *v = RLPRailShort(fields[k], 24);
+        if (v.length) [out addObject:[NSString stringWithFormat:@"%@ %@", RLPTr(k), v]];
+    }
+    return [out componentsJoinedByString:@" · "];
+}
+
+/// web `String(x || '')` 的只取字符串版：非字符串一律当空（元数据字段类型不信任）。
+static NSString *RLPRailStr(id v) {
+    return [v isKindOfClass:[NSString class]] ? (NSString *)v : @"";
+}
+
+/// web npRailLocalTrack 的采样率写法：采样率整数千 → "96k"，否则一位小数 "44.1k"。
+static NSString *RLPRailSampleRateText(id srValue) {
+    const double sr = [srValue respondsToSelector:@selector(doubleValue)] ? [srValue doubleValue] : 0;
+    if (!(sr > 0)) return @"";
+    if (fmod(sr, 1000.0) == 0)
+        return [NSString stringWithFormat:@"%ldk", (long)lround(sr / 1000.0)];
+    return [NSString stringWithFormat:@"%.1fk", round(sr / 100.0) / 10.0];
+}
+
+/// web fmtTag：`sr/bits`（专辑卡 p2 在 AI 字段全空时的格式兜底）。
+static NSString *RLPRailTagText(id srValue, id bitsValue) {
+    NSString *sr = RLPRailSampleRateText(srValue);
+    if (!sr.length) return @"";
+    const NSInteger bits = [bitsValue respondsToSelector:@selector(integerValue)]
+                         ? [bitsValue integerValue] : 0;
+    if (bits <= 0) return sr;
+    return [NSString stringWithFormat:@"%@/%ld", sr, (long)bits];
+}
+
 @interface RLPNowPlayingViewController ()
 
 @property(nonatomic,strong) RLPNPCanvas *webCanvas;
@@ -536,6 +683,21 @@ static const CGFloat kRailP2H        = 15.0;   // 10.5 × 1.45 ≈ 15.2
 @property(nonatomic,strong) NSArray<RLPRailChipView *> *railCards;
 @property(nonatomic,copy) NSDictionary *trackMetadata;
 @property(nonatomic,strong) NSPopover *knowledgePopover;
+// ---- AI 整理栏（web NP_DATA / SUMC / NPLIB 的原生落点）----
+// railStates[kind] = {state:idle|loading|ok|error|insufficient, data:摘要JSON, fp:实体指纹}
+@property(nonatomic,strong) NSMutableDictionary<NSString *, NSMutableDictionary *> *railStates;
+// 每个栏目当前指向的实体：{kind, name, artist, album}
+@property(nonatomic,strong) NSMutableDictionary<NSString *, NSDictionary *> *railTargets;
+// 页面级 summary 缓存（key=完整 URL，与 web SUMC.cache 同语义：成功/失败都缓存、insufficient 不缓存）
+@property(nonatomic,strong) NSMutableDictionary<NSString *, id> *railSummaryCache;
+// 同一实体指纹在飞时只发一次（web NP_DATA.inflight[fp]）
+@property(nonatomic,strong) NSMutableSet<NSString *> *railSummaryInflight;
+// 专辑本地曲库（web NPLIB.album）：按「专辑名|艺术家」缓存 /api/lib/album 详情
+@property(nonatomic,strong) NSMutableDictionary<NSString *, NSDictionary *> *railAlbumCache;
+@property(nonatomic,strong) NSMutableSet<NSString *> *railAlbumInflight;
+// 世代号：切歌/换 meta 单调递增，旧世代回调一律丢弃（web NP_DATA.req）
+@property(nonatomic) NSUInteger railSeq;
+@property(nonatomic) BOOL railDetail;   // web NP_RAILDETAIL；持久化到 NSUserDefaults RLPNPRailDetail
 @property(nonatomic,strong) RLPPlaybackStatus *webStatus;
 @property(nonatomic) NSInteger playbackMode;
 @property(nonatomic) BOOL statusInFlight;
@@ -587,6 +749,9 @@ static const CGFloat kRailP2H        = 15.0;   // 10.5 × 1.45 ≈ 15.2
 
 - (instancetype)init {
     self = [super initWithTitle:RLPTr(@"正在播放")];
+    if (!self) return nil;
+    // web localStorage('rta-np-raildetail') 的原生等价：档位是纯展示偏好，重启后保持。
+    _railDetail = [[NSUserDefaults standardUserDefaults] boolForKey:@"RLPNPRailDetail"];
     return self;
 }
 
@@ -662,7 +827,7 @@ static const CGFloat kRailP2H        = 15.0;   // 10.5 × 1.45 ≈ 15.2
                          NSParagraphStyleAttributeName:ps}];
     }
     [self.railPanel addSubview:self.railTitle];
-    self.railDensity=[NSSegmentedControl segmentedControlWithLabels:@[RLPTr(@"简略"),RLPTr(@"详细")] trackingMode:NSSegmentSwitchTrackingSelectOne target:self action:@selector(onRailDensity:)];self.railDensity.identifier=@"npRailSeg";self.railDensity.selectedSegment=0;[self.railPanel addSubview:self.railDensity];
+    self.railDensity=[NSSegmentedControl segmentedControlWithLabels:@[RLPTr(@"简略"),RLPTr(@"详细")] trackingMode:NSSegmentSwitchTrackingSelectOne target:self action:@selector(onRailDensity:)];self.railDensity.identifier=@"npRailSeg";self.railDensity.selectedSegment=self.railDetail?1:0;[self.railPanel addSubview:self.railDensity];
     // 三张卡（歌曲/专辑/艺术家）= web `.npchip`。旧实现是 NSButton 多行标题，
     // AppKit 把文字画在卡片左下角（上半部全空）⟹ 用户报「排版散」。
     NSMutableArray<RLPRailChipView *> *cards=[NSMutableArray array];
@@ -672,6 +837,7 @@ static const CGFloat kRailP2H        = 15.0;   // 10.5 × 1.45 ≈ 15.2
         RLPRailChipView *c=[[RLPRailChipView alloc] initWithFrame:NSZeroRect];
         c.identifier=[@"npChip." stringByAppendingString:name];
         c.chipIndex=(NSInteger)railIdx++;
+        c.detailMode=self.railDetail;   // 恢复上次的「简略/详细」档位
         c.onTap=^(RLPRailChipView *chip){ __typeof__(self) s=wsRail; if(s)[s onRailCard:chip]; };
         [self.railPanel addSubview:c];
         [cards addObject:c];
@@ -774,9 +940,12 @@ static const CGFloat kRailP2H        = 15.0;   // 10.5 × 1.45 ≈ 15.2
     self.railTitle.frame=NSMakeRect(kRailHeadPadX,bodyH-kRailHeadPadTop-13,72,13);
     self.railDensity.frame=NSMakeRect(MAX(80,side-kRailHeadPadX-116),bodyH-kRailHeadPadTop-railSegH,116,railSegH);
     CGFloat ry=bodyH-kRailHeadPadTop-railSegH-kRailHeadGap;   // 栏头底部再空 8
+    const CGFloat railCardW=MAX(40,side-kRailHeadPadX*2);
     for(RLPRailChipView *c in self.railCards){
-        CGFloat ch=[c preferredHeight];
-        c.frame=NSMakeRect(kRailHeadPadX,ry-ch,MAX(40,side-kRailHeadPadX*2),ch);
+        // 详细档的高度由**文本实测**决定（简介不限 40 字、p1 最多 5 行 / p2 2 行）；
+        // 必须先拿卡宽再量，否则第一次布局时 bounds 宽度还是 0。
+        CGFloat ch=[c preferredHeightForWidth:railCardW];
+        c.frame=NSMakeRect(kRailHeadPadX,ry-ch,railCardW,ch);
         [c relayout];
         ry-=ch+kRailChipGap;
     }
@@ -839,24 +1008,462 @@ static const CGFloat kRailP2H        = 15.0;   // 10.5 × 1.45 ≈ 15.2
     [[RLPCoreClient shared] getJSON:@"/api/cast/devices" completion:^(NSDictionary *j){__typeof__(self) s=ws;if(!s)return;NSArray *devs=[j[@"devices"] isKindOfClass:NSArray.class]?j[@"devices"]:@[];if(!devs.count){RLPToast(j[@"hint"]?:RLPTr(@"未发现可投放设备"));return;}
         NSAlert *a=[NSAlert new];a.messageText=RLPTr(@"推送当前曲目到设备");NSPopUpButton *p=[[NSPopUpButton alloc] initWithFrame:NSMakeRect(0,0,320,28)];for(NSDictionary *d in devs)[p addItemWithTitle:d[@"name"]?:@"UPnP"];a.accessoryView=p;[a addButtonWithTitle:RLPTr(@"推送")];[a addButtonWithTitle:RLPTr(@"取消")];if([a runModal]!=NSAlertFirstButtonReturn)return;NSDictionary *d=devs[p.indexOfSelectedItem];NSString *body=[s castBodyForDevice:d];if(body.length)[[RLPCoreClient shared] postJSON:@"/api/cast/start" body:body completion:^(NSDictionary *r){if(![r[@"ok"] boolValue])RLPToast(r[@"error"]?:RLPTr(@"投放失败"));}];}];
 }
-- (void)onRailDensity:(id)s {[self renderRailMetadata];[self layoutWebPlayback];}
+- (void)onRailDensity:(id)s {
+    const BOOL detail = (self.railDensity.selectedSegment == 1);
+    if (detail != self.railDetail) {
+        self.railDetail = detail;
+        // web localStorage('rta-np-raildetail') 的等价持久化；恢复在 init。
+        [[NSUserDefaults standardUserDefaults] setBool:detail forKey:@"RLPNPRailDetail"];
+        for (RLPRailChipView *c in self.railCards) c.detailMode = detail;
+    }
+    // 纯展示档位：只重算预览 + 重排，**绝不重建 railStates / 重发 summary**
+    // （web npRailDetailSet：只把 tabSig 作废，NP_DATA.cache 引用都不动）。
+    [self renderRailMetadata];
+    [self layoutWebPlayback];
+}
+
+#pragma mark - AI 整理栏数据层（web NP_DATA / SUMC / NPLIB 的原生同构）
+
+- (void)railEnsureContainers {
+    if (!self.railStates) self.railStates = [NSMutableDictionary dictionary];
+    if (!self.railTargets) self.railTargets = [NSMutableDictionary dictionary];
+    if (!self.railSummaryCache) self.railSummaryCache = [NSMutableDictionary dictionary];
+    if (!self.railSummaryInflight) self.railSummaryInflight = [NSMutableSet set];
+    if (!self.railAlbumCache) self.railAlbumCache = [NSMutableDictionary dictionary];
+    if (!self.railAlbumInflight) self.railAlbumInflight = [NSMutableSet set];
+}
+
+/// 切歌/离页：世代号前进让所有在飞回调作废；页面级 URL 缓存（railSummaryCache）保留 ——
+/// 与 web SUMC 同语义（同一实体跨歌复用，例如同一艺术家的 person）。
+- (void)railInvalidateForTrackChange {
+    [self railEnsureContainers];
+    self.railSeq += 1;
+    [self.railStates removeAllObjects];
+    [self.railTargets removeAllObjects];
+    [self.railSummaryInflight removeAllObjects];
+}
+
+/// web npDataCan 的**取数闸门**：meta.summaryEnabled 且（可用/已缓存/可离线缓存/有 key）。
+/// 关时零 summary 请求，只留本地事实兜底 —— 不拿"没资料"去冒充"整理过的资料"。
+- (BOOL)railSummariesEnabled {
+    NSDictionary *m = self.trackMetadata ?: @{};
+    id en = m[@"summaryEnabled"];
+    if (![en respondsToSelector:@selector(boolValue)] || ![en boolValue]) return NO;
+    for (NSString *k in @[@"summaryAvailable", @"summaryCached", @"summaryCacheOk", @"hasLlmKey"]) {
+        id v = m[k];
+        if ([v respondsToSelector:@selector(boolValue)] && [v boolValue]) return YES;
+    }
+    return NO;
+}
+
+- (NSString *)railFpForKind:(NSString *)kind {
+    NSDictionary *t = self.railTargets[kind];
+    if (!t) return @"";
+    // web npDataFp：kind|name|artist|(composer)|album。本轮没有 work 卡，composer 不参与。
+    return [NSString stringWithFormat:@"%@|%@|%@|%@", kind,
+            RLPRailStr(t[@"name"]), RLPRailStr(t[@"artist"]), RLPRailStr(t[@"album"])];
+}
+
+/// web npSummUrl 的逐字形状（参数顺序也一致；encodeURIComponent = RLPEnc）。
+/// track 额外 album/file/genre；artist 非空才带；最后固定 lang=zh。
+- (NSString *)railUrlForTarget:(NSDictionary *)t {
+    NSString *kind = RLPRailStr(t[@"kind"]);
+    NSMutableString *u = [NSMutableString stringWithFormat:
+        @"/api/entity/summary?kind=%@&name=%@", kind, RLPEnc(RLPRailStr(t[@"name"]))];
+    NSString *artist = RLPRailStr(t[@"artist"]);
+    if (artist.length) [u appendFormat:@"&artist=%@", RLPEnc(artist)];
+    if ([kind isEqualToString:@"track"]) {
+        NSString *album = RLPRailStr(t[@"album"]);
+        NSString *file = RLPRailStr(t[@"file"]);
+        NSString *genre = RLPRailStr(t[@"genre"]);
+        if (album.length) [u appendFormat:@"&album=%@", RLPEnc(album)];
+        if (file.length) [u appendFormat:@"&file=%@", RLPEnc(file)];
+        if (genre.length) [u appendFormat:@"&genre=%@", RLPEnc(genre)];
+    }
+    [u appendString:@"&lang=zh"];
+    return u;
+}
+
+- (void)railBeginSummariesForMeta:(NSDictionary *)json {
+    [self railEnsureContainers];
+    // 新世代：旧世代在飞/迟到的响应全部作废（web npDataReset 的 req 单调递增）。
+    self.railSeq += 1;
+    [self.railStates removeAllObjects];
+    [self.railTargets removeAllObjects];
+    [self.railSummaryInflight removeAllObjects];
+    NSDictionary *m = json ?: self.trackMetadata ?: @{};
+    if (![self railSummariesEnabled]) {
+        // 闸门关闭：targets/states 都空 ⟹ renderRailMetadata 只出本地事实。
+        [self renderRailMetadata];
+        [self layoutWebPlayback];
+        return;
+    }
+    NSString *title = RLPRailStr(m[@"title"]);
+    if (!title.length) title = self.titleLabel2.stringValue ?: @"";
+    if (!title.length && self.currentPath.length)
+        title = self.currentPath.lastPathComponent.stringByDeletingPathExtension;
+    NSString *artist = RLPRailStr(m[@"artist"]);
+    NSString *album = RLPRailStr(m[@"album"]);
+    NSString *albumArtist = RLPRailStr(m[@"albumArtist"]);
+    NSString *summaryArtist = RLPRailStr(m[@"summaryArtist"]);
+    NSString *genre = RLPRailStr(m[@"genre"]);
+    if (title.length) {
+        // web npDataTargets：track 的实体键带 album；file/genre 在 npSummUrl 里补。
+        self.railTargets[@"track"] = @{ @"kind": @"track", @"name": title,
+            @"artist": artist, @"album": album, @"file": self.currentPath ?: @"",
+            @"genre": genre };
+    }
+    // web 只在 album 非空且不等于 title 时出「专辑」卡。
+    if (album.length && ![album isEqualToString:title]) {
+        NSString *relArtist = summaryArtist.length ? summaryArtist
+            : (albumArtist.length ? albumArtist : artist);
+        self.railTargets[@"release"] = @{ @"kind": @"release", @"name": album,
+            @"artist": relArtist, @"album": @"" };
+    }
+    NSString *personName = albumArtist.length ? albumArtist : artist;
+    if (personName.length) {
+        // web 的 person target 不带 artist（npSummUrl 因此没有 &artist=）。
+        self.railTargets[@"person"] = @{ @"kind": @"person", @"name": personName,
+            @"artist": @"", @"album": @"" };
+    }
+    for (NSString *kind in @[@"track", @"release", @"person"]) {
+        if (!self.railTargets[kind]) continue;
+        NSMutableDictionary *idle = [NSMutableDictionary dictionary];
+        idle[@"state"] = @"idle";
+        self.railStates[kind] = idle;
+    }
+    for (NSString *kind in @[@"track", @"release", @"person"])
+        if (self.railTargets[kind]) [self railEnsureKind:kind];
+    [self renderRailMetadata];
+    [self layoutWebPlayback];
+}
+
+/// web npDataEnsure：同一实体已有 loading/ok/insufficient 就不重发；
+/// 同 URL 命中页面级缓存直接写回；同一指纹在飞时合并（不重复发请求）。
+- (void)railEnsureKind:(NSString *)kind {
+    NSDictionary *t = self.railTargets[kind];
+    if (!t) return;
+    NSString *fp = [self railFpForKind:kind];
+    NSDictionary *st = self.railStates[kind];
+    NSString *state = RLPRailStr(st[@"state"]);
+    if ([RLPRailStr(st[@"fp"]) isEqualToString:fp] &&
+        ([state isEqualToString:@"loading"] || [state isEqualToString:@"ok"] ||
+         [state isEqualToString:@"insufficient"])) return;
+    NSString *url = [self railUrlForTarget:t];
+    id cached = self.railSummaryCache[url];
+    if (cached) {
+        // web summaryOnce 缓存命中走异步回调；这里直接写回（同一 runloop 内 UI 立刻有内容），
+        // 期间不产生任何请求。
+        [self railApplySummary:cached kind:kind fp:fp url:url gen:self.railSeq];
+        return;
+    }
+    if ([self.railSummaryInflight containsObject:fp]) return;
+    [self.railSummaryInflight addObject:fp];
+    NSMutableDictionary *loading = [NSMutableDictionary dictionary];
+    loading[@"state"] = @"loading";
+    loading[@"fp"] = fp;
+    self.railStates[kind] = loading;
+    [self renderRailMetadata];
+    [self layoutWebPlayback];
+    const NSTimeInterval startedAt = [NSDate timeIntervalSinceReferenceDate];
+    [self railFetchSummaryUrl:url kind:kind fp:fp gen:self.railSeq startedAt:startedAt];
+}
+
+/// web fetchJsonPendingOnce：pending 按 retryAfterMs（夹 150..2000，默认 400ms）轮询，
+/// 120s 墙钟预算；每次回来都复核世代号 + 实体指纹，杜绝切歌后旧实体串台。
+- (void)railFetchSummaryUrl:(NSString *)url kind:(NSString *)kind fp:(NSString *)fp
+                        gen:(NSUInteger)gen startedAt:(NSTimeInterval)startedAt {
+    // 定时器/轮询再次进入前先核世代：切歌后不再为旧实体白发一次请求
+    // （web 的 setTimeout 也会再打一次、只靠回调守卫丢弃；这里少花一次）。
+    if (gen != self.railSeq) return;
+    __weak __typeof__(self) ws = self;
+    [[RLPCoreClient shared] getJSON:url completion:^(NSDictionary * _Nullable j) {
+        __typeof__(self) s = ws;
+        if (!s || gen != s.railSeq) return;                       // 已切歌/换 meta → 丢弃
+        if (![[s railFpForKind:kind] isEqualToString:fp]) return;  // 实体已换 → 丢弃
+        if ([j[@"pending"] respondsToSelector:@selector(boolValue)] && [j[@"pending"] boolValue]) {
+            const NSTimeInterval now = [NSDate timeIntervalSinceReferenceDate];
+            if (now - startedAt > 120.0) {
+                [s.railSummaryInflight removeObject:fp];
+                NSMutableDictionary *err = [NSMutableDictionary dictionary];
+                err[@"state"] = @"error";
+                err[@"error"] = RLPTr(@"资料获取超时");
+                err[@"fp"] = fp;
+                s.railStates[kind] = err;
+                [s renderRailMetadata];
+                [s layoutWebPlayback];
+                return;
+            }
+            id ra = j[@"retryAfterMs"];
+            double delay = 400;
+            if ([ra respondsToSelector:@selector(doubleValue)] &&
+                [ra doubleValue] >= 150 && [ra doubleValue] <= 2000)
+                delay = [ra doubleValue];
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(delay * NSEC_PER_MSEC)),
+                           dispatch_get_main_queue(), ^{
+                __typeof__(self) s2 = ws;
+                if (!s2) return;
+                [s2 railFetchSummaryUrl:url kind:kind fp:fp gen:gen startedAt:startedAt];
+            });
+            return;
+        }
+        [s railApplySummary:j kind:kind fp:fp url:url gen:gen];
+    }];
+}
+
+- (BOOL)railHasSummary:(NSDictionary *)j {
+    // web summHas：有结构化 fields，或 ok 且有 sections（旧缓存只有段落）。
+    id f = j[@"fields"];
+    BOOL hasFields = [f isKindOfClass:[NSDictionary class]] && ((NSDictionary *)f).count > 0;
+    id sec = j[@"sections"];
+    BOOL hasSections = [j[@"ok"] respondsToSelector:@selector(boolValue)] && [j[@"ok"] boolValue] &&
+                       [sec isKindOfClass:[NSArray class]] && ((NSArray *)sec).count > 0;
+    return hasFields || hasSections;
+}
+
+- (void)railApplySummary:(NSDictionary *)j kind:(NSString *)kind fp:(NSString *)fp
+                      url:(NSString *)url gen:(NSUInteger)gen {
+    if (![j isKindOfClass:[NSDictionary class]]) j = @{};
+    if (gen != self.railSeq) return;
+    if (![[self railFpForKind:kind] isEqualToString:fp]) return;
+    [self.railSummaryInflight removeObject:fp];
+    const BOOL insufficient = [j[@"insufficient"] respondsToSelector:@selector(boolValue)] &&
+                              [j[@"insufficient"] boolValue];
+    // web summaryOnce：insufficient 是终局结论，不写缓存（避免下次点开复用成自动重试死循环）。
+    if (!insufficient) self.railSummaryCache[url] = j;
+    NSMutableDictionary *st = [NSMutableDictionary dictionary];
+    st[@"fp"] = fp;
+    if (insufficient) {
+        st[@"state"] = @"insufficient";
+        st[@"data"] = j;
+    } else if ([self railHasSummary:j]) {
+        st[@"state"] = @"ok";
+        st[@"data"] = [j mutableCopy];
+    } else {
+        st[@"state"] = @"error";
+        st[@"error"] = RLPRailStr(j[@"error"]);
+    }
+    self.railStates[kind] = st;
+    if ([st[@"state"] isEqualToString:@"ok"] && [kind isEqualToString:@"release"])
+        [self railLoadAlbumForTarget:self.railTargets[kind] fp:fp gen:gen];
+    [self renderRailMetadata];
+    [self layoutWebPlayback];
+}
+
+/// web npLocalAlbum：/api/lib/albums?q= 找一个同名（优先同艺术家）的专辑，再取详情
+/// （曲目数 / 总时长 / 年份）。只为「专辑」卡的本地事实服务，不改变 AI 字段。
+- (void)railLoadAlbumForTarget:(NSDictionary *)t fp:(NSString *)fp gen:(NSUInteger)gen {
+    NSString *name = RLPRailStr(t[@"name"]);
+    if (!name.length) return;
+    NSString *artist = RLPRailStr(t[@"artist"]);
+    NSString *key = [NSString stringWithFormat:@"%@|%@", name, artist];
+    NSDictionary *cached = self.railAlbumCache[key];
+    if (cached) {
+        [self railAttachAlbum:cached kind:@"release" fp:fp gen:self.railSeq];
+        return;
+    }
+    if ([self.railAlbumInflight containsObject:key]) return;
+    [self.railAlbumInflight addObject:key];
+    __weak __typeof__(self) ws = self;
+    NSString *listUrl = [NSString stringWithFormat:@"/api/lib/albums?q=%@", RLPEnc(name)];
+    [[RLPCoreClient shared] getJSON:listUrl completion:^(NSDictionary * _Nullable j) {
+        __typeof__(self) s = ws;
+        if (!s || gen != s.railSeq) { [s.railAlbumInflight removeObject:key]; return; }
+        NSArray *list = [j[@"albums"] isKindOfClass:[NSArray class]] ? j[@"albums"] : @[];
+        NSDictionary *hit = nil;
+        for (NSDictionary *a in list) {
+            if (![a isKindOfClass:[NSDictionary class]]) continue;
+            if (![RLPRailStr(a[@"name"]) isEqualToString:name]) continue;
+            NSString *ha = RLPRailStr(a[@"artist"]);
+            if (!artist.length || !ha.length || [ha isEqualToString:artist]) { hit = a; break; }
+        }
+        if (!hit) {
+            for (NSDictionary *a in list) {
+                if (![a isKindOfClass:[NSDictionary class]]) continue;
+                if ([RLPRailStr(a[@"name"]) isEqualToString:name]) { hit = a; break; }
+            }
+        }
+        NSString *albumKey = hit ? RLPRailStr(hit[@"k"]) : @"";
+        if (!albumKey.length) { [s.railAlbumInflight removeObject:key]; return; }
+        NSString *detailUrl = [NSString stringWithFormat:@"/api/lib/album?k=%@", RLPEnc(albumKey)];
+        [[RLPCoreClient shared] getJSON:detailUrl completion:^(NSDictionary * _Nullable a) {
+            __typeof__(self) s2 = ws;
+            if (!s2) return;
+            [s2.railAlbumInflight removeObject:key];
+            if (gen != s2.railSeq) return;
+            if (![a isKindOfClass:[NSDictionary class]] || ![a[@"ok"] boolValue]) return;
+            s2.railAlbumCache[key] = a;
+            [s2 railAttachAlbum:a kind:@"release" fp:fp gen:gen];
+        }];
+    }];
+}
+
+- (void)railAttachAlbum:(NSDictionary *)album kind:(NSString *)kind fp:(NSString *)fp gen:(NSUInteger)gen {
+    if (gen != self.railSeq) return;
+    if (![[self railFpForKind:kind] isEqualToString:fp]) return;
+    NSDictionary *st = self.railStates[kind];
+    if (![RLPRailStr(st[@"state"]) isEqualToString:@"ok"]) return;
+    NSDictionary *data = [st[@"data"] isKindOfClass:[NSDictionary class]] ? st[@"data"] : nil;
+    if (!data) return;
+    NSMutableDictionary *mdata = [data mutableCopy];
+    mdata[@"__album"] = album;   // web npDataEnsure 里 `s.__album = alb` 的同义
+    NSMutableDictionary *mst = [st mutableCopy];
+    mst[@"data"] = mdata;
+    self.railStates[kind] = mst;
+    [self renderRailMetadata];
+    [self layoutWebPlayback];
+}
+
+/// web npRailLocalTrack：本地曲目事实只兜底，绝不覆盖 AI 字段。
+- (NSDictionary *)railLocalTrackPreview {
+    NSDictionary *m = self.trackMetadata ?: @{};
+    NSMutableArray *a = [NSMutableArray array];
+    NSString *artist = RLPRailStr(m[@"artist"]);
+    NSString *album = RLPRailStr(m[@"album"]);
+    if (artist.length) [a addObject:artist];
+    if (album.length) [a addObject:album];
+    NSMutableArray *fmt = [NSMutableArray array];
+    NSString *codec = RLPRailStr(m[@"codec"]);
+    if (codec.length) [fmt addObject:[codec uppercaseString]];
+    NSString *sr = RLPRailSampleRateText(m[@"sampleRate"]);
+    if (sr.length) [fmt addObject:sr];
+    id bits = m[@"bits"];
+    if ([bits respondsToSelector:@selector(integerValue)] && [bits integerValue] > 0)
+        [fmt addObject:[NSString stringWithFormat:@"%ldbit", (long)[bits integerValue]]];
+    const double dur = self.webStatus.duration;
+    if (dur > 0) [fmt addObject:RLPFmtDuration(dur)];
+    return @{ @"p1": [a componentsJoinedByString:@" · "],
+              @"p2": [fmt componentsJoinedByString:@" · "] };
+}
+
+/// web npRailBio：fields['简介'] → sections 首段 → 只留名字；名字已开头则不重复「X：」。
+/// 简略档 limit=40（截断补 …）；详细档 limit=0（整段交给 5 行 clamp）。
+- (NSString *)railBioFromData:(NSDictionary *)d who:(NSString *)who limit:(NSInteger)limit {
+    NSString *v = @"";
+    NSDictionary *fields = [d[@"fields"] isKindOfClass:[NSDictionary class]] ? d[@"fields"] : nil;
+    if (fields[@"简介"] != nil) v = RLPRailValueText(fields[@"简介"]);
+    if (!v.length) {
+        NSArray *sections = [d[@"sections"] isKindOfClass:[NSArray class]] ? d[@"sections"] : @[];
+        for (NSDictionary *sec in sections) {
+            if (![sec isKindOfClass:[NSDictionary class]]) continue;
+            NSArray *paras = [sec[@"paragraphs"] isKindOfClass:[NSArray class]] ? sec[@"paragraphs"] : @[];
+            for (id p in paras) {
+                NSString *t = RLPRailValueText([p isKindOfClass:[NSDictionary class]] ? ((NSDictionary *)p)[@"text"] : nil);
+                if (t.length) { v = t; break; }
+            }
+            if (v.length) break;
+        }
+    }
+    v = RLPRailCollapse(v);
+    NSString *who2 = RLPRailCollapse(who);
+    if (v.length && who2.length && ![v hasPrefix:who2]) v = [who2 stringByAppendingFormat:@"：%@", v];
+    if (v.length) {
+        if (limit > 0 && (NSInteger)v.length > limit) v = RLPRailShort(v, limit);
+        return v;
+    }
+    return who2;
+}
+
+/// web npRailPreview(kind, st) 的逐分支同构。返回 {p1,p2,st}。
+- (NSDictionary *)railPreviewForKind:(NSString *)kind state:(NSDictionary *)st {
+    NSDictionary *m = self.trackMetadata ?: @{};
+    NSDictionary *d = [st[@"data"] isKindOfClass:[NSDictionary class]] ? st[@"data"] : nil;
+    NSDictionary *fields = [d[@"fields"] isKindOfClass:[NSDictionary class]] ? d[@"fields"] : nil;
+    const NSString *state = RLPRailStr(st[@"state"]);
+    if (!state.length) state = @"idle";
+    // 资料不足是终局结论：写清缺什么，p2 留空，不显示本地兜底假装"有资料"。
+    if ([state isEqualToString:@"insufficient"]) {
+        NSString *msg = RLPRailStr(d[@"error"]);
+        if (!msg.length) msg = @"资料不足：缺少艺术家与曲名";
+        return @{ @"p1": msg, @"p2": @"", @"st": RLPTr(@"资料不足") };
+    }
+    const NSInteger pickLimit = self.railDetail ? 4 : 2;
+    NSString *p1 = @"", *p2 = @"";
+    if ([kind isEqualToString:@"track"]) {
+        NSDictionary *loc = [self railLocalTrackPreview];
+        p1 = RLPRailPick(fields, @[@"演唱", @"作曲", @"作词", @"编曲"], pickLimit);
+        p2 = RLPRailPick(fields, @[@"歌曲风格", @"发行时间", @"所属专辑", @"衍生作品"], pickLimit);
+        if (!p1.length) p1 = RLPRailStr(loc[@"p1"]).length ? RLPRailStr(loc[@"p1"]) : RLPRailStr(m[@"title"]);
+        if (!p2.length) p2 = RLPRailStr(loc[@"p2"]);
+    } else if ([kind isEqualToString:@"release"]) {
+        NSDictionary *alb = [d[@"__album"] isKindOfClass:[NSDictionary class]] ? d[@"__album"] : nil;
+        NSMutableArray *lp = [NSMutableArray array];
+        NSString *relArtist = RLPRailStr(m[@"albumArtist"]);
+        if (!relArtist.length) relArtist = RLPRailStr(m[@"artist"]);
+        if (relArtist.length) [lp addObject:relArtist];
+        if ([alb[@"year"] respondsToSelector:@selector(integerValue)] && [alb[@"year"] integerValue] > 0)
+            [lp addObject:[NSString stringWithFormat:@"%ld", (long)[alb[@"year"] integerValue]]];
+        NSArray *tracks = [alb[@"tracks"] isKindOfClass:[NSArray class]] ? alb[@"tracks"] : @[];
+        if (tracks.count) {
+            double total = 0;
+            for (NSDictionary *t in tracks)
+                if ([t isKindOfClass:[NSDictionary class]] && [t[@"dur"] respondsToSelector:@selector(doubleValue)])
+                    total += [t[@"dur"] doubleValue];
+            [lp addObject:[NSString stringWithFormat:@"%lu %@", (unsigned long)tracks.count, RLPTr(@"首")]];
+            if (total > 0) [lp addObject:RLPFmtDuration(total)];
+        } else if (self.webStatus.duration > 0) {
+            [lp addObject:RLPFmtDuration(self.webStatus.duration)];
+        }
+        p1 = [lp componentsJoinedByString:@" · "];
+        p2 = RLPRailPick(fields, @[@"出版方", @"专辑类型", @"语种", @"发行时间"], pickLimit);
+        if (!p2.length) p2 = RLPRailTagText(alb[@"sr"], alb[@"bits"]);
+    } else if ([kind isEqualToString:@"person"]) {
+        NSString *who = RLPRailStr(self.railTargets[@"person"][@"name"]);
+        if (!who.length) who = RLPRailStr(m[@"albumArtist"]);
+        if (!who.length) who = RLPRailStr(m[@"artist"]);
+        p1 = [self railBioFromData:d who:who limit:(self.railDetail ? 0 : 40)];
+        if (!p1.length) p1 = RLPRailPick(fields, @[@"活跃年代"], pickLimit);
+        p2 = RLPRailPick(fields, @[@"风格", @"代表作品"], pickLimit);
+        if (!p1.length) p1 = who;
+    }
+    NSString *stText = @"";
+    if ([state isEqualToString:@"loading"]) stText = RLPTr(@"整理中…");
+    else if ([state isEqualToString:@"error"]) stText = RLPTr(@"暂无资料");
+    else if ([state isEqualToString:@"ok"])
+        stText = ([d[@"from_cache"] respondsToSelector:@selector(boolValue)] && [d[@"from_cache"] boolValue])
+               ? RLPTr(@"已缓存") : RLPTr(@"已整理");
+    return @{ @"p1": p1 ?: @"", @"p2": p2 ?: @"", @"st": stText };
+}
+
+/// 只重绘卡片，不取数（轮询/主题/切档都会调）。
 - (void)renderRailMetadata {
-    // web npRailPreview：name 行 = 栏目名；p1 = 主值；p2 = 次值（简略/详细两档都有正文，
-    // 只是详细档字段更多）。原生没有把 web 的 fields 预览接到栏上，这里用本地曲目事实 +
-    // 「点开查看」状态，结构/几何与 web 一致（第5项判据量的是几何，不含内容保真）。
-    NSDictionary *m=self.trackMetadata?:@{};NSArray *names=@[m[@"title"]?:@"",m[@"album"]?:@"",m[@"artist"]?:@""];
-    NSArray *labels=@[RLPTr(@"歌曲"),RLPTr(@"专辑"),RLPTr(@"艺术家")];
-    NSString *genre=[m[@"genre"] isKindOfClass:NSString.class]?m[@"genre"]:@"";
-    for(NSUInteger i=0;i<self.railCards.count;i++){
-        NSString *value=[names[i] isKindOfClass:NSString.class]?names[i]:@"";
-        RLPRailChipView *c=self.railCards[i];
-        [c setNameText:labels[i]
-                status:(value.length?RLPTr(@"点开查看"):RLPTr(@"暂无资料"))
-                    p1:(value.length?value:RLPTr(@"暂无资料"))
-                    p2:genre];
+    [self railEnsureContainers];
+    NSArray<NSString *> *kinds = @[@"track", @"release", @"person"];
+    NSArray<NSString *> *labels = @[RLPTr(@"歌曲"), RLPTr(@"专辑"), RLPTr(@"艺术家")];
+    for (NSUInteger i = 0; i < self.railCards.count && i < kinds.count; ++i) {
+        NSString *kind = kinds[i];
+        NSDictionary *st = self.railStates[kind] ?: @{ @"state": @"idle" };
+        NSDictionary *pv = [self railPreviewForKind:kind state:st];
+        [self.railCards[i] setNameText:labels[i]
+                               status:RLPRailStr(pv[@"st"])
+                                   p1:RLPRailStr(pv[@"p1"])
+                                   p2:RLPRailStr(pv[@"p2"])];
     }
 }
-- (void)onRailCard:(RLPRailChipView *)b {NSArray *kinds=@[@"track",@"release",@"person"];NSArray *names=@[self.trackMetadata[@"title"]?:@"",self.trackMetadata[@"album"]?:@"",self.trackMetadata[@"artist"]?:@""];if(b.chipIndex<0||b.chipIndex>=3||![(NSString *)names[b.chipIndex] length])return;[self.knowledge loadKind:kinds[b.tag] name:names[b.chipIndex] artist:self.trackMetadata[@"artist"]];[self.knowledgePopover close];self.knowledgePopover=RLPShowCardPopover(b,RLPCardController(self.knowledge,420,380),420);}
+
+- (void)onRailCard:(RLPRailChipView *)b {
+    NSArray<NSString *> *kinds = @[@"track", @"release", @"person"];
+    NSInteger idx = b.chipIndex;
+    if (idx < 0 || idx >= (NSInteger)kinds.count) return;
+    NSString *kind = kinds[(NSUInteger)idx];
+    NSDictionary *t = self.railTargets[kind];
+    NSString *name = RLPRailStr(t[@"name"]);
+    if (!name.length) {
+        // 没取 summary 的路径（闸门关 / meta 未回）也要能点开：名字取原生既有字段。
+        NSDictionary *m = self.trackMetadata ?: @{};
+        if (idx == 0) name = RLPRailStr(m[@"title"]);
+        else if (idx == 1) name = RLPRailStr(m[@"album"]);
+        else { name = RLPRailStr(m[@"albumArtist"]); if (!name.length) name = RLPRailStr(m[@"artist"]); }
+    }
+    if (!name.length) return;
+    NSString *artist = RLPRailStr(t[@"artist"]);
+    if (idx == 2) artist = @"";   // 艺术家实体不需要 track 的 artist 参数
+    [self.knowledge loadKind:kind name:name artist:artist.length ? artist : nil];
+    [self.knowledgePopover close];
+    // 离屏判据/审计没有窗口：NSPopover 在无窗口视图上会抛异常，有窗口才弹。
+    if (!b.window) return;
+    self.knowledgePopover = RLPShowCardPopover(b, RLPCardController(self.knowledge, 420, 380), 420);
+}
 
 - (NSTextView *)makeTextView {
     RLPTheme *t = [RLPTheme current];
@@ -881,7 +1488,7 @@ static const CGFloat kRailP2H        = 15.0;   // 10.5 × 1.45 ≈ 15.2
 - (void)viewDidDisappear {
     [self.knowledge cancelLoading];
     [super viewDidDisappear];
-    [self stopPolling];self.lyricSeq++;[self.knowledgePopover close];
+    [self stopPolling];self.lyricSeq++;self.railSeq++;[self.railSummaryInflight removeAllObjects];[self.knowledgePopover close];
     // 离开单曲页：让服务器也停下在跑的分析（与 web 版离开页面时的 anlCancelServer 同语义）。
     if (self.anlBusy) {
         [[RLPCoreClient shared] postJSON:@"/api/anl/cancel" body:@""
@@ -938,6 +1545,8 @@ static const CGFloat kRailP2H        = 15.0;   // 10.5 × 1.45 ≈ 15.2
         if (![path isEqualToString:self_.currentPath ?: @""]) {
             BOOL cancelPrevious=self_.anlBusy;
             self_.currentPath = path;self_.trackMetadata=@{};self_.artistLabel2.stringValue=@"";self_.metaLabel.stringValue=@"";[self_ refreshQueueContext];[self_ refreshFavorite];
+            // 切歌：旧世代在飞的 summary 必须作废（迟到响应不能贴到新曲/新专辑的卡上）。
+            [self_ railInvalidateForTrackChange];
             [self_ loadLyricsForPath:path];
             [self_ loadCoverForPath:path];
             [self_ loadMetaAndKnowledgeForPath:path];
@@ -1033,7 +1642,7 @@ static const CGFloat kRailP2H        = 15.0;   // 10.5 × 1.45 ≈ 15.2
 /// 为什么要先 /api/meta：/api/status 只给路径，资料层要的是"实体名"。
 - (void)loadMetaAndKnowledgeForPath:(NSString *)path {
     if (!path.length) {
-        self.trackMetadata=@{};[self renderMetaChipsFromMeta:nil];[self renderRailMetadata];
+        self.trackMetadata=@{};[self railInvalidateForTrackChange];[self renderMetaChipsFromMeta:nil];[self renderRailMetadata];
         [self.knowledge loadKind:@"track" name:@"" artist:nil];
         return;
     }
@@ -1056,7 +1665,9 @@ static const CGFloat kRailP2H        = 15.0;   // 10.5 × 1.45 ≈ 15.2
         if([json[@"sampleRate"] doubleValue]>0)[format addObject:[NSString stringWithFormat:@"%g kHz",[json[@"sampleRate"] doubleValue]/1000]];
         if([json[@"bits"] integerValue]>0)[format addObject:[NSString stringWithFormat:@"%ld bit",(long)[json[@"bits"] integerValue]]];
         self_.kindLabel.stringValue=[NSString stringWithFormat:@"%@ · %@",RLPTr(@"正在播放"),[format componentsJoinedByString:@" / "]];
-        [self_ renderRailMetadata];[self_ layoutWebPlayback];
+        // 三张卡的 summary 预览从这里起步（闸门在 railBeginSummariesForMeta 内判定，
+        // 关时零请求、只留本地事实）。
+        [self_ railBeginSummariesForMeta:json];
     }];
 }
 
