@@ -758,6 +758,46 @@ int RLPRunFunctionalAudit(NSString *outDir) {
                     Pump(0.3);
                 }
             }
+            // 行悬停底色（web .trow:hover）：必须是自定义 row view，且**画出来**（像素判据）：
+            // 同一行渲染两次（悬停前/悬停后），底色必须真的变了 —— 只断言类名等于没验。
+            {
+                NSTableView *tt = [tv valueForKey:@"_tableView"];
+                NSTableRowView *rv = tt ? [tt rowViewAtRow:0 makeIfNecessary:YES] : nil;
+                CK([rv isKindOfClass:[RLPHoverRowView class]], "曲目行是自定义 row view（可悬停）",
+                   NSStringFromClass(rv.class));
+                RLPHoverRowView *hv = (RLPHoverRowView *)rv;
+                if ([hv isKindOfClass:[RLPHoverRowView class]]) {
+                    NSString *p0 = [outDir stringByAppendingPathComponent:@"04c-hover-off.png"];
+                    NSString *p1 = [outDir stringByAppendingPathComponent:@"04c-hover-on.png"];
+                    [hv setHoveredForAudit:NO];
+                    BOOL a = Snap(hv, p0, hv.bounds.size.width > 10 ? hv.bounds.size : NSMakeSize(600, 26));
+                    [hv setHoveredForAudit:YES];
+                    BOOL b = Snap(hv, p1, hv.bounds.size.width > 10 ? hv.bounds.size : NSMakeSize(600, 26));
+                    CK(a && b, "行悬停截图已落盘", outDir);
+                    if (a && b) {
+                        // 采样行中部一块，非悬停时是页面底色、悬停时应更深一档
+                        NSImage *i0 = [[NSImage alloc] initWithContentsOfFile:p0];
+                        NSImage *i1 = [[NSImage alloc] initWithContentsOfFile:p1];
+                        NSBitmapImageRep *r0 = nil, *r1 = nil;
+                        for (NSImageRep *r in i0.representations) if ([r isKindOfClass:[NSBitmapImageRep class]]) r0 = (NSBitmapImageRep *)r;
+                        for (NSImageRep *r in i1.representations) if ([r isKindOfClass:[NSBitmapImageRep class]]) r1 = (NSBitmapImageRep *)r;
+                        if (r0 && r1) {
+                            NSColor *c0 = [r0 colorAtX:r0.pixelsWide / 2 y:r0.pixelsHigh / 2];
+                            NSColor *c1 = [r1 colorAtX:r1.pixelsWide / 2 y:r1.pixelsHigh / 2];
+                            NSColor *g0 = [c0 colorUsingColorSpace:[NSColorSpace sRGBColorSpace]];
+                            NSColor *g1 = [c1 colorUsingColorSpace:[NSColorSpace sRGBColorSpace]];
+                            CK(g0 && g1 && (fabs(g0.redComponent - g1.redComponent) > 0.01 ||
+                                            fabs(g0.greenComponent - g1.greenComponent) > 0.01 ||
+                                            fabs(g0.blueComponent - g1.blueComponent) > 0.01),
+                               "悬停后行底色真的画出来了（像素变化）",
+                               [NSString stringWithFormat:@"off=%.2f/%.2f/%.2f on=%.2f/%.2f/%.2f",
+                                g0 ? g0.redComponent : -1, g0 ? g0.greenComponent : -1, g0 ? g0.blueComponent : -1,
+                                g1 ? g1.redComponent : -1, g1 ? g1.greenComponent : -1, g1 ? g1.blueComponent : -1]);
+                        }
+                    }
+                    [hv setHoveredForAudit:NO];
+                }
+            }
             // 点心形 → 后端真的收藏（不是只换图标）
             // 必须拿**第 0 行**的按钮（tag 就是行号）：随便抓一个可能是回收 cell 上的旧 tag，
             // 点了等于没点（第一版判据就是这么假红的）。

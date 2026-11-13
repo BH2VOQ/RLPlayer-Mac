@@ -43,6 +43,15 @@ void RLPAlert(NSString *title, NSString *message);
 NSString * _Nullable RLPAskText(NSString *title, NSString *okTitle, NSString *value,
                                 NSString * _Nullable placeholder, NSString * _Nullable hint);
 
+/// 行悬停底色（web `.trow:hover`）：NSTableRowView 自己收 mouseEntered/Exited 并绘制底色。
+/// 表格页只需在 `-tableView:rowViewForRow:` 返回它、给 hoverColor。
+@interface RLPHoverRowView : NSTableRowView
+@property (nonatomic, strong, nullable) NSColor *hoverColor;
+/// 判据入口：直接设悬停态（真实路径是 tracking area 的 mouseEntered/Exited）。
+- (void)setHoveredForAudit:(BOOL)hovered;
+@property (nonatomic, readonly) BOOL hoveredForAudit;
+@end
+
 /// 系统符号按钮（无边框、模板着色）。
 NSButton *RLPSymbolButton(NSString *symbol, NSString *tooltip, id _Nullable target, SEL _Nullable action);
 /// 单行标签（默认 13px；颜色/字体可后改）。

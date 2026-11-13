@@ -170,6 +170,45 @@ NSString *RLPAskText(NSString *title, NSString *okTitle, NSString *value,
     return v.length ? v : nil;
 }
 
+#pragma mark - 行悬停底色
+
+@implementation RLPHoverRowView {
+    NSTrackingArea *_hoverArea;
+    BOOL _hovered;
+}
+
+- (BOOL)hoveredForAudit { return _hovered; }
+
+- (void)updateTrackingAreas {
+    [super updateTrackingAreas];
+    if (_hoverArea) { [self removeTrackingArea:_hoverArea]; _hoverArea = nil; }
+    _hoverArea = [[NSTrackingArea alloc] initWithRect:self.bounds
+                                              options:(NSTrackingMouseEnteredAndExited |
+                                                       NSTrackingActiveInKeyWindow |
+                                                       NSTrackingInVisibleRect)
+                                                owner:self userInfo:nil];
+    [self addTrackingArea:_hoverArea];
+}
+
+- (void)mouseEntered:(NSEvent *)event { (void)event; [self setHoveredForAudit:YES]; }
+- (void)mouseExited:(NSEvent *)event { (void)event; [self setHoveredForAudit:NO]; }
+
+- (void)setHoveredForAudit:(BOOL)hovered {
+    if (_hovered == hovered) return;
+    _hovered = hovered;
+    self.needsDisplay = YES;
+}
+
+- (void)drawBackgroundInRect:(NSRect)dirtyRect {
+    [super drawBackgroundInRect:dirtyRect];
+    // 悬停底色画在选中态之下：选中行由 NSTableView 自己画高亮，不抢它。
+    if (!_hovered || self.selected || !self.hoverColor) return;
+    [self.hoverColor setFill];
+    NSRectFill(dirtyRect);
+}
+
+@end
+
 NSButton *RLPSymbolButton(NSString *symbol, NSString *tooltip, id target, SEL action) {
     NSButton *b = [[NSButton alloc] initWithFrame:NSZeroRect];
     b.bordered = NO;

@@ -584,6 +584,15 @@ static NSString * const kColAdd = @"ColAdd";
     return cell;
 }
 
+#pragma mark - 行悬停（web .trow:hover）
+
+- (NSTableRowView *)tableView:(NSTableView *)tableView rowViewForRow:(NSInteger)row {
+    (void)tableView; (void)row;
+    RLPHoverRowView *v = [[RLPHoverRowView alloc] initWithFrame:NSZeroRect];
+    v.hoverColor = [RLPTheme current].hov;
+    return v;
+}
+
 #pragma mark - 排序（web track-sort，客户端排序与 web 同口径）
 
 - (void)onSortChanged:(NSPopUpButton *)sender {

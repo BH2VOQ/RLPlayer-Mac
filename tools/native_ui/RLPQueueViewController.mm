@@ -162,6 +162,15 @@ static NSString *const kQueueDragType = @"RLPQueueRowDrag";
     [self syncTableWidth];
 }
 
+#pragma mark - 行悬停（web .trow:hover）
+
+- (NSTableRowView *)tableView:(NSTableView *)tableView rowViewForRow:(NSInteger)row {
+    (void)tableView; (void)row;
+    RLPHoverRowView *v = [[RLPHoverRowView alloc] initWithFrame:NSZeroRect];
+    v.hoverColor = [RLPTheme current].hov;
+    return v;
+}
+
 #pragma mark - 表格
 
 - (NSInteger)numberOfRowsInTableView:(NSTableView *)tv { return (NSInteger)self.paths.count; }
