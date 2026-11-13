@@ -30,6 +30,8 @@ static NSString *const kQueueDragType = @"RLPQueueRowDrag";
 @property (nonatomic, strong) NSTextField *empty;
 @property (nonatomic, copy) NSArray<NSString *> *paths;
 @property (nonatomic, copy) NSArray<NSDictionary *> *metas;
+// web S.q.cues：/api/queue?meta=1 的 [cs,ce] 数组，排序/播放都必须带上（否则 CUE 分轨会丢区间）。
+@property (nonatomic, copy) NSArray<NSArray<NSNumber *> *> *cues;
 @property (nonatomic, assign) NSInteger currentIndex;
 @property (nonatomic, assign) NSInteger mode;
 @property (nonatomic, assign) NSUInteger seq;
@@ -40,7 +42,7 @@ static NSString *const kQueueDragType = @"RLPQueueRowDrag";
 
 - (instancetype)init {
     self = [super initWithTitle:RLPTr(@"播放队列")];
-    if (self) { _paths = @[]; _metas = @[]; _currentIndex = -1; }
+    if (self) { _paths = @[]; _metas = @[]; _cues = @[]; _currentIndex = -1; }
     return self;
 }
 
@@ -54,19 +56,27 @@ static NSString *const kQueueDragType = @"RLPQueueRowDrag";
     bar.translatesAutoresizingMaskIntoConstraints = NO;
     // web 的排序是一个下拉（#qSort: 默认 / 标题 / 艺术家 / …），不是三个按钮。
     self.sortPopup = [[NSPopUpButton alloc] initWithFrame:NSZeroRect pullsDown:NO];
-    [self.sortPopup addItemsWithTitles:@[ RLPTr(@"默认顺序"), RLPTr(@"标题"),
-                                          RLPTr(@"艺术家") ]];
+    // web #qSort 的 8 档，顺序/representedObject 逐值照抄（ui_script.h:12564-12574）。
+    NSArray<NSArray<NSString *> *> *sortSpecs = @[
+        @[ @"default", RLPTr(@"默认顺序") ], @[ @"title", RLPTr(@"标题") ],
+        @[ @"artist", RLPTr(@"艺术家") ], @[ @"album", RLPTr(@"专辑") ],
+        @[ @"dur", RLPTr(@"时长") ], @[ @"year", RLPTr(@"年份") ],
+        @[ @"shuffle", RLPTr(@"随机打乱") ], @[ @"reverse", RLPTr(@"反转顺序") ] ];
+    for (NSArray<NSString *> *spec in sortSpecs) {
+        [self.sortPopup addItemWithTitle:spec[1]];
+        self.sortPopup.lastItem.representedObject = spec[0];
+    }
     self.sortPopup.identifier = @"queue.sort";   // 对应 web #qSort（parity_map ctrl）
     self.sortPopup.target = self;
     self.sortPopup.action = @selector(onSortPicked:);
     self.sortPopup.translatesAutoresizingMaskIntoConstraints = NO;
-    [bar addArrangedSubview:RLPLabel(RLPTr(@"排序"), [NSFont systemFontOfSize:11],
+    [bar addArrangedSubview:RLPLabel(RLPTr(@"排序："), [NSFont systemFontOfSize:11],
                                      [RLPTheme current].mut2)];
     [bar addArrangedSubview:self.sortPopup];
     NSArray *acts = @[
         @[ RLPTr(@"刷新"), @"refresh" ],
-        @[ RLPTr(@"存为歌单"), @"save" ],
-        @[ RLPTr(@"清空"), @"clear" ],
+        @[ RLPTr(@"保存为歌单"), @"save" ],
+        @[ RLPTr(@"清空队列"), @"clear" ],
     ];
     for (NSArray *a in acts) {
         NSButton *b = [NSButton buttonWithTitle:a[0] target:self action:@selector(onAction:)];
@@ -324,12 +334,19 @@ static NSString *const kQueueDragType = @"RLPQueueRowDrag";
 
 - (void)playRow:(NSInteger)row {
     if (row < 0 || row >= (NSInteger)self.paths.count) return;
-    RLPPlayPath(self.paths[row]);
+    // web 队列行点击：playPath(items[i], cues[i][0], cues[i][1]) —— CUE 分轨必须带区间。
+    double cs = -1, ce = -1;
+    if (row < (NSInteger)self.cues.count) {
+        NSArray<NSNumber *> *c = self.cues[(NSUInteger)row];
+        if (c.count >= 2) { cs = c[0].doubleValue; ce = c[1].doubleValue; }
+    }
+    RLPPlayPathCue(self.paths[(NSUInteger)row], cs, ce);
 }
 
 /// web #qSort：排序下拉改变的是**队列顺序**（/api/qorder），不改变正在播放的那一首。
 - (void)onSortPicked:(NSPopUpButton *)sender {
-    NSArray<NSString *> *keys = @[ @"default", @"title", @"artist" ];
+    NSArray<NSString *> *keys = @[ @"default", @"title", @"artist", @"album",
+                                   @"dur", @"year", @"shuffle", @"reverse" ];
     const NSInteger i = sender.indexOfSelectedItem;
     if (i < 0 || i >= (NSInteger)keys.count) return;
     [self sortBy:keys[(NSUInteger)i]];
@@ -345,6 +362,29 @@ static NSString *const kQueueDragType = @"RLPQueueRowDrag";
     [self sortBy:a];
 }
 
+static NSDictionary *RLPQueueMeta(NSArray<NSDictionary *> *metas, NSInteger i) {
+    if (i < 0 || i >= (NSInteger)metas.count) return @{};
+    id m = metas[(NSUInteger)i];
+    return [m isKindOfClass:[NSDictionary class]] ? m : @{};
+}
+
+static double RLPQueueMetaNum(NSDictionary *m, NSString *k) {
+    id v = m[k];
+    return [v respondsToSelector:@selector(doubleValue)] ? [v doubleValue] : 0.0;
+}
+
+/// 空 meta 的文本回落 = 路径 basename（web 的 txt(i,k) 若为空同样退到标题/路径语义）。
+static NSString *RLPQueueMetaText(NSDictionary *m, NSString *k,
+                                 NSArray<NSString *> *paths, NSInteger i) {
+    id v = m[k];
+    if ([v isKindOfClass:[NSString class]] && [(NSString *)v length]) return v;
+    if (i >= 0 && i < (NSInteger)paths.count)
+        return paths[(NSUInteger)i].lastPathComponent.stringByDeletingPathExtension;
+        return @"";
+}
+
+/// web #qSort：排序下拉改变的是**队列顺序**（/api/qorder），不改变正在播放的那一首。
+/// 8 档逐条对齐 `ui_script.h:12496-12540`；qorder 行必须保留 CUE 区间（queueItemLine）。
 - (void)sortBy:(NSString *)key {
     if (!self.paths.count) { RLPToast(RLPTr(@"队列是空的")); return; }
     if ([key isEqualToString:@"default"]) {
@@ -355,26 +395,60 @@ static NSString *const kQueueDragType = @"RLPQueueRowDrag";
         }];
         return;
     }
+    const NSInteger n = (NSInteger)self.paths.count;
     NSMutableArray<NSNumber *> *idx = [NSMutableArray array];
-    for (NSInteger i = 0; i < (NSInteger)self.paths.count; ++i) [idx addObject:@(i)];
-    __weak __typeof__(self) weakSelf = self;
+    for (NSInteger i = 0; i < n; ++i) [idx addObject:@(i)];
     NSArray<NSDictionary *> *metas = self.metas;
     NSArray<NSString *> *paths = self.paths;
-    NSString *mk = [key isEqualToString:@"artist"] ? @"a" : @"t";
-    [idx sortUsingComparator:^NSComparisonResult(NSNumber *x, NSNumber *y) {
-        const NSInteger a = x.integerValue, b = y.integerValue;
-        NSDictionary *ma = (a < (NSInteger)metas.count && [metas[a] isKindOfClass:[NSDictionary class]]) ? metas[a] : @{};
-        NSDictionary *mb = (b < (NSInteger)metas.count && [metas[b] isKindOfClass:[NSDictionary class]]) ? metas[b] : @{};
-        NSString *sa = [ma[mk] isKindOfClass:[NSString class]] ? ma[mk] : @"";
-        NSString *sb = [mb[mk] isKindOfClass:[NSString class]] ? mb[mk] : @"";
-        if (!sa.length) sa = paths[a].lastPathComponent;
-        if (!sb.length) sb = paths[b].lastPathComponent;
-        return [sa localizedStandardCompare:sb];
-    }];
-    NSMutableArray<NSString *> *ordered = [NSMutableArray array];
-    for (NSNumber *n in idx) [ordered addObject:paths[n.integerValue]];
-    NSString *body = [NSString stringWithFormat:@"files=%@",
-                      RLPEnc([ordered componentsJoinedByString:@"\n"])];
+
+    if ([key isEqualToString:@"shuffle"]) {
+        // web：Fisher-Yates（Math.random 等价 → arc4random_uniform，避免可预测顺序）。
+        for (NSInteger k = n - 1; k > 0; --k) {
+            const uint32_t r = arc4random_uniform((uint32_t)(k + 1));
+            [idx exchangeObjectAtIndex:(NSUInteger)k withObjectAtIndex:(NSUInteger)r];
+        }
+    } else if ([key isEqualToString:@"reverse"]) {
+        idx = [[[idx reverseObjectEnumerator] allObjects] mutableCopy];
+    } else if ([key isEqualToString:@"dur"] || [key isEqualToString:@"year"]) {
+        const BOOL year = [key isEqualToString:@"year"];
+        [idx sortUsingComparator:^NSComparisonResult(NSNumber *x, NSNumber *y) {
+            double a = RLPQueueMetaNum(RLPQueueMeta(metas, x.integerValue), @"d");
+            double b = RLPQueueMetaNum(RLPQueueMeta(metas, y.integerValue), @"d");
+            if (year) {
+                a = RLPQueueMetaNum(RLPQueueMeta(metas, x.integerValue), @"y");
+                b = RLPQueueMetaNum(RLPQueueMeta(metas, y.integerValue), @"y");
+                // web year 是降序（新到旧）。
+                if (a > b) return NSOrderedAscending;
+                if (a < b) return NSOrderedDescending;
+                return NSOrderedSame;
+            }
+            if (a < b) return NSOrderedAscending;
+            if (a > b) return NSOrderedDescending;
+            return NSOrderedSame;
+        }];
+    } else if ([key isEqualToString:@"title"] || [key isEqualToString:@"artist"] || [key isEqualToString:@"album"]) {
+        NSString *mk = [key isEqualToString:@"title"] ? @"t" : ([key isEqualToString:@"artist"] ? @"a" : @"al");
+        [idx sortUsingComparator:^NSComparisonResult(NSNumber *x, NSNumber *y) {
+            NSString *sa = RLPQueueMetaText(RLPQueueMeta(metas, x.integerValue), mk, paths, x.integerValue);
+            NSString *sb = RLPQueueMetaText(RLPQueueMeta(metas, y.integerValue), mk, paths, y.integerValue);
+            return [sa localizedStandardCompare:sb];
+        }];
+    }
+    NSMutableArray<NSString *> *lines = [NSMutableArray array];
+    for (NSNumber *num in idx) {
+        const NSInteger i = num.integerValue;
+        NSString *line = paths[(NSUInteger)i];
+        // web queueItemLine：cs>=0 的行追加 "	<cs>	<ce>"，否则只发路径。
+        if (i < (NSInteger)self.cues.count) {
+            NSArray<NSNumber *> *c = self.cues[(NSUInteger)i];
+            if (c.count >= 2 && c[0].doubleValue >= 0) {
+                line = [line stringByAppendingFormat:@"\t%.3f\t%.3f", c[0].doubleValue, c[1].doubleValue];
+            }
+        }
+        [lines addObject:line];
+    }
+    __weak __typeof__(self) weakSelf = self;
+    NSString *body = [NSString stringWithFormat:@"files=%@", RLPEnc([lines componentsJoinedByString:@"\n"])];
     [[RLPCoreClient shared] postJSON:@"/api/qorder" body:body completion:^(NSDictionary * _Nullable json) {
         __typeof__(self) self_ = weakSelf;
         if (!self_) return;
@@ -454,6 +528,20 @@ static NSString *const kQueueDragType = @"RLPQueueRowDrag";
         NSMutableArray<NSDictionary *> *mm = [NSMutableArray array];
         for (id x in ms) [mm addObject:[x isKindOfClass:[NSDictionary class]] ? x : @{}];
         self_.metas = mm;
+        // web S.q.cues：排序与播放都靠它保住 CUE 分轨区间。
+        NSArray *cs = [json[@"cues"] isKindOfClass:[NSArray class]] ? json[@"cues"] : @[];
+        NSMutableArray<NSArray<NSNumber *> *> *cc = [NSMutableArray array];
+        for (id x in cs) {
+            if ([x isKindOfClass:[NSArray class]] && [(NSArray *)x count] >= 2) {
+                NSArray *pair = (NSArray *)x;
+                double a = [pair[0] respondsToSelector:@selector(doubleValue)] ? [pair[0] doubleValue] : -1;
+                double b = [pair[1] respondsToSelector:@selector(doubleValue)] ? [pair[1] doubleValue] : -1;
+                [cc addObject:@[ @(a), @(b) ]];
+            } else {
+                [cc addObject:@[ @(-1), @(-1) ]];
+            }
+        }
+        self_.cues = cc;
         self_.currentIndex = [json[@"index"] respondsToSelector:@selector(integerValue)] ? [json[@"index"] integerValue] : -1;
         self_.mode = [json[@"mode"] respondsToSelector:@selector(integerValue)] ? [json[@"mode"] integerValue] : 0;
         [self_.table reloadData];

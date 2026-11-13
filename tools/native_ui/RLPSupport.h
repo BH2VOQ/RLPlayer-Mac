@@ -87,6 +87,8 @@ void RLPRequestBack(void);
 
 /// 播放/入队动作（与 web 版同一 /api 契约，不复制播放逻辑）。
 void RLPPlayPath(NSString *path);
+/// CUE 分轨：cs/ce >= 0 时带区间（web playPath(file, cs, ce) 同契约），否则退化为整轨。
+void RLPPlayPathCue(NSString *path, double cs, double ce);
 void RLPPlayAlbum(NSString *albumKey, NSInteger startIndex);
 void RLPEnqueuePath(NSString *path);
 void RLPPostJSON(NSString *path, NSString * _Nullable body);

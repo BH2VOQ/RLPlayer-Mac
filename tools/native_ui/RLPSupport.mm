@@ -344,6 +344,16 @@ void RLPPlayPath(NSString *path) {
     RLPPostJSON(@"/api/play", [NSString stringWithFormat:@"file=%@", RLPEnc(path)]);
 }
 
+/// CUE 分轨播放：与 web `playPath(file, cs, ce)` 同一条后端契约（POST /api/play
+/// body `file=&cs=&ce=`）。cs<0 或 ce<=cs 时按整轨处理，不编造区间。
+void RLPPlayPathCue(NSString *path, double cs, double ce) {
+    if (!path.length) return;
+    NSMutableString *body = [NSMutableString stringWithFormat:@"file=%@", RLPEnc(path)];
+    if (cs >= 0) [body appendFormat:@"&cs=%.3f", cs];
+    if (ce > cs) [body appendFormat:@"&ce=%.3f", ce];
+    RLPPostJSON(@"/api/play", body);
+}
+
 void RLPPlayAlbum(NSString *albumKey, NSInteger startIndex) {
     if (!albumKey.length) return;
     RLPPostJSON(@"/api/lib/play", [NSString stringWithFormat:@"k=%@&i=%ld", RLPEnc(albumKey), (long)startIndex]);
