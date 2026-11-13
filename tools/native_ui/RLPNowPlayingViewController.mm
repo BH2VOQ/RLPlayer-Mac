@@ -300,6 +300,42 @@ static NSString *RLPNPFavKey(NSString *path) {
 
 @end
 
+/// 音频分析摘要卡（web .anlcard：标题在左上、摘要一行在下面、整卡可点）。
+/// 旧实现把两段文字塞进 NSButton title，AppKit 多行标题在未翻转坐标里画到卡片底部
+/// ⟹ 截图看起来"文字趴在白块左下角"，用户实机反馈「排版错乱」。
+@interface RLPAnalysisCard : NSButton
+@property (nonatomic, copy) NSString *cardTitle;
+@property (nonatomic, copy) NSString *cardSummary;
+@end
+@implementation RLPAnalysisCard
+- (void)setCardTitle:(NSString *)cardTitle { _cardTitle = [cardTitle copy]; self.needsDisplay = YES; }
+- (void)setCardSummary:(NSString *)cardSummary { _cardSummary = [cardSummary copy]; self.needsDisplay = YES; }
+- (void)drawRect:(NSRect)dirtyRect {
+    (void)dirtyRect;
+    RLPTheme *t = [RLPTheme current];
+    NSRect b = self.bounds;
+    const CGFloat pad = 12.0;
+    NSMutableParagraphStyle *ps = [[NSMutableParagraphStyle alloc] init];
+    ps.lineBreakMode = NSLineBreakByTruncatingTail;
+    NSDictionary *titleAttrs = @{ NSFontAttributeName: [NSFont systemFontOfSize:11 weight:NSFontWeightSemibold],
+                                  NSForegroundColorAttributeName: t.text,
+                                  NSParagraphStyleAttributeName: ps };
+    NSDictionary *sumAttrs = @{ NSFontAttributeName: [NSFont systemFontOfSize:11],
+                                NSForegroundColorAttributeName: t.mut2,
+                                NSParagraphStyleAttributeName: ps };
+    // NSButton 的文字绘制上下文是「顶部为原点」的：drawInRect 的 y 小 = 更靠上。
+    // 所以标题 y=10（贴顶），摘要 y=30（标题下面），与 web .anlcard(标题行 + 摘要行) 同序。
+    if (self.cardTitle.length)
+        [self.cardTitle drawInRect:NSMakeRect(pad, 10, MAX(10, b.size.width - pad * 2), 15)
+                     withAttributes:titleAttrs];
+    if (self.cardSummary.length) {
+        NSRect sumRect = NSMakeRect(pad, 30, MAX(10, b.size.width - pad * 2), MAX(14, b.size.height - 46));
+        if (sumRect.size.height > 34) sumRect.size.height = 34;
+        [self.cardSummary drawInRect:sumRect withAttributes:sumAttrs];
+    }
+}
+@end
+
 @interface RLPNowPlayingViewController ()
 
 @property(nonatomic,strong) RLPNPCanvas *webCanvas;
@@ -947,14 +983,11 @@ static NSString *RLPNPFavKey(NSString *path) {
 /// 摘要块：无边框、单行、过长截断 + tooltip 全文。
 /// 为什么不许换行：用户明确要求「改成 1 行显示」，换行就是没做到。
 - (NSButton *)anlChipWithIdentifier:(NSString *)ident action:(SEL)action {
-    NSButton *b = [NSButton buttonWithTitle:@"" target:self action:action];
+    RLPAnalysisCard *b = [RLPAnalysisCard buttonWithTitle:@"" target:self action:action];
     b.bordered = NO;
     b.identifier = ident;
-    b.font = [RLPTheme current].small;
     b.translatesAutoresizingMaskIntoConstraints = NO;
-    b.alignment = NSTextAlignmentLeft;
-    [(NSButtonCell *)b.cell setLineBreakMode:NSLineBreakByTruncatingTail];
-    b.contentTintColor = [RLPTheme current].text2;
+    b.title = @"";
     return b;
 }
 
@@ -991,9 +1024,12 @@ static NSString *RLPNPFavKey(NSString *path) {
     } else if (!h) {
         dyn = qual = fake = RLPTr(@"未分析");
     }
-    [self.anlDyn setTitle:[NSString stringWithFormat:@"%@\n%@", RLPTr(@"动态"), dyn]];
-    [self.anlQual setTitle:[NSString stringWithFormat:@"%@\n%@", RLPTr(@"音质"), qual]];
-    [self.anlFake setTitle:[NSString stringWithFormat:@"%@\n%@", RLPTr(@"假无损"), fake]];
+    ((RLPAnalysisCard *)self.anlDyn).cardTitle = RLPTr(@"动态");
+    ((RLPAnalysisCard *)self.anlDyn).cardSummary = dyn;
+    ((RLPAnalysisCard *)self.anlQual).cardTitle = RLPTr(@"音质");
+    ((RLPAnalysisCard *)self.anlQual).cardSummary = qual;
+    ((RLPAnalysisCard *)self.anlFake).cardTitle = RLPTr(@"假无损");
+    ((RLPAnalysisCard *)self.anlFake).cardSummary = fake;
     self.anlDyn.toolTip = dyn; self.anlQual.toolTip = qual; self.anlFake.toolTip = fake;
 
     self.analysisStatus.stringValue=[NSString stringWithFormat:@"%@ · %@",RLPTr(@"音频分析"),self.anlBusy?RLPTr(@"分析中…"):(self.anlError?: (h?RLPTr(@"已分析"):RLPTr(@"未分析")))];
