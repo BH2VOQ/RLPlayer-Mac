@@ -92,3 +92,24 @@
 - audit / parity / behavior / i18n：提交后复跑并回填。
 
 **下一步**：等 ctest 184 全绿 → 本地提交 → 复跑 audit(246+)/parity/behavior/i18n → 更新本文件 → 出总报告。
+
+### 2026-11-13 ~23:25 —— 提交与最终门禁（全部三项完成）
+
+**提交**：`673f735 feat(native): rail chip geometry, inline writeback, headphone target curve, 1.1.7.22`
+（本地提交，**未推送**；`website/` 与本次无关，未提交。）
+
+**最终门禁（2026-11-13 23:20 实测）**
+| 门禁 | 数字 | 证据 |
+|---|---|---|
+| build | `cmake --build build-mac -j8` = **0 error**（含全部 target 链接） | `evidence/native-final-audit.log` 同轮构建 |
+| ctest | **184/184 passed, 0 failed**（357.05s，serial） | `evidence/native-item5-12-8-ctest-184.log` |
+| audit | **246 passed, 0 failed**（exit 0） | `evidence/native-final-audit.log` |
+| parity | ctrl done=180 **missing=0** removed=1；api done=96 missing=0 na=16（16 ok/0 bad；removed 1 ok/0 bad） | 终端输出 |
+| behavior | actionable=0（bindings 50） | 终端输出 |
+| i18n | OK (2316 pairs) | 终端输出 |
+
+**收尾状态**：14 项中 11 项为上一轮完成、3 项（5/12/8）本轮完成并各自红→绿；
+三项证据：`native-item5-20261113.md`、`native-item12-20261113.md`、`native-item8-20261113.md`；
+假绿清单从 8 条增至 **11 条**（新增 #9 几何全绿≠渲染正确、#10 属性存在≠功能接入、#11 编译绿≠运行绿）。
+
+**下一步（交用户/下一轮）**：实机验收清单见总报告 §5；第 1 项根因仍未定位（需用户导出诊断包）。
