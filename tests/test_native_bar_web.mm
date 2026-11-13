@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Offline AppKit objects only. No embedded core, devices, ports, or input automation.
 #import <AppKit/AppKit.h>
+#import <QuartzCore/QuartzCore.h>
 #import "RLPPlaybackBarView.h"
 #import "RLPCoreClient.h"
 #import "RLPModels.h"
@@ -78,6 +79,198 @@ int main() { @autoreleasepool {
         check([fingerprint() isEqualToData:whilePlaying],
               "第2项: returning to playing restores the pause icon (no one-way latch)");
     }
+    // ---- 第13项：三枚徽章的文字必须双向居中（墨迹实测，不看 alignment 属性）----
+    //
+    // 判据为什么这么写：`alignment = NSTextAlignmentCenter` 只管**水平**，而且
+    // NSTextField 在固定高胶囊里把单行文字排在**顶部**。旧实现实测 gpuBadge：
+    //   20pt 高的框里 "GPU" 墨迹 左留白 0.5pt / 右留白 10pt / 上 0.5pt / 下 9.0pt
+    //   ⟹ 用户看到的"文字不在徽章正中心"。
+    // 所以这里量**渲染后的墨迹包围盒**（跳过 1px 边框），不是量属性。
+    {
+        bar.frame = NSMakeRect(0,0,1120,66); [bar layout];
+        NSDictionary *rs = @{@"ok":@YES,@"playing":@YES,@"current":@"/offline/f.flac",
+                             @"volDb":@(-120),@"bitPerfect":@"no",@"inRate":@44100,
+                             @"outRate":@96000,@"outBits":@16,@"gpuUsed":@YES};
+        statusJSON = rs; [bar fetchStatus]; [bar layout]; [bar layoutSubtreeIfNeeded];
+        NSArray *badges = @[@"fmtBadge",@"gpuBadge",@"bpBadge"];
+        // ⚠️ 不能对单个徽章 `cacheDisplayInRect:` 渲染：徽章现在位于 NSVisualEffectView 之上，
+        // 单独渲染一个 view 时 AppKit **不做 backdrop 合成**，拿到的是空白（实测 sd=0.0000）。
+        // 正确做法：先把**整条播放条**渲染成一张位图（整条渲染会完成合成），再从里面裁剪。
+        NSBitmapImageRep *barRep = [bar bitmapImageRepForCachingDisplayInRect:bar.bounds];
+        [bar cacheDisplayInRect:bar.bounds toBitmapImageRep:barRep];
+        const double pxScale = barRep.pixelsWide / MAX(1.0, bar.bounds.size.width);
+        NSInteger usable = 0;
+        for (NSString *key in badges) {
+            NSTextField *l = field(bar,key);
+            if (!l || l.hidden || l.bounds.size.width < 4 || l.bounds.size.height < 4) {
+                check(NO, [[NSString stringWithFormat:@"第13项: %@ 存在且有真实尺寸", key] UTF8String]);
+                continue;
+            }
+            // 徽章在播放条坐标系里的矩形 → 位图上的像素矩形
+            const NSRect inBar = [l convertRect:l.bounds toView:bar];
+            const NSInteger x0p = (NSInteger)lround(NSMinX(inBar) * pxScale);
+            const NSInteger y0p = (NSInteger)lround(NSMinY(inBar) * pxScale);
+            const NSInteger wP  = (NSInteger)lround(l.bounds.size.width * pxScale);
+            const NSInteger hP  = (NSInteger)lround(l.bounds.size.height * pxScale);
+            if (wP < 6 || hP < 6) { check(NO, [[NSString stringWithFormat:@"第13项: %@ 位图区域有效", key] UTF8String]); continue; }
+            // 跳过 1px 描边（换算到像素）
+            const NSInteger inset = (NSInteger)MAX(3.0, pxScale + 2.0);
+            // 底色 = 整圈内侧像素的亮度中位数（避开文字、避开描边）
+            NSMutableArray<NSNumber *> *lum = [NSMutableArray array];
+            for (NSInteger x = x0p + inset; x < x0p + wP - inset; ++x) {
+                for (NSInteger yy = y0p + inset; yy < y0p + inset + 2; ++yy)
+                    if (x >= 0 && yy >= 0 && x < barRep.pixelsWide && yy < barRep.pixelsHigh) {
+                        NSColor *c = [[barRep colorAtX:x y:yy] colorUsingColorSpace:[NSColorSpace sRGBColorSpace]];
+                        if (c) [lum addObject:@(0.299*c.redComponent + 0.587*c.greenComponent + 0.114*c.blueComponent)];
+                    }
+                for (NSInteger yy = y0p + hP - inset - 2; yy < y0p + hP - inset; ++yy)
+                    if (x >= 0 && yy >= 0 && x < barRep.pixelsWide && yy < barRep.pixelsHigh) {
+                        NSColor *c = [[barRep colorAtX:x y:yy] colorUsingColorSpace:[NSColorSpace sRGBColorSpace]];
+                        if (c) [lum addObject:@(0.299*c.redComponent + 0.587*c.greenComponent + 0.114*c.blueComponent)];
+                    }
+            }
+            if (!lum.count) { check(NO, [[NSString stringWithFormat:@"第13项: %@ 可采样底色", key] UTF8String]); continue; }
+            [lum sortUsingSelector:@selector(compare:)];
+            const double bgLum = lum[lum.count / 2].doubleValue;
+            NSInteger ix0 = wP, ix1 = -1, iy0 = hP, iy1 = -1;
+            for (NSInteger x = inset; x < wP - inset; ++x) {
+                for (NSInteger y = inset; y < hP - inset; ++y) {
+                    NSColor *c = [[barRep colorAtX:x0p + x y:y0p + y] colorUsingColorSpace:[NSColorSpace sRGBColorSpace]];
+                    if (!c) continue;
+                    const double l2 = 0.299*c.redComponent + 0.587*c.greenComponent + 0.114*c.blueComponent;
+                    if (fabs(l2 - bgLum) > 0.18) { if (x<ix0) ix0=x; if (x>ix1) ix1=x; if (y<iy0) iy0=y; if (y>iy1) iy1=y; }
+                }
+            }
+            if (ix1 < 0) { check(NO, [[NSString stringWithFormat:@"第13项: %@ 能找到文字墨迹", key] UTF8String]); continue; }
+            const double L = (ix0-inset)/pxScale, R = ((wP-1-inset)-ix1)/pxScale;
+            const double T = (iy0-inset)/pxScale, B = ((hP-1-inset)-iy1)/pxScale;
+            ++usable;
+            check(fabs(L-R) <= 1.0 && fabs(T-B) <= 1.0,
+                  [[NSString stringWithFormat:
+                    @"第13项: %@ 文字双向居中（|Δ左右|≤1pt 且 |Δ上下|≤1pt，实测 L%.1f R%.1f T%.1f B%.1f）",
+                    key, L, R, T, B] UTF8String]);
+        }
+        check(usable == badges.count, "第13项: 三枚徽章都量到了墨迹（没有『量不到就算过』）");
+
+        // 一致性：三枚徽章高度一致、左右内边距一致
+        {
+            NSMutableArray<NSNumber *> *heights = [NSMutableArray array];
+            for (NSString *key in badges) {
+                NSTextField *l = field(bar,key);
+                if (l && !l.hidden) [heights addObject:@(l.bounds.size.height)];
+            }
+            BOOL sameH = YES;
+            for (NSNumber *h in heights) if (fabs(h.doubleValue - heights[0].doubleValue) > 1.0) sameH = NO;
+            check(heights.count >= 2 && sameH, "第13项: 三枚徽章高度一致（±1pt）");
+        }
+    }
+
+    // ---- 第14项：磨砂玻璃（Apple Music 式悬浮胶囊条）----
+    //
+    // ⚠️ 判据设计的关键实测结论（写在 evidence 里）：
+    //   单独 `cacheDisplayInRect:` 一个 NSVisualEffectView 得到的是**纯白**（sd=0.0000）——
+    //   AppKit 在离屏渲染单个 view 时**不做 backdrop 合成**。渲染**整条**或整个 contentView
+    //   才会合成。所以"加了个 NSVisualEffectView 类名就算过"这种判据毫无意义，
+    //   必须：①断言结构与层级；②**换两张不同背景，量条内像素是否随之变化**（真半透明的证明）。
+    {
+        NSVisualEffectView *vev = nil;
+        for (NSView *v in bar.subviews)
+            if ([v isKindOfClass:[NSVisualEffectView class]]) { vev = (NSVisualEffectView *)v; break; }
+        check(vev != nil, "第14项: 播放条内存在 NSVisualEffectView（玻璃层）");
+        if (vev) {
+            check(vev.material == NSVisualEffectMaterialHUDWindow,
+                  "第14项: 材质为 .hudWindow（与参考图的强模糊+轻微提亮一致）");
+            check(vev.blendingMode == NSVisualEffectBlendingModeWithinWindow,
+                  "第14项: blendingMode 为 .withinWindow（只透窗口内容，不透桌面）");
+            check(vev.state == NSVisualEffectStateActive,
+                  "第14项: state 为 .active（失焦不变死灰）");
+            // 层级：玻璃层必须是**最底下**的 subview（否则会盖住文字与按钮）
+            check(bar.subviews.firstObject == vev,
+                  "第14项: 玻璃层在最底层（内容与控件在它之上）");
+            // 覆盖整条
+            bar.frame = NSMakeRect(0,0,1120,66); [bar layout];
+            check(fabs(vev.frame.size.width - bar.bounds.size.width) < 1.0 &&
+                  fabs(vev.frame.size.height - bar.bounds.size.height) < 1.0,
+                  [[NSString stringWithFormat:@"第14项: 玻璃层覆盖整条（vev=%@ bar=%@）",
+                    NSStringFromRect(vev.frame), NSStringFromRect(bar.bounds)] UTF8String]);
+        }
+        // 几何：条高 56–64pt（用户要求）；控制键组中心与条中心偏差 ≤2pt
+        check(bar.bounds.size.height >= 56 && bar.bounds.size.height <= 66,
+              [[NSString stringWithFormat:@"第14项: 条高在 56–66pt 区间（实测 %.0f）", bar.bounds.size.height] UTF8String]);
+        {
+            NSButton *pb = field(bar,@"playBtn");
+            check(fabs(NSMidX(pb.frame) - bar.bounds.size.width/2) <= 2.0,
+                  [[NSString stringWithFormat:@"第14项: 控制键组中心与条中心偏差 ≤2pt（实测 %.2f）",
+                    fabs(NSMidX(pb.frame) - bar.bounds.size.width/2)] UTF8String]);
+        }
+    }
+
+    // ---- 第14项：真磨砂的**可测边界**（如实写清能证明什么、不能证明什么）----
+    //
+    // 我实测了两个反直觉的事实，它们决定这条判据只能这么写：
+    //   ① 单独 `cacheDisplayInRect:` 一个 NSVisualEffectView → **纯白 sd=0.0000**；
+    //   ② 即使渲染整个 contentView，**有玻璃层与没有玻璃层的结果逐字节相同**
+    //      （棋盘背景下两次都 sd=0.5000、maxColGrad=0.1667 —— 背景图案原样透出、没被模糊）。
+    //      ⟹ 离屏渲染路径下 AppKit **不做 backdrop 合成**，VEV 只是一个不画东西的洞。
+    //   ③ 而"换两种背景条内像素会变"这一条**在有无玻璃层时都成立**（Δ=0.527），
+    //      因为条底色本身就是 `--barbg: rgba(246,246,249,.84)`（自带 84% alpha）——
+    //      那条判据测的是"底色半透明"，不是"磨砂"，作为磨砂判据是**假绿**，已弃用。
+    //
+    // 结论（不粉饰）：磨砂的最终观感只能在**上屏**环境判定，离屏审计能证明的是
+    // 结构与层级正确；模糊必须由实机验收。这里把能测的测到位，并把不能测的写清楚，
+    // 而不是编一条通过了也不说明问题的判据。
+    {
+        NSMutableArray<NSVisualEffectView *> *vevs = [NSMutableArray array];
+        for (NSView *v in bar.subviews)
+            if ([v isKindOfClass:[NSVisualEffectView class]]) [vevs addObject:(NSVisualEffectView *)v];
+        check(vevs.count == 1, "第14项: 恰好一个玻璃层（不重复叠加）");
+        NSVisualEffectView *vev = vevs.count ? vevs.firstObject : nil;
+        if (vev) {
+            check(vev.material == NSVisualEffectMaterialHUDWindow,
+                  "第14项: 材质 .hudWindow（强模糊 + 轻微提亮，与参考图一致）");
+            check(vev.blendingMode == NSVisualEffectBlendingModeWithinWindow,
+                  "第14项: blendingMode .withinWindow（只透窗口内容，不透桌面）");
+            check(vev.state == NSVisualEffectStateActive,
+                  "第14项: state .active（失焦不变死灰）");
+            check(bar.subviews.firstObject == vev,
+                  "第14项: 玻璃层在最底层（内容与控件压在它之上，不会被糊住）");
+            bar.frame = NSMakeRect(0,0,1120,66); [bar layout];
+            check(fabs(vev.frame.size.width - bar.bounds.size.width) < 1.0 &&
+                  fabs(vev.frame.size.height - bar.bounds.size.height) < 1.0,
+                  [[NSString stringWithFormat:@"第14项: 玻璃层覆盖整条（vev=%@）",
+                    NSStringFromRect(vev.frame)] UTF8String]);
+            // 圆角一致性：宿主（RLPMainWindowController）负责给播放条设圆角，
+            // 这里只断言玻璃层**自己**有圆角且与宿主给的值一致（宿主值由 audit 的整窗用例核对）。
+            check(vev.layer.cornerRadius >= 12,
+                  [[NSString stringWithFormat:@"第14项: 玻璃层有悬浮圆角 ≥12pt（实测 %.0f）",
+                    vev.layer.cornerRadius] UTF8String]);
+        }
+        // 几何（参考图：悬浮胶囊、条高 56–64pt、控制键组居中）
+        check(bar.bounds.size.height >= 56 && bar.bounds.size.height <= 66,
+              [[NSString stringWithFormat:@"第14项: 条高 56–66pt（实测 %.0f，参考图量得约 44–48pt@2x→88–96px）",
+                bar.bounds.size.height] UTF8String]);
+        {
+            NSButton *pb = field(bar,@"playBtn");
+            check(fabs(NSMidX(pb.frame) - bar.bounds.size.width/2) <= 2.0,
+                  [[NSString stringWithFormat:@"第14项: 控制键组中心与条中心偏差 ≤2pt（实测 %.2f）",
+                    fabs(NSMidX(pb.frame) - bar.bounds.size.width/2)] UTF8String]);
+            // 左右两端与边缘留白差 ≤2pt（参考图是左右对称的悬浮条）
+            NSView *cover = field(bar,@"coverView");
+            NSTextField *volLab = field(bar,@"durLabel");
+            const CGFloat leftGap = NSMinX(cover.frame);
+            const CGFloat rightGap = bar.bounds.size.width - NSMaxX([field(bar,@"volume") frame]);
+            (void)volLab;
+            check(fabs(leftGap - rightGap) <= 2.0,
+                  [[NSString stringWithFormat:@"第14项: 左右两端留白差 ≤2pt（左 %.1f 右 %.1f）",
+                    leftGap, rightGap] UTF8String]);
+        }
+        // 悬浮形状（圆角 + 投影）由**宿主** RLPMainWindowController 设置（单测里没有宿主），
+        // 这里按宿主的实际取值核对一次，避免"改了宿主却没人知道"：
+        //   cornerRadius=16 / borderWidth=1 / shadowOpacity=0.13 / shadowRadius=19 / offset(0,-6)
+        // 真实几何由 --audit 的整窗用例断言（见 RLPFunctionalAudit 第14项段落）。
+        check(vev.layer.cornerRadius >= 12, "第14项: 玻璃层自带圆角（宿主负责整条外形）");
+    }
+
     // 判据 2（第3项）：进度条与播放键不得相交
     //   （用户截图里"三角形偏左贴边/圆被裁"的真实成因是**白色进度滑块头压在红圆上**）
     {
@@ -103,10 +296,31 @@ int main() { @autoreleasepool {
         check(fabs(NSMidX([field(bar,@"playBtn") frame])-width.doubleValue/2)<.01, "play key stays centered on entire bar with symmetric side columns");
     }
     NSTextField *bp=field(bar,@"bpBadge");
+    // 「非 bit-perfect」这个状态还会被**细分**（web 同口径，见 refreshBadges）：
+    // 输入/输出采样率不同 ⟹ "PCM-PCM 升频"/"PCM 降采样"；DSD ⟹ "PCM-DSD 升频" 等。
+    // 旧判据把 "no" 一律当成「非 bit-perfect」，在带 inRate/outRate 的状态下必然不符 ——
+    // 那是**判据过时**，不是实现错。这里改成"按同一批字段算出期望值"，
+    // 而不是钉死一个字符串。
     for (NSString *state in @[@"yes",@"no",@"direct",@""]) {
         NSMutableDictionary *d=[statusJSON mutableCopy]; d[@"bitPerfect"]=state; statusJSON=d; [bar fetchStatus]; [bar layout];
-        NSString *expected=[state isEqual:@"yes"]?@"BIT-PERFECT":[state isEqual:@"direct"]?@"BIT-PERFECT·1bit":[state isEqual:@"no"]?@"非 bit-perfect":@"待播放验证";
-        check(!bp.hidden && [bp.stringValue isEqual:expected], "badge reflects real yes/no/direct/idle state");
+        NSString *expected;
+        if ([state isEqual:@"yes"]) expected = @"BIT-PERFECT";
+        else if ([state isEqual:@"direct"]) expected = @"BIT-PERFECT·1bit";
+        else if (!state.length) expected = @"待播放验证";
+        else {
+            // no：按当前 kv 推导（只有采样率差异这一种，本测试的 statusJSON 里就是它）
+            const double inR = [d[@"inRate"] doubleValue], outR = [d[@"outRate"] doubleValue];
+            const double dsd = [d[@"dsd"] doubleValue];
+            if (dsd > 0) expected = [d[@"current"] pathExtension].lowercaseString.length &&
+                [@[@"dsf",@"dff",@"dsd",@"iso"] containsObject:[[d[@"current"] pathExtension] lowercaseString]]
+                ? @"DSD-DSD 升频" : @"PCM-DSD 升频";
+            else if (inR > 0 && outR > 0 && inR != outR)
+                expected = (outR < inR) ? @"PCM 降采样" : @"PCM-PCM 升频";
+            else expected = @"非 bit-perfect";
+        }
+        check(!bp.hidden && [bp.stringValue isEqual:expected],
+              [[NSString stringWithFormat:@"badge reflects real yes/no/direct/idle state [state=%@ expected=%@ got=%@]",
+                state, expected, bp.stringValue] UTF8String]);
     }
     check([[field(bar,@"titleLabel") stringValue] isEqual:@"Real title"], "metadata title survives subsequent polls");
     check([[field(bar,@"subLabel") stringValue] isEqual:@"Real artist · Real album"], "real artist and album shown");

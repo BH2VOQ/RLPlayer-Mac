@@ -30,6 +30,10 @@ NS_ASSUME_NONNULL_BEGIN
 
 /// 当前选中的导航行（-1 = 未选中）。详情页返回时用它对回原列表页。
 @property (nonatomic, readonly) NSInteger selectedRow;
+/// 最后一次「已新建歌单：<name>」提示文案。
+/// 为什么要有这个出口：toast 只活 ~1.8s，自动化判据在忙时会整段错过那个窗口（实测偶发假红）；
+/// 而"新建歌单的提示带上歌单名"是**产品行为**，不该因为窗口短暂就无法断言。
+@property (nonatomic, copy, readonly, nullable) NSString *lastSavedQueueToast;
 
 /// 当前悬停行（-1 = 无）。侧栏表格把鼠标位置转进来，用于画悬停底色。
 @property (nonatomic, readonly) NSInteger hoverRow;

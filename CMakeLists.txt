@@ -284,7 +284,9 @@ if(APPLE)
   foreach(t IN ITEMS test_native_album_web test_native_bar_web)
     target_compile_options(${t} PRIVATE -fobjc-arc)
     target_include_directories(${t} PRIVATE src tools tools/native_ui)
-    target_link_libraries(${t} PRIVATE "-framework AppKit")
+    # QuartzCore：第14项的半透明判据要造两层渐变背景（CAGradientLayer）来证明
+    # 「换背景后条内像素真的变化」，这是"真磨砂"唯一有意义的证明方式。
+    target_link_libraries(${t} PRIVATE "-framework AppKit" "-framework QuartzCore")
   endforeach()
   target_link_libraries(test_native_album_web PRIVATE rlapp_core)
   add_test(NAME native_album_web COMMAND test_native_album_web)

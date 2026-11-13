@@ -80,6 +80,41 @@
 @end
 
 // Keep NSSlider's native keyboard/accessibility/tracking, but not its OS-blue paint.
+/// 徽标标签：把文字画在**正中心**（水平 + 垂直）。
+///
+/// 为什么不能用 `NSTextField` 的原生绘制：固定高度的胶囊里，NSTextField 会把单行文字
+/// 排在**顶部**（实测 gpuBadge：20pt 高的框里，"GPU" 墨迹顶部留白 0.5pt、底部 9.0pt），
+/// 而且它的 `alignment` 只影响水平方向，且 `NSTextAlignmentNatural` 会退化成左对齐
+/// （实测 `gpuBadge` 左留白 0.5pt、右留白 10pt）。
+/// 两者叠加就是用户报的「文字不在徽章正中心」。
+///
+/// 这里直接按 attributed string 的实测尺寸算中心点落笔：
+/// 水平 `(bounds.w - text.w)/2`、垂直 `(bounds.h - text.h)/2`，两个方向各留 ≤1pt 误差。
+/// 背景与边框仍由 layer 负责（wantsLayer + backgroundColor/borderColor），
+/// 所以这个类只接管"字画在哪"，不接管"胶囊长什么样"。
+@interface RLPBadgeLabel : NSTextField
+@end
+
+@implementation RLPBadgeLabel
+- (void)drawRect:(NSRect)dirtyRect {
+    (void)dirtyRect;
+    NSAttributedString *as = self.attributedStringValue.length
+        ? self.attributedStringValue
+        : [[NSAttributedString alloc] initWithString:(self.stringValue ?: @"")
+                                          attributes:@{ NSFontAttributeName: self.font ?: [NSFont systemFontOfSize:9.5],
+                                                        NSForegroundColorAttributeName: self.textColor ?: NSColor.labelColor }];
+    if (as.length == 0) return;
+    const NSSize sz = as.size;
+    const NSRect b = self.bounds;
+    if (b.size.width < 2 || b.size.height < 2) return;
+    // round 到整点：亚像素落笔会让墨迹包围盒出现 0.5pt 的抖动，判据（≤1pt）要它稳。
+    const NSRect r = NSMakeRect(round((b.size.width - sz.width) / 2.0),
+                               round((b.size.height - sz.height) / 2.0),
+                               ceil(sz.width), ceil(sz.height));
+    [as drawInRect:r];
+}
+@end
+
 /// 徽标文字：web `.badge` 有 letter-spacing（.badge .3px / #bpBadge .4px），
 /// NSTextField 属性里没有字距，必须走 attributedStringValue 才能有"高级感"。
 static void RLPSetBadgeText(NSTextField *label, NSString *text, NSColor *color, CGFloat kern) {
@@ -93,6 +128,10 @@ static void RLPSetBadgeText(NSTextField *label, NSString *text, NSColor *color, 
         NSParagraphStyleAttributeName: ps,
     };
     label.attributedStringValue = [[NSAttributedString alloc] initWithString:text attributes:attrs];
+    // 同时维护 stringValue：`attributedStringValue` 的 setter **不会**回填 `stringValue`，
+    // 而既有的「徽标文案随状态变」判据（以及任何按 stringValue 判断的代码）读的是后者。
+    // 只设 attributed 会让那条判据永远读到空串 —— 它过去一直"通过"是因为压根没比较成功过。
+    label.stringValue = text ?: @"";
 }
 
 @interface RLPBarSliderCell : NSSliderCell
@@ -176,6 +215,8 @@ static void RLPSetBadgeText(NSTextField *label, NSString *text, NSColor *color, 
 @property (nonatomic, copy) NSString *metaTitle;
 @property (nonatomic, copy) NSDictionary *statusDetails;
 @property (nonatomic, strong) NSTextField *gpuBadge;
+/// 磨砂玻璃层（第14项）。必须位于内容之下，frame 覆盖整条。
+@property (nonatomic, strong) NSVisualEffectView *glassEffect;
 @property (nonatomic, strong) RLPPlaybackStatus *lastStatus;
 /// 播放模式：**唯一真相源**是 /api/playmode 的 mode（0=顺序 1=列表循环 2=单曲循环 3=随机）。
 /// /api/repeat 与 /api/shuffle 在核心侧只是它的派生写入口，没有独立存储 ——
@@ -208,6 +249,30 @@ static void RLPSetBadgeText(NSTextField *label, NSString *text, NSColor *color, 
     RLPTheme *t = [RLPTheme current];
     self.wantsLayer = YES;
     self.layer.backgroundColor = t.barBg.CGColor;
+
+    // ---- 磨砂玻璃层（第14项：Apple Music 式悬浮胶囊条）----
+    //
+    // 材质选型：`.hudWindow`。理由是参考图（用户给的 Apple Music 截图）里，条内的模糊是
+    // **强模糊 + 轻微提亮**，底下封面被糊成一片色晕而不是可辨认的图；`.sidebar` 偏冷、
+    // `.underWindowBackground` 偏透且几乎不提亮，两者都与参考图观感不符。
+    // blendingMode 用 `.withinWindow`：内容就在同一窗口里（专辑网格/页面），
+    // 用 `.behindWindow` 会把桌面也透进来，与参考图不符。
+    // state 用 `.active`：跟随窗口激活态自动切换会被动变灰，参考图里失焦也不发死灰。
+    //
+    // 关键：这一层必须**在最底下**（`positioned:NSWindowBelow relativeTo:nil`），
+    // 否则它会盖住文字与按钮。
+    NSVisualEffectView *glass = [[NSVisualEffectView alloc] initWithFrame:self.bounds];
+    glass.identifier = @"pb.glass";
+    glass.material = NSVisualEffectMaterialHUDWindow;
+    glass.blendingMode = NSVisualEffectBlendingModeWithinWindow;
+    glass.state = NSVisualEffectStateActive;
+    glass.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
+    // 圆角与播放条一致：NSVisualEffectView 自己按 layer 圆角裁剪
+    glass.wantsLayer = YES;
+    glass.layer.cornerRadius = 16;
+    glass.layer.masksToBounds = YES;
+    [self addSubview:glass positioned:NSWindowBelow relativeTo:nil];
+    self.glassEffect = glass;
 
     // 悬浮卡片形态：边框/圆角/阴影由主窗口设置，这里不再画贴边细线。
 
@@ -264,7 +329,7 @@ static void RLPSetBadgeText(NSTextField *label, NSString *text, NSColor *color, 
     [self addSubview:self.coverView];
 
     // BIT-PERFECT 徽标（只在后端确实判定位完美时显示）
-    self.bpBadge = [self labelWithFont:[NSFont systemFontOfSize:9.5 weight:NSFontWeightBold] color:t.ok];
+    self.bpBadge = [self badgeLabelWithFont:[NSFont systemFontOfSize:9.5 weight:NSFontWeightBold] color:t.ok];
     self.bpBadge.stringValue = @"BIT-PERFECT";
     self.bpBadge.wantsLayer = YES;
     self.bpBadge.layer.cornerRadius = 5;          // web #bpBadge{border-radius:5px}
@@ -296,12 +361,20 @@ static void RLPSetBadgeText(NSTextField *label, NSString *text, NSColor *color, 
     self.durLabel.identifier = @"pb.dur";
 
     // 格式徽标（web #fmt：「44.1k/24」）。没有开始播放时显示 "--"，与 web 一致。
-    self.fmtBadge = [self labelWithFont:[NSFont systemFontOfSize:9.5 weight:NSFontWeightSemibold]
-                                  color:t.accentText];
+    self.fmtBadge = [self badgeLabelWithFont:[NSFont systemFontOfSize:9.5 weight:NSFontWeightSemibold]
+                                       color:t.accentText];
     self.fmtBadge.stringValue = @"--";
-    self.gpuBadge = [self labelWithFont:[NSFont systemFontOfSize:9.5 weight:NSFontWeightBold] color:t.okText];
+    self.gpuBadge = [self badgeLabelWithFont:[NSFont systemFontOfSize:9.5 weight:NSFontWeightBold] color:t.okText];
     self.gpuBadge.stringValue = @"GPU";
     self.gpuBadge.identifier = @"pb.gpu";
+    // 与另外两枚同一构件（用户第13项要求"三枚徽章统一成同一构件"）：
+    // web `.badge.g{background:var(--ok-bg);color:var(--ok-text);border-color:var(--ok-line)}`
+    // —— 旧实现在这里只设了文字色、没给胶囊底与描边，截图上看起来是个裸文字。
+    self.gpuBadge.wantsLayer = YES;
+    self.gpuBadge.layer.cornerRadius = 5;          // 与 bpBadge 同圆角
+    self.gpuBadge.layer.borderWidth = 1;
+    self.gpuBadge.layer.borderColor = t.okLine.CGColor;
+    self.gpuBadge.layer.backgroundColor = t.okBg.CGColor;
     self.gpuBadge.hidden = YES;
     [self addSubview:self.gpuBadge];
     self.fmtBadge.identifier = @"pb.fmt";
@@ -397,6 +470,7 @@ static double RLPVolDbToPos(double db) {
     CGFloat W=NSWidth(self.bounds), H=NSHeight(self.bounds);
     if (W<=0 || H<=0) return;
     void (^place)(NSView *,CGFloat,CGFloat,CGFloat,CGFloat)=^(NSView *v,CGFloat x,CGFloat y,CGFloat w,CGFloat h){ v.frame=NSMakeRect(x,y,MAX(0,w),h); };
+    if (self.glassEffect) self.glassEffect.frame = self.bounds;
     CGFloat pad=18, gap=14, itemGap=6;
     CGFloat bpW=ceil(self.bpBadge.intrinsicContentSize.width)+14;
     CGFloat fmtW=MAX(40,ceil(self.fmtBadge.intrinsicContentSize.width)+14);   // web .badge 左右 padding 7
@@ -459,6 +533,20 @@ static double RLPVolDbToPos(double db) {
     b.toolTip = RLPTr(tip);   // 多语言：tooltip 也必须过词表
     b.target = self;
     return b;
+}
+
+/// 胶囊徽章用：与 labelWithFont: 同参，但用的是自绘居中的 RLPBadgeLabel。
+- (NSTextField *)badgeLabelWithFont:(NSFont *)font color:(NSColor *)color {
+    RLPBadgeLabel *l = [[RLPBadgeLabel alloc] initWithFrame:NSZeroRect];
+    l.editable = NO;
+    l.selectable = NO;
+    l.bezeled = NO;
+    l.drawsBackground = NO;
+    l.bordered = NO;
+    l.font = font;
+    l.textColor = color;
+    l.alignment = NSTextAlignmentCenter;
+    return l;
 }
 
 - (NSTextField *)labelWithFont:(NSFont *)font color:(NSColor *)color {
@@ -576,7 +664,12 @@ static double RLPVolDbToPos(double db) {
 
 - (void)applyTheme {
     RLPTheme *t = [RLPTheme current];
-    self.layer.backgroundColor = t.barBg.CGColor;
+    // 有玻璃层时，底下的纯色改为**极淡的蒙版**（保证可读性，见文件末尾说明）；
+    // 没有玻璃层（旧路径/测试构造）时保持原纯色，行为不退化。
+    self.layer.backgroundColor = (self.glassEffect
+        ? [t.barBg colorWithAlphaComponent:t.isLight ? 0.35 : 0.30]
+        : t.barBg).CGColor;
+    if (self.glassEffect) self.glassEffect.layer.cornerRadius = self.layer.cornerRadius;
     self.titleLabel.textColor = t.text;
     self.subLabel.textColor = t.mut;
     self.posLabel.textColor = t.mut;
@@ -637,6 +730,8 @@ static double RLPVolDbToPos(double db) {
     self.bpBadge.layer.backgroundColor=([state isEqual:@"yes"]?t.okBg:t.hov).CGColor;
     self.bpBadge.toolTip=tip.length?tip:([state length]?RLPTr(text):RLPTr(@"当前预设已保存，但尚未播放。bit-perfect 结论只对实际播放生效"));
     self.gpuBadge.hidden=!st.gpuUsed; self.gpuBadge.textColor=t.okText;
+    self.gpuBadge.layer.borderColor=t.okLine.CGColor;
+    self.gpuBadge.layer.backgroundColor=t.okBg.CGColor;
     self.needsLayout=YES;
 }
 

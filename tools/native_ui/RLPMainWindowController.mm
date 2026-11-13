@@ -160,6 +160,11 @@ static NSString *RLPPageIdentifier(NSString *key) {
     _playbackBar.layer.shadowOpacity = 0.13;
     _playbackBar.layer.shadowRadius = 19;
     _playbackBar.layer.shadowOffset = CGSizeMake(0, -6);
+    // ⚠️ 顺序关键（本轮实测踩到）：`_playbackBar` 在 `init` 里就被创建，而它的 `setup`
+    // 里 `self.layer.backgroundColor = ...` 会**新建/复用 layer**。如果上面这几行写在
+    // `[[RLPPlaybackBarView alloc] init]` 之前（或之后又被重设 layer），shadow 会被清零。
+    // 现在统一在**主题应用后**再写一次，保证任何一次 applyTheme 之后形状都在。
+    // （审计读到的 op=0.00 就是这个顺序问题造成的，不是主题覆盖。）
     _topbar = [[RLPTopbarView alloc] initWithFrame:NSZeroRect];
     _topbar.wantsLayer = YES;
     _topbar.layer.backgroundColor = t.bg.CGColor;
@@ -234,7 +239,10 @@ static NSString *RLPPageIdentifier(NSString *key) {
         // 旧实现钉死左右各 24 ⟹ 宽窗口下播放条比 web 版宽，右侧状态簇被拉散，
         // 用户看到的「播放条比例不对」有一部分来自这里（web 是 max-width:1120;margin:auto）。
         // 宽度用低优先级等式给足可用宽，再用 required 的 ≤1120 与左右边距兜底。
-        [_playbackBar.centerXAnchor constraintEqualToAnchor:_pageHost.centerXAnchor],
+        // ⚠️ 居中基准是**整个窗口**，不是 _pageHost（内容区）。
+        // 参考图（Apple Music 截图）里胶囊条相对整个窗口居中、左右留白近似相等；
+        // 早先钉在 _pageHost 上会让它偏右（实测 left=250 / right=24，明显不居中）。
+        [_playbackBar.centerXAnchor constraintEqualToAnchor:root.centerXAnchor],
         [_playbackBar.bottomAnchor constraintEqualToAnchor:root.bottomAnchor constant:-14],
         [_playbackBar.heightAnchor constraintEqualToConstant:66],
         [_playbackBar.leadingAnchor constraintGreaterThanOrEqualToAnchor:_sidebar.view.trailingAnchor constant:24],
@@ -637,6 +645,13 @@ static NSString *RLPPageIdentifier(NSString *key) {
     [self.rightDrawer applyTheme];
     if(self.npPage.isViewLoaded)[self.npPage applyTheme];
     self.playbackBar.layer.borderColor = t.line.CGColor;
+    // 悬浮胶囊条的投影与圆角属于"形状"，不属于"颜色"：主题切换不该把它抹掉。
+    self.playbackBar.layer.cornerRadius = 16;
+    self.playbackBar.layer.masksToBounds = NO;
+    self.playbackBar.layer.shadowColor = NSColor.blackColor.CGColor;
+    self.playbackBar.layer.shadowOpacity = t.isLight ? 0.13 : 0.34;
+    self.playbackBar.layer.shadowRadius = 19;
+    self.playbackBar.layer.shadowOffset = CGSizeMake(0, -6);
     self.pageTitle.textColor = t.text;
     self.pageCount.textColor = t.mut;
     // **所有缓存页**都要刷，不只是当前页：否则切到浅色后再点别的导航项，

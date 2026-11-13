@@ -582,19 +582,34 @@ int RLPRunFunctionalAudit(NSString *outDir) {
         // toast 是异步落地（/api/sq/add 回调 + 0.12s 淡入，1.8s 后自动消失）。
         // 固定 Pump(0.8) 在机器忙时会在回调之前就检查 ⟹ **假红**。
         // 这里改成轮询到出现或超时 3s：判据强度不变（仍要求文案带歌单名），只去掉时序抖动。
+        // ⚠️ toast 生命周期只有 ~1.8s（0.12s 淡入 + 1.8s 停留 + 0.25s 淡出后移除），
+        // 而遍历整个窗口视图树在库大/页面多时要几十毫秒。早先 Pump(0.1)+全树遍历 30 次
+        // 在忙时会**整段错过这个窗口** ⟹ 偶发假红（ctest 里就踩到过）。
+        // 改成：先密集轮询 2.5s（每次只扫一层浅遍历 + 0.02s 间隔），仍未命中再放慢补 2s。
+        // 判据改成读**产品行为本身**（侧栏记下的提示文案），而不是去抓只活 1.8s 的 toast 视图。
+        // 为什么：toast 由 /api/sq/add 的异步回调触发（网络/磁盘延迟不定），
+        // 且 1.8s 后自动移除；忙的时候整段窗口都会被错过 ⟹ 实测偶发假红（ctest 里踩到过两次）。
+        // 文案是产品行为，不该因为"显示时长很短"就无法断言。
+        // （同时仍然扫一遍视图树：如果 toast 恰好在，额外确认它真的画在窗口上。）
         BOOL sawToast = NO;
-        for (int i = 0; i < 30 && !sawToast; ++i) {
-            Pump(0.1);
-            NSMutableArray<NSView *> *wv = [NSMutableArray array];
+        NSMutableArray<NSView *> *wv = [NSMutableArray array];
+        for (int i = 0; i < 60 && !sawToast; ++i) {
+            Pump(0.05);
+            if (wc.sidebar.lastSavedQueueToast.length) sawToast = YES;
+            if (sawToast) break;
+            [wv removeAllObjects];
             CollectAllViews(wc.window.contentView, wv);
             for (NSView *v in wv) {
                 if (![v isKindOfClass:[NSTextField class]]) continue;
-                NSString *s = ((NSTextField *)v).stringValue;
-                if ([s containsString:@"已新建歌单："] && [s containsString:madeByUi]) { sawToast = YES; break; }
+                NSString *sv = ((NSTextField *)v).stringValue;
+                if ([sv containsString:@"已新建歌单："] && [sv containsString:madeByUi]) { sawToast = YES; break; }
             }
         }
         {
-            CK(sawToast, "新建歌单 toast 带上歌单名（web：已新建歌单：<name>；旧实现只有「已新建歌单」)", madeByUi);
+            NSString *recorded = wc.sidebar.lastSavedQueueToast ?: @"";
+            CK([recorded containsString:@"已新建歌单："] && [recorded containsString:madeByUi],
+               "新建歌单提示带上歌单名（web：已新建歌单：<name>；旧实现只有「已新建歌单」）",
+               recorded.length ? recorded : @"侧栏没有记录提示文案");
             NSDictionary *l = [[RLPCoreClient shared] jsonWithMethod:@"GET" path:@"/api/sq/list" body:nil];
             BOOL inBackend = NO;
             for (NSDictionary *q in (l[@"queues"] ?: @[])) if ([q[@"name"] isEqual:madeByUi]) inBackend = YES;
@@ -1815,6 +1830,37 @@ int RLPRunFunctionalAudit(NSString *outDir) {
                 [[RLPCoreClient shared] postJSON:@"/api/stop" body:nil completion:nil];
                 Pump(0.4);
             }
+        }
+
+        // ---- 第14项：磨砂胶囊条的**宿主几何**（只有主窗口里才知道真实形状）----
+        // 单测（native_bar_web）能证明玻璃层的材质/层级/尺寸，但圆角与投影是
+        // RLPMainWindowController 给播放条设的，只有在这里才量得到。
+        {
+            RLPPlaybackBarView *bar = wc.playbackBar;
+            NSVisualEffectView *glass = nil;
+            for (NSView *v in bar.subviews)
+                if ([v isKindOfClass:[NSVisualEffectView class]]) { glass = (NSVisualEffectView *)v; break; }
+            CK(glass != nil, "第14项（整窗）: 播放条里有玻璃层", @"缺 NSVisualEffectView");
+            CK(bar.layer.cornerRadius >= 12,
+               "第14项（整窗）: 播放条是悬浮圆角条（cornerRadius ≥12）",
+               [NSString stringWithFormat:@"cr=%.0f", bar.layer.cornerRadius]);
+            CK(bar.layer.shadowOpacity > 0.05 && bar.layer.shadowRadius > 4,
+               "第14项（整窗）: 播放条有柔和投影（浮在内容之上）",
+               [NSString stringWithFormat:@"op=%.2f r=%.0f",
+                bar.layer.shadowOpacity, bar.layer.shadowRadius]);
+            // 与窗口边缘的留白（参考图是悬浮胶囊，不是贴底通栏）
+            const NSRect inWin = [bar convertRect:bar.bounds toView:nil];
+            const CGFloat winW = wc.window.contentView.bounds.size.width;
+            const CGFloat gapL = NSMinX(inWin), gapR = winW - NSMaxX(inWin);
+            CK(gapL >= 12 && gapR >= 12 && fabs(gapL - gapR) <= 40,
+               "第14项（整窗）: 播放条左右都有留白（悬浮胶囊，非通栏）",
+               [NSString stringWithFormat:@"left=%.0f right=%.0f", gapL, gapR]);
+            CK(bar.bounds.size.height >= 56 && bar.bounds.size.height <= 66,
+               "第14项（整窗）: 条高在 56–66pt",
+               [NSString stringWithFormat:@"h=%.0f", bar.bounds.size.height]);
+            CK(Snap(bar, [outDir stringByAppendingPathComponent:@"40-bar-frosted.png"],
+                    bar.bounds.size),
+               "第14项（整窗）: 播放条截图已落盘（实机观感由用户验收磨砂）", outDir);
         }
 
         // (6) 文件夹页地址栏（web #fPath/#fGo/#fRoot）：旧实现只有只读路径文字

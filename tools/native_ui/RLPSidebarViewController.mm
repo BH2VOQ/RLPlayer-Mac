@@ -155,6 +155,7 @@ static BOOL RLPRowIsSection(NSArray<NSDictionary *> *items, NSInteger row) {
 }
 
 @implementation RLPSidebarViewController
+@synthesize lastSavedQueueToast = _lastSavedQueueToast;
 
 - (instancetype)init {
     self = [super initWithNibName:nil bundle:nil];
@@ -795,7 +796,11 @@ static BOOL RLPRowIsSection(NSArray<NSDictionary *> *items, NSInteger row) {
         }
         // web：toast('已新建歌单：' + j.name) —— 必须带歌单名（旧实现只写「已新建歌单」）。
         NSString *created = [json[@"name"] isKindOfClass:[NSString class]] ? json[@"name"] : name;
-        RLPToast([NSString stringWithFormat:@"%@%@", RLPTr(@"已新建歌单："), created]);
+        // 记下"最后一次新建歌单的提示文案"：轻提示（toast）只活 ~1.8s，
+        // 自动化审计在忙的时候会整段错过那个窗口 ⟹ 偶发假红（ctest 里真踩到过）。
+        // 文案本身是产品行为的一部分，记在这里既让判据稳定，也让用户可见的那句话可被核对。
+        _lastSavedQueueToast = [NSString stringWithFormat:@"%@%@", RLPTr(@"已新建歌单："), created];
+        RLPToast(_lastSavedQueueToast);
         [self_ postSavedQueuesChanged];
         [self_ openSavedQueueNamed:created];   // web renderSavedQueuePage(j.name)
     }];
