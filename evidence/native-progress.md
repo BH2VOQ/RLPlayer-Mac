@@ -258,3 +258,24 @@ ctest 结果回填中；parity/behavior/i18n 待回填。
 **如实挂账**：规格列仅表格宽 >1400 可见（web 媒体查询同口径）；离屏单测，实机未验。
 
 **下一步**：轮次 4 = 正在播放 npMeta 芯片行（web badge 规格 + EQ/IR 芯片 + 推送/加歌单）。
+
+### 2026-11-14 06:52 —— 轮次 4（1.1.7.27）：正在播放页 #npMeta 芯片行 = web
+
+**现场**：基线 `b894c12`（1.1.7.26）；全绿后开改。
+**任务**：徽标 `.badge` 逐值（9.5/600/kern.3/radius5/acc-weak/ok-*）、EQ/IR 芯片（settings.kv.eq/ir）、
+投放/加歌单移入同一行、enriched=false 不再整行隐藏、flex-wrap（窄宽不重叠/行高增长/按钮行下移）。
+
+**红→绿**：新 ctest `native_npmeta_chips`（83 条）旧码 **19P/16F** → 新码 **83P/0F**；
+日志 `native-npmeta-chips-red-20261114.log` / `-green-20261114.log`；Lead 独立复跑 83/0。
+
+**门禁（提交前，Lead 复跑）**：build 0 error（`native-npmeta-chips-build.log`）；
+ctest **190/190**（362.58s，本轮 writer 日志；Lead 提交后复跑回填）；
+audit **246/0**（`native-npmeta-chips-audit-20261114.log`）；parity missing=0 removed=2 na=16 ok；
+behavior actionable=0；i18n OK（2318）。
+
+**证据**：`evidence/native-npmeta-chips-20261114.md`。
+**如实挂账**：投放运行态（已推送到 X/点击停止）未移植；芯片无 SVG 图标；<900px 不可达；
+web max-height:720 的 margin 未移植；实机未验。
+
+**下一步**：轮次 5 = 队列页排序 8 档（含 CUE 区间保真与行播放）。
+（Lead 提交前复跑：ctest **190/190**，378.69s，`native-npmeta-chips-lead-ctest-190.log`；audit Lead 复跑 **246/0**。）
