@@ -24,6 +24,34 @@
 
 static NSString *const kQueueDragType = @"RLPQueueRowDrag";
 
+/// 队列行视图：web `.qrow` 的 hover / 当前行 / 底部分隔线。
+/// 悬停状态由 RLPHoverRowView 的 tracking area 提供（判据入口 setHoveredForAudit:），
+/// 控制器据此决定行尾 × 是否显示（web `.qdel` opacity 0 → hover 1）。
+@interface RLPQueueRowView : RLPHoverRowView
+@property (nonatomic, assign) BOOL currentRow;
+@property (nonatomic, copy, nullable) void (^onHoverChanged)(RLPQueueRowView *rowView, BOOL hovered);
+@end
+
+@implementation RLPQueueRowView
+- (void)setHoveredForAudit:(BOOL)hovered {
+    [super setHoveredForAudit:hovered];
+    if (self.onHoverChanged) self.onHoverChanged(self, hovered);
+}
+- (void)drawBackgroundInRect:(NSRect)dirtyRect {
+    [super drawBackgroundInRect:dirtyRect];
+    RLPTheme *t = [RLPTheme current];
+    // web .qrow.on 背景 --acc-weak（在悬停色之下、选中高亮之上，当前行始终可见）。
+    if (self.currentRow) {
+        [t.accentWeak setFill];
+        NSRectFill(dirtyRect);
+    }
+    // web .qrow border-bottom:1px solid var(--line)。
+    [t.line setFill];
+    const CGFloat y = self.isFlipped ? NSMaxY(self.bounds) - 1 : 0;
+    NSRectFill(NSMakeRect(0, y, NSWidth(self.bounds), 1));
+}
+@end
+
 @interface RLPQueueViewController () <NSTableViewDataSource, NSTableViewDelegate>
 @property (nonatomic, strong) NSTableView *table;
 @property (nonatomic, strong) NSScrollView *tableScroll;
@@ -36,13 +64,14 @@ static NSString *const kQueueDragType = @"RLPQueueRowDrag";
 @property (nonatomic, assign) NSInteger mode;
 @property (nonatomic, assign) NSUInteger seq;
 @property (nonatomic, strong) NSPopUpButton *sortPopup;
+@property (nonatomic, assign) NSInteger hoveredRow;
 @end
 
 @implementation RLPQueueViewController
 
 - (instancetype)init {
     self = [super initWithTitle:RLPTr(@"播放队列")];
-    if (self) { _paths = @[]; _metas = @[]; _cues = @[]; _currentIndex = -1; }
+    if (self) { _paths = @[]; _metas = @[]; _cues = @[]; _currentIndex = -1; _hoveredRow = -1; }
     return self;
 }
 
@@ -92,19 +121,19 @@ static NSString *const kQueueDragType = @"RLPQueueRowDrag";
     // web 的行没有斑马底：开交替色时 AppKit 会把空表区域也铺满条带
     // （0 首队列也会出现一屏灰条，截图里非常明显，用户会以为是坏掉）。
     self.table.usesAlternatingRowBackgroundColors = NO;
-    self.table.rowHeight = 26;
+    // web .qrow：padding 9 18 + 12.5 正文 ≈ 38pt 行高；无列头（页面自带排序栏）。
+    self.table.rowHeight = 38;
+    self.table.intercellSpacing = NSMakeSize(0, 0);
     self.table.backgroundColor = t.bg;
-    // 与 web 队列行同比：句首 #、标题、艺术家、专辑、时长，**行尾 × 移除**
-    //（web .qdel 每个队列行常显一个 ×；旧实现只有右键菜单，用户看不到"怎么删"）。
-    NSArray *titles = @[ @"#", RLPTr(@"标题"), RLPTr(@"艺术家"), RLPTr(@"专辑"), RLPTr(@"时长"), @"" ];
-    // 列宽总和必须明显小于可视宽度（922@1180）：NSTableView 的行内 cell 间距会再吃掉几十 pt，
-    // 贴着上限算会让最后一列（行尾 ×）刚好落到视口外（2026-11-13 实测：x=1157 > 可视右沿）。
-    NSArray *ws = @[ @34, @300, @150, @170, @64, @28 ];
-    for (NSInteger i = 0; i < (NSInteger)titles.count; ++i) {
-        NSTableColumn *c = [[NSTableColumn alloc] initWithIdentifier:[NSString stringWithFormat:@"c%ld", (long)i]];
-        c.title = titles[i];
+    self.table.headerView = nil;
+    if (@available(macOS 11.0, *)) self.table.style = NSTableViewStylePlain;
+    // 4 列 = web .qrow 的四个子元素：序号 / 标题 / 所在文件夹 / 行尾 ×。
+    NSArray<NSString *> *colIDs = @[ @"q.n", @"q.t", @"q.f", @"q.del" ];
+    for (NSString *cid in colIDs) {
+        NSTableColumn *c = [[NSTableColumn alloc] initWithIdentifier:cid];
+        c.title = @"";
         c.minWidth = 0; c.maxWidth = 10000;
-        c.width = [ws[i] doubleValue];
+        c.width = (cid == @"q.n") ? 26.0 : ((cid == @"q.del") ? 24.0 : 300.0);
         [self.table addTableColumn:c];
     }
     // 关键：**不要**让 NSTableView 把多余宽度摊到各列。
@@ -179,20 +208,42 @@ static NSString *const kQueueDragType = @"RLPQueueRowDrag";
     const NSSize clip = sc.contentSize;
     if (clip.width < 1 || clip.height < 1) return;
     [self syncTableWidth];
+    [self layoutQueueColumnsForWidth:clip.width];
 }
 
-#pragma mark - 行悬停（web .trow:hover）
+#pragma mark - 行悬停（web .qrow:hover；× 仅悬停时显示）
+
+/// web .qrow 的所在文件夹名（只显示 basename，全路径放 tooltip）。
+/// macOS 路径分隔符固定为 /，与 web `parentFolder()` 同语义。
+static NSString *RLPQueueParentFolder(NSString *path) {
+    if (!path.length) return @"";
+    NSString *dir = [path stringByDeletingLastPathComponent];
+    NSString *name = dir.lastPathComponent;
+    return name.length ? name : dir;
+}
 
 - (NSTableRowView *)tableView:(NSTableView *)tableView rowViewForRow:(NSInteger)row {
-    (void)tableView; (void)row;
-    RLPHoverRowView *v = [[RLPHoverRowView alloc] initWithFrame:NSZeroRect];
+    RLPQueueRowView *v = [[RLPQueueRowView alloc] initWithFrame:NSZeroRect];
     v.hoverColor = [RLPTheme current].hov;
+    v.currentRow = (row == self.currentIndex);
+    __weak __typeof__(self) ws = self;
+    v.onHoverChanged = ^(RLPQueueRowView *rv, BOOL hovered) {
+        __typeof__(self) s = ws;
+        if (!s) return;
+        const NSInteger r = [tableView rowForView:rv];
+        if (r < 0) return;
+        if (hovered) s.hoveredRow = r;
+        else if (s.hoveredRow == r) s.hoveredRow = -1;
+        // 只刷行尾 × 这一列，避免整表重绘导致悬停闪烁。
+        [tableView reloadDataForRowIndexes:[NSIndexSet indexSetWithIndex:(NSUInteger)r]
+                             columnIndexes:[NSIndexSet indexSetWithIndex:3]];
+    };
     return v;
 }
 
 #pragma mark - 表格
 
-- (NSInteger)numberOfRowsInTableView:(NSTableView *)tv { return (NSInteger)self.paths.count; }
+- (NSInteger)numberOfRowsInTableView:(NSTableView *)tv { (void)tv; return (NSInteger)self.paths.count; }
 
 - (NSDictionary *)metaAt:(NSInteger)row {
     if (row < 0 || row >= (NSInteger)self.metas.count) return @{};
@@ -200,48 +251,110 @@ static NSString *const kQueueDragType = @"RLPQueueRowDrag";
     return [m isKindOfClass:[NSDictionary class]] ? m : @{};
 }
 
+/// 响应式列宽：web .qrow 的四个 flex 子项（序号 26、标题 flex、文件夹 max 38%、× 24）。
+- (void)layoutQueueColumnsForWidth:(CGFloat)width {
+    if (!self.table || width < 80) return;
+    const CGFloat nW = 26.0, delW = 24.0;
+    const CGFloat folderW = MIN(width * 0.38, MAX(60.0, width * 0.38));
+    const CGFloat titleW = MAX(40.0, width - nW - delW - folderW);
+    NSDictionary<NSString *, NSNumber *> *ws = @{ @"q.n": @(nW), @"q.t": @(titleW),
+                                                  @"q.f": @(folderW), @"q.del": @(delW) };
+    for (NSTableColumn *c in self.table.tableColumns) {
+        NSNumber *w = ws[c.identifier];
+        if (w) c.width = w.doubleValue;
+    }
+    [self.table tile];
+}
+
 - (NSView *)tableView:(NSTableView *)tv viewForTableColumn:(NSTableColumn *)col row:(NSInteger)row {
     RLPTheme *t = [RLPTheme current];
     NSString *ident = col.identifier;
-    NSTextField *l = [tv makeViewWithIdentifier:ident owner:self];
-    if (!l) { l = RLPLabel(@"", t.body, t.text); l.identifier = ident; }
-    if (row < 0 || row >= (NSInteger)self.paths.count) { l.stringValue = @""; return l; }
+    if (row < 0 || row >= (NSInteger)self.paths.count) return nil;
+    NSString *path = self.paths[(NSUInteger)row];
     NSDictionary *m = [self metaAt:row];
-    NSString *path = self.paths[row];
-    NSString *title = [m[@"t"] isKindOfClass:[NSString class]] ? m[@"t"] : @"";
-    if (!title.length) title = path.lastPathComponent.stringByDeletingPathExtension;
-    if ([ident isEqualToString:@"c0"]) l.stringValue = [NSString stringWithFormat:@"%ld", (long)(row + 1)];
-    else if ([ident isEqualToString:@"c1"]) l.stringValue = title;
-    else if ([ident isEqualToString:@"c2"]) l.stringValue = [m[@"a"] isKindOfClass:[NSString class]] ? m[@"a"] : @"";
-    else if ([ident isEqualToString:@"c3"]) l.stringValue = [m[@"al"] isKindOfClass:[NSString class]] ? m[@"al"] : @"";
-    else l.stringValue = RLPFmtDuration([m[@"d"] respondsToSelector:@selector(doubleValue)] ? [m[@"d"] doubleValue] : 0);
-    if ([ident isEqualToString:@"c5"]) {
-        // 行尾 ×（web .qdel）：点一下**只删这一行**，不触发播放（行点击由 action 处理）。
-        NSTableCellView *cell = [tv makeViewWithIdentifier:@"qdel" owner:self];
+    NSString *reuse = [ident stringByAppendingString:@".cell"];
+
+    if ([ident isEqualToString:@"q.del"]) {
+        // web .qdel：24×24、radius 6、默认 opacity 0，行悬停才出现（点击只删这一行）。
+        NSTableCellView *cell = [tv makeViewWithIdentifier:reuse owner:self];
         if (!cell) {
-            cell = [[NSTableCellView alloc] initWithFrame:NSMakeRect(0, 0, 34, 26)];
-            cell.identifier = @"qdel";
+            cell = [[NSTableCellView alloc] initWithFrame:NSMakeRect(0, 0, 24, tv.rowHeight)];
+            cell.identifier = reuse;
             NSButton *b = [NSButton buttonWithTitle:@"\u00d7" target:self action:@selector(onRowDelete:)];
             b.bordered = NO;
             b.identifier = @"q.del";
             b.font = [NSFont systemFontOfSize:13];
-            b.tag = -1;
-            b.frame = NSMakeRect(4, 1, 26, 24);
-            b.autoresizingMask = NSViewMinXMargin;
+            b.wantsLayer = YES;
+            b.layer.cornerRadius = 6;
+            b.translatesAutoresizingMaskIntoConstraints = NO;
             [cell addSubview:b];
+            [NSLayoutConstraint activateConstraints:@[
+                [b.centerXAnchor constraintEqualToAnchor:cell.centerXAnchor],
+                [b.centerYAnchor constraintEqualToAnchor:cell.centerYAnchor],
+                [b.widthAnchor constraintEqualToConstant:24],
+                [b.heightAnchor constraintEqualToConstant:24],
+            ]];
             cell.textField = nil;
         }
         NSButton *btn = nil;
         for (NSView *v in cell.subviews) if ([v isKindOfClass:[NSButton class]]) btn = (NSButton *)v;
         btn.tag = row;
-        btn.contentTintColor = t.mut;
+        btn.contentTintColor = t.mut2;
         btn.toolTip = RLPTr(@"从队列移除");
-        cell.frame = NSMakeRect(0, 0, 34, tv.rowHeight);
+        // 悬停行显示，其它行透明（web .qrow:hover .qdel opacity:1）。
+        btn.alphaValue = (row == self.hoveredRow) ? 1.0 : 0.0;
+        cell.frame = NSMakeRect(0, 0, 24, tv.rowHeight);
         return cell;
     }
-    // 当前曲用强调色标出来（用户要知道"正在播的是哪一行"）
-    l.textColor = (row == self.currentIndex) ? t.accent : t.text;
-    return l;
+
+    NSTableCellView *cell = [tv makeViewWithIdentifier:reuse owner:self];
+    if (!cell) {
+        cell = [[NSTableCellView alloc] initWithFrame:NSMakeRect(0, 0, MAX(20, col.width), tv.rowHeight)];
+        cell.identifier = reuse;
+        NSTextField *tf = [NSTextField labelWithString:@""];
+        tf.lineBreakMode = NSLineBreakByTruncatingTail;
+        tf.maximumNumberOfLines = 1;
+        tf.translatesAutoresizingMaskIntoConstraints = NO;
+        tf.identifier = ident;
+        [cell addSubview:tf];
+        cell.textField = tf;
+        // web .qrow padding 9 18：单元格左右各内缩 10pt（行间 gap 12 由列宽承担）。
+        [NSLayoutConstraint activateConstraints:@[
+            [tf.leadingAnchor constraintEqualToAnchor:cell.leadingAnchor constant:10.0],
+            [tf.trailingAnchor constraintEqualToAnchor:cell.trailingAnchor constant:-10.0],
+            [tf.centerYAnchor constraintEqualToAnchor:cell.centerYAnchor],
+        ]];
+    }
+    NSTextField *tf = cell.textField;
+    tf.alignment = NSTextAlignmentLeft;
+    tf.textColor = t.text;
+    tf.font = [NSFont systemFontOfSize:12.5];
+    tf.toolTip = nil;
+    cell.toolTip = nil;
+
+    if ([ident isEqualToString:@"q.n"]) {
+        tf.alignment = NSTextAlignmentRight;
+        tf.textColor = t.mut2;
+        tf.font = [NSFont monospacedDigitSystemFontOfSize:11 weight:NSFontWeightRegular];
+        tf.stringValue = [NSString stringWithFormat:@"%ld", (long)(row + 1)];
+    } else if ([ident isEqualToString:@"q.t"]) {
+        NSString *title = [m[@"t"] isKindOfClass:[NSString class]] ? m[@"t"] : @"";
+        if (!title.length) title = path.lastPathComponent.stringByDeletingPathExtension;
+        const BOOL current = (row == self.currentIndex);
+        // web .qrow.on .qt{color:--acc-text;font-weight:650}。
+        tf.font = [NSFont systemFontOfSize:12.5 weight:current ? NSFontWeightSemibold : NSFontWeightRegular];
+        tf.textColor = current ? t.accentText : t.text;
+        tf.stringValue = title;
+        tf.toolTip = path;   // web .qt title = 全路径
+    } else if ([ident isEqualToString:@"q.f"]) {
+        tf.alignment = NSTextAlignmentLeft;
+        tf.textColor = t.mut2;
+        tf.font = [NSFont systemFontOfSize:11];
+        tf.stringValue = RLPQueueParentFolder(path);
+        tf.toolTip = path;   // web .qp title = 全路径
+        cell.toolTip = path;
+    }
+    return cell;
 }
 
 /// 行尾 ×：只删这一行（web .qdel），与右键菜单是两条入口，语义相同。

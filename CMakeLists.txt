@@ -402,6 +402,20 @@ if(APPLE)
   add_test(NAME native_queue_sort COMMAND test_native_queue_sort)
   set_tests_properties(native_queue_sort PROPERTIES TIMEOUT 120)
 
+  # 播放队列页行布局 = web `.qrow`：4 列（序号/标题/文件夹/×）、行高 38、无列头、
+  # 当前行 accent-weak + 标题 accent、× 仅行悬停可见、底部分隔线。对 1.1.7.28 先跑红。
+  add_executable(test_native_queue_rows tests/test_native_queue_rows.mm
+    tools/native_ui/RLPQueueViewController.mm tools/native_ui/RLPPageViewController.mm
+    tools/native_ui/RLPSupport.mm tools/native_ui/RLPModels.mm
+    tools/native_ui/RLPTheme.mm tools/native_ui/RLPNativeI18n.mm
+    tools/native_ui/RLPTrackActions.mm tools/native_ui/RLPAnalysisSummary.mm)
+  target_compile_options(test_native_queue_rows PRIVATE -fobjc-arc)
+  target_include_directories(test_native_queue_rows PRIVATE src tools tools/native_ui)
+  target_link_libraries(test_native_queue_rows PRIVATE
+    "-framework AppKit" "-framework QuartzCore" "-framework CoreImage")
+  add_test(NAME native_queue_rows COMMAND test_native_queue_rows)
+  set_tests_properties(native_queue_rows PROPERTIES TIMEOUT 120)
+
   # 曲目页行几何/内容 = web `.trow-track`：7 列（无独立专辑列、有规格列）、响应式
   # 1.6/1.8/1:0.9、无列头、rowHeight 34、artist — album 单格。对 1.1.7.25 先跑红。
   add_executable(test_native_tracks_rows tests/test_native_tracks_rows.mm
