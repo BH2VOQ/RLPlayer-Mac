@@ -1067,10 +1067,14 @@ static NSString *RLPRailTagText(id srValue, id bitsValue) {
 @property(nonatomic,strong) NSButton *railToggle;
 @property(nonatomic,strong) NSButton *favoriteButton;
 @property(nonatomic,strong) NSButton *castButton;
-// web buildNpMetaHtml 的补全芯片（年份 / 流派 / 专辑艺术家 + 「已补全」）。
-// 只在 meta.enriched===true 时出现 —— 没补全就不假装有资料。
+// web #npMeta 一行：补全徽标（.badge）+ EQ/IR + 投放/加歌单（.chip）。
+// 行是否显示只取决于「有没有任何一个可见芯片」——不再是「仅补全后」。
 @property(nonatomic,strong) NSView *metaChipsRow;
 @property(nonatomic,strong) NSArray<NSButton *> *metaChips;
+@property(nonatomic,strong) NSButton *eqChip;    // web #npEqChip（.chip）
+@property(nonatomic,strong) NSButton *irChip;    // web #npIrChip（.chip）
+@property(nonatomic,copy) NSString *eqPath;      // settings.kv.eq（web ADV.eq）
+@property(nonatomic,copy) NSString *irPath;      // settings.kv.ir（web ADV.ir）
 @property(nonatomic,strong) NSButton *saveButton;
 @property(nonatomic,strong) NSTextField *railTitle;
 @property(nonatomic,strong) NSSegmentedControl *railDensity;
@@ -1163,6 +1167,56 @@ static NSString *RLPRailTagText(id srValue, id bitsValue) {
     b.identifier=ident; b.font=[NSFont systemFontOfSize:10.5]; b.bezelStyle=NSBezelStyleRounded;
     [parent addSubview:b]; return b;
 }
+
+#pragma mark - #npMeta 芯片（web .badge / .chip 的逐值移植）
+
+/// web `.badge`：9.5px/600、letter-spacing .3px、padding 2 7、radius 5、1px 边框。
+/// 背景/描边/文字三件套由 `styleMetaBadge:green:` 按 `--acc-weak/--acc-text`（或绿）写。
+- (void)styleMetaBadge:(NSButton *)b green:(BOOL)green {
+    RLPTheme *t=[RLPTheme current];
+    NSString *text=b.title.length?b.title:b.attributedTitle.string;
+    if (!text) text=@"";
+    b.title=text;
+    b.attributedTitle=[[NSAttributedString alloc] initWithString:text attributes:@{
+        NSFontAttributeName:[NSFont systemFontOfSize:9.5 weight:NSFontWeightSemibold],
+        NSForegroundColorAttributeName:green?t.okText:t.accentText,
+        NSKernAttributeName:@0.3}];
+    b.font=[NSFont systemFontOfSize:9.5 weight:NSFontWeightSemibold];
+    b.wantsLayer=YES;
+    b.layer.cornerRadius=5;
+    b.layer.borderWidth=1;
+    b.layer.backgroundColor=(green?t.okBg:t.accentWeak).CGColor;
+    b.layer.borderColor=(green?t.okLine:t.accentWeak).CGColor;
+    b.contentTintColor=green?t.okText:t.accentText;
+}
+
+/// web `.chip`：11px、padding 3 9、radius 12、bg `--bg3`、border `--line`、文字 `--txt2`。
+- (void)styleMetaChip:(NSButton *)b {
+    RLPTheme *t=[RLPTheme current];
+    NSString *text=b.title.length?b.title:b.attributedTitle.string;
+    if (!text) text=@"";
+    b.title=text;
+    b.attributedTitle=[[NSAttributedString alloc] initWithString:text attributes:@{
+        NSFontAttributeName:[NSFont systemFontOfSize:11],
+        NSForegroundColorAttributeName:t.text2}];
+    b.font=[NSFont systemFontOfSize:11];
+    b.bordered=NO;
+    b.bezelStyle=NSBezelStyleSmallSquare;
+    b.wantsLayer=YES;
+    b.layer.cornerRadius=12;
+    b.layer.borderWidth=1;
+    b.layer.backgroundColor=t.bg3.CGColor;
+    b.layer.borderColor=t.line.CGColor;
+    b.contentTintColor=t.text2;
+}
+
+/// 主题切换后重刷（徽标文字在 b.title 里，chips 的文案是固定的）。
+- (void)restyleMetaChipsForTheme {
+    for (NSUInteger i=0;i<self.metaChips.count;i++)
+        [self styleMetaBadge:self.metaChips[i] green:(i==self.metaChips.count-1)];
+    for (NSButton *b in @[self.eqChip,self.irChip,self.castButton,self.saveButton]) [self styleMetaChip:b];
+}
+
 - (void)buildContent {
     RLPTheme *t=[RLPTheme current]; NSView *host=self.webCanvas;
     self.cover=[[NSImageView alloc] initWithFrame:NSZeroRect]; self.cover.identifier=@"npCover";
@@ -1173,20 +1227,28 @@ static NSString *RLPRailTagText(id srValue, id bitsValue) {
     self.artistLabel2=RLPLabel(@"",[NSFont systemFontOfSize:13],t.mut); self.artistLabel2.identifier=@"npSub";
     self.metaLabel=RLPLabel(@"",[NSFont systemFontOfSize:12],t.mut2); self.metaLabel.identifier=@"npNextTrackHero";
     for(NSView *v in @[self.kindLabel,self.titleLabel2,self.artistLabel2,self.metaLabel]) [host addSubview:v];
-    // 补全芯片行（web #npMeta）：年份 · 流派 · 专辑艺术家 · 已补全。
+    // 补全徽标行 + 当前 EQ/IR + 投放/加歌单（web #npMeta 的同一行，flex-wrap 由 layoutMetaChips 算）。
     self.metaChipsRow=[[NSView alloc] initWithFrame:NSZeroRect]; self.metaChipsRow.identifier=@"npMeta";
     self.metaChipsRow.hidden=YES; [host addSubview:self.metaChipsRow];
     NSMutableArray *mc=[NSMutableArray array];
     for(NSString *ident in @[@"npMeta.year",@"npMeta.genre",@"npMeta.albumArtist",@"npMeta.enriched"]) {
         NSButton *b=[NSButton buttonWithTitle:@"" target:nil action:nil];
-        b.identifier=ident; b.bordered=NO; b.wantsLayer=YES; b.layer.cornerRadius=10; b.layer.borderWidth=1;
-        b.font=[NSFont systemFontOfSize:11]; b.hidden=YES;
+        b.identifier=ident; b.bordered=NO; b.wantsLayer=YES; b.layer.cornerRadius=5; b.layer.borderWidth=1;
+        b.font=[NSFont systemFontOfSize:9.5 weight:NSFontWeightSemibold]; b.hidden=YES;
         [self.metaChipsRow addSubview:b]; [mc addObject:b];
     }
     self.metaChips=mc;
     self.favoriteButton=[self webButton:@"♡" identifier:@"npFavBtn" action:@selector(onFav:) parent:host]; self.favoriteButton.bordered=NO;self.favoriteButton.font=[NSFont systemFontOfSize:22];
-    self.castButton=[self webButton:@"推送到设备" identifier:@"npCastBtn" action:@selector(onCastCurrent:) parent:host];
-    self.saveButton=[self webButton:@"＋ 添加到歌单" identifier:@"npAddSq" action:@selector(onSaveCurrent:) parent:host];
+    // 261024-02 #5：投放 / 加歌单在 web 里也是 #npMeta 里的 .chip（不是下面独立按钮行）。
+    self.castButton=[self webButton:@"推送到设备" identifier:@"npCastBtn" action:@selector(onCastCurrent:) parent:self.metaChipsRow];
+    self.saveButton=[self webButton:@"添加到歌单" identifier:@"npAddSq" action:@selector(onSaveCurrent:) parent:self.metaChipsRow];
+    self.castButton.toolTip=RLPTr(@"把当前曲目推送到 UPnP / DLNA 设备");
+    self.saveButton.toolTip=RLPTr(@"把当前曲目添加到指定歌单");
+    self.eqChip=[self webButton:@"EQ" identifier:@"npEqChip" action:@selector(onEqChip:) parent:self.metaChipsRow];
+    self.irChip=[self webButton:@"IR" identifier:@"npIrChip" action:@selector(onIrChip:) parent:self.metaChipsRow];
+    for(NSButton *b in @[self.eqChip,self.irChip,self.castButton,self.saveButton]) {
+        b.hidden=YES; [self styleMetaChip:b];
+    }
     // Existing compare/work functions remain accessible; they are not removed for appearance.
     self.compareBtn=[self webButton:@"对比版本" identifier:@"npCompare" action:@selector(onCompare:) parent:host];
     self.worksBtn=[self webButton:@"古典作品版本" identifier:@"np.works" action:@selector(onOpenWorks:) parent:host];
@@ -1277,44 +1339,109 @@ static NSString *RLPRailTagText(id srValue, id bitsValue) {
     self.railPanel.hidden=[[NSUserDefaults standardUserDefaults] boolForKey:@"RLPNPRailHidden"];
     [self applyTheme];[self anlPaint];[self layoutWebPlayback];
 }
-/// web buildNpMetaHtml 的原生同构：`meta.enriched === true` 才出芯片；
+/// web buildNpMetaHtml 的原生同构：`meta.enriched === true` 才出**徽标**；
 /// 年份/流派/专辑艺术家取 /api/meta 的同名字段，值后面跟来源提示（meta.sources）。
-/// 没补全就整行隐藏 —— 不写「暂无资料」占位，也不假装有标签。
+/// 注意：徽标只占 #npMeta 一行的**前一组**；EQ/IR（settings.kv）与投放/加歌单（.chip）
+/// 是同一行的后两组，各自按自己的数据出现（web 的 innerHTML 也是三段拼接）。
 - (void)renderMetaChipsFromMeta:(NSDictionary *)json {
     NSDictionary *meta = [json[@"meta"] isKindOfClass:[NSDictionary class]] ? json[@"meta"] : nil;
     const BOOL enriched = [meta[@"enriched"] respondsToSelector:@selector(boolValue)] &&
                           [meta[@"enriched"] boolValue];
-    RLPTheme *t=[RLPTheme current];
     NSDictionary *sources=[meta[@"sources"] isKindOfClass:[NSDictionary class]]?meta[@"sources"]:@{};
     NSArray *specs=@[@[@"year",RLPTr(@"年份")],@[@"genre",RLPTr(@"流派")],@[@"albumArtist",RLPTr(@"专辑艺术家")]];
-    BOOL any=NO;
+    // 先复位四个徽标：文字/提示/配色都回默认，由下面的 enriched 分支决定谁出现。
     for(NSUInteger i=0;i<self.metaChips.count;i++) {
         NSButton *b=self.metaChips[i];
-        b.layer.backgroundColor=t.bg2.CGColor; b.layer.borderColor=t.line.CGColor;
-        [b setAttributedTitle:[[NSAttributedString alloc] initWithString:@"" attributes:@{}]];
-        b.contentTintColor=t.text2; b.hidden=YES;
+        b.hidden=YES; b.title=@""; b.toolTip=nil;
+        [self styleMetaBadge:b green:(i==self.metaChips.count-1)];
     }
-    if(!enriched) { self.metaChipsRow.hidden=YES; return; }
-    for(NSUInteger i=0;i<specs.count;i++) {
-        NSString *key=specs[i][0], *label=specs[i][1];
-        id v=json[key];
-        if(![v respondsToSelector:@selector(description)]) continue;
-        NSString *text=[v description]; if(!text.length) continue;
-        NSButton *b=self.metaChips[i];
-        b.title=[NSString stringWithFormat:@"%@  %@",label,text];
-        b.toolTip=[NSString stringWithFormat:@"%@: %@",RLPTr(@"来源"),
-                   ([sources[key] isKindOfClass:[NSString class]] && [sources[key] length])?sources[key]:RLPTr(@"本地标签")];
-        b.hidden=NO; any=YES;
+    if(enriched) {
+        for(NSUInteger i=0;i<specs.count;i++) {
+            NSString *key=specs[i][0], *label=specs[i][1];
+            id v=json[key];
+            if(![v respondsToSelector:@selector(description)]) continue;
+            NSString *text=[v description]; if(!text.length) continue;
+            NSButton *b=self.metaChips[i];
+            // web 是 `label + '  ' + v` —— **两个**空格，不是排版近似。
+            b.title=[NSString stringWithFormat:@"%@  %@",label,text];
+            b.toolTip=[NSString stringWithFormat:@"%@: %@",RLPTr(@"来源"),
+                       ([sources[key] isKindOfClass:[NSString class]] && [sources[key] length])?sources[key]:RLPTr(@"本地标签")];
+            [self styleMetaBadge:b green:NO]; b.hidden=NO;
+        }
+        // 「已补全」徽标（web .badge.g 绿色）：标签/封面/歌词已由在线来源补全。
+        NSButton *en=self.metaChips.lastObject;
+        en.title=RLPTr(@"已补全");
+        en.toolTip=RLPTr(@"标签/封面/歌词已由在线来源补全，可在设置-元数据补全关闭");
+        [self styleMetaBadge:en green:YES]; en.hidden=NO;
     }
-    // 「已补全」徽标（web .badge.g 绿色）：标签/封面/歌词已由在线来源补全。
-    NSButton *en= self.metaChips.lastObject;
-    en.title=RLPTr(@"已补全");
-    en.toolTip=RLPTr(@"标签/封面/歌词已由在线来源补全，可在设置-元数据补全关闭");
-    en.contentTintColor=[NSColor colorWithSRGBRed:0.10 green:0.55 blue:0.28 alpha:1];
-    en.layer.borderColor=[NSColor colorWithSRGBRed:0.10 green:0.55 blue:0.28 alpha:0.55].CGColor;
-    en.hidden=NO;
-    self.metaChipsRow.hidden = !any && en.hidden;
+    // 徽标只是这一行的成员之一：整行是否显示交给统一判定（EQ/IR、投放/加歌单也在这一行）。
+    [self applyMetaChipVisibility];
+}
+
+/// #npMeta 行可见 = 至少一个芯片可见。三组芯片各自的数据源：
+///   徽标     ← /api/meta（meta.enriched + 字段 + sources）
+///   EQ/IR    ← /api/settings 的 kv.eq / kv.ir（web loadSettings → ADV.eq/ADV.ir）
+///   投放/加歌单 ← 当前播放状态（web 恒显示，因为 CAST.state 在启动时就读了；原生没有全局
+///               cast 状态缓存，用「拿到过播放状态快照或页面在轮询」作为「当前曲目可操作」的等价条件，
+///               没拿到状态时这两个按钮点了也没有对象，不摆一个空壳）。
+- (void)applyMetaChipVisibility {
+    self.eqChip.hidden=(self.eqPath.length==0);
+    if(!self.eqChip.hidden)
+        self.eqChip.toolTip=[NSString stringWithFormat:@"%@%@%@",RLPTr(@"当前 EQ："),
+                             self.eqPath.lastPathComponent,RLPTr(@"（点击打开 EQ 与房间校正）")];
+    else self.eqChip.toolTip=nil;
+    self.irChip.hidden=(self.irPath.length==0);
+    if(!self.irChip.hidden)
+        self.irChip.toolTip=[NSString stringWithFormat:@"%@%@%@",RLPTr(@"当前 IR："),
+                             self.irPath.lastPathComponent,RLPTr(@"（点击打开 EQ 与房间校正）")];
+    else self.irChip.toolTip=nil;
+    const BOOL live=(self.polling || self.webStatus!=nil);
+    self.castButton.hidden=!live;
+    self.saveButton.hidden=!live;
+    BOOL any=NO;
+    for(NSButton *b in self.metaChips) if(!b.hidden) any=YES;
+    for(NSButton *b in @[self.eqChip,self.irChip,self.castButton,self.saveButton]) if(!b.hidden) any=YES;
+    self.metaChipsRow.hidden=!any;
     [self layoutWebPlayback];
+}
+
+/// web `.npmline` 的 flex-wrap：gap 6（横竖同值）、align-items:center、每行一致行高、
+/// min-height 22、margin-top 10。徽标固有高 22（9.5px 文字 + 2×7 横向 padding + 2×1 边框），
+/// chip 固有高 24（11px + 3×2 + 2×1）。返回整行高度（≥ 22）；芯片放在行内坐标系（y 从 0 起）。
+- (CGFloat)layoutMetaChipsInWidth:(CGFloat)iw {
+    NSMutableArray<NSButton *> *items=[NSMutableArray array];
+    for(NSButton *b in self.metaChips) if(!b.hidden) [items addObject:b];
+    for(NSButton *b in @[self.eqChip,self.irChip,self.castButton,self.saveButton]) if(b&&!b.hidden) [items addObject:b];
+    if(!items.count) return 22.0;
+    NSMutableArray<NSMutableArray<NSButton *> *> *lines=[NSMutableArray array];
+    NSMutableArray<NSMutableArray<NSNumber *> *> *widths=[NSMutableArray array];
+    NSMutableArray<NSButton *> *line=nil; NSMutableArray<NSNumber *> *lineW=nil; CGFloat cx=0;
+    for(NSButton *b in items) {
+        const BOOL badge=[b.identifier hasPrefix:@"npMeta."];
+        NSAttributedString *as=b.attributedTitle;
+        CGFloat tw=as.length?as.size.width:[b.title sizeWithAttributes:@{NSFontAttributeName:b.font}].width;
+        const CGFloat bw=ceil(tw)+(badge?16.0:20.0);   // padding 2×7 或 2×9 + 边框 2×1
+        if(!line || (cx>0 && cx+bw>iw)) { line=[NSMutableArray array]; lineW=[NSMutableArray array]; [lines addObject:line]; [widths addObject:lineW]; cx=0; }
+        [line addObject:b]; [lineW addObject:@(bw)]; cx+=bw+6;
+    }
+    CGFloat total=0;
+    for(NSUInteger i=0;i<lines.count;i++) {
+        CGFloat lh=0; for(NSButton *b in lines[i]) lh=MAX(lh,[b.identifier hasPrefix:@"npMeta."]?22.0:24.0);
+        if(i>0) total+=6;
+        total+=lh;
+    }
+    CGFloat top=total;
+    for(NSUInteger i=0;i<lines.count;i++) {
+        NSMutableArray<NSButton *> *ln=lines[i]; NSMutableArray<NSNumber *> *lw=widths[i];
+        CGFloat lh=0; for(NSButton *b in ln) lh=MAX(lh,[b.identifier hasPrefix:@"npMeta."]?22.0:24.0);
+        top-=lh; CGFloat x=0;
+        for(NSUInteger j=0;j<ln.count;j++) {
+            NSButton *b=ln[j]; const CGFloat bh=[b.identifier hasPrefix:@"npMeta."]?22.0:24.0; const CGFloat bw=lw[j].doubleValue;
+            b.frame=NSMakeRect(x,top+(lh-bh)/2,bw,bh); x+=bw+6;
+        }
+        if(i+1<lines.count) top-=6;
+    }
+    return total;
 }
 
 - (void)layoutWebPlayback {
@@ -1326,19 +1453,19 @@ static NSString *RLPRailTagText(id srValue, id bitsValue) {
     [self.titleLabel2 sizeToFit];self.titleLabel2.frame=NSMakeRect(x,infoY+25,MIN(MAX(100,self.titleLabel2.frame.size.width),iw-44),30);
     self.favoriteButton.frame=NSMakeRect(NSMaxX(self.titleLabel2.frame)+8,infoY+24,28,30);
     self.artistLabel2.frame=NSMakeRect(x,infoY+63,iw,21);self.metaLabel.frame=NSMakeRect(x,infoY+88,iw,18);
-    // 芯片行占 metaLabel 的位置（metaLabel 在本页从未被赋过文案，是历史占位）；
-    // 有补全芯片时把它让出来，没有时保持空行不显示。
-    self.metaChipsRow.frame=NSMakeRect(x,infoY+84,iw,22);
+    // web `.npmline` 是副标题之后的独立一行：margin-top:10 ⟹ 行顶 = 副标题行底 + 10。
+    // 行高由 flex-wrap 的实际行数算出，旧的按钮行（隐藏的对比/作品入口）顺势下移，不再固定 infoY+113。
     {
-        CGFloat cx=0;
-        for(NSButton *b in self.metaChips) {
-            if(b.hidden) continue;
-            NSSize ts=[b.title sizeWithAttributes:@{NSFontAttributeName:b.font}];
-            const CGFloat bw=ceil(ts.width)+18;
-            b.frame=NSMakeRect(cx,0,bw,22); cx+=bw+6;
+        const CGFloat metaTop=infoY+84+10;
+        const CGFloat metaH=[self layoutMetaChipsInWidth:iw];
+        self.metaChipsRow.frame=NSMakeRect(x,metaTop,iw,MAX(22,metaH));
+        const CGFloat btnY=NSMaxY(self.metaChipsRow.frame)+6;
+        CGFloat bx=x;
+        for(NSButton *b in @[self.compareBtn,self.worksBtn]) {
+            CGFloat bw=b==self.worksBtn?100:94;
+            b.frame=NSMakeRect(bx,btnY,bw,24); bx+=bw+6;
         }
     }
-    CGFloat bx=x;for(NSButton *b in @[self.castButton,self.saveButton,self.compareBtn,self.worksBtn]){CGFloat bw=b==self.worksBtn?100:(b==self.saveButton?112:94);b.frame=NSMakeRect(bx,infoY+113,bw,24);bx+=bw+6;}
     self.closeButton.frame=NSMakeRect(w-56,16,38,38);self.railToggle.frame=NSMakeRect(w-100,18,34,34);self.analysisToggle.frame=NSMakeRect(w-142,18,34,34);
     CGFloat col=(w-2*gutter-36)/4, side=MIN(340,col), bodyH=MAX(60,bottom-by);
     self.analysisPanel.frame=NSMakeRect(gutter,by,side,bodyH);self.railPanel.frame=NSMakeRect(w-gutter-side,by,side,bodyH);
@@ -1436,7 +1563,20 @@ static NSString *RLPRailTagText(id srValue, id bitsValue) {
 - (void)onCycleMode:(id)s {self.playbackMode=(self.playbackMode+1)%4;[[RLPCoreClient shared] postJSON:[NSString stringWithFormat:@"/api/playmode?mode=%ld",(long)self.playbackMode] body:nil completion:nil];}
 - (void)onCommitSeek:(id)s {if(self.webControls.seek.dragging)return;[[RLPCoreClient shared] postJSON:[NSString stringWithFormat:@"/api/seek?pos=%.6f",self.webControls.seek.doubleValue] body:nil completion:nil];self.lyricManualUntil=0;}
 - (void)onCommitVolume:(id)s {if(self.webControls.volume.dragging)return;double db=RLPNPVolPosToDb(self.webControls.volume.doubleValue);self.webControls.volLabel.stringValue=RLPNPVolDbLabel(db);[[RLPCoreClient shared] postJSON:[NSString stringWithFormat:@"/api/volume?db=%.1f",db] body:nil completion:nil];}
-- (void)onSaveCurrent:(id)s {if(self.currentPath.length)RLPShowSaveToPlaylist(self.currentPath,self.saveButton);}
+- (void)onSaveCurrent:(id)s {
+    if(!self.currentPath.length)return;
+    // 无窗口时（离屏判据 / 审计）NSPopover 会抛异常：锚点交 nil 让保存弹层跳过，
+    // **请求路径照旧**走（与 onRailCard 的离屏守卫同一套纪律；真机上 saveButton 在窗口里，行为不变）。
+    RLPShowSaveToPlaylist(self.currentPath,self.saveButton.window?self.saveButton:nil);
+}
+/// web npBindEqChips：`closeNowPlaying(); openSettingsTab('eq')`。EQ 与 IR 两个芯片都落同一页
+/// （IR 也在「EQ 与房间校正」里配置，和 web 完全一致）。
+- (void)onEqChip:(id)s {[self openEqRoomCorrection];}
+- (void)onIrChip:(id)s {[self openEqRoomCorrection];}
+- (void)openEqRoomCorrection {
+    [[NSNotificationCenter defaultCenter] postNotificationName:@"RLPCloseNowPlayingNotification" object:nil];
+    [[NSNotificationCenter defaultCenter] postNotificationName:@"RLPOpenSettingsPaneNotification" object:@"eq"];
+}
 // Device identity is location (UPnP description URL or airplay://), never display name.
 - (NSString *)castBodyForDevice:(NSDictionary *)device {
     NSString *dev=[device[@"location"] isKindOfClass:NSString.class]?device[@"location"]:nil;
@@ -1950,6 +2090,8 @@ static NSString *RLPRailTagText(id srValue, id bitsValue) {
     self.polling = YES;
     // 自动分析开关的真相源是 settings.autoanl（开关本身在设置·高级页签，播放页不再显示）。
     [self anlRefreshAutoSettingIfStale];
+    // 页面进入「live」态：投放/加歌单芯片此时才有可操作对象（web 靠启动即读的 CAST.state）。
+    [self applyMetaChipVisibility];
     __weak __typeof__(self) weakSelf = self;
     self.poll = [NSTimer scheduledTimerWithTimeInterval:0.4 repeats:YES block:^(NSTimer *timer) {
         (void)timer;
@@ -1963,6 +2105,7 @@ static NSString *RLPRailTagText(id srValue, id bitsValue) {
     [self.poll invalidate];
     self.poll = nil;
     self.polling = NO;
+    [self applyMetaChipVisibility];   // 芯片可见性跟着 live 态重算（行高随之收缩）
 }
 
 - (void)refresh {
@@ -2016,8 +2159,9 @@ static NSString *RLPRailTagText(id srValue, id bitsValue) {
     }];
 }
 
-/// settings.autoanl 的读取节流：它不是热路径（用户在设置页偶尔改一次），
-/// 但读一次就永久缓存会让"刚勾上却要等到切歌才生效"。10 s 一次足够，且绝不进 0.8 s 的忙碌路径。
+/// settings.autoanl / settings.eq / settings.ir 的**同一份**读取节流：
+/// 它不是热路径（用户在设置页偶尔改一次），但读一次就永久缓存会让"刚勾上却要等到切歌才生效"。
+/// 10 s 一次足够，且绝不进 0.8 s 的忙碌路径（EQ/IR 芯片复用这一次响应，不另开轮询）。
 - (void)anlRefreshAutoSettingIfStale {
     const NSTimeInterval now = [NSDate timeIntervalSinceReferenceDate];
     if (self.anlAutoSettingAt > 0 && (now - self.anlAutoSettingAt) < 10.0) return;
@@ -2032,6 +2176,11 @@ static NSString *RLPRailTagText(id srValue, id bitsValue) {
         id v = kv[@"autoanl"];
         if ([v isKindOfClass:[NSString class]]) s.anlAutoEnabled = [(NSString *)v isEqualToString:@"1"];
         else if ([v isKindOfClass:[NSNumber class]]) s.anlAutoEnabled = [(NSNumber *)v boolValue];
+        // web loadSettings：`if (kv.eq !== undefined) ADV.eq = kv.eq;` 同理 ir。
+        // 芯片读的就是这两个值，所以必须在这一刻更新（否则要等到用户进设置页才显示）。
+        s.eqPath=[kv[@"eq"] isKindOfClass:[NSString class]]?(NSString *)kv[@"eq"]:@"";
+        s.irPath=[kv[@"ir"] isKindOfClass:[NSString class]]?(NSString *)kv[@"ir"]:@"";
+        [s applyMetaChipVisibility];
     }];
 }
 
@@ -2496,6 +2645,8 @@ static NSString *RLPRailTagText(id srValue, id bitsValue) {
     [self anlUpdateSegmentTitles];
     for(RLPAnlCardView *c in @[self.anlDyn,self.anlQual,self.anlFake])[c applyTheme];
     for(RLPRailChipView *b in self.railCards){[b applyTheme];b.layer.borderColor=t.line.CGColor;}
+    // #npMeta 的徽标/芯片颜色来自层的 CGColor + attributedTitle，切主题必须重刷（否则停在旧主题）。
+    [self restyleMetaChipsForTheme];
     self.anlDetail.textColor=t.text;[self.webControls applyTheme];self.webControls.playBtn.layer.backgroundColor=t.accent.CGColor;self.webControls.playBtn.contentTintColor=NSColor.whiteColor;
     [self.knowledge applyTheme];[self renderRailMetadata];[self updateLyricPosition:self.webStatus.position];[self updateBlurredCover];
 }

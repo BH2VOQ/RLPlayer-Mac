@@ -369,6 +369,24 @@ if(APPLE)
   add_test(NAME native_analysis_panel COMMAND test_native_analysis_panel)
   set_tests_properties(native_analysis_panel PROPERTIES TIMEOUT 120)
 
+  # 正在播放页 #npMeta 芯片行 = web `.npmline` + `.badge` + `.chip`：
+  # 徽标逐值（9.5/600/kern.3/radius5/acc-weak/ok-bg）+ EQ/IR 芯片（settings.kv.eq/ir）
+  # + 投放/加歌单同处一行 + flex-wrap（窄宽不重叠、行高增长、按钮行下移）。
+  # 对 1.1.7.26 先跑红（旧码只有 4 个 11pt/radius10 徽标，整行受 meta.enriched 闸门，
+  # EQ/IR/投放/加歌单根本不在这一行，也没有换行）。改完再跑绿。
+  add_executable(test_native_npmeta_chips tests/test_native_npmeta_chips.mm
+    tools/native_ui/RLPNowPlayingViewController.mm tools/native_ui/RLPPageViewController.mm
+    tools/native_ui/RLPSupport.mm tools/native_ui/RLPModels.mm
+    tools/native_ui/RLPTheme.mm tools/native_ui/RLPNativeI18n.mm
+    tools/native_ui/RLPKnowledgeView.mm tools/native_ui/RLPAnalysisSummary.mm
+    tools/native_ui/RLPLyrics.mm tools/native_ui/RLPTrackActions.mm)
+  target_compile_options(test_native_npmeta_chips PRIVATE -fobjc-arc)
+  target_include_directories(test_native_npmeta_chips PRIVATE src tools tools/native_ui)
+  target_link_libraries(test_native_npmeta_chips PRIVATE
+    "-framework AppKit" "-framework QuartzCore" "-framework CoreImage")
+  add_test(NAME native_npmeta_chips COMMAND test_native_npmeta_chips)
+  set_tests_properties(native_npmeta_chips PROPERTIES TIMEOUT 120)
+
   # 曲目页行几何/内容 = web `.trow-track`：7 列（无独立专辑列、有规格列）、响应式
   # 1.6/1.8/1:0.9、无列头、rowHeight 34、artist — album 单格。对 1.1.7.25 先跑红。
   add_executable(test_native_tracks_rows tests/test_native_tracks_rows.mm
