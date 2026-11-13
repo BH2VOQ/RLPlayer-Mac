@@ -27,6 +27,8 @@ NS_ASSUME_NONNULL_BEGIN
 /// 最近一次布局算出的内容高度。
 @property (nonatomic, readonly) CGFloat contentHeight;
 - (void)addItem:(NSView *)item span:(BOOL)fullWidth;
+/// 清空全部字段（按声道数重建「声道音量微调」这类动态内容时用）。
+- (void)removeAllItems;
 - (void)relayout;
 @end
 
@@ -35,12 +37,14 @@ NS_ASSUME_NONNULL_BEGIN
 - (instancetype)initWithTitle:(NSString *)title hint:(nullable NSString *)hint;
 /// 字段（web .sfld）：标签在上、控件在下、说明在最下。identifier 落在控件上。
 - (void)addField:(NSString *)label control:(NSView *)control hint:(nullable NSString *)hint;
-/// 整行字段（web .sfld.wide）：跨满所有列。
-- (void)addWideField:(NSString *)label control:(NSView *)control hint:(nullable NSString *)hint;
+/// 整行字段（web .sfld.wide）：跨满所有列。返回该字段容器（需要按状态整块隐藏时用）。
+- (NSView *)addWideField:(NSString *)label control:(NSView *)control hint:(nullable NSString *)hint;
 /// 开关行（web .chk）：开关在左、文字在右。
 - (void)addCheck:(NSString *)label control:(NSView *)control hint:(nullable NSString *)hint;
 - (void)addButtonRow:(NSArray<NSView *> *)buttons;
 - (void)addNote:(NSString *)text;
+/// 清空卡片体内的全部字段/说明/按钮（用于按输出声道数重建声道微调）。
+- (void)removeAllFields;
 /// 子标题（web `.meta-card .mh.sub`：12.5/650 + 底部 1px 分隔线 + 下方 8pt 内边距）。
 /// 用于同一张卡体内的第二段区块（如「AI 接入」卡里的「标签写回」）。
 - (void)addSubHeader:(NSString *)title hint:(nullable NSString *)hint;

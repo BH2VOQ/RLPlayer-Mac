@@ -355,6 +355,46 @@ if(APPLE)
   add_test(NAME native_writeback_card COMMAND test_native_writeback_card)
   set_tests_properties(native_writeback_card PROPERTIES TIMEOUT 180)
 
+  # task-3 A/B：设置页「卡片外散落控件」逐页结构判据。
+  # 判据断言每个控件的最近卡片祖先存在（共同容器），且每张卡片都有真实卡体内容；
+  # 另断言输入页不再出现第二套采集控件、输出页声道微调有按声道数生成的真实控件、
+  # 元数据两组控件各自归卡、流媒体/诊断控件全部归卡。
+  add_executable(test_native_settings_cards tests/test_native_settings_cards.mm
+    tools/native_ui/RLPSettingsViewController.mm tools/native_ui/RLPSettingsLayout.mm
+    tools/native_ui/RLPServersView.mm tools/native_ui/RLPMetaSourcesView.mm
+    tools/native_ui/RLPLibStatsView.mm tools/native_ui/RLPEqualizerView.mm tools/native_ui/RLPTargetCurve.mm
+    tools/native_ui/RLPInputView.mm tools/native_ui/RLPCastView.mm
+    tools/native_ui/RLPCalibrationView.mm tools/native_ui/RLPUpdateWindowController.mm
+    tools/native_ui/RLPFeedbackWindowController.mm tools/native_ui/RLPPageViewController.mm
+    tools/native_ui/RLPCoreClient.mm tools/native_ui/RLPSupport.mm
+    tools/native_ui/RLPTheme.mm tools/native_ui/RLPNativeI18n.mm
+    tools/native_ui/RLPTargetCurve.mm tools/mac_update.mm)
+  target_compile_options(test_native_settings_cards PRIVATE -fobjc-arc)
+  target_include_directories(test_native_settings_cards PRIVATE src tools tools/native_ui)
+  target_link_libraries(test_native_settings_cards PRIVATE rlapp_core
+    "-framework AppKit" "-framework Security")
+  add_test(NAME native_settings_cards COMMAND test_native_settings_cards)
+  set_tests_properties(native_settings_cards PROPERTIES TIMEOUT 300)
+
+  # task-3 C/D：反馈就地发送（不弹窗、真 POST 到 web 同款端点）+ 诊断摘要只复制不弹面板。
+  # 网络层用测试接缝注入：断言的是 feedback_api.h 的端点/六字段/成功判定，不联网。
+  add_executable(test_native_feedback_inline tests/test_native_feedback_inline.mm
+    tools/native_ui/RLPSettingsViewController.mm tools/native_ui/RLPSettingsLayout.mm
+    tools/native_ui/RLPServersView.mm tools/native_ui/RLPMetaSourcesView.mm
+    tools/native_ui/RLPLibStatsView.mm tools/native_ui/RLPEqualizerView.mm tools/native_ui/RLPTargetCurve.mm
+    tools/native_ui/RLPInputView.mm tools/native_ui/RLPCastView.mm
+    tools/native_ui/RLPCalibrationView.mm tools/native_ui/RLPUpdateWindowController.mm
+    tools/native_ui/RLPFeedbackWindowController.mm tools/native_ui/RLPPageViewController.mm
+    tools/native_ui/RLPCoreClient.mm tools/native_ui/RLPSupport.mm
+    tools/native_ui/RLPTheme.mm tools/native_ui/RLPNativeI18n.mm
+    tools/native_ui/RLPTargetCurve.mm tools/mac_update.mm)
+  target_compile_options(test_native_feedback_inline PRIVATE -fobjc-arc)
+  target_include_directories(test_native_feedback_inline PRIVATE src tools tools/native_ui)
+  target_link_libraries(test_native_feedback_inline PRIVATE rlapp_core
+    "-framework AppKit" "-framework Security")
+  add_test(NAME native_feedback_inline COMMAND test_native_feedback_inline)
+  set_tests_properties(native_feedback_inline PROPERTIES TIMEOUT 300)
+
   # 第8项耳机目标曲线：桥层（数组三元组/预设字段）+ 请求逐字段（web diff）+ 图上图层（像素）。
   add_executable(test_native_target_curve tests/test_native_target_curve.mm
     tools/native_ui/RLPEqualizerView.mm tools/native_ui/RLPTargetCurve.mm

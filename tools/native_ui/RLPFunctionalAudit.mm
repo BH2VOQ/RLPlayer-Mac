@@ -1680,28 +1680,39 @@ int RLPRunFunctionalAudit(NSString *outDir) {
                [NSString stringWithFormat:@"shownPopovers=%ld legacyEntry=%d",
                 (long)shownPopovers, (int)hasLegacyPopoverEntry]);
 
-            // ---- 第九项收口：点「查看 / 复制诊断摘要」后摘要面板**就地展开**（不是气泡）----
-            NSScrollView *diagSummary = nil;
+            // ---- task-3 D 收口：诊断摘要**只复制 + 就地提示**，不再有 JSON 面板/弹窗----
+            // 用户 2026-11-13 明确要求：「按钮只做复制摘要 + 就地提示，不显示 JSON 面板、不弹窗」。
+            // 判据：旧的两个 identifier 必须不存在；导出卡内不得有非空文本视图（那是 JSON 面板的形态）。
+            NSView *diagMsgForCheck = nil;
             for (NSView *v in allD)
-                if ([v.identifier isEqualToString:@"sp_diagscroll"] && [v isKindOfClass:[NSScrollView class]])
-                    diagSummary = (NSScrollView *)v;
-            CK(diagSummary != nil && !RLPViewActuallyVisible(diagSummary),
-               "诊断摘要面板默认收起（不占页面高度）",
-               diagSummary ? @"ok" : @"缺 sp_diagscroll");
-            if (diagSummary && [svm respondsToSelector:NSSelectorFromString(@"setDiagSummaryVisible:")]) {
-                NSMethodSignature *sig = [svm methodSignatureForSelector:NSSelectorFromString(@"setDiagSummaryVisible:")];
-                NSInvocation *inv = [NSInvocation invocationWithMethodSignature:sig];
-                [inv setTarget:svm];
-                [inv setSelector:NSSelectorFromString(@"setDiagSummaryVisible:")];
-                BOOL yes = YES;
-                [inv setArgument:&yes atIndex:2];
-                [inv invoke];
-                Pump(0.2);
-                CK(RLPViewActuallyVisible(diagSummary) && diagSummary.frame.size.height >= 100,
-                   "调用后摘要面板就地展开且有真实高度（不是零高空气泡）",
-                   [NSString stringWithFormat:@"h=%.0f hidden=%d",
-                    diagSummary.frame.size.height, (int)diagSummary.hidden]);
+                if ([v.identifier isEqualToString:@"sp_diagmsg"]) diagMsgForCheck = v;
+            Class groupClsD = NSClassFromString(@"RLPSettingsGroup");
+            NSView *diagGroupForCheck = nil;
+            for (NSView *p = diagMsgForCheck.superview; p; p = p.superview)
+                if (groupClsD && [p isKindOfClass:groupClsD]) { diagGroupForCheck = p; break; }
+            BOOL oldPanel = NO;
+            for (NSView *v in allD) {
+                if ([v.identifier isEqualToString:@"sp_diagsummarytext"] ||
+                    [v.identifier isEqualToString:@"sp_diagscroll"]) oldPanel = YES;
             }
+            BOOL jsonPanelInCard = NO;
+            if (diagGroupForCheck) {
+                for (NSView *v in allD) {
+                    if (![v isKindOfClass:[NSTextView class]]) continue;
+                    NSTextView *tv = (NSTextView *)v;
+                    if (tv.string.length == 0) continue;
+                    for (NSView *p = tv.superview; p; p = p.superview)
+                        if (p == diagGroupForCheck) { jsonPanelInCard = YES; break; }
+                }
+            }
+            CK(!oldPanel && !jsonPanelInCard,
+               "【task-3 D】诊断摘要不再有 JSON 面板（sp_diagsummarytext/sp_diagscroll 已删除）",
+               [NSString stringWithFormat:@"oldPanel=%d jsonPanelInCard=%d", (int)oldPanel, (int)jsonPanelInCard]);
+            CK(RLPViewActuallyVisible(byTitle[RLPTr(@"查看 / 复制诊断摘要")]) &&
+               RLPViewActuallyVisible(diagMsgForCheck),
+               "【task-3 D】「查看 / 复制诊断摘要」与就地提示行都在导出卡内（无第二个容器）",
+               [NSString stringWithFormat:@"btn=%d msg=%d",
+                (int)!!byTitle[RLPTr(@"查看 / 复制诊断摘要")], (int)!!diagMsgForCheck]);
             // 证据截图：诊断页（三按钮 + 内联反馈表单都在页面上）
             [svm.view layoutSubtreeIfNeeded];
             Pump(0.2);

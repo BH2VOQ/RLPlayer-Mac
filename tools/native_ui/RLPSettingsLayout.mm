@@ -47,6 +47,23 @@ static const CGFloat kBodyPadY = 14.0;
     [self relayout];
 }
 
+/// 清空全部字段：先摘约束再删视图，最后把内容高度归零。
+- (void)removeAllItems {
+    if (self.live.count) {
+        [NSLayoutConstraint deactivateConstraints:self.live];
+        [self.live removeAllObjects];
+    }
+    for (NSView *v in [self.items copy]) {
+        [v removeFromSuperview];
+    }
+    [self.items removeAllObjects];
+    [self.spans removeAllObjects];
+    self.contentHeight = 0;
+    self.lastWidth = -1;
+    self.lastItemCount = NSUIntegerMax;
+    [self setNeedsLayout:YES];
+}
+
 /// 列数 = floor((可用宽 + 列间距) / (列下限 + 列间距))，至少 1。
 /// 这就是 CSS repeat(auto-fill, minmax(260px,1fr)) 的等价算法。
 - (NSInteger)columnsForWidth:(CGFloat)w {
@@ -258,9 +275,11 @@ static const CGFloat kBodyPadY = 14.0;
     [self.grid addItem:[self fieldWithLabel:label control:control hint:hint] span:NO];
     [self syncHeight];
 }
-- (void)addWideField:(NSString *)label control:(NSView *)control hint:(NSString *)hint {
-    [self.grid addItem:[self fieldWithLabel:label control:control hint:hint] span:YES];
+- (NSView *)addWideField:(NSString *)label control:(NSView *)control hint:(NSString *)hint {
+    NSView *box = [self fieldWithLabel:label control:control hint:hint];
+    [self.grid addItem:box span:YES];
     [self syncHeight];
+    return box;
 }
 
 /// 开关行（web .chk）：开关在左、文字在右。
@@ -374,6 +393,11 @@ static const CGFloat kBodyPadY = 14.0;
 
 - (void)addFullRow:(NSView *)view {
     [self.grid addItem:view span:YES];
+    [self syncHeight];
+}
+
+- (void)removeAllFields {
+    [self.grid removeAllItems];
     [self syncHeight];
 }
 

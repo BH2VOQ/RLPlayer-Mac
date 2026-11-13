@@ -113,3 +113,63 @@
 假绿清单从 8 条增至 **11 条**（新增 #9 几何全绿≠渲染正确、#10 属性存在≠功能接入、#11 编译绿≠运行绿）。
 
 **下一步（交用户/下一轮）**：实机验收清单见总报告 §5；第 1 项根因仍未定位（需用户导出诊断包）。
+
+### 2026-11-14 00:0x —— task-3 开始（设置页卡片归位 + 反馈/诊断摘要）
+
+**现场**：git main，`e40fde4`(docs) / `673f735`(feat)，工作树仅 `?? website/`；`src/version.h` = 1.1.7.22。
+**基线门禁（本轮实测，全绿后才改）**
+| 门禁 | 数字 | 证据 |
+|---|---|---|
+| build | `cmake --build build-mac -j8` exit 0 | 终端 |
+| ctest | 184/184 passed, 0 failed（344.17s serial） | 终端 |
+| audit | 246 passed, 0 failed | `evidence/native-3-baseline-audit.log` |
+| parity | missing=0 / removed 1 ok / na 16 ok | `evidence/native-3-baseline-parity.log` |
+| behavior | actionable=0（bindings 50） | `evidence/native-3-baseline-behavior.log` |
+| i18n | OK (2316 pairs) | `evidence/native-3-baseline-i18n.log` |
+
+**任务**：A 逐页卡片归位；B 元数据 AI 接入/联网检索归卡；C 反馈就地发送（不弹窗、真探活/真 POST）；
+D 诊断摘要只复制+就地提示（去掉 JSON 面板；不恢复「随反馈上传诊断」）。
+
+### 2026-11-14 00:55 —— task-3 A/B/C/D 完成（提交前）
+
+**判据红→绿（同一份用例，旧码 HEAD `e40fde4` 跑红，新码跑绿）**
+| 项 | 用例 | 旧码 | 新码 | 证据 |
+|---|---|---|---|---|
+| A/B | `test_native_settings_cards`（ctest `native_settings_cards`，80 checks） | **39 passed / 41 failed** | **80 passed / 0 failed** | `native-3-settings-cards-red.log` / `-green.log` |
+| C/D | `test_native_feedback_inline`（ctest `native_feedback_inline`，40 checks） | **12 passed / 22 failed** | **40 passed / 0 failed** | `native-3-feedback-red.log` / `-green.log` |
+
+旧码红的具体证据（截取）：输入页 `sp_instart` 出现 2 次（卡片内外各一套）、`采集实时状态` 空壳卡；
+输出页 `sp_upnp_dev/sp_upnp_scan/sp_upnp_msg/sp_backendmsg/sp_trimchmsg` 全部页面并列、
+`声道音量微调` 空壳且 2 声道控件 count=0；流媒体两张卡都是空壳（表单/按钮在页面级）；
+元数据 `llm.modelpopup/modelrefresh/modelmsg/save/test/clear/status` + `search.save/clear/status` 页面并列；
+EQ/校准页 cards=0；诊断 `sp_vercur/updcheck/updinstall/updmsg/updbar/updnote` 页面并列；
+C：点发送后窗口 1→2（标题「反馈」）、无 POST、通道永远「正在检查…」、摘要 JSON 面板仍在。
+
+**实现要点**
+- `RLPSettingsViewController.mm`：10 个设置页全量把控件改走卡片 API（addField/addWideField/addButtonRow/
+  addFullRow/addNoteView）；输出页 UPnP 整行（含标签）归「输出后端」卡、按后端显示/隐藏；「声道音量微调」
+  按实际声道数生成 NSSlider（默认 2，改 6/8 重建，accent 色）；元数据 AI 卡（模型/刷新/状态/按钮）+ 联网检索卡；
+  流媒体服务器/投放子视图、EQ/校准子视图均作卡片体整行；诊断页更新行全部归「软件更新」卡。
+- `RLPInputView`：新增 **statusOnly** 模式（只保留「采集实时状态」），旧码卡片外那整套重复采集控件消失；
+  输入页「刷新设备」移入卡片；开始采集请求体恢复 web 语义 `mode/dev(id)/seconds/out`（旧码空 body 丢功能）。
+  旧视图独有的 `mode=null`「空跑（不开设备）」没有随重复控件删掉，用同卡开关 `sp_innull` 保留（铁律①）。
+- C：`onSendFeedback:` 就地发送（`onOpenFeedback:` 弹窗路径从设置页移除，弹窗类保留在菜单入口不删功能）；
+  `probeFeedbackChannel` 真探活（watchdog 200+ok、12s 兜底、失败显示原因+重试）；成功/失败/字数文案逐字对齐 web；
+  计数 `0 / 16384 字节` 且上限从 web 源码 `FB_MAX_BYTES` 机器抽取比对。
+- D：删除 `sp_diagsummarytext`/`sp_diagscroll`，`onDiagSummary:` 只复制+就地「摘要已复制」；
+  `parity_removed.tsv` 登记 `ctrl sp_diagsummarytext`（removed 1→2，双向核验通过）。未恢复「随反馈上传诊断」。
+
+**门禁（提交前，2026-11-14 00:55）**
+| 门禁 | 数字 | 证据 |
+|---|---|---|
+| build | `cmake --build build-mac -j8` exit 0 | 终端 |
+| ctest | **186/186 passed, 0 failed**（354.36s serial；含两条新用例） | `evidence/native-3-ctest.log` |
+| audit | **246 passed, 0 failed** | `evidence/native-3-audit.log` |
+| parity | missing=0 removed=2 na=16（removed 2 ok/0 bad） | `evidence/native-3-baseline-parity.log` 同命令 |
+| behavior | actionable=0（bindings 50） | 同命令 |
+| i18n | OK (2316 pairs) | 同命令 |
+
+**证据文件**：`evidence/native-3-settings-cards-20261114.md`（含红→绿、web 结构对照、如实挂账）；
+逐页对比图 `evidence/native-3-compare-*.png`；修复后离屏截图 `evidence/native-3-shots/`；旧码同页图 `-before/`。
+
+**下一步**：本地提交 → 提交后复跑 audit/parity/behavior/i18n → 回填提交号 → 出总报告（不推送、不发版）。

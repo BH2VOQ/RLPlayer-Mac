@@ -19,6 +19,7 @@
 #import "RLPTheme.h"
 
 @interface RLPInputView ()
+@property (nonatomic, assign, readwrite) BOOL statusOnly;
 @property (nonatomic, strong) NSStackView *stack;
 @property (nonatomic, strong) NSPopUpButton *backend;
 @property (nonatomic, strong) NSPopUpButton *device;
@@ -51,8 +52,20 @@
 @implementation RLPInputView
 
 - (instancetype)initWithFrame:(NSRect)r {
+    return [self initWithFrame:r statusOnly:NO];
+}
+
+- (instancetype)initStatusOnlyWithFrame:(NSRect)r {
+    return [self initWithFrame:r statusOnly:YES];
+}
+
+- (instancetype)initWithFrame:(NSRect)r statusOnly:(BOOL)statusOnly {
     self = [super initWithFrame:r];
-    if (self) { _devices = @[]; [self build]; }
+    if (self) {
+        _devices = @[];
+        _statusOnly = statusOnly;
+        [self build];
+    }
     return self;
 }
 
@@ -91,6 +104,7 @@
         [self.stack.widthAnchor constraintEqualToAnchor:sc.contentView.widthAnchor],
     ]];
 
+    if (!self.statusOnly) {
     self.backend = [[NSPopUpButton alloc] initWithFrame:NSZeroRect pullsDown:NO];
     [self.backend addItemsWithTitles:@[ @"none", @"coreaudio", @"coreaudio-shared" ]];
     self.backend.target = self;
@@ -147,13 +161,17 @@
     self.status.maximumNumberOfLines = 2;
     self.status.lineBreakMode = NSLineBreakByWordWrapping;
     [self.stack addArrangedSubview:self.status];
+    }   // !statusOnly
 
     // ---- 采集实时状态（1:1 对齐 web 的「采集实时状态」区块）----
     // 每个值都用 web 的 id；缺一个 parity 就会报缺口，所以这是清单而不是装饰。
     RLPTheme *t2 = [RLPTheme current];
-    NSTextField *hdr = RLPLabel(RLPTr(@"采集实时状态"),
-        [NSFont systemFontOfSize:12 weight:NSFontWeightSemibold], t2.text);
-    [self.stack addArrangedSubview:hdr];
+    // statusOnly 时设置页的卡片头已经写了「采集实时状态」，不再重复一行小标题（实测截图里的重复头部）。
+    if (!self.statusOnly) {
+        NSTextField *hdr = RLPLabel(RLPTr(@"采集实时状态"),
+            [NSFont systemFontOfSize:12 weight:NSFontWeightSemibold], t2.text);
+        [self.stack addArrangedSubview:hdr];
+    }
 
     self.statRunning = RLPLabel(@"-", t2.small, t2.text);
     self.statRunning.identifier = @"sp_stat_running";
@@ -339,7 +357,7 @@
         self.status.stringValue = RLPTr(@"核心未启动");
         return;
     }
-    [self loadDevices];
+    if (!self.statusOnly) [self loadDevices];
     __weak __typeof__(self) weakSelf = self;
     [[RLPCoreClient shared] getJSON:@"/api/input/state" completion:^(NSDictionary * _Nullable json) {
         __typeof__(self) self_ = weakSelf;
