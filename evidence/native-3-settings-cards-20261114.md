@@ -2,6 +2,7 @@
 
 日期：2026-11-14 · 仓库 `/Users/august/Downloads/DQ/RLPlayer` · 基线 `e40fde4`（1.1.7.22，工作树干净）
 分支：main（仅本地提交，未推送）
+提交：`024918c feat(native): settings cards contain controls, inline feedback, copy-only diag summary, 1.1.7.23`
 
 ## 0. 现场与基线（改前实测，全绿）
 

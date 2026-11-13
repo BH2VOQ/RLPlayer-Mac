@@ -173,3 +173,22 @@ C：点发送后窗口 1→2（标题「反馈」）、无 POST、通道永远�
 逐页对比图 `evidence/native-3-compare-*.png`；修复后离屏截图 `evidence/native-3-shots/`；旧码同页图 `-before/`。
 
 **下一步**：本地提交 → 提交后复跑 audit/parity/behavior/i18n → 回填提交号 → 出总报告（不推送、不发版）。
+
+### 2026-11-14 01:00 —— 提交与最终门禁（task-3 完成）
+
+**提交**：`024918c feat(native): settings cards contain controls, inline feedback, copy-only diag summary, 1.1.7.23`
+（本地提交，**未推送**；`website/` 与本次无关，仍未提交。）
+
+**最终门禁（提交后实测）**
+| 门禁 | 数字 | 证据 |
+|---|---|---|
+| build | `cmake --build build-mac -j8` exit 0 | 终端 |
+| ctest | **186/186 passed, 0 failed**（353.46s serial） | `evidence/native-3-ctest.log` |
+| audit | **246 passed, 0 failed** | `evidence/native-3-final-audit.log` |
+| parity | missing=0 / removed=2（2 ok / 0 bad）/ na=16 ok | `evidence/native-3-final-parity.log` |
+| behavior | actionable=0（bindings 50） | `evidence/native-3-final-behavior.log` |
+| i18n | OK (2316 pairs) | `evidence/native-3-final-i18n.log` |
+
+**收尾**：A/B/C/D 四项全部完成并各自红→绿（数字见 §00:55 表）；
+证据汇总 `evidence/native-3-settings-cards-20261114.md`，逐页对比图 `native-3-compare-*.png`。
+**下一步（交用户）**：实机验收（见报告 §5）；真实反馈 POST 未真发（测试接缝抓包验证端点/请求体/回包）。
