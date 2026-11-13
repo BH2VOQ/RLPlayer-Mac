@@ -300,39 +300,427 @@ static NSString *RLPNPFavKey(NSString *path) {
 
 @end
 
-/// 音频分析摘要卡（web .anlcard：标题在左上、摘要一行在下面、整卡可点）。
-/// 旧实现把两段文字塞进 NSButton title，AppKit 多行标题在未翻转坐标里画到卡片底部
-/// ⟹ 截图看起来"文字趴在白块左下角"，用户实机反馈「排版错乱」。
-@interface RLPAnalysisCard : NSButton
-@property (nonatomic, copy) NSString *cardTitle;
-@property (nonatomic, copy) NSString *cardSummary;
+#pragma mark - 音频分析卡片（web .anlcard：标题左上 / 摘要 / 展开后 2 列指标网格）
+
+// web 的真实几何（src/net/ui_page.h:930-950），逐条照抄：
+//   .anlcard   padding:7px 9px 8px；gap:4px；radius:10；border:1px
+//   .anlct     10.5px / 700 / letter-spacing:.8
+//   .anlcs     11.5px / line-height:1.45
+//   .anlbadge  9.5px / radius 5 / padding 1px 5px
+//   .anlgrid   2 列 / gap:1px 10px
+//   .anllb     10px；.anlv 11px / tabular / 右对齐；.anlv.na 灰字 10.5px 可换行；
+//              .anlv.warn 琥珀 600
+//   .anlsec    10px / 700 / letter-spacing:.7 / border-top:1px
+//   .anlwarn   10.5px / rgba(234,179,8,.10) 底 + rgba(234,179,8,.24) 边 / radius 7
+//
+// 为什么不用 NSButton 自绘：AppKit 多行标题画在卡片左下角、且固定高度把长摘要截断
+// （旧实现就是 11pt 单行 + 100/74 固定高）。子视图化后才能量真实几何、才能按文本生长。
+static const CGFloat kAnlCardPadTop    = 7.0;
+static const CGFloat kAnlCardPadX      = 9.0;
+static const CGFloat kAnlCardPadBottom = 8.0;
+static const CGFloat kAnlCardGap       = 4.0;
+static const CGFloat kAnlCardRadius    = 10.0;
+static const CGFloat kAnlTitleH        = 13.0;
+static const CGFloat kAnlBadgeH        = 15.0;
+static const CGFloat kAnlSumLineH      = 11.5 * 1.45;   // web line-height:1.45
+static const CGFloat kAnlRowH          = 16.0;
+static const CGFloat kAnlColGap        = 10.0;
+static const CGFloat kAnlSecH          = 17.0;
+
+/// 卡片区容器：web #npAnlBody。**不翻转**（底部为原点）——这样卡片自下而上排，
+/// 既保持「动态/音质/假无损」从上到下的视觉顺序，也让离屏判据能按 NSMaxY 验证堆叠。
+/// 卡片高度超过可见高度时用滚轮滚动（内容被 masksToBounds 裁在面板内的卡片区）。
+@interface RLPNPAnalBody : NSView
+@property (nonatomic, copy, nullable) void (^onScroll)(CGFloat deltaY);
 @end
-@implementation RLPAnalysisCard
-- (void)setCardTitle:(NSString *)cardTitle { _cardTitle = [cardTitle copy]; self.needsDisplay = YES; }
-- (void)setCardSummary:(NSString *)cardSummary { _cardSummary = [cardSummary copy]; self.needsDisplay = YES; }
-- (void)drawRect:(NSRect)dirtyRect {
-    (void)dirtyRect;
+@implementation RLPNPAnalBody
+- (BOOL)isFlipped { return NO; }
+- (void)scrollWheel:(NSEvent *)event {
+    if (self.onScroll) { self.onScroll(event.scrollingDeltaY); return; }
+    [super scrollWheel:event];
+}
+@end
+
+@interface RLPAnlCardView : NSView {
+    NSTextField *_titleLab;
+    NSTextField *_badgeLab;
+    NSTextField *_sumLab;
+    NSMutableArray<NSDictionary *> *_built;
+    NSMutableArray<NSValue *> *_hairlines;
+}
+@property (nonatomic, copy) NSString *cardKey;
+@property (nonatomic, assign) NSInteger anlLevel;
+@property (nonatomic, copy) NSArray<NSDictionary *> *rows;
+@property (nonatomic, copy) NSString *titleText;
+@property (nonatomic, copy) NSString *summaryText;
+@property (nonatomic, copy) NSString *badgeText;
+@property (nonatomic, copy, nullable) void (^onTap)(void);
+- (void)applyTitle:(NSString *)title summary:(NSString *)summary badge:(nullable NSString *)badge;
+- (void)applyRows:(NSArray<NSDictionary *> *)rows level:(NSInteger)level;
+- (CGFloat)preferredHeightForWidth:(CGFloat)width;
+- (void)relayout;
+- (void)applyTheme;
+@end
+
+@implementation RLPAnlCardView
+
+- (instancetype)initWithFrame:(NSRect)frameRect {
+    self = [super initWithFrame:frameRect];
+    if (!self) return nil;
+    self.wantsLayer = YES;
+    self.layer.cornerRadius = kAnlCardRadius;
+    self.layer.borderWidth = 1;
+    _built = [NSMutableArray array];
+    _hairlines = [NSMutableArray array];
+
+    _titleLab = [NSTextField labelWithString:@""];
+    _titleLab.identifier = @"anl.title";
+    _titleLab.maximumNumberOfLines = 1;
+    _titleLab.usesSingleLineMode = YES;
+    _titleLab.lineBreakMode = NSLineBreakByTruncatingTail;
+    [self addSubview:_titleLab];
+
+    _sumLab = [NSTextField labelWithString:@""];
+    _sumLab.identifier = @"anl.sum";
+    _sumLab.maximumNumberOfLines = 0;
+    _sumLab.usesSingleLineMode = NO;
+    _sumLab.lineBreakMode = NSLineBreakByWordWrapping;
+    _sumLab.cell.wraps = YES;
+    [self addSubview:_sumLab];
+
+    _badgeLab = [NSTextField labelWithString:@""];
+    _badgeLab.identifier = @"anl.badge";
+    _badgeLab.font = [NSFont systemFontOfSize:9.5 weight:NSFontWeightSemibold];
+    _badgeLab.alignment = NSTextAlignmentCenter;
+    _badgeLab.maximumNumberOfLines = 1;
+    _badgeLab.wantsLayer = YES;
+    _badgeLab.layer.cornerRadius = 5;
+    _badgeLab.layer.borderWidth = 1;
+    _badgeLab.hidden = YES;
+    [self addSubview:_badgeLab];
+    [self applyTheme];
+    return self;
+}
+
+- (BOOL)isFlipped { return YES; }
+
+- (void)setCardKey:(NSString *)cardKey {
+    _cardKey = [cardKey copy];
+    _titleLab.identifier = [cardKey stringByAppendingString:@".title"];
+    _sumLab.identifier = [cardKey stringByAppendingString:@".sum"];
+    _badgeLab.identifier = [cardKey stringByAppendingString:@".badge"];
+}
+
+/// 同一份文本在不同主题下重新上色（字距/行距属于 web 的排版常量，不随主题变）。
+- (NSAttributedString *)attrText:(NSString *)text font:(NSFont *)font color:(NSColor *)color
+                            kern:(CGFloat)kern lineHeight:(CGFloat)lineHeight wrap:(BOOL)wrap {
+    NSMutableParagraphStyle *ps = [[NSMutableParagraphStyle alloc] init];
+    ps.lineBreakMode = wrap ? NSLineBreakByWordWrapping : NSLineBreakByTruncatingTail;
+    if (lineHeight > 0) { ps.minimumLineHeight = lineHeight; ps.maximumLineHeight = lineHeight; }
+    NSMutableDictionary *attrs = [NSMutableDictionary dictionary];
+    attrs[NSFontAttributeName] = font;
+    attrs[NSForegroundColorAttributeName] = color;
+    attrs[NSParagraphStyleAttributeName] = ps;
+    if (kern > 0) attrs[NSKernAttributeName] = @(kern);
+    return [[NSAttributedString alloc] initWithString:(text ?: @"") attributes:attrs];
+}
+
+- (void)refreshLabels {
     RLPTheme *t = [RLPTheme current];
-    NSRect b = self.bounds;
-    const CGFloat pad = 12.0;
+    NSFont *tf = [NSFont systemFontOfSize:10.5 weight:NSFontWeightBold];
+    _titleLab.font = tf;
+    _titleLab.attributedStringValue = [self attrText:self.titleText font:tf color:t.mut2
+                                                kern:0.8 lineHeight:0 wrap:NO];
+    NSFont *sf = [NSFont systemFontOfSize:11.5];
+    _sumLab.font = sf;
+    _sumLab.attributedStringValue = [self attrText:self.summaryText font:sf color:t.text
+                                              kern:0 lineHeight:kAnlSumLineH wrap:YES];
+    _badgeLab.stringValue = self.badgeText ?: @"";
+    _badgeLab.font = [NSFont systemFontOfSize:9.5 weight:NSFontWeightSemibold];
+    _badgeLab.textColor = t.accentText;
+    _badgeLab.layer.backgroundColor = t.accentWeak.CGColor;
+    _badgeLab.layer.borderColor = t.accentWeak.CGColor;
+    _badgeLab.hidden = !self.badgeText.length;
+}
+
+- (void)applyTitle:(NSString *)title summary:(NSString *)summary badge:(NSString *)badge {
+    self.titleText = [title copy];
+    self.summaryText = [summary copy];
+    self.badgeText = [badge copy];
+    [self refreshLabels];
+    [self relayout];
+}
+
+- (void)applyRows:(NSArray<NSDictionary *> *)rows level:(NSInteger)level {
+    self.rows = rows ?: @[];
+    self.anlLevel = level;
+    [self rebuildRows];
+    [self relayout];
+}
+
+- (NSTextField *)makeLabel:(NSString *)ident font:(NSFont *)font color:(NSColor *)color
+                      wrap:(BOOL)wrap {
+    NSTextField *l = [NSTextField labelWithString:@""];
+    l.identifier = ident;
+    l.font = font;
+    l.textColor = color;
+    l.maximumNumberOfLines = wrap ? 0 : 1;
+    l.usesSingleLineMode = !wrap;
+    l.lineBreakMode = wrap ? NSLineBreakByWordWrapping : NSLineBreakByTruncatingTail;
+    if (wrap) l.cell.wraps = YES;
+    [self addSubview:l];
+    return l;
+}
+
+/// 行视图重建：sec/row/warn/note 都是真实子视图（判据量的是它们，不是 drawRect 里的常量）。
+- (void)rebuildRows {
+
+    const NSUInteger subBefore = self.subviews.count;
+    for (NSDictionary *r in _built) {
+        for (NSString *k in @[@"lab", @"lb", @"v", @"rule", @"box", @"main", @"hint"])
+            if ([r[k] isKindOfClass:[NSView class]]) [(NSView *)r[k] removeFromSuperview];
+    }
+    (void)subBefore;
+    [_built removeAllObjects];
+    [_hairlines removeAllObjects];
+    RLPTheme *t = [RLPTheme current];
+    NSColor *amberBg = [NSColor colorWithSRGBRed:234/255. green:179/255. blue:8/255. alpha:0.10];
+    NSColor *amberLine = [NSColor colorWithSRGBRed:234/255. green:179/255. blue:8/255. alpha:0.24];
+
+    for (NSDictionary *r in self.rows) {
+        NSString *kind = [r[@"k"] isKindOfClass:[NSString class]] ? r[@"k"] : @"row";
+        if ([kind isEqualToString:@"sec"]) {
+            NSView *rule = [[NSView alloc] initWithFrame:NSZeroRect];
+            rule.identifier = @"anl.sec.rule";
+            rule.wantsLayer = YES;
+            rule.layer.backgroundColor = t.line.CGColor;
+            [self addSubview:rule];
+            NSTextField *lab = [self makeLabel:@"anl.sec"
+                                          font:[NSFont systemFontOfSize:10 weight:NSFontWeightBold]
+                                         color:t.accentText wrap:NO];
+            NSMutableParagraphStyle *ps = [[NSMutableParagraphStyle alloc] init];
+            ps.lineBreakMode = NSLineBreakByTruncatingTail;
+            lab.attributedStringValue = [[NSAttributedString alloc]
+                initWithString:(r[@"t"] ?: @"")
+                attributes:@{ NSFontAttributeName: lab.font, NSForegroundColorAttributeName: t.accentText,
+                              NSKernAttributeName: @0.7, NSParagraphStyleAttributeName: ps }];
+            [_built addObject:@{ @"k": @"sec", @"lab": lab, @"rule": rule }];
+        } else if ([kind isEqualToString:@"row"]) {
+            const BOOL na = [r[@"na"] boolValue];
+            const BOOL hot = [r[@"warn"] boolValue];
+            NSTextField *lb = [self makeLabel:@"anl.lb"
+                                         font:[NSFont systemFontOfSize:10]
+                                        color:t.mut2 wrap:NO];
+            lb.stringValue = r[@"l"] ?: @"";
+            NSFont *vf = na ? [NSFont monospacedDigitSystemFontOfSize:10.5 weight:NSFontWeightRegular]
+                            : [NSFont monospacedDigitSystemFontOfSize:11 weight:NSFontWeightRegular];
+            NSTextField *val = [self makeLabel:@"anl.v" font:vf
+                                        color:(hot ? t.warn : (na ? t.mut2 : t.text)) wrap:na];
+            val.stringValue = r[@"v"] ?: @"NA";
+            val.alignment = NSTextAlignmentRight;
+            BOOL wide = [r[@"wide"] isKindOfClass:[NSNumber class]] ? [r[@"wide"] boolValue]
+                                                                   : (na && [(r[@"v"] ?: @"") length] > 8);
+            [_built addObject:@{ @"k": @"row", @"lb": lb, @"v": val,
+                                 @"na": @(na), @"warn": @(hot), @"wide": @(wide) }];
+        } else if ([kind isEqualToString:@"warn"]) {
+            NSView *box = [[NSView alloc] initWithFrame:NSZeroRect];
+            box.identifier = [NSString stringWithFormat:@"%@.warn", self.cardKey ?: @"anl.dyn"];
+            box.wantsLayer = YES;
+            box.layer.cornerRadius = 7;
+            box.layer.borderWidth = 1;
+            box.layer.backgroundColor = amberBg.CGColor;
+            box.layer.borderColor = amberLine.CGColor;
+            [self addSubview:box];
+            NSTextField *main = [self makeLabel:@"anl.warn.txt"
+                                          font:[NSFont systemFontOfSize:10.5]
+                                         color:t.warn wrap:YES];
+            main.stringValue = r[@"t"] ?: @"";
+            NSTextField *hint = [self makeLabel:@"anl.warn.hint"
+                                           font:[NSFont systemFontOfSize:9.5]
+                                          color:t.mut2 wrap:YES];
+            hint.stringValue = r[@"h"] ?: @"";
+            [main removeFromSuperview];
+            [hint removeFromSuperview];
+            [box addSubview:main];
+            [box addSubview:hint];
+            [_built addObject:@{ @"k": @"warn", @"box": box, @"main": main, @"hint": hint }];
+        } else {
+            NSTextField *note = [self makeLabel:@"anl.note"
+                                           font:[NSFont systemFontOfSize:10]
+                                          color:t.mut2 wrap:YES];
+            note.stringValue = r[@"t"] ?: @"";
+            [_built addObject:@{ @"k": @"note", @"lab": note }];
+        }
+    }
+    [self applyTheme];
+}
+
+- (CGFloat)measuredHeight:(NSTextField *)label lineHeight:(CGFloat)lh width:(CGFloat)width {
+    NSString *s = label.stringValue;
+    // NSTextField 的文字区比 frame 窄左右各 2pt：不扣掉这 4pt，边界行会被裁掉一行。
+    width = MAX(10, width - 4.0);
+    if (!s.length || width < 10) return 0;
+    NSMutableParagraphStyle *ps = [[NSMutableParagraphStyle alloc] init];
+    ps.lineBreakMode = NSLineBreakByWordWrapping;
+    ps.minimumLineHeight = lh;
+    ps.maximumLineHeight = lh;
+    NSRect r = [s boundingRectWithSize:NSMakeSize(width, CGFLOAT_MAX)
+                               options:NSStringDrawingUsesLineFragmentOrigin | NSStringDrawingUsesFontLeading
+                            attributes:@{ NSFontAttributeName: label.font, NSParagraphStyleAttributeName: ps }];
+    return MAX(lh, ceil(r.size.height));
+}
+
+- (CGFloat)titleWidth {
+    // 标题带 letter-spacing .8：徽标位置必须按「含字距」的宽度算，否则徽标压住标题末尾。
+    NSString *t = self.titleText ?: @"";
+    if (!t.length) return 0;
     NSMutableParagraphStyle *ps = [[NSMutableParagraphStyle alloc] init];
     ps.lineBreakMode = NSLineBreakByTruncatingTail;
-    NSDictionary *titleAttrs = @{ NSFontAttributeName: [NSFont systemFontOfSize:11 weight:NSFontWeightSemibold],
-                                  NSForegroundColorAttributeName: t.text,
-                                  NSParagraphStyleAttributeName: ps };
-    NSDictionary *sumAttrs = @{ NSFontAttributeName: [NSFont systemFontOfSize:11],
-                                NSForegroundColorAttributeName: t.mut2,
-                                NSParagraphStyleAttributeName: ps };
-    // NSButton 的文字绘制上下文是「顶部为原点」的：drawInRect 的 y 小 = 更靠上。
-    // 所以标题 y=10（贴顶），摘要 y=30（标题下面），与 web .anlcard(标题行 + 摘要行) 同序。
-    if (self.cardTitle.length)
-        [self.cardTitle drawInRect:NSMakeRect(pad, 10, MAX(10, b.size.width - pad * 2), 15)
-                     withAttributes:titleAttrs];
-    if (self.cardSummary.length) {
-        NSRect sumRect = NSMakeRect(pad, 30, MAX(10, b.size.width - pad * 2), MAX(14, b.size.height - 46));
-        if (sumRect.size.height > 34) sumRect.size.height = 34;
-        [self.cardSummary drawInRect:sumRect withAttributes:sumAttrs];
+    return ceil([t sizeWithAttributes:@{ NSFontAttributeName: _titleLab.font,
+                                         NSKernAttributeName: @0.8,
+                                         NSParagraphStyleAttributeName: ps }].width);
+}
+
+- (CGFloat)headerHeight {
+    return self.badgeText.length ? kAnlBadgeH : kAnlTitleH;
+}
+
+/// 行区排版（翻转坐标，从 y0 往下排）。apply=NO 时只量高度，不写 frame。
+- (CGFloat)layoutBodyAtY:(CGFloat)y0 width:(CGFloat)contentW apply:(BOOL)apply {
+    if (contentW < 20) return 0;
+    const CGFloat x0 = kAnlCardPadX;
+    const CGFloat cellW = (contentW - kAnlColGap) / 2.0;
+    CGFloat y = y0;
+    NSUInteger col = 0;
+    if (apply) [_hairlines removeAllObjects];
+    for (NSDictionary *r in _built) {
+        NSString *kind = r[@"k"];
+        if ([kind isEqualToString:@"sec"]) {
+            if (col) { col = 0; y += kAnlRowH; }
+            if (apply) {
+                ((NSView *)r[@"rule"]).frame = NSMakeRect(x0, y, contentW, 1);
+                ((NSTextField *)r[@"lab"]).frame = NSMakeRect(x0, y + 4, contentW, 12);
+            }
+            y += kAnlSecH;
+        } else if ([kind isEqualToString:@"row"]) {
+            NSTextField *lb = r[@"lb"], *val = r[@"v"];
+            if ([r[@"wide"] boolValue]) {
+                if (col) { col = 0; y += kAnlRowH; }
+                const CGFloat labW = MIN(ceil([lb.stringValue sizeWithAttributes:
+                                              @{ NSFontAttributeName: lb.font }].width), contentW * 0.55);
+                const CGFloat valW = MAX(20, contentW - labW - 8);
+                const CGFloat valH = [self measuredHeight:val lineHeight:val.font.pointSize * 1.35 width:valW];
+                const CGFloat h = MAX(kAnlRowH, valH + 2);
+                if (apply) {
+                    lb.frame = NSMakeRect(x0, y, labW, h);
+                    val.frame = NSMakeRect(x0 + labW + 8, y, valW, MAX(valH, h));
+                    [_hairlines addObject:[NSValue valueWithRect:
+                                           NSMakeRect(x0, y + h - 1, contentW, 1)]];
+                }
+                y += h;
+            } else {
+                const CGFloat x = x0 + (col ? (cellW + kAnlColGap) : 0);
+                if (apply) {
+                    lb.frame = NSMakeRect(x, y, cellW, kAnlRowH);
+                    val.frame = NSMakeRect(x, y, cellW, kAnlRowH);
+                    [_hairlines addObject:[NSValue valueWithRect:
+                                           NSMakeRect(x, y + kAnlRowH - 1, cellW, 1)]];
+                }
+                if (col == 1) { col = 0; y += kAnlRowH; } else { col = 1; }
+            }
+        } else if ([kind isEqualToString:@"warn"]) {
+            if (col) { col = 0; y += kAnlRowH; }
+            NSTextField *main = r[@"main"], *hint = r[@"hint"];
+            const CGFloat innerW = contentW - 14;
+            const CGFloat mainH = [self measuredHeight:main lineHeight:10.5 * 1.5 width:innerW];
+            const CGFloat hintH = hint.stringValue.length
+                ? [self measuredHeight:hint lineHeight:9.5 * 1.45 width:innerW] : 0;
+            const CGFloat boxH = 3 + mainH + (hintH ? 2 + hintH : 0) + 3;
+            if (apply) {
+                ((NSView *)r[@"box"]).frame = NSMakeRect(x0, y, contentW, boxH);
+                main.frame = NSMakeRect(7, 3, innerW, mainH);
+                if (hintH) hint.frame = NSMakeRect(7, 3 + mainH + 2, innerW, hintH);
+            }
+            y += boxH + 1;      // web .anlgrid 行间距 1px
+        } else {
+            if (col) { col = 0; y += kAnlRowH; }
+            NSTextField *note = r[@"lab"];
+            const CGFloat h = [self measuredHeight:note lineHeight:10 * 1.45 width:contentW];
+            if (apply) note.frame = NSMakeRect(x0, y, contentW, h);
+            y += h + 1;
+        }
     }
+    if (col) y += kAnlRowH;
+    return y - y0;
+}
+
+- (CGFloat)preferredHeightForWidth:(CGFloat)width {
+    const CGFloat contentW = MAX(10, width - kAnlCardPadX * 2);
+    const CGFloat sumH = [self measuredHeight:_sumLab lineHeight:kAnlSumLineH width:contentW];
+    const CGFloat bodyH = self.rows.count ? [self layoutBodyAtY:0 width:contentW apply:NO] : 0;
+    CGFloat h = kAnlCardPadTop + [self headerHeight] + kAnlCardGap + sumH;
+    if (self.rows.count) h += kAnlCardGap + bodyH;
+    return h + kAnlCardPadBottom;
+}
+
+- (void)relayout {
+    const CGFloat W = self.bounds.size.width, H = self.bounds.size.height;
+    if (W < 20 || H < 20) return;
+    const CGFloat contentW = MAX(10, W - kAnlCardPadX * 2);
+    _titleLab.frame = NSMakeRect(kAnlCardPadX, kAnlCardPadTop, contentW, kAnlTitleH);
+    if (self.badgeText.length) {
+        const CGFloat badgeW = ceil([self.badgeText sizeWithAttributes:
+                                    @{ NSFontAttributeName: _badgeLab.font }].width) + 10;
+        _badgeLab.frame = NSMakeRect(kAnlCardPadX + [self titleWidth] + 6, kAnlCardPadTop,
+                                     MIN(MAX(18, badgeW), contentW * 0.7), kAnlBadgeH);
+    }
+    const CGFloat sumY = kAnlCardPadTop + [self headerHeight] + kAnlCardGap;
+    const CGFloat sumH = [self measuredHeight:_sumLab lineHeight:kAnlSumLineH width:contentW];
+    _sumLab.frame = NSMakeRect(kAnlCardPadX, sumY, contentW, sumH);
+    const CGFloat bodyY = sumY + sumH + (self.rows.count ? kAnlCardGap : 0);
+    [self layoutBodyAtY:bodyY width:contentW apply:YES];
+    self.needsDisplay = YES;
+}
+
+- (void)drawRect:(NSRect)dirtyRect {
+    [super drawRect:dirtyRect];
+    if (!_hairlines.count) return;
+    [[RLPTheme current].line setFill];
+    for (NSValue *v in _hairlines) NSRectFill([v rectValue]);
+}
+
+- (void)applyTheme {
+    RLPTheme *t = [RLPTheme current];
+    self.layer.backgroundColor = t.bg2.CGColor;
+    self.layer.borderColor = t.line.CGColor;
+    [self refreshLabels];
+    for (NSDictionary *r in _built) {
+        NSString *kind = r[@"k"];
+        if ([kind isEqualToString:@"sec"]) {
+            ((NSTextField *)r[@"lab"]).textColor = t.accentText;
+            ((NSView *)r[@"rule"]).layer.backgroundColor = t.line.CGColor;
+        } else if ([kind isEqualToString:@"row"]) {
+            ((NSTextField *)r[@"lb"]).textColor = t.mut2;
+            NSTextField *v = r[@"v"];
+            v.textColor = [r[@"warn"] boolValue] ? t.warn : ([r[@"na"] boolValue] ? t.mut2 : t.text);
+        } else if ([kind isEqualToString:@"warn"]) {
+            ((NSTextField *)r[@"main"]).textColor = t.warn;
+            ((NSTextField *)r[@"hint"]).textColor = t.mut2;
+        } else if ([kind isEqualToString:@"note"]) {
+            ((NSTextField *)r[@"lab"]).textColor = t.mut2;
+        }
+    }
+    self.needsDisplay = YES;
+}
+
+/// 文字子视图覆盖卡片：hitTest 不劫持的话点击落到 NSTextField 上，卡片收不到 mouseDown。
+- (NSView *)hitTest:(NSPoint)point {
+    NSPoint p = [self convertPoint:point fromView:self.superview];
+    return NSPointInRect(p, self.bounds) ? self : nil;
+}
+- (void)mouseDown:(NSEvent *)event {
+    (void)event;
+    if (self.onTap) self.onTap();
 }
 @end
 
@@ -666,6 +1054,12 @@ static NSString *RLPRailTagText(id srValue, id bitsValue) {
 @property(nonatomic,strong) NSTimer *lyricRetryTimer;
 @property(nonatomic,strong) NSTextField *kindLabel;
 @property(nonatomic,strong) NSTextField *analysisStatus;
+@property(nonatomic,strong) NSTextField *anlLab;       // web .anllab（独立 9.5/700/kern1.5）
+@property(nonatomic,strong) NSView *anlSeg;            // web .npseg（一个外框 + 发丝分隔）
+@property(nonatomic,strong) NSView *anlSep1, *anlSep2;
+@property(nonatomic,strong) RLPNPAnalBody *anlBody;    // web #npAnlBody（卡片区）
+@property(nonatomic,assign) CGFloat anlScrollOffset;   // 卡片区滚动位移（内容高于面板时）
+@property(nonatomic,assign) CGFloat anlContentH;       // 卡片内容总高（用于夹住滚动位移）
 @property(nonatomic,strong) NSButton *anlAuto;
 @property(nonatomic,strong) NSButton *anlRun;
 @property(nonatomic,strong) NSButton *closeButton;
@@ -715,9 +1109,9 @@ static NSString *RLPRailTagText(id srValue, id bitsValue) {
 @property (nonatomic, strong) NSTextField *lyricsEmpty;
 // ---- 音频分析：一行四元素（动态 / 音质 / 假无损 / 展开）----
 @property (nonatomic, strong) NSView *anlRow;
-@property (nonatomic, strong) NSButton *anlDyn;
-@property (nonatomic, strong) NSButton *anlQual;
-@property (nonatomic, strong) NSButton *anlFake;
+@property (nonatomic, strong) RLPAnlCardView *anlDyn;
+@property (nonatomic, strong) RLPAnlCardView *anlQual;
+@property (nonatomic, strong) RLPAnlCardView *anlFake;
 @property (nonatomic, strong) NSButton *anlExpand;
 @property (nonatomic, strong) NSScrollView *anlDetailScroll;
 @property (nonatomic, strong) NSTextView *anlDetail;
@@ -801,14 +1195,34 @@ static NSString *RLPRailTagText(id srValue, id bitsValue) {
     self.railToggle=[self webButton:@"▤" identifier:@"npRailToggle" action:@selector(onToggleRail:) parent:host];self.railToggle.toolTip=RLPTr(@"显示 / 隐藏 AI 资料面板");
     self.analysisPanel=[[NSView alloc] initWithFrame:NSZeroRect];self.analysisPanel.identifier=@"npAnal";[host addSubview:self.analysisPanel];
     self.railPanel=[[NSView alloc] initWithFrame:NSZeroRect];self.railPanel.identifier=@"npRail";[host addSubview:self.railPanel];
-    self.analysisStatus=RLPLabel(RLPTr(@"音频分析 · 未播放"),[NSFont systemFontOfSize:9.5],t.mut2);self.analysisStatus.identifier=@"npAnlStat";[self.analysisPanel addSubview:self.analysisStatus];
-    self.anlAuto=[self webButton:@"自动" identifier:@"npAnlAuto" action:@selector(onToggleAuto:) parent:self.analysisPanel];
-    self.anlExpand=[self webButton:@"详细" identifier:@"npAnlToggle" action:@selector(onAnlExpand:) parent:self.analysisPanel];
-    self.anlRun=[self webButton:@"分析" identifier:@"npAnlRun" action:@selector(onAnlReanalyze:) parent:self.analysisPanel];
-    self.anlDyn=[self anlChipWithIdentifier:@"anl.dyn" action:@selector(onAnlDyn:)];self.anlQual=[self anlChipWithIdentifier:@"anl.qual" action:@selector(onAnlQual:)];self.anlFake=[self anlChipWithIdentifier:@"anl.fake" action:@selector(onAnlFake:)];
-    for(NSButton *b in @[self.anlDyn,self.anlQual,self.anlFake]) {b.translatesAutoresizingMaskIntoConstraints=YES;b.wantsLayer=YES;b.layer.cornerRadius=10;b.layer.borderWidth=1;b.layer.masksToBounds=YES;[(NSButtonCell *)b.cell setLineBreakMode:NSLineBreakByWordWrapping];b.cell.wraps=YES;[self.analysisPanel addSubview:b];}
+    // 头部：独立的 9.5/700/kern1.5 标题（web .anllab）+ 右端状态（web #npAnlStat）
+    self.anlLab=RLPLabel(RLPTr(@"音频分析"),[NSFont systemFontOfSize:9.5 weight:NSFontWeightBold],t.mut2);
+    self.anlLab.identifier=@"npAnlLab";[self.analysisPanel addSubview:self.anlLab];
+    self.analysisStatus=RLPLabel(RLPTr(@"未播放"),[NSFont systemFontOfSize:10],t.mut2);
+    self.analysisStatus.identifier=@"npAnlStat";self.analysisStatus.alignment=NSTextAlignmentRight;
+    [self.analysisPanel addSubview:self.analysisStatus];
+    // 三个动作装进**一个**带外框的分段控件（web .npseg：radius 9、10.5/600、padding 3 11、发丝分隔）
+    self.anlSeg=[[NSView alloc] initWithFrame:NSZeroRect];self.anlSeg.identifier=@"npAnlSeg";
+    self.anlSeg.wantsLayer=YES;self.anlSeg.layer.cornerRadius=9;self.anlSeg.layer.borderWidth=1;
+    self.anlSeg.layer.masksToBounds=YES;[self.analysisPanel addSubview:self.anlSeg];
+    self.anlSep1=[[NSView alloc] initWithFrame:NSZeroRect];self.anlSep1.wantsLayer=YES;[self.anlSeg addSubview:self.anlSep1];
+    self.anlSep2=[[NSView alloc] initWithFrame:NSZeroRect];self.anlSep2.wantsLayer=YES;[self.anlSeg addSubview:self.anlSep2];
+    self.anlAuto=[self webButton:@"自动" identifier:@"npAnlAuto" action:@selector(onToggleAuto:) parent:self.anlSeg];
+    self.anlExpand=[self webButton:@"详细" identifier:@"npAnlToggle" action:@selector(onAnlExpand:) parent:self.anlSeg];
+    self.anlRun=[self webButton:@"分析" identifier:@"npAnlRun" action:@selector(onAnlReanalyze:) parent:self.anlSeg];
+    for(NSButton *b in @[self.anlAuto,self.anlExpand,self.anlRun]) {
+        b.bordered=NO;b.bezelStyle=NSBezelStyleSmallSquare;
+        b.font=[NSFont systemFontOfSize:10.5 weight:NSFontWeightSemibold];
+        b.wantsLayer=YES;b.layer.backgroundColor=NSColor.clearColor.CGColor;
+    }
+    // 卡片区（web #npAnlBody）：三张摘要卡始终在视图树里，展开档在卡内长指标，不再换成文本 blob。
+    self.anlBody=[[RLPNPAnalBody alloc] initWithFrame:NSZeroRect];self.anlBody.identifier=@"npAnlBody";
+    self.anlBody.wantsLayer=YES;self.anlBody.layer.masksToBounds=YES;[self.analysisPanel addSubview:self.anlBody];
+    self.anlDyn=[self anlCardWithIdentifier:@"anl.dyn"];self.anlQual=[self anlCardWithIdentifier:@"anl.qual"];self.anlFake=[self anlCardWithIdentifier:@"anl.fake"];
+    __weak __typeof__(self) wsAnl=self;
+    self.anlBody.onScroll=^(CGFloat deltaY){ __typeof__(self) s=wsAnl; if(s)[s onAnlBodyScroll:deltaY]; };
     self.anlDetail=[self makeTextView]; self.anlDetailScroll=[[NSScrollView alloc] initWithFrame:NSZeroRect];self.anlDetailScroll.drawsBackground=NO;self.anlDetailScroll.hasVerticalScroller=YES;self.anlDetailScroll.documentView=self.anlDetail;self.anlDetailScroll.hidden=YES;[self.analysisPanel addSubview:self.anlDetailScroll];
-    self.anlReanalyze=[self webButton:@"重新分析" identifier:@"npAnlRecalculate" action:@selector(onAnlReanalyze:) parent:self.analysisPanel];self.anlReanalyze.hidden=YES;
+    self.anlReanalyze=[self webButton:@"重新分析" identifier:@"npAnlRecalculate" action:@selector(onAnlReanalyze:) parent:self.analysisPanel];self.anlReanalyze.hidden=YES;self.anlReanalyze.font=[NSFont systemFontOfSize:10.5];
     self.lyricDocument=[[RLPNPLyricDocument alloc] initWithFrame:NSMakeRect(0,0,500,400)];
     self.lyricScroll=[[NSScrollView alloc] initWithFrame:NSZeroRect]; self.lyricScroll.identifier=@"npLyric";self.lyricScroll.drawsBackground=NO;self.lyricScroll.hasVerticalScroller=NO;self.lyricScroll.documentView=self.lyricDocument;[host addSubview:self.lyricScroll];
     self.lyricScroll.contentView.postsBoundsChangedNotifications=YES;
@@ -930,11 +1344,40 @@ static NSString *RLPRailTagText(id srValue, id bitsValue) {
     self.analysisPanel.frame=NSMakeRect(gutter,by,side,bodyH);self.railPanel.frame=NSMakeRect(w-gutter-side,by,side,bodyH);
     self.lyricScroll.frame=NSMakeRect(gutter+col+18,by,col*2,bodyH);
     if(self.analysisPanel.hidden&&self.railPanel.hidden)self.lyricScroll.frame=NSMakeRect(gutter,by,w-32,bodyH);
-    self.analysisStatus.frame=NSMakeRect(12,bodyH-26,MAX(50,side-24),16);
-    self.anlAuto.frame=NSMakeRect(MAX(8,side-156),bodyH-57,48,25);self.anlExpand.frame=NSMakeRect(MAX(56,side-108),bodyH-57,54,25);self.anlRun.frame=NSMakeRect(MAX(110,side-54),bodyH-57,46,25);
-    CGFloat available=MAX(90,bodyH-96),firstCard=MIN(100,available*.4),otherCard=MIN(74,(available-firstCard)/2);
-    CGFloat y=bodyH-68;for(NSButton *b in @[self.anlDyn,self.anlQual,self.anlFake]){CGFloat ch=b==self.anlDyn?firstCard:otherCard;b.frame=NSMakeRect(12,y-ch,MAX(40,side-24),ch);y-=ch+8;}
-    self.anlDetailScroll.frame=NSMakeRect(12,12,MAX(40,side-24),MAX(40,bodyH-80));self.anlReanalyze.frame=NSMakeRect(12,bodyH-82,90,22);
+    // ---- 音频分析面板：web #npAnal（padding:8px 11px 9px、.anlhead gap:8、面板 gap:6）----
+    {
+        const CGFloat anlPadX = 11.0, anlPadTop = 8.0, anlPadBottom = 9.0;
+        const CGFloat anlLabelH = 13.0, anlSegH = 21.0, anlHeadGap = 8.0, anlBodyGap = 6.0;
+        NSFont *labFont = self.anlLab.font;
+        // 必须量 attributedStringValue：kern 1.5 会把 4 个字的显示宽度再撑宽 ~4.5pt，
+        // 用 stringValue+font 量会窄 4.5pt ⟹ 标题「音频分析」被截成「音频…」。
+        const CGFloat labW = ceil(self.anlLab.attributedStringValue.length
+                                  ? self.anlLab.attributedStringValue.size.width
+                                  : [self.anlLab.stringValue sizeWithAttributes:
+                                     @{ NSFontAttributeName: labFont }].width) + 4.0;  // NSTextField 左右各 2pt 内缩
+        const CGFloat headY = bodyH - anlPadTop - anlLabelH;
+        self.anlLab.frame = NSMakeRect(anlPadX, headY, MIN(MAX(20, labW), MAX(20, side - anlPadX * 2)), anlLabelH);
+        // 状态贴右：面板右缘 → 13pt（web 面板内边距 11 + #npAnlStat 右内边距 2）
+        {
+            const CGFloat statRight = side - (anlPadX + 2);
+            const CGFloat statAvail = MAX(20, statRight - (anlPadX + labW + 8));
+            const CGFloat statW = MIN(statAvail, ceil([self.analysisStatus.stringValue sizeWithAttributes:
+                                                      @{ NSFontAttributeName: self.analysisStatus.font }].width) + 4.0);
+            self.analysisStatus.frame = NSMakeRect(statRight - statW, headY, statW, anlLabelH);
+        }
+        const CGFloat segTop = anlPadTop + anlLabelH + anlHeadGap;
+        const CGFloat segY = bodyH - segTop - anlSegH;
+        [self anlLayoutSegmentAtY:segY right:side - anlPadX];
+        const CGFloat cardsTop = segTop + anlSegH + anlBodyGap;
+        const CGFloat cardsH = MAX(1, bodyH - cardsTop - anlPadBottom);
+        const CGFloat cardsW = MAX(20, side - anlPadX * 2);
+        self.anlBody.frame = NSMakeRect(anlPadX, anlPadBottom, cardsW, cardsH);
+        self.anlDetailScroll.frame = self.anlBody.frame;
+        self.anlReanalyze.frame = NSMakeRect(anlPadX, segY, 62, anlSegH);
+        // 窄面板放不下「重新分析」时让它让位（「分析」分段本来就是同一动作）。
+        if (NSMinX(self.anlSeg.frame) < NSMaxX(self.anlReanalyze.frame) + 8) self.anlReanalyze.hidden = YES;
+        [self anlLayoutCards];
+    }
     // ---- AI 整理栏几何（web .nprailcard padding:10 / gap:8，.npchipwrap gap:6）----
     const CGFloat railSegH=24;
     self.railTitle.frame=NSMakeRect(kRailHeadPadX,bodyH-kRailHeadPadTop-13,72,13);
@@ -1799,22 +2242,117 @@ static NSString *RLPRailTagText(id srValue, id bitsValue) {
     }];
 }
 
-#pragma mark - 音频分析（一行四元素）
+#pragma mark - 音频分析面板（web #npAnal：头部两行 + 三张摘要卡 + 展开档卡内指标）
 
-/// 摘要块：无边框、单行、过长截断 + tooltip 全文。
-/// 为什么不许换行：用户明确要求「改成 1 行显示」，换行就是没做到。
-- (NSButton *)anlChipWithIdentifier:(NSString *)ident action:(SEL)action {
-    RLPAnalysisCard *b = [RLPAnalysisCard buttonWithTitle:@"" target:self action:action];
-    b.bordered = NO;
-    b.identifier = ident;
-    b.translatesAutoresizingMaskIntoConstraints = NO;
-    b.title = @"";
-    return b;
+/// 卡片区是 web #npAnlBody：三张摘要卡**始终存在**，展开档只是让每张卡长出指标网格。
+/// 旧实现展开时把三张卡 hidden 掉、换一块纯文本 NSTextView —— 那条路径已删除；
+/// 没有 health 数据（未播放/未分析/分析失败）时仍保留纯文本解释，信息不丢。
+- (RLPAnlCardView *)anlCardWithIdentifier:(NSString *)ident {
+    RLPAnlCardView *c = [[RLPAnlCardView alloc] initWithFrame:NSZeroRect];
+    c.identifier = ident;
+    c.cardKey = ident;
+    __weak __typeof__(self) ws = self;
+    // 点卡片 = 与「详细」分段同一动作（web：点 .anlchd 走 anlSetLvl 的同一个循环）。
+    c.onTap = ^{ __typeof__(self) s = ws; if (s) [s onAnlExpand:nil]; };
+    [self.anlBody addSubview:c];
+    return c;
 }
 
 - (void)onAnlDyn:(id)sender { [self anlOpenLevel:RLPAnlLevelMetrics]; }
 - (void)onAnlQual:(id)sender { [self anlOpenLevel:RLPAnlLevelMetrics]; }
 - (void)onAnlFake:(id)sender { [self anlOpenLevel:RLPAnlLevelMetrics]; }
+
+/// 卡片区滚轮：内容高于面板时按位移滚动（卡片区 masksToBounds 已经裁在面板内）。
+- (void)onAnlBodyScroll:(CGFloat)deltaY {
+    const CGFloat maxOffset = MAX(0.0, self.anlContentH - self.anlBody.bounds.size.height);
+    self.anlScrollOffset = MAX(0.0, MIN(maxOffset, self.anlScrollOffset - deltaY));
+    [self anlLayoutCards];
+}
+
+/// 分段文字：10.5/600（web .npseg>b）。自动态带实心点（web .npseg>b.auto.on::before）。
+- (void)anlUpdateSegmentTitles {
+    RLPTheme *t = [RLPTheme current];
+    NSFont *f = [NSFont systemFontOfSize:10.5 weight:NSFontWeightSemibold];
+    NSString *autoTitle = self.anlAutoEnabled
+        ? [NSString stringWithFormat:@"● %@", RLPTr(@"自动")] : RLPTr(@"自动");
+    NSString *toggleTitle = self.anlLevel == RLPAnlLevelCollapsed ? RLPTr(@"详细")
+                         : (self.anlLevel == RLPAnlLevelMetrics ? RLPTr(@"全部指标") : RLPTr(@"收起"));
+    NSArray<NSButton *> *btns = @[self.anlAuto, self.anlExpand, self.anlRun];
+    NSArray<NSString *> *titles = @[autoTitle, toggleTitle, RLPTr(@"分析")];
+    NSArray<NSColor *> *colors = @[self.anlAutoEnabled ? t.okText : t.text2, t.text2, t.accentText];
+    for (NSUInteger i = 0; i < btns.count; ++i) {
+        NSButton *b = btns[i];
+        b.font = f;
+        NSMutableParagraphStyle *ps = [[NSMutableParagraphStyle alloc] init];
+        ps.alignment = NSTextAlignmentCenter;
+        [b setAttributedTitle:[[NSAttributedString alloc]
+            initWithString:titles[i]
+                attributes:@{ NSFontAttributeName: f, NSForegroundColorAttributeName: colors[i],
+                              NSParagraphStyleAttributeName: ps }]];
+    }
+}
+
+/// 每一段宽度 = 文字宽 + 左右 padding 11（web .npseg>b padding:3px 11px）。
+- (CGFloat)anlSegmentWidth {
+    NSFont *f = [NSFont systemFontOfSize:10.5 weight:NSFontWeightSemibold];
+    CGFloat total = 2.0;   // 外框左右各 1px
+    NSArray<NSButton *> *btns = @[self.anlAuto, self.anlExpand, self.anlRun];
+    for (NSUInteger i = 0; i < btns.count; ++i) {
+        NSString *label = btns[i].attributedTitle.string.length
+            ? btns[i].attributedTitle.string : (btns[i].title ?: @"");
+        total += ceil([label sizeWithAttributes:@{ NSFontAttributeName: f }].width) + 22.0;
+        if (i + 1 < btns.count) total += 1.0;   // 段间发丝（border-left）
+    }
+    return total;
+}
+
+/// 分段控件右端贴齐面板内容右缘（web .anlacts justify-content:flex-end）。
+- (void)anlLayoutSegmentAtY:(CGFloat)y right:(CGFloat)right {
+    NSFont *f = [NSFont systemFontOfSize:10.5 weight:NSFontWeightSemibold];
+    NSArray<NSButton *> *btns = @[self.anlAuto, self.anlExpand, self.anlRun];
+    NSArray<NSView *> *seps = @[self.anlSep1, self.anlSep2];
+    const CGFloat total = [self anlSegmentWidth];
+    self.anlSeg.frame = NSMakeRect(right - total, y, total, 21.0);
+    CGFloat cx = 1.0;   // 外框 1px
+    for (NSUInteger i = 0; i < btns.count; ++i) {
+        NSString *label = btns[i].attributedTitle.string.length
+            ? btns[i].attributedTitle.string : (btns[i].title ?: @"");
+        const CGFloat w = ceil([label sizeWithAttributes:@{ NSFontAttributeName: f }].width) + 22.0;
+        btns[i].frame = NSMakeRect(cx, 1.0, w, 19.0);
+        cx += w;
+        if (i < seps.count) {
+            seps[i].frame = NSMakeRect(cx, 1.0, 1.0, 19.0);
+            cx += 1.0;
+        }
+    }
+}
+
+/// 卡片区排版：高度由每张卡的**文本实测**决定（不再有 100/74 固定上限）；
+/// 内容高于面板时允许滚动，滚动位移夹在 [0, contentH - 可见高]。
+- (void)anlLayoutCards {
+    const CGFloat W = self.anlBody.bounds.size.width;
+    const CGFloat H = self.anlBody.bounds.size.height;
+    if (W < 20 || H < 10) return;
+    NSArray<RLPAnlCardView *> *cards = @[self.anlDyn, self.anlQual, self.anlFake];
+    CGFloat hs[3] = {0, 0, 0};
+    CGFloat contentH = 0;
+    for (NSUInteger i = 0; i < cards.count; ++i) {
+        hs[i] = [cards[i] preferredHeightForWidth:W];
+        contentH += hs[i];
+    }
+    contentH += 8.0 * 2;   // web #npAnlBody gap:8px
+    self.anlContentH = contentH;
+    const CGFloat maxOffset = MAX(0.0, contentH - H);
+    if (self.anlScrollOffset > maxOffset) self.anlScrollOffset = maxOffset;
+    if (self.anlScrollOffset < 0) self.anlScrollOffset = 0;
+    CGFloat top = H + self.anlScrollOffset;
+    for (NSUInteger i = 0; i < cards.count; ++i) {
+        RLPAnlCardView *c = cards[i];
+        c.frame = NSMakeRect(0, top - hs[i], W, hs[i]);
+        [c relayout];
+        top -= hs[i] + 8.0;
+    }
+}
 
 /// 「展开」循环三档：收起 → 指标 → 全量 → 收起（与 web 版 anlSetLvl 同口径）。
 - (void)onAnlExpand:(id)sender {
@@ -1824,13 +2362,12 @@ static NSString *RLPRailTagText(id srValue, id bitsValue) {
 }
 
 - (void)anlOpenLevel:(RLPAnlLevel)level {
- self.anlLevel=level;BOOL open=level!=RLPAnlLevelCollapsed;
- self.anlDetailScroll.hidden=!open;self.anlReanalyze.hidden=!open;
- for(NSButton *button in @[self.anlDyn,self.anlQual,self.anlFake])button.hidden=open;
- self.anlExpand.title=level==RLPAnlLevelCollapsed?RLPTr(@"详细"):(level==RLPAnlLevelMetrics?RLPTr(@"全部指标"):RLPTr(@"收起"));[self anlPaint];
+    self.anlLevel = level;
+    [self anlPaint];
 }
 
 /// 只刷文案，不重新取数（0.8s 轮询会调它，绝不能在这里发分析请求）。
+/// 展开档的数据全部来自 RLPAnlRowsForCard（health → 行），UI 只排版、不算指标。
 - (void)anlPaint {
     NSDictionary *h = self.anlHealth;
     NSString *dyn = RLPAnlSumDyn(h), *qual = RLPAnlSumQual(h), *fake = RLPAnlSumFake(h);
@@ -1845,20 +2382,50 @@ static NSString *RLPRailTagText(id srValue, id bitsValue) {
     } else if (!h) {
         dyn = qual = fake = RLPTr(@"未分析");
     }
-    ((RLPAnalysisCard *)self.anlDyn).cardTitle = RLPTr(@"动态");
-    ((RLPAnalysisCard *)self.anlDyn).cardSummary = dyn;
-    ((RLPAnalysisCard *)self.anlQual).cardTitle = RLPTr(@"音质");
-    ((RLPAnalysisCard *)self.anlQual).cardSummary = qual;
-    ((RLPAnalysisCard *)self.anlFake).cardTitle = RLPTr(@"假无损");
-    ((RLPAnalysisCard *)self.anlFake).cardSummary = fake;
+    // 徽标：web anlCardDyn 在 channels>2 出「多声道 N ch」，anlCardFake 在 fake24 出「24bit 可疑」。
+    NSString *dynBadge = nil;
+    if (h && RLPAnlAvail(h[@"channels"]) && [h[@"channels"] doubleValue] > 2.0)
+        dynBadge = [NSString stringWithFormat:@"%@ %@ ch", RLPTr(@"多声道"), RLPAnlCount(h[@"channels"])];
+    NSString *fakeBadge = nil;
+    if (h && [h[@"fake24"] isKindOfClass:[NSNumber class]] && [h[@"fake24"] boolValue])
+        fakeBadge = RLPTr(@"24bit 可疑");
+
+    const NSInteger lvl = (NSInteger)self.anlLevel;
+    NSArray<NSDictionary *> *dynRows = h ? RLPAnlRowsForCard(h, @"dyn", lvl) : @[];
+    NSArray<NSDictionary *> *qualRows = h ? RLPAnlRowsForCard(h, @"qual", lvl) : @[];
+    NSArray<NSDictionary *> *fakeRows = h ? RLPAnlRowsForCard(h, @"fake", lvl) : @[];
+
+    [self.anlDyn applyTitle:RLPTr(@"动态") summary:dyn badge:dynBadge];
+    [self.anlQual applyTitle:RLPTr(@"音质") summary:qual badge:nil];
+    [self.anlFake applyTitle:RLPTr(@"假无损") summary:fake badge:fakeBadge];
+    [self.anlDyn applyRows:dynRows level:lvl];
+    [self.anlQual applyRows:qualRows level:lvl];
+    [self.anlFake applyRows:fakeRows level:lvl];
     self.anlDyn.toolTip = dyn; self.anlQual.toolTip = qual; self.anlFake.toolTip = fake;
 
-    self.analysisStatus.stringValue=[NSString stringWithFormat:@"%@ · %@",RLPTr(@"音频分析"),self.anlBusy?RLPTr(@"分析中…"):(self.anlError?: (h?RLPTr(@"已分析"):RLPTr(@"未分析")))];
-    self.anlAuto.state=self.anlAutoEnabled?NSControlStateValueOn:NSControlStateValueOff;
-    if (self.anlLevel == RLPAnlLevelCollapsed) { self.anlDetail.string = @""; return; }
-    // 详情文本是纯函数（RLPAnalysisSummary）：同一份 health 永远同一份输出，可离线单测。
-    self.anlDetail.string = RLPAnlDetailText(h, (NSInteger)self.anlLevel, self.anlCached,
-                                             self.anlError, self.currentPath);
+    // 状态：标题已独立成「音频分析」，这里只说状态（web #npAnlStat 的语义）。
+    NSString *stat;
+    if (self.anlBusy) stat = RLPTr(@"分析中…");
+    else if (self.anlError.length) stat = [NSString stringWithFormat:@"%@：%@", RLPTr(@"分析失败"), self.anlError];
+    else if (!self.currentPath.length) stat = RLPTr(@"未播放");
+    else if (!RLPAnlIsLocalPath(self.currentPath)) stat = RLPTr(@"仅本地文件可分析");
+    else if (!h) stat = RLPTr(@"未分析");
+    else stat = self.anlCached ? RLPTr(@"缓存命中") : RLPTr(@"已分析");
+    self.analysisStatus.stringValue = stat;
+    self.anlAuto.state = self.anlAutoEnabled ? NSControlStateValueOn : NSControlStateValueOff;
+    [self anlUpdateSegmentTitles];
+
+    // 有 health ⟹ 三卡可见 + 卡内指标（不再藏卡换文本）；
+    // 无 health（未播放/未分析/失败）⟹ 等价信息仍以纯文本解释呈现，信息不丢。
+    const BOOL showBlob = (self.anlLevel != RLPAnlLevelCollapsed && !h);
+    self.anlBody.hidden = showBlob;
+    self.anlDetailScroll.hidden = !showBlob;
+    self.anlReanalyze.hidden = (self.anlLevel == RLPAnlLevelCollapsed);
+    if (showBlob)
+        self.anlDetail.string = RLPAnlDetailText(h, lvl, self.anlCached, self.anlError, self.currentPath);
+    else
+        self.anlDetail.string = @"";
+    [self layoutWebPlayback];
 }
 
 /// 真的取数。**只由切歌自动分析或用户点「重新分析」触发**，绝不进轮询。
@@ -1912,7 +2479,22 @@ static NSString *RLPRailTagText(id srValue, id bitsValue) {
     self.titleLabel2.textColor=t.text;self.artistLabel2.textColor=t.mut;self.metaLabel.textColor=t.mut2;self.kindLabel.textColor=t.mut2;
     self.railTitle.textColor=t.mut2;self.analysisStatus.textColor=t.mut2;self.lyricsEmpty.textColor=t.mut2;
     for(NSView *p in @[self.analysisPanel,self.railPanel]){p.wantsLayer=YES;p.layer.cornerRadius=14;p.layer.borderWidth=1;p.layer.borderColor=t.line.CGColor;p.layer.backgroundColor=[t.isLight?[NSColor colorWithSRGBRed:15/255. green:23/255. blue:42/255. alpha:.04]:[NSColor colorWithWhite:1 alpha:.045] CGColor];}
-    for(NSButton *b in @[self.anlDyn,self.anlQual,self.anlFake]){b.layer.backgroundColor=t.bg.CGColor;b.layer.borderColor=t.line.CGColor;b.contentTintColor=t.text2;}
+    // 头部：独立 9.5/700/kern1.5 标题（web .anllab）；分段控件一个外框 + 内部发丝分隔。
+    {
+        NSMutableParagraphStyle *ps=[[NSMutableParagraphStyle alloc] init];ps.lineBreakMode=NSLineBreakByTruncatingTail;
+        self.anlLab.attributedStringValue=[[NSAttributedString alloc] initWithString:RLPTr(@"音频分析")
+            attributes:@{NSFontAttributeName:[NSFont systemFontOfSize:9.5 weight:NSFontWeightBold],
+                         NSForegroundColorAttributeName:t.mut2,
+                         NSKernAttributeName:@1.5,
+                         NSParagraphStyleAttributeName:ps}];
+    }
+    self.anlLab.font=[NSFont systemFontOfSize:9.5 weight:NSFontWeightBold];
+    self.anlSeg.layer.backgroundColor=t.hov.CGColor;
+    self.anlSeg.layer.borderColor=t.line.CGColor;
+    self.anlSep1.layer.backgroundColor=t.line.CGColor;
+    self.anlSep2.layer.backgroundColor=t.line.CGColor;
+    [self anlUpdateSegmentTitles];
+    for(RLPAnlCardView *c in @[self.anlDyn,self.anlQual,self.anlFake])[c applyTheme];
     for(RLPRailChipView *b in self.railCards){[b applyTheme];b.layer.borderColor=t.line.CGColor;}
     self.anlDetail.textColor=t.text;[self.webControls applyTheme];self.webControls.playBtn.layer.backgroundColor=t.accent.CGColor;self.webControls.playBtn.contentTintColor=NSColor.whiteColor;
     [self.knowledge applyTheme];[self renderRailMetadata];[self updateLyricPosition:self.webStatus.position];[self updateBlurredCover];

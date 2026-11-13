@@ -352,6 +352,23 @@ if(APPLE)
   add_test(NAME native_rail_preview COMMAND test_native_rail_preview)
   set_tests_properties(native_rail_preview PROPERTIES TIMEOUT 120)
 
+  # 「正在播放 · 音频分析面板」web #npAnal 对齐判据：头部独立标题/右对齐状态/单一边框
+  # 分段控件（C1 同源几何）+ L0 摘要卡（标题 10.5/摘要 11.5/内边距 7-9-8/多声道徽标
+  # + 高度随内容生长）+ 展开档 L1/L2 仍保留三卡并在卡内长出 2 列指标网格（旧码是
+  # 「隐藏三卡 + 一块纯文本 blob」）。对 1.1.7.24 先跑红，改完再跑绿。
+  add_executable(test_native_analysis_panel tests/test_native_analysis_panel.mm
+    tools/native_ui/RLPNowPlayingViewController.mm tools/native_ui/RLPPageViewController.mm
+    tools/native_ui/RLPSupport.mm tools/native_ui/RLPModels.mm
+    tools/native_ui/RLPTheme.mm tools/native_ui/RLPNativeI18n.mm
+    tools/native_ui/RLPKnowledgeView.mm tools/native_ui/RLPAnalysisSummary.mm
+    tools/native_ui/RLPLyrics.mm tools/native_ui/RLPTrackActions.mm)
+  target_compile_options(test_native_analysis_panel PRIVATE -fobjc-arc)
+  target_include_directories(test_native_analysis_panel PRIVATE src tools tools/native_ui)
+  target_link_libraries(test_native_analysis_panel PRIVATE
+    "-framework AppKit" "-framework QuartzCore" "-framework CoreImage")
+  add_test(NAME native_analysis_panel COMMAND test_native_analysis_panel)
+  set_tests_properties(native_analysis_panel PROPERTIES TIMEOUT 120)
+
   # 第12项「标签写回」结构+几何判据：真设置页（隔离目录、backend=null）、离屏、不出声。
   add_executable(test_native_writeback_card tests/test_native_writeback_card.mm
     tools/native_ui/RLPSettingsViewController.mm tools/native_ui/RLPSettingsLayout.mm

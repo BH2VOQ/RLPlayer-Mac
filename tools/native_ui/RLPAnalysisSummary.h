@@ -63,6 +63,27 @@ NSDictionary *_Nullable RLPAnlUnwrapHealth(NSDictionary *_Nullable json);
 NSString *RLPAnlDetailText(NSDictionary *_Nullable health, NSInteger level, BOOL cached,
                            NSString *_Nullable error, NSString *_Nullable path);
 
+// ---------------------------------------------------------------------------
+// 展开档「每张卡」的指标行模型（web anlCardDyn / anlCardQual / anlCardFake 的移植）
+//
+// 为什么要有这个 API：web 的展开档不是一块纯文本，而是**三张卡各自长出 2 列指标网格**。
+// 行模型是「health → 行」的唯一出口，UI 只负责排版（不自己算指标、不写死文案），
+// 这样同一份 health 的行内容可以在离线单测里逐条钉住。
+//
+// 返回值元素是 NSDictionary，k 区分四类：
+//   sec  @{k:"sec",  t:分组标题}                       —— web .anlsec（带顶部 1px 规则）
+//   row  @{k:"row",  l:标签, v:值, na:BOOL, warn:BOOL, wide:BOOL}
+//                                                     —— web .anlml（wide = NA 长原因整行独占）
+//   warn @{k:"warn", t:主文, h:提示}                    —— web .anlwarn（真峰过载）
+//   note @{k:"note", t:文本}                            —— web .anlnote / .anlwh
+// 值全部由 health 字段推导；不可用一律 NA（带原因），绝不编造数值。
+//
+// cardKey ∈ "dyn" / "qual" / "fake"；level 0 = 收起档（只有 dyn 的真峰警告），
+// 1 = 关键指标，2 = 全量 + 原始证据（与 web anlSetLvl 的三档同口径）。
+NSArray<NSDictionary *> *_Nonnull RLPAnlRowsForCard(NSDictionary *_Nullable health,
+                                                    NSString *_Nonnull cardKey,
+                                                    NSInteger level);
+
 /// 是否本地文件（可分析）。流媒体/远端路径不可分析。
 BOOL RLPAnlIsLocalPath(NSString *_Nullable path);
 

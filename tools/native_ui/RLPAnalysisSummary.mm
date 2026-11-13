@@ -253,6 +253,377 @@ NSString *RLPAnlDetailText(NSDictionary *health, NSInteger level, BOOL cached,
     return s;
 }
 
+// ---------------------------------------------------------------------------
+// 展开档「每张卡」的指标行模型（web anlCardDyn/anlCardQual/anlCardFake 的移植）
+//
+// 口径全部来自 web src/net/ui_script.h 的 anl*V 系列（:8177-8350）：
+//   * *_available=false ⟹ NA（原因），绝不拿哨兵/缺失当 0；
+//   * 真峰 >0 才带 "+" 与 warn（母带过载）；
+//   * cutoff_hz=0 是「未检出陡沿」，不是「0 kHz 带宽」；
+//   * signalw：NA 文案长于 8 字才整行独占（两列网格的节奏不被长原因打乱）。
+// ---------------------------------------------------------------------------
+static NSString *AnlNA_(NSString *why) {
+    return why.length ? [NSString stringWithFormat:@"NA（%@）", why] : @"NA";
+}
+static NSDictionary *AnlRow(NSString *label, NSString *value, BOOL na, BOOL warn) {
+    NSString *v = value ?: @"NA";
+    return @{ @"k": @"row", @"l": label ?: @"",
+              @"v": v, @"na": @(na), @"warn": @(warn),
+              @"wide": @(na && v.length > 8) };
+}
+static NSDictionary *AnlSec(NSString *title) { return @{ @"k": @"sec", @"t": title ?: @"" }; }
+static NSDictionary *AnlWarn(NSString *text, NSString *hint) {
+    return @{ @"k": @"warn", @"t": text ?: @"", @"h": hint ?: @"" };
+}
+static NSDictionary *AnlNote(NSString *text) { return @{ @"k": @"note", @"t": text ?: @"" }; }
+
+static NSDictionary *AnlQ(NSDictionary *h) {
+    id q = h[@"quality"];
+    return [q isKindOfClass:[NSDictionary class]] ? q : @{};
+}
+/// 旗标只认显式 false（缺失视为未知），与 RLPAnlValFlag 同口径。
+static BOOL AnlFlagOK(id flag) {
+    return ![flag isKindOfClass:[NSNumber class]] || [(NSNumber *)flag boolValue];
+}
+/// *_available=false 的数值行：NA 必须带原因（"素材过短"），不是光秃秃的 NA。
+static NSDictionary *AnlValRow(NSDictionary *h, NSString *label,
+                               NSString *key, NSString *flagKey,
+                               NSInteger digits, NSString *unit, NSString *why) {
+    if (!AnlFlagOK(h[flagKey])) return AnlRow(label, AnlNA_(why), YES, NO);
+    NSString *v = RLPAnlVal(h[key], digits, unit);
+    return AnlRow(label, v, [v isEqualToString:@"NA"], NO);
+}
+
+/// web anlVerV：判定（不是整段摘要，摘要里可能还带截止频率）
+static NSString *AnlVerdict(NSDictionary *h) {
+    id st = h[@"status"];
+    if ([st isKindOfClass:[NSString class]] && [(NSString *)st length] && ![st isEqualToString:@"ready"])
+        return RLPTr(@"分析未完成");
+    if ([h[@"lossless_suspected"] isKindOfClass:[NSNumber class]] && [h[@"lossless_suspected"] boolValue])
+        return RLPTr(@"疑似有损转码");
+    // 有截止但置信度不足：说"证据不足"，不要冒充"未发现"。
+    if (RLPAnlAvail(h[@"cutoff_hz"]) && [h[@"cutoff_hz"] doubleValue] > 0 &&
+        RLPAnlAvail(h[@"confidence"]) && [h[@"confidence"] doubleValue] < 0.5)
+        return [NSString stringWithFormat:@"%@ %ld%%", RLPTr(@"证据不足 · 置信度"),
+                (long)lround([h[@"confidence"] doubleValue] * 100.0)];
+    return RLPTr(@"未发现");
+}
+/// web anlCutoffV：cutoff=0/缺失 ⟹ 未检出（不是 0.0 kHz）。
+static NSString *AnlCutoffV(NSDictionary *h) {
+    if (!RLPAnlAvail(h[@"cutoff_hz"]) || [h[@"cutoff_hz"] doubleValue] <= 0) return RLPTr(@"未检出");
+    return [NSString stringWithFormat:@"%.1f kHz", [h[@"cutoff_hz"] doubleValue] / 1000.0];
+}
+static NSString *AnlConfV(NSDictionary *h) {
+    if (!RLPAnlAvail(h[@"confidence"])) return @"NA";
+    const double c = [h[@"confidence"] doubleValue];
+    return [NSString stringWithFormat:@"%.0f%%", c <= 1.0001 ? c * 100.0 : c];
+}
+static NSString *AnlDurV(NSDictionary *h) {
+    return RLPAnlVal(h[@"duration_sec"], 1, @" s");
+}
+static NSString *AnlClockOf(id msValue) {
+    if (!RLPAnlAvail(msValue) || [msValue doubleValue] <= 0) return @"NA";
+    NSDate *d = [NSDate dateWithTimeIntervalSince1970:[msValue doubleValue] / 1000.0];
+    NSDateFormatter *f = [[NSDateFormatter alloc] init];
+    f.dateFormat = @"HH:mm";
+    return [f stringFromDate:d];
+}
+static NSString *AnlChannelsV(NSDictionary *h) {
+    if (!RLPAnlAvail(h[@"channels"])) return @"NA";
+    return [NSString stringWithFormat:@"%@ ch", RLPAnlCount(h[@"channels"])];
+}
+static BOOL AnlHfAvail(NSDictionary *h, NSDictionary *q) {
+    id flag = q[@"hf_ratio_10k_available"];
+    if ([flag isKindOfClass:[NSNumber class]]) return [(NSNumber *)flag boolValue];
+    return RLPAnlAvail(h[@"fs"]) && [h[@"fs"] doubleValue] > 20000.0;
+}
+static NSString *AnlHfV(NSDictionary *h, NSDictionary *q) {
+    if (!AnlHfAvail(h, q)) return AnlNA_(RLPTr(@"采样率 ≤20 kHz"));
+    return RLPAnlVal(q[@"hf_ratio_10k_db"], 2, @" dB");
+}
+static BOOL AnlSideAvail(NSDictionary *h, NSDictionary *q) {
+    id flag = q[@"side_mid_available"];
+    if ([flag isKindOfClass:[NSNumber class]]) return [(NSNumber *)flag boolValue];
+    return RLPAnlAvail(h[@"channels"]) ? [h[@"channels"] doubleValue] <= 2.0 : YES;
+}
+/// web anlCorrV / anlMonoLossV / anlSideMidV：多声道一律 NA（多声道）
+static NSString *AnlStereoV(NSDictionary *h, NSDictionary *q, NSString *key, NSInteger digits, NSString *unit) {
+    if (RLPAnlAvail(h[@"channels"]) && [h[@"channels"] doubleValue] > 2.0) return AnlNA_(RLPTr(@"多声道"));
+    if (![q[@"stereo"] isKindOfClass:[NSNumber class]] || ![q[@"stereo"] boolValue])
+        return AnlNA_(RLPTr(@"单声道素材"));
+    if (!AnlSideAvail(h, q)) return @"NA";
+    return RLPAnlVal(q[key], digits, unit);
+}
+/// web anlClipV：计数类 0 是真实值；>0 是警告（琥珀）。
+static NSString *AnlClipV(NSDictionary *q, BOOL *warn) {
+    if (warn) *warn = NO;
+    id n = q[@"clipped_samples"];
+    if (![n isKindOfClass:[NSNumber class]] || !isfinite([(NSNumber *)n doubleValue])) return @"NA";
+    const double v = [(NSNumber *)n doubleValue];
+    if (v <= 0) return @"0";
+    if (warn) *warn = YES;
+    NSString *pct = RLPAnlAvail(q[@"clipped_pct"])
+        ? [NSString stringWithFormat:@"（%.3f%%）", [q[@"clipped_pct"] doubleValue]] : @"";
+    return [NSString stringWithFormat:@"%@ %@%@", RLPAnlCount(n), RLPTr(@"个样本"), pct];
+}
+static NSDictionary *AnlClipRow(NSDictionary *q, NSString *label) {
+    BOOL warn = NO;
+    NSString *v = AnlClipV(q, &warn);
+    return AnlRow(label, v, [v isEqualToString:@"NA"], warn);
+}
+/// web anlLongestV：>=3 样本才算需要提醒的连续削波
+static NSDictionary *AnlLongestRow(NSDictionary *q, NSString *label) {
+    id n = q[@"longest_clip_run"];
+    if (![n isKindOfClass:[NSNumber class]] || !isfinite([(NSNumber *)n doubleValue]))
+        return AnlRow(label, @"NA", YES, NO);
+    const double v = [(NSNumber *)n doubleValue];
+    if (v <= 0) return AnlRow(label, @"0", NO, NO);
+    return AnlRow(label, [NSString stringWithFormat:@"%@ %@", RLPAnlCount(n), RLPTr(@"个样本")], NO, v >= 3);
+}
+static NSDictionary *AnlRunsRow(NSDictionary *q, NSString *label) {
+    id n = q[@"clipped_runs"];
+    if (![n isKindOfClass:[NSNumber class]] || !isfinite([(NSNumber *)n doubleValue]))
+        return AnlRow(label, @"NA", YES, NO);
+    const double v = [(NSNumber *)n doubleValue];
+    if (v <= 0) return AnlRow(label, @"0", NO, NO);
+    return AnlRow(label, [NSString stringWithFormat:@"%@ %@", RLPAnlCount(n), RLPTr(@"段削波")], NO, YES);
+}
+static NSDictionary *AnlThdnRow(NSDictionary *q, NSString *label) {
+    if (!AnlFlagOK(q[@"thdn_available"])) return AnlRow(label, AnlNA_(RLPTr(@"多峰素材")), YES, NO);
+    if (!RLPAnlAvail(q[@"thdn_db"])) return AnlRow(label, @"NA", YES, NO);
+    NSString *pct = RLPAnlAvail(q[@"thdn_pct"])
+        ? [NSString stringWithFormat:@"（%.3f%%）", [q[@"thdn_pct"] doubleValue]] : @"";
+    return AnlRow(label, [NSString stringWithFormat:@"%.2f dB%@", [q[@"thdn_db"] doubleValue], pct], NO, NO);
+}
+static NSDictionary *AnlImdRow(NSDictionary *q, NSString *label) {
+    if (!AnlFlagOK(q[@"imd_available"])) return AnlRow(label, AnlNA_(RLPTr(@"需双音素材")), YES, NO);
+    NSString *v = RLPAnlVal(q[@"imd_db"], 2, @" dB");
+    return AnlRow(label, v, [v isEqualToString:@"NA"], NO);
+}
+static NSDictionary *AnlWarnRowForTruePeak(NSDictionary *h) {
+    if (!AnlFlagOK(h[@"true_peak_available"])) return nil;
+    if (!RLPAnlAvail(h[@"true_peak_dbtp"]) || [h[@"true_peak_dbtp"] doubleValue] <= 0) return nil;
+    const double v = [h[@"true_peak_dbtp"] doubleValue];
+    return AnlWarn([NSString stringWithFormat:@"%@ %@%.2f dBTP", RLPTr(@"母带要修"), v > 0 ? @"+" : @"", v],
+                   RLPTr(@"样本峰值只反映采样点，采样点之间的峰值只有真峰能看见"));
+}
+
+static NSArray *AnlRowsDyn(NSDictionary *h, NSInteger L) {
+    NSMutableArray *a = [NSMutableArray array];
+    NSDictionary *warn = AnlWarnRowForTruePeak(h);
+    if (L <= 0) { if (warn) [a addObject:warn]; return a; }
+
+    [a addObject:AnlSec(RLPTr(@"动态"))];
+    [a addObject:AnlValRow(h, RLPTr(@"动态范围 DR"), @"dr_db", @"dr_available", 2, @" dB", RLPTr(@"素材过短"))];
+    [a addObject:AnlValRow(h, RLPTr(@"响度 (LUFS)"), @"lufs", @"lufs_available", 2, @" LUFS", RLPTr(@"素材过短"))];
+    [a addObject:AnlValRow(h, RLPTr(@"响度范围 LRA"), @"lra", @"lra_available", 2, @" LU", RLPTr(@"素材过短"))];
+    {
+        // 真峰：>0 带 "+" 并按 warn 显示（这是"母带过载"的信号）
+        NSString *v = @"NA";
+        BOOL na = YES, hot = NO;
+        if (AnlFlagOK(h[@"true_peak_available"]) && RLPAnlAvail(h[@"true_peak_dbtp"])) {
+            const double tp = [h[@"true_peak_dbtp"] doubleValue];
+            v = [NSString stringWithFormat:@"%@%.2f dBTP", tp > 0 ? @"+" : @"", tp];
+            na = NO; hot = tp > 0;
+        }
+        [a addObject:AnlRow(RLPTr(@"真峰 (dBTP)"), v, na, hot)];
+    }
+    [a addObject:AnlRow(RLPTr(@"样本峰值"), RLPAnlVal(h[@"peak_dbfs"], 2, @" dBFS"),
+                        !RLPAnlAvail(h[@"peak_dbfs"]), NO)];
+    [a addObject:AnlRow(RLPTr(@"声道"), AnlChannelsV(h),
+                        [AnlChannelsV(h) isEqualToString:@"NA"], NO)];
+    if (warn) [a addObject:warn];
+
+    if (L >= 2) {
+        [a addObject:AnlSec(RLPTr(@"采样规格"))];
+        [a addObject:AnlRow(RLPTr(@"采样率"), RLPAnlVal(h[@"fs"], 0, @" Hz"),
+                            !RLPAnlAvail(h[@"fs"]), NO)];
+        [a addObject:AnlRow(RLPTr(@"位深"), RLPAnlVal(h[@"bits"], 0, @" bit"),
+                            !RLPAnlAvail(h[@"bits"]), NO)];
+        [a addObject:AnlRow(RLPTr(@"时长"), AnlDurV(h), !RLPAnlAvail(h[@"duration_sec"]), NO)];
+        [a addObject:AnlSec(RLPTr(@"分析记录"))];
+        [a addObject:AnlRow(RLPTr(@"分析状态"),
+                            [h[@"status"] isKindOfClass:[NSString class]] ? h[@"status"] : @"NA",
+                            ![h[@"status"] isKindOfClass:[NSString class]], NO)];
+        [a addObject:AnlRow(RLPTr(@"分析时刻"), AnlClockOf(h[@"analyzed_at_ms"]),
+                            [AnlClockOf(h[@"analyzed_at_ms"]) isEqualToString:@"NA"], NO)];
+        if ([h[@"error"] isKindOfClass:[NSString class]] && [h[@"error"] length])
+            [a addObject:AnlNote([NSString stringWithFormat:@"%@：%@", RLPTr(@"后端说明"), h[@"error"]])];
+    }
+    return a;
+}
+
+static NSArray *AnlRowsQual(NSDictionary *h, NSInteger L) {
+    NSMutableArray *a = [NSMutableArray array];
+    if (L <= 0) return a;
+    NSDictionary *q = AnlQ(h);
+    const BOOL qOK = [q[@"available"] isKindOfClass:[NSNumber class]] && [q[@"available"] boolValue];
+    if (!qOK) {
+        // 样本不足时不摆一堆无意义的数字（那正是"看着很专业其实是噪声"的来源）
+        [a addObject:AnlSec(RLPTr(@"可用性"))];
+        [a addObject:AnlRow(RLPTr(@"音质指标"), RLPTr(@"不适用（样本不足）"), YES, NO)];
+        [a addObject:AnlRow(RLPTr(@"谱窗数"), RLPAnlCount(q[@"spectral_windows"]),
+                            (BOOL)!RLPAnlAvail(q[@"spectral_windows"]), NO)];
+        [a addObject:AnlNote([q[@"note"] isKindOfClass:[NSString class]] && [q[@"note"] length]
+                             ? q[@"note"] : RLPTr(@"素材太短或静音占比过高，无法做稳定的频谱统计"))];
+        return a;
+    }
+
+    [a addObject:AnlSec(RLPTr(@"音质"))];
+    [a addObject:AnlClipRow(q, RLPTr(@"削波样本"))];
+    [a addObject:AnlLongestRow(q, RLPTr(@"最长连续削波"))];
+    [a addObject:AnlRow(RLPTr(@"峰值因子"), RLPAnlVal(q[@"crest_db"], 2, @" dB"),
+                        !RLPAnlAvail(q[@"crest_db"]), NO)];
+    [a addObject:AnlRow(RLPTr(@"信噪比"), RLPAnlVal(q[@"snr_db"], 2, @" dB"),
+                        !RLPAnlAvail(q[@"snr_db"]), NO)];
+    [a addObject:AnlRow(RLPTr(@"频谱重心"), RLPAnlVal(q[@"centroid_hz"], 0, @" Hz"),
+                        !RLPAnlAvail(q[@"centroid_hz"]), NO)];
+    [a addObject:AnlRow(RLPTr(@"本底噪声"), RLPAnlVal(q[@"noise_floor_dbfs"], 2, @" dBFS"),
+                        !RLPAnlAvail(q[@"noise_floor_dbfs"]), NO)];
+    [a addObject:AnlRow(RLPTr(@"10k 以上能量"), AnlHfV(h, q),
+                        [AnlHfV(h, q) hasPrefix:@"NA"], NO)];
+    {
+        NSString *corr = AnlStereoV(h, q, @"channel_corr", 3, @"");
+        [a addObject:AnlRow(RLPTr(@"立体声相关"), corr, [corr hasPrefix:@"NA"], NO)];
+    }
+
+    if (L >= 2) {
+        [a addObject:AnlSec(RLPTr(@"失真"))];
+        [a addObject:AnlThdnRow(q, RLPTr(@"THD+N"))];
+        [a addObject:AnlImdRow(q, RLPTr(@"互调失真 IMD"))];
+        [a addObject:AnlRow(RLPTr(@"非谐波残留"), RLPAnlVal(q[@"non_tonal_db"], 2, @" dB"),
+                            !RLPAnlAvail(q[@"non_tonal_db"]), NO)];
+        [a addObject:AnlRow(RLPTr(@"THD+N 方法"),
+                            [q[@"thdn_method"] isKindOfClass:[NSString class]] ? q[@"thdn_method"] : @"NA",
+                            ![q[@"thdn_method"] isKindOfClass:[NSString class]], NO)];
+
+        [a addObject:AnlSec(RLPTr(@"噪声"))];
+        [a addObject:AnlRow(RLPTr(@"频谱最小值"), RLPAnlVal(q[@"spectral_min_dbfs"], 2, @" dBFS"),
+                            !RLPAnlAvail(q[@"spectral_min_dbfs"]), NO)];
+        [a addObject:AnlRow(@"RMS", RLPAnlVal(q[@"rms_dbfs"], 2, @" dBFS"),
+                            !RLPAnlAvail(q[@"rms_dbfs"]), NO)];
+        [a addObject:AnlRow(RLPTr(@"静音占比"), RLPAnlVal(q[@"silence_pct"], 2, @"%"),
+                            !RLPAnlAvail(q[@"silence_pct"]), NO)];
+
+        [a addObject:AnlSec(RLPTr(@"频响"))];
+        [a addObject:AnlRow(RLPTr(@"频谱倾斜"), RLPAnlVal(q[@"tilt_db_per_oct"], 2, @" dB/oct"),
+                            !RLPAnlAvail(q[@"tilt_db_per_oct"]), NO)];
+        [a addObject:AnlRow(RLPTr(@"95% 滚降点"), RLPAnlVal(q[@"rolloff95_hz"], 0, @" Hz"),
+                            !RLPAnlAvail(q[@"rolloff95_hz"]), NO)];
+        [a addObject:AnlRow(RLPTr(@"10k 以上能量"), AnlHfV(h, q), [AnlHfV(h, q) hasPrefix:@"NA"], NO)];
+        [a addObject:AnlRow(RLPTr(@"频谱重心"), RLPAnlVal(q[@"centroid_hz"], 0, @" Hz"),
+                            !RLPAnlAvail(q[@"centroid_hz"]), NO)];
+
+        [a addObject:AnlSec(RLPTr(@"削波"))];
+        [a addObject:AnlClipRow(q, RLPTr(@"削波样本"))];
+        [a addObject:AnlRunsRow(q, RLPTr(@"削波段数"))];
+        [a addObject:AnlLongestRow(q, RLPTr(@"最长连续削波"))];
+        [a addObject:AnlRow(RLPTr(@"峰值因子"), RLPAnlVal(q[@"crest_db"], 2, @" dB"),
+                            !RLPAnlAvail(q[@"crest_db"]), NO)];
+
+        [a addObject:AnlSec(RLPTr(@"立体声"))];
+        {
+            NSString *corr = AnlStereoV(h, q, @"channel_corr", 3, @"");
+            [a addObject:AnlRow(RLPTr(@"声道相关"), corr, [corr hasPrefix:@"NA"], NO)];
+            NSString *mono = AnlStereoV(h, q, @"mono_loss_db", 2, @" dB");
+            [a addObject:AnlRow(RLPTr(@"单声道兼容损失"), mono, [mono hasPrefix:@"NA"], NO)];
+            NSString *sm = AnlStereoV(h, q, @"side_mid_db", 1, @" dB");
+            [a addObject:AnlRow(@"side/mid", sm, [sm hasPrefix:@"NA"], NO)];
+        }
+
+        [a addObject:AnlSec(RLPTr(@"动态细化"))];
+        [a addObject:AnlRow(@"P95−P10", RLPAnlVal(q[@"dyn_p95_p10_db"], 2, @" dB"),
+                            !RLPAnlAvail(q[@"dyn_p95_p10_db"]), NO)];
+        [a addObject:AnlRow(RLPTr(@"动态重心"), RLPAnlVal(q[@"dyn_centroid_dbfs"], 2, @" dBFS"),
+                            !RLPAnlAvail(q[@"dyn_centroid_dbfs"]), NO)];
+        [a addObject:AnlRow(RLPTr(@"安静段 P10"), RLPAnlVal(q[@"quiet_p10_dbfs"], 2, @" dBFS"),
+                            !RLPAnlAvail(q[@"quiet_p10_dbfs"]), NO)];
+        [a addObject:AnlRow(RLPTr(@"谱窗数"), RLPAnlCount(q[@"spectral_windows"]),
+                            (BOOL)!RLPAnlAvail(q[@"spectral_windows"]), NO)];
+        if ([q[@"note"] isKindOfClass:[NSString class]] && [q[@"note"] length])
+            [a addObject:AnlNote(q[@"note"])];
+    }
+    return a;
+}
+
+static NSArray *AnlRowsFake(NSDictionary *h, NSInteger L) {
+    NSMutableArray *a = [NSMutableArray array];
+    if (L <= 0) return a;
+    NSDictionary *q = AnlQ(h);
+
+    [a addObject:AnlSec(RLPTr(@"判定"))];
+    {
+        NSString *verdict = AnlVerdict(h);
+        BOOL hot = ([h[@"lossless_suspected"] isKindOfClass:[NSNumber class]] &&
+                    [h[@"lossless_suspected"] boolValue]);
+        [a addObject:AnlRow(RLPTr(@"判定"), verdict, NO, hot)];
+    }
+    [a addObject:AnlRow(RLPTr(@"截止频率"), AnlCutoffV(h), NO, NO)];
+    [a addObject:AnlRow(RLPTr(@"置信度"), AnlConfV(h), [AnlConfV(h) isEqualToString:@"NA"], NO)];
+    [a addObject:AnlRow(RLPTr(@"谱窗数"), RLPAnlCount(q[@"spectral_windows"]),
+                        (BOOL)!RLPAnlAvail(q[@"spectral_windows"]), NO)];
+    [a addObject:AnlRow(RLPTr(@"时长"), AnlDurV(h), !RLPAnlAvail(h[@"duration_sec"]), NO)];
+    {
+        const BOOL hasFake = [h[@"fake24"] isKindOfClass:[NSNumber class]];
+        const BOOL fake24 = hasFake && [h[@"fake24"] boolValue];
+        NSString *v = hasFake ? (fake24 ? RLPTr(@"是") : RLPTr(@"否")) : @"NA";
+        [a addObject:AnlRow(RLPTr(@"24bit 实为低位深"), v, !hasFake, fake24)];
+    }
+
+    if (L >= 2) {
+        [a addObject:AnlSec(RLPTr(@"原始证据"))];
+        [a addObject:AnlRow(@"lossless_suspected",
+                            [h[@"lossless_suspected"] isKindOfClass:[NSNumber class]]
+                                ? ([(NSNumber *)h[@"lossless_suspected"] boolValue] ? @"true" : @"false") : @"NA",
+                            ![h[@"lossless_suspected"] isKindOfClass:[NSNumber class]], NO)];
+        [a addObject:AnlRow(@"cutoff_hz", RLPAnlVal(h[@"cutoff_hz"], 1, @" Hz"),
+                            !RLPAnlAvail(h[@"cutoff_hz"]), NO)];
+        [a addObject:AnlRow(@"confidence", RLPAnlVal(h[@"confidence"], 3, @""),
+                            !RLPAnlAvail(h[@"confidence"]), NO)];
+        [a addObject:AnlRow(@"fs / 2",
+                            RLPAnlAvail(h[@"fs"])
+                                ? [NSString stringWithFormat:@"%lld Hz", (long long)llround([h[@"fs"] doubleValue] / 2.0)]
+                                : @"NA",
+                            !RLPAnlAvail(h[@"fs"]), NO)];
+        [a addObject:AnlRunsRow(q, RLPTr(@"削波段数"))];
+        [a addObject:AnlRow(RLPTr(@"削波占比"), RLPAnlVal(q[@"clipped_pct"], 3, @"%"),
+                            !RLPAnlAvail(q[@"clipped_pct"]), NO)];
+        [a addObject:AnlRow(@"RMS", RLPAnlVal(q[@"rms_dbfs"], 2, @" dBFS"),
+                            !RLPAnlAvail(q[@"rms_dbfs"]), NO)];
+        [a addObject:AnlRow(RLPTr(@"静音占比"), RLPAnlVal(q[@"silence_pct"], 2, @"%"),
+                            !RLPAnlAvail(q[@"silence_pct"]), NO)];
+        [a addObject:AnlRow(RLPTr(@"频谱倾斜"), RLPAnlVal(q[@"tilt_db_per_oct"], 2, @" dB/oct"),
+                            !RLPAnlAvail(q[@"tilt_db_per_oct"]), NO)];
+        [a addObject:AnlRow(RLPTr(@"95% 滚降点"), RLPAnlVal(q[@"rolloff95_hz"], 0, @" Hz"),
+                            !RLPAnlAvail(q[@"rolloff95_hz"]), NO)];
+        [a addObject:AnlThdnRow(q, RLPTr(@"THD+N"))];
+        [a addObject:AnlImdRow(q, RLPTr(@"互调失真 IMD"))];
+        [a addObject:AnlRow(RLPTr(@"非谐波残留"), RLPAnlVal(q[@"non_tonal_db"], 2, @" dB"),
+                            !RLPAnlAvail(q[@"non_tonal_db"]), NO)];
+        [a addObject:AnlRow(RLPTr(@"动态重心"), RLPAnlVal(q[@"dyn_centroid_dbfs"], 2, @" dBFS"),
+                            !RLPAnlAvail(q[@"dyn_centroid_dbfs"]), NO)];
+        [a addObject:AnlRow(@"P95−P10", RLPAnlVal(q[@"dyn_p95_p10_db"], 2, @" dB"),
+                            !RLPAnlAvail(q[@"dyn_p95_p10_db"]), NO)];
+    }
+    if ([h[@"reason"] isKindOfClass:[NSString class]] && [h[@"reason"] length]) {
+        [a addObject:AnlSec(RLPTr(@"判定依据"))];
+        [a addObject:AnlNote(h[@"reason"])];
+    }
+    if ([h[@"error"] isKindOfClass:[NSString class]] && [h[@"error"] length])
+        [a addObject:AnlNote([NSString stringWithFormat:@"%@：%@", RLPTr(@"后端说明"), h[@"error"]])];
+    return a;
+}
+
+NSArray<NSDictionary *> *RLPAnlRowsForCard(NSDictionary *health, NSString *cardKey, NSInteger level) {
+    const NSInteger L = MAX(0, MIN(2, level));
+    NSString *key = [cardKey isKindOfClass:[NSString class]] ? cardKey : @"";
+    if (![health isKindOfClass:[NSDictionary class]] || !health.count) return @[];
+    if ([key isEqualToString:@"dyn"]) return AnlRowsDyn(health, L);
+    if ([key isEqualToString:@"qual"]) return AnlRowsQual(health, L);
+    if ([key isEqualToString:@"fake"]) return AnlRowsFake(health, L);
+    return @[];
+}
+
 BOOL RLPAnlIsLocalPath(NSString *path) {
     if (![path isKindOfClass:[NSString class]] || !path.length) return NO;
     // 只认绝对本地路径；http(s)/流媒体协议一律不可分析（与 web 版 anlIsLocal 同口径）。
