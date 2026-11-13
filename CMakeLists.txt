@@ -304,6 +304,21 @@ if(APPLE)
   target_include_directories(test_native_bar_core PRIVATE src tools tools/native_ui)
   target_link_libraries(test_native_bar_core PRIVATE rlapp_core
     "-framework AppKit" "-framework MediaPlayer")
+  # 单层滚动 + EQ 曲线拖动（第6/7项）。**必须真实窗口响应链**：
+  # 上一轮的 EQ 拖动判据只调 applyDragEvent:（等于只测换算函数），
+  # 完全证明不了「真实鼠标事件能走到这个视图」——本轮换成 NSWindow sendEvent。
+  add_executable(test_native_scroll_eq tests/test_native_scroll_eq.mm
+    tools/native_ui/RLPEqualizerView.mm tools/native_ui/RLPSupport.mm
+    tools/native_ui/RLPModels.mm tools/native_ui/RLPTheme.mm
+    tools/native_ui/RLPNativeI18n.mm tools/native_ui/RLPTrackActions.mm
+    tools/native_ui/RLPAnalysisSummary.mm)
+  target_compile_options(test_native_scroll_eq PRIVATE -fobjc-arc)
+  target_include_directories(test_native_scroll_eq PRIVATE src tools tools/native_ui)
+  target_link_libraries(test_native_scroll_eq PRIVATE
+    "-framework AppKit" "-framework QuartzCore")
+  add_test(NAME native_scroll_eq COMMAND test_native_scroll_eq)
+  set_tests_properties(native_scroll_eq PROPERTIES TIMEOUT 120)
+
   add_test(NAME native_bar_core COMMAND test_native_bar_core)
   set_tests_properties(native_bar_core PROPERTIES
     ENVIRONMENT "PATH=${CMAKE_SOURCE_DIR}/build-mac/ffmpeg-lite:/usr/bin:/bin:/usr/sbin:/sbin"
