@@ -80,6 +80,21 @@
 @end
 
 // Keep NSSlider's native keyboard/accessibility/tracking, but not its OS-blue paint.
+/// 徽标文字：web `.badge` 有 letter-spacing（.badge .3px / #bpBadge .4px），
+/// NSTextField 属性里没有字距，必须走 attributedStringValue 才能有"高级感"。
+static void RLPSetBadgeText(NSTextField *label, NSString *text, NSColor *color, CGFloat kern) {
+    if (!label) return;
+    NSMutableParagraphStyle *ps = [[NSMutableParagraphStyle alloc] init];
+    ps.alignment = NSTextAlignmentCenter;
+    NSDictionary *attrs = @{
+        NSFontAttributeName: label.font ?: [NSFont systemFontOfSize:9.5],
+        NSForegroundColorAttributeName: color ?: NSColor.labelColor,
+        NSKernAttributeName: @(kern),
+        NSParagraphStyleAttributeName: ps,
+    };
+    label.attributedStringValue = [[NSAttributedString alloc] initWithString:text attributes:attrs];
+}
+
 @interface RLPBarSliderCell : NSSliderCell
 /// web #vol/#npVol 是原生 range 滑块：红色填充 + 白色胶囊滑块头，**滑块头右缘贴住轨道右端**。
 /// 旧实现画 10px 红圆点、填充一路画到最右 ⟹ 用户实测「最大音量不是直接拉到头的」。
@@ -574,6 +589,10 @@ static double RLPVolDbToPos(double db) {
     self.fmtBadge.textColor = t.accentText;
     self.fmtBadge.layer.borderColor = t.accentWeak.CGColor;
     self.fmtBadge.layer.backgroundColor = t.accentWeak.CGColor;
+    if (self.fmtBadge.attributedStringValue.length == 0)
+        RLPSetBadgeText(self.fmtBadge, self.fmtBadge.stringValue ?: @"--", t.accentText, 0.3);
+    if (self.bpBadge.attributedStringValue.length == 0)
+        RLPSetBadgeText(self.bpBadge, self.bpBadge.stringValue ?: @"", t.mut, 0.4);
     self.bpBadge.layer.borderColor = t.okLine.CGColor;   // web: 1px var(--ok-line)
     self.lyricBtn.contentTintColor = t.mut;
     self.chainBtn.contentTintColor = t.mut;
@@ -608,10 +627,13 @@ static double RLPVolDbToPos(double db) {
             color=output<input?t.warn:t.accent;
         }
     }
-    self.bpBadge.stringValue=RLPTr(text); self.bpBadge.hidden=NO;
+    self.bpBadge.hidden=NO;
     self.bpBadge.textColor=color;
-    // web #bpBadge：bp-yes 用 --ok-line 边框 + --ok-bg 底；其余态边框跟文字同色（currentColor）。
-    self.bpBadge.layer.borderColor=([state isEqual:@"yes"]?t.okLine:color).CGColor;
+    RLPSetBadgeText(self.bpBadge, RLPTr(text), color, 0.4);   // web #bpBadge letter-spacing:.4px
+    // web #bpBadge：bp-yes 用 --ok-line 边框 + --ok-bg 底；空态(.bp-idle) 用 --line；
+    // 其余态边框跟文字同色（currentColor）。
+    NSColor *border = [state length] ? ([state isEqual:@"yes"] ? t.okLine : color) : t.line;
+    self.bpBadge.layer.borderColor=border.CGColor;
     self.bpBadge.layer.backgroundColor=([state isEqual:@"yes"]?t.okBg:t.hov).CGColor;
     self.bpBadge.toolTip=tip.length?tip:([state length]?RLPTr(text):RLPTr(@"当前预设已保存，但尚未播放。bit-perfect 结论只对实际播放生效"));
     self.gpuBadge.hidden=!st.gpuUsed; self.gpuBadge.textColor=t.okText;
@@ -685,10 +707,11 @@ static double RLPVolDbToPos(double db) {
         NSString *kstr = (fabs(k - round(k)) < 1e-6)
             ? [NSString stringWithFormat:@"%.0fk", k]
             : [NSString stringWithFormat:@"%.1fk", k];
-        self.fmtBadge.stringValue = [NSString stringWithFormat:@"%@/%ld", kstr, (long)st.outBits];
+        RLPSetBadgeText(self.fmtBadge,
+                        [NSString stringWithFormat:@"%@/%ld", kstr, (long)st.outBits],
+                        [RLPTheme current].accentText, 0.3);   // web .badge letter-spacing:.3px
     } else {
-        self.fmtBadge.stringValue = @"--";
-    self.fmtBadge.identifier = @"pb.fmt";
+        RLPSetBadgeText(self.fmtBadge, @"--", [RLPTheme current].accentText, 0.3);
     }
 
     if (!self.progress.dragging) {

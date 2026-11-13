@@ -1514,6 +1514,36 @@ int RLPRunFunctionalAudit(NSString *outDir) {
             CK(fbMore != nil && fbMore.target && fbMore.action,
                "诊断页有「填写反馈」气泡窗入口且有 action", @"缺 sp_fbmore");
             CK(fbTextStillThere, "反馈正文仍在视图树里（收进隐藏容器，未删功能）", @"找不到 sp_fbtext");
+
+            // (5c) 气泡窗内容装配：离屏审计无法可靠显示 NSPopover（窗口不 key），
+            // 所以只验证"把同一批真实控件搬进气泡窗内容容器"这一步 —— 搬进去/搬回来都在同一批
+            // identifier 上，证明不是复制第二份控件、也不是只有入口没有内容。
+            if ([svm respondsToSelector:NSSelectorFromString(@"auditDiagPopoverContent")]) {
+                NSViewController *vc = [svm performSelector:NSSelectorFromString(@"auditDiagPopoverContent")];
+                BOOL contentHasAll = NO;
+                if (vc && [vc isKindOfClass:[NSViewController class]]) {
+                    NSMutableArray<NSView *> *pcv = [NSMutableArray array];
+                    CollectAllViews(vc.view, pcv);
+                    NSMutableSet<NSString *> *pids = [NSMutableSet set];
+                    for (NSView *v in pcv) if (v.identifier.length) [pids addObject:v.identifier];
+                    contentHasAll = [pids containsObject:@"sp_diagzip"] &&
+                                    [pids containsObject:@"sp_diagjson"] &&
+                                    [pids containsObject:@"sp_diagsummary"] &&
+                                    [pids containsObject:@"sp_diagupload"] &&
+                                    [pids containsObject:@"sp_diagsummarytext"];
+                }
+                CK(contentHasAll, "气泡窗内容容器里是同一批诊断控件（不是空壳/第二份）",
+                   @"内容容器里缺少 sp_diagzip 等");
+                [svm performSelector:NSSelectorFromString(@"auditRestoreDiagPopover")];
+                Pump(0.3);
+                NSMutableArray<NSView *> *restored = [NSMutableArray array];
+                CollectAllViews(svm.view, restored);
+                BOOL back = NO;
+                for (NSView *v in restored)
+                    if ([v.identifier isEqualToString:@"sp_diagzip"]) { back = YES; break; }
+                CK(back, "还原后诊断控件回到主窗口视图树（状态/identifier 不重复）",
+                   @"主视图树里找不到 sp_diagzip");
+            }
         }
 
         // (6) 文件夹页地址栏（web #fPath/#fGo/#fRoot）：旧实现只有只读路径文字

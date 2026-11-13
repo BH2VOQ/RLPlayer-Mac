@@ -721,7 +721,7 @@
         [self.stack.trailingAnchor constraintEqualToAnchor:self.trailingAnchor],
         [self.stack.topAnchor constraintEqualToAnchor:self.topAnchor],
     ]];
-    [self.heightAnchor constraintEqualToConstant:[self preferredContentHeight]].active = YES;
+    // 高度约束由宿主（设置页 fillEqualizer）持有，避免两边各加一条 required 约束互相冲突。
 }
 
 - (CGFloat)preferredContentHeight {

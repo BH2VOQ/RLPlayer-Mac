@@ -1505,15 +1505,21 @@ static NSString *RLPControlIdentifier(NSString *key) {
     }
 }
 
-- (void)onDiagMore:(NSButton *)sender {
-    if (self.diagPopover) { [self.diagPopover close]; return; }
+/// 把隐藏容器里的真实控件搬进一个气泡窗内容容器（不显示）。
+- (NSStackView *)detachPopoverContentFromBox:(NSStackView *)box {
     NSStackView *content = [[NSStackView alloc] init];
     content.orientation = NSUserInterfaceLayoutOrientationVertical;
     content.alignment = NSLayoutAttributeLeading;
     content.spacing = 10;
     content.translatesAutoresizingMaskIntoConstraints = NO;
     [content.widthAnchor constraintGreaterThanOrEqualToConstant:600].active = YES;
-    [self moveViewsFrom:self.diagToolsBox to:content];
+    [self moveViewsFrom:box to:content];
+    return content;
+}
+
+- (void)onDiagMore:(NSButton *)sender {
+    if (self.diagPopover) { [self.diagPopover close]; return; }
+    NSStackView *content = [self detachPopoverContentFromBox:self.diagToolsBox];
     NSViewController *vc = RLPCardController(content, 660, 120);
     self.diagPopover = RLPShowCardPopover(sender, vc, 660);
     self.diagPopover.delegate = self;
@@ -1522,17 +1528,24 @@ static NSString *RLPControlIdentifier(NSString *key) {
 
 - (void)onFbMore:(NSButton *)sender {
     if (self.fbPopover) { [self.fbPopover close]; return; }
-    NSStackView *content = [[NSStackView alloc] init];
-    content.orientation = NSUserInterfaceLayoutOrientationVertical;
-    content.alignment = NSLayoutAttributeLeading;
-    content.spacing = 10;
-    content.translatesAutoresizingMaskIntoConstraints = NO;
-    [content.widthAnchor constraintGreaterThanOrEqualToConstant:600].active = YES;
-    [self moveViewsFrom:self.fbBox to:content];
+    NSStackView *content = [self detachPopoverContentFromBox:self.fbBox];
     NSViewController *vc = RLPCardController(content, 660, 120);
     self.fbPopover = RLPShowCardPopover(sender, vc, 660);
     self.fbPopover.delegate = self;
     self.fbPopoverContent = content;
+}
+
+/// 审计入口：不显示气泡窗，只做「搬进内容容器」这一步 —— 证明气泡窗里的确实是同一批控件。
+- (NSViewController *)auditDiagPopoverContent {
+    if (self.diagPopover) return nil;
+    NSStackView *content = [self detachPopoverContentFromBox:self.diagToolsBox];
+    self.diagPopoverContent = content;
+    return RLPCardController(content, 660, 120);
+}
+
+- (void)auditRestoreDiagPopover {
+    if (self.diagPopoverContent) [self moveViewsFrom:self.diagPopoverContent to:self.diagToolsBox];
+    self.diagPopoverContent = nil;
 }
 
 - (void)popoverDidClose:(NSNotification *)note {
