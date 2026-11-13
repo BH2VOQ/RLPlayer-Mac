@@ -279,3 +279,18 @@ web max-height:720 的 margin 未移植；实机未验。
 
 **下一步**：轮次 5 = 队列页排序 8 档（含 CUE 区间保真与行播放）。
 （Lead 提交前复跑：ctest **190/190**，378.69s，`native-npmeta-chips-lead-ctest-190.log`；audit Lead 复跑 **246/0**。）
+
+### 2026-11-14 07:18 —— 轮次 5（1.1.7.28）：队列页排序 8 档 + CUE 区间保真
+
+**现场**：基线 `6d2d45d`（1.1.7.27）。原派发子代理在写文件前失败（工作树零残留），本包由 Lead 直接实现。
+**任务**：web #qSort 8 档（默认/标题/艺术家/专辑/时长/年份/随机打乱/反转）语义 + 按钮文案
++ qorder 行保留 `\tcs\tce` + 行播放 `RLPPlayPathCue(path,cs,ce)` + cues 解析。
+
+**红→绿**：新 ctest `native_queue_sort`（56 条）旧码 **21P/25F** → 新码 **56P/0F**；
+日志 `native-queue-sort-red-20261114.log` / `-green-20261114.log`；Lead 本人跑红绿。
+
+**门禁**：build 0 error；ctest / audit / parity / behavior / i18n 由最终门禁统一复跑回填。
+**证据**：`evidence/native-queue-sort-20261114.md`。
+**如实挂账**：队列行布局（.qrow 文件夹名/悬停×/行高 38/border-bottom）未移植，留作下一包；实机未验。
+
+**下一步**：轮次 6 = 队列行布局（web `.qrow`）或最终门禁收口。
