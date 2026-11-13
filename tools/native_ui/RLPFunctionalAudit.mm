@@ -44,6 +44,13 @@
 - (void)cardHoverChanged:(BOOL)on;
 @end
 
+/// 设置页 AI 模型刷新入口（审计用同一生产路径，不复制一份逻辑）。
+@interface NSObject (RLPLlmRefreshAudit)
+- (void)onLlmModelRefresh:(id)sender;
+- (void)loadLlmModels:(BOOL)force;
+- (void)loadLlmConfig;
+@end
+
 @interface RLPNowPlayingViewController (OfflineAuditProjection)
 - (void)applyLyricText:(NSString *)text forPath:(NSString *)path;
 - (void)updateLyricPosition:(double)pos;
@@ -956,6 +963,60 @@ int RLPRunFunctionalAudit(NSString *outDir) {
             // 清空，后面的断言从空队列开始（与 web 清空按钮同一端点）
             [[RLPCoreClient shared] postJSON:@"/api/clear" body:nil completion:nil];
             Pump(0.5);
+        }
+    }
+
+    // ---- ③b AI 换端点后「拉模型」必须按**屏幕上的地址**去拉（用户 2026-11-13 反馈）----
+    // 旧实现：后端 /api/llm/models 只读已落盘的 conf；界面改了地址没保存就点「拉模型」
+    // ⟹ 永远拿回旧端点的模型；而且强制重拉时旧列表没清空，看起来"还是原来那串"。
+    {
+        [wc.sidebar selectKey:@"settings"];
+        Pump(0.8);
+        RLPSettingsViewController *set = (RLPSettingsViewController *)wc.currentContent;
+        if ([set isKindOfClass:[RLPSettingsViewController class]]) {
+            [set selectPane:@"meta"];
+            Pump(0.8);
+            NSTextField *base = [set valueForKey:@"llmBase"];
+            NSTextField *key  = [set valueForKey:@"llmKey"];
+            NSPopUpButton *modelsPopup = [set valueForKey:@"llmModelPopup"];
+            NSTextField *modelText = [set valueForKey:@"llmModel"];
+            CK(base != nil && key != nil && modelsPopup != nil,
+               "设置·元数据页有接口地址/密钥/模型下拉（判据前提）", @"控件缺失");
+
+            // ① 强制重拉必须**先清空旧列表**（同步断言，不等网络）。
+            //    判据不能依赖"当前恰好是空列表"（那是恒真）：先塞两条**假的上一次结果**，
+            //    再调强制重拉，旧条目必须当场消失（旧实现不清 ⟹ 红）。
+            [modelsPopup removeAllItems];
+            [modelsPopup addItemWithTitle:@"deepseek-chat"];
+            [modelsPopup addItemWithTitle:@"deepseek-reasoner"];
+            modelsPopup.hidden = NO;
+            CK(modelsPopup.numberOfItems == 2, "判据前置：先放两条旧端点模型在列表里",
+               [NSString stringWithFormat:@"items=%ld", (long)modelsPopup.numberOfItems]);
+            [(id)set loadLlmModels:YES];
+            CK(modelsPopup.numberOfItems == 0 && modelsPopup.hidden,
+               "强制重拉被调用后旧模型列表立刻清空（不残留）",
+               [NSString stringWithFormat:@"items=%ld hidden=%d",
+                (long)modelsPopup.numberOfItems, (int)modelsPopup.hidden]);
+
+            // ② 屏幕上填一个新地址后点「拉模型」：必须先把该地址落盘（后端按 conf 拉），
+            //    否则拉取永远走旧端点。用本机不可达地址，失败得快（不会真联网）。
+            NSString *typed = @"https://127.0.0.1:1/v1";
+            base.stringValue = typed;
+            [(id)set onLlmModelRefresh:nil];
+            Pump(1.2);
+            NSDictionary *status = [[RLPCoreClient shared] jsonWithMethod:@"GET" path:@"/api/llm" body:nil];
+            NSString *savedBase = [status[@"baseUrl"] isKindOfClass:[NSString class]] ? status[@"baseUrl"] : @"";
+            CK([savedBase containsString:@"127.0.0.1:1"],
+               "点「拉模型」先把屏幕上的新地址落盘（后端才会按新端点拉）",
+               [NSString stringWithFormat:@"saved=%@", savedBase]);
+            // 拉取失败必须降级成手填 + 显示原因，且不擅自改用户当前 model
+            CK(modelsPopup.hidden, "新端点拉不到模型时降级手填（下拉隐藏）", @"下拉仍显示");
+            CK(modelText.stringValue.length > 0, "降级后模型输入框保留当前值（不擅自清空）",
+               modelText.stringValue);
+
+            // ③ 复原：把地址改回空态不方便（后端会保留旧值），这里只把 UI 复位到已落盘值
+            [set loadLlmConfig];
+            Pump(0.6);
         }
     }
 

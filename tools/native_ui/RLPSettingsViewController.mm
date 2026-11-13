@@ -331,6 +331,10 @@ static NSStackView *RLPSRow(NSString *label, NSView *control, NSString *hint, RL
 @property (nonatomic, strong) NSTimer *wbTimer;
 @property (nonatomic, strong) NSTimer *coverTimer;
 @property (nonatomic, strong) NSTextField *llmBase;
+/// 已落盘的接口地址（loadLlmConfig 读回）。用来判断「屏幕上的地址是否还没保存」。
+/// 为什么需要：后端 /api/llm/models 是从 conf 读地址的，UI 里改了地址却没点保存就点「拉模型」
+/// 会永远拿回**旧端点**的模型（用户 2026-11-13 反馈的原话：无论填什么端点的 url 都拉到原来端点的模型）。
+@property (nonatomic, copy) NSString *llmSavedBase;
 @property (nonatomic, strong) NSSecureTextField *llmKey;
 @property (nonatomic, strong) NSTextField *llmModel;
 @property (nonatomic, strong) NSPopUpButton *llmModelPopup;
@@ -1739,7 +1743,14 @@ static NSString *RLPControlIdentifier(NSString *key) {
 /// 拉取模型列表。纪律与 web 一致：拉不到降级手填、不擅自改用户当前 model、选中即保存。
 - (void)loadLlmModels:(BOOL)force {
     if (![RLPCoreClient shared].started || !self.llmModelPopup) return;
-    if (force) self.llmModelMsg.stringValue = RLPTr(@"正在重新拉取模型列表…");
+    if (force) {
+        // 强制重拉时**先把旧列表清空**：换端点后旧模型还挂在下拉里，
+        // 用户看到的就是「还是原来那一串」（2026-11-13 反馈的另一半）。
+        [self.llmModelPopup removeAllItems];
+        self.llmModelPopup.hidden = YES;
+        self.llmModelMsg.stringValue = RLPTr(@"正在重新拉取模型列表…");
+        self.llmModelMsg.textColor = [RLPTheme current].mut;
+    }
     NSString *url = force ? @"/api/llm/models?refresh=1" : @"/api/llm/models";
     __weak __typeof__(self) weakSelf = self;
     [[RLPCoreClient shared] getJSON:url completion:^(NSDictionary * _Nullable json) {
@@ -1795,7 +1806,21 @@ static NSString *RLPControlIdentifier(NSString *key) {
     }];
 }
 
-- (void)onLlmModelRefresh:(id)sender { (void)sender; [self loadLlmModels:YES]; }
+- (void)onLlmModelRefresh:(id)sender {
+    (void)sender;
+    // 后端 /api/llm/models 从 conf 读地址：屏幕上改了地址却没保存时，直接刷新会拿回**旧端点**的模型。
+    // 所以这里先判断「屏幕值 vs 已落盘值」，有差异就先走保存（保存成功后自己会强制重拉）。
+    NSString *typedBase = [self.llmBase.stringValue stringByTrimmingCharactersInSet:
+                           [NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    NSString *typedKey  = [self.llmKey.stringValue stringByTrimmingCharactersInSet:
+                           [NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    const BOOL baseChanged = typedBase.length && ![typedBase isEqualToString:self.llmSavedBase ?: @""];
+    if (baseChanged || typedKey.length) {
+        [self onLlmSave:nil];   // 同一条保存路径：落盘 → 强制重拉 models → 静默测连通
+        return;
+    }
+    [self loadLlmModels:YES];
+}
 
 /// 手填模型回车即保存（只发 model=，不动 base/key）。留空不写，避免把已存模型清空。
 - (void)onLlmModelTyped:(NSTextField *)sender {
@@ -2050,7 +2075,10 @@ static NSInteger RLPSearchIndexForProviderId(NSString *pid) {
         __typeof__(self) self_ = weakSelf;
         if (!self_ || !json) return;
         // 只覆盖响应里真有的字段（POST 回包与 GET 未必同形，缺字段不当成清空）
-        if ([json[@"baseUrl"] isKindOfClass:[NSString class]]) self_.llmBase.stringValue = json[@"baseUrl"];
+        if ([json[@"baseUrl"] isKindOfClass:[NSString class]]) {
+            self_.llmBase.stringValue = json[@"baseUrl"];
+            self_.llmSavedBase = json[@"baseUrl"];   // 「拉模型」要能判断屏幕上的地址是否已落盘
+        }
         if ([json[@"model"] isKindOfClass:[NSString class]]) self_.llmModel.stringValue = json[@"model"];
         NSString *masked = [json[@"masked"] isKindOfClass:[NSString class]] ? json[@"masked"] : @"";
         const BOOL configured = [json[@"configured"] respondsToSelector:@selector(boolValue)] && [json[@"configured"] boolValue];
