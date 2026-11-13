@@ -67,6 +67,8 @@ static NSString * const kColAdd = @"ColAdd";
     NSInteger _searchSeq;
     NSTimer *_debounceTimer;
     NSMutableSet<NSString *> *_favoritePaths;   // /api/fav/list 的路径集合（心形实心/空心）
+    NSString *_trackSort;                       // web S.trackSort：default/title/artist/album/dur/year/fav
+    NSPopUpButton *_sortPopup;
 }
 
 - (instancetype)init {
@@ -78,6 +80,7 @@ static NSString * const kColAdd = @"ColAdd";
         _hasLoaded = NO;
         _searchSeq = 0;
         _favoritePaths = [NSMutableSet set];
+        _trackSort = @"default";
     }
     return self;
 }
@@ -91,6 +94,7 @@ static NSString * const kColAdd = @"ColAdd";
         _hasLoaded = NO;
         _searchSeq = 0;
         _favoritePaths = [NSMutableSet set];
+        _trackSort = @"default";
     }
     return self;
 }
@@ -112,6 +116,25 @@ static NSString * const kColAdd = @"ColAdd";
     _searchField.action = @selector(onSearchFieldAction:);
     _searchField.translatesAutoresizingMaskIntoConstraints = NO;
     [container addSubview:_searchField];
+
+    // 1b. 排序下拉（web track-sort：默认/标题/艺术家/专辑/时长/年份/收藏优先），贴右上角。
+    _sortPopup = [[NSPopUpButton alloc] initWithFrame:NSZeroRect pullsDown:NO];
+    _sortPopup.identifier = @"tracks.sort";
+    _sortPopup.font = [NSFont systemFontOfSize:12];
+    _sortPopup.translatesAutoresizingMaskIntoConstraints = NO;
+    {
+        NSArray *items = @[ @[@"default", RLPTr(@"默认排序")], @[@"title", RLPTr(@"标题")],
+                            @[@"artist", RLPTr(@"艺术家")], @[@"album", RLPTr(@"专辑")],
+                            @[@"dur", RLPTr(@"时长")], @[@"year", RLPTr(@"年份")],
+                            @[@"fav", RLPTr(@"收藏优先")] ];
+        for (NSArray *it in items) {
+            [_sortPopup addItemWithTitle:it[1]];
+            _sortPopup.lastItem.representedObject = it[0];
+        }
+    }
+    _sortPopup.target = self;
+    _sortPopup.action = @selector(onSortChanged:);
+    [container addSubview:_sortPopup];
 
     // 2. 表格与滚动容器
     _tableView = [[RLPTrackTableView alloc] initWithFrame:NSZeroRect];
@@ -240,6 +263,8 @@ static NSString * const kColAdd = @"ColAdd";
         [_searchField.topAnchor constraintEqualToAnchor:container.topAnchor constant:4.0],
         [_searchField.widthAnchor constraintEqualToConstant:300.0],
         [_searchField.heightAnchor constraintEqualToConstant:24.0],
+        [_sortPopup.trailingAnchor constraintEqualToAnchor:container.trailingAnchor constant:-24.0],
+        [_sortPopup.centerYAnchor constraintEqualToAnchor:_searchField.centerYAnchor],
 
         [_scrollView.leadingAnchor constraintEqualToAnchor:container.leadingAnchor constant:24.0],
         [_scrollView.trailingAnchor constraintEqualToAnchor:container.trailingAnchor constant:-24.0],
@@ -343,6 +368,7 @@ static NSString * const kColAdd = @"ColAdd";
 
         [self_ updateFooterVisibility];
         [self_ loadFavoriteSet];
+        [self_ applyTrackSort];
         [self_->_tableView reloadData];
     }];
 }
@@ -556,6 +582,42 @@ static NSString * const kColAdd = @"ColAdd";
     }
 
     return cell;
+}
+
+#pragma mark - 排序（web track-sort，客户端排序与 web 同口径）
+
+- (void)onSortChanged:(NSPopUpButton *)sender {
+    id rep = sender.selectedItem.representedObject;
+    _trackSort = [rep isKindOfClass:[NSString class]] ? rep : @"default";
+    [self applyTrackSort];
+    [_tableView reloadData];
+}
+
+/// 与 web 的排序键逐条对齐（web 只排**当前已加载的这一片**，不改变后端分页）。
+- (void)applyTrackSort {
+    if (!_tracks.count || [_trackSort isEqualToString:@"default"]) return;
+    NSArray *sorted = [_tracks sortedArrayUsingComparator:^NSComparisonResult(RLPTrack *a, RLPTrack *b) {
+        if ([self->_trackSort isEqualToString:@"title"])
+            return [(a.title ?: @"") caseInsensitiveCompare:(b.title ?: @"")];
+        if ([self->_trackSort isEqualToString:@"artist"])
+            return [(a.artist ?: @"") caseInsensitiveCompare:(b.artist ?: @"")];
+        if ([self->_trackSort isEqualToString:@"album"])
+            return [(a.album ?: @"") caseInsensitiveCompare:(b.album ?: @"")];
+        if ([self->_trackSort isEqualToString:@"dur"])
+            return a.duration < b.duration ? NSOrderedAscending : (a.duration > b.duration ? NSOrderedDescending : NSOrderedSame);
+        if ([self->_trackSort isEqualToString:@"year"]) {
+            // 曲目没有 year 字段（web 用 a.year，后端 search 不回该键）⟹ 保持原序，不编造。
+            return NSOrderedSame;
+        }
+        if ([self->_trackSort isEqualToString:@"fav"]) {
+            const BOOL fa = [self->_favoritePaths containsObject:a.path];
+            const BOOL fb = [self->_favoritePaths containsObject:b.path];
+            if (fa != fb) return fa ? NSOrderedAscending : NSOrderedDescending;
+            return [(a.title ?: @"") caseInsensitiveCompare:(b.title ?: @"")];
+        }
+        return NSOrderedSame;
+    }];
+    [_tracks setArray:sorted];
 }
 
 #pragma mark - 行内动作（web favIconHtml / 第 7 列 +）

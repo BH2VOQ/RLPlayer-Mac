@@ -39,6 +39,11 @@
 #import "RLPSupport.h"
 #import "RLPTheme.h"
 
+/// 专辑卡悬停入口（RLPAlbumItem 的 cardHoverChanged:）——审计用它触发同一个生产入口。
+@interface NSObject (RLPAlbumHoverAudit)
+- (void)cardHoverChanged:(BOOL)on;
+@end
+
 @interface RLPNowPlayingViewController (OfflineAuditProjection)
 - (void)applyLyricText:(NSString *)text forPath:(NSString *)path;
 - (void)updateLyricPosition:(double)pos;
@@ -465,6 +470,42 @@ int RLPRunFunctionalAudit(NSString *outDir) {
         }
     }
 
+    // ---- ②a3 专辑卡悬停播放角标（web .grid 卡片 hover 才浮出播放键）----
+    {
+        [wc.sidebar selectKey:@"albums"];
+        Pump(0.7);
+        RLPAlbumsViewController *av = [wc.currentContent isKindOfClass:[RLPAlbumsViewController class]]
+                                    ? (RLPAlbumsViewController *)wc.currentContent : nil;
+        CK(av != nil, "能回到专辑页", NSStringFromClass(wc.currentContent.class));
+        if (av) {
+            NSCollectionView *cv = [av valueForKey:@"collection"];
+            NSCollectionViewItem *item = cv ? [cv itemAtIndexPath:[NSIndexPath indexPathForItem:0 inSection:0]] : nil;
+            CK(item != nil, "专辑网格有第一个 item（判据前提）", item ? NSStringFromClass(item.class) : @"nil");
+            if (item) {
+                NSMutableArray<NSView *> *iv = [NSMutableArray array];
+                CollectAllViews(item.view, iv);
+                NSButton *badge = nil;
+                for (NSView *v in iv)
+                    if ([v.identifier isEqualToString:@"album.playbadge"]) badge = (NSButton *)v;
+                CK(badge != nil, "专辑卡有播放角标（web 悬停播放键）",
+                   badge ? NSStringFromClass(badge.class) : @"缺角标");
+                if (badge) {
+                    CK(badge.hidden, "未悬停时角标隐藏（默认不抢注意力）", @"默认可见");
+                    // 悬停：调生产入口（tracking area 的 mouseEntered 最终就是它，见 RLPAlbumCardView）
+                    [(id)item cardHoverChanged:YES];
+                    [item.view layoutSubtreeIfNeeded];
+                    CK(!badge.hidden && badge.frame.size.width > 0 && badge.frame.size.height > 0,
+                       "悬停后播放角标浮现且有真实尺寸",
+                       [NSString stringWithFormat:@"hidden=%d frame=%@", (int)badge.hidden,
+                        NSStringFromRect(badge.frame)]);
+                    CK(badge.action != NULL, "角标点击有真实 action（点它=播放整张）",
+                       badge.action ? NSStringFromSelector(badge.action) : @"nil");
+                    [(id)item cardHoverChanged:NO];
+                }
+            }
+        }
+    }
+
     // ---- ②c 侧栏「我的歌单」是动态列表（web #sqList）----
     // 旧实现（2026-11-13 前）侧栏只有一行静态「保存的队列」，一条歌单条目都没有：
     // 没有 条目 / ✎ 重命名 / × 删除 / 空态整行。判据必须能区分"静态一行"与"动态列表"，
@@ -686,6 +727,37 @@ int RLPRunFunctionalAudit(NSString *outDir) {
                [NSString stringWithFormat:@"favUsable=%ld addUsable=%ld", (long)favUsable, (long)addUsable]);
             CK(Snap(wc.window.contentView, [outDir stringByAppendingPathComponent:@"04b-tracks-actions.png"],
                     CGSizeMake(1180, 760)), "曲目页行内动作截图已落盘", outDir);
+            // 排序下拉（web track-sort）：改"标题"必须真的改变第一行；改"收藏优先"必须把收藏的排到最前。
+            {
+                NSMutableArray<NSView *> *sv2 = [NSMutableArray array];
+                CollectAllViews(tv.view, sv2);
+                NSPopUpButton *sortPopup = nil;
+                for (NSView *v in sv2)
+                    if ([v isKindOfClass:[NSPopUpButton class]] && [v.identifier isEqualToString:@"tracks.sort"])
+                        sortPopup = (NSPopUpButton *)v;
+                CK(sortPopup != nil && sortPopup.numberOfItems >= 6,
+                   "曲目页有排序下拉（web track-sort 的 6+ 档）",
+                   sortPopup ? [NSString stringWithFormat:@"items=%ld", (long)sortPopup.numberOfItems] : @"缺下拉");
+                if (sortPopup) {
+                    // 切到「标题」：按标题升序，第一行应是最小标题
+                    [sortPopup selectItemAtIndex:1];   // 1 = 标题
+                    [sortPopup sendAction:sortPopup.action to:sortPopup.target];
+                    Pump(0.4);
+                    NSArray *sortedRows = [tv valueForKey:@"_tracks"];
+                    BOOL ascending = YES;
+                    for (NSUInteger i = 1; i < sortedRows.count; ++i) {
+                        NSString *prev = [sortedRows[i - 1] valueForKey:@"title"] ?: @"";
+                        NSString *cur  = [sortedRows[i] valueForKey:@"title"] ?: @"";
+                        if ([prev caseInsensitiveCompare:cur] == NSOrderedDescending) ascending = NO;
+                    }
+                    CK(ascending && sortedRows.count >= 2, "切『标题』后按标题升序（真的重排了）",
+                       [NSString stringWithFormat:@"rows=%ld", (long)sortedRows.count]);
+                    // 复位默认，后面的断言用原始顺序
+                    [sortPopup selectItemAtIndex:0];
+                    [sortPopup sendAction:sortPopup.action to:sortPopup.target];
+                    Pump(0.3);
+                }
+            }
             // 点心形 → 后端真的收藏（不是只换图标）
             // 必须拿**第 0 行**的按钮（tag 就是行号）：随便抓一个可能是回收 cell 上的旧 tag，
             // 点了等于没点（第一版判据就是这么假红的）。

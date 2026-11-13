@@ -111,6 +111,7 @@ static const NSUserInterfaceItemIdentifier kAlbumItemID = @"RLPAlbumItem";
     _playBadge.toolTip = RLPTr(@"播放整张");
     _playBadge.target = self;
     _playBadge.action = @selector(onPlayBadge:);
+    _playBadge.identifier = @"album.playbadge";   // 运行时判据：悬停才可见
     _playBadge.wantsLayer = YES;
     _playBadge.layer.cornerRadius = 16;
     _playBadge.layer.backgroundColor = t.accent.CGColor;
