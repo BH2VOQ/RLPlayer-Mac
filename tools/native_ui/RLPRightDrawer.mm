@@ -196,6 +196,22 @@
 
 #pragma mark - 抽屉本体
 
+/// 滚动区 documentView 必须是翻转坐标：非翻转的 NSStackView 作为 documentView 时，
+/// 内容从**底部**开始排（用户实测：队列 9 行全挤在右侧面板下半部 = 播放列表错位）。
+/// 翻转后第一行从顶部开始，和 web #qlist 一致。
+@interface RLPFlippedStackView : NSStackView
+@end
+@implementation RLPFlippedStackView
+- (BOOL)isFlipped { return YES; }
+@end
+
+/// 滚动区 documentView 用翻转坐标：内容从顶部开始（非翻转 doc 会把内容钉在底部）。
+@interface RLPFlippedDocumentView : NSView
+@end
+@implementation RLPFlippedDocumentView
+- (BOOL)isFlipped { return YES; }
+@end
+
 @interface RLPRightDrawer ()
 @property (nonatomic, copy, readwrite) NSString *tab;
 @property (nonatomic, assign, readwrite) BOOL polling;
@@ -272,7 +288,7 @@
 
     for (NSView *v in @[ self.qTab, self.lTab, self.count, self.clearBtn ]) [head addSubview:v];
 
-    self.qStack = [[NSStackView alloc] initWithFrame:NSZeroRect];
+    self.qStack = [[RLPFlippedStackView alloc] initWithFrame:NSZeroRect];
     self.qStack.orientation = NSUserInterfaceLayoutOrientationVertical;
     self.qStack.alignment = NSLayoutAttributeLeading;
     self.qStack.spacing = 0;
@@ -286,7 +302,7 @@
     self.lHint.translatesAutoresizingMaskIntoConstraints = NO;
     [self addSubview:self.lHint];
 
-    self.lStack = [[NSStackView alloc] initWithFrame:NSZeroRect];
+    self.lStack = [[RLPFlippedStackView alloc] initWithFrame:NSZeroRect];
     self.lStack.orientation = NSUserInterfaceLayoutOrientationVertical;
     self.lStack.alignment = NSLayoutAttributeLeading;
     self.lStack.spacing = 0;
@@ -351,7 +367,7 @@
     sc.hasVerticalScroller = YES;
     sc.autohidesScrollers = YES;
     sc.scrollerStyle = NSScrollerStyleOverlay;
-    NSView *doc = [[NSView alloc] initWithFrame:NSZeroRect];
+    NSView *doc = [[RLPFlippedDocumentView alloc] initWithFrame:NSZeroRect];
     doc.translatesAutoresizingMaskIntoConstraints = NO;
     stack.translatesAutoresizingMaskIntoConstraints = NO;
     [doc addSubview:stack];

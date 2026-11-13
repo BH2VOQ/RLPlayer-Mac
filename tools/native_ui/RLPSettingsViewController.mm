@@ -197,7 +197,7 @@ static NSStackView *RLPSRow(NSString *label, NSView *control, NSString *hint, RL
     if (hint.length) [box addArrangedSubview:RLPLabel(hint, [NSFont systemFontOfSize:10.5], t.mut2)];
     return box;
 }
-@interface RLPSettingsViewController ()
+@interface RLPSettingsViewController () <NSPopoverDelegate>
 @property (nonatomic, strong) NSSegmentedControl *tabs;
 @property (nonatomic, strong) NSView *paneHost;
 @property (nonatomic, assign) RLPSTab tab;
@@ -291,6 +291,15 @@ static NSStackView *RLPSRow(NSString *label, NSView *control, NSString *hint, RL
 @property (nonatomic, strong) NSButton *diagSummaryBtn;
 @property (nonatomic, strong) NSButton *diagUploadBtn;
 @property (nonatomic, strong) NSTextField *diagMsg;
+// 诊断/反馈的「选项收进气泡窗」（用户实测：这些选项不该平铺在页面上）。
+// 默认隐藏的容器仍留在视图树里（审计/parity 的 identifier 锚点不因气泡而消失）；
+// 点开时把真实控件搬进 NSPopover，关闭时搬回隐藏容器（状态不丢、不复制第二份）。
+@property (nonatomic, strong) NSStackView *diagToolsBox;
+@property (nonatomic, strong) NSStackView *fbBox;
+@property (nonatomic, strong) NSPopover *diagPopover;
+@property (nonatomic, strong) NSPopover *fbPopover;
+@property (nonatomic, strong) NSStackView *diagPopoverContent;
+@property (nonatomic, strong) NSStackView *fbPopoverContent;
 @property (nonatomic, strong) NSTextView *diagSummaryText;
 @property (nonatomic, strong) NSPopUpButton *updChannelPopup;
 @property (nonatomic, strong) NSTextField *verCurLabel;
@@ -318,7 +327,13 @@ static NSStackView *RLPSRow(NSString *label, NSView *control, NSString *hint, RL
 @property (nonatomic, strong) NSSwitch *metaLlmSwitch;
 @property (nonatomic, strong) NSSwitch *metaSummarySwitch;
 @property (nonatomic, strong) NSSwitch *metaAiFillSwitch;
+// 元数据「高级选项」折叠（web #sp_metamore / #sp_metaadv）：默认收起，点开才显示
+// 数据源 / AI 接入 / 联网检索 / 标签写回这一整块（用户实测「元数据页繁杂」）。
+@property (nonatomic, strong) NSButton *metaMoreBtn;
+@property (nonatomic, strong) NSStackView *metaAdvancedStack;
+@property (nonatomic) BOOL metaAdvancedVisible;
 @property (nonatomic, strong) RLPEqualizerView *eqView;
+@property (nonatomic, strong) NSLayoutConstraint *eqHeightConstraint;
 @property (nonatomic, strong) RLPInputView *inputView;
 @property (nonatomic, strong) RLPCastView *castView;
 @property (nonatomic, strong) RLPCalibrationView *calView;
@@ -776,6 +791,20 @@ static NSString *RLPControlIdentifier(NSString *key) {
     NSString *key = RLPBackendKeyForControl(sender.identifier);
     if (!key.length) return;
     [self postKey:key value:(sender.state == NSControlStateValueOn ? @"1" : @"0")];
+}
+
+/// web「AI 增强」是一个开关但同时写 metallm + metasummary（同开同关）。
+- (void)onMetaAiEnhanced:(NSSwitch *)sender {
+    NSString *v = (sender.state == NSControlStateValueOn) ? @"1" : @"0";
+    [self postKeys:@{ @"metallm": v, @"metasummary": v }];
+    self.metaSummarySwitch.state = sender.state;
+}
+
+/// web #sp_metamore：点击展开/收起高级选项（按钮文案 ▾/▴，aria-expanded 同语义）。
+- (void)onToggleMetaAdvanced:(NSButton *)sender {
+    self.metaAdvancedVisible = !self.metaAdvancedVisible;
+    self.metaAdvancedStack.hidden = !self.metaAdvancedVisible;
+    sender.title = (self.metaAdvancedVisible ? RLPTr(@"高级选项 ▴") : RLPTr(@"高级选项 ▾"));
 }
 
 - (void)applyKV:(NSDictionary *)kv toSwitch:(NSSwitch *)sw key:(NSString *)key {
@@ -1285,8 +1314,10 @@ static NSString *RLPControlIdentifier(NSString *key) {
 /// 三块：诊断包导出 / 软件更新 / 反馈问题。
 - (void)fillDiag:(NSStackView *)stack t:(RLPTheme *)t {
     // ---- 诊断包 ----
-    [stack addArrangedSubview:RLPSGroup(RLPTr(@"导出诊断包"),
-        RLPTr(@"一个 zip 打包全部日志 / 系统信息 / 设置摘要（已脱敏），不用再到处找日志文件"), t)];
+    RLPSettingsGroup *diagGroup = (RLPSettingsGroup *)RLPSGroup(RLPTr(@"导出诊断包"),
+        RLPTr(@"一个 zip 打包全部日志 / 系统信息 / 设置摘要（已脱敏），不用再到处找日志文件"), t);
+    [stack addArrangedSubview:diagGroup];
+    NSMutableArray<NSView *> *diagBoxViews = [NSMutableArray array];
 
     self.diagZipBtn = [NSButton buttonWithTitle:RLPTr(@"导出诊断包（.zip）") target:self
                                          action:@selector(onExportDiagZip:)];
@@ -1318,7 +1349,7 @@ static NSString *RLPControlIdentifier(NSString *key) {
     for (NSView *v in @[ self.diagZipBtn, self.diagJsonBtn, self.diagSummaryBtn,
                          self.diagUploadBtn, self.diagMsg ])
         [diagRow addArrangedSubview:v];
-    [stack addArrangedSubview:diagRow];
+    [diagBoxViews addObject:diagRow];
 
     self.diagSummaryText = [[NSTextView alloc] initWithFrame:NSMakeRect(0, 0, 620, 200)];
     self.diagSummaryText.identifier = @"sp_diagsummarytext";
@@ -1329,7 +1360,7 @@ static NSString *RLPControlIdentifier(NSString *key) {
     diagScroll.hasVerticalScroller = YES;
     diagScroll.documentView = self.diagSummaryText;
     diagScroll.translatesAutoresizingMaskIntoConstraints = NO;
-    [stack addArrangedSubview:diagScroll];
+    [diagBoxViews addObject:diagScroll];
     [NSLayoutConstraint activateConstraints:@[
         [diagScroll.widthAnchor constraintEqualToConstant:620],
         [diagScroll.heightAnchor constraintEqualToConstant:200],
@@ -1385,8 +1416,10 @@ static NSString *RLPControlIdentifier(NSString *key) {
     [stack addArrangedSubview:self.updNote];
 
     // ---- 反馈问题 ----
-    [stack addArrangedSubview:RLPSGroup(RLPTr(@"反馈问题"),
-        RLPTr(@"直接发送给开发者，可附诊断包"), t)];
+    RLPSettingsGroup *fbGroup = (RLPSettingsGroup *)RLPSGroup(RLPTr(@"反馈问题"),
+        RLPTr(@"直接发送给开发者，可附诊断包"), t);
+    [stack addArrangedSubview:fbGroup];
+    NSMutableArray<NSView *> *fbBoxViews = [NSMutableArray array];
 
     self.fbText = [[NSTextView alloc] initWithFrame:NSMakeRect(0, 0, 620, 110)];
     self.fbText.identifier = @"sp_fbtext";
@@ -1396,7 +1429,7 @@ static NSString *RLPControlIdentifier(NSString *key) {
     fbScroll.hasVerticalScroller = YES;
     fbScroll.documentView = self.fbText;
     fbScroll.translatesAutoresizingMaskIntoConstraints = NO;
-    [stack addArrangedSubview:fbScroll];
+    [fbBoxViews addObject:fbScroll];
     [NSLayoutConstraint activateConstraints:@[
         [fbScroll.widthAnchor constraintEqualToConstant:620],
         [fbScroll.heightAnchor constraintEqualToConstant:110],
@@ -1404,11 +1437,11 @@ static NSString *RLPControlIdentifier(NSString *key) {
 
     self.fbCount = [self hintForKey:@"sp_fbcount" width:300];
     self.fbCount.stringValue = RLPTr(@"0 / 16384 字节");
-    [stack addArrangedSubview:self.fbCount];
+    [fbBoxViews addObject:self.fbCount];
 
     self.fbChan = [self hintForKey:@"sp_fbchan" width:520];
     self.fbChan.stringValue = RLPTr(@"正在检查反馈通道…");
-    [stack addArrangedSubview:self.fbChan];
+    [fbBoxViews addObject:self.fbChan];
 
     self.fbDiagSwitch = [self switchForKey:@"sp_fbdiag" action:@selector(onFbDiagToggle:)];
     self.fbDiagSwitch.state = NSControlStateValueOn;
@@ -1430,27 +1463,129 @@ static NSString *RLPControlIdentifier(NSString *key) {
     [fbRow addArrangedSubview:RLPLabel(RLPTr(@"附带诊断包"), t.small, t.mut)];
     for (NSView *v in @[ self.fbSendBtn, self.fbRetryBtn, self.fbMsg ])
         [fbRow addArrangedSubview:v];
-    [stack addArrangedSubview:fbRow];
+    [fbBoxViews addObject:fbRow];
 
     [stack addArrangedSubview:RLPLabel(
         RLPTr(@"提交前会先探活；通道不可用时按钮保持禁用，绝不假装发送成功。"
               @"诊断包已脱敏，不会上传你的音乐文件。"), t.small, t.mut)];
+
+    // 两个隐藏容器 + 各自的「打开气泡窗」入口行（web 设置页行式交互：选项收进气泡窗）
+    self.diagToolsBox = [self hiddenPopoverBox:diagBoxViews inStack:stack];
+    self.fbBox = [self hiddenPopoverBox:fbBoxViews inStack:stack];
+    NSButton *diagMore = [NSButton buttonWithTitle:RLPTr(@"诊断包选项 ▾")
+                                             target:self action:@selector(onDiagMore:)];
+    diagMore.bezelStyle = NSBezelStyleRounded;
+    diagMore.identifier = @"sp_diagmore";
+    [diagGroup addButtonRow:@[ diagMore ]];
+    NSButton *fbMore = [NSButton buttonWithTitle:RLPTr(@"填写反馈 ▾")
+                                           target:self action:@selector(onFbMore:)];
+    fbMore.bezelStyle = NSBezelStyleRounded;
+    fbMore.identifier = @"sp_fbmore";
+    [fbGroup addButtonRow:@[ fbMore ]];
+}
+
+/// 把一组控件放进默认隐藏的容器（仍在视图树里，identifier 锚点不丢），由气泡窗按钮搬进/搬出。
+- (NSStackView *)hiddenPopoverBox:(NSArray<NSView *> *)views inStack:(NSStackView *)stack {
+    NSStackView *box = [[NSStackView alloc] init];
+    box.orientation = NSUserInterfaceLayoutOrientationVertical;
+    box.alignment = NSLayoutAttributeLeading;
+    box.spacing = 10;
+    box.translatesAutoresizingMaskIntoConstraints = NO;
+    box.hidden = YES;
+    for (NSView *v in views) [box addArrangedSubview:v];
+    [stack addArrangedSubview:box];
+    [box.widthAnchor constraintEqualToAnchor:stack.widthAnchor constant:-48].active = YES;
+    return box;
+}
+
+- (void)moveViewsFrom:(NSStackView *)from to:(NSStackView *)to {
+    for (NSView *v in [from.arrangedSubviews copy]) {
+        [from removeArrangedSubview:v];
+        [to addArrangedSubview:v];
+    }
+}
+
+- (void)onDiagMore:(NSButton *)sender {
+    if (self.diagPopover) { [self.diagPopover close]; return; }
+    NSStackView *content = [[NSStackView alloc] init];
+    content.orientation = NSUserInterfaceLayoutOrientationVertical;
+    content.alignment = NSLayoutAttributeLeading;
+    content.spacing = 10;
+    content.translatesAutoresizingMaskIntoConstraints = NO;
+    [content.widthAnchor constraintGreaterThanOrEqualToConstant:600].active = YES;
+    [self moveViewsFrom:self.diagToolsBox to:content];
+    NSViewController *vc = RLPCardController(content, 660, 120);
+    self.diagPopover = RLPShowCardPopover(sender, vc, 660);
+    self.diagPopover.delegate = self;
+    self.diagPopoverContent = content;
+}
+
+- (void)onFbMore:(NSButton *)sender {
+    if (self.fbPopover) { [self.fbPopover close]; return; }
+    NSStackView *content = [[NSStackView alloc] init];
+    content.orientation = NSUserInterfaceLayoutOrientationVertical;
+    content.alignment = NSLayoutAttributeLeading;
+    content.spacing = 10;
+    content.translatesAutoresizingMaskIntoConstraints = NO;
+    [content.widthAnchor constraintGreaterThanOrEqualToConstant:600].active = YES;
+    [self moveViewsFrom:self.fbBox to:content];
+    NSViewController *vc = RLPCardController(content, 660, 120);
+    self.fbPopover = RLPShowCardPopover(sender, vc, 660);
+    self.fbPopover.delegate = self;
+    self.fbPopoverContent = content;
+}
+
+- (void)popoverDidClose:(NSNotification *)note {
+    NSPopover *p = note.object;
+    if (p == self.diagPopover) {
+        [self moveViewsFrom:self.diagPopoverContent to:self.diagToolsBox];
+        self.diagPopover = nil; self.diagPopoverContent = nil;
+    } else if (p == self.fbPopover) {
+        [self moveViewsFrom:self.fbPopoverContent to:self.fbBox];
+        self.fbPopover = nil; self.fbPopoverContent = nil;
+    }
 }
 
 #pragma mark - 元数据
 
 - (void)fillMeta:(NSStackView *)stack t:(RLPTheme *)t {
+    // ── 基础选项（对齐 web：默认只显示三个开关 + 「高级选项 ▾」，即用户图二效果）──
     [stack addArrangedSubview:RLPSGroup(RLPTr(@"元数据补全"),
         RLPTr(@"播放时后台补全标签 / 封面 / 歌词，结果落在本地库"), t)];
     self.metaOnSwitch = [self switchWithAction:@selector(onSwitch:) key:@"sp_metaon"];
-    [stack addArrangedSubview:RLPSRow(RLPTr(@"自动补全"), self.metaOnSwitch,
-        RLPTr(@"只用公开数据源，不调用 AI，不产生费用"), t)];
-    self.metaLlmSwitch = [self switchWithAction:@selector(onSwitch:) key:@"sp_metallm"];
-    [stack addArrangedSubview:RLPSRow(RLPTr(@"允许 AI 辅助"), self.metaLlmSwitch, nil, t)];
-    self.metaSummarySwitch = [self switchWithAction:@selector(onSwitch:) key:@"sp_metasummary"];
-    [stack addArrangedSubview:RLPSRow(RLPTr(@"AI 综合简介"), self.metaSummarySwitch, nil, t)];
+    [stack addArrangedSubview:RLPSRow(RLPTr(@"自动补全（不用 AI）"), self.metaOnSwitch,
+        RLPTr(@"只用公开数据源（QQ音乐 / 网易云 / iTunes / dizzylab / lrclib）补全标签、封面、歌词；全程不调用 AI，不产生费用"), t)];
+    // web 把「DeepSeek 增强 + 在线整理简介」合并成一键：metallm 与 metasummary 同开同关。
+    self.metaLlmSwitch = [self switchWithAction:@selector(onMetaAiEnhanced:) key:@"sp_metallm"];
+    [stack addArrangedSubview:RLPSRow(RLPTr(@"AI 增强（OpenAI 兼容）"), self.metaLlmSwitch,
+        RLPTr(@"联网调用所选 AI 接口（按次计费）：解析无标签文件，并在艺术家 / 专辑 / 单曲页整理简介并缓存；关闭后两项都停"), t)];
     self.metaAiFillSwitch = [self switchWithAction:@selector(onSwitch:) key:@"sp_metaaifill"];
-    [stack addArrangedSubview:RLPSRow(RLPTr(@"AI 补封面歌词"), self.metaAiFillSwitch, nil, t)];
+    [stack addArrangedSubview:RLPSRow(RLPTr(@"AI 辅助爬取封面歌词"), self.metaAiFillSwitch,
+        RLPTr(@"仅当公开数据源因歌名对不上而失败时，自动用 AI 规范化歌名再检索一次；AI 只纠正歌名，封面歌词仍来自公开数据源并过同曲校验"), t)];
+
+    // 「高级选项 ▾」入口（web #sp_metamore）：默认收起；展开后是下面整块高级内容。
+    NSButton *moreBtn = [NSButton buttonWithTitle:RLPTr(@"高级选项 ▾") target:self
+                                           action:@selector(onToggleMetaAdvanced:)];
+    moreBtn.bezelStyle = NSBezelStyleRounded;
+    moreBtn.identifier = @"sp_metamore";
+    self.metaMoreBtn = moreBtn;
+    if (gCurrentGroup) [gCurrentGroup addButtonRow:@[moreBtn]];
+    else [stack addArrangedSubview:moreBtn];
+
+    // 高级内容容器：默认 hidden（NSStackView 对隐藏的 arrangedSubview 不占高度）。
+    NSStackView *adv = [[NSStackView alloc] init];
+    adv.orientation = NSUserInterfaceLayoutOrientationVertical;
+    adv.alignment = NSLayoutAttributeLeading;
+    adv.spacing = 22;
+    adv.translatesAutoresizingMaskIntoConstraints = NO;
+    adv.hidden = YES;
+    adv.identifier = @"sp_metaadv";        // web #sp_metaadv（审计用它断言"默认收起"）
+    self.metaAdvancedStack = adv;
+    // 高级卡片建在 adv 里：RLPSGroup 会落进 gCurrentStack，所以临时切换上下文。
+    NSStackView *savedStack = gCurrentStack;
+    RLPSettingsGroup *savedGroup = gCurrentGroup;
+    gCurrentStack = adv;
+    gCurrentGroup = nil;
 
     // 数据源开关 + 优先级（对齐 web sp_metasrc：按注册表动态渲染，新增源前端零改动）。
     // web 把它放在「元数据补全」这张卡片**里面**，不是裸挂在页面上。
@@ -1459,13 +1594,13 @@ static NSString *RLPControlIdentifier(NSString *key) {
     if (gCurrentGroup) {
         [gCurrentGroup addFullRow:self.metaSourcesView];
     } else {
-        [stack addArrangedSubview:self.metaSourcesView];
-        [self.metaSourcesView.widthAnchor constraintEqualToAnchor:stack.widthAnchor constant:-48].active = YES;
+        [adv addArrangedSubview:self.metaSourcesView];
+        [self.metaSourcesView.widthAnchor constraintEqualToAnchor:adv.widthAnchor constant:-48].active = YES;
     }
     [self.metaSourcesView reload];
 
     // AI 模型端点：密钥红线 —— GET 只回掩码，输入框留空 = 不改已存的 key
-    [stack addArrangedSubview:RLPSGroup(RLPTr(@"AI 模型端点"),
+    [adv addArrangedSubview:RLPSGroup(RLPTr(@"AI 模型端点"),
         RLPTr(@"用于资料整理与简介。密钥只在本机保存，界面永不回显明文；留空表示不修改。"), t)];
 
     // 接口预设（对齐 web LLM_PROVIDERS / sp_llmprovider）：只负责「填地址」，
@@ -1478,13 +1613,13 @@ static NSString *RLPControlIdentifier(NSString *key) {
     self.llmProviderPopup.target = self;
     self.llmProviderPopup.action = @selector(onLlmProviderPicked:);
     [self.llmProviderPopup.widthAnchor constraintEqualToConstant:240].active = YES;
-    [stack addArrangedSubview:RLPSRow(RLPTr(@"接口预设"), self.llmProviderPopup, nil, t)];
+    [adv addArrangedSubview:RLPSRow(RLPTr(@"接口预设"), self.llmProviderPopup, nil, t)];
 
     self.llmBase = [[NSTextField alloc] initWithFrame:NSZeroRect];
     self.llmBase.placeholderString = @"https://api.deepseek.com";
     self.llmBase.identifier = @"llm.base";
     [[self.llmBase.widthAnchor constraintEqualToConstant:320] setActive:YES];
-    [stack addArrangedSubview:RLPSRow(RLPTr(@"接口地址"), self.llmBase, nil, t)];
+    [adv addArrangedSubview:RLPSRow(RLPTr(@"接口地址"), self.llmBase, nil, t)];
 
     self.llmModel = [[NSTextField alloc] initWithFrame:NSZeroRect];
     self.llmModel.placeholderString = @"deepseek-chat";
@@ -1494,7 +1629,7 @@ static NSString *RLPControlIdentifier(NSString *key) {
     self.llmModel.target = self;
     self.llmModel.action = @selector(onLlmModelTyped:);
     [[self.llmModel.widthAnchor constraintEqualToConstant:220] setActive:YES];
-    [stack addArrangedSubview:RLPSRow(RLPTr(@"模型"), self.llmModel, nil, t)];
+    [adv addArrangedSubview:RLPSRow(RLPTr(@"模型"), self.llmModel, nil, t)];
 
     // 模型下拉（对齐 web llmModelRender）：拉到 /api/llm/models 就显示动态列表并「选中即保存」；
     // 拉不到自动降级到上面的手填框 + 如实写出原因，绝不因网关缺 /models 而崩。
@@ -1513,20 +1648,20 @@ static NSString *RLPControlIdentifier(NSString *key) {
     modelRow.spacing = 8;
     [modelRow addArrangedSubview:self.llmModelPopup];
     [modelRow addArrangedSubview:self.llmModelRefresh];
-    [stack addArrangedSubview:modelRow];
+    [adv addArrangedSubview:modelRow];
 
     self.llmModelMsg = RLPLabel(RLPTr(@"模型列表读取中"), t.small, t.mut);
     self.llmModelMsg.maximumNumberOfLines = 2;
     self.llmModelMsg.lineBreakMode = NSLineBreakByWordWrapping;
     self.llmModelMsg.identifier = @"llm.modelmsg";
     [[self.llmModelMsg.widthAnchor constraintEqualToConstant:560] setActive:YES];
-    [stack addArrangedSubview:self.llmModelMsg];
+    [adv addArrangedSubview:self.llmModelMsg];
 
     self.llmKey = [[NSSecureTextField alloc] initWithFrame:NSZeroRect];
     self.llmKey.placeholderString = RLPTr(@"留空 = 保持已保存的密钥");
     self.llmKey.identifier = @"llm.key";
     [[self.llmKey.widthAnchor constraintEqualToConstant:320] setActive:YES];
-    [stack addArrangedSubview:RLPSRow(RLPTr(@"密钥"), self.llmKey, nil, t)];
+    [adv addArrangedSubview:RLPSRow(RLPTr(@"密钥"), self.llmKey, nil, t)];
 
     NSStackView *llmBtns = [[NSStackView alloc] init];
     llmBtns.orientation = NSUserInterfaceLayoutOrientationHorizontal;
@@ -1543,19 +1678,19 @@ static NSString *RLPControlIdentifier(NSString *key) {
     [llmBtns addArrangedSubview:save];
     [llmBtns addArrangedSubview:test];
     [llmBtns addArrangedSubview:clearKey];
-    [stack addArrangedSubview:llmBtns];
+    [adv addArrangedSubview:llmBtns];
 
     self.llmStatus = RLPLabel(@"", t.small, t.mut);
     self.llmStatus.maximumNumberOfLines = 2;
     self.llmStatus.lineBreakMode = NSLineBreakByWordWrapping;
     self.llmStatus.identifier = @"llm.status";
     [[self.llmStatus.widthAnchor constraintEqualToConstant:560] setActive:YES];
-    [stack addArrangedSubview:self.llmStatus];
+    [adv addArrangedSubview:self.llmStatus];
 
     // ── 联网检索端点（search / fetch 一起切换，对齐 web SEARCH 区块）──
     // 用户 2026-11-12 实测反馈：原生缺这组选项。配置存同一份 rlplayer-llm.conf 的
     // search_* 三行，走 /api/llm 同一条 POST；Key 只存本机、界面永不回显明文。
-    [stack addArrangedSubview:RLPSGroup(RLPTr(@"联网检索端点"),
+    [adv addArrangedSubview:RLPSGroup(RLPTr(@"联网检索端点"),
         RLPTr(@"「AI 增强」整理资料时用的 search / fetch 端点。DeepSeek 为默认；切到 AnySearch / Tavily 后，非 DeepSeek 的 AI 接口也能联网检索。"), t)];
 
     self.searchProviderPopup = [[NSPopUpButton alloc] initWithFrame:NSZeroRect pullsDown:NO];
@@ -1566,19 +1701,19 @@ static NSString *RLPControlIdentifier(NSString *key) {
     self.searchProviderPopup.target = self;
     self.searchProviderPopup.action = @selector(onSearchProviderChanged:);
     [self.searchProviderPopup.widthAnchor constraintEqualToConstant:240].active = YES;
-    [stack addArrangedSubview:RLPSRow(RLPTr(@"检索端点"), self.searchProviderPopup, nil, t)];
+    [adv addArrangedSubview:RLPSRow(RLPTr(@"检索端点"), self.searchProviderPopup, nil, t)];
 
     self.searchBase = [[NSTextField alloc] initWithFrame:NSZeroRect];
     self.searchBase.placeholderString = RLPTr(@"留空 = 用该厂商默认地址");
     self.searchBase.identifier = @"search.base";
     [[self.searchBase.widthAnchor constraintEqualToConstant:320] setActive:YES];
-    [stack addArrangedSubview:RLPSRow(RLPTr(@"检索地址"), self.searchBase, nil, t)];
+    [adv addArrangedSubview:RLPSRow(RLPTr(@"检索地址"), self.searchBase, nil, t)];
 
     self.searchKey = [[NSSecureTextField alloc] initWithFrame:NSZeroRect];
     self.searchKey.placeholderString = RLPTr(@"留空 = 保持已保存的检索 Key");
     self.searchKey.identifier = @"search.key";
     [[self.searchKey.widthAnchor constraintEqualToConstant:320] setActive:YES];
-    [stack addArrangedSubview:RLPSRow(RLPTr(@"检索 Key"), self.searchKey, nil, t)];
+    [adv addArrangedSubview:RLPSRow(RLPTr(@"检索 Key"), self.searchKey, nil, t)];
 
     NSStackView *searchBtns = [[NSStackView alloc] init];
     searchBtns.orientation = NSUserInterfaceLayoutOrientationHorizontal;
@@ -1591,24 +1726,24 @@ static NSString *RLPControlIdentifier(NSString *key) {
     sClear.identifier = @"search.clear";
     [searchBtns addArrangedSubview:sSave];
     [searchBtns addArrangedSubview:sClear];
-    [stack addArrangedSubview:searchBtns];
+    [adv addArrangedSubview:searchBtns];
 
     self.searchStatus = RLPLabel(@"", t.small, t.mut);
     self.searchStatus.maximumNumberOfLines = 2;
     self.searchStatus.lineBreakMode = NSLineBreakByWordWrapping;
     self.searchStatus.identifier = @"search.status";
     [[self.searchStatus.widthAnchor constraintEqualToConstant:560] setActive:YES];
-    [stack addArrangedSubview:self.searchStatus];
+    [adv addArrangedSubview:self.searchStatus];
 
     // ---- 标签写回（web sp_wbdesc / sp_wbdry / sp_wbapply / sp_wbmsg）----
     // web 把这块放在「元数据」页。原生原来挂在「高级」页，按 web 的位置搬回来 ——
     // 位置本身就是 web 的信息架构，不该自创。
-    [stack addArrangedSubview:RLPSGroup(RLPTr(@"标签写回"),
+    [adv addArrangedSubview:RLPSGroup(RLPTr(@"标签写回"),
         RLPTr(@"默认开启：补全到的标签 / 封面写回音频文件本身；写前校验音频数据逐位不变"), t)];
 
     self.wbDesc = [self hintForKey:@"sp_wbdesc" width:560];
     self.wbDesc.stringValue = RLPTr(@"补全到的标签 / 封面写回音频文件本身；写前校验音频数据逐位不变，原文件备份到备份目录");
-    [stack addArrangedSubview:self.wbDesc];
+    [adv addArrangedSubview:self.wbDesc];
 
     self.wbDryBtn = [NSButton buttonWithTitle:RLPTr(@"预览写回") target:self
                                        action:@selector(onWritebackDry:)];
@@ -1630,7 +1765,12 @@ static NSString *RLPControlIdentifier(NSString *key) {
     [wbRow addArrangedSubview:self.wbDryBtn];
     [wbRow addArrangedSubview:self.wbApplyBtn];
     [wbRow addArrangedSubview:self.writebackStatus];
-    [stack addArrangedSubview:wbRow];
+    [adv addArrangedSubview:wbRow];
+
+    gCurrentStack = savedStack;
+    gCurrentGroup = savedGroup;
+    [stack addArrangedSubview:adv];
+    [adv.widthAnchor constraintEqualToAnchor:stack.widthAnchor].active = YES;
 }
 
 #pragma mark - 均衡 / 输入（已迁移的子界面）
@@ -1638,12 +1778,24 @@ static NSString *RLPControlIdentifier(NSString *key) {
 - (void)fillEqualizer:(NSStackView *)stack t:(RLPTheme *)t {
     self.eqView = [[RLPEqualizerView alloc] initWithFrame:NSMakeRect(0, 0, 620, 720)];
     self.eqView.translatesAutoresizingMaskIntoConstraints = NO;
+    // 设置页本身就是整页滚动容器：EQ 不再套自己的滚动条（用户实测「只要外面那个滚动条」）。
+    [self.eqView setEmbeddedInPage:YES];
     [stack addArrangedSubview:self.eqView];
+    // 高度 = 内容自然高度；reload 之后再校正一次（20 段参数/OPRA 文本就位后高度才准确）。
+    self.eqHeightConstraint = [self.eqView.heightAnchor
+        constraintEqualToConstant:MAX(900.0, [self.eqView preferredContentHeight])];
     [NSLayoutConstraint activateConstraints:@[
-        [self.eqView.heightAnchor constraintEqualToConstant:720],
+        self.eqHeightConstraint,
         [self.eqView.widthAnchor constraintEqualToAnchor:stack.widthAnchor constant:-4],
     ]];
     [self.eqView reload];
+    __weak __typeof__(self) weakEq = self;
+    dispatch_async(dispatch_get_main_queue(), ^{
+        __typeof__(self) self_ = weakEq;
+        if (!self_ || !self_.eqHeightConstraint) return;
+        CGFloat h = [self_.eqView preferredContentHeight];
+        if (h > self_.eqHeightConstraint.constant) self_.eqHeightConstraint.constant = MAX(900.0, h);
+    });
 }
 
 - (void)fillCalibration:(NSStackView *)stack t:(RLPTheme *)t {

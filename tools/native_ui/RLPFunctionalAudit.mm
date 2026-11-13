@@ -789,17 +789,23 @@ int RLPRunFunctionalAudit(NSString *outDir) {
                         for (NSImageRep *r in i0.representations) if ([r isKindOfClass:[NSBitmapImageRep class]]) r0 = (NSBitmapImageRep *)r;
                         for (NSImageRep *r in i1.representations) if ([r isKindOfClass:[NSBitmapImageRep class]]) r1 = (NSBitmapImageRep *)r;
                         if (r0 && r1) {
-                            NSColor *c0 = [r0 colorAtX:r0.pixelsWide / 2 y:r0.pixelsHigh / 2];
-                            NSColor *c1 = [r1 colorAtX:r1.pixelsWide / 2 y:r1.pixelsHigh / 2];
+                            // 采样点避开文字列（居中可能正好压在标题/专辑名的字形上 ⟹ 假红）。
+                            // 35% 处标题与艺术家文本之间是空白，底色差异才是判据本体。
+                            const NSInteger sx = r0.pixelsWide * 35 / 100;
+                            NSColor *c0 = [r0 colorAtX:sx y:r0.pixelsHigh / 2];
+                            NSColor *c1 = [r1 colorAtX:sx y:r1.pixelsHigh / 2];
                             NSColor *g0 = [c0 colorUsingColorSpace:[NSColorSpace sRGBColorSpace]];
                             NSColor *g1 = [c1 colorUsingColorSpace:[NSColorSpace sRGBColorSpace]];
+                            // 悬停底色是**半透明覆盖**（web .trow:hover 用 --hov，浅色主题下是 rgba 黑）：
+                            // 只看 RGB 会漏掉这种"透明画上去"的底色，必须把 alpha 也算进判据。
                             CK(g0 && g1 && (fabs(g0.redComponent - g1.redComponent) > 0.01 ||
                                             fabs(g0.greenComponent - g1.greenComponent) > 0.01 ||
-                                            fabs(g0.blueComponent - g1.blueComponent) > 0.01),
-                               "悬停后行底色真的画出来了（像素变化）",
-                               [NSString stringWithFormat:@"off=%.2f/%.2f/%.2f on=%.2f/%.2f/%.2f",
-                                g0 ? g0.redComponent : -1, g0 ? g0.greenComponent : -1, g0 ? g0.blueComponent : -1,
-                                g1 ? g1.redComponent : -1, g1 ? g1.greenComponent : -1, g1 ? g1.blueComponent : -1]);
+                                            fabs(g0.blueComponent - g1.blueComponent) > 0.01 ||
+                                            fabs(g0.alphaComponent - g1.alphaComponent) > 0.01),
+                               "悬停后行底色真的画出来了（像素变化，含 alpha）",
+                               [NSString stringWithFormat:@"off=%.2f/%.2f/%.2f a%.2f on=%.2f/%.2f/%.2f a%.2f",
+                                g0 ? g0.redComponent : -1, g0 ? g0.greenComponent : -1, g0 ? g0.blueComponent : -1, g0 ? g0.alphaComponent : -1,
+                                g1 ? g1.redComponent : -1, g1 ? g1.greenComponent : -1, g1 ? g1.blueComponent : -1, g1 ? g1.alphaComponent : -1]);
                         }
                     }
                     [hv setHoveredForAudit:NO];
@@ -1368,6 +1374,170 @@ int RLPRunFunctionalAudit(NSString *outDir) {
            NSStringFromClass(wc.nowPlayingPage.class));
         [[NSNotificationCenter defaultCenter] postNotificationName:@"RLPCloseNowPlayingNotification" object:nil];
         Pump(0.4);
+    }
+
+    // ---- ⑤d 2026-11-13 轮：用户实机点出的 UI 故障（每条都问运行时事实）----
+    {
+        // (1) 专辑封面必须正方形：旧实现封面高固定 180、宽随窗口变 ⟹ letterbox 白边。
+        [wc.sidebar selectKey:@"albums"];
+        Pump(0.9);
+        NSMutableArray<NSView *> *albumsAll = [NSMutableArray array];
+        CollectAllViews(wc.currentContent.view, albumsAll);
+        NSInteger itemCount = 0, squareCovers = 0;
+        for (NSView *v in albumsAll) {
+            if (![NSStringFromClass(v.class) containsString:@"RLPAlbumCardView"]) continue;
+            ++itemCount;
+            NSMutableArray<NSView *> *iv = [NSMutableArray array];
+            CollectAllViews(v, iv);
+            for (NSView *c in iv) {
+                if (![c isKindOfClass:[NSImageView class]]) continue;
+                if (c.bounds.size.width < 40 || c.bounds.size.height < 40) continue;
+                if (fabs(c.bounds.size.width - c.bounds.size.height) <= 0.5) ++squareCovers;
+            }
+        }
+        CK(itemCount > 0 && squareCovers >= itemCount,
+           "专辑卡封面是正方形（web .card .cv{aspect-ratio:1}；旧实现 180 固定高 ⟹ 白边）",
+           [NSString stringWithFormat:@"items=%ld square=%ld", (long)itemCount, (long)squareCovers]);
+
+        // (2) 播放条音量滑块：位置刻度 0..1000，0 dB 必须落在最右端（web #vol max=1000）
+        NSMutableArray<NSView *> *barViews = [NSMutableArray array];
+        CollectAllViews(wc.playbackBar, barViews);
+        NSSlider *vol = nil;
+        for (NSView *v in barViews)
+            if ([v isKindOfClass:[NSSlider class]] && [v.identifier isEqualToString:@"pb.vol"]) { vol = (NSSlider *)v; break; }
+        CK(vol != nil, "播放条音量滑块存在（web #vol）", @"缺 pb.vol");
+        if (vol) {
+            CK(fabs(vol.maxValue - 1000.0) < 0.5, "音量是位置刻度 0..1000（web #vol）",
+               [NSString stringWithFormat:@"max=%.1f", vol.maxValue]);
+            CK(vol.cell && [(id)vol.cell respondsToSelector:NSSelectorFromString(@"capsuleStyle")],
+               "音量滑块用白色胶囊头（web range 原生外观；旧实现 10px 红点）", @"cell 不是 capsule 样式");
+        }
+        // 进度滑杆不应画滑块头（web .track 只有填充线）
+        NSSlider *prog = nil;
+        for (NSView *v in barViews)
+            if ([v isKindOfClass:[NSSlider class]] && [v.identifier isEqualToString:@"pb.progress"]) { prog = (NSSlider *)v; break; }
+        CK(prog != nil && prog.cell && [(id)prog.cell respondsToSelector:NSSelectorFromString(@"hideKnob")],
+           "进度条无滑块头（web .track 同款）", @"cell 不是 hideKnob 样式");
+
+        // (3) 顶栏：刷新曲库按钮 + 返回键是纯图标 chevron（不是「← 返回专辑」文字胶囊）
+        NSMutableArray<NSView *> *topViews = [NSMutableArray array];
+        CollectAllViews(wc.window.contentView, topViews);
+        NSButton *scanBtn = nil, *backBtn = nil;
+        for (NSView *v in topViews) {
+            if (![v isKindOfClass:[NSButton class]]) continue;
+            if ([v.identifier isEqualToString:@"top.scan"]) scanBtn = (NSButton *)v;
+            if ([v.identifier isEqualToString:@"top.back"]) backBtn = (NSButton *)v;
+        }
+        CK(scanBtn != nil && scanBtn.target && scanBtn.action,
+           "顶栏有「重新扫描音乐库」按钮且有 action（web #bScan 同功能）",
+           scanBtn ? [NSString stringWithFormat:@"target=%@", scanBtn.target] : @"缺 top.scan");
+        CK(backBtn != nil && backBtn.image != nil && backBtn.title.length <= 1,
+           "返回键是纯图标 chevron（不是「← 返回专辑」文字胶囊）",
+           backBtn ? [NSString stringWithFormat:@"title=%@", backBtn.title] : @"缺 top.back");
+
+        // (4) 元数据「高级选项」：默认收起，点开后高级内容可见（web #sp_metamore/#sp_metaadv）
+        // 前面几步切过专辑/播放条，这里先真正切到设置页再断言设置页控件。
+        [wc.sidebar selectKey:@"settings"];
+        Pump(0.9);
+        if ([wc.currentContent isKindOfClass:[RLPSettingsViewController class]]) {
+            RLPSettingsViewController *svm = (RLPSettingsViewController *)wc.currentContent;
+            [svm selectPane:@"meta"];
+            Pump(0.6);
+            NSMutableArray<NSView *> *mv = [NSMutableArray array];
+            CollectAllViews(svm.view, mv);
+            NSButton *more = nil; NSView *adv = nil;
+            for (NSView *v in mv) {
+                if ([v.identifier isEqualToString:@"sp_metamore"]) more = [v isKindOfClass:[NSButton class]] ? (NSButton *)v : nil;
+                if ([v.identifier isEqualToString:@"sp_metaadv"]) adv = v;
+            }
+            CK(more != nil && adv != nil, "元数据页有「高级选项」按钮与高级内容容器", @"缺 sp_metamore/sp_metaadv");
+            if (more && adv) {
+                CK(adv.hidden, "高级选项默认收起（用户：默认只显示基础选项）", @"高级内容默认可见");
+                [more performClick:nil];
+                Pump(0.4);
+                CK(!adv.hidden, "点「高级选项」后高级内容真的展开", @"仍是收起态");
+                CK(adv.frame.size.height > 10, "展开后高级内容有真实高度（布局解算过）",
+                   @(adv.frame.size.height).stringValue);
+                // 证据截图：高级选项展开态（数据源 / AI 接入 / 联网检索 / 写回）
+                [svm.view layoutSubtreeIfNeeded];
+                Pump(0.3);
+                CK(Snap(svm.view, [outDir stringByAppendingPathComponent:@"21c-settings-meta-advanced.png"],
+                        CGSizeMake(1180, 760)), "高级选项展开态截图已落盘", outDir);
+                [more performClick:nil];
+                Pump(0.3);
+                CK(adv.hidden, "再点一次收起", @"仍展开");
+            }
+            // (5) EQ 页：不再有内层滚动条（旧的 EQ 自带滚动 + 参数表滚动 = 三个滚动条）
+            [svm selectPane:@"eq"];
+            Pump(0.6);
+            NSClassFromString(@"RLPEqualizerView");
+            NSMutableArray<NSView *> *eqAll = [NSMutableArray array];
+            CollectAllViews(svm.view, eqAll);
+            NSView *eqRoot = nil;
+            Class eqClass = NSClassFromString(@"RLPEqualizerView");
+            for (NSView *v in eqAll) if (eqClass && [v isKindOfClass:eqClass]) { eqRoot = v; break; }
+            CK(eqRoot != nil, "EQ 页有 RLPEqualizerView（审计锚点）", @"视图树里找不到");
+            NSMutableArray<NSView *> *eqSub = [NSMutableArray array];
+            if (eqRoot) CollectAllViews(eqRoot, eqSub);
+            NSInteger scrollersInsideEQ = 0;
+            for (NSView *v in eqSub) {
+                if (![v isKindOfClass:[NSScrollView class]]) continue;
+                NSScrollView *scv = (NSScrollView *)v;
+                if (scv.hasVerticalScroller || scv.hasHorizontalScroller) ++scrollersInsideEQ;
+            }
+            CK(scrollersInsideEQ == 0, "EQ 页只剩外层整页滚动条（内层 0 个滚动条）",
+               [NSString stringWithFormat:@"innerScrollers=%ld", (long)scrollersInsideEQ]);
+            // 20 段参数表必须全高可见（旧实现内层 300pt 滚动裁掉一半参数）
+            NSTableView *bands = nil;
+            for (NSView *v in eqAll)
+                if ([v isKindOfClass:[NSTableView class]] && [v.identifier isEqualToString:@"peq.bands"]) { bands = (NSTableView *)v; break; }
+            CK(bands != nil && bands.frame.size.height >= 20 * 26,
+               "20 段参数表全高渲染（不再内层滚动裁切）",
+               bands ? [NSString stringWithFormat:@"h=%.0f", bands.frame.size.height] : @"缺 peq.bands");
+            CK(bands != nil && bands.dataSource != nil && bands.delegate != nil,
+               "参数表有真实数据源（曲线可编辑前提）", @"dataSource/delegate 为空");
+
+            // (5b) 诊断/反馈选项收进气泡窗：入口键在页面上，原控件仍在视图树里（隐藏容器）
+            [svm selectPane:@"diag"];
+            Pump(0.6);
+            NSMutableArray<NSView *> *dsv = [NSMutableArray array];
+            CollectAllViews(svm.view, dsv);
+            NSButton *diagMore = nil, *fbMore = nil;
+            BOOL fbTextStillThere = NO;
+            for (NSView *v in dsv) {
+                if ([v.identifier isEqualToString:@"sp_diagmore"]) diagMore = (NSButton *)v;
+                if ([v.identifier isEqualToString:@"sp_fbmore"]) fbMore = (NSButton *)v;
+                if ([v.identifier isEqualToString:@"sp_fbtext"]) fbTextStillThere = YES;
+            }
+            CK(diagMore != nil && diagMore.target && diagMore.action,
+               "诊断页有「诊断包选项」气泡窗入口且有 action", @"缺 sp_diagmore");
+            CK(fbMore != nil && fbMore.target && fbMore.action,
+               "诊断页有「填写反馈」气泡窗入口且有 action", @"缺 sp_fbmore");
+            CK(fbTextStillThere, "反馈正文仍在视图树里（收进隐藏容器，未删功能）", @"找不到 sp_fbtext");
+        }
+
+        // (6) 文件夹页地址栏（web #fPath/#fGo/#fRoot）：旧实现只有只读路径文字
+        [wc.sidebar selectKey:@"folders"];
+        Pump(0.7);
+        NSMutableArray<NSView *> *fv = [NSMutableArray array];
+        CollectAllViews(wc.currentContent.view, fv);
+        NSMutableSet<NSString *> *fids = [NSMutableSet set];
+        for (NSView *v in fv) if (v.identifier.length) [fids addObject:v.identifier];
+        CK([fids containsObject:@"fPath"] && [fids containsObject:@"fGo"] && [fids containsObject:@"fRoot"],
+           "文件夹页有可输入路径 + 跳转键 + 根目录下拉（web 地址栏）",
+           [NSString stringWithFormat:@"ids=%@", fids]);
+
+        // (7) 队列页排序下拉（web #qSort）
+        [wc.sidebar selectKey:@"queue"];
+        Pump(0.7);
+        NSMutableArray<NSView *> *qv = [NSMutableArray array];
+        CollectAllViews(wc.currentContent.view, qv);
+        NSPopUpButton *qsort = nil;
+        for (NSView *v in qv)
+            if ([v isKindOfClass:[NSPopUpButton class]] && [v.identifier isEqualToString:@"queue.sort"]) { qsort = (NSPopUpButton *)v; break; }
+        CK(qsort != nil && qsort.target && qsort.action,
+           "队列页有排序下拉（web #qSort 语义：只改队列顺序）",
+           qsort ? [NSString stringWithFormat:@"items=%ld", (long)qsort.numberOfItems] : @"缺 queue.sort");
     }
 
     // ---- ⑥ 主题必须真的换得动：用**渲染像素**判定，不看属性自述 ----

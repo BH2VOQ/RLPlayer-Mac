@@ -81,6 +81,11 @@
 
 // Keep NSSlider's native keyboard/accessibility/tracking, but not its OS-blue paint.
 @interface RLPBarSliderCell : NSSliderCell
+/// web #vol/#npVol 是原生 range 滑块：红色填充 + 白色胶囊滑块头，**滑块头右缘贴住轨道右端**。
+/// 旧实现画 10px 红圆点、填充一路画到最右 ⟹ 用户实测「最大音量不是直接拉到头的」。
+@property (nonatomic, assign) BOOL capsuleStyle;
+/// 进度条：web .track 只有填充线、没有滑块头，这里同款（音量条才画胶囊头）。
+@property (nonatomic, assign) BOOL hideKnob;
 @end
 @implementation RLPBarSliderCell
 - (void)drawBarInside:(NSRect)rect flipped:(BOOL)flipped {
@@ -88,14 +93,45 @@
     [[RLPTheme current].track setFill];
     [[NSBezierPath bezierPathWithRoundedRect:track xRadius:2 yRadius:2] fill];
     double fraction = (self.doubleValue-self.minValue)/MAX(1e-9,self.maxValue-self.minValue);
-    track.size.width *= MAX(0,MIN(1,fraction));
-    [[RLPTheme current].accent setFill];
-    [[NSBezierPath bezierPathWithRoundedRect:track xRadius:2 yRadius:2] fill];
+    fraction = MAX(0.0, MIN(1.0, fraction));
+    CGFloat fillEnd;
+    if (self.capsuleStyle) {
+        // 与 web 同几何：滑块头中心在 [左端+半头宽, 右端-半头宽] 之间移动，
+        // 填充画到头中心为止（最右端时头右缘正好贴住轨道右端）。
+        const CGFloat knobW = 22.0;
+        CGFloat minC = NSMinX(track) + knobW/2.0;
+        CGFloat maxC = NSMaxX(track) - knobW/2.0;
+        fillEnd = minC + fraction * MAX(0.0, maxC - minC);
+    } else {
+        fillEnd = NSMinX(track) + NSWidth(track) * fraction;
+    }
+    NSRect fill = track;
+    fill.size.width = MAX(0.0, fillEnd - NSMinX(track));
+    if (fill.size.width > 0) {
+        [[RLPTheme current].accent setFill];
+        [[NSBezierPath bezierPathWithRoundedRect:fill xRadius:2 yRadius:2] fill];
+    }
 }
+
 - (void)drawKnob:(NSRect)rect {
-    [[RLPTheme current].accent setFill];
-    NSRect knob = NSMakeRect(NSMidX(rect)-5,NSMidY(rect)-5,10,10);
-    [[NSBezierPath bezierPathWithOvalInRect:knob] fill];
+    if (self.hideKnob) return;
+    if (!self.capsuleStyle) {
+        [[RLPTheme current].accent setFill];
+        NSRect knob = NSMakeRect(NSMidX(rect)-5,NSMidY(rect)-5,10,10);
+        [[NSBezierPath bezierPathWithOvalInRect:knob] fill];
+        return;
+    }
+    // web 原生 range 滑块头：白色横向胶囊（约 22×13）+ 很淡的投影，压在红色填充上。
+    const CGFloat knobW = 22.0, knobH = 13.0;
+    NSRect knob = NSMakeRect(NSMidX(rect)-knobW/2.0, NSMidY(rect)-knobH/2.0, knobW, knobH);
+    NSShadow *shadow = [[NSShadow alloc] init];
+    shadow.shadowColor = [NSColor blackColor];
+    shadow.shadowBlurRadius = 3.0;
+    shadow.shadowOffset = NSMakeSize(0, -1);
+    [shadow set];
+    [[NSColor whiteColor] setFill];
+    [[NSBezierPath bezierPathWithRoundedRect:knob xRadius:knobH/2.0 yRadius:knobH/2.0] fill];
+    [[NSGraphicsContext currentContext] setShouldAntialias:YES];
 }
 @end
 
@@ -163,6 +199,10 @@
     self.prevBtn = [self symbolButton:@"backward.fill" tip:@"上一首"];
     self.playBtn = [self symbolButton:@"play.fill" tip:@"播放 / 暂停"];
     self.nextBtn = [self symbolButton:@"forward.fill" tip:@"下一首"];
+    // 稳定锚点（与 web #bPrev/#bPause/#bNext 一一对应；行为扫描用它们核对绑定）：
+    self.prevBtn.identifier = @"pb.prev";
+    self.playBtn.identifier = @"pb.play";
+    self.nextBtn.identifier = @"pb.next";
     self.prevBtn.action = @selector(previousTrack);
     self.playBtn.action = @selector(playPause);
     self.nextBtn.action = @selector(nextTrack);
@@ -176,6 +216,7 @@
     self.repeatBtn.action = @selector(toggleRepeat:);
     // 停止（与暂停不同：停止会释放设备，web 版底栏也有这个键）
     self.stopBtn = [self symbolButton:@"stop.fill" tip:@"停止"];
+    self.stopBtn.identifier = @"pb.stop";
     self.stopBtn.target = self;
     self.stopBtn.action = @selector(stopPlayback:);
     for (NSButton *b in @[self.prevBtn, self.playBtn, self.nextBtn, self.stopBtn, self.shuffleBtn, self.repeatBtn])
@@ -191,6 +232,7 @@
 
     // 封面缩略图（web 底栏最左）
     RLPBarCoverView *cv = [[RLPBarCoverView alloc] initWithFrame:NSZeroRect];
+    cv.imageScaling = NSImageScaleProportionallyUpOrDown;
     __weak __typeof__(self) weakCoverBar = self;
     cv.onClick = ^{
         __typeof__(self) s = weakCoverBar;
@@ -210,9 +252,9 @@
     self.bpBadge = [self labelWithFont:[NSFont systemFontOfSize:9.5 weight:NSFontWeightBold] color:t.ok];
     self.bpBadge.stringValue = @"BIT-PERFECT";
     self.bpBadge.wantsLayer = YES;
-    self.bpBadge.layer.cornerRadius = 4;
+    self.bpBadge.layer.cornerRadius = 5;          // web #bpBadge{border-radius:5px}
     self.bpBadge.layer.borderWidth = 1;
-    self.bpBadge.layer.borderColor = t.ok.CGColor;
+    self.bpBadge.layer.borderColor = t.okLine.CGColor;
     self.bpBadge.alignment = NSTextAlignmentCenter;
     self.bpBadge.identifier = @"pb.bp";
     self.bpBadge.stringValue = RLPTr(@"待播放验证");
@@ -250,7 +292,7 @@
     self.fmtBadge.identifier = @"pb.fmt";
     self.fmtBadge.alignment = NSTextAlignmentCenter;
     self.fmtBadge.wantsLayer = YES;
-    self.fmtBadge.layer.cornerRadius = 4;
+    self.fmtBadge.layer.cornerRadius = 5;         // web .badge{border-radius:5px}
     self.fmtBadge.layer.borderWidth = 1;
     self.fmtBadge.layer.borderColor = t.accentWeak.CGColor;
     self.fmtBadge.layer.backgroundColor = t.accentWeak.CGColor;
@@ -267,7 +309,9 @@
     self.chainBtn.action = @selector(showSignalChain:);
 
     self.progress = [[RLPCommitSlider alloc] initWithFrame:NSZeroRect];
-    self.progress.cell = [[RLPBarSliderCell alloc] init];
+    RLPBarSliderCell *progCell = [[RLPBarSliderCell alloc] init];
+    progCell.hideKnob = YES;             // web .track：只有填充线，没有圆点
+    self.progress.cell = progCell;
     self.progress.minValue = 0.0;
     self.progress.maxValue = 1.0;
     self.progress.doubleValue = 0.0;
@@ -290,7 +334,9 @@
     // 音量滑块改用**位置刻度 0..1000**（web 2026-10-25 修过的曲线）：
     // 旧实现是线性 dB 刻度，拖到中间就 -30 dB（只剩 3% 振幅），用户会以为"没声音"。
     self.volume = [[RLPCommitSlider alloc] initWithFrame:NSZeroRect];
-    self.volume.cell = [[RLPBarSliderCell alloc] init];
+    RLPBarSliderCell *volCell = [[RLPBarSliderCell alloc] init];
+    volCell.capsuleStyle = YES;          // web #vol 的白色胶囊滑块头
+    self.volume.cell = volCell;
     self.volume.minValue = 0.0;
     self.volume.maxValue = 1000.0;
     self.volume.doubleValue = 1000.0;
@@ -338,7 +384,7 @@ static double RLPVolDbToPos(double db) {
     void (^place)(NSView *,CGFloat,CGFloat,CGFloat,CGFloat)=^(NSView *v,CGFloat x,CGFloat y,CGFloat w,CGFloat h){ v.frame=NSMakeRect(x,y,MAX(0,w),h); };
     CGFloat pad=18, gap=14, itemGap=6;
     CGFloat bpW=ceil(self.bpBadge.intrinsicContentSize.width)+14;
-    CGFloat fmtW=MAX(40,ceil(self.fmtBadge.intrinsicContentSize.width)+12);
+    CGFloat fmtW=MAX(40,ceil(self.fmtBadge.intrinsicContentSize.width)+14);   // web .badge 左右 padding 7
     CGFloat gpuW=self.gpuBadge.hidden?0:34;
     CGFloat volW=76, iconW=32;
     CGFloat rightW=32*2+bpW+fmtW+14+volW+itemGap*5+(gpuW?gpuW+itemGap:0);
@@ -528,7 +574,7 @@ static double RLPVolDbToPos(double db) {
     self.fmtBadge.textColor = t.accentText;
     self.fmtBadge.layer.borderColor = t.accentWeak.CGColor;
     self.fmtBadge.layer.backgroundColor = t.accentWeak.CGColor;
-    self.bpBadge.layer.borderColor = t.ok.CGColor;
+    self.bpBadge.layer.borderColor = t.okLine.CGColor;   // web: 1px var(--ok-line)
     self.lyricBtn.contentTintColor = t.mut;
     self.chainBtn.contentTintColor = t.mut;
     self.volIconView.contentTintColor = t.mut;
@@ -563,7 +609,9 @@ static double RLPVolDbToPos(double db) {
         }
     }
     self.bpBadge.stringValue=RLPTr(text); self.bpBadge.hidden=NO;
-    self.bpBadge.textColor=color; self.bpBadge.layer.borderColor=color.CGColor;
+    self.bpBadge.textColor=color;
+    // web #bpBadge：bp-yes 用 --ok-line 边框 + --ok-bg 底；其余态边框跟文字同色（currentColor）。
+    self.bpBadge.layer.borderColor=([state isEqual:@"yes"]?t.okLine:color).CGColor;
     self.bpBadge.layer.backgroundColor=([state isEqual:@"yes"]?t.okBg:t.hov).CGColor;
     self.bpBadge.toolTip=tip.length?tip:([state length]?RLPTr(text):RLPTr(@"当前预设已保存，但尚未播放。bit-perfect 结论只对实际播放生效"));
     self.gpuBadge.hidden=!st.gpuUsed; self.gpuBadge.textColor=t.okText;
@@ -613,14 +661,13 @@ static double RLPVolDbToPos(double db) {
     if (name.length == 0) name = st.playing ? RLPTr(@"未命名曲目") : RLPTr(@"未播放");
     self.titleLabel.stringValue = ([st.currentPath isEqualToString:self.metaPath] && self.metaTitle.length) ? self.metaTitle : name;
 
-    if (st.error.length) {
-        self.subLabel.stringValue = st.error;
-        self.subLabel.textColor = [RLPTheme current].danger;
-    } else {
-        // 副标题 = 艺术家 · 专辑（web 底栏同口径）；bit-perfect 改用独立徽标显示。
-        self.subLabel.textColor = [RLPTheme current].mut;
-        [self refreshMetaForPath:st.currentPath];
-    }
+    // 副标题 = 艺术家 · 专辑（web 底栏同口径）；bit-perfect 改用独立徽标显示。
+    // 错误原文（RENDERFAIL 等）只进单曲页告警条与诊断包，绝不长期占据底栏副标题
+    // （旧实现 st.error 非空就顶掉副标题，用户实测「第一次播放歌曲显示这个提示」）。
+    self.subLabel.textColor = [RLPTheme current].mut;
+    [self refreshMetaForPath:st.currentPath];
+    if (st.error.length) self.subLabel.toolTip = st.error;
+    else self.subLabel.toolTip = nil;
     [self refreshBadges];
     // 封面：切歌才重新取（避免每 500ms 拉一次图）
     if (![st.currentPath isEqualToString:self.coverPath ?: @""]) {

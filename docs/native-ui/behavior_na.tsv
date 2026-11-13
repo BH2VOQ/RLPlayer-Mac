@@ -1,0 +1,10 @@
+# kind	web_id	reason
+# 行为对照的「不适用」表：每条都必须写清为什么原生不需要同名绑定。
+bind	aCoverFile	原生换封面走系统 NSOpenPanel（模态选择器），web 的 file input 无对应 DOM id。
+bind	askCancel	原生文本对话框用 NSAlert（系统模态）自带「取消」按钮，web 的 askCancel 无对应控件。
+bind	askOk	原生文本对话框用 NSAlert 的确认按钮，web 的 askOk 无对应控件。
+bind	sp_naa_dev	NAA/RTANet 在 macOS 无驱动体系，后端明确报不可用（原生回退 CoreAudio 独占），web 的 NAA 设备下拉在原生无对象。
+bind	sp_naahost	同上：NAA 主机地址在 macOS 端不可用。
+bind	sRep	web 的经典(workbench)布局用 #sRep；原生把同一组播放模式能力放在设置·通用「循环模式」（sp_rep，同一后端路径 /api/playmode|repeat），无同名控件。
+bind	sShuf	同上：原生随机播放在设置·通用「随机播放」（sp_shuf，/api/shuffle 同一条后端路径）。
+bind	sLoud	同上：原生等响度补偿在设置·通用「等响度补偿」（sp_loud，settings 键 loudness）。

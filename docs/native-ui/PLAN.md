@@ -312,3 +312,54 @@ Windows 平台层删除后没改回来。后果：
 | 2 | 强制重拉时不清空旧模型列表，换端点后旧模型还挂在下拉里 | `loadLlmModels:force` 开始时 `removeAllItems` + 隐藏 + 「正在重新拉取…」 | 判据前置塞两条假旧模型再强制重拉，旧实现 `items=2 hidden=0`（红） |
 
 修后 `--audit` **195 项**全过；`179/179` ctest。
+
+## 12. 2026-11-13 第五轮：用户实机反馈 13 条 + 行为级比对
+
+基准 `src/version.h = 1.1.7.14`（a519338→e0ec65f 本地未推送）；本轮目标版本 1.1.7.15。
+新增门禁工具 `behavior_scan.py`（见 §12.2）。所有改动均为本地提交、未推送。
+
+### 12.1 用户实机点出的问题与修法
+
+| # | 用户现象 | 根因 | 修法 | 判据 |
+|---|---|---|---|---|
+| 1 | 专辑封面都留白边（web 铺满） | 封面高写死 180、宽随列宽变 ⟹ 方图被 `ProportionallyUpOrDown` letterbox | 新增 `RLPCoverImageView`（web `object-fit:cover`：等比铺满+裁切）；封面高度=宽度（正方形） | `--audit`：每张专辑卡封面 bounds 高宽差 ≤0.5pt |
+| 2 | 专辑与专辑之间间隔太大 | item 高 = 封面+62、行距 22（web 文字区 39 + gap16） | item 高 = 封面+39；行距 16；字体 12.5/11、名字 margin 9 | 同上（几何值来自 web CSS `.card .cv`/`.nm`/`.ar`） |
+| 3 | 音量条最大音量不到头、红点不够「高级」 | 旧 cell 画 10px 红圆点 + 填充画到最右 | 白色 22×13 胶囊头，中心行程 [半头宽, 右端-半头宽]，填充到头中心；进度条不画头 | `--audit`：pb.vol 0..1000 + capsuleStyle；pb.progress hideKnob |
+| 4 | 徽章没有 web 高级感 | 圆角 4、边框用饱和绿、无色底 | 圆角 5、bp-yes 用 `--ok-line` 边框 + `--ok-bg` 底（web #bpBadge 逐值） | 代码对照 web CSS；属美术微调（无像素判据） |
+| 5 | 底栏副标题显示 RENDERFAIL 长错误串 | `applyStatus` 把 st.error 直接塞进 subLabel | 底栏副标题只显示 艺术家·专辑；错误原文进单曲页告警条/tooltip | 代码审查（错误串只在有 error 的运行时出现） |
+| 6 | EQ 三个滚动条，只要外面那个 | EQ 自带滚动 + 20 段表内层滚动 + 设置页滚动 | `setEmbeddedInPage:`：取消 EQ 自身滚动，交给设置页；参数表改全高 546pt、无内层滚动条 | `--audit`：EQ 内部 0 个滚动条；peq.bands 高 ≥ 20×26 |
+| 7 | EQ 波形图要能手动调整 | 曲线视图只画不响应鼠标 | `RLPEQCurveView` 增加 mouseDown/Dragged：按对数频率找最近段、y→增益（±18dB），260ms 节流下发 `/api/peq` | 生产入口回调（web PEQ_DRAG 同语义）；拖动事件为运行时行为 |
+| 8 | 耳机 EQ 没做进来 | OPRA 区块存在但在内层滚动下方、看不到 | 随 #6 一并展开；OPRA 搜索/型号/预设/应用沿用既有实现 | `--audit` 截图 + 现有 OPRA 代码路径 |
+| 9 | 元数据页不合格：默认只显示基础项，高级项在「高级选项」里 | 旧实现全部平铺 | 三个基础开关 + 「高级选项 ▾」；高级容器 `sp_metaadv` 默认隐藏，点击展开（web #sp_metamore 同构） | `--audit`：默认 hidden→点击展开有真实高度→再点收起 |
+| 10 | 没做刷新曲库按钮 | 原生只有设置页「重新扫描全部」 | 顶栏 `top.scan`（arrow.clockwise）→ `POST /api/lib/scan`，扫描中提示「扫描已在进行中」（web #bScan） | `--audit`：top.scan 在视图树且有 target/action |
+| 11 | 「返回专辑」按钮无意义，要返回上一页的 chevron | 文字胶囊固定在右侧 | 顶栏左侧 28pt 圆形 `chevron.left`（`top.back`），仅在详情栈非空时显示；标题位置随动 | `--audit`：top.back 是纯图标（无文字） |
+| 12 | 播放列表错位（队列行全在右抽屉下半部） | 抽屉滚动区 documentView 非翻转 ⟹ 内容钉底 | `RLPFlippedDocumentView` 作 documentView；行首从顶部排（空态也在顶部） | 截图 14-drawer-queue.png + 行为入口 |
+| 13 | 页面里鼠标停在单独框上滚轮失灵 | 内层 NSScrollView 吞 wheel 却无处可滚 | `RLPForwardingScrollView`：自身不可滚时把事件交给外层整页滚动；专辑详情曲目表/其他作品条接入 | 代码路径 + 专辑详情整页滚动截图 |
+| 14 | 艺术家页不如 web | 固定 168×196/116 小圆；只拉 /api/artist/image，缺专辑封面兜底 | 列宽=头像直径（auto-fill minmax150/gap16），文字区 39；三层降级 ① artist/image ② /api/lib/cover（首张有封面专辑） ③ 首字母 | `--audit` 截图；fallback 路径代码 |
+| 15 | 队列页没有 web 的排序下拉 | 只有三个按钮（标题/艺术家/默认） | `NSPopUpButton queue.sort` → `/api/qorder`（默认走 `/api/qsort?by=default`）；只改队列顺序不改正在播放 | `--audit`：queue.sort 有 target/action |
+| 16 | 文件夹页不能输入路径跳转 | 只有只读路径文字 | 地址栏：`fPath` 可编辑输入 + `fGo` 跳转 + `fRoot` 音乐库根目录下拉（/api/lib/stats roots） | `--audit`：三个 identifier 都在 |
+
+| 17 | 诊断/反馈页的选项平铺在页面上，用户要求收进气泡窗 | 页面上放「诊断包选项 ▾」「填写反馈 ▾」入口；点开时把**同一批真实控件**搬进 NSPopover，关窗搬回隐藏容器（不是复制第二份，状态不丢；identifier 锚点始终留在视图树里供 parity/审计取证） | `--audit`：sp_diagmore/sp_fbmore 有 action；sp_fbtext 仍在视图树 |
+
+未修/挂账（如实）：① 第一次播放出现 RENDERFAIL 的真实根因需用户环境（虚拟声卡/独占）的日志复现，
+本轮只修了「错误串长期占据底栏副标题」的显示层；② 元数据高级区目前是纵向卡片流、
+不是用户图一的两列网格（内容已齐，版式差异）；③ 专辑/文件夹空态（无隔离夹具判据）、
+默认渲染器切换、双模式薄表现层（同 §5.2，等 parity 全绿后再做）。
+
+### 12.2 behavior_scan.py（行为级三态对照）
+
+`parity_scan.py` 只证明 identifier/端点**存在**，抓不到「控件在、点了不动」。本轮新增
+`tools/native_ui/behavior_scan.py`：
+
+- web 侧：从 `ui_script.h` 抽 `D('id').on<event> = …` 与 `.click()` 绑定（50 条）；
+- native 侧：从 `tools/native_ui/*.mm` 抽 identifier 字面量 + 邻近行为标记
+  （`@selector` / `target=` / `action=` / 手势 / `mouseDown:`）；
+- 映射：复用 `parity.tsv` 的 web↔native 对应 + `parity_map.tsv` + `behavior_na.tsv`（每条 NA 必须有理由）；
+- 三态：`done`（控件 + 行为路径）/ `control-only`（控件在、无行为路径）/ `missing`（原生无对应）。
+
+当前结果：**50 条绑定 → 42 done / 8 na / 0 actionable**（`behavior.tsv`）。
+其中真实补齐：队列排序下拉（qSort）、文件夹地址栏（fPath/fGo/fRoot）、播放页音量（np.vol）、
+播放条 prev/next/stop 的稳定 identifier；NA 仅限平台差异（NAA 无驱动、系统对话框/文件面板、
+经典布局的 sRep/sShuf/sLoud 已以 sp_* 落位）。
+
+命令：`python3 tools/native_ui/behavior_scan.py`（写表）/ `--check`（有 actionable 即退出 1）。

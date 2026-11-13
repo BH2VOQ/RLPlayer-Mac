@@ -28,6 +28,9 @@ NSArray<NSString *> *RLPSplitArtistNames(NSString * _Nullable raw);
 @property (nonatomic, copy) NSString *name;
 @property (nonatomic) NSInteger albumCount;
 @property (nonatomic) NSInteger trackCount;
+/// 该艺术家第一张「有封面」专辑的 k。web 艺术家头像的三层降级里
+/// 第②层就是用它去拉 /api/lib/cover（很多本地艺人没有真头像）。
+@property (nonatomic, copy, nullable) NSString *coverKey;
 /// 从专辑列表派生（一张合作专辑同时计入每位参与者）。
 + (NSArray<RLPArtist *> *)artistsFromAlbums:(NSArray<RLPAlbum *> *)albums;
 @end

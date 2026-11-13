@@ -11,13 +11,30 @@
 
 static const NSUserInterfaceItemIdentifier kArtistItemID = @"RLPArtistItem";
 
-/// 艺术家卡片尺寸（图一：大圆头像 + 下方名称/专辑数）。
+/// 艺术家卡片尺寸与专辑卡同算法（web：.grid minmax(150px,1fr) + gap16 + padding18）。
+/// 头像 = 列宽的正方形（再裁成圆），文字区 39pt；旧实现写死 168×196 / 116pt 小圆。
 static const CGFloat kCardW = 168;
-static const CGFloat kCardH = 196;
-static const CGFloat kAvatar = 116;
-
+static const CGFloat kCardH = 207;
+static const CGFloat kAvatar = 168;
 
 #pragma mark - 艺术家卡片
+
+/// 卡片根视图：圆角半径要跟着列宽走（web border-radius:50%），
+/// 放在 NSView 的 -layout 里做（NSCollectionViewItem 本身没有 layout 回调）。
+@interface RLPArtistCardView : NSView
+@property (nonatomic, weak) NSView *avatarView;
+@property (nonatomic, weak) NSView *coverView;
+@end
+@implementation RLPArtistCardView
+- (void)layout {
+    [super layout];
+    CGFloat side = NSWidth(self.bounds);
+    if (side > 0) {
+        self.avatarView.layer.cornerRadius = side / 2.0;
+        self.coverView.layer.cornerRadius = side / 2.0;
+    }
+}
+@end
 
 @interface RLPArtistItem : NSCollectionViewItem
 @property (nonatomic, strong) NSView *avatarView;
@@ -36,71 +53,112 @@ static const CGFloat kAvatar = 116;
 
 - (void)loadView {
     RLPTheme *t = [RLPTheme current];
-    NSView *v = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, kCardW, kCardH)];
+    RLPArtistCardView *v = [[RLPArtistCardView alloc] initWithFrame:NSMakeRect(0, 0, kCardW, kCardH)];
     v.wantsLayer = YES;
     self.view = v;
 
-    const CGFloat ax = (kCardW - kAvatar) / 2.0;
-    _avatarView = [[NSView alloc] initWithFrame:NSMakeRect(ax, kCardH - kAvatar - 8, kAvatar, kAvatar)];
+    // 圆形头像容器：宽度 = 卡片列宽（web .card .cv{aspect-ratio:1;border-radius:50%}），
+    // 不用固定 116 —— 旧实现头像比列宽小一圈，五列之间空隙明显，用户实测「不如 web 好看」。
+    _avatarView = [[NSView alloc] initWithFrame:NSZeroRect];
     _avatarView.wantsLayer = YES;
-    _avatarView.layer.cornerRadius = kAvatar / 2.0;
     _avatarView.layer.masksToBounds = YES;
     _avatarView.layer.backgroundColor = t.bg2.CGColor;
     _avatarView.layer.borderWidth = 1;
     _avatarView.layer.borderColor = t.hairline.CGColor;
+    _avatarView.translatesAutoresizingMaskIntoConstraints = NO;
     [v addSubview:_avatarView];
-
-    // 真封面（/api/artist/cover）盖在圆形占位上；没有封面时露出首字母。
-    _coverView = [[NSImageView alloc] initWithFrame:NSMakeRect(0, 0, kAvatar, kAvatar)];
-    _coverView.imageScaling = NSImageScaleProportionallyUpOrDown;
-    _coverView.wantsLayer = YES;
-    _coverView.layer.cornerRadius = kAvatar / 2.0;
-    _coverView.layer.masksToBounds = YES;
-    [_avatarView addSubview:_coverView];
 
     _initialLabel = [NSTextField labelWithString:@""];
     _initialLabel.font = [NSFont systemFontOfSize:40 weight:NSFontWeightMedium];
     _initialLabel.textColor = t.mut;
     _initialLabel.alignment = NSTextAlignmentCenter;
-    _initialLabel.frame = NSMakeRect(0, (kAvatar - 44) / 2.0, kAvatar, 44);
+    _initialLabel.translatesAutoresizingMaskIntoConstraints = NO;
     [_avatarView addSubview:_initialLabel];
 
+    // 真封面（/api/artist/image）盖在圆形占位上；没有封面时露出首字母（web 同层序）。
+    _coverView = [[RLPCoverImageView alloc] initWithFrame:NSZeroRect];
+    _coverView.imageScaling = NSImageScaleProportionallyUpOrDown;
+    _coverView.wantsLayer = YES;
+    _coverView.layer.masksToBounds = YES;
+    _coverView.translatesAutoresizingMaskIntoConstraints = NO;
+    [_avatarView addSubview:_coverView];
+
     _nameLabel = [NSTextField labelWithString:@""];
-    _nameLabel.font = [NSFont systemFontOfSize:13.5 weight:NSFontWeightSemibold];
+    _nameLabel.font = [NSFont systemFontOfSize:12.5 weight:NSFontWeightSemibold];
     _nameLabel.textColor = t.text;
-    _nameLabel.alignment = NSTextAlignmentCenter;
+    _nameLabel.alignment = NSTextAlignmentLeft;   // web .card .nm 默认左对齐
     _nameLabel.lineBreakMode = NSLineBreakByTruncatingTail;
-    _nameLabel.frame = NSMakeRect(4, 36, kCardW - 8, 18);
+    _nameLabel.maximumNumberOfLines = 1;
+    _nameLabel.translatesAutoresizingMaskIntoConstraints = NO;
     [v addSubview:_nameLabel];
 
     _countLabel = [NSTextField labelWithString:@""];
-    _countLabel.font = [NSFont systemFontOfSize:11.5];
+    _countLabel.font = [NSFont systemFontOfSize:11];
     _countLabel.textColor = t.mut;
-    _countLabel.alignment = NSTextAlignmentCenter;
+    _countLabel.alignment = NSTextAlignmentLeft;
     _countLabel.lineBreakMode = NSLineBreakByTruncatingTail;
-    _countLabel.frame = NSMakeRect(4, 16, kCardW - 8, 16);
+    _countLabel.maximumNumberOfLines = 1;
+    _countLabel.translatesAutoresizingMaskIntoConstraints = NO;
     [v addSubview:_countLabel];
+
+    [NSLayoutConstraint activateConstraints:@[
+        [_avatarView.leadingAnchor constraintEqualToAnchor:v.leadingAnchor],
+        [_avatarView.trailingAnchor constraintEqualToAnchor:v.trailingAnchor],
+        [_avatarView.topAnchor constraintEqualToAnchor:v.topAnchor],
+        [_avatarView.heightAnchor constraintEqualToAnchor:_avatarView.widthAnchor],
+        [_coverView.leadingAnchor constraintEqualToAnchor:_avatarView.leadingAnchor],
+        [_coverView.trailingAnchor constraintEqualToAnchor:_avatarView.trailingAnchor],
+        [_coverView.topAnchor constraintEqualToAnchor:_avatarView.topAnchor],
+        [_coverView.bottomAnchor constraintEqualToAnchor:_avatarView.bottomAnchor],
+        [_initialLabel.centerXAnchor constraintEqualToAnchor:_avatarView.centerXAnchor],
+        [_initialLabel.centerYAnchor constraintEqualToAnchor:_avatarView.centerYAnchor],
+        [_nameLabel.leadingAnchor constraintEqualToAnchor:v.leadingAnchor],
+        [_nameLabel.trailingAnchor constraintEqualToAnchor:v.trailingAnchor],
+        [_nameLabel.topAnchor constraintEqualToAnchor:_avatarView.bottomAnchor constant:9],
+        [_countLabel.leadingAnchor constraintEqualToAnchor:_nameLabel.leadingAnchor],
+        [_countLabel.trailingAnchor constraintEqualToAnchor:_nameLabel.trailingAnchor],
+        [_countLabel.topAnchor constraintEqualToAnchor:_nameLabel.bottomAnchor constant:2],
+    ]];
+    ((RLPArtistCardView *)v).avatarView = _avatarView;
+    ((RLPArtistCardView *)v).coverView = _coverView;
 }
 
+// 圆半径在 RLPArtistCardView -layout 里算（见上）。
 - (void)setArtist:(RLPArtist *)artist {
     self.artistName = artist.name;
     self.nameLabel.stringValue = artist.name;
     self.countLabel.stringValue = [NSString stringWithFormat:RLPTr(@"%ld 张专辑"), (long)artist.albumCount];
     self.initialLabel.stringValue = artist.name.length ? [artist.name substringToIndex:1].uppercaseString : @"?";
     self.coverView.image = nil;
-    // 真封面（/api/artist/image?who=…，与 web 艺术家卡片同端点）。取不到就保留首字母占位，
-    // 这不是错误状态、也不报 toast —— 大量本地曲库本来就没有艺术家图。
+    self.initialLabel.hidden = NO;
+    // 三层降级与 web 同款：① /api/artist/image（真头像）→ ② /api/lib/cover（该艺术家第一张
+    // 有封面专辑的图）→ ③ 首字母占位。旧原生只做①，真实库里大量艺人永远停在首字母圆，
+    // 这正是用户截图里「澤 / D / K」那些灰圆与 web 观感的差距。
     if (!artist.name.length) return;
     NSString *who = artist.name;
+    NSString *fallbackKey = artist.coverKey;
     NSString *url = [NSString stringWithFormat:@"/api/artist/image?who=%@", RLPEnc(who)];
     __weak __typeof__(self) weakSelf = self;
     [[RLPCoreClient shared] getData:url completion:^(NSData * _Nullable data) {
         __typeof__(self) self_ = weakSelf;
-        if (!self_ || data.length == 0) return;
+        if (!self_) return;
         // 复用回来的 item 可能已被换给别的艺术家：名字不一致就丢弃。
         if (![self_.artistName isEqualToString:who]) return;
-        NSImage *img = [[NSImage alloc] initWithData:data];
-        if (img) self_.coverView.image = img;
+        NSImage *img = data.length ? [[NSImage alloc] initWithData:data] : nil;
+        if (img) {
+            self_.coverView.image = img;
+            self_.initialLabel.hidden = YES;
+            return;
+        }
+        if (!fallbackKey.length) return;
+        NSString *coverURL = [NSString stringWithFormat:@"/api/lib/cover?k=%@", RLPEnc(fallbackKey)];
+        [[RLPCoreClient shared] getData:coverURL completion:^(NSData * _Nullable cdata) {
+            __typeof__(self) self_ = weakSelf;
+            if (!self_ || cdata.length == 0) return;
+            if (![self_.artistName isEqualToString:who]) return;
+            NSImage *cimg = [[NSImage alloc] initWithData:cdata];
+            if (cimg) { self_.coverView.image = cimg; self_.initialLabel.hidden = YES; }
+        }];
     }];
 }
 
@@ -153,11 +211,12 @@ static const CGFloat kAvatar = 116;
     [root addSubview:self.countLabel];
 
     NSCollectionViewFlowLayout *layout = [[NSCollectionViewFlowLayout alloc] init];
-    // 大圆头像网格（图一）：168×196 卡，间距 18/22，与 web minmax(150px,1fr)+gap16 同观感。
-    layout.itemSize = NSMakeSize(kCardW, kCardH);
-    layout.sectionInset = NSEdgeInsetsMake(18, 24, 28, 24);
-    layout.minimumInteritemSpacing = 18;
-    layout.minimumLineSpacing = 22;
+    // web：`.grid{grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:16px;padding:18px}`
+    // 头像 = 列宽正方形 + 文字区 39；列数随窗口宽度重算（viewDidLayout → relayout）。
+    layout.itemSize = NSMakeSize(150, 189);
+    layout.sectionInset = NSEdgeInsetsMake(18, 18, 18, 18);
+    layout.minimumInteritemSpacing = 16;
+    layout.minimumLineSpacing = 16;
 
     self.collection = [[NSCollectionView alloc] initWithFrame:NSZeroRect];
     self.collection.collectionViewLayout = layout;
@@ -192,6 +251,26 @@ static const CGFloat kAvatar = 116;
         [scroll.topAnchor constraintEqualToAnchor:title.bottomAnchor constant:12],
         [scroll.bottomAnchor constraintEqualToAnchor:root.bottomAnchor]
     ]];
+}
+
+/// CSS repeat(auto-fill,minmax(150px,1fr)) 的等价算法（与专辑页同款，列下限 150）。
+- (void)relayoutGridForWidth:(CGFloat)w {
+    if (![self.collection.collectionViewLayout isKindOfClass:[NSCollectionViewFlowLayout class]]) return;
+    NSCollectionViewFlowLayout *l = (NSCollectionViewFlowLayout *)self.collection.collectionViewLayout;
+    const CGFloat pad = 18, gap = 16, minW = 150;
+    const CGFloat avail = w - pad * 2;
+    if (avail < minW) return;
+    NSInteger cols = (NSInteger)floor((avail + gap) / (minW + gap));
+    if (cols < 1) cols = 1;
+    const CGFloat itemW = floor((avail - gap * (cols - 1)) / cols);
+    if (fabs(l.itemSize.width - itemW) < 0.5) return;
+    l.itemSize = NSMakeSize(itemW, itemW + 39);
+    [l invalidateLayout];
+}
+
+- (void)viewDidLayout {
+    [super viewDidLayout];
+    [self relayoutGridForWidth:self.view.bounds.size.width];
 }
 
 - (void)reloadData {

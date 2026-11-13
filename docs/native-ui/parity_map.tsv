@@ -52,3 +52,18 @@ view	files	page.files	RLPMainWindowController.mm	web data-v=files（文件浏览
 view	remote	page.remote	RLPMainWindowController.mm	web data-v=remote（流媒体）= 原生 streaming 页，锚点 page.remote
 view	favs	page.favs	RLPMainWindowController.mm	web data-v=favs（我的最爱）= 原生 favorites 页，锚点 page.favs
 view	sq	page.sq	RLPMainWindowController.mm	web data-v=sq（保存的队列）= 原生 playlists 页，锚点 page.sq
+# ---- 播放条按钮：web bPrev/bPause/bNext/bStop/bLyric/vol ↔ 原生 pb.* ----
+ctrl	bPrev	pb.prev	RLPPlaybackBarView.mm	底栏上一首（web #bPrev）
+ctrl	bPause	pb.play	RLPPlaybackBarView.mm	底栏播放/暂停主键（web #bPause）
+ctrl	bNext	pb.next	RLPPlaybackBarView.mm	底栏下一首（web #bNext）
+ctrl	bStop	pb.stop	RLPPlaybackBarView.mm	底栏停止（web #bStop）
+ctrl	bLyric	pb.lyric	RLPPlaybackBarView.mm	底栏歌词抽屉入口（web #bLyric）
+ctrl	vol	pb.vol	RLPPlaybackBarView.mm	底栏音量滑块（web #vol）
+ctrl	npVol	np.vol	RLPNowPlayingViewController.mm	播放页音量滑块（web #npVol 镜像）
+# ---- 顶栏 / 队列 / 艺术家 / 列表排序：功能同源，identifier 命名不同 ----
+ctrl	bScan	top.scan	RLPMainWindowController.mm	顶栏「重新扫描音乐库」= web #bScan（/api/lib/scan）
+ctrl	qClear	right.clear	RLPRightDrawer.mm	右抽屉搜索清空 = web #qClear
+ctrl	qSort	queue.sort	RLPQueueViewController.mm	队列排序下拉 = web #qSort（/api/qorder）
+ctrl	trackSort	tracks.sort	RLPTracksViewController.mm	曲目页排序下拉 = web #trackSort
+ctrl	wTitle	works.title	RLPWorksViewController.mm	古典作品搜索-作品名（web #wTitle）
+ctrl	wComposer	works.composer	RLPWorksViewController.mm	古典作品搜索-作曲家（web #wComposer）

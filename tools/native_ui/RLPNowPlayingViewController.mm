@@ -229,8 +229,7 @@ static NSString *RLPNPFavKey(NSString *path) {
     self.volume.doubleValue = 1000.0;
     self.volume.continuous = YES;
     self.volume.controlSize = NSControlSizeSmall;
-    self.volume.identifier = @"np.vol";
-    self.volume.toolTip = RLPTr(@"音量");
+    self.volume.toolTip = RLPTr(@"音量");   // 旧控制条遗留；真播放页走 webControls
     self.volLabel = RLPLabel(@"0.0 dB",
         [NSFont monospacedDigitSystemFontOfSize:10.5 weight:NSFontWeightRegular], t.mut);
     self.volLabel.identifier = @"np.vollab";
@@ -460,6 +459,7 @@ static NSString *RLPNPFavKey(NSString *path) {
     self.webControls.prevBtn.action=@selector(onPrevious:);self.webControls.playBtn.action=@selector(onPause:);self.webControls.nextBtn.action=@selector(onNext:);self.webControls.stopBtn.action=@selector(onStop:);
     self.webControls.seek.cell=[RLPNPAccentCell new];self.webControls.seek.minValue=0;self.webControls.seek.maxValue=1;
     self.webControls.volume.cell=[RLPNPAccentCell new];self.webControls.volume.minValue=0;self.webControls.volume.maxValue=1000;
+    self.webControls.volume.identifier=@"np.vol";   // 功能实现落在这个滑块（web #npVol）
     self.webControls.seek.target=self;self.webControls.seek.action=@selector(onCommitSeek:);self.webControls.volume.target=self;self.webControls.volume.action=@selector(onCommitVolume:);
     __weak __typeof__(self) ws=self;self.webControls.seek.onCommit=^{[ws onCommitSeek:nil];};self.webControls.volume.onCommit=^{[ws onCommitVolume:nil];};
     // Existing version actions remain reachable from the track context menu.

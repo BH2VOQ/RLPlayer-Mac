@@ -30,7 +30,7 @@
         self.bordered = NO;
         self.title = @"";
         self.wantsLayer = YES;
-        _cover = [[NSImageView alloc] initWithFrame:NSZeroRect];
+        _cover = [[RLPCoverImageView alloc] initWithFrame:NSZeroRect];
         _cover.imageScaling = NSImageScaleProportionallyUpOrDown;
         _cover.wantsLayer = YES;
         _cover.layer.cornerRadius = 8;
@@ -187,7 +187,7 @@
     self.pageScroll.documentView = self.albumDocument;
     [self.contentView addSubview:self.pageScroll];
     NSView *host = self.albumDocument;
-    self.cover = [[NSImageView alloc] initWithFrame:NSZeroRect];
+    self.cover = [[RLPCoverImageView alloc] initWithFrame:NSZeroRect];
     self.cover.imageScaling = NSImageScaleProportionallyUpOrDown;
     self.cover.wantsLayer = YES;
     self.cover.layer.cornerRadius = 12;
@@ -262,7 +262,7 @@
         __typeof__(self) owner=weakSelf;
         return row>=0 && row<(NSInteger)owner.tracks.count ? owner.tracks[row].path:nil;
     };
-    self.scroll = [[NSScrollView alloc] initWithFrame:NSZeroRect];
+    self.scroll = [[RLPForwardingScrollView alloc] initWithFrame:NSZeroRect];
     self.scroll.drawsBackground = NO;
     self.scroll.hasVerticalScroller = NO;
     self.scroll.documentView = self.table;
@@ -285,7 +285,7 @@
     self.footerCopyright = RLPLabel(@"", t.small, t.mut2);
     self.otherWorksTitle = RLPLabel(@"", [NSFont systemFontOfSize:15 weight:NSFontWeightSemibold], t.text);
     self.otherWorksTitle.identifier = @"album.otherworks.title";
-    self.otherWorksScroll = [[NSScrollView alloc] initWithFrame:NSZeroRect];
+    self.otherWorksScroll = [[RLPForwardingScrollView alloc] initWithFrame:NSZeroRect];
     self.otherWorksScroll.drawsBackground = NO;
     self.otherWorksScroll.hasHorizontalScroller = NO;
     self.otherWorksScroll.hasVerticalScroller = NO;

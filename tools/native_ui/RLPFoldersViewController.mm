@@ -16,7 +16,9 @@
 @property (nonatomic, strong) NSArray<NSString *> *dirs;
 @property (nonatomic, strong) NSArray<NSString *> *files;
 @property (nonatomic, strong) NSTableView *table;
-@property (nonatomic, strong) NSTextField *pathLabel;
+@property (nonatomic, strong) NSTextField *pathField;      // web #fPath（可输入后回车跳转）
+@property (nonatomic, strong) NSPopUpButton *rootPopup;     // web #fRoot（音乐库根目录跳转）
+@property (nonatomic, strong) NSButton *goBtn;              // web #fGo
 @property (nonatomic, strong) NSButton *upBtn;
 @property (nonatomic) BOOL loaded;
 @end
@@ -44,10 +46,31 @@
     refresh.translatesAutoresizingMaskIntoConstraints = NO;
     [host addSubview:refresh];
 
-    self.pathLabel = RLPLabel(@"", t.mono, t.mut);
-    self.pathLabel.lineBreakMode = NSLineBreakByTruncatingMiddle;
-    self.pathLabel.translatesAutoresizingMaskIntoConstraints = NO;
-    [host addSubview:self.pathLabel];
+    // web 地址栏：可输入路径 + 回车/「↩」跳转 + 音乐库根目录下拉（#fPath/#fGo/#fRoot）。
+    // 旧实现只有一个只读路径文字 —— 用户问「没做刷新曲库」之外，也看不到怎么跳目录。
+    self.rootPopup = [[NSPopUpButton alloc] initWithFrame:NSZeroRect pullsDown:NO];
+    self.rootPopup.identifier = @"fRoot";
+    self.rootPopup.target = self;
+    self.rootPopup.action = @selector(onRootPicked:);
+    self.rootPopup.translatesAutoresizingMaskIntoConstraints = NO;
+    [host addSubview:self.rootPopup];
+
+    self.pathField = [[NSTextField alloc] initWithFrame:NSZeroRect];
+    self.pathField.identifier = @"fPath";
+    self.pathField.font = [NSFont monospacedSystemFontOfSize:11 weight:NSFontWeightRegular];
+    self.pathField.placeholderString = RLPTr(@"输入目录后回车，例如 /Users/你的用户名/Music");
+    self.pathField.target = self;
+    self.pathField.action = @selector(onGoIn:);
+    self.pathField.translatesAutoresizingMaskIntoConstraints = NO;
+    [host addSubview:self.pathField];
+
+    self.goBtn = [NSButton buttonWithTitle:@"↩" target:self action:@selector(onGo:)] ;
+    self.goBtn.bordered = NO;
+    self.goBtn.bezelStyle = NSBezelStyleRegularSquare;
+    self.goBtn.identifier = @"fGo";
+    self.goBtn.toolTip = RLPTr(@"转到");
+    self.goBtn.translatesAutoresizingMaskIntoConstraints = NO;
+    [host addSubview:self.goBtn];
 
     self.table = [[NSTableView alloc] initWithFrame:NSZeroRect];
     self.table.backgroundColor = [NSColor clearColor];
@@ -95,9 +118,15 @@
         [refresh.centerYAnchor constraintEqualToAnchor:self.upBtn.centerYAnchor],
         [refresh.widthAnchor constraintEqualToConstant:24],
         [refresh.heightAnchor constraintEqualToConstant:24],
-        [self.pathLabel.leadingAnchor constraintEqualToAnchor:refresh.trailingAnchor constant:12],
-        [self.pathLabel.trailingAnchor constraintEqualToAnchor:host.trailingAnchor constant:-24],
-        [self.pathLabel.centerYAnchor constraintEqualToAnchor:self.upBtn.centerYAnchor],
+        [self.rootPopup.leadingAnchor constraintEqualToAnchor:refresh.trailingAnchor constant:8],
+        [self.rootPopup.centerYAnchor constraintEqualToAnchor:self.upBtn.centerYAnchor],
+        [self.rootPopup.widthAnchor constraintEqualToConstant:150],
+        [self.pathField.leadingAnchor constraintEqualToAnchor:self.rootPopup.trailingAnchor constant:8],
+        [self.pathField.centerYAnchor constraintEqualToAnchor:self.upBtn.centerYAnchor],
+        [self.goBtn.leadingAnchor constraintEqualToAnchor:self.pathField.trailingAnchor constant:4],
+        [self.goBtn.centerYAnchor constraintEqualToAnchor:self.upBtn.centerYAnchor],
+        [self.goBtn.widthAnchor constraintEqualToConstant:24],
+        [self.goBtn.trailingAnchor constraintEqualToAnchor:host.trailingAnchor constant:-24],
         [scroll.leadingAnchor constraintEqualToAnchor:host.leadingAnchor constant:24],
         [scroll.trailingAnchor constraintEqualToAnchor:host.trailingAnchor constant:-24],
         [scroll.topAnchor constraintEqualToAnchor:self.upBtn.bottomAnchor constant:10],
@@ -107,7 +136,49 @@
 
 - (void)activate {
     if (!self.loaded) [self reloadData];
+    [self loadRoots];
 }
+
+/// 音乐库根目录下拉（web #fRoot）：来自 /api/lib/stats 的 roots。
+- (void)loadRoots {
+    if (![RLPCoreClient shared].started) return;
+    __weak __typeof__(self) weakSelf = self;
+    [[RLPCoreClient shared] getJSON:@"/api/lib/stats" completion:^(NSDictionary * _Nullable json) {
+        __typeof__(self) self_ = weakSelf;
+        if (!self_ || ![json isKindOfClass:[NSDictionary class]]) return;
+        NSArray *roots = [json[@"roots"] isKindOfClass:[NSArray class]] ? json[@"roots"] : @[];
+        [self_.rootPopup removeAllItems];
+        [self_.rootPopup addItemWithTitle:RLPTr(@"音乐库…")];
+        for (id r in roots) if ([r isKindOfClass:[NSString class]] && [r length])
+            [self_.rootPopup addItemWithTitle:((NSString *)r).lastPathComponent];
+    }];
+}
+
+- (void)onRootPicked:(NSPopUpButton *)sender {
+    if (sender.indexOfSelectedItem <= 0) return;
+    NSString *title = sender.titleOfSelectedItem;
+    if (!title.length) return;
+    // 下拉里只显示目录名：真正的路径从 /api/lib/stats 再取一次（同名目录不歧义）
+    __weak __typeof__(self) weakSelf = self;
+    [[RLPCoreClient shared] getJSON:@"/api/lib/stats" completion:^(NSDictionary * _Nullable json) {
+        __typeof__(self) self_ = weakSelf;
+        if (!self_) return;
+        NSArray *roots = [json[@"roots"] isKindOfClass:[NSArray class]] ? json[@"roots"] : @[];
+        for (id r in roots) {
+            if (![r isKindOfClass:[NSString class]]) continue;
+            if ([[(NSString *)r lastPathComponent] isEqualToString:title]) { [self_ loadDir:r]; return; }
+        }
+        [self_ loadDir:title];
+    }];
+}
+
+- (void)onGo:(id)sender {
+    NSString *v = [self.pathField.stringValue stringByTrimmingCharactersInSet:
+                   [NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    if (v.length) [self loadDir:v];
+}
+
+- (void)onGoIn:(NSTextField *)sender { (void)sender; [self onGo:nil]; }
 
 - (void)loadDir:(NSString *)dir {
     if (![RLPCoreClient shared].started) {
@@ -129,7 +200,7 @@
         strongSelf.dir = json[@"dir"] ?: @"";
         strongSelf.dirs = json[@"dirs"] ?: @[];
         strongSelf.files = json[@"files"] ?: @[];
-        strongSelf.pathLabel.stringValue = strongSelf.dir;
+        strongSelf.pathField.stringValue = strongSelf.dir;
         strongSelf.upBtn.enabled = strongSelf.dir.length > 1 && ![strongSelf.dir isEqualToString:@"/"];
         [strongSelf.table reloadData];
         [strongSelf setSubtitle:[NSString stringWithFormat:@"%ld %@ · %ld %@",
@@ -277,7 +348,7 @@
 
 - (void)applyTheme {
     [super applyTheme];
-    self.pathLabel.textColor = [RLPTheme current].mut;
+    self.pathField.textColor = [RLPTheme current].text;
     [self.table reloadData];
 }
 

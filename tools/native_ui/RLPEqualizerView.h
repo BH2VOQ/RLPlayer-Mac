@@ -9,6 +9,11 @@ NS_ASSUME_NONNULL_BEGIN
 @interface RLPEqualizerView : NSView
 - (void)reload;
 - (void)applyTheme;
+/// 嵌入设置页（页面本身已有一个整页滚动容器）时调用：去掉本视图自己的滚动条，
+/// 内容直接铺开、由外层页面滚动。用户实测「EQ 页三个滚动条，只要外面那个」。
+- (void)setEmbeddedInPage:(BOOL)embedded;
+/// 内容自然高度（embedded 模式下由设置页用它给高度约束）。
+- (CGFloat)preferredContentHeight;
 @end
 
 NS_ASSUME_NONNULL_END

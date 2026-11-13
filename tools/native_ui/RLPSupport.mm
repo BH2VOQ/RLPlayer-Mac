@@ -170,6 +170,55 @@ NSString *RLPAskText(NSString *title, NSString *okTitle, NSString *value,
     return v.length ? v : nil;
 }
 
+#pragma mark - 封面视图（object-fit: cover）
+
+@implementation RLPCoverImageView
+
+- (void)setImage:(NSImage *)image {
+    [super setImage:image];
+    self.needsDisplay = YES;   // layer-backed 的视图也要重画（Cover 会被复用）
+}
+
+// 不用 NSImageView 默认的 letterbox 绘制，按 web `object-fit:cover`：等比放大铺满，
+// 超出的部分裁掉（由上层 layer 的 masksToBounds / cornerRadius 负责裁切）。
+- (void)drawRect:(NSRect)dirtyRect {
+    (void)dirtyRect;
+    NSImage *img = self.image;
+    if (!img || img.size.width <= 0 || img.size.height <= 0) return;
+    NSRect b = self.bounds;
+    if (b.size.width <= 0 || b.size.height <= 0) return;
+    NSSize is = img.size;
+    CGFloat scale = MAX(b.size.width / is.width, b.size.height / is.height);
+    NSSize ds = NSMakeSize(is.width * scale, is.height * scale);
+    NSRect dst = NSMakeRect(NSMidX(b) - ds.width / 2.0, NSMidY(b) - ds.height / 2.0,
+                            ds.width, ds.height);
+    [img drawInRect:dst fromRect:NSZeroRect operation:NSCompositingOperationSourceOver
+             fraction:1.0 respectFlipped:YES hints:nil];
+}
+
+@end
+
+#pragma mark - 内层滚动转发（整页滚动）
+
+@implementation RLPForwardingScrollView
+
+- (void)scrollWheel:(NSEvent *)event {
+    BOOL canV = self.documentView.frame.size.height > self.contentView.bounds.size.height + 0.5;
+    BOOL canH = self.documentView.frame.size.width > self.contentView.bounds.size.width + 0.5;
+    CGFloat dx = fabs(event.scrollingDeltaX), dy = fabs(event.scrollingDeltaY);
+    BOOL shift = (event.modifierFlags & NSEventModifierFlagShift) != 0;
+    BOOL wantsH = shift || dx > dy;
+    BOOL scrollable = wantsH ? canH : canV;
+    if (!scrollable) {
+        // 自己滚不动 ⟹ 顺着响应者链交给外层页面滚动（不能吞掉事件）。
+        [(NSView *)self.nextResponder scrollWheel:event];
+        return;
+    }
+    [super scrollWheel:event];
+}
+
+@end
+
 #pragma mark - 行悬停底色
 
 @implementation RLPHoverRowView {

@@ -82,6 +82,7 @@ NSArray<NSString *> *RLPSplitArtistNames(NSString *raw) {
             }
             artist.albumCount += 1;
             artist.trackCount += a.trackCount;
+            if (a.hasCover && artist.coverKey.length == 0 && a.key.length) artist.coverKey = a.key;
         }
     }
     NSMutableArray *out = [NSMutableArray array];

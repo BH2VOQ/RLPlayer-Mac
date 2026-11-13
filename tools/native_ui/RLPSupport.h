@@ -32,6 +32,18 @@ NSString *RLPEnc(NSString *s);
 - (void)coverForSourceId:(NSString *)coverId completion:(void (^)(NSImage * _Nullable image))completion;
 @end
 
+/// 封面视图：按 web `object-fit:cover` 语义绘制 —— 等比放大铺满并裁掉溢出，绝不 letterbox。
+/// NSImageView 默认的 NSImageScaleProportionallyUpOrDown 在非正方形容器里会留白边
+/// （用户实测：原生专辑页封面四边白条，web 版铺满无白边）。
+@interface RLPCoverImageView : NSImageView
+@end
+
+/// 内层滚动容器：当自身在该方向上不可滚动时，把滚轮事件交给外层整页滚动。
+/// 用户实测：专辑页鼠标停在曲目列表/其他作品条上时滚轮失灵 —— 内层 NSScrollView
+/// 吃掉了事件却无处可滚。web 只有一个整页滚动容器（.main{overflow:auto}）。
+@interface RLPForwardingScrollView : NSScrollView
+@end
+
 /// 轻提示（非模态，1.8s 淡出）。用于"已加入队列""已收藏"这类反馈。
 void RLPToast(NSString *message);
 

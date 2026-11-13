@@ -27,6 +27,10 @@
 
 @interface RLPEQCurveView : NSView
 @property (nonatomic, copy) NSArray<NSArray<NSNumber *> *> *points;
+/// 每个 PEQ 段的中心频率（用于把鼠标 x 映射到最近的一段）
+@property (nonatomic, copy) NSArray<NSNumber *> *bandFreqs;
+/// 手动拖拽曲线：返回 (段索引, 目标增益 dB)。web 版 PEQ_DRAG 同语义。
+@property (nonatomic, copy) void (^onDragBand)(NSInteger index, double gainDb);
 @end
 
 @implementation RLPEQCurveView
@@ -115,12 +119,62 @@
     }
 }
 
+#pragma mark - 曲线拖拽（web PEQ_DRAG：拖动波形图改对应段的增益）
+
+// 与 drawRect 同一套坐标（对数频率 x、±18dB y）。
+- (NSRect)plotRect {
+    NSRect b = self.bounds;
+    const CGFloat padL = 34, padR = 8, padT = 8, padB = 18;
+    return NSMakeRect(b.origin.x + padL, b.origin.y + padB,
+                      b.size.width - padL - padR, b.size.height - padT - padB);
+}
+
+- (CGFloat)xForFreq:(double)f {
+    NSRect plot = [self plotRect];
+    const double fMin = 20.0, fMax = 20000.0;
+    double c = MAX(fMin, MIN(fMax, f));
+    return plot.origin.x + (CGFloat)((log10(c) - log10(fMin)) / (log10(fMax) - log10(fMin))) * plot.size.width;
+}
+
+- (void)applyDragEvent:(NSEvent *)event {
+    if (!self.onDragBand || self.bandFreqs.count == 0) return;
+    NSPoint p = [self convertPoint:event.locationInWindow fromView:nil];
+    NSRect plot = [self plotRect];
+    if (p.x < plot.origin.x || p.x > NSMaxX(plot)) return;
+    if (p.y < plot.origin.y || p.y > NSMaxY(plot)) return;
+    NSInteger best = -1;
+    CGFloat bestDist = CGFLOAT_MAX;
+    for (NSUInteger i = 0; i < self.bandFreqs.count; ++i) {
+        CGFloat bx = [self xForFreq:self.bandFreqs[i].doubleValue];
+        CGFloat d = fabs(bx - p.x);
+        if (d < bestDist) { bestDist = d; best = (NSInteger)i; }
+    }
+    if (best < 0) return;
+    double db = -18.0 + ((p.y - plot.origin.y) / plot.size.height) * 36.0;
+    if (db > 18.0) db = 18.0;
+    if (db < -18.0) db = -18.0;
+    self.onDragBand(best, db);
+}
+
+- (void)mouseDown:(NSEvent *)event {
+    if (self.onDragBand) { [self applyDragEvent:event]; return; }
+    [super mouseDown:event];
+}
+
+- (void)mouseDragged:(NSEvent *)event {
+    if (self.onDragBand) { [self applyDragEvent:event]; return; }
+    [super mouseDragged:event];
+}
+
 @end
 
 #pragma mark - 均衡主视图
 
 @interface RLPEqualizerView () <NSTableViewDataSource, NSTableViewDelegate>
 @property (nonatomic, strong) NSStackView *stack;
+@property (nonatomic, strong) NSScrollView *scroll;
+@property (nonatomic, strong) NSArray<NSLayoutConstraint *> *scrollConstraints;
+@property (nonatomic, assign) BOOL embeddedInPage;
 @property (nonatomic, strong) RLPEQCurveView *curve;
 @property (nonatomic, strong) NSSwitch *bypass;
 @property (nonatomic, strong) NSTextField *preamp;
@@ -157,8 +211,10 @@
     NSScrollView *scroll = [[NSScrollView alloc] initWithFrame:self.bounds];
     scroll.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
     scroll.drawsBackground = NO;
-    scroll.hasVerticalScroller = YES;
+    // 内层滚动条默认不画（设置页外层已有整页滚动；独立使用时可显式打开）
+    scroll.hasVerticalScroller = NO;
     [self addSubview:scroll];
+    self.scroll = scroll;
 
     self.stack = [[NSStackView alloc] initWithFrame:NSZeroRect];
     self.stack.orientation = NSUserInterfaceLayoutOrientationVertical;
@@ -167,23 +223,26 @@
     self.stack.edgeInsets = NSEdgeInsetsMake(4, 0, 16, 0);
     self.stack.translatesAutoresizingMaskIntoConstraints = NO;
     scroll.documentView = self.stack;
-    [NSLayoutConstraint activateConstraints:@[
+    self.scrollConstraints = @[
         [self.stack.leadingAnchor constraintEqualToAnchor:scroll.contentView.leadingAnchor],
         [self.stack.trailingAnchor constraintEqualToAnchor:scroll.contentView.trailingAnchor],
         [self.stack.topAnchor constraintEqualToAnchor:scroll.contentView.topAnchor],
         [self.stack.widthAnchor constraintEqualToAnchor:scroll.contentView.widthAnchor],
-    ]];
+    ];
+    [NSLayoutConstraint activateConstraints:self.scrollConstraints];
 
     NSStackView *top = [[NSStackView alloc] init];
     top.orientation = NSUserInterfaceLayoutOrientationHorizontal;
     top.spacing = 10;
     self.bypass = [[NSSwitch alloc] initWithFrame:NSZeroRect];
+    self.bypass.identifier = @"peqBypass";     // web #peqBypass（行为扫描锚点）
     self.bypass.target = self;
     self.bypass.action = @selector(onBypass:);
     [top addArrangedSubview:self.bypass];
     [top addArrangedSubview:RLPLabel(RLPTr(@"旁路（不改声音）"), t.body, t.text)];
     [top addArrangedSubview:RLPLabel(RLPTr(@"前级"), t.body, t.text)];
     self.preamp = [[NSTextField alloc] initWithFrame:NSZeroRect];
+    self.preamp.identifier = @"peqPreamp";     // web #peqPreamp（行为扫描锚点）
     self.preamp.stringValue = @"0";
     self.preamp.target = self;
     self.preamp.action = @selector(onPreampEnter:);
@@ -206,10 +265,21 @@
         [self.curve.heightAnchor constraintEqualToConstant:170],
         [self.curve.widthAnchor constraintEqualToAnchor:self.stack.widthAnchor constant:-4],
     ]];
+    // web PEQ_DRAG 等价：在曲线上按住拖动 → 改最近一段的增益（260ms 节流后下发）。
+    __weak __typeof__(self) weakCurve = self;
+    self.curve.onDragBand = ^(NSInteger idx, double db) {
+        __typeof__(self) s = weakCurve;
+        if (!s || idx < 0 || idx >= (NSInteger)s.bands.count) return;
+        s.bands[(NSUInteger)idx][@"g"] = @(db);
+        [s.bandTable reloadDataForRowIndexes:[NSIndexSet indexSetWithIndex:(NSUInteger)idx]
+                             columnIndexes:[NSIndexSet indexSetWithIndex:0]];
+        [s scheduleApply];
+    };
 
     [self.stack addArrangedSubview:RLPLabel(RLPTr(@"20 段参数"),
         [NSFont systemFontOfSize:13 weight:NSFontWeightSemibold], t.text)];
     self.bandTable = [[NSTableView alloc] initWithFrame:NSZeroRect];
+    self.bandTable.identifier = @"peq.bands";
     self.bandTable.dataSource = self;
     self.bandTable.delegate = self;
     self.bandTable.rowHeight = 26;
@@ -225,12 +295,13 @@
     }
     NSScrollView *bs = [[NSScrollView alloc] initWithFrame:NSZeroRect];
     bs.documentView = self.bandTable;
-    bs.hasVerticalScroller = YES;
+    bs.hasVerticalScroller = NO;             // 20 段一次全显示（用户：只要外层那个滚动条）
     bs.drawsBackground = NO;
     bs.translatesAutoresizingMaskIntoConstraints = NO;
     [self.stack addArrangedSubview:bs];
     [NSLayoutConstraint activateConstraints:@[
-        [bs.heightAnchor constraintEqualToConstant:300],
+        // 表头 + 20 行 × 26pt：不再用 300pt 内层滚动裁掉一半参数（18/20 段本该可见）。
+        [bs.heightAnchor constraintEqualToConstant:20 * 26 + 26],
         [bs.widthAnchor constraintEqualToAnchor:self.stack.widthAnchor constant:-4],
     ]];
 
@@ -453,6 +524,9 @@
         [clean addObject:@[ @([a[0] doubleValue]), @([a[1] doubleValue]) ]];
     }
     self.curve.points = clean;
+    NSMutableArray<NSNumber *> *freqs = [NSMutableArray array];
+    for (NSDictionary *b in self.bands) if (b[@"f"]) [freqs addObject:b[@"f"]];
+    self.curve.bandFreqs = freqs;
     [self.curve setNeedsDisplay:YES];
 
     // 状态行：以事实为准（几段非 0、前级多少、采样率）
@@ -627,6 +701,46 @@
     self.opraStatus.textColor = t.mut;
     [self.bandTable reloadData];
     [self.curve setNeedsDisplay:YES];
+}
+
+
+#pragma mark - 嵌入设置页（去掉本视图自己的滚动，交给整页滚动）
+
+- (void)setEmbeddedInPage:(BOOL)embedded {
+    if (_embeddedInPage == embedded) return;
+    _embeddedInPage = embedded;
+    if (!embedded || !self.scroll) return;
+    // 拆掉内层 NSScrollView：stack 直接铺在外层页面上，外层页面负责滚动。
+    [NSLayoutConstraint deactivateConstraints:self.scrollConstraints];
+    [self.scroll removeFromSuperview];
+    self.scroll = nil;
+    self.stack.translatesAutoresizingMaskIntoConstraints = NO;
+    [self addSubview:self.stack];
+    [NSLayoutConstraint activateConstraints:@[
+        [self.stack.leadingAnchor constraintEqualToAnchor:self.leadingAnchor],
+        [self.stack.trailingAnchor constraintEqualToAnchor:self.trailingAnchor],
+        [self.stack.topAnchor constraintEqualToAnchor:self.topAnchor],
+    ]];
+    [self.heightAnchor constraintEqualToConstant:[self preferredContentHeight]].active = YES;
+}
+
+- (CGFloat)preferredContentHeight {
+    CGFloat total = self.stack.edgeInsets.top + self.stack.edgeInsets.bottom;
+    NSInteger n = 0;
+    for (NSView *v in self.stack.arrangedSubviews) {
+        if (v.hidden) continue;
+        // NSScrollView / 自绘视图在布局前 fittingSize 是 0 —— 先看显式高度约束。
+        CGFloat h = 0;
+        for (NSLayoutConstraint *c in v.constraints) {
+            if (c.firstAttribute == NSLayoutAttributeHeight && c.secondItem == nil
+                && c.relation == NSLayoutRelationEqual) { h = c.constant; break; }
+        }
+        if (h <= 0) h = v.fittingSize.height;
+        total += h;
+        ++n;
+    }
+    if (n > 1) total += self.stack.spacing * (n - 1);
+    return ceil(total);
 }
 
 @end

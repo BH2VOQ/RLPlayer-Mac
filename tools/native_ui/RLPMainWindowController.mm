@@ -194,6 +194,12 @@ static NSString *RLPPageIdentifier(NSString *key) {
     queueBtn.translatesAutoresizingMaskIntoConstraints = NO;
     [_topbar addSubview:queueBtn];
 
+    // 顶栏「刷新曲库」（web #bScan：重新扫描音乐库；用户实测「没做刷新曲库的按钮」）。
+    NSButton *scanBtn = RLPSymbolButton(@"arrow.clockwise", RLPTr(@"重新扫描音乐库"), self, @selector(onScanLibrary:));
+    scanBtn.translatesAutoresizingMaskIntoConstraints = NO;
+    scanBtn.identifier = @"top.scan";
+    [_topbar addSubview:scanBtn];
+
     NSButton *npBtn = RLPSymbolButton(@"play.rectangle", RLPTr(@"正在播放"), self, @selector(onNowPlaying:));
     npBtn.translatesAutoresizingMaskIntoConstraints = NO;
     [_topbar addSubview:npBtn];
@@ -220,6 +226,9 @@ static NSString *RLPPageIdentifier(NSString *key) {
         [queueBtn.trailingAnchor constraintEqualToAnchor:npBtn.leadingAnchor constant:-10],
         [queueBtn.centerYAnchor constraintEqualToAnchor:_topbar.centerYAnchor],
         [queueBtn.widthAnchor constraintEqualToConstant:28],
+        [scanBtn.trailingAnchor constraintEqualToAnchor:queueBtn.leadingAnchor constant:-10],
+        [scanBtn.centerYAnchor constraintEqualToAnchor:_topbar.centerYAnchor],
+        [scanBtn.widthAnchor constraintEqualToConstant:28],
 
         // 悬浮播放条（web .bar）：最大宽 1120 **居中**、底 14 / 高 66 / 圆角 16。
         // 旧实现钉死左右各 24 ⟹ 宽窗口下播放条比 web 版宽，右侧状态簇被拉散，
@@ -384,8 +393,20 @@ static NSString *RLPPageIdentifier(NSString *key) {
 
 /// 顶栏页标题 = 当前页的 pageTitle；详情页也用它自己的标题。
 - (void)syncTopbarTitle {
-    if(!self.webBackButton){self.webBackButton=[NSButton buttonWithTitle:RLPTr(@"← 返回专辑") target:self action:@selector(onTopbarBack:)];self.webBackButton.bezelStyle=NSBezelStyleRounded;self.webBackButton.identifier=@"top.back";[self.topbar addSubview:self.webBackButton];}
-    self.webBackButton.frame=NSMakeRect(MAX(600,self.topbar.bounds.size.width-230),14,100,32);
+    // web 顶栏左上角是**圆形 chevron 返回键**（回到上一页），旧实现是"← 返回专辑"文字胶囊，
+    // 且固定钉在右侧 —— 用户实测「这个返回专辑的按钮是无意义的，改成图二返回上一页的布局」。
+    if(!self.webBackButton){
+        NSButton *b = RLPSymbolButton(@"chevron.left", RLPTr(@"返回上一页"), self, @selector(onTopbarBack:));
+        b.title = @"";          // 纯图标键（NSButton 默认 title="Button" 会画出一截文字）
+        b.bordered = NO;
+        b.wantsLayer = YES;
+        b.layer.cornerRadius = 14;
+        b.layer.backgroundColor = [RLPTheme current].hov.CGColor;
+        b.identifier = @"top.back";
+        self.webBackButton = b;
+        [self.topbar addSubview:b];
+    }
+    self.webBackButton.frame=NSMakeRect(14, (self.topbar.bounds.size.height-28)/2.0, 28, 28);
     self.webBackButton.hidden=self.rowStack.count==0;
     NSString *title = nil;
     if ([self.currentContent respondsToSelector:@selector(pageTitle)])
@@ -398,11 +419,35 @@ static NSString *RLPPageIdentifier(NSString *key) {
     // 直接 sizeToFit 设 frame，保证标题在任何渲染路径下都画得出来。
     [self.pageTitle sizeToFit];
     CGRect f = self.pageTitle.frame;
-    f.origin = CGPointMake(20, (self.topbar.bounds.size.height - f.size.height) / 2.0);
+    f.origin = CGPointMake(self.webBackButton.hidden ? 20 : 52,
+                           (self.topbar.bounds.size.height - f.size.height) / 2.0);
     self.pageTitle.frame = f;
 }
 
 - (void)onTopbarBack:(id)sender { [self popDetail]; }
+
+/// 顶栏「重新扫描音乐库」= web #bScan（POST /api/lib/scan，body 空）。
+/// 后端已在扫时 started=false，提示"扫描已在进行中"，不假装启动。
+- (void)onScanLibrary:(id)sender {
+    if (![RLPCoreClient shared].started) { RLPToast(RLPTr(@"核心未启动")); return; }
+    __weak __typeof__(self) weakSelf = self;
+    [[RLPCoreClient shared] postJSON:@"/api/lib/scan" body:nil completion:^(NSDictionary * _Nullable json) {
+        __typeof__(self) self_ = weakSelf;
+        if (!self_) return;
+        BOOL started = [json[@"started"] respondsToSelector:@selector(boolValue)] ? [json[@"started"] boolValue] : YES;
+        RLPToast(started ? RLPTr(@"开始扫描音乐库") : RLPTr(@"扫描已在进行中"));
+        [[NSNotificationCenter defaultCenter] postNotificationName:@"RLPLibraryChangedNotification" object:nil];
+        // 曲目/专辑/艺术家页都重拉一次（与 web libChanged 同口径）
+        [self_ reloadVisibleLibraryPages];
+    }];
+}
+
+- (void)reloadVisibleLibraryPages {
+    for (NSString *key in @[@"albums", @"artists", @"tracks", @"folders"]) {
+        NSViewController *vc = self.pageCache[key];
+        if ([vc respondsToSelector:@selector(reloadData)]) [(id)vc reloadData];
+    }
+}
 
 - (void)onPageCount:(NSNotification *)note {
     if (![note.object isKindOfClass:[NSString class]]) return;
@@ -584,6 +629,7 @@ static NSString *RLPPageIdentifier(NSString *key) {
     self.window.contentView.layer.backgroundColor = t.bg.CGColor;
     // web .top 的背景是 --topbg（半透明 + backdrop-blur），不是 --bg。
     self.topbar.layer.backgroundColor = t.topBg.CGColor;
+    if (self.webBackButton) self.webBackButton.layer.backgroundColor = t.hov.CGColor;
     self.topbarHeightConstraint.constant = t.topH;   // apple 60 / classic 52
     self.pageHost.layer.backgroundColor = t.bg.CGColor;
     [self.sidebar applyTheme];

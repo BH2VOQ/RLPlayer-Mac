@@ -33,6 +33,7 @@ static NSString *const kQueueDragType = @"RLPQueueRowDrag";
 @property (nonatomic, assign) NSInteger currentIndex;
 @property (nonatomic, assign) NSInteger mode;
 @property (nonatomic, assign) NSUInteger seq;
+@property (nonatomic, strong) NSPopUpButton *sortPopup;
 @end
 
 @implementation RLPQueueViewController
@@ -51,11 +52,19 @@ static NSString *const kQueueDragType = @"RLPQueueRowDrag";
     bar.orientation = NSUserInterfaceLayoutOrientationHorizontal;
     bar.spacing = 8;
     bar.translatesAutoresizingMaskIntoConstraints = NO;
+    // web 的排序是一个下拉（#qSort: 默认 / 标题 / 艺术家 / …），不是三个按钮。
+    self.sortPopup = [[NSPopUpButton alloc] initWithFrame:NSZeroRect pullsDown:NO];
+    [self.sortPopup addItemsWithTitles:@[ RLPTr(@"默认顺序"), RLPTr(@"标题"),
+                                          RLPTr(@"艺术家") ]];
+    self.sortPopup.identifier = @"queue.sort";   // 对应 web #qSort（parity_map ctrl）
+    self.sortPopup.target = self;
+    self.sortPopup.action = @selector(onSortPicked:);
+    self.sortPopup.translatesAutoresizingMaskIntoConstraints = NO;
+    [bar addArrangedSubview:RLPLabel(RLPTr(@"排序"), [NSFont systemFontOfSize:11],
+                                     [RLPTheme current].mut2)];
+    [bar addArrangedSubview:self.sortPopup];
     NSArray *acts = @[
         @[ RLPTr(@"刷新"), @"refresh" ],
-        @[ RLPTr(@"按标题排序"), @"title" ],
-        @[ RLPTr(@"按艺术家排序"), @"artist" ],
-        @[ RLPTr(@"恢复默认顺序"), @"default" ],
         @[ RLPTr(@"存为歌单"), @"save" ],
         @[ RLPTr(@"清空"), @"clear" ],
     ];
@@ -318,12 +327,27 @@ static NSString *const kQueueDragType = @"RLPQueueRowDrag";
     RLPPlayPath(self.paths[row]);
 }
 
+/// web #qSort：排序下拉改变的是**队列顺序**（/api/qorder），不改变正在播放的那一首。
+- (void)onSortPicked:(NSPopUpButton *)sender {
+    NSArray<NSString *> *keys = @[ @"default", @"title", @"artist" ];
+    const NSInteger i = sender.indexOfSelectedItem;
+    if (i < 0 || i >= (NSInteger)keys.count) return;
+    [self sortBy:keys[(NSUInteger)i]];
+}
+
 - (void)onAction:(NSButton *)sender {
     NSString *a = sender.identifier;
     if ([a isEqualToString:@"refresh"]) { [self reloadData]; return; }
     if ([a isEqualToString:@"clear"]) { [self confirmClear]; return; }
     if ([a isEqualToString:@"save"]) { [self saveAsPlaylist]; return; }
-    if ([a isEqualToString:@"default"]) {
+    if ([a isEqualToString:@"default"]) { [self sortBy:@"default"]; return; }
+    // 按标题 / 艺术家排序：本地算出新顺序，再整体提交 /api/qorder
+    [self sortBy:a];
+}
+
+- (void)sortBy:(NSString *)key {
+    if (!self.paths.count) { RLPToast(RLPTr(@"队列是空的")); return; }
+    if ([key isEqualToString:@"default"]) {
         __weak __typeof__(self) weakSelf = self;
         [[RLPCoreClient shared] postJSON:@"/api/qsort?by=default" body:nil completion:^(NSDictionary * _Nullable json) {
             (void)json;
@@ -331,12 +355,6 @@ static NSString *const kQueueDragType = @"RLPQueueRowDrag";
         }];
         return;
     }
-    // 按标题 / 艺术家排序：本地算出新顺序，再整体提交 /api/qorder
-    [self sortBy:a];
-}
-
-- (void)sortBy:(NSString *)key {
-    if (!self.paths.count) { RLPToast(RLPTr(@"队列是空的")); return; }
     NSMutableArray<NSNumber *> *idx = [NSMutableArray array];
     for (NSInteger i = 0; i < (NSInteger)self.paths.count; ++i) [idx addObject:@(i)];
     __weak __typeof__(self) weakSelf = self;

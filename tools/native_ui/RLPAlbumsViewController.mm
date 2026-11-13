@@ -70,10 +70,12 @@ static const NSUserInterfaceItemIdentifier kAlbumItemID = @"RLPAlbumItem";
     v.layer.masksToBounds = NO;   // 阴影要能画到卡片外
     self.view = v;
 
-    _coverView = [[NSImageView alloc] initWithFrame:NSZeroRect];
+    _coverView = [[RLPCoverImageView alloc] initWithFrame:NSZeroRect];
     _coverView.wantsLayer = YES;
-    _coverView.layer.cornerRadius = 8;
+    _coverView.layer.cornerRadius = 9;
     _coverView.layer.masksToBounds = YES;
+    _coverView.layer.borderWidth = 1;
+    _coverView.layer.borderColor = t.hairline.CGColor;
     _coverView.imageScaling = NSImageScaleProportionallyUpOrDown;
     _coverView.translatesAutoresizingMaskIntoConstraints = NO;
     [v addSubview:_coverView];
@@ -86,7 +88,7 @@ static const NSUserInterfaceItemIdentifier kAlbumItemID = @"RLPAlbumItem";
     [v addSubview:_placeholderLabel];
 
     _nameLabel = [NSTextField labelWithString:@""];
-    _nameLabel.font = [NSFont systemFontOfSize:13 weight:NSFontWeightSemibold];
+    _nameLabel.font = [NSFont systemFontOfSize:12.5 weight:NSFontWeightSemibold];
     _nameLabel.textColor = t.text;
     _nameLabel.lineBreakMode = NSLineBreakByTruncatingTail;
     _nameLabel.maximumNumberOfLines = 1;
@@ -94,7 +96,7 @@ static const NSUserInterfaceItemIdentifier kAlbumItemID = @"RLPAlbumItem";
     [v addSubview:_nameLabel];
 
     _artistLabel = [NSTextField labelWithString:@""];
-    _artistLabel.font = [NSFont systemFontOfSize:11.5];
+    _artistLabel.font = [NSFont systemFontOfSize:11];
     _artistLabel.textColor = t.mut;
     _artistLabel.lineBreakMode = NSLineBreakByTruncatingTail;
     _artistLabel.maximumNumberOfLines = 1;
@@ -123,7 +125,9 @@ static const NSUserInterfaceItemIdentifier kAlbumItemID = @"RLPAlbumItem";
         [_coverView.leadingAnchor constraintEqualToAnchor:v.leadingAnchor],
         [_coverView.trailingAnchor constraintEqualToAnchor:v.trailingAnchor],
         [_coverView.topAnchor constraintEqualToAnchor:v.topAnchor],
-        [_coverView.heightAnchor constraintEqualToConstant:180],
+        // web .card .cv{aspect-ratio:1}：封面必须是正方形；旧实现写死 180 高 + 每列宽不一
+        // ⟹ 方图被压进非正方形容器里 letterbox，用户实测「封面都留白边」。
+        [_coverView.heightAnchor constraintEqualToAnchor:_coverView.widthAnchor],
         [_placeholderLabel.centerXAnchor constraintEqualToAnchor:_coverView.centerXAnchor],
         [_placeholderLabel.centerYAnchor constraintEqualToAnchor:_coverView.centerYAnchor],
         [_playBadge.trailingAnchor constraintEqualToAnchor:_coverView.trailingAnchor constant:-8],
@@ -132,7 +136,7 @@ static const NSUserInterfaceItemIdentifier kAlbumItemID = @"RLPAlbumItem";
         [_playBadge.heightAnchor constraintEqualToConstant:32],
         [_nameLabel.leadingAnchor constraintEqualToAnchor:v.leadingAnchor constant:2],
         [_nameLabel.trailingAnchor constraintEqualToAnchor:v.trailingAnchor constant:-2],
-        [_nameLabel.topAnchor constraintEqualToAnchor:_coverView.bottomAnchor constant:8],
+        [_nameLabel.topAnchor constraintEqualToAnchor:_coverView.bottomAnchor constant:9],
         [_artistLabel.leadingAnchor constraintEqualToAnchor:_nameLabel.leadingAnchor],
         [_artistLabel.trailingAnchor constraintEqualToAnchor:_nameLabel.trailingAnchor],
         [_artistLabel.topAnchor constraintEqualToAnchor:_nameLabel.bottomAnchor constant:2],
@@ -257,7 +261,7 @@ static const NSUserInterfaceItemIdentifier kAlbumItemID = @"RLPAlbumItem";
     // 之前原生写死 180×230 + inset 20/24 + lineSpacing 20，卡片比 web 宽、行距也更大。
     // 现在按可用宽度算列数（与 CSS auto-fill 同算法），列宽随之拉伸填满。
     NSCollectionViewFlowLayout *layout = [[NSCollectionViewFlowLayout alloc] init];
-    layout.itemSize = NSMakeSize(152, 214);      // 152 封面 + 9 + 16(标题) + 2 + 14(艺术家) ≈ 214
+    layout.itemSize = NSMakeSize(152, 191);      // 152 封面 + 9 + 15(标题) + 2 + 13(艺术家) = 191
     layout.sectionInset = NSEdgeInsetsMake(18, 18, 18, 18);   // .grid padding:18
     layout.minimumInteritemSpacing = 16;         // .grid gap:16
     layout.minimumLineSpacing = 16;
@@ -442,7 +446,9 @@ static const NSUserInterfaceItemIdentifier kAlbumItemID = @"RLPAlbumItem";
     if (cols < 1) cols = 1;
     const CGFloat itemW = floor((avail - gap * (cols - 1)) / cols);
     if (fabs(l.itemSize.width - itemW) < 0.5) return;
-    l.itemSize = NSMakeSize(itemW, itemW + 62);   // 封面正方形 + 文字区 62
+    // web：封面(正方形) + .nm margin-top 9 + 行高 15 + .ar margin-top 2 + 行高 13 = +39；
+    // 行距 16 由 layout.minimumLineSpacing 负责。旧实现文字区写 62（行间距比 web 大 23pt）。
+    l.itemSize = NSMakeSize(itemW, itemW + 39);
     [l invalidateLayout];
 }
 
