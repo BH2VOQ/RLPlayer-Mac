@@ -46,6 +46,48 @@ int main() { @autoreleasepool {
     CGFloat end = -1;
     for (NSString *key in keys) { NSView *v=field(bar,key); check(!v.hidden && v.frame.origin.x > end, "five controls ordered repeat/prev/play/next/stop"); end=NSMaxX(v.frame); }
     NSView *shuffle=field(bar,@"shuffleBtn"); check(shuffle.hidden || shuffle.superview == nil, "no sixth shuffle control; API remains available");
+
+    // ---- 第2/3项（2026-11-13 用户实机）----
+    // 判据 1：播放中播放键必须是暂停图标。
+    //   不能用 image.name 判（`imageWithSystemSymbolName:` 生成的图 name 可能是 nil），
+    //   改用**渲染位图指纹**：不同状态必须给出不同位图 —— 这是"图标真的换过"的直接证据，
+    //   而不是"我设了一个属性"（属性对、渲染错 是本项目踩过多次的形态）。
+    {
+        NSButton *pb = field(bar,@"playBtn");
+        NSData *(^fingerprint)(void) = ^NSData *{
+            NSImage *img = pb.image;
+            if (!img) return nil;
+            NSBitmapImageRep *rep = [NSBitmapImageRep imageRepWithData:[img TIFFRepresentation]];
+            return rep ? [rep representationUsingType:NSBitmapImageFileTypePNG properties:@{}] : nil;
+        };
+        NSData *whilePlaying = fingerprint();     // statusJSON 当前 playing=1
+        NSMutableDictionary *stopped = [statusJSON mutableCopy];
+        stopped[@"playing"] = @NO; stopped[@"paused"] = @NO;
+        statusJSON = stopped;
+        [bar fetchStatus];
+        NSData *whileStopped = fingerprint();
+        check(whilePlaying != nil && whileStopped != nil, "play key renders a real bitmap in both states");
+        check(![whilePlaying isEqualToData:whileStopped],
+              "第2项: play key image differs between playing and stopped (icon really switches)");
+        check([bar isPlaying] == NO, "bar.isPlaying is false after a stopped status");
+        NSMutableDictionary *resumed = [stopped mutableCopy];
+        resumed[@"playing"] = @YES;
+        statusJSON = resumed;
+        [bar fetchStatus];
+        check([bar isPlaying] == YES, "bar.isPlaying is true after a playing status");
+        check([fingerprint() isEqualToData:whilePlaying],
+              "第2项: returning to playing restores the pause icon (no one-way latch)");
+    }
+    // 判据 2（第3项）：进度条与播放键不得相交
+    //   （用户截图里"三角形偏左贴边/圆被裁"的真实成因是**白色进度滑块头压在红圆上**）
+    {
+        bar.frame = NSMakeRect(0,0,1120,66); [bar layout];
+        NSView *prog = field(bar,@"progress"), *pb = field(bar,@"playBtn");
+        check(!NSIntersectsRect(prog.frame, pb.frame),
+              "第3项: progress track never intersects the round play key");
+        check(fabs(pb.frame.size.width - pb.frame.size.height) < 0.51,
+              "第3项: play key is square (cornerRadius == half side draws a full circle)");
+    }
     check(fabs([field(bar,@"playBtn") frame].size.width-34)<.01, "web main key is 34pt");
     check(fabs([field(bar,@"coverView") frame].size.width-44)<.01, "web cover is 44pt");
     for (NSNumber *width in @[@1120,@980,@860]) {

@@ -268,7 +268,8 @@ if(APPLE)
   # MediaPlayer：媒体键（MPRemoteCommandCenter）与锁屏正在播放信息。原生客户端的必备能力，
   # web 版做不到（页面 JS 拿不到系统媒体键）。
   target_link_libraries(rlplayer_native PRIVATE rlapp_core
-    "-framework AppKit" "-framework Security" "-framework MediaPlayer")
+    "-framework AppKit" "-framework Security" "-framework MediaPlayer"
+    "-framework AVFoundation" "-framework CoreMedia")   # --audit 夹具读真实时长（索引 dur 不许自欺；CMTimeGetSeconds 在 CoreMedia）
 
   # Offline contracts for the frozen web album and mini bar.
   add_executable(test_native_album_web tests/test_native_album_web.mm
@@ -288,6 +289,25 @@ if(APPLE)
   target_link_libraries(test_native_album_web PRIVATE rlapp_core)
   add_test(NAME native_album_web COMMAND test_native_album_web)
   add_test(NAME native_bar_web COMMAND test_native_bar_web)
+
+  # 底栏 × 真实 embedded 核心（第2项判据的快速版：秒级，不必等一轮 13 分钟的 --audit）。
+  # 为什么单独建一个可执行文件：--audit 是整窗离屏审计，跑一轮十几分钟；
+  # 而「播放中底栏图标是否切成暂停」是一个三段异步（轮询→回调→应用状态）的不变量，
+  # 改一行判据就要重跑整窗是不可接受的反馈周期。这里只装底栏 + 核心。
+  # 纪律：backend=null + volume=-120 —— 只跑 DSP，绝不打开设备（铁律②）。
+  add_executable(test_native_bar_core tests/test_native_bar_core.mm
+    tools/native_ui/RLPPlaybackBarView.mm tools/native_ui/RLPSignalChain.mm
+    tools/native_ui/RLPSupport.mm tools/native_ui/RLPModels.mm
+    tools/native_ui/RLPTheme.mm tools/native_ui/RLPNativeI18n.mm
+    tools/native_ui/RLPCoreClient.mm)
+  target_compile_options(test_native_bar_core PRIVATE -fobjc-arc)
+  target_include_directories(test_native_bar_core PRIVATE src tools tools/native_ui)
+  target_link_libraries(test_native_bar_core PRIVATE rlapp_core
+    "-framework AppKit" "-framework MediaPlayer")
+  add_test(NAME native_bar_core COMMAND test_native_bar_core)
+  set_tests_properties(native_bar_core PROPERTIES
+    ENVIRONMENT "PATH=${CMAKE_SOURCE_DIR}/build-mac/ffmpeg-lite:/usr/bin:/bin:/usr/sbin:/sbin"
+    TIMEOUT 180)
 
   # 原生 UI 的两条离线门禁（不联网、不开窗口、不发声）：
   #   native_ui_selftest = 视图树契约（10 项，含 webviews=0）

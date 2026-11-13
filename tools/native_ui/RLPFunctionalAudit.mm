@@ -17,6 +17,7 @@
 #import "RLPFunctionalAudit.h"
 #import <AppKit/AppKit.h>
 #import "RLPCoreClient.h"
+#import "RLPModels.h"
 #import "RLPMainWindowController.h"
 #import "RLPSidebarViewController.h"
 #import "RLPAlbumsViewController.h"
@@ -37,6 +38,7 @@
 #import "RLPRightDrawer.h"
 #import "RLPLyrics.h"
 #import "RLPSupport.h"
+#import <AVFoundation/AVFoundation.h>
 #import "RLPTheme.h"
 
 /// 专辑卡悬停入口（RLPAlbumItem 的 cardHoverChanged:）——审计用它触发同一个生产入口。
@@ -222,17 +224,32 @@ static NSString *BuildFixtureLibrary(NSString *root) {
             NSString *title = [NSString stringWithFormat:@"%@ %ld", info[0], (long)t];
             NSString *aiff = [dir stringByAppendingPathComponent:
                               [NSString stringWithFormat:@"%02ld.aiff", (long)t]];
+            // ⚠️ 这里必须让**真实时长**足够长：旧写法 `say -o … "test"` 只有约 0.69s，
+            // 而下面索引行写的是 dur=30s+。播放到第二次 0.5s 轮询时音频早已 EOS，
+            // 于是 --audit 里任何「播放中」的判据都读到 playing=false（本轮第2项就是被它假红）。
+            // 用重复文本把它拉长到十几秒；时长仍以 ffprobe 实测为准写进索引。
+            NSMutableString *tts = [NSMutableString string];
+            for (int k = 0; k < 24; ++k) [tts appendString:@"test number "];
             NSTask *say = [[NSTask alloc] init];
             say.launchPath = @"/usr/bin/say";
-            say.arguments = @[ @"-o", aiff, @"test" ];
+            say.arguments = @[ @"-o", aiff, tts ];
             @try { [say launch]; [say waitUntilExit]; } @catch (NSException *e) { (void)e; }
             if (![fm fileExistsAtPath:aiff]) {
                 [@"" writeToFile:aiff atomically:YES encoding:NSUTF8StringEncoding error:nil];
             }
             NSDictionary *attr = [fm attributesOfItemAtPath:aiff error:nil];
             const long long sz = (long long)attr.fileSize;
+            // 索引里的 dur 必须是**文件的真实时长**：夹具自欺过一次（写死 30s，实际 0.69s），
+            // 结果「播放中」的判据在音频早已结束后才去读状态，全变成假红。
+            double realDur = 30.0;
+            {
+                AVURLAsset *asset = [AVURLAsset URLAssetWithURL:[NSURL fileURLWithPath:aiff] options:nil];
+                const CMTime d = asset.duration;
+                if (CMTIME_IS_NUMERIC(d) && CMTimeGetSeconds(d) > 0.1)
+                    realDur = CMTimeGetSeconds(d);
+            }
             [idx appendFormat:@"%@\t111\t%lld\t%@\t%@\t%@\t%@\t%ld\t1\t%@\t44100\t16\t2\t%.1f\t0\tJazz\t\t0\t0\t0\n",
-             aiff, sz, info[0], info[1], info[1], title, (long)t, info[2], 30.0 + t];
+             aiff, sz, info[0], info[1], info[1], title, (long)t, info[2], realDur];
             ++made;
         }
     }
@@ -1675,6 +1692,129 @@ int RLPRunFunctionalAudit(NSString *outDir) {
             Pump(0.2);
             CK(Snap(svm.view, [outDir stringByAppendingPathComponent:@"21d-settings-diag-inline.png"],
                     CGSizeMake(1180, 760)), "诊断/反馈内联形态截图已落盘", outDir);
+        }
+
+        // =====================================================================
+        // (5z) 播放链路 + 底栏播放键状态（2026-11-13 用户实机：「无法正常播放音乐」）
+        //
+        // ⚠️ 本轮才发现的一个**巨大盲区**：在这次改动之前，整个 --audit 从来没有调用过
+        //    任何播放入口（grep RLPPlayPath = 0 次），也就从未断言过「点了播放之后播没播起来」。
+        //    所以「无法正常播放音乐」这种硬故障可以在门禁全绿的情况下上线。
+        //    判据走**生产入口**（RLPPlayPath → /api/play → 队列线程），不直接改状态。
+        //
+        // 纪律（铁律②）：backend=null + volume=-120 —— 只跑 DSP，绝不打开设备、绝不出声。
+        // =====================================================================
+        {
+            // /api/lib/albums 的元素是**字典**（{k,name,artist,…}），不是数组 ——
+            // 按位置取会抛 NSInvalidArgumentException 把审计进程带走（第一版真踩了）。
+            NSArray *albumTracks = @[];
+            NSDictionary *al = [[RLPCoreClient shared] jsonWithMethod:@"GET" path:@"/api/lib/albums" body:nil];
+            NSArray *albumsAll = [al[@"albums"] isKindOfClass:[NSArray class]] ? al[@"albums"] : @[];
+            NSString *firstAlbumKey = @"";
+            for (id a in albumsAll) {
+                if (![a isKindOfClass:[NSDictionary class]]) continue;
+                NSString *k = ((NSDictionary *)a)[@"k"];
+                if ([k isKindOfClass:[NSString class]] && k.length) { firstAlbumKey = k; break; }
+            }
+            if (firstAlbumKey.length) {
+                NSDictionary *ad = [[RLPCoreClient shared] jsonWithMethod:@"GET"
+                    path:[NSString stringWithFormat:@"/api/lib/album?k=%@", RLPEnc(firstAlbumKey)] body:nil];
+                if ([ad[@"tracks"] isKindOfClass:[NSArray class]]) albumTracks = ad[@"tracks"];
+            }
+            NSString *firstPath = @"";
+            for (id t in albumTracks) {
+                if (![t isKindOfClass:[NSDictionary class]]) continue;
+                NSString *pp = ((NSDictionary *)t)[@"path"];
+                if ([pp isKindOfClass:[NSString class]] && pp.length) { firstPath = pp; break; }
+            }
+            CK(firstPath.length > 0, "播放判据有真实曲目可播（夹具库非空）", firstPath);
+
+            if (firstPath.length) {
+                [[RLPCoreClient shared] postJSON:@"/api/settings"
+                    body:@"backend=null&volume=-120" completion:nil];
+                Pump(0.3);
+                [[RLPCoreClient shared] postJSON:@"/api/clear" body:nil completion:nil];
+                Pump(0.3);
+
+                // ① 生产入口播这一首 → 必须真的进入 playing 且时间轴推进
+                RLPPlayPath(firstPath);
+                BOOL started = NO; NSString *lastErr = @"";
+                for (int i = 0; i < 60 && !started; ++i) {
+                    Pump(0.1);
+                    NSDictionary *st = [[RLPCoreClient shared] jsonWithMethod:@"GET" path:@"/api/status" body:nil];
+                    RLPPlaybackStatus *s2 = [RLPPlaybackStatus statusFromJSON:st];
+                    if (s2.playing) started = YES;
+                    if (s2.error.length) lastErr = s2.error;
+                }
+                CK(started, "点击曲目后 /api/status 真的变成 playing=true（生产入口走通）",
+                   lastErr.length ? [NSString stringWithFormat:@"error=%@", lastErr] : @"6s 内未起播");
+                double pos1 = 0, pos2 = 0;
+                {
+                    NSDictionary *st = [[RLPCoreClient shared] jsonWithMethod:@"GET" path:@"/api/status" body:nil];
+                    pos1 = [RLPPlaybackStatus statusFromJSON:st].position;
+                    Pump(1.2);
+                    st = [[RLPCoreClient shared] jsonWithMethod:@"GET" path:@"/api/status" body:nil];
+                    pos2 = [RLPPlaybackStatus statusFromJSON:st].position;
+                }
+                CK(pos2 > pos1 + 0.3, "播放位置随时间前进（不是 playing=true 但时间轴停住）",
+                   [NSString stringWithFormat:@"pos %.2f -> %.2f", pos1, pos2]);
+                NSDictionary *stNow = [[RLPCoreClient shared] jsonWithMethod:@"GET" path:@"/api/status" body:nil];
+                RLPPlaybackStatus *sNow = [RLPPlaybackStatus statusFromJSON:stNow];
+                CK(![sNow.error containsString:@"RENDERFAIL"] && ![sNow.error containsString:@"失败"],
+                   "null 后端起播全程无 RENDERFAIL / 设备错误",
+                   sNow.error.length ? sNow.error : @"无错误");
+
+                // ---- ② 底栏播放键必须跟着真实状态切（第2项）----
+                // 不用「固定 Pump 后读一次图标」：底栏是 0.5s 轮询 + 异步回调，机器忙时会读到
+                // 上一拍快照 ⟹ **假红**（本轮第一次跑就红在这条）。改成等不变量成立再断言：
+                // 「底栏 isPlaying == /api/status 的 playing」+「两种状态图标位图不同」。
+                RLPPlaybackBarView *bar = wc.playbackBar;
+                CK(bar != nil, "底栏实例存在（后续图标判据的前提）", @"playbackBar 为 nil");
+                [bar startPolling];
+                NSData *(^barIcon)(void) = ^NSData *{
+                    NSButton *pb2 = [bar valueForKey:@"playBtn"];
+                    NSImage *img = pb2.image;
+                    if (!img) return nil;
+                    NSBitmapImageRep *rep = [NSBitmapImageRep imageRepWithData:[img TIFFRepresentation]];
+                    return rep ? [rep representationUsingType:NSBitmapImageFileTypePNG properties:@{}] : nil;
+                };
+                BOOL barSawPlaying = NO;
+                for (int i = 0; i < 80 && !barSawPlaying; ++i) { Pump(0.05); barSawPlaying = bar.isPlaying; }
+                NSData *iconPlaying = barIcon();
+                CK(barSawPlaying, "第2项：播放中底栏 isPlaying=true（轮询真的把状态带到���栏）",
+                   [NSString stringWithFormat:@"polling=%d lastStatus=%@",
+                    (int)bar.polling, bar.lastStatus ? @"有" : @"nil"]);
+                [[RLPCoreClient shared] postJSON:@"/api/pause?on=1" body:nil completion:nil];
+                BOOL barSawPaused = NO;
+                for (int i = 0; i < 80 && !barSawPaused; ++i) { Pump(0.05); barSawPaused = !bar.isPlaying; }
+                NSData *iconPaused = barIcon();
+                CK(barSawPaused, "第2项：暂停后底栏 isPlaying=false（状态能下来，不是单向锁死）",
+                   [NSString stringWithFormat:@"isPlaying=%d", (int)bar.isPlaying]);
+                CK(iconPlaying != nil && iconPaused != nil &&
+                   ![iconPlaying isEqualToData:iconPaused],
+                   "第2项：底栏播放键图标随播放/暂停真的换图（不是一直画三角形）",
+                   [NSString stringWithFormat:@"playingImg=%luB pausedImg=%luB",
+                    (unsigned long)iconPlaying.length, (unsigned long)iconPaused.length]);
+
+                // ---- 第3项：播放键完整圆 + 进度滑块头不得压在它上面 ----
+                // 用户截图里"三角形偏左贴边、圆被裁"的实测成因是**白色进度滑块头压在红圆上**：
+                // 红圆本身 67×66px 完整、三角形左右留白各 25px、圆心偏差 0/0.5px（像素量过）。
+                NSButton *pb3 = [bar valueForKey:@"playBtn"];
+                NSView *prog3 = [bar valueForKey:@"progress"];
+                NSRect kf3 = pb3.frame, fr3 = prog3.frame;
+                CK(!NSIntersectsRect(fr3, kf3),
+                   "第3项：进度条不与播放键相交（白色滑块头不再压在红圆上）",
+                   [NSString stringWithFormat:@"progress=%@ play=%@",
+                    NSStringFromRect(fr3), NSStringFromRect(kf3)]);
+                CK(fabs(kf3.size.width - kf3.size.height) < 0.51 &&
+                   fabs(pb3.layer.cornerRadius - kf3.size.width / 2.0) < 0.51,
+                   "第3项：播放键是完整圆形（方形外框 + cornerRadius = 半径）",
+                   [NSString stringWithFormat:@"frame=%@ radius=%.1f",
+                    NSStringFromRect(kf3), pb3.layer.cornerRadius]);
+
+                [[RLPCoreClient shared] postJSON:@"/api/stop" body:nil completion:nil];
+                Pump(0.4);
+            }
         }
 
         // (6) 文件夹页地址栏（web #fPath/#fGo/#fRoot）：旧实现只有只读路径文字
