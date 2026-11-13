@@ -148,6 +148,8 @@ static void RLPStripSentinels(NSStackView *stack) {
 static RLPSettingsGroup *gCurrentGroup = nil;
 /// 当前分组的宿主 stack（用于把卡片按顺序加进去）。
 static NSStackView *gCurrentStack = nil;
+/// 上一次 RLPSGroup 生成的「卡片宽度 = 宿主宽度 - 48」约束（并排布局时要先摘掉它）。
+static NSLayoutConstraint *gLastGroupWidthConstraint = nil;
 
 /// 分区标题 = 开一张 web .sgroup 卡片。
 static NSView *RLPSGroup(NSString *title, NSString *desc, RLPTheme *t) {
@@ -156,7 +158,9 @@ static NSView *RLPSGroup(NSString *title, NSString *desc, RLPTheme *t) {
     gCurrentGroup = g;
     if (gCurrentStack) {
         [gCurrentStack addArrangedSubview:g];
-        [g.widthAnchor constraintEqualToAnchor:gCurrentStack.widthAnchor constant:-48].active = YES;
+        NSLayoutConstraint *wc = [g.widthAnchor constraintEqualToAnchor:gCurrentStack.widthAnchor constant:-48];
+        wc.active = YES;
+        gLastGroupWidthConstraint = wc;
     }
     // 返回卡片本身：调用点会 addArrangedSubview 它，NSStackView 对已在其中的视图是幂等的。
     return g;
@@ -1600,21 +1604,21 @@ static NSString *RLPControlIdentifier(NSString *key) {
     gCurrentStack = adv;
     gCurrentGroup = nil;
 
-    // 数据源开关 + 优先级（对齐 web sp_metasrc：按注册表动态渲染，新增源前端零改动）。
-    // web 把它放在「元数据补全」这张卡片**里面**，不是裸挂在页面上。
+    // 数据源卡片（web 高级区左列 .meta-card）：逐源开关 + 优先级（对齐 web sp_metasrc）。
+    RLPSettingsGroup *dataGroup = (RLPSettingsGroup *)RLPSGroup(RLPTr(@"数据源"),
+        RLPTr(@"越靠上优先级越高；拖动把手或点 ▲▼ 调整顺序，关掉的源完全不参与补全"), t);
+    [adv addArrangedSubview:dataGroup];
+    NSLayoutConstraint *dataWidthConstraint = gLastGroupWidthConstraint;
     self.metaSourcesView = [[RLPMetaSourcesView alloc] initWithFrame:NSMakeRect(0, 0, 620, 200)];
     self.metaSourcesView.translatesAutoresizingMaskIntoConstraints = NO;
-    if (gCurrentGroup) {
-        [gCurrentGroup addFullRow:self.metaSourcesView];
-    } else {
-        [adv addArrangedSubview:self.metaSourcesView];
-        [self.metaSourcesView.widthAnchor constraintEqualToAnchor:adv.widthAnchor constant:-48].active = YES;
-    }
+    [dataGroup addFullRow:self.metaSourcesView];
     [self.metaSourcesView reload];
 
-    // AI 模型端点：密钥红线 —— GET 只回掩码，输入框留空 = 不改已存的 key
-    [adv addArrangedSubview:RLPSGroup(RLPTr(@"AI 模型端点"),
-        RLPTr(@"用于资料整理与简介。密钥只在本机保存，界面永不回显明文；留空表示不修改。"), t)];
+    // AI 接入卡片（web 高级区右列 .meta-card）：密钥红线 —— GET 只回掩码，输入框留空 = 不改已存的 key
+    RLPSettingsGroup *aiGroup = (RLPSettingsGroup *)RLPSGroup(RLPTr(@"AI 接入（OpenAI 兼容）"),
+        RLPTr(@"任何兼容 OpenAI 的服务都能用。密钥只在本机保存，界面永不回显明文；留空表示不修改。"), t);
+    [adv addArrangedSubview:aiGroup];
+    NSLayoutConstraint *aiWidthConstraint = gLastGroupWidthConstraint;
 
     // 接口预设（对齐 web LLM_PROVIDERS / sp_llmprovider）：只负责「填地址」，
     // 不做连通性判断 —— 能不能用由「测试连通」回答。custom 留空，绝不覆盖用户已填地址。
@@ -1779,6 +1783,25 @@ static NSString *RLPControlIdentifier(NSString *key) {
     [wbRow addArrangedSubview:self.wbApplyBtn];
     [wbRow addArrangedSubview:self.writebackStatus];
     [adv addArrangedSubview:wbRow];
+
+    // web `.meta-adv-grid`：数据源 / AI 接入 **左右两列**（>=1100px 时两列，窄屏回落单列）。
+    // 摘掉两张卡各自的「整宽」约束，放进等宽的横向 stack；窄窗口由 stack 自动压缩。
+    if (dataGroup && aiGroup && dataWidthConstraint && aiWidthConstraint) {
+        dataWidthConstraint.active = NO;
+        aiWidthConstraint.active = NO;
+        NSStackView *twoCol = [[NSStackView alloc] init];
+        twoCol.orientation = NSUserInterfaceLayoutOrientationHorizontal;
+        twoCol.distribution = NSStackViewDistributionFillEqually;
+        twoCol.alignment = NSLayoutAttributeTop;
+        twoCol.spacing = 16;
+        twoCol.translatesAutoresizingMaskIntoConstraints = NO;
+        [adv removeArrangedSubview:dataGroup];
+        [adv removeArrangedSubview:aiGroup];
+        [twoCol addArrangedSubview:dataGroup];
+        [twoCol addArrangedSubview:aiGroup];
+        [adv insertArrangedSubview:twoCol atIndex:0];
+        [twoCol.widthAnchor constraintEqualToAnchor:adv.widthAnchor].active = YES;
+    }
 
     gCurrentStack = savedStack;
     gCurrentGroup = savedGroup;
