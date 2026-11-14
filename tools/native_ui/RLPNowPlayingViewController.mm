@@ -1586,6 +1586,9 @@ static NSString *RLPRailTagText(id srValue, id bitsValue) {
 @property (nonatomic, strong) NSTimer *poll;
 @property (nonatomic) BOOL polling;
 @property (nonatomic, copy) NSString *currentPath;
+/// v3.3.11 `npSetCover` / `npResetCover`：逐曲封面手动设置与恢复自动。
+@property (nonatomic, strong) NSButton *coverSetBtn;
+@property (nonatomic, strong) NSButton *coverResetBtn;
 @property (nonatomic, strong) NSImageView *cover;
 @property (nonatomic, strong) NSTextField *titleLabel2;
 @property (nonatomic, strong) NSTextField *artistLabel2;
@@ -1742,6 +1745,17 @@ static NSString *RLPRailTagText(id srValue, id bitsValue) {
     self.cover=[[NSImageView alloc] initWithFrame:NSZeroRect]; self.cover.identifier=@"npCover";
     self.cover.imageScaling=NSImageScaleAxesIndependently; self.cover.wantsLayer=YES;
     self.cover.layer.cornerRadius=14;self.cover.layer.masksToBounds=YES; [host addSubview:self.cover];
+    // v3.3.11 `npSetCover` / `npResetCover`（web 在封面下方一行小按钮）。
+    // 为什么必须有真实控件：只加后端路由等于「设置成功但没人能点」，parity 也会漏记。
+    self.coverSetBtn=[NSButton buttonWithTitle:RLPTr(@"设置歌曲封面") target:self action:@selector(onSetCover:)];
+    self.coverSetBtn.identifier=@"npSetCover";self.coverSetBtn.bezelStyle=NSBezelStyleRounded;
+    self.coverSetBtn.controlSize=NSControlSizeMini;
+    self.coverSetBtn.toolTip=RLPTr(@"仅设置当前歌曲封面，不修改专辑和音乐文件");
+    [host addSubview:self.coverSetBtn];
+    self.coverResetBtn=[NSButton buttonWithTitle:RLPTr(@"自动") target:self action:@selector(onResetCover:)];
+    self.coverResetBtn.identifier=@"npResetCover";self.coverResetBtn.bezelStyle=NSBezelStyleRounded;
+    self.coverResetBtn.controlSize=NSControlSizeMini;self.coverResetBtn.toolTip=RLPTr(@"恢复自动封面");
+    [host addSubview:self.coverResetBtn];
     self.kindLabel=RLPLabel(RLPTr(@"正在播放"),[NSFont systemFontOfSize:10 weight:NSFontWeightSemibold],t.mut2); self.kindLabel.identifier=@"npKind";
     RLPSetKernedText(self.kindLabel, RLPTr(@"正在播放"), 1.6);   // web .npkind{letter-spacing:1.6px}
     self.titleLabel2=RLPLabel(RLPTr(@"未播放"),[NSFont systemFontOfSize:20 weight:NSFontWeightBold],t.text); self.titleLabel2.identifier=@"npTitle";
@@ -2102,6 +2116,20 @@ static NSString *RLPRailTagText(id srValue, id bitsValue) {
     CGFloat w=self.webCanvas.bounds.size.width,h=self.webCanvas.bounds.size.height;
     CGFloat c=MIN(236,MAX(132,h*.24)), gutter=16, top=44, by=top+c+18, bottom=MAX(by+60,h-86);
     self.cover.frame=NSMakeRect(gutter,top,c,c);
+    {
+        // 两个小按钮排在封面图正下方；封面窄于 150 时按钮可能溢出到信息列，故限宽并右对齐到封面右缘。
+        [self.coverSetBtn sizeToFit];[self.coverResetBtn sizeToFit];
+        const CGFloat bw1=self.coverSetBtn.frame.size.width,bw2=self.coverResetBtn.frame.size.width;
+        const CGFloat gap=6, total=bw1+gap+bw2;
+        const CGFloat bx=gutter+c-total<gutter?gutter:gutter+c-total;
+        self.coverSetBtn.frame=NSMakeRect(bx,top+c+8,bw1,20);
+        self.coverResetBtn.frame=NSMakeRect(bx+bw1+gap,top+c+8,bw2,20);
+        // web `#npResetCover` 仅在 `curMeta.coverSource === 'track_manual'` 时显示。
+        // 本仓 /api/meta 还没有 coverSource 字段（见 evidence 挂账），故始终可见：
+        // 无手动封面时点「自动」只会写 reset 标记，读侧本来就走自动链 ⟹ 语义无害。
+        self.coverSetBtn.enabled=self.currentPath.length>0;
+        self.coverResetBtn.enabled=self.currentPath.length>0;
+    }
     CGFloat x=gutter+c+26, infoY=top+MAX(0,(c-130)/2), iw=MAX(80,w-x-24);
     // web `#npTitle{font-size:clamp(19px,2.6vh,27px);line-height:1.3}`：
     // 字号/行盒按视口高度换算（旧码固定 20pt/30pt 行，大窗偏小、小窗字距挤）。
@@ -2425,6 +2453,63 @@ static NSString *RLPRailTagText(id srValue, id bitsValue) {
     [self layoutWebPlayback];
 }
 - (void)onToggleRail:(id)sender {self.railPanel.hidden=!self.railPanel.hidden;[[NSUserDefaults standardUserDefaults] setBool:self.railPanel.hidden forKey:@"RLPNPRailHidden"];[self layoutWebPlayback];}
+#pragma mark - v3.3.11 逐曲封面
+
+/// POST /api/cover/set?file=<曲目> body = 图片字节（上游同契约）。
+/// 生产接缝：判据直接调它，绕过系统文件面板。
+- (void)setCoverAtPath:(NSString *)coverPath forTrack:(NSString *)track {
+    if (!coverPath.length || !track.length) return;
+    NSData *data=[NSData dataWithContentsOfFile:coverPath];
+    if (!data.length) { RLPToast(RLPTr(@"图片读取失败")); return; }
+    NSString *url=[NSString stringWithFormat:@"/api/cover/set?file=%@", RLPEnc(track)];
+    __weak __typeof__(self) ws=self;
+    [[RLPCoreClient shared] postData:url body:data contentType:@"image/jpeg"
+                          completion:^(NSDictionary * _Nullable json) {
+        __typeof__(self) s2=ws; if(!s2) return;
+        if (json && [json[@"ok"] boolValue]) {
+            RLPToast(RLPTr(@"歌曲封面已设置"));
+            if ([s2.currentPath isEqualToString:track]) [s2 loadCoverForPath:track];
+        } else {
+            NSString *err=[json[@"error"] isKindOfClass:[NSString class]]?json[@"error"]:RLPTr(@"设置失败");
+            RLPToast([NSString stringWithFormat:@"%@：%@", RLPTr(@"设置失败"), err]);
+        }
+    }];
+}
+
+/// POST /api/cover/reset?file=<曲目>：写 reset 标记，读侧回落自动封面。
+- (void)resetCoverForTrack:(NSString *)track {
+    if (!track.length) return;
+    NSString *url=[NSString stringWithFormat:@"/api/cover/reset?file=%@", RLPEnc(track)];
+    __weak __typeof__(self) ws=self;
+    [[RLPCoreClient shared] postJSON:url body:nil completion:^(NSDictionary * _Nullable json) {
+        __typeof__(self) s2=ws; if(!s2) return;
+        if (json && [json[@"ok"] boolValue]) {
+            RLPToast(RLPTr(@"已恢复自动封面"));
+            if ([s2.currentPath isEqualToString:track]) [s2 loadCoverForPath:track];
+        } else {
+            NSString *err=[json[@"error"] isKindOfClass:[NSString class]]?json[@"error"]:RLPTr(@"设置失败");
+            RLPToast([NSString stringWithFormat:@"%@：%@", RLPTr(@"设置失败"), err]);
+        }
+    }];
+}
+
+- (void)onSetCover:(id)sender {
+    (void)sender;
+    if (!self.currentPath.length) return;
+    NSOpenPanel *p=[NSOpenPanel openPanel];
+    p.canChooseFiles=YES;p.canChooseDirectories=NO;p.allowsMultipleSelection=NO;
+    p.message=RLPTr(@"选择一张图片作为歌曲封面");
+    p.allowedFileTypes=@[ @"jpg", @"jpeg", @"png", @"webp", @"gif" ];
+    if ([p runModal]!=NSModalResponseOK || !p.URL) return;
+    [self setCoverAtPath:p.URL.path forTrack:self.currentPath];
+}
+
+- (void)onResetCover:(id)sender {
+    (void)sender;
+    if (!self.currentPath.length) return;
+    [self resetCoverForTrack:self.currentPath];
+}
+
 - (void)onToggleAuto:(id)sender {self.anlAutoEnabled=!self.anlAutoEnabled;self.anlAutoSettingAt=[NSDate timeIntervalSinceReferenceDate];[[RLPCoreClient shared] postJSON:@"/api/settings" body:self.anlAutoEnabled?@"autoanl=1":@"autoanl=0" completion:nil];[self anlPaint];if(self.anlAutoEnabled)[self anlAutoTickForPath:self.currentPath playing:self.webStatus.playing paused:self.webStatus.paused];}
 - (void)onPrevious:(id)s {[[RLPCoreClient shared] postJSON:@"/api/skip?dir=-1" body:nil completion:nil];}
 - (void)onNext:(id)s {[[RLPCoreClient shared] postJSON:@"/api/skip?dir=1" body:nil completion:nil];}

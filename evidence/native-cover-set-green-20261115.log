@@ -1,0 +1,69 @@
+== 单进程 embedded 核心（rlapp::*）验证 ==
+
+[1] start_embedded() 进程内初始化（不监听端口）
+  [PASS] 前置：start_embedded() 之前本进程无 TCP LISTEN
+STARTUP v1.1.7.66 build=Nov 15 2026 03:42:28 pid=27354 port=0 os=macOS 27.2 cpu=Apple M4 gpu=available(GPU 卷积可用（librtagpu.dylib）) endpoints=5 mode=embedded
+  [PASS] start_embedded() 返回 true
+  [PASS] 重复调用幂等（仍返回 true）
+  [PASS] embedded 形态本进程没有任何 TCP LISTEN socket
+  [PASS] start_embedded() 没有 fork 任何子进程（未开浏览器）
+  [PASS] RLPLAYER_PORT == "8899"（曲库文件名不因改造而漂移）
+  [PASS] /api/net http:false（不冒充有本地服务）
+  [PASS] /api/net port:0（不再回 8899）
+
+[2] 代表性路由保持可分发（业务语义不变）
+  [PASS] /api/ping 返回 ok:true
+  [PASS] /api/ping 带 app=RLPlayer
+  [PASS] /api/ping contentType=json
+  [PASS] / contentType=text/html
+  [PASS] / 返回非空 HTML
+  [PASS] / 侧栏品牌位用真实 logo 图片
+  [PASS] / 侧栏品牌位不再有红色 R 占位
+  [PASS] /app.js contentType=javascript
+  [PASS] /app.js 返回非空脚本
+  [PASS] /favicon contentType=image/png（未被默认值覆盖）
+  [PASS] /favicon 字节以 PNG 魔数开头（二进制未被破坏）
+  [PASS] /api/lib/stats 返回 ok:true
+  [PASS] /api/lib/stats tracks=2（真索引被载入）
+  [PASS] /api/lib/stats albums=1
+  [PASS] /api/lib/status 返回 ok:true
+  [PASS] /api/lib/status tracks=2
+  [PASS] /api/lib/status albums=1
+  [PASS] /api/lib/albums 含夹具专辑名
+  [PASS] /api/lib/search 命中夹具曲目
+  [PASS] /api/lib/search 不误命中
+  [PASS] GET /api/lib/prune 拒收并报 405
+  [PASS] POST /api/lib/prune 正常返回 ok:true
+  [PASS] /api/filters GET 可分派
+  [SKIP] /api/upload body 原样落盘  (会写入 exe 目录 uploads/（污染构建产物），本测试刻意不跑)
+
+[3] 并发分发（不得串行化）
+  分发总数=320  并发峰值=8（线程 8 × 轮 40）
+  [PASS] 并发分发全部返回合法 JSON
+  [PASS] 分发计数与调用次数一致
+  [PASS] 并发峰值 >= 2（dispatch 未被全局锁串行化）
+  [PASS] 并发峰值 >= 3（多 worker 真并行，不是偶发两路重叠）
+
+[3b] 反面控制：串行对照组必须被探针识别为峰值 1
+  对照组峰值=1（线程 8 × 轮 40，全程持锁）
+  [PASS] 反面控制：持锁执行时峰值恒为 1（证明这个判据真能区分串行/并行）
+
+[3.5] /api/cover/set|reset（单曲封面手动覆盖）
+  [PASS] K0 夹具音频文件真实存在（否则后面测的是文件缺失而不是路由）
+  [PASS] K1 /api/cover/set 接受 ≥1KB 可识别 PNG
+    cue: manual dir=/var/folders/8n/893t2v7s75gbrzdvgb902nrc0000gn/T/rlapp_embedded_test_27354/covers/manual files: a76541137ef284b7.jpg
+  [PASS] K2 设置后 /api/cover 读回的正是刚写入的 PNG（魔数 + 大小，不是占位图）
+  [PASS] K3 /api/cover/reset 写 reset 标记
+  [PASS] K4 不存在的文件被拒绝
+  [PASS] K5 <1KB 载荷被拒绝
+  [PASS] K6 GET /api/cover/set 不执行副作用
+
+[4] 生命周期（exit_requested / stop_embedded）
+  [PASS] 初始 exit_requested() == false
+  [PASS] /api/quit 返回 ok:true
+  [PASS] /api/quit 之后 exit_requested() == true
+  [PASS] stop_embedded() 连续两次调用未崩溃（幂等）
+  [PASS] stop 之后迟到的 dispatch 仍安全返回
+
+== 结果：0 失败 / 1 跳过 ==
+RESULT=OK

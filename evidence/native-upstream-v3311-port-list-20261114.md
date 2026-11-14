@@ -59,3 +59,9 @@
   生产接缝 / `/api/queue/set` / 16 MiB 闸门 / `require_stopped`（1.1.7.66）。
   挂账：`askConfirm` 替换确认、`needsFolder` 追问（macOS 不需要）。
   见 `native-m3u-parser-20261115.md` / `native-m3u-import-20261115.md`。
+
+## 进度（1.1.7.67）
+
+- **封面手动设置 / 重置**：后端 `/api/cover/set|reset` + 读侧手动封面优先（K0–K6，红→绿）已落地，
+  见 `evidence/native-cover-set-20261115.md`；前端 `npSetCover/npResetCover` 按钮与
+  `/api/meta` 的 `coverSource` 仍未做（下一包）。

@@ -1037,3 +1037,33 @@ build 0 error、3 项相关 ctest 全绿。
 导入后不跳页、未做页面级真点按钮（离屏会弹真面板）。
 
 **门禁**：串行 ctest 202/202、`--audit` 246/0、parity missing=0、behavior actionable=0。
+
+
+### 2026-11-15 03:xx —— 轮次 32（1.1.7.67）：v3.3.11 单曲封面 set/reset（后端）
+
+**任务**：待移植清单「封面手动设置 / 重置」组。先核对发现本仓后端**没有**
+`/api/cover/set|reset`（grep = 0），故本包先补后端与读侧。
+
+**红→绿**：`test_embedded_api` 新增 K0–K6。把读侧人为回退后跑出**真实红**
+（K2 `len=67 magic=1`，读到的是占位图），补读侧后 **0 失败 7 条全绿**。
+
+**关键发现（真缺陷）**：只加写路由时「设置成功」是空操作 —— `/api/cover` 读取链
+不查逐曲手动封面。必须同时补读侧（`manual/<track:hash>.jpg` + reset 标记短路）才真正生效。
+这是「接口存在 ≠ 功能生效」的又一实例，已写进证据第 3 节。
+
+**实现**：POST 白名单两条；`is_side_effect_exempt` 显式排除这两个子路径（防 `<img src>` 改封面）；
+路由插在 `/api/cover` 读取分支之前；set 校验 1KB~24MiB + 图片魔数 + 原子写；reset 写
+`source:"reset"` 标记；读侧命中手动封面时 `max-age=3600`。
+
+**同包补齐前端按钮**：`npSetCover`/`npResetCover`（`NSOpenPanel` + 生产接缝
+`setCoverAtPath:forTrack:` / `resetCoverForTrack:`，set 走二进制 `postData`、reset 走 `postJSON`，
+成功后 `loadCoverForPath:` 重拉），判据 C1–C10 全绿；i18n 新增 8 条并按既有译法复用
+（避免一稿两译），coverage 0 缺失。
+
+**UI 接线的红证据来自门禁**：补按钮前 `native_ui_parity` FAIL（`api missing=2`），
+补后 `api done=97 missing=0`。
+
+**挂账**：`/api/meta` 的 `coverSource` 字段（导致「自动」按钮始终可见，与上游有可见差异）、
+reset 只标记不删图（与上游一致）、夹具为构造 PNG 不解码。
+
+**门禁**：串行 ctest 202/202、`--audit` 246/0、parity missing=0、behavior actionable=0。

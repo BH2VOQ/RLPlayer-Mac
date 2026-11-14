@@ -7154,6 +7154,8 @@ static bool is_side_effect_path(const std::string& p) {
         // 专辑封面预热（2026-10-26）：会落盘 covercache + 打网络。
         // 只读端点是 /api/lib/cover（单张）与 /api/lib/cover/progress（进度）。
         "/api/lib/cover/prefetch", "/api/lib/cover/set",
+        // v3.3.11：单曲封面手动设置 / 恢复自动（落盘 covercache，必须 POST）
+        "/api/cover/set", "/api/cover/reset",
         // 1.1.4-beta10 页面内自检：会把结果落盘（副作用），必须 POST
         "/api/selftest/report", "/api/selftest/request",
     };
@@ -7184,6 +7186,10 @@ static bool is_side_effect_exempt(const std::string& p) {
     //   这条是 B-6 记录的同类缺陷：新增 /api/x 时必须检查是否已存在 /api/x 的兄弟端点。
     if (p.rfind("/api/lib/cover/prefetch", 0) == 0) return false;
     if (p.rfind("/api/lib/cover/set", 0) == 0) return false;
+    // v3.3.11：/api/cover/set|reset 会落盘 covercache —— 前缀 /api/cover 本身是只读读图，
+    // 必须把这两个子路径排除，否则一个 <img src> 就能改用户封面。
+    if (p.rfind("/api/cover/set", 0) == 0) return false;
+    if (p.rfind("/api/cover/reset", 0) == 0) return false;
     for (const char* k : kGetOk) if (p.rfind(k, 0) == 0) return true;
     return false;
 }
@@ -7801,7 +7807,8 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
     // 只收 POST（is_side_effect_path 已登记），body 上限沿用全局；字段只取 total/pass/fail/rows。
     // 自检**请求**端点：创建 <state>/selftest-request 标志；下一次（或正在进行的）页面加载
     // 会带上 window.__SELFTEST_AUTO=1 自动跑用例并 POST 回报，回报时删标志（一次性）。
-    // 为什么要有它：DSH 侧边栏改写 URL，?selftest=1 到不了页面 —— 只能用服务端状态触发。
+    // 为什么要有它：旧侧栏通道会改写 URL、?selftest=1 到不了页面；ego 下参数可用，但服务端
+    // 状态仍是最稳的一次性触发（不受宿主怎么传 URL 影响）。
     if (rq.path.rfind("/api/selftest/request", 0) == 0) {
         ct = "application/json; charset=utf-8";
         if (rq.method != "POST") return "{\"ok\":false,\"error\":\"只接受 POST\"}";
@@ -10465,6 +10472,45 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
         return rta::meta::work_versions_to_json(wr);
     }
 
+    // ---------------- v3.3.11 单曲封面手动设置 / 恢复自动 ----------------
+    // POST /api/cover/set?file=<路径>   body = 图片原始字节（≥1KB、可识别）
+    // POST /api/cover/reset?file=<路径> 写 .source.json 的 reset 标记，下次读取回落自动封面
+    // 两条都只接受曲库里真实存在的音频文件（与上游同口径，不认任意路径）。
+    if (rq.path.rfind("/api/cover/set", 0) == 0 || rq.path.rfind("/api/cover/reset", 0) == 0) {
+        ct = "application/json; charset=utf-8";
+        std::string file;
+        {
+            const size_t q = rq.path.find("?file=");
+            if (q != std::string::npos) file = urlDecode(rq.path.substr(q + 6));
+            const size_t amp = file.find('&');
+            if (amp != std::string::npos) file = file.substr(0, amp);
+        }
+        std::error_code ec;
+        if (file.empty() || !valid_utf8(file) || !fs::is_regular_file(fs::u8path(file), ec) || ec ||
+            !rta::net::lib_is_audio(fs::u8path(file))) {
+            return "{\"ok\":false,\"error\":\"只能为曲库中实际存在的音频文件设置封面\"}";
+        }
+        const std::string key = "track:" + rta::meta::MetaStore::hashOf(rta::net::lib_path_key(file));
+        bool ok = false;
+        if (rq.path.rfind("/api/cover/reset", 0) == 0) {
+            const rta::cover::CoverPaths pp = rta::cover::cover_paths_in(cover_manual_dir(), key);
+            fs::create_directories(fs::u8path(pp.dir), ec);
+            const std::string manifest = "{\"version\":1,\"key\":\"" + key + "\",\"source\":\"reset\"}";
+            std::error_code we;
+            {
+                std::ofstream f(fs::u8path(pp.jpg + ".source.json"), std::ios::binary | std::ios::trunc);
+                if (f) { f.write(manifest.data(), (std::streamsize)manifest.size()); f.flush(); we = f.fail() ? std::make_error_code(std::errc::io_error) : we; }
+            }
+            ok = !we;
+        } else {
+            const std::vector<unsigned char> body(rq.body.begin(), rq.body.end());
+            ok = body.size() >= 1024 && body.size() <= 24u * 1024u * 1024u &&
+                 rta::cover::cover_looks_like_image(body) &&
+                 cover_write_atomic(key, body, true).empty();
+        }
+        if (!ok) return "{\"ok\":false,\"error\":\"封面及来源提交失败；原记录保留\"}";
+        return "{\"ok\":true}";
+    }
     if (rq.path.rfind("/api/cover", 0) == 0) {
         std::string file;
         const size_t q = rq.path.find("?file=");
@@ -10475,6 +10521,23 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
         }
         std::string mime = "image/png";
         std::vector<unsigned char> bytes;
+        // v3.3.11：本曲手动封面优先（/api/cover/set 写的就是这里）。
+        // 有 reset 标记（.source.json source=reset）时跳过手动封面，回落自动封面链。
+        if (!file.empty()) {
+            const std::string trackKey =
+                "track:" + rta::meta::MetaStore::hashOf(rta::net::lib_path_key(file));
+            const rta::cover::CoverPaths mp = rta::cover::cover_paths_in(cover_manual_dir(), trackKey);
+            std::error_code mec;
+            const bool resetDeclared = fs::exists(fs::u8path(mp.jpg + ".source.json"), mec);
+            std::vector<unsigned char> mb;
+            if (!resetDeclared && rta::cover::cover_read_cached_in(cover_manual_dir(), trackKey, mb) &&
+                !mb.empty()) {
+                bytes.swap(mb);
+                mime = cover_mime_of(bytes);
+                rta::net::webui_set_cache_control("public, max-age=3600");
+                return std::string(bytes.begin(), bytes.end());
+            }
+        }
         if (!file.empty()) bytes = rta::audio::get_cover(file, mime);
         // 内嵌/本地图片读取失败(≤128B = get_cover 的占位 PNG)→ MetaStore 缓存封面兜底
         if (file.empty() || bytes.size() <= 128) {

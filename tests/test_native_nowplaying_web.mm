@@ -12,12 +12,18 @@
 
 // 判据接缝：RLPRailWrapView 的惯性入口（实现在 RLPNowPlayingViewController.mm 内部，
 // 不进公开头；ARC 下 id 发消息也需要签名，故在测试侧声明）。
+@interface RLPNowPlayingViewController (RLPCoverTestSeam)
+- (void)setCoverAtPath:(NSString *)coverPath forTrack:(NSString *)track;
+- (void)resetCoverForTrack:(NSString *)track;
+@end
 @interface NSObject (RLPRailMomentumTest)
 - (void)beginMomentumWithVelocity:(CGFloat)v;
 - (void)momentumTick:(id)sender;
 - (void)onCommitPreciseVolume:(id)sender;
 - (void)onToggleVolumeMute:(id)sender;
 @end
+static NSString *g_lastDataPath = nil;
+static NSUInteger g_lastDataLen = 0;
 static NSString *lastPath,*lastBody;static RLPJSONCompletion pendingFav;
 @interface RLPRequestSpy : NSObject
 /// 按路径前缀返回固定 JSON 的桩：状态机判据要「真的走一遍 /api/status → 渲染」，
@@ -26,6 +32,10 @@ static NSString *lastPath,*lastBody;static RLPJSONCompletion pendingFav;
 @end
 @implementation RLPRequestSpy
 - (BOOL)started{return NO;}
+- (void)postData:(NSString *)path body:(NSData *)body contentType:(NSString *)contentType completion:(RLPJSONCompletion)done {
+    (void)contentType; g_lastDataPath = path ?: @""; g_lastDataLen = body.length;
+    if (done) done(@{ @"ok": @YES });
+}
 - (void)postJSON:(NSString *)path body:(NSString *)body completion:(RLPJSONCompletion)done {lastPath=path;lastBody=body;if([path hasPrefix:@"/api/fav?"])pendingFav=[done copy];}
 - (void)getJSON:(NSString *)path completion:(RLPJSONCompletion)done {
     id hit=nil;
@@ -834,6 +844,31 @@ int main(){@autoreleasepool{
     }
    }
   }
+ }
+ // ---- v3.3.11 逐曲封面 set/reset（npSetCover / npResetCover）----
+ {
+  NSButton *setB=(NSButton *)find(vc.view,@"npSetCover"),*rstB=(NSButton *)find(vc.view,@"npResetCover");
+  ck(setB && [setB isKindOfClass:[NSButton class]],"C1 npSetCover 控件存在");
+  ck(rstB && [rstB isKindOfClass:[NSButton class]],"C2 npResetCover 控件存在");
+  ck(setB && setB.target && setB.action!=NULL,"C3 设置封面按钮有真实 target/action");
+  ck(rstB && rstB.target && rstB.action!=NULL,"C4 恢复自动按钮有真实 target/action");
+  NSString *imgPath=[@"/tmp" stringByAppendingPathComponent:[NSString stringWithFormat:@"rlp-cover-%d.png",(int)getpid()]];
+  NSMutableData *png=[NSMutableData data];
+  const unsigned char magic[8]={0x89,'P','N','G',0x0d,0x0a,0x1a,0x0a};
+  [png appendBytes:magic length:8];
+  while(png.length<1200)[png appendBytes:"\0" length:1];
+  ck([png writeToFile:imgPath atomically:YES],"C5 封面夹具图片已写入");
+  g_lastDataPath=@"";g_lastDataLen=0;
+  [vc setCoverAtPath:imgPath forTrack:@"/Music/A/One.flac"];
+  ck([g_lastDataPath hasPrefix:@"/api/cover/set?file="],"C6 设置封面真发 /api/cover/set");
+  ck(g_lastDataLen>=1200,"C7 下发的是图片字节而不是表单（>=1200B）");
+  NSString *decoded=[g_lastDataPath stringByRemovingPercentEncoding]?:g_lastDataPath;
+  ck([decoded containsString:@"/Music/A/One.flac"],"C8 请求带的是目标曲目路径");
+  lastPath=nil;
+  [vc resetCoverForTrack:@"/Music/A/One.flac"];
+  ck(lastPath && [lastPath hasPrefix:@"/api/cover/reset?file="],"C9 恢复自动真发 /api/cover/reset");
+  ck(lastPath && [[lastPath stringByRemovingPercentEncoding] containsString:@"/Music/A/One.flac"],"C10 reset 请求带目标曲目路径");
+  [[NSFileManager defaultManager] removeItemAtPath:imgPath error:nil];
  }
  pendingFav=nil;method_setImplementation(shared,old);
  printf("np web: %d failures\n",fail);return fail?1:0;

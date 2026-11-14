@@ -1,0 +1,7 @@
+设置歌曲封面	Set track cover	播放页逐曲封面按钮（v3.3.11 npSetCover）
+仅设置当前歌曲封面，不修改专辑和音乐文件	Only sets this track's cover; album art and files are untouched	按钮 tooltip（web 同文案）
+自动	Auto	恢复自动封面按钮（web 同文案）
+恢复自动封面	Restore automatic cover	按钮 tooltip（web 同文案）
+选择一张图片作为歌曲封面	Choose an image for this track's cover	文件面板提示
+歌曲封面已设置	Track cover set	设置成功（web 同文案）
+已恢复自动封面	Automatic cover restored	重置成功（web 同文案）
