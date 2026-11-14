@@ -71,3 +71,10 @@
 - **反馈结果**：预览 `sp_fbpreview` + 持久结果区 `sp_fbresult` 已落地（P1–P9 / G1–G3，红→绿）。
   `/api/feedback/status` **不移植**（本仓客户端直传远端服务，无后端 job），见
   `evidence/native-feedback-result-20261115.md` 第 2 节的契约对照。
+
+## 结论（N/A）
+
+- **播放设置闸门 `PLAYBACK_SETTINGS` / `ensurePlaybackSettings`**：本仓**不适用**（不移植）。
+  原生版 `startEmbedded()` 同步读设置、之后才建窗口，`ready=false` 状态不可达；
+  照搬会得到永远为 true 的死代码。详见 `evidence/native-playback-settings-na-20261115.md`。
+  唯一真实差异（非法保存音量静默 clamp、不提示用户）已挂账到偏差台账。

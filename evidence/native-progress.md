@@ -1089,3 +1089,17 @@ reset 只标记不删图（与上游一致）、夹具为构造 PNG 不解码。
 **i18n**：新增 6 条（chunk-native121-fbpreview），coverage 0 缺失。
 
 **门禁**：串行 ctest 202/202、`--audit` 246/0、parity missing=0、behavior actionable=0。
+
+
+### 2026-11-15 04:xx —— 轮次 34（文档）：v3.3.11 播放设置闸门判定为 N/A
+
+**结论**：`PLAYBACK_SETTINGS` / `ensurePlaybackSettings` **不移植**。原生版
+`applicationDidFinishLaunching` 第 73 行同步 `startEmbedded()`（设置在其中读完），
+第 75–77 行才建窗口 ⟹ 「UI 已可用但设置未读」的窗口不存在，`ready=false` 永远不可达。
+照搬会得到永远为 true 的死代码与一排永不显示的控件。
+
+**替代关系**（不是空着）：核心启动失败有 `started` + 「核心未启动」；音量垃圾值有后端
+`isfinite + clamp(-144,0)` 防护（`rtaweb.cpp:2012`）。
+
+**如实挂账**：唯一真实差异是「非法保存音量静默 clamp、不提示用户」（上游会拒绝播放并提示改正），
+已追加到 `native-known-deviations-20261114.md`；做成上游那样需跨后端契约改动，不在小范围移植内。

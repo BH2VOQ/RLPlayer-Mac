@@ -30,3 +30,15 @@
   「已经没办法拿诊断包了、不知道是哪个版本的 bug，先当不存在吧」⟹ **用户放弃提供诊断包、
   暂挂账、停止追查**，未改播放引擎、未定位根因、**不写成已修**。完整状态见
   `evidence/native-renderfail-status-20261115.md`。
+
+### 追加（2026-11-15，v3.3.11 对照）
+
+**非法保存音量：静默 clamp，不提示用户**
+
+- 上游（`ui_script.h:684`）：`invalidVolume` 时拒绝播放并提示
+  「保存的音量无效，请修正为 -120～+20 dB 后重新读取播放设置」。
+- 本仓（`tools/rtaweb.cpp:2012`）：`defaultVolumeDb = isfinite(p.volume) ? clamp(p.volume,-144,0) : -20`，
+  clamp 后继续工作，用户**看不到提示**。
+- 判定：安全（不会 NaN / 不会爆音），但用户意图被静默改写。
+- 要做成上游那样需要跨后端契约改动（解析期记 `volumeInvalid` → 上抛到 `/api/settings` → UI 展示），
+  不在小范围移植内，故挂账。
