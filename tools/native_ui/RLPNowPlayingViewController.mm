@@ -1963,7 +1963,10 @@ static NSString *RLPRailTagText(id srValue, id bitsValue) {
         [self updateLyricFadeMask];   // 视口高度变了要重算 26pt 渐隐位置
     // ---- 音频分析面板：web #npAnal（padding:8px 11px 9px、.anlhead gap:8、面板 gap:6）----
     {
-        const CGFloat anlPadX = 11.0, anlPadTop = 8.0, anlPadBottom = 9.0;
+        // web `#npAnal{padding:8px 11px 9px}` + 1px border ⟹ 内容左缘距面板外缘 12pt。
+        // 原生面板无边框，直接把 12 当内边距，左缘/状态右缘/卡片宽同时回到 web 真值
+        // （1.1.7.57 之前是 11，把 1pt 差烘进了判据期望，见 evidence/native-anl-gutter-20261114.md）。
+        const CGFloat anlPadX = 12.0, anlPadTop = 8.0, anlPadBottom = 9.0;
         const CGFloat anlLabelH = 13.0, anlSegH = 21.0, anlHeadGap = 8.0, anlBodyGap = 6.0;
         NSFont *labFont = self.anlLab.font;
         // 必须量 attributedStringValue：kern 1.5 会把 4 个字的显示宽度再撑宽 ~4.5pt，

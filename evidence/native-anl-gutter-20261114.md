@@ -57,10 +57,13 @@ C8 PASS: w=264/264/264px spread=0 右缘留白=13/13/13px L1溢出=0px L2溢出=
 
 证据：`evidence/native-gutter-red-20261114.log` / `-green-…log`。
 
-## 已知 1px 偏差（勿再当新 bug 反复查）
-**`#npAnlBody` 卡片左缘：原生 11pt vs web 12pt（web 面板有 1px 边框，内容从 border+padding 起算）。**
-这是**已知偏差**（历史实现无边框），本轮只对齐右缘 25pt 与卡宽 `panelW-36`；`anlcard.left` 判据仍按 11。
-若以后有人发现左缘差 1pt：不是回归，是这条；要改需单独一包（会牵动头部状态/收起键的既有判据）。
+## 已知 1px 偏差（**1.1.7.57 已关闭**，勿再当新 bug 反复查）
+原偏差：`#npAnlBody` 卡片左缘 原生 11pt vs web 12pt（web 面板 1px 边框使内容从 border+padding 起算）。
+**1.1.7.57 起原生内边距直接取 12**（面板无边框也按 web 外缘对齐），左缘差已消除；详见下方 §1.1.7.57。
+
+**仍留 1pt（本包未动，勿当回归）**：右上角收起键 `.anlhide` 仍是 `x = side-8-22`，web 因 1px 边框应为
+`side-9-22`（`right:8px` 相对 padding box）。它不影响本次左缘/卡宽/状态右缘三条判据；若要改，需单独一包
+（会牵动「收起键不压状态文字」的既有断言 `NSMinX(anlHide) >= NSMaxX(stat) - 1`）。
 
 ## 如实挂账
 1. **web 与原生仍差 1pt**：web 面板 1px 边框使内容从 12 开始；原生无边框（历史实现），
@@ -69,3 +72,46 @@ C8 PASS: w=264/264/264px spread=0 右缘留白=13/13/13px L1溢出=0px L2溢出=
 2. 滚动条**轨道**非常驻（web `overflow-y:scroll` 恒显轨道；原生只在溢出时画拇指）。
 3. 拇指宽度 6pt（web CSS 6，但实测滚动条占位 11）；本轮把 11 作为「拇指条」总占位的一部分来算卡宽。
 4. 未做触摸板惯性/分页滚动（沿用既有滚轮位移）。
+
+---
+
+## 1.1.7.57 —— 左缘 11→12（关闭本文件挂账 1）
+
+### web 真值（不变，重述便于对照）
+| 量 | web | 依据 |
+|---|---|---|
+| 内容左缘距面板外缘 | **12** | `#npAnal{padding:8px 11px 9px}` + 1px border |
+| 状态右缘距面板外缘 | **38** | `.anlheadtop{padding-right:26px}` + `#npAnlStat{padding-right:2px}` + 11 padding + 1px border |
+| 卡宽 | **panelW−37** | 实测 panelW=301 ⟹ 264（= 12 左 + 264 卡 + 25 右） |
+| `#npAnlBody` 宽 | panelW−13 | 内容 277 + `margin-right:-11`，右缘距面板右 1（= border） |
+
+原生面板**无 1px 边框**，旧实现取 `anlPadX=11` 自洽成「左 11 / 状态右 37 / 卡宽 panelW−36 / body panelW−11」，
+四条期望把这 1pt 差**烘进了判据**（与上次 `rightGap 13→37` 同一类：不是随手改数字，是原生缺边框的显式披露）。
+本包把原生内边距直接取 **12**（= web 的 padding 11 + border 1），一处修正连带四条归位：
+body 左缘 12、body 右缘仍撑满面板、状态右缘 38、卡宽 panelW−37；卡右缘距面板右仍是 **25**（13 留白 + 12 拇指条）。
+
+### 判据改动（`tests/test_native_analysis_panel.mm`，5 条 + tolerance 收严）
+| 判据 | 旧期望 | 新期望 | 依据 |
+|---|---|---|---|
+| `anslab.left` | 11 (tol 1.5) | **12 (tol 0.5)** | web 12；tol 1.5 会把 1pt 差放过（等于没判） |
+| `stat.rightGap` | 37 (tol 1.0) | **38 (tol 0.5)** | 26 + 11 + 1 |
+| `anlcard.left` | 11 (tol 1.5) | **12 (tol 0.5)** | 同上（三张卡各一条） |
+| `anlcard.width` | `panelW-36` (tol 1.5) | **`panelW-37` (tol 0.5)** | web 实测 264@301 |
+| `npAnlBody` 宽 | `panelW-11` (tol 1.5) | **`panelW-12` (tol 0.5)** | 左 12、右缘撑满面板（web 因边框是 panelW-13） |
+
+### 红 → 绿（旧码跑红，同判据同 tolerance）
+| 轮次 | 结果 | 具体失败项 |
+|---|---|---|
+| 旧码（1.1.7.56，仅改判据） | **131 passed / 9 failed** | `anslab.left` 11 vs 12；`stat.rightGap` 37 vs 38；`anlcard.left` ×3 11 vs 12；`anlcard.width` ×3 297 vs 296；`npAnlBody` 宽 322 vs 321 |
+| 新码（1.1.7.57，`anlPadX=12`） | **140 passed / 0 failed** | — |
+
+日志：`evidence/native-anlpad-red-20261114.log`（EXIT=1，9 FAIL 明细）、`evidence/native-anlpad-green-20261114.log`（EXIT=0）。
+
+### 实现
+- `tools/native_ui/RLPNowPlayingViewController.mm`：`anlPadX 11.0 → 12.0`（注释写明 11+1 的由来与「旧期望把 1pt 差烘进去」）。
+  其余取值全部**派生**（`statRight = side-(anlPadX+26)`、`cardsW = side-anlPadX`、`anlSeg` 右缘、`anlReanalyze` x），
+  没有第二处硬编码，所以一处改动即可自洽。
+
+### 如实挂账
+1. `.anlhide` 仍 `side-8-22`（web 应为 `side-9-22`）：本包未动，见上方「仍留 1pt」。
+2. 本包只跑判据 + 全量门禁（离屏），**未做实机肉眼验收**；实机由用户执行。

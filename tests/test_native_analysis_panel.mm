@@ -268,7 +268,7 @@ int main() {
             Ck(FontIsWeight(lab.font, NSFontWeightBold), "标签字重 700（web .anllab font-weight:700）",
                [NSString stringWithFormat:@"trait=%@", [lab.font.fontDescriptor objectForKey:NSFontWeightTrait] ?: @"nil"]);
             Geo("anslab.kern", 1.5, KernOf(lab), 0.15);
-            Geo("anslab.left", 11, NSMinX(lab.frame), 1.5);
+            Geo("anslab.left", 12, NSMinX(lab.frame), 0.5);   // web: padding 11 + 1px border ⟹ 12（原生无边框，直接量 12）
             {
                 // 字距 1.5 计入显示宽度：frame 必须容得下 attributed 宽，否则标题会变成「音频…」
                 double need = ceil(lab.attributedStringValue.size.width);
@@ -281,10 +281,10 @@ int main() {
         Ck(stat != nil, "状态文字 #npAnlStat 存在", @"npAnlStat 缺失");
         if (stat) {
             // web：`ui_page.h` 的 `.anlheadtop{padding-right:26px}`（1.1.4-beta6，为右上角 `.anlhide`
-            // 留位）+ `#npAnlStat{padding-right:2px}` + `#npAnal` 内边距 11 ⟹ 状态 frame 右缘距面板右缘 37。
-            // 1.1.7.41 以前原生没有那枚收起键，这里硬编码 13（面板内边距 11 + 2）自洽但与 web 不符；
-            // 1.1.7.42 补上 `.anlhide` 后按 web 真值改为 37（并新增「收起键不压状态文字」断言）。
-            Geo("stat.rightGap", 37, panelW - NSMaxX(stat.frame), 1.0);
+            // 留位）+ `#npAnlStat{padding-right:2px}` + `#npAnal` padding-left/right 11 + **1px 边框**
+            // ⟹ 状态 frame 右缘距面板右缘 38。1.1.7.57 之前原生按「无边框」自洽成 37（差 1pt，
+            // 判据把这个偏差烘进了期望值）；本包把左/右内边距改 12（= web 的 11+1）后回到 38。
+            Geo("stat.rightGap", 38, panelW - NSMaxX(stat.frame), 0.5);   // web: 26 padding-right + 11 padding + 1px border ⟹ 38
             Ck(stat.alignment == NSTextAlignmentRight, "状态文字右对齐（web text-align:right）",
                [NSString stringWithFormat:@"alignment=%ld", (long)stat.alignment]);
             Geo("stat.font", 10, stat.font.pointSize, 0.3);
@@ -369,12 +369,12 @@ int main() {
                "摘要卡可见且量到尺寸（L0）",
                [NSString stringWithFormat:@"%@ %@ hidden=%d", key, NSStringFromRect(card.frame), card.hidden]);
             Geo("anlcard.radius", 10, LayerRadius(card), 1.0);
-            Geo("anlcard.left", 11, NSMinX([card.superview convertRect:card.frame toView:panel]), 1.5);
+            Geo("anlcard.left", 12, NSMinX([card.superview convertRect:card.frame toView:panel]), 0.5);   // web 内容从 12 起（padding 11 + 1px border）
             // web 实测（ego 打开 ?selftest=1，C8）：panelW=301 时 cardW=264，卡右缘距面板右缘 25
-            // （= padding-right 13 + 滚动条 11 + 右内边距/边框 1）。原生面板左内边距 11（web 因 1px
-            // 边框实际内容从 12 开始），故同结构下 cardW = panelW - 36（右侧仍是 25）。
+            // （= padding-right 13 + 滚动条 11 + 右内边距/边框 1）。1.1.7.57 起原生内边距取 12（= web 的
+            // 11 padding + 1px 边框），故同结构下 cardW = panelW - 37（与 web 实测 264 逐点相同，右侧仍是 25）。
             // 这里从 panelW-22 改期望值，差因见 evidence/native-anl-gutter-20261114.md。
-            Geo("anlcard.width", panelW - 36, card.frame.size.width, 1.5);
+            Geo("anlcard.width", panelW - 37, card.frame.size.width, 0.5);
             NSTextField *title = (NSTextField *)FindById(card, [key stringByAppendingString:@".title"]);
             NSTextField *sum = (NSTextField *)FindById(card, [key stringByAppendingString:@".sum"]);
             Ck(title != nil && sum != nil,
@@ -671,9 +671,9 @@ int main() {
                 Ck(fabs(NSMaxX(body.frame) - panelW) <= 1.0,
                    "npAnlBody 右缘撑到面板右缘（web margin-right:-11）",
                    [NSString stringWithFormat:@"body.maxX=%.1f panelW=%.1f", NSMaxX(body.frame), panelW]);
-                Ck(fabs(NSWidth(body.frame) - (panelW - 11)) <= 1.5,
-                   "npAnlBody 宽度 = panelW-11（撑进右内边距）",
-                   [NSString stringWithFormat:@"bodyW=%.1f want=%.1f", NSWidth(body.frame), panelW - 11]);
+                Ck(fabs(NSWidth(body.frame) - (panelW - 12)) <= 0.5,
+                   "npAnlBody 宽度 = panelW-12（左缘 12；右缘撑满面板 ⇒ 比 web 的 panelW-13 宽 1pt，卡宽仍 25 沟槽对齐）",
+                   [NSString stringWithFormat:@"bodyW=%.1f want=%.1f", NSWidth(body.frame), panelW - 12]);
                 // 两者都要在**同一坐标系**里量：卡片 frame 是 body 局部坐标，body 宽也用 bounds。
                 Ck(fabs((NSWidth(body.frame) - NSMaxX(dyn.frame)) - 25.0) <= 1.5,
                    "卡片右缘到盒子右缘 = 25（13pt 留白 + 12pt 拇指条，常驻）",

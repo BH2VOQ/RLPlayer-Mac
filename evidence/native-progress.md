@@ -797,3 +797,25 @@ i18n 三项 OK（2421 pairs，本包无新增中文文案）。串行全量 ctes
 （唯一红 `library` 的时间敏感断言 [7.3]，首次冷启动 2352ms；纯 C++ 用例、与本包 UI 零关联，
 单跑 5/5 绿）→ 另起干净全量复跑 **201/201**（不改判据、如实挂账该 flake，见
 `evidence/native-bar-hover-20261114.md` §6.6）。
+
+### 2026-11-14 21:5x —— 轮次 22（1.1.7.57）：音频分析栏左缘 11→12
+
+**任务**（关闭 `native-anl-gutter-20261114.md` 挂账 1 / 已知偏差 #1）：web 面板有 1px 边框，
+内容从 border+padding 起算 12；原生面板无边框、历史取 11，四条期望把这 1pt 差烘进了判据。
+**先核对 web**：`ui_page.h:874` `#npAnal{padding:8px 11px 9px}` + 1px border ⟹ 内容左缘 **12**；
+`.anlheadtop{padding-right:26px}` + `#npAnlStat{padding-right:2px}` ⟹ 状态右缘 **38**；
+web 实测（panelW=301）卡宽 **264 = panelW-37**、卡右缘距面板右 25（13 留白 + 12 拇指条）。
+**判据**（`test_native_analysis_panel` 5 条 + tolerance 收严）：`anslab.left 11→12`、`stat.rightGap 37→38`、
+`anlcard.left 11→12`、`anlcard.width panelW-36→panelW-37`、`npAnlBody 宽 panelW-11→panelW-12`；
+tolerance 1.5/1.0 → **0.5**（原 1.5 会把 1pt 差放过 ⟹ 等于没判）。
+**红→绿**：旧码（1.1.7.56，仅改判据）**131P / 9F**（`anslab.left` 11 vs 12、`stat.rightGap` 37 vs 38、
+`anlcard.left`×3 11 vs 12、`anlcard.width`×3 297 vs 296、`npAnlBody` 322 vs 321）→ 新码 **140P / 0F**。
+**实现**：`RLPNowPlayingViewController.mm` 只改 `anlPadX 11→12`；其余取值全是派生
+（`statRight=side-(anlPadX+26)`、`cardsW=side-anlPadX`、分段右缘、`anlReanalyze` x），无第二处硬编码。
+**如实挂账**：①`.anlhide` 仍 `side-8-22`（web 应 `side-9-22`，`right:8px` 相对 padding box）——本包未动，
+改它会牵动「收起键不压状态文字」断言，需单独包；②本包只跑离屏判据 + 门禁，**未做实机肉眼验收**（由用户执行）。
+**证据**：`native-anlpad-red-20261114.log` / `native-anlpad-green-20261114.log`、
+`native-anl-gutter-20261114.md` §1.1.7.57、`native-4-playback-diff.md` #23（改「已修（1.1.7.57）」）。
+**门禁（1.1.7.57 树）**：build 0 error；串行全量 ctest **201/201（405.48s）**；`--audit` **246/0**；
+parity missing=0（view 14 / tab 10 / ctrl done=179 / api done=96，na 16 全可复核、removed 2 双向核验）；
+behavior actionable=0（50 bindings）；i18n 三项 OK（2421 pairs）。

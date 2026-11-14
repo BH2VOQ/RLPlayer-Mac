@@ -53,7 +53,7 @@
 
 | # | web | 原生 | 状态 |
 |---|---|---|---|
-| 23 | `#npAnal{padding:8px 11px 9px;radius14;gap:6}` | `layoutWebPlayback`：`anlPadX=11/anlPadTop=8/anlPadBottom=9` | 已对齐 |
+| 23 | `#npAnal{padding:8px 11px 9px;radius14;gap:6}`（内容左缘 = 11 padding + 1px border = **12**） | `layoutWebPlayback`：`anlPadX=**12**/anlPadTop=8/anlPadBottom=9`（1.1.7.57 起，左缘/状态右缘 38/卡宽 panelW-37 全部回到 web 真值） | **已修（1.1.7.57）**：旧版 11 把 1pt 差烘进判据，见 `native-anl-gutter-20261114.md` §1.1.7.57 |
 | 24 | `.anllab{9.5;letter-spacing:1.5;700}` | `anlLab` 9.5/700/kern1.5（创建/主题两处均 attributed） | **已修（1.1.7.51 补判据）**：实现早于本包，本轮补判据并改正状态 |
 | 25 | `#npAnlStat{10;right;tabular}` | `analysisStatus` 10/right | 已对齐 |
 | 26 | `.npseg{radius9;1px}；`b{10.5;600;pad3 11;border-left}`；`b.on{ok-bg}` | `anlSeg` radius9/border + 三枚 10.5/600 无边框按钮 + 两条发丝分隔 | 已对齐 |
