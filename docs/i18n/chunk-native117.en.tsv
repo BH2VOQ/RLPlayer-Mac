@@ -1,0 +1,97 @@
+%@（声道 %lu，dB）	%@ (channel %lu, dB)	native-ui coverage 1.1.7.37
+%ld 帧 (%.1fs)	%ld frames (%.1fs)	native-ui coverage 1.1.7.37
+%ld 次	%ld requests	native-ui coverage 1.1.7.37
+%ld 种调音目标	%ld targets	native-ui coverage 1.1.7.37
+(正在发现…)	(discovering…)	native-ui coverage 1.1.7.37
+0 / 16384 字节	0 / 16384 bytes	native-ui coverage 1.1.7.37
+20 段参数均衡 + OPRA 耳机目标曲线校准	20-band parametric EQ + OPRA headphone target calibration	native-ui coverage 1.1.7.37
+7 阶在低采样率或 Chebyshev 1-bit 下不稳定，会自动降为 5 阶	7th order is unstable at low rates or with Chebyshev 1-bit and falls back to 5th order automatically	native-ui coverage 1.1.7.37
+DSD 位流装进 24-bit PCM 容器（DAC 端剥壳，全程 bit-perfect）	DSD bitstream in a 24-bit PCM container (unwrapped by the DAC, bit-perfect throughout)	native-ui coverage 1.1.7.37
+DSD512 / 1024 的 DoP 载波绝大多数设备不支持	Most devices do not support the DoP carrier for DSD512 / 1024	native-ui coverage 1.1.7.37
+OPRA 校准预设 · 查看调音预设	OPRA calibration presets · view target presets	native-ui coverage 1.1.7.37
+THD+N 方法	THD+N method	native-ui coverage 1.1.7.37
+一个 zip 打包全部日志 / 系统信息 / 设置摘要	One zip with all logs / system info / settings summary	native-ui coverage 1.1.7.37
+一致 %ld Hz	Matches %ld Hz	native-ui coverage 1.1.7.37
+下次开始采集将使用模拟源（不打开真实设备）	The next capture run uses the simulated source (no real device opened)	native-ui coverage 1.1.7.37
+仅当公开数据源因歌名对不上而失败时，自动用 AI 规范化歌名再检索一次；AI 只纠正歌名，封面歌词仍来自公开数据源并过同曲校验	Only when a public source fails to match the track title is the title normalized by AI and searched once more; AI only fixes the title — cover and lyrics still come from public sources and pass the same-track check	native-ui coverage 1.1.7.37
+仅录制模式生效	Applies to record mode only	native-ui coverage 1.1.7.37
+任何兼容 OpenAI 的服务都能用。密钥只在本机保存，界面永不回显明文；留空表示不修改。	Any OpenAI-compatible service works. The key is stored on this machine only and never shown in plain text; leave it empty to keep it unchanged.	native-ui coverage 1.1.7.37
+全球 = GitHub 通道；中国大陆 = 国内后台通道	Global = GitHub channel; China mainland = domestic backend channel	native-ui coverage 1.1.7.37
+共 %lu 首	%lu tracks	native-ui coverage 1.1.7.37
+共发现 %lu 个渲染器	%lu renderers discovered	native-ui coverage 1.1.7.37
+关闭循环	Disable loop	native-ui coverage 1.1.7.37
+分析中…	Analyzing…	native-ui coverage 1.1.7.37
+切换界面显示语言，保存后生效	Switch the UI language; takes effect after saving	native-ui coverage 1.1.7.37
+勾选后把采集直接送到默认共享端点监听；不勾选则录制保存为 WAV	When checked, the capture is sent straight to the default shared endpoint for monitoring; when unchecked it is recorded to WAV	native-ui coverage 1.1.7.37
+勾选后系统音量条失效，音量只能用本程序调；默认开启	When checked the system volume slider stops working and volume can only be set here; on by default	native-ui coverage 1.1.7.37
+双击任意一首，从这首开始顺序播放整个最爱列表（%ld 首）	Double-click any track to play the whole favorites list in order from it (%ld tracks)	native-ui coverage 1.1.7.37
+反馈内容不合法	Invalid feedback content	native-ui coverage 1.1.7.37
+发现 %lu 个 NAA 端点	%lu NAA endpoints found	native-ui coverage 1.1.7.37
+只产生模拟信号用于调试；不打开真实输入设备，也不向输出设备送声音	Generates a simulated signal for debugging only; opens no real input device and sends no audio to the output device	native-ui coverage 1.1.7.37
+只在「DSD 源 → PCM」路径生效	Only applies on the DSD source → PCM path	native-ui coverage 1.1.7.37
+可用性	Availability	native-ui coverage 1.1.7.37
+均衡器（PEQ / 耳机 EQ）	Equalizer (PEQ / headphone EQ)	native-ui coverage 1.1.7.37
+已停止投放，输出回到本机	Casting stopped; output is back on this machine	native-ui coverage 1.1.7.37
+已分析	Analyzed	native-ui coverage 1.1.7.37
+已切到 bit-perfect 直通	Switched to bit-perfect passthrough	native-ui coverage 1.1.7.37
+已开启	On	native-ui coverage 1.1.7.37
+已重采样 %ld → %ld Hz	Resampled %ld → %ld Hz	native-ui coverage 1.1.7.37
+开始采集失败	Failed to start capture	native-ui coverage 1.1.7.37
+当前播放会停止，队列中的曲目将被移除。	Current playback stops and the queued tracks are removed.	native-ui coverage 1.1.7.37
+当前预设已保存，但尚未播放。bit-perfect 结论只对实际播放生效	Preset saved but nothing has played yet. The bit-perfect verdict only applies to real playback	native-ui coverage 1.1.7.37
+房间测量向导 / REW、AutoEq 文本 / 房间校正 IR	Room measurement wizard / REW, AutoEq text / room correction IR	native-ui coverage 1.1.7.37
+扫描已在进行中	A scan is already running	native-ui coverage 1.1.7.37
+投放中	Casting	native-ui coverage 1.1.7.37
+投放失败	Casting failed	native-ui coverage 1.1.7.37
+按 %ld 声道显示	Shown for %ld channels	native-ui coverage 1.1.7.37
+推送	Cast	native-ui coverage 1.1.7.37
+推送当前曲目到设备	Cast the current track to the device	native-ui coverage 1.1.7.37
+提交前会先探活；通道不可用时按钮保持禁用，绝不假装发送成功。	The channel is probed before submitting; when unavailable the button stays disabled and never fakes success.	native-ui coverage 1.1.7.37
+更新通道	Update channel	native-ui coverage 1.1.7.37
+未发现 NAA 端点（macOS 无 NAA 驱动体系）	No NAA endpoints found (macOS has no NAA driver stack)	native-ui coverage 1.1.7.37
+未开启	Off	native-ui coverage 1.1.7.37
+本机：http://127.0.0.1:%ld/ · 局域网：http://%@:%ld/（%@）	Local: http://127.0.0.1:%ld/ · LAN: http://%@:%ld/ (%@)	native-ui coverage 1.1.7.37
+条件不满足自动回退普通路径	Falls back to the plain path when the conditions are not met	native-ui coverage 1.1.7.37
+查询网络信息	Check network info	native-ui coverage 1.1.7.37
+模拟源（空跑，不开设备）	Simulated source (dry run, no device)	native-ui coverage 1.1.7.37
+溢出 %ld / 欠载 %ld	Overruns %ld / underruns %ld	native-ui coverage 1.1.7.37
+滤波段数：	Bands:	native-ui coverage 1.1.7.37
+点按钮查询本机地址与局域网访问状态	Click the button to read the local address and LAN reachability	native-ui coverage 1.1.7.37
+留空 = 与 1x 相同	Empty = same as 1x	native-ui coverage 1.1.7.37
+留空则沿用 PCM 页的 1x	Empty = inherit 1x from the PCM tab	native-ui coverage 1.1.7.37
+留空自动存至 recordings 目录	Empty = auto-saved in the recordings folder	native-ui coverage 1.1.7.37
+目录已加入	Folder added	native-ui coverage 1.1.7.37
+目标曲线：%@	Target curve: %@	native-ui coverage 1.1.7.37
+素材太短或静音占比过高，无法做稳定的频谱统计	Too short or too much silence for stable spectrum statistics	native-ui coverage 1.1.7.37
+线性 = 无相位失真、有前振铃；最小 = 无预振铃；混合 = 50:50 叠加	Linear = no phase distortion but pre-ringing; minimum = no pre-ringing; mixed = 50:50 blend	native-ui coverage 1.1.7.37
+网络信息	Network info	native-ui coverage 1.1.7.37
+联网调用所选 AI 接口（按次计费）：解析无标签文件，并在艺术家 / 专辑 / 单曲页整理简介并缓存；关闭后两项都停	Calls the selected AI API online (billed per request): parses untagged files and writes cached bios on artist / album / track pages; turning it off stops both	native-ui coverage 1.1.7.37
+补全到的标签 / 封面写回音频文件本身；写前校验音频数据逐位不变，原文件备份到备份目录	Completed tags / covers are written back into the audio file itself; the audio data is verified bit-identical first and the original is backed up	native-ui coverage 1.1.7.37
+设备必须支持该声道数	The device must support this channel count	native-ui coverage 1.1.7.37
+诊断 JSON 导出失败	Diagnostics JSON export failed	native-ui coverage 1.1.7.37
+诊断包已脱敏，不会上传你的音乐文件。	The diagnostics bundle is redacted and never uploads your music files.	native-ui coverage 1.1.7.37
+诊断摘要读取失败	Failed to read the diagnostics summary	native-ui coverage 1.1.7.37
+请先填目录或点「浏览…」	Enter a folder first or click Browse…	native-ui coverage 1.1.7.37
+调音预设	Target presets	native-ui coverage 1.1.7.37
+资料整理失败 · 点击重试	Metadata pass failed · click to retry	native-ui coverage 1.1.7.37
+资料获取超时	Metadata request timed out	native-ui coverage 1.1.7.37
+跟随源 = 按文件真实位深请求；DSD 输出恒为 1 bit	Follow source = request the file's real bit depth; DSD output is always 1 bit	native-ui coverage 1.1.7.37
+输入目录后回车，例如 /Users/你的用户名/Music	Type a folder and press Return, e.g. /Users/yourname/Music	native-ui coverage 1.1.7.37
+达到指定时长自动停止	Stops automatically at the specified duration	native-ui coverage 1.1.7.37
+返回上一页	Back	native-ui coverage 1.1.7.37
+还没有在播放	Nothing playing yet	native-ui coverage 1.1.7.37
+还没有流媒体服务器	No streaming servers yet	native-ui coverage 1.1.7.37
+进程内直连（无本地端口）· 局域网访问：%@	In-process link (no local port) · LAN access: %@	native-ui coverage 1.1.7.37
+选择用于资料补全与增强的模型；读不到列表也可以直接手填	Model used for metadata completion and enrichment; you can also type it in when the list is unavailable	native-ui coverage 1.1.7.37
+通带越宽，过渡带越窄、抽头越多	The wider the passband, the narrower the transition region and the more taps	native-ui coverage 1.1.7.37
+采集信号会被直接送到当前输出设备。请先确认音量，注意啸叫与回声。	The captured signal goes straight to the current output device. Check the volume first and watch for feedback and echo.	native-ui coverage 1.1.7.37
+预设：	Preset:	native-ui coverage 1.1.7.37
+频段数：	Bands:	native-ui coverage 1.1.7.37
+默认关闭；只分析本地文件，每曲只跑一次，切歌立即取消	Off by default; local files only, once per track, cancelled as soon as the track changes	native-ui coverage 1.1.7.37
+（已脱敏），不用再到处找日志文件	(redacted) — no need to hunt for log files any more	native-ui coverage 1.1.7.37
+（还没有音乐目录）	(no music folders yet)	native-ui coverage 1.1.7.37
+歌词加载中… 正在等后台补全	Loading lyrics… waiting for background completion	native-ui coverage 1.1.7.37
+没有歌词 · 同名 LRC、内嵌歌词或在线补全	No lyrics · matching LRC, embedded lyrics, or online completion	native-ui coverage 1.1.7.37
+添加目录失败	Failed to add the folder	native-ui coverage 1.1.7.37
+清空播放队列？	Clear the play queue?	native-ui coverage 1.1.7.37
+同名 .lrc 文件、内嵌歌词，或播放时自动在线补全	A matching .lrc file, embedded lyrics, or online completion during playback	native-ui coverage 1.1.7.37

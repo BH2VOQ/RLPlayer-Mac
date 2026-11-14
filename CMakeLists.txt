@@ -1567,6 +1567,16 @@ if(PYTHON3_EXECUTABLE)
   add_test(NAME i18n_table_check
            COMMAND ${PYTHON3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/gen_i18n_table.py --check)
   set_tests_properties(i18n_table_check PROPERTIES WORKING_DIRECTORY ${CMAKE_SOURCE_DIR} TIMEOUT 60)
+  # 原生 UI 词表同步：tools/native_ui/RLPNativeI18n.mm 由 gen_native_i18n.py 生成，
+  # 改过 docs/i18n 却忘了重生成时英文界面会回落中文（2026-11-14 实测已漂移 2 条）。
+  add_test(NAME native_i18n_table_check
+           COMMAND ${PYTHON3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/gen_native_i18n.py --check)
+  set_tests_properties(native_i18n_table_check PROPERTIES WORKING_DIRECTORY ${CMAKE_SOURCE_DIR} TIMEOUT 60)
+  # 原生 UI 文案覆盖：源码里每个 RLPTr(@"中文") 都必须有英文译文。
+  # 为什么不靠人眼：原生一路加控件，新增短文案很容易绕过词表（英文界面中英混排）。
+  add_test(NAME native_i18n_coverage
+           COMMAND ${PYTHON3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/check_native_i18n_coverage.py)
+  set_tests_properties(native_i18n_coverage PROPERTIES WORKING_DIRECTORY ${CMAKE_SOURCE_DIR} TIMEOUT 60)
 endif()
 
 add_executable(test_raop_session tests/test_raop_session.cpp)

@@ -386,3 +386,22 @@ playback RENDERFAIL 根因仍需用户诊断包。实机验收由用户执行（
 **工作树说明**：本轮收尾时工作树另有**别的写者**留下的 ego 通道注释/文档改动（`src/net/ui_page.h`、
 `src/net/ui_script.h`、`tools/rtaweb.cpp`、`tools/check_b10_*.js`、`tools/README.md`、`docs/native-ui/PLAN.md`、
 `evidence/native-3-settings-cards-20261114.md`），全是注释/文档、未进本轮任何提交，也不改变构建行为。
+
+### 2026-11-14 14:20 —— 轮次 10（1.1.7.37）：原生文案进 i18n 词表
+
+**现场**：基线 `371883b`（1.1.7.36）。全量 ctest 197/197、audit 246/0（4 轮里 1 轮 SIGBUS，见下）为基线。
+**任务**（task-4 · 设置页已知差异④）：新增短文案走 `RLPTr` 回退、未进 i18n 表。
+**红→绿**：新判据 `tools/check_native_i18n_coverage.py`（ctest `native_i18n_coverage`）
+旧码 **101 条**中文文案无英文译文 → 新码 **0 条**（1599 处字面量全覆盖）。
+另一条既存红：`gen_native_i18n.py --check` 旧码 FAIL（2 条漂移）→ 新码 OK。
+**门禁**：build 0 error；全量 ctest **199/199**（409.14s，197 基线 + 本包 2 条新门禁）。
+**证据**：`evidence/native-task4-i18n-20261114.md`、`native-i18n-coverage-red-20261114.log`。
+**如实挂账**：判据只覆盖字面量；97 条英译新译未母语校对；英文界面未实机验证。
+
+**同轮基线发现（挂账，下一包修）**：`rlplayer_native --audit` 本轮第 1 次运行
+**EXIT=138 SIGBUS**（4 次里 1 次），崩溃报告存 `evidence/native-audit-sigbus-140145.ips`：
+栈在 `_platform_memmove ← std::string::assign ← rta::update::CheckResult::operator= ←
+-[RLPUpdateWindowController handleCheckResult:manually:]`。**不是**此前记的"专辑详情导航处"。
+根因（已用最小探针证实）：done 回调参数是 `const CheckResult&`，窗口控制器直接把它
+`dispatch_async` 到主队列 —— block 捕获 `const T&` 参数是**引用捕获**，
+回调返回后生产者对象已析构 ⟹ 主线程读已释放堆缓冲。下一包修。

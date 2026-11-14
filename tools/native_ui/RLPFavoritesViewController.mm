@@ -88,7 +88,7 @@ static NSString * const kFavColHeart = @"ColFavHeart";
     _hintLabel.translatesAutoresizingMaskIntoConstraints = NO;
     [self.contentView addSubview:_hintLabel];
     // web 空态：还没有收藏 / 在曲目行或单曲页点心形，就会出现在这里
-    _emptyLabel = RLPLabel(RLPTr(@"还没有收藏\n在曲目行或单曲页点心形，就会出现在这里"),
+    _emptyLabel = RLPLabel([RLPTr(@"还没有收藏") stringByAppendingFormat:@"\n%@", RLPTr(@"在曲目行或单曲页点心形，就会出现在这里")],
                            [NSFont systemFontOfSize:13], [RLPTheme current].mut);
     _emptyLabel.identifier = @"fav.empty";
     _emptyLabel.alignment = NSTextAlignmentCenter;

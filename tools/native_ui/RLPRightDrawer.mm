@@ -441,7 +441,7 @@
     RLPTheme *t = [RLPTheme current];
     self.count.stringValue = [NSString stringWithFormat:RLPTr(@"共 %lu 首"), (unsigned long)self.items.count];
     if (!self.items.count) {
-        NSTextField *e = RLPLabel(RLPTr(@"队列为空\n右键专辑或曲目可加入"), t.small, t.mut2);
+        NSTextField *e = RLPLabel([RLPTr(@"队列为空") stringByAppendingFormat:@"\n%@", RLPTr(@"右键专辑或曲目可加入")], t.small, t.mut2);
         e.identifier = @"right.q.empty";
         e.alignment = NSTextAlignmentCenter;
         e.maximumNumberOfLines = 2;
@@ -532,7 +532,7 @@
         if ([s.lyricFile isEqualToString:file] && s.lyricRetry < 6) {
             NSTimeInterval wait = waits[s.lyricRetry];
             s.lyricRetry++;
-            [s renderLyricMessage:RLPTr(@"歌词加载中…\n正在等后台补全（首次播放新曲目时可能要几秒）")];
+            [s renderLyricMessage:[RLPTr(@"歌词加载中…") stringByAppendingFormat:@"\n%@", RLPTr(@"正在等后台补全（首次播放新曲目时可能要几秒）")]];
             [s.lyricTimer invalidate];
             s.lyricTimer = [NSTimer scheduledTimerWithTimeInterval:wait repeats:NO block:^(NSTimer *tm) {
                 __typeof__(self) s2 = w;
@@ -541,7 +541,7 @@
             }];
             return;
         }
-        [s renderLyricMessage:RLPTr(@"没有歌词\n同名 .lrc 文件、内嵌歌词，或播放时自动在线补全")];
+        [s renderLyricMessage:[RLPTr(@"没有歌词") stringByAppendingFormat:@"\n%@", RLPTr(@"同名 .lrc 文件、内嵌歌词，或播放时自动在线补全")]];
     }];
 }
 
