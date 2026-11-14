@@ -43,6 +43,10 @@
 | behavior | `behavior_scan.py --check` exit 0（actionable=0） |
 | i18n | `gen_i18n_table.py --check` = OK（2318 pairs），exit 0 |
 
+**稳定性复跑（1.1.7.36 同树，未改任何代码）**：第二次全量 ctest **197/197**（377.55 s，exit 0，
+`evidence/native-chip-icons-ctest-197-rerun.log`）；第二次 audit **246/0**（`evidence/native-chip-icons-audit-20261114-rerun.log`）。
+即最终树连续两次全量 ctest 与两次 audit 全绿。
+
 ## 5. 如实挂账
 
 1. 图标是 **SF Symbol 同构**，不是 web 的逐像素 SVG（形状相近、尺寸同为 11×11；不做像素级对照）。

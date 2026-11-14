@@ -9,8 +9,10 @@
 | 1.1.7.33 | `5a7b950` | P0-1 播放/暂停三入口：底栏、播放页、菜单/媒体键；停止态重播（web `playOrPause` 同语义） | `native_pause_paths` 8/8 红 → 16/0 绿 |
 | 1.1.7.34 | `3419fa3` | P0-2 诊断包：默认预算 12→7.5 MiB（STORE ZIP 实际 7,605,710 B ≤ 8 MiB）；原生导出校验 PK 头/大小、提示写真实 MB | `test_diag_bundle` 103/3 红 → 106/0 绿 |
 | 1.1.7.35 | `201235b` | P1 EQ/OPRA：型号卡片 + 预设卡片墙（曲线小图/作者·详情/段数/前级/应用按钮/当前态），读 settings 的 opraproduct/oprapreset | `native_opra_cards` 1/6 红 → 16/0 绿；`native_target_curve` 更新为卡片入口 21/0 |
-| 1.1.7.36 | 本包 | P2 chip 图标：EQ/IR/投放/加歌单芯片装 SF Symbol（web 内联 SVG 同构），芯片固有宽补 15pt | `native_npmeta_chips` 84/2 红 → 86/0 绿 |
+| 1.1.7.36 | `912fdb6` | P2 chip 图标：EQ/IR/投放/加歌单芯片装 SF Symbol（web 内联 SVG 同构），芯片固有宽补 15pt | `native_npmeta_chips` 84/2 红 → 86/0 绿 |
 
+**最终稳定性（1.1.7.36 同树）**：全量 ctest 连续两次 **197/197**（393.19 s / 377.55 s）、
+audit 连续两次 **246/0**；parity missing=0、behavior actionable=0、i18n OK。证据日志在 `evidence/`（日志按 .gitignore 不入库）。
 **证据**：`evidence/native-pause-paths-20261114.md`、`evidence/native-diag-8mib-20261114.md`、
 `evidence/native-opra-cards-20261114.md`（含 before/after PNG 与红/绿日志落盘说明）。
 
