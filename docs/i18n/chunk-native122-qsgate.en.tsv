@@ -1,0 +1,4 @@
+当前设备不支持这一档	This device does not support this profile	播放方式弹层置灰 tooltip（v3.3.11 rlPaintPreset）
+当前设备不支持置灰的那几档。	This device does not support the greyed-out profiles.	弹层说明行
+能力尚未确认，请先选择输出设备。	Device capabilities not confirmed yet; choose an output first.	弹层/说明行（web 同文案）
+请先停止播放，再应用预设。	Stop playback before applying a preset.	播放/暂停时阻挡（web 同文案）

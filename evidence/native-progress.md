@@ -1103,3 +1103,24 @@ reset 只标记不删图（与上游一致）、夹具为构造 PNG 不解码。
 
 **如实挂账**：唯一真实差异是「非法保存音量静默 clamp、不提示用户」（上游会拒绝播放并提示改正），
 已追加到 `native-known-deviations-20261114.md`；做成上游那样需跨后端契约改动，不在小范围移植内。
+
+
+### 2026-11-15 04:xx —— 轮次 35（1.1.7.69）：v3.3.11 快速启动能力门控
+
+**先核对了上游再动手**：`quickStartHtml()` 在 v3.3.11 **没有任何调用点**，导航项被
+`syncQuickStartVisibility()` 永久隐藏 ⟹ 「快速开始页面」是死代码，照搬等于移植一个不渲染的页面。
+真正活着的是 `quickStartModel()`，唯一消费点是 `rlPaintPreset()`（播放方式三档能否点）。
+
+**本仓旧码的真实缺陷**：`loadPresetCaps:` 把 `/api/preset/caps` 拉回来就 `(void)json` 丢掉 ⟹
+能力探测是装饰品，三档永远可点，用户只能事后在后端 notes 里看到降级说明。
+
+**实现**：把判定抽成纯函数 `+gatingForCapsJSON:`（逐条照 offline/remote/shared/known/dsdNative/dop），
+`applyPresetCaps:` 写进状态；`onOpenPlay:` 按档置灰 + tooltip + 界面说明行（`quickstart.presetGate`）；
+新增 `pausedNow` —— 旧实现只有 `playing = st.playing && !st.paused`，**暂停会被误判成可应用**。
+
+**红→绿**：新增 Q1–Q5。红（门控恒 true）build 0 error、**6 FAIL** → 绿 build 0 error、0 失败。
+
+**挂账**：快速开始页面不移植（死代码）、`quickstart` 偏好未移植、弹层未做页面级真点击判据
+（用纯函数覆盖同一决策）、`preset/apply` 未加本仓后端不认的参数。
+
+**门禁**：串行 ctest 202/202、`--audit` 246/0、parity missing=0、behavior actionable=0。

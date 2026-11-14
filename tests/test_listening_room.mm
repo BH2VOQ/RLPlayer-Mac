@@ -117,6 +117,43 @@ int main() {
         CK(bad.count == 0, "A3 聆听室没有跳设置页的入口（用户硬要求）",
            [bad componentsJoinedByString:@", "]);
 
+        // ---------- Q 系列：v3.3.11 quickStartModel 的能力门控（纯函数）----------
+        // 旧码把 /api/preset/caps 拉下来就丢掉（(void)json），三档永远可点 ——
+        // 用户点了才在后端 notes 里看到降级原因，事先毫无提示。
+        {
+            NSDictionary *full = @{ @"ok": @YES,
+                @"device": @{ @"name": @"Mac Speakers", @"backend": @"coreaudio",
+                              @"rates": @[ @44100, @48000, @96000 ], @"maxRate": @96000,
+                              @"dsdNative": @NO, @"dop": @YES } };
+            NSDictionary *g1 = [RLPQuickStartViewController gatingForCapsJSON:full];
+            CK([g1[@"known"] boolValue], "Q1a 完整能力 ⟹ known", @"");
+            CK([g1[@"pcmReady"] boolValue], "Q1b 完整能力 ⟹ PCM 可用", @"");
+            CK([g1[@"dsdReady"] boolValue], "Q1c 有 DoP ⟹ DSD 可用（mac 只有 DoP 通路）", @"");
+            NSDictionary *noDsd = @{ @"ok": @YES,
+                @"device": @{ @"name": @"USB DAC", @"backend": @"coreaudio",
+                              @"rates": @[ @44100 ], @"maxRate": @44100,
+                              @"dsdNative": @NO, @"dop": @NO } };
+            NSDictionary *g2 = [RLPQuickStartViewController gatingForCapsJSON:noDsd];
+            CK(![g2[@"dsdReady"] boolValue], "Q2a 无 DoP 无 Native ⟹ DSD 不可用", @"");
+            CK([g2[@"pcmReady"] boolValue], "Q2b 但 PCM 仍可用（不连坐）", @"");
+            NSDictionary *off = @{ @"ok": @YES,
+                @"device": @{ @"name": @"离线处理（Null）", @"backend": @"null",
+                              @"rates": @[ @44100 ], @"maxRate": @44100, @"dop": @YES } };
+            NSDictionary *g3 = [RLPQuickStartViewController gatingForCapsJSON:off];
+            CK(![g3[@"known"] boolValue], "Q3 离线处理 ⟹ known=false", @"");
+            CK(![g3[@"pcmReady"] boolValue] && ![g3[@"dsdReady"] boolValue],
+               "Q3b 离线时两档都不可用（不假装支持）", @"");
+            NSDictionary *g4 = [RLPQuickStartViewController gatingForCapsJSON:
+                @{ @"ok": @YES,
+                   @"device": @{ @"name": @"", @"backend": @"coreaudio", @"rates": @[], @"maxRate": @0 } }];
+            CK(![g4[@"known"] boolValue], "Q4 无名/无率 ⟹ 能力未确认", @"");
+            NSDictionary *g5 = [RLPQuickStartViewController gatingForCapsJSON:@{ @"ok": @NO }];
+            CK(![g5[@"known"] boolValue] && ![g5[@"pcmReady"] boolValue], "Q5a ok:false ⟹ 不可用", @"");
+            NSDictionary *g6 = [RLPQuickStartViewController gatingForCapsJSON:nil];
+            CK(![g6[@"known"] boolValue] && ![g6[@"pcmReady"] boolValue],
+               "Q5b nil ⟹ 不可用（不臆造能力）", @"");
+        }
+
         // ---------- A6 主题切换：自建颜色必须重刷（历史真故障）----------
         // 为什么必须单独判：切到浅色后，卡片里那些 applyTheme 漏掉的标签会继续停在深色主题的
         // 颜色上 —— 浅底浅字/深底深字，肉眼几乎看不见字，而"能构造出来"之类的判据全绿。

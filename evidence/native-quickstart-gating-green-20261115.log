@@ -1,0 +1,40 @@
+=== test_listening_room（聆听室合并页）===
+  [PASS] A5a 原音直通(PCM源) ⟹ bitperfect
+  [PASS] A5b 原音直通(DSD源) ⟹ bitperfect
+  [PASS] A5c PCM 升频恒 pcm
+  [PASS] A5d DSD 档 + DSD 源 ⟹ dsd（DSD→DSD）
+  [PASS] A5e DSD 档 + PCM 源 ⟹ pcm2dsd（PCM→DSD）
+  [PASS] A5f 源类型判定 dsf/dff/大小写
+  [PASS] A4a 温和档选出的滤波含 gauss
+  [PASS] A4b 锐利档不含 gauss
+  [PASS] A4c 档位映射结果必须来自后端名单
+  [PASS] A4c 档位映射结果必须来自后端名单
+  [PASS] A4c 档位映射结果必须来自后端名单
+  [PASS] A4d 温和与锐利必须是不同滤波
+  [PASS] A4e 不选 forNx 专用项
+  [PASS] A4f 空名单 ⟹ nil（不臆造）
+  [PASS] A4g 反查温和档
+  [PASS] A4h 未知滤波 ⟹ 自定义(-1)
+  [PASS] A4i forNx 项写 filterNx 键
+  [PASS] A1a 聆听室可离线构建（无核心不崩）
+  [PASS] A1b 标题是「聆听室」
+  [PASS] A2 四张卡存在 room.device
+  [PASS] A2 四张卡存在 room.output
+  [PASS] A2 四张卡存在 room.play
+  [PASS] A2 四张卡存在 room.style
+  [PASS] A3 聆听室没有跳设置页的入口（用户硬要求）
+  [PASS] Q1a 完整能力 ⟹ known
+  [PASS] Q1b 完整能力 ⟹ PCM 可用
+  [PASS] Q1c 有 DoP ⟹ DSD 可用（mac 只有 DoP 通路）
+  [PASS] Q2a 无 DoP 无 Native ⟹ DSD 不可用
+  [PASS] Q2b 但 PCM 仍可用（不连坐）
+  [PASS] Q3 离线处理 ⟹ known=false
+  [PASS] Q3b 离线时两档都不可用（不假装支持）
+  [PASS] Q4 无名/无率 ⟹ 能力未确认
+  [PASS] Q5a ok:false ⟹ 不可用
+  [PASS] Q5b nil ⟹ 不可用（不臆造能力）
+  [PASS] A6 页内确实有文字标签（否则本判据空转）
+  [PASS] A6 切到浅色后没有标签停留在深色主题的颜色上
+  [PASS] A6 切到浅色后卡片的 layer 底色跟着重刷
+
+listening_room 全部通过（0 项失败）

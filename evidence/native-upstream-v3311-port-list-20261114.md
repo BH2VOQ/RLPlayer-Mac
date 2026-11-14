@@ -78,3 +78,10 @@
   原生版 `startEmbedded()` 同步读设置、之后才建窗口，`ready=false` 状态不可达；
   照搬会得到永远为 true 的死代码。详见 `evidence/native-playback-settings-na-20261115.md`。
   唯一真实差异（非法保存音量静默 clamp、不提示用户）已挂账到偏差台账。
+
+## 进度（1.1.7.69）
+
+- **快速启动**：上游「快速开始页面」在 v3.3.11 已是死代码（`quickStartHtml` 无调用点、导航永久隐藏），
+  **页面不移植**；真正活着的能力模型 `quickStartModel` 已移植为纯函数
+  `+gatingForCapsJSON:`，驱动「播放方式」三档置灰 + 停止播放闸门（Q1–Q5，红→绿）。
+  见 `evidence/native-quickstart-gating-20261115.md`。

@@ -59,9 +59,22 @@
 @property (nonatomic, copy) NSString *currentPath;
 @property (nonatomic, assign) BOOL hasRoots;
 @property (nonatomic, assign) BOOL playing;
+/// v3.3.11 `rlApplyDailyPreset` 用 `S.playing||S.paused` 判定「请先停止播放」——
+/// `playing` 已经是 `st.playing && !st.paused`，暂停态必须单独记一个，否则暂停时会被当成"可以应用"。
+@property (nonatomic, assign) BOOL pausedNow;
 @property (nonatomic, strong) NSPopover *popover;
 @property (nonatomic, assign) NSUInteger coverSeq;
 @property (nonatomic, strong) NSTimer *poll;
+@end
+
+// v3.3.11 `quickStartModel` 的三项能力结论（`/api/preset/caps` 的真实响应派生）。
+// 为什么必须真的用起来：只把 caps 拉下来再丢掉，等于「能力探测」是个装饰品 ——
+// 用户点「DSD 升频」会得到后端 `notes` 里的降级说明，但他事先看不到按钮为什么不该点。
+@interface RLPQuickStartViewController (RLPPresetCapsState)
+@property (nonatomic, assign) BOOL presetCapsKnown;
+@property (nonatomic, assign) BOOL presetPcmReady;
+@property (nonatomic, assign) BOOL presetDsdReady;
+@property (nonatomic, copy, nullable) NSString *presetCapsDevice;
 @end
 
 @implementation RLPQuickStartViewController
@@ -546,8 +559,23 @@
         @[@1, RLPTr(@"PCM 升频"), RLPTr(@"把普通高清音源提升到设备支持的更高采样率")],
         @[@2, RLPTr(@"DSD 升频"), RLPTr(@"转换成 DSD 信号输出，声音更绵密（需要设备支持 DoP）")],
     ];
+    // v3.3.11 `rlPaintPreset` 的两条闸门，逐条移植：
+    //   ① 正在播放/暂停时不许应用（`请先停止播放，再应用预设。`）
+    //   ② PCM / DSD 档按 `/api/preset/caps` 的真实能力置灰（`能力尚未确认，请先选择输出设备。`）
+    const BOOL busy = [self playbackIsActive];
     for (NSArray *o in opts) {
+        const NSInteger code = [o[0] integerValue];
+        BOOL enabled = !busy;
+        if (enabled && code == 1) enabled = self.presetPcmReady;
+        if (enabled && code == 2) enabled = self.presetDsdReady;
         NSButton *b = [self popRowWithTitle:o[1] note:o[2] on:NO action:@selector(onPickPlayMode:) ident:[o[0] stringValue]];
+        b.enabled = enabled;
+        if (!enabled) {
+            // 说清"为什么点不了"：上游把原因写在按钮下方（`当前能力未确认或不支持`）。
+            b.toolTip = busy ? RLPTr(@"请先停止播放，再应用预设。")
+                             : (self.presetCapsKnown ? RLPTr(@"当前设备不支持这一档")
+                                                    : RLPTr(@"能力尚未确认，请先选择输出设备。"));
+        }
         [s addArrangedSubview:b];
         [[b.widthAnchor constraintEqualToConstant:330] setActive:YES];
         NSTextField *sub = RLPLabel(o[2], [RLPTheme current].small, [RLPTheme current].mut);
@@ -556,6 +584,18 @@
         sub.preferredMaxLayoutWidth = 330;
         [s addArrangedSubview:sub];
         [[sub.widthAnchor constraintEqualToConstant:330] setActive:YES];
+    }
+    if (busy || !self.presetCapsKnown || !self.presetPcmReady || !self.presetDsdReady) {
+        NSString *why = busy ? RLPTr(@"请先停止播放，再应用预设。")
+                      : (!self.presetCapsKnown ? RLPTr(@"能力尚未确认，请先选择输出设备。")
+                                              : RLPTr(@"当前设备不支持置灰的那几档。"));
+        NSTextField *gate = RLPLabel(why, [RLPTheme current].small, [RLPTheme current].mut2);
+        gate.identifier = @"quickstart.presetGate";
+        gate.maximumNumberOfLines = 0;
+        gate.lineBreakMode = NSLineBreakByWordWrapping;
+        gate.preferredMaxLayoutWidth = 330;
+        [s addArrangedSubview:gate];
+        [[gate.widthAnchor constraintEqualToConstant:330] setActive:YES];
     }
     NSTextField *dsdNote = RLPLabel(isDsd
         ? RLPTr(@"当前是 DSD 文件：DSD 升频会走 DSD→DSD。")
@@ -567,6 +607,12 @@
     [s addArrangedSubview:dsdNote];
     [[dsdNote.widthAnchor constraintEqualToConstant:330] setActive:YES];
     [self showPopoverFrom:self.playCard withCard:s width:360 minH:260];
+}
+
+/// 是否正在播放或暂停（上游 `S.playing||S.paused`）。用页面已轮询到的状态，
+/// 不新开一条轮询：`self.webStatus` 是该页唯一的状态快照。
+- (BOOL)playbackIsActive {
+    return self.playing || self.pausedNow;
 }
 
 - (void)onPickPlayMode:(NSButton *)sender {
@@ -874,6 +920,7 @@
         RLPPlaybackStatus *st = [RLPPlaybackStatus statusFromJSON:json];
         if (!st) return;
         self_.playing = st.playing && !st.paused;
+        self_.pausedNow = st.paused;
         NSString *path = st.currentPath ?: @"";
         [self_.npToggle setTitle:self_.playing ? RLPTr(@"暂停") : RLPTr(@"继续播放")];
         self_.npState.stringValue = path.length ? (self_.playing ? RLPTr(@"正在播放") : RLPTr(@"已暂停")) : RLPTr(@"未播放");
@@ -1100,10 +1147,56 @@
 - (void)loadPresetCaps:(BOOL)force {
     if (![RLPCoreClient shared].started) return;
     NSString *url = force ? @"/api/preset/caps?refresh=1" : @"/api/preset/caps";
+    __weak __typeof__(self) weakSelf = self;
     [[RLPCoreClient shared] getJSON:url completion:^(NSDictionary * _Nullable json) {
-        // 能力只影响按钮是否可用；读不到就保持可用（宁可点下去报错，也不假装不支持）
-        (void)json;
+        __typeof__(self) self_ = weakSelf;
+        if (!self_) return;
+        [self_ applyPresetCaps:json];
     }];
+}
+
+/// v3.3.11 `quickStartModel` 的逐条移植：从 `/api/preset/caps` 算出
+/// `pcmReady` / `dsdReady`，供「播放方式」弹层置灰用。
+///
+/// 上游判定（ui_script.h:5326-5338）：
+///   remote = backend=='upnp'; shared = backend=='wasapi-shared'; offline = backend=='null';
+///   known  = !offline && !remote && caps.ok && device.name && rates 非空 && maxRate>0
+///   pcmReady = known && !remote && !shared
+///   dsdReady = known && !remote && !shared && (dsdNative || dop)
+/// mac 侧 `upnp`/`wasapi-shared` 不存在（backend 是 coreaudio/…），但 `offline(null)` 与
+/// `dsdNative` 判定同样成立：mac 的 DSD 只有 DoP，故 dsdReady 实际靠 `dop` 决定。
+/// 纯函数：`/api/preset/caps` 响应 → 三档可用性（v3.3.11 `quickStartModel` 的逐条移植）。
+/// 抽成类方法的理由：这条决策决定按钮能不能点，必须能被判据**直接**测，
+/// 而不是只能靠"打开弹层再找按钮"间接测（间接测会因为布局时机变红变绿）。
+/// 返回 @{@"known":BOOL, @"pcmReady":BOOL, @"dsdReady":BOOL}。
++ (NSDictionary<NSString *, NSNumber *> *)gatingForCapsJSON:(NSDictionary * _Nullable)json {
+    const id okv = json[@"ok"];
+    const BOOL ok = [okv respondsToSelector:@selector(boolValue)] && [okv boolValue];
+    NSDictionary *dev = [json[@"device"] isKindOfClass:[NSDictionary class]] ? json[@"device"] : nil;
+    NSString *backend = [dev[@"backend"] isKindOfClass:[NSString class]] ? dev[@"backend"] : @"";
+    NSString *name = [dev[@"name"] isKindOfClass:[NSString class]] ? dev[@"name"] : @"";
+    NSArray *rates = [dev[@"rates"] isKindOfClass:[NSArray class]] ? dev[@"rates"] : @[];
+    double maxRate = [dev[@"maxRate"] respondsToSelector:@selector(doubleValue)]
+                     ? [dev[@"maxRate"] doubleValue] : 0.0;
+    const BOOL offline = [backend isEqualToString:@"null"];
+    const BOOL remote = [backend isEqualToString:@"upnp"];
+    const BOOL shared = [backend isEqualToString:@"wasapi-shared"];
+    const BOOL known = ok && !offline && !remote && name.length > 0 && rates.count > 0 && maxRate > 0;
+    const BOOL dsdNative = [dev[@"dsdNative"] respondsToSelector:@selector(boolValue)] &&
+                           [dev[@"dsdNative"] boolValue];
+    const BOOL dop = [dev[@"dop"] respondsToSelector:@selector(boolValue)] && [dev[@"dop"] boolValue];
+    return @{ @"known": @(known),
+              @"pcmReady": @(known && !remote && !shared),
+              @"dsdReady": @(known && !remote && !shared && (dsdNative || dop)) };
+}
+
+- (void)applyPresetCaps:(NSDictionary * _Nullable)json {
+    NSDictionary<NSString *, NSNumber *> *g = [[self class] gatingForCapsJSON:json];
+    self.presetCapsKnown = [g[@"known"] boolValue];
+    self.presetPcmReady = [g[@"pcmReady"] boolValue];
+    self.presetDsdReady = [g[@"dsdReady"] boolValue];
+    NSDictionary *dev = [json[@"device"] isKindOfClass:[NSDictionary class]] ? json[@"device"] : nil;
+    self.presetCapsDevice = [dev[@"name"] isKindOfClass:[NSString class]] ? dev[@"name"] : nil;
 }
 @end
 
