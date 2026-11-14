@@ -342,3 +342,25 @@ web max-height:720 的 margin 未移植；实机未验。
 **门禁**：build 0 error；全量 ctest（195）/audit/parity/behavior/i18n 由最终门禁复跑。
 **证据**：`evidence/native-cast-chip-20261114.md`。
 **如实挂账**：设备名仅 host 回落（未额外拉设备表）；轮询固定 2s；实机投放未验。
+
+### 2026-11-14 08:41 —— 最终门禁（1.1.7.32，9 包收口）
+
+| 门禁 | 数字 | 证据 |
+|---|---|---|
+| build | `cmake --build build-mac -j8` exit 0 | 终端 |
+| ctest | **195/195 passed, 0 failed**（373.95s 串行） | `evidence/native-final-ctest-195.log` |
+| audit | **246 passed / 0 failed**（隔离目录） | `evidence/native-final-audit-246-32.log` |
+| parity | ctrl done=179 / api missing=0 / removed=2（2 ok）/ na=16（16 ok） | `/tmp/final-parity.log` |
+| behavior | actionable=0（bindings 50） | `/tmp/final-behavior.log` |
+| i18n | OK（2318 pairs） | `/tmp/final-i18n.log` |
+
+**本轮 9 个包（1.1.7.24 → 1.1.7.32，每包 feat+docs 两本地提交，共 18 个提交；未推送/未发版）**：
+① 右栏 AI 摘要与点击实体修正；② 音频分析 #npAnal；③ 曲目页 `.trow-track`；
+④ #npMeta 芯片行；⑤ 队列排序 8 档 + CUE 保真；⑥ 队列 `.qrow` 行；
+⑦ 专辑/文件夹空态；⑧ 右栏 `nprailempty`/`npSummHint`；⑨ 投放芯片运行态。
+新增 9 个 ctest 全部旧码先红后绿；证据文件见 `evidence/native-*-20261114.md`。
+
+**遗留风险（如实）**：离屏审计套件 `native_ui_functional` 在 5 次全量 ctest 中出现过 **2 次** bus error
+（均在专辑详情导航处，单跑/换轮重跑均通过；未能复现，记为既有 open flake）。
+**未做**：古典第 4 卡/抽屉 vs 气泡、OPRA 预设卡片墙、chip SVG 图标、默认渲染器切换、双模式层；
+playback RENDERFAIL 根因仍需用户诊断包。实机验收由用户执行。
