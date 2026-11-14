@@ -1227,8 +1227,11 @@ static const CGFloat kRailDetailLineHeight = 1.35;
     const CGFloat thumbH = MAX(18.0, H * (H / self.contentHeight));
     const CGFloat maxOff = MAX(1.0, self.contentHeight - H);
     const CGFloat t = MAX(0.0, MIN(1.0, self.contentOffset / maxOff)) * MAX(0.0, H - thumbH);
-    // 拇指画在右侧 6pt 沟槽里；卡片右缘另留 13pt ⟹ 滚动条永远不压卡片圆角。
-    return NSMakeRect(W - 6.0, H - thumbH - t, 6.0, thumbH);
+    // web 实测（ego/Chromium，2026-11-14）：`.npchipwrap` 内容溢出时滚动条占位 **11pt**
+    // （CSS 写 `::-webkit-scrollbar{width:6px}`，实测 offsetWidth-clientWidth=11），
+    // 首张 `.npchip` 宽 = wrapW-11；不溢出时占位 0、卡宽 = wrapW。原生沿用「常驻占位」
+    // 取舍（与 #npAnlBody 同），6pt 拇指画在 11pt 占位内 x∈[W-8,W-2]，与卡片右缘留 3pt。
+    return NSMakeRect(W - 8.0, H - thumbH - t, 6.0, thumbH);
 }
 - (void)drawRect:(NSRect)dirtyRect {
     (void)dirtyRect;
@@ -1999,8 +2002,10 @@ static NSString *RLPRailTagText(id srValue, id bitsValue) {
         self.anlReanalyze.frame = NSMakeRect(anlPadX, segY, 62, anlSegH);
         // 窄面板放不下「重新分析」时让它让位（「分析」分段本来就是同一动作）。
         if (NSMinX(self.anlSeg.frame) < NSMaxX(self.anlReanalyze.frame) + 8) self.anlReanalyze.hidden = YES;
-        // web .anlhide：top:7 / right:8 / 22x22（面板局部坐标=左下原点 => y 从面板顶往内 7+22）。
-        self.anlHide.frame = NSMakeRect(side - 8.0 - 22.0, bodyH - 7.0 - 22.0, 22.0, 22.0);
+        // web `.anlhide{top:7;right:8}` 相对 padding box，`#npAnal` 另有 1px 边框 ⟹
+        // 从面板外缘量右距 9pt（ego 实测 right=9）。1.1.7.57 起 anlPadX 已取 12（=11+1），
+        // 这里把收起键从 8 同步归位到 9，与状态文字右缘 38 的 1pt 差一并消除。
+        self.anlHide.frame = NSMakeRect(side - 9.0 - 22.0, bodyH - 7.0 - 22.0, 22.0, 22.0);
         [self anlLayoutCards];
     }
     // ---- AI 整理栏几何（web .nprailcard padding:10 / gap:8，.npchipwrap gap:6）----
@@ -2073,7 +2078,7 @@ static NSString *RLPRailTagText(id srValue, id bitsValue) {
     [self.knowledge cancelLoading];
 }
 
-/// `.npchipwrap` 卡片排版：卡片宽度 = wrap 宽 - 19（13pt 留白 + 6pt 拇指条），
+/// `.npchipwrap` 卡片排版：卡片宽度 = wrap 宽 - 11（web 实测滚动条占位 11pt），
 /// 从顶部往下排、偏移只改卡片 y；栏头等其它子视图坐标完全不动。
 - (void)railLayoutChips {
     NSView *wrap = self.railChipWrap;
@@ -2081,7 +2086,7 @@ static NSString *RLPRailTagText(id srValue, id bitsValue) {
     const CGFloat W = wrap.bounds.size.width, H = wrap.bounds.size.height;
     if (W < 20 || H < 10) return;
     RLPRailWrapView *rw = (RLPRailWrapView *)wrap;
-    const CGFloat cardW = MAX(40, W - 19);
+    const CGFloat cardW = MAX(40, W - 11);
     NSArray<RLPRailChipView *> *cards = self.railCards ?: @[];
     if (cards.count == 0) { rw.contentHeight = 0; return; }
     // 隐藏的卡（如非古典时的「作品」）不参与排版 ⟹ 不占高度、不留缝（web 是"不在 tabs 里"）。

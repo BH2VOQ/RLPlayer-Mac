@@ -171,12 +171,12 @@ int main() {
         // 卡片现在在 `.npchipwrap` 里（独立滚动区），frame 是 wrap 局部坐标 ⟹ 一律转到 rail 坐标再量。
         #define RAILRECT(v) [(v) convertRect:(v).bounds toView:rail]
         Geo("rail.padX.left", 10, NSMinX(RAILRECT(vis[0])), 2);
-        // web 卡右缘 = 面板右内边距 10 + chipwrap 滚动条占位（~11）；原生是 10 + 常驻 19
-        // （13 留白 + 6 拇指条，与 #28 同一取舍）。差因在 evidence/native-chipwrap-20261114.md 里披露。
-        Geo("rail.padX.right", 29, rail.bounds.size.width - NSMaxX(RAILRECT(vis[0])), 2);
-        // web `.npchipwrap` 是滚动区：卡宽 = wrap 内容宽。原生右侧常驻 19pt（13 留白 + 6 拇指条，
-        // 与 #28 的沟槽同一取舍；web 该处是 ~11px 滚动条占位）⟹ 卡宽 = railW - 20 - 19。
-        Geo("rail.card.width", rail.bounds.size.width - 39, NSWidth(RAILRECT(vis[0])), 2);
+        // web 实测：溢出时卡右缘距面板右 = padding 10 + border 1 + 滚动条占位 11 = 22。
+        // 原生面板无 1px 边框 ⟹ 同结构下 21（差 1pt，与 #npAnal 的 border 差异同类，如实披露）。
+        // 1.1.7.58 起原生右侧常驻 11pt（旧码 19pt 多留 8pt），见 evidence/native-chipwrap-width-20261114.md。
+        Geo("rail.padX.right", 21, rail.bounds.size.width - NSMaxX(RAILRECT(vis[0])), 2);
+        // 卡宽 = railW - 左右内边距 20 - 滚动条占位 11 = railW - 31。
+        Geo("rail.card.width", rail.bounds.size.width - 31, NSWidth(RAILRECT(vis[0])), 2);
 
         // ---- 卡片间距（web .npchipwrap gap:6px）----
         for (NSUInteger i = 0; i + 1 < vis.count; ++i)

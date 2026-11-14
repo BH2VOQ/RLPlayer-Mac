@@ -819,3 +819,41 @@ tolerance 1.5/1.0 → **0.5**（原 1.5 会把 1pt 差放过 ⟹ 等于没判）
 **门禁（1.1.7.57 树）**：build 0 error；串行全量 ctest **201/201（405.48s）**；`--audit` **246/0**；
 parity missing=0（view 14 / tab 10 / ctrl done=179 / api done=96，na 16 全可复核、removed 2 双向核验）；
 behavior actionable=0（50 bindings）；i18n 三项 OK（2421 pairs）。
+
+
+### 2026-11-14 23:xx —— 轮次 23（1.1.7.58）：`.npchipwrap` 卡宽对齐实测 + `.anlhide` 8→9
+
+**任务**（用户清单前 5 项 + 文档 #10/#11）：芯片区卡宽 `wrapW-19` → web 实测值、
+同步两个测试期望、更新 `RLPRailWrapView` 注释、`.anlhide` 收起键 8→9、
+更正 `known-deviations` #1/#4/#9、记录 `sp_opra_copychip` 现状。
+
+**先实测**：ego 浏览器打开 19091 的 `index.html`（未碰 8899、未改
+`build-mac/rlplayer-settings.conf`），注入 8 张 `.npchip` 造溢出。
+`offsetWidth 279 - clientWidth 268 = 11`（CSS 写 `::-webkit-scrollbar{width:6px}`），
+首卡宽 268 = `wrapW-11`；不溢出时占位 0、卡宽 279。`.anlhide` 实测 `right=9`。
+
+**红→绿**：仅改判据时 `native_nowplaying_web` / `native_rail_cards` /
+`native_analysis_panel` **3 个 ctest 全红**（`239 vs 247`、拇指间隙 13、
+`anlhide.rightGap 8`）→ 改实现后 6 项相关 ctest **全绿**，build 0 error。
+
+**实现**：`RLPNowPlayingViewController.mm` 卡宽 `W-19→W-11`、拇指 `W-6→W-8`、
+`.anlhide` `side-8-22→side-9-22`；`test_native_nowplaying_web` /
+`test_native_rail_cards` 几何期望同步；`test_native_analysis_panel` 新增
+`anlhide.rightGap` 判据。`RLPRailWrapView` 的「13pt 留白」注释改为 web 实测口径。
+
+**文档**：新建 `evidence/native-chipwrap-width-20261114.md`（实测表 + 红绿 + 挂账）；
+`evidence/native-known-deviations-20261114.md` #1/#4 改「已关闭」、#9 澄清只剩设置页
+`.chip`、新增 **#12 记录 `sp_opra_copychip` 假绿**（web 有 1 个可点 .chip 复制官网链接，
+原生只有 `RLPControlIdentifier` 字典里的 id 字符串，`parity_scan` 因此标 `done`——
+静态表的盲区）；`native-4-playback-diff.md` #69 行与本轮节同步。
+
+**上游核实（`git fetch` 只读）**：fetch 前后 HEAD 均 `1bfa64e`、分支 `main` 未变，
+本地领先 `origin/main` **105** 提交。`RLPlayer2` 上游最新提交仍是 11-02 的
+`5ca77f6`（ssh usa 读 GitHub API 复核），`github/origin` 均停在 11-11 的 1.1.6
+⟹ 本机可见的三个 remote **都没有「上游刚更新」的 UI 代码**；未 merge/rebase/reset，
+工作树与本地提交零改动。用户所说「上游」待澄清。
+
+**如实挂账**：①web 不溢出时卡宽 = wrapW，原生常驻 11pt 占位；②web 卡右缘 22 vs
+原生 21（面板 1px border）；③抽屉 blur/滑入、brightness 真混合、chipwrap 惯性、
+默认界面切换、双模式薄表现层仍未做；④RENDERFAIL 需用户诊断包（本机日志已见
+`Pocket Master Audio` / `hogexcl=1` / 独占流 201 轮未接受数据，但缺用户侧完整诊断包）。

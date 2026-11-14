@@ -124,7 +124,7 @@
 | 66 | `.npclose:hover{background:#fff;scale1.04}`、`.nptoggle:hover` 同款、`.nprailhide/.anlhide:hover{background:var(--hov2);color:var(--txt)}` | `npClose`/`npAnalToggle`/`npRailToggle`：静态底改 web 的 alpha .92，hover 提亮到不透明 + `scale 1.04`；`npAnalHide`/`npRailHide` hover `--hov2`+`--txt` | **已修（1.1.7.46）** |
 | 67 | `.npchip:hover`（浅色半透明值）、`.npcast:hover`（`--hov`/`--acc`）、`.npseek:hover` 5→7 | `RLPRailChipView.setHovered:`、`applyChipHover:hovered:`、`RLPNPAccentCell.barThickness` | **已修（1.1.7.46）** |
 | 68 | `#npAnlBody` 自己滚（`overflow-y:scroll`），头部固定；`#npLyric` 独立滚动；整页不滚 | `RLPNPAnalBody.onScroll`/`anlDetailScroll`/`lyricScroll` 各自滚动，`webCanvas` 不滚 | 已对齐 |
-| 69 | `.npchipwrap{overflow:auto;scrollbar-width:thin;gap:6}` 内部滚动、栏头/脚注固定 | `RLPRailWrapView`（非 NSScrollView）自绘 contentOffset+6pt 拇指；卡片挂 wrap、栏头不动；卡宽 `wrapW-19`（右侧 13 留白+6 拇指，web ~11 滚动条 ⟹ 比 web 窄 8pt 的已知偏差） | **已修（1.1.7.53）** |
+| 69 | `.npchipwrap{overflow:auto;scrollbar-width:thin;gap:6}` 内部滚动、栏头/脚注固定 | `RLPRailWrapView`（非 NSScrollView）自绘 contentOffset+6pt 拇指；卡片挂 wrap、栏头不动；**1.1.7.58 起卡宽 `wrapW-11`**（ego 实测滚动条占位 11pt，拇指 `x∈[W-8,W-2]`） | **已修（1.1.7.53 / 1.1.7.58 对齐宽度）** |
 
 ## 10. 本轮未覆盖 / 明确不做
 
@@ -229,3 +229,19 @@
 - 旧码（1.1.7.39）：18P / **2F**（`stopped state resets npKind…`、`track switch resets npKind…`）。
 - 新码：**21P / 0F**。
 - 证据：`evidence/native-playback-states-20261114.md`、`native-playback-state-{red,green}-20261114.log`。
+
+
+### 1.1.7.58 —— `.npchipwrap` 卡宽 + `.anlhide` 归位（表 #69 / #27）
+
+- **先实测**（ego/Chromium，19091）：`.npchipwrap` 溢出时 `offsetWidth 279 / clientWidth 268`
+  ⟹ 滚动条占位 **11pt**（CSS 写 6px），首张 `.npchip` 宽 **268 = wrapW-11**；
+  不溢出时占位 0、卡宽 wrapW。`.anlhide` 实测 `right=9`（CSS 8 + 1px border）。
+- **旧码**：卡宽 `wrapW-19`（13 留白 + 6 拇指）比 web 窄 8pt；`.anlhide` 右距 8。
+- **判据红→绿**：只改判据时 3 个 ctest 全红（`got 239 want 247`、拇指间隙 13、
+  `rail.padX.right/card.width`、`anlhide.rightGap got 8`）→ 改实现后 6 项相关 ctest 全绿。
+- **改动**：`railLayoutChips` `W-19→W-11`、`scrollThumbRect` `W-6→W-8`、
+  `.anlhide` `side-8-22→side-9-22`；两个测试文件的几何期望同步；新增
+  `test_native_analysis_panel` 的 `anlhide.rightGap=9`。
+- **证据**：`evidence/native-chipwrap-width-20261114.md`、
+  `native-chipwrap-{red,green}-20261114.log`。
+- **挂账**：web 不溢出时卡宽 = wrapW（原生常驻 11pt）；web 卡右缘 22 vs 原生 21（1px border）。

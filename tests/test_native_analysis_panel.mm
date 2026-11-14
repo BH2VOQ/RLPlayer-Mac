@@ -299,6 +299,10 @@ int main() {
                 NSView *anlHide = FindById(panel, @"npAnalHide");
                 Ck(anlHide != nil, "面板右上角有 web #npAnalHide 收起键", @"npAnalHide 缺失");
                 if (anlHide)
+                    // web `.anlhide{right:8px}` 相对 padding box；`#npAnal` 有 1px 边框 ⟹
+                    // 从面板外缘量 = 9pt（ego 实测 right=9）。1.1.7.58 起原生从 8 改 9。
+                    Geo("anlhide.rightGap", 9, panelW - NSMaxX(anlHide.frame), 0.5);
+                if (anlHide)
                     Ck(NSMinX(anlHide.frame) >= NSMaxX(stat.frame) - 1.0,
                        "收起键不压住状态文字（web .anlheadtop padding-right:26 的用途）",
                        [NSString stringWithFormat:@"stat.maxX=%.1f hide.minX=%.1f",
