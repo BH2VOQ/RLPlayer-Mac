@@ -64,3 +64,39 @@
 - `RLPNowPlayingViewController -applyPlayModeUI`：按 `playbackMode` 选 SF Symbol + `REP_META[].aria`
   tooltip + 单曲循环才显示角标；`onCycleMode` 与 `/api/queue` 读回（`refreshQueueContext`）后都调用它，
   `buildContent` 末尾初始化一次。
+
+## 包 3（1.1.7.42）：面板内置收起键 `#npAnalHide` / `#npRailHide`
+
+### 差异（对照表 #27 / #34）
+- web（`ui_page.h`）：`#npAnal` 面板头右上有 `.anlhide`（绝对定位 `top:7;right:8`、22×22 圆形、
+  `‹` 图标），`#npRail` 栏头有 `.nprailhide`（22×22 圆形、`›`）——两枚键与右上角
+  `#npAnalToggle`/`#npRailToggle` 写**同一份**隐藏状态（localStorage `rta-np-anal`/`rta-np-rail`）。
+- 原生 1.1.7.41：只有右上角两枚总开关，面板头部**没有** web 的那枚收起键（元素缺失）。
+
+### 判据（`tests/test_native_nowplaying_web.mm` 追加）
+1. `npAnalHide` / `npRailHide` 控件存在（旧码两枚都红）；
+2. 各 22×22（web `.anlhide`/`.nprailhide` 尺寸），分析面板这枚还是圆形（cornerRadius ≥ 10.5）；
+3. 点 `npAnalHide` ⟹ `analysisPanel.hidden` 且 `NSUserDefaults 键 `RLPNPAnalysisHidden=YES``（与顶栏开关同源）；
+4. 点 `npRailHide` ⟹ `railPanel.hidden` 且 `RLPNPRailHidden=YES`；测完复位，不污染后续用例。
+
+### 红 → 绿
+| 轮次 | 结果 |
+|---|---|
+| 旧码（1.1.7.41） | 9 条新判据里 **2 条 FAIL**（`npAnalHide` / `npRailHide` 都不存在，其余 7 条因控件缺失被跳过）|
+| 新码 | **42 passed / 0 failures**（33 条既有 + 9 条新） |
+
+证据：`evidence/native-playback-hidekeys-red-20261114.log` / `-green-…log`。
+
+### 判据修正（如实披露）
+补上 `.anlhide` 后，既存 `tests/test_native_analysis_panel.mm` 两处期望值 **13** 变红，实测 native=37、diff +24。
+核对 web 源码：`src/net/ui_page.h` 的 `.anlheadtop{padding-right:26px}`（1.1.4-beta6 起就有，正是为右上角
+`.anlhide` 留位）+ `#npAnlStat{padding-right:2px}` + `#npAnal` 内边距 11 ⟹ 状态 frame 右缘距面板右缘应为
+**37**。旧码 13 是「原生还没有那枚收起键」时的近似值（漏算 26），自洽但与 web 不符。
+本包把两处期望改为 **37**（并注明来源），同时新增断言「收起键不压住状态文字」把 26px 右内边距的用途钉住。
+首次全量 ctest（1.1.7.42）因此只有 `native_analysis_panel` 一项红（200/201），修正判据后复跑 **201/201**。
+
+### 实现
+- `RLPNowPlayingViewController` 在两个面板头部各建一枚 22×22 圆形 `NSButton`（identifier 用 web 的
+  `npAnalHide`/`npRailHide`），SF Symbol `chevron.left`/`chevron.right`；
+- 动作只做「隐藏 + 写同一 NSUserDefaults 键 + 重新布局」，不切换（重新显示仍走右上角总开关，与 web 语义一致）；
+- 分析面板状态文字让出 26pt（web `.anlheadtop{padding-right:26px}`），栏头分段控件为收起键让出 30pt。

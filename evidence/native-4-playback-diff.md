@@ -57,7 +57,7 @@
 | 24 | `.anllab{9.5;letter-spacing:1.5;700}` | `anlLab` 9.5/700（无 kern；量宽时按 kern 补 4.5pt 的注释已注明） | 未修（同 #11，字距属性未接） |
 | 25 | `#npAnlStat{10;right;tabular}` | `analysisStatus` 10/right | 已对齐 |
 | 26 | `.npseg{radius9;1px}；`b{10.5;600;pad3 11;border-left}`；`b.on{ok-bg}` | `anlSeg` radius9/border + 三枚 10.5/600 无边框按钮 + 两条发丝分隔 | 已对齐 |
-| 27 | `.anlhide{22×22;圆形;top7 right8}‹` | **无此控件** | 未修（元素缺失，见 1.1.7.42 计划项） |
+| 27 | `.anlhide{22×22;圆形;top7 right8}‹` | `analysisPanel` 头部 `npAnalHide`（22×22、cornerRadius 11、`chevron.left`），点击=隐藏+写 `RLPNPAnalysisHidden` | **已修（1.1.7.42）** |
 | 28 | `#npAnlBody{overflow-y:scroll;gap:8;padding-right:13;margin-right:-11}` | `RLPNPAnalBody`/`anlBody`：自绘滚动、无固定沟槽 | 未修（web 恒显滚动条沟槽只为三档卡等宽；原生卡片宽度不随档位跳，代价是细窄时滚动条覆盖右缘） |
 | 29 | `.anlcard{radius10;pad7 9 8;gap4}` | `kAnlCardPadTop/X/Bottom/Gap/Radius` 常量 | 已对齐 |
 | 30 | `.anlgrid{2 列;gap1 10}`、`.anlml`、`.anlv`、`.anlwarn`、`.anlnote` | `RLPAnlCardView` 逐行布局（`kAnlColGap=10`） | 已对齐 |
@@ -69,7 +69,7 @@
 | 31 | `.nprailcard{pad10;radius14;gap8;blur}` | `railPanel` 几何 `kRailHeadPadX/PadTop/gap` | 已对齐 |
 | 32 | `.nprailcap{9.5;letter-spacing:1.5;700}` | `railTitle` 9.5 + NSKern 1.5 | 已对齐 |
 | 33 | `.npseg`「简略/详细」| `railDensity`(npRailSeg) NSSegmentedControl h24 | 已对齐 |
-| 34 | `.nprailhide{22×22;圆形}›` | **无此控件** | 未修（同 #27） |
+| 34 | `.nprailhide{22×22;圆形}›` | `railPanel` 栏头 `npRailHide`（22×22、`chevron.right`），点击=隐藏+写 `RLPNPRailHidden` | **已修（1.1.7.42）** |
 | 35 | `.npchip{pad8 10 9;radius11;12/11.5/9.5/11.5/10.5}`、`-top/-name/-st/-p1/-p2` | `RLPRailChipView`（768-955）同字号层级 | 已对齐 |
 | 36 | `.npchipwrap[data-detail=1]` 5 行/2 行钳制 | `kRailDetailLineHeight=1.35`、`measuredTextHeight cap:5/2` | 已对齐 |
 | 37 | `.nprailempty{10.5;1.6}` | `railEmptyLabel` 10.5 多行 | 已对齐 |
@@ -135,6 +135,14 @@
 - 页面内自检脚本（`window.__SELFTEST`）是 web 侧判据载体，原生用 `--audit`/ctest，载体不同、判据等价。
 
 ## 11. 红→绿记录（逐包追加）
+
+### 1.1.7.42 —— 面板内置收起键 `#npAnalHide` / `#npRailHide`（表 #27 / #34）
+
+- 判据：`tests/test_native_nowplaying_web.mm` 追加 9 条（两枚键存在、各 22×22、圆形、两盏灯点击后
+  panel.hidden + 同一 `NSUserDefaults` 键）。
+- 旧码（1.1.7.41）：**2 FAIL**（两枚键都不存在；其余 7 条因控件缺失被跳过）。
+- 新码：**42P / 0F**（33 既有 + 9 新）。
+- 证据：`evidence/native-playback-hidekeys-{red,green}-20261114.log`。
 
 ### 1.1.7.41 —— 循环模式图标 + `#npRepOne` 角标（表 #51 / #52）
 

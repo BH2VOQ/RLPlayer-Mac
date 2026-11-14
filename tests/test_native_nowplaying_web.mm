@@ -118,6 +118,34 @@ int main(){@autoreleasepool{
   // 复位到顺序播放，别把档位状态留给后面的用例
   if([vc respondsToSelector:@selector(applyPlayModeUI)]){[vc setValue:@0 forKey:@"playbackMode"];[vc applyPlayModeUI];}
  }
+
+ // ---- 侧栏面板内置收起键：web #npAnalHide / #npRailHide（22x22 圆形，与顶栏开关同源状态）----
+ // 旧码只有右上角两个总开关，面板头部没有 web 的那枚收起键（元素缺失）。
+ {
+  [(NSView *)vc.view layoutSubtreeIfNeeded];   // 面板是内层视图，尺寸由 layoutWebPlayback 写
+  NSButton *anlHide=(NSButton *)find(vc.view,@"npAnalHide");
+  NSButton *railHide=(NSButton *)find(vc.view,@"npRailHide");
+  ck(anlHide!=nil,"web #npAnalHide panel-local hide key exists");
+  ck(railHide!=nil,"web #npRailHide panel-local hide key exists");
+  if(anlHide&&railHide){
+    ck(fabs(anlHide.frame.size.width-22)<0.6&&fabs(anlHide.frame.size.height-22)<0.6,
+       "npAnalHide is 22x22 like web .anlhide");
+    ck(fabs(railHide.frame.size.width-22)<0.6&&fabs(railHide.frame.size.height-22)<0.6,
+       "npRailHide is 22x22 like web .nprailhide");
+    ck(anlHide.wantsLayer&&anlHide.layer.cornerRadius>=10.5, "npAnalHide is a circle (web border-radius:50%)");
+    NSView *ap=[vc valueForKey:@"analysisPanel"];NSView *rp=[vc valueForKey:@"railPanel"];
+    [anlHide performClick:nil];
+    ck(ap.hidden,"npAnalHide hides the analysis panel");
+    ck([[NSUserDefaults standardUserDefaults] boolForKey:@"RLPNPAnalysisHidden"],
+       "npAnalHide persists the same hidden state as the top-right toggle");
+    ap.hidden=NO;[[NSUserDefaults standardUserDefaults] setBool:NO forKey:@"RLPNPAnalysisHidden"];
+    [railHide performClick:nil];
+    ck(rp.hidden,"npRailHide hides the AI rail panel");
+    ck([[NSUserDefaults standardUserDefaults] boolForKey:@"RLPNPRailHidden"],
+       "npRailHide persists the same hidden state as the top-right toggle");
+    rp.hidden=NO;[[NSUserDefaults standardUserDefaults] setBool:NO forKey:@"RLPNPRailHidden"];
+  }
+ }
  pendingFav=nil;method_setImplementation(shared,old);
  printf("np web: %d failures\n",fail);return fail?1:0;
 }}

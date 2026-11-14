@@ -1069,6 +1069,9 @@ static NSString *RLPRailTagText(id srValue, id bitsValue) {
 @property(nonatomic,strong) NSTimer *lyricRetryTimer;
 @property(nonatomic,strong) NSTextField *kindLabel;
 @property(nonatomic,strong) NSTextField *analysisStatus;
+/// web #npAnalHide / #npRailHide：面板头部右上的 22px 圆形收起键（与顶栏开关同源状态）。
+@property(nonatomic,strong) NSButton *anlHide;
+@property(nonatomic,strong) NSButton *railHide;
 @property(nonatomic,strong) NSTextField *anlLab;       // web .anllab（独立 9.5/700/kern1.5）
 @property(nonatomic,strong) NSView *anlSeg;            // web .npseg（一个外框 + 发丝分隔）
 @property(nonatomic,strong) NSView *anlSep1, *anlSep2;
@@ -1303,6 +1306,14 @@ static NSString *RLPRailTagText(id srValue, id bitsValue) {
     self.analysisStatus=RLPLabel(RLPTr(@"未播放"),[NSFont systemFontOfSize:10],t.mut2);
     self.analysisStatus.identifier=@"npAnlStat";self.analysisStatus.alignment=NSTextAlignmentRight;
     [self.analysisPanel addSubview:self.analysisStatus];
+    // web #npAnalHide（.anlhide{position:absolute;top:7;right:8;22x22;圆形;收起箭头}）：
+    // 面板头部自己的收起键，和右上角 #npAnalToggle 是**同一份**隐藏状态（web 两个入口写同一 localStorage）。
+    self.anlHide=[self webButton:@"" identifier:@"npAnalHide" action:@selector(onHideAnalysis:) parent:self.analysisPanel];
+    self.anlHide.title=@"";self.anlHide.bordered=NO;self.anlHide.imagePosition=NSImageOnly;
+    self.anlHide.image=[NSImage imageWithSystemSymbolName:@"chevron.left"
+                                  accessibilityDescription:RLPTr(@"隐藏音频分析面板")];
+    self.anlHide.contentTintColor=t.mut2;self.anlHide.wantsLayer=YES;self.anlHide.layer.cornerRadius=11;
+    self.anlHide.toolTip=RLPTr(@"隐藏音频分析面板，可在右上角重新显示");
     // 三个动作装进**一个**带外框的分段控件（web .npseg：radius 9、10.5/600、padding 3 11、发丝分隔）
     self.anlSeg=[[NSView alloc] initWithFrame:NSZeroRect];self.anlSeg.identifier=@"npAnlSeg";
     self.anlSeg.wantsLayer=YES;self.anlSeg.layer.cornerRadius=9;self.anlSeg.layer.borderWidth=1;
@@ -1344,6 +1355,13 @@ static NSString *RLPRailTagText(id srValue, id bitsValue) {
     }
     [self.railPanel addSubview:self.railTitle];
     self.railDensity=[NSSegmentedControl segmentedControlWithLabels:@[RLPTr(@"简略"),RLPTr(@"详细")] trackingMode:NSSegmentSwitchTrackingSelectOne target:self action:@selector(onRailDensity:)];self.railDensity.identifier=@"npRailSeg";self.railDensity.selectedSegment=self.railDetail?1:0;[self.railPanel addSubview:self.railDensity];
+    // web #npRailHide（.nprailhide{22x22;圆形;收起箭头}）：与右上角 #npRailToggle 共用同一隐藏状态。
+    self.railHide=[self webButton:@"" identifier:@"npRailHide" action:@selector(onHideRail:) parent:self.railPanel];
+    self.railHide.title=@"";self.railHide.bordered=NO;self.railHide.imagePosition=NSImageOnly;
+    self.railHide.image=[NSImage imageWithSystemSymbolName:@"chevron.right"
+                                accessibilityDescription:RLPTr(@"隐藏 AI 资料面板")];
+    self.railHide.contentTintColor=t.mut2;self.railHide.wantsLayer=YES;self.railHide.layer.cornerRadius=11;
+    self.railHide.toolTip=RLPTr(@"隐藏 AI 资料面板，可在右上角重新显示");
     // 三张卡（歌曲/专辑/艺术家）= web `.npchip`。旧实现是 NSButton 多行标题，
     // AppKit 把文字画在卡片左下角（上半部全空）⟹ 用户报「排版散」。
     NSMutableArray<RLPRailChipView *> *cards=[NSMutableArray array];
@@ -1545,7 +1563,8 @@ static NSString *RLPRailTagText(id srValue, id bitsValue) {
         self.anlLab.frame = NSMakeRect(anlPadX, headY, MIN(MAX(20, labW), MAX(20, side - anlPadX * 2)), anlLabelH);
         // 状态贴右：面板右缘 → 13pt（web 面板内边距 11 + #npAnlStat 右内边距 2）
         {
-            const CGFloat statRight = side - (anlPadX + 2);
+            // web .anlheadtop{padding-right:26px}：状态文字给右上角的收起键让出 26pt。
+            const CGFloat statRight = side - (anlPadX + 26);
             const CGFloat statAvail = MAX(20, statRight - (anlPadX + labW + 8));
             const CGFloat statW = MIN(statAvail, ceil([self.analysisStatus.stringValue sizeWithAttributes:
                                                       @{ NSFontAttributeName: self.analysisStatus.font }].width) + 4.0);
@@ -1562,12 +1581,16 @@ static NSString *RLPRailTagText(id srValue, id bitsValue) {
         self.anlReanalyze.frame = NSMakeRect(anlPadX, segY, 62, anlSegH);
         // 窄面板放不下「重新分析」时让它让位（「分析」分段本来就是同一动作）。
         if (NSMinX(self.anlSeg.frame) < NSMaxX(self.anlReanalyze.frame) + 8) self.anlReanalyze.hidden = YES;
+        // web .anlhide：top:7 / right:8 / 22x22（面板局部坐标=左下原点 => y 从面板顶往内 7+22）。
+        self.anlHide.frame = NSMakeRect(side - 8.0 - 22.0, bodyH - 7.0 - 22.0, 22.0, 22.0);
         [self anlLayoutCards];
     }
     // ---- AI 整理栏几何（web .nprailcard padding:10 / gap:8，.npchipwrap gap:6）----
     const CGFloat railSegH=24;
     self.railTitle.frame=NSMakeRect(kRailHeadPadX,bodyH-kRailHeadPadTop-13,72,13);
-    self.railDensity.frame=NSMakeRect(MAX(80,side-kRailHeadPadX-116),bodyH-kRailHeadPadTop-railSegH,116,railSegH);
+    // 栏头右侧：简略/详细分段 + 收起键（web .nprailhide 与分段同处栏头一行）。
+    self.railDensity.frame=NSMakeRect(MAX(80,side-kRailHeadPadX-116-30),bodyH-kRailHeadPadTop-railSegH,116,railSegH);
+    self.railHide.frame=NSMakeRect(side-8.0-22.0,bodyH-kRailHeadPadTop-railSegH,22.0,22.0);
     CGFloat ry=bodyH-kRailHeadPadTop-railSegH-kRailHeadGap;   // 栏头底部再空 8
     const CGFloat railCardW=MAX(40,side-kRailHeadPadX*2);
     if (self.railEmptyLabel && !self.railEmptyLabel.hidden) {
@@ -1629,6 +1652,16 @@ static NSString *RLPRailTagText(id srValue, id bitsValue) {
 - (void)onClosePlayback:(id)sender {[[NSNotificationCenter defaultCenter] postNotificationName:@"RLPCloseNowPlayingNotification" object:nil];}
 - (void)cancelOperation:(id)sender {[self onClosePlayback:sender];}
 - (void)onToggleAnalysis:(id)sender {self.analysisPanel.hidden=!self.analysisPanel.hidden;[[NSUserDefaults standardUserDefaults] setBool:self.analysisPanel.hidden forKey:@"RLPNPAnalysisHidden"];[self layoutWebPlayback];}
+- (void)onHideAnalysis:(id)sender {
+    self.analysisPanel.hidden=YES;
+    [[NSUserDefaults standardUserDefaults] setBool:YES forKey:@"RLPNPAnalysisHidden"];
+    [self layoutWebPlayback];
+}
+- (void)onHideRail:(id)sender {
+    self.railPanel.hidden=YES;
+    [[NSUserDefaults standardUserDefaults] setBool:YES forKey:@"RLPNPRailHidden"];
+    [self layoutWebPlayback];
+}
 - (void)onToggleRail:(id)sender {self.railPanel.hidden=!self.railPanel.hidden;[[NSUserDefaults standardUserDefaults] setBool:self.railPanel.hidden forKey:@"RLPNPRailHidden"];[self layoutWebPlayback];}
 - (void)onToggleAuto:(id)sender {self.anlAutoEnabled=!self.anlAutoEnabled;self.anlAutoSettingAt=[NSDate timeIntervalSinceReferenceDate];[[RLPCoreClient shared] postJSON:@"/api/settings" body:self.anlAutoEnabled?@"autoanl=1":@"autoanl=0" completion:nil];[self anlPaint];if(self.anlAutoEnabled)[self anlAutoTickForPath:self.currentPath playing:self.webStatus.playing paused:self.webStatus.paused];}
 - (void)onPrevious:(id)s {[[RLPCoreClient shared] postJSON:@"/api/skip?dir=-1" body:nil completion:nil];}
@@ -2873,6 +2906,7 @@ static NSString *RLPNowPlayingCastDeviceLabel(NSString *device) {
     RLPTheme *t=[RLPTheme current];self.webCanvas.needsDisplay=YES;self.cover.layer.backgroundColor=t.bg2.CGColor;
     self.titleLabel2.textColor=t.text;self.artistLabel2.textColor=t.mut;self.metaLabel.textColor=t.mut2;self.kindLabel.textColor=t.mut2;
     self.railTitle.textColor=t.mut2;self.analysisStatus.textColor=t.mut2;self.lyricsEmpty.textColor=t.mut2;
+    self.anlHide.contentTintColor=t.mut2;self.railHide.contentTintColor=t.mut2;
     for(NSView *p in @[self.analysisPanel,self.railPanel]){p.wantsLayer=YES;p.layer.cornerRadius=14;p.layer.borderWidth=1;p.layer.borderColor=t.line.CGColor;p.layer.backgroundColor=[t.isLight?[NSColor colorWithSRGBRed:15/255. green:23/255. blue:42/255. alpha:.04]:[NSColor colorWithWhite:1 alpha:.045] CGColor];}
     // 头部：独立 9.5/700/kern1.5 标题（web .anllab）；分段控件一个外框 + 内部发丝分隔。
     {

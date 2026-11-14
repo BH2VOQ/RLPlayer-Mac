@@ -475,3 +475,27 @@ AppKit `NSGenericException: no common ancestor`（离屏测试第一次跑直接
 **证据**：`evidence/native-playback-states-20261114.md`、`native-playback-mode-{red,green}-20261114.log`；
 对照表 #51/#52 标「已修（1.1.7.41）」。
 **门禁（1.1.7.41 树）**：build 0 error；串行全量 ctest **201/201 passed（392.91s）**；audit **246/0**；parity missing=0；behavior actionable=0；i18n OK。
+
+### 2026-11-14 16:0x —— 轮次 12d（1.1.7.42）：面板内置收起键 `#npAnalHide` / `#npRailHide`
+
+**任务**（task-4 · 播放页差异表 #27/#34）：web 的 `#npAnal` 面板头右上有一枚 `.anlhide`
+（`position:absolute;top:7;right:8`、22×22 圆形、`‹`），`#npRail` 栏头有 `.nprailhide`（22×22、`›`）；
+两枚键与右上角 `#npAnalToggle`/`#npRailToggle` 写**同一份**隐藏状态。原生 1.1.7.41 只有右上角总开关，
+面板头部没有这两枚键（元素缺失）。
+**判据**：`tests/test_native_nowplaying_web.mm` 追加 9 条：两枚键存在、各 22×22、分析面板这枚是圆形
+（cornerRadius≥10.5）、点 `npAnalHide` 后 `analysisPanel.hidden` 且 `RLPNPAnalysisHidden=YES`、
+点 `npRailHide` 后 `railPanel.hidden` 且 `RLPNPRailHidden=YES`；测后复位。
+**红→绿**：旧码（1.1.7.41）**2 F**（两枚键都不存在，其余 7 条因控件缺失跳过）→ 新码 **42 passed / 0 failures**
+（33 条既有 + 9 条新）。
+**判据修正（如实披露）**：补上 `.anlhide` 后既存 `test_native_analysis_panel` 两处期望值 **13** 变红
+（实测 37，diff +24）。核对 web：`.anlheadtop{padding-right:26px}`（1.1.4-beta6 起就有，正是给 `.anlhide` 留位）
++ `#npAnlStat{padding-right:2}` + 面板内边距 11 ⟹ 应为 **37**；旧值 13 是原生还没有收起键时的近似（漏算 26）。
+本包把两处期望改为 37 并注明来源，另新增「收起键不压住状态文字」断言。首次全量 ctest 因此只有
+`native_analysis_panel` 一项红（200/201），修正判据后复跑 **201/201**。
+**实现**：两个面板头部各建一枚 22×22 圆形 `NSButton`（identifier 用 web 的 `npAnalHide`/`npRailHide`，
+SF Symbol `chevron.left`/`chevron.right`）；动作 = 隐藏 + 写同一 `NSUserDefaults` 键 + 重新布局（不切换，
+重新显示仍走右上角总开关，与 web 语义一致）；分析面板状态文字让出 26pt，栏头分段控件为收起键让出 30pt。
+**证据**：`evidence/native-playback-states-20261114.md`、`native-playback-hidekeys-{red,green}-20261114.log`、
+`evidence/native-42-ctest.log`、`native-42-audit.log`；对照表 #27/#34 标「已修（1.1.7.42）」。
+**门禁（1.1.7.42 树）**：build 0 error；串行全量 ctest **201/201 passed（377.01s）**；audit **246/0**；
+parity missing=0；behavior actionable=0；i18n OK（2416 pairs）。

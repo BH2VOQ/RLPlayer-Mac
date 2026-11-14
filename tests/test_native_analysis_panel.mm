@@ -275,7 +275,11 @@ int main() {
         NSTextField *stat = (NSTextField *)FindById(panel, @"npAnlStat");
         Ck(stat != nil, "状态文字 #npAnlStat 存在", @"npAnlStat 缺失");
         if (stat) {
-            Geo("stat.rightGap", 13, panelW - NSMaxX(stat.frame), 1.0);   // 13±1
+            // web：`ui_page.h` 的 `.anlheadtop{padding-right:26px}`（1.1.4-beta6，为右上角 `.anlhide`
+            // 留位）+ `#npAnlStat{padding-right:2px}` + `#npAnal` 内边距 11 ⟹ 状态 frame 右缘距面板右缘 37。
+            // 1.1.7.41 以前原生没有那枚收起键，这里硬编码 13（面板内边距 11 + 2）自洽但与 web 不符；
+            // 1.1.7.42 补上 `.anlhide` 后按 web 真值改为 37（并新增「收起键不压状态文字」断言）。
+            Geo("stat.rightGap", 37, panelW - NSMaxX(stat.frame), 1.0);
             Ck(stat.alignment == NSTextAlignmentRight, "状态文字右对齐（web text-align:right）",
                [NSString stringWithFormat:@"alignment=%ld", (long)stat.alignment]);
             Geo("stat.font", 10, stat.font.pointSize, 0.3);
@@ -284,6 +288,16 @@ int main() {
                 Ck(stat.frame.size.width >= need - 0.5, "状态文字不被截断（frame 容得下全文）",
                    [NSString stringWithFormat:@"frame=%.1f need=%.1f got=「%@」",
                     stat.frame.size.width, need, stat.stringValue]);
+            }
+            {
+                // web 的 26px 右内边距就是给 `.anlhide` 留的：两枚元素不许在水平方向重叠。
+                NSView *anlHide = FindById(panel, @"npAnalHide");
+                Ck(anlHide != nil, "面板右上角有 web #npAnalHide 收起键", @"npAnalHide 缺失");
+                if (anlHide)
+                    Ck(NSMinX(anlHide.frame) >= NSMaxX(stat.frame) - 1.0,
+                       "收起键不压住状态文字（web .anlheadtop padding-right:26 的用途）",
+                       [NSString stringWithFormat:@"stat.maxX=%.1f hide.minX=%.1f",
+                        NSMaxX(stat.frame), NSMinX(anlHide.frame)]);
             }
             Ck(![stat.stringValue containsString:@"音频分析"],
                "状态不再重复「音频分析」（标题已独立成一条）",
@@ -700,8 +714,9 @@ int main() {
                "1180 窗口下面板标题仍完整（不被截断）",
                [NSString stringWithFormat:@"panel=%.1f frame=%.1f need=%.1f", pw,
                 lab2.frame.size.width, lab2.attributedStringValue.size.width]);
-            Ck(stat2 && pw - 13 - NSMaxX(stat2.frame) <= 0.5 && NSMaxX(stat2.frame) >= pw - 14,
-               "1180 窗口下状态仍贴右（距面板右缘 13±1）",
+            // 同 279 行：web `.anlheadtop` 的 26px 右内边距 + 面板 11 ⟹ 37（旧码漏算 26 写成 13）。
+            Ck(stat2 && fabs(NSMaxX(stat2.frame) - (pw - 37)) <= 1.0,
+               "1180 窗口下状态仍贴右（距面板右缘 37±1，web .anlheadtop padding-right:26）",
                [NSString stringWithFormat:@"panel=%.1f right=%.1f", pw, NSMaxX(stat2.frame)]);
             Ck(seg2 && NSMaxX(seg2.frame) <= pw - 11 + 0.5 && NSMaxX(seg2.frame) >= pw - 12,
                "1180 窗口下分段控件右端贴齐面板内容右缘（11px 内边距）",
