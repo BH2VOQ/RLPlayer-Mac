@@ -499,3 +499,26 @@ SF Symbol `chevron.left`/`chevron.right`）；动作 = 隐藏 + 写同一 `NSUse
 `evidence/native-42-ctest.log`、`native-42-audit.log`；对照表 #27/#34 标「已修（1.1.7.42）」。
 **门禁（1.1.7.42 树）**：build 0 error；串行全量 ctest **201/201 passed（377.01s）**；audit **246/0**；
 parity missing=0；behavior actionable=0；i18n OK（2416 pairs）。
+
+### 2026-11-14 16:2x —— 轮次 13（1.1.7.43）：播放页响应式字号/行距（P1，表 #13/#41）
+
+**任务**（Lead 定序 P1）：web `#npTitle{clamp(19px,2.6vh,27px);line-height:1.3}`、
+`.npline{clamp(13px,1.9vh,17px);line-height:2.05}`；原生固定 20pt/30pt 行 + 歌词 14pt/30pt ⟹ 小窗标题偏大、
+大窗偏小、行距僵。
+**判据**：`tests/test_native_nowplaying_web.mm` 追加 18 条，按**真实窗口高度** 640/800/1080 三档改 `vc.view`
+尺寸与 `layoutSubtreeIfNeeded`，断言标题字号=clamp(19,2.6vh,27)、歌词字号=clamp(13,1.9vh,17)、
+行盒=字号×2.05、相邻行贴合（±0.5~0.6pt）。
+**红→绿**：旧码（1.1.7.42）**9 F**（标题 20/20/20 vs 19/20.8/27；歌词 14 vs 13/15.2/17；行盒 30 vs 26.65/31.16/34.85）
+→ 新码 **60 passed / 0 failures**（42 既有 + 18 新）。
+**实现**：新增 `RLPNPTitlePointSize`/`RLPNPLyricPointSize`/`RLPNPLyricLineStep`（1vh=webCanvas 高度 1%）；
+`layoutWebPlayback` 每帧换算标题字号与行盒，并把副标题/下一首/芯片行的 Y 从标题行底推导；
+歌词行盒 = 2.05×字号，窗口高度变化时 `restyleLyricRows` 只重设字体不改控件/滚动状态。
+**如实挂账**：`.npline.on` 的 `transform:scale(1.03)` active 缩放未做（候补）；只验证 640/800/1080 三档；
+标题省略号沿用 NSTextField 截断。
+**门禁（1.1.7.43 树）**：build 0 error；串行全量 ctest **201/201 passed（380.47s）**；audit **246/0**；
+parity missing=0；behavior actionable=0；i18n OK（2416 pairs）。
+**如实记录（flake）**：第一次全量 ctest 200/201，唯一红 `diag_bundle_json`（与本包无关的诊断包 JSON 用例）；
+单跑该用例 **62/0** 通过，随后**无并发**复跑全量 **201/201**。判为并发审计（同时跑 --audit）带来的环境抖动，
+按 open flake 记，不加工代码。
+**证据**：`evidence/native-responsive-type-20261114.md`、`native-responsive-type-{red,green}-20261114.log`、
+`native-43-ctest.log`、`native-43-audit.log`；对照表 #13/#41 标「已修（1.1.7.43）」（#41 的 active scale 仍挂未修）。

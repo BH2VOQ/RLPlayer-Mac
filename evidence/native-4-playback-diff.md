@@ -33,7 +33,7 @@
 | 10 | `.npcover{height:clamp(132px,24vh,236px)}` + `radius14` | `c=MIN(236,MAX(132,h*.24))`，`cover.layer.cornerRadius=14` | 已对齐 |
 | 11 | `.npkind{font-size:10;letter-spacing:1.6;font-weight:600;margin-bottom:8}` | `kindLabel` 10/600（**无 letter-spacing**） | 未修（字距 1.6 未接；wants kern，与 anllab 同一手法） |
 | 12 | `.npkind` 文案 = `npPlayingKindText(curMeta)`：`正在播放 · CODEC / kHz / bit`；`null` ⟹ 纯「正在播放」 | `loadMetaAndKnowledgeForPath`（2431）同格式；`refresh` 切曲分支先复位 | **已修（1.1.7.40）**：旧码停止后挂上一首格式串、无字段时挂尾 ` · `（见 #60） |
-| 13 | `.nptit{font-size:clamp(19px,2.6vh,27px);font-weight:700;line-height:1.3;…ellipsis}` | `titleLabel2` 固定 20/700 | 未修（响应式字号未接；见 #44 同因） |
+| 13 | `.nptit{font-size:clamp(19px,2.6vh,27px);font-weight:700;line-height:1.3;…ellipsis}` | `layoutWebPlayback`：`RLPNPTitlePointSize(vh)`，`titleH=ceil(size·1.3)`，下方行 Y 从标题行底推导 | **已修（1.1.7.43）**：旧码固定 20/30 |
 | 14 | `.npsub{font-size:13;color:var(--mut);margin-top:8;ellipsis}` | `artistLabel2` 13/mut @infoY+63；`loadMeta` 拼 `artist · album` | 已对齐 |
 | 15 | `#npNextTrackHero{font-size:12;color:var(--mut2);margin-top:4;默认隐藏}` 文案 `下一首: X · 剩 N 首` / `队列末尾 · 共 N 首` | `metaLabel`(npNextTrackHero) 12/mut2；`refreshQueueContext`（2865）只在「有下一首」时写文案，**不清空、无「队列末尾」分支、不按播放态隐藏** | 未修（文案/显隐状态机未对齐；web 半角 `: `、原生全角 `：`） |
 | 16 | `#npFavBtn{padding:4;display:none→收藏态显示}` 20×20 心形 | `favoriteButton` 28×30 `♡`（`refreshFavorite` 控制） | 已对齐（图标为字形而非 SVG） |
@@ -81,7 +81,7 @@
 | # | web | 原生 | 状态 |
 |---|---|---|---|
 | 40 | `#npLyric`：`mask-image` 上下 26px 渐隐、`scrollbar-width:none`、`padding:2px 0` | `lyricScroll`：无 mask 层、隐藏滚动条 | 未修（CAGradientLayer mask 未接；视觉差异在长歌词首/末行） |
-| 41 | `.npline{font-size:clamp(13px,1.9vh,17px);line-height:2.05}`；`.on{650;scale1.03}` | `applyLyricText`/`layoutLyricRows`（1583/1588）：**固定 14pt、行距 30pt**，active=Semibold，无 scale | 未修（响应式字号/行高 + active 缩放未接；见 1.1.7.43 计划项） |
+| 41 | `.npline{font-size:clamp(13px,1.9vh,17px);line-height:2.05}`；`.on{650;scale1.03}` | `applyLyricText`/`layoutLyricRows`：字号=`RLPNPLyricPointSize(vh)`、行盒=2.05×字号，窗口变化时 `restyleLyricRows`；active=Semibold | **已修（1.1.7.43）** 字号/行盒；**未修** active `scale(1.03)` |
 | 42 | 行留白 = `(容器高-行高)/2`（JS 写 `--nppad`），首/末行也能居中 | `layoutLyricRows`：`pad=MAX(26,h/2-18)` | 已对齐（等价公式，行高固定 30 时一致） |
 | 43 | 手动滚动 3s 保护；seek/切歌立即重定位 | `lyricManualUntil`/`onLyricScrolled`（1604）、`onCommitSeek` 清保护 | 已对齐 |
 | 44 | 空态：`没有歌词` + 副行 `同名 .lrc 文件、内嵌歌词，或播放时自动在线补全（可在设置-元数据补全关闭）` | `lyricsEmpty`：`没有歌词 · 同名 LRC、内嵌歌词或在线补全`（无曲目时 `还没有播放曲目`） | 未修（文案未逐字对齐；拆行/字号未做） |

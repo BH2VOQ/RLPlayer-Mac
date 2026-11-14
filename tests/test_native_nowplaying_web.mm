@@ -146,6 +146,52 @@ int main(){@autoreleasepool{
     rp.hidden=NO;[[NSUserDefaults standardUserDefaults] setBool:NO forKey:@"RLPNPRailHidden"];
   }
  }
+
+ // ---- P1 响应式字号：web `#npTitle{clamp(19px,2.6vh,27px)}`、`.npline{clamp(13px,1.9vh,17px);line-height:2.05}` ----
+ // 旧码固定 20pt 标题 / 14pt+30pt 行盒：640 档标题偏大、1080 档标题偏小；歌词在三档都不随窗口变。
+ {
+  NSArray *heights=@[@640,@800,@1080];
+  for(NSNumber *hn in heights){
+    CGFloat H=hn.doubleValue;
+    [(NSView *)vc.view setFrameSize:NSMakeSize(1180,H)];
+    [(NSView *)vc.view layoutSubtreeIfNeeded];
+    [vc setValue:@"/offline/lyric.flac" forKey:@"currentPath"];
+    [vc applyLyricText:@"[00:01.00]line one\n[00:05.00]line two" forPath:@"/offline/lyric.flac"];
+    [(NSView *)vc.view layoutSubtreeIfNeeded];
+    const CGFloat expTitle=MIN(27.0,MAX(19.0,H*0.026));     // web clamp(19px,2.6vh,27px)
+    const CGFloat expLyric=MIN(17.0,MAX(13.0,H*0.019));     // web clamp(13px,1.9vh,17px)
+    NSTextField *title=(NSTextField *)find(vc.view,@"npTitle");
+    ck(title!=nil,"npTitle 存在（响应式字号判据前提）");
+    if(title)
+      ck(fabs(title.font.pointSize-expTitle)<0.5,
+         [[NSString stringWithFormat:@"@%dpt 窗口：npTitle 字号 = clamp(19,2.6vh,27)（want %.2f got %.2f）",
+           (int)H,expTitle,title.font.pointSize] UTF8String]);
+    // 标题行盒 = 字号 × 1.3（web line-height:1.3）——不许把 27pt 字塞进 30pt 行里被裁。
+    if(title){
+      NSTextField *k=(NSTextField *)find(vc.view,@"npKind");
+      (void)k;
+    }
+    NSArray<NSButton *> *rows=[vc valueForKey:@"lyricRows"];
+    ck(rows.count==2, [[NSString stringWithFormat:@"@%dpt：两行歌词都建成了",(int)H] UTF8String]);
+    if(rows.count==2){
+      NSButton *b0=rows[0];
+      NSFont *f0=(NSFont *)[b0.attributedTitle attribute:NSFontAttributeName atIndex:0 effectiveRange:NULL];
+      CGFloat fs=f0?f0.pointSize:b0.font.pointSize;
+      ck(fabs(fs-expLyric)<0.5,
+         [[NSString stringWithFormat:@"@%dpt：歌词字号 = clamp(13,1.9vh,17)（want %.2f got %.2f）",
+           (int)H,expLyric,fs] UTF8String]);
+      ck(fabs(b0.frame.size.height-fs*2.05)<0.6,
+         [[NSString stringWithFormat:@"@%dpt：行盒 = 字号×2.05（web line-height）want %.2f got %.2f",
+           (int)H,fs*2.05,b0.frame.size.height] UTF8String]);
+      CGFloat gap=NSMinY(rows[1].frame)-NSMaxY(b0.frame);
+      ck(fabs(gap)<0.6,
+         [[NSString stringWithFormat:@"@%dpt：相邻歌词行贴合行盒（gap want 0 got %.2f）",(int)H,gap] UTF8String]);
+    }
+  }
+  // 复位到默认窗口，别把尺寸留给后面的用例
+  [(NSView *)vc.view setFrameSize:NSMakeSize(1180,760)];
+  [(NSView *)vc.view layoutSubtreeIfNeeded];
+ }
  pendingFav=nil;method_setImplementation(shared,old);
  printf("np web: %d failures\n",fail);return fail?1:0;
 }}

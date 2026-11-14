@@ -145,6 +145,17 @@ static NSString *RLPNPVolDbLabel(double db) {
     return [NSString stringWithFormat:@"%@%.1f dB", db > 0.0 ? @"+" : @"", db];
 }
 
+/// web 响应式字号的三个 clamp（`ui_page.h`）：
+///   `#npTitle{font-size:clamp(19px,2.6vh,27px);line-height:1.3}`
+///   `.npline{font-size:clamp(13px,1.9vh,17px);line-height:2.05}`
+/// 1vh = 页面视口高的 1%；原生等价 = #npPage 覆盖层（webCanvas）bounds 高度。
+/// 旧码标题固定 20、歌词固定 14 + 行盒 30 ⟹ 大窗口显小、小窗口行距错。
+static CGFloat RLPNPClamp(CGFloat v, CGFloat lo, CGFloat hi) { return fmin(hi, fmax(lo, v)); }
+static CGFloat RLPNPTitlePointSize(CGFloat viewportH) { return RLPNPClamp(viewportH * 0.026, 19.0, 27.0); }
+static CGFloat RLPNPLyricPointSize(CGFloat viewportH) { return RLPNPClamp(viewportH * 0.019, 13.0, 17.0); }
+/// web `.npline{line-height:2.05}`：行盒 = 字号×2.05（不是固定 30pt）。
+static CGFloat RLPNPLyricLineStep(CGFloat pointSize) { return pointSize * 2.05; }
+
 /// 收藏路径规范化：后端 /api/fav 的收藏键沿用了跨平台的 "\\" 分隔符
 /// （实测 POST /api/fav?file=/a/b.flac 后 /api/fav/list 回 "\\a\\b.flac"），
 /// 而 /api/status 的 current 是 "…/a/b.flac" ⟹ 逐字比较永远不相等、心形永远空心。
@@ -1063,6 +1074,8 @@ static NSString *RLPRailTagText(id srValue, id bitsValue) {
 @property(nonatomic,copy) NSArray<RLPLyricLine *> *lyricLines;
 @property(nonatomic,strong) NSMutableArray<NSButton *> *lyricRows;
 @property(nonatomic) NSInteger lyricActiveIndex;
+/// 当前歌词字号（按视口高度换算；只用于检测窗口高度变化后重排，不参与业务状态）。
+@property(nonatomic) CGFloat lyricPointSize;
 @property(nonatomic) NSTimeInterval lyricManualUntil;
 @property(nonatomic) NSUInteger lyricSeq;
 @property(nonatomic) NSInteger lyricRetry;
@@ -1526,14 +1539,21 @@ static NSString *RLPRailTagText(id srValue, id bitsValue) {
     CGFloat c=MIN(236,MAX(132,h*.24)), gutter=16, top=44, by=top+c+18, bottom=MAX(by+60,h-86);
     self.cover.frame=NSMakeRect(gutter,top,c,c);
     CGFloat x=gutter+c+26, infoY=top+MAX(0,(c-130)/2), iw=MAX(80,w-x-24);
-    self.kindLabel.frame=NSMakeRect(x,infoY,iw,16);self.titleLabel2.frame=NSMakeRect(x,infoY+25,MAX(50,MIN(iw-42,620)),30);
-    [self.titleLabel2 sizeToFit];self.titleLabel2.frame=NSMakeRect(x,infoY+25,MIN(MAX(100,self.titleLabel2.frame.size.width),iw-44),30);
-    self.favoriteButton.frame=NSMakeRect(NSMaxX(self.titleLabel2.frame)+8,infoY+24,28,30);
-    self.artistLabel2.frame=NSMakeRect(x,infoY+63,iw,21);self.metaLabel.frame=NSMakeRect(x,infoY+88,iw,18);
+    // web `#npTitle{font-size:clamp(19px,2.6vh,27px);line-height:1.3}`：
+    // 字号/行盒按视口高度换算（旧码固定 20pt/30pt 行，大窗偏小、小窗字距挤）。
+    const CGFloat titleSize=RLPNPTitlePointSize(h);
+    const CGFloat titleH=ceil(titleSize*1.3);
+    self.titleLabel2.font=[NSFont systemFontOfSize:titleSize weight:NSFontWeightBold];
+    self.kindLabel.frame=NSMakeRect(x,infoY,iw,16);self.titleLabel2.frame=NSMakeRect(x,infoY+25,MAX(50,MIN(iw-42,620)),titleH);
+    [self.titleLabel2 sizeToFit];self.titleLabel2.frame=NSMakeRect(x,infoY+25,MIN(MAX(100,self.titleLabel2.frame.size.width),iw-44),titleH);
+    self.favoriteButton.frame=NSMakeRect(NSMaxX(self.titleLabel2.frame)+8,infoY+25+MAX(0,(titleH-30)/2),28,30);
+    // web `.npsub{margin-top:8}` ⟹ 副标题顶 = 标题行底 + 8；`#npNextTrackHero{margin-top:4}`。
+    const CGFloat subY=infoY+25+titleH+8;
+    self.artistLabel2.frame=NSMakeRect(x,subY,iw,21);self.metaLabel.frame=NSMakeRect(x,subY+21+4,iw,18);
     // web `.npmline` 是副标题之后的独立一行：margin-top:10 ⟹ 行顶 = 副标题行底 + 10。
     // 行高由 flex-wrap 的实际行数算出，旧的按钮行（隐藏的对比/作品入口）顺势下移，不再固定 infoY+113。
     {
-        const CGFloat metaTop=infoY+84+10;
+        const CGFloat metaTop=subY+21+10;
         const CGFloat metaH=[self layoutMetaChipsInWidth:iw];
         self.metaChipsRow.frame=NSMakeRect(x,metaTop,iw,MAX(22,metaH));
         const CGFloat btnY=NSMaxY(self.metaChipsRow.frame)+6;
@@ -1620,9 +1640,26 @@ static NSString *RLPRailTagText(id srValue, id bitsValue) {
     self.webControls.frame=NSMakeRect(MAX(16,(w-1160)/2),h-76,MIN(1160,w-32),58);[self.webControls layout];
     [self layoutLyricRows];
 }
+/// 按当前字号重建每行的字体/颜色（窗口高度变了要跟着换；内容/高亮状态不变）。
+- (void)restyleLyricRows {
+    const CGFloat size=(self.lyricPointSize>0.01)?self.lyricPointSize
+        :RLPNPLyricPointSize(self.webCanvas.bounds.size.height);
+    for(NSUInteger i=0;i<self.lyricRows.count;i++){
+        const BOOL on=(NSInteger)i==self.lyricActiveIndex;
+        NSButton *b=self.lyricRows[i];
+        b.font=[NSFont systemFontOfSize:size];
+        b.attributedTitle=[[NSAttributedString alloc] initWithString:b.title attributes:@{
+            NSFontAttributeName:[NSFont systemFontOfSize:size weight:on?NSFontWeightSemibold:NSFontWeightRegular],
+            NSForegroundColorAttributeName:on?[RLPTheme current].text:[RLPTheme current].mut2}];
+    }
+}
 - (void)layoutLyricRows {
     CGFloat w=self.lyricScroll.contentSize.width, h=self.lyricScroll.contentSize.height;
-    CGFloat pad=MAX(26,h/2-18),y=pad;for(NSButton *b in self.lyricRows){b.frame=NSMakeRect(6,y,MAX(40,w-12),30);y+=30;}
+    // web `.npline{clamp(13,1.9vh,17);line-height:2.05}`：字号与行盒都随视口高度变。
+    const CGFloat size=RLPNPLyricPointSize(self.webCanvas.bounds.size.height);
+    const CGFloat step=RLPNPLyricLineStep(size);
+    if(fabs(size-self.lyricPointSize)>0.01){ self.lyricPointSize=size; [self restyleLyricRows]; }
+    CGFloat pad=MAX(26,h/2-step/2),y=pad;for(NSButton *b in self.lyricRows){b.frame=NSMakeRect(6,y,MAX(40,w-12),step);y+=step;}
     self.lyricDocument.frame=NSMakeRect(0,0,w,MAX(h,y+pad));self.lyricsEmpty.frame=NSMakeRect(8,MAX(0,h/2-30),MAX(40,w-16),60);
 }
 - (void)applyLyricText:(NSString *)text forPath:(NSString *)path {
@@ -1631,12 +1668,14 @@ static NSString *RLPRailTagText(id srValue, id bitsValue) {
     for(NSView *v in [self.lyricRows copy])[v removeFromSuperview];[self.lyricRows removeAllObjects];
     self.lyricsEmpty.hidden=self.lyricLines.count>0;
     self.lyricsEmpty.stringValue=RLPTr(@"没有歌词 · 同名 LRC、内嵌歌词或在线补全");
-    for(RLPLyricLine *line in self.lyricLines){NSButton *b=[NSButton buttonWithTitle:line.text target:self action:@selector(onLyricLine:)];b.tag=self.lyricRows.count;b.bordered=NO;b.font=[NSFont systemFontOfSize:14];[self.lyricDocument addSubview:b];[self.lyricRows addObject:b];}
+    self.lyricPointSize=RLPNPLyricPointSize(self.webCanvas.bounds.size.height);
+    for(RLPLyricLine *line in self.lyricLines){NSButton *b=[NSButton buttonWithTitle:line.text target:self action:@selector(onLyricLine:)];b.tag=self.lyricRows.count;b.bordered=NO;b.font=[NSFont systemFontOfSize:self.lyricPointSize];[self.lyricDocument addSubview:b];[self.lyricRows addObject:b];}
     [self layoutLyricRows];[self updateLyricPosition:self.webStatus.position];
 }
 - (void)updateLyricPosition:(double)pos {
     NSInteger at=[RLPLyrics activeIndex:self.lyricLines position:pos];self.lyricActiveIndex=at;
-    for(NSUInteger i=0;i<self.lyricRows.count;i++){BOOL on=(NSInteger)i==at;NSButton *b=self.lyricRows[i];b.attributedTitle=[[NSAttributedString alloc] initWithString:b.title attributes:@{NSFontAttributeName:[NSFont systemFontOfSize:14 weight:on?NSFontWeightSemibold:NSFontWeightRegular],NSForegroundColorAttributeName:on?[RLPTheme current].text:[RLPTheme current].mut2}];}
+    const CGFloat size=(self.lyricPointSize>0.01)?self.lyricPointSize:RLPNPLyricPointSize(self.webCanvas.bounds.size.height);
+    for(NSUInteger i=0;i<self.lyricRows.count;i++){BOOL on=(NSInteger)i==at;NSButton *b=self.lyricRows[i];b.font=[NSFont systemFontOfSize:size];b.attributedTitle=[[NSAttributedString alloc] initWithString:b.title attributes:@{NSFontAttributeName:[NSFont systemFontOfSize:size weight:on?NSFontWeightSemibold:NSFontWeightRegular],NSForegroundColorAttributeName:on?[RLPTheme current].text:[RLPTheme current].mut2}];}
     if(at<0||[NSDate timeIntervalSinceReferenceDate]<self.lyricManualUntil)return;
     if(at<(NSInteger)self.lyricRows.count){CGFloat y=NSMidY(self.lyricRows[at].frame)-self.lyricScroll.contentSize.height/2;
         self.lyricManualUntil=DBL_MAX;[self.lyricScroll.contentView scrollToPoint:NSMakePoint(0,MAX(0,y))];[self.lyricScroll reflectScrolledClipView:self.lyricScroll.contentView];self.lyricManualUntil=0;}
