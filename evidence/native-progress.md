@@ -445,3 +445,15 @@ AppKit `NSGenericException: no common ancestor`（离屏测试第一次跑直接
 `parity_scan --check` missing=0；`behavior_scan --check` actionable=0；`gen_i18n_table --check` / `gen_native_i18n --check` OK。
 **提交**：`feat(native): split settings EQ/cal into web card granularity`，1.1.7.39（仅本地）。
 **下一步**：播放页 `#np` 对照表（`evidence/native-4-playback-diff.md`，69 条）→ 按表逐项红→绿。
+
+### 2026-11-14 15:3x —— 轮次 12b（1.1.7.40）：播放页 `#npKind` 停止/切曲状态机
+
+**任务**（task-4 · 播放页差异表 #12/#60）：`#npKind` 文案 = web `npPlayingKindText(curMeta)`，
+停止/切曲必须复位，不许挂上一首的 `正在播放 · FLAC / 48 kHz / 24 bit`。
+**判据**：`tests/test_native_nowplaying_web.mm` 追加 3 条，走真实 `/api/status → refresh → 渲染`
+（替身 `RLPCoreClient` 新增 fixture 表 + `getData:` 应答；缺后者时测试直接 SIGABRT，属工装缺陷已修）。
+**红→绿**：旧码 **18P/2F**（新 3 条里 2 条红：停止复位、切曲复位）→ 新码 **21P/0F**。
+**实现**：`refresh` 切曲分支先复位 `kindLabel`；meta 格式串改「有字段才拼 ` · `」（旧码无效时挂尾 ` · `）。
+**证据**：`evidence/native-playback-states-20261114.md`、`native-playback-state-{red,green}-20261114.log`；
+对照表状态列已把 #12/#60 标为「已修（1.1.7.40）」。
+**门禁（1.1.7.40 树）**：build 0 error；串行全量 ctest **201/201 passed（398.09s）**；audit **246/0**；parity missing=0；behavior actionable=0；i18n OK。

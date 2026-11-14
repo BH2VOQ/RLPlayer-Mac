@@ -32,7 +32,7 @@
 | 9 | `.nphero{grid auto 1fr;gap:26}` | `layoutWebPlayback`：`x=gutter+c+26` | 已对齐 |
 | 10 | `.npcover{height:clamp(132px,24vh,236px)}` + `radius14` | `c=MIN(236,MAX(132,h*.24))`，`cover.layer.cornerRadius=14` | 已对齐 |
 | 11 | `.npkind{font-size:10;letter-spacing:1.6;font-weight:600;margin-bottom:8}` | `kindLabel` 10/600（**无 letter-spacing**） | 未修（字距 1.6 未接；wants kern，与 anllab 同一手法） |
-| 12 | `.npkind` 文案 = `npPlayingKindText(curMeta)`：`正在播放 · CODEC / kHz / bit` | `loadMetaAndKnowledgeForPath`（2431）L2455 同格式 | **已修（1.1.7.40）**：停止/切空时未复位（见 #48） |
+| 12 | `.npkind` 文案 = `npPlayingKindText(curMeta)`：`正在播放 · CODEC / kHz / bit`；`null` ⟹ 纯「正在播放」 | `loadMetaAndKnowledgeForPath`（2431）同格式；`refresh` 切曲分支先复位 | **已修（1.1.7.40）**：旧码停止后挂上一首格式串、无字段时挂尾 ` · `（见 #60） |
 | 13 | `.nptit{font-size:clamp(19px,2.6vh,27px);font-weight:700;line-height:1.3;…ellipsis}` | `titleLabel2` 固定 20/700 | 未修（响应式字号未接；见 #44 同因） |
 | 14 | `.npsub{font-size:13;color:var(--mut);margin-top:8;ellipsis}` | `artistLabel2` 13/mut @infoY+63；`loadMeta` 拼 `artist · album` | 已对齐 |
 | 15 | `#npNextTrackHero{font-size:12;color:var(--mut2);margin-top:4;默认隐藏}` 文案 `下一首: X · 剩 N 首` / `队列末尾 · 共 N 首` | `metaLabel`(npNextTrackHero) 12/mut2；`refreshQueueContext`（2865）只在「有下一首」时写文案，**不清空、无「队列末尾」分支、不按播放态隐藏** | 未修（文案/显隐状态机未对齐；web 半角 `: `、原生全角 `：`） |
@@ -110,7 +110,7 @@
 | # | web | 原生 | 状态 |
 |---|---|---|---|
 | 59 | 播放图标：`S.playing && !S.paused` | `refresh` 同判据（1.1.7.33 三入口统一） | 已对齐 |
-| 60 | 停止：清 `lastCur`，`#npTitle`=`未播放`、副标题/`#npMeta` 清空、歌词回空态 | `refresh`（2325）：`title=未播放`、`artist=""`、`meta=""`；**`#npKind` 不复位**（保留上一首 `正在播放 · FLAC / 48 kHz / 24 bit`） | 未修（见 1.1.7.40「已修」条目） |
+| 60 | 停止：清 `lastCur`，`#npTitle`=`未播放`、副标题/`#npMeta` 清空、歌词回空态、`#npKind` 回「正在播放」 | `refresh`（2325）：`title=未播放`、`artist=""`、`meta=""`；**新码**再加 `kindLabel=正在播放` | **已修（1.1.7.40）**：旧码保留上一首 `正在播放 · FLAC / 48 kHz / 24 bit` |
 | 61 | 切曲：`trackMetadata`/封面/歌词/分析全量复位，旧请求作废（世代号） | `refresh` 切曲分支 + `anlSeq`/`coverSeq`/`lyricSeq`/`rail` gen | 已对齐 |
 | 62 | `anl` 状态文字：`未播放 / 正在分析… / 缓存命中 / 失败·点击重试 / 分析于 HH:MM` | `anlPaint`（2716）同状态机 | 已对齐 |
 | 63 | 错误态：`j.error` 不进整页正文 | 原生把 `st.error` 写进 `artistLabel2`（副标题位） | 未修（web 整页不展示后端 error；原生此处是超集，需改成 toast/日志，避免盖掉艺术家信息） |
@@ -136,4 +136,9 @@
 
 ## 11. 红→绿记录（逐包追加）
 
-（每包完成后在此追加：判据命令、旧码红数字、新码绿数字、commit。）
+### 1.1.7.40 —— 停止/切曲 `#npKind` 复位（表 #12 / #60）
+
+- 判据：`tests/test_native_nowplaying_web.mm` 追加 3 条（真实 `/api/status → refresh → 渲染`）。
+- 旧码（1.1.7.39）：18P / **2F**（`stopped state resets npKind…`、`track switch resets npKind…`）。
+- 新码：**21P / 0F**。
+- 证据：`evidence/native-playback-states-20261114.md`、`native-playback-state-{red,green}-20261114.log`。

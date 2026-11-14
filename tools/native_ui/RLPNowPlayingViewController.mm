@@ -2327,6 +2327,10 @@ static NSString *RLPNowPlayingCastDeviceLabel(NSString *device) {
         if (![path isEqualToString:self_.currentPath ?: @""]) {
             BOOL cancelPrevious=self_.anlBusy;
             self_.currentPath = path;self_.trackMetadata=@{};self_.artistLabel2.stringValue=@"";self_.metaLabel.stringValue=@"";[self_ refreshQueueContext];[self_ refreshFavorite];
+            // 切曲/停止先把「正在播放 · CODEC / kHz / bit」复位成纯「正在播放」：
+            // web renderNp 每帧都用 curMeta 重算（curMeta 清空 ⟹ 只剩「正在播放」）；
+            // 旧码只在 /api/meta 回来时覆盖 ⟹ 停止后仍挂着上一首的格式串（用户可见的假信息）。
+            self_.kindLabel.stringValue=RLPTr(@"正在播放");
             // 切歌：旧世代在飞的 summary 必须作废（迟到响应不能贴到新曲/新专辑的卡上）。
             [self_ railInvalidateForTrackChange];
             [self_ loadLyricsForPath:path];
@@ -2452,7 +2456,11 @@ static NSString *RLPNowPlayingCastDeviceLabel(NSString *device) {
         NSMutableArray *format=[NSMutableArray array];if([json[@"codec"] isKindOfClass:NSString.class])[format addObject:[json[@"codec"] uppercaseString]];
         if([json[@"sampleRate"] doubleValue]>0)[format addObject:[NSString stringWithFormat:@"%g kHz",[json[@"sampleRate"] doubleValue]/1000]];
         if([json[@"bits"] integerValue]>0)[format addObject:[NSString stringWithFormat:@"%ld bit",(long)[json[@"bits"] integerValue]]];
-        self_.kindLabel.stringValue=[NSString stringWithFormat:@"%@ · %@",RLPTr(@"正在播放"),[format componentsJoinedByString:@" / "]];
+        // web npPlayingKindText：**有格式字段才拼** " · CODEC / kHz / bit"，一个都没有就只回「正在播放」。
+        // 旧码无条件拼分隔符 ⟹ /api/meta 缺 codec/sampleRate/bits 时显示「正在播放 · 」（尾部悬挂）。
+        self_.kindLabel.stringValue = format.count
+            ? [NSString stringWithFormat:@"%@ · %@", RLPTr(@"正在播放"), [format componentsJoinedByString:@" / "]]
+            : RLPTr(@"正在播放");
         // 三张卡的 summary 预览从这里起步（闸门在 railBeginSummariesForMeta 内判定，
         // 关时零请求、只留本地事实）。
         [self_ railBeginSummariesForMeta:json];
