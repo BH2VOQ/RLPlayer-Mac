@@ -331,3 +331,14 @@ web max-height:720 的 margin 未移植；实机未验。
 **门禁**：build 0 error；全量 ctest（194）/audit/parity/behavior/i18n 由最终门禁复跑。
 **证据**：`evidence/native-rail-states-20261114.md`。
 **如实挂账**：状态行放栏底（web 流式在其后）；无像素判据；实机未验。
+
+### 2026-11-14 08:30 —— 轮次 9（1.1.7.32）：投放芯片运行态 = web
+
+**现场**：基线 `52a8428`（1.1.7.31）。本包由 Lead 直接实现。
+**任务**：live 期 2s 读 `/api/cast/state`；running → chip「已推送到 host」+ ok 三令牌，
+点击 = `/api/cast/stop` + toast；否则「推送到设备」+ 原设备列表。
+**红→绿**：新 ctest `native_cast_chip`（10 条）旧码 **1P/1F** → 新码 **10P/0F**；
+日志 `native-cast-chip-red-20261114.log` / `-green-20261114.log`。
+**门禁**：build 0 error；全量 ctest（195）/audit/parity/behavior/i18n 由最终门禁复跑。
+**证据**：`evidence/native-cast-chip-20261114.md`。
+**如实挂账**：设备名仅 host 回落（未额外拉设备表）；轮询固定 2s；实机投放未验。
