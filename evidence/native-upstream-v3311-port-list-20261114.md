@@ -85,3 +85,11 @@
   **页面不移植**；真正活着的能力模型 `quickStartModel` 已移植为纯函数
   `+gatingForCapsJSON:`，驱动「播放方式」三档置灰 + 停止播放闸门（Q1–Q5，红→绿）。
   见 `evidence/native-quickstart-gating-20261115.md`。
+
+## 结论（N/A）
+
+- **QA 引导 / i18n 上报**：两者都是 **Web 前端的自动化验收设施**，不是用户功能，**不移植**。
+  QA 驱动依赖 DOM 指令（`document.querySelector`），原生无对应物；本仓等价物是
+  `rlplayer_native --audit`（246 项）+ 202 项 ctest。i18n 运行时上报的原生等价物是
+  **编译期** `native_i18n_coverage`（当前 0 缺失）—— 比「出事才知道」更硬。
+  见 `evidence/native-qa-i18n-harness-na-20261115.md`。

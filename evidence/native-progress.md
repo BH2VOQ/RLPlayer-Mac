@@ -1124,3 +1124,20 @@ reset 只标记不删图（与上游一致）、夹具为构造 PNG 不解码。
 （用纯函数覆盖同一决策）、`preset/apply` 未加本仓后端不认的参数。
 
 **门禁**：串行 ctest 202/202、`--audit` 246/0、parity missing=0、behavior actionable=0。
+
+
+### 2026-11-15 05:xx —— 轮次 36（文档）：v3.3.11 QA 引导 / i18n 上报判定为 N/A
+
+**核对结果**：两项都是 Web 前端的**自动化验收设施**，不是用户功能，故不移植。
+
+- **QA 引导**：上游代码自带说明「仅 RLPLAYER_QA=1 时由 tick 启动」，靠 `/api/qa/next` 下发
+  DOM 指令（`scroll:#npDataBody`、展开折叠块）、回传 `qaPanelsText()`、`/api/qa/done` 收尾 ——
+  是给自动化截图脚本用的驱动端。AppKit 无 DOM，无对应物。本仓等价物是
+  `rlplayer_native --audit`（246 项）+ 202 项 ctest，且不需要生产期开关。
+- **i18n 上报**：扫 DOM 文本节点与 `title/placeholder/aria-label` 找含 CJK 且未译的串，
+  `POST /api/i18n/miss` 聚合（本仓后端无此端点）。原生每条文案都是编译期可见的
+  `RLPTr`，由 `native_i18n_coverage` 穷举校验（当前 1672 处、0 缺失）——
+  编译期拦住比运行期上报更硬。
+
+**挂账**：两项不新增代码、不升版本、无新词条；原生确实没有「运行期回传漏译」通道，
+若将来需要应扩编译期检查覆盖面而不是再造网络遥测。
