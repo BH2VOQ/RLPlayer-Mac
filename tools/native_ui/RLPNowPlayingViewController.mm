@@ -63,6 +63,9 @@
 - (void)applyChipHover:(NSButton *)button hovered:(BOOL)hovered;
 /// 歌词空态/加载态的两行文案（web `#npLyric` 空态与抽屉加载态），判据直接驱动这条路径。
 - (void)setLyricsPlaceholder:(NSString *)main detail:(NSString *)detail;
+/// web `.nplyric2{-webkit-mask-image:linear-gradient(180deg,transparent 0,#000 26px,#000 calc(100% - 26px),transparent 100%)}`
+/// 的原生等价：给歌词滚动视图挂 CAGradientLayer 遮罩（首/末行渐隐，26pt 全不透明区）。
+- (void)updateLyricFadeMask;
 @end
 // Web #npPage uses top-left coordinates and covers the entire window content.
 @interface RLPNPCanvas : NSView
@@ -1844,8 +1847,9 @@ static NSString *RLPRailTagText(id srValue, id bitsValue) {
     self.closeButton.frame=NSMakeRect(w-56,16,38,38);self.railToggle.frame=NSMakeRect(w-100,18,34,34);self.analysisToggle.frame=NSMakeRect(w-142,18,34,34);
     CGFloat col=(w-2*gutter-36)/4, side=MIN(340,col), bodyH=MAX(60,bottom-by);
     self.analysisPanel.frame=NSMakeRect(gutter,by,side,bodyH);self.railPanel.frame=NSMakeRect(w-gutter-side,by,side,bodyH);
-    self.lyricScroll.frame=NSMakeRect(gutter+col+18,by,col*2,bodyH);
-    if(self.analysisPanel.hidden&&self.railPanel.hidden)self.lyricScroll.frame=NSMakeRect(gutter,by,w-32,bodyH);
+        self.lyricScroll.frame=NSMakeRect(gutter+col+18,by,col*2,bodyH);
+        if(self.analysisPanel.hidden&&self.railPanel.hidden)self.lyricScroll.frame=NSMakeRect(gutter,by,w-32,bodyH);
+        [self updateLyricFadeMask];   // 视口高度变了要重算 26pt 渐隐位置
     // ---- 音频分析面板：web #npAnal（padding:8px 11px 9px、.anlhead gap:8、面板 gap:6）----
     {
         const CGFloat anlPadX = 11.0, anlPadTop = 8.0, anlPadBottom = 9.0;
@@ -1941,6 +1945,29 @@ static NSString *RLPRailTagText(id srValue, id bitsValue) {
                          NSParagraphStyleAttributeName:ps}]];
     self.lyricsEmpty.attributedStringValue=as;
     self.lyricsEmpty.hidden=NO;
+}
+
+/// web 歌词视口的 26pt 上下渐隐遮罩（`mask-image:linear-gradient(180deg,transparent 0,#000 26px,#000 calc(100% - 26px),transparent 100%)`）。
+/// 遮罩挂在**滚动视图**上（不是 document）：滚动时渐隐区固定在视口边缘，首/末行不会"硬切"。
+- (void)updateLyricFadeMask {
+    const CGFloat H = self.lyricScroll.bounds.size.height;
+    if (H < 10) return;
+    self.lyricScroll.wantsLayer = YES;
+    CAGradientLayer *m = (CAGradientLayer *)self.lyricScroll.layer.mask;
+    if (![m isKindOfClass:[CAGradientLayer class]]) {
+        m = [CAGradientLayer layer];
+        m.colors = @[(__bridge id)NSColor.clearColor.CGColor,
+                     (__bridge id)NSColor.blackColor.CGColor,
+                     (__bridge id)NSColor.blackColor.CGColor,
+                     (__bridge id)NSColor.clearColor.CGColor];
+        // 非翻转坐标（原点左下）：startPoint 在上、endPoint 在下，locations 从顶部开始数。
+        m.startPoint = CGPointMake(0.5, 1.0);
+        m.endPoint = CGPointMake(0.5, 0.0);
+        self.lyricScroll.layer.mask = m;
+    }
+    const CGFloat fade = 26.0;
+    m.frame = self.lyricScroll.bounds;
+    m.locations = @[@0.0, @(MIN(0.5, fade / H)), @(MAX(0.5, 1.0 - fade / H)), @1.0];
 }
 
 /// 按当前字号重建每行的字体/颜色（窗口高度变了要跟着换；内容/高亮状态不变）。

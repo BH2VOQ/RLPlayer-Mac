@@ -685,3 +685,19 @@ anlLab kern=1.5 防回归；全部从 attributedStringValue 取。
 #24 改正为已修。
 **门禁（1.1.7.51 树）**：build 0 error；串行全量 ctest **201/201 passed（404.38s）**；audit **246/0**；
 parity missing=0；behavior actionable=0；i18n OK（2419 pairs）。
+
+### 2026-11-14 19:0x —— 轮次 18（1.1.7.52）：歌词视口 26pt 渐隐遮罩（表 #40）
+
+**任务**（Lead 定序 2）：`#40` 歌词 mask 渐隐。
+**先核对 web**：`.nplyric2{mask-image:linear-gradient(180deg,transparent 0,#000 26px,#000 calc(100% - 26px),transparent 100%)}`
+——视口顶/底各 26px 渐隐、中间全显；原生旧码无遮罩，长歌词首/末行硬切。
+**判据**：`test_native_nowplaying_web` 追加 8 条：遮罩是 CAGradientLayer、四色标 alpha、locations 0→1、
+26/H 与 1-26/H、frame=bounds、窗口变矮后重算、复位。
+**红→绿**：旧码（1.1.7.51）**1 F**（遮罩缺失，后续判据跳过）→ 新码 **158 passed / 0 failures**（150 既有 + 8 遮罩判据）。
+**实现**：`updateLyricFadeMask`（透明/黑/黑/透明四色标，startPoint 上→endPoint 下，locations=[0,26/H,1-26/H,1]）；
+遮罩挂在**滚动视图**（不是 document），滚动时渐隐固定视口边缘；布局末尾调用，高度变化重算；不新增 NSScrollView。
+**如实挂账**：①26pt 固定像素（web 同，不随字号缩放）；②原生仍 hasVerticalScroller=NO（与 web 隐藏滚动条等价）；
+③遮罩不参与行盒/滚动几何。
+**证据**：`evidence/native-lyric-mask-20261114.md`、`native-mask-{red,green}-20261114.log`；对照表 #40 标已修。
+**门禁（1.1.7.52 树）**：build 0 error；串行全量 ctest **201/201 passed（412.68s）**；audit **246/0**；
+parity missing=0；behavior actionable=0；i18n OK（2419 pairs）。

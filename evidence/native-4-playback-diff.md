@@ -80,7 +80,7 @@
 
 | # | web | 原生 | 状态 |
 |---|---|---|---|
-| 40 | `#npLyric`：`mask-image` 上下 26px 渐隐、`scrollbar-width:none`、`padding:2px 0` | `lyricScroll`：无 mask 层、隐藏滚动条 | 未修（CAGradientLayer mask 未接；视觉差异在长歌词首/末行） |
+| 40 | `#npLyric`/`.nplyric2`：`mask-image:linear-gradient(180deg,transparent 0,#000 26px,#000 calc(100% - 26px),transparent 100%)`、`scrollbar-width:none` | `lyricScroll.layer.mask` = CAGradientLayer（透明/黑/黑/透明，locations=[0,26/H,1-26/H,1]，窗口变矮重算）；滚动条本就不显示 | **已修（1.1.7.52）** |
 | 41 | `.npline{font-size:clamp(13px,1.9vh,17px);line-height:2.05}`；`.on{650;scale1.03}` | `applyLyricText`/`layoutLyricRows`：字号=`RLPNPLyricPointSize(vh)`、行盒=2.05×字号，窗口变化时 `restyleLyricRows`；active=Semibold | **已修（1.1.7.48）**：字号/行盒（1.1.7.43）+ active `transform:scale(1.03)`（行左右留 ≥1.5% 余量保证放大不裁字） |
 | 42 | 行留白 = `(容器高-行高)/2`（JS 写 `--nppad`），首/末行也能居中 | `layoutLyricRows`：`pad=MAX(26,h/2-18)` | 已对齐（等价公式，行高固定 30 时一致） |
 | 43 | 手动滚动 3s 保护；seek/切歌立即重定位 | `lyricManualUntil`/`onLyricScrolled`（1604）、`onCommitSeek` 清保护 | 已对齐 |
@@ -135,6 +135,12 @@
 - 页面内自检脚本（`window.__SELFTEST`）是 web 侧判据载体，原生用 `--audit`/ctest，载体不同、判据等价。
 
 ## 11. 红→绿记录（逐包追加）
+
+### 1.1.7.52 —— 歌词视口 26pt 渐隐遮罩（表 #40）
+
+- 判据：8 条（CAGradientLayer / 四色标 alpha / locations 0→1 / 26/H / frame=bounds / 变矮重算）。
+- 旧码（1.1.7.51）：**1 FAIL**（无 mask，后续判据跳过）→ 新码 **158P / 0F**。
+- 证据：`evidence/native-lyric-mask-20261114.md`、`native-mask-{red,green}-20261114.log`。
 
 ### 1.1.7.51 —— `.npkind` 字距 1.6（表 #11；#24 补判据）
 

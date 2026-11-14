@@ -6,6 +6,7 @@
 #import "RLPModels.h"
 #import "RLPSupport.h"
 #import <objc/runtime.h>
+#import <QuartzCore/QuartzCore.h>
 #include <cmath>
 #include <cstdio>
 static NSString *lastPath,*lastBody;static RLPJSONCompletion pendingFav;
@@ -550,6 +551,44 @@ int main(){@autoreleasepool{
   if(anl)
    ck(fabs(KernOf(anl)-1.5)<0.05,
       [[NSString stringWithFormat:@"anlLab 字距 1.5（web .anllab；got %.2f）",KernOf(anl)] UTF8String]);
+ }
+
+ // ---- #40 歌词视口渐隐：web `.nplyric2{ mask-image:linear-gradient(180deg,transparent 0,#000 26px,#000 calc(100% - 26px),transparent 100%) }` ----
+ {
+  NSScrollView *lyr=(NSScrollView *)[vc valueForKey:@"lyricScroll"];
+  ck(lyr!=nil,"歌词滚动视图存在（遮罩判据前提）");
+  if(lyr){
+   id mask=lyr.layer.mask;
+   ck([mask isKindOfClass:[CAGradientLayer class]],"歌词视口挂 CAGradientLayer 遮罩（不是只留注释）");
+   if([mask isKindOfClass:[CAGradientLayer class]]){
+    CAGradientLayer *g=(CAGradientLayer *)mask;
+    const CGFloat H=lyr.bounds.size.height;
+    ck(g.colors.count==4,"遮罩四个色标（transparent/黑/黑/transparent）");
+    if(g.colors.count==4){
+      NSColor *c0=[NSColor colorWithCGColor:(CGColorRef)g.colors[0]];
+      NSColor *c1=[NSColor colorWithCGColor:(CGColorRef)g.colors[1]];
+      NSColor *c2=[NSColor colorWithCGColor:(CGColorRef)g.colors[2]];
+      NSColor *c3=[NSColor colorWithCGColor:(CGColorRef)g.colors[3]];
+      ck(c0.alphaComponent<0.02&&c3.alphaComponent<0.02,"首/尾色标透明（渐隐到 0）");
+      ck(c1.alphaComponent>0.98&&c2.alphaComponent>0.98,"中段两个色标不透明（26pt 之后完全显示）");
+    }
+    ck(fabs([g.locations[0] doubleValue]-0.0)<0.01&&fabs([g.locations[3] doubleValue]-1.0)<0.01,
+       "locations 覆盖 0→1");
+    ck(fabs([g.locations[1] doubleValue]-26.0/H)<0.01&&fabs([g.locations[2] doubleValue]-(1.0-26.0/H))<0.01,
+       [[NSString stringWithFormat:@"渐隐区=26pt（want %.4f/%.4f got %.4f/%.4f H=%.1f）",
+         26.0/H,1.0-26.0/H,[g.locations[1] doubleValue],[g.locations[2] doubleValue],H] UTF8String]);
+    ck(NSWidth(g.frame)==lyr.bounds.size.width&&NSHeight(g.frame)==H,"遮罩尺寸跟随视口");
+    // 窗口变矮后 26pt 渐隐比例要重算（不是一次性常量）
+    [(NSView *)vc.view setFrameSize:NSMakeSize(1180,640)];
+    [(NSView *)vc.view layoutSubtreeIfNeeded];
+    CAGradientLayer *g2=(CAGradientLayer *)lyr.layer.mask;
+    const CGFloat H2=lyr.bounds.size.height;
+    ck(g2&&fabs([g2.locations[1] doubleValue]-26.0/H2)<0.01,
+       [[NSString stringWithFormat:@"视口变矮后渐隐位置重算（H=%.1f loc=%.4f）",H2,[g2.locations[1] doubleValue]] UTF8String]);
+    [(NSView *)vc.view setFrameSize:NSMakeSize(1180,760)];
+    [(NSView *)vc.view layoutSubtreeIfNeeded];
+   }
+  }
  }
  pendingFav=nil;method_setImplementation(shared,old);
  printf("np web: %d failures\n",fail);return fail?1:0;
