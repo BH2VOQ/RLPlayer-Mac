@@ -1717,7 +1717,9 @@ static NSString *RLPRailTagText(id srValue, id bitsValue) {
     NSMutableArray<RLPRailChipView *> *cards=[NSMutableArray array];
     __weak __typeof__(self) wsRail=self;
     NSUInteger railIdx=0;
-    for(NSString *name in @[@"歌曲",@"专辑",@"艺术家"]){
+    // 第 4 张 = web npDataTargets 的 work tab「作品」：只在古典曲目出现（可见性在 render 里判定，
+    // 结构恒在 ⟹ 切曲时不必重建视图树，卡片隐藏即可）。
+    for(NSString *name in @[@"歌曲",@"专辑",@"艺术家",@"作品"]){
         RLPRailChipView *c=[[RLPRailChipView alloc] initWithFrame:NSZeroRect];
         c.identifier=[@"npChip." stringByAppendingString:name];
         c.chipIndex=(NSInteger)railIdx++;
@@ -2079,18 +2081,26 @@ static NSString *RLPRailTagText(id srValue, id bitsValue) {
     const CGFloat cardW = MAX(40, W - 19);
     NSArray<RLPRailChipView *> *cards = self.railCards ?: @[];
     if (cards.count == 0) { rw.contentHeight = 0; return; }
+    // 隐藏的卡（如非古典时的「作品」）不参与排版 ⟹ 不占高度、不留缝（web 是"不在 tabs 里"）。
     CGFloat contentH = 0;
-    for (NSUInteger i = 0; i < cards.count; ++i) {
-        contentH += [cards[i] preferredHeightForWidth:cardW];
-        if (i + 1 < cards.count) contentH += kRailChipGap;
+    NSUInteger shown = 0;
+    for (RLPRailChipView *c in cards) {
+        if (c.hidden) continue;
+        if (shown > 0) contentH += kRailChipGap;
+        contentH += [c preferredHeightForWidth:cardW];
+        ++shown;
     }
     rw.contentHeight = contentH;
     CGFloat top = H - rw.contentOffset;
+    NSUInteger laid = 0;
     for (RLPRailChipView *c in cards) {
+        if (c.hidden) { c.frame = NSZeroRect; continue; }
+        if (laid > 0) top -= kRailChipGap;
         CGFloat ch = [c preferredHeightForWidth:cardW];
         c.frame = NSMakeRect(0, top - ch, cardW, ch);
         [c relayout];
-        top -= ch + kRailChipGap;
+        top -= ch;
+        ++laid;
     }
     rw.needsDisplay = YES;
 }
@@ -2421,15 +2431,23 @@ static NSString *RLPNowPlayingCastDeviceLabel(NSString *device) {
 - (NSString *)railFpForKind:(NSString *)kind {
     NSDictionary *t = self.railTargets[kind];
     if (!t) return @"";
-    // web npDataFp：kind|name|artist|(composer)|album。本轮没有 work 卡，composer 不参与。
-    return [NSString stringWithFormat:@"%@|%@|%@|%@", kind,
-            RLPRailStr(t[@"name"]), RLPRailStr(t[@"artist"]), RLPRailStr(t[@"album"])];
+    // web npDataFp：kind|name|artist|(composer)|album（work 实体的鉴别键必须含 composer）。
+    return [NSString stringWithFormat:@"%@|%@|%@|%@|%@", kind, RLPRailStr(t[@"name"]),
+            RLPRailStr(t[@"artist"]), RLPRailStr(t[@"composer"]), RLPRailStr(t[@"album"])];
 }
 
 /// web npSummUrl 的逐字形状（参数顺序也一致；encodeURIComponent = RLPEnc）。
 /// track 额外 album/file/genre；artist 非空才带；最后固定 lang=zh。
 - (NSString *)railUrlForTarget:(NSDictionary *)t {
     NSString *kind = RLPRailStr(t[@"kind"]);
+    // web npDataEnsure 的 work 分支：Discogs 版本推荐走独立端点（不是 summary）。
+    if ([kind isEqualToString:@"work"]) {
+        NSMutableString *wu = [NSMutableString stringWithFormat:
+            @"/api/entity/versions?kind=work&name=%@", RLPEnc(RLPRailStr(t[@"name"]))];
+        NSString *composer = RLPRailStr(t[@"composer"]);
+        if (composer.length) [wu appendFormat:@"&composer=%@", RLPEnc(composer)];
+        return wu;
+    }
     NSMutableString *u = [NSMutableString stringWithFormat:
         @"/api/entity/summary?kind=%@&name=%@", kind, RLPEnc(RLPRailStr(t[@"name"]))];
     NSString *artist = RLPRailStr(t[@"artist"]);
@@ -2488,16 +2506,32 @@ static NSString *RLPNowPlayingCastDeviceLabel(NSString *device) {
         self.railTargets[@"person"] = @{ @"kind": @"person", @"name": personName,
             @"artist": @"", @"album": @"" };
     }
-    for (NSString *kind in @[@"track", @"release", @"person"]) {
+    // web npDataTargets：「作品」只在古典曲目出现，检索键是「去译名后的曲名 + 猜出的作曲家」。
+    if (RLPNPIsClassical(m)) {
+        NSDictionary *wt = RLPNPWorkTarget(m);
+        NSString *workTitle = RLPRailStr(wt[@"title"]);
+        if (workTitle.length) {
+            self.railTargets[@"work"] = @{ @"kind": @"work", @"name": workTitle,
+                @"artist": @"", @"album": @"", @"composer": RLPRailStr(wt[@"composer"]) };
+        }
+    }
+    for (NSString *kind in @[@"track", @"release", @"person", @"work"]) {
         if (!self.railTargets[kind]) continue;
         NSMutableDictionary *idle = [NSMutableDictionary dictionary];
         idle[@"state"] = @"idle";
         self.railStates[kind] = idle;
     }
-    for (NSString *kind in @[@"track", @"release", @"person"])
+    for (NSString *kind in @[@"track", @"release", @"person", @"work"])
         if (self.railTargets[kind]) [self railEnsureKind:kind];
     [self renderRailMetadata];
     [self layoutWebPlayback];
+}
+
+/// web npDataEnsure 的 work 分支：`(j && j.ok && (j.performances||[]).length) ? j : null`。
+- (BOOL)railHasWorkData:(NSDictionary *)j {
+    if (![j[@"ok"] respondsToSelector:@selector(boolValue)] || ![j[@"ok"] boolValue]) return NO;
+    NSArray *p = [j[@"performances"] isKindOfClass:[NSArray class]] ? j[@"performances"] : @[];
+    return p.count > 0;
 }
 
 /// web npDataEnsure：同一实体已有 loading/ok/insufficient 就不重发；
@@ -2598,7 +2632,8 @@ static NSString *RLPNowPlayingCastDeviceLabel(NSString *device) {
     if (insufficient) {
         st[@"state"] = @"insufficient";
         st[@"data"] = j;
-    } else if ([self railHasSummary:j]) {
+    } else if ([kind isEqualToString:@"work"] ? [self railHasWorkData:j] : [self railHasSummary:j]) {
+        // web npDataEnsure 的 work 分支成功判据是 `ok && performances.length`（不是 fields/sections）。
         st[@"state"] = @"ok";
         st[@"data"] = [j mutableCopy];
     } else {
@@ -2777,6 +2812,11 @@ static NSString *RLPNowPlayingCastDeviceLabel(NSString *device) {
         if (!p1.length) p1 = RLPRailPick(fields, @[@"活跃年代"], pickLimit);
         p2 = RLPRailPick(fields, @[@"风格", @"代表作品"], pickLimit);
         if (!p1.length) p1 = who;
+    } else if ([kind isEqualToString:@"work"]) {
+        // web：p1 = fields['作曲家','创作年代']，没有就退回猜出的作曲家；p2 = fields['体裁']。
+        p1 = RLPRailPick(fields, @[@"作曲家", @"创作年代"], pickLimit);
+        if (!p1.length) p1 = RLPRailStr(RLPNPWorkTarget(m)[@"composer"]);
+        p2 = RLPRailPick(fields, @[@"体裁"], pickLimit);
     }
     NSString *stText = @"";
     if ([state isEqualToString:@"loading"]) stText = RLPTr(@"整理中…");
@@ -2790,8 +2830,8 @@ static NSString *RLPNowPlayingCastDeviceLabel(NSString *device) {
 /// 只重绘卡片，不取数（轮询/主题/切档都会调）。
 - (void)renderRailMetadata {
     [self railEnsureContainers];
-    NSArray<NSString *> *kinds = @[@"track", @"release", @"person"];
-    NSArray<NSString *> *labels = @[RLPTr(@"歌曲"), RLPTr(@"专辑"), RLPTr(@"艺术家")];
+    NSArray<NSString *> *kinds = @[@"track", @"release", @"person", @"work"];
+    NSArray<NSString *> *labels = @[RLPTr(@"歌曲"), RLPTr(@"专辑"), RLPTr(@"艺术家"), RLPTr(@"作品")];
     for (NSUInteger i = 0; i < self.railCards.count && i < kinds.count; ++i) {
         NSString *kind = kinds[i];
         NSDictionary *st = self.railStates[kind] ?: @{ @"state": @"idle" };
@@ -2801,14 +2841,20 @@ static NSString *RLPNowPlayingCastDeviceLabel(NSString *device) {
                                    p1:RLPRailStr(pv[@"p1"])
                                    p2:RLPRailStr(pv[@"p2"])];
     }
-    // 栏目有无：web npDataTargets 为空 => 卡片不显示、整块 nprailempty 出现。
+    // 栏目有无：web 的 tab 列表 = npDataTargets，卡片逐张对应；「作品」只对古典曲目存在。
     NSDictionary *m = self.trackMetadata ?: @{};
     NSString *title = RLPRailStr(m[@"title"]);
     NSString *album = RLPRailStr(m[@"album"]);
     NSString *who = RLPRailStr(m[@"albumArtist"]);
     if (!who.length) who = RLPRailStr(m[@"artist"]);
     const BOOL hasCards = (title.length || album.length || who.length);
-    for (RLPRailChipView *c in self.railCards) c.hidden = !hasCards;
+    for (NSUInteger i = 0; i < self.railCards.count; ++i) {
+        NSString *kind = (i < kinds.count) ? kinds[i] : @"";
+        BOOL visible = NO;
+        if ([kind isEqualToString:@"work"]) visible = (self.railTargets[@"work"] != nil);
+        else if (hasCards) visible = YES;   // 三张基础卡按 meta 兜底（与既有行为一致）
+        self.railCards[i].hidden = !visible;
+    }
     if (self.railEmptyLabel) self.railEmptyLabel.hidden = hasCards;
 
     // 歌曲资料状态行（web npRailHint）：只认当前实体且只在三种状态下出现。
@@ -2855,12 +2901,27 @@ static NSString *RLPNowPlayingCastDeviceLabel(NSString *device) {
 }
 
 - (void)onRailCard:(RLPRailChipView *)b {
-    NSArray<NSString *> *kinds = @[@"track", @"release", @"person"];
+    NSArray<NSString *> *kinds = @[@"track", @"release", @"person", @"work"];
     NSInteger idx = b.chipIndex;
     if (idx < 0 || idx >= (NSInteger)kinds.count) return;
     NSString *kind = kinds[(NSUInteger)idx];
     NSDictionary *t = self.railTargets[kind];
     NSString *name = RLPRailStr(t[@"name"]);
+    if ([kind isEqualToString:@"work"]) {
+        // web npDataActivate('work')：作品实体没有 summary，抽屉正文走 /api/entity/versions。
+        NSString *composer = RLPRailStr(t[@"composer"]);
+        if (!name.length) {
+            NSDictionary *wt = RLPNPWorkTarget(self.trackMetadata ?: @{});
+            name = RLPRailStr(wt[@"title"]);
+            if (!composer.length) composer = RLPRailStr(wt[@"composer"]);
+        }
+        if (!name.length) return;
+        [self.knowledge loadWorkName:name composer:composer];
+        [self.knowledgePopover close];
+        [self closeDataDrawer];
+        [self openDataDrawer];
+        return;
+    }
     if (!name.length) {
         // 没取 summary 的路径（闸门关 / meta 未回）也要能点开：名字取原生既有字段。
         NSDictionary *m = self.trackMetadata ?: @{};
@@ -3130,15 +3191,19 @@ static NSString *RLPNowPlayingCastDeviceLabel(NSString *device) {
 
 /// 打开弹层：列同目录音频文件（/api/files?dir=），当前曲目默认勾选。
 /// 打开古典作品页：带当前曲名与艺术家（作曲家可空，后端按作品名检索）。
-/// web 的「作品」tab 只在古典曲目出现；原生不假装自动判定，入口常在、结果由后端说话。
+/// 右键菜单的「古典作品」入口：作品名/作曲家按 web npWorkTarget 抽取，与右栏第 4 张卡共用
+/// 同一套判定（web npDataTargets 只在古典曲目追加 work tab）。结果由后端 versions 说话。
 - (void)onOpenWorks:(id)sender {
     (void)sender;
-    NSString *title = self.titleLabel2.stringValue ?: @"";
-    NSString *artist = self.artistLabel2.stringValue ?: @"";
+    // web npOpenWorks：作品名/作曲家都从 npWorkTarget(curMeta) 取（去掉译名括号、猜作曲家），
+    // 旧实现把"艺术家"当作曲家传，Discogs 检索几乎必然 0 条。
+    NSDictionary *wt = RLPNPWorkTarget(self.trackMetadata ?: @{});
+    NSString *title = RLPRailStr(wt[@"title"]);
+    if (!title.length) title = self.titleLabel2.stringValue ?: @"";
     if (!title.length && self.currentPath.length)
         title = self.currentPath.lastPathComponent.stringByDeletingPathExtension;
     [[NSNotificationCenter defaultCenter] postNotificationName:@"RLPOpenWorksNotification"
-        object:@{@"title": title, @"composer": artist}];
+        object:@{@"title": title, @"composer": RLPRailStr(wt[@"composer"])}];
 }
 
 - (void)onCompare:(id)sender {

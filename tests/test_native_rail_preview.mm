@@ -80,11 +80,27 @@ static id SummaryResponse(NSString *path) {
     return q.lastObject ?: @{ @"ok": @NO, @"error": @"no fixture" };
 }
 
+/// /api/entity/versions 的夹具队列：key = `work|作品名|作曲家`（与 native 的实体指纹同口径）。
+static NSMutableDictionary<NSString *, id> *g_versionsFixtures = nil;
+static id VersionsResponse(NSString *path) {
+    NSURLComponents *c = [NSURLComponents componentsWithString:
+        [@"http://localhost" stringByAppendingString:path]];
+    NSString *name = @"", *composer = @"";
+    for (NSURLQueryItem *it in c.queryItems) {
+        if ([it.name isEqualToString:@"name"]) name = it.value ?: @"";
+        if ([it.name isEqualToString:@"composer"]) composer = it.value ?: @"";
+    }
+    NSString *key = [NSString stringWithFormat:@"work|%@|%@", name, composer];
+    id fx = g_versionsFixtures[key];
+    return fx ?: @{ @"ok": @NO, @"error": @"no fixture" };
+}
+
 static id ResponseForPath(NSString *path) {
     if ([path hasPrefix:@"/api/meta"]) return g_meta ?: @{ @"ok": @NO };
     if ([path hasPrefix:@"/api/lib/albums"]) return g_albumsList ?: @{ @"ok": @YES, @"albums": @[] };
     if ([path hasPrefix:@"/api/lib/album?"]) return g_albumDetail ?: @{ @"ok": @NO };
     if ([path hasPrefix:@"/api/entity/summary"]) return SummaryResponse(path);
+    if ([path hasPrefix:@"/api/entity/versions"]) return VersionsResponse(path);
     if ([path hasPrefix:@"/api/status"]) return @{ @"ok": @YES, @"playing": @YES, @"current": @"", @"dur": @0 };
     return @{ @"ok": @NO };
 }
@@ -95,6 +111,7 @@ static void ResetFixtures(void) {
     g_albumsList = nil;
     g_albumDetail = nil;
     [g_summaryQueues removeAllObjects];
+    [g_versionsFixtures removeAllObjects];
 }
 
 static NSMutableArray<NSString *> *SummaryURLs(void) {
@@ -108,7 +125,7 @@ static NSMutableArray<NSString *> *SummaryURLs(void) {
 #pragma clang diagnostic ignored "-Wincomplete-implementation"
 @implementation RLPCoreClient
 + (instancetype)shared { static RLPCoreClient *c; if (!c) c = [self new]; return c; }
-- (BOOL)started { return NO; }
+- (BOOL)started { return YES; }
 - (void)getJSON:(NSString *)path completion:(RLPJSONCompletion)done {
     [g_urls addObject:path];
     id resp = ResponseForPath(path);
@@ -132,8 +149,18 @@ static NSMutableArray<NSString *> *SummaryURLs(void) {
 }
 - (void)loadKind:(NSString *)kind name:(NSString *)name artist:(NSString *)artist {
     [self.calls addObject:@{ @"kind": kind ?: @"", @"name": name ?: @"",
-                             @"artist": artist ?: @"" }];
+                             @"artist": artist ?: @"", @"composer": @"" }];
 }
+/// web npDataActivate('work') → /api/entity/versions。生产码新增入口，这里只记录不联网。
+- (void)loadWorkName:(NSString *)name composer:(NSString *)composer {
+    [self.calls addObject:@{ @"kind": @"work", @"name": name ?: @"",
+                             @"artist": @"", @"composer": composer ?: @"" }];
+}
+@end
+
+/// 测试用的方法声明（生产实现由本包新增；旧码没有 ⟹ 判据必须红而不是编译失败）。
+@interface RLPKnowledgeView (WorkTest)
+- (void)loadWorkName:(NSString * _Nullable)name composer:(NSString * _Nullable)composer;
 @end
 
 /// 测试专用入口（生产里都是私有方法；category 声明避免改生产头文件）。
@@ -462,12 +489,227 @@ static void ScenarioSectionsFallback(void) {
     HasStr(pP1.stringValue ?: @"", @"传颂之物", "(c) sections 兜底含首段正文");
 }
 
+
+#pragma mark - 场景5/6：第 4 张卡「作品（古典曲目）」
+
+/// 卡片视图收集（递归：卡片在 `.npchipwrap` 内）。
+static NSArray<NSView *> *AllRailChips(NSView *rail) {
+    NSMutableArray<NSView *> *out = [NSMutableArray array];
+    __block void (^collect)(NSView *);
+    collect = ^(NSView *root){
+        for (NSView *v in root.subviews) {
+            NSString *cid = v.identifier;
+            BOOL isChild = [cid isEqualToString:@"npChip.dot"] || [cid isEqualToString:@"npChip.name"] ||
+                           [cid isEqualToString:@"npChip.st"] || [cid isEqualToString:@"npChip.p1"] ||
+                           [cid isEqualToString:@"npChip.p2"];
+            if ([cid hasPrefix:@"npChip."] && !isChild) [out addObject:v];
+            collect(v);
+        }
+    };
+    collect(rail);
+    return out;
+}
+/// 沿 superview 链判断真实可见（web「tab 不在 tabs 里」⟺ 卡片隐藏）。
+static BOOL VisibleUp(NSView *v) {
+    for (NSView *x = v; x; x = x.superview) {
+        if (x.hidden || x.alphaValue < 0.05) return NO;
+        if (x.frame.size.width < 1 || x.frame.size.height < 1) return NO;
+    }
+    return YES;
+}
+/// 数抽屉里的演绎版本行（web .npdwork）。
+static NSInteger WorkRowCount(NSView *root) {
+    __block NSInteger n = 0;
+    __block void (^walk)(NSView *);
+    walk = ^(NSView *r){
+        if ([r.identifier isEqualToString:@"npWorkRow"]) ++n;
+        for (NSView *s in r.subviews) walk(s);
+    };
+    walk(root);
+    return n;
+}
+static NSDictionary *WorkMeta(NSString *title, NSString *album, NSString *genre, NSString *composer) {
+    NSMutableDictionary *m = [MetaJSON(YES, title, @"Wiener Philharmoniker", album,
+                                       @"Wiener Philharmoniker", genre, YES, NO, YES) mutableCopy];
+    if (composer.length) m[@"composer"] = composer;
+    return m;
+}
+static NSDictionary *WorkPerformancesFixture(BOOL fromCache, NSNumber *generatedAt) {
+    NSMutableDictionary *d = [@{
+        @"ok": @YES,
+        @"performances": @[
+            @{ @"year": @1962, @"title": @"Symphony No. 5", @"conductor": @"Karajan",
+               @"ensemble": @"Berliner Philharmoniker", @"label": @"DG", @"format": @"CD",
+               @"url": @"https://www.discogs.com/release/1" },
+            @{ @"year": @1987, @"title": @"Symphony No. 5", @"conductor": @"Abbado",
+               @"orchestra": @"Wiener Philharmoniker", @"label": @"DG", @"format": @"CD",
+               @"url": @"https://www.discogs.com/release/2" } ],
+        @"distinctCount": @2, @"releaseCount": @2,
+    } mutableCopy];
+    d[@"from_cache"] = @(fromCache);
+    if (generatedAt) d[@"generated_at"] = generatedAt;
+    return d;
+}
+
+static void ScenarioWorkCard(void) {
+    std::printf("--- 场景5：古典曲目的第 4 张卡「作品」（rail + versions + 点击实体）---\n");
+    ResetFixtures();
+    // 古典判定走专辑名前缀：「Beethoven: Symphony No. 5」⟹ composer=Beethoven、作品名=曲名
+    g_meta = WorkMeta(@"Symphony No. 5", @"Beethoven: Symphony No. 5", @"Classical", nil);
+    g_summaryQueues[@"track|Symphony No. 5"] = [@[ TrackFieldsFixture() ] mutableCopy];
+    g_summaryQueues[@"release|Beethoven: Symphony No. 5"] = [@[ ReleaseFieldsFixture() ] mutableCopy];
+    g_summaryQueues[@"person|Wiener Philharmoniker"] = [@[ PersonFieldsFixture() ] mutableCopy];
+    g_versionsFixtures[@"work|Symphony No. 5|Beethoven"] = WorkPerformancesFixture(NO, nil);
+
+    RLPNowPlayingViewController *vc = NewVC(nil);
+    [vc setValue:@"/Music/symph5.flac" forKey:@"currentPath"];
+    [vc setValue:StatusWithPath(@"/Music/symph5.flac", 400) forKey:@"webStatus"];
+    [vc loadMetaAndKnowledgeForPath:@"/Music/symph5.flac"];
+    Pump(1.0);
+    [vc layoutWebPlayback];
+    NSView *rail = FindById(vc.view, @"npRail");
+    Ck(rail != nil, "找得到 AI 整理栏 #npRail", @"npRail 缺失");
+    if (!rail) return;
+
+    NSArray<NSView *> *chips = AllRailChips(rail);
+    Ck(chips.count == 4, "古典曲目右栏是 4 张卡（歌曲/专辑/艺术家/作品）",
+       [NSString stringWithFormat:@"cards=%lu", (unsigned long)chips.count]);
+    NSView *workChip = Chip(rail, @"作品");
+    Ck(workChip != nil, "第 4 张卡 identifier = npChip.作品（web npDataTargets 的 work tab）",
+       @"找不到 npChip.作品");
+    if (!workChip) return;
+    Ck(VisibleUp(workChip), "作品卡可见（古典判定命中）", @"作品卡不可见");
+    NSTextField *wname = (NSTextField *)FindById(workChip, @"npChip.name");
+    EqStr(wname.stringValue, @"作品", "作品卡名 = web npDataTargets label「作品」");
+
+    // ---- 数据：/api/entity/versions?kind=work&name=…&composer=… ----
+    NSMutableArray<NSString *> *vurls = [NSMutableArray array];
+    for (NSString *u in g_urls) if ([u hasPrefix:@"/api/entity/versions"]) [vurls addObject:u];
+    std::printf("  versions URLs:\n");
+    for (NSString *u in vurls) std::printf("    %s\n", u.UTF8String);
+    NSString *want = @"/api/entity/versions?kind=work&name=Symphony%20No.%205&composer=Beethoven";
+    Ck([vurls containsObject:want],
+       "作品卡发 /api/entity/versions?kind=work&name=…&composer=…（web npDataEnsure work 分支）",
+       [vurls componentsJoinedByString:@"\n"]);
+    Ck(vurls.count == 1, "同一实体只请求一次（web npDataEnsure 的 in-flight 合并）",
+       [NSString stringWithFormat:@"n=%lu", (unsigned long)vurls.count]);
+
+    // ---- 预览：p1 = 作曲家（无 fields 时兜底）、p2 = 体裁、st = 已整理 ----
+    NSTextField *wp1 = ChipP1(rail, @"作品");
+    NSTextField *wp2 = ChipP2(rail, @"作品");
+    NSTextField *wst = ChipSt(rail, @"作品");
+    std::printf("  (work p1=「%s」 p2=「%s」 st=「%s」)\n", wp1.stringValue.UTF8String,
+                wp2.stringValue.UTF8String, wst.stringValue.UTF8String);
+    EqStr(wp1.stringValue, @"Beethoven", "作品 p1 = 作曲家（web npRailPreview work 分支）");
+    Ck(wp2.stringValue.length == 0, "无 fields 时作品 p2 为空（不拿本地字段冒充）",
+       [NSString stringWithFormat:@"p2=「%@」", wp2.stringValue ?: @""]);
+    EqStr(wst.stringValue, RLPTr(@"已整理"), "作品状态 = 已整理（非缓存）");
+
+    // ---- 点击第 4 张卡 → work 实体（web npDataActivate('work')）----
+    RLPRecordingKnowledge *k = (RLPRecordingKnowledge *)[vc valueForKey:@"knowledge"];
+    [k.calls removeAllObjects];
+    ClickChip(vc, workChip);
+    NSDictionary *call = k.calls.lastObject;
+    EqStr(call[@"kind"], @"work", "点作品卡 → work 实体");
+    EqStr(call[@"name"], @"Symphony No. 5", "作品实体 name = 曲名");
+    EqStr(call[@"composer"], @"Beethoven", "作品实体带 composer（Discogs 检索要用）");
+
+    // ---- 非古典：作品卡不出现、零 versions 请求（web 只给古典曲目加这一栏）----
+    ResetFixtures();
+    g_meta = WorkMeta(@"夜想曲", @"Album Y", @"J-POP", nil);
+    g_summaryQueues[@"track|夜想曲"] = [@[ TrackFieldsFixture() ] mutableCopy];
+    g_summaryQueues[@"release|Album Y"] = [@[ ReleaseFieldsFixture() ] mutableCopy];
+    g_summaryQueues[@"person|Wiener Philharmoniker"] = [@[ PersonFieldsFixture() ] mutableCopy];
+    RLPNowPlayingViewController *vc2 = NewVC(nil);
+    [vc2 setValue:@"/Music/夜想曲.m4a" forKey:@"currentPath"];
+    [vc2 setValue:StatusWithPath(@"/Music/夜想曲.m4a", 225) forKey:@"webStatus"];
+    [vc2 loadMetaAndKnowledgeForPath:@"/Music/夜想曲.m4a"];
+    Pump(0.8);
+    [vc2 layoutWebPlayback];
+    NSView *rail2 = FindById(vc2.view, @"npRail");
+    NSView *workChip2 = Chip(rail2, @"作品");
+    Ck(workChip2 == nil || !VisibleUp(workChip2), "非古典曲目作品卡不显示（web 无 work tab）",
+       @"非古典时作品卡可见");
+    NSMutableArray<NSString *> *u2 = [NSMutableArray array];
+    for (NSString *u in g_urls) if ([u hasPrefix:@"/api/entity/versions"]) [u2 addObject:u];
+    Ck(u2.count == 0, "非古典曲目零 versions 请求（不给流行曲发 Discogs）",
+       [u2 componentsJoinedByString:@"\n"]);
+}
+
+static void ScenarioWorkDrawer(void) {
+    std::printf("--- 场景6：作品抽屉正文（加载态 / 空态 / 缓存 · N 个版本 / 打开整页）---\n");
+    if (![RLPKnowledgeView instancesRespondToSelector:@selector(loadWorkName:composer:)]) {
+        Ck(NO, "RLPKnowledgeView 有 loadWorkName:composer:（web npDataActivate work 分支）",
+           @"方法不存在（旧码）");
+        return;
+    }
+    ResetFixtures();
+    g_versionsFixtures[@"work|Symphony No. 5|Beethoven"] = WorkPerformancesFixture(NO, nil);
+    RLPKnowledgeView *kv = [[RLPKnowledgeView alloc] initWithFrame:NSMakeRect(0, 0, 420, 500)];
+    [kv loadWorkName:@"Symphony No. 5" composer:@"Beethoven"];
+    NSTextField *status = (NSTextField *)FindById(kv, @"knowledgeStatus");
+    Ck(status != nil, "作品抽屉有状态行 identification=knowledgeStatus", @"缺 knowledgeStatus");
+    HasStr(status.stringValue ?: @"", @"正在整理资料",
+           "加载态文案 = web npDataSkeleton「正在整理资料…」");
+    Pump(0.4);
+    Ck(WorkRowCount(kv) == 2, "演绎版本行数 = performances 条数（2）",
+       [NSString stringWithFormat:@"rows=%ld", (long)WorkRowCount(kv)]);
+    HasStr(status.stringValue ?: @"", @"Discogs 实时", "来源行 = web「Discogs 实时」");
+    HasStr(status.stringValue ?: @"", @"不同演绎 2 / 发行版本 2",
+           "来源行含「不同演绎 N / 发行版本 N」（web npDataWorkBody sub）");
+    NSView *row0 = FindById(kv, @"npWorkRow");
+    Ck(row0 != nil, "有 npdwork 行（web .npdwork）", @"缺 npWorkRow");
+    if (row0) {
+        EqStr(((NSTextField *)FindById(row0, @"npWorkYear")).stringValue, @"1962",
+              "行首年份 = web .npdwork .wy（p.year）");
+        EqStr(((NSTextField *)FindById(row0, @"npWorkTitle")).stringValue, @"Symphony No. 5",
+              "行标题 = p.title");
+        HasStr(((NSTextField *)FindById(row0, @"npWorkMeta")).stringValue ?: @"",
+               @"Karajan · Berliner Philharmoniker · DG · CD",
+               "行右侧 = conductor · ensemble · label · format（web meta 拼法）");
+    }
+    // ---- 空态：Discogs 没查到 / 网络不可达（web npDataWorkBody 首两行 + 重试）----
+    g_versionsFixtures[@"work|Symphony No. 5|Beethoven"] = @{ @"ok": @NO, @"error": @"网络不可达" };
+    [kv loadWorkName:@"Symphony No. 5" composer:@"Beethoven"];
+    Pump(0.4);
+    HasStr(status.stringValue ?: @"", @"未在 Discogs 检索到该作品的演绎版本",
+           "空态文案 = web npDataWorkBody 首行（逐字）");
+    NSTextField *subline = (NSTextField *)FindById(kv, @"npWorkHintSub");
+    HasStr(subline.stringValue ?: @"", @"作品：Symphony No. 5 · Beethoven",
+           "空态第二行 =「作品：名 · 作曲家」（web npDataWorkBody）");
+    NSButton *refresh = (NSButton *)FindById(kv, @"knowledgeRefresh");
+    HasStr(refresh.title ?: @"", @"重试", "空态给「重试查询」按钮（web npWorkRetry）");
+    Ck(WorkRowCount(kv) == 0, "空态不残留上一轮的行",
+       [NSString stringWithFormat:@"rows=%ld", (long)WorkRowCount(kv)]);
+    // ---- 缓存态：来源行以「缓存」开头 ----
+    g_versionsFixtures[@"work|Symphony No. 5|Beethoven"] = WorkPerformancesFixture(YES, @1730000000);
+    [kv loadWorkName:@"Symphony No. 5" composer:@"Beethoven"];
+    Pump(0.4);
+    HasStr(status.stringValue ?: @"", @"缓存", "缓存态来源行以「缓存」开头（web from_cache 分支）");
+    Ck(WorkRowCount(kv) == 2, "缓存态仍有 2 行",
+       [NSString stringWithFormat:@"rows=%ld", (long)WorkRowCount(kv)]);
+
+    // ---- 「查看 Discogs 版本推荐 →」= web npWorkOpen → 原生古典作品整页 ----
+    __block NSDictionary *notified = nil;
+    id token = [[NSNotificationCenter defaultCenter] addObserverForName:@"RLPOpenWorksNotification"
+        object:nil queue:nil usingBlock:^(NSNotification *n){ notified = n.object; }];
+    NSButton *openBtn = (NSButton *)FindById(kv, @"npWorkOpen");
+    Ck(openBtn != nil, "作品抽屉有「查看 Discogs 版本推荐」入口", @"缺 npWorkOpen");
+    if (openBtn) [openBtn performClick:nil];
+    Ck([notified[@"title"] isEqualToString:@"Symphony No. 5"], "打开整页带作品名",
+       notified.description ?: @"未发出通知");
+    Ck([notified[@"composer"] isEqualToString:@"Beethoven"], "打开整页带作曲家",
+       notified.description ?: @"未发出通知");
+    [[NSNotificationCenter defaultCenter] removeObserver:token];
+}
+
 int main() {
     @autoreleasepool {
         NSApplication *app = [NSApplication sharedApplication];
         [app setActivationPolicy:NSApplicationActivationPolicyAccessory];
         g_urls = [NSMutableArray array];
         g_summaryQueues = [NSMutableDictionary dictionary];
+        g_versionsFixtures = [NSMutableDictionary dictionary];
         std::printf("=== test_native_rail_preview（内容级 · 离屏 · 不出声 · 不发真请求）===\n");
         std::printf("--- 基准: ui_script.h npRailPreview(12927-13040) / npSummUrl(13230-13260) ---\n");
 
@@ -475,6 +717,8 @@ int main() {
         ScenarioGatingOff();
         ScenarioInsufficient();
         ScenarioSectionsFallback();
+        ScenarioWorkCard();
+        ScenarioWorkDrawer();
 
         std::printf("结果：%d passed, %d failed\n", g_pass, g_fail);
         return g_fail == 0 ? 0 : 1;

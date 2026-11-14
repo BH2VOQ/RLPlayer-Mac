@@ -113,4 +113,12 @@ void RLPPlaybackResumeOrReplay(BOOL playing, BOOL paused, NSString * _Nullable c
 /// 供「我的最爱」双击等"从某行起播整个列表"的场景使用。
 void RLPPlayWholeListFrom(NSArray<NSString *> *files, NSInteger start);
 
+/// 「古典作品」判定与检索参数（web ui_script.h npIsClassical / npGuessComposer / npWorkTarget 的逐条移植）。
+/// 为什么放在公共层：播放页第 4 张卡、作品抽屉、整页入口、右键菜单四处都要用同一套判定，
+/// 各写一份必然漂移（web 也只有一个真源）。
+BOOL RLPNPIsClassical(NSDictionary * _Nullable meta);
+NSString *RLPNPGuessComposer(NSDictionary * _Nullable meta);
+/// 返回 @{@"title": 去译名后的作品名, @"composer": 作曲家}；两者都可为空串。
+NSDictionary<NSString *, NSString *> *RLPNPWorkTarget(NSDictionary * _Nullable meta);
+
 NS_ASSUME_NONNULL_END

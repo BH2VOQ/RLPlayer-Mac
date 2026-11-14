@@ -421,3 +421,95 @@ void RLPPlayWholeListFrom(NSArray<NSString *> *files, NSInteger start) {
         }
     }];
 }
+
+
+#pragma mark - 古典作品判定（web npIsClassical / npGuessComposer / npWorkTarget）
+
+static NSString *RLPNPMetaStr(NSDictionary *meta, NSString *key) {
+    id v = meta[key];
+    return [v isKindOfClass:[NSString class]] ? (NSString *)v : @"";
+}
+static BOOL RLPNPRegex(NSString *pattern, NSString *text) {
+    if (!text.length) return NO;
+    static NSMutableDictionary<NSString *, NSRegularExpression *> *cache;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{ cache = [NSMutableDictionary dictionary]; });
+    NSRegularExpression *re = cache[pattern];
+    if (!re) {
+        re = [NSRegularExpression regularExpressionWithPattern:pattern
+                                                      options:NSRegularExpressionCaseInsensitive
+                                                        error:NULL];
+        if (!re) return NO;
+        cache[pattern] = re;
+    }
+    return [re firstMatchInString:text options:0 range:NSMakeRange(0, text.length)] != nil;
+}
+static NSString *RLPNPTrim(NSString *s) {
+    return [s stringByTrimmingCharactersInSet:
+            [NSCharacterSet whitespaceAndNewlineCharacterSet]] ?: @"";
+}
+
+BOOL RLPNPIsClassical(NSDictionary *meta) {
+    if (![meta isKindOfClass:[NSDictionary class]]) return NO;
+    // ① 后端直接给了 composer ⟹ 就是古典（web 同一优先级）
+    if (RLPNPTrim(RLPNPMetaStr(meta, @"composer")).length) return YES;
+    NSString *genre = RLPNPMetaStr(meta, @"genre");
+    NSString *album = RLPNPMetaStr(meta, @"album");
+    NSString *title = RLPNPMetaStr(meta, @"title");
+    // ② 风格/流派命中（classical / 古典 / 巴洛克 / opera …）
+    if (RLPNPRegex(@"classical|古典|classique|baroque|巴洛克|opera|オペラ", genre)) return YES;
+    // ③ 专辑名带「古典」
+    if ([album rangeOfString:@"古典"].location != NSNotFound) return YES;
+    // ④ 专辑名 + 曲名的体裁特征兜底（Symphony / Concerto / 奏鸣曲 / 交响 ……）
+    NSString *both = [NSString stringWithFormat:@"%@ %@", album, title];
+    return RLPNPRegex(@"symphon|concerto|sonata|caprice|capriccio|nocturne|prelude|overture|"
+                      @"string quartet|requiem|mass in|opus\\s*\\d|op\\.\\s*\\d+|kv\\.?\\s*\\d+|"
+                      @"bwv\\s*\\d+|symphonie|konzert|奏鸣曲|交响|协奏|练习曲|夜曲|前奏曲|序曲|组曲|"
+                      @"安魂曲|作品\\s*\\d+", both);
+}
+
+NSString *RLPNPGuessComposer(NSDictionary *meta) {
+    if (![meta isKindOfClass:[NSDictionary class]]) return @"";
+    NSString *c = RLPNPTrim(RLPNPMetaStr(meta, @"composer"));
+    if (c.length) return c;
+    NSString *album = RLPNPMetaStr(meta, @"album");
+    NSString *title = RLPNPMetaStr(meta, @"title");
+    // ① 曲名末尾括号：(Tchaikovsky) / (Beethoven) —— 只认拉丁字母的名字
+    if (title.length) {
+        NSRegularExpression *re = [NSRegularExpression regularExpressionWithPattern:
+            @"\\(([A-Z][A-Za-z\\u00c0-\\u024f.' -]{2,40})\\)\\s*$" options:0 error:NULL];
+        NSTextCheckingResult *m = [re firstMatchInString:title options:0
+                                                   range:NSMakeRange(0, title.length)];
+        if (m && m.numberOfRanges > 1) {
+            NSString *g = RLPNPTrim([title substringWithRange:[m rangeAtIndex:1]]);
+            if (g.length) return g;
+        }
+    }
+    // ② 专辑名冒号前缀：「Beethoven: Symphony No. 5」→ Beethoven（最多 3 个词、纯拉丁）
+    NSRange colon = [album rangeOfString:@":"];
+    if (colon.location != NSNotFound && colon.location > 1) {
+        NSString *pre = RLPNPTrim([album substringToIndex:colon.location]);
+        NSArray<NSString *> *words = [pre componentsSeparatedByCharactersInSet:
+            [NSCharacterSet whitespaceCharacterSet]];
+        NSUInteger n = 0;
+        for (NSString *w in words) if (w.length) ++n;
+        if (pre.length && n <= 3 && RLPNPRegex(@"^[A-Za-z\\u00c0-\\u024f.' -]+$", pre)) return pre;
+    }
+    return @"";
+}
+
+NSDictionary<NSString *, NSString *> *RLPNPWorkTarget(NSDictionary *meta) {
+    NSString *t = RLPNPMetaStr(meta, @"title");
+    // 在线补全有时把曲名写成「原文 (中文译名)」；Discogs 要用原文 ⟹ 去掉末尾 CJK 括号译名。
+    if (t.length) {
+        NSRegularExpression *re = [NSRegularExpression regularExpressionWithPattern:
+            @"^(.*?)\\s*[（(]([^()（）]*)[）)]\\s*$" options:0 error:NULL];
+        NSTextCheckingResult *m = [re firstMatchInString:t options:0 range:NSMakeRange(0, t.length)];
+        if (m && m.numberOfRanges > 2) {
+            NSString *g1 = RLPNPTrim([t substringWithRange:[m rangeAtIndex:1]]);
+            NSString *g2 = [t substringWithRange:[m rangeAtIndex:2]];
+            if (g1.length && RLPNPRegex(@"[\\u4e00-\\u9fff]", g2)) t = g1;
+        }
+    }
+    return @{ @"title": t ?: @"", @"composer": RLPNPGuessComposer(meta) ?: @"" };
+}

@@ -83,6 +83,8 @@ static void ck(bool ok,const char *n){printf("[%s] %s\n",ok?"PASS":"FAIL",n);if(
 - (void)refreshQueueContext;
 - (void)setLyricsPlaceholder:(NSString *)main detail:(NSString *)detail;
 - (void)loadLyricsForPath:(NSString *)path;
+- (void)renderRailMetadata;
+- (void)layoutWebPlayback;
 @end
 int main(){@autoreleasepool{
  [NSApplication sharedApplication]; [RLPTheme setThemeName:@"light"];
@@ -608,12 +610,18 @@ int main(){@autoreleasepool{
    NSView *rail=(NSView *)[vc valueForKey:@"railPanel"];
    ck(rail&&CountScrollViews(rail)==0,
       [[NSString stringWithFormat:@"右栏子树内 NSScrollView=0（单层滚动仍成立；got %ld）",(long)(rail?CountScrollViews(rail):-1)] UTF8String]);
+   // 生产里 wrap 的可见性/卡片几何都由"有实体"驱动；判据先喂一份 meta 让栏目成立
+   // （否则 wrap 隐藏、卡片按 0 帧量，等于没量到真实滚动）。
+   [vc setValue:@{@"title":@"曲名",@"album":@"专辑",@"artist":@"艺术家"} forKey:@"trackMetadata"];
+   [(id)vc renderRailMetadata];
+   [(id)vc layoutWebPlayback];
+   [(NSView *)vc.view layoutSubtreeIfNeeded];
    id chipsObj=[vc valueForKey:@"railCards"];
    NSArray<NSView *> *chips=[chipsObj isKindOfClass:[NSArray class]]?(NSArray<NSView *> *)chipsObj:@[];
-   ck(chips.count==3,"三张 chip 仍在");
+   ck(chips.count==4,"四张 chip 槽在（第 4 张「作品」非古典时隐藏）");
    for(NSView *c in chips) ck(c.superview==wrap,"chip 挂在 chipwrap 内（不是直接铺在面板上）");
    const CGFloat W=wrap.bounds.size.width;
-   NSView *c0=chips[0];
+   NSView *c0=nil; for(NSView *c in chips) if(!c.hidden&&NSWidth(c.frame)>0){c0=c;break;} if(!c0) c0=chips[0];
    ck(fabs(c0.frame.size.width-(W-19))<1.5,
       [[NSString stringWithFormat:@"卡宽 = wrapW-19（13 留白 + 6 拇指；got %.1f want %.1f）",c0.frame.size.width,W-19] UTF8String]);
    // 栏头不随滚动移动
@@ -623,6 +631,7 @@ int main(){@autoreleasepool{
    wrap.hidden=NO;
    [(NSView *)vc.view layoutSubtreeIfNeeded];
    CGFloat y0=c0.frame.origin.y;
+
    BOOL hasOffset=[wrap respondsToSelector:NSSelectorFromString(@"setContentOffset:")];
    ck(hasOffset,"chipwrap 暴露 contentOffset（自绘滚动的状态入口）");
    if(hasOffset){

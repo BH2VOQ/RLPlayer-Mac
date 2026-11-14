@@ -1,0 +1,307 @@
+[  0%] Built target dopinfo
+[  0%] Built target filter_report
+[  1%] Built target wavcmp
+[  1%] Built target httptest
+[  1%] Building OBJCXX object CMakeFiles/test_native_pause_paths.dir/tools/native_ui/RLPNativeI18n.mm.o
+[  1%] Building OBJCXX object CMakeFiles/test_native_bar_web.dir/tools/native_ui/RLPNativeI18n.mm.o
+c++: warning: overriding '-ffast-math' option with '-ffp-contract=off' [-Woverriding-option]
+c++: warning: overriding '-ffast-math' option with '-ffp-contract=off' [-Woverriding-option]
+[  1%] Built target rtaweb
+[  1%] Built target rlapp_core
+[  2%] Building OBJCXX object CMakeFiles/test_native_opra_cards.dir/tools/native_ui/RLPNativeI18n.mm.o
+c++: warning: overriding '-ffast-math' option with '-ffp-contract=off' [-Woverriding-option]
+[  2%] Building OBJCXX object CMakeFiles/test_native_scroll_eq.dir/tools/native_ui/RLPNativeI18n.mm.o
+c++: warning: overriding '-ffast-math' option with '-ffp-contract=off' [-Woverriding-option]
+[  2%] Building OBJCXX object CMakeFiles/test_native_rail_cards.dir/tools/native_ui/RLPNativeI18n.mm.o
+c++: warning: overriding '-ffast-math' option with '-ffp-contract=off' [-Woverriding-option]
+[  2%] Building OBJCXX object CMakeFiles/test_native_rail_preview.dir/tools/native_ui/RLPNativeI18n.mm.o
+c++: warning: overriding '-ffast-math' option with '-ffp-contract=off' [-Woverriding-option]
+[  2%] Building OBJCXX object CMakeFiles/test_native_npmeta_chips.dir/tools/native_ui/RLPNativeI18n.mm.o
+c++: warning: overriding '-ffast-math' option with '-ffp-contract=off' [-Woverriding-option]
+[  2%] Building OBJCXX object CMakeFiles/test_native_analysis_panel.dir/tools/native_ui/RLPNativeI18n.mm.o
+c++: warning: overriding '-ffast-math' option with '-ffp-contract=off' [-Woverriding-option]
+[  2%] Linking OBJCXX executable test_native_scroll_eq
+[  2%] Linking OBJCXX executable test_native_rail_preview
+[  2%] Linking OBJCXX executable test_native_bar_web
+[  3%] Linking OBJCXX executable test_native_rail_cards
+[  4%] Linking OBJCXX executable test_native_pause_paths
+[  4%] Linking OBJCXX executable test_native_npmeta_chips
+[  4%] Linking OBJCXX executable test_native_opra_cards
+[  4%] Linking OBJCXX executable test_native_analysis_panel
+[  5%] Built target test_native_rail_preview
+[  7%] Built target test_native_scroll_eq
+[  8%] Built target test_native_bar_web
+[ 10%] Built target test_native_npmeta_chips
+[ 10%] Built target test_native_opra_cards
+[ 11%] Built target test_native_pause_paths
+[ 12%] Built target test_native_rail_cards
+[ 13%] Built target test_native_analysis_panel
+[ 13%] Building OBJCXX object CMakeFiles/test_native_queue_sort.dir/tools/native_ui/RLPNativeI18n.mm.o
+[ 14%] Building OBJCXX object CMakeFiles/test_native_empty_states.dir/tools/native_ui/RLPNativeI18n.mm.o
+[ 14%] Building OBJCXX object CMakeFiles/test_native_queue_rows.dir/tools/native_ui/RLPNativeI18n.mm.o
+c++: warning: overriding '-ffast-math' option with '-ffp-contract=off' [-Woverriding-option]
+c++: warning: overriding '-ffast-math' option with '-ffp-contract=off' [-Woverriding-option]
+c++: warning: overriding '-ffast-math' option with '-ffp-contract=off' [-Woverriding-option]
+[ 14%] Building OBJCXX object CMakeFiles/test_native_rail_states.dir/tools/native_ui/RLPNativeI18n.mm.o
+[ 14%] Building OBJCXX object CMakeFiles/test_native_tracks_rows.dir/tools/native_ui/RLPNativeI18n.mm.o
+[ 14%] Building OBJCXX object CMakeFiles/test_native_cast_chip.dir/tools/native_ui/RLPNativeI18n.mm.o
+c++: warning: overriding '-ffast-math' option with '-ffp-contract=off' [-Woverriding-option]
+c++: warning: overriding '-ffast-math' option with '-ffp-contract=off' [-Woverriding-option]
+c++: warning: overriding '-ffast-math' option with '-ffp-contract=off' [-Woverriding-option]
+[ 15%] Building OBJCXX object CMakeFiles/test_native_writeback_card.dir/tools/native_ui/RLPNativeI18n.mm.o
+c++: warning: overriding '-ffast-math' option with '-ffp-contract=off' [-Woverriding-option]
+[ 15%] Building OBJCXX object CMakeFiles/test_native_settings_cards.dir/tools/native_ui/RLPNativeI18n.mm.o
+c++: warning: overriding '-ffast-math' option with '-ffp-contract=off' [-Woverriding-option]
+[ 15%] Linking OBJCXX executable test_native_queue_rows
+[ 15%] Linking OBJCXX executable test_native_empty_states
+[ 15%] Linking OBJCXX executable test_native_rail_states
+[ 15%] Linking OBJCXX executable test_native_queue_sort
+[ 16%] Linking OBJCXX executable test_native_cast_chip
+[ 16%] Linking OBJCXX executable test_native_tracks_rows
+[ 16%] Linking CXX executable test_native_settings_cards
+[ 16%] Linking CXX executable test_native_writeback_card
+[ 16%] Built target test_native_empty_states
+[ 17%] Built target test_native_queue_rows
+[ 18%] Built target test_native_queue_sort
+[ 19%] Built target test_native_tracks_rows
+[ 20%] Built target test_native_rail_states
+[ 21%] Built target test_native_cast_chip
+[ 21%] Building OBJCXX object CMakeFiles/test_native_settings_granularity.dir/tools/native_ui/RLPNativeI18n.mm.o
+[ 21%] Building OBJCXX object CMakeFiles/test_native_feedback_inline.dir/tools/native_ui/RLPNativeI18n.mm.o
+c++: warning: overriding '-ffast-math' option with '-ffp-contract=off' [-Woverriding-option]
+c++: warning: overriding '-ffast-math' option with '-ffp-contract=off' [-Woverriding-option]
+[ 23%] Built target test_native_settings_cards
+[ 25%] Built target test_native_writeback_card
+[ 26%] Built target test_native_settings_keys
+[ 26%] Built target test_native_lyrics
+[ 26%] Building OBJCXX object CMakeFiles/test_native_update_result_lifetime.dir/tools/native_ui/RLPNativeI18n.mm.o
+c++: warning: overriding '-ffast-math' option with '-ffp-contract=off' [-Woverriding-option]
+[ 26%] Building OBJCXX object CMakeFiles/test_native_target_curve.dir/tools/native_ui/RLPNativeI18n.mm.o
+c++: warning: overriding '-ffast-math' option with '-ffp-contract=off' [-Woverriding-option]
+[ 26%] Building OBJCXX object CMakeFiles/test_native_nowplaying_web.dir/tools/native_ui/RLPNativeI18n.mm.o
+[ 26%] Building OBJCXX object CMakeFiles/test_analysis_row.dir/tools/native_ui/RLPNativeI18n.mm.o
+c++: warning: overriding '-ffast-math' option with '-ffp-contract=off' [-Woverriding-option]
+c++: warning: overriding '-ffast-math' option with '-ffp-contract=off' [-Woverriding-option]
+[ 26%] Building OBJCXX object CMakeFiles/test_listening_room.dir/tools/native_ui/RLPNativeI18n.mm.o
+c++: warning: overriding '-ffast-math' option with '-ffp-contract=off' [-Woverriding-option]
+[ 26%] Building OBJCXX object CMakeFiles/test_workbench.dir/tools/native_ui/RLPNativeI18n.mm.o
+c++: warning: overriding '-ffast-math' option with '-ffp-contract=off' [-Woverriding-option]
+[ 27%] Linking CXX executable test_native_settings_granularity
+[ 27%] Linking CXX executable test_native_feedback_inline
+[ 27%] Linking CXX executable test_native_update_result_lifetime
+[ 27%] Linking OBJCXX executable test_native_target_curve
+[ 27%] Linking CXX executable test_native_nowplaying_web
+[ 27%] Linking CXX executable test_analysis_row
+[ 28%] Linking CXX executable test_workbench
+[ 28%] Linking CXX executable test_listening_room
+[ 30%] Built target test_native_settings_granularity
+[ 32%] Built target test_native_feedback_inline
+[ 33%] Built target test_native_update_result_lifetime
+[ 34%] Built target test_native_target_curve
+[ 36%] Built target test_signal_chain
+[ 37%] Built target test_native_nowplaying_web
+[ 38%] Built target test_analysis_row
+[ 38%] Building OBJCXX object CMakeFiles/test_mode_settings_readback.dir/tools/native_ui/RLPNativeI18n.mm.o
+c++: warning: overriding '-ffast-math' option with '-ffp-contract=off' [-Woverriding-option]
+[ 39%] Built target test_workbench
+[ 40%] Built target test_listening_room
+[ 40%] Building OBJCXX object CMakeFiles/test_remove_dir.dir/tools/native_ui/RLPNativeI18n.mm.o
+c++: warning: overriding '-ffast-math' option with '-ffp-contract=off' [-Woverriding-option]
+[ 40%] Building OBJCXX object CMakeFiles/test_works_view.dir/tools/native_ui/RLPNativeI18n.mm.o
+c++: warning: overriding '-ffast-math' option with '-ffp-contract=off' [-Woverriding-option]
+[ 41%] Building OBJCXX object CMakeFiles/test_servers_view.dir/tools/native_ui/RLPNativeI18n.mm.o
+[ 41%] Built target test_settings_persist
+c++: warning: overriding '-ffast-math' option with '-ffp-contract=off' [-Woverriding-option]
+[ 41%] Building OBJCXX object CMakeFiles/test_artist_grid.dir/tools/native_ui/RLPNativeI18n.mm.o
+c++: warning: overriding '-ffast-math' option with '-ffp-contract=off' [-Woverriding-option]
+[ 41%] Building OBJCXX object CMakeFiles/test_track_actions.dir/tools/native_ui/RLPNativeI18n.mm.o
+c++: warning: overriding '-ffast-math' option with '-ffp-contract=off' [-Woverriding-option]
+[ 42%] Building OBJCXX object CMakeFiles/test_llm_endpoint.dir/tools/native_ui/RLPNativeI18n.mm.o
+c++: warning: overriding '-ffast-math' option with '-ffp-contract=off' [-Woverriding-option]
+[ 42%] Built target test_diag_event
+[ 42%] Built target test_diag_run_marker
+[ 42%] Built target rtadiag
+[ 43%] Built target test_diag_bundle
+[ 43%] Linking CXX executable test_mode_settings_readback
+[ 43%] Linking CXX executable test_remove_dir
+[ 43%] Built target test_diag_bundle_json
+[ 44%] Linking CXX executable test_works_view
+[ 44%] Linking CXX executable test_artist_grid
+[ 44%] Linking CXX executable test_servers_view
+[ 44%] Built target test_diag_http
+[ 44%] Linking CXX executable test_llm_endpoint
+[ 45%] Built target test_diag_questions
+[ 46%] Linking CXX executable test_track_actions
+[ 47%] Built target test_remove_dir
+[ 48%] Built target test_mode_settings_readback
+[ 48%] Built target test_rtadiag
+[ 49%] Built target test_quality_edges
+[ 49%] Built target test_float_decode
+[ 49%] Built target test_works_view
+[ 50%] Built target test_health_store
+[ 52%] Built target test_artist_grid
+[ 54%] Built target test_llm_endpoint
+[ 56%] Built target test_servers_view
+[ 56%] Built target test_lyrics_cache
+[ 56%] Built target test_ir_resample
+[ 57%] Built target test_track_actions
+[ 57%] Built target test_source_manager
+[ 57%] Built target test_subsonic
+[ 57%] Built target test_cover_native
+[ 58%] Built target test_coreaudio
+[ 58%] Built target test_startup_native
+[ 58%] Built target test_source_native
+[ 59%] Built target rtaloop
+[ 60%] Built target test_mac_transport
+[ 60%] Built target test_embedded_api
+[ 60%] Built target test_airplay_policy
+[ 60%] Built target test_mac_update
+[ 60%] Built target test_dop_underrun_fill
+[ 60%] Built target test_dop_padding
+[ 60%] Built target test_retrieval
+[ 60%] Built target test_retrieval_speed
+[ 60%] Built target test_knowledge
+[ 60%] Built target test_entity_classify
+[ 61%] Built target test_retrieval_v6
+[ 61%] Built target test_track_identity
+[ 61%] Built target test_knowledge_v6
+[ 61%] Built target test_async_job
+[ 61%] Built target test_decide_route
+[ 62%] Built target test_bp_verdict
+[ 62%] Built target test_opra_eq
+[ 62%] Built target test_metacache
+[ 62%] Built target test_phys_format
+[ 62%] Built target test_three_layer_states
+[ 62%] Built target test_host_msg
+[ 62%] Built target test_mac_feedback
+[ 63%] Built target test_physlock_device
+[ 63%] Built target test_update_channel
+[ 64%] Built target test_update_check
+[ 65%] Built target test_http_cancel
+[ 65%] Built target test_bitdepth_negotiation
+[ 65%] Built target test_output_bit_depth
+[ 65%] Built target test_thread_join_safe
+[ 65%] Built target test_modulator
+[ 65%] Built target test_dither
+[ 65%] Built target test_resampler
+[ 65%] Built target test_modulator_families
+[ 66%] Built target pcm_quality_report
+[ 66%] Built target test_filters
+[ 66%] Built target test_pipeline
+[ 66%] Built target test_conv_matrix
+[ 67%] Built target test_volume_eq
+[ 67%] Built target test_conv_ir_prep
+[ 68%] Built target test_output_gain
+[ 69%] Built target test_dop_gain_guard
+[ 69%] Built target test_hw_volume
+[ 69%] Built target test_hog_exclusive
+[ 69%] Built target test_direct_dsd_plan
+[ 69%] Built target test_chain
+[ 69%] Built target test_peq
+[ 70%] Built target test_drift
+[ 70%] Built target test_clock_loop
+[ 71%] Built target test_status
+[ 71%] Built target test_loudness
+[ 71%] Built target test_eq_reload
+[ 72%] Built target test_dsd_production
+[ 72%] Built target test_dop
+[ 72%] Built target test_md5
+[ 72%] Built target test_dop_stream
+[ 72%] Built target test_parallel
+[ 72%] Built target test_two_stage
+[ 73%] Built target test_isp
+[ 74%] Built target test_channel_gain
+[ 75%] Built target test_gpu_bridge
+[ 75%] Built target test_stream_baseline
+[ 75%] Built target test_playback_edges
+[ 75%] Built target test_fullscale
+[ 76%] Built target test_metaparse
+[ 76%] Built target test_metamatch
+[ 76%] Built target test_ratepick
+[ 76%] Built target test_buffer_policy
+[ 76%] Built target test_year
+[ 76%] Built target test_playback_gpu
+[ 76%] Built target test_zipstore
+[ 76%] Built target test_hotfix_guard
+[ 77%] Built target test_renderfail
+[ 77%] Built target test_decode_retry
+[ 77%] Built target test_stream_decode
+[ 77%] Built target test_dsd_path
+[ 77%] Built target test_dsd_reader
+[ 77%] Built target test_alac_encoder
+[ 77%] Built target test_airplay_discovery
+[ 77%] Built target test_cast_audio
+[ 77%] Built target test_cast_bit_exact
+[ 77%] Built target test_dsd_decimate_rate
+[ 77%] Built target test_raop_session
+[ 78%] Built target test_dsd_two_stage
+[ 79%] Built target test_entities
+[ 79%] Built target test_library
+[ 79%] Built target test_libroot_regress
+[ 79%] Built target test_cue
+[ 79%] Built target test_tags_native
+[ 79%] Built target test_album_cover
+[ 80%] Built target test_library_fingerprint
+[ 80%] Built target test_http_response_state
+[ 80%] Built target test_local_cover_cache
+[ 80%] Built target test_library_probe_retry
+[ 80%] Built target test_cover_fetch
+[ 80%] Built target test_dynamics
+[ 81%] Built target test_cover_thumb
+[ 82%] Built target test_fake_lossless
+[ 82%] Built target test_track_health
+[ 82%] Built target test_room_measurement
+[ 82%] Built target test_room_correction
+[ 82%] Built target rtahealth
+[ 82%] Built target test_metastore
+[ 82%] Built target test_enrich
+[ 82%] Built target test_quality
+[ 82%] Built target test_version_compare
+[ 82%] Built target test_replaygain
+[ 82%] Built target test_feedback_redact
+[ 82%] Built target test_dsd_rate_convert
+[ 82%] Built target test_quality_ai
+[ 82%] Built target test_feedback_api
+[ 82%] Built target test_shuffle_order
+[ 82%] Built target test_install_id
+[ 83%] Built target test_media_duration
+[ 83%] Built target test_render_loop_dry
+[ 83%] Built target test_feedback_live
+[ 83%] Built target test_scanpool
+[ 84%] Built target test_room_transport_coreaudio
+[ 85%] Built target test_ffmpeg_matrix
+[ 85%] Built target test_writeback
+[ 85%] Built target test_upnp_control
+[ 85%] Built target test_cast_service
+[ 86%] Built target test_system_proxy
+[ 86%] Built target test_gpu_metal
+[ 86%] Built target test_upnp_discovery
+[ 86%] Built target test_gpu_conv_streaming
+[ 87%] Built target test_loopback_capture
+[ 87%] Built target gpu_precision
+[ 87%] Built target test_webui_hardening
+[ 87%] Built target test_net_405
+[ 87%] Built target test_gpu_precision
+[ 88%] Built target test_cast_status
+[ 88%] Built target test_metallm
+[ 88%] Built target test_dsd_stream_decode
+[ 89%] Built target test_preset_profiles
+[ 89%] Built target test_cast_upsample_plan
+[ 89%] Built target test_llm_models
+[ 89%] Built target test_provider_order
+[ 89%] Built target test_search_endpoints
+[ 90%] Built target test_ai_fill
+[ 91%] Built target rlplayer_mac
+[ 91%] Building OBJCXX object CMakeFiles/test_native_album_web.dir/tools/native_ui/RLPNativeI18n.mm.o
+[ 91%] Building OBJCXX object CMakeFiles/test_native_bar_core.dir/tools/native_ui/RLPNativeI18n.mm.o
+c++: warning: overriding '-ffast-math' option with '-ffp-contract=off' [-Woverriding-option]
+c++: warning: overriding '-ffast-math' option with '-ffp-contract=off' [-Woverriding-option]
+[ 91%] Building OBJCXX object CMakeFiles/rlplayer_native.dir/tools/native_ui/RLPNativeI18n.mm.o
+c++: warning: overriding '-ffast-math' option with '-ffp-contract=off' [-Woverriding-option]
+[ 91%] Linking CXX executable test_native_bar_core
+[ 92%] Linking CXX executable test_native_album_web
+[ 94%] Built target test_native_bar_core
+[ 94%] Built target test_native_album_web
+[ 94%] Linking CXX executable rlplayer_native
+[100%] Built target rlplayer_native
+build exit=0

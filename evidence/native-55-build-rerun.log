@@ -1,0 +1,235 @@
+[  0%] Built target dopinfo
+[  1%] Built target filter_report
+[  1%] Built target wavcmp
+[  1%] Built target httptest
+[  1%] Built target rlapp_core
+[  1%] Built target rtaweb
+[  2%] Built target test_native_bar_web
+[  2%] Building OBJCXX object CMakeFiles/test_native_pause_paths.dir/tools/native_ui/RLPNowPlayingViewController.mm.o
+c++: warning: overriding '-ffast-math' option with '-ffp-contract=off' [-Woverriding-option]
+[  3%] Built target test_native_opra_cards
+[  5%] Built target test_native_scroll_eq
+[  5%] Building OBJCXX object CMakeFiles/test_native_rail_preview.dir/tools/native_ui/RLPNowPlayingViewController.mm.o
+[  5%] Building OBJCXX object CMakeFiles/test_native_rail_cards.dir/tools/native_ui/RLPNowPlayingViewController.mm.o
+c++: warning: overriding '-ffast-math' option with '-ffp-contract=off' [-Woverriding-option]
+c++: warning: overriding '-ffast-math' option with '-ffp-contract=off' [-Woverriding-option]
+[  5%] Building OBJCXX object CMakeFiles/test_native_analysis_panel.dir/tools/native_ui/RLPNowPlayingViewController.mm.o
+[  5%] Building OBJCXX object CMakeFiles/test_native_npmeta_chips.dir/tools/native_ui/RLPNowPlayingViewController.mm.o
+c++: warning: overriding '-ffast-math' option with '-ffp-contract=off' [-Woverriding-option]
+c++: warning: overriding '-ffast-math' option with '-ffp-contract=off' [-Woverriding-option]
+[  6%] Built target test_native_queue_sort
+[  7%] Built target test_native_empty_states
+[  8%] Built target test_native_queue_rows
+[  8%] Building OBJCXX object CMakeFiles/test_native_rail_states.dir/tools/native_ui/RLPNowPlayingViewController.mm.o
+c++: warning: overriding '-ffast-math' option with '-ffp-contract=off' [-Woverriding-option]
+[  8%] Building OBJCXX object CMakeFiles/test_native_cast_chip.dir/tools/native_ui/RLPNowPlayingViewController.mm.o
+c++: warning: overriding '-ffast-math' option with '-ffp-contract=off' [-Woverriding-option]
+[  9%] Built target test_native_tracks_rows
+[ 12%] Built target test_native_writeback_card
+[ 14%] Built target test_native_settings_cards
+[ 16%] Built target test_native_feedback_inline
+[ 19%] Built target test_native_settings_granularity
+[ 20%] Built target test_native_update_result_lifetime
+[ 21%] Built target test_native_target_curve
+[ 21%] Built target test_native_settings_keys
+[ 22%] Built target test_native_lyrics
+[ 22%] Building OBJCXX object CMakeFiles/test_analysis_row.dir/tools/native_ui/RLPNowPlayingViewController.mm.o
+c++: warning: overriding '-ffast-math' option with '-ffp-contract=off' [-Woverriding-option]
+[ 23%] Linking OBJCXX executable test_native_pause_paths
+[ 23%] Linking OBJCXX executable test_native_analysis_panel
+[ 23%] Linking OBJCXX executable test_native_npmeta_chips
+[ 23%] Linking OBJCXX executable test_native_rail_preview
+[ 24%] Built target test_native_analysis_panel
+[ 25%] Linking OBJCXX executable test_native_rail_cards
+[ 26%] Built target test_native_rail_preview
+[ 28%] Built target test_native_npmeta_chips
+[ 29%] Built target test_native_pause_paths
+[ 29%] Linking OBJCXX executable test_native_rail_states
+[ 30%] Built target test_native_rail_cards
+[ 31%] Built target test_listening_room
+[ 32%] Built target test_mode_settings_readback
+[ 32%] Building OBJCXX object CMakeFiles/test_native_nowplaying_web.dir/tools/native_ui/RLPNowPlayingViewController.mm.o
+[ 34%] Built target test_workbench
+c++: warning: overriding '-ffast-math' option with '-ffp-contract=off' [-Woverriding-option]
+[ 36%] Built target test_signal_chain
+[ 36%] Linking OBJCXX executable test_native_cast_chip
+[ 37%] Built target test_native_rail_states
+[ 38%] Built target test_remove_dir
+[ 39%] Built target test_works_view
+[ 40%] Built target test_native_cast_chip
+[ 40%] Built target test_settings_persist
+[ 43%] Built target test_servers_view
+[ 43%] Built target test_diag_event
+[ 43%] Built target test_diag_run_marker
+[ 43%] Built target rtadiag
+[ 46%] Built target test_llm_endpoint
+[ 47%] Built target test_diag_bundle
+[ 49%] Built target test_track_actions
+[ 49%] Built target test_diag_bundle_json
+[ 51%] Built target test_artist_grid
+[ 51%] Built target test_diag_http
+[ 52%] Built target test_diag_questions
+[ 52%] Built target test_rtadiag
+[ 52%] Built target test_float_decode
+[ 53%] Built target test_health_store
+[ 53%] Built target test_lyrics_cache
+[ 54%] Built target test_quality_edges
+[ 54%] Built target test_ir_resample
+[ 54%] Built target test_source_manager
+[ 54%] Built target test_subsonic
+[ 54%] Built target test_cover_native
+[ 55%] Built target test_coreaudio
+[ 55%] Built target test_source_native
+[ 55%] Built target test_startup_native
+[ 56%] Built target rtaloop
+[ 57%] Built target test_mac_transport
+[ 57%] Built target test_dop_underrun_fill
+[ 57%] Built target test_embedded_api
+[ 57%] Built target test_airplay_policy
+[ 57%] Built target test_mac_update
+[ 57%] Built target test_dop_padding
+[ 57%] Built target test_knowledge
+[ 57%] Built target test_retrieval
+[ 57%] Built target test_entity_classify
+[ 57%] Built target test_retrieval_speed
+[ 57%] Built target test_track_identity
+[ 58%] Built target test_retrieval_v6
+[ 58%] Built target test_async_job
+[ 58%] Built target test_knowledge_v6
+[ 58%] Built target test_metacache
+[ 58%] Built target test_opra_eq
+[ 58%] Built target test_decide_route
+[ 59%] Built target test_bp_verdict
+[ 59%] Built target test_phys_format
+[ 60%] Built target test_physlock_device
+[ 60%] Built target test_host_msg
+[ 60%] Built target test_three_layer_states
+[ 60%] Built target test_mac_feedback
+[ 61%] Built target test_update_check
+[ 61%] Built target test_update_channel
+[ 62%] Built target test_http_cancel
+[ 62%] Built target test_thread_join_safe
+[ 62%] Built target test_bitdepth_negotiation
+[ 62%] Built target test_output_bit_depth
+[ 62%] Built target test_resampler
+[ 62%] Built target test_dither
+[ 62%] Built target test_modulator
+[ 62%] Built target test_filters
+[ 62%] Built target test_modulator_families
+[ 63%] Built target pcm_quality_report
+[ 63%] Built target test_pipeline
+[ 63%] Built target test_conv_matrix
+[ 63%] Built target test_conv_ir_prep
+[ 64%] Built target test_volume_eq
+[ 65%] Built target test_output_gain
+[ 66%] Built target test_dop_gain_guard
+[ 66%] Built target test_hw_volume
+[ 66%] Built target test_hog_exclusive
+[ 66%] Built target test_direct_dsd_plan
+[ 66%] Built target test_peq
+[ 66%] Built target test_eq_reload
+[ 67%] Built target test_dsd_production
+[ 67%] Built target test_chain
+[ 68%] Built target test_drift
+[ 68%] Built target test_clock_loop
+[ 69%] Built target test_status
+[ 69%] Built target test_loudness
+[ 69%] Built target test_md5
+[ 69%] Built target test_dop
+[ 69%] Built target test_dop_stream
+[ 69%] Built target test_two_stage
+[ 69%] Built target test_parallel
+[ 69%] Built target test_stream_baseline
+[ 71%] Built target test_isp
+[ 71%] Built target test_channel_gain
+[ 71%] Built target test_fullscale
+[ 72%] Built target test_gpu_bridge
+[ 72%] Built target test_playback_edges
+[ 73%] Built target test_metaparse
+[ 73%] Built target test_metamatch
+[ 73%] Built target test_buffer_policy
+[ 73%] Built target test_ratepick
+[ 73%] Built target test_zipstore
+[ 73%] Built target test_year
+[ 73%] Built target test_playback_gpu
+[ 73%] Built target test_hotfix_guard
+[ 74%] Built target test_renderfail
+[ 74%] Built target test_dsd_path
+[ 74%] Built target test_decode_retry
+[ 74%] Built target test_stream_decode
+[ 74%] Built target test_dsd_reader
+[ 74%] Built target test_alac_encoder
+[ 74%] Built target test_airplay_discovery
+[ 74%] Built target test_cast_bit_exact
+[ 74%] Built target test_cast_audio
+[ 74%] Built target test_raop_session
+[ 74%] Built target test_dsd_decimate_rate
+[ 75%] Built target test_dsd_two_stage
+[ 76%] Built target test_entities
+[ 76%] Built target test_libroot_regress
+[ 76%] Built target test_cue
+[ 76%] Built target test_library
+[ 76%] Built target test_tags_native
+[ 77%] Built target test_library_fingerprint
+[ 77%] Built target test_album_cover
+[ 77%] Built target test_library_probe_retry
+[ 77%] Built target test_http_response_state
+[ 77%] Built target test_local_cover_cache
+[ 77%] Built target test_cover_fetch
+[ 77%] Built target test_dynamics
+[ 78%] Built target test_cover_thumb
+[ 79%] Built target test_fake_lossless
+[ 79%] Built target test_room_correction
+[ 79%] Built target test_track_health
+[ 79%] Built target test_room_measurement
+[ 79%] Built target rtahealth
+[ 79%] Built target test_metastore
+[ 79%] Built target test_enrich
+[ 79%] Built target test_quality
+[ 79%] Built target test_version_compare
+[ 79%] Built target test_quality_ai
+[ 79%] Built target test_replaygain
+[ 79%] Built target test_dsd_rate_convert
+[ 79%] Built target test_feedback_redact
+[ 79%] Built target test_feedback_api
+[ 79%] Built target test_install_id
+[ 79%] Built target test_shuffle_order
+[ 79%] Built target test_feedback_live
+[ 80%] Built target test_room_transport_coreaudio
+[ 80%] Built target test_scanpool
+[ 80%] Built target test_render_loop_dry
+[ 81%] Built target test_media_duration
+[ 82%] Built target test_ffmpeg_matrix
+[ 82%] Built target test_writeback
+[ 82%] Built target test_upnp_control
+[ 83%] Built target test_system_proxy
+[ 83%] Built target test_upnp_discovery
+[ 83%] Built target test_cast_service
+[ 84%] Built target test_cast_status
+[ 85%] Built target test_loopback_capture
+[ 85%] Built target test_gpu_conv_streaming
+[ 85%] Built target test_gpu_metal
+[ 85%] Built target gpu_precision
+[ 85%] Built target test_gpu_precision
+[ 85%] Built target test_webui_hardening
+[ 85%] Built target test_net_405
+[ 85%] Built target test_metallm
+[ 85%] Built target test_dsd_stream_decode
+[ 86%] Built target test_preset_profiles
+[ 86%] Built target test_cast_upsample_plan
+[ 87%] Built target test_ai_fill
+[ 87%] Built target test_llm_models
+[ 87%] Built target test_provider_order
+[ 87%] Built target test_search_endpoints
+[ 87%] Linking CXX executable test_analysis_row
+[ 88%] Built target rlplayer_mac
+[ 89%] Built target test_native_bar_core
+[ 91%] Built target test_native_album_web
+[ 93%] Built target test_analysis_row
+[ 93%] Linking CXX executable test_native_nowplaying_web
+[ 93%] Building OBJCXX object CMakeFiles/rlplayer_native.dir/tools/native_ui/RLPNowPlayingViewController.mm.o
+[ 94%] Built target test_native_nowplaying_web
+c++: warning: overriding '-ffast-math' option with '-ffp-contract=off' [-Woverriding-option]
+[ 94%] Linking CXX executable rlplayer_native
+[100%] Built target rlplayer_native
+build exit=0

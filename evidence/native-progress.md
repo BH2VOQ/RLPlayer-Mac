@@ -742,3 +742,34 @@ parity missing=0；behavior actionable=0；i18n OK（2419 pairs）。
 **证据**：`evidence/native-drawer-20261114.md`、`native-drawer-{red,green}-20261114.log`；对照表 #39 标已修。
 **门禁（1.1.7.54 树）**：build 0 error；串行全量 ctest **201/201 passed（404.80s）**；audit **246/0**；
 parity missing=0；behavior actionable=0；i18n OK（2419 pairs）。
+
+### 2026-11-14 20:4x —— 轮次 20（1.1.7.55）：古典第 4 张「作品」卡 + 作品抽屉
+
+**任务**（接手 `native-loop-gaps-20261114.md` §19 第 1 项 P2「未开始」）：把 web `npDataTargets` 的
+work tab、`npDataEnsure('work')`、`npDataWorkBody` 逐行移植到原生右栏与页内抽屉。
+**先核对 web**：`ui_script.h:12720-12751`（npIsClassical / npGuessComposer / npWorkTarget）、
+`:12818`（npDataTargets）、`:13123`（npDataWorkBody）；旧原生右栏硬编码 3 种实体，且
+`onOpenWorks:` 把「艺术家」当作曲家传，Discogs 检索必然 0 条。
+**判据**：`test_native_rail_preview` 追加场景 5/6（4 卡 / versions URL 形状 / 点击实体 / 抽屉加载态·空态·缓存态·版本行·打开整页）；
+同步把 `test_native_rail_cards`（3 张→4 槽、非古典可见 3、隐藏卡 frame 归零）与
+`test_native_nowplaying_web`（先喂 meta 再量 chipwrap）两条既有判据跟着结构更新，不删红判据。
+**红→绿**：旧码（1.1.7.54）**46P / 3F**（cards=3、无 npChip.作品、无 loadWorkName:composer:）
+→ 新码 **78P / 0F**；`native_nowplaying_web` 0 failures。
+**实现**：`RLPSupport` 新增三个公共判定函数（4 处入口共用一套真源）；`RLPKnowledgeView` 新增
+`loadWorkName:composer:` 全套（versions URL / pending 轮询 / 来源行 / npdwork 行 / 空态 / 打开整页）；
+`RLPNowPlayingViewController` 右栏 4 卡、work URL、成功判据、预览、点击实体、指纹含 composer、
+`onOpenWorks:` 改取作品名+作曲家。
+**收口（接力本工单在途 WIP）**：首次全量 ctest **200/201**，唯一红 `native_i18n_coverage`
+（新 `RLPTr(@"不同演绎")` / `RLPTr(@"发行版本")` 两个独立字面量未进词表）；现场只补了 TSV 与 web 表头，
+漏了原生表 ⟹ `native_i18n_table_check` 亦红。本轮新增 `chunk-native118-work.en.tsv`（Performances / Releases）
+并重生成两份生成表，三条 i18n 门禁同时绿；顺手修同包内「注释与实现矛盾」「两语句挤一行」两处一致性。
+**如实挂账**：①离线夹具，未真连 Discogs；②`.npdwork` 是 NSStackView 三列近似、未移植「复制版本链接」按钮；
+③缓存日期只到 `yyyy-MM-dd`（web fmtDate 未逐字复刻）；④抽屉沿用 1.1.7.54 形态（无 blur / 无滑入）；
+⑤work tab 仍受右栏 summary 闸门约束（与 web npDataCan 同口径）。既有挂账不因本包关闭：
+底部播放条 `.k` / 设置页 `.chip` hover、`#npAnlBody` 左缘 1pt、默认渲染器切换、双模式薄表现层、
+RENDERFAIL 根因（需用户诊断包）、`native_ui_functional` 偶发 bus error。
+**证据**：`evidence/native-work-card-20261114.md`、`native-work-card-{red,green,npweb-green}-20261114.log`、
+`native-55-{build,ctest,ctest-final,audit,build-rerun,ctest-rerun,audit-rerun}.log`。
+**门禁（1.1.7.55 树）**：build 0 error；串行全量 ctest **201/201 passed（400.76s）**；audit **246/0**；
+parity missing=0（view 14 / tab 10 / ctrl 179 / api 96，na 16 全可复核、removed 2 双向核验）；
+behavior actionable=0（50 bindings）；i18n 三项 OK（2421 pairs）。

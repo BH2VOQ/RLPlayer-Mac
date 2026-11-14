@@ -25,6 +25,10 @@
 @property (nonatomic, strong) NSTextField *status;
 @property (nonatomic, strong) NSButton *refreshBtn;
 @property (nonatomic, copy) NSString *kind;
+@property (nonatomic, copy) NSString *composer;
+@property (nonatomic, assign) BOOL workMode;          // 当前是「作品」模式（走 /api/entity/versions）
+@property (nonatomic, strong) NSTextField *workHintSub; // web npDataWorkBody 的第二行「作品：名 · 作曲家」
+@property (nonatomic, strong) NSButton *openWorksBtn;   // web npWorkOpen「查看 Discogs 版本推荐 →」
 @property (nonatomic, copy) NSString *name;
 @property (nonatomic, copy) NSString *artist;
 @property (nonatomic, assign) NSUInteger seq;
@@ -71,14 +75,24 @@
     [hdr addArrangedSubview:self.title];
     self.refreshBtn = [NSButton buttonWithTitle:RLPTr(@"重新整理") target:self action:@selector(onRefresh:)];
     self.refreshBtn.bezelStyle = NSBezelStyleRounded;
+    self.refreshBtn.identifier = @"knowledgeRefresh";
     self.refreshBtn.enabled = NO;
     [hdr addArrangedSubview:self.refreshBtn];
     [self.stack addArrangedSubview:hdr];
 
     self.status = RLPLabel(RLPTr(@"未在播放"), t.small, t.mut);
+    self.status.identifier = @"knowledgeStatus";
     self.status.maximumNumberOfLines = 2;
     self.status.lineBreakMode = NSLineBreakByWordWrapping;
     [self.stack addArrangedSubview:self.status];
+
+    // web npDataWorkBody 第二行（「作品：名 · 作曲家」）与整页入口；只在作品模式出现，其它模式隐藏。
+    self.workHintSub = RLPLabel(@"", t.small, t.mut2);
+    self.workHintSub.identifier = @"npWorkHintSub";
+    self.workHintSub.maximumNumberOfLines = 2;
+    self.workHintSub.lineBreakMode = NSLineBreakByWordWrapping;
+    self.workHintSub.hidden = YES;
+    [self.stack addArrangedSubview:self.workHintSub];
 
     self.fieldStack = [[NSStackView alloc] init];
     self.fieldStack.translatesAutoresizingMaskIntoConstraints = NO;
@@ -98,6 +112,13 @@
     self.summaryView.backgroundColor = t.bg2;
     sc.documentView = self.summaryView;
     [self.stack addArrangedSubview:sc];
+    // web npWorkOpen：「查看 Discogs 版本推荐 →」（原生 = 既有古典作品整页）
+    self.openWorksBtn = [NSButton buttonWithTitle:RLPTr(@"查看 Discogs 版本推荐 →")
+                                           target:self action:@selector(onOpenWorksPage:)];
+    self.openWorksBtn.bezelStyle = NSBezelStyleRounded;
+    self.openWorksBtn.identifier = @"npWorkOpen";
+    self.openWorksBtn.hidden = YES;
+    [self.stack addArrangedSubview:self.openWorksBtn];
     [NSLayoutConstraint activateConstraints:@[
         [sc.heightAnchor constraintEqualToConstant:150],
         [sc.widthAnchor constraintEqualToAnchor:self.stack.widthAnchor],
@@ -108,6 +129,12 @@
 
 - (void)loadKind:(NSString *)kind name:(NSString *)name artist:(NSString *)artist {
     [self cancelLoading];
+    self.workMode = NO;
+    self.composer = @"";
+    self.workHintSub.stringValue = @"";
+    self.workHintSub.hidden = YES;
+    self.openWorksBtn.hidden = YES;
+    self.refreshBtn.title = RLPTr(@"重新整理");
     self.kind = kind ?: @"track";
     self.name = name ?: @"";
     self.artist = artist ?: @"";
@@ -134,6 +161,7 @@
     self.pollCount = 0;
     [self clearFields];
     self.summaryView.string = @"";
+    if (self.workMode) { [self fetchWorkRefresh:YES]; return; }
     [self fetchKnowledgeRefresh:YES];
     [self fetchSummaryRefresh:YES];
 }
@@ -185,7 +213,8 @@
         (void)tm;
         __typeof__(self) self_ = weakSelf;
         if (!self_ || seq != self_.seq) return;
-        [self_ fetchKnowledgeRefresh:NO];
+        if (self_.workMode) [self_ fetchWorkRefresh:NO];
+        else [self_ fetchKnowledgeRefresh:NO];
     }];
 }
 
@@ -209,6 +238,182 @@
         }
         self_.summaryView.string = text;
     }];
+}
+
+/// 版本行的文字允许被压缩（web `.wt/.wp` 都是 `min-width:0;overflow:hidden;text-overflow:ellipsis`）。
+static void RLPAllowCompress(NSTextField *tf) {
+    [tf setContentCompressionResistancePriority:NSLayoutPriorityDefaultLow
+                                  forOrientation:NSLayoutConstraintOrientationHorizontal];
+}
+
+#pragma mark - 作品（古典曲目）· 演绎版本
+
+/// web `npDataActivate('work')`：作品实体没有 summary，数据源是 Discogs 版本推荐。
+- (void)loadWorkName:(NSString *)name composer:(NSString *)composer {
+    [self cancelLoading];
+    self.workMode = YES;
+    self.kind = @"work";
+    self.name = name ?: @"";
+    self.composer = composer ?: @"";
+    [self clearFields];
+    self.summaryView.string = @"";
+    self.workHintSub.stringValue = @"";
+    self.workHintSub.hidden = YES;
+    self.openWorksBtn.hidden = YES;
+    self.refreshBtn.title = RLPTr(@"重新查询");
+    if (!self.name.length) {
+        self.status.stringValue = RLPTr(@"未在播放");
+        self.refreshBtn.enabled = NO;
+        return;
+    }
+    [self fetchWorkRefresh:NO];
+}
+
+/// web `npDataEnsure('work')` 的 URL 形状：`/api/entity/versions?kind=work&name=…[&composer=…][&refresh=1]`。
+- (NSString *)workUrlWithRefresh:(BOOL)refresh {
+    NSMutableString *u = [NSMutableString stringWithFormat:@"/api/entity/versions?kind=work&name=%@",
+                          RLPEnc(self.name)];
+    if (self.composer.length) [u appendFormat:@"&composer=%@", RLPEnc(self.composer)];
+    if (refresh) [u appendString:@"&refresh=1"];
+    return u;
+}
+
+- (void)fetchWorkRefresh:(BOOL)refresh {
+    if (![[RLPCoreClient shared] started]) {
+        self.status.stringValue = RLPTr(@"核心未启动");
+        self.refreshBtn.enabled = NO;
+        return;
+    }
+    self.refreshBtn.enabled = YES;
+    const NSUInteger seq = ++self.seq;
+    NSString *url = [self workUrlWithRefresh:refresh];
+    self.status.stringValue = RLPTr(@"正在整理资料…");   // web npDataSkeleton 的 npdhint
+    __weak __typeof__(self) weakSelf = self;
+    [[RLPCoreClient shared] getJSON:url completion:^(NSDictionary * _Nullable json) {
+        __typeof__(self) self_ = weakSelf;
+        if (!self_ || seq != self_.seq) return;       // 已换实体/关页 → 丢弃过期结果
+        if (!json) { self_.status.stringValue = RLPTr(@"资料读取失败"); return; }
+        // pending 是后端异步 job（Discogs 检索可能要几秒），按建议间隔轮询，不是失败。
+        if ([json[@"pending"] respondsToSelector:@selector(boolValue)] && [json[@"pending"] boolValue]) {
+            [self_ schedulePollForKnowledge];
+            return;
+        }
+        NSArray *perfs = [json[@"performances"] isKindOfClass:[NSArray class]]
+                       ? json[@"performances"] : @[];
+        const BOOL ok = [json[@"ok"] respondsToSelector:@selector(boolValue)] && [json[@"ok"] boolValue];
+        if (!ok || perfs.count == 0) { [self_ renderWorkEmpty:json]; return; }
+        [self_ renderWorkRows:json performances:perfs];
+    }];
+}
+
+/// web `npDataStatHtml('work')` 的正文：`Discogs 实时` / `缓存 · <日期>` + `· 不同演绎 N / 发行版本 M`。
+- (NSString *)workSourceLine:(NSDictionary *)json {
+    NSString *src;
+    if ([json[@"from_cache"] respondsToSelector:@selector(boolValue)] && [json[@"from_cache"] boolValue]) {
+        NSString *date = @"";
+        id gen = json[@"generated_at"];
+        if ([gen respondsToSelector:@selector(doubleValue)] && [gen doubleValue] > 0) {
+            NSDateFormatter *df = [[NSDateFormatter alloc] init];
+            df.dateFormat = @"yyyy-MM-dd";
+            date = [df stringFromDate:[NSDate dateWithTimeIntervalSince1970:[gen doubleValue]]];
+        }
+        src = date.length ? [NSString stringWithFormat:@"%@ · %@", RLPTr(@"缓存"), date] : RLPTr(@"缓存");
+    } else {
+        src = RLPTr(@"Discogs 实时");
+    }
+    NSInteger distinct = [json[@"distinctCount"] respondsToSelector:@selector(integerValue)]
+                       ? [json[@"distinctCount"] integerValue] : 0;
+    NSInteger releases = [json[@"releaseCount"] respondsToSelector:@selector(integerValue)]
+                       ? [json[@"releaseCount"] integerValue] : 0;
+    return [NSString stringWithFormat:@"%@ · %@ %ld / %@ %ld", src, RLPTr(@"不同演绎"),
+            (long)distinct, RLPTr(@"发行版本"), (long)releases];
+}
+
+/// web `npDataWorkBody`：每条 `.npdwork` = `年份 | 标题 | 指挥·乐团·厂牌·格式`。
+- (void)renderWorkRows:(NSDictionary *)json performances:(NSArray *)perfs {
+    [self clearFields];
+    self.workHintSub.hidden = YES;
+    self.workHintSub.stringValue = @"";
+    self.openWorksBtn.hidden = NO;              // web npWorkOpen
+    self.status.stringValue = [self workSourceLine:json];
+    RLPTheme *t = [RLPTheme current];
+    for (id item in perfs) {
+        if (![item isKindOfClass:[NSDictionary class]]) continue;
+        NSDictionary *p = (NSDictionary *)item;
+        NSStackView *row = [[NSStackView alloc] init];
+        row.identifier = @"npWorkRow";
+        row.orientation = NSUserInterfaceLayoutOrientationHorizontal;
+        row.alignment = NSLayoutAttributeCenterY;
+        row.spacing = 10;
+
+        NSString *year = @"—";
+        if ([p[@"year"] respondsToSelector:@selector(integerValue)] && [p[@"year"] integerValue] > 0)
+            year = [NSString stringWithFormat:@"%ld", (long)[p[@"year"] integerValue]];
+        NSTextField *yl = RLPLabel(year, [NSFont monospacedDigitSystemFontOfSize:11.5
+                                                                        weight:NSFontWeightRegular], t.mut);
+        yl.identifier = @"npWorkYear";
+        [[yl.widthAnchor constraintEqualToConstant:38] setActive:YES];
+        RLPAllowCompress(yl);
+        [row addArrangedSubview:yl];
+
+        NSString *title = [p[@"title"] isKindOfClass:[NSString class]] ? p[@"title"] : @"—";
+        NSTextField *tl = RLPLabel(title.length ? title : @"—", [NSFont systemFontOfSize:11.5], t.text2 ?: t.text);
+        tl.identifier = @"npWorkTitle";
+        tl.lineBreakMode = NSLineBreakByTruncatingTail;
+        tl.maximumNumberOfLines = 1;
+        tl.toolTip = title;
+        [[tl.widthAnchor constraintGreaterThanOrEqualToConstant:60] setActive:YES];
+        RLPAllowCompress(tl);
+        [row addArrangedSubview:tl];
+
+        NSString *ens = [p[@"ensemble"] isKindOfClass:[NSString class]] ? p[@"ensemble"] : nil;
+        if (!ens.length) ens = [p[@"orchestra"] isKindOfClass:[NSString class]] ? p[@"orchestra"] : @"";
+        NSMutableArray<NSString *> *meta = [NSMutableArray array];
+        for (NSString *k in @[@"conductor", @"label", @"format"]) {
+            if ([p[k] isKindOfClass:[NSString class]] && [p[k] length]) [meta addObject:p[k]];
+        }
+        // 顺序按 web：[conductor, ensemble||orchestra, label, format]
+        NSMutableArray<NSString *> *ordered = [NSMutableArray array];
+        if ([p[@"conductor"] isKindOfClass:[NSString class]] && [p[@"conductor"] length])
+            [ordered addObject:p[@"conductor"]];
+        if (ens.length) [ordered addObject:ens];
+        for (NSString *k in @[@"label", @"format"])
+            if ([p[k] isKindOfClass:[NSString class]] && [p[k] length]) [ordered addObject:p[k]];
+        (void)meta;
+        NSString *metaText = ordered.count ? [ordered componentsJoinedByString:@" · "] : @"—";
+        NSTextField *ml = RLPLabel(metaText, [NSFont systemFontOfSize:10.5], t.mut2);
+        ml.identifier = @"npWorkMeta";
+        ml.lineBreakMode = NSLineBreakByTruncatingTail;
+        ml.maximumNumberOfLines = 1;
+        ml.toolTip = metaText;
+        RLPAllowCompress(ml);
+        [row addArrangedSubview:ml];
+        [self.fieldStack addArrangedSubview:row];
+    }
+    // 底部「重新查询」在 hdr 的 refreshBtn 上（web 也有 npDataRefresh）；文案随状态切换。
+    self.refreshBtn.title = RLPTr(@"重新查询");
+}
+
+/// web `npDataWorkBody` 空态：两行文案 + 「重试查询」。
+- (void)renderWorkEmpty:(NSDictionary *)json {
+    [self clearFields];
+    self.openWorksBtn.hidden = YES;
+    self.refreshBtn.title = RLPTr(@"重试查询");
+    self.status.stringValue = RLPTr(@"未在 Discogs 检索到该作品的演绎版本（可能网络不可达或作品名不匹配）。");
+    NSString *who = self.composer.length
+        ? [NSString stringWithFormat:@"%@ · %@", self.name, self.composer] : self.name;
+    self.workHintSub.stringValue = [NSString stringWithFormat:@"%@：%@", RLPTr(@"作品"), who];
+    self.workHintSub.hidden = NO;
+    // 后端给了错误串就一并显示，避免"什么都没说"（web 的 error 态也是原文展示）。
+    NSString *err = [json[@"error"] isKindOfClass:[NSString class]] ? json[@"error"] : @"";
+    if (err.length && ![err isEqualToString:@"no fixture"])
+        self.status.toolTip = err;
+}
+
+- (void)onOpenWorksPage:(id)sender {
+    (void)sender;
+    [[NSNotificationCenter defaultCenter] postNotificationName:@"RLPOpenWorksNotification"
+        object:@{@"title": self.name ?: @"", @"composer": self.composer ?: @""}];
 }
 
 #pragma mark - 渲染

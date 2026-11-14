@@ -2202,6 +2202,8 @@ NSDictionary *RLPNativeI18nTable(void) {
             @"下一首: %@ · 剩 %ld 首": @"Next: %@ · %ld remaining",
             @"下一首: %@": @"Next: %@",
             @"队列末尾 · 共 %ld 首": @"End of queue · %ld tracks total",
+            @"不同演绎": @"Performances",
+            @"发行版本": @"Releases",
             @"AirPlay 共享输出（非 bit-perfect，端到端逐位未获验证）": @"AirPlay shared output (non-bit-perfect, end-to-end bit-perfection unverified)",
             @"AirPlay 设备：将使用系统共享输出（不独占/Hog），端到端 bit-perfect 未获验证": @"AirPlay device: will use system shared output (no exclusive/Hog), end-to-end bit-perfect unverified",
             @"AirPlay 不支持 DoP/Native DSD 输出；如需播放请将输出模式设为 PCM": @"AirPlay does not support DoP/Native DSD output; please set output mode to PCM to play",
