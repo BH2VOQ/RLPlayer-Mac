@@ -2198,6 +2198,7 @@ NSDictionary *RLPNativeI18nTable(void) {
             @"添加目录失败": @"Failed to add the folder",
             @"清空播放队列？": @"Clear the play queue?",
             @"同名 .lrc 文件、内嵌歌词，或播放时自动在线补全": @"A matching .lrc file, embedded lyrics, or online completion during playback",
+            @"例如 /Users/你的用户名/Music/headphone-eq.txt": @"Example: /Users/yourname/Music/headphone-eq.txt",
             @"AirPlay 共享输出（非 bit-perfect，端到端逐位未获验证）": @"AirPlay shared output (non-bit-perfect, end-to-end bit-perfection unverified)",
             @"AirPlay 设备：将使用系统共享输出（不独占/Hog），端到端 bit-perfect 未获验证": @"AirPlay device: will use system shared output (no exclusive/Hog), end-to-end bit-perfect unverified",
             @"AirPlay 不支持 DoP/Native DSD 输出；如需播放请将输出模式设为 PCM": @"AirPlay does not support DoP/Native DSD output; please set output mode to PCM to play",

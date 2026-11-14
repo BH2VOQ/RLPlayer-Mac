@@ -420,3 +420,28 @@ playback RENDERFAIL 根因仍需用户诊断包。实机验收由用户执行（
 audit 修复后连续 4 轮 246/0；parity missing=0；behavior actionable=0；i18n OK。
 **提交**：`524ae0e` fix(native): own the update check result before hopping to main thread，1.1.7.38。
 **下一步**：`native_settings_granularity`（EQ 两卡 / cal 三卡 + sp_eq/sp_ir/sp_irgpu 真控件）红→绿 → 1.1.7.39。
+
+### 2026-11-14 15:25 —— 轮次 12（1.1.7.39）：设置页卡片粒度（EQ 两卡 / cal 三卡 + `sp_eq`/`sp_ir`/`sp_irgpu` 真控件）
+
+**现场**：基线 `61d2470`（1.1.7.38 文档提交，代码树 = `524ae0e`）。工作树里另有别人留下的 ego 通道注释/文档改动，
+本轮**一个都没 stage**（`src/net/ui_page.h`、`src/net/ui_script.h`、`tools/rtaweb.cpp`、`tools/check_b10_*.js`、
+`tools/README.md`、`docs/native-ui/PLAN.md`、`evidence/native-3-settings-cards-20261114.md`，及未使用的
+`RLPSettingsLayout` 列宽参数 WIP）。
+**任务**（task-4）：EQ 页拆 web 的两卡（参数均衡 / 耳机 EQ）；cal 页拆三卡；`sp_ir`/`sp_irgpu` 必须是真控件
+（旧码只有 identifier 字面量 ⟹ parity 假绿）；新增 `sp_eq` 路径输入并落 `/api/settings` 的 `eq` 字段。
+**判据**：新 ctest `native_settings_granularity`（`tests/test_native_settings_granularity.mm`，23 条断言）：
+两卡/三卡结构与标题逐字、控件归属卡体、`sp_eq` 宽度>20、`sp_irgpu` 是 `NSSwitch`、
+改 `sp_eq` 后 `kv.eq` 真的变、`irgpu` 打开后 `kv.irgpu=1`、页签内无第二条可见滚动条。
+**红→绿**：旧码（1.1.7.38 二进制）**6 passed / 15 failed**（2 条行为判据因控件缺失跳过）→ 新码 **23 passed / 0 failed**。
+证据 `evidence/native-settings-granularity-red-20261114.log` / `-green-…log`、报告 `evidence/native-settings-granularity-20261114.md`。
+**过程中修掉一个真崩溃**：`buildOpraSection` 在 `opraInfo` 尚未入 hierarchy 时激活「宽=容器宽」约束 ⟹
+AppKit `NSGenericException: no common ancestor`（离屏测试第一次跑直接 abort），已改为先 `addArrangedSubview` 再激活。
+**如实挂账**：①判据「单层滚动」最初把页签根（它自己就是整页滚动容器）和 20 段表的固定高度 NSTableView
+包装也算成嵌套 ⟹ EQ 半条是**假红**，已改定义（只数 `hasVerticalScroller/hasHorizontalScroller` 为真的嵌套滚动容器，
+排除页签根）；cal 半条是真差异（旧 cal 视图自带 `hasVerticalScroller=YES`）。②`sp_ir` 的 `ir` 字段写回未单独立断言
+（`sp_eq`/`sp_irgpu` 有行为判据）。③声道音量微调仍是 `NSSlider`（web 是 number 输入），本轮未动。
+**i18n**：新控件占位文案 1 条新翻译进 `docs/i18n/chunk-native117.en.tsv` 并重生成两张表（2416 pairs）。
+**门禁（1.1.7.39 树）**：build 0 error；串行全量 ctest **201/201 passed（403.47s）**；audit **246/0**；
+`parity_scan --check` missing=0；`behavior_scan --check` actionable=0；`gen_i18n_table --check` / `gen_native_i18n --check` OK。
+**提交**：`feat(native): split settings EQ/cal into web card granularity`，1.1.7.39（仅本地）。
+**下一步**：播放页 `#np` 对照表（`evidence/native-4-playback-diff.md`，69 条）→ 按表逐项红→绿。

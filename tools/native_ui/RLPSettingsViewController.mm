@@ -236,6 +236,9 @@ static NSStackView *RLPSRow(NSString *label, NSView *control, NSString *hint, RL
 @property (nonatomic, strong) RLPSettingsGroup *trimGroup;
 @property (nonatomic, strong) NSMutableDictionary<NSString *, NSSlider *> *trimFields;
 @property (nonatomic, strong) NSMutableDictionary<NSString *, NSTextField *> *trimValueLabels;
+/// web #sp_eq（cal 页「EQ 文件（REW / AutoEq 文本）」路径输入）：旧码只有映射表里的
+/// 标识符、没有控件，本轮补成真控件并接 /api/settings 的 eq 键。
+@property (nonatomic, strong) NSTextField *eqField;
 @property (nonatomic, strong) NSTextField *trimChMsg;
 
 // ---- PCM 页（web data-g=pcm）----
@@ -2015,42 +2018,85 @@ static NSString *RLPControlIdentifier(NSString *key) {
 #pragma mark - 均衡 / 输入（已迁移的子界面）
 
 - (void)fillEqualizer:(NSStackView *)stack t:(RLPTheme *)t {
-    // 用户要求「所有设置页的每个分组都必须在卡片容器里」：旧 EQ 页把一整套控件直接铺在页面层级。
-    // web 这里分两张 sgroup（参数均衡 / 耳机 EQ），原生用一张卡片承载整个均衡器子界面
-    // （子界面内部按「20 段参数」「OPRA 耳机目标曲线」自然分段），仍是同一卡片后代。
-    RLPSettingsGroup *eqGroup = (RLPSettingsGroup *)RLPSGroup(RLPTr(@"均衡器（PEQ / 耳机 EQ）"),
-        RLPTr(@"20 段参数均衡 + OPRA 耳机目标曲线校准"), t);
-    [stack addArrangedSubview:eqGroup];
+    // web eqSettingsHtml() 是**两张** sgroup（卡片粒度逐条对齐）：
+    //   ① 「参数均衡 PEQ（20 段 · HIFI）」
+    //   ② 「耳机 EQ（OPRA 校准预设）」
+    // 原生 1.1.7.38 及以前把两段塞进同一张卡（用户看到的是"一张卡里三块"）。
+    // 现在：RLPEqualizerView 仍持同一份数据与交互，只是把 OPRA 段整段搬进第二张卡
+    //（不复制控件、不复制请求）。
+    RLPSettingsGroup *peqGroup = (RLPSettingsGroup *)RLPSGroup(
+        RLPTr(@"参数均衡 PEQ（20 段 · HIFI）"),
+        RLPTr(@"RBJ 双二阶 · 20 段 ISO 1/3 倍频程中心频率（20Hz~20kHz）· 采样率相关重建 · 参数热更新交叉淡入"), t);
+    [stack addArrangedSubview:peqGroup];
     self.eqView = [[RLPEqualizerView alloc] initWithFrame:NSMakeRect(0, 0, 620, 720)];
     self.eqView.translatesAutoresizingMaskIntoConstraints = NO;
     // 设置页本身就是整页滚动容器：EQ 不再套自己的滚动条（用户实测「只要外面那个滚动条」）。
     [self.eqView setEmbeddedInPage:YES];
-    [eqGroup addFullRow:self.eqView];
-    // 高度 = 内容自然高度；reload 之后再校正一次（20 段参数/OPRA 文本就位后高度才准确）。
+    [peqGroup addFullRow:self.eqView];
+    // 高度 = PEQ 段内容自然高度；reload 之后再校正一次（20 段参数文本就位后才准确）。
     self.eqHeightConstraint = [self.eqView.heightAnchor
-        constraintEqualToConstant:MAX(900.0, [self.eqView preferredContentHeight])];
+        constraintEqualToConstant:MAX(420.0, [self.eqView preferredContentHeight])];
     [self.eqHeightConstraint setActive:YES];
     [self.eqView reload];
+
+    RLPSettingsGroup *opraGroup = (RLPSettingsGroup *)RLPSGroup(
+        RLPTr(@"耳机 EQ（OPRA 校准预设）"), RLPTr(@"收录 6,230 款耳机专业校准滤波 · CC BY-SA 4.0"), t);
+    [stack addArrangedSubview:opraGroup];
+    // 把 OPRA 段从 EQ 视图里整段搬进第二张卡片（AppKit 重挂父视图，控件不复制）。
+    [opraGroup addFullRow:self.eqView.opraSectionView];
+
     __weak __typeof__(self) weakEq = self;
     dispatch_async(dispatch_get_main_queue(), ^{
         __typeof__(self) self_ = weakEq;
         if (!self_ || !self_.eqHeightConstraint) return;
         CGFloat h = [self_.eqView preferredContentHeight];
         if (h > self_.eqHeightConstraint.constant) {
-            self_.eqHeightConstraint.constant = MAX(900.0, h);
-            [eqGroup contentDidChange];
+            self_.eqHeightConstraint.constant = MAX(420.0, h);
+            [peqGroup contentDidChange];
         }
+        [opraGroup contentDidChange];
     });
 }
 
 - (void)fillCalibration:(NSStackView *)stack t:(RLPTheme *)t {
-    RLPSettingsGroup *calGroup = (RLPSettingsGroup *)RLPSGroup(RLPTr(@"声音校准"),
-        RLPTr(@"房间测量向导 / REW、AutoEq 文本 / 房间校正 IR"), t);
-    [stack addArrangedSubview:calGroup];
+    // web calSettingsHtml() 是**三张** sgroup：
+    //   ① 房间校正（测量向导） ② EQ 文件（REW / AutoEq 文本） ③ 房间校正 IR（WAV 脉冲响应）
+    // 旧原生只有一张「声音校准」卡，且 web 的 sp_eq / sp_ir / sp_irgpu 在原生**只有
+    // identifier 映射表里的字符串、屏幕上没有控件**（parity_scan 只认字面量 ⟹ 假绿）。
+    // 本轮：三张卡 + 三个真控件（同一份视图，不复制逻辑）。
+    RLPSettingsGroup *wizGroup = (RLPSettingsGroup *)RLPSGroup(
+        RLPTr(@"房间校正（测量向导）"),
+        RLPTr(@"Farina 对数扫频 → 反卷积 → 心理声学平滑 → 目标曲线 → 最小相位校正 FIR · 多声道 2.0~7.1.4"), t);
+    [stack addArrangedSubview:wizGroup];
     self.calView = [[RLPCalibrationView alloc] initWithFrame:NSMakeRect(0, 0, 620, 620)];
     self.calView.translatesAutoresizingMaskIntoConstraints = NO;
-    [calGroup addFullRow:self.calView];
-    [[self.calView.heightAnchor constraintEqualToConstant:620] setActive:YES];
+    [self.calView setEmbeddedInPage:YES];
+    [wizGroup addFullRow:self.calView];
+    [[self.calView.heightAnchor
+        constraintEqualToConstant:MAX(240.0, [self.calView preferredContentHeight])] setActive:YES];
+
+    // ② EQ 文件（REW / AutoEq 文本）：web 的 sp_eq 路径输入 + tip 说明。
+    RLPSettingsGroup *eqFileGroup = (RLPSettingsGroup *)RLPSGroup(
+        RLPTr(@"EQ 文件（REW / AutoEq 文本）"), RLPTr(@"按文件里的 Filter 行生成双二阶滤波器组"), t);
+    [stack addArrangedSubview:eqFileGroup];
+    // 不写死宽度：由卡片字段网格按列宽拉伸（web .sfld input{width:100%}）。
+    NSTextField *eqPath = [[NSTextField alloc] initWithFrame:NSZeroRect];
+    eqPath.identifier = @"sp_eq";
+    eqPath.placeholderString = RLPTr(@"例如 /Users/你的用户名/Music/headphone-eq.txt");
+    eqPath.target = self;
+    eqPath.action = @selector(onEqPath:);
+    eqPath.translatesAutoresizingMaskIntoConstraints = NO;
+    self.eqField = eqPath;
+    [eqFileGroup addField:RLPTr(@"EQ 文件路径") control:self.eqField
+                      hint:RLPTr(@"每行形如 Filter 1: ON PK Fc 1000 Hz Gain -3.0 dB Q 1.41")];
+
+    // ③ 房间校正 IR（WAV 脉冲响应）：sp_ir 路径 + sp_irgpu 开关（都在 IR 段视图里）。
+    RLPSettingsGroup *irGroup = (RLPSettingsGroup *)RLPSGroup(
+        RLPTr(@"房间校正 IR（WAV 脉冲响应）"),
+        RLPTr(@"把房间 / 耳机脉冲响应用 FIR 卷积叠进播放链路"), t);
+    [stack addArrangedSubview:irGroup];
+    [irGroup addFullRow:self.calView.irSectionView];
+
     [self.calView reload];
 }
 
@@ -2994,6 +3040,8 @@ static BOOL RLPFeedbackTextBlank(NSString *s) {
         id root = kv[@"root"];
         if ([root isKindOfClass:[NSString class]] && [root length])
             self_.rootField.stringValue = root;
+        if (self_.eqField && [kv[@"eq"] isKindOfClass:[NSString class]])
+            self_.eqField.stringValue = kv[@"eq"];
         // 声道音量微调按真实「输出声道数」重建（0 = 跟随源 → 先按立体声，web 同口径）。
         NSInteger trimCh = 2;
         id chv = kv[@"ch"];
@@ -3047,6 +3095,12 @@ static BOOL RLPFeedbackTextBlank(NSString *s) {
 
 - (void)onBuffer:(NSTextField *)s { [self postKey:@"buffer" value:s.stringValue]; }
 - (void)onRamp:(NSTextField *)s { [self postKey:@"ramp" value:s.stringValue]; }
+- (void)onEqPath:(NSTextField *)s {
+    NSString *path = [s.stringValue stringByTrimmingCharactersInSet:
+                      [NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    [self postKey:@"eq" value:path];
+}
+
 - (void)onTrim:(id)sender {
     // 一次提交整串 trim（后端只认逗号分隔的 8 个值）；没生成的声道位按 0。
     NSMutableArray<NSString *> *vals = [NSMutableArray array];

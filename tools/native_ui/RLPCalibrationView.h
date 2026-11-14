@@ -10,6 +10,13 @@ NS_ASSUME_NONNULL_BEGIN
 @interface RLPCalibrationView : NSView
 - (void)reload;
 - (void)applyTheme;
+/// 嵌入设置页时调用：去掉本视图自己的滚动条，由外层页面统一滚动。
+- (void)setEmbeddedInPage:(BOOL)embedded;
+/// 房间校正 IR 段（web cal 页第三张 sgroup 的卡体）。设置页整段搬进那张卡片；
+/// 同一份视图、同一份交互，不复制第二套控件。
+@property (nonatomic, readonly, nullable) NSView *irSectionView;
+/// 内容自然高度（嵌入设置页时由设置页用它给高度约束）。
+- (CGFloat)preferredContentHeight;
 @end
 
 NS_ASSUME_NONNULL_END

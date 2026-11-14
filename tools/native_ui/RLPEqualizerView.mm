@@ -431,6 +431,9 @@
 @property (nonatomic, strong) NSPopUpButton *presetPop;
 @property (nonatomic, strong) NSTextField *presetName;
 @property (nonatomic, strong) NSTextField *opraQuery;
+/// OPRA 段独立容器（web「耳机 EQ（OPRA 校准预设）」那张卡的卡体）：
+/// 设置页会把它整段搬进第二张卡片；独立使用时仍挂在 self.stack 里。
+@property (nonatomic, strong) NSStackView *opraSection;
 @property (nonatomic, strong) NSStackView *opraModelCards;
 @property (nonatomic, strong) NSStackView *opraPresetCards;
 @property (nonatomic, strong) NSTextField *opraGuide;
@@ -573,6 +576,8 @@
 
     [self buildPresetSection];
     [self buildOpraSection];
+    // 独立使用时两段都在本视图里；设置页会把 opraSection 搬进「耳机 EQ」卡。
+    [self.stack addArrangedSubview:self.opraSection];
 }
 
 - (void)buildPresetSection {
@@ -601,9 +606,14 @@
 
 - (void)buildOpraSection {
     RLPTheme *t = [RLPTheme current];
-    [self.stack addArrangedSubview:RLPLabel(RLPTr(@"OPRA 耳机目标曲线"),
+    self.opraSection = [[NSStackView alloc] initWithFrame:NSZeroRect];
+    self.opraSection.orientation = NSUserInterfaceLayoutOrientationVertical;
+    self.opraSection.alignment = NSLayoutAttributeLeading;
+    self.opraSection.spacing = 10;
+    self.opraSection.translatesAutoresizingMaskIntoConstraints = NO;
+    [self.opraSection addArrangedSubview:RLPLabel(RLPTr(@"OPRA 耳机目标曲线"),
         [NSFont systemFontOfSize:13 weight:NSFontWeightSemibold], t.text)];
-    [self.stack addArrangedSubview:RLPLabel(
+    [self.opraSection addArrangedSubview:RLPLabel(
         RLPTr(@"输入耳机型号搜索；应用后会把 PEQ 换成该耳机的补偿曲线"), t.small, t.mut)];
 
     NSStackView *r1 = [[NSStackView alloc] init];
@@ -620,21 +630,21 @@
     sb.bezelStyle = NSBezelStyleRounded;
     sb.identifier = @"opra.search";
     [r1 addArrangedSubview:sb];
-    [self.stack addArrangedSubview:r1];
+    [self.opraSection addArrangedSubview:r1];
 
     // 型号卡片区（web #eqModelCards）：点击才加载该型号的预设墙。
     self.opraGuide = RLPLabel(RLPTr(@"点击卡片选中"), t.small, t.mut);
     self.opraGuide.identifier = @"opra.guide";
     self.opraGuide.hidden = YES;
-    [self.stack addArrangedSubview:self.opraGuide];
+    [self.opraSection addArrangedSubview:self.opraGuide];
 
     self.opraModelCards = [[NSStackView alloc] initWithFrame:NSZeroRect];
     self.opraModelCards.orientation = NSUserInterfaceLayoutOrientationVertical;
     self.opraModelCards.alignment = NSLayoutAttributeLeading;
     self.opraModelCards.spacing = 6;
     self.opraModelCards.translatesAutoresizingMaskIntoConstraints = NO;
-    [self.stack addArrangedSubview:self.opraModelCards];
-    [[self.opraModelCards.widthAnchor constraintEqualToAnchor:self.stack.widthAnchor constant:-4] setActive:YES];
+    [self.opraSection addArrangedSubview:self.opraModelCards];
+    [[self.opraModelCards.widthAnchor constraintEqualToAnchor:self.opraSection.widthAnchor constant:-4] setActive:YES];
 
     // 预设卡片墙（web #eqPresetCards）：作者·详情 / 段数 / 曲线小图 / 前级增益 / 应用按钮。
     self.opraSelectedTitle = RLPLabel(@"", [NSFont systemFontOfSize:13.5 weight:NSFontWeightSemibold], t.text);
@@ -642,7 +652,7 @@
     self.opraSelectedTitle.maximumNumberOfLines = 2;
     self.opraSelectedTitle.lineBreakMode = NSLineBreakByWordWrapping;
     self.opraSelectedTitle.hidden = YES;
-    [self.stack addArrangedSubview:self.opraSelectedTitle];
+    [self.opraSection addArrangedSubview:self.opraSelectedTitle];
 
     self.opraPresetCards = [[NSStackView alloc] initWithFrame:NSZeroRect];
     self.opraPresetCards.orientation = NSUserInterfaceLayoutOrientationVertical;
@@ -650,20 +660,22 @@
     self.opraPresetCards.spacing = 8;
     self.opraPresetCards.translatesAutoresizingMaskIntoConstraints = NO;
     self.opraPresetCards.hidden = YES;
-    [self.stack addArrangedSubview:self.opraPresetCards];
-    [[self.opraPresetCards.widthAnchor constraintEqualToAnchor:self.stack.widthAnchor constant:-4] setActive:YES];
+    [self.opraSection addArrangedSubview:self.opraPresetCards];
+    [[self.opraPresetCards.widthAnchor constraintEqualToAnchor:self.opraSection.widthAnchor constant:-4] setActive:YES];
 
     self.opraStatus = RLPLabel(@"", t.small, t.mut);
     self.opraStatus.identifier = @"opra.status";
-    [self.stack addArrangedSubview:self.opraStatus];
+    [self.opraSection addArrangedSubview:self.opraStatus];
 
     // web showTargetCurveInfo：选中的目标曲线要给出「名称 / 是什么 / 适合谁 / 前级增益 / 段数」。
     self.opraInfo = RLPLabel(@"", t.small, t.mut);
     self.opraInfo.identifier = @"opra.info";
     self.opraInfo.maximumNumberOfLines = 6;
     self.opraInfo.lineBreakMode = NSLineBreakByWordWrapping;
-    [[self.opraInfo.widthAnchor constraintEqualToConstant:600] setActive:YES];
-    [self.stack addArrangedSubview:self.opraInfo];
+    // 顺序很要紧：先入 hierarchy 再激活「宽 = 容器宽」约束，否则约束两端没有共同祖先，
+    // AppKit 会抛 NSGenericException（opra.info / NSStackView 无 common ancestor，实测崩）。
+    [self.opraSection addArrangedSubview:self.opraInfo];
+    [[self.opraInfo.widthAnchor constraintEqualToAnchor:self.opraSection.widthAnchor] setActive:YES];
 }
 
 #pragma mark - OPRA 卡片渲染 / 选择 / 应用
@@ -1228,6 +1240,8 @@ static NSArray<NSDictionary *> *RLPOpraFilter(NSArray<NSDictionary *> *index, NS
 
 
 #pragma mark - 嵌入设置页（去掉本视图自己的滚动，交给整页滚动）
+
+- (NSView *)opraSectionView { return self.opraSection; }
 
 - (void)setEmbeddedInPage:(BOOL)embedded {
     if (_embeddedInPage == embedded) return;

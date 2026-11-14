@@ -20,6 +20,11 @@
 #import "RLPTheme.h"
 
 @interface RLPCalibrationView ()
+/// IR 段独立容器（web cal 页第三张卡）。设置页把它整段搬进「房间校正 IR」卡。
+@property (nonatomic, strong) NSScrollView *scroll;
+@property (nonatomic, copy) NSArray<NSLayoutConstraint *> *scrollConstraints;
+@property (nonatomic, strong) NSStackView *irSection;
+@property (nonatomic, strong) NSTextField *irStatus;
 @property (nonatomic, strong) NSStackView *stack;
 @property (nonatomic, strong) NSPopUpButton *layout;
 @property (nonatomic, strong) NSTextField *sweepSec;
@@ -61,6 +66,7 @@
     sc.drawsBackground = NO;
     sc.hasVerticalScroller = YES;
     [self addSubview:sc];
+    self.scroll = sc;
 
     self.stack = [[NSStackView alloc] initWithFrame:NSZeroRect];
     self.stack.orientation = NSUserInterfaceLayoutOrientationVertical;
@@ -68,12 +74,13 @@
     self.stack.spacing = 12;
     self.stack.translatesAutoresizingMaskIntoConstraints = NO;
     sc.documentView = self.stack;
-    [NSLayoutConstraint activateConstraints:@[
+    self.scrollConstraints = @[
         [self.stack.leadingAnchor constraintEqualToAnchor:sc.contentView.leadingAnchor],
         [self.stack.trailingAnchor constraintEqualToAnchor:sc.contentView.trailingAnchor],
         [self.stack.topAnchor constraintEqualToAnchor:sc.contentView.topAnchor],
         [self.stack.widthAnchor constraintEqualToAnchor:sc.contentView.widthAnchor],
-    ]];
+    ];
+    [NSLayoutConstraint activateConstraints:self.scrollConstraints];
 
     [self.stack addArrangedSubview:RLPLabel(RLPTr(@"房间测量"),
         [NSFont systemFontOfSize:13 weight:NSFontWeightSemibold], t.text)];
@@ -112,15 +119,26 @@
     [[self.planInfo.widthAnchor constraintEqualToConstant:560] setActive:YES];
     [self.stack addArrangedSubview:self.planInfo];
 
-    [self.stack addArrangedSubview:RLPLabel(RLPTr(@"房间校正 IR"),
+    // ---- 房间校正 IR（web cal 页第三张 sgroup「房间校正 IR（WAV 脉冲响应）」）----
+    // 独立成一段（settings 页把这一整段搬进第三张卡片）：同一份视图/交互，不复制控件。
+    self.irSection = [[NSStackView alloc] initWithFrame:NSZeroRect];
+    self.irSection.orientation = NSUserInterfaceLayoutOrientationVertical;
+    self.irSection.alignment = NSLayoutAttributeLeading;
+    self.irSection.spacing = 10;
+    self.irSection.translatesAutoresizingMaskIntoConstraints = NO;
+    [self.irSection addArrangedSubview:RLPLabel(RLPTr(@"房间校正 IR"),
         [NSFont systemFontOfSize:13 weight:NSFontWeightSemibold], t.text)];
-    [self.stack addArrangedSubview:RLPLabel(
+    [self.irSection addArrangedSubview:RLPLabel(
         RLPTr(@"填入卷积用的 IR WAV 路径；留空 = 不做房间校正。也可用 REW / AutoEq 导出的文件。"),
         t.small, t.mut)];
 
     self.irPath = [[NSTextField alloc] initWithFrame:NSZeroRect];
+    self.irPath.identifier = @"sp_ir";          // web #sp_ir（设置页「房间校正 IR」路径输入）
     self.irPath.placeholderString = RLPTr(@"例如 /Volumes/Music/ir/room.wav");
-    [[self.irPath.widthAnchor constraintEqualToConstant:380] setActive:YES];
+    [self.irPath.widthAnchor constraintGreaterThanOrEqualToConstant:260].active = YES;
+    // 回车即落盘（web 表单保存时同样写 ir）；「应用」按钮保留给鼠标用户。
+    self.irPath.target = self;
+    self.irPath.action = @selector(onApplyIR:);
     NSStackView *irRow = (NSStackView *)[self row:RLPTr(@"IR 文件") control:self.irPath hint:nil];
     NSButton *pick = [NSButton buttonWithTitle:RLPTr(@"选择…") target:self action:@selector(onPickIR:)];
     pick.bezelStyle = NSBezelStyleRounded;
@@ -128,19 +146,68 @@
     NSButton *apply = [NSButton buttonWithTitle:RLPTr(@"应用") target:self action:@selector(onApplyIR:)];
     apply.bezelStyle = NSBezelStyleRounded;
     [irRow addArrangedSubview:apply];
-    [self.stack addArrangedSubview:irRow];
+    [self.irSection addArrangedSubview:irRow];
 
     self.irGpu = [[NSSwitch alloc] initWithFrame:NSZeroRect];
+    self.irGpu.identifier = @"sp_irgpu";        // web #sp_irgpu（GPU 卷积开关）
     self.irGpu.target = self;
     self.irGpu.action = @selector(onIrGpu:);
-    [self.stack addArrangedSubview:[self row:RLPTr(@"GPU 卷积") control:self.irGpu
+    [self.irSection addArrangedSubview:[self row:RLPTr(@"GPU 卷积") control:self.irGpu
                                        hint:RLPTr(@"长 IR 用 GPU 更省 CPU")]];
+
+    // IR 段自己的状态行：不再借用测量向导卡里的 status（那会让用户以为测量出了事）。
+    self.irStatus = RLPLabel(@"", t.small, t.mut);
+    self.irStatus.identifier = @"sp_irstatus";
+    self.irStatus.maximumNumberOfLines = 2;
+    self.irStatus.lineBreakMode = NSLineBreakByWordWrapping;
+    [self.irSection addArrangedSubview:self.irStatus];
+    [self.stack addArrangedSubview:self.irSection];
 
     self.status = RLPLabel(@"", t.small, t.mut);
     self.status.maximumNumberOfLines = 2;
     self.status.lineBreakMode = NSLineBreakByWordWrapping;
     [self.stack addArrangedSubview:self.status];
 }
+
+#pragma mark - 嵌入设置页
+
+/// 嵌入设置页（页面本身已有一个整页滚动容器）：拆掉本视图自己的 NSScrollView，
+/// 内容直接铺开由外层页面滚动（用户 2026-11-13 要求「整页只有一根滚动条」）。
+- (void)setEmbeddedInPage:(BOOL)embedded {
+    if (!embedded || !self.scroll) return;
+    [NSLayoutConstraint deactivateConstraints:self.scrollConstraints];
+    [self.scroll removeFromSuperview];
+    self.scroll = nil;
+    self.stack.translatesAutoresizingMaskIntoConstraints = NO;
+    [self addSubview:self.stack];
+    [NSLayoutConstraint activateConstraints:@[
+        [self.stack.leadingAnchor constraintEqualToAnchor:self.leadingAnchor],
+        [self.stack.trailingAnchor constraintEqualToAnchor:self.trailingAnchor],
+        [self.stack.topAnchor constraintEqualToAnchor:self.topAnchor],
+    ]];
+}
+
+/// 内容自然高度（嵌入设置页时由设置页给高度约束；本视图没有 intrinsic 高度）。
+- (CGFloat)preferredContentHeight {
+    CGFloat total = self.stack.edgeInsets.top + self.stack.edgeInsets.bottom;
+    NSInteger n = 0;
+    for (NSView *v in self.stack.arrangedSubviews) {
+        if (v.hidden) continue;
+        CGFloat h = 0;
+        for (NSLayoutConstraint *c in v.constraints) {
+            if (c.firstAttribute == NSLayoutAttributeHeight && c.secondItem == nil
+                && c.relation == NSLayoutRelationEqual) { h = c.constant; break; }
+        }
+        if (h <= 0) h = v.fittingSize.height;
+        total += h;
+        ++n;
+    }
+    if (n > 1) total += self.stack.spacing * (n - 1);
+    return ceil(total);
+}
+
+/// 房间校正 IR 段（web cal 页第三张卡）。设置页把它整段搬进「房间校正 IR」卡。
+- (NSView *)irSectionView { return self.irSection; }
 
 #pragma mark - 测量（会出声，必须先确认）
 
@@ -266,11 +333,11 @@
         __typeof__(self) self_ = weakSelf;
         if (!self_) return;
         if (json && [json[@"ok"] boolValue]) {
-            self_.status.stringValue = RLPTr(@"已保存");
+            self_.irStatus.stringValue = RLPTr(@"已保存");
             RLPToast(RLPTr(@"已保存"));
         } else {
             NSString *err = [json[@"error"] isKindOfClass:[NSString class]] ? json[@"error"] : RLPTr(@"保存失败");
-            self_.status.stringValue = err;
+            self_.irStatus.stringValue = err;
         }
     }];
 }
