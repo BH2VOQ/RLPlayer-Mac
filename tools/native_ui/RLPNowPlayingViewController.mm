@@ -1081,6 +1081,9 @@ static NSString *RLPRailTagText(id srValue, id bitsValue) {
 @property(nonatomic,strong) NSArray<RLPRailChipView *> *railCards;
 @property(nonatomic,strong,nullable) NSTextField *railEmptyLabel;
 @property(nonatomic,strong,nullable) NSButton *railHintBtn;
+@property(nonatomic,assign) BOOL castRunningState;
+@property(nonatomic,copy) NSString *castDeviceName;
+@property(nonatomic,strong,nullable) NSTimer *castPoll;
 @property(nonatomic,copy) NSDictionary *trackMetadata;
 @property(nonatomic,strong) NSPopover *knowledgePopover;
 // ---- AI 整理栏（web NP_DATA / SUMC / NPLIB 的原生落点）----
@@ -1622,7 +1625,87 @@ static NSString *RLPRailTagText(id srValue, id bitsValue) {
     NSString *fileValue=[self.currentPath stringByAddingPercentEncodingWithAllowedCharacters:allowed];
     return [NSString stringWithFormat:@"dev=%@&file=%@&volume=%.1f",deviceValue,fileValue,self.webStatus?self.webStatus.volumeDb:-120.0];
 }
+/// 投放芯片的运行态（web npCastBtnHtml：`npcast.on` 绿底 + 「已推送到 <device>」，点击停止）。
+/// 后端契约 `/api/cast/state` → {ok, running, device, phase, ...}（RLPCastView 已在读同一接口）。
+- (void)startCastStatePoll {
+    [self.castPoll invalidate];
+    if (![RLPCoreClient shared].started) return;
+    __weak __typeof__(self) ws = self;
+    self.castPoll = [NSTimer scheduledTimerWithTimeInterval:2.0 repeats:YES block:^(NSTimer *t) {
+        (void)t;
+        [ws refreshCastChipState];
+    }];
+    [self refreshCastChipState];
+}
+
+/// web castDevNameOf：优先设备列表里的标签；没有列表时取 URL host，最后回落「设备」。
+static NSString *RLPNowPlayingCastDeviceLabel(NSString *device) {
+    NSString *loc = device ?: @"";
+    if (!loc.length) return RLPTr(@"设备");
+    NSRange scheme = [loc rangeOfString:@"://"];
+    if (scheme.location != NSNotFound) {
+        NSString *rest = [loc substringFromIndex:NSMaxRange(scheme)];
+        NSString *hostPart = [rest componentsSeparatedByString:@"/"][0];
+        hostPart = [hostPart componentsSeparatedByString:@"?"][0];
+        if (hostPart.length) return hostPart;
+    }
+    NSString *last = loc.lastPathComponent;
+    return last.length ? last : loc;
+}
+
+- (void)refreshCastChipState {
+    if (!self.metaChipsRow) return;
+    __weak __typeof__(self) ws = self;
+    [[RLPCoreClient shared] getJSON:@"/api/cast/state" completion:^(NSDictionary * _Nullable json) {
+        __typeof__(self) s = ws;
+        if (!s) return;
+        const BOOL running = [json[@"running"] respondsToSelector:@selector(boolValue)] &&
+                             [json[@"running"] boolValue];
+        NSString *device = [json[@"device"] isKindOfClass:[NSString class]] ? json[@"device"] : @"";
+        s.castRunningState = running;
+        s.castDeviceName = running ? RLPNowPlayingCastDeviceLabel(device) : @"";
+        [s applyCastChipStyle];
+        [s layoutWebPlayback];
+    }];
+}
+
+- (void)applyCastChipStyle {
+    if (!self.castButton) return;
+    RLPTheme *t = [RLPTheme current];
+    if (self.castRunningState) {
+        NSString *title = [NSString stringWithFormat:@"%@ %@", RLPTr(@"已推送到"), self.castDeviceName ?: RLPTr(@"设备")];
+        self.castButton.attributedTitle = [[NSAttributedString alloc] initWithString:title attributes:@{
+            NSFontAttributeName: [NSFont systemFontOfSize:11 weight:NSFontWeightSemibold],
+            NSForegroundColorAttributeName: t.okText,
+        }];
+        self.castButton.title = title;
+        self.castButton.layer.backgroundColor = t.okBg.CGColor;
+        self.castButton.layer.borderColor = t.okLine.CGColor;
+        self.castButton.contentTintColor = t.okText;
+        self.castButton.toolTip = RLPTr(@"点击停止投放并恢复本机输出");
+    } else {
+        [self styleMetaChip:self.castButton];
+        self.castButton.title = RLPTr(@"推送到设备");
+        self.castButton.toolTip = RLPTr(@"把当前曲目推送到 UPnP / DLNA 设备");
+    }
+}
+
 - (void)onCastCurrent:(id)s {
+    if (self.castRunningState) {
+        // web castToggle：投放中点按钮 = 停止（不弹设备列表）。
+        __weak __typeof__(self) ws = self;
+        [[RLPCoreClient shared] postJSON:@"/api/cast/stop" body:@""
+                              completion:^(NSDictionary * _Nullable r) {
+            __typeof__(self) s = ws;
+            if (!s) return;
+            if (![r[@"ok"] boolValue] && [r[@"error"] isKindOfClass:[NSString class]])
+                RLPToast((NSString *)r[@"error"]);
+            else
+                RLPToast(RLPTr(@"已停止投放，输出回到本机"));
+            [s refreshCastChipState];
+        }];
+        return;
+    }
     if(!self.currentPath.length)return;__weak __typeof__(self) ws=self;
     [[RLPCoreClient shared] getJSON:@"/api/cast/devices" completion:^(NSDictionary *j){__typeof__(self) s=ws;if(!s)return;NSArray *devs=[j[@"devices"] isKindOfClass:NSArray.class]?j[@"devices"]:@[];if(!devs.count){RLPToast(j[@"hint"]?:RLPTr(@"未发现可投放设备"));return;}
         NSAlert *a=[NSAlert new];a.messageText=RLPTr(@"推送当前曲目到设备");NSPopUpButton *p=[[NSPopUpButton alloc] initWithFrame:NSMakeRect(0,0,320,28)];for(NSDictionary *d in devs)[p addItemWithTitle:d[@"name"]?:@"UPnP"];a.accessoryView=p;[a addButtonWithTitle:RLPTr(@"推送")];[a addButtonWithTitle:RLPTr(@"取消")];if([a runModal]!=NSAlertFirstButtonReturn)return;NSDictionary *d=devs[p.indexOfSelectedItem];NSString *body=[s castBodyForDevice:d];if(body.length)[[RLPCoreClient shared] postJSON:@"/api/cast/start" body:body completion:^(NSDictionary *r){if(![r[@"ok"] boolValue])RLPToast(r[@"error"]?:RLPTr(@"投放失败"));}];}];
@@ -2148,7 +2231,7 @@ static NSString *RLPRailTagText(id srValue, id bitsValue) {
     return tv;
 }
 
-- (void)dealloc { [[NSNotificationCenter defaultCenter] removeObserver:self];[self.poll invalidate];[self.lyricRetryTimer invalidate]; }
+- (void)dealloc { [[NSNotificationCenter defaultCenter] removeObserver:self];[self.poll invalidate];[self.castPoll invalidate];[self.lyricRetryTimer invalidate]; }
 
 - (void)activate {
     [self startPolling];
@@ -2179,6 +2262,7 @@ static NSString *RLPRailTagText(id srValue, id bitsValue) {
     [self anlRefreshAutoSettingIfStale];
     // 页面进入「live」态：投放/加歌单芯片此时才有可操作对象（web 靠启动即读的 CAST.state）。
     [self applyMetaChipVisibility];
+    [self startCastStatePoll];
     __weak __typeof__(self) weakSelf = self;
     self.poll = [NSTimer scheduledTimerWithTimeInterval:0.4 repeats:YES block:^(NSTimer *timer) {
         (void)timer;
@@ -2191,6 +2275,8 @@ static NSString *RLPRailTagText(id srValue, id bitsValue) {
     self.statusEpoch++;self.statusInFlight=NO;[self.lyricRetryTimer invalidate];self.lyricRetryTimer=nil;
     [self.poll invalidate];
     self.poll = nil;
+    [self.castPoll invalidate];
+    self.castPoll = nil;
     self.polling = NO;
     [self applyMetaChipVisibility];   // 芯片可见性跟着 live 态重算（行高随之收缩）
 }
