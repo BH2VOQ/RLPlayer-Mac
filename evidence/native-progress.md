@@ -320,3 +320,14 @@ web max-height:720 的 margin 未移植；实机未验。
 **门禁**：build 0 error；全量 ctest（193）/audit/parity/behavior/i18n 由最终门禁复跑。
 **证据**：`evidence/native-empty-states-20261114.md`。
 **如实挂账**：空态卡未走像素样式判据；窄窗 520 宽未自适应（主窗口最小 900，不可达）。
+
+### 2026-11-14 08:08 —— 轮次 8（1.1.7.31）：AI 整理栏空态 + 状态行 = web
+
+**现场**：基线 `f5e144c`（1.1.7.30）。本包由 Lead 直接实现。
+**任务**：无 AI 栏目时 3 卡不显示 + `nprailempty` 整块说明；歌曲资料 `npSummHint`
+（loading/insufficient/error 可点重试/ok 隐藏）。
+**红→绿**：新 ctest `native_rail_states`（17 条）旧码 **2P/5F** → 新码 **17P/0F**；
+日志 `native-rail-states-red-20261114.log` / `-green-20261114.log`。
+**门禁**：build 0 error；全量 ctest（194）/audit/parity/behavior/i18n 由最终门禁复跑。
+**证据**：`evidence/native-rail-states-20261114.md`。
+**如实挂账**：状态行放栏底（web 流式在其后）；无像素判据；实机未验。
