@@ -57,6 +57,8 @@
 - (void)onClosePlayback:(id)sender;
 /// web applyRep：循环键图标/配色/tooltip 随四档模式变化 + #npRepOne 角标只在单曲循环显示。
 - (void)applyPlayModeUI;
+/// web updateNextTrackInfo 的原生同构：按队列快照刷新 `#npNextTrackHero`（停止/无队列 → 隐藏）。
+- (void)applyQueueSnapshot:(nullable NSDictionary *)json;
 @end
 // Web #npPage uses top-left coordinates and covers the entire window content.
 @interface RLPNPCanvas : NSView
@@ -191,6 +193,17 @@ static CGFloat RLPNPLyricLineStep(CGFloat pointSize) { return pointSize * 2.05; 
 static NSString *RLPNPFavKey(NSString *path) {
     if (![path isKindOfClass:[NSString class]]) return @"";
     return [path stringByReplacingOccurrencesOfString:@"\\" withString:@"/"];
+}
+
+/// 队列条目 → 路径：web 的 /api/queue items 是路径字符串；老配置/扩展可能给 {path|file} 字典。
+/// 只做形状兼容，不改后端语义。
+static NSString *RLPQueueItemPath(id item) {
+    if ([item isKindOfClass:[NSString class]]) return (NSString *)item;
+    if ([item isKindOfClass:[NSDictionary class]]) {
+        id p = ((NSDictionary *)item)[@"path"] ?: ((NSDictionary *)item)[@"file"];
+        return [p isKindOfClass:[NSString class]] ? p : @"";
+    }
+    return @"";
 }
 
 /// 底部控制条：进度滑杆一行 + 「当前/总时长 · 循环/上一首/播放/下一首/停止 · 音量」一行，
@@ -1171,6 +1184,8 @@ static NSString *RLPRailTagText(id srValue, id bitsValue) {
 @property(nonatomic) BOOL statusInFlight;
 @property(nonatomic) NSUInteger statusEpoch;
 @property(nonatomic) BOOL favorite;
+/// web `#npNextTrackHero` 当前是否占位（`.npmline` 的 Y 依赖它；默认隐藏 ⟹ 为 NO）。
+@property(nonatomic) BOOL nextTrackVisible;
 /// 当前循环档位用的 SF Symbol 名（web REP_ICON[0..3] 的原生等价；判据据此核对映射）。
 @property(nonatomic,copy) NSString *playModeSymbol;
 
@@ -1316,6 +1331,7 @@ static NSString *RLPRailTagText(id srValue, id bitsValue) {
     self.titleLabel2=RLPLabel(RLPTr(@"未播放"),[NSFont systemFontOfSize:20 weight:NSFontWeightBold],t.text); self.titleLabel2.identifier=@"npTitle";
     self.artistLabel2=RLPLabel(@"",[NSFont systemFontOfSize:13],t.mut); self.artistLabel2.identifier=@"npSub";
     self.metaLabel=RLPLabel(@"",[NSFont systemFontOfSize:12],t.mut2); self.metaLabel.identifier=@"npNextTrackHero";
+    self.metaLabel.hidden=YES;   // web #npNextTrackHero 默认 display:none，只有「播放中 + 有队列」才显示
     for(NSView *v in @[self.kindLabel,self.titleLabel2,self.artistLabel2,self.metaLabel]) [host addSubview:v];
     // 补全徽标行 + 当前 EQ/IR + 投放/加歌单（web #npMeta 的同一行，flex-wrap 由 layoutMetaChips 算）。
     self.metaChipsRow=[[NSView alloc] initWithFrame:NSZeroRect]; self.metaChipsRow.identifier=@"npMeta";
@@ -1587,7 +1603,8 @@ static NSString *RLPRailTagText(id srValue, id bitsValue) {
     // web `.npmline` 是副标题之后的独立一行：margin-top:10 ⟹ 行顶 = 副标题行底 + 10。
     // 行高由 flex-wrap 的实际行数算出，旧的按钮行（隐藏的对比/作品入口）顺势下移，不再固定 infoY+113。
     {
-        const CGFloat metaTop=subY+21+10;
+        // web `#npNextTrackHero{margin-top:4;font-size:12}`：可见时多一行（12pt 行 ≈18pt），`.npmline` 随之下移。
+        const CGFloat metaTop=subY+21+10+(self.nextTrackVisible?22.0:0);
         const CGFloat metaH=[self layoutMetaChipsInWidth:iw];
         self.metaChipsRow.frame=NSMakeRect(x,metaTop,iw,MAX(22,metaH));
         const CGFloat btnY=NSMaxY(self.metaChipsRow.frame)+6;
@@ -2474,7 +2491,9 @@ static NSString *RLPNowPlayingCastDeviceLabel(NSString *device) {
         if(st.error.length)self_.artistLabel2.stringValue=st.error;
         if (![path isEqualToString:self_.currentPath ?: @""]) {
             BOOL cancelPrevious=self_.anlBusy;
-            self_.currentPath = path;self_.trackMetadata=@{};self_.artistLabel2.stringValue=@"";self_.metaLabel.stringValue=@"";[self_ refreshQueueContext];[self_ refreshFavorite];
+            self_.currentPath = path;self_.trackMetadata=@{};self_.artistLabel2.stringValue=@"";self_.metaLabel.stringValue=@"";
+            self_.nextTrackVisible=NO;self_.metaLabel.hidden=YES;   // 换歌先清「下一首」，不等新队列返回
+            [self_ refreshQueueContext];[self_ refreshFavorite];
             // 切曲/停止先把「正在播放 · CODEC / kHz / bit」复位成纯「正在播放」：
             // web renderNp 每帧都用 curMeta 重算（curMeta 清空 ⟹ 只剩「正在播放」）；
             // 旧码只在 /api/meta 回来时覆盖 ⟹ 停止后仍挂着上一首的格式串（用户可见的假信息）。
@@ -3021,6 +3040,60 @@ static NSString *RLPNowPlayingCastDeviceLabel(NSString *device) {
 }
 - (void)refreshQueueContext {
     NSString *path=self.currentPath;__weak __typeof__(self) ws=self;
-    [[RLPCoreClient shared] getJSON:@"/api/queue?meta=1" completion:^(NSDictionary *j){__typeof__(self) s=ws;if(!s||![path isEqual:s.currentPath])return;s.playbackMode=[j[@"mode"] integerValue];[s applyPlayModeUI];NSArray *items=[j[@"items"] isKindOfClass:NSArray.class]?j[@"items"]:@[];NSInteger i=[j[@"index"] integerValue];if(i>=0&&i+1<(NSInteger)items.count){id next=items[i+1];s.metaLabel.stringValue=[NSString stringWithFormat:@"下一首：%@ · 剩 %ld 首",[next isKindOfClass:NSString.class]?[next lastPathComponent]:@"",(long)items.count-i-1];}}];
+    [[RLPCoreClient shared] getJSON:@"/api/queue?meta=1" completion:^(NSDictionary *j){__typeof__(self) s=ws;
+        if(!s||![path isEqual:s.currentPath])return;
+        if(![j isKindOfClass:[NSDictionary class]]){[s applyQueueSnapshot:nil];return;}
+        s.playbackMode=([j[@"mode"] respondsToSelector:@selector(integerValue)])?[j[@"mode"] integerValue]:0;
+        [s applyPlayModeUI];
+        [s applyQueueSnapshot:j];
+    }];
+}
+
+/// web `updateNextTrackInfo()` 的逐条移植（`ui_script.h`）：
+///   ① `if (!S.playing || !qLen) { display:none; return; }`
+///   ② 单曲循环（mode 2）的「下一首」= 当前曲；顺序/列表/随机按 (cur+1)，越界时的回绕规则：
+///      mode 1/3 回绕到第 1 首，mode 0 = hasNext:false ⟹ 「队列末尾」。
+///   ③ 文案：`下一首: <名> · 剩 N 首`（remain 0 时不带后缀）/ `队列末尾 · 共 N 首`。
+/// 原生 metaLabel 就是 `#npNextTrackHero`（font 12 / mut2 / margin-top 4）。
+- (void)applyQueueSnapshot:(NSDictionary *)json {
+    NSArray *items=[json[@"items"] isKindOfClass:[NSArray class]]?json[@"items"]:@[];
+    const NSInteger qLen=(NSInteger)items.count;
+    const NSInteger idx=([json[@"index"] respondsToSelector:@selector(integerValue)])?[json[@"index"] integerValue]:-1;
+    const NSInteger mode=([json[@"mode"] respondsToSelector:@selector(integerValue)])?[json[@"mode"] integerValue]:0;
+    if(!self.webStatus.playing||qLen<=0){
+        self.metaLabel.stringValue=@"";
+        self.metaLabel.toolTip=nil;
+        self.metaLabel.hidden=YES;
+        self.nextTrackVisible=NO;
+        [self layoutWebPlayback];
+        return;
+    }
+    NSInteger cur=idx;
+    if(cur<0&&self.currentPath.length){
+        for(NSInteger i=0;i<qLen;++i)
+            if([RLPQueueItemPath(items[(NSUInteger)i]) isEqualToString:self.currentPath]){cur=i;break;}
+    }
+    NSInteger nextIdx=cur+1;
+    BOOL hasNext=YES;
+    if(mode==2){nextIdx=(cur>=0&&cur<qLen)?cur:0;hasNext=(qLen>0);}
+    else if(nextIdx>=qLen){
+        if(mode==1||mode==3){nextIdx=0;hasNext=(qLen>0);}
+        else hasNext=NO;
+    }
+    const NSInteger remain=MAX(0,qLen-1-(cur>=0?cur:0));
+    NSString *text;
+    if(hasNext&&qLen>0){
+        NSString *name=RLPQueueItemPath(items[(NSUInteger)(nextIdx<0?0:nextIdx)]).lastPathComponent;
+        text=remain>0
+            ?[NSString stringWithFormat:RLPTr(@"下一首: %@ · 剩 %ld 首"),name,(long)remain]
+            :[NSString stringWithFormat:RLPTr(@"下一首: %@"),name];
+    } else {
+        text=[NSString stringWithFormat:RLPTr(@"队列末尾 · 共 %ld 首"),(long)qLen];
+    }
+    self.metaLabel.stringValue=text;
+    self.metaLabel.toolTip=text;
+    self.metaLabel.hidden=NO;
+    self.nextTrackVisible=YES;
+    [self layoutWebPlayback];
 }
 @end

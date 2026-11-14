@@ -35,7 +35,7 @@
 | 12 | `.npkind` 文案 = `npPlayingKindText(curMeta)`：`正在播放 · CODEC / kHz / bit`；`null` ⟹ 纯「正在播放」 | `loadMetaAndKnowledgeForPath`（2431）同格式；`refresh` 切曲分支先复位 | **已修（1.1.7.40）**：旧码停止后挂上一首格式串、无字段时挂尾 ` · `（见 #60） |
 | 13 | `.nptit{font-size:clamp(19px,2.6vh,27px);font-weight:700;line-height:1.3;…ellipsis}` | `layoutWebPlayback`：`RLPNPTitlePointSize(vh)`，`titleH=ceil(size·1.3)`，下方行 Y 从标题行底推导 | **已修（1.1.7.43）**：旧码固定 20/30 |
 | 14 | `.npsub{font-size:13;color:var(--mut);margin-top:8;ellipsis}` | `artistLabel2` 13/mut @infoY+63；`loadMeta` 拼 `artist · album` | 已对齐 |
-| 15 | `#npNextTrackHero{font-size:12;color:var(--mut2);margin-top:4;默认隐藏}` 文案 `下一首: X · 剩 N 首` / `队列末尾 · 共 N 首` | `metaLabel`(npNextTrackHero) 12/mut2；`refreshQueueContext`（2865）只在「有下一首」时写文案，**不清空、无「队列末尾」分支、不按播放态隐藏** | 未修（文案/显隐状态机未对齐；web 半角 `: `、原生全角 `：`） |
+| 15 | `#npNextTrackHero{font-size:12;color:var(--mut2);margin-top:4;默认隐藏}` 文案 `下一首: X · 剩 N 首` / `队列末尾 · 共 N 首`；隐藏条件 `!S.playing \|\| !qLen`（**暂停仍显示**） | `metaLabel` 12/mut2 默认隐藏；`applyQueueSnapshot:` 逐条移植（mode2/回绕/remain/半角 `: `）；切曲即清空；可见时 `.npmline` 下移 22pt | **已修（1.1.7.45）** |
 | 16 | `#npFavBtn{padding:4;display:none→收藏态显示}` 20×20 心形 | `favoriteButton` 28×30 `♡`（`refreshFavorite` 控制） | 已对齐（图标为字形而非 SVG） |
 
 ## 3. `#npMeta` 芯片行
@@ -135,6 +135,13 @@
 - 页面内自检脚本（`window.__SELFTEST`）是 web 侧判据载体，原生用 `--audit`/ctest，载体不同、判据等价。
 
 ## 11. 红→绿记录（逐包追加）
+
+### 1.1.7.45 —— `#npNextTrackHero` 状态机（表 #15）
+
+- 判据：`tests/test_native_nowplaying_web.mm` 追加 6 条（有下一首/队列末尾/单曲循环/停止/换歌）。
+- 旧码（1.1.7.44）：**5 FAIL** → 新码 **82P / 0F**。
+- 证据：`evidence/native-nexttrack-{red,green}-20261114.log`。
+- 挂账：web 只在 `!playing`（停止）时隐藏，暂停仍显示（与任务书措辞不同，待确认）。
 
 ### 1.1.7.44 —— 控制区逐值（表 #48 / #49 / #56）
 

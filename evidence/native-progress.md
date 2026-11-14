@@ -541,3 +541,22 @@ pos/dur 字号12/宽42/居中、vol 滑杆104、vlab 字号11/宽58/右对齐。
 对照表 #48/#49/#56 标「已修（1.1.7.44）」。
 **门禁（1.1.7.44 树）**：build 0 error；串行全量 ctest **201/201 passed（395.13s）**；audit **246/0**；
 parity missing=0；behavior actionable=0；i18n OK（2416 pairs）。
+
+### 2026-11-14 17:0x —— 轮次 13c（1.1.7.45）：`#npNextTrackHero` 状态机（P3，表 #15）
+
+**任务**（Lead 定序 P3）：停止/暂停隐藏、队列末尾显示「队列末尾 · 共 N 首」、有下一首才写文案、换歌清空。
+**先核对 web**：`updateNextTrackInfo()` 的隐藏条件是 `!S.playing || !qLen` —— **暂停不隐藏**（`playing` 是会话态，
+暂停时仍为 true）。本包按 web 实现；Lead 任务书写的「暂停隐藏」与 web 不一致，已在证据里标注待人确认。
+**判据**：`tests/test_native_nowplaying_web.mm` 追加 6 条（有下一首/末尾/单曲循环/停止清空隐藏/换歌立即清空），
+走真实 `refreshQueueContext` + 队列 fixture；红跑用**最终测试版本**（临时还原 HEAD 实现→跑红→恢复实现→跑绿）。
+**红→绿**：旧码（1.1.7.44）**5 F**（全角冒号、无末尾分支、不识别 mode=2、停止不清不隐、换歌后仍可见）
+→ 新码 **82 passed / 0 failures**（75 既有 + 6 新 + 1 前提）。
+**实现**：`applyQueueSnapshot:` 逐条移植 web 规则（mode==2/越界回绕/remain/半角「: 」）；
+`refreshQueueContext` 响应为空也走清理路径；切曲分支清空+隐藏；可见时 `.npmline` 下移 22pt（web 多一行）。
+i18n：新增 3 个格式串词条（`下一首: %@ · 剩 %ld 首` / `下一首: %@` / `队列末尾 · 共 %ld 首`），重生成两表（2419 pairs）。
+**如实挂账**：①暂停时仍显示（按 web，待确认）；②tooltip 未逐字复刻 web 的「队列共 N 首，剩余 N 首」；
+③队列只在切歌/激活时拉取（web 同），队列内增删不会即时改文案。
+**证据**：`evidence/native-nexttrack-20261114.md`、`native-nexttrack-{red,green}-20261114.log`；
+对照表 #15 标「已修（1.1.7.45）」。
+**门禁（1.1.7.45 树）**：build 0 error；串行全量 ctest **201/201 passed（405.75s）**；audit **246/0**；
+parity missing=0；behavior actionable=0；i18n OK（2419 pairs）。

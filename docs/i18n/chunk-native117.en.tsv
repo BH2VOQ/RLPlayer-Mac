@@ -96,3 +96,6 @@ THD+N 方法	THD+N method	native-ui coverage 1.1.7.37
 清空播放队列？	Clear the play queue?	native-ui coverage 1.1.7.37
 同名 .lrc 文件、内嵌歌词，或播放时自动在线补全	A matching .lrc file, embedded lyrics, or online completion during playback	native-ui coverage 1.1.7.37
 例如 /Users/你的用户名/Music/headphone-eq.txt	Example: /Users/yourname/Music/headphone-eq.txt
+下一首: %@ · 剩 %ld 首	Next: %@ · %ld remaining
+下一首: %@	Next: %@
+队列末尾 · 共 %ld 首	End of queue · %ld tracks total

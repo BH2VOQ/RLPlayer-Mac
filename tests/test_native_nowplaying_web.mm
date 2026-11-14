@@ -40,6 +40,7 @@ static void ck(bool ok,const char *n){printf("[%s] %s\n",ok?"PASS":"FAIL",n);if(
 - (NSString *)castBodyForDevice:(NSDictionary *)device;
 - (void)refresh;
 - (void)applyPlayModeUI;
+- (void)refreshQueueContext;
 @end
 int main(){@autoreleasepool{
  [NSApplication sharedApplication]; [RLPTheme setThemeName:@"light"];
@@ -229,6 +230,49 @@ int main(){@autoreleasepool{
    ck(fabs(vlab.font.pointSize-11.0)<0.3,"np.vollab 字号 11（web .npvol .vlab font-size:11）");
    ck(fabs(vlab.frame.size.width-58.0)<1.0,"np.vollab 宽 58（web .vlab min-width:58）");
    ck(vlab.alignment==NSTextAlignmentRight,"np.vollab 右对齐（web .vlab text-align:right）");
+  }
+ }
+
+ // ---- P3 #npNextTrackHero 状态机（web updateNextTrackInfo：!playing||!qLen → 隐藏；末尾「队列末尾 · 共 N 首」）----
+ {
+  NSTextField *hero=(NSTextField *)find(vc.view,@"npNextTrackHero");
+  ck(hero!=nil,"npNextTrackHero 存在（状态机判据前提）");
+  if(hero){
+   NSArray *items=@[@"/offline/a.flac",@"/offline/cur.flac",@"/offline/c.flac"];
+   [vc setValue:@"/offline/cur.flac" forKey:@"currentPath"];
+   // 状态夹具要让 webStatus.playing=1（applyQueueSnapshot 读的是状态快照，不是 /api/status 桩）
+   [vc setValue:[RLPPlaybackStatus statusFromJSON:@{@"ok":@1,@"playing":@1,@"paused":@0,
+              @"current":@"/offline/cur.flac",@"dur":@10.0}] forKey:@"webStatus"];
+   spy.fixtures=@{@"/api/status":@{@"ok":@1,@"playing":@1,@"paused":@0,@"current":@"/offline/cur.flac",@"dur":@10.0},
+                  @"/api/queue":@{@"ok":@1,@"mode":@0,@"index":@1,@"items":items}};
+   [vc refreshQueueContext];
+   ck([hero.stringValue isEqualToString:@"下一首: c.flac · 剩 1 首"],
+      [[NSString stringWithFormat:@"有下一首：文案逐字=web「下一首: X · 剩 N 首」（got「%@」）",hero.stringValue?:@""] UTF8String]);
+   ck(hero.hidden==NO,"有下一首时可见（web display:''）");
+   spy.fixtures=@{@"/api/queue":@{@"ok":@1,@"mode":@0,@"index":@2,@"items":items}};
+   [vc refreshQueueContext];
+   ck([hero.stringValue isEqualToString:@"队列末尾 · 共 3 首"],
+      [[NSString stringWithFormat:@"队列末尾：文案逐字=web「队列末尾 · 共 N 首」（got「%@」）",hero.stringValue?:@""] UTF8String]);
+   spy.fixtures=@{@"/api/queue":@{@"ok":@1,@"mode":@2,@"index":@1,@"items":items}};
+   [vc refreshQueueContext];
+   ck([hero.stringValue isEqualToString:@"下一首: cur.flac · 剩 1 首"],
+      [[NSString stringWithFormat:@"单曲循环：下一首=当前曲（web repMode==2）（got「%@」）",hero.stringValue?:@""] UTF8String]);
+   // 停止：web `!S.playing || !qLen` ⟹ display:none 且不写文案
+   [vc setValue:@"" forKey:@"currentPath"];
+   [vc setValue:[RLPPlaybackStatus statusFromJSON:@{@"ok":@1,@"playing":@0,@"paused":@0,
+              @"current":@"",@"dur":@0.0}] forKey:@"webStatus"];
+   spy.fixtures=@{@"/api/status":@{@"ok":@1,@"playing":@0,@"paused":@0,@"current":@"",@"dur":@0.0},
+                  @"/api/queue":@{@"ok":@1,@"mode":@0,@"index":@0,@"items":items}};
+   [vc refreshQueueContext];
+   ck(hero.hidden && hero.stringValue.length==0,
+      [[NSString stringWithFormat:@"停止后隐藏并清空（web !S.playing）（hidden=%d text=「%@」）",(int)hero.hidden,hero.stringValue?:@""] UTF8String]);
+   // 换歌：旧文案必须立刻清掉（web 切歌清 lastCur/队列态，不等新队列）
+   [hero setStringValue:@"下一首: stale.flac · 剩 2 首"]; hero.hidden=NO;
+   [vc setValue:@"/offline/old.flac" forKey:@"currentPath"];
+   spy.fixtures=@{@"/api/status":@{@"ok":@1,@"playing":@1,@"paused":@0,@"current":@"/offline/new.flac",@"dur":@10.0}};
+   [vc refresh];
+   ck(hero.hidden && hero.stringValue.length==0,
+      [[NSString stringWithFormat:@"换歌立即清空旧「下一首」文案（hidden=%d text=「%@」）",(int)hero.hidden,hero.stringValue?:@""] UTF8String]);
   }
  }
  pendingFav=nil;method_setImplementation(shared,old);
