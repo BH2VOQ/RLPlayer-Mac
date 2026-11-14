@@ -115,6 +115,7 @@ void RLPToast(NSString *message) {
     const CGFloat padX = 14, padY = 8;
     NSView *box = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, label.frame.size.width + padX * 2, label.frame.size.height + padY * 2)];
     box.wantsLayer = YES;
+    box.identifier = @"rlp.toast";     // 判据/审计按 identifier 找，不靠文案匹配（文案会本地化）
     box.layer.backgroundColor = [t.bg2 colorWithAlphaComponent:0.96].CGColor;
     box.layer.cornerRadius = 9;
     box.layer.borderWidth = 1;

@@ -113,7 +113,7 @@
 | 60 | 停止：清 `lastCur`，`#npTitle`=`未播放`、副标题/`#npMeta` 清空、歌词回空态、`#npKind` 回「正在播放」 | `refresh`（2325）：`title=未播放`、`artist=""`、`meta=""`；**新码**再加 `kindLabel=正在播放` | **已修（1.1.7.40）**：旧码保留上一首 `正在播放 · FLAC / 48 kHz / 24 bit` |
 | 61 | 切曲：`trackMetadata`/封面/歌词/分析全量复位，旧请求作废（世代号） | `refresh` 切曲分支 + `anlSeq`/`coverSeq`/`lyricSeq`/`rail` gen | 已对齐 |
 | 62 | `anl` 状态文字：`未播放 / 正在分析… / 缓存命中 / 失败·点击重试 / 分析于 HH:MM` | `anlPaint`（2716）同状态机 | 已对齐 |
-| 63 | 错误态：`j.error` 不进整页正文 | 原生把 `st.error` 写进 `artistLabel2`（副标题位） | 未修（web 整页不展示后端 error；原生此处是超集，需改成 toast/日志，避免盖掉艺术家信息） |
+| 63 | 错误态：`j.error` 不进整页正文 | `st.error` 不再写 `artistLabel2`；改 `RLPToast`（同一错误去重，1.8s 自动消失） | **已修（1.1.7.50）**（web 无 toast 组件，原生用既有轻提示：可见反馈的超集，文案=后端原文） |
 | 64 | loading：web 整页只靠 400ms 轮询，无显式 loading 文案 | 原生 `statusInFlight` + 轮询，无额外骨架 | 已对齐 |
 
 ## 9. hover / active / 滚动行为

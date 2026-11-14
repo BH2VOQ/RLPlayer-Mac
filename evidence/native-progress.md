@@ -650,3 +650,20 @@ bodyW=288、`padding-right:13`、滚动条占位 11、cardW=264、卡片右缘�
 对照表 #28 标已修。
 **门禁（1.1.7.49 树）**：build 0 error；串行全量 ctest **201/201 passed（397.21s）**；audit **246/0**；
 parity missing=0；behavior actionable=0；i18n OK（2419 pairs）。
+
+### 2026-11-14 18:4x —— 轮次 16（1.1.7.50）：后端错误态改 toast（表 #63）
+
+**任务**（Lead 定序 2）：错误态不再写副标题、改 toast；判据断言「错误不写副标题 + toast 出现 + 自动消失」。
+**先核对 web**：web 整页 `renderNp()` 不展示后端 error 字段；原生旧码把 `status.error` 写进 `#npSub`
+（艺术家信息被顶掉，成为假信息）。
+**判据**：`test_native_nowplaying_web` 追加 4 条，在真实 NSWindow 里跑：副标题≠错误串、出现
+`rlp.toast`、toast 文案=错误原文、真跑 2.6s runloop 后 toast 自动消失。
+**红→绿**：旧码（1.1.7.49）**2 F**（副标题写成错误串、无 toast）→ 新码 **144 passed / 0 failures**（140 既有 + 4 新）。
+**实现**：status 分支不再写 `artistLabel2`，改 `RLPToast(st.error)`；新增 `lastStatusError` 去重
+（同一错误只弹一次、错误消失即清）；`RLPToast` 容器加 `identifier=rlp.toast` 便于判据/审计定位。
+**如实挂账**：①web 无 toast 组件（失败提示走另一套通道），原生用既有 1.8s 轻提示、文案为后端原文，
+属可见反馈的超集；②不同错误串会重新弹，暂无合并窗口；③副标题在无 metadata 时保持空/艺术家。
+**证据**：`evidence/native-error-toast-20261114.md`、`native-toast-{red,green}-20261114.log`；
+对照表 #63 标已修。
+**门禁（1.1.7.50 树）**：build 0 error；串行全量 ctest **201/201 passed（408.63s）**；audit **246/0**；
+parity missing=0；behavior actionable=0；i18n OK（2419 pairs）。

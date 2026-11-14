@@ -1315,6 +1315,8 @@ static NSString *RLPRailTagText(id srValue, id bitsValue) {
 @property(nonatomic) BOOL statusInFlight;
 @property(nonatomic) NSUInteger statusEpoch;
 @property(nonatomic) BOOL favorite;
+/// 最近一次已经弹过 toast 的后端错误串（每次轮询同一错误只提示一次）。
+@property(nonatomic,copy) NSString *lastStatusError;
 /// web `#npNextTrackHero` 当前是否占位（`.npmline` 的 Y 依赖它；默认隐藏 ⟹ 为 NO）。
 @property(nonatomic) BOOL nextTrackVisible;
 /// 当前循环档位用的 SF Symbol 名（web REP_ICON[0..3] 的原生等价；判据据此核对映射）。
@@ -2737,7 +2739,16 @@ static NSString *RLPNowPlayingCastDeviceLabel(NSString *device) {
         self_.webControls.playBtn.contentTintColor=NSColor.whiteColor;
         [self_ updateLyricPosition:st.position];
         if(!self_.trackMetadata.count || ![path isEqualToString:self_.currentPath?:@""])self_.titleLabel2.stringValue=path.length?path.lastPathComponent.stringByDeletingPathExtension:RLPTr(@"未播放");
-        if(st.error.length)self_.artistLabel2.stringValue=st.error;
+        // web 整页**不把后端 error 写进副标题**（那会把艺术家信息顶掉，变成"艺术家=解码失败"）。
+        // 原生保留可见反馈：改走 toast（与队列/收藏失败同一套轻提示），同一错误串不重复弹。
+        if (st.error.length) {
+            if (![st.error isEqualToString:self_.lastStatusError ?: @""]) {
+                self_.lastStatusError = st.error;
+                RLPToast(st.error);
+            }
+        } else {
+            self_.lastStatusError = nil;
+        }
         if (![path isEqualToString:self_.currentPath ?: @""]) {
             BOOL cancelPrevious=self_.anlBusy;
             self_.currentPath = path;self_.trackMetadata=@{};self_.artistLabel2.stringValue=@"";self_.metaLabel.stringValue=@"";

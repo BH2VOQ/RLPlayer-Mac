@@ -487,6 +487,40 @@ int main(){@autoreleasepool{
        "末行缩放后不越下/右边界（不被 clip）");
   }
  }
+
+ // ---- #63 后端错误态：不写副标题、改 toast 且自动消失（web 整页不展示后端 error）----
+ {
+  NSWindow *win=[[NSWindow alloc] initWithContentRect:NSMakeRect(0,0,900,700)
+                                             styleMask:NSWindowStyleMaskBorderless
+                                               backing:NSBackingStoreBuffered defer:NO];
+  win.contentView=[[NSView alloc] initWithFrame:NSMakeRect(0,0,900,700)];
+  vc.view.frame=win.contentView.bounds;
+  [win.contentView addSubview:vc.view];
+  [win orderFront:nil];
+  NSString *err=@"后端错误：解码失败";
+  [vc setValue:@"/offline/err.flac" forKey:@"currentPath"];
+  spy.fixtures=@{@"/api/status":@{@"ok":@1,@"playing":@0,@"paused":@0,
+                                  @"current":@"/offline/err.flac",@"dur":@0.0,@"error":err}};
+  [vc refresh];
+  NSTextField *artist=(NSTextField *)[vc valueForKey:@"artistLabel2"];
+  ck(![artist.stringValue isEqualToString:err],
+     [[NSString stringWithFormat:@"错误不再写进副标题位（web 整页不展示后端 error；got「%@」）",artist.stringValue?:@""] UTF8String]);
+  NSView *toast=(NSView *)find(win.contentView,@"rlp.toast");
+  ck(toast!=nil,"后端错误以 toast 出现（不顶掉艺术家信息）");
+  if(toast){
+    BOOL hasText=NO;
+    for(NSView *n in toast.subviews)
+        if([n isKindOfClass:[NSTextField class]] && [[(NSTextField *)n stringValue] isEqualToString:err]) hasText=YES;
+    ck(hasText,"toast 文案 = 后端错误原文");
+    // web 没有 toast；原生 1.8s 后淡出并移除，判据真等一轮 runloop 验证"自动消失"。
+    [[NSRunLoop currentRunLoop] runUntilDate:[NSDate dateWithTimeIntervalSinceNow:2.6]];
+    ck(find(win.contentView,@"rlp.toast")==nil,"toast 自动消失（不常驻、不挡播放页）");
+  }
+  // 不 close：离屏测试没有 run loop 收尾，关窗会在 dealloc 顺序上踩到 objc_release 崩溃
+  // （判据已经在窗口里量完，保留到进程结束即可，测试进程本就短命）。
+  [win orderOut:nil];
+  static NSWindow *sToastWindow; sToastWindow = win;
+ }
  pendingFav=nil;method_setImplementation(shared,old);
  printf("np web: %d failures\n",fail);return fail?1:0;
 }}
