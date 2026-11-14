@@ -339,6 +339,20 @@ if(APPLE)
   add_test(NAME native_scroll_eq COMMAND test_native_scroll_eq)
   set_tests_properties(native_scroll_eq PROPERTIES TIMEOUT 120)
 
+  # OPRA 卡片墙（P1）：型号卡片 + 预设卡片墙 + 目标曲线小图 + 当前态 + 应用请求。
+  # 对 1.1.7.34 先跑红（旧码是型号下拉 + 预设下拉，没有卡片/曲线小图/当前态）。
+  add_executable(test_native_opra_cards tests/test_native_opra_cards.mm
+    tools/native_ui/RLPEqualizerView.mm tools/native_ui/RLPSupport.mm
+    tools/native_ui/RLPTargetCurve.mm tools/native_ui/RLPModels.mm
+    tools/native_ui/RLPTheme.mm tools/native_ui/RLPNativeI18n.mm
+    tools/native_ui/RLPTrackActions.mm tools/native_ui/RLPAnalysisSummary.mm)
+  target_compile_options(test_native_opra_cards PRIVATE -fobjc-arc)
+  target_include_directories(test_native_opra_cards PRIVATE src tools tools/native_ui)
+  target_link_libraries(test_native_opra_cards PRIVATE
+    "-framework AppKit" "-framework QuartzCore")
+  add_test(NAME native_opra_cards COMMAND test_native_opra_cards)
+  set_tests_properties(native_opra_cards PROPERTIES TIMEOUT 120)
+
   # 「AI 整理」栏三张卡片的几何判据（第5项）：离屏量真实视图树，不开窗、不出声。
   # 旧码没有 dot/name/status/p1/p2 子视图（NSButton 多行标题），先跑红再改绿。
   add_executable(test_native_rail_cards tests/test_native_rail_cards.mm
@@ -1538,7 +1552,7 @@ if(NODE_EXECUTABLE)
   add_test(NAME llm_ui COMMAND ${NODE_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tests/test_llm_ui.js)
   set_tests_properties(llm_ui PROPERTIES WORKING_DIRECTORY ${CMAKE_SOURCE_DIR} TIMEOUT 30)
   # 1.1.4-beta10：合作艺术家拆分 / 艺术家卡简介 / 首页艺术家归属 —— 纯逻辑，不需要浏览器
-  # （本机规则：禁止自起无头浏览器；能离线证明的先证明，几何量测改为侧边栏目视验收）
+  # （本机规则：不要自起浏览器进程；能离线证明的先证明，几何量测改为 ego 页面内自检）
   add_test(NAME b10_logic COMMAND ${NODE_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/check_b10_logic.js)
   set_tests_properties(b10_logic PROPERTIES WORKING_DIRECTORY ${CMAKE_SOURCE_DIR} TIMEOUT 30)
   # 1.1.5-beta2：UI 资料检索契约（album/file 传参、knowledge 轮询单飞、资料不足态）——纯逻辑

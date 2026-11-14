@@ -211,8 +211,204 @@
     if (self.onDragBand) { [self applyDragEvent:event]; return; }
     [super mouseDragged:event];
 }
-
 @end
+
+#pragma mark - OPRA 型号/预设卡片（web #eqModelCards / #eqPresetCards）
+
+/// 型号卡片上的一张小目标曲线（web `.tc-curve` 的同构）：只画曲线，不画坐标轴。
+@interface RLPOpraCurveThumb : NSView
+@property (nonatomic, strong, nullable) RLPTargetCurve *targetCurve;
+@end
+
+@implementation RLPOpraCurveThumb
+- (BOOL)isFlipped { return YES; }
+- (void)drawRect:(NSRect)dirty {
+    (void)dirty;
+    RLPTheme *t = [RLPTheme current];
+    NSRect b = NSInsetRect(self.bounds, 1, 1);
+    if (b.size.width < 4 || b.size.height < 4) return;
+    [t.bg2 setFill];
+    NSRectFill(b);
+    NSArray<NSValue *> *pts = [RLPTargetCurveLibrary plotPoints:self.targetCurve inRect:b];
+    if (pts.count < 2) return;
+    NSBezierPath *p = [NSBezierPath bezierPath];
+    [p moveToPoint:pts.firstObject.pointValue];
+    for (NSUInteger i = 1; i < pts.count; ++i) [p lineToPoint:pts[i].pointValue];
+    p.lineWidth = 1.4;
+    [(t.accent2 ?: t.accent) setStroke];
+    [p stroke];
+    for (NSValue *v in @[ pts.firstObject, pts.lastObject ]) {
+        NSPoint pt = v.pointValue;
+        NSBezierPath *dot = [NSBezierPath bezierPathWithOvalInRect:NSMakeRect(pt.x - 2, pt.y - 2, 4, 4)];
+        [(t.accent2 ?: t.accent) setFill];
+        [dot fill];
+    }
+}
+@end
+
+/// 型号卡片：`vendor · name` + 「OPRA 校准预设 · 查看调音预设」。点击 = 选中并加载预设墙。
+@interface RLPOpraModelCard : NSView
+@property (nonatomic, copy) NSString *productId;
+@property (nonatomic, copy) NSString *vendor;
+@property (nonatomic, copy) NSString *name;
+@property (nonatomic, assign) BOOL active;
+@property (nonatomic, copy, nullable) void (^onClick)(void);
+@end
+
+@implementation RLPOpraModelCard
+- (BOOL)isFlipped { return YES; }
+- (instancetype)initWithFrame:(NSRect)r {
+    self = [super initWithFrame:r];
+    if (self) {
+        self.identifier = @"opra.model.card";
+        self.wantsLayer = YES;
+        self.layer.cornerRadius = 8;
+        self.layer.borderWidth = 1;
+        [self applyTheme];
+    }
+    return self;
+}
+- (void)applyTheme {
+    RLPTheme *t = [RLPTheme current];
+    self.layer.backgroundColor = (self.active ? t.accentWeak : t.bg2).CGColor;
+    self.layer.borderColor = (self.active ? t.accent : t.line).CGColor;
+}
+- (void)setActive:(BOOL)active { _active = active; [self applyTheme]; }
+- (void)drawRect:(NSRect)dirty {
+    (void)dirty;
+    RLPTheme *t = [RLPTheme current];
+    NSString *title = self.vendor.length
+        ? [NSString stringWithFormat:@"%@ · %@", self.vendor, self.name ?: @""]
+        : (self.name ?: @"");
+    NSDictionary *ta = @{ NSFontAttributeName: [NSFont systemFontOfSize:13 weight:NSFontWeightSemibold],
+                          NSForegroundColorAttributeName: t.text };
+    NSDictionary *sa = @{ NSFontAttributeName: [NSFont systemFontOfSize:11 weight:NSFontWeightRegular],
+                          NSForegroundColorAttributeName: t.mut2 };
+    [title drawInRect:NSMakeRect(12, 7, self.bounds.size.width - 24, 18) withAttributes:ta];
+    [RLPTr(@"OPRA 校准预设 · 查看调音预设")
+        drawInRect:NSMakeRect(12, 27, self.bounds.size.width - 24, 14) withAttributes:sa];
+}
+- (void)mouseDown:(NSEvent *)event {
+    (void)event;
+    if (self.onClick) self.onClick();
+}
+- (void)click { if (self.onClick) self.onClick(); }
+@end
+
+/// 预设卡片：目标曲线小图 / 作者·详情 / 段数 / 前级增益 / 应用到 EQ / 当前态。
+@interface RLPOpraPresetCard : NSView
+@property (nonatomic, assign) NSInteger presetIndex;
+@property (nonatomic, copy) NSString *productId;
+@property (nonatomic, copy) NSString *presetId;
+@property (nonatomic, copy) NSString *titleText;
+@property (nonatomic, copy) NSString *detailsText;
+@property (nonatomic, copy) NSString *curveName;
+@property (nonatomic, copy) NSString *scene;
+@property (nonatomic, assign) NSInteger bandsCount;
+@property (nonatomic, assign) double gainDb;
+@property (nonatomic, assign) BOOL active;
+@property (nonatomic, strong) RLPOpraCurveThumb *thumb;
+@property (nonatomic, strong) NSButton *applyBtn;
+@property (nonatomic, copy, nullable) void (^onSelect)(void);
+@property (nonatomic, copy, nullable) void (^onApply)(void);
+@end
+
+@implementation RLPOpraPresetCard
+- (BOOL)isFlipped { return YES; }
+- (instancetype)initWithFrame:(NSRect)r {
+    self = [super initWithFrame:r];
+    if (self) {
+        self.identifier = @"opra.preset.card";
+        self.wantsLayer = YES;
+        self.layer.cornerRadius = 9;
+        self.layer.borderWidth = 1;
+        for (NSString *ident in @[ @"opra.preset.title", @"opra.preset.badge",
+                                   @"opra.preset.meta", @"opra.preset.scene" ]) {
+            NSTextField *l = [NSTextField labelWithString:@""];
+            l.identifier = ident;
+            l.bezeled = NO;
+            l.drawsBackground = NO;
+            l.editable = NO;
+            l.selectable = NO;
+            l.maximumNumberOfLines = 2;
+            l.lineBreakMode = NSLineBreakByTruncatingTail;
+            [self addSubview:l];
+        }
+        self.thumb = [[RLPOpraCurveThumb alloc] initWithFrame:NSZeroRect];
+        self.thumb.identifier = @"opra.preset.curve";
+        [self addSubview:self.thumb];
+        self.applyBtn = [NSButton buttonWithTitle:RLPTr(@"应用到 EQ")
+                                            target:self action:@selector(onApplyButton:)];
+        self.applyBtn.bezelStyle = NSBezelStyleRounded;
+        self.applyBtn.identifier = @"opra.preset.apply";
+        self.applyBtn.font = [NSFont systemFontOfSize:12 weight:NSFontWeightMedium];
+        [self addSubview:self.applyBtn];
+        [self applyTheme];
+    }
+    return self;
+}
+- (void)applyTheme {
+    RLPTheme *t = [RLPTheme current];
+    self.layer.backgroundColor = (self.active ? t.accentWeak : t.bg2).CGColor;
+    self.layer.borderColor = (self.active ? t.accent : t.line).CGColor;
+    self.applyBtn.title = self.active ? RLPTr(@"已应用当前预设") : RLPTr(@"应用到 EQ");
+    NSTextField *title = [self labelWithIdentifier:@"opra.preset.title"];
+    title.font = [NSFont systemFontOfSize:13.5 weight:NSFontWeightSemibold];
+    title.textColor = t.text;
+    title.stringValue = self.titleText ?: @"";
+    NSTextField *badge = [self labelWithIdentifier:@"opra.preset.badge"];
+    badge.font = [NSFont systemFontOfSize:10 weight:NSFontWeightSemibold];
+    badge.textColor = t.accentText;
+    badge.stringValue = [NSString stringWithFormat:@"%ld %@", (long)self.bandsCount, RLPTr(@"段")];
+    badge.alignment = NSTextAlignmentRight;
+    NSTextField *meta = [self labelWithIdentifier:@"opra.preset.meta"];
+    meta.font = [NSFont systemFontOfSize:11.5 weight:NSFontWeightRegular];
+    meta.textColor = t.mut2;
+    meta.stringValue = [NSString stringWithFormat:@"%@%.1f dB · %@%ld %@",
+                        RLPTr(@"前级增益："), self.gainDb, RLPTr(@"频段数："),
+                        (long)self.bandsCount, RLPTr(@"段")];
+    meta.maximumNumberOfLines = 1;
+    NSTextField *desc = [self labelWithIdentifier:@"opra.preset.scene"];
+    desc.font = [NSFont systemFontOfSize:11 weight:NSFontWeightRegular];
+    desc.textColor = t.mut;
+    desc.stringValue = [NSString stringWithFormat:@"%@%@", RLPTr(@"目标曲线："), self.curveName ?: @""];
+    desc.maximumNumberOfLines = 1;
+    self.thumb.targetCurve = [RLPTargetCurveLibrary curveForKind:
+        [RLPTargetCurveLibrary kindForDetails:self.detailsText]];
+    [self.thumb setNeedsDisplay:YES];
+    [self setNeedsLayout:YES];
+}
+- (void)setActive:(BOOL)active { _active = active; [self applyTheme]; }
+- (NSTextField *)labelWithIdentifier:(NSString *)ident {
+    for (NSView *v in self.subviews) {
+        if ([v.identifier isEqualToString:ident] && [v isKindOfClass:[NSTextField class]])
+            return (NSTextField *)v;
+    }
+    return nil;
+}
+- (void)layout {
+    [super layout];
+    const CGFloat W = self.bounds.size.width;
+    [(NSTextField *)[self labelWithIdentifier:@"opra.preset.title"]
+        setFrame:NSMakeRect(12, 8, W - 92, 18)];
+    [(NSTextField *)[self labelWithIdentifier:@"opra.preset.badge"]
+        setFrame:NSMakeRect(W - 78, 9, 66, 16)];
+    self.thumb.frame = NSMakeRect(12, 32, W - 24, 40);
+    [(NSTextField *)[self labelWithIdentifier:@"opra.preset.scene"]
+        setFrame:NSMakeRect(12, 78, W - 24, 16)];
+    [(NSTextField *)[self labelWithIdentifier:@"opra.preset.meta"]
+        setFrame:NSMakeRect(12, 100, W - 24, 16)];
+    self.applyBtn.frame = NSMakeRect(MAX(12, W - 134), 126, 122, 26);
+}
+- (void)mouseDown:(NSEvent *)event {
+    (void)event;
+    if (self.onSelect) self.onSelect();
+}
+- (void)onApplyButton:(id)sender { (void)sender; if (self.onApply) self.onApply(); }
+- (void)selectCard { if (self.onSelect) self.onSelect(); }
+- (void)applyCard { if (self.onApply) self.onApply(); }
+@end
+
 
 #pragma mark - 均衡主视图
 
@@ -235,8 +431,16 @@
 @property (nonatomic, strong) NSPopUpButton *presetPop;
 @property (nonatomic, strong) NSTextField *presetName;
 @property (nonatomic, strong) NSTextField *opraQuery;
-@property (nonatomic, strong) NSPopUpButton *opraProduct;
-@property (nonatomic, strong) NSPopUpButton *opraPreset;
+@property (nonatomic, strong) NSStackView *opraModelCards;
+@property (nonatomic, strong) NSStackView *opraPresetCards;
+@property (nonatomic, strong) NSTextField *opraGuide;
+@property (nonatomic, strong) NSTextField *opraSelectedTitle;
+@property (nonatomic, copy) NSArray<RLPOpraModelCard *> *opraModelCardViews;
+@property (nonatomic, copy) NSArray<RLPOpraPresetCard *> *opraPresetCardViews;
+@property (nonatomic, assign) NSInteger opraSelectedProductIndex;
+@property (nonatomic, assign) NSInteger opraSelectedPresetIndex;
+@property (nonatomic, copy) NSString *appliedProductId;
+@property (nonatomic, copy) NSString *appliedPresetId;
 @property (nonatomic, strong) NSTextField *opraStatus;
 @property (nonatomic, copy) NSArray<NSDictionary *> *opraItems;
 @property (nonatomic, copy) NSArray<NSDictionary *> *opraPresets;
@@ -258,6 +462,10 @@
         _opraPresets = @[];
         _opraIndexCache = nil;
         _opraProductSeq = 0;
+        _opraSelectedProductIndex = -1;
+        _opraSelectedPresetIndex = -1;
+        _appliedProductId = @"";
+        _appliedPresetId = @"";
         [self build];
     }
     return self;
@@ -414,40 +622,132 @@
     [r1 addArrangedSubview:sb];
     [self.stack addArrangedSubview:r1];
 
-    NSStackView *r2 = [[NSStackView alloc] init];
-    r2.orientation = NSUserInterfaceLayoutOrientationHorizontal;
-    r2.spacing = 8;
-    self.opraProduct = [[NSPopUpButton alloc] initWithFrame:NSZeroRect pullsDown:NO];
-    self.opraProduct.identifier = @"opra.product";
-    self.opraProduct.target = self;
-    self.opraProduct.action = @selector(onOpraProduct:);
-    [[self.opraProduct.widthAnchor constraintEqualToConstant:260] setActive:YES];
-    [r2 addArrangedSubview:self.opraProduct];
-    self.opraPreset = [[NSPopUpButton alloc] initWithFrame:NSZeroRect pullsDown:NO];
-    self.opraPreset.identifier = @"opra.preset";
-    self.opraPreset.target = self;
-    self.opraPreset.action = @selector(onOpraPreset:);
-    [[self.opraPreset.widthAnchor constraintEqualToConstant:200] setActive:YES];
-    [r2 addArrangedSubview:self.opraPreset];
-    NSButton *ab = [NSButton buttonWithTitle:RLPTr(@"应用") target:self action:@selector(onOpraApply:)];
-    ab.bezelStyle = NSBezelStyleRounded;
-    ab.identifier = @"opra.apply";
-    [r2 addArrangedSubview:ab];
-    [self.stack addArrangedSubview:r2];
+    // 型号卡片区（web #eqModelCards）：点击才加载该型号的预设墙。
+    self.opraGuide = RLPLabel(RLPTr(@"点击卡片选中"), t.small, t.mut);
+    self.opraGuide.identifier = @"opra.guide";
+    self.opraGuide.hidden = YES;
+    [self.stack addArrangedSubview:self.opraGuide];
+
+    self.opraModelCards = [[NSStackView alloc] initWithFrame:NSZeroRect];
+    self.opraModelCards.orientation = NSUserInterfaceLayoutOrientationVertical;
+    self.opraModelCards.alignment = NSLayoutAttributeLeading;
+    self.opraModelCards.spacing = 6;
+    self.opraModelCards.translatesAutoresizingMaskIntoConstraints = NO;
+    [self.stack addArrangedSubview:self.opraModelCards];
+    [[self.opraModelCards.widthAnchor constraintEqualToAnchor:self.stack.widthAnchor constant:-4] setActive:YES];
+
+    // 预设卡片墙（web #eqPresetCards）：作者·详情 / 段数 / 曲线小图 / 前级增益 / 应用按钮。
+    self.opraSelectedTitle = RLPLabel(@"", [NSFont systemFontOfSize:13.5 weight:NSFontWeightSemibold], t.text);
+    self.opraSelectedTitle.identifier = @"opra.presets.title";
+    self.opraSelectedTitle.maximumNumberOfLines = 2;
+    self.opraSelectedTitle.lineBreakMode = NSLineBreakByWordWrapping;
+    self.opraSelectedTitle.hidden = YES;
+    [self.stack addArrangedSubview:self.opraSelectedTitle];
+
+    self.opraPresetCards = [[NSStackView alloc] initWithFrame:NSZeroRect];
+    self.opraPresetCards.orientation = NSUserInterfaceLayoutOrientationVertical;
+    self.opraPresetCards.alignment = NSLayoutAttributeLeading;
+    self.opraPresetCards.spacing = 8;
+    self.opraPresetCards.translatesAutoresizingMaskIntoConstraints = NO;
+    self.opraPresetCards.hidden = YES;
+    [self.stack addArrangedSubview:self.opraPresetCards];
+    [[self.opraPresetCards.widthAnchor constraintEqualToAnchor:self.stack.widthAnchor constant:-4] setActive:YES];
 
     self.opraStatus = RLPLabel(@"", t.small, t.mut);
     self.opraStatus.identifier = @"opra.status";
     [self.stack addArrangedSubview:self.opraStatus];
 
     // web showTargetCurveInfo：选中的目标曲线要给出「名称 / 是什么 / 适合谁 / 前级增益 / 段数」。
-    // 原生是下拉框而不是预设卡片墙，所以曲线示意图只能叠加到 EQ 图上（没有 .tc-curve 小图的位置），
-    // 但**说明文字**必须与 web 同源（RLPTargetCurveLibrary 逐字移植）。
     self.opraInfo = RLPLabel(@"", t.small, t.mut);
     self.opraInfo.identifier = @"opra.info";
     self.opraInfo.maximumNumberOfLines = 6;
     self.opraInfo.lineBreakMode = NSLineBreakByWordWrapping;
     [[self.opraInfo.widthAnchor constraintEqualToConstant:600] setActive:YES];
     [self.stack addArrangedSubview:self.opraInfo];
+}
+
+#pragma mark - OPRA 卡片渲染 / 选择 / 应用
+
+/// 清空栈里的卡片（arrangedSubviews + superview 双清，避免隐藏层残留）。
+- (void)clearCardStack:(NSStackView *)stack {
+    for (NSView *v in [stack.arrangedSubviews copy]) {
+        [stack removeArrangedSubview:v];
+        [v removeFromSuperview];
+    }
+}
+
+- (void)renderModelCards {
+    [self clearCardStack:self.opraModelCards];
+    NSMutableArray<RLPOpraModelCard *> *cards = [NSMutableArray array];
+    for (NSUInteger i = 0; i < self.opraItems.count; ++i) {
+        NSDictionary *x = self.opraItems[i];
+        RLPOpraModelCard *c = [[RLPOpraModelCard alloc] initWithFrame:NSMakeRect(0, 0, 400, 48)];
+        c.productId = [x[@"id"] isKindOfClass:[NSString class]] ? x[@"id"] : @"";
+        c.vendor = [x[@"vendor"] isKindOfClass:[NSString class]] ? x[@"vendor"] : @"";
+        c.name = [x[@"name"] isKindOfClass:[NSString class]] ? x[@"name"] : @"";
+        c.active = ([c.productId isEqualToString:self.appliedProductId] ||
+                    (NSInteger)i == self.opraSelectedProductIndex);
+        __weak __typeof__(self) ws = self;
+        c.onClick = ^{ [ws onModelCardSelected:(NSInteger)i]; };
+        c.translatesAutoresizingMaskIntoConstraints = NO;
+        [self.opraModelCards addArrangedSubview:c];
+        [[c.widthAnchor constraintEqualToAnchor:self.opraModelCards.widthAnchor] setActive:YES];
+        [[c.heightAnchor constraintEqualToConstant:48] setActive:YES];
+        [cards addObject:c];
+    }
+    self.opraModelCardViews = cards;
+}
+
+- (void)onModelCardSelected:(NSInteger)index {
+    if (index < 0 || index >= (NSInteger)self.opraItems.count) return;
+    self.opraSelectedProductIndex = index;
+    [self renderModelCards];
+    [self loadProductPresets:index];
+}
+
+- (void)renderPresetCards {
+    [self clearCardStack:self.opraPresetCards];
+    if (self.opraSelectedProductIndex < 0 ||
+        self.opraSelectedProductIndex >= (NSInteger)self.opraItems.count) {
+        self.opraPresetCardViews = @[];
+        return;
+    }
+    NSDictionary *prod = self.opraItems[(NSUInteger)self.opraSelectedProductIndex];
+    NSString *pid = [prod[@"id"] isKindOfClass:[NSString class]] ? prod[@"id"] : @"";
+    NSMutableArray<RLPOpraPresetCard *> *cards = [NSMutableArray array];
+    for (NSUInteger i = 0; i < self.opraPresets.count; ++i) {
+        NSDictionary *p = self.opraPresets[i];
+        RLPOpraPresetCard *c = [[RLPOpraPresetCard alloc] initWithFrame:NSMakeRect(0, 0, 400, 164)];
+        c.presetIndex = (NSInteger)i;
+        c.productId = pid;
+        c.presetId = [p[@"id"] isKindOfClass:[NSString class]] ? p[@"id"] : @"";
+        NSString *author = [p[@"author"] isKindOfClass:[NSString class]] ? p[@"author"] : @"";
+        NSString *details = [p[@"details"] isKindOfClass:[NSString class]] ? p[@"details"] : @"";
+        c.titleText = author.length ? author : @"OPRA";
+        if (details.length) c.titleText = [c.titleText stringByAppendingFormat:@" · %@", details];
+        c.detailsText = details;
+        c.bandsCount = [p[@"bandsCount"] respondsToSelector:@selector(integerValue)]
+            ? [p[@"bandsCount"] integerValue] : 0;
+        c.gainDb = [p[@"gainDb"] respondsToSelector:@selector(doubleValue)] ? [p[@"gainDb"] doubleValue] : 0.0;
+        c.curveName = [RLPTargetCurveLibrary targetCurveNameForDetails:details author:author];
+        c.active = ([c.productId isEqualToString:self.appliedProductId] &&
+                    [c.presetId isEqualToString:self.appliedPresetId]);
+        __weak __typeof__(self) ws = self;
+        __weak RLPOpraPresetCard *weakCard = c;
+        c.onSelect = ^{
+            ws.opraSelectedPresetIndex = (NSInteger)i;
+            [ws previewTargetCurveForPreset:ws.opraPresets.count > (NSUInteger)i ? ws.opraPresets[i] : nil];
+            [ws renderPresetCards];
+        };
+        c.onApply = ^{ [ws applyOpraPreset:pid presetId:weakCard.presetId]; };
+        [c applyTheme];
+        c.translatesAutoresizingMaskIntoConstraints = NO;
+        [self.opraPresetCards addArrangedSubview:c];
+        [[c.widthAnchor constraintEqualToAnchor:self.opraPresetCards.widthAnchor] setActive:YES];
+        [[c.heightAnchor constraintEqualToConstant:164] setActive:YES];
+        [cards addObject:c];
+    }
+    self.opraPresetCardViews = cards;
 }
 
 #pragma mark - 20 段表格（可编辑）
@@ -759,9 +1059,13 @@ static NSArray<NSDictionary *> *RLPOpraFilter(NSArray<NSDictionary *> *index, NS
     if (![RLPCoreClient shared].started) return;
     [self resetTargetCurvePreview];
     self.opraItems = @[];
-    [self.opraProduct removeAllItems];
-    [self.opraPreset removeAllItems];
+    self.opraSelectedProductIndex = -1;
+    self.opraSelectedPresetIndex = -1;
     self.opraPresets = @[];
+    [self renderModelCards];
+    [self renderPresetCards];
+    self.opraGuide.hidden = YES;
+    self.opraSelectedTitle.hidden = YES;
     if (self.opraIndexCache) { [self applyOpraQuery:qq]; return; }
     self.opraStatus.stringValue = RLPTr(@"正在加载耳机数据库…");
     __weak __typeof__(self) weakSelf = self;
@@ -779,27 +1083,33 @@ static NSArray<NSDictionary *> *RLPOpraFilter(NSArray<NSDictionary *> *index, NS
 - (void)applyOpraQuery:(NSString *)qq {
     NSArray<NSDictionary *> *hits = RLPOpraFilter(self.opraIndexCache ?: @[], qq);
     self.opraItems = hits;
-    [self.opraProduct removeAllItems];
-    for (NSDictionary *x in hits) {
-        NSString *nm = [x[@"name"] isKindOfClass:[NSString class]] ? x[@"name"] : @"";
-        NSString *vd = [x[@"vendor"] isKindOfClass:[NSString class]] ? x[@"vendor"] : @"";
-        NSString *title = vd.length ? [NSString stringWithFormat:@"%@ · %@", vd, nm] : nm;
-        if (title.length) [self.opraProduct addItemWithTitle:title];
-    }
+    self.opraSelectedProductIndex = -1;
+    self.opraSelectedPresetIndex = -1;
+    self.opraPresets = @[];
+    [self renderModelCards];
+    [self renderPresetCards];
+    self.opraSelectedTitle.hidden = YES;
+    // web：有结果才显示型号卡片区；空结果给"未找到"并在下方给出可操作提示。
+    self.opraGuide.hidden = hits.count ? NO : YES;
     self.opraStatus.stringValue = hits.count
         ? [NSString stringWithFormat:RLPTr(@"%ld 个结果"), (long)hits.count]
         : RLPTr(@"未找到匹配的耳机型号，请尝试不同关键词");
-    if (hits.count) {
-        [self.opraProduct selectItemAtIndex:0];
-        [self onOpraProduct:self.opraProduct];
-    }
 }
 
-- (void)onOpraProduct:(id)sender {
-    const NSInteger idx = self.opraProduct.indexOfSelectedItem;
-    if (idx < 0 || idx >= (NSInteger)self.opraItems.count) return;
-    NSString *pid = self.opraItems[idx][@"id"];
-    if (![pid isKindOfClass:[NSString class]] || !pid.length) return;
+- (void)loadProductPresets:(NSInteger)productIndex {
+    if (productIndex < 0 || productIndex >= (NSInteger)self.opraItems.count) return;
+    NSDictionary *prod = self.opraItems[(NSUInteger)productIndex];
+    NSString *pid = [prod[@"id"] isKindOfClass:[NSString class]] ? prod[@"id"] : @"";
+    if (!pid.length) return;
+    NSString *vendor = [prod[@"vendor"] isKindOfClass:[NSString class]] ? prod[@"vendor"] : @"";
+    NSString *name = [prod[@"name"] isKindOfClass:[NSString class]] ? prod[@"name"] : @"";
+    self.opraSelectedTitle.hidden = NO;
+    self.opraSelectedTitle.stringValue = [NSString stringWithFormat:@"%@ %@ · %@",
+        vendor, name, RLPTr(@"调音预设")];
+    self.opraPresetCards.hidden = NO;
+    self.opraPresets = @[];
+    [self renderPresetCards];
+    self.opraStatus.stringValue = RLPTr(@"正在获取预设…");
     const NSInteger seq = ++self.opraProductSeq;   // 只认最后一次选择（web OPRA_CUR_PRODUCT）
     [self resetTargetCurvePreview];
     NSString *url = [NSString stringWithFormat:@"/api/opra/presets?productId=%@", RLPEnc(pid)];
@@ -811,44 +1121,31 @@ static NSArray<NSDictionary *> *RLPOpraFilter(NSArray<NSDictionary *> *index, NS
         NSMutableArray<NSDictionary *> *good = [NSMutableArray array];
         for (id x in items) if ([x isKindOfClass:[NSDictionary class]]) [good addObject:x];
         self_.opraPresets = good;
-        [self_.opraPreset removeAllItems];
-        for (NSDictionary *x in good) {
-            // 后端 /api/opra/presets **没有 name 字段**（只有 id/author/details/gainDb/bandsCount），
-            // 旧实现读 x[@"name"] ⟹ 下拉框恒为空、永远无法应用 —— 第8项③层断点。
-            NSString *author = [x[@"author"] isKindOfClass:[NSString class]] ? x[@"author"] : @"";
-            NSString *details = [x[@"details"] isKindOfClass:[NSString class]] ? x[@"details"] : @"";
-            NSString *title = author.length ? author : @"OPRA";
-            if (details.length) title = [title stringByAppendingFormat:@" · %@", details];
-            [self_.opraPreset addItemWithTitle:title];
+        // 当前态：优先命中 settings 写回的 oprapreset，否则预览第一条。
+        NSInteger selected = 0;
+        for (NSUInteger i = 0; i < good.count; ++i) {
+            NSString *eid = good[i][@"id"];
+            if ([eid isKindOfClass:[NSString class]] && [eid isEqualToString:self_.appliedPresetId]) {
+                selected = (NSInteger)i;
+                break;
+            }
         }
+        self_.opraSelectedPresetIndex = good.count ? selected : -1;
+        [self_ renderPresetCards];
         if (!good.count) {
             self_.opraStatus.stringValue = RLPTr(@"这款耳机没有可用曲线");
             return;
         }
         self_.opraStatus.stringValue = [NSString stringWithFormat:RLPTr(@"%ld 种调音目标"), (long)good.count];
-        [self_.opraPreset selectItemAtIndex:0];
-        // web：presets 到位后立刻 `showTargetCurveInfo(presets.find(oprapreset) || presets[0])`
-        [self_ previewTargetCurveForPreset:good[0]];
+        [self_ previewTargetCurveForPreset:good[(NSUInteger)selected]];
     }];
 }
 
-- (void)onOpraPreset:(id)sender {
-    const NSInteger idx = self.opraPreset.indexOfSelectedItem;
-    if (idx < 0 || idx >= (NSInteger)self.opraPresets.count) return;
-    [self previewTargetCurveForPreset:self.opraPresets[idx]];
-}
-
-- (void)onOpraApply:(id)sender {
-    const NSInteger pi = self.opraProduct.indexOfSelectedItem;
-    const NSInteger ei = self.opraPreset.indexOfSelectedItem;
-    if (pi < 0 || pi >= (NSInteger)self.opraItems.count ||
-        ei < 0 || ei >= (NSInteger)self.opraPresets.count) {
+- (void)applyOpraPreset:(NSString *)pid presetId:(NSString *)eid {
+    if (!pid.length || !eid.length) {
         RLPToast(RLPTr(@"请先选择耳机与曲线"));
         return;
     }
-    NSString *pid = self.opraItems[pi][@"id"];
-    NSString *eid = self.opraPresets[ei][@"id"];
-    if (![pid isKindOfClass:[NSString class]] || ![eid isKindOfClass:[NSString class]]) return;
     // 与 web applyOpraPreset 的请求体逐字段一致：productId=…&presetId=…（两者都做 encodeURIComponent）。
     NSString *body = [NSString stringWithFormat:@"productId=%@&presetId=%@", RLPEnc(pid), RLPEnc(eid)];
     self.opraStatus.stringValue = RLPTr(@"应用中…");
@@ -861,11 +1158,15 @@ static NSArray<NSDictionary *> *RLPOpraFilter(NSArray<NSDictionary *> *index, NS
             self_.opraStatus.stringValue = [RLPTr(@"失败：") stringByAppendingString:err];
             return;
         }
+        // 当前态立刻落 UI（要等 reload 回来才显示会闪一下）
+        self_.appliedProductId = pid;
+        self_.appliedPresetId = eid;
+        [self_ renderModelCards];
+        [self_ renderPresetCards];
         self_.opraStatus.stringValue = RLPTr(@"已应用耳机曲线");
         RLPToast(RLPTr(@"已应用耳机曲线"));
         // web applyOpraPreset：成功路径是 `j.path`（eqPath 仅兼容），随后 **saveSettings(true)**
-        // 把 eq / opraproduct / oprapreset 一起落盘。原生以前只 reload 了 /api/peq，
-        // **没写回 settings 的 eq** ⟹ 后端热重载根本不触发（用户听不到新 EQ）。
+        // 把 eq / opraproduct / oprapreset 一起落盘。后端热重载靠这份写回触发。
         NSString *appliedPath = [json[@"path"] isKindOfClass:[NSString class]] ? json[@"path"]
                                : ([json[@"eqPath"] isKindOfClass:[NSString class]] ? json[@"eqPath"] : nil);
         if (appliedPath.length) {
@@ -875,7 +1176,11 @@ static NSArray<NSDictionary *> *RLPOpraFilter(NSArray<NSDictionary *> *index, NS
         }
         // EQ 已被换成耳机曲线 ⟹ 必须重新拉 /api/peq 才能看到真实新状态
         [self_ reload];
-        [self_ previewTargetCurveForPreset:self_.opraPresets[ei]];
+        NSDictionary *cur = nil;
+        for (NSDictionary *x in self_.opraPresets) {
+            if ([x[@"id"] isKindOfClass:[NSString class]] && [x[@"id"] isEqualToString:eid]) { cur = x; break; }
+        }
+        if (cur) [self_ previewTargetCurveForPreset:cur];
     }];
 }
 
@@ -897,6 +1202,18 @@ static NSArray<NSDictionary *> *RLPOpraFilter(NSArray<NSDictionary *> *index, NS
         [self_ absorbState:json];
     }];
     [self loadPresetList];
+    // 当前态：settings 的 opraproduct/oprapreset 是 web 的唯一真相源（预设卡的"已应用当前预设"靠它）。
+    [[RLPCoreClient shared] getJSON:@"/api/settings" completion:^(NSDictionary * _Nullable j) {
+        __typeof__(self) s = weakSelf;
+        if (!s) return;
+        NSDictionary *kv = [j[@"kv"] isKindOfClass:[NSDictionary class]] ? j[@"kv"] : nil;
+        if (kv) {
+            if ([kv[@"opraproduct"] isKindOfClass:[NSString class]]) s.appliedProductId = kv[@"opraproduct"];
+            if ([kv[@"oprapreset"] isKindOfClass:[NSString class]]) s.appliedPresetId = kv[@"oprapreset"];
+        }
+        [s renderModelCards];
+        [s renderPresetCards];
+    }];
 }
 
 - (void)applyTheme {

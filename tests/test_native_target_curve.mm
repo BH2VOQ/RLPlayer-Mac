@@ -128,6 +128,12 @@ static NSTextField *FindFieldWithPlaceholder(NSView *root, NSString *frag) {
         [((NSTextField *)v).placeholderString containsString:frag]) return (NSTextField *)v;
     return nil;
 }
+static NSArray<NSView *> *FindAllById(NSView *root, NSString *ident) {
+    NSMutableArray *all = [NSMutableArray array]; Collect(root, all);
+    NSMutableArray *out = [NSMutableArray array];
+    for (NSView *v in all) if ([v.identifier isEqualToString:ident]) [out addObject:v];
+    return out;
+}
 static NSPopUpButton *FindPopupWithAction(NSView *root, NSString *sel) {
     NSMutableArray *all = [NSMutableArray array]; Collect(root, all);
     for (NSView *v in all) if ([v isKindOfClass:[NSPopUpButton class]] &&
@@ -205,9 +211,8 @@ int main() {
 
         NSTextField *query = FindFieldWithPlaceholder(v, @"HD650");
         NSButton *searchBtn = FindButton(v, RLPTr(@"搜索"));
-        NSButton *applyBtn = FindButton(v, RLPTr(@"应用"));
-        Ck(query && searchBtn && applyBtn, "OPRA 搜索框 / 搜索键 / 应用键都在",
-           [NSString stringWithFormat:@"query=%d search=%d apply=%d", !!query, !!searchBtn, !!applyBtn]);
+        Ck(query != nil && searchBtn != nil, "OPRA 搜索框 / 搜索键都在",
+           [NSString stringWithFormat:@"query=%d search=%d", !!query, !!searchBtn]);
         if (!query || !searchBtn) { std::printf("结果：%d passed, %d failed\n", g_pass, g_fail); return 1; }
 
         NSBitmapImageRep *base = Snap(curve);   // 未选任何目标曲线时的渲染
@@ -234,35 +239,40 @@ int main() {
             Ck((NSInteger)g_gets.count == before, "【请求】空关键词不发起任何请求", @"");
         }
 
-        NSPopUpButton *product = FindPopupWithAction(v, @"onOpraProduct:");
-        NSPopUpButton *preset = nil;
-        if (product) {
-            NSMutableArray *all = [NSMutableArray array]; Collect(v, all);
-            for (NSView *x in all)
-                if ([x isKindOfClass:[NSPopUpButton class]] && x != product && x.superview == product.superview)
-                    preset = (NSPopUpButton *)x;
+        // ---- ① 型号卡片（web #eqModelCards；旧码是型号下拉）----
+        NSArray<NSView *> *models = FindAllById(v, @"opra.model.card");
+        Ck(models.count == 1, "【①桥层】数组三元组成 1 张型号卡片（点击选中）",
+           [NSString stringWithFormat:@"cards=%lu", (unsigned long)models.count]);
+        if (models.count == 1) {
+            Eq("【①桥层】型号卡片文案 = vendor · name",
+               [NSString stringWithFormat:@"%@ · %@", [models[0] valueForKey:@"vendor"],
+                                          [models[0] valueForKey:@"name"]],
+               @"Sennheiser · HD 600");
         }
-        Ck(product != nil && preset != nil, "找得到型号 / 预设两个下拉框", @"");
-        if (!product) { std::printf("结果：%d passed, %d failed\n", g_pass, g_fail); return 1; }
-        Ck(product.numberOfItems == 1,
-           "【①桥层】数组三元组被解析成型号项（旧码恒 0 项 —— 用户说『没接入』的直接原因）",
-           [NSString stringWithFormat:@"items=%ld", (long)product.numberOfItems]);
-        if (product.numberOfItems == 1)
-            Eq("【①桥层】型号显示名 = vendor · name", [product itemTitleAtIndex:0], @"Sennheiser · HD 600");
+
+        // 点击型号卡 → 预设卡片墙（web 同语义；旧码是自动填下拉）
+        if (models.count == 1) {
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+            [models[0] performSelector:@selector(click)];
+#pragma clang diagnostic pop
+        }
+        Pump();
+        [v layoutSubtreeIfNeeded];
 
         NSString *presetsPath = @"";
         for (NSString *p in g_gets) if ([p hasPrefix:@"/api/opra/presets"]) { presetsPath = p; break; }
         Eq("【③请求】预设请求 = presets?productId=<encodeURIComponent>",
            presetsPath, @"/api/opra/presets?productId=sennheiser%3A%3Ahd_600");
 
-        // ---- ③ 字段：预设没有 name，显示名 = author · details ----
-        Ck(preset && preset.numberOfItems == 2,
-           "【③字段】预设列表被填满（后端没有 name 字段，旧码读 name ⟹ 恒空）",
-           [NSString stringWithFormat:@"items=%ld", (long)(preset ? preset.numberOfItems : -1)]);
-        if (preset && preset.numberOfItems == 2) {
-            Eq("【③字段】预设显示名 1 = author · details", [preset itemTitleAtIndex:0],
+        // ---- ③ 字段：预设没有 name，卡片标题 = author · details ----
+        NSArray<NSView *> *presetCards = FindAllById(v, @"opra.preset.card");
+        Ck(presetCards.count == 2, "【③字段】预设卡片墙 2 张（标题 = author · details，不是 name）",
+           [NSString stringWithFormat:@"cards=%lu", (unsigned long)presetCards.count]);
+        if (presetCards.count == 2) {
+            Eq("【③字段】预设卡标题 1 = author · details", [presetCards[0] valueForKey:@"titleText"],
                @"oratory1990 · Harman Target");
-            Eq("【③字段】预设显示名 2 = author · details", [preset itemTitleAtIndex:1],
+            Eq("【③字段】预设卡标题 2 = author · details", [presetCards[1] valueForKey:@"titleText"],
                @"AutoEQ · Harman In-Ear");
         }
 
@@ -286,11 +296,15 @@ int main() {
            "【②绘制】新图层是**虚线**（列覆盖率 <85%）⟹ 与实线 PEQ 可区分",
            [NSString stringWithFormat:@"colCoverage=%.2f", cov0]);
 
-        // 切到另一条曲线：图形必须随之变化
-        if (preset && preset.numberOfItems >= 2) {
-            [preset selectItemAtIndex:1];
-            [preset sendAction:preset.action to:preset.target];
+        // 切到另一条曲线：图形必须随之变化（新 UI：点第二张预设卡）
+        presetCards = FindAllById(v, @"opra.preset.card");
+        if (presetCards.count >= 2) {
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+            [presetCards[1] performSelector:@selector(selectCard)];
+#pragma clang diagnostic pop
             Pump();
+            [v layoutSubtreeIfNeeded];
             NSBitmapImageRep *p1 = Snap(curve);
             double cov1 = 0, cen1 = 0;
             NSInteger d1 = DiffPixels(p0, p1, curve, &cov1, &cen1);
@@ -302,11 +316,11 @@ int main() {
                          "【④时机】切曲线后说明同步改成 In-Ear", info.stringValue);
         }
 
-        // ---- ③ 请求：apply body 与 web 逐字段一致 ----
-        if (applyBtn) {
-            [preset selectItemAtIndex:1];
-            [preset sendAction:preset.action to:preset.target];
-            [applyBtn performClick:nil];
+        // ---- ③ 请求：apply body 与 web 逐字段一致（新 UI：点卡片上的「应用到 EQ」）----
+        presetCards = FindAllById(v, @"opra.preset.card");
+        if (presetCards.count >= 2) {
+            NSButton *applyCardBtn = [presetCards[1] valueForKey:@"applyBtn"];
+            [applyCardBtn performClick:nil];
             Pump();
         }
         NSString *applyBody = @"", *settingsBody = @"";
