@@ -368,3 +368,21 @@ playback RENDERFAIL 根因仍需用户诊断包。实机验收由用户执行。
 **稳定性复跑（1.1.7.32 同树）**：ctest **195/195**（361.65s，`final-ctest-195-rerun`）；audit **246/0**（第二次）；
 即最终树连续两次全量 ctest 与两次 audit 全绿。此前 1.1.7.29 阶段 5 次全量 ctest 有 2 次
 `native_ui_functional` bus error（专辑详情导航处；单跑与换轮重跑均通过，未复现，按 open flake 记录）。
+
+### 2026-11-14 12:xx —— 本轮 P0/P1/P2 四包（1.1.7.33 → 1.1.7.36）
+
+| 包 | 版本/提交 | 内容 | 判据（旧码红 → 新码绿） |
+|---|---|---|---|
+| P0-1 | 1.1.7.33 `5a7b950` | 播放/暂停三入口统一判定；媒体键显式 pause/resume；停止态重播 | `native_pause_paths` 8/8 → 16/0 |
+| P0-2 | 1.1.7.34 `3419fa3` | 诊断包默认预算 12→7.5 MiB；真实 ZIP 7,605,710 B ≤ 8 MiB；原生导出校验 PK/大小并显示真实 MB | `test_diag_bundle` 103/3 → 106/0 |
+| P1 | 1.1.7.35 `201235b` | OPRA 型号卡片 + 预设卡片墙（曲线小图/作者·详情/段数/前级/应用/当前态） | `native_opra_cards` 1/6 → 16/0；`native_target_curve` 21/0（更新为新入口） |
+| P2 | 1.1.7.36 本包 | EQ/IR/投放/加歌单芯片图标（SF Symbol 11×11，宽度补 15pt） | `native_npmeta_chips` 84/2 → 86/0 |
+
+**门禁（最终树 1.1.7.36，串行/machine idle）**：见 `evidence/native-chip-icons-20261114.md` 与各包证据。
+**open flake**：1.1.7.35 第一次全量 ctest 中 `native_ui_functional` bus error 一次（专辑详情导航处），
+单跑 `--audit` 246/0、第二次全量 ctest 通过；历史上同类 2/5。未修。
+**未做**：古典第 4 张「作品」卡、抽屉 vs 气泡、默认渲染器切换、双模式薄表现层；
+playback RENDERFAIL 根因仍需用户诊断包。实机验收由用户执行（清单见 `evidence/native-loop-gaps-20261114.md`）。
+**工作树说明**：本轮收尾时工作树另有**别的写者**留下的 ego 通道注释/文档改动（`src/net/ui_page.h`、
+`src/net/ui_script.h`、`tools/rtaweb.cpp`、`tools/check_b10_*.js`、`tools/README.md`、`docs/native-ui/PLAN.md`、
+`evidence/native-3-settings-cards-20261114.md`），全是注释/文档、未进本轮任何提交，也不改变构建行为。

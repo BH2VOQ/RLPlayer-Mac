@@ -1213,6 +1213,24 @@ static NSString *RLPRailTagText(id srValue, id bitsValue) {
     b.layer.backgroundColor=t.bg3.CGColor;
     b.layer.borderColor=t.line.CGColor;
     b.contentTintColor=t.text2;
+    // web 的 EQ/IR/投放/加歌单 `.chip` 各带 11–12px 内联 SVG（用户「chip SVG 图标」挂账项）。
+    // 用 SF Symbol 做同构图标：EQ=三段滑杆、IR=波形、投放=AirPlay 音频、加歌单=加号。
+    NSString *sym = nil;
+    if ([b.identifier isEqualToString:@"npEqChip"]) sym = @"slider.horizontal.3";
+    else if ([b.identifier isEqualToString:@"npIrChip"]) sym = @"waveform";
+    else if ([b.identifier isEqualToString:@"npCastBtn"]) sym = @"airplayaudio";
+    else if ([b.identifier isEqualToString:@"npAddSq"]) sym = @"plus";
+    if (sym) {
+        NSImage *img = [NSImage imageWithSystemSymbolName:sym accessibilityDescription:nil];
+        if (img) {
+            img.size = NSMakeSize(11, 11);
+            b.image = img;
+            b.imagePosition = NSImageLeft;
+            b.imageScaling = NSImageScaleProportionallyDown;
+        } else {
+            b.image = nil;   // 系统缺这个符号：退回纯文字，绝不留空白图位
+        }
+    }
 }
 
 /// 主题切换后重刷（徽标文字在 b.title 里，chips 的文案是固定的）。
@@ -1443,7 +1461,8 @@ static NSString *RLPRailTagText(id srValue, id bitsValue) {
         const BOOL badge=[b.identifier hasPrefix:@"npMeta."];
         NSAttributedString *as=b.attributedTitle;
         CGFloat tw=as.length?as.size.width:[b.title sizeWithAttributes:@{NSFontAttributeName:b.font}].width;
-        const CGFloat bw=ceil(tw)+(badge?16.0:20.0);   // padding 2×7 或 2×9 + 边框 2×1
+        const CGFloat iconExtra = b.image ? 15.0 : 0.0;   // 11px 图标 + 4px 间距（web chip 的内联 SVG 同构）
+        const CGFloat bw=ceil(tw)+(badge?16.0:20.0)+iconExtra;   // padding 2×7 或 2×9 + 边框 2×1
         if(!line || (cx>0 && cx+bw>iw)) { line=[NSMutableArray array]; lineW=[NSMutableArray array]; [lines addObject:line]; [widths addObject:lineW]; cx=0; }
         [line addObject:b]; [lineW addObject:@(bw)]; cx+=bw+6;
     }

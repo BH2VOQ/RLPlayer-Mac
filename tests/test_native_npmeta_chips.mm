@@ -314,6 +314,11 @@ static void ScenarioBadgesAndChipsAt1180(void) {
     }
     EqStr(ChipText(eq), @"EQ", "EQ 芯片文案");
     EqStr(ChipText(ir), @"IR", "IR 芯片文案");
+    Ck(eq.image != nil && ir.image != nil,
+       "EQ/IR 芯片带 SF Symbol 图标（web `.chip` 内联 SVG 的同构）",
+       [NSString stringWithFormat:@"eq=%@ ir=%@", eq.image ? @"有" : @"nil", ir.image ? @"有" : @"nil"]);
+    Ck(eq.image == nil || (fabs(eq.image.size.width - 11.0) < 0.51 && fabs(eq.image.size.height - 11.0) < 0.51),
+       "图标尺寸 11×11（web SVG width=11 height=11）", @"图标尺寸不对");
     HasStr(eq.toolTip, @"test.txt", "EQ tooltip 含当前 EQ 文件名（basename）");
     HasStr(eq.toolTip, RLPTr(@"当前 EQ："), "EQ tooltip 以「当前 EQ：」开头（web 同文案）");
     HasStr(eq.toolTip, RLPTr(@"（点击打开 EQ 与房间校正）"), "EQ tooltip 含点击说明");
@@ -361,6 +366,9 @@ static void ScenarioBadgesAndChipsAt1180(void) {
     Ck(fabs(add.font.pointSize - 11.0) < 0.01 && fabs(LayerRadius(add) - 12.0) < 0.01 &&
        SameRGBA(LayerBg(add), t.bg3) && SameRGBA(LayerBorder(add), t.line),
        "加歌单芯片是 web .chip 度量（11pt/radius12/bg3/line）", @"度量不对");
+    Ck(cast.image != nil && add.image != nil,
+       "投放/加歌单芯片带图标（web `.chip` 内联 SVG：AirPlay / 加号）",
+       [NSString stringWithFormat:@"cast=%@ add=%@", cast.image ? @"有" : @"nil", add.image ? @"有" : @"nil"]);
 
     // 点击加歌单 = 走既有保存路径（RLPShowSaveToPlaylist → /api/sq/list）。无窗口时生产码跳过弹层。
     [g_urls removeAllObjects];
