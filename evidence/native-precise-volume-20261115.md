@@ -50,8 +50,9 @@
 
 ## 5. 如实挂账（本组未做完的部分）
 
-1. **未移植** `npVolKnob` SVG 圆弧旋钮、`npVolKnobArc/Ticks/Val`、`npVolFloor` 静音/恢复按钮、
+1. **未移植** `npVolKnob` SVG 圆弧旋钮、`npVolKnobArc/Ticks/Val`、
    `npRawVolumeNotice` 设备调音提示、`barVolInput`/`barVolDb`（底栏镜像）。
+   `npVolFloor` 静音/恢复按钮**已于 1.1.7.64 补齐**，见 `evidence/native-volume-mute-20261115.md`。
 2. **未移植** `PLAYBACK_SETTINGS.ready` / `isRawVolumeLocked()` 的锁定闸门与
    `persistVolumeGesture`（`volume=` settings 写回）；本包只做「输入 → 下发 → 同步」主链路。
 3. **未复刻** web 非法值的 toast 文案（避免新增 i18n 词条），改用红边框 + 恢复值；

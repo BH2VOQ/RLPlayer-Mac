@@ -976,3 +976,20 @@ settings 写回 / Esc 取消未移植；位置与 web 不同（原生在图标�
 **边界**：播放引擎零改动，未改 `hogexcl` 与独占/共享回退逻辑；`test_renderfail` 绿只证明
 归因分类逻辑，不证明故障消失。若将来有可复现的当期失败 + 当次诊断包，再重新开包。
 本条为纯文档记录，按项目惯例**不升版本号**。
+
+
+### 2026-11-15 02:xx —— 轮次 29（1.1.7.64）：v3.3.11 `npVolFloor` 静音 / 恢复
+
+**任务**：待移植清单「音量旋钮 / 精确音量」组第二部分，照 `ui_script.h:6372-6380` 的
+`toggleVolumeMute` 语义。
+
+**红→绿**：`test_native_nowplaying_web` 新增 M1–M7（控件存在 / target+action / 静音下发
+-120 dB / 输入框同步 / 标签「静音」/ 恢复先前 -12.5 dB / 输入框同步）。
+仅判据时 build 0 error、**1 FAIL**（M1）→ 补实现后 build 0 error、4 项相关 ctest 全绿。
+
+**实现**：`RLPNPControlBar` 加 `volMuteBtn`（identifier `npVolFloor`、SF Symbol、复用词条
+`静音`）与 `volumeRestoreDb`（NAN = web `volumeRestore===null`）；把 1.1.7.62 的下发逻辑
+抽成 `applyVolumeDb:` 供精确输入与静音共用；`onToggleVolumeMute:` 逐行对齐上游
+（当前 -120 且无恢复值直接 return）。布局把静音键纳入 `minIconX` 守卫，宽窗口不动 104pt 滑块。
+
+**门禁**：串行 ctest 202/202、`--audit` 246/0、parity missing=0、behavior actionable=0。

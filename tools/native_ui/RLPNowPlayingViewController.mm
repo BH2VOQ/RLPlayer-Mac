@@ -297,6 +297,9 @@ static void RLPSetKernedText(NSTextField *label, NSString *text, CGFloat kern) {
 /// v3.3.11 `npVolInput`：精确 dB 输入（-120~+20，Enter 确认）。
 @property (nonatomic, strong) NSTextField *volDbField;
 @property (nonatomic, assign) double preciseVolumeDb;
+/// v3.3.11 `npVolFloor`：静音/恢复按钮；NAN = web 的 `volumeRestore === null`。
+@property (nonatomic, strong) NSButton *volMuteBtn;
+@property (nonatomic, assign) double volumeRestoreDb;
 @property (nonatomic, strong) NSButton *repBtn;
 /// web #npRepOne：单曲循环时叠在循环键上的「1」角标（10px/700）。
 @property (nonatomic, strong) NSTextField *repBadge;
@@ -309,6 +312,33 @@ static void RLPSetKernedText(NSTextField *label, NSString *text, CGFloat kern) {
 @end
 
 @implementation RLPNPControlBar
+
+/// v3.3.11 `setVol` 的公共落地：下发 /api/volume 并同步精确输入/标签/滑块。
+- (void)applyVolumeDb:(double)db {
+    db = round(db * 10.0) / 10.0;
+    self.volDbField.layer.borderWidth = 0;
+    self.preciseVolumeDb = db;
+    self.volDbField.stringValue = [NSString stringWithFormat:@"%.1f", db];
+    self.volLabel.stringValue = RLPNPVolDbLabel(db);
+    self.volume.doubleValue = RLPNPVolDbToPos(db);
+    [[RLPCoreClient shared] postJSON:[NSString stringWithFormat:@"/api/volume?db=%.1f", db]
+                                body:nil completion:nil];
+}
+
+/// v3.3.11 `toggleVolumeMute`（ui_script.h:6372-6379）：
+/// 当前 <= -120 且无恢复值时直接返回；否则记住当前值并静音 / 恢复先前值。
+- (void)onToggleVolumeMute:(id)sender {
+    (void)sender;
+    if (self.preciseVolumeDb <= -120.0) {
+        if (isnan(self.volumeRestoreDb)) return;
+        const double restored = self.volumeRestoreDb;
+        self.volumeRestoreDb = NAN;
+        [self applyVolumeDb:restored];
+    } else {
+        self.volumeRestoreDb = self.preciseVolumeDb;
+        [self applyVolumeDb:-120.0];
+    }
+}
 
 /// v3.3.11 `commitPreciseVolume` 的 AppKit 等价：-120~+20 dB，Enter 确认。
 /// 非法值按 web `aria-invalid` 的等价处理：标红边框 + 恢复已确认值，**不发请求**。
@@ -324,14 +354,7 @@ static void RLPSetKernedText(NSTextField *label, NSString *text, CGFloat kern) {
         self.volDbField.stringValue = [NSString stringWithFormat:@"%.1f", self.preciseVolumeDb];
         return;
     }
-    const double db = round(db0 * 10.0) / 10.0;
-    self.volDbField.layer.borderWidth = 0;
-    self.preciseVolumeDb = db;
-    self.volDbField.stringValue = [NSString stringWithFormat:@"%.1f", db];
-    self.volLabel.stringValue = RLPNPVolDbLabel(db);
-    self.volume.doubleValue = RLPNPVolDbToPos(db);
-    [[RLPCoreClient shared] postJSON:[NSString stringWithFormat:@"/api/volume?db=%.1f", db]
-                                body:nil completion:nil];
+    [self applyVolumeDb:db0];
 }
 
 - (instancetype)initWithFrame:(NSRect)frameRect {
@@ -451,9 +474,22 @@ static void RLPSetKernedText(NSTextField *label, NSString *text, CGFloat kern) {
     self.volDbField.action = @selector(onCommitPreciseVolume:);
     self.volDbField.wantsLayer = YES;
 
+    // v3.3.11 `npVolFloor` / `toggleVolumeMute`：静音（-120 dB）与恢复先前音量。
+    self.volMuteBtn = [[NSButton alloc] initWithFrame:NSZeroRect];
+    self.volMuteBtn.identifier = @"npVolFloor";
+    self.volMuteBtn.bordered = NO;
+    self.volMuteBtn.imagePosition = NSImageOnly;
+    self.volMuteBtn.image = [NSImage imageWithSystemSymbolName:@"speaker.slash.fill"
+                                     accessibilityDescription:RLPTr(@"静音")];
+    self.volMuteBtn.toolTip = RLPTr(@"静音");
+    self.volMuteBtn.target = self;
+    self.volMuteBtn.action = @selector(onToggleVolumeMute:);
+    self.volumeRestoreDb = NAN;   // web 的 volumeRestore === null
+
     for (NSView *v in @[self.seek, self.posLabel, self.sepLabel, self.durLabel, self.repBtn,
                         self.prevBtn, self.playBtn, self.nextBtn, self.stopBtn,
-                        self.volIcon, self.volume, self.volLabel, self.volDbField, self.repBadge]) {
+                        self.volIcon, self.volume, self.volLabel, self.volDbField,
+                        self.volMuteBtn, self.repBadge]) {
         [self addSubview:v];
     }
     return self;
@@ -505,18 +541,21 @@ static void RLPSetKernedText(NSTextField *label, NSString *text, CGFloat kern) {
     }
     // v3.3.11 `npVolInput`：精确 dB 输入放在音量图标左侧；宽窗口保持 web 的 104pt 滑块，
     // 窄窗口才按剩余空间收缩滑块（与上面 minIconX 同一套守卫）。
-    const CGFloat preciseW = 48.0;
+    const CGFloat preciseW = 48.0, muteW = 22.0;
     CGFloat preciseX = iconX - volGap - preciseW;
-    if (preciseX < minIconX) {
-        sliderW = MAX(56.0, sliderW - (minIconX - preciseX));
+    CGFloat muteX = preciseX - volGap - muteW;
+    if (muteX < minIconX) {
+        sliderW = MAX(56.0, sliderW - (minIconX - muteX));
         sliderX = labelX - volGap - sliderW;
         iconX = sliderX - volGap - iconW;
         preciseX = iconX - volGap - preciseW;
+        muteX = preciseX - volGap - muteW;
     }
     self.volIcon.frame = NSMakeRect(iconX, rowCY - 7, iconW, 14);
     self.volume.frame = NSMakeRect(sliderX, rowCY - 9, sliderW, 18);
     self.volLabel.frame = NSMakeRect(labelX, rowCY - 8, volLabW, 16);
     self.volDbField.frame = NSMakeRect(preciseX, rowCY - 8, preciseW, 16);
+    self.volMuteBtn.frame = NSMakeRect(muteX, rowCY - 11, muteW, 22);
 }
 
 - (void)applyTheme {
@@ -529,6 +568,7 @@ static void RLPSetKernedText(NSTextField *label, NSString *text, CGFloat kern) {
         b.contentTintColor = t.text;
     self.volIcon.contentTintColor = t.mut;
     self.volDbField.textColor = t.text;
+    self.volMuteBtn.contentTintColor = t.mut;
     self.repBadge.textColor = t.accentText;
 }
 

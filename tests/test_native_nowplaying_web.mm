@@ -16,6 +16,7 @@
 - (void)beginMomentumWithVelocity:(CGFloat)v;
 - (void)momentumTick:(id)sender;
 - (void)onCommitPreciseVolume:(id)sender;
+- (void)onToggleVolumeMute:(id)sender;
 @end
 static NSString *lastPath,*lastBody;static RLPJSONCompletion pendingFav;
 @interface RLPRequestSpy : NSObject
@@ -745,6 +746,34 @@ int main(){@autoreleasepool{
     [(id)vf.target onCommitPreciseVolume:vf];
     ck([lastPath isEqualToString:@"/api/volume?db=-120.0"],
        [[NSString stringWithFormat:@"V7 -120 dB 静音档真下发（got %@）",lastPath?:@"(nil)"] UTF8String]);
+  }
+ }
+
+ // ---- v3.3.11 `npVolFloor`：静音 / 恢复（toggleVolumeMute 同语义）----
+ {
+  id barObj2=[vc valueForKey:@"webControls"];
+  NSButton *mute=[barObj2 valueForKey:@"volMuteBtn"];
+  ck(mute!=nil && [mute.identifier isEqualToString:@"npVolFloor"],
+     "M1 npVolFloor 静音/恢复按钮存在（v3.3.11）");
+  if(mute){
+    ck(mute.target!=nil && mute.action!=NULL,"M2 npVolFloor 有真实 target/action");
+    NSTextField *vf2=[barObj2 valueForKey:@"volDbField"];
+    // 先确认一个非静音精确值，再点静音
+    lastPath=nil; vf2.stringValue=@"-12.5"; [(id)vf2.target onCommitPreciseVolume:vf2];
+    lastPath=nil; [(id)mute.target onToggleVolumeMute:mute];
+    ck([lastPath isEqualToString:@"/api/volume?db=-120.0"],
+       [[NSString stringWithFormat:@"M3 点静音真下发 -120 dB（got %@）",lastPath?:@"(nil)"] UTF8String]);
+    ck([vf2.stringValue isEqualToString:@"-120.0"],
+       [[NSString stringWithFormat:@"M4 静音后精确输入框同步（got %@）",vf2.stringValue] UTF8String]);
+    NSTextField *vl2=[barObj2 valueForKey:@"volLabel"];
+    ck([vl2.stringValue isEqualToString:@"静音"],
+       [[NSString stringWithFormat:@"M5 静音后标签为「静音」（got %@）",vl2.stringValue] UTF8String]);
+    // 再点恢复先前 dB
+    lastPath=nil; [(id)mute.target onToggleVolumeMute:mute];
+    ck([lastPath isEqualToString:@"/api/volume?db=-12.5"],
+       [[NSString stringWithFormat:@"M6 再点恢复先前 -12.5 dB（got %@）",lastPath?:@"(nil)"] UTF8String]);
+    ck([vf2.stringValue isEqualToString:@"-12.5"],
+       [[NSString stringWithFormat:@"M7 恢复后精确输入框同步（got %@）",vf2.stringValue] UTF8String]);
   }
  }
 
