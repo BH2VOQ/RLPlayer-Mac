@@ -93,15 +93,15 @@
 | # | web | 原生 | 状态 |
 |---|---|---|---|
 | 47 | `.npctl2{max-width:1160;居中;rows auto auto;gap12}` | `webControls` 宽 `MIN(1160,w-32)` 居中，高 58 @`h-76` | 已对齐 |
-| 48 | `.npseek{height:5;radius3;hover→7}`、`>i` 已播色 | `RLPNPCell drawBarInside` 画 5pt 轨/圆角；**无 hover 增高** | 未修（hover 7pt 未接；NSSlider 需 tracking area，低风险后置） |
-| 49 | `.nptime{12;tabular}`、`.tval{min-width:42;居中}`、`.tsep{opacity:.45}` | `posLabel/durLabel` **monospaced 11pt**、46 宽、右/左对齐 | 未修（字号 12 vs 11、min-width 42 未用） |
+| 48 | `.npseek{height:5;radius3;hover→7}`、`>i` 已播色 | `RLPNPAccentCell.barThickness` 5/7pt + `RLPNPSlider.hoverGrow` 跟踪区（mouseEntered/Exited 切换轨道厚并重绘） | **已修（1.1.7.44）** |
+| 49 | `.nptime{12;tabular}`、`.tval{min-width:42;居中}`、`.tsep{opacity:.45}` | `posLabel/durLabel` monospacedDigit 12pt、42 宽、均居中；`tsep` 10 宽 + 1pt 间距 | **已修（1.1.7.44）** |
 | 50 | `.npkeys{width:min(460px,40vw);gap14}`；`.k{32×32;radius9}`；`.k.big{34×34;圆形;accent}` | `RLPNPControlBar.layout`：rep 32、prev/next/stop 32、play 34（radius17），gap 14 | 已对齐（宽度上限 min(460,40vw) 未接） |
 | 51 | `#npRep` 图标随模式换（`REP_ICON[0..3]`），`title/aria` 随模式 | `onCycleMode` + `applyPlayModeUI`：SF Symbol `arrow.right`/`repeat`/`repeat.1`/`shuffle` + web `REP_META[].aria` tooltip | **已修（1.1.7.41）**：旧码固定 `repeat`、无档位指示 |
 | 52 | `#npRepOne{display:'' only 单曲循环}`「1」角标 | `RLPNPControlBar.repBadge`（identifier `npRepOne`，10pt/700），`applyPlayModeUI` 只在 mode=2 显示 | **已修（1.1.7.41）**：旧码无此控件 |
 | 53 | `#npPrev/#npNext` 18×18 filled | `backward.fill`/`forward.fill` 32pt 按钮 | 已对齐 |
 | 54 | `#npPlay` `#npIcP`：playing&&!paused → 暂停图标，否则播放图标 | `refresh`（2322）`pause.fill/play.fill` 切换 | 已对齐 |
 | 55 | `#npStop` 15×15 圆角方块 | `stop.fill` 32pt 按钮 | 已对齐 |
-| 56 | `.npvol{icon14;gap8;min-width150}`、`input{width:104}`、`.vlab{11;min-w58;right}` | `RLPNPControlBar`：icon14/gap6/slider **118**/label **56**/font **10.5** | 未修（滑块/标签宽度与字号近似而非逐值） |
+| 56 | `.npvol{icon14;gap8;min-width150}`、`input{width:104}`、`.vlab{11;min-w58;right}` | `RLPNPControlBar`：icon14/gap8/slider 104/label 58/font 11 | **已修（1.1.7.44）** |
 | 57 | `volPosToDb/volDbToPos`：`-55·(1-p)^1.6`，`p≤5→-120dB` 真静音 | `RLPNPVolPosToDb/RLPNPVolDbToPos/RLPNPVolDbLabel` 逐字同曲线 | 已对齐 |
 | 58 | 拖拽期间 400ms 轮询不得回写（`dragging` + holdUntil） | `RLPNPSlider.dragging` + `refresh` 跳过回写，松手 `onCommit` 一次 | 已对齐 |
 
@@ -135,6 +135,20 @@
 - 页面内自检脚本（`window.__SELFTEST`）是 web 侧判据载体，原生用 `--audit`/ctest，载体不同、判据等价。
 
 ## 11. 红→绿记录（逐包追加）
+
+### 1.1.7.44 —— 控制区逐值（表 #48 / #49 / #56）
+
+- 判据：`tests/test_native_nowplaying_web.mm` 追加 15 条（seek `barThickness` 5→7 + hover 跟踪区、
+  pos/dur 12pt/42 宽/居中、vol 104 + vlab 11pt/58 宽/右对齐）。
+- 旧码（1.1.7.43）：15 条里 **10 FAIL**（其余 3 条 hover 子判据因 `barThickness` 不存在跳过）。
+- 新码：**75P / 0F**（60 既有 + 15 新）。
+- 证据：`evidence/native-controlrow-{red,green}-20261114.log`。
+
+### 1.1.7.43 —— 响应式字号/行距（表 #13 / #41）
+
+- 判据：`tests/test_native_nowplaying_web.mm` 追加 18 条（640/800/1080 三档真实窗口高度）。
+- 旧码（1.1.7.42）：**9 FAIL** → 新码 **60P / 0F**。
+- 证据：`evidence/native-responsive-type-{red,green}-20261114.log`。
 
 ### 1.1.7.42 —— 面板内置收起键 `#npAnalHide` / `#npRailHide`（表 #27 / #34）
 

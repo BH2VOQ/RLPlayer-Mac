@@ -1,0 +1,76 @@
+[PASS] native request encoding exactly matches web encodeURIComponent
+[PASS] web npCover/npAnal/npLyric/npRail/control regions exist
+[PASS] cover is 24vh at 760px
+[PASS] hero gutter is 16px
+[PASS] body has symmetric 1:2:1 columns
+[PASS] three columns do not overlap
+[PASS] panel body never covers control row in flipped canvas
+[PASS] web analysis actions and exit are present
+[PASS] production timed lyrics projection API exists
+[PASS] real LRC timestamp chooses second highlighted row
+[PASS] plain lyrics never highlight
+[PASS] pause request explicitly sets on=1
+[PASS] resume request explicitly sets on=0
+[PASS] seek uses real backend pos parameter, not ignored ratio
+[PASS] cast request construction is directly verifiable
+[PASS] cast form roundtrips real file and location including ampersand and plus
+[PASS] old favorite completion cannot mutate new track
+[PASS] npKind carries web npPlayingKindText fields (codec / kHz / bit)
+[PASS] stopped state resets npKind to plain 正在播放 (web npPlayingKindText(null))
+[PASS] stopped state keeps npTitle = 未播放
+[PASS] track switch resets npKind before new meta arrives (no stale codec, no trailing ' · ')
+[PASS] npRep control exists
+[PASS] web #npRepOne badge exists
+[PASS] npRep icon follows web REP_ICON[0]
+[PASS] npRepOne only visible in single-repeat (mode=0)
+[PASS] npRep icon follows web REP_ICON[1]
+[PASS] npRepOne only visible in single-repeat (mode=1)
+[PASS] npRep icon follows web REP_ICON[2]
+[PASS] npRepOne only visible in single-repeat (mode=2)
+[PASS] npRep icon follows web REP_ICON[3]
+[PASS] npRepOne only visible in single-repeat (mode=3)
+[PASS] the four play modes use four distinct npRep icons
+[PASS] npRepOne renders 1
+[PASS] web #npAnalHide panel-local hide key exists
+[PASS] web #npRailHide panel-local hide key exists
+[PASS] npAnalHide is 22x22 like web .anlhide
+[PASS] npRailHide is 22x22 like web .nprailhide
+[PASS] npAnalHide is a circle (web border-radius:50%)
+[PASS] npAnalHide hides the analysis panel
+[PASS] npAnalHide persists the same hidden state as the top-right toggle
+[PASS] npRailHide hides the AI rail panel
+[PASS] npRailHide persists the same hidden state as the top-right toggle
+[PASS] npTitle 存在（响应式字号判据前提）
+[PASS] @640pt 窗口：npTitle 字号 = clamp(19,2.6vh,27)（want 19.00 got 19.00）
+[PASS] @640pt：两行歌词都建成了
+[PASS] @640pt：歌词字号 = clamp(13,1.9vh,17)（want 13.00 got 13.00）
+[PASS] @640pt：行盒 = 字号×2.05（web line-height）want 26.65 got 26.65
+[PASS] @640pt：相邻歌词行贴合行盒（gap want 0 got 0.00）
+[PASS] npTitle 存在（响应式字号判据前提）
+[PASS] @800pt 窗口：npTitle 字号 = clamp(19,2.6vh,27)（want 20.80 got 20.80）
+[PASS] @800pt：两行歌词都建成了
+[PASS] @800pt：歌词字号 = clamp(13,1.9vh,17)（want 15.20 got 15.20）
+[PASS] @800pt：行盒 = 字号×2.05（web line-height）want 31.16 got 31.16
+[PASS] @800pt：相邻歌词行贴合行盒（gap want 0 got 0.00）
+[PASS] npTitle 存在（响应式字号判据前提）
+[PASS] @1080pt 窗口：npTitle 字号 = clamp(19,2.6vh,27)（want 27.00 got 27.00）
+[PASS] @1080pt：两行歌词都建成了
+[PASS] @1080pt：歌词字号 = clamp(13,1.9vh,17)（want 17.00 got 17.00）
+[PASS] @1080pt：行盒 = 字号×2.05（web line-height）want 34.85 got 34.85
+[PASS] @1080pt：相邻歌词行贴合行盒（gap want 0 got 0.00）
+[PASS] 控制区五个逐值判据前提都在
+[PASS] np.seek cell 暴露 barThickness（hover 5→7 的实现前提）
+[PASS] np.seek 轨道高 5pt（web .npseek height:5）
+[PASS] np.seek hover 后轨道高 7pt（web .npseek:hover height:7）
+[PASS] np.seek 有 hover 跟踪区（不是只有属性、没有鼠标响应）
+[PASS] np.pos 字号 12（web .nptime font-size:12）
+[PASS] np.pos 宽 42（web .tval min-width:42）
+[PASS] np.pos 居中（web .tval text-align:center）
+[PASS] np.dur 字号 12（web .nptime font-size:12）
+[PASS] np.dur 宽 42（web .tval min-width:42）
+[PASS] np.dur 居中（web .tval text-align:center）
+[PASS] np.vol 滑杆宽 104（web .npvol input width:104）
+[PASS] np.vollab 字号 11（web .npvol .vlab font-size:11）
+[PASS] np.vollab 宽 58（web .vlab min-width:58）
+[PASS] np.vollab 右对齐（web .vlab text-align:right）
+np web: 0 failures

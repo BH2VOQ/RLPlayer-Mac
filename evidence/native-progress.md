@@ -522,3 +522,22 @@ parity missing=0；behavior actionable=0；i18n OK（2416 pairs）。
 按 open flake 记，不加工代码。
 **证据**：`evidence/native-responsive-type-20261114.md`、`native-responsive-type-{red,green}-20261114.log`、
 `native-43-ctest.log`、`native-43-audit.log`；对照表 #13/#41 标「已修（1.1.7.43）」（#41 的 active scale 仍挂未修）。
+
+### 2026-11-14 16:5x —— 轮次 13b（1.1.7.44）：控制区逐值（P2，表 #48/#49/#56）
+
+**任务**（Lead 定序 P2）：`#npSeek:hover{5→7}`、`.nptime{12px}` + `.tval{min-width:42;居中}`、
+`.npvol{input 104 / vlab 11px / min-w58}`；判据量实际尺寸 ±1pt。
+**判据**：`tests/test_native_nowplaying_web.mm` 追加 15 条：seek cell `barThickness` 5→7 + hover 跟踪区存在、
+pos/dur 字号12/宽42/居中、vol 滑杆104、vlab 字号11/宽58/右对齐。
+**红→绿**：旧码（1.1.7.43）**10 F**（15 条里；`barThickness` 不存在导致 3 条 hover 子判据跳过）
+→ 新码 **75 passed / 0 failures**（60 既有 + 15 新）。
+**实现**：`RLPNPAccentCell` 加 `hovered`/`barThickness`（5/7pt，圆角随厚度）并用于 `drawBarInside`；
+`RLPNPSlider` 加 `hoverGrow` 与 `NSTrackingMouseEnteredAndExited|ActiveInKeyWindow|InVisibleRect` 跟踪区
+（只 seek 开，音量条保持 5pt 原生 range 外观）；时间字体 monospacedDigit 12、`.tval` 宽 42 居中、sep 10+1pt；
+音量滑杆 104、标签 58/11pt、图标间距 8（窄窗保留收缩兜底）。
+**如实挂账**：hover 响应只对 seek；跟踪区用 `ActiveInKeyWindow`，离屏判据以 `hoverGrow`+`trackingAreas` 证明
+「有响应装置」，未做真实鼠标注入（遵守「不做键鼠自动化」铁律）；极小窗口下音量条仍会收缩（兜底）。
+**证据**：`evidence/native-controlrow-20261114.md`、`native-controlrow-{red,green}-20261114.log`；
+对照表 #48/#49/#56 标「已修（1.1.7.44）」。
+**门禁（1.1.7.44 树）**：build 0 error；串行全量 ctest **201/201 passed（395.13s）**；audit **246/0**；
+parity missing=0；behavior actionable=0；i18n OK（2416 pairs）。

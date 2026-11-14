@@ -88,13 +88,18 @@
 - (BOOL)isFlipped { return YES; }
 @end
 @interface RLPNPAccentCell : NSSliderCell
+/// web `.npseek{height:5px}` / `.npseek:hover{height:7px}`：悬停时轨道加粗到 7pt。
+@property (nonatomic, assign) BOOL hovered;
+- (CGFloat)barThickness;
 @end
 @implementation RLPNPAccentCell
+- (CGFloat)barThickness { return self.hovered ? 7.0 : 5.0; }
 - (void)drawBarInside:(NSRect)r flipped:(BOOL)flipped {
-    CGFloat y=NSMidY(r)-2.5; NSRect track=NSMakeRect(r.origin.x,y,r.size.width,5);
-    [[RLPTheme current].track setFill]; [[NSBezierPath bezierPathWithRoundedRect:track xRadius:2.5 yRadius:2.5] fill];
+    const CGFloat th=[self barThickness];
+    CGFloat y=NSMidY(r)-th/2; NSRect track=NSMakeRect(r.origin.x,y,r.size.width,th);
+    [[RLPTheme current].track setFill]; [[NSBezierPath bezierPathWithRoundedRect:track xRadius:th/2 yRadius:th/2] fill];
     double p=(self.doubleValue-self.minValue)/MAX(.001,self.maxValue-self.minValue);
-    track.size.width*=MAX(0,MIN(1,p)); [[RLPTheme current].accent setFill]; [[NSBezierPath bezierPathWithRoundedRect:track xRadius:2.5 yRadius:2.5] fill];
+    track.size.width*=MAX(0,MIN(1,p)); [[RLPTheme current].accent setFill]; [[NSBezierPath bezierPathWithRoundedRect:track xRadius:th/2 yRadius:th/2] fill];
 }
 @end
 
@@ -106,14 +111,37 @@
 @interface RLPNPSlider : NSSlider
 @property (nonatomic, assign, readonly) BOOL dragging;
 @property (nonatomic, copy, nullable) void (^onCommit)(void);
+/// 只有 #npSeek 打开（web `.npseek:hover{height:7px}`）；音量条保持 5pt（web `input[type=range]` 默认外观）。
+@property (nonatomic, assign) BOOL hoverGrow;
 @end
 
 @implementation RLPNPSlider
+- (void)updateTrackingAreas {
+    [super updateTrackingAreas];
+    if (!self.hoverGrow) return;
+    for (NSTrackingArea *a in self.trackingAreas)
+        if (a.owner == self) [self removeTrackingArea:a];
+    NSTrackingArea *hover = [[NSTrackingArea alloc]
+        initWithRect:NSZeroRect
+             options:(NSTrackingMouseEnteredAndExited | NSTrackingActiveInKeyWindow | NSTrackingInVisibleRect)
+               owner:self userInfo:nil];
+    [self addTrackingArea:hover];
+}
 - (void)mouseDown:(NSEvent *)event {
     _dragging = YES;
     [super mouseDown:event];      // NSSlider 在这里跑完整个拖动循环
     _dragging = NO;
     if (self.onCommit) self.onCommit();
+}
+- (void)mouseEntered:(NSEvent *)event {
+    if (!self.hoverGrow || ![self.cell isKindOfClass:[RLPNPAccentCell class]]) return;
+    ((RLPNPAccentCell *)self.cell).hovered = YES;
+    [self setNeedsDisplay:YES];
+}
+- (void)mouseExited:(NSEvent *)event {
+    if (!self.hoverGrow || ![self.cell isKindOfClass:[RLPNPAccentCell class]]) return;
+    ((RLPNPAccentCell *)self.cell).hovered = NO;
+    [self setNeedsDisplay:YES];
 }
 @end
 
@@ -206,15 +234,18 @@ static NSString *RLPNPFavKey(NSString *path) {
     self.seek.controlSize = NSControlSizeSmall;
     self.seek.identifier = @"np.seek";
     self.seek.toolTip = RLPTr(@"进度");
+    self.seek.hoverGrow = YES;                 // web `.npseek:hover{height:7px}`
 
-    NSFont *timeFont = [NSFont monospacedDigitSystemFontOfSize:11 weight:NSFontWeightRegular];
+    // web `.nptime{font-size:12px}`（值用 tabular-nums，等宽数字）
+    NSFont *timeFont = [NSFont monospacedDigitSystemFontOfSize:12 weight:NSFontWeightRegular];
     self.posLabel = RLPLabel(@"0:00", timeFont, t.mut);
     self.posLabel.identifier = @"np.pos";
-    self.posLabel.alignment = NSTextAlignmentRight;
+    self.posLabel.alignment = NSTextAlignmentCenter;   // web `.tval{text-align:center}`
     self.sepLabel = RLPLabel(@"/", timeFont, t.mut);
     self.sepLabel.alignment = NSTextAlignmentCenter;
     self.durLabel = RLPLabel(@"0:00", timeFont, t.mut);
     self.durLabel.identifier = @"np.dur";
+    self.durLabel.alignment = NSTextAlignmentCenter;   // web `.tval{text-align:center}`
 
     self.repBtn = [NSButton buttonWithTitle:RLPTr(@"顺序") target:nil action:nil];
     self.repBtn.bezelStyle = NSBezelStyleRounded;
@@ -252,8 +283,9 @@ static NSString *RLPNPFavKey(NSString *path) {
     self.volume.continuous = YES;
     self.volume.controlSize = NSControlSizeSmall;
     self.volume.toolTip = RLPTr(@"音量");   // 旧控制条遗留；真播放页走 webControls
+    // web `.npvol .vlab{font-size:11px;min-width:58px;text-align:right}`
     self.volLabel = RLPLabel(@"0.0 dB",
-        [NSFont monospacedDigitSystemFontOfSize:10.5 weight:NSFontWeightRegular], t.mut);
+        [NSFont monospacedDigitSystemFontOfSize:11 weight:NSFontWeightRegular], t.mut);
     self.volLabel.identifier = @"np.vollab";
     self.volLabel.alignment = NSTextAlignmentRight;
 
@@ -278,10 +310,11 @@ static NSString *RLPNPFavKey(NSString *path) {
 
     // 下排：时间（左）· 控制键（中，恒居中）· 音量（右）
     const CGFloat rowCY = seekY / 2.0;
-    const CGFloat timeW = 46.0, sepW = 10.0;
+    // web `.nptime .tval{min-width:42px;text-align:center}` + `.tsep{margin:0 1px;min-width:10px}`
+    const CGFloat timeW = 42.0, sepW = 10.0;
     CGFloat x = pad;
-    self.posLabel.frame = NSMakeRect(x, rowCY - 8, timeW, 16); x += timeW + 2;
-    self.sepLabel.frame = NSMakeRect(x, rowCY - 8, sepW, 16); x += sepW + 2;
+    self.posLabel.frame = NSMakeRect(x, rowCY - 8, timeW, 16); x += timeW + 1;
+    self.sepLabel.frame = NSMakeRect(x, rowCY - 8, sepW, 16); x += sepW + 1;
     self.durLabel.frame = NSMakeRect(x, rowCY - 8, timeW, 16);
 
     const CGFloat repW = 32.0, keyS = 32.0, playS = 34.0, keyGap = 14.0;
@@ -296,8 +329,9 @@ static NSString *RLPNPFavKey(NSString *path) {
     // web #npRepOne：margin-left 22 / margin-top -18 ⟹ 按钮右上角的 10px「1」。
     self.repBadge.frame = NSMakeRect(repX + 18, rowCY + 1, 13, 13);
 
-    const CGFloat volLabW = 56.0, iconW = 14.0, volGap = 6.0;
-    CGFloat sliderW = 118.0;
+    // web `.npvol{display:flex;gap:8px}` + `input[type=range]{width:104px}` + `.vlab{min-width:58px}`
+    const CGFloat volLabW = 58.0, iconW = 14.0, volGap = 8.0;
+    CGFloat sliderW = 104.0;
     const CGFloat minIconX = kx + 12.0;                 // 绝不压住中键区
     const CGFloat labelX = W - pad - volLabW;
     CGFloat sliderX = labelX - volGap - sliderW;

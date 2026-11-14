@@ -192,6 +192,45 @@ int main(){@autoreleasepool{
   [(NSView *)vc.view setFrameSize:NSMakeSize(1180,760)];
   [(NSView *)vc.view layoutSubtreeIfNeeded];
  }
+
+ // ---- P2 控制区逐值：web `#npSeek:hover{5→7}`、`.nptime{12px; tval min-width:42 居中}`、`.npvol{104/11/58}` ----
+ {
+  NSView *ctl=[vc valueForKey:@"webControls"];
+  [ctl layoutSubtreeIfNeeded];
+  NSSlider *seek=(NSSlider *)[ctl valueForKey:@"seek"];
+  NSSlider *vol=(NSSlider *)[ctl valueForKey:@"volume"];
+  NSTextField *pos=(NSTextField *)[ctl valueForKey:@"posLabel"];
+  NSTextField *dur=(NSTextField *)[ctl valueForKey:@"durLabel"];
+  NSTextField *vlab=(NSTextField *)[ctl valueForKey:@"volLabel"];
+  ck(seek&&vol&&pos&&dur&&vlab,"控制区五个逐值判据前提都在");
+  if(seek&&vol&&pos&&dur&&vlab){
+   // hover 5→7pt（web .npseek:hover{height:7px}）
+   BOOL hasThick=[seek.cell respondsToSelector:NSSelectorFromString(@"barThickness")];
+   ck(hasThick,"np.seek cell 暴露 barThickness（hover 5→7 的实现前提）");
+   if(hasThick){
+     NSNumber *t0=[seek.cell valueForKey:@"barThickness"];
+     ck(fabs(t0.doubleValue-5.0)<=0.6,"np.seek 轨道高 5pt（web .npseek height:5）");
+     [seek.cell setValue:@YES forKey:@"hovered"];
+     NSNumber *t1=[seek.cell valueForKey:@"barThickness"];
+     ck(fabs(t1.doubleValue-7.0)<=0.6,"np.seek hover 后轨道高 7pt（web .npseek:hover height:7）");
+     [seek.cell setValue:@NO forKey:@"hovered"];
+     ck([seek respondsToSelector:NSSelectorFromString(@"hoverGrow")]&&seek.trackingAreas.count>=1,
+        "np.seek 有 hover 跟踪区（不是只有属性、没有鼠标响应）");
+   }
+   // .nptime{font-size:12} / .tval{min-width:42;text-align:center}
+   ck(fabs(pos.font.pointSize-12.0)<0.3,"np.pos 字号 12（web .nptime font-size:12）");
+   ck(fabs(pos.frame.size.width-42.0)<1.0,"np.pos 宽 42（web .tval min-width:42）");
+   ck(pos.alignment==NSTextAlignmentCenter,"np.pos 居中（web .tval text-align:center）");
+   ck(fabs(dur.font.pointSize-12.0)<0.3,"np.dur 字号 12（web .nptime font-size:12）");
+   ck(fabs(dur.frame.size.width-42.0)<1.0,"np.dur 宽 42（web .tval min-width:42）");
+   ck(dur.alignment==NSTextAlignmentCenter,"np.dur 居中（web .tval text-align:center）");
+   // .npvol input 104 / .vlab 11px min-width 58
+   ck(fabs(vol.frame.size.width-104.0)<1.0,"np.vol 滑杆宽 104（web .npvol input width:104）");
+   ck(fabs(vlab.font.pointSize-11.0)<0.3,"np.vollab 字号 11（web .npvol .vlab font-size:11）");
+   ck(fabs(vlab.frame.size.width-58.0)<1.0,"np.vollab 宽 58（web .vlab min-width:58）");
+   ck(vlab.alignment==NSTextAlignmentRight,"np.vollab 右对齐（web .vlab text-align:right）");
+  }
+ }
  pendingFav=nil;method_setImplementation(shared,old);
  printf("np web: %d failures\n",fail);return fail?1:0;
 }}
