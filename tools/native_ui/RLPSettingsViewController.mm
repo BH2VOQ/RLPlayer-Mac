@@ -340,6 +340,11 @@ static NSStackView *RLPSRow(NSString *label, NSView *control, NSString *hint, RL
 @property (nonatomic, strong) NSButton *fbSendBtn;
 @property (nonatomic, strong) NSButton *fbRetryBtn;
 @property (nonatomic, strong) NSTextField *fbMsg;
+/// v3.3.11 `rlFbPreview`：提交前先看清「会发送什么」（纯前端，不发请求）。
+@property (nonatomic, strong) NSButton *fbPreviewBtn;
+@property (nonatomic, strong) NSTextField *fbPreviewBox;
+/// v3.3.11 `rlFbResult`：持久结果区（结论留在页面上，不只刷一行状态）。
+@property (nonatomic, strong) NSTextField *fbResultBox;
 
 // ---- 反馈通道（2026-11-14：按 web 版 fbWatchdog/fbSend 真实语义就地实现）----
 /// 探活结果：-1 = 还没探完，0 = 不可用，1 = 可用（只有 1 才允许提交，与 web 同一条闸门）。
@@ -833,12 +838,52 @@ static NSString *RLPControlIdentifier(NSString *key) {
     self.fbChan.textColor = (kind == 2) ? t.danger : (kind == 1) ? t.okText : t.mut2;
 }
 
-/// 发送结果行（web fbMsg）。
+/// 发送结果行（web fbMsg）+ 持久结果区（web `rlFbResult` / `sp_fbresult`）。
+/// 为什么两者都写：状态行会被下一次操作覆盖，用户回头想「刚才到底成没成」就没了；
+/// 结果区留在页面上，直到下一次发送才更新。
 - (void)fbResultText:(NSString *)text kind:(NSInteger)kind {
-    if (!self.fbMsg) return;
-    self.fbMsg.stringValue = text ?: @"";
     RLPTheme *t = [RLPTheme current];
-    self.fbMsg.textColor = (kind == 2) ? t.danger : (kind == 1) ? t.okText : t.mut2;
+    if (self.fbMsg) {
+        self.fbMsg.stringValue = text ?: @"";
+        self.fbMsg.textColor = (kind == 2) ? t.danger : (kind == 1) ? t.okText : t.mut2;
+    }
+    if (self.fbResultBox) {
+        self.fbResultBox.stringValue = text ?: @"";
+        self.fbResultBox.textColor = (kind == 2) ? t.danger : (kind == 1) ? t.okText : t.mut2;
+        self.fbResultBox.hidden = (text.length == 0);   // web 空结果不占位
+    }
+}
+
+#pragma mark - v3.3.11 反馈预览（rlFbPreview：先看会发送什么）
+
+/// 预览文案**从真实请求参数派生**，不另写一份口径 —— 否则「预览说发了 A、实际发了 B」，
+/// 比没有预览更糟。字段/端点/上限全部取 src/net/feedback_api.h 里的常量。
+- (NSString *)fbPreviewSummary {
+    NSString *text = self.fbText.string ?: @"";
+    NSString *trimmed = [text stringByTrimmingCharactersInSet:
+                         [NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    const NSUInteger bytes = [text lengthOfBytesUsingEncoding:NSUTF8StringEncoding];
+    const BOOL attach = self.fbDiagSwitch.state == NSControlStateValueOn;
+    NSProcessInfo *pi = [NSProcessInfo processInfo];
+    NSMutableArray<NSString *> *lines = [NSMutableArray array];
+    [lines addObject:[NSString stringWithFormat:RLPTr(@"将提交到：%@"),
+                      [NSString stringWithUTF8String:rta::feedback::kFeedbackUploadUrl]]];
+    [lines addObject:[NSString stringWithFormat:RLPTr(@"版本：%@"),
+                      [NSString stringWithUTF8String:RLPLAYER_VERSION]]];
+    [lines addObject:[NSString stringWithFormat:RLPTr(@"系统：macOS %@"),
+                      pi.operatingSystemVersionString]];
+    [lines addObject:[NSString stringWithFormat:RLPTr(@"正文：%@ 字 / %lu 字节（上限 16384 字节）"),
+                      @(trimmed.length), (unsigned long)bytes]];
+    [lines addObject:attach ? RLPTr(@"诊断包：附带（已脱敏，与「导出诊断包」同一份）")
+                            : RLPTr(@"诊断包：不附带")];
+    return [lines componentsJoinedByString:@"\n"];
+}
+
+- (void)onFbPreview:(id)sender {
+    (void)sender;
+    if (!self.fbPreviewBox) return;
+    self.fbPreviewBox.stringValue = [self fbPreviewSummary];
+    self.fbPreviewBox.hidden = NO;
 }
 
 /// 提交按钮的唯一开关（web fbBusy）：忙 / 通道未确认可用（!= 1）时一律禁用。
@@ -1770,6 +1815,21 @@ static NSString *RLPControlIdentifier(NSString *key) {
                                      action:@selector(onFeedbackRetry:)];
     self.fbRetryBtn.hidden = YES;
     self.fbMsg = [self hintForKey:@"sp_fbmsg" width:300];
+    // v3.3.11 `rlFbPreview`：先看会发送什么（纯前端，不发请求、不改任何状态）。
+    self.fbPreviewBtn = [self secondaryButton:@"先看会发送什么" ident:@"sp_fbpreview"
+                                       action:@selector(onFbPreview:)];
+    self.fbPreviewBox = RLPLabel(@"", t.small, t.mut2);
+    self.fbPreviewBox.identifier = @"sp_fbpreviewbox";
+    self.fbPreviewBox.maximumNumberOfLines = 8;
+    self.fbPreviewBox.lineBreakMode = NSLineBreakByWordWrapping;
+    self.fbPreviewBox.selectable = YES;
+    self.fbPreviewBox.hidden = YES;   // web `#rlFbPreviewbox{display:none}`，点了才出现
+    self.fbResultBox = RLPLabel(@"", t.small, t.mut2);
+    self.fbResultBox.identifier = @"sp_fbresult";
+    self.fbResultBox.maximumNumberOfLines = 4;
+    self.fbResultBox.lineBreakMode = NSLineBreakByWordWrapping;
+    self.fbResultBox.selectable = YES;
+    self.fbResultBox.hidden = YES;
 
     NSStackView *fbRow = [[NSStackView alloc] init];
     fbRow.orientation = NSUserInterfaceLayoutOrientationHorizontal;
@@ -1777,9 +1837,11 @@ static NSString *RLPControlIdentifier(NSString *key) {
     fbRow.spacing = 10;
     [fbRow addArrangedSubview:self.fbDiagSwitch];
     [fbRow addArrangedSubview:RLPLabel(RLPTr(@"附带诊断包"), t.small, t.mut)];
-    for (NSView *v in @[ self.fbSendBtn, self.fbRetryBtn, self.fbMsg ])
+    for (NSView *v in @[ self.fbPreviewBtn, self.fbSendBtn, self.fbRetryBtn, self.fbMsg ])
         [fbRow addArrangedSubview:v];
     [fbGroup addFullRow:fbRow];
+    [fbGroup addFullRow:self.fbPreviewBox];
+    [fbGroup addFullRow:self.fbResultBox];
 
     [fbGroup addNote:RLPTr(@"提交前会先探活；通道不可用时按钮保持禁用，绝不假装发送成功。")];
     [fbGroup addNote:RLPTr(@"诊断包已脱敏，不会上传你的音乐文件。")];

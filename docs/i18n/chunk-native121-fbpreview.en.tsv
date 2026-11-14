@@ -1,0 +1,7 @@
+先看会发送什么	Preview what will be sent	反馈卡预览按钮（v3.3.11 rlFbPreview）
+将提交到：%@	Will submit to: %	预览首行（端点）
+正文：%@ 字 / %lu 字节（上限 16384 字节）	Body: %@ chars / %lu bytes (limit 16384 bytes)	预览正文计数
+诊断包：附带（已脱敏，与「导出诊断包」同一份）	Diagnostics: attached (redacted, same bundle as export)	预览附带诊断
+诊断包：不附带	Diagnostics: not attached	预览不附带诊断
+版本：%@	Version: %@	预览版本行
+系统：macOS %@	macOS %@	预览系统行

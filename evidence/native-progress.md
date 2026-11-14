@@ -1067,3 +1067,25 @@ build 0 error、3 项相关 ctest 全绿。
 reset 只标记不删图（与上游一致）、夹具为构造 PNG 不解码。
 
 **门禁**：串行 ctest 202/202、`--audit` 246/0、parity missing=0、behavior actionable=0。
+
+
+### 2026-11-15 04:xx —— 轮次 33（1.1.7.68）：v3.3.11 反馈结果 + 预览
+
+**任务**：待移植清单「反馈结果」组。核对上游后发现 `/api/feedback/status` 依赖 Web 版的
+**后端 job 队列**，而本仓是客户端进程内直传远端服务 —— 照搬会成为第二套并行机制，不移植，
+如实挂账（证据第 2 节给了六项契约对照）。
+
+**实际移植**：`sp_fbpreview`（「先看会发送什么」，文案从真实请求参数派生：端点取
+`kFeedbackUploadUrl`、版本取 `RLPLAYER_VERSION`、字节数取真实 UTF-8 长度、诊断包取开关）
++ `sp_fbpreviewbox`（默认隐藏）+ `sp_fbresult`（持久结果区，`fbResultText:kind:` 同时写
+状态行与结果区，空结果不占位）。
+
+**红→绿**：新增 P1–P9 / G1–G3。红阶段（控件标识缺失）build 0 error、**9 FAIL** →
+绿阶段 build 0 error、**52 passed / 0 failed**。
+
+**如实记录**：红阶段 G2/P4 出现**假阳性**（`nil.hidden == NO` 恒为真），已改成
+`ctrl != nil && ctrl.hidden == NO` 后重跑。
+
+**i18n**：新增 6 条（chunk-native121-fbpreview），coverage 0 缺失。
+
+**门禁**：串行 ctest 202/202、`--audit` 246/0、parity missing=0、behavior actionable=0。

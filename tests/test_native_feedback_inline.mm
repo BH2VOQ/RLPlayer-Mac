@@ -281,6 +281,14 @@ int main() {
         Pump(0.5);
         Ck([fbMsg.stringValue isEqualToString:@"已收到，工单号 FB-TEST-1。感谢反馈！"],
            @"【C】成功文案逐字对齐 web（已收到，工单号 …。感谢反馈！）", fbMsg.stringValue);
+        // ---- v3.3.11 反馈结果视图（rlFbResult / sp_fbresult）----
+        {
+            NSTextField *resBox = (NSTextField *)FindId(settings.view, @"sp_fbresult");
+            Ck(resBox != nil, @"【G1】结果区 sp_fbresult 存在", @"找不到控件");
+            Ck(resBox != nil && resBox.hidden == NO, @"【G2】发送成功后结果区可见", @"仍然隐藏");
+            Ck([resBox.stringValue containsString:@"FB-TEST-1"],
+               @"【G3】结果区保留工单号（不只刷一行会消失的状态）", resBox.stringValue);
+        }
         Ck(fbText.string.length == 0, @"【C】成功后清空正文（web fbSend 同语义）", fbText.string);
         Ck(sendBtn.enabled && [sendBtn.title isEqualToString:RLPTr(@"发送反馈")],
            @"【C】成功后按钮恢复「发送反馈」", sendBtn.title);
@@ -396,6 +404,33 @@ int main() {
         Pump(0.8);
         Ck([WindowsFingerprint() isEqualToString:winBefore2],
            @"【D】再次点击仍不创建窗口（幂等）", WindowsFingerprint());
+
+        // ---- v3.3.11 反馈预览（rlFbPreview：先看会发送什么，不发请求）----
+        {
+            NSButton *pv = (NSButton *)FindId(settings.view, @"sp_fbpreview");
+            NSTextField *pvBox = (NSTextField *)FindId(settings.view, @"sp_fbpreviewbox");
+            Ck(pv != nil && [pv isKindOfClass:[NSButton class]], @"【P1】预览按钮存在", @"");
+            Ck(pv.target != nil && pv.action != NULL, @"【P2】预览按钮有真实 target/action", @"");
+            Ck(pvBox != nil && pvBox.hidden, @"【P3】预览框默认隐藏（web display:none）", @"");
+            const NSInteger before = uploadCalls;
+            fbText.string = @"预览用正文";
+            [settings performSelector:NSSelectorFromString(@"updateFbCount")];
+            fbDiag.state = NSControlStateValueOn;
+            [pv performClick:nil];
+            Pump(0.2);
+            Ck(pvBox != nil && pvBox.hidden == NO, @"【P4】点击预览后出现预览框", @"");
+            Ck([pvBox.stringValue containsString:@"api/v1/feedback"],
+               @"【P5】预览里有真实端点（不是占位说明）", pvBox.stringValue);
+            Ck([pvBox.stringValue containsString:@"正文：5 字"],
+               @"【P6】预览里有真实正文字数", pvBox.stringValue);
+            Ck([pvBox.stringValue containsString:@"诊断包：附带"],
+               @"【P7】预览反映「附诊断包」开关（开）", pvBox.stringValue);
+            fbDiag.state = NSControlStateValueOff;
+            [pv performClick:nil];
+            Ck([pvBox.stringValue containsString:@"诊断包：不附带"],
+               @"【P8】开关关掉后预览改为不附带", pvBox.stringValue);
+            Ck(uploadCalls == before, @"【P9】预览绝不发请求", [NSString stringWithFormat:@"calls=%ld", (long)uploadCalls]);
+        }
 
         std::printf("结果：%d passed, %d failed\n", gPass, gFail);
         return gFail == 0 ? 0 : 1;

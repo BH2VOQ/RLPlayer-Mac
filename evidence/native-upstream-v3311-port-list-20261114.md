@@ -65,3 +65,9 @@
 - **封面手动设置 / 重置**：后端 `/api/cover/set|reset` + 读侧手动封面优先（K0–K6，红→绿）已落地，
   见 `evidence/native-cover-set-20261115.md`；前端 `npSetCover/npResetCover` 按钮与
   `/api/meta` 的 `coverSource` 仍未做（下一包）。
+
+## 进度（1.1.7.68）
+
+- **反馈结果**：预览 `sp_fbpreview` + 持久结果区 `sp_fbresult` 已落地（P1–P9 / G1–G3，红→绿）。
+  `/api/feedback/status` **不移植**（本仓客户端直传远端服务，无后端 job），见
+  `evidence/native-feedback-result-20261115.md` 第 2 节的契约对照。
