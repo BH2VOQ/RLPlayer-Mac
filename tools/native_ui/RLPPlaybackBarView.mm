@@ -349,12 +349,18 @@ static void RLPSetBadgeText(NSTextField *label, NSString *text, NSColor *color, 
     self.playBtn.layer.backgroundColor = t.accent.CGColor;
     self.playBtn.contentTintColor = NSColor.whiteColor;
     self.playBtn.identifier = @"pb.play";
-    // web `.k.big:hover{filter:brightness(1.08)}`：CSS filter 无 AppKit 等价物，
-    // 与播放页 np.play 同一取舍 —— accent 混 10% 白；退出恢复 accent，白图标不变。
+    // web `.k.big:hover{filter:brightness(1.08)}`：逐通道 ×1.08 夹到 1（不是混白）。
+    // 与播放页 np.play 同一公式（两处本地同构，避免牵动既有判据）。
     ((RLPBarKeyButton *)self.playBtn).hoverApplier = ^(RLPBarKeyButton *btn, BOOL hovered) {
         RLPTheme *t2 = [RLPTheme current];
-        NSColor *bg = hovered
-            ? [t2.accent blendedColorWithFraction:0.10 ofColor:NSColor.whiteColor] : t2.accent;
+        NSColor *bg = t2.accent;
+        if (hovered) {
+            NSColor *srgb = [bg colorUsingColorSpace:NSColorSpace.sRGBColorSpace] ?: bg;
+            CGFloat r=0,g=0,b=0,a=0; [srgb getRed:&r green:&g blue:&b alpha:&a];
+            bg = [NSColor colorWithSRGBRed:MIN((CGFloat)1.0, r*1.08)
+                                     green:MIN((CGFloat)1.0, g*1.08)
+                                      blue:MIN((CGFloat)1.0, b*1.08) alpha:a];
+        }
         btn.layer.backgroundColor = bg.CGColor;
         btn.contentTintColor = NSColor.whiteColor;
     };

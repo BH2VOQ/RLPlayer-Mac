@@ -439,5 +439,24 @@ int main() { @autoreleasepool {
             check(BarCgEq(big.layer.backgroundColor,baseC,0.02), "pb.play 退出恢复 --acc 底");
         }
     }
+        // ---- brightness(1.08) 逐通道真混合（旧码混 10% 白）----
+        {
+            NSButton *big2 = field(bar,@"playBtn");
+            if ([big2 respondsToSelector:NSSelectorFromString(@"setHovered:")]) {
+                NSColor *acc = [RLPTheme current].accent;
+                NSColor *srgb = [acc colorUsingColorSpace:NSColorSpace.sRGBColorSpace] ?: acc;
+                CGFloat r=0,g=0,b=0,a=0; [srgb getRed:&r green:&g blue:&b alpha:&a];
+                NSColor *want = [NSColor colorWithSRGBRed:MIN((CGFloat)1.0,r*1.08)
+                                                    green:MIN((CGFloat)1.0,g*1.08)
+                                                     blue:MIN((CGFloat)1.0,b*1.08) alpha:a];
+                [(id)big2 setHovered:YES];
+                check(BarCgEq(big2.layer.backgroundColor, want, 0.02),
+                      "pb.play hover = brightness(1.08) per-channel (not white blend)");
+                NSColor *mixWhite = [acc blendedColorWithFraction:0.10 ofColor:NSColor.whiteColor];
+                check(!BarCgEq(big2.layer.backgroundColor, mixWhite, 0.02),
+                      "pb.play hover no longer equals the old 10%% white blend");
+                [(id)big2 setHovered:NO];
+            }
+        }
     printf("native_bar_web: %d checks, %d failures\n",checks,failures); return failures?1:0;
 } }

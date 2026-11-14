@@ -298,9 +298,13 @@ struct RLPUpdatePlan {
         ^(const rta::update::NativeProgress &p) {
             __typeof__(self) self_ = weakSelf;
             if (!self_) return;
+            // 与 1.1.7.38 的 CheckResult SIGBUS 同源：block 捕获 `const T&` 是**引用捕获**，
+            // 回调返回后生产者的 p 即析构，主线程再读 p.percent / p.detail.c_str() 是悬垂。
+            // 必须在跳线程前把标量与 NSString 拷出来（同 checkManually 的进度回调口径）。
+            const double pct = p.percent;
+            NSString *detail = [NSString stringWithUTF8String:p.detail.c_str()] ?: @"";
             dispatch_async(dispatch_get_main_queue(), ^{
-                self_.progress.doubleValue = p.percent >= 0 ? p.percent : 0;
-                NSString *detail = [NSString stringWithUTF8String:p.detail.c_str()];
+                self_.progress.doubleValue = pct >= 0 ? pct : 0;
                 self_.progressText.stringValue = detail.length ? detail : RLPTr(@"正在安装…");
             });
         },

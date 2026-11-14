@@ -433,6 +433,28 @@ int main(){@autoreleasepool{
   #undef HOVERABLE
  }
 
+ // ---- #65 补：brightness(1.08) 逐通道真混合（旧码混 10% 白）----
+ {
+  NSButton *play2=(NSButton *)find(vc.view,@"np.play");
+  BOOL play2Hover=[play2 respondsToSelector:NSSelectorFromString(@"setHovered:")];
+  if(play2&&play2Hover){
+    [play2 setHovered:NO];
+    NSColor *acc=[RLPTheme current].accent;
+    NSColor *srgb=[acc colorUsingColorSpace:NSColorSpace.sRGBColorSpace]?:acc;
+    CGFloat r=0,g=0,b=0,a=0; [srgb getRed:&r green:&g blue:&b alpha:&a];
+    NSColor *want=[NSColor colorWithSRGBRed:MIN((CGFloat)1.0,r*1.08)
+                                      green:MIN((CGFloat)1.0,g*1.08)
+                                       blue:MIN((CGFloat)1.0,b*1.08) alpha:a];
+    [play2 setHovered:YES];
+    ck(CgEq(play2.layer.backgroundColor,want,0.02),
+       "npPlay hover = brightness(1.08) 逐通道 ×1.08（不是混白）");
+    NSColor *mixWhite=[acc blendedColorWithFraction:0.10 ofColor:NSColor.whiteColor];
+    ck(!CgEq(play2.layer.backgroundColor,mixWhite,0.02),
+       "npPlay hover 不再等于旧的混 10% 白近似");
+    [play2 setHovered:NO];
+  }
+ }
+
  // ---- #44/#46 歌词空态与加载态：web 两行文案逐字（主行 clamp 字号 + 副行 12px --mut2）----
  {
   NSTextField *empty=(NSTextField *)[vc valueForKey:@"lyricsEmpty"];

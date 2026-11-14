@@ -857,3 +857,26 @@ behavior actionable=0（50 bindings）；i18n 三项 OK（2421 pairs）。
 原生 21（面板 1px border）；③抽屉 blur/滑入、brightness 真混合、chipwrap 惯性、
 默认界面切换、双模式薄表现层仍未做；④RENDERFAIL 需用户诊断包（本机日志已见
 `Pocket Master Audio` / `hogexcl=1` / 独占流 201 轮未接受数据，但缺用户侧完整诊断包）。
+
+
+### 2026-11-15 00:xx —— 轮次 24（1.1.7.59）：brightness 真混合 + 更新进度 UAF + 上游新版本核实
+
+**任务**：清单 #7（混白近似 → 真实逐通道混合）、#9 剩余同源 UAF；并核实用户所说「上游新版本」。
+
+**brightness 红→绿**：`np.play` / `pb.play` 两处 hover 从 `accent 混 10% 白` 改为
+sRGB 分量 ×1.08 夹到 1（web `filter:brightness(1.08)` 的真实结果）。
+新增 4 条精确判据（等于逐通道值、不等于混白值）。第一次编译因判据误用已 `#undef` 的
+`HOVERABLE` 宏失败、导致假绿，已改为 `respondsToSelector:` 后重跑：
+旧实现 build 0 error / **2 个测试 4 条判据全红** → 新实现 build 0 error / **5 个相关测试全绿**。
+
+**UAF**：`RLPUpdateWindowController` 的 `begin_install` 进度回调同样按引用捕获
+`const NativeProgress&`，回调返回后主线程读 `p.detail.c_str()` 是悬垂（与 1.1.7.38 的
+CheckResult SIGBUS 同源）。已在跳线程前同步拷出 `percent` 与 `NSString *detail`。
+如实挂账：该条**未加独立判据**，仅代码审查 + 全量门禁。
+
+**上游核实更正**：`main` 无更新，但 **Release v3.3.11 于 2026-11-14 15:34 UTC 发布**
+（tag/分支 `codex/release-3.3.11` → `4ab338e3`）；v3.3.11 相对 main 的
+`ui_script.h` +3082/-709 行、新增 71 id / 14 端点 / 148 函数。
+详见 `evidence/native-upstream-ui-compare-20261114.md` §7。
+
+**门禁**：串行 ctest 201/201、`--audit` 246/0、parity missing=0、behavior actionable=0。

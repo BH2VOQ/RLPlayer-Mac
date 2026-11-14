@@ -379,8 +379,17 @@ static void RLPSetKernedText(NSTextField *label, NSString *text, CGFloat kern) {
     }
     ((RLPHoverButton *)self.playBtn).hoverApplier = ^(RLPHoverButton *btn, BOOL hovered) {
         RLPTheme *t2 = [RLPTheme current];
-        // CSS filter:brightness 没有 AppKit 等价物：往 accent 混 10% 白，亮度等价上调。
-        NSColor *bg = hovered ? [t2.accent blendedColorWithFraction:0.10 ofColor:NSColor.whiteColor] : t2.accent;
+        // web `filter:brightness(1.08)` = 对 sRGB 每个分量 ×1.08 并夹到 1（**不是混白**）。
+        // 旧实现混 10% 白会把高饱和 --acc 去饱和（#fa2d48 → 250,66,90），
+        // 与浏览器逐像素结果（255,49,78）不一致；这里按通道相乘，才是真·亮度混合。
+        NSColor *bg = t2.accent;
+        if (hovered) {
+            NSColor *srgb = [bg colorUsingColorSpace:NSColorSpace.sRGBColorSpace] ?: bg;
+            CGFloat r=0,g=0,b=0,a=0; [srgb getRed:&r green:&g blue:&b alpha:&a];
+            bg = [NSColor colorWithSRGBRed:MIN((CGFloat)1.0, r*1.08)
+                                     green:MIN((CGFloat)1.0, g*1.08)
+                                      blue:MIN((CGFloat)1.0, b*1.08) alpha:a];
+        }
         btn.layer.backgroundColor = bg.CGColor;
         btn.contentTintColor = NSColor.whiteColor;
     };
