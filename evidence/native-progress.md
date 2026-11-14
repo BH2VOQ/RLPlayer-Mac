@@ -560,3 +560,30 @@ i18n：新增 3 个格式串词条（`下一首: %@ · 剩 %ld 首` / `下一首
 对照表 #15 标「已修（1.1.7.45）」。
 **门禁（1.1.7.45 树）**：build 0 error；串行全量 ctest **201/201 passed（405.75s）**；audit **246/0**；
 parity missing=0；behavior actionable=0；i18n OK（2419 pairs）。
+
+### 2026-11-14 17:3x —— 轮次 14（1.1.7.46）：web hover 态统一（表 #65/#66/#67）
+
+**任务**（Lead 定序 1）：`.k/.npclose/.nptoggle/.chip/.npcast/.npchip/.npseek` 的 hover 要按 web 视觉值对齐，
+判据必须量**实际视觉变化**（颜色/描边/缩放），不能只断言有 tracking area。
+**先核对 web**：`.k:hover{background:var(--hov2);color:var(--txt)}`、`.k.big:hover{brightness(1.08)}`、
+`.npclose:hover{background:#fff;scale1.04}`（深色 rgba(48,50,58,.96)）、`.nptoggle:hover` 同款、
+`.chip:hover/.npcast:hover{background:var(--hov);color:var(--txt);border-color:var(--acc)}`、
+`.npchip:hover` 半透明底/边、`.npseek:hover{height:7px}`（1.1.7.44 已做，本轮回归断言）。
+顺带核对：`.npclose/.nptoggle` 静态底应是 `rgba(255,255,255,.92)`，旧码用了不透明 `--bg` ⟹ hover 前后肉眼无差。
+**判据**：`tests/test_native_nowplaying_web` 追加 35 条，逐条量 `CALayer.backgroundColor/borderColor` 逐分量、
+`transform.m11`、`contentTintColor`，并验证 `trackingAreas≥1`；hover 进入/退出都断言（退出必须恢复静态值）。
+**红→绿**：旧码（1.1.7.45）**10 F**（8 个控件无 hover 状态机、npclose 静态底非 .92、npRep 圆角非 9）
+→ 新码 **121 passed / 0 failures**（86 既有 + 35 新）。
+**实现**：新增 `RLPHoverButton`（跟踪区 + hovered + hoverApplier，`setHovered:` 是鼠标与判据共用入口）；
+`NPCreateKeyButton` 造 `.k` 键（圆角 9/17）、`.k` 注入 hov2、`.k.big` 用 accent 混 10% 白近似 brightness；
+`webButton:` 统一返回 hover 载体；close/toggle 静态底改 .92 + hover 不透明 + `scale1.04`；
+`.chip/.npcast` 走 `applyChipHover:hovered:`（必须重写 attributedTitle 前景色）；投放退出走 `applyCastChipStyle`；
+面板收起键 hover `--hov2/--txt`；右栏卡片 `setHovered:` 改底/边、退出 `applyTheme`。
+**如实挂账**：①只覆盖正在播放页，底部播放条 `.k` 与设置页 `.chip` 未含；②brightness 用混白近似；
+③`.npchip.on`（选中卡）hover 优先级未区分，hover 会覆盖选中态（web 选中规则在后）；④hover 判据走
+`setHovered:`（与 mouseEntered/Exited 同一入口），未做真实鼠标注入（遵守不做键鼠自动化）。
+**另（裁决落档）**：Lead 已确认 `#npNextTrackHero` **保持 web 行为（暂停不隐藏）**——「停止/暂停隐藏」是
+任务书措辞错误，不是需求变更；已在 `evidence/native-nexttrack-20261114.md` 写明差异来源，不算未完成项。
+**证据**：`evidence/native-hover-20261114.md`、`native-hover-{red,green}-20261114.log`；对照表 #65/#66/#67 标已修。
+**门禁（1.1.7.46 树）**：build 0 error；串行全量 ctest **201/201 passed（403.59s）**；audit **246/0**；
+parity missing=0；behavior actionable=0；i18n OK（2419 pairs）。

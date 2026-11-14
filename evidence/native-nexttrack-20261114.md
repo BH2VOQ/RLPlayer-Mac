@@ -12,8 +12,12 @@ remain = max(0, qLen-1-curIdx)
   else     → 「队列末尾 · 共 <qLen> 首」
 ```
 注意：**暂停不隐藏**。web 的判据是 `!S.playing`（`playing` 是会话态，暂停时仍为 true），
-所以暂停时「下一首」仍显示。Lead 任务书写的是「停止/暂停隐藏」，与 web 源码不一致——本包按 web 实现，
-如需「暂停也隐藏」请确认（那样要改成 `!playing || paused`，偏离 web）。
+所以暂停时「下一首」仍显示。
+
+> **差异来源（已裁决，勿当未完成项）**：Lead 任务书里写的「停止/暂停隐藏」是**措辞错误**；
+> 用户既定要求是「与 web 一一对应」。Lead 已确认**保持 web 行为**（暂停不隐藏），
+> 依据 `ui_script.h updateNextTrackInfo()` 的 `if (!S.playing || !qLen)`。
+> 因此本项不算未修，也不再改成 `!playing || paused`。
 
 ## 原生 1.1.7.44 及以前
 `refreshQueueContext` 只在「有下一首」时写一次文案：**全角冒号**「下一首：X · 剩 N 首」，

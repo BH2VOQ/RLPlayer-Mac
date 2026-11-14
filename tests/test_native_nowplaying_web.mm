@@ -28,6 +28,30 @@ static NSString *lastPath,*lastBody;static RLPJSONCompletion pendingFav;
 @end
 static RLPRequestSpy *spy;static id fakeShared(id c,SEL s){return spy;}
 static int fail;
+/// CGColor 与 NSColor 逐分量比较（含 alpha）：hover 判据必须量**实际视觉值**，不能只断言有跟踪区。
+static BOOL CgEq(CGColorRef cg, NSColor *want, double tol) {
+    if (!cg || !want) return NO;
+    NSColor *c = [NSColor colorWithCGColor:cg];
+    NSColor *s = [c colorUsingColorSpace:[NSColorSpace sRGBColorSpace]];
+    NSColor *w = [want colorUsingColorSpace:[NSColorSpace sRGBColorSpace]];
+    if (!s || !w) return NO;
+    return fabs(s.redComponent - w.redComponent) < tol &&
+           fabs(s.greenComponent - w.greenComponent) < tol &&
+           fabs(s.blueComponent - w.blueComponent) < tol &&
+           fabs(s.alphaComponent - w.alphaComponent) < tol;
+}
+/// 未设置的 layer 底色视作 clear（AppKit 里 CGColorRef 可能是 NULL 或透明）。
+/// 测试侧声明：生产实现里 hover 状态机在 RLPHoverButton/RLPRailChipView 上；
+/// 这里只做编译期声明，运行时一律先 respondsToSelector 守卫（旧码没有这个方法）。
+@interface NSView (RLPHoverTest)
+- (void)setHovered:(BOOL)hovered;
+@end
+
+static BOOL CgClearOrNil(CGColorRef cg) {
+    if (!cg) return YES;
+    NSColor *c = [NSColor colorWithCGColor:cg];
+    return c != nil && c.alphaComponent < 0.02;
+}
 static NSView *find(NSView *v, NSString *key) { if([v.identifier isEqual:key])return v; for(NSView *s in v.subviews){NSView *r=find(s,key);if(r)return r;}return nil; }
 static void ck(bool ok,const char *n){printf("[%s] %s\n",ok?"PASS":"FAIL",n);if(!ok)++fail;}
 @interface RLPNowPlayingViewController (WebTest)
@@ -274,6 +298,119 @@ int main(){@autoreleasepool{
    ck(hero.hidden && hero.stringValue.length==0,
       [[NSString stringWithFormat:@"换歌立即清空旧「下一首」文案（hidden=%d text=「%@」）",(int)hero.hidden,hero.stringValue?:@""] UTF8String]);
   }
+ }
+
+ // ---- Hover 统一（web .k/.npclose/.nptoggle/.chip/.npcast/.npchip/.npseek）----
+ // 判据量 hover 前后的**实际视觉值**（底色/描边/transform/文字色），并验证跟踪区存在；
+ // 不是"有 tracking area 就算对齐"。
+ {
+  RLPTheme *t=[RLPTheme current];
+  NSColor *closeBase=(t.isLight?[NSColor colorWithWhite:1 alpha:.92]
+                              :[NSColor colorWithSRGBRed:30/255. green:32/255. blue:38/255. alpha:.92]);
+  NSColor *closeHover=(t.isLight?[NSColor whiteColor]
+                               :[NSColor colorWithSRGBRed:48/255. green:50/255. blue:58/255. alpha:.96]);
+  #define HOVERABLE(v) ((v) && [(v) respondsToSelector:NSSelectorFromString(@"setHovered:")])
+  // ① .npclose：底 rgba(.92) → #fff，scale 1.04
+  NSButton *close=(NSButton *)find(vc.view,@"npClose");
+  ck(close!=nil,"npclose 存在");
+  ck(HOVERABLE(close),"npclose 有 hover 状态机（旧码只能靠按下高亮）");
+  ck(close&&CgEq(close.layer.backgroundColor,closeBase,0.02),"npclose 静态底 = web rgba(255,255,255,.92)");
+  if(HOVERABLE(close)){
+    ck(close.trackingAreas.count>=1,"npclose 有 hover 跟踪区（鼠标能真的触发）");
+    [close setHovered:YES];
+    ck(CgEq(close.layer.backgroundColor,closeHover,0.02),"npclose hover 底 = #fff（web .npclose:hover）");
+    ck(fabs(close.layer.transform.m11-1.04)<0.005,"npclose hover transform:scale(1.04)");
+    [close setHovered:NO];
+    ck(CgEq(close.layer.backgroundColor,closeBase,0.02),"npclose 退出恢复静态底");
+    ck(fabs(close.layer.transform.m11-1.0)<0.005,"npclose 退出 transform 复位");
+  }
+  // ② .nptoggle：同款（底/缩放/字色）
+  NSButton *tog=(NSButton *)find(vc.view,@"npAnalToggle");
+  ck(tog&&HOVERABLE(tog),"nptoggle 有 hover 状态机");
+  if(HOVERABLE(tog)){
+    [tog setHovered:YES];
+    ck(CgEq(tog.layer.backgroundColor,closeHover,0.02),"nptoggle hover 底 = #fff（web .nptoggle:hover）");
+    ck(fabs(tog.layer.transform.m11-1.04)<0.005,"nptoggle hover transform:scale(1.04)");
+    ck(CgEq(tog.contentTintColor.CGColor,t.text,0.06),"nptoggle hover 字色 = --txt");
+    [tog setHovered:NO];
+    ck(CgEq(tog.layer.backgroundColor,closeBase,0.02),"nptoggle 退出恢复静态底");
+    ck(fabs(tog.layer.transform.m11-1.0)<0.005,"nptoggle 退出 transform 复位");
+  }
+  // ③ .k：顺序/循环键 底 transparent → --hov2；圆角 9
+  NSButton *rep=(NSButton *)find(vc.view,@"np.rep");
+  ck(rep&&HOVERABLE(rep),"npRep（.k）有 hover 状态机");
+  ck(rep&&fabs(rep.layer.cornerRadius-9.0)<0.5,"npRep 圆角 9（web .k radius:9）");
+  if(HOVERABLE(rep)){
+    ck(CgClearOrNil(rep.layer.backgroundColor),"npRep 静态无底色（web .k 无 background）");
+    [rep setHovered:YES];
+    ck(CgEq(rep.layer.backgroundColor,t.hov2,0.03),"npRep hover 底 = --hov2（web .k:hover）");
+    ck(CgEq(rep.contentTintColor.CGColor,t.text,0.06),"npRep hover 字色 = --txt");
+    [rep setHovered:NO];
+    ck(CgClearOrNil(rep.layer.backgroundColor),"npRep 退出底色清空");
+  }
+  NSButton *prev=(NSButton *)find(vc.view,@"np.prev");
+  ck(prev&&HOVERABLE(prev),"npPrev（.k）有 hover 状态机");
+  if(HOVERABLE(prev)){
+    [prev setHovered:YES];
+    ck(CgEq(prev.layer.backgroundColor,t.hov2,0.03),"npPrev hover 底 = --hov2");
+    [prev setHovered:NO];
+  }
+  // ④ .k.big：play 圆 34/acc → hover 亮度上调（不是回到透明）
+  NSButton *play=(NSButton *)find(vc.view,@"np.play");
+  ck(play&&HOVERABLE(play),"npPlay（.k.big）有 hover 状态机");
+  ck(play&&fabs(play.layer.cornerRadius-17.0)<0.5,"npPlay 圆形（web .k.big 34×34 圆）");
+  if(HOVERABLE(play)){
+    NSColor *base=[NSColor colorWithCGColor:play.layer.backgroundColor];
+    [play setHovered:YES];
+    NSColor *hover=[NSColor colorWithCGColor:play.layer.backgroundColor];
+    ck(!CgEq((CGColorRef)play.layer.backgroundColor,base,0.02),"npPlay hover 底色变化（web brightness 1.08）");
+    (void)hover;
+    [play setHovered:NO];
+    ck(CgEq((CGColorRef)play.layer.backgroundColor,base,0.02),"npPlay 退出恢复 accent 底");
+  }
+  // ⑤ .chip：EQ 芯片 边 --line → --acc、底 --bg3 → --hov、字 --txt2 → --txt
+  NSButton *eq=(NSButton *)find(vc.view,@"npEqChip");
+  ck(eq&&HOVERABLE(eq),"npEqChip（.chip）有 hover 状态机");
+  if(HOVERABLE(eq)){
+    ck(CgEq(eq.layer.borderColor,t.line,0.05),"npEqChip 静态描边 = --line");
+    [eq setHovered:YES];
+    ck(CgEq(eq.layer.borderColor,t.accent,0.05),"npEqChip hover 描边 = --acc（web .chip:hover）");
+    ck(CgEq(eq.layer.backgroundColor,t.hov,0.03),"npEqChip hover 底 = --hov");
+    [eq setHovered:NO];
+    ck(CgEq(eq.layer.borderColor,t.line,0.05),"npEqChip 退出恢复 --line");
+  }
+  // ⑥ .npcast：投放芯片同 .chip:hover
+  NSButton *cast=(NSButton *)find(vc.view,@"npCastBtn");
+  ck(cast&&HOVERABLE(cast),"npCastBtn（.npcast）有 hover 状态机");
+  if(HOVERABLE(cast)){
+    [cast setHovered:YES];
+    ck(CgEq(cast.layer.borderColor,t.accent,0.05),"npCastBtn hover 描边 = --acc");
+    ck(CgEq(cast.layer.backgroundColor,t.hov,0.03),"npCastBtn hover 底 = --hov");
+    [cast setHovered:NO];
+  }
+  // ⑦ .npchip：右栏卡片 底/描边 按 web hover 的半透明值
+  NSView *chip=find(vc.view,@"npChip.歌曲");
+  ck(chip&&HOVERABLE(chip),"npchip（右栏卡片）有 hover 状态机");
+  if(HOVERABLE(chip)){
+    NSColor *chipBase=[NSColor colorWithCGColor:chip.layer.backgroundColor];
+    [chip setHovered:YES];
+    NSColor *wantBg=(t.isLight?[NSColor colorWithSRGBRed:15/255. green:23/255. blue:42/255. alpha:.06]
+                             :[NSColor colorWithWhite:1 alpha:.09]);
+    ck(CgEq(chip.layer.backgroundColor,wantBg,0.02),"npchip hover 底 = web rgba(.09/.06)");
+    [chip setHovered:NO];
+    if(chipBase) ck(CgEq((CGColorRef)chip.layer.backgroundColor,chipBase,0.02),"npchip 退出恢复静态底");
+  }
+  // ⑧ .npseek：5→7 的 hover 增高不得被本包改回（P2 判据回归）
+  NSView *ctl=[vc valueForKey:@"webControls"];
+  NSSlider *seek=(NSSlider *)[ctl valueForKey:@"seek"];
+  if([seek.cell respondsToSelector:NSSelectorFromString(@"barThickness")]){
+    [seek.cell setValue:@NO forKey:@"hovered"];
+    ck(fabs([[seek.cell valueForKey:@"barThickness"] doubleValue]-5.0)<0.6,"npSeek 静态 5pt（回归）");
+    [seek.cell setValue:@YES forKey:@"hovered"];
+    ck(fabs([[seek.cell valueForKey:@"barThickness"] doubleValue]-7.0)<0.6,"npSeek hover 7pt（回归）");
+    [seek.cell setValue:@NO forKey:@"hovered"];
+  } else ck(false,"npSeek 的 hover 增高在回归中丢失");
+  #undef HOVERABLE
  }
  pendingFav=nil;method_setImplementation(shared,old);
  printf("np web: %d failures\n",fail);return fail?1:0;

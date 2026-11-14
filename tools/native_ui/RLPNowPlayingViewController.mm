@@ -59,6 +59,8 @@
 - (void)applyPlayModeUI;
 /// web updateNextTrackInfo 的原生同构：按队列快照刷新 `#npNextTrackHero`（停止/无队列 → 隐藏）。
 - (void)applyQueueSnapshot:(nullable NSDictionary *)json;
+/// web `.chip:hover` 的视觉：底 --hov / 边 --acc / 字 --txt；退出回到 `.chip` 静态样式。
+- (void)applyChipHover:(NSButton *)button hovered:(BOOL)hovered;
 @end
 // Web #npPage uses top-left coordinates and covers the entire window content.
 @interface RLPNPCanvas : NSView
@@ -146,6 +148,56 @@
     [self setNeedsDisplay:YES];
 }
 @end
+
+#pragma mark - web hover 态（.k / .npclose / .nptoggle / .chip / .npcast / .npchip / .anlhide / .nprailhide）
+
+/// 统一 hover 载体：跟踪区 + `hovered` 状态 + 由使用方注入的视觉回调。
+/// 为什么不用 NSButton 的默认高亮：web 的 hover 是**颜色/描边/缩放**变化，
+/// AppKit 默认只有按下高亮，用户悬停时看不到任何反馈（审计里就是"点了才知道能点"）。
+@interface RLPHoverButton : NSButton
+@property (nonatomic, assign, readonly) BOOL hovered;
+/// 视觉回调：hovered=true/false 时按 web 的 hover 值改颜色/描边/transform。
+@property (nonatomic, copy, nullable) void (^hoverApplier)(RLPHoverButton *button, BOOL hovered);
+- (void)setHovered:(BOOL)hovered;
+@end
+
+@implementation RLPHoverButton
+// readonly 属性 + 自实现 setter ⟹ Clang 不再自动合成 ivar/getter，必须显式合成。
+@synthesize hovered = _hovered;
+- (void)updateTrackingAreas {
+    [super updateTrackingAreas];
+    if (!self.wantsLayer) return;
+    for (NSTrackingArea *a in self.trackingAreas)
+        if (a.owner == self) return;       // 已经装过
+    NSTrackingArea *hover = [[NSTrackingArea alloc]
+        initWithRect:NSZeroRect
+             options:(NSTrackingMouseEnteredAndExited | NSTrackingActiveInKeyWindow | NSTrackingInVisibleRect)
+               owner:self userInfo:nil];
+    [self addTrackingArea:hover];
+}
+- (void)mouseEntered:(NSEvent *)event { self.hovered = YES; }
+- (void)mouseExited:(NSEvent *)event { self.hovered = NO; }
+- (void)setHovered:(BOOL)hovered {
+    if (self.hovered == hovered) return;
+    _hovered = hovered;
+    if (self.hoverApplier) self.hoverApplier(self, hovered);
+    self.needsDisplay = YES;
+}
+@end
+
+/// `.k` 键（32×32 / radius 9；play 是 `.k.big` 34×34 圆）：图标 + 圆角，圆角由 web 值给。
+static NSButton *NPCreateKeyButton(NSString *symbol, NSString *tooltip, CGFloat radius) {
+    RLPHoverButton *b = [[RLPHoverButton alloc] initWithFrame:NSZeroRect];
+    b.bordered = NO;
+    b.imagePosition = NSImageOnly;
+    b.imageScaling = NSImageScaleProportionallyDown;
+    b.image = [NSImage imageWithSystemSymbolName:symbol accessibilityDescription:RLPTr(tooltip)];
+    b.contentTintColor = [RLPTheme current].text;
+    b.toolTip = RLPTr(tooltip);
+    b.wantsLayer = YES;
+    b.layer.cornerRadius = radius;
+    return b;
+}
 
 /// 音量滑块是**位置刻度 0..1000**，不是 dB。曲线逐字对齐 web ui_script.h 的
 /// volPosToDb / volDbToPos（-55·(1-p)^1.6；pos≤5 = -120 dB 真静音）。
@@ -260,12 +312,18 @@ static NSString *RLPQueueItemPath(id item) {
     self.durLabel.identifier = @"np.dur";
     self.durLabel.alignment = NSTextAlignmentCenter;   // web `.tval{text-align:center}`
 
-    self.repBtn = [NSButton buttonWithTitle:RLPTr(@"顺序") target:nil action:nil];
-    self.repBtn.bezelStyle = NSBezelStyleRounded;
-    self.repBtn.controlSize = NSControlSizeSmall;
-    self.repBtn.font = t.small;
+    // `.k` 键统一 hover 载体（RLPHoverButton）：NSButton 便利构造器不会返回子类实例，
+    // 直接 alloc，否则后面注入 hoverApplier 会 send unrecognized selector。
+    RLPHoverButton *rep = [[RLPHoverButton alloc] initWithFrame:NSZeroRect];
+    rep.title = RLPTr(@"顺序");
+    rep.bezelStyle = NSBezelStyleRounded;
+    rep.controlSize = NSControlSizeSmall;
+    rep.font = t.small;
+    self.repBtn = rep;
     self.repBtn.identifier = @"np.rep";
     self.repBtn.toolTip = RLPTr(@"循环方式");
+    self.repBtn.wantsLayer = YES;
+    self.repBtn.layer.cornerRadius = 9;         // web `.k{border-radius:9px}`
 
     // web #npRepOne：单曲循环时才显示的「1」角标（web 默认 display:none，applyRep 按档位开关）。
     // 旧码只有固定 repeat 图标、没有档位指示 ⟹ 用户看不出当前是顺序/列表/单曲/随机。
@@ -274,15 +332,31 @@ static NSString *RLPQueueItemPath(id item) {
     self.repBadge.alignment = NSTextAlignmentCenter;
     self.repBadge.hidden = YES;
 
-    self.prevBtn = RLPSymbolButton(@"backward.fill", @"上一首", nil, nil);
+    // web `.k{32×32;border-radius:9}` / `.k.big{34×34;圆形;--acc}`，hover 分别是
+    // `.k:hover{background:var(--hov2);color:var(--txt)}` 与 `.k.big:hover{filter:brightness(1.08)}`。
+    self.prevBtn = NPCreateKeyButton(@"backward.fill", @"上一首", 9.0);
     self.prevBtn.identifier = @"np.prev";
-    self.playBtn = RLPSymbolButton(@"play.fill", @"播放 / 暂停", nil, nil);
+    self.playBtn = NPCreateKeyButton(@"play.fill", @"播放 / 暂停", 17.0);
     self.playBtn.identifier = @"np.play";
-    self.playBtn.wantsLayer=YES;self.playBtn.layer.cornerRadius=17;self.playBtn.layer.backgroundColor=t.accent.CGColor;self.playBtn.contentTintColor=NSColor.whiteColor;
-    self.nextBtn = RLPSymbolButton(@"forward.fill", @"下一首", nil, nil);
+    self.playBtn.layer.backgroundColor=t.accent.CGColor;self.playBtn.contentTintColor=NSColor.whiteColor;
+    self.nextBtn = NPCreateKeyButton(@"forward.fill", @"下一首", 9.0);
     self.nextBtn.identifier = @"np.next";
-    self.stopBtn = RLPSymbolButton(@"stop.fill", @"停止", nil, nil);
+    self.stopBtn = NPCreateKeyButton(@"stop.fill", @"停止", 9.0);
     self.stopBtn.identifier = @"np.stop";
+    for (NSButton *b in @[self.prevBtn, self.nextBtn, self.stopBtn]) {
+        ((RLPHoverButton *)b).hoverApplier = ^(RLPHoverButton *btn, BOOL hovered) {
+            RLPTheme *t2 = [RLPTheme current];
+            btn.layer.backgroundColor = (hovered ? t2.hov2 : NSColor.clearColor).CGColor;
+            btn.contentTintColor = t2.text;
+        };
+    }
+    ((RLPHoverButton *)self.playBtn).hoverApplier = ^(RLPHoverButton *btn, BOOL hovered) {
+        RLPTheme *t2 = [RLPTheme current];
+        // CSS filter:brightness 没有 AppKit 等价物：往 accent 混 10% 白，亮度等价上调。
+        NSColor *bg = hovered ? [t2.accent blendedColorWithFraction:0.10 ofColor:NSColor.whiteColor] : t2.accent;
+        btn.layer.backgroundColor = bg.CGColor;
+        btn.contentTintColor = NSColor.whiteColor;
+    };
 
     self.volIcon = [[NSImageView alloc] initWithFrame:NSZeroRect];
     self.volIcon.image = [NSImage imageWithSystemSymbolName:@"speaker.wave.2"
@@ -838,6 +912,10 @@ static const CGFloat kRailP2H        = 15.0;   // 10.5 × 1.45 ≈ 15.2
 /// 简介不再按 40 字截断；高度由文本实测撑开。默认（简略）保持既有的单行几何。
 @property (nonatomic, assign) BOOL detailMode;
 @property (nonatomic, copy, nullable) void (^onTap)(RLPRailChipView *chip);
+/// web `.npchip:hover`：底 rgba(255,255,255,.09)/浅色 rgba(15,23,42,.06)、
+/// 边 rgba(255,255,255,.14)/浅色 rgba(15,23,42,.14)。
+@property (nonatomic, assign, readonly) BOOL hovered;
+- (void)setHovered:(BOOL)hovered;
 - (void)setNameText:(NSString *)name status:(NSString *)status
                   p1:(NSString *)p1 p2:(NSString *)p2;
 - (CGFloat)preferredHeight;
@@ -847,6 +925,7 @@ static const CGFloat kRailP2H        = 15.0;   // 10.5 × 1.45 ≈ 15.2
 @end
 
 @implementation RLPRailChipView
+@synthesize hovered = _hovered;
 
 - (NSTextField *)labelWithFont:(NSFont *)font color:(NSColor *)color ident:(NSString *)ident {
     NSTextField *l = [NSTextField labelWithString:@""];
@@ -1022,6 +1101,35 @@ static const CGFloat kRailDetailLineHeight = 1.35;
 - (void)mouseDown:(NSEvent *)event {
     (void)event;
     if (self.onTap) self.onTap(self);
+}
+// web `.npchip:hover{background:rgba(255,255,255,.09);border-color:rgba(255,255,255,.14)}`
+// （浅色主题 rgba(15,23,42,.06)/.14）；enter 改底/边，exit 回到 applyTheme 的静态值。
+- (void)updateTrackingAreas {
+    [super updateTrackingAreas];
+    for (NSTrackingArea *a in self.trackingAreas)
+        if (a.owner == self) return;
+    NSTrackingArea *hover = [[NSTrackingArea alloc]
+        initWithRect:NSZeroRect
+             options:(NSTrackingMouseEnteredAndExited | NSTrackingActiveInKeyWindow | NSTrackingInVisibleRect)
+               owner:self userInfo:nil];
+    [self addTrackingArea:hover];
+}
+- (void)mouseEntered:(NSEvent *)event { self.hovered = YES; }
+- (void)mouseExited:(NSEvent *)event { self.hovered = NO; }
+- (void)setHovered:(BOOL)hovered {
+    if (self.hovered == hovered) return;
+    _hovered = hovered;
+    RLPTheme *t = [RLPTheme current];
+    if (hovered) {
+        self.layer.backgroundColor = (t.isLight
+            ? [NSColor colorWithSRGBRed:15/255. green:23/255. blue:42/255. alpha:.06]
+            : [NSColor colorWithWhite:1 alpha:.09]).CGColor;
+        self.layer.borderColor = (t.isLight
+            ? [NSColor colorWithSRGBRed:15/255. green:23/255. blue:42/255. alpha:.14]
+            : [NSColor colorWithWhite:1 alpha:.14]).CGColor;
+    } else {
+        [self applyTheme];
+    }
 }
 
 @end
@@ -1250,7 +1358,9 @@ static NSString *RLPRailTagText(id srValue, id bitsValue) {
 - (NSView *)contentView { return self.webCanvas; }
 - (void)setSubtitle:(NSString *)text { /* Full-window npPage has no ordinary page subtitle. */ }
 - (NSButton *)webButton:(NSString *)title identifier:(NSString *)ident action:(SEL)action parent:(NSView *)parent {
-    NSButton *b=[NSButton buttonWithTitle:RLPTr(title) target:self action:action];
+    // 统一用 RLPHoverButton：没有 hover 语义的按钮不注入 hoverApplier（视觉保持原样）。
+    RLPHoverButton *b=[[RLPHoverButton alloc] initWithFrame:NSZeroRect];
+    b.title=RLPTr(title); b.target=self; b.action=action;
     b.identifier=ident; b.font=[NSFont systemFontOfSize:10.5]; b.bezelStyle=NSBezelStyleRounded;
     [parent addSubview:b]; return b;
 }
@@ -1259,6 +1369,25 @@ static NSString *RLPRailTagText(id srValue, id bitsValue) {
 
 /// web `.badge`：9.5px/600、letter-spacing .3px、padding 2 7、radius 5、1px 边框。
 /// 背景/描边/文字三件套由 `styleMetaBadge:green:` 按 `--acc-weak/--acc-text`（或绿）写。
+/// web `.chip:hover{background:var(--hov);color:var(--txt);border-color:var(--acc)}`。
+/// 属性文字必须重写：`attributedTitle` 自带前景色，只改 contentTintColor 不会变字色。
+- (void)applyChipHover:(NSButton *)button hovered:(BOOL)hovered {
+    if (hovered) {
+        RLPTheme *t = [RLPTheme current];
+        NSString *text = button.title.length ? button.title : (button.attributedTitle.string ?: @"");
+        button.title = text;
+        button.attributedTitle = [[NSAttributedString alloc] initWithString:text attributes:@{
+            NSFontAttributeName: [NSFont systemFontOfSize:11],
+            NSForegroundColorAttributeName: t.text}];
+        button.font = [NSFont systemFontOfSize:11];
+        button.layer.backgroundColor = t.hov.CGColor;
+        button.layer.borderColor = t.accent.CGColor;
+        button.contentTintColor = t.text;
+    } else {
+        [self styleMetaChip:button];
+    }
+}
+
 - (void)styleMetaBadge:(NSButton *)b green:(BOOL)green {
     RLPTheme *t=[RLPTheme current];
     NSString *text=b.title.length?b.title:b.attributedTitle.string;
@@ -1355,6 +1484,17 @@ static NSString *RLPRailTagText(id srValue, id bitsValue) {
     for(NSButton *b in @[self.eqChip,self.irChip,self.castButton,self.saveButton]) {
         b.hidden=YES; [self styleMetaChip:b];
     }
+    // web `.chip:hover{background:var(--hov);color:var(--txt);border-color:var(--acc)}`；
+    // 投放芯片投放中态是绿样式，hover 退出要回到 applyCastChipStyle 而不是基础 chip。
+    for (NSButton *b in @[self.eqChip,self.irChip,self.saveButton]) {
+        ((RLPHoverButton *)b).hoverApplier = ^(RLPHoverButton *btn, BOOL hovered) {
+            [self applyChipHover:btn hovered:hovered];
+        };
+    }
+    ((RLPHoverButton *)self.castButton).hoverApplier = ^(RLPHoverButton *btn, BOOL hovered) {
+        [self applyChipHover:btn hovered:hovered];
+        if (!hovered) [self applyCastChipStyle];
+    };
     // Existing compare/work functions remain accessible; they are not removed for appearance.
     self.compareBtn=[self webButton:@"对比版本" identifier:@"npCompare" action:@selector(onCompare:) parent:host];
     self.worksBtn=[self webButton:@"古典作品版本" identifier:@"np.works" action:@selector(onOpenWorks:) parent:host];
@@ -1377,6 +1517,11 @@ static NSString *RLPRailTagText(id srValue, id bitsValue) {
                                   accessibilityDescription:RLPTr(@"隐藏音频分析面板")];
     self.anlHide.contentTintColor=t.mut2;self.anlHide.wantsLayer=YES;self.anlHide.layer.cornerRadius=11;
     self.anlHide.toolTip=RLPTr(@"隐藏音频分析面板，可在右上角重新显示");
+    ((RLPHoverButton *)self.anlHide).hoverApplier = ^(RLPHoverButton *btn, BOOL hovered) {
+        RLPTheme *t2=[RLPTheme current];
+        btn.layer.backgroundColor = (hovered ? t2.hov2 : NSColor.clearColor).CGColor;
+        btn.contentTintColor = hovered ? t2.text : t2.mut2;
+    };
     // 三个动作装进**一个**带外框的分段控件（web .npseg：radius 9、10.5/600、padding 3 11、发丝分隔）
     self.anlSeg=[[NSView alloc] initWithFrame:NSZeroRect];self.anlSeg.identifier=@"npAnlSeg";
     self.anlSeg.wantsLayer=YES;self.anlSeg.layer.cornerRadius=9;self.anlSeg.layer.borderWidth=1;
@@ -1425,6 +1570,11 @@ static NSString *RLPRailTagText(id srValue, id bitsValue) {
                                 accessibilityDescription:RLPTr(@"隐藏 AI 资料面板")];
     self.railHide.contentTintColor=t.mut2;self.railHide.wantsLayer=YES;self.railHide.layer.cornerRadius=11;
     self.railHide.toolTip=RLPTr(@"隐藏 AI 资料面板，可在右上角重新显示");
+    ((RLPHoverButton *)self.railHide).hoverApplier = ^(RLPHoverButton *btn, BOOL hovered) {
+        RLPTheme *t2=[RLPTheme current];
+        btn.layer.backgroundColor = (hovered ? t2.hov2 : NSColor.clearColor).CGColor;
+        btn.contentTintColor = hovered ? t2.text : t2.mut2;
+    };
     // 三张卡（歌曲/专辑/艺术家）= web `.npchip`。旧实现是 NSButton 多行标题，
     // AppKit 把文字画在卡片左下角（上半部全空）⟹ 用户报「排版散」。
     NSMutableArray<RLPRailChipView *> *cards=[NSMutableArray array];
@@ -1461,7 +1611,14 @@ static NSString *RLPRailTagText(id srValue, id bitsValue) {
     self.knowledge=[[RLPKnowledgeView alloc] initWithFrame:NSMakeRect(0,0,420,380)];
     self.webControls=[[RLPNPControlBar alloc] initWithFrame:NSZeroRect];[host addSubview:self.webControls];
     self.webControls.autoresizingMask=NSViewNotSizable;
-    self.webControls.repBtn.target=self;self.webControls.repBtn.action=@selector(onCycleMode:);self.webControls.repBtn.bordered=NO;self.webControls.repBtn.image=[NSImage imageWithSystemSymbolName:@"repeat" accessibilityDescription:@"循环方式"];self.webControls.repBtn.title=@"";
+    self.webControls.repBtn.target=self;self.webControls.repBtn.action=@selector(onCycleMode:);
+    // web `.k:hover{background:var(--hov2);color:var(--txt)}`；退出时按当前档位恢复图标色。
+    ((RLPHoverButton *)self.webControls.repBtn).hoverApplier = ^(RLPHoverButton *btn, BOOL hovered) {
+        RLPTheme *t2=[RLPTheme current];
+        btn.layer.backgroundColor = (hovered ? t2.hov2 : NSColor.clearColor).CGColor;
+        if (hovered) btn.contentTintColor = t2.text;
+        else [self applyPlayModeUI];   // 档位色（顺序=mut / 其余=accentText）
+    };self.webControls.repBtn.bordered=NO;self.webControls.repBtn.image=[NSImage imageWithSystemSymbolName:@"repeat" accessibilityDescription:@"循环方式"];self.webControls.repBtn.title=@"";
     for(NSButton *b in @[self.webControls.prevBtn,self.webControls.playBtn,self.webControls.nextBtn,self.webControls.stopBtn])b.target=self;
     self.webControls.prevBtn.action=@selector(onPrevious:);self.webControls.playBtn.action=@selector(onPause:);self.webControls.nextBtn.action=@selector(onNext:);self.webControls.stopBtn.action=@selector(onStop:);
     self.webControls.seek.cell=[RLPNPAccentCell new];self.webControls.seek.minValue=0;self.webControls.seek.maxValue=1;
@@ -1473,7 +1630,26 @@ static NSString *RLPRailTagText(id srValue, id bitsValue) {
     self.compareBtn.hidden=YES;self.worksBtn.hidden=YES;
     NSArray *symbols=@[@"arrow.down.right.and.arrow.up.left",@"chart.bar.xaxis",@"text.bubble"];
     NSArray *roundButtons=@[self.closeButton,self.analysisToggle,self.railToggle];
-    for(NSUInteger i=0;i<roundButtons.count;i++){NSButton *b=roundButtons[i];b.title=@"";b.bordered=NO;b.image=[NSImage imageWithSystemSymbolName:symbols[i] accessibilityDescription:b.toolTip?:@""];b.imagePosition=NSImageOnly;b.wantsLayer=YES;b.layer.cornerRadius=i==0?19:17;b.layer.borderWidth=1;b.layer.borderColor=t.line.CGColor;b.layer.backgroundColor=t.bg.CGColor;b.contentTintColor=t.mut;}
+    for(NSUInteger i=0;i<roundButtons.count;i++){NSButton *b=roundButtons[i];b.title=@"";b.bordered=NO;b.image=[NSImage imageWithSystemSymbolName:symbols[i] accessibilityDescription:b.toolTip?:@""];b.imagePosition=NSImageOnly;b.wantsLayer=YES;b.layer.cornerRadius=i==0?19:17;b.layer.borderWidth=1;
+        // web `.npclose{background:rgba(255,255,255,.92);border:1px solid rgba(15,23,42,.14)}`，
+        // 深色 `rgba(30,32,38,.92)/rgba(255,255,255,.16)`；旧码用 --bg 不透明白，hover 前后肉眼无差。
+        b.layer.borderColor=(t.isLight?[NSColor colorWithSRGBRed:15/255. green:23/255. blue:42/255. alpha:.14]:[NSColor colorWithWhite:1 alpha:.16]).CGColor;
+        b.layer.backgroundColor=(t.isLight?[NSColor colorWithWhite:1 alpha:.92]:[NSColor colorWithSRGBRed:30/255. green:32/255. blue:38/255. alpha:.92]).CGColor;
+        b.contentTintColor=t.mut;}
+    // web `.npclose:hover{background:#fff;transform:scale(1.04)}`、`.nptoggle:hover` 同款（深色改 rgba(48,50,58,.96)）
+    for (NSButton *b in roundButtons) {
+        ((RLPHoverButton *)b).hoverApplier = ^(RLPHoverButton *btn, BOOL hovered) {
+            RLPTheme *t2 = [RLPTheme current];
+            btn.layer.backgroundColor = (hovered
+                ? (t2.isLight ? NSColor.whiteColor
+                   : [NSColor colorWithSRGBRed:48/255. green:50/255. blue:58/255. alpha:.96])
+                : (t2.isLight ? [NSColor colorWithWhite:1 alpha:.92]
+                   : [NSColor colorWithSRGBRed:30/255. green:32/255. blue:38/255. alpha:.92])).CGColor;
+            btn.contentTintColor = hovered ? t2.text : t2.mut;
+            btn.layer.transform = hovered ? CATransform3DMakeScale(1.04, 1.04, 1) : CATransform3DIdentity;
+            btn.layer.zPosition = hovered ? 1.0 : 0.0;
+        };
+    }
     self.analysisPanel.hidden=[[NSUserDefaults standardUserDefaults] boolForKey:@"RLPNPAnalysisHidden"];
     self.railPanel.hidden=[[NSUserDefaults standardUserDefaults] boolForKey:@"RLPNPRailHidden"];
     [self applyTheme];[self applyPlayModeUI];[self anlPaint];[self layoutWebPlayback];

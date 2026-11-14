@@ -120,9 +120,9 @@
 
 | # | web | 原生 | 状态 |
 |---|---|---|---|
-| 65 | `.k:hover{background:var(--hov)}`、`.k.big:hover{brightness 1.08}` | AppKit 按钮默认高亮（无同色 hover 渐变） | 未修（原生按钮 hover 无自定义跟踪区；低优先） |
-| 66 | `.npclose:hover{background:#fff;scale1.04}`、`.nptoggle:hover`、`.nprailhide:hover`、`.anlhide:hover` | 圆形键仅 AppKit 默认高亮 | 未修（同上；`#27/#34` 的隐藏键新建时一并给 hover 高亮） |
-| 67 | `.npchip:hover`、`.npcast:hover`、`.npseek:hover` | `RLPRailChipView.mouseDown` 有按压反馈；投放/进度无 hover | 未修 |
+| 65 | `.k:hover{background:var(--hov2);color:var(--txt)}`、`.k.big:hover{brightness 1.08}` | `np.rep/np.prev/np.next/np.stop`（`RLPHoverButton` + `NPCreateKeyButton`）hover `--hov2`、`np.play` accent 混白提亮；圆角 9/17 | **已修（1.1.7.46）**（仅 np 页；底部播放条 `.k` 未含） |
+| 66 | `.npclose:hover{background:#fff;scale1.04}`、`.nptoggle:hover` 同款、`.nprailhide/.anlhide:hover{background:var(--hov2);color:var(--txt)}` | `npClose`/`npAnalToggle`/`npRailToggle`：静态底改 web 的 alpha .92，hover 提亮到不透明 + `scale 1.04`；`npAnalHide`/`npRailHide` hover `--hov2`+`--txt` | **已修（1.1.7.46）** |
+| 67 | `.npchip:hover`（浅色半透明值）、`.npcast:hover`（`--hov`/`--acc`）、`.npseek:hover` 5→7 | `RLPRailChipView.setHovered:`、`applyChipHover:hovered:`、`RLPNPAccentCell.barThickness` | **已修（1.1.7.46）** |
 | 68 | `#npAnlBody` 自己滚（`overflow-y:scroll`），头部固定；`#npLyric` 独立滚动；整页不滚 | `RLPNPAnalBody.onScroll`/`anlDetailScroll`/`lyricScroll` 各自滚动，`webCanvas` 不滚 | 已对齐 |
 | 69 | 右栏 `.npchipwrap` 内部滚动、脚注固定 | 原生 rail 卡片按可用高度均分（`preferredHeightForWidth`），溢出时 hint 置底 | 未修（无独立 chipwrap 滚动容器；卡片少时视觉等价） |
 
@@ -135,6 +135,13 @@
 - 页面内自检脚本（`window.__SELFTEST`）是 web 侧判据载体，原生用 `--audit`/ctest，载体不同、判据等价。
 
 ## 11. 红→绿记录（逐包追加）
+
+### 1.1.7.46 —— hover 统一（表 #65/#66/#67）
+
+- 判据：35 条 hover 视觉断言（底色/描边/transform/字色，逐分量 ±0.02~0.06）。
+- 旧码（1.1.7.45）：**10 FAIL** → 新码 **121P / 0F**。
+- 证据：`evidence/native-hover-{red,green}-20261114.log`。
+- 挂账：底部播放条 `.k` 与设置页 `.chip` 未含；`.npchip.on` hover 优先级未区分。
 
 ### 1.1.7.45 —— `#npNextTrackHero` 状态机（表 #15）
 
