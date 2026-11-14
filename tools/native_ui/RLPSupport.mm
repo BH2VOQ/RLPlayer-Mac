@@ -513,3 +513,54 @@ NSDictionary<NSString *, NSString *> *RLPNPWorkTarget(NSDictionary *meta) {
     }
     return @{ @"title": t ?: @"", @"composer": RLPNPGuessComposer(meta) ?: @"" };
 }
+
+/// v3.3.11 `parseTransportM3u` 的 macOS/POSIX 适配（上游 `m3uWindowsPath` 是
+/// Windows 反斜杠路径，macOS 分支必须换成 POSIX；CUE / BOM / 注释 / 拒绝规则逐条照搬）。
+/// 返回 @{@"items": @[路径(\tcs\tce)], @"needsFolder": @(BOOL)}；非法歌单返回 nil。
+NSDictionary<NSString *, id> *RLPParseM3U(NSString *text, NSString *folder) {
+    if (!text) return nil;
+    NSString *s = text;
+    if ([s hasPrefix:@"\uFEFF"]) s = [s substringFromIndex:1];       // BOM
+    NSArray *lines = [s componentsSeparatedByCharactersInSet:[NSCharacterSet newlineCharacterSet]];
+    NSMutableArray<NSString *> *items = [NSMutableArray array];
+    NSString *cue = nil;
+    BOOL needsFolder = NO;
+    for (NSString *raw in lines) {
+        NSString *line = [raw stringByTrimmingCharactersInSet:
+                          [NSCharacterSet whitespaceAndNewlineCharacterSet]];
+        if (!line.length) continue;
+        // 控制字符（换行已分行）→ 拒绝，与上游 /[\u0000-\u001f]/ 同义。
+        for (NSUInteger i = 0; i < line.length; ++i)
+            if ([line characterAtIndex:i] < 0x20) return nil;
+        if ([line.uppercaseString hasPrefix:@"#EXT-X-"]) return nil;   // HLS 不是本地歌单
+        if ([line.lowercaseString hasPrefix:@"#rta-cue"]) {
+            NSMutableArray<NSString *> *pp = [NSMutableArray array];
+            for (NSString *x in [line componentsSeparatedByCharactersInSet:
+                                 [NSCharacterSet whitespaceCharacterSet]]) if (x.length) [pp addObject:x];
+            double a = 0, b = 0;
+            if (pp.count != 3 || cue ||
+                ![[NSScanner scannerWithString:pp[1]] scanDouble:&a] ||
+                ![[NSScanner scannerWithString:pp[2]] scanDouble:&b] ||
+                a < 0 || (b != -1 && b <= a)) return nil;
+            cue = [NSString stringWithFormat:@"\t%@\t%@", pp[1], pp[2]];
+            continue;
+        }
+        if ([line hasPrefix:@"#"]) continue;                            // 注释
+        NSString *path = line;
+        if ([path.lowercaseString hasPrefix:@"file:"]) {                // file:// URL → 路径
+            NSURL *u = [NSURL URLWithString:path];
+            if (!u || u.query.length || u.fragment.length) return nil;
+            path = u.path ?: @"";
+        }
+        if (![path hasPrefix:@"/"]) {
+            if (folder.length) path = [folder stringByAppendingPathComponent:path];
+            else needsFolder = YES;                                       // 需追问文件夹
+        }
+        if (folder.length || [path hasPrefix:@"/"])
+            path = [path stringByStandardizingPath];                    // 处理 .. / .
+        [items addObject:[NSString stringWithFormat:@"%@%@", path, cue ?: @""]];
+        cue = nil;
+    }
+    if (!items.count || cue) return nil;                                // 空歌单 / 孤立 CUE
+    return @{ @"items": items, @"needsFolder": @(needsFolder) };
+}

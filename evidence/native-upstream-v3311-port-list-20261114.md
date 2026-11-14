@@ -47,3 +47,8 @@
 
 - **音量旋钮 / 精确音量**：`npVolInput` 精确 dB 输入（1.1.7.62）+ `npVolFloor` 静音/恢复
   （1.1.7.64）已落地；旋钮本体 / 底栏镜像 / 锁定闸门 / settings 写回仍未做。
+
+## 进度（1.1.7.65）
+
+- **M3U 播放列表导入**：解析纯函数 `RLPParseM3U`（POSIX 适配，U1–U10 判据）已落地，
+  见 `evidence/native-m3u-parser-20261115.md`；队列页按钮 / 文件选择 / `/api/queue/set` 下仍未做。

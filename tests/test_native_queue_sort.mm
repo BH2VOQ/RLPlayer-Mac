@@ -311,6 +311,25 @@ int main() {
         }
 
         std::printf("结果：%d passed, %d failed\n", g_pass, g_fail);
+        // ---- v3.3.11 parseTransportM3u（POSIX 适配）判据 ----
+        {
+            NSDictionary *p = RLPParseM3U(@"\uFEFF#EXTM3U\r\n/Music/A.flac\r\n# note\r\nsub/B.flac\r\n", @"/List");
+            NSArray *items = p[@"items"];
+            Ck(items.count == 2, "U1 M3U BOM/CRLF/注释解析出 2 首",
+               [NSString stringWithFormat:@"got %lu", (unsigned long)items.count]);
+            EqStr(items.count > 0 ? items[0] : nil, @"/Music/A.flac", "U2 M3U 绝对路径原样");
+            EqStr(items.count > 1 ? items[1] : nil, @"/List/sub/B.flac", "U3 M3U 相对路径按文件夹拼接");
+            Ck(p != nil && [p[@"needsFolder"] boolValue] == NO, "U4 有文件夹时不需要追问", @"");
+            NSDictionary *p2 = RLPParseM3U(@"#EXTM3U\nrel/C.flac\n", nil);
+            Ck(p2 != nil && [p2[@"needsFolder"] boolValue] == YES, "U5 相对路径无文件夹时标记 needsFolder", @"");
+            NSDictionary *p3 = RLPParseM3U(@"#RTA-CUE 10 20\n/Music/C.flac\n", @"/List");
+            EqStr([p3[@"items"] firstObject], @"/Music/C.flac\t10\t20", "U6 CUE 区间附加到下一首");
+            Ck(RLPParseM3U(@"#EXT-X-STREAM-INF\nx\n", nil) == nil, "U7 HLS 歌单被拒绝", @"");
+            Ck(RLPParseM3U(@"#RTA-CUE 1 2\n", nil) == nil, "U8 孤立 CUE 被拒绝", @"");
+            Ck(RLPParseM3U(@"#EXTM3U\n", nil) == nil, "U9 空歌单被拒绝", @"");
+            Ck(RLPParseM3U(@"/Music/A.flac\n\u0001bad\n", nil) == nil, "U10 控制字符被拒绝", @"");
+        }
+
         return g_fail == 0 ? 0 : 1;
     }
 }

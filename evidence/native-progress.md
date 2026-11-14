@@ -993,3 +993,23 @@ settings 写回 / Esc 取消未移植；位置与 web 不同（原生在图标�
 （当前 -120 且无恢复值直接 return）。布局把静音键纳入 `minIconX` 守卫，宽窗口不动 104pt 滑块。
 
 **门禁**：串行 ctest 202/202、`--audit` 246/0、parity missing=0、behavior actionable=0。
+
+
+### 2026-11-15 02:xx —— 轮次 30（1.1.7.65）：v3.3.11 M3U 解析纯函数
+
+**任务**：待移植清单「M3U 导入」组第一部分，先落地与判据共用的解析真源。
+
+**红→绿**：`test_native_queue_sort` 新增 U1–U10（BOM/CRLF/注释、绝对路径、相对路径+folder、
+needsFolder、CUE 区间、HLS/孤立 CUE/空歌单/控制字符拒绝）。占位实现下 build 0 error、
+**9 FAIL**（U5 因占位恰好返回 needsFolder=YES 碰巧 PASS，已如实记录）→ 真实现后
+build 0 error、3 项相关 ctest 全绿。
+
+**实现**：`RLPSupport.h/.mm` 加 `RLPParseM3U(text, folder)`；照搬上游
+`parseTransportM3u` 的 BOM/注释/CUE/拒绝规则，把 Windows `m3uWindowsPath` 适配为 POSIX
+（`/` 绝对根、`stringByAppendingPathComponent`、`stringByStandardizingPath`、`NSURL.path`）。
+纯函数不读文件/不弹面板/不发请求。
+
+**挂账**：队列页 `qImportM3u` 按钮、文件选择、`/api/queue/set` 下发、16 MiB 闸门、
+`require_stopped`、替换确认、相对路径追问文件夹均未做（下一包）。
+
+**门禁**：串行 ctest 202/202、`--audit` 246/0、parity missing=0、behavior actionable=0。

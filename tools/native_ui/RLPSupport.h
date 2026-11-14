@@ -121,4 +121,10 @@ NSString *RLPNPGuessComposer(NSDictionary * _Nullable meta);
 /// 返回 @{@"title": 去译名后的作品名, @"composer": 作曲家}；两者都可为空串。
 NSDictionary<NSString *, NSString *> *RLPNPWorkTarget(NSDictionary * _Nullable meta);
 
+/// v3.3.11 `parseTransportM3u` 的 macOS/POSIX 适配（上游是 Windows 反斜杠路径）。
+/// 返回 @{@"items": NSArray<NSString*>, @"needsFolder": NSNumber(BOOL)}；
+/// 非法歌单（HLS / 孤立 CUE / 空 / 控制字符）返回 nil。folder 传 nil 表示未知。
+/// 纯函数：不读文件、不弹面板，供队列页与判据共用同一份解析。
+NSDictionary<NSString *, id> * _Nullable RLPParseM3U(NSString *text, NSString * _Nullable folder);
+
 NS_ASSUME_NONNULL_END

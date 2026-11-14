@@ -1,0 +1,12 @@
+Internal ctest changing into directory: /Users/august/Downloads/DQ/RLPlayer/build-mac
+Test project /Users/august/Downloads/DQ/RLPlayer/build-mac
+    Start  2: native_bar_web
+1/3 Test  #2: native_bar_web ...................   Passed    1.83 sec
+    Start 10: native_queue_sort
+2/3 Test #10: native_queue_sort ................   Passed    0.95 sec
+    Start 32: native_nowplaying_web
+3/3 Test #32: native_nowplaying_web ............   Passed    3.28 sec
+
+100% tests passed, 0 tests failed out of 3
+
+Total Test time (real) =   6.06 sec
