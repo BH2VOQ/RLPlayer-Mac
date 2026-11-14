@@ -481,12 +481,33 @@ static const CGFloat kAnlSecH          = 17.0;
 /// 卡片高度超过可见高度时用滚轮滚动（内容被 masksToBounds 裁在面板内的卡片区）。
 @interface RLPNPAnalBody : NSView
 @property (nonatomic, copy, nullable) void (^onScroll)(CGFloat deltaY);
+/// 内容总高 / 当前滚动偏移：拇指位置由这两个值算出（与 web `#npAnlBody` 的滚动状态同源）。
+@property (nonatomic, assign) CGFloat contentHeight;
+@property (nonatomic, assign) CGFloat scrollOffset;
+/// 6px 拇指的矩形（**自绘**，不新增 NSScrollView）；不溢出时返回 NSZeroRect。
+- (NSRect)scrollThumbRect;
 @end
 @implementation RLPNPAnalBody
 - (BOOL)isFlipped { return NO; }
 - (void)scrollWheel:(NSEvent *)event {
     if (self.onScroll) { self.onScroll(event.scrollingDeltaY); return; }
     [super scrollWheel:event];
+}
+- (NSRect)scrollThumbRect {
+    const CGFloat W = self.bounds.size.width, H = self.bounds.size.height;
+    if (W < 20 || H < 10 || self.contentHeight <= H + 1.0) return NSZeroRect;
+    const CGFloat thumbH = MAX(18.0, H * (H / self.contentHeight));
+    const CGFloat maxOff = MAX(1.0, self.contentHeight - H);
+    const CGFloat t = MAX(0.0, MIN(1.0, self.scrollOffset / maxOff)) * MAX(0.0, H - thumbH);
+    // web：滚动条画在**右侧沟槽**里、永远不压卡片圆角（卡片右缘到沟槽还有 13pt 留白）。
+    return NSMakeRect(W - 8.0, H - thumbH - t, 6.0, thumbH);
+}
+- (void)drawRect:(NSRect)dirtyRect {
+    (void)dirtyRect;
+    NSRect r = [self scrollThumbRect];
+    if (NSIsEmptyRect(r) || r.size.height <= 0) return;
+    [[RLPTheme current].line setFill];
+    [[NSBezierPath bezierPathWithRoundedRect:r xRadius:3.0 yRadius:3.0] fill];
 }
 @end
 
@@ -1832,7 +1853,9 @@ static NSString *RLPRailTagText(id srValue, id bitsValue) {
         [self anlLayoutSegmentAtY:segY right:side - anlPadX];
         const CGFloat cardsTop = segTop + anlSegH + anlBodyGap;
         const CGFloat cardsH = MAX(1, bodyH - cardsTop - anlPadBottom);
-        const CGFloat cardsW = MAX(20, side - anlPadX * 2);
+        // web `#npAnlBody{margin-right:-11px}`：盒子撑进面板右内边距，右缘到面板右缘；
+        // 卡片宽度再扣右侧沟槽（13pt 留白 + 12pt 拇指条），所以滚轮/溢出都不改变卡宽。
+        const CGFloat cardsW = MAX(20, side - anlPadX);
         self.anlBody.frame = NSMakeRect(anlPadX, anlPadBottom, cardsW, cardsH);
         self.anlDetailScroll.frame = self.anlBody.frame;
         self.anlReanalyze.frame = NSMakeRect(anlPadX, segY, 62, anlSegH);
@@ -3089,11 +3112,16 @@ static NSString *RLPNowPlayingCastDeviceLabel(NSString *device) {
     const CGFloat W = self.anlBody.bounds.size.width;
     const CGFloat H = self.anlBody.bounds.size.height;
     if (W < 20 || H < 10) return;
+    // web `#npAnlBody{padding-right:13px}` + 6px 滚动条：卡片右缘与拇指之间始终留 13pt，
+    // 拇指条再占 12pt（拇指 6pt 居中），总右侧占位 25pt。整条右侧**常驻**，
+    // 与内容多少/是否滚动无关 ⟹ 三档（L0/L1/L2）卡宽恒定、滚动条永不压卡片圆角。
+    const CGFloat kGutter = 25.0;
+    const CGFloat cardW = MAX(20.0, W - kGutter);
     NSArray<RLPAnlCardView *> *cards = @[self.anlDyn, self.anlQual, self.anlFake];
     CGFloat hs[3] = {0, 0, 0};
     CGFloat contentH = 0;
     for (NSUInteger i = 0; i < cards.count; ++i) {
-        hs[i] = [cards[i] preferredHeightForWidth:W];
+        hs[i] = [cards[i] preferredHeightForWidth:cardW];
         contentH += hs[i];
     }
     contentH += 8.0 * 2;   // web #npAnlBody gap:8px
@@ -3104,10 +3132,13 @@ static NSString *RLPNowPlayingCastDeviceLabel(NSString *device) {
     CGFloat top = H + self.anlScrollOffset;
     for (NSUInteger i = 0; i < cards.count; ++i) {
         RLPAnlCardView *c = cards[i];
-        c.frame = NSMakeRect(0, top - hs[i], W, hs[i]);
+        c.frame = NSMakeRect(0, top - hs[i], cardW, hs[i]);
         [c relayout];
         top -= hs[i] + 8.0;
     }
+    self.anlBody.contentHeight = contentH;
+    self.anlBody.scrollOffset = self.anlScrollOffset;
+    self.anlBody.needsDisplay = YES;
 }
 
 /// 「展开」循环三档：收起 → 指标 → 全量 → 收起（与 web 版 anlSetLvl 同口径）。

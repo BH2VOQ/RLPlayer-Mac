@@ -138,6 +138,11 @@ static void CollectById(NSView *root, NSString *ident, NSMutableArray<NSView *> 
     if ([root.identifier isEqualToString:ident]) [out addObject:root];
     for (NSView *s in root.subviews) CollectById(s, ident, out);
 }
+/// `#npAnlBody` 的自绘滚动拇指（生产实现里是 RLPNPAnalBody 的方法；旧码没有）。
+@interface NSView (RLPAnalThumbTest)
+- (NSRect)scrollThumbRect;
+@end
+
 static void CollectAll(NSView *root, NSMutableArray<NSView *> *out) {
     if (!root) return;
     [out addObject:root];
@@ -365,7 +370,11 @@ int main() {
                [NSString stringWithFormat:@"%@ %@ hidden=%d", key, NSStringFromRect(card.frame), card.hidden]);
             Geo("anlcard.radius", 10, LayerRadius(card), 1.0);
             Geo("anlcard.left", 11, NSMinX([card.superview convertRect:card.frame toView:panel]), 1.5);
-            Geo("anlcard.width", panelW - 22, card.frame.size.width, 1.5);
+            // web 实测（ego 打开 ?selftest=1，C8）：panelW=301 时 cardW=264，卡右缘距面板右缘 25
+            // （= padding-right 13 + 滚动条 11 + 右内边距/边框 1）。原生面板左内边距 11（web 因 1px
+            // 边框实际内容从 12 开始），故同结构下 cardW = panelW - 36（右侧仍是 25）。
+            // 这里从 panelW-22 改期望值，差因见 evidence/native-anl-gutter-20261114.md。
+            Geo("anlcard.width", panelW - 36, card.frame.size.width, 1.5);
             NSTextField *title = (NSTextField *)FindById(card, [key stringByAppendingString:@".title"]);
             NSTextField *sum = (NSTextField *)FindById(card, [key stringByAppendingString:@".sum"]);
             Ck(title != nil && sum != nil,
@@ -653,6 +662,43 @@ int main() {
         // ---------------------------------------------------------------
         // ⑤ 切回收起：同样的卡片身份回到紧凑档（不再有指标行）。
         // ---------------------------------------------------------------
+        // web `#npAnlBody` 的 13pt 沟槽：盒子撑到面板右缘、卡片右缘到盒子右缘 25（13 留白 +
+        // 12pt 拇指条），拇指自绘在沟槽里、不与卡片相交；不新增 NSScrollView（单层滚动）。
+        {
+            NSView *body = FindById(panel, @"npAnlBody");
+            Ck(body != nil, "npAnlBody 存在（沟槽判据前提）", @"");
+            if (body) {
+                Ck(fabs(NSMaxX(body.frame) - panelW) <= 1.0,
+                   "npAnlBody 右缘撑到面板右缘（web margin-right:-11）",
+                   [NSString stringWithFormat:@"body.maxX=%.1f panelW=%.1f", NSMaxX(body.frame), panelW]);
+                Ck(fabs(NSWidth(body.frame) - (panelW - 11)) <= 1.5,
+                   "npAnlBody 宽度 = panelW-11（撑进右内边距）",
+                   [NSString stringWithFormat:@"bodyW=%.1f want=%.1f", NSWidth(body.frame), panelW - 11]);
+                // 两者都要在**同一坐标系**里量：卡片 frame 是 body 局部坐标，body 宽也用 bounds。
+                Ck(fabs((NSWidth(body.frame) - NSMaxX(dyn.frame)) - 25.0) <= 1.5,
+                   "卡片右缘到盒子右缘 = 25（13pt 留白 + 12pt 拇指条，常驻）",
+                   [NSString stringWithFormat:@"gap=%.1f bodyW=%.1f cardMaxX=%.1f",
+                    NSWidth(body.frame) - NSMaxX(dyn.frame), NSWidth(body.frame), NSMaxX(dyn.frame)]);
+                BOOL hasThumb = [body respondsToSelector:@selector(scrollThumbRect)];
+                Ck(hasThumb, "npAnlBody 暴露自绘拇指矩形（不靠 NSScrollView）", @"");
+                if (hasThumb) {
+                    NSRect thumb = [body scrollThumbRect];
+                    Ck(!NSIsEmptyRect(thumb), "L2 溢出时拇指出现（内容高 > 可见高）",
+                       [NSString stringWithFormat:@"thumb=%@ contentH=%.1f", NSStringFromRect(thumb),
+                        [[body valueForKey:@"contentHeight"] doubleValue]]);
+                    if (!NSIsEmptyRect(thumb)) {
+                        Ck(NSMinX(thumb) - NSMaxX(dyn.frame) >= 13.0,
+                           "拇指与卡片右缘 ≥13pt（滚动条不压卡片圆角）",
+                           [NSString stringWithFormat:@"clear=%.1f", NSMinX(thumb) - NSMaxX(dyn.frame)]);
+                        Ck(NSMaxX(thumb) <= NSWidth(body.frame) + 0.5,
+                           "拇指在 body 右缘沟槽内", NSStringFromRect(thumb));
+                    }
+                }
+                Ck(![body isKindOfClass:[NSScrollView class]],
+                   "卡片区不是 NSScrollView（单层滚动判据不新增滚动容器）", @"");
+            }
+        }
+
         [vc onAnlExpand:nil];     // L2 → L0
         [vc layoutWebPlayback];
         [v layoutSubtreeIfNeeded];

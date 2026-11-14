@@ -625,3 +625,28 @@ parity missing=0；behavior actionable=0；i18n OK（2419 pairs）。
 对照表 #41 从「部分已修」改「已修（1.1.7.48）」。
 **门禁（1.1.7.48 树）**：build 0 error；串行全量 ctest **201/201 passed（395.83s）**；audit **246/0**；
 parity missing=0；behavior actionable=0；i18n OK（2419 pairs）。
+
+### 2026-11-14 18:2x —— 轮次 15（1.1.7.49）：`#npAnlBody` 13px 沟槽 + 自绘拇指（表 #28）
+
+**任务**（Lead 定序 1）：先在同一 panelW 用 web 页面 C8 实测 → 再落地「沟槽常驻 13px + 拇指不压卡片圆角 +
+单层滚动仍成立」→ 更新 311 期望值并披露差因。
+**web 实测**（ego 打开 `rtaweb --port 19091/index.html`，页面内 `selftestRun()`；只碰 19091）：
+C8 `PASS w=264/264/264 spread=0 右缘留白=13/13/13 L1溢出=0 L2溢出=567`；DOM：panelW=301、
+bodyW=288、`padding-right:13`、滚动条占位 11、cardW=264、卡片右缘距面板右 25、clear=13。
+**差因披露**：web `cardW = panelW-37`（左 12 = padding11+border1，右 25 = 13+11+1）；
+原生面板无 1px 边框、左内边距 11 ⟹ `cardW = panelW-36`（右缘仍 25）。故 `anlcard.width` 期望
+**311 → 297**（panelW 333），与上次 rightGap 13→37 同属「原生无边框/内边距」的显式差。
+**判据**：`test_native_analysis_panel` 改 1 条 + 新增 7 条：body 右缘撑到面板右缘、bodyW=panelW-11、
+卡片右缘到盒子右缘=25（同坐标系量）、暴露 `scrollThumbRect`、L2 溢出拇指非空、拇指与卡片右缘≥13、
+拇指在沟槽内、卡片区不是 NSScrollView（单层滚动）。
+**红→绿**：旧码（1.1.7.48）**7 F**（3×卡宽 311 vs 297、body 未撑右缘、bodyW 311 vs 322、gap=0、无拇指 API）
+→ 新码 **140 passed / 0 failures**（analysis panel 全绿）。
+**实现**：`anlBody` 盒子 `x=11 / width=panelW-11`（等价 `margin-right:-11`）；卡片 `width=bodyW-25`
+（13 留白 + 12 拇指条，常驻，三档恒定）；`RLPNPAnalBody` 自绘 6px 拇指（`x∈[bodyW-8, bodyW-2]`，
+按 contentH/H 与 offset 定位，不溢出不画），**不新增 NSScrollView**。
+**如实挂账**：①左缘仍是 11（web 内容从 12 起，因 1px 边框）——只对齐右缘/卡宽，改左缘会牵动头部判据；
+②滚动条轨道非常驻（web 恒显，原生只在溢出时画拇指）；③拇指 6pt（web CSS 6，实测滚动条占位 11）。
+**证据**：`evidence/native-anl-gutter-20261114.md`（含 web 实测表）、`native-gutter-{red,green}-20261114.log`；
+对照表 #28 标已修。
+**门禁（1.1.7.49 树）**：build 0 error；串行全量 ctest **201/201 passed（397.21s）**；audit **246/0**；
+parity missing=0；behavior actionable=0；i18n OK（2419 pairs）。

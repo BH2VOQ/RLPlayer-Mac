@@ -58,7 +58,7 @@
 | 25 | `#npAnlStat{10;right;tabular}` | `analysisStatus` 10/right | 已对齐 |
 | 26 | `.npseg{radius9;1px}；`b{10.5;600;pad3 11;border-left}`；`b.on{ok-bg}` | `anlSeg` radius9/border + 三枚 10.5/600 无边框按钮 + 两条发丝分隔 | 已对齐 |
 | 27 | `.anlhide{22×22;圆形;top7 right8}‹` | `analysisPanel` 头部 `npAnalHide`（22×22、cornerRadius 11、`chevron.left`），点击=隐藏+写 `RLPNPAnalysisHidden` | **已修（1.1.7.42）** |
-| 28 | `#npAnlBody{overflow-y:scroll;gap:8;padding-right:13;margin-right:-11}` | `RLPNPAnalBody`/`anlBody`：自绘滚动、无固定沟槽 | 未修（web 恒显滚动条沟槽只为三档卡等宽；原生卡片宽度不随档位跳，代价是细窄时滚动条覆盖右缘） |
+| 28 | `#npAnlBody{overflow-y:scroll;gap:8;padding-right:13;margin-right:-11}`；web 实测 panelW=301 → cardW=264（右缘距面板右 25、clear=13、滚动条占位 11） | `anlBody` 撑到面板右缘（`x=11/width=panelW-11`）、卡片 `width=bodyW-25`（13 留白 + 12 拇指条，三档恒定）、6pt 拇指自绘在沟槽内、不加 NSScrollView | **已修（1.1.7.49）**：卡宽期望 `panelW-22`(311) → `panelW-36`(297)，差因=web 1px 边框+右内边距 1，见 `evidence/native-anl-gutter-20261114.md` |
 | 29 | `.anlcard{radius10;pad7 9 8;gap4}` | `kAnlCardPadTop/X/Bottom/Gap/Radius` 常量 | 已对齐 |
 | 30 | `.anlgrid{2 列;gap1 10}`、`.anlml`、`.anlv`、`.anlwarn`、`.anlnote` | `RLPAnlCardView` 逐行布局（`kAnlColGap=10`） | 已对齐 |
 
@@ -135,6 +135,13 @@
 - 页面内自检脚本（`window.__SELFTEST`）是 web 侧判据载体，原生用 `--audit`/ctest，载体不同、判据等价。
 
 ## 11. 红→绿记录（逐包追加）
+
+### 1.1.7.49 —— `#npAnlBody` 沟槽 + 自绘拇指（表 #28）
+
+- web 实测：panelW=301、cardW=264、右缘 25、clear 13（C8 `w=264/264/264 spread=0`）。
+- 判据：卡宽 `panelW-36`、body 撑到右缘、右缘 25、拇指 ≥13 不压卡片、非 NSScrollView。
+- 旧码（1.1.7.48）：**7 FAIL** → 新码 **140P / 0F**。
+- 证据：`evidence/native-anl-gutter-20261114.md`、`native-gutter-{red,green}-20261114.log`。
 
 ### 1.1.7.48 —— `.npline.on` active 缩放（表 #41）
 
