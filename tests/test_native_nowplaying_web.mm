@@ -9,6 +9,13 @@
 #import <QuartzCore/QuartzCore.h>
 #include <cmath>
 #include <cstdio>
+
+// 判据接缝：RLPRailWrapView 的惯性入口（实现在 RLPNowPlayingViewController.mm 内部，
+// 不进公开头；ARC 下 id 发消息也需要签名，故在测试侧声明）。
+@interface NSObject (RLPRailMomentumTest)
+- (void)beginMomentumWithVelocity:(CGFloat)v;
+- (void)momentumTick:(id)sender;
+@end
 static NSString *lastPath,*lastBody;static RLPJSONCompletion pendingFav;
 @interface RLPRequestSpy : NSObject
 /// 按路径前缀返回固定 JSON 的桩：状态机判据要「真的走一遍 /api/status → 渲染」，
@@ -688,6 +695,28 @@ int main(){@autoreleasepool{
   }
  }
 
+ // ---- #69 补：chipwrap 惯性滚动（阻尼衰减到静止，位移有限）----
+ {
+  NSView *wrap2=find(vc.view,@"npChipWrap");
+  if(wrap2 && [wrap2 respondsToSelector:NSSelectorFromString(@"beginMomentumWithVelocity:")]){
+    // 惯性只在「内容溢出」时能推进 offset；momentumTick 会触发 railLayoutChips 重算
+    // contentHeight，故每帧后把内容高恢复为大值（与上方 chipwrap 判据同口径）。
+    [wrap2 setValue:@1200 forKey:@"contentHeight"];
+    [wrap2 setValue:@0 forKey:@"contentOffset"];
+    [(id)wrap2 beginMomentumWithVelocity:600];
+    const CGFloat start=[[wrap2 valueForKey:@"contentOffset"] doubleValue];
+    for(NSInteger i=0;i<200;i++){
+      [(id)wrap2 momentumTick:nil];
+      [wrap2 setValue:@1200 forKey:@"contentHeight"];
+    }
+    const CGFloat end=[[wrap2 valueForKey:@"contentOffset"] doubleValue];
+    ck(end>=start && (end-start)>10.0 && (end-start)<2000.0,
+       [[NSString stringWithFormat:@"惯性位移有限且单调（got %.1f）",end-start] UTF8String]);
+    ck(fabs([[wrap2 valueForKey:@"momentumVelocity"] doubleValue])<0.01,
+       "惯性速度按阻尼衰减到 0（自动停止）");
+  } else ck(false,"chipwrap 暴露惯性滚动入口 beginMomentumWithVelocity:");
+ }
+
  // ---- #39 `#npDrawer` 页内抽屉浮卡（frame/圆角/阴影/遮罩点击关闭/不动底层滚动）----
  {
   NSView *canvas=(NSView *)[vc valueForKey:@"webCanvas"];
@@ -722,6 +751,16 @@ int main(){@autoreleasepool{
     ck(CountScrollViews(canvas)==scrollBefore,
        [[NSString stringWithFormat:@"打开抽屉不新增 NSScrollView（before %ld after %ld）",(long)scrollBefore,(long)CountScrollViews(canvas)] UTF8String]);
     ck(NSEqualPoints(lyr.contentView.bounds.origin,lyrOriginBefore),"打开抽屉不动底层歌词滚动位置");
+    // #39 补：backdrop blur(2px) + transform .26s 滑入（frame 仍为终态，不破坏几何判据）
+    NSView *blur=nil;
+    for(NSView *s in bg.subviews) if([s.identifier isEqualToString:@"npDrawerBlur"]){blur=s;break;}
+    ck(blur!=nil && [blur isKindOfClass:[NSVisualEffectView class]],
+       "npDrawerBg 含 NSVisualEffectView 模糊层（web backdrop-filter:blur(2px)）");
+    CAAnimation *slide=[drawer.layer animationForKey:@"npDrawerSlide"];
+    ck(slide!=nil && fabs(slide.duration-0.26)<0.01,
+       [[NSString stringWithFormat:@"抽屉 0.26s transform 滑入动画（got %.2f）",slide?slide.duration:-1] UTF8String]);
+    ck(fabs(drawer.frame.size.width-wantW)<1.0,
+       "滑入动画不改 model frame（离屏几何判据仍确定性）");
     [bg mouseDown:nil];   // 点遮罩 = web npDrawerClose()
     ck(drawer.hidden&&bg.hidden,"点遮罩关闭抽屉（web #npDrawerBg 点击关闭）");
     // Esc 关闭（web 抽屉的 Esc 路径）；旧码没有这个入口时只跳过

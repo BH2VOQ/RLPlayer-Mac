@@ -899,3 +899,22 @@ i18n 复用既有词条 `已复制来源链接:` / `复制 OPRA 项目官网链�
 **文档**：新建 `evidence/native-opra-copychip-20261115.md`；`known-deviations` #12 改「已关闭」。
 
 **门禁**：串行 ctest 201/201、`--audit` 246/0、parity missing=0、behavior actionable=0。
+
+
+### 2026-11-15 01:xx —— 轮次 26（1.1.7.61）：抽屉 blur + 滑入 / chipwrap 惯性
+
+**任务**：关闭用户清单 #6 / #8 与 `known-deviations` #5 / #11。
+
+**红→绿**：`test_native_nowplaying_web` 新增 5 条判据。仅判据时 build 0 error、
+**3 FAIL**（惯性入口缺失、`npDrawerBlur` 模糊层缺失、0.26s 滑入动画缺失）→ 补实现后
+build 0 error、5 项相关 ctest 全绿。首轮绿阶段惯性位移得 0，根因是 `momentumTick`
+触发 `railLayoutChips` 重算 `contentHeight` 为不溢出值、`contentOffset` 被夹回 0；
+按既有 chipwrap 判据同口径每帧恢复 `contentHeight=1200` 后转绿（修判据前置条件，非改阈值）。
+
+**实现**：`RLPBlurView : NSVisualEffectView`（`HUDWindow`/`WithinWindow`，`hitTest:nil` 点击穿透）
+作为遮罩子视图；`CABasicAnimation(transform.translation.x, 0.26s, cubic-bezier(.2,.8,.2,1))`
+只动 presentation layer，`frame` 恒为终态；`RLPRailMomentumStep` 纯函数（每帧 ×0.90、
+<8pt/s 收敛）+ `momentumTick:` 阻尼惯性，系统 `momentumPhase` 阶段不叠加，`timer` 仅在
+`self.window != nil` 时挂、`dealloc` invalidate。
+
+**门禁**：串行 ctest 201/201、`--audit` 246/0、parity missing=0、behavior actionable=0。

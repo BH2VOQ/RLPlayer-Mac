@@ -1194,10 +1194,30 @@ static const CGFloat kRailDetailLineHeight = 1.35;
 #pragma mark - `.npdrawerbg` 遮罩（点遮罩关闭）
 
 /// web `#npDrawerBg`：整页半透明遮罩（`background:rgba(0,0,0,.30)`），点它 = `npDrawerClose()`。
+/// `backdrop-filter:blur(2px)` 的 AppKit 等价：只负责模糊窗口内内容；
+/// 30% 黑遮罩仍由 RLPOverlayBackdrop 的 layer 背景承担。hitTest 返回 nil 让点击穿透。
+@interface RLPBlurView : NSVisualEffectView
+@end
+@implementation RLPBlurView
+- (NSView *)hitTest:(NSPoint)point { (void)point; return nil; }
+@end
+
 @interface RLPOverlayBackdrop : NSView
 @property (nonatomic, copy, nullable) void (^onClick)(void);
 @end
 @implementation RLPOverlayBackdrop
+- (instancetype)initWithFrame:(NSRect)frameRect {
+    if ((self = [super initWithFrame:frameRect])) {
+        RLPBlurView *blur = [[RLPBlurView alloc] initWithFrame:self.bounds];
+        blur.identifier = @"npDrawerBlur";
+        blur.material = NSVisualEffectMaterialHUDWindow;
+        blur.blendingMode = NSVisualEffectBlendingModeWithinWindow;
+        blur.state = NSVisualEffectStateActive;
+        blur.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
+        [self addSubview:blur];
+    }
+    return self;
+}
 - (void)mouseDown:(NSEvent *)event {
     (void)event;
     if (self.onClick) self.onClick();
@@ -1209,18 +1229,68 @@ static const CGFloat kRailDetailLineHeight = 1.35;
 /// web `.npchipwrap{overflow:auto;scrollbar-width:thin}` 的原生等价：
 /// 用普通 NSView + contentOffset + drawRect 拇指，**不引入第二个 NSScrollView**
 /// （「单层滚动」判据要求可见 NSScrollView 数量不增加；嵌套滚动会让滚轮事件在两层之间打架）。
+/// 惯性滚动的单帧衰减（纯函数，可离屏判据）：速度每帧 ×0.90，<8pt/s 收敛到 0 停止；
+/// 返回本帧位移（pt），衰减后的速度写回 outVelocity。web `overflow:auto` 自带惯性，
+/// 自绘容器不引入 NSScrollView，所以由这里补同语义的阻尼滚动。
+static CGFloat RLPRailMomentumStep(CGFloat velocity, CGFloat *outVelocity) {
+    CGFloat v = velocity * 0.90;
+    if (fabs(v) < 8.0) v = 0.0;
+    if (outVelocity) *outVelocity = v;
+    return v / 60.0;   // 1/60s 帧
+}
+
 @interface RLPRailWrapView : NSView
 @property (nonatomic, assign) CGFloat contentHeight;
 @property (nonatomic, assign) CGFloat contentOffset;
 @property (nonatomic, copy, nullable) void (^onScrollDelta)(CGFloat deltaY);
 @property (nonatomic, copy, nullable) void (^onOffsetChanged)(CGFloat offset);
+/// 惯性状态：判据可直接驱动 momentumTick:，不依赖真实 runloop/timer。
+@property (nonatomic, assign) CGFloat momentumVelocity;
+@property (nonatomic, strong, nullable) NSTimer *momentumTimer;
+- (void)beginMomentumWithVelocity:(CGFloat)velocity;
+- (void)momentumTick:(id)sender;
+- (void)stopMomentum;
 - (NSRect)scrollThumbRect;
 @end
 @implementation RLPRailWrapView
 - (BOOL)isFlipped { return NO; }
 - (void)scrollWheel:(NSEvent *)event {
-    if (self.onScrollDelta) { self.onScrollDelta(event.scrollingDeltaY); return; }
-    [super scrollWheel:event];
+    const CGFloat dy = event.scrollingDeltaY;
+    // 触摸板/系统惯性阶段由 AppKit 继续发 wheel 事件：按普通位移处理，不叠加自绘惯性。
+    if (event.momentumPhase != NSEventPhaseNone) {
+        [self stopMomentum];
+        if (self.onScrollDelta) self.onScrollDelta(dy);
+        return;
+    }
+    [self stopMomentum];
+    if (self.onScrollDelta) self.onScrollDelta(dy);
+    // 离散滚轮 / 无系统惯性的手势：按本次 dy 估速度，补一段阻尼惯性。
+    if (fabs(dy) > 0.5) [self beginMomentumWithVelocity:-dy * 12.0];
+}
+- (void)beginMomentumWithVelocity:(CGFloat)velocity {
+    self.momentumVelocity = velocity;
+    // 只有真在窗口里才挂 timer；离屏判据直接调 momentumTick: 驱动。
+    if (self.window) {
+        [self.momentumTimer invalidate];
+        self.momentumTimer = [NSTimer scheduledTimerWithTimeInterval:1.0/60.0
+            target:self selector:@selector(momentumTick:) userInfo:nil repeats:YES];
+    }
+}
+- (void)momentumTick:(id)sender {
+    (void)sender;
+    CGFloat v = 0;
+    const CGFloat delta = RLPRailMomentumStep(self.momentumVelocity, &v);
+    self.momentumVelocity = v;
+    if (fabs(delta) > 0.001) self.contentOffset = self.contentOffset + delta;
+    if (v == 0.0) [self stopMomentum];
+}
+- (void)stopMomentum {
+    [self.momentumTimer invalidate];
+    self.momentumTimer = nil;
+    self.momentumVelocity = 0.0;
+}
+- (void)dealloc {
+    [_momentumTimer invalidate];
 }
 - (void)setContentOffset:(CGFloat)contentOffset {
     const CGFloat maxOff = MAX(0.0, self.contentHeight - self.bounds.size.height);
@@ -2075,6 +2145,17 @@ static NSString *RLPRailTagText(id srValue, id bitsValue) {
         ctx.duration=0.18;
         self.dataDrawer.animator.alphaValue=1;
     } completionHandler:nil];
+    // web `.npdrawer{transform:translateX(calc(100% + 26px)); transition:transform .26s …}`：
+    // frame 始终在终点（离屏判据量确定性 frame），滑入只动 presentation layer 的
+    // transform.translation.x；model 值保持 identity，既有几何判据不受动画影响。
+    const CGFloat slideFrom = self.dataDrawer.frame.size.width + 26.0;
+    CABasicAnimation *slide = [CABasicAnimation animationWithKeyPath:@"transform.translation.x"];
+    slide.fromValue = @(slideFrom);
+    slide.toValue = @0;
+    slide.duration = 0.26;
+    slide.timingFunction = [CAMediaTimingFunction functionWithControlPoints:0.2 :0.8 :0.2 :1.0];
+    [self.dataDrawer.layer removeAnimationForKey:@"npDrawerSlide"];
+    [self.dataDrawer.layer addAnimation:slide forKey:@"npDrawerSlide"];
     self.dataDrawer.layer.zPosition=6;
     self.dataBackdrop.layer.zPosition=5;
 }
@@ -2084,6 +2165,7 @@ static NSString *RLPRailTagText(id srValue, id bitsValue) {
     self.dataDrawerOpen=NO;
     self.dataDrawer.hidden=YES;
     self.dataBackdrop.hidden=YES;
+    [self.dataDrawer.layer removeAnimationForKey:@"npDrawerSlide"];
     [self.knowledge cancelLoading];
 }
 

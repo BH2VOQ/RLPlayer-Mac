@@ -1,0 +1,214 @@
+Internal ctest changing into directory: /Users/august/Downloads/DQ/RLPlayer/build-mac
+Test project /Users/august/Downloads/DQ/RLPlayer/build-mac
+    Start 31: native_nowplaying_web
+1/1 Test #31: native_nowplaying_web ............***Failed    3.45 sec
+[PASS] native request encoding exactly matches web encodeURIComponent
+[PASS] web npCover/npAnal/npLyric/npRail/control regions exist
+[PASS] cover is 24vh at 760px
+[PASS] hero gutter is 16px
+[PASS] body has symmetric 1:2:1 columns
+[PASS] three columns do not overlap
+[PASS] panel body never covers control row in flipped canvas
+[PASS] web analysis actions and exit are present
+[PASS] production timed lyrics projection API exists
+[PASS] real LRC timestamp chooses second highlighted row
+[PASS] plain lyrics never highlight
+[PASS] pause request explicitly sets on=1
+[PASS] resume request explicitly sets on=0
+[PASS] seek uses real backend pos parameter, not ignored ratio
+[PASS] cast request construction is directly verifiable
+[PASS] cast form roundtrips real file and location including ampersand and plus
+[PASS] old favorite completion cannot mutate new track
+[PASS] npKind carries web npPlayingKindText fields (codec / kHz / bit)
+[PASS] stopped state resets npKind to plain 正在播放 (web npPlayingKindText(null))
+[PASS] stopped state keeps npTitle = 未播放
+[PASS] track switch resets npKind before new meta arrives (no stale codec, no trailing ' · ')
+[PASS] npRep control exists
+[PASS] web #npRepOne badge exists
+[PASS] npRep icon follows web REP_ICON[0]
+[PASS] npRepOne only visible in single-repeat (mode=0)
+[PASS] npRep icon follows web REP_ICON[1]
+[PASS] npRepOne only visible in single-repeat (mode=1)
+[PASS] npRep icon follows web REP_ICON[2]
+[PASS] npRepOne only visible in single-repeat (mode=2)
+[PASS] npRep icon follows web REP_ICON[3]
+[PASS] npRepOne only visible in single-repeat (mode=3)
+[PASS] the four play modes use four distinct npRep icons
+[PASS] npRepOne renders 1
+[PASS] web #npAnalHide panel-local hide key exists
+[PASS] web #npRailHide panel-local hide key exists
+[PASS] npAnalHide is 22x22 like web .anlhide
+[PASS] npRailHide is 22x22 like web .nprailhide
+[PASS] npAnalHide is a circle (web border-radius:50%)
+[PASS] npAnalHide hides the analysis panel
+[PASS] npAnalHide persists the same hidden state as the top-right toggle
+[PASS] npRailHide hides the AI rail panel
+[PASS] npRailHide persists the same hidden state as the top-right toggle
+[PASS] npTitle 存在（响应式字号判据前提）
+[PASS] @640pt 窗口：npTitle 字号 = clamp(19,2.6vh,27)（want 19.00 got 19.00）
+[PASS] @640pt：两行歌词都建成了
+[PASS] @640pt：歌词字号 = clamp(13,1.9vh,17)（want 13.00 got 13.00）
+[PASS] @640pt：行盒 = 字号×2.05（web line-height）want 26.65 got 26.65
+[PASS] @640pt：相邻歌词行贴合行盒（gap want 0 got 0.00）
+[PASS] npTitle 存在（响应式字号判据前提）
+[PASS] @800pt 窗口：npTitle 字号 = clamp(19,2.6vh,27)（want 20.80 got 20.80）
+[PASS] @800pt：两行歌词都建成了
+[PASS] @800pt：歌词字号 = clamp(13,1.9vh,17)（want 15.20 got 15.20）
+[PASS] @800pt：行盒 = 字号×2.05（web line-height）want 31.16 got 31.16
+[PASS] @800pt：相邻歌词行贴合行盒（gap want 0 got 0.00）
+[PASS] npTitle 存在（响应式字号判据前提）
+[PASS] @1080pt 窗口：npTitle 字号 = clamp(19,2.6vh,27)（want 27.00 got 27.00）
+[PASS] @1080pt：两行歌词都建成了
+[PASS] @1080pt：歌词字号 = clamp(13,1.9vh,17)（want 17.00 got 17.00）
+[PASS] @1080pt：行盒 = 字号×2.05（web line-height）want 34.85 got 34.85
+[PASS] @1080pt：相邻歌词行贴合行盒（gap want 0 got 0.00）
+[PASS] 控制区五个逐值判据前提都在
+[PASS] np.seek cell 暴露 barThickness（hover 5→7 的实现前提）
+[PASS] np.seek 轨道高 5pt（web .npseek height:5）
+[PASS] np.seek hover 后轨道高 7pt（web .npseek:hover height:7）
+[PASS] np.seek 有 hover 跟踪区（不是只有属性、没有鼠标响应）
+[PASS] np.pos 字号 12（web .nptime font-size:12）
+[PASS] np.pos 宽 42（web .tval min-width:42）
+[PASS] np.pos 居中（web .tval text-align:center）
+[PASS] np.dur 字号 12（web .nptime font-size:12）
+[PASS] np.dur 宽 42（web .tval min-width:42）
+[PASS] np.dur 居中（web .tval text-align:center）
+[PASS] np.vol 滑杆宽 104（web .npvol input width:104）
+[PASS] np.vollab 字号 11（web .npvol .vlab font-size:11）
+[PASS] np.vollab 宽 58（web .vlab min-width:58）
+[PASS] np.vollab 右对齐（web .vlab text-align:right）
+[PASS] npNextTrackHero 存在（状态机判据前提）
+[PASS] 有下一首：文案逐字=web「下一首: X · 剩 N 首」（got「下一首: c.flac · 剩 1 首」）
+[PASS] 有下一首时可见（web display:''）
+[PASS] 队列末尾：文案逐字=web「队列末尾 · 共 N 首」（got「队列末尾 · 共 3 首」）
+[PASS] 单曲循环：下一首=当前曲（web repMode==2）（got「下一首: cur.flac · 剩 1 首」）
+[PASS] 停止后隐藏并清空（web !S.playing）（hidden=1 text=「」）
+[PASS] 换歌立即清空旧「下一首」文案（hidden=1 text=「」）
+[PASS] npclose 存在
+[PASS] npclose 有 hover 状态机（旧码只能靠按下高亮）
+[PASS] npclose 静态底 = web rgba(255,255,255,.92)
+[PASS] npclose 有 hover 跟踪区（鼠标能真的触发）
+[PASS] npclose hover 底 = #fff（web .npclose:hover）
+[PASS] npclose hover transform:scale(1.04)
+[PASS] npclose 退出恢复静态底
+[PASS] npclose 退出 transform 复位
+[PASS] nptoggle 有 hover 状态机
+[PASS] nptoggle hover 底 = #fff（web .nptoggle:hover）
+[PASS] nptoggle hover transform:scale(1.04)
+[PASS] nptoggle hover 字色 = --txt
+[PASS] nptoggle 退出恢复静态底
+[PASS] nptoggle 退出 transform 复位
+[PASS] npRep（.k）有 hover 状态机
+[PASS] npRep 圆角 9（web .k radius:9）
+[PASS] npRep 静态无底色（web .k 无 background）
+[PASS] npRep hover 底 = --hov2（web .k:hover）
+[PASS] npRep hover 字色 = --txt
+[PASS] npRep 退出底色清空
+[PASS] npPrev（.k）有 hover 状态机
+[PASS] npPrev hover 底 = --hov2
+[PASS] npPlay（.k.big）有 hover 状态机
+[PASS] npPlay 圆形（web .k.big 34×34 圆）
+[PASS] npPlay hover 底色变化（web brightness 1.08）
+[PASS] npPlay 退出恢复 accent 底
+[PASS] npEqChip（.chip）有 hover 状态机
+[PASS] npEqChip 静态描边 = --line
+[PASS] npEqChip hover 描边 = --acc（web .chip:hover）
+[PASS] npEqChip hover 底 = --hov
+[PASS] npEqChip 退出恢复 --line
+[PASS] npCastBtn（.npcast）有 hover 状态机
+[PASS] npCastBtn hover 描边 = --acc
+[PASS] npCastBtn hover 底 = --hov
+[PASS] npchip（右栏卡片）有 hover 状态机
+[PASS] npchip hover 底 = web rgba(.09/.06)
+[PASS] npchip 退出恢复静态底
+[PASS] npSeek 静态 5pt（回归）
+[PASS] npSeek hover 7pt（回归）
+[PASS] npPlay hover = brightness(1.08) 逐通道 ×1.08（不是混白）
+[PASS] npPlay hover 不再等于旧的混 10% 白近似
+[PASS] lyricsEmpty 存在（歌词空态判据前提）
+[PASS] 空态允许两行（旧码单行会截断副文案）
+[PASS] 空态居中（web .nplyric2 居中）
+[PASS] 无歌词空态两行文案逐字=web（got「没有歌词
+同名 .lrc 文件、内嵌歌词，或播放时自动在线补全（可在设置-元数据补全关闭）」）
+[PASS] 空态是两行（主行+副行）
+[PASS] 主行字号跟随歌词 clamp（want 14.44 got 14.44）
+[PASS] 副行 12px（web <span style=font-size:12px>）
+[PASS] 歌词两行文案 API 存在（加载态判据走同一入口）
+[PASS] 加载态两行文案逐字=web 抽屉「歌词加载中… + 正在等后台补全…」
+[PASS] 无曲目也用 web 整页空态（旧码是「还没有播放曲目」；got「没有歌词
+同名 .lrc 文件、内嵌歌词，或播放时自动在线补全（可在设置-元数据补全关闭）」）
+[PASS] 三行歌词就位（缩放判据前提）
+[PASS] 当前歌词行 transform:scale(1.03)（web .npline.on）
+[PASS] 非当前行不缩放（scale 1.0）
+[PASS] 非当前行不缩放（第三行）
+[PASS] 高亮移动后新行缩放 1.03
+[PASS] 原当前行退出时缩放复位（不残留 1.03）
+[PASS] 当前行缩放后仍在文档内（row=2.0,229.1 552.1x30.5 doc=556x489）
+[PASS] 首行缩放后不越上/左边界（不被 clip）
+[PASS] 末行缩放后不越下/右边界（不被 clip）
+[PASS] 错误不再写进副标题位（web 整页不展示后端 error；got「」）
+[PASS] 后端错误以 toast 出现（不顶掉艺术家信息）
+[PASS] toast 文案 = 后端错误原文
+[PASS] toast 自动消失（不常驻、不挡播放页）
+[PASS] npKind 存在（字距判据前提）
+[PASS] npKind 字距 1.6（web .npkind letter-spacing:1.6px；got 1.60）
+[PASS] 刷新后 npKind 字距仍 1.6（got 1.60，text=「正在播放」）
+[PASS] anlLab 存在（#24 判据前提）
+[PASS] anlLab 字距 1.5（web .anllab；got 1.50）
+[PASS] 歌词滚动视图存在（遮罩判据前提）
+[PASS] 歌词视口挂 CAGradientLayer 遮罩（不是只留注释）
+[PASS] 遮罩四个色标（transparent/黑/黑/transparent）
+[PASS] 首/尾色标透明（渐隐到 0）
+[PASS] 中段两个色标不透明（26pt 之后完全显示）
+[PASS] locations 覆盖 0→1
+[PASS] 渐隐区=26pt（want 0.0677/0.9323 got 0.0677/0.9323 H=384.0）
+[PASS] 遮罩尺寸跟随视口
+[PASS] 视口变矮后渐隐位置重算（H=338.4 loc=0.0768）
+[PASS] npChipWrap 存在（自绘滚动容器）
+[PASS] chipwrap 不是 NSScrollView（不引入嵌套滚动）
+[PASS] 右栏子树内 NSScrollView=0（单层滚动仍成立；got 0）
+[PASS] 四张 chip 槽在（第 4 张「作品」非古典时隐藏）
+[PASS] chip 挂在 chipwrap 内（不是直接铺在面板上）
+[PASS] chip 挂在 chipwrap 内（不是直接铺在面板上）
+[PASS] chip 挂在 chipwrap 内（不是直接铺在面板上）
+[PASS] chip 挂在 chipwrap 内（不是直接铺在面板上）
+[PASS] 卡宽 = wrapW-11（web 滚动条占位 11；got 247.0 want 247.0）
+[PASS] chipwrap 暴露 contentOffset（自绘滚动的状态入口）
+[PASS] 滚动 150 后卡片上移 150（got -150.0）
+[PASS] 栏头 y 不随 chipwrap 滚动改变
+[PASS] chipwrap 暴露 scrollThumbRect（自绘拇指判据入口）
+[PASS] 内容溢出时出现 6pt 拇指
+[PASS] 拇指与卡片右缘 ~3pt（11pt 占位内 6pt 拇指；got 3.0）
+[PASS] 拇指在 wrap 右侧沟槽内
+[FAIL] chipwrap 暴露惯性滚动入口 beginMomentumWithVelocity:
+[PASS] 有 rail chip 可点开抽屉
+[PASS] 点卡片打开页内 npDrawer（不是系统弹窗）
+[PASS] npDrawerBg 遮罩存在
+[PASS] 打开后抽屉与遮罩可见
+[PASS] 抽屉宽=min(430,44vw)（want 430 got 430）
+[PASS] top/right 14pt（frame={{736, 14}, {430, 732}}）
+[PASS] 抽屉高 = 页面高-28（top/bottom 14）
+[PASS] 抽屉圆角 18（web border-radius:18px）
+[PASS] 抽屉 1px 描边（--line2）
+[PASS] 阴影 opacity=0.42 radius=40（web 0 28 80 rgba .42）
+[PASS] 阴影向下 28
+[PASS] 遮罩铺满页面（inset 0）
+[PASS] 打开抽屉不新增 NSScrollView（before 3 after 3）
+[PASS] 打开抽屉不动底层歌词滚动位置
+[FAIL] npDrawerBg 含 NSVisualEffectView 模糊层（web backdrop-filter:blur(2px)）
+[FAIL] 抽屉 0.26s transform 滑入动画（got -1.00）
+[PASS] 滑入动画不改 model frame（离屏几何判据仍确定性）
+[PASS] 点遮罩关闭抽屉（web #npDrawerBg 点击关闭）
+[PASS] 抽屉支持 Esc 关闭（cancelOperation:）
+[PASS] 再次打开抽屉
+[PASS] Esc 关闭抽屉（web keydown Escape）
+np web: 3 failures
+
+
+0% tests passed, 1 tests failed out of 1
+
+Total Test time (real) =   3.46 sec
+
+The following tests FAILED:
+	 31 - native_nowplaying_web (Failed)
+Errors while running CTest

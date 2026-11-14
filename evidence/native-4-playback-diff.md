@@ -74,7 +74,7 @@
 | 36 | `.npchipwrap[data-detail=1]` 5 行/2 行钳制 | `kRailDetailLineHeight=1.35`、`measuredTextHeight cap:5/2` | 已对齐 |
 | 37 | `.nprailempty{10.5;1.6}` | `railEmptyLabel` 10.5 多行 | 已对齐 |
 | 38 | `.nprailhint{10.5}` + `err` 可点重试 | `npSummHint`(`railHintBtn`) 10.5，点击重试 | 已对齐 |
-| 39 | `#npDrawerBg` inset0 rgba(0,0,0,.30) + `#npDrawer` top/right/bottom 14、width min(430,44vw)、radius18、shadow `0 28 80 rgba(0,0,0,.42)`；点遮罩/Esc 关闭 | `npDrawer`/`npDrawerBg` 页内视图（非 NSPopover）：frame/圆角18/1px边/阴影 .42+40+向下28/遮罩点击关闭/Esc；打开不新增 NSScrollView、不动底层滚动 | **已修（1.1.7.54）**（遮罩无 blur、无滑入动画；见已知偏差 #5） |
+| 39 | `#npDrawerBg` inset0 rgba(0,0,0,.30)+blur(2px) + `#npDrawer` top/right/bottom 14、width min(430,44vw)、radius18、shadow `0 28 80 rgba(0,0,0,.42)`、`transform .26s` 滑入；点遮罩/Esc 关闭 | `npDrawer`/`npDrawerBg` 页内视图：frame/圆角18/1px边/阴影 .42+40+向下28/遮罩点击/Esc/不新增 NSScrollView/不动底层滚动；**1.1.7.61 起** `NSVisualEffectView` 模糊层 + 0.26s `transform.translation.x` 滑入（frame 仍为终态） | **已修（1.1.7.54 / 1.1.7.61 补齐 blur 与滑入）** |
 
 ## 6. 歌词区
 
@@ -245,3 +245,14 @@
 - **证据**：`evidence/native-chipwrap-width-20261114.md`、
   `native-chipwrap-{red,green}-20261114.log`。
 - **挂账**：web 不溢出时卡宽 = wrapW（原生常驻 11pt）；web 卡右缘 22 vs 原生 21（1px border）。
+
+
+### 1.1.7.61 —— 抽屉 blur + 滑入 / chipwrap 惯性（表 #39 / #69）
+
+- 判据：`test_native_nowplaying_web` 新增 5 条（惯性入口 / 位移有限单调 / 速度衰减到 0 /
+  `NSVisualEffectView` 模糊层 / 0.26s `transform` 滑入且 model frame 不变）。
+- 红→绿：仅判据时 build 0 error、**3 FAIL** → 补实现后 build 0 error、5 项相关 ctest 全绿。
+- 关键取舍：滑入只动 presentation layer 的 `transform.translation.x`，**不改 model frame**，
+  否则离屏几何判据随动画帧漂移；惯性用纯函数 + 只在 `self.window` 时挂 timer。
+- 证据：`evidence/native-drawer-inertia-20261115.md`、
+  `native-drawer-inertia-{red,green}-20261115.log`。
