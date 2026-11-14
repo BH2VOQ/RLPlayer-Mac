@@ -652,6 +652,55 @@ int main(){@autoreleasepool{
    }
   }
  }
+
+ // ---- #39 `#npDrawer` 页内抽屉浮卡（frame/圆角/阴影/遮罩点击关闭/不动底层滚动）----
+ {
+  NSView *canvas=(NSView *)[vc valueForKey:@"webCanvas"];
+  NSScrollView *lyr=(NSScrollView *)[vc valueForKey:@"lyricScroll"];
+  const NSInteger scrollBefore=CountScrollViews(canvas);
+  const NSPoint lyrOriginBefore=lyr.contentView.bounds.origin;
+  id chipsObj=[vc valueForKey:@"railCards"];
+  NSArray<NSView *> *chips=[chipsObj isKindOfClass:[NSArray class]]?(NSArray<NSView *>*)chipsObj:@[];
+  ck(chips.count>0,"有 rail chip 可点开抽屉");
+  if(chips.count>0){
+   // onRailCard 在拿不到实体名时会直接返回（生产里由 summary 或 meta 兜底）；判据先喂 meta。
+   [vc setValue:@{@"title":@"曲名",@"album":@"专辑",@"artist":@"艺术家"} forKey:@"trackMetadata"];
+   [(id)vc performSelector:@selector(onRailCard:) withObject:chips[0]];
+   NSView *bg=find(vc.view,@"npDrawerBg"), *drawer=find(vc.view,@"npDrawer");
+   ck(drawer!=nil,"点卡片打开页内 npDrawer（不是系统弹窗）");
+   ck(bg!=nil,"npDrawerBg 遮罩存在");
+   if(drawer&&bg){
+    const CGFloat W=canvas.bounds.size.width, H=canvas.bounds.size.height;
+    const CGFloat wantW=MIN(430.0,0.44*W);
+    ck(!drawer.hidden&&!bg.hidden,"打开后抽屉与遮罩可见");
+    ck(fabs(drawer.frame.size.width-wantW)<1.0,
+       [[NSString stringWithFormat:@"抽屉宽=min(430,44vw)（want %.0f got %.0f）",wantW,drawer.frame.size.width] UTF8String]);
+    ck(fabs(NSMaxX(drawer.frame)-(W-14.0))<1.0&&fabs(NSMinY(drawer.frame)-14.0)<1.0,
+       [[NSString stringWithFormat:@"top/right 14pt（frame=%@）",NSStringFromRect(drawer.frame)] UTF8String]);
+    ck(fabs(drawer.frame.size.height-(H-28.0))<1.0,"抽屉高 = 页面高-28（top/bottom 14）");
+    ck(fabs(drawer.layer.cornerRadius-18.0)<0.6,"抽屉圆角 18（web border-radius:18px）");
+    ck(drawer.layer.borderWidth>=1.0,"抽屉 1px 描边（--line2）");
+    ck(drawer.layer.shadowOpacity>0.30&&fabs(drawer.layer.shadowRadius-40.0)<1.0,
+       [[NSString stringWithFormat:@"阴影 opacity=%.2f radius=%.0f（web 0 28 80 rgba .42）",drawer.layer.shadowOpacity,drawer.layer.shadowRadius] UTF8String]);
+    ck(fabs(drawer.layer.shadowOffset.height+28.0)<1.0,"阴影向下 28");
+    ck(fabs(bg.frame.size.width-W)<1.0&&fabs(bg.frame.size.height-H)<1.0,"遮罩铺满页面（inset 0）");
+    ck(CountScrollViews(canvas)==scrollBefore,
+       [[NSString stringWithFormat:@"打开抽屉不新增 NSScrollView（before %ld after %ld）",(long)scrollBefore,(long)CountScrollViews(canvas)] UTF8String]);
+    ck(NSEqualPoints(lyr.contentView.bounds.origin,lyrOriginBefore),"打开抽屉不动底层歌词滚动位置");
+    [bg mouseDown:nil];   // 点遮罩 = web npDrawerClose()
+    ck(drawer.hidden&&bg.hidden,"点遮罩关闭抽屉（web #npDrawerBg 点击关闭）");
+    // Esc 关闭（web 抽屉的 Esc 路径）；旧码没有这个入口时只跳过
+    BOOL hasEsc=[vc respondsToSelector:@selector(cancelOperation:)];
+    ck(hasEsc,"抽屉支持 Esc 关闭（cancelOperation:）");
+    if(hasEsc){
+      [(id)vc performSelector:@selector(onRailCard:) withObject:chips[0]];
+      ck(!drawer.hidden,"再次打开抽屉");
+      [(id)vc cancelOperation:nil];
+      ck(drawer.hidden,"Esc 关闭抽屉（web keydown Escape）");
+    }
+   }
+  }
+ }
  pendingFav=nil;method_setImplementation(shared,old);
  printf("np web: %d failures\n",fail);return fail?1:0;
 }}

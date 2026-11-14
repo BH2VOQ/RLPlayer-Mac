@@ -68,6 +68,9 @@
 - (void)updateLyricFadeMask;
 /// `.npchipwrap` 的卡片排版（contentOffset 只影响卡片，栏头/分段/收起键不动）。
 - (void)railLayoutChips;
+/// web `#npDrawer`：页内抽屉浮卡（frame/圆角/阴影/遮罩点击关闭；不动底层滚动）。
+- (void)openDataDrawer;
+- (void)closeDataDrawer;
 @end
 // Web #npPage uses top-left coordinates and covers the entire window content.
 @interface RLPNPCanvas : NSView
@@ -1179,6 +1182,19 @@ static const CGFloat kRailDetailLineHeight = 1.35;
 
 @end
 
+#pragma mark - `.npdrawerbg` 遮罩（点遮罩关闭）
+
+/// web `#npDrawerBg`：整页半透明遮罩（`background:rgba(0,0,0,.30)`），点它 = `npDrawerClose()`。
+@interface RLPOverlayBackdrop : NSView
+@property (nonatomic, copy, nullable) void (^onClick)(void);
+@end
+@implementation RLPOverlayBackdrop
+- (void)mouseDown:(NSEvent *)event {
+    (void)event;
+    if (self.onClick) self.onClick();
+}
+@end
+
 #pragma mark - `.npchipwrap` 自绘滚动容器（不新增 NSScrollView）
 
 /// web `.npchipwrap{overflow:auto;scrollbar-width:thin}` 的原生等价：
@@ -1363,6 +1379,10 @@ static NSString *RLPRailTagText(id srValue, id bitsValue) {
 @property(nonatomic,strong,nullable) NSTimer *castPoll;
 @property(nonatomic,copy) NSDictionary *trackMetadata;
 @property(nonatomic,strong) NSPopover *knowledgePopover;
+/// web `#npDrawerBg` / `#npDrawer`：页内遮罩 + 抽屉浮卡（不再用系统 NSPopover）。
+@property(nonatomic,strong) RLPOverlayBackdrop *dataBackdrop;
+@property(nonatomic,strong) NSView *dataDrawer;
+@property(nonatomic) BOOL dataDrawerOpen;
 // ---- AI 整理栏（web NP_DATA / SUMC / NPLIB 的原生落点）----
 // railStates[kind] = {state:idle|loading|ok|error|insufficient, data:摘要JSON, fp:实体指纹}
 @property(nonatomic,strong) NSMutableDictionary<NSString *, NSMutableDictionary *> *railStates;
@@ -1769,6 +1789,32 @@ static NSString *RLPRailTagText(id srValue, id bitsValue) {
     }
     self.analysisPanel.hidden=[[NSUserDefaults standardUserDefaults] boolForKey:@"RLPNPAnalysisHidden"];
     self.railPanel.hidden=[[NSUserDefaults standardUserDefaults] boolForKey:@"RLPNPRailHidden"];
+    // web #npDrawerBg / #npDrawer：页内浮层（不是系统弹窗）——遮罩铺满页面、抽屉贴右。
+    // 加在 webCanvas 末尾（z 序最上），点遮罩关闭；不动底层滚动视图。
+    self.dataBackdrop=[[RLPOverlayBackdrop alloc] initWithFrame:NSZeroRect];
+    self.dataBackdrop.identifier=@"npDrawerBg";
+    self.dataBackdrop.wantsLayer=YES;
+    self.dataBackdrop.layer.backgroundColor=[NSColor colorWithWhite:0 alpha:.30].CGColor;
+    self.dataBackdrop.hidden=YES;
+    __weak __typeof__(self) wsDrawer=self;
+    self.dataBackdrop.onClick=^{ __typeof__(self) s=wsDrawer; if(s)[s closeDataDrawer]; };
+    [self.webCanvas addSubview:self.dataBackdrop];
+    self.dataDrawer=[[NSView alloc] initWithFrame:NSZeroRect];
+    self.dataDrawer.identifier=@"npDrawer";
+    self.dataDrawer.wantsLayer=YES;
+    self.dataDrawer.layer.cornerRadius=18;
+    self.dataDrawer.layer.borderWidth=1;
+    // 注意：masksToBounds=NO 才能看到 box-shadow（CSS 的 overflow:hidden 不裁 box-shadow）；
+    // 内容的圆角裁切交给 knowledge 自身的圆角/背景（windows 侧本来也不透明）。
+    self.dataDrawer.layer.shadowOpacity=0.42;
+    self.dataDrawer.layer.shadowRadius=40.0;    // CSS blur 80px ≈ CALayer radius 40
+    self.dataDrawer.layer.shadowOffset=CGSizeMake(0,-28.0);
+    self.dataDrawer.layer.shadowColor=NSColor.blackColor.CGColor;
+    self.dataDrawer.hidden=YES;
+    self.knowledge.frame=self.dataDrawer.bounds;
+    self.knowledge.autoresizingMask=NSViewWidthSizable|NSViewHeightSizable;
+    [self.dataDrawer addSubview:self.knowledge];
+    [self.webCanvas addSubview:self.dataDrawer];
     [self applyTheme];[self applyPlayModeUI];[self anlPaint];[self layoutWebPlayback];
 }
 /// web buildNpMetaHtml 的原生同构：`meta.enriched === true` 才出**徽标**；
@@ -1988,6 +2034,38 @@ static NSString *RLPRailTagText(id srValue, id bitsValue) {
     }
     self.webControls.frame=NSMakeRect(MAX(16,(w-1160)/2),h-76,MIN(1160,w-32),58);[self.webControls layout];
     [self layoutLyricRows];
+    // web #npDrawerBg inset 0 / #npDrawer top/right/bottom 14、width:min(430,44vw)
+    {
+        const CGFloat dw = MIN(430.0, 0.44 * w);
+        self.dataBackdrop.frame = NSMakeRect(0, 0, w, h);
+        self.dataDrawer.frame = NSMakeRect(w - 14.0 - dw, 14.0, dw, MAX(60.0, h - 28.0));
+        self.knowledge.frame = self.dataDrawer.bounds;
+    }
+}
+
+/// web `#npDrawer`：`top/right/bottom:14px`、`width:min(430px,44vw)`、radius 18、border `--line2`、
+/// `box-shadow:0 28px 80px rgba(0,0,0,.42)`；`#npDrawerBg` 是 rgba(0,0,0,.30) 遮罩，点遮罩关闭。
+- (void)openDataDrawer {
+    [self layoutWebPlayback];            // 先按当前页面尺寸算出抽屉 frame
+    self.dataDrawerOpen=YES;
+    self.dataBackdrop.hidden=NO;
+    self.dataDrawer.hidden=NO;
+    // 透明度过渡（滑入在 web 是 transform .26s；原生直接把 frame 放到终点，避免离屏判据等动画）。
+    self.dataDrawer.alphaValue=0;
+    [NSAnimationContext runAnimationGroup:^(NSAnimationContext *ctx){
+        ctx.duration=0.18;
+        self.dataDrawer.animator.alphaValue=1;
+    } completionHandler:nil];
+    self.dataDrawer.layer.zPosition=6;
+    self.dataBackdrop.layer.zPosition=5;
+}
+
+- (void)closeDataDrawer {
+    if (!self.dataDrawerOpen) return;
+    self.dataDrawerOpen=NO;
+    self.dataDrawer.hidden=YES;
+    self.dataBackdrop.hidden=YES;
+    [self.knowledge cancelLoading];
 }
 
 /// `.npchipwrap` 卡片排版：卡片宽度 = wrap 宽 - 19（13pt 留白 + 6pt 拇指条），
@@ -2127,8 +2205,14 @@ static NSString *RLPRailTagText(id srValue, id bitsValue) {
     NSMenuItem *works=[[NSMenuItem alloc] initWithTitle:RLPTr(@"古典作品版本") action:@selector(onOpenWorks:) keyEquivalent:@""];works.target=self;[menu addItem:works];
     return menu;
 }
+/// web 抽屉的 Esc 关闭（`npDrawerClose`）；没有抽屉时走默认行为。
+- (void)cancelOperation:(id)sender {
+    // 先关抽屉（web 的 Esc = npDrawerClose）；没有抽屉时保持原有「Esc 关闭播放页」。
+    if (self.dataDrawerOpen) { [self closeDataDrawer]; return; }
+    [self onClosePlayback:sender];
+}
+
 - (void)onClosePlayback:(id)sender {[[NSNotificationCenter defaultCenter] postNotificationName:@"RLPCloseNowPlayingNotification" object:nil];}
-- (void)cancelOperation:(id)sender {[self onClosePlayback:sender];}
 - (void)onToggleAnalysis:(id)sender {self.analysisPanel.hidden=!self.analysisPanel.hidden;[[NSUserDefaults standardUserDefaults] setBool:self.analysisPanel.hidden forKey:@"RLPNPAnalysisHidden"];[self layoutWebPlayback];}
 - (void)onHideAnalysis:(id)sender {
     self.analysisPanel.hidden=YES;
@@ -2788,10 +2872,9 @@ static NSString *RLPNowPlayingCastDeviceLabel(NSString *device) {
     NSString *artist = RLPRailStr(t[@"artist"]);
     if (idx == 2) artist = @"";   // 艺术家实体不需要 track 的 artist 参数
     [self.knowledge loadKind:kind name:name artist:artist.length ? artist : nil];
-    [self.knowledgePopover close];
-    // 离屏判据/审计没有窗口：NSPopover 在无窗口视图上会抛异常，有窗口才弹。
-    if (!b.window) return;
-    self.knowledgePopover = RLPShowCardPopover(b, RLPCardController(self.knowledge, 420, 380), 420);
+    [self.knowledgePopover close];[self closeDataDrawer];
+    // web #npDrawer：页内浮卡（不是系统弹窗，也不再需要窗口才可打开）。
+    [self openDataDrawer];
 }
 
 - (NSTextView *)makeTextView {

@@ -723,3 +723,22 @@ chip 挂在 wrap、卡宽 wrapW-19、offset 150 后卡片真实上移、栏头 y
 对照表 #69 标已修。
 **门禁（1.1.7.53 树）**：build 0 error；串行全量 ctest **201/201 passed（385.30s）**；audit **246/0**；
 parity missing=0；behavior actionable=0；i18n OK（2419 pairs）。
+
+### 2026-11-14 19:4x —— 轮次 19（1.1.7.54）：`#npDrawer` 页内抽屉浮卡（表 #39）
+
+**任务**（Lead 定序 2）：单独一包；判据覆盖 frame/圆角/阴影/遮罩点击关闭 + 打开时不影响底层滚动。
+**先核对 web**：`.npdrawer{top/right/bottom:14;width:min(430,44vw);radius:18;border:1px;box-shadow:0 28px 80px rgba(0,0,0,.42)}`；
+`.npdrawerbg{inset:0;background:rgba(0,0,0,.30)}`；点遮罩/Esc 关闭。原生旧码用 NSPopover 系统浮卡，
+宽度/圆角/阴影/动效非 1:1，离屏或无窗口时直接不弹。
+**判据**：`test_native_nowplaying_web` 追加 13 条（width/上下右 14/圆角 18/1px 边/阴影 opacity+radius+offset/
+遮罩 inset0/不新增 NSScrollView/歌词滚动位置不动/点遮罩关闭/Esc 关闭）。
+**红→绿**：旧码（1.1.7.53）**2 F**（无 npDrawer / npDrawerBg）→ 新码 **191 passed / 0 failures**（173 既有 + 13 新 + 前提）。
+**实现**：`RLPOverlayBackdrop` 遮罩 + `npDrawer` 页内视图（加在 webCanvas 最上层）；`knowledge` 嵌入；
+`layoutWebPlayback` 按页面尺寸排；`openDataDrawer/closeDataDrawer`；`onRailCard` 不再弹 NSPopover；
+停止/切歌自动关；`cancelOperation:` 处理 Esc。
+**如实挂账**：①遮罩无 backdrop blur（web 有 blur 2px），抽屉直接到终点、只做 alpha 淡入（避免动画与判据抢跑）；
+②`masksToBounds=NO` 才能显示阴影（CSS overflow:hidden 不裁 box-shadow），内容圆角交给 knowledge；
+③抽屉不进入滚动链路，打开/关闭不动底层滚动。
+**证据**：`evidence/native-drawer-20261114.md`、`native-drawer-{red,green}-20261114.log`；对照表 #39 标已修。
+**门禁（1.1.7.54 树）**：build 0 error；串行全量 ctest **201/201 passed（404.80s）**；audit **246/0**；
+parity missing=0；behavior actionable=0；i18n OK（2419 pairs）。

@@ -74,7 +74,7 @@
 | 36 | `.npchipwrap[data-detail=1]` 5 行/2 行钳制 | `kRailDetailLineHeight=1.35`、`measuredTextHeight cap:5/2` | 已对齐 |
 | 37 | `.nprailempty{10.5;1.6}` | `railEmptyLabel` 10.5 多行 | 已对齐 |
 | 38 | `.nprailhint{10.5}` + `err` 可点重试 | `npSummHint`(`railHintBtn`) 10.5，点击重试 | 已对齐 |
-| 39 | `#npDrawer` 右侧浮卡（`npdrawer` 430 宽、18 圆角、滑入） | `RLPShowCardPopover` + `RLPKnowledgeView` 浮卡 | 未修（原生用系统浮卡，动效/宽度非 1:1；功能等价，不删） |
+| 39 | `#npDrawerBg` inset0 rgba(0,0,0,.30) + `#npDrawer` top/right/bottom 14、width min(430,44vw)、radius18、shadow `0 28 80 rgba(0,0,0,.42)`；点遮罩/Esc 关闭 | `npDrawer`/`npDrawerBg` 页内视图（非 NSPopover）：frame/圆角18/1px边/阴影 .42+40+向下28/遮罩点击关闭/Esc；打开不新增 NSScrollView、不动底层滚动 | **已修（1.1.7.54）**（遮罩无 blur、无滑入动画；见已知偏差 #5） |
 
 ## 6. 歌词区
 
@@ -135,6 +135,12 @@
 - 页面内自检脚本（`window.__SELFTEST`）是 web 侧判据载体，原生用 `--audit`/ctest，载体不同、判据等价。
 
 ## 11. 红→绿记录（逐包追加）
+
+### 1.1.7.54 —— `#npDrawer` 页内抽屉浮卡（表 #39）
+
+- 判据：13 条（frame/上下右 14/宽 min(430,44vw)/圆角 18/1px 边/阴影 opacity+radius+offset/遮罩 inset0/不新增 NSScrollView/底层滚动不动/点遮罩关闭/Esc）。
+- 旧码（1.1.7.53）：**2 FAIL**（无 npDrawer/npDrawerBg）→ 新码 **191P / 0F**。
+- 证据：`evidence/native-drawer-20261114.md`、`native-drawer-{red,green}-20261114.log`。
 
 ### 1.1.7.53 —— `.npchipwrap` 自绘滚动（表 #69）
 
