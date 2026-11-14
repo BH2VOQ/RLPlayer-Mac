@@ -25,15 +25,20 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 BUILD="${1:-$ROOT/build-mac}"
 OUT="$ROOT/dist-mac"
 
-# 1.1.7.1：可选择打包**纯 AppKit 原生客户端**（rlplayer_native）。
-# 默认仍是 rlplayer_mac（web 壳）—— parity 未全绿前不切换默认。
-#   RL_NATIVE_APP=1 tools/make_app_mac.sh
-# 产物名也区分：RLPlayer.app（web） / RLPlayer-Native.app（原生），
-# 这样两个包可以同时装在机器上对比，不会互相覆盖。
-APP_BIN_NAME="${RL_NATIVE_APP:+rlplayer_native}"
-APP_BIN_NAME="${APP_BIN_NAME:-rlplayer_mac}"
-APP_DIR_NAME="${RL_NATIVE_APP:+RLPlayer-Native}"
-APP_DIR_NAME="${APP_DIR_NAME:-RLPlayer}"
+# 1.1.7.63：用户明确「默认开原生版 原生版是要替代 web 版的」。
+# 默认主可执行 = rlplayer_native、产物 RLPlayer.app；web 版只在显式 RL_WEB_APP=1 时
+# 出对照包 RLPlayer-Web.app。旧 RL_NATIVE_APP=1 用法保留（仍出 RLPlayer-Native.app），
+# 不删 web 可执行、不改进运行时逻辑，只改打包默认值。
+APP_BIN_NAME="rlplayer_native"
+APP_DIR_NAME="RLPlayer"
+if [[ -n "${RL_WEB_APP:-}" ]]; then
+  APP_BIN_NAME="rlplayer_mac"
+  APP_DIR_NAME="RLPlayer-Web"
+elif [[ -n "${RL_NATIVE_APP:-}" ]]; then
+  APP_DIR_NAME="RLPlayer-Native"
+fi
+# 只读自省入口（判据用）：打印本次会打包的主可执行名，不打包、不写文件。
+if [[ "${1:-}" == "--print-default-bin" ]]; then echo "$APP_BIN_NAME"; exit 0; fi
 [[ -x "$BUILD/$APP_BIN_NAME" ]] || { echo "!! $APP_BIN_NAME 不存在，请先在 $BUILD 构建"; exit 1; }
 APP="$OUT/$APP_DIR_NAME.app"
 

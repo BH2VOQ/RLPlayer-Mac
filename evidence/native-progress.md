@@ -941,3 +941,22 @@ settings 写回 / Esc 取消未移植；位置与 web 不同（原生在图标�
 `evidence/native-precise-volume-20261115.md`。
 
 **门禁**：串行 ctest 201/201、`--audit` 246/0、parity missing=0、behavior actionable=0。
+
+
+### 2026-11-15 01:xx —— 轮次 28（1.1.7.63）：默认 packaging 切到原生版
+
+**任务**：用户答复 #12「默认开原生版 原生版是要替代 web 版的」——不做双向切换键，
+原生为默认与最终形态，web 仅留对照/回退。
+
+**红→绿**：新增 `tests/check_native_default_app.cmake` + ctest `native_default_app`，
+真跑 `zsh tools/make_app_mac.sh --print-default-bin`（只读自省入口）。
+旧码默认 `rlplayer_mac` → **1 FAIL**（`实际 'rlplayer_mac'`）→ 改默认后 **PASS**，
+同时校验 `RL_WEB_APP=1 → rlplayer_mac`、`RL_NATIVE_APP=1 → rlplayer_native`。
+
+**实现**：`make_app_mac.sh` 默认 `rlplayer_native` / `RLPlayer.app`；`RL_WEB_APP=1` 出
+`RLPlayer-Web.app`；旧 `RL_NATIVE_APP=1` 兼容出 `RLPlayer-Native.app`。不删 web 可执行。
+
+**挂账**：PLAN.md §2.2 的旧状态未改（该文件有外来 WIP，绝不 stage）；未发版/未推送；
+真实出包未重跑，实机验收由用户执行。
+
+**门禁**：串行 ctest 201/201、`--audit` 246/0、parity missing=0、behavior actionable=0。

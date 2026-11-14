@@ -621,6 +621,8 @@ if(APPLE)
   # 原生 UI 的两条离线门禁（不联网、不开窗口、不发声）：
   #   native_ui_selftest = 视图树契约（10 项，含 webviews=0）
   #   native_ui_smoke    = ObjC 桥 → C++ 核心的真实链路（隔离 state/library，拉 ping/albums/status）
+  add_test(NAME native_default_app
+           COMMAND ${CMAKE_COMMAND} -P ${CMAKE_SOURCE_DIR}/tests/check_native_default_app.cmake)
   add_test(NAME native_ui_selftest COMMAND rlplayer_native --selftest)
   set_tests_properties(native_ui_selftest PROPERTIES
     ENVIRONMENT "RLPLAYER_STATE_DIR=${CMAKE_BINARY_DIR}/native-selftest-state" TIMEOUT 60)
