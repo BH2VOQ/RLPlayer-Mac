@@ -1,0 +1,316 @@
+[PASS] five controls ordered repeat/prev/play/next/stop
+[PASS] five controls ordered repeat/prev/play/next/stop
+[PASS] five controls ordered repeat/prev/play/next/stop
+[PASS] five controls ordered repeat/prev/play/next/stop
+[PASS] five controls ordered repeat/prev/play/next/stop
+[PASS] no sixth shuffle control; API remains available
+[PASS] play key renders a real bitmap in both states
+[PASS] 第2项: play key image differs between playing and stopped (icon really switches)
+[PASS] bar.isPlaying is false after a stopped status
+[PASS] bar.isPlaying is true after a playing status
+[PASS] 第2项: returning to playing restores the pause icon (no one-way latch)
+[PASS] 第13项: fmtBadge 文字双向居中（|Δ左右|≤1pt 且 |Δ上下|≤1pt，实测 L7.5 R8.0 T3.5 B3.0）
+[PASS] 第13项: gpuBadge 文字双向居中（|Δ左右|≤1pt 且 |Δ上下|≤1pt，实测 L4.5 R5.0 T4.0 B5.0）
+[PASS] 第13项: bpBadge 文字双向居中（|Δ左右|≤1pt 且 |Δ上下|≤1pt，实测 L0.0 R0.0 T0.0 B0.0）
+[PASS] 第13项: 三枚徽章都量到了墨迹（没有『量不到就算过』）
+[PASS] 第13项: 三枚徽章高度一致（±1pt）
+[PASS] 第14项: 播放条内存在 NSVisualEffectView（玻璃层）
+[PASS] 第14项: 材质为 .hudWindow（与参考图的强模糊+轻微提亮一致）
+[PASS] 第14项: blendingMode 为 .withinWindow（只透窗口内容，不透桌面）
+[PASS] 第14项: state 为 .active（失焦不变死灰）
+[PASS] 第14项: 玻璃层在最底层（内容与控件在它之上）
+[PASS] 第14项: 玻璃层覆盖整条（vev={{0, 0}, {1120, 66}} bar={{0, 0}, {1120, 66}}）
+[PASS] 第14项: 条高在 56–66pt 区间（实测 66）
+[PASS] 第14项: 控制键组中心与条中心偏差 ≤2pt（实测 0.00）
+[PASS] 第14项: 恰好一个玻璃层（不重复叠加）
+[PASS] 第14项: 材质 .hudWindow（强模糊 + 轻微提亮，与参考图一致）
+[PASS] 第14项: blendingMode .withinWindow（只透窗口内容，不透桌面）
+[PASS] 第14项: state .active（失焦不变死灰）
+[PASS] 第14项: 玻璃层在最底层（内容与控件压在它之上，不会被糊住）
+[PASS] 第14项: 玻璃层覆盖整条（vev={{0, 0}, {1120, 66}}）
+[PASS] 第14项: 玻璃层有悬浮圆角 ≥12pt（实测 16）
+[PASS] 第14项: 条高 56–66pt（实测 66，参考图量得约 44–48pt@2x→88–96px）
+[PASS] 第14项: 控制键组中心与条中心偏差 ≤2pt（实测 0.00）
+[PASS] 第14项: 左右两端留白差 ≤2pt（左 18.0 右 18.0）
+[PASS] 第14项: 玻璃层自带圆角（宿主负责整条外形）
+[PASS] 第3项: progress track never intersects the round play key
+[PASS] 第3项: play key is square (cornerRadius == half side draws a full circle)
+[PASS] web main key is 34pt
+[PASS] web cover is 44pt
+[PASS] right controls and badges visible inside right column in one or two rows
+[PASS] right controls and badges visible inside right column in one or two rows
+[PASS] right controls and badges visible inside right column in one or two rows
+[PASS] right controls and badges visible inside right column in one or two rows
+[PASS] right controls and badges visible inside right column in one or two rows
+[PASS] right controls and badges visible inside right column in one or two rows
+[PASS] right status cluster controls never overlap after wrapping
+[PASS] right status cluster controls never overlap after wrapping
+[PASS] right status cluster controls never overlap after wrapping
+[PASS] right status cluster controls never overlap after wrapping
+[PASS] right status cluster controls never overlap after wrapping
+[PASS] right status cluster controls never overlap after wrapping
+[PASS] right status cluster controls never overlap after wrapping
+[PASS] right status cluster controls never overlap after wrapping
+[PASS] right status cluster controls never overlap after wrapping
+[PASS] right status cluster controls never overlap after wrapping
+[PASS] right status cluster controls never overlap after wrapping
+[PASS] right status cluster controls never overlap after wrapping
+[PASS] right status cluster controls never overlap after wrapping
+[PASS] right status cluster controls never overlap after wrapping
+[PASS] right status cluster controls never overlap after wrapping
+[PASS] right controls and badges visible inside right column in one or two rows
+[PASS] right controls and badges visible inside right column in one or two rows
+[PASS] right controls and badges visible inside right column in one or two rows
+[PASS] right controls and badges visible inside right column in one or two rows
+[PASS] right controls and badges visible inside right column in one or two rows
+[PASS] right controls and badges visible inside right column in one or two rows
+[PASS] right status cluster controls never overlap after wrapping
+[PASS] right status cluster controls never overlap after wrapping
+[PASS] right status cluster controls never overlap after wrapping
+[PASS] right status cluster controls never overlap after wrapping
+[PASS] right status cluster controls never overlap after wrapping
+[PASS] right status cluster controls never overlap after wrapping
+[PASS] right status cluster controls never overlap after wrapping
+[PASS] right status cluster controls never overlap after wrapping
+[PASS] right status cluster controls never overlap after wrapping
+[PASS] right status cluster controls never overlap after wrapping
+[PASS] right status cluster controls never overlap after wrapping
+[PASS] right status cluster controls never overlap after wrapping
+[PASS] right status cluster controls never overlap after wrapping
+[PASS] right status cluster controls never overlap after wrapping
+[PASS] right status cluster controls never overlap after wrapping
+[PASS] right controls and badges visible inside right column in one or two rows
+[PASS] right controls and badges visible inside right column in one or two rows
+[PASS] right controls and badges visible inside right column in one or two rows
+[PASS] right controls and badges visible inside right column in one or two rows
+[PASS] right controls and badges visible inside right column in one or two rows
+[PASS] right controls and badges visible inside right column in one or two rows
+[PASS] right status cluster controls never overlap after wrapping
+[PASS] right status cluster controls never overlap after wrapping
+[PASS] right status cluster controls never overlap after wrapping
+[PASS] right status cluster controls never overlap after wrapping
+[PASS] right status cluster controls never overlap after wrapping
+[PASS] right status cluster controls never overlap after wrapping
+[PASS] right status cluster controls never overlap after wrapping
+[PASS] right status cluster controls never overlap after wrapping
+[PASS] right status cluster controls never overlap after wrapping
+[PASS] right status cluster controls never overlap after wrapping
+[PASS] right status cluster controls never overlap after wrapping
+[PASS] right status cluster controls never overlap after wrapping
+[PASS] right status cluster controls never overlap after wrapping
+[PASS] right status cluster controls never overlap after wrapping
+[PASS] right status cluster controls never overlap after wrapping
+[PASS] play key stays centered on entire bar with symmetric side columns
+[PASS] play key stays centered on entire bar with symmetric side columns
+[PASS] play key stays centered on entire bar with symmetric side columns
+[PASS] play key stays centered on entire bar with symmetric side columns
+[PASS] play key stays centered on entire bar with symmetric side columns
+[PASS] badge reflects real yes/no/direct/idle state [state=yes expected=BIT-PERFECT got=BIT-PERFECT]
+[PASS] badge reflects real yes/no/direct/idle state [state=no expected=PCM-PCM 升频 got=PCM-PCM 升频]
+[PASS] badge reflects real yes/no/direct/idle state [state=direct expected=BIT-PERFECT·1bit got=BIT-PERFECT·1bit]
+[PASS] badge reflects real yes/no/direct/idle state [state= expected=待播放验证 got=待播放验证]
+[PASS] metadata title survives subsequent polls
+[PASS] real artist and album shown
+[PASS] custom theme-colored slider cell, not system blue track
+[PASS] transport controls have real target-action wiring
+[PASS] transport controls have real target-action wiring
+[PASS] transport controls have real target-action wiring
+[PASS] transport controls have real target-action wiring
+[PASS] transport controls have real target-action wiring
+[PASS] badge direction and direct/cast negative controls use backend evidence
+[PASS] badge direction and direct/cast negative controls use backend evidence
+[PASS] badge direction and direct/cast negative controls use backend evidence
+[PASS] badge direction and direct/cast negative controls use backend evidence
+[PASS] badge direction and direct/cast negative controls use backend evidence
+[PASS] badge direction and direct/cast negative controls use backend evidence
+[PASS] badge direction and direct/cast negative controls use backend evidence
+[PASS] badge direction and direct/cast negative controls use backend evidence
+[PASS] GPU badge follows real gpuUsed status
+[PASS] minimum supported 626pt bar contains every real control/badge
+[PASS] minimum bar controls do not overlap
+[PASS] minimum bar controls do not overlap
+[PASS] minimum bar controls do not overlap
+[PASS] minimum bar controls do not overlap
+[PASS] minimum bar controls do not overlap
+[PASS] minimum bar controls do not overlap
+[PASS] minimum bar controls do not overlap
+[PASS] minimum bar controls do not overlap
+[PASS] minimum bar controls do not overlap
+[PASS] minimum bar controls do not overlap
+[PASS] minimum bar controls do not overlap
+[PASS] minimum bar controls do not overlap
+[PASS] minimum bar controls do not overlap
+[PASS] minimum bar controls do not overlap
+[PASS] minimum bar controls do not overlap
+[PASS] minimum bar controls do not overlap
+[PASS] minimum bar controls do not overlap
+[PASS] minimum supported 626pt bar contains every real control/badge
+[PASS] minimum bar controls do not overlap
+[PASS] minimum bar controls do not overlap
+[PASS] minimum bar controls do not overlap
+[PASS] minimum bar controls do not overlap
+[PASS] minimum bar controls do not overlap
+[PASS] minimum bar controls do not overlap
+[PASS] minimum bar controls do not overlap
+[PASS] minimum bar controls do not overlap
+[PASS] minimum bar controls do not overlap
+[PASS] minimum bar controls do not overlap
+[PASS] minimum bar controls do not overlap
+[PASS] minimum bar controls do not overlap
+[PASS] minimum bar controls do not overlap
+[PASS] minimum bar controls do not overlap
+[PASS] minimum bar controls do not overlap
+[PASS] minimum bar controls do not overlap
+[PASS] minimum supported 626pt bar contains every real control/badge
+[PASS] minimum bar controls do not overlap
+[PASS] minimum bar controls do not overlap
+[PASS] minimum bar controls do not overlap
+[PASS] minimum bar controls do not overlap
+[PASS] minimum bar controls do not overlap
+[PASS] minimum bar controls do not overlap
+[PASS] minimum bar controls do not overlap
+[PASS] minimum bar controls do not overlap
+[PASS] minimum bar controls do not overlap
+[PASS] minimum bar controls do not overlap
+[PASS] minimum bar controls do not overlap
+[PASS] minimum bar controls do not overlap
+[PASS] minimum bar controls do not overlap
+[PASS] minimum bar controls do not overlap
+[PASS] minimum bar controls do not overlap
+[PASS] minimum supported 626pt bar contains every real control/badge
+[PASS] minimum bar controls do not overlap
+[PASS] minimum bar controls do not overlap
+[PASS] minimum bar controls do not overlap
+[PASS] minimum bar controls do not overlap
+[PASS] minimum bar controls do not overlap
+[PASS] minimum bar controls do not overlap
+[PASS] minimum bar controls do not overlap
+[PASS] minimum bar controls do not overlap
+[PASS] minimum bar controls do not overlap
+[PASS] minimum bar controls do not overlap
+[PASS] minimum bar controls do not overlap
+[PASS] minimum bar controls do not overlap
+[PASS] minimum bar controls do not overlap
+[PASS] minimum bar controls do not overlap
+[PASS] minimum supported 626pt bar contains every real control/badge
+[PASS] minimum bar controls do not overlap
+[PASS] minimum bar controls do not overlap
+[PASS] minimum bar controls do not overlap
+[PASS] minimum bar controls do not overlap
+[PASS] minimum bar controls do not overlap
+[PASS] minimum bar controls do not overlap
+[PASS] minimum bar controls do not overlap
+[PASS] minimum bar controls do not overlap
+[PASS] minimum bar controls do not overlap
+[PASS] minimum bar controls do not overlap
+[PASS] minimum bar controls do not overlap
+[PASS] minimum bar controls do not overlap
+[PASS] minimum bar controls do not overlap
+[PASS] minimum supported 626pt bar contains every real control/badge
+[PASS] minimum bar controls do not overlap
+[PASS] minimum bar controls do not overlap
+[PASS] minimum bar controls do not overlap
+[PASS] minimum bar controls do not overlap
+[PASS] minimum bar controls do not overlap
+[PASS] minimum bar controls do not overlap
+[PASS] minimum bar controls do not overlap
+[PASS] minimum bar controls do not overlap
+[PASS] minimum bar controls do not overlap
+[PASS] minimum bar controls do not overlap
+[PASS] minimum bar controls do not overlap
+[PASS] minimum bar controls do not overlap
+[PASS] minimum supported 626pt bar contains every real control/badge
+[PASS] minimum bar controls do not overlap
+[PASS] minimum bar controls do not overlap
+[PASS] minimum bar controls do not overlap
+[PASS] minimum bar controls do not overlap
+[PASS] minimum bar controls do not overlap
+[PASS] minimum bar controls do not overlap
+[PASS] minimum bar controls do not overlap
+[PASS] minimum bar controls do not overlap
+[PASS] minimum bar controls do not overlap
+[PASS] minimum bar controls do not overlap
+[PASS] minimum bar controls do not overlap
+[PASS] minimum supported 626pt bar contains every real control/badge
+[PASS] minimum bar controls do not overlap
+[PASS] minimum bar controls do not overlap
+[PASS] minimum bar controls do not overlap
+[PASS] minimum bar controls do not overlap
+[PASS] minimum bar controls do not overlap
+[PASS] minimum bar controls do not overlap
+[PASS] minimum bar controls do not overlap
+[PASS] minimum bar controls do not overlap
+[PASS] minimum bar controls do not overlap
+[PASS] minimum bar controls do not overlap
+[PASS] minimum supported 626pt bar contains every real control/badge
+[PASS] minimum bar controls do not overlap
+[PASS] minimum bar controls do not overlap
+[PASS] minimum bar controls do not overlap
+[PASS] minimum bar controls do not overlap
+[PASS] minimum bar controls do not overlap
+[PASS] minimum bar controls do not overlap
+[PASS] minimum bar controls do not overlap
+[PASS] minimum bar controls do not overlap
+[PASS] minimum bar controls do not overlap
+[PASS] minimum supported 626pt bar contains every real control/badge
+[PASS] minimum bar controls do not overlap
+[PASS] minimum bar controls do not overlap
+[PASS] minimum bar controls do not overlap
+[PASS] minimum bar controls do not overlap
+[PASS] minimum bar controls do not overlap
+[PASS] minimum bar controls do not overlap
+[PASS] minimum bar controls do not overlap
+[PASS] minimum bar controls do not overlap
+[PASS] minimum supported 626pt bar contains every real control/badge
+[PASS] minimum bar controls do not overlap
+[PASS] minimum bar controls do not overlap
+[PASS] minimum bar controls do not overlap
+[PASS] minimum bar controls do not overlap
+[PASS] minimum bar controls do not overlap
+[PASS] minimum bar controls do not overlap
+[PASS] minimum bar controls do not overlap
+[PASS] minimum supported 626pt bar contains every real control/badge
+[PASS] minimum bar controls do not overlap
+[PASS] minimum bar controls do not overlap
+[PASS] minimum bar controls do not overlap
+[PASS] minimum bar controls do not overlap
+[PASS] minimum bar controls do not overlap
+[PASS] minimum bar controls do not overlap
+[PASS] minimum supported 626pt bar contains every real control/badge
+[PASS] minimum bar controls do not overlap
+[PASS] minimum bar controls do not overlap
+[PASS] minimum bar controls do not overlap
+[PASS] minimum bar controls do not overlap
+[PASS] minimum bar controls do not overlap
+[PASS] minimum supported 626pt bar contains every real control/badge
+[PASS] minimum bar controls do not overlap
+[PASS] minimum bar controls do not overlap
+[PASS] minimum bar controls do not overlap
+[PASS] minimum bar controls do not overlap
+[PASS] minimum supported 626pt bar contains every real control/badge
+[PASS] minimum bar controls do not overlap
+[PASS] minimum bar controls do not overlap
+[PASS] minimum bar controls do not overlap
+[PASS] minimum supported 626pt bar contains every real control/badge
+[PASS] minimum bar controls do not overlap
+[PASS] minimum bar controls do not overlap
+[PASS] minimum supported 626pt bar contains every real control/badge
+[PASS] minimum bar controls do not overlap
+[PASS] minimum supported 626pt bar contains every real control/badge
+[PASS] GPU badge clears when unused
+[PASS] drawn slider fill uses web accent rather than macOS blue
+[PASS] volume curve matches frozen web including true silent notch
+[PASS] volume curve matches frozen web including true silent notch
+[PASS] volume curve matches frozen web including true silent notch
+[PASS] volume curve matches frozen web including true silent notch
+[PASS] mode button cycles all four modes including shuffle
+[PASS] mode button cycles all four modes including shuffle
+[PASS] mode button cycles all four modes including shuffle
+[PASS] mode button cycles all four modes including shuffle
+[PASS] polling lifecycle preserved
+[FAIL] pb.repeatBtn 有 hover 状态机（web .k:hover）
+[FAIL] pb.prevBtn 有 hover 状态机（web .k:hover）
+[FAIL] pb.nextBtn 有 hover 状态机（web .k:hover）
+[FAIL] pb.stopBtn 有 hover 状态机（web .k:hover）
+[FAIL] pb.play 有 hover 状态机（web .k.big:hover）
+native_bar_web: 315 checks, 5 failures

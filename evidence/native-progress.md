@@ -773,3 +773,27 @@ RENDERFAIL 根因（需用户诊断包）、`native_ui_functional` 偶发 bus er
 **门禁（1.1.7.55 树）**：build 0 error；串行全量 ctest **201/201 passed（400.76s）**；audit **246/0**；
 parity missing=0（view 14 / tab 10 / ctrl 179 / api 96，na 16 全可复核、removed 2 双向核验）；
 behavior actionable=0（50 bindings）；i18n 三项 OK（2421 pairs）。
+
+### 2026-11-14 21:0x —— 轮次 21（1.1.7.56）：底部播放条 `.k` hover 态
+
+**任务**（关闭 `native-hover-20261114.md` 挂账 1 / 已知偏差 #9 的底栏部分）：web 底栏 5 个 `.k` 键
+有 hover 反馈，原生此前只有 AppKit 默认按下高亮。
+**先核对 web**：`ui_page.h:1081-1085`（`.k` / `.k:hover{--hov2/--txt}` / `.k.big` / `.k.big:hover{brightness 1.08}`）、
+`:276-277`（`.ibtn` 同值）、`:1594-1600`（底栏 5 键）。
+**判据**：`test_native_bar_web` 追加 hover 段，量 4 个 `.k` 键与 `.k.big` 的
+`respondsToSelector(setHovered:)` / trackingAreas / 静态底 / hover 底 `--hov2` / hover 图标色 `--txt` /
+退出恢复透明底与 hover 前 tint（不抹播放模式强调色）；`pb.play` 另锁 `--acc` 静态底、hover 变化、退出恢复。
+**红→绿**：旧码（1.1.7.55）**315P / 5F**（5 键无 hover 状态机）→ 新码 **346P / 0F**。
+**实现**：`RLPPlaybackBarView.mm` 本地新增 `RLPBarKeyButton`（跟踪区 + hovered + hoverApplier，
+`viewDidMoveToSuperview` 主动建区保证离屏判据不假绿）；`symbolButton:` 工厂改返回它并注入 `.k:hover`
+语义（退出恢复进入前 tint）；`pb.play` 覆盖为 accent 混 10% 白（同 np.play 取舍）。
+**如实挂账**：①设置页 `.chip` 仍未做（已知偏差 #9 已改为只挂设置页）；②`brightness(1.08)` 用混白近似；
+③走 `setHovered:` 未做真实鼠标注入（不做键鼠自动化）；④底栏与 np 页各一份同构载体，
+未合并公共层（避免牵动 191 条判据）；⑤其余既有挂账不因本包关闭。
+**证据**：`evidence/native-bar-hover-20261114.md`、`native-bar-hover-{red,green}-20261114.log`、
+`native-56-{build,ctest,audit}.log`。
+**门禁（1.1.7.56 树）**：build 0 error；audit **246/0**；parity missing=0；behavior actionable=0；
+i18n 三项 OK（2421 pairs，本包无新增中文文案）。串行全量 ctest 首次 **200/201**
+（唯一红 `library` 的时间敏感断言 [7.3]，首次冷启动 2352ms；纯 C++ 用例、与本包 UI 零关联，
+单跑 5/5 绿）→ 另起干净全量复跑 **201/201**（不改判据、如实挂账该 flake，见
+`evidence/native-bar-hover-20261114.md` §6.6）。

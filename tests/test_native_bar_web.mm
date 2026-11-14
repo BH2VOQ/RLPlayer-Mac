@@ -38,6 +38,25 @@ static BOOL online = NO;
 static int failures = 0, checks = 0;
 static void check(BOOL ok, const char *what) { ++checks; printf("[%s] %s\n", ok ? "PASS" : "FAIL", what); if (!ok) ++failures; }
 static id field(id bar, NSString *key) { return [bar valueForKey:key]; }
+// 底栏 hover 判据的颜色比较（与 np 页 test_native_nowplaying_web 同口径：逐分量）。
+static BOOL BarCgEq(CGColorRef c, NSColor *want, double tol) {
+    if (!c || !want) return NO;
+    NSColor *got = [[NSColor colorWithCGColor:c] colorUsingColorSpace:NSColorSpace.deviceRGBColorSpace];
+    NSColor *w = [want colorUsingColorSpace:NSColorSpace.deviceRGBColorSpace];
+    return got && w && fabs(got.redComponent-w.redComponent)<tol
+        && fabs(got.greenComponent-w.greenComponent)<tol
+        && fabs(got.blueComponent-w.blueComponent)<tol
+        && fabs(got.alphaComponent-w.alphaComponent)<tol;
+}
+static BOOL BarCgClear(CGColorRef c) {
+    if (!c) return YES;
+    NSColor *got = [[NSColor colorWithCGColor:c] colorUsingColorSpace:NSColorSpace.deviceRGBColorSpace];
+    return !got || got.alphaComponent < 0.01;
+}
+// 测试侧声明：生产实现的 hover 状态机只在 RLPBarKeyButton 上；旧码没有 ⟹ 判据必须红而不是编译失败。
+@interface NSObject (BarHoverTest)
+- (void)setHovered:(BOOL)hovered;
+@end
 int main() { @autoreleasepool {
     [NSApplication sharedApplication]; posts = [NSMutableArray array];
     RLPPlaybackBarView *bar = [[RLPPlaybackBarView alloc] initWithFrame:NSMakeRect(0,0,1120,66)];
@@ -372,5 +391,53 @@ int main() { @autoreleasepool {
     [bar setValue:@0 forKey:@"playMode"];
     for (NSInteger mode=1;mode<=4;++mode) { [bar toggleRepeat:nil]; check([posts.lastObject isEqual:[NSString stringWithFormat:@"/api/playmode?mode=%ld",(long)(mode%4)]], "mode button cycles all four modes including shuffle"); }
     [bar stopPolling]; check(!bar.polling, "polling lifecycle preserved");
+
+    // ---- 底栏 `.k` hover（web ui_page.h:1081-1085，hover 挂账 1 / 已知偏差 #9）----
+    // .k{32×32;radius9;color:--mut} / .k:hover{background:--hov2;color:--txt}
+    // .k.big{34;圆;--acc;白字} / .k.big:hover{filter:brightness(1.08)}
+    // 旧码是普通 NSButton（只有 AppKit 按下高亮）：判据用 respondsToSelector 驱动，
+    // 方法不存在只是 FAIL、不会崩（与 np 页 hover 判据同口径）。
+    {
+        RLPTheme *t = [RLPTheme current];
+        NSArray<NSString *> *keys = @[@"repeatBtn",@"prevBtn",@"nextBtn",@"stopBtn"];
+        for (NSString *k in keys) {
+            NSButton *b = field(bar,k);
+            NSString *tag = [NSString stringWithFormat:@"pb.%@",k];
+            bool hoverable = [b respondsToSelector:NSSelectorFromString(@"setHovered:")];
+            check(hoverable, [[NSString stringWithFormat:@"%@ 有 hover 状态机（web .k:hover）",tag] UTF8String]);
+            if (!hoverable) continue;   // 旧码：后续判据跳过（红只由这条 + 前提给出）
+            check(b.trackingAreas.count>=1, [[NSString stringWithFormat:@"%@ 有 hover 跟踪区",tag] UTF8String]);
+            check(BarCgClear(b.layer.backgroundColor),
+                  [[NSString stringWithFormat:@"%@ 静态无底色（web .k 无 background）",tag] UTF8String]);
+            // 静态图标色不写死：底栏既有实现在 applyTheme/refreshModeButtons 里会按主题与播放模式
+            // 改写 tint（repeat/shuffle 激活时是 --acc）。本包只锁 hover 状态机 ⟹ 捕获 hover 前基线。
+            NSColor *baseTint = b.contentTintColor;
+            check(baseTint != nil, [[NSString stringWithFormat:@"%@ 静态图标色存在",tag] UTF8String]);
+            [(id)b setHovered:YES];
+            check(BarCgEq(b.layer.backgroundColor,t.hov2,0.03),
+                  [[NSString stringWithFormat:@"%@ hover 底 = --hov2",tag] UTF8String]);
+            check(BarCgEq(b.contentTintColor.CGColor,t.text,0.06),
+                  [[NSString stringWithFormat:@"%@ hover 图标色 = --txt",tag] UTF8String]);
+            [(id)b setHovered:NO];
+            check(BarCgClear(b.layer.backgroundColor),
+                  [[NSString stringWithFormat:@"%@ 退出恢复透明底",tag] UTF8String]);
+            check(BarCgEq(b.contentTintColor.CGColor,baseTint,0.06),
+                  [[NSString stringWithFormat:@"%@ 退出恢复 hover 前图标色（不抹掉播放模式强调色）",tag] UTF8String]);
+        }
+        // .k.big（播放键）：accent 底不变为透明，hover 提亮（brightness 1.08 的混白近似）。
+        NSButton *big = field(bar,@"playBtn");
+        bool bigHover = [big respondsToSelector:NSSelectorFromString(@"setHovered:")];
+        check(bigHover, "pb.play 有 hover 状态机（web .k.big:hover）");
+        if (bigHover) {
+            CGColorRef base = big.layer.backgroundColor;
+            NSColor *baseC = base ? [NSColor colorWithCGColor:base] : nil;
+            check(baseC && BarCgEq(base,t.accent,0.02), "pb.play 静态底 = --acc（圆形红键，不被清掉）");
+            [(id)big setHovered:YES];
+            check(!BarCgEq(big.layer.backgroundColor,baseC,0.02),
+                  "pb.play hover 底色变化（web brightness 1.08）");
+            [(id)big setHovered:NO];
+            check(BarCgEq(big.layer.backgroundColor,baseC,0.02), "pb.play 退出恢复 --acc 底");
+        }
+    }
     printf("native_bar_web: %d checks, %d failures\n",checks,failures); return failures?1:0;
 } }

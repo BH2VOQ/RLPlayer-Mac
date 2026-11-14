@@ -51,8 +51,10 @@ hover 时才可见 `.92 → 1.0` 的提亮 + 1.04 缩放。
 - 右栏 `.npchip`：`RLPRailChipView` 加跟踪区 + `setHovered:`（hover 改底/边，退出 `applyTheme`）。
 
 ## 如实挂账
-1. **范围**：本轮只覆盖**正在播放页**的 hover；底部播放条 `#bRep/#bPause`（同样是 web `.k/.k.big`）与
-   设置页的 `.chip` 仍只有 AppKit 默认按下高亮（不在本轮 np 页差异表范围内）。
+1. **范围**：本轮只覆盖**正在播放页**的 hover；设置页的 `.chip` 仍只有 AppKit 默认按下高亮（不在本轮 np 页差异表范围内）。
+   > **2026-11-14 更新（1.1.7.56）**：底部播放条 `#bRep/#bPause/#bPrev/#bNext/#bStop` 的 `.k / .k.big`
+   > hover 已补齐（`RLPBarKeyButton`，见 `evidence/native-bar-hover-20261114.md`，
+   > `test_native_bar_web` 315→346 条、红 5F→绿 0F）。此条挂账**只剩设置页 `.chip`**。
 2. `.k.big` 的 `brightness(1.08)` 用「混 10% 白」近似，不是 CSS filter 的像素级复刻（无 filter API）。
 3. hover 判据走 `setHovered:`（与 `mouseEntered/Exited` 同一入口），未做真实鼠标注入（遵守「不做键鼠自动化」）。
 4. `.npchip.on`（选中卡）hover 优先级未做区分：现在 hover 会覆盖选中底/边；web 里 `.npchip.on` 规则在

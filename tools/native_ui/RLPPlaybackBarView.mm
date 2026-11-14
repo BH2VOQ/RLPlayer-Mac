@@ -32,6 +32,46 @@
 }
 @end
 
+// 底栏 `.k` / `.ibtn` hover 载体（web `.k:hover{background:var(--hov2);color:var(--txt)}`、
+// `.k.big:hover{filter:brightness(1.08)}`、`.ibtn:hover{--hov2/--txt}`）。
+// 为什么不直接复用播放页的 RLPHoverButton：那个类定义在 RLPNowPlayingViewController.mm 内部，
+// 提到公共层会牵动播放页 191 条既有判据；本包只补底栏，故本地同构一份（与 RLPBarCoverView
+// 自管 tracking area 的既有做法一致）。判据走 setHovered:，与鼠标事件同一入口。
+@interface RLPBarKeyButton : NSButton
+@property (nonatomic, assign, readonly) BOOL hovered;
+@property (nonatomic, copy, nullable) void (^hoverApplier)(RLPBarKeyButton *button, BOOL hovered);
+- (void)setHovered:(BOOL)hovered;
+@end
+
+@implementation RLPBarKeyButton
+@synthesize hovered = _hovered;
+- (instancetype)initWithFrame:(NSRect)frameRect {
+    if ((self = [super initWithFrame:frameRect])) self.wantsLayer = YES;
+    return self;
+}
+- (void)viewDidMoveToSuperview {
+    [super viewDidMoveToSuperview];
+    // 离屏构造（无 window）时 AppKit 未必调 updateTrackingAreas ⟹ 入场即建，保证鼠标真能触发。
+    if (self.superview) [self updateTrackingAreas];
+}
+- (void)updateTrackingAreas {
+    [super updateTrackingAreas];
+    for (NSTrackingArea *a in self.trackingAreas) if (a.owner == self) return;
+    NSTrackingArea *area = [[NSTrackingArea alloc] initWithRect:NSZeroRect
+        options:(NSTrackingMouseEnteredAndExited | NSTrackingActiveInKeyWindow | NSTrackingInVisibleRect)
+          owner:self userInfo:nil];
+    [self addTrackingArea:area];
+}
+- (void)mouseEntered:(NSEvent *)event { self.hovered = YES; }
+- (void)mouseExited:(NSEvent *)event  { self.hovered = NO; }
+- (void)setHovered:(BOOL)hovered {
+    if (self.hovered == hovered) return;
+    _hovered = hovered;
+    if (self.hoverApplier) self.hoverApplier(self, hovered);
+    self.needsDisplay = YES;
+}
+@end
+
 // 底栏封面：web 的 #cv 本身没有 click 绑定（进播放页靠 #npOpen），但用户明确要求
 // 「播放栏点击作品封面需要可以跳转到播放页」⟹ 两边都该多这个入口，原生先做。
 // 用 mouseDown 直接处理而不是手势识别器：手势在离屏/非 key window 下容易不触发，
@@ -309,6 +349,15 @@ static void RLPSetBadgeText(NSTextField *label, NSString *text, NSColor *color, 
     self.playBtn.layer.backgroundColor = t.accent.CGColor;
     self.playBtn.contentTintColor = NSColor.whiteColor;
     self.playBtn.identifier = @"pb.play";
+    // web `.k.big:hover{filter:brightness(1.08)}`：CSS filter 无 AppKit 等价物，
+    // 与播放页 np.play 同一取舍 —— accent 混 10% 白；退出恢复 accent，白图标不变。
+    ((RLPBarKeyButton *)self.playBtn).hoverApplier = ^(RLPBarKeyButton *btn, BOOL hovered) {
+        RLPTheme *t2 = [RLPTheme current];
+        NSColor *bg = hovered
+            ? [t2.accent blendedColorWithFraction:0.10 ofColor:NSColor.whiteColor] : t2.accent;
+        btn.layer.backgroundColor = bg.CGColor;
+        btn.contentTintColor = NSColor.whiteColor;
+    };
 
     // 封面缩略图（web 底栏最左）
     RLPBarCoverView *cv = [[RLPBarCoverView alloc] initWithFrame:NSZeroRect];
@@ -524,7 +573,7 @@ static double RLPVolDbToPos(double db) {
 }
 
 - (NSButton *)symbolButton:(NSString *)symbol tip:(NSString *)tip {
-    NSButton *b = [[NSButton alloc] initWithFrame:NSZeroRect];
+    RLPBarKeyButton *b = [[RLPBarKeyButton alloc] initWithFrame:NSZeroRect];
     b.bordered = NO;
     b.imagePosition = NSImageOnly;
     b.imageScaling = NSImageScaleProportionallyDown;
@@ -532,6 +581,20 @@ static double RLPVolDbToPos(double db) {
     b.contentTintColor = [RLPTheme current].text;
     b.toolTip = RLPTr(tip);   // 多语言：tooltip 也必须过词表
     b.target = self;
+    // web `.k:hover{background:var(--hov2);color:var(--txt)}` / `.ibtn:hover` 同值。
+    // 退出时恢复「进入 hover 前」的 tint（repeat/shuffle 激活时是 --acc，不能被抹成静态色）。
+    __block NSColor *savedTint = nil;
+    b.hoverApplier = ^(RLPBarKeyButton *btn, BOOL hovered) {
+        RLPTheme *t = [RLPTheme current];
+        if (hovered) {
+            savedTint = btn.contentTintColor;
+            btn.layer.backgroundColor = t.hov2.CGColor;
+            btn.contentTintColor = t.text;
+        } else {
+            btn.layer.backgroundColor = NSColor.clearColor.CGColor;
+            btn.contentTintColor = savedTint ?: t.mut;
+        }
+    };
     return b;
 }
 

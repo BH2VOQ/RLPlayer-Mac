@@ -1,4 +1,4 @@
-# 已知偏差清单（native ↔ web，2026-11-14，至 1.1.7.54）
+# 已知偏差清单（native ↔ web，2026-11-14，至 1.1.7.56）
 
 > 这些是**有意的、已解释的**偏差，不是未完成项；后续排查不要当回归反复查。
 > 每一条都给了 web 依据、原生实现、为什么要这样、判据在哪。
@@ -13,7 +13,7 @@
 | 6 | `.k.big` hover 提亮 | `filter:brightness(1.08)` | accent 色**混 10% 白** | AppKit 无 CSS filter；混白是亮度等价近似。判据只要求"hover 底色发生变化 + 退出恢复 accent"。见 `native-hover-20261114.md`。 |
 | 7 | 歌词加载态（#44/#46） | **整页**没有 loading 态（空歌词直接显示「没有歌词」两行） | 保留两行加载态（文案取自抽屉 `歌词加载中…` + 副行说明），失败态保留 `歌词加载失败` | 原生超集（等后端补全时给用户反馈）；文案逐字取 web 抽屉同词条，不是整页逐像素。见 `native-lyric-text-20261114.md`。 |
 | 8 | `#npchipwrap` 滚动实现（#69） | 原生滚动容器（`overflow:auto`） | `RLPRailWrapView : NSView` 自绘 `contentOffset` + `drawRect` 拇指，**不新增 NSScrollView** | 单层滚动判据：可见 NSScrollView 数不增加，避免嵌套滚轮打架。判据锁"NSScrollView=0 + 栏头不动 + 拇指不压卡片"。见 `native-chipwrap-20261114.md`。 |
-| 9 | hover 覆盖范围 | `.k/.npclose/.nptoggle/.chip/.npcast/.npchip/.npseek`、面板收起键 | 正在播放页已全部覆盖；**底部播放条 `.k`** 与设置页 `.chip` 仍是 AppKit 默认按下高亮 | 本轮范围限定 np 页差异表；底部播放条不在表内，未动。见 `native-hover-20261114.md` 挂账 1。 |
+| 9 | hover 覆盖范围 | `.k/.npclose/.nptoggle/.chip/.npcast/.npchip/.npseek`、面板收起键 | 正在播放页已全部覆盖；**底部播放条 `.k`** 于 **1.1.7.56 补齐**（`RLPBarKeyButton` 状态机，见 `native-bar-hover-20261114.md`）；**设置页 `.chip`** 仍是 AppKit 默认按下高亮 | 底栏已不在挂账内；设置页 `.chip` 仍是剩余差距（本轮范围限 np 页 + 底栏）。见 `native-hover-20261114.md` 挂账 1。 |
 | 10 | 字距单位（#11/#24） | `letter-spacing:1.6px / 1.5px` | `NSKernAttributeName @1.6 / @1.5`（pt） | 1x 下 px≈pt，与既有 anllab 做法一致；高分屏只影响像素密度，不改变相对字距。见 `native-kern-20261114.md`。 |
 | 11 | `.npchipwrap` 滚动交互 | 原生滚动条/惯性 | 滚轮位移（无惯性/分页）；拇指只在溢出时画（无经典轨道） | 与既有 `#npAnlBody` 同一取舍；判据只锁位移与拇指位置。 |
 
