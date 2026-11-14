@@ -206,13 +206,35 @@ struct RLPUpdatePlan {
         ^(const rta::update::CheckResult &r) {
             __typeof__(self) self_ = weakSelf;
             if (!self_) return;
-            dispatch_async(dispatch_get_main_queue(), ^{ [self_ handleCheckResult:r manually:manually]; });
+            [self_ postCheckResult:r manually:manually];
         });
 #else
     (void)manually;
     RLPToast(RLPTr(@"本构建未启用更新模块"));
 #endif
 }
+
+#ifdef RLP_HAVE_UPDATE
+// 判据接缝（供 tests/test_native_update_result_lifetime.mm 调）：
+// done 回调收到的 CheckResult 属于**生产者**（begin_check 的内部对象），回调返回即失效。
+// 跨线程到主队列必须带一份自己的拷贝 —— 见下方 handleCheckResult 的实现说明。
+- (void)postCheckResult:(const rta::update::CheckResult &)r manually:(BOOL)manually {
+    // ⚠️ 所有权边界（2026-11-14 实测 SIGBUS 的根因）：
+    //   done 回调收到的 r 属于**生产者**（begin_check 内部的对象，回调返回即析构）；
+    //   block 捕获 `const T&` 形式的参数是**引用捕获**，不是拷贝 ⟹ 直接
+    //   dispatch_async 到主队列，主线程拿到的就是一个悬垂引用，读 notes / downloadUrl
+    //   这类会走堆分配的字段就是读已释放内存（偶发 EXC_BAD_ACCESS / SIGBUS）。
+    //   所以必须在跳线程**之前**拷一份自己的（shared_ptr 保证生命周期到 block 执行完）。
+    std::shared_ptr<rta::update::CheckResult> owned =
+        std::make_shared<rta::update::CheckResult>(r);
+    __weak __typeof__(self) weakSelf = self;
+    dispatch_async(dispatch_get_main_queue(), ^{
+        __typeof__(self) self_ = weakSelf;
+        if (!self_) return;
+        [self_ handleCheckResult:*owned manually:manually];
+    });
+}
+#endif   // RLP_HAVE_UPDATE（接缝）
 
 #ifdef RLP_HAVE_UPDATE
 - (void)handleCheckResult:(const rta::update::CheckResult &)r manually:(BOOL)manually {

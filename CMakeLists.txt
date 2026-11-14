@@ -563,6 +563,21 @@ if(APPLE)
   add_test(NAME native_feedback_inline COMMAND test_native_feedback_inline)
   set_tests_properties(native_feedback_inline PROPERTIES TIMEOUT 300)
 
+
+
+  # 更新检查结果「跨线程所有权」判据：done 回调的 const CheckResult& 是生产者的对象，
+  # 跨 dispatch_async 必须自带拷贝。旧实现引用捕获 ⟹ 主线程读已释放堆缓冲（偶发 SIGBUS）。
+  add_executable(test_native_update_result_lifetime tests/test_native_update_result_lifetime.mm
+    tools/native_ui/RLPUpdateWindowController.mm tools/native_ui/RLPSupport.mm
+    tools/native_ui/RLPCoreClient.mm tools/native_ui/RLPTheme.mm
+    tools/native_ui/RLPNativeI18n.mm tools/mac_update.mm)
+  target_compile_options(test_native_update_result_lifetime PRIVATE -fobjc-arc)
+  target_include_directories(test_native_update_result_lifetime PRIVATE src tools tools/native_ui)
+  target_link_libraries(test_native_update_result_lifetime PRIVATE rlapp_core
+    "-framework AppKit" "-framework Security")
+  add_test(NAME native_update_result_lifetime COMMAND test_native_update_result_lifetime)
+  set_tests_properties(native_update_result_lifetime PROPERTIES TIMEOUT 120)
+
   # 第8项耳机目标曲线：桥层（数组三元组/预设字段）+ 请求逐字段（web diff）+ 图上图层（像素）。
   add_executable(test_native_target_curve tests/test_native_target_curve.mm
     tools/native_ui/RLPEqualizerView.mm tools/native_ui/RLPTargetCurve.mm

@@ -405,3 +405,14 @@ playback RENDERFAIL 根因仍需用户诊断包。实机验收由用户执行（
 根因（已用最小探针证实）：done 回调参数是 `const CheckResult&`，窗口控制器直接把它
 `dispatch_async` 到主队列 —— block 捕获 `const T&` 参数是**引用捕获**，
 回调返回后生产者对象已析构 ⟹ 主线程读已释放堆缓冲。下一包修。
+
+### 2026-11-14 14:40 —— 轮次 11（1.1.7.38）：audit 偶发 SIGBUS = 更新结果跨线程所有权
+
+**根因**：`begin_check` 的 done 回调参数是 `const CheckResult&`，窗口控制器直接
+`dispatch_async` 到主队列 —— block 捕获 `const T&` 参数是**引用捕获**（最小探针实测段错误），
+回调返回后生产者已析构 ⟹ 主线程读已释放堆缓冲（notes 长串）。崩溃报告栈落在
+`CheckResult::operator=` → `std::string::assign` → `memmove`。**不是**此前挂账的"专辑详情导航处"。
+**修复**：跳线程前 `make_shared<CheckResult>(r)` 深拷贝，block 持 shared_ptr。
+**红→绿**：新 ctest `native_update_result_lifetime` 旧实现 **3P/2F** → 新实现 **5P/0F**。
+**稳定性**：修复后**连续 4 轮** `--audit` 全绿（246/0 ×4）；修复前基线 4 轮崩 1 轮。
+**如实挂账**：4 轮是小样本，不宣称"概率归零"；ProgressFn 同形但用法安全，未加判据。
