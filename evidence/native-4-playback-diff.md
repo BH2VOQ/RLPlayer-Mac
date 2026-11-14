@@ -124,7 +124,7 @@
 | 66 | `.npclose:hover{background:#fff;scale1.04}`、`.nptoggle:hover` 同款、`.nprailhide/.anlhide:hover{background:var(--hov2);color:var(--txt)}` | `npClose`/`npAnalToggle`/`npRailToggle`：静态底改 web 的 alpha .92，hover 提亮到不透明 + `scale 1.04`；`npAnalHide`/`npRailHide` hover `--hov2`+`--txt` | **已修（1.1.7.46）** |
 | 67 | `.npchip:hover`（浅色半透明值）、`.npcast:hover`（`--hov`/`--acc`）、`.npseek:hover` 5→7 | `RLPRailChipView.setHovered:`、`applyChipHover:hovered:`、`RLPNPAccentCell.barThickness` | **已修（1.1.7.46）** |
 | 68 | `#npAnlBody` 自己滚（`overflow-y:scroll`），头部固定；`#npLyric` 独立滚动；整页不滚 | `RLPNPAnalBody.onScroll`/`anlDetailScroll`/`lyricScroll` 各自滚动，`webCanvas` 不滚 | 已对齐 |
-| 69 | 右栏 `.npchipwrap` 内部滚动、脚注固定 | 原生 rail 卡片按可用高度均分（`preferredHeightForWidth`），溢出时 hint 置底 | 未修（无独立 chipwrap 滚动容器；卡片少时视觉等价） |
+| 69 | `.npchipwrap{overflow:auto;scrollbar-width:thin;gap:6}` 内部滚动、栏头/脚注固定 | `RLPRailWrapView`（非 NSScrollView）自绘 contentOffset+6pt 拇指；卡片挂 wrap、栏头不动；卡宽 `wrapW-19`（右侧 13 留白+6 拇指，web ~11 滚动条 ⟹ 比 web 窄 8pt 的已知偏差） | **已修（1.1.7.53）** |
 
 ## 10. 本轮未覆盖 / 明确不做
 
@@ -135,6 +135,12 @@
 - 页面内自检脚本（`window.__SELFTEST`）是 web 侧判据载体，原生用 `--audit`/ctest，载体不同、判据等价。
 
 ## 11. 红→绿记录（逐包追加）
+
+### 1.1.7.53 —— `.npchipwrap` 自绘滚动（表 #69）
+
+- 判据：11 条（wrap 非 NSScrollView / rail 子树 NSScrollView=0 / 卡宽 wrapW-19 / offset 真实位移 / 栏头不动 / 拇指不压卡片）。
+- 旧码（1.1.7.52）：**1 FAIL**（无 npChipWrap）→ 新码 **173P / 0F**；rail 既有判据同步改递归查找并披露宽度差。
+- 证据：`evidence/native-chipwrap-20261114.md`、`native-chipwrap-{red,green}-20261114.log`。
 
 ### 1.1.7.52 —— 歌词视口 26pt 渐隐遮罩（表 #40）
 

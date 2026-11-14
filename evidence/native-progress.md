@@ -701,3 +701,25 @@ parity missing=0；behavior actionable=0；i18n OK（2419 pairs）。
 **证据**：`evidence/native-lyric-mask-20261114.md`、`native-mask-{red,green}-20261114.log`；对照表 #40 标已修。
 **门禁（1.1.7.52 树）**：build 0 error；串行全量 ctest **201/201 passed（412.68s）**；audit **246/0**；
 parity missing=0；behavior actionable=0；i18n OK（2419 pairs）。
+
+### 2026-11-14 19:5x —— 轮次 19a（1.1.7.53）：`.npchipwrap` 自绘滚动（表 #69）
+
+**任务**（Lead 定序 1）：按自写方案做 chipwrap：自绘 contentOffset + 拇指、**不新增嵌套 NSScrollView**；
+判据先锁「可见 NSScrollView 数量不变 + 栏头不随滚动移动 + 单层滚动仍绿」。
+**先核对 web**：`.npchipwrap{overflow:auto;scrollbar-width:thin;gap:6}`、滚动条 6px；
+芯片区独立滚动（栏头/分段固定）。
+**判据**：`test_native_nowplaying_web` 追加 11 条：wrap 非 NSScrollView、railPanel 子树 NSScrollView=0、
+chip 挂在 wrap、卡宽 wrapW-19、offset 150 后卡片真实上移、栏头 y 不变、拇指出现/与卡片右缘≥13/在沟槽内。
+**红→绿**：旧码（1.1.7.52）**1 F**（无 npChipWrap）→ 新码 **173 passed / 0 failures**（158 既有 + 11 新）。
+**实现**：新 `RLPRailWrapView : NSView`（contentHeight/contentOffset、scrollWheel 回调、drawRect 6pt 拇指）；
+三张 chip 挂进 wrap；`layoutWebPlayback` 排 wrap；`railLayoutChips` 卡宽=wrapW-19、按 offset 排。
+**同步修既有判据**：`native_rail_cards`/`native_rail_states` 从「railPanel 直接子视图」改为递归找卡
+（卡片在 wrap 内）、几何 convertRect 到 rail 坐标；`rail.card.width` railW-20→**railW-39**、
+`rail.padX.right` 10→**29**——差因是右侧常驻 19pt（13 留白+6 拇指条；web ~11px 滚动条），
+属与 web 的**已知宽度偏差**（比 web 窄 8pt），已在证据披露。
+**如实挂账**：①拇指只在溢出时画（无经典滚动条轨道）；②滚轮位移（无惯性/分页）；
+③内容高不足时 offset 自动回 0；④`contentOffset` 判据用 KVC 驱动（生产入口是 scrollWheel 回调同一 setter）。
+**证据**：`evidence/native-chipwrap-20261114.md`、`native-chipwrap-{red,green}-20261114.log`；
+对照表 #69 标已修。
+**门禁（1.1.7.53 树）**：build 0 error；串行全量 ctest **201/201 passed（385.30s）**；audit **246/0**；
+parity missing=0；behavior actionable=0；i18n OK（2419 pairs）。

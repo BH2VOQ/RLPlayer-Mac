@@ -30,6 +30,13 @@ static NSString *lastPath,*lastBody;static RLPJSONCompletion pendingFav;
 static RLPRequestSpy *spy;static id fakeShared(id c,SEL s){return spy;}
 static int fail;
 /// CGColor 与 NSColor 逐分量比较（含 alpha）：hover 判据必须量**实际视觉值**，不能只断言有跟踪区。
+/// 递归统计 NSScrollView（「单层滚动」判据：不新增嵌套滚动容器）。
+static NSInteger CountScrollViews(NSView *root) {
+    NSInteger n = [root isKindOfClass:[NSScrollView class]] ? 1 : 0;
+    for (NSView *s in root.subviews) n += CountScrollViews(s);
+    return n;
+}
+
 /// 取 attributed 文本首个字符的 kern（web letter-spacing 的原生等价）；没有则返回 0。
 static CGFloat KernOf(NSTextField *label) {
     if (!label || label.attributedStringValue.length == 0) return 0;
@@ -53,6 +60,7 @@ static BOOL CgEq(CGColorRef cg, NSColor *want, double tol) {
 /// 这里只做编译期声明，运行时一律先 respondsToSelector 守卫（旧码没有这个方法）。
 @interface NSView (RLPHoverTest)
 - (void)setHovered:(BOOL)hovered;
+- (NSRect)scrollThumbRect;
 @end
 
 static BOOL CgClearOrNil(CGColorRef cg) {
@@ -587,6 +595,60 @@ int main(){@autoreleasepool{
        [[NSString stringWithFormat:@"视口变矮后渐隐位置重算（H=%.1f loc=%.4f）",H2,[g2.locations[1] doubleValue]] UTF8String]);
     [(NSView *)vc.view setFrameSize:NSMakeSize(1180,760)];
     [(NSView *)vc.view layoutSubtreeIfNeeded];
+   }
+  }
+ }
+
+ // ---- #69 `.npchipwrap` 自绘滚动：不新增 NSScrollView、栏头不动 ----
+ {
+  NSView *wrap=find(vc.view,@"npChipWrap");
+  ck(wrap!=nil,"npChipWrap 存在（自绘滚动容器）");
+  if(wrap){
+   ck(![wrap isKindOfClass:[NSScrollView class]],"chipwrap 不是 NSScrollView（不引入嵌套滚动）");
+   NSView *rail=(NSView *)[vc valueForKey:@"railPanel"];
+   ck(rail&&CountScrollViews(rail)==0,
+      [[NSString stringWithFormat:@"右栏子树内 NSScrollView=0（单层滚动仍成立；got %ld）",(long)(rail?CountScrollViews(rail):-1)] UTF8String]);
+   id chipsObj=[vc valueForKey:@"railCards"];
+   NSArray<NSView *> *chips=[chipsObj isKindOfClass:[NSArray class]]?(NSArray<NSView *> *)chipsObj:@[];
+   ck(chips.count==3,"三张 chip 仍在");
+   for(NSView *c in chips) ck(c.superview==wrap,"chip 挂在 chipwrap 内（不是直接铺在面板上）");
+   const CGFloat W=wrap.bounds.size.width;
+   NSView *c0=chips[0];
+   ck(fabs(c0.frame.size.width-(W-19))<1.5,
+      [[NSString stringWithFormat:@"卡宽 = wrapW-19（13 留白 + 6 拇指；got %.1f want %.1f）",c0.frame.size.width,W-19] UTF8String]);
+   // 栏头不随滚动移动
+   NSTextField *title=(NSTextField *)[vc valueForKey:@"railTitle"];
+   const CGFloat titleYBefore=title.frame.origin.y;
+   // 测试环境没有真实元数据 ⟹ 生产会把 wrap 隐藏并显示 .nprailempty；判据先把它恢复可见再量滚动。
+   wrap.hidden=NO;
+   [(NSView *)vc.view layoutSubtreeIfNeeded];
+   CGFloat y0=c0.frame.origin.y;
+   BOOL hasOffset=[wrap respondsToSelector:NSSelectorFromString(@"setContentOffset:")];
+   ck(hasOffset,"chipwrap 暴露 contentOffset（自绘滚动的状态入口）");
+   if(hasOffset){
+     // 先给足内容高（3 张卡本身可能还没撑出滚动），再设偏移；relayout 会把 contentHeight
+     // 恢复成真实值（这是生产行为），所以拇指判据前再补一次大内容高。
+     [wrap setValue:@1200 forKey:@"contentHeight"];
+     [wrap setValue:@150 forKey:@"contentOffset"];
+     ck(fabs(c0.frame.origin.y-(y0-150))<1.0,
+        [[NSString stringWithFormat:@"滚动 150 后卡片上移 150（got %.1f）",c0.frame.origin.y-y0] UTF8String]);
+     ck(fabs(title.frame.origin.y-titleYBefore)<0.01,"栏头 y 不随 chipwrap 滚动改变");
+     // 拇指：右侧沟槽、与卡片右缘 ≥13、内容未溢出时为空
+     [wrap setValue:@100 forKey:@"contentOffset"];
+     [wrap setValue:@1200 forKey:@"contentHeight"];
+     [wrap setNeedsDisplay:YES];
+     BOOL hasThumb=[wrap respondsToSelector:NSSelectorFromString(@"scrollThumbRect")];
+     ck(hasThumb,"chipwrap 暴露 scrollThumbRect（自绘拇指判据入口）");
+     if(hasThumb){
+       NSRect thumb=[wrap scrollThumbRect];
+       NSRect cardRect=c0.frame;
+       ck(!NSIsEmptyRect(thumb),"内容溢出时出现 6pt 拇指");
+       if(!NSIsEmptyRect(thumb)){
+         ck(NSMinX(thumb)-NSMaxX(cardRect)>=13.0,
+            [[NSString stringWithFormat:@"拇指与卡片右缘 ≥13pt（不压圆角；got %.1f）",NSMinX(thumb)-NSMaxX(cardRect)] UTF8String]);
+         ck(NSMaxX(thumb)<=W+0.5,"拇指在 wrap 右侧沟槽内");
+       }
+     }
    }
   }
  }

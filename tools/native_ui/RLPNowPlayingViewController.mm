@@ -66,6 +66,8 @@
 /// web `.nplyric2{-webkit-mask-image:linear-gradient(180deg,transparent 0,#000 26px,#000 calc(100% - 26px),transparent 100%)}`
 /// 的原生等价：给歌词滚动视图挂 CAGradientLayer 遮罩（首/末行渐隐，26pt 全不透明区）。
 - (void)updateLyricFadeMask;
+/// `.npchipwrap` 的卡片排版（contentOffset 只影响卡片，栏头/分段/收起键不动）。
+- (void)railLayoutChips;
 @end
 // Web #npPage uses top-left coordinates and covers the entire window content.
 @interface RLPNPCanvas : NSView
@@ -1177,6 +1179,50 @@ static const CGFloat kRailDetailLineHeight = 1.35;
 
 @end
 
+#pragma mark - `.npchipwrap` 自绘滚动容器（不新增 NSScrollView）
+
+/// web `.npchipwrap{overflow:auto;scrollbar-width:thin}` 的原生等价：
+/// 用普通 NSView + contentOffset + drawRect 拇指，**不引入第二个 NSScrollView**
+/// （「单层滚动」判据要求可见 NSScrollView 数量不增加；嵌套滚动会让滚轮事件在两层之间打架）。
+@interface RLPRailWrapView : NSView
+@property (nonatomic, assign) CGFloat contentHeight;
+@property (nonatomic, assign) CGFloat contentOffset;
+@property (nonatomic, copy, nullable) void (^onScrollDelta)(CGFloat deltaY);
+@property (nonatomic, copy, nullable) void (^onOffsetChanged)(CGFloat offset);
+- (NSRect)scrollThumbRect;
+@end
+@implementation RLPRailWrapView
+- (BOOL)isFlipped { return NO; }
+- (void)scrollWheel:(NSEvent *)event {
+    if (self.onScrollDelta) { self.onScrollDelta(event.scrollingDeltaY); return; }
+    [super scrollWheel:event];
+}
+- (void)setContentOffset:(CGFloat)contentOffset {
+    const CGFloat maxOff = MAX(0.0, self.contentHeight - self.bounds.size.height);
+    const CGFloat clamped = MAX(0.0, MIN(maxOff, contentOffset));
+    if (fabs(clamped - _contentOffset) < 0.01) return;
+    _contentOffset = clamped;
+    self.needsDisplay = YES;
+    if (self.onOffsetChanged) self.onOffsetChanged(clamped);
+}
+- (NSRect)scrollThumbRect {
+    const CGFloat W = self.bounds.size.width, H = self.bounds.size.height;
+    if (W < 20 || H < 10 || self.contentHeight <= H + 1.0) return NSZeroRect;
+    const CGFloat thumbH = MAX(18.0, H * (H / self.contentHeight));
+    const CGFloat maxOff = MAX(1.0, self.contentHeight - H);
+    const CGFloat t = MAX(0.0, MIN(1.0, self.contentOffset / maxOff)) * MAX(0.0, H - thumbH);
+    // 拇指画在右侧 6pt 沟槽里；卡片右缘另留 13pt ⟹ 滚动条永远不压卡片圆角。
+    return NSMakeRect(W - 6.0, H - thumbH - t, 6.0, thumbH);
+}
+- (void)drawRect:(NSRect)dirtyRect {
+    (void)dirtyRect;
+    NSRect r = [self scrollThumbRect];
+    if (NSIsEmptyRect(r)) return;
+    [[RLPTheme current].line setFill];
+    [[NSBezierPath bezierPathWithRoundedRect:r xRadius:3.0 yRadius:3.0] fill];
+}
+@end
+
 #pragma mark - web npRailPreview / npSummUrl 的同构投影（内容唯一真相源）
 
 /// web efValueText：字符串原样、数字/布尔转字符串、数组按行拼接（简介段落有时是数组）。
@@ -1266,6 +1312,8 @@ static NSString *RLPRailTagText(id srValue, id bitsValue) {
 @property(nonatomic,strong) RLPNPCanvas *webCanvas;
 @property(nonatomic,strong) NSView *analysisPanel;
 @property(nonatomic,strong) NSView *railPanel;
+/// web `.npchipwrap`：栏头之下、栏底之上的独立滚动区（卡片滚动时栏头不动）。
+@property(nonatomic,strong) NSView *railChipWrap;
 @property(nonatomic,strong) RLPNPControlBar *webControls;
 @property(nonatomic,strong) NSScrollView *lyricScroll;
 @property(nonatomic,strong) RLPNPLyricDocument *lyricDocument;
@@ -1631,6 +1679,21 @@ static NSString *RLPRailTagText(id srValue, id bitsValue) {
     };
     // 三张卡（歌曲/专辑/艺术家）= web `.npchip`。旧实现是 NSButton 多行标题，
     // AppKit 把文字画在卡片左下角（上半部全空）⟹ 用户报「排版散」。
+    RLPRailWrapView *wrap=[[RLPRailWrapView alloc] initWithFrame:NSZeroRect];
+    wrap.identifier=@"npChipWrap";
+    wrap.wantsLayer=YES;
+    wrap.layer.masksToBounds=YES;   // web overflow:auto：卡片裁在 chipwrap 内
+    self.railChipWrap=wrap;
+    [self.railPanel addSubview:wrap];
+    __weak __typeof__(self) wsWrap=self;
+    wrap.onScrollDelta=^(CGFloat deltaY){
+        __typeof__(self) s=wsWrap; if(!s) return;
+        RLPRailWrapView *w=(RLPRailWrapView *)s.railChipWrap;
+        w.contentOffset = w.contentOffset - deltaY;
+    };
+    wrap.onOffsetChanged=^(CGFloat off){
+        __typeof__(self) s=wsWrap; if(s) [s railLayoutChips];
+    };
     NSMutableArray<RLPRailChipView *> *cards=[NSMutableArray array];
     __weak __typeof__(self) wsRail=self;
     NSUInteger railIdx=0;
@@ -1640,7 +1703,7 @@ static NSString *RLPRailTagText(id srValue, id bitsValue) {
         c.chipIndex=(NSInteger)railIdx++;
         c.detailMode=self.railDetail;   // 恢复上次的「简略/详细」档位
         c.onTap=^(RLPRailChipView *chip){ __typeof__(self) s=wsRail; if(s)[s onRailCard:chip]; };
-        [self.railPanel addSubview:c];
+        [wrap addSubview:c];
         [cards addObject:c];
     }
     self.railCards=cards;
@@ -1907,15 +1970,17 @@ static NSString *RLPRailTagText(id srValue, id bitsValue) {
         CGFloat eh = MAX(30.0, ceil(br.size.height) + 8.0);
         self.railEmptyLabel.frame = NSMakeRect(kRailHeadPadX, ry - eh, railCardW, eh);
         ry -= eh;
-    } else {
-        for(RLPRailChipView *c in self.railCards){
-            // 详细档的高度由**文本实测**决定（简介不限 40 字、p1 最多 5 行 / p2 2 行）；
-            // 必须先拿卡宽再量，否则第一次布局时 bounds 宽度还是 0。
-            CGFloat ch=[c preferredHeightForWidth:railCardW];
-            c.frame=NSMakeRect(kRailHeadPadX,ry-ch,railCardW,ch);
-            [c relayout];
-            ry-=ch+kRailChipGap;
-        }
+    }
+    // web `.npchipwrap`：栏头之下独立滚动区；卡片滚动时栏头/分段/收起键不动。
+    {
+        const CGFloat wrapBottom = (self.railHintBtn && !self.railHintBtn.hidden) ? 34.0 : 10.0;
+        const CGFloat wrapTop = bodyH - kRailHeadPadTop - railSegH - kRailHeadGap;
+        self.railChipWrap.frame = NSMakeRect(kRailHeadPadX, wrapBottom,
+                                             MAX(20, side - kRailHeadPadX * 2),
+                                             MAX(20, wrapTop - wrapBottom));
+        self.railChipWrap.hidden = (self.railEmptyLabel && !self.railEmptyLabel.hidden);
+        [self railLayoutChips];
+        (void)railCardW; (void)ry;
     }
     if (self.railHintBtn && !self.railHintBtn.hidden) {
         // web .nprailhint 在卡片区之后；原生放在栏底（卡片较少时视觉同区，且不遮卡片）。
@@ -1923,6 +1988,33 @@ static NSString *RLPRailTagText(id srValue, id bitsValue) {
     }
     self.webControls.frame=NSMakeRect(MAX(16,(w-1160)/2),h-76,MIN(1160,w-32),58);[self.webControls layout];
     [self layoutLyricRows];
+}
+
+/// `.npchipwrap` 卡片排版：卡片宽度 = wrap 宽 - 19（13pt 留白 + 6pt 拇指条），
+/// 从顶部往下排、偏移只改卡片 y；栏头等其它子视图坐标完全不动。
+- (void)railLayoutChips {
+    NSView *wrap = self.railChipWrap;
+    if (!wrap || wrap.hidden) return;
+    const CGFloat W = wrap.bounds.size.width, H = wrap.bounds.size.height;
+    if (W < 20 || H < 10) return;
+    RLPRailWrapView *rw = (RLPRailWrapView *)wrap;
+    const CGFloat cardW = MAX(40, W - 19);
+    NSArray<RLPRailChipView *> *cards = self.railCards ?: @[];
+    if (cards.count == 0) { rw.contentHeight = 0; return; }
+    CGFloat contentH = 0;
+    for (NSUInteger i = 0; i < cards.count; ++i) {
+        contentH += [cards[i] preferredHeightForWidth:cardW];
+        if (i + 1 < cards.count) contentH += kRailChipGap;
+    }
+    rw.contentHeight = contentH;
+    CGFloat top = H - rw.contentOffset;
+    for (RLPRailChipView *c in cards) {
+        CGFloat ch = [c preferredHeightForWidth:cardW];
+        c.frame = NSMakeRect(0, top - ch, cardW, ch);
+        [c relayout];
+        top -= ch + kRailChipGap;
+    }
+    rw.needsDisplay = YES;
 }
 /// web `#npLyric` 空态 / `#lyricbox` 加载态的两行文案：
 /// 主行字号跟歌词 clamp（13~17），副行固定 12px + `--mut2`，居中、可换行（`maximumNumberOfLines=0`）。

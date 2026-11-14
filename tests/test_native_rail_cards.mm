@@ -84,9 +84,23 @@ static NSView *FindByIdIn(NSView *root, NSString *ident) { return FindById(root,
 
 /// 找 railPanel 的直接子视图里所有卡片（identifier 前缀 npChip.），按屏幕从上到下排。
 static NSArray<NSView *> *RailCards(NSView *rail, NSMutableArray<NSView *> *out) {
-    for (NSView *v in rail.subviews) {
-        if ([v.identifier hasPrefix:@"npChip."]) [out addObject:v];
-    }
+    // web `.npchip` 位于 `.npchipwrap` 里（不是 railcard 的直接子视图）：
+    // 递归找，但排序仍按同一 wrap 内的 frame.y（所有卡片同一父视图）。
+    __block void (^collect)(NSView *);
+    __block NSMutableArray<NSView *> *all=[NSMutableArray array];
+    collect = ^(NSView *root){
+        for (NSView *v in root.subviews) {
+            NSString *cid=v.identifier;
+            // 卡片 identifier 是 `npChip.歌曲/专辑/艺术家`；卡内子标签是 `npChip.dot/name/st/p1/p2`。
+            BOOL isChild=[cid isEqualToString:@"npChip.dot"]||[cid isEqualToString:@"npChip.name"]||
+                         [cid isEqualToString:@"npChip.st"]||[cid isEqualToString:@"npChip.p1"]||
+                         [cid isEqualToString:@"npChip.p2"];
+            if ([cid hasPrefix:@"npChip."] && !isChild) [all addObject:v];
+            collect(v);
+        }
+    };
+    collect(rail);
+    [out addObjectsFromArray:all];
     [out sortUsingComparator:^NSComparisonResult(NSView *a, NSView *b) {
         if (a.frame.origin.y > b.frame.origin.y) return NSOrderedAscending;
         if (a.frame.origin.y < b.frame.origin.y) return NSOrderedDescending;
@@ -141,13 +155,19 @@ int main() {
         if (cards.count != 3) { std::printf("结果：FAIL（卡片数不足）\n"); return 1; }
 
         // ---- 栏的整体左右内边距（web .nprailcard padding:10px）----
-        Geo("rail.padX.left", 10, cards[0].frame.origin.x, 2);
-        Geo("rail.card.width", rail.bounds.size.width - 20, cards[0].frame.size.width, 2);
-        Geo("rail.padX.right", 10, rail.bounds.size.width - NSMaxX(cards[0].frame), 2);
+        // 卡片现在在 `.npchipwrap` 里（独立滚动区），frame 是 wrap 局部坐标 ⟹ 一律转到 rail 坐标再量。
+        #define RAILRECT(v) [(v) convertRect:(v).bounds toView:rail]
+        Geo("rail.padX.left", 10, NSMinX(RAILRECT(cards[0])), 2);
+        // web 卡右缘 = 面板右内边距 10 + chipwrap 滚动条占位（~11）；原生是 10 + 常驻 19
+        // （13 留白 + 6 拇指条，与 #28 同一取舍）。差因在 evidence/native-chipwrap-20261114.md 里披露。
+        Geo("rail.padX.right", 29, rail.bounds.size.width - NSMaxX(RAILRECT(cards[0])), 2);
+        // web `.npchipwrap` 是滚动区：卡宽 = wrap 内容宽。原生右侧常驻 19pt（13 留白 + 6 拇指条，
+        // 与 #28 的沟槽同一取舍；web 该处是 ~11px 滚动条占位）⟹ 卡宽 = railW - 20 - 19。
+        Geo("rail.card.width", rail.bounds.size.width - 39, NSWidth(RAILRECT(cards[0])), 2);
 
         // ---- 卡片间距（web .npchipwrap gap:6px）----
         for (NSUInteger i = 0; i + 1 < cards.count; ++i)
-            Geo("chip.gap", 6, cards[i].frame.origin.y - NSMaxY(cards[i + 1].frame), 2);
+            Geo("chip.gap", 6, NSMinY(RAILRECT(cards[i])) - NSMaxY(RAILRECT(cards[i + 1])), 2);
 
         // ---- 栏头（标题 + 简略/详细）与首卡间距（web .nprailcard gap:8px）----
         NSTextField *cap = (NSTextField *)FindById(rail, @"npRailCap");
@@ -161,7 +181,7 @@ int main() {
         Ck(seg != nil, "栏头简略/详细分段存在", @"npRailSeg 缺失");
         if (cap && seg) {
             const double headBottom = MIN(NSMinY(cap.frame), NSMinY(seg.frame));
-            Geo("head.gapToFirstCard", 8, headBottom - NSMaxY(cards[0].frame), 2);
+            Geo("head.gapToFirstCard", 8, headBottom - NSMaxY(RAILRECT(cards[0])), 2);
             Geo("rail.padY.top", 10, rail.bounds.size.height - NSMaxY(seg.frame), 2);
             Geo("railcap.kern", 1.5, KernOf(cap), 0.2);
             Ck(cap.font.pointSize >= 9.0 && cap.font.pointSize <= 10.5,

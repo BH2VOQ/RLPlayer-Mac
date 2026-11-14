@@ -72,8 +72,20 @@ static BOOL ActuallyVisible(NSView *v) {
     return YES;
 }
 static NSArray<NSView *> *RailCards(NSView *rail) {
+    // 卡片在 `.npchipwrap` 内（web 结构），递归找；可见性判断会沿 superview 链检查 wrap.hidden。
     NSMutableArray *out = [NSMutableArray array];
-    for (NSView *v in rail.subviews) if ([v.identifier hasPrefix:@"npChip."]) [out addObject:v];
+    __block void (^collect)(NSView *);
+    collect = ^(NSView *root){
+        for (NSView *v in root.subviews) {
+            NSString *cid=v.identifier;
+            BOOL isChild=[cid isEqualToString:@"npChip.dot"]||[cid isEqualToString:@"npChip.name"]||
+                         [cid isEqualToString:@"npChip.st"]||[cid isEqualToString:@"npChip.p1"]||
+                         [cid isEqualToString:@"npChip.p2"];
+            if ([cid hasPrefix:@"npChip."] && !isChild) [out addObject:v];
+            collect(v);
+        }
+    };
+    collect(rail);
     return out;
 }
 
