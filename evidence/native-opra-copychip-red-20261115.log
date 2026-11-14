@@ -1,0 +1,34 @@
+Internal ctest changing into directory: /Users/august/Downloads/DQ/RLPlayer/build-mac
+Test project /Users/august/Downloads/DQ/RLPlayer/build-mac
+    Start 5: native_opra_cards
+1/1 Test #5: native_opra_cards ................***Failed    2.14 sec
+== OPRA 型号卡片 + 预设卡片墙（桩核心，不启动播放）==
+  [PASS] O0 settings 的当前态已读入（opraproduct/oprapreset）
+  [PASS] 搜索框存在
+  [PASS] O1 搜索结果 = 1 张型号卡片
+  [PASS] O1 型号卡文案字段 = vendor·name（第一条）
+  [PASS] O1 卡片 identifier 统一（判据/无障碍可定位）
+  [PASS] O2 预设卡片墙 = 2 张卡
+  [PASS] O2 预设卡文案 = author · details（不是 name 字段）
+  [PASS] O2 非当前态卡片按钮 = 应用到 EQ
+  [PASS] O4 当前预设（settings e1）在卡片上显示「已应用当前预设」
+  [PASS] O2 段数徽标存在
+  [PASS] O3 预设卡有目标曲线小图
+  [PASS] O3 小图真的画了曲线（非背景像素 > 20）
+  [PASS] O5 应用按钮真发 /api/opra/apply（productId/presetId）
+  [PASS] O5 成功后写回 settings（eq/opraproduct/oprapreset）
+  [PASS] O5 当前态切到 e2（卡片状态跟着变）
+  [PASS] O5 重渲染后「已应用当前预设」落在 e2 卡片
+  [FAIL] C1 sp_opra_copychip 是视图树里的真实控件（不是只有 id 字符串） — 
+  [FAIL] C2 sp_opra_copychip 是可点按钮（web .chip） — 
+
+OPRA 卡片墙 有失败（16 passed, 2 failed）
+
+
+0% tests passed, 1 tests failed out of 1
+
+Total Test time (real) =   2.14 sec
+
+The following tests FAILED:
+	  5 - native_opra_cards (Failed)
+Errors while running CTest

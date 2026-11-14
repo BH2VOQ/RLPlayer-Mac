@@ -1,0 +1,16 @@
+Internal ctest changing into directory: /Users/august/Downloads/DQ/RLPlayer/build-mac
+Test project /Users/august/Downloads/DQ/RLPlayer/build-mac
+    Start  5: native_opra_cards
+1/5 Test  #5: native_opra_cards ................   Passed    0.92 sec
+    Start  9: native_npmeta_chips
+2/5 Test  #9: native_npmeta_chips ..............   Passed    2.83 sec
+    Start 17: native_settings_cards
+3/5 Test #17: native_settings_cards ............   Passed   10.28 sec
+    Start 19: native_settings_granularity
+4/5 Test #19: native_settings_granularity ......   Passed    4.79 sec
+    Start 21: native_target_curve
+5/5 Test #21: native_target_curve ..............   Passed    1.35 sec
+
+100% tests passed, 0 tests failed out of 5
+
+Total Test time (real) =  20.18 sec

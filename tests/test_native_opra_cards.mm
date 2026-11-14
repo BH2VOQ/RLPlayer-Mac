@@ -120,6 +120,11 @@ static NSArray *Arr(RLPEqualizerView *v, NSString *key) {
 static id Obj(RLPEqualizerView *v, NSString *key) {
     @try { return [v valueForKey:key]; } @catch (__unused NSException *e) { return nil; }
 }
+static NSView *FindByIdent(NSView *root, NSString *ident) {
+    if ([root.identifier isEqualToString:ident]) return root;
+    for (NSView *s in root.subviews) { NSView *r = FindByIdent(s, ident); if (r) return r; }
+    return nil;
+}
 static NSView *FindByName(NSView *root, NSString *cls) {
     if ([NSStringFromClass(root.class) isEqualToString:cls]) return root;
     for (NSView *s in root.subviews) {
@@ -293,6 +298,26 @@ int main() {
                     std::printf("shot -> %s (%d, %dx%d)\n", shotPath, (int)ok,
                                 (int)rep.pixelsWide, (int)rep.pixelsHigh);
                 }
+            }
+        }
+
+        // ---- sp_opra_copychip：web 有 1 个可点 .chip 复制 OPRA 官网链接 ----
+        // 旧原生只有 RLPSettingsViewController 的 identifier 字典字符串，parity_scan 因此假绿。
+        {
+            NSView *chip = FindByIdent(v, @"sp_opra_copychip");
+            ck(chip != nil, "C1 sp_opra_copychip 是视图树里的真实控件（不是只有 id 字符串）", @"");
+            ck([chip isKindOfClass:[NSButton class]], "C2 sp_opra_copychip 是可点按钮（web .chip）", @"");
+            NSButton *btn = (NSButton *)chip;
+            if (btn) {
+                ck(btn.action != NULL && btn.target != nil, "C3 sp_opra_copychip 有真实 target/action", @"");
+                ck([btn.title containsString:@"opra.roon.app"], "C4 sp_opra_copychip 显示官网链接", btn.title ?: @"(nil)");
+                NSPasteboard *pb = [NSPasteboard generalPasteboard];
+                [pb clearContents];
+                [pb setString:@"SENTINEL-NOT-COPIED" forType:NSPasteboardTypeString];
+                [btn performClick:nil];
+                NSString *copied = [pb stringForType:NSPasteboardTypeString];
+                ck([copied isEqualToString:@"https://opra.roon.app/"],
+                   "C5 点击真把 https://opra.roon.app/ 写进剪贴板", copied ?: @"(nil)");
             }
         }
 

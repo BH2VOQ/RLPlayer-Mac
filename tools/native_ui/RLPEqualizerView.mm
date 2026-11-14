@@ -457,6 +457,19 @@
 
 @implementation RLPEqualizerView
 
+/// web `sp_opra_copychip`（ui_script.h:10996-10997 / 11947-11955）：一枚 `.chip`，
+/// 点击把 OPRA 项目官网链接写进剪贴板并 toast「已复制来源链接: …」。
+/// 旧原生只在 RLPSettingsViewController 的 identifier 字典里有这个字符串 —— 屏幕上
+/// 没有控件、没有 target/action，parity_scan/behavior_scan 都因此标成 done（静态表盲区）。
+- (void)onCopyOpraLink:(id)sender {
+    (void)sender;
+    NSString *url = @"https://opra.roon.app/";
+    NSPasteboard *pb = [NSPasteboard generalPasteboard];
+    [pb clearContents];
+    [pb setString:url forType:NSPasteboardTypeString];
+    RLPToast([NSString stringWithFormat:@"%@%@", RLPTr(@"已复制来源链接:"), url]);
+}
+
 - (instancetype)initWithFrame:(NSRect)r {
     self = [super initWithFrame:r];
     if (self) {
@@ -630,6 +643,17 @@
     sb.bezelStyle = NSBezelStyleRounded;
     sb.identifier = @"opra.search";
     [r1 addArrangedSubview:sb];
+    // web `sp_opra_copychip`：与搜索框同一行的官网链接芯片，点击复制（见 onCopyOpraLink:）。
+    NSButton *copyChip = [NSButton buttonWithTitle:@"https://opra.roon.app/"
+                                            target:self action:@selector(onCopyOpraLink:)];
+    copyChip.identifier = @"sp_opra_copychip";
+    copyChip.bezelStyle = NSBezelStyleRounded;
+    copyChip.font = [NSFont systemFontOfSize:11.5];
+    copyChip.toolTip = RLPTr(@"复制 OPRA 项目官网链接");
+    copyChip.image = [NSImage imageWithSystemSymbolName:@"doc.on.doc"
+                              accessibilityDescription:RLPTr(@"复制 OPRA 项目官网链接")];
+    copyChip.imagePosition = NSImageLeading;
+    [r1 addArrangedSubview:copyChip];
     [self.opraSection addArrangedSubview:r1];
 
     // 型号卡片区（web #eqModelCards）：点击才加载该型号的预设墙。

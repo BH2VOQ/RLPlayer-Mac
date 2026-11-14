@@ -880,3 +880,22 @@ CheckResult SIGBUS 同源）。已在跳线程前同步拷出 `percent` 与 `NSS
 详见 `evidence/native-upstream-ui-compare-20261114.md` §7。
 
 **门禁**：串行 ctest 201/201、`--audit` 246/0、parity missing=0、behavior actionable=0。
+
+
+### 2026-11-15 00:xx —— 轮次 25（1.1.7.60）：补 `sp_opra_copychip` 真实控件
+
+**任务**：用户清单 #11 记录的静态表假绿；方向按用户确认「骨架/语言不动，照 Windows v3.3.11
+UI 继续做 AppKit UI」，本项先把本仓 web 版已有、原生缺失的能力补齐。
+
+**红→绿**：`test_native_opra_cards` 新增 C1–C5（真实控件 / NSButton / target+action /
+标题含 URL / 点击后剪贴板 == `https://opra.roon.app/`）。
+只加判据时 build 0 error、**2 FAIL**（C1/C2，其余因 btn=nil 跳过）→ 补实现后 build 0 error、
+5 项相关 ctest 全绿。证据 `native-opra-copychip-{red,green}-20261115.log`。
+
+**实现**：`RLPEqualizerView.mm` OPRA 搜索行追加 `NSButton`，identifier 与 web 一致，
+SF Symbol `doc.on.doc` 代替内联 SVG，action 写 `NSPasteboard` + `RLPToast`。
+i18n 复用既有词条 `已复制来源链接:` / `复制 OPRA 项目官网链接`，未改生成表。
+
+**文档**：新建 `evidence/native-opra-copychip-20261115.md`；`known-deviations` #12 改「已关闭」。
+
+**门禁**：串行 ctest 201/201、`--audit` 246/0、parity missing=0、behavior actionable=0。
