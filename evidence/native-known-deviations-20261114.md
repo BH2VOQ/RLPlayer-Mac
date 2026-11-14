@@ -23,3 +23,10 @@
 - 分析栏：`tests/test_native_analysis_panel.mm`（140+1 条，含 #28 沟槽/拇指、`.anlhide` rightGap=9）。
 - 右栏卡片：`tests/test_native_rail_cards.mm`（50 条）、`test_native_rail_states.mm`（17 条）。
 - 门禁：串行 `ctest` 201/201、`rlplayer_native --audit` 246/0、parity/behavior/i18n 全绿。
+
+## 附：非偏差类挂账（不在本表内）
+
+- **#14 播放 RENDERFAIL**：不是已解释偏差，也不是已关闭项。用户 2026-11-15 明确
+  「已经没办法拿诊断包了、不知道是哪个版本的 bug，先当不存在吧」⟹ **用户放弃提供诊断包、
+  暂挂账、停止追查**，未改播放引擎、未定位根因、**不写成已修**。完整状态见
+  `evidence/native-renderfail-status-20261115.md`。
