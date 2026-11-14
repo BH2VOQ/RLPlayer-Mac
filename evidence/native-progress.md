@@ -587,3 +587,23 @@ parity missing=0；behavior actionable=0；i18n OK（2419 pairs）。
 **证据**：`evidence/native-hover-20261114.md`、`native-hover-{red,green}-20261114.log`；对照表 #65/#66/#67 标已修。
 **门禁（1.1.7.46 树）**：build 0 error；串行全量 ctest **201/201 passed（403.59s）**；audit **246/0**；
 parity missing=0；behavior actionable=0；i18n OK（2419 pairs）。
+
+### 2026-11-14 18:0x —— 轮次 14b（1.1.7.47）：歌词空态/加载态两行文案（表 #44/#46）
+
+**任务**（Lead 定序 2）：歌词空态与加载态文案逐字对齐 web，含两行副文案。
+**先核对 web**：`#npLyric` 空态 = 主行 `没有歌词`（字号跟 `.npline` clamp 13~17）+ 副行 12px `--mut2`
+「同名 .lrc 文件、内嵌歌词，或播放时自动在线补全（可在设置-元数据补全关闭）」；抽屉 `#lyricbox` 加载态 =
+`歌词加载中…` + 副行「正在等后台补全（首次播放新曲目时可能要几秒）」。web 整页对「无曲目/网络曲目」没有
+单独文案（都是同一段空态；`网络曲目暂无歌词` 只在抽屉）。
+**判据**：`test_native_nowplaying_web` 追加 8 条：空态两行逐字、允许两行且居中、主行字号=clamp、副行=12px、
+加载态两行逐字、无曲目也走整页空态。
+**红→绿**：旧码（1.1.7.46）**6 F**（单行截断、文案不符、无副行、副行字号不适用、API 缺失、无曲目文案错位）
+→ 新码 **131 passed / 0 failures**（121 既有 + 8 新 + 前提）。
+**实现**：`lyricsEmpty` 多行居中；新增 `setLyricsPlaceholder:detail:`（主行 clamp 字号/`--mut`，副行 12px/`--mut2`，居中）；
+空态/无曲目/网络曲目统一 web 整页两行空态；加载态改 web 抽屉两行文案；失败态保留 `歌词加载失败`。
+**如实挂账**：①加载态在 web 整页并不存在（web 空歌词直接显示「没有歌词」），原生加载态是超集、文案取自抽屉；
+②`歌词加载失败` web 整页也没有，保留原生既有提示。
+**证据**：`evidence/native-lyric-text-20261114.md`、`native-lyrictext-{red,green}-20261114.log`；
+对照表 #44/#46 标已修。
+**门禁（1.1.7.47 树）**：build 0 error；串行全量 ctest **201/201 passed（390.94s）**；audit **246/0**；
+parity missing=0；behavior actionable=0；i18n OK（2419 pairs）。

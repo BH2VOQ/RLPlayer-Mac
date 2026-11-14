@@ -61,6 +61,8 @@
 - (void)applyQueueSnapshot:(nullable NSDictionary *)json;
 /// web `.chip:hover` 的视觉：底 --hov / 边 --acc / 字 --txt；退出回到 `.chip` 静态样式。
 - (void)applyChipHover:(NSButton *)button hovered:(BOOL)hovered;
+/// 歌词空态/加载态的两行文案（web `#npLyric` 空态与抽屉加载态），判据直接驱动这条路径。
+- (void)setLyricsPlaceholder:(NSString *)main detail:(NSString *)detail;
 @end
 // Web #npPage uses top-left coordinates and covers the entire window content.
 @interface RLPNPCanvas : NSView
@@ -1549,7 +1551,15 @@ static NSString *RLPRailTagText(id srValue, id bitsValue) {
     self.lyricScroll.contentView.postsBoundsChangedNotifications=YES;
     [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(onLyricScrolled:) name:NSViewBoundsDidChangeNotification object:self.lyricScroll.contentView];
     self.lyricRows=[NSMutableArray array];self.lyricLines=@[];self.lyricActiveIndex=-1;
-    self.lyricsEmpty=RLPLabel(RLPTr(@"还没有在播放"),[NSFont systemFontOfSize:14],t.mut2);self.lyricsEmpty.alignment=NSTextAlignmentCenter;[self.lyricDocument addSubview:self.lyricsEmpty];
+    // web `#npLyric` 空态是**两行**：主行 14pt(clamp) `没有歌词` + 副行 12px `--mut2` 说明。
+    // 旧码单行 `没有歌词 · 同名 LRC…` + maximumNumberOfLines=1 ⟹ 副文案被截断、字号也不对。
+    self.lyricsEmpty=RLPLabel(RLPTr(@"没有歌词"),[NSFont systemFontOfSize:14],t.mut2);
+    self.lyricsEmpty.alignment=NSTextAlignmentCenter;
+    self.lyricsEmpty.maximumNumberOfLines=0;
+    self.lyricsEmpty.lineBreakMode=NSLineBreakByWordWrapping;
+    [self.lyricDocument addSubview:self.lyricsEmpty];
+    [self setLyricsPlaceholder:@"没有歌词"
+                        detail:@"同名 .lrc 文件、内嵌歌词，或播放时自动在线补全（可在设置-元数据补全关闭）"];
     self.railTitle=RLPLabel(RLPTr(@"AI 整理"),[NSFont systemFontOfSize:9.5 weight:NSFontWeightSemibold],t.mut2);
     self.railTitle.identifier=@"npRailCap";
     // web .nprailcap：font-size:9.5px; letter-spacing:1.5px（大写小标题的疏排感，判据要量）
@@ -1867,6 +1877,29 @@ static NSString *RLPRailTagText(id srValue, id bitsValue) {
     self.webControls.frame=NSMakeRect(MAX(16,(w-1160)/2),h-76,MIN(1160,w-32),58);[self.webControls layout];
     [self layoutLyricRows];
 }
+/// web `#npLyric` 空态 / `#lyricbox` 加载态的两行文案：
+/// 主行字号跟歌词 clamp（13~17），副行固定 12px + `--mut2`，居中、可换行（`maximumNumberOfLines=0`）。
+- (void)setLyricsPlaceholder:(NSString *)main detail:(NSString *)detail {
+    const CGFloat size=(self.lyricPointSize>0.01)?self.lyricPointSize
+        :RLPNPLyricPointSize(self.webCanvas.bounds.size.height);
+    RLPTheme *t=[RLPTheme current];
+    NSMutableParagraphStyle *ps=[[NSMutableParagraphStyle alloc] init];
+    ps.alignment=NSTextAlignmentCenter;
+    ps.lineBreakMode=NSLineBreakByWordWrapping;
+    NSMutableAttributedString *as=[[NSMutableAttributedString alloc] initWithString:
+        [NSString stringWithFormat:@"%@\n", RLPTr(main ?: @"")]
+        attributes:@{NSFontAttributeName:[NSFont systemFontOfSize:size],
+                     NSForegroundColorAttributeName:t.mut,
+                     NSParagraphStyleAttributeName:ps}];
+    if (detail.length)
+        [as appendAttributedString:[[NSAttributedString alloc] initWithString:RLPTr(detail)
+            attributes:@{NSFontAttributeName:[NSFont systemFontOfSize:12],
+                         NSForegroundColorAttributeName:t.mut2,
+                         NSParagraphStyleAttributeName:ps}]];
+    self.lyricsEmpty.attributedStringValue=as;
+    self.lyricsEmpty.hidden=NO;
+}
+
 /// 按当前字号重建每行的字体/颜色（窗口高度变了要跟着换；内容/高亮状态不变）。
 - (void)restyleLyricRows {
     const CGFloat size=(self.lyricPointSize>0.01)?self.lyricPointSize
@@ -1894,7 +1927,9 @@ static NSString *RLPRailTagText(id srValue, id bitsValue) {
     self.lyricLines=[RLPLyrics parse:text];self.lyricActiveIndex=-1;
     for(NSView *v in [self.lyricRows copy])[v removeFromSuperview];[self.lyricRows removeAllObjects];
     self.lyricsEmpty.hidden=self.lyricLines.count>0;
-    self.lyricsEmpty.stringValue=RLPTr(@"没有歌词 · 同名 LRC、内嵌歌词或在线补全");
+    if(self.lyricLines.count==0)
+        [self setLyricsPlaceholder:@"没有歌词"
+                            detail:@"同名 .lrc 文件、内嵌歌词，或播放时自动在线补全（可在设置-元数据补全关闭）"];
     self.lyricPointSize=RLPNPLyricPointSize(self.webCanvas.bounds.size.height);
     for(RLPLyricLine *line in self.lyricLines){NSButton *b=[NSButton buttonWithTitle:line.text target:self action:@selector(onLyricLine:)];b.tag=self.lyricRows.count;b.bordered=NO;b.font=[NSFont systemFontOfSize:self.lyricPointSize];[self.lyricDocument addSubview:b];[self.lyricRows addObject:b];}
     [self layoutLyricRows];[self updateLyricPosition:self.webStatus.position];
@@ -2741,7 +2776,14 @@ static NSString *RLPNowPlayingCastDeviceLabel(NSString *device) {
 
 - (void)loadLyricsForPath:(NSString *)path {
     const NSUInteger seq=++self.lyricSeq;[self.lyricRetryTimer invalidate];self.lyricRetryTimer=nil;
-    if(!path.length||[path hasPrefix:@"http://"]||[path hasPrefix:@"https://"]){[self applyLyricText:@"" forPath:path];self.lyricsEmpty.stringValue=path.length?RLPTr(@"网络曲目暂无歌词"):RLPTr(@"还没有播放曲目");return;}
+    if(!path.length||[path hasPrefix:@"http://"]||[path hasPrefix:@"https://"]){
+        [self applyLyricText:@"" forPath:path];
+        // web `renderNpLyric()` 对"无歌词"只有一种两行空态（网络曲目也一样）；右侧抽屉才另有
+        // 「网络曲目暂无歌词」。旧码把抽屉文案搬到整页，属于超集/错位。
+        [self setLyricsPlaceholder:@"没有歌词"
+                            detail:@"同名 .lrc 文件、内嵌歌词，或播放时自动在线补全（可在设置-元数据补全关闭）"];
+        return;
+    }
     self.lyricRetry=0;[self fetchLyricPath:path sequence:seq];
 }
 - (void)fetchLyricPath:(NSString *)path sequence:(NSUInteger)seq {
@@ -2750,7 +2792,10 @@ static NSString *RLPNowPlayingCastDeviceLabel(NSString *device) {
         NSString *lrc=[j[@"lrc"] isKindOfClass:NSString.class]?j[@"lrc"]:@"";[s applyLyricText:lrc forPath:path];
         if(!j){s.lyricsEmpty.stringValue=RLPTr(@"歌词加载失败");return;}
         const NSInteger waits[]={1,2,3,5,8,13};
-        if(!s.lyricLines.count&&s.lyricRetry<6){s.lyricsEmpty.stringValue=RLPTr(@"歌词加载中… 正在等后台补全");NSInteger delay=waits[s.lyricRetry++];s.lyricRetryTimer=[NSTimer scheduledTimerWithTimeInterval:delay repeats:NO block:^(NSTimer *t){__typeof__(self) n=ws;if(n&&seq==n.lyricSeq&&n.polling)[n fetchLyricPath:path sequence:seq];}];}
+        if(!s.lyricLines.count&&s.lyricRetry<6){
+            [s setLyricsPlaceholder:@"歌词加载中…"
+                             detail:@"正在等后台补全（首次播放新曲目时可能要几秒）"];
+            NSInteger delay=waits[s.lyricRetry++];s.lyricRetryTimer=[NSTimer scheduledTimerWithTimeInterval:delay repeats:NO block:^(NSTimer *t){__typeof__(self) n=ws;if(n&&seq==n.lyricSeq&&n.polling)[n fetchLyricPath:path sequence:seq];}];}
     }];
 }
 

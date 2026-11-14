@@ -65,6 +65,8 @@ static void ck(bool ok,const char *n){printf("[%s] %s\n",ok?"PASS":"FAIL",n);if(
 - (void)refresh;
 - (void)applyPlayModeUI;
 - (void)refreshQueueContext;
+- (void)setLyricsPlaceholder:(NSString *)main detail:(NSString *)detail;
+- (void)loadLyricsForPath:(NSString *)path;
 @end
 int main(){@autoreleasepool{
  [NSApplication sharedApplication]; [RLPTheme setThemeName:@"light"];
@@ -411,6 +413,42 @@ int main(){@autoreleasepool{
     [seek.cell setValue:@NO forKey:@"hovered"];
   } else ck(false,"npSeek 的 hover 增高在回归中丢失");
   #undef HOVERABLE
+ }
+
+ // ---- #44/#46 歌词空态与加载态：web 两行文案逐字（主行 clamp 字号 + 副行 12px --mut2）----
+ {
+  NSTextField *empty=(NSTextField *)[vc valueForKey:@"lyricsEmpty"];
+  ck(empty!=nil,"lyricsEmpty 存在（歌词空态判据前提）");
+  if(empty){
+   const CGFloat expectMain=MIN(17.0,MAX(13.0,760.0*0.019));
+   ck(empty.maximumNumberOfLines==0,"空态允许两行（旧码单行会截断副文案）");
+   ck(empty.alignment==NSTextAlignmentCenter,"空态居中（web .nplyric2 居中）");
+   [vc setValue:@"/offline/lyric.flac" forKey:@"currentPath"];
+   [vc applyLyricText:@"" forPath:@"/offline/lyric.flac"];
+   NSString *txt=empty.attributedStringValue.string ?: @"";
+   ck([txt isEqualToString:@"没有歌词\n同名 .lrc 文件、内嵌歌词，或播放时自动在线补全（可在设置-元数据补全关闭）"],
+      [[NSString stringWithFormat:@"无歌词空态两行文案逐字=web（got「%@」）",txt] UTF8String]);
+   ck([txt rangeOfString:@"\n"].location!=NSNotFound,"空态是两行（主行+副行）");
+   NSFont *f0=(NSFont *)[empty.attributedStringValue attribute:NSFontAttributeName atIndex:0 effectiveRange:NULL];
+   ck(f0&&fabs(f0.pointSize-expectMain)<0.6,
+      [[NSString stringWithFormat:@"主行字号跟随歌词 clamp（want %.2f got %.2f）",expectMain,f0?f0.pointSize:0] UTF8String]);
+   NSRange subRange=[txt rangeOfString:@"同名"];
+   NSFont *f1=nil;
+   if(subRange.location!=NSNotFound)
+     f1=(NSFont *)[empty.attributedStringValue attribute:NSFontAttributeName atIndex:subRange.location effectiveRange:NULL];
+   ck(f1&&fabs(f1.pointSize-12.0)<0.3,"副行 12px（web <span style=font-size:12px>）");
+   BOOL hasSet=[vc respondsToSelector:@selector(setLyricsPlaceholder:detail:)];
+   ck(hasSet,"歌词两行文案 API 存在（加载态判据走同一入口）");
+   if(hasSet){
+     [vc setLyricsPlaceholder:@"歌词加载中…" detail:@"正在等后台补全（首次播放新曲目时可能要几秒）"];
+     ck([empty.attributedStringValue.string isEqualToString:@"歌词加载中…\n正在等后台补全（首次播放新曲目时可能要几秒）"],
+        "加载态两行文案逐字=web 抽屉「歌词加载中… + 正在等后台补全…」");
+   }
+   [vc setValue:@"" forKey:@"currentPath"];
+   [vc loadLyricsForPath:@""];
+   ck([empty.attributedStringValue.string hasPrefix:@"没有歌词\n同名 .lrc 文件、内嵌歌词"],
+      [[NSString stringWithFormat:@"无曲目也用 web 整页空态（旧码是「还没有播放曲目」；got「%@」）",empty.attributedStringValue.string?:@""] UTF8String]);
+  }
  }
  pendingFav=nil;method_setImplementation(shared,old);
  printf("np web: %d failures\n",fail);return fail?1:0;
