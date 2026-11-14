@@ -15,6 +15,7 @@
 @interface NSObject (RLPRailMomentumTest)
 - (void)beginMomentumWithVelocity:(CGFloat)v;
 - (void)momentumTick:(id)sender;
+- (void)onCommitPreciseVolume:(id)sender;
 @end
 static NSString *lastPath,*lastBody;static RLPJSONCompletion pendingFav;
 @interface RLPRequestSpy : NSObject
@@ -715,6 +716,36 @@ int main(){@autoreleasepool{
     ck(fabs([[wrap2 valueForKey:@"momentumVelocity"] doubleValue])<0.01,
        "惯性速度按阻尼衰减到 0（自动停止）");
   } else ck(false,"chipwrap 暴露惯性滚动入口 beginMomentumWithVelocity:");
+ }
+
+ // ---- v3.3.11 `npVolInput`：精确 dB 输入（-120~+20，Enter 确认）----
+ {
+  id barObj=[vc valueForKey:@"webControls"];
+  NSTextField *vf=[barObj valueForKey:@"volDbField"];
+  ck(vf!=nil && [vf.identifier isEqualToString:@"npVolInput"],
+     "V1 npVolInput 精确音量输入存在（v3.3.11 新增）");
+  if(vf){
+    ck(vf.target!=nil && vf.action!=NULL,"V2 npVolInput 有真实 target/action");
+    lastPath=nil;
+    vf.stringValue=@"-12.5";
+    [(id)vf.target onCommitPreciseVolume:vf];
+    ck([lastPath isEqualToString:@"/api/volume?db=-12.5"],
+       [[NSString stringWithFormat:@"V3 精确输入真下发 /api/volume?db=-12.5（got %@）",lastPath?:@"(nil)"] UTF8String]);
+    NSTextField *vl=[barObj valueForKey:@"volLabel"];
+    ck([vl.stringValue isEqualToString:@"-12.5 dB"],
+       [[NSString stringWithFormat:@"V4 音量标签同步精确值（got %@）",vl.stringValue] UTF8String]);
+    lastPath=nil;
+    vf.stringValue=@"99";
+    [(id)vf.target onCommitPreciseVolume:vf];
+    ck(lastPath==nil,"V5 越界值（99 dB）不下发请求");
+    ck([vf.stringValue isEqualToString:@"-12.5"],
+       [[NSString stringWithFormat:@"V6 越界后输入框恢复已确认值（got %@）",vf.stringValue] UTF8String]);
+    lastPath=nil;
+    vf.stringValue=@"-120";
+    [(id)vf.target onCommitPreciseVolume:vf];
+    ck([lastPath isEqualToString:@"/api/volume?db=-120.0"],
+       [[NSString stringWithFormat:@"V7 -120 dB 静音档真下发（got %@）",lastPath?:@"(nil)"] UTF8String]);
+  }
  }
 
  // ---- #39 `#npDrawer` 页内抽屉浮卡（frame/圆角/阴影/遮罩点击关闭/不动底层滚动）----

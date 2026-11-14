@@ -36,3 +36,9 @@
 - 本表只做「字符串存在性」初筛，不证明功能等价；每项移植前需读上游实现、写判据跑红再改绿。
 - 与铁律①一致：**只增不删**，不替换 UI 骨架（上游 `ui_script.h` 相对本仓 +8637/-8613 行）。
 - 原生版还需再过一遍 `tools/native_ui/parity_scan.py` / `behavior_scan.py` 的静态盲区（见 known-deviations #12）。
+
+## 进度（1.1.7.62）
+
+- **音量旋钮 / 精确音量**：已落地 `npVolInput` 精确 dB 输入（V1–V7 判据，红→绿），
+  见 `evidence/native-precise-volume-20261115.md`；旋钮本体 / 静音按钮 / 锁定闸门仍未做。
+- 其余 9 组待继续逐条对照。

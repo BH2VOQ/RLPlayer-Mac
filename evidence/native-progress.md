@@ -918,3 +918,26 @@ build 0 error、5 项相关 ctest 全绿。首轮绿阶段惯性位移得 0，�
 `self.window != nil` 时挂、`dealloc` invalidate。
 
 **门禁**：串行 ctest 201/201、`--audit` 246/0、parity missing=0、behavior actionable=0。
+
+
+### 2026-11-15 01:xx —— 轮次 27（1.1.7.62）：v3.3.11 `npVolInput` 精确 dB 音量输入
+
+**任务**：按用户确认方向，照 Windows v3.3.11 UI 补 AppKit UI；本包做待移植清单第 1 组的
+「精确音量」部分（不新增后端端点、不新增 i18n 词条）。
+
+**红→绿**：`test_native_nowplaying_web` 新增 V1–V7（控件存在 / target+action /
+`-12.5` 真下发 `/api/volume?db=-12.5` / 标签同步 / 越界不发请求 / 越界恢复已确认值 /
+`-120` 静音档下发）。仅判据时 build 0 error、**1 FAIL**（V1，其余跳过）→ 补实现后
+build 0 error、4 项相关 ctest 全绿。中途判据曾因 `ck` 只有 2 参数多传 detail 编译失败，
+已修正后重跑（假绿已排除）。
+
+**实现**：`RLPNPControlBar` 加 `volDbField`（identifier `npVolInput`、48pt、图标左侧，
+宽窗口不动 104pt 滑块）；`onCommitPreciseVolume:` 校验 -120~+20、round 0.1、下发
+`/api/volume?db=`、同步 `volLabel`/滑块；非法值红边框 + 恢复值不发请求；`refresh`
+从 `/api/status` 的 `volumeDb` 同步精确值。tooltip 复用既有词条 `音量（dB）`。
+
+**挂账**：旋钮 SVG / 静音恢复按钮 / `PLAYBACK_SETTINGS.ready` 锁定 / `rawVolumeLocked` /
+settings 写回 / Esc 取消未移植；位置与 web 不同（原生在图标左侧）。见
+`evidence/native-precise-volume-20261115.md`。
+
+**门禁**：串行 ctest 201/201、`--audit` 246/0、parity missing=0、behavior actionable=0。

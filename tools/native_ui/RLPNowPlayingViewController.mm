@@ -294,6 +294,9 @@ static void RLPSetKernedText(NSTextField *label, NSString *text, CGFloat kern) {
 @property (nonatomic, strong) NSTextField *sepLabel;
 @property (nonatomic, strong) NSTextField *durLabel;
 @property (nonatomic, strong) NSTextField *volLabel;
+/// v3.3.11 `npVolInput`：精确 dB 输入（-120~+20，Enter 确认）。
+@property (nonatomic, strong) NSTextField *volDbField;
+@property (nonatomic, assign) double preciseVolumeDb;
 @property (nonatomic, strong) NSButton *repBtn;
 /// web #npRepOne：单曲循环时叠在循环键上的「1」角标（10px/700）。
 @property (nonatomic, strong) NSTextField *repBadge;
@@ -306,6 +309,30 @@ static void RLPSetKernedText(NSTextField *label, NSString *text, CGFloat kern) {
 @end
 
 @implementation RLPNPControlBar
+
+/// v3.3.11 `commitPreciseVolume` 的 AppKit 等价：-120~+20 dB，Enter 确认。
+/// 非法值按 web `aria-invalid` 的等价处理：标红边框 + 恢复已确认值，**不发请求**。
+- (void)onCommitPreciseVolume:(id)sender {
+    (void)sender;
+    NSString *text = [self.volDbField.stringValue stringByTrimmingCharactersInSet:
+                      [NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    const double db0 = text.doubleValue;
+    const BOOL valid = text.length > 0 && isfinite(db0) && db0 >= -120.0 && db0 <= 20.0;
+    if (!valid) {
+        self.volDbField.layer.borderWidth = 1;
+        self.volDbField.layer.borderColor = [RLPTheme current].danger.CGColor;
+        self.volDbField.stringValue = [NSString stringWithFormat:@"%.1f", self.preciseVolumeDb];
+        return;
+    }
+    const double db = round(db0 * 10.0) / 10.0;
+    self.volDbField.layer.borderWidth = 0;
+    self.preciseVolumeDb = db;
+    self.volDbField.stringValue = [NSString stringWithFormat:@"%.1f", db];
+    self.volLabel.stringValue = RLPNPVolDbLabel(db);
+    self.volume.doubleValue = RLPNPVolDbToPos(db);
+    [[RLPCoreClient shared] postJSON:[NSString stringWithFormat:@"/api/volume?db=%.1f", db]
+                                body:nil completion:nil];
+}
 
 - (instancetype)initWithFrame:(NSRect)frameRect {
     self = [super initWithFrame:frameRect];
@@ -412,9 +439,21 @@ static void RLPSetKernedText(NSTextField *label, NSString *text, CGFloat kern) {
     self.volLabel.identifier = @"np.vollab";
     self.volLabel.alignment = NSTextAlignmentRight;
 
+    // v3.3.11 `npVolInput` / `commitPreciseVolume`：精确 dB 输入（Enter 确认）。
+    // tooltip 复用既有词条「音量（dB）」，不新增 i18n 键。
+    self.volDbField = [[NSTextField alloc] initWithFrame:NSZeroRect];
+    self.volDbField.identifier = @"npVolInput";
+    self.volDbField.placeholderString = @"0.0";
+    self.volDbField.font = [NSFont monospacedDigitSystemFontOfSize:11 weight:NSFontWeightRegular];
+    self.volDbField.alignment = NSTextAlignmentRight;
+    self.volDbField.toolTip = RLPTr(@"音量（dB）");
+    self.volDbField.target = self;
+    self.volDbField.action = @selector(onCommitPreciseVolume:);
+    self.volDbField.wantsLayer = YES;
+
     for (NSView *v in @[self.seek, self.posLabel, self.sepLabel, self.durLabel, self.repBtn,
                         self.prevBtn, self.playBtn, self.nextBtn, self.stopBtn,
-                        self.volIcon, self.volume, self.volLabel, self.repBadge]) {
+                        self.volIcon, self.volume, self.volLabel, self.volDbField, self.repBadge]) {
         [self addSubview:v];
     }
     return self;
@@ -464,9 +503,20 @@ static void RLPSetKernedText(NSTextField *label, NSString *text, CGFloat kern) {
         sliderX = labelX - volGap - sliderW;
         iconX = sliderX - volGap - iconW;
     }
+    // v3.3.11 `npVolInput`：精确 dB 输入放在音量图标左侧；宽窗口保持 web 的 104pt 滑块，
+    // 窄窗口才按剩余空间收缩滑块（与上面 minIconX 同一套守卫）。
+    const CGFloat preciseW = 48.0;
+    CGFloat preciseX = iconX - volGap - preciseW;
+    if (preciseX < minIconX) {
+        sliderW = MAX(56.0, sliderW - (minIconX - preciseX));
+        sliderX = labelX - volGap - sliderW;
+        iconX = sliderX - volGap - iconW;
+        preciseX = iconX - volGap - preciseW;
+    }
     self.volIcon.frame = NSMakeRect(iconX, rowCY - 7, iconW, 14);
     self.volume.frame = NSMakeRect(sliderX, rowCY - 9, sliderW, 18);
     self.volLabel.frame = NSMakeRect(labelX, rowCY - 8, volLabW, 16);
+    self.volDbField.frame = NSMakeRect(preciseX, rowCY - 8, preciseW, 16);
 }
 
 - (void)applyTheme {
@@ -478,6 +528,7 @@ static void RLPSetKernedText(NSTextField *label, NSString *text, CGFloat kern) {
     for (NSButton *b in @[self.prevBtn, self.playBtn, self.nextBtn, self.stopBtn])
         b.contentTintColor = t.text;
     self.volIcon.contentTintColor = t.mut;
+    self.volDbField.textColor = t.text;
     self.repBadge.textColor = t.accentText;
 }
 
@@ -3115,6 +3166,8 @@ static NSString *RLPNowPlayingCastDeviceLabel(NSString *device) {
         if(!self_.webControls.seek.dragging)self_.webControls.seek.doubleValue=st.duration>0?st.position/st.duration:0;
         if(!self_.webControls.volume.dragging)self_.webControls.volume.doubleValue=RLPNPVolDbToPos(st.volumeDb);
         self_.webControls.volLabel.stringValue=RLPNPVolDbLabel(st.volumeDb);
+        self_.webControls.preciseVolumeDb=st.volumeDb;
+        self_.webControls.volDbField.stringValue=[NSString stringWithFormat:@"%.1f",st.volumeDb];
         self_.webControls.playBtn.image=[NSImage imageWithSystemSymbolName:st.playing&&!st.paused?@"pause.fill":@"play.fill" accessibilityDescription:@"播放 / 暂停"];
         self_.webControls.playBtn.contentTintColor=NSColor.whiteColor;
         [self_ updateLyricPosition:st.position];
