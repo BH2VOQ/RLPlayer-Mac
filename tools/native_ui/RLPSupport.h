@@ -93,6 +93,20 @@ void RLPPlayAlbum(NSString *albumKey, NSInteger startIndex);
 void RLPEnqueuePath(NSString *path);
 void RLPPostJSON(NSString *path, NSString * _Nullable body);
 
+/// 播放/暂停的**唯一决策**（与 web playOrPause 同语义）：
+///   播放中（playing && !paused）→ /api/pause?on=1
+///   暂停中（paused）             → /api/pause?on=0
+///   已停止但知道当前曲目         → /api/play（只发 pause 不会有任何反应，web 同口径重播）
+///   以上都不是                   → 不发请求
+/// 底栏、播放页、菜单/媒体键三入口都必须走这里，避免各自维护一份会漂移的判定。
+void RLPPlaybackToggle(BOOL playing, BOOL paused, NSString * _Nullable currentPath);
+/// 显式暂停（系统 pauseCommand 的语义）：永远发 /api/pause?on=1，不看 UI 状态快照。
+/// 为什么不能用复选框判定：状态轮询 0.5s 一拍，后台被 App Nap 降频/某次请求丢失时快照可能是旧的，
+/// 「用户明确要求暂停」不能因为旧快照而静默不发请求。
+void RLPPlaybackPauseExplicit(void);
+/// 显式继续/重播（系统 playCommand 的语义）：已在播→什么都不做；暂停中→on=0；已停止且有曲目→重播。
+void RLPPlaybackResumeOrReplay(BOOL playing, BOOL paused, NSString * _Nullable currentPath);
+
 /// 整列顺序播放（对齐 web playWholeListFrom）：先用 /api/queue/set 以给定路径列表建队列，
 /// 成功后从 start 起播。files 为空不做任何事；单曲循环模式（2）先切回列表循环（1），
 /// 否则播完第一首会一直重复，与"顺序播放整列"的心智相悖（web ensureSequentialMode 同口径）。

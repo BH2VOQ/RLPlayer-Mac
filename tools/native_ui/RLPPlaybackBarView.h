@@ -13,8 +13,13 @@ NS_ASSUME_NONNULL_BEGIN
 - (void)startPolling;
 - (void)stopPolling;
 
-/// 菜单/快捷键入口（等幂：playing 时暂停，否则播放/继续）。
+/// 菜单/快捷键的切换入口（与 web playOrPause 同语义：播放中→暂停；暂停中→继续；
+/// 已停止→重播当前曲目）。三条入口（底栏/播放页/菜单）共用 RLPSupport 的同一判定。
 - (void)playPause;
+/// 系统 pauseCommand 的显式入口：永远发 /api/pause?on=1，不看状态快照。
+- (void)pausePlayback;
+/// 系统 playCommand 的显式入口：已在播→空转；暂停中→继续；已停止→重播当前曲目。
+- (void)resumeOrReplay;
 - (void)nextTrack;
 - (void)previousTrack;
 

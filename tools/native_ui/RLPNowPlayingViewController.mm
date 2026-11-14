@@ -1597,7 +1597,11 @@ static NSString *RLPRailTagText(id srValue, id bitsValue) {
 - (void)onToggleAuto:(id)sender {self.anlAutoEnabled=!self.anlAutoEnabled;self.anlAutoSettingAt=[NSDate timeIntervalSinceReferenceDate];[[RLPCoreClient shared] postJSON:@"/api/settings" body:self.anlAutoEnabled?@"autoanl=1":@"autoanl=0" completion:nil];[self anlPaint];if(self.anlAutoEnabled)[self anlAutoTickForPath:self.currentPath playing:self.webStatus.playing paused:self.webStatus.paused];}
 - (void)onPrevious:(id)s {[[RLPCoreClient shared] postJSON:@"/api/skip?dir=-1" body:nil completion:nil];}
 - (void)onNext:(id)s {[[RLPCoreClient shared] postJSON:@"/api/skip?dir=1" body:nil completion:nil];}
-- (void)onPause:(id)s {BOOL pause=self.webStatus.playing&&!self.webStatus.paused;[[RLPCoreClient shared] postJSON:pause?@"/api/pause?on=1":@"/api/pause?on=0" body:nil completion:nil];}
+- (void)onPause:(id)s {
+    // 与底栏/菜单同一条决策（RLPSupport::RLPPlaybackToggle）：播放页以前在「已停止」时
+    // 只发 /api/pause?on=0（no-op），与 web playOrPause 的"重播"行为不一致。
+    RLPPlaybackToggle(self.webStatus.playing, self.webStatus.paused, self.webStatus.currentPath);
+}
 - (void)onStop:(id)s {[[RLPCoreClient shared] postJSON:@"/api/stop" body:nil completion:nil];}
 - (void)onCycleMode:(id)s {self.playbackMode=(self.playbackMode+1)%4;[[RLPCoreClient shared] postJSON:[NSString stringWithFormat:@"/api/playmode?mode=%ld",(long)self.playbackMode] body:nil completion:nil];}
 - (void)onCommitSeek:(id)s {if(self.webControls.seek.dragging)return;[[RLPCoreClient shared] postJSON:[NSString stringWithFormat:@"/api/seek?pos=%.6f",self.webControls.seek.doubleValue] body:nil completion:nil];self.lyricManualUntil=0;}

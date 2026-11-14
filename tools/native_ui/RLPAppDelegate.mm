@@ -215,8 +215,10 @@ static void STCheck(BOOL ok, const char *what, NSString *detail) {
         (void)e;
         __typeof__(self) self_ = weakSelf;
         if (!self_) return MPRemoteCommandHandlerStatusCommandFailed;
-        // play 语义是"继续播放"，但如果本来在播就什么都不做（幂等）
-        if (!self_.mainWC.playbackBar.isPlaying) [self_.mainWC.playbackBar playPause];
+        // play 语义：已在播→空转；暂停中→继续；已停止→重播当前曲目。
+        // 不能沿用「!isPlaying 就 playPause」：停止态下 playPause 发的是 /api/pause?on=0，
+        // 后端对停止态不起播 ⟹ 系统 play 键看起来完全没反应（用户在实机上报过同型）。
+        [self_.mainWC.playbackBar resumeOrReplay];
         return MPRemoteCommandHandlerStatusSuccess;
     }];
 
@@ -225,7 +227,8 @@ static void STCheck(BOOL ok, const char *what, NSString *detail) {
         (void)e;
         __typeof__(self) self_ = weakSelf;
         if (!self_) return MPRemoteCommandHandlerStatusCommandFailed;
-        if (self_.mainWC.playbackBar.isPlaying) [self_.mainWC.playbackBar playPause];
+        // 系统「暂停」必须真的发出 on=1：不能依赖 isPlaying 快照，否则快照过期时静默丢命令。
+        [self_.mainWC.playbackBar pausePlayback];
         return MPRemoteCommandHandlerStatusSuccess;
     }];
 

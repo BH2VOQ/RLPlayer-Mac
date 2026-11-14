@@ -354,6 +354,24 @@ void RLPPlayPathCue(NSString *path, double cs, double ce) {
     RLPPostJSON(@"/api/play", body);
 }
 
+void RLPPlaybackToggle(BOOL playing, BOOL paused, NSString *currentPath) {
+    if (playing && !paused) { RLPPostJSON(@"/api/pause?on=1", nil); return; }
+    if (paused) { RLPPostJSON(@"/api/pause?on=0", nil); return; }
+    // 已停止：与 web playOrPause 相同 —— 只发 /api/pause?on=0 是 no-op（本轮用户报过的原话）。
+    if (currentPath.length) { RLPPlayPath(currentPath); return; }
+    RLPToast(RLPTr(@"队列是空的"));
+}
+
+void RLPPlaybackPauseExplicit(void) {
+    RLPPostJSON(@"/api/pause?on=1", nil);
+}
+
+void RLPPlaybackResumeOrReplay(BOOL playing, BOOL paused, NSString *currentPath) {
+    if (playing && !paused) return;              // 已在播：playCommand 等幂，不打断
+    if (paused) { RLPPostJSON(@"/api/pause?on=0", nil); return; }
+    if (currentPath.length) { RLPPlayPath(currentPath); return; }
+}
+
 void RLPPlayAlbum(NSString *albumKey, NSInteger startIndex) {
     if (!albumKey.length) return;
     RLPPostJSON(@"/api/lib/play", [NSString stringWithFormat:@"k=%@&i=%ld", RLPEnc(albumKey), (long)startIndex]);

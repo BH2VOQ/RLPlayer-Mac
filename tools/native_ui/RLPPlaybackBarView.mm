@@ -862,9 +862,22 @@ static double RLPVolDbToPos(double db) {
 
 - (void)playPause {
     if (!self.polling) return;
-    BOOL playing = self.lastStatus.playing && !self.lastStatus.paused;
-    NSString *path = [NSString stringWithFormat:@"/api/pause?on=%d", playing ? 1 : 0];
-    [[RLPCoreClient shared] postJSON:path body:nil completion:nil];
+    RLPPlaybackStatus *st = self.lastStatus;
+    // 与 web playOrPause 同一条判定（播放中→暂停 / 暂停中→继续 / 已停止→重播）：
+    // 以前这里在「已停止」时只发 /api/pause?on=0，后端对停止态不会起播 ⟹ 看起来"按钮没反应"。
+    RLPPlaybackToggle(st.playing, st.paused, st.currentPath);
+}
+
+- (void)pausePlayback {
+    if (!self.polling) return;
+    // 系统「暂停」是显式命令：不看 0.5s 轮询快照（后台 App Nap/丢请求时快照可能过期）。
+    RLPPlaybackPauseExplicit();
+}
+
+- (void)resumeOrReplay {
+    if (!self.polling) return;
+    RLPPlaybackStatus *st = self.lastStatus;
+    RLPPlaybackResumeOrReplay(st.playing, st.paused, st.currentPath);
 }
 
 - (void)nextTrack {

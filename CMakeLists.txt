@@ -307,6 +307,23 @@ if(APPLE)
   target_include_directories(test_native_bar_core PRIVATE src tools tools/native_ui)
   target_link_libraries(test_native_bar_core PRIVATE rlapp_core
     "-framework AppKit" "-framework MediaPlayer")
+
+  # 播放/暂停三入口请求契约（P0-1）：底栏 / 播放页 / 菜单·媒体键显式命令。
+  # 桩核心只记录请求路径，不启动播放核心、不打开音频设备。
+  # 对 1.1.7.32 先跑红：停止态只发 /api/pause?on=0（no-op）、媒体键沿用 isPlaying 快照。
+  add_executable(test_native_pause_paths tests/test_native_pause_paths.mm
+    tools/native_ui/RLPPlaybackBarView.mm tools/native_ui/RLPSignalChain.mm
+    tools/native_ui/RLPSupport.mm tools/native_ui/RLPModels.mm
+    tools/native_ui/RLPTheme.mm tools/native_ui/RLPNativeI18n.mm
+    tools/native_ui/RLPNowPlayingViewController.mm tools/native_ui/RLPPageViewController.mm
+    tools/native_ui/RLPKnowledgeView.mm tools/native_ui/RLPAnalysisSummary.mm
+    tools/native_ui/RLPLyrics.mm tools/native_ui/RLPTrackActions.mm)
+  target_compile_options(test_native_pause_paths PRIVATE -fobjc-arc)
+  target_include_directories(test_native_pause_paths PRIVATE src tools tools/native_ui)
+  target_link_libraries(test_native_pause_paths PRIVATE
+    "-framework AppKit" "-framework QuartzCore" "-framework CoreImage")
+  add_test(NAME native_pause_paths COMMAND test_native_pause_paths)
+  set_tests_properties(native_pause_paths PROPERTIES TIMEOUT 120)
   # 单层滚动 + EQ 曲线拖动（第6/7项）。**必须真实窗口响应链**：
   # 上一轮的 EQ 拖动判据只调 applyDragEvent:（等于只测换算函数），
   # 完全证明不了「真实鼠标事件能走到这个视图」——本轮换成 NSWindow sendEvent。
