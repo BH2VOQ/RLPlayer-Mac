@@ -127,7 +127,28 @@ int main(){@autoreleasepool{
  [vc setValue:status forKey:@"webStatus"];
  [vc onPause:nil];ck([lastPath isEqual:@"/api/pause?on=1"],"pause request explicitly sets on=1");
  status.paused=YES;[vc onPause:nil];ck([lastPath isEqual:@"/api/pause?on=0"],"resume request explicitly sets on=0");
- id controls=[vc valueForKey:@"webControls"];NSSlider *seek=[controls valueForKey:@"seek"];seek.doubleValue=.5;[vc onCommitSeek:nil];ck([lastPath isEqual:@"/api/seek?pos=0.500000"],"seek uses real backend pos parameter, not ignored ratio");
+ id controls=[vc valueForKey:@"webControls"];NSSlider *seek=[controls valueForKey:@"seek"];seek.doubleValue=.5;[vc onCommitSeek:nil];ck([lastPath isEqual:@"/api/seek?pos=0.5000"],"seek uses real backend pos parameter, not ignored ratio");   // v3.3.11 toFixed(4) 精度
+ // ---- S 系列：v3.3.11 doSeek 的三条守卫（ui_script.h:6572-6575）----
+ // 上游原码：if (!S.playing || !(S.dur > 0) || !Number.isFinite(frac)) return;
+ //           var f = Math.max(0, Math.min(0.9999, frac));  api('/api/seek?pos=' + f.toFixed(4));
+ // 旧码直接 "/api/seek?pos=%.6f" ⟹ 未播放/无时长也发请求，且 pos 可能超出后端接受范围。
+ {
+  lastPath=nil;
+  [vc setValue:[RLPPlaybackStatus statusFromJSON:@{@"ok":@1,@"playing":@0,@"paused":@0,@"dur":@10}] forKey:@"webStatus"];
+  seek.doubleValue=.3;[vc onCommitSeek:nil];
+  ck(![lastPath hasPrefix:@"/api/seek"],"S1a 未播放时不发 seek（上游 !S.playing ⟹ return）");
+  [vc setValue:[RLPPlaybackStatus statusFromJSON:@{@"ok":@1,@"playing":@1,@"paused":@0,@"dur":@0}] forKey:@"webStatus"];
+  lastPath=nil;seek.doubleValue=.3;[vc onCommitSeek:nil];
+  ck(![lastPath hasPrefix:@"/api/seek"],"S1b 时长为 0 时不发 seek（上游 !(S.dur>0) ⟹ return）");
+  [vc setValue:[RLPPlaybackStatus statusFromJSON:@{@"ok":@1,@"playing":@1,@"paused":@0,@"dur":@10}] forKey:@"webStatus"];
+  lastPath=nil;seek.doubleValue=1.0;[vc onCommitSeek:nil];
+  ck([lastPath isEqual:@"/api/seek?pos=0.9999"],"S2 pos=1.0 被 clamp 到 0.9999（上游 Math.min(0.9999,frac)）");
+  lastPath=nil;seek.doubleValue=-0.5;[vc onCommitSeek:nil];
+  ck([lastPath isEqual:@"/api/seek?pos=0.0000"],"S3 负值被 clamp 到 0.0000（上游 Math.max(0,…)）");
+  lastPath=nil;seek.doubleValue=.5;[vc onCommitSeek:nil];
+  ck([lastPath isEqual:@"/api/seek?pos=0.5000"],"S4 正常值按上游 toFixed(4) 精度下发");
+ }
+
  BOOL castAPI=[vc respondsToSelector:@selector(castBodyForDevice:)];ck(castAPI,"cast request construction is directly verifiable");
  if(castAPI){NSString *location=@"http://offline/device.xml?x=a&v=+";NSString *path=@"/offline/song&demo+.flac";[vc setValue:path forKey:@"currentPath"];NSString *body=[vc castBodyForDevice:@{@"location":location,@"name":@"fixture"}];NSMutableDictionary *fields=[NSMutableDictionary dictionary];for(NSString *part in [body componentsSeparatedByString:@"&"]){NSRange sep=[part rangeOfString:@"="];if(sep.location==NSNotFound)continue;fields[[part substringToIndex:sep.location]]=[[[part substringFromIndex:sep.location+1] stringByReplacingOccurrencesOfString:@"+" withString:@" "] stringByRemovingPercentEncoding];}ck([fields[@"file"] isEqual:path]&&[fields[@"dev"] isEqual:location],"cast form roundtrips real file and location including ampersand and plus");}
  [vc setValue:@"/offline/A.flac" forKey:@"currentPath"];[vc setValue:@NO forKey:@"favorite"];[vc onFav:nil];

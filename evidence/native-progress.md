@@ -1141,3 +1141,21 @@ reset 只标记不删图（与上游一致）、夹具为构造 PNG 不解码。
 
 **挂账**：两项不新增代码、不升版本、无新词条；原生确实没有「运行期回传漏译」通道，
 若将来需要应扩编译期检查覆盖面而不是再造网络遥测。
+
+### 2026-11-15 05:xx —— 轮次 37（1.1.7.70）：v3.3.11 doSeek 守卫 + 精度
+
+**范围判断**：``npWaveform``（真波形）需要新分析模块 + 缓存/后台 worker + 新端点 + Canvas 绘制，
+是跨三个模块的新子系统，超出小范围改动 ⟹ 只读评估记入证据第 5 节，本轮不做。
+真正可聚焦的是 ``doSeek`` 的守卫与精度，本包做这部分。
+
+**旧码缺陷**：``onCommitSeek:`` 是一条单行实现，三条守卫一条都没有 —— 未播放/时长未知照发 seek；
+拖到最右发 ``pos=1.000000``（后端会精确跳到文件末尾）；精度 6 位与上游 ``toFixed(4)`` 不一致。
+
+**实现**：按上游逐条加 ``!st.playing`` / ``!(st.duration > 0)`` / ``!isfinite(raw)`` 守卫，
+``fmin(0.9999, fmax(0.0, raw))`` 后以 ``%.4f`` 下发；``lyricManualUntil = 0`` 保留（对应上游 lyricReposition）。
+
+**红→绿**：新增 S1a/S1b/S2/S3/S4。红 build 0 error、**5 FAIL** → 绿 build 0 error、``np web: 0 failures``。
+既有判据「seek uses real backend pos parameter」随之从 6 位改 4 位（精度本身即移植目标，不是放宽判据）。
+
+**门禁**：串行 ctest 202/202、``--audit`` 246/0、parity missing=0、behavior actionable=0。
+

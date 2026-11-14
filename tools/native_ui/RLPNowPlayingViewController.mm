@@ -2545,7 +2545,20 @@ static NSString *RLPRailTagText(id srValue, id bitsValue) {
     }
     if (self.webControls.repBadge) self.webControls.repBadge.hidden = (m != 2);
 }
-- (void)onCommitSeek:(id)s {if(self.webControls.seek.dragging)return;[[RLPCoreClient shared] postJSON:[NSString stringWithFormat:@"/api/seek?pos=%.6f",self.webControls.seek.doubleValue] body:nil completion:nil];self.lyricManualUntil=0;}
+- (void)onCommitSeek:(id)s {
+    if(self.webControls.seek.dragging)return;
+    // v3.3.11 doSeek（ui_script.h:6572-6575）逐条移植：
+    //   if (!S.playing || !(S.dur > 0) || !Number.isFinite(frac)) return;
+    //   var f = Math.max(0, Math.min(0.9999, frac));  api('/api/seek?pos=' + f.toFixed(4));
+    // 为什么要这三条守卫：未播放或时长未知时发 /api/seek 只会得到后端拒绝；
+    // 而 pos 传 1.0 会让后端精确跳到文件末尾（上游因此把上界钉在 0.9999）。
+    RLPPlaybackStatus *st = self.webStatus;
+    const double raw = self.webControls.seek.doubleValue;
+    if (!st || !st.playing || !(st.duration > 0) || !isfinite(raw)) return;
+    const double f = fmin(0.9999, fmax(0.0, raw));
+    [[RLPCoreClient shared] postJSON:[NSString stringWithFormat:@"/api/seek?pos=%.4f", f] body:nil completion:nil];
+    self.lyricManualUntil = 0;
+}
 - (void)onCommitVolume:(id)s {if(self.webControls.volume.dragging)return;double db=RLPNPVolPosToDb(self.webControls.volume.doubleValue);self.webControls.volLabel.stringValue=RLPNPVolDbLabel(db);[[RLPCoreClient shared] postJSON:[NSString stringWithFormat:@"/api/volume?db=%.1f",db] body:nil completion:nil];}
 - (void)onSaveCurrent:(id)s {
     if(!self.currentPath.length)return;

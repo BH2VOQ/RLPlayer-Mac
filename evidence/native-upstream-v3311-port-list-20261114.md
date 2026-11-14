@@ -93,3 +93,12 @@
   `rlplayer_native --audit`（246 项）+ 202 项 ctest。i18n 运行时上报的原生等价物是
   **编译期** `native_i18n_coverage`（当前 0 缺失）—— 比「出事才知道」更硬。
   见 `evidence/native-qa-i18n-harness-na-20261115.md`。
+
+## 进度（1.1.7.70）
+
+- **波形 / 传输进度**：可聚焦部分（``doSeek`` 的三条守卫 + clamp 0.9999 + ``toFixed(4)`` 精度）已移植，
+  S1–S4 红→绿，见 ``evidence/native-seek-guard-20261115.md``。
+  **``npWaveform`` 真波形未做**：它是跨「分析模块 + 缓存/后台 worker + 新端点 + Canvas 绘制」的
+  新子系统（上游 ``src/analysis/waveform.h`` + ``src/net/ui_waveform.h`` 18.7 KB），超出小范围改动，
+  需独立排期；证据第 5 节给了完整只读评估。播放页进度**功能**已完整（波形是可视化增强）。
+
