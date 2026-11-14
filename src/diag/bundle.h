@@ -97,9 +97,13 @@ inline constexpr const char* kDiagName      = "diag.json";
 inline constexpr const char* kEventsName    = "events.jsonl";
 inline constexpr const char* kUiEventsName  = "uievents.jsonl";
 
-// 12 MB = ROADMAP D6 的整包目标；256 KiB 预留给 manifest/checksums/report；
+// 反馈通道的硬上限是解码后 8 MiB（后台/页面两边同一闸门，见 feedback_api.h）。
+// 诊断包 ZIP 用 STORE（不压缩，见 src/net/zipstore.h），所以**预算必须给
+// manifest/checksums/report 和 ZIP 目录留出余量**：7.5 MiB 预算 + 256 KiB 元数据预留
+// ⟹ 条目 ≤ ~7.25 MiB，实测真实 ZIP ≤ 8 MiB。旧值 12 MiB 会生成 >8 MiB 的 zip，
+// 用户实机在"反馈附带诊断包"处被 8 MiB 闸门拦下（P0-2）。
 // 16 KiB 是"尾部还值得留"的下限（再小就只能看到半条日志，不如把预算让给别的条目）。
-inline constexpr std::size_t kDefaultBudgetBytes = 12u * 1024u * 1024u;
+inline constexpr std::size_t kDefaultBudgetBytes = 7680u * 1024u;  // 7.5 MiB
 inline constexpr std::size_t kMetaReserveBytes   = 256u * 1024u;
 inline constexpr std::size_t kMinUsefulTailBytes = 16u * 1024u;
 

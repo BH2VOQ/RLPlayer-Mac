@@ -2717,6 +2717,15 @@ static NSInteger RLPSearchIndexForProviderId(NSString *pid) {
         __typeof__(self) self_ = weakSelf;
         if (!self_) return;
         if (!data.length) { RLPToast(RLPTr(@"诊断包导出失败")); return; }
+        // 服务端超预算时回的是 JSON 错误报文（不是 ZIP）。不能把它存成 .zip 假装成功；
+        // 也顺手兜住 8 MiB 上限（与反馈通道同一闸门，P0-2）。
+        const NSUInteger nbytes = data.length;
+        const unsigned char *pb = (const unsigned char *)data.bytes;
+        const bool isZip = nbytes >= 4 && pb[0] == 'P' && pb[1] == 'K' && pb[2] == 3 && pb[3] == 4;
+        if (!isZip || nbytes > 8u * 1024u * 1024u) {
+            RLPToast(RLPTr(@"诊断包导出失败"));
+            return;
+        }
         NSSavePanel *panel = [NSSavePanel savePanel];
         panel.nameFieldStringValue = @"rlplayer-diag.zip";
         if ([panel runModal] != NSModalResponseOK || !panel.URL) return;
@@ -2725,7 +2734,11 @@ static NSInteger RLPSearchIndexForProviderId(NSString *pid) {
             RLPToast(err.localizedDescription ?: RLPTr(@"写入失败"));
             return;
         }
-        RLPToast([NSString stringWithFormat:RLPTr(@"已导出 %@"), panel.URL.lastPathComponent]);
+        // 提示里写**真实字节数**（UI 文案必须与落盘大小一致；MB 只是人类可读换算）。
+        NSString *name = panel.URL.lastPathComponent;
+        RLPToast([NSString stringWithFormat:@"%@  %.2f MB",
+                  [NSString stringWithFormat:RLPTr(@"已导出 %@"), name],
+                  (double)nbytes / (1024.0 * 1024.0)]);
     }];
 }
 

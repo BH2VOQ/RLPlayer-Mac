@@ -572,6 +572,73 @@ int main() {
     }
 
     // ------------------------------------------------------------------
+    section("P0-2：默认预算下真实 ZIP ≤ 8 MiB（大日志按尾部裁剪）");
+    {
+        // 夹具与用户实机同形：events/uievents 与 4 份历史日志都很大（共约 20 MiB），
+        // 但只允许默认预算产出 ≤8 MiB 的 STORE ZIP。旧码默认 12 MiB ⟹ ZIP 会越过上限。
+        auto line_blob = [](const std::string& head, std::size_t bytes, const std::string& tail) {
+            std::string s = head;
+            s.push_back('\n');
+            const std::string line =
+                "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\n";
+            while (s.size() + tail.size() + line.size() + 2 <= bytes) s += line;
+            s += tail;
+            s.push_back('\n');
+            return s;
+        };
+        BundleSpec spec;
+        spec.cs.origin = "test";
+        spec.app_version = "1.1.7.33";
+        std::vector<BundleEntry> items;
+        items.push_back(make_entry(kDiagName, "{\"os\":\"macOS 27.x\",\"arch\":\"arm64\"}", EntryKind::Json, 100));
+        items.push_back(make_entry(kEventsName,
+            line_blob("HEAD-EVENTS", 3u * 1024u * 1024u, "TAIL-EVENTS"), EntryKind::Jsonl, 80));
+        items.push_back(make_entry(kUiEventsName,
+            line_blob("HEAD-UIEVENTS", 3u * 1024u * 1024u, "TAIL-UIEVENTS"), EntryKind::Jsonl, 60));
+        items.push_back(make_entry("launcher.log",
+            line_blob("HEAD-LAUNCHER", 3u * 1024u * 1024u, "TAIL-LAUNCHER"), EntryKind::Log, 40));
+        for (const char* name : {"rlplayer-playback.log", "rlplayer-playback.log.1",
+                                 "rlplayer-playback.log.2"}) {
+            items.push_back(make_entry(name,
+                line_blob(std::string("HEAD-") + name, 3u * 1024u * 1024u,
+                          std::string("TAIL-") + name), EntryKind::Log, 40));
+        }
+        const AssembleResult r = assemble(spec, std::move(items), "报告正文\n");
+        ck(r.ok, "大日志包组装成功", r.err);
+        ck(!r.over_budget, "默认预算下不超预算");
+        ck(r.total_bytes <= r.budget_bytes, "整包 ≤ 默认预算",
+           std::to_string(r.total_bytes) + " vs " + std::to_string(r.budget_bytes));
+
+        const std::string z = zip_of(r);
+        std::printf("  实测：entries=%zu bytes, budget=%zu, ZIP=%zu bytes\n",
+                    r.total_bytes, r.budget_bytes, z.size());
+        ck(z.size() > 4u * 1024u * 1024u, "ZIP 真的带了大量证据（不是空包）",
+           std::to_string(z.size()));
+        ck(z.size() <= 8u * 1024u * 1024u, "真实 ZIP ≤ 8 MiB（反馈通道硬上限）",
+           std::to_string(z.size()) + " bytes");
+        ck(z.size() > 4 && z[0] == 'P' && z[1] == 'K', "ZIP 以 PK 开头");
+
+        std::set<std::string> have;
+        const MaterializedEntry* launcher = nullptr;
+        for (const auto& e : r.entries) {
+            have.insert(e.rec.name);
+            if (e.rec.name == "launcher.log") launcher = &e;
+        }
+        ck(have.count(kDiagName) && have.count(kEventsName) &&
+           have.count(kUiEventsName) && have.count(kReportName),
+           "版本/事件/UI 事件/报告 必需条目齐全");
+        ck(launcher != nullptr, "launcher.log 在包里（日志条目没有被整类排除）");
+        if (launcher) {
+            ck(launcher->rec.truncated, "launcher.log 被裁剪（不是原样 3 MiB 全带）");
+            ck(launcher->data.find("TAIL-LAUNCHER") != std::string::npos,
+               "裁剪保留**尾部**（最近日志还在）");
+            ck(launcher->data.find("HEAD-LAUNCHER") == std::string::npos,
+               "裁剪丢弃**头部**（旧日志让位给核心条目）");
+        }
+        ck(!r.dropped.empty(), "装不下的整条日志被丢弃并记账（manifest 可审计）");
+    }
+
+    // ------------------------------------------------------------------
     std::printf("\n%s：通过 %d / 失败 %d\n", g_fails == 0 ? "全部通过" : "存在失败",
                 g_pass, g_fails);
     if (std::getenv("RTADIAG_KEEP_TMP")) {
