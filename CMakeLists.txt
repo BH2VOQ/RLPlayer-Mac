@@ -430,6 +430,21 @@ if(APPLE)
   add_test(NAME native_empty_states COMMAND test_native_empty_states)
   set_tests_properties(native_empty_states PROPERTIES TIMEOUT 120)
 
+  # AI 整理栏 nprailempty / npSummHint 状态：无实体时三卡不显示并出空态说明；
+  # loading/insufficient/error（可重试）/ok 状态行。对 1.1.7.30 先跑红。
+  add_executable(test_native_rail_states tests/test_native_rail_states.mm
+    tools/native_ui/RLPNowPlayingViewController.mm tools/native_ui/RLPPageViewController.mm
+    tools/native_ui/RLPSupport.mm tools/native_ui/RLPModels.mm
+    tools/native_ui/RLPTheme.mm tools/native_ui/RLPNativeI18n.mm
+    tools/native_ui/RLPKnowledgeView.mm tools/native_ui/RLPAnalysisSummary.mm
+    tools/native_ui/RLPLyrics.mm tools/native_ui/RLPTrackActions.mm)
+  target_compile_options(test_native_rail_states PRIVATE -fobjc-arc)
+  target_include_directories(test_native_rail_states PRIVATE src tools tools/native_ui)
+  target_link_libraries(test_native_rail_states PRIVATE
+    "-framework AppKit" "-framework QuartzCore" "-framework CoreImage")
+  add_test(NAME native_rail_states COMMAND test_native_rail_states)
+  set_tests_properties(native_rail_states PROPERTIES TIMEOUT 120)
+
   # 曲目页行几何/内容 = web `.trow-track`：7 列（无独立专辑列、有规格列）、响应式
   # 1.6/1.8/1:0.9、无列头、rowHeight 34、artist — album 单格。对 1.1.7.25 先跑红。
   add_executable(test_native_tracks_rows tests/test_native_tracks_rows.mm

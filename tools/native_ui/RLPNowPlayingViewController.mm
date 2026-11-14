@@ -1079,6 +1079,8 @@ static NSString *RLPRailTagText(id srValue, id bitsValue) {
 @property(nonatomic,strong) NSTextField *railTitle;
 @property(nonatomic,strong) NSSegmentedControl *railDensity;
 @property(nonatomic,strong) NSArray<RLPRailChipView *> *railCards;
+@property(nonatomic,strong,nullable) NSTextField *railEmptyLabel;
+@property(nonatomic,strong,nullable) NSButton *railHintBtn;
 @property(nonatomic,copy) NSDictionary *trackMetadata;
 @property(nonatomic,strong) NSPopover *knowledgePopover;
 // ---- AI 整理栏（web NP_DATA / SUMC / NPLIB 的原生落点）----
@@ -1319,6 +1321,24 @@ static NSString *RLPRailTagText(id srValue, id bitsValue) {
         [cards addObject:c];
     }
     self.railCards=cards;
+
+    // web `.nprailempty`：没有任何栏目（没有可整理的实体）时的整块说明。
+    self.railEmptyLabel=RLPLabel(
+        RLPTr(@"播放后在右侧显示歌曲、专辑、艺术家（古典作品还会多一栏演绎版本）的精简整理资料。"),
+        [NSFont systemFontOfSize:10.5], t.mut2);
+    self.railEmptyLabel.identifier=@"npRailEmpty";
+    self.railEmptyLabel.maximumNumberOfLines=0;
+    self.railEmptyLabel.lineBreakMode=NSLineBreakByWordWrapping;
+    self.railEmptyLabel.hidden=YES;
+    [self.railPanel addSubview:self.railEmptyLabel];
+
+    // web `.nprailhint`：只有「加载中 / 失败可重试 / 资料不足」三种才出现。
+    self.railHintBtn=[NSButton buttonWithTitle:@"" target:self action:@selector(onRailHintRetry:)];
+    self.railHintBtn.bordered=NO;
+    self.railHintBtn.alignment=NSTextAlignmentLeft;
+    self.railHintBtn.identifier=@"npSummHint";
+    self.railHintBtn.hidden=YES;
+    [self.railPanel addSubview:self.railHintBtn];
     self.knowledge=[[RLPKnowledgeView alloc] initWithFrame:NSMakeRect(0,0,420,380)];
     self.webControls=[[RLPNPControlBar alloc] initWithFrame:NSZeroRect];[host addSubview:self.webControls];
     self.webControls.autoresizingMask=NSViewNotSizable;
@@ -1511,13 +1531,29 @@ static NSString *RLPRailTagText(id srValue, id bitsValue) {
     self.railDensity.frame=NSMakeRect(MAX(80,side-kRailHeadPadX-116),bodyH-kRailHeadPadTop-railSegH,116,railSegH);
     CGFloat ry=bodyH-kRailHeadPadTop-railSegH-kRailHeadGap;   // 栏头底部再空 8
     const CGFloat railCardW=MAX(40,side-kRailHeadPadX*2);
-    for(RLPRailChipView *c in self.railCards){
-        // 详细档的高度由**文本实测**决定（简介不限 40 字、p1 最多 5 行 / p2 2 行）；
-        // 必须先拿卡宽再量，否则第一次布局时 bounds 宽度还是 0。
-        CGFloat ch=[c preferredHeightForWidth:railCardW];
-        c.frame=NSMakeRect(kRailHeadPadX,ry-ch,railCardW,ch);
-        [c relayout];
-        ry-=ch+kRailChipGap;
+    if (self.railEmptyLabel && !self.railEmptyLabel.hidden) {
+        // web .nprailempty：无栏目时卡片不显示，说明文字紧跟栏头（10.5/1.6 行高）。
+        NSString *txt = self.railEmptyLabel.stringValue ?: @"";
+        NSRect br = [txt boundingRectWithSize:NSMakeSize(railCardW, CGFLOAT_MAX)
+                                      options:NSStringDrawingUsesLineFragmentOrigin
+                                   attributes:@{ NSFontAttributeName: self.railEmptyLabel.font }
+                                      context:nil];
+        CGFloat eh = MAX(30.0, ceil(br.size.height) + 8.0);
+        self.railEmptyLabel.frame = NSMakeRect(kRailHeadPadX, ry - eh, railCardW, eh);
+        ry -= eh;
+    } else {
+        for(RLPRailChipView *c in self.railCards){
+            // 详细档的高度由**文本实测**决定（简介不限 40 字、p1 最多 5 行 / p2 2 行）；
+            // 必须先拿卡宽再量，否则第一次布局时 bounds 宽度还是 0。
+            CGFloat ch=[c preferredHeightForWidth:railCardW];
+            c.frame=NSMakeRect(kRailHeadPadX,ry-ch,railCardW,ch);
+            [c relayout];
+            ry-=ch+kRailChipGap;
+        }
+    }
+    if (self.railHintBtn && !self.railHintBtn.hidden) {
+        // web .nprailhint 在卡片区之后；原生放在栏底（卡片较少时视觉同区，且不遮卡片）。
+        self.railHintBtn.frame = NSMakeRect(kRailHeadPadX, 10, railCardW, 18);
     }
     self.webControls.frame=NSMakeRect(MAX(16,(w-1160)/2),h-76,MIN(1160,w-32),58);[self.webControls layout];
     [self layoutLyricRows];
@@ -2022,6 +2058,57 @@ static NSString *RLPRailTagText(id srValue, id bitsValue) {
                                    p1:RLPRailStr(pv[@"p1"])
                                    p2:RLPRailStr(pv[@"p2"])];
     }
+    // 栏目有无：web npDataTargets 为空 => 卡片不显示、整块 nprailempty 出现。
+    NSDictionary *m = self.trackMetadata ?: @{};
+    NSString *title = RLPRailStr(m[@"title"]);
+    NSString *album = RLPRailStr(m[@"album"]);
+    NSString *who = RLPRailStr(m[@"albumArtist"]);
+    if (!who.length) who = RLPRailStr(m[@"artist"]);
+    const BOOL hasCards = (title.length || album.length || who.length);
+    for (RLPRailChipView *c in self.railCards) c.hidden = !hasCards;
+    if (self.railEmptyLabel) self.railEmptyLabel.hidden = hasCards;
+
+    // 歌曲资料状态行（web npRailHint）：只认当前实体且只在三种状态下出现。
+    NSDictionary *tst = self.railStates[@"track"] ?: @{};
+    NSString *tstate = RLPRailStr(tst[@"state"]);
+    NSString *hint = nil;
+    NSColor *hintColor = [RLPTheme current].mut2;
+    if ([tstate isEqualToString:@"insufficient"]) {
+        hint = RLPTr(@"资料不足：缺少艺术家与曲名");
+        hintColor = [RLPTheme current].warn ?: [RLPTheme current].mut2;
+    } else if ([tstate isEqualToString:@"error"]) {
+        hint = RLPTr(@"歌曲资料未能取到 · 点击重试");
+        hintColor = [RLPTheme current].warn ?: [RLPTheme current].mut2;
+    } else if ([tstate isEqualToString:@"loading"]) {
+        hint = RLPTr(@"正在后台整理歌曲资料…");
+    }
+    if (self.railHintBtn) {
+        self.railHintBtn.hidden = (hint == nil);
+        if (hint) {
+            NSMutableParagraphStyle *ps=[[NSMutableParagraphStyle alloc] init];
+            ps.lineBreakMode=NSLineBreakByWordWrapping;
+            self.railHintBtn.attributedTitle=[[NSAttributedString alloc] initWithString:hint attributes:@{
+                NSFontAttributeName:[NSFont systemFontOfSize:10.5],
+                NSForegroundColorAttributeName:hintColor,
+                NSParagraphStyleAttributeName:ps}];
+            self.railHintBtn.toolTip = [tstate isEqualToString:@"error"] ? RLPTr(@"重新请求这首歌的 AI 整理") : nil;
+        }
+    }
+}
+
+/// web npSummRetry：失败后点状态行 = 强制重新请求这首歌的 summary（refresh 语义）。
+- (void)onRailHintRetry:(id)sender {
+    (void)sender;
+    NSDictionary *t = self.railTargets[@"track"];
+    if (!t) return;
+    NSString *url = [self railUrlForTarget:t];
+    if (url.length) [self.railSummaryCache removeObjectForKey:url];
+    NSMutableDictionary *idle = [NSMutableDictionary dictionary];
+    idle[@"state"] = @"idle";
+    self.railStates[@"track"] = idle;
+    [self renderRailMetadata];
+    [self layoutWebPlayback];
+    [self railEnsureKind:@"track"];
 }
 
 - (void)onRailCard:(RLPRailChipView *)b {
