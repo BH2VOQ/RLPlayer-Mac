@@ -55,6 +55,8 @@
 - (void)renderMetaChipsFromMeta:(NSDictionary *)json;
 - (NSMenu *)playbackContextMenu;
 - (void)onClosePlayback:(id)sender;
+/// web applyRep：循环键图标/配色/tooltip 随四档模式变化 + #npRepOne 角标只在单曲循环显示。
+- (void)applyPlayModeUI;
 @end
 // Web #npPage uses top-left coordinates and covers the entire window content.
 @interface RLPNPCanvas : NSView
@@ -162,6 +164,8 @@ static NSString *RLPNPFavKey(NSString *path) {
 @property (nonatomic, strong) NSTextField *durLabel;
 @property (nonatomic, strong) NSTextField *volLabel;
 @property (nonatomic, strong) NSButton *repBtn;
+/// web #npRepOne：单曲循环时叠在循环键上的「1」角标（10px/700）。
+@property (nonatomic, strong) NSTextField *repBadge;
 @property (nonatomic, strong) NSButton *prevBtn;
 @property (nonatomic, strong) NSButton *playBtn;
 @property (nonatomic, strong) NSButton *nextBtn;
@@ -208,6 +212,13 @@ static NSString *RLPNPFavKey(NSString *path) {
     self.repBtn.identifier = @"np.rep";
     self.repBtn.toolTip = RLPTr(@"循环方式");
 
+    // web #npRepOne：单曲循环时才显示的「1」角标（web 默认 display:none，applyRep 按档位开关）。
+    // 旧码只有固定 repeat 图标、没有档位指示 ⟹ 用户看不出当前是顺序/列表/单曲/随机。
+    self.repBadge = RLPLabel(@"1", [NSFont systemFontOfSize:10 weight:NSFontWeightBold], t.accentText);
+    self.repBadge.identifier = @"npRepOne";
+    self.repBadge.alignment = NSTextAlignmentCenter;
+    self.repBadge.hidden = YES;
+
     self.prevBtn = RLPSymbolButton(@"backward.fill", @"上一首", nil, nil);
     self.prevBtn.identifier = @"np.prev";
     self.playBtn = RLPSymbolButton(@"play.fill", @"播放 / 暂停", nil, nil);
@@ -237,7 +248,7 @@ static NSString *RLPNPFavKey(NSString *path) {
 
     for (NSView *v in @[self.seek, self.posLabel, self.sepLabel, self.durLabel, self.repBtn,
                         self.prevBtn, self.playBtn, self.nextBtn, self.stopBtn,
-                        self.volIcon, self.volume, self.volLabel]) {
+                        self.volIcon, self.volume, self.volLabel, self.repBadge]) {
         [self addSubview:v];
     }
     return self;
@@ -265,11 +276,14 @@ static NSString *RLPNPFavKey(NSString *path) {
     const CGFloat repW = 32.0, keyS = 32.0, playS = 34.0, keyGap = 14.0;
     const CGFloat keysW = repW + keyGap + keyS + keyGap + playS + keyGap + keyS + keyGap + keyS;
     CGFloat kx = (W - keysW) / 2.0;
+    const CGFloat repX = kx;
     self.repBtn.frame = NSMakeRect(kx, rowCY - 12, repW, 24); kx += repW + keyGap;
     self.prevBtn.frame = NSMakeRect(kx, rowCY - keyS / 2.0, keyS, keyS); kx += keyS + keyGap;
     self.playBtn.frame = NSMakeRect(kx, rowCY - playS / 2.0, playS, playS); kx += playS + keyGap;
     self.nextBtn.frame = NSMakeRect(kx, rowCY - keyS / 2.0, keyS, keyS); kx += keyS + keyGap;
     self.stopBtn.frame = NSMakeRect(kx, rowCY - keyS / 2.0, keyS, keyS);
+    // web #npRepOne：margin-left 22 / margin-top -18 ⟹ 按钮右上角的 10px「1」。
+    self.repBadge.frame = NSMakeRect(repX + 18, rowCY + 1, 13, 13);
 
     const CGFloat volLabW = 56.0, iconW = 14.0, volGap = 6.0;
     CGFloat sliderW = 118.0;
@@ -296,6 +310,7 @@ static NSString *RLPNPFavKey(NSString *path) {
     for (NSButton *b in @[self.prevBtn, self.playBtn, self.nextBtn, self.stopBtn])
         b.contentTintColor = t.text;
     self.volIcon.contentTintColor = t.mut;
+    self.repBadge.textColor = t.accentText;
 }
 
 @end
@@ -1106,6 +1121,8 @@ static NSString *RLPRailTagText(id srValue, id bitsValue) {
 @property(nonatomic) BOOL statusInFlight;
 @property(nonatomic) NSUInteger statusEpoch;
 @property(nonatomic) BOOL favorite;
+/// 当前循环档位用的 SF Symbol 名（web REP_ICON[0..3] 的原生等价；判据据此核对映射）。
+@property(nonatomic,copy) NSString *playModeSymbol;
 
 @property (nonatomic, strong) NSTimer *poll;
 @property (nonatomic) BOOL polling;
@@ -1378,7 +1395,7 @@ static NSString *RLPRailTagText(id srValue, id bitsValue) {
     for(NSUInteger i=0;i<roundButtons.count;i++){NSButton *b=roundButtons[i];b.title=@"";b.bordered=NO;b.image=[NSImage imageWithSystemSymbolName:symbols[i] accessibilityDescription:b.toolTip?:@""];b.imagePosition=NSImageOnly;b.wantsLayer=YES;b.layer.cornerRadius=i==0?19:17;b.layer.borderWidth=1;b.layer.borderColor=t.line.CGColor;b.layer.backgroundColor=t.bg.CGColor;b.contentTintColor=t.mut;}
     self.analysisPanel.hidden=[[NSUserDefaults standardUserDefaults] boolForKey:@"RLPNPAnalysisHidden"];
     self.railPanel.hidden=[[NSUserDefaults standardUserDefaults] boolForKey:@"RLPNPRailHidden"];
-    [self applyTheme];[self anlPaint];[self layoutWebPlayback];
+    [self applyTheme];[self applyPlayModeUI];[self anlPaint];[self layoutWebPlayback];
 }
 /// web buildNpMetaHtml 的原生同构：`meta.enriched === true` 才出**徽标**；
 /// 年份/流派/专辑艺术家取 /api/meta 的同名字段，值后面跟来源提示（meta.sources）。
@@ -1622,7 +1639,32 @@ static NSString *RLPRailTagText(id srValue, id bitsValue) {
     RLPPlaybackToggle(self.webStatus.playing, self.webStatus.paused, self.webStatus.currentPath);
 }
 - (void)onStop:(id)s {[[RLPCoreClient shared] postJSON:@"/api/stop" body:nil completion:nil];}
-- (void)onCycleMode:(id)s {self.playbackMode=(self.playbackMode+1)%4;[[RLPCoreClient shared] postJSON:[NSString stringWithFormat:@"/api/playmode?mode=%ld",(long)self.playbackMode] body:nil completion:nil];}
+- (void)onCycleMode:(id)s {self.playbackMode=(self.playbackMode+1)%4;[[RLPCoreClient shared] postJSON:[NSString stringWithFormat:@"/api/playmode?mode=%ld",(long)self.playbackMode] body:nil completion:nil];[self applyPlayModeUI];}
+
+/// web applyRep(v)：0 顺序 / 1 列表循环 / 2 单曲循环 / 3 随机。
+/// 图标**随档位换**（web REP_ICON 四条路径）：只改颜色不改图标是明令禁止的假修；
+/// 「1」角标只在 2（单曲循环）显示（web #npRepOne 的 display 开关）。
+- (void)applyPlayModeUI {
+    NSInteger m = self.playbackMode;
+    if (m < 0 || m > 3) m = 0;
+    static NSString *const kSymbols[4] = { @"arrow.right", @"repeat", @"repeat.1", @"shuffle" };
+    // tooltip 逐字用 web REP_META[].aria（同一份中文进词表，英文界面自动跟随）。
+    static NSString *const kTips[4] = {
+        @"顺序播放（播到末尾停止）", @"列表循环（播到末尾回到第一首）",
+        @"单曲循环（重复当前这首）", @"随机播放（不重复当前曲）"
+    };
+    NSString *symbol = kSymbols[m];
+    self.playModeSymbol = symbol;
+    NSImage *img = [NSImage imageWithSystemSymbolName:symbol accessibilityDescription:RLPTr(kTips[m])];
+    if (self.webControls.repBtn) {
+        self.webControls.repBtn.image = img;
+        self.webControls.repBtn.imagePosition = NSImageOnly;
+        self.webControls.repBtn.title = @"";
+        self.webControls.repBtn.toolTip = RLPTr(kTips[m]);
+        self.webControls.repBtn.contentTintColor = (m == 0) ? [RLPTheme current].mut : [RLPTheme current].accentText;
+    }
+    if (self.webControls.repBadge) self.webControls.repBadge.hidden = (m != 2);
+}
 - (void)onCommitSeek:(id)s {if(self.webControls.seek.dragging)return;[[RLPCoreClient shared] postJSON:[NSString stringWithFormat:@"/api/seek?pos=%.6f",self.webControls.seek.doubleValue] body:nil completion:nil];self.lyricManualUntil=0;}
 - (void)onCommitVolume:(id)s {if(self.webControls.volume.dragging)return;double db=RLPNPVolPosToDb(self.webControls.volume.doubleValue);self.webControls.volLabel.stringValue=RLPNPVolDbLabel(db);[[RLPCoreClient shared] postJSON:[NSString stringWithFormat:@"/api/volume?db=%.1f",db] body:nil completion:nil];}
 - (void)onSaveCurrent:(id)s {
@@ -2872,6 +2914,6 @@ static NSString *RLPNowPlayingCastDeviceLabel(NSString *device) {
 }
 - (void)refreshQueueContext {
     NSString *path=self.currentPath;__weak __typeof__(self) ws=self;
-    [[RLPCoreClient shared] getJSON:@"/api/queue?meta=1" completion:^(NSDictionary *j){__typeof__(self) s=ws;if(!s||![path isEqual:s.currentPath])return;s.playbackMode=[j[@"mode"] integerValue];NSArray *items=[j[@"items"] isKindOfClass:NSArray.class]?j[@"items"]:@[];NSInteger i=[j[@"index"] integerValue];if(i>=0&&i+1<(NSInteger)items.count){id next=items[i+1];s.metaLabel.stringValue=[NSString stringWithFormat:@"下一首：%@ · 剩 %ld 首",[next isKindOfClass:NSString.class]?[next lastPathComponent]:@"",(long)items.count-i-1];}}];
+    [[RLPCoreClient shared] getJSON:@"/api/queue?meta=1" completion:^(NSDictionary *j){__typeof__(self) s=ws;if(!s||![path isEqual:s.currentPath])return;s.playbackMode=[j[@"mode"] integerValue];[s applyPlayModeUI];NSArray *items=[j[@"items"] isKindOfClass:NSArray.class]?j[@"items"]:@[];NSInteger i=[j[@"index"] integerValue];if(i>=0&&i+1<(NSInteger)items.count){id next=items[i+1];s.metaLabel.stringValue=[NSString stringWithFormat:@"下一首：%@ · 剩 %ld 首",[next isKindOfClass:NSString.class]?[next lastPathComponent]:@"",(long)items.count-i-1];}}];
 }
 @end

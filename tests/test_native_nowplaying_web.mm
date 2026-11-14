@@ -90,6 +90,34 @@ int main(){@autoreleasepool{
  ck([[[vc valueForKey:@"kindLabel"] stringValue] isEqualToString:@"正在播放"],
     "track switch resets npKind before new meta arrives (no stale codec, no trailing ' · ')");
 
+ // ---- 循环模式：web #npRep 图标随档位换（REP_ICON 四条路径）+ #npRepOne 角标（仅单曲循环）----
+ // 旧码：repBtn 永远 repeat 图标、没有「1」角标 ⟹ 用户看不出当前是顺序/列表/单曲/随机。
+ {
+  NSView *ctl=[vc valueForKey:@"webControls"];
+  NSButton *repBtn=(NSButton *)[ctl valueForKey:@"repBtn"];
+  // 旧码没有 repBadge 属性：KVC 取值会抛 NSUnknownKeyException，先按 getter 存在性守卫。
+  NSTextField *repOne=(NSTextField *)([ctl respondsToSelector:NSSelectorFromString(@"repBadge")]
+                    ? [ctl valueForKey:@"repBadge"] : nil);
+  ck(repBtn&&[repBtn.identifier isEqualToString:@"np.rep"],"npRep control exists");
+  ck(repOne&&[repOne.identifier isEqualToString:@"npRepOne"],"web #npRepOne badge exists");
+  NSArray *expected=@[@"arrow.right",@"repeat",@"repeat.1",@"shuffle"];
+  NSMutableSet *seen=[NSMutableSet set];
+  for(NSInteger m=0;m<4;m++){
+    [vc setValue:@(m) forKey:@"playbackMode"];
+    BOOL hasApply=[vc respondsToSelector:@selector(applyPlayModeUI)];
+    if(hasApply)[vc applyPlayModeUI];                 // 旧码没有这个方法：别让判据崩在这里
+    NSString *sym=hasApply?([vc valueForKey:@"playModeSymbol"]?:@""):@"";
+    [seen addObject:sym];
+    ck([sym isEqualToString:expected[(NSUInteger)m]],
+       [[NSString stringWithFormat:@"npRep icon follows web REP_ICON[%ld]",(long)m] UTF8String]);
+    ck(repOne.hidden==(m!=2),
+       [[NSString stringWithFormat:@"npRepOne only visible in single-repeat (mode=%ld)",(long)m] UTF8String]);
+  }
+  ck(seen.count==4,"the four play modes use four distinct npRep icons");
+  ck([[repOne stringValue] isEqualToString:@"1"],"npRepOne renders 1");
+  // 复位到顺序播放，别把档位状态留给后面的用例
+  if([vc respondsToSelector:@selector(applyPlayModeUI)]){[vc setValue:@0 forKey:@"playbackMode"];[vc applyPlayModeUI];}
+ }
  pendingFav=nil;method_setImplementation(shared,old);
  printf("np web: %d failures\n",fail);return fail?1:0;
 }}

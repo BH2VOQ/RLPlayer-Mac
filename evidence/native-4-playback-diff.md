@@ -96,8 +96,8 @@
 | 48 | `.npseek{height:5;radius3;hover→7}`、`>i` 已播色 | `RLPNPCell drawBarInside` 画 5pt 轨/圆角；**无 hover 增高** | 未修（hover 7pt 未接；NSSlider 需 tracking area，低风险后置） |
 | 49 | `.nptime{12;tabular}`、`.tval{min-width:42;居中}`、`.tsep{opacity:.45}` | `posLabel/durLabel` **monospaced 11pt**、46 宽、右/左对齐 | 未修（字号 12 vs 11、min-width 42 未用） |
 | 50 | `.npkeys{width:min(460px,40vw);gap14}`；`.k{32×32;radius9}`；`.k.big{34×34;圆形;accent}` | `RLPNPControlBar.layout`：rep 32、prev/next/stop 32、play 34（radius17），gap 14 | 已对齐（宽度上限 min(460,40vw) 未接） |
-| 51 | `#npRep` 图标随模式换（`REP_ICON[0..3]`），`title/aria` 随模式 | `onCycleMode`（1625）+ `repBtn` **固定 `repeat` 图标、标题空** | 未修（见 1.1.7.41 计划项） |
-| 52 | `#npRepOne{display:'' only 单曲循环}`「1」角标 | **无此控件** | 未修（同 #51） |
+| 51 | `#npRep` 图标随模式换（`REP_ICON[0..3]`），`title/aria` 随模式 | `onCycleMode` + `applyPlayModeUI`：SF Symbol `arrow.right`/`repeat`/`repeat.1`/`shuffle` + web `REP_META[].aria` tooltip | **已修（1.1.7.41）**：旧码固定 `repeat`、无档位指示 |
+| 52 | `#npRepOne{display:'' only 单曲循环}`「1」角标 | `RLPNPControlBar.repBadge`（identifier `npRepOne`，10pt/700），`applyPlayModeUI` 只在 mode=2 显示 | **已修（1.1.7.41）**：旧码无此控件 |
 | 53 | `#npPrev/#npNext` 18×18 filled | `backward.fill`/`forward.fill` 32pt 按钮 | 已对齐 |
 | 54 | `#npPlay` `#npIcP`：playing&&!paused → 暂停图标，否则播放图标 | `refresh`（2322）`pause.fill/play.fill` 切换 | 已对齐 |
 | 55 | `#npStop` 15×15 圆角方块 | `stop.fill` 32pt 按钮 | 已对齐 |
@@ -135,6 +135,14 @@
 - 页面内自检脚本（`window.__SELFTEST`）是 web 侧判据载体，原生用 `--audit`/ctest，载体不同、判据等价。
 
 ## 11. 红→绿记录（逐包追加）
+
+### 1.1.7.41 —— 循环模式图标 + `#npRepOne` 角标（表 #51 / #52）
+
+- 判据：`tests/test_native_nowplaying_web.mm` 追加 12 条（4 档 symbol 映射 + 4 档角标可见性 + 图标互异 + 文字）。
+- 旧码（1.1.7.40）：12 条里 **10 条 FAIL**（只剩「`np.rep` 存在」「mode=2 时角标不可见」两条碰巧成立）。
+- 新码：**33P / 0F**（21 既有 + 12 新）。
+- 证据：`evidence/native-playback-mode-{red,green}-20261114.log`。
+- 挂账：原生 SF Symbol 与 web 四条 SVG 路径造型非 1:1（语义/档位映射对齐）。
 
 ### 1.1.7.40 —— 停止/切曲 `#npKind` 复位（表 #12 / #60）
 

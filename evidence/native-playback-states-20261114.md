@@ -33,3 +33,34 @@
 ### 实现
 - `refresh` 的「切曲/停止」分支先 `kindLabel = RLPTr(@"正在播放")`，再由新 meta 覆盖；
 - `loadMetaAndKnowledgeForPath` 的格式串改为「有字段才拼 ` · `」，否则纯「正在播放」。
+
+## 包 2（1.1.7.41）：循环模式图标 + `#npRepOne`「1」角标
+
+### 差异（对照表 #51 / #52）
+- web `applyRep(v)`/`cycleRep()`（`ui_script.h` L6117/6145）：四档 0 顺序 / 1 列表循环 / 2 单曲循环 / 3 随机，
+  **图标随档位换**（`REP_ICON[0..3]` 四条 SVG 路径），`aria-label`/`title` 同步换，
+  `#npRepOne` 的「1」角标**只在单曲循环** `display:''`。web 注释明写「只改颜色不改图标是明令禁止的假修」。
+- 原生 1.1.7.40：整页 `#npRep`（`repBtn`）**永远 `repeat` 图标、没有「1」角标**，
+  用户看不出当前是顺序/列表/单曲/随机（只有右键/设置页能查）。
+
+### 判据（`tests/test_native_nowplaying_web.mm` 追加）
+1. `np.rep` 控件存在（前提）、`npRepOne` 角标存在（旧码红）；
+2. 0..3 四档逐档：`playModeSymbol` 等于 web `REP_ICON` 的等价 SF Symbol
+   （`arrow.right`/`repeat`/`repeat.1`/`shuffle`）（旧码红，方法缺失/属性为空）；
+3. 四档图标互不相同（旧码红）；
+4. 「1」角标只在 2（单曲循环）可见（旧码红），且文字是 `1`。
+
+### 红 → 绿
+| 轮次 | 结果 |
+|---|---|
+| 旧码（1.1.7.40） | 12 条新判据里 **10 条 FAIL**（只有 `np.rep` 存在、mode=2 时"角标不可见"两条碰巧成立）|
+| 新码 | **33 passed / 0 failures**（21 条既有 + 12 条新） |
+
+证据：`evidence/native-playback-mode-red-20261114.log` / `-green-…log`。
+
+### 实现
+- `RLPNPControlBar` 新增 `repBadge`（identifier `npRepOne`，10pt/700，`hidden=YES` 默认），
+  布局放在循环键右上角（web `margin-left:22 / margin-top:-18` 的等价位）。
+- `RLPNowPlayingViewController -applyPlayModeUI`：按 `playbackMode` 选 SF Symbol + `REP_META[].aria`
+  tooltip + 单曲循环才显示角标；`onCycleMode` 与 `/api/queue` 读回（`refreshQueueContext`）后都调用它，
+  `buildContent` 末尾初始化一次。

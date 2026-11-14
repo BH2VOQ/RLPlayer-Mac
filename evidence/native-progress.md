@@ -457,3 +457,21 @@ AppKit `NSGenericException: no common ancestor`（离屏测试第一次跑直接
 **证据**：`evidence/native-playback-states-20261114.md`、`native-playback-state-{red,green}-20261114.log`；
 对照表状态列已把 #12/#60 标为「已修（1.1.7.40）」。
 **门禁（1.1.7.40 树）**：build 0 error；串行全量 ctest **201/201 passed（398.09s）**；audit **246/0**；parity missing=0；behavior actionable=0；i18n OK。
+
+### 2026-11-14 15:5x —— 轮次 12c（1.1.7.41）：播放模式图标随档位 + `#npRepOne` 角标
+
+**任务**（task-4 · 播放页差异表 #51/#52）：web `applyRep(v)` 四档换图标（`REP_ICON[0..3]`）+ 单曲循环显示
+`#npRepOne` 的「1」角标；web 注释明写「只改颜色不改图标是明令禁止的假修」。原生整页循环键固定 `repeat`、
+无档位指示（用户看不出当前模式）。
+**判据**：`tests/test_native_nowplaying_web.mm` 追加 12 条：4 档 `playModeSymbol` 映射
+（`arrow.right`/`repeat`/`repeat.1`/`shuffle`）、4 档角标可见性（只有单曲循环可见）、四档图标互异、角标文字=1。
+**红→绿**：旧码（1.1.7.40）12 条里 **10 F**（只有「`np.rep` 存在」「mode=2 时不可见」两条碰巧成立）→
+新码 **33 passed / 0 failures**（21 条既有 + 12 条新）。
+**实现**：`RLPNPControlBar` 新增 `repBadge`（identifier `npRepOne`，10pt/700，默认 hidden，布局在循环键右上角）；
+`RLPNowPlayingViewController -applyPlayModeUI` 按 `playbackMode` 选 SF Symbol + web `REP_META[].aria` tooltip +
+单曲循环才显角标；`onCycleMode`、`/api/queue` 读回（`refreshQueueContext`）、`buildContent` 末尾三处调用。
+**如实挂账**：原生用 SF Symbol（`arrow.right`/`repeat`/`repeat.1`/`shuffle`），不是 web 的四条 SVG 路径
+（造型非 1:1，档位/语义对齐）；底部播放条的独立随机/循环键未动。
+**证据**：`evidence/native-playback-states-20261114.md`、`native-playback-mode-{red,green}-20261114.log`；
+对照表 #51/#52 标「已修（1.1.7.41）」。
+**门禁（1.1.7.41 树）**：build 0 error；串行全量 ctest **201/201 passed（392.91s）**；audit **246/0**；parity missing=0；behavior actionable=0；i18n OK。
