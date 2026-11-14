@@ -30,6 +30,11 @@
 #import "RLPTheme.h"
 #import "RLPSupport.h"
 
+// 生产接缝（实现在 RLPQueueViewController.mm）：导入 M3U 到队列，不弹系统文件面板。
+@interface RLPQueueViewController (RLPM3UImportSeam)
+- (void)importM3UAtPath:(NSString *)path playing:(BOOL)playing;
+@end
+
 #include <cstdio>
 #include <cmath>
 
@@ -91,6 +96,11 @@ static NSDictionary *QueuePayload(void) {
 
 #pragma mark - 工具
 
+static void CollectAll(NSView *v, NSMutableArray<NSView *> *out) {
+    if (!v) return;
+    [out addObject:v];
+    for (NSView *s in v.subviews) CollectAll(s, out);
+}
 static NSView *FindById(NSView *root, NSString *ident) {
     if (!root) return nil;
     if ([root.identifier isEqualToString:ident]) return root;
@@ -305,12 +315,75 @@ int main() {
             Ck([table.registeredDraggedTypes containsObject:@"RLPQueueRowDrag"],
                "拖拽排序的 pasteboard 类型仍注册（/api/qmove 路径未回退）",
                [table.registeredDraggedTypes componentsJoinedByString:@","]);
+            // 行视图是 AppKit 懒创建的：离屏时 viewAtColumn 不一定会被调用，
+            // 直接扫视图树会随布局时机时红时绿（实测同树两次运行结果不同）。
+            // 先强制物化第 0 行的第 3 列（行尾 × 所在列），再扫描 ⟹ 判据确定性。
+            [table reloadData];
+            [table layoutSubtreeIfNeeded];
+            (void)[table viewAtColumn:3 row:0 makeIfNecessary:YES];
+            [table layoutSubtreeIfNeeded];
+            Pump(0.1);
+            all = [NSMutableArray array];
+            CollectAll(vc.view, all);
             NSButton *del = nil;
             for (NSView *x in all) if ([x isKindOfClass:[NSButton class]] && [x.identifier isEqualToString:@"q.del"]) del = (NSButton *)x;
             Ck(del != nil, "行尾 × 按钮仍存在（q.del）", @"找不到 q.del");
         }
 
-        std::printf("结果：%d passed, %d failed\n", g_pass, g_fail);
+        // ---- v3.3.11 qImportM3u：队列页导入按钮与 /api/queue/set 下发 ----
+        {
+            NSError *err = nil;
+            NSString *m3uPath = [@"/tmp" stringByAppendingPathComponent:
+                                 [NSString stringWithFormat:@"rlp-q-import-%d.m3u", (int)getpid()]];
+            NSString *m3u = @"#EXTM3U\r\n/Music/A/One.flac\r\n/Music/B/Two.flac\r\n";
+            Ck([m3u writeToFile:m3uPath atomically:YES encoding:NSUTF8StringEncoding error:&err],
+               "Q0 夹具 .m3u 已写入", err.localizedDescription);
+            RLPQueueViewController *q = [RLPQueueViewController new];
+            NSView *qv = q.view;
+            NSButton *imp = (NSButton *)FindById(qv, @"qImportM3u");
+            Ck(imp != nil && [imp isKindOfClass:[NSButton class]],
+               "Q1 队列页有 qImportM3u 导入按钮", imp ? @"found" : @"nil");
+            Ck(imp.target != nil && imp.action != NULL, "Q2 按钮有真实 target/action", @"");
+            // 生产接缝：不允许真弹系统文件面板（离屏判据），路由到夹具路径。
+            BOOL hasSeam = [q respondsToSelector:@selector(importM3UAtPath:playing:)];
+            Ck(hasSeam, "Q2b 生产接缝 importM3UAtPath:playing: 存在", @"");
+            NSInteger before = (NSInteger)g_posts.count;
+            if (hasSeam) [q importM3UAtPath:m3uPath playing:NO];
+            Pump(0.3);
+            NSString *setPath = nil, *setBody = nil;
+            for (NSDictionary *p in [g_posts copy]) {
+                if ([p[@"path"] hasPrefix:@"/api/queue/set"]) { setPath = p[@"path"]; setBody = p[@"body"]; }
+            }
+            Ck(setPath != nil, "Q3 导入真发 /api/queue/set", setPath ?: @"(none)");
+            NSString *decoded = URLDecodeBody(setBody ?: @"");
+            Ck([decoded containsString:@"/Music/A/One.flac"] && [decoded containsString:@"/Music/B/Two.flac"],
+               "Q4 下发体含歌单两首路径", decoded);
+            Ck([decoded containsString:@"require_stopped=1"],
+               "Q5 下发体带 require_stopped=1（与 web 同契约）", decoded);
+            Ck((NSInteger)g_posts.count > before, "Q6 POST 真的追加了请求", @"");
+            // 播放中必须拒绝替换队列
+            NSInteger afterPlay = (NSInteger)g_posts.count;
+            if (hasSeam) [q importM3UAtPath:m3uPath playing:YES];
+            Pump(0.2);
+            Ck((NSInteger)g_posts.count == afterPlay,
+               "Q7 播放中导入被拒绝（不替换队列）", @"");
+            // 过大歌单闸门
+            NSString *bigPath = [@"/tmp" stringByAppendingPathComponent:
+                                 [NSString stringWithFormat:@"rlp-q-big-%d.m3u", (int)getpid()]];
+            // 每行 ~100 字节 × 200000 行 ≈ 20 MB > 16 MiB（旧夹具 7.6 MB 到不了闸门，判据假红）
+            NSString *longDir = @"/Music/AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA/";
+            NSMutableString *big = [NSMutableString stringWithString:@"#EXTM3U\r\n"];
+            for (NSUInteger i = 0; i < 220000; ++i) [big appendString:longDir];   // ~17.6 MB > 16 MiB
+            [big appendString:@"One.flac\r\n"];
+            [big writeToFile:bigPath atomically:YES encoding:NSUTF8StringEncoding error:nil];
+            NSInteger afterBig = (NSInteger)g_posts.count;
+            if (hasSeam) [q importM3UAtPath:bigPath playing:NO];
+            Pump(0.2);
+            Ck((NSInteger)g_posts.count == afterBig, "Q8 过大歌单被拒绝（16 MiB 闸门）", @"");
+            [[NSFileManager defaultManager] removeItemAtPath:m3uPath error:nil];
+            [[NSFileManager defaultManager] removeItemAtPath:bigPath error:nil];
+        }
+
         // ---- v3.3.11 parseTransportM3u（POSIX 适配）判据 ----
         {
             NSDictionary *p = RLPParseM3U(@"\uFEFF#EXTM3U\r\n/Music/A.flac\r\n# note\r\nsub/B.flac\r\n", @"/List");
@@ -330,6 +403,7 @@ int main() {
             Ck(RLPParseM3U(@"/Music/A.flac\n\u0001bad\n", nil) == nil, "U10 控制字符被拒绝", @"");
         }
 
+        std::printf("结果：%d passed, %d failed\n", g_pass, g_fail);
         return g_fail == 0 ? 0 : 1;
     }
 }

@@ -52,3 +52,10 @@
 
 - **M3U 播放列表导入**：解析纯函数 `RLPParseM3U`（POSIX 适配，U1–U10 判据）已落地，
   见 `evidence/native-m3u-parser-20261115.md`；队列页按钮 / 文件选择 / `/api/queue/set` 下仍未做。
+
+## 进度（1.1.7.66）
+
+- **M3U 播放列表导入**：**组完成** —— 解析纯函数（1.1.7.65）+ 队列页按钮 / 文件面板 /
+  生产接缝 / `/api/queue/set` / 16 MiB 闸门 / `require_stopped`（1.1.7.66）。
+  挂账：`askConfirm` 替换确认、`needsFolder` 追问（macOS 不需要）。
+  见 `native-m3u-parser-20261115.md` / `native-m3u-import-20261115.md`。

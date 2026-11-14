@@ -1,0 +1,91 @@
+Internal ctest changing into directory: /Users/august/Downloads/DQ/RLPlayer/build-mac
+Test project /Users/august/Downloads/DQ/RLPlayer/build-mac
+    Start 10: native_queue_sort
+1/1 Test #10: native_queue_sort ................***Failed    1.64 sec
+=== test_native_queue_sort（#qSort 8 档 + CUE 保真 · 离屏 · 不出声）===
+  [PASS] 找得到排序下拉 queue.sort
+  [PASS] 排序下拉恰好 8 档（web #qSort）
+  [PASS] 排序档标题与 web 同序
+  [PASS] 排序档 representedObject 与 web 同序
+  [PASS] 排序档标题与 web 同序
+  [PASS] 排序档 representedObject 与 web 同序
+  [PASS] 排序档标题与 web 同序
+  [PASS] 排序档 representedObject 与 web 同序
+  [PASS] 排序档标题与 web 同序
+  [PASS] 排序档 representedObject 与 web 同序
+  [PASS] 排序档标题与 web 同序
+  [PASS] 排序档 representedObject 与 web 同序
+  [PASS] 排序档标题与 web 同序
+  [PASS] 排序档 representedObject 与 web 同序
+  [PASS] 排序档标题与 web 同序
+  [PASS] 排序档 representedObject 与 web 同序
+  [PASS] 排序档标题与 web 同序
+  [PASS] 排序档 representedObject 与 web 同序
+  [PASS] 找得到 保存/清空 按钮（identifier 不变）
+  [PASS] 按钮文案 = 保存为歌单（web）
+  [PASS] 按钮文案 = 清空队列（web）
+  [PASS] 排序标签 = 「排序：」（web 同文案）
+  [PASS] 排序 title 走 /api/qorder（web applyQueueSort）
+  [PASS] 排序 title 的顺序 = web
+  [PASS] title：第 1 行保留 \tcs\tce
+  [PASS] title：第 2 行保留 \tcs\tce
+  [PASS] 排序 artist 走 /api/qorder（web applyQueueSort）
+  [PASS] 排序 artist 的顺序 = web
+  [PASS] artist：第 4 行保留 \tcs\tce
+  [PASS] artist：第 3 行保留 \tcs\tce
+  [PASS] 排序 album 走 /api/qorder（web applyQueueSort）
+  [PASS] 排序 album 的顺序 = web
+  [PASS] album：第 4 行保留 \tcs\tce
+  [PASS] album：第 3 行保留 \tcs\tce
+  [PASS] 排序 dur 走 /api/qorder（web applyQueueSort）
+  [PASS] 排序 dur 的顺序 = web
+  [PASS] dur：第 1 行保留 \tcs\tce
+  [PASS] dur：第 2 行保留 \tcs\tce
+  [PASS] 排序 year 走 /api/qorder（web applyQueueSort）
+  [PASS] 排序 year 的顺序 = web
+  [PASS] year：第 1 行保留 \tcs\tce
+  [PASS] year：第 2 行保留 \tcs\tce
+  [PASS] 排序 reverse 走 /api/qorder（web applyQueueSort）
+  [PASS] 排序 reverse 的顺序 = web
+  [PASS] reverse：第 1 行保留 \tcs\tce
+  [PASS] reverse：第 3 行保留 \tcs\tce
+  [PASS] shuffle：4 条不重复（Fisher-Yates 合法排列）
+  [PASS] shuffle：CUE 区间仍随行保留
+  [PASS] default 走 /api/qsort?by=default（web applyQueueSort）
+  [PASS] 点 CUE 行发出 /api/play
+  [PASS] CUE 行播放 body 带 cs=10.000 & ce=20.000（web playPath(file,cs,ce)）
+  [PASS] CUE 行播放 file = 第 2 项路径
+  [PASS] 整轨行播放不带 cs/ce（不编造区间）
+  [PASS] 找得到队列表格
+  [PASS] 拖拽排序的 pasteboard 类型仍注册（/api/qmove 路径未回退）
+  [PASS] 行尾 × 按钮仍存在（q.del）
+  [PASS] Q0 夹具 .m3u 已写入
+  [FAIL] Q1 队列页有 qImportM3u 导入按钮 — nil
+  [FAIL] Q2 按钮有真实 target/action — 
+  [FAIL] Q2b 生产接缝 importM3UAtPath:playing: 存在 — 
+  [FAIL] Q3 导入真发 /api/queue/set — (none)
+  [FAIL] Q4 下发体含歌单两首路径 — 
+  [FAIL] Q5 下发体带 require_stopped=1（与 web 同契约） — 
+  [FAIL] Q6 POST 真的追加了请求 — 
+  [PASS] Q7 播放中导入被拒绝（不替换队列）
+  [PASS] Q8 过大歌单被拒绝（16 MiB 闸门）
+  [PASS] U1 M3U BOM/CRLF/注释解析出 2 首
+  [PASS] U2 M3U 绝对路径原样
+  [PASS] U3 M3U 相对路径按文件夹拼接
+  [PASS] U4 有文件夹时不需要追问
+  [PASS] U5 相对路径无文件夹时标记 needsFolder
+  [PASS] U6 CUE 区间附加到下一首
+  [PASS] U7 HLS 歌单被拒绝
+  [PASS] U8 孤立 CUE 被拒绝
+  [PASS] U9 空歌单被拒绝
+  [PASS] U10 控制字符被拒绝
+结果：69 passed, 7 failed
+
+
+0% tests passed, 1 tests failed out of 1
+
+Total Test time (real) =   1.65 sec
+
+The following tests FAILED:
+	 10 - native_queue_sort (Failed)
+Errors while running CTest

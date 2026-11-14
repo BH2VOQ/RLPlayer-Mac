@@ -1013,3 +1013,27 @@ build 0 error、3 项相关 ctest 全绿。
 `require_stopped`、替换确认、相对路径追问文件夹均未做（下一包）。
 
 **门禁**：串行 ctest 202/202、`--audit` 246/0、parity missing=0、behavior actionable=0。
+
+
+### 2026-11-15 03:xx —— 轮次 31（1.1.7.66）：v3.3.11 M3U 导入 UI 接缝
+
+**任务**：待移植清单「M3U 导入」组第二部分：队列页 `qImportM3u` + 文件面板 + 生产接缝 +
+`/api/queue/set` 下发 + 16 MiB/播放中闸门。
+
+**红→绿**：`test_native_queue_sort` 新增 Q0–Q8。旧码 build 0 error、**7 FAIL**
+（Q1–Q6、Q8；Q7 因无接缝恒真）→ 新码 build 0 error、`native_queue_sort` 全绿。
+
+**实现**：`RLPQueueViewController` 工具栏加 `导入 M3U 到队列`（identifier `qImportM3u`）、
+`NSOpenPanel`（`.m3u/.m3u8`）、生产接缝 `importM3UAtPath:playing:`（扩展名 → 16 MiB →
+`RLPParseM3U`(folder=文件目录) → `require_stopped=1&files=` → `/api/queue/set` → 刷新）、
+`isPlayingNow` 复用 `/api/status`；新增 6 条 i18n（chunk-native119-m3u.en.tsv）并重生成
+两份生成表（2427 对）。
+
+**修掉两处判据假红**（如实记录）：① `q.del` 判据依赖 AppKit 行视图懒创建，同树两次运行
+时红时绿 → 先 `viewAtColumn:3 row:0 makeIfNecessary:YES` 物化再扫；② Q8 夹具只有 7.6 MB、
+到不了 16 MiB 闸门 → 加长路径并增到 ~17.6 MB。③ 汇总 printf 原本在所有断言之前，已移到末尾。
+
+**挂账**：`askConfirm` 替换确认、`needsFolder` 追问（macOS 用文件目录，不需要）、
+导入后不跳页、未做页面级真点按钮（离屏会弹真面板）。
+
+**门禁**：串行 ctest 202/202、`--audit` 246/0、parity missing=0、behavior actionable=0。

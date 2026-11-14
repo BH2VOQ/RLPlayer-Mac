@@ -61,6 +61,8 @@ static NSString *const kQueueDragType = @"RLPQueueRowDrag";
 // web S.q.cues：/api/queue?meta=1 的 [cs,ce] 数组，排序/播放都必须带上（否则 CUE 分轨会丢区间）。
 @property (nonatomic, copy) NSArray<NSArray<NSNumber *> *> *cues;
 @property (nonatomic, assign) NSInteger currentIndex;
+/// 最近一次 /api/status 的播放中状态（仅用于「播放中不许替换队列」的守卫）。
+@property (nonatomic, assign) BOOL isPlayingNow;
 @property (nonatomic, assign) NSInteger mode;
 @property (nonatomic, assign) NSUInteger seq;
 @property (nonatomic, strong) NSPopUpButton *sortPopup;
@@ -105,6 +107,7 @@ static NSString *const kQueueDragType = @"RLPQueueRowDrag";
     NSArray *acts = @[
         @[ RLPTr(@"刷新"), @"refresh" ],
         @[ RLPTr(@"保存为歌单"), @"save" ],
+        @[ RLPTr(@"导入 M3U 到队列"), @"qImportM3u" ],   // v3.3.11 新增
         @[ RLPTr(@"清空队列"), @"clear" ],
     ];
     for (NSArray *a in acts) {
@@ -470,6 +473,7 @@ static NSString *RLPQueueParentFolder(NSString *path) {
     if ([a isEqualToString:@"refresh"]) { [self reloadData]; return; }
     if ([a isEqualToString:@"clear"]) { [self confirmClear]; return; }
     if ([a isEqualToString:@"save"]) { [self saveAsPlaylist]; return; }
+    if ([a isEqualToString:@"qImportM3u"]) { [self promptImportM3U]; return; }
     if ([a isEqualToString:@"default"]) { [self sortBy:@"default"]; return; }
     // 按标题 / 艺术家排序：本地算出新顺序，再整体提交 /api/qorder
     [self sortBy:a];
@@ -572,6 +576,66 @@ static NSString *RLPQueueMetaText(NSDictionary *m, NSString *k,
     }];
 }
 
+#pragma mark - v3.3.11 M3U 导入
+
+/// 打开系统文件面板选 .m3u/.m3u8（等价 web 的隐藏 `<input id=qM3uFile type=file>`）。
+/// 播放中直接拒绝（web 语义「请先停止播放，再替换队列」），不弹面板。
+- (void)promptImportM3U {
+    if (self.isPlayingNow) { RLPToast(RLPTr(@"请先停止播放，再替换队列。")); return; }
+    NSOpenPanel *p = [NSOpenPanel openPanel];
+    p.canChooseFiles = YES;
+    p.canChooseDirectories = NO;
+    p.allowsMultipleSelection = NO;
+    if (@available(macOS 11.0, *)) {
+        p.allowedContentTypes = @[];
+    }
+    p.allowedFileTypes = @[ @"m3u", @"m3u8" ];
+    p.message = RLPTr(@"选择 M3U 歌单");
+    __weak __typeof__(self) ws = self;
+    [p beginWithCompletionHandler:^(NSModalResponse r) {
+        __typeof__(self) s2 = ws;
+        if (!s2 || r != NSModalResponseOK) return;
+        [s2 importM3UAtPath:p.URL.path playing:NO];
+    }];
+}
+
+/// 生产接缝（判据直接调，绕过系统面板）：读文件 → `RLPParseM3U`（folder = 文件所在目录）
+/// → 16 MiB 闸门 → `require_stopped=1&files=` POST `/api/queue/set` → 刷新。
+- (void)importM3UAtPath:(NSString *)path playing:(BOOL)playing {
+    if (!path.length) return;
+    if (playing) { RLPToast(RLPTr(@"请先停止播放，再替换队列。")); return; }
+    if (![path.pathExtension.lowercaseString isEqualToString:@"m3u"] &&
+        ![path.pathExtension.lowercaseString isEqualToString:@"m3u8"]) {
+        RLPToast(RLPTr(@"歌单包含不支持的路径或格式")); return;
+    }
+    NSDictionary *attrs = [[NSFileManager defaultManager] attributesOfItemAtPath:path error:nil];
+    if ([attrs[NSFileSize] unsignedLongLongValue] > 16ull * 1024ull * 1024ull) {
+        RLPToast(RLPTr(@"歌单过大")); return;
+    }
+    NSString *text = [NSString stringWithContentsOfFile:path encoding:NSUTF8StringEncoding error:nil];
+    if (!text) text = [NSString stringWithContentsOfFile:path encoding:NSUTF16StringEncoding error:nil];
+    if (!text) { RLPToast(RLPTr(@"歌单包含不支持的路径或格式")); return; }
+    NSDictionary *parsed = RLPParseM3U(text, path.stringByDeletingLastPathComponent);
+    NSArray<NSString *> *items = parsed[@"items"];
+    if (![items isKindOfClass:[NSArray class]] || items.count == 0) {
+        RLPToast(RLPTr(@"歌单包含不支持的路径或格式")); return;
+    }
+    NSString *files = [items componentsJoinedByString:@"\n"];
+    NSString *escape = [files stringByAddingPercentEncodingWithAllowedCharacters:
+                        [NSCharacterSet URLQueryAllowedCharacterSet]];
+    NSString *body = [NSString stringWithFormat:@"require_stopped=1&files=%@", escape ?: @""];
+    __weak __typeof__(self) ws = self;
+    [[RLPCoreClient shared] postJSON:@"/api/queue/set" body:body completion:^(NSDictionary * _Nullable j) {
+        __typeof__(self) s2 = ws;
+        if (!s2) return;
+        if (![j[@"ok"] boolValue]) {
+            RLPToast(RLPTr(@"导入失败"));
+            return;
+        }
+        [s2 reloadData];
+    }];
+}
+
 - (void)confirmClear {
     NSAlert *a = [[NSAlert alloc] init];
     a.messageText = RLPTr(@"确定清空播放队列？");
@@ -633,6 +697,13 @@ static NSString *RLPQueueMetaText(NSDictionary *m, NSString *k,
             [self_ setSubtitle:RLPTr(@"读取失败")];
             return;
         }
+        // 「播放中不许替换队列」的守卫需要真实播放态：与页面同一份 /api/status 轮询口径，
+        // 不自己维护第二份播放状态（核心是唯一真相源）。
+        [[RLPCoreClient shared] getJSON:@"/api/status" completion:^(NSDictionary * _Nullable st) {
+            __typeof__(self) s3 = weakSelf;
+            if (!s3) return;
+            s3.isPlayingNow = [st[@"playing"] boolValue] && ![st[@"paused"] boolValue];
+        }];
         NSArray *items = [json[@"items"] isKindOfClass:[NSArray class]] ? json[@"items"] : @[];
         NSMutableArray<NSString *> *ps = [NSMutableArray array];
         for (id x in items) if ([x isKindOfClass:[NSString class]]) [ps addObject:x];

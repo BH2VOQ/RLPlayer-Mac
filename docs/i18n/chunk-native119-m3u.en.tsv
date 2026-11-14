@@ -1,0 +1,6 @@
+导入 M3U 到队列	Import M3U to queue	队列页 m3u 导入按钮（v3.3.11）
+选择 M3U 歌单	Choose an M3U playlist	文件面板提示
+请先停止播放，再替换队列。	Stop playback before replacing the queue.	播放中拒绝导入（web 同文案）
+歌单过大	Playlist too large	16 MiB 上限（web 同文案）
+导入失败	Import failed	/api/queue/set 失败（web 同文案）
+歌单包含不支持的路径或格式	The playlist contains an unsupported path or format	解析失败/扩展名不符（web 同文案）
