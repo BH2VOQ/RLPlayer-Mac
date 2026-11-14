@@ -31,7 +31,7 @@
 |---|---|---|---|
 | 9 | `.nphero{grid auto 1fr;gap:26}` | `layoutWebPlayback`：`x=gutter+c+26` | 已对齐 |
 | 10 | `.npcover{height:clamp(132px,24vh,236px)}` + `radius14` | `c=MIN(236,MAX(132,h*.24))`，`cover.layer.cornerRadius=14` | 已对齐 |
-| 11 | `.npkind{font-size:10;letter-spacing:1.6;font-weight:600;margin-bottom:8}` | `kindLabel` 10/600（**无 letter-spacing**） | 未修（字距 1.6 未接；wants kern，与 anllab 同一手法） |
+| 11 | `.npkind{font-size:10;letter-spacing:1.6;font-weight:600;margin-bottom:8}` | `kindLabel` 10/600/kern1.6（`RLPSetKernedText`，创建/刷新/主题都保持 attributed kern） | **已修（1.1.7.51）** |
 | 12 | `.npkind` 文案 = `npPlayingKindText(curMeta)`：`正在播放 · CODEC / kHz / bit`；`null` ⟹ 纯「正在播放」 | `loadMetaAndKnowledgeForPath`（2431）同格式；`refresh` 切曲分支先复位 | **已修（1.1.7.40）**：旧码停止后挂上一首格式串、无字段时挂尾 ` · `（见 #60） |
 | 13 | `.nptit{font-size:clamp(19px,2.6vh,27px);font-weight:700;line-height:1.3;…ellipsis}` | `layoutWebPlayback`：`RLPNPTitlePointSize(vh)`，`titleH=ceil(size·1.3)`，下方行 Y 从标题行底推导 | **已修（1.1.7.43）**：旧码固定 20/30 |
 | 14 | `.npsub{font-size:13;color:var(--mut);margin-top:8;ellipsis}` | `artistLabel2` 13/mut @infoY+63；`loadMeta` 拼 `artist · album` | 已对齐 |
@@ -54,7 +54,7 @@
 | # | web | 原生 | 状态 |
 |---|---|---|---|
 | 23 | `#npAnal{padding:8px 11px 9px;radius14;gap:6}` | `layoutWebPlayback`：`anlPadX=11/anlPadTop=8/anlPadBottom=9` | 已对齐 |
-| 24 | `.anllab{9.5;letter-spacing:1.5;700}` | `anlLab` 9.5/700（无 kern；量宽时按 kern 补 4.5pt 的注释已注明） | 未修（同 #11，字距属性未接） |
+| 24 | `.anllab{9.5;letter-spacing:1.5;700}` | `anlLab` 9.5/700/kern1.5（创建/主题两处均 attributed） | **已修（1.1.7.51 补判据）**：实现早于本包，本轮补判据并改正状态 |
 | 25 | `#npAnlStat{10;right;tabular}` | `analysisStatus` 10/right | 已对齐 |
 | 26 | `.npseg{radius9;1px}；`b{10.5;600;pad3 11;border-left}`；`b.on{ok-bg}` | `anlSeg` radius9/border + 三枚 10.5/600 无边框按钮 + 两条发丝分隔 | 已对齐 |
 | 27 | `.anlhide{22×22;圆形;top7 right8}‹` | `analysisPanel` 头部 `npAnalHide`（22×22、cornerRadius 11、`chevron.left`），点击=隐藏+写 `RLPNPAnalysisHidden` | **已修（1.1.7.42）** |
@@ -135,6 +135,12 @@
 - 页面内自检脚本（`window.__SELFTEST`）是 web 侧判据载体，原生用 `--audit`/ctest，载体不同、判据等价。
 
 ## 11. 红→绿记录（逐包追加）
+
+### 1.1.7.51 —— `.npkind` 字距 1.6（表 #11；#24 补判据）
+
+- 判据：npKind kern=1.6（创建/刷新后）、anlLab kern=1.5 防回归。
+- 旧码（1.1.7.50）：**2 FAIL** → 新码 **149P / 0F**。
+- 证据：`evidence/native-kern-20261114.md`、`native-kern-{red,green}-20261114.log`。
 
 ### 1.1.7.49 —— `#npAnlBody` 沟槽 + 自绘拇指（表 #28）
 

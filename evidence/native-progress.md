@@ -667,3 +667,21 @@ parity missing=0；behavior actionable=0；i18n OK（2419 pairs）。
 对照表 #63 标已修。
 **门禁（1.1.7.50 树）**：build 0 error；串行全量 ctest **201/201 passed（408.63s）**；audit **246/0**；
 parity missing=0；behavior actionable=0；i18n OK（2419 pairs）。
+
+### 2026-11-14 18:5x —— 轮次 17（1.1.7.51）：`.npkind` 字距 1.6（表 #11；#24 补判据）
+
+**任务**（Lead 定序 1）：清掉 `#11/#24` 字距。
+**先核对 web**：`.npkind{letter-spacing:1.6px}`、`.anllab{letter-spacing:1.5px}`；原生 `npKind` 用 stringValue
+赋值（无 kern），左栏 `anlLab` 已接 kern 1.5 但对照表未更新、也没判据。
+**判据**：`test_native_nowplaying_web` 追加 4 条：npKind kern=1.6、状态刷新后仍 1.6（旧码 stringValue 会冲掉）、
+anlLab kern=1.5 防回归；全部从 attributedStringValue 取。
+**红→绿**：旧码（1.1.7.50）**2 F**（npKind kern=0、刷新后仍 0）→ 新码 **149 passed / 0 failures**
+（147 既有 + 4 新 + 前提）。
+**实现**：新增 `RLPSetKernedText`（整串 attributed：字体/颜色/kern/段落）；`npKind` 创建 + refresh 两处文案
++ 主题切换都走它；`stringValue` 不再用于该标签。
+**如实挂账**：①kern 按 1x px≈pt（与既有 anllab 一致，高分屏只影响密度）；②#24 的 anlLab 实现在本包之前，
+本包只补判据并改正对照表。
+**证据**：`evidence/native-kern-20261114.md`、`native-kern-{red,green}-20261114.log`；对照表 #11 标已修、
+#24 改正为已修。
+**门禁（1.1.7.51 树）**：build 0 error；串行全量 ctest **201/201 passed（404.38s）**；audit **246/0**；
+parity missing=0；behavior actionable=0；i18n OK（2419 pairs）。

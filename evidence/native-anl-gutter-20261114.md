@@ -57,6 +57,11 @@ C8 PASS: w=264/264/264px spread=0 右缘留白=13/13/13px L1溢出=0px L2溢出=
 
 证据：`evidence/native-gutter-red-20261114.log` / `-green-…log`。
 
+## 已知 1px 偏差（勿再当新 bug 反复查）
+**`#npAnlBody` 卡片左缘：原生 11pt vs web 12pt（web 面板有 1px 边框，内容从 border+padding 起算）。**
+这是**已知偏差**（历史实现无边框），本轮只对齐右缘 25pt 与卡宽 `panelW-36`；`anlcard.left` 判据仍按 11。
+若以后有人发现左缘差 1pt：不是回归，是这条；要改需单独一包（会牵动头部状态/收起键的既有判据）。
+
 ## 如实挂账
 1. **web 与原生仍差 1pt**：web 面板 1px 边框使内容从 12 开始；原生无边框（历史实现），
    `anlcard.left` 仍是 11。本轮只对齐「右缘 25 + 卡宽 panelW-36」；若要把左缘也改成 12，

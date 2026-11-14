@@ -260,6 +260,23 @@ static NSString *RLPQueueItemPath(id item) {
     return @"";
 }
 
+/// web `letter-spacing` 的 AppKit 等价：kern（单位 pt，与 1x px 等价）。
+/// 为什么要重写整串 attributed 值：`stringValue` 会丢掉 kern，而 `.npkind`/`.anllab` 的 kern 是
+/// web 版式的一部分（`.npkind{letter-spacing:1.6}`、`.anllab{letter-spacing:1.5}`）。
+static void RLPSetKernedText(NSTextField *label, NSString *text, CGFloat kern) {
+    if (!label) return;
+    RLPTheme *t = [RLPTheme current];
+    NSMutableParagraphStyle *ps = [[NSMutableParagraphStyle alloc] init];
+    ps.alignment = label.alignment;
+    ps.lineBreakMode = label.lineBreakMode;
+    NSAttributedString *as = [[NSAttributedString alloc] initWithString:(text ?: @"")
+        attributes:@{NSFontAttributeName: (label.font ?: [NSFont systemFontOfSize:10]),
+                     NSForegroundColorAttributeName: (label.textColor ?: t.mut2),
+                     NSKernAttributeName: @(kern),
+                     NSParagraphStyleAttributeName: ps}];
+    label.attributedStringValue = as;
+}
+
 /// 底部控制条：进度滑杆一行 + 「当前/总时长 · 循环/上一首/播放/下一首/停止 · 音量」一行，
 /// 与 web #npPage 的 .npseek + .npctlrow 同结构。内部纯手动布局（固定高度，约束只有外层四条）。
 @interface RLPNPControlBar : NSView
@@ -1482,6 +1499,7 @@ static NSString *RLPRailTagText(id srValue, id bitsValue) {
     self.cover.imageScaling=NSImageScaleAxesIndependently; self.cover.wantsLayer=YES;
     self.cover.layer.cornerRadius=14;self.cover.layer.masksToBounds=YES; [host addSubview:self.cover];
     self.kindLabel=RLPLabel(RLPTr(@"正在播放"),[NSFont systemFontOfSize:10 weight:NSFontWeightSemibold],t.mut2); self.kindLabel.identifier=@"npKind";
+    RLPSetKernedText(self.kindLabel, RLPTr(@"正在播放"), 1.6);   // web .npkind{letter-spacing:1.6px}
     self.titleLabel2=RLPLabel(RLPTr(@"未播放"),[NSFont systemFontOfSize:20 weight:NSFontWeightBold],t.text); self.titleLabel2.identifier=@"npTitle";
     self.artistLabel2=RLPLabel(@"",[NSFont systemFontOfSize:13],t.mut); self.artistLabel2.identifier=@"npSub";
     self.metaLabel=RLPLabel(@"",[NSFont systemFontOfSize:12],t.mut2); self.metaLabel.identifier=@"npNextTrackHero";
@@ -2757,7 +2775,8 @@ static NSString *RLPNowPlayingCastDeviceLabel(NSString *device) {
             // 切曲/停止先把「正在播放 · CODEC / kHz / bit」复位成纯「正在播放」：
             // web renderNp 每帧都用 curMeta 重算（curMeta 清空 ⟹ 只剩「正在播放」）；
             // 旧码只在 /api/meta 回来时覆盖 ⟹ 停止后仍挂着上一首的格式串（用户可见的假信息）。
-            self_.kindLabel.stringValue=RLPTr(@"正在播放");
+            if (!self_.kindLabel.attributedStringValue.length || ![self_.kindLabel.attributedStringValue.string isEqualToString:RLPTr(@"正在播放")])
+                RLPSetKernedText(self_.kindLabel, RLPTr(@"正在播放"), 1.6);
             // 切歌：旧世代在飞的 summary 必须作废（迟到响应不能贴到新曲/新专辑的卡上）。
             [self_ railInvalidateForTrackChange];
             [self_ loadLyricsForPath:path];
@@ -2895,9 +2914,10 @@ static NSString *RLPNowPlayingCastDeviceLabel(NSString *device) {
         if([json[@"bits"] integerValue]>0)[format addObject:[NSString stringWithFormat:@"%ld bit",(long)[json[@"bits"] integerValue]]];
         // web npPlayingKindText：**有格式字段才拼** " · CODEC / kHz / bit"，一个都没有就只回「正在播放」。
         // 旧码无条件拼分隔符 ⟹ /api/meta 缺 codec/sampleRate/bits 时显示「正在播放 · 」（尾部悬挂）。
-        self_.kindLabel.stringValue = format.count
-            ? [NSString stringWithFormat:@"%@ · %@", RLPTr(@"正在播放"), [format componentsJoinedByString:@" / "]]
-            : RLPTr(@"正在播放");
+        RLPSetKernedText(self_.kindLabel,
+            format.count
+                ? [NSString stringWithFormat:@"%@ · %@", RLPTr(@"正在播放"), [format componentsJoinedByString:@" / "]]
+                : RLPTr(@"正在播放"), 1.6);
         // 三张卡的 summary 预览从这里起步（闸门在 railBeginSummariesForMeta 内判定，
         // 关时零请求、只留本地事实）。
         [self_ railBeginSummariesForMeta:json];
@@ -3274,7 +3294,12 @@ static NSString *RLPNowPlayingCastDeviceLabel(NSString *device) {
 
 - (void)applyTheme {
     RLPTheme *t=[RLPTheme current];self.webCanvas.needsDisplay=YES;self.cover.layer.backgroundColor=t.bg2.CGColor;
-    self.titleLabel2.textColor=t.text;self.artistLabel2.textColor=t.mut;self.metaLabel.textColor=t.mut2;self.kindLabel.textColor=t.mut2;
+    self.titleLabel2.textColor=t.text;self.artistLabel2.textColor=t.mut;self.metaLabel.textColor=t.mut2;
+    {
+        NSString *k=self.kindLabel.attributedStringValue.string ?: self.kindLabel.stringValue ?: RLPTr(@"正在播放");
+        self.kindLabel.textColor=t.mut2;
+        RLPSetKernedText(self.kindLabel, k, 1.6);
+    }
     self.railTitle.textColor=t.mut2;self.analysisStatus.textColor=t.mut2;self.lyricsEmpty.textColor=t.mut2;
     self.anlHide.contentTintColor=t.mut2;self.railHide.contentTintColor=t.mut2;
     for(NSView *p in @[self.analysisPanel,self.railPanel]){p.wantsLayer=YES;p.layer.cornerRadius=14;p.layer.borderWidth=1;p.layer.borderColor=t.line.CGColor;p.layer.backgroundColor=[t.isLight?[NSColor colorWithSRGBRed:15/255. green:23/255. blue:42/255. alpha:.04]:[NSColor colorWithWhite:1 alpha:.045] CGColor];}

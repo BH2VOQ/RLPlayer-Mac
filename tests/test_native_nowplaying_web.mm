@@ -29,6 +29,13 @@ static NSString *lastPath,*lastBody;static RLPJSONCompletion pendingFav;
 static RLPRequestSpy *spy;static id fakeShared(id c,SEL s){return spy;}
 static int fail;
 /// CGColor 与 NSColor 逐分量比较（含 alpha）：hover 判据必须量**实际视觉值**，不能只断言有跟踪区。
+/// 取 attributed 文本首个字符的 kern（web letter-spacing 的原生等价）；没有则返回 0。
+static CGFloat KernOf(NSTextField *label) {
+    if (!label || label.attributedStringValue.length == 0) return 0;
+    NSNumber *k = [label.attributedStringValue attribute:NSKernAttributeName atIndex:0 effectiveRange:NULL];
+    return k ? k.doubleValue : 0;
+}
+
 static BOOL CgEq(CGColorRef cg, NSColor *want, double tol) {
     if (!cg || !want) return NO;
     NSColor *c = [NSColor colorWithCGColor:cg];
@@ -520,6 +527,29 @@ int main(){@autoreleasepool{
   // （判据已经在窗口里量完，保留到进程结束即可，测试进程本就短命）。
   [win orderOut:nil];
   static NSWindow *sToastWindow; sToastWindow = win;
+ }
+
+ // ---- #11 `.npkind{letter-spacing:1.6}` / #24 `.anllab{letter-spacing:1.5}` ----
+ {
+  NSTextField *kind=(NSTextField *)find(vc.view,@"npKind");
+  ck(kind!=nil,"npKind 存在（字距判据前提）");
+  if(kind){
+   ck(fabs(KernOf(kind)-1.6)<0.05,
+      [[NSString stringWithFormat:@"npKind 字距 1.6（web .npkind letter-spacing:1.6px；got %.2f）",KernOf(kind)] UTF8String]);
+   // 文案更新后 kern 不能丢（旧码 stringValue 会重置 attributed 属性）
+   spy.fixtures=@{@"/api/status":@{@"ok":@1,@"playing":@1,@"paused":@0,
+                                  @"current":@"/offline/kern.flac",@"dur":@10.0}};
+   [vc setValue:@"/offline/kern.flac" forKey:@"currentPath"];
+   [vc refresh];
+   ck(fabs(KernOf(kind)-1.6)<0.05,
+      [[NSString stringWithFormat:@"刷新后 npKind 字距仍 1.6（got %.2f，text=「%@」）",KernOf(kind),kind.stringValue] UTF8String]);
+  }
+  // #24 左栏分析标题：web .anllab letter-spacing:1.5（代码里已接，本轮补判据防回归）
+  NSTextField *anl=(NSTextField *)[vc valueForKey:@"anlLab"];
+  ck(anl!=nil,"anlLab 存在（#24 判据前提）");
+  if(anl)
+   ck(fabs(KernOf(anl)-1.5)<0.05,
+      [[NSString stringWithFormat:@"anlLab 字距 1.5（web .anllab；got %.2f）",KernOf(anl)] UTF8String]);
  }
  pendingFav=nil;method_setImplementation(shared,old);
  printf("np web: %d failures\n",fail);return fail?1:0;
