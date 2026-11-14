@@ -416,3 +416,7 @@ playback RENDERFAIL 根因仍需用户诊断包。实机验收由用户执行（
 **红→绿**：新 ctest `native_update_result_lifetime` 旧实现 **3P/2F** → 新实现 **5P/0F**。
 **稳定性**：修复后**连续 4 轮** `--audit` 全绿（246/0 ×4）；修复前基线 4 轮崩 1 轮。
 **如实挂账**：4 轮是小样本，不宣称"概率归零"；ProgressFn 同形但用法安全，未加判据。
+**本包门禁（1.1.7.38 树）**：build 0 error；串行全量 ctest **200/200 passed（386.04s）**；
+audit 修复后连续 4 轮 246/0；parity missing=0；behavior actionable=0；i18n OK。
+**提交**：`524ae0e` fix(native): own the update check result before hopping to main thread，1.1.7.38。
+**下一步**：`native_settings_granularity`（EQ 两卡 / cal 三卡 + sp_eq/sp_ir/sp_irgpu 真控件）红→绿 → 1.1.7.39。
