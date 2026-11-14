@@ -607,3 +607,21 @@ parity missing=0；behavior actionable=0；i18n OK（2419 pairs）。
 对照表 #44/#46 标已修。
 **门禁（1.1.7.47 树）**：build 0 error；串行全量 ctest **201/201 passed（390.94s）**；audit **246/0**；
 parity missing=0；behavior actionable=0；i18n OK（2419 pairs）。
+
+### 2026-11-14 18:0x —— 轮次 14c（1.1.7.48）：`.npline.on` active 缩放 + 放大不裁字（表 #41）
+
+**任务**（Lead 定序 3）：补齐 `.npline.on{transform:scale(1.03)}`，数值以 web 为准；Lead 追加要求：
+判据还要断言"缩放后相邻行/首尾行不被裁切"。
+**判据**：`test_native_nowplaying_web` 追加 8 条：当前行 m11=1.03、非当前行两行=1.0、高亮切换后新行放大/
+旧行复位；并用 1.03 缩放后的可见矩形断言**当前行仍在歌词文档内、首行不越上/左、末行不越下/右**
+（doc=556×489 下旧码水平溢出约 2pt）。
+**红→绿**：旧码（1.1.7.47）**8 F**（5 条无缩放 + 3 条越界）→ 新码 **140 passed / 0 failures**
+（131 既有 + 8 新 + 前提）。
+**实现**：`updateLyricPosition` 当前行 `CATransform3DMakeScale(1.03,...)`、其余 identity（行按钮 wantsLayer）；
+`layoutLyricRows` 行左右 inset 从 6pt 改为 `max(6, ceil((w-12)*0.015)+1)`，给 1.03 绘制留 ≥1.5% 余量，
+避免"放大即裁字"；行盒（clamp×2.05）与滚动几何不变。
+**如实挂账**：①缩放不参与布局（web 同），当前行视觉略宽 ~3%；②无 :active/过渡（web .npline 也无 transition）。
+**证据**：`evidence/native-lyric-scale-20261114.md`、`native-lyricscale-{red,green}-20261114.log`；
+对照表 #41 从「部分已修」改「已修（1.1.7.48）」。
+**门禁（1.1.7.48 树）**：build 0 error；串行全量 ctest **201/201 passed（395.83s）**；audit **246/0**；
+parity missing=0；behavior actionable=0；i18n OK（2419 pairs）。

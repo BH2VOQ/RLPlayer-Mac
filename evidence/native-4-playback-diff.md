@@ -81,7 +81,7 @@
 | # | web | 原生 | 状态 |
 |---|---|---|---|
 | 40 | `#npLyric`：`mask-image` 上下 26px 渐隐、`scrollbar-width:none`、`padding:2px 0` | `lyricScroll`：无 mask 层、隐藏滚动条 | 未修（CAGradientLayer mask 未接；视觉差异在长歌词首/末行） |
-| 41 | `.npline{font-size:clamp(13px,1.9vh,17px);line-height:2.05}`；`.on{650;scale1.03}` | `applyLyricText`/`layoutLyricRows`：字号=`RLPNPLyricPointSize(vh)`、行盒=2.05×字号，窗口变化时 `restyleLyricRows`；active=Semibold | **已修（1.1.7.43）** 字号/行盒；**未修** active `scale(1.03)` |
+| 41 | `.npline{font-size:clamp(13px,1.9vh,17px);line-height:2.05}`；`.on{650;scale1.03}` | `applyLyricText`/`layoutLyricRows`：字号=`RLPNPLyricPointSize(vh)`、行盒=2.05×字号，窗口变化时 `restyleLyricRows`；active=Semibold | **已修（1.1.7.48）**：字号/行盒（1.1.7.43）+ active `transform:scale(1.03)`（行左右留 ≥1.5% 余量保证放大不裁字） |
 | 42 | 行留白 = `(容器高-行高)/2`（JS 写 `--nppad`），首/末行也能居中 | `layoutLyricRows`：`pad=MAX(26,h/2-18)` | 已对齐（等价公式，行高固定 30 时一致） |
 | 43 | 手动滚动 3s 保护；seek/切歌立即重定位 | `lyricManualUntil`/`onLyricScrolled`（1604）、`onCommitSeek` 清保护 | 已对齐 |
 | 44 | 空态：`没有歌词`（clamp 字号）+ 副行 12px `--mut2` `同名 .lrc 文件、内嵌歌词，或播放时自动在线补全（可在设置-元数据补全关闭）`；无曲目/网络曲目同文案 | `lyricsEmpty` 多行居中 + `setLyricsPlaceholder:detail:`：主行跟 clamp、副行 12px/`--mut2`；整页去掉 `还没有播放曲目`/`网络曲目暂无歌词` 错位文案 | **已修（1.1.7.47）** |
@@ -135,6 +135,12 @@
 - 页面内自检脚本（`window.__SELFTEST`）是 web 侧判据载体，原生用 `--audit`/ctest，载体不同、判据等价。
 
 ## 11. 红→绿记录（逐包追加）
+
+### 1.1.7.48 —— `.npline.on` active 缩放（表 #41）
+
+- 判据：8 条（transform 1.03 / 其余 1.0 / 切换复位 + 缩放后不裁切，doc 556×489）。
+- 旧码（1.1.7.47）：**8 FAIL** → 新码 **140P / 0F**。
+- 证据：`evidence/native-lyricscale-{red,green}-20261114.log`。
 
 ### 1.1.7.47 —— 歌词空态/加载态两行文案（表 #44/#46）
 

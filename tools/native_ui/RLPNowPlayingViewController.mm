@@ -1919,7 +1919,12 @@ static NSString *RLPRailTagText(id srValue, id bitsValue) {
     const CGFloat size=RLPNPLyricPointSize(self.webCanvas.bounds.size.height);
     const CGFloat step=RLPNPLyricLineStep(size);
     if(fabs(size-self.lyricPointSize)>0.01){ self.lyricPointSize=size; [self restyleLyricRows]; }
-    CGFloat pad=MAX(26,h/2-step/2),y=pad;for(NSButton *b in self.lyricRows){b.frame=NSMakeRect(6,y,MAX(40,w-12),step);y+=step;}
+    // web `.npline.on{transform:scale(1.03)}`：缩放是绘制变换，行左右必须预留 ≥1.5% 宽度余量，
+    // 否则放大后越过 `#npLyric` 剪裁边界（"放大即裁字"）。旧码只留 6pt，556pt 文档下会溢出约 2pt。
+    const CGFloat scaledPad=ceil(MAX(40.0,w-12.0)*0.015)+1.0;
+    const CGFloat inset=MAX(6.0,scaledPad);
+    CGFloat pad=MAX(26,h/2-step/2),y=pad;
+    for(NSButton *b in self.lyricRows){b.frame=NSMakeRect(inset,y,MAX(40,w-inset*2),step);y+=step;}
     self.lyricDocument.frame=NSMakeRect(0,0,w,MAX(h,y+pad));self.lyricsEmpty.frame=NSMakeRect(8,MAX(0,h/2-30),MAX(40,w-16),60);
 }
 - (void)applyLyricText:(NSString *)text forPath:(NSString *)path {
@@ -1937,7 +1942,17 @@ static NSString *RLPRailTagText(id srValue, id bitsValue) {
 - (void)updateLyricPosition:(double)pos {
     NSInteger at=[RLPLyrics activeIndex:self.lyricLines position:pos];self.lyricActiveIndex=at;
     const CGFloat size=(self.lyricPointSize>0.01)?self.lyricPointSize:RLPNPLyricPointSize(self.webCanvas.bounds.size.height);
-    for(NSUInteger i=0;i<self.lyricRows.count;i++){BOOL on=(NSInteger)i==at;NSButton *b=self.lyricRows[i];b.font=[NSFont systemFontOfSize:size];b.attributedTitle=[[NSAttributedString alloc] initWithString:b.title attributes:@{NSFontAttributeName:[NSFont systemFontOfSize:size weight:on?NSFontWeightSemibold:NSFontWeightRegular],NSForegroundColorAttributeName:on?[RLPTheme current].text:[RLPTheme current].mut2}];}
+    for(NSUInteger i=0;i<self.lyricRows.count;i++){
+        BOOL on=(NSInteger)i==at;
+        NSButton *b=self.lyricRows[i];
+        b.font=[NSFont systemFontOfSize:size];
+        b.attributedTitle=[[NSAttributedString alloc] initWithString:b.title attributes:@{
+            NSFontAttributeName:[NSFont systemFontOfSize:size weight:on?NSFontWeightSemibold:NSFontWeightRegular],
+            NSForegroundColorAttributeName:on?[RLPTheme current].text:[RLPTheme current].mut2}];
+        // web `.npline.on{transform:scale(1.03)}`：只缩放当前行（视觉放大，不影响行盒/滚动几何）。
+        b.wantsLayer=YES;
+        b.layer.transform = on ? CATransform3DMakeScale(1.03,1.03,1) : CATransform3DIdentity;
+    }
     if(at<0||[NSDate timeIntervalSinceReferenceDate]<self.lyricManualUntil)return;
     if(at<(NSInteger)self.lyricRows.count){CGFloat y=NSMidY(self.lyricRows[at].frame)-self.lyricScroll.contentSize.height/2;
         self.lyricManualUntil=DBL_MAX;[self.lyricScroll.contentView scrollToPoint:NSMakePoint(0,MAX(0,y))];[self.lyricScroll reflectScrolledClipView:self.lyricScroll.contentView];self.lyricManualUntil=0;}

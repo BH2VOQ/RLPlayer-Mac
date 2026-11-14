@@ -450,6 +450,43 @@ int main(){@autoreleasepool{
       [[NSString stringWithFormat:@"无曲目也用 web 整页空态（旧码是「还没有播放曲目」；got「%@」）",empty.attributedStringValue.string?:@""] UTF8String]);
   }
  }
+
+ // ---- #41 web `.npline.on{transform:scale(1.03)}`：当前歌词行放大 1.03，其余行保持 1.0 ----
+ {
+  [vc setValue:@"/offline/lines.flac" forKey:@"currentPath"];
+  [vc applyLyricText:@"[00:01.00]line a\n[00:03.00]line b\n[00:05.00]line c" forPath:@"/offline/lines.flac"];
+  NSArray<NSButton *> *rows=[vc valueForKey:@"lyricRows"];
+  ck(rows.count==3,"三行歌词就位（缩放判据前提）");
+  if(rows.count==3){
+    [vc updateLyricPosition:3.5];
+    ck(fabs(rows[1].layer.transform.m11-1.03)<0.005,"当前歌词行 transform:scale(1.03)（web .npline.on）");
+    ck(fabs(rows[0].layer.transform.m11-1.0)<0.005,"非当前行不缩放（scale 1.0）");
+    ck(fabs(rows[2].layer.transform.m11-1.0)<0.005,"非当前行不缩放（第三行）");
+    [vc updateLyricPosition:1.2];
+    ck(fabs(rows[0].layer.transform.m11-1.03)<0.005,"高亮移动后新行缩放 1.03");
+    ck(fabs(rows[1].layer.transform.m11-1.0)<0.005,"原当前行退出时缩放复位（不残留 1.03）");
+    // 放大后不许被裁：1.03 缩放是**绘制变换**（不改行盒），所以必须断言缩放后的可见边界仍在
+    // 歌词文档内（首行不越上/左、末行不越下/右），否则"放大即裁字"。
+    NSView *doc=[vc valueForKey:@"lyricDocument"];
+    NSRect docBounds=doc.bounds;
+    NSRect (^scaled)(NSRect) = ^NSRect(NSRect f){
+      CGFloat dx=f.size.width*0.015, dy=f.size.height*0.015;   // (1.03-1)/2 = 0.015
+      return NSInsetRect(f,-dx,-dy);
+    };
+    [vc updateLyricPosition:3.5];
+    NSRect s1=scaled(rows[1].frame);
+    ck(NSMinX(s1)>=NSMinX(docBounds)&&NSMaxX(s1)<=NSMaxX(docBounds)&&
+       NSMinY(s1)>=NSMinY(docBounds)&&NSMaxY(s1)<=NSMaxY(docBounds),
+       [[NSString stringWithFormat:@"当前行缩放后仍在文档内（row=%.1f,%.1f %.1fx%.1f doc=%.0fx%.0f）",
+         s1.origin.x,s1.origin.y,s1.size.width,s1.size.height,docBounds.size.width,docBounds.size.height] UTF8String]);
+    NSRect s0=scaled(rows[0].frame);
+    ck(NSMinX(s0)>=NSMinX(docBounds)&&NSMinY(s0)>=NSMinY(docBounds),
+       "首行缩放后不越上/左边界（不被 clip）");
+    NSRect s2=scaled(rows[2].frame);
+    ck(NSMaxX(s2)<=NSMaxX(docBounds)&&NSMaxY(s2)<=NSMaxY(docBounds),
+       "末行缩放后不越下/右边界（不被 clip）");
+  }
+ }
  pendingFav=nil;method_setImplementation(shared,old);
  printf("np web: %d failures\n",fail);return fail?1:0;
 }}
