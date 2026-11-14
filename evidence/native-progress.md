@@ -364,3 +364,7 @@ web max-height:720 的 margin 未移植；实机未验。
 （均在专辑详情导航处，单跑/换轮重跑均通过；未能复现，记为既有 open flake）。
 **未做**：古典第 4 卡/抽屉 vs 气泡、OPRA 预设卡片墙、chip SVG 图标、默认渲染器切换、双模式层；
 playback RENDERFAIL 根因仍需用户诊断包。实机验收由用户执行。
+
+**稳定性复跑（1.1.7.32 同树）**：ctest **195/195**（361.65s，`final-ctest-195-rerun`）；audit **246/0**（第二次）；
+即最终树连续两次全量 ctest 与两次 audit 全绿。此前 1.1.7.29 阶段 5 次全量 ctest 有 2 次
+`native_ui_functional` bus error（专辑详情导航处；单跑与换轮重跑均通过，未复现，按 open flake 记录）。
