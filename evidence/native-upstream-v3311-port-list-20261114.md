@@ -120,3 +120,9 @@
 - **底栏精确 dB 输入** barVolInput 已落地，判据顺带抓出并修好一处**两处共有**的真缺陷：
   text.doubleValue 对非数字返回 0，而 0 dB 合法 ⟹ abc 被当 0 dB 下发。
   见 evidence/native-bar-voldb-20261115.md。挂账：barVolDb 输出（需辅助功能语义）、volFloor 底栏静音键。
+
+## 进度（1.1.7.74）
+
+- **底栏静音键** volFloor 已落地，并把两处静音记忆值收敛为**全局唯一**（对齐上游 volumeRestore 单例），
+  避免「播放页静音、底栏恢复」时恢复成错误值。见 evidence/native-volume-mute-shared-20261115.md。
+  挂账：静音态图标切换（aria-pressed）未做、未接辅助功能。

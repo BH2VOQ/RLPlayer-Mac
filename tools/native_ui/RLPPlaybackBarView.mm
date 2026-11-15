@@ -251,6 +251,8 @@ static void RLPSetBadgeText(NSTextField *label, NSString *text, NSColor *color, 
 @property (nonatomic, strong) RLPVolumeKnobView *volKnob;
 /// v3.3.11 底栏 `barVolInput`：精确 dB 输入（-120~+20，Enter 确认）。
 @property (nonatomic, strong) NSTextField *volDbField;
+/// v3.3.11 底栏 volFloor：静音/恢复（叠在旋钮圆盖中心，与 web 同位置）。
+@property (nonatomic, strong) NSButton *volMuteBtn;
 @property (nonatomic, strong) NSImageView *volIconView;
 @property (nonatomic, strong) NSImageView *coverView;      // 封面缩略图（web 底栏左侧）
 @property (nonatomic, strong) NSTextField *bpBadge;        // BIT-PERFECT 绿色徽标
@@ -507,6 +509,16 @@ static void RLPSetBadgeText(NSTextField *label, NSString *text, NSColor *color, 
     __weak __typeof__(self) kobs = self;
     self.volKnob.onLiveChange = ^(double db) { [kobs updateVolumeUiForDb:db]; };
     self.volKnob.onCommit = ^(double db) { [kobs commitVolumeDb:db]; };
+    // v3.3.11 底栏 volFloor：静音/恢复键，叠在旋钮圆盖中心（web ui_page.h:1501）。
+    self.volMuteBtn = [[NSButton alloc] initWithFrame:NSZeroRect];
+    self.volMuteBtn.identifier = @"volFloor";
+    self.volMuteBtn.bordered = NO;
+    self.volMuteBtn.imagePosition = NSImageOnly;
+    self.volMuteBtn.image = [NSImage imageWithSystemSymbolName:@"speaker.slash.fill"
+                                     accessibilityDescription:RLPTr(@"静音")];
+    self.volMuteBtn.toolTip = RLPTr(@"静音");
+    self.volMuteBtn.target = self;
+    self.volMuteBtn.action = @selector(onToggleVolumeMute:);
 
     // v3.3.11 底栏 barVolInput：精确 dB 输入。与播放页 npVolInput 同一套校验/提交纪律。
     self.volDbField = [[NSTextField alloc] initWithFrame:NSZeroRect];
@@ -521,7 +533,7 @@ static void RLPSetBadgeText(NSTextField *label, NSString *text, NSColor *color, 
 
     for (NSView *v in @[self.titleLabel, self.subLabel, self.posLabel, self.durLabel, self.fmtBadge,
                         self.lyricBtn, self.chainBtn, self.progress, volView, self.volume,
-                        self.volKnob, self.volDbField]) {
+                        self.volKnob, self.volDbField, self.volMuteBtn]) {
         v.translatesAutoresizingMaskIntoConstraints = NO;
         [self addSubview:v];
     }
@@ -620,9 +632,18 @@ static double RLPVolDbToPos(double db) {
             CGFloat w=v==self.volKnob?knobS:v==self.volDbField?46.0:v==self.volume?volW:v==self.volIconView?14:v==self.bpBadge?bpW:v==self.fmtBadge?fmtW:v==self.gpuBadge?gpuW:iconW;
             CGFloat h=(v==self.lyricBtn || v==self.chainBtn)?32:(v==self.volKnob?knobS:v==self.volDbField?18.0:v==self.volume?16:20);
             CGFloat rowCY=wrap?(row==0?H-21:13):H/2;
+            if (v == self.volMuteBtn) {
+                // 覆盖层：不占簇宽度，叠在旋钮圆盖中心（web 是 absolute 定位）。
+                rowX -= itemGap;
+                continue;
+            }
             if (v == self.volKnob) {
                 // 旋钮是方形、居中在 volW 槽位里：槽宽不变 ⟹ 右端留白与左端对称（第14项判据）。
                 place(v, rowX + (w - h) / 2.0, rowCY - h / 2.0, h, h);
+                // 静音键叠在圆盖中心（22×22，web 也是 28×28 覆盖层）
+                const CGFloat muteS = 22.0;
+                place(self.volMuteBtn, NSMidX(self.volKnob.frame) - muteS / 2.0,
+                      rowCY - muteS / 2.0, muteS, muteS);
             } else {
                 place(v,rowX,rowCY-h/2,w,h);
             }
@@ -1050,6 +1071,15 @@ static double RLPVolDbToPos(double db) {
 /// 旋钮松开：按 v3.3.11 的 dB 值直接下发（不再经 -55 位置曲线换算）。
 /// v3.3.11 barVolInput 的 Enter 提交：与播放页 onCommitPreciseVolume: 同一套校验。
 /// 非法值（空/非数/越界）只标红并回填已确认值，**不下发请求**（与 web aria-invalid 同语义）。
+/// v3.3.11 toggleVolumeMute：与播放页共用同一份记忆值（volumeRestore 唯一）。
+- (void)onToggleVolumeMute:(id)sender {
+    (void)sender;
+    if (!self.polling) return;
+    const double next = RLPVolumeMuteNextDb(self.volKnob.db);
+    if (isnan(next)) return;   // 当前 -120 且无恢复值 ⟹ 什么都不做
+    [self commitVolumeDb:next];
+    [self updateVolumeUiForDb:next];
+}
 - (void)onCommitPreciseVolume:(id)sender {
     (void)sender;
     NSString *text = [self.volDbField.stringValue stringByTrimmingCharactersInSet:

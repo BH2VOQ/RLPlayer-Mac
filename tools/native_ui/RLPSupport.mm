@@ -564,3 +564,22 @@ NSDictionary<NSString *, id> *RLPParseM3U(NSString *text, NSString *folder) {
     if (!items.count || cue) return nil;                                // 空歌单 / 孤立 CUE
     return @{ @"items": items, @"needsFolder": @(needsFolder) };
 }
+
+// ---- v3.3.11 静音/恢复的唯一状态 ----
+static double gVolumeRestoreDb = NAN;   // NAN = web volumeRestore === null
+
+double RLPVolumeMuteNextDb(double currentDb) {
+    if (!isfinite(currentDb)) currentDb = -120.0;
+    if (currentDb <= -120.0) {
+        if (isnan(gVolumeRestoreDb)) return NAN;   // 上游：无恢复值直接 return，不发请求
+        const double restored = gVolumeRestoreDb;
+        gVolumeRestoreDb = NAN;
+        return restored;
+    }
+    gVolumeRestoreDb = currentDb;
+    return -120.0;
+}
+
+BOOL RLPVolumeMuteHasRestore(void) { return !isnan(gVolumeRestoreDb); }
+
+void RLPVolumeMuteReset(void) { gVolumeRestoreDb = NAN; }

@@ -1204,3 +1204,17 @@ fetchStatus 回填时仅在输入框非第一响应者时覆盖（不打断输�
 **结果**：native_bar_web 358 checks / 0 failures；np web 0 failures。
 
 **挂账**：barVolDb（sr-only 输出，需辅助功能语义）、volumePending（架构 N/A）、底栏 volFloor 静音键、输入框定宽 46pt。
+
+### 2026-11-15 13:xx —— 轮次 41（1.1.7.74）：底栏静音键 volFloor + 静音状态全局唯一
+
+**关键点**：上游 volumeRestore 是**全局单例**，两个静音键共用。原生此前只有播放页一份局部记忆值；
+若底栏各记一份，就会出现「播放页静音 -12.5、底栏恢复」时恢复成错误值。
+
+**实现**：RLPSupport 新增 RLPVolumeMuteNextDb / RLPVolumeMuteHasRestore / RLPVolumeMuteReset（NAN = null）；
+播放页改为调用共享函数（行为不变，M1–M7 判据仍全绿证明未改行为）；底栏新增 volFloor 作为**覆盖层**
+叠在旋钮圆盖中心（不占簇宽度，与 web absolute 定位同语义）。
+
+**判据**：新增 6 条（控件/接线/覆盖层位置/初始无值/静音下发 -120/恢复为 -12.5 而非默认值/恢复后清空/
+已 -120 且无值时点击不发请求）。结果 native_bar_web 368 checks / 0 failures；np web 0 failures。
+
+**挂账**：静音态图标切换（aria-pressed）未做；两个静音键未接 NSAccessibility；RLPVolumeMuteReset 暂无调用点。

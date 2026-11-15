@@ -5,6 +5,7 @@
 #import <QuartzCore/QuartzCore.h>
 #import "RLPPlaybackBarView.h"
 #import "RLPVolumeKnobView.h"
+#import "RLPSupport.h"
 
 // 生产接缝（实现在 RLPPlaybackBarView.mm）：旋钮松开按 v3.3.11 dB 直接下发。
 @interface RLPPlaybackBarView (RLPBarKnobTestSeam)
@@ -388,7 +389,33 @@ int main() { @autoreleasepool {
     check(NSWidth(knob.frame) > 0 && NSHeight(knob.frame) > 0, "旋钮有真实可见尺寸");
     check(fabs(NSWidth(knob.frame) - NSHeight(knob.frame)) < 1.0, "旋钮槽位是方形（圆盘不被拉伸）");
 
+
     online=YES; [bar startPolling];
+
+
+    // ---- v3.3.11 底栏 volFloor：静音/恢复（与播放页共用一份记忆值） ----
+    NSButton *barMute = field(bar, @"volMuteBtn");
+    check(barMute != nil && [barMute.identifier isEqual:@"volFloor"], "底栏有 volFloor 静音键（web ui_page.h:1501 同位置）");
+    check(barMute.target == bar && barMute.action != NULL, "底栏静音键有真实 target/action");
+    check(NSWidth(barMute.frame) > 0 && NSMidX(barMute.frame) > NSMinX(knob.frame) && NSMidX(barMute.frame) < NSMaxX(knob.frame), "静音键叠在旋钮圆盖范围内（覆盖层而非占位控件）");
+
+    // 共享状态：静音→恢复 必须回到原值（不是回到某个固定默认值）
+    RLPVolumeMuteReset();
+    check(!RLPVolumeMuteHasRestore(), "初始无恢复值（web volumeRestore === null）");
+    knob.db = -12.5; [bar commitVolumeDb:knob.db];
+    check([posts.lastObject isEqual:@"/api/volume?db=-12.5"], "前置：把音量设到 -12.5 dB");
+    [barMute performClick:nil];
+    check([posts.lastObject isEqual:@"/api/volume?db=-120.0"], "点击静音键下发 -120.0 dB");
+    check(RLPVolumeMuteHasRestore(), "静音后有恢复值");
+    [barMute performClick:nil];
+    check([posts.lastObject isEqual:@"/api/volume?db=-12.5"], "再点一次恢复成静音前的 -12.5 dB（不是默认值）");
+    check(!RLPVolumeMuteHasRestore(), "恢复后清空记忆值");
+    // 无恢复值且当前已 -120：上游语义是「什么都不做」
+    RLPVolumeMuteReset();
+    knob.db = -120.0; [bar commitVolumeDb:knob.db];
+    NSString *before = posts.lastObject;
+    [barMute performClick:nil];
+    check([posts.lastObject isEqual:before], "当前已 -120 且无恢复值时点击不发请求（上游 return）");
 
     // ---- v3.3.11 barVolInput：底栏精确 dB 输入（Enter 确认） ----
     NSTextField *volField = field(bar, @"volDbField");   // field() 走 KVC 属性名

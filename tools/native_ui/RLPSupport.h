@@ -93,6 +93,14 @@ void RLPPlayAlbum(NSString *albumKey, NSInteger startIndex);
 void RLPEnqueuePath(NSString *path);
 void RLPPostJSON(NSString *path, NSString * _Nullable body);
 
+/// v3.3.11 `toggleVolumeMute` 的**唯一状态**（web `volumeRestore` 是全局单例）。
+/// 播放页与底栏两个静音键必须共用同一份记忆值，否则「在播放页静音、到底栏取消静音」会恢复成错误值。
+/// 返回应下发的 dB；返回 **NAN** 表示上游语义的「什么都不做」（当前已 -120 且无恢复值）。
+double RLPVolumeMuteNextDb(double currentDb);
+/// 当前是否有可恢复的记忆值（判据与 UI 可用；对应 web `volumeRestore !== null`）。
+BOOL RLPVolumeMuteHasRestore(void);
+/// 清空记忆值（上游在「重置/丢弃」路径上会置 null）。
+void RLPVolumeMuteReset(void);
 /// 播放/暂停的**唯一决策**（与 web playOrPause 同语义）：
 ///   播放中（playing && !paused）→ /api/pause?on=1
 ///   暂停中（paused）             → /api/pause?on=0
