@@ -557,6 +557,47 @@ if(APPLE)
   add_test(NAME native_pages_fixes COMMAND test_native_pages_fixes)
   set_tests_properties(native_pages_fixes PROPERTIES TIMEOUT 120)
 
+  # 页面 P8–P12 判据（歌单页顶栏标题/计数、曲目页搜索空态与单一搜索入口、
+  # 右键收藏双向、收藏/最近列结构）。用真主窗口 + 全量页面（与 test_native_single_scroll
+  # 同一份源码清单）；客户端用记录型 spy 替换 +[RLPCoreClient shared]：不启动核心、不出声。
+  add_executable(test_native_pages_p812 tests/test_native_pages_p812.mm
+    tools/native_ui/RLPShortcuts.mm
+    tools/native_ui/RLPMainWindowController.mm tools/native_ui/RLPSidebarViewController.mm
+    tools/native_ui/RLPAlbumsViewController.mm tools/native_ui/RLPAlbumDetailViewController.mm
+    tools/native_ui/RLPArtistDetailViewController.mm tools/native_ui/RLPArtistsViewController.mm
+    tools/native_ui/RLPTracksViewController.mm tools/native_ui/RLPQueueViewController.mm
+    tools/native_ui/RLPPlaylistsViewController.mm tools/native_ui/RLPFoldersViewController.mm
+    tools/native_ui/RLPRecentViewController.mm tools/native_ui/RLPFavoritesViewController.mm
+    tools/native_ui/RLPStreamingViewController.mm tools/native_ui/RLPQuickStartViewController.mm
+    tools/native_ui/RLPListeningRoom.mm
+    tools/native_ui/RLPNowPlayingViewController.mm tools/native_ui/RLPWorksViewController.mm
+    tools/native_ui/RLPSettingsViewController.mm tools/native_ui/RLPSettingsLayout.mm
+    tools/native_ui/RLPServersView.mm tools/native_ui/RLPMetaSourcesView.mm
+    tools/native_ui/RLPLibStatsView.mm tools/native_ui/RLPRemoveDir.mm
+    tools/native_ui/RLPEqualizerView.mm tools/native_ui/RLPEQFaderView.mm tools/native_ui/RLPEQFaderInspector.mm tools/native_ui/RLPVolumeSliderView.mm
+    tools/native_ui/RLPEQGeometry.mm tools/native_ui/RLPTargetCurve.mm
+    tools/native_ui/RLPInputView.mm tools/native_ui/RLPCastView.mm
+    tools/native_ui/RLPCalibrationView.mm
+    tools/native_ui/RLPUpdateWindowController.mm tools/mac_update.mm
+    tools/native_ui/RLPPageViewController.mm
+    tools/native_ui/RLPPlaceholderViewController.mm tools/native_ui/RLPRightDrawer.mm
+    tools/native_ui/RLPPlaybackBarView.mm tools/native_ui/RLPVolumeKnobView.mm tools/native_ui/RLPVolumeSliderView.mm
+    tools/native_ui/RLPKnowledgeView.mm tools/native_ui/RLPLyrics.mm
+    tools/native_ui/RLPAnalysisSummary.mm tools/native_ui/RLPSignalChain.mm
+    tools/native_ui/RLPTrackActions.mm tools/native_ui/RLPModels.mm
+    tools/native_ui/RLPSupport.mm tools/native_ui/RLPTheme.mm tools/native_ui/RLPNativeI18n.mm
+    tools/native_ui/RLPCoreClient.mm)
+  set_source_files_properties(tools/mac_update.mm
+    PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
+  target_compile_options(test_native_pages_p812 PRIVATE -fobjc-arc)
+  target_compile_definitions(test_native_pages_p812 PRIVATE RL_WITH_UPDATE=1)
+  target_include_directories(test_native_pages_p812 PRIVATE src tools tools/native_ui)
+  target_link_libraries(test_native_pages_p812 PRIVATE rlapp_core
+    "-framework AppKit" "-framework QuartzCore" "-framework WebKit" "-framework Security"
+    "-framework MediaPlayer" "-framework AVFoundation" "-framework CoreMedia")
+  add_test(NAME native_pages_p812 COMMAND test_native_pages_p812)
+  set_tests_properties(native_pages_p812 PROPERTIES TIMEOUT 240)
+
   # 播放队列页行布局 = web `.qrow`：4 列（序号/标题/文件夹/×）、行高 38、无列头、
   # 当前行 accent-weak + 标题 accent、× 仅行悬停可见、底部分隔线。对 1.1.7.28 先跑红。
   add_executable(test_native_queue_rows tests/test_native_queue_rows.mm
