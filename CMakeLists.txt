@@ -1442,6 +1442,15 @@ add_executable(test_modulator_families tests/test_modulator_families.cpp)
 target_link_libraries(test_modulator_families PRIVATE rtadsp)
 add_test(NAME modulator_families COMMAND test_modulator_families)
 
+# ---------------- 2026-11-16：U12 1-bit SDM 输出 corner 准入（设置前置闸门的契约测试）----------------
+# 策略照抄上游语义，见 src/dsp/sdm_output_policy.h 顶部注释：非真 EC 的 1-bit
+# corner 必须 >= 100 kHz，Chebyshev 优先于 ecCorrection（不豁免），corner<=0/NaN
+# 单独一条错误。纯策略头单测：不实例化调制器、不碰设备、不发声。
+# 绝不静默换 corner —— 本测试同时锁死「非法值不得被改写成 100 kHz 后放行」的错误码。
+add_executable(test_sdm_policy tests/test_sdm_policy.cpp)
+target_link_libraries(test_sdm_policy PRIVATE rtadsp)
+add_test(NAME sdm_policy COMMAND test_sdm_policy)
+
 add_executable(test_filters tests/test_filters.cpp)
 target_link_libraries(test_filters PRIVATE rtadsp)
 add_test(NAME filters COMMAND test_filters)
