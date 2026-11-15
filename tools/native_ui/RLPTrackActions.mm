@@ -208,12 +208,19 @@ void RLPShowQualitySheet(NSString *path, NSView *anchor) {
             out.string = [j[@"error"] isKindOfClass:[NSString class]] ? j[@"error"] : RLPTr(@"分析失败");
             return;
         }
+        // 后端返回的是**外层** {ok, usable, cached, ms, stats, health:{…}}；摘要与完整性提示
+        // 都住在 health 内层 ⟹ 先解外层（旧代码直接把外层传给摘要函数，指标会被读成"缺失"）。
+        NSDictionary *hh = RLPAnlUnwrapHealth(j) ?: j;
         // 摘要三行 + 明细：数字全部来自后端，UI 只排版（铁律 3）
         NSMutableString *txt = [NSMutableString string];
-        [txt appendFormat:@"%@：%@\n", RLPTr(@"动态"), RLPAnlSumDyn(j)];
-        [txt appendFormat:@"%@：%@\n", RLPTr(@"音质"), RLPAnlSumQual(j)];
-        [txt appendFormat:@"%@：%@\n\n", RLPTr(@"假无损"), RLPAnlSumFake(j)];
-        [txt appendString:RLPAnlDetailText(j, RLPAnlLevelFull, NO, nil, path)];
+        // U10：半截文件的提示摆在摘要**之前**（后端 note 原样，绝不写死文案）
+        if (RLPAnlIncomplete(hh) && [hh[@"note"] isKindOfClass:[NSString class]] &&
+            [(NSString *)hh[@"note"] length])
+            [txt appendFormat:@"%@\n\n", hh[@"note"]];
+        [txt appendFormat:@"%@：%@\n", RLPTr(@"动态"), RLPAnlSumDyn(hh)];
+        [txt appendFormat:@"%@：%@\n", RLPTr(@"音质"), RLPAnlSumQual(hh)];
+        [txt appendFormat:@"%@：%@\n\n", RLPTr(@"假无损"), RLPAnlSumFake(hh)];
+        [txt appendString:RLPAnlDetailText(hh, RLPAnlLevelFull, NO, nil, path)];
         out.string = txt;
     }];
 }

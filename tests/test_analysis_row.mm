@@ -182,6 +182,41 @@ int main() {
             CK(Has(RLPAnlDetailText(nil, 1, NO, @"解码失败", @"/m/a.flac"), @"解码失败"), "C1y 失败如实显示原因", @"");
         }
 
+        // ---------- ③e 完整性（U10）：只读后端结论，四个字典用例 ----------
+        {
+            // ① incomplete + declared：note 原样首行、声明/实际两个数都在
+            NSDictionary *incDecl = @{ @"status": @"incomplete", @"incomplete": @YES,
+                                       @"declared_sec": @10.0, @"duration_sec": @4.99,
+                                       @"note": @"文件可能不完整：容器声明 10.000 s，实际解码 4.990 s（49.9%）" };
+            CK(RLPAnlIncomplete(incDecl), "C1z1 incomplete=true ⟹ 判「可能不完整」", @"");
+            NSString *dt = RLPAnlDetailText(incDecl, 2, NO, nil, @"/m/a.mp3");
+            CK([dt hasPrefix:(NSString *)incDecl[@"note"]],
+               "C1z1 详情首行 = 后端 note **原样**（逐字开头，不写死文案）", dt);
+            NSString *cmp = RLPAnlDeclaredVsActual(incDecl);
+            CK(cmp.length > 0 && Has(cmp, @"10.000") && Has(cmp, @"4.990"),
+               "C1z1 声明/实际两个数都在", cmp);
+
+            // ② declared=0：后端明确"没判" ⟹ 不许排成 "容器声明 0.000 s"
+            CK(RLPAnlDeclaredVsActual(@{ @"declared_sec": @0, @"duration_sec": @5.0 }) == nil,
+               "C1z2 declared_sec=0 ⟹ 未判（nil，不是 0.000 s）", @"");
+            CK(!RLPAnlIncomplete(@{ @"status": @"ready", @"incomplete": @NO }),
+               "C1z2 完整文件 ⟹ 不判不完整", @"");
+
+            // ③ note 空：结论来自字段而不是文案；详情也不许多出写死的提示
+            NSDictionary *noNote = @{ @"status": @"incomplete", @"incomplete": @YES,
+                                      @"declared_sec": @10.0, @"duration_sec": @4.99 };
+            CK(RLPAnlIncomplete(noNote), "C1z3 note 空仍判「可能不完整」（结论不靠文案）", @"");
+            CK(!Has(RLPAnlDetailText(noNote, 1, NO, nil, @"/m/a.mp3"), @"文件可能不完整："),
+               "C1z3 note 空 ⟹ 详情不写死「文件可能不完整」文案", @"");
+
+            // ④ 完整文件：不判不完整、详情不含提示；老后端只有 status 时也要认
+            CK(!Has(RLPAnlDetailText(@{ @"status": @"ready", @"incomplete": @NO, @"declared_sec": @10.0 },
+                                     1, NO, nil, @"/m/a.flac"), @"可能不完整"),
+               "C1z4 完整文件详情不含不完整提示", @"");
+            CK(RLPAnlIncomplete(@{ @"status": @"incomplete" }),
+               "C1z4 只有 status=incomplete（老后端无 incomplete 键）也认", @"");
+        }
+
         // ---------- ④ 自动分析去重（每曲一次） ----------
         CK(RLPAnlShouldAutoAnalyze(@"/m/a.flac", YES, YES, nil, NO, NO), "C4a 首次 ⟹ 触发", @"");
         CK(!RLPAnlShouldAutoAnalyze(@"/m/a.flac", YES, YES, @"/m/a.flac", NO, NO), "C4b 同曲已跑 ⟹ 不再触发", @"");

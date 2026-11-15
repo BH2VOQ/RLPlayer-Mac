@@ -57,7 +57,10 @@ NSString *RLPAnlSumQual(NSDictionary *h) {
 NSString *RLPAnlSumFake(NSDictionary *h) {
     if (![h isKindOfClass:[NSDictionary class]]) return RLPTr(@"未分析");
     id st = h[@"status"];
-    if ([st isKindOfClass:[NSString class]] && [(NSString *)st length] && ![st isEqualToString:@"ready"])
+    // U10：incomplete = 分析**完成**了，但文件可能只有一半。绝不返回「分析未完成」——
+    // 那会把用户引向"再点一次分析"，而正确动作是等拷贝/下载结束。摘要照常给有损判读。
+    if ([st isKindOfClass:[NSString class]] && [(NSString *)st length] && ![st isEqualToString:@"ready"] &&
+        ![st isEqualToString:@"incomplete"])
         return RLPTr(@"分析未完成");
     NSMutableArray<NSString *> *parts = [NSMutableArray array];
     const BOOL suspected = [h[@"lossless_suspected"] isKindOfClass:[NSNumber class]] &&
@@ -123,6 +126,33 @@ NSDictionary *RLPAnlUnwrapHealth(NSDictionary *json) {
 }
 
 // ---------------------------------------------------------------------------
+// 完整性（U10，2026-11-16）：后端判「文件可能不完整」的**只读**判读层
+//
+// 判据的唯一真相源在后端（src/analysis/track_health.h 的 apply_completeness：
+// |实际 − 容器声明| > max(1 s, 2%×声明) ⟹ status="incomplete"，容器时长未知就不判）。
+// UI 侧**绝不复算**这个阈值，也不从 note 文案反推 —— 只读两个字段：
+//   incomplete: true/false（新键）；status: "ready"/"incomplete"/…
+// 这样两边口径不会漂移（铁律 3：串接层不许自己发明判据）。
+// ---------------------------------------------------------------------------
+BOOL RLPAnlIncomplete(NSDictionary *h) {
+    if (![h isKindOfClass:[NSDictionary class]]) return NO;
+    id flag = h[@"incomplete"];
+    if ([flag isKindOfClass:[NSNumber class]] && [(NSNumber *)flag boolValue]) return YES;
+    id st = h[@"status"];
+    return [st isKindOfClass:[NSString class]] && [(NSString *)st isEqualToString:@"incomplete"];
+}
+
+NSString *RLPAnlDeclaredVsActual(NSDictionary *h) {
+    if (![h isKindOfClass:[NSDictionary class]]) return nil;
+    id decl = h[@"declared_sec"];
+    // declared_sec==0/缺失 = 后端明确"没判"（容器时长未知）：绝不能排成 "声明 0.0 s"。
+    if (!RLPAnlAvail(decl) || [(NSNumber *)decl doubleValue] <= 0.0) return nil;
+    NSString *actual = RLPAnlVal(h[@"duration_sec"], 3, @" s");
+    return [NSString stringWithFormat:@"%@ %.3f s / %@ %@",
+            RLPTr(@"容器声明"), [(NSNumber *)decl doubleValue], RLPTr(@"实际解码"), actual];
+}
+
+// ---------------------------------------------------------------------------
 // 详情文本（L1 = 关键指标；L2 = 全量 + 原始证据）
 // 对齐 web 版 anlCardDyn / anlCardQual / anlCardFake 的字段清单。
 // ---------------------------------------------------------------------------
@@ -136,6 +166,12 @@ NSString *RLPAnlDetailText(NSDictionary *health, NSInteger level, BOOL cached,
         else if (!RLPAnlIsLocalPath(path)) [s appendString:RLPTr(@"仅本地文件可分析")];
         else [s appendString:RLPTr(@"未分析")];
         return s;
+    }
+    // U10：半截文件的提示**原样**放首行（后端 note，中文人话里已经带声明值/实际值/百分比）。
+    // 这里绝不写死文案：note 是后端判据的一部分，UI 只负责摆在最前面；note 为空就不占行。
+    if (RLPAnlIncomplete(health) && [health[@"note"] isKindOfClass:[NSString class]] &&
+        [(NSString *)health[@"note"] length]) {
+        [s appendFormat:@"%@\n\n", health[@"note"]];
     }
     NSDictionary *q = [health[@"quality"] isKindOfClass:[NSDictionary class]] ? health[@"quality"] : @{};
     const BOOL qOK = [q[@"available"] isKindOfClass:[NSNumber class]] && [q[@"available"] boolValue];
@@ -206,6 +242,11 @@ NSString *RLPAnlDetailText(NSDictionary *health, NSInteger level, BOOL cached,
         [s appendFormat:@"\n%@\n", RLPTr(@"分析记录")];
         [s appendFormat:@"  %@ %@\n", RLPTr(@"分析状态"),
             [health[@"status"] isKindOfClass:[NSString class]] ? health[@"status"] : @"NA"];
+        // U10：把判据的两个数摊开（note 已给过一遍，这里是"按字段可核对"的同一对数字）。
+        {
+            NSString *cmp = RLPAnlDeclaredVsActual(health);
+            if (cmp.length) [s appendFormat:@"  %@ %@\n", RLPTr(@"完整性"), cmp];
+        }
         {
             NSString *clock = @"NA";
             const double ms = RLPAnlAvail(health[@"analyzed_at_ms"]) ? [health[@"analyzed_at_ms"] doubleValue] : 0;
@@ -297,7 +338,9 @@ static NSDictionary *AnlValRow(NSDictionary *h, NSString *label,
 /// web anlVerV：判定（不是整段摘要，摘要里可能还带截止频率）
 static NSString *AnlVerdict(NSDictionary *h) {
     id st = h[@"status"];
-    if ([st isKindOfClass:[NSString class]] && [(NSString *)st length] && ![st isEqualToString:@"ready"])
+    // U10：同 RLPAnlSumFake —— incomplete 不是"分析未完成"，它只说明文件可能短了一截。
+    if ([st isKindOfClass:[NSString class]] && [(NSString *)st length] && ![st isEqualToString:@"ready"] &&
+        ![st isEqualToString:@"incomplete"])
         return RLPTr(@"分析未完成");
     if ([h[@"lossless_suspected"] isKindOfClass:[NSNumber class]] && [h[@"lossless_suspected"] boolValue])
         return RLPTr(@"疑似有损转码");

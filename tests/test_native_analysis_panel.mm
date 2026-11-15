@@ -773,6 +773,40 @@ int main() {
                [NSString stringWithFormat:@"panel=%.1f segRight=%.1f", pw, NSMaxX(seg2.frame)]);
         }
 
+        // ---------------------------------------------------------------
+        // ⑧ U10 完整性：后端判 incomplete 时，状态串必须说「文件可能不完整」，
+        //    三张摘要卡不许把"分析成功但文件可能短了一截"说成「分析未完成」。
+        //    （后端 note 的"首行原样展示"在详情文本路径上，由 test_analysis_row 的纯函数用例钉住。）
+        // ---------------------------------------------------------------
+        {
+            NSMutableDictionary *inc = [AnlFixtureHealth() mutableCopy];
+            inc[@"status"] = @"incomplete";
+            inc[@"incomplete"] = @YES;
+            inc[@"declared_sec"] = @10.0;
+            inc[@"duration_sec"] = @4.99;
+            inc[@"note"] = @"文件可能不完整：容器声明 10.000 s，实际解码 4.990 s（49.9%）—— "
+                           @"若这首正在拷贝/下载，请等复制完成后再分析一次";
+            g_healthEnv = @{ @"ok": @YES, @"usable": @YES, @"cached": @NO, @"health": inc };
+            [vc onAnlReanalyze:nil];
+            [vc layoutWebPlayback];
+            [v layoutSubtreeIfNeeded];
+            NSTextField *statU10 = (NSTextField *)FindById(panel, @"npAnlStat");
+            Ck(statU10 != nil && [statU10.stringValue isEqualToString:@"文件可能不完整"],
+               "U10 状态串：incomplete ⟹「文件可能不完整」（不是「已分析」也不是「分析失败」）",
+               [NSString stringWithFormat:@"got=「%@」", statU10.stringValue ?: @""]);
+            // 卡片标识由 setCardKey 派生：「anl.fake」⟹ 摘要标签是「anl.fake.sum」。
+            NSView *fakeCard = FindById(panel, @"anl.fake");
+            NSTextField *fakeSumLab = (NSTextField *)FindById(fakeCard, @"anl.fake.sum");
+            NSString *fakeSum = nil;
+            if ([fakeSumLab isKindOfClass:[NSTextField class]]) {
+                NSAttributedString *as = fakeSumLab.attributedStringValue;
+                fakeSum = as.string.length ? as.string : fakeSumLab.stringValue;
+            }
+            Ck(fakeSum != nil && ![fakeSum containsString:@"分析未完成"],
+               "U10 摘要：incomplete 不被说成「分析未完成」（前端若这么说，用户会去重跑而不是等拷贝）",
+               [NSString stringWithFormat:@"got=「%@」", fakeSum ?: @"(nil)"]);
+        }
+
         std::printf("结果：%d passed, %d failed\n", g_pass, g_fail);
         return g_fail == 0 ? 0 : 1;
     }

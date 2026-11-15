@@ -17,6 +17,15 @@ NSString *RLPAnlSumQual(NSDictionary *_Nullable h);
 /// 假无损摘要：疑似有损转码 / 截止频率 / 带宽证据 / 24bit 实为低位深。
 NSString *RLPAnlSumFake(NSDictionary *_Nullable h);
 
+/// 是否「文件可能不完整」（后端 U10 判据的结论）。
+/// true = status=="incomplete" 或 incomplete==true；缺字段/非字典 ⟹ NO。
+/// **只陈述后端结论**，不在这里重新算 |声明−实际|（口径的唯一真相源在
+/// src/analysis/track_health.h 的 apply_completeness：1 s / 2% 容差，unknown 不判）。
+BOOL RLPAnlIncomplete(NSDictionary *_Nullable h);
+/// 「容器声明 vs 实际解码」的一行对比（declared_sec<=0 或缺失 ⟹ nil = 未判）。
+/// 后端已经给了 note 人话；这个函数是给"展开档分析记录"用的**数字**行，两者不互相替代。
+NSString *_Nullable RLPAnlDeclaredVsActual(NSDictionary *_Nullable h);
+
 /// 数值可用性（与 web 版 anlHas 同口径：必须是有限数字）。
 BOOL RLPAnlHas(id _Nullable v);
 /// 格式化：不可用返回 "NA"（不是 "不适用 dB" 这种拼接垃圾）。

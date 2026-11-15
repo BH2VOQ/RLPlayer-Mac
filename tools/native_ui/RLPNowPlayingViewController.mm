@@ -3892,6 +3892,9 @@ static NSString *RLPNowPlayingCastDeviceLabel(NSString *device) {
     else if (!self.currentPath.length) stat = RLPTr(@"未播放");
     else if (!RLPAnlIsLocalPath(self.currentPath)) stat = RLPTr(@"仅本地文件可分析");
     else if (!h) stat = RLPTr(@"未分析");
+    // U10：后端判「文件可能不完整」时，状态串直接说出来（后端 note 在展开档首行原样展示）。
+    // 不写"分析失败"也不写"已分析"：分析**成功**了，只是结论只覆盖已存在的那一部分。
+    else if (RLPAnlIncomplete(h)) stat = RLPTr(@"文件可能不完整");
     else stat = self.anlCached ? RLPTr(@"缓存命中") : RLPTr(@"已分析");
     self.analysisStatus.stringValue = stat;
     self.anlAuto.state = self.anlAutoEnabled ? NSControlStateValueOn : NSControlStateValueOff;

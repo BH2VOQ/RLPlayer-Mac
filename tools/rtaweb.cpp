@@ -878,8 +878,15 @@ static std::string err_text_redacted(std::string s) {
 //     前端无法用同一套判据区分"没分析"与"分析失败"。
 // 现契约（三种结果同构，字段只增不删）：
 //   {"ok":<bool>,"usable":<bool>,"code":"<稳定码>","error":"<人话>","health":{...}}
-//   ok == usable == (health.status == "ready")；失败时 health.status=="error"，
+//   ok == usable == (health.status == "ready" || health.status == "incomplete")；
+//   失败时 health.status=="error"，
 //   指标字段一律为 null（不是 0 —— 0 在 JSON/JS 里是"测出来就是 0"，null 才是"没有结论"）。
+//
+// ★ U10（2026-11-16）：incomplete 也算"给了指标"。半截文件（正在拷贝/下载）能解码出已有部分，
+//   指标（DR/LUFS/真峰/音质）都是**已经存在的那段**的真实测量值 ⟹ ok/usable 必须是 true，
+//   否则前端会把"已解码出一半"整块当成分析失败，用户既看不到指标、也看不到黄色提示。
+//   代价是调用方要自己看 status/incomplete 才敢说"这是完整文件"——所以 health 里必须带
+//   declared_sec / incomplete / note 三键（三种结果同构，字段只增不删）。
 // 稳定码取自 src/diag/error_codes.h（未就绪时用同名字面量，落地后逐字一致，见 diag 接线处）。
 static long long rlp_epoch_ms() {
     return (long long)std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -902,6 +909,8 @@ static std::string health_failure_json(const std::string& code, const std::strin
       << ",\"channels\":" << (h ? h->channels : 0)
       << ",\"bits\":" << (h ? h->bits : 0)
       << ",\"status\":\"error\",\"error\":\"" << jesc(msg) << "\""
+      // U10：完整性三键是"三种结果同构"的一部分（失败结果写默认值：未判 / 不是半截 / 无提示）
+      << ",\"declared_sec\":0.0,\"incomplete\":false,\"note\":\"\""
       << ",\"analyzed_at_ms\":" << (h && h->analyzedAtMs > 0 ? (long long)h->analyzedAtMs : rlp_epoch_ms())
       << ",\"quality\":{\"available\":false,\"hf_ratio_10k_available\":false,\"side_mid_available\":false}}}";
     return j.str();
@@ -1164,20 +1173,28 @@ static std::string handle_health_analysis(const rta::net::HttpRequest& rq, std::
         return j.str();
     }
 
-    if (h.status != "ready") {
+    // U10：incomplete 不是失败 —— 它是「解码成功、但容器头声称的时长比实际解码到的明显更长」。
+    // 半截文件里的指标是**已存在那段**的真实测量值 ⟹ 走 200 / ok:true / usable:true 照给数，
+    // 只有 status / incomplete / declared_sec / note 把"这是半份结论"讲清楚。
+    if (h.status != "ready" && h.status != "incomplete") {
         rta::net::webui_set_status(422);
         const std::string why = h.error.empty() ? "分析失败（未给出原因）" : h.error;
         return health_failure_json(h.errorCode.empty() ? "decode.read_failed" : h.errorCode, why, &h, rid);
     }
 
-    // 分析期间文件被改/被替换：结论对应的是旧内容，不能缓存，也不能冒充新文件的结论。
-    const rta::analysis::FileIdentity after = rta::analysis::FileIdentity::from_path(file);
-    if (!after.valid || !before.valid || !after.matches(before)) {
-        rta::net::webui_set_status(409);
-        return health_failure_json("decode.read_changed",
-                                   "文件在分析期间发生变化，请等拷贝/下载完成后再试", &h, rid);
+    if (h.status == "ready") {
+        // 分析期间文件被改/被替换：结论对应的是旧内容，不能缓存，也不能冒充新文件的结论。
+        const rta::analysis::FileIdentity after = rta::analysis::FileIdentity::from_path(file);
+        if (!after.valid || !before.valid || !after.matches(before)) {
+            rta::net::webui_set_status(409);
+            return health_failure_json("decode.read_changed",
+                                       "文件在分析期间发生变化，请等拷贝/下载完成后再试", &h, rid);
+        }
+        health_cache_put(key, h, after);
     }
-    health_cache_put(key, h, after);
+    // incomplete **不进任何缓存**（上游 v3.3.11 同口径）：它是"边写边分析"的中间结论，
+    // 缓存等于把半份结论固化成这首曲子的体检结果；盘缓存 HealthStore::upsert 本来也只收
+    // ready。文件后续拷完 ⟹ 内容/身份变了 ⟹ 下次请求自然重算（重算本来就是对的语义）。
 
     std::ostringstream j;
     j << "{\"ok\":true,\"usable\":true,\"cached\":false,\"ms\":"

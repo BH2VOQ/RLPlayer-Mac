@@ -2483,6 +2483,10 @@ inline const I18nPair* i18n_table(std::size_t* count) {
         {"已整理", "Summarized"},
         {"资料不足", "Insufficient data"},
         {"资料不足：缺少艺术家与曲名", "Insufficient data: missing artist and track title"},
+        {"文件可能不完整", "Possibly incomplete"},
+        {"完整性", "Completeness"},
+        {"容器声明", "Container declares"},
+        {"实际解码", "Decoded"},
     };
     if (count) *count = sizeof(k) / sizeof(k[0]);
     return k;

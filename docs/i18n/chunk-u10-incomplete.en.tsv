@@ -1,0 +1,4 @@
+文件可能不完整	Possibly incomplete	原生播放页分析状态串（U10 完整性）
+完整性	Completeness	原生分析展开档「分析记录」行标签（U10）
+容器声明	Container declares	完整性对比行：容器声明的时长（U10）
+实际解码	Decoded	完整性对比行：实际解码到的时长（U10）

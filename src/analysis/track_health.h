@@ -26,6 +26,14 @@
 //   的 dr_db / lufs / lra / peak_dbfs / cutoff_hz / confidence / fake24 必须完全相同（==）。
 //   依据是 dynamics.h / fake_lossless.h 两个增量分析器的硬约定（见各自文件头），
 //   以及 DsdPcmStream / WavPcmStream 与整曲解码的逐样本一致性。
+//   U10 起还要求 declared_sec / incomplete / note 两条路径一致（两条路径各调一次
+//   apply_completeness，判据是纯函数、不依赖解码路径）。analyze_buffer 不判完整性
+//   （没有路径可读容器头，本来也无从判定）。
+//
+// ★ U10（2026-11-16）：status 从 ready/error 扩为 ready / incomplete / error（cancelled 是
+//   既有的第四条）。incomplete = 「解码成功，但容器头声明的时长明显大于实际解码到的时长」⟹
+//   半截文件；判据见 detail::apply_completeness（1 s / 2% 容差，unknown 不判），
+//   分子（容器声明时长探针）见 container_duration.h。
 //
 // 已知边界（沿用 B1a，详见 docs/WIP-B1a.md §6）：
 //   - 多声道 LUFS 权重只实现 L/R=1.0；素材 <3 s 时 DR/LRA 口径不成立（返回 0）；
@@ -37,6 +45,7 @@
 #include "fake_lossless.h"
 #include "quality.h"                 // B2 音质分析（19 项客观指标）；增量接口，与流式体检同一次解码
 #include "health_stream.h"           // 分块 PCM 源（DSD / WAV）
+#include "container_duration.h"      // U10：容器声明时长探针（「文件可能不完整」判据的分子）
 #include "../audio/audio_loader.h"   // read_any（整段回退路径，只读使用）
 #include <string>
 #include <vector>
@@ -72,9 +81,18 @@ struct TrackHealth {
     uint32_t fs = 0;
     int channels = 0;
     int bits = 0;
-    std::string status;          // "ready" / "error"
+    std::string status;          // "ready" / "error" / "incomplete"（U10）
     std::string error;           // status=error 时的人话原因
     std::string errorCode;       // stable diagnostic code; never inferred from translated prose
+    // ---- 完整性（U10，2026-11-16；上游 v3.3.11 BUG-3 同口径）----
+    // 半截文件（正在拷贝/下载、下载中断、边写边分析）能正常解码，durationSec 只反映「已有字节」
+    // 的长度 ⟹ 指标看着全对、其实是半份结论。这里把**容器声明的时长**（FLAC STREAMINFO /
+    // WAV fmt+data / MP3 Xing·Info·VBRI / DSF fmt.sampleCount）与实际解码时长比对，差得太多就把
+    // status 从 "ready" 降为 "incomplete" 并写 note（指标照给，不拒绝出数）。
+    // declaredSec==0 表示容器时长未知（不判）：宁可漏报，不许把正常文件标黄。
+    double declaredSec = 0.0;
+    bool   incomplete = false;
+    std::string note;            // 不完整提示（中文人话；incomplete=false 时为空）
     int64_t analyzedAtMs = 0;    // Unix epoch 毫秒；缓存命中语义见 docs/分析器API建议.md
     // ---- 音质分析（B2 quality.h，2026-10-27 接入）----
     // hasQuality=false 时 quality 全 0，JSON 段里 available=false（老调用方只读老字段，零影响）。
@@ -267,6 +285,36 @@ inline TrackHealth drive_health(Src& src, size_t blockFrames, bool* streamedOk,
     return h;
 }
 
+// ---- U10：完整性判定（容器声明时长 vs 实际解码时长）----
+// 判据（照抄上游 v3.3.11 src/analysis/track_health.h 的 apply_completeness，不发明口径）：
+//   |实际 − 声明| > max(1 s, 2% × 声明) 才算「可能不完整」。
+//   * 1 s 下限：挡住容器字段的正常粒度差（MP3 帧边界 26 ms、DSF 块填充、ape 尾部标签…）；
+//   * 2% 相对量：长曲（DSD 383 s、WAV 1398 s）里 1 s 只有千分之几，光看绝对量会漏。
+// 只对 status=="ready" 的结果生效 —— 解码自己失败（真错误）绝不能被降级成「可能只是没下载完」。
+// 容器时长未知（probe 返回 false）时**不做任何判定**：宁可漏报，不许把正常文件标黄。
+inline void apply_completeness(TrackHealth& h, const std::string& path) {
+    if (h.status != "ready" || !(h.durationSec > 0.0)) return;
+    DeclaredDuration d;
+    if (!probe_declared_duration(path, &d)) return;      // 容器时长未知 ⟹ 不判（宁可漏报）
+    if (!(d.seconds > 0.0) || !std::isfinite(d.seconds)) return;
+    h.declaredSec = d.seconds;
+    const double diff = h.durationSec - d.seconds;
+    // 用 (std::max) 的括号形式：本头文件可能被已 include 过 windows.h 的 TU 间接包含，
+    // 那时 min/max 是宏，std::max(…) 会被宏展开成语法垃圾（上游踩过，clang 报 "too many errors"）。
+    const double tol  = (std::max)(1.0, d.seconds * 0.02);
+    if (std::fabs(diff) <= tol) return;                  // 在噪声内：当完整
+    h.incomplete = true;
+    h.status = "incomplete";
+    // 稳定码：程序判断用，绝不让调用方从中文文案反推语义（error 留空 —— 这不是失败）
+    h.errorCode = "analysis.incomplete";
+    char note[320] = {0};
+    std::snprintf(note, sizeof(note),
+                  "文件可能不完整：容器声明 %.3f s，实际解码 %.3f s（%.1f%%）—— "
+                  "若这首正在拷贝/下载，请等复制完成后再分析一次",
+                  d.seconds, h.durationSec, 100.0 * h.durationSec / d.seconds);
+    h.note = note;
+}
+
 } // namespace detail
 
 // 核心入口（解码无关）：对已在内存里的 AudioBuffer 做体检。不抛异常。
@@ -285,7 +333,9 @@ inline TrackHealth analyze_file_whole(const std::string& path) {
     try {
         rta::audio::LoadNote note;
         rta::audio::AudioBuffer buf = rta::audio::read_any(path, &note);
-        return analyze_buffer(buf);
+        TrackHealth h = analyze_buffer(buf);
+        detail::apply_completeness(h, path);     // U10：半截文件 → incomplete（指标照给）
+        return h;
     } catch (const rta::audio::DecodeFailure& e) {
         h.status = "error"; h.error = e.what(); h.errorCode = e.code;
     } catch (const std::exception& e) {
@@ -319,7 +369,10 @@ inline TrackHealth analyze_file(const std::string& path, const HealthStreamOptio
             bool ok = false;
             TrackHealth h = detail::drive_health(src, opt.blockFrames, &ok, opt.cancel);
             if (h.status == "cancelled") return h;   // 流式循环已取消：保留元信息，不回退
-            if (ok && h.status == "ready") return h;
+            if (ok && h.status == "ready") {
+                detail::apply_completeness(h, path);   // U10：流式路径同样要判（WAV/DSF）
+                return h;
+            }
             // 短读/计划不成立/无样本：回退整段路径，用老实现的结论（错误信息也由它给）。
             // 回退前再查一次取消：此时 h 已带 fs/channels/bits/analyzedAtMs，原样保留。
             if (cancel_requested()) return detail::cancelled_health(&h);
@@ -359,6 +412,13 @@ inline std::string track_health_json(const TrackHealth& h) {
       << ",\"bits\":"       << h.bits
       << ",\"status\":\""   << detail::json_escape(h.status) << "\""
       << ",\"error\":\""    << detail::json_escape(h.error) << "\""
+      // ---- 完整性（U10，2026-11-16；纯附加，老字段一个没动）----
+      // declared_sec：容器声明的时长（0=未知，未判）；incomplete：是否判定为「半截文件」；
+      // note：中文人话提示（incomplete=false 时为空串）。指标照给，只是让状态可见。
+      // 三种结果（ready / incomplete / error）同构：这三键始终存在。
+      << ",\"declared_sec\":" << detail::jnum(h.declaredSec, "%.3f")
+      << ",\"incomplete\":"  << (h.incomplete ? "true" : "false")
+      << ",\"note\":\""     << detail::json_escape(h.note) << "\""
       << ",\"analyzed_at_ms\":" << (long long)h.analyzedAtMs
       // ---- quality 段（B2 quality.h 的 19 项；2026-10-27 接入）----
       // 向后兼容：老字段一个都没动，新段只增不删。available=false 时各数值无意义（调用方按它判）。
