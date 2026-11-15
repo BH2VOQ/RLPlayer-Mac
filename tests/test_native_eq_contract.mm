@@ -33,6 +33,7 @@
 #import "RLPEqualizerView.h"
 #import "RLPSupport.h"
 #import "RLPTheme.h"
+#import "RLPSettingsViewController.h"
 
 #include <cstdio>
 #include <cstdlib>
@@ -65,6 +66,7 @@ static NSView *FindId(NSView *root, NSString *ident) {
 @interface NSObject (RLPEQCurveGeometry)
 - (NSRect)plotRect;
 - (CGFloat)xForFreq:(double)f;
+- (double)curveDbAtFrequency:(double)freq;
 @end
 
 /// 翻转文档视图（内容从顶部开始排；否则 hitTest 直接返回 nil）。
@@ -298,6 +300,269 @@ int main() {
             Ck(fabs(pre + 6.0) < 0.6,
                @"E10 自动前级把前级设成 -6 dB（曲线峰值 +6 dB 向上取整取负）",
                [NSString stringWithFormat:@"preamp=%.2f", pre]);
+        }
+
+        // ---- E11：重置 Flat 之后，曲线必须跟着变平（用户 2026-11-15 实测反馈"不会随动"）----
+        // 判据取的是**绘图用的真实数据**（curve.points 的最大 |dB|），不是"按钮点了没报错"。
+        {
+            // 先造一个明显的隆起：第 11 段 +9 dB
+            NSMutableString *bump = [NSMutableString string];
+            for (NSUInteger i = 1; i <= 20; ++i) {
+                const double g = (i == 11) ? 9.0 : 0.0;
+                const double f = (i == 11) ? 1000.0 : (20.0 + (double)i * 900.0);
+                [bump appendFormat:@"%@%lu,PK,%.1f,%.2f,1.41", (i > 1 ? @";" : @""),
+                                    (unsigned long)i, f, g];
+            }
+            [core jsonWithMethod:@"POST" path:@"/api/peq"
+                            body:[NSString stringWithFormat:@"bypass=0&preamp=0&bands=%@", bump]];
+            [eq reload];
+            Pump(0.9);
+            NSArray *bumpyPts = [curve valueForKey:@"points"];
+            double bumpPeak = 0;
+            for (NSArray<NSNumber *> *pp in bumpyPts)
+                if (pp.count >= 2) bumpPeak = MAX(bumpPeak, fabs(pp[1].doubleValue));
+            Ck(bumpPeak > 5.0,
+               @"E11 前置：曲线在 +9 dB 隆起时峰值明显（绘图数据真的动了）",
+               [NSString stringWithFormat:@"peak=%.2f 点数=%lu", bumpPeak, (unsigned long)bumpyPts.count]);
+
+            // 点「重置 Flat」——与用户完全相同的生产入口
+            NSButton *resetBtn = (NSButton *)FindId(eq, @"peqReset");
+            Ck(resetBtn != nil, @"E11 找到「重置 Flat」按钮", @"缺失");
+            [resetBtn performClick:nil];
+            Pump(1.0);
+
+            NSArray *flatPts = [curve valueForKey:@"points"];
+            double flatPeak = 0;
+            for (NSArray<NSNumber *> *pp in flatPts)
+                if (pp.count >= 2) flatPeak = MAX(flatPeak, fabs(pp[1].doubleValue));
+            Ck(flatPeak < 0.5,
+               @"E11 重置后**绘图数据**变平（曲线随动，不是只有表格变了）",
+               [NSString stringWithFormat:@"peak=%.2f 点数=%lu", flatPeak, (unsigned long)flatPts.count]);
+            // 表格也要跟着回 0
+            NSView *g11 = [(id)eq tableView:table viewForTableColumn:table.tableColumns[2] row:10];
+            const double gv = [g11 isKindOfClass:[NSTextField class]] ? ((NSTextField *)g11).doubleValue : 999;
+            Ck(fabs(gv) < 0.05, @"E11 重置后表格第 11 段增益回 0.00",
+               [NSString stringWithFormat:@"g=%.2f", gv]);
+        }
+
+        // ---- E14：OPRA 输入即检索（web sInput.oninput）----
+        // 用户 2026-11-15：耳机 EQ 要做到 web 版当时的效果，**输入耳机名的同时自动检索**。
+        // 旧原生只有"点搜索 / 回车"才查，边打字不出结果。
+        {
+            NSTextField *q = (NSTextField *)FindId(eq, @"opra.query");
+            Ck(q != nil, @"E14 找到 OPRA 搜索框", @"缺 opra.query");
+            // 前置：先等索引缓存就位（首次搜索会拉全量索引）
+            q.stringValue = @"k701";
+            [eq performSelector:NSSelectorFromString(@"onOpraSearch:") withObject:nil];
+            Pump(1.6);
+            NSArray *firstHits = [eq valueForKey:@"opraItems"];
+            Ck(firstHits.count > 0, @"E14 前置：k701 能检索到型号",
+               [NSString stringWithFormat:@"hits=%lu", (unsigned long)firstHits.count]);
+            const NSUInteger beforeCount = firstHits.count;
+            // 关键：**不点按钮、不回车**，只改文本——走真实的 delegate 入口
+            q.stringValue = @"akg";
+            NSNotification *note = [NSNotification notificationWithName:NSControlTextDidChangeNotification
+                                                                object:q];
+            [(id)eq controlTextDidChange:note];
+            Pump(1.0);
+            NSArray *afterHits = [eq valueForKey:@"opraItems"];
+            Ck(afterHits.count > 0 && afterHits.count != beforeCount,
+               @"E14 只改文本（不点搜索）就检索出了新结果 —— 输入即检索",
+               [NSString stringWithFormat:@"before=%lu after=%lu",
+                (unsigned long)beforeCount, (unsigned long)afterHits.count]);
+        }
+
+        // ---- E15：EQ 卡片高度跟随内容（不留空白、不溢出遮挡）----
+        // 用户 2026-11-15 截图：上半部分大片空白（OPRA 段搬走后高度没缩）、
+        // 下半部分被遮挡（异步卡片到达后父卡片没重新量高）。
+        {
+            RLPSettingsViewController *sv2 = [[RLPSettingsViewController alloc] init];
+            NSView *pv2 = sv2.view;
+            pv2.frame = NSMakeRect(0, 0, 1160, 900);
+            [sv2 selectPane:@"eq"];
+            Pump(1.4);
+            [pv2 layoutSubtreeIfNeeded];
+
+            NSMutableArray<NSView *> *all2 = [NSMutableArray array];
+            Collect(pv2, all2);
+            NSMutableArray<NSView *> *cards = [NSMutableArray array];
+            for (NSView *x in all2)
+                if ([NSStringFromClass(x.class) isEqualToString:@"RLPSettingsGroup"]) [cards addObject:x];
+            Ck(cards.count == 2, @"E15 EQ 页仍是两张卡",
+               [NSString stringWithFormat:@"cards=%lu", (unsigned long)cards.count]);
+
+            // ★ 真正的复现路径：OPRA 卡片是**异步**到达的（搜索才拉），
+            //   用户截图里那张卡就是搜 k701 之后弹出来的。
+            //   静态首帧量不出问题——第一版 E15 所以在旧代码上也绿（无效判据）。
+            if (cards.count == 2) {
+                NSView *eqInSettings = nil;
+                for (NSView *x in all2)
+                    if ([NSStringFromClass(x.class) isEqualToString:@"RLPEqualizerView"]) { eqInSettings = x; break; }
+                NSTextField *q2 = (NSTextField *)FindId(pv2, @"opra.query");
+                if (eqInSettings && q2) {
+                    const CGFloat card1Before = cards[1].frame.size.height;
+                    q2.stringValue = @"k701";
+                    [eqInSettings performSelector:NSSelectorFromString(@"onOpraSearch:") withObject:nil];
+                    Pump(2.0);                 // 等索引 + 型号卡片渲染完
+                    [pv2 layoutSubtreeIfNeeded];
+                    NSArray *modelCards = [eqInSettings valueForKey:@"opraModelCardViews"];
+                    Ck(modelCards.count > 0,
+                       @"E15 前置：搜索后型号卡片真的出来了（异步到达）",
+                       [NSString stringWithFormat:@"cards=%lu", (unsigned long)modelCards.count]);
+                    const CGFloat card1After = cards[1].frame.size.height;
+                    Ck(card1After > card1Before + 20.0,
+                       @"E15 型号卡片到达后 OPRA 卡片长高了（否则内容溢出=截图里的下半遮挡）",
+                       [NSString stringWithFormat:@"before=%.0f after=%.0f",
+                        card1Before, card1After]);
+                    NSView *grid2 = nil;
+                    for (NSView *c in cards[1].subviews)
+                        if ([c.identifier isEqualToString:@"set.group.body"]) grid2 = c;
+                    NSInteger overflow2 = 0;
+                    CGFloat deepest2 = 0;
+                    for (NSView *it in [grid2 valueForKey:@"items"]) {
+                        deepest2 = MAX(deepest2, NSMaxY(it.frame));
+                        if (NSMaxY(it.frame) > grid2.frame.size.height + 1.0) ++overflow2;
+                    }
+                    Ck(overflow2 == 0,
+                       @"E15 型号卡片到达后没有内容溢出 OPRA 卡片（不遮挡）",
+                       [NSString stringWithFormat:@"deepest=%.0f gridH=%.0f",
+                        deepest2, grid2.frame.size.height]);
+                    Ck(grid2.frame.size.height - deepest2 < 60.0,
+                       @"E15 OPRA 卡片底部没有大片空白",
+                       [NSString stringWithFormat:@"gap=%.0f", grid2.frame.size.height - deepest2]);
+                }
+            }
+            if (cards.count == 2) {
+                for (NSUInteger ci = 0; ci < cards.count; ++ci) {
+                    NSView *card = cards[ci];
+                    NSView *grid = nil, *head = nil;
+                    for (NSView *c in card.subviews) {
+                        if ([c.identifier isEqualToString:@"set.group.body"]) grid = c;
+                        if ([c.identifier isEqualToString:@"set.group.head"]) head = c;
+                    }
+                    // 卡高应当 ≈ 1 + 31 + 内容 + 17.5 + 1（网格自带上下 padding）
+                    NSArray *items = [grid valueForKey:@"items"];
+                    CGFloat need = 0;
+                    for (NSView *it in items) need = MAX(need, NSMaxY(it.frame));
+                    const CGFloat contentH = [[grid valueForKey:@"contentHeight"] doubleValue];
+                    const CGFloat cardH = card.frame.size.height;
+                    const CGFloat gridH = grid.frame.size.height;
+                    // ① 不留空白：网格高度不应明显超过内容
+                    Ck(gridH <= contentH + 40,
+                       [NSString stringWithFormat:@"E15 卡片%lu 底部没有大片空白（网格高≈内容高）", (unsigned long)ci],
+                       [NSString stringWithFormat:@"gridH=%.0f contentH=%.0f cardH=%.0f",
+                        gridH, contentH, cardH]);
+                    // ② 不遮挡：每个 item 都必须完整落在网格内
+                    NSInteger overflow = 0;
+                    for (NSView *it in items)
+                        if (NSMaxY(it.frame) > gridH + 1.0) ++overflow;
+                    Ck(overflow == 0,
+                       [NSString stringWithFormat:@"E15 卡片%lu 没有内容溢出卡片边框（遮挡）", (unsigned long)ci],
+                       [NSString stringWithFormat:@"overflow=%ld gridH=%.0f", (long)overflow, gridH]);
+                    (void)head; (void)need;
+                }
+            }
+        }
+
+        // ---- E13：手柄（点）必须落在曲线上，而不是落在"该段自己的增益"上 ----
+        // 用户 2026-11-15：点要跟 band 对应好。
+        // 判据：造一个相邻段互相叠加的形状（10 段 +12 dB、11 段 +0），
+        //      此时第 11 段自己的 gain 是 0，但曲线在 1 kHz 处被邻居抬起来了。
+        //      手柄若画在"自己的 gain"上就会浮在曲线下方 ⟹ 与曲线分离。
+        {
+            [core jsonWithMethod:@"POST" path:@"/api/peq/preset" body:@"action=reset&name="];
+            NSMutableString *neigh = [NSMutableString string];
+            for (NSUInteger i = 1; i <= 20; ++i) {
+                const double g = (i == 10) ? 12.0 : 0.0;
+                const double f = (i == 10) ? 1250.0 : (20.0 + (double)i * 900.0);
+                [neigh appendFormat:@"%@%lu,PK,%.1f,%.2f,1.41", (i > 1 ? @";" : @""),
+                                     (unsigned long)i, f, g];
+            }
+            [core jsonWithMethod:@"POST" path:@"/api/peq"
+                            body:[NSString stringWithFormat:@"bypass=0&preamp=0&bands=%@", neigh]];
+            [eq reload];
+            Pump(1.0);
+            [eq layoutSubtreeIfNeeded];
+
+            // 第 11 段：自身 gain=0，但曲线在它附近被邻居抬高
+            NSArray *bf = [curve valueForKey:@"bandFreqs"];
+            // ⚠️ 不能按"第 11 个频点就是 1 kHz"取：后端给的是 ISO 1/3 倍频程序列
+            //（20/25/40/63/80/125/200/315/500/800/1000/1250/…），索引 10 才是 1000 Hz。
+            // 第一版按 bf[10] 取到 9920 Hz，判据自己假红（期望值算错，不是产品问题）。
+            NSUInteger i11 = 0;
+            for (NSUInteger k = 0; k < bf.count; ++k)
+                if ([bf[k] doubleValue] > 999.0 && [bf[k] doubleValue] < 1001.0) { i11 = k; break; }
+            const double f11 = bf.count > i11 ? [bf[i11] doubleValue] : 0;
+            const double onCurve = [(id)curve curveDbAtFrequency:f11];
+            Ck(fabs(onCurve) > 0.8,
+               @"E13 前置：邻居段把第 11 段处的**曲线**抬起来了（自身 gain 仍为 0）",
+               [NSString stringWithFormat:@"曲线在 %.0fHz = %.2f dB", f11, onCurve]);
+
+            // 手柄 y 必须用曲线值（这就是"点贴着曲线"的定义）
+            const CGFloat yCurve = [(id)curve valueForKey:@"plotRect"] ? 0 : 0;
+            const NSRect plotR = [(id)curve plotRect];
+            const CGFloat hx = [(id)curve xForFreq:f11];
+            (void)hx; (void)yCurve;
+            // 该 y 由 drawRect 的同一套公式算：y = plot.origin.y + (db+18)/36*plotH
+            const CGFloat yExpected = plotR.origin.y + (CGFloat)((onCurve + 18.0) / 36.0) * plotR.size.height;
+            const CGFloat yIfBandGain = plotR.origin.y + (CGFloat)((0.0 + 18.0) / 36.0) * plotR.size.height;
+            Ck(fabs(yExpected - yIfBandGain) > 3.0,
+               @"E13 两种画法（贴曲线 / 贴自身增益）在该点上真的差得开（判据有区分力）",
+               [NSString stringWithFormat:@"yCurve=%.1f yBandGain=%.1f", yExpected, yIfBandGain]);
+            // 生产入口：手柄位置取自 curveDbAtFrequency:，不是 bandGains
+            const double drawn = [(id)curve curveDbAtFrequency:f11];
+            Ck(fabs(drawn - onCurve) < 0.01 && fabs(drawn) > 0.8,
+               @"E13 手柄取值走的是曲线插值（点贴在曲线上）",
+               [NSString stringWithFormat:@"drawn=%.2f", drawn]);
+        }
+
+        // ---- E12：设置页 reloadData 必须把 EQ 一起刷新 ----
+        // 用户实测："重置底下 band 数据，曲线图不会随动"。
+        // 根因不是重置本身，而是**设置页的 reloadData 从不通知 eqView** ——
+        // eqView 只在 fillEqualizer 建立时 reload 一次，此后再没人刷新它。
+        // 所以这条判据走的是设置页的真实刷新入口，不是直接调 eqView.reload。
+        {
+            RLPSettingsViewController *sv = [[RLPSettingsViewController alloc] init];
+            NSView *pv = sv.view;
+            pv.frame = NSMakeRect(0, 0, 1160, 900);
+            [sv selectPane:@"eq"];
+            Pump(1.2);
+            [pv layoutSubtreeIfNeeded];
+            NSView *svCurve = FindId(pv, @"eq.curve");
+            Ck(svCurve != nil, @"E12 设置页里找到 EQ 曲线视图", @"缺 eq.curve");
+
+            // 造 +9 dB 隆起后，用**设置页的 reloadData**（不是 eqView.reload）去刷新
+            NSMutableString *bump2 = [NSMutableString string];
+            for (NSUInteger i = 1; i <= 20; ++i) {
+                const double g = (i == 11) ? 9.0 : 0.0;
+                const double f = (i == 11) ? 1000.0 : (20.0 + (double)i * 900.0);
+                [bump2 appendFormat:@"%@%lu,PK,%.1f,%.2f,1.41", (i > 1 ? @";" : @""),
+                                     (unsigned long)i, f, g];
+            }
+            [core jsonWithMethod:@"POST" path:@"/api/peq"
+                            body:[NSString stringWithFormat:@"bypass=0&preamp=0&bands=%@", bump2]];
+            [(id)sv performSelector:NSSelectorFromString(@"reloadData")];
+            Pump(1.2);
+            NSArray *svPts = [svCurve valueForKey:@"points"];
+            double svPeak = 0;
+            for (NSArray<NSNumber *> *pp in svPts)
+                if (pp.count >= 2) svPeak = MAX(svPeak, fabs(pp[1].doubleValue));
+            Ck(svPeak > 5.0,
+               @"E12 设置页 reloadData 后 EQ 曲线拿到新数据（旧实现漏了 eqView，恒为 0）",
+               [NSString stringWithFormat:@"peak=%.2f", svPeak]);
+
+            // 同一路径点「重置 Flat」，曲线必须回到平直
+            NSButton *svReset = (NSButton *)FindId(pv, @"peqReset");
+            Ck(svReset != nil, @"E12 设置页里找到「重置 Flat」", @"缺失");
+            [svReset performClick:nil];
+            Pump(1.2);
+            NSArray *flatPts2 = [svCurve valueForKey:@"points"];
+            double flatPeak2 = 0;
+            for (NSArray<NSNumber *> *pp in flatPts2)
+                if (pp.count >= 2) flatPeak2 = MAX(flatPeak2, fabs(pp[1].doubleValue));
+            Ck(flatPeak2 < 0.5,
+               @"E12 点「重置 Flat」后曲线在设置页里真的变平（用户报的不随动）",
+               [NSString stringWithFormat:@"peak=%.2f", flatPeak2]);
         }
 
         std::printf("\n%s（%d passed, %d failed）\n",

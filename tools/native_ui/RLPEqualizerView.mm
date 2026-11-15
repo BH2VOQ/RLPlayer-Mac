@@ -49,12 +49,32 @@
 @property (nonatomic) double activeBandDb;
 /// 每段当前增益 dB：画 20 个可拖手柄 + 频段分隔线（用户反馈「没有分 band」）。
 @property (nonatomic, copy) NSArray<NSNumber *> *bandGains;
+/// drawRect 调用次数 + 最近一次绘制时 points 的峰值（判据用：证明"数据变了画面也真的重画了"）。
+/// 为什么需要：曲线"不随动"有两种成因——数据没更新，或更新了但没重绘。
+/// 只看属性分不清这两者；截图又会被 layer 缓存骗（离屏 cacheDisplay 会复用旧内容）。
+@property (nonatomic, readonly) NSInteger drawCount;
+@property (nonatomic, readonly) double lastDrawnPeakDb;
 @end
 
-@implementation RLPEQCurveView
+@implementation RLPEQCurveView {
+    NSInteger _drawCount;
+    double _lastDrawnPeakDb;
+    NSInteger _dragBand;      // 正在拖的段（-1 = 没有）
+    double _dragStartDb;      // 起拖时该段的增益
+    CGFloat _dragStartY;      // 起拖时的指针 y（位移累加的基准）
+    double _dragAppliedDb;    // 本次拖动已经下发的增益
+}
+@synthesize drawCount = _drawCount;
+@synthesize lastDrawnPeakDb = _lastDrawnPeakDb;
 
 - (void)drawRect:(NSRect)dirty {
     (void)dirty;
+    // 绘制自证：记录次数与"这次画出来的峰值"，供判据区分"数据没变"与"变了没重绘"。
+    _drawCount += 1;
+    double peak = 0;
+    for (NSArray<NSNumber *> *pt in self.points)
+        if ([pt isKindOfClass:[NSArray class]] && pt.count >= 2) peak = MAX(peak, fabs(pt[1].doubleValue));
+    _lastDrawnPeakDb = peak;
     RLPTheme *t = [RLPTheme current];
     NSRect b = self.bounds;
     [t.bg2 setFill];
@@ -191,10 +211,16 @@
             }
         }
         // 手柄
+        // ⚠️ 手柄必须画在"该段中心频率处**曲线本身**的增益"上，不是画在该段自己的 gain 上。
+        // 相邻段互相叠加，某段设 +9 dB 时曲线在它自己的中心频率处并不等于 +9 —— 画在 gain 上
+        // 就会出现"点浮在曲线外面 / 20 个点连起来不是曲线"（用户 2026-11-15：点要跟 band 对应好）。
+        // 例外：正在拖动的那一段画 activeBandDb（拖动中的实时值，曲线还没回来）。
         for (NSUInteger i = 0; i < n; ++i) {
-            const double db = (i < self.bandGains.count) ? self.bandGains[i].doubleValue : 0.0;
+            const BOOL active = (i == (NSUInteger)self.activeBand);
+            const double db = active ? self.activeBandDb
+                                     : [self curveDbAtFrequency:self.bandFreqs[i].doubleValue];
             const CGFloat hx = X(self.bandFreqs[i].doubleValue);
-            const CGFloat hy = Y(i == (NSUInteger)self.activeBand ? self.activeBandDb : db);
+            const CGFloat hy = Y(db);
             const CGFloat r = (i == (NSUInteger)self.activeBand) ? 4.5 : 3.0;
             NSBezierPath *dot = [NSBezierPath bezierPathWithOvalInRect:
                                  NSMakeRect(hx - r, hy - r, r * 2, r * 2)];
@@ -205,6 +231,31 @@
             [dot stroke];
         }
     }
+}
+
+/// 曲线在某个频率处的 dB（**用后端 points 插值**，不自己算公式 —— 铁律：不抄第二份频响）。
+/// 手柄位置必须落在这条曲线上，否则"点"与"band"就对不上：
+/// 相邻段互相叠加，某段 +9 dB 时曲线在它自己的中心频率处并不等于 +9。
+- (double)curveDbAtFrequency:(double)freq {
+    NSArray<NSArray<NSNumber *> *> *pts = self.points;
+    if (pts.count < 2) {
+        // 还没有曲线数据（首帧）：退回该段自身增益，至少不画到 0
+        return 0.0;
+    }
+    if (!(freq > 0)) return pts.firstObject.count >= 2 ? pts.firstObject[1].doubleValue : 0.0;
+    const double lf = log10(freq);
+    // points 是按对数频率均匀给的（20Hz→20kHz），直接按对数插值
+    const double lfMin = log10(MAX(1e-6, pts.firstObject[0].doubleValue));
+    const double lfMax = log10(MAX(1e-6, pts.lastObject[0].doubleValue));
+    if (!(lfMax > lfMin)) return pts.firstObject[1].doubleValue;
+    const double t = (lf - lfMin) / (lfMax - lfMin) * (double)(pts.count - 1);
+    if (t <= 0) return pts.firstObject[1].doubleValue;
+    if (t >= (double)(pts.count - 1)) return pts.lastObject[1].doubleValue;
+    const NSUInteger i0 = (NSUInteger)floor(t);
+    const double u = t - (double)i0;
+    const double a = pts[i0].count >= 2 ? pts[i0][1].doubleValue : 0.0;
+    const double b = pts[i0 + 1].count >= 2 ? pts[i0 + 1][1].doubleValue : a;
+    return a + (b - a) * u;
 }
 
 #pragma mark - 曲线拖拽（web PEQ_DRAG：拖动波形图改对应段的增益）
@@ -224,24 +275,54 @@
     return plot.origin.x + (CGFloat)((log10(c) - log10(fMin)) / (log10(fMax) - log10(fMin))) * plot.size.width;
 }
 
+/// 拖动：web peqDragValue() 的**位移累加**语义（ui_script.h:11645 的注释解释了为什么不用绝对映射）：
+///   · 绝对映射 = "指针在哪 y，增益就是那个 y 对应的 dB"。听上去更直觉，但一旦曲线量程/
+///     前级变化，同一次拖动的值就会自己往前冲（量程变大 → 同一位置对应更大 dB → 再扩量程）。
+///   · 位移累加 = "指针挪了多少像素，增益就加减多少 dB"。指针不动值就不动，
+///     手柄始终贴在指针上 ⟹ **点和手指严格对应**（用户 2026-11-15：点要跟 band 对应好）。
 - (void)applyDragEvent:(NSEvent *)event {
     if (!self.onDragBand || self.bandFreqs.count == 0) return;
     NSPoint p = [self convertPoint:event.locationInWindow fromView:nil];
     NSRect plot = [self plotRect];
     if (plot.size.width <= 1 || plot.size.height <= 1) return;
-    if (p.x < plot.origin.x || p.x > NSMaxX(plot)) return;
-    if (p.y < plot.origin.y || p.y > NSMaxY(plot)) return;
-    // 纯映射（RLPEQGeometry）：x 归一化 -> 最近频段，y 归一化 -> 增益 dB，与 drawRect 同一套坐标。
-    NSInteger best = RLPEQNearestBandIndex(self.bandFreqs, (p.x - plot.origin.x) / plot.size.width);
-    if (best < 0) return;
-    self.activeBand = best;          // 高亮被拖动的这一段：用户要能看见自己在动哪一段
-    self.activeBandDb = RLPEQDbForPlotFraction((p.y - plot.origin.y) / plot.size.height);
+
+    if (_dragBand < 0) {
+        // 起拖：只有落在绘图区内才认（保留原来"拖出画布就忽略"的边界语义）
+        if (p.x < plot.origin.x || p.x > NSMaxX(plot)) return;
+        if (p.y < plot.origin.y || p.y > NSMaxY(plot)) return;
+        NSInteger best = RLPEQNearestBandIndex(self.bandFreqs,
+                                               (p.x - plot.origin.x) / plot.size.width);
+        if (best < 0) return;
+        _dragBand = best;
+        _dragStartDb = (best < (NSInteger)self.bandGains.count)
+            ? self.bandGains[(NSUInteger)best].doubleValue : 0.0;
+        _dragStartY = p.y;
+        _dragAppliedDb = _dragStartDb;
+        self.activeBand = best;      // 高亮被拖动的这一段：用户要能看见自己在动哪一段
+        self.activeBandDb = _dragStartDb;
+    }
+    // 位移 → dB：整块绘图区高 = 2*RLPEQDbRange，按当前高度换算，与 drawRect 同一套坐标。
+    const CGFloat pxPerDb = plot.size.height / (2.0 * RLPEQDbRange);
+    double db = _dragStartDb + (double)((p.y - _dragStartY) / pxPerDb);
+    db = MAX(-RLPEQDbRange, MIN(RLPEQDbRange, db));
+    _dragAppliedDb = db;
+    self.activeBand = _dragBand;
+    self.activeBandDb = db;
     [self setNeedsDisplay:YES];
-    self.onDragBand(best, self.activeBandDb);
+    self.onDragBand(_dragBand, db);
+}
+
+/// 松手：结束本次拖动（下一次按下重新定起点）。
+- (void)endDrag {
+    _dragBand = -1;
 }
 
 - (void)mouseDown:(NSEvent *)event {
-    if (self.onDragBand) { [self applyDragEvent:event]; return; }
+    if (self.onDragBand) {
+        _dragBand = -1;              // 新的一次按下 = 新的一次拖动，重新定起点
+        [self applyDragEvent:event];
+        return;
+    }
     [super mouseDown:event];
 }
 
@@ -256,8 +337,8 @@
 /// 直到下次拖动换段、或整表重新加载（absorbState 会把它复位）。
 /// 这条也是判据 E5 的落点：拖动后 activeBand 必须是**命中的那一段**，而不是 -1。
 - (void)mouseUp:(NSEvent *)event {
-    (void)event;
-    if (!self.onDragBand) [super mouseUp:event];
+    if (!self.onDragBand) { [super mouseUp:event]; return; }
+    [self endDrag];
 }
 @end
 
@@ -459,7 +540,8 @@
 
 #pragma mark - 均衡主视图
 
-@interface RLPEqualizerView () <NSTableViewDataSource, NSTableViewDelegate>
+@interface RLPEqualizerView () <NSTableViewDataSource, NSTableViewDelegate,
+                                NSTextFieldDelegate>
 @property (nonatomic, strong) NSStackView *stack;
 @property (nonatomic, strong) NSScrollView *scroll;
 @property (nonatomic, strong) NSArray<NSLayoutConstraint *> *scrollConstraints;
@@ -500,6 +582,12 @@
 @property (nonatomic, assign) NSInteger opraProductSeq;
 /// 目标曲线说明（web showTargetCurveInfo 的原生同构：名称/是什么/适合谁/增益与段数）。
 @property (nonatomic, strong) NSTextField *opraInfo;
+/// 输入即检索的去抖计时器（web sInput.oninput = function(){ doSearch(this.value); }）。
+/// 每敲一个字符就查一次 6230 条索引虽然不慢，但会反复重排卡片栈 ⟹ 打字时界面抖；
+/// 180ms 去抖既保持"边输入边出结果"的手感，又不在每个击键上重排。
+@property (nonatomic, strong, nullable) NSTimer *opraSearchTimer;
+/// 上一次已执行的查询（重复触发同一个关键词时不再重排卡片）。
+@property (nonatomic, copy) NSString *opraLastQuery;
 @end
 
 /// web `.chip:hover{background:var(--hov);color:var(--txt);border-color:var(--acc)}` 的原生等价物。
@@ -798,6 +886,8 @@
     self.opraQuery.identifier = @"opra.query";
     self.opraQuery.target = self;
     self.opraQuery.action = @selector(onOpraSearch:);
+    // 输入即检索（web sInput.oninput）：按字符触发，180ms 去抖。
+    self.opraQuery.delegate = self;
     [[self.opraQuery.widthAnchor constraintEqualToConstant:220] setActive:YES];
     [r1 addArrangedSubview:self.opraQuery];
     NSButton *sb = [NSButton buttonWithTitle:RLPTr(@"搜索") target:self action:@selector(onOpraSearch:)];
@@ -893,6 +983,13 @@
         [cards addObject:c];
     }
     self.opraModelCardViews = cards;
+    [self notifyContentSizeChanged];
+}
+
+/// 内容高度可能变了：通知宿主（设置页）重新量高。
+/// 必须**批量结束时**调，不要在循环里调 —— 设置页那边每次都会触发一次卡片重排。
+- (void)notifyContentSizeChanged {
+    if (self.onContentSizeChanged) self.onContentSizeChanged();
 }
 
 - (void)onModelCardSelected:(NSInteger)index {
@@ -945,6 +1042,7 @@
         [cards addObject:c];
     }
     self.opraPresetCardViews = cards;
+    [self notifyContentSizeChanged];
 }
 
 #pragma mark - 频段类型码（后端契约：PK / LS / HS）
@@ -1298,11 +1396,50 @@ static NSArray<NSDictionary *> *RLPOpraFilter(NSArray<NSDictionary *> *index, NS
     [self.curve setNeedsDisplay:YES];
 }
 
+/// web `sInput.oninput = function () { doSearch(this.value); }` 的原生同构：
+/// **边输入边检索**，不是"敲完再点搜索"。180ms 去抖（见 opraSearchTimer 注释）。
+- (void)controlTextDidChange:(NSNotification *)note {
+    if (note.object != self.opraQuery) return;   // 其它输入框走各自的 action
+    [self.opraSearchTimer invalidate];
+    __weak __typeof__(self) weakSelf = self;
+    self.opraSearchTimer = [NSTimer scheduledTimerWithTimeInterval:0.18 repeats:NO
+                                                            block:^(NSTimer *tm) {
+        (void)tm;
+        __typeof__(self) s = weakSelf;
+        if (!s) return;
+        NSString *q = [s.opraQuery.stringValue stringByTrimmingCharactersInSet:
+                       [NSCharacterSet whitespaceAndNewlineCharacterSet]];
+        if ([q isEqualToString:s.opraLastQuery]) return;   // 同一个词不重排卡片
+        s.opraLastQuery = q;
+        [s runOpraSearch:q];
+    }];
+}
+
+/// 点「搜索」按钮 / 回车：立即执行一次（跳过 180ms 去抖）。
 - (void)onOpraSearch:(id)sender {
+    [self.opraSearchTimer invalidate];
     NSString *qq = [self.opraQuery.stringValue stringByTrimmingCharactersInSet:
                     [NSCharacterSet whitespaceAndNewlineCharacterSet]];
-    // 空关键词不发请求（web 261023-03 第6条：避免一进页面就拉整个索引）
-    if (!qq.length) { self.opraStatus.stringValue = RLPTr(@"请输入耳机型号"); return; }
+    self.opraLastQuery = qq;
+    [self runOpraSearch:qq];
+}
+
+/// 真正的检索入口（按钮 / 回车 / 输入去抖三处共用一份）。
+/// 空关键词不清空也不发请求：web 261023-03 第6条的语义是"什么都没输入就不列型号"。
+- (void)runOpraSearch:(NSString *)qq {
+    if (!qq.length) {
+        // 输入被清空：回到"引导 + 无结果"的初始态（web doSearch("") 同语义）
+        self.opraItems = @[];
+        self.opraSelectedProductIndex = -1;
+        self.opraSelectedPresetIndex = -1;
+        self.opraPresets = @[];
+        [self renderModelCards];
+        [self renderPresetCards];
+        self.opraGuide.hidden = YES;
+        self.opraSelectedTitle.hidden = YES;
+        self.opraStatus.stringValue = RLPTr(@"请输入耳机型号");
+        return;
+    }
     if (![RLPCoreClient shared].started) return;
     [self resetTargetCurvePreview];
     self.opraItems = @[];

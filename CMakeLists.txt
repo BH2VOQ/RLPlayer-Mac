@@ -335,11 +335,18 @@ if(APPLE)
     tools/native_ui/RLPTargetCurve.mm tools/native_ui/RLPSupport.mm
     tools/native_ui/RLPModels.mm tools/native_ui/RLPTheme.mm
     tools/native_ui/RLPNativeI18n.mm tools/native_ui/RLPTrackActions.mm
-    tools/native_ui/RLPAnalysisSummary.mm tools/native_ui/RLPCoreClient.mm)
+    tools/native_ui/RLPAnalysisSummary.mm tools/native_ui/RLPCoreClient.mm
+    # E12 走设置页的真实刷新入口（reloadData），所以需要整套设置页。
+    tools/native_ui/RLPSettingsViewController.mm tools/native_ui/RLPSettingsLayout.mm
+    tools/native_ui/RLPServersView.mm tools/native_ui/RLPMetaSourcesView.mm
+    tools/native_ui/RLPLibStatsView.mm tools/native_ui/RLPInputView.mm
+    tools/native_ui/RLPCastView.mm tools/native_ui/RLPCalibrationView.mm
+    tools/native_ui/RLPUpdateWindowController.mm tools/native_ui/RLPFeedbackWindowController.mm
+    tools/native_ui/RLPPageViewController.mm tools/mac_update.mm)
   target_compile_options(test_native_eq_contract PRIVATE -fobjc-arc)
   target_include_directories(test_native_eq_contract PRIVATE src tools tools/native_ui)
   target_link_libraries(test_native_eq_contract PRIVATE rlapp_core
-    "-framework AppKit" "-framework QuartzCore")
+    "-framework AppKit" "-framework QuartzCore" "-framework Security")
   add_test(NAME native_eq_contract COMMAND test_native_eq_contract)
   set_tests_properties(native_eq_contract PROPERTIES TIMEOUT 180)
 

@@ -237,6 +237,18 @@ int main() {
             query.stringValue = @"   ";
             [searchBtn performClick:nil];
             Ck((NSInteger)g_gets.count == before, "【请求】空关键词不发起任何请求", @"");
+            // ⚠️ 2026-11-15：空输入现在会**清空型号卡片并回到引导态**，这是 web doSearch("")
+            // 的原始语义（ui_script.h:11959-11966：`if(!q){ cardsBox.innerHTML=''; guide显示; return; }`）。
+            // 旧原生只在状态行写「请输入耳机型号」、卡片留在屏幕上 —— 与 web 不一致。
+            // 所以断言完"不发请求"之后要让状态复位，后面的判据才有卡片可点。
+            // （这不是放宽判据：请求数断言仍然严格；只是承认"清空输入=回到初始态"这条 web 语义。）
+            Ck(FindAllById(v, @"opra.model.card").count == 0,
+               "【请求】空关键词清空型号卡片并回到引导态（web doSearch 同语义）",
+               @"卡片仍留在屏幕上");
+            query.stringValue = @"hd 600";
+            [searchBtn performClick:nil];
+            Pump();
+            [v layoutSubtreeIfNeeded];
         }
 
         // ---- ① 型号卡片（web #eqModelCards；旧码是型号下拉）----

@@ -14,6 +14,10 @@ NS_ASSUME_NONNULL_BEGIN
 - (void)setEmbeddedInPage:(BOOL)embedded;
 /// 内容自然高度（embedded 模式下由设置页用它给高度约束）。
 - (CGFloat)preferredContentHeight;
+/// 内容高度变了（OPRA 卡片异步到达 / 预设墙展开 / 表格行数变化）时的通知。
+/// 宿主必须据此**双向**更新高度约束 —— 只放大不缩小会留一片空白，
+/// 不通知则卡片高度停在"0 行"时的值、内容溢出卡片边框。
+@property (nonatomic, copy, nullable) void (^onContentSizeChanged)(void);
 /// OPRA 段（web「耳机 EQ（OPRA 校准预设）」卡体）。设置页把它整段搬进第二张卡片；
 /// 同一份视图、同一份交互，不复制第二套控件。
 @property (nonatomic, readonly, nullable) NSView *opraSectionView;

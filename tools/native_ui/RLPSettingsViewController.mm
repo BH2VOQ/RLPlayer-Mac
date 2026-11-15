@@ -2106,16 +2106,28 @@ static NSString *RLPControlIdentifier(NSString *key) {
     // 把 OPRA 段从 EQ 视图里整段搬进第二张卡片（AppKit 重挂父视图，控件不复制）。
     [opraGroup addFullRow:self.eqView.opraSectionView];
 
+    // ⚠️ 高度必须**双向**跟随内容，而且要在 OPRA 段被搬走之后重算一次。
+    // 旧实现两个错：
+    //   ① 只在 h > constant 时放大 ⟹ 内容变矮（OPRA 段整段搬去第二张卡）后
+    //      旧的富余高度永远留着 ⟹ 卡片底部一大片空白（用户 2026-11-15 截图红框）；
+    //   ② OPRA 卡片异步到达的型号/预设卡片从不通知父卡片重新量高 ⟹ 卡片高度还是
+    //      "0 行"时算出的值，内容溢出卡片边框（同一张截图下半部分被遮挡）。
     __weak __typeof__(self) weakEq = self;
-    dispatch_async(dispatch_get_main_queue(), ^{
-        __typeof__(self) self_ = weakEq;
-        if (!self_ || !self_.eqHeightConstraint) return;
-        CGFloat h = [self_.eqView preferredContentHeight];
-        if (h > self_.eqHeightConstraint.constant) {
-            self_.eqHeightConstraint.constant = MAX(420.0, h);
+    self.eqView.onContentSizeChanged = ^{
+        __typeof__(self) self2 = weakEq;
+        if (!self2 || !self2.eqHeightConstraint || !self2.eqView) return;
+        CGFloat h = MAX(420.0, [self2.eqView preferredContentHeight]);
+        if (fabs(h - self2.eqHeightConstraint.constant) > 0.5) {
+            self2.eqHeightConstraint.constant = h;
             [peqGroup contentDidChange];
         }
         [opraGroup contentDidChange];
+    };
+    self.eqView.onContentSizeChanged();
+    dispatch_async(dispatch_get_main_queue(), ^{
+        __typeof__(self) self3 = weakEq;
+        if (!self3 || !self3.eqView) return;
+        self3.eqView.onContentSizeChanged();
     });
 }
 
@@ -3121,6 +3133,11 @@ static BOOL RLPFeedbackTextBlank(NSString *s) {
     [self.serversView reload];
     [self.metaSourcesView reload];
     [self.libStatsView reload];
+    // ⚠️ EQ 视图也必须在这一串里。旧实现漏了它：eqView 只在 fillEqualizer 建立时
+    // reload 一次，此后再没人刷新 ⟹ 用户在 EQ 页做任何"外部改变"（重置 Flat、
+    // 从工作台改预设、OPRA 应用）之后回到设置页，曲线仍停在旧数据上
+    //（"重置之后曲线不随动"）。判据见 test_native_eq_contract 的 E12。
+    [self.eqView reload];
     [self loadLlmConfig];
 }
 
