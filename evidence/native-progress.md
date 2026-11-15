@@ -1290,3 +1290,17 @@ np web 231 checks / 0 failures。
 全部 diff=+0.00；np web 231 checks / 0 failures 证明栏头与卡片布局未被连带影响。
 
 **挂账**：railHide 收起键仍按 side-8-22（与 1pt 议题无关）；边框色取主题 t.line 而 web 是独立 rgba；未真机像素比对。
+
+### 2026-11-15 14:xx —— 轮次 47（1.1.7.79）：sp_opra_copychip 悬停态
+
+**收口偏差**：设置页 `.chip` hover 未做 —— 该芯片是系统圆角 NSButton，功能与判据都在，唯独鼠标移上去外观不变。
+
+**实现**：文件内子类 RLPChipHoverButton：NSTrackingArea 触发；进入时记录原 bezel（nil 用 NSNull 哨兵）与原
+attributedTitle，然后 bezel=t.hov、文字=t.text；退出复原（nil 就真的回 nil）。判据入口 -setChipHovered:。
+**为什么不做自绘胶囊**：形状/内边距/圆角/图标排布全变等于重新设计控件，超出「补一处悬停」范围。
+
+**判据**：C3b（入口存在）/C3c（bezel 取 hov，逐分量 ≤0.02）/C3d（文字显式取 txt 色）/C3e（退出复原 nil，
+不留永久着色 —— hover 最易写错处）。opra_cards 25 passed / 0 failed；np web 231 checks / 0 failures。
+
+**挂账**：边框色无法用系统 bezel 单独改（只对齐底色与文字）；transition .15s 未做；其它 .chip 未接入；
+未真机鼠标移入移出验证。

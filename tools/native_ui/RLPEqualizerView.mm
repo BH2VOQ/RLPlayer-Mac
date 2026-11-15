@@ -409,7 +409,6 @@
 - (void)applyCard { if (self.onApply) self.onApply(); }
 @end
 
-
 #pragma mark - 均衡主视图
 
 @interface RLPEqualizerView () <NSTableViewDataSource, NSTableViewDelegate>
@@ -453,6 +452,51 @@
 @property (nonatomic, assign) NSInteger opraProductSeq;
 /// 目标曲线说明（web showTargetCurveInfo 的原生同构：名称/是什么/适合谁/增益与段数）。
 @property (nonatomic, strong) NSTextField *opraInfo;
+@end
+
+/// web `.chip:hover{background:var(--hov);color:var(--txt);border-color:var(--acc)}` 的原生等价物。
+/// ★ 只补**悬停态**，不改形状：当前用系统圆角 bezel（外观已近似 web 的胶囊），
+///   若改成自绘胶囊就等于重新设计控件，超出「补一处悬停」的范围。
+@interface RLPChipHoverButton : NSButton
+@end
+
+@implementation RLPChipHoverButton {
+    NSTrackingArea *_chipTrack;
+    NSColor *_chipNormalBezel;      // 进入前的 bezel 色（nil = 系统默认）
+    NSAttributedString *_chipNormalTitle;
+}
+
+- (void)updateTrackingAreas {
+    [super updateTrackingAreas];
+    if (_chipTrack) [self removeTrackingArea:_chipTrack];
+    _chipTrack = [[NSTrackingArea alloc] initWithRect:self.bounds
+                                               options:(NSTrackingMouseEnteredAndExited |
+                                                        NSTrackingActiveInKeyWindow |
+                                                        NSTrackingInVisibleRect)
+                                                 owner:self userInfo:nil];
+    [self addTrackingArea:_chipTrack];
+}
+
+/// 判据入口：真实路径是 tracking area 的 mouseEntered/Exited。
+- (void)setChipHovered:(BOOL)hovered {
+    RLPTheme *t = [RLPTheme current];
+    if (hovered) {
+        if (!_chipNormalBezel) _chipNormalBezel = self.bezelColor ?: (NSColor *)[NSNull null];
+        if (!_chipNormalTitle) _chipNormalTitle = self.attributedTitle.copy;
+        self.bezelColor = t.hov;
+        self.attributedTitle = [[NSAttributedString alloc] initWithString:self.title
+            attributes:@{ NSFontAttributeName: self.font ?: [NSFont systemFontOfSize:11],
+                          NSForegroundColorAttributeName: t.text }];
+    } else {
+        self.bezelColor = [_chipNormalBezel isKindOfClass:[NSNull class]] ? nil : _chipNormalBezel;
+        if (_chipNormalTitle) self.attributedTitle = _chipNormalTitle;
+        _chipNormalBezel = nil;
+        _chipNormalTitle = nil;
+    }
+}
+
+- (void)mouseEntered:(NSEvent *)event { (void)event; [self setChipHovered:YES]; }
+- (void)mouseExited:(NSEvent *)event  { (void)event; [self setChipHovered:NO]; }
 @end
 
 @implementation RLPEqualizerView
@@ -644,7 +688,7 @@
     sb.identifier = @"opra.search";
     [r1 addArrangedSubview:sb];
     // web `sp_opra_copychip`：与搜索框同一行的官网链接芯片，点击复制（见 onCopyOpraLink:）。
-    NSButton *copyChip = [NSButton buttonWithTitle:@"https://opra.roon.app/"
+    RLPChipHoverButton *copyChip = [RLPChipHoverButton buttonWithTitle:@"https://opra.roon.app/"
                                             target:self action:@selector(onCopyOpraLink:)];
     copyChip.identifier = @"sp_opra_copychip";
     copyChip.bezelStyle = NSBezelStyleRounded;
@@ -1261,7 +1305,6 @@ static NSArray<NSDictionary *> *RLPOpraFilter(NSArray<NSDictionary *> *index, NS
     [self.bandTable reloadData];
     [self.curve setNeedsDisplay:YES];
 }
-
 
 #pragma mark - 嵌入设置页（去掉本视图自己的滚动，交给整页滚动）
 

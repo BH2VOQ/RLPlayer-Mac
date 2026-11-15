@@ -18,6 +18,13 @@
 //      （eq/opraproduct/oprapreset）→ 卡片当前态跟着变
 # import <AppKit/AppKit.h>
 
+/**
+ * 测试接缝：生产里 `sp_opra_copychip` 是 `RLPChipHoverButton`（该类型定义在 RLPEqualizerView.mm 内），
+ * 判据只用到悬停开关这一个方法，这里按 NSButton 分类声明，避免把实现类型搬进测试头。
+ */
+@interface NSButton (RLPChipHoverTestSeam)
+- (void)setChipHovered:(BOOL)hovered;
+@end
 #import "RLPEqualizerView.h"
 #import "RLPCoreClient.h"
 #import "RLPModels.h"
@@ -310,6 +317,24 @@ int main() {
             NSButton *btn = (NSButton *)chip;
             if (btn) {
                 ck(btn.action != NULL && btn.target != nil, "C3 sp_opra_copychip 有真实 target/action", @"");
+                // C3b–C3d：web `.chip:hover{background:var(--hov);color:var(--txt);border-color:var(--acc)}`。
+                // 只补悬停态（形状沿用系统圆角 bezel）；钉住「进入变色 / 退出复原」。
+                ck([btn respondsToSelector:NSSelectorFromString(@"setChipHovered:")],
+                   "C3b 芯片按钮支持悬停态（web .chip:hover 的原生入口）", @"");
+                [btn setChipHovered:YES];
+                NSColor *hw = [[RLPTheme current].hov colorUsingColorSpace:NSColorSpace.deviceRGBColorSpace];
+                NSColor *hg = [btn.bezelColor colorUsingColorSpace:NSColorSpace.deviceRGBColorSpace];
+                ck(hw && hg && fabs(hg.redComponent - hw.redComponent) < 0.02 &&
+                   fabs(hg.greenComponent - hw.greenComponent) < 0.02,
+                   "C3c 悬停时 bezel 取主题 hov（web background:var(--hov)）",
+                   [NSString stringWithFormat:@"bezel=%@ hov=%@", btn.bezelColor, [RLPTheme current].hov]);
+                ck(btn.attributedTitle.length > 0 &&
+                   [btn.attributedTitle attribute:NSForegroundColorAttributeName atIndex:0 effectiveRange:NULL] != nil,
+                   "C3d 悬停时文字显式取主题 txt 色（web color:var(--txt)）", @"");
+                [btn setChipHovered:NO];
+                ck(btn.bezelColor == nil,
+                   "C3e 退出悬停复原成系统默认 bezel（不留下永久着色）",
+                   [NSString stringWithFormat:@"bezel=%@", btn.bezelColor]);
                 ck([btn.title containsString:@"opra.roon.app"], "C4 sp_opra_copychip 显示官网链接", btn.title ?: @"(nil)");
                 NSPasteboard *pb = [NSPasteboard generalPasteboard];
                 [pb clearContents];

@@ -159,3 +159,8 @@
 - **rail 面板内容内缩改为 border-box 语义**（11 = padding 10 + border 1），收口台账最后那 1pt 差。
   见 evidence/native-rail-borderbox-20261115.md；rail_cards 52/0、np web 231/0。
   挂账：railHide 仍按 side-8-22 定位；边框色取主题 t.line（web 是独立 rgba）；未真机像素比对。
+
+## 进度（1.1.7.79）
+
+- **sp_opra_copychip 悬停态**（web `.chip:hover`：底色 hov / 文字 txt）已补，见 evidence/native-chip-hover-20261115.md。
+  opra_cards 25/0、np web 231/0。挂账：边框色（系统 bezel 无法单独改）、transition .15s、其它 .chip 未接入。
