@@ -2321,16 +2321,10 @@ static NSString *RLPRailTagText(id srValue, id bitsValue) {
 
 /// `.npchipwrap` 卡片排版：卡片宽度 = wrap 宽 - 11（web 实测滚动条占位 11pt），
 /// 从顶部往下排、偏移只改卡片 y；栏头等其它子视图坐标完全不动。
-- (void)railLayoutChips {
-    NSView *wrap = self.railChipWrap;
-    if (!wrap || wrap.hidden) return;
-    const CGFloat W = wrap.bounds.size.width, H = wrap.bounds.size.height;
-    if (W < 20 || H < 10) return;
-    RLPRailWrapView *rw = (RLPRailWrapView *)wrap;
-    const CGFloat cardW = MAX(40, W - 11);
+/// 按给定卡片宽度排一次版，返回总内容高度（不写 contentHeight）。
+- (CGFloat)railLayoutChipsWithWidth:(CGFloat)cardW height:(CGFloat)H {
+    RLPRailWrapView *rw = (RLPRailWrapView *)self.railChipWrap;
     NSArray<RLPRailChipView *> *cards = self.railCards ?: @[];
-    if (cards.count == 0) { rw.contentHeight = 0; return; }
-    // 隐藏的卡（如非古典时的「作品」）不参与排版 ⟹ 不占高度、不留缝（web 是"不在 tabs 里"）。
     CGFloat contentH = 0;
     NSUInteger shown = 0;
     for (RLPRailChipView *c in cards) {
@@ -2352,6 +2346,27 @@ static NSString *RLPRailTagText(id srValue, id bitsValue) {
         ++laid;
     }
     rw.needsDisplay = YES;
+    return contentH;
+}
+
+/// `.npchipwrap` 卡片排版。
+/// ★ 滚动条占位与 web 对齐（2026-11-15 收口已知偏差）：web 实测是「内容溢出才占 11pt」——
+///   不溢出时卡片宽度就是 wrap 宽度 W；旧码无条件 W-11，于是短列表也会空出一条 11pt 的槽，
+///   与 web 截图差 1pt 级差（这就是偏差台账里那条 chipwrap 宽度差）。
+///   因此这里两遍排：先按 W 排一次，若放得下就用 W；放不下才按 W-11 重排（与浏览器同序）。
+- (void)railLayoutChips {
+    NSView *wrap = self.railChipWrap;
+    if (!wrap || wrap.hidden) return;
+    const CGFloat W = wrap.bounds.size.width, H = wrap.bounds.size.height;
+    if (W < 20 || H < 10) return;
+    RLPRailWrapView *rw = (RLPRailWrapView *)wrap;
+    NSArray<RLPRailChipView *> *cards = self.railCards ?: @[];
+    if (cards.count == 0) { rw.contentHeight = 0; return; }
+    const CGFloat wideW = MAX(40, W);
+    const CGFloat narrowW = MAX(40, W - 11);
+    const CGFloat hWide = [self railLayoutChipsWithWidth:wideW height:H];
+    if (hWide <= H + 0.5) return;   // 放得下 ⟹ 不占滚动条，宽度保持 W
+    [self railLayoutChipsWithWidth:narrowW height:H];
 }
 /// web `#npLyric` 空态 / `#lyricbox` 加载态的两行文案：
 /// 主行字号跟歌词 clamp（13~17），副行固定 12px + `--mut2`，居中、可换行（`maximumNumberOfLines=0`）。

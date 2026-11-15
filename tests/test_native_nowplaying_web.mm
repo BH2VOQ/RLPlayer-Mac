@@ -684,10 +684,18 @@ int main(){@autoreleasepool{
    for(NSView *c in chips) ck(c.superview==wrap,"chip 挂在 chipwrap 内（不是直接铺在面板上）");
    const CGFloat W=wrap.bounds.size.width;
    NSView *c0=nil; for(NSView *c in chips) if(!c.hidden&&NSWidth(c.frame)>0){c0=c;break;} if(!c0) c0=chips[0];
-   // web 实测（ego/Chromium）：`.npchipwrap` 溢出时滚动条占位 11pt，首张 `.npchip` 宽 = wrapW-11。
-   // 旧码 wrapW-19（13 留白 + 6 拇指）比 web 多留 8pt；1.1.7.58 起对齐实测值。
-   ck(fabs(c0.frame.size.width-(W-11))<1.5,
-      [[NSString stringWithFormat:@"卡宽 = wrapW-11（web 滚动条占位 11；got %.1f want %.1f）",c0.frame.size.width,W-11] UTF8String]);
+   // web 实测（ego/Chromium）：`.npchipwrap` **溢出时**滚动条占位 11pt（卡宽 = wrapW-11），
+   // **不溢出时不占位**（卡宽 = wrapW）。
+   // 旧码无条件 wrapW-11：短列表也空出一条 11pt 槽（就是偏差台账里那条 1pt 级差）。
+   // 判据只读：由实际 contentHeight 决定期望值，断两者**自洽**（旧码在本夹具下会失败）。
+   id rwc = wrap;   // 用 KVC 读内容高度，不依赖 .mm 内部类型名
+   const double kdContent = [[rwc valueForKey:@"contentHeight"] doubleValue];
+   const BOOL kdOverflow = (kdContent > wrap.bounds.size.height + 0.5);
+   const CGFloat kdWant = kdOverflow ? (W-11) : W;
+   ck(fabs(c0.frame.size.width-kdWant)<1.5,
+      [[NSString stringWithFormat:@"卡宽与溢出状态自洽（%@；contentH %.1f / wrapH %.1f ⟹ want %.1f；got %.1f",
+        kdOverflow?@"溢出 ⟹ wrapW-11":@"不溢出 ⟹ wrapW", kdContent, wrap.bounds.size.height,
+        kdWant,c0.frame.size.width] UTF8String]);
    // 栏头不随滚动移动
    NSTextField *title=(NSTextField *)[vc valueForKey:@"railTitle"];
    const CGFloat titleYBefore=title.frame.origin.y;
@@ -717,7 +725,11 @@ int main(){@autoreleasepool{
        NSRect cardRect=c0.frame;
        ck(!NSIsEmptyRect(thumb),"内容溢出时出现 6pt 拇指");
        if(!NSIsEmptyRect(thumb)){
-         const CGFloat gap = NSMinX(thumb)-NSMaxX(cardRect);
+         // 沟槽起点按 **web 的 11pt 占位**算（不是按当前卡片实测右缘）：本块为量拇指
+         // 人为把 contentHeight 设成溢出值，而卡片宽度是按"真实是否溢出"算出来的，
+         // 两者在夹具里本就不一致；用 W-11 作基准才是这条判据本来的意思。
+         (void)cardRect;
+         const CGFloat gap = NSMinX(thumb)-(W-11);
          // 卡片右缘 = W-11，6pt 拇指在 x∈[W-8,W-2] ⟹ 间隙 3pt（11pt 占位内，不压圆角）。
          ck(gap>=2.0 && gap<=5.0,
             [[NSString stringWithFormat:@"拇指与卡片右缘 ~3pt（11pt 占位内 6pt 拇指；got %.1f）",gap] UTF8String]);

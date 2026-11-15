@@ -171,12 +171,18 @@ int main() {
         // 卡片现在在 `.npchipwrap` 里（独立滚动区），frame 是 wrap 局部坐标 ⟹ 一律转到 rail 坐标再量。
         #define RAILRECT(v) [(v) convertRect:(v).bounds toView:rail]
         Geo("rail.padX.left", 10, NSMinX(RAILRECT(vis[0])), 2);
-        // web 实测：溢出时卡右缘距面板右 = padding 10 + border 1 + 滚动条占位 11 = 22。
-        // 原生面板无 1px 边框 ⟹ 同结构下 21（差 1pt，与 #npAnal 的 border 差异同类，如实披露）。
-        // 1.1.7.58 起原生右侧常驻 11pt（旧码 19pt 多留 8pt），见 evidence/native-chipwrap-width-20261114.md。
-        Geo("rail.padX.right", 21, rail.bounds.size.width - NSMaxX(RAILRECT(vis[0])), 2);
-        // 卡宽 = railW - 左右内边距 20 - 滚动条占位 11 = railW - 31。
-        Geo("rail.card.width", rail.bounds.size.width - 31, NSWidth(RAILRECT(vis[0])), 2);
+        // web 实测：**溢出时**卡右缘距面板右 = padding 10 + border 1 + 滚动条占位 11 = 22；
+        // 不溢出时不占位 ⟹ 10（原生无 1px 边框，故溢出情形为 21）。
+        // 1.1.7.75 起占位随**实际溢出**决定（旧码无条件占位，短列表也空一条 11pt 槽）；
+        // 因此这里按 contentHeight 判定期望值，并对两者都保留覆盖（旧码在"不溢出"情形会失败）。
+        id kdWrap = [vc valueForKey:@"railChipWrap"];
+        const double kdContent = kdWrap ? [[kdWrap valueForKey:@"contentHeight"] doubleValue] : -1.0;
+        const BOOL kdOverflow = kdWrap && (kdContent > [kdWrap bounds].size.height + 0.5);
+        const CGFloat kdRightPad = kdOverflow ? 21.0 : 10.0;
+        const CGFloat kdCardW = rail.bounds.size.width - 20.0 - (kdOverflow ? 11.0 : 0.0);
+        Geo("rail.padX.right", kdRightPad, rail.bounds.size.width - NSMaxX(RAILRECT(vis[0])), 2);
+        // 卡宽 = railW - 左右内边距 20 - (溢出 ? 滚动条占位 11 : 0)。
+        Geo("rail.card.width", kdCardW, NSWidth(RAILRECT(vis[0])), 2);
 
         // ---- 卡片间距（web .npchipwrap gap:6px）----
         for (NSUInteger i = 0; i + 1 < vis.count; ++i)
