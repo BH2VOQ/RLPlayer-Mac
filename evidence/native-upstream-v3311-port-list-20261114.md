@@ -107,3 +107,10 @@
 - **音量旋钮本体**：播放页 npVolKnob 已落地（纯几何函数 + 自绘 + 拖动 + 26 条判据 K1–K10），
   见 evidence/native-volume-knob-20261115.md。挂账：底栏旋钮未做、尺寸受行高约束（40pt vs web 64pt）、
   拖动期间不下发（原生「松开才提交」纪律）、未接 NSAccessibility。
+
+## 进度（1.1.7.72）
+
+- **底栏音量旋钮** `volKnob` 已落地（复用同组件，350 项判据全绿），见 evidence/native-bar-knob-20261115.md。
+  **同时纠正一处真实偏差**：上游 v3.3.11 的 volPosToDb（-55 位置曲线）已 0 处引用，
+  原生底栏此前仍在用它，同一个 dB 在两个界面会落在不同位置。
+  挂账：底栏静音键 volFloor、barVolInput 精确输入、volumePending 提示（后者属架构 N/A）。

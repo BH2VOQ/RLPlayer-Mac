@@ -189,6 +189,7 @@ if(APPLE)
     tools/native_ui/RLPSidebarViewController.mm
     tools/native_ui/RLPAlbumsViewController.mm
     tools/native_ui/RLPPlaybackBarView.mm
+    tools/native_ui/RLPVolumeKnobView.mm
     tools/native_ui/RLPPlaceholderViewController.mm
     tools/native_ui/RLPCoreClient.mm
     tools/native_ui/RLPModels.mm
@@ -237,6 +238,7 @@ if(APPLE)
     tools/native_ui/main.mm tools/native_ui/RLPAppDelegate.mm
     tools/native_ui/RLPMainWindowController.mm tools/native_ui/RLPSidebarViewController.mm
     tools/native_ui/RLPAlbumsViewController.mm tools/native_ui/RLPPlaybackBarView.mm
+    tools/native_ui/RLPVolumeKnobView.mm
     tools/native_ui/RLPPlaceholderViewController.mm tools/native_ui/RLPCoreClient.mm
     tools/native_ui/RLPModels.mm tools/native_ui/RLPTheme.mm
     tools/native_ui/RLPSupport.mm tools/native_ui/RLPPageViewController.mm
@@ -283,8 +285,10 @@ if(APPLE)
     tools/native_ui/RLPAnalysisSummary.mm tools/native_ui/RLPCoreClient.mm)
   add_executable(test_native_bar_web tests/test_native_bar_web.mm
     tools/native_ui/RLPPlaybackBarView.mm tools/native_ui/RLPSignalChain.mm
+    tools/native_ui/RLPVolumeKnobView.mm
     tools/native_ui/RLPSupport.mm tools/native_ui/RLPModels.mm
-    tools/native_ui/RLPTheme.mm tools/native_ui/RLPNativeI18n.mm)
+    tools/native_ui/RLPTheme.mm tools/native_ui/RLPNativeI18n.mm  tools/native_ui/RLPVolumeKnobView.mm
+)
   foreach(t IN ITEMS test_native_album_web test_native_bar_web)
     target_compile_options(${t} PRIVATE -fobjc-arc)
     target_include_directories(${t} PRIVATE src tools tools/native_ui)
@@ -303,6 +307,7 @@ if(APPLE)
   # 纪律：backend=null + volume=-120 —— 只跑 DSP，绝不打开设备（铁律②）。
   add_executable(test_native_bar_core tests/test_native_bar_core.mm
     tools/native_ui/RLPPlaybackBarView.mm tools/native_ui/RLPSignalChain.mm
+    tools/native_ui/RLPVolumeKnobView.mm
     tools/native_ui/RLPSupport.mm tools/native_ui/RLPModels.mm
     tools/native_ui/RLPTheme.mm tools/native_ui/RLPNativeI18n.mm
     tools/native_ui/RLPCoreClient.mm)
@@ -316,6 +321,7 @@ if(APPLE)
   # 对 1.1.7.32 先跑红：停止态只发 /api/pause?on=0（no-op）、媒体键沿用 isPlaying 快照。
   add_executable(test_native_pause_paths tests/test_native_pause_paths.mm
     tools/native_ui/RLPPlaybackBarView.mm tools/native_ui/RLPSignalChain.mm
+    tools/native_ui/RLPVolumeKnobView.mm
     tools/native_ui/RLPSupport.mm tools/native_ui/RLPModels.mm
     tools/native_ui/RLPTheme.mm tools/native_ui/RLPNativeI18n.mm
     tools/native_ui/RLPNowPlayingViewController.mm tools/native_ui/RLPPageViewController.mm
@@ -956,6 +962,7 @@ if(APPLE)
     tools/native_ui/RLPArtistsViewController.mm
     tools/native_ui/RLPAlbumDetailViewController.mm
     tools/native_ui/RLPPlaybackBarView.mm tools/native_ui/RLPSignalChain.mm
+    tools/native_ui/RLPVolumeKnobView.mm
     tools/native_ui/RLPTrackActions.mm tools/native_ui/RLPAnalysisSummary.mm
     tools/native_ui/RLPPageViewController.mm
     tools/native_ui/RLPCoreClient.mm tools/native_ui/RLPSupport.mm
@@ -964,6 +971,7 @@ if(APPLE)
   set_source_files_properties(tests/test_artist_grid.mm
     tools/native_ui/RLPArtistsViewController.mm tools/native_ui/RLPAlbumDetailViewController.mm
     tools/native_ui/RLPPlaybackBarView.mm tools/native_ui/RLPSignalChain.mm
+    tools/native_ui/RLPVolumeKnobView.mm
     tools/native_ui/RLPTrackActions.mm tools/native_ui/RLPAnalysisSummary.mm
     tools/native_ui/RLPPageViewController.mm
     tools/native_ui/RLPCoreClient.mm tools/native_ui/RLPSupport.mm

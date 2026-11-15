@@ -10,6 +10,7 @@
 //   * 拖动进度/音量期间不用轮询值回写（否则滑块会被"橡皮筋"拉回去）；松手才提交一次。
 //   * 没开始轮询（核心未启动/selftest）时不发任何请求。
 #import "RLPPlaybackBarView.h"
+#import "RLPVolumeKnobView.h"
 #import "RLPCoreClient.h"
 #import "RLPModels.h"
 #import "RLPTheme.h"
@@ -246,6 +247,8 @@ static void RLPSetBadgeText(NSTextField *label, NSString *text, NSColor *color, 
 @property (nonatomic, strong) NSButton *chainBtn;       // 信号链（web #bChain）
 @property (nonatomic, strong) RLPCommitSlider *progress;
 @property (nonatomic, strong) RLPCommitSlider *volume;
+/// v3.3.11 底栏 #volKnob：音量旋钮（web 的 #vol range 已是 sr-only）。
+@property (nonatomic, strong) RLPVolumeKnobView *volKnob;
 @property (nonatomic, strong) NSImageView *volIconView;
 @property (nonatomic, strong) NSImageView *coverView;      // 封面缩略图（web 底栏左侧）
 @property (nonatomic, strong) NSTextField *bpBadge;        // BIT-PERFECT 绿色徽标
@@ -483,6 +486,7 @@ static void RLPSetBadgeText(NSTextField *label, NSString *text, NSColor *color, 
     self.volume.minValue = 0.0;
     self.volume.maxValue = 1000.0;
     self.volume.doubleValue = 1000.0;
+    self.volume.hidden = YES;   // web #vol 是 sr-only：可见控制是旋钮
     self.volume.continuous = YES;
     self.volume.controlSize = NSControlSizeSmall;
     self.volume.target = self;
@@ -490,8 +494,21 @@ static void RLPSetBadgeText(NSTextField *label, NSString *text, NSColor *color, 
     self.volume.onCommit = ^{ [weakSelf commitVolume]; };
     self.volume.identifier = @"pb.vol";
 
+    // v3.3.11 底栏 #volKnob：旋钮取代可见滑块（web 的 #vol range 是 sr-only）。
+    // 为什么不是「再加一个控件」：upstream v3.3.11 里 volPosToDb（-55 曲线）已 0 处引用，
+    // 音量唯一映射是 volDbToNorm/volNormToDb 的对称指数（0 dB 居中）；底栏若继续用 -55 曲线，
+    // 同一个 dB 会在两个界面显示在不同位置。
+    self.volKnob = [[RLPVolumeKnobView alloc] initWithFrame:NSZeroRect];
+    self.volKnob.identifier = @"volKnob";
+    self.volKnob.toolTip = RLPTr(@"音量旋钮");
+    self.volKnob.db = 0.0;
+    __weak __typeof__(self) kobs = self;
+    self.volKnob.onLiveChange = ^(double db) { [kobs updateVolumeUiForDb:db]; };
+    self.volKnob.onCommit = ^(double db) { [kobs commitVolumeDb:db]; };
+
     for (NSView *v in @[self.titleLabel, self.subLabel, self.posLabel, self.durLabel, self.fmtBadge,
-                        self.lyricBtn, self.chainBtn, self.progress, volView, self.volume]) {
+                        self.lyricBtn, self.chainBtn, self.progress, volView, self.volume,
+                        self.volKnob]) {
         v.translatesAutoresizingMaskIntoConstraints = NO;
         [self addSubview:v];
     }
@@ -563,17 +580,35 @@ static double RLPVolDbToPos(double db) {
     place(self.posLabel,cx,7,timeW,16);
     place(self.progress,cx+timeW+timeGap,7,centerW-2*(timeW+timeGap),16);
     place(self.durLabel,cx+centerW-timeW,7,timeW,16);
+    // 旋钮尺寸必须随行数走：wrap 模式下右簇拆成两行（行高 ~13pt 中心），
+    // 36pt 的方形会顶出条外 —— 判据「626pt 条内所有控件都在界内」会直接抓到。
+    const CGFloat knobS = wrap ? 22.0 : MIN(36.0, H - 18.0);
     NSArray *rows=wrap?@[@[self.lyricBtn,self.chainBtn,self.bpBadge],
-                         @[self.fmtBadge,self.gpuBadge,self.volIconView,self.volume]]:
-                        @[@[self.lyricBtn,self.chainBtn,self.bpBadge,self.fmtBadge,self.gpuBadge,self.volIconView,self.volume]];
+                         @[self.fmtBadge,self.gpuBadge,self.volIconView,self.volKnob]]:
+                        @[@[self.lyricBtn,self.chainBtn,self.bpBadge,self.fmtBadge,self.gpuBadge,self.volIconView,self.volKnob]];
+    // 右侧控制簇**右对齐**（web 的 status 簇是 flex-end）：
+    // 旋钮是方形、比原滑块槽窄，若仍左对齐就会在条右端留下多出来的空白（第14项留白判据）。
     for (NSUInteger row=0;row<rows.count;++row) {
-        CGFloat rowX=rx;
+        CGFloat total=0;
         for (NSView *v in rows[row]) {
             if (v==self.gpuBadge && v.hidden) continue;
-            CGFloat w=v==self.volume?volW:v==self.volIconView?14:v==self.bpBadge?bpW:v==self.fmtBadge?fmtW:v==self.gpuBadge?gpuW:iconW;
-            CGFloat h=(v==self.lyricBtn || v==self.chainBtn)?32:v==self.volume?16:20;
+            CGFloat w=v==self.volKnob?knobS:v==self.volume?volW:v==self.volIconView?14:v==self.bpBadge?bpW:v==self.fmtBadge?fmtW:v==self.gpuBadge?gpuW:iconW;
+            total += w + itemGap;
+        }
+        if (total > 0) total -= itemGap;
+        CGFloat rowX = MAX(rx, W - pad - total);
+        for (NSView *v in rows[row]) {
+            if (v==self.gpuBadge && v.hidden) continue;
+            CGFloat w=v==self.volKnob?knobS:v==self.volume?volW:v==self.volIconView?14:v==self.bpBadge?bpW:v==self.fmtBadge?fmtW:v==self.gpuBadge?gpuW:iconW;
+            CGFloat h=(v==self.lyricBtn || v==self.chainBtn)?32:(v==self.volKnob?knobS:v==self.volume?16:20);
             CGFloat rowCY=wrap?(row==0?H-21:13):H/2;
-            place(v,rowX,rowCY-h/2,w,h); rowX+=w+itemGap;
+            if (v == self.volKnob) {
+                // 旋钮是方形、居中在 volW 槽位里：槽宽不变 ⟹ 右端留白与左端对称（第14项判据）。
+                place(v, rowX + (w - h) / 2.0, rowCY - h / 2.0, h, h);
+            } else {
+                place(v,rowX,rowCY-h/2,w,h);
+            }
+            rowX+=w+itemGap;
         }
     }
 }
@@ -884,6 +919,7 @@ static double RLPVolDbToPos(double db) {
     // 音量滑块是**位置刻度 0..1000**（不是 dB），必须换算；sb 静音档 -120 也要能落回最左端。
     if (!self.volume.dragging && isfinite(st.volumeDb)) {
         self.volume.doubleValue = RLPVolDbToPos(st.volumeDb);
+        self.volKnob.db = st.volumeDb;   // 旋钮是可见真值（v3.3.11）
     }
 }
 
@@ -981,6 +1017,21 @@ static double RLPVolDbToPos(double db) {
 
 - (void)volumeChanged:(id)sender {
     (void)sender;
+}
+
+/// 拖动中只同步界面（旋钮 + 隐藏滑块的状态载体），不下发请求。
+- (void)updateVolumeUiForDb:(double)db {
+    db = round(db * 10.0) / 10.0;
+    if (self.volKnob.db != db) self.volKnob.db = db;
+    self.volume.doubleValue = RLPVolDbToPos(db);   // 仅为状态载体，已不可见
+}
+
+/// 旋钮松开：按 v3.3.11 的 dB 值直接下发（不再经 -55 位置曲线换算）。
+- (void)commitVolumeDb:(double)db {
+    if (!self.polling) return;
+    db = RLPVolClampDb(db);
+    NSString *path = [NSString stringWithFormat:@"/api/volume?db=%.1f", db];
+    [[RLPCoreClient shared] postJSON:path body:nil completion:nil];
 }
 
 - (void)commitVolume {

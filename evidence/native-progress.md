@@ -1175,3 +1175,19 @@ reset 只标记不删图（与上游一致）、夹具为构造 PNG 不解码。
 
 **挂账**：底栏旋钮未做；原生圆盘 40pt（web 64pt，受控制栏行高约束）；拖动期间不下发请求
 （沿用原生「松开才提交」纪律，web 是每帧下发）；未接 NSAccessibility。
+
+### 2026-11-15 12:xx —— 轮次 39（1.1.7.72）：v3.3.11 底栏音量旋钮 volKnob
+
+**关键发现**：原生底栏一直用 volPosToDb（-55 位置曲线），测试还专门锁住它宣称「冻结 web 曲线」；
+但 v3.3.11 上游该函数已 0 处引用，音量唯一映射是对称指数 volNormToDb。底栏因此改为旋钮 + dB 直发。
+
+**实现**：bar 加 volKnob（复用 RLPVolumeKnobView），旧滑块 hidden 保留为状态载体（对齐 web #vol 的 sr-only）；
+新增 commitVolumeDb:（dB 经 clamp 后直发）/ updateVolumeUiForDb:（拖动只同步界面）；
+fetchStatus 回填 kn.db；右侧控制簇改**右对齐**（否则方形旋钮比滑块槽窄 20pt，条右端留白失衡）；
+knobS 随 wrap 自适应（22 vs 36），否则 wrap 行里方形会顶出条外。
+
+**判据**：改写 3 组既有断言（滑块 cell → 旋钮存在+滑块隐藏；-55 曲线 → 旋钮 dB 直发；
+滑块 accent 像素 → 旋钮尺寸/方形），并说明是纠错而非放宽。结果 native_bar_web: 350 checks, 0 failures。
+布局两条判据抓出真缺陷：626pt 条内越界、左右留白差 20pt —— 都是改动后被测出来的，不是调阈值。
+
+**挂账**：底栏静音键 volFloor 未做；barVolInput 精确输入未做；volumePending 属架构 N/A；拖动期间不下发；未接 NSAccessibility。

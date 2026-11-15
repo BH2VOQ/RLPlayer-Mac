@@ -4,6 +4,12 @@
 #import <AppKit/AppKit.h>
 #import <QuartzCore/QuartzCore.h>
 #import "RLPPlaybackBarView.h"
+#import "RLPVolumeKnobView.h"
+
+// 生产接缝（实现在 RLPPlaybackBarView.mm）：旋钮松开按 v3.3.11 dB 直接下发。
+@interface RLPPlaybackBarView (RLPBarKnobTestSeam)
+- (void)commitVolumeDb:(double)db;
+@end
 #import "RLPCoreClient.h"
 #import "RLPModels.h"
 #import "RLPTheme.h"
@@ -277,7 +283,7 @@ int main() { @autoreleasepool {
             NSView *cover = field(bar,@"coverView");
             NSTextField *volLab = field(bar,@"durLabel");
             const CGFloat leftGap = NSMinX(cover.frame);
-            const CGFloat rightGap = bar.bounds.size.width - NSMaxX([field(bar,@"volume") frame]);
+            const CGFloat rightGap = bar.bounds.size.width - NSMaxX([field(bar,@"volKnob") frame]);
             (void)volLab;
             check(fabs(leftGap - rightGap) <= 2.0,
                   [[NSString stringWithFormat:@"第14项: 左右两端留白差 ≤2pt（左 %.1f 右 %.1f）",
@@ -304,7 +310,7 @@ int main() { @autoreleasepool {
     check(fabs([field(bar,@"coverView") frame].size.width-44)<.01, "web cover is 44pt");
     for (NSNumber *width in @[@1120,@980,@860]) {
         bar.frame=NSMakeRect(0,0,width.doubleValue,66); [bar layout];
-        NSArray *right=@[@"lyricBtn",@"chainBtn",@"bpBadge",@"fmtBadge",@"volIconView",@"volume"];
+        NSArray *right=@[@"lyricBtn",@"chainBtn",@"bpBadge",@"fmtBadge",@"volIconView",@"volKnob"];
         CGFloat edge=NSMaxX([field(bar,@"stopBtn") frame]);
         for (NSString *key in right) { NSView *v=field(bar,key); check(!v.hidden && v.frame.size.width>0 && NSMinX(v.frame)>=edge && NSMaxX(v.frame)<=width.doubleValue, "right controls and badges visible inside right column in one or two rows"); }
         for (NSUInteger i=0;i<right.count;++i) for(NSUInteger j=i+1;j<right.count;++j)
@@ -343,7 +349,10 @@ int main() { @autoreleasepool {
     }
     check([[field(bar,@"titleLabel") stringValue] isEqual:@"Real title"], "metadata title survives subsequent polls");
     check([[field(bar,@"subLabel") stringValue] isEqual:@"Real artist · Real album"], "real artist and album shown");
-    NSSlider *volume=field(bar,@"volume"); check(![volume.cell isMemberOfClass:NSSliderCell.class], "custom theme-colored slider cell, not system blue track");
+    NSSlider *volume=field(bar,@"volume");
+    RLPVolumeKnobView *knob=field(bar,@"volKnob");
+    check([knob isKindOfClass:RLPVolumeKnobView.class], "v3.3.11 #volKnob 存在（底栏音量旋钮）");
+    check(volume.hidden, "旧滑块已隐藏（web #vol range 是 sr-only，可见控制是旋钮）");
     for (NSString *key in @[@"prevBtn",@"playBtn",@"nextBtn",@"stopBtn",@"repeatBtn"]) {
         NSButton *button=field(bar,key); check(button.target==bar && button.action!=NULL, "transport controls have real target-action wiring");
     }
@@ -366,7 +375,7 @@ int main() { @autoreleasepool {
     check(![field(bar,@"gpuBadge") isHidden], "GPU badge follows real gpuUsed status");
     gpu[@"bitPerfect"]=@"direct"; gpu[@"gpuUsed"]=@YES; statusJSON=gpu;
     bar.frame=NSMakeRect(0,0,626,66); [bar fetchStatus]; [bar layout];
-    NSArray *all=@[@"coverView",@"titleLabel",@"subLabel",@"repeatBtn",@"prevBtn",@"playBtn",@"nextBtn",@"stopBtn",@"posLabel",@"progress",@"durLabel",@"lyricBtn",@"chainBtn",@"bpBadge",@"fmtBadge",@"gpuBadge",@"volIconView",@"volume"];
+    NSArray *all=@[@"coverView",@"titleLabel",@"subLabel",@"repeatBtn",@"prevBtn",@"playBtn",@"nextBtn",@"stopBtn",@"posLabel",@"progress",@"durLabel",@"lyricBtn",@"chainBtn",@"bpBadge",@"fmtBadge",@"gpuBadge",@"volIconView",@"volKnob"];
     for (NSUInteger i=0;i<all.count;++i) {
         NSView *a=field(bar,all[i]); check(!a.hidden && NSContainsRect(bar.bounds,a.frame), "minimum supported 626pt bar contains every real control/badge");
         for (NSUInteger j=i+1;j<all.count;++j) {
@@ -374,19 +383,18 @@ int main() { @autoreleasepool {
         }
     }
     gpu[@"gpuUsed"]=@NO; statusJSON=gpu; [bar fetchStatus]; check([field(bar,@"gpuBadge") isHidden], "GPU badge clears when unused");
-    NSBitmapImageRep *pixels=[[NSBitmapImageRep alloc] initWithBitmapDataPlanes:NULL pixelsWide:100 pixelsHigh:16 bitsPerSample:8 samplesPerPixel:4 hasAlpha:YES isPlanar:NO colorSpaceName:NSDeviceRGBColorSpace bytesPerRow:0 bitsPerPixel:0];
-    [NSGraphicsContext saveGraphicsState]; [NSGraphicsContext setCurrentContext:[NSGraphicsContext graphicsContextWithBitmapImageRep:pixels]];
-    volume.doubleValue=500; [volume.cell drawBarInside:NSMakeRect(0,0,100,16) flipped:NO];
-    [NSGraphicsContext restoreGraphicsState];
-    NSColor *ink=[[pixels colorAtX:20 y:8] colorUsingColorSpace:NSColorSpace.deviceRGBColorSpace];
-    NSColor *accent=[RLPTheme.current.accent colorUsingColorSpace:NSColorSpace.deviceRGBColorSpace];
-    check(fabs(ink.redComponent-accent.redComponent)<.02 && fabs(ink.greenComponent-accent.greenComponent)<.02, "drawn slider fill uses web accent rather than macOS blue");
+    // 旋钮是自绘视图：这里断言它真的占据了可见槽位（方形），accent 值弧的色彩断言
+    // 由 test_native_volume_knob 的绘制路径覆盖（同一份 RLPVolumeKnobView 实现）。
+    check(NSWidth(knob.frame) > 0 && NSHeight(knob.frame) > 0, "旋钮有真实可见尺寸");
+    check(fabs(NSWidth(knob.frame) - NSHeight(knob.frame)) < 1.0, "旋钮槽位是方形（圆盘不被拉伸）");
     online=YES; [bar startPolling];
-    for (NSNumber *pos in @[@0,@5,@500,@1000]) {
-        volume.doubleValue=pos.doubleValue; [bar commitVolume];
-        double expected=pos.doubleValue<=5?-120:-55*pow(1-pos.doubleValue/1000,1.6);
-        NSString *request=[NSString stringWithFormat:@"/api/volume?db=%.1f",expected];
-        check([posts.lastObject isEqual:request], "volume curve matches frozen web including true silent notch");
+    // ★ 曲线变更（2026-11-15，v3.3.11 对照）：upstream 的 volPosToDb（-55 位置曲线）已 0 处引用，
+    //   音量唯一映射是 volDbToNorm/volNormToDb 的对称指数；底栏改为按旋钮 dB 直接下发。
+    //   旧判据「frozen web -55 curve」守的是一条上游已删除的曲线，这里是纠正而不是放宽。
+    for (NSNumber *dbx in @[@(-120.0), @(0.0), @(-12.5), @(20.0)]) {
+        knob.db = dbx.doubleValue; [bar commitVolumeDb:knob.db];
+        NSString *request=[NSString stringWithFormat:@"/api/volume?db=%.1f", RLPVolClampDb(dbx.doubleValue)];
+        check([posts.lastObject isEqual:request], "v3.3.11 音量：旋钮 dB 原样下发（-120 真静音 / 0 dB / 负值 / +20 上限）");
     }
     [bar setValue:@0 forKey:@"playMode"];
     for (NSInteger mode=1;mode<=4;++mode) { [bar toggleRepeat:nil]; check([posts.lastObject isEqual:[NSString stringWithFormat:@"/api/playmode?mode=%ld",(long)(mode%4)]], "mode button cycles all four modes including shuffle"); }
