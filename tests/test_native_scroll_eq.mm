@@ -291,6 +291,27 @@ int main() {
         ck(curve != nil, "第7项: 找到 EQ 曲线视图（可拖动的那个）", @"没有任何视图实现 applyDragEvent:");
 
         if (curve) {
+            // ⚠️ 2026-11-15：默认视图已改为推子板，曲线默认 hidden。
+            // 第7项测的是**曲线**的响应链，所以先走生产入口切回曲线模式。
+            // 不切的话 hitTest 会打到 NSStackView（曲线没参与布局），拖动落空。
+            NSButton *modeBtn = nil;
+            {
+                NSMutableArray *allb = [NSMutableArray array];
+                Collect(eq, [NSButton class], allb);
+                for (NSButton *b in allb)
+                    if ([b.identifier isEqualToString:@"peq.mode"]) { modeBtn = b; break; }
+            }
+            ck(modeBtn != nil, "第7项: 找到曲线/推子切换按钮", @"缺 peq.mode");
+            if (modeBtn && curve.hidden) {
+                [modeBtn performClick:nil];
+                NSDate *u = [NSDate dateWithTimeIntervalSinceNow:0.3];
+                while ([u timeIntervalSinceNow] > 0)
+                    [[NSRunLoop currentRunLoop] runMode:NSDefaultRunLoopMode
+                                             beforeDate:[NSDate dateWithTimeIntervalSinceNow:0.01]];
+                [eq layoutSubtreeIfNeeded];
+                [pageDoc layoutSubtreeIfNeeded];
+            }
+            ck(curve.hidden == NO, "第7项: 切换后曲线可见", @"仍 hidden");
             // 先在曲线上布局出真实几何（离屏也要 layout，否则 plotRect 全 0）
             [curve layoutSubtreeIfNeeded];
             ck(curve.bounds.size.width > 100 && curve.bounds.size.height > 60,

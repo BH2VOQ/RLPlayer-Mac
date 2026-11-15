@@ -27,6 +27,7 @@
 #import "RLPTheme.h"
 #import "RLPTargetCurve.h"
 #import "RLPEQGeometry.h"
+#import "RLPEQFaderView.h"
 
 #include <cmath>
 #include <initializer_list>
@@ -86,7 +87,9 @@
     if (plot.size.width <= 4 || plot.size.height <= 4) return;
 
     // x 轴对数 20Hz..20kHz；y 轴 ±18dB
-    const double fMin = 20.0, fMax = 20000.0, dbMax = 18.0;
+    // 竖直量程 = ±RLPEQDbRange（±24 dB，用户 2026-11-15 明确；与后端钳位/web 表格一致）。
+    // 这里**不许**再写死数字：写死过一次 18，于是画布拖到底只到 ±18 而表格能填 ±24。
+    const double fMin = 20.0, fMax = 20000.0, dbMax = RLPEQDbRange;
     const double lfMin = log10(fMin), lfMax = log10(fMax);
     CGFloat (^X)(double) = ^CGFloat(double f) {
         double c = MAX(fMin, MIN(fMax, f));
@@ -106,7 +109,8 @@
         g.lineWidth = 0.5;
         [g stroke];
     }
-    for (double db = -12.0; db <= 12.0; db += 6.0) {
+    // 水平网格：每 6 dB 一条，覆盖整个量程（±24 → -24..24，共 8 条）
+    for (double db = -floor(dbMax / 6.0) * 6.0; db <= dbMax + 1e-9; db += 6.0) {
         if (fabs(db) < 0.001) continue;
         NSBezierPath *g = [NSBezierPath bezierPath];
         [g moveToPoint:NSMakePoint(plot.origin.x, Y(db))];
@@ -124,9 +128,11 @@
 
     // 轴标注
     NSDictionary *attrs = @{ NSFontAttributeName: t.small, NSForegroundColorAttributeName: t.mut };
-    [@"+18" drawAtPoint:NSMakePoint(2, NSMaxY(plot) - 12) withAttributes:attrs];
+    [[NSString stringWithFormat:@"+%.0f", dbMax]
+        drawAtPoint:NSMakePoint(2, NSMaxY(plot) - 12) withAttributes:attrs];
     [@"0" drawAtPoint:NSMakePoint(2, Y(0) - 6) withAttributes:attrs];
-    [@"-18" drawAtPoint:NSMakePoint(2, plot.origin.y) withAttributes:attrs];
+    [[NSString stringWithFormat:@"-%.0f", dbMax]
+        drawAtPoint:NSMakePoint(2, plot.origin.y) withAttributes:attrs];
     [@"20" drawAtPoint:NSMakePoint(plot.origin.x, 2) withAttributes:attrs];
     [@"1k" drawAtPoint:NSMakePoint(X(1000) - 6, 2) withAttributes:attrs];
     [@"20k" drawAtPoint:NSMakePoint(NSMaxX(plot) - 22, 2) withAttributes:attrs];
@@ -547,6 +553,14 @@
 @property (nonatomic, strong) NSArray<NSLayoutConstraint *> *scrollConstraints;
 @property (nonatomic, assign) BOOL embeddedInPage;
 @property (nonatomic, strong) RLPEQCurveView *curve;
+/// 推子板（用户 2026-11-15 要求的目标形态：下面频率、上面 ±dB 输入）。
+/// 与曲线**同一份数据**（都从 self.bands / 后端 points 取），只是两种视图。
+/// 默认用推子板（用户明确要的效果）；曲线仍可用工具栏按钮切回去，功能不删。
+@property (nonatomic, strong) RLPEQFaderView *fader;
+/// 当前是推子板（YES）还是曲线（NO）。
+@property (nonatomic, assign) BOOL faderMode;
+/// 视图模式切换按钮（曲线 / 推子）。
+@property (nonatomic, strong) NSButton *modeButton;
 @property (nonatomic, strong) NSSwitch *bypass;
 @property (nonatomic, strong) NSTextField *preamp;
 @property (nonatomic, strong) NSTextField *status;
@@ -554,6 +568,8 @@
 @property (nonatomic, strong) NSMutableArray<NSMutableDictionary *> *bands;
 @property (nonatomic, strong) NSTimer *applyTimer;
 @property (nonatomic, assign) BOOL loading;
+/// 拖动热路径的轻量刷新次数（判据 E17 用：证明拖动没走 reloadData 重建 cell）。
+@property (nonatomic, readonly) NSInteger rowValueRefreshes;
 - (void)applyOpraQuery:(NSString *)qq;
 - (void)previewTargetCurveForPreset:(nullable NSDictionary *)p;
 - (void)resetTargetCurvePreview;
@@ -635,7 +651,10 @@
 - (void)mouseExited:(NSEvent *)event  { (void)event; [self setChipHovered:NO]; }
 @end
 
-@implementation RLPEqualizerView
+@implementation RLPEqualizerView {
+    NSInteger _rowValueRefreshes;
+}
+@synthesize rowValueRefreshes = _rowValueRefreshes;
 
 /// web `sp_opra_copychip`（ui_script.h:10996-10997 / 11947-11955）：一枚 `.chip`，
 /// 点击把 OPRA 项目官网链接写进剪贴板并 toast「已复制来源链接: …」。
@@ -717,6 +736,20 @@
     self.status.lineBreakMode = NSLineBreakByWordWrapping;
     [self.stack addArrangedSubview:self.status];
 
+    // 视图模式切换（用户 2026-11-15：要推子板形态；曲线保留，功能不删）。
+    {
+        NSStackView *modeRow = [[NSStackView alloc] initWithFrame:NSZeroRect];
+        modeRow.orientation = NSUserInterfaceLayoutOrientationHorizontal;
+        modeRow.spacing = 8;
+        self.modeButton = [NSButton buttonWithTitle:RLPTr(@"切换为曲线")
+                                             target:self action:@selector(onToggleMode:)];
+        self.modeButton.identifier = @"peq.mode";
+        self.modeButton.bezelStyle = NSBezelStyleRounded;
+        [modeRow addArrangedSubview:self.modeButton];
+        modeRow.alignment = NSLayoutAttributeCenterY;
+        [self.stack addArrangedSubview:modeRow];
+    }
+
     self.curve = [[RLPEQCurveView alloc] initWithFrame:NSZeroRect];
     self.curve.identifier = @"eq.curve";          // 判据（第8项像素采样）用它定位曲线视图
     self.curve.wantsLayer = YES;
@@ -727,6 +760,44 @@
         [self.curve.heightAnchor constraintEqualToConstant:170],
         [self.curve.widthAnchor constraintEqualToAnchor:self.stack.widthAnchor constant:-4],
     ]];
+
+    // 推子板：与曲线**同址叠加**（同一份数据、同一块位置，切换只改 hidden）。
+    // 为什么叠加而不是各占一行：两者语义相同（都是"调这 20 段"），
+    // 同时显示会把同一件事画两遍，且卡片高度会翻倍。
+    self.fader = [[RLPEQFaderView alloc] initWithFrame:NSZeroRect];
+    self.fader.identifier = @"eq.fader";
+    self.fader.wantsLayer = YES;
+    self.fader.layer.cornerRadius = 8;
+    self.fader.translatesAutoresizingMaskIntoConstraints = NO;
+    [self.stack addArrangedSubview:self.fader];
+    [NSLayoutConstraint activateConstraints:@[
+        [self.fader.heightAnchor constraintEqualToConstant:230],
+        [self.fader.widthAnchor constraintEqualToAnchor:self.stack.widthAnchor constant:-4],
+    ]];
+    // ⚠️ 不要给 fader 加 topAnchor == curve.topAnchor 去"叠在一起"：
+    // 两者都是 stack 的 arrangedSubviews，NSStackView 会自己垂直排布，
+    // 再加一条对齐约束就是和排列约束打架（冲突日志 + 高度莫名变高）。
+    // 正确做法就是靠 detachesHiddenViews（默认 YES）：hidden 的那个自动退出布局，
+    // 所以同一时刻只有一个是占位的，切换只改 hidden。
+    // 默认推子板（用户明确要的效果）；曲线是隐藏的那一个。
+    self.faderMode = YES;
+    self.fader.hidden = NO;
+    self.curve.hidden = YES;
+    __weak __typeof__(self) weakFader = self;
+    self.fader.onBandGainEdited = ^(NSInteger idx, double db) {
+        __typeof__(self) s = weakFader;
+        if (!s || idx < 0 || idx >= (NSInteger)s.bands.count) return;
+        s.bands[(NSUInteger)idx][@"g"] = @(db);
+        NSMutableArray<NSNumber *> *gains = [s.fader.bandGains mutableCopy]
+                                          ?: [NSMutableArray arrayWithCapacity:s.bands.count];
+        while (gains.count < s.bands.count) [gains addObject:@0];
+        gains[(NSUInteger)idx] = @(db);
+        s.fader.bandGains = gains;
+        s.curve.bandGains = gains;
+        [s.curve setNeedsDisplay:YES];
+        [s refreshBandRowValues:(NSUInteger)idx];
+        [s scheduleApply];
+    };
     // web PEQ_DRAG 等价：在曲线上按住拖动 → 改最近一段的增益（260ms 节流后下发）。
     __weak __typeof__(self) weakCurve = self;
     self.curve.onDragBand = ^(NSInteger idx, double db) {
@@ -740,8 +811,12 @@
         gains[(NSUInteger)idx] = @(db);
         s.curve.bandGains = gains;
         [s.curve setNeedsDisplay:YES];
-        [s.bandTable reloadDataForRowIndexes:[NSIndexSet indexSetWithIndex:(NSUInteger)idx]
-                             columnIndexes:[NSIndexSet indexSetWithIndex:0]];
+        // ⚠️ 这里**不能**用 reloadDataForRowIndexes:columnIndexes:。
+        // 那是"重建这一行的 cell view"——鼠标拖动每秒 60~120 个事件，每个都重建一次
+        // NSTableView 的 cell（含 NSTextField/NSPopUpButton），是用户反馈「图有点卡顿」的主因。
+        // 而且原来传的列索引是 0（段号列），增益列根本没被刷新 —— 白付了重建代价还没效果。
+        // 正确做法：只把已存在的那两行 cell 的字符串改掉（不申请新 view、不重算行高）。
+        [s refreshBandRowValues:(NSUInteger)idx];
         [s scheduleApply];
     };
 
@@ -1045,6 +1120,62 @@
     [self notifyContentSizeChanged];
 }
 
+/// 只改某一行**已存在**的 cell 里的数值文本，不重建 cell view。
+/// 拖动热路径专用（见 onDragBand 的注释）：每秒上百次事件时，任何
+/// reloadData / reloadDataForRowIndexes 都会重建 NSTextField 与 NSPopUpButton，
+/// 那是可见的卡顿来源。
+- (void)refreshBandRowValues:(NSUInteger)row {
+    // 判据锚点：拖动热路径每触发一次这里 += 1（E17 用它证明"走了轻量路径"）。
+    _rowValueRefreshes += 1;
+    if (row >= self.bands.count) return;
+    NSDictionary *band = self.bands[row];
+    for (NSInteger ci = 0; ci < (NSInteger)self.bandTable.numberOfColumns; ++ci) {
+        NSTableColumn *col = self.bandTable.tableColumns[(NSUInteger)ci];
+        NSString *key = col.identifier;
+        if (![key isEqualToString:@"g"] && ![key isEqualToString:@"q"]) continue;
+        NSString *ident = [key stringByAppendingString:@"Field"];
+        NSTextField *tf = (NSTextField *)[self.bandTable viewAtColumn:ci row:(NSInteger)row
+                                                          makeIfNecessary:NO];
+        if (!tf || ![tf isKindOfClass:[NSTextField class]]) continue;
+        if (![tf.identifier isEqualToString:ident]) continue;
+        if ([[self.bandTable window] firstResponder] == tf) continue;   // 用户正在这里输入，别抢
+        tf.stringValue = [NSString stringWithFormat:@"%.2f", [band[key] doubleValue]];
+    }
+}
+
+/// 曲线 ↔ 推子板切换。两种视图读同一份 bands，切换只改 visible 与按钮标题。
+- (void)onToggleMode:(id)sender {
+    (void)sender;
+    self.faderMode = !self.faderMode;
+    self.fader.hidden = !self.faderMode;
+    self.curve.hidden = self.faderMode;
+    self.modeButton.title = self.faderMode ? RLPTr(@"切换为曲线") : RLPTr(@"切换为推子");
+    // ⚠️ detachesHiddenViews 让 hidden 的那个退出布局，但**改完 hidden 必须让 stack 重新排**，
+    // 否则刚显示的那个视图还停在上一次的位置（实测：hitTest 打到 NSStackView，
+    // 拖动落空、增益恒 0）。顺手把外层也标脏，向上冒到卡片。
+    [self.stack needsLayout];
+    [self setNeedsLayout:YES];
+    [self.superview setNeedsLayout:YES];
+    [self syncViewsFromBands];
+    [self notifyContentSizeChanged];
+}
+
+/// 把 self.bands 同步给两个视图（曲线 + 推子）。集中一处，避免两条路径各写一份。
+- (void)syncViewsFromBands {
+    NSMutableArray<NSNumber *> *freqs = [NSMutableArray array];
+    NSMutableArray<NSNumber *> *gains = [NSMutableArray array];
+    for (NSDictionary *b in self.bands) {
+        [freqs addObject:b[@"f"] ?: @0];
+        [gains addObject:b[@"g"] ?: @0];
+    }
+    self.curve.bandFreqs = freqs;
+    self.curve.bandGains = gains;
+    self.fader.bandFreqs = freqs;
+    self.fader.bandGains = gains;
+    [self.curve setNeedsDisplay:YES];
+    [self.fader setNeedsDisplay:YES];
+}
+
 #pragma mark - 频段类型码（后端契约：PK / LS / HS）
 
 // 后端 src/dsp/peq.h 的 peq_band_type_name() 只认这三个码：PK / LS / HS。
@@ -1235,13 +1366,8 @@ static NSString *RLPEQTypeCodeNormalized(id raw) {
         [clean addObject:@[ @([a[0] doubleValue]), @([a[1] doubleValue]) ]];
     }
     self.curve.points = clean;
-    NSMutableArray<NSNumber *> *freqs = [NSMutableArray array];
-    for (NSDictionary *b in self.bands) if (b[@"f"]) [freqs addObject:b[@"f"]];
-    self.curve.bandFreqs = freqs;
-    // 手柄高度要用每段当前增益；拖拽高亮默认无
-    NSMutableArray<NSNumber *> *gains = [NSMutableArray arrayWithCapacity:self.bands.count];
-    for (NSDictionary *b in self.bands) [gains addObject:@([b[@"g"] doubleValue])];
-    self.curve.bandGains = gains;
+    // 曲线与推子板共用一份 freqs/gains —— 走同一个同步口，避免两边各写一份走岔
+    [self syncViewsFromBands];
     // ⚠️ **不要**在这里把 activeBand 复位成 -1。
     // absorbState 是每次 POST /api/peq 回来都会跑的；而拖动提交是 260ms 节流 ⟹
     // 每拖动一下，紧接着的这次回填就会把"正在调哪一段"的高亮抹掉 —— 用户看到的就是

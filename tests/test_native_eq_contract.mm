@@ -34,6 +34,7 @@
 #import "RLPSupport.h"
 #import "RLPTheme.h"
 #import "RLPSettingsViewController.h"
+#import "RLPEQFaderView.h"
 
 #include <cstdio>
 #include <cstdlib>
@@ -63,6 +64,10 @@ static NSView *FindId(NSView *root, NSString *ident) {
 }
 
 /// 曲线视图的私有几何入口（同 RLPEqualizerView.mm 的 drawRect 坐标；仅测试侧可见）。
+@interface NSObject (RLPEQHotPath)
+- (void)refreshBandRowValues:(NSUInteger)row;
+@end
+
 @interface NSObject (RLPEQCurveGeometry)
 - (NSRect)plotRect;
 - (CGFloat)xForFreq:(double)f;
@@ -198,18 +203,38 @@ int main() {
 
         // 1 kHz 在 20Hz..20kHz 的对数轴上是 0.5663（见 test_native_eq_geometry 的 E3）
         const CGFloat xFrac = 0.5663;
-        const NSRect plot2 = [(id)curve plotRect];
-        const NSRect inWin = [curve convertRect:curve.bounds toView:nil];
-        const NSPoint p0 = NSMakePoint(inWin.origin.x + plot2.origin.x + plot2.size.width * xFrac,
-                                       inWin.origin.y + NSMidY(plot2));
-        const NSPoint p1 = NSMakePoint(p0.x, p0.y + 40);   // 向上拖 = 提升增益
-
+        // ⚠️ 坐标必须在**切到曲线模式之后**再算：曲线默认 hidden，此时它不参与 stack 布局，
+        // frame 仍是 {{0,0},{0,0}} ⟹ convertRect 得到的 inWin 是错的，
+        // 后面 hitTest 自然打到 NSStackView（实测踩到，5 条红）。
         NSEvent *(^mouse)(NSEventType, NSPoint) = ^NSEvent *(NSEventType type, NSPoint at) {
             return [NSEvent mouseEventWithType:type location:at modifierFlags:0
                                      timestamp:[NSDate timeIntervalSinceReferenceDate]
                                   windowNumber:win.windowNumber context:nil eventNumber:0
                                     clickCount:1 pressure:type == NSEventTypeLeftMouseUp ? 0.0 : 1.0];
         };
+        // ⚠️ 2026-11-15：默认视图已改为**推子板**（用户明确要的形态），曲线默认隐藏。
+        // E5 测的是曲线模式的拖拽几何，所以先走生产入口（工具栏切换按钮）切回曲线。
+        // 不能靠"直接把 curve.hidden 设成 NO"——那绕过了 onToggleMode 的实际行为，
+        // 切不过去也会绿（无效判据）。
+        NSButton *modeBtn = (NSButton *)FindId(eq, @"peq.mode");
+        Ck(modeBtn != nil, @"E5 前置：找到曲线/推子切换按钮", @"缺 peq.mode");
+        if (modeBtn && ![modeBtn.title isEqualToString:RLPTr(@"切换为推子")]) {
+            // 当前是推子模式 → 点一次切到曲线
+            [modeBtn performClick:nil];
+            Pump(0.5);
+            [eq layoutSubtreeIfNeeded];
+            [win layoutIfNeeded];
+        }
+        Ck(curve.hidden == NO, @"E5 前置：切换后曲线视图真的可见了",
+           [NSString stringWithFormat:@"hidden=%d", (int)curve.hidden]);
+        Ck(curve.frame.size.width > 100 && curve.frame.size.height > 60,
+           @"E5 前置：切到曲线模式后曲线有真实尺寸（坐标才能算对）",
+           NSStringFromRect(curve.frame));
+        const NSRect plot2 = [(id)curve plotRect];
+        const NSRect inWin = [curve convertRect:curve.bounds toView:nil];
+        const NSPoint p0 = NSMakePoint(inWin.origin.x + plot2.origin.x + plot2.size.width * xFrac,
+                                       inWin.origin.y + NSMidY(plot2));
+        const NSPoint p1 = NSMakePoint(p0.x, p0.y + 40);   // 向上拖 = 提升增益
         NSView *hit = [win.contentView hitTest:[win.contentView convertPoint:p0 fromView:nil]];
         Ck(hit == curve, @"E5 1 kHz 处的 hitTest 命中曲线视图本身",
            [NSString stringWithFormat:@"hit=%@", hit ? NSStringFromClass(hit.class) : @"nil"]);
@@ -461,6 +486,241 @@ int main() {
                        [NSString stringWithFormat:@"overflow=%ld gridH=%.0f", (long)overflow, gridH]);
                     (void)head; (void)need;
                 }
+            }
+        }
+
+        // ---- E16：推子板（用户 2026-11-15 指定的目标形态）----
+        // 用户原话：想要截图那种「每段一根推子，**下面显示频率**，**上面可以输入 ±dB 详细数据**」，
+        // 并且是 20 段。这条判据就按这三件事逐条验，不看"像不像"，看数。
+        {
+            RLPEQFaderView *fd = nil;
+            NSMutableArray<NSView *> *allF = [NSMutableArray array];
+            Collect(eq, allF);
+            for (NSView *v in allF)
+                if ([v isKindOfClass:[RLPEQFaderView class]]) { fd = (RLPEQFaderView *)v; break; }
+            Ck(fd != nil, @"E16 EQ 页里有推子板视图", @"缺 RLPEQFaderView");
+            if (fd) {
+                [eq layoutSubtreeIfNeeded];
+                // ① 20 段，且频率标签覆盖 20Hz–20kHz（不是全 0 / 全是同一个值）
+                const NSUInteger nf = [fd bandCount];
+                Ck(nf == 20, @"E16 推子板是 20 段",
+                   [NSString stringWithFormat:@"n=%lu", (unsigned long)nf]);
+                NSMutableSet<NSString *> *labels = [NSMutableSet set];
+                NSMutableSet<NSNumber *> *freqs = [NSMutableSet set];
+                for (NSUInteger i = 0; i < nf; ++i) {
+                    [labels addObject:[fd freqLabelForBand:i]];
+                    if (i < fd.bandFreqs.count) [freqs addObject:fd.bandFreqs[i]];
+                }
+                Ck(labels.count == nf, @"E16 20 个频率标签互不相同（不是同一段复制 20 份）",
+                   [NSString stringWithFormat:@"unique=%lu", (unsigned long)labels.count]);
+                const double f0 = freqs.count ? [fd.bandFreqs.firstObject doubleValue] : 0;
+                const double fl = fd.bandFreqs.count ? [fd.bandFreqs.lastObject doubleValue] : 0;
+                Ck(fabs(f0 - 20.0) < 1.0 && fabs(fl - 20000.0) < 1.0,
+                   @"E16 频率覆盖 20 Hz 到 20 kHz",
+                   [NSString stringWithFormat:@"%.0f..%.0f", f0, fl]);
+
+                // ② 频率标签画在**下方**：标签基线必须低于绘图区底边
+                const NSRect plotF = [fd plotRect];
+                Ck(plotF.origin.y > 5.0,
+                   @"E16 绘图区下方留出了频率标签行（不是贴着底边画）",
+                   [NSString stringWithFormat:@"plotY=%.1f", plotF.origin.y]);
+
+                // ③ 上方有 20 个 ±dB 输入框，且都落在绘图区**上方**
+                NSUInteger fieldCount = 0, above = 0;
+                for (NSUInteger i = 0; i < nf; ++i) {
+                    NSTextField *f = [fd valueFieldForBand:i];
+                    if (!f) continue;
+                    ++fieldCount;
+                    if (NSMinY(f.frame) >= NSMaxY(plotF) - 1.0) ++above;
+                }
+                Ck(fieldCount == nf, @"E16 每段上方都有 ±dB 数值输入框",
+                   [NSString stringWithFormat:@"fields=%lu n=%lu",
+                    (unsigned long)fieldCount, (unsigned long)nf]);
+                Ck(above == nf, @"E16 这些输入框都排在绘图区上方（不是压在推子上）",
+                   [NSString stringWithFormat:@"above=%lu/%lu", (unsigned long)above, (unsigned long)nf]);
+
+                // ④-pre 输入框里必须**真的有数值**。
+                // 这一条是 2026-11-15 实测踩到的坑：bandFreqs 先到 → 建了 20 个空框；
+                // bandGains 后到 → 走了"数量相等"短路分支只重排没填值 ⟹ 20 个框全空白。
+                // 只看"框存在、位置对"是发现不了的（像素渲染出来才看得出来），
+                // 所以这里直接断言每个框的文本能解析成一个数。
+                NSUInteger filled = 0;
+                for (NSUInteger i = 0; i < nf; ++i) {
+                    NSTextField *f = [fd valueFieldForBand:i];
+                    NSString *s = f.stringValue ?: @"";
+                    if (s.length && fabs(f.doubleValue) < 1e9) ++filled;
+                }
+                Ck(filled == nf, @"E16 20 个输入框里都显示着数值（不是空框）",
+                   [NSString stringWithFormat:@"filled=%lu/%lu 首框='%@'",
+                    (unsigned long)filled, (unsigned long)nf,
+                    [fd valueFieldForBand:0].stringValue]);
+
+                // ④-b 复现"两个 setter 分两次到"的真实顺序（宿主就是这么设的）：
+                // 先 freqs（建框）、再 gains（应有数值）。旧实现这一步只重排不填值 ⟹ 全空。
+                // 用真视图造，不改生产代码 —— 这才是那个 bug 的成立条件。
+                {
+                    RLPEQFaderView *probe = [[RLPEQFaderView alloc] initWithFrame:NSMakeRect(0, 0, 900, 230)];
+                    probe.bandFreqs = fd.bandFreqs;      // 第一步：只有频率
+                    probe.bandGains = fd.bandGains;      // 第二步：才有增益
+                    NSUInteger f2 = 0;
+                    for (NSUInteger i = 0; i < [probe bandCount]; ++i) {
+                        NSTextField *ff = [probe valueFieldForBand:i];
+                        if (ff.stringValue.length) ++f2;
+                    }
+                    Ck(f2 == [probe bandCount] && [probe bandCount] > 0,
+                       @"E16 先设频率再设增益，输入框也必须被填上数值（旧实现此处全空）",
+                       [NSString stringWithFormat:@"filled=%lu/%lu",
+                        (unsigned long)f2, (unsigned long)[probe bandCount]]);
+                }
+
+                // ④ 输入框真的能把值送进核心（走生产入口：commit 那条 selector）
+                [core jsonWithMethod:@"POST" path:@"/api/peq/preset" body:@"action=reset&name="];
+                [eq reload];
+                Pump(1.0);
+                NSTextField *f5 = [fd valueFieldForBand:4];   // 第 5 段
+                Ck(f5 != nil, @"E16 取到第 5 段的输入框", @"nil");
+                if (f5) {
+                    f5.stringValue = @"7.5";
+                    [(id)fd onValueFieldCommitted:f5];
+                    Pump(1.0);
+                    NSDictionary *js = [core jsonWithMethod:@"GET" path:@"/api/peq" body:nil];
+                    NSArray *bs = [js[@"bands"] isKindOfClass:[NSArray class]] ? js[@"bands"] : @[];
+                    const double got = bs.count > 4 ? [bs[4][@"gain"] doubleValue] : 999;
+                    Ck(fabs(got - 7.5) < 0.05,
+                       @"E16 在上方输入框填 7.5 → 核心第 5 段真的是 +7.5 dB",
+                       [NSString stringWithFormat:@"gain=%.2f", got]);
+                }
+
+                // ⑤ ±24 dB 量程（用户 2026-11-15 明确），越界要被夹住而不是接受
+                NSTextField *f6 = [fd valueFieldForBand:5];
+                if (f6) {
+                    f6.stringValue = @"99";
+                    [(id)fd onValueFieldCommitted:f6];
+                    Pump(1.0);
+                    NSDictionary *js2 = [core jsonWithMethod:@"GET" path:@"/api/peq" body:nil];
+                    NSArray *bs2 = [js2[@"bands"] isKindOfClass:[NSArray class]] ? js2[@"bands"] : @[];
+                    const double got2 = bs2.count > 5 ? [bs2[5][@"gain"] doubleValue] : 999;
+                    Ck(fabs(got2 - 24.0) < 0.05,
+                       @"E16 填 99 被夹到 +24 dB（用户明确的量程上限）",
+                       [NSString stringWithFormat:@"gain=%.2f", got2]);
+                    Ck([f6.stringValue doubleValue] <= 24.05,
+                       @"E16 夹好之后输入框里显示的也是 24 附近，不是原样留着 99",
+                       [NSString stringWithFormat:@"text=%@", f6.stringValue]);
+                }
+
+                // ⑥ 拖推子：位移累加，指针上移 = 增益变大
+                [core jsonWithMethod:@"POST" path:@"/api/peq/preset" body:@"action=reset&name="];
+                [eq reload];
+                Pump(1.0);
+                [eq layoutSubtreeIfNeeded];
+                const NSRect tr3 = [fd trackRectForBand:9];
+                const NSPoint mid3 = [fd convertPoint:NSMakePoint(NSMidX(tr3), NSMidY(tr3)) toView:nil];
+                NSEvent *(^mev)(NSEventType, NSPoint) = ^NSEvent *(NSEventType type, NSPoint at) {
+                    return [NSEvent mouseEventWithType:type location:at modifierFlags:0
+                                             timestamp:[NSDate timeIntervalSinceReferenceDate]
+                                          windowNumber:win.windowNumber context:nil eventNumber:0
+                                            clickCount:1 pressure:type == NSEventTypeLeftMouseUp ? 0.0 : 1.0];
+                };
+                [fd mouseDown:mev(NSEventTypeLeftMouseDown, mid3)];
+                [fd mouseDragged:mev(NSEventTypeLeftMouseDragged,
+                                     NSMakePoint(mid3.x, mid3.y + 30))];
+                [fd mouseUp:mev(NSEventTypeLeftMouseUp, NSMakePoint(mid3.x, mid3.y + 30))];
+                Pump(1.2);
+                NSDictionary *js3 = [core jsonWithMethod:@"GET" path:@"/api/peq" body:nil];
+                NSArray *bs3 = [js3[@"bands"] isKindOfClass:[NSArray class]] ? js3[@"bands"] : @[];
+                NSInteger chg = -1; double g3 = 0; NSInteger cnt3 = 0;
+                for (NSUInteger i = 0; i < bs3.count; ++i) {
+                    const double g = [bs3[i][@"gain"] doubleValue];
+                    if (fabs(g) > 0.05) { ++cnt3; chg = (NSInteger)i; g3 = g; }
+                }
+                Ck(cnt3 == 1 && chg == 9 && g3 > 0.5,
+                   @"E16 向上拖第 10 段推子 → 只有第 10 段增益变大",
+                   [NSString stringWithFormat:@"cnt=%ld idx=%ld gain=%.2f",
+                    (long)cnt3, (long)chg, g3]);
+            }
+        }
+
+        // ---- E16 前置：E5 之后视图停在哪，后面几步要能继续 ----
+        // ---- E17：拖动热路径不许重建表格 cell（用户 2026-11-15：图有点卡顿）----
+        // 旧实现每收到一个 mouseDragged 就 reloadDataForRowIndexes:，
+        // 那是"重建这一行的 cell view"（含 NSTextField + NSPopUpButton）。
+        // 鼠标 60~120 Hz ⟹ 每秒上百次重建，这就是可见的卡顿。
+        // 而且它传的列索引是 0（段号列），增益列根本没刷新 —— 白付代价还没效果。
+        // 判据：连续拖 20 次，轻量刷新计数 == 20，且表格 cell 对象**地址不变**。
+        {
+            [core jsonWithMethod:@"POST" path:@"/api/peq/preset" body:@"action=reset&name="];
+            [eq reload];
+            Pump(1.0);
+            [eq layoutSubtreeIfNeeded];
+
+            RLPEQFaderView *fd2 = nil;
+            NSMutableArray<NSView *> *af = [NSMutableArray array];
+            Collect(eq, af);
+            for (NSView *v in af)
+                if ([v isKindOfClass:[RLPEQFaderView class]]) { fd2 = (RLPEQFaderView *)v; break; }
+            Ck(fd2 != nil, @"E17 找到推子板", @"nil");
+
+            if (fd2) {
+                [fd2 layoutSubtreeIfNeeded];
+                NSTableView *tbl = (NSTableView *)FindId(eq, @"peq.bands");
+                Ck(tbl != nil, @"E17 找到 20 段参数表", @"缺 peq.bands");
+                // 先让表格把 cell 建出来（否则第一次访问会 makeIfNecessary 建一个）
+                [tbl layoutSubtreeIfNeeded];
+                NSView *cellBefore = [tbl viewAtColumn:1 row:9 makeIfNecessary:YES];
+                Ck(cellBefore != nil, @"E17 前置：第 10 行的 cell 已存在", @"nil");
+
+                const NSInteger before = [[eq valueForKey:@"rowValueRefreshes"] integerValue];
+                const NSRect tr = [fd2 trackRectForBand:9];
+                const NSPoint mid = [fd2 convertPoint:NSMakePoint(NSMidX(tr), NSMidY(tr)) toView:nil];
+                NSEvent *(^mev2)(NSEventType, NSPoint) = ^NSEvent *(NSEventType type, NSPoint at) {
+                    return [NSEvent mouseEventWithType:type location:at modifierFlags:0
+                                             timestamp:[NSDate timeIntervalSinceReferenceDate]
+                                          windowNumber:win.windowNumber context:nil eventNumber:0
+                                            clickCount:1 pressure:1.0];
+                };
+                [fd2 mouseDown:mev2(NSEventTypeLeftMouseDown, mid)];
+                for (NSInteger i = 1; i <= 20; ++i)
+                    [fd2 mouseDragged:mev2(NSEventTypeLeftMouseDragged,
+                                          NSMakePoint(mid.x, mid.y + (CGFloat)i))];
+                const NSInteger after = [[eq valueForKey:@"rowValueRefreshes"] integerValue];
+                // 21 = 1 次 mouseDown（按下即改值，web pointerdown 同语义）+ 20 次 mouseDragged。
+                // 断言"每个事件恰好一次轻量刷新"：既不能 0（跳过刷新=界面不跟手），
+                // 也不能 >21（说明还夹着别的重建路径）。
+                Ck(after - before == 21,
+                   @"E17 按下+20 次拖动 = 21 次**轻量**刷新（既不漏刷也不重复重建）",
+                   [NSString stringWithFormat:@"n=%ld", (long)(after - before)]);
+
+                NSView *cellAfter = [tbl viewAtColumn:1 row:9 makeIfNecessary:NO];
+                // ⚠️ 这里原本写的是"cell 对象地址不变 ⟹ 无 reloadData"，实测**没有区分力**：
+                // 把旧实现（reloadDataForRowIndexes）放回热路径，这条依然 PASS——
+                // NSTableView 会复用 cell 对象，地址不变并不能证明没重建。
+                // 一条恒绿的判据只会制造"已验证"的假象，所以改成直接测**耗时**：
+                // 这才是用户说的"卡顿"本身，也是轻量刷新的唯一目的。
+                const NSUInteger kIters = 400;
+                const NSDate *t0 = [NSDate date];
+                for (NSUInteger k = 0; k < kIters; ++k)
+                    [(id)eq refreshBandRowValues:9];
+                const double cheapMs = -[t0 timeIntervalSinceNow] * 1000.0;
+                const NSDate *t1 = [NSDate date];
+                for (NSUInteger k = 0; k < kIters; ++k)
+                    [tbl reloadDataForRowIndexes:[NSIndexSet indexSetWithIndex:9]
+                                  columnIndexes:[NSIndexSet indexSetWithIndex:1]];
+                const double heavyMs = -[t1 timeIntervalSinceNow] * 1000.0;
+                Ck(heavyMs > cheapMs * 2.0,
+                   @"E17 轻量刷新明显快于重建 cell（这就是用户感觉到的卡顿来源）",
+                   [NSString stringWithFormat:@"cheap=%.1fms heavy=%.1fms 比值=%.1fx",
+                    cheapMs, heavyMs, cheapMs > 0.01 ? heavyMs / cheapMs : 0.0]);
+                (void)cellAfter; (void)cellBefore;
+
+                // 轻量刷新必须真的把数值写进 cell，否则"不卡"是靠不更新换来的
+                if ([cellAfter isKindOfClass:[NSTextField class]]) {
+                    const double shown = ((NSTextField *)cellAfter).doubleValue;
+                    Ck(shown > 0.3,
+                       @"E17 轻量刷新真的把拖动后的增益写进了 cell（屏幕上看得见）",
+                       [NSString stringWithFormat:@"shown=%.2f", shown]);
+                }
+                [fd2 mouseUp:mev2(NSEventTypeLeftMouseUp, mid)];
+                Pump(0.8);
             }
         }
 
