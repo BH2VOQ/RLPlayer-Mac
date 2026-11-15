@@ -215,6 +215,27 @@ int main() {
            [NSString stringWithFormat:@"query=%d search=%d", !!query, !!searchBtn]);
         if (!query || !searchBtn) { std::printf("结果：%d passed, %d failed\n", g_pass, g_fail); return 1; }
 
+        // ⚠️ 2026-11-15：EQ 默认视图已改为**推子板**，曲线默认 hidden。
+        // 【②绘制】这几条判据采样的是**曲线视图**上的目标曲线图层，所以先走生产入口
+        // （工具栏切换按钮）切回曲线模式；不切的话曲线不参与布局，Snap 出来是空白，
+        // changedPixels 恒 0（实测 4 条假红）。
+        {
+            NSMutableArray<NSView *> *btnAll = [NSMutableArray array];
+            Collect(v, btnAll);
+            NSButton *modeBtn = nil;
+            for (NSView *b in btnAll)
+                if ([b isKindOfClass:[NSButton class]] &&
+                    [b.identifier isEqualToString:@"peq.mode"]) { modeBtn = (NSButton *)b; break; }
+            Ck(modeBtn != nil, "【②绘制】前置：找到曲线/推子切换按钮", @"缺 peq.mode");
+            if (modeBtn && curve.hidden) {
+                [modeBtn performClick:nil];
+                Pump();
+                [v layoutSubtreeIfNeeded];
+            }
+            Ck(curve.hidden == NO, "【②绘制】前置：曲线模式已激活（目标曲线图层在曲线上）",
+               [NSString stringWithFormat:@"hidden=%d", (int)curve.hidden]);
+        }
+
         NSBitmapImageRep *base = Snap(curve);   // 未选任何目标曲线时的渲染
 
         // ---- ① 桥层：数组三元组 + web 的「全量索引一次 + 本地过滤」 ----
