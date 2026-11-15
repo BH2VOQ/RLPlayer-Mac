@@ -2015,6 +2015,11 @@ add_executable(test_room_measurement tests/test_room_measurement.cpp)
 target_include_directories(test_room_measurement PRIVATE ${CMAKE_SOURCE_DIR}/src)
 add_test(NAME room_measurement COMMAND test_room_measurement)
 
+# U4：测量麦克风校准曲线（纯 header：解析 / 对数插值 / 读数减校准）
+add_executable(test_mic_cal tests/test_mic_cal.cpp)
+target_include_directories(test_mic_cal PRIVATE ${CMAKE_SOURCE_DIR}/src)
+add_test(NAME mic_cal COMMAND test_mic_cal)
+
 add_executable(rtahealth tools/rtahealth.cpp)
 target_include_directories(rtahealth PRIVATE ${CMAKE_SOURCE_DIR}/src)
 target_link_libraries(rtahealth PRIVATE ${RL_PLATFORM_LIBS})
