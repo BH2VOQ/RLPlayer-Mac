@@ -42,6 +42,8 @@ NS_ASSUME_NONNULL_BEGIN
 /// 主题切换后刷新自建颜色。
 - (void)applyTheme;
 
+- (void)updateVolumeUiForDb:(double)db;
+
 @end
 
 NS_ASSUME_NONNULL_END

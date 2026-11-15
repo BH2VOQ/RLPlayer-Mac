@@ -185,6 +185,7 @@ if(APPLE)
   add_executable(rlplayer_native
     tools/native_ui/main.mm
     tools/native_ui/RLPAppDelegate.mm
+    tools/native_ui/RLPShortcuts.mm
     tools/native_ui/RLPMainWindowController.mm
     tools/native_ui/RLPSidebarViewController.mm
     tools/native_ui/RLPAlbumsViewController.mm
@@ -283,6 +284,12 @@ if(APPLE)
     tools/native_ui/RLPModels.mm tools/native_ui/RLPSupport.mm tools/native_ui/RLPTheme.mm
     tools/native_ui/RLPNativeI18n.mm tools/native_ui/RLPTrackActions.mm
     tools/native_ui/RLPAnalysisSummary.mm tools/native_ui/RLPCoreClient.mm)
+  add_executable(test_native_shortcuts tests/test_native_shortcuts.mm
+    tools/native_ui/RLPShortcuts.mm)
+  target_compile_options(test_native_shortcuts PRIVATE -fobjc-arc)
+  target_include_directories(test_native_shortcuts PRIVATE src tools tools/native_ui)
+  target_link_libraries(test_native_shortcuts PRIVATE "-framework AppKit" "-framework Foundation")
+  add_test(NAME native_shortcuts COMMAND test_native_shortcuts)
   add_executable(test_native_bar_web tests/test_native_bar_web.mm
     tools/native_ui/RLPPlaybackBarView.mm tools/native_ui/RLPSignalChain.mm
     tools/native_ui/RLPVolumeKnobView.mm

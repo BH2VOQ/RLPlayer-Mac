@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #import <MediaPlayer/MediaPlayer.h>
 #import "RLPAppDelegate.h"
+#import "RLPShortcuts.h"
 #import "RLPSupport.h"
 #import "RLPCoreClient.h"
 #import "RLPMainWindowController.h"
@@ -54,6 +55,13 @@ static void STCheck(BOOL ok, const char *what, NSString *detail) {
 @property (nonatomic, copy) NSString *lastReportedPath;
 @end
 
+@interface RLPAppDelegate ()
+@property (nonatomic, strong, nullable) id shortcutMonitor;
+- (void)installShortcutMonitor;
+- (void)handleShortcut:(RLPShortcutAction)a;
+- (BOOL)shortcutEditingText;
+@end
+
 @implementation RLPAppDelegate
 
 - (void)applicationDidFinishLaunching:(NSNotification *)note {
@@ -78,6 +86,7 @@ static void STCheck(BOOL ok, const char *what, NSString *detail) {
     [NSApp activateIgnoringOtherApps:YES];
     [self.mainWC loadInitialData];
     [self setupRemoteCommands];
+    [self installShortcutMonitor];   // web document keydown 的同语义落点（见 RLPShortcuts.h）
     [self setupNowPlayingCenter];
 
     self.exitPoll = [NSTimer scheduledTimerWithTimeInterval:0.25 repeats:YES block:^(NSTimer *t) {
@@ -272,6 +281,84 @@ static void STCheck(BOOL ok, const char *what, NSString *detail) {
         [self_.mainWC.playbackBar seekToSeconds:pe.positionTime];
         return MPRemoteCommandHandlerStatusSuccess;
     }];
+}
+
+
+#pragma mark - 全局快捷键（逐条对齐 web document keydown）
+
+/// 焦点是否在可编辑文本里。field editor（NSTextView）与 NSTextField 都算：
+/// 否则用户在搜索框里打 n/p/s/l 会误触播放控制（web 对 INPUT/SELECT/TEXTAREA 直接 return）。
+- (BOOL)shortcutEditingText {
+    NSResponder *fr = self.mainWC.window.firstResponder;
+    if (!fr) return NO;
+    if ([fr isKindOfClass:NSTextView.class]) return ((NSTextView *)fr).isEditable;
+    if ([fr isKindOfClass:NSTextField.class]) return ((NSTextField *)fr).isEditable;
+    return NO;
+}
+
+- (void)installShortcutMonitor {
+    __weak __typeof__(self) weakSelf = self;
+    self.shortcutMonitor = [NSEvent addLocalMonitorForEventsMatchingMask:NSEventMaskKeyDown
+                                                                handler:^NSEvent *(NSEvent *e) {
+        __typeof__(self) self_ = weakSelf;
+        if (!self_) return e;
+        if (e.window != self_.mainWC.window) return e;   // 只在本窗口生效，别抢别处按键
+        NSString *key = e.charactersIgnoringModifiers;
+        if (!key.length) key = [NSString stringWithFormat:@"%C", (unichar)e.keyCode];
+        BOOL cmd = (e.modifierFlags & NSEventModifierFlagCommand) != 0;
+        BOOL shift = (e.modifierFlags & NSEventModifierFlagShift) != 0;
+        BOOL ctrl = (e.modifierFlags & NSEventModifierFlagControl) != 0;
+        RLPShortcutAction a = RLPShortcutActionForKey(key, cmd, shift, ctrl, [self_ shortcutEditingText]);
+        if (a == RLPShortcutNone) return e;
+        [self_ handleShortcut:a];
+        return nil;   // 已消费
+    }];
+}
+
+- (void)handleShortcut:(RLPShortcutAction)a {
+    RLPPlaybackBarView *bar = self.mainWC.playbackBar;
+    switch (a) {
+        case RLPShortcutFocusSearch:
+            // web：聚焦搜索框并 select()。原生搜索框在专辑页，交给该页自己响应。
+            [[NSNotificationCenter defaultCenter] postNotificationName:@"RLPFocusSearchNotification" object:nil];
+            break;
+        case RLPShortcutPlayPause: [bar playPause]; break;
+        case RLPShortcutNext:      [bar nextTrack]; break;
+        case RLPShortcutPrev:      [bar previousTrack]; break;
+        case RLPShortcutStop:      [bar stopPlayback:nil]; break;
+        case RLPShortcutSeekForward5:
+        case RLPShortcutSeekBack5: {
+            double dur = bar.lastStatus.duration, pos = bar.lastStatus.position;
+            if (!(dur > 0)) break;   // 未播放/时长未知时不动作（web 的 seekRel 同样如此）
+            double target = pos + (a == RLPShortcutSeekForward5 ? 5.0 : -5.0);
+            if (target < 0) target = 0;
+            if (target > dur - 0.05) target = dur - 0.05;
+            [bar seekToSeconds:target];
+            break;
+        }
+        case RLPShortcutVolumeUpCoarse:
+        case RLPShortcutVolumeUpFine:
+        case RLPShortcutVolumeDownCoarse:
+        case RLPShortcutVolumeDownFine: {
+            double step = (a == RLPShortcutVolumeUpCoarse || a == RLPShortcutVolumeDownCoarse)
+                          ? RLPVolumeStepCoarseDb : RLPVolumeStepFineDb;
+            if (a == RLPShortcutVolumeDownCoarse || a == RLPShortcutVolumeDownFine) step = -step;
+            BOOL changed = NO;
+            double db = RLPVolumeNudgeDb(bar.lastStatus.volumeDb, step, &changed);
+            if (!changed) break;   // web 里 next == cur 时同样不发请求
+            [[RLPCoreClient shared] postJSON:[NSString stringWithFormat:@"/api/volume?db=%.1f", db]
+                                        body:nil completion:nil];
+            [bar updateVolumeUiForDb:db];
+            break;
+        }
+        case RLPShortcutLyrics:
+            [[NSNotificationCenter defaultCenter] postNotificationName:@"RLPOpenNowPlayingNotification" object:nil];
+            break;
+        case RLPShortcutEscapeBack:
+            [[NSNotificationCenter defaultCenter] postNotificationName:@"RLPCloseNowPlayingNotification" object:nil];
+            break;
+        case RLPShortcutNone: break;
+    }
 }
 
 @end

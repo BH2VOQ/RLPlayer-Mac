@@ -1,0 +1,414 @@
+Internal ctest changing into directory: /Users/august/Downloads/DQ/RLPlayer/build-mac
+Test project /Users/august/Downloads/DQ/RLPlayer/build-mac
+        Start   1: native_shortcuts
+  1/204 Test   #1: native_shortcuts .................   Passed    0.12 sec
+        Start   2: native_album_web
+  2/204 Test   #2: native_album_web .................   Passed    2.01 sec
+        Start   3: native_bar_web
+  3/204 Test   #3: native_bar_web ...................   Passed    0.17 sec
+        Start   4: native_pause_paths
+  4/204 Test   #4: native_pause_paths ...............   Passed    4.72 sec
+        Start   5: native_scroll_eq
+  5/204 Test   #5: native_scroll_eq .................   Passed    0.92 sec
+        Start   6: native_opra_cards
+  6/204 Test   #6: native_opra_cards ................   Passed    0.28 sec
+        Start   7: native_volume_knob
+  7/204 Test   #7: native_volume_knob ...............   Passed    0.07 sec
+        Start   8: native_rail_cards
+  8/204 Test   #8: native_rail_cards ................   Passed    0.14 sec
+        Start   9: native_rail_preview
+  9/204 Test   #9: native_rail_preview ..............   Passed    6.50 sec
+        Start  10: native_analysis_panel
+ 10/204 Test  #10: native_analysis_panel ............   Passed    0.24 sec
+        Start  11: native_npmeta_chips
+ 11/204 Test  #11: native_npmeta_chips ..............   Passed    2.72 sec
+        Start  12: native_queue_sort
+ 12/204 Test  #12: native_queue_sort ................   Passed    1.52 sec
+        Start  13: native_queue_rows
+ 13/204 Test  #13: native_queue_rows ................   Passed    0.36 sec
+        Start  14: native_empty_states
+ 14/204 Test  #14: native_empty_states ..............   Passed    0.43 sec
+        Start  15: native_rail_states
+ 15/204 Test  #15: native_rail_states ...............   Passed    0.16 sec
+        Start  16: native_cast_chip
+ 16/204 Test  #16: native_cast_chip .................   Passed    0.30 sec
+        Start  17: native_tracks_rows
+ 17/204 Test  #17: native_tracks_rows ...............   Passed    0.14 sec
+        Start  18: native_writeback_card
+ 18/204 Test  #18: native_writeback_card ............   Passed    1.45 sec
+        Start  19: native_settings_cards
+ 19/204 Test  #19: native_settings_cards ............   Passed   10.20 sec
+        Start  20: native_feedback_inline
+ 20/204 Test  #20: native_feedback_inline ...........   Passed    8.24 sec
+        Start  21: native_settings_granularity
+ 21/204 Test  #21: native_settings_granularity ......   Passed    3.18 sec
+        Start  22: native_update_result_lifetime
+ 22/204 Test  #22: native_update_result_lifetime ....   Passed    1.20 sec
+        Start  23: native_target_curve
+ 23/204 Test  #23: native_target_curve ..............   Passed    1.01 sec
+        Start  24: native_bar_core
+ 24/204 Test  #24: native_bar_core ..................   Passed    3.76 sec
+        Start  25: native_default_app
+ 25/204 Test  #25: native_default_app ...............   Passed    0.08 sec
+        Start  26: native_ui_selftest
+ 26/204 Test  #26: native_ui_selftest ...............   Passed    1.06 sec
+        Start  27: native_ui_smoke
+ 27/204 Test  #27: native_ui_smoke ..................   Passed    0.07 sec
+        Start  28: native_ui_functional
+ 28/204 Test  #28: native_ui_functional .............   Passed   74.56 sec
+        Start  29: native_ui_parity
+ 29/204 Test  #29: native_ui_parity .................   Passed    0.68 sec
+        Start  30: native_ui_theme
+ 30/204 Test  #30: native_ui_theme ..................   Passed    3.70 sec
+        Start  31: native_settings_keys
+ 31/204 Test  #31: native_settings_keys .............   Passed    3.38 sec
+        Start  32: native_lyrics
+ 32/204 Test  #32: native_lyrics ....................   Passed    0.01 sec
+        Start  33: analysis_row
+ 33/204 Test  #33: analysis_row .....................   Passed    3.25 sec
+        Start  34: native_nowplaying_web
+ 34/204 Test  #34: native_nowplaying_web ............   Passed    2.96 sec
+        Start  35: listening_room
+ 35/204 Test  #35: listening_room ...................   Passed    0.18 sec
+        Start  36: workbench
+ 36/204 Test  #36: workbench ........................   Passed    0.33 sec
+        Start  37: mode_settings_readback
+ 37/204 Test  #37: mode_settings_readback ...........   Passed    0.20 sec
+        Start  38: servers_view
+ 38/204 Test  #38: servers_view .....................   Passed    7.77 sec
+        Start  39: signal_chain
+ 39/204 Test  #39: signal_chain .....................   Passed    0.01 sec
+        Start  40: remove_dir
+ 40/204 Test  #40: remove_dir .......................   Passed    0.61 sec
+        Start  41: llm_endpoint
+ 41/204 Test  #41: llm_endpoint .....................   Passed   10.62 sec
+        Start  42: works_view
+ 42/204 Test  #42: works_view .......................   Passed    1.60 sec
+        Start  43: artist_grid
+ 43/204 Test  #43: artist_grid ......................   Passed    4.16 sec
+        Start  44: track_actions
+ 44/204 Test  #44: track_actions ....................   Passed    0.81 sec
+        Start  45: settings_persist
+ 45/204 Test  #45: settings_persist .................   Passed    0.65 sec
+        Start  46: diag_event
+ 46/204 Test  #46: diag_event .......................   Passed    0.09 sec
+        Start  47: diag_run_marker
+ 47/204 Test  #47: diag_run_marker ..................   Passed    0.64 sec
+        Start  48: diag_bundle
+ 48/204 Test  #48: diag_bundle ......................   Passed    0.24 sec
+        Start  49: diag_bundle_json
+ 49/204 Test  #49: diag_bundle_json .................   Passed    0.08 sec
+        Start  50: diag_http
+ 50/204 Test  #50: diag_http ........................   Passed    0.21 sec
+        Start  51: diag_questions
+ 51/204 Test  #51: diag_questions ...................   Passed    0.04 sec
+        Start  52: rtadiag
+ 52/204 Test  #52: rtadiag ..........................   Passed    0.04 sec
+        Start  53: float_decode
+ 53/204 Test  #53: float_decode .....................   Passed    0.52 sec
+        Start  54: quality_edges
+ 54/204 Test  #54: quality_edges ....................   Passed    0.17 sec
+        Start  55: health_store
+ 55/204 Test  #55: health_store .....................   Passed    0.31 sec
+        Start  56: lyrics_cache
+ 56/204 Test  #56: lyrics_cache .....................   Passed    0.07 sec
+        Start  57: ir_resample
+ 57/204 Test  #57: ir_resample ......................   Passed    0.02 sec
+        Start  58: source_manager
+ 58/204 Test  #58: source_manager ...................   Passed    0.13 sec
+        Start  59: subsonic
+ 59/204 Test  #59: subsonic .........................   Passed    0.06 sec
+        Start  60: coreaudio
+ 60/204 Test  #60: coreaudio ........................   Passed    0.17 sec
+        Start  61: mac_transport
+ 61/204 Test  #61: mac_transport ....................   Passed    0.68 sec
+        Start  62: mac_update
+ 62/204 Test  #62: mac_update .......................   Passed   55.73 sec
+        Start  63: embedded_api
+ 63/204 Test  #63: embedded_api .....................   Passed    0.36 sec
+        Start  64: airplay_policy
+ 64/204 Test  #64: airplay_policy ...................   Passed    0.07 sec
+        Start  65: dop_underrun_fill
+ 65/204 Test  #65: dop_underrun_fill ................   Passed    0.01 sec
+        Start  66: dop_padding
+ 66/204 Test  #66: dop_padding ......................   Passed    0.01 sec
+        Start  67: knowledge
+ 67/204 Test  #67: knowledge ........................   Passed    0.01 sec
+        Start  68: retrieval
+ 68/204 Test  #68: retrieval ........................   Passed    0.01 sec
+        Start  69: retrieval_speed
+ 69/204 Test  #69: retrieval_speed ..................   Passed    2.65 sec
+        Start  70: entity_classify
+ 70/204 Test  #70: entity_classify ..................   Passed    0.01 sec
+        Start  71: retrieval_v6
+ 71/204 Test  #71: retrieval_v6 .....................   Passed    0.02 sec
+        Start  72: track_identity
+ 72/204 Test  #72: track_identity ...................   Passed    0.01 sec
+        Start  73: knowledge_v6
+ 73/204 Test  #73: knowledge_v6 .....................   Passed    0.01 sec
+        Start  74: async_job
+ 74/204 Test  #74: async_job ........................   Passed    0.01 sec
+        Start  75: metacache
+ 75/204 Test  #75: metacache ........................   Passed    0.69 sec
+        Start  76: opra_eq
+ 76/204 Test  #76: opra_eq ..........................   Passed    0.03 sec
+        Start  77: decide_route
+ 77/204 Test  #77: decide_route .....................   Passed    0.00 sec
+        Start  78: bp_verdict
+ 78/204 Test  #78: bp_verdict .......................   Passed    0.01 sec
+        Start  79: phys_format
+ 79/204 Test  #79: phys_format ......................   Passed    0.01 sec
+        Start  80: three_layer_states
+ 80/204 Test  #80: three_layer_states ...............   Passed    0.31 sec
+        Start  81: host_msg
+ 81/204 Test  #81: host_msg .........................   Passed    0.01 sec
+        Start  82: mac_feedback
+ 82/204 Test  #82: mac_feedback .....................   Passed    0.01 sec
+        Start  83: update_check
+ 83/204 Test  #83: update_check .....................   Passed    0.02 sec
+        Start  84: update_channel
+ 84/204 Test  #84: update_channel ...................   Passed    0.00 sec
+        Start  85: http_cancel
+ 85/204 Test  #85: http_cancel ......................   Passed    1.27 sec
+        Start  86: bitdepth_negotiation
+ 86/204 Test  #86: bitdepth_negotiation .............   Passed    0.08 sec
+        Start  87: thread_join_safe
+ 87/204 Test  #87: thread_join_safe .................   Passed    0.34 sec
+        Start  88: output_bit_depth
+ 88/204 Test  #88: output_bit_depth .................   Passed    0.01 sec
+        Start  89: resampler
+ 89/204 Test  #89: resampler ........................   Passed   39.61 sec
+        Start  90: dither
+ 90/204 Test  #90: dither ...........................   Passed    0.35 sec
+        Start  91: modulator
+ 91/204 Test  #91: modulator ........................   Passed    1.80 sec
+        Start  92: modulator_families
+ 92/204 Test  #92: modulator_families ...............   Passed    9.22 sec
+        Start  93: filters
+ 93/204 Test  #93: filters ..........................   Passed   11.22 sec
+        Start  94: pipeline
+ 94/204 Test  #94: pipeline .........................   Passed    1.03 sec
+        Start  95: conv_matrix
+ 95/204 Test  #95: conv_matrix ......................   Passed    0.42 sec
+        Start  96: conv_ir_prep
+ 96/204 Test  #96: conv_ir_prep .....................   Passed    0.59 sec
+        Start  97: volume_eq
+ 97/204 Test  #97: volume_eq ........................   Passed    0.03 sec
+        Start  98: output_gain
+ 98/204 Test  #98: output_gain ......................   Passed    0.01 sec
+        Start  99: dop_gain_guard
+ 99/204 Test  #99: dop_gain_guard ...................   Passed    0.01 sec
+        Start 100: hw_volume
+100/204 Test #100: hw_volume ........................   Passed    0.06 sec
+        Start 101: hog_exclusive
+101/204 Test #101: hog_exclusive ....................   Passed    0.08 sec
+        Start 102: eq_reload
+102/204 Test #102: eq_reload ........................   Passed    2.06 sec
+        Start 103: direct_dsd_plan
+103/204 Test #103: direct_dsd_plan ..................   Passed    0.00 sec
+        Start 104: dsd_production
+104/204 Test #104: dsd_production ...................   Passed    7.38 sec
+        Start 105: peq
+105/204 Test #105: peq ..............................   Passed    0.05 sec
+        Start 106: chain
+106/204 Test #106: chain ............................   Passed    0.39 sec
+        Start 107: drift
+107/204 Test #107: drift ............................   Passed    0.01 sec
+        Start 108: clock_loop
+108/204 Test #108: clock_loop .......................   Passed    0.17 sec
+        Start 109: status
+109/204 Test #109: status ...........................   Passed    0.01 sec
+        Start 110: loudness
+110/204 Test #110: loudness .........................   Passed    0.01 sec
+        Start 111: md5
+111/204 Test #111: md5 ..............................   Passed    0.00 sec
+        Start 112: dop
+112/204 Test #112: dop ..............................   Passed    0.01 sec
+        Start 113: dop_stream
+113/204 Test #113: dop_stream .......................   Passed    0.01 sec
+        Start 114: parallel
+114/204 Test #114: parallel .........................   Passed    0.39 sec
+        Start 115: two_stage
+115/204 Test #115: two_stage ........................   Passed    0.25 sec
+        Start 116: isp
+116/204 Test #116: isp ..............................   Passed    0.01 sec
+        Start 117: stream_baseline
+117/204 Test #117: stream_baseline ..................   Passed    0.08 sec
+        Start 118: channel_gain
+118/204 Test #118: channel_gain .....................   Passed    0.01 sec
+        Start 119: gpu_bridge
+119/204 Test #119: gpu_bridge .......................   Passed    0.01 sec
+        Start 120: fullscale
+120/204 Test #120: fullscale ........................   Passed    0.12 sec
+        Start 121: playback_edges
+121/204 Test #121: playback_edges ...................   Passed    0.02 sec
+        Start 122: metaparse
+122/204 Test #122: metaparse ........................   Passed    0.01 sec
+        Start 123: metamatch
+123/204 Test #123: metamatch ........................   Passed    0.00 sec
+        Start 124: buffer_policy
+124/204 Test #124: buffer_policy ....................   Passed    0.01 sec
+        Start 125: ratepick
+125/204 Test #125: ratepick .........................   Passed    0.00 sec
+        Start 126: zipstore
+126/204 Test #126: zipstore .........................   Passed    0.01 sec
+        Start 127: year
+127/204 Test #127: year .............................   Passed    0.01 sec
+        Start 128: playback_gpu
+128/204 Test #128: playback_gpu .....................   Passed    0.00 sec
+        Start 129: hotfix_guard
+129/204 Test #129: hotfix_guard .....................   Passed    0.02 sec
+        Start 130: renderfail
+130/204 Test #130: renderfail .......................   Passed    0.05 sec
+        Start 131: decode_retry
+131/204 Test #131: decode_retry .....................   Passed    4.64 sec
+        Start 132: stream_decode
+132/204 Test #132: stream_decode ....................   Passed    3.86 sec
+        Start 133: dsd_path
+133/204 Test #133: dsd_path .........................   Passed    1.23 sec
+        Start 134: dsd_reader
+134/204 Test #134: dsd_reader .......................   Passed    0.01 sec
+        Start 135: alac_encoder
+135/204 Test #135: alac_encoder .....................   Passed    0.02 sec
+        Start 136: airplay_discovery
+136/204 Test #136: airplay_discovery ................   Passed    0.01 sec
+        Start 137: cast_audio
+137/204 Test #137: cast_audio .......................   Passed    0.26 sec
+        Start 138: cast_bit_exact
+138/204 Test #138: cast_bit_exact ...................   Passed    0.05 sec
+        Start 139: airplay_ui
+139/204 Test #139: airplay_ui .......................   Passed    0.16 sec
+        Start 140: cast_ui
+140/204 Test #140: cast_ui ..........................   Passed    0.15 sec
+        Start 141: cast_contract
+141/204 Test #141: cast_contract ....................   Passed    0.14 sec
+        Start 142: llm_ui
+142/204 Test #142: llm_ui ...........................   Passed    0.20 sec
+        Start 143: b10_logic
+143/204 Test #143: b10_logic ........................   Passed    0.15 sec
+        Start 144: retrieval_ui
+144/204 Test #144: retrieval_ui .....................   Passed    0.15 sec
+        Start 145: i18n_table_check
+145/204 Test #145: i18n_table_check .................   Passed    0.06 sec
+        Start 146: native_i18n_table_check
+146/204 Test #146: native_i18n_table_check ..........   Passed    0.02 sec
+        Start 147: native_i18n_coverage
+147/204 Test #147: native_i18n_coverage .............   Passed    0.05 sec
+        Start 148: raop_session
+148/204 Test #148: raop_session .....................   Passed    9.11 sec
+        Start 149: dsd_decimate_rate
+149/204 Test #149: dsd_decimate_rate ................   Passed    0.01 sec
+        Start 150: dsd_two_stage
+150/204 Test #150: dsd_two_stage ....................   Passed   26.03 sec
+        Start 151: entities
+151/204 Test #151: entities .........................   Passed    0.03 sec
+        Start 152: library
+152/204 Test #152: library ..........................   Passed    1.23 sec
+        Start 153: libroot_regress
+153/204 Test #153: libroot_regress ..................   Passed    0.49 sec
+        Start 154: cue
+154/204 Test #154: cue ..............................   Passed    0.01 sec
+        Start 155: tags_native
+155/204 Test #155: tags_native ......................   Passed    5.76 sec
+        Start 156: album_cover
+156/204 Test #156: album_cover ......................   Passed    0.49 sec
+        Start 157: library_fingerprint
+157/204 Test #157: library_fingerprint ..............   Passed    0.78 sec
+        Start 158: library_probe_retry
+158/204 Test #158: library_probe_retry ..............   Passed    1.74 sec
+        Start 159: local_cover_cache
+159/204 Test #159: local_cover_cache ................   Passed    6.61 sec
+        Start 160: http_response_state
+160/204 Test #160: http_response_state ..............   Passed    0.01 sec
+        Start 161: cover_fetch
+161/204 Test #161: cover_fetch ......................   Passed    0.03 sec
+        Start 162: cover_thumb
+162/204 Test #162: cover_thumb ......................   Passed    0.04 sec
+        Start 163: dynamics
+163/204 Test #163: dynamics .........................   Passed    0.51 sec
+        Start 164: fake_lossless
+164/204 Test #164: fake_lossless ....................   Passed    4.96 sec
+        Start 165: track_health
+165/204 Test #165: track_health .....................   Passed    0.99 sec
+        Start 166: room_correction
+166/204 Test #166: room_correction ..................   Passed    0.23 sec
+        Start 167: room_measurement
+167/204 Test #167: room_measurement .................   Passed    0.99 sec
+        Start 168: metastore
+168/204 Test #168: metastore ........................   Passed    0.01 sec
+        Start 169: enrich
+169/204 Test #169: enrich ...........................   Passed    0.01 sec
+        Start 170: quality
+170/204 Test #170: quality ..........................   Passed    0.45 sec
+        Start 171: quality_ai
+171/204 Test #171: quality_ai .......................   Passed    0.01 sec
+        Start 172: version_compare
+172/204 Test #172: version_compare ..................   Passed    0.89 sec
+        Start 173: replaygain
+173/204 Test #173: replaygain .......................   Passed    0.30 sec
+        Start 174: dsd_rate_convert
+174/204 Test #174: dsd_rate_convert .................   Passed    7.06 sec
+        Start 175: feedback_redact
+175/204 Test #175: feedback_redact ..................   Passed    0.00 sec
+        Start 176: feedback_api
+176/204 Test #176: feedback_api .....................   Passed    0.10 sec
+        Start 177: install_id
+177/204 Test #177: install_id .......................   Passed    0.01 sec
+        Start 178: shuffle_order
+178/204 Test #178: shuffle_order ....................   Passed    0.01 sec
+        Start 179: feedback_live
+179/204 Test #179: feedback_live ....................   Passed    0.01 sec
+        Start 180: room_transport_coreaudio
+180/204 Test #180: room_transport_coreaudio .........   Passed    0.06 sec
+        Start 181: render_loop_dry
+181/204 Test #181: render_loop_dry ..................   Passed    0.32 sec
+        Start 182: scanpool
+182/204 Test #182: scanpool .........................   Passed    0.43 sec
+        Start 183: media_duration
+183/204 Test #183: media_duration ...................   Passed    0.21 sec
+        Start 184: ffmpeg_matrix
+184/204 Test #184: ffmpeg_matrix ....................   Passed    1.60 sec
+        Start 185: writeback
+185/204 Test #185: writeback ........................   Passed    0.29 sec
+        Start 186: upnp_control
+186/204 Test #186: upnp_control .....................   Passed    0.03 sec
+        Start 187: upnp_discovery
+187/204 Test #187: upnp_discovery ...................   Passed    5.99 sec
+        Start 188: system_proxy
+188/204 Test #188: system_proxy .....................   Passed    0.02 sec
+        Start 189: cast_service
+189/204 Test #189: cast_service .....................   Passed   10.95 sec
+        Start 190: cast_status
+190/204 Test #190: cast_status ......................   Passed    0.90 sec
+        Start 191: loopback_capture
+191/204 Test #191: loopback_capture .................   Passed    0.08 sec
+        Start 192: gpu_metal
+192/204 Test #192: gpu_metal ........................   Passed    0.14 sec
+        Start 193: gpu_conv_streaming
+193/204 Test #193: gpu_conv_streaming ...............   Passed    0.03 sec
+        Start 194: gpu_precision
+194/204 Test #194: gpu_precision ....................   Passed    0.20 sec
+        Start 195: webui_hardening
+195/204 Test #195: webui_hardening ..................   Passed    0.52 sec
+        Start 196: net_405
+196/204 Test #196: net_405 ..........................   Passed    0.37 sec
+        Start 197: metallm
+197/204 Test #197: metallm ..........................   Passed    0.41 sec
+        Start 198: dsd_stream_decode
+198/204 Test #198: dsd_stream_decode ................   Passed    1.01 sec
+        Start 199: preset_profiles
+199/204 Test #199: preset_profiles ..................   Passed    0.02 sec
+        Start 200: cast_upsample_plan
+200/204 Test #200: cast_upsample_plan ...............   Passed    0.01 sec
+        Start 201: llm_models
+201/204 Test #201: llm_models .......................   Passed    0.01 sec
+        Start 202: provider_order
+202/204 Test #202: provider_order ...................   Passed    0.04 sec
+        Start 203: search_endpoints
+203/204 Test #203: search_endpoints .................   Passed    0.02 sec
+        Start 204: ai_fill
+204/204 Test #204: ai_fill ..........................   Passed    0.01 sec
+
+100% tests passed, 0 tests failed out of 204
+
+Total Test time (real) = 411.01 sec
