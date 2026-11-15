@@ -947,6 +947,7 @@ if(APPLE)
   # 一行几何先断言"量到了"再断言"同一行"，避免未布局时 frame 全 0 假红。
   add_executable(test_analysis_row tests/test_analysis_row.mm
     tools/native_ui/RLPAnalysisSummary.mm
+    tools/native_ui/RLPWaveformView.mm
     tools/native_ui/RLPNowPlayingViewController.mm
     tools/native_ui/RLPVolumeKnobView.mm
     tools/native_ui/RLPPageViewController.mm
@@ -958,6 +959,7 @@ if(APPLE)
     tools/native_ui/RLPNativeI18n.mm)
   set_source_files_properties(tests/test_analysis_row.mm
     tools/native_ui/RLPAnalysisSummary.mm
+    tools/native_ui/RLPWaveformView.mm
     tools/native_ui/RLPNowPlayingViewController.mm
     tools/native_ui/RLPVolumeKnobView.mm
     tools/native_ui/RLPPageViewController.mm
@@ -981,6 +983,27 @@ if(APPLE)
   target_include_directories(test_native_nowplaying_web PRIVATE src tools tools/native_ui)
   target_link_libraries(test_native_nowplaying_web PRIVATE rlapp_core "-framework AppKit" "-framework CoreImage" "-framework QuartzCore")
   add_test(NAME native_nowplaying_web COMMAND test_native_nowplaying_web)
+
+  # U2 包3：正在播放页原生波形视图（np.waveform）的判据。
+  # 先红：旧实现视图树没有 np.waveform、/api/waveform 0 次请求；
+  # 后绿：注入合成 peaks 后判 view/长度/播放头/双色/点击 seek/拖选高亮。
+  add_executable(test_native_waveform tests/test_native_waveform.mm ${_np_web_sources})
+  target_compile_options(test_native_waveform PRIVATE -fobjc-arc)
+  target_include_directories(test_native_waveform PRIVATE src tools tools/native_ui)
+  target_link_libraries(test_native_waveform PRIVATE rlapp_core "-framework AppKit" "-framework CoreImage" "-framework QuartzCore")
+  add_test(NAME native_waveform COMMAND test_native_waveform)
+
+  # U2 包3：RLPNowPlayingViewController 引用 RLPWaveformView；凡编译该 VC 的目标都要带上这个 TU，
+  # 否则链接期 _OBJC_CLASS_$_RLPWaveformView 未定义。test_analysis_row 的源列表已直接包含它，
+  # test_native_nowplaying_web / test_native_waveform 由该列表派生，这里只补其余目标。
+  foreach(_wf_target IN ITEMS rlplayer_native test_native_single_scroll test_native_pause_paths
+      test_native_rail_cards test_native_rail_preview test_native_analysis_panel
+      test_native_npmeta_chips test_native_pages_p812 test_native_np_refresh
+      test_native_topbar_search test_native_rail_states test_native_cast_chip)
+    if(TARGET ${_wf_target})
+      target_sources(${_wf_target} PRIVATE tools/native_ui/RLPWaveformView.mm)
+    endif()
+  endforeach()
 
   set_tests_properties(analysis_row PROPERTIES TIMEOUT 120)
 
