@@ -275,3 +275,5 @@ DeepSeek 为默认检索端点。	DeepSeek is the default search endpoint.	检�
 （未命名版本）	(untitled version)	古典作品页
 首歌曲	songs	专辑页发布信息（图一：N 首歌曲，X 分钟）
 的其他作品	's Other Works	专辑页「其他作品」横向区标题（图一）
+搜索：%@	Search: %@	曲目页搜索框标签
+未找到与 “%@” 相关的曲目	No tracks match “%@”	曲目页搜索空态
