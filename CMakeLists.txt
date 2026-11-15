@@ -620,6 +620,7 @@ if(APPLE)
     tools/native_ui/RLPServersView.mm tools/native_ui/RLPMetaSourcesView.mm
     tools/native_ui/RLPLibStatsView.mm tools/native_ui/RLPRemoveDir.mm
     tools/native_ui/RLPEqualizerView.mm tools/native_ui/RLPEQFaderView.mm
+    tools/native_ui/RLPEQFaderInspector.mm tools/native_ui/RLPVolumeSliderView.mm
     tools/native_ui/RLPEQGeometry.mm tools/native_ui/RLPTargetCurve.mm
     tools/native_ui/RLPInputView.mm tools/native_ui/RLPCastView.mm
     tools/native_ui/RLPCalibrationView.mm
