@@ -1,0 +1,5 @@
+自动（prefer）	Auto (prefer)	采样率族策略下拉（U5 / v3.3.11）
+严格同族（strict）	Strict same family (strict)	采样率族策略下拉（U5 / v3.3.11）
+兼容转换（compatible）	Compatible conversion (compatible)	采样率族策略下拉（U5 / v3.3.11）
+采样率族策略	Sample-rate family policy	原生设置页输出采样率行下（U5 / v3.3.11）
+自动 = 优先源采样率同族（拒绝跨族）；严格 = 禁止跨族；兼容 = 允许跨族转换（非 bit-perfect）	Auto = prefer the source sample-rate family (cross-family blocked); Strict = cross-family blocked; Compatible = allow cross-family conversion (not bit-perfect)	采样率族策略行说明（U5 / v3.3.11）

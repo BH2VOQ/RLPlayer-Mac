@@ -82,6 +82,8 @@ int main() {
             { "dsd",          "128",               "DSD 目标率" },
             { "buffer",       "100",               "输出缓冲" },
             { "bits",         "24",                "输出位深" },
+            // U5（v3.3.11）：采样率族策略 —— 原生设置页 sp_ratefamily 下拉写的就是这个键。
+            { "rateFamilyPolicy", "strict",          "采样率族策略" },
         };
 
         for (const KeyCase &c : cases) {

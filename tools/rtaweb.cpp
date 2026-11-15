@@ -60,6 +60,7 @@ using rta::net::SubEntry;
 #include "audio/render_loop.h"     // 渲染主循环(含 RENDERFAIL 遥测;测试与 rtaweb 共用同一份)
 class CoreAudioSink;   // 本文件后部定义；render_loop 的 mac 遥测分支要用（前向声明）
 #include "audio/rate_pick.h"       // 输出采样率选择的纯逻辑(可离线单测;2026-10-22 第二首按 44100 开流事故)
+#include "audio/rate_family_policy.h"  // U5：PCM 采样率族策略（prefer|strict|compatible，v3.3.11 移植）
 #include "platform/path.h"
 #include "platform/audio_out_factory.h"   // macOS：CoreAudioOutput（PLATFORM.md §13.9/§13.10）
 #include "platform/macos/audio_in_coreaudio.h"   // 输入采集（AUHAL input；§13.13）
@@ -323,6 +324,10 @@ struct PlayParams {
     std::string filterNx;    // Nx（>=88.2k）用；空则沿用 filter
     std::string shaper = "none";
     std::string rate;        // "src" | "max" | 数字
+    // U5（Windows v3.3.11 移植）：PCM 采样率族策略（prefer | strict | compatible）。
+    // ★ 本包默认 compatible（上游默认 prefer）：升级后「44.1k 源 + 只支持 48k 族的设备」
+    //   仍能出声，不制造无声回归；要严格同族/优先同族由设置页显式切换。
+    std::string rateFamilyPolicy = "compatible";
     double volume = 0.0;
     bool   gpu = false;
     bool   loudness = false;
@@ -446,6 +451,10 @@ struct PlayerState {
     // 在信号链 JSON 生成处一并写入，/api/status 直接带出，供底栏常驻徽标使用。
     std::string bpState;
     std::string bpWhy;
+    // U5（v3.3.11）：本次播放实际生效的 PCM 采样率族策略与跨族结论。
+    // 由 play_one_impl 起播时写入；/api/status 与信号链 JSON 带出（空 = 投放/未确定）。
+    std::string rateFamilyPolicy;      // prefer | strict | compatible
+    bool        rateCrossFamily = false;
     // ---- 输出格式自证（2026-10-26，debug/20261026-02 F-5）----
     // 为什么必须由后端给：底栏只拿到 outRate，而 **DoP 的 outRate 是载波率**
     // （DSD128 / 48k 族 = 6144000/16 = 384000），和"PCM 升频到 384k"的数字一模一样。
@@ -579,6 +588,12 @@ static void reset_out_format_state(const char* mode) {
     set_out_format_state(mode, 0, 0, 0, std::string(), 0, std::string());
     g_ps.hogRequested.store(false);
     g_ps.hogAcquired.store(false);
+    // U5：每曲复位族策略结论，避免上一曲的「跨族」标注被当成本曲事实（同 outMode 的教训）。
+    {
+        std::lock_guard<std::mutex> lk(g_ps.mtx);
+        g_ps.rateFamilyPolicy.clear();
+        g_ps.rateCrossFamily = false;
+    }
 }
 
 // 20 段参数均衡 PEQ（261024-02 #6）：全局单例。播放线程处理音频，HTTP 线程改参数（热更新）。
@@ -1228,6 +1243,8 @@ static PlayParams parseForm(const std::string& body, std::set<std::string>* seen
         else if (k == "filterNx") p.filterNx = v;
         else if (k == "shaper")   p.shaper = v;
         else if (k == "rate")     p.rate = v;
+        // U5：PCM 采样率族策略（设置页显式键；/api/settings 白名单同名；非法值由读取侧回落 Prefer）
+        else if (k == "rateFamilyPolicy") p.rateFamilyPolicy = v;
         else if (k == "volume")   p.volume = atof(v.c_str());
         else if (k == "hogexcl")  p.hogExclusive = (v == "1" || v == "true");
         else if (k == "gpu")      p.gpu = (v == "1");
@@ -1317,6 +1334,11 @@ static PlayParams apply_conf_defaults_for_play(const PlayParams& in, const std::
 
     if (seen.find("rate") == seen.end() && hasConf("rate")) {
         p.rate = getConf("rate");
+    }
+    // U5：采样率族策略的 conf 兜底（落盘值非法时由 parse_rate_family_policy 回落 Prefer，
+    // 与 Windows 上游「invalid persisted input never enables cross-family fallback」一致）。
+    if (seen.find("rateFamilyPolicy") == seen.end() && hasConf("rateFamilyPolicy")) {
+        p.rateFamilyPolicy = getConf("rateFamilyPolicy");
     }
     if (seen.find("filter") == seen.end() && hasConf("filter")) {
         p.filter = getConf("filter");
@@ -3581,6 +3603,23 @@ static bool play_one_impl(const std::string& file, const PlayParams& pIn, rta::a
                 if (d.id == di && d.nominalRate) { sysRate = d.nominalRate; break; }
             if (!sysRate) play_log("SYSRATE_EMPTY 设备标称率不可读");
         }
+        // 用户是否选了「自动采样率」（max / 跟随源 / 未指定）。
+        // ★ 判据必须用 p.rate（用户原始输入），不能用上面的 reqRate —— 非 WASAPI 后端时
+        //   reqRate 被归一成 "src"，那是实现细节，不是用户意图。
+        // 用途：能力不命中时的行为要分档 ——
+        //   自动档的职责是「让声音出来」⟹ 挑一个设备能用的率继续播（否则 44.1k 源在只支持
+        //     48k 族的端点上永远没声音，而这类端点很常见）；
+        //   明确选择的职责是「如实告诉用户做不到」⟹ 保持硬失败，绝不悄悄改成别的率。
+        //   保真播放器不能替用户改主意：错要错得看得见（用户选了 768k 就该知道设备做不了）。
+        // follow 也属于「自动档」：它的职责是"让声音出来"，所以设备做不到系统率时
+        // 允许按族策略挑一个能用的（U5 起同族优先；跨族只在 compatible 下允许）。
+        const bool rateAuto = (p.rate == "max" || p.rate == "src" || p.rate.empty() ||
+                               p.rate == "follow");
+        // U5（Windows v3.3.11 移植）：PCM 采样率族策略。非法 conf 值由 parse 回落 Prefer
+        //（不会悄悄开启跨族）；默认档位在本包是 compatible（见 PlayParams 的注释）。
+        const rta::audio::RateFamilyPolicy ratePolicy =
+            rta::audio::parse_rate_family_policy(p.rateFamilyPolicy);
+        bool rateCrossFamily = false;   // 本次是否发生跨族 PCM 转换（信号链/status 带出）
         const rta::audio::RatePick pick =
             rta::audio::pick_output_rate(reqRate, in.rate, probeRates, sysRate);
         cfg.outRate = pick.rate;
@@ -3600,18 +3639,55 @@ static bool play_one_impl(const std::string& file, const PlayParams& pIn, rta::a
                 appendNote(pick.note);        // 例如采样率参数无法解析
             }
         }
-        // 用户是否选了「自动采样率」（max / 跟随源 / 未指定）。
-        // ★ 判据必须用 p.rate（用户原始输入），不能用上面的 reqRate —— 非 WASAPI 后端时
-        //   reqRate 被归一成 "src"，那是实现细节，不是用户意图。
-        // 用途：能力不命中时的行为要分档 ——
-        //   自动档的职责是「让声音出来」⟹ 挑一个设备能用的率继续播（否则 44.1k 源在只支持
-        //     48k 族的端点上永远没声音，而这类端点很常见）；
-        //   明确选择的职责是「如实告诉用户做不到」⟹ 保持硬失败，绝不悄悄改成别的率。
-        //   保真播放器不能替用户改主意：错要错得看得见（用户选了 768k 就该知道设备做不了）。
-        // follow 也属于「自动档」：它的职责是"让声音出来"，所以设备做不到系统率时
-        // 允许按 pick_supported_rate 挑一个能用的（与 max 同族逻辑）。
-        const bool rateAuto = (p.rate == "max" || p.rate == "src" || p.rate.empty() ||
-                               p.rate == "follow");
+        // ---- U5：pick 结果的 PCM 族校验（DSD/DoP 不进来）----
+        // 为什么在 pick 之后：pick 只负责「挑哪个率」，族策略负责「这个率允不允许」。
+        // DoP 的 cfg.outRate 随后会被载波率覆盖；DirectSDM 直通在此之前已经 return。
+        // 有 max 探测表时按能力表择优（同族优先，跨族由策略决定）；其余路径（src/follow/
+        // 明确数值/共享/null）只校验【实际的源→输出时钟】—— 这些路径没有能力表可查。
+        if (!(p.dsd >= 64) && in.rate > 0 && pick.decided && pick.rate > 0) {
+            rta::audio::RateFamilyDecision fam;
+            if (reqRate == "max" && !probeRates.empty()) {
+                fam = rta::audio::decide_pcm_rate(in.rate, pick.rate, probeRates, rateAuto, ratePolicy);
+            } else {
+                fam = rta::audio::validate_pcm_rate(in.rate, pick.rate, rateAuto, ratePolicy);
+            }
+            if (!fam.ok) {
+                std::string why = std::string("采样率族策略（") +
+                    rta::audio::rate_family_policy_name(ratePolicy) + "）不允许 PCM " +
+                    std::to_string(in.rate) + " Hz → " + std::to_string(pick.rate) +
+                    " Hz：" + fam.reason;
+                play_log(std::string(fam.logTag) + " " + why + " device=" +
+                         (pEff.device.empty() ? std::string("默认端点") : pEff.device));
+                if (ui_lang_en())
+                    why += " (sample-rate family policy blocked the cross-family PCM conversion;"
+                           " switch it to compatible to allow it)";
+                std::lock_guard<std::mutex> lk(ps.mtx);
+                ps.error = why;
+                return false;
+            }
+            if (fam.rate > 0 && fam.rate != pick.rate) {
+                const std::string why2 = std::string("按采样率族策略（") +
+                    rta::audio::rate_family_policy_name(ratePolicy) + "）由 " +
+                    std::to_string(pick.rate) + " Hz 改为同族 " + std::to_string(fam.rate) +
+                    " Hz（源 " + std::to_string(in.rate) + " Hz）";
+                appendNote(why2);
+                play_log("RATEFAMILY " + why2);
+                cfg.outRate = fam.rate;
+            }
+            rateCrossFamily = fam.crossFamily;
+            if (rateCrossFamily) {
+                // 跨族不改率也必须让用户看见（非 bit-perfect 是事实，不能静默）。
+                appendNote(fam.reason);
+                play_log(std::string("RATE_CROSS_FAMILY ") + fam.reason +
+                         " in=" + std::to_string(in.rate) + " out=" + std::to_string(fam.rate) +
+                         " policy=" + rta::audio::rate_family_policy_name(ratePolicy));
+            }
+        }
+        {
+            std::lock_guard<std::mutex> lk(ps.mtx);
+            ps.rateFamilyPolicy = rta::audio::rate_family_policy_name(ratePolicy);
+            ps.rateCrossFamily = rateCrossFamily;
+        }
 
         // 自动抖动：按输出位深选型（16 bit 用 NS9，24 bit 用 LNS15，更高位深不整形）
         if (p.shaper == "auto") {
@@ -3772,6 +3848,9 @@ static bool play_one_impl(const std::string& file, const PlayParams& pIn, rta::a
                 pushBit(16);                                               // ③ 16
                 pushBit(32);                                               // ④ 32
                 int effBits = 0;
+                // U5：自动档最近一次族策略拒绝原因（硬失败文案要说明是策略挡的，不是设备做不到）。
+                std::string autoRateWhy;
+                std::string autoRateTag;
                 // 位深循环里每个候选位深的支持列表都留一份：目标率不命中时，自适应换率
                 // 要在这三档位深里挑，不能只试最后一个（否则可能白丢一个本来能用的位深）
                 std::vector<std::vector<uint32_t>> ratesByBits((size_t)std::max(nBits, 1));
@@ -3801,11 +3880,18 @@ static bool play_one_impl(const std::string& file, const PlayParams& pIn, rta::a
                         const std::vector<uint32_t>& rates = (i < (int)ratesByBits.size())
                             ? ratesByBits[(size_t)i] : ratesByBits[0];
                         uint32_t outR = wantDevRate;
-                        const auto dec = rta::audio::decide_capability_failure(rateAuto, wantDevRate, rates, outR, in.rate);
+                        // U5（v3.3.11）：policy 版决策 —— 自动档跨族是否允许由族策略决定；
+                        // 同族档位优先（即使低于目标率也不跨族；只有 compatible 允许跨族）。
+                        const auto dec = rta::audio::decide_capability_failure(
+                            rateAuto, wantDevRate, rates, outR, in.rate, ratePolicy);
                         if (dec.action == rta::audio::CapAction::FallbackRate && outR > 0) {
                             effBitsFB = bitsCand[i];
                             pickedRate = outR;
                             pickedWhy = dec.userMessage;
+                        } else if (dec.action == rta::audio::CapAction::HardFail) {
+                            // 自动档被族策略拒绝（不是「设备不支持」）：原因带进下面的硬失败文案。
+                            autoRateWhy = dec.userMessage;
+                            autoRateTag = dec.logTag;
                         }
                     }
                     if (effBitsFB != 0 && pickedRate != 0) {
@@ -3851,6 +3937,13 @@ static bool play_one_impl(const std::string& file, const PlayParams& pIn, rta::a
                         // 明确选择档：绝不自动改率，但必须让用户清楚「做不到的是你选的那个率」
                         const auto dec = rta::audio::decide_capability_failure(false, wantDevRate, {});
                         es << "。" << dec.userMessage;
+                        // U5：strict / 族未知时，跨族明确选择本身也不允许 —— 把策略原因带进同一句报错。
+                        const auto fam = rta::audio::validate_pcm_rate(in.rate, wantDevRate, false, ratePolicy);
+                        if (!fam.ok) es << "。" << fam.reason;
+                    } else if (!autoRateWhy.empty()) {
+                        // U5：自动档也可能是被族策略挡住的（设备支持列表里根本没有源族档位），
+                        // 不能只报「设备不支持这个率」——用户需要知道是策略挡的、以及怎么放行。
+                        es << "。" << autoRateWhy;
                     }
                     // ---- 英文界面：整句按语言二选一，**不做逐词替换** ----
                     // 数值全部沿用上面同一批变量（请求率 / 请求位深 / 端点 id / 设备支持率表 /
@@ -3873,6 +3966,18 @@ static bool play_one_impl(const std::string& file, const PlayParams& pIn, rta::a
                             en << ". You explicitly selected this sample rate, so RLPlayer reports the"
                                   " failure instead of switching rates on its own (change it in Settings,"
                                   " or set the sample rate to Max so a supported rate is picked for you).";
+                            // U5：strict 下跨族明确选择连尝试都不允许（族策略原因必须可见）。
+                            const auto fam = rta::audio::validate_pcm_rate(
+                                in.rate, wantDevRate, false, ratePolicy);
+                            if (!fam.ok)
+                                en << " The strict sample-rate family policy blocks cross-family PCM conversion"
+                                      " (source " << in.rate << " Hz, requested " << wantDevRate << " Hz).";
+                        } else if (!autoRateWhy.empty()) {
+                            // U5：自动档被族策略拒绝（与 es 里的中文原因同一事实）。
+                            en << (autoRateTag == "RATE_FAMILY_BLOCKED"
+                                ? ". The sample-rate family policy blocked a cross-family PCM conversion;"
+                                  " switch the policy to Compatible to allow cross-family resampling."
+                                : ". The sample-rate policy check rejected this conversion.");
                         }
                         msgOut = en.str();
                     }
@@ -4292,6 +4397,10 @@ static bool play_one_impl(const std::string& file, const PlayParams& pIn, rta::a
                 // 会亮出假的绿色 BIT-PERFECT。现在统一调 bp_verdict()：判据改一处，三处同步。
                 << ",\"bitPerfect\":\"" << jesc(bpv.state) << "\""
                 << ",\"bitPerfectWhy\":\"" << jesc(bpv.why) << "\""
+                // U5（v3.3.11）：本次 PCM 采样率族策略与跨族结论；DoP/DirectSDM 也带策略名，
+                // 但 rateCrossFamily 恒 false（DSD 位流/载波率不参与 PCM 族判定）。
+                << ",\"rateFamilyPolicy\":\"" << jesc(ps.rateFamilyPolicy) << "\""
+                << ",\"rateCrossFamily\":" << (ps.rateCrossFamily ? "true" : "false")
                 << ",\"decodeMs\":" << note.totalMs
                 << ",\"ffmpegMs\":" << note.ffmpegMs
                 << ",\"wavReadMs\":" << note.wavReadMs
@@ -11502,6 +11611,22 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
                     merged[kk] = line.substr(eqp + 1);
                 }
             }
+            // U5：rateFamilyPolicy 值域 prefer|strict|compatible。非法值**直接拒绝**：
+            // 不静默回落（回落会把用户的选择悄悄改成别的语义），也不写 conf。
+            // 放在合并/写盘之前 —— 拒绝必须整请求生效，不能留下半写状态。
+            {
+                std::istringstream vp(rq.body);
+                std::string vt;
+                while (std::getline(vp, vt, (char)38)) {
+                    const size_t e = vt.find((char)61);
+                    if (e == std::string::npos) continue;
+                    const std::string vk = urlDecode(vt.substr(0, e));
+                    if (vk != "rateFamilyPolicy") continue;
+                    const std::string vv = urlDecode(vt.substr(e + 1));
+                    if (!rta::audio::valid_rate_family_policy(vv))
+                        return "{\"ok\":false,\"error\":\"rateFamilyPolicy 只接受 prefer / strict / compatible\"}";
+                }
+            }
             std::istringstream is(rq.body);
             std::string tok;
             while (std::getline(is, tok, (char)38)) {
@@ -11511,7 +11636,7 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
                 const std::string v = urlDecode(tok.substr(e + 1));
                 if (k.empty() || v.size() > 512) continue;
                 bool okKey = false;
-                for (const char* allow : { "rate", "filter", "filterNx", "shaper", "dsd", "modorder",
+                for (const char* allow : { "rate", "rateFamilyPolicy", "filter", "filterNx", "shaper", "dsd", "modorder",
                                            // 2026-11-11（1.1.7.1）：严格独占（Hog Mode）开关。
                                            // 旧白名单漏了这一个键 ⟹ POST /api/settings hogexcl=1 被
                                            // **静默丢弃**（实测：/api/settings 回 ok:true merged:true
@@ -11578,6 +11703,13 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
                     const PlayParams cur = params_snapshot();
                     const bool g = (clean == "1");
                     if (cur.convGpu != g) { irgpuChanged = true; irgpuNew = g; }
+                } else if (k == "rateFamilyPolicy") {
+                    // 与 eq/ir 同一个理由：设置页写的键必须对「下一首 / 跳曲」立即生效，
+                    // 不能只留在 conf 里等下一次 /api/play。这里只同步内存参数，不重启管线
+                    // （族策略只影响起播选率，不改变正在跑的 DSP 链）。
+                    PlayParams gp = params_snapshot();
+                    gp.rateFamilyPolicy = clean;
+                    params_store(gp);
                 }
                 if (merged.find(k) == merged.end()) order.push_back(k);
                 merged[k] = clean;
@@ -11676,6 +11808,9 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
         injectKv("stream_threshold_mb", "200");
         injectKv("isp_prescan_sec", "20");
         injectKv("rg.mode", "off");
+        // U5：采样率族策略缺省值（与 PlayParams 默认一致 = compatible）。
+        // 没写进 conf 也要让设置页拿到当前档位，否则新装用户的设置页永远显示空档。
+        injectKv("rateFamilyPolicy", "compatible");
         injectKv("rg.preventClipping", "1");
         injectKv("rg.preamp", "0.0");
         for (const rta::meta::ProviderDesc& pd : rta::meta::provider_registry()) {
@@ -12623,6 +12758,9 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
           // 2026-11-10：播放中三层被改回去 ⟹ 当场降级（覆盖开流时的静态结论）
           << ",\"bitPerfect\":\"" << jesc(castMode ? "no" : (liveLayerWhy.empty() ? ps.bpState : std::string("no"))) << "\""
           << ",\"bitPerfectWhy\":\"" << jesc(castMode ? (isAirPlayCast ? "AirPlay 投放：44100 Hz / 16 bit ALAC，端到端逐位未获验证" : "UPnP 投放：源文件按原采样率供源，本机不做升频；接收端是否重采样由对方决定（本机 DSP 未介入）") : (liveLayerWhy.empty() ? ps.bpWhy : ("播放中设备格式变化：" + liveLayerWhy))) << "\""
+          // U5（v3.3.11）：本次 PCM 采样率族策略与是否跨族（投放模式无本地 PCM 决策 ⟹ 空/false）。
+          << ",\"rateFamilyPolicy\":\"" << jesc(castMode ? std::string() : ps.rateFamilyPolicy) << "\""
+          << ",\"rateCrossFamily\":" << ((!castMode && ps.rateCrossFamily) ? "true" : "false")
           // ---- 输出格式自证（2026-10-26 F-5，mac 口径）----
           // 为什么底栏只拿到 outRate 会误判：DoP 的 outRate 是**载波率**
           // （DSD128/48k 族 = 6144000/16 = 384000），和"PCM 升频到 384k"数字完全一样。
