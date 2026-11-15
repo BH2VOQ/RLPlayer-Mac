@@ -42,3 +42,38 @@
 - 判定：安全（不会 NaN / 不会爆音），但用户意图被静默改写。
 - 要做成上游那样需要跨后端契约改动（解析期记 `volumeInvalid` → 上抛到 `/api/settings` → UI 展示），
   不在小范围移植内，故挂账。
+
+---
+
+## 2026-11-15 收口记录（1.1.7.75 → 1.1.7.81）
+
+本日对照 v3.3.11 又收口了 6 条，记在这里避免上表把它们当「未修」重复排查。
+
+### 已关闭
+
+| 原条目 | 关闭版本 | 做了什么 | 判据 / 证据 |
+|---|---|---|---|
+| #4 剩余 1pt（web 22 / native 21） | **1.1.7.75 + 1.1.7.78** | ①滚动条占位改为真溢出才占 11pt（旧码无条件占位，短列表也空一条槽）；②rail 内容内缩按 box-sizing:border-box 取 **11**（= padding 10 + border 1） | np web 228→233 条、rail_cards 52 条；证据 `native-chipwrap-reserve-20261115.md`、`native-rail-borderbox-20261115.md` |
+| #9 设置页 .chip hover | **1.1.7.79** | 新增 `RLPChipHoverButton`（NSTrackingArea → bezel 取 hov、文字取 txt，退出复原） | `test_native_opra_cards` C3b–C3e；证据 `native-chip-hover-20261115.md` |
+| #12 `sp_opra_copychip` 悬停 | **1.1.7.79** | 同上（该芯片此前只有点击与剪贴板行为，无悬停态） | 同上 |
+| （表外）`/api/meta` 缺 `coverSource` ⟹「自动」封面按钮常显 | **1.1.7.76** | 后端新增 `cover_manual_active_for()`，`/api/meta` 输出 manual/embed/none；前端按 coverSource == manual 显隐 | `test_embedded_api` K7/K8 + np web C4b–C4d；证据 `native-cover-source-20261115.md` |
+| （表外）rail 收起键写死 8pt、与行顶齐平 | **1.1.7.80** | 两轴改走 `kRailHeadPadX/Top`：右 11、顶 12（行内居中） | np web 两条新判据（右 11±1 / 顶 12±1）；证据 `native-railhide-margin-20261115.md` |
+| （表外）分析面板收起键顶部少算边框 | **1.1.7.81** | 顶 7 → **8**（top:7 在 padding box 内，加 border 1） | np web 两条新判据（右 9±1 / 顶 8±1）；证据 `native-anlhide-margin-20261115.md` |
+
+### 仍未关闭（本日盘点后的真实剩余项）
+
+| # | 项 | 现状 | 为什么没做 |
+|---|---|---|---|
+| A | 专辑卡播放角标 1pt（web right:7;bottom:7，原生 -8） | 待修 | 差 1pt 已定位，但**没有现成夹具**能红→绿地钉住（`test_native_album_web` 仅 80 行、无角标判据）；按纪律不盲改，留作下一包自带夹具 |
+| B | .chip 悬停的边框色 border-color:var(--acc) | 只做了底色+文字 | 系统 NSButton bezel 无法单独改边框色（自绘胶囊等于重新设计控件） |
+| C | .chip 的 transition:.15s | 瞬时切换 | bezelColor 不可动画；要做需自绘层 |
+| D | #npDrawer 模糊半径 | NSVisualEffectView 材质近似 | AppKit 无 backdrop-filter 半径控制 |
+| E | 惯性阻尼 0.90 | 近似而非系统动量曲线 | 自绘滚动容器，无系统动量可对齐 |
+| F | 非法保存音量静默 clamp | 不提示 | 上游是拒绝播放并提示；原生在启动期读取，缺一处可见提示 |
+| G | npWaveform 真波形 | 未做 | 跨 src/analysis + 缓存 worker + 端点 + AppKit 绘制的新子系统，需独立排期（`native-seek-guard-20261115.md` §5） |
+| H | #13 双模式薄表现层 | 只读评估已完成，不建议现在做 | 前提虽满足但收益面未定义，且会冲撞 246 项 audit / 203 项 ctest 的可见性断言（`native-dualmode-assessment-20261115.md`） |
+
+### 判据索引（当日基线）
+
+- 播放页 `test_native_nowplaying_web`：**235 条**；底栏 `test_native_bar_web`：**350 条**；右栏 `test_native_rail_cards`：**52 条**；OPRA `test_native_opra_cards`：**25 条**。
+- 门禁基线：串行 `ctest` **203/203**、`rlplayer_native --audit` **246/0**、parity `missing=0`、behavior `actionable=0`、i18n 覆盖 0 缺失。
