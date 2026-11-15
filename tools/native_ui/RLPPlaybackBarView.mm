@@ -11,6 +11,7 @@
 //   * 没开始轮询（核心未启动/selftest）时不发任何请求。
 #import "RLPPlaybackBarView.h"
 #import "RLPVolumeKnobView.h"
+#import "RLPVolumeSliderView.h"
 #import "RLPCoreClient.h"
 #import "RLPModels.h"
 #import "RLPTheme.h"
@@ -248,7 +249,7 @@ static void RLPSetBadgeText(NSTextField *label, NSString *text, NSColor *color, 
 @property (nonatomic, strong) RLPCommitSlider *progress;
 @property (nonatomic, strong) RLPCommitSlider *volume;
 /// v3.3.11 底栏 #volKnob：音量旋钮（web 的 #vol range 已是 sr-only）。
-@property (nonatomic, strong) RLPVolumeKnobView *volKnob;
+@property (nonatomic, strong) RLPVolumeSliderView *volKnob;
 /// v3.3.11 底栏 `barVolInput`：精确 dB 输入（-120~+20，Enter 确认）。
 @property (nonatomic, strong) NSTextField *volDbField;
 /// v3.3.11 底栏 volFloor：静音/恢复（叠在旋钮圆盖中心，与 web 同位置）。
@@ -480,6 +481,7 @@ static void RLPSetBadgeText(NSTextField *label, NSString *text, NSColor *color, 
     volView.contentTintColor = t.mut;
     volView.translatesAutoresizingMaskIntoConstraints = NO;
     self.volIconView = volView;
+    volView.hidden = YES;   // 由可点击的 volMuteBtn 取代（同一位置、同一图标）
 
     // 音量滑块改用**位置刻度 0..1000**（web 2026-10-25 修过的曲线）：
     // 旧实现是线性 dB 刻度，拖到中间就 -30 dB（只剩 3% 振幅），用户会以为"没声音"。
@@ -498,14 +500,25 @@ static void RLPSetBadgeText(NSTextField *label, NSString *text, NSColor *color, 
     self.volume.onCommit = ^{ [weakSelf commitVolume]; };
     self.volume.identifier = @"pb.vol";
 
-    // v3.3.11 底栏 #volKnob：旋钮取代可见滑块（web 的 #vol range 是 sr-only）。
-    // 为什么不是「再加一个控件」：upstream v3.3.11 里 volPosToDb（-55 曲线）已 0 处引用，
-    // 音量唯一映射是 volDbToNorm/volNormToDb 的对称指数（0 dB 居中）；底栏若继续用 -55 曲线，
-    // 同一个 dB 会在两个界面显示在不同位置。
-    self.volKnob = [[RLPVolumeKnobView alloc] initWithFrame:NSZeroRect];
+    // 音量：横向滑杆（2026-11-15 由 270 度旋钮改来）。
+    // 用户当场反馈「音量旋钮调整音量的方式很别扭」，查证后换掉：
+    //   · Apple HIG《Sliders》：Don't use a slider to adjust audio volume...
+    //     use a volume view, which ... includes a volume-level slider.
+    //     旋钮比 slider 更偏离规范：一维连续量藏进角度，得先瞄准再拖。
+    //   · macOS 27.2 系统音量提示本身也改成了「左端喇叭 + 分段横条」的横向形态。
+    //   · 旧旋钮是**绝对角度映射**：按下瞬间就跳到指针角度对应的值，按住无法微调；
+    //     且没有滚轮通路。新滑杆：点按跳转、拖动增量、滚轮 0.5 dB/格（⌥ 0.1）、
+    //     双击回 0 dB、⌥ 拖动精细 1/4 灵敏度。
+    // dB 换算仍然复用 RLPVolDbToNorm / RLPVolNormToDb（不造第二套口径）。
+    // 底栏若另用 -55 曲线，同一个 dB 会在两个界面显示在不同位置。
+    self.volKnob = [[RLPVolumeSliderView alloc] initWithFrame:NSZeroRect];
     self.volKnob.identifier = @"volKnob";
     self.volKnob.toolTip = RLPTr(@"音量旋钮");
     self.volKnob.db = 0.0;
+    // 底栏已有 volIconView（喇叭）与 volDbField（dB 输入），
+    // 滑杆内部再带一套会把轨道挤到 20pt 宽（实测），所以这里关掉。
+    self.volKnob.showsAccessories = NO;
+    self.volKnob.toolTip = RLPTr(@"音量滑杆：拖动 / 滚轮微调（⌥ 精细），双击回 0 dB");
     __weak __typeof__(self) kobs = self;
     self.volKnob.onLiveChange = ^(double db) { [kobs updateVolumeUiForDb:db]; };
     self.volKnob.onCommit = ^(double db) { [kobs commitVolumeDb:db]; };
@@ -514,11 +527,11 @@ static void RLPSetBadgeText(NSTextField *label, NSString *text, NSColor *color, 
     self.volMuteBtn.identifier = @"volFloor";
     self.volMuteBtn.bordered = NO;
     self.volMuteBtn.imagePosition = NSImageOnly;
-    self.volMuteBtn.image = [NSImage imageWithSystemSymbolName:@"speaker.slash.fill"
-                                     accessibilityDescription:RLPTr(@"静音")];
-    self.volMuteBtn.toolTip = RLPTr(@"静音");
+    // 图标随音量状态走（静音 → 斜杠喇叭，有声 → 声波喇叭）；见 refreshVolumeMuteIcon。
+    self.volMuteBtn.toolTip = RLPTr(@"静音 / 取消静音");
     self.volMuteBtn.target = self;
     self.volMuteBtn.action = @selector(onToggleVolumeMute:);
+    [self refreshVolumeMuteIcon];
 
     // v3.3.11 底栏 barVolInput：精确 dB 输入。与播放页 npVolInput 同一套校验/提交纪律。
     self.volDbField = [[NSTextField alloc] initWithFrame:NSZeroRect];
@@ -572,28 +585,19 @@ static double RLPVolDbToPos(double db) {
     CGFloat bpW=ceil(self.bpBadge.intrinsicContentSize.width)+14;
     CGFloat fmtW=MAX(40,ceil(self.fmtBadge.intrinsicContentSize.width)+14);   // web .badge 左右 padding 7
     CGFloat gpuW=self.gpuBadge.hidden?0:34;
-    CGFloat volW=76, iconW=32;
-    CGFloat rightW=32*2+bpW+fmtW+14+volW+itemGap*5+(gpuW?gpuW+itemGap:0);
+    // 音量滑杆（2026-11-15 由旋钮换来的横向滑杆）与它左右两个真实控件的宽度。
+    const CGFloat muteW=16.0, dbW=46.0, volIdealW=88.0, volMinW=48.0;
+    CGFloat iconW=32;
     CGFloat available=W-2*pad-2*gap;
-    CGFloat centerW=MIN(440,available*1.6/3.8);
-    // Equal left/right columns keep the five-key group centered on the whole bar.
-    // Expand BOTH side columns for content, never steal only from the left column.
-    centerW=MIN(centerW,available-2*rightW);
-    // v3.3.11 右侧簇多了精确 dB 输入（46pt）：626pt 最小宽度下单行放不下，
-    // 必须折成两行（web 的 status 簇在窄宽度下也是两行），否则会越界或压住中间控制键。
-    const BOOL overflowRight = rightW > (available - 198) / 2.0;
-    BOOL wrap=(centerW<198) || overflowRight;
-    if (wrap) {
-        volW=48;
-        CGFloat sideBudget=(available-198)/2;
-        iconW=MIN(32,MAX(24,(sideBudget-bpW-2*itemGap)/2));
-        CGFloat topW=2*iconW+bpW+itemGap*2;
-        CGFloat bottomW=fmtW+14+volW+itemGap*2+(gpuW?gpuW+itemGap:0);
-        rightW=MAX(topW,bottomW);
-        centerW=MAX(198,MIN(440,MIN(available*1.6/3.8,available-2*rightW)));
-    }
+    // 中栏宽度按 web 的三列比例（1.1fr:1.6fr:1.1fr）与 .ctr 的 max-width:440 走。
+    // 只用 198 兜底：五键组 186pt，再窄就塞不进中栏了。
+    // ⚠️ 这里**不再**用「右簇整块宽度」把中栏压窄（旧写法 centerW=available-2*rightW）：
+    //   那是旋钮时代的假设（右簇必须整块落在中栏右侧）。滑杆时代右簇上排与五键组同高、
+    //   可以一直伸到 keys 右缘；按整块列宽压中栏会让 1120pt 的进度条缩到 132pt（实测）。
+    CGFloat centerW=MAX(198,MIN(440,available*1.6/3.8));
+    centerW=MIN(centerW,available);
     CGFloat leftW=(available-centerW)/2;
-    CGFloat cx=(W-centerW)/2, rx=cx+centerW+gap;
+    CGFloat cx=(W-centerW)/2;
     place(self.coverView,pad,(H-44)/2,44,44);
     place(self.titleLabel,pad+55,H/2+2,leftW-55,17);
     place(self.subLabel,pad+55,H/2-16,leftW-55,15);
@@ -608,46 +612,107 @@ static double RLPVolDbToPos(double db) {
     place(self.posLabel,cx,7,timeW,16);
     place(self.progress,cx+timeW+timeGap,7,centerW-2*(timeW+timeGap),16);
     place(self.durLabel,cx+centerW-timeW,7,timeW,16);
-    // 旋钮尺寸必须随行数走：wrap 模式下右簇拆成两行（行高 ~13pt 中心），
-    // 36pt 的方形会顶出条外 —— 判据「626pt 条内所有控件都在界内」会直接抓到。
-    const CGFloat knobS = wrap ? 22.0 : MIN(36.0, H - 18.0);
-    NSArray *rows=wrap?@[@[self.lyricBtn,self.chainBtn,self.bpBadge],
-                         @[self.fmtBadge,self.gpuBadge,self.volIconView,self.volKnob,self.volDbField]]:
-                        @[@[self.lyricBtn,self.chainBtn,self.bpBadge,self.fmtBadge,self.gpuBadge,self.volIconView,self.volKnob,self.volDbField]];
-    // 右侧控制簇**右对齐**（web 的 status 簇是 flex-end）：
-    // 旋钮是方形、比原滑块槽窄，若仍左对齐就会在条右端留下多出来的空白（第14项留白判据）。
-    for (NSUInteger row=0;row<rows.count;++row) {
-        CGFloat total=0;
-        for (NSView *v in rows[row]) {
-            if (v==self.gpuBadge && v.hidden) continue;
-            CGFloat w=v==self.volKnob?knobS:v==self.volDbField?46.0:v==self.volume?volW:v==self.volIconView?14:v==self.bpBadge?bpW:v==self.fmtBadge?fmtW:v==self.gpuBadge?gpuW:iconW;
-            total += w + itemGap;
+    // ---- 右侧簇（歌词 / 信号链 / 徽章 / 音量）----
+    // 三条硬约束，626pt 最小宽度下必须**同时**成立：
+    //   ① 所有真实控件与徽章都可见、都在条内（不允许"宽度不够就藏起来"）；
+    //   ② 行内与行间互不重叠，也不压住中栏五键组与进度行（含时长标签）；
+    //   ③ 音量滑杆要有可用横向行程（showsAccessories=NO 时 track 吃满自身宽度 ⟹ 宽度即行程）。
+    // 行划分按**真实剩余空间**决定，不写死行数：
+    //   · 一行放得下 → 单行（与五键组同一竖带、右对齐；web .vol 也是 flex-end 单行）；
+    //   · 放不下 → 两行：上排 歌词/信号链/bp，下排 fmt/GPU/静音/滑杆/dB；
+    //   · 下排连「最小可用滑杆」都放不下（626pt 实测下排只有 ~163pt）→ 三行：
+    //     上排 歌词/信号链/bp，中排 fmt/GPU，下排 静音/滑杆/dB。
+    // ⚠️ 上一版在窄宽度把静音键与 dB 输入**折叠进滑杆**（showsAccessories=YES）：
+    //     滑杆槽位 48pt 再被内置喇叭(20)+数值(56)吃掉 ⟹ 轨道只剩 20pt（实测），
+    //     既违反③（细调行程不够），又让两个真实控件 hidden（违反①）。那版已撤销。
+    const CGFloat clusterMinX = cx + centerW / 2.0 + keysW / 2.0 + gap;   // 五键组右缘 + gap
+    const CGFloat centerRightX = cx + centerW + gap;                      // 中栏进度行右缘 + gap
+    const CGFloat availTop = (W - pad) - clusterMinX;
+    const CGFloat availLow = (W - pad) - centerRightX;
+    // 上排（歌词/信号链/bp）可能因徽章文字变长而超宽：把两个图标键收窄到塞得下为止
+    // （24pt 仍是可点击下限，再窄就该换行而不是硬塞）。
+    const CGFloat iconFit = (availTop - bpW - 2.0*itemGap) / 2.0;
+    iconW = MIN(iconW, MAX(24.0, iconFit));
+    if (getenv("RLP_BAR_DIAG")) fprintf(stderr,
+        "[bar] W=%.0f centerW=%.0f cx=%.0f keysW=%.0f clusterMinX=%.0f availTop=%.0f availLow=%.0f bpW=%.0f fmtW=%.0f gpuW=%.0f\n",
+        W, centerW, cx, keysW, clusterMinX, availTop, availLow, bpW, fmtW, gpuW);
+
+    // 单行方案的竖带中心与五键组相同（cy = H-24）：右簇因此永远落在进度行**上方**，
+    // 横向不必让开进度条（旧版居中在 H/2，图标键下缘会压到进度行 6pt，实测）。
+    const CGFloat singleCY = cy;
+    const BOOL singleOverProgress = (singleCY - 16.0 < 23.0) && (singleCY + 16.0 > 7.0);
+    const CGFloat singleAvail = singleOverProgress ? availLow : availTop;
+    const CGFloat fixedSingle = 2.0*iconW + bpW + fmtW + muteW + dbW + (gpuW > 0 ? gpuW : 0);
+    const NSInteger gapsSingle = 6 + (gpuW > 0 ? 1 : 0);
+    const CGFloat roomSingle = singleAvail - fixedSingle - gapsSingle * itemGap;
+
+    NSArray<NSArray<NSView *> *> *rows = nil;
+    CGFloat volFit = volIdealW;
+    if (roomSingle >= volMinW) {
+        volFit = MIN(volIdealW, roomSingle);
+        rows = @[@[self.lyricBtn,self.chainBtn,self.bpBadge,self.fmtBadge,self.gpuBadge,
+                   self.volMuteBtn,self.volKnob,self.volDbField]];
+    } else {
+        const CGFloat fixed2 = fmtW + muteW + dbW + (gpuW > 0 ? gpuW : 0);
+        const NSInteger gaps2 = 3 + (gpuW > 0 ? 1 : 0);
+        const CGFloat room2 = availLow - fixed2 - gaps2 * itemGap;
+        if (room2 >= volMinW) {
+            volFit = MIN(volIdealW, room2);
+            rows = @[@[self.lyricBtn,self.chainBtn,self.bpBadge],
+                     @[self.fmtBadge,self.gpuBadge,self.volMuteBtn,self.volKnob,self.volDbField]];
+        } else {
+            const CGFloat room3 = availLow - (muteW + dbW) - 2.0*itemGap;
+            volFit = MIN(volIdealW, MAX(volMinW, room3));
+            rows = @[@[self.lyricBtn,self.chainBtn,self.bpBadge],
+                     @[self.fmtBadge,self.gpuBadge],
+                     @[self.volMuteBtn,self.volKnob,self.volDbField]];
         }
-        if (total > 0) total -= itemGap;
-        // 下界不能用 rx（那是中栏右缘）：右侧簇允许向左延伸，只要不压住五键组右缘。
-        const CGFloat clusterMinX = cx + centerW / 2.0 + keysW / 2.0 + gap;
-        CGFloat rowX = MAX(clusterMinX, W - pad - total);
-        for (NSView *v in rows[row]) {
-            if (v==self.gpuBadge && v.hidden) continue;
-            CGFloat w=v==self.volKnob?knobS:v==self.volDbField?46.0:v==self.volume?volW:v==self.volIconView?14:v==self.bpBadge?bpW:v==self.fmtBadge?fmtW:v==self.gpuBadge?gpuW:iconW;
-            CGFloat h=(v==self.lyricBtn || v==self.chainBtn)?32:(v==self.volKnob?knobS:v==self.volDbField?18.0:v==self.volume?16:20);
-            CGFloat rowCY=wrap?(row==0?H-21:13):H/2;
-            if (v == self.volMuteBtn) {
-                // 覆盖层：不占簇宽度，叠在旋钮圆盖中心（web 是 absolute 定位）。
-                rowX -= itemGap;
-                continue;
-            }
-            if (v == self.volKnob) {
-                // 旋钮是方形、居中在 volW 槽位里：槽宽不变 ⟹ 右端留白与左端对称（第14项判据）。
-                place(v, rowX + (w - h) / 2.0, rowCY - h / 2.0, h, h);
-                // 静音键叠在圆盖中心（22×22，web 也是 28×28 覆盖层）
-                const CGFloat muteS = 22.0;
-                place(self.volMuteBtn, NSMidX(self.volKnob.frame) - muteS / 2.0,
-                      rowCY - muteS / 2.0, muteS, muteS);
-            } else {
-                place(v,rowX,rowCY-h/2,w,h);
-            }
-            rowX+=w+itemGap;
+    }
+    // 行中心（自下而上）：单行 = 五键组中心；两行沿用既有口径；
+    // 三行按 30+1+16+1+16 = 66 排（上下各留 1..1.5pt，图标键收到 30pt）：
+    // 这样图标键不再贴条顶、dB 输入框不再贴条底（626pt 紧凑档的观感）。
+    BOOL dense = (rows.count >= 3);
+    CGFloat rowCY[3] = { singleCY, 0, 0 };
+    if (rows.count == 2) { rowCY[0] = H - 21.0; rowCY[1] = 13.0; }
+    else if (rows.count >= 3) { rowCY[0] = H - 16.0; rowCY[1] = H - 40.0; rowCY[2] = 9.0; }
+    // 右簇里每个控件的高/宽：紧凑（三行）时徽章/滑杆/输入框压到 16pt，行间才有 1pt 缝。
+    CGFloat (^itemH)(NSView *) = ^CGFloat(NSView *v) {
+        if (v == self.lyricBtn || v == self.chainBtn) return dense ? 30.0 : 32.0;
+        if (v == self.volMuteBtn) return 16.0;
+        if (v == self.volKnob) return dense ? 16.0 : 18.0;
+        if (v == self.volDbField) return dense ? 16.0 : 18.0;
+        if (v == self.fmtBadge || v == self.gpuBadge) return dense ? 16.0 : 20.0;
+        return 20.0;    // bpBadge
+    };
+    CGFloat (^itemW)(NSView *) = ^CGFloat(NSView *v) {
+        if (v == self.volKnob) return volFit;
+        if (v == self.volDbField) return dbW;
+        if (v == self.volMuteBtn) return muteW;
+        if (v == self.bpBadge) return bpW;
+        if (v == self.fmtBadge) return fmtW;
+        if (v == self.gpuBadge) return gpuW;
+        return iconW;   // lyricBtn / chainBtn
+    };
+    // 摆放：每行**右对齐**（web 的 status 簇是 flex-end）；行左界按所在竖带取 ——
+    // 与进度行（y 7..23）竖向相交的行必须让开中栏右缘，否则只让开五键组右缘。
+    for (NSUInteger row = 0; row < rows.count; ++row) {
+        NSArray<NSView *> *items = rows[row];
+        CGFloat total = 0; CGFloat maxH = 0; NSInteger n = 0;
+        for (NSView *v in items) {
+            if (v.hidden) continue;
+            total += itemW(v); maxH = MAX(maxH, itemH(v)); ++n;
+        }
+        if (n > 1) total += itemGap * (n - 1);
+        const CGFloat bandMinY = rowCY[row] - maxH / 2.0, bandMaxY = rowCY[row] + maxH / 2.0;
+        const BOOL overProgress = (bandMinY < 23.0) && (bandMaxY > 7.0);
+        const CGFloat rowMinX = overProgress ? centerRightX : clusterMinX;
+        CGFloat rowX = MAX(rowMinX, W - pad - total);
+        for (NSView *v in items) {
+            if (v.hidden) continue;
+            const CGFloat w = itemW(v), h = itemH(v);
+            // 横向滑杆吃满槽位宽度：track 因此等于槽宽（细调行程由宽度保证）。
+            place(v, rowX, rowCY[row] - h / 2.0, w, h);
+            rowX += w + itemGap;
         }
     }
 }
@@ -958,7 +1023,8 @@ static double RLPVolDbToPos(double db) {
     // 音量滑块是**位置刻度 0..1000**（不是 dB），必须换算；sb 静音档 -120 也要能落回最左端。
     if (!self.volume.dragging && isfinite(st.volumeDb)) {
         self.volume.doubleValue = RLPVolDbToPos(st.volumeDb);
-        self.volKnob.db = st.volumeDb;   // 旋钮是可见真值（v3.3.11）
+        self.volKnob.db = st.volumeDb;   // 滑杆是可见真值（v3.3.11）
+        [self refreshVolumeMuteIcon];
         if (self.volDbField != self.window.firstResponder) {
             self.volDbField.stringValue = [NSString stringWithFormat:@"%.1f", st.volumeDb];
         }
@@ -1061,11 +1127,22 @@ static double RLPVolDbToPos(double db) {
     (void)sender;
 }
 
-/// 拖动中只同步界面（旋钮 + 隐藏滑块的状态载体），不下发请求。
+/// 拖动中只同步界面（滑杆 + 隐藏滑块的状态载体），不下发请求。
 - (void)updateVolumeUiForDb:(double)db {
     db = round(db * 10.0) / 10.0;
     if (self.volKnob.db != db) self.volKnob.db = db;
     self.volume.doubleValue = RLPVolDbToPos(db);   // 仅为状态载体，已不可见
+    [self refreshVolumeMuteIcon];
+}
+
+/// 底栏静音键（volFloor）是**唯一可见的喇叭**：图标必须反映当前音量状态。
+/// 为什么不能固定画 speaker.slash.fill：它已从装饰图标变成可点击的真实控件，
+/// 常亮斜杠会让人以为当前已静音（用户第一眼就会误判）。
+- (void)refreshVolumeMuteIcon {
+    const BOOL muted = self.volKnob.db <= RLPVolKnobMinDb + 0.05;
+    NSString *sym = muted ? @"speaker.slash.fill" : @"speaker.wave.2";
+    self.volMuteBtn.image = [NSImage imageWithSystemSymbolName:sym
+                                     accessibilityDescription:RLPTr(@"音量")];
 }
 
 /// 旋钮松开：按 v3.3.11 的 dB 值直接下发（不再经 -55 位置曲线换算）。

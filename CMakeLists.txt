@@ -190,7 +190,7 @@ if(APPLE)
     tools/native_ui/RLPMainWindowController.mm
     tools/native_ui/RLPSidebarViewController.mm
     tools/native_ui/RLPAlbumsViewController.mm
-    tools/native_ui/RLPPlaybackBarView.mm
+    tools/native_ui/RLPPlaybackBarView.mm tools/native_ui/RLPVolumeSliderView.mm
     tools/native_ui/RLPVolumeKnobView.mm
     tools/native_ui/RLPPlaceholderViewController.mm
     tools/native_ui/RLPCoreClient.mm
@@ -216,7 +216,7 @@ if(APPLE)
     tools/native_ui/RLPStreamingViewController.mm
     tools/native_ui/RLPQuickStartViewController.mm
     tools/native_ui/RLPPlaylistsViewController.mm
-    tools/native_ui/RLPEqualizerView.mm tools/native_ui/RLPEQFaderView.mm tools/native_ui/RLPTargetCurve.mm
+    tools/native_ui/RLPEqualizerView.mm tools/native_ui/RLPEQFaderView.mm tools/native_ui/RLPEQFaderInspector.mm tools/native_ui/RLPVolumeSliderView.mm tools/native_ui/RLPTargetCurve.mm
     tools/native_ui/RLPEQGeometry.mm tools/native_ui/RLPTargetCurve.mm
     tools/native_ui/RLPInputView.mm
     tools/native_ui/RLPCastView.mm
@@ -240,7 +240,7 @@ if(APPLE)
     tools/mac_update.mm
     tools/native_ui/main.mm tools/native_ui/RLPAppDelegate.mm
     tools/native_ui/RLPMainWindowController.mm tools/native_ui/RLPSidebarViewController.mm
-    tools/native_ui/RLPAlbumsViewController.mm tools/native_ui/RLPPlaybackBarView.mm
+    tools/native_ui/RLPAlbumsViewController.mm tools/native_ui/RLPPlaybackBarView.mm tools/native_ui/RLPVolumeSliderView.mm
     tools/native_ui/RLPVolumeKnobView.mm
     tools/native_ui/RLPPlaceholderViewController.mm tools/native_ui/RLPCoreClient.mm
     tools/native_ui/RLPModels.mm tools/native_ui/RLPTheme.mm
@@ -256,7 +256,7 @@ if(APPLE)
     tools/native_ui/RLPWorksViewController.mm
     tools/native_ui/RLPUpdateWindowController.mm
     tools/native_ui/RLPStreamingViewController.mm tools/native_ui/RLPQuickStartViewController.mm
-    tools/native_ui/RLPPlaylistsViewController.mm tools/native_ui/RLPEqualizerView.mm tools/native_ui/RLPEQFaderView.mm tools/native_ui/RLPTargetCurve.mm
+    tools/native_ui/RLPPlaylistsViewController.mm tools/native_ui/RLPEqualizerView.mm tools/native_ui/RLPEQFaderView.mm tools/native_ui/RLPEQFaderInspector.mm tools/native_ui/RLPVolumeSliderView.mm tools/native_ui/RLPTargetCurve.mm
     tools/native_ui/RLPPlaylistsViewController.mm tools/native_ui/RLPEQGeometry.mm tools/native_ui/RLPTargetCurve.mm
     tools/native_ui/RLPInputView.mm tools/native_ui/RLPCastView.mm
     tools/native_ui/RLPLyrics.mm tools/native_ui/RLPRightDrawer.mm
@@ -303,14 +303,14 @@ if(APPLE)
     tools/native_ui/RLPSettingsViewController.mm tools/native_ui/RLPSettingsLayout.mm
     tools/native_ui/RLPServersView.mm tools/native_ui/RLPMetaSourcesView.mm
     tools/native_ui/RLPLibStatsView.mm tools/native_ui/RLPRemoveDir.mm
-    tools/native_ui/RLPEqualizerView.mm tools/native_ui/RLPEQFaderView.mm
+    tools/native_ui/RLPEqualizerView.mm tools/native_ui/RLPEQFaderView.mm tools/native_ui/RLPEQFaderInspector.mm tools/native_ui/RLPVolumeSliderView.mm
     tools/native_ui/RLPEQGeometry.mm tools/native_ui/RLPTargetCurve.mm
     tools/native_ui/RLPInputView.mm tools/native_ui/RLPCastView.mm
     tools/native_ui/RLPCalibrationView.mm
     tools/native_ui/RLPUpdateWindowController.mm tools/mac_update.mm
     tools/native_ui/RLPPageViewController.mm
     tools/native_ui/RLPPlaceholderViewController.mm tools/native_ui/RLPRightDrawer.mm
-    tools/native_ui/RLPPlaybackBarView.mm tools/native_ui/RLPVolumeKnobView.mm
+    tools/native_ui/RLPPlaybackBarView.mm tools/native_ui/RLPVolumeKnobView.mm tools/native_ui/RLPVolumeSliderView.mm
     tools/native_ui/RLPKnowledgeView.mm tools/native_ui/RLPLyrics.mm
     tools/native_ui/RLPAnalysisSummary.mm tools/native_ui/RLPSignalChain.mm
     tools/native_ui/RLPTrackActions.mm tools/native_ui/RLPModels.mm
@@ -331,7 +331,7 @@ if(APPLE)
   # 与产品共用同一套错误假设，于是"JSON 键读错 + bands 格式全错"两条真故障双双假绿。
   # 这条判据只认核心状态里的事实：哪一段的 gain 真的变了。
   add_executable(test_native_eq_contract tests/test_native_eq_contract.mm
-    tools/native_ui/RLPEqualizerView.mm tools/native_ui/RLPEQFaderView.mm tools/native_ui/RLPEQGeometry.mm
+    tools/native_ui/RLPEqualizerView.mm tools/native_ui/RLPEQFaderView.mm tools/native_ui/RLPEQFaderInspector.mm tools/native_ui/RLPVolumeSliderView.mm tools/native_ui/RLPEQGeometry.mm
     tools/native_ui/RLPTargetCurve.mm tools/native_ui/RLPSupport.mm
     tools/native_ui/RLPModels.mm tools/native_ui/RLPTheme.mm
     tools/native_ui/RLPNativeI18n.mm tools/native_ui/RLPTrackActions.mm
@@ -363,7 +363,7 @@ if(APPLE)
   target_link_libraries(test_native_shortcuts PRIVATE "-framework AppKit" "-framework Foundation")
   add_test(NAME native_shortcuts COMMAND test_native_shortcuts)
   add_executable(test_native_bar_web tests/test_native_bar_web.mm
-    tools/native_ui/RLPPlaybackBarView.mm tools/native_ui/RLPSignalChain.mm
+    tools/native_ui/RLPPlaybackBarView.mm tools/native_ui/RLPSignalChain.mm tools/native_ui/RLPVolumeSliderView.mm
     tools/native_ui/RLPVolumeKnobView.mm
     tools/native_ui/RLPSupport.mm tools/native_ui/RLPModels.mm
     tools/native_ui/RLPTheme.mm tools/native_ui/RLPNativeI18n.mm  tools/native_ui/RLPVolumeKnobView.mm
@@ -385,7 +385,7 @@ if(APPLE)
   # 改一行判据就要重跑整窗是不可接受的反馈周期。这里只装底栏 + 核心。
   # 纪律：backend=null + volume=-120 —— 只跑 DSP，绝不打开设备（铁律②）。
   add_executable(test_native_bar_core tests/test_native_bar_core.mm
-    tools/native_ui/RLPPlaybackBarView.mm tools/native_ui/RLPSignalChain.mm
+    tools/native_ui/RLPPlaybackBarView.mm tools/native_ui/RLPSignalChain.mm tools/native_ui/RLPVolumeSliderView.mm
     tools/native_ui/RLPVolumeKnobView.mm
     tools/native_ui/RLPSupport.mm tools/native_ui/RLPModels.mm
     tools/native_ui/RLPTheme.mm tools/native_ui/RLPNativeI18n.mm
@@ -399,7 +399,7 @@ if(APPLE)
   # 桩核心只记录请求路径，不启动播放核心、不打开音频设备。
   # 对 1.1.7.32 先跑红：停止态只发 /api/pause?on=0（no-op）、媒体键沿用 isPlaying 快照。
   add_executable(test_native_pause_paths tests/test_native_pause_paths.mm
-    tools/native_ui/RLPPlaybackBarView.mm tools/native_ui/RLPSignalChain.mm
+    tools/native_ui/RLPPlaybackBarView.mm tools/native_ui/RLPSignalChain.mm tools/native_ui/RLPVolumeSliderView.mm
     tools/native_ui/RLPVolumeKnobView.mm
     tools/native_ui/RLPSupport.mm tools/native_ui/RLPModels.mm
     tools/native_ui/RLPTheme.mm tools/native_ui/RLPNativeI18n.mm
@@ -417,7 +417,7 @@ if(APPLE)
   # 上一轮的 EQ 拖动判据只调 applyDragEvent:（等于只测换算函数），
   # 完全证明不了「真实鼠标事件能走到这个视图」——本轮换成 NSWindow sendEvent。
   add_executable(test_native_scroll_eq tests/test_native_scroll_eq.mm
-    tools/native_ui/RLPEqualizerView.mm tools/native_ui/RLPEQFaderView.mm tools/native_ui/RLPSupport.mm tools/native_ui/RLPTargetCurve.mm
+    tools/native_ui/RLPEqualizerView.mm tools/native_ui/RLPEQFaderView.mm tools/native_ui/RLPEQFaderInspector.mm tools/native_ui/RLPVolumeSliderView.mm tools/native_ui/RLPSupport.mm tools/native_ui/RLPTargetCurve.mm
     tools/native_ui/RLPEQGeometry.mm tools/native_ui/RLPSupport.mm tools/native_ui/RLPTargetCurve.mm
     tools/native_ui/RLPModels.mm tools/native_ui/RLPTheme.mm
     tools/native_ui/RLPNativeI18n.mm tools/native_ui/RLPTrackActions.mm
@@ -432,7 +432,7 @@ if(APPLE)
   # OPRA 卡片墙（P1）：型号卡片 + 预设卡片墙 + 目标曲线小图 + 当前态 + 应用请求。
   # 对 1.1.7.34 先跑红（旧码是型号下拉 + 预设下拉，没有卡片/曲线小图/当前态）。
   add_executable(test_native_opra_cards tests/test_native_opra_cards.mm
-    tools/native_ui/RLPEqualizerView.mm tools/native_ui/RLPEQFaderView.mm tools/native_ui/RLPSupport.mm
+    tools/native_ui/RLPEqualizerView.mm tools/native_ui/RLPEQFaderView.mm tools/native_ui/RLPEQFaderInspector.mm tools/native_ui/RLPVolumeSliderView.mm tools/native_ui/RLPSupport.mm
     tools/native_ui/RLPEQGeometry.mm tools/native_ui/RLPSupport.mm
     tools/native_ui/RLPTargetCurve.mm tools/native_ui/RLPModels.mm
     tools/native_ui/RLPTheme.mm tools/native_ui/RLPNativeI18n.mm
@@ -445,11 +445,15 @@ if(APPLE)
 
   add_executable(test_native_volume_knob tests/test_native_volume_knob.mm
     tools/native_ui/RLPVolumeKnobView.mm
+    tools/native_ui/RLPVolumeSliderView.mm
+    tools/native_ui/RLPSupport.mm
+    tools/native_ui/RLPNativeI18n.mm
+    tools/native_ui/RLPCoreClient.mm
     tools/native_ui/RLPTheme.mm)
   target_compile_options(test_native_volume_knob PRIVATE -fobjc-arc)
   target_include_directories(test_native_volume_knob PRIVATE src tools tools/native_ui)
-  target_link_libraries(test_native_volume_knob PRIVATE
-    "-framework AppKit" "-framework QuartzCore")
+  target_link_libraries(test_native_volume_knob PRIVATE rlapp_core
+    "-framework AppKit" "-framework QuartzCore" "-framework Security")
   add_test(NAME native_volume_knob COMMAND test_native_volume_knob)
   set_tests_properties(native_opra_cards PROPERTIES TIMEOUT 120)
 
@@ -615,7 +619,7 @@ if(APPLE)
   add_executable(test_native_writeback_card tests/test_native_writeback_card.mm
     tools/native_ui/RLPSettingsViewController.mm tools/native_ui/RLPSettingsLayout.mm
     tools/native_ui/RLPServersView.mm tools/native_ui/RLPMetaSourcesView.mm
-    tools/native_ui/RLPLibStatsView.mm tools/native_ui/RLPEqualizerView.mm tools/native_ui/RLPEQFaderView.mm tools/native_ui/RLPTargetCurve.mm
+    tools/native_ui/RLPLibStatsView.mm tools/native_ui/RLPEqualizerView.mm tools/native_ui/RLPEQFaderView.mm tools/native_ui/RLPEQFaderInspector.mm tools/native_ui/RLPVolumeSliderView.mm tools/native_ui/RLPTargetCurve.mm
     tools/native_ui/RLPLibStatsView.mm tools/native_ui/RLPEQGeometry.mm tools/native_ui/RLPTargetCurve.mm
     tools/native_ui/RLPInputView.mm tools/native_ui/RLPCastView.mm
     tools/native_ui/RLPCalibrationView.mm tools/native_ui/RLPUpdateWindowController.mm
@@ -637,7 +641,7 @@ if(APPLE)
   add_executable(test_native_settings_cards tests/test_native_settings_cards.mm
     tools/native_ui/RLPSettingsViewController.mm tools/native_ui/RLPSettingsLayout.mm
     tools/native_ui/RLPServersView.mm tools/native_ui/RLPMetaSourcesView.mm
-    tools/native_ui/RLPLibStatsView.mm tools/native_ui/RLPEqualizerView.mm tools/native_ui/RLPEQFaderView.mm tools/native_ui/RLPTargetCurve.mm
+    tools/native_ui/RLPLibStatsView.mm tools/native_ui/RLPEqualizerView.mm tools/native_ui/RLPEQFaderView.mm tools/native_ui/RLPEQFaderInspector.mm tools/native_ui/RLPVolumeSliderView.mm tools/native_ui/RLPTargetCurve.mm
     tools/native_ui/RLPLibStatsView.mm tools/native_ui/RLPEQGeometry.mm tools/native_ui/RLPTargetCurve.mm
     tools/native_ui/RLPInputView.mm tools/native_ui/RLPCastView.mm
     tools/native_ui/RLPCalibrationView.mm tools/native_ui/RLPUpdateWindowController.mm
@@ -657,7 +661,7 @@ if(APPLE)
   add_executable(test_native_feedback_inline tests/test_native_feedback_inline.mm
     tools/native_ui/RLPSettingsViewController.mm tools/native_ui/RLPSettingsLayout.mm
     tools/native_ui/RLPServersView.mm tools/native_ui/RLPMetaSourcesView.mm
-    tools/native_ui/RLPLibStatsView.mm tools/native_ui/RLPEqualizerView.mm tools/native_ui/RLPEQFaderView.mm tools/native_ui/RLPTargetCurve.mm
+    tools/native_ui/RLPLibStatsView.mm tools/native_ui/RLPEqualizerView.mm tools/native_ui/RLPEQFaderView.mm tools/native_ui/RLPEQFaderInspector.mm tools/native_ui/RLPVolumeSliderView.mm tools/native_ui/RLPTargetCurve.mm
     tools/native_ui/RLPLibStatsView.mm tools/native_ui/RLPEQGeometry.mm tools/native_ui/RLPTargetCurve.mm
     tools/native_ui/RLPInputView.mm tools/native_ui/RLPCastView.mm
     tools/native_ui/RLPCalibrationView.mm tools/native_ui/RLPUpdateWindowController.mm
@@ -680,7 +684,7 @@ if(APPLE)
   add_executable(test_native_settings_granularity tests/test_native_settings_granularity.mm
     tools/native_ui/RLPSettingsViewController.mm tools/native_ui/RLPSettingsLayout.mm
     tools/native_ui/RLPServersView.mm tools/native_ui/RLPMetaSourcesView.mm
-    tools/native_ui/RLPLibStatsView.mm tools/native_ui/RLPEqualizerView.mm tools/native_ui/RLPEQFaderView.mm
+    tools/native_ui/RLPLibStatsView.mm tools/native_ui/RLPEqualizerView.mm tools/native_ui/RLPEQFaderView.mm tools/native_ui/RLPEQFaderInspector.mm tools/native_ui/RLPVolumeSliderView.mm
     tools/native_ui/RLPLibStatsView.mm tools/native_ui/RLPEQGeometry.mm
     tools/native_ui/RLPTargetCurve.mm tools/native_ui/RLPInputView.mm
     tools/native_ui/RLPCastView.mm tools/native_ui/RLPCalibrationView.mm
@@ -712,7 +716,7 @@ if(APPLE)
 
   # 第8项耳机目标曲线：桥层（数组三元组/预设字段）+ 请求逐字段（web diff）+ 图上图层（像素）。
   add_executable(test_native_target_curve tests/test_native_target_curve.mm
-    tools/native_ui/RLPEqualizerView.mm tools/native_ui/RLPEQFaderView.mm tools/native_ui/RLPTargetCurve.mm
+    tools/native_ui/RLPEqualizerView.mm tools/native_ui/RLPEQFaderView.mm tools/native_ui/RLPEQFaderInspector.mm tools/native_ui/RLPVolumeSliderView.mm tools/native_ui/RLPTargetCurve.mm
     tools/native_ui/RLPEQGeometry.mm tools/native_ui/RLPTargetCurve.mm
     tools/native_ui/RLPSupport.mm tools/native_ui/RLPModels.mm
     tools/native_ui/RLPTheme.mm tools/native_ui/RLPNativeI18n.mm
@@ -868,7 +872,7 @@ if(APPLE)
   add_executable(test_workbench tests/test_workbench.mm
     tools/native_ui/RLPWorkbench.mm
     tools/native_ui/RLPWorkbenchViewController.mm tools/native_ui/RLPSignalChain.mm
-    tools/native_ui/RLPEqualizerView.mm tools/native_ui/RLPEQFaderView.mm tools/native_ui/RLPTargetCurve.mm
+    tools/native_ui/RLPEqualizerView.mm tools/native_ui/RLPEQFaderView.mm tools/native_ui/RLPEQFaderInspector.mm tools/native_ui/RLPVolumeSliderView.mm tools/native_ui/RLPTargetCurve.mm
     tools/native_ui/RLPEQGeometry.mm tools/native_ui/RLPTargetCurve.mm
     tools/native_ui/RLPPageViewController.mm
     tools/native_ui/RLPSupport.mm
@@ -880,7 +884,7 @@ if(APPLE)
   set_source_files_properties(tests/test_workbench.mm
     tools/native_ui/RLPWorkbench.mm
     tools/native_ui/RLPWorkbenchViewController.mm tools/native_ui/RLPSignalChain.mm
-    tools/native_ui/RLPEqualizerView.mm tools/native_ui/RLPEQFaderView.mm tools/native_ui/RLPTargetCurve.mm
+    tools/native_ui/RLPEqualizerView.mm tools/native_ui/RLPEQFaderView.mm tools/native_ui/RLPEQFaderInspector.mm tools/native_ui/RLPVolumeSliderView.mm tools/native_ui/RLPTargetCurve.mm
     tools/native_ui/RLPEQGeometry.mm tools/native_ui/RLPTargetCurve.mm
     tools/native_ui/RLPPageViewController.mm
     tools/native_ui/RLPSupport.mm
@@ -926,7 +930,7 @@ if(APPLE)
     tools/native_ui/RLPMetaSourcesView.mm tools/native_ui/RLPLibStatsView.mm
     tools/native_ui/RLPSettingsViewController.mm
     tools/native_ui/RLPSettingsLayout.mm
-    tools/native_ui/RLPEqualizerView.mm tools/native_ui/RLPEQFaderView.mm tools/native_ui/RLPTargetCurve.mm
+    tools/native_ui/RLPEqualizerView.mm tools/native_ui/RLPEQFaderView.mm tools/native_ui/RLPEQFaderInspector.mm tools/native_ui/RLPVolumeSliderView.mm tools/native_ui/RLPTargetCurve.mm
     tools/native_ui/RLPEQGeometry.mm tools/native_ui/RLPTargetCurve.mm
     tools/native_ui/RLPInputView.mm
     tools/native_ui/RLPCastView.mm
@@ -944,7 +948,7 @@ if(APPLE)
     tools/native_ui/RLPLibStatsView.mm
     tools/native_ui/RLPSettingsViewController.mm
     tools/native_ui/RLPSettingsLayout.mm
-    tools/native_ui/RLPEqualizerView.mm tools/native_ui/RLPEQFaderView.mm tools/native_ui/RLPInputView.mm tools/native_ui/RLPTargetCurve.mm
+    tools/native_ui/RLPEqualizerView.mm tools/native_ui/RLPEQFaderView.mm tools/native_ui/RLPEQFaderInspector.mm tools/native_ui/RLPVolumeSliderView.mm tools/native_ui/RLPInputView.mm tools/native_ui/RLPTargetCurve.mm
     tools/native_ui/RLPEQGeometry.mm tools/native_ui/RLPInputView.mm tools/native_ui/RLPTargetCurve.mm
     tools/native_ui/RLPCastView.mm tools/native_ui/RLPCalibrationView.mm
     tools/native_ui/RLPUpdateWindowController.mm tools/native_ui/RLPFeedbackWindowController.mm
@@ -1002,7 +1006,7 @@ if(APPLE)
     tools/native_ui/RLPSettingsLayout.mm
     tools/native_ui/RLPServersView.mm
     tools/native_ui/RLPMetaSourcesView.mm tools/native_ui/RLPLibStatsView.mm
-    tools/native_ui/RLPEqualizerView.mm tools/native_ui/RLPEQFaderView.mm tools/native_ui/RLPInputView.mm tools/native_ui/RLPTargetCurve.mm
+    tools/native_ui/RLPEqualizerView.mm tools/native_ui/RLPEQFaderView.mm tools/native_ui/RLPEQFaderInspector.mm tools/native_ui/RLPVolumeSliderView.mm tools/native_ui/RLPInputView.mm tools/native_ui/RLPTargetCurve.mm
     tools/native_ui/RLPEQGeometry.mm tools/native_ui/RLPInputView.mm tools/native_ui/RLPTargetCurve.mm
     tools/native_ui/RLPCastView.mm tools/native_ui/RLPCalibrationView.mm
     tools/native_ui/RLPUpdateWindowController.mm tools/native_ui/RLPFeedbackWindowController.mm
@@ -1013,7 +1017,7 @@ if(APPLE)
     tools/native_ui/RLPSettingsViewController.mm tools/native_ui/RLPServersView.mm
     tools/native_ui/RLPSettingsLayout.mm
     tools/native_ui/RLPMetaSourcesView.mm tools/native_ui/RLPLibStatsView.mm
-    tools/native_ui/RLPEqualizerView.mm tools/native_ui/RLPEQFaderView.mm tools/native_ui/RLPInputView.mm tools/native_ui/RLPTargetCurve.mm
+    tools/native_ui/RLPEqualizerView.mm tools/native_ui/RLPEQFaderView.mm tools/native_ui/RLPEQFaderInspector.mm tools/native_ui/RLPVolumeSliderView.mm tools/native_ui/RLPInputView.mm tools/native_ui/RLPTargetCurve.mm
     tools/native_ui/RLPEQGeometry.mm tools/native_ui/RLPInputView.mm tools/native_ui/RLPTargetCurve.mm
     tools/native_ui/RLPCastView.mm tools/native_ui/RLPCalibrationView.mm
     tools/native_ui/RLPUpdateWindowController.mm tools/native_ui/RLPFeedbackWindowController.mm
@@ -1053,7 +1057,7 @@ if(APPLE)
   add_executable(test_artist_grid tests/test_artist_grid.mm
     tools/native_ui/RLPArtistsViewController.mm
     tools/native_ui/RLPAlbumDetailViewController.mm
-    tools/native_ui/RLPPlaybackBarView.mm tools/native_ui/RLPSignalChain.mm
+    tools/native_ui/RLPPlaybackBarView.mm tools/native_ui/RLPSignalChain.mm tools/native_ui/RLPVolumeSliderView.mm
     tools/native_ui/RLPVolumeKnobView.mm
     tools/native_ui/RLPTrackActions.mm tools/native_ui/RLPAnalysisSummary.mm
     tools/native_ui/RLPPageViewController.mm
@@ -1062,7 +1066,7 @@ if(APPLE)
     tools/native_ui/RLPTheme.mm tools/native_ui/RLPNativeI18n.mm)
   set_source_files_properties(tests/test_artist_grid.mm
     tools/native_ui/RLPArtistsViewController.mm tools/native_ui/RLPAlbumDetailViewController.mm
-    tools/native_ui/RLPPlaybackBarView.mm tools/native_ui/RLPSignalChain.mm
+    tools/native_ui/RLPPlaybackBarView.mm tools/native_ui/RLPSignalChain.mm tools/native_ui/RLPVolumeSliderView.mm
     tools/native_ui/RLPVolumeKnobView.mm
     tools/native_ui/RLPTrackActions.mm tools/native_ui/RLPAnalysisSummary.mm
     tools/native_ui/RLPPageViewController.mm
@@ -2182,4 +2186,5 @@ target_link_libraries(dsdconv PRIVATE rtadsp)
 # 已移出守卫。⚠️ 实测它能编译并运行通过，只是依赖 windows.h 之外的垫片——
 # 仍放在 RTA_BUILD_LEGACY_TESTS 开关内，等 wp-d2-tests 的 POSIX 垫片合并后随整块打开。
 endif()   # RTA_BUILD_LEGACY_TESTS
+
 

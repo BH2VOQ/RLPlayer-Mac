@@ -564,3 +564,7 @@ DeepSeek 为默认检索端点。	DeepSeek is the default search endpoint.	检�
 切换为曲线	Switch to curve	EQ 视图切换按钮（2026-11-15 推子板）
 切换为推子	Switch to faders	EQ 视图切换按钮（2026-11-15 推子板）
 直接输入该段的增益，范围 ±24 dB	Type this band's gain directly, ±24 dB	推子板数值框 tooltip（±24 dB 量程）
+启用/停用这一段	Enable or bypass this band	EQ 单段检查器开关（2026-11-15）
+品质因数 Q（0.1–20）	Quality factor Q (0.1-20)	EQ 单段检查器 Q 输入框 tooltip
+静音 / 取消静音	Mute or unmute	音量滑杆左端喇叭按钮 tooltip
+音量滑杆：拖动 / 滚轮微调（⌥ 精细），双击回 0 dB	Volume slider: drag or scroll to fine-tune (⌥ = fine), double-click resets to 0 dB	底栏音量滑杆 tooltip（2026-11-15 旋钮改滑杆）

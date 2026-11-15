@@ -509,12 +509,21 @@ int RLPAppDelegateRunSelfTest(void) {
         RLPEqualizerView *v = [[RLPEqualizerView alloc] initWithFrame:NSMakeRect(0, 0, 600, 700)];
         NSMutableArray<NSView *> *ev = [NSMutableArray array];
         CollectViews(v, ev);
-        NSInteger tables = 0, switches = 0;
+        NSInteger tables = 0, switches = 0, faders = 0, inspectors = 0;
         for (NSView *x in ev) {
             if ([x isKindOfClass:[NSTableView class]]) ++tables;
             if ([x isKindOfClass:[NSSwitch class]]) ++switches;
+            if ([x.identifier isEqualToString:@"eq.fader"]) ++faders;
+            if ([x.identifier isEqualToString:@"eq.inspector"]) ++inspectors;
         }
-        STCheck(tables >= 1, "均衡视图有 20 段参数表", [NSString stringWithFormat:@"tables=%ld", (long)tables]);
+        // 2026-11-15 用户明确「底下这个 eq 表不要了」⟹ 20 行参数表被移除，
+        // 职责拆成推子板（频率/增益，20 根推子）+ 单段检查器（Q/类型/开关）。
+        // 判据跟着控件集走：表格必须**消失**，替代表格的两个编辑面必须**在位**。
+        STCheck(tables == 0, "均衡视图不再有 20 行参数表（用户 2026-11-15 明确移除）",
+                [NSString stringWithFormat:@"tables=%ld", (long)tables]);
+        STCheck(faders == 1 && inspectors == 1,
+                "均衡视图有推子板 + 单段检查器（替代原表格的编辑面）",
+                [NSString stringWithFormat:@"faders=%ld inspectors=%ld", (long)faders, (long)inspectors]);
         STCheck(switches >= 1, "均衡视图有旁路开关", [NSString stringWithFormat:@"switches=%ld", (long)switches]);
     }
     {

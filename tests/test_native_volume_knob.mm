@@ -9,6 +9,7 @@
 //   ③ 两者都看起来像那么回事，只有把具体坐标/数值钉死才测得出来。
 #import <AppKit/AppKit.h>
 #import "RLPVolumeKnobView.h"
+#import "RLPVolumeSliderView.h"
 
 #include <cmath>
 #include <cstdio>
@@ -122,6 +123,73 @@ int main() {
            [NSString stringWithFormat:@"db=%.1f", knob.db]);
     }
 
-    std::printf("\n结果：%d passed, %d failed\n", gPass, gFail);
-    return gFail == 0 ? 0 : 1;
+    // ---- S 组：横向音量滑杆（2026-11-15 用户反馈"旋钮很别扭"后的替代方案）----
+    {
+        // S1 换算必须与旋钮逐值一致：两边各自实现了一份（为了不互相拖链接依赖），
+        // 所以这里做交叉校验 —— 只要有人改了一边忘了另一边，这条立刻红。
+        BOOL same = YES;
+        for (double db = -120.0; db <= 20.0; db += 0.5) {
+            if (!Near(RLPVolSliderDbToNorm(db), RLPVolDbToNorm(db), 1e-9)) { same = NO; break; }
+        }
+        Ck(same, "S1 滑杆的 dB→norm 与旋钮逐值一致（两份实现不会走岔）", @"");
+
+        BOOL sameInv = YES;
+        for (double n = 0.0; n <= 1.0; n += 0.01) {
+            if (!Near(RLPVolSliderNormToDb(n), RLPVolNormToDb(n), 0.11)) { sameInv = NO; break; }
+        }
+        Ck(sameInv, "S2 滑杆的 norm→dB 与旋钮一致（容差取 0.1 dB 量化）", @"");
+
+        Ck(Near(RLPVolSliderDbToNorm(0.0), 0.5, 1e-9), "S3 0 dB 在正中", @"");
+        Ck(Near(RLPVolSliderDbToNorm(-120.0), 0.0, 1e-6) &&
+           Near(RLPVolSliderDbToNorm(20.0), 1.0, 1e-6),
+           "S4 两端分别是 -120 / +20 dB", @"");
+        Ck(Near(RLPVolSliderClampDb(999.0), 20.0, 1e-9) &&
+           Near(RLPVolSliderClampDb(-999.0), -120.0, 1e-9),
+           "S5 越界赋值被夹到量程（不把非法值送进引擎）", @"");
+    }
+
+    {
+        RLPVolumeSliderView *sl = [[RLPVolumeSliderView alloc] initWithFrame:NSMakeRect(0, 0, 160, 24)];
+        [sl layoutSubtreeIfNeeded];
+        sl.db = 0.0;
+
+        Ck(NSWidth([sl trackRect]) > 40,
+           "S6 滑杆有足够的横向行程（旋钮只有角度，细调困难）",
+           [NSString stringWithFormat:@"trackW=%.0f", NSWidth([sl trackRect])]);
+
+        // S7 点按：点哪到哪（滑杆直觉）
+        const CGFloat xq = [sl xForNorm:0.25];
+        NSEvent *down = [NSEvent mouseEventWithType:NSEventTypeLeftMouseDown
+                                           location:[sl convertPoint:NSMakePoint(xq, NSMidY([sl trackRect]))
+                                                              toView:nil]
+                                      modifierFlags:0 timestamp:0 windowNumber:0
+                                            context:nil eventNumber:0 clickCount:1 pressure:1.0];
+        [sl mouseDown:down];
+        Ck(Near(sl.db, RLPVolSliderNormToDb(0.25), 0.15),
+           "S8 点按轨道 → 音量跳到该位置（点哪到哪）",
+           [NSString stringWithFormat:@"db=%.1f", sl.db]);
+
+        // S9 增量拖动：从落点再往右拖 30px，音量必须**继续变大**，
+        // 而不是因为指针在轨道外就回跳（旧旋钮的绝对映射会这样）。
+        const double base = sl.db;
+        const CGFloat x1 = [sl xForNorm:0.25];
+        NSEvent *drag = [NSEvent mouseEventWithType:NSEventTypeLeftMouseDragged
+                                           location:[sl convertPoint:NSMakePoint(x1 + 30, NSMidY([sl trackRect]))
+                                                              toView:nil]
+                                      modifierFlags:0 timestamp:0 windowNumber:0
+                                            context:nil eventNumber:0 clickCount:1 pressure:1.0];
+        [sl mouseDragged:drag];
+        Ck(sl.db > base + 0.5,
+           "S9 拖动是增量累加（指针离开落点后音量继续跟着走）",
+           [NSString stringWithFormat:@"%.1f → %.1f", base, sl.db]);
+
+        // S10 锁定时拖动无效
+        sl.isLocked = YES;
+        const double lockedFore = sl.db;
+        [sl mouseDown:down];
+        Ck(Near(sl.db, lockedFore, 1e-9), "S10 锁定后点按无效", @"");
+
+        std::printf("\n结果：%d passed, %d failed\n", gPass, gFail);
+        return gFail == 0 ? 0 : 1;
+    }
 }

@@ -1250,7 +1250,17 @@ static NSString *RLPControlIdentifier(NSString *key) {
 
     [stack addArrangedSubview:RLPSGroup(RLPTr(@"抖动与保护"), RLPTr(@"按采样率自动重标定"), t)];
 
-    self.shaperPopup = [self popupForKey:@"sp_shaper" items:@[ RLPTr(@"读取中…") ]
+    // ⚠️ 选项必须**当场给全**，不能只放一个"读取中…"占位再等别处填。
+    // 用户 2026-11-15 实测：这个下拉永远显示「读取中…」。
+    // 根因：后端把 SHAPER_OPTS 只塞进 **web 页面的 <select id=sShap>**（rtaweb.cpp:12706
+    // 的 fill_all），原生端没有任何 /api/... 会返回这份清单，
+    // 而 reloadData 里也只给滤波器下拉填了项（/api/filters），漏了这一个。
+    // 清单与后端逐字一致（rtaweb.cpp:12692 的 so 循环），改一处必须改两处。
+    NSArray<NSString *> *shapers = @[ @"auto", @"none", @"NS1", @"NS4", @"NS5", @"NS9",
+                                      @"LNS15", @"RPDF", @"TPDF", @"Gauss1", @"Shaped" ];
+    NSMutableArray<NSString *> *shaperItems = [NSMutableArray array];
+    for (NSString *s in shapers) [shaperItems addObject:s];
+    self.shaperPopup = [self popupForKey:@"sp_shaper" items:shaperItems
                                   action:@selector(onShaper:)];
     [stack addArrangedSubview:RLPSRow(RLPTr(@"抖动 / 噪声整形"), self.shaperPopup,
         RLPTr(@"auto = 按输出位深自动选型"), t)];
@@ -3055,12 +3065,21 @@ static BOOL RLPFeedbackTextBlank(NSString *s) {
         if (!items.count) return;
         [self_.filt1xPopup removeAllItems];
         [self_.filtNxPopup removeAllItems];
+        // SDM 页的 Oversampling 1x / Nx 用的是同一份滤波器清单
+        //（web：sel('sp_sdmo1', ...) 与 1x/Nx 共用 FILTER_OPTS）。
+        // 旧原生只填了 PCM 页那两个，SDM 页两个永远停在「读取中…」。
+        [self_.sdmO1Popup removeAllItems];
+        [self_.sdmONxPopup removeAllItems];
+        [self_.sdmO1Popup addItemWithTitle:RLPTr(@"跟随 PCM 页的 1x")];
+        [self_.sdmONxPopup addItemWithTitle:RLPTr(@"跟随上面的 1x")];
         for (id it in items) {
             NSString *name = [it isKindOfClass:[NSDictionary class]] ? it[@"name"]
                              : ([it isKindOfClass:[NSString class]] ? it : nil);
             if (!name.length) continue;
             [self_.filt1xPopup addItemWithTitle:name];
             [self_.filtNxPopup addItemWithTitle:name];
+            [self_.sdmO1Popup addItemWithTitle:name];
+            [self_.sdmONxPopup addItemWithTitle:name];
         }
     }];
 

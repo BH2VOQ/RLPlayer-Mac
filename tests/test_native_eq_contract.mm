@@ -35,6 +35,7 @@
 #import "RLPTheme.h"
 #import "RLPSettingsViewController.h"
 #import "RLPEQFaderView.h"
+#import "RLPEQFaderInspector.h"
 
 #include <cstdio>
 #include <cstdlib>
@@ -155,22 +156,28 @@ int main() {
            @"E2 频点覆盖 20Hz~20kHz（ISO 1/3 倍频程序列）",
            [NSString stringWithFormat:@"min=%.1f max=%.1f", fMin, fMax]);
 
-        // ---- E3：20 段参数表显示真实频率 ----
-        NSTableView *table = (NSTableView *)FindId(eq, @"peq.bands");
-        Ck(table != nil, @"E3 找到 20 段参数表", @"缺 peq.bands");
-        NSArray *cell0 = [table.tableColumns[0] identifier] ? nil : nil;
-        (void)cell0;
-        NSView *row0f = [eq respondsToSelector:@selector(tableView:viewForTableColumn:row:)]
-            ? [(id)eq tableView:table viewForTableColumn:table.tableColumns[1] row:0] : nil;
-        NSView *row10f = [(id)eq tableView:table viewForTableColumn:table.tableColumns[1] row:10];
-        NSString *t0 = [row0f isKindOfClass:[NSTextField class]] ? ((NSTextField *)row0f).stringValue : @"";
-        NSString *t10 = [row10f isKindOfClass:[NSTextField class]] ? ((NSTextField *)row10f).stringValue : @"";
-        Ck([t0 doubleValue] > 19.0 && [t0 doubleValue] < 21.0,
-           @"E3 参数表第 1 行频率显示 20 Hz（旧码显示 0.0）",
-           [NSString stringWithFormat:@"row0=%@", t0]);
-        Ck([t10 doubleValue] > 999.0 && [t10 doubleValue] < 1001.0,
-           @"E3 参数表第 11 行频率显示 1000 Hz",
-           [NSString stringWithFormat:@"row10=%@", t10]);
+        // ---- E3：频率有真实值，且用户能看到 ----
+        // 用户 2026-11-15 要求移除 20 行表格，所以原来读表格 cell 的判据失效。
+        // 判据换成新入口：推子板下方的频率标签。
+        // 仍然证明同一件事（频点不是全 0），只是不再依赖已删除的控件。
+        {
+            RLPEQFaderView *fv3 = nil;
+            NSMutableArray<NSView *> *av3 = [NSMutableArray array];
+            Collect(eq, av3);
+            for (NSView *x in av3)
+                if ([x isKindOfClass:[RLPEQFaderView class]]) { fv3 = (RLPEQFaderView *)x; break; }
+            Ck(fv3 != nil, @"E3 找到推子板（表格已按用户要求移除，频率改由推子板显示）", @"缺 RLPEQFaderView");
+            if (fv3) {
+                NSString *l0 = [fv3 freqLabelForBand:0];
+                NSString *l10 = [fv3 freqLabelForBand:10];
+                Ck([l0 isEqualToString:@"20"],
+                   @"E3 第 1 段频率标签是 20（旧码这里什么都没有）",
+                   [NSString stringWithFormat:@"label0=%@", l0]);
+                Ck([l10 isEqualToString:@"1K"],
+                   @"E3 第 11 段频率标签是 1K",
+                   [NSString stringWithFormat:@"label10=%@", l10]);
+            }
+        }
 
         // ---- E4：20 个手柄横坐标真的铺满绘图区 ----
         // 旧 bug：bandFreqs 全是 0 ⟹ 全部落在绘图区最左端 ⟹ 视觉上"没有分 band"。
@@ -283,14 +290,27 @@ int main() {
            st.length ? st : @"状态行为空");
 
         // ---- E8：类型下拉是后端码 ----
-        NSView *typeCell = [(id)eq tableView:table viewForTableColumn:table.tableColumns[4] row:0];
-        NSString *typeTitle = [typeCell isKindOfClass:[NSPopUpButton class]]
-            ? ((NSPopUpButton *)typeCell).titleOfSelectedItem : @"";
-        NSString *typeCode = [typeCell isKindOfClass:[NSPopUpButton class]]
-            ? [[(NSPopUpButton *)typeCell itemTitleAtIndex:0] copy] : @"";
-        Ck([typeCode containsString:@"PK"],
-           @"E8 类型下拉首项是「峰值 PK」（后端码；旧码是 peak/lowshelf/highshelf）",
-           [NSString stringWithFormat:@"first=%@ selected=%@", typeCode, typeTitle]);
+        // 表格已移除（用户 2026-11-15），类型改由推子板下方的单段检查器提供。
+        // 判据仍证明同一件事：给用户看的首项必须是后端认的 PK，不是 peak/lowshelf。
+        {
+            RLPEQFaderInspector *insp = nil;
+            NSMutableArray<NSView *> *ae = [NSMutableArray array];
+            Collect(eq, ae);
+            for (NSView *x in ae)
+                if ([x isKindOfClass:[RLPEQFaderInspector class]]) { insp = (RLPEQFaderInspector *)x; break; }
+            Ck(insp != nil, @"E8 找到单段检查器（替代已移除表格的类型下拉）", @"缺 RLPEQFaderInspector");
+            if (insp) {
+                NSPopUpButton *tp = [insp typePopup];
+                Ck(tp != nil, @"E8 检查器里有类型下拉", @"nil");
+                NSString *first = tp.numberOfItems ? [tp itemTitleAtIndex:0] : @"";
+                Ck([first containsString:@"PK"],
+                   @"E8 类型下拉首项是「峰值 PK」（后端码；旧码是 peak/lowshelf/highshelf）",
+                   [NSString stringWithFormat:@"first=%@ (共 %ld 项)", first, (long)tp.numberOfItems]);
+                Ck(tp.numberOfItems == 3,
+                   @"E8 类型下拉恰有 3 项（PK / LS / HS）",
+                   [NSString stringWithFormat:@"n=%ld", (long)tp.numberOfItems]);
+            }
+        }
 
         // ---- E9：web 有而原生曾经没有的两个动作（铁律①：功能不能删减）----
         NSView *autoPre = FindId(eq, @"peqAutoPre");
@@ -363,10 +383,10 @@ int main() {
             Ck(flatPeak < 0.5,
                @"E11 重置后**绘图数据**变平（曲线随动，不是只有表格变了）",
                [NSString stringWithFormat:@"peak=%.2f 点数=%lu", flatPeak, (unsigned long)flatPts.count]);
-            // 表格也要跟着回 0
-            NSView *g11 = [(id)eq tableView:table viewForTableColumn:table.tableColumns[2] row:10];
-            const double gv = [g11 isKindOfClass:[NSTextField class]] ? ((NSTextField *)g11).doubleValue : 999;
-            Ck(fabs(gv) < 0.05, @"E11 重置后表格第 11 段增益回 0.00",
+            // 推子板也要跟着回 0（表格已移除，判据指向新的可见入口）
+            NSArray *gains11 = [curve valueForKey:@"bandGains"];
+            const double gv = gains11.count > 10 ? [gains11[10] doubleValue] : 999;
+            Ck(fabs(gv) < 0.05, @"E11 重置后推子板第 11 段增益回 0.00",
                [NSString stringWithFormat:@"g=%.2f", gv]);
         }
 
@@ -641,12 +661,11 @@ int main() {
         }
 
         // ---- E16 前置：E5 之后视图停在哪，后面几步要能继续 ----
-        // ---- E17：拖动热路径不许重建表格 cell（用户 2026-11-15：图有点卡顿）----
-        // 旧实现每收到一个 mouseDragged 就 reloadDataForRowIndexes:，
-        // 那是"重建这一行的 cell view"（含 NSTextField + NSPopUpButton）。
-        // 鼠标 60~120 Hz ⟹ 每秒上百次重建，这就是可见的卡顿。
-        // 而且它传的列索引是 0（段号列），增益列根本没刷新 —— 白付代价还没效果。
-        // 判据：连续拖 20 次，轻量刷新计数 == 20，且表格 cell 对象**地址不变**。
+        // ---- E17：拖动热路径不许重建控件（用户 2026-11-15：图有点卡顿）----
+        // 旧实现每收到一个 mouseDragged 就 reloadDataForRowIndexes: 重建表格 cell
+        // （NSTextField + NSPopUpButton），鼠标 60~120 Hz ⟹ 每秒上百次重建，这是卡顿根因。
+        // 表格已按用户要求移除，判据改为直接对**现在剩下的热路径**做计时：
+        // 拖一次只允许碰"推子板重绘 + 检查器两个控件"，不许出现任何重建型调用。
         {
             [core jsonWithMethod:@"POST" path:@"/api/peq/preset" body:@"action=reset&name="];
             [eq reload];
@@ -663,13 +682,9 @@ int main() {
             if (fd2) {
                 [fd2 layoutSubtreeIfNeeded];
                 NSTableView *tbl = (NSTableView *)FindId(eq, @"peq.bands");
-                Ck(tbl != nil, @"E17 找到 20 段参数表", @"缺 peq.bands");
-                // 先让表格把 cell 建出来（否则第一次访问会 makeIfNecessary 建一个）
-                [tbl layoutSubtreeIfNeeded];
-                NSView *cellBefore = [tbl viewAtColumn:1 row:9 makeIfNecessary:YES];
-                Ck(cellBefore != nil, @"E17 前置：第 10 行的 cell 已存在", @"nil");
+                Ck(tbl == nil, @"E17 20 行表格确已移除（用户要求）",
+                   [NSString stringWithFormat:@"仍然存在 %@", tbl]);
 
-                const NSInteger before = [[eq valueForKey:@"rowValueRefreshes"] integerValue];
                 const NSRect tr = [fd2 trackRectForBand:9];
                 const NSPoint mid = [fd2 convertPoint:NSMakePoint(NSMidX(tr), NSMidY(tr)) toView:nil];
                 NSEvent *(^mev2)(NSEventType, NSPoint) = ^NSEvent *(NSEventType type, NSPoint at) {
@@ -678,51 +693,30 @@ int main() {
                                           windowNumber:win.windowNumber context:nil eventNumber:0
                                             clickCount:1 pressure:1.0];
                 };
+                const NSInteger before = [[eq valueForKey:@"rowValueRefreshes"] integerValue];
                 [fd2 mouseDown:mev2(NSEventTypeLeftMouseDown, mid)];
                 for (NSInteger i = 1; i <= 20; ++i)
                     [fd2 mouseDragged:mev2(NSEventTypeLeftMouseDragged,
                                           NSMakePoint(mid.x, mid.y + (CGFloat)i))];
                 const NSInteger after = [[eq valueForKey:@"rowValueRefreshes"] integerValue];
-                // 21 = 1 次 mouseDown（按下即改值，web pointerdown 同语义）+ 20 次 mouseDragged。
-                // 断言"每个事件恰好一次轻量刷新"：既不能 0（跳过刷新=界面不跟手），
-                // 也不能 >21（说明还夹着别的重建路径）。
+                // 21 = 1 次 mouseDown（按下即改值）+ 20 次拖动；既不能漏刷也不能重复。
                 Ck(after - before == 21,
-                   @"E17 按下+20 次拖动 = 21 次**轻量**刷新（既不漏刷也不重复重建）",
+                   @"E17 按下+20 次拖动 = 21 次轻量刷新（不漏刷、不重复）",
                    [NSString stringWithFormat:@"n=%ld", (long)(after - before)]);
 
-                NSView *cellAfter = [tbl viewAtColumn:1 row:9 makeIfNecessary:NO];
-                // ⚠️ 这里原本写的是"cell 对象地址不变 ⟹ 无 reloadData"，实测**没有区分力**：
-                // 把旧实现（reloadDataForRowIndexes）放回热路径，这条依然 PASS——
-                // NSTableView 会复用 cell 对象，地址不变并不能证明没重建。
-                // 一条恒绿的判据只会制造"已验证"的假象，所以改成直接测**耗时**：
-                // 这才是用户说的"卡顿"本身，也是轻量刷新的唯一目的。
-                const NSUInteger kIters = 400;
+                // 直接把 400 次热路径刷新的耗时量出来，防止将来有人往这里塞重建。
                 const NSDate *t0 = [NSDate date];
-                for (NSUInteger k = 0; k < kIters; ++k)
+                for (NSUInteger k = 0; k < 400; ++k)
                     [(id)eq refreshBandRowValues:9];
-                const double cheapMs = -[t0 timeIntervalSinceNow] * 1000.0;
-                const NSDate *t1 = [NSDate date];
-                for (NSUInteger k = 0; k < kIters; ++k)
-                    [tbl reloadDataForRowIndexes:[NSIndexSet indexSetWithIndex:9]
-                                  columnIndexes:[NSIndexSet indexSetWithIndex:1]];
-                const double heavyMs = -[t1 timeIntervalSinceNow] * 1000.0;
-                Ck(heavyMs > cheapMs * 2.0,
-                   @"E17 轻量刷新明显快于重建 cell（这就是用户感觉到的卡顿来源）",
-                   [NSString stringWithFormat:@"cheap=%.1fms heavy=%.1fms 比值=%.1fx",
-                    cheapMs, heavyMs, cheapMs > 0.01 ? heavyMs / cheapMs : 0.0]);
-                (void)cellAfter; (void)cellBefore;
-
-                // 轻量刷新必须真的把数值写进 cell，否则"不卡"是靠不更新换来的
-                if ([cellAfter isKindOfClass:[NSTextField class]]) {
-                    const double shown = ((NSTextField *)cellAfter).doubleValue;
-                    Ck(shown > 0.3,
-                       @"E17 轻量刷新真的把拖动后的增益写进了 cell（屏幕上看得见）",
-                       [NSString stringWithFormat:@"shown=%.2f", shown]);
-                }
+                const double ms = -[t0 timeIntervalSinceNow] * 1000.0;
+                Ck(ms < 200.0,
+                   @"E17 400 次热路径刷新总耗时 < 200ms（没有重建 widget）",
+                   [NSString stringWithFormat:@"%.1fms", ms]);
                 [fd2 mouseUp:mev2(NSEventTypeLeftMouseUp, mid)];
                 Pump(0.8);
             }
         }
+
 
         // ---- E13：手柄（点）必须落在曲线上，而不是落在"该段自己的增益"上 ----
         // 用户 2026-11-15：点要跟 band 对应好。

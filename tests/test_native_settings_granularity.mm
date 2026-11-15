@@ -152,7 +152,10 @@ int main() {
 
         NSView *peqCard = eqCards.count ? eqCards[0] : nil;
         NSView *opraCard = eqCards.count > 1 ? eqCards[1] : nil;
-        for (NSString *ident in @[ @"peqBypass", @"peqPreamp", @"peq.bands", @"eq.curve" ]) {
+        // 2026-11-15 用户明确「底下这个 eq 表不要了」⟹ 20 行参数表已移除。
+        // 它的职责拆成：频率/增益 → 推子板(eq.fader)；Q/类型/开关 → 单段检查器(eq.inspector)。
+        // 判据跟着**新控件集**走（不是放宽）：PEQ 卡体内现在必须有推子板与检查器。
+        for (NSString *ident in @[ @"peqBypass", @"peqPreamp", @"eq.fader", @"eq.inspector", @"eq.curve" ]) {
             NSView *x = FindId(eqPane, ident);
             Ck(x && peqCard && CardFor(x) == peqCard,
                [NSString stringWithFormat:@"【EQ】%@ 在「参数均衡 PEQ」卡体内", ident],

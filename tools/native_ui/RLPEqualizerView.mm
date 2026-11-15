@@ -28,6 +28,7 @@
 #import "RLPTargetCurve.h"
 #import "RLPEQGeometry.h"
 #import "RLPEQFaderView.h"
+#import "RLPEQFaderInspector.h"
 
 #include <cmath>
 #include <initializer_list>
@@ -564,7 +565,11 @@
 @property (nonatomic, strong) NSSwitch *bypass;
 @property (nonatomic, strong) NSTextField *preamp;
 @property (nonatomic, strong) NSTextField *status;
-@property (nonatomic, strong) NSTableView *bandTable;
+/// 已废弃：20 行表格被用户要求移除（2026-11-15）。保留声明仅为兼容既有判据的 KVC 访问，
+/// 运行时恒为 nil；新代码不要再读它。
+@property (nonatomic, strong, nullable) NSTableView *bandTable;
+/// 单段检查器（Q / 类型 / 开关），替代被移除的表格。
+@property (nonatomic, strong) RLPEQFaderInspector *inspector;
 @property (nonatomic, strong) NSMutableArray<NSMutableDictionary *> *bands;
 @property (nonatomic, strong) NSTimer *applyTimer;
 @property (nonatomic, assign) BOOL loading;
@@ -795,6 +800,8 @@
         s.fader.bandGains = gains;
         s.curve.bandGains = gains;
         [s.curve setNeedsDisplay:YES];
+        // 拖谁就把检查器切到谁（用户点/拖某一段，下面就该显示那一段的 Q/类型）
+        if (s.inspector.bandIndex != idx) [s syncInspectorForBand:idx];
         [s refreshBandRowValues:(NSUInteger)idx];
         [s scheduleApply];
     };
@@ -810,42 +817,50 @@
         while (gains.count < s.bands.count) [gains addObject:@0];
         gains[(NSUInteger)idx] = @(db);
         s.curve.bandGains = gains;
+        s.fader.bandGains = gains;   // 推子板与曲线同源，两边都要跟着走
         [s.curve setNeedsDisplay:YES];
-        // ⚠️ 这里**不能**用 reloadDataForRowIndexes:columnIndexes:。
-        // 那是"重建这一行的 cell view"——鼠标拖动每秒 60~120 个事件，每个都重建一次
-        // NSTableView 的 cell（含 NSTextField/NSPopUpButton），是用户反馈「图有点卡顿」的主因。
-        // 而且原来传的列索引是 0（段号列），增益列根本没被刷新 —— 白付了重建代价还没效果。
-        // 正确做法：只把已存在的那两行 cell 的字符串改掉（不申请新 view、不重算行高）。
+        if (s.inspector.bandIndex != idx) [s syncInspectorForBand:idx];
+        // 拖动热路径：只刷检查器里那几个控件，不做任何重建。
+        // （表格已按用户要求移除；历史上这里每帧 reloadDataForRowIndexes: 重建 cell，
+        //  是"拖动卡顿"的根因，注释留作教训。）
         [s refreshBandRowValues:(NSUInteger)idx];
         [s scheduleApply];
     };
 
-    [self.stack addArrangedSubview:RLPLabel(RLPTr(@"20 段参数"),
-        [NSFont systemFontOfSize:13 weight:NSFontWeightSemibold], t.text)];
-    self.bandTable = [[NSTableView alloc] initWithFrame:NSZeroRect];
-    self.bandTable.identifier = @"peq.bands";
-    self.bandTable.dataSource = self;
-    self.bandTable.delegate = self;
-    self.bandTable.rowHeight = 26;
-    self.bandTable.backgroundColor = t.bg;
-    NSArray *titles = @[ @"#", RLPTr(@"频率 Hz"), RLPTr(@"增益 dB"), @"Q", RLPTr(@"类型") ];
-    NSArray *ids = @[ @"n", @"f", @"g", @"q", @"type" ];
-    NSArray *ws = @[ @34, @90, @90, @70, @130 ];
-    for (NSInteger i = 0; i < (NSInteger)titles.count; ++i) {
-        NSTableColumn *c = [[NSTableColumn alloc] initWithIdentifier:ids[i]];
-        c.title = titles[i];
-        c.width = [ws[i] doubleValue];
-        [self.bandTable addTableColumn:c];
-    }
-    // 用户 2026-11-15 明确：**每个界面只允许整页滚动，禁止页面内的小页面滚动**。
-    // 旧实现把 20 段表塞进 NSScrollView（虽然不显示滚动条），滚轮在表上仍然被它吃掉。
-    // 现在表格直接铺在 stack 里（高度 = 表头 + 20 行），滚动完全交给设置页。
-    self.bandTable.translatesAutoresizingMaskIntoConstraints = NO;
-    [self.stack addArrangedSubview:self.bandTable];
+    // 用户 2026-11-15：底下这个 eq 表不要了。
+    // 但那张 20 行表是 Q / 滤波器类型 / 单段开关的唯一编辑入口，直接删=删功能。
+    // 所以改成单段检查器：只在推子板下方显示当前选中那一段的 Q / 类型 / 开关，
+    // 固定一行高、不再是 20 行大表（专业 EQ 的 inspector 做法）。
+    self.inspector = [[RLPEQFaderInspector alloc] initWithFrame:NSZeroRect];
+    self.inspector.identifier = @"eq.inspector";
+    self.inspector.translatesAutoresizingMaskIntoConstraints = NO;
+    [self.stack addArrangedSubview:self.inspector];
     [NSLayoutConstraint activateConstraints:@[
-        [self.bandTable.heightAnchor constraintEqualToConstant:20 * 26 + 26],
-        [self.bandTable.widthAnchor constraintEqualToAnchor:self.stack.widthAnchor constant:-4],
+        [self.inspector.heightAnchor constraintEqualToConstant:30],
+        [self.inspector.widthAnchor constraintEqualToAnchor:self.stack.widthAnchor constant:-4],
     ]];
+    __weak __typeof__(self) weakInsp = self;
+    self.inspector.onQChanged = ^(NSInteger idx, double q) {
+        __typeof__(self) s = weakInsp;
+        if (!s || idx < 0 || idx >= (NSInteger)s.bands.count) return;
+        s.bands[(NSUInteger)idx][@"q"] = @(q);
+        [s scheduleApply];
+    };
+    self.inspector.onTypeChanged = ^(NSInteger idx, NSString *code) {
+        __typeof__(self) s = weakInsp;
+        if (!s || idx < 0 || idx >= (NSInteger)s.bands.count) return;
+        s.bands[(NSUInteger)idx][@"type"] = RLPEQTypeCodeNormalized(code);
+        [s scheduleApply];
+    };
+    self.inspector.onEnabledChanged = ^(NSInteger idx, BOOL on) {
+        __typeof__(self) s = weakInsp;
+        if (!s || idx < 0 || idx >= (NSInteger)s.bands.count) return;
+        s.bands[(NSUInteger)idx][@"on"] = @(on);
+        [s scheduleApply];
+    };
+    // 20 行表格已移除（用户 2026-11-15：底下这个 eq 表不要了）。
+    // 它的三列职责去向：频率/增益 → 推子板；Q/类型/开关 → 上面的单段检查器。
+    // bandTable 属性保留为 nil，只为让既有 KVC/判据在过渡期不崩（下面有用法守卫）。
 
     [self buildPresetSection];
     [self buildOpraSection];
@@ -1128,19 +1143,9 @@
     // 判据锚点：拖动热路径每触发一次这里 += 1（E17 用它证明"走了轻量路径"）。
     _rowValueRefreshes += 1;
     if (row >= self.bands.count) return;
-    NSDictionary *band = self.bands[row];
-    for (NSInteger ci = 0; ci < (NSInteger)self.bandTable.numberOfColumns; ++ci) {
-        NSTableColumn *col = self.bandTable.tableColumns[(NSUInteger)ci];
-        NSString *key = col.identifier;
-        if (![key isEqualToString:@"g"] && ![key isEqualToString:@"q"]) continue;
-        NSString *ident = [key stringByAppendingString:@"Field"];
-        NSTextField *tf = (NSTextField *)[self.bandTable viewAtColumn:ci row:(NSInteger)row
-                                                          makeIfNecessary:NO];
-        if (!tf || ![tf isKindOfClass:[NSTextField class]]) continue;
-        if (![tf.identifier isEqualToString:ident]) continue;
-        if ([[self.bandTable window] firstResponder] == tf) continue;   // 用户正在这里输入，别抢
-        tf.stringValue = [NSString stringWithFormat:@"%.2f", [band[key] doubleValue]];
-    }
+    // 表格已移除 ⟹ 拖动时要跟着变的是**检查器**（如果正好选中这一段）。
+    // 只在这个段被选中时更新，避免每帧白算一遍。
+    if (self.inspector.bandIndex == (NSInteger)row) [self syncInspectorForBand:(NSInteger)row];
 }
 
 /// 曲线 ↔ 推子板切换。两种视图读同一份 bands，切换只改 visible 与按钮标题。
@@ -1174,6 +1179,22 @@
     self.fader.bandGains = gains;
     [self.curve setNeedsDisplay:YES];
     [self.fader setNeedsDisplay:YES];
+}
+
+/// 把第 idx 段的 Q / 类型 / 开关 + 频率灌进检查器。idx < 0 时整条隐藏。
+- (void)syncInspectorForBand:(NSInteger)idx {
+    if (!self.inspector) return;
+    if (idx < 0 || idx >= (NSInteger)self.bands.count) {
+        self.inspector.bandIndex = -1;
+        return;
+    }
+    NSDictionary *b = self.bands[(NSUInteger)idx];
+    self.inspector.bandIndex = idx;
+    self.inspector.freqText = [NSString stringWithFormat:@"%.0f Hz", [b[@"f"] doubleValue]];
+    self.inspector.q = [b[@"q"] doubleValue];
+    self.inspector.typeCode = RLPEQTypeCodeNormalized(b[@"type"]);
+    self.inspector.bandEnabled = [b[@"on"] boolValue];
+    [self.inspector syncValues];
 }
 
 #pragma mark - 频段类型码（后端契约：PK / LS / HS）
@@ -1354,7 +1375,7 @@ static NSString *RLPEQTypeCodeNormalized(id raw) {
             m[@"on"] = @([x[@"on"] respondsToSelector:@selector(boolValue)] ? [x[@"on"] boolValue] : YES);
             [self.bands addObject:m];
         }
-        [self.bandTable reloadData];
+        [self syncInspectorForBand:self.inspector.bandIndex];
     }
 
     NSArray *pts = [json[@"points"] isKindOfClass:[NSArray class]] ? json[@"points"] : nil;
@@ -1728,11 +1749,11 @@ static NSArray<NSDictionary *> *RLPOpraFilter(NSArray<NSDictionary *> *index, NS
 
 - (void)applyTheme {
     RLPTheme *t = [RLPTheme current];
-    self.bandTable.backgroundColor = t.bg;
+    // 表格已移除（用户要求），这里不再有可上色的表格。
     self.status.textColor = t.mut;
     self.opraStatus.textColor = t.mut;
     self.opraInfo.textColor = t.mut;
-    [self.bandTable reloadData];
+    [self syncInspectorForBand:self.inspector.bandIndex];
     [self.curve setNeedsDisplay:YES];
 }
 

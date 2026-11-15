@@ -5,6 +5,7 @@
 #import <QuartzCore/QuartzCore.h>
 #import "RLPPlaybackBarView.h"
 #import "RLPVolumeKnobView.h"
+#import "RLPVolumeSliderView.h"
 #import "RLPSupport.h"
 
 // 生产接缝（实现在 RLPPlaybackBarView.mm）：旋钮松开按 v3.3.11 dB 直接下发。
@@ -135,7 +136,12 @@ int main() { @autoreleasepool {
             // 徽章在播放条坐标系里的矩形 → 位图上的像素矩形
             const NSRect inBar = [l convertRect:l.bounds toView:bar];
             const NSInteger x0p = (NSInteger)lround(NSMinX(inBar) * pxScale);
-            const NSInteger y0p = (NSInteger)lround(NSMinY(inBar) * pxScale);
+            // ⚠️ y 必须翻一次：NSBitmapImageRep 的 colorAtX:y: 以**位图左上角**为原点，
+            // 而 NSView 坐标以左下角为原点。旧写法直接用 NSMinY，只有徽章**正好在条高一半**
+            // （y 23..43 于 66pt 高的条内，中心 33 = H/2）时两种解释才重合 ⟹ 这条判据长期
+            // 是"碰巧过"。2026-11-15 把右簇上移到五键组竖带（中心 H-24=42）后立刻露馅：
+            // 实测 fmt/gpu 找不到墨迹、bp 量到的是时长标签的墨迹（R63.5 就是证据）。
+            const NSInteger y0p = (NSInteger)lround((bar.bounds.size.height - NSMaxY(inBar)) * pxScale);
             const NSInteger wP  = (NSInteger)lround(l.bounds.size.width * pxScale);
             const NSInteger hP  = (NSInteger)lround(l.bounds.size.height * pxScale);
             if (wP < 6 || hP < 6) { check(NO, [[NSString stringWithFormat:@"第13项: %@ 位图区域有效", key] UTF8String]); continue; }
@@ -284,7 +290,18 @@ int main() { @autoreleasepool {
             NSView *cover = field(bar,@"coverView");
             NSTextField *volLab = field(bar,@"durLabel");
             const CGFloat leftGap = NSMinX(cover.frame);
-            const CGFloat rightGap = bar.bounds.size.width - NSMaxX([field(bar,@"volDbField") frame]);
+            // 右端留白必须取**全部控件里最靠右的那一个**的右缘。
+            // 旧写法只看 volDbField；音量改成滑杆后滑杆自带数值、并且排在 volDbField 右边，
+            // 于是量出来是负的（-1.0），看起来像"溢出"，其实是取样对象过时。
+            CGFloat rightMost = 0;
+            for (NSView *sub in bar.subviews) {
+                if (sub.hidden || sub.alphaValue < 0.01) continue;
+                if (NSIsEmptyRect(sub.frame)) continue;
+                // glass 背景铺满整个 bounds；把它算进来右边距永远为 0（假红）。
+                if ([sub.identifier isEqualToString:@"pb.glass"]) continue;
+                rightMost = MAX(rightMost, NSMaxX(sub.frame));
+            }
+            const CGFloat rightGap = bar.bounds.size.width - rightMost;
             (void)volLab;
             check(fabs(leftGap - rightGap) <= 2.0,
                   [[NSString stringWithFormat:@"第14项: 左右两端留白差 ≤2pt（左 %.1f 右 %.1f）",
@@ -311,7 +328,7 @@ int main() { @autoreleasepool {
     check(fabs([field(bar,@"coverView") frame].size.width-44)<.01, "web cover is 44pt");
     for (NSNumber *width in @[@1120,@980,@860]) {
         bar.frame=NSMakeRect(0,0,width.doubleValue,66); [bar layout];
-        NSArray *right=@[@"lyricBtn",@"chainBtn",@"bpBadge",@"fmtBadge",@"volIconView",@"volKnob"];
+        NSArray *right=@[@"lyricBtn",@"chainBtn",@"bpBadge",@"fmtBadge",@"volMuteBtn",@"volKnob",@"volDbField"];
         CGFloat edge=NSMaxX([field(bar,@"stopBtn") frame]);
         for (NSString *key in right) { NSView *v=field(bar,key); check(!v.hidden && v.frame.size.width>0 && NSMinX(v.frame)>=edge && NSMaxX(v.frame)<=width.doubleValue, "right controls and badges visible inside right column in one or two rows"); }
         for (NSUInteger i=0;i<right.count;++i) for(NSUInteger j=i+1;j<right.count;++j)
@@ -351,9 +368,22 @@ int main() { @autoreleasepool {
     check([[field(bar,@"titleLabel") stringValue] isEqual:@"Real title"], "metadata title survives subsequent polls");
     check([[field(bar,@"subLabel") stringValue] isEqual:@"Real artist · Real album"], "real artist and album shown");
     NSSlider *volume=field(bar,@"volume");
-    RLPVolumeKnobView *knob=field(bar,@"volKnob");
-    check([knob isKindOfClass:RLPVolumeKnobView.class], "v3.3.11 #volKnob 存在（底栏音量旋钮）");
-    check(volume.hidden, "旧滑块已隐藏（web #vol range 是 sr-only，可见控制是旋钮）");
+    // 2026-11-15：底栏音量由 270 度旋钮改成**横向滑杆**（用户反馈"旋钮很别扭"）。
+    // 依据：Apple HIG《Sliders》"Don't use a slider to adjust audio volume...
+    // use a volume view, which includes a volume-level slider"；macOS 27.2 系统音量提示
+    // 自身也改成"左端喇叭 + 分段横条"。旋钮比 slider 更偏离：一维连续量藏进角度。
+    // 因此这里断言的是新控件，属性名沿用 volKnob（避免大面积改 KVC 锚点）。
+    RLPVolumeSliderView *knob=(RLPVolumeSliderView *)field(bar,@"volKnob");
+    check([knob isKindOfClass:RLPVolumeSliderView.class],
+          "底栏音量是横向滑杆（2026-11-15 由旋钮改来，HIG 推荐 volume slider）");
+    RLPVolumeSliderView *sl = knob;
+    // 行程判据用 trackRect 而不是 frame：showsAccessories=YES 时轨道会被内置喇叭/数值挤窄，
+    // 只有"轨道的真实宽度"才等价于"用户可细调的横向行程"。
+    check(NSWidth([sl trackRect]) > 40,
+          "滑杆有足够横向行程（旋钮只有角度，细调困难）");
+    check([sl muteButton] != nil, "滑杆自带静音键（左端喇叭）");
+    check([sl valueLabel] != nil, "滑杆自带 dB 数值显示");
+    check(volume.hidden, "旧的 NSSlider 仍隐藏（不与新滑杆重复）");
     for (NSString *key in @[@"prevBtn",@"playBtn",@"nextBtn",@"stopBtn",@"repeatBtn"]) {
         NSButton *button=field(bar,key); check(button.target==bar && button.action!=NULL, "transport controls have real target-action wiring");
     }
@@ -376,18 +406,26 @@ int main() { @autoreleasepool {
     check(![field(bar,@"gpuBadge") isHidden], "GPU badge follows real gpuUsed status");
     gpu[@"bitPerfect"]=@"direct"; gpu[@"gpuUsed"]=@YES; statusJSON=gpu;
     bar.frame=NSMakeRect(0,0,626,66); [bar fetchStatus]; [bar layout];
-    NSArray *all=@[@"coverView",@"titleLabel",@"subLabel",@"repeatBtn",@"prevBtn",@"playBtn",@"nextBtn",@"stopBtn",@"posLabel",@"progress",@"durLabel",@"lyricBtn",@"chainBtn",@"bpBadge",@"fmtBadge",@"gpuBadge",@"volIconView",@"volKnob"];
+    NSArray *all=@[@"coverView",@"titleLabel",@"subLabel",@"repeatBtn",@"prevBtn",@"playBtn",@"nextBtn",@"stopBtn",@"posLabel",@"progress",@"durLabel",@"lyricBtn",@"chainBtn",@"bpBadge",@"fmtBadge",@"gpuBadge",@"volMuteBtn",@"volKnob",@"volDbField"];
     for (NSUInteger i=0;i<all.count;++i) {
         NSView *a=field(bar,all[i]); check(!a.hidden && NSContainsRect(bar.bounds,a.frame), "minimum supported 626pt bar contains every real control/badge");
         for (NSUInteger j=i+1;j<all.count;++j) {
-            NSView *b=field(bar,all[j]); check(!NSIntersectsRect(a.frame,b.frame), "minimum bar controls do not overlap");
+            NSView *b=field(bar,all[j]);
+            if (NSIntersectsRect(a.frame, b.frame)) {
+                printf("  [diag] overlap: %s %s  vs  %s %s\n",
+                       [all[i] UTF8String], [NSStringFromRect(a.frame) UTF8String],
+                       [all[j] UTF8String], [NSStringFromRect(b.frame) UTF8String]);
+            }
+            check(!NSIntersectsRect(a.frame,b.frame), "minimum bar controls do not overlap");
         }
     }
     gpu[@"gpuUsed"]=@NO; statusJSON=gpu; [bar fetchStatus]; check([field(bar,@"gpuBadge") isHidden], "GPU badge clears when unused");
-    // 旋钮是自绘视图：这里断言它真的占据了可见槽位（方形），accent 值弧的色彩断言
-    // 由 test_native_volume_knob 的绘制路径覆盖（同一份 RLPVolumeKnobView 实现）。
-    check(NSWidth(knob.frame) > 0 && NSHeight(knob.frame) > 0, "旋钮有真实可见尺寸");
-    check(fabs(NSWidth(knob.frame) - NSHeight(knob.frame)) < 1.0, "旋钮槽位是方形（圆盘不被拉伸）");
+    // 音量控件是自绘视图：断言它真的占据可见槽位。绘制路径与 dB 换算由
+    // test_native_volume_knob 的 S1–S10 覆盖（滑杆那份实现）。
+    check(NSWidth(knob.frame) > 0 && NSHeight(knob.frame) > 0, "音量滑杆有真实可见尺寸");
+    // 滑杆是**横向**的：宽度必须明显大于高度（旧旋钮是正方形，这条对调了）。
+    check(NSWidth(knob.frame) > NSHeight(knob.frame) * 2.0,
+          "滑杆槽位是横向的（宽 > 2×高；旧旋钮是正方形）");
 
 
     online=YES; [bar startPolling];
@@ -397,7 +435,15 @@ int main() { @autoreleasepool {
     NSButton *barMute = field(bar, @"volMuteBtn");
     check(barMute != nil && [barMute.identifier isEqual:@"volFloor"], "底栏有 volFloor 静音键（web ui_page.h:1501 同位置）");
     check(barMute.target == bar && barMute.action != NULL, "底栏静音键有真实 target/action");
-    check(NSWidth(barMute.frame) > 0 && NSMidX(barMute.frame) > NSMinX(knob.frame) && NSMidX(barMute.frame) < NSMaxX(knob.frame), "静音键叠在旋钮圆盖范围内（覆盖层而非占位控件）");
+    // 静音入口：可点击的喇叭按钮（volFloor）现在是**行内真实控件**，
+    // 位置就在 mac 惯例的"滑杆左侧"，取代了原来只显示的 volIconView（后者已 hidden）。
+    // 滑杆自身的喇叭/数值附件保持关闭（showsAccessories=NO）：底栏已经有这两样，
+    // 滑杆里再带一套会把轨道挤到 20pt（实测），同一行还会出现三个相同信息。
+    check(!barMute.hidden, "静音键可见（滑杆左侧可点击喇叭）");
+    check(NSMidX(barMute.frame) < NSMinX(knob.frame),
+          "静音键在滑杆左侧（mac 惯例：喇叭 → 滑杆 → 数值）");
+    check(sl.showsAccessories == NO,
+          "滑杆自身不重复带喇叭/数值（底栏已提供，避免同一行三个相同信息）");
 
     // 共享状态：静音→恢复 必须回到原值（不是回到某个固定默认值）
     RLPVolumeMuteReset();

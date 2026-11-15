@@ -206,33 +206,41 @@ int main() {
            [scrollableIds componentsJoinedByString:@", "]);
 
         // ---- 判据 6b：横向滚动视图不得有垂直滚动条 ----
-        // 20 段参数表用的是普通 NSScrollView；它宽度够、纵向全展开 ⟹ 两向都不该有。
-        ck(true, "第6项: EQ 内层无横向滚动视图需要保留（20 段表已全展开）", @"");
+        // 20 行参数表已按用户要求移除（2026-11-15）；推子板是自绘视图、常驻全展开，
+        // 不需要任何内层滚动容器来裁剪 ⟹ 本格保留为"无内层横滚需求"的显式记录。
+        ck(true, "第6项: EQ 内层无横向滚动视图需要保留（推子板/检查器均常驻全展开）", @"");
 
-        // ---- 判据 6c：在 20 段表上方滚轮，事件必须能到达外层页面滚动容器 ----
+        // ---- 判据 6c：在推子板上方滚轮，事件必须能到达外层页面滚动容器 ----
         //
+        // 历史：用户第6项原话是"鼠标滚动到 20 段参数窗口的时候，滚动就会暂停，因为滚动被拐到了
+        // 表格自己的滚动机制上"。2026-11-15 用户要求移除那张表（改推子板 + 单段检查器）⟹
+        // 判据落点换成推子板，但**判据意图一个都没丢**：EQ 页里不允许任何内层容器吃掉滚轮。
         // ⚠️ 这里**不断言 scrollTop 的像素位移**，原因是实测过的平台行为：
         //    NSScrollView 的动画滚动依赖窗口在屏（/tmp/probe_scroll2：
         //    `scrollWheel:` 之后 clipView.bounds 不动；`scrollToPoint:` 立刻动）。
         //    离屏窗口里断言"滚了 N 像素"只能得到假红，那不是产品缺陷。
-        //    所以判据换成**链路可达性**：从鼠标所在的 20 段表出发，
-        //    沿 nextResponder 能不能走到外层页面滚动容器 —— 这正是用户说的
-        //    "滚动被拐到 20 段参数的滚动机制上" 的判据面（拐走了 = 走不到）。
+        //    所以判据换成**链路可达性**：从鼠标所在的推子板出发，
+        //    沿 nextResponder 能不能走到外层页面滚动容器（拐走了 = 走不到）。
         //    真正的像素位移由「内层可滚动数量 == 0」那一格覆盖：
         //    内层没有可滚动的 scroll view，事件就没有地方可以被拐走。
-        NSTableView *bandTable = nil;
-        NSMutableArray *tables = [NSMutableArray array];
-        Collect(eq, [NSTableView class], tables);
-        for (NSTableView *t in tables)
-            if ([t.identifier isEqualToString:@"peq.bands"]) bandTable = t;
-        ck(bandTable != nil, "第6项: 找到 20 段参数表（滚轮判据的落点）", @"缺 peq.bands");
+        // 落点换成**推子板**：20 行参数表已按用户要求移除（2026-11-15「底下这个 eq 表不要了」），
+        // 现在 EQ 页里最大的可交互面就是推子板（它不重写 scrollWheel，滚轮应当穿过去）。
+        // 判据意图不变：从 EQ 页的编辑面出发，滚轮沿响应链能不能走到外层页面滚动容器。
+        NSView *faderBoard = nil;
+        {
+            NSMutableArray *views = [NSMutableArray array];
+            Collect(eq, [NSView class], views);
+            for (NSView *v in views)
+                if ([v.identifier isEqualToString:@"eq.fader"]) { faderBoard = v; break; }
+        }
+        ck(faderBoard != nil, "第6项: 找到推子板（滚轮判据的落点；20 行参数表已移除）", @"缺 eq.fader");
 
-        if (bandTable) {
-            // 「鼠标放在 20 段参数表上方」：取表格左侧数字/频率列区域（避开右侧下拉与可编辑单元格）
-            const NSRect tableInWin = [bandTable convertRect:bandTable.bounds toView:nil];
-            const NSPoint at = NSMakePoint(NSMinX(tableInWin) + 40, NSMidY(tableInWin));
+        if (faderBoard) {
+            // 「鼠标放在推子板上」：取几何正中（避开上方数值框行与下方频率标签行）。
+            const NSRect faderInWin = [faderBoard convertRect:faderBoard.bounds toView:nil];
+            const NSPoint at = NSMakePoint(NSMidX(faderInWin), NSMinY(faderInWin) + NSHeight(faderInWin) * 0.45);
             NSView *hit = [win.contentView hitTest:[win.contentView convertPoint:at fromView:nil]];
-            ck(hit != nil, "第6项: 20 段表上方确实有视图接收事件（不是空白）",
+            ck(hit != nil, "第6项: 推子板上方确实有视图接收事件（不是空白）",
                [NSString stringWithFormat:@"hit=%@", hit ? NSStringFromClass([hit class]) : @"nil"]);
 
             // 链路可达性：从命中视图沿 nextResponder 上溯，必须能走到外层页面滚动容器。
@@ -246,7 +254,7 @@ int main() {
                 r = r.nextResponder;
             }
             ck(reachesPage,
-               "第6项: 从 20 段表出发，滚轮响应链能走到外层页面滚动容器（没被内层截断）",
+               "第6项: 从推子板出发，滚轮响应链能走到外层页面滚动容器（没被内层截断）",
                [chain componentsJoinedByString:@" -> "]);
 
             // 反向判据：链上除了外层页面那一个，不得出现第二个**可滚动**的 NSScrollView。

@@ -295,12 +295,28 @@ static const CGFloat kKnobR = 9.0;
         const BOOL active = (i == (NSUInteger)self.activeBand);
         const double db = (i < self.bandGains.count) ? self.bandGains[i].doubleValue : 0.0;
 
-        // 轨道（用户截图是很粗的深灰竖条）
+        // 轨道：底槽用淡灰画满全程；红色只填充 0 dB 到当前值那一段。
+        // 用户 2026-11-15 明确：推子的红颜色要跟着柱子高度走，往上推就高，往下推就低。
+        // 所以红色不是选中态的整根高亮，而是增益量本身的可视化：
+        // 正值从 0 dB 往上长，负值从 0 dB 往下长，0 dB 时红色长度为 0。
         NSRect track = [self trackRectForBand:i];
-        NSBezierPath *tr = [NSBezierPath bezierPathWithRoundedRect:track
-                                                          xRadius:kTrackW / 2 yRadius:kTrackW / 2];
-        [(active ? t.accent : [t.mut colorWithAlphaComponent:0.85]) setFill];
-        [tr fill];
+        NSBezierPath *slot = [NSBezierPath bezierPathWithRoundedRect:track
+                                                            xRadius:kTrackW / 2 yRadius:kTrackW / 2];
+        [[t.mut colorWithAlphaComponent:0.30] setFill];
+        [slot fill];
+
+        const CGFloat y0 = [self yForDb:0.0];
+        const CGFloat yNow = [self yForDb:db];
+        if (fabs(yNow - y0) > 0.5) {
+            const CGFloat top = MAX(y0, yNow), bot = MIN(y0, yNow);
+            NSRect fillRect = NSMakeRect(NSMinX(track), bot, NSWidth(track), top - bot);
+            NSBezierPath *fl = [NSBezierPath bezierPathWithRoundedRect:fillRect
+                                                              xRadius:kTrackW / 2 yRadius:kTrackW / 2];
+            // 正在调的那段用满强度 accent，其余用同一套红稍淡：
+            // 哪根在动仍一眼看出，同时红色长度始终等于增益量。
+            [(active ? t.accent : [t.accent colorWithAlphaComponent:0.70]) setFill];
+            [fl fill];
+        }
 
         // 把手：白色实心圆 + 深色细描边（截图形态）
         const CGFloat hy = [self yForDb:db];

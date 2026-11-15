@@ -1566,15 +1566,31 @@ int RLPRunFunctionalAudit(NSString *outDir) {
                [NSString stringWithFormat:@"freqs=%lu uniq=%lu range=%.1f..%.1f gains=%lu",
                 (unsigned long)bandFreqs.count, (unsigned long)uniqFreqs.count, fLo, fHi,
                 (unsigned long)bandGains.count]);
-            // 20 段参数表必须全高可见（旧实现内层 300pt 滚动裁掉一半参数）
-            NSTableView *bands = nil;
-            for (NSView *v in eqAll)
-                if ([v isKindOfClass:[NSTableView class]] && [v.identifier isEqualToString:@"peq.bands"]) { bands = (NSTableView *)v; break; }
-            CK(bands != nil && bands.frame.size.height >= 20 * 26,
-               "20 段参数表全高渲染（不再内层滚动裁切）",
-               bands ? [NSString stringWithFormat:@"h=%.0f", bands.frame.size.height] : @"缺 peq.bands");
-            CK(bands != nil && bands.dataSource != nil && bands.delegate != nil,
-               "参数表有真实数据源（曲线可编辑前提）", @"dataSource/delegate 为空");
+            // 2026-11-15 用户明确「底下这个 eq 表不要了」⟹ 20 行参数表已移除，
+            // 编辑面拆成 推子板（频率/增益，20 根推子）+ 单段检查器（Q/类型/开关）。
+            // 判据保留原来的两条意图，只把落点换成新控件：
+            //   ① 编辑面必须**全高可见**（不被内层滚动裁切）；
+            //   ② 编辑面有真实数据/可编辑入口（不是空壳）。
+            NSInteger tablesLeft = 0;
+            for (NSView *v in eqAll) if ([v isKindOfClass:[NSTableView class]]) ++tablesLeft;
+            CK(tablesLeft == 0, "EQ 页不再有 20 行参数表（用户 2026-11-15 明确移除）",
+               [NSString stringWithFormat:@"tables=%ld", (long)tablesLeft]);
+            NSView *faderBoard = nil, *bandInspector = nil;
+            for (NSView *v in eqSub) {
+                if ([v.identifier isEqualToString:@"eq.fader"]) faderBoard = v;
+                if ([v.identifier isEqualToString:@"eq.inspector"]) bandInspector = v;
+            }
+            const NSUInteger faderBands = [[faderBoard valueForKey:@"bandCount"] unsignedIntegerValue];
+            CK(faderBoard != nil && faderBoard.frame.size.height >= 229.0 && faderBands == 20,
+               "推子板全高渲染（20 根推子，不被内层滚动裁切）",
+               faderBoard ? [NSString stringWithFormat:@"h=%.0f bands=%lu",
+                             faderBoard.frame.size.height, (unsigned long)faderBands] : @"缺 eq.fader");
+            NSInteger inspParts = 0;
+            for (NSView *v in eqSub) if ([v.identifier hasPrefix:@"eq.insp."]) ++inspParts;
+            CK(bandInspector != nil && bandInspector.frame.size.height >= 29.0 && inspParts >= 4,
+               "单段检查器在位（频点/Q/类型/开关的编辑入口，替代原表格）",
+               bandInspector ? [NSString stringWithFormat:@"h=%.0f parts=%ld",
+                                bandInspector.frame.size.height, (long)inspParts] : @"缺 eq.inspector");
 
             // (5b) 诊断/反馈区（2026-11-13 用户实机：气泡里空白 / 要求改成 web 内联填写窗）
             //
