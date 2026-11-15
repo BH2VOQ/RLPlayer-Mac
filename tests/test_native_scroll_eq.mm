@@ -342,26 +342,48 @@ int main() {
                [NSString stringWithFormat:@"posts=%@", [g_posts componentsJoinedByString:@","]]);
             // 下发的 body 必须真的带上 20 段且其中某段增益 ≠ 0 —— 证明拖动改了值，
             // 不是"发了个请求但参数没变"（那是最容易骗过判据的形态）。
+            //
+            // ⚠️ 格式由后端 peq_parse_bands_param() 定死：**序号,类型,频率,增益,Q[,off]**。
+            // 这条测试此前按「频率,增益,Q,类型」解析 —— 那是**原生自己臆造的错格式**，
+            // 于是它一边把它当真相，一边对"后端永远回 {"ok":false,"bands 参数格式不对"}"
+            // 这个真故障完全无感（判据与产品一起错，双双假绿）。
+            // 现在同时断言两件事：① 段顺序/字段位正确；② 任一段增益真的变了。
             BOOL changedGain = NO;
+            BOOL formatOK = YES;
+            NSString *formatWhy = @"";
             if (peqBody.length) {
-                // body 是 urlencoded 表单：`bands=31.25%2C0.0000%2C1.41%2Cpeak%3B…`
-                // 必须先解码再按 ';'/',' 切 —— 第一版没解码，逗号是 %2C，于是永远解析不出增益
-                // （判据自身 bug，不是产品问题）。
                 NSString *decoded = [peqBody stringByRemovingPercentEncoding] ?: peqBody;
                 NSRange r = [decoded rangeOfString:@"bands="];
                 if (r.location != NSNotFound) {
                     NSString *tail = [decoded substringFromIndex:r.location + r.length];
-                    // 逐段形如 f,g,q,type;  ⟹ 抓任意一段的 g 非 0
-                    for (NSString *seg in [tail componentsSeparatedByString:@";"]) {
-                        NSArray *kv = [seg componentsSeparatedByString:@","];
-                        if (kv.count >= 2) {
-                            NSString *g = [kv[1] stringByTrimmingCharactersInSet:
-                                           [NSCharacterSet whitespaceAndNewlineCharacterSet]];
-                            if (g.length && fabs(g.doubleValue) > 0.05) { changedGain = YES; break; }
+                    NSArray<NSString *> *segs = [tail componentsSeparatedByString:@";"];
+                    if (segs.count < 2) { formatOK = NO; formatWhy = @"段数不足"; }
+                    NSInteger wantIndex = 1;
+                    for (NSString *seg in segs) {
+                        NSArray<NSString *> *kv = [seg componentsSeparatedByString:@","];
+                        if (kv.count < 5) { formatOK = NO; formatWhy = @"每段应有 5 个字段"; break; }
+                        // [0] 序号 [1] 类型码 [2] 频率 [3] 增益 [4] Q
+                        if (kv[0].integerValue != wantIndex) {
+                            formatOK = NO;
+                            formatWhy = [NSString stringWithFormat:@"第 %ld 段序号不是 %ld",
+                                         (long)wantIndex, (long)wantIndex];
+                            break;
                         }
+                        ++wantIndex;
+                        NSString *code = [kv[1] uppercaseString];
+                        if (!([code isEqualToString:@"PK"] || [code isEqualToString:@"LS"]
+                              || [code isEqualToString:@"HS"])) {
+                            formatOK = NO;
+                            formatWhy = [@"类型码必须是 PK/LS/HS，实际 " stringByAppendingString:kv[1]];
+                            break;
+                        }
+                        if (fabs(kv[3].doubleValue) > 0.05) changedGain = YES;
                     }
-                }
+                } else { formatOK = NO; formatWhy = @"没有 bands= 字段"; }
             }
+            ck(formatOK,
+               "第7项: 下发体符合后端契约（序号,类型码,频率,增益,Q）—— 后端不会回「格式不对」",
+               formatWhy.length ? formatWhy : @"未解析");
             ck(changedGain,
                "第7项: 下发体里至少一段增益真的变了（不是空拖动）",
                peqBody.length > 160 ? [peqBody substringToIndex:160] : peqBody);

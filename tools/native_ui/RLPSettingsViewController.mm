@@ -1417,9 +1417,13 @@ static NSString *RLPControlIdentifier(NSString *key) {
     [stack addArrangedSubview:RLPSGroup(RLPTr(@"采集实时状态"), RLPTr(@"1 秒自动轮询"), t)];
     self.inputView = [[RLPInputView alloc] initStatusOnlyWithFrame:NSMakeRect(0, 0, 620, 240)];
     self.inputView.translatesAutoresizingMaskIntoConstraints = NO;
+    // 设置页本身就是整页滚动容器：状态区块不再套自己的滚动条。
+    [self.inputView setEmbeddedInPage:YES];
     [gCurrentGroup addFullRow:self.inputView];
-    [[self.inputView.heightAnchor constraintGreaterThanOrEqualToConstant:260] setActive:YES];
     [self.inputView reload];
+    // 高度 = 状态区块的自然高度（拆掉内层滚动后必须由宿主给，否则本视图没有 intrinsic 高度）。
+    [[self.inputView.heightAnchor
+        constraintEqualToConstant:MAX(120.0, [self.inputView preferredContentHeight])] setActive:YES];
     [self loadInputDevices];
 }
 

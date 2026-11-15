@@ -249,6 +249,16 @@
     if (self.onDragBand) { [self applyDragEvent:event]; return; }
     [super mouseDragged:event];
 }
+
+/// 松手：**不清 activeBand**。
+/// 用户 2026-11-15 的原始反馈是"看不出在调哪一段"。松手就清高亮，等于调完立刻
+/// 失去唯一的位置反馈（数据表在下面几十行外，视线根本回不去）。改成保留最后调过的那一段，
+/// 直到下次拖动换段、或整表重新加载（absorbState 会把它复位）。
+/// 这条也是判据 E5 的落点：拖动后 activeBand 必须是**命中的那一段**，而不是 -1。
+- (void)mouseUp:(NSEvent *)event {
+    (void)event;
+    if (!self.onDragBand) [super mouseUp:event];
+}
 @end
 
 #pragma mark - OPRA 型号/预设卡片（web #eqModelCards / #eqPresetCards）
@@ -702,6 +712,70 @@
         [row addArrangedSubview:b];
     }
     [self.stack addArrangedSubview:row];
+
+    // web #peqAutoPre / #peqReset（ui_script.h:10970-10975）—— 铁律①：功能不能删减。
+    // 旧原生只有「加载/保存/删除」三个预设动作，这两个 web 上有的动作在原生**根本不存在**。
+    NSStackView *row2 = [[NSStackView alloc] init];
+    row2.orientation = NSUserInterfaceLayoutOrientationHorizontal;
+    row2.spacing = 8;
+    NSButton *autoPre = [NSButton buttonWithTitle:RLPTr(@"自动前级（防削波）")
+                                           target:self action:@selector(onAutoPreamp:)];
+    autoPre.bezelStyle = NSBezelStyleRounded;
+    autoPre.identifier = @"peqAutoPre";
+    autoPre.toolTip = RLPTr(@"把前级设为 -ceil(当前曲线峰值增益)，给 EQ 提升留出余量，避免数字削波");
+    [row2 addArrangedSubview:autoPre];
+    NSButton *flat = [NSButton buttonWithTitle:RLPTr(@"重置 Flat")
+                                        target:self action:@selector(onResetFlat:)];
+    flat.bezelStyle = NSBezelStyleRounded;
+    flat.identifier = @"peqReset";
+    [row2 addArrangedSubview:flat];
+    [self.stack addArrangedSubview:row2];
+}
+
+/// web peqAutoPreamp（ui_script.h:11785）的 1:1 同构。
+/// 口径必须与 web 一致：后端 points **已含当前前级**，所以先减掉旧前级再取峰值，
+/// 前级 = -ceil(峰值)，向上取整保证不削波。
+- (void)onAutoPreamp:(id)sender {
+    (void)sender;
+    // web 用前端算好的 points；这里同源（也是后端 points），不做第二套算法。
+    double maxGain = 0.0;
+    NSArray<NSArray<NSNumber *> *> *pts = self.curve.points;
+    if (pts.count) {
+        for (NSArray<NSNumber *> *p in pts)
+            if (p.count >= 2 && p[1].doubleValue > maxGain) maxGain = p[1].doubleValue;
+        // points 已含当前前级 ⟹ 先扣掉它，再算需要的新前级
+        const double oldPre = self.preamp.doubleValue;
+        maxGain = MAX(0.0, maxGain - oldPre);
+    } else {
+        for (NSDictionary *b in self.bands) {
+            const BOOL on = [b[@"on"] respondsToSelector:@selector(boolValue)] ? [b[@"on"] boolValue] : YES;
+            if (on && [b[@"g"] doubleValue] > maxGain) maxGain = [b[@"g"] doubleValue];
+        }
+    }
+    const double pre = -MAX(0.0, ceil(maxGain));
+    self.preamp.stringValue = [NSString stringWithFormat:@"%.1f", pre];
+    [self scheduleApply];
+    self.status.stringValue = [NSString stringWithFormat:@"%@%.1f dB → %@ %.1f dB",
+        RLPTr(@"自动前级：曲线峰值 +"), maxGain, RLPTr(@"前级"), pre];
+}
+
+/// web #peqReset（ui_script.h:11928）：action=reset，后端把它恢复成 Flat。
+- (void)onResetFlat:(id)sender {
+    (void)sender;
+    if (![RLPCoreClient shared].started) return;
+    __weak __typeof__(self) weakSelf = self;
+    [[RLPCoreClient shared] postJSON:@"/api/peq/preset" body:@"action=reset&name="
+                          completion:^(NSDictionary * _Nullable json) {
+        __typeof__(self) self_ = weakSelf;
+        if (!self_) return;
+        if (!json || ![json[@"ok"] boolValue]) {
+            NSString *err = [json[@"error"] isKindOfClass:[NSString class]] ? json[@"error"] : RLPTr(@"未知错误");
+            RLPToast([RLPTr(@"失败：") stringByAppendingString:err]);
+            return;
+        }
+        [self_ absorbState:json];
+        RLPToast(RLPTr(@"已重置为 Flat"));
+    }];
 }
 
 - (void)buildOpraSection {
@@ -1070,7 +1144,12 @@ static NSString *RLPEQTypeCodeNormalized(id raw) {
     NSMutableArray<NSNumber *> *gains = [NSMutableArray arrayWithCapacity:self.bands.count];
     for (NSDictionary *b in self.bands) [gains addObject:@([b[@"g"] doubleValue])];
     self.curve.bandGains = gains;
-    self.curve.activeBand = -1;
+    // ⚠️ **不要**在这里把 activeBand 复位成 -1。
+    // absorbState 是每次 POST /api/peq 回来都会跑的；而拖动提交是 260ms 节流 ⟹
+    // 每拖动一下，紧接着的这次回填就会把"正在调哪一段"的高亮抹掉 —— 用户看到的就是
+    // "高亮闪一下没了 / 根本不知道在调哪一段"。只做越界收敛，保留用户最后触碰的段。
+    if (self.curve.activeBand < 0 || self.curve.activeBand >= (NSInteger)self.bands.count)
+        self.curve.activeBand = -1;
     [self.curve setNeedsDisplay:YES];
 
     // 状态行：以事实为准（几段非 0、前级多少、采样率）

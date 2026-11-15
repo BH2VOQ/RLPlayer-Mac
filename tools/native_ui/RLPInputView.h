@@ -13,6 +13,11 @@ NS_ASSUME_NONNULL_BEGIN
 @property (nonatomic, readonly) BOOL statusOnly;
 - (void)reload;
 - (void)applyTheme;
+/// 嵌入一个**本身已经整页滚动**的宿主（设置页）时调用：去掉本视图自带的 NSScrollView，
+/// 内容直接铺开，由宿主页面滚动（用户 2026-11-15：每个界面只允许整页滚动，禁止小页面滚动）。
+- (void)setEmbeddedInPage:(BOOL)embedded;
+/// 内容自然高度（embedded 模式下由宿主给高度约束；本视图没有 intrinsic 高度）。
+- (CGFloat)preferredContentHeight;
 @end
 
 NS_ASSUME_NONNULL_END

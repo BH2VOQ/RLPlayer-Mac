@@ -1549,10 +1549,23 @@ int RLPRunFunctionalAudit(NSString *outDir) {
                 if ([v.identifier isEqualToString:@"eq.curve"]) { curveView = v; break; }
             NSArray *bandFreqs = [curveView valueForKey:@"bandFreqs"];
             NSArray *bandGains = [curveView valueForKey:@"bandGains"];
-            CK(curveView != nil && bandFreqs.count == 20 && bandGains.count == 20,
-               "EQ 曲线已分 band（20 段频点 + 20 个增益手柄）",
-               [NSString stringWithFormat:@"freqs=%lu gains=%lu",
-                (unsigned long)bandFreqs.count, (unsigned long)bandGains.count]);
+            // ⚠️ 这条判据曾经是**假绿**：只数 count == 20，而当时 20 个频点全是 0.0
+            //（原生读 JSON 用 f/g，后端给 freq/gain ⟹ 全 nil ⟹ 20 个手柄叠在最左端）。
+            // 现在必须同时断言"20 个频点互不相同且覆盖 20Hz~20kHz"，
+            // 否则 count=20 什么都证明不了。真正的端到端判据见 native_eq_contract。
+            NSMutableSet *uniqFreqs = [NSMutableSet set];
+            double fLo = 1e9, fHi = 0;
+            for (NSNumber *f in bandFreqs) {
+                [uniqFreqs addObject:f];
+                fLo = MIN(fLo, f.doubleValue);
+                fHi = MAX(fHi, f.doubleValue);
+            }
+            CK(curveView != nil && bandFreqs.count == 20 && bandGains.count == 20 &&
+               uniqFreqs.count == 20 && fLo <= 25.0 && fHi >= 19999.0,
+               "EQ 曲线已分 band（20 个互不相同的真实频点 + 20 个增益手柄）",
+               [NSString stringWithFormat:@"freqs=%lu uniq=%lu range=%.1f..%.1f gains=%lu",
+                (unsigned long)bandFreqs.count, (unsigned long)uniqFreqs.count, fLo, fHi,
+                (unsigned long)bandGains.count]);
             // 20 段参数表必须全高可见（旧实现内层 300pt 滚动裁掉一半参数）
             NSTableView *bands = nil;
             for (NSView *v in eqAll)

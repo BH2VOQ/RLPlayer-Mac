@@ -21,6 +21,10 @@
 @interface RLPInputView ()
 @property (nonatomic, assign, readwrite) BOOL statusOnly;
 @property (nonatomic, strong) NSStackView *stack;
+/// 本视图自带的整页滚动（嵌入设置页时会被整根拆掉，见 setEmbeddedInPage:）。
+@property (nonatomic, strong) NSScrollView *scroll;
+@property (nonatomic, strong) NSArray<NSLayoutConstraint *> *scrollConstraints;
+@property (nonatomic, assign) BOOL embeddedInPage;
 @property (nonatomic, strong) NSPopUpButton *backend;
 @property (nonatomic, strong) NSPopUpButton *device;
 @property (nonatomic, strong) NSPopUpButton *mode;
@@ -90,6 +94,7 @@
     sc.drawsBackground = NO;
     sc.hasVerticalScroller = YES;
     [self addSubview:sc];
+    self.scroll = sc;
 
     self.stack = [[NSStackView alloc] initWithFrame:NSZeroRect];
     self.stack.orientation = NSUserInterfaceLayoutOrientationVertical;
@@ -97,12 +102,13 @@
     self.stack.spacing = 12;
     self.stack.translatesAutoresizingMaskIntoConstraints = NO;
     sc.documentView = self.stack;
-    [NSLayoutConstraint activateConstraints:@[
+    self.scrollConstraints = @[
         [self.stack.leadingAnchor constraintEqualToAnchor:sc.contentView.leadingAnchor],
         [self.stack.trailingAnchor constraintEqualToAnchor:sc.contentView.trailingAnchor],
         [self.stack.topAnchor constraintEqualToAnchor:sc.contentView.topAnchor],
         [self.stack.widthAnchor constraintEqualToAnchor:sc.contentView.widthAnchor],
-    ]];
+    ];
+    [NSLayoutConstraint activateConstraints:self.scrollConstraints];
 
     if (!self.statusOnly) {
     self.backend = [[NSPopUpButton alloc] initWithFrame:NSZeroRect pullsDown:NO];
@@ -445,6 +451,47 @@
     RLPTheme *t = [RLPTheme current];
     self.status.textColor = t.mut;
     self.warning.textColor = t.danger;
+}
+
+#pragma mark - 嵌入整页滚动的宿主（去掉本视图自己的滚动）
+
+- (void)setEmbeddedInPage:(BOOL)embedded {
+    if (_embeddedInPage == embedded) return;
+    _embeddedInPage = embedded;
+    if (!embedded || !self.scroll) return;
+    // 拆掉内层 NSScrollView：stack 直接铺在本视图里，滚动交给设置页那根整页滚动条。
+    // 不拆的话，滚轮停在「采集实时状态」上会被这里吃掉，整页滚不动
+    // （用户 2026-11-15：每个界面只允许整页滚动，禁止页面中的小页面滚动）。
+    [NSLayoutConstraint deactivateConstraints:self.scrollConstraints];
+    self.scrollConstraints = @[];
+    [self.scroll removeFromSuperview];
+    self.scroll = nil;
+    self.stack.translatesAutoresizingMaskIntoConstraints = NO;
+    [self addSubview:self.stack];
+    [NSLayoutConstraint activateConstraints:@[
+        [self.stack.leadingAnchor constraintEqualToAnchor:self.leadingAnchor],
+        [self.stack.trailingAnchor constraintEqualToAnchor:self.trailingAnchor],
+        [self.stack.topAnchor constraintEqualToAnchor:self.topAnchor],
+        [self.stack.bottomAnchor constraintLessThanOrEqualToAnchor:self.bottomAnchor],
+    ]];
+}
+
+- (CGFloat)preferredContentHeight {
+    CGFloat total = self.stack.edgeInsets.top + self.stack.edgeInsets.bottom;
+    NSInteger n = 0;
+    for (NSView *v in self.stack.arrangedSubviews) {
+        if (v.hidden) continue;
+        CGFloat h = 0;
+        for (NSLayoutConstraint *c in v.constraints) {
+            if (c.firstAttribute == NSLayoutAttributeHeight && c.secondItem == nil
+                && c.relation == NSLayoutRelationEqual) { h = c.constant; break; }
+        }
+        if (h <= 0) h = v.fittingSize.height;
+        total += h;
+        ++n;
+    }
+    if (n > 1) total += self.stack.spacing * (n - 1);
+    return ceil(total);
 }
 
 @end
