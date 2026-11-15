@@ -31,6 +31,19 @@
 - (NSTextField *)subtitleLabel { return _subtitle; }
 - (NSView *)contentView { return _content; }
 
+/// P8：标题在页面加载后变化（歌单名 / 搜索词）时，顶栏必须立即跟随 —— 旧实现 pageTitle
+/// 只读，歌单页的标题于是永远是 init 时的「歌单」，web 的 head(name, …) 语义丢失。
+/// 顶栏由主窗口绘制（web #pth），这里通过窗口控制器上的 syncTopbarTitle 接缝刷新；
+/// 页面没有 windowController（单测/离屏）时静默跳过，绝不因标题变化强行找窗口。
+- (void)setPageTitle:(NSString *)title {
+    _pageTitle = [title copy] ?: @"";
+    if (_title) _title.stringValue = RLPTr(_pageTitle);
+    if (!self.isViewLoaded) return;
+    NSWindowController *wc = self.view.window.windowController;
+    if ([wc respondsToSelector:@selector(syncTopbarTitle)])
+        [(id)wc performSelector:@selector(syncTopbarTitle)];
+}
+
 - (void)loadView {
     RLPTheme *t = [RLPTheme current];
     _root = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 900, 640)];

@@ -8,6 +8,14 @@
 #import "RLPTrackActions.h"
 #import "RLPTheme.h"
 
+// web 最近播放（ui_script.h:3595-3599 的 grid-template-columns:34px 1fr 160px 92px）：
+// 4 列（#/标题/艺术家/专辑），**没有时长列**；列表也**没有表头行**（行模板直接贴进 #list）。
+// 旧原生多出「时长」列且挂了表头视图（P12）。
+static const CGFloat kRecentIndexW = 34.0;
+static const CGFloat kRecentArtistW = 160.0;
+static const CGFloat kRecentAlbumW = 92.0;
+static const CGFloat kRecentTitleMinW = 120.0;
+
 @interface RLPRecentViewController () <NSTableViewDataSource, NSTableViewDelegate>
 @property (nonatomic, strong) NSTextField *emptyLabel;   // web：还没有播放记录
 @property (nonatomic, strong) NSTableView *tableView;
@@ -41,7 +49,8 @@
             return ts[(NSUInteger)row].path;
         };
     }
-    _tableView.headerView = [[NSTableHeaderView alloc] initWithFrame:NSZeroRect];
+    // web 最近列表没有表头行（.trow 行模板直接进 #list，不画 head 的列名）。
+    _tableView.headerView = nil;
     _tableView.backgroundColor = NSColor.clearColor;
     _tableView.selectionHighlightStyle = NSTableViewSelectionHighlightStyleRegular;
     // 与 web 版一致：**单击**即触发（web 的行 onclick 就是单击）。
@@ -50,13 +59,30 @@
     _tableView.doubleAction = @selector(onDoubleClick:);
     _tableView.target = self;
     
-    // Columns
-    NSArray<NSString *> *headers = @[RLPTr(@"#"), RLPTr(@"标题"), RLPTr(@"艺术家"), RLPTr(@"专辑"), RLPTr(@"时长")];
-    for (int i = 0; i < 5; i++) {
+    // P12：web 最近播放 4 列（#/标题/艺术家/专辑），旧原生的第 5 列「时长」是 web 不存在的多余列。
+    NSArray<NSString *> *headers = @[RLPTr(@"#"), RLPTr(@"标题"), RLPTr(@"艺术家"), RLPTr(@"专辑")];
+    for (int i = 0; i < 4; i++) {
         NSTableColumn *col = [[NSTableColumn alloc] initWithIdentifier:[NSString stringWithFormat:@"col%d", i]];
         col.title = headers[i];
+        col.resizingMask = NSTableColumnNoResizing;
+        switch (i) {
+            case 0:
+                col.width = kRecentIndexW; col.minWidth = kRecentIndexW; col.maxWidth = kRecentIndexW;
+                break;
+            case 1:
+                col.width = 420; col.minWidth = kRecentTitleMinW; col.maxWidth = 10000;
+                break;
+            case 2:
+                col.width = kRecentArtistW; col.minWidth = kRecentArtistW; col.maxWidth = kRecentArtistW;
+                break;
+            default:
+                col.width = kRecentAlbumW; col.minWidth = kRecentAlbumW; col.maxWidth = kRecentAlbumW;
+                break;
+        }
         [_tableView addTableColumn:col];
     }
+    // 不交给 AppKit 均匀拉伸：标题列按 web 的 1fr 自己吃剩余宽度（见 -viewDidLayout）。
+    _tableView.columnAutoresizingStyle = NSTableViewNoColumnAutoresizing;
     
     scroll.documentView = _tableView;
 
@@ -79,6 +105,20 @@
     ]];
     
     _tracks = [NSMutableArray array];
+}
+
+/// web .trow 的标题列是 1fr：随页面宽度伸缩，其余三列固定（34 / 160 / 92）。
+/// 旧原生把宽度交给 AppKit 均匀拉伸 ⟹ 4 列都摊成 100pt，和 web 的列宽完全不是一回事。
+- (void)viewDidLayout {
+    [super viewDidLayout];
+    const CGFloat width = NSWidth(self.contentView.bounds);
+    if (!_tableView || !(width > 1.0)) return;
+    NSTableColumn *title = nil;
+    for (NSTableColumn *c in _tableView.tableColumns)
+        if ([c.identifier isEqualToString:@"col1"]) { title = c; break; }
+    if (!title) return;
+    const CGFloat rest = width - (kRecentIndexW + kRecentArtistW + kRecentAlbumW);
+    title.width = MAX(kRecentTitleMinW, rest);
 }
 
 - (void)activate {
@@ -129,7 +169,6 @@
     else if ([identifier isEqualToString:@"col1"]) label.stringValue = track.title.length ? track.title : track.path.lastPathComponent;
     else if ([identifier isEqualToString:@"col2"]) label.stringValue = track.artist.length ? track.artist : RLPTr(@"未知");
     else if ([identifier isEqualToString:@"col3"]) label.stringValue = track.album.length ? track.album : RLPTr(@"未知");
-    else if ([identifier isEqualToString:@"col4"]) label.stringValue = RLPFmtDuration(track.duration);
     
     return label;
 }

@@ -82,10 +82,8 @@
 - (void)onSelectSavedQueueNote:(NSNotification *)note {
     id obj = note.object;
     if (![obj isKindOfClass:[NSString class]] || ![obj length]) return;
-    self.selectedName = obj;
-    // 先把列表里对应的行选中（列表可能还没拉到 ⟹ reloadData 之后由 reloadData 的 stillThere 分支补）
-    [self selectRowForName:obj];
-    [self loadItems];
+    // 侧栏点某份歌单 = web renderSavedQueuePage(name)：同一入口负责 title/count/表格/按钮。
+    [self openPlaylist:obj];
 }
 
 - (void)onSavedQueuesChangedNote:(NSNotification *)note {
@@ -231,9 +229,14 @@
 - (void)openPlaylist:(NSString *)name {
     self.selectedName = name ?: @"";
     const BOOL has = self.selectedName.length > 0;
+    // P8：顶栏标题 = 歌单名（web head(name, it.length + ' 首', …)）。旧实现只读 pageTitle，
+    // 歌单页标题于是永远停在「歌单」；没有选中具体歌单时回到页面名。
+    self.pageTitle = has ? self.selectedName : RLPTr(@"歌单");
     self.playAllBtn.enabled = has;
     self.renameBtn.enabled = has;
     self.deleteBtn.enabled = has;
+    // web renderSavedQueuePage 的中间态：head(name, '加载中…', '')，info 回来后再换成「N 首」。
+    [self setSubtitle:has ? RLPTr(@"加载中…") : @""];
     [self loadItems];
 }
 
@@ -368,6 +371,7 @@
         if (!self_) return;
         if (json && [json[@"ok"] boolValue]) {
             self_.selectedName = to;
+            [self_ setPageTitle:to];
             RLPToast(RLPTr(@"已重命名"));
             [self_ reloadData];
             [[NSNotificationCenter defaultCenter] postNotificationName:@"RLPSavedQueuesChangedNotification"
@@ -393,6 +397,7 @@
         if (!self_) return;
         if (json && [json[@"ok"] boolValue]) {
             self_.selectedName = @"";
+            [self_ setPageTitle:RLPTr(@"歌单")];
             [self_.items removeAllObjects];
             [self_.itemTable reloadData];
             self_.playAllBtn.enabled = NO;
@@ -428,17 +433,21 @@
             r.count = [x[@"n"] respondsToSelector:@selector(integerValue)] ? [x[@"n"] integerValue] : 0;
             if (r.name.length) [self_.playlists addObject:r];
         }
-        [self_ setSubtitle:[NSString stringWithFormat:RLPTr(@"%ld 个歌单"), (long)self_.playlists.count]];
         BOOL stillThere = NO;
         for (RLPPlaylistRow *r in self_.playlists)
             if ([r.name isEqualToString:self_.selectedName]) { stillThere = YES; break; }
         if (!stillThere) {
             self_.selectedName = @"";
+            [self_ setPageTitle:RLPTr(@"歌单")];
+            [self_ setSubtitle:[NSString stringWithFormat:RLPTr(@"%ld 个歌单"), (long)self_.playlists.count]];
             [self_.items removeAllObjects];
             [self_.itemTable reloadData];
             self_.playAllBtn.enabled = NO;
             self_.renameBtn.enabled = NO;
             self_.deleteBtn.enabled = NO;
+            // P8：顶栏计数 = 歌单个数（主窗口顶栏 #cnt 的 RLPPageCountNotification 接缝）。
+            [[NSNotificationCenter defaultCenter] postNotificationName:@"RLPPageCountNotification"
+                object:[NSString stringWithFormat:RLPTr(@"%ld 个歌单"), (long)self_.playlists.count]];
         } else {
             [self_ loadItems];
         }
@@ -456,7 +465,9 @@
         [self_.items removeAllObjects];
         if (!json || ![json[@"ok"] boolValue]) {
             [self_.itemTable reloadData];
+            // web：失败分支 head(name, '', '') —— 标题仍是歌单名，计数清空。
             [self_ setSubtitle:RLPTr(@"歌单不存在（可能已被删除）")];
+            [[NSNotificationCenter defaultCenter] postNotificationName:@"RLPPageCountNotification" object:@""];
             return;
         }
         NSArray *arr = [json[@"items"] isKindOfClass:[NSArray class]] ? json[@"items"] : @[];
@@ -471,7 +482,10 @@
         [self_.itemTable reloadData];
         // web：空歌单整块显示「这个歌单是空的」（不是一行小字，也不是空表格）
         self_.emptyLabel.hidden = self_.items.count > 0;
-        [self_ setSubtitle:[NSString stringWithFormat:RLPTr(@"%ld 首"), (long)self_.items.count]];
+        NSString *count = [NSString stringWithFormat:RLPTr(@"%ld 首"), (long)self_.items.count];
+        [self_ setSubtitle:count];
+        // P8：web head(name, it.length + ' 首') 的第二个参数画在顶栏标题旁（#cnt）。
+        [[NSNotificationCenter defaultCenter] postNotificationName:@"RLPPageCountNotification" object:count];
     }];
 }
 

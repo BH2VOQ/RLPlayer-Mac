@@ -92,6 +92,12 @@ static NSString *RLPTrackArtistAlbumText(RLPTrack *t) {
     NSView *_footerView;
     NSButton *_loadMoreButton;
     NSTextField *_emptyLabel;
+    // P9：搜索无结果时的整块空态（带搜索词 + 提示 + 「清空搜索词」），与普通空态分开，
+    // 因为 web 只在 q 非空时渲染这一块（ui_script.h:3337-3345）。
+    NSStackView *_searchEmptyView;
+    NSTextField *_searchEmptyTitle;
+    NSTextField *_searchEmptyHint;
+    NSButton *_searchClearButton;
     NSLayoutConstraint *_footerHeightConstraint;
 
     NSMutableArray<RLPTrack *> *_tracks;
@@ -159,13 +165,17 @@ static NSString *RLPTrackArtistAlbumText(RLPTrack *t) {
     RLPTheme *theme = [RLPTheme current];
     NSView *container = self.contentView;
 
-    // 1. 页面内搜索框（宽度 300，可清空）
+    // 1. 页内搜索框：**不再显示**（P10）。web 的曲目页只有顶栏 #q 一个搜索入口，
+    //    旧原生在页面里又放了一个 300px NSSearchField ⟹ 同一个页面两个入口，各写各的搜索。
+    //    这里保留这个控件当**查询状态载体**（fetchTracks 读它的 stringValue；
+    //    searchWithQuery: 仍由顶栏分派进来），只是从视觉/交互上隐藏。
     _searchField = [[NSSearchField alloc] initWithFrame:NSZeroRect];
     _searchField.placeholderString = RLPTr(@"搜索专辑 / 艺术家 / 曲目…");
     _searchField.delegate = self;
     _searchField.target = self;
     _searchField.action = @selector(onSearchFieldAction:);
     _searchField.translatesAutoresizingMaskIntoConstraints = NO;
+    _searchField.hidden = YES;
     [container addSubview:_searchField];
 
     // 1b. 排序下拉（web track-sort：默认/标题/艺术家/专辑/时长/年份/收藏优先），贴右上角。
@@ -321,6 +331,39 @@ static NSString *RLPTrackArtistAlbumText(RLPTrack *t) {
     _emptyLabel.hidden = YES;
     [container addSubview:_emptyLabel];
 
+    // 3b. P9 搜索无结果空态（web ui_script.h:3337-3345）：
+    //   「未找到与 “<q>” 相关的曲目」 + 小字提示 + 「清空搜索词」按钮（点击 = 顶栏 qClear）。
+    // 旧原生只有一行「没有匹配的曲目」，既不告诉用户搜了什么，也没有清空入口。
+    _searchEmptyView = [[NSStackView alloc] init];
+    _searchEmptyView.orientation = NSUserInterfaceLayoutOrientationVertical;
+    _searchEmptyView.alignment = NSLayoutAttributeCenterX;
+    _searchEmptyView.spacing = 8;
+    _searchEmptyView.translatesAutoresizingMaskIntoConstraints = NO;
+    _searchEmptyView.hidden = YES;
+    _searchEmptyView.identifier = @"tracks.searchempty";
+
+    _searchEmptyTitle = RLPLabel(@"", [NSFont systemFontOfSize:15 weight:NSFontWeightSemibold], theme.text);
+    _searchEmptyTitle.alignment = NSTextAlignmentCenter;
+    _searchEmptyTitle.maximumNumberOfLines = 0;
+    _searchEmptyTitle.lineBreakMode = NSLineBreakByWordWrapping;
+    _searchEmptyTitle.preferredMaxLayoutWidth = 560;
+
+    _searchEmptyHint = RLPLabel(RLPTr(@"请尝试缩短搜索词，或检查是否有错别字"),
+                                [NSFont systemFontOfSize:12], theme.mut2);
+    _searchEmptyHint.alignment = NSTextAlignmentCenter;
+
+    _searchClearButton = [NSButton buttonWithTitle:RLPTr(@"清空搜索词")
+                                             target:self
+                                             action:@selector(onSearchClear:)];
+    _searchClearButton.bezelStyle = NSBezelStyleRounded;
+    _searchClearButton.controlSize = NSControlSizeSmall;
+    _searchClearButton.identifier = @"tracks.searchclear";
+
+    [_searchEmptyView addArrangedSubview:_searchEmptyTitle];
+    [_searchEmptyView addArrangedSubview:_searchEmptyHint];
+    [_searchEmptyView addArrangedSubview:_searchClearButton];
+    [container addSubview:_searchEmptyView];
+
     // 4. 底栏与“加载更多”按钮
     _footerView = [[NSView alloc] initWithFrame:NSZeroRect];
     _footerView.translatesAutoresizingMaskIntoConstraints = NO;
@@ -351,6 +394,10 @@ static NSString *RLPTrackArtistAlbumText(RLPTrack *t) {
 
         [_emptyLabel.centerXAnchor constraintEqualToAnchor:_scrollView.centerXAnchor],
         [_emptyLabel.centerYAnchor constraintEqualToAnchor:_scrollView.centerYAnchor],
+
+        [_searchEmptyView.centerXAnchor constraintEqualToAnchor:container.centerXAnchor],
+        [_searchEmptyView.centerYAnchor constraintEqualToAnchor:_scrollView.centerYAnchor],
+        [_searchEmptyView.widthAnchor constraintLessThanOrEqualToAnchor:container.widthAnchor constant:-80],
 
         [_footerView.leadingAnchor constraintEqualToAnchor:container.leadingAnchor constant:24.0],
         [_footerView.trailingAnchor constraintEqualToAnchor:container.trailingAnchor constant:-24.0],
@@ -452,6 +499,7 @@ static NSString *RLPTrackArtistAlbumText(RLPTrack *t) {
         _hasLoaded = YES;
         _emptyLabel.stringValue = RLPTr(@"核心未启动");
         _emptyLabel.hidden = NO;
+        _searchEmptyView.hidden = YES;
         [self updateFooterVisibility];
         [_tableView reloadData];
         return;
@@ -468,6 +516,9 @@ static NSString *RLPTrackArtistAlbumText(RLPTrack *t) {
         if (!self_ || self_->_searchSeq != seq) return;
         self_->_hasLoaded = YES;
 
+        // web：头部标题随查询词变化（head(q ? ('搜索：' + q) : '曲目', …)，ui_script.h:3334）。
+        [self_ setPageTitle:q.length ? [NSString stringWithFormat:RLPTr(@"搜索：%@"), q] : RLPTr(@"曲目")];
+
         if (!json || ![json[@"ok"] boolValue]) {
             [self_ setSubtitle:RLPTr(@"读取失败")];
             [self_->_tracks removeAllObjects];
@@ -475,6 +526,7 @@ static NSString *RLPTrackArtistAlbumText(RLPTrack *t) {
             self_->_totalCount = 0;
             self_->_emptyLabel.stringValue = RLPTr(@"读取失败");
             self_->_emptyLabel.hidden = NO;
+            self_->_searchEmptyView.hidden = YES;
             [self_ updateFooterVisibility];
             [self_->_tableView reloadData];
             return;
@@ -491,10 +543,20 @@ static NSString *RLPTrackArtistAlbumText(RLPTrack *t) {
 
         if (list.count == 0) {
             [self_ setSubtitle:RLPTr(@"没有匹配的曲目")];
-            self_->_emptyLabel.stringValue = RLPTr(@"没有匹配的曲目");
-            self_->_emptyLabel.hidden = NO;
+            if (q.length) {
+                // web 只在 q 非空时给这块空态（含搜索词与清空入口）；q 为空仍是一行提示。
+                self_->_emptyLabel.hidden = YES;
+                self_->_searchEmptyTitle.stringValue =
+                    [NSString stringWithFormat:RLPTr(@"未找到与 “%@” 相关的曲目"), q];
+                self_->_searchEmptyView.hidden = NO;
+            } else {
+                self_->_searchEmptyView.hidden = YES;
+                self_->_emptyLabel.stringValue = RLPTr(@"没有匹配的曲目");
+                self_->_emptyLabel.hidden = NO;
+            }
         } else {
             self_->_emptyLabel.hidden = YES;
+            self_->_searchEmptyView.hidden = YES;
             if (total > (NSInteger)list.count) {
                 [self_ setSubtitle:[NSString stringWithFormat:@"%ld / %ld %@",
                                     (long)list.count, (long)total, RLPTr(@"首")]];
@@ -570,6 +632,33 @@ static NSString *RLPTrackArtistAlbumText(RLPTrack *t) {
     _searchField.stringValue = query ?: @"";
     _limit = 300;
     [self fetchTracks];
+}
+
+/// P9：空态里的「清空搜索词」= web 的 D('qClear').click()（ui_script.h:3342-3344）：
+/// 清空顶栏搜索框并按当前视图重拉，而不是只把页内查询置空（那样顶栏还留着旧词）。
+- (void)onSearchClear:(id)sender {
+    (void)sender;
+    NSWindowController *wc = self.isViewLoaded ? self.view.window.windowController : nil;
+    if ([wc respondsToSelector:@selector(clearSearchQuery)]) {
+        [(id)wc performSelector:@selector(clearSearchQuery)];
+        return;
+    }
+    // 主窗口（D 包合并前）还没有 clearSearchQuery：清空它的搜索框并走 onSearch:（qClear 同一落点）。
+    if ([wc respondsToSelector:@selector(onSearch:)]) {
+        NSSearchField *topSearch = nil;
+        @try {
+            topSearch = (NSSearchField *)[wc valueForKey:@"search"];
+        } @catch (NSException *e) {
+            (void)e;
+            topSearch = nil;
+        }
+        if ([topSearch isKindOfClass:[NSSearchField class]]) {
+            topSearch.stringValue = @"";
+            [(id)wc performSelector:@selector(onSearch:) withObject:topSearch];
+            return;
+        }
+    }
+    [self searchWithQuery:@""];   // 没有主窗口（离屏单页）时至少清掉本页查询
 }
 
 - (void)onLoadMore:(id)sender {

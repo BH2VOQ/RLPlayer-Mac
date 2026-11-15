@@ -11,6 +11,13 @@
 static const NSUserInterfaceItemIdentifier kFavTableID = @"RLPFavTable";
 // web .favhead 第 5 列：行尾心形（实心 ⟹ 点一下取消收藏）。
 static NSString * const kFavColHeart = @"ColFavHeart";
+// web .favhead 网格（ui_script.h:3703-3721）：34px # / 1fr 标题 / 180px 艺术家 / 200px 专辑 / 34px 心。
+// **没有时长列**——旧原生多出的「时长」列在 web 列集里不存在（P12）。
+static const CGFloat kFavIndexW = 34.0;
+static const CGFloat kFavArtistW = 180.0;
+static const CGFloat kFavAlbumW = 200.0;
+static const CGFloat kFavHeartW = 34.0;
+static const CGFloat kFavTitleMinW = 120.0;
 
 @interface RLPFavoritesViewController () <NSTableViewDataSource, NSTableViewDelegate>
 @property (nonatomic, strong) NSTableView *tableView;
@@ -49,16 +56,35 @@ static NSString * const kFavColHeart = @"ColFavHeart";
     // 同队列页：web 无斑马底；空表时交替色会在空白区域铺出条带。
     _tableView.usesAlternatingRowBackgroundColors = NO;
     
-    NSArray *cols = @[@"#", RLPTr(@"标题"), RLPTr(@"艺术家"), RLPTr(@"专辑"), RLPTr(@"时长"), @""];
+    // P12：web .favhead 是 5 列（34px # / 1fr 标题 / 180px 艺术家 / 200px 专辑 / 34px 心），
+    // 旧原生的第 5 列「时长」是 web 不存在的多余列（网格模板里没有 dur）。
+    NSArray *cols = @[@"#", RLPTr(@"标题"), RLPTr(@"艺术家"), RLPTr(@"专辑"), @""];
     for (NSInteger i = 0; i < (NSInteger)cols.count; i++) {
         NSTableColumn *c = [[NSTableColumn alloc] initWithIdentifier:[NSString stringWithFormat:@"col%ld", (long)i]];
         c.title = cols[i];
-        if (i == 5) {
-            c.identifier = kFavColHeart;
-            c.width = 30; c.minWidth = 26; c.maxWidth = 34;
+        c.resizingMask = NSTableColumnNoResizing;
+        switch (i) {
+            case 0:
+                c.width = kFavIndexW; c.minWidth = kFavIndexW; c.maxWidth = kFavIndexW;
+                break;
+            case 1:
+                c.width = 420; c.minWidth = kFavTitleMinW; c.maxWidth = 10000;
+                break;
+            case 2:
+                c.width = kFavArtistW; c.minWidth = kFavArtistW; c.maxWidth = kFavArtistW;
+                break;
+            case 3:
+                c.width = kFavAlbumW; c.minWidth = kFavAlbumW; c.maxWidth = kFavAlbumW;
+                break;
+            default:
+                c.identifier = kFavColHeart;
+                c.width = kFavHeartW; c.minWidth = kFavHeartW; c.maxWidth = kFavHeartW;
+                break;
         }
         [_tableView addTableColumn:c];
     }
+    // 不交给 AppKit 均匀拉伸：标题列按 web 的 1fr 自己吃剩余宽度（见 -viewDidLayout）。
+    _tableView.columnAutoresizingStyle = NSTableViewNoColumnAutoresizing;
     
     NSScrollView *scroll = [[NSScrollView alloc] initWithFrame:self.contentView.bounds];
     scroll.documentView = _tableView;
@@ -74,13 +100,9 @@ static NSString * const kFavColHeart = @"ColFavHeart";
     _tableView.doubleAction = @selector(onDoubleClick:);
     _tableView.target = self;
     
-    // 右键菜单
-    NSMenu *menu = [[NSMenu alloc] init];
-    [menu addItemWithTitle:RLPTr(@"播放") action:@selector(onPlay:) keyEquivalent:@""];
-    [menu addItemWithTitle:RLPTr(@"加入队列") action:@selector(onEnqueue:) keyEquivalent:@""];
-    [menu addItemWithTitle:RLPTr(@"取消收藏") action:@selector(onUnfav:) keyEquivalent:@""];
-    _tableView.menu = menu;
-
+    // 右键菜单 = RLPTrackActionTableView 的共享菜单（menuForEvent 按被点行构造完整动作集）。
+    // 旧实现在这里另建了一份静态菜单并挂到 tableView.menu，但 menuForEvent 永远优先返回共享菜单，
+    // 这份静态菜单**从未生效**（P11 死代码，删除）。
     // web .favhint：列表顶部一句"双击 = 从这个开始顺序播放整个最爱列表（N 首）"。
     // 用**约束**而不是 frame：本页 contentView 由外层 pageHost 给尺寸，
     // frame 布局时算出来的 y 会落到页面下沿（实测空态文字被压到播放条上）。
@@ -105,6 +127,20 @@ static NSString * const kFavColHeart = @"ColFavHeart";
         [_emptyLabel.centerYAnchor constraintEqualToAnchor:self.contentView.centerYAnchor],
         [_emptyLabel.widthAnchor constraintLessThanOrEqualToAnchor:self.contentView.widthAnchor constant:-40],
     ]];
+}
+
+/// web .favhead 的标题列是 1fr：随页面宽度伸缩，其余四列固定（34 / 180 / 200 / 34）。
+/// 旧原生把宽度交给 AppKit 均匀拉伸 ⟹ 5 列都摊成 100pt，和 web 的列宽完全不是一回事。
+- (void)viewDidLayout {
+    [super viewDidLayout];
+    const CGFloat width = NSWidth(self.contentView.bounds);
+    if (!_tableView || !(width > 1.0)) return;
+    NSTableColumn *title = nil;
+    for (NSTableColumn *c in _tableView.tableColumns)
+        if ([c.identifier isEqualToString:@"col1"]) { title = c; break; }
+    if (!title) return;
+    const CGFloat rest = width - (kFavIndexW + kFavArtistW + kFavAlbumW + kFavHeartW);
+    title.width = MAX(kFavTitleMinW, rest);
 }
 
 - (void)reloadData {
@@ -162,35 +198,6 @@ static NSString * const kFavColHeart = @"ColFavHeart";
     RLPPlayWholeListFrom(paths, row);
 }
 
-- (void)onPlay:(id)sender {
-    NSInteger row = _tableView.clickedRow >= 0 ? _tableView.clickedRow : _tableView.selectedRow;
-    if (row < 0) return;
-    RLPPlayPath(_tracks[row].path);
-}
-
-- (void)onEnqueue:(id)sender {
-    NSInteger row = _tableView.clickedRow >= 0 ? _tableView.clickedRow : _tableView.selectedRow;
-    if (row < 0) return;
-    RLPEnqueuePath(_tracks[row].path);
-}
-
-- (void)onUnfav:(id)sender {
-    NSInteger row = _tableView.clickedRow >= 0 ? _tableView.clickedRow : _tableView.selectedRow;
-    if (row < 0) return;
-    NSString *path = _tracks[row].path;
-    NSString *url = [NSString stringWithFormat:@"/api/fav?file=%@&on=0", RLPEnc(path)];
-    
-    __weak __typeof__(self) weakSelf = self;
-    [[RLPCoreClient shared] postJSON:url body:nil completion:^(NSDictionary * _Nullable json) {
-        __typeof__(self) self_ = weakSelf;
-        if (json && [json[@"ok"] boolValue]) {
-            [self_ reloadData];
-        } else {
-            RLPToast(RLPTr(@"取消收藏失败"));
-        }
-    }];
-}
-
 #pragma mark - NSTableView
 
 - (NSInteger)numberOfRowsInTableView:(NSTableView *)tableView {
@@ -228,7 +235,6 @@ static NSString * const kFavColHeart = @"ColFavHeart";
     else if ([cid isEqualToString:@"col1"]) val = t.title;
     else if ([cid isEqualToString:@"col2"]) val = t.artist;
     else if ([cid isEqualToString:@"col3"]) val = t.album;
-    else if ([cid isEqualToString:@"col4"]) val = RLPFmtDuration(t.duration);
     
     NSTextField *tf = RLPLabel(val, [RLPTheme current].body, [RLPTheme current].text);
     return tf;
