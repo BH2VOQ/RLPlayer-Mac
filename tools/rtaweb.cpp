@@ -90,6 +90,7 @@ using rta::render::SinkOpenOpts;
 #include "dsp/dop.h"
 #include "dsp/dsd_rate_convert.h"
 #include "dsp/room_api.h"        // R-1：房间测量端点层（授权/计划/状态机）
+#include "dsp/mic_cal.h"        // U4：测量麦克风校准曲线（/api/miccal 导入 + 测量→算校正扣除）
 #include "platform/macos/room_transport_coreaudio.h"   // F-3：同族整数倍 DSD→DSD 速率转换
 #include "dsp/modulator.h"
 #include "dsp/sdm_output_policy.h"   // U12：1-bit SDM 输出拐点准入（保存/开流前置闸门的唯一判定实现）
@@ -7368,6 +7369,9 @@ static bool is_side_effect_path(const std::string& p) {
         "/api/compare",
         // Room measurement plays an audible sweep: a stray GET must never start it.
         "/api/roomcorr/measure", "/api/roomcorr/cancel",
+        // U4：/api/miccal 的导入/清除会改进程内校准状态，必须 POST；GET 只做状态查询
+        // （唯一放行点在 getReadOnlyOk，带 clear/path 参数的 GET 仍然 405）。
+        "/api/miccal",
         // 预设的 apply 会写 rlplayer-settings.conf（副作用）；caps 是只读查询，不进这张表
         "/api/preset/apply",
         // 专辑封面预热（2026-10-26）：会落盘 covercache + 打网络。
@@ -7669,6 +7673,77 @@ std::string rlapp::diag_json(std::size_t budget_bytes) {
     return rta::diag::bundle_json(result);
 }
 
+// ---------------- U4 第二步：测量麦克风校准（/api/miccal） ----------------
+// 状态口径与 /api/settings 一致：**只存进程内**，不落盘。重启后要重新导入。
+// 为什么先不落盘：校准表是用户临时挑的一个文件；只存路径会在「文件被删/被换掉」时
+// 静默失效（测量照样跑、扣掉的却是另一个话筒的曲线）。后续若做持久化，应由设置页
+// 显式选择 + 显式确认，而不是本端点顺手写 conf。
+static std::mutex g_micCalMx;
+static rta::dsp::MicCalTable g_micCal;
+
+static rta::dsp::MicCalTable miccal_snapshot() {
+    std::lock_guard<std::mutex> lk(g_micCalMx);
+    return g_micCal;
+}
+static void miccal_store(const rta::dsp::MicCalTable& t) {
+    std::lock_guard<std::mutex> lk(g_micCalMx);
+    g_micCal = t;
+}
+static void miccal_reset() {
+    std::lock_guard<std::mutex> lk(g_micCalMx);
+    g_micCal = rta::dsp::MicCalTable{};
+}
+
+// 查询串取值（只读）：/api/miccal?path=... / clear=1
+static std::string query_value(const std::string& path, const char* key) {
+    const std::string pat1 = std::string("?") + key + "=";
+    size_t pos = path.find(pat1);
+    if (pos == std::string::npos) {
+        const std::string pat2 = std::string("&") + key + "=";
+        pos = path.find(pat2);
+        if (pos == std::string::npos) return std::string();
+        pos += pat2.size();
+    } else {
+        pos += pat1.size();
+    }
+    const size_t end = path.find('&', pos);
+    return urlDecode(path.substr(pos, end == std::string::npos ? std::string::npos : end - pos));
+}
+
+// 导入失败的唯一出口：400 + 稳定 code（前端/测试只认这个 code，不看中文原文）。
+static std::string miccal_fail(const std::string& why, const std::string& detail) {
+    rta::net::webui_set_status(400);
+    std::ostringstream j;
+    j << "{\"ok\":false,\"code\":\"miccal.parse_failed\",\"error\":\""
+      << jesc(detail.empty() ? why : why + "：" + detail) << "\"}";
+    return j.str();
+}
+
+// 导入成功的响应：严格按契约只回点数/幅度范围/解析形态（不回 success 以外的状态）。
+static std::string miccal_import_json(const rta::dsp::MicCalTable& t) {
+    std::ostringstream j;
+    j << "{\"ok\":true"
+      << ",\"n_points\":" << t.points.size()
+      << ",\"min_db\":" << t.minDb
+      << ",\"max_db\":" << t.maxDb
+      << ",\"how\":\"" << jesc(t.how) << "\"}";
+    return j.str();
+}
+
+// GET 状态：未导入时也是完整的空态（active=false / n_points=0 / path="空"），
+// 前端不必靠字段缺失来判断。
+static std::string miccal_stats_json(const rta::dsp::MicCalTable& t) {
+    std::ostringstream j;
+    j << "{\"ok\":true"
+      << ",\"active\":" << (!t.points.empty() ? "true" : "false")
+      << ",\"n_points\":" << t.points.size()
+      << ",\"min_db\":" << (t.points.empty() ? 0.0 : t.minDb)
+      << ",\"max_db\":" << (t.points.empty() ? 0.0 : t.maxDb)
+      << ",\"path\":\"" << jesc(t.source) << "\""
+      << ",\"how\":\"" << jesc(t.how) << "\"}";
+    return j.str();
+}
+
 static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
     auto& ps = g_ps;
 
@@ -7696,6 +7771,16 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
         if (p.rfind("/api/writeback", 0) == 0) return p.rfind("/api/writeback/status", 0) != 0;  // 预览端点
         if (p.rfind("/api/settings", 0) == 0) return true;
         if (p.rfind("/api/peq", 0) == 0) return p.rfind("/api/peq/preset", 0) != 0;
+        // U4：/api/miccal 的 GET 只允许无副作用参数的状态查询。导入与清除必须 POST；
+        // 一个 <img src>...?clear=1 绝不能把用户的校准表清掉。
+        if (p.rfind("/api/miccal", 0) == 0) {
+            const size_t q = p.find('?');
+            if (q == std::string::npos) return true;
+            const std::string qs = p.substr(q);
+            if (qs.find("clear=") != std::string::npos || qs.find("path=") != std::string::npos)
+                return false;
+            return true;
+        }
         return false;
     };
     // 注意：/api/fav 既要有 GET 列表（/api/fav/list）又要有 POST 切换，所以先判豁免。
@@ -7863,6 +7948,52 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
         // refresh=1 会换 URL 语义以外的内容，但 1h 的旧图可接受，且用户可手动刷新）。
         rta::net::webui_set_cache_control("public, max-age=3600");
         return r.bytes;
+    }
+
+    // ---------------- U4 第二步：/api/miccal（测量麦克风校准）----------------
+    // GET  /api/miccal            读状态：active / n_points / min_db / max_db / path / how
+    // POST /api/miccal?path=<绝对路径>  导入：200 {ok:true,n_points,min_db,max_db,how}
+    //                                    失败：400 {ok:false,code:"miccal.parse_failed",error}
+    // POST /api/miccal?clear=1    清除：{ok:true,active:false}
+    //
+    // 失败语义：**先解析成功再换表** —— 坏文件/路径错误不能把用户已经导入的表清掉，
+    // 否则一次误点会让下一次测量悄悄少扣校准。
+    if (rq.path.rfind("/api/miccal", 0) == 0) {
+        ct = "application/json; charset=utf-8";
+        if (rq.method == "POST") {
+            const std::string clear = query_value(rq.path, "clear");
+            // 只认显式 clear=1/true：其它取值（clear=0、clear=）一律按「没带清除」处理，
+            // 避免任何非空值都能把用户的校准表清掉。
+            if (clear == "1" || clear == "true") {
+                miccal_reset();
+                play_log("MICCAL clear");
+                return "{\"ok\":true,\"active\":false}";
+            }
+            const std::string path = query_value(rq.path, "path");
+            if (path.empty()) return miccal_fail("未指定校准文件路径", "");
+            // F1 同一条口径：进入 fs 之前先校验 UTF-8；中文路径交给 u8path，绝不自己拼。
+            if (!valid_utf8(path)) return miccal_fail("校准文件路径编码非法（要求 UTF-8）", path);
+            fs::path p;
+            try {
+                p = fs::u8path(path);
+            } catch (...) {
+                return miccal_fail("校准文件路径无法解析", path);
+            }
+            if (!p.is_absolute()) return miccal_fail("校准文件路径必须是绝对路径", path);
+            std::error_code ec;
+            if (!fs::is_regular_file(p, ec))
+                return miccal_fail("校准文件不存在或不是普通文件", path);
+            if (::access(path.c_str(), R_OK) != 0)
+                return miccal_fail("校准文件不可读（权限不足）", path);
+            rta::dsp::MicCalTable loaded;
+            if (!rta::dsp::mic_cal_load(path, loaded))
+                return miccal_fail(
+                    "无法解析校准文件（至少需要 3 个有效的「频率 Hz + 幅度 dB」数据点）", path);
+            miccal_store(loaded);
+            play_log("MICCAL import path=" + path + " n=" + std::to_string(loaded.points.size()));
+            return miccal_import_json(loaded);
+        }
+        return miccal_stats_json(miccal_snapshot());
     }
 
     // ---------------- R-1 房间测量（铁律 1：确认前绝不发声）----------------

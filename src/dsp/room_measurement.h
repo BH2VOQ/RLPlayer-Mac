@@ -60,6 +60,7 @@
 // 上游只做了「虚拟房间」端到端验证，**没有接真实采集**（mac 侧同样未接，如实挂账）。
 #pragma once
 #include "room_correction.h"
+#include "mic_cal.h"   // U4：测量话筒校准（把话筒自身频响从房间 IR 里扣掉）
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
@@ -274,6 +275,38 @@ private:
 
 // ---------------- 校正集 ----------------
 
+// 把话筒自身频响从房间 IR 里扣掉（U4）：只改幅度、不动相位。
+//
+// 为什么必须扣：房间校正测到的是「房间 + 话筒」的合成响应。话筒自身 ±2~5 dB 的起伏
+// 不扣掉就会被当成房间的峰谷写进校正 FIR —— 用户听到的是「把话筒的误差反向加进房间」。
+//
+// 实现口径：IR → FFT → 每个 bin 用 mic_cal_apply(cal, f, 该 bin 的 dB 幅度) 得到
+// 「扣掉话筒后」的幅度 → 用两幅度之差作为**实数**增益乘回复谱（相位原样保留）→ IFFT。
+//   * DC（bin 0）不动：校准文件本来就没有 0 Hz 数据，动它只会引入直流偏置；
+//   * 共轭镜像 bin 用同一个实数增益（实信号谱的对称性因此保持不变）；
+//   * 空表/无效表（<3 点）⟹ 原样返回入参副本（调用方另有「无表走原路径」的负向对照）。
+inline std::vector<double> subtract_mic_cal_from_ir(const std::vector<double>& ir, double fs,
+                                                    const MicCalTable& cal) {
+    if (ir.empty() || cal.points.empty() || !(fs > 0.0)) return ir;
+    const size_t n = next_pow2(ir.size());
+    std::vector<cplx> X(n, cplx(0.0, 0.0));
+    for (size_t i = 0; i < ir.size(); ++i) X[i] = cplx(ir[i], 0.0);
+    fft(X);
+    for (size_t k = 1; k <= n / 2; ++k) {
+        const double f = (double)k * fs / (double)n;
+        const double mag = std::abs(X[k]);
+        const double magDb = 20.0 * std::log10(std::max(mag, 1e-12));
+        const double fixedDb = mic_cal_apply(cal, f, magDb);   // 读数 − 校准（与测量同向）
+        const double gain = std::pow(10.0, (fixedDb - magDb) / 20.0);   // 纯实数：只改幅度
+        X[k] *= gain;
+        if (n - k != k) X[n - k] *= gain;
+    }
+    fft(X, true);
+    std::vector<double> out(ir.size());
+    for (size_t i = 0; i < out.size(); ++i) out[i] = X[i].real();
+    return out;
+}
+
 // 由测量结果批量产出各声道校正 IR。
 // 门禁：任一声道 valid=false → 返回空集（不静默给半套校正：只校一半的房间比
 // 不校更误导，用户会以为已经校好）。
@@ -281,9 +314,13 @@ private:
 // 延迟/增益不烙进 IR（IR 是线性滤波器、不携带时延/增益语义），而是放在
 // subDelaySamples/subGainDb 由播放管线在应用时执行。
 // globalGainDb：向导的整体电平微调，线性乘到每条 IR（只改增益不改形状）。
+// micCal：可选的测量话筒校准表。非空且有效时，每条声道 IR 先经
+// subtract_mic_cal_from_ir 扣掉话筒曲线，再交给 compute_correction_ir；
+// **默认 nullptr = 与旧实现逐字节相同**（负向对照由 tests/test_mic_cal.cpp §4 守住）。
 inline CorrectionSet build_corrections(const MeasurementSessionResult& r, const TargetCurve& t,
                                        const CorrectionOpts& o, double fs,
-                                       double globalGainDb = 0.0) {
+                                       double globalGainDb = 0.0,
+                                       const MicCalTable* micCal = nullptr) {
     CorrectionSet cs;
     if (fs <= 0.0) return cs;
     for (const auto& ch : r.channels)
@@ -299,7 +336,14 @@ inline CorrectionSet build_corrections(const MeasurementSessionResult& r, const 
     const double g = std::pow(10.0, globalGainDb / 20.0);
     for (const auto& ch : r.channels) {
         cs.channelNames.push_back(ch.channelName);
-        std::vector<double> h = compute_correction_ir(ch.roomIr, fs, t, o);
+        // 有表：先扣话筒；无表/空表：直接走原 IR（不复制、不重算 ⟹ 结果与旧实现逐字节一致）。
+        std::vector<double> calIr;
+        const std::vector<double>* irp = &ch.roomIr;
+        if (micCal && micCal->ok() && !ch.roomIr.empty() && fs > 0.0) {
+            calIr = subtract_mic_cal_from_ir(ch.roomIr, fs, *micCal);
+            irp = &calIr;
+        }
+        std::vector<double> h = compute_correction_ir(*irp, fs, t, o);
         if (g != 1.0)
             for (double& v : h) v *= g;
         cs.correctionIrs.push_back(std::move(h));

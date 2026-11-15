@@ -17,6 +17,7 @@
 //
 // 全部数据在内存里；唯一 IO 是 §1 末尾的 mic_cal_load 临时文件（跑完即删）。
 #include "dsp/mic_cal.h"
+#include "dsp/room_measurement.h"   // §4：把校准表接进「测量→算校正」路径
 
 #include <cmath>
 #include <cstdio>
@@ -259,6 +260,141 @@ int main() {
         check(mic_cal_interp(clamp, std::nan("")) == 3.0, "NaN → 最低端（同上游）");
         check(mic_cal_apply(clamp, 10.0, -10.0) == -13.0, "越界点 apply：−10 − 3 = −13");
         check(mic_cal_apply(clamp, 48000.0, 0.0) == -2.0, "高频越界 apply：0 − 2 = −2");
+    }
+
+    // ---------------- §4 接进「测量→算校正」：有表扣话筒，无表逐字节不变 ----------------
+    // 判据（铁律 4）：
+    //   a) 负向对照：无表时 helper 原样返回；build_corrections 与直接调用
+    //      compute_correction_ir 逐元素相同 ⟹ 「没有表就什么都不改」不是靠注释保证。
+    //   b) 有表时只改幅度：频谱幅度比必须等于 10^(−校准值/20)（逐 bin 对数插值），
+    //      相位逐 bin 不变（乘的是正实数）。
+    //   c) 路径等价：默认参数 / 显式 nullptr / 空表 三种「无表」调用结果完全一致。
+    //   d) 频率选择性：1 kHz 有 −4 dB 校准 ⟹ 校正 IR 的「1k 相对 10k」比无表时下降约 4 dB；
+    //      100 Hz 无校准 ⟹ 同一指标变化 < 0.5 dB（证明不是整体增益被改掉）。
+    printf("[§4] 测量→算校正：扣话筒（只改幅度）+ 无表负向对照\n");
+    {
+        const double fs = 48000.0;
+        // 合成房间 IR：5 ms 主峰 + 一对敲不对称的回声（频谱因此带非零相位）
+        std::vector<double> ir(4096, 0.0);
+        ir[240] = 1.0;
+        ir[300] = 0.40;
+        ir[301] = -0.15;
+
+        // 校准表：1 kHz 处 −4 dB，两端 0 dB（对数频率插值 → 一条宽而平滑的凹口）
+        MicCalTable cal;
+        cal.points = {MicCalPoint{20.0, 0.0}, MicCalPoint{100.0, 0.0},
+                      MicCalPoint{1000.0, -4.0}, MicCalPoint{10000.0, 0.0},
+                      MicCalPoint{20000.0, 0.0}};
+        check(cal.ok(), "合成校准表有效（≥3 点）");
+
+        auto spectrum = [](const std::vector<double>& x) {
+            const size_t n = next_pow2(x.size());
+            std::vector<cplx> S(n, cplx(0.0, 0.0));
+            for (size_t i = 0; i < x.size(); ++i) S[i] = cplx(x[i], 0.0);
+            fft(S);
+            return S;
+        };
+        auto nearest_bin = [](double hz, size_t n, double fs) {
+            return (size_t)std::llround(hz * (double)n / fs);
+        };
+        auto mag_db = [](const cplx& v) { return 20.0 * std::log10(std::max(std::abs(v), 1e-12)); };
+
+        // (a) 无表：helper 逐元素原样返回
+        {
+            const std::vector<double> same = subtract_mic_cal_from_ir(ir, fs, MicCalTable{});
+            check(same.size() == ir.size(), "空表：长度不变", "size=" + std::to_string(same.size()));
+            bool exact = same.size() == ir.size();
+            for (size_t i = 0; exact && i < ir.size(); ++i) exact = (same[i] == ir[i]);
+            check(exact, "空表：逐元素与输入完全相同（负向对照）");
+        }
+
+        // (b) 有表：只改幅度（幅度比 = 10^(−校准/20)，相位不变）
+        {
+            const std::vector<double> fixed = subtract_mic_cal_from_ir(ir, fs, cal);
+            check(fixed.size() == ir.size(), "有表：长度不变", "size=" + std::to_string(fixed.size()));
+            const auto S0 = spectrum(ir), S1 = spectrum(fixed);
+            const size_t n = S0.size();
+            const double probes[] = {100.0, 500.0, 1000.0, 2000.0, 10000.0};
+            bool magOk = true, phaseOk = true;
+            std::string magDetail, phaseDetail;
+            for (double hz : probes) {
+                const size_t k = nearest_bin(hz, n, fs);
+                const double expectDelta = -mic_cal_interp(cal, (double)k * fs / (double)n);
+                const double gotDelta = mag_db(S1[k]) - mag_db(S0[k]);
+                magDetail += fmt(hz) + "→" + fmt(gotDelta) + "/" + fmt(expectDelta) + " ";
+                if (std::abs(gotDelta - expectDelta) > 1e-9) magOk = false;
+                const double dPhase = std::abs(std::arg(S1[k]) - std::arg(S0[k]));
+                phaseDetail += fmt(hz) + "→" + fmt(dPhase) + " ";
+                if (std::abs(S0[k]) > 1e-3 && dPhase > 1e-9) phaseOk = false;
+            }
+            check(magOk, "每个频点幅度比 = 10^(−校准值/20)（读数 − 校准，方向正确）", magDetail);
+            check(phaseOk, "相位逐 bin 不变（补偿只乘正实数增益）", phaseDetail);
+        }
+
+        // (c) 接进 build_corrections：无表与旧路径逐元素相同
+        MeasurementSessionResult res;
+        {
+            ChannelMeasurement cm;
+            cm.channelName = "L";
+            cm.valid = true;
+            cm.roomIr = ir;
+            res.channels.push_back(cm);
+        }
+        const TargetCurve target = TargetCurve::tilt(-1.0);
+        const CorrectionOpts opts;
+        const CorrectionSet base = build_corrections(res, target, opts, fs);
+        const CorrectionSet noCal = build_corrections(res, target, opts, fs, 0.0, nullptr);
+        const MicCalTable emptyCal;
+        const CorrectionSet emptyCalSet = build_corrections(res, target, opts, fs, 0.0, &emptyCal);
+        const std::vector<double> direct = compute_correction_ir(ir, fs, target, opts);
+        {
+            bool sameBase = base.correctionIrs.size() == 1 &&
+                            base.correctionIrs[0].size() == direct.size();
+            for (size_t i = 0; sameBase && i < direct.size(); ++i)
+                sameBase = (base.correctionIrs[0][i] == direct[i]);
+            check(sameBase, "默认参数 ≡ 直接 compute_correction_ir（逐元素相同）",
+                  "taps=" + std::to_string(direct.size()));
+
+            bool sameNoCal = noCal.correctionIrs.size() == 1 &&
+                             noCal.correctionIrs[0].size() == base.correctionIrs[0].size();
+            for (size_t i = 0; sameNoCal && i < base.correctionIrs[0].size(); ++i)
+                sameNoCal = (noCal.correctionIrs[0][i] == base.correctionIrs[0][i]);
+            check(sameNoCal, "显式 nullptr ≡ 旧调用（逐元素相同，负向对照）");
+
+            bool sameEmpty = emptyCalSet.correctionIrs.size() == 1 &&
+                             emptyCalSet.correctionIrs[0].size() == base.correctionIrs[0].size();
+            for (size_t i = 0; sameEmpty && i < base.correctionIrs[0].size(); ++i)
+                sameEmpty = (emptyCalSet.correctionIrs[0][i] == base.correctionIrs[0][i]);
+            check(sameEmpty, "传空表 ≡ 无表（空表不改任何东西）");
+        }
+
+        // (d) 有表：频率选择性抬升（1 kHz 该抬，100 Hz 不该抬）
+        const CorrectionSet withCal = build_corrections(res, target, opts, fs, 0.0, &cal);
+        {
+            const size_t n = next_pow2(2 * (size_t)opts.taps);
+            auto corrMagDb = [&](const std::vector<double>& h, double hz) {
+                std::vector<cplx> S(n, cplx(0.0, 0.0));
+                for (size_t i = 0; i < h.size() && i < n; ++i) S[i] = cplx(h[i], 0.0);
+                fft(S);
+                const size_t k = nearest_bin(hz, n, fs);
+                return mag_db(S[k]);
+            };
+            // 用「相对 10 kHz」的形状指标，消掉末端 200 Hz~2 kHz 归一化带来的整体增益差
+            const double base1k = corrMagDb(base.correctionIrs[0], 1000.0) - corrMagDb(base.correctionIrs[0], 10000.0);
+            const double cal1k = corrMagDb(withCal.correctionIrs[0], 1000.0) - corrMagDb(withCal.correctionIrs[0], 10000.0);
+            const double base100 = corrMagDb(base.correctionIrs[0], 100.0) - corrMagDb(base.correctionIrs[0], 10000.0);
+            const double cal100 = corrMagDb(withCal.correctionIrs[0], 100.0) - corrMagDb(withCal.correctionIrs[0], 10000.0);
+            const double lift1k = cal1k - base1k;
+            const double lift100 = cal100 - base100;
+            // 方向：校准 −4 dB = 话筒该频点本身偏低 ⟹ 房间读数里那个「假凹口」被填平 4 dB
+            // ⟹ 校正 IR 对该频点的抬升必须**减少**约 4 dB（读数 − 校准 = 读数 + 4）。
+            check(lift1k < -2.0, "1 kHz 校正相对 10 kHz 比无表时下降 > 2 dB（话筒 −4 dB 已从房间读数填平）",
+                  "lift=" + fmt(lift1k) + " dB（base=" + fmt(base1k) + " cal=" + fmt(cal1k) + "）");
+            check(std::abs(lift100) < 0.5, "100 Hz（校准为 0 dB）同一指标变化 < 0.5 dB（不是整体增益）",
+                  "lift=" + fmt(lift100) + " dB");
+            check(withCal.channelNames == base.channelNames && withCal.fs == base.fs &&
+                  withCal.taps == base.taps, "有表时校正集元数据不变（声道/fs/taps）");
+        }
     }
 
     printf("test_mic_cal: %d/%d 通过 %s\n", total - fails, total, fails == 0 ? "PASS" : "FAIL");
