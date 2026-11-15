@@ -66,14 +66,23 @@ static NSString *const kQueueDragType = @"RLPQueueRowDrag";
 @property (nonatomic, assign) NSInteger mode;
 @property (nonatomic, assign) NSUInteger seq;
 @property (nonatomic, strong) NSPopUpButton *sortPopup;
+/// 已生效的排序档（P6：失败时把下拉回滚到这里；web 用未改写的 S.queueSort 重渲染）。
+@property (nonatomic, copy) NSString *sortKey;
+/// P7：空队列时「保存为歌单」必须禁用（web 空队列根本不渲染保存按钮）。
+@property (nonatomic, strong) NSButton *saveButton;
 @property (nonatomic, assign) NSInteger hoveredRow;
+- (void)restoreSortSelection:(NSString *)key;
+- (void)savePlaylistNamed:(NSString *)name;
 @end
 
 @implementation RLPQueueViewController
 
 - (instancetype)init {
     self = [super initWithTitle:RLPTr(@"播放队列")];
-    if (self) { _paths = @[]; _metas = @[]; _cues = @[]; _currentIndex = -1; _hoveredRow = -1; }
+    if (self) {
+        _paths = @[]; _metas = @[]; _cues = @[]; _currentIndex = -1; _hoveredRow = -1;
+        _sortKey = @"default";
+    }
     return self;
 }
 
@@ -100,6 +109,7 @@ static NSString *const kQueueDragType = @"RLPQueueRowDrag";
     self.sortPopup.identifier = @"queue.sort";   // 对应 web #qSort（parity_map ctrl）
     self.sortPopup.target = self;
     self.sortPopup.action = @selector(onSortPicked:);
+    [self.sortPopup selectItemAtIndex:0];   // 生效档位 = 默认顺序（P6 回滚基准）
     self.sortPopup.translatesAutoresizingMaskIntoConstraints = NO;
     [bar addArrangedSubview:RLPLabel(RLPTr(@"排序："), [NSFont systemFontOfSize:11],
                                      [RLPTheme current].mut2)];
@@ -115,6 +125,10 @@ static NSString *const kQueueDragType = @"RLPQueueRowDrag";
         b.bezelStyle = NSBezelStyleRounded;
         b.identifier = a[1];
         [bar addArrangedSubview:b];
+        if ([a[1] isEqualToString:@"save"]) {
+            self.saveButton = b;
+            b.enabled = NO;   // P7：队列数据回来之前不可保存（空队列不弹框、不发请求）
+        }
     }
     [host addSubview:bar];
 
@@ -503,12 +517,30 @@ static NSString *RLPQueueMetaText(NSDictionary *m, NSString *k,
 /// web #qSort：排序下拉改变的是**队列顺序**（/api/qorder），不改变正在播放的那一首。
 /// 8 档逐条对齐 `ui_script.h:12496-12540`；qorder 行必须保留 CUE 区间（queueItemLine）。
 - (void)sortBy:(NSString *)key {
-    if (!self.paths.count) { RLPToast(RLPTr(@"队列是空的")); return; }
+    if (!key.length) return;
+    // P6：失败回滚基准 = 上一档已生效的排序（web 失败时不改 S.queueSort，重渲染仍是旧档）。
+    NSString *previous = self.sortKey.length ? self.sortKey : @"default";
+    if (!self.paths.count) {
+        RLPToast(RLPTr(@"队列是空的"));
+        [self restoreSortSelection:previous];
+        return;
+    }
     if ([key isEqualToString:@"default"]) {
         __weak __typeof__(self) weakSelf = self;
         [[RLPCoreClient shared] postJSON:@"/api/qsort?by=default" body:nil completion:^(NSDictionary * _Nullable json) {
-            (void)json;
-            [weakSelf reloadData];
+            __typeof__(self) self_ = weakSelf;
+            if (!self_) return;
+            if (json && [json[@"ok"] boolValue]) {
+                self_.sortKey = @"default";
+                RLPToast(RLPTr(@"已恢复默认顺序"));   // web ui_script.h:12500
+                [self_ reloadData];
+                return;
+            }
+            NSString *err = ([json[@"error"] isKindOfClass:[NSString class]] && [json[@"error"] length])
+                          ? json[@"error"] : RLPTr(@"没有可恢复的排序");
+            RLPToast(err);
+            [self_ restoreSortSelection:previous];
+            [self_ reloadData];
         }];
         return;
     }
@@ -569,11 +601,26 @@ static NSString *RLPQueueMetaText(NSDictionary *m, NSString *k,
     [[RLPCoreClient shared] postJSON:@"/api/qorder" body:body completion:^(NSDictionary * _Nullable json) {
         __typeof__(self) self_ = weakSelf;
         if (!self_) return;
-        if (json && ![json[@"ok"] boolValue]) {
-            RLPToast([json[@"error"] isKindOfClass:[NSString class]] ? json[@"error"] : RLPTr(@"排序失败"));
+        if (json && [json[@"ok"] boolValue]) {
+            self_.sortKey = key;   // 成功才提交档位
+            [self_ reloadData];
+            return;
         }
+        NSString *err = ([json[@"error"] isKindOfClass:[NSString class]] && [json[@"error"] length])
+                      ? json[@"error"] : RLPTr(@"排序失败");
+        RLPToast(err);                                  // P6：不再静默
+        [self_ restoreSortSelection:previous];          // P6：下拉回滚上一档
         [self_ reloadData];
     }];
+}
+
+/// P6：把排序下拉恢复到上一档（不触发 action，只改选中项）。
+- (void)restoreSortSelection:(NSString *)key {
+    if (!self.sortPopup || !key.length) return;
+    NSArray<NSString *> *keys = @[ @"default", @"title", @"artist", @"album",
+                                   @"dur", @"year", @"shuffle", @"reverse" ];
+    const NSInteger idx = (NSInteger)[keys indexOfObject:key];
+    [self.sortPopup selectItemAtIndex:(idx == NSNotFound) ? 0 : idx];
 }
 
 #pragma mark - v3.3.11 M3U 导入
@@ -651,6 +698,11 @@ static NSString *RLPQueueMetaText(NSDictionary *m, NSString *k,
 }
 
 - (void)saveAsPlaylist {
+    // P7 空队列守卫：直接提示，不弹框、不发请求（web saveQueueDialog 的 n==0 分支）。
+    if (!self.paths.count) {
+        RLPToast(RLPTr(@"队列是空的，先加几首歌再保存"));
+        return;
+    }
     NSAlert *a = [[NSAlert alloc] init];
     a.messageText = RLPTr(@"把当前队列存为歌单");
     [a addButtonWithTitle:RLPTr(@"保存")];
@@ -662,11 +714,39 @@ static NSString *RLPQueueMetaText(NSDictionary *m, NSString *k,
     NSString *name = [tf.stringValue stringByTrimmingCharactersInSet:
                       [NSCharacterSet whitespaceAndNewlineCharacterSet]];
     if (!name.length) { RLPToast(RLPTr(@"请先填写歌单名称")); return; }
+    [self savePlaylistNamed:name];
+}
+
+/// 保存当前队列为歌单（生产接缝：对话框只负责取名；判据直接调这里，不弹模态框）。
+- (void)savePlaylistNamed:(NSString *)name {
+    NSString *trimmed = [name ?: @"" stringByTrimmingCharactersInSet:
+                         [NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    if (!trimmed.length) { RLPToast(RLPTr(@"请先填写歌单名称")); return; }
+    // P7：空队列即使绕过按钮也绝不发请求。
+    if (!self.paths.count) {
+        RLPToast(RLPTr(@"队列是空的，先加几首歌再保存"));
+        return;
+    }
     // sq/save = 存当前队列；sq/add 是新建空歌单（两者不能混）
-    NSString *url = [NSString stringWithFormat:@"/api/sq/save?name=%@", RLPEnc(name)];
+    NSString *url = [NSString stringWithFormat:@"/api/sq/save?name=%@", RLPEnc(trimmed)];
+    __weak __typeof__(self) weakSelf = self;
+    const NSInteger queueCount = (NSInteger)self.paths.count;
     [[RLPCoreClient shared] postJSON:url body:nil completion:^(NSDictionary * _Nullable json) {
-        if (json && [json[@"ok"] boolValue]) RLPToast(RLPTr(@"已保存歌单"));
-        else RLPToast([json[@"error"] isKindOfClass:[NSString class]] ? json[@"error"] : RLPTr(@"保存失败"));
+        __typeof__(self) self_ = weakSelf;
+        if (!self_) return;
+        if (!json || ![json[@"ok"] boolValue]) {
+            RLPToast([json[@"error"] isKindOfClass:[NSString class]] ? json[@"error"] : RLPTr(@"保存失败"));
+            return;
+        }
+        // P2：web ui_script.h:3930-3932 —— toast 带歌单名/首数，并通知侧栏重拉（行数 +1）。
+        NSString *saved = ([json[@"name"] isKindOfClass:[NSString class]] && [json[@"name"] length])
+                        ? json[@"name"] : trimmed;
+        const NSInteger count = [json[@"count"] respondsToSelector:@selector(integerValue)]
+                              ? [json[@"count"] integerValue] : queueCount;
+        RLPToast([NSString stringWithFormat:@"%@%@（%ld %@）",
+                  RLPTr(@"已存为歌单："), saved, (long)count, RLPTr(@"首")]);
+        [[NSNotificationCenter defaultCenter] postNotificationName:@"RLPSavedQueuesChangedNotification"
+                                                            object:nil];
     }];
 }
 
@@ -687,7 +767,11 @@ static NSString *RLPQueueMetaText(NSDictionary *m, NSString *k,
 }
 
 - (void)reloadData {
-    if (![RLPCoreClient shared].started) { [self setSubtitle:RLPTr(@"核心未启动")]; return; }
+    if (![RLPCoreClient shared].started) {
+        [self setSubtitle:RLPTr(@"核心未启动")];
+        self.saveButton.enabled = NO;   // P7：没有队列数据 ⟹ 不能保存
+        return;
+    }
     const NSUInteger seq = ++self.seq;
     __weak __typeof__(self) weakSelf = self;
     [[RLPCoreClient shared] getJSON:@"/api/queue?meta=1" completion:^(NSDictionary * _Nullable json) {
@@ -730,6 +814,7 @@ static NSString *RLPQueueMetaText(NSDictionary *m, NSString *k,
         self_.mode = [json[@"mode"] respondsToSelector:@selector(integerValue)] ? [json[@"mode"] integerValue] : 0;
         [self_.table reloadData];
         self_.empty.hidden = ps.count > 0;
+        self_.saveButton.enabled = ps.count > 0;   // P7：空队列禁用「保存为歌单」
         NSArray *names = @[ RLPTr(@"顺序"), RLPTr(@"列表循环"), RLPTr(@"单曲循环"), RLPTr(@"随机") ];
         NSString *mn = names[MIN(MAX(self_.mode, 0), 3)];
         [self_ setSubtitle:[NSString stringWithFormat:RLPTr(@"%ld 首 · 当前第 %ld 首 · %@"),

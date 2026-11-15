@@ -53,6 +53,18 @@ static void EqStr(NSString *got, NSString *want, const char *what) {
 
 static NSMutableArray<NSDictionary *> *g_gets;    // @{path}
 static NSMutableArray<NSDictionary *> *g_posts;   // @{path, body}
+/// 队列夹具：P7 需要把队列清空，其它判据仍用 4 首默认夹具。
+static NSArray<NSString *> *g_queueItems;
+static NSArray<NSDictionary *> *g_queueMetas;
+static NSArray<NSArray<NSNumber *> *> *g_queueCues;
+static NSInteger g_queueMode;
+/// 失败注入 + 保存响应（P2/P6：真实走 ok/error 字段，不靠文案猜测）。
+static BOOL g_failQorder;
+static NSString *g_qorderErr;
+static BOOL g_failQsortDefault;
+static NSString *g_qsortErr;
+static NSDictionary *g_saveResponse;
+static NSInteger g_savedQueueNotes;
 
 static NSArray<NSString *> *PathsFixture(void) {
     return @[ @"/Music/A/One.flac", @"/Music/B/Two.flac",
@@ -70,8 +82,9 @@ static NSArray<NSArray<NSNumber *> *> *CuesFixture(void) {
               @[ @(-1), @(-1) ], @[ @(30), @(40) ] ];
 }
 static NSDictionary *QueuePayload(void) {
-    return @{ @"ok": @YES, @"index": @0, @"mode": @0,
-              @"items": PathsFixture(), @"cues": CuesFixture(), @"metas": MetasFixture() };
+    return @{ @"ok": @YES, @"index": @0, @"mode": @(g_queueMode),
+              @"items": g_queueItems ?: @[], @"cues": g_queueCues ?: @[],
+              @"metas": g_queueMetas ?: @[] };
 }
 
 #pragma mark clang diagnostic push
@@ -83,12 +96,32 @@ static NSDictionary *QueuePayload(void) {
     if (!done) return;
     [g_gets addObject:@{ @"path": path ?: @"" }];
     if ([path hasPrefix:@"/api/queue?meta=1"]) { done(QueuePayload()); return; }
+    if ([path hasPrefix:@"/api/playmode"]) { done(@{ @"ok": @YES, @"mode": @(g_queueMode) }); return; }
     if ([path hasPrefix:@"/api/sq/list"]) { done(@{ @"ok": @YES, @"queues": @[] }); return; }
     done(@{ @"ok": @NO });
 }
 - (void)getData:(NSString *)path completion:(RLPDataCompletion)done { (void)path; if (done) done(nil); }
 - (void)postJSON:(NSString *)path body:(NSString *)body completion:(RLPJSONCompletion)done {
     [g_posts addObject:@{ @"path": path ?: @"", @"body": body ?: @"" }];
+    // 失败注入：判据必须看到 ok 字段被读、下拉回滚、错误按后端原文提示。
+    if ([path hasPrefix:@"/api/qorder"] && g_failQorder) {
+        NSMutableDictionary *j = [@{ @"ok": @NO } mutableCopy];
+        if (g_qorderErr.length) j[@"error"] = g_qorderErr;
+        if (done) done(j);
+        return;
+    }
+    if ([path hasPrefix:@"/api/qsort"] && g_failQsortDefault) {
+        NSMutableDictionary *j = [@{ @"ok": @NO } mutableCopy];
+        if (g_qsortErr.length) j[@"error"] = g_qsortErr;
+        if (done) done(j);
+        return;
+    }
+    if ([path hasPrefix:@"/api/sq/save"] && g_saveResponse) { if (done) done(g_saveResponse); return; }
+    if ([path hasPrefix:@"/api/playmode?mode="]) {
+        g_queueMode = [[path substringFromIndex:@"/api/playmode?mode=".length] integerValue];
+        if (done) done(@{ @"ok": @YES });
+        return;
+    }
     if (done) done(@{ @"ok": @YES });
 }
 @end
@@ -139,12 +172,42 @@ static NSDictionary *LastPostFor(NSString *path) {
     for (NSDictionary *p in g_posts) if ([p[@"path"] isEqualToString:path]) hit = p;
     return hit;
 }
+static NSArray<NSDictionary *> *PostsWithPrefix(NSString *prefix) {
+    NSMutableArray *out = [NSMutableArray array];
+    for (NSDictionary *p in g_posts) if ([p[@"path"] hasPrefix:prefix]) [out addObject:p];
+    return out;
+}
+
+#pragma mark - 轻提示断言（与 test_native_nowplaying_web 同一条离屏口径）
+
+/// RLPToast 挂在窗口 contentView 上的视图 identifier 是 rlp.toast（不靠文案匹配）。
+static NSView *ToastBox(NSWindow *win) {
+    for (NSView *v in win.contentView.subviews)
+        if ([v.identifier isEqualToString:@"rlp.toast"]) return v;
+    return nil;
+}
+static void ClearToasts(NSWindow *win) {
+    NSMutableArray<NSView *> *doomed = [NSMutableArray array];
+    for (NSView *v in win.contentView.subviews)
+        if ([v.identifier isEqualToString:@"rlp.toast"]) [doomed addObject:v];
+    for (NSView *v in doomed) [v removeFromSuperview];
+}
+/// 当前 toast 的文案（RLPToast 显示的是 RLPTr(message)，所以断言也用 RLPTr 比对）。
+static NSString *ToastText(NSWindow *win) {
+    NSView *box = ToastBox(win);
+    if (!box) return nil;
+    for (NSView *v in box.subviews)
+        if ([v isKindOfClass:[NSTextField class]]) return ((NSTextField *)v).stringValue;
+    return nil;
+}
 #pragma mark - 测试
 
 @interface RLPQueueViewController (QueueSortTest)
 - (void)reloadData;
 - (void)sortBy:(NSString *)key;
 - (void)playRow:(NSInteger)row;
+- (void)onSortPicked:(NSPopUpButton *)sender;
+- (void)savePlaylistNamed:(NSString *)name;   // 生产接缝：不弹「保存为歌单」名对话框
 - (NSTableView *)table;
 @end
 
@@ -189,11 +252,30 @@ int main() {
         [app setActivationPolicy:NSApplicationActivationPolicyAccessory];
         g_gets = [NSMutableArray array];
         g_posts = [NSMutableArray array];
+        g_queueItems = PathsFixture();
+        g_queueMetas = MetasFixture();
+        g_queueCues = CuesFixture();
+        g_queueMode = 0;
         [RLPTheme setThemeName:@"light"];
         [RLPTheme setUiStyle:@"apple"];
+        // 离屏窗口承载页面：P2/P6/P7 要断言**用户看得见的 toast**（RLPToast 无窗口时会静默丢弃）。
+        NSWindow *win = [[NSWindow alloc] initWithContentRect:NSMakeRect(0, 0, 1200, 800)
+                                                    styleMask:NSWindowStyleMaskBorderless
+                                                      backing:NSBackingStoreBuffered defer:NO];
+        win.contentView = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 1200, 800)];
+        [win orderFront:nil];
+        static NSWindow *sWindow; sWindow = win; (void)sWindow;   // 不 close：离屏测试不承担 dealloc 顺序
+        [[NSNotificationCenter defaultCenter] addObserverForName:@"RLPSavedQueuesChangedNotification"
+                                                           object:nil queue:nil
+                                                        usingBlock:^(NSNotification *note) {
+            (void)note;
+            ++g_savedQueueNotes;
+        }];
         std::printf("=== test_native_queue_sort（#qSort 8 档 + CUE 保真 · 离屏 · 不出声）===\n");
 
         RLPQueueViewController *vc = NewVC();
+        vc.view.frame = win.contentView.bounds;
+        [win.contentView addSubview:vc.view];
         NSPopUpButton *sort = (NSPopUpButton *)FindById(vc.view, @"queue.sort");
         Ck(sort != nil, "找得到排序下拉 queue.sort", @"下拉缺失");
         if (!sort) { std::printf("结果：%d passed, %d failed\n", g_pass, g_fail); return 1; }
@@ -328,6 +410,116 @@ int main() {
             NSButton *del = nil;
             for (NSView *x in all) if ([x isKindOfClass:[NSButton class]] && [x.identifier isEqualToString:@"q.del"]) del = (NSButton *)x;
             Ck(del != nil, "行尾 × 按钮仍存在（q.del）", @"找不到 q.del");
+        }
+
+        // ---- P7 空队列守卫：按钮禁用 + 直接提示，不弹框不发请求（web saveQueueDialog 的 n==0 分支）----
+        {
+            g_queueItems = @[]; g_queueMetas = @[]; g_queueCues = @[];
+            RLPQueueViewController *emptyVC = [RLPQueueViewController new];
+            NSView *ev = emptyVC.view;
+            ev.frame = win.contentView.bounds;
+            [win.contentView addSubview:ev];
+            [ev layoutSubtreeIfNeeded];
+            [emptyVC reloadData];
+            Pump(0.05);
+            Ck([emptyVC valueForKey:@"paths"] != nil && [[emptyVC valueForKey:@"paths"] count] == 0,
+               "P7 空队列已载入（判据前提）", [NSString stringWithFormat:@"paths=%@", [emptyVC valueForKey:@"paths"]]);
+            NSButton *save = (NSButton *)FindById(ev, @"save");
+            Ck([save isKindOfClass:[NSButton class]], "P7 找得到「保存为歌单」按钮（save）", @"save 缺失");
+            Ck(save != nil && !save.enabled,
+               "P7 空队列时「保存为歌单」按钮禁用（web 空队列不渲染保存按钮）",
+               [NSString stringWithFormat:@"enabled=%d", save ? (int)save.enabled : -1]);
+            [g_posts removeAllObjects];
+            ClearToasts(win);
+            [emptyVC savePlaylistNamed:@"Empty Queue"];
+            Pump(0.05);
+            Ck(PostsWithPrefix(@"/api/sq/save").count == 0,
+               "P7 空队列保存不发 /api/sq/save（后端本来也会拒，前端不先弹框）",
+               [g_posts componentsJoinedByString:@" | "]);
+            Ck([ToastText(win) isEqualToString:RLPTr(@"队列是空的，先加几首歌再保存")],
+               "P7 空队列保存直接提示（web 原文：队列是空的，先加几首再保存）",
+               ToastText(win) ?: @"(无 toast)");
+            [ev removeFromSuperview];
+            // 恢复夹具（后续 M3U 判据仍用 4 首队列）。
+            g_queueItems = PathsFixture(); g_queueMetas = MetasFixture(); g_queueCues = CuesFixture();
+            [vc reloadData];
+            Pump(0.05);
+        }
+
+        // ---- P2 保存歌单后侧栏刷新 + toast 带歌单名/首数（web ui_script.h:3930-3932）----
+        {
+            g_saveResponse = @{ @"ok": @YES, @"name": @"Night Mix", @"count": @4 };
+            g_savedQueueNotes = 0;
+            [g_posts removeAllObjects];
+            ClearToasts(win);
+            [vc savePlaylistNamed:@"Night Mix"];
+            Pump(0.05);
+            NSArray<NSDictionary *> *saves = PostsWithPrefix(@"/api/sq/save");
+            Ck(saves.count == 1, "P2 保存歌单真发 /api/sq/save", [g_posts componentsJoinedByString:@" | "]);
+            if (saves.count == 1) {
+                NSString *decoded = [saves[0][@"path"] stringByRemovingPercentEncoding] ?: saves[0][@"path"];
+                Ck([decoded containsString:@"name=Night Mix"], "P2 歌单名下发正确", decoded);
+            }
+            Ck(g_savedQueueNotes == 1,
+               "P2 成功后发 RLPSavedQueuesChangedNotification（侧栏行数 +1 含新名）",
+               [NSString stringWithFormat:@"notes=%ld", (long)g_savedQueueNotes]);
+            NSString *wantToast = [NSString stringWithFormat:@"%@%@（%ld %@）",
+                                   RLPTr(@"已存为歌单："), @"Night Mix", (long)4, RLPTr(@"首")];
+            Ck([ToastText(win) isEqualToString:wantToast],
+               "P2 toast = 已存为歌单：<名>（<N> 首）（带名与首数，不是裸的已保存歌单）",
+               [NSString stringWithFormat:@"got=%@ want=%@", ToastText(win) ?: @"(无 toast)", wantToast]);
+            g_saveResponse = nil;
+        }
+
+        // ---- P6 排序失败反馈 + 下拉回滚（web ui_script.h:12496-12500 / 12541-12543）----
+        {
+            // P6a qorder 失败：toast 后端 error，下拉回到上一档（不留在用户刚点的档位）。
+            g_failQorder = YES;
+            g_qorderErr = @"排序失败：无法写入队列文件";
+            ClearToasts(win);
+            [sort selectItemAtIndex:0];                 // 上一档 = 默认顺序
+            [sort selectItemAtIndex:5];                 // 用户点「年份」
+            [g_posts removeAllObjects];
+            [vc onSortPicked:sort];
+            Pump(0.1);
+            Ck([ToastText(win) isEqualToString:g_qorderErr],
+               "P6 排序失败 toast = 后端 error（不再静默）",
+               [NSString stringWithFormat:@"got=%@ want=%@", ToastText(win) ?: @"(无 toast)", g_qorderErr]);
+            Ck(sort.indexOfSelectedItem == 0,
+               "P6 排序失败后下拉回滚到上一档（默认顺序）",
+               [NSString stringWithFormat:@"selected=%ld", (long)sort.indexOfSelectedItem]);
+            g_failQorder = NO;
+
+            // P6b 先成功排一次标题（成为"上一档"），再让 default 恢复失败。
+            [sort selectItemAtIndex:1];
+            [vc onSortPicked:sort];
+            Pump(0.1);
+            Ck([g_posts count] > 0, "P6b 标题排序已下发（判据前提）", @"");
+
+            g_failQsortDefault = YES;
+            g_qsortErr = nil;
+            ClearToasts(win);
+            [sort selectItemAtIndex:0];
+            [vc onSortPicked:sort];
+            Pump(0.1);
+            Ck([ToastText(win) isEqualToString:RLPTr(@"没有可恢复的排序")],
+               "P6 default 失败且后端无 error 时提示「没有可恢复的排序」（web fallback 文案）",
+               [NSString stringWithFormat:@"got=%@", ToastText(win) ?: @"(无 toast)"]);
+            Ck(sort.indexOfSelectedItem == 1,
+               "P6 default 失败后下拉回滚到上一档（标题）",
+               [NSString stringWithFormat:@"selected=%ld", (long)sort.indexOfSelectedItem]);
+            g_failQsortDefault = NO;
+
+            // P6c default 成功：web 回 toast「已恢复默认顺序」并把档位留在默认。
+            ClearToasts(win);
+            [sort selectItemAtIndex:0];
+            [vc onSortPicked:sort];
+            Pump(0.1);
+            Ck([ToastText(win) isEqualToString:RLPTr(@"已恢复默认顺序")],
+               "P6 default 成功提示「已恢复默认顺序」（web ui_script.h:12500）",
+               [NSString stringWithFormat:@"got=%@", ToastText(win) ?: @"(无 toast)"]);
+            Ck(sort.indexOfSelectedItem == 0, "P6 成功后档位停在默认顺序",
+               [NSString stringWithFormat:@"selected=%ld", (long)sort.indexOfSelectedItem]);
         }
 
         // ---- v3.3.11 qImportM3u：队列页导入按钮与 /api/queue/set 下发 ----

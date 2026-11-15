@@ -121,6 +121,12 @@ void RLPPlaybackResumeOrReplay(BOOL playing, BOOL paused, NSString * _Nullable c
 /// 供「我的最爱」双击等"从某行起播整个列表"的场景使用。
 void RLPPlayWholeListFrom(NSArray<NSString *> *files, NSInteger start);
 
+/// web ensureSequentialMode 的共享守卫：起播整列之前先读 /api/playmode，
+/// 是单曲循环（mode==2）就切回列表循环（mode=1）；其余模式原样不动。
+/// then 在主线程恰好回调一次（无需回调时传 nil）。最爱页/队列页/歌单页共用同一实现，
+/// 避免各页面各写一套导致某页漏掉（P3：歌单页在单曲循环下整列播成一首）。
+void RLPEnsureSequentialMode(void (^ _Nullable then)(void));
+
 /// 「古典作品」判定与检索参数（web ui_script.h npIsClassical / npGuessComposer / npWorkTarget 的逐条移植）。
 /// 为什么放在公共层：播放页第 4 张卡、作品抽屉、整页入口、右键菜单四处都要用同一套判定，
 /// 各写一份必然漂移（web 也只有一个真源）。

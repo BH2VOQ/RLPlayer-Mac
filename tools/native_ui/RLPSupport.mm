@@ -410,14 +410,18 @@ void RLPPlayWholeListFrom(NSArray<NSString *> *files, NSInteger start) {
 
     // 单曲循环（mode=2）会让"播放整列"卡在第一首：先读当前模式，是 2 就切回列表循环 1。
     // 读到 mode 之前不盲目写，避免把用户的随机/顺序设置也改掉。
+    RLPEnsureSequentialMode(^{ RLPSetQueueAndPlay(clean, i); });
+}
+
+void RLPEnsureSequentialMode(void (^then)(void)) {
     [[RLPCoreClient shared] getJSON:@"/api/playmode" completion:^(NSDictionary * _Nullable modeJson) {
         NSInteger mode = [modeJson[@"mode"] respondsToSelector:@selector(integerValue)]
                        ? [modeJson[@"mode"] integerValue] : 0;
         if (mode == 2) {
             [[RLPCoreClient shared] postJSON:@"/api/playmode?mode=1" body:nil
-                                  completion:^(NSDictionary * _Nullable) { RLPSetQueueAndPlay(clean, i); }];
-        } else {
-            RLPSetQueueAndPlay(clean, i);
+                                  completion:^(NSDictionary * _Nullable ignored) { (void)ignored; if (then) then(); }];
+        } else if (then) {
+            then();
         }
     }];
 }

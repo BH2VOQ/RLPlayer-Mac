@@ -95,6 +95,9 @@ static NSString *RLPTrackArtistAlbumText(RLPTrack *t) {
     NSLayoutConstraint *_footerHeightConstraint;
 
     NSMutableArray<RLPTrack *> *_tracks;
+    // P5：接口返回的**原始顺序**。每次排序都从这里派生，绝不就地覆盖 ——
+    // 否则切回「默认排序」不可逆（web ui_script.h:3352 每次用原始 trackRows 的拷贝）。
+    NSMutableArray<RLPTrack *> *_rawTracks;
     NSInteger _limit;
     NSInteger _totalCount;
     BOOL _hasLoaded;
@@ -120,6 +123,7 @@ static NSString *RLPTrackArtistAlbumText(RLPTrack *t) {
     self = [super initWithTitle:RLPTr(@"曲目")];
     if (self) {
         _tracks = [NSMutableArray array];
+        _rawTracks = [NSMutableArray array];
         _limit = 300;
         _totalCount = 0;
         _hasLoaded = NO;
@@ -134,6 +138,7 @@ static NSString *RLPTrackArtistAlbumText(RLPTrack *t) {
     self = [super initWithTitle:title.length ? title : RLPTr(@"曲目")];
     if (self) {
         _tracks = [NSMutableArray array];
+        _rawTracks = [NSMutableArray array];
         _limit = 300;
         _totalCount = 0;
         _hasLoaded = NO;
@@ -442,6 +447,7 @@ static NSString *RLPTrackArtistAlbumText(RLPTrack *t) {
     if (![RLPCoreClient shared].started) {
         [self setSubtitle:RLPTr(@"核心未启动")];
         [_tracks removeAllObjects];
+        [_rawTracks removeAllObjects];
         _totalCount = 0;
         _hasLoaded = YES;
         _emptyLabel.stringValue = RLPTr(@"核心未启动");
@@ -465,6 +471,7 @@ static NSString *RLPTrackArtistAlbumText(RLPTrack *t) {
         if (!json || ![json[@"ok"] boolValue]) {
             [self_ setSubtitle:RLPTr(@"读取失败")];
             [self_->_tracks removeAllObjects];
+            [self_->_rawTracks removeAllObjects];
             self_->_totalCount = 0;
             self_->_emptyLabel.stringValue = RLPTr(@"读取失败");
             self_->_emptyLabel.hidden = NO;
@@ -474,7 +481,7 @@ static NSString *RLPTrackArtistAlbumText(RLPTrack *t) {
         }
 
         NSArray<RLPTrack *> *list = [RLPTrack tracksFromJSON:json key:@"tracks"];
-        [self_->_tracks setArray:list];
+        [self_->_rawTracks setArray:list];   // P5：只维护原始序；_tracks 由 applyTrackSort 派生
 
         NSInteger total = [json[@"total"] respondsToSelector:@selector(integerValue)]
             ? [json[@"total"] integerValue]
@@ -497,9 +504,10 @@ static NSString *RLPTrackArtistAlbumText(RLPTrack *t) {
             }
         }
 
+        // 先派生 _tracks（P5 从 _rawTracks），footer 的「加载更多」判据读的是 _tracks.count。
+        [self_ applyTrackSort];
         [self_ updateFooterVisibility];
         [self_ loadFavoriteSet];
-        [self_ applyTrackSort];
         [self_->_tableView reloadData];
     }];
 }
@@ -767,9 +775,14 @@ static NSString *RLPTrackArtistAlbumText(RLPTrack *t) {
 }
 
 /// 与 web 的排序键逐条对齐（web 只排**当前已加载的这一片**，不改变后端分页）。
+/// 每次都从 _rawTracks（接口原始顺序）派生；default = 原序（P5：可逆）。
 - (void)applyTrackSort {
-    if (!_tracks.count || [_trackSort isEqualToString:@"default"]) return;
-    NSArray *sorted = [_tracks sortedArrayUsingComparator:^NSComparisonResult(RLPTrack *a, RLPTrack *b) {
+    if (!_rawTracks) { [_tracks removeAllObjects]; return; }
+    if (!_rawTracks.count || [_trackSort isEqualToString:@"default"]) {
+        [_tracks setArray:_rawTracks];
+        return;
+    }
+    NSArray *sorted = [_rawTracks sortedArrayUsingComparator:^NSComparisonResult(RLPTrack *a, RLPTrack *b) {
         if ([self->_trackSort isEqualToString:@"title"])
             return [(a.title ?: @"") caseInsensitiveCompare:(b.title ?: @"")];
         if ([self->_trackSort isEqualToString:@"artist"])
@@ -779,8 +792,12 @@ static NSString *RLPTrackArtistAlbumText(RLPTrack *t) {
         if ([self->_trackSort isEqualToString:@"dur"])
             return a.duration < b.duration ? NSOrderedAscending : (a.duration > b.duration ? NSOrderedDescending : NSOrderedSame);
         if ([self->_trackSort isEqualToString:@"year"]) {
-            // 曲目没有 year 字段（web 用 a.year，后端 search 不回该键）⟹ 保持原序，不编造。
-            return NSOrderedSame;
+            // web ui_script.h:3362-3363 的 year 是**降序**：(b.year||0)-(a.year||0)，新到旧。
+            // 后端 /api/lib/search 本来就回 "year"（rtaweb.cpp:8244），RLPTrack 已解析，
+            // 旧码注释「曲目没有 year 字段」不成立。
+            if (a.year == b.year) return NSOrderedSame;
+            // JS 的 (b.year - a.year) 为正 ⟹ a 排在 b 之后 ⟹ NSOrderedDescending。
+            return (b.year > a.year) ? NSOrderedDescending : NSOrderedAscending;
         }
         if ([self->_trackSort isEqualToString:@"fav"]) {
             const BOOL fa = [self->_favoritePaths containsObject:a.path];

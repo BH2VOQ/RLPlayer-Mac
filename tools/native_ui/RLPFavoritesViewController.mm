@@ -66,10 +66,11 @@ static NSString * const kFavColHeart = @"ColFavHeart";
     scroll.hasHorizontalScroller = NO;
     [self.contentView addSubview:scroll];
     
-    // 双击播放
-    // 与 web 版一致：**单击**即触发（web 的行 onclick 就是单击）。
-    // 双击保留兼容；两者指向同一动作，重复触发幂等。
-    _tableView.action = @selector(onDoubleClick:);
+    // 双击播放（P1）：单击**只选中**，绝不整列开播。
+    // web 真源 ui_script.h:3725-3737：.favrow 的 onclick 只切换 .fsel 选中态，
+    // 整列顺序播放挂在 ondblclick（playWholeListFrom）上。旧原生把 action（单击）
+    // 也指向 onDoubleClick: ⟹ 点一下行就把整个收藏列表建成队列并起播，与 web 相悖。
+    _tableView.action = NULL;
     _tableView.doubleAction = @selector(onDoubleClick:);
     _tableView.target = self;
     
@@ -147,13 +148,18 @@ static NSString * const kFavColHeart = @"ColFavHeart";
 - (void)onDoubleClick:(id)sender {
     NSInteger row = [_tableView clickedRow];
     if (row < 0 || row >= (NSInteger)_tracks.count) return;
+    [self playRowAtIndex:row];
+}
+
+/// 整列起播（双击的真实落点；判据直接调这里，不依赖鼠标事件）。
+- (void)playRowAtIndex:(NSInteger)row {
+    if (row < 0 || row >= (NSInteger)_tracks.count) return;
     // 与 web 我的最爱页同语义：双击不是只播这一首，而是把整个收藏列表建成队列、
     // 从被点那首开始顺序播放（/api/queue/set → playPath）。单曲循环模式会被切回列表循环。
     NSMutableArray<NSString *> *paths = [NSMutableArray array];
     for (RLPTrack *t in _tracks) if (t.path.length) [paths addObject:t.path];
     // start 要用"在过滤后列表里的位置"；_tracks 全有 path 时与 row 一致。
-    NSInteger start = row;
-    RLPPlayWholeListFrom(paths, start);
+    RLPPlayWholeListFrom(paths, row);
 }
 
 - (void)onPlay:(id)sender {
