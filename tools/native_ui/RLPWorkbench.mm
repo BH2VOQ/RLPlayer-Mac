@@ -170,3 +170,23 @@ NSString *RLPChainNodeDisabledReason(NSString *node, NSDictionary *settings) {
     }
     return nil;   // src / out 恒适用
 }
+
+NSString *RLPProfileSummary(NSDictionary *profile) {
+    if (![profile isKindOfClass:[NSDictionary class]]) return RLPTr(@"未保存");
+    NSDictionary *keys = [profile[@"keys"] isKindOfClass:[NSDictionary class]] ? profile[@"keys"] : @{};
+    NSMutableArray<NSString *> *p = [NSMutableArray array];
+    NSString *f = keys[@"filter"];
+    if ([f isKindOfClass:[NSString class]] && f.length) [p addObject:f];
+    NSString *dsd = keys[@"dsd"];
+    if ([dsd isKindOfClass:[NSString class]] && dsd.integerValue > 0) {
+        [p addObject:[NSString stringWithFormat:@"DSD%@", dsd]];
+    } else {
+        NSString *rate = keys[@"rate"];
+        if ([rate isKindOfClass:[NSString class]] && rate.length)
+            [p addObject:([rate isEqualToString:@"follow"] ? RLPTr(@"跟随源")
+                                                          : [NSString stringWithFormat:@"%@ Hz", rate])];
+    }
+    NSString *eqName = profile[@"eqId"];
+    if ([eqName isKindOfClass:[NSString class]] && eqName.length) [p addObject:eqName];
+    return p.count ? [p componentsJoinedByString:@" · "] : RLPTr(@"未保存");
+}

@@ -7829,6 +7829,9 @@ static bool is_side_effect_path(const std::string& p) {
         // U4：/api/miccal 的导入/清除会改进程内校准状态，必须 POST；GET 只做状态查询
         // （唯一放行点在 getReadOnlyOk，带 clear/path 参数的 GET 仍然 405）。
         "/api/miccal",
+        // U16：/api/profiles 的 save/apply/delete 会写配置档并改设置；GET 只做无参列表查询
+        // （唯一放行点在 getReadOnlyOk，带任何 query 的 GET 一律 405）。
+        "/api/profiles",
         // 预设的 apply 会写 rlplayer-settings.conf（副作用）；caps 是只读查询，不进这张表
         "/api/preset/apply",
         // 专辑封面预热（2026-10-26）：会落盘 covercache + 打网络。
@@ -8201,6 +8204,458 @@ static std::string miccal_stats_json(const rta::dsp::MicCalTable& t) {
     return j.str();
 }
 
+// ---------------- U16（上游 v3.3.11）：工作台命名配置档（/api/profiles）----------------
+//
+// 上游语义（src/net/workbench_config.h + src/net/workbench_profiles.h@v3.3.11）：
+//   * audio_keys() 是工作台能切的**全部**听感/链路键；
+//   * profile_key() 在 audio_keys() 上再排除 backend/device/buffer/upnpdev/gpuvendor ——
+//     切档不能抢输出设备与独占，否则"对比听感"会变成"制造事故"；
+//   * 配置档只存处理参数；音量、曲目与播放位置永远不进档。
+//
+// mac 落点：runtime_state_dir()（rlplayer-settings.conf 所在目录，path_in_exe_dir 同口径），
+// 不另建目录；写盘用「临时文件 + rename」，避免半写文件把用户全部档弄丢。
+// 读回来的档逐键过滤：存档只写白名单；外来/手改文件里的危险键、macOS 不支持的键与
+// 非法值在 apply 响应里如实列进 skipped，绝不静默生效。
+struct WorkbenchProfileEntry {
+    std::string id, name, eq_id;
+    long long created_at = 0;
+    std::map<std::string, std::string> keys;
+};
+
+struct WorkbenchProfileBook {
+    bool loaded = false;
+    std::string load_error;
+    std::string active;
+    int next_id = 1;
+    std::vector<WorkbenchProfileEntry> entries;
+};
+
+static WorkbenchProfileBook g_profileBook;
+
+static std::mutex& profile_book_mutex() {
+    static std::mutex m;
+    return m;
+}
+
+// 与上游 workbench_config.h 的 audio_keys() 逐字一致（按字母序，序列化稳定）。
+static const std::set<std::string>& profile_audio_keys() {
+    static const std::set<std::string> keys = {
+        "ahmbits", "atten", "backend", "bits", "buffer", "channels", "cleanup", "cleanup_auto",
+        "cleanup_noise_db", "cleanup_strength", "device", "directsdm", "dsd", "dsd2stage",
+        "dsdconv", "dsdkind", "dsdnative", "eq", "filter", "filterNx", "gpuvendor", "ir",
+        "irgpu", "isp", "loudness", "modcut", "moddith", "modfamily", "modorder", "oobgain",
+        "phase", "rate", "rateFamilyPolicy", "rgclip", "rgmode", "roomcorrauto", "sdmfilt",
+        "sdmfiltnx", "shaper", "taps", "transition", "trim", "twostage", "upnpdev"
+    };
+    return keys;
+}
+
+// 上游 profile_key()：白名单内，且**排除**输出设备/独占/缓冲这几个会改变物理端点的键。
+static bool profile_key_ok(const std::string& k) {
+    if (profile_audio_keys().count(k) == 0) return false;
+    return k != "backend" && k != "device" && k != "buffer" &&
+           k != "upnpdev" && k != "gpuvendor";
+}
+
+// macOS 设置层真正会写盘的音频键：上游白名单里 platform 专属的 cleanup/roomcorrauto/rgclip
+// 本平台没有对应实现，存档时不臆造它们的值（应用时遇到就如实 skip）。
+static bool profile_platform_key(const std::string& k) {
+    if (!profile_key_ok(k)) return false;
+    return k != "roomcorrauto" && k != "rgclip" && k != "cleanup" && k != "cleanup_auto" &&
+           k != "cleanup_strength" && k != "cleanup_noise_db";
+}
+
+static std::string profile_num(double value) {
+    std::ostringstream out;
+    out.precision(15);
+    out << value;
+    return out.str();
+}
+
+// RFC 3986 组件编码（配置档值可能含中文路径、& 与 =）。
+static std::string profile_pct(const std::string& s) {
+    static const char* hex = "0123456789ABCDEF";
+    std::string out;
+    for (unsigned char c : s) {
+        const bool safe = (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+                          (c >= '0' && c <= '9') || c == '-' || c == '_' || c == '.' || c == '~';
+        if (safe) { out += (char)c; continue; }
+        out += '%';
+        out += hex[c >> 4];
+        out += hex[c & 0x0F];
+    }
+    return out;
+}
+
+// 设置层「当前值」：conf 全量过 parseForm（与起播/设置页同一套解析），缺键用 PlayParams 默认值。
+// 这样存出来的是**完整**档，而不是"用户恰好改过的那几个键" —— 应用后才能整链还原。
+static PlayParams profile_current_params() {
+    const auto conf = load_conf_map();
+    std::string body;
+    for (const auto& kv : conf)
+        body += profile_pct(kv.first) + "=" + profile_pct(kv.second) + "&";
+    return parseForm(body);
+}
+
+static std::map<std::string, std::string> profile_snapshot_keys() {
+    const PlayParams p = profile_current_params();
+    std::map<std::string, std::string> v;
+    auto put = [&v](const char* k, const std::string& value) {
+        if (profile_platform_key(k)) v[k] = value;
+    };
+    put("filter", p.filter);
+    put("filterNx", p.filterNx);
+    put("rate", p.rate.empty() ? std::string("follow") : p.rate);
+    put("rateFamilyPolicy", p.rateFamilyPolicy);
+    put("dsd", std::to_string(p.dsd));
+    put("dsdnative", p.dsdNative ? "1" : "0");
+    put("directsdm", p.directSdm ? "1" : "0");
+    put("shaper", p.shaper);
+    put("twostage", p.twoStage ? "1" : "0");
+    put("taps", std::to_string(p.taps));
+    put("atten", profile_num(p.atten));
+    put("transition", profile_num(p.transition));
+    put("phase", p.phase);
+    put("modorder", std::to_string(p.modOrder));
+    put("modfamily", p.modFamily);
+    put("modcut", profile_num(p.modCutoff));
+    put("moddith", profile_num(p.modDither));
+    put("oobgain", profile_num(p.oobGain));
+    put("ahmbits", std::to_string(p.ahmBits));
+    put("sdmfilt", p.sdmFilter);
+    put("sdmfiltnx", p.sdmFilterNx);
+    put("isp", p.isp ? "1" : "0");
+    put("eq", p.eqFile);
+    put("ir", p.convIr);
+    put("irgpu", p.convGpu ? "1" : "0");
+    put("loudness", p.loudness ? "1" : "0");
+    put("rgmode", p.rgMode);
+    put("dsdkind", p.dsdKind);
+    put("dsdconv", p.dsdConv);
+    put("dsd2stage", p.dsd2Stage ? "1" : "0");
+    put("bits", std::to_string(p.bits));
+    put("channels", std::to_string(p.outChannels));
+    std::string trims;
+    for (int i = 0; i < 8; ++i) {
+        if (i) trims += ',';
+        trims += profile_num(p.trim[i]);
+    }
+    put("trim", trims);
+    return v;
+}
+
+static bool profile_valid_name(const std::string& s) {
+    if (s.empty() || s.size() > 140 || !valid_utf8(s)) return false;
+    if (s.find_first_not_of(' ') == std::string::npos) return false;
+    for (unsigned char c : s)
+        if (c < 32 || c == 127) return false;
+    return true;
+}
+
+static std::string profile_file_path() {
+    return path_in_exe_dir("rlplayer-workbench-profiles.json");
+}
+
+static std::string profile_keys_json(const std::map<std::string, std::string>& keys) {
+    std::string text = "{";
+    for (const auto& kv : keys) {
+        if (!profile_key_ok(kv.first)) continue;
+        if (text.size() > 1) text += ',';
+        text += '"' + jesc(kv.first) + "\":\"" + jesc(kv.second) + '"';
+    }
+    return text + '}';
+}
+
+static std::string profile_entry_json(const WorkbenchProfileEntry& e) {
+    std::ostringstream j;
+    j << "{\"id\":\"" << jesc(e.id) << "\",\"name\":\"" << jesc(e.name)
+      << "\",\"createdAt\":" << e.created_at;
+    if (!e.eq_id.empty()) j << ",\"eqId\":\"" << jesc(e.eq_id) << '"';
+    j << ",\"keys\":" << profile_keys_json(e.keys) << '}';
+    return j.str();
+}
+
+static std::string profile_entries_json() {
+    std::string text = "[";
+    for (size_t i = 0; i < g_profileBook.entries.size(); ++i) {
+        if (i) text += ',';
+        text += profile_entry_json(g_profileBook.entries[i]);
+    }
+    return text + ']';
+}
+
+static std::string profile_list_json() {
+    return "{\"ok\":true,\"active\":\"" + jesc(g_profileBook.active) +
+           "\",\"profiles\":" + profile_entries_json() + '}';
+}
+
+static std::string profile_json_error(int code, const std::string& err_code,
+                                      const std::string& text) {
+    rta::net::webui_set_status(code);
+    return "{\"ok\":false,\"code\":\"" + jesc(err_code) + "\",\"error\":\"" + jesc(text) + "\"}";
+}
+
+// 档文件读取：坏文件绝不覆盖（保留原文件并如实报错），空/缺文件就是空态。
+static bool profile_book_load() {
+    WorkbenchProfileBook& b = g_profileBook;
+    if (b.loaded) return b.load_error.empty();
+    b.loaded = true;
+    const std::string path = profile_file_path();
+    auto bad = [&](const std::string& why) -> bool {
+        b.load_error = "配置档文件损坏，已保留原文件：" + why;
+        b.entries.clear();
+        b.active.clear();
+        return false;
+    };
+    std::ifstream in(path, std::ios::binary);
+    if (!in) {
+        // 没有档文件 = 空态（首次保存时才创建）；文件存在却打不开 = 权限问题，不能当空态。
+        std::error_code exists_ec;
+        if (fs::exists(fs::u8path(path), exists_ec)) return bad("无法读取档文件（请检查目录权限）");
+        return true;
+    }
+    std::string bytes, line;
+    while (std::getline(in, line)) {
+        if (!line.empty() && line.back() == '\r') line.pop_back();
+        bytes += line;
+        bytes += '\n';
+    }
+    const rta::net::Json j = rta::net::json_parse(bytes);
+    if (j.type != rta::net::Json::Obj || j["version"].n() != 1 ||
+        j["profiles"].type != rta::net::Json::Arr || j["profiles"].size() > 512)
+        return bad("不是有效的 v1 JSON 档文件");
+    std::set<std::string> ids;
+    int max_id = 0;
+    for (const auto& x : j["profiles"].arr) {
+        if (x.type != rta::net::Json::Obj) return bad("档条目不是对象");
+        const std::string id = x["id"].s();
+        if (id.empty() || !ids.insert(id).second) return bad("档 id 为空或重复");
+        const std::string name = x["name"].s();
+        if (!profile_valid_name(name)) return bad("档名无效");
+        if (x["keys"].type != rta::net::Json::Obj) return bad("档 keys 不是对象");
+        WorkbenchProfileEntry e;
+        e.id = id;
+        e.name = name;
+        e.eq_id = x["eqId"].s();
+        e.created_at = (long long)x["createdAt"].n();
+        for (const auto& kv : x["keys"].obj) {
+            if (kv.second.type != rta::net::Json::Str) continue;
+            e.keys[kv.first] = kv.second.str;   // 原样读回；apply 时逐键过滤
+        }
+        if (id.size() > 1 && id[0] == 'p') {
+            bool digits = true;
+            for (size_t i = 1; i < id.size(); ++i)
+                if (id[i] < '0' || id[i] > '9') { digits = false; break; }
+            if (digits) max_id = std::max(max_id, std::atoi(id.c_str() + 1));
+        }
+        b.entries.push_back(std::move(e));
+    }
+    b.active = j["active"].s();
+    if (ids.count(b.active) == 0) b.active.clear();
+    b.next_id = std::max((int)j["nextId"].n(), max_id + 1);
+    if (b.next_id < 1) b.next_id = 1;
+    return true;
+}
+
+static bool profile_book_persist() {
+    std::ostringstream j;
+    j << "{\"version\":1,\"nextId\":" << g_profileBook.next_id
+      << ",\"active\":\"" << jesc(g_profileBook.active) << "\",\"profiles\":"
+      << profile_entries_json() << "}\n";
+    const std::string path = profile_file_path();
+    const std::string tmp = path + ".tmp";
+    {
+        std::ofstream out(tmp, std::ios::binary | std::ios::trunc);
+        if (!out) return false;
+        out << j.str();
+        if (!out.good()) { out.close(); std::remove(tmp.c_str()); return false; }
+    }
+    std::error_code ec;
+    fs::rename(fs::u8path(tmp), fs::u8path(path), ec);
+    if (!ec) return true;
+    // rename 在极端文件系统上可能失败：退回直接写，仍失败就如实 false（调用方回滚内存）。
+    ec.clear();
+    {
+        std::ofstream out(path, std::ios::binary | std::ios::trunc);
+        if (!out) { std::remove(tmp.c_str()); return false; }
+        out << j.str();
+        if (!out.good()) { out.close(); std::remove(tmp.c_str()); return false; }
+    }
+    std::remove(tmp.c_str());
+    return true;
+}
+
+static std::string handle(const rta::net::HttpRequest& rq, std::string& ct);   // 定义在下方
+
+// /api/profiles：GET 列表；POST 走 save / apply / delete 三个动作。
+static std::string profile_request(const std::string& raw_path, const std::string& method) {
+    std::map<std::string, std::string> query;
+    const size_t qpos = raw_path.find('?');
+    if (qpos != std::string::npos) {
+        std::istringstream is(raw_path.substr(qpos + 1));
+        std::string tok;
+        while (std::getline(is, tok, '&')) {
+            if (tok.empty()) continue;
+            const size_t e = tok.find('=');
+            const std::string k = urlDecode(e == std::string::npos ? tok : tok.substr(0, e));
+            const std::string v = e == std::string::npos ? std::string() : urlDecode(tok.substr(e + 1));
+            if (k.empty()) continue;
+            if (query.count(k)) return profile_json_error(400, "profiles.bad_request", "重复参数：" + k);
+            query[k] = v;
+        }
+    }
+    std::unique_lock<std::mutex> lock(profile_book_mutex());
+    if (!profile_book_load())
+        return profile_json_error(500, "profiles.load_failed", g_profileBook.load_error);
+    if (method != "POST") return profile_list_json();   // GET：只读（带动作参数由 405 闸门拦下）
+
+    int found = 0;
+    std::string action, action_value;
+    for (const char* a : {"save", "apply", "delete"}) {
+        auto it = query.find(a);
+        if (it == query.end()) continue;
+        ++found;
+        action = a;
+        action_value = it->second;
+    }
+    if (found == 0)
+        return profile_json_error(400, "profiles.bad_action", "缺少动作参数：save / apply / delete");
+    if (found > 1)
+        return profile_json_error(400, "profiles.bad_action", "一次请求只能带一个动作");
+
+    if (action == "save") {
+        const std::string name = action_value;
+        if (!profile_valid_name(name))
+            return profile_json_error(400, "profiles.bad_name",
+                                      "配置档名称不能为空、不能超过 140 字节，且不含控制字符");
+        const WorkbenchProfileBook previous = g_profileBook;
+        WorkbenchProfileEntry e;
+        e.id = "p" + std::to_string(g_profileBook.next_id++);
+        e.name = name;
+        e.created_at = (long long)std::time(nullptr);
+        e.keys = profile_snapshot_keys();
+        if (!g_peq) peq_load_current();
+        if (g_peq) {
+            const rta::dsp::PeqSettings peq = g_peq->settings();
+            // EQ 快照的可见标识（只记方案名，不复制频段）；Flat = 没有自定义 EQ，不必写进档。
+            if (!peq.presetName.empty() && peq.presetName != "Flat") e.eq_id = peq.presetName;
+        }
+        g_profileBook.entries.push_back(std::move(e));
+        g_profileBook.active = g_profileBook.entries.back().id;
+        if (!profile_book_persist()) {
+            g_profileBook = previous;
+            return profile_json_error(500, "profiles.persist_failed",
+                                      "配置档保存失败（请检查 state 目录权限）");
+        }
+        return "{\"ok\":true,\"saved\":\"" + jesc(g_profileBook.active) + "\",\"active\":\"" +
+               jesc(g_profileBook.active) + "\",\"profiles\":" + profile_entries_json() + '}';
+    }
+
+    if (action == "delete") {
+        const std::string id = action_value;
+        auto it = std::find_if(g_profileBook.entries.begin(), g_profileBook.entries.end(),
+                               [&](const WorkbenchProfileEntry& p) { return p.id == id; });
+        if (it == g_profileBook.entries.end())
+            return profile_json_error(404, "profiles.not_found", "没有这个配置档：" + id);
+        const WorkbenchProfileBook previous = g_profileBook;
+        const std::string deleted = it->id;
+        g_profileBook.entries.erase(it);
+        if (g_profileBook.active == deleted) g_profileBook.active.clear();
+        if (!profile_book_persist()) {
+            g_profileBook = previous;
+            return profile_json_error(500, "profiles.persist_failed",
+                                      "配置档删除失败（请检查 state 目录权限）");
+        }
+        return "{\"ok\":true,\"deleted\":\"" + jesc(deleted) + "\",\"active\":\"" +
+               jesc(g_profileBook.active) + "\",\"profiles\":" + profile_entries_json() + '}';
+    }
+
+    // ---- apply：档内键合并写回设置层（复用 /api/settings 的合并/热重载语义）----
+    const std::string id = action_value;
+    auto it = std::find_if(g_profileBook.entries.begin(), g_profileBook.entries.end(),
+                           [&](const WorkbenchProfileEntry& p) { return p.id == id; });
+    if (it == g_profileBook.entries.end())
+        return profile_json_error(404, "profiles.not_found", "没有这个配置档：" + id);
+    const WorkbenchProfileEntry entry = *it;
+    lock.unlock();   // 设置层写入可能触发热重载；不要拿着档锁等音频线程
+
+    std::string body;
+    std::vector<std::pair<std::string, std::string>> candidates, skipped;
+    for (const auto& kv : entry.keys) {
+        if (!profile_key_ok(kv.first)) {
+            skipped.emplace_back(kv.first, "切档不接受此键（输出设备 / 独占 / 缓冲）");
+            continue;
+        }
+        if (kv.first == "rateFamilyPolicy" && !rta::audio::valid_rate_family_policy(kv.second)) {
+            skipped.emplace_back(kv.first, "rateFamilyPolicy 只接受 prefer / strict / compatible");
+            continue;
+        }
+        body += profile_pct(kv.first) + "=" + profile_pct(kv.second) + "&";
+        candidates.emplace_back(kv.first, kv.second);
+    }
+
+    std::vector<std::string> applied;
+    std::string error_text, error_code;
+    if (!body.empty()) {
+        rta::net::HttpRequest sub;
+        sub.method = "POST";
+        sub.path = "/api/settings";
+        sub.body = body;
+        std::string sub_ct;
+        const std::string out = handle(sub, sub_ct);
+        const rta::net::Json sj = rta::net::json_parse(out);
+        const bool ok = sj.has("ok") && sj["ok"].type == rta::net::Json::Bool && sj["ok"].b;
+        if (!ok) {
+            error_text = sj["error"].s();
+            error_code = sj["code"].s();
+            if (error_text.empty()) error_text = "设置层拒绝了该配置档";
+        } else {
+            const rta::net::Json& kv = sj["kv"];
+            for (const auto& c : candidates) {
+                if (kv.has(c.first) && kv[c.first].s() == c.second) applied.push_back(c.first);
+                else skipped.emplace_back(c.first, "设置层未接受该键（白名单或准入闸门）");
+            }
+        }
+    }
+    if (!error_text.empty()) {
+        const int st = rta::net::webui_status_slot()->load();
+        rta::net::webui_set_status(st == 422 ? 422 : 400);
+        return "{\"ok\":false,\"code\":\"profiles.apply_rejected\",\"upstreamCode\":\"" +
+               jesc(error_code) + "\",\"error\":\"" + jesc(error_text) + "\"}";
+    }
+
+    lock.lock();
+    auto again = std::find_if(g_profileBook.entries.begin(), g_profileBook.entries.end(),
+                              [&](const WorkbenchProfileEntry& p) { return p.id == id; });
+    const bool still_there = again != g_profileBook.entries.end();
+    if (still_there) {
+        const WorkbenchProfileBook previous = g_profileBook;
+        g_profileBook.active = id;
+        if (!profile_book_persist()) {
+            g_profileBook = previous;
+            return profile_json_error(500, "profiles.persist_failed",
+                                      "设置已应用，但配置档状态保存失败（请检查 state 目录权限）");
+        }
+    }
+    std::ostringstream j;
+    j << "{\"ok\":true,\"active\":\"" << jesc(g_profileBook.active) << "\",\"applied\":[";
+    for (size_t i = 0; i < applied.size(); ++i) {
+        if (i) j << ',';
+        j << '"' << jesc(applied[i]) << '"';
+    }
+    j << "],\"skipped\":[";
+    for (size_t i = 0; i < skipped.size(); ++i) {
+        if (i) j << ',';
+        j << "{\"key\":\"" << jesc(skipped[i].first) << "\",\"reason\":\""
+          << jesc(skipped[i].second) << "\"}";
+    }
+    j << ']';
+    if (!still_there) j << ",\"note\":\"配置档在应用过程中被删除，设置已写入\"";
+    j << '}';
+    return j.str();
+}
+
+
 static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
     auto& ps = g_ps;
 
@@ -8238,6 +8693,9 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
                 return false;
             return true;
         }
+        // U16：/api/profiles 的 GET 只允许**无参数**列表查询；save/apply/delete 必须 POST
+        //（一个 <img src=.../api/profiles?delete=p1> 绝不能删掉用户的档）。
+        if (p.rfind("/api/profiles", 0) == 0) return p.find('?') == std::string::npos;
         return false;
     };
     // 注意：/api/fav 既要有 GET 列表（/api/fav/list）又要有 POST 切换，所以先判豁免。
@@ -12426,6 +12884,16 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
           << ",\"hotReload\":\"pending-settings\""
           << "}";
         return j.str();
+    }
+
+    // ---------------- U16（上游 v3.3.11）：工作台命名配置档 ----------------
+    // GET  /api/profiles               列表：active + profiles[{id,name,keys,eqId?,createdAt}]
+    // POST /api/profiles?save=<name>   把当前听感键快照成命名档（不含设备/独占/缓冲）
+    // POST /api/profiles?apply=<id>    档内键合并写回 /api/settings；危险/不支持键 skip 并如实返回
+    // POST /api/profiles?delete=<id>   删除；重复删除/未知档 → 404 + profiles.not_found
+    if (rq.path.rfind("/api/profiles", 0) == 0) {
+        ct = "application/json; charset=utf-8";
+        return profile_request(rq.path, rq.method);
     }
 
     // 局域网监听状态（控制面默认只对本机开放）

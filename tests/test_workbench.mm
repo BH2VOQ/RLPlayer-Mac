@@ -182,6 +182,14 @@ int main() {
             for (NSView *v in all) if ([v.identifier isEqualToString:k]) found = YES;
             CK(found, [[NSString stringWithFormat:@"B1d A/B 控件存在 %@", k] UTF8String], @"缺失");
         }
+        // U16 命名配置档：档列表 + 保存/应用/删除入口（后端 /api/profiles；档列表不是 NSUserDefaults）。
+        NSArray *profileIds = @[@"wb.profile.list", @"wb.profile.save",
+                                @"wb.profile.apply", @"wb.profile.delete"];
+        for (NSString *k in profileIds) {
+            BOOL found = NO;
+            for (NSView *v in all) if ([v.identifier isEqualToString:k]) found = YES;
+            CK(found, [[NSString stringWithFormat:@"B12 配置档控件存在 %@", k] UTF8String], @"缺失");
+        }
         // B2j 灰节点必须**真的禁用点击**（不只是 alpha 低）：
         // 默认 PCM ⟹ SDM 节点的点击接收器 enabled 必须为 NO，否则点了会弹出改不动的层。
         {

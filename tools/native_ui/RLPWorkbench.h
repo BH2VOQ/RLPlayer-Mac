@@ -56,4 +56,8 @@ BOOL RLPChainNodeApplies(NSString *node, NSDictionary *_Nullable settings);
 /// 不适用时的原因（人话）；适用时返回 nil。
 NSString *_Nullable RLPChainNodeDisabledReason(NSString *node, NSDictionary *_Nullable settings);
 
+/// U16 命名配置档（/api/profiles）的一句话摘要：滤波 + 升频/DSD + EQ 方案名。
+/// profile 是 GET /api/profiles 返回的一条；空/缺键返回「未保存」（不臆造默认值）。
+NSString *RLPProfileSummary(NSDictionary *_Nullable profile);
+
 NS_ASSUME_NONNULL_END
