@@ -62,8 +62,67 @@ ctrl	vol	pb.vol	RLPPlaybackBarView.mm	底栏音量滑块（web #vol）
 ctrl	npVol	np.vol	RLPNowPlayingViewController.mm	播放页音量滑块（web #npVol 镜像）
 # ---- 顶栏 / 队列 / 艺术家 / 列表排序：功能同源，identifier 命名不同 ----
 ctrl	bScan	top.scan	RLPMainWindowController.mm	顶栏「重新扫描音乐库」= web #bScan（/api/lib/scan）
-ctrl	qClear	right.clear	RLPRightDrawer.mm	右抽屉搜索清空 = web #qClear
+# 2026-11 更正：旧行「ctrl qClear right.clear 右抽屉搜索清空」是错的 ——
+# web #qClear 是**顶栏全局搜索**的清除键（ui_script.h updateSearchClearBtn），
+# 原生用 NSSearchField 自带的系统 cancel 按钮，无独立控件 ⟹ 移入 parity_na.tsv。
 ctrl	qSort	queue.sort	RLPQueueViewController.mm	队列排序下拉 = web #qSort（/api/qorder）
 ctrl	trackSort	tracks.sort	RLPTracksViewController.mm	曲目页排序下拉 = web #trackSort
 ctrl	wTitle	works.title	RLPWorksViewController.mm	古典作品搜索-作品名（web #wTitle）
 ctrl	wComposer	works.composer	RLPWorksViewController.mm	古典作品搜索-作曲家（web #wComposer）
+# ---- 2026-11：web 事件绑定点控件 -> 原生锚点（identifier 或 sel:）----
+# sel:xxx 表示原生控件没有可查询 identifier，锚点是 @selector(xxx) 接线处；parity status=sel。
+ctrl	bChain	pb.chain	RLPPlaybackBarView.mm:457	
+ctrl	bRep	sel:toggleRepeat:	RLPPlaybackBarView.mm:343	底栏循环键 = @selector(toggleRepeat:)，无稳定 identifier
+ctrl	npPrev	np.prev	RLPNowPlayingViewController.mm:436	
+ctrl	npPlay	np.play	RLPNowPlayingViewController.mm:438	
+ctrl	npNext	np.next	RLPNowPlayingViewController.mm:441	
+ctrl	npStop	np.stop	RLPNowPlayingViewController.mm:443	
+ctrl	npRep	np.rep	RLPNowPlayingViewController.mm:421	
+ctrl	npOpen	pb.cover	RLPPlaybackBarView.mm:390	web 底栏「打开单曲页」= 原生底栏封面点击（pb.cover）
+ctrl	npDataClose	npDrawerBg	RLPNowPlayingViewController.mm:2027	单曲页数据抽屉关闭 = 原生遮罩 npDrawerBg（点遮罩关闭）
+ctrl	aPlay	sel:onPlayAll:	RLPAlbumDetailViewController.mm:210	专辑页「播放整张」= @selector(onPlayAll:)（按钮由 actions[] 数组构造，无 identifier）
+ctrl	aAdd	sel:onEnqueueAlbum:	RLPAlbumDetailViewController.mm:210	专辑页「加入队列」= @selector(onEnqueueAlbum:)
+ctrl	aSetCover	sel:onSetCover:	RLPAlbumDetailViewController.mm:210	专辑页「设置封面」= @selector(onSetCover:)（打开 NSOpenPanel）
+ctrl	aShuf	album.shuffle	RLPAlbumDetailViewController.mm:229	
+ctrl	bBackAlbums	top.back	RLPMainWindowController.mm:426	web 专辑页返回 = 原生顶栏「返回」键（top.back）
+ctrl	bTopBack	top.back	RLPMainWindowController.mm:426	同 bBackAlbums：原生只有单一顶栏返回键
+ctrl	bBackArtists	sel:onBack:	RLPArtistDetailViewController.mm:180	艺术家详情页「返回艺术家列表」= @selector(onBack:)
+ctrl	bBackArtistsTop	sel:onBack:	RLPArtistDetailViewController.mm:180	同 bBackArtists
+ctrl	bArtistRefresh	knowledgeRefresh	RLPKnowledgeView.mm:78	「刷新资料」= 原生 AI 资料面板「重新整理」（knowledgeRefresh）
+ctrl	bRetryKnowledge	knowledgeRefresh	RLPKnowledgeView.mm:78	「重试资料」= 同 knowledgeRefresh
+ctrl	bRescan	sp_rescan	RLPSettingsViewController.mm:1567	
+ctrl	bAddRoot	sp_addroot	RLPSettingsViewController.mm:1563	
+ctrl	bEmptyAddRoot	albums.emptyAdd	RLPAlbumsViewController.mm:363	专辑空态「添加目录」= albums.emptyAdd
+ctrl	bEmptyScan	albums.emptyScan	RLPAlbumsViewController.mm:368	专辑空态「扫描」= albums.emptyScan
+ctrl	bNet	sp_netbtn	RLPSettingsViewController.mm:1617	设置「网络信息」查询 = sp_netbtn
+ctrl	bUpnp	sp_upnp_scan	RLPSettingsViewController.mm:1075	设置「UPnP 发现」= sp_upnp_scan
+ctrl	sp_upnp	sp_upnp_scan	RLPSettingsViewController.mm:1075	web 流媒体页 UPnP 发现按钮 = 设置 sp_upnp_scan（同一 /api/upnp 查询）
+ctrl	remoteGoSet	remote.empty.goset	RLPStreamingViewController.mm:322	
+ctrl	remoteRetry	remote.empty.retry	RLPStreamingViewController.mm:326	
+ctrl	rBackDir	sel:goBack:	RLPStreamingViewController.mm:248	流媒体「返回上一级」= @selector(goBack:)
+ctrl	qclr	right.clear	RLPRightDrawer.mm:286	队列「清除」= 右侧抽屉 right.clear（同一 /api/clear）
+ctrl	qClrAll	sel:onAction:	RLPQueueViewController.mm:114	队列页「清空队列」= @selector(onAction:) 的 clear 分支（identifier 由动作数组生成）
+ctrl	qSaveSq	sq.savecurrent	RLPPlaylistsViewController.mm:121	队列页「保存为歌单」= 歌单页 sq.savecurrent
+ctrl	q	sel:onSearch:	RLPArtistsViewController.mm:203	顶栏搜索输入 = 原生 NSSearchField 的 @selector(onSearch:)（含 260ms 防抖）
+ctrl	tq	sel:onQueue:	RLPMainWindowController.mm:210	右侧抽屉开关 = 顶栏 @selector(onQueue:)（队列键无 identifier）
+ctrl	trMore	sel:onLoadMore:	RLPTracksViewController.mm:326	曲目页「加载更多」= @selector(onLoadMore:)
+ctrl	wBackNp	works.backnp	RLPWorksViewController.mm:88	作品页「返回正在播放」= works.backnp
+ctrl	bSearchVersions	works.search	RLPWorksViewController.mm:126	作品页「搜索版本」= works.search
+ctrl	bRefreshVersions	works.refresh	RLPWorksViewController.mm:133	作品页「刷新版本」= works.refresh
+ctrl	bRetryVersions	works.retry	RLPWorksViewController.mm:296	作品页「重试版本」= works.retry
+ctrl	fUp	sel:onUp:	RLPFoldersViewController.mm:43	文件夹页「上一级」= @selector(onUp:)
+ctrl	sqNew	sq.new	RLPPlaylistsViewController.mm:120	
+ctrl	sqEmpty	sq.empty	RLPSidebarViewController.mm:507	
+ctrl	sqPlayAll	sq.playall	RLPPlaylistsViewController.mm:117	
+ctrl	sqRen	sq.ren	RLPSidebarViewController.mm:558	
+ctrl	sqDel	sq.del	RLPSidebarViewController.mm:564	
+ctrl	castActStop	sp_cast_stop	RLPCastView.mm:160	投放控制「停止推送」= sp_cast_stop
+ctrl	castActChange	sp_cast_push	RLPCastView.mm:157	投放控制「换设备」= 重新推送 sp_cast_push
+ctrl	presetBitPerfect	sel:onPickPlayMode:	RLPQuickStartViewController.mm:571	输出预设 = 原生快捷页 onPickPlayMode:（原音直通 = mode 0，无稳定 identifier）
+ctrl	presetPcm	sel:onPickPlayMode:	RLPQuickStartViewController.mm:571	输出预设 = onPickPlayMode:（PCM 升频 = mode 1）
+ctrl	presetDsd	sel:onPickPlayMode:	RLPQuickStartViewController.mm:571	输出预设 = onPickPlayMode:（DSD 升频 = mode 2）
+ctrl	presetCapsRefresh	sel:onReloadDevices:	RLPQuickStartViewController.mm:174	「刷新硬件能力」= 快捷页「重新检测设备」@selector(onReloadDevices:)
+ctrl	peqLoad	sel:onPresetAction:	RLPEqualizerView.mm:872	PEQ 预设「加载」= @selector(onPresetAction:) 的 load 分支
+ctrl	peqSave	sel:onPresetAction:	RLPEqualizerView.mm:872	PEQ 预设「保存」= @selector(onPresetAction:) 的 save 分支
+ctrl	peqDelete	sel:onPresetAction:	RLPEqualizerView.mm:872	PEQ 预设「删除」= @selector(onPresetAction:) 的 delete 分支
+ctrl	cmpGo	sel:onCompareRun:	RLPNowPlayingViewController.mm:3634	对比弹层「开始对比」= @selector(onCompareRun:)（POST /api/compare）
