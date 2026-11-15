@@ -2258,6 +2258,7 @@ inline const I18nPair* i18n_table(std::size_t* count) {
         {"兼容转换（compatible）", "Compatible conversion (compatible)"},
         {"采样率族策略", "Sample-rate family policy"},
         {"自动 = 优先源采样率同族（拒绝跨族）；严格 = 禁止跨族；兼容 = 允许跨族转换（非 bit-perfect）", "Auto = prefer the source sample-rate family (cross-family blocked); Strict = cross-family blocked; Compatible = allow cross-family conversion (not bit-perfect)"},
+        {"界面语言将在重启后生效", "The interface language will take effect after restarting the app"},
         {"AirPlay 共享输出（非 bit-perfect，端到端逐位未获验证）", "AirPlay shared output (non-bit-perfect, end-to-end bit-perfection unverified)"},
         {"AirPlay 设备：将使用系统共享输出（不独占/Hog），端到端 bit-perfect 未获验证", "AirPlay device: will use system shared output (no exclusive/Hog), end-to-end bit-perfect unverified"},
         {"AirPlay 不支持 DoP/Native DSD 输出；如需播放请将输出模式设为 PCM", "AirPlay does not support DoP/Native DSD output; please set output mode to PCM to play"},
