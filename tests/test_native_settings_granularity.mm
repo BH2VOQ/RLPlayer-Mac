@@ -390,6 +390,10 @@ int main() {
             if (iMax >= 0 && i16 >= 0) {
                 [ratePop selectItemAtIndex:iMax];
                 Fire(ratePop);
+                // 两个 POST 都走并发 IO 队列：连发会让后端两次「读全量 → 合并写」交错，
+                // 先到的那次可能被后到的覆盖（实测偶发 kv.bits 仍是上一轮的值）。
+                // 这里等第一次落盘再发第二次 —— 判据要证明的是写回，不是竞态。
+                Pump(0.2);
                 [bitsPop selectItemAtIndex:i16];
                 Fire(bitsPop);
                 Pump(0.5);
@@ -410,6 +414,274 @@ int main() {
                 });
                 Ck(bitsBack, @"【回填】kv.bits=16 ⟹ 下拉回到「16 bit」",
                    [NSString stringWithFormat:@"当前=%@", bitsPop.titleOfSelectedItem ?: @"(无)"]);
+            }
+        }
+
+        // ====================================================================
+        // ⑧ S1b（2026-11-16）：DSD 三控件 → 单个 dsd 键；设备 → id；Nx 滤波器 → 空值首项
+        //    web applyDsd（ui_script.h:8958）：PCM ⟹ dsd=0；DSD ⟹ dsd=<pk><rt>
+        //    （pk=dop|native，rt=64/128/256/512/1024）。旧原生分开发 outmode / dsdpk /
+        //    dsd=<裸数字>：前两个不在 /api/settings 白名单里（静默丢弃），第三个也无法把
+        //    封装还原出来。判据 = 触发真控件 action ⟹ 读回 kv.dsd；再 POST kv.dsd 让
+        //    reloadData 反解三个控件（值回显，不是只看控件在不在）。
+        //    设备：web option value = 设备 id（ui_script.h:5337），旧原生发显示名。
+        //    Nx 滤波器：web 空值首项 = 「跟随 1x」（POST filterNx=）；旧原生发中文文案。
+        // ====================================================================
+        [settings selectPane:@"out"];
+        Pump(0.5);
+        [v layoutSubtreeIfNeeded];
+        NSPopUpButton *outModePop = (NSPopUpButton *)FindId(PaneRoot(v, @"out"), @"sp_outmode");
+        Ck([outModePop isKindOfClass:[NSPopUpButton class]],
+           @"【S1b】sp_outmode 是下拉（out 页）",
+           outModePop ? NSStringFromClass(outModePop.class) : @"控件缺失");
+
+        [settings selectPane:@"sdm"];
+        Pump(0.5);
+        [v layoutSubtreeIfNeeded];
+        NSView *sdmPaneS1b = PaneRoot(v, @"sdm");
+        NSPopUpButton *dsdRatePop = (NSPopUpButton *)FindId(sdmPaneS1b, @"sp_dsdrate");
+        NSPopUpButton *dsdPackPop = (NSPopUpButton *)FindId(sdmPaneS1b, @"sp_dsdpk");
+        Ck([dsdRatePop isKindOfClass:[NSPopUpButton class]],
+           @"【S1b】sp_dsdrate 是下拉（SDM 页）",
+           dsdRatePop ? NSStringFromClass(dsdRatePop.class) : @"控件缺失");
+        Ck([dsdPackPop isKindOfClass:[NSPopUpButton class]],
+           @"【S1b】sp_dsdpk 是下拉（SDM 页）",
+           dsdPackPop ? NSStringFromClass(dsdPackPop.class) : @"控件缺失");
+
+        if ([outModePop isKindOfClass:[NSPopUpButton class]] &&
+            [dsdRatePop isKindOfClass:[NSPopUpButton class]] &&
+            [dsdPackPop isKindOfClass:[NSPopUpButton class]]) {
+            // ---- ⑧a PCM ⟹ dsd=0（旧码发 outmode，白名单静默丢弃 ⟹ kv.dsd 根本不存在）----
+            [outModePop selectItemWithTitle:@"pcm"];
+            Fire(outModePop);
+            Pump(0.6);
+            NSDictionary *kvPcmS1b = ReadKV();
+            Ck([kvPcmS1b[@"dsd"] isEqualToString:@"0"],
+               @"【S1b·dsd】输出模式 PCM ⟹ POST dsd=0（旧码发 outmode，被白名单丢弃）",
+               [NSString stringWithFormat:@"kv.dsd=%@ kv.outmode=%@ kv.dsdpk=%@",
+                kvPcmS1b[@"dsd"] ?: @"(无)", kvPcmS1b[@"outmode"] ?: @"(无)", kvPcmS1b[@"dsdpk"] ?: @"(无)"]);
+            Ck(kvPcmS1b[@"outmode"] == nil,
+               @"【S1b·dsd】不再发 outmode（白名单外，POST 回 ok 也不落盘）",
+               [NSString stringWithFormat:@"kv.outmode=%@", kvPcmS1b[@"outmode"] ?: @"(无)"]);
+
+            // ---- ⑧b DSD ⟹ dsd=<pk><rt>；改比特率/封装都作用在同一个键上 ----
+            [outModePop selectItemWithTitle:@"dsd"];
+            Fire(outModePop);
+            Pump(0.3);
+            [dsdRatePop selectItemWithTitle:@"256"];
+            Fire(dsdRatePop);
+            [dsdPackPop selectItemWithTitle:@"dop"];
+            Fire(dsdPackPop);
+            Pump(0.6);
+            NSDictionary *kvD256 = ReadKV();
+            Ck([kvD256[@"dsd"] isEqualToString:@"dop256"],
+               @"【S1b·dsd】DSD + DoP + 256 ⟹ POST dsd=dop256（旧码发 dsd=256 + dsdpk）",
+               [NSString stringWithFormat:@"kv.dsd=%@", kvD256[@"dsd"] ?: @"(无)"]);
+            [dsdRatePop selectItemWithTitle:@"512"];
+            Fire(dsdRatePop);
+            Pump(0.6);
+            NSDictionary *kvD512 = ReadKV();
+            Ck([kvD512[@"dsd"] isEqualToString:@"dop512"],
+               @"【S1b·dsd】DSD 比特率 512 ⟹ dsd=dop512",
+               [NSString stringWithFormat:@"kv.dsd=%@", kvD512[@"dsd"] ?: @"(无)"]);
+
+            // ---- ⑧c PCM 下改比特率/封装必须联动切到 DSD（web onchange，ui_script.h:10465）----
+            [outModePop selectItemWithTitle:@"pcm"];
+            Fire(outModePop);
+            Pump(0.6);
+            NSDictionary *kvPcm2 = ReadKV();
+            Ck([kvPcm2[@"dsd"] isEqualToString:@"0"], @"【S1b·dsd】再切回 PCM ⟹ dsd=0",
+               [NSString stringWithFormat:@"kv.dsd=%@", kvPcm2[@"dsd"] ?: @"(无)"]);
+            [dsdRatePop selectItemWithTitle:@"128"];
+            Fire(dsdRatePop);
+            Pump(0.6);
+            NSDictionary *kvAuto = ReadKV();
+            Ck([kvAuto[@"dsd"] isEqualToString:@"dop128"],
+               @"【S1b·dsd】PCM 下改比特率 128 ⟹ dsd=dop128（自动切 DSD）",
+               [NSString stringWithFormat:@"kv.dsd=%@", kvAuto[@"dsd"] ?: @"(无)"]);
+            Ck([[outModePop titleOfSelectedItem] isEqualToString:@"dsd"],
+               @"【S1b·dsd】PCM 下改比特率 ⟹ 输出模式下拉联动到 DSD",
+               [NSString stringWithFormat:@"当前=%@", outModePop.titleOfSelectedItem ?: @"(无)"]);
+
+            // ---- ⑧d 反解：kv.dsd ⟹ 三个控件（交叉设错再 activate，证明真的按值回显）----
+            [core jsonWithMethod:@"POST" path:@"/api/settings" body:@"dsd=dop512"];
+            [outModePop selectItemWithTitle:@"pcm"];
+            [dsdRatePop selectItemWithTitle:@"64"];
+            [dsdPackPop selectItemWithTitle:@"dop"];
+            [settings activate];
+            BOOL backOutDsd = WaitUntil(3.0, ^BOOL {
+                return [[outModePop titleOfSelectedItem] isEqualToString:@"dsd"];
+            });
+            Ck(backOutDsd, @"【S1b·回填】kv.dsd=dop512 ⟹ 输出模式回显 DSD",
+               [NSString stringWithFormat:@"当前=%@", outModePop.titleOfSelectedItem ?: @"(无)"]);
+            BOOL backRate512 = WaitUntil(3.0, ^BOOL {
+                return [[dsdRatePop titleOfSelectedItem] isEqualToString:@"512"];
+            });
+            Ck(backRate512, @"【S1b·回填】kv.dsd=dop512 ⟹ 比特率回显 512（旧码找 dsd512 永远找不到）",
+               [NSString stringWithFormat:@"当前=%@", dsdRatePop.titleOfSelectedItem ?: @"(无)"]);
+            BOOL backPackDop = WaitUntil(3.0, ^BOOL {
+                return [[dsdPackPop titleOfSelectedItem] isEqualToString:@"dop"];
+            });
+            Ck(backPackDop, @"【S1b·回填】kv.dsd=dop512 ⟹ 封装回显 DoP",
+               [NSString stringWithFormat:@"当前=%@", dsdPackPop.titleOfSelectedItem ?: @"(无)"]);
+
+            [core jsonWithMethod:@"POST" path:@"/api/settings" body:@"dsd=0"];
+            [outModePop selectItemWithTitle:@"dsd"];
+            [dsdRatePop selectItemWithTitle:@"512"];
+            [settings activate];
+            BOOL backOutPcm = WaitUntil(3.0, ^BOOL {
+                return [[outModePop titleOfSelectedItem] isEqualToString:@"pcm"];
+            });
+            Ck(backOutPcm, @"【S1b·回填】kv.dsd=0 ⟹ 输出模式回显 PCM",
+               [NSString stringWithFormat:@"当前=%@", outModePop.titleOfSelectedItem ?: @"(无)"]);
+            BOOL backRate256 = WaitUntil(3.0, ^BOOL {
+                return [[dsdRatePop titleOfSelectedItem] isEqualToString:@"256"];
+            });
+            Ck(backRate256, @"【S1b·回填】kv.dsd=0 ⟹ 比特率回显默认 256（web dsdRateOf 同口径）",
+               [NSString stringWithFormat:@"当前=%@", dsdRatePop.titleOfSelectedItem ?: @"(无)"]);
+
+            // 上一版原生存过裸数字（dsd=128），回填必须兼容，否则升级用户的 DSD 档会被读没
+            [core jsonWithMethod:@"POST" path:@"/api/settings" body:@"dsd=128"];
+            [settings activate];
+            BOOL legacyD = WaitUntil(3.0, ^BOOL {
+                return [[outModePop titleOfSelectedItem] isEqualToString:@"dsd"] &&
+                       [[dsdRatePop titleOfSelectedItem] isEqualToString:@"128"];
+            });
+            Ck(legacyD, @"【S1b·回填】旧 conf 的裸数字 dsd=128 也能反解（DSD / 128）",
+               [NSString stringWithFormat:@"输出模式=%@ 比特率=%@",
+                outModePop.titleOfSelectedItem ?: @"(无)", dsdRatePop.titleOfSelectedItem ?: @"(无)"]);
+        }
+
+        // ---- ⑧e 设备：发设备 id（web option value=id），不是显示名 ----
+        NSDictionary *devJsonS1b = [core jsonWithMethod:@"GET" path:@"/api/devices" body:nil];
+        NSArray *devListS1b = [devJsonS1b[@"devices"] isKindOfClass:[NSArray class]] ? devJsonS1b[@"devices"] : @[];
+        NSString *devIdS1b = nil, *devNameS1b = nil;
+        for (id d in devListS1b) {
+            if (![d isKindOfClass:[NSDictionary class]]) continue;
+            NSString *n = [d[@"name"] isKindOfClass:[NSString class]] ? d[@"name"] : nil;
+            NSString *i2 = [d[@"id"] isKindOfClass:[NSString class]] ? d[@"id"] : nil;
+            if (n.length && i2.length && ![n isEqualToString:i2]) { devIdS1b = i2; devNameS1b = n; break; }
+        }
+        if (!devIdS1b) {
+            Ck(NO, @"【S1b·device】/api/devices 至少一个带稳定 id 的输出设备", @"设备列表为空或没有 id");
+        } else {
+            [settings selectPane:@"out"];
+            Pump(0.5);
+            [v layoutSubtreeIfNeeded];
+            NSPopUpButton *devicePopS1b = (NSPopUpButton *)FindId(PaneRoot(v, @"out"), @"sp_device");
+            Ck([devicePopS1b isKindOfClass:[NSPopUpButton class]],
+               @"【S1b·device】sp_device 是下拉", devicePopS1b ? NSStringFromClass(devicePopS1b.class) : @"控件缺失");
+            Ck(devicePopS1b.numberOfItems > 0 &&
+               [[devicePopS1b itemAtIndex:0].representedObject isKindOfClass:[NSString class]] &&
+               [((NSString *)[devicePopS1b itemAtIndex:0].representedObject) isEqualToString:@""],
+               @"【S1b·device】首项是空值「默认设备」（web option value=\"\"）",
+               [NSString stringWithFormat:@"items=%ld 首项=%@",
+                (long)devicePopS1b.numberOfItems, [devicePopS1b itemAtIndex:0].title ?: @"(无)"]);
+
+            NSInteger devIdxS1b = -1;
+            for (NSInteger i = 1; i < (NSInteger)devicePopS1b.numberOfItems; ++i) {
+                id ro = [devicePopS1b itemAtIndex:i].representedObject;
+                if ([ro isKindOfClass:[NSString class]] && [(NSString *)ro isEqualToString:devIdS1b]) {
+                    devIdxS1b = i; break;
+                }
+            }
+            Ck(devIdxS1b > 0, @"【S1b·device】下拉项携带设备 id（representedObject）",
+               [NSString stringWithFormat:@"id=%@ 未出现在下拉里", devIdS1b]);
+            if (devIdxS1b > 0) {
+                [devicePopS1b selectItemAtIndex:devIdxS1b];
+                Fire(devicePopS1b);
+                Pump(0.6);
+                NSDictionary *kvDevS1b = ReadKV();
+                Ck([kvDevS1b[@"device"] isEqualToString:devIdS1b],
+                   @"【S1b·device】选设备 ⟹ POST device=id（旧码发显示名）",
+                   [NSString stringWithFormat:@"kv.device=%@ 期望 id=%@（显示名=%@）",
+                    kvDevS1b[@"device"] ?: @"(无)", devIdS1b, devNameS1b]);
+                Ck(![kvDevS1b[@"device"] isEqualToString:devNameS1b],
+                   @"【S1b·device】落盘的不是显示名", [NSString stringWithFormat:@"kv.device=%@", kvDevS1b[@"device"] ?: @"(无)"]);
+
+                [core jsonWithMethod:@"POST" path:@"/api/settings" body:[NSString stringWithFormat:@"device=%@", RLPEnc(devIdS1b)]];
+                [devicePopS1b selectItemAtIndex:0];
+                [settings activate];
+                BOOL devBackS1b = WaitUntil(3.0, ^BOOL {
+                    return [[devicePopS1b titleOfSelectedItem] isEqualToString:devNameS1b];
+                });
+                Ck(devBackS1b, @"【S1b·回填】kv.device=id ⟹ 设备下拉按 id 回显显示名",
+                   [NSString stringWithFormat:@"当前=%@ 期望=%@",
+                    devicePopS1b.titleOfSelectedItem ?: @"(无)", devNameS1b]);
+            }
+        }
+
+        // ---- ⑧f Nx 滤波器：保留「跟随 1x」空值首项；选中时发 filterNx=（空串）----
+        [settings selectPane:@"pcm"];
+        Pump(0.6);
+        [v layoutSubtreeIfNeeded];
+        NSPopUpButton *filtNxPopS1b = (NSPopUpButton *)FindId(PaneRoot(v, @"pcm"), @"sp_filtNx");
+        Ck([filtNxPopS1b isKindOfClass:[NSPopUpButton class]],
+           @"【S1b·filtNx】sp_filtNx 是下拉", filtNxPopS1b ? NSStringFromClass(filtNxPopS1b.class) : @"控件缺失");
+        NSDictionary *filtersJsonS1b = [core jsonWithMethod:@"GET" path:@"/api/filters" body:nil];
+        NSArray *filterItemsS1b = [filtersJsonS1b[@"items"] isKindOfClass:[NSArray class]] ? filtersJsonS1b[@"items"] : @[];
+        NSString *nxNameS1b = nil;
+        for (id it in filterItemsS1b) {
+            NSString *n = [it isKindOfClass:[NSDictionary class]] ? it[@"name"]
+                         : ([it isKindOfClass:[NSString class]] ? it : nil);
+            if (n.length) { nxNameS1b = n; break; }
+        }
+        if ([filtNxPopS1b isKindOfClass:[NSPopUpButton class]]) {
+            BOOL nxReadyS1b = WaitUntil(3.0, ^BOOL { return filtNxPopS1b.numberOfItems > 1; });
+            Ck(nxReadyS1b, @"【S1b·filtNx】/api/filters 已填入下拉", @"清单为空");
+            NSMenuItem *nxFirstS1b = filtNxPopS1b.numberOfItems ? [filtNxPopS1b itemAtIndex:0] : nil;
+            Ck(nxFirstS1b && [nxFirstS1b.title rangeOfString:@"跟随 1x"].location != NSNotFound,
+               @"【S1b·filtNx】首项保留「跟随 1x（不单独指定）」（旧码 removeAllItems 后丢失）",
+               [NSString stringWithFormat:@"首项=%@", nxFirstS1b.title ?: @"(无)"]);
+            Ck(nxFirstS1b &&
+               [nxFirstS1b.representedObject isKindOfClass:[NSString class]] &&
+               [((NSString *)nxFirstS1b.representedObject) isEqualToString:@""],
+               @"【S1b·filtNx】首项的值是空串（POST filterNx=）",
+               [NSString stringWithFormat:@"representedObject=%@", nxFirstS1b.representedObject ?: @"(nil)"]);
+
+            if (nxNameS1b.length) {
+                NSInteger nxIdxS1b = IndexOf(filtNxPopS1b, nxNameS1b);
+                if (nxIdxS1b < 0) {
+                    Ck(NO, [NSString stringWithFormat:@"【S1b·filtNx】下拉有「%@」", nxNameS1b], @"选项缺失");
+                } else {
+                    [filtNxPopS1b selectItemAtIndex:nxIdxS1b];
+                    Fire(filtNxPopS1b);
+                    Pump(0.6);
+                    NSDictionary *kvNxNamed = ReadKV();
+                    Ck([kvNxNamed[@"filterNx"] isEqualToString:nxNameS1b],
+                       @"【S1b·filtNx】选中具体滤波器 ⟹ POST filterNx=名字",
+                       [NSString stringWithFormat:@"kv.filterNx=%@", kvNxNamed[@"filterNx"] ?: @"(无)"]);
+
+                    [filtNxPopS1b selectItemAtIndex:0];
+                    Fire(filtNxPopS1b);
+                    Pump(0.6);
+                    NSDictionary *kvNxFirst = ReadKV();
+                    Ck([kvNxFirst[@"filterNx"] isKindOfClass:[NSString class]] &&
+                       [kvNxFirst[@"filterNx"] length] == 0,
+                       @"【S1b·filtNx】选中「跟随 1x」⟹ POST filterNx=（空串；旧码发中文文案）",
+                       [NSString stringWithFormat:@"kv.filterNx=%@", kvNxFirst[@"filterNx"] ?: @"(无)"]);
+
+                    [core jsonWithMethod:@"POST" path:@"/api/settings"
+                                    body:[NSString stringWithFormat:@"filterNx=%@", RLPEnc(nxNameS1b)]];
+                    [filtNxPopS1b selectItemAtIndex:0];
+                    [settings activate];
+                    BOOL nxBackNamed = WaitUntil(3.0, ^BOOL {
+                        return [[filtNxPopS1b titleOfSelectedItem] isEqualToString:nxNameS1b];
+                    });
+                    Ck(nxBackNamed, @"【S1b·回填】kv.filterNx=名字 ⟹ 下拉回显该滤波器",
+                       [NSString stringWithFormat:@"当前=%@", filtNxPopS1b.titleOfSelectedItem ?: @"(无)"]);
+
+                    [core jsonWithMethod:@"POST" path:@"/api/settings" body:@"filterNx="];
+                    [filtNxPopS1b selectItemAtIndex:nxIdxS1b];
+                    [settings activate];
+                    BOOL nxBackEmpty = WaitUntil(3.0, ^BOOL {
+                        return filtNxPopS1b.indexOfSelectedItem == 0;
+                    });
+                    Ck(nxBackEmpty, @"【S1b·回填】kv.filterNx=空 ⟹ 下拉回显「跟随 1x」",
+                       [NSString stringWithFormat:@"当前=%@", filtNxPopS1b.titleOfSelectedItem ?: @"(无)"]);
+                }
+            } else {
+                Ck(NO, @"【S1b·filtNx】/api/filters 至少返回一个滤波器名", @"清单为空");
             }
         }
 

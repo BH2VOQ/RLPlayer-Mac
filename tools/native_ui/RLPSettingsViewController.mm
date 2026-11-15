@@ -219,6 +219,11 @@ static NSStackView *RLPSRow(NSString *label, NSView *control, NSString *hint, RL
 @property (nonatomic, strong) NSButton *upnpScanBtn;
 @property (nonatomic, strong) NSTextField *upnpMsg;
 @property (nonatomic, strong) NSPopUpButton *devicePopup;
+/// /api/settings 读回的落盘设备 id：设备列表异步到达后再按 id 回显（web option value=id）。
+@property (nonatomic, copy) NSString *savedDeviceId;
+/// /api/settings 读回的 filter / filterNx：清单异步到达后再按值回显（空串 = 跟随 1x）。
+@property (nonatomic, copy) NSString *savedFilter;
+@property (nonatomic, copy) NSString *savedFilterNx;
 @property (nonatomic, strong) NSSwitch *hogSwitch;
 @property (nonatomic, strong) NSPopUpButton *outModePopup;
 @property (nonatomic, strong) NSPopUpButton *bitsPopup;
@@ -1009,7 +1014,21 @@ static NSString *RLPControlIdentifier(NSString *key) {
     id v = kv[key];
     if (![v isKindOfClass:[NSString class]]) return;
     NSString *s = v;
-    if (!s.length) return;
+    if (!s.length) {
+        // 空串是合法值（filterNx / phase 的「跟随」首项）：选中值为空串的项，没有就回退首项。
+        BOOL matchedEmpty = NO;
+        for (NSMenuItem *it in pop.itemArray) {
+            if ([it.representedObject isKindOfClass:[NSString class]] &&
+                [(NSString *)it.representedObject isEqualToString:@""]) {
+                [pop selectItemAtIndex:[pop indexOfItem:it]];
+                matchedEmpty = YES;
+                break;
+            }
+        }
+        if (!matchedEmpty && pop.numberOfItems > 0) [pop selectItemAtIndex:0];
+        [self.loadedKeys addObject:key];
+        return;
+    }
     // 值 ≠ 文案的下拉（采样率 / 位深）：先按 representedObject 精确匹配，再退回按标题匹配。
     BOOL matched = NO;
     for (NSMenuItem *it in pop.itemArray) {
@@ -1022,6 +1041,49 @@ static NSString *RLPControlIdentifier(NSString *key) {
     }
     if (!matched && [pop itemWithTitle:s]) [pop selectItemWithTitle:s];
     [self.loadedKeys addObject:key];
+}
+
+/// 按落盘 id 回显设备。设备列表与 /api/settings 是两个并发来源，两边都要调用一次，
+/// 否则先到的一方会被后到的一方按位置覆盖（旧实现根本没有按 id 的回显路径）。
+- (void)selectSavedDevice {
+    NSString *want = self.savedDeviceId;
+    if (!want.length || !self.devicePopup) return;
+    for (NSInteger i = 0; i < (NSInteger)self.devicePopup.numberOfItems; ++i) {
+        id ro = [self.devicePopup itemAtIndex:i].representedObject;
+        if ([ro isKindOfClass:[NSString class]] && [(NSString *)ro isEqualToString:want]) {
+            [self.devicePopup selectItemAtIndex:i];
+            return;
+        }
+    }
+}
+
+/// 反解 kv.dsd 回三个控件。值域见 web applyDsd / dsdRateOf / dsdPackOf（ui_script.h:8958-8964）：
+///   0          ⟹ PCM（比特率回显默认 256、封装 DoP，web 同口径）
+///   dopNN / nativeNN ⟹ DSD + 对应封装 + NN 档
+///   裸数字 NN（上一版原生的写法）⟹ 按 DSD 处理，封装默认 DoP；不认识的档位按 256。
+- (void)applyDsdPersistValue:(id)raw {
+    NSString *v = [raw isKindOfClass:[NSString class]] ? (NSString *)raw
+                 : ([raw respondsToSelector:@selector(stringValue)] ? [raw stringValue] : @"");
+    const BOOL isDsd = v.length && ![v isEqualToString:@"0"];
+    NSString *mode = isDsd ? @"dsd" : @"pcm";
+    if ([self.outModePopup itemWithTitle:mode]) [self.outModePopup selectItemWithTitle:mode];
+
+    NSString *pk = ([v.lowercaseString hasPrefix:@"nat"]) ? @"native" : @"dop";
+    if ([self.dsdPackPopup itemWithTitle:pk]) [self.dsdPackPopup selectItemWithTitle:pk];
+    else if ([self.dsdPackPopup itemWithTitle:@"dop"]) [self.dsdPackPopup selectItemWithTitle:@"dop"];
+
+    // 末尾连续数字 = 目标档；dop/nat 前缀不参与档位解析（旧裸数字也走这里）。
+    NSMutableString *tail = [NSMutableString string];
+    for (NSInteger i = (NSInteger)v.length - 1; i >= 0; --i) {
+        unichar c = [v characterAtIndex:(NSUInteger)i];
+        if (c < '0' || c > '9') break;
+        [tail insertString:[NSString stringWithFormat:@"%C", c] atIndex:0];
+    }
+    if (!tail.length) [tail appendString:@"256"];
+    if (![self.dsdRatePopup itemWithTitle:tail]) [tail setString:@"256"];
+    if ([self.dsdRatePopup itemWithTitle:tail]) [self.dsdRatePopup selectItemWithTitle:tail];
+
+    [self updateDsdModeNote];
 }
 
 #pragma mark - 输出
@@ -1092,6 +1154,9 @@ static NSString *RLPControlIdentifier(NSString *key) {
 
     self.devicePopup = [self popupForKey:@"sp_device"
         items:@[ RLPTr(@"默认设备") ] action:@selector(onDevice:)];
+    // web #sp_device 首项 value=""（默认设备），设备项 value=稳定 id（ui_script.h:5318/5337）。
+    // 旧实现整列只有显示名，选中后 POST 的也是显示名 —— 后端按 id 解析，名字匹配不可靠。
+    [[self.devicePopup itemAtIndex:0] setRepresentedObject:@""];
     [stack addArrangedSubview:RLPSRow(RLPTr(@"输出设备"), self.devicePopup,
         RLPTr(@"独占模式会接管这个设备；共享模式经系统混音，不接管"), t)];
 
@@ -1318,8 +1383,8 @@ static NSString *RLPControlIdentifier(NSString *key) {
         items:@[ RLPTr(@"跟随上面的 1x"), RLPTr(@"读取中…") ] action:@selector(onSdmONx:)];
     [stack addArrangedSubview:RLPSRow(RLPTr(@"Oversampling Nx（88.2 kHz 及以上音源）"), self.sdmONxPopup, nil, t)];
 
-    // 值用纯数字（64/128/256/512/1024），与 web 的 opt('64', …) 同口径；
-    // 保存时后端认的是 dsd=<数字>，不是 "dsd64"。
+    // 值用纯数字（64/128/256/512/1024），与 web 的 opt('64', …) 同口径。
+    // 落盘时不是单独发它：三个控件合成一个 dsd 键（例如 dop256 / 0），见 dsdPersistValue。
     self.dsdRatePopup = [self popupForKey:@"sp_dsdrate"
         items:@[ @"64", @"128", @"256", @"512", @"1024" ] action:@selector(onDsdRate:)];
     [stack addArrangedSubview:RLPSRow(RLPTr(@"比特率"), self.dsdRatePopup,
@@ -2267,8 +2332,11 @@ static NSString *RLPControlIdentifier(NSString *key) {
 }
 
 - (void)onDevice:(id)sender {
-    NSString *name = self.devicePopup.titleOfSelectedItem;
-    if (name.length) [self postKey:@"device" value:name];
+    if (!self.devicePopup.selectedItem) return;
+    // 发设备 id（web option value=id）；空串 = 默认设备。显示名只用于界面。
+    id ro = self.devicePopup.selectedItem.representedObject;
+    NSString *value = [ro isKindOfClass:[NSString class]] ? (NSString *)ro : @"";
+    [self postKey:@"device" value:value];
 }
 
 - (void)onBits:(id)sender {
@@ -2282,11 +2350,52 @@ static NSString *RLPControlIdentifier(NSString *key) {
 }
 
 - (void)onFilter1x:(id)sender { [self postKey:@"filter" value:self.filt1xPopup.titleOfSelectedItem]; }
-- (void)onFilterNx:(id)sender { [self postKey:@"filterNx" value:self.filtNxPopup.titleOfSelectedItem]; }
-- (void)onDsdRate:(id)sender {
-    NSString *s = self.dsdRatePopup.titleOfSelectedItem;
-    [self postKey:@"dsd" value:[s isEqualToString:RLPTr(@"不升频")] ? @"0"
-                : [s stringByReplacingOccurrencesOfString:@"dsd" withString:@""]];
+/// Nx 滤波器：首项「跟随 1x」的值是空串（web filterNx 的 option value=""）。
+/// 旧实现发中文标题，后端把「跟随 1x（不单独指定）」当成滤波器名。
+- (void)onFilterNx:(id)sender {
+    if (!self.filtNxPopup.selectedItem) return;
+    id ro = self.filtNxPopup.selectedItem.representedObject;
+    NSString *value = [ro isKindOfClass:[NSString class]] ? (NSString *)ro
+                     : (self.filtNxPopup.indexOfSelectedItem == 0 ? @""
+                        : (self.filtNxPopup.titleOfSelectedItem ?: @""));
+    [self postKey:@"filterNx" value:value];
+}
+
+/// web applyDsd（ui_script.h:8958）：PCM ⟹ dsd=0；DSD ⟹ dsd=<pk><rt>
+/// （pk=dop|native；rt=64/128/256/512/1024）。旧码分开发 outmode / dsdpk，
+/// 这两个键不在 /api/settings 白名单里，POST 回 ok:true 也会被静默丢弃。
+- (NSString *)dsdPersistValue {
+    const BOOL isDsd = [self.outModePopup.titleOfSelectedItem isEqualToString:@"dsd"];
+    if (!isDsd) return @"0";
+    NSString *pk = @"dop";
+    NSString *packTitle = (self.dsdPackPopup.titleOfSelectedItem ?: @"").lowercaseString;
+    if ([packTitle containsString:@"nat"]) pk = @"native";
+    NSString *rt = self.dsdRatePopup.titleOfSelectedItem ?: @"";
+    NSCharacterSet *nonDigits = [[NSCharacterSet decimalDigitCharacterSet] invertedSet];
+    if (!rt.length || [rt rangeOfCharacterFromSet:nonDigits].location != NSNotFound) rt = @"256";
+    return [pk stringByAppendingString:rt];
+}
+
+/// 在 PCM 下改比特率 / 封装 = 用户明确想要 DSD：把输出模式联动过去
+/// （web onchange，ui_script.h:10465；旧原生不联动，界面会与落盘值互相打架）。
+- (void)syncOutModeToDsd {
+    if ([self.outModePopup.titleOfSelectedItem isEqualToString:@"dsd"]) return;
+    if ([self.outModePopup itemWithTitle:@"dsd"]) {
+        [self.outModePopup selectItemWithTitle:@"dsd"];
+        RLPToast(RLPTr(@"输出模式已切到 DSD（SDM）"));
+    }
+}
+
+/// 常驻说明只在 PCM 时显示（web applyDsdState 对 #sp_dsdmodenote 的 display:none）。
+- (void)updateDsdModeNote {
+    if (self.dsdModeNote)
+        self.dsdModeNote.hidden = [self.outModePopup.titleOfSelectedItem isEqualToString:@"dsd"];
+}
+
+- (void)onDsdRate:(NSPopUpButton *)s {
+    [self syncOutModeToDsd];
+    [self updateDsdModeNote];
+    [self postKey:@"dsd" value:[self dsdPersistValue]];
 }
 - (void)onModFamily:(id)sender { [self postKey:@"modfamily" value:self.modFamilyPopup.titleOfSelectedItem]; }
 - (void)onModOrder:(id)sender { [self postKey:@"modorder" value:self.modOrderPopup.titleOfSelectedItem]; }
@@ -3080,15 +3189,25 @@ static BOOL RLPFeedbackTextBlank(NSString *s) {
         if (![devs isKindOfClass:[NSArray class]]) return;
         [self_.devicePopup removeAllItems];
         [self_.inDevicePopup removeAllItems];
+        // web #sp_device：首项 value="" 的「默认设备」，设备项 value = 稳定 id
+        //（ui_script.h:5318 / 5337）。旧实现只填显示名 ⟹ 选中后 POST 的也是显示名，
+        // 后端按 id 解析（rtaweb.cpp:2764），名字匹配只能算兜底。
+        [self_.devicePopup addItemWithTitle:RLPTr(@"默认设备")];
+        [[self_.devicePopup itemAtIndex:0] setRepresentedObject:@""];
         for (id d in (NSArray *)devs) {
             if (![d isKindOfClass:[NSDictionary class]]) continue;
             NSString *name = d[@"name"];
             if (!name.length) continue;
+            NSString *did = [d[@"id"] isKindOfClass:[NSString class]] ? d[@"id"] : @"";
             [self_.devicePopup addItemWithTitle:name];
+            if (did.length)
+                [[self_.devicePopup itemAtIndex:self_.devicePopup.numberOfItems - 1]
+                    setRepresentedObject:did];
             [self_.inDevicePopup addItemWithTitle:name];
         }
-        if (!self_.devicePopup.numberOfItems) [self_.devicePopup addItemWithTitle:RLPTr(@"默认音频设备")];
         if (!self_.inDevicePopup.numberOfItems) [self_.inDevicePopup addItemWithTitle:RLPTr(@"默认输入设备")];
+        // settings 的 GET 可能比设备列表先到：按记下的 id 再回显一次。
+        [self_ selectSavedDevice];
     }];
 
     [[RLPCoreClient shared] getJSON:@"/api/filters" completion:^(NSDictionary * _Nullable json) {
@@ -3098,6 +3217,11 @@ static BOOL RLPFeedbackTextBlank(NSString *s) {
         if (!items.count) return;
         [self_.filt1xPopup removeAllItems];
         [self_.filtNxPopup removeAllItems];
+        // Nx 的「跟随 1x」是**空值首项**（web sel('sp_filtNx', ..., 空 option)）。
+        // 旧实现 removeAllItems 后只塞滤波器名 ⟹ 首项变成某个滤波器，「跟随 1x」凭空消失，
+        // 用户以为它还在选中，实际 POST 的是某个滤波器名。
+        [self_.filtNxPopup addItemWithTitle:RLPTr(@"跟随 1x（不单独指定）")];
+        [[self_.filtNxPopup itemAtIndex:0] setRepresentedObject:@""];
         // SDM 页的 Oversampling 1x / Nx 用的是同一份滤波器清单
         //（web：sel('sp_sdmo1', ...) 与 1x/Nx 共用 FILTER_OPTS）。
         // 旧原生只填了 PCM 页那两个，SDM 页两个永远停在「读取中…」。
@@ -3110,10 +3234,22 @@ static BOOL RLPFeedbackTextBlank(NSString *s) {
                              : ([it isKindOfClass:[NSString class]] ? it : nil);
             if (!name.length) continue;
             [self_.filt1xPopup addItemWithTitle:name];
+            [[self_.filt1xPopup itemAtIndex:self_.filt1xPopup.numberOfItems - 1]
+                setRepresentedObject:name];
             [self_.filtNxPopup addItemWithTitle:name];
+            [[self_.filtNxPopup itemAtIndex:self_.filtNxPopup.numberOfItems - 1]
+                setRepresentedObject:name];
             [self_.sdmO1Popup addItemWithTitle:name];
             [self_.sdmONxPopup addItemWithTitle:name];
         }
+        // /api/settings 与 /api/filters 是两个并发 GET：清单后到时按记下的 kv 值重选，
+        // 否则回显会被刚重建的列表冲回第一项（旧实现只填项、不回显）。
+        if (self_.savedFilterNx)
+            [self_ applyKV:@{ @"filterNx": self_.savedFilterNx }
+                  toPopup:self_.filtNxPopup key:@"filterNx"];
+        if (self_.savedFilter.length)
+            [self_ applyKV:@{ @"filter": self_.savedFilter }
+                  toPopup:self_.filt1xPopup key:@"filter"];
     }];
 
     // 设置：以 kv 为准回填。读不到就不回填 —— 绝不把 UI 默认值写回去覆盖用户设置。
@@ -3140,11 +3276,17 @@ static BOOL RLPFeedbackTextBlank(NSString *s) {
         [self_ applyKV:kv toPopup:self_.backendPopup key:@"backend"];
         // 后端联动（web 同语义）：upnp 才显示目标渲染器、隐藏声道微调；其它后端反过来。
         [self_ syncOutputBackendVisibility:self_.backendPopup.titleOfSelectedItem ?: @"coreaudio"];
-        [self_ applyKV:kv toPopup:self_.devicePopup key:@"device"];
+        // 设备落盘值是 id（web option value）：列表异步到达后再按 id 回显（selectSavedDevice）。
+        self_.savedDeviceId = [kv[@"device"] isKindOfClass:[NSString class]] ? kv[@"device"] : @"";
+        [self_ selectSavedDevice];
         [self_ applyKV:kv toPopup:self_.ratePopup key:@"rate"];
         // 位深与采样率一样是「值 ≠ 文案」的下拉（web value=-1/0/16/32）；
         // 旧实现根本没把 kv.bits 回填到下拉，于是重开设置页永远显示第一项。
         [self_ applyKV:kv toPopup:self_.bitsPopup key:@"bits"];
+        // filter / filterNx 清单是异步到的：先记值，/api/filters 完成块再按值重选。
+        // filterNx 的空串是合法值（「跟随 1x」首项），applyKV 必须能选中它。
+        self_.savedFilter = [kv[@"filter"] isKindOfClass:[NSString class]] ? kv[@"filter"] : @"";
+        self_.savedFilterNx = [kv[@"filterNx"] isKindOfClass:[NSString class]] ? kv[@"filterNx"] : @"";
         [self_ applyKV:kv toPopup:self_.filt1xPopup key:@"filter"];
         [self_ applyKV:kv toPopup:self_.filtNxPopup key:@"filterNx"];
         [self_ applyKV:kv toPopup:self_.modFamilyPopup key:@"modfamily"];
@@ -3159,12 +3301,8 @@ static BOOL RLPFeedbackTextBlank(NSString *s) {
             [self_ loadInputDevices];
         }
 
-        id dsd = kv[@"dsd"];
-        if ([dsd respondsToSelector:@selector(integerValue)]) {
-            NSInteger n = [dsd integerValue];
-            NSString *title = (n <= 0) ? RLPTr(@"不升频") : [NSString stringWithFormat:@"dsd%ld", (long)n];
-            if ([self_.dsdRatePopup itemWithTitle:title]) [self_.dsdRatePopup selectItemWithTitle:title];
-        }
+        // kv.dsd 是三个控件的合成值（web applyDsd）：0=PCM；dopNN/natNN 或旧裸数字 NN=DSD。
+        [self_ applyDsdPersistValue:kv[@"dsd"]];
         id root = kv[@"root"];
         if ([root isKindOfClass:[NSString class]] && [root length])
             self_.rootField.stringValue = root;
@@ -3208,7 +3346,10 @@ static BOOL RLPFeedbackTextBlank(NSString *s) {
     [self showStatus:RLPTr(@"已切到 bit-perfect 直通")];
 }
 
-- (void)onOutMode:(NSPopUpButton *)s { [self postKey:@"outmode" value:s.titleOfSelectedItem ?: @"pcm"]; }
+- (void)onOutMode:(NSPopUpButton *)s {
+    [self updateDsdModeNote];
+    [self postKey:@"dsd" value:[self dsdPersistValue]];
+}
 
 - (void)onChannels:(NSPopUpButton *)s {
     NSArray<NSString *> *vals = @[ @"0", @"2", @"6", @"8" ];
@@ -3281,7 +3422,11 @@ static BOOL RLPFeedbackTextBlank(NSString *s) {
 
 - (void)onSdmO1:(NSPopUpButton *)s { [self postKey:@"sdmfilt" value:s.indexOfSelectedItem == 0 ? @"" : (s.titleOfSelectedItem ?: @"")]; }
 - (void)onSdmONx:(NSPopUpButton *)s { [self postKey:@"sdmfiltnx" value:s.indexOfSelectedItem == 0 ? @"" : (s.titleOfSelectedItem ?: @"")]; }
-- (void)onDsdPack:(NSPopUpButton *)s { [self postKey:@"dsdpk" value:s.titleOfSelectedItem ?: @"dop"]; }
+- (void)onDsdPack:(NSPopUpButton *)s {
+    [self syncOutModeToDsd];
+    [self updateDsdModeNote];
+    [self postKey:@"dsd" value:[self dsdPersistValue]];
+}
 - (void)onDsdKind:(NSPopUpButton *)s { [self postKey:@"dsdkind" value:s.titleOfSelectedItem ?: @"fir"]; }
 - (void)onDsdConv:(NSPopUpButton *)s { [self postKey:@"dsdconv" value:s.titleOfSelectedItem ?: @"narrow"]; }
 - (void)onModCut:(NSTextField *)s { [self postKey:@"modcut" value:s.stringValue]; }
