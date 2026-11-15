@@ -15,6 +15,7 @@
 #import "RLPAnalysisSummary.h"
 #import "RLPLyrics.h"
 #import "RLPTrackActions.h"
+#import "RLPWaveformView.h"   // U2 包3：控制条上方的波形条（identifier np.waveform）
 #import <CoreImage/CoreImage.h>
 #import <QuartzCore/QuartzCore.h>
 
@@ -51,6 +52,12 @@
 
 @interface RLPNowPlayingViewController (CanvasLayout)
 - (void)layoutWebPlayback;
+/// U2 包3：波形取数（只在切曲/首次进入调用；/api/status 轮询只搬播放头，绝不再取数）。
+- (void)loadWaveformForPath:(NSString *)path;
+/// 波形点击 → POST /api/seek?pos=（守卫与 onCommitSeek 同一口径）。
+- (void)seekFromWaveformAtFraction:(double)fraction;
+/// 每轮 /api/status 只把播放头搬到新位置（不重算波形）。
+- (void)updateWaveformPlayheadForStatus:(RLPPlaybackStatus *)status;
 /// web buildNpMetaHtml 的同构投影（补全芯片行）。审计用它喂合成 meta 验渲染，
 /// 真实路径由 /api/meta 异步驱动。
 - (void)renderMetaChipsFromMeta:(NSDictionary *)json;
@@ -1626,6 +1633,15 @@ static NSString *RLPRailTagText(id srValue, id bitsValue) {
 @property (nonatomic, strong) NSTimer *poll;
 @property (nonatomic) BOOL polling;
 @property (nonatomic, copy) NSString *currentPath;
+// ---- U2 包3：波形（np.waveform）----
+@property (nonatomic, strong) RLPWaveformView *waveformView;
+/// 当前包络对应的曲目路径（nil = 尚未取/不支持）。同曲绝不重复请求。
+@property (nonatomic, copy) NSString *waveformPath;
+/// 波形请求序号：切曲后迟到的响应一律丢弃（与封面/歌词同一套纪律）。
+@property (nonatomic, assign) NSUInteger waveformSeq;
+/// 最近一次拖选（start/end 是 0..1 比例，seconds 是换算后的秒数）。
+/// A/B 段端点后端尚未实现 ⟹ 本轮只留痕 + 高亮，不设循环点（挂账见 evidence）。
+@property (nonatomic, copy) NSDictionary *waveformSelection;
 /// v3.3.11 `npSetCover` / `npResetCover`：逐曲封面手动设置与恢复自动。
 @property (nonatomic, strong) NSButton *coverSetBtn;
 @property (nonatomic, strong) NSButton *coverResetBtn;
@@ -1995,6 +2011,21 @@ static NSString *RLPRailTagText(id srValue, id bitsValue) {
     self.webControls.volume.identifier=@"np.vol";   // 功能实现落在这个滑块（web #npVol）
     self.webControls.seek.target=self;self.webControls.seek.action=@selector(onCommitSeek:);self.webControls.volume.target=self;self.webControls.volume.action=@selector(onCommitVolume:);
     __weak __typeof__(self) ws=self;self.webControls.seek.onCommit=^{[ws onCommitSeek:nil];};self.webControls.volume.onCommit=^{[ws onCommitVolume:nil];};
+    // U2 包3：波形条挂在控制条正上方（几何在 layoutWebPlayback 给出：高 50pt）。
+    // 视图只负责画；取数在 loadWaveformForPath（切曲/首次进入一次），播放头只跟 /api/status。
+    self.waveformView=[[RLPWaveformView alloc] initWithFrame:NSZeroRect];
+    self.waveformView.identifier=@"np.waveform";
+    __weak __typeof__(self) wsWave=self;
+    self.waveformView.onSeek=^(double fraction){
+        __typeof__(self) s=wsWave;
+        if(s)[s seekFromWaveformAtFraction:fraction];
+    };
+    self.waveformView.onSelect=^(double start,double end,double seconds){
+        __typeof__(self) s=wsWave;
+        if(!s)return;
+        s.waveformSelection=@{@"start":@(start),@"end":@(end),@"seconds":@(seconds)};
+    };
+    [host addSubview:self.waveformView];
     // Existing version actions remain reachable from the track context menu.
     self.compareBtn.hidden=YES;self.worksBtn.hidden=YES;
     NSArray *symbols=@[@"arrow.down.right.and.arrow.up.left",@"chart.bar.xaxis",@"text.bubble"];
@@ -2157,7 +2188,10 @@ static NSString *RLPRailTagText(id srValue, id bitsValue) {
 
 - (void)layoutWebPlayback {
     CGFloat w=self.webCanvas.bounds.size.width,h=self.webCanvas.bounds.size.height;
-    CGFloat c=MIN(236,MAX(132,h*.24)), gutter=16, top=44, by=top+c+18, bottom=MAX(by+60,h-86);
+    // U2 包3：波形条占控制条上方 50pt + 上下各 8pt 间距；三栏底边要让开，不能压到波形上。
+    const CGFloat waveformH=50.0, waveformGap=8.0, waveformBodyGap=8.0;
+    CGFloat c=MIN(236,MAX(132,h*.24)), gutter=16, top=44, by=top+c+18,
+            bottom=MAX(by+60,h-76-waveformGap-waveformH-waveformBodyGap);
     self.cover.frame=NSMakeRect(gutter,top,c,c);
     {
         // 两个小按钮排在封面图正下方；封面窄于 150 时按钮可能溢出到信息列，故限宽并右对齐到封面右缘。
@@ -2291,6 +2325,10 @@ static NSString *RLPRailTagText(id srValue, id bitsValue) {
         self.railHintBtn.frame = NSMakeRect(kRailHeadPadX, 10, railCardW, 18);
     }
     self.webControls.frame=NSMakeRect(MAX(16,(w-1160)/2),h-76,MIN(1160,w-32),58);[self.webControls layout];
+    // U2 包3：波形与控制条同一宽度、贴在其正上方（top-left 坐标：控制条顶 = h-76）。
+    self.waveformView.frame=NSMakeRect(NSMinX(self.webControls.frame),
+                                       NSMinY(self.webControls.frame)-waveformGap-waveformH,
+                                       NSWidth(self.webControls.frame),waveformH);
     [self layoutLyricRows];
     // web #npDrawerBg inset 0 / #npDrawer top/right/bottom 14、width:min(430,44vw)
     {
@@ -3340,6 +3378,8 @@ static NSString *RLPNowPlayingCastDeviceLabel(NSString *device) {
     // → 再打开」以前显示的还是旧档位（审计 C 项）。首次进入（还没有 currentPath）由
     // refresh 的换曲分支负责，这里不重复发请求。
     if(self.currentPath.length)[self refreshPlayMode];
+    // 重新进入页面：同曲已有包络时不重复请求（loadWaveformForPath 内部幂等）。
+    if(self.currentPath.length)[self loadWaveformForPath:self.currentPath];
     if(self.polling&&self.currentPath.length)[self loadLyricsForPath:self.currentPath];
 }
 
@@ -3397,6 +3437,8 @@ static NSString *RLPNowPlayingCastDeviceLabel(NSString *device) {
         if (!st) return;
         NSString *path = st.currentPath ?: @"";
         self_.webStatus=st;
+        // 既有 0.4 s 的 /api/status 轮询只把播放头搬过去：波形只在切曲时取，这里绝不重发 /api/waveform。
+        [self_ updateWaveformPlayheadForStatus:st];
         self_.webControls.posLabel.stringValue=RLPFmtDuration(st.position);self_.webControls.durLabel.stringValue=RLPFmtDuration(st.duration);
         if(!self_.webControls.seek.dragging)self_.webControls.seek.doubleValue=st.duration>0?st.position/st.duration:0;
         if(!self_.webControls.volume.dragging)self_.webControls.volume.doubleValue=RLPNPVolDbToPos(st.volumeDb);
@@ -3432,6 +3474,8 @@ static NSString *RLPNowPlayingCastDeviceLabel(NSString *device) {
             [self_ loadLyricsForPath:path];
             [self_ loadCoverForPath:path];
             [self_ loadMetaAndKnowledgeForPath:path];
+            // U2 包3：切曲/首次进入取一次波形（GET /api/waveform?file=…&bins=512）。
+            [self_ loadWaveformForPath:path];
             // 切歌：清掉上一首的结果与层级。
             self_.anlHealth = nil;
             self_.anlPath = nil;
@@ -3453,6 +3497,56 @@ static NSString *RLPNowPlayingCastDeviceLabel(NSString *device) {
         // 只有「autoanl=1 且正在播放 且 本地文件 且 无缓存 且 没在跑 且 本曲还没自动跑过」才发一次。
         [self_ anlAutoTickForPath:path playing:st.playing paused:st.paused];
     }];
+}
+
+#pragma mark - U2 包3：波形（/api/waveform 取数 + /api/status 搬播放头 + 点击 seek）
+
+/// 取一次波形（**只在切曲/首次进入时调**）。同曲已有包络就直接返回：
+/// 400 ms 的 /api/status 轮询只走 updateWaveformPlayheadForStatus，绝不重算波形。
+/// 失败/不支持（网络曲目、非 WAV/DSF/DFF、超限）只留中心基线，不摆假包络。
+- (void)loadWaveformForPath:(NSString *)path {
+    if (!self.waveformView) return;
+    if (!path.length || [path hasPrefix:@"http://"] || [path hasPrefix:@"https://"]) {
+        self.waveformSeq++;                 // 在途响应作废
+        self.waveformPath = nil;
+        self.waveformSelection = nil;
+        [self.waveformView clearWaveform];
+        return;
+    }
+    if ([path isEqualToString:self.waveformPath ?: @""] && self.waveformView.peaks.count) return;
+    const NSUInteger seq = ++self.waveformSeq;
+    self.waveformPath = path;
+    self.waveformSelection = nil;
+    [self.waveformView clearWaveform];       // 旧曲包络不能留在新曲上（新数据回来前只画基线）
+    NSString *url = [NSString stringWithFormat:@"/api/waveform?file=%@&bins=512", RLPEnc(path)];
+    __weak __typeof__(self) ws = self;
+    [[RLPCoreClient shared] getJSON:url completion:^(NSDictionary * _Nullable json) {
+        __typeof__(self) s = ws;
+        if (!s || seq != s.waveformSeq || ![path isEqualToString:s.waveformPath ?: @""]) return;
+        NSArray *peaks = [json[@"peaks"] isKindOfClass:[NSArray class]] ? json[@"peaks"] : nil;
+        if (!peaks.count) return;            // 解码失败/超限：保持空态，同一首不再打后端
+        NSArray *rms = [json[@"rms"] isKindOfClass:[NSArray class]] ? json[@"rms"] : nil;
+        [s.waveformView setPeaks:peaks rms:rms duration:[json[@"duration"] doubleValue]];
+    }];
+}
+
+/// /api/status 每轮调一次：只改播放头浮点值并重绘（不重算波形、不发请求）。
+- (void)updateWaveformPlayheadForStatus:(RLPPlaybackStatus *)status {
+    if (!self.waveformView || !status) return;
+    const double duration = status.duration;
+    const double fraction = duration > 0.0 ? status.position / duration : 0.0;
+    self.waveformView.playheadFraction = fraction;   // setter 自己 clamp 到 [0,1]
+}
+
+/// 波形点击 → 跳转。守卫与 onCommitSeek 完全同口径（web doSeek：playing / dur>0 / finite），
+/// pos 上界 0.9999、四位小数。
+- (void)seekFromWaveformAtFraction:(double)fraction {
+    RLPPlaybackStatus *st = self.webStatus;
+    if (!st || !st.playing || !(st.duration > 0.0) || !isfinite(fraction)) return;
+    const double f = fmin(0.9999, fmax(0.0, fraction));
+    [[RLPCoreClient shared] postJSON:[NSString stringWithFormat:@"/api/seek?pos=%.4f", f]
+                                body:nil completion:nil];
+    self.lyricManualUntil = 0;
 }
 
 /// settings.autoanl / settings.eq / settings.ir 的**同一份**读取节流：
