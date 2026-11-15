@@ -1,0 +1,20 @@
+翻译…	Translate…	歌词右键菜单：翻译（子菜单选目标语言）
+音译	Transliterate	歌词右键菜单：音译（拉丁字母转写）
+日语假名	Furigana	歌词右键菜单：日语汉字标平假名
+转繁体	Traditional Chinese	歌词右键菜单：简体转繁体
+恢复原文	Restore original	歌词右键菜单：切回原文
+复制歌词	Copy lyrics	歌词右键菜单：复制全部歌词
+正在翻译歌词…	Translating lyrics…	歌词 AI 进行中提示
+正在处理歌词…	Processing lyrics…	歌词 AI 进行中提示（音译/假名/繁体）
+歌词处理失败	Lyrics processing failed	歌词 AI 失败提示前缀
+已载入（缓存）	Loaded (cached)	歌词 AI 命中磁盘缓存
+已恢复原文	Restored original lyrics	恢复原文后的提示
+歌词已复制	Lyrics copied	复制歌词后的提示
+核心未启动，稍后再试	Core is not running — try again later	歌词 AI 前置检查失败
+英文	English	歌词翻译目标语言
+日语	Japanese	歌词翻译目标语言
+韩语	Korean	歌词翻译目标语言
+法语	French	歌词翻译目标语言
+德语	German	歌词翻译目标语言
+俄语	Russian	歌词翻译目标语言
+西班牙语	Spanish	歌词翻译目标语言

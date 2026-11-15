@@ -2302,6 +2302,15 @@ target_include_directories(test_ai_fill PRIVATE ${CMAKE_SOURCE_DIR}/src)
 target_link_libraries(test_ai_fill PRIVATE ${RL_PLATFORM_LIBS})
 add_test(NAME ai_fill COMMAND test_ai_fill)
 
+# ---------------- 1.1.7.90：歌词 AI（翻译 / 音译 / 假名 / 繁体，移植上游 v3.3.11 lyrics_ai.h）
+# 全离线：假 LLM 走 LlmConfig.transport 钩子 ⟹ 不出网、不需要 key。
+# 判据：行数守恒 / 空行保留 / finish_reason=length 不交付 / 行数不符拒绝 / no_key /
+#       LRC 时间戳前缀逐字节保留。
+add_executable(test_lyrics_ai tests/test_lyrics_ai.cpp)
+target_include_directories(test_lyrics_ai PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(test_lyrics_ai PRIVATE ${RL_PLATFORM_LIBS})
+add_test(NAME lyrics_ai COMMAND test_lyrics_ai)
+
 option(RTA_BUILD_LEGACY_TESTS "构建尚未移植到 macOS 的旧测试（缺 POSIX 垫片，默认关闭）" OFF)
 if(RTA_BUILD_LEGACY_TESTS)
 

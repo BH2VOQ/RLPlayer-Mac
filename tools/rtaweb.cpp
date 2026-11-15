@@ -80,6 +80,7 @@ using rta::render::SinkOpenOpts;
 #include "meta/retrieval.h"         // P3 资料层③ AI 综合检索(/api/entity/summary)
 #include "meta/discogs.h"           // P3 资料层④b Discogs 版本推荐(/api/entity/versions)
 #include "meta/statusflags.h"       // gpu/gpuUsed 组合语义（用户 261024-04 #8，/api/status 与 /api/signal 同源）
+#include "meta/lyrics_ai.h"          // 1.1.7.90 歌词 AI：翻译/音译/假名/繁体（/api/lyrics/ai，上游 v3.3.11 移植）
 #include "dsp/filter_families.h"
 #include "dsp/oversample_peak.h"
 #include "dsp/eq_text.h"
@@ -7376,6 +7377,8 @@ static bool is_side_effect_path(const std::string& p) {
         "/api/cover/set", "/api/cover/reset",
         // 1.1.4-beta10 页面内自检：会把结果落盘（副作用），必须 POST
         "/api/selftest/report", "/api/selftest/request",
+        // 1.1.7.90 歌词 AI：会打网络并落盘 lyrics-cache（副作用），必须 POST
+        "/api/lyrics/ai",
     };
     for (const char* k : kNeedPost) {
         const size_t n = std::strlen(k);
@@ -8810,15 +8813,11 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
         return "{\"ok\":false,\"error\":\"unknown lib api\"}";
     }
 
-    // ---------------- 歌词 ----------------
-    if (rq.path.rfind("/api/lyrics", 0) == 0) {
-        ct = "application/json; charset=utf-8";
-        std::string file;
-        const size_t q = rq.path.find("?file=");
-        if (q != std::string::npos) file = urlDecode(rq.path.substr(q + 6));
-        if (file.empty()) return "{\"ok\":false,\"error\":\"未指定文件\"}";
-        if (!valid_utf8(file)) return utf8_path_reject(file);   // F1：本端点下方就是 fs::u8path
-        std::string text, src;
+    // ---------------- 歌词取词（sidecar → 内嵌标签 → MetaStore）----------------
+    // /api/lyrics 与 /api/lyrics/ai 共用同一条取词路径：两份实现迟早不一致
+    // （上游正因为不想复制这段，才让前端把解析好的行 POST 上来；本分支原生 UI 走 lines，
+    //   但 file / text 两种入参仍要能取到同一份歌词）。
+    auto lyrics_text_from_file = [&](const std::string& file, std::string& text, std::string& src) {
         // 1) 同名 .lrc（或同目录唯一的 .lrc）
         {
             std::error_code ec;
@@ -8904,6 +8903,167 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
                 }
             }
         }
+    };
+
+
+    // ---------------- 歌词 AI：翻译 / 音译 / 假名 / 繁体（移植上游 v3.3.11 lyrics_ai.h） ----------------
+    // POST /api/lyrics/ai（表单参数；body 与 query 都认，便于原生 UI 与 curl 两种用法）：
+    //   task    translate（默认）| translit | furigana | trad；也接受上游的 kind 键名
+    //   lang    目标语言码（translate 必填，其余任务忽略）
+    //   srclang 源语言码（可选；进提示词与缓存 key）
+    //   file    音频路径：取词路径与 GET /api/lyrics 完全同一条
+    //   text    已取到的歌词正文（LRC 或纯文本）：[mm:ss.xx] 前缀原样保留，只换文本
+    //   lines   JSON 字符串数组（上游契约：前端已解析好行、时间轴留在前端）
+    // 返回：{"ok":true,"fromCache":bool,"task":"…","lang":"…","tokens":N,"lines":[…]}
+    //       file / text 模式另给 "text":"<整段拼回>"（前端可以直接替换整段歌词）
+    // 失败：HTTP 400 + {"ok":false,"code":"lyrics_ai.xxx","error":"人话"}（码见 meta/lyrics_ai.h）
+    //
+    // 为什么由这里切块而不是让前端切：单次调用 max_tokens 上限 8000，一首 40+ 行歌词
+    // 必须分块；且任何一块失败都要整体失败（绝不拼接半首歌）。
+    if (rq.path.rfind("/api/lyrics/ai", 0) == 0) {
+        ct = "application/json; charset=utf-8";
+        auto ai_fail = [&](const std::string& code, const std::string& msg) {
+            rta::net::webui_set_status(400);
+            return std::string("{\"ok\":false,\"code\":\"") + code + "\",\"error\":\"" + jesc(msg) + "\"}";
+        };
+        auto ai_arg = [&](const char* key) -> std::string {
+            const std::string k(key);
+            std::istringstream is(rq.body);
+            std::string tok;
+            while (std::getline(is, tok, '&')) {
+                const size_t eq = tok.find('=');
+                if (eq == std::string::npos) continue;
+                if (urlDecode(tok.substr(0, eq)) != k) continue;
+                return urlDecode(tok.substr(eq + 1));
+            }
+            const size_t qp = rq.path.find('?');
+            if (qp != std::string::npos) {
+                std::istringstream qs(rq.path.substr(qp + 1));
+                std::string q;
+                while (std::getline(qs, q, '&')) {
+                    const size_t eq = q.find('=');
+                    if (eq == std::string::npos) continue;
+                    if (urlDecode(q.substr(0, eq)) != k) continue;
+                    return urlDecode(q.substr(eq + 1));
+                }
+            }
+            return std::string();
+        };
+
+        std::string taskS = ai_arg("task");
+        if (taskS.empty()) taskS = ai_arg("kind");            // 上游键名兼容
+        rta::meta::LyricsAiTask task = rta::meta::LyricsAiTask::Translate;
+        if (!rta::meta::lyrics_ai_parse_task(taskS, task))
+            return ai_fail("lyrics_ai.bad_task", "task 非法（translate / translit / furigana / trad）");
+        const std::string lang = rta::meta::lyrics_ai_norm_lang(ai_arg("lang"));
+        const std::string srcLang = rta::meta::lyrics_ai_norm_lang(ai_arg("srclang"));
+        if (task == rta::meta::LyricsAiTask::Translate && lang.empty())
+            return ai_fail(rta::meta::kLyricsAiErrNoLang, "翻译任务缺少目标语言（lang）");
+
+        // 三种入参统一成「前缀 + 正文」的行模型：时间轴行与非时间轴行的处理完全一样，
+        // 行数守恒也只在这一层计（按"时间轴行"数）。
+        std::vector<rta::meta::LyricsAiLrcLine> parts;
+        const std::string linesJson = ai_arg("lines");
+        const std::string textArg = ai_arg("text");
+        const std::string fileArg = ai_arg("file");
+        if (!linesJson.empty()) {
+            const rta::net::Json lj = rta::net::json_parse(linesJson);
+            if (lj.type != rta::net::Json::Arr)
+                return ai_fail("lyrics_ai.bad_request", "lines 必须是 JSON 字符串数组");
+            for (size_t i = 0; i < lj.size(); ++i) {
+                if (lj.at(i).type != rta::net::Json::Str)
+                    return ai_fail("lyrics_ai.bad_request", "lines[" + std::to_string(i) + "] 不是字符串");
+                rta::meta::LyricsAiLrcLine p;
+                p.text = lj.at(i).str;
+                parts.push_back(p);
+            }
+        } else if (!textArg.empty()) {
+            if (!valid_utf8(textArg)) return utf8_path_reject(textArg);
+            parts = rta::meta::lyrics_ai_split_lrc(textArg);
+        } else if (!fileArg.empty()) {
+            if (!valid_utf8(fileArg)) return utf8_path_reject(fileArg);
+            std::string lrc, src;
+            lyrics_text_from_file(fileArg, lrc, src);
+            if (lrc.empty())
+                return ai_fail("lyrics_ai.no_lyrics", "这首曲目没有取到歌词（同名 .lrc / 内嵌标签 / 本地库都空）");
+            parts = rta::meta::lyrics_ai_split_lrc(lrc);
+        } else {
+            return ai_fail("lyrics_ai.bad_request", "需要 file / text / lines 之一");
+        }
+
+        // 只把非空正文行送模型（空行 / 纯元信息行原样保留，回来按原下标贴回）。
+        std::vector<std::string> payload;
+        payload.reserve(parts.size());
+        for (const auto& p : parts) {
+            if (!rta::meta::llm_trim(p.text).empty()) payload.push_back(p.text);
+        }
+        if (payload.empty()) {   // 纯间奏 / 空歌词：没有要处理的内容，不值得花一次调用
+            std::ostringstream oe;
+            oe << "{\"ok\":true,\"fromCache\":false,\"task\":\""
+               << jesc(rta::meta::lyrics_ai_task_tag(task)) << "\",\"lang\":\"" << jesc(lang)
+               << "\",\"tokens\":0,\"lines\":[";
+            for (size_t i = 0; i < parts.size(); ++i) {
+                if (i) oe << ',';
+                oe << '"' << jesc(parts[i].prefix + parts[i].text) << '"';
+            }
+            oe << "]}";
+            return oe.str();
+        }
+        if (payload.size() > 1200)
+            return ai_fail("lyrics_ai.bad_request", "歌词行数过多（上限 1200 行）：请先裁剪再重试");
+
+        const rta::meta::LlmConfig cfg = rta::meta::llm_config_load(llm_conf_path());
+        // 缓存目录跟随本项目既有的运行期状态目录约定（与 covercache / artistcache 同一层），
+        // 空目录/写失败都不影响本次结果（见 lyrics_cache_save）。
+        const std::string cacheDir = path_in_exe_dir("lyrics-cache");
+        const rta::meta::LyricsAiResult r =
+            rta::meta::lyrics_ai_process_all(cfg, task, payload, srcLang, lang, cacheDir);
+        if (!r.ok) {
+            play_log("LYRICS_AI_FAIL task=" + rta::meta::lyrics_ai_task_tag(task) + " lang=" + lang +
+                     " lines=" + std::to_string(payload.size()) + " code=" + r.code + " err=" + r.error);
+            return ai_fail(r.code.empty() ? std::string("lyrics_ai.error") : r.code, r.error);
+        }
+        const std::vector<std::string> joined = rta::meta::lyrics_ai_apply_lrc(parts, r.lines);
+        if (joined.empty())
+            return ai_fail(rta::meta::kLyricsAiErrLineMismatch,
+                           "回填行数与原文不符：为避免界面错行，本次结果丢弃");
+
+        std::ostringstream oj;
+        oj << "{\"ok\":true,\"fromCache\":" << (r.fromCache ? "true" : "false")
+           << ",\"task\":\"" << jesc(rta::meta::lyrics_ai_task_tag(task)) << "\""
+           << ",\"lang\":\"" << jesc(lang) << "\""
+           << ",\"tokens\":" << r.tokens
+           << ",\"lines\":[";
+        for (size_t i = 0; i < joined.size(); ++i) {
+            if (i) oj << ',';
+            oj << '"' << jesc(joined[i]) << '"';
+        }
+        oj << "]";
+        if (!textArg.empty() || !fileArg.empty()) {
+            std::string whole;
+            for (size_t i = 0; i < joined.size(); ++i) {
+                if (i) whole += '\n';
+                whole += joined[i];
+            }
+            oj << ",\"text\":\"" << jesc(whole) << "\"";
+        }
+        oj << "}";
+        play_log("LYRICS_AI task=" + rta::meta::lyrics_ai_task_tag(task) + " lang=" + lang +
+                 " lines=" + std::to_string(joined.size()) + " tokens=" + std::to_string(r.tokens) +
+                 (r.fromCache ? " cache=hit" : " cache=miss"));
+        return oj.str();
+    }
+
+    // ---------------- 歌词 ----------------
+    if (rq.path.rfind("/api/lyrics", 0) == 0) {
+        ct = "application/json; charset=utf-8";
+        std::string file;
+        const size_t q = rq.path.find("?file=");
+        if (q != std::string::npos) file = urlDecode(rq.path.substr(q + 6));
+        if (file.empty()) return "{\"ok\":false,\"error\":\"未指定文件\"}";
+        if (!valid_utf8(file)) return utf8_path_reject(file);   // F1：本端点下方就是 fs::u8path
+        std::string text, src;
+        lyrics_text_from_file(file, text, src);
         std::ostringstream j;
         j << "{\"ok\":" << (text.empty() ? "false" : "true")
           << ",\"src\":\"" << src << "\",\"lrc\":\"" << jesc(text) << "\"}";

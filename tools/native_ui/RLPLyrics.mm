@@ -107,3 +107,89 @@
 }
 
 @end
+
+#pragma mark - 歌词 AI（翻译 / 音译 / 日语假名 / 简转繁）
+
+// 表单值编码：只保留 RFC3986 的 unreserved 字符，其余全部百分号编码。
+// 为什么不用 URLQueryAllowedCharacterSet：它**不**编码 & = + ? / 这些在表单里有语义的字符，
+// 歌词里一句 "rock & roll" 就会把请求体劈成另一个参数（上游 web 侧用 encodeURIComponent 同口径）。
+static NSString *RLPLyricsFormEscape(NSString *s) {
+    static NSCharacterSet *allowed;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        allowed = [NSCharacterSet characterSetWithCharactersInString:
+                   @"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_.~"];
+    });
+    return [s stringByAddingPercentEncodingWithAllowedCharacters:allowed] ?: @"";
+}
+
+@implementation RLPLyrics (AI)
+
++ (NSArray<NSString *> *)aiMenuTitles {
+    // 六项与上游 v3.3.11 的歌词右键菜单同口径（翻译…/音译/日语假名/转繁体 + 恢复原文/复制歌词）。
+    return @[ @"翻译…", @"音译", @"日语假名", @"转繁体", @"恢复原文", @"复制歌词" ];
+}
+
++ (NSString *)aiTaskForMenuTitle:(NSString *)title {
+    if ([title isEqualToString:@"翻译…"]) return @"translate";
+    if ([title isEqualToString:@"音译"])   return @"translit";
+    if ([title isEqualToString:@"日语假名"]) return @"furigana";
+    if ([title isEqualToString:@"转繁体"]) return @"trad";
+    return nil;
+}
+
++ (NSString *)aiRequestBodyTask:(NSString *)task
+                           lang:(NSString *)lang
+                     sourceLang:(NSString *)sourceLang
+                          lines:(NSArray<NSString *> *)lines {
+    NSArray<NSString *> *safe = lines ?: @[];
+    NSData *json = [NSJSONSerialization dataWithJSONObject:safe options:0 error:nil];
+    NSString *jsonText = json ? [[NSString alloc] initWithData:json encoding:NSUTF8StringEncoding] : @"[]";
+    return [NSString stringWithFormat:@"task=%@&lang=%@&srclang=%@&lines=%@",
+            RLPLyricsFormEscape(task ?: @""),
+            RLPLyricsFormEscape(lang ?: @""),
+            RLPLyricsFormEscape(sourceLang ?: @""),
+            RLPLyricsFormEscape(jsonText ?: @"[]")];
+}
+
++ (NSArray<RLPLyricLine *> *)applyAiLines:(NSArray<NSString *> *)aiLines
+                                       to:(NSArray<RLPLyricLine *> *)originals {
+    if (![aiLines isKindOfClass:[NSArray class]] || ![originals isKindOfClass:[NSArray class]]) return nil;
+    // 行数守恒：少一行就是整首歌错位（后端也按这条拒绝），这里再挡一道。
+    if (aiLines.count != originals.count) return nil;
+    NSMutableArray<RLPLyricLine *> *out = [NSMutableArray arrayWithCapacity:originals.count];
+    for (NSUInteger i = 0; i < originals.count; ++i) {
+        id v = aiLines[i];
+        if (![v isKindOfClass:[NSString class]]) return nil;
+        RLPLyricLine *l = [RLPLyricLine new];
+        l.t = originals[i].t;        // 时间戳原样保留 ⟹ 高亮/滚动/点行跳转全部不受影响
+        l.text = (NSString *)v;
+        [out addObject:l];
+    }
+    return out;
+}
+
++ (NSArray<RLPLyricLine *> *)linesFromAiResponse:(NSDictionary *)json
+                                       appliedTo:(NSArray<RLPLyricLine *> *)originals
+                                           error:(NSString **)error {
+    if (![json isKindOfClass:[NSDictionary class]]) {
+        if (error) *error = @"没有响应（核心未启动或请求失败）";
+        return nil;
+    }
+    if (![json[@"ok"] boolValue]) {
+        id msg = json[@"error"];
+        if (error) *error = [msg isKindOfClass:[NSString class]] ? (NSString *)msg : @"处理失败";
+        return nil;
+    }
+    id lines = json[@"lines"];
+    if (![lines isKindOfClass:[NSArray class]]) {
+        if (error) *error = @"响应缺少 lines";
+        return nil;
+    }
+    NSArray<RLPLyricLine *> *out = [self applyAiLines:(NSArray *)lines to:originals];
+    if (!out && error) *error = @"行数与原文不符（为避免错行，已丢弃）";
+    return out;
+}
+
+@end
+

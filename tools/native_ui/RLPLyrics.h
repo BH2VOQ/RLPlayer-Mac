@@ -29,4 +29,28 @@ NS_ASSUME_NONNULL_BEGIN
 + (NSInteger)activeIndex:(NSArray<RLPLyricLine *> *)lines position:(double)pos;
 @end
 
+/// 歌词 AI（翻译 / 音译 / 日语假名 / 简转繁）：右键菜单六项 + 请求体 + 结果贴回。
+/// 移植上游 v3.3.11 的歌词 AI（后端 /api/lyrics/ai）。
+/// 为什么放在这里而不是 UI 里：这三步（菜单名、表单编码、按行贴回）都有判据，
+/// 写进视图代码就没法单测了（判据见 tests/test_native_lyrics.mm 的 A1~A4）。
+@interface RLPLyrics (AI)
+/// 右键菜单六项（顺序固定：翻译… / 音译 / 日语假名 / 转繁体 / 恢复原文 / 复制歌词）。
++ (NSArray<NSString *> *)aiMenuTitles;
+/// 菜单名 → 后端任务名（translate / translit / furigana / trad）；不是 AI 项返回 nil。
++ (nullable NSString *)aiTaskForMenuTitle:(NSString *)title;
+/// 表单请求体（POST /api/lyrics/ai）：lines 走 JSON（时间轴留在 UI，后端只换文本）。
++ (NSString *)aiRequestBodyTask:(NSString *)task
+                           lang:(nullable NSString *)lang
+                     sourceLang:(nullable NSString *)sourceLang
+                          lines:(NSArray<NSString *> *)lines;
+/// 按行贴回译文：时间戳 t 原样保留；行数不符返回 nil（宁可不贴，也不错位）。
++ (nullable NSArray<RLPLyricLine *> *)applyAiLines:(NSArray<NSString *> *)aiLines
+                                               to:(NSArray<RLPLyricLine *> *)originals;
+/// 解析 /api/lyrics/ai 回包并贴回；失败时回填 error 并返回 nil。
++ (nullable NSArray<RLPLyricLine *> *)linesFromAiResponse:(nullable NSDictionary *)json
+                                                appliedTo:(NSArray<RLPLyricLine *> *)originals
+                                                    error:(NSString * _Nullable * _Nullable)error;
+@end
+
+
 NS_ASSUME_NONNULL_END

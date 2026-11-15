@@ -1078,6 +1078,12 @@ struct LlmReply {
     bool ok = false;
     std::string content, error;
     int totalTokens = 0;
+    // choices[0].finish_reason（"stop" / "length" / "tool_calls" ...）。
+    // 2026-11-16（1.1.7.90 歌词 AI 移植）：上游 lyrics_ai.h 的三条硬约束之一是
+    // 「finish_reason=="length" 时宁可报错也不返回半首歌」——半首歌词贴到界面上，
+    // 用户会以为歌词本来就这么短，比报错更难发现。旧 LlmReply 不读这个字段，
+    // 调用方无法区分「正常收尾」与「被 max_tokens 截断」，所以补在这里。
+    std::string finishReason;
 };
 
 // 完整请求体（含 model），llm_chat 用
@@ -1136,6 +1142,7 @@ inline LlmReply llm_parse_chat_response(const std::string& text) {
     }
     if (!j.has("choices") || j["choices"].size() == 0) { r.error = "响应缺少 choices"; return r; }
     r.content = j["choices"].at(0)["message"]["content"].s();
+    r.finishReason = j["choices"].at(0)["finish_reason"].s();   // 截断判定见 lyrics_ai.h
     if (j.has("usage")) r.totalTokens = (int)j["usage"]["total_tokens"].n();
     r.ok = true;
     return r;

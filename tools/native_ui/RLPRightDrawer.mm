@@ -145,6 +145,8 @@
 @property (nonatomic, assign) double t;
 @property (nonatomic, assign) BOOL active;
 @property (nonatomic, copy) void (^onSeek)(double);
+/// 右键菜单（歌词 AI 六项）：行本体与文字标签都要设，否则点在文字上没有菜单。
+- (void)setContextMenu:(NSMenu *)menu;
 @end
 
 @implementation RLPDrawerLyricRow {
@@ -194,6 +196,10 @@
     // 只有带时间轴的行能跳（web: l.t >= 0 && S.dur > 0）
     if (self.t >= 0 && self.onSeek) self.onSeek(self.t);
 }
+- (void)setContextMenu:(NSMenu *)menu {
+    self.menu = menu;    // NSView 的默认 menuForEvent 返回 self.menu
+    _label.menu = menu;  // 点在文字上时是 label 收到右键，所以它也要有
+}
 @end
 
 #pragma mark - 抽屉本体
@@ -214,7 +220,7 @@
 - (BOOL)isFlipped { return YES; }
 @end
 
-@interface RLPRightDrawer ()
+@interface RLPRightDrawer () <NSMenuDelegate>
 @property (nonatomic, copy, readwrite) NSString *tab;
 @property (nonatomic, assign, readwrite) BOOL polling;
 @property (nonatomic, strong) NSButton *qTab;
@@ -237,6 +243,16 @@
 @property (nonatomic, assign) NSInteger activeLine;
 @property (nonatomic, assign) double dur;
 @property (nonatomic, strong) NSMutableArray<RLPDrawerLyricRow *> *lyricRows;
+/// 歌词 AI：翻译/音译/假名/繁体应用前的原文（"恢复原文"用）。
+@property (nonatomic, copy) NSArray<RLPLyricLine *> *originalLyricLines;
+@property (nonatomic, assign) BOOL lyricAiApplied;
+@property (nonatomic, assign) BOOL lyricAiBusy;
+@property (nonatomic, strong) NSMenu *lyricAiMenu;
+/// 歌词 AI：菜单构造 / 提示 / 请求（实现见文件后半「歌词 AI」段；先声明以避"selector 未声明"告警）。
+- (NSMenu *)lyricAiMenu;
+- (NSMenuItem *)lyricAiItem:(NSString *)title action:(SEL)sel;
+- (void)showLyricHint:(NSString *)msg;
+- (void)runLyricAiTask:(NSString *)task lang:(NSString *)lang;
 @end
 
 @implementation RLPRightDrawer
@@ -312,6 +328,9 @@
     self.lStack.translatesAutoresizingMaskIntoConstraints = NO;
     self.lScroll = [self scrollWith:self.lStack ident:@"right.lbody"];
     self.lScroll.hidden = YES;
+    // 歌词区任意位置右键都要出 AI 菜单（空白处也是），所以滚动区与栈也挂同一份菜单。
+    self.lStack.menu = [self lyricAiMenu];
+    self.lScroll.menu = [self lyricAiMenu];
 
     [NSLayoutConstraint activateConstraints:@[
         [head.leadingAnchor constraintEqualToAnchor:self.leadingAnchor],
@@ -543,6 +562,9 @@
         NSString *lrc = [j[@"lrc"] isKindOfClass:[NSString class]] ? j[@"lrc"] : @"";
         s.lines = [RLPLyrics parse:lrc];
         s.activeLine = -1;
+        // 换歌/换词必须作废上一首的 AI 结果：否则会把上一首的译文贴到这一首（指纹失配）。
+        s.originalLyricLines = nil;
+        s.lyricAiApplied = NO;
         if (s.lines.count) { [s renderLyrics]; return; }
         // 空结果退避重试（web 1/2/3/5/8/13s，最多 6 次 ≈ 32s）：后台可能正在补全
         const NSInteger waits[] = {1, 2, 3, 5, 8, 13};
@@ -588,6 +610,7 @@
     __weak __typeof__(self) w = self;
     for (RLPLyricLine *line in self.lines) {
         RLPDrawerLyricRow *row = [[RLPDrawerLyricRow alloc] initWithText:line.text timed:line.t];
+        [row setContextMenu:[self lyricAiMenu]];   // 歌词区右键：AI 六项
         row.onSeek = ^(double t) {
             __typeof__(self) s = w;
             if (!s || s.dur <= 0) return;
@@ -603,6 +626,147 @@
         [self.lStack addArrangedSubview:row];
         [row.widthAnchor constraintEqualToAnchor:self.lStack.widthAnchor constant:-16].active = YES;
     }
+}
+
+#pragma mark - 歌词 AI（翻译 / 音译 / 日语假名 / 简转繁）
+
+/// 歌词区右键菜单（六项）：翻译…（子菜单选目标语言）/ 音译 / 日语假名 / 转繁体 /
+/// 恢复原文 / 复制歌词。移植上游 v3.3.11 的歌词右键菜单（"显示选项"归主题设置，这里只做 AI 类）。
+///
+/// 为什么翻译要选语言：后端 translate 必须有目标语言（空着只会让模型自己猜、白花钱），
+/// 所以"翻译…"带省略号 + 子菜单，选了语言才发请求。
+- (NSMenu *)lyricAiMenu {
+    if (_lyricAiMenu) return _lyricAiMenu;
+    NSMenu *m = [[NSMenu alloc] initWithTitle:@"lyrics-ai"];
+    m.autoenablesItems = NO;
+    m.delegate = self;
+
+    NSMenuItem *tr = [[NSMenuItem alloc] initWithTitle:RLPTr(@"翻译…") action:nil keyEquivalent:@""];
+    NSMenu *langs = [[NSMenu alloc] initWithTitle:@"lyrics-ai-lang"];
+    // 语言标签写成字面量（不是拼接变量）：原生 i18n 覆盖检查只认 RLPTr(@"…") 字面量。
+    NSArray<NSArray<NSString *> *> *pairs = @[
+        @[ @"zh", RLPTr(@"中文") ], @[ @"en", RLPTr(@"英文") ],
+        @[ @"ja", RLPTr(@"日语") ], @[ @"ko", RLPTr(@"韩语") ],
+        @[ @"fr", RLPTr(@"法语") ], @[ @"de", RLPTr(@"德语") ],
+        @[ @"ru", RLPTr(@"俄语") ], @[ @"es", RLPTr(@"西班牙语") ],
+    ];
+    for (NSArray<NSString *> *p in pairs) {
+        NSMenuItem *it = [self lyricAiItem:p[1] action:@selector(lyricAiTranslateLang:)];
+        it.representedObject = p[0];
+        [langs addItem:it];
+    }
+    tr.submenu = langs;
+    [m addItem:tr];
+
+    [m addItem:[self lyricAiItem:RLPTr(@"音译") action:@selector(lyricAiTransliterate:)]];
+    [m addItem:[self lyricAiItem:RLPTr(@"日语假名") action:@selector(lyricAiFurigana:)]];
+    [m addItem:[self lyricAiItem:RLPTr(@"转繁体") action:@selector(lyricAiTradChinese:)]];
+
+    [m addItem:[NSMenuItem separatorItem]];
+
+    NSMenuItem *restore = [[NSMenuItem alloc] initWithTitle:RLPTr(@"恢复原文")
+                                                     action:@selector(lyricRestoreOriginal:)
+                                              keyEquivalent:@""];
+    restore.target = self;
+    [m addItem:restore];
+
+    NSMenuItem *copy = [[NSMenuItem alloc] initWithTitle:RLPTr(@"复制歌词")
+                                                  action:@selector(lyricCopyAll:)
+                                           keyEquivalent:@""];
+    copy.target = self;
+    [m addItem:copy];
+
+    _lyricAiMenu = m;
+    return m;
+}
+
+/// 统一构造菜单项（target 一律是本抽屉）。
+- (NSMenuItem *)lyricAiItem:(NSString *)title action:(SEL)sel {
+    NSMenuItem *it = [[NSMenuItem alloc] initWithTitle:(title ?: @"") action:sel keyEquivalent:@""];
+    it.target = self;
+    return it;
+}
+
+/// 菜单打开时按当前状态启停：没歌词 ⟹ AI 类与复制都禁用；没应用过 AI ⟹ "恢复原文"禁用。
+/// 不这样做的话，用户点了没反应（web 那边踩过"点了像没反应"的同类问题）。
+- (void)menuWillOpen:(NSMenu *)menu {
+    const BOOL has = self.lines.count > 0;
+    for (NSMenuItem *it in menu.itemArray) {
+        if (it.isSeparatorItem) continue;
+        if (it.action == @selector(lyricRestoreOriginal:)) it.enabled = self.lyricAiApplied;
+        else it.enabled = has;
+    }
+}
+
+- (void)showLyricHint:(NSString *)msg {
+    self.lHint.hidden = NO;
+    self.lHint.stringValue = msg ?: @"";
+}
+
+- (void)lyricAiTranslateLang:(NSMenuItem *)item {
+    NSString *code = [item.representedObject isKindOfClass:[NSString class]] ? (NSString *)item.representedObject : @"zh";
+    [self runLyricAiTask:@"translate" lang:code];
+}
+- (void)lyricAiTransliterate:(id)sender { [self runLyricAiTask:@"translit" lang:nil]; }
+- (void)lyricAiFurigana:(id)sender      { [self runLyricAiTask:@"furigana" lang:nil]; }
+- (void)lyricAiTradChinese:(id)sender    { [self runLyricAiTask:@"trad" lang:nil]; }
+
+/// 发请求 → 按行贴回。
+///
+/// 关键约束（与后端同一套）：行由 UI 发给后端（lines，时间轴留在 UI），回来按**行数**贴回；
+/// 后端已按 20/14 行切块 + 磁盘缓存，同一首歌第二次是秒出（fromCache）。
+/// 这里不重试：AI 调用按次计费，失败就失败，用户再点一次才有意义。
+- (void)runLyricAiTask:(NSString *)task lang:(NSString *)lang {
+    if (self.lyricAiBusy) return;
+    if (![RLPCoreClient shared].started) { [self showLyricHint:RLPTr(@"核心未启动，稍后再试")]; return; }
+    // 已应用过 AI 时以"原文"为基准再处理（否则会在译文上再翻一遍，越翻越偏）。
+    NSArray<RLPLyricLine *> *base = self.lyricAiApplied ? self.originalLyricLines : self.lines;
+    if (!base.count) { [self showLyricHint:RLPTr(@"这首曲目没有歌词")]; return; }
+
+    NSMutableArray<NSString *> *texts = [NSMutableArray arrayWithCapacity:base.count];
+    for (RLPLyricLine *l in base) [texts addObject:(l.text ?: @"")];
+    NSString *body = [RLPLyrics aiRequestBodyTask:task lang:lang sourceLang:nil lines:texts];
+
+    self.lyricAiBusy = YES;
+    [self showLyricHint:(task == @"translate" ? RLPTr(@"正在翻译歌词…") : RLPTr(@"正在处理歌词…"))];
+    __weak __typeof__(self) w = self;
+    [[RLPCoreClient shared] postJSON:@"/api/lyrics/ai" body:body completion:^(NSDictionary * _Nullable j) {
+        __typeof__(self) s = w;
+        if (!s) return;
+        s.lyricAiBusy = NO;
+        NSString *err = nil;
+        NSArray<RLPLyricLine *> *applied = [RLPLyrics linesFromAiResponse:j appliedTo:base error:&err];
+        if (!applied) {
+            [s showLyricHint:[RLPTr(@"歌词处理失败") stringByAppendingFormat:@"：%@", (err ?: RLPTr(@"未知错误"))]];
+            return;
+        }
+        if (!s.lyricAiApplied) { s.originalLyricLines = base; s.lyricAiApplied = YES; }
+        s.lines = applied;
+        s.activeLine = -1;
+        [s renderLyrics];   // 时间戳没变 ⟹ 高亮/滚动/点行跳转全部照旧
+        const BOOL cached = [j[@"fromCache"] respondsToSelector:@selector(boolValue)] && [j[@"fromCache"] boolValue];
+        [s showLyricHint:(cached ? RLPTr(@"已载入（缓存）") : RLPTr(@"完成"))];
+    }];
+}
+
+- (void)lyricRestoreOriginal:(id)sender {
+    if (!self.lyricAiApplied || !self.originalLyricLines.count) return;
+    self.lines = self.originalLyricLines;
+    self.originalLyricLines = nil;
+    self.lyricAiApplied = NO;
+    self.activeLine = -1;
+    [self renderLyrics];
+    [self showLyricHint:RLPTr(@"已恢复原文")];
+}
+
+- (void)lyricCopyAll:(id)sender {
+    if (!self.lines.count) return;
+    NSMutableArray<NSString *> *rows = [NSMutableArray arrayWithCapacity:self.lines.count];
+    for (RLPLyricLine *l in self.lines) [rows addObject:(l.text ?: @"")];
+    NSPasteboard *pb = [NSPasteboard generalPasteboard];
+    [pb clearContents];
+    [pb setString:[rows componentsJoinedByString:@"\n"] forType:NSPasteboardTypeString];
+    [self showLyricHint:RLPTr(@"歌词已复制")];
 }
 
 - (void)updatePosition:(double)pos duration:(double)dur {

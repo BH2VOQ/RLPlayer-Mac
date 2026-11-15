@@ -114,6 +114,64 @@ int main() {
         CK([RLPLyrics isTimed:@[]] == NO, "L7c 空数组 isTimed=NO", @"");
         CK([RLPLyrics activeIndex:@[] position:1] == -1, "L7d 空数组不高亮", @"");
 
+
+        // A1 歌词 AI 右键菜单六项（移植上游 v3.3.11 的歌词右键菜单）
+        {
+            NSArray<NSString *> *titles = [RLPLyrics aiMenuTitles];
+            CK(titles.count == 6, "A1a 菜单六项", @(titles.count).stringValue);
+            CK(titles.count == 6 && [titles[0] isEqualToString:@"翻译…"] &&
+               [titles[4] isEqualToString:@"恢复原文"] && [titles[5] isEqualToString:@"复制歌词"],
+               "A1b 首项「翻译…」/ 第五「恢复原文」/ 第六「复制歌词」", titles.description);
+            CK([[RLPLyrics aiTaskForMenuTitle:@"翻译…"] isEqualToString:@"translate"], "A1c 翻译 → translate", @"");
+            CK([[RLPLyrics aiTaskForMenuTitle:@"音译"] isEqualToString:@"translit"], "A1d 音译 → translit", @"");
+            CK([[RLPLyrics aiTaskForMenuTitle:@"日语假名"] isEqualToString:@"furigana"], "A1e 日语假名 → furigana", @"");
+            CK([[RLPLyrics aiTaskForMenuTitle:@"转繁体"] isEqualToString:@"trad"], "A1f 转繁体 → trad", @"");
+            CK([RLPLyrics aiTaskForMenuTitle:@"恢复原文"] == nil, "A1g 非 AI 项返回 nil", @"");
+        }
+
+        // A2 请求体：表单编码后歌词里不会出现原始分隔符（否则一句 "a & b" 会劈成两个参数）
+        {
+            NSString *body = [RLPLyrics aiRequestBodyTask:@"furigana"
+                                                   lang:nil
+                                             sourceLang:@"ja"
+                                                  lines:@[ @"夜に駆ける", @"rock & roll" ]];
+            CK([body containsString:@"task=furigana"], "A2a task 进表单", body);
+            CK([body containsString:@"srclang=ja"], "A2b srclang 进表单", body);
+            CK([body containsString:@"lines=%5B"], "A2c lines 是百分号编码的 JSON 数组", body);
+            CK([body rangeOfString:@"&roll"].location == NSNotFound, "A2d 歌词里的 & 被编码（不会劈参）", body);
+            NSString *decoded = [body stringByRemovingPercentEncoding];
+            CK([decoded containsString:@"夜に駆ける"], "A2e 解码后能取回原文行", decoded ?: @"");
+        }
+
+        // A3 按行贴回：时间戳原样保留；行数不符宁可不贴
+        {
+            NSArray<RLPLyricLine *> *orig = [RLPLyrics parse:@"[00:01.00]あ\n[00:05.00]い\n[00:09.00]う"];
+            NSArray<RLPLyricLine *> *applied = [RLPLyrics applyAiLines:@[ @"甲", @"乙", @"丙" ] to:orig];
+            CK(applied.count == 3, "A3a 贴回三行", @(applied.count).stringValue);
+            CK(applied.count == 3 && applied[0].t == orig[0].t && applied[1].t == orig[1].t &&
+               applied[2].t == orig[2].t, "A3b 时间戳逐行原样保留", @"");
+            CK(applied.count == 3 && [applied[1].text isEqualToString:@"乙"], "A3c 文本被替换成译文", @"");
+            CK([RLPLyrics applyAiLines:@[ @"甲", @"乙" ] to:orig] == nil, "A3d 少一行 ⟹ nil（绝不错位）", @"");
+            CK([RLPLyrics applyAiLines:@[ @"甲", @"乙", @"丙", @"丁" ] to:orig] == nil,
+               "A3e 多一行 ⟹ nil", @"");
+        }
+
+        // A4 回包解析：失败带出后端错误（界面据此提示，而不是静默）
+        {
+            NSArray<RLPLyricLine *> *orig = [RLPLyrics parse:@"[00:01.00]a\n[00:02.00]b"];
+            NSString *err = nil;
+            NSDictionary *okJson = @{ @"ok": @YES, @"lines": @[ @"甲", @"乙" ], @"fromCache": @NO };
+            NSArray<RLPLyricLine *> *got = [RLPLyrics linesFromAiResponse:okJson appliedTo:orig error:&err];
+            CK(got.count == 2 && err == nil, "A4a 成功回包贴回两行", err ?: @"");
+            NSDictionary *badJson = @{ @"ok": @NO, @"code": @"lyrics_ai.no_key", @"error": @"未配置 api_key" };
+            err = nil;
+            CK([RLPLyrics linesFromAiResponse:badJson appliedTo:orig error:&err] == nil &&
+               [err isEqualToString:@"未配置 api_key"], "A4b 失败回包带出人话错误", err ?: @"");
+            err = nil;
+            CK([RLPLyrics linesFromAiResponse:nil appliedTo:orig error:&err] == nil &&
+               err.length > 0, "A4c 无回包 ⟹ nil + 有错误说明", err ?: @"");
+        }
+
         std::printf("\n%s（%d 项失败）\n",
                     gFail == 0 ? "native lyrics 全部通过" : "native lyrics 有失败", gFail);
         return gFail == 0 ? 0 : 1;
