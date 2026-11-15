@@ -264,6 +264,20 @@
 /// cs/ce 必须带 —— 否则 CUE 分轨会从整张碟开头播（web 版明确处理过）。
 - (void)playFromIndex:(NSInteger)index {
     if (!self.selectedName.length) return;
+    // P3：单曲循环（mode==2）下"播放整列/点第 N 首"会卡在同一首无限重复。
+    // web ensureSequentialMode 同口径：起播前先读模式，是 2 就切回列表循环(1)。
+    // 与「我的最爱」整列播放共用 RLPSupport 的同一守卫（不各写一套）。
+    __weak __typeof__(self) weakSelf = self;
+    RLPEnsureSequentialMode(^{
+        __typeof__(self) self_ = weakSelf;
+        if (!self_) return;
+        [self_ loadQueueAndPlayAt:index];
+    });
+}
+
+/// 起播后半段：/api/sq/play 换队列 → 按该曲 file/cs/ce 真正 /api/play。
+- (void)loadQueueAndPlayAt:(NSInteger)index {
+    if (!self.selectedName.length) return;
     NSString *url = [NSString stringWithFormat:@"/api/sq/play?name=%@&i=%ld",
                      RLPEnc(self.selectedName), (long)index];
     __weak __typeof__(self) weakSelf = self;

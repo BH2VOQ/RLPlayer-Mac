@@ -44,6 +44,8 @@ NSArray<NSString *> *RLPSplitArtistNames(NSString * _Nullable raw);
 @property (nonatomic, copy) NSString *album;
 @property (nonatomic, copy) NSString *path;
 @property (nonatomic) double duration;
+/// 年份（/api/lib/search、/api/lib/album 的行都回 "year"；0 = 后端没给，不编造）。
+@property (nonatomic) NSInteger year;
 @property (nonatomic) double cueStart;
 @property (nonatomic) double cueEnd;
 @property (nonatomic) NSInteger sampleRate;

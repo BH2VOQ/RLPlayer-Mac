@@ -104,6 +104,7 @@ NSArray<NSString *> *RLPSplitArtistNames(NSString *raw) {
     t.path = Str(json, @"path");
     if (!t.path.length) t.path = Str(json, @"file");
     t.duration = Num(json, @"dur");
+    t.year = (NSInteger)Num(json, @"year");
     t.cueStart = Num(json, @"cs");
     t.cueEnd = Num(json, @"ce");
     t.sampleRate = (NSInteger)Num(json, @"sr");

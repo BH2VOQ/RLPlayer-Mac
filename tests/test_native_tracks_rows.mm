@@ -29,6 +29,11 @@
 #include <cstdio>
 #include <cmath>
 
+/// 排序入口是生产代码里的动作方法（不在头文件里）；判据按真实下拉动作调用它。
+@interface RLPTracksViewController (TracksSortAudit)
+- (void)onSortChanged:(NSPopUpButton *)sender;
+@end
+
 static int g_fail = 0, g_pass = 0;
 
 static void Ck(BOOL ok, const char *what, NSString *detail) {
@@ -160,10 +165,12 @@ static NSArray<NSDictionary *> *FixtureTracks(void) {
     return @[
         @{ @"path": @"/Users/test/Music/Aimer/Album Y/01 - Track One.flac",
            @"title": @"Track One", @"artist": @"Aimer", @"album": @"Album Y",
-           @"dur": @225, @"sr": @96000, @"bits": @24, @"ch": @2, @"codec": @"flac" },
+           @"dur": @225, @"sr": @96000, @"bits": @24, @"ch": @2, @"codec": @"flac",
+           @"year": @1999 },   // 后端 /api/lib/search 的 year（rtaweb.cpp:8244）必须进模型
         @{ @"path": @"/Users/test/Music/Aimer/Album Y/02 - Track Two.mp3",
            @"title": @"Track Two", @"artist": @"Aimer", @"album": @"Album Y",
-           @"dur": @180, @"sr": @44100, @"bits": @16, @"ch": @2, @"codec": @"mp3" },
+           @"dur": @180, @"sr": @44100, @"bits": @16, @"ch": @2, @"codec": @"mp3",
+           @"year": @2005 },
     ];
 }
 
@@ -552,6 +559,44 @@ int main() {
                [NSString stringWithFormat:@"got=「%@」", CellText(table, @"format", 2).stringValue]);
             // 恢复夹具，避免后续状态污染（本进程只跑一遍，仍做干净收尾）。
             g_fixtureTracks = FixtureTracks();
+        }
+
+        // ---- 11. 排序：年份降序（P4）与默认可逆（P5）----
+        // web 真源：ui_script.h:3352-3363
+        //   var sorted = ...（每次从 S.trackRows 原始序派生）；year 比较器 (b.year||0)-(a.year||0) 降序；
+        //   default 显示原始 trackRows（所以点过别的档再回默认必须回到原序）。
+        // 旧码（RLPTracksViewController.mm:770-794）：就地覆盖 _tracks、default 直接 return、
+        //   year 分支固定 NSOrderedSame（注释还写着"曲目没有 year 字段"，与后端事实不符）。
+        {
+            g_fixtureTracks = FixtureTracks();
+            [vc reloadData];
+            [vc.view layoutSubtreeIfNeeded];
+            NSPopUpButton *sort11 = (NSPopUpButton *)FindById(vc.view, @"tracks.sort");
+            Ck(sort11 != nil, "排序下拉存在（P4/P5 判据前提）", @"tracks.sort 缺失");
+            if (sort11) {
+                // P4：年份降序。夹具 Track One=1999 / Track Two=2005 ⟹ 原序 One,Two，排序后 Two 在前。
+                [sort11 selectItemAtIndex:5];   // default/title/artist/album/dur/year
+                [vc onSortChanged:sort11];
+                [vc.view layoutSubtreeIfNeeded];
+                EqStr(CellText(table, @"title", 0).stringValue, @"Track Two",
+                      "P4 年份排序真的排：2005 的曲目排第一（降序，与 web 同向）");
+                EqStr(CellText(table, @"title", 1).stringValue, @"Track One",
+                      "P4 年份排序：1999 的曲目排第二");
+
+                // P5：先排"收藏优先"（夹具第 2 首已收藏 ⟹ Two 在前），再切回默认必须回到原始顺序。
+                [sort11 selectItemAtIndex:6];   // fav
+                [vc onSortChanged:sort11];
+                EqStr(CellText(table, @"title", 0).stringValue, @"Track Two",
+                      "P5 收藏优先排序生效（已收藏的 Track Two 在前）");
+
+                [sort11 selectItemAtIndex:0];   // default
+                [vc onSortChanged:sort11];
+                [vc.view layoutSubtreeIfNeeded];
+                EqStr(CellText(table, @"title", 0).stringValue, @"Track One",
+                      "P5 默认排序可逆：切回默认后回到接口原始顺序（保留 _rawTracks）");
+                EqStr(CellText(table, @"title", 1).stringValue, @"Track Two",
+                      "P5 默认排序可逆：第 2 行也回到原始顺序");
+            }
         }
 
         std::printf("结果：%d passed, %d failed\n", g_pass, g_fail);
