@@ -21,6 +21,7 @@
 #include <string>
 #include <vector>
 #include <algorithm>
+#include "rate_family_policy.h"   // 采样率族策略（精确时钟谱，v3.3.11 移植）
 
 namespace rta::audio {
 
@@ -151,9 +152,9 @@ inline RatePick pick_output_rate(const std::string& requested, uint32_t sourceRa
 // 优先级：
 //   ① 与 want 完全相等；
 //   ② 同族且不低于 want —— 44.1k 源不能换到 48k 族（会引入非整数比重采样）。
-//      判据：want % 44100 == 0 视为 44.1k 族，在 supported 里找 % 44100 == 0 且 >= want 的最小值；
-//            want % 48000 == 0 视为 48k 族，同理 % 48000 == 0；
-//            want 本身不在任何族（被人手改成怪值）时，改用 sourceRate 的族。
+//      判据（U5 / v3.3.11）：用 rate_family() 的**精确时钟谱**，不再用「能被 44100/48000 整除」——
+//      7056000 同时被两者整除，旧判据会把它误归 44.1k 族；精确谱里它是 unknown。
+//      want 本身不在任何族（被人手改成怪值）时，改用 sourceRate 的族。
 //   ③ 不小于 want 的最小值（绝不无谓降采样）；
 //   ④ 最大值（全低于 want 时，宁可降一点也不能不出声）。
 // 注意 ② 里「同族」只解决「换族」问题，不解决「更高」问题：同族里没有 >= want 的，仍落到 ③/④。
@@ -166,15 +167,13 @@ inline uint32_t pick_supported_rate(uint32_t want, uint32_t sourceRate,
     // ① 完全相等 —— 最理想，直接返回
     if (std::binary_search(v.begin(), v.end(), want)) return want;
 
-    // ② 同族且 >= want
-    uint32_t family = 0;
-    if (want % 44100u == 0)       family = 44100u;
-    else if (want % 48000u == 0)  family = 48000u;
-    else if (sourceRate && sourceRate % 44100u == 0) family = 44100u;
-    else if (sourceRate && sourceRate % 48000u == 0) family = 48000u;
+    // ② 同族且 >= want（精确时钟谱：11025×2^n / 8000,12000×2^n）
+    const uint32_t wantFamily = rate_family(want);
+    const uint32_t family = wantFamily ? wantFamily
+                                       : (sourceRate ? rate_family(sourceRate) : 0u);
     if (family) {
         // v 已升序 → 第一个满足条件的即最小
-        for (uint32_t r : v) if (r % family == 0 && r >= want) return r;
+        for (uint32_t r : v) if (rate_family(r) == family && r >= want) return r;
     }
 
     // ③ 不小于 want 的最小值
@@ -270,6 +269,70 @@ inline CapDecision decide_capability_failure(bool rateAuto, uint32_t want,
     d.outRate = want;
     d.changed = false;
     outRate = want;
+    return d;
+}
+
+// ---------------------------------------------------------------------------
+// U5（v3.3.11 移植）：按采样率族策略的能力失败决策（新增调用方用这一版）。
+//
+// 旧 5 参数版本**原样保留**给既有调用方（行为、文案、logTag 都不动）；这里只给
+// 「自动换率」与「明确选择」的新路径用：跨族是否允许由 RateFamilyPolicy 决定，
+// 同族档位永远优先于跨族档位（即使同族低于目标率）。默认 Compatible 与旧行为一致。
+// 判据与真值表见 tests/test_rate_family_policy.cpp。
+// ---------------------------------------------------------------------------
+inline CapDecision decide_capability_failure(bool rateAuto, uint32_t want,
+                                            const std::vector<uint32_t>& supported,
+                                            uint32_t& outRate, uint32_t sourceRate,
+                                            RateFamilyPolicy policy) {
+    CapDecision d;
+    const auto v = ratepick_detail::normalized(supported);
+
+    // 空列表：探测为空 ≠ 设备不支持，自动档只建议重试；明确选择也不擅自改率
+    if (v.empty()) {
+        outRate = want;
+        d.outRate = want;
+        d.changed = false;
+        d.logTag = "RATEPROBE_EMPTY";
+        if (rateAuto) {
+            d.action = CapAction::RetryProbe;
+            d.userMessage = "设备独占支持率探测为空（端点可能正在重配置），建议探测重试或保持现有采样率";
+        } else {
+            d.action = CapAction::HardFail;
+            d.userMessage = "你在设置里明确指定了 " + std::to_string(want) +
+                            " Hz，但设备独占支持率探测为空，尚无法确认是否支持；不会自动改成别的率";
+        }
+        return d;
+    }
+
+    const uint32_t src = (sourceRate > 0) ? sourceRate : want;
+    const auto fam = decide_pcm_rate(src, want, v, rateAuto, policy);
+    if (!fam.ok) {
+        outRate = want;
+        d.action = CapAction::HardFail;
+        d.outRate = want;
+        d.changed = false;
+        d.logTag = fam.logTag;
+        d.userMessage = fam.reason;
+        if (!rateAuto && std::string(fam.logTag) == "EXPLICIT_REJECT") {
+            d.userMessage = "你在设置里明确指定了 " + std::to_string(want) +
+                            " Hz，设备独占模式做不了这个采样率；已按你的选择报错（不会自动改成别的率，"
+                            "请在设置里改选设备支持的率，或把采样率改成\"最大\"让它自动挑）";
+        }
+        return d;
+    }
+
+    outRate = fam.rate;
+    d.outRate = fam.rate;
+    d.changed = (fam.rate != want);
+    d.action = d.changed ? CapAction::FallbackRate : CapAction::Matched;
+    d.logTag = fam.crossFamily ? fam.logTag : (d.changed ? "RATEFALLBACK" : "");
+    if (fam.crossFamily) {
+        d.userMessage = fam.reason;
+    } else if (d.changed) {
+        d.userMessage = "目标 " + std::to_string(want) + " Hz 独占不支持，按采样率族策略已用 " +
+                        std::to_string(fam.rate) + " Hz（源 " + std::to_string(src) +
+                        " Hz 重采样，非 bit-perfect）";
+    }
     return d;
 }
 

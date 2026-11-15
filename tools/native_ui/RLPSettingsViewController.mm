@@ -243,6 +243,8 @@ static NSStackView *RLPSRow(NSString *label, NSView *control, NSString *hint, RL
 
 // ---- PCM 页（web data-g=pcm）----
 @property (nonatomic, strong) NSPopUpButton *ratePopup;
+/// U5（v3.3.11）：采样率族策略下拉（web 无同名控件；原生设置页新增，键 = rateFamilyPolicy）。
+@property (nonatomic, strong) NSPopUpButton *rateFamilyPopup;
 @property (nonatomic, strong) NSPopUpButton *filt1xPopup;
 @property (nonatomic, strong) NSPopUpButton *filtNxPopup;
 @property (nonatomic, strong) NSPopUpButton *phasePopup;
@@ -638,7 +640,10 @@ static NSString *RLPBackendKeyForControl(NSString *identifier) {
     // web SET_KEYS（ui_script.h:976-978）把 #s2s 落成 twostage、#sLoud 落成 loudness。
     static NSDictionary<NSString *, NSString *> *renamed;
     static dispatch_once_t onceRenamed;
-    dispatch_once(&onceRenamed, ^{ renamed = @{ @"2s": @"twostage", @"loud": @"loudness" }; });
+    // U5（v3.3.11）：sp_ratefamily 的后端 settings 键是驼峰 rateFamilyPolicy
+    //（/api/settings 白名单同名；web id 与后端键名在这里不是同一个命名空间）。
+    dispatch_once(&onceRenamed, ^{ renamed = @{ @"2s": @"twostage", @"loud": @"loudness",
+                                                @"ratefamily": @"rateFamilyPolicy" }; });
     NSString *mapped = renamed[rest];
     return mapped ?: rest;
 }
@@ -652,7 +657,8 @@ static NSString *RLPControlIdentifier(NSString *key) {
             @"sp_upnp_dev": @"sp_upnp_dev", @"sp_upnp_scan": @"sp_upnp_scan",
             @"sp_upnp_msg": @"sp_upnp_msg", @"sp_device": @"sp_device",
             @"sp_hogexcl": @"sp_hogexcl", @"sp_outmode": @"sp_outmode",
-            @"sp_rate": @"sp_rate", @"sp_bits": @"sp_bits", @"sp_ch": @"sp_ch",
+            @"sp_rate": @"sp_rate", @"sp_ratefamily": @"sp_ratefamily",
+            @"sp_bits": @"sp_bits", @"sp_ch": @"sp_ch",
             @"sp_buffer": @"sp_buffer", @"sp_ramp": @"sp_ramp",
             @"sp_backendmsg": @"sp_backendmsg", @"sp_trimchmsg": @"sp_trimchmsg",
             @"sp_trim": @"sp_trim", @"sp_trimwrap": @"sp_trimwrap",
@@ -1186,6 +1192,20 @@ static NSString *RLPControlIdentifier(NSString *key) {
     }
     [stack addArrangedSubview:RLPSRow(RLPTr(@"输出采样率"), self.ratePopup,
         RLPTr(@"自动 = 所选设备的最高采样率"), t)];
+
+    // ---- U5（Windows v3.3.11 移植）：PCM 采样率族策略（紧跟采样率行）----
+    // 值（representedObject）必须是后端白名单的 prefer / strict / compatible；
+    // 显示文案只用中文，复用 RLPTr（英文由 docs/i18n 词表生成）。
+    self.rateFamilyPopup = [self popupForKey:@"sp_ratefamily"
+        items:@[ RLPTr(@"自动（prefer）"), RLPTr(@"严格同族（strict）"), RLPTr(@"兼容转换（compatible）") ]
+        action:@selector(onRateFamily:)];
+    {
+        NSArray<NSString *> *vals = @[ @"prefer", @"strict", @"compatible" ];
+        for (NSUInteger i = 0; i < vals.count && i < (NSUInteger)self.rateFamilyPopup.numberOfItems; ++i)
+            [self.rateFamilyPopup itemAtIndex:(NSInteger)i].representedObject = vals[i];
+    }
+    [stack addArrangedSubview:RLPSRow(RLPTr(@"采样率族策略"), self.rateFamilyPopup,
+        RLPTr(@"自动 = 优先源采样率同族（拒绝跨族）；严格 = 禁止跨族；兼容 = 允许跨族转换（非 bit-perfect）"), t)];
 
     // web #sp_bits 的 option value 是 -1 / 0 / 16 / 32（ui_script.h:9855-9858）。
     self.bitsPopup = [self popupForKey:@"sp_bits"
@@ -2349,6 +2369,14 @@ static NSString *RLPControlIdentifier(NSString *key) {
     if (v.length) [self postKey:@"rate" value:v];
 }
 
+/// U5（v3.3.11）：采样率族策略。发 representedObject（prefer/strict/compatible），
+/// 绝不发中文标题 —— 后端只认这三个值，非法值会被 /api/settings 直接拒绝（不是静默回落）。
+- (void)onRateFamily:(id)sender {
+    NSString *v = self.rateFamilyPopup.selectedItem.representedObject
+                  ?: self.rateFamilyPopup.titleOfSelectedItem;
+    if (v.length) [self postKey:@"rateFamilyPolicy" value:v];
+}
+
 - (void)onFilter1x:(id)sender { [self postKey:@"filter" value:self.filt1xPopup.titleOfSelectedItem]; }
 /// Nx 滤波器：首项「跟随 1x」的值是空串（web filterNx 的 option value=""）。
 /// 旧实现发中文标题，后端把「跟随 1x（不单独指定）」当成滤波器名。
@@ -3280,6 +3308,8 @@ static BOOL RLPFeedbackTextBlank(NSString *s) {
         self_.savedDeviceId = [kv[@"device"] isKindOfClass:[NSString class]] ? kv[@"device"] : @"";
         [self_ selectSavedDevice];
         [self_ applyKV:kv toPopup:self_.ratePopup key:@"rate"];
+        // U5：族策略回显（GET 缺省注入 compatible；值 prefer/strict/compatible）。
+        [self_ applyKV:kv toPopup:self_.rateFamilyPopup key:@"rateFamilyPolicy"];
         // 位深与采样率一样是「值 ≠ 文案」的下拉（web value=-1/0/16/32）；
         // 旧实现根本没把 kv.bits 回填到下拉，于是重开设置页永远显示第一项。
         [self_ applyKV:kv toPopup:self_.bitsPopup key:@"bits"];

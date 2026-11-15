@@ -173,6 +173,32 @@ int main() {
     // ---- 语义：关掉也必须能存（不是"只能写 1"）----
     roundtrip(confPath, "hogexcl", "0", "0");
 
+    // ---- U5（v3.3.11）：采样率族策略 —— 合法值落盘/读回；非法值直接拒绝且不写 conf ----
+    std::printf("\n[被测] rateFamilyPolicy（U5 采样率族策略）\n");
+    {
+        // 新装 / conf 没这个键时，GET 必须注入与 PlayParams 一致的默认档（否则设置页永远空档）。
+        const std::string gotDefault = call("GET", "/api/settings");
+        ck(kv_get(gotDefault, "rateFamilyPolicy") == "compatible",
+           "rateFamilyPolicy 缺省注入 compatible（新装用户设置页有档位）",
+           "读回=" + kv_get(gotDefault, "rateFamilyPolicy"));
+    }
+    roundtrip(confPath, "rateFamilyPolicy", "strict", "strict");
+    {
+        // 非法值必须**拒绝**（不是静默回落），且 conf 里不能出现这个值。
+        const std::string badPost = call("POST", "/api/settings", "rateFamilyPolicy=bogus");
+        ck(badPost.find("\"ok\":false") != std::string::npos,
+           "rateFamilyPolicy=bogus 被直接拒绝（不是静默回落）", badPost.substr(0, 160));
+        const std::string confBad = read_file(confPath);
+        ck(!conf_has(confBad, "rateFamilyPolicy", "bogus"),
+           "非法值没有写进 rlplayer-settings.conf", confBad.substr(0, 200));
+        const std::string gotBad = call("GET", "/api/settings");
+        ck(kv_get(gotBad, "rateFamilyPolicy").rfind("strict", 0) == 0,
+           "拒绝非法值后旧值仍是 strict（没有被悄悄改掉）",
+           "读回=" + kv_get(gotBad, "rateFamilyPolicy"));
+        // 合法值往返：compatible（本包默认档）也必须能存能读。
+        roundtrip(confPath, "rateFamilyPolicy", "compatible", "compatible");
+    }
+
     // ---- 合并写：设过 hogexcl 之后，别的键不被清空 ----
     // 这是 /api/settings 的历史事故点（trunc + 只写本次键会把 backend 抹掉 ⟹ 可能对用户设备出声）。
     {

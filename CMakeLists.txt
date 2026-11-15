@@ -1711,6 +1711,11 @@ add_executable(test_ratepick tests/test_ratepick.cpp)
 target_include_directories(test_ratepick PRIVATE ${CMAKE_SOURCE_DIR}/src)
 add_test(NAME ratepick COMMAND test_ratepick)
 
+# U5（v3.3.11）：PCM 采样率族策略真值表（prefer|strict|compatible；7056000 必须 unknown）。
+add_executable(test_rate_family_policy tests/test_rate_family_policy.cpp)
+target_include_directories(test_rate_family_policy PRIVATE ${CMAKE_SOURCE_DIR}/src)
+add_test(NAME rate_family_policy COMMAND test_rate_family_policy)
+
 # 最小 ZIP（STORE）打包结构（2026-10-22 功能3「导出诊断 = 一个压缩包」）。
 # 纯内存、零外部依赖、不调 PowerShell（理由见 src/net/zipstore.h 头注）。
 add_executable(test_zipstore tests/test_zipstore.cpp)
