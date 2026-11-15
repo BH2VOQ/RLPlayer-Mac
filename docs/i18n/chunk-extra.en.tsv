@@ -561,3 +561,6 @@ DeepSeek 为默认检索端点。	DeepSeek is the default search endpoint.	检�
 （未命名版本）	(untitled version)	古典作品页
 首歌曲	songs	专辑页发布信息（图一：N 首歌曲，X 分钟）
 的其他作品	's Other Works	专辑页「其他作品」横向区标题（图一）
+切换为曲线	Switch to curve	EQ 视图切换按钮（2026-11-15 推子板）
+切换为推子	Switch to faders	EQ 视图切换按钮（2026-11-15 推子板）
+直接输入该段的增益，范围 ±24 dB	Type this band's gain directly, ±24 dB	推子板数值框 tooltip（±24 dB 量程）
