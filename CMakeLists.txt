@@ -2390,3 +2390,11 @@ endif()   # RTA_BUILD_LEGACY_TESTS
 add_executable(test_waveform tests/test_waveform.cpp)
 target_include_directories(test_waveform PRIVATE ${CMAKE_SOURCE_DIR}/src)
 add_test(NAME waveform COMMAND test_waveform)
+
+# U2 包2：GET /api/waveform 黑盒（波形本体 / LRU 命中 / FileIdentity 失效 / bins 钳位 /
+# CUE 区间 / 路径稳定码）。需要 rlapp_core：判据走真实 handle()，不是另写一份 handler。
+add_executable(test_waveform_api tests/test_waveform_api.cpp)
+target_include_directories(test_waveform_api PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tools)
+target_link_libraries(test_waveform_api PRIVATE rlapp_core)
+add_test(NAME waveform_api COMMAND test_waveform_api)
+set_tests_properties(waveform_api PROPERTIES TIMEOUT 180)
