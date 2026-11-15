@@ -551,6 +551,76 @@ if(APPLE)
   add_test(NAME native_queue_rows COMMAND test_native_queue_rows)
   set_tests_properties(native_queue_rows PROPERTIES TIMEOUT 120)
 
+  # 右侧抽屉 D1/D2 判据：① 点歌词行 = POST /api/seek?pos=<该行时刻/时长>（后端只认 pos=，
+  # 旧码发 ratio= ⟹ 每次都跳回曲首）；② 在歌词页签切歌（底栏下一首 / 点队列行）后必须
+  # 重拉当前曲的歌词（/api/lyrics?file=B），且同一首不被每秒重拉。对旧码先跑红。
+  add_executable(test_native_right_drawer tests/test_native_right_drawer.mm
+    tools/native_ui/RLPRightDrawer.mm tools/native_ui/RLPLyrics.mm
+    tools/native_ui/RLPSupport.mm tools/native_ui/RLPModels.mm
+    tools/native_ui/RLPTheme.mm tools/native_ui/RLPNativeI18n.mm)
+  target_compile_options(test_native_right_drawer PRIVATE -fobjc-arc)
+  target_include_directories(test_native_right_drawer PRIVATE src tools tools/native_ui)
+  target_link_libraries(test_native_right_drawer PRIVATE
+    "-framework AppKit" "-framework QuartzCore")
+  add_test(NAME native_right_drawer COMMAND test_native_right_drawer)
+  set_tests_properties(native_right_drawer PROPERTIES TIMEOUT 120)
+
+  # 正在播放页 D3/D4 判据：① /api/cast/start 返回 ok 后必须**立刻**刷芯片（不等 2s 轮询），
+  # 失败不许假装已推送；② 重新打开页面要重读 /api/queue 同步循环/随机模式（旧码只在换曲分支读）。
+  add_executable(test_native_np_refresh tests/test_native_np_refresh.mm
+    tools/native_ui/RLPNowPlayingViewController.mm tools/native_ui/RLPPageViewController.mm
+    tools/native_ui/RLPVolumeKnobView.mm
+    tools/native_ui/RLPSupport.mm tools/native_ui/RLPModels.mm
+    tools/native_ui/RLPTheme.mm tools/native_ui/RLPNativeI18n.mm
+    tools/native_ui/RLPKnowledgeView.mm tools/native_ui/RLPAnalysisSummary.mm
+    tools/native_ui/RLPLyrics.mm tools/native_ui/RLPTrackActions.mm)
+  target_compile_options(test_native_np_refresh PRIVATE -fobjc-arc)
+  target_include_directories(test_native_np_refresh PRIVATE src tools tools/native_ui)
+  target_link_libraries(test_native_np_refresh PRIVATE
+    "-framework AppKit" "-framework QuartzCore" "-framework CoreImage")
+  add_test(NAME native_np_refresh COMMAND test_native_np_refresh)
+  set_tests_properties(native_np_refresh PROPERTIES TIMEOUT 120)
+
+  # 顶栏搜索语义 D5 = web #q：260ms 防抖（不用回车）+ 按当前视图分派
+  # （专辑/艺术家/曲目页内过滤，其余视图才切曲目页）+ Esc/清空按当前视图重拉。
+  # 用真主窗口 + 全量页面（与 test_native_single_scroll 同一份源码清单），
+  # 客户端用记录型 spy 替换 +[RLPCoreClient shared]：不启动核心、不出声。
+  add_executable(test_native_topbar_search tests/test_native_topbar_search.mm
+    tools/native_ui/RLPShortcuts.mm
+    tools/native_ui/RLPMainWindowController.mm tools/native_ui/RLPSidebarViewController.mm
+    tools/native_ui/RLPAlbumsViewController.mm tools/native_ui/RLPAlbumDetailViewController.mm
+    tools/native_ui/RLPArtistDetailViewController.mm tools/native_ui/RLPArtistsViewController.mm
+    tools/native_ui/RLPTracksViewController.mm tools/native_ui/RLPQueueViewController.mm
+    tools/native_ui/RLPPlaylistsViewController.mm tools/native_ui/RLPFoldersViewController.mm
+    tools/native_ui/RLPRecentViewController.mm tools/native_ui/RLPFavoritesViewController.mm
+    tools/native_ui/RLPStreamingViewController.mm tools/native_ui/RLPQuickStartViewController.mm
+    tools/native_ui/RLPListeningRoom.mm
+    tools/native_ui/RLPNowPlayingViewController.mm tools/native_ui/RLPWorksViewController.mm
+    tools/native_ui/RLPSettingsViewController.mm tools/native_ui/RLPSettingsLayout.mm
+    tools/native_ui/RLPServersView.mm tools/native_ui/RLPMetaSourcesView.mm
+    tools/native_ui/RLPLibStatsView.mm tools/native_ui/RLPRemoveDir.mm
+    tools/native_ui/RLPEqualizerView.mm tools/native_ui/RLPEQFaderView.mm
+    tools/native_ui/RLPEQGeometry.mm tools/native_ui/RLPTargetCurve.mm
+    tools/native_ui/RLPInputView.mm tools/native_ui/RLPCastView.mm
+    tools/native_ui/RLPCalibrationView.mm
+    tools/native_ui/RLPUpdateWindowController.mm tools/mac_update.mm
+    tools/native_ui/RLPPageViewController.mm
+    tools/native_ui/RLPPlaceholderViewController.mm tools/native_ui/RLPRightDrawer.mm
+    tools/native_ui/RLPPlaybackBarView.mm tools/native_ui/RLPVolumeKnobView.mm
+    tools/native_ui/RLPKnowledgeView.mm tools/native_ui/RLPLyrics.mm
+    tools/native_ui/RLPAnalysisSummary.mm tools/native_ui/RLPSignalChain.mm
+    tools/native_ui/RLPTrackActions.mm tools/native_ui/RLPModels.mm
+    tools/native_ui/RLPSupport.mm tools/native_ui/RLPTheme.mm tools/native_ui/RLPNativeI18n.mm
+    tools/native_ui/RLPCoreClient.mm)
+  target_compile_options(test_native_topbar_search PRIVATE -fobjc-arc)
+  target_compile_definitions(test_native_topbar_search PRIVATE RL_WITH_UPDATE=1)
+  target_include_directories(test_native_topbar_search PRIVATE src tools tools/native_ui)
+  target_link_libraries(test_native_topbar_search PRIVATE rlapp_core
+    "-framework AppKit" "-framework QuartzCore" "-framework WebKit" "-framework Security"
+    "-framework MediaPlayer" "-framework AVFoundation" "-framework CoreMedia")
+  add_test(NAME native_topbar_search COMMAND test_native_topbar_search)
+  set_tests_properties(native_topbar_search PROPERTIES TIMEOUT 240)
+
   # 专辑页 / 文件夹页空态 = web emptyStateHtml（非 classic）：0 张专辑时空态卡
   # （有/无 roots 两套文案 + 三个入口）与「此目录没有音频文件」。对 1.1.7.29 先跑红。
   add_executable(test_native_empty_states tests/test_native_empty_states.mm
