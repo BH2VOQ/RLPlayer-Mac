@@ -1175,6 +1175,18 @@ if(APPLE)
   target_link_libraries(test_settings_persist PRIVATE rlapp_core)
   add_test(NAME settings_persist COMMAND test_settings_persist)
   set_tests_properties(settings_persist PROPERTIES TIMEOUT 120)
+
+  # 2026-11-16（U12 第二步）：1-bit SDM 拐点准入是否真的接到三个真实入口 ——
+  #   ① 保存前置闸门（POST /api/settings：422 + 不写盘）、② 开流前闸门（DoP，进线程之前）、
+  #   ③ GET 的 additive sdm 快照（原生提示文案的真相源）。
+  # 判据是黑盒（HTTP 状态槽 / conf 原文 / /api/status.error），不看实现；
+  # 改前必然红（POST 回 ok:true 并把 modcut=20 写进 conf）。见测试文件头注释。
+  add_executable(test_sdm_settings_gate tests/test_sdm_settings_gate.cpp)
+  target_include_directories(test_sdm_settings_gate PRIVATE
+    ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tools)
+  target_link_libraries(test_sdm_settings_gate PRIVATE rlapp_core)
+  add_test(NAME sdm_settings_gate COMMAND test_sdm_settings_gate)
+  set_tests_properties(sdm_settings_gate PROPERTIES TIMEOUT 180)
 endif()
 
 # ---------------- 测试 ----------------

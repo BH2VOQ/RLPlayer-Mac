@@ -17,6 +17,8 @@
 //   ⑤ 点名页逐项归位：输入（不再重复一套采集控件）、输出（UPnP 发现控件在「输出后端」卡、
 //      「声道音量微调」里有按声道数生成的真实控件）、流媒体（服务器/投放都在各自卡片里）、
 //      元数据（AI 接入 / 联网检索端点两组控件都在各自卡）、诊断（导出/更新/反馈）。
+//   ⑧ U12（2026-11-16）：SDM 拐点准入提示（sp_sdmcorner_note）—— 文案必须由
+//      GET /api/settings 的 sdm 对象驱动（admitted=false → 后端 note 原文；合法 → 收起）。
 //
 // 红→绿：旧码 ④③② 大面积红（卡片空壳 + 页面并列控件），改完必须全绿。
 // 证据：evidence/native-3-settings-cards-red.log / -green.log；离屏截图 RLP_SETTINGS_SNAP_DIR。
@@ -374,6 +376,49 @@ int main() {
         Ck(CardFor(FindId(PaneRoot(v, @"sdm"), @"sp_dsdmsg")) != nil &&
            CardFor(FindId(PaneRoot(v, @"sdm"), @"sp_dsdmodenote")) != nil,
            @"【A】SDM 说明行都在卡片体内", @"缺卡片祖先");
+        // ---- ⑧ U12（2026-11-16）：1-bit SDM 拐点准入提示必须由 GET 的 sdm 对象驱动 ----
+        // 判据不是"控件存在"（那只能证明 parity），而是"后端判不合格时它真的显示后端给的文案"：
+        //   ① 把 conf 直接写成不合法组合（dsd=64 / dsd 族 / 20 kHz）。为什么不用 POST 造：
+        //      保存闸门已经会 422 拒绝 —— 这正是本轮新增的闸门，所以只能改文件模拟历史配置；
+        //   ② GET 的 sdm.admitted=false、note 带稳定子串与 100 kHz 出路 ⟹ 控件可见且文案含 note；
+        //   ③ 换回合法组合（100 kHz）⟹ 提示收起（不是"永远挂一条红字"）。
+        {
+            NSString *confPath = [state stringByAppendingPathComponent:@"rlplayer-settings.conf"];
+            NSData *origConf = [NSData dataWithContentsOfFile:confPath];
+            NSString *badConf = @"backend=null\nvolume=-120\nscanonstartup=0\nmetaon=0\nmetallm=0\n"
+                                 "dsd=64\nmodfamily=dsd\nmodcut=20\n";
+            [badConf writeToFile:confPath atomically:YES encoding:NSUTF8StringEncoding error:nil];
+            [settings reloadData];
+            Pump(1.0);
+            [settings selectPane:@"sdm"];
+            [v layoutSubtreeIfNeeded];
+            Pump(0.4);
+            [v layoutSubtreeIfNeeded];
+            NSTextField *cornerNote = (NSTextField *)FindId(PaneRoot(v, @"sdm"), @"sp_sdmcorner_note");
+            Ck(cornerNote != nil, @"【U12】SDM 页存在 sp_sdmcorner_note 提示控件", @"控件缺失");
+            Ck(cornerNote != nil && !cornerNote.hidden,
+               @"【U12】后端 admitted=false 时提示控件可见",
+               cornerNote.hidden ? @"hidden" : @"");
+            Ck([cornerNote.stringValue containsString:@"SDM_CORNER_QUALITY"] &&
+               [cornerNote.stringValue containsString:@"100 kHz"],
+               @"【U12】提示文案来自后端 sdm.note（稳定子串 + 100 kHz 出路；前端不写死阈值）",
+               cornerNote.stringValue ?: @"nil");
+            NSString *goodConf = @"backend=null\nvolume=-120\nscanonstartup=0\nmetaon=0\nmetallm=0\n"
+                                  "dsd=64\nmodfamily=dsd\nmodcut=100\n";
+            [goodConf writeToFile:confPath atomically:YES encoding:NSUTF8StringEncoding error:nil];
+            [settings reloadData];
+            Pump(1.0);
+            [v layoutSubtreeIfNeeded];
+            Ck(cornerNote != nil && cornerNote.hidden,
+               @"【U12】拐点合法（100 kHz）时提示收起",
+               cornerNote.hidden ? @"" : (cornerNote.stringValue ?: @""));
+            // 恢复原始 conf：本测试只借用这一小段状态，不改后续用例的环境。
+            if (origConf) [origConf writeToFile:confPath atomically:YES];
+            else [[NSFileManager defaultManager] removeItemAtPath:confPath error:nil];
+            [settings reloadData];
+            Pump(0.8);
+        }
+
         [settings selectPane:@"eq"];
         [v layoutSubtreeIfNeeded];
         Pump(0.3);
