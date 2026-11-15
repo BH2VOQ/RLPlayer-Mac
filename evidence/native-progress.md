@@ -1277,3 +1277,16 @@ np web 231 checks / 0 failures。
 （两个组件可能被挂回，且删词表属另一类操作，留更安全）。
 
 **验证**：grep 后仅剩 RLPWorkbenchViewController.h 一处有意保留的历史标注；门禁与上一包等价。
+
+### 2026-11-15 14:xx —— 轮次 46（1.1.7.78）：rail 内缩 border-box 语义
+
+**缺陷**：原生面板已有 1pt 边框（layer.borderWidth=1 向内描边），但内容内缩常量照抄 CSS 的 padding:10，
+漏掉边框那 1pt ⟹ 卡片压在边框内缘上，右端与 web 差 1pt（台账那条 web 22 / native 21）。
+
+**实现**：kRailHeadPadX / kRailHeadPadTop 由 10 改 11，并注释说明 11 = padding 10 + border 1（border-box）。
+栏头/卡片/chipwrap 共用这两个常量，一处改动同时修正左内边距、右内边距、卡宽与栏头起始位置。
+
+**判据**：三条 rail 期望值从「原生观测值 + 容差」改为按 CSS 语义算出的真值（11 / 22或11 / railW-22-...），
+全部 diff=+0.00；np web 231 checks / 0 failures 证明栏头与卡片布局未被连带影响。
+
+**挂账**：railHide 收起键仍按 side-8-22（与 1pt 议题无关）；边框色取主题 t.line 而 web 是独立 rgba；未真机像素比对。

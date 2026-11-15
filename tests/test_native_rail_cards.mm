@@ -170,7 +170,8 @@ int main() {
         // ---- 栏的整体左右内边距（web .nprailcard padding:10px）----
         // 卡片现在在 `.npchipwrap` 里（独立滚动区），frame 是 wrap 局部坐标 ⟹ 一律转到 rail 坐标再量。
         #define RAILRECT(v) [(v) convertRect:(v).bounds toView:rail]
-        Geo("rail.padX.left", 10, NSMinX(RAILRECT(vis[0])), 2);
+                // web 11 = padding:10 + border:1（border-box）—— 见 kRailHeadPadX 的注释。
+Geo("rail.padX.left", 11, NSMinX(RAILRECT(vis[0])), 2);
         // web 实测：**溢出时**卡右缘距面板右 = padding 10 + border 1 + 滚动条占位 11 = 22；
         // 不溢出时不占位 ⟹ 10（原生无 1px 边框，故溢出情形为 21）。
         // 1.1.7.75 起占位随**实际溢出**决定（旧码无条件占位，短列表也空一条 11pt 槽）；
@@ -178,8 +179,8 @@ int main() {
         id kdWrap = [vc valueForKey:@"railChipWrap"];
         const double kdContent = kdWrap ? [[kdWrap valueForKey:@"contentHeight"] doubleValue] : -1.0;
         const BOOL kdOverflow = kdWrap && (kdContent > [kdWrap bounds].size.height + 0.5);
-        const CGFloat kdRightPad = kdOverflow ? 21.0 : 10.0;
-        const CGFloat kdCardW = rail.bounds.size.width - 20.0 - (kdOverflow ? 11.0 : 0.0);
+        const CGFloat kdRightPad = kdOverflow ? 22.0 : 11.0;   // web 11 + 滚动条 11
+        const CGFloat kdCardW = rail.bounds.size.width - 22.0 - (kdOverflow ? 11.0 : 0.0);   // 左右各 11
         Geo("rail.padX.right", kdRightPad, rail.bounds.size.width - NSMaxX(RAILRECT(vis[0])), 2);
         // 卡宽 = railW - 左右内边距 20 - (溢出 ? 滚动条占位 11 : 0)。
         Geo("rail.card.width", kdCardW, NSWidth(RAILRECT(vis[0])), 2);

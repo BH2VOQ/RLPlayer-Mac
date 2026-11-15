@@ -153,3 +153,9 @@
 - **双模式注释残渣已清理**（纯注释，不动逻辑、不删功能）：设置页/快速开始/审计/工作台/聆听室共 9 处。
   证据 evidence/native-dualmode-residue-20261115.md；门禁与上一包等价。
   刻意未做：删两个保留组件（铁律①）、删 i18n 死词条（留更安全）。
+
+## 进度（1.1.7.78）
+
+- **rail 面板内容内缩改为 border-box 语义**（11 = padding 10 + border 1），收口台账最后那 1pt 差。
+  见 evidence/native-rail-borderbox-20261115.md；rail_cards 52/0、np web 231/0。
+  挂账：railHide 仍按 side-8-22 定位；边框色取主题 t.line（web 是独立 rgba）；未真机像素比对。

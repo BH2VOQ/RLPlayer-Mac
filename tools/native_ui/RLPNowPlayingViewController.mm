@@ -1058,8 +1058,11 @@ static const CGFloat kAnlSecH          = 17.0;
 //   .npchip      padding:8px 10px 9px, border-radius:11px, gap:2px
 //   .npchip-top  gap:7px / .dot 5px     → 圆点 5、点与名称间距 7
 //   name 11.5/700、.npchip-st 9.5、p1 11.5、p2 10.5、line-height:1.45
-static const CGFloat kRailHeadPadTop = 10.0;
-static const CGFloat kRailHeadPadX   = 10.0;
+// ★ 11 = web 的 padding:10 **+ border:1**（CSS 是 box-sizing:border-box ⟹ 内容从边框内缘起算）。
+//   原生面板的 layer.borderWidth=1 是**向内**描边（见 applyTheme），所以内容也必须从 11 起算，
+//   否则卡片会压在边框上、且右端与 web 差 1pt（偏差台账里那条 rail 1pt 差就是这么来的）。
+static const CGFloat kRailHeadPadTop = 11.0;
+static const CGFloat kRailHeadPadX   = 11.0;
 static const CGFloat kRailHeadGap    = 8.0;
 static const CGFloat kRailChipGap    = 6.0;
 static const CGFloat kRailChipPadTop = 8.0;
