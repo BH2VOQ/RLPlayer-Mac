@@ -141,3 +141,9 @@
 - **chipwrap 滚动条占位已与 web 一致**（溢出才占 11pt；旧码无条件占位）。
   证据 evidence/native-chipwrap-reserve-20261115.md；np web 228 checks / 0 failures。
   挂账：溢出分支未被夹具直接钉住；拇指宽固定 6pt；自绘滚动条非 NSScroller。
+
+## 进度（1.1.7.76）
+
+- **/api/meta 补 coverSource 字段 + 「自动」封面按钮闸门**（只有手动封面生效时才显示该按钮）。
+  证据 evidence/native-cover-source-20261115.md；判据 K7/K8（后端）+ C4b–C4d（前端）。
+  挂账：只区分 manual 与其余（本仓无上游 online/extracted 溯源链）；reset 用 .source.json 存在性判定。

@@ -1247,3 +1247,19 @@ fetchStatus 回填时仅在输入框非第一响应者时覆盖（不打断输�
 结果 np web 228 checks / 0 failures（原 227 PASS / 1 FAIL）。
 
 **挂账**：溢出分支未由夹具直接钉住；拇指宽固定 6pt；自绘滚动条非 NSScroller。
+
+### 2026-11-15 14:xx —— 轮次 44（1.1.7.76）：/api/meta coverSource + 封面按钮闸门
+
+**收口的偏差**：/api/meta 缺 coverSource 导致播放页「自动」按钮常显——点了也没有手动封面可恢复，
+属于看着能用、实则无意义的控件。
+
+**实现**：后端新增 cover_manual_active_for(file)（key 口径与 /api/cover 一致：track 前缀 + hash，
+有 .source.json 时不生效），/api/meta 输出 coverSource = manual / embed / none；前端抽出
+applyCoverSourceGate（读 trackMetadata，非 manual 即隐藏），控件初始 hidden，loadMeta 回调里调用。
+抽成独立方法是为了判据可直接调用，避免脆弱的异步断言。
+
+**判据**：K7/K8（后端）+ C4b/C4c/C4d（前端隐藏/显示/再隐藏）。结果 test_embedded_api 0 失败 / 1 跳过；
+np web 231 checks / 0 failures。
+
+**挂账**：只区分 manual 与其余（无上游 online/extracted 溯源链）；reset 用 .source.json 存在性判定；
+未真机验证完整交互。

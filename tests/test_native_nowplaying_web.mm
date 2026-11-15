@@ -885,6 +885,15 @@ int main(){@autoreleasepool{
   ck(rstB && [rstB isKindOfClass:[NSButton class]],"C2 npResetCover 控件存在");
   ck(setB && setB.target && setB.action!=NULL,"C3 设置封面按钮有真实 target/action");
   ck(rstB && rstB.target && rstB.action!=NULL,"C4 恢复自动按钮有真实 target/action");
+  // C4b/C4c（v3.3.11 coverSource 闸门）：只有手动封面生效时才显示「自动」按钮。
+  // 旧实现缺 /api/meta.coverSource ⟹ 按钮常显，点了也无从恢复（偏差台账那条）。
+  ck(rstB.hidden, "C4b 无手动封面时「自动」按钮隐藏（coverSource != manual）");
+  [vc setValue:@{@"title":@"T",@"coverSource":@"manual"} forKey:@"trackMetadata"];
+  [vc performSelector:@selector(applyCoverSourceGate) withObject:nil];
+  ck(!rstB.hidden, "C4c coverSource == manual 时按钮显示");
+  [vc setValue:@{@"title":@"T",@"coverSource":@"embed"} forKey:@"trackMetadata"];
+  [vc performSelector:@selector(applyCoverSourceGate) withObject:nil];
+  ck(rstB.hidden, "C4d coverSource == embed 时按钮重新隐藏");
   NSString *imgPath=[@"/tmp" stringByAppendingPathComponent:[NSString stringWithFormat:@"rlp-cover-%d.png",(int)getpid()]];
   NSMutableData *png=[NSMutableData data];
   const unsigned char magic[8]={0x89,'P','N','G',0x0d,0x0a,0x1a,0x0a};

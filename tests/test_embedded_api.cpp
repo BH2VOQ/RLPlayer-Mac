@@ -462,9 +462,21 @@ int main() {
                 std::printf("    cue: /api/cover/lookup \u2192 %s\n", probe.substr(0, 120).c_str());
             }
         }
+        // K7/K8（v3.3.11 /api/meta 的 coverSource）：手动封面生效期应为 manual，
+        // 恢复自动后不应再是 manual —— 原生「自动」按钮的可见性就靠这条。
+        {
+            const std::string metaManual = call("/api/meta?file=" + urlq(trackPath));
+            ck(contains(metaManual, "\"coverSource\":\"manual\""),
+               "K7 手动封面生效时 /api/meta coverSource == manual", metaManual.substr(0, 120));
+        }
         const std::string resetR = call("/api/cover/reset?file=" + urlq(trackPath),
                                         nullptr, "POST");
         ck(contains(resetR, "\"ok\":true"), "K3 /api/cover/reset 写 reset 标记", resetR);
+        {   // 恢复自动 ⟹ coverSource 不得再是 manual（按钮应隐藏）
+            const std::string metaAuto = call("/api/meta?file=" + urlq(trackPath));
+            ck(!contains(metaAuto, "\"coverSource\":\"manual\""),
+               "K8 恢复自动后 /api/meta coverSource 不再是 manual", metaAuto.substr(0, 120));
+        }
         // 负向：不存在的文件必须拒绝（不能给任意路径写封面）
         const std::string bad = call("/api/cover/set?file=" + urlq(u8str(tmp / "nope.flac")),
                                      nullptr, "POST", std::string(png.begin(), png.end()));

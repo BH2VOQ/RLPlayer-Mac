@@ -5212,6 +5212,19 @@ static rta::cover::CoverPaths cover_paths(const std::string& key) {
 }
 // 人工封面独立存放：在线抓取与本地抽取都不覆盖用户选择。
 static std::string cover_manual_dir() { return cover_cache_dir() + "/manual"; }
+
+/// v3.3.11 /api/meta 的 coverSource 判定：本曲是否**当前生效**手动封面。
+/// 与 /api/cover 同口径：key = track:<hash>；有 .source.json（reset 标记）时手动封面不生效。
+static bool cover_manual_active_for(const std::string& file) {
+    if (file.empty()) return false;
+    const std::string key =
+        "track:" + rta::meta::MetaStore::hashOf(rta::net::lib_path_key(file));
+    if (!rta::cover::cover_has_disk_in(cover_manual_dir(), key)) return false;
+    const rta::cover::CoverPaths mp = rta::cover::cover_paths_in(cover_manual_dir(), key);
+    std::error_code mec;
+    const bool resetDeclared = fs::exists(fs::u8path(mp.jpg + ".source.json"), mec);
+    return !resetDeclared;
+}
 static bool cover_read_manual(const std::string& key, std::vector<unsigned char>& out) {
     return rta::cover::cover_read_cached_in(cover_manual_dir(), key, out);
 }
@@ -9985,6 +9998,15 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
         }
         // 可用 = 开关开 且（有缓存 或 有 key 能现场整理）。三者任一不成立 → 前端干脆不显示板块。
         const bool summaryAvailable = msMeta.summary && (summaryCacheOk || hasKeyMeta);
+        // v3.3.11 /api/meta 的 coverSource：前端靠它判断「自动」封面按钮是否该出现。
+        // 上游词表 manual / online / extracted / embed / none；本仓手动封面落在 cover_manual_dir()，
+        // 故这里只需区分 manual 与其余（缺失该字段时原生页只能让按钮常显，即旧偏差）。
+        // v3.3.11 /api/meta 的 coverSource：前端靠它判断「自动」封面按钮是否该出现。
+        // 上游词表 manual / online / extracted / embed / none；本仓手动封面落在 cover_manual_dir()，
+        // 故这里只需区分 manual 与其余（缺失该字段时原生页只能让按钮常显，即旧偏差）。
+        const std::string coverSource = cover_manual_active_for(file)
+            ? std::string("manual")
+            : (hasCover ? std::string("embed") : std::string("none"));
         std::ostringstream j;
         j << "{\"ok\":true"
           << ",\"title\":\"" << jesc(fTitle) << "\""
@@ -10001,6 +10023,7 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
           << ",\"channels\":" << mi.channels
           << ",\"bits\":" << mi.bits
           << ",\"hasCover\":" << (hasCover ? "true" : "false")
+          << ",\"coverSource\":\"" << jesc(coverSource) << "\""
           << ",\"coverFromAlbum\":" << (coverFromAlbum ? "true" : "false")
           << ",\"meta\":{\"enriched\":" << (meta_enriched(tm) ? "true" : "false")   // F2：真被在线补过才算
           << ",\"sources\":{";

@@ -1,0 +1,338 @@
+=== rlplayer_native 功能级验收（真数据 + 真导航 + 截图）===
+  [PASS] 夹具曲库已生成
+STARTUP v1.1.7.76 build=Nov 15 2026 14:12:18 pid=38583 port=0 os=macOS 27.2 cpu=Apple M4 gpu=available(GPU 卷积可用（librtagpu.dylib）) endpoints=5 mode=embedded
+  [PASS] 核心已启动（隔离目录）
+  [PASS] 后端返回 >= 3 张专辑
+  [PASS] 旧收藏文件被读进来了（1 条）
+  [PASS] 旧收藏路径被规范成正斜杠（Windows 遗留 '' 已迁移）
+  [PASS] 迁移后的路径与曲库路径同形
+  [PASS] 取消收藏后列表清空
+  [PASS] 能导航到专辑页
+  [PASS] 当前内容是专辑页
+  [PASS] 专辑页拿到 >= 3 张专辑
+  [PASS] 专辑页截图已落盘
+  [PASS] 拿到第一张专辑的 key
+  [PASS] 点专辑后进入专辑详情页
+  [PASS] 专辑详情页有实际内容（非空壳）
+  [PASS] 专辑详情页截图已落盘
+RLPlayer: 更新检查失败 UPDATE_CHECK_FAIL status=200 decision=up-to-date channel=cn err=
+  [PASS] 返回后回到专辑页
+  [PASS] 夹具里有 John Coltrane 的专辑（其他作品判据的前提）
+  [PASS] 已进入 John Coltrane 的专辑详情
+  [PASS] 曲目表下方有『N 首歌曲，X 分钟』
+  [PASS] 发布信息里的曲目数与真实曲目数一致
+  [PASS] 版权行渲染出来了（℗ 年份，图一底部那段）
+  [PASS] 曲目表在视图树里
+  [PASS] 发布信息在曲目表下方（flipped 文档里 y 更大）
+  [PASS] 『其他作品』区标题已渲染（图一那条横排的标题）
+  [PASS] 『其他作品』区有 >= 1 张封面卡（同艺人另一张专辑）
+  [PASS] 其他作品卡是可点按钮（有真实 action）
+  [PASS] 专辑页（含其他作品）截图已落盘
+  [PASS] 点艺术家进入艺术家详情页
+  [PASS] 艺术家详情页有实际内容
+  [PASS] 能回到专辑页
+  [PASS] 专辑网格有第一个 item（判据前提）
+  [PASS] 专辑卡有播放角标（web 悬停播放键）
+  [PASS] 未悬停时角标隐藏（默认不抢注意力）
+  [PASS] 悬停后播放角标浮现且有真实尺寸
+  [PASS] 角标点击有真实 action（点它=播放整张）
+  [PASS] 初始 0 个歌单（隔离夹具）
+  [PASS] 空态整行『＋ 新建歌单』在视图树里（web .sqempty）
+  [PASS] 『我的歌单』标题行有『＋ 新建』（web .sqnew-btn）
+  [PASS] 空态行有真实宽度（不是塌成 0 的摆设）
+  [PASS] 新建歌单提示带上歌单名（web：已新建歌单：<name>；旧实现只有「已新建歌单」）
+  [PASS] 生产入口新建的歌单真的落库（不是只弹了个 toast）
+  [PASS] 后端已创建歌单
+  [PASS] 后端已创建歌单
+  [PASS] 侧栏出现 2 行歌单（动态渲染）
+  [PASS] 侧栏歌单名与后端一致且顺序一致
+  [PASS] 每行歌单都有 ✎ 与 ×（web .sqb ren/del）
+  [PASS] 侧栏歌单区块截图已落盘
+  [PASS] ✎ 改名后侧栏行文本变成新名字
+  [PASS] 改名真的落到后端（不是只改了侧栏内存里的字符串）
+  [PASS] × 删除后侧栏只剩 1 行
+  [PASS] 被删的歌单不再出现在侧栏
+  [PASS] 点歌单行后内容是歌单页
+  [PASS] 歌单页被选中到被点的那一份
+  [PASS] 歌单页截图已落盘
+  [PASS] artists
+  [PASS] artists
+  [PASS] artists
+  [PASS] tracks
+  [PASS] tracks
+  [PASS] tracks
+  [PASS] folders
+  [PASS] folders
+  [PASS] folders
+  [PASS] streaming
+  [PASS] streaming
+  [PASS] streaming
+  [PASS] queue
+  [PASS] queue
+  [PASS] queue
+  [PASS] recent
+  [PASS] recent
+  [PASS] recent
+  [PASS] favorites
+  [PASS] favorites
+  [PASS] favorites
+  [PASS] playlists
+  [PASS] playlists
+  [PASS] playlists
+  [PASS] station
+  [PASS] station
+  [PASS] station
+  [PASS] settings
+  [PASS] settings
+  [PASS] settings
+  [PASS] 能进流媒体页
+  [PASS] 未配置服务器时显示整页空态卡（不是只弹 toast）
+  [PASS] 空态卡有标题（web：还没有可浏览的流媒体服务器）
+  [PASS] 空态卡说明写了支持的协议与下一步（web 同一段）
+  [PASS] 空态卡有『去设置里配置』按钮
+  [PASS] 空态卡有『重试』按钮
+  [PASS] 流媒体空态卡截图已落盘
+  [PASS] 点『去设置里配置』进入设置页
+  [PASS] 设置页落在『流媒体』页签
+  [PASS] 设置·流媒体页截图已落盘
+  [PASS] 能进曲目页
+  [PASS] 曲目页有真实数据（判据前提）
+  [PASS] 每行都有收藏心形与入队 +（web 第 2/7 列）
+  [PASS] 行内按钮有真实尺寸（不是隐形控件）
+  [PASS] 曲目页行内动作截图已落盘
+  [PASS] 曲目页有排序下拉（web track-sort 的 6+ 档）
+  [PASS] 切『标题』后按标题升序（真的重排了）
+  [PASS] 曲目行是自定义 row view（可悬停）
+  [PASS] 行悬停截图已落盘
+  [PASS] 悬停后行底色真的画出来了（像素变化，含 alpha）
+  [PASS] 行内按钮的 tag 指向真实行号（点击可落到那一行）
+  [PASS] 第 0 行的心形与 + 都能定位到
+  [PASS] 点心形后该曲真的进了收藏（/api/fav?on=1）
+  [PASS] 点 + 后该曲真的进了队列（/api/add）
+  [PASS] 队列页截图已落盘
+  [PASS] 空队列没有交替行灰条（web：纯背景 + 居中空态）
+  [PASS] 收藏页截图已落盘
+  [PASS] 空收藏页没有交替行灰条
+  [PASS] 空收藏页有指导性空态（web：还没有收藏 + 怎么做）
+  [PASS] 空『最近播放』页有空态（web：还没有播放记录）
+  [PASS] 空队列空态含下一步提示（web 第二行）
+  [PASS] 队列里至少有 1 首（入队真的落到后端）
+  [PASS] 队列每行都有行尾 ×（web .qdel）
+  [PASS] 行尾 × 有真实尺寸（不是 0 宽 0 高的隐形控件）
+  [PASS] 行尾 × 落在表格可见宽度内（没有被挤到列外）
+  [PASS] 队列行截图已落盘
+  [PASS] 点行尾 × 后队列少一首（真的调 /api/qdel）
+  [PASS] 设置·元数据页有接口地址/密钥/模型下拉（判据前提）
+  [PASS] 判据前置：先放两条旧端点模型在列表里
+  [PASS] 强制重拉被调用后旧模型列表立刻清空（不残留）
+  [PASS] 点「拉模型」先把屏幕上的新地址落盘（后端才会按新端点拉）
+  [PASS] 新端点拉不到模型时降级手填（下拉隐藏）
+  [PASS] 降级后模型输入框保留当前值（不擅自清空）
+  [PASS] 能进设置
+  [PASS] 设置页 10 个页签（web data-g 清单）
+  [PASS] 元数据页数据源逐行渲染（异步到达后）
+  [PASS] 数据源列表高度容得下全部行（不被裁切）
+  [PASS] 底部提示『越靠上优先级越高』在（图三最后一行）
+  [PASS] 数据源面板容器可定位
+  [PASS] 数据源面板高度随异步行数重算（底部提示不被裁）
+  [PASS] 底部提示有真实高度（没被 stack 压成 0）
+  [PASS] 设置页 10 个页签都能真正切到位
+  [PASS] 输出页有 sp_backend（web data-g=out 的代表控件）
+  [PASS] 流媒体页有 sp_cast_dev（投放面板）
+  [PASS] 元数据页有 sp_metaon
+  [PASS] 通用页有 sp_uistyle（界面风格）
+  [PASS] 运行时 out 页真的有 sp_backend（）
+  [PASS] 运行时 out 页真的有 sp_bpfix（）
+  [PASS] 运行时 out 页真的有 sp_ramp（）
+  [PASS] 运行时 out 页真的有 sp_trimwrap（）
+  [PASS] 运行时 pcm 页真的有 sp_phase（）
+  [PASS] 运行时 pcm 页真的有 sp_transition（）
+  [PASS] 运行时 pcm 页真的有 sp_shaper（）
+  [PASS] 运行时 sdm 页真的有 sp_dsdkind（）
+  [PASS] 运行时 sdm 页真的有 sp_modcut（）
+  [PASS] 运行时 in 页真的有 sp_inbuf（）
+  [PASS] 运行时 in 页真的有 sp_inout（）
+  [PASS] 运行时 adv 页真的有 sp_uistyle（）
+  [PASS] 运行时 adv 页真的有 sp_scanthreads（）
+  [PASS] 运行时 adv 页真的有 sp_rep（）
+  [PASS] 运行时 diag 页真的有 sp_updchannel（）
+  [PASS] 运行时 diag 页真的有 sp_fbtext（）
+  [PASS] 运行时 meta 页真的有 sp_metaon（）
+  [PASS] 运行时 meta 页真的有 sp_wbdry（）
+  [PASS] 设置页有 tab.<key> 页签锚点（parity 取证用）
+  [PASS] 右侧抽屉已创建（web #right）
+  [PASS] 抽屉 identifier = right
+  [PASS] 抽屉默认收起（web #right 基础态 display:none）
+  [PASS] 收起时不轮询（不在后台空转）
+  [PASS] 顶栏队列键能打开抽屉
+  [PASS] 打开后开始 1s 轮询（web pollSchedule）
+  [PASS] 抽屉有队列页签
+  [PASS] 抽屉有歌词页签
+  [PASS] 抽屉有计数（web #rcnt）
+  [PASS] 抽屉有清除键（web #qclr）
+  [PASS] 抽屉有队列列表（web #qlist）
+  [PASS] 抽屉有歌词容器（web #lyricbox）
+  [PASS] 能切到歌词页签
+  [PASS] 抽屉宽 320（web width:320px）
+  [PASS] 抽屉右边距 18（web right:18px）
+  [PASS] 再点一次收起并停轮询
+  [PASS] 切 classic 后强调色真的变了（web --acc 珊瑚红→蓝）
+  [PASS] 切 classic 后顶栏高度 60→52（web #app rows）
+  [PASS] 未补全时补全芯片行隐藏（不假装有资料）
+  [PASS] 补全后芯片行显示
+  [PASS] 补全芯片 = 年份 + 流派 + 专辑艺术家 + 已补全（4 个）
+  [PASS] 「已补全」徽标文案正确（web .badge.g）
+  [PASS] 年份芯片的来源提示来自 meta.sources
+  [PASS] 补全芯片态截图已落盘
+  [PASS] 单曲页有实际内容
+  [PASS] 播放条宽度铺满窗口
+  [PASS] 播放条封面在视图树里（web #cv）
+  [PASS] 封面有真实尺寸（可点击前提）
+  [PASS] 封面是可命中的图片视图
+  [PASS] 点播放条封面 → 打开正在播放页
+  [PASS] 正在播放页被真正创建（不是只翻了个标志位）
+  [PASS] 专辑卡封面是正方形（web .card .cv{aspect-ratio:1}；旧实现 180 固定高 ⟹ 白边）
+  [PASS] 播放条音量滑块存在（web #vol）
+  [PASS] 音量是位置刻度 0..1000（web #vol）
+  [PASS] 音量滑块用白色胶囊头（web range 原生外观；旧实现 10px 红点）
+  [PASS] 进度条无滑块头（web .track 同款）
+  [PASS] 顶栏有「重新扫描音乐库」按钮且有 action（web #bScan 同功能）
+  [PASS] 返回键是纯图标 chevron（不是「← 返回专辑」文字胶囊）
+  [PASS] 元数据页有「高级选项」按钮与高级内容容器
+  [PASS] 高级选项默认收起（用户：默认只显示基础选项）
+  [PASS] 点「高级选项」后高级内容真的展开
+  [PASS] 展开后高级内容有真实高度（布局解算过）
+  [PASS] 高级选项展开态截图已落盘
+  [PASS] 再点一次收起
+  [PASS] EQ 页有 RLPEqualizerView（审计锚点）
+  [PASS] EQ 页只剩外层整页滚动条（内层 0 个滚动条）
+  [PASS] 20 段参数表全高渲染（不再内层滚动裁切）
+  [PASS] 参数表有真实数据源（曲线可编辑前提）
+  [PASS] 诊断页真的显示在窗口里（可见性判据的前提）
+  [PASS] 诊断页无需点击就有可见按钮「导出诊断包（.zip）」
+  [PASS] 诊断页无需点击就有可见按钮「只要 JSON」
+  [PASS] 诊断页无需点击就有可见按钮「查看 / 复制诊断摘要」
+  [PASS] 「导出诊断包（.zip）」是红底主按钮（web .btn.pri 视觉）
+  [PASS] 「随反馈上传诊断」按钮已删除（用户明确要求去掉）
+  [PASS] 反馈正文文本域内联可见且够高（约 8 行，用户要求）
+  [PASS] 反馈字数计数内联可见
+  [PASS] 输入 12 个字符后计数显示 12 / 16384
+  [PASS] 中文按 UTF-8 字节计数（6 个汉字 = 18 字节，不是 6）
+  [PASS] 「附带诊断包」默认勾选（web checked 同态）
+  [PASS] 「发送反馈」按钮内联可见、文案逐字一致
+  [PASS] 诊断/反馈不再由 NSPopover 承载（无显示中的气泡、无 ▾ 气泡入口）
+  [PASS] 【task-3 D】诊断摘要不再有 JSON 面板（sp_diagsummarytext/sp_diagscroll 已删除）
+  [PASS] 【task-3 D】「查看 / 复制诊断摘要」与就地提示行都在导出卡内（无第二个容器）
+  [PASS] 诊断/反馈内联形态截图已落盘
+  [PASS] 播放判据有真实曲目可播（夹具库非空）
+ffmpeg version 8.1.2 Copyright (c) 2000-2026 the FFmpeg developers
+built with Apple clang version 21.0.0 (clang-2100.3.34.2)
+configuration: --cc=clang --objcc=clang --disable-shared --enable-static --disable-debug --disable-doc --disable-programs --enable-ffmpeg --enable-ffprobe --disable-autodetect --disable-network --disable-everything --enable-protocol='file,pipe' --enable-demuxer='wav,flac,mp3,ogg,mov,mp4,m4v,matroska,webm,ape,wv,tta,aac,ac3,dts,eac3,mlp,caf,aiff,au,amr,asf,avi,mpc,mpc8,dsf,iff,rawaudio,xwma,oma,image2,pcm_s16le,pcm_s24le,pcm_s32le,pcm_f32le,smacker,bink' --enable-decoder='pcm_s16le,pcm_s24le,pcm_s32le,pcm_f32le,pcm_f64le,pcm_u8,pcm_s8,pcm_s16be,pcm_s24be,pcm_s32be,pcm_f32be,pcm_alaw,pcm_mulaw,pcm_lxf,pcm_vidc,adpcm_g722,adpcm_ima_qt,adpcm_ima_wav,adpcm_ms,adpcm_yamaha,flac,alac,mp3float,mp3adufloat,mp3on4float,mp3,mp3adu,mp3on4,aac,aac_latm,vorbis,opus,wmapro,wmav2,wmav1,wmavoice,cook,atrac1,atrac3,atrac3al,atrac3plus,atrac3plusal,atrac9,dca,ac3,ac3_fixed,eac3,truehd,mlp,tak,ape,shorten,wavpack,tta,als,speex,wmalossless,pcm_s32le_planar,mjpeg,png,mpc7,mpc8,atrac3p,qdm2,qdmc,imc,musepack7,musepack8,amrnb,amrwb,ilbc,g723_1,g729,dsd_lsbf,dsd_msbf,dsd_lsbf_planar,dsd_msbf_planar,dst,dolby_e,truespeech,comfortnoise,sbc,msnsiren,siren,ws_snd1,xan_dpcm,roq_dpcm,interplay_dpcm,sol_dpcm' --enable-parser='flac,aac,ac3,dca,mpegaudio,opus,vorbis,xma' --enable-muxer='wav,flac,mp3,ipod,ogg,opus,matroska,aiff,caf,asf,wv,image2' --arch=arm64 --target-os=darwin --enable-zlib --enable-libmp3lame --extra-cflags='-I/Users/august/Downloads/DQ/RLPlayer/third_party/lame-arm64/include -arch arm64 -mmacosx-version-min=13.0' --extra-ldflags='-L/Users/august/Downloads/DQ/RLPlayer/third_party/lame-arm64/lib -arch arm64 -mmacosx-version-min=13.0' --enable-encoder='pcm_s16le,pcm_s24le,pcm_s32le,pcm_f32le,flac,alac,aac,vorbis,opus,libmp3lame' --enable-bsf='pcm_rechunk,flac_picture,aac_adtstoasc' --enable-filter='aresample,anull,aformat'
+libavutil      60. 26.102 / 60. 26.102
+libavcodec     62. 28.102 / 62. 28.102
+libavformat    62. 12.102 / 62. 12.102
+libavdevice    62.  3.102 / 62.  3.102
+libavfilter    11. 14.102 / 11. 14.102
+libswscale      9.  5.102 /  9.  5.102
+libswresample   6.  3.102 /  6.  3.102
+
+Exiting with exit code 0
+ffprobe version 8.1.2 Copyright (c) 2007-2026 the FFmpeg developers
+built with Apple clang version 21.0.0 (clang-2100.3.34.2)
+configuration: --cc=clang --objcc=clang --disable-shared --enable-static --disable-debug --disable-doc --disable-programs --enable-ffmpeg --enable-ffprobe --disable-autodetect --disable-network --disable-everything --enable-protocol='file,pipe' --enable-demuxer='wav,flac,mp3,ogg,mov,mp4,m4v,matroska,webm,ape,wv,tta,aac,ac3,dts,eac3,mlp,caf,aiff,au,amr,asf,avi,mpc,mpc8,dsf,iff,rawaudio,xwma,oma,image2,pcm_s16le,pcm_s24le,pcm_s32le,pcm_f32le,smacker,bink' --enable-decoder='pcm_s16le,pcm_s24le,pcm_s32le,pcm_f32le,pcm_f64le,pcm_u8,pcm_s8,pcm_s16be,pcm_s24be,pcm_s32be,pcm_f32be,pcm_alaw,pcm_mulaw,pcm_lxf,pcm_vidc,adpcm_g722,adpcm_ima_qt,adpcm_ima_wav,adpcm_ms,adpcm_yamaha,flac,alac,mp3float,mp3adufloat,mp3on4float,mp3,mp3adu,mp3on4,aac,aac_latm,vorbis,opus,wmapro,wmav2,wmav1,wmavoice,cook,atrac1,atrac3,atrac3al,atrac3plus,atrac3plusal,atrac9,dca,ac3,ac3_fixed,eac3,truehd,mlp,tak,ape,shorten,wavpack,tta,als,speex,wmalossless,pcm_s32le_planar,mjpeg,png,mpc7,mpc8,atrac3p,qdm2,qdmc,imc,musepack7,musepack8,amrnb,amrwb,ilbc,g723_1,g729,dsd_lsbf,dsd_msbf,dsd_lsbf_planar,dsd_msbf_planar,dst,dolby_e,truespeech,comfortnoise,sbc,msnsiren,siren,ws_snd1,xan_dpcm,roq_dpcm,interplay_dpcm,sol_dpcm' --enable-parser='flac,aac,ac3,dca,mpegaudio,opus,vorbis,xma' --enable-muxer='wav,flac,mp3,ipod,ogg,opus,matroska,aiff,caf,asf,wv,image2' --arch=arm64 --target-os=darwin --enable-zlib --enable-libmp3lame --extra-cflags='-I/Users/august/Downloads/DQ/RLPlayer/third_party/lame-arm64/include -arch arm64 -mmacosx-version-min=13.0' --extra-ldflags='-L/Users/august/Downloads/DQ/RLPlayer/third_party/lame-arm64/lib -arch arm64 -mmacosx-version-min=13.0' --enable-encoder='pcm_s16le,pcm_s24le,pcm_s32le,pcm_f32le,flac,alac,aac,vorbis,opus,libmp3lame' --enable-bsf='pcm_rechunk,flac_picture,aac_adtstoasc' --enable-filter='aresample,anull,aformat'
+libavutil      60. 26.102 / 60. 26.102
+libavcodec     62. 28.102 / 62. 28.102
+libavformat    62. 12.102 / 62. 12.102
+libavdevice    62.  3.102 / 62.  3.102
+libavfilter    11. 14.102 / 11. 14.102
+libswscale      9.  5.102 /  9.  5.102
+libswresample   6.  3.102 /  6.  3.102
+ffprobe version 8.1.2 Copyright (c) 2007-2026 the FFmpeg developers
+built with Apple clang version 21.0.0 (clang-2100.3.34.2)
+configuration: --cc=clang --objcc=clang --disable-shared --enable-static --disable-debug --disable-doc --disable-programs --enable-ffmpeg --enable-ffprobe --disable-autodetect --disable-network --disable-everything --enable-protocol='file,pipe' --enable-demuxer='wav,flac,mp3,ogg,mov,mp4,m4v,matroska,webm,ape,wv,tta,aac,ac3,dts,eac3,mlp,caf,aiff,au,amr,asf,avi,mpc,mpc8,dsf,iff,rawaudio,xwma,oma,image2,pcm_s16le,pcm_s24le,pcm_s32le,pcm_f32le,smacker,bink' --enable-decoder='pcm_s16le,pcm_s24le,pcm_s32le,pcm_f32le,pcm_f64le,pcm_u8,pcm_s8,pcm_s16be,pcm_s24be,pcm_s32be,pcm_f32be,pcm_alaw,pcm_mulaw,pcm_lxf,pcm_vidc,adpcm_g722,adpcm_ima_qt,adpcm_ima_wav,adpcm_ms,adpcm_yamaha,flac,alac,mp3float,mp3adufloat,mp3on4float,mp3,mp3adu,mp3on4,aac,aac_latm,vorbis,opus,wmapro,wmav2,wmav1,wmavoice,cook,atrac1,atrac3,atrac3al,atrac3plus,atrac3plusal,atrac9,dca,ac3,ac3_fixed,eac3,truehd,mlp,tak,ape,shorten,wavpack,tta,als,speex,wmalossless,pcm_s32le_planar,mjpeg,png,mpc7,mpc8,atrac3p,qdm2,qdmc,imc,musepack7,musepack8,amrnb,amrwb,ilbc,g723_1,g729,dsd_lsbf,dsd_msbf,dsd_lsbf_planar,dsd_msbf_planar,dst,dolby_e,truespeech,comfortnoise,sbc,msnsiren,siren,ws_snd1,xan_dpcm,roq_dpcm,interplay_dpcm,sol_dpcm' --enable-parser='flac,aac,ac3,dca,mpegaudio,opus,vorbis,xma' --enable-muxer='wav,flac,mp3,ipod,ogg,opus,matroska,aiff,caf,asf,wv,image2' --arch=arm64 --target-os=darwin --enable-zlib --enable-libmp3lame --extra-cflags='-I/Users/august/Downloads/DQ/RLPlayer/third_party/lame-arm64/include -arch arm64 -mmacosx-version-min=13.0' --extra-ldflags='-L/Users/august/Downloads/DQ/RLPlayer/third_party/lame-arm64/lib -arch arm64 -mmacosx-version-min=13.0' --enable-encoder='pcm_s16le,pcm_s24le,pcm_s32le,pcm_f32le,flac,alac,aac,vorbis,opus,libmp3lame' --enable-bsf='pcm_rechunk,flac_picture,aac_adtstoasc' --enable-filter='aresample,anull,aformat'
+libavutil      60. 26.102 / 60. 26.102
+libavcodec     62. 28.102 / 62. 28.102
+libavformat    62. 12.102 / 62. 12.102
+libavdevice    62.  3.102 / 62.  3.102
+libavfilter    11. 14.102 / 11. 14.102
+libswscale      9.  5.102 /  9.  5.102
+libswresample   6.  3.102 /  6.  3.102
+ffprobe version 8.1.2 Copyright (c) 2007-2026 the FFmpeg developers
+built with Apple clang version 21.0.0 (clang-2100.3.34.2)
+configuration: --cc=clang --objcc=clang --disable-shared --enable-static --disable-debug --disable-doc --disable-programs --enable-ffmpeg --enable-ffprobe --disable-autodetect --disable-network --disable-everything --enable-protocol='file,pipe' --enable-demuxer='wav,flac,mp3,ogg,mov,mp4,m4v,matroska,webm,ape,wv,tta,aac,ac3,dts,eac3,mlp,caf,aiff,au,amr,asf,avi,mpc,mpc8,dsf,iff,rawaudio,xwma,oma,image2,pcm_s16le,pcm_s24le,pcm_s32le,pcm_f32le,smacker,bink' --enable-decoder='pcm_s16le,pcm_s24le,pcm_s32le,pcm_f32le,pcm_f64le,pcm_u8,pcm_s8,pcm_s16be,pcm_s24be,pcm_s32be,pcm_f32be,pcm_alaw,pcm_mulaw,pcm_lxf,pcm_vidc,adpcm_g722,adpcm_ima_qt,adpcm_ima_wav,adpcm_ms,adpcm_yamaha,flac,alac,mp3float,mp3adufloat,mp3on4float,mp3,mp3adu,mp3on4,aac,aac_latm,vorbis,opus,wmapro,wmav2,wmav1,wmavoice,cook,atrac1,atrac3,atrac3al,atrac3plus,atrac3plusal,atrac9,dca,ac3,ac3_fixed,eac3,truehd,mlp,tak,ape,shorten,wavpack,tta,als,speex,wmalossless,pcm_s32le_planar,mjpeg,png,mpc7,mpc8,atrac3p,qdm2,qdmc,imc,musepack7,musepack8,amrnb,amrwb,ilbc,g723_1,g729,dsd_lsbf,dsd_msbf,dsd_lsbf_planar,dsd_msbf_planar,dst,dolby_e,truespeech,comfortnoise,sbc,msnsiren,siren,ws_snd1,xan_dpcm,roq_dpcm,interplay_dpcm,sol_dpcm' --enable-parser='flac,aac,ac3,dca,mpegaudio,opus,vorbis,xma' --enable-muxer='wav,flac,mp3,ipod,ogg,opus,matroska,aiff,caf,asf,wv,image2' --arch=arm64 --target-os=darwin --enable-zlib --enable-libmp3lame --extra-cflags='-I/Users/august/Downloads/DQ/RLPlayer/third_party/lame-arm64/include -arch arm64 -mmacosx-version-min=13.0' --extra-ldflags='-L/Users/august/Downloads/DQ/RLPlayer/third_party/lame-arm64/lib -arch arm64 -mmacosx-version-min=13.0' --enable-encoder='pcm_s16le,pcm_s24le,pcm_s32le,pcm_f32le,flac,alac,aac,vorbis,opus,libmp3lame' --enable-bsf='pcm_rechunk,flac_picture,aac_adtstoasc' --enable-filter='aresample,anull,aformat'
+libavutil      60. 26.102 / 60. 26.102
+libavcodec     62. 28.102 / 62. 28.102
+libavformat    62. 12.102 / 62. 12.102
+libavdevice    62.  3.102 / 62.  3.102
+libavfilter    11. 14.102 / 11. 14.102
+libswscale      9.  5.102 /  9.  5.102
+libswresample   6.  3.102 /  6.  3.102
+  [PASS] 点击曲目后 /api/status 真的变成 playing=true（生产入口走通）
+ffprobe version 8.1.2 Copyright (c) 2007-2026 the FFmpeg developers
+built with Apple clang version 21.0.0 (clang-2100.3.34.2)
+configuration: --cc=clang --objcc=clang --disable-shared --enable-static --disable-debug --disable-doc --disable-programs --enable-ffmpeg --enable-ffprobe --disable-autodetect --disable-network --disable-everything --enable-protocol='file,pipe' --enable-demuxer='wav,flac,mp3,ogg,mov,mp4,m4v,matroska,webm,ape,wv,tta,aac,ac3,dts,eac3,mlp,caf,aiff,au,amr,asf,avi,mpc,mpc8,dsf,iff,rawaudio,xwma,oma,image2,pcm_s16le,pcm_s24le,pcm_s32le,pcm_f32le,smacker,bink' --enable-decoder='pcm_s16le,pcm_s24le,pcm_s32le,pcm_f32le,pcm_f64le,pcm_u8,pcm_s8,pcm_s16be,pcm_s24be,pcm_s32be,pcm_f32be,pcm_alaw,pcm_mulaw,pcm_lxf,pcm_vidc,adpcm_g722,adpcm_ima_qt,adpcm_ima_wav,adpcm_ms,adpcm_yamaha,flac,alac,mp3float,mp3adufloat,mp3on4float,mp3,mp3adu,mp3on4,aac,aac_latm,vorbis,opus,wmapro,wmav2,wmav1,wmavoice,cook,atrac1,atrac3,atrac3al,atrac3plus,atrac3plusal,atrac9,dca,ac3,ac3_fixed,eac3,truehd,mlp,tak,ape,shorten,wavpack,tta,als,speex,wmalossless,pcm_s32le_planar,mjpeg,png,mpc7,mpc8,atrac3p,qdm2,qdmc,imc,musepack7,musepack8,amrnb,amrwb,ilbc,g723_1,g729,dsd_lsbf,dsd_msbf,dsd_lsbf_planar,dsd_msbf_planar,dst,dolby_e,truespeech,comfortnoise,sbc,msnsiren,siren,ws_snd1,xan_dpcm,roq_dpcm,interplay_dpcm,sol_dpcm' --enable-parser='flac,aac,ac3,dca,mpegaudio,opus,vorbis,xma' --enable-muxer='wav,flac,mp3,ipod,ogg,opus,matroska,aiff,caf,asf,wv,image2' --arch=arm64 --target-os=darwin --enable-zlib --enable-libmp3lame --extra-cflags='-I/Users/august/Downloads/DQ/RLPlayer/third_party/lame-arm64/include -arch arm64 -mmacosx-version-min=13.0' --extra-ldflags='-L/Users/august/Downloads/DQ/RLPlayer/third_party/lame-arm64/lib -arch arm64 -mmacosx-version-min=13.0' --enable-encoder='pcm_s16le,pcm_s24le,pcm_s32le,pcm_f32le,flac,alac,aac,vorbis,opus,libmp3lame' --enable-bsf='pcm_rechunk,flac_picture,aac_adtstoasc' --enable-filter='aresample,anull,aformat'
+libavutil      60. 26.102 / 60. 26.102
+libavcodec     62. 28.102 / 62. 28.102
+libavformat    62. 12.102 / 62. 12.102
+libavdevice    62.  3.102 / 62.  3.102
+libavfilter    11. 14.102 / 11. 14.102
+libswscale      9.  5.102 /  9.  5.102
+libswresample   6.  3.102 /  6.  3.102
+ffmpeg version 8.1.2 Copyright (c) 2000-2026 the FFmpeg developers
+built with Apple clang version 21.0.0 (clang-2100.3.34.2)
+configuration: --cc=clang --objcc=clang --disable-shared --enable-static --disable-debug --disable-doc --disable-programs --enable-ffmpeg --enable-ffprobe --disable-autodetect --disable-network --disable-everything --enable-protocol='file,pipe' --enable-demuxer='wav,flac,mp3,ogg,mov,mp4,m4v,matroska,webm,ape,wv,tta,aac,ac3,dts,eac3,mlp,caf,aiff,au,amr,asf,avi,mpc,mpc8,dsf,iff,rawaudio,xwma,oma,image2,pcm_s16le,pcm_s24le,pcm_s32le,pcm_f32le,smacker,bink' --enable-decoder='pcm_s16le,pcm_s24le,pcm_s32le,pcm_f32le,pcm_f64le,pcm_u8,pcm_s8,pcm_s16be,pcm_s24be,pcm_s32be,pcm_f32be,pcm_alaw,pcm_mulaw,pcm_lxf,pcm_vidc,adpcm_g722,adpcm_ima_qt,adpcm_ima_wav,adpcm_ms,adpcm_yamaha,flac,alac,mp3float,mp3adufloat,mp3on4float,mp3,mp3adu,mp3on4,aac,aac_latm,vorbis,opus,wmapro,wmav2,wmav1,wmavoice,cook,atrac1,atrac3,atrac3al,atrac3plus,atrac3plusal,atrac9,dca,ac3,ac3_fixed,eac3,truehd,mlp,tak,ape,shorten,wavpack,tta,als,speex,wmalossless,pcm_s32le_planar,mjpeg,png,mpc7,mpc8,atrac3p,qdm2,qdmc,imc,musepack7,musepack8,amrnb,amrwb,ilbc,g723_1,g729,dsd_lsbf,dsd_msbf,dsd_lsbf_planar,dsd_msbf_planar,dst,dolby_e,truespeech,comfortnoise,sbc,msnsiren,siren,ws_snd1,xan_dpcm,roq_dpcm,interplay_dpcm,sol_dpcm' --enable-parser='flac,aac,ac3,dca,mpegaudio,opus,vorbis,xma' --enable-muxer='wav,flac,mp3,ipod,ogg,opus,matroska,aiff,caf,asf,wv,image2' --arch=arm64 --target-os=darwin --enable-zlib --enable-libmp3lame --extra-cflags='-I/Users/august/Downloads/DQ/RLPlayer/third_party/lame-arm64/include -arch arm64 -mmacosx-version-min=13.0' --extra-ldflags='-L/Users/august/Downloads/DQ/RLPlayer/third_party/lame-arm64/lib -arch arm64 -mmacosx-version-min=13.0' --enable-encoder='pcm_s16le,pcm_s24le,pcm_s32le,pcm_f32le,flac,alac,aac,vorbis,opus,libmp3lame' --enable-bsf='pcm_rechunk,flac_picture,aac_adtstoasc' --enable-filter='aresample,anull,aformat'
+libavutil      60. 26.102 / 60. 26.102
+libavcodec     62. 28.102 / 62. 28.102
+libavformat    62. 12.102 / 62. 12.102
+libavdevice    62.  3.102 / 62.  3.102
+libavfilter    11. 14.102 / 11. 14.102
+libswscale      9.  5.102 /  9.  5.102
+libswresample   6.  3.102 /  6.  3.102
+
+Exiting with exit code 0
+Stream map '' matches no streams.
+To ignore this, add a trailing '?' to the map.
+Failed to set value '0:v:0' for option 'map': Invalid argument
+Error parsing options for output file /var/folders/8n/893t2v7s75gbrzdvgb902nrc0000gn/T/rta38583-0.img.
+Error opening output files: Invalid argument
+ffmpeg version 8.1.2 Copyright (c) 2000-2026 the FFmpeg developers
+built with Apple clang version 21.0.0 (clang-2100.3.34.2)
+configuration: --cc=clang --objcc=clang --disable-shared --enable-static --disable-debug --disable-doc --disable-programs --enable-ffmpeg --enable-ffprobe --disable-autodetect --disable-network --disable-everything --enable-protocol='file,pipe' --enable-demuxer='wav,flac,mp3,ogg,mov,mp4,m4v,matroska,webm,ape,wv,tta,aac,ac3,dts,eac3,mlp,caf,aiff,au,amr,asf,avi,mpc,mpc8,dsf,iff,rawaudio,xwma,oma,image2,pcm_s16le,pcm_s24le,pcm_s32le,pcm_f32le,smacker,bink' --enable-decoder='pcm_s16le,pcm_s24le,pcm_s32le,pcm_f32le,pcm_f64le,pcm_u8,pcm_s8,pcm_s16be,pcm_s24be,pcm_s32be,pcm_f32be,pcm_alaw,pcm_mulaw,pcm_lxf,pcm_vidc,adpcm_g722,adpcm_ima_qt,adpcm_ima_wav,adpcm_ms,adpcm_yamaha,flac,alac,mp3float,mp3adufloat,mp3on4float,mp3,mp3adu,mp3on4,aac,aac_latm,vorbis,opus,wmapro,wmav2,wmav1,wmavoice,cook,atrac1,atrac3,atrac3al,atrac3plus,atrac3plusal,atrac9,dca,ac3,ac3_fixed,eac3,truehd,mlp,tak,ape,shorten,wavpack,tta,als,speex,wmalossless,pcm_s32le_planar,mjpeg,png,mpc7,mpc8,atrac3p,qdm2,qdmc,imc,musepack7,musepack8,amrnb,amrwb,ilbc,g723_1,g729,dsd_lsbf,dsd_msbf,dsd_lsbf_planar,dsd_msbf_planar,dst,dolby_e,truespeech,comfortnoise,sbc,msnsiren,siren,ws_snd1,xan_dpcm,roq_dpcm,interplay_dpcm,sol_dpcm' --enable-parser='flac,aac,ac3,dca,mpegaudio,opus,vorbis,xma' --enable-muxer='wav,flac,mp3,ipod,ogg,opus,matroska,aiff,caf,asf,wv,image2' --arch=arm64 --target-os=darwin --enable-zlib --enable-libmp3lame --extra-cflags='-I/Users/august/Downloads/DQ/RLPlayer/third_party/lame-arm64/include -arch arm64 -mmacosx-version-min=13.0' --extra-ldflags='-L/Users/august/Downloads/DQ/RLPlayer/third_party/lame-arm64/lib -arch arm64 -mmacosx-version-min=13.0' --enable-encoder='pcm_s16le,pcm_s24le,pcm_s32le,pcm_f32le,flac,alac,aac,vorbis,opus,libmp3lame' --enable-bsf='pcm_rechunk,flac_picture,aac_adtstoasc' --enable-filter='aresample,anull,aformat'
+libavutil      60. 26.102 / 60. 26.102
+libavcodec     62. 28.102 / 62. 28.102
+libavformat    62. 12.102 / 62. 12.102
+libavdevice    62.  3.102 / 62.  3.102
+libavfilter    11. 14.102 / 11. 14.102
+libswscale      9.  5.102 /  9.  5.102
+libswresample   6.  3.102 /  6.  3.102
+
+Exiting with exit code 0
+Stream map '' matches no streams.
+To ignore this, add a trailing '?' to the map.
+Failed to set value '0:v:0' for option 'map': Invalid argument
+Error parsing options for output file /var/folders/8n/893t2v7s75gbrzdvgb902nrc0000gn/T/rta38583-1.img.
+Error opening output files: Invalid argument
+  [PASS] 播放位置随时间前进（不是 playing=true 但时间轴停住）
+  [PASS] null 后端起播全程无 RENDERFAIL / 设备错误
+  [PASS] 底栏实例存在（后续图标判据的前提）
+  [PASS] 第2项：播放中底栏 isPlaying=true（轮询真的把状态带到���栏）
+  [PASS] 第2项：暂停后底栏 isPlaying=false（状态能下来，不是单向锁死）
+  [PASS] 第2项：底栏播放键图标随播放/暂停真的换图（不是一直画三角形）
+  [PASS] 第3项：进度条不与播放键相交（白色滑块头不再压在红圆上）
+  [PASS] 第3项：播放键是完整圆形（方形外框 + cornerRadius = 半径）
+  [PASS] 第14项（整窗）: 播放条里有玻璃层
+  [PASS] 第14项（整窗）: 播放条是悬浮圆角条（cornerRadius ≥12）
+  [PASS] 第14项（整窗）: 播放条有柔和投影（浮在内容之上）
+  [PASS] 第14项（整窗）: 播放条左右都有留白（悬浮胶囊，非通栏）
+  [PASS] 第14项（整窗）: 条高在 56–66pt
+  [PASS] 第14项（整窗）: 播放条截图已落盘（实机观感由用户验收磨砂）
+  [PASS] 文件夹页有可输入路径 + 跳转键 + 根目录下拉（web 地址栏）
+  [PASS] 队列页有排序下拉（web #qSort 语义：只改队列顺序）
+  [PASS] 浅色主题下主页渲染为浅色（像素判定）
+  [PASS] 侧栏有选中行（导航高亮的前提）
+  [PASS] 浅色主题下强调色真的画出来了（侧栏选中态）
+  [PASS] 深色主题下主页渲染为深色（像素判定）
+  [PASS] 主题只含 dark/light
+
+截图目录：/var/folders/8n/893t2v7s75gbrzdvgb902nrc0000gn/T/rlp-native-audit
+结果：246 passed, 0 failed

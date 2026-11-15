@@ -1784,6 +1784,9 @@ static NSString *RLPRailTagText(id srValue, id bitsValue) {
     self.coverSetBtn.toolTip=RLPTr(@"仅设置当前歌曲封面，不修改专辑和音乐文件");
     [host addSubview:self.coverSetBtn];
     self.coverResetBtn=[NSButton buttonWithTitle:RLPTr(@"自动") target:self action:@selector(onResetCover:)];
+    // v3.3.11：只有「当前生效的是手动封面」才显示「自动」按钮（web 依 /api/meta 的 coverSource）。
+    // 旧实现没有该字段 ⟹ 按钮常显，点了也没东西可恢复（偏差台账那条）。
+    self.coverResetBtn.hidden = YES;
     self.coverResetBtn.identifier=@"npResetCover";self.coverResetBtn.bezelStyle=NSBezelStyleRounded;
     self.coverResetBtn.controlSize=NSControlSizeMini;self.coverResetBtn.toolTip=RLPTr(@"恢复自动封面");
     [host addSubview:self.coverResetBtn];
@@ -3487,6 +3490,14 @@ static NSString *RLPNowPlayingCastDeviceLabel(NSString *device) {
 
 /// 取当前曲的标题/艺术家，再据此拉 AI 资料层。
 /// 为什么要先 /api/meta：/api/status 只给路径，资料层要的是"实体名"。
+/// v3.3.11 coverSource 闸门：只有手动封面当前生效时才显示「自动」按钮。
+/// 单独成方法是为了可被判据直接调用（不必等 /api/meta 的网络回调）。
+- (void)applyCoverSourceGate {
+    NSString *cs = [self.trackMetadata[@"coverSource"] isKindOfClass:NSString.class]
+        ? self.trackMetadata[@"coverSource"] : @"";
+    self.coverResetBtn.hidden = ![cs isEqualToString:@"manual"];
+}
+
 - (void)loadMetaAndKnowledgeForPath:(NSString *)path {
     if (!path.length) {
         self.trackMetadata=@{};[self railInvalidateForTrackChange];[self renderMetaChipsFromMeta:nil];[self renderRailMetadata];
@@ -3506,6 +3517,8 @@ static NSString *RLPNowPlayingCastDeviceLabel(NSString *device) {
         if (title.length) self_.titleLabel2.stringValue = title;
         self_.trackMetadata=json?:@{};
         [self_ renderMetaChipsFromMeta:json];
+        // v3.3.11：只有 coverSource == manual 才显示「自动」封面按钮（否则无东西可恢复）。
+        [self_ applyCoverSourceGate];
         NSString *album=[json[@"album"] isKindOfClass:NSString.class]?json[@"album"]:@"";
         self_.artistLabel2.stringValue=[NSString stringWithFormat:@"%@%@%@",artist,album.length?@" · ":@"",album];
         NSMutableArray *format=[NSMutableArray array];if([json[@"codec"] isKindOfClass:NSString.class])[format addObject:[json[@"codec"] uppercaseString]];
