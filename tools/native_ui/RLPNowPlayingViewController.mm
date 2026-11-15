@@ -6,6 +6,7 @@
 // 只读展示 + 少量动作（播放/暂停、收藏、体检）。歌词来自 /api/lyrics?file=…，
 // 音质体检来自 /api/health?file=…（都是既有端点，UI 不重复实现分析）。
 #import "RLPNowPlayingViewController.h"
+#import "RLPVolumeKnobView.h"
 #import "RLPCoreClient.h"
 #import "RLPModels.h"
 #import "RLPSupport.h"
@@ -299,6 +300,8 @@ static void RLPSetKernedText(NSTextField *label, NSString *text, CGFloat kern) {
 @property (nonatomic, assign) double preciseVolumeDb;
 /// v3.3.11 `npVolFloor`：静音/恢复按钮；NAN = web 的 `volumeRestore === null`。
 @property (nonatomic, strong) NSButton *volMuteBtn;
+/// v3.3.11 npVolKnob：音量旋钮本体（web 用 64x64 SVG 圆盘；原生自绘同构控件）。
+@property (nonatomic, strong) RLPVolumeKnobView *volKnob;
 @property (nonatomic, assign) double volumeRestoreDb;
 @property (nonatomic, strong) NSButton *repBtn;
 /// web #npRepOne：单曲循环时叠在循环键上的「1」角标（10px/700）。
@@ -314,6 +317,17 @@ static void RLPSetKernedText(NSTextField *label, NSString *text, CGFloat kern) {
 @implementation RLPNPControlBar
 
 /// v3.3.11 `setVol` 的公共落地：下发 /api/volume 并同步精确输入/标签/滑块。
+/// 拖动中只同步界面（标签 / 精确输入 / 滑块 / 旋钮），不下发请求 —— 松开才 applyVolumeDb:。
+- (void)updateVolumeUiForDb:(double)db {
+    db = round(db * 10.0) / 10.0;
+    self.preciseVolumeDb = db;
+    self.volDbField.layer.borderWidth = 0;
+    self.volDbField.stringValue = [NSString stringWithFormat:@"%.1f", db];
+    self.volLabel.stringValue = RLPNPVolDbLabel(db);
+    self.volume.doubleValue = RLPNPVolDbToPos(db);
+    if (self.volKnob.db != db) self.volKnob.db = db;
+}
+
 - (void)applyVolumeDb:(double)db {
     db = round(db * 10.0) / 10.0;
     self.volDbField.layer.borderWidth = 0;
@@ -321,6 +335,7 @@ static void RLPSetKernedText(NSTextField *label, NSString *text, CGFloat kern) {
     self.volDbField.stringValue = [NSString stringWithFormat:@"%.1f", db];
     self.volLabel.stringValue = RLPNPVolDbLabel(db);
     self.volume.doubleValue = RLPNPVolDbToPos(db);
+    if (self.volKnob.db != db) self.volKnob.db = db;   // 旋钮与读数同一帧更新
     [[RLPCoreClient shared] postJSON:[NSString stringWithFormat:@"/api/volume?db=%.1f", db]
                                 body:nil completion:nil];
 }
@@ -486,10 +501,19 @@ static void RLPSetKernedText(NSTextField *label, NSString *text, CGFloat kern) {
     self.volMuteBtn.action = @selector(onToggleVolumeMute:);
     self.volumeRestoreDb = NAN;   // web 的 volumeRestore === null
 
+    // v3.3.11 npVolKnob：音量旋钮。拖动中只更新界面（与原生既有滑块「松开才提交」同纪律），
+    // 松开才下发 /api/volume。web 是每帧下发，差异如实挂账。
+    self.volKnob = [[RLPVolumeKnobView alloc] initWithFrame:NSZeroRect];
+    self.volKnob.identifier = @"npVolKnob";
+    self.volKnob.toolTip = RLPTr(@"音量");
+    __weak __typeof__(self) kws = self;
+    self.volKnob.onLiveChange = ^(double db) { [kws updateVolumeUiForDb:db]; };
+    self.volKnob.onCommit = ^(double db) { [kws applyVolumeDb:db]; };
+
     for (NSView *v in @[self.seek, self.posLabel, self.sepLabel, self.durLabel, self.repBtn,
                         self.prevBtn, self.playBtn, self.nextBtn, self.stopBtn,
                         self.volIcon, self.volume, self.volLabel, self.volDbField,
-                        self.volMuteBtn, self.repBadge]) {
+                        self.volKnob, self.volMuteBtn, self.repBadge]) {
         [self addSubview:v];
     }
     return self;
@@ -541,21 +565,27 @@ static void RLPSetKernedText(NSTextField *label, NSString *text, CGFloat kern) {
     }
     // v3.3.11 `npVolInput`：精确 dB 输入放在音量图标左侧；宽窗口保持 web 的 104pt 滑块，
     // 窄窗口才按剩余空间收缩滑块（与上面 minIconX 同一套守卫）。
+    // v3.3.11 npVolKnob：旋钮取代可见滑块（web 的 npVol range 是 sr-only）。
+    // 尺寸受控制栏行高限制（web 64px，原生行高 ~40pt ⟹ 取 40pt 并在证据里挂账差异）。
+    const CGFloat knobS = MAX(28.0, MIN(40.0, H - 22.0));
     const CGFloat preciseW = 48.0, muteW = 22.0;
     CGFloat preciseX = iconX - volGap - preciseW;
     CGFloat muteX = preciseX - volGap - muteW;
-    if (muteX < minIconX) {
-        sliderW = MAX(56.0, sliderW - (minIconX - muteX));
-        sliderX = labelX - volGap - sliderW;
-        iconX = sliderX - volGap - iconW;
-        preciseX = iconX - volGap - preciseW;
-        muteX = preciseX - volGap - muteW;
+    // 新排布（左→右）：图标 · 旋钮 · 精确 dB 输入 · 读数；静音键居中叠在旋钮圆盖上。
+    CGFloat knobX = preciseX - volGap - knobS;
+    iconX = knobX - volGap - iconW;
+    if (iconX < minIconX) {
+        knobX = minIconX + volGap + iconW;
+        iconX = minIconX;
     }
+    muteX = knobX + (knobS - muteW) / 2.0;
     self.volIcon.frame = NSMakeRect(iconX, rowCY - 7, iconW, 14);
-    self.volume.frame = NSMakeRect(sliderX, rowCY - 9, sliderW, 18);
+    self.volume.frame = NSMakeRect(sliderX, rowCY - 9, sliderW, 18);   // 仅作状态载体，不再可见
+    self.volume.hidden = YES;
+    self.volKnob.frame = NSMakeRect(knobX, rowCY - knobS / 2.0, knobS, knobS);
     self.volLabel.frame = NSMakeRect(labelX, rowCY - 8, volLabW, 16);
     self.volDbField.frame = NSMakeRect(preciseX, rowCY - 8, preciseW, 16);
-    self.volMuteBtn.frame = NSMakeRect(muteX, rowCY - 11, muteW, 22);
+    self.volMuteBtn.frame = NSMakeRect(muteX, rowCY - muteW / 2.0, muteW, muteW);
 }
 
 - (void)applyTheme {
@@ -569,6 +599,7 @@ static void RLPSetKernedText(NSTextField *label, NSString *text, CGFloat kern) {
     self.volIcon.contentTintColor = t.mut;
     self.volDbField.textColor = t.text;
     self.volMuteBtn.contentTintColor = t.mut;
+    self.volKnob.needsDisplay = YES;
     self.repBadge.textColor = t.accentText;
 }
 

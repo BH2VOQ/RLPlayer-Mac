@@ -102,3 +102,8 @@
   新子系统（上游 ``src/analysis/waveform.h`` + ``src/net/ui_waveform.h`` 18.7 KB），超出小范围改动，
   需独立排期；证据第 5 节给了完整只读评估。播放页进度**功能**已完整（波形是可视化增强）。
 
+## 进度（1.1.7.71）
+
+- **音量旋钮本体**：播放页 npVolKnob 已落地（纯几何函数 + 自绘 + 拖动 + 26 条判据 K1–K10），
+  见 evidence/native-volume-knob-20261115.md。挂账：底栏旋钮未做、尺寸受行高约束（40pt vs web 64pt）、
+  拖动期间不下发（原生「松开才提交」纪律）、未接 NSAccessibility。

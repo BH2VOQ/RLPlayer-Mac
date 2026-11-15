@@ -1159,3 +1159,19 @@ reset 只标记不删图（与上游一致）、夹具为构造 PNG 不解码。
 
 **门禁**：串行 ctest 202/202、``--audit`` 246/0、parity missing=0、behavior actionable=0。
 
+### 2026-11-15 12:xx —— 轮次 38（1.1.7.71）：v3.3.11 音量旋钮本体 npVolKnob
+
+**上游真值**：ui_page.h:1581 的 #npVolKnob 是 64×64 圆盘（track 弧 r=24 + 刻度 + 值弧 + 中心 cap r=20 + 居中静音键 + 读数），
+配套 #npVol range 是 sr-only；映射用 volDbToNorm/volNormToDb 的对称指数曲线（0 dB 在正上方）；大弧标志阈值是 2/3。
+
+**实现**：新增 RLPVolumeKnobView.h/.mm（纯 C 几何函数 + 自绘视图 + 拖动），接入播放页控制栏取代可见滑块
+（滑块 hidden 但保留为状态载体），静音键移到圆盖中心，拖动中走 updateVolumeUiForDb:（只同步界面）、
+松开走 applyVolumeDb:（下发）。
+
+**判据**：新建 test_native_volume_knob（已注册 ctest），K1–K10 共 26 条，钉住两点历史事故：
+① 大弧阈值 2/3（旧码 norm>0.5 让 0 dB 附近弧线绕出圈外，3.3.10 用户实测反馈）；
+② 0 dB 在正上方（线性 dB 会让中点变成 -30 dB、拖到中间就没声音，web 2026-10-25 事故）。
+结果 26 passed / 0 failed；接入后 np web: 0 failures、native_bar_web: 348 checks, 0 failures。
+
+**挂账**：底栏旋钮未做；原生圆盘 40pt（web 64pt，受控制栏行高约束）；拖动期间不下发请求
+（沿用原生「松开才提交」纪律，web 是每帧下发）；未接 NSAccessibility。

@@ -194,6 +194,7 @@ if(APPLE)
     tools/native_ui/RLPModels.mm
     tools/native_ui/RLPTheme.mm
     tools/native_ui/RLPSupport.mm
+    tools/native_ui/RLPVolumeKnobView.mm
     tools/native_ui/RLPPageViewController.mm
     tools/native_ui/RLPNativeI18n.mm
     tools/native_ui/RLPAlbumDetailViewController.mm
@@ -207,6 +208,7 @@ if(APPLE)
     tools/native_ui/RLPSettingsViewController.mm
     tools/native_ui/RLPSettingsLayout.mm
     tools/native_ui/RLPNowPlayingViewController.mm tools/native_ui/RLPWorksViewController.mm
+    tools/native_ui/RLPVolumeKnobView.mm
     tools/native_ui/RLPUpdateWindowController.mm
     tools/native_ui/RLPStreamingViewController.mm
     tools/native_ui/RLPQuickStartViewController.mm
@@ -244,6 +246,7 @@ if(APPLE)
     tools/native_ui/RLPFoldersViewController.mm tools/native_ui/RLPQueueViewController.mm
     tools/native_ui/RLPRecentViewController.mm tools/native_ui/RLPFavoritesViewController.mm
     tools/native_ui/RLPSettingsViewController.mm tools/native_ui/RLPNowPlayingViewController.mm
+    tools/native_ui/RLPVolumeKnobView.mm
     tools/native_ui/RLPSettingsLayout.mm
     tools/native_ui/RLPWorksViewController.mm
     tools/native_ui/RLPUpdateWindowController.mm
@@ -316,6 +319,7 @@ if(APPLE)
     tools/native_ui/RLPSupport.mm tools/native_ui/RLPModels.mm
     tools/native_ui/RLPTheme.mm tools/native_ui/RLPNativeI18n.mm
     tools/native_ui/RLPNowPlayingViewController.mm tools/native_ui/RLPPageViewController.mm
+    tools/native_ui/RLPVolumeKnobView.mm
     tools/native_ui/RLPKnowledgeView.mm tools/native_ui/RLPAnalysisSummary.mm
     tools/native_ui/RLPLyrics.mm tools/native_ui/RLPTrackActions.mm)
   target_compile_options(test_native_pause_paths PRIVATE -fobjc-arc)
@@ -351,12 +355,22 @@ if(APPLE)
   target_link_libraries(test_native_opra_cards PRIVATE
     "-framework AppKit" "-framework QuartzCore")
   add_test(NAME native_opra_cards COMMAND test_native_opra_cards)
+
+  add_executable(test_native_volume_knob tests/test_native_volume_knob.mm
+    tools/native_ui/RLPVolumeKnobView.mm
+    tools/native_ui/RLPTheme.mm)
+  target_compile_options(test_native_volume_knob PRIVATE -fobjc-arc)
+  target_include_directories(test_native_volume_knob PRIVATE src tools tools/native_ui)
+  target_link_libraries(test_native_volume_knob PRIVATE
+    "-framework AppKit" "-framework QuartzCore")
+  add_test(NAME native_volume_knob COMMAND test_native_volume_knob)
   set_tests_properties(native_opra_cards PROPERTIES TIMEOUT 120)
 
   # 「AI 整理」栏三张卡片的几何判据（第5项）：离屏量真实视图树，不开窗、不出声。
   # 旧码没有 dot/name/status/p1/p2 子视图（NSButton 多行标题），先跑红再改绿。
   add_executable(test_native_rail_cards tests/test_native_rail_cards.mm
     tools/native_ui/RLPNowPlayingViewController.mm tools/native_ui/RLPPageViewController.mm
+    tools/native_ui/RLPVolumeKnobView.mm
     tools/native_ui/RLPSupport.mm tools/native_ui/RLPModels.mm
     tools/native_ui/RLPTheme.mm tools/native_ui/RLPNativeI18n.mm
     tools/native_ui/RLPKnowledgeView.mm tools/native_ui/RLPAnalysisSummary.mm
@@ -372,6 +386,7 @@ if(APPLE)
   # 对旧码先跑红（旧码只显示本地事实 + 点开查看、点击 kind 恒为 track），改完再跑绿。
   add_executable(test_native_rail_preview tests/test_native_rail_preview.mm
     tools/native_ui/RLPNowPlayingViewController.mm tools/native_ui/RLPPageViewController.mm
+    tools/native_ui/RLPVolumeKnobView.mm
     tools/native_ui/RLPSupport.mm tools/native_ui/RLPModels.mm
     tools/native_ui/RLPTheme.mm tools/native_ui/RLPNativeI18n.mm
     tools/native_ui/RLPKnowledgeView.mm tools/native_ui/RLPAnalysisSummary.mm
@@ -389,6 +404,7 @@ if(APPLE)
   # 「隐藏三卡 + 一块纯文本 blob」）。对 1.1.7.24 先跑红，改完再跑绿。
   add_executable(test_native_analysis_panel tests/test_native_analysis_panel.mm
     tools/native_ui/RLPNowPlayingViewController.mm tools/native_ui/RLPPageViewController.mm
+    tools/native_ui/RLPVolumeKnobView.mm
     tools/native_ui/RLPSupport.mm tools/native_ui/RLPModels.mm
     tools/native_ui/RLPTheme.mm tools/native_ui/RLPNativeI18n.mm
     tools/native_ui/RLPKnowledgeView.mm tools/native_ui/RLPAnalysisSummary.mm
@@ -407,6 +423,7 @@ if(APPLE)
   # EQ/IR/投放/加歌单根本不在这一行，也没有换行）。改完再跑绿。
   add_executable(test_native_npmeta_chips tests/test_native_npmeta_chips.mm
     tools/native_ui/RLPNowPlayingViewController.mm tools/native_ui/RLPPageViewController.mm
+    tools/native_ui/RLPVolumeKnobView.mm
     tools/native_ui/RLPSupport.mm tools/native_ui/RLPModels.mm
     tools/native_ui/RLPTheme.mm tools/native_ui/RLPNativeI18n.mm
     tools/native_ui/RLPKnowledgeView.mm tools/native_ui/RLPAnalysisSummary.mm
@@ -465,6 +482,7 @@ if(APPLE)
   # loading/insufficient/error（可重试）/ok 状态行。对 1.1.7.30 先跑红。
   add_executable(test_native_rail_states tests/test_native_rail_states.mm
     tools/native_ui/RLPNowPlayingViewController.mm tools/native_ui/RLPPageViewController.mm
+    tools/native_ui/RLPVolumeKnobView.mm
     tools/native_ui/RLPSupport.mm tools/native_ui/RLPModels.mm
     tools/native_ui/RLPTheme.mm tools/native_ui/RLPNativeI18n.mm
     tools/native_ui/RLPKnowledgeView.mm tools/native_ui/RLPAnalysisSummary.mm
@@ -480,6 +498,7 @@ if(APPLE)
   # 点击 = /api/cast/stop（不是弹设备列表）；否则「推送到设备」。对 1.1.7.31 先跑红。
   add_executable(test_native_cast_chip tests/test_native_cast_chip.mm
     tools/native_ui/RLPNowPlayingViewController.mm tools/native_ui/RLPPageViewController.mm
+    tools/native_ui/RLPVolumeKnobView.mm
     tools/native_ui/RLPSupport.mm tools/native_ui/RLPModels.mm
     tools/native_ui/RLPTheme.mm tools/native_ui/RLPNativeI18n.mm
     tools/native_ui/RLPKnowledgeView.mm tools/native_ui/RLPAnalysisSummary.mm
@@ -685,6 +704,7 @@ if(APPLE)
   add_executable(test_analysis_row tests/test_analysis_row.mm
     tools/native_ui/RLPAnalysisSummary.mm
     tools/native_ui/RLPNowPlayingViewController.mm
+    tools/native_ui/RLPVolumeKnobView.mm
     tools/native_ui/RLPPageViewController.mm
     tools/native_ui/RLPSupport.mm
     tools/native_ui/RLPTheme.mm
@@ -695,6 +715,7 @@ if(APPLE)
   set_source_files_properties(tests/test_analysis_row.mm
     tools/native_ui/RLPAnalysisSummary.mm
     tools/native_ui/RLPNowPlayingViewController.mm
+    tools/native_ui/RLPVolumeKnobView.mm
     tools/native_ui/RLPPageViewController.mm
     tools/native_ui/RLPSupport.mm
     tools/native_ui/RLPTheme.mm
