@@ -64,7 +64,7 @@
 
 | # | 项 | 现状 | 为什么没做 |
 |---|---|---|---|
-| A | 专辑卡播放角标 1pt（web right:7;bottom:7，原生 -8） | 待修 | 差 1pt 已定位，但**没有现成夹具**能红→绿地钉住（`test_native_album_web` 仅 80 行、无角标判据）；按纪律不盲改，留作下一包自带夹具 |
+| A | 专辑卡播放角标（web `right:7;bottom:7`、32×32，原生约束 `-8`） | **待修，且比台账原来记的更多**：本轮尝试建夹具时量到原生角标实际是 **32.5×36**（不是 32×32） | ①差 1pt 已定位（注释写 7、约束写 8，属注释与代码不一致）；②量到的 32.5×36 是按钮**固有尺寸**——离屏集合项不在窗口里，`layoutSubtreeIfNeeded` 不解析约束，测到的是 intrinsicContentSize 而非期望几何 ⟹ 这类夹具必须先挂进离屏窗口才算数 |
 | B | .chip 悬停的边框色 border-color:var(--acc) | 只做了底色+文字 | 系统 NSButton bezel 无法单独改边框色（自绘胶囊等于重新设计控件） |
 | C | .chip 的 transition:.15s | 瞬时切换 | bezelColor 不可动画；要做需自绘层 |
 | D | #npDrawer 模糊半径 | NSVisualEffectView 材质近似 | AppKit 无 backdrop-filter 半径控制 |
