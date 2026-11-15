@@ -2060,6 +2060,14 @@ target_link_libraries(test_mic_cal_api PRIVATE rlapp_core)
 add_test(NAME mic_cal_api COMMAND test_mic_cal_api)
 set_tests_properties(mic_cal_api PROPERTIES TIMEOUT 120)
 
+# U16（上游 v3.3.11）：工作台命名配置档 /api/profiles 黑盒（save→读回→apply 逐键一致→delete）。
+# 与 mic_cal_api 同一路径：进程内 rlapp::dispatch，不监听端口、不开音频设备。
+add_executable(test_profiles_api tests/test_profiles_api.cpp)
+target_include_directories(test_profiles_api PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tools)
+target_link_libraries(test_profiles_api PRIVATE rlapp_core)
+add_test(NAME profiles_api COMMAND test_profiles_api)
+set_tests_properties(profiles_api PROPERTIES TIMEOUT 120)
+
 add_executable(rtahealth tools/rtahealth.cpp)
 target_include_directories(rtahealth PRIVATE ${CMAKE_SOURCE_DIR}/src)
 target_link_libraries(rtahealth PRIVATE ${RL_PLATFORM_LIBS})

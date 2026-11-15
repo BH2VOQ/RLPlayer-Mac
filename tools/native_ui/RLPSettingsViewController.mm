@@ -447,6 +447,13 @@ static NSStackView *RLPSRow(NSString *label, NSView *control, NSString *hint, RL
     RLPTheme *t = [RLPTheme current];
     NSView *host = self.contentView;
 
+    // U16：工作台应用命名配置档后，设置页的读数必须跟着重读（同一进程内的另一份视图）。
+    // 走既有通知机制，不让两个页面互相持有；observer 在 dealloc 统一移除（见上）。
+    [[NSNotificationCenter defaultCenter] addObserver:self
+                                             selector:@selector(onWorkbenchProfileApplied:)
+                                                 name:@"RLPSettingsChangedNotification"
+                                               object:nil];
+
     self.tabs = [[NSSegmentedControl alloc] initWithFrame:NSZeroRect];
     self.tabs.trackingMode = NSSegmentSwitchTrackingSelectOne;
     self.tabs.target = self;
@@ -3252,6 +3259,13 @@ static BOOL RLPFeedbackTextBlank(NSString *s) {
 
 
 #pragma mark - 数据
+
+/// U16：工作台应用配置档后重读设置（同一份 /api/settings，UI 里不复制状态）。
+- (void)onWorkbenchProfileApplied:(NSNotification *)note {
+    (void)note;
+    if (![RLPCoreClient shared].started) return;
+    [self reloadData];
+}
 
 - (void)activate { [self reloadData]; [self wbSyncBusy]; }
 

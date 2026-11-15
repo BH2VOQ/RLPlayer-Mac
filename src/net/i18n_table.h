@@ -2518,6 +2518,22 @@ inline const I18nPair* i18n_table(std::size_t* count) {
         {"完整性", "Completeness"},
         {"容器声明", "Container declares"},
         {"实际解码", "Decoded"},
+        {"配置档", "Profiles"},
+        {"把当前听感设置存成命名档，点应用即可切换。切档只动滤波/升频/DSD/EQ 等听感项，不动输出设备、独占与缓冲。", "Save the current listening settings as a named profile; click Apply to switch. Switching only changes listening items such as filters, upsampling, DSD and EQ — never the output device, exclusive mode or buffer."},
+        {"保存当前为配置档…", "Save current as profile…"},
+        {"保存为配置档", "Save as profile"},
+        {"配置档名称", "Profile name"},
+        {"名称不能为空，最多 140 字节。", "The name cannot be empty and must be at most 140 bytes."},
+        {"已保存配置档：%@", "Profile saved: %@"},
+        {"已应用配置档：%@", "Profile applied: %@"},
+        {"已应用配置档：%@ · 有 %ld 项没有生效", "Profile applied: %@ · %ld items did not take effect"},
+        {"已删除配置档：%@", "Profile deleted: %@"},
+        {"还没有配置档", "No profiles yet"},
+        {"共 %ld 档", "%ld profiles"},
+        {"当前：%@", "Current: %@"},
+        {"删除配置档「%@」？", "Delete profile “%@”?"},
+        {"删除后无法恢复。", "This cannot be undone."},
+        {"先选中一个配置档", "Select a profile first"},
     };
     if (count) *count = sizeof(k) / sizeof(k[0]);
     return k;

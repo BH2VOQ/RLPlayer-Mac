@@ -22,7 +22,7 @@
 static NSString *const kABSlotsKey = @"RLPWorkbenchABSlots";
 static const NSInteger kABSlotCount = 4;
 
-@interface RLPWorkbenchViewController ()
+@interface RLPWorkbenchViewController () <NSTableViewDataSource, NSTableViewDelegate>
 @property (nonatomic, strong) NSStackView *stack;
 // 信号链
 @property (nonatomic, strong) NSStackView *chainRow;
@@ -70,6 +70,15 @@ static const NSInteger kABSlotCount = 4;
 @property (nonatomic, strong) NSMutableArray<NSTextField *> *abSummaries;
 @property (nonatomic, strong) NSButton *abToggle;
 @property (nonatomic, assign) NSInteger abActive;
+// U16 配置档（命名档；档列表与 active 都只来自后端 /api/profiles，不落 NSUserDefaults）
+@property (nonatomic, strong) NSMutableArray<NSDictionary *> *profiles;
+@property (nonatomic, copy) NSString *profileActive;
+@property (nonatomic, strong) NSTableView *profileTable;
+@property (nonatomic, strong) NSScrollView *profileScroll;
+@property (nonatomic, strong) NSTextField *profileStatus;
+@property (nonatomic, strong) NSButton *profileSaveButton;
+@property (nonatomic, strong) NSButton *profileApplyButton;
+@property (nonatomic, strong) NSButton *profileDeleteButton;
 // 数据
 @property (nonatomic, copy) NSDictionary *settings;
 @property (nonatomic, copy) NSArray<NSDictionary *> *filters;
@@ -99,6 +108,10 @@ static const NSInteger kABSlotCount = 4;
 - (void)reloadAll;
 - (void)refreshChain;
 - (void)refreshAB;
+- (void)buildProfiles;
+- (void)reloadProfiles;
+- (void)refreshProfileStatus;
+- (NSDictionary *)selectedProfile;
 - (void)rebuildFilterControls;
 - (void)reloadEqPresets;
 - (void)syncPhaseSeg;
@@ -129,6 +142,8 @@ static const NSInteger kABSlotCount = 4;
         _abSummaries = [NSMutableArray array];
         _abActive = -1;
         _abSlots = [NSMutableArray array];
+        _profiles = [NSMutableArray array];
+        _profileActive = @"";
         NSArray *saved = [[NSUserDefaults standardUserDefaults] arrayForKey:kABSlotsKey];
         for (NSInteger i = 0; i < kABSlotCount; ++i) {
             NSDictionary *s = (i < (NSInteger)saved.count && [saved[i] isKindOfClass:[NSDictionary class]]) ? saved[i] : @{};
@@ -170,6 +185,7 @@ static const NSInteger kABSlotCount = 4;
     [self buildTrackCard];
     [self buildChain];
     [self buildABSlots];
+    [self buildProfiles];
     [self buildFilterSection];
     [self buildUpsampleSection];
     [self buildOutputSection];
@@ -713,6 +729,278 @@ static const NSInteger kABSlotCount = 4;
         self.abSummaries[i].toolTip = RLPABSlotSummary(s);
         self.abSummaries[i].textColor = on ? t.accentText : t.mut;
     }
+}
+
+#pragma mark - ②b 配置档（U16 命名档）
+
+/// 配置档卡：命名档列表 + 保存/应用/删除。
+/// 纪律：档列表与生效状态**只来自后端** /api/profiles（持久化在 state 目录），
+/// NSUserDefaults 里只有旧的 A/B 槽；两者不混用，也不允许把 UI 上的临时选择当成档。
+- (void)buildProfiles {
+    RLPTheme *t = [RLPTheme current];
+    NSView *card = [self cardWithIdentifier:@"wb.profiles"];
+    NSTextField *ti = [self sectionTitle:RLPTr(@"配置档")];
+    NSTextField *note = RLPLabel(RLPTr(@"把当前听感设置存成命名档，点应用即可切换。切档只动滤波/升频/DSD/EQ 等听感项，不动输出设备、独占与缓冲。"), t.small, t.mut);
+    note.translatesAutoresizingMaskIntoConstraints = NO;
+    note.maximumNumberOfLines = 0;
+    note.lineBreakMode = NSLineBreakByWordWrapping;
+
+    self.profileTable = [[NSTableView alloc] initWithFrame:NSMakeRect(0, 0, 640, 96)];
+    self.profileTable.identifier = @"wb.profile.list";
+    self.profileTable.headerView = nil;
+    self.profileTable.rowHeight = 24;
+    self.profileTable.backgroundColor = NSColor.clearColor;
+    self.profileTable.selectionHighlightStyle = NSTableViewSelectionHighlightStyleRegular;
+    self.profileTable.dataSource = self;
+    self.profileTable.delegate = self;
+    self.profileTable.autoresizingMask = NSViewWidthSizable;
+    if (@available(macOS 11.0, *)) self.profileTable.style = NSTableViewStylePlain;
+    NSTableColumn *col = [[NSTableColumn alloc] initWithIdentifier:@"profile"];
+    col.resizingMask = NSTableColumnAutoresizingMask;
+    [self.profileTable addTableColumn:col];
+    self.profileTable.columnAutoresizingStyle = NSTableViewUniformColumnAutoresizingStyle;
+
+    self.profileScroll = [[NSScrollView alloc] initWithFrame:NSZeroRect];
+    self.profileScroll.translatesAutoresizingMaskIntoConstraints = NO;
+    self.profileScroll.hasVerticalScroller = YES;
+    self.profileScroll.autohidesScrollers = YES;
+    self.profileScroll.drawsBackground = NO;
+    self.profileScroll.borderType = NSNoBorder;
+    self.profileScroll.documentView = self.profileTable;
+
+    self.profileSaveButton = [NSButton buttonWithTitle:RLPTr(@"保存当前为配置档…") target:self action:@selector(onProfileSave:)];
+    self.profileSaveButton.bezelStyle = NSBezelStyleRounded;
+    self.profileSaveButton.identifier = @"wb.profile.save";
+    self.profileSaveButton.font = t.small;
+    self.profileSaveButton.translatesAutoresizingMaskIntoConstraints = NO;
+
+    self.profileApplyButton = [NSButton buttonWithTitle:RLPTr(@"应用") target:self action:@selector(onProfileApply:)];
+    self.profileApplyButton.bezelStyle = NSBezelStyleRounded;
+    self.profileApplyButton.identifier = @"wb.profile.apply";
+    self.profileApplyButton.font = t.small;
+    self.profileApplyButton.translatesAutoresizingMaskIntoConstraints = NO;
+
+    self.profileDeleteButton = [NSButton buttonWithTitle:RLPTr(@"删除") target:self action:@selector(onProfileDelete:)];
+    self.profileDeleteButton.bezelStyle = NSBezelStyleRounded;
+    self.profileDeleteButton.identifier = @"wb.profile.delete";
+    self.profileDeleteButton.font = t.small;
+    self.profileDeleteButton.translatesAutoresizingMaskIntoConstraints = NO;
+
+    self.profileStatus = RLPLabel(RLPTr(@"还没有配置档"), t.caption, t.mut);
+    self.profileStatus.identifier = @"wb.profile.status";
+    self.profileStatus.translatesAutoresizingMaskIntoConstraints = NO;
+    self.profileStatus.lineBreakMode = NSLineBreakByTruncatingTail;
+
+    for (NSView *v in @[ti, note, self.profileScroll, self.profileSaveButton,
+                        self.profileApplyButton, self.profileDeleteButton, self.profileStatus])
+        [card addSubview:v];
+
+    [NSLayoutConstraint activateConstraints:@[
+        [ti.leadingAnchor constraintEqualToAnchor:card.leadingAnchor constant:14],
+        [ti.topAnchor constraintEqualToAnchor:card.topAnchor constant:12],
+        [note.leadingAnchor constraintEqualToAnchor:card.leadingAnchor constant:14],
+        [note.trailingAnchor constraintEqualToAnchor:card.trailingAnchor constant:-14],
+        [note.topAnchor constraintEqualToAnchor:ti.bottomAnchor constant:2],
+        [self.profileScroll.leadingAnchor constraintEqualToAnchor:card.leadingAnchor constant:14],
+        [self.profileScroll.trailingAnchor constraintEqualToAnchor:card.trailingAnchor constant:-14],
+        [self.profileScroll.topAnchor constraintEqualToAnchor:note.bottomAnchor constant:8],
+        [self.profileScroll.heightAnchor constraintEqualToConstant:96],
+        [self.profileSaveButton.leadingAnchor constraintEqualToAnchor:card.leadingAnchor constant:14],
+        [self.profileSaveButton.topAnchor constraintEqualToAnchor:self.profileScroll.bottomAnchor constant:10],
+        [self.profileApplyButton.leadingAnchor constraintEqualToAnchor:self.profileSaveButton.trailingAnchor constant:8],
+        [self.profileApplyButton.centerYAnchor constraintEqualToAnchor:self.profileSaveButton.centerYAnchor],
+        [self.profileDeleteButton.leadingAnchor constraintEqualToAnchor:self.profileApplyButton.trailingAnchor constant:8],
+        [self.profileDeleteButton.centerYAnchor constraintEqualToAnchor:self.profileSaveButton.centerYAnchor],
+        [self.profileStatus.leadingAnchor constraintEqualToAnchor:card.leadingAnchor constant:14],
+        [self.profileStatus.trailingAnchor constraintEqualToAnchor:card.trailingAnchor constant:-14],
+        [self.profileStatus.topAnchor constraintEqualToAnchor:self.profileSaveButton.bottomAnchor constant:6],
+    ]];
+    [self addFullWidth:card height:262];
+    [self refreshProfileStatus];
+}
+
+- (void)refreshProfileStatus {
+    if (self.profiles.count == 0) {
+        self.profileStatus.stringValue = RLPTr(@"还没有配置档");
+    } else {
+        NSString *count = [NSString stringWithFormat:RLPTr(@"共 %ld 档"), (long)self.profiles.count];
+        NSString *activeName = nil;
+        for (NSDictionary *p in self.profiles) {
+            id pid = p[@"id"];
+            if ([pid isKindOfClass:[NSString class]] && [(NSString *)pid isEqualToString:self.profileActive]) {
+                activeName = [p[@"name"] isKindOfClass:[NSString class]] ? p[@"name"] : nil;
+                break;
+            }
+        }
+        self.profileStatus.stringValue = activeName.length
+            ? [NSString stringWithFormat:@"%@ · %@", [NSString stringWithFormat:RLPTr(@"当前：%@"), activeName], count]
+            : count;
+    }
+    self.profileApplyButton.enabled = self.profiles.count > 0;
+    self.profileDeleteButton.enabled = self.profiles.count > 0;
+}
+
+- (NSDictionary *)selectedProfile {
+    const NSInteger row = self.profileTable.selectedRow;
+    if (row >= 0 && row < (NSInteger)self.profiles.count) return self.profiles[(NSUInteger)row];
+    if (self.profileActive.length) {
+        for (NSDictionary *p in self.profiles) {
+            id pid = p[@"id"];
+            if ([pid isKindOfClass:[NSString class]] && [(NSString *)pid isEqualToString:self.profileActive]) return p;
+        }
+    }
+    return nil;
+}
+
+/// 读档列表：只认后端。失败/核心未启动时清空成空态（不沿用旧快照，避免"看起来还生效"）。
+- (void)reloadProfiles {
+    if (![RLPCoreClient shared].started) {
+        self.profiles = [NSMutableArray array];
+        self.profileActive = @"";
+        [self.profileTable reloadData];
+        [self refreshProfileStatus];
+        return;
+    }
+    __weak __typeof__(self) weakSelf = self;
+    [[RLPCoreClient shared] getJSON:@"/api/profiles" completion:^(NSDictionary * _Nullable json) {
+        __typeof__(self) self_ = weakSelf;
+        if (!self_) return;
+        if (json && [json[@"ok"] boolValue] && [json[@"profiles"] isKindOfClass:[NSArray class]]) {
+            self_.profiles = [(NSArray *)json[@"profiles"] mutableCopy];
+            self_.profileActive = [json[@"active"] isKindOfClass:[NSString class]] ? json[@"active"] : @"";
+        } else {
+            self_.profiles = [NSMutableArray array];
+            self_.profileActive = @"";
+        }
+        [self_.profileTable reloadData];
+        // 选回当前档；没有 active 就选第一行 —— 「应用/删除」要有明确对象。
+        NSInteger sel = -1;
+        for (NSInteger i = 0; i < (NSInteger)self_.profiles.count; ++i) {
+            id pid = self_.profiles[(NSUInteger)i][@"id"];
+            if ([pid isKindOfClass:[NSString class]] && [(NSString *)pid isEqualToString:self_.profileActive]) { sel = i; break; }
+        }
+        if (sel < 0 && self_.profiles.count > 0) sel = 0;
+        if (sel >= 0) [self_.profileTable selectRowIndexes:[NSIndexSet indexSetWithIndex:(NSUInteger)sel]
+                                      byExtendingSelection:NO];
+        [self_ refreshProfileStatus];
+    }];
+}
+
+- (void)onProfileSave:(id)sender {
+    (void)sender;
+    if (![RLPCoreClient shared].started) { RLPToast(RLPTr(@"核心未启动")); return; }
+    NSString *name = RLPAskText(RLPTr(@"保存为配置档"), RLPTr(@"保存"), @"",
+                                RLPTr(@"配置档名称"), RLPTr(@"名称不能为空，最多 140 字节。"));
+    if (!name.length) return;
+    __weak __typeof__(self) weakSelf = self;
+    [[RLPCoreClient shared] postJSON:[NSString stringWithFormat:@"/api/profiles?save=%@", RLPEnc(name)]
+                                  body:nil
+                            completion:^(NSDictionary * _Nullable json) {
+        __typeof__(self) self_ = weakSelf;
+        if (!self_) return;
+        if (json && [json[@"ok"] boolValue]) {
+            RLPToast([NSString stringWithFormat:RLPTr(@"已保存配置档：%@"), name]);
+            [self_ reloadProfiles];
+        } else {
+            NSString *why = [json[@"error"] isKindOfClass:[NSString class]] ? json[@"error"] : @"";
+            RLPToast([NSString stringWithFormat:@"%@ %@", RLPTr(@"保存失败"), why]);
+        }
+    }];
+}
+
+- (void)onProfileApply:(id)sender {
+    (void)sender;
+    NSDictionary *p = [self selectedProfile];
+    if (!p) { RLPToast(RLPTr(@"先选中一个配置档")); return; }
+    NSString *pid = [p[@"id"] isKindOfClass:[NSString class]] ? p[@"id"] : @"";
+    if (!pid.length) return;
+    NSString *name = [p[@"name"] isKindOfClass:[NSString class]] ? p[@"name"] : pid;
+    __weak __typeof__(self) weakSelf = self;
+    [[RLPCoreClient shared] postJSON:[NSString stringWithFormat:@"/api/profiles?apply=%@", RLPEnc(pid)]
+                                  body:nil
+                            completion:^(NSDictionary * _Nullable json) {
+        __typeof__(self) self_ = weakSelf;
+        if (!self_) return;
+        if (json && [json[@"ok"] boolValue]) {
+            const NSInteger skipped = [json[@"skipped"] isKindOfClass:[NSArray class]]
+                ? (NSInteger)[(NSArray *)json[@"skipped"] count] : 0;
+            if (skipped > 0) {
+                RLPToast([NSString stringWithFormat:RLPTr(@"已应用配置档：%@ · 有 %ld 项没有生效"),
+                          name, (long)skipped]);
+            } else {
+                RLPToast([NSString stringWithFormat:RLPTr(@"已应用配置档：%@"), name]);
+            }
+            // 工作台自己的读数立即刷新（设置页由 RLPSettingsChangedNotification 重读）。
+            [self_ reloadSettings];
+            [self_ reloadStatus];
+            [self_ reloadEqPresets];
+            [self_.eqView reload];
+            [[NSNotificationCenter defaultCenter] postNotificationName:@"RLPSettingsChangedNotification"
+                                                                object:nil];
+            [self_ reloadProfiles];
+        } else {
+            NSString *why = [json[@"error"] isKindOfClass:[NSString class]] ? json[@"error"] : @"";
+            RLPToast([NSString stringWithFormat:@"%@ %@", RLPTr(@"应用失败"), why]);
+        }
+    }];
+}
+
+- (void)onProfileDelete:(id)sender {
+    (void)sender;
+    NSDictionary *p = [self selectedProfile];
+    if (!p) { RLPToast(RLPTr(@"先选中一个配置档")); return; }
+    NSString *pid = [p[@"id"] isKindOfClass:[NSString class]] ? p[@"id"] : @"";
+    if (!pid.length) return;
+    NSString *name = [p[@"name"] isKindOfClass:[NSString class]] ? p[@"name"] : pid;
+    NSAlert *a = [[NSAlert alloc] init];
+    a.messageText = [NSString stringWithFormat:RLPTr(@"删除配置档「%@」？"), name];
+    a.informativeText = RLPTr(@"删除后无法恢复。");
+    [a addButtonWithTitle:RLPTr(@"删除")];
+    [a addButtonWithTitle:RLPTr(@"取消")];
+    if ([a runModal] != NSAlertFirstButtonReturn) return;
+    __weak __typeof__(self) weakSelf = self;
+    [[RLPCoreClient shared] postJSON:[NSString stringWithFormat:@"/api/profiles?delete=%@", RLPEnc(pid)]
+                                  body:nil
+                            completion:^(NSDictionary * _Nullable json) {
+        __typeof__(self) self_ = weakSelf;
+        if (!self_) return;
+        if (json && [json[@"ok"] boolValue]) {
+            RLPToast([NSString stringWithFormat:RLPTr(@"已删除配置档：%@"), name]);
+            [self_ reloadProfiles];
+        } else {
+            NSString *why = [json[@"error"] isKindOfClass:[NSString class]] ? json[@"error"] : @"";
+            RLPToast([NSString stringWithFormat:@"%@ %@", RLPTr(@"删除失败"), why]);
+        }
+    }];
+}
+
+#pragma mark - NSTableViewDataSource / NSTableViewDelegate（配置档列表）
+
+- (NSInteger)numberOfRowsInTableView:(NSTableView *)tableView {
+    (void)tableView;
+    return (NSInteger)self.profiles.count;
+}
+
+- (NSView *)tableView:(NSTableView *)tableView viewForTableColumn:(NSTableColumn *)tableColumn row:(NSInteger)row {
+    (void)tableColumn;
+    if (row < 0 || row >= (NSInteger)self.profiles.count) return nil;
+    RLPTheme *t = [RLPTheme current];
+    NSDictionary *p = self.profiles[(NSUInteger)row];
+    NSTextField *label = (NSTextField *)[tableView makeViewWithIdentifier:@"wb.profile.cell" owner:self];
+    if (!label) {
+        label = RLPLabel(@"", t.body, t.text);
+        label.identifier = @"wb.profile.cell";
+        label.lineBreakMode = NSLineBreakByTruncatingTail;
+        label.maximumNumberOfLines = 1;
+    }
+    NSString *name = [p[@"name"] isKindOfClass:[NSString class]] ? p[@"name"] : @"—";
+    NSString *text = [NSString stringWithFormat:@"%@   ·   %@", name, RLPProfileSummary(p)];
+    label.stringValue = text;
+    label.toolTip = text;
+    id pid = p[@"id"];
+    const BOOL on = [pid isKindOfClass:[NSString class]] && [(NSString *)pid isEqualToString:self.profileActive];
+    label.textColor = on ? t.accentText : t.text;
+    return label;
 }
 
 #pragma mark - ③ 快速滤波切换
@@ -1539,6 +1827,7 @@ static const NSInteger kABSlotCount = 4;
     [self reloadDevices];
     [self reloadSettings];
     [self reloadStatus];
+    [self reloadProfiles];
     [self.eqView reload];
     [self reloadEqPresets];
 }
@@ -1609,6 +1898,9 @@ static const NSInteger kABSlotCount = 4;
         [self_ rebuildFilterControls];
         [self_ refreshChain];
         [self_ refreshAB];
+        // U16：应用配置档可能改掉 eq（EQ 文本路径）。旧实现从未调用这个回显，
+        // 勾选状态会停在旧值 —— 应用档后读数是假的。
+        [self_ syncEqOnCheck];
         const BOOL eqOn = [[self_ str:@"eq" def:@"0"] isEqualToString:@"1"];
         [self_.eqBypass setTitle:eqOn ? RLPTr(@"旁路 EQ") : RLPTr(@"启用 EQ")];
         NSArray *vals = @[@"0", @"64", @"128", @"256", @"512"];
@@ -1751,6 +2043,9 @@ static const NSInteger kABSlotCount = 4;
     [self refreshChain];
     [self refreshTrackCard];
     [self refreshAB];
+    // U16：配置档状态行与档列表的行颜色也要跟着主题重刷（否则浅底深灰几乎看不见）。
+    if (self.profileStatus) self.profileStatus.textColor = t.mut;
+    if (self.profileTable) [self.profileTable reloadData];
 }
 
 @end

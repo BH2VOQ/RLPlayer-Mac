@@ -1,0 +1,16 @@
+配置档	Profiles	工作台配置档卡标题（U16）
+把当前听感设置存成命名档，点应用即可切换。切档只动滤波/升频/DSD/EQ 等听感项，不动输出设备、独占与缓冲。	Save the current listening settings as a named profile; click Apply to switch. Switching only changes listening items such as filters, upsampling, DSD and EQ — never the output device, exclusive mode or buffer.	工作台配置档卡说明（U16）
+保存当前为配置档…	Save current as profile…	工作台配置档保存按钮（U16）
+保存为配置档	Save as profile	保存配置档对话框标题（U16）
+配置档名称	Profile name	保存配置档输入框占位符（U16）
+名称不能为空，最多 140 字节。	The name cannot be empty and must be at most 140 bytes.	保存配置档对话框提示（U16）
+已保存配置档：%@	Profile saved: %@	保存成功轻提示（U16）
+已应用配置档：%@	Profile applied: %@	应用成功轻提示（U16）
+已应用配置档：%@ · 有 %ld 项没有生效	Profile applied: %@ · %ld items did not take effect	应用部分成功轻提示（U16）
+已删除配置档：%@	Profile deleted: %@	删除成功轻提示（U16）
+还没有配置档	No profiles yet	配置档列表空态（U16）
+共 %ld 档	%ld profiles	配置档计数状态行（U16）
+当前：%@	Current: %@	当前生效配置档状态行（U16）
+删除配置档「%@」？	Delete profile “%@”?	删除配置档确认标题（U16）
+删除后无法恢复。	This cannot be undone.	删除配置档确认提示（U16）
+先选中一个配置档	Select a profile first	应用/删除配置档前置提示（U16）
