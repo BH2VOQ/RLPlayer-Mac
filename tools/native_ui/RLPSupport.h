@@ -15,6 +15,14 @@ NSString *RLPTr(NSString *zh);
 void RLPSetLanguage(NSString * _Nullable lang);
 NSString *RLPLanguage(void);
 
+/// 读**已落盘**的界面语言（state 目录 rlplayer-settings.conf 的 lang，"zh"/"en"）。
+/// 缺失或非法返回 nil。与 web 同口径（src/net/ui_page.h 的 read_conf_value）：
+/// 配置文件是语言优先级的唯一真相源，不靠后端 GET。
+NSString * _Nullable RLPLanguageFromConf(void);
+/// 启动早期（建菜单/建窗口之前）调用：把落盘语言应用到 RLPTr。
+/// 那时核心还没起来，所以只读 conf —— 这也是"每次 RLPTr 都不打后端"的保证。
+void RLPApplyLanguageFromConf(void);
+
 /// 时长："m:ss" / "h:mm:ss"；非有限值返回 "0:00"。
 NSString *RLPFmtDuration(double seconds);
 /// 字节数："12.3 MB"。

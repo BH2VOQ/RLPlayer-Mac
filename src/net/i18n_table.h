@@ -2258,6 +2258,7 @@ inline const I18nPair* i18n_table(std::size_t* count) {
         {"兼容转换（compatible）", "Compatible conversion (compatible)"},
         {"采样率族策略", "Sample-rate family policy"},
         {"自动 = 优先源采样率同族（拒绝跨族）；严格 = 禁止跨族；兼容 = 允许跨族转换（非 bit-perfect）", "Auto = prefer the source sample-rate family (cross-family blocked); Strict = cross-family blocked; Compatible = allow cross-family conversion (not bit-perfect)"},
+        {"界面语言将在重启后生效", "The interface language will take effect after restarting the app"},
         {"翻译…", "Translate…"},
         {"音译", "Transliterate"},
         {"日语假名", "Furigana"},

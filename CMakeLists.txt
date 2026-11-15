@@ -842,6 +842,26 @@ if(APPLE)
   add_test(NAME native_update_result_lifetime COMMAND test_native_update_result_lifetime)
   set_tests_properties(native_update_result_lifetime PROPERTIES TIMEOUT 120)
 
+  # 界面语言：启动时应用 <state>/rlplayer-settings.conf 的 lang；切换时如实挂账「重启生效」。
+  # 判据先红后绿见 tests/test_native_lang.mm 文件头；真核心 + 真设置页真控件，不出声。
+  add_executable(test_native_lang tests/test_native_lang.mm
+    tools/native_ui/RLPSettingsViewController.mm tools/native_ui/RLPSettingsLayout.mm
+    tools/native_ui/RLPServersView.mm tools/native_ui/RLPMetaSourcesView.mm
+    tools/native_ui/RLPLibStatsView.mm tools/native_ui/RLPEqualizerView.mm tools/native_ui/RLPEQFaderView.mm tools/native_ui/RLPEQFaderInspector.mm tools/native_ui/RLPVolumeSliderView.mm tools/native_ui/RLPTargetCurve.mm
+    tools/native_ui/RLPLibStatsView.mm tools/native_ui/RLPEQGeometry.mm tools/native_ui/RLPTargetCurve.mm
+    tools/native_ui/RLPInputView.mm tools/native_ui/RLPCastView.mm
+    tools/native_ui/RLPCalibrationView.mm tools/native_ui/RLPUpdateWindowController.mm
+    tools/native_ui/RLPFeedbackWindowController.mm tools/native_ui/RLPPageViewController.mm
+    tools/native_ui/RLPCoreClient.mm tools/native_ui/RLPSupport.mm
+    tools/native_ui/RLPTheme.mm tools/native_ui/RLPNativeI18n.mm
+    tools/native_ui/RLPTargetCurve.mm tools/mac_update.mm)
+  target_compile_options(test_native_lang PRIVATE -fobjc-arc)
+  target_include_directories(test_native_lang PRIVATE src tools tools/native_ui)
+  target_link_libraries(test_native_lang PRIVATE rlapp_core
+    "-framework AppKit" "-framework Security")
+  add_test(NAME native_lang COMMAND test_native_lang)
+  set_tests_properties(native_lang PROPERTIES TIMEOUT 180)
+
   # 第8项耳机目标曲线：桥层（数组三元组/预设字段）+ 请求逐字段（web diff）+ 图上图层（像素）。
   add_executable(test_native_target_curve tests/test_native_target_curve.mm
     tools/native_ui/RLPEqualizerView.mm tools/native_ui/RLPEQFaderView.mm tools/native_ui/RLPEQFaderInspector.mm tools/native_ui/RLPVolumeSliderView.mm tools/native_ui/RLPTargetCurve.mm

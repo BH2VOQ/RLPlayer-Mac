@@ -65,6 +65,10 @@ static void STCheck(BOOL ok, const char *what, NSString *detail) {
 @implementation RLPAppDelegate
 
 - (void)applicationDidFinishLaunching:(NSNotification *)note {
+    // 语言必须在**建菜单/建窗口之前**应用：菜单标题与各页文案都在下面几行里就调用 RLPTr，
+    // 构造完就定型了。真相源是 state 目录的 rlplayer-settings.conf（与 web 同口径）；
+    // 启动早期核心还没起来，不能去 GET /api/settings。
+    RLPApplyLanguageFromConf();
     [self buildMenu];
     // 主题：没存过就用默认（light）。**无条件调一次**并同步全局 appearance ——
     // setThemeName 对同名会 early-return 不发通知，只靠它会出现

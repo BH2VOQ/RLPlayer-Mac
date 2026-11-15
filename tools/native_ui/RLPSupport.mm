@@ -4,6 +4,8 @@
 #import "RLPCoreClient.h"
 #import "RLPTheme.h"
 
+#include <cstdlib>
+
 static NSString *gLang = @"zh";
 
 NSString *RLPLanguage(void) { return gLang; }
@@ -11,6 +13,38 @@ NSString *RLPLanguage(void) { return gLang; }
 void RLPSetLanguage(NSString *lang) {
     if ([lang isEqualToString:@"en"] || [lang isEqualToString:@"zh"]) gLang = [lang copy];
     else gLang = @"zh";
+}
+
+/// state 目录口径必须与后端 read_conf_value 一致（src/net/ui_page.h）：
+///   ① RLPLAYER_STATE_DIR（测试/独立实例）；② ~/Library/Application Support/RLPlayer
+///   （= platform/macos/path_posix.h 的 config_dir_utf8()）。
+static NSString *RLPSettingsConfPath(void) {
+    const char *env = std::getenv("RLPLAYER_STATE_DIR");
+    NSString *dir = (env && *env)
+        ? [NSString stringWithUTF8String:env]
+        : [NSHomeDirectory() stringByAppendingPathComponent:@"Library/Application Support/RLPlayer"];
+    return [dir stringByAppendingPathComponent:@"rlplayer-settings.conf"];
+}
+
+NSString * _Nullable RLPLanguageFromConf(void) {
+    NSString *text = [NSString stringWithContentsOfFile:RLPSettingsConfPath()
+                                               encoding:NSUTF8StringEncoding error:NULL];
+    if (!text.length) return nil;
+    // 与后端 read_conf_value 的口径一致：按 '=' 切成键/值，两侧去空格与 Tab，值转小写。
+    NSCharacterSet *ws = [NSCharacterSet characterSetWithCharactersInString:@" \t"];
+    for (NSString *line in [text componentsSeparatedByCharactersInSet:[NSCharacterSet newlineCharacterSet]]) {
+        NSRange eq = [line rangeOfString:@"="];
+        if (eq.location == NSNotFound) continue;
+        NSString *key = [[line substringToIndex:eq.location] stringByTrimmingCharactersInSet:ws];
+        if (![key isEqualToString:@"lang"]) continue;
+        return [[line substringFromIndex:eq.location + 1] stringByTrimmingCharactersInSet:ws].lowercaseString;
+    }
+    return nil;
+}
+
+void RLPApplyLanguageFromConf(void) {
+    // nil / 非法值 ⟹ RLPSetLanguage 回落 zh（空 state 目录不能把界面卡在英文）。
+    RLPSetLanguage(RLPLanguageFromConf());
 }
 
 NSString *RLPTr(NSString *zh) {
