@@ -17,6 +17,9 @@
 #import "RLPCoreClient.h"
 #import "RLPFavoritesViewController.h"
 #import "RLPRecentViewController.h"
+#import "RLPMainWindowController.h"
+#import "RLPSidebarViewController.h"
+#import "RLPPlaylistsViewController.h"
 #import "RLPQueueViewController.h"
 #import "RLPTrackActions.h"
 #import "RLPTheme.h"
@@ -279,6 +282,42 @@ int main() {
                    "P12 最近专辑列宽 = 92px（web 92px）",
                    [NSString stringWithFormat:@"w3=%.1f", ColWidth(tv, 3)]);
             }
+        }
+
+        // ---- P8 歌单页顶栏标题 = 歌单名（副标题「N 首」）----
+        // web renderSavedQueuePage（ui_script.h:3796-3810）：head(name, it.length + ' 首', …)
+        // —— 进入某份歌单时顶栏标题是**歌单名**，不是固定的「歌单」。
+        {
+            RLPMainWindowController *wc = [[RLPMainWindowController alloc] init];
+            wc.window.contentView.frame = NSMakeRect(0, 0, 1280, 860);
+            [wc.window.contentView layoutSubtreeIfNeeded];
+            [wc.sidebar reloadSavedQueues];
+            Pump(0.25);
+            Ck(wc.sidebar.savedQueueRowCount == 1,
+               "P8 侧栏拿到 fixture 的 1 份歌单（判据前提）",
+               [NSString stringWithFormat:@"savedQueues=%ld", (long)wc.sidebar.savedQueueRowCount]);
+            // 侧栏点「Night Drive」行 = web paintSavedQueues 的 sqrow.onclick → renderSavedQueuePage(name)
+            [wc.sidebar selectKey:@"playlists"];
+            Pump(0.3);
+            NSDictionary *cache = [wc valueForKey:@"pageCache"];
+            RLPPlaylistsViewController *pl = (RLPPlaylistsViewController *)cache[@"playlists"];
+            Ck([pl isKindOfClass:[RLPPlaylistsViewController class]],
+               "P8 歌单页已创建（判据前提）", @"pageCache[playlists] 不是歌单页");
+            NSTextField *topTitle = (NSTextField *)[wc valueForKey:@"pageTitle"];
+            NSTextField *topCount = (NSTextField *)[wc valueForKey:@"pageCount"];
+            NSString *title = topTitle.stringValue ?: @"";
+            Ck([title isEqualToString:@"Night Drive"],
+               "P8 顶栏标题 = 歌单名（不再是固定「歌单」）",
+               [NSString stringWithFormat:@"topbar=%@ pageTitle=%@", title, pl.pageTitle ?: @"(nil)"]);
+            Ck([pl.pageTitle isEqualToString:@"Night Drive"],
+               "P8 页面的 pageTitle 也随歌单更新（可写标题 API 生效）",
+               pl.pageTitle ?: @"(nil)");
+            Ck([topCount.stringValue isEqualToString:@"3 首"],
+               "P8 顶栏副标题/计数 = 「3 首」（web head 第二参）",
+               [NSString stringWithFormat:@"count=%@", topCount.stringValue ?: @"(empty)"]);
+            Ck([pl.subtitleLabel.stringValue isEqualToString:@"3 首"],
+               "P8 页内副标题 = 「3 首」",
+               pl.subtitleLabel.stringValue ?: @"(nil)");
         }
 
         // ---- P11 右键「收藏」按当前收藏态发 on=1/0；自建菜单死代码已删 ----

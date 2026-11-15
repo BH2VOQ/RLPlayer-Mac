@@ -12,7 +12,9 @@ NS_ASSUME_NONNULL_BEGIN
 
 - (instancetype)initWithTitle:(NSString *)title;
 
-@property (nonatomic, copy, readonly) NSString *pageTitle;
+/// 页标题（web #pth，由主窗口顶栏承载）。**可写**：歌单页打开某份歌单后标题 = 歌单名，
+/// 曲目页搜索时空态/标题带搜索词。赋值会立即联动顶栏（见实现里的 syncTopbarTitle 接缝）。
+@property (nonatomic, copy) NSString *pageTitle;
 @property (nonatomic, strong, readonly) NSTextField *titleLabel;
 @property (nonatomic, strong, readonly) NSTextField *subtitleLabel;
 /// 子类把内容加到这里（已铺满标题下方）。
