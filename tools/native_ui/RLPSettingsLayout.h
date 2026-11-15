@@ -26,6 +26,12 @@ NS_ASSUME_NONNULL_BEGIN
 @property (nonatomic, readonly) NSInteger columnCount;
 /// 最近一次布局算出的内容高度。
 @property (nonatomic, readonly) CGFloat contentHeight;
+/// 列下限（web `repeat(auto-fill,minmax(<W>,1fr))` 里的 <W>）。默认 260 = .sgbody；
+/// 「声道音量微调」按 web `.trimgrid{minmax(148px,1fr)}` 设 148。
+@property (nonatomic, assign) CGFloat minColumnWidth;
+/// 列间距 / 行间距（web `.sgbody{gap:14px 20px}`；`.trimgrid{gap:10px}`）。
+@property (nonatomic, assign) CGFloat columnGap;
+@property (nonatomic, assign) CGFloat rowGap;
 - (void)addItem:(NSView *)item span:(BOOL)fullWidth;
 /// 清空全部字段（按声道数重建「声道音量微调」这类动态内容时用）。
 - (void)removeAllItems;

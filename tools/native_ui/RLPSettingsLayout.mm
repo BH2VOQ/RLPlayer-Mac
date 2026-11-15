@@ -34,6 +34,9 @@ static const CGFloat kBodyPadY = 14.0;
         _spans = [NSMutableArray array];
         _live = [NSMutableArray array];
         _columnCount = 1;
+        _minColumnWidth = kFieldMinW;
+        _columnGap = kColGap;
+        _rowGap = kRowGap;
         self.translatesAutoresizingMaskIntoConstraints = NO;
     }
     return self;
@@ -67,9 +70,11 @@ static const CGFloat kBodyPadY = 14.0;
 /// 列数 = floor((可用宽 + 列间距) / (列下限 + 列间距))，至少 1。
 /// 这就是 CSS repeat(auto-fill, minmax(260px,1fr)) 的等价算法。
 - (NSInteger)columnsForWidth:(CGFloat)w {
+    const CGFloat minW = self.minColumnWidth > 1 ? self.minColumnWidth : kFieldMinW;
+    const CGFloat gap = MAX(0.0, self.columnGap);
     CGFloat avail = w - kBodyPadX * 2;
-    if (avail < kFieldMinW) return 1;
-    NSInteger n = (NSInteger)floor((avail + kColGap) / (kFieldMinW + kColGap));
+    if (avail < minW) return 1;
+    NSInteger n = (NSInteger)floor((avail + gap) / (minW + gap));
     return MAX(1, n);
 }
 
@@ -86,9 +91,10 @@ static const CGFloat kBodyPadY = 14.0;
     const CGFloat w = wNow;
     const NSInteger cols = [self columnsForWidth:w];
     self.columnCount = cols;
-    const CGFloat colW = (w - kBodyPadX * 2 - kColGap * (cols - 1)) / cols;
-
     // 逐行摆放：整行项独占一行；普通项按列填充。
+    const CGFloat kRowGapNow = MAX(0.0, self.rowGap);
+    const CGFloat kColGapNow = MAX(0.0, self.columnGap);
+    const CGFloat colW = (w - kBodyPadX * 2 - kColGapNow * (cols - 1)) / cols;
     CGFloat y = kBodyPadY;
     NSInteger col = 0;
     CGFloat rowH = 0;
@@ -96,8 +102,8 @@ static const CGFloat kBodyPadY = 14.0;
     for (NSUInteger i = 0; i < self.items.count; ++i) {
         NSView *v = self.items[i];
         const BOOL full = self.spans[i].boolValue;
-        if (full && col > 0) { y += rowH + kRowGap; col = 0; rowH = 0; }
-        const CGFloat x = kBodyPadX + col * (colW + kColGap);
+        if (full && col > 0) { y += rowH + kRowGapNow; col = 0; rowH = 0; }
+        const CGFloat x = kBodyPadX + col * (colW + kColGapNow);
         const CGFloat itemW = full ? (w - kBodyPadX * 2) : colW;
         // 用 fittingSize / intrinsicContentSize 量高度，不调 layoutSubtreeIfNeeded：
         // 后者在约束求解过程中会重入（实测栈溢出）。
@@ -113,10 +119,10 @@ static const CGFloat kBodyPadY = 14.0;
         [cs addObject:[v.topAnchor constraintEqualToAnchor:self.topAnchor constant:y]];
         [cs addObject:[v.widthAnchor constraintEqualToConstant:itemW]];
         rowH = MAX(rowH, h);
-        if (full) { y += rowH + kRowGap; col = 0; rowH = 0; }
-        else if (++col >= cols) { y += rowH + kRowGap; col = 0; rowH = 0; }
+        if (full) { y += rowH + kRowGapNow; col = 0; rowH = 0; }
+        else if (++col >= cols) { y += rowH + kRowGapNow; col = 0; rowH = 0; }
     }
-    if (col > 0) y += rowH + kRowGap;
+    if (col > 0) y += rowH + kRowGapNow;
     // 网格自身高度：优先级低于「卡片底 = 网格底」的钉子，避免两条等式互相打架
     // （实测打架结果是网格被压成 0 高、卡片只剩标题条，字段全被裁掉）。
     NSLayoutConstraint *hc = [self.heightAnchor constraintEqualToConstant:MAX(1, y - kRowGap + kBodyPadY)];

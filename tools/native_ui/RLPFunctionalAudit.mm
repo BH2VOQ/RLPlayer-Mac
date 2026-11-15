@@ -1533,14 +1533,26 @@ int RLPRunFunctionalAudit(NSString *outDir) {
             CK(eqRoot != nil, "EQ 页有 RLPEqualizerView（审计锚点）", @"视图树里找不到");
             NSMutableArray<NSView *> *eqSub = [NSMutableArray array];
             if (eqRoot) CollectAllViews(eqRoot, eqSub);
+            // 用户 2026-11-15 明确：**每个界面只允许整页滚动，禁止页面内的小页面滚动**。
+            // 旧判据只数 hasVerticalScroller/hasHorizontalScroller —— 不显示滚动条的
+            // NSScrollView（就是 20 段表那个）照样吃滚轮，于是判据假绿。
+            // 现在：EQ 页内部不允许存在**任何** NSScrollView。
             NSInteger scrollersInsideEQ = 0;
             for (NSView *v in eqSub) {
-                if (![v isKindOfClass:[NSScrollView class]]) continue;
-                NSScrollView *scv = (NSScrollView *)v;
-                if (scv.hasVerticalScroller || scv.hasHorizontalScroller) ++scrollersInsideEQ;
+                if ([v isKindOfClass:[NSScrollView class]]) ++scrollersInsideEQ;
             }
-            CK(scrollersInsideEQ == 0, "EQ 页只剩外层整页滚动条（内层 0 个滚动条）",
-               [NSString stringWithFormat:@"innerScrollers=%ld", (long)scrollersInsideEQ]);
+            CK(scrollersInsideEQ == 0, "EQ 页内部没有任何 NSScrollView（滚轮只归整页）",
+               [NSString stringWithFormat:@"innerScrollViews=%ld", (long)scrollersInsideEQ]);
+            // 分 band：曲线视图必须拿到 20 个频段与每段增益，否则手柄画不出来。
+            NSView *curveView = nil;
+            for (NSView *v in eqSub)
+                if ([v.identifier isEqualToString:@"eq.curve"]) { curveView = v; break; }
+            NSArray *bandFreqs = [curveView valueForKey:@"bandFreqs"];
+            NSArray *bandGains = [curveView valueForKey:@"bandGains"];
+            CK(curveView != nil && bandFreqs.count == 20 && bandGains.count == 20,
+               "EQ 曲线已分 band（20 段频点 + 20 个增益手柄）",
+               [NSString stringWithFormat:@"freqs=%lu gains=%lu",
+                (unsigned long)bandFreqs.count, (unsigned long)bandGains.count]);
             // 20 段参数表必须全高可见（旧实现内层 300pt 滚动裁掉一半参数）
             NSTableView *bands = nil;
             for (NSView *v in eqAll)

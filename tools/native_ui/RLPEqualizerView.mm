@@ -26,6 +26,7 @@
 #import "RLPSupport.h"
 #import "RLPTheme.h"
 #import "RLPTargetCurve.h"
+#import "RLPEQGeometry.h"
 
 #include <cmath>
 #include <initializer_list>
@@ -42,6 +43,12 @@
 /// 原生直接叠加到 EQ 图上，用户能看到"我选的目标曲线长这样"以及它与当前 PEQ 的关系。
 /// nil = 不画（没选预设时不该假装有目标）。
 @property (nonatomic, strong, nullable) RLPTargetCurve *targetCurve;   // 曲线表是共享只读数据，不 copy（RLPTargetCurve 不是 NSCopying）
+/// 正在被拖动的段（-1 = 无）；绘制时高亮它。
+@property (nonatomic) NSInteger activeBand;
+/// 正在被拖动段的临时增益（绘制手柄用）。
+@property (nonatomic) double activeBandDb;
+/// 每段当前增益 dB：画 20 个可拖手柄 + 频段分隔线（用户反馈「没有分 band」）。
+@property (nonatomic, copy) NSArray<NSNumber *> *bandGains;
 @end
 
 @implementation RLPEQCurveView
@@ -163,6 +170,41 @@
         [t.accent setStroke];
         [curve stroke];
     }
+
+    // ---- 分 band（用户反馈「没有分 band」）----
+    // 每段画一条淡分隔线（段中心处）+ 一个可拖手柄（曲线在该段的增益高度）。
+    // 拖拽时高亮当前段：这是"我在调哪一段"的唯一可见反馈。
+    if (self.bandFreqs.count >= 2) {
+        const NSUInteger n = self.bandFreqs.count;
+        [t.line setStroke];
+        for (NSUInteger i = 0; i < n; ++i) {
+            const CGFloat bx = X(self.bandFreqs[i].doubleValue);
+            // 段中心竖线：只画在相邻两段中点，避免把 20 条线糊成栅栏
+            if (i + 1 < n) {
+                const CGFloat midX = (bx + X(self.bandFreqs[i + 1].doubleValue)) / 2.0;
+                NSBezierPath *sep = [NSBezierPath bezierPath];
+                [sep moveToPoint:NSMakePoint(midX, plot.origin.y)];
+                [sep lineToPoint:NSMakePoint(midX, NSMaxY(plot))];
+                sep.lineWidth = 0.5;
+                [[t.line colorWithAlphaComponent:0.6] setStroke];
+                [sep stroke];
+            }
+        }
+        // 手柄
+        for (NSUInteger i = 0; i < n; ++i) {
+            const double db = (i < self.bandGains.count) ? self.bandGains[i].doubleValue : 0.0;
+            const CGFloat hx = X(self.bandFreqs[i].doubleValue);
+            const CGFloat hy = Y(i == (NSUInteger)self.activeBand ? self.activeBandDb : db);
+            const CGFloat r = (i == (NSUInteger)self.activeBand) ? 4.5 : 3.0;
+            NSBezierPath *dot = [NSBezierPath bezierPathWithOvalInRect:
+                                 NSMakeRect(hx - r, hy - r, r * 2, r * 2)];
+            [t.bg2 setFill];
+            [dot fill];
+            [(i == (NSUInteger)self.activeBand ? t.accent : t.mut) setStroke];
+            dot.lineWidth = (i == (NSUInteger)self.activeBand) ? 2.0 : 1.0;
+            [dot stroke];
+        }
+    }
 }
 
 #pragma mark - 曲线拖拽（web PEQ_DRAG：拖动波形图改对应段的增益）
@@ -186,20 +228,16 @@
     if (!self.onDragBand || self.bandFreqs.count == 0) return;
     NSPoint p = [self convertPoint:event.locationInWindow fromView:nil];
     NSRect plot = [self plotRect];
+    if (plot.size.width <= 1 || plot.size.height <= 1) return;
     if (p.x < plot.origin.x || p.x > NSMaxX(plot)) return;
     if (p.y < plot.origin.y || p.y > NSMaxY(plot)) return;
-    NSInteger best = -1;
-    CGFloat bestDist = CGFLOAT_MAX;
-    for (NSUInteger i = 0; i < self.bandFreqs.count; ++i) {
-        CGFloat bx = [self xForFreq:self.bandFreqs[i].doubleValue];
-        CGFloat d = fabs(bx - p.x);
-        if (d < bestDist) { bestDist = d; best = (NSInteger)i; }
-    }
+    // 纯映射（RLPEQGeometry）：x 归一化 -> 最近频段，y 归一化 -> 增益 dB，与 drawRect 同一套坐标。
+    NSInteger best = RLPEQNearestBandIndex(self.bandFreqs, (p.x - plot.origin.x) / plot.size.width);
     if (best < 0) return;
-    double db = -18.0 + ((p.y - plot.origin.y) / plot.size.height) * 36.0;
-    if (db > 18.0) db = 18.0;
-    if (db < -18.0) db = -18.0;
-    self.onDragBand(best, db);
+    self.activeBand = best;          // 高亮被拖动的这一段：用户要能看见自己在动哪一段
+    self.activeBandDb = RLPEQDbForPlotFraction((p.y - plot.origin.y) / plot.size.height);
+    [self setNeedsDisplay:YES];
+    self.onDragBand(best, self.activeBandDb);
 }
 
 - (void)mouseDown:(NSEvent *)event {
@@ -597,6 +635,13 @@
         __typeof__(self) s = weakCurve;
         if (!s || idx < 0 || idx >= (NSInteger)s.bands.count) return;
         s.bands[(NSUInteger)idx][@"g"] = @(db);
+        // 手柄高度必须跟着走，否则拖完松手手柄还停在旧位置（用户会以为没生效）
+        NSMutableArray<NSNumber *> *gains = [s.curve.bandGains mutableCopy]
+                                          ?: [NSMutableArray arrayWithCapacity:s.bands.count];
+        while (gains.count < s.bands.count) [gains addObject:@0];
+        gains[(NSUInteger)idx] = @(db);
+        s.curve.bandGains = gains;
+        [s.curve setNeedsDisplay:YES];
         [s.bandTable reloadDataForRowIndexes:[NSIndexSet indexSetWithIndex:(NSUInteger)idx]
                              columnIndexes:[NSIndexSet indexSetWithIndex:0]];
         [s scheduleApply];
@@ -619,16 +664,14 @@
         c.width = [ws[i] doubleValue];
         [self.bandTable addTableColumn:c];
     }
-    NSScrollView *bs = [[NSScrollView alloc] initWithFrame:NSZeroRect];
-    bs.documentView = self.bandTable;
-    bs.hasVerticalScroller = NO;             // 20 段一次全显示（用户：只要外层那个滚动条）
-    bs.drawsBackground = NO;
-    bs.translatesAutoresizingMaskIntoConstraints = NO;
-    [self.stack addArrangedSubview:bs];
+    // 用户 2026-11-15 明确：**每个界面只允许整页滚动，禁止页面内的小页面滚动**。
+    // 旧实现把 20 段表塞进 NSScrollView（虽然不显示滚动条），滚轮在表上仍然被它吃掉。
+    // 现在表格直接铺在 stack 里（高度 = 表头 + 20 行），滚动完全交给设置页。
+    self.bandTable.translatesAutoresizingMaskIntoConstraints = NO;
+    [self.stack addArrangedSubview:self.bandTable];
     [NSLayoutConstraint activateConstraints:@[
-        // 表头 + 20 行 × 26pt：不再用 300pt 内层滚动裁掉一半参数（18/20 段本该可见）。
-        [bs.heightAnchor constraintEqualToConstant:20 * 26 + 26],
-        [bs.widthAnchor constraintEqualToAnchor:self.stack.widthAnchor constant:-4],
+        [self.bandTable.heightAnchor constraintEqualToConstant:20 * 26 + 26],
+        [self.bandTable.widthAnchor constraintEqualToAnchor:self.stack.widthAnchor constant:-4],
     ]];
 
     [self buildPresetSection];
@@ -830,6 +873,31 @@
     self.opraPresetCardViews = cards;
 }
 
+#pragma mark - 频段类型码（后端契约：PK / LS / HS）
+
+// 后端 src/dsp/peq.h 的 peq_band_type_name() 只认这三个码：PK / LS / HS。
+// 旧实现把下拉标题 "peak"/"lowshelf"/"highshelf" 直接塞进 type 再发给后端 ——
+// peq_band_type_from_name() 虽然能吃 "peak"，但发出去的 bands 串本身格式就是错的
+//（后端要「序号,类型,频率,增益,Q」，见 tools/rtaweb.cpp 的 peq_parse_bands_param），
+// 所以任何拖动都得到 {"ok":false,"error":"bands 参数格式不对"}。
+static NSString *RLPEQTypeCodeFromTitle(NSString *title) {
+    if ([title containsString:@"LS"] || [title containsString:@"低架"]) return @"LS";
+    if ([title containsString:@"HS"] || [title containsString:@"高架"]) return @"HS";
+    return @"PK";
+}
+static NSString *RLPEQTypeTitleForCode(NSString *code) {
+    if ([code isEqualToString:@"LS"]) return RLPTr(@"低架 LS");
+    if ([code isEqualToString:@"HS"]) return RLPTr(@"高架 HS");
+    return RLPTr(@"峰值 PK");
+}
+/// 把任意历史形态（peak/PK/LS/LOW_SHELF…）收敛成后端码。
+static NSString *RLPEQTypeCodeNormalized(id raw) {
+    NSString *s = [raw isKindOfClass:[NSString class]] ? [(NSString *)raw lowercaseString] : @"";
+    if ([s isEqualToString:@"ls"] || [s containsString:@"low"]) return @"LS";
+    if ([s isEqualToString:@"hs"] || [s containsString:@"high"]) return @"HS";
+    return @"PK";
+}
+
 #pragma mark - 20 段表格（可编辑）
 
 - (NSInteger)numberOfRowsInTableView:(NSTableView *)tv { return (NSInteger)self.bands.count; }
@@ -852,15 +920,16 @@
         NSPopUpButton *p = [tv makeViewWithIdentifier:key owner:self];
         if (!p) {
             p = [[NSPopUpButton alloc] initWithFrame:NSZeroRect pullsDown:NO];
-            [p addItemsWithTitles:@[ @"peak", @"lowshelf", @"highshelf" ]];
+            [p addItemsWithTitles:@[ RLPTr(@"峰值 PK"), RLPTr(@"低架 LS"), RLPTr(@"高架 HS") ]];
             p.identifier = key;
             p.target = self;
             p.action = @selector(onBandType:);
             p.font = t.small;
         }
         p.tag = row;
-        NSString *ty = [band[@"type"] isKindOfClass:[NSString class]] ? band[@"type"] : @"peak";
-        if ([p itemWithTitle:ty]) [p selectItemWithTitle:ty];
+        NSString *ty = RLPEQTypeCodeNormalized(band[@"type"]);
+        NSString *title = RLPEQTypeTitleForCode(ty);
+        if ([p itemWithTitle:title]) [p selectItemWithTitle:title];
         return p;
     }
     // g / q：可编辑数字框
@@ -899,7 +968,7 @@
 - (void)onBandType:(NSPopUpButton *)sender {
     const NSInteger row = sender.tag;
     if (row < 0 || row >= (NSInteger)self.bands.count) return;
-    self.bands[row][@"type"] = sender.titleOfSelectedItem ?: @"peak";
+    self.bands[row][@"type"] = RLPEQTypeCodeFromTitle(sender.titleOfSelectedItem);
     [self scheduleApply];
 }
 
@@ -917,13 +986,20 @@
     }];
 }
 
+/// 提交给后端的 bands 串。格式由 tools/rtaweb.cpp 的 peq_parse_bands_param() 定义：
+///   「序号,类型,频率,增益,Q[,off];…」，类型码 = PK / LS / HS。
+/// 旧实现发的是「频率,增益,Q,类型」—— 字段顺序与类型码全错，后端一律
+/// 回 {"ok":false,"error":"bands 参数格式不对"} ⟹ 拖动/编辑从来没有真正下发过。
 - (NSString *)bandsParam {
     NSMutableArray<NSString *> *parts = [NSMutableArray array];
-    for (NSDictionary *b in self.bands) {
-        [parts addObject:[NSString stringWithFormat:@"%.4f,%.4f,%.4f,%@",
-                          [b[@"f"] doubleValue], [b[@"g"] doubleValue],
-                          [b[@"q"] doubleValue],
-                          [b[@"type"] isKindOfClass:[NSString class]] ? b[@"type"] : @"peak"]];
+    for (NSUInteger i = 0; i < self.bands.count; ++i) {
+        NSDictionary *b = self.bands[i];
+        const BOOL on = [b[@"on"] respondsToSelector:@selector(boolValue)] ? [b[@"on"] boolValue] : YES;
+        [parts addObject:[NSString stringWithFormat:@"%lu,%@,%.4f,%.4f,%.4f%@",
+                          (unsigned long)(i + 1),
+                          RLPEQTypeCodeNormalized(b[@"type"]),
+                          [b[@"f"] doubleValue], [b[@"g"] doubleValue], [b[@"q"] doubleValue],
+                          on ? @"" : @",off"]];
     }
     return [parts componentsJoinedByString:@";"];
 }
@@ -956,16 +1032,23 @@
     if ([json[@"preamp"] respondsToSelector:@selector(doubleValue)])
         self.preamp.stringValue = [NSString stringWithFormat:@"%.2f", [json[@"preamp"] doubleValue]];
 
+    // 后端字段名是 **freq / gain / q / type / on**（tools/rtaweb.cpp 的 peq_state_json），
+    // 不是 f/g/q/type。旧实现只读 f/g ⟹ 每段都取到 nil ⟹ 20 段频率与增益全变 0：
+    // 参数表整列 0.0、曲线永远平直、bandFreqs 全 0 让 20 个手柄叠在最左端（"没有分 band"），
+    // 拖动也永远只会命中第 0 段（"拖了没反应"）。这是本轮 EQ 页故障的总根因。
     NSArray *bs = [json[@"bands"] isKindOfClass:[NSArray class]] ? json[@"bands"] : nil;
     if (bs.count) {
         [self.bands removeAllObjects];
         for (id x in bs) {
             if (![x isKindOfClass:[NSDictionary class]]) continue;
             NSMutableDictionary *m = [NSMutableDictionary dictionary];
-            m[@"f"] = @([x[@"f"] respondsToSelector:@selector(doubleValue)] ? [x[@"f"] doubleValue] : 0);
-            m[@"g"] = @([x[@"g"] respondsToSelector:@selector(doubleValue)] ? [x[@"g"] doubleValue] : 0);
+            id fRaw = x[@"freq"] ?: x[@"f"];
+            id gRaw = x[@"gain"] ?: x[@"g"];
+            m[@"f"] = @([fRaw respondsToSelector:@selector(doubleValue)] ? [fRaw doubleValue] : 0);
+            m[@"g"] = @([gRaw respondsToSelector:@selector(doubleValue)] ? [gRaw doubleValue] : 0);
             m[@"q"] = @([x[@"q"] respondsToSelector:@selector(doubleValue)] ? [x[@"q"] doubleValue] : 1);
-            m[@"type"] = [x[@"type"] isKindOfClass:[NSString class]] ? x[@"type"] : @"peak";
+            m[@"type"] = RLPEQTypeCodeNormalized(x[@"type"]);
+            m[@"on"] = @([x[@"on"] respondsToSelector:@selector(boolValue)] ? [x[@"on"] boolValue] : YES);
             [self.bands addObject:m];
         }
         [self.bandTable reloadData];
@@ -983,6 +1066,11 @@
     NSMutableArray<NSNumber *> *freqs = [NSMutableArray array];
     for (NSDictionary *b in self.bands) if (b[@"f"]) [freqs addObject:b[@"f"]];
     self.curve.bandFreqs = freqs;
+    // 手柄高度要用每段当前增益；拖拽高亮默认无
+    NSMutableArray<NSNumber *> *gains = [NSMutableArray arrayWithCapacity:self.bands.count];
+    for (NSDictionary *b in self.bands) [gains addObject:@([b[@"g"] doubleValue])];
+    self.curve.bandGains = gains;
+    self.curve.activeBand = -1;
     [self.curve setNeedsDisplay:YES];
 
     // 状态行：以事实为准（几段非 0、前级多少、采样率）

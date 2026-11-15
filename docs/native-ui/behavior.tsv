@@ -3,50 +3,50 @@
 bind	aCoverFile	change,click()	--	na	原生换封面走系统 NSOpenPanel（模态选择器），web 的 file input 无对应 DOM id。
 bind	askCancel	click()	--	na	原生文本对话框用 NSAlert（系统模态）自带「取消」按钮，web 的 askCancel 无对应控件。
 bind	askOk	click()	--	na	原生文本对话框用 NSAlert 的确认按钮，web 的 askOk 无对应控件。
-bind	bLyric	click()	pb.lyric	done	RLPPlaybackBarView.mm:247
-bind	bNext	click()	pb.next	done	RLPPlaybackBarView.mm:163
-bind	bPause	click()	pb.play	done	RLPPlaybackBarView.mm:162
-bind	bPrev	click()	pb.prev	done	RLPPlaybackBarView.mm:161
-bind	bScan	click()	top.scan	done	RLPMainWindowController.mm:155
-bind	bStop	click()	pb.stop	done	RLPPlaybackBarView.mm:174
+bind	bLyric	click()	pb.lyric	done	RLPPlaybackBarView.mm:341
+bind	bNext	click()	pb.next	done	RLPPlaybackBarView.mm:246
+bind	bPause	click()	pb.play	done	RLPPlaybackBarView.mm:245
+bind	bPrev	click()	pb.prev	done	RLPPlaybackBarView.mm:244
+bind	bScan	click()	top.scan	done	RLPFunctionalAudit.mm:1271
+bind	bStop	click()	pb.stop	done	RLPPlaybackBarView.mm:257
 bind	cast_ceil	change	cast_ceil	done	RLPCastView.mm:104
 bind	cast_force	change	cast_force	done	RLPCastView.mm:113
 bind	cast_up	change	cast_up	done	RLPCastView.mm:93
-bind	fGo	click()	fGo	done	RLPFoldersViewController.mm:58
-bind	fPath	keydown	fPath	done	RLPFoldersViewController.mm:47
-bind	fRoot	change	fRoot	done	RLPFoldersViewController.mm:40
-bind	npVol	input	np.vol	done	RLPNowPlayingViewController.mm:410
-bind	peqBypass	change	peqBypass	done	RLPEqualizerView.mm:212
-bind	peqPreamp	input	peqPreamp	done	RLPEqualizerView.mm:218
+bind	fGo	click()	fGo	done	RLPFoldersViewController.mm:59
+bind	fPath	keydown	fPath	done	RLPFoldersViewController.mm:48
+bind	fRoot	change	fRoot	done	RLPFoldersViewController.mm:41
+bind	npVol	input	np.vol	done	RLPNowPlayingViewController.mm:1538
+bind	peqBypass	change	peqBypass	done	RLPEqualizerView.mm:457
+bind	peqPreamp	input	peqPreamp	done	RLPEqualizerView.mm:463
 bind	q	input,keydown	q	done	RLPAppDelegate.mm:104
-bind	qClear	click()	right.clear	done	RLPFunctionalAudit.mm:1055
-bind	qSort	change	queue.sort	done	RLPQueueViewController.mm:41
+bind	qClear	click()	right.clear	done	RLPFunctionalAudit.mm:1086
+bind	qSort	change	queue.sort	done	RLPFunctionalAudit.mm:1626
 bind	sLoud	change	--	na	同上：原生等响度补偿在设置·通用「等响度补偿」（sp_loud，settings 键 loudness）。
 bind	sRep	change	--	na	web 的经典(workbench)布局用 #sRep；原生把同一组播放模式能力放在设置·通用「循环模式」（sp_rep，同一后端路径 /api/playmode|repeat），无同名控件。
 bind	sShuf	change	--	na	同上：原生随机播放在设置·通用「随机播放」（sp_shuf，/api/shuffle 同一条后端路径）。
-bind	sp_autoanl	change	sp_autoanl	done	RLPSettingsViewController.mm:517
-bind	sp_backend	change	sp_backend	done	RLPFunctionalAudit.mm:976
-bind	sp_ch	change	sp_ch	done	RLPSettingsViewController.mm:490
-bind	sp_directsdm	change	sp_directsdm	done	RLPSettingsViewController.mm:503
-bind	sp_hogexcl	change	sp_hogexcl	done	RLPSettingsViewController.mm:489
-bind	sp_inbackend	change	sp_inbackend	done	RLPSettingsViewController.mm:506
-bind	sp_inbuf	change	sp_inbuf	done	RLPSettingsViewController.mm:507
-bind	sp_inch	change	sp_inch	done	RLPSettingsViewController.mm:507
-bind	sp_indev	change	sp_indev	done	RLPSettingsViewController.mm:506
-bind	sp_inmon	change	sp_inmon	done	RLPSettingsViewController.mm:508
-bind	sp_inout	change	sp_inout	done	RLPSettingsViewController.mm:509
-bind	sp_inseconds	change	sp_inseconds	done	RLPSettingsViewController.mm:508
-bind	sp_lang	change	sp_lang	done	RLPSettingsViewController.mm:511
-bind	sp_llmmodel	change	llm.modelpopup	done	RLPSettingsViewController.mm:1381
-bind	sp_llmprovider	change	llm.provider	done	RLPSettingsViewController.mm:1358
+bind	sp_autoanl	change	sp_autoanl	done	RLPSettingsViewController.mm:547
+bind	sp_backend	change	sp_backend	done	RLPFunctionalAudit.mm:1007
+bind	sp_ch	change	sp_ch	done	RLPSettingsViewController.mm:520
+bind	sp_directsdm	change	sp_directsdm	done	RLPSettingsViewController.mm:533
+bind	sp_hogexcl	change	sp_hogexcl	done	RLPSettingsViewController.mm:519
+bind	sp_inbackend	change	sp_inbackend	done	RLPSettingsViewController.mm:536
+bind	sp_inbuf	change	sp_inbuf	done	RLPSettingsViewController.mm:537
+bind	sp_inch	change	sp_inch	done	RLPSettingsViewController.mm:537
+bind	sp_indev	change	sp_indev	done	RLPSettingsViewController.mm:536
+bind	sp_inmon	change	sp_inmon	done	RLPSettingsViewController.mm:538
+bind	sp_inout	change	sp_inout	done	RLPSettingsViewController.mm:539
+bind	sp_inseconds	change	sp_inseconds	done	RLPSettingsViewController.mm:538
+bind	sp_lang	change	sp_lang	done	RLPSettingsViewController.mm:541
+bind	sp_llmmodel	change	llm.modelpopup	done	RLPSettingsViewController.mm:1670
+bind	sp_llmprovider	change	llm.provider	done	RLPSettingsViewController.mm:1626
 bind	sp_naa_dev	change	--	na	NAA/RTANet 在 macOS 无驱动体系，后端明确报不可用（原生回退 CoreAudio 独占），web 的 NAA 设备下拉在原生无对象。
 bind	sp_naahost	input	--	na	同上：NAA 主机地址在 macOS 端不可用。
-bind	sp_scanthreads	change	sp_scanthreads	done	RLPSettingsViewController.mm:515
-bind	sp_searchprovider	change	search.provider	done	RLPSettingsViewController.mm:1439
-bind	sp_theme	change	sp_theme	done	RLPSettingsViewController.mm:511
-bind	sp_uistyle	change	sp_uistyle	done	RLPFunctionalAudit.mm:982
-bind	sp_upnp_dev	change	sp_upnp_dev	done	RLPSettingsViewController.mm:487
-bind	trackSort	change	tracks.sort	done	RLPFunctionalAudit.mm:635
-bind	vol	input	pb.vol	done	RLPPlaybackBarView.mm:288
+bind	sp_scanthreads	change	sp_scanthreads	done	RLPSettingsViewController.mm:545
+bind	sp_searchprovider	change	search.provider	done	RLPSettingsViewController.mm:1726
+bind	sp_theme	change	sp_theme	done	RLPSettingsViewController.mm:541
+bind	sp_uistyle	change	sp_uistyle	done	RLPFunctionalAudit.mm:1013
+bind	sp_upnp_dev	change	sp_upnp_dev	done	RLPSettingsViewController.mm:517
+bind	trackSort	change	tracks.sort	done	RLPFunctionalAudit.mm:666
+bind	vol	input	pb.vol	done	RLPFunctionalAudit.mm:1252
 bind	wComposer	keydown	works.composer	done	RLPWorksViewController.mm:104
 bind	wTitle	keydown	works.title	done	RLPWorksViewController.mm:98

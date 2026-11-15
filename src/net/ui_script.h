@@ -13825,12 +13825,12 @@ document.addEventListener('visibilitychange', function () {
 })();
 
 /* ---------------- 页面内自检（1.1.4-beta10） ----------------
-   背景（2026-11-08 用户钦定的规则）：**禁止自起无头浏览器**。需要浏览器时只走 DSH 侧边栏。
+   背景（2026-11-08 钦定；2026-11-14 通道改为 ego）：**不要自起浏览器进程**。需要浏览器时只走 ego（dsh-ego-browser 的 ego_* 工具）。
    这条规则把"UI 判据怎么自动跑"堵死了：CDP 脚本（tools/uibrowser.js）会起 Edge 子进程。
    解法不是放弃判据，而是把判据搬进**页面自己**：
      · 页面里已经加载了全部生产函数（跟用户在用的完全同一份 JS）；
      · 检测用例在本文件末尾注册进 window.__SELFTEST；
-     · 侧边栏里打开页面 → 地址后加 ?selftest=1 → 页面跑完把结果表格画在自己身上，
+     · ego_navigate 打开页面（地址可直接带 ?selftest=1）→ 页面跑完把结果表格画在自己身上，
        同时 POST 回 /api/selftest/report 落盘（便于事后 grep，不依赖任何人肉截图）。
    🔴 铁律 3：每条判据必须能红。每个用例自带 want/actual，页面直接把两者并排画出来，
       不看"有没有数字"、只看"want 是否等于 actual"。 */
@@ -13895,8 +13895,8 @@ function selftestEnsureNowPlaying() {
 function selftestMaybeAutoRun() {
   var on = false;
   try {
-    // 同时认 query 与 hash：侧边栏/宿主对 URL 的规范化方式不统一，两种写法都支持才不至于"点了没反应"
-    // ① 服务端标志（首选：DSH 侧边栏会改写/丢弃 URL 参数，只有它能稳定生效）
+    // 同时认 query 与 hash：不同宿主对 URL 的规范方式不统一，两种写法都支持才不至于"点了没反应"
+    // ① 服务端标志（首选：一次性、稳定的触发；ego 下 URL 参数也可用，但标志文件保证刷新不重跑）
     on = (typeof window !== 'undefined' && window.__SELFTEST_AUTO === 1) ||
          /(?:^|[?&])selftest=1(?:&|$)/.test(location.search || '') ||
          /(?:^|[&#])selftest=1(?:&|$)/.test(location.hash || '');

@@ -1754,8 +1754,8 @@ h += "#npPage .npedge{display:none}";
     h += "<div id=modal><div class=mcard><div class=mhead><b id=mtitle>信号链</b><span class=sp></span><button class=ibtn id=mclose><svg width=15 height=15 viewBox='0 0 24 24' fill=none stroke=currentColor stroke-width=2><path d='M18 6L6 18M6 6l12 12'/></svg></button></div><div class=mbody id=mbody></div></div></div>";
     h += "<div class=toast id=toast></div></div>";
     // 1.1.4-beta10：页面内自检的服务端触发开关。
-    // 为什么不用 URL 参数：DSH 侧边栏对地址做过规范化，?selftest=1 会被丢掉，页面根本读不到
-    // ⟹ 表现为"点了没反应"。改成服务端标志文件后，**任何**一次页面加载都会带上这个开关，
+    // 为什么还留着服务端标志：旧侧栏通道会丢掉 ?selftest=1（页面读不到，表现成"点了没反应"）；
+    // ego 通道下 URL 参数可用，但标志文件保证**任何**一次页面加载都带开关、且只跑一次，
     // 与宿主怎么改写 URL 无关。
     if (selftest_flag_present()) h += "<script>window.__SELFTEST_AUTO=1;</script>";
     h += "<script src=/app.js></script>";

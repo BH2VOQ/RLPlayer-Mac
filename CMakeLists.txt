@@ -186,6 +186,7 @@ if(APPLE)
     tools/native_ui/main.mm
     tools/native_ui/RLPAppDelegate.mm
     tools/native_ui/RLPShortcuts.mm
+    tools/native_ui/RLPEQGeometry.mm
     tools/native_ui/RLPMainWindowController.mm
     tools/native_ui/RLPSidebarViewController.mm
     tools/native_ui/RLPAlbumsViewController.mm
@@ -216,6 +217,7 @@ if(APPLE)
     tools/native_ui/RLPQuickStartViewController.mm
     tools/native_ui/RLPPlaylistsViewController.mm
     tools/native_ui/RLPEqualizerView.mm tools/native_ui/RLPTargetCurve.mm
+    tools/native_ui/RLPEQGeometry.mm tools/native_ui/RLPTargetCurve.mm
     tools/native_ui/RLPInputView.mm
     tools/native_ui/RLPCastView.mm
     tools/native_ui/RLPCalibrationView.mm
@@ -255,6 +257,7 @@ if(APPLE)
     tools/native_ui/RLPUpdateWindowController.mm
     tools/native_ui/RLPStreamingViewController.mm tools/native_ui/RLPQuickStartViewController.mm
     tools/native_ui/RLPPlaylistsViewController.mm tools/native_ui/RLPEqualizerView.mm tools/native_ui/RLPTargetCurve.mm
+    tools/native_ui/RLPPlaylistsViewController.mm tools/native_ui/RLPEQGeometry.mm tools/native_ui/RLPTargetCurve.mm
     tools/native_ui/RLPInputView.mm tools/native_ui/RLPCastView.mm
     tools/native_ui/RLPLyrics.mm tools/native_ui/RLPRightDrawer.mm
     tools/native_ui/RLPSettingsLayout.mm
@@ -284,6 +287,45 @@ if(APPLE)
     tools/native_ui/RLPModels.mm tools/native_ui/RLPSupport.mm tools/native_ui/RLPTheme.mm
     tools/native_ui/RLPNativeI18n.mm tools/native_ui/RLPTrackActions.mm
     tools/native_ui/RLPAnalysisSummary.mm tools/native_ui/RLPCoreClient.mm)
+  # 全程序「每页只有一层滚动」（用户 2026-11-15 明确：不要大框架套小框架）。
+  # 判据遍历左导航全部 key，统计每页"真的能滚"的容器数量，必须恰好 1（页面根那根）。
+  add_executable(test_native_single_scroll tests/test_native_single_scroll.mm
+    tools/native_ui/RLPAppDelegate.mm tools/native_ui/RLPShortcuts.mm
+    tools/native_ui/RLPMainWindowController.mm tools/native_ui/RLPSidebarViewController.mm
+    tools/native_ui/RLPAlbumsViewController.mm tools/native_ui/RLPAlbumDetailViewController.mm
+    tools/native_ui/RLPArtistDetailViewController.mm tools/native_ui/RLPArtistsViewController.mm
+    tools/native_ui/RLPTracksViewController.mm tools/native_ui/RLPQueueViewController.mm
+    tools/native_ui/RLPPlaylistsViewController.mm tools/native_ui/RLPFoldersViewController.mm
+    tools/native_ui/RLPRecentViewController.mm tools/native_ui/RLPFavoritesViewController.mm
+    tools/native_ui/RLPStreamingViewController.mm tools/native_ui/RLPQuickStartViewController.mm
+    tools/native_ui/RLPNowPlayingViewController.mm tools/native_ui/RLPWorksViewController.mm
+    tools/native_ui/RLPSettingsViewController.mm tools/native_ui/RLPSettingsLayout.mm
+    tools/native_ui/RLPServersView.mm tools/native_ui/RLPMetaSourcesView.mm
+    tools/native_ui/RLPLibStatsView.mm tools/native_ui/RLPEqualizerView.mm
+    tools/native_ui/RLPEQGeometry.mm tools/native_ui/RLPTargetCurve.mm
+    tools/native_ui/RLPInputView.mm tools/native_ui/RLPCastView.mm
+    tools/native_ui/RLPCalibrationView.mm tools/native_ui/RLPUpdateWindowController.mm
+    tools/native_ui/RLPFeedbackWindowController.mm tools/native_ui/RLPPageViewController.mm
+    tools/native_ui/RLPPlaceholderViewController.mm tools/native_ui/RLPRightDrawer.mm
+    tools/native_ui/RLPPlaybackBarView.mm tools/native_ui/RLPVolumeKnobView.mm
+    tools/native_ui/RLPKnowledgeView.mm tools/native_ui/RLPLyrics.mm
+    tools/native_ui/RLPAnalysisSummary.mm tools/native_ui/RLPSignalChain.mm
+    tools/native_ui/RLPTrackActions.mm tools/native_ui/RLPModels.mm
+    tools/native_ui/RLPSupport.mm tools/native_ui/RLPTheme.mm tools/native_ui/RLPNativeI18n.mm
+    tools/native_ui/RLPCoreClient.mm)
+  target_compile_options(test_native_single_scroll PRIVATE -fobjc-arc)
+  target_include_directories(test_native_single_scroll PRIVATE src tools tools/native_ui)
+  target_link_libraries(test_native_single_scroll PRIVATE rlapp_core
+    "-framework AppKit" "-framework QuartzCore" "-framework WebKit" "-framework Security")
+  add_test(NAME native_single_scroll COMMAND test_native_single_scroll)
+  set_tests_properties(native_single_scroll PROPERTIES TIMEOUT 240)
+
+  add_executable(test_native_eq_geometry tests/test_native_eq_geometry.mm
+    tools/native_ui/RLPEQGeometry.mm)
+  target_compile_options(test_native_eq_geometry PRIVATE -fobjc-arc)
+  target_include_directories(test_native_eq_geometry PRIVATE src tools tools/native_ui)
+  target_link_libraries(test_native_eq_geometry PRIVATE "-framework AppKit" "-framework Foundation")
+  add_test(NAME native_eq_geometry COMMAND test_native_eq_geometry)
   add_executable(test_native_shortcuts tests/test_native_shortcuts.mm
     tools/native_ui/RLPShortcuts.mm)
   target_compile_options(test_native_shortcuts PRIVATE -fobjc-arc)
@@ -346,6 +388,7 @@ if(APPLE)
   # 完全证明不了「真实鼠标事件能走到这个视图」——本轮换成 NSWindow sendEvent。
   add_executable(test_native_scroll_eq tests/test_native_scroll_eq.mm
     tools/native_ui/RLPEqualizerView.mm tools/native_ui/RLPSupport.mm tools/native_ui/RLPTargetCurve.mm
+    tools/native_ui/RLPEQGeometry.mm tools/native_ui/RLPSupport.mm tools/native_ui/RLPTargetCurve.mm
     tools/native_ui/RLPModels.mm tools/native_ui/RLPTheme.mm
     tools/native_ui/RLPNativeI18n.mm tools/native_ui/RLPTrackActions.mm
     tools/native_ui/RLPAnalysisSummary.mm)
@@ -360,6 +403,7 @@ if(APPLE)
   # 对 1.1.7.34 先跑红（旧码是型号下拉 + 预设下拉，没有卡片/曲线小图/当前态）。
   add_executable(test_native_opra_cards tests/test_native_opra_cards.mm
     tools/native_ui/RLPEqualizerView.mm tools/native_ui/RLPSupport.mm
+    tools/native_ui/RLPEQGeometry.mm tools/native_ui/RLPSupport.mm
     tools/native_ui/RLPTargetCurve.mm tools/native_ui/RLPModels.mm
     tools/native_ui/RLPTheme.mm tools/native_ui/RLPNativeI18n.mm
     tools/native_ui/RLPTrackActions.mm tools/native_ui/RLPAnalysisSummary.mm)
@@ -542,6 +586,7 @@ if(APPLE)
     tools/native_ui/RLPSettingsViewController.mm tools/native_ui/RLPSettingsLayout.mm
     tools/native_ui/RLPServersView.mm tools/native_ui/RLPMetaSourcesView.mm
     tools/native_ui/RLPLibStatsView.mm tools/native_ui/RLPEqualizerView.mm tools/native_ui/RLPTargetCurve.mm
+    tools/native_ui/RLPLibStatsView.mm tools/native_ui/RLPEQGeometry.mm tools/native_ui/RLPTargetCurve.mm
     tools/native_ui/RLPInputView.mm tools/native_ui/RLPCastView.mm
     tools/native_ui/RLPCalibrationView.mm tools/native_ui/RLPUpdateWindowController.mm
     tools/native_ui/RLPFeedbackWindowController.mm tools/native_ui/RLPPageViewController.mm
@@ -563,6 +608,7 @@ if(APPLE)
     tools/native_ui/RLPSettingsViewController.mm tools/native_ui/RLPSettingsLayout.mm
     tools/native_ui/RLPServersView.mm tools/native_ui/RLPMetaSourcesView.mm
     tools/native_ui/RLPLibStatsView.mm tools/native_ui/RLPEqualizerView.mm tools/native_ui/RLPTargetCurve.mm
+    tools/native_ui/RLPLibStatsView.mm tools/native_ui/RLPEQGeometry.mm tools/native_ui/RLPTargetCurve.mm
     tools/native_ui/RLPInputView.mm tools/native_ui/RLPCastView.mm
     tools/native_ui/RLPCalibrationView.mm tools/native_ui/RLPUpdateWindowController.mm
     tools/native_ui/RLPFeedbackWindowController.mm tools/native_ui/RLPPageViewController.mm
@@ -582,6 +628,7 @@ if(APPLE)
     tools/native_ui/RLPSettingsViewController.mm tools/native_ui/RLPSettingsLayout.mm
     tools/native_ui/RLPServersView.mm tools/native_ui/RLPMetaSourcesView.mm
     tools/native_ui/RLPLibStatsView.mm tools/native_ui/RLPEqualizerView.mm tools/native_ui/RLPTargetCurve.mm
+    tools/native_ui/RLPLibStatsView.mm tools/native_ui/RLPEQGeometry.mm tools/native_ui/RLPTargetCurve.mm
     tools/native_ui/RLPInputView.mm tools/native_ui/RLPCastView.mm
     tools/native_ui/RLPCalibrationView.mm tools/native_ui/RLPUpdateWindowController.mm
     tools/native_ui/RLPFeedbackWindowController.mm tools/native_ui/RLPPageViewController.mm
@@ -604,6 +651,7 @@ if(APPLE)
     tools/native_ui/RLPSettingsViewController.mm tools/native_ui/RLPSettingsLayout.mm
     tools/native_ui/RLPServersView.mm tools/native_ui/RLPMetaSourcesView.mm
     tools/native_ui/RLPLibStatsView.mm tools/native_ui/RLPEqualizerView.mm
+    tools/native_ui/RLPLibStatsView.mm tools/native_ui/RLPEQGeometry.mm
     tools/native_ui/RLPTargetCurve.mm tools/native_ui/RLPInputView.mm
     tools/native_ui/RLPCastView.mm tools/native_ui/RLPCalibrationView.mm
     tools/native_ui/RLPUpdateWindowController.mm tools/native_ui/RLPFeedbackWindowController.mm
@@ -635,6 +683,7 @@ if(APPLE)
   # 第8项耳机目标曲线：桥层（数组三元组/预设字段）+ 请求逐字段（web diff）+ 图上图层（像素）。
   add_executable(test_native_target_curve tests/test_native_target_curve.mm
     tools/native_ui/RLPEqualizerView.mm tools/native_ui/RLPTargetCurve.mm
+    tools/native_ui/RLPEQGeometry.mm tools/native_ui/RLPTargetCurve.mm
     tools/native_ui/RLPSupport.mm tools/native_ui/RLPModels.mm
     tools/native_ui/RLPTheme.mm tools/native_ui/RLPNativeI18n.mm
     tools/native_ui/RLPTrackActions.mm tools/native_ui/RLPAnalysisSummary.mm)
@@ -790,6 +839,7 @@ if(APPLE)
     tools/native_ui/RLPWorkbench.mm
     tools/native_ui/RLPWorkbenchViewController.mm tools/native_ui/RLPSignalChain.mm
     tools/native_ui/RLPEqualizerView.mm tools/native_ui/RLPTargetCurve.mm
+    tools/native_ui/RLPEQGeometry.mm tools/native_ui/RLPTargetCurve.mm
     tools/native_ui/RLPPageViewController.mm
     tools/native_ui/RLPSupport.mm
     tools/native_ui/RLPTheme.mm
@@ -801,6 +851,7 @@ if(APPLE)
     tools/native_ui/RLPWorkbench.mm
     tools/native_ui/RLPWorkbenchViewController.mm tools/native_ui/RLPSignalChain.mm
     tools/native_ui/RLPEqualizerView.mm tools/native_ui/RLPTargetCurve.mm
+    tools/native_ui/RLPEQGeometry.mm tools/native_ui/RLPTargetCurve.mm
     tools/native_ui/RLPPageViewController.mm
     tools/native_ui/RLPSupport.mm
     tools/native_ui/RLPTheme.mm
@@ -846,6 +897,7 @@ if(APPLE)
     tools/native_ui/RLPSettingsViewController.mm
     tools/native_ui/RLPSettingsLayout.mm
     tools/native_ui/RLPEqualizerView.mm tools/native_ui/RLPTargetCurve.mm
+    tools/native_ui/RLPEQGeometry.mm tools/native_ui/RLPTargetCurve.mm
     tools/native_ui/RLPInputView.mm
     tools/native_ui/RLPCastView.mm
     tools/native_ui/RLPCalibrationView.mm
@@ -863,6 +915,7 @@ if(APPLE)
     tools/native_ui/RLPSettingsViewController.mm
     tools/native_ui/RLPSettingsLayout.mm
     tools/native_ui/RLPEqualizerView.mm tools/native_ui/RLPInputView.mm tools/native_ui/RLPTargetCurve.mm
+    tools/native_ui/RLPEQGeometry.mm tools/native_ui/RLPInputView.mm tools/native_ui/RLPTargetCurve.mm
     tools/native_ui/RLPCastView.mm tools/native_ui/RLPCalibrationView.mm
     tools/native_ui/RLPUpdateWindowController.mm tools/native_ui/RLPFeedbackWindowController.mm
     tools/native_ui/RLPPageViewController.mm tools/native_ui/RLPCoreClient.mm
@@ -920,6 +973,7 @@ if(APPLE)
     tools/native_ui/RLPServersView.mm
     tools/native_ui/RLPMetaSourcesView.mm tools/native_ui/RLPLibStatsView.mm
     tools/native_ui/RLPEqualizerView.mm tools/native_ui/RLPInputView.mm tools/native_ui/RLPTargetCurve.mm
+    tools/native_ui/RLPEQGeometry.mm tools/native_ui/RLPInputView.mm tools/native_ui/RLPTargetCurve.mm
     tools/native_ui/RLPCastView.mm tools/native_ui/RLPCalibrationView.mm
     tools/native_ui/RLPUpdateWindowController.mm tools/native_ui/RLPFeedbackWindowController.mm
     tools/native_ui/RLPPageViewController.mm tools/native_ui/RLPCoreClient.mm
@@ -930,6 +984,7 @@ if(APPLE)
     tools/native_ui/RLPSettingsLayout.mm
     tools/native_ui/RLPMetaSourcesView.mm tools/native_ui/RLPLibStatsView.mm
     tools/native_ui/RLPEqualizerView.mm tools/native_ui/RLPInputView.mm tools/native_ui/RLPTargetCurve.mm
+    tools/native_ui/RLPEQGeometry.mm tools/native_ui/RLPInputView.mm tools/native_ui/RLPTargetCurve.mm
     tools/native_ui/RLPCastView.mm tools/native_ui/RLPCalibrationView.mm
     tools/native_ui/RLPUpdateWindowController.mm tools/native_ui/RLPFeedbackWindowController.mm
     tools/native_ui/RLPPageViewController.mm tools/native_ui/RLPCoreClient.mm
