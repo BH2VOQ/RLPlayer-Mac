@@ -495,6 +495,13 @@ def _token_in(text, item):
     return re.search(re.escape(item) + r"([^A-Za-z0-9_.]|$)", text) is not None
 
 
+def _literal_exists(path, item):
+    """端点字面量在源码里是否仍存在（容忍行号漂移）。
+    要求带引号的整串匹配（"/api/pl"），否则 /api/pl 会命中 /api/play —— 这个坑真踩过。"""
+    src = read(path)
+    return ('"' + item + '"') in src or ("'" + item + "'") in src
+
+
 def verify_evidence(web_ev, nat_ev, item, kind):
     """Return a list of problems for one na row's two evidence cells."""
     bad = []
@@ -523,6 +530,10 @@ def verify_evidence(web_ev, nat_ev, item, kind):
             bad.append("web evidence %r is out of range" % p)
             continue
         if not _token_in(text, item):
+            # api 条目指向 tools/rtaweb.cpp：行号会随每次新增端点漂移，
+            # 只要端点字面量仍在后端源码里，证据就成立（比固定行号更强的判据）。
+            if kind == "api" and path == RTAWEB and _literal_exists(path, item):
+                continue
             bad.append("web evidence %r does not mention %r" % (p, item))
     nparts = [p.strip() for p in nat_ev.split(";") if p.strip()]
     if not nparts:

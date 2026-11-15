@@ -109,7 +109,7 @@ ctrl	qClear	--	na	web=src/net/ui_script.h:1816 native=RLPMainWindowController.mm
 ctrl	qClrAll	sel:onAction:	sel	RLPQueueViewController.mm:124 (impl RLPQueueViewController.mm:476)（@selector 接线；无 identifier）
 ctrl	qSaveSq	sq.savecurrent	done	RLPPlaylistsViewController.mm:119
 ctrl	qSort	queue.sort	done	RLPQueueViewController.mm:109
-ctrl	qclr	right.clear	done	RLPRightDrawer.mm:286
+ctrl	qclr	right.clear	done	RLPRightDrawer.mm:302
 ctrl	rBackDir	sel:goBack:	sel	RLPStreamingViewController.mm:248 (impl RLPStreamingViewController.mm:502)（@selector 接线；无 identifier）
 ctrl	ralbAdd	--	na	web=src/net/ui_script.h:5670 native=RLPStreamingViewController.mm:523: 同上：没有「整张加入队列」的远程专辑操作
 ctrl	ralbPlayAll	--	na	web=src/net/ui_script.h:5667 native=RLPStreamingViewController.mm:523: 原生流媒体页只做目录浏览 + 行点击播放，没有 web 远程专辑详情页的「播放整张」
@@ -195,8 +195,8 @@ ctrl	sp_inout	sp_inout	done	RLPSettingsViewController.mm:689
 ctrl	sp_inseconds	sp_inseconds	done	RLPSettingsViewController.mm:688
 ctrl	sp_instart	sp_instart	done	RLPSettingsViewController.mm:1557
 ctrl	sp_instop	sp_instop	done	RLPSettingsViewController.mm:1561
-ctrl	sp_ir	sp_ir	done	RLPCalibrationView.mm:136
-ctrl	sp_irgpu	sp_irgpu	done	RLPCalibrationView.mm:152
+ctrl	sp_ir	sp_ir	done	RLPCalibrationView.mm:140
+ctrl	sp_irgpu	sp_irgpu	done	RLPCalibrationView.mm:156
 ctrl	sp_isp	sp_isp	done	RLPSettingsViewController.mm:677
 ctrl	sp_lang	sp_lang	done	RLPSettingsViewController.mm:691
 ctrl	sp_libstats	sp_libstats	done	RLPSettingsViewController.mm:1673
@@ -374,8 +374,9 @@ api	/api/lib/stats	/api/lib/stats	done	RLPAlbumsViewController.mm:432
 api	/api/lib/status	--	na	web=src/net/ui_script.h:0refs;tools/rtaweb.cpp:7396 native=无对应实现（tools/native_ui/*.mm 0 次引用该路径）: web 前端 0 次引用；扫描进度前端改用 /api/lib/stats（原生已接）。
 api	/api/llm/models	/api/llm/models	done	RLPSettingsViewController.mm:2511
 api	/api/llm/test	/api/llm/test	done	RLPSettingsViewController.mm:2812
-api	/api/lyrics	/api/lyrics	done	RLPNowPlayingViewController.mm:3509
+api	/api/lyrics/ai	/api/lyrics/ai	done	RLPRightDrawer.mm:733
 api	/api/meta	/api/meta	done	RLPNowPlayingViewController.mm:3555
+api	/api/miccal	/api/miccal	done	RLPCalibrationView.mm:360
 api	/api/naa/discover	/api/naa/discover	done	RLPSettingsViewController.mm:3461
 api	/api/net	/api/net	done	RLPSettingsViewController.mm:3740
 api	/api/opra/apply	/api/opra/apply	done	RLPEqualizerView.mm:1684
@@ -401,11 +402,11 @@ api	/api/rates	/api/rates	done	RLPWorkbenchViewController.mm:1577
 api	/api/recent	/api/recent	done	RLPRecentViewController.mm:136
 api	/api/repeat	/api/repeat	done	RLPSettingsViewController.mm:3639
 api	/api/rescan	/api/rescan	done	RLPSettingsViewController.mm:2488
-api	/api/roomcorr/cancel	/api/roomcorr/cancel	done	RLPCalibrationView.mm:299
+api	/api/roomcorr/cancel	/api/roomcorr/cancel	done	RLPCalibrationView.mm:342
 api	/api/roomcorr/layouts	--	na	web=src/net/ui_script.h:0refs;tools/rtaweb.cpp:7866 native=无对应实现（tools/native_ui/*.mm 0 次引用该路径）: web 前端 0 次引用；房间测量向导在 web 里已被显式隐藏（ui_script.h calSettingsHtml：「房间测量正在重做，本版暂不提供」），布局列表页随之不可达。
-api	/api/roomcorr/measure	/api/roomcorr/measure	done	RLPCalibrationView.mm:279
-api	/api/roomcorr/plan	/api/roomcorr/plan	done	RLPCalibrationView.mm:219
-api	/api/roomcorr/status	/api/roomcorr/status	done	RLPCalibrationView.mm:364
+api	/api/roomcorr/measure	/api/roomcorr/measure	done	RLPCalibrationView.mm:322
+api	/api/roomcorr/plan	/api/roomcorr/plan	done	RLPCalibrationView.mm:262
+api	/api/roomcorr/status	/api/roomcorr/status	done	RLPCalibrationView.mm:488
 api	/api/search/get	--	na	web=src/net/ui_script.h:0refs;tools/rtaweb.cpp:5585 native=无对应实现（tools/native_ui/*.mm 0 次引用该路径）: web 前端 0 次引用；后端出站检索的内部路由，不是界面能力。
 api	/api/seek	/api/seek	done	RLPNowPlayingViewController.mm:2494
 api	/api/selftest/report	/api/selftest/report	done	RLPFunctionalAudit.mm:290
