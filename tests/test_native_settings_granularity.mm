@@ -27,6 +27,15 @@
 //   ④ 行为：给 sp_eq 填路径并触发 action ⟹ 后端 /api/settings 的 kv.eq 真的变成该值
 //      （不是只改 UI 状态）；sp_irgpu 同理（0/1）。
 //   ⑤ 单层滚动：EQ / cal 页签内不得再有 NSScrollView（用户 2026-11-13 要求整页只有一根滚动条）。
+//   ⑥ 设置键值（S1a · 2026-11-16）：这 4 个控件的**动作都在**，但发出的键/值后端白名单不认 ——
+//      /api/settings 是「白名单 + 合并写」，不在白名单的键**静默丢弃**（ok:true 但 conf 里没有该键）。
+//      判据 = 触发真控件 action ⟹ 读回 /api/settings 的 kv，按**后端键**断言：
+//        ⑥a sp_2s   → twostage=1|0（旧码发 2s，被丢弃）
+//        ⑥b sp_loud → loudness=1|0（旧码发 loud，被丢弃）
+//        ⑥c sp_rate → max / follow / src / 96000（web ui_page.h:1547 的 option value；
+//                     旧码把中文文案当值发）
+//        ⑥d sp_bits → -1 / 0 / 16 / 32（web ui_script.h:9855-9858；旧码把中文文案当值发）
+//   ⑦ 回填：kv 的值必须能把下拉切回对应项（值 ≠ 文案 ⟹ applyKV 不能再按文案匹配）。
 //
 // 纪律：隔离 state/library；backend=null、volume=-120；不播放；不联网（只打本进程后端）。
 #import <AppKit/AppKit.h>
@@ -53,6 +62,16 @@ static void Pump(NSTimeInterval s) {
     while ([until timeIntervalSinceNow] > 0)
         [[NSRunLoop currentRunLoop] runMode:NSDefaultRunLoopMode
                                  beforeDate:[NSDate dateWithTimeIntervalSinceNow:0.02]];
+}
+/// 等一个条件成立（轮询 runloop）。只用于异步数据回填，不用来掩盖竞态。
+static BOOL WaitUntil(NSTimeInterval timeout, BOOL (^pred)(void)) {
+    NSDate *until = [NSDate dateWithTimeIntervalSinceNow:timeout];
+    while ([until timeIntervalSinceNow] > 0) { if (pred()) return YES; Pump(0.03); }
+    return pred();
+}
+/// 触发控件的 action（与真实点击走同一条路径：target + action）。
+static void Fire(NSControl *c) {
+    if (c.action && c.target) [c.target performSelector:c.action withObject:c];
 }
 static void Collect(NSView *v, NSMutableArray<NSView *> *out) {
     if (!v) return;
@@ -240,6 +259,158 @@ int main() {
                @"【cal】sp_irgpu 打开后 /api/settings 的 irgpu = 1",
                [NSString stringWithFormat:@"kv.irgpu=%@", kv[@"irgpu"] ?: @"(nil)"]);
             [core jsonWithMethod:@"POST" path:@"/api/settings" body:@"irgpu=0"];
+        }
+
+        // ====================================================================
+        // ⑥ 设置键值判据（S1a · 2026-11-16）：控件在、动作也在，但发出去的**键/值**
+        //    必须是后端白名单认的那一套 —— /api/settings 是「白名单 + 合并写」，
+        //    不在白名单的键**静默丢弃**（返回 ok:true，conf 里没有该键，重启回默认）。
+        //    这种失败无声无息：用户点一下等于没点。
+        //    判据口径 = 触发真控件 action ⟹ 读回 /api/settings 的 kv，按**后端键**断言。
+        // ====================================================================
+        NSDictionary *(^ReadKV)(void) = ^NSDictionary *(void) {
+            NSDictionary *js = [core jsonWithMethod:@"GET" path:@"/api/settings" body:nil];
+            return [js[@"kv"] isKindOfClass:[NSDictionary class]] ? js[@"kv"] : @{};
+        };
+        NSInteger (^IndexOf)(NSPopUpButton *, NSString *) = ^NSInteger(NSPopUpButton *p, NSString *t) {
+            for (NSInteger i = 0; i < (NSInteger)p.numberOfItems; ++i)
+                if ([[p itemAtIndex:i].title isEqualToString:t]) return i;
+            return -1;
+        };
+
+        // ---- ⑥a sp_2s：web #s2s 落盘键是 twostage（ui_script.h:978），不是 2s ----
+        [settings selectPane:@"pcm"];
+        Pump(0.5);
+        [v layoutSubtreeIfNeeded];
+        NSSwitch *twoStage = (NSSwitch *)FindId(PaneRoot(v, @"pcm"), @"sp_2s");
+        if ([twoStage isKindOfClass:[NSSwitch class]]) {
+            twoStage.state = NSControlStateValueOff;
+            Fire(twoStage);
+            Pump(0.6);
+            NSDictionary *kvOff = ReadKV();
+            Ck([kvOff[@"twostage"] isEqualToString:@"0"],
+               @"【键值】sp_2s 关 ⟹ POST twostage=0（后端白名单键；旧码发的 2s 被丢弃）",
+               [NSString stringWithFormat:@"kv.twostage=%@", kvOff[@"twostage"] ?: @"(无)"]);
+            twoStage.state = NSControlStateValueOn;
+            Fire(twoStage);
+            Pump(0.6);
+            NSDictionary *kvOn = ReadKV();
+            Ck([kvOn[@"twostage"] isEqualToString:@"1"],
+               @"【键值】sp_2s 开 ⟹ POST twostage=1",
+               [NSString stringWithFormat:@"kv.twostage=%@", kvOn[@"twostage"] ?: @"(无)"]);
+        } else {
+            Ck(NO, @"【键值】sp_2s 是开关（pcm 页）", twoStage ? NSStringFromClass(twoStage.class) : @"控件缺失");
+        }
+
+        // ---- ⑥b sp_loud：web #sLoud 落盘键是 loudness（ui_script.h:976），不是 loud ----
+        [settings selectPane:@"adv"];
+        Pump(0.5);
+        [v layoutSubtreeIfNeeded];
+        NSSwitch *loud = (NSSwitch *)FindId(PaneRoot(v, @"adv"), @"sp_loud");
+        if ([loud isKindOfClass:[NSSwitch class]]) {
+            loud.state = NSControlStateValueOn;
+            Fire(loud);
+            Pump(0.6);
+            NSDictionary *kvLoudOn = ReadKV();
+            Ck([kvLoudOn[@"loudness"] isEqualToString:@"1"],
+               @"【键值】sp_loud 开 ⟹ POST loudness=1（旧码发的 loud 被丢弃）",
+               [NSString stringWithFormat:@"kv.loudness=%@", kvLoudOn[@"loudness"] ?: @"(无)"]);
+            loud.state = NSControlStateValueOff;
+            Fire(loud);
+            Pump(0.6);
+            NSDictionary *kvLoudOff = ReadKV();
+            Ck([kvLoudOff[@"loudness"] isEqualToString:@"0"],
+               @"【键值】sp_loud 关 ⟹ POST loudness=0",
+               [NSString stringWithFormat:@"kv.loudness=%@", kvLoudOff[@"loudness"] ?: @"(无)"]);
+        } else {
+            Ck(NO, @"【键值】sp_loud 是开关（adv 页）", loud ? NSStringFromClass(loud.class) : @"控件缺失");
+        }
+
+        // ---- ⑥c sp_rate：web #sRate 的 option value = follow / max / src + Hz（ui_page.h:1547）----
+        [settings selectPane:@"out"];
+        Pump(0.5);
+        [v layoutSubtreeIfNeeded];
+        NSPopUpButton *ratePop = (NSPopUpButton *)FindId(PaneRoot(v, @"out"), @"sp_rate");
+        NSArray<NSArray<NSString *> *> *rateCases = @[
+            @[ RLPTr(@"自动（设备最高）"), @"max" ],
+            @[ RLPTr(@"跟随系统"), @"follow" ],
+            @[ RLPTr(@"源采样率"), @"src" ],
+            @[ @"96000", @"96000" ],
+        ];
+        if ([ratePop isKindOfClass:[NSPopUpButton class]]) {
+            for (NSArray<NSString *> *c in rateCases) {
+                const NSInteger idx = IndexOf(ratePop, c[0]);
+                if (idx < 0) {
+                    Ck(NO, [NSString stringWithFormat:@"【键值】输出采样率有「%@」项", c[0]], @"选项缺失");
+                    continue;
+                }
+                [ratePop selectItemAtIndex:idx];
+                Fire(ratePop);
+                Pump(0.5);
+                NSDictionary *kvRate = ReadKV();
+                Ck([kvRate[@"rate"] isEqualToString:c[1]],
+                   [NSString stringWithFormat:@"【键值】输出采样率「%@」⟹ POST rate=%@", c[0], c[1]],
+                   [NSString stringWithFormat:@"kv.rate=%@", kvRate[@"rate"] ?: @"(无)"]);
+            }
+        } else {
+            Ck(NO, @"【键值】sp_rate 是下拉（out 页）", ratePop ? NSStringFromClass(ratePop.class) : @"控件缺失");
+        }
+
+        // ---- ⑥d sp_bits：web #sp_bits 的 option value = -1 / 0 / 16 / 32（ui_script.h:9855-9858）----
+        NSPopUpButton *bitsPop = (NSPopUpButton *)FindId(PaneRoot(v, @"out"), @"sp_bits");
+        NSArray<NSArray<NSString *> *> *bitsCases = @[
+            @[ RLPTr(@"跟随源（按文件位深）"), @"-1" ],
+            @[ @"24 bit", @"0" ],
+            @[ @"16 bit", @"16" ],
+            @[ @"32 bit", @"32" ],
+        ];
+        if ([bitsPop isKindOfClass:[NSPopUpButton class]]) {
+            for (NSArray<NSString *> *c in bitsCases) {
+                const NSInteger idx = IndexOf(bitsPop, c[0]);
+                if (idx < 0) {
+                    Ck(NO, [NSString stringWithFormat:@"【键值】输出位深有「%@」项", c[0]], @"选项缺失");
+                    continue;
+                }
+                [bitsPop selectItemAtIndex:idx];
+                Fire(bitsPop);
+                Pump(0.5);
+                NSDictionary *kvBits = ReadKV();
+                Ck([kvBits[@"bits"] isEqualToString:c[1]],
+                   [NSString stringWithFormat:@"【键值】输出位深「%@」⟹ POST bits=%@", c[0], c[1]],
+                   [NSString stringWithFormat:@"kv.bits=%@", kvBits[@"bits"] ?: @"(无)"]);
+            }
+        } else {
+            Ck(NO, @"【键值】sp_bits 是下拉（out 页）", bitsPop ? NSStringFromClass(bitsPop.class) : @"控件缺失");
+        }
+
+        // ---- ⑦ 回填：kv 的**值**必须能把下拉切回对应项（值 ≠ 文案 ⟹ 不能再按文案匹配）----
+        if ([ratePop isKindOfClass:[NSPopUpButton class]] && [bitsPop isKindOfClass:[NSPopUpButton class]]) {
+            const NSInteger iMax = IndexOf(ratePop, RLPTr(@"自动（设备最高）"));
+            const NSInteger i16 = IndexOf(bitsPop, @"16 bit");
+            if (iMax >= 0 && i16 >= 0) {
+                [ratePop selectItemAtIndex:iMax];
+                Fire(ratePop);
+                [bitsPop selectItemAtIndex:i16];
+                Fire(bitsPop);
+                Pump(0.5);
+                NSDictionary *kvBeforeReload = ReadKV();
+                Ck([kvBeforeReload[@"bits"] isEqualToString:@"16"],
+                   @"【回填】前置：bits=16 已落盘（否则回填判据会拿旧值骗人）",
+                   [NSString stringWithFormat:@"kv.bits=%@", kvBeforeReload[@"bits"] ?: @"(无)"]);
+                [ratePop selectItemAtIndex:0];   // 先人为弄错，才能证明 activate 真的切回来
+                [bitsPop selectItemAtIndex:0];
+                [settings activate];
+                const BOOL rateBack = WaitUntil(3.0, ^BOOL {
+                    return [[ratePop titleOfSelectedItem] isEqualToString:RLPTr(@"自动（设备最高）")];
+                });
+                Ck(rateBack, @"【回填】kv.rate=max ⟹ 下拉回到「自动（设备最高）」",
+                   [NSString stringWithFormat:@"当前=%@", ratePop.titleOfSelectedItem ?: @"(无)"]);
+                const BOOL bitsBack = WaitUntil(3.0, ^BOOL {
+                    return [[bitsPop titleOfSelectedItem] isEqualToString:@"16 bit"];
+                });
+                Ck(bitsBack, @"【回填】kv.bits=16 ⟹ 下拉回到「16 bit」",
+                   [NSString stringWithFormat:@"当前=%@", bitsPop.titleOfSelectedItem ?: @"(无)"]);
+            }
         }
 
         std::printf("结果：%d passed, %d failed\n", gPass, gFail);

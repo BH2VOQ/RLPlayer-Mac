@@ -629,7 +629,13 @@ static NSString *RLPBackendKeyForControl(NSString *identifier) {
                                                 @"dsdmodenote", @"inmsg", @"gpumsg", @"metasrc" ]];
     });
     if ([notSettingKeys containsObject:rest]) return @"";
-    return rest;
+    // 少数控件的后端键名与 web id 不同（/api/settings 是白名单键）：
+    // web SET_KEYS（ui_script.h:976-978）把 #s2s 落成 twostage、#sLoud 落成 loudness。
+    static NSDictionary<NSString *, NSString *> *renamed;
+    static dispatch_once_t onceRenamed;
+    dispatch_once(&onceRenamed, ^{ renamed = @{ @"2s": @"twostage", @"loud": @"loudness" }; });
+    NSString *mapped = renamed[rest];
+    return mapped ?: rest;
 }
 
 static NSString *RLPControlIdentifier(NSString *key) {
@@ -1004,7 +1010,17 @@ static NSString *RLPControlIdentifier(NSString *key) {
     if (![v isKindOfClass:[NSString class]]) return;
     NSString *s = v;
     if (!s.length) return;
-    if ([pop itemWithTitle:s]) [pop selectItemWithTitle:s];
+    // 值 ≠ 文案的下拉（采样率 / 位深）：先按 representedObject 精确匹配，再退回按标题匹配。
+    BOOL matched = NO;
+    for (NSMenuItem *it in pop.itemArray) {
+        if ([it.representedObject isKindOfClass:[NSString class]] &&
+            [(NSString *)it.representedObject isEqualToString:s]) {
+            [pop selectItemAtIndex:[pop indexOfItem:it]];
+            matched = YES;
+            break;
+        }
+    }
+    if (!matched && [pop itemWithTitle:s]) [pop selectItemWithTitle:s];
     [self.loadedKeys addObject:key];
 }
 
@@ -1088,16 +1104,33 @@ static NSString *RLPControlIdentifier(NSString *key) {
     [stack addArrangedSubview:RLPSRow(RLPTr(@"输出模式"), self.outModePopup,
         RLPTr(@"DSD 的比特率与封装（DoP / Native）在 SDM 页设置"), t)];
 
+    // web #sRate 的 option value 是 follow / max / src + Hz（ui_page.h:1547）。
+    // 中文文案只用于显示，**值**放在 representedObject —— 旧实现把标题当值发给后端，
+    // 于是 rate=自动、bits=跟随源（按文件位深）这种非法值被后端丢弃或写坏。
     self.ratePopup = [self popupForKey:@"sp_rate"
-        items:@[ RLPTr(@"自动"), @"44100", @"88200", @"176400", @"352800", @"705600",
-                 @"48000", @"96000", @"192000", @"384000", @"768000" ]
+        items:@[ RLPTr(@"跟随系统"), RLPTr(@"自动（设备最高）"), RLPTr(@"源采样率"),
+                 @"44100", @"48000", @"88200", @"96000", @"176400", @"192000",
+                 @"352800", @"384000", @"705600", @"768000" ]
         action:@selector(onRate:)];
+    {
+        NSArray<NSString *> *vals = @[ @"follow", @"max", @"src",
+            @"44100", @"48000", @"88200", @"96000", @"176400", @"192000",
+            @"352800", @"384000", @"705600", @"768000" ];
+        for (NSUInteger i = 0; i < vals.count && i < (NSUInteger)self.ratePopup.numberOfItems; ++i)
+            [self.ratePopup itemAtIndex:(NSInteger)i].representedObject = vals[i];
+    }
     [stack addArrangedSubview:RLPSRow(RLPTr(@"输出采样率"), self.ratePopup,
         RLPTr(@"自动 = 所选设备的最高采样率"), t)];
 
+    // web #sp_bits 的 option value 是 -1 / 0 / 16 / 32（ui_script.h:9855-9858）。
     self.bitsPopup = [self popupForKey:@"sp_bits"
-        items:@[ RLPTr(@"跟随源（按文件位深）"), @"0", @"16", @"32" ]
+        items:@[ RLPTr(@"跟随源（按文件位深）"), @"24 bit", @"16 bit", @"32 bit" ]
         action:@selector(onBits:)];
+    {
+        NSArray<NSString *> *vals = @[ @"-1", @"0", @"16", @"32" ];
+        for (NSUInteger i = 0; i < vals.count && i < (NSUInteger)self.bitsPopup.numberOfItems; ++i)
+            [self.bitsPopup itemAtIndex:(NSInteger)i].representedObject = vals[i];
+    }
     [stack addArrangedSubview:RLPSRow(RLPTr(@"输出位深（PCM）"), self.bitsPopup,
         RLPTr(@"跟随源 = 按文件真实位深请求；DSD 输出恒为 1 bit"), t)];
 
@@ -2239,13 +2272,13 @@ static NSString *RLPControlIdentifier(NSString *key) {
 }
 
 - (void)onBits:(id)sender {
-    NSString *s = self.bitsPopup.titleOfSelectedItem;
-    [self postKey:@"bits" value:[s isEqualToString:RLPTr(@"自动")] ? @"0" : s];
+    NSString *v = self.bitsPopup.selectedItem.representedObject ?: self.bitsPopup.titleOfSelectedItem;
+    if (v.length) [self postKey:@"bits" value:v];
 }
 
 - (void)onRate:(id)sender {
-    NSString *s = self.ratePopup.titleOfSelectedItem;
-    [self postKey:@"rate" value:[s isEqualToString:RLPTr(@"跟随源")] ? @"follow" : s];
+    NSString *v = self.ratePopup.selectedItem.representedObject ?: self.ratePopup.titleOfSelectedItem;
+    if (v.length) [self postKey:@"rate" value:v];
 }
 
 - (void)onFilter1x:(id)sender { [self postKey:@"filter" value:self.filt1xPopup.titleOfSelectedItem]; }
@@ -3109,6 +3142,9 @@ static BOOL RLPFeedbackTextBlank(NSString *s) {
         [self_ syncOutputBackendVisibility:self_.backendPopup.titleOfSelectedItem ?: @"coreaudio"];
         [self_ applyKV:kv toPopup:self_.devicePopup key:@"device"];
         [self_ applyKV:kv toPopup:self_.ratePopup key:@"rate"];
+        // 位深与采样率一样是「值 ≠ 文案」的下拉（web value=-1/0/16/32）；
+        // 旧实现根本没把 kv.bits 回填到下拉，于是重开设置页永远显示第一项。
+        [self_ applyKV:kv toPopup:self_.bitsPopup key:@"bits"];
         [self_ applyKV:kv toPopup:self_.filt1xPopup key:@"filter"];
         [self_ applyKV:kv toPopup:self_.filtNxPopup key:@"filterNx"];
         [self_ applyKV:kv toPopup:self_.modFamilyPopup key:@"modfamily"];
