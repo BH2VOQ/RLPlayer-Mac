@@ -114,3 +114,9 @@
   **同时纠正一处真实偏差**：上游 v3.3.11 的 volPosToDb（-55 位置曲线）已 0 处引用，
   原生底栏此前仍在用它，同一个 dB 在两个界面会落在不同位置。
   挂账：底栏静音键 volFloor、barVolInput 精确输入、volumePending 提示（后者属架构 N/A）。
+
+## 进度（1.1.7.73）
+
+- **底栏精确 dB 输入** barVolInput 已落地，判据顺带抓出并修好一处**两处共有**的真缺陷：
+  text.doubleValue 对非数字返回 0，而 0 dB 合法 ⟹ abc 被当 0 dB 下发。
+  见 evidence/native-bar-voldb-20261115.md。挂账：barVolDb 输出（需辅助功能语义）、volFloor 底栏静音键。

@@ -1191,3 +1191,16 @@ knobS 随 wrap 自适应（22 vs 36），否则 wrap 行里方形会顶出条外
 布局两条判据抓出真缺陷：626pt 条内越界、左右留白差 20pt —— 都是改动后被测出来的，不是调阈值。
 
 **挂账**：底栏静音键 volFloor 未做；barVolInput 精确输入未做；volumePending 属架构 N/A；拖动期间不下发；未接 NSAccessibility。
+
+### 2026-11-15 13:xx —— 轮次 40（1.1.7.73）：底栏精确 dB 输入 barVolInput
+
+**实现**：底栏加 volDbField（identifier barVolInput），Enter 提交 /api/volume?db=；非法值标红+回填、不下发；
+fetchStatus 回填时仅在输入框非第一响应者时覆盖（不打断输入）；右侧簇因加宽改为两行布局（overflowRight），
+簇起点下界由中栏右缘改为五键右缘（否则 626pt 下右端越界 12pt）。
+
+**判据抓出真缺陷**：「非数字不下发」首跑 FAIL —— text.doubleValue 对 abc 返回 0，而 0 dB 合法，
+于是垃圾输入被当成 0 dB 下发。该缺陷**两处共有**（底栏 + 播放页 npVolInput），一并修成 NSScanner + isAtEnd。
+
+**结果**：native_bar_web 358 checks / 0 failures；np web 0 failures。
+
+**挂账**：barVolDb（sr-only 输出，需辅助功能语义）、volumePending（架构 N/A）、底栏 volFloor 静音键、输入框定宽 46pt。

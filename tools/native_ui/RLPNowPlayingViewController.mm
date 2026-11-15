@@ -361,8 +361,13 @@ static void RLPSetKernedText(NSTextField *label, NSString *text, CGFloat kern) {
     (void)sender;
     NSString *text = [self.volDbField.stringValue stringByTrimmingCharactersInSet:
                       [NSCharacterSet whitespaceAndNewlineCharacterSet]];
-    const double db0 = text.doubleValue;
-    const BOOL valid = text.length > 0 && isfinite(db0) && db0 >= -120.0 && db0 <= 20.0;
+    // ★ 不能用 text.doubleValue 判合法性：非数字文本它会返回 0，而 0 dB 是**合法值**，
+    //   于是 abc 会被当成 0 dB 下发（判据「非数字不下发」抓到的真缺陷）。
+    //   必须要求整个字符串被扫描器完整消费。
+    NSScanner *scan = [NSScanner scannerWithString:text];
+    double db0 = 0.0;
+    const BOOL numeric = [scan scanDouble:&db0] && scan.isAtEnd;
+    const BOOL valid = numeric && text.length > 0 && isfinite(db0) && db0 >= -120.0 && db0 <= 20.0;
     if (!valid) {
         self.volDbField.layer.borderWidth = 1;
         self.volDbField.layer.borderColor = [RLPTheme current].danger.CGColor;

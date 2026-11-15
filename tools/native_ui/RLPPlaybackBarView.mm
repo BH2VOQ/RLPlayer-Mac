@@ -249,6 +249,8 @@ static void RLPSetBadgeText(NSTextField *label, NSString *text, NSColor *color, 
 @property (nonatomic, strong) RLPCommitSlider *volume;
 /// v3.3.11 底栏 #volKnob：音量旋钮（web 的 #vol range 已是 sr-only）。
 @property (nonatomic, strong) RLPVolumeKnobView *volKnob;
+/// v3.3.11 底栏 `barVolInput`：精确 dB 输入（-120~+20，Enter 确认）。
+@property (nonatomic, strong) NSTextField *volDbField;
 @property (nonatomic, strong) NSImageView *volIconView;
 @property (nonatomic, strong) NSImageView *coverView;      // 封面缩略图（web 底栏左侧）
 @property (nonatomic, strong) NSTextField *bpBadge;        // BIT-PERFECT 绿色徽标
@@ -506,9 +508,20 @@ static void RLPSetBadgeText(NSTextField *label, NSString *text, NSColor *color, 
     self.volKnob.onLiveChange = ^(double db) { [kobs updateVolumeUiForDb:db]; };
     self.volKnob.onCommit = ^(double db) { [kobs commitVolumeDb:db]; };
 
+    // v3.3.11 底栏 barVolInput：精确 dB 输入。与播放页 npVolInput 同一套校验/提交纪律。
+    self.volDbField = [[NSTextField alloc] initWithFrame:NSZeroRect];
+    self.volDbField.identifier = @"barVolInput";
+    self.volDbField.placeholderString = @"0.0";
+    self.volDbField.font = [NSFont monospacedDigitSystemFontOfSize:10 weight:NSFontWeightRegular];
+    self.volDbField.alignment = NSTextAlignmentRight;
+    self.volDbField.toolTip = RLPTr(@"音量（dB）");
+    self.volDbField.target = self;
+    self.volDbField.action = @selector(onCommitPreciseVolume:);
+    self.volDbField.wantsLayer = YES;
+
     for (NSView *v in @[self.titleLabel, self.subLabel, self.posLabel, self.durLabel, self.fmtBadge,
                         self.lyricBtn, self.chainBtn, self.progress, volView, self.volume,
-                        self.volKnob]) {
+                        self.volKnob, self.volDbField]) {
         v.translatesAutoresizingMaskIntoConstraints = NO;
         [self addSubview:v];
     }
@@ -554,7 +567,10 @@ static double RLPVolDbToPos(double db) {
     // Equal left/right columns keep the five-key group centered on the whole bar.
     // Expand BOTH side columns for content, never steal only from the left column.
     centerW=MIN(centerW,available-2*rightW);
-    BOOL wrap=centerW<198;
+    // v3.3.11 右侧簇多了精确 dB 输入（46pt）：626pt 最小宽度下单行放不下，
+    // 必须折成两行（web 的 status 簇在窄宽度下也是两行），否则会越界或压住中间控制键。
+    const BOOL overflowRight = rightW > (available - 198) / 2.0;
+    BOOL wrap=(centerW<198) || overflowRight;
     if (wrap) {
         volW=48;
         CGFloat sideBudget=(available-198)/2;
@@ -584,23 +600,25 @@ static double RLPVolDbToPos(double db) {
     // 36pt 的方形会顶出条外 —— 判据「626pt 条内所有控件都在界内」会直接抓到。
     const CGFloat knobS = wrap ? 22.0 : MIN(36.0, H - 18.0);
     NSArray *rows=wrap?@[@[self.lyricBtn,self.chainBtn,self.bpBadge],
-                         @[self.fmtBadge,self.gpuBadge,self.volIconView,self.volKnob]]:
-                        @[@[self.lyricBtn,self.chainBtn,self.bpBadge,self.fmtBadge,self.gpuBadge,self.volIconView,self.volKnob]];
+                         @[self.fmtBadge,self.gpuBadge,self.volIconView,self.volKnob,self.volDbField]]:
+                        @[@[self.lyricBtn,self.chainBtn,self.bpBadge,self.fmtBadge,self.gpuBadge,self.volIconView,self.volKnob,self.volDbField]];
     // 右侧控制簇**右对齐**（web 的 status 簇是 flex-end）：
     // 旋钮是方形、比原滑块槽窄，若仍左对齐就会在条右端留下多出来的空白（第14项留白判据）。
     for (NSUInteger row=0;row<rows.count;++row) {
         CGFloat total=0;
         for (NSView *v in rows[row]) {
             if (v==self.gpuBadge && v.hidden) continue;
-            CGFloat w=v==self.volKnob?knobS:v==self.volume?volW:v==self.volIconView?14:v==self.bpBadge?bpW:v==self.fmtBadge?fmtW:v==self.gpuBadge?gpuW:iconW;
+            CGFloat w=v==self.volKnob?knobS:v==self.volDbField?46.0:v==self.volume?volW:v==self.volIconView?14:v==self.bpBadge?bpW:v==self.fmtBadge?fmtW:v==self.gpuBadge?gpuW:iconW;
             total += w + itemGap;
         }
         if (total > 0) total -= itemGap;
-        CGFloat rowX = MAX(rx, W - pad - total);
+        // 下界不能用 rx（那是中栏右缘）：右侧簇允许向左延伸，只要不压住五键组右缘。
+        const CGFloat clusterMinX = cx + centerW / 2.0 + keysW / 2.0 + gap;
+        CGFloat rowX = MAX(clusterMinX, W - pad - total);
         for (NSView *v in rows[row]) {
             if (v==self.gpuBadge && v.hidden) continue;
-            CGFloat w=v==self.volKnob?knobS:v==self.volume?volW:v==self.volIconView?14:v==self.bpBadge?bpW:v==self.fmtBadge?fmtW:v==self.gpuBadge?gpuW:iconW;
-            CGFloat h=(v==self.lyricBtn || v==self.chainBtn)?32:(v==self.volKnob?knobS:v==self.volume?16:20);
+            CGFloat w=v==self.volKnob?knobS:v==self.volDbField?46.0:v==self.volume?volW:v==self.volIconView?14:v==self.bpBadge?bpW:v==self.fmtBadge?fmtW:v==self.gpuBadge?gpuW:iconW;
+            CGFloat h=(v==self.lyricBtn || v==self.chainBtn)?32:(v==self.volKnob?knobS:v==self.volDbField?18.0:v==self.volume?16:20);
             CGFloat rowCY=wrap?(row==0?H-21:13):H/2;
             if (v == self.volKnob) {
                 // 旋钮是方形、居中在 volW 槽位里：槽宽不变 ⟹ 右端留白与左端对称（第14项判据）。
@@ -920,6 +938,9 @@ static double RLPVolDbToPos(double db) {
     if (!self.volume.dragging && isfinite(st.volumeDb)) {
         self.volume.doubleValue = RLPVolDbToPos(st.volumeDb);
         self.volKnob.db = st.volumeDb;   // 旋钮是可见真值（v3.3.11）
+        if (self.volDbField != self.window.firstResponder) {
+            self.volDbField.stringValue = [NSString stringWithFormat:@"%.1f", st.volumeDb];
+        }
     }
 }
 
@@ -1027,6 +1048,29 @@ static double RLPVolDbToPos(double db) {
 }
 
 /// 旋钮松开：按 v3.3.11 的 dB 值直接下发（不再经 -55 位置曲线换算）。
+/// v3.3.11 barVolInput 的 Enter 提交：与播放页 onCommitPreciseVolume: 同一套校验。
+/// 非法值（空/非数/越界）只标红并回填已确认值，**不下发请求**（与 web aria-invalid 同语义）。
+- (void)onCommitPreciseVolume:(id)sender {
+    (void)sender;
+    NSString *text = [self.volDbField.stringValue stringByTrimmingCharactersInSet:
+                      [NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    // ★ 不能用 text.doubleValue 判合法性：非数字文本它会返回 0，而 0 dB 是**合法值**，
+    //   于是 abc 会被当成 0 dB 下发（判据「非数字不下发」抓到的真缺陷）。
+    //   必须要求整个字符串被扫描器完整消费。
+    NSScanner *scan = [NSScanner scannerWithString:text];
+    double db0 = 0.0;
+    const BOOL numeric = [scan scanDouble:&db0] && scan.isAtEnd;
+    const BOOL valid = numeric && text.length > 0 && isfinite(db0) && db0 >= RLPVolKnobMinDb && db0 <= RLPVolKnobMaxDb;
+    if (!valid) {
+        self.volDbField.layer.borderWidth = 1;
+        self.volDbField.layer.borderColor = [RLPTheme current].danger.CGColor;
+        self.volDbField.stringValue = [NSString stringWithFormat:@"%.1f", self.volKnob.db];
+        return;
+    }
+    self.volDbField.layer.borderWidth = 0;
+    [self commitVolumeDb:db0];
+    [self updateVolumeUiForDb:RLPVolClampDb(db0)];
+}
 - (void)commitVolumeDb:(double)db {
     if (!self.polling) return;
     db = RLPVolClampDb(db);

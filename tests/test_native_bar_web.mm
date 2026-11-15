@@ -283,7 +283,7 @@ int main() { @autoreleasepool {
             NSView *cover = field(bar,@"coverView");
             NSTextField *volLab = field(bar,@"durLabel");
             const CGFloat leftGap = NSMinX(cover.frame);
-            const CGFloat rightGap = bar.bounds.size.width - NSMaxX([field(bar,@"volKnob") frame]);
+            const CGFloat rightGap = bar.bounds.size.width - NSMaxX([field(bar,@"volDbField") frame]);
             (void)volLab;
             check(fabs(leftGap - rightGap) <= 2.0,
                   [[NSString stringWithFormat:@"第14项: 左右两端留白差 ≤2pt（左 %.1f 右 %.1f）",
@@ -387,7 +387,24 @@ int main() { @autoreleasepool {
     // 由 test_native_volume_knob 的绘制路径覆盖（同一份 RLPVolumeKnobView 实现）。
     check(NSWidth(knob.frame) > 0 && NSHeight(knob.frame) > 0, "旋钮有真实可见尺寸");
     check(fabs(NSWidth(knob.frame) - NSHeight(knob.frame)) < 1.0, "旋钮槽位是方形（圆盘不被拉伸）");
+
     online=YES; [bar startPolling];
+
+    // ---- v3.3.11 barVolInput：底栏精确 dB 输入（Enter 确认） ----
+    NSTextField *volField = field(bar, @"volDbField");   // field() 走 KVC 属性名
+    check(volField != nil && [volField.identifier isEqual:@"barVolInput"], "底栏有 barVolInput 精确 dB 输入（web ui_page.h:1503）");
+    check(volField.target == bar && volField.action != NULL, "精确输入有真实 target/action（Enter 提交）");
+    volField.stringValue = @"-12.5"; [bar performSelector:@selector(onCommitPreciseVolume:) withObject:volField];
+    check([posts.lastObject isEqual:@"/api/volume?db=-12.5"], "合法值 Enter 后下发 /api/volume?db=-12.5");
+    volField.stringValue = @"999"; [bar performSelector:@selector(onCommitPreciseVolume:) withObject:volField];
+    check([posts.lastObject isEqual:@"/api/volume?db=-12.5"], "越界值不下发（保持上一条请求不变）");
+    check(volField.layer.borderWidth > 0, "非法值标红边框（web aria-invalid 同语义）");
+    volField.stringValue = @"abc"; [bar performSelector:@selector(onCommitPreciseVolume:) withObject:volField];
+    check([posts.lastObject isEqual:@"/api/volume?db=-12.5"], "非数字不下发（不把垃圾值发给后端）");
+    volField.stringValue = @"20"; [bar performSelector:@selector(onCommitPreciseVolume:) withObject:volField];
+    check([posts.lastObject isEqual:@"/api/volume?db=20.0"], "上限 +20 dB 合法并下发");
+    volField.stringValue = @"-120"; [bar performSelector:@selector(onCommitPreciseVolume:) withObject:volField];
+    check([posts.lastObject isEqual:@"/api/volume?db=-120.0"], "下限 -120 dB（真静音）合法并下发");
     // ★ 曲线变更（2026-11-15，v3.3.11 对照）：upstream 的 volPosToDb（-55 位置曲线）已 0 处引用，
     //   音量唯一映射是 volDbToNorm/volNormToDb 的对称指数；底栏改为按旋钮 dB 直接下发。
     //   旧判据「frozen web -55 curve」守的是一条上游已删除的曲线，这里是纠正而不是放宽。
