@@ -4,22 +4,22 @@
 #   native_evidence  原生 file:line，或「无对应实现（<具体解释>）」
 # 空证据 / 假证据都会让 parity_scan.py --check 退出 1。
 
-api	/api/anl/stats	src/net/ui_script.h:0refs;tools/rtaweb.cpp:7983	无对应实现（tools/native_ui/*.mm 0 次引用该路径）	web 前端 0 次引用（grep api/anl/stats src/net/ui_script.h）；它是 /api/anl/cancel 同组的后端统计路由，前端不用。原生已有 /api/anl/cancel。
-api	/api/buffer/reset	src/net/ui_script.h:0refs;tools/rtaweb.cpp:7239	无对应实现（tools/native_ui/*.mm 0 次引用该路径）	web 前端 0 次引用；后端运维路由（清空缓冲），UI 无入口。
-api	/api/dbg	src/net/ui_script.h:0refs;tools/rtaweb.cpp:12462	无对应实现（tools/native_ui/*.mm 0 次引用该路径）	web 前端 0 次引用；调试用的后端路由，不在产品界面里。
-api	/api/diag/save	src/net/ui_script.h:0refs;tools/rtaweb.cpp:12224	无对应实现（tools/native_ui/*.mm 0 次引用该路径）	web 前端 0 次引用；诊断落盘由 /api/diagzip 承担（原生已接）。
-api	/api/indevices	src/net/ui_script.h:0refs;tools/rtaweb.cpp:11959	无对应实现（tools/native_ui/*.mm 0 次引用该路径）	已被 /api/input/devices 取代的旧名（web 前端用后者，原生已接 /api/input/devices）。
-api	/api/lib/remove	src/net/ui_script.h:0refs;tools/rtaweb.cpp:7235	无对应实现（tools/native_ui/*.mm 0 次引用该路径）	web 前端 0 次引用；破坏性目录删除走 /api/lib/rmdir（原生已接，含 rmdirinfo 预检）。
-api	/api/lib/status	src/net/ui_script.h:0refs;tools/rtaweb.cpp:7270	无对应实现（tools/native_ui/*.mm 0 次引用该路径）	web 前端 0 次引用；扫描进度前端改用 /api/lib/stats（原生已接）。
-api	/api/pl	src/net/ui_script.h:0refs;tools/rtaweb.cpp:7235	无对应实现（tools/native_ui/*.mm 0 次引用该路径）	精确词元匹配 0 次（此前的 7 次是 /api/play 的子串误报）。歌单能力由 /api/sq/* 承担，web 与原生都用 sq/*，原生已接全套。
-api	/api/pl/load	src/net/ui_script.h:0refs;tools/rtaweb.cpp:7269	无对应实现（tools/native_ui/*.mm 0 次引用该路径）	web 前端 0 次引用；同属 /api/pl 旧歌单通道，被 /api/sq/play 取代（原生已接）。
-api	/api/quit	src/net/ui_script.h:0refs;tools/rtaweb.cpp:7236	无对应实现（tools/native_ui/*.mm 0 次引用该路径）	web 前端 0 次引用；CLI 退出命令（rtaweb 专用），GUI 不该有"退出后端"入口。
-api	/api/roomcorr/layouts	src/net/ui_script.h:0refs;tools/rtaweb.cpp:7763	无对应实现（tools/native_ui/*.mm 0 次引用该路径）	web 前端 0 次引用；房间测量向导在 web 里已被显式隐藏（ui_script.h calSettingsHtml：「房间测量正在重做，本版暂不提供」），布局列表页随之不可达。
-api	/api/search/get	src/net/ui_script.h:0refs;tools/rtaweb.cpp:5459	无对应实现（tools/native_ui/*.mm 0 次引用该路径）	web 前端 0 次引用；后端出站检索的内部路由，不是界面能力。
-api	/api/selftest/request	src/net/ui_script.h:0refs;tools/rtaweb.cpp:7252	无对应实现（tools/native_ui/*.mm 0 次引用该路径）	web 侧"武装自检"的标志文件端点。原生自检由命令行参数直接触发，无此需要。
-api	/api/shutdown	src/net/ui_script.h:0refs;tools/rtaweb.cpp:7236	无对应实现（tools/native_ui/*.mm 0 次引用该路径）	web 前端 0 次引用；CLI 关闭命令，同 /api/quit。
-api	/api/src/search	src/net/ui_script.h:0refs;tools/rtaweb.cpp:7270	无对应实现（tools/native_ui/*.mm 0 次引用该路径）	web 前端 0 次引用；流媒体服务器的服务端搜索由 /api/src/browse 承担（原生已接 browse 与 src/cover）。
-api	/api/writeback/dry	src/net/ui_script.h:0refs;tools/rtaweb.cpp:7269	无对应实现（tools/native_ui/*.mm 0 次引用该路径）	与 /api/writeback?dry=1 是同一能力的两个别名；原生与 web 前端一致使用 ?dry=1（已接），不重复接别名。
+api	/api/anl/stats	src/net/ui_script.h:0refs;tools/rtaweb.cpp:1005	无对应实现（tools/native_ui/*.mm 0 次引用该路径）	web 前端 0 次引用（grep api/anl/stats src/net/ui_script.h）；它是 /api/anl/cancel 同组的后端统计路由，前端不用。原生已有 /api/anl/cancel。
+api	/api/buffer/reset	src/net/ui_script.h:0refs;tools/rtaweb.cpp:7365	无对应实现（tools/native_ui/*.mm 0 次引用该路径）	web 前端 0 次引用；后端运维路由（清空缓冲），UI 无入口。
+api	/api/dbg	src/net/ui_script.h:0refs;tools/rtaweb.cpp:12614	无对应实现（tools/native_ui/*.mm 0 次引用该路径）	web 前端 0 次引用；调试用的后端路由，不在产品界面里。
+api	/api/diag/save	src/net/ui_script.h:0refs;tools/rtaweb.cpp:12376	无对应实现（tools/native_ui/*.mm 0 次引用该路径）	web 前端 0 次引用；诊断落盘由 /api/diagzip 承担（原生已接）。
+api	/api/indevices	src/net/ui_script.h:0refs;tools/rtaweb.cpp:12111	无对应实现（tools/native_ui/*.mm 0 次引用该路径）	已被 /api/input/devices 取代的旧名（web 前端用后者，原生已接 /api/input/devices）。
+api	/api/lib/remove	src/net/ui_script.h:0refs;tools/rtaweb.cpp:7346	无对应实现（tools/native_ui/*.mm 0 次引用该路径）	web 前端 0 次引用；破坏性目录删除走 /api/lib/rmdir（原生已接，含 rmdirinfo 预检）。
+api	/api/lib/status	src/net/ui_script.h:0refs;tools/rtaweb.cpp:7396	无对应实现（tools/native_ui/*.mm 0 次引用该路径）	web 前端 0 次引用；扫描进度前端改用 /api/lib/stats（原生已接）。
+api	/api/pl	src/net/ui_script.h:0refs;tools/rtaweb.cpp:7361	无对应实现（tools/native_ui/*.mm 0 次引用该路径）	精确词元匹配 0 次（此前的 7 次是 /api/play 的子串误报）。歌单能力由 /api/sq/* 承担，web 与原生都用 sq/*，原生已接全套。
+api	/api/pl/load	src/net/ui_script.h:0refs;tools/rtaweb.cpp:7395	无对应实现（tools/native_ui/*.mm 0 次引用该路径）	web 前端 0 次引用；同属 /api/pl 旧歌单通道，被 /api/sq/play 取代（原生已接）。
+api	/api/quit	src/net/ui_script.h:0refs;tools/rtaweb.cpp:7362	无对应实现（tools/native_ui/*.mm 0 次引用该路径）	web 前端 0 次引用；CLI 退出命令（rtaweb 专用），GUI 不该有"退出后端"入口。
+api	/api/roomcorr/layouts	src/net/ui_script.h:0refs;tools/rtaweb.cpp:7866	无对应实现（tools/native_ui/*.mm 0 次引用该路径）	web 前端 0 次引用；房间测量向导在 web 里已被显式隐藏（ui_script.h calSettingsHtml：「房间测量正在重做，本版暂不提供」），布局列表页随之不可达。
+api	/api/search/get	src/net/ui_script.h:0refs;tools/rtaweb.cpp:5585	无对应实现（tools/native_ui/*.mm 0 次引用该路径）	web 前端 0 次引用；后端出站检索的内部路由，不是界面能力。
+api	/api/selftest/request	src/net/ui_script.h:0refs;tools/rtaweb.cpp:7378	无对应实现（tools/native_ui/*.mm 0 次引用该路径）	web 侧"武装自检"的标志文件端点。原生自检由命令行参数直接触发，无此需要。
+api	/api/shutdown	src/net/ui_script.h:0refs;tools/rtaweb.cpp:7362	无对应实现（tools/native_ui/*.mm 0 次引用该路径）	web 前端 0 次引用；CLI 关闭命令，同 /api/quit。
+api	/api/src/search	src/net/ui_script.h:0refs;tools/rtaweb.cpp:7396	无对应实现（tools/native_ui/*.mm 0 次引用该路径）	web 前端 0 次引用；流媒体服务器的服务端搜索由 /api/src/browse 承担（原生已接 browse 与 src/cover）。
+api	/api/writeback/dry	src/net/ui_script.h:0refs;tools/rtaweb.cpp:7395	无对应实现（tools/native_ui/*.mm 0 次引用该路径）	与 /api/writeback?dry=1 是同一能力的两个别名；原生与 web 前端一致使用 ?dry=1（已接），不重复接别名。
 # ---- 2026-11：web 绑定点里没有原生控件的 ctrl 行 ----
 ctrl	aCoverFile	src/net/ui_script.h:2448	RLPAlbumDetailViewController.mm:625	原生换封面走系统 NSOpenPanel（模态选择器），web 的 <input type=file> 无对应 DOM id
 ctrl	askOk	src/net/ui_script.h:3624	RLPSupport.mm:152	原生文本输入对话框用 RLPAskText/NSAlert（系统模态自带确认按钮），web 的 askOk 无对应控件

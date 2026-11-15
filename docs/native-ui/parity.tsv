@@ -31,7 +31,7 @@ ctrl	aSetCover	sel:onSetCover:	sel	RLPAlbumDetailViewController.mm:210 (impl RLP
 ctrl	aShuf	album.shuffle	done	RLPAlbumDetailViewController.mm:229
 ctrl	askCancel	--	na	web=src/net/ui_script.h:3630 native=RLPSupport.mm:152: 同上：NSAlert 自带「取消」按钮，web 的 askCancel 无对应控件
 ctrl	askOk	--	na	web=src/net/ui_script.h:3624 native=RLPSupport.mm:152: 原生文本输入对话框用 RLPAskText/NSAlert（系统模态自带确认按钮），web 的 askOk 无对应控件
-ctrl	bAddRoot	sp_addroot	done	RLPSettingsViewController.mm:1563
+ctrl	bAddRoot	sp_addroot	done	RLPSettingsViewController.mm:1691
 ctrl	bAll	--	na	web=src/net/ui_script.h:2748 native=RLPAlbumsViewController.mm:294: web 专辑子集页「返回全部专辑」；原生没有专辑子集视图（专辑页始终是全部专辑）
 ctrl	bArtistAlbums	--	na	web=src/net/ui_script.h:2846 native=RLPArtistDetailViewController.mm:357: web 艺术家资料页的「查看专辑」跳转；原生艺术家详情页直接列出该艺人专辑，无需中间跳转
 ctrl	bArtistBio	--	na	web=src/net/ui_script.h:2747 native=RLPArtistsViewController.mm:230: web 专辑子集页上的「艺术家资料」跳转；原生艺术家页由艺术家列表双击进入（含 AI 资料层），无该按钮
@@ -40,18 +40,18 @@ ctrl	bBackAlbums	top.back	done	RLPMainWindowController.mm:426
 ctrl	bBackArtists	sel:onBack:	sel	RLPArtistDetailViewController.mm:180 (impl RLPArtistDetailViewController.mm:449)（@selector 接线；无 identifier）
 ctrl	bBackArtistsTop	sel:onBack:	sel	RLPArtistDetailViewController.mm:180 (impl RLPArtistDetailViewController.mm:449)（@selector 接线；无 identifier）
 ctrl	bBioToggle	--	na	web=src/net/ui_script.h:2858 native=RLPArtistDetailViewController.mm:262: web 简介「展开/收起」；原生资料面板整段可滚动，无折叠按钮
-ctrl	bChain	pb.chain	done	RLPPlaybackBarView.mm:457
+ctrl	bChain	pb.chain	done	RLPPlaybackBarView.mm:458
 ctrl	bEmptyAddRoot	albums.emptyAdd	done	RLPAlbumsViewController.mm:363
 ctrl	bEmptyScan	albums.emptyScan	done	RLPAlbumsViewController.mm:368
 ctrl	bHelp	--	na	web=src/net/ui_script.h:6607 native=RLPShortcuts.mm:17: web 的「快捷键与提示」浮层；原生快捷键走系统菜单 keyEquivalent，无帮助浮层控件
-ctrl	bLyric	pb.lyric	done	RLPPlaybackBarView.mm:452
-ctrl	bNet	sp_netbtn	done	RLPSettingsViewController.mm:1617
-ctrl	bNext	pb.next	done	RLPPlaybackBarView.mm:332
-ctrl	bPause	pb.play	done	RLPPlaybackBarView.mm:331
-ctrl	bPrev	pb.prev	done	RLPPlaybackBarView.mm:330
+ctrl	bLyric	pb.lyric	done	RLPPlaybackBarView.mm:453
+ctrl	bNet	sp_netbtn	done	RLPSettingsViewController.mm:1745
+ctrl	bNext	pb.next	done	RLPPlaybackBarView.mm:333
+ctrl	bPause	pb.play	done	RLPPlaybackBarView.mm:332
+ctrl	bPrev	pb.prev	done	RLPPlaybackBarView.mm:331
 ctrl	bRefreshVersions	works.refresh	done	RLPWorksViewController.mm:133
-ctrl	bRep	sel:toggleRepeat:	sel	RLPPlaybackBarView.mm:343 (impl RLPPlaybackBarView.mm:745)（@selector 接线；无 identifier）
-ctrl	bRescan	sp_rescan	done	RLPSettingsViewController.mm:1567
+ctrl	bRep	sel:toggleRepeat:	sel	RLPPlaybackBarView.mm:344 (impl RLPPlaybackBarView.mm:810)（@selector 接线；无 identifier）
+ctrl	bRescan	sp_rescan	done	RLPSettingsViewController.mm:1695
 ctrl	bRetryKnowledge	knowledgeRefresh	done	RLPKnowledgeView.mm:78
 ctrl	bRetryVersions	works.retry	done	RLPWorksViewController.mm:296
 ctrl	bRoomWiz	--	na	web=src/net/ui_script.h:6522 native=无对应实现（web 房间测量卡片 roomCorrCard 整块 display:none；原生 RLPCalibrationView 只加载 EQ/IR 文件，无测量向导）: web 房间测量向导本版禁用，原生也没有测量链路，控件无对应实现
@@ -59,9 +59,9 @@ ctrl	bSaveRoomEq	--	na	web=src/net/ui_script.h:12165 native=无对应实现（�
 ctrl	bScan	top.scan	done	RLPMainWindowController.mm:217
 ctrl	bSearchClear	--	na	web=src/net/ui_script.h:1815 native=无对应实现（原生空态由各页 empty 视图承担：albums.emptyAdd / folders.empty / recent.empty，没有「清空搜索词」按钮）: web 搜索空态里的跳转按钮，原生空态没有这个按钮
 ctrl	bSearchVersions	works.search	done	RLPWorksViewController.mm:126
-ctrl	bStop	pb.stop	done	RLPPlaybackBarView.mm:346
+ctrl	bStop	pb.stop	done	RLPPlaybackBarView.mm:347
 ctrl	bTopBack	top.back	done	RLPMainWindowController.mm:426
-ctrl	bUpnp	sp_upnp_scan	done	RLPSettingsViewController.mm:1075
+ctrl	bUpnp	sp_upnp_scan	done	RLPSettingsViewController.mm:1159
 ctrl	castActChange	sp_cast_push	done	RLPCastView.mm:157
 ctrl	castActStop	sp_cast_stop	done	RLPCastView.mm:160
 ctrl	cast_ceil	cast_ceil	done	RLPCastView.mm:126
@@ -85,19 +85,19 @@ ctrl	npDrawerBg	npDrawerBg	done	RLPNowPlayingViewController.mm:2027
 ctrl	npFavBtn	npFavBtn	done	RLPNowPlayingViewController.mm:1820
 ctrl	npGrip	--	na	web=src/net/ui_script.h:1072 native=RLPMainWindowController.mm:130: web 全屏覆盖层的自绘拖拽条；原生窗口拖拽由 AppKit 标题栏承担，无该控件
 ctrl	npNext	np.next	done	RLPNowPlayingViewController.mm:441
-ctrl	npOpen	pb.cover	done	RLPPlaybackBarView.mm:390
+ctrl	npOpen	pb.cover	done	RLPPlaybackBarView.mm:391
 ctrl	npPlay	np.play	done	RLPNowPlayingViewController.mm:438
 ctrl	npPrev	np.prev	done	RLPNowPlayingViewController.mm:436
 ctrl	npRep	np.rep	done	RLPNowPlayingViewController.mm:421
 ctrl	npStop	np.stop	done	RLPNowPlayingViewController.mm:443
 ctrl	npVol	np.vol	done	RLPNowPlayingViewController.mm:1995
-ctrl	peqAutoPre	peqAutoPre	done	RLPEqualizerView.mm:887
-ctrl	peqBypass	peqBypass	done	RLPEqualizerView.mm:718
-ctrl	peqDelete	sel:onPresetAction:	sel	RLPEqualizerView.mm:872 (impl RLPEqualizerView.mm:1394)（@selector 接线；无 identifier）
-ctrl	peqLoad	sel:onPresetAction:	sel	RLPEqualizerView.mm:872 (impl RLPEqualizerView.mm:1394)（@selector 接线；无 identifier）
-ctrl	peqPreamp	peqPreamp	done	RLPEqualizerView.mm:725
-ctrl	peqReset	peqReset	done	RLPEqualizerView.mm:893
-ctrl	peqSave	sel:onPresetAction:	sel	RLPEqualizerView.mm:872 (impl RLPEqualizerView.mm:1394)（@selector 接线；无 identifier）
+ctrl	peqAutoPre	peqAutoPre	done	RLPEqualizerView.mm:902
+ctrl	peqBypass	peqBypass	done	RLPEqualizerView.mm:723
+ctrl	peqDelete	sel:onPresetAction:	sel	RLPEqualizerView.mm:887 (impl RLPEqualizerView.mm:1415)（@selector 接线；无 identifier）
+ctrl	peqLoad	sel:onPresetAction:	sel	RLPEqualizerView.mm:887 (impl RLPEqualizerView.mm:1415)（@selector 接线；无 identifier）
+ctrl	peqPreamp	peqPreamp	done	RLPEqualizerView.mm:730
+ctrl	peqReset	peqReset	done	RLPEqualizerView.mm:908
+ctrl	peqSave	sel:onPresetAction:	sel	RLPEqualizerView.mm:887 (impl RLPEqualizerView.mm:1415)（@selector 接线；无 identifier）
 ctrl	pickCancelSq	--	na	web=src/net/ui_script.h:3885 native=RLPTrackActions.mm:207: 同上：弹层由 NSPopover 关闭，无 web 的「取消」按钮
 ctrl	pickNewSq	--	na	web=src/net/ui_script.h:3888 native=RLPTrackActions.mm:207: 原生保存到歌单用 NSPopover 弹层（内联「新歌单名」输入 + 保存），无独立「新建歌单…」按钮
 ctrl	presetBitPerfect	sel:onPickPlayMode:	sel	RLPQuickStartViewController.mm:571 (impl RLPQuickStartViewController.mm:618)（@selector 接线；无 identifier）
@@ -106,9 +106,9 @@ ctrl	presetDsd	sel:onPickPlayMode:	sel	RLPQuickStartViewController.mm:571 (impl 
 ctrl	presetPcm	sel:onPickPlayMode:	sel	RLPQuickStartViewController.mm:571 (impl RLPQuickStartViewController.mm:618)（@selector 接线；无 identifier）
 ctrl	q	sel:onSearch:	sel	RLPArtistsViewController.mm:203 (impl RLPArtistsViewController.mm:325)（@selector 接线；无 identifier）
 ctrl	qClear	--	na	web=src/net/ui_script.h:1816 native=RLPMainWindowController.mm:203: web 顶栏搜索旁的自绘清除键；原生用 NSSearchField 自带的系统 cancel 按钮（回车/清除走 onSearch:），无独立 #qClear
-ctrl	qClrAll	sel:onAction:	sel	RLPQueueViewController.mm:114 (impl RLPQueueViewController.mm:471)（@selector 接线；无 identifier）
-ctrl	qSaveSq	sq.savecurrent	done	RLPPlaylistsViewController.mm:121
-ctrl	qSort	queue.sort	done	RLPQueueViewController.mm:100
+ctrl	qClrAll	sel:onAction:	sel	RLPQueueViewController.mm:124 (impl RLPQueueViewController.mm:476)（@selector 接线；无 identifier）
+ctrl	qSaveSq	sq.savecurrent	done	RLPPlaylistsViewController.mm:119
+ctrl	qSort	queue.sort	done	RLPQueueViewController.mm:109
 ctrl	qclr	right.clear	done	RLPRightDrawer.mm:286
 ctrl	rBackDir	sel:goBack:	sel	RLPStreamingViewController.mm:248 (impl RLPStreamingViewController.mm:502)（@selector 接线；无 identifier）
 ctrl	ralbAdd	--	na	web=src/net/ui_script.h:5670 native=RLPStreamingViewController.mm:523: 同上：没有「整张加入队列」的远程专辑操作
@@ -123,142 +123,142 @@ ctrl	rmdGo	--	na	web=src/net/ui_script.h:3488 native=无对应实现（同上：
 ctrl	sLoud	--	na	web=src/net/ui_script.h:4764 native=RLPSettingsViewController.mm:1600: 原生等响度补偿在设置·通用（sp_loud，settings 键 loudness），无同名控件
 ctrl	sRep	--	na	web=src/net/ui_script.h:2436 native=RLPSettingsViewController.mm:1592: 原生把循环方式放在设置·通用（sp_rep，同一 /api/playmode 路径），无同名快捷面板控件
 ctrl	sShuf	--	na	web=src/net/ui_script.h:4039 native=RLPSettingsViewController.mm:1596: 原生随机播放在设置·通用（sp_shuf，同一 /api/shuffle），无同名控件
-ctrl	sp_2s	sp_2s	done	RLPSettingsViewController.mm:659
-ctrl	sp_addroot	sp_addroot	done	RLPSettingsViewController.mm:1563
-ctrl	sp_atten	sp_atten	done	RLPSettingsViewController.mm:658
-ctrl	sp_autoanl	sp_autoanl	done	RLPSettingsViewController.mm:680
-ctrl	sp_backend	sp_backend	done	RLPSettingsViewController.mm:648
-ctrl	sp_backendmsg	sp_backendmsg	done	RLPSettingsViewController.mm:654
-ctrl	sp_bits	sp_bits	done	RLPSettingsViewController.mm:652
-ctrl	sp_bpfix	sp_bpfix	done	RLPSettingsViewController.mm:1051
-ctrl	sp_browseRoot	sp_browseRoot	done	RLPSettingsViewController.mm:1559
-ctrl	sp_buffer	sp_buffer	done	RLPSettingsViewController.mm:653
+ctrl	sp_2s	sp_2s	done	RLPSettingsViewController.mm:676
+ctrl	sp_addroot	sp_addroot	done	RLPSettingsViewController.mm:1691
+ctrl	sp_atten	sp_atten	done	RLPSettingsViewController.mm:675
+ctrl	sp_autoanl	sp_autoanl	done	RLPSettingsViewController.mm:697
+ctrl	sp_backend	sp_backend	done	RLPSettingsViewController.mm:664
+ctrl	sp_backendmsg	sp_backendmsg	done	RLPSettingsViewController.mm:671
+ctrl	sp_bits	sp_bits	done	RLPSettingsViewController.mm:669
+ctrl	sp_bpfix	sp_bpfix	done	RLPSettingsViewController.mm:1135
+ctrl	sp_browseRoot	sp_browseRoot	done	RLPSettingsViewController.mm:1687
+ctrl	sp_buffer	sp_buffer	done	RLPSettingsViewController.mm:670
 ctrl	sp_cast_dev	sp_cast_dev	done	RLPCastView.mm:96
 ctrl	sp_cast_devmsg	sp_cast_devmsg	done	RLPCastView.mm:107
 ctrl	sp_cast_msg	sp_cast_msg	done	RLPCastView.mm:163
 ctrl	sp_cast_push	sp_cast_push	done	RLPCastView.mm:157
 ctrl	sp_cast_scan	sp_cast_scan	done	RLPCastView.mm:102
-ctrl	sp_cast_stat_bytes	sp_cast_stat_bytes	done	RLPSettingsViewController.mm:719
-ctrl	sp_cast_stat_dev	sp_cast_stat_dev	done	RLPSettingsViewController.mm:716
-ctrl	sp_cast_stat_err	sp_cast_stat_err	done	RLPSettingsViewController.mm:725
+ctrl	sp_cast_stat_bytes	sp_cast_stat_bytes	done	RLPSettingsViewController.mm:736
+ctrl	sp_cast_stat_dev	sp_cast_stat_dev	done	RLPSettingsViewController.mm:733
+ctrl	sp_cast_stat_err	sp_cast_stat_err	done	RLPSettingsViewController.mm:742
 ctrl	sp_cast_stat_err_box	sp_cast_stat_err_box	done	RLPCastView.mm:200
-ctrl	sp_cast_stat_phase	sp_cast_stat_phase	done	RLPSettingsViewController.mm:715
-ctrl	sp_cast_stat_port	sp_cast_stat_port	done	RLPSettingsViewController.mm:721
-ctrl	sp_cast_stat_pos	sp_cast_stat_pos	done	RLPSettingsViewController.mm:717
-ctrl	sp_cast_stat_prep	sp_cast_stat_prep	done	RLPSettingsViewController.mm:723
+ctrl	sp_cast_stat_phase	sp_cast_stat_phase	done	RLPSettingsViewController.mm:732
+ctrl	sp_cast_stat_port	sp_cast_stat_port	done	RLPSettingsViewController.mm:738
+ctrl	sp_cast_stat_pos	sp_cast_stat_pos	done	RLPSettingsViewController.mm:734
+ctrl	sp_cast_stat_prep	sp_cast_stat_prep	done	RLPSettingsViewController.mm:740
 ctrl	sp_cast_stat_prep_box	sp_cast_stat_prep_box	done	RLPCastView.mm:198
-ctrl	sp_cast_stat_ratematch	sp_cast_stat_ratematch	done	RLPSettingsViewController.mm:722
-ctrl	sp_cast_stat_reqs	sp_cast_stat_reqs	done	RLPSettingsViewController.mm:720
-ctrl	sp_cast_stat_transport	sp_cast_stat_transport	done	RLPSettingsViewController.mm:718
-ctrl	sp_cast_stat_warn	sp_cast_stat_warn	done	RLPSettingsViewController.mm:724
+ctrl	sp_cast_stat_ratematch	sp_cast_stat_ratematch	done	RLPSettingsViewController.mm:739
+ctrl	sp_cast_stat_reqs	sp_cast_stat_reqs	done	RLPSettingsViewController.mm:737
+ctrl	sp_cast_stat_transport	sp_cast_stat_transport	done	RLPSettingsViewController.mm:735
+ctrl	sp_cast_stat_warn	sp_cast_stat_warn	done	RLPSettingsViewController.mm:741
 ctrl	sp_cast_stat_warn_box	sp_cast_stat_warn_box	done	RLPCastView.mm:199
 ctrl	sp_cast_stop	sp_cast_stop	done	RLPCastView.mm:160
-ctrl	sp_cast_up_curfilt	sp_cast_up_curfilt	done	RLPSettingsViewController.mm:728
-ctrl	sp_cast_up_currate	sp_cast_up_currate	done	RLPSettingsViewController.mm:727
+ctrl	sp_cast_up_curfilt	sp_cast_up_curfilt	done	RLPSettingsViewController.mm:745
+ctrl	sp_cast_up_currate	sp_cast_up_currate	done	RLPSettingsViewController.mm:744
 ctrl	sp_cast_up_info	sp_cast_up_info	done	RLPCastView.mm:146
-ctrl	sp_ch	sp_ch	done	RLPSettingsViewController.mm:652
-ctrl	sp_device	sp_device	done	RLPSettingsViewController.mm:650
-ctrl	sp_diagjson	sp_diagjson	done	RLPSettingsViewController.mm:681
-ctrl	sp_diagmsg	sp_diagmsg	done	RLPSettingsViewController.mm:683
-ctrl	sp_diagsummary	sp_diagsummary	done	RLPSettingsViewController.mm:682
+ctrl	sp_ch	sp_ch	done	RLPSettingsViewController.mm:669
+ctrl	sp_device	sp_device	done	RLPSettingsViewController.mm:666
+ctrl	sp_diagjson	sp_diagjson	done	RLPSettingsViewController.mm:698
+ctrl	sp_diagmsg	sp_diagmsg	done	RLPSettingsViewController.mm:700
+ctrl	sp_diagsummary	sp_diagsummary	done	RLPSettingsViewController.mm:699
 ctrl	sp_diagsummarytext	--	removed	2026-11-14: 用户本轮原话：「该按钮只做『复制摘要 + 就地提示』，不显示 JSON 面板、不弹窗、不出现第二个容器」。web 侧 #sp_diagsummarytext 是摘要 JSON 的 <pre> 面板；原生按用户明确要求删除这个面板，只保留复制 + 就地提示（导出 JSON 仍可走「只要 JSON」，功能未丢失）。RLPFunctionalAudit 另有「无 JSON 面板」结构断言钉住它不存在。
 ctrl	sp_diagupload	--	removed	2026-11-13: 用户原话：「诊断包这里我也希望用图示的 web 版的效果，不过要去掉随反馈上传诊断的按钮」。该按钮与反馈表单的「附带诊断包」勾选是重复入口（诊断包随反馈一起提交），保留会让同一件事有两个入口，且旧实现里它只是打开反馈窗口，语义上也不自洽。原生 RLPFunctionalAudit 另有文案 + identifier 双重断言钉住它不存在。
-ctrl	sp_diagzip	sp_diagzip	done	RLPSettingsViewController.mm:681
-ctrl	sp_directsdm	sp_directsdm	done	RLPSettingsViewController.mm:665
-ctrl	sp_dsdconv	sp_dsdconv	done	RLPSettingsViewController.mm:666
-ctrl	sp_dsdkind	sp_dsdkind	done	RLPSettingsViewController.mm:666
-ctrl	sp_dsdmodenote	sp_dsdmodenote	done	RLPSettingsViewController.mm:663
-ctrl	sp_dsdmsg	sp_dsdmsg	done	RLPSettingsViewController.mm:667
-ctrl	sp_dsdpk	sp_dsdpk	done	RLPSettingsViewController.mm:662
-ctrl	sp_dsdrate	sp_dsdrate	done	RLPSettingsViewController.mm:662
-ctrl	sp_eq	sp_eq	done	RLPSettingsViewController.mm:2187
-ctrl	sp_fbchan	sp_fbchan	done	RLPSettingsViewController.mm:689
-ctrl	sp_fbcount	sp_fbcount	done	RLPSettingsViewController.mm:689
-ctrl	sp_fbdiag	sp_fbdiag	done	RLPSettingsViewController.mm:690
-ctrl	sp_fbmsg	sp_fbmsg	done	RLPSettingsViewController.mm:691
-ctrl	sp_fbretry	sp_fbretry	done	RLPSettingsViewController.mm:691
-ctrl	sp_fbsend	sp_fbsend	done	RLPSettingsViewController.mm:690
-ctrl	sp_fbtext	sp_fbtext	done	RLPSettingsViewController.mm:1806
-ctrl	sp_filt	sp_filt	done	RLPSettingsViewController.mm:657
-ctrl	sp_filtNx	sp_filtNx	done	RLPSettingsViewController.mm:657
-ctrl	sp_footTpl	sp_footTpl	done	RLPSettingsViewController.mm:656
-ctrl	sp_gpu	sp_gpu	done	RLPSettingsViewController.mm:675
-ctrl	sp_gpumsg	sp_gpumsg	done	RLPSettingsViewController.mm:675
-ctrl	sp_hogexcl	sp_hogexcl	done	RLPSettingsViewController.mm:651
-ctrl	sp_inbackend	sp_inbackend	done	RLPSettingsViewController.mm:669
-ctrl	sp_inbuf	sp_inbuf	done	RLPSettingsViewController.mm:670
-ctrl	sp_inch	sp_inch	done	RLPSettingsViewController.mm:670
-ctrl	sp_indev	sp_indev	done	RLPSettingsViewController.mm:669
-ctrl	sp_inmon	sp_inmon	done	RLPSettingsViewController.mm:671
-ctrl	sp_inmsg	sp_inmsg	done	RLPSettingsViewController.mm:673
-ctrl	sp_inout	sp_inout	done	RLPSettingsViewController.mm:672
-ctrl	sp_inseconds	sp_inseconds	done	RLPSettingsViewController.mm:671
-ctrl	sp_instart	sp_instart	done	RLPSettingsViewController.mm:1429
-ctrl	sp_instop	sp_instop	done	RLPSettingsViewController.mm:1433
+ctrl	sp_diagzip	sp_diagzip	done	RLPSettingsViewController.mm:698
+ctrl	sp_directsdm	sp_directsdm	done	RLPSettingsViewController.mm:682
+ctrl	sp_dsdconv	sp_dsdconv	done	RLPSettingsViewController.mm:683
+ctrl	sp_dsdkind	sp_dsdkind	done	RLPSettingsViewController.mm:683
+ctrl	sp_dsdmodenote	sp_dsdmodenote	done	RLPSettingsViewController.mm:680
+ctrl	sp_dsdmsg	sp_dsdmsg	done	RLPSettingsViewController.mm:684
+ctrl	sp_dsdpk	sp_dsdpk	done	RLPSettingsViewController.mm:679
+ctrl	sp_dsdrate	sp_dsdrate	done	RLPSettingsViewController.mm:679
+ctrl	sp_eq	sp_eq	done	RLPSettingsViewController.mm:2315
+ctrl	sp_fbchan	sp_fbchan	done	RLPSettingsViewController.mm:706
+ctrl	sp_fbcount	sp_fbcount	done	RLPSettingsViewController.mm:706
+ctrl	sp_fbdiag	sp_fbdiag	done	RLPSettingsViewController.mm:707
+ctrl	sp_fbmsg	sp_fbmsg	done	RLPSettingsViewController.mm:708
+ctrl	sp_fbretry	sp_fbretry	done	RLPSettingsViewController.mm:708
+ctrl	sp_fbsend	sp_fbsend	done	RLPSettingsViewController.mm:707
+ctrl	sp_fbtext	sp_fbtext	done	RLPSettingsViewController.mm:1934
+ctrl	sp_filt	sp_filt	done	RLPSettingsViewController.mm:674
+ctrl	sp_filtNx	sp_filtNx	done	RLPSettingsViewController.mm:674
+ctrl	sp_footTpl	sp_footTpl	done	RLPSettingsViewController.mm:673
+ctrl	sp_gpu	sp_gpu	done	RLPSettingsViewController.mm:692
+ctrl	sp_gpumsg	sp_gpumsg	done	RLPSettingsViewController.mm:692
+ctrl	sp_hogexcl	sp_hogexcl	done	RLPSettingsViewController.mm:667
+ctrl	sp_inbackend	sp_inbackend	done	RLPSettingsViewController.mm:686
+ctrl	sp_inbuf	sp_inbuf	done	RLPSettingsViewController.mm:687
+ctrl	sp_inch	sp_inch	done	RLPSettingsViewController.mm:687
+ctrl	sp_indev	sp_indev	done	RLPSettingsViewController.mm:686
+ctrl	sp_inmon	sp_inmon	done	RLPSettingsViewController.mm:688
+ctrl	sp_inmsg	sp_inmsg	done	RLPSettingsViewController.mm:690
+ctrl	sp_inout	sp_inout	done	RLPSettingsViewController.mm:689
+ctrl	sp_inseconds	sp_inseconds	done	RLPSettingsViewController.mm:688
+ctrl	sp_instart	sp_instart	done	RLPSettingsViewController.mm:1557
+ctrl	sp_instop	sp_instop	done	RLPSettingsViewController.mm:1561
 ctrl	sp_ir	sp_ir	done	RLPCalibrationView.mm:136
 ctrl	sp_irgpu	sp_irgpu	done	RLPCalibrationView.mm:152
-ctrl	sp_isp	sp_isp	done	RLPSettingsViewController.mm:660
-ctrl	sp_lang	sp_lang	done	RLPSettingsViewController.mm:674
-ctrl	sp_libstats	sp_libstats	done	RLPSettingsViewController.mm:1545
-ctrl	sp_llmbase	llm.base	done	RLPSettingsViewController.mm:1954
-ctrl	sp_llmcapnote	sp_llmcapnote	done	RLPSettingsViewController.mm:701
-ctrl	sp_llmclear	llm.clear	done	RLPSettingsViewController.mm:1980
-ctrl	sp_llmkey	llm.key	done	RLPSettingsViewController.mm:1961
-ctrl	sp_llmmodel	llm.modelpopup	done	RLPSettingsViewController.mm:1993
-ctrl	sp_llmmodels	llm.modelrefresh	done	RLPSettingsViewController.mm:1999
-ctrl	sp_llmmodeltext	llm.modeltext	done	RLPSettingsViewController.mm:1986
-ctrl	sp_llmmodmsg	llm.modelmsg	done	RLPSettingsViewController.mm:2013
-ctrl	sp_llmmsg	llm.status	done	RLPSettingsViewController.mm:1968
-ctrl	sp_llmprovider	llm.provider	done	RLPSettingsViewController.mm:1945
-ctrl	sp_llmsave	llm.save	done	RLPSettingsViewController.mm:1974
-ctrl	sp_llmtest	llm.test	done	RLPSettingsViewController.mm:1977
-ctrl	sp_loud	sp_loud	done	RLPSettingsViewController.mm:680
+ctrl	sp_isp	sp_isp	done	RLPSettingsViewController.mm:677
+ctrl	sp_lang	sp_lang	done	RLPSettingsViewController.mm:691
+ctrl	sp_libstats	sp_libstats	done	RLPSettingsViewController.mm:1673
+ctrl	sp_llmbase	llm.base	done	RLPSettingsViewController.mm:2082
+ctrl	sp_llmcapnote	sp_llmcapnote	done	RLPSettingsViewController.mm:718
+ctrl	sp_llmclear	llm.clear	done	RLPSettingsViewController.mm:2108
+ctrl	sp_llmkey	llm.key	done	RLPSettingsViewController.mm:2089
+ctrl	sp_llmmodel	llm.modelpopup	done	RLPSettingsViewController.mm:2121
+ctrl	sp_llmmodels	llm.modelrefresh	done	RLPSettingsViewController.mm:2127
+ctrl	sp_llmmodeltext	llm.modeltext	done	RLPSettingsViewController.mm:2114
+ctrl	sp_llmmodmsg	llm.modelmsg	done	RLPSettingsViewController.mm:2141
+ctrl	sp_llmmsg	llm.status	done	RLPSettingsViewController.mm:2096
+ctrl	sp_llmprovider	llm.provider	done	RLPSettingsViewController.mm:2073
+ctrl	sp_llmsave	llm.save	done	RLPSettingsViewController.mm:2102
+ctrl	sp_llmtest	llm.test	done	RLPSettingsViewController.mm:2105
+ctrl	sp_loud	sp_loud	done	RLPSettingsViewController.mm:697
 ctrl	sp_meta_	sp_meta_	done	RLPMetaSourcesView.mm:225
-ctrl	sp_metaadv	sp_metaadv	done	RLPSettingsViewController.mm:1913
-ctrl	sp_metaaifill	sp_metaaifill	done	RLPSettingsViewController.mm:693
+ctrl	sp_metaadv	sp_metaadv	done	RLPSettingsViewController.mm:2041
+ctrl	sp_metaaifill	sp_metaaifill	done	RLPSettingsViewController.mm:710
 ctrl	sp_metadrag_	sp_metadrag_	done	RLPMetaSourcesView.mm:206
-ctrl	sp_metallm	sp_metallm	done	RLPSettingsViewController.mm:692
+ctrl	sp_metallm	sp_metallm	done	RLPSettingsViewController.mm:709
 ctrl	sp_metamore	metasrc.reset	done	RLPMetaSourcesView.mm:79
 ctrl	sp_metamvdn_	sp_metamvdn_	done	RLPMetaSourcesView.mm:249
 ctrl	sp_metamvup_	sp_metamvup_	done	RLPMetaSourcesView.mm:242
-ctrl	sp_metaon	sp_metaon	done	RLPSettingsViewController.mm:692
+ctrl	sp_metaon	sp_metaon	done	RLPSettingsViewController.mm:709
 ctrl	sp_metasrc	metasrc.list	done	RLPMetaSourcesView.mm:88
 ctrl	sp_metasrcrow_	sp_metasrcrow_	done	RLPFunctionalAudit.mm:1121
 ctrl	sp_meter_peak	sp_meter_peak	done	RLPInputView.mm:206
 ctrl	sp_meter_rms	sp_meter_rms	done	RLPInputView.mm:204
 ctrl	sp_meter_water	sp_meter_water	done	RLPInputView.mm:202
-ctrl	sp_modcut	sp_modcut	done	RLPSettingsViewController.mm:664
-ctrl	sp_moddith	sp_moddith	done	RLPSettingsViewController.mm:665
-ctrl	sp_modfamily	sp_modfamily	done	RLPSettingsViewController.mm:663
-ctrl	sp_modorder	sp_modorder	done	RLPSettingsViewController.mm:664
+ctrl	sp_modcut	sp_modcut	done	RLPSettingsViewController.mm:681
+ctrl	sp_moddith	sp_moddith	done	RLPSettingsViewController.mm:682
+ctrl	sp_modfamily	sp_modfamily	done	RLPSettingsViewController.mm:680
+ctrl	sp_modorder	sp_modorder	done	RLPSettingsViewController.mm:681
 ctrl	sp_naa_dev	--	na	web=src/net/ui_script.h:7632 native=无对应实现（NAA/RTANet 在 macOS 无驱动体系；web 已把 NAA 从输出后端下拉移除，原生后端也不含 NAA）: NAA 设备下拉在原生无对象
 ctrl	sp_naa_scan	--	na	web=src/net/ui_script.h:7663 native=无对应实现（同上：NAA 已从 macOS 后端移除，原生无 NAA 发现入口）: NAA 设备扫描在原生无对象
 ctrl	sp_naahost	--	na	web=src/net/ui_script.h:7651 native=无对应实现（同上：NAA 主机地址在 macOS 端不可用）: NAA 主机地址在原生无对象
-ctrl	sp_opra_copychip	sp_opra_copychip	done	RLPEqualizerView.mm:975
-ctrl	sp_opra_msg	sp_opra_msg	done	RLPSettingsViewController.mm:711
-ctrl	sp_opra_search	sp_opra_search	done	RLPSettingsViewController.mm:709
-ctrl	sp_opra_searchhint	sp_opra_searchhint	done	RLPSettingsViewController.mm:710
-ctrl	sp_outmode	sp_outmode	done	RLPSettingsViewController.mm:651
-ctrl	sp_phase	sp_phase	done	RLPSettingsViewController.mm:657
-ctrl	sp_phasemsg	sp_phasemsg	done	RLPSettingsViewController.mm:658
-ctrl	sp_ramp	sp_ramp	done	RLPSettingsViewController.mm:653
-ctrl	sp_rate	sp_rate	done	RLPSettingsViewController.mm:652
-ctrl	sp_rep	sp_rep	done	RLPSettingsViewController.mm:679
-ctrl	sp_rescan	sp_rescan	done	RLPSettingsViewController.mm:1567
-ctrl	sp_root	sp_root	done	RLPSettingsViewController.mm:676
-ctrl	sp_roots	sp_roots	done	RLPSettingsViewController.mm:1586
-ctrl	sp_scanthreads	sp_scanthreads	done	RLPSettingsViewController.mm:678
-ctrl	sp_sdmo1	sp_sdmo1	done	RLPSettingsViewController.mm:661
-ctrl	sp_sdmoNx	sp_sdmoNx	done	RLPSettingsViewController.mm:661
-ctrl	sp_searchbase	search.base	done	RLPSettingsViewController.mm:2061
-ctrl	sp_searchcapnote	sp_searchcapnote	done	RLPSettingsViewController.mm:705
-ctrl	sp_searchclear	search.clear	done	RLPSettingsViewController.mm:2082
-ctrl	sp_searchkey	search.key	done	RLPSettingsViewController.mm:2067
-ctrl	sp_searchmsg	search.status	done	RLPSettingsViewController.mm:2074
-ctrl	sp_searchprovider	search.provider	done	RLPSettingsViewController.mm:2053
-ctrl	sp_searchsave	search.save	done	RLPSettingsViewController.mm:2079
-ctrl	sp_shaper	sp_shaper	done	RLPSettingsViewController.mm:660
-ctrl	sp_shuf	sp_shuf	done	RLPSettingsViewController.mm:679
+ctrl	sp_opra_copychip	sp_opra_copychip	done	RLPEqualizerView.mm:990
+ctrl	sp_opra_msg	sp_opra_msg	done	RLPSettingsViewController.mm:728
+ctrl	sp_opra_search	sp_opra_search	done	RLPSettingsViewController.mm:726
+ctrl	sp_opra_searchhint	sp_opra_searchhint	done	RLPSettingsViewController.mm:727
+ctrl	sp_outmode	sp_outmode	done	RLPSettingsViewController.mm:667
+ctrl	sp_phase	sp_phase	done	RLPSettingsViewController.mm:674
+ctrl	sp_phasemsg	sp_phasemsg	done	RLPSettingsViewController.mm:675
+ctrl	sp_ramp	sp_ramp	done	RLPSettingsViewController.mm:670
+ctrl	sp_rate	sp_rate	done	RLPSettingsViewController.mm:668
+ctrl	sp_rep	sp_rep	done	RLPSettingsViewController.mm:696
+ctrl	sp_rescan	sp_rescan	done	RLPSettingsViewController.mm:1695
+ctrl	sp_root	sp_root	done	RLPSettingsViewController.mm:693
+ctrl	sp_roots	sp_roots	done	RLPSettingsViewController.mm:1714
+ctrl	sp_scanthreads	sp_scanthreads	done	RLPSettingsViewController.mm:695
+ctrl	sp_sdmo1	sp_sdmo1	done	RLPSettingsViewController.mm:678
+ctrl	sp_sdmoNx	sp_sdmoNx	done	RLPSettingsViewController.mm:678
+ctrl	sp_searchbase	search.base	done	RLPSettingsViewController.mm:2189
+ctrl	sp_searchcapnote	sp_searchcapnote	done	RLPSettingsViewController.mm:722
+ctrl	sp_searchclear	search.clear	done	RLPSettingsViewController.mm:2210
+ctrl	sp_searchkey	search.key	done	RLPSettingsViewController.mm:2195
+ctrl	sp_searchmsg	search.status	done	RLPSettingsViewController.mm:2202
+ctrl	sp_searchprovider	search.provider	done	RLPSettingsViewController.mm:2181
+ctrl	sp_searchsave	search.save	done	RLPSettingsViewController.mm:2207
+ctrl	sp_shaper	sp_shaper	done	RLPSettingsViewController.mm:677
+ctrl	sp_shuf	sp_shuf	done	RLPSettingsViewController.mm:696
 ctrl	sp_src_add	srv.add	done	RLPServersView.mm:73
 ctrl	sp_src_base	srv.form.base	done	RLPServersView.mm:126
 ctrl	sp_src_cancel	srv.form.cancel	done	RLPServersView.mm:153
@@ -283,40 +283,40 @@ ctrl	sp_stat_running	sp_stat_running	done	RLPInputView.mm:183
 ctrl	sp_stat_spec	sp_stat_spec	done	RLPInputView.mm:187
 ctrl	sp_stat_water	sp_stat_water	done	RLPInputView.mm:189
 ctrl	sp_stat_xrun	sp_stat_xrun	done	RLPInputView.mm:191
-ctrl	sp_taps	sp_taps	done	RLPSettingsViewController.mm:658
-ctrl	sp_theme	sp_theme	done	RLPSettingsViewController.mm:674
-ctrl	sp_transition	sp_transition	done	RLPSettingsViewController.mm:659
-ctrl	sp_trim	sp_trim	done	RLPSettingsViewController.mm:655
-ctrl	sp_trimchmsg	sp_trimchmsg	done	RLPSettingsViewController.mm:1156
-ctrl	sp_trimwrap	sp_trimwrap	done	RLPSettingsViewController.mm:1147
-ctrl	sp_uistyle	sp_uistyle	done	RLPSettingsViewController.mm:674
-ctrl	sp_updbar	sp_updbar	done	RLPSettingsViewController.mm:1775
-ctrl	sp_updbeta	sp_updbeta	done	RLPSettingsViewController.mm:686
-ctrl	sp_updchannel	sp_updchannel	done	RLPSettingsViewController.mm:684
-ctrl	sp_updcheck	sp_updcheck	done	RLPSettingsViewController.mm:1752
-ctrl	sp_updfill	sp_updfill	done	RLPSettingsViewController.mm:687
-ctrl	sp_updinstall	sp_updinstall	done	RLPSettingsViewController.mm:1756
-ctrl	sp_updmsg	sp_updmsg	done	RLPSettingsViewController.mm:686
-ctrl	sp_updnote	sp_updnote	done	RLPSettingsViewController.mm:688
-ctrl	sp_upnp	sp_upnp_scan	done	RLPSettingsViewController.mm:1075
-ctrl	sp_upnp_dev	sp_upnp_dev	done	RLPSettingsViewController.mm:649
-ctrl	sp_upnp_msg	sp_upnp_msg	done	RLPSettingsViewController.mm:1080
-ctrl	sp_upnp_scan	sp_upnp_scan	done	RLPSettingsViewController.mm:1075
-ctrl	sp_upnpwrap	sp_upnpwrap	done	RLPSettingsViewController.mm:1060
-ctrl	sp_vercur	sp_vercur	done	RLPSettingsViewController.mm:684
-ctrl	sp_wbapply	sp_wbapply	done	RLPSettingsViewController.mm:2034
-ctrl	sp_wbdesc	sp_wbdesc	done	RLPSettingsViewController.mm:2021
-ctrl	sp_wbdry	sp_wbdry	done	RLPSettingsViewController.mm:2030
-ctrl	sp_wbmsg	sp_wbmsg	done	RLPSettingsViewController.mm:2038
+ctrl	sp_taps	sp_taps	done	RLPSettingsViewController.mm:675
+ctrl	sp_theme	sp_theme	done	RLPSettingsViewController.mm:691
+ctrl	sp_transition	sp_transition	done	RLPSettingsViewController.mm:676
+ctrl	sp_trim	sp_trim	done	RLPSettingsViewController.mm:672
+ctrl	sp_trimchmsg	sp_trimchmsg	done	RLPSettingsViewController.mm:1274
+ctrl	sp_trimwrap	sp_trimwrap	done	RLPSettingsViewController.mm:1265
+ctrl	sp_uistyle	sp_uistyle	done	RLPSettingsViewController.mm:691
+ctrl	sp_updbar	sp_updbar	done	RLPSettingsViewController.mm:1903
+ctrl	sp_updbeta	sp_updbeta	done	RLPSettingsViewController.mm:703
+ctrl	sp_updchannel	sp_updchannel	done	RLPSettingsViewController.mm:701
+ctrl	sp_updcheck	sp_updcheck	done	RLPSettingsViewController.mm:1880
+ctrl	sp_updfill	sp_updfill	done	RLPSettingsViewController.mm:704
+ctrl	sp_updinstall	sp_updinstall	done	RLPSettingsViewController.mm:1884
+ctrl	sp_updmsg	sp_updmsg	done	RLPSettingsViewController.mm:703
+ctrl	sp_updnote	sp_updnote	done	RLPSettingsViewController.mm:705
+ctrl	sp_upnp	sp_upnp_scan	done	RLPSettingsViewController.mm:1159
+ctrl	sp_upnp_dev	sp_upnp_dev	done	RLPSettingsViewController.mm:665
+ctrl	sp_upnp_msg	sp_upnp_msg	done	RLPSettingsViewController.mm:1164
+ctrl	sp_upnp_scan	sp_upnp_scan	done	RLPSettingsViewController.mm:1159
+ctrl	sp_upnpwrap	sp_upnpwrap	done	RLPSettingsViewController.mm:1144
+ctrl	sp_vercur	sp_vercur	done	RLPSettingsViewController.mm:701
+ctrl	sp_wbapply	sp_wbapply	done	RLPSettingsViewController.mm:2162
+ctrl	sp_wbdesc	sp_wbdesc	done	RLPSettingsViewController.mm:2149
+ctrl	sp_wbdry	sp_wbdry	done	RLPSettingsViewController.mm:2158
+ctrl	sp_wbmsg	sp_wbmsg	done	RLPSettingsViewController.mm:2166
 ctrl	sqDel	sq.del	done	RLPSidebarViewController.mm:564
 ctrl	sqEmpty	sq.empty	done	RLPSidebarViewController.mm:507
-ctrl	sqNew	sq.new	done	RLPPlaylistsViewController.mm:120
-ctrl	sqPlayAll	sq.playall	done	RLPPlaylistsViewController.mm:117
+ctrl	sqNew	sq.new	done	RLPPlaylistsViewController.mm:118
+ctrl	sqPlayAll	sq.playall	done	RLPPlaylistsViewController.mm:115
 ctrl	sqRen	sq.ren	done	RLPSidebarViewController.mm:558
 ctrl	tq	sel:onQueue:	sel	RLPMainWindowController.mm:210 (impl RLPMainWindowController.mm:691)（@selector 接线；无 identifier）
-ctrl	trMore	sel:onLoadMore:	sel	RLPTracksViewController.mm:326 (impl RLPTracksViewController.mm:567)（@selector 接线；无 identifier）
-ctrl	trackSort	tracks.sort	done	RLPTracksViewController.mm:168
-ctrl	vol	pb.vol	done	RLPPlaybackBarView.mm:499
+ctrl	trMore	sel:onLoadMore:	sel	RLPTracksViewController.mm:374 (impl RLPTracksViewController.mm:664)（@selector 接线；无 identifier）
+ctrl	trackSort	tracks.sort	done	RLPTracksViewController.mm:183
+ctrl	vol	pb.vol	done	RLPPlaybackBarView.mm:501
 ctrl	wBackNp	works.backnp	done	RLPWorksViewController.mm:88
 ctrl	wClose	--	na	web=src/net/ui_script.h:1084 native=RLPMainWindowController.mm:131: 同上：关闭 = NSWindowStyleMaskClosable 的系统按钮
 ctrl	wComposer	works.composer	done	RLPWorksViewController.mm:120
@@ -325,9 +325,9 @@ ctrl	wMin	--	na	web=src/net/ui_script.h:1082 native=RLPMainWindowController.mm:1
 ctrl	wTitle	works.title	done	RLPWorksViewController.mm:114
 api	/api/add	/api/add	done	RLPSupport.mm:383
 api	/api/anl/cancel	/api/anl/cancel	done	RLPNowPlayingViewController.mm:3352
-api	/api/anl/stats	--	na	web=src/net/ui_script.h:0refs;tools/rtaweb.cpp:7983 native=无对应实现（tools/native_ui/*.mm 0 次引用该路径）: web 前端 0 次引用（grep api/anl/stats src/net/ui_script.h）；它是 /api/anl/cancel 同组的后端统计路由，前端不用。原生已有 /api/anl/cancel。
+api	/api/anl/stats	--	na	web=src/net/ui_script.h:0refs;tools/rtaweb.cpp:1005 native=无对应实现（tools/native_ui/*.mm 0 次引用该路径）: web 前端 0 次引用（grep api/anl/stats src/net/ui_script.h）；它是 /api/anl/cancel 同组的后端统计路由，前端不用。原生已有 /api/anl/cancel。
 api	/api/artist/image	/api/artist/image	done	RLPArtistDetailViewController.mm:324
-api	/api/buffer/reset	--	na	web=src/net/ui_script.h:0refs;tools/rtaweb.cpp:7239 native=无对应实现（tools/native_ui/*.mm 0 次引用该路径）: web 前端 0 次引用；后端运维路由（清空缓冲），UI 无入口。
+api	/api/buffer/reset	--	na	web=src/net/ui_script.h:0refs;tools/rtaweb.cpp:7365 native=无对应实现（tools/native_ui/*.mm 0 次引用该路径）: web 前端 0 次引用；后端运维路由（清空缓冲），UI 无入口。
 api	/api/cast/devices	/api/cast/devices	done	RLPCastView.mm:292
 api	/api/cast/start	/api/cast/start	done	RLPCastView.mm:226
 api	/api/cast/state	/api/cast/state	done	RLPCastView.mm:321
@@ -336,103 +336,103 @@ api	/api/clear	/api/clear	done	RLPFunctionalAudit.mm:911
 api	/api/compare	/api/compare	done	RLPNowPlayingViewController.mm:3670
 api	/api/cover/reset	/api/cover/reset	done	RLPNowPlayingViewController.mm:2547
 api	/api/cover/set	/api/cover/set	done	RLPNowPlayingViewController.mm:2529
-api	/api/dbg	--	na	web=src/net/ui_script.h:0refs;tools/rtaweb.cpp:12462 native=无对应实现（tools/native_ui/*.mm 0 次引用该路径）: web 前端 0 次引用；调试用的后端路由，不在产品界面里。
+api	/api/dbg	--	na	web=src/net/ui_script.h:0refs;tools/rtaweb.cpp:12614 native=无对应实现（tools/native_ui/*.mm 0 次引用该路径）: web 前端 0 次引用；调试用的后端路由，不在产品界面里。
 api	/api/devices	/api/devices	done	RLPQuickStartViewController.mm:832
-api	/api/diag	/api/diag	done	RLPSettingsViewController.mm:2848
-api	/api/diag/save	--	na	web=src/net/ui_script.h:0refs;tools/rtaweb.cpp:12224 native=无对应实现（tools/native_ui/*.mm 0 次引用该路径）: web 前端 0 次引用；诊断落盘由 /api/diagzip 承担（原生已接）。
+api	/api/diag	/api/diag	done	RLPSettingsViewController.mm:3028
+api	/api/diag/save	--	na	web=src/net/ui_script.h:0refs;tools/rtaweb.cpp:12376 native=无对应实现（tools/native_ui/*.mm 0 次引用该路径）: web 前端 0 次引用；诊断落盘由 /api/diagzip 承担（原生已接）。
 api	/api/diagjson	/api/diagjson	done	RLPFeedbackWindowController.mm:178
-api	/api/diagzip	/api/diagzip	done	RLPSettingsViewController.mm:2865
-api	/api/enrich	/api/enrich	done	RLPTrackActions.mm:148
+api	/api/diagzip	/api/diagzip	done	RLPSettingsViewController.mm:3045
+api	/api/enrich	/api/enrich	done	RLPTrackActions.mm:164
 api	/api/entity/knowledge	/api/entity/knowledge	done	RLPKnowledgeView.mm:182
 api	/api/entity/summary	/api/entity/summary	done	RLPAlbumDetailViewController.mm:681
 api	/api/entity/versions	/api/entity/versions	done	RLPKnowledgeView.mm:274
 api	/api/fav/list	/api/fav/list	done	RLPAlbumDetailViewController.mm:603
 api	/api/files	/api/files	done	RLPFoldersViewController.mm:200
 api	/api/filters	/api/filters	done	RLPQuickStartViewController.mm:890
-api	/api/gpu	/api/gpu	done	RLPSettingsViewController.mm:2514
-api	/api/health	/api/health	done	RLPTrackActions.mm:189
-api	/api/indevices	--	na	web=src/net/ui_script.h:0refs;tools/rtaweb.cpp:11959 native=无对应实现（tools/native_ui/*.mm 0 次引用该路径）: 已被 /api/input/devices 取代的旧名（web 前端用后者，原生已接 /api/input/devices）。
+api	/api/gpu	/api/gpu	done	RLPSettingsViewController.mm:2694
+api	/api/health	/api/health	done	RLPTrackActions.mm:205
+api	/api/indevices	--	na	web=src/net/ui_script.h:0refs;tools/rtaweb.cpp:12111 native=无对应实现（tools/native_ui/*.mm 0 次引用该路径）: 已被 /api/input/devices 取代的旧名（web 前端用后者，原生已接 /api/input/devices）。
 api	/api/input/devices	/api/input/devices	done	RLPInputView.mm:340
 api	/api/input/start	/api/input/start	done	RLPInputView.mm:304
 api	/api/input/state	/api/input/state	done	RLPInputView.mm:368
 api	/api/input/stop	/api/input/stop	done	RLPInputView.mm:323
 api	/api/lib/album	/api/lib/album	done	RLPAlbumDetailViewController.mm:399
 api	/api/lib/albums	/api/lib/albums	done	RLPAlbumDetailViewController.mm:705
-api	/api/lib/cover/prefetch	/api/lib/cover/prefetch	done	RLPSettingsViewController.mm:2689
-api	/api/lib/cover/progress	/api/lib/cover/progress	done	RLPSettingsViewController.mm:2696
+api	/api/lib/cover/prefetch	/api/lib/cover/prefetch	done	RLPSettingsViewController.mm:2869
+api	/api/lib/cover/progress	/api/lib/cover/progress	done	RLPSettingsViewController.mm:2876
 api	/api/lib/cover/set	/api/lib/cover/set	done	RLPAlbumDetailViewController.mm:633
 api	/api/lib/enqueue	/api/lib/enqueue	done	RLPAlbumDetailViewController.mm:614
 api	/api/lib/play	/api/lib/play	done	RLPSupport.mm:378
-api	/api/lib/prune	/api/lib/prune	done	RLPSettingsViewController.mm:2311
-api	/api/lib/remove	--	na	web=src/net/ui_script.h:0refs;tools/rtaweb.cpp:7235 native=无对应实现（tools/native_ui/*.mm 0 次引用该路径）: web 前端 0 次引用；破坏性目录删除走 /api/lib/rmdir（原生已接，含 rmdirinfo 预检）。
+api	/api/lib/prune	/api/lib/prune	done	RLPSettingsViewController.mm:2491
+api	/api/lib/remove	--	na	web=src/net/ui_script.h:0refs;tools/rtaweb.cpp:7346 native=无对应实现（tools/native_ui/*.mm 0 次引用该路径）: web 前端 0 次引用；破坏性目录删除走 /api/lib/rmdir（原生已接，含 rmdirinfo 预检）。
 api	/api/lib/rmdir	/api/lib/rmdir	done	RLPFoldersViewController.mm:345
 api	/api/lib/rmdirinfo	/api/lib/rmdirinfo	done	RLPFoldersViewController.mm:316
 api	/api/lib/roots	/api/lib/roots	done	RLPQuickStartViewController.mm:782
 api	/api/lib/scan	/api/lib/scan	done	RLPAlbumsViewController.mm:414
-api	/api/lib/search	/api/lib/search	done	RLPTracksViewController.mm:455
+api	/api/lib/search	/api/lib/search	done	RLPTracksViewController.mm:509
 api	/api/lib/stats	/api/lib/stats	done	RLPAlbumsViewController.mm:432
-api	/api/lib/status	--	na	web=src/net/ui_script.h:0refs;tools/rtaweb.cpp:7270 native=无对应实现（tools/native_ui/*.mm 0 次引用该路径）: web 前端 0 次引用；扫描进度前端改用 /api/lib/stats（原生已接）。
-api	/api/llm/models	/api/llm/models	done	RLPSettingsViewController.mm:2331
-api	/api/llm/test	/api/llm/test	done	RLPSettingsViewController.mm:2632
+api	/api/lib/status	--	na	web=src/net/ui_script.h:0refs;tools/rtaweb.cpp:7396 native=无对应实现（tools/native_ui/*.mm 0 次引用该路径）: web 前端 0 次引用；扫描进度前端改用 /api/lib/stats（原生已接）。
+api	/api/llm/models	/api/llm/models	done	RLPSettingsViewController.mm:2511
+api	/api/llm/test	/api/llm/test	done	RLPSettingsViewController.mm:2812
 api	/api/lyrics	/api/lyrics	done	RLPNowPlayingViewController.mm:3509
 api	/api/meta	/api/meta	done	RLPNowPlayingViewController.mm:3555
-api	/api/naa/discover	/api/naa/discover	done	RLPSettingsViewController.mm:3235
-api	/api/net	/api/net	done	RLPSettingsViewController.mm:3510
-api	/api/opra/apply	/api/opra/apply	done	RLPEqualizerView.mm:1663
-api	/api/opra/index	/api/opra/index	done	RLPEqualizerView.mm:1582
-api	/api/opra/presets	/api/opra/presets	done	RLPEqualizerView.mm:1625
+api	/api/naa/discover	/api/naa/discover	done	RLPSettingsViewController.mm:3461
+api	/api/net	/api/net	done	RLPSettingsViewController.mm:3740
+api	/api/opra/apply	/api/opra/apply	done	RLPEqualizerView.mm:1684
+api	/api/opra/index	/api/opra/index	done	RLPEqualizerView.mm:1603
+api	/api/opra/presets	/api/opra/presets	done	RLPEqualizerView.mm:1646
 api	/api/pause	/api/pause	done	RLPAlbumDetailViewController.mm:584
-api	/api/peq/preset	/api/peq/preset	done	RLPEqualizerView.mm:930
+api	/api/peq/preset	/api/peq/preset	done	RLPEqualizerView.mm:945
 api	/api/ping	/api/ping	done	main.mm:39
-api	/api/pl	--	na	web=src/net/ui_script.h:0refs;tools/rtaweb.cpp:7235 native=无对应实现（tools/native_ui/*.mm 0 次引用该路径）: 精确词元匹配 0 次（此前的 7 次是 /api/play 的子串误报）。歌单能力由 /api/sq/* 承担，web 与原生都用 sq/*，原生已接全套。
-api	/api/pl/load	--	na	web=src/net/ui_script.h:0refs;tools/rtaweb.cpp:7269 native=无对应实现（tools/native_ui/*.mm 0 次引用该路径）: web 前端 0 次引用；同属 /api/pl 旧歌单通道，被 /api/sq/play 取代（原生已接）。
-api	/api/play	/api/play	done	RLPPlaylistsViewController.mm:283
+api	/api/pl	--	na	web=src/net/ui_script.h:0refs;tools/rtaweb.cpp:7361 native=无对应实现（tools/native_ui/*.mm 0 次引用该路径）: 精确词元匹配 0 次（此前的 7 次是 /api/play 的子串误报）。歌单能力由 /api/sq/* 承担，web 与原生都用 sq/*，原生已接全套。
+api	/api/pl/load	--	na	web=src/net/ui_script.h:0refs;tools/rtaweb.cpp:7395 native=无对应实现（tools/native_ui/*.mm 0 次引用该路径）: web 前端 0 次引用；同属 /api/pl 旧歌单通道，被 /api/sq/play 取代（原生已接）。
+api	/api/play	/api/play	done	RLPPlaylistsViewController.mm:300
 api	/api/playmode	/api/playmode	done	RLPAlbumDetailViewController.mm:644
 api	/api/preset/apply	/api/preset/apply	done	RLPQuickStartViewController.mm:625
 api	/api/preset/caps	/api/preset/caps	done	RLPQuickStartViewController.mm:1149
 api	/api/providers	/api/providers	done	RLPMetaSourcesView.mm:140
-api	/api/qdel	/api/qdel	done	RLPQueueViewController.mm:367
-api	/api/qmove	/api/qmove	done	RLPQueueViewController.mm:407
-api	/api/qorder	/api/qorder	done	RLPQueueViewController.mm:569
-api	/api/qsort	/api/qsort	done	RLPQueueViewController.mm:509
-api	/api/queue/set	/api/queue/set	done	RLPQueueViewController.mm:628
-api	/api/quit	--	na	web=src/net/ui_script.h:0refs;tools/rtaweb.cpp:7236 native=无对应实现（tools/native_ui/*.mm 0 次引用该路径）: web 前端 0 次引用；CLI 退出命令（rtaweb 专用），GUI 不该有"退出后端"入口。
+api	/api/qdel	/api/qdel	done	RLPQueueViewController.mm:377
+api	/api/qmove	/api/qmove	done	RLPQueueViewController.mm:417
+api	/api/qorder	/api/qorder	done	RLPQueueViewController.mm:592
+api	/api/qsort	/api/qsort	done	RLPQueueViewController.mm:521
+api	/api/queue/set	/api/queue/set	done	RLPQueueViewController.mm:666
+api	/api/quit	--	na	web=src/net/ui_script.h:0refs;tools/rtaweb.cpp:7362 native=无对应实现（tools/native_ui/*.mm 0 次引用该路径）: web 前端 0 次引用；CLI 退出命令（rtaweb 专用），GUI 不该有"退出后端"入口。
 api	/api/rates	/api/rates	done	RLPWorkbenchViewController.mm:1577
-api	/api/recent	/api/recent	done	RLPRecentViewController.mm:96
-api	/api/repeat	/api/repeat	done	RLPSettingsViewController.mm:3409
-api	/api/rescan	/api/rescan	done	RLPSettingsViewController.mm:2308
+api	/api/recent	/api/recent	done	RLPRecentViewController.mm:136
+api	/api/repeat	/api/repeat	done	RLPSettingsViewController.mm:3639
+api	/api/rescan	/api/rescan	done	RLPSettingsViewController.mm:2488
 api	/api/roomcorr/cancel	/api/roomcorr/cancel	done	RLPCalibrationView.mm:299
-api	/api/roomcorr/layouts	--	na	web=src/net/ui_script.h:0refs;tools/rtaweb.cpp:7763 native=无对应实现（tools/native_ui/*.mm 0 次引用该路径）: web 前端 0 次引用；房间测量向导在 web 里已被显式隐藏（ui_script.h calSettingsHtml：「房间测量正在重做，本版暂不提供」），布局列表页随之不可达。
+api	/api/roomcorr/layouts	--	na	web=src/net/ui_script.h:0refs;tools/rtaweb.cpp:7866 native=无对应实现（tools/native_ui/*.mm 0 次引用该路径）: web 前端 0 次引用；房间测量向导在 web 里已被显式隐藏（ui_script.h calSettingsHtml：「房间测量正在重做，本版暂不提供」），布局列表页随之不可达。
 api	/api/roomcorr/measure	/api/roomcorr/measure	done	RLPCalibrationView.mm:279
 api	/api/roomcorr/plan	/api/roomcorr/plan	done	RLPCalibrationView.mm:219
 api	/api/roomcorr/status	/api/roomcorr/status	done	RLPCalibrationView.mm:364
-api	/api/search/get	--	na	web=src/net/ui_script.h:0refs;tools/rtaweb.cpp:5459 native=无对应实现（tools/native_ui/*.mm 0 次引用该路径）: web 前端 0 次引用；后端出站检索的内部路由，不是界面能力。
+api	/api/search/get	--	na	web=src/net/ui_script.h:0refs;tools/rtaweb.cpp:5585 native=无对应实现（tools/native_ui/*.mm 0 次引用该路径）: web 前端 0 次引用；后端出站检索的内部路由，不是界面能力。
 api	/api/seek	/api/seek	done	RLPNowPlayingViewController.mm:2494
 api	/api/selftest/report	/api/selftest/report	done	RLPFunctionalAudit.mm:290
-api	/api/selftest/request	--	na	web=src/net/ui_script.h:0refs;tools/rtaweb.cpp:7252 native=无对应实现（tools/native_ui/*.mm 0 次引用该路径）: web 侧"武装自检"的标志文件端点。原生自检由命令行参数直接触发，无此需要。
+api	/api/selftest/request	--	na	web=src/net/ui_script.h:0refs;tools/rtaweb.cpp:7378 native=无对应实现（tools/native_ui/*.mm 0 次引用该路径）: web 侧"武装自检"的标志文件端点。原生自检由命令行参数直接触发，无此需要。
 api	/api/settings	/api/settings	done	RLPAlbumDetailViewController.mm:673
-api	/api/shuffle	/api/shuffle	done	RLPSettingsViewController.mm:3416
-api	/api/shutdown	--	na	web=src/net/ui_script.h:0refs;tools/rtaweb.cpp:7236 native=无对应实现（tools/native_ui/*.mm 0 次引用该路径）: web 前端 0 次引用；CLI 关闭命令，同 /api/quit。
-api	/api/signal	/api/signal	done	RLPPlaybackBarView.mm:1164
+api	/api/shuffle	/api/shuffle	done	RLPSettingsViewController.mm:3646
+api	/api/shutdown	--	na	web=src/net/ui_script.h:0refs;tools/rtaweb.cpp:7362 native=无对应实现（tools/native_ui/*.mm 0 次引用该路径）: web 前端 0 次引用；CLI 关闭命令，同 /api/quit。
+api	/api/signal	/api/signal	done	RLPPlaybackBarView.mm:1241
 api	/api/skip	/api/skip	done	RLPNowPlayingViewController.mm:2579
 api	/api/sq/add	/api/sq/add	done	RLPFunctionalAudit.mm:627
 api	/api/sq/delete	/api/sq/delete	done	RLPFunctionalAudit.mm:618
-api	/api/sq/info	/api/sq/info	done	RLPPlaylistsViewController.mm:437
+api	/api/sq/info	/api/sq/info	done	RLPPlaylistsViewController.mm:460
 api	/api/sq/list	/api/sq/list	done	RLPFunctionalAudit.mm:613
-api	/api/sq/play	/api/sq/play	done	RLPPlaylistsViewController.mm:267
-api	/api/sq/rename	/api/sq/rename	done	RLPPlaylistsViewController.mm:349
-api	/api/sq/save	/api/sq/save	done	RLPPlaylistsViewController.mm:330
+api	/api/sq/play	/api/sq/play	done	RLPPlaylistsViewController.mm:284
+api	/api/sq/rename	/api/sq/rename	done	RLPPlaylistsViewController.mm:366
+api	/api/sq/save	/api/sq/save	done	RLPPlaylistsViewController.mm:347
 api	/api/src/browse	/api/src/browse	done	RLPStreamingViewController.mm:451
 api	/api/src/config	/api/src/config	done	RLPServersView.mm:174
 api	/api/src/cover	/api/src/cover	done	RLPSupport.mm:88
 api	/api/src/ping	/api/src/ping	done	RLPServersView.mm:357
-api	/api/src/search	--	na	web=src/net/ui_script.h:0refs;tools/rtaweb.cpp:7270 native=无对应实现（tools/native_ui/*.mm 0 次引用该路径）: web 前端 0 次引用；流媒体服务器的服务端搜索由 /api/src/browse 承担（原生已接 browse 与 src/cover）。
+api	/api/src/search	--	na	web=src/net/ui_script.h:0refs;tools/rtaweb.cpp:7396 native=无对应实现（tools/native_ui/*.mm 0 次引用该路径）: web 前端 0 次引用；流媒体服务器的服务端搜索由 /api/src/browse 承担（原生已接 browse 与 src/cover）。
 api	/api/status	/api/status	done	RLPAlbumDetailViewController.mm:580
-api	/api/stop	/api/stop	done	RLPFunctionalAudit.mm:1866
-api	/api/track/health	/api/track/health	done	RLPNowPlayingViewController.mm:3924
+api	/api/stop	/api/stop	done	RLPFunctionalAudit.mm:1882
+api	/api/track/health	/api/track/health	done	RLPNowPlayingViewController.mm:3927
 api	/api/ui/events	/api/ui/events	done	RLPFunctionalAudit.mm:303
 api	/api/upload	/api/upload	done	RLPFoldersViewController.mm:376
 api	/api/upnp	/api/upnp	done	RLPCastView.mm:282
 api	/api/volume	/api/volume	done	RLPAppDelegate.mm:349
-api	/api/writeback/dry	--	na	web=src/net/ui_script.h:0refs;tools/rtaweb.cpp:7269 native=无对应实现（tools/native_ui/*.mm 0 次引用该路径）: 与 /api/writeback?dry=1 是同一能力的两个别名；原生与 web 前端一致使用 ?dry=1（已接），不重复接别名。
-api	/api/writeback/status	/api/writeback/status	done	RLPSettingsViewController.mm:2728
+api	/api/writeback/dry	--	na	web=src/net/ui_script.h:0refs;tools/rtaweb.cpp:7395 native=无对应实现（tools/native_ui/*.mm 0 次引用该路径）: 与 /api/writeback?dry=1 是同一能力的两个别名；原生与 web 前端一致使用 ?dry=1（已接），不重复接别名。
+api	/api/writeback/status	/api/writeback/status	done	RLPSettingsViewController.mm:2908
