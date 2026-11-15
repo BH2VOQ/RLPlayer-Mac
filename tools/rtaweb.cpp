@@ -91,6 +91,7 @@ using rta::render::SinkOpenOpts;
 #include "dsp/room_api.h"        // R-1：房间测量端点层（授权/计划/状态机）
 #include "platform/macos/room_transport_coreaudio.h"   // F-3：同族整数倍 DSD→DSD 速率转换
 #include "dsp/modulator.h"
+#include "dsp/sdm_output_policy.h"   // U12：1-bit SDM 输出拐点准入（保存/开流前置闸门的唯一判定实现）
 #include "dsp/direct_sdm.h"
 #include "audio/direct_dsd_plan.h"
 #include "audio/dop_padding.h"   // 1.1.2 P0-3：DoP 尾块合法静音（0x05/0xFA 交替）
@@ -2659,6 +2660,67 @@ static std::string settings_conf_value(const char* wantKey) {
     return std::string();
 }
 
+// ---------------- U12（2026-11-16）：1-bit SDM 输出拐点准入（保存 / 开流共用同一判定）----------------
+// 语义照抄上游契约（唯一实现见 src/dsp/sdm_output_policy.h 头注释）：
+//   · 只有「真 EC」豁免 corner 质量下限；判据是 corner < 100 kHz，不是只认 20/50k 两个样例；
+//   · Chebyshev 优先（Chebyshev + ecCorrection 不豁免）；
+//   · 拒绝绝不静默改写拐点 —— 拒绝就是拒绝。
+// 为什么判在这里而不是在 SdmModulator 构造里 throw：dsd_rate_convert.h 被 cast/export 复用，
+// 构造函数抛异常会污染那条路径。两处闸门（设置保存 / DoP 开流）共用下面这段判定，口径不许分叉。
+//
+// 未来状态口径（与 DoP 生产者里的 mcfg 逐字同源）：
+//   modcut == 0 → 100 kHz（设置页文案「0 = 100」）；modcut > 0 → modcut * 1000 Hz；
+//   负数 / 非有限值 → 原样交给准入判成 sdm.corner_invalid（绝不静默换成默认 100 kHz）。
+static double sdm_corner_hz_for_policy(double modCutKhz) {
+    return (modCutKhz == 0.0) ? rta::dsp::kSdmOneBitCornerFloorHz : (modCutKhz * 1000.0);
+}
+
+// 1-bit（levels == 2）路径是否适用：AHM 由 SdmModulator 展开成 2^ahmBits 多电平，不经过 1-bit 准入。
+static bool sdm_gate_applies_to_family(const std::string& modFamily) {
+    return rta::dsp::parse_modulator_family(modFamily) != rta::dsp::ModulatorFamily::Ahm;
+}
+
+// 准入判定：族 + 有效 corner（Hz）。ecCorrection 与 DoP 的 mcfg 一致，恒 false。
+static rta::dsp::SdmCornerAdmission sdm_gate_admission(const std::string& modFamily, double modCutKhz) {
+    return rta::dsp::sdm_corner_admission(rta::dsp::parse_modulator_family(modFamily), false,
+                                         sdm_corner_hz_for_policy(modCutKhz));
+}
+
+// 给用户看的人话：POST 的 error 与 GET 的 sdm.note 共用同一句（两处口径不许分叉）。
+// 以稳定子串（SDM_CORNER_QUALITY / SDM_CORNER_INVALID）开头，UI/日志按它匹配。
+static std::string sdm_gate_human(const rta::dsp::SdmCornerAdmission& adm) {
+    if (adm.admitted) return std::string();
+    return adm.message +
+           "。请把「噪声整形拐点」设为 100 kHz 及以上（或 0 = 默认 100 kHz），"
+           "或把调制器族换成 EC（EC 族不吃 cutoff）";
+}
+
+// GET /api/settings 顶层 additive 的 sdm 快照：原生设置页的提示文案只认它（前端不写死 100000）。
+static std::string sdm_status_json(const std::map<std::string, std::string>& kvs) {
+    auto get = [&](const char* k) -> std::string {
+        auto it = kvs.find(k);
+        return it == kvs.end() ? std::string() : it->second;
+    };
+    const std::string famIn = get("modfamily");
+    const double cutKhz = std::atof(get("modcut").c_str());
+    const bool oneBit = sdm_gate_applies_to_family(famIn);
+    rta::dsp::SdmCornerAdmission adm;   // 默认 admitted
+    if (oneBit) adm = sdm_gate_admission(famIn, cutKhz);
+    double cornerHz = sdm_corner_hz_for_policy(cutKhz);
+    if (!std::isfinite(cornerHz)) cornerHz = 0.0;   // JSON 不认 nan/inf；code 已说明值不成立
+    std::ostringstream j;
+    j << "{\"corner_hz\":" << cornerHz
+      << ",\"one_bit\":" << (oneBit ? "true" : "false")
+      << ",\"family\":\""
+      << jesc(rta::dsp::modulator_family_name(rta::dsp::parse_modulator_family(famIn)))
+      << "\""
+      << ",\"admitted\":" << (adm.admitted ? "true" : "false")
+      << ",\"code\":\"" << jesc(adm.code) << "\""
+      << ",\"note\":\"" << jesc(sdm_gate_human(adm)) << "\""
+      << ",\"policy\":\"sdm-corner-v1\"}";
+    return j.str();
+}
+
 // EQ 路径"可用吗"：空串 = 明确不要 EQ（合法）；非空但读不到 = 用户还在逐字符输入 / 写错了。
 // 用途只有一个：决定【要不要为它热重启播放】。少了这道闸，用户在设置页手打路径时
 // 每敲一个字符都会 POST /api/settings，把正在播的歌反复重启 —— 那比"没变化"更糟。
@@ -3799,6 +3861,23 @@ static bool play_one_impl(const std::string& file, const PlayParams& pIn, rta::a
                                  p.modFamily.empty() ? std::string("dsd") : p.modFamily,
                                  p.modOrder > 0 ? p.modOrder : 5,
                                  std::string());
+        }
+
+        // ---- U12（2026-11-16）：1-bit SDM 拐点准入 —— 开流前闸门（在 spawn 生产者线程之前）----
+        // 与设置保存闸门共用同一判定（见本文件「U12」段的 sdm_gate_admission）。
+        // 生产者线程里的 mcfg 用**同一组输入**（p.modFamily + p.modCutoff，0 → 100 kHz）组装 NTF，
+        // 所以这里判的就是生效配置；拒绝走播放失败路径（ps.error），绝不进线程。
+        // 也绝不把 throw 塞进 SdmModulator 构造（dsd_rate_convert.h 被 cast/export 复用）。
+        if (dop && sdm_gate_applies_to_family(p.modFamily)) {
+            const rta::dsp::SdmCornerAdmission adm = sdm_gate_admission(p.modFamily, p.modCutoff);
+            if (!adm.admitted) {
+                play_log(std::string("PLAY_REJECT sdm_corner code=") + adm.code +
+                         " family=" + (p.modFamily.empty() ? std::string("dsd") : p.modFamily) +
+                         " modcut=" + std::to_string(p.modCutoff) + " file=" + file);
+                std::lock_guard<std::mutex> lk(ps.mtx);
+                ps.error = sdm_gate_human(adm);
+                return false;
+            }
         }
 
         // 设备能力检查（仅 WASAPI）。HF-01/02/04 接线（2026-10-22）：
@@ -11731,6 +11810,35 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
                 if (merged.find(k) == merged.end()) order.push_back(k);
                 merged[k] = clean;
             }
+            // ---- U12（2026-11-16）：1-bit SDM 拐点准入 —— 保存前置闸门（白名单合并后、写盘前）----
+            // 为什么卡在写盘前：设置页把拐点写进 conf 只要一次 POST；等开流再拒绝时用户已经
+            // "保存成功"，下次播放才炸。写盘前拒绝才叫"改不了 = 不会错"。
+            // 只看**未来状态**（merged）：本次提交没带的键继承 conf 里的旧值。
+            // 只在 dsd > 0（真出 DSD）且 1-bit（levels == 2，即非 AHM）时判：
+            // PCM 输出与 AHM 多电平都不经过 1-bit corner 准入。
+            {
+                auto mergedStr = [&](const char* kk) -> std::string {
+                    auto it = merged.find(kk);
+                    return it == merged.end() ? std::string() : it->second;
+                };
+                const int futureDsd = std::atoi(mergedStr("dsd").c_str());
+                const std::string famText = mergedStr("modfamily");
+                if (futureDsd > 0 && sdm_gate_applies_to_family(famText)) {
+                    const double cutKhz = std::atof(mergedStr("modcut").c_str());
+                    const rta::dsp::SdmCornerAdmission adm = sdm_gate_admission(famText, cutKhz);
+                    if (!adm.admitted) {
+                        play_log(std::string("SETTINGS_REJECT sdm_corner code=") + adm.code +
+                                 " family=" + (famText.empty() ? std::string("dsd") : famText) +
+                                 " modcut=" + std::to_string(cutKhz) +
+                                 " dsd=" + std::to_string(futureDsd));
+                        rta::net::webui_set_status(422);
+                        std::ostringstream ej;
+                        ej << "{\"ok\":false,\"code\":\"" << jesc(adm.code)
+                           << "\",\"error\":\"" << jesc(sdm_gate_human(adm)) << "\"}";
+                        return ej.str();
+                    }
+                }
+            }
             // 整体写回（合并后的全量键；顺序保持首次出现次序，便于人工排查）
             std::ofstream f(sp, std::ios::trunc);
             if (!f) return "{\"ok\":false,\"error\":\"写入失败\"}";
@@ -11836,7 +11944,10 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
             const auto it = kvs.find("meta" + std::string(pd.id));   // metaqq/metanetease/metaitunes/metalrclib
             injectKv(nk, it == kvs.end() ? std::string("1") : it->second);
         }
-        j << "}}";
+        // ---------------- U12（2026-11-16）：顶层 additive 的 sdm 快照 ----------------
+        // 只增不改：kv 结构与读侧一行不动。原生设置页的提示文案完全由 sdm.note 驱动
+        //（前端不写死 100000 Hz —— 阈值/出路的真相源是 sdm_output_policy.h + 这里）。
+        j << "},\"sdm\":" << sdm_status_json(kvs) << "}";
         return j.str();
     }
 

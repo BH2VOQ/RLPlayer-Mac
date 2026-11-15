@@ -266,6 +266,14 @@ static NSStackView *RLPSRow(NSString *label, NSView *control, NSString *hint, RL
 @property (nonatomic, strong) NSPopUpButton *modOrderPopup;
 @property (nonatomic, strong) NSTextField *modCutField;
 @property (nonatomic, strong) NSTextField *modDithField;
+/// U12（2026-11-16）：1-bit SDM 拐点准入提示（原生新增控件；web 无）。
+/// 文案由 GET /api/settings 的 sdm 对象驱动（admitted=false → sdm.note 原样显示），
+/// 前端**不**写死 100000 Hz 阈值 —— 策略真相源是 src/dsp/sdm_output_policy.h。
+@property (nonatomic, strong) NSTextField *sdmCornerNote;
+/// SDM 卡片：提示显示/隐藏后要让网格重算卡体高度（否则留一条空白行 / 把提示裁掉）。
+@property (nonatomic, strong) RLPSettingsGroup *sdmGroup;
+/// 最近一次 GET 的 sdm 快照：SDM 页签是懒建的，先 reload 后建页签时用它补一次文案。
+@property (nonatomic, copy) NSDictionary *sdmAdmission;
 @property (nonatomic, strong) NSSwitch *directSdmSwitch;
 @property (nonatomic, strong) NSPopUpButton *dsdKindPopup;
 @property (nonatomic, strong) NSPopUpButton *dsdConvPopup;
@@ -674,6 +682,7 @@ static NSString *RLPControlIdentifier(NSString *key) {
             @"sp_moddith": @"sp_moddith", @"sp_directsdm": @"sp_directsdm",
             @"sp_dsdkind": @"sp_dsdkind", @"sp_dsdconv": @"sp_dsdconv",
             @"sp_dsdmsg": @"sp_dsdmsg",
+            @"sp_sdmcorner_note": @"sp_sdmcorner_note",   // U12：拐点准入提示（原生新增，parity 扫描取证）
             @"sp_inbackend": @"sp_inbackend", @"sp_indev": @"sp_indev",
             @"sp_inch": @"sp_inch", @"sp_inbuf": @"sp_inbuf",
             @"sp_inmon": @"sp_inmon", @"sp_inseconds": @"sp_inseconds",
@@ -804,6 +813,13 @@ static NSString *RLPControlIdentifier(NSString *key) {
 
 /// 提交单个键。**只提交这一个** —— 后端合并写，未提交的键保持原值。
 - (void)postKey:(NSString *)key value:(NSString *)value {
+    [self postKey:key value:value completion:nil];
+}
+
+/// completion(ok)：保存结果落定后回调。用于「改完要刷新派生提示」的控件（例如 SDM 拐点：
+/// 被 422 拒时后端 conf 没写，读回的仍是旧值 —— 提示必须跟着真实状态走，不能拿输入框的值猜）。
+- (void)postKey:(NSString *)key value:(NSString *)value
+      completion:(void (^_Nullable)(BOOL ok))completion {
     if (!key.length) return;
     [self.loadedKeys addObject:key];
     NSString *body = [NSString stringWithFormat:@"%@=%@", key, RLPEnc(value ?: @"")];
@@ -811,13 +827,15 @@ static NSString *RLPControlIdentifier(NSString *key) {
     [[RLPCoreClient shared] postJSON:@"/api/settings" body:body completion:^(NSDictionary * _Nullable json) {
         __typeof__(self) self_ = weakSelf;
         if (!self_) return;
-        if (json && [json[@"ok"] boolValue]) {
+        const BOOL ok = (json && [json[@"ok"] boolValue]);
+        if (ok) {
             self_.statusLine.stringValue = [NSString stringWithFormat:@"%@ %@ = %@", RLPTr(@"已保存"), key, value];
         } else {
             NSString *err = [json[@"error"] isKindOfClass:[NSString class]] ? json[@"error"] : RLPTr(@"保存失败");
             self_.statusLine.stringValue = err;
             RLPToast(err);
         }
+        if (completion) completion(ok);
     }];
 }
 
@@ -1392,7 +1410,10 @@ static NSString *RLPControlIdentifier(NSString *key) {
 
 /// SDM 页 —— 1:1 对齐 web data-g=sdm（ui_script.h:9901）。
 - (void)fillSdm:(NSStackView *)stack t:(RLPTheme *)t {
-    [stack addArrangedSubview:RLPSGroup(RLPTr(@"SDM 输出"), RLPTr(@"只在输出 DSD 时生效"), t)];
+    RLPSettingsGroup *sdmGroup = (RLPSettingsGroup *)RLPSGroup(RLPTr(@"SDM 输出"),
+                                                                RLPTr(@"只在输出 DSD 时生效"), t);
+    [stack addArrangedSubview:sdmGroup];
+    self.sdmGroup = sdmGroup;
 
     self.sdmO1Popup = [self popupForKey:@"sp_sdmo1"
         items:@[ RLPTr(@"跟随 PCM 页的 1x"), RLPTr(@"读取中…") ] action:@selector(onSdmO1:)];
@@ -1433,6 +1454,15 @@ static NSString *RLPControlIdentifier(NSString *key) {
     self.modCutField = [self numberFieldForKey:@"sp_modcut" action:@selector(onModCut:)
                                     placeholder:@"0 = 100"];
     [stack addArrangedSubview:RLPSRow(RLPTr(@"噪声整形拐点（kHz，0 = 100）"), self.modCutField, nil, t)];
+
+    // U12（2026-11-16）：拐点准入提示（紧跟「拐点」行、同卡整行）。
+    // 只有后端判 admitted=false 才显示；显示内容**原样**用 sdm.note（阈值/出路都由后端写，
+    // 前端不复制 100000 Hz —— 策略改了不用改 UI，也不会两处口径打架）。
+    self.sdmCornerNote = [self hintForKey:@"sp_sdmcorner_note" width:560];
+    self.sdmCornerNote.identifier = @"sp_sdmcorner_note";   // 机械扫描可见（parity / --audit 取证）
+    self.sdmCornerNote.hidden = YES;
+    [gCurrentGroup addNoteView:self.sdmCornerNote];
+    [self applySdmAdmission:self.sdmAdmission];   // 页签晚建时用最近一次 GET 的快照补一次
 
     self.modDithField = [self numberFieldForKey:@"sp_moddith" action:@selector(onModDith:)
                                      placeholder:@"-1 = 默认"];
@@ -3286,6 +3316,11 @@ static BOOL RLPFeedbackTextBlank(NSString *s) {
         if (!self_) return;
         NSDictionary *kv = [json[@"kv"] isKindOfClass:[NSDictionary class]] ? json[@"kv"] : nil;
         if (!kv) { self_.statusLine.stringValue = RLPTr(@"设置读取失败"); return; }
+        // U12（2026-11-16）：拐点准入提示由同一份 GET 的顶层 sdm 对象驱动；
+        // 读不到就隐藏（不回落到"猜一个阈值"，那会让 UI 与后端策略分叉）。
+        NSDictionary *sdm = [json[@"sdm"] isKindOfClass:[NSDictionary class]] ? json[@"sdm"] : nil;
+        self_.sdmAdmission = sdm;
+        [self_ applySdmAdmission:sdm];
         [self_ applyKV:kv toSwitch:self_.hogSwitch key:@"hogexcl"];
         [self_ applyKV:kv toSwitch:self_.loudSwitch key:@"loudness"];
         [self_ applyKV:kv toSwitch:self_.ispSwitch key:@"isp"];
@@ -3459,7 +3494,53 @@ static BOOL RLPFeedbackTextBlank(NSString *s) {
 }
 - (void)onDsdKind:(NSPopUpButton *)s { [self postKey:@"dsdkind" value:s.titleOfSelectedItem ?: @"fir"]; }
 - (void)onDsdConv:(NSPopUpButton *)s { [self postKey:@"dsdconv" value:s.titleOfSelectedItem ?: @"narrow"]; }
-- (void)onModCut:(NSTextField *)s { [self postKey:@"modcut" value:s.stringValue]; }
+/// 改拐点：保存 + 落定后刷新准入提示（后端合并写：成功则新值生效，被 422 拒则旧值仍生效）。
+- (void)onModCut:(NSTextField *)s {
+    __weak __typeof__(self) weakSelf = self;
+    [self postKey:@"modcut" value:s.stringValue completion:^(BOOL ok) {
+        (void)ok;
+        __typeof__(self) self_ = weakSelf;
+        [self_ reloadSdmAdmission];
+    }];
+}
+
+#pragma mark - 拐点准入提示（U12）
+
+/// U12（2026-11-16）：拐点准入提示 —— 文案完全由 /api/settings 的 `sdm` 对象驱动。
+/// 为什么不在前端写阈值：100 kHz（100000 Hz）是后端策略（policy=sdm-corner-v1），
+/// 前端复制一份就会在策略调整后显示错误提示。这里只做「admitted==false → 显示 note」。
+/// 为什么要 contentDidChange：字段网格按行高缓存，只改 hidden 会留一条空白或把提示裁掉。
+- (void)applySdmAdmission:(NSDictionary *)sdm {
+    NSTextField *note = self.sdmCornerNote;
+    if (!note) return;
+    NSString *text = [sdm[@"note"] isKindOfClass:[NSString class]] ? sdm[@"note"] : @"";
+    const BOOL rejected = [sdm[@"admitted"] isKindOfClass:[NSNumber class]] &&
+                          ![sdm[@"admitted"] boolValue];
+    const BOOL show = rejected && text.length > 0;
+    const BOOL wasShown = !note.hidden;
+    if (show) {
+        note.stringValue = text;
+        note.textColor = [RLPTheme current].danger;
+        note.hidden = NO;
+    } else {
+        note.stringValue = @"";
+        note.hidden = YES;
+    }
+    if (wasShown != show && self.sdmGroup) [self.sdmGroup contentDidChange];
+}
+
+/// 只刷新 sdm 快照：仍以后端读回为准，不拿输入框的值猜判定。
+- (void)reloadSdmAdmission {
+    if (![RLPCoreClient shared].started) return;
+    __weak __typeof__(self) weakSelf = self;
+    [[RLPCoreClient shared] getJSON:@"/api/settings" completion:^(NSDictionary * _Nullable json) {
+        __typeof__(self) self_ = weakSelf;
+        if (!self_) return;
+        NSDictionary *sdm = [json[@"sdm"] isKindOfClass:[NSDictionary class]] ? json[@"sdm"] : nil;
+        self_.sdmAdmission = sdm;
+        [self_ applySdmAdmission:sdm];
+    }];
+}
 - (void)onModDith:(NSTextField *)s { [self postKey:@"moddith" value:s.stringValue]; }
 
 #pragma mark - 输入页动作
