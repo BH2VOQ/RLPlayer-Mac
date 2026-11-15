@@ -87,7 +87,7 @@ NSInteger RLPToneStyleForFilter(NSString *filterName, NSArray<NSDictionary *> *f
         NSString *pick = RLPFilterForToneStyle((RLPToneStyle)s, filterItems);
         if ([pick isEqualToString:filterName]) return s;
     }
-    return -1;   // 自定义（用户在专业模式里手挑了别的滤波）
+    return -1;   // 自定义（用户手动挑了别的滤波）
 }
 
 BOOL RLPFilterUsesNxKey(NSString *filterName, NSArray<NSDictionary *> *filterItems) {

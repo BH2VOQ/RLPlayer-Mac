@@ -377,7 +377,7 @@ int RLPRunFunctionalAudit(NSString *outDir) {
     }
 
     // ---- ① 专辑页真的有卡片，不是空壳 ----
-    // 1.1.7.1：首页不再是专辑页（聆听模式首页=聆听室），所以必须**显式导航到专辑页**
+    // 1.1.7.1：首页是聆听室，不是专辑页，所以必须**显式导航到专辑页**
     // 再验"点专辑→详情→返回"。否则返回栈记的是聆听室，断言"回到专辑页"就是判据本身错了。
     CK([wc.sidebar selectKey:@"albums"], "能导航到专辑页", @"侧栏没有 albums");
     Pump(0.6);
@@ -693,7 +693,7 @@ int RLPRunFunctionalAudit(NSString *outDir) {
 
     // ---- ③ 逐个导航项：切过去必须有内容 + 截图 ----
     // 1.1.7.1：按**符号 key** 遍历，不用裸行号 —— 导航项随模式变化，行号会错位。
-    // 聆听模式先走一遍（含聆听室），再切专业模式验工作台与设置。
+    // 无模式分叉：按符号 key 逐个切页（行号不参与，见上一行说明）。
     struct RowSpec { const char *key; const char *name; const char *file; };
     const RowSpec rows[] = {
         { "artists",   "artists",   "03-artists.png" },

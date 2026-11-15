@@ -1,13 +1,12 @@
 // SPDX-FileCopyrightText: 2026 BH2VOQ <https://github.com/BH2VOQ>
 // SPDX-License-Identifier: GPL-3.0-or-later
 //
-// RLPSettingsViewController.mm — 设置页（纯 AppKit，页签随模式）
+// RLPSettingsViewController.mm — 设置页（纯 AppKit）
 //
-// 2026-11-11 用户要求：**两个模式都要有设置页**。
-//   专业模式 7 页：播放 / 输入 / 校准 / 流媒体 / 元数据 / 高级 / 诊断
-//     （输出/PCM/SDM/均衡在专业工作台当场可切，设置不重复）。
-//   聆听模式 11 页：播放 / 输出 / PCM / SDM / 均衡 / 输入 / 校准 / 流媒体 / 元数据 / 高级 / 诊断
-//     （没有工作台 ⟹ 四页挂回设置，功能不因模式而不可达）。
+// 页签 = web `data-g` 的同一份清单，**不随模式变化**。
+// 双模式（聆听 / 专业）已于 2026-11-12 整层拆掉：枚举 / 顶栏切换 / 侧栏分叉 /
+// 设置页签随模式 / 工作台首页一并移除，为的是让「web 有的我是否都有」可机械验证。
+// （2026-11-11 那条「两个模式都要有设置页」的要求已随双模式整体退场。）
 //
 // 设计取舍（照 web 版设置页的真实结构，不自己发明）：
 //   * 页签划分与 web 完全一致（data-g）：输出 / PCM / SDM / 输入 / 高级 / 均衡 / 校准 / 流媒体 / 诊断 / 元数据。
@@ -40,12 +39,8 @@
 
 #pragma mark - 页签定义
 
-// 页签**随模式**（2026-11-11 用户要求：两个模式都要有设置页）：
-//   专业模式 7 页：播放 / 输入 / 校准 / 流媒体 / 元数据 / 高级 / 诊断
-//     —— 输出/PCM/SDM/均衡的选项在专业工作台当场可切，设置不重复。
-//   聆听模式 11 页：播放 / 输出 / PCM / SDM / 均衡 / 输入 / 校准 / 流媒体 / 元数据 / 高级 / 诊断
-//     —— 聆听模式没有工作台，这四页必须挂回设置，否则功能不可达（铁律：功能不能删）。
-// 页签是**索引 → key 的运行时表**，不再是编译期常量数组：切模式时重建。
+// 页签**不随模式变化**：一份清单，与 web `data-g` 对应（双模式已于 2026-11-12 整层拆掉）。
+// 页签是**索引 → key 的运行时表**（不再用编译期常量数组），重建只为保持选中页。
 typedef NS_ENUM(NSInteger, RLPSTab) {
     RLPSTabAdv = 0, RLPSTabIn, RLPSTabOut, RLPSTabPcm, RLPSTabSdm,
     RLPSTabEq, RLPSTabCal, RLPSTabMeta, RLPSTabStream, RLPSTabDiag
@@ -467,7 +462,7 @@ static NSStackView *RLPSRow(NSString *label, NSView *control, NSString *hint, RL
     [self showTab:self.tab];
 }
 
-/// 按当前模式重建页签集合（聆听 11 页 / 专业 7 页），并保持当前页选中。
+/// 按 web 页签清单重建分段控件，并保持当前页选中（无模式分叉）。
 - (void)rebuildTabs {
     NSArray<NSString *> *keys = RLPSettingsTabKeys();
     self.tabs.segmentCount = (NSInteger)keys.count;

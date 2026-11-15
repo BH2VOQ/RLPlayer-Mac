@@ -147,3 +147,9 @@
 - **/api/meta 补 coverSource 字段 + 「自动」封面按钮闸门**（只有手动封面生效时才显示该按钮）。
   证据 evidence/native-cover-source-20261115.md；判据 K7/K8（后端）+ C4b–C4d（前端）。
   挂账：只区分 manual 与其余（本仓无上游 online/extracted 溯源链）；reset 用 .source.json 存在性判定。
+
+## 进度（1.1.7.77）
+
+- **双模式注释残渣已清理**（纯注释，不动逻辑、不删功能）：设置页/快速开始/审计/工作台/聆听室共 9 处。
+  证据 evidence/native-dualmode-residue-20261115.md；门禁与上一包等价。
+  刻意未做：删两个保留组件（铁律①）、删 i18n 死词条（留更安全）。
