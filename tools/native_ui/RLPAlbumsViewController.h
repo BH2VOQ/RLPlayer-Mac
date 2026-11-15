@@ -13,6 +13,10 @@ NS_ASSUME_NONNULL_BEGIN
 /// 重新拉取专辑列表（核心未启动时安全空转）。
 - (void)reload;
 
+/// 按关键词过滤（web loadAlbums(q) → GET /api/lib/albums?q=…）：空串 = 整库。
+/// 这是顶栏搜索在**专辑页**的「页内过滤」语义 —— 不切页、不跳曲目页。
+- (void)searchWithQuery:(NSString *)query;
+
 /// 切到本页时调用：重新上报计数（顶栏标题旁的"N 张专辑"）。
 /// 主窗口每次路由都会调 activate；只有 reload 时上报会让计数在换页后被清空。
 - (void)activate;

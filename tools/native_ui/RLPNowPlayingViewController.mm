@@ -58,6 +58,12 @@
 - (void)onClosePlayback:(id)sender;
 /// web applyRep：循环键图标/配色/tooltip 随四档模式变化 + #npRepOne 角标只在单曲循环显示。
 - (void)applyPlayModeUI;
+/// 从队列快照取 mode 并刷新循环/随机芯片（web applyRep）。
+- (void)applyPlayModeFromJSON:(NSDictionary *)json;
+/// 只同步播放模式、不依赖当前曲：页面重新打开时用（refresh 只在换曲分支拉队列）。
+- (void)refreshPlayMode;
+/// 投放「推送」落库：/api/cast/start 成功后立刻刷芯片（不等 2s 轮询）。
+- (void)castStartToDevice:(NSDictionary *)device;
 /// web updateNextTrackInfo 的原生同构：按队列快照刷新 `#npNextTrackHero`（停止/无队列 → 隐藏）。
 - (void)applyQueueSnapshot:(nullable NSDictionary *)json;
 /// web `.chip:hover` 的视觉：底 --hov / 边 --acc / 字 --txt；退出回到 `.chip` 静态样式。
@@ -2707,6 +2713,33 @@ static NSString *RLPNowPlayingCastDeviceLabel(NSString *device) {
     }
 }
 
+/// 投放「推送」落库（web castPush(file, dev) → /api/cast/start）。
+/// 成功**立刻**刷一次芯片（不等 2s 的 /api/cast/state 轮询）：否则用户点完推送后
+/// 按钮还是「推送到设备」，要等下一格轮询才变「已推送到 <设备>」（审计 C 项）。
+- (void)castStartToDevice:(NSDictionary *)device {
+    NSString *body = [self castBodyForDevice:device];
+    if (!body.length) return;
+    __weak __typeof__(self) ws = self;
+    [[RLPCoreClient shared] postJSON:@"/api/cast/start" body:body
+                          completion:^(NSDictionary * _Nullable r) {
+        __typeof__(self) s = ws;
+        if (!s) return;
+        if (![r[@"ok"] boolValue]) {
+            NSString *err = [r[@"error"] isKindOfClass:[NSString class]]
+                ? (NSString *)r[@"error"] : RLPTr(@"投放失败");
+            RLPToast(err);
+            return;
+        }
+        NSString *label = [device[@"name"] isKindOfClass:[NSString class]] ? device[@"name"] : nil;
+        if (!label.length) {
+            NSString *loc = [device[@"location"] isKindOfClass:[NSString class]] ? device[@"location"] : @"";
+            label = RLPNowPlayingCastDeviceLabel(loc);
+        }
+        RLPToast([NSString stringWithFormat:@"%@ %@", RLPTr(@"已推送到"), label]);
+        [s refreshCastChipState];   // 芯片立刻变成 on 态（不等轮询）
+    }];
+}
+
 - (void)onCastCurrent:(id)s {
     if (self.castRunningState) {
         // web castToggle：投放中点按钮 = 停止（不弹设备列表）。
@@ -2725,7 +2758,7 @@ static NSString *RLPNowPlayingCastDeviceLabel(NSString *device) {
     }
     if(!self.currentPath.length)return;__weak __typeof__(self) ws=self;
     [[RLPCoreClient shared] getJSON:@"/api/cast/devices" completion:^(NSDictionary *j){__typeof__(self) s=ws;if(!s)return;NSArray *devs=[j[@"devices"] isKindOfClass:NSArray.class]?j[@"devices"]:@[];if(!devs.count){RLPToast(j[@"hint"]?:RLPTr(@"未发现可投放设备"));return;}
-        NSAlert *a=[NSAlert new];a.messageText=RLPTr(@"推送当前曲目到设备");NSPopUpButton *p=[[NSPopUpButton alloc] initWithFrame:NSMakeRect(0,0,320,28)];for(NSDictionary *d in devs)[p addItemWithTitle:d[@"name"]?:@"UPnP"];a.accessoryView=p;[a addButtonWithTitle:RLPTr(@"推送")];[a addButtonWithTitle:RLPTr(@"取消")];if([a runModal]!=NSAlertFirstButtonReturn)return;NSDictionary *d=devs[p.indexOfSelectedItem];NSString *body=[s castBodyForDevice:d];if(body.length)[[RLPCoreClient shared] postJSON:@"/api/cast/start" body:body completion:^(NSDictionary *r){if(![r[@"ok"] boolValue])RLPToast(r[@"error"]?:RLPTr(@"投放失败"));}];}];
+        NSAlert *a=[NSAlert new];a.messageText=RLPTr(@"推送当前曲目到设备");NSPopUpButton *p=[[NSPopUpButton alloc] initWithFrame:NSMakeRect(0,0,320,28)];for(NSDictionary *d in devs)[p addItemWithTitle:d[@"name"]?:@"UPnP"];a.accessoryView=p;[a addButtonWithTitle:RLPTr(@"推送")];[a addButtonWithTitle:RLPTr(@"取消")];if([a runModal]!=NSAlertFirstButtonReturn)return;NSDictionary *d=devs[p.indexOfSelectedItem];[s castStartToDevice:d];}];
 }
 - (void)onRailDensity:(id)s {
     const BOOL detail = (self.railDensity.selectedSegment == 1);
@@ -3302,6 +3335,11 @@ static NSString *RLPNowPlayingCastDeviceLabel(NSString *device) {
 
 - (void)activate {
     [self startPolling];
+    // 模式（循环/随机）是**全局**状态：页面重新打开时必须重读一次。
+    // refresh 只在「换曲」分支里拉 /api/queue，所以「关掉正在播放页 → 在别处改成单曲循环
+    // → 再打开」以前显示的还是旧档位（审计 C 项）。首次进入（还没有 currentPath）由
+    // refresh 的换曲分支负责，这里不重复发请求。
+    if(self.currentPath.length)[self refreshPlayMode];
     if(self.polling&&self.currentPath.length)[self loadLyricsForPath:self.currentPath];
 }
 
@@ -3967,13 +4005,29 @@ static NSString *RLPNowPlayingCastDeviceLabel(NSString *device) {
     NSString *path=self.currentPath;if(!path.length)return;__weak __typeof__(self) ws=self;
     [[RLPCoreClient shared] getJSON:@"/api/fav/list" completion:^(NSDictionary *j){__typeof__(self) s=ws;if(!s||![path isEqual:s.currentPath])return;NSArray *items=[j[@"files"] isKindOfClass:NSArray.class]?j[@"files"]:([j[@"items"] isKindOfClass:NSArray.class]?j[@"items"]:@[]);s.favorite=NO;for(id item in items){NSString *p=[item isKindOfClass:NSString.class]?item:([item isKindOfClass:NSDictionary.class]?item[@"file"]:nil);if([RLPNPFavKey(p) isEqual:RLPNPFavKey(path)])s.favorite=YES;}s.favoriteButton.title=s.favorite?@"♥":@"♡";}];
 }
+/// 从 /api/queue 快照里取 mode 并刷新循环/随机芯片（web applyRep(v)）。
+- (void)applyPlayModeFromJSON:(NSDictionary *)j {
+    self.playbackMode = ([j[@"mode"] respondsToSelector:@selector(integerValue)]) ? [j[@"mode"] integerValue] : 0;
+    [self applyPlayModeUI];
+}
+
+/// 只同步「播放模式」（不依赖当前曲）：页面重新打开时把模式拉回最新。
+/// 与 refreshQueueContext 共用 /api/queue?meta=1，但**不**用 currentPath 守卫
+/// （模式不是某一首的属性，换曲守卫会把它丢掉）。
+- (void)refreshPlayMode {
+    __weak __typeof__(self) ws = self;
+    [[RLPCoreClient shared] getJSON:@"/api/queue?meta=1" completion:^(NSDictionary *j){__typeof__(self) s=ws;
+        if(!s||![j isKindOfClass:[NSDictionary class]])return;
+        [s applyPlayModeFromJSON:j];
+    }];
+}
+
 - (void)refreshQueueContext {
     NSString *path=self.currentPath;__weak __typeof__(self) ws=self;
     [[RLPCoreClient shared] getJSON:@"/api/queue?meta=1" completion:^(NSDictionary *j){__typeof__(self) s=ws;
         if(!s||![path isEqual:s.currentPath])return;
         if(![j isKindOfClass:[NSDictionary class]]){[s applyQueueSnapshot:nil];return;}
-        s.playbackMode=([j[@"mode"] respondsToSelector:@selector(integerValue)])?[j[@"mode"] integerValue]:0;
-        [s applyPlayModeUI];
+        [s applyPlayModeFromJSON:j];
         [s applyQueueSnapshot:j];
     }];
 }

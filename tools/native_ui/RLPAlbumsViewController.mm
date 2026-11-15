@@ -216,6 +216,10 @@ static const NSUserInterfaceItemIdentifier kAlbumItemID = @"RLPAlbumItem";
 @property (nonatomic, strong) NSTextField *countLabel;
 @property (nonatomic, strong) NSMutableArray<RLPAlbum *> *albums;
 @property (nonatomic, strong) NSCache<NSString *, NSImage *> *coverCache;
+/// 当前生效的过滤词（空 = 整库）。reload 一律按它发请求，避免「清空后仍是过滤结果」。
+@property (nonatomic, copy) NSString *query;
+/// 请求世代：连续打字/清空时只允许最新一次响应落地（否则旧响应会把新结果覆盖掉）。
+@property (nonatomic, assign) NSUInteger reloadSeq;
 // 专辑页空态（web emptyStateHtml 的非 classic 分支）：只在曲库 0 张专辑时出现。
 @property (nonatomic, strong) NSView *emptyCard;
 @property (nonatomic, strong) NSTextField *emptyTitleLabel;
@@ -468,17 +472,29 @@ static const NSUserInterfaceItemIdentifier kAlbumItemID = @"RLPAlbumItem";
     }
 }
 
-- (void)reload {
+- (void)reload { [self reloadWithQuery:self.query ?: @""]; }
+
+- (void)searchWithQuery:(NSString *)query { [self reloadWithQuery:query ?: @""]; }
+
+/// web loadAlbums(q)：带 q 走服务端过滤（后端 /api/lib/albums?q= 按专辑名+艺术家匹配），
+/// 不带 q 才是整库。旧原生的 reload 永远发裸路径 ⟹ 顶栏搜索在专辑页根本没有过滤能力。
+- (void)reloadWithQuery:(NSString *)query {
+    self.query = query ?: @"";
     if (![RLPCoreClient shared].started) {
         [self.albums removeAllObjects];
         self.countLabel.stringValue = RLPTr(@"核心未启动");
         [self.collection reloadData];
         return;
     }
+    const NSUInteger seq = ++self.reloadSeq;
+    NSString *path = self.query.length
+        ? [NSString stringWithFormat:@"/api/lib/albums?q=%@", RLPEnc(self.query)]
+        : @"/api/lib/albums";
     __weak __typeof__(self) weakSelf = self;
-    [[RLPCoreClient shared] getJSON:@"/api/lib/albums" completion:^(NSDictionary * _Nullable json) {
+    [[RLPCoreClient shared] getJSON:path completion:^(NSDictionary * _Nullable json) {
         __typeof__(self) self_ = weakSelf;
         if (!self_) return;
+        if (self_.reloadSeq != seq) return;   // 已发出更新的查询，旧响应作废
         if (!json || ![json[@"ok"] boolValue]) {
             self_.countLabel.stringValue = RLPTr(@"加载失败");
             return;

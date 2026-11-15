@@ -65,7 +65,7 @@ static const CGFloat kSidebarWidth = 226.0;   // --sidew
 static const CGFloat kPlaybackHeight = 66.0;  // .bar height
 static const CGFloat kTopbarHeight = 60.0;    // .top height（classic 52，见 topbarHeight()）
 
-@interface RLPMainWindowController ()
+@interface RLPMainWindowController () <NSSearchFieldDelegate>
 @property (nonatomic, strong, readwrite) RLPSidebarViewController *sidebar;
 @property (nonatomic, strong, readwrite) RLPAlbumsViewController *albums;
 @property (nonatomic, strong, readwrite) RLPPlaybackBarView *playbackBar;
@@ -78,6 +78,13 @@ static const CGFloat kTopbarHeight = 60.0;    // .top height（classic 52，见 
 @property (nonatomic, strong) RLPRightDrawer *rightDrawer;
 @property (nonatomic, assign) BOOL drawerOpen;
 @property (nonatomic, strong) NSSearchField *search;
+/// 顶栏搜索的防抖定时器（web #q oninput 的 260ms setTimeout）。
+@property (nonatomic, strong) NSTimer *searchDebounce;
+/// 当前生效的搜索词（清空/Esc 时按它判断要不要重拉）。
+@property (nonatomic, copy) NSString *searchQuery;
+/// 上一次真正分派出去的「落点视图 + 搜索词」，用于去重（同一落点同一个词不重复发请求）。
+@property (nonatomic, copy) NSString *appliedQuery;
+@property (nonatomic, copy) NSString *appliedView;
 @property (nonatomic, strong) NSTextField *pageTitle;   // 顶栏页标题（web #pth）
 @property (nonatomic, strong) NSTextField *pageCount;   // 计数（web #cnt）
 @property (nonatomic, strong) NSViewController *currentContent;
@@ -193,6 +200,11 @@ static NSString *RLPPageIdentifier(NSString *key) {
     _search.translatesAutoresizingMaskIntoConstraints = NO;
     _search.target = self;
     _search.action = @selector(onSearch:);
+    // web #q 的 oninput：边输入边搜（260ms 防抖），不能只靠回车。
+    // 旧实现只有 target/action ⟹ 必须按回车才触发，与 web 的即时搜索不是同一个东西。
+    _search.delegate = self;
+    // 打字期间不要 AppKit 再发一次 action（否则会和 260ms 防抖双发）；回车/清除键仍走 onSearch:。
+    _search.sendsWholeSearchString = YES;
     [_topbar addSubview:_search];
 
     NSButton *queueBtn = RLPSymbolButton(@"list.bullet", RLPTr(@"播放队列"), self, @selector(onQueue:));
@@ -320,6 +332,7 @@ static NSString *RLPPageIdentifier(NSString *key) {
 }
 
 - (void)dealloc {
+    [_searchDebounce invalidate];
     [[NSNotificationCenter defaultCenter] removeObserver:self];
 }
 
@@ -564,17 +577,112 @@ static NSString *RLPPageIdentifier(NSString *key) {
 
 #pragma mark - 顶栏动作
 
-- (void)onSearch:(id)sender {
-    NSString *q = [self.search.stringValue stringByTrimmingCharactersInSet:
-                   [NSCharacterSet whitespaceAndNewlineCharacterSet]];
-    // 全局搜索的落点 = 曲目页（与 web 版一致：搜索是跨库的，不是页内过滤）
-    NSViewController *tracks = self.pageCache[@"tracks"];
-    if (![tracks isKindOfClass:[RLPTracksViewController class]]) {
-        tracks = [[RLPTracksViewController alloc] init];
-        self.pageCache[@"tracks"] = tracks;
+#pragma mark - 顶栏搜索（web #q：oninput 260ms 防抖 + 按当前视图分派）
+
+/// 当前视图 key（web S.view）。详情页/覆盖页不是库列表页本身（web 里是 album/artist/works），
+/// 所以用 currentContent 与 pageCache 的对应关系判定，而不是只看左导航选中项。
+- (NSString *)currentViewKey {
+    NSString *key = self.sidebar.selectedKey ?: @"albums";
+    NSViewController *page = self.pageCache[key];
+    if (page && page != self.currentContent) return @"detail";
+    return key;
+}
+
+/// web dispatchSearchQuery 的原生同构：
+///   专辑 / 艺术家 / 曲目 = **页内过滤**（不跳页）；其余视图（文件夹/流媒体/队列/最近/
+///   最爱/歌单/设置，以及详情页）才切到曲目页做全局搜索。
+/// 旧实现无条件切曲目页 ⟹ 用户停在专辑页打字就被拽走，页内过滤根本用不上。
+- (void)applySearchQuery:(NSString *)query {
+    NSString *q = [query stringByTrimmingCharactersInSet:
+                   [NSCharacterSet whitespaceAndNewlineCharacterSet]] ?: @"";
+    NSString *view = [self currentViewKey];
+    const BOOL libraryPage = [view isEqualToString:@"albums"] ||
+                              [view isEqualToString:@"artists"] ||
+                              [view isEqualToString:@"tracks"];
+    NSString *target = libraryPage ? view : @"tracks";
+    // 已经在目标页 + 同一个词才去重：打字停顿后 AppKit 仍可能再发一次 action，
+    // 回车也会落到这里；web 用 260ms 定时器 + 分派，没有双发。
+    // 注意必须同时看「当前视图」——在设置页输入时 target 也是 tracks，但这时还得切页。
+    if (q.length && [self.appliedQuery isEqualToString:q] &&
+        [self.appliedView isEqualToString:target] && [view isEqualToString:target])
+        return;
+    self.searchQuery = q;
+    self.appliedQuery = q;
+    self.appliedView = target;
+    if ([target isEqualToString:@"albums"]) { [self.albums searchWithQuery:q]; return; }
+    if (libraryPage) {
+        id page = self.pageCache[target];
+        if ([page respondsToSelector:@selector(searchWithQuery:)]) [page searchWithQuery:q];
+        return;
     }
-    [self.sidebar selectKey:@"tracks"];
-    [(RLPTracksViewController *)tracks searchWithQuery:q ?: @""];
+    // 其余视图：整页搜索落点是曲目页（web 的 setView('tracks') + loadTracks(q)）。
+    // 必须走 sidebar 选中而不是直接 swap 内容：否则内容换了、左导航高亮还停在上一个页。
+    if (![self.sidebar selectKey:@"tracks"]) [self showContentForKey:@"tracks"];
+    id tracks = self.pageCache[@"tracks"];
+    if ([tracks respondsToSelector:@selector(searchWithQuery:)]) [tracks searchWithQuery:q];
+}
+
+/// web clearSearchQuery：清空搜索框并按**当前视图**重拉整库。
+/// 专辑/艺术家/曲目各自重拉；其余视图回到专辑页（与 web else 分支的 loadAlbums('') 同口径）。
+- (void)clearSearchQuery {
+    [self.searchDebounce invalidate];
+    self.searchDebounce = nil;
+    self.searchQuery = @"";
+    self.appliedQuery = @"";
+    self.appliedView = @"";
+    if (self.search.stringValue.length) self.search.stringValue = @"";
+    NSString *view = [self currentViewKey];
+    if ([view isEqualToString:@"albums"]) {
+        [self.albums searchWithQuery:@""];
+        return;
+    }
+    for (NSString *key in @[@"artists", @"tracks"]) {
+        if (![view isEqualToString:key]) continue;
+        id page = self.pageCache[key];
+        if ([page respondsToSelector:@selector(searchWithQuery:)]) [page searchWithQuery:@""];
+        return;
+    }
+    if (![self.sidebar selectKey:@"albums"]) [self showContentForKey:@"albums"];
+    [self.albums searchWithQuery:@""];
+}
+
+/// web #q.oninput：每次输入重置 260ms 防抖，到点按当前视图分派（不需要回车）。
+- (void)controlTextDidChange:(NSNotification *)note {
+    if (note.object && note.object != self.search) return;
+    [self.searchDebounce invalidate];
+    __weak __typeof__(self) weakSelf = self;
+    self.searchDebounce = [NSTimer scheduledTimerWithTimeInterval:0.26 repeats:NO block:^(NSTimer *tm) {
+        (void)tm;
+        __typeof__(self) s = weakSelf;
+        if (!s) return;
+        s.searchDebounce = nil;
+        NSString *q = [s.search.stringValue stringByTrimmingCharactersInSet:
+                       [NSCharacterSet whitespaceAndNewlineCharacterSet]] ?: @"";
+        if (q.length) [s applySearchQuery:q];
+        else [s clearSearchQuery];
+    }];
+}
+
+/// web #q.onkeydown 的 Escape 分支：清空并按当前视图重拉（这里吞掉事件，避免系统 beep）。
+- (BOOL)control:(NSControl *)control textView:(NSTextView *)textView doCommandBySelector:(SEL)commandSelector {
+    (void)textView;
+    if (control != self.search) return NO;
+    if (commandSelector == @selector(cancelOperation:)) {
+        [self clearSearchQuery];
+        return YES;
+    }
+    return NO;   // 回车走 target/action（onSearch:），其它按键原样放行
+}
+
+/// 回车（action）与搜索框自带清除键：立即分派，不等防抖（web 的清空键也是立刻 clearSearchQuery）。
+- (void)onSearch:(id)sender {
+    (void)sender;
+    [self.searchDebounce invalidate];
+    self.searchDebounce = nil;
+    NSString *q = [self.search.stringValue stringByTrimmingCharactersInSet:
+                   [NSCharacterSet whitespaceAndNewlineCharacterSet]] ?: @"";
+    if (!q.length) { [self clearSearchQuery]; return; }
+    [self applySearchQuery:q];
 }
 
 /// 顶栏队列键 = **切换右侧抽屉**（web #bQueue 切 #app.qopen）。

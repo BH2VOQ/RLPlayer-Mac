@@ -9,12 +9,14 @@
 //   POST /api/play  file=&cs=&ce=  → 播第 N 项（CUE 分轨要带 cs/ce）
 //   POST /api/clear            → 清空队列
 //   GET  /api/lyrics?file=…    → {ok, lrc}
-//   POST /api/seek  ratio=…    → 点歌词行跳转
+//   POST /api/seek  pos=…      → 点歌词行跳转（0..1 比例，参数名与 web doSeek 一致）
 #import "RLPRightDrawer.h"
 #import "RLPCoreClient.h"
 #import "RLPSupport.h"
 #import "RLPTheme.h"
 #import "RLPLyrics.h"
+
+#include <math.h>   // fmin/fmax：歌词行比例钳位（勿依赖 AppKit 的间接包含）
 
 // ── 队列行（web .qi）──
 @interface RLPDrawerQueueRow : NSView
@@ -419,6 +421,13 @@
 
 #pragma mark - 队列
 
+/// 当前队列项路径（qIndex 越界/空队列返回 nil）。
+- (NSString *)currentTrackPath {
+    if (self.qIndex >= 0 && self.qIndex < (NSInteger)self.items.count)
+        return self.items[(NSUInteger)self.qIndex];
+    return nil;
+}
+
 - (void)loadQueue {
     if (![RLPCoreClient shared].started) return;
     __weak __typeof__(self) w = self;
@@ -431,6 +440,13 @@
         s.cues = [j[@"cues"] isKindOfClass:[NSArray class]] ? j[@"cues"] : @[];
         s.qIndex = [j[@"index"] respondsToSelector:@selector(integerValue)] ? [j[@"index"] integerValue] : -1;
         [s renderQueue];
+        // 换曲检测（web：pollStatus 发现 lastCur 变化就 loadLyrics 新曲）。
+        // 旧码的 1s 轮询只更新 qIndex，从不重拉歌词 ⟹ 在歌词页签切歌后永远停在上一首的词。
+        // 判据口径：只有「当前曲真的变了」才重拉（同一首每秒重拉 = 把后端打爆，也违反 web 语义）。
+        NSString *nowPath = [s currentTrackPath] ?: @"";
+        if (![s.tab isEqualToString:@"l"] || !nowPath.length) return;
+        if ([nowPath isEqualToString:(s.lyricFile ?: @"")]) return;
+        [s loadLyricsForCurrent:NO];
     }];
 }
 
@@ -475,8 +491,9 @@
     if (cs >= 0) [body appendFormat:@"&cs=%.3f", cs];
     if (ce >= 0) [body appendFormat:@"&ce=%.3f", ce];
     [[RLPCoreClient shared] postJSON:@"/api/play" body:body completion:^(NSDictionary * _Nullable j) {
+        // 这里**不能**直接 loadLyricsForCurrent：此刻 qIndex/items 还是旧队列，
+        // 读到的是上一首的 file（审计 C 项的成因）。歌词跟随由 loadQueue 的换曲检测驱动。
         [self loadQueue];
-        [self loadLyricsForCurrent:NO];
     }];
 }
 
@@ -507,16 +524,16 @@
 
 - (void)loadLyricsForCurrent:(BOOL)isRetry {
     if (![RLPCoreClient shared].started) return;
-    NSString *file = nil;
-    if (self.qIndex >= 0 && self.qIndex < (NSInteger)self.items.count)
-        file = self.items[(NSUInteger)self.qIndex];
+    NSString *file = [self currentTrackPath];
     if (!file.length) { [self renderLyricMessage:RLPTr(@"还没有播放曲目")]; return; }
-    if ([file hasPrefix:@"http://"] || [file hasPrefix:@"https://"]) {
-        [self renderLyricMessage:RLPTr(@"网络曲目暂无歌词")]; return;
-    }
     if (!isRetry) {
         self.lyricFile = file; self.lyricRetry = 0;
         [self.lyricTimer invalidate]; self.lyricTimer = nil;
+    }
+    // lyricFile 必须在「无歌词」分支之前就记下：否则 loadQueue 的换曲检测会把它当成
+    // 新曲，每秒重渲染一次空态（网络曲目就是这条路径）。
+    if ([file hasPrefix:@"http://"] || [file hasPrefix:@"https://"]) {
+        [self renderLyricMessage:RLPTr(@"网络曲目暂无歌词")]; return;
     }
     __weak __typeof__(self) w = self;
     NSString *url = [@"/api/lyrics?file=" stringByAppendingString:RLPEnc(file)];
@@ -574,8 +591,12 @@
         row.onSeek = ^(double t) {
             __typeof__(self) s = w;
             if (!s || s.dur <= 0) return;
+            // 参数名必须是 pos（ui_script.h:6671 doSeek）：后端 /api/seek 只读 "?pos="，
+            // 旧码发 ?ratio= ⟹ 找不到 pos ⟹ frac=0 ⟹ 每次点歌词都跳回曲首（不是"跳不准"）。
+            // 上界钉 0.9999（web 同口径：pos=1.0 会让后端精确跳到文件末尾）。
+            const double f = fmin(0.9999, fmax(0.0, t / s.dur));
             [[RLPCoreClient shared] postJSON:
-                [NSString stringWithFormat:@"/api/seek?ratio=%.6f", t / s.dur]
+                [NSString stringWithFormat:@"/api/seek?pos=%.4f", f]
                 body:nil completion:nil];
         };
         [self.lyricRows addObject:row];
