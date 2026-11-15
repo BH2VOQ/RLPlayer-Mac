@@ -100,13 +100,9 @@ static const CGFloat kFavTitleMinW = 120.0;
     _tableView.doubleAction = @selector(onDoubleClick:);
     _tableView.target = self;
     
-    // 右键菜单
-    NSMenu *menu = [[NSMenu alloc] init];
-    [menu addItemWithTitle:RLPTr(@"播放") action:@selector(onPlay:) keyEquivalent:@""];
-    [menu addItemWithTitle:RLPTr(@"加入队列") action:@selector(onEnqueue:) keyEquivalent:@""];
-    [menu addItemWithTitle:RLPTr(@"取消收藏") action:@selector(onUnfav:) keyEquivalent:@""];
-    _tableView.menu = menu;
-
+    // 右键菜单 = RLPTrackActionTableView 的共享菜单（menuForEvent 按被点行构造完整动作集）。
+    // 旧实现在这里另建了一份静态菜单并挂到 tableView.menu，但 menuForEvent 永远优先返回共享菜单，
+    // 这份静态菜单**从未生效**（P11 死代码，删除）。
     // web .favhint：列表顶部一句"双击 = 从这个开始顺序播放整个最爱列表（N 首）"。
     // 用**约束**而不是 frame：本页 contentView 由外层 pageHost 给尺寸，
     // frame 布局时算出来的 y 会落到页面下沿（实测空态文字被压到播放条上）。
@@ -200,35 +196,6 @@ static const CGFloat kFavTitleMinW = 120.0;
     for (RLPTrack *t in _tracks) if (t.path.length) [paths addObject:t.path];
     // start 要用"在过滤后列表里的位置"；_tracks 全有 path 时与 row 一致。
     RLPPlayWholeListFrom(paths, row);
-}
-
-- (void)onPlay:(id)sender {
-    NSInteger row = _tableView.clickedRow >= 0 ? _tableView.clickedRow : _tableView.selectedRow;
-    if (row < 0) return;
-    RLPPlayPath(_tracks[row].path);
-}
-
-- (void)onEnqueue:(id)sender {
-    NSInteger row = _tableView.clickedRow >= 0 ? _tableView.clickedRow : _tableView.selectedRow;
-    if (row < 0) return;
-    RLPEnqueuePath(_tracks[row].path);
-}
-
-- (void)onUnfav:(id)sender {
-    NSInteger row = _tableView.clickedRow >= 0 ? _tableView.clickedRow : _tableView.selectedRow;
-    if (row < 0) return;
-    NSString *path = _tracks[row].path;
-    NSString *url = [NSString stringWithFormat:@"/api/fav?file=%@&on=0", RLPEnc(path)];
-    
-    __weak __typeof__(self) weakSelf = self;
-    [[RLPCoreClient shared] postJSON:url body:nil completion:^(NSDictionary * _Nullable json) {
-        __typeof__(self) self_ = weakSelf;
-        if (json && [json[@"ok"] boolValue]) {
-            [self_ reloadData];
-        } else {
-            RLPToast(RLPTr(@"取消收藏失败"));
-        }
-    }];
 }
 
 #pragma mark - NSTableView

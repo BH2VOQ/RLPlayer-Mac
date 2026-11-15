@@ -163,13 +163,9 @@ static NSString *const kQueueDragType = @"RLPQueueRowDrag";
     self.table.doubleAction = @selector(onDouble:);
     self.table.target = self;
 
-    // 右键菜单：只弹菜单，删除必须显式再点一次
-    NSMenu *menu = [[NSMenu alloc] init];
-    [menu addItemWithTitle:RLPTr(@"播放") action:@selector(onMenuPlay:) keyEquivalent:@""];
-    [menu addItemWithTitle:RLPTr(@"从队列移除") action:@selector(onMenuRemove:) keyEquivalent:@""];
-    for (NSMenuItem *mi in menu.itemArray) mi.target = self;
-    self.table.menu = menu;
-    // 右键改用共享菜单（与 web 一致：播放/入队/收藏/存歌单/体检/对比 + 从队列移除）
+    // 右键菜单 = RLPTrackActionTableView 的共享菜单（menuForEvent 按被点行构造）。
+    // 旧静态菜单挂到 table.menu 但从未生效（P11 死代码，删除）；「从队列移除」仍由
+    // removeAction 接进共享菜单，删除入口不丢。    // 右键改用共享菜单（与 web 一致：播放/入队/收藏/存歌单/体检/对比 + 从队列移除）
     {
         __weak __typeof__(self) ws = self;
         RLPTrackActionTableView *tv = (RLPTrackActionTableView *)self.table;
@@ -433,11 +429,6 @@ static NSString *RLPQueueParentFolder(NSString *path) {
     const NSInteger row = self.table.clickedRow;
     if (row < 0 || row >= (NSInteger)self.paths.count) return;
     [self playRow:row];
-}
-
-- (void)onMenuPlay:(id)sender {
-    const NSInteger row = self.table.clickedRow;
-    if (row >= 0) [self playRow:row];
 }
 
 /// 共享右键菜单的动作入口。

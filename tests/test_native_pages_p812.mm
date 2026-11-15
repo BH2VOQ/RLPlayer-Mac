@@ -17,6 +17,8 @@
 #import "RLPCoreClient.h"
 #import "RLPFavoritesViewController.h"
 #import "RLPRecentViewController.h"
+#import "RLPQueueViewController.h"
+#import "RLPTrackActions.h"
 #import "RLPTheme.h"
 #import "RLPSupport.h"
 #import <objc/runtime.h>
@@ -165,6 +167,18 @@ static CGFloat ColWidth(NSTableView *tv, NSInteger i) {
     if (i < 0 || i >= (NSInteger)tv.numberOfColumns) return -1;
     return [tv tableColumns][(NSUInteger)i].width;
 }
+/// 最近一条以 prefix 开头的 POST（P11 收藏方向判据用）。
+static NSDictionary *LastPostWithPrefix(NSString *prefix) {
+    NSDictionary *hit = nil;
+    for (NSDictionary *p in g_spy.posts)
+        if ([p[@"path"] hasPrefix:prefix]) hit = p;
+    return hit;
+}
+static BOOL MenuHasItem(NSMenu *m, NSString *title) {
+    for (NSMenuItem *it in m.itemArray)
+        if ([it.title isEqualToString:RLPTr(title)]) return YES;
+    return NO;
+}
 
 #pragma mark - 主流程
 
@@ -265,6 +279,70 @@ int main() {
                    "P12 最近专辑列宽 = 92px（web 92px）",
                    [NSString stringWithFormat:@"w3=%.1f", ColWidth(tv, 3)]);
             }
+        }
+
+        // ---- P11 右键「收藏」按当前收藏态发 on=1/0；自建菜单死代码已删 ----
+        {
+            // 先在已收藏的曲目上调用共享菜单动作：web 的行尾心形是双向开关，
+            // 当前已收藏必须发 on=0（旧码恒发 on=1 ⟹ 只能加不能取消）。
+            NSMenuItem *favItem = [[NSMenuItem alloc] initWithTitle:RLPTr(@"收藏")
+                                                              action:@selector(rlp_trackMenuAction:)
+                                                       keyEquivalent:@""];
+            favItem.tag = RLPTrackActionFavorite;
+            favItem.representedObject = @"/Music/Fav/Two.flac";
+            [g_spy.posts removeAllObjects];
+            BOOL handled = RLPHandleTrackAction(favItem, nil);
+            Ck(handled, "P11 收藏动作被共享分派处理（判据前提）", @"RLPHandleTrackAction 没接");
+            Pump(0.15);
+            NSDictionary *post = LastPostWithPrefix(@"/api/fav?");
+            NSString *decoded = post ? ([post[@"body"] stringByRemovingPercentEncoding] ?: post[@"body"]) : nil;
+            NSString *postPath = post[@"path"] ?: @"";
+            NSString *postDecoded = [postPath stringByRemovingPercentEncoding] ?: postPath;
+            Ck(post != nil && [postDecoded containsString:@"on=0"],
+               "P11 已收藏曲目右键「收藏」发 on=0（取消收藏；不再只能加）",
+               [g_spy.posts componentsJoinedByString:@" | "]);
+            (void)decoded;
+
+            // 负向：未收藏的曲目仍然发 on=1（不能把「收藏」也做成永远取消）。
+            NSMenuItem *addItem = [[NSMenuItem alloc] initWithTitle:RLPTr(@"收藏")
+                                                               action:@selector(rlp_trackMenuAction:)
+                                                        keyEquivalent:@""];
+            addItem.tag = RLPTrackActionFavorite;
+            addItem.representedObject = @"/Music/T/One.flac";
+            [g_spy.posts removeAllObjects];
+            RLPHandleTrackAction(addItem, nil);
+            Pump(0.15);
+            NSDictionary *post2 = LastPostWithPrefix(@"/api/fav?");
+            NSString *p2 = post2[@"path"] ?: @"";
+            NSString *p2d = [p2 stringByRemovingPercentEncoding] ?: p2;
+            Ck(post2 != nil && [p2d containsString:@"on=1"],
+               "P11 未收藏曲目右键「收藏」仍发 on=1",
+               [g_spy.posts componentsJoinedByString:@" | "]);
+
+            // 共享菜单仍保留收藏动作（右键动作超集不回退）。
+            NSMenu *shared = RLPTrackMenuForPath(@"/Music/Fav/Two.flac", nil, nil, nil);
+            Ck(shared != nil && MenuHasItem(shared, @"收藏"),
+               "P11 共享菜单仍有「收藏」项（超集保留）",
+               shared ? @"缺收藏项" : @"menu=nil");
+        }
+        {
+            // 收藏页：自建 NSMenu 从未生效（RLPTrackActionTableView.menuForEvent 永远先给共享菜单），
+            // 已删除 ⟹ tableView.menu 必须为空；队列页同理。
+            RLPFavoritesViewController *fav2 = [RLPFavoritesViewController new];
+            fav2.view.frame = NSMakeRect(0, 0, 900, 640);
+            [win.contentView addSubview:fav2.view];
+            [fav2.view layoutSubtreeIfNeeded];
+            NSTableView *ftv = TableOf(fav2);
+            Ck(ftv.menu == nil, "P11 收藏页自建右键菜单死代码已删（menu=nil）",
+               [NSString stringWithFormat:@"menu=%@", ftv.menu]);
+
+            RLPQueueViewController *queue = [RLPQueueViewController new];
+            queue.view.frame = NSMakeRect(0, 0, 900, 640);
+            [win.contentView addSubview:queue.view];
+            [queue.view layoutSubtreeIfNeeded];
+            NSTableView *qtv = [queue valueForKey:@"table"];
+            Ck(qtv != nil && qtv.menu == nil, "P11 队列页自建右键菜单死代码已删（menu=nil）",
+               [NSString stringWithFormat:@"menu=%@", qtv.menu]);
         }
 
         std::printf("结果：%d passed, %d failed\n", g_pass, g_fail);
