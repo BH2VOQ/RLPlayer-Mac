@@ -70,6 +70,7 @@ using rta::render::OutSink;
 using rta::render::SinkOpenOpts;
 #include "analysis/track_health.h"     // F-5：/api/track/health 音质体检（含 quality 19 项）
 #include "analysis/health_store.h"     // 1.1.4：/api/health 缓存键用强文件身份（mtime/size/ctime/inode/dev）
+#include "analysis/waveform.h"     // U2 包2：/api/waveform 的峰值包络（算法在包1，本包只做解码接线+缓存）
 #include "analysis/version_compare_json.h" // F-8: reachable comparison and valid JSON
 #include "meta/artwork.h"            // F-4：艺人头像全信源调度（provider.h 能力矩阵派生）
 #include "meta/enrich.h"            // 单曲元数据补全编排(播放触发 + /api/enrich + /api/meta 兜底)
@@ -1207,6 +1208,462 @@ static std::string handle_health_analysis(const rta::net::HttpRequest& rq, std::
       << ",\"health\":" << rta::analysis::track_health_json(h) << "}";
     return j.str();
 }
+
+// ==================== U2 包2：GET /api/waveform（波形峰值包络 + RMS） ====================
+//
+// GET /api/waveform?file=<URL 编码的绝对路径>[&bins=512][&cs=<秒>][&ce=<秒>][&force=1]
+//   file 缺省 = 当前播放曲（没有在播曲目时 400 waveform.path_missing）
+//   bins 默认 512，钳 [16,4096]（返回的 bins / peaks / rms 长度都用钳位后的值）
+//   cs/ce 可选：只算 [cs, ce) 这段（CUE 分轨）；缺省 0..duration。duration 是**区间长度**。
+//
+// 解码：复用体检的流式源（analysis::detail::HealthSource；WAV / DSF / DFF 按块随机读，
+//   内存与曲长无关，见 health_stream.h 的由来）。只有流式源判定「这个文件不能安全分块读」
+//   时才回退 read_any 整段解码，且解码前必须有尺寸上界（kWaveformMaxWholePcmBytes）；
+//   给不出上界或超限一律 waveform.too_large —— 宁可没波形，也不赌进程内存。
+// 缓存：进程内 LRU（≤32 条），键 = 规范路径 + FileIdentity(mtime,size) + cs + ce + bins；
+//   命中还要求完整强身份 matches()（同 mtime/size 被原地改写也不会拿旧波形冒充新内容）。
+//   force=1 跳过读缓存并重算。
+// 串行/取消：与 /api/health 同一套风格 —— 同一时刻只算一个（g_wfRunMtx），后到的请求把
+//   前一个的取消标志置真，前一个在下一个分块边界退出（409 analysis.cancelled）。
+//   计算只发生在 dispatch 线程上，不碰播放线程、不打开音频设备。
+//
+// 成功：{"ok":true,"cached":<bool>,"file":"<原样回显>","rate":...,"channels":...,
+//        "duration":<秒>,"bins":N,"peak":<max>,"peaks":[...],"rms":[...]}
+// 稳定错误码（程序判断只看 code，不看中文）：
+//   400 waveform.path_missing   参数缺失/非绝对路径/编码非法/不存在
+//   422 waveform.decode_failed  解码失败（流式与整段回退都给不出可用样本）
+//   413 waveform.too_large      整段解码超上限（拒绝而不是赌）
+//   409 analysis.cancelled      被后来的请求取消（与 /api/health 同码）
+struct WaveformCacheEntry {
+    rta::analysis::WaveformResult w;
+    rta::analysis::FileIdentity id;
+};
+static std::mutex g_wfCacheMtx;
+static std::map<std::string, WaveformCacheEntry> g_wfCache;
+static std::deque<std::string> g_wfCacheOrder;
+static constexpr size_t kWaveformCacheMax = 32;
+
+static std::mutex g_wfRunMtx;                          // 串行化：同一时刻只算一个
+static std::mutex g_wfTokenMtx;                        // 保护 g_wfToken
+static std::shared_ptr<std::atomic<bool>> g_wfToken;   // 当前请求的取消标志
+
+// 整段回退的硬上限：已解码 PCM（int32 × frames × channels）。DSD/长曲不该走这条路；
+// 256 MiB 覆盖常见 10 分钟级有损/无损文件，再大就拒绝（waveform.too_large）。
+static constexpr uint64_t kWaveformMaxWholePcmBytes = 256ull * 1024ull * 1024ull;
+// 容器头估不出上界（ffprobe 拿不到 duration/rate/channels）时的兜底：文件再大就不试。
+static constexpr uint64_t kWaveformMaxUnboundedFileBytes = 32ull * 1024ull * 1024ull;
+
+struct WaveformOutcome {
+    bool ok = false;
+    bool cancelled = false;
+    std::string code;
+    std::string error;
+    rta::analysis::WaveformResult w;
+};
+
+// 查询串解析：只取本端点认识的键；file 最后 urlDecode（%26 不能当分隔符）。
+static void waveform_parse_query(const std::string& path, std::string* file,
+                                 size_t* bins, double* cs, double* ce, bool* force) {
+    if (file) file->clear();
+    if (bins) *bins = (size_t)rta::analysis::WaveformAccumulator::kDefaultBins;
+    if (cs) *cs = 0.0;
+    if (ce) *ce = 0.0;
+    if (force) *force = false;
+    const size_t q = path.find('?');
+    if (q == std::string::npos) return;
+    const std::string qs = path.substr(q + 1);
+    size_t start = 0;
+    while (start <= qs.size()) {
+        const size_t amp = qs.find('&', start);
+        const std::string tok = qs.substr(start, amp == std::string::npos ? std::string::npos : amp - start);
+        const size_t eq = tok.find('=');
+        if (eq != std::string::npos) {
+            const std::string k = urlDecode(tok.substr(0, eq));
+            const std::string v = urlDecode(tok.substr(eq + 1));
+            if (k == "file" && file) {
+                *file = v;
+            } else if (k == "bins" && bins) {
+                const char* s = v.c_str();
+                char* end = nullptr;
+                const long long n = std::strtoll(s, &end, 10);
+                if (end != s) {
+                    const long long lo = (long long)rta::analysis::WaveformAccumulator::kMinBins;
+                    const long long hi = (long long)rta::analysis::WaveformAccumulator::kMaxBins;
+                    *bins = (size_t)(n < lo ? lo : (n > hi ? hi : n));
+                }
+            } else if (k == "cs" && cs) {
+                char* end = nullptr;
+                const double d = std::strtod(v.c_str(), &end);
+                *cs = (end != v.c_str() && d > 0.0 && d < 1e9) ? d : 0.0;
+            } else if (k == "ce" && ce) {
+                char* end = nullptr;
+                const double d = std::strtod(v.c_str(), &end);
+                *ce = (end != v.c_str() && d > 0.0 && d < 1e9) ? d : 0.0;
+            } else if (k == "force" && force) {
+                *force = (v == "1" || v == "true");
+            }
+        }
+        if (amp == std::string::npos) break;
+        start = amp + 1;
+    }
+}
+
+static std::string waveform_cache_key(const std::string& normPath,
+                                      const rta::analysis::FileIdentity& id,
+                                      size_t bins, double cs, double ce) {
+    char b[128];
+    std::snprintf(b, sizeof(b), "|%lld|%lld|%zu|%.6f|%.6f",
+                  (long long)id.mtime, (long long)id.size, bins, cs, ce);
+    return normPath + b;
+}
+
+static bool waveform_cache_lookup(const std::string& key,
+                                  const rta::analysis::FileIdentity& id,
+                                  rta::analysis::WaveformResult& out) {
+    std::lock_guard<std::mutex> lk(g_wfCacheMtx);
+    auto it = g_wfCache.find(key);
+    if (it == g_wfCache.end()) return false;
+    if (!id.valid || !it->second.id.matches(id)) {
+        g_wfCache.erase(it);
+        return false;
+    }
+    out = it->second.w;
+    return true;
+}
+
+static void waveform_cache_put(const std::string& key,
+                               const rta::analysis::WaveformResult& w,
+                               const rta::analysis::FileIdentity& id) {
+    std::lock_guard<std::mutex> lk(g_wfCacheMtx);
+    if (g_wfCache.find(key) == g_wfCache.end()) g_wfCacheOrder.push_back(key);
+    WaveformCacheEntry e;
+    e.w = w;
+    e.id = id;
+    g_wfCache[key] = std::move(e);
+    while (g_wfCacheOrder.size() > kWaveformCacheMax) {
+        const std::string old = g_wfCacheOrder.front();
+        g_wfCacheOrder.pop_front();
+        g_wfCache.erase(old);
+    }
+}
+
+// 新请求接管：先把上一个请求的取消标志置真，再给自己发一个新标志（同 health_begin_request）。
+static std::shared_ptr<std::atomic<bool>> waveform_begin_request() {
+    std::lock_guard<std::mutex> lk(g_wfTokenMtx);
+    if (g_wfToken) g_wfToken->store(true);
+    g_wfToken = std::make_shared<std::atomic<bool>>(false);
+    return g_wfToken;
+}
+
+// 任意分块源 → 波形累加器：源需提供 rate()/channels()/totalFrames()/read(pos,n,AudioBuffer&)。
+// 只读 [start, end) 帧；取消只在块边界检查（不会留下半块状态）。
+template <class Src>
+static bool waveform_drive(Src& src, size_t start, size_t end, size_t bins,
+                           std::atomic<bool>* cancel, WaveformOutcome& out) {
+    const int ch = src.channels();
+    if (ch <= 0) {
+        out.code = "waveform.decode_failed";
+        out.error = "声道数非法，无法切分波形";
+        return false;
+    }
+    if (end > src.totalFrames()) end = src.totalFrames();
+    if (start >= end) {
+        out.code = "waveform.decode_failed";
+        out.error = "CUE 区间为空（cs >= ce）";
+        return false;
+    }
+    rta::analysis::WaveformAccumulator acc(end - start, bins, (int)src.rate(), ch);
+    std::vector<float> tmp;
+    rta::audio::AudioBuffer chunk;
+    const size_t step = 65536;   // 与 health_stream 的分块口径一致
+    size_t pos = start;
+    while (pos < end) {
+        if (cancel && cancel->load(std::memory_order_relaxed)) {
+            out.cancelled = true;
+            return false;
+        }
+        const size_t want = std::min(step, end - pos);
+        const size_t got = src.read(pos, want, chunk);
+        if (got == 0) {
+            out.code = "waveform.decode_failed";
+            out.error = "流式读取返回 0 帧（文件被移动/截断？）";
+            return false;
+        }
+        tmp.resize(got * (size_t)ch);
+        for (size_t i = 0; i < got; ++i)
+            for (int c = 0; c < ch; ++c)
+                tmp[i * (size_t)ch + (size_t)c] = (float)chunk.sample(i, c);
+        if (!acc.addBlock(tmp.data(), got, ch)) {
+            out.code = "waveform.decode_failed";
+            out.error = "波形累加器拒绝了该块（声道数不一致）";
+            return false;
+        }
+        pos += got;
+    }
+    out.w = acc.finish();
+    out.ok = true;
+    return true;
+}
+
+// 整段回退路径的块源（只读切片，语义对齐 track_health.h 的 BufferSource）。
+class WaveformBufferSource {
+public:
+    explicit WaveformBufferSource(const rta::audio::AudioBuffer& b) : buf_(b) {}
+    uint32_t rate() const { return buf_.rate; }
+    int channels() const { return buf_.channels; }
+    size_t totalFrames() const { return buf_.frames(); }
+    size_t read(size_t pos, size_t n, rta::audio::AudioBuffer& out) {
+        const size_t total = buf_.frames();
+        if (pos >= total || n == 0) return 0;
+        if (n > total - pos) n = total - pos;
+        const size_t chn = (size_t)buf_.channels;
+        out.rate = buf_.rate; out.channels = buf_.channels; out.bits = buf_.bits; out.isFloat = buf_.isFloat;
+        out.raw.assign(buf_.raw.begin() + (long long)(pos * chn),
+                       buf_.raw.begin() + (long long)((pos + n) * chn));
+        return n;
+    }
+private:
+    const rta::audio::AudioBuffer& buf_;
+};
+
+static std::string waveform_bytes_text(uint64_t bytes) {
+    char b[64];
+    if (bytes >= (1ull << 20))
+        std::snprintf(b, sizeof(b), "%.1f MiB", (double)bytes / (1024.0 * 1024.0));
+    else
+        std::snprintf(b, sizeof(b), "%llu 字节", (unsigned long long)bytes);
+    return b;
+}
+
+// 解码 + 分 bin。绝不抛异常；失败填 code（稳定码）与 error（人话原因）。
+static WaveformOutcome waveform_compute(const std::string& path, size_t bins,
+                                        double cs, double ce,
+                                        std::atomic<bool>* cancel) {
+    WaveformOutcome out;
+    const auto cancelled = [&] { return cancel && cancel->load(std::memory_order_relaxed); };
+    if (cancelled()) { out.cancelled = true; return out; }
+
+    // ---- 1) 有界流式（首选）：WAV / DSF / DFF 按块随机读，内存与曲长无关 ----
+    {
+        rta::analysis::detail::HealthSource src;
+        std::string why;
+        if (src.open(path, &why)) {
+            const size_t total = src.totalFrames();
+            const double rate = (double)src.rate();
+            if (total == 0 || !(rate > 0.0)) {
+                out.code = "waveform.decode_failed";
+                out.error = "文件没有可用的 PCM 帧（帧数或采样率为 0）";
+                return out;
+            }
+            const double dur = (double)total / rate;
+            const double startSec = (cs > dur) ? dur : cs;
+            const double endSec = (ce > 0.0) ? ((ce > dur) ? dur : ce) : dur;
+            if (!(endSec > startSec)) {
+                out.code = "waveform.decode_failed";
+                out.error = "CUE 区间为空（cs >= ce）";
+                return out;
+            }
+            size_t start = (size_t)std::llround(startSec * rate);
+            size_t end = (size_t)std::llround(endSec * rate);
+            if (start > total) start = total;
+            if (end > total) end = total;
+            waveform_drive(src, start, end, bins, cancel, out);
+            return out;
+        }
+    }
+
+    if (cancelled()) { out.cancelled = true; return out; }
+
+    // ---- 2) 整段回退（read_any）：解码前必须先给出尺寸上界，否则拒绝 ----
+    uint64_t fileBytes = 0;
+    {
+        std::error_code ec;
+        const uintmax_t sz = fs::file_size(fs::u8path(path), ec);
+        if (!ec) fileBytes = (uint64_t)sz;
+    }
+    // 原生格式（WAV / DSF / DFF）不走 ffprobe：read_any 的整段缓冲是 int32 × 样本，而每个
+    // 样本在文件里至少占 1 字节 ⟹ 4 × 文件字节就是安全上界（DSD 1-bit 流经抽取后更小）。
+    // 压缩格式才问 ffprobe 要 rate/channels/duration 来估上界（find_tool 会跑 -version 自检，
+    // 尽量只在真正需要的格式上付这个代价）。
+    const std::string ext = rta::audio::lowerExt(path);
+    const bool native = (ext == ".wav" || ext == ".wave" || ext.empty() ||
+                         ext == ".dsf" || ext == ".dff");
+    bool bounded = false;
+    uint64_t estPcmBytes = 0;
+    if (native) {
+        bounded = true;
+        estPcmBytes = (fileBytes > (~0ull) / 4) ? ~0ull : fileBytes * 4;
+    } else {
+        const rta::audio::MediaInfo mi = rta::audio::probe_media(path);
+        bounded = mi.sampleRate > 0 && mi.channels > 0 && mi.duration > 0.0 && mi.duration < 1e9;
+        if (bounded) {
+            const double est = mi.duration * (double)mi.sampleRate * (double)mi.channels * 4.0;
+            estPcmBytes = (est >= 1.8e19) ? ~0ull : (uint64_t)est;
+        }
+    }
+    if ((bounded && estPcmBytes > kWaveformMaxWholePcmBytes) ||
+        (!bounded && fileBytes > kWaveformMaxUnboundedFileBytes)) {
+        out.code = "waveform.too_large";
+        out.error = bounded
+            ? ("整段解码预计需要 " + waveform_bytes_text(estPcmBytes) + " PCM，超过上限 " +
+               waveform_bytes_text(kWaveformMaxWholePcmBytes) + "（该格式不支持流式分块读）")
+            : ("探测不到容器时长/采样率/声道数，且文件 " + waveform_bytes_text(fileBytes) +
+               " 超过兜底上限 " + waveform_bytes_text(kWaveformMaxUnboundedFileBytes) +
+               "（无法在解码前给出内存上界）");
+        return out;
+    }
+
+    if (cancelled()) { out.cancelled = true; return out; }
+    rta::audio::AudioBuffer buf;
+    try {
+        buf = rta::audio::read_any(path, nullptr);
+    } catch (const rta::audio::DecodeFailure& e) {
+        out.code = "waveform.decode_failed";
+        out.error = std::string("解码失败：") + e.what();
+        return out;
+    } catch (const std::bad_alloc&) {
+        out.code = "waveform.too_large";
+        out.error = "整段解码时内存不足（已超过上限）";
+        return out;
+    } catch (const std::exception& e) {
+        out.code = "waveform.decode_failed";
+        out.error = std::string("解码失败：") + e.what();
+        return out;
+    } catch (...) {
+        out.code = "waveform.decode_failed";
+        out.error = "解码失败（未知异常）";
+        return out;
+    }
+    const uint64_t pcmBytes = (uint64_t)buf.raw.size() * sizeof(int32_t);
+    if (pcmBytes > kWaveformMaxWholePcmBytes) {
+        out.code = "waveform.too_large";
+        out.error = "整段解码得到 " + waveform_bytes_text(pcmBytes) + " PCM，超过上限 " +
+                    waveform_bytes_text(kWaveformMaxWholePcmBytes);
+        return out;
+    }
+    if (buf.frames() == 0 || buf.rate == 0 || buf.channels <= 0) {
+        out.code = "waveform.decode_failed";
+        out.error = "解码后没有可用样本（帧数、声道数或采样率为 0）";
+        return out;
+    }
+    const double dur = (double)buf.frames() / (double)buf.rate;
+    const double startSec = (cs > dur) ? dur : cs;
+    const double endSec = (ce > 0.0) ? ((ce > dur) ? dur : ce) : dur;
+    if (!(endSec > startSec)) {
+        out.code = "waveform.decode_failed";
+        out.error = "CUE 区间为空（cs >= ce）";
+        return out;
+    }
+    size_t start = (size_t)std::llround(startSec * (double)buf.rate);
+    size_t end = (size_t)std::llround(endSec * (double)buf.rate);
+    if (start > buf.frames()) start = buf.frames();
+    if (end > buf.frames()) end = buf.frames();
+    WaveformBufferSource src(buf);
+    waveform_drive(src, start, end, bins, cancel, out);
+    return out;
+}
+
+static std::string waveform_fail_json(int status, const std::string& code, const std::string& msg) {
+    rta::net::webui_set_status(status);
+    std::ostringstream j;
+    j << "{\"ok\":false,\"code\":\"" << jesc(code) << "\",\"error\":\"" << jesc(msg) << "\"}";
+    return j.str();
+}
+
+static std::string waveform_float_text(double v) {
+    char b[32];
+    std::snprintf(b, sizeof(b), "%.6f", v);
+    return b;
+}
+
+static std::string waveform_json(const std::string& file,
+                                 const rta::analysis::WaveformResult& w, bool cached) {
+    std::ostringstream j;
+    j << "{\"ok\":true,\"cached\":" << (cached ? "true" : "false")
+      << ",\"file\":\"" << jesc(file) << "\""
+      << ",\"rate\":" << w.sampleRate
+      << ",\"channels\":" << w.channels
+      << ",\"duration\":" << waveform_float_text(w.durationSec)
+      << ",\"bins\":" << w.bins
+      << ",\"peak\":" << waveform_float_text((double)w.maxPeak)
+      << ",\"peaks\":[";
+    for (size_t i = 0; i < w.peaks.size(); ++i) {
+        if (i) j << ",";
+        j << waveform_float_text((double)w.peaks[i]);
+    }
+    j << "],\"rms\":[";
+    for (size_t i = 0; i < w.rms.size(); ++i) {
+        if (i) j << ",";
+        j << waveform_float_text((double)w.rms[i]);
+    }
+    j << "]}";
+    return j.str();
+}
+
+// GET /api/waveform 的实现（路由在 handle() 的 /api/health 之后）。
+static std::string handle_waveform_api(const rta::net::HttpRequest& rq, std::string& ct) {
+    ct = "application/json; charset=utf-8";
+    std::string file;
+    size_t bins = (size_t)rta::analysis::WaveformAccumulator::kDefaultBins;
+    double cs = 0.0, ce = 0.0;
+    bool force = false;
+    waveform_parse_query(rq.path, &file, &bins, &cs, &ce, &force);
+
+    // 缺省取当前播放曲（与 /api/status 同源：ps.current 优先，其次最近一次播放参数）。
+    if (file.empty()) {
+        {
+            std::lock_guard<std::mutex> lk(g_ps.mtx);
+            file = g_ps.current;
+        }
+        if (file.empty()) file = params_snapshot().file;
+    }
+    if (file.empty())
+        return waveform_fail_json(400, "waveform.path_missing",
+                                  "未指定文件（需要 ?file=<绝对路径>），且当前没有正在播放的曲目");
+    if (!valid_utf8(file))
+        return waveform_fail_json(400, "waveform.path_missing", "路径不是合法 UTF-8，已拒绝");
+    fs::path p;
+    try {
+        p = fs::u8path(file);
+    } catch (...) {
+        return waveform_fail_json(400, "waveform.path_missing", "路径无法解析");
+    }
+    if (!p.is_absolute())
+        return waveform_fail_json(400, "waveform.path_missing", "只接受绝对路径");
+    std::error_code ec;
+    if (!fs::is_regular_file(p, ec) || ec)
+        return waveform_fail_json(400, "waveform.path_missing", "文件不存在或不是普通文件");
+
+    const rta::analysis::FileIdentity before = rta::analysis::FileIdentity::from_path(file);
+    const std::string key = waveform_cache_key(rta::analysis::normalize_path_key(file),
+                                               before, bins, cs, ce);
+
+    rta::analysis::WaveformResult cachedW;
+    if (!force && waveform_cache_lookup(key, before, cachedW))
+        return waveform_json(file, cachedW, true);
+
+    const auto token = waveform_begin_request();
+    WaveformOutcome oc;
+    {
+        std::unique_lock<std::mutex> runLk(g_wfRunMtx);   // 同一时刻只算一个
+        if (token->load()) {
+            oc.cancelled = true;
+        } else {
+            oc = waveform_compute(file, bins, cs, ce, token.get());
+        }
+    }
+    if (token->load() || oc.cancelled)
+        return waveform_fail_json(409, "analysis.cancelled", "波形分析已取消（新请求接管）");
+    if (!oc.ok)
+        return waveform_fail_json(oc.code == "waveform.too_large" ? 413 : 422, oc.code, oc.error);
+
+    // 分析期间文件被改写：结论对应哪份内容说不清 ⟹ 不入缓存（仍把结果回给调用方）。
+    const rta::analysis::FileIdentity after = rta::analysis::FileIdentity::from_path(file);
+    if (after.valid && before.valid && after.matches(before))
+        waveform_cache_put(key, oc.w, after);
+    return waveform_json(file, oc.w, false);
+}
+
 
 // F6：非法 UTF-8 字节替换为 U+FFFD（替换符）。playback.log 里可能出现旧版本写入或
 // 外部工具追加的非 UTF-8 字节，直接塞进 JSON 会被浏览器当乱码。
@@ -8255,6 +8712,11 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
     if (rq.path.rfind("/api/track/health", 0) == 0 ||
         rq.path.rfind("/api/health", 0) == 0) {
         return handle_health_analysis(rq, ct);
+    }
+    // GET /api/waveform?file=<绝对路径>[&bins=][&cs=][&ce=][&force=1] → U2 包2 波形峰值包络 + RMS
+    // 只读：不改文件、不打开音频设备；解码串行化与取消语义同 /api/health。
+    if (rq.path.rfind("/api/waveform", 0) == 0) {
+        return handle_waveform_api(rq, ct);
     }
 
     if (rq.path.rfind("/api/lib", 0) == 0) {
