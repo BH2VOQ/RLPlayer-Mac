@@ -20,6 +20,7 @@
 #import "RLPMainWindowController.h"
 #import "RLPSidebarViewController.h"
 #import "RLPPlaylistsViewController.h"
+#import "RLPTracksViewController.h"
 #import "RLPQueueViewController.h"
 #import "RLPTrackActions.h"
 #import "RLPTheme.h"
@@ -177,6 +178,18 @@ static NSDictionary *LastPostWithPrefix(NSString *prefix) {
         if ([p[@"path"] hasPrefix:prefix]) hit = p;
     return hit;
 }
+/// 全窗口里**可见**的搜索输入框数量（P10：只允许顶栏那一个）。
+static NSInteger VisibleSearchFieldCount(NSView *root) {
+    NSMutableArray<NSView *> *views = [NSMutableArray array];
+    CollectAll(root, views);
+    NSInteger n = 0;
+    for (NSView *v in views) {
+        if (![v isKindOfClass:[NSSearchField class]]) continue;
+        if (v.hidden || v.isHiddenOrHasHiddenAncestor) continue;
+        n++;
+    }
+    return n;
+}
 static BOOL MenuHasItem(NSMenu *m, NSString *title) {
     for (NSMenuItem *it in m.itemArray)
         if ([it.title isEqualToString:RLPTr(title)]) return YES;
@@ -318,6 +331,42 @@ int main() {
             Ck([pl.subtitleLabel.stringValue isEqualToString:@"3 首"],
                "P8 页内副标题 = 「3 首」",
                pl.subtitleLabel.stringValue ?: @"(nil)");
+        }
+
+        // ---- P10 曲目页只有一个搜索入口（顶栏；页内 _searchField 隐藏）----
+        // web 的曲目页没有页内搜索框：#q 是唯一入口（ui_script.h:6006+ 的顶栏搜索）。
+        // 旧原生页内另有 300px NSSearchField ⟹ 全窗口可见搜索框 2 个，两个入口各写各的。
+        {
+            RLPMainWindowController *wc = [[RLPMainWindowController alloc] init];
+            wc.window.contentView.frame = NSMakeRect(0, 0, 1280, 860);
+            [wc.window.contentView layoutSubtreeIfNeeded];
+            [wc.sidebar selectKey:@"tracks"];
+            Pump(0.35);
+            NSDictionary *cache = [wc valueForKey:@"pageCache"];
+            RLPTracksViewController *tr = (RLPTracksViewController *)cache[@"tracks"];
+            Ck([tr isKindOfClass:[RLPTracksViewController class]],
+               "P10 曲目页已创建（判据前提）", @"pageCache[tracks] 不是曲目页");
+            NSInteger visible = VisibleSearchFieldCount(wc.window.contentView);
+            Ck(visible == 1,
+               "P10 全窗口可见搜索输入框 = 1（只剩顶栏单一入口）",
+               [NSString stringWithFormat:@"visible=%ld", (long)visible]);
+            NSSearchField *inPage = (NSSearchField *)[tr valueForKey:@"searchField"];
+            Ck(inPage != nil && inPage.hidden,
+               "P10 页内 _searchField 已隐藏（不再有第二个可见输入框）",
+               inPage ? [NSString stringWithFormat:@"hidden=%d", (int)inPage.hidden] : @"找不到 _searchField");
+
+            // searchWithQuery: 接缝必须保留：顶栏搜索仍能驱动页内查询（不因隐藏输入框而断）。
+            [g_spy.gets removeAllObjects];
+            [tr searchWithQuery:@"night"];
+            Pump(0.25);
+            BOOL asked = NO;
+            for (NSString *p in g_spy.gets)
+                if ([p hasPrefix:@"/api/lib/search?q=night"]) asked = YES;
+            Ck(asked, "P10 searchWithQuery: 接缝保留（仍按顶栏词查询）",
+               [g_spy.gets componentsJoinedByString:@" | "]);
+            Ck(inPage != nil && [inPage.stringValue isEqualToString:@"night"],
+               "P10 隐藏的页内搜索框仍持有查询状态（fetchTracks 读它）",
+               inPage ? inPage.stringValue : @"(nil)");
         }
 
         // ---- P11 右键「收藏」按当前收藏态发 on=1/0；自建菜单死代码已删 ----

@@ -159,13 +159,17 @@ static NSString *RLPTrackArtistAlbumText(RLPTrack *t) {
     RLPTheme *theme = [RLPTheme current];
     NSView *container = self.contentView;
 
-    // 1. 页面内搜索框（宽度 300，可清空）
+    // 1. 页内搜索框：**不再显示**（P10）。web 的曲目页只有顶栏 #q 一个搜索入口，
+    //    旧原生在页面里又放了一个 300px NSSearchField ⟹ 同一个页面两个入口，各写各的搜索。
+    //    这里保留这个控件当**查询状态载体**（fetchTracks 读它的 stringValue；
+    //    searchWithQuery: 仍由顶栏分派进来），只是从视觉/交互上隐藏。
     _searchField = [[NSSearchField alloc] initWithFrame:NSZeroRect];
     _searchField.placeholderString = RLPTr(@"搜索专辑 / 艺术家 / 曲目…");
     _searchField.delegate = self;
     _searchField.target = self;
     _searchField.action = @selector(onSearchFieldAction:);
     _searchField.translatesAutoresizingMaskIntoConstraints = NO;
+    _searchField.hidden = YES;
     [container addSubview:_searchField];
 
     // 1b. 排序下拉（web track-sort：默认/标题/艺术家/专辑/时长/年份/收藏优先），贴右上角。
