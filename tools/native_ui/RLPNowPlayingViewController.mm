@@ -2240,7 +2240,9 @@ static NSString *RLPRailTagText(id srValue, id bitsValue) {
         // web `.anlhide{top:7;right:8}` 相对 padding box，`#npAnal` 另有 1px 边框 ⟹
         // 从面板外缘量右距 9pt（ego 实测 right=9）。1.1.7.57 起 anlPadX 已取 12（=11+1），
         // 这里把收起键从 8 同步归位到 9，与状态文字右缘 38 的 1pt 差一并消除。
-        self.anlHide.frame = NSMakeRect(side - 9.0 - 22.0, bodyH - 7.0 - 22.0, 22.0, 22.0);
+        // web `.anlhide{position:absolute;top:7px;right:8px}` 的定位框是 **padding box**（不含边框），
+        // 而 `#npAnal` 有 border:1px ⟹ 距面板**外缘**应为 右 9 / 顶 8；旧码顶部写 7（少算边框那 1pt）。
+        self.anlHide.frame = NSMakeRect(side - 9.0 - 22.0, bodyH - 8.0 - 22.0, 22.0, 22.0);
         [self anlLayoutCards];
     }
     // ---- AI 整理栏几何（web .nprailcard padding:10 / gap:8，.npchipwrap gap:6）----

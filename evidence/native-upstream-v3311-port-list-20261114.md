@@ -169,3 +169,8 @@
 
 - **rail 收起键 npRailHide 边距与居中**已对齐（右 11 / 顶 12，均走内缩常量），见 evidence/native-railhide-margin-20261115.md。
   np web 233 checks / 0 failures。挂账：行高 24pt 来自分段控件；未真机像素比对。
+
+## 进度（1.1.7.81）
+
+- **分析面板收起键 npAnalHide 顶部边距**已按 padding-box 语义修正（右 9 / 顶 8），见 evidence/native-anlhide-margin-20261115.md。
+  np web 235 checks / 0 failures。挂账：#npAnal 内边距（8/11/9）与 rail 的 11/11 不同源，未统一（统一会改布局）。

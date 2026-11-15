@@ -218,6 +218,15 @@ int main(){@autoreleasepool{
     ck(fabs(railHide.frame.size.width-22)<0.6&&fabs(railHide.frame.size.height-22)<0.6,
        "npRailHide is 22x22 like web .nprailhide");
     ck(anlHide.wantsLayer&&anlHide.layer.cornerRadius>=10.5, "npAnalHide is a circle (web border-radius:50%)");
+    {   // v1.1.7.81：web `.anlhide{top:7;right:8}` 的定位框是 padding box，面板有 border:1 ⟹ 外缘 右 9 / 顶 8。
+        NSView *ap0=[vc valueForKey:@"analysisPanel"];
+        const CGFloat anlRight = NSWidth(ap0.bounds) - NSMaxX(anlHide.frame);
+        const CGFloat anlTop = NSHeight(ap0.bounds) - NSMaxY(anlHide.frame);
+        ck(fabs(anlRight-9.0)<1.0,
+           [[NSString stringWithFormat:@"npAnalHide 右端距面板外缘 = 9pt（8 + 边框 1；got %.1f）", anlRight] UTF8String]);
+        ck(fabs(anlTop-8.0)<1.0,
+           [[NSString stringWithFormat:@"npAnalHide 顶部距面板外缘 = 8pt（7 + 边框 1；got %.1f）", anlTop] UTF8String]);
+    }
     {   // v1.1.7.80：web `.nprailhead` 在 border-box 面板内，`.nprailhide` 右缘 = 内容内缘 11（旧值 8）。
         NSView *rp0=[vc valueForKey:@"railPanel"];
         const CGFloat rightMargin = NSWidth(rp0.bounds) - NSMaxX(railHide.frame);
