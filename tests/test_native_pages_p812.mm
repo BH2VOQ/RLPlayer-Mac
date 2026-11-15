@@ -190,6 +190,31 @@ static NSInteger VisibleSearchFieldCount(NSView *root) {
     }
     return n;
 }
+/// 可见文本里是否包含 needle（P9 空态文案判据：必须带搜索词）。
+static BOOL HasVisibleLabelContaining(NSView *root, NSString *needle) {
+    NSMutableArray<NSView *> *views = [NSMutableArray array];
+    CollectAll(root, views);
+    for (NSView *v in views) {
+        if (![v isKindOfClass:[NSTextField class]]) continue;
+        if ([v isKindOfClass:[NSSearchField class]]) continue;   // 搜索框不是空态文案
+        if (v.hidden || v.isHiddenOrHasHiddenAncestor) continue;
+        NSTextField *tf = (NSTextField *)v;
+        if (tf.stringValue && [tf.stringValue rangeOfString:needle].location != NSNotFound) return YES;
+    }
+    return NO;
+}
+/// 按标题找可见按钮（P9「清空搜索词」）。
+static NSButton *FindVisibleButton(NSView *root, NSString *title) {
+    NSMutableArray<NSView *> *views = [NSMutableArray array];
+    CollectAll(root, views);
+    for (NSView *v in views) {
+        if (![v isKindOfClass:[NSButton class]]) continue;
+        if (v.hidden || v.isHiddenOrHasHiddenAncestor) continue;
+        NSButton *b = (NSButton *)v;
+        if ([b.title isEqualToString:title]) return b;
+    }
+    return nil;
+}
 static BOOL MenuHasItem(NSMenu *m, NSString *title) {
     for (NSMenuItem *it in m.itemArray)
         if ([it.title isEqualToString:RLPTr(title)]) return YES;
@@ -331,6 +356,56 @@ int main() {
             Ck([pl.subtitleLabel.stringValue isEqualToString:@"3 首"],
                "P8 页内副标题 = 「3 首」",
                pl.subtitleLabel.stringValue ?: @"(nil)");
+        }
+
+        // ---- P9 曲目页搜索无结果空态：带搜索词 + 「清空搜索词」----
+        // web ui_script.h:3334-3345：无命中且 q 非空时，空态是
+        //   「未找到与 “<q>” 相关的曲目」+ 提示 + 「清空搜索词」按钮（点击 = 顶栏 qClear）。
+        // 旧原生只有一行「没有匹配的曲目」，不给搜索词、也不给清空入口。
+        {
+            RLPMainWindowController *wc = [[RLPMainWindowController alloc] init];
+            wc.window.contentView.frame = NSMakeRect(0, 0, 1280, 860);
+            [wc.window.contentView layoutSubtreeIfNeeded];
+            [wc.sidebar selectKey:@"tracks"];
+            Pump(0.35);
+            NSDictionary *cache = [wc valueForKey:@"pageCache"];
+            RLPTracksViewController *tr = (RLPTracksViewController *)cache[@"tracks"];
+            Ck([tr isKindOfClass:[RLPTracksViewController class]],
+               "P9 曲目页已创建（判据前提）", @"pageCache[tracks] 不是曲目页");
+            NSSearchField *topSearch = (NSSearchField *)[wc valueForKey:@"search"];
+            Ck(topSearch != nil, "P9 顶栏搜索框存在（判据前提）", @"缺顶栏搜索框");
+            // 走真实顶栏入口：输入 zzz → onSearch: → tracks searchWithQuery:
+            topSearch.stringValue = @"zzz";
+            [wc performSelector:@selector(onSearch:) withObject:topSearch];
+            Pump(0.35);
+            Ck(HasVisibleLabelContaining(wc.window.contentView, @"zzz"),
+               "P9 无结果空态包含搜索词（未找到与 “zzz” 相关的曲目）",
+               @"空态里没有搜索词");
+            NSButton *clearBtn = FindVisibleButton(wc.window.contentView, RLPTr(@"清空搜索词"));
+            Ck(clearBtn != nil,
+               "P9 空态带「清空搜索词」按钮",
+               @"找不到清空搜索词按钮");
+            NSTextField *topTitle = (NSTextField *)[wc valueForKey:@"pageTitle"];
+            Ck([topTitle.stringValue isEqualToString:RLPTr(@"搜索：zzz")],
+               "P9 顶栏标题 = 搜索：<q>（web head('搜索：'+q)）",
+               topTitle.stringValue ?: @"(empty)");
+            if (clearBtn) {
+                [clearBtn performClick:nil];
+                Pump(0.35);
+                Ck(topSearch.stringValue.length == 0,
+                   "P9 点「清空搜索词」= 顶栏 qClear（搜索框已清空）",
+                   [NSString stringWithFormat:@"topSearch=%@", topSearch.stringValue]);
+                NSSearchField *inPage = (NSSearchField *)[tr valueForKey:@"searchField"];
+                Ck(inPage.stringValue.length == 0,
+                   "P9 清空后页内查询状态也为空（fetchTracks 用空词重拉）",
+                   inPage ? inPage.stringValue : @"(nil)");
+                Ck(FindVisibleButton(wc.window.contentView, RLPTr(@"清空搜索词")) == nil,
+                   "P9 清空后空态消失（恢复列表）",
+                   @"清空按钮仍在");
+                Ck([topTitle.stringValue isEqualToString:RLPTr(@"曲目")],
+                   "P9 清空后顶栏标题回到「曲目」",
+                   topTitle.stringValue ?: @"(empty)");
+            }
         }
 
         // ---- P10 曲目页只有一个搜索入口（顶栏；页内 _searchField 隐藏）----
