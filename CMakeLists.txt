@@ -2346,4 +2346,10 @@ target_link_libraries(dsdconv PRIVATE rtadsp)
 # 仍放在 RTA_BUILD_LEGACY_TESTS 开关内，等 wp-d2-tests 的 POSIX 垫片合并后随整块打开。
 endif()   # RTA_BUILD_LEGACY_TESTS
 
-
+# U2 包1：波形峰值包络（src/analysis/waveform.h，纯头、零平台依赖）。
+# 判据：30 s/48 kHz 合成信号 10.0 s 唯一满幅脉冲 → bins=300 最大 bin ∈ [99,101]；
+# 分块（1024 帧）与整段逐 bin 逐位相等；边界/bins 钳位/totalFrames=0 不崩。
+# 全程离线：不开音频设备、不解码真实文件、不读写缓存（铁律 1）。
+add_executable(test_waveform tests/test_waveform.cpp)
+target_include_directories(test_waveform PRIVATE ${CMAKE_SOURCE_DIR}/src)
+add_test(NAME waveform COMMAND test_waveform)
