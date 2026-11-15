@@ -2248,7 +2248,12 @@ static NSString *RLPRailTagText(id srValue, id bitsValue) {
     self.railTitle.frame=NSMakeRect(kRailHeadPadX,bodyH-kRailHeadPadTop-13,72,13);
     // 栏头右侧：简略/详细分段 + 收起键（web .nprailhide 与分段同处栏头一行）。
     self.railDensity.frame=NSMakeRect(MAX(80,side-kRailHeadPadX-116-30),bodyH-kRailHeadPadTop-railSegH,116,railSegH);
-    self.railHide.frame=NSMakeRect(side-8.0-22.0,bodyH-kRailHeadPadTop-railSegH,22.0,22.0);
+    // web `.nprailhead` 是 `.nprailcard`（padding:10 + border:1，border-box）里的一行 flex，
+    // `.nprailhide` 是 flex:none 的最后一个子项 ⟹ 其右缘 = 内容内缘 = 11，不是 8（旧值）。
+    // 竖直方向：web `.nprailhead{align-items:center}` ⟹ 22pt 的收起键在 24pt 行里**居中**
+    // （顶距 = 内缩 11 + (24-22)/2 = 12），不是与行顶齐平（13）。
+    const CGFloat railHideY = bodyH - kRailHeadPadTop - railSegH + (railSegH - 22.0) / 2.0;
+    self.railHide.frame=NSMakeRect(side-kRailHeadPadX-22.0,railHideY,22.0,22.0);
     CGFloat ry=bodyH-kRailHeadPadTop-railSegH-kRailHeadGap;   // 栏头底部再空 8
     const CGFloat railCardW=MAX(40,side-kRailHeadPadX*2);
     if (self.railEmptyLabel && !self.railEmptyLabel.hidden) {

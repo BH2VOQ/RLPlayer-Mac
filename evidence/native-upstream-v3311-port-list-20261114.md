@@ -164,3 +164,8 @@
 
 - **sp_opra_copychip 悬停态**（web `.chip:hover`：底色 hov / 文字 txt）已补，见 evidence/native-chip-hover-20261115.md。
   opra_cards 25/0、np web 231/0。挂账：边框色（系统 bezel 无法单独改）、transition .15s、其它 .chip 未接入。
+
+## 进度（1.1.7.80）
+
+- **rail 收起键 npRailHide 边距与居中**已对齐（右 11 / 顶 12，均走内缩常量），见 evidence/native-railhide-margin-20261115.md。
+  np web 233 checks / 0 failures。挂账：行高 24pt 来自分段控件；未真机像素比对。

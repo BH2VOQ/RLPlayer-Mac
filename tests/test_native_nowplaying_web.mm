@@ -218,6 +218,15 @@ int main(){@autoreleasepool{
     ck(fabs(railHide.frame.size.width-22)<0.6&&fabs(railHide.frame.size.height-22)<0.6,
        "npRailHide is 22x22 like web .nprailhide");
     ck(anlHide.wantsLayer&&anlHide.layer.cornerRadius>=10.5, "npAnalHide is a circle (web border-radius:50%)");
+    {   // v1.1.7.80：web `.nprailhead` 在 border-box 面板内，`.nprailhide` 右缘 = 内容内缘 11（旧值 8）。
+        NSView *rp0=[vc valueForKey:@"railPanel"];
+        const CGFloat rightMargin = NSWidth(rp0.bounds) - NSMaxX(railHide.frame);
+        ck(fabs(rightMargin-11.0)<1.0,
+           [[NSString stringWithFormat:@"npRailHide 右端距面板内缘 = 11pt（web border-box 内缘；got %.1f）", rightMargin] UTF8String]);
+        const CGFloat topMargin = NSHeight(rp0.bounds) - NSMaxY(railHide.frame);
+        ck(fabs(topMargin-12.0)<1.0,
+           [[NSString stringWithFormat:@"npRailHide 顶部距面板内缘 = 12pt（web 在 24pt 行内居中；got %.1f）", topMargin] UTF8String]);
+    }
     NSView *ap=[vc valueForKey:@"analysisPanel"];NSView *rp=[vc valueForKey:@"railPanel"];
     [anlHide performClick:nil];
     ck(ap.hidden,"npAnalHide hides the analysis panel");
