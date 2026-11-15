@@ -33,6 +33,10 @@
 @property (nonatomic, strong) NSButton *cancelBtn;
 @property (nonatomic, strong) NSTextField *irPath;
 @property (nonatomic, strong) NSSwitch *irGpu;
+/// U4：测量麦克风校准（导入/清除；状态由 GET /api/miccal 驱动）
+@property (nonatomic, strong) NSTextField *micCalNote;
+@property (nonatomic, strong) NSButton *micCalImportBtn;
+@property (nonatomic, strong) NSButton *micCalClearBtn;
 @property (nonatomic, strong) NSTextField *status;
 @property (nonatomic, copy) NSDictionary *plan;   // 最近一次 plan 的原始返回
 @end
@@ -162,6 +166,45 @@
     self.irStatus.lineBreakMode = NSLineBreakByWordWrapping;
     [self.irSection addArrangedSubview:self.irStatus];
     [self.stack addArrangedSubview:self.irSection];
+
+    // ---- U4：测量麦克风校准（把话筒自身频响从房间测量里扣掉）----
+    // 为什么放在校准页：房间校正测到的是「房间 + 话筒」；不扣话筒曲线，话筒的起伏
+    // 会被当成房间的峰谷写进校正 FIR。状态**只由 GET /api/miccal 驱动**，导入/清除
+    // 成功后同样回读，不在本地推算数字（避免「界面说有 4 点、后端其实没换表」）。
+    NSStackView *micCalSection = [[NSStackView alloc] initWithFrame:NSZeroRect];
+    micCalSection.orientation = NSUserInterfaceLayoutOrientationVertical;
+    micCalSection.alignment = NSLayoutAttributeLeading;
+    micCalSection.spacing = 8;
+    [micCalSection addArrangedSubview:RLPLabel(RLPTr(@"麦克风校准"),
+        [NSFont systemFontOfSize:13 weight:NSFontWeightSemibold], t.text)];
+    NSTextField *micHint = RLPLabel(
+        RLPTr(@"导入两列文本（频率 Hz、幅度 dB；支持 UMIK / REW 导出的 txt、csv），测量时先扣话筒曲线再算校正。"),
+        t.small, t.mut);
+    micHint.maximumNumberOfLines = 2;
+    micHint.lineBreakMode = NSLineBreakByWordWrapping;
+    [[micHint.widthAnchor constraintEqualToConstant:560] setActive:YES];
+    [micCalSection addArrangedSubview:micHint];
+
+    NSStackView *micBtns = [[NSStackView alloc] init];
+    micBtns.orientation = NSUserInterfaceLayoutOrientationHorizontal;
+    micBtns.spacing = 8;
+    self.micCalImportBtn = [NSButton buttonWithTitle:RLPTr(@"导入麦克风校准文件…")
+                                             target:self action:@selector(onImportMicCal:)];
+    self.micCalImportBtn.identifier = @"sp_miccal_import";
+    self.micCalClearBtn = [NSButton buttonWithTitle:RLPTr(@"清除")
+                                            target:self action:@selector(onClearMicCal:)];
+    self.micCalClearBtn.identifier = @"sp_miccal_clear";
+    for (NSButton *b in @[ self.micCalImportBtn, self.micCalClearBtn ]) b.bezelStyle = NSBezelStyleRounded;
+    [micBtns addArrangedSubview:self.micCalImportBtn];
+    [micBtns addArrangedSubview:self.micCalClearBtn];
+    [micCalSection addArrangedSubview:[self row:RLPTr(@"麦克风校准文件") control:micBtns hint:nil]];
+
+    self.micCalNote = RLPLabel(RLPTr(@"未导入"), t.small, t.mut);
+    self.micCalNote.identifier = @"sp_miccal_note";
+    self.micCalNote.maximumNumberOfLines = 2;
+    self.micCalNote.lineBreakMode = NSLineBreakByWordWrapping;
+    [micCalSection addArrangedSubview:self.micCalNote];
+    [self.stack addArrangedSubview:micCalSection];
 
     self.status = RLPLabel(@"", t.small, t.mut);
     self.status.maximumNumberOfLines = 2;
@@ -304,6 +347,87 @@
     }];
 }
 
+#pragma mark - 麦克风校准（U4）
+
+/// 状态唯一来源 = GET /api/miccal。导入/清除成功后同样回读，避免「界面说有 N 点、
+/// 后端其实没换表」这种自欺。
+- (void)refreshMicCalState {
+    if (![RLPCoreClient shared].started) {
+        self.micCalNote.stringValue = RLPTr(@"核心未启动");
+        return;
+    }
+    __weak __typeof__(self) weakSelf = self;
+    [[RLPCoreClient shared] getJSON:@"/api/miccal" completion:^(NSDictionary * _Nullable json) {
+        __typeof__(self) self_ = weakSelf;
+        if (!self_) return;
+        if (!json || ![json[@"ok"] boolValue] || ![json[@"active"] boolValue]) {
+            self_.micCalNote.stringValue = RLPTr(@"未导入");
+            self_.micCalNote.toolTip = nil;
+            return;
+        }
+        const NSInteger n = [json[@"n_points"] respondsToSelector:@selector(integerValue)]
+                                ? [json[@"n_points"] integerValue] : 0;
+        const double mn = [json[@"min_db"] respondsToSelector:@selector(doubleValue)]
+                              ? [json[@"min_db"] doubleValue] : 0.0;
+        const double mx = [json[@"max_db"] respondsToSelector:@selector(doubleValue)]
+                              ? [json[@"max_db"] doubleValue] : 0.0;
+        self_.micCalNote.stringValue =
+            [NSString stringWithFormat:RLPTr(@"%ld 点 / %+.1f ~ %+.1f dB"), (long)n, mn, mx];
+        NSString *path = [json[@"path"] isKindOfClass:[NSString class]] ? json[@"path"] : @"";
+        self_.micCalNote.toolTip = path.length ? path : nil;
+    }];
+}
+
+- (void)onImportMicCal:(id)sender {
+    if (![RLPCoreClient shared].started) { RLPToast(RLPTr(@"核心未启动")); return; }
+    NSOpenPanel *p = [NSOpenPanel openPanel];
+    p.canChooseFiles = YES;
+    p.canChooseDirectories = NO;
+    p.allowsMultipleSelection = NO;
+    if (@available(macOS 11.0, *)) {
+        p.allowedContentTypes = @[];
+    }
+    p.allowedFileTypes = @[ @"txt", @"csv" ];   // 只选文本校准文件（UMIK / REW 导出）
+    p.message = RLPTr(@"选择麦克风校准文件");
+    __weak __typeof__(self) weakSelf = self;
+    [p beginWithCompletionHandler:^(NSModalResponse r) {
+        __typeof__(self) self_ = weakSelf;
+        if (!self_ || r != NSModalResponseOK || !p.URL.path.length) return;
+        NSString *url = [NSString stringWithFormat:@"/api/miccal?path=%@", RLPEnc(p.URL.path)];
+        self_.micCalNote.stringValue = RLPTr(@"导入中…");
+        [[RLPCoreClient shared] postJSON:url body:nil completion:^(NSDictionary * _Nullable json) {
+            __typeof__(self) self2 = weakSelf;
+            if (!self2) return;
+            if (json && [json[@"ok"] boolValue]) {
+                [self2 refreshMicCalState];
+                return;
+            }
+            NSString *err = [json[@"error"] isKindOfClass:[NSString class]]
+                                ? json[@"error"] : RLPTr(@"导入失败");
+            self2.micCalNote.stringValue = err;
+            RLPToast(err);
+        }];
+    }];
+}
+
+- (void)onClearMicCal:(id)sender {
+    if (![RLPCoreClient shared].started) return;
+    __weak __typeof__(self) weakSelf = self;
+    [[RLPCoreClient shared] postJSON:@"/api/miccal?clear=1" body:nil
+                           completion:^(NSDictionary * _Nullable json) {
+        __typeof__(self) self_ = weakSelf;
+        if (!self_) return;
+        if (json && [json[@"ok"] boolValue]) {
+            [self_ refreshMicCalState];
+            return;
+        }
+        NSString *err = [json[@"error"] isKindOfClass:[NSString class]]
+                            ? json[@"error"] : RLPTr(@"清除失败");
+        self_.micCalNote.stringValue = err;
+        RLPToast(err);
+    }];
+}
+
 #pragma mark - 校正 IR
 
 - (void)onPickIR:(id)sender {
@@ -367,12 +491,15 @@
         const BOOL running = [json[@"running"] respondsToSelector:@selector(boolValue)] && [json[@"running"] boolValue];
         if (running) self_.status.stringValue = RLPTr(@"测量进行中…");
     }];
+    // U4：校准表状态同样走现有 reload（页面重建/嵌入设置页时一起刷新）
+    [self refreshMicCalState];
 }
 
 - (void)applyTheme {
     RLPTheme *t = [RLPTheme current];
     self.status.textColor = t.mut;
     self.planInfo.textColor = t.mut;
+    self.micCalNote.textColor = t.mut;
 }
 
 @end

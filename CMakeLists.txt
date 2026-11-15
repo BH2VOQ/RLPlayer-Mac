@@ -2032,6 +2032,14 @@ add_executable(test_mic_cal tests/test_mic_cal.cpp)
 target_include_directories(test_mic_cal PRIVATE ${CMAKE_SOURCE_DIR}/src)
 add_test(NAME mic_cal COMMAND test_mic_cal)
 
+# U4 第二步：/api/miccal 黑盒（导入→GET 读回→清除；坏文件 400 + 稳定 code）。
+# 需要 rlapp_core：判据走的是真实 handle()（与 App/CLI 同一份 dispatch），不是另写一份 handler。
+add_executable(test_mic_cal_api tests/test_mic_cal_api.cpp)
+target_include_directories(test_mic_cal_api PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tools)
+target_link_libraries(test_mic_cal_api PRIVATE rlapp_core)
+add_test(NAME mic_cal_api COMMAND test_mic_cal_api)
+set_tests_properties(mic_cal_api PROPERTIES TIMEOUT 120)
+
 add_executable(rtahealth tools/rtahealth.cpp)
 target_include_directories(rtahealth PRIVATE ${CMAKE_SOURCE_DIR}/src)
 target_link_libraries(rtahealth PRIVATE ${RL_PLATFORM_LIBS})

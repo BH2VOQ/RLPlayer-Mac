@@ -1,0 +1,8 @@
+麦克风校准	Microphone calibration	原生校准页「麦克风校准」段标题（U4）
+导入两列文本（频率 Hz、幅度 dB；支持 UMIK / REW 导出的 txt、csv），测量时先扣话筒曲线再算校正。	Import a two-column text file (frequency Hz, magnitude dB; UMIK / REW exported txt or csv). The microphone curve is subtracted before corrections are computed.	原生校准页校准段说明（U4）
+麦克风校准文件	Microphone calibration file	原生校准页文件行标签（U4）
+导入麦克风校准文件…	Import microphone calibration file…	原生校准页导入按钮（U4）
+未导入	Not imported	校准表未导入时的状态（U4）
+选择麦克风校准文件	Choose a microphone calibration file	NSOpenPanel 标题（U4）
+导入中…	Importing…	校准文件导入中的临时状态（U4）
+%ld 点 / %+.1f ~ %+.1f dB	%ld points / %+.1f ~ %+.1f dB	校准表状态行（点数 / 幅度范围，U4）
