@@ -5835,6 +5835,14 @@ static bool should_cold_retry_shared(bool sharedOk, bool stopped, double fracAft
     return !sharedOk && !stopped && fracAfter < 0.999;
 }
 
+// 冷重试该用哪个进度：只有「共享那次确实比进入前更靠后」才采用共享那次的进度，
+// 否则沿用进入共享前的分数（失败发生在起播前时，played 只是被写成同一个起点）。
+// 抽成纯函数是为了能被离线判据钉住（回归评审 2026-11-17 指出旧实现会让进度回跳）。
+static double cold_retry_frac(bool advanced, size_t playedNow, size_t totalNow, double fracBefore) {
+    if (!advanced || totalNow == 0) return fracBefore;
+    return (double)playedNow / (double)totalNow;
+}
+
 
 // ---------------- 播放入口（独占 RENDERFAIL 自动回退共享）----------------
 // 2026-10-22 VM 事故的落地修复：独占流开得出来但设备 4 秒不接受数据时，
@@ -5863,12 +5871,17 @@ static bool play_one(const std::string& file, const PlayParams& p, rta::audio::A
         return false;
     }
 
+    // 2026-11-17（回归评审）：回退重开会执行 ps.volDb.store(p.volume)，把用户在播放中
+    // 调过的音量重置回起播时的旧值。回退链每一级都带上**当前实时音量**，不让降级改音量。
+    const double liveVolDb = ps.volDb.load();
+
     // 中间级（仅 PCM、仅一次）：同后端关掉 Hog 再试。
     // 依据：Hog 在 macOS 上是弱语义（本仓库实测其它进程仍可 IO），而这把 USB 设备在 Hog
     // 下只跑一个回调就停止拉数据；物理格式锁定仍保留，逐位条件不因关 Hog 而放宽。
     if (p.dsd <= 0) {
         PlayParams pH = p;
         pH.hogExclusive = false;
+        pH.volume = liveVolDb;
         if (frac > 0.0) pH.initialSeekFrac = frac;
         { std::lock_guard<std::mutex> lk(ps.mtx); ps.error.clear(); }
         // 设备刚被独占流停下：USB/驱动侧需要沉降时间，否则重开常常只拿到首包就再停。
@@ -5889,6 +5902,7 @@ static bool play_one(const std::string& file, const PlayParams& p, rta::audio::A
     PlayParams p2 = p;
     p2.backend = "coreaudio-shared";
     p2.shaper = "none";                 // 共享模式不追求 bit-perfect，关掉抖动整形
+    p2.volume = liveVolDb;              // 共享回退不得重置用户当前音量
     const bool resume = (frac > 0.0 && frac < 1.0 && totalFrames > 0);
     if (resume) p2.initialSeekFrac = frac;
     const std::string where = resume
@@ -5909,20 +5923,28 @@ static bool play_one(const std::string& file, const PlayParams& p, rta::audio::A
     }
     const std::string note = "独占流无响应,已回退 CoreAudio 共享(非 bit-perfect)，" + where;
     const bool sharedOk = play_one_impl(file, p2, buf, nullptr, note);
-    if (!should_cold_retry_shared(sharedOk, ps.stop.load(),
-            (ps.total.load() > 0) ? (double)ps.played.load() / (double)ps.total.load() : 0.0))
-        return sharedOk;
+
+    // 2026-11-17（回归评审）：共享那次可能已经播了一段才失败。若仍用进入共享前的旧 frac，
+    // 冷重试会把进度往回跳。只在「确实比进入前更靠后」时采用新进度；失败发生在起播前时
+    // played 只是被写成同一个起点，不满足 > 条件，仍用旧 frac。
+    const size_t playedNow = ps.played.load();
+    const size_t totalNow = ps.total.load();
+    const bool advanced = totalNow > 0 && playedNow > playedFrames;
+    const double fracNow = cold_retry_frac(advanced, playedNow, totalNow, frac);
+    if (!should_cold_retry_shared(sharedOk, ps.stop.load(), fracNow)) return sharedOk;
 
     // 共享也失败：设备通常刚被上一路流抢占/停止，需要沉降时间。
     // 只做**一次**冷重试（同一位置续播），不是循环；结果如实进日志。
     // 续播分数用本次尝试**之前**已刷新的 frac（其 played/total 同源同采样率）。
     // 若在失败后再读 ps.played/ps.total，二者可能分属新旧 output rate（审计 2026-11-17 指出的风险），
     // 会把续播位置算歪。
-    if (frac >= 0.999) return false;
-    play_log("RETRY_SHARED_COLD 共享流仍未接受数据，释放设备 400ms 同位置重试一次");
+    if (fracNow >= 0.999) return false;
+    play_log("RETRY_SHARED_COLD 共享流仍未接受数据，释放设备 400ms 后重试一次 frac=" +
+             std::to_string(fracNow) + (advanced ? "（按共享那段的实际进度）" : "（按重开前进度）"));
     std::this_thread::sleep_for(std::chrono::milliseconds(400));
     PlayParams p3 = p2;
-    if (frac > 0.0) p3.initialSeekFrac = frac;
+    p3.volume = liveVolDb;             // 冷重试同样不得重置音量
+    if (fracNow > 0.0) p3.initialSeekFrac = fracNow;
     { std::lock_guard<std::mutex> lk(ps.mtx); ps.error.clear(); }
     const bool retryOk = play_one_impl(file, p3, buf, nullptr, note + "（第二次尝试）");
     play_log(std::string("RETRY_SHARED_COLD result=") + (retryOk ? "ok" : "failed"));

@@ -280,6 +280,15 @@ int main() {
             ck(wt && std::string(wt) == "image/webp", "Case 9c: WebP magic → image/webp", wt ? wt : "null");
             ck(gt && std::string(gt) == "image/gif", "Case 9d: GIF magic → image/gif", gt ? gt : "null");
             ck(image_content_type_by_magic(junk, sizeof junk) == nullptr, "Case 9e: junk bytes → nullptr (502 path preserved)");
+
+            // Cold-retry resume position (2026-11-17 regression review): trust the failed
+            // shared attempt progress only when it actually advanced past the entry point.
+            ck(std::abs(cold_retry_frac(true, 50, 100, 0.10) - 0.50) < 1e-9,
+               "Case 10a: advanced → resume from shared attempt progress");
+            ck(std::abs(cold_retry_frac(false, 50, 100, 0.10) - 0.10) < 1e-9,
+               "Case 10b: not advanced → keep pre-attempt fraction");
+            ck(std::abs(cold_retry_frac(true, 50, 0, 0.30) - 0.30) < 1e-9,
+               "Case 10c: no total → keep pre-attempt fraction");
         }
     }
 
