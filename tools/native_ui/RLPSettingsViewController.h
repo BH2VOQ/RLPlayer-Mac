@@ -14,6 +14,10 @@ NS_ASSUME_NONNULL_BEGIN
 /// 外观（主题 light/dark）按用户要求只在**这里**改，顶栏不再放切换按钮。
 @interface RLPSettingsViewController : RLPPageViewController
 
+/// bit-perfect 直通按钮的确认策略（真机默认 YES；无界面测试可置 NO，避免模态框卡死主线程）。
++ (BOOL)rlp_confirmsBitPerfectFix;
++ (void)setRlp_confirmsBitPerfectFix:(BOOL)v;
+
 /// 打开设置并切到指定页签（"play"/"out"/"pcm"/"sdm"/"eq"/"in"/"adv"/"cal"/"stream"/"diag"/"meta"）。
 /// 供其他页面「去设置里配置」使用；未知 key 时停在当前页签。
 /// out/pcm/sdm/eq 等页签都真实存在；只有未知 key 才停在当前页签。

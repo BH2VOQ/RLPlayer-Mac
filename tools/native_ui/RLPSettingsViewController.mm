@@ -3799,6 +3799,9 @@ static BOOL RLPFeedbackTextBlank(NSString *s) {
 
 #pragma mark - 输出页动作
 
+/// 直通按钮的确认策略：真机默认弹确认；无界面测试可关掉，避免模态框把测试主线程卡死。
+static BOOL sRLPConfirmBitPerfectFix = YES;
+
 - (void)parseAndStoreTrimString:(id)raw {
     if (!self.savedTrimValues) {
         self.savedTrimValues = [NSMutableArray arrayWithCapacity:8];
@@ -3821,18 +3824,23 @@ static BOOL RLPFeedbackTextBlank(NSString *s) {
 
 /// bit-perfect 直通：web 的判据是「输出采样率 = 源 / 抖动 = none / 音量 0 dB / 无 EQ·IR / 独占」。
 /// 这里一次提交这组键（后端合并写，其它键不受影响）。
++ (BOOL)rlp_confirmsBitPerfectFix { return sRLPConfirmBitPerfectFix; }
++ (void)setRlp_confirmsBitPerfectFix:(BOOL)v { sRLPConfirmBitPerfectFix = v; }
+
 - (void)onBitPerfectFix:(id)sender {
     (void)sender;
     // 2026-11-17（UI 缺口审计已证实）：旧实现**未经确认**就把音量改成 0 dB（满幅），
     // 在非 0 dB 状态下点一下会直接满幅输出；且 rate 写成 "follow"、漏了 backend/dsd/isp，
     // 从共享/DSD/ISP 状态点下去仍进不了直通。按 Web 的 sp_bpfix 语义修正。
-    NSAlert *a = [NSAlert new];
-    a.alertStyle = NSAlertStyleWarning;
-    a.messageText = RLPTr(@"切到 bit-perfect 直通");
-    a.informativeText = RLPTr(@"会把输出音量设为 0 dB（满幅），采样率改为跟随源，关闭抖动/EQ/IR，并切回 CoreAudio 独占。确定继续？");
-    [a addButtonWithTitle:RLPTr(@"切到直通")];
-    [a addButtonWithTitle:RLPTr(@"取消")];
-    if ([a runModal] != NSAlertFirstButtonReturn) return;
+    if ([[self class] rlp_confirmsBitPerfectFix] && self.view.window) {
+        NSAlert *a = [NSAlert new];
+        a.alertStyle = NSAlertStyleWarning;
+        a.messageText = RLPTr(@"切到 bit-perfect 直通");
+        a.informativeText = RLPTr(@"会把输出音量设为 0 dB（满幅），采样率改为跟随源，关闭抖动/EQ/IR，并切回 CoreAudio 独占。确定继续？");
+        [a addButtonWithTitle:RLPTr(@"切到直通")];
+        [a addButtonWithTitle:RLPTr(@"取消")];
+        if ([a runModal] != NSAlertFirstButtonReturn) return;
+    }
 
     __weak __typeof__(self) weakSelf = self;
     [self postKeys:@{

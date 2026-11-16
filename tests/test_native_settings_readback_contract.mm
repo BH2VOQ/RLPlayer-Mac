@@ -479,6 +479,8 @@ int main(void) {
             NSSwitch *h = (NSSwitch *)FindId(v, @"sp_hogexcl");
             return h && h.state == NSControlStateValueOff;
         });
+        // 直通按钮在真机上会先弹确认（模态会卡死无界面测试）；这里显式关掉确认策略。
+        [(id)[settings class] setRlp_confirmsBitPerfectFix:NO];
         [(id)settings performSelector:@selector(onBitPerfectFix:) withObject:nil];
         WaitUntil(4.0, ^BOOL {
             NSSwitch *h = (NSSwitch *)FindId(v, @"sp_hogexcl");
@@ -489,7 +491,7 @@ int main(void) {
         NSSwitch *hogAfterBP = (NSSwitch *)FindId(v, @"sp_hogexcl");
         NSPopUpButton *bitsAfterBP = (NSPopUpButton *)FindId(v, @"sp_bits");
         NSPopUpButton *rPopAfterBP = (NSPopUpButton *)FindId(v, @"sp_rate");
-        Ck(rPopAfterBP && [rPopAfterBP.selectedItem.representedObject isEqualToString:@"follow"] &&
+        Ck(rPopAfterBP && [rPopAfterBP.selectedItem.representedObject isEqualToString:@"src"] &&
            hogAfterBP && hogAfterBP.state == NSControlStateValueOn &&
            bitsAfterBP && [bitsAfterBP.selectedItem.representedObject isEqualToString:@"-1"],
            @"点击 bit-perfect 直通后设置页自身控件同步更新",
