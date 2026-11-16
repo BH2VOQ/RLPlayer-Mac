@@ -57,3 +57,4 @@ ctrl	sp_naa_dev	src/net/ui_script.h:7632	无对应实现（NAA/RTANet 在 macOS 
 ctrl	sp_naa_scan	src/net/ui_script.h:7663	无对应实现（同上：NAA 已从 macOS 后端移除，原生无 NAA 发现入口）	NAA 设备扫描在原生无对象
 ctrl	sp_naahost	src/net/ui_script.h:7651	无对应实现（同上：NAA 主机地址在 macOS 端不可用）	NAA 主机地址在原生无对象
 ctrl	npGrip	src/net/ui_script.h:1072	RLPMainWindowController.mm:130	web 全屏覆盖层的自绘拖拽条；原生窗口拖拽由 AppKit 标题栏承担，无该控件
+api	/api/repeat	src/net/ui_script.h:0refs;tools/rtaweb.cpp:12683	无对应实现（tools/native_ui/*.mm 0 次引用该路径；设置页改用 /api/playmode）	web 前端 0 次引用（改用 /api/playmode）；/api/repeat 只读 body 的 rate，旧原生调用恒被归零，故按 Web 口径改用 /api/playmode。
