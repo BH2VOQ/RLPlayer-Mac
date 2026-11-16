@@ -672,3 +672,6 @@ SDM Nx 滤波	SDM Nx filter
 音频处理主控位于专业模式「数字音乐台」，此处保留完整参数与深链入口	Audio processing is centered in the Professional Digital console; full parameters and deep links remain here.
 高级 ▸	Advanced ▸
 高级 ▾	Advanced ▾
+当前正在播放或暂停：切换播放方式只保存设置，将于下一首或重新播放时生效（不会中断当前播放）。	Playback is active or paused. Changing playback mode saves settings for the next track or replay without interrupting playback.
+已保存设置，将在下一首或重新播放时生效	Settings saved. Changes take effect on the next track or replay.
+正在保存设置（下一首或重新播放时生效）…	Saving settings for the next track or replay…

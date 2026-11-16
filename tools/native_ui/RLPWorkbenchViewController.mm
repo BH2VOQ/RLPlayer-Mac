@@ -1979,9 +1979,10 @@ static const NSInteger kABSlotCount = 4;
         if (!self_) return;
         if (json && [json[@"ok"] boolValue]) {
             NSArray *notes = [json[@"notes"] isKindOfClass:[NSArray class]] ? json[@"notes"] : @[];
-            self_.bpLine.stringValue = notes.count ? [notes componentsJoinedByString:@"；"] : RLPTr(@"已应用");
-            self_.statusMessage.stringValue = RLPTr(@"已生效");
-            RLPToast(RLPTr(@"已应用"));
+            NSString *saved = RLPTr(@"已保存设置，将在下一首或重新播放时生效");
+            self_.bpLine.stringValue = notes.count ? [NSString stringWithFormat:@"%@ · %@", saved, [notes componentsJoinedByString:@"；"]] : saved;
+            self_.statusMessage.stringValue = saved;
+            RLPToast(saved);
             [self_ reloadSettings];
         } else {
             NSString *err = [json[@"error"] isKindOfClass:[NSString class]] ? json[@"error"] : RLPTr(@"应用失败");

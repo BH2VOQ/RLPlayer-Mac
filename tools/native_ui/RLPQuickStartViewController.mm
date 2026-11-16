@@ -695,8 +695,12 @@
 
 - (void)onOpenPlay:(id)sender {
     const BOOL isDsd = RLPPathIsDsd(self.currentPath);
+    const BOOL active = [self playbackIsActive];
+    NSString *popNote = active
+        ? RLPTr(@"当前正在播放或暂停：切换播放方式只保存设置，将于下一首或重新播放时生效（不会中断当前播放）。")
+        : RLPTr(@"不确定就选「原音直通」：文件是什么就播什么。");
     NSStackView *s = [self popStackWithTitle:RLPTr(@"播放方式")
-        note:RLPTr(@"不确定就选「原音直通」：文件是什么就播什么。")];
+        note:popNote];
     NSDictionary<NSString *, NSDictionary *> *statuses =
         [[self class] presetStatusForCapsJSON:self.presetCapsJSON
                                      settings:self.settings
@@ -776,13 +780,38 @@
     return self.playing || self.pausedNow;
 }
 
++ (NSDictionary<NSString *, NSString *> *)playModeFeedbackForNotes:(NSArray * _Nullable)notes
+                                                  playbackActive:(BOOL)active {
+    NSMutableArray<NSString *> *clean = [NSMutableArray array];
+    if ([notes isKindOfClass:[NSArray class]]) {
+        for (id item in notes) {
+            if ([item isKindOfClass:[NSString class]] && [(NSString *)item length]) {
+                [clean addObject:(NSString *)item];
+            }
+        }
+    }
+    NSString *joined = clean.count ? [clean componentsJoinedByString:@"；"] : @"";
+    if (active) {
+        NSString *prefix = RLPTr(@"已保存设置，将在下一首或重新播放时生效");
+        NSString *banner = joined.length ? [NSString stringWithFormat:@"%@ · %@", prefix, joined] : prefix;
+        return @{ @"toast": prefix, @"notes": banner };
+    }
+    return @{
+        @"toast": RLPTr(@"已应用"),
+        @"notes": joined.length ? joined : RLPTr(@"已应用"),
+    };
+}
+
 - (void)onPickPlayMode:(NSButton *)sender {
     const RLPPlayMode3 mode = (RLPPlayMode3)sender.identifier.integerValue;
     NSString *profile = RLPProfileForPlayMode(mode, RLPPathIsDsd(self.currentPath));
+    const BOOL active = [self playbackIsActive];
     [self.popover close];
     self.playValue.stringValue = (mode == RLPPlayMode3Direct ? RLPTr(@"原音直通")
                                  : mode == RLPPlayMode3Pcm ? RLPTr(@"PCM 升频") : RLPTr(@"DSD 升频"));
-    self.presetNotes.stringValue = RLPTr(@"正在应用…");
+    self.presetNotes.stringValue = active
+        ? RLPTr(@"正在保存设置（下一首或重新播放时生效）…")
+        : RLPTr(@"正在应用…");
     NSString *path = [NSString stringWithFormat:@"/api/preset/apply?profile=%@", RLPEnc(profile)];
     __weak __typeof__(self) weakSelf = self;
     [[RLPCoreClient shared] postJSON:path body:nil completion:^(NSDictionary * _Nullable json) {
@@ -791,13 +820,17 @@
         if (json && [json[@"ok"] boolValue]) {
             // notes 是后端给的决策说明（含降级原因），照实显示，不自己编"已优化"。
             NSArray *notes = [json[@"notes"] isKindOfClass:[NSArray class]] ? json[@"notes"] : @[];
-            self_.presetNotes.stringValue = notes.count ? [notes componentsJoinedByString:@"；"] : RLPTr(@"已应用");
-            RLPToast(RLPTr(@"已应用"));
+            const BOOL deferred = active || [self_ playbackIsActive];
+            NSDictionary<NSString *, NSString *> *fb =
+                [[self_ class] playModeFeedbackForNotes:notes playbackActive:deferred];
+            self_.presetNotes.stringValue = fb[@"notes"];
+            RLPToast(fb[@"toast"]);
             [self_ reloadSettings];
         } else {
             NSString *err = [json[@"error"] isKindOfClass:[NSString class]] ? json[@"error"] : RLPTr(@"应用失败");
             self_.presetNotes.stringValue = err;
             RLPToast(err);
+            [self_ syncPlayAndStyleCards];
         }
     }];
 }
@@ -1557,11 +1590,12 @@
                                                            settings:(NSDictionary * _Nullable)kv
                                                             playing:(BOOL)playing
                                                              paused:(BOOL)paused {
+    (void)playing;
+    (void)paused;
     NSDictionary<NSString *, NSNumber *> *g = [self gatingForCapsJSON:json];
     const BOOL known = [g[@"known"] boolValue];
     const BOOL pcmReady = [g[@"pcmReady"] boolValue];
     const BOOL dsdReady = [g[@"dsdReady"] boolValue];
-    const BOOL busy = playing || paused;
 
     NSDictionary *dev = [json[@"device"] isKindOfClass:[NSDictionary class]] ? json[@"device"] : nil;
     NSString *capBackend = [dev[@"backend"] isKindOfClass:[NSString class]] ? dev[@"backend"] : @"";
@@ -1576,18 +1610,15 @@
     NSString *dopMax = [dev[@"dopMax"] isKindOfClass:[NSString class]] ? dev[@"dopMax"] : @"";
     const BOOL dsdNative = [dev[@"dsdNative"] respondsToSelector:@selector(boolValue)] && [dev[@"dsdNative"] boolValue];
 
-    NSString *busyWhy = RLPTr(@"请先停止播放，再应用预设。");
     NSString *pcmWhy = @"";
-    if (busy) pcmWhy = busyWhy;
-    else if (isShared || isAirPlay) pcmWhy = RLPTr(@"共享/隔空播放不支持升频，请在「输出」中开启独占设备。");
+    if (isShared || isAirPlay) pcmWhy = RLPTr(@"共享/隔空播放不支持升频，请在「输出」中开启独占设备。");
     else if (isOffline) pcmWhy = RLPTr(@"离线处理模式不连接设备，不支持设备升频。");
     else if (isRemote) pcmWhy = RLPTr(@"网络播放器由远端负责输出，不支持本机升频。");
     else if (!known) pcmWhy = RLPTr(@"能力尚未确认，请先选择输出设备。");
     else if (!pcmReady) pcmWhy = RLPTr(@"当前设备不支持 PCM 升频。");
 
     NSString *dsdWhy = @"";
-    if (busy) dsdWhy = busyWhy;
-    else if (isShared || isAirPlay) dsdWhy = RLPTr(@"共享/隔空播放不支持 DSD/DoP，请在「输出」中开启独占设备。");
+    if (isShared || isAirPlay) dsdWhy = RLPTr(@"共享/隔空播放不支持 DSD/DoP，请在「输出」中开启独占设备。");
     else if (isOffline) dsdWhy = RLPTr(@"离线处理模式不连接设备，不支持 DSD 升频。");
     else if (isRemote) dsdWhy = RLPTr(@"网络播放器不支持本机 DoP 升频。");
     else if (!known) dsdWhy = RLPTr(@"能力尚未确认，请先选择输出设备。");
@@ -1604,17 +1635,17 @@
         : RLPTr(@"需要设备支持 DoP");
 
     NSDictionary *bpEntry = @{
-        @"enabled": @(!busy),
-        @"reason": busy ? busyWhy : @"",
+        @"enabled": @YES,
+        @"reason": @"",
         @"result": RLPTr(@"保持源采样率与原始声音（禁用 EQ/IR 与听音风格）"),
     };
     NSDictionary *pcmEntry = @{
-        @"enabled": @(!busy && pcmReady && !isShared && !isOffline && !isRemote && !isAirPlay),
+        @"enabled": @(pcmReady && !isShared && !isOffline && !isRemote && !isAirPlay),
         @"reason": pcmWhy,
         @"result": pcmResult,
     };
     NSDictionary *dsdEntry = @{
-        @"enabled": @(!busy && dsdReady && !isShared && !isOffline && !isRemote && !isAirPlay),
+        @"enabled": @(dsdReady && !isShared && !isOffline && !isRemote && !isAirPlay),
         @"reason": dsdWhy,
         @"result": dsdResult,
     };

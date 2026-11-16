@@ -92,6 +92,8 @@ int main() {
 
         const std::string got = handle(make_req("GET", "/api/settings"), ct);
         ck(got.find("\"rate\":\"src\"") != std::string::npos, "Case 1d: conf 回读 rate=src", got);
+        ck(got.find("\"volume\":\"-120\"") != std::string::npos,
+           "Case 1d-volume: applying a preset preserves global volume", got);
         ck(got.find("\"taps\":\"0\"") != std::string::npos &&
            got.find("\"mintapsperinput\":\"0\"") != std::string::npos &&
            got.find("\"phase\":\"\"") != std::string::npos &&

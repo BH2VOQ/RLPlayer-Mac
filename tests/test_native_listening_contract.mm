@@ -51,8 +51,14 @@ static NSView *FindById(NSView *root, NSString *ident) {
 @property (nonatomic, strong) NSTextField *styleValue;
 @property (nonatomic, strong) NSTextField *styleSub;
 @property (nonatomic, strong) NSView *styleCard;
+@property (nonatomic, strong) NSTextField *presetNotes;
+@property (nonatomic, assign) BOOL playing;
+@property (nonatomic, assign) BOOL pausedNow;
++ (NSDictionary<NSString *, NSString *> *)playModeFeedbackForNotes:(NSArray * _Nullable)notes
+                                                  playbackActive:(BOOL)active;
 - (void)syncPlayAndStyleCards;
 - (void)onPickStyle:(NSButton *)sender;
+- (void)onPickPlayMode:(NSButton *)sender;
 @end
 
 int main() {
@@ -171,10 +177,44 @@ int main() {
         NSDictionary *stBusy = [RLPQuickStartViewController presetStatusForCapsJSON:caFull
                                                                             settings:@{@"backend": @"coreaudio"}
                                                                              playing:YES paused:NO];
-        CK(![stBusy[@"bitperfect"][@"enabled"] boolValue] &&
-           ![stBusy[@"pcm"][@"enabled"] boolValue] &&
-           ![stBusy[@"dsd"][@"enabled"] boolValue],
-           "C3d 播放中全部预设禁用", @"");
+        CK([stBusy[@"bitperfect"][@"enabled"] boolValue] &&
+           [stBusy[@"pcm"][@"enabled"] boolValue] &&
+           [stBusy[@"dsd"][@"enabled"] boolValue] &&
+           [stBusy[@"pcm2dsd"][@"enabled"] boolValue] &&
+           ![stBusy[@"bitperfect"][@"reason"] length] &&
+           ![stBusy[@"pcm"][@"reason"] length] &&
+           ![stBusy[@"dsd"][@"reason"] length],
+           "C3d 播放中硬件支持的全部预设仍可选（不因播放中全部禁用）", @"");
+
+        NSDictionary *stPaused = [RLPQuickStartViewController presetStatusForCapsJSON:caFull
+                                                                              settings:@{@"backend": @"coreaudio"}
+                                                                               playing:NO paused:YES];
+        CK([stPaused[@"bitperfect"][@"enabled"] boolValue] &&
+           [stPaused[@"pcm"][@"enabled"] boolValue] &&
+           [stPaused[@"dsd"][@"enabled"] boolValue] &&
+           [stPaused[@"pcm2dsd"][@"enabled"] boolValue],
+           "C3e 暂停中硬件支持的全部预设仍可选", @"");
+
+        NSDictionary *stBusyShared = [RLPQuickStartViewController presetStatusForCapsJSON:caShared
+                                                                                  settings:@{@"backend": @"coreaudio-shared"}
+                                                                                   playing:YES paused:NO];
+        CK([stBusyShared[@"bitperfect"][@"enabled"] boolValue] &&
+           ![stBusyShared[@"pcm"][@"enabled"] boolValue] &&
+           [stBusyShared[@"pcm"][@"reason"] length] > 0 &&
+           ![stBusyShared[@"dsd"][@"enabled"] boolValue] &&
+           [stBusyShared[@"dsd"][@"reason"] length] > 0,
+           "C3f 播放中仍保留设备能力限制（shared 下禁用 PCM/DSD 升频）",
+           stBusyShared[@"pcm"][@"reason"] ?: @"nil");
+
+        NSDictionary *fbActive = [RLPQuickStartViewController playModeFeedbackForNotes:@[@"说明A"] playbackActive:YES];
+        NSDictionary *fbStopped = [RLPQuickStartViewController playModeFeedbackForNotes:@[@"说明A"] playbackActive:NO];
+        CK([fbActive[@"toast"] rangeOfString:@"下一首或重新播放时生效"].location != NSNotFound &&
+           [fbActive[@"notes"] rangeOfString:@"下一首或重新播放时生效"].location != NSNotFound &&
+           [fbActive[@"notes"] rangeOfString:@"说明A"].location != NSNotFound &&
+           [fbStopped[@"toast"] isEqualToString:RLPTr(@"已应用")] &&
+           [fbStopped[@"notes"] isEqualToString:@"说明A"],
+           "C3g 播放/暂停时反馈明确提示下一首或重新播放生效，停播时提示已应用",
+           fbActive.description ?: @"nil");
 
         // ---------- C4 bitperfect 下风格禁用且不破坏直通 ----------
         RLPQuickStartViewController *vc = [[RLPQuickStartViewController alloc] init];
@@ -185,6 +225,26 @@ int main() {
         CK([vc.styleValue.stringValue isEqualToString:RLPTr(@"保持原音")],
            "C4a bitperfect 下风格卡显示「保持原音」", vc.styleValue.stringValue ?: @"nil");
         CK(vc.styleCard.alphaValue < 0.9, "C4b bitperfect 下风格卡视觉置灰", @"");
+
+        // C4c: 播放中切播放方式不中断播放、不改音量(-120)，且提示下一首/重新播放生效
+        vc.playing = YES;
+        vc.pausedNow = NO;
+        NSButton *pickBpBtn = [[NSButton alloc] initWithFrame:NSZeroRect];
+        pickBpBtn.identifier = @"0";
+        [vc onPickPlayMode:pickBpBtn];
+        NSString *inflightNote = vc.presetNotes.stringValue ?: @"";
+        for (int spin = 0; spin < 40; ++spin) {
+            [[NSRunLoop currentRunLoop] runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.025]];
+            if ([vc.presetNotes.stringValue rangeOfString:@"正在保存"].location == NSNotFound) break;
+        }
+        NSDictionary *kvAfterPick = [core jsonWithMethod:@"GET" path:@"/api/settings" body:nil][@"kv"];
+        CK(vc.playing && !vc.pausedNow &&
+           [inflightNote rangeOfString:@"下一首或重新播放时生效"].location != NSNotFound &&
+           [vc.presetNotes.stringValue rangeOfString:@"下一首或重新播放时生效"].location != NSNotFound &&
+           [kvAfterPick[@"volume"] isEqualToString:@"-120"],
+           "C4c 播放中 onPickPlayMode 不停播不改音量且明确提示下一首或重新播放生效",
+           [NSString stringWithFormat:@"inflight=%@ final=%@ vol=%@",
+            inflightNote, vc.presetNotes.stringValue ?: @"nil", kvAfterPick[@"volume"] ?: @"nil"]);
 
         // ---------- C5 真实几何自适应（宽4/中2/窄1 等宽 + 单层滚动 + 页头入口）----------
         CK(FindById(vc.view, @"room.folders") != nil, "C5a 页头存在音乐文件夹入口 room.folders", @"");

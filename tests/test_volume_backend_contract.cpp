@@ -213,6 +213,39 @@ int main() {
            "Case 4f: /api/settings 拒绝非法值后旧值 15 未被破坏", sGet);
     }
 
+    // Global volume must survive a new album/play request, not just the live sink.
+    {
+        std::string ct;
+        handle(make_req("POST", "/api/settings", "backend=null&volume=-120"), ct);
+        const auto result = handle(make_req("POST", "/api/volume?db=-80"), ct);
+        const auto next = apply_conf_defaults_for_play(parseForm("backend=null&file=next-album.wav"), {"backend", "file"});
+        ck(result.find("\"ok\":true") != std::string::npos && std::fabs(next.volume + 80.0) < 1e-9,
+           "Case 5a: next album inherits the user global volume", std::to_string(next.volume));
+        ck(std::fabs(saved_volume_setting() + 80.0) < 1e-9,
+           "Case 5b: live volume is persisted for subsequent playback");
+    }
+
+    {
+        std::string ct;
+        g_ps.playing.store(true);
+        g_ps.bpInputs = {};
+        g_ps.bpInputs.inRate = g_ps.bpInputs.outRate = 44100;
+        g_ps.bpInputs.srcBits = g_ps.bpInputs.outBits = 24;
+        g_ps.bpInputs.volumeDb = -80.0;
+        g_ps.bpInputsKnown = true;
+        const auto before = rta::audio::bp_verdict(g_ps.bpInputs);
+        g_ps.bpState = before.state; g_ps.bpWhy = before.why;
+        handle(make_req("POST", "/api/volume?db=0"), ct);
+        ck(g_ps.bpState == "yes", "Case 6a: removing only volume attenuation recalculates bit-perfect");
+        g_ps.bpInputs.sharedMixer = true;
+        handle(make_req("POST", "/api/volume?db=-80"), ct);
+        handle(make_req("POST", "/api/volume?db=0"), ct);
+        ck(g_ps.bpState == "no" && g_ps.bpWhy.find("共享") != std::string::npos,
+           "Case 6b: unity volume cannot conceal shared output");
+        g_ps.playing.store(false);
+        g_ps.bpInputsKnown = false;
+    }
+
     fs::remove_all(tmpDir, ec);
     if (g_fails == 0) std::printf("\n[ALL PASS] test_volume_backend_contract 全部通过\n");
     else               std::printf("\n[FAILED] %d 项未通过\n", g_fails);

@@ -457,6 +457,8 @@ struct PlayerState {
     // 在信号链 JSON 生成处一并写入，/api/status 直接带出，供底栏常驻徽标使用。
     std::string bpState;
     std::string bpWhy;
+    rta::audio::BpInputs bpInputs;
+    bool bpInputsKnown = false;
     // U5（v3.3.11）：本次播放实际生效的 PCM 采样率族策略与跨族结论。
     // 由 play_one_impl 起播时写入；/api/status 与信号链 JSON 带出（空 = 投放/未确定）。
     std::string rateFamilyPolicy;      // prefer | strict | compatible
@@ -3756,7 +3758,8 @@ static std::string preset_apply_json(const std::string& path) {
         return std::string("{\"ok\":false,\"error\":\"profile 非法（只接受 bitperfect / pcm / dsd / pcm2dsd）：") +
                jesc(profStr) + "\"}";
     }
-    const bool keepVolume = q.count("keep_volume") && q.at("keep_volume") == "1";
+    // Volume is global and changes only through an explicit volume control.
+    const bool keepVolume = true;
     const bool stoppedOnly = q.count("require_stopped") && q.at("require_stopped") == "1";
     if (stoppedOnly) {
         if (g_ps.playing.load() || g_ps.paused.load() || g_upnpPlayer.load()) {
@@ -3948,8 +3951,10 @@ static std::string preset_apply_json(const std::string& path) {
     // 清零而不是硬写一个状态：此刻没有播放，任何 yes/no 都是编的（铁律 3）。
     {
         std::lock_guard<std::mutex> lk(g_ps.mtx);
-        g_ps.bpState.clear();
-        g_ps.bpWhy.clear();
+        if (!g_ps.playing.load() && !g_ps.paused.load()) {
+            g_ps.bpState.clear();
+            g_ps.bpWhy.clear();
+        }
     }
 
     return j.str();
@@ -4037,6 +4042,10 @@ static BigIspScan scan_isp_blocks(PlaySource& src, size_t fromFrame, size_t limi
 static bool play_one_impl(const std::string& file, const PlayParams& pIn, rta::audio::AudioBuffer& buf,
                           bool* sharedFallback, const std::string& extraNote) {
     auto& ps = g_ps;
+    {
+        std::lock_guard<std::mutex> lk(ps.mtx);
+        ps.bpInputsKnown = false;
+    }
     rta::diag::Stage failureStage = rta::diag::Stage::Decode;
     play_log_rotate();
     g_dbgPeak.store(0.0);
@@ -5294,6 +5303,8 @@ static bool play_one_impl(const std::string& file, const PlayParams& pIn, rta::a
             {
                 std::lock_guard<std::mutex> lk(ps.mtx);
                 ps.bpState = bpv.state; ps.bpWhy = bpv.why;
+                ps.bpInputs = bpin;
+                ps.bpInputsKnown = true;
             }
             dlog("stage recent-ok");
             play_log(std::string("PLAY v") + RLPLAYER_VERSION + " " + sig.str());
@@ -5557,6 +5568,11 @@ static bool play_one_impl(const std::string& file, const PlayParams& pIn, rta::a
                 if (ca->container_lossy()) b.formatFallback = true;
                 return b;
             }();
+            {
+                std::lock_guard<std::mutex> lk(ps.mtx);
+                ps.bpInputs = bpin2;
+                ps.bpInputsKnown = true;
+            }
             const rta::audio::BpVerdict bpv2 = rta::audio::bp_verdict(bpin2);
             if (bpv2.state != bpv.state) {
                 play_log("PVFIX verdict " + bpv.state + " -> " + bpv2.state +
@@ -14392,11 +14408,26 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
             if (db > 20.0) db = 20.0;
             if (db < -120.0) db = -120.0;
         }
+        // Global setting: serialize persistence before publishing the live value.
+        static std::mutex volumeRequestMutex;
+        std::lock_guard<std::mutex> volumeRequestLock(volumeRequestMutex);
+        {
+            std::lock_guard<std::mutex> volumeLock(ps.mtx);
+            if (ps.playing.load() && ps.rawVolumeLocked && db != 0.0) {
+                rta::net::webui_set_status(409);
+                return "{\"ok\":false,\"error\":\"原始 DSD 码流不支持软件音量；请使用设备音量，或切换到支持音量处理的 DoP。\",\"volumeWritable\":false,\"rawVolumeLocked\":true,\"db\":0}";
+            }
+        }
+        std::string volumeError;
+        if (!conf_merge_write({{"volume", std::to_string(db)}}, volumeError)) {
+            rta::net::webui_set_status(500);
+            return std::string("{\"ok\":false,\"error\":\"保存全局音量失败：") + jesc(volumeError) + "\"}";
+        }
         {
             std::lock_guard<std::mutex> volumeLock(ps.mtx);
             if (!write_live_volume_locked(db)) {
                 rta::net::webui_set_status(409);
-                return "{\"ok\":false,\"error\":\"原始 DSD 码流不支持软件音量；请使用设备音量，或切换到支持音量处理的 DoP。\",\"volumeWritable\":false,\"rawVolumeLocked\":true,\"db\":0}";
+                return "{\"ok\":false,\"error\":\"播放通路已切换为原始 DSD，音量设置保留供后续 PCM 播放使用\"}";
             }
         }
         {
@@ -14416,6 +14447,27 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
         if (!g_activeDop.load()) {
             if (OutSink* s = g_activeSink.load()) {
                 s->set_live_gain_db(db - ps.startDb.load());
+            }
+        }
+        {
+            std::lock_guard<std::mutex> lk(ps.mtx);
+            if (ps.playing.load() && ps.bpInputsKnown) {
+                auto inputs = ps.bpInputs;
+                inputs.volumeDb = db;
+                inputs.gainNotUnity = std::abs(db) > 1e-9;
+                if (auto* ca = dynamic_cast<CoreAudioSink*>(g_activeSink.load()))
+                    inputs.gainNotUnity = std::abs(ca->render_gain() - 1.0) > 1e-12;
+                const auto verdict = rta::audio::bp_verdict(inputs);
+                auto replaceText = [&](const char* key, const std::string& oldValue, const std::string& value) {
+                    const std::string from = std::string("\"") + key + "\":\"" + jesc(oldValue) + "\"";
+                    const std::string to = std::string("\"") + key + "\":\"" + jesc(value) + "\"";
+                    if (auto at = ps.signal.find(from); at != std::string::npos) ps.signal.replace(at, from.size(), to);
+                };
+                replaceText("bitPerfect", ps.bpState, verdict.state);
+                replaceText("bitPerfectWhy", ps.bpWhy, verdict.why);
+                ps.bpInputs = inputs;
+                ps.bpState = verdict.state;
+                ps.bpWhy = verdict.why;
             }
         }
         char nb[32];
@@ -14483,6 +14535,7 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
             std::lock_guard<std::mutex> lk(ps.mtx);
             ps.bpState.clear();
             ps.bpWhy.clear();
+            ps.bpInputsKnown = false;
             ps.rawVolumeLocked = false;
         }
         return "{\"ok\":true}";
