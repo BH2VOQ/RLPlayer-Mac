@@ -167,6 +167,7 @@ static const CGFloat kAvatar = 168;
 #pragma mark - 艺术家网格
 
 @interface RLPArtistsViewController () <NSCollectionViewDataSource, NSCollectionViewDelegate>
+@property (nonatomic, strong) NSTextField *artistsTitleLabel;
 @property (nonatomic, strong) NSCollectionView *collection;
 @property (nonatomic, strong) NSSearchField *searchField;
 @property (nonatomic, strong) NSTextField *countLabel;
@@ -191,11 +192,12 @@ static const CGFloat kAvatar = 168;
     root.wantsLayer = YES;
     root.layer.backgroundColor = t.bg.CGColor;
 
-    NSTextField *title = [NSTextField labelWithString:RLPTr(@"艺术家")];
-    title.font = [NSFont systemFontOfSize:17 weight:NSFontWeightSemibold];
-    title.textColor = t.text;
-    title.translatesAutoresizingMaskIntoConstraints = NO;
-    [root addSubview:title];
+    // 属性名刻意避开基类 RLPPageViewController 的 pageTitle/titleLabel（只读）。
+    self.artistsTitleLabel = [NSTextField labelWithString:RLPTr(@"艺术家")];
+    self.artistsTitleLabel.font = [NSFont systemFontOfSize:17 weight:NSFontWeightSemibold];
+    self.artistsTitleLabel.textColor = t.text;
+    self.artistsTitleLabel.translatesAutoresizingMaskIntoConstraints = NO;
+    [root addSubview:self.artistsTitleLabel];
 
     self.searchField = [[NSSearchField alloc] initWithFrame:NSZeroRect];
     self.searchField.placeholderString = RLPTr(@"搜索艺术家...");
@@ -239,21 +241,32 @@ static const CGFloat kAvatar = 168;
     [root addSubview:scroll];
 
     [NSLayoutConstraint activateConstraints:@[
-        [title.leadingAnchor constraintEqualToAnchor:root.leadingAnchor constant:24],
-        [title.topAnchor constraintEqualToAnchor:root.topAnchor constant:18],
-        [self.searchField.leadingAnchor constraintEqualToAnchor:title.trailingAnchor constant:24],
+        [self.artistsTitleLabel.leadingAnchor constraintEqualToAnchor:root.leadingAnchor constant:24],
+        [self.artistsTitleLabel.topAnchor constraintEqualToAnchor:root.topAnchor constant:18],
+        [self.searchField.leadingAnchor constraintEqualToAnchor:self.artistsTitleLabel.trailingAnchor constant:24],
         [self.searchField.widthAnchor constraintEqualToConstant:260],
-        [self.searchField.centerYAnchor constraintEqualToAnchor:title.centerYAnchor],
+        [self.searchField.centerYAnchor constraintEqualToAnchor:self.artistsTitleLabel.centerYAnchor],
         [self.countLabel.trailingAnchor constraintEqualToAnchor:root.trailingAnchor constant:-24],
-        [self.countLabel.centerYAnchor constraintEqualToAnchor:title.centerYAnchor],
+        [self.countLabel.centerYAnchor constraintEqualToAnchor:self.artistsTitleLabel.centerYAnchor],
         [scroll.leadingAnchor constraintEqualToAnchor:root.leadingAnchor],
         [scroll.trailingAnchor constraintEqualToAnchor:root.trailingAnchor],
-        [scroll.topAnchor constraintEqualToAnchor:title.bottomAnchor constant:12],
+        [scroll.topAnchor constraintEqualToAnchor:self.artistsTitleLabel.bottomAnchor constant:12],
         [scroll.bottomAnchor constraintEqualToAnchor:root.bottomAnchor]
     ]];
 }
 
 /// CSS repeat(auto-fill,minmax(150px,1fr)) 的等价算法（与专辑页同款，列下限 150）。
+- (void)applyTheme {
+    // 视图未加载时直接返回：测试会在未加载状态下调用，触发 loadView 会破坏离线判据。
+    if (!self.isViewLoaded) return;
+    RLPTheme *t = [RLPTheme current];
+    self.view.wantsLayer = YES;
+    self.view.layer.backgroundColor = t.bg.CGColor;
+    self.artistsTitleLabel.textColor = t.text;
+    self.countLabel.textColor = t.mut;
+    [self.collection reloadData];
+}
+
 - (void)relayoutGridForWidth:(CGFloat)w {
     if (![self.collection.collectionViewLayout isKindOfClass:[NSCollectionViewFlowLayout class]]) return;
     NSCollectionViewFlowLayout *l = (NSCollectionViewFlowLayout *)self.collection.collectionViewLayout;
