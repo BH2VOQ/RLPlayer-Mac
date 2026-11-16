@@ -744,12 +744,15 @@ static const char* const g_buildTime = __DATE__ " " __TIME__;
 
 // DSD 源抽取设置（P0-4/P0-5）：播放与预解码两条线程都要用，所以放在一个函数里
 static void apply_dsd_src_settings(const PlayParams& p) {
-    auto& st = dsd_pcm_settings();      // 必须是引用：auto 会拷贝，设置就丢了（本轮踩到）
+    // 2026-11-16：改为「整组快照写入」。原来是拿引用逐字段赋值，
+    // 读侧（体检/波形线程）会读到 kind/conversion/twoStage 拼不成一组的半写状态。
+    rta::audio::DsdPcmSettings st;
     st.kind = (p.dsdKind == "iir") ? rta::dsp::IntegratorKind::Iir
             : (p.dsdKind == "cic") ? rta::dsp::IntegratorKind::Cic
                                    : rta::dsp::IntegratorKind::Fir;
     st.conversion = rta::dsp::parse_conversion(p.dsdConv);
     st.twoStage = p.dsd2Stage;
+    rta::audio::set_dsd_pcm_settings(st);
 }
 
 // ---------------- 工具 ----------------

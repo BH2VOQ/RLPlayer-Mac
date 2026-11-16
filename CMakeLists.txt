@@ -2444,3 +2444,10 @@ target_include_directories(test_waveform_api PRIVATE ${CMAKE_SOURCE_DIR}/src ${C
 target_link_libraries(test_waveform_api PRIVATE rlapp_core)
 add_test(NAME waveform_api COMMAND test_waveform_api)
 set_tests_properties(waveform_api PROPERTIES TIMEOUT 180)
+
+# 2026-11-16 评审 MAJOR：DSD 抽取设置按值快照（写侧唯一整组入口）。
+# 判据：并发 3 写 1 读，读到的每次快照都必须是 A 或 B 的完整三元组（旧实现的引用读会出现撕裂组合）。
+add_executable(test_dsd_settings_snapshot tests/test_dsd_settings_snapshot.cpp)
+target_include_directories(test_dsd_settings_snapshot PRIVATE ${CMAKE_SOURCE_DIR}/src)
+add_test(NAME dsd_settings_snapshot COMMAND test_dsd_settings_snapshot)
+set_tests_properties(dsd_settings_snapshot PROPERTIES TIMEOUT 120)
