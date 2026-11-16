@@ -83,6 +83,7 @@ using rta::render::SinkOpenOpts;
 #include "meta/statusflags.h"       // gpu/gpuUsed 组合语义（用户 261024-04 #8，/api/status 与 /api/signal 同源）
 #include "meta/lyrics_ai.h"          // 1.1.7.90 歌词 AI：翻译/音译/假名/繁体（/api/lyrics/ai，上游 v3.3.11 移植）
 #include "dsp/filter_families.h"
+#include "dsp/filter_family.h"      // U8：滤波器族标注（/api/filters 的 family / familyLabel）
 #include "dsp/oversample_peak.h"
 #include "dsp/eq_text.h"
 #include "dsp/ir_resample.h"
@@ -13252,12 +13253,19 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
             const char* phCn = (fp.phase == rta::dsp::PhaseKind::Minimum) ? "最小相位"
                              : (fp.phase == rta::dsp::PhaseKind::Intermediate) ? "混合相位"
                              : "线性相位";
+            // U8（2026-11-16）：每项追加 family / familyLabel（**只加字段，原有字段一个不动**）。
+            // 族来自 src/dsp/filter_family.h 的前缀规则（纪要 + 名字表），未知名归 unknown；
+            // 展示标签再由名字后缀补相位名，前端不用再抄一份族表。
+            const rta::dsp::FilterFamily fam = rta::dsp::filter_family(fp.name);
             j << "{\"name\":\"" << jesc(fp.name) << "\""
               << ",\"phase\":\"" << ph << "\""
               << ",\"phaseName\":\"" << phCn << "\""
               << ",\"taps\":" << fp.taps
               << ",\"twoStage\":" << (fp.twoStage ? "true" : "false")
-              << ",\"forNx\":" << (fp.forNx ? "true" : "false") << "}";
+              << ",\"forNx\":" << (fp.forNx ? "true" : "false")
+              << ",\"family\":\"" << jesc(rta::dsp::filter_family_id(fam)) << "\""
+              << ",\"familyLabel\":\"" << jesc(rta::dsp::filter_family_full_label(fp.name)) << "\""
+              << "}";
         }
         j << "]}";
         return j.str();

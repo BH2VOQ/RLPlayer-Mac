@@ -31,11 +31,50 @@
 #import "RLPLibStatsView.h"
 #import "RLPSettingsLayout.h"
 #include "version.h"
+#include "dsp/filter_family.h"   // U8：滤波器族标注（文案唯一出处，纯头）
 #include "net/feedback_api.h"
 #include "net/http_client.h"
 #include "net/install_id.h"
 
 #include <chrono>
+
+#pragma mark - 滤波器族标注（U8）
+
+// ---- U8（2026-11-16）：滤波器下拉的族标注 ----
+// 名字来自 /api/filters（后端预设表），族/相位/文案全部来自 src/dsp/filter_family.h。
+// 纪律：**文案**可以带族名，**值**永远是原名（representedObject）—— 后端只认原名，
+// 把「poly-sinc-lp（多相 sinc 线性相位）」当值发出去会被 /api/settings 拒绝。
+static NSString *RLPFilterFamilyName(NSString *name) {
+    if (!name.length) return @"";
+    const auto fam = rta::dsp::filter_family(name.UTF8String);
+    return RLPTr([NSString stringWithUTF8String:rta::dsp::filter_family_label(fam)]);
+}
+
+static NSString *RLPFilterPhaseName(NSString *name) {
+    if (!name.length) return @"";
+    const auto ph = rta::dsp::filter_phase_of_name(name.UTF8String);
+    return RLPTr([NSString stringWithUTF8String:rta::dsp::filter_phase_label(ph)]);
+}
+
+/// 下拉项文案：`poly-sinc-lp（多相 sinc 线性相位）`；名字没写相位就只写族名。
+static NSString *RLPFilterDecoratedTitle(NSString *name) {
+    NSString *fam = RLPFilterFamilyName(name);
+    if (!name.length || !fam.length) return name;
+    NSString *ph = RLPFilterPhaseName(name);
+    if (!ph.length) return [NSString stringWithFormat:@"%@（%@）", name, fam];
+    return [NSString stringWithFormat:@"%@（%@ %@）", name, fam, ph];
+}
+
+/// 一行族说明：族性格 +（名字写明的）相位行为。文案出自 filter_family.h，不含数值承诺。
+static NSString *RLPFilterFamilyNote(NSString *name) {
+    if (!name.length) return @"";
+    const auto fam = rta::dsp::filter_family(name.UTF8String);
+    const auto ph = rta::dsp::filter_phase_of_name(name.UTF8String);
+    NSString *fn = RLPTr([NSString stringWithUTF8String:rta::dsp::filter_family_note(fam)]);
+    NSString *pn = RLPTr([NSString stringWithUTF8String:rta::dsp::filter_phase_note(ph)]);
+    if (!pn.length) return fn;
+    return [NSString stringWithFormat:@"%@ %@", fn, pn];
+}
 
 #pragma mark - 页签定义
 
@@ -249,6 +288,8 @@ static NSStackView *RLPSRow(NSString *label, NSView *control, NSString *hint, RL
 @property (nonatomic, strong) NSPopUpButton *rateFamilyPopup;
 @property (nonatomic, strong) NSPopUpButton *filt1xPopup;
 @property (nonatomic, strong) NSPopUpButton *filtNxPopup;
+/// U8：Nx 滤波器行下方的族说明（web 无此控件，原生新增；parity 扫描靠 identifier 取证）。
+@property (nonatomic, strong) NSTextField *filtNxNote;
 @property (nonatomic, strong) NSPopUpButton *phasePopup;
 @property (nonatomic, strong) NSTextField *phaseMsg;
 @property (nonatomic, strong) NSTextField *tapsField;
@@ -681,6 +722,7 @@ static NSString *RLPControlIdentifier(NSString *key) {
             @"sp_trim": @"sp_trim", @"sp_trimwrap": @"sp_trimwrap",
             @"sp_upnpwrap": @"sp_upnpwrap", @"sp_footTpl": @"sp_footTpl",
             @"sp_filt": @"sp_filt", @"sp_filtNx": @"sp_filtNx", @"sp_phase": @"sp_phase",
+            @"sp_filtNx_note": @"sp_filtNx_note",   // U8：Nx 行下的族说明（原生新增，parity 扫描取证）
             @"sp_phasemsg": @"sp_phasemsg", @"sp_taps": @"sp_taps", @"sp_atten": @"sp_atten",
             @"sp_transition": @"sp_transition", @"sp_2s": @"sp_2s",
             @"sp_shaper": @"sp_shaper", @"sp_isp": @"sp_isp",
@@ -1366,6 +1408,13 @@ static NSString *RLPControlIdentifier(NSString *key) {
         action:@selector(onFilterNx:)];
     [stack addArrangedSubview:RLPSRow(RLPTr(@"Nx 滤波器（88.2 kHz 及以上音源）"), self.filtNxPopup,
         RLPTr(@"留空 = 与 1x 相同"), t)];
+
+    // U8（2026-11-16）：紧跟 Nx 行下方的「族说明」。文案取自 src/dsp/filter_family.h
+    // （纪要的族划分 + 名字后缀相位），**不写任何 dB / 抽头承诺**；选中项一变就重算。
+    self.filtNxNote = [self hintForKey:@"sp_filtNx_note" width:560];
+    self.filtNxNote.identifier = @"sp_filtNx_note";   // 机械扫描可见（parity / --audit 取证）
+    self.filtNxNote.hidden = YES;
+    [gCurrentGroup addNoteView:self.filtNxNote];
 
     self.phasePopup = [self popupForKey:@"sp_phase"
         items:@[ RLPTr(@"跟随预设（用所选滤波器自带的相位）"), @"linear", @"minimum", @"intermediate" ]
@@ -2436,7 +2485,15 @@ static NSString *RLPControlIdentifier(NSString *key) {
     if (v.length) [self postKey:@"rateFamilyPolicy" value:v];
 }
 
-- (void)onFilter1x:(id)sender { [self postKey:@"filter" value:self.filt1xPopup.titleOfSelectedItem]; }
+/// 1x 滤波器：**发 representedObject（原名）**。U8 起下拉文案带了「（族名）」，
+/// 标题不再是值；旧实现发标题，改文案后会把「poly-sinc-lp（多相 sinc 线性相位）」发给后端。
+- (void)onFilter1x:(id)sender {
+    id ro = self.filt1xPopup.selectedItem.representedObject;
+    NSString *value = [ro isKindOfClass:[NSString class]] ? (NSString *)ro
+                     : (self.filt1xPopup.titleOfSelectedItem ?: @"");
+    if (value.length) [self postKey:@"filter" value:value];
+    [self refreshFilterFamilyNote];   // Nx 选中「跟随 1x」时，说明跟着 1x 走
+}
 /// Nx 滤波器：首项「跟随 1x」的值是空串（web filterNx 的 option value=""）。
 /// 旧实现发中文标题，后端把「跟随 1x（不单独指定）」当成滤波器名。
 - (void)onFilterNx:(id)sender {
@@ -2446,6 +2503,25 @@ static NSString *RLPControlIdentifier(NSString *key) {
                      : (self.filtNxPopup.indexOfSelectedItem == 0 ? @""
                         : (self.filtNxPopup.titleOfSelectedItem ?: @""));
     [self postKey:@"filterNx" value:value];
+    [self refreshFilterFamilyNote];
+}
+
+/// 族说明以「实际生效的 Nx 滤波」为准：Nx 选中具体项就用它，选中「跟随 1x」就回落到 1x。
+- (NSString *)effectiveFilterNameForNote {
+    id nx = self.filtNxPopup.selectedItem.representedObject;
+    if ([nx isKindOfClass:[NSString class]] && [(NSString *)nx length]) return nx;
+    id ones = self.filt1xPopup.selectedItem.representedObject;
+    return [ones isKindOfClass:[NSString class]] ? (NSString *)ones : @"";
+}
+
+/// U8：把 sp_filtNx_note 更新成当前生效滤波器的族说明（族 + 名字写明的相位）。
+/// 没有可用的滤波器名（清单还没到）就隐藏 —— 不显示空白占位，也不猜一个族。
+- (void)refreshFilterFamilyNote {
+    if (!self.filtNxNote) return;
+    NSString *name = [self effectiveFilterNameForNote];
+    NSString *note = name.length ? RLPFilterFamilyNote(name) : @"";
+    self.filtNxNote.stringValue = note ?: @"";
+    self.filtNxNote.hidden = note.length == 0;
 }
 
 /// web applyDsd（ui_script.h:8958）：PCM ⟹ dsd=0；DSD ⟹ dsd=<pk><rt>
@@ -3322,19 +3398,29 @@ static BOOL RLPFeedbackTextBlank(NSString *s) {
         [self_.sdmO1Popup removeAllItems];
         [self_.sdmONxPopup removeAllItems];
         [self_.sdmO1Popup addItemWithTitle:RLPTr(@"跟随 PCM 页的 1x")];
+        [[self_.sdmO1Popup itemAtIndex:0] setRepresentedObject:@""];
         [self_.sdmONxPopup addItemWithTitle:RLPTr(@"跟随上面的 1x")];
+        [[self_.sdmONxPopup itemAtIndex:0] setRepresentedObject:@""];
         for (id it in items) {
             NSString *name = [it isKindOfClass:[NSDictionary class]] ? it[@"name"]
                              : ([it isKindOfClass:[NSString class]] ? it : nil);
             if (!name.length) continue;
-            [self_.filt1xPopup addItemWithTitle:name];
+            // U8（2026-11-16）：文案 = 原名（族名[ 相位名]），**值仍是原名**。
+            // 族名由 filter_family.h 按名字前缀判（后端 /api/filters 的 familyLabel 同源），
+            // 这里本地再算一次是为了让英文界面能按词条翻译括号里的族名。
+            NSString *title = RLPFilterDecoratedTitle(name);
+            [self_.filt1xPopup addItemWithTitle:title];
             [[self_.filt1xPopup itemAtIndex:self_.filt1xPopup.numberOfItems - 1]
                 setRepresentedObject:name];
-            [self_.filtNxPopup addItemWithTitle:name];
+            [self_.filtNxPopup addItemWithTitle:title];
             [[self_.filtNxPopup itemAtIndex:self_.filtNxPopup.numberOfItems - 1]
                 setRepresentedObject:name];
-            [self_.sdmO1Popup addItemWithTitle:name];
-            [self_.sdmONxPopup addItemWithTitle:name];
+            [self_.sdmO1Popup addItemWithTitle:title];
+            [[self_.sdmO1Popup itemAtIndex:self_.sdmO1Popup.numberOfItems - 1]
+                setRepresentedObject:name];
+            [self_.sdmONxPopup addItemWithTitle:title];
+            [[self_.sdmONxPopup itemAtIndex:self_.sdmONxPopup.numberOfItems - 1]
+                setRepresentedObject:name];
         }
         // /api/settings 与 /api/filters 是两个并发 GET：清单后到时按记下的 kv 值重选，
         // 否则回显会被刚重建的列表冲回第一项（旧实现只填项、不回显）。
@@ -3344,6 +3430,8 @@ static BOOL RLPFeedbackTextBlank(NSString *s) {
         if (self_.savedFilter.length)
             [self_ applyKV:@{ @"filter": self_.savedFilter }
                   toPopup:self_.filt1xPopup key:@"filter"];
+        // 回填之后族说明要跟上（否则第一个选中项有说明、回填后的没有）。
+        [self_ refreshFilterFamilyNote];
     }];
 
     // 设置：以 kv 为准回填。读不到就不回填 —— 绝不把 UI 默认值写回去覆盖用户设置。
@@ -3521,8 +3609,20 @@ static BOOL RLPFeedbackTextBlank(NSString *s) {
 
 #pragma mark - SDM 页动作
 
-- (void)onSdmO1:(NSPopUpButton *)s { [self postKey:@"sdmfilt" value:s.indexOfSelectedItem == 0 ? @"" : (s.titleOfSelectedItem ?: @"")]; }
-- (void)onSdmONx:(NSPopUpButton *)s { [self postKey:@"sdmfiltnx" value:s.indexOfSelectedItem == 0 ? @"" : (s.titleOfSelectedItem ?: @"")]; }
+/// SDM 页 Oversampling：与 PCM 页共用同一份滤波器清单，因此同 U8 口径 ——
+/// 首项是空串（跟随），其余**发 representedObject（原名）**，绝不发带族名的标题。
+- (void)onSdmO1:(NSPopUpButton *)s {
+    id ro = s.selectedItem.representedObject;
+    NSString *value = [ro isKindOfClass:[NSString class]] ? (NSString *)ro
+                     : (s.indexOfSelectedItem == 0 ? @"" : @"");
+    [self postKey:@"sdmfilt" value:value];
+}
+- (void)onSdmONx:(NSPopUpButton *)s {
+    id ro = s.selectedItem.representedObject;
+    NSString *value = [ro isKindOfClass:[NSString class]] ? (NSString *)ro
+                     : (s.indexOfSelectedItem == 0 ? @"" : @"");
+    [self postKey:@"sdmfiltnx" value:value];
+}
 - (void)onDsdPack:(NSPopUpButton *)s {
     [self syncOutModeToDsd];
     [self updateDsdModeNote];

@@ -45,6 +45,8 @@
 #import "RLPCalibrationView.h"
 #import "RLPEqualizerView.h"
 
+#include "dsp/filter_family.h"   // U8：族标注的唯一出处（原生下拉的族名/族说明）
+
 #include <cstdio>
 #include <cstdlib>
 #include <unistd.h>
@@ -87,6 +89,25 @@ static NSView *FindId(NSView *root, NSString *ident) {
     for (NSView *v in Descendants(root))
         if ([v.identifier isEqualToString:ident]) return v;
     return nil;
+}
+/// U8（2026-11-16）：按 representedObject（**原名**）找下拉项。
+/// U8 起下拉文案是「原名（族名[ 相位名]）」，标题不再等于值，不能再按标题找。
+static NSMenuItem *ItemForValue(NSPopUpButton *p, NSString *value) {
+    for (NSInteger i = 0; i < (NSInteger)p.numberOfItems; ++i) {
+        id ro = [p itemAtIndex:i].representedObject;
+        if ([ro isKindOfClass:[NSString class]] && [(NSString *)ro isEqualToString:value])
+            return [p itemAtIndex:i];
+    }
+    return nil;
+}
+/// 期望的族名 / 族说明 —— 直接问 C++ 分类器（不是把 UI 的字符串抄一遍）。
+static NSString *U8FamilyLabel(NSString *name) {
+    if (!name.length) return @"";
+    return [NSString stringWithUTF8String:rta::dsp::filter_family_label(rta::dsp::filter_family(name.UTF8String))];
+}
+static NSString *U8FamilyNote(NSString *name) {
+    if (!name.length) return @"";
+    return [NSString stringWithUTF8String:rta::dsp::filter_family_full_note(name.UTF8String).c_str()];
 }
 static BOOL IsCard(NSView *v) {
     return v && [NSStringFromClass(v.class) isEqualToString:@"RLPSettingsGroup"];
@@ -275,6 +296,14 @@ int main() {
         NSInteger (^IndexOf)(NSPopUpButton *, NSString *) = ^NSInteger(NSPopUpButton *p, NSString *t) {
             for (NSInteger i = 0; i < (NSInteger)p.numberOfItems; ++i)
                 if ([[p itemAtIndex:i].title isEqualToString:t]) return i;
+            return -1;
+        };
+        // U8：滤波器下拉文案带「（族名）」，值仍是原名 ⟹ 按 representedObject 找下标。
+        NSInteger (^IndexOfValue)(NSPopUpButton *, NSString *) = ^NSInteger(NSPopUpButton *p, NSString *v) {
+            for (NSInteger i = 0; i < (NSInteger)p.numberOfItems; ++i) {
+                id ro = [p itemAtIndex:i].representedObject;
+                if ([ro isKindOfClass:[NSString class]] && [(NSString *)ro isEqualToString:v]) return i;
+            }
             return -1;
         };
 
@@ -640,7 +669,7 @@ int main() {
                [NSString stringWithFormat:@"representedObject=%@", nxFirstS1b.representedObject ?: @"(nil)"]);
 
             if (nxNameS1b.length) {
-                NSInteger nxIdxS1b = IndexOf(filtNxPopS1b, nxNameS1b);
+                NSInteger nxIdxS1b = IndexOfValue(filtNxPopS1b, nxNameS1b);
                 if (nxIdxS1b < 0) {
                     Ck(NO, [NSString stringWithFormat:@"【S1b·filtNx】下拉有「%@」", nxNameS1b], @"选项缺失");
                 } else {
@@ -666,9 +695,10 @@ int main() {
                     [filtNxPopS1b selectItemAtIndex:0];
                     [settings activate];
                     BOOL nxBackNamed = WaitUntil(3.0, ^BOOL {
-                        return [[filtNxPopS1b titleOfSelectedItem] isEqualToString:nxNameS1b];
+                        id ro = filtNxPopS1b.selectedItem.representedObject;
+                        return [ro isKindOfClass:[NSString class]] && [(NSString *)ro isEqualToString:nxNameS1b];
                     });
-                    Ck(nxBackNamed, @"【S1b·回填】kv.filterNx=名字 ⟹ 下拉回显该滤波器",
+                    Ck(nxBackNamed, @"【S1b·回填】kv.filterNx=名字 ⟹ 下拉回显该滤波器（按 representedObject）",
                        [NSString stringWithFormat:@"当前=%@", filtNxPopS1b.titleOfSelectedItem ?: @"(无)"]);
 
                     [core jsonWithMethod:@"POST" path:@"/api/settings" body:@"filterNx="];
@@ -682,6 +712,114 @@ int main() {
                 }
             } else {
                 Ck(NO, @"【S1b·filtNx】/api/filters 至少返回一个滤波器名", @"清单为空");
+            }
+        }
+
+
+        // ---- ⑧g U8 滤波器族标注（2026-11-16）--------------------------------
+        // 判据：
+        //   g1 /api/filters 每项**追加** family / familyLabel，原有字段一个不动；
+        //      familyLabel 不含数字（族名只描述性格，不许变成 dB/抽头承诺）。
+        //   g2 下拉文案 = 原名在前 + 括号族名（族名问 src/dsp/filter_family.h）；
+        //   g3 每项 representedObject 仍是**原名** —— 文案改了，发出去的值不变；
+        //   g4 选中项变化 ⟹ sp_filtNx_note 的文本跟着变，且等于该族的说明。
+        [settings selectPane:@"pcm"];
+        Pump(0.5);
+        [v layoutSubtreeIfNeeded];
+        NSPopUpButton *filtNxPopU8 = (NSPopUpButton *)FindId(PaneRoot(v, @"pcm"), @"sp_filtNx");
+        NSPopUpButton *filt1xPopU8 = (NSPopUpButton *)FindId(PaneRoot(v, @"pcm"), @"sp_filt");
+        NSTextField *noteU8 = (NSTextField *)FindId(PaneRoot(v, @"pcm"), @"sp_filtNx_note");
+        Ck([noteU8 isKindOfClass:[NSTextField class]], @"【U8】sp_filtNx_note 是真实标签",
+           noteU8 ? NSStringFromClass(noteU8.class) : @"控件缺失");
+
+        NSDictionary *filtersJsonU8 = [core jsonWithMethod:@"GET" path:@"/api/filters" body:nil];
+        NSArray *itemsU8 = [filtersJsonU8[@"items"] isKindOfClass:[NSArray class]] ? filtersJsonU8[@"items"] : @[];
+        Ck(itemsU8.count > 0, @"【U8】/api/filters 返回清单",
+           [NSString stringWithFormat:@"items=%lu", (unsigned long)itemsU8.count]);
+        NSCharacterSet *digitsU8 = [NSCharacterSet decimalDigitCharacterSet];
+        BOOL fieldsOkU8 = YES, keptOkU8 = YES, labelCleanU8 = YES;
+        NSString *badU8 = @"";
+        for (id it in itemsU8) {
+            if (![it isKindOfClass:[NSDictionary class]]) { fieldsOkU8 = NO; continue; }
+            NSDictionary *d = it;
+            if (![d[@"family"] isKindOfClass:[NSString class]] ||
+                ![d[@"familyLabel"] isKindOfClass:[NSString class]] ||
+                !((NSString *)d[@"family"]).length) {
+                fieldsOkU8 = NO; badU8 = [d description];
+            }
+            if ([d[@"familyLabel"] isKindOfClass:[NSString class]] &&
+                [(NSString *)d[@"familyLabel"] rangeOfCharacterFromSet:digitsU8].location != NSNotFound)
+                labelCleanU8 = NO;
+            if (![d[@"name"] isKindOfClass:[NSString class]] ||
+                ![d[@"phase"] isKindOfClass:[NSString class]] ||
+                ![d[@"phaseName"] isKindOfClass:[NSString class]] ||
+                ![d[@"taps"] isKindOfClass:[NSNumber class]] ||
+                ![d[@"twoStage"] isKindOfClass:[NSNumber class]] ||
+                ![d[@"forNx"] isKindOfClass:[NSNumber class]])
+                keptOkU8 = NO;
+        }
+        Ck(fieldsOkU8, @"【U8】每项都有 family / familyLabel", badU8);
+        Ck(keptOkU8, @"【U8】原有字段一个不动（name/phase/phaseName/taps/twoStage/forNx）", @"字段缺失");
+        Ck(labelCleanU8, @"【U8】familyLabel 不含数字（不做 dB/抽头承诺）", @"出现数字");
+
+        // 两个不同族的真实滤波器：A 带相位后缀、B 不带
+        NSString *nameA = @"poly-sinc-lp";
+        NSString *nameB = @"closed-form";
+        for (NSString *nm in @[ nameA, nameB ]) {
+            NSMenuItem *itU8 = ItemForValue(filtNxPopU8, nm);
+            NSString *labelU8 = U8FamilyLabel(nm);
+            Ck(itU8 != nil, [NSString stringWithFormat:@"【U8】下拉按值找到「%@」", nm], @"选项缺失");
+            if (!itU8) continue;
+            const BOOL titledU8 = [itU8.title hasPrefix:nm] &&
+                [itU8.title rangeOfString:@"（"].location != NSNotFound &&
+                [itU8.title rangeOfString:@"）"].location != NSNotFound &&
+                labelU8.length && [itU8.title rangeOfString:labelU8].location != NSNotFound;
+            Ck(titledU8, [NSString stringWithFormat:@"【U8】文案「原名（族名）」：%@", itU8.title],
+               [NSString stringWithFormat:@"期望前缀=%@ 族名=%@", nm, labelU8]);
+            Ck([itU8.representedObject isKindOfClass:[NSString class]] &&
+               [((NSString *)itU8.representedObject) isEqualToString:nm],
+               [NSString stringWithFormat:@"【U8】「%@」的值仍是原名", nm],
+               [NSString stringWithFormat:@"representedObject=%@", itU8.representedObject ?: @"(nil)"]);
+        }
+        // 1x 下拉同一份文案/值（两处都改过，不能只改一处）
+        NSMenuItem *it1xU8 = ItemForValue(filt1xPopU8, nameA);
+        Ck(it1xU8 && [it1xU8.title hasPrefix:nameA] && [it1xU8.title rangeOfString:U8FamilyLabel(nameA)].location != NSNotFound,
+           @"【U8】1x 下拉文案也带族名", it1xU8 ? it1xU8.title : @"选项缺失");
+        Ck(it1xU8 && [it1xU8.representedObject isEqual:nameA],
+           @"【U8】1x 下拉的值是原名", it1xU8 ? [it1xU8.representedObject description] : @"选项缺失");
+
+        if ([noteU8 isKindOfClass:[NSTextField class]] &&
+            [filtNxPopU8 isKindOfClass:[NSPopUpButton class]]) {
+            const NSInteger idxA = IndexOfValue(filtNxPopU8, nameA);
+            const NSInteger idxB = IndexOfValue(filtNxPopU8, nameB);
+            if (idxA >= 0 && idxB >= 0) {
+                [filtNxPopU8 selectItemAtIndex:idxA];
+                Fire(filtNxPopU8);
+                Pump(0.5);
+                NSString *noteA = noteU8.stringValue ?: @"";
+                Ck(noteA.length && [noteA isEqualToString:U8FamilyNote(nameA)],
+                   @"【U8】选中 poly-sinc-lp ⟹ note 是该族说明",
+                   [NSString stringWithFormat:@"note=%@ 期望=%@", noteA, U8FamilyNote(nameA)]);
+                Ck(!noteU8.hidden, @"【U8】族说明可见", @"标签仍被隐藏");
+                NSDictionary *kvA = ReadKV();
+                Ck([kvA[@"filterNx"] isEqualToString:nameA],
+                   @"【U8】选中的值仍是原名 ⟹ POST filterNx=poly-sinc-lp",
+                   [NSString stringWithFormat:@"kv.filterNx=%@", kvA[@"filterNx"] ?: @"(无)"]);
+
+                [filtNxPopU8 selectItemAtIndex:idxB];
+                Fire(filtNxPopU8);
+                Pump(0.5);
+                NSString *noteB = noteU8.stringValue ?: @"";
+                Ck([noteB isEqualToString:U8FamilyNote(nameB)],
+                   @"【U8】选中 closed-form ⟹ note 换成闭式插值族说明",
+                   [NSString stringWithFormat:@"note=%@ 期望=%@", noteB, U8FamilyNote(nameB)]);
+                Ck(![noteB isEqualToString:noteA],
+                   @"【U8】选中项变化 ⟹ note 文本确实变了",
+                   [NSString stringWithFormat:@"A=%@ B=%@", noteA, noteB]);
+                Ck([noteB rangeOfCharacterFromSet:digitsU8].location == NSNotFound,
+                   @"【U8】族说明不含数字", noteB);
+            } else {
+                Ck(NO, @"【U8】下拉里同时有 poly-sinc-lp 与 closed-form", @"选项缺失");
             }
         }
 

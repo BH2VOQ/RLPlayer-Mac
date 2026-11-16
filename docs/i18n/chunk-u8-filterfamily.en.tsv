@@ -1,0 +1,24 @@
+多相 sinc	Poly-sinc	族标签：poly-sinc 系（U8 滤波器族标注）
+多相 sinc 高斯	Poly-sinc Gaussian	族标签：poly-sinc-gauss 系
+多相 sinc 扩展频响	Poly-sinc extended response	族标签：poly-sinc-ext2 系
+半带	Half-band	族标签：poly-sinc-hb 系
+超长 sinc	Long sinc	族标签：sinc-S/M/MG/L/LL 系
+闭式插值	Closed-form	族标签：closed-form 系
+最小振铃	Minimum ringing	族标签：minringFIR 系
+切趾	Apodizing	族标签：apod 系
+未分类	Unclassified	族标签：对不上任何前缀的滤波器
+线性相位	Linear phase	相位标签（已有词条，此处同名同译）
+最小相位	Minimum phase	相位标签（已有词条，此处同名同译）
+混合相位	Intermediate phase	相位标签（已有词条，此处同名同译）
+多相 sinc：Kaiser 窗，经典高衰减家族。	Poly-sinc: Kaiser window, the classic high-attenuation family.	族说明：poly-sinc 行
+多相 sinc 高斯：Gaussian 窗，滚降更平缓。	Poly-sinc Gaussian: Gaussian window, gentler roll-off.	族说明：poly-sinc-gauss 行
+多相 sinc 扩展频响：Blackman-Harris 窗，旁瓣更低。	Poly-sinc extended response: Blackman-Harris window, lower side lobes.	族说明：poly-sinc-ext2 行
+半带：手册里的 half-band 族。	Half-band: the half-band family from the manual.	族说明：poly-sinc-hb 行
+超长 sinc：档位 S / M / MG / L / LL 逐级加长。	Long sinc: the S / M / MG / L / LL tiers grow step by step.	族说明：sinc 行
+闭式插值：Blackman-Harris 窗，旁瓣最低。	Closed-form: Blackman-Harris window, lowest side lobes.	族说明：closed-form 行
+最小振铃：手册列为特殊类型。	Minimum ringing: listed as a special type in the manual.	族说明：minringFIR 行
+切趾：通带高频平滑滚降，压低预振铃。	Apodizing: smooth roll-off at the high end of the passband, reducing pre-ringing.	族说明：apod 行
+未分类：纪要的族划分与名字表里都没有把握归族。	Unclassified: no confident family match in the notes or the name table.	族说明：未分类
+线性相位：冲激响应对称，峰值前后都有振铃。	Linear phase: symmetric impulse response, ringing both before and after the peak.	相位说明：-lp
+最小相位：无前振铃，能量集中在脉冲起始处。	Minimum phase: no pre-ringing, energy concentrated at the start of the impulse.	相位说明：-mp
+混合相位：幅频不变，群延迟落在最小与线性之间。	Intermediate phase: same magnitude response, group delay between minimum and linear.	相位说明：-ip
