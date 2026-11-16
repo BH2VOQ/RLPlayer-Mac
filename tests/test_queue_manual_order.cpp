@@ -151,6 +151,16 @@ int main() {
            "拖动后=" + seq_text(moved) + " 关随机后=" + seq_text(it));
     }
 
+    // 2026-11-17 后端审计：原生 EQ 页用 POST /api/peq/preset action=list 拉预设名，
+    // 旧实现一律回「未知 action」⟹ 预设下拉永远为空（用户「预设无法使用」的疑点之一）。
+    {
+        const std::string list = call("POST", "/api/peq/preset", "action=list&name=");
+        ck(list.find("\"ok\":true") != std::string::npos,
+           "peq/preset action=list 返回 ok:true（预设下拉不再永远为空）", list.substr(0, 200));
+        ck(list.find("\"presets\"") != std::string::npos,
+           "peq/preset action=list 带回 presets 字段", list.substr(0, 200));
+    }
+
     rlapp::stop_embedded();
     fs::remove_all(tmp, ec);
 

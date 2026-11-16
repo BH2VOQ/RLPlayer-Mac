@@ -1342,6 +1342,13 @@ public:
     bool dop_requested() const { return dop_requested_.load(std::memory_order_relaxed); }
     // 1.1.2 AP-1.3 自证：本次是否被平台强制成了共享输出（AirPlay 恒为 true）。
     bool shared_mode() const { return shared_; }
+    // 诊断用只读快照（2026-11-17）：关闭后设备是否仍留在独占物理格式，靠它回答。
+    bool phys_locked() const { return physLocked_; }
+    UInt32 client_bits() const { return clientBits_; }
+    uint32_t last_render_flags() const { return last_render_flags_.load(std::memory_order_relaxed); }
+    double last_render_sample_time() const { return last_render_sample_time_.load(std::memory_order_relaxed); }
+    uint32_t last_render_bytes() const { return last_render_bytes_.load(std::memory_order_relaxed); }
+    uint32_t last_render_frames() const { return last_render_frames_.load(std::memory_order_relaxed); }
 
     // ---------------- 1.1.2 DoP 安全自证（只读诊断，供 STAT / signal chain 取用）----------------
     // phase    : 渲染侧标记相位的异常计数（改写/非法/声道对齐）与"下一帧标记"
@@ -1680,12 +1687,20 @@ private:
     }
 
     // 设备拉数据的回调：把环形缓冲里的帧按设备请求量填出去；不够就补静音并记欠载
-    static OSStatus render_trampoline(void* refcon, AudioUnitRenderActionFlags* /*flags*/,
-                                      const AudioTimeStamp* /*ts*/, UInt32 /*bus*/,
+    static OSStatus render_trampoline(void* refcon, AudioUnitRenderActionFlags* flags,
+                                      const AudioTimeStamp* ts, UInt32 /*bus*/,
                                       UInt32 frames, AudioBufferList* io) {
         auto* self = static_cast<CoreAudioOutput*>(refcon);
         if (!self) return noErr;
         self->render_callbacks_.fetch_add(1, std::memory_order_relaxed);
+        // 2026-11-17：记录回调现场，用于区分「无回调」「回调带 OutputIsSilence」
+        // 与「时间戳不推进（设备时钟停摆）」。实时线程只写原子量，不分配、不加锁。
+        if (flags) self->last_render_flags_.store((uint32_t)*flags, std::memory_order_relaxed);
+        if (ts) self->last_render_sample_time_.store((double)ts->mSampleTime, std::memory_order_relaxed);
+        if (io && io->mNumberBuffers > 0) {
+            self->last_render_bytes_.store((uint32_t)io->mBuffers[0].mDataByteSize, std::memory_order_relaxed);
+            self->last_render_frames_.store(frames, std::memory_order_relaxed);
+        }
         if (!io) return noErr;
         self->render(frames, io);
         return noErr;
@@ -1832,6 +1847,10 @@ private:
         buffer_frames_ = 0;
         maximum_slice_frames_ = 0;
         render_callbacks_.store(0);
+        last_render_flags_.store(0);
+        last_render_sample_time_.store(-1.0);
+        last_render_bytes_.store(0);
+        last_render_frames_.store(0);
         io_restarts_.store(0);
         devicePacking_ = macos::ContainerPacking::Packed16;
         deviceEffectiveBits_ = 0;
@@ -1900,6 +1919,11 @@ private:
     size_t buffer_frames_ = 0;
     UInt32 maximum_slice_frames_ = 0;
     std::atomic<uint64_t> render_callbacks_{0};
+    // 最近一次回调的现场（见 render_trampoline 注释）
+    std::atomic<uint32_t> last_render_flags_{0};
+    std::atomic<double>   last_render_sample_time_{-1.0};
+    std::atomic<uint32_t> last_render_bytes_{0};
+    std::atomic<uint32_t> last_render_frames_{0};
     std::atomic<uint64_t> io_restarts_{0};
     std::atomic<size_t> frames_written_{0};
 

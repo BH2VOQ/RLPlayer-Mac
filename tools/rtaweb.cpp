@@ -2278,7 +2278,10 @@ public:
              " shared=" + (shared_ ? "1" : "0") +
              " frames=" + std::to_string(ao_->buffer_frames()) +
              " device_running=" + (device_running() ? "1" : "0") +
-             " device_shared_with_others=" + (device_shared_with_others() ? "1" : "0"));
+             " device_shared_with_others=" + (device_shared_with_others() ? "1" : "0") +
+             " phys_locked=" + (phys_locked() ? "1" : "0") +
+             " client_bits=" + std::to_string(client_bits()) +
+             " hog_acquired=" + (hog_acquired() ? "1" : "0"));
         return ok;
     }
     size_t buffer_frames() const override { return ao_->buffer_frames() ? ao_->buffer_frames() : 4096; }
@@ -2376,6 +2379,12 @@ public:
     OSStatus last_render_query() const { auto* ca = dynamic_cast<rta::platform::CoreAudioOutput*>(ao_.get()); return ca ? ca->last_render_query() : noErr; }
     uint64_t io_restarts() const { auto* ca = dynamic_cast<rta::platform::CoreAudioOutput*>(ao_.get()); return ca ? ca->io_restarts() : 0; }
     bool device_running() const { auto* ca = dynamic_cast<rta::platform::CoreAudioOutput*>(ao_.get()); return ca ? ca->device_running() : false; }
+    bool phys_locked() const { auto* ca = dynamic_cast<rta::platform::CoreAudioOutput*>(ao_.get()); return ca ? ca->phys_locked() : false; }
+    UInt32 client_bits() const { auto* ca = dynamic_cast<rta::platform::CoreAudioOutput*>(ao_.get()); return ca ? ca->client_bits() : 0; }
+    uint32_t cb_flags() const { auto* ca = dynamic_cast<rta::platform::CoreAudioOutput*>(ao_.get()); return ca ? ca->last_render_flags() : 0; }
+    double cb_sample_time() const { auto* ca = dynamic_cast<rta::platform::CoreAudioOutput*>(ao_.get()); return ca ? ca->last_render_sample_time() : -1.0; }
+    uint32_t cb_bytes() const { auto* ca = dynamic_cast<rta::platform::CoreAudioOutput*>(ao_.get()); return ca ? ca->last_render_bytes() : 0; }
+    uint32_t cb_frames() const { auto* ca = dynamic_cast<rta::platform::CoreAudioOutput*>(ao_.get()); return ca ? ca->last_render_frames() : 0; }
     uint64_t underruns() const { return ao_->underruns(); }
     bool bit_perfect() const { return ao_->bit_perfect(); }
     // 2026-10-25：接管后音量条的起点 dB（原硬件音量的等效值）。
@@ -5717,7 +5726,16 @@ static bool play_one_impl(const std::string& file, const PlayParams& pIn, rta::a
                        " render_query=" + std::to_string(ca->last_render_query()) +
                        " io_restarts=" + std::to_string(ca->io_restarts()) +
                        " device_running=" + (ca->device_running() ? "1" : "0") +
-                       " device_shared_with_others=" + (ca->device_shared_with_others() ? "1" : "0");
+                       " device_shared_with_others=" + (ca->device_shared_with_others() ? "1" : "0") +
+                       // 2026-11-17：关流后设备是否仍留在独占物理格式、按几位打包，
+                       // 这两个现场值决定「回退共享为何拿不到回调」的下一层判断。
+                       " phys_locked=" + (ca->phys_locked() ? "1" : "0") +
+                       " client_bits=" + std::to_string(ca->client_bits()) +
+                       " hog_acquired=" + (ca->hog_acquired() ? "1" : "0") +
+                       " cb_flags=" + std::to_string((unsigned)ca->cb_flags()) +
+                       " cb_sample_time=" + std::to_string(ca->cb_sample_time()) +
+                       " cb_bytes=" + std::to_string((unsigned)ca->cb_bytes()) +
+                       " cb_frames=" + std::to_string((unsigned)ca->cb_frames());
             }
             return std::string();
         };
@@ -7614,6 +7632,16 @@ static void apply_dsp_settings_snapshot(PlayParams& dst, const PlayParams& snap)
     dst.rateFamilyPolicy = snap.rateFamilyPolicy;
 }
 
+// 下一首 / 手动跳曲前，把**最新设置**合进播放参数。
+// 依据（2026-11-17 后端审计已证实）：POST /api/settings 落盘后，g_params 只同步了滤波/EQ 等
+// 少数键，/api/skip 与自动续播直接 params_snapshot() ⟹ 改过后端/设备/采样率/DSD 的用户，
+// 不手动重播就一直沿用旧参数。apply_conf_defaults_for_play 的严格绝缘清单
+// （file/cue/rid/seek/srcbits/dsdnative）保证不会破坏队列项与会话状态。
+static PlayParams next_track_params(const PlayParams& base) {
+    std::set<std::string> none;              // 空集合 ⟹ 所有播放偏好都从 conf 兜底
+    return apply_conf_defaults_for_play(base, none);
+}
+
 // ---- 队列播放线程：自动播下一首，并在播当前曲时预解码下一曲 ----
 static void queue_thread(PlayParams p, size_t start) {
     auto& ps = g_ps;
@@ -7650,6 +7678,8 @@ static void queue_thread(PlayParams p, size_t start) {
             firstTrack = false;
         } else {
             pit.initialSeekFrac = -1.0;
+            // 先按最新 conf 刷新全部播放偏好，再叠加运行中的 DSP/EQ 快照。
+            pit = next_track_params(pit);
             apply_dsp_settings_snapshot(pit, params_snapshot());
         }
         pit.cueStart = cur.cs;
@@ -12437,10 +12467,16 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
         ct = "application/json; charset=utf-8";
         std::string file;
         {
+            // 2026-11-17：必须先按原始 query 的 & 截断**再** urlDecode。
+            // 反过来会把 %26 解成 & 后再截断（Simon & Garfunkel 之类的路径被砍成 "Simon "）。
             const size_t q = rq.path.find("?file=");
-            if (q != std::string::npos) file = urlDecode(rq.path.substr(q + 6));
-            const size_t amp = file.find('&');
-            if (amp != std::string::npos) file = file.substr(0, amp);
+            if (q != std::string::npos) {
+                std::string raw = rq.path.substr(q + 6);
+                const size_t ampRaw = raw.find('&');
+                if (ampRaw != std::string::npos) raw = raw.substr(0, ampRaw);
+                file = urlDecode(raw);
+            }
+
         }
         std::error_code ec;
         if (file.empty() || !valid_utf8(file) || !fs::is_regular_file(fs::u8path(file), ec) || ec ||
@@ -12728,7 +12764,7 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
         g_upnpPlayer.store(false);
         ps.stopJoin();          // 原子停线程
 
-        PlayParams p = params_snapshot();
+        PlayParams p = next_track_params(params_snapshot());   // 手动跳曲同样用最新设置
         size_t target = 0;
         QItem targetItem;
         bool ok = false;
@@ -13224,6 +13260,9 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
             }
             const std::string action = f.count("action") ? f["action"] : "";
             const std::string name   = f.count("name") ? f["name"] : "";
+            // 2026-11-17：原生 EQ 页用 action=list 拉预设名，旧实现一律「未知 action」拒绝，
+            // 导致预设下拉永远为空。列表本就随 peq_state_json 下发，直接复用同一份状态。
+            if (action == "list") return peq_state_json(false);
             if (action == "reset") {
                 rta::dsp::PeqSettings s = rta::dsp::peq_flat_settings();
                 g_peq->set_settings(s);
