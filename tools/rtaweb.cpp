@@ -5780,6 +5780,12 @@ static bool play_one_impl(const std::string& file, const PlayParams& pIn, rta::a
     return false;
 }
 
+// 冷重试准入：只在「共享也失败、用户没停、且本曲没播完」时允许**一次**额外尝试。
+// 抽成纯函数是为了能离线钉住"绝不重试已完成播放"与"绝不因用户停止而重开"。
+static bool should_cold_retry_shared(bool sharedOk, bool stopped, double fracAfter) {
+    return !sharedOk && !stopped && fracAfter < 0.999;
+}
+
 // ---------------- 播放入口（独占 RENDERFAIL 自动回退共享）----------------
 // 2026-10-22 VM 事故的落地修复：独占流开得出来但设备 4 秒不接受数据时，
 // 以 wasapi-shared 重开整条 play_one（设备率取系统混音率、shaper=None、note 明示
@@ -5807,6 +5813,22 @@ static bool play_one(const std::string& file, const PlayParams& p, rta::audio::A
         return false;
     }
 
+    // 中间级（仅 PCM、仅一次）：同后端关掉 Hog 再试。
+    // 依据：Hog 在 macOS 上是弱语义（本仓库实测其它进程仍可 IO），而这把 USB 设备在 Hog
+    // 下只跑一个回调就停止拉数据；物理格式锁定仍保留，逐位条件不因关 Hog 而放宽。
+    if (p.dsd <= 0) {
+        PlayParams pH = p;
+        pH.hogExclusive = false;
+        if (frac > 0.0) pH.initialSeekFrac = frac;
+        { std::lock_guard<std::mutex> lk(ps.mtx); ps.error.clear(); }
+        play_log("FALLBACK_NOHOG 独占流停止消费，关闭 Hog 后同位置重试一次（保留物理格式锁定）");
+        const bool hogOk = play_one_impl(file, pH, buf, nullptr,
+            "独占（Hog）设备停止消费，已关闭 Hog 重试；物理格式仍按源锁定");
+        play_log(std::string("FALLBACK_NOHOG result=") + (hogOk ? "ok" : "failed"));
+        if (hogOk) return true;
+        if (ps.stop.load()) return false;
+    }
+
     PlayParams p2 = p;
     p2.backend = "coreaudio-shared";
     p2.shaper = "none";                 // 共享模式不追求 bit-perfect，关掉抖动整形
@@ -5827,7 +5849,25 @@ static bool play_one(const std::string& file, const PlayParams& p, rta::audio::A
         ps.outFallbackWhy += where;
     }
     const std::string note = "独占流无响应,已回退 CoreAudio 共享(非 bit-perfect)，" + where;
-    return play_one_impl(file, p2, buf, nullptr, note);
+    const bool sharedOk = play_one_impl(file, p2, buf, nullptr, note);
+    if (!should_cold_retry_shared(sharedOk, ps.stop.load(),
+            (ps.total.load() > 0) ? (double)ps.played.load() / (double)ps.total.load() : 0.0))
+        return sharedOk;
+
+    // 共享也失败：设备通常刚被上一路流抢占/停止，需要沉降时间。
+    // 只做**一次**冷重试（同一位置续播），不是循环；结果如实进日志。
+    const size_t playedAfter = ps.played.load();
+    const size_t totalAfter = ps.total.load();
+    const double fracAfter = (totalAfter > 0) ? (double)playedAfter / (double)totalAfter : 0.0;
+    if (fracAfter >= 0.999) return false;
+    play_log("RETRY_SHARED_COLD 共享流仍未接受数据，释放设备 400ms 后同位置重试一次");
+    std::this_thread::sleep_for(std::chrono::milliseconds(400));
+    PlayParams p3 = p2;
+    if (fracAfter > 0.0) p3.initialSeekFrac = fracAfter;
+    { std::lock_guard<std::mutex> lk(ps.mtx); ps.error.clear(); }
+    const bool retryOk = play_one_impl(file, p3, buf, nullptr, note + "（第二次尝试）");
+    play_log(std::string("RETRY_SHARED_COLD result=") + (retryOk ? "ok" : "failed"));
+    return retryOk;
 }
 
 // ---------------- 播放队列 ----------------

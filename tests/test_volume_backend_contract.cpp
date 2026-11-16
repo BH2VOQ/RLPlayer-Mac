@@ -246,6 +246,15 @@ int main() {
         g_ps.bpInputsKnown = false;
     }
 
+    // Cold retry must stay a single bounded attempt: never after success, never after stop,
+    // never once the track has effectively finished.
+    {
+        ck(!should_cold_retry_shared(true, false, 0.10), "Case 7a: success never triggers a retry");
+        ck(!should_cold_retry_shared(false, true, 0.10), "Case 7b: user stop never triggers a retry");
+        ck(!should_cold_retry_shared(false, false, 0.999), "Case 7c: finished track never triggers a retry");
+        ck(should_cold_retry_shared(false, false, 0.40), "Case 7d: failed mid-track allows exactly one retry");
+    }
+
     fs::remove_all(tmpDir, ec);
     if (g_fails == 0) std::printf("\n[ALL PASS] test_volume_backend_contract 全部通过\n");
     else               std::printf("\n[FAILED] %d 项未通过\n", g_fails);
