@@ -2228,6 +2228,7 @@ NSDictionary *RLPNativeI18nTable(void) {
             @"切换更新通道失败": @"Failed to switch update channel",
             @"更新通道已保存": @"Update channel saved",
             @"会把输出音量设为 0 dB（满幅），采样率改为跟随源，关闭抖动/EQ/IR，并切回 CoreAudio 独占。确定继续？": @"This sets output volume to 0 dB (full scale), rate to source, disables dither/EQ/IR, and switches back to CoreAudio exclusive. Continue?",
+            @"歌单读取失败": @"Failed to load playlists",
             @"网络请求失败": @"Network request failed",
             @"尚未配置 API Key": @"API key is not configured yet",
             @"未选择 UPnP / DLNA 渲染器：设置 → 输出 → 目标渲染器（点「重新发现」刷新列表）": @"No UPnP / DLNA renderer selected: Settings → Output → Target renderer (click Discover again to refresh the list)",

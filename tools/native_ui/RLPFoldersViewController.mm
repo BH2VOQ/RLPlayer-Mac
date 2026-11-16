@@ -204,8 +204,14 @@
         if (!strongSelf) return;
         strongSelf.loaded = YES;
         if (!json || ![json[@"ok"] boolValue]) {
+            // 2026-11-17（UI 缺口审计已证实）：旧实现只弹 toast，首屏失败时空态标签仍隐藏
+            // ⟹ 整页空白、用户不知道发生了什么。把后端给的 error 原样显示出来。
+            NSString *why = [json[@"error"] isKindOfClass:[NSString class]] ? json[@"error"]
+                                                                          : RLPTr(@"目录读取失败");
+            strongSelf.emptyLabel.stringValue = why;
+            strongSelf.emptyLabel.hidden = NO;
             [strongSelf setSubtitle:RLPTr(@"读取失败")];
-            RLPToast(RLPTr(@"目录读取失败"));
+            RLPToast(why);
             return;
         }
         strongSelf.dir = json[@"dir"] ?: @"";

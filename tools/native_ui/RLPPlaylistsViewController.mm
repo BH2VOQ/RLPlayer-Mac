@@ -429,6 +429,15 @@
     [[RLPCoreClient shared] getJSON:@"/api/sq/list" completion:^(NSDictionary * _Nullable json) {
         __typeof__(self) self_ = weakSelf;
         if (!self_ || seq != self_.listSeq) return;
+        // 2026-11-17（UI 缺口审计已证实）：旧实现不判 ok，超时/失败也先清空再报
+        // 「0 个歌单」——把网络故障说成「你没有歌单」。失败时保留旧数据并显示原因。
+        if (!json || ![json[@"ok"] boolValue]) {
+            NSString *why = [json[@"error"] isKindOfClass:[NSString class]] ? json[@"error"]
+                                                                          : RLPTr(@"歌单读取失败");
+            [self_ setSubtitle:why];
+            RLPToast(why);
+            return;
+        }
         [self_.playlists removeAllObjects];
         NSArray *qs = [json[@"queues"] isKindOfClass:[NSArray class]] ? json[@"queues"] : @[];
         for (id x in qs) {
