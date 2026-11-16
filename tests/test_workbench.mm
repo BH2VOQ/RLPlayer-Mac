@@ -12,6 +12,7 @@
 //       抢独占、爆音。这条是安全性判据，故意写错的实现必须跑红。
 //   B2  不适用的信号链节点必须真的灰掉（PCM 路径下的 SDM、DoP 下的 shaper）。
 #import <AppKit/AppKit.h>
+#import <objc/message.h>
 #import "RLPWorkbench.h"
 #import "RLPSignalChain.h"
 #import "RLPWorkbenchViewController.h"
@@ -155,7 +156,8 @@ int main() {
         CK(!RLPChainNodeApplies(@"resample", @{@"dsd": @"0", @"rate": @"follow"}),
            "B2f 跟随源时重采样节点不适用", @"");
         CK(RLPChainNodeApplies(@"resample", full), "B2g 指定采样率时重采样适用", @"");
-        CK(!RLPChainNodeApplies(@"eq", @{@"eq": @"0"}), "B2h EQ 旁路时不适用", @"");
+        CK(RLPChainNodeApplies(@"eq", @{@"eq": @"/tmp/rew.txt"}), "B2h 外部 EQ 路径时 eq 节点适用", @"");
+        CK(RLPChainNodeApplies(@"eq", @{@"eq": @""}), "B2h2 settings.eq 为空时 PEQ 节点仍适用", @"");
         CK(RLPChainNodeApplies(@"src", full) && RLPChainNodeApplies(@"out", full),
            "B2i 源与输出节点恒适用", @"");
 
@@ -244,18 +246,132 @@ int main() {
             }
         }
 
-        // ---------- B10 EQ 必须有独立的开关（eq=1/0），不只是"旁路"按钮 ----------
-        // 触发原因：只有旁路按钮时，"现在是开还是关"没有状态回显；
-        // 发烧友 A/B 时要能一眼看到 EQ 是否在链路里。
+        // ---------- B10 单一 PEQ 主开关（peqBypass）+ 外部 EQ 路径摘要（wb.eq.extpath） ----------
         {
-            NSButton *eqOn = nil;
+            NSView *peqSw = nil;
+            NSTextField *extLab = nil;
             for (NSView *v in all) {
-                if (![v isKindOfClass:[NSButton class]]) continue;
-                if ([((NSButton *)v).identifier isEqualToString:@"wb.eqon"]) eqOn = (NSButton *)v;
+                if ([v.identifier isEqualToString:@"peqBypass"]) peqSw = v;
+                if ([v isKindOfClass:[NSTextField class]] && [v.identifier isEqualToString:@"wb.eq.extpath"]) extLab = (NSTextField *)v;
             }
-            CK(eqOn != nil, "B10a EQ 开关在位", @"");
-            CK(eqOn != nil && [eqOn.title rangeOfString:RLPTr(@"EQ")].location != NSNotFound,
-               "B10b EQ 开关标题可读", eqOn.title ?: @"");
+            CK(peqSw != nil, "B10a 单一 PEQ 主开关 peqBypass 在位", @"");
+            CK(extLab != nil, "B10b 外部 EQ 路径摘要标签 wb.eq.extpath 在位", @"");
+        }
+
+        // ---------- B12 目标1/2/4/5 行为回归（纯逻辑 + 控制器回读 + seq 保护） ----------
+        {
+            CK(RLPParseDsdRate(@"256") == 256, "B12a 纯数字 DSD256 解析", @"");
+            CK(RLPParseDsdRate(@"dop128") == 128, "B12b legacy dop128 解析", @"");
+            CK(RLPParseDsdRate(@"nat64") == 64, "B12c legacy nat64 解析", @"");
+            CK(RLPParseDsdRate(@"native512") == 512, "B12d legacy native512 解析", @"");
+            CK(RLPParseDsdRate(@"0") == 0, "B12e PCM 0 解析", @"");
+
+            NSString *eqSum = RLPABSlotSummary(@{@"filter": @"poly-sinc-gauss", @"dsd": @"dop256", @"eq": @"/Users/test/Headphone.txt"});
+            CK([eqSum rangeOfString:@"DSD256"].location != NSNotFound &&
+               [eqSum rangeOfString:@"EQ:Headphone.txt"].location != NSNotFound,
+               "B12f 槽摘要保留外部 EQ 文件名且支持 legacy dsd", eqSum ?: @"");
+
+            // 控制器回读测试（需调用私有方法验证 applySettingsPayload / syncAllControlsFromSettings）
+            RLPWorkbenchViewController *wb = [[RLPWorkbenchViewController alloc] init];
+            wb.view.frame = NSMakeRect(0, 0, 1180, 760);
+            [wb.view layoutSubtreeIfNeeded];
+            NSMutableArray<NSView *> *wbAll = [NSMutableArray array];
+            CollectViews(wb.view, wbAll);
+
+            // 模拟带 legacy dsd + 外部 eq + 自定义未知 modcut/ahmbits/dsdkind/dsdconv 的 settings
+            NSDictionary *kv1 = @{
+                @"dsd": @"dop128",
+                @"backend": @"coreaudio",
+                @"eq": @"/tmp/MyREW.txt",
+                @"modcut": @"85",
+                @"ahmbits": @"12",
+                @"dsdkind": @"custom_kind",
+                @"dsdconv": @"ultra_wide",
+            };
+            SEL applySel = NSSelectorFromString(@"applySettingsPayload:forSeq:");
+            if ([wb respondsToSelector:applySel]) {
+                ((void (*)(id, SEL, NSDictionary *, NSUInteger))objc_msgSend)(wb, applySel, kv1, 10);
+                // seq=5 旧回包必须被丢弃，不能把 dsd 改回 0
+                ((void (*)(id, SEL, NSDictionary *, NSUInteger))objc_msgSend)(wb, applySel, @{@"dsd": @"0", @"modcut": @"0"}, 5);
+            }
+            NSSegmentedControl *dsdSeg = nil;
+            NSTextField *extLab = nil;
+            for (NSView *v in wbAll) {
+                if ([v isKindOfClass:[NSSegmentedControl class]] && [v.identifier isEqualToString:@"wb.dsd"]) dsdSeg = (NSSegmentedControl *)v;
+                if ([v isKindOfClass:[NSTextField class]] && [v.identifier isEqualToString:@"wb.eq.extpath"]) extLab = (NSTextField *)v;
+            }
+            CK(dsdSeg != nil && dsdSeg.selectedSegment == 2, "B12g legacy dop128 回显到 DSD128 且 seq=5 旧包被丢弃",
+               dsdSeg ? [NSString stringWithFormat:@"seg=%ld", (long)dsdSeg.selectedSegment] : @"nil");
+            CK(extLab != nil && [extLab.stringValue rangeOfString:@"MyREW.txt"].location != NSNotFound,
+               "B12h 外部 EQ 路径摘要回显文件名", extLab.stringValue ?: @"nil");
+
+            // 检查 modcut/ahmbits/dsdkind/dsdconv 未知值不显示伪默认
+            NSMutableArray<NSString *> *popupTitles = [NSMutableArray array];
+            for (NSView *v in wbAll) {
+                if ([v isKindOfClass:[NSPopUpButton class]]) {
+                    NSString *t = ((NSPopUpButton *)v).titleOfSelectedItem;
+                    if (t.length) [popupTitles addObject:t];
+                }
+            }
+            CK([popupTitles containsObject:@"85"] && [popupTitles containsObject:@"12"] &&
+               [popupTitles containsObject:@"custom_kind"] && [popupTitles containsObject:@"ultra_wide"],
+               "B12i modcut/ahmbits/dsdkind/dsdconv 未知值按真实值回显（不显示伪默认）",
+               [popupTitles componentsJoinedByString:@","]);
+        }
+
+        // ---------- B13 680/820/1180 几何防重叠 + 隐藏页不占位 ----------
+        {
+            NSArray<NSNumber *> *widths = @[@680, @820, @1180];
+            for (NSNumber *wn in widths) {
+                CGFloat w = wn.doubleValue;
+                RLPWorkbenchViewController *gvc = [[RLPWorkbenchViewController alloc] init];
+                gvc.view.frame = NSMakeRect(0, 0, w, 800);
+                [gvc.view layoutSubtreeIfNeeded];
+
+                NSMutableArray<NSView *> *gv = [NSMutableArray array];
+                CollectViews(gvc.view, gv);
+
+                // 1) A/B 4 张槽卡互不重叠
+                NSMutableArray<NSView *> *abSlots = [NSMutableArray array];
+                NSView *panelAB = nil, *panelEQ = nil, *panelMon = nil;
+                for (NSView *v in gv) {
+                    if ([v.identifier hasPrefix:@"wb.abslot."]) [abSlots addObject:v];
+                    if ([v.identifier isEqualToString:@"wb.panel.ab"]) panelAB = v;
+                    if ([v.identifier isEqualToString:@"wb.panel.eq"]) panelEQ = v;
+                    if ([v.identifier isEqualToString:@"wb.panel.monitor"]) panelMon = v;
+                }
+                BOOL abOverlap = NO;
+                for (NSUInteger i = 0; i < abSlots.count; ++i) {
+                    NSRect r1 = [abSlots[i] convertRect:abSlots[i].bounds toView:gvc.view];
+                    for (NSUInteger j = i + 1; j < abSlots.count; ++j) {
+                        NSRect r2 = [abSlots[j] convertRect:abSlots[j].bounds toView:gvc.view];
+                        NSRect inter = NSIntersectionRect(r1, r2);
+                        if (inter.size.width > 1.0 && inter.size.height > 1.0) abOverlap = YES;
+                    }
+                }
+                CK(!abOverlap && abSlots.count == 4,
+                   [[NSString stringWithFormat:@"B13a_%d A/B 槽位无几何重叠", (int)w] UTF8String], @"");
+
+                BOOL controlsFit = YES, controlsOverlap = NO;
+                for (NSView *slot in abSlots) {
+                    NSMutableArray<NSView *> *controls = [NSMutableArray array];
+                    for (NSView *child in slot.subviews) if ([child isKindOfClass:NSControl.class]) [controls addObject:child];
+                    for (NSUInteger i = 0; i < controls.count; ++i) {
+                        NSRect r = controls[i].frame;
+                        if (NSIsEmptyRect(r) || !NSContainsRect(NSInsetRect(slot.bounds, -1, -1), r)) controlsFit = NO;
+                        for (NSUInteger j = i + 1; j < controls.count; ++j) {
+                            NSRect intersection = NSIntersectionRect(r, controls[j].frame);
+                            if (NSWidth(intersection) > 1 && NSHeight(intersection) > 1) controlsOverlap = YES;
+                        }
+                    }
+                }
+                CK(controlsFit && !controlsOverlap, [[NSString stringWithFormat:@"B13c_%d slot controls fit without overlap", (int)w] UTF8String], @"");
+
+                // 2) 隐藏页不占位（当前 ab 激活时，eq 与 monitor 均 hidden）
+                CK(panelAB && !panelAB.hidden && panelEQ && panelEQ.hidden && panelMon && panelMon.hidden &&
+                   [panelAB.superview isKindOfClass:NSStackView.class] && ((NSStackView *)panelAB.superview).detachesHiddenViews,
+                   [[NSString stringWithFormat:@"B13b_%d 隐藏页签处于 hidden（不占位）", (int)w] UTF8String], @"");
+            }
         }
 
         // 不许有跳设置页的入口

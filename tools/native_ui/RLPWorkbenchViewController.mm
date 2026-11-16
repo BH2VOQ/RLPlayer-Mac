@@ -139,10 +139,17 @@ static const NSInteger kABSlotCount = 4;
 // EQ 页签
 @property (nonatomic, strong) NSPopUpButton *eqPresetPopup;
 @property (nonatomic, copy) NSArray<NSString *> *eqPresetNames;
-@property (nonatomic, strong) NSButton *eqOnCheck;
-@property (nonatomic, strong) NSButton *eqBypass;
+@property (nonatomic, strong) NSTextField *eqExtLabel;
+@property (nonatomic, assign) BOOL peqBypassed;
 @property (nonatomic, strong) RLPEqualizerView *eqView;
 @property (nonatomic, strong) NSLayoutConstraint *eqHeightConstraint;
+
+// A/B 响应式网格
+@property (nonatomic, strong) NSStackView *abGridStack;
+@property (nonatomic, strong) NSStackView *abRow1;
+@property (nonatomic, strong) NSStackView *abRow2;
+@property (nonatomic, strong) NSMutableArray<NSView *> *abSlotCards;
+@property (nonatomic, assign) BOOL abCompact;
 
 // 音质监控页签
 @property (nonatomic, strong) NSStackView *monitorRowsStack;
@@ -234,6 +241,7 @@ static const NSInteger kABSlotCount = 4;
     self.stack.alignment = NSLayoutAttributeLeading;
     self.stack.spacing = 12;
     self.stack.edgeInsets = NSEdgeInsetsMake(6, 20, 20, 20);
+    self.stack.detachesHiddenViews = YES;
     self.stack.translatesAutoresizingMaskIntoConstraints = NO;
     self.scroll.documentView = self.stack;
 
@@ -260,10 +268,22 @@ static const NSInteger kABSlotCount = 4;
                                              selector:@selector(onViewFrameChanged:)
                                                  name:NSViewFrameDidChangeNotification
                                                object:self.view];
+    [[NSNotificationCenter defaultCenter] addObserver:self
+                                             selector:@selector(onExternalSettingsChanged:)
+                                                 name:RLPSettingsChangedNotification
+                                               object:nil];
 }
 
 - (void)dealloc {
     [[NSNotificationCenter defaultCenter] removeObserver:self];
+}
+
+- (void)onExternalSettingsChanged:(NSNotification *)note {
+    if (note.object == self) return;
+    if (![RLPCoreClient shared].started) return;
+    [self reloadSettings];
+    [self reloadEqPresets];
+    [self.eqView reload];
 }
 
 - (void)onViewFrameChanged:(NSNotification *)note {
@@ -282,6 +302,25 @@ static const NSInteger kABSlotCount = 4;
             self.rackStack.orientation = want;
             self.rackStack.distribution = narrow ? NSStackViewDistributionFill : NSStackViewDistributionFillEqually;
             self.rackStack.alignment = narrow ? NSLayoutAttributeLeading : NSLayoutAttributeTop;
+        }
+    }
+    if (self.abRow1 && self.abRow2 && self.abSlotCards.count == 4) {
+        const BOOL compact = (w > 1.0 && w < 760.0);
+        if (compact != self.abCompact) {
+            self.abCompact = compact;
+            for (NSView *c in self.abSlotCards) {
+                [c removeFromSuperview];
+            }
+            if (compact) {
+                [self.abRow1 addArrangedSubview:self.abSlotCards[0]];
+                [self.abRow1 addArrangedSubview:self.abSlotCards[1]];
+                [self.abRow2 addArrangedSubview:self.abSlotCards[2]];
+                [self.abRow2 addArrangedSubview:self.abSlotCards[3]];
+                self.abRow2.hidden = NO;
+            } else {
+                for (NSView *c in self.abSlotCards) [self.abRow1 addArrangedSubview:c];
+                self.abRow2.hidden = YES;
+            }
         }
     }
 }
@@ -609,6 +648,7 @@ static const NSInteger kABSlotCount = 4;
     self.panelAB.orientation = NSUserInterfaceLayoutOrientationVertical;
     self.panelAB.alignment = NSLayoutAttributeLeading;
     self.panelAB.spacing = 12;
+    self.panelAB.detachesHiddenViews = YES;
     self.panelAB.identifier = @"wb.panel.ab";
     self.panelAB.translatesAutoresizingMaskIntoConstraints = NO;
     [self addFullWidth:self.panelAB toStack:self.stack height:0];
@@ -617,6 +657,7 @@ static const NSInteger kABSlotCount = 4;
     self.panelEQ.orientation = NSUserInterfaceLayoutOrientationVertical;
     self.panelEQ.alignment = NSLayoutAttributeLeading;
     self.panelEQ.spacing = 12;
+    self.panelEQ.detachesHiddenViews = YES;
     self.panelEQ.identifier = @"wb.panel.eq";
     self.panelEQ.hidden = YES;
     self.panelEQ.translatesAutoresizingMaskIntoConstraints = NO;
@@ -626,6 +667,7 @@ static const NSInteger kABSlotCount = 4;
     self.panelMonitor.orientation = NSUserInterfaceLayoutOrientationVertical;
     self.panelMonitor.alignment = NSLayoutAttributeLeading;
     self.panelMonitor.spacing = 12;
+    self.panelMonitor.detachesHiddenViews = YES;
     self.panelMonitor.identifier = @"wb.panel.monitor";
     self.panelMonitor.hidden = YES;
     self.panelMonitor.translatesAutoresizingMaskIntoConstraints = NO;
@@ -681,10 +723,24 @@ static const NSInteger kABSlotCount = 4;
     [note setContentCompressionResistancePriority:NSLayoutPriorityDefaultLow forOrientation:NSLayoutConstraintOrientationHorizontal];
     [inner addArrangedSubview:note];
 
-    NSStackView *row = [[NSStackView alloc] init];
-    row.orientation = NSUserInterfaceLayoutOrientationHorizontal;
-    row.distribution = NSStackViewDistributionFillEqually;
-    row.spacing = 8;
+    self.abGridStack = [[NSStackView alloc] init];
+    self.abGridStack.orientation = NSUserInterfaceLayoutOrientationVertical;
+    self.abGridStack.alignment = NSLayoutAttributeLeading;
+    self.abGridStack.spacing = 8;
+    self.abGridStack.detachesHiddenViews = YES;
+
+    self.abRow1 = [[NSStackView alloc] init];
+    self.abRow1.orientation = NSUserInterfaceLayoutOrientationHorizontal;
+    self.abRow1.distribution = NSStackViewDistributionFillEqually;
+    self.abRow1.spacing = 8;
+
+    self.abRow2 = [[NSStackView alloc] init];
+    self.abRow2.orientation = NSUserInterfaceLayoutOrientationHorizontal;
+    self.abRow2.distribution = NSStackViewDistributionFillEqually;
+    self.abRow2.spacing = 8;
+    self.abRow2.hidden = YES;
+
+    self.abSlotCards = [NSMutableArray array];
     NSArray *names = @[@"A", @"B", @"C", @"D"];
     for (NSInteger i = 0; i < kABSlotCount; ++i) {
         NSView *slot = [[NSView alloc] initWithFrame:NSZeroRect];
@@ -731,10 +787,15 @@ static const NSInteger kABSlotCount = 4;
         ]];
         [self.abButtons addObject:pick];
         [self.abSummaries addObject:sum];
-        [row addArrangedSubview:slot];
+        [self.abSlotCards addObject:slot];
+        [self.abRow1 addArrangedSubview:slot];
     }
-    [inner addArrangedSubview:row];
-    [row.widthAnchor constraintEqualToAnchor:inner.widthAnchor constant:-28].active = YES;
+    [self.abGridStack addArrangedSubview:self.abRow1];
+    [self.abGridStack addArrangedSubview:self.abRow2];
+    [self.abRow1.widthAnchor constraintEqualToAnchor:self.abGridStack.widthAnchor].active = YES;
+    [self.abRow2.widthAnchor constraintEqualToAnchor:self.abGridStack.widthAnchor].active = YES;
+    [inner addArrangedSubview:self.abGridStack];
+    [self.abGridStack.widthAnchor constraintEqualToAnchor:inner.widthAnchor constant:-28].active = YES;
     [self addFullWidth:card toStack:self.panelAB height:0];
 }
 
@@ -986,7 +1047,7 @@ static const NSInteger kABSlotCount = 4;
             [self_ reloadStatus];
             [self_ reloadEqPresets];
             [self_.eqView reload];
-            [[NSNotificationCenter defaultCenter] postNotificationName:@"RLPSettingsChangedNotification" object:nil];
+            [[NSNotificationCenter defaultCenter] postNotificationName:RLPSettingsChangedNotification object:self_];
             [self_ reloadProfiles];
         } else {
             NSString *why = [json[@"error"] isKindOfClass:[NSString class]] ? json[@"error"] : @"";
@@ -1401,6 +1462,7 @@ static const NSInteger kABSlotCount = 4;
 
     self.dsdSeg = [NSSegmentedControl segmentedControlWithLabels:@[@"PCM", @"DSD64", @"128", @"256", @"512"]
         trackingMode:NSSegmentSwitchTrackingSelectOne target:self action:@selector(onDsdChanged:)];
+    self.dsdSeg.identifier = @"wb.dsd";
     [self.dsdSeg setContentCompressionResistancePriority:NSLayoutPriorityDefaultLow forOrientation:NSLayoutConstraintOrientationHorizontal];
     [col addArrangedSubview:self.dsdSeg];
 
@@ -1557,10 +1619,13 @@ static const NSInteger kABSlotCount = 4;
     head.alignment = NSLayoutAttributeCenterY;
     head.spacing = 10;
     NSTextField *ti = [self sectionTitle:RLPTr(@"均衡（20 段 PEQ · 推子板 + 单段检查器 + OPRA）")];
+    ti.lineBreakMode = NSLineBreakByTruncatingTail;
+    [ti setContentCompressionResistancePriority:NSLayoutPriorityDefaultLow forOrientation:NSLayoutConstraintOrientationHorizontal];
 
-    self.eqOnCheck = [NSButton checkboxWithTitle:RLPTr(@"EQ 开") target:self action:@selector(onEqOnChanged:)];
-    self.eqOnCheck.identifier = @"wb.eqon";
-    self.eqOnCheck.font = t.small;
+    self.eqExtLabel = RLPLabel(RLPTr(@"外部 EQ：未加载"), t.small, t.mut);
+    self.eqExtLabel.identifier = @"wb.eq.extpath";
+    self.eqExtLabel.lineBreakMode = NSLineBreakByTruncatingMiddle;
+    [self.eqExtLabel setContentCompressionResistancePriority:NSLayoutPriorityDefaultLow forOrientation:NSLayoutConstraintOrientationHorizontal];
 
     self.eqPresetPopup = [[NSPopUpButton alloc] initWithFrame:NSZeroRect pullsDown:NO];
     self.eqPresetPopup.target = self;
@@ -1569,15 +1634,10 @@ static const NSInteger kABSlotCount = 4;
     self.eqPresetPopup.font = t.small;
     [self.eqPresetPopup addItemWithTitle:RLPTr(@"加载预设…")];
 
-    self.eqBypass = [NSButton buttonWithTitle:RLPTr(@"旁路 EQ") target:self action:@selector(onEqBypass:)];
-    self.eqBypass.bezelStyle = NSBezelStyleRounded;
-    self.eqBypass.font = t.small;
-
     [head addArrangedSubview:ti];
     [head addArrangedSubview:[[NSView alloc] init]];
-    [head addArrangedSubview:self.eqOnCheck];
+    [head addArrangedSubview:self.eqExtLabel];
     [head addArrangedSubview:self.eqPresetPopup];
-    [head addArrangedSubview:self.eqBypass];
     [inner addArrangedSubview:head];
     [head.widthAnchor constraintEqualToAnchor:inner.widthAnchor constant:-28].active = YES;
 
@@ -1933,7 +1993,7 @@ static const NSInteger kABSlotCount = 4;
 - (void)onDsdChanged:(NSSegmentedControl *)sender {
     NSArray *vals = @[@"0", @"64", @"128", @"256", @"512"];
     const NSInteger i = sender.selectedSegment;
-    if (i >= 0 && i < (NSInteger)vals.count) [self postSettings:@{@"dsd": vals[i]}];
+    if (i >= 0 && i < (NSInteger)vals.count) [self postSettings:@{@"dsd": vals[i], @"dsdnative": @"0"}];
 }
 - (void)onDeviceChanged:(NSPopUpButton *)sender {
     NSDictionary *d = sender.selectedItem.representedObject;
@@ -1984,6 +2044,7 @@ static const NSInteger kABSlotCount = 4;
             self_.statusMessage.stringValue = saved;
             RLPToast(saved);
             [self_ reloadSettings];
+            [[NSNotificationCenter defaultCenter] postNotificationName:RLPSettingsChangedNotification object:self_];
         } else {
             NSString *err = [json[@"error"] isKindOfClass:[NSString class]] ? json[@"error"] : RLPTr(@"应用失败");
             self_.statusMessage.stringValue = err;
@@ -2000,12 +2061,14 @@ static const NSInteger kABSlotCount = 4;
     [[RLPCoreClient shared] getJSON:@"/api/peq" completion:^(NSDictionary * _Nullable json) {
         __typeof__(self) self_ = weakSelf;
         if (!self_) return;
+        self_.peqBypassed = [json[@"bypass"] boolValue];
         NSArray *names = [json[@"presets"] isKindOfClass:[NSArray class]] ? json[@"presets"] : @[];
         self_.eqPresetNames = names;
         [self_.eqPresetPopup removeAllItems];
         [self_.eqPresetPopup addItemWithTitle:RLPTr(@"加载预设…")];
         for (id n in names) if ([n isKindOfClass:[NSString class]]) [self_.eqPresetPopup addItemWithTitle:n];
         [self_.eqPresetPopup selectItemAtIndex:0];
+        [self_ refreshChain];
     }];
 }
 
@@ -2020,9 +2083,12 @@ static const NSInteger kABSlotCount = 4;
         __typeof__(self) self_ = weakSelf;
         if (!self_) return;
         if (json && [json[@"ok"] boolValue]) {
+            self_.peqBypassed = [json[@"bypass"] boolValue];
             RLPToast([NSString stringWithFormat:@"%@ %@", RLPTr(@"已加载"), name]);
             [self_.eqView reload];
             [self_ reloadSettings];
+            [self_ refreshChain];
+            [[NSNotificationCenter defaultCenter] postNotificationName:RLPSettingsChangedNotification object:self_];
         } else {
             RLPToast([json[@"error"] isKindOfClass:[NSString class]] ? json[@"error"] : RLPTr(@"加载失败"));
         }
@@ -2030,26 +2096,26 @@ static const NSInteger kABSlotCount = 4;
     }];
 }
 
-- (void)onEqOnChanged:(NSButton *)sender {
-    const BOOL want = sender.state == NSControlStateValueOn;
-    NSString *cur = [self str:@"eq" def:@""];
-    if (want && !cur.length) {
-        RLPToast(RLPTr(@"还没有 EQ 文件：请先加载 PEQ 预设或 OPRA"));
-        sender.state = NSControlStateValueOff;
-        return;
-    }
-    [self postSettings:@{@"eq": want ? cur : @""}];
-}
-
+/// 切换 20 段 PEQ 旁路（读写 /api/peq 的 bypass，绝不写 settings.eq=0/1 破坏外部 EQ 文件路径）。
 - (void)onEqBypass:(id)sender {
-    (void)sender;
-    const BOOL on = [[self str:@"eq" def:@"0"] isEqualToString:@"1"];
-    [self postSettings:@{@"eq": on ? @"0" : @"1"}];
-}
-
-- (void)syncEqOnCheck {
-    const BOOL on = [self str:@"eq" def:@""].length > 0;
-    self.eqOnCheck.state = on ? NSControlStateValueOn : NSControlStateValueOff;
+    BOOL wantBypass = !self.peqBypassed;
+    if ([sender isKindOfClass:[NSButton class]] && [((NSButton *)sender).identifier isEqualToString:@"wb.node.eq.on"]) {
+        wantBypass = (((NSButton *)sender).state != NSControlStateValueOn);
+    }
+    NSString *body = [NSString stringWithFormat:@"bypass=%d", wantBypass ? 1 : 0];
+    __weak __typeof__(self) weakSelf = self;
+    [[RLPCoreClient shared] postJSON:@"/api/peq" body:body completion:^(NSDictionary * _Nullable json) {
+        __typeof__(self) self_ = weakSelf;
+        if (!self_) return;
+        if (json && [json[@"ok"] boolValue]) {
+            self_.peqBypassed = [json[@"bypass"] boolValue];
+            [self_.eqView reload];
+            [self_ refreshChain];
+            [[NSNotificationCenter defaultCenter] postNotificationName:RLPSettingsChangedNotification object:self_];
+        } else {
+            RLPToast(RLPTr(@"PEQ 旁路切换失败"));
+        }
+    }];
 }
 
 #pragma mark - 信号链详情弹窗与节点弹层
@@ -2177,10 +2243,14 @@ static const NSInteger kABSlotCount = 4;
         [s addArrangedSubview:[self inlineLabel:RLPTr(@"滤波（1x / Nx 写的键不同）")]];
         [s addArrangedSubview:filtPop];
     } else if ([key isEqualToString:@"eq"]) {
-        NSButton *on = [NSButton checkboxWithTitle:RLPTr(@"EQ 开") target:self action:@selector(onEqOnToggleFromNode:)];
+        NSButton *on = [NSButton checkboxWithTitle:RLPTr(@"20 段 PEQ 启用") target:self action:@selector(onEqBypass:)];
         on.identifier = @"wb.node.eq.on";
-        on.state = [self str:@"eq" def:@""].length ? NSControlStateValueOn : NSControlStateValueOff;
+        on.state = self.peqBypassed ? NSControlStateValueOff : NSControlStateValueOn;
         [s addArrangedSubview:on];
+        NSString *extEq = [self str:@"eq" def:@""];
+        if (extEq.length && ![extEq isEqualToString:@"0"]) {
+            [s addArrangedSubview:[self inlineLabel:[NSString stringWithFormat:@"%@%@", RLPTr(@"外部 EQ："), extEq]]];
+        }
     } else if ([key isEqualToString:@"ir"]) {
         NSButton *off = [NSButton buttonWithTitle:RLPTr(@"关闭卷积（清空 IR）") target:self action:@selector(onNodeIrOff:)];
         off.bezelStyle = NSBezelStyleRounded;
@@ -2196,7 +2266,8 @@ static const NSInteger kABSlotCount = 4;
         NSArray *vals = @[@"0", @"64", @"128", @"256", @"512"];
         NSArray *titles = @[RLPTr(@"PCM 输出（关）"), @"DSD64", @"DSD128", @"DSD256", @"DSD512"];
         NSPopUpButton *p = [self popoverPopupWithValues:vals titles:titles action:@selector(onNodeDsd:)];
-        NSInteger i = [vals indexOfObject:[self str:@"dsd" def:@"0"]];
+        NSString *dsdStr = [NSString stringWithFormat:@"%ld", (long)RLPParseDsdRate(self.settings[@"dsd"])];
+        NSInteger i = [vals indexOfObject:dsdStr];
         [p selectItemAtIndex:(i == NSNotFound) ? 0 : i];
         [s addArrangedSubview:p];
     } else if ([key isEqualToString:@"out"]) {
@@ -2230,7 +2301,6 @@ static const NSInteger kABSlotCount = 4;
     return p;
 }
 
-- (void)onEqOnToggleFromNode:(NSButton *)s { [self onEqOnChanged:s]; }
 - (void)onNodeRate:(NSPopUpButton *)s { NSString *v = s.selectedItem.representedObject; if ([v isKindOfClass:[NSString class]]) [self postSettings:@{@"rate": v}]; }
 - (void)onNodeFilter:(NSPopUpButton *)s {
     NSString *n = s.selectedItem.representedObject;
@@ -2241,7 +2311,7 @@ static const NSInteger kABSlotCount = 4;
     [self postSettings:@{(nx ? @"filterNx" : @"filter"): n}];
 }
 - (void)onNodeShaper:(NSPopUpButton *)s { NSString *v = s.selectedItem.representedObject; if ([v isKindOfClass:[NSString class]]) [self postSettings:@{@"shaper": v}]; }
-- (void)onNodeDsd:(NSPopUpButton *)s { NSString *v = s.selectedItem.representedObject; if ([v isKindOfClass:[NSString class]]) [self postSettings:@{@"dsd": v}]; }
+- (void)onNodeDsd:(NSPopUpButton *)s { NSString *v = s.selectedItem.representedObject; if ([v isKindOfClass:[NSString class]]) [self postSettings:@{@"dsd": v, @"dsdnative": @"0"}]; }
 - (void)onNodeBackend:(NSPopUpButton *)s { NSString *v = s.selectedItem.representedObject; if ([v isKindOfClass:[NSString class]]) [self postSettings:@{@"backend": v}]; }
 - (void)onNodeIrOff:(id)s { (void)s; [self postSettings:@{@"ir": @"0"}]; [self.popover close]; }
 
@@ -2269,6 +2339,7 @@ static const NSInteger kABSlotCount = 4;
             self_.statusMessage.stringValue = RLPTr(@"已生效");
             RLPToast(RLPTr(@"已生效"));
             [self_ reloadSettings];
+            [[NSNotificationCenter defaultCenter] postNotificationName:RLPSettingsChangedNotification object:self_];
         } else {
             self_.statusMessage.stringValue = RLPTr(@"保存失败，已保留原值");
             RLPToast(RLPTr(@"保存失败"));
@@ -2293,29 +2364,69 @@ static const NSInteger kABSlotCount = 4;
     if ([self.activeTab isEqualToString:@"monitor"]) [self refreshMonitor];
 }
 
+- (void)selectPopup:(NSPopUpButton *)popup settingKey:(NSString *)key defaultValue:(NSString *)defVal {
+    if (!popup) return;
+    for (NSInteger i = (NSInteger)popup.numberOfItems - 1; i >= 0; --i) {
+        if ([popup itemAtIndex:i].tag == 999) [popup removeItemAtIndex:i];
+    }
+    NSString *val = [self str:key def:@""];
+    NSString *target = val.length ? val : defVal;
+    if (!target.length) return;
+    for (NSInteger i = 0; i < (NSInteger)popup.numberOfItems; ++i) {
+        NSMenuItem *it = [popup itemAtIndex:i];
+        if (([it.representedObject isKindOfClass:[NSString class]] && [(NSString *)it.representedObject isEqualToString:target]) ||
+            [it.title isEqualToString:target]) {
+            [popup selectItemAtIndex:i];
+            return;
+        }
+    }
+    // 未知值 / 非预置值：按真实值新增并选中，绝不显示伪默认。
+    [popup addItemWithTitle:target];
+    NSMenuItem *added = [popup lastItem];
+    added.representedObject = target;
+    added.tag = 999;
+    [popup selectItem:added];
+}
+
 - (void)syncAllControlsFromSettings {
     [self syncOutputControls];
     [self rebuildFilterControls];
     [self refreshChain];
     [self refreshAB];
-    [self syncEqOnCheck];
-    const BOOL eqOn = [[self str:@"eq" def:@"0"] isEqualToString:@"1"];
-    [self.eqBypass setTitle:eqOn ? RLPTr(@"旁路 EQ") : RLPTr(@"启用 EQ")];
+    if (self.eqExtLabel) {
+        NSString *extEq = [self str:@"eq" def:@""];
+        self.eqExtLabel.stringValue = (extEq.length && ![extEq isEqualToString:@"0"])
+            ? [NSString stringWithFormat:@"%@%@", RLPTr(@"外部 EQ："), extEq.lastPathComponent]
+            : RLPTr(@"外部 EQ：未加载");
+    }
 
+    const NSInteger dsdRate = RLPParseDsdRate(self.settings[@"dsd"]);
     NSArray *vals = @[@"0", @"64", @"128", @"256", @"512"];
-    NSInteger idx = [vals indexOfObject:[self str:@"dsd" def:@"0"]];
+    NSString *dsdStr = [NSString stringWithFormat:@"%ld", (long)dsdRate];
+    NSInteger idx = [vals indexOfObject:dsdStr];
     self.dsdSeg.selectedSegment = (idx == NSNotFound) ? 0 : idx;
     [self.shaperPopup selectItemWithTitle:[self str:@"shaper" def:@"auto"]];
     [self.modFamilyPopup selectItemWithTitle:[self str:@"modfamily" def:@"ec"]];
     [self.modOrderPopup selectItemWithTitle:[self str:@"modorder" def:@"7"]];
 
-    const BOOL dsdOn = [self str:@"dsd" def:@"0"].integerValue > 0;
+    const BOOL dsdOn = dsdRate > 0;
     self.modFamilyPopup.enabled = dsdOn;
     self.modOrderPopup.enabled = dsdOn;
 
+    NSString *bk = [self str:@"backend" def:@"coreaudio"];
+    const BOOL isSharedOrRemote = [bk isEqualToString:@"coreaudio-shared"] ||
+                                  [bk isEqualToString:@"upnp"] ||
+                                  [bk isEqualToString:@"null"];
     NSDictionary *d = [self currentDeviceDict];
-    const BOOL hasDop = d && [d[@"dopCarrierRate"] isKindOfClass:[NSNumber class]] && [d[@"dopCarrierRate"] doubleValue] > 0;
+    const BOOL hasDop = !isSharedOrRemote && d &&
+        (([d[@"dopCarrierRate"] isKindOfClass:[NSNumber class]] && [d[@"dopCarrierRate"] doubleValue] > 0) ||
+         [d[@"dop"] boolValue]);
     for (NSInteger i = 1; i < 5; ++i) [self.dsdSeg setEnabled:hasDop forSegment:i];
+
+    [self selectPopup:self.modCutPopup settingKey:@"modcut" defaultValue:@"0"];
+    [self selectPopup:self.ahmBitsPopup settingKey:@"ahmbits" defaultValue:@"6"];
+    [self selectPopup:self.dsdKindPopup settingKey:@"dsdkind" defaultValue:@"fir"];
+    [self selectPopup:self.dsdConvPopup settingKey:@"dsdconv" defaultValue:@"narrow"];
 
     // 同步高级参数控件
     self.twoStageCheck.state = [[self str:@"twostage" def:@"0"] isEqualToString:@"1"] ? NSControlStateValueOn : NSControlStateValueOff;
@@ -2492,15 +2603,21 @@ static const NSInteger kABSlotCount = 4;
     NSDictionary *st = self.status ?: @{};
     NSString *fs = [st[@"inRate"] isKindOfClass:[NSNumber class]] ? [st[@"inRate"] stringValue] : nil;
     NSString *bits = [st[@"bits"] isKindOfClass:[NSNumber class]] ? [st[@"bits"] stringValue] : [self str:@"bits" def:@"—"];
-    const BOOL dsd = [self str:@"dsd" def:@"0"].integerValue > 0;
+    const NSInteger dsdRate = RLPParseDsdRate(s[@"dsd"]);
+    const BOOL dsd = dsdRate > 0;
     NSString *activeFilter = RLPWorkbenchActivePlaybackFilter(s, st, RLPTr(@"默认"));
+    NSString *extEq = [self str:@"eq" def:@""];
+    const BOOL hasExtEq = extEq.length && ![extEq isEqualToString:@"0"];
+    NSString *eqText = hasExtEq
+        ? [NSString stringWithFormat:@"%@ · %@", self.peqBypassed ? RLPTr(@"PEQ 旁路") : RLPTr(@"PEQ 开"), extEq.lastPathComponent]
+        : (self.peqBypassed ? RLPTr(@"旁路") : RLPTr(@"开"));
     NSDictionary *vals = @{
         @"src": fs ? [NSString stringWithFormat:@"%@ Hz / %@ bit", fs, bits] : (dsd ? @"DSD" : @"—"),
         @"resample": [NSString stringWithFormat:@"%@ · %@", [self str:@"rate" def:@"follow"], activeFilter],
-        @"eq": [[self str:@"eq" def:@"0"] isEqualToString:@"1"] ? RLPTr(@"开") : RLPTr(@"旁路"),
+        @"eq": eqText,
         @"ir": [self str:@"ir" def:@"0"],
         @"shaper": dsd ? @"none (DoP)" : [self str:@"shaper" def:@"auto"],
-        @"sdm": dsd ? [NSString stringWithFormat:@"DSD%@ · %@%@", [self str:@"dsd" def:@"0"],
+        @"sdm": dsd ? [NSString stringWithFormat:@"DSD%ld · %@%@", (long)dsdRate,
                        [self str:@"modfamily" def:@"ec"], [self str:@"modorder" def:@"7"]] : @"—",
         @"out": [NSString stringWithFormat:@"%@%@", [self str:@"backend" def:@"coreaudio"],
                  [[self str:@"hogexcl" def:@"1"] isEqualToString:@"1"] ? @" · Hog" : @""],

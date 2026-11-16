@@ -89,6 +89,13 @@ NSViewController *RLPCardController(NSView *card, CGFloat width, CGFloat minHeig
 extern NSNotificationName const RLPOpenAlbumNotification;   // object = album key(NSString)
 extern NSNotificationName const RLPOpenArtistNotification;  // object = artist name(NSString)
 extern NSNotificationName const RLPBackNotification;
+/// 设置/预设/配置档成功保存后的跨页面同步通知（object = 发起保存的控制器，接收方忽略 object == self 防环）。
+extern NSNotificationName const RLPSettingsChangedNotification;
+
+/// 解析设置中的 dsd 值（支持纯数字 "0"/"64"/"256" 与 legacy "dop256"/"nat128"/"native64"）。
+NSInteger RLPParseDsdRate(id _Nullable raw);
+/// 判断文本框是否正在被用户编辑（通知刷新时跳过覆写，避免打断输入）。
+BOOL RLPTextFieldIsEditing(NSTextField * _Nullable tf);
 void RLPRequestOpenAlbum(NSString *albumKey);
 void RLPRequestOpenArtist(NSString *artistName);
 void RLPRequestBack(void);

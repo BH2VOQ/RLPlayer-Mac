@@ -80,6 +80,7 @@
 @property (nonatomic, strong) NSTimer *poll;
 @property (nonatomic, assign) NSUInteger statusEpoch;
 @property (nonatomic, assign) BOOL statusInflight;
+@property (nonatomic, assign) NSUInteger settingsSeq;
 @end
 
 // v3.3.11 `quickStartModel` 的三项能力结论（`/api/preset/caps` 的真实响应派生）。
@@ -105,12 +106,22 @@
                                                  selector:@selector(onPlaybackActionCompleted:)
                                                      name:@"RLPPlaybackActionCompletedNotification"
                                                    object:nil];
+        [[NSNotificationCenter defaultCenter] addObserver:self
+                                                 selector:@selector(onExternalSettingsChanged:)
+                                                     name:RLPSettingsChangedNotification
+                                                   object:nil];
     }
     return self;
 }
 
 - (void)dealloc {
     [[NSNotificationCenter defaultCenter] removeObserver:self];
+}
+
+- (void)onExternalSettingsChanged:(NSNotification *)note {
+    if (note.object == self) return;
+    if (![RLPCoreClient shared].started) return;
+    [self reloadSettings];
 }
 
 - (void)onPlaybackActionCompleted:(NSNotification *)note {
@@ -536,6 +547,15 @@
         }
         [NSLayoutConstraint activateConstraints:self.npQueueConstraints];
     }
+
+    if (self.albumRow && self.albumRow.arrangedSubviews.count > 1) {
+        const NSInteger maxAlbums = MAX(1, (NSInteger)floor((w + 12.0) / 116.0));
+        NSArray<NSView *> *items = self.albumRow.arrangedSubviews;
+        for (NSUInteger i = 0; i < items.count; ++i) {
+            if ([items[i] isKindOfClass:[NSTextField class]]) continue; // 空态提示标签不隐藏
+            items[i].hidden = ((NSInteger)i >= maxAlbums);
+        }
+    }
 }
 
 #pragma mark - ③ 专辑行
@@ -557,6 +577,7 @@
     self.albumRow = [[NSStackView alloc] init];
     self.albumRow.orientation = NSUserInterfaceLayoutOrientationHorizontal;
     self.albumRow.spacing = 12;
+    self.albumRow.detachesHiddenViews = YES;
     self.albumRow.translatesAutoresizingMaskIntoConstraints = NO;
     [self.stack addArrangedSubview:self.albumRow];
 
@@ -592,12 +613,13 @@
     [self.stack addArrangedSubview:c];
     [NSLayoutConstraint activateConstraints:@[
         [c.widthAnchor constraintEqualToAnchor:self.stack.widthAnchor constant:-48],
-        [c.heightAnchor constraintEqualToConstant:64],
+        [c.heightAnchor constraintGreaterThanOrEqualToConstant:64],
         [self.libDesc.leadingAnchor constraintEqualToAnchor:c.leadingAnchor constant:14],
         [self.libDesc.topAnchor constraintEqualToAnchor:c.topAnchor constant:12],
         [self.libDesc.trailingAnchor constraintEqualToAnchor:more.leadingAnchor constant:-12],
         [self.libButton.leadingAnchor constraintEqualToAnchor:c.leadingAnchor constant:14],
         [self.libButton.topAnchor constraintEqualToAnchor:self.libDesc.bottomAnchor constant:6],
+        [self.libButton.bottomAnchor constraintLessThanOrEqualToAnchor:c.bottomAnchor constant:-10],
         [more.trailingAnchor constraintEqualToAnchor:c.trailingAnchor constant:-14],
         [more.centerYAnchor constraintEqualToAnchor:c.centerYAnchor],
         [more.widthAnchor constraintEqualToConstant:72],
@@ -813,6 +835,7 @@
         ? RLPTr(@"正在保存设置（下一首或重新播放时生效）…")
         : RLPTr(@"正在应用…");
     NSString *path = [NSString stringWithFormat:@"/api/preset/apply?profile=%@", RLPEnc(profile)];
+    ++self.settingsSeq;
     __weak __typeof__(self) weakSelf = self;
     [[RLPCoreClient shared] postJSON:path body:nil completion:^(NSDictionary * _Nullable json) {
         __typeof__(self) self_ = weakSelf;
@@ -826,6 +849,8 @@
             self_.presetNotes.stringValue = fb[@"notes"];
             RLPToast(fb[@"toast"]);
             [self_ reloadSettings];
+            [[NSNotificationCenter defaultCenter] postNotificationName:RLPSettingsChangedNotification
+                                                                object:self_];
         } else {
             NSString *err = [json[@"error"] isKindOfClass:[NSString class]] ? json[@"error"] : RLPTr(@"应用失败");
             self_.presetNotes.stringValue = err;
@@ -1074,6 +1099,7 @@
 /// 写设置：一次 POST 多个键，然后**读回校验**（不维护第二套状态）。
 - (void)postSettings:(NSDictionary<NSString *, NSString *> *)kv {
     if (!kv.count) return;
+    ++self.settingsSeq;
     NSMutableArray *parts = [NSMutableArray array];
     for (NSString *k in kv) [parts addObject:[NSString stringWithFormat:@"%@=%@", k, RLPEnc(kv[k])]];
     NSString *body = [parts componentsJoinedByString:@"&"];
@@ -1084,6 +1110,8 @@
         if (json && [json[@"ok"] boolValue]) {
             RLPToast(RLPTr(@"已生效"));
             [self_ reloadSettings];
+            [[NSNotificationCenter defaultCenter] postNotificationName:RLPSettingsChangedNotification
+                                                                object:self_];
         } else {
             RLPToast(RLPTr(@"保存失败"));
         }
@@ -1235,10 +1263,11 @@
 }
 
 - (void)reloadSettings {
+    const NSUInteger seq = ++self.settingsSeq;
     __weak __typeof__(self) weakSelf = self;
     [[RLPCoreClient shared] getJSON:@"/api/settings" completion:^(NSDictionary * _Nullable json) {
         __typeof__(self) self_ = weakSelf;
-        if (!self_) return;
+        if (!self_ || seq != self_.settingsSeq) return;
         // ⚠️ /api/settings 的值在 **kv** 子对象里（与设置页同一口径）。
         // 直接读顶层会全部取不到 ⟹ 静默回落默认值，界面显示与真实设置脱节。
         self_.settings = [json[@"kv"] isKindOfClass:[NSDictionary class]] ? json[@"kv"] : @{};

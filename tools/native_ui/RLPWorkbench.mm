@@ -57,14 +57,16 @@ NSString *RLPABSlotSummary(NSDictionary<NSString *, NSString *> *snapshot) {
     NSMutableArray *p = [NSMutableArray array];
     NSString *f = snapshot[@"filter"];
     if (f.length) [p addObject:f];
-    NSString *dsd = snapshot[@"dsd"];
-    if (dsd.length && dsd.integerValue > 0) [p addObject:[NSString stringWithFormat:@"DSD%@", dsd]];
+    NSInteger dsdRate = RLPParseDsdRate(snapshot[@"dsd"]);
+    if (dsdRate > 0) [p addObject:[NSString stringWithFormat:@"DSD%ld", (long)dsdRate]];
     else {
         NSString *rate = snapshot[@"rate"];
         if (rate.length) [p addObject:([rate isEqualToString:@"follow"] ? RLPTr(@"跟随源") : [NSString stringWithFormat:@"%@ Hz", rate])];
     }
     NSString *eq = snapshot[@"eq"];
-    if (eq.length) [p addObject:([eq isEqualToString:@"1"] ? RLPTr(@"EQ 开") : RLPTr(@"EQ 关"))];
+    if (eq.length && ![eq isEqualToString:@"0"]) {
+        [p addObject:[NSString stringWithFormat:@"EQ:%@", eq.lastPathComponent]];
+    }
     return p.count ? [p componentsJoinedByString:@" · "] : RLPTr(@"未保存");
 }
 
@@ -164,7 +166,7 @@ NSString *RLPWorkbenchActivePlaybackFilter(NSDictionary *settings, NSDictionary 
         if ([v respondsToSelector:@selector(doubleValue)]) fs = [v doubleValue];
     }
     // Match the backend PCM/SDM slot fallback order; the editor slot is unrelated.
-    if ([Str(settings, @"dsd") integerValue] >= 64) {
+    if (RLPParseDsdRate(settings[@"dsd"]) >= 64) {
         NSString *sdm1 = Str(settings, @"sdmfilt") ?: @"";
         NSString *sdmNx = Str(settings, @"sdmfiltnx") ?: @"";
         if (fs >= 88200.0) {
@@ -180,8 +182,7 @@ NSString *RLPWorkbenchActivePlaybackFilter(NSDictionary *settings, NSDictionary 
 }
 
 static BOOL IsDsdOut(NSDictionary *s) {
-    NSString *d = Str(s, @"dsd");
-    return d.length && d.integerValue > 0;
+    return RLPParseDsdRate(s[@"dsd"]) > 0;
 }
 
 BOOL RLPChainNodeApplies(NSString *node, NSDictionary *settings) {
@@ -209,8 +210,7 @@ NSString *RLPChainNodeDisabledReason(NSString *node, NSDictionary *settings) {
         return nil;
     }
     if ([node isEqualToString:@"eq"]) {
-        NSString *eq = Str(settings, @"eq");
-        if (eq.length && ![eq isEqualToString:@"1"]) return RLPTr(@"EQ 已旁路");
+        // settings.eq 是外部 EQ 文件路径，并非 20 段 PEQ 开关；PEQ 开关由 /api/peq 的 bypass 控制。
         return nil;
     }
     if ([node isEqualToString:@"ir"]) {
@@ -227,9 +227,9 @@ NSString *RLPProfileSummary(NSDictionary *profile) {
     NSMutableArray<NSString *> *p = [NSMutableArray array];
     NSString *f = keys[@"filter"];
     if ([f isKindOfClass:[NSString class]] && f.length) [p addObject:f];
-    NSString *dsd = keys[@"dsd"];
-    if ([dsd isKindOfClass:[NSString class]] && dsd.integerValue > 0) {
-        [p addObject:[NSString stringWithFormat:@"DSD%@", dsd]];
+    NSInteger dsdRate = RLPParseDsdRate(keys[@"dsd"]);
+    if (dsdRate > 0) {
+        [p addObject:[NSString stringWithFormat:@"DSD%ld", (long)dsdRate]];
     } else {
         NSString *rate = keys[@"rate"];
         if ([rate isKindOfClass:[NSString class]] && rate.length)

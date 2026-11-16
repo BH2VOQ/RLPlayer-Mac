@@ -271,6 +271,9 @@ static NSStackView *RLPSRow(NSString *label, NSView *control, NSString *hint, RL
 // ---- 输出页（web data-g=out）----
 @property (nonatomic, strong) NSPopUpButton *backendPopup;
 @property (nonatomic, strong) NSButton *bpFixBtn;
+@property (nonatomic, copy) NSString *savedUpnpDev;
+@property (nonatomic, copy) NSArray *upnpDevices;
+@property (nonatomic, assign) NSUInteger settingsSeq;
 @property (nonatomic, strong) NSView *upnpWrap;
 /// 「目标渲染器」整行字段容器：后端不是 upnp 时连标签一起隐藏（web #sp_upnpwrap 的 display:none）。
 @property (nonatomic, strong) NSView *upnpField;
@@ -513,8 +516,8 @@ static NSStackView *RLPSRow(NSString *label, NSView *control, NSString *hint, RL
     // U16：工作台应用命名配置档后，设置页的读数必须跟着重读（同一进程内的另一份视图）。
     // 走既有通知机制，不让两个页面互相持有；observer 在 dealloc 统一移除（见上）。
     [[NSNotificationCenter defaultCenter] addObserver:self
-                                             selector:@selector(onWorkbenchProfileApplied:)
-                                                 name:@"RLPSettingsChangedNotification"
+                                             selector:@selector(onExternalSettingsChanged:)
+                                                 name:RLPSettingsChangedNotification
                                                object:nil];
 
     self.groupTabs = [NSSegmentedControl segmentedControlWithLabels:@[RLPTr(@"通用"), RLPTr(@"音频处理")]
@@ -548,6 +551,8 @@ static NSStackView *RLPSRow(NSString *label, NSView *control, NSString *hint, RL
     self.tabs.target = self;
     self.tabs.action = @selector(onTabChanged:);
     self.tabs.translatesAutoresizingMaskIntoConstraints = NO;
+    [self.tabs setContentCompressionResistancePriority:NSLayoutPriorityDefaultLow
+                                        forOrientation:NSLayoutConstraintOrientationHorizontal];
     [host addSubview:self.tabs];
     [self rebuildTabs];
     [self syncModeHintVisibility];
@@ -963,6 +968,7 @@ static NSString *RLPControlIdentifier(NSString *key) {
       completion:(void (^_Nullable)(BOOL ok))completion {
     if (!key.length) return;
     [self.loadedKeys addObject:key];
+    ++self.settingsSeq;
     NSString *body = [NSString stringWithFormat:@"%@=%@", key, RLPEnc(value ?: @"")];
     __weak __typeof__(self) weakSelf = self;
     [[RLPCoreClient shared] postJSON:@"/api/settings" body:body completion:^(NSDictionary * _Nullable json) {
@@ -971,6 +977,8 @@ static NSString *RLPControlIdentifier(NSString *key) {
         const BOOL ok = (json && [json[@"ok"] boolValue]);
         if (ok) {
             self_.statusLine.stringValue = [NSString stringWithFormat:@"%@ %@ = %@", RLPTr(@"已保存"), key, value];
+            [[NSNotificationCenter defaultCenter] postNotificationName:RLPSettingsChangedNotification
+                                                                object:self_];
         } else {
             NSString *err = [json[@"error"] isKindOfClass:[NSString class]] ? json[@"error"] : RLPTr(@"保存失败");
             self_.statusLine.stringValue = err;
@@ -980,17 +988,38 @@ static NSString *RLPControlIdentifier(NSString *key) {
     }];
 }
 
-/// 一次提交多个键（后端合并写）。用于「bit-perfect 直通」这种一组键同时改的场景。
+/// 一次提交多个键（后端合并写）。用于「bit-perfect 直通」与 DSD+dsdnative 等一组键同时改的场景。
 - (void)postKeys:(NSDictionary<NSString *, NSString *> *)kv {
+    [self postKeys:kv completion:nil];
+}
+
+- (void)postKeys:(NSDictionary<NSString *, NSString *> *)kv
+      completion:(void (^_Nullable)(BOOL ok))completion {
     NSMutableArray<NSString *> *parts = [NSMutableArray array];
     for (NSString *k in kv) {
         [self.loadedKeys addObject:k];
         [parts addObject:[NSString stringWithFormat:@"%@=%@", k, RLPEnc(kv[k] ?: @"")]];
     }
     if (!parts.count) return;
+    ++self.settingsSeq;
+    __weak __typeof__(self) weakSelf = self;
     [[RLPCoreClient shared] postJSON:@"/api/settings"
                                 body:[parts componentsJoinedByString:@"&"]
-                          completion:nil];
+                          completion:^(NSDictionary * _Nullable json) {
+        __typeof__(self) self_ = weakSelf;
+        if (!self_) return;
+        const BOOL ok = (json && [json[@"ok"] boolValue]);
+        if (ok) {
+            self_.statusLine.stringValue = RLPTr(@"已保存");
+            [[NSNotificationCenter defaultCenter] postNotificationName:RLPSettingsChangedNotification
+                                                                object:self_];
+        } else {
+            NSString *err = [json[@"error"] isKindOfClass:[NSString class]] ? json[@"error"] : RLPTr(@"保存失败");
+            self_.statusLine.stringValue = err;
+            RLPToast(err);
+        }
+        if (completion) completion(ok);
+    }];
 }
 
 /// 状态行文字（不写假话）。
@@ -1176,6 +1205,7 @@ static NSString *RLPControlIdentifier(NSString *key) {
 
 - (void)applyKV:(NSDictionary *)kv toTextField:(NSTextField *)tf key:(NSString *)key {
     if (!tf) return;
+    if (RLPTextFieldIsEditing(tf)) return;
     id v = kv[key];
     if ([v isKindOfClass:[NSString class]]) {
         tf.stringValue = v;
@@ -1234,33 +1264,88 @@ static NSString *RLPControlIdentifier(NSString *key) {
     }
 }
 
-/// 反解 kv.dsd 回三个控件。值域见 web applyDsd / dsdRateOf / dsdPackOf（ui_script.h:8958-8964）：
-///   0          ⟹ PCM（比特率回显默认 256、封装 DoP，web 同口径）
-///   dopNN / nativeNN ⟹ DSD + 对应封装 + NN 档
-///   裸数字 NN（上一版原生的写法）⟹ 按 DSD 处理，封装默认 DoP；不认识的档位按 256。
+/// 反解 kv.dsd 回三个控件（支持纯数字 0/64/128/256/512/1024 及 legacy 前缀 dopNN/natNN/nativeNN）。
+/// macOS 只提供 DoP，不提供 Native。
 - (void)applyDsdPersistValue:(id)raw {
-    NSString *v = [raw isKindOfClass:[NSString class]] ? (NSString *)raw
-                 : ([raw respondsToSelector:@selector(stringValue)] ? [raw stringValue] : @"");
-    const BOOL isDsd = v.length && ![v isEqualToString:@"0"];
+    const NSInteger rate = RLPParseDsdRate(raw);
+    const BOOL isDsd = (rate > 0);
     NSString *mode = isDsd ? @"dsd" : @"pcm";
     if ([self.outModePopup itemWithTitle:mode]) [self.outModePopup selectItemWithTitle:mode];
 
-    NSString *pk = ([v.lowercaseString hasPrefix:@"nat"]) ? @"native" : @"dop";
-    if ([self.dsdPackPopup itemWithTitle:pk]) [self.dsdPackPopup selectItemWithTitle:pk];
-    else if ([self.dsdPackPopup itemWithTitle:@"dop"]) [self.dsdPackPopup selectItemWithTitle:@"dop"];
+    if ([self.dsdPackPopup itemWithTitle:@"dop"]) [self.dsdPackPopup selectItemWithTitle:@"dop"];
 
-    // 末尾连续数字 = 目标档；dop/nat 前缀不参与档位解析（旧裸数字也走这里）。
-    NSMutableString *tail = [NSMutableString string];
-    for (NSInteger i = (NSInteger)v.length - 1; i >= 0; --i) {
-        unichar c = [v characterAtIndex:(NSUInteger)i];
-        if (c < '0' || c > '9') break;
-        [tail insertString:[NSString stringWithFormat:@"%C", c] atIndex:0];
-    }
-    if (!tail.length) [tail appendString:@"256"];
-    if (![self.dsdRatePopup itemWithTitle:tail]) [tail setString:@"256"];
+    NSString *tail = isDsd ? [NSString stringWithFormat:@"%ld", (long)rate] : @"256";
+    if (![self.dsdRatePopup itemWithTitle:tail]) tail = @"256";
     if ([self.dsdRatePopup itemWithTitle:tail]) [self.dsdRatePopup selectItemWithTitle:tail];
 
     [self updateDsdModeNote];
+}
+
+- (void)selectSavedUpnpDevice {
+    NSString *want = self.savedUpnpDev;
+    if (!want.length || !self.upnpPop) return;
+    for (NSInteger i = 0; i < (NSInteger)self.upnpPop.numberOfItems; ++i) {
+        id ro = [self.upnpPop itemAtIndex:i].representedObject;
+        if ([ro isKindOfClass:[NSString class]] && [(NSString *)ro isEqualToString:want]) {
+            [self.upnpPop selectItemAtIndex:i];
+            return;
+        }
+    }
+}
+
+- (void)applyUpnpDevicesPayload:(NSDictionary *)json {
+    RLPSettingsViewController *self_ = self;
+        NSArray *list = [json[@"devices"] isKindOfClass:[NSArray class]] ? json[@"devices"] : @[];
+        self_.upnpDevices = list;
+        if (self_.upnpPop) {
+            [self_.upnpPop removeAllItems];
+            NSMutableSet<NSString *> *seenIds = [NSMutableSet set];
+            for (id it in list) {
+                if (![it isKindOfClass:[NSDictionary class]]) continue;
+                NSDictionary *d = (NSDictionary *)it;
+                NSString *devId = [d[@"id"] isKindOfClass:NSString.class] ? d[@"id"] : @"";
+                if (!devId.length || [seenIds containsObject:devId]) continue;
+                NSString *name = [d[@"friendlyName"] isKindOfClass:[NSString class]] && [d[@"friendlyName"] length] ? d[@"friendlyName"]
+                               : ([d[@"name"] isKindOfClass:[NSString class]] && [d[@"name"] length] ? d[@"name"]
+                               : ([d[@"host"] isKindOfClass:[NSString class]] && [d[@"host"] length] ? d[@"host"] : devId));
+                NSString *kind = [d[@"kind"] isKindOfClass:[NSString class]] ? d[@"kind"] : @"";
+                NSString *label = kind.length ? [NSString stringWithFormat:@"[%@] %@", [kind isEqualToString:@"airplay"] ? @"AirPlay" : @"UPnP", name] : name;
+                if ([self_.upnpPop itemWithTitle:label]) label = [label stringByAppendingFormat:@" · %@", devId];
+                [self_.upnpPop addItemWithTitle:label];
+                [[self_.upnpPop lastItem] setRepresentedObject:devId];
+                [seenIds addObject:devId];
+            }
+            NSString *saved = self_.savedUpnpDev ?: @"";
+            if (saved.length && ![seenIds containsObject:saved]) {
+                [self_.upnpPop addItemWithTitle:[NSString stringWithFormat:@"%@%@", RLPTr(@"（上次选择 · 离线/需刷新）"), saved]];
+                [[self_.upnpPop lastItem] setRepresentedObject:saved];
+            }
+            if (self_.upnpPop.numberOfItems == 0) {
+                [self_.upnpPop addItemWithTitle:RLPTr(@"（未发现 UPnP 渲染器）")];
+                [[self_.upnpPop lastItem] setRepresentedObject:@""];
+            }
+            [self_ selectSavedUpnpDevice];
+        }
+        if (self_.upnpMsg) {
+            if (list.count) {
+                self_.upnpMsg.stringValue = [NSString stringWithFormat:RLPTr(@"共发现 %lu 个渲染器"), (unsigned long)list.count];
+            } else {
+                NSString *hint = [json[@"hint"] isKindOfClass:[NSString class]] ? json[@"hint"] : @"";
+                self_.upnpMsg.stringValue = hint.length ? hint : RLPTr(@"播放 / 切歌自动投放到该渲染器（与下方「投放」共用会话）");
+            }
+        }
+}
+
+- (void)loadUpnpDevicesForce:(BOOL)force {
+    if (![RLPCoreClient shared].started) return;
+    NSString *url = force ? @"/api/cast/devices?scan=1" : @"/api/cast/devices";
+    if (force && self.upnpMsg) self.upnpMsg.stringValue = RLPTr(@"正在发现渲染器…");
+    __weak __typeof__(self) weakSelf = self;
+    [[RLPCoreClient shared] getJSON:url completion:^(NSDictionary * _Nullable json) {
+        __typeof__(self) self_ = weakSelf;
+        if (!self_ || ![json isKindOfClass:[NSDictionary class]]) return;
+        [self_ applyUpnpDevicesPayload:json];
+    }];
 }
 
 #pragma mark - 输出
@@ -1281,6 +1366,8 @@ static NSString *RLPControlIdentifier(NSString *key) {
     self.backendPopup = [self popupForKey:@"sp_backend"
         items:@[ @"coreaudio", @"coreaudio-shared", @"upnp", @"null" ]
         action:@selector(onBackend:)];
+    [self.backendPopup setContentCompressionResistancePriority:NSLayoutPriorityDefaultLow
+                                                forOrientation:NSLayoutConstraintOrientationHorizontal];
     [backendRow addArrangedSubview:self.backendPopup];
     self.bpFixBtn = [NSButton buttonWithTitle:RLPTr(@"切到 bit-perfect 直通")
                                       target:self action:@selector(onBitPerfectFix:)];
@@ -1305,7 +1392,10 @@ static NSString *RLPControlIdentifier(NSString *key) {
     upnpRow.alignment = NSLayoutAttributeCenterY;
     upnpRow.spacing = 8;
     self.upnpPop = [self popupForKey:@"sp_upnp_dev"
-        items:@[ RLPTr(@"(正在发现…)") ] action:@selector(onUpnpDevice:)];
+        items:@[ RLPTr(@"（未发现 UPnP 渲染器）") ] action:@selector(onUpnpDevice:)];
+    [[self.upnpPop itemAtIndex:0] setRepresentedObject:@""];
+    [self.upnpPop setContentCompressionResistancePriority:NSLayoutPriorityDefaultLow
+                                           forOrientation:NSLayoutConstraintOrientationHorizontal];
     self.upnpScanBtn = [NSButton buttonWithTitle:RLPTr(@"重新发现") target:self
                                          action:@selector(onUpnpScan:)];
     self.upnpScanBtn.bezelStyle = NSBezelStyleRounded;
@@ -1392,6 +1482,11 @@ static NSString *RLPControlIdentifier(NSString *key) {
 
     self.chPopup = [self popupForKey:@"sp_ch"
         items:@[ RLPTr(@"跟随源声道数"), @"2", @"6", @"8" ] action:@selector(onChannels:)];
+    {
+        NSArray<NSString *> *vals = @[ @"0", @"2", @"6", @"8" ];
+        for (NSUInteger i = 0; i < vals.count && i < (NSUInteger)self.chPopup.numberOfItems; ++i)
+            [self.chPopup itemAtIndex:(NSInteger)i].representedObject = vals[i];
+    }
     [stack addArrangedSubview:RLPSRow(RLPTr(@"输出声道数"), self.chPopup,
         RLPTr(@"设备必须支持该声道数"), t)];
 
@@ -1587,9 +1682,9 @@ static NSString *RLPControlIdentifier(NSString *key) {
     // 值用纯数字（64/128/256/512/1024），与 web 的 opt('64', …) 同口径。
     // 落盘时不是单独发它：三个控件合成一个 dsd 键（例如 dop256 / 0），见 dsdPersistValue。
     self.dsdRatePopup = [self popupForKey:@"sp_dsdrate"
-        items:@[ @"64", @"128", @"256", @"512", @"1024" ] action:@selector(onDsdRate:)];
+        items:@[ @"64", @"128", @"256", @"512" ] action:@selector(onDsdRate:)];
     [stack addArrangedSubview:RLPSRow(RLPTr(@"比特率"), self.dsdRatePopup,
-        RLPTr(@"DSD512 / 1024 的 DoP 载波绝大多数设备不支持"), t)];
+        RLPTr(@"最高支持 DSD512，实际可用倍率取决于设备 DoP 载波能力"), t)];
 
     // 封装：macOS 上 Native DSD 无法实现（CoreAudio 只提供 PCM 管线），
     // 呈现一个永远不能工作的选项等于骗用户 ⟹ 只留 DoP（web 同口径）。
@@ -2626,19 +2721,14 @@ static NSString *RLPControlIdentifier(NSString *key) {
     self.filtNxNote.hidden = note.length == 0;
 }
 
-/// web applyDsd（ui_script.h:8958）：PCM ⟹ dsd=0；DSD ⟹ dsd=<pk><rt>
-/// （pk=dop|native；rt=64/128/256/512/1024）。旧码分开发 outmode / dsdpk，
-/// 这两个键不在 /api/settings 白名单里，POST 回 ok:true 也会被静默丢弃。
+/// 后端纯数字契约：PCM ⟹ dsd=0；DSD ⟹ dsd=<rt>（64/128/256/512/1024）且 dsdnative=0（macOS 只 DoP）。
 - (NSString *)dsdPersistValue {
     const BOOL isDsd = [self.outModePopup.titleOfSelectedItem isEqualToString:@"dsd"];
     if (!isDsd) return @"0";
-    NSString *pk = @"dop";
-    NSString *packTitle = (self.dsdPackPopup.titleOfSelectedItem ?: @"").lowercaseString;
-    if ([packTitle containsString:@"nat"]) pk = @"native";
     NSString *rt = self.dsdRatePopup.titleOfSelectedItem ?: @"";
     NSCharacterSet *nonDigits = [[NSCharacterSet decimalDigitCharacterSet] invertedSet];
     if (!rt.length || [rt rangeOfCharacterFromSet:nonDigits].location != NSNotFound) rt = @"256";
-    return [pk stringByAppendingString:rt];
+    return rt;
 }
 
 /// 在 PCM 下改比特率 / 封装 = 用户明确想要 DSD：把输出模式联动过去
@@ -2660,7 +2750,7 @@ static NSString *RLPControlIdentifier(NSString *key) {
 - (void)onDsdRate:(NSPopUpButton *)s {
     [self syncOutModeToDsd];
     [self updateDsdModeNote];
-    [self postKey:@"dsd" value:[self dsdPersistValue]];
+    [self postKeys:@{ @"dsd": [self dsdPersistValue], @"dsdnative": @"0" }];
 }
 - (void)onModFamily:(id)sender { [self postKey:@"modfamily" value:self.modFamilyPopup.titleOfSelectedItem]; }
 - (void)onModOrder:(id)sender { [self postKey:@"modorder" value:self.modOrderPopup.titleOfSelectedItem]; }
@@ -3438,9 +3528,9 @@ static BOOL RLPFeedbackTextBlank(NSString *s) {
 
 #pragma mark - 数据
 
-/// U16：工作台应用配置档后重读设置（同一份 /api/settings，UI 里不复制状态）。
-- (void)onWorkbenchProfileApplied:(NSNotification *)note {
-    (void)note;
+/// 跨页面设置/配置档保存后重读设置（忽略自己发出的通知防环）。
+- (void)onExternalSettingsChanged:(NSNotification *)note {
+    if (note.object == self) return;
     if (![RLPCoreClient shared].started) return;
     [self reloadData];
 }
@@ -3543,9 +3633,11 @@ static BOOL RLPFeedbackTextBlank(NSString *s) {
     }];
 
     // 设置：以 kv 为准回填。读不到就不回填 —— 绝不把 UI 默认值写回去覆盖用户设置。
+    // 带 settingsSeq 乱序保护，避免旧 GET 回包覆盖较新的保存结果。
+    const NSUInteger seq = ++self.settingsSeq;
     [[RLPCoreClient shared] getJSON:@"/api/settings" completion:^(NSDictionary * _Nullable json) {
         __typeof__(self) self_ = weakSelf;
-        if (!self_) return;
+        if (!self_ || seq != self_.settingsSeq) return;
         NSDictionary *kv = [json[@"kv"] isKindOfClass:[NSDictionary class]] ? json[@"kv"] : nil;
         if (!kv) { self_.statusLine.stringValue = RLPTr(@"设置读取失败"); return; }
         // U12（2026-11-16）：拐点准入提示由同一份 GET 的顶层 sdm 对象驱动；
@@ -3615,21 +3707,23 @@ static BOOL RLPFeedbackTextBlank(NSString *s) {
             [self_ loadInputDevices];
         }
 
-        // kv.dsd 是三个控件的合成值（web applyDsd）：0=PCM；dopNN/natNN 或旧裸数字 NN=DSD。
+        // kv.dsd 是三个控件的合成值（0=PCM；64..1024 或旧 dopNN/natNN=DSD）。
         [self_ applyDsdPersistValue:kv[@"dsd"]];
+        self_.savedUpnpDev = [kv[@"upnpdev"] isKindOfClass:[NSString class]] ? kv[@"upnpdev"] : @"";
+        [self_ selectSavedUpnpDevice];
         id root = kv[@"root"];
-        if ([root isKindOfClass:[NSString class]] && [root length])
+        if ([root isKindOfClass:[NSString class]] && [root length] && !RLPTextFieldIsEditing(self_.rootField))
             self_.rootField.stringValue = root;
-        if (self_.eqField && [kv[@"eq"] isKindOfClass:[NSString class]])
+        if (self_.eqField && [kv[@"eq"] isKindOfClass:[NSString class]] && !RLPTextFieldIsEditing(self_.eqField))
             self_.eqField.stringValue = kv[@"eq"];
         // 声道音量微调按真实「输出声道数」重建（0 = 跟随源 → 先按立体声，web 同口径）。
-        NSInteger trimCh = 2;
-        id chv = kv[@"ch"];
+        NSInteger trimCh = 0;
+        id chv = kv[@"channels"];
         if ([chv respondsToSelector:@selector(integerValue)]) {
             trimCh = [chv integerValue];
         }
         [self_ rebuildTrimFields:trimCh];
-        // 下拉回显「输出声道数」本身（按渠道值选对应项）。
+        // 下拉回显「输出声道数」本身（0 跟随源原样回显为第 0 项）。
         if (self_.chPopup) {
             const NSInteger idx = (trimCh == 6) ? 2 : (trimCh == 8) ? 3 : (trimCh == 2) ? 1 : 0;
             if (idx >= 0 && idx < self_.chPopup.numberOfItems) [self_.chPopup selectItemAtIndex:idx];
@@ -3653,6 +3747,7 @@ static BOOL RLPFeedbackTextBlank(NSString *s) {
         }
     }];
 
+    [self loadUpnpDevicesForce:NO];
     [self reloadRoots];
     [self.serversView reload];
     [self.metaSourcesView reload];
@@ -3679,7 +3774,7 @@ static BOOL RLPFeedbackTextBlank(NSString *s) {
 
 - (void)onOutMode:(NSPopUpButton *)s {
     [self updateDsdModeNote];
-    [self postKey:@"dsd" value:[self dsdPersistValue]];
+    [self postKeys:@{ @"dsd": [self dsdPersistValue], @"dsdnative": @"0" }];
 }
 
 - (void)onChannels:(NSPopUpButton *)s {
@@ -3715,8 +3810,16 @@ static BOOL RLPFeedbackTextBlank(NSString *s) {
     }
     [self postKey:@"trim" value:[vals componentsJoinedByString:@","]];
 }
-- (void)onUpnpDevice:(NSPopUpButton *)s { [self postKey:@"upnpdev" value:s.titleOfSelectedItem ?: @""]; }
-- (void)onUpnpScan:(id)sender { [self.castView reload]; }
+- (void)onUpnpDevice:(NSPopUpButton *)s {
+    id ro = s.selectedItem.representedObject;
+    NSString *val = [ro isKindOfClass:[NSString class]] ? (NSString *)ro : @"";
+    self.savedUpnpDev = val;
+    [self postKey:@"upnpdev" value:val];
+}
+- (void)onUpnpScan:(id)sender {
+    [self loadUpnpDevicesForce:YES];
+    [self.castView reload];
+}
 
 /// /api/naa/discover：NAA 端点自动发现（web 261024-01 #11）。
 /// macOS 没有 NAA 驱动体系，后端对 backend=naa 会返回 UnavailableSink；
@@ -3768,7 +3871,7 @@ static BOOL RLPFeedbackTextBlank(NSString *s) {
 - (void)onDsdPack:(NSPopUpButton *)s {
     [self syncOutModeToDsd];
     [self updateDsdModeNote];
-    [self postKey:@"dsd" value:[self dsdPersistValue]];
+    [self postKeys:@{ @"dsd": [self dsdPersistValue], @"dsdnative": @"0" }];
 }
 - (void)onDsdKind:(NSPopUpButton *)s { [self postKey:@"dsdkind" value:s.titleOfSelectedItem ?: @"fir"]; }
 - (void)onDsdConv:(NSPopUpButton *)s { [self postKey:@"dsdconv" value:s.titleOfSelectedItem ?: @"narrow"]; }

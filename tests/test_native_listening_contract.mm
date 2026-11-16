@@ -302,6 +302,36 @@ int main() {
            [NSString stringWithFormat:@"y=[%.1f,%.1f,%.1f,%.1f]",
             c1.frame.origin.y, c2.frame.origin.y, c3.frame.origin.y, c4.frame.origin.y]);
 
+        CK([RLPPlayModeFromSettings(@{@"dsd": @"dop256"}) isEqualToString:@"dsd"],
+           "C6a legacy dop256 派生 dsd 播放方式", @"");
+        CK([RLPPlayModeFromSettings(@{@"dsd": @"native128"}) isEqualToString:@"dsd"],
+           "C6b legacy native128 派生 dsd 播放方式", @"");
+
+        // C7 680/820/1180 几何防重叠（聆听室四卡）
+        for (NSNumber *wn in @[@680, @820, @1180]) {
+            const CGFloat w = wn.doubleValue;
+            RLPQuickStartViewController *qvc = [[RLPQuickStartViewController alloc] init];
+            qvc.view.frame = NSMakeRect(0, 0, w, 800);
+            [qvc updateResponsiveLayoutForWidth:(w - 48.0)];
+            [qvc.view layoutSubtreeIfNeeded];
+            NSView *q1 = FindById(qvc.view, @"room.device");
+            NSView *q2 = FindById(qvc.view, @"room.output");
+            NSView *q3 = FindById(qvc.view, @"room.play");
+            NSView *q4 = FindById(qvc.view, @"room.style");
+            NSArray<NSView *> *cards = @[q1 ?: [NSView new], q2 ?: [NSView new], q3 ?: [NSView new], q4 ?: [NSView new]];
+            BOOL overlap = NO;
+            for (NSUInteger i = 0; i < cards.count; ++i) {
+                NSRect r1 = [cards[i] convertRect:cards[i].bounds toView:qvc.view];
+                for (NSUInteger j = i + 1; j < cards.count; ++j) {
+                    NSRect r2 = [cards[j] convertRect:cards[j].bounds toView:qvc.view];
+                    NSRect inter = NSIntersectionRect(r1, r2);
+                    if (inter.size.width > 1.0 && inter.size.height > 1.0) overlap = YES;
+                }
+            }
+            CK(!overlap && q1 && q2 && q3 && q4,
+               [[NSString stringWithFormat:@"C7_%d 聆听室四卡无几何重叠", (int)w] UTF8String], @"");
+        }
+
         [core shutdown];
         [fm removeItemAtPath:root error:nil];
         std::printf("\n%s（%d 项失败）\n", gFail == 0 ? "native_listening_contract 全部通过" : "native_listening_contract 有失败", gFail);

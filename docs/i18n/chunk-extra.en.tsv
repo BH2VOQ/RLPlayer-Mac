@@ -675,3 +675,10 @@ SDM Nx 滤波	SDM Nx filter
 当前正在播放或暂停：切换播放方式只保存设置，将于下一首或重新播放时生效（不会中断当前播放）。	Playback is active or paused. Changing playback mode saves settings for the next track or replay without interrupting playback.
 已保存设置，将在下一首或重新播放时生效	Settings saved. Changes take effect on the next track or replay.
 正在保存设置（下一首或重新播放时生效）…	Saving settings for the next track or replay…
+外部 EQ：未加载	External EQ: not loaded
+外部 EQ：	External EQ:
+20 段 PEQ 启用	Enable 20-band PEQ
+PEQ 旁路切换失败	Could not change PEQ bypass
+PEQ 旁路	PEQ bypassed
+PEQ 开	PEQ on
+最高支持 DSD512，实际可用倍率取决于设备 DoP 载波能力	Supports up to DSD512; available rates depend on the device DoP carrier capability

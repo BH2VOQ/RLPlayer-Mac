@@ -1916,11 +1916,32 @@ static std::string utf8_sanitize(const std::string& s) {
 // 其中包括 /api/repeat —— 它复用 `rate` 字段传循环模式，于是 conf 里的 rate=96000 会把它算成
 // 非法值判 0，把用户的循环设置静默清掉（实测复现过）。现在 conf 兜底拆成下面独立的
 // apply_conf_defaults_for_play()，只由真正"开始播放"的路径调用。
+struct DsdSettingValue {
+    int level = -1;
+    bool native = false;
+    bool dop = false;
+};
+
+// Legacy Web/UI values and numeric API values share one strict parser.
+static DsdSettingValue parse_dsd_setting(std::string value) {
+    DsdSettingValue out;
+    for (char& c : value) if (c >= 'A' && c <= 'Z') c += 'a' - 'A';
+    if (value.rfind("native", 0) == 0) { out.native = true; value.erase(0, 6); }
+    else if (value.rfind("nat", 0) == 0) { out.native = true; value.erase(0, 3); }
+    else if (value.rfind("dop", 0) == 0) { out.dop = true; value.erase(0, 3); }
+    if (value.empty() && !out.native && !out.dop) value = "0";
+    for (int level : {0, 64, 128, 256, 512}) {
+        if (value == std::to_string(level)) { out.level = level; break; }
+    }
+    return out;
+}
+
 static PlayParams parseForm(const std::string& body, std::set<std::string>* seenOut = nullptr) {
     PlayParams p;
     std::istringstream is(body);
     std::string tok;
     std::set<std::string> seen;
+    bool packedNative = false;
     while (std::getline(is, tok, '&')) {
         const size_t e = tok.find('=');
         if (e == std::string::npos) continue;
@@ -1942,7 +1963,11 @@ static PlayParams parseForm(const std::string& body, std::set<std::string>* seen
         else if (k == "gpu")      p.gpu = (v == "1");
         else if (k == "isp")      p.isp = (v == "1");
         else if (k == "twostage") p.twoStage = (v == "1");
-        else if (k == "dsd")      p.dsd = atoi(v.c_str());
+        else if (k == "dsd") {
+            const auto dsd = parse_dsd_setting(v);
+            p.dsd = dsd.level;
+            packedNative = dsd.native;
+        }
         else if (k == "modorder") p.modOrder = atoi(v.c_str());
         else if (k == "modfamily") p.modFamily = v;
         else if (k == "oobgain")   p.oobGain = atof(v.c_str());
@@ -1999,6 +2024,7 @@ static PlayParams parseForm(const std::string& body, std::set<std::string>* seen
     }
     // 把"body 里确实出现过的键"交回调用方，供 apply_conf_defaults_for_play 判断哪些该兜底。
     if (seenOut) *seenOut = seen;
+    p.dsdNative = p.dsdNative || packedNative;
     return p;
 }
 
@@ -2064,7 +2090,9 @@ static PlayParams apply_conf_defaults_for_play(const PlayParams& in, const std::
         p.isp = (getConf("isp") == "1" || getConf("isp") == "true");
     }
     if (seen.find("dsd") == seen.end() && hasConf("dsd")) {
-        p.dsd = atoi(getConf("dsd").c_str());
+        const auto dsd = parse_dsd_setting(getConf("dsd"));
+        p.dsd = dsd.level;
+        p.dsdNative = p.dsdNative || dsd.native;
     }
     if (seen.find("directsdm") == seen.end() && hasConf("directsdm")) {
         p.directSdm = (getConf("directsdm") == "1");
@@ -11038,6 +11066,10 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
         // L-2：播放路径才吃 conf 兜底；/api/repeat /api/add 不受影响（见 apply_conf_defaults_for_play 注释）
         std::set<std::string> seenKeys;
         PlayParams p = apply_conf_defaults_for_play(parseForm(rq.body, &seenKeys), seenKeys);   // 非 const：远程曲目会把 p.file 换成缓存路径
+        if (p.dsd < 0) {
+            rta::net::webui_set_status(400);
+            return "{\"ok\":false,\"code\":\"dsd.invalid\",\"error\":\"DSD 倍率非法，请重新选择 PCM 或 DSD64–512 DoP\"}";
+        }
         // 远程曲目：先把原始文件完整下载到缓存，再走与本地完全相同的解码与 DSP 路径
         if (!p.remoteId.empty()) {
             std::string ferr;
@@ -13517,7 +13549,21 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
                     auto it = merged.find(kk);
                     return it == merged.end() ? std::string() : it->second;
                 };
-                const int futureDsd = std::atoi(mergedStr("dsd").c_str());
+                const auto dsd = parse_dsd_setting(mergedStr("dsd"));
+                if (dsd.level < 0) {
+                    rta::net::webui_set_status(400);
+                    return "{\"ok\":false,\"code\":\"dsd.invalid\",\"error\":\"DSD 倍率只支持 0 / 64 / 128 / 256 / 512\"}";
+                }
+                if (dsd.native || (dsd.level > 0 && mergedStr("dsdnative") == "1")) {
+                    rta::net::webui_set_status(422);
+                    return "{\"ok\":false,\"code\":\"dsd.native_unavailable\",\"error\":\"macOS 不支持 Native DSD，请选择 DoP\"}";
+                }
+                if (merged.count("dsd")) merged["dsd"] = std::to_string(dsd.level);
+                if (dsd.dop) {
+                    if (!merged.count("dsdnative")) order.push_back("dsdnative");
+                    merged["dsdnative"] = "0";
+                }
+                const int futureDsd = dsd.level;
                 const std::string famText = mergedStr("modfamily");
                 if (futureDsd > 0 && sdm_gate_applies_to_family(famText)) {
                     const double cutKhz = std::atof(mergedStr("modcut").c_str());

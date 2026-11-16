@@ -646,3 +646,26 @@ double RLPVolumeMuteNextDb(double currentDb) {
 BOOL RLPVolumeMuteHasRestore(void) { return !isnan(gVolumeRestoreDb); }
 
 void RLPVolumeMuteReset(void) { gVolumeRestoreDb = NAN; }
+
+NSNotificationName const RLPSettingsChangedNotification = @"RLPSettingsChangedNotification";
+
+NSInteger RLPParseDsdRate(id _Nullable raw) {
+    NSString *s = [raw isKindOfClass:[NSString class]] ? (NSString *)raw
+                : ([raw respondsToSelector:@selector(stringValue)] ? [raw stringValue] : @"");
+    s = [[s stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]] lowercaseString];
+    if (!s.length || [s isEqualToString:@"0"]) return 0;
+    if ([s hasPrefix:@"native"]) s = [s substringFromIndex:6];
+    else if ([s hasPrefix:@"nat"]) s = [s substringFromIndex:3];
+    else if ([s hasPrefix:@"dop"]) s = [s substringFromIndex:3];
+    // Keep legacy 1024 readable, but never accept a partial numeric prefix.
+    for (NSNumber *rate in @[@64, @128, @256, @512, @1024]) {
+        if ([s isEqualToString:rate.stringValue]) return rate.integerValue;
+    }
+    return 0;
+}
+
+BOOL RLPTextFieldIsEditing(NSTextField * _Nullable tf) {
+    if (!tf || !tf.window) return NO;
+    NSText *fe = tf.currentEditor;
+    return (fe != nil && tf.window.firstResponder == fe);
+}

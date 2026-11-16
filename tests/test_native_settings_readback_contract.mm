@@ -114,6 +114,11 @@ static void FlushDelayed(void) {
     if (blk) blk(payload);
 }
 
+@interface RLPSettingsViewController (CoreParityTest)
+- (void)applyUpnpDevicesPayload:(NSDictionary *)json;
+@property (nonatomic, copy) NSString *savedUpnpDev;
+@end
+
 int main(void) {
     @autoreleasepool {
         NSApplication *app = [NSApplication sharedApplication];
@@ -366,6 +371,75 @@ int main(void) {
            [NSString stringWithFormat:@"state=%ld", (long)shufAfterTheme.state]);
         Ck(foundRootAfterTheme, @"主题重建(adv): sp_roots 仍回读真实音乐目录",
            [NSString stringWithFormat:@"count=%lu", (unsigned long)rootsAfterTheme.arrangedSubviews.count]);
+
+        // ---- 7. 目标1/3/5：纯数字 dsd+dsdnative=0、channels=0 原样回显、680/820/1180 几何防重叠 ----
+        [settings selectPane:@"out"];
+        Pump(0.1);
+        [core jsonWithMethod:@"POST" path:@"/api/settings" body:@"channels=0&dsd=dop128&dsdnative=0"];
+        [settings reloadData];
+        WaitUntil(4.0, ^BOOL {
+            NSPopUpButton *chPop = (NSPopUpButton *)FindId(v, @"sp_ch");
+            return chPop && chPop.indexOfSelectedItem == 0;
+        });
+        NSPopUpButton *chPop = (NSPopUpButton *)FindId(v, @"sp_ch");
+        Ck(chPop && chPop.indexOfSelectedItem == 0, @"channels=0 原样回显第 0 项（跟随源）",
+           [NSString stringWithFormat:@"idx=%ld", (long)(chPop ? chPop.indexOfSelectedItem : -1)]);
+
+        [settings selectPane:@"sdm"];
+        Pump(0.1);
+        NSPopUpButton *dsdRatePop = (NSPopUpButton *)FindId(v, @"sp_dsdrate");
+        NSPopUpButton *dsdPkPop = (NSPopUpButton *)FindId(v, @"sp_dsdpk");
+        Ck(dsdRatePop && [dsdRatePop.titleOfSelectedItem isEqualToString:@"128"],
+           @"legacy dop128 回显比特率 128", dsdRatePop.titleOfSelectedItem ?: @"nil");
+        Ck(dsdPkPop && dsdPkPop.numberOfItems == 1 && [dsdPkPop.titleOfSelectedItem isEqualToString:@"dop"],
+           @"macOS 只提供 DoP 不提供 Native", dsdPkPop.titleOfSelectedItem ?: @"nil");
+
+        // 改选 256，校验写回核心为纯数字 dsd=256 且 dsdnative=0
+        if (dsdRatePop) {
+            [dsdRatePop selectItemWithTitle:@"256"];
+            [dsdRatePop sendAction:dsdRatePop.action to:dsdRatePop.target];
+            WaitUntil(3.0, ^BOOL {
+                NSDictionary *s = [core jsonWithMethod:@"GET" path:@"/api/settings" body:nil];
+                NSDictionary *skv = [s[@"kv"] isKindOfClass:[NSDictionary class]] ? s[@"kv"] : @{};
+                return [[NSString stringWithFormat:@"%@", skv[@"dsd"] ?: @""] isEqualToString:@"256"] &&
+                       [[NSString stringWithFormat:@"%@", skv[@"dsdnative"] ?: @""] isEqualToString:@"0"];
+            });
+            NSDictionary *sNow = [core jsonWithMethod:@"GET" path:@"/api/settings" body:nil];
+            NSDictionary *skvNow = [sNow[@"kv"] isKindOfClass:[NSDictionary class]] ? sNow[@"kv"] : @{};
+            Ck([[NSString stringWithFormat:@"%@", skvNow[@"dsd"] ?: @""] isEqualToString:@"256"] &&
+               [[NSString stringWithFormat:@"%@", skvNow[@"dsdnative"] ?: @""] isEqualToString:@"0"],
+               @"设置页 DSD 保存纯数字 dsd=256 与 dsdnative=0",
+               [NSString stringWithFormat:@"dsd=%@ dsdnative=%@", skvNow[@"dsd"], skvNow[@"dsdnative"]]);
+        }
+
+        // 680/820/1180 几何验证：设置页窗口缩放不崩溃、核心控件不超出容器
+        for (NSNumber *wn in @[@680, @820, @1180]) {
+            v.frame = NSMakeRect(0, 0, wn.doubleValue, 760);
+            [v layoutSubtreeIfNeeded];
+            NSView *tabsV = FindId(v, @"settings.tabs");
+            Ck(tabsV && NSWidth(tabsV.frame) <= wn.doubleValue,
+               [NSString stringWithFormat:@"settings_%d 页签栏不超出容器", wn.intValue],
+               [NSString stringWithFormat:@"tabsW=%.1f", tabsV ? NSWidth(tabsV.frame) : -1.0]);
+        }
+
+        [settings selectPane:@"out"];
+        Pump(0.1);
+        settings.savedUpnpDev = @"uuid:second";
+        [settings applyUpnpDevicesPayload:@{@"devices": @[
+            @{@"id": @"uuid:first", @"friendlyName": @"Same room", @"kind": @"upnp"},
+            @{@"id": @"uuid:second", @"friendlyName": @"Same room", @"kind": @"upnp"},
+            @{@"friendlyName": @"No stable ID"}
+        ]}];
+        NSPopUpButton *renderer = [settings valueForKey:@"upnpPop"];
+        Ck(renderer.numberOfItems == 2 && [renderer.selectedItem.representedObject isEqualToString:@"uuid:second"],
+           @"同名渲染器按ID回选，缺失ID条目不可选", renderer.itemTitles.description);
+        [renderer selectItemAtIndex:0];
+        [renderer sendAction:renderer.action to:renderer.target];
+        WaitUntil(3.0, ^BOOL {
+            return [[core jsonWithMethod:@"GET" path:@"/api/settings" body:nil][@"kv"][@"upnpdev"] isEqualToString:@"uuid:first"];
+        });
+        Ck([[core jsonWithMethod:@"GET" path:@"/api/settings" body:nil][@"kv"][@"upnpdev"] isEqualToString:@"uuid:first"],
+           @"投放目标保存真实ID而非显示名称", @"");
 
         [RLPTheme setThemeName:@"dark"];
         [core shutdown];

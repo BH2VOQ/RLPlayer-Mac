@@ -153,12 +153,7 @@ NSString *RLPPlayModeFromSettings(NSDictionary *kv) {
         [declared isEqualToString:@"custom"]) {
         return declared;
     }
-    id dsdObj = kv[@"dsd"];
-    NSString *dsdStr = [dsdObj isKindOfClass:[NSString class]] ? dsdObj
-                     : ([dsdObj isKindOfClass:[NSNumber class]] ? [(NSNumber *)dsdObj stringValue] : @"0");
-    NSString *dsdDigits = [dsdStr stringByReplacingOccurrencesOfString:@"nat" withString:@""];
-    dsdDigits = [dsdDigits stringByReplacingOccurrencesOfString:@"dop" withString:@""];
-    const NSInteger dsdVal = dsdDigits.integerValue;
+    const NSInteger dsdVal = RLPParseDsdRate(kv[@"dsd"]);
 
     id dirObj = kv[@"directsdm"];
     NSString *dirStr = [dirObj isKindOfClass:[NSString class]] ? dirObj

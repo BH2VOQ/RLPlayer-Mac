@@ -103,6 +103,8 @@ static NSInteger CountNestedScrollables(NSView *root) {
 - (void)onFilterResetOverride:(id)sender;
 - (void)onABPick:(NSButton *)sender;
 - (void)refreshAB;
+@property (nonatomic, assign) BOOL peqBypassed;
+- (void)onEqBypass:(id)sender;
 @end
 
 @interface MockStudioWorkbenchVC : RLPWorkbenchViewController
@@ -298,6 +300,28 @@ int main() {
         NSArray<NSDictionary<NSString *, NSString *> *> *realMon = RLPWorkbenchMonitorRows(realStatus);
         CK([realStatus isKindOfClass:[NSDictionary class]] && realMon.count >= 6,
            "S9e 真实 /api/status 映射到监控行且无值回退 N/A", @"");
+
+        // Real controller action must toggle PEQ without overwriting the external EQ path.
+        NSString *externalPath = [root stringByAppendingPathComponent:@"external.txt"];
+        [core jsonWithMethod:@"POST" path:@"/api/settings" body:[@"eq=" stringByAppendingString:RLPEnc(externalPath)]];
+        [core jsonWithMethod:@"POST" path:@"/api/peq" body:@"bypass=0"];
+        RLPWorkbenchViewController *liveWorkbench = [[RLPWorkbenchViewController alloc] init];
+        (void)liveWorkbench.view;
+        for (int spin = 0; spin < 30; ++spin) [[NSRunLoop currentRunLoop] runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.01]];
+        for (NSNumber *wanted in @[@YES, @NO]) {
+            liveWorkbench.peqBypassed = !wanted.boolValue;
+            [liveWorkbench onEqBypass:nil];
+            NSDictionary *peqState = nil;
+            for (int spin = 0; spin < 100; ++spin) {
+                [[NSRunLoop currentRunLoop] runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.01]];
+                peqState = [core jsonWithMethod:@"GET" path:@"/api/peq" body:nil];
+                if ([peqState[@"bypass"] boolValue] == wanted.boolValue && liveWorkbench.peqBypassed == wanted.boolValue) break;
+            }
+            NSDictionary *saved = [core jsonWithMethod:@"GET" path:@"/api/settings" body:nil][@"kv"];
+            CK([peqState[@"bypass"] boolValue] == wanted.boolValue &&
+               liveWorkbench.peqBypassed == wanted.boolValue && [saved[@"eq"] isEqualToString:externalPath],
+               wanted.boolValue ? "S10a PEQ bypass preserves external EQ path" : "S10b PEQ enable preserves external EQ path", saved.description);
+        }
 
         [core shutdown];
         [fm removeItemAtPath:root error:nil];

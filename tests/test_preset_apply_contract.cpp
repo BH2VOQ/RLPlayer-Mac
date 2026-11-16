@@ -155,6 +155,31 @@ int main() {
            "Case 3e: 拒绝非法 uimode 后保留原值 pro", g2);
     }
 
+    // Legacy UI values must use the same DSD contract as numeric playback values.
+    {
+        const auto dop = parseForm("backend=null&volume=-120&dsd=dop256");
+        ck(dop.dsd == 256 && !dop.dsdNative, "Case 4a: legacy dop256 parses as DSD256 DoP");
+        const auto native = parseForm("backend=null&volume=-120&dsd=native128");
+        ck(native.dsd == 128 && native.dsdNative, "Case 4b: legacy native marker cannot silently become PCM/DoP");
+        std::string err, ct;
+        conf_merge_write({{"dsd", "dop128"}, {"dsdnative", "0"}, {"modfamily", "dsd"}, {"modcut", "100"}}, err);
+        const auto inherited = apply_conf_defaults_for_play(parseForm("backend=null"), {"backend"});
+        ck(inherited.dsd == 128 && !inherited.dsdNative, "Case 4c: legacy persisted DoP survives next-play defaults");
+        const auto rejected = handle(make_req("POST", "/api/settings", "dsd=dop256&modfamily=dsd&modcut=50"), ct);
+        ck(rejected.find("sdm.corner_quality") != std::string::npos && conf_get("dsd", "") == "dop128",
+           "Case 4d: prefixed DSD cannot bypass corner admission or mutate saved state", rejected);
+        const auto accepted = handle(make_req("POST", "/api/settings", "dsd=dop256&dsdnative=0&modfamily=dsd&modcut=100"), ct);
+        ck(accepted.find("\"ok\":true") != std::string::npos && conf_get("dsd", "") == "256",
+           "Case 4e: valid DoP persists a canonical numeric multiplier", accepted);
+        const auto noNative = handle(make_req("POST", "/api/settings", "dsd=nat128"), ct);
+        ck(noNative.find("\"ok\":false") != std::string::npos && conf_get("dsd", "") == "256",
+           "Case 4f: macOS rejects Native instead of pretending support", noNative);
+        const auto junk = handle(make_req("POST", "/api/settings", "dsd=dop256junk"), ct);
+        ck(junk.find("\"ok\":false") != std::string::npos && conf_get("dsd", "") == "256",
+           "Case 4g: malformed DSD values do not replace valid settings", junk);
+        handle(make_req("POST", "/api/settings", "dsd=0&dsdnative=0"), ct);
+    }
+
     fs::remove_all(tmpDir, ec);
     if (g_fails == 0) std::printf("\n[ALL PASS] test_preset_apply_contract 全部通过\n");
     else               std::printf("\n[FAILED] %d 项未通过\n", g_fails);

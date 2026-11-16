@@ -947,6 +947,7 @@ static NSString *RLPEQTypeCodeNormalized(id raw) {
         }
         // 关键：用**后端返回的状态**刷新（含新曲线），不用本地猜测值
         [self_ absorbState:json];
+        [[NSNotificationCenter defaultCenter] postNotificationName:RLPSettingsChangedNotification object:self_];
     }];
 }
 

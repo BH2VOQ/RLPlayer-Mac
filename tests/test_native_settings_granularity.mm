@@ -503,15 +503,15 @@ int main() {
             Fire(dsdPackPop);
             Pump(0.6);
             NSDictionary *kvD256 = ReadKV();
-            Ck([kvD256[@"dsd"] isEqualToString:@"dop256"],
-               @"【S1b·dsd】DSD + DoP + 256 ⟹ POST dsd=dop256（旧码发 dsd=256 + dsdpk）",
+            Ck([kvD256[@"dsd"] isEqualToString:@"256"] && [kvD256[@"dsdnative"] isEqualToString:@"0"],
+               @"【S1b·dsd】DSD + DoP + 256 保存数字倍率且 dsdnative=0",
                [NSString stringWithFormat:@"kv.dsd=%@", kvD256[@"dsd"] ?: @"(无)"]);
             [dsdRatePop selectItemWithTitle:@"512"];
             Fire(dsdRatePop);
             Pump(0.6);
             NSDictionary *kvD512 = ReadKV();
-            Ck([kvD512[@"dsd"] isEqualToString:@"dop512"],
-               @"【S1b·dsd】DSD 比特率 512 ⟹ dsd=dop512",
+            Ck([kvD512[@"dsd"] isEqualToString:@"512"] && [kvD512[@"dsdnative"] isEqualToString:@"0"],
+               @"【S1b·dsd】DSD512 保存数字倍率且 dsdnative=0",
                [NSString stringWithFormat:@"kv.dsd=%@", kvD512[@"dsd"] ?: @"(无)"]);
 
             // ---- ⑧c PCM 下改比特率/封装必须联动切到 DSD（web onchange，ui_script.h:10465）----
@@ -525,8 +525,8 @@ int main() {
             Fire(dsdRatePop);
             Pump(0.6);
             NSDictionary *kvAuto = ReadKV();
-            Ck([kvAuto[@"dsd"] isEqualToString:@"dop128"],
-               @"【S1b·dsd】PCM 下改比特率 128 ⟹ dsd=dop128（自动切 DSD）",
+            Ck([kvAuto[@"dsd"] isEqualToString:@"128"] && [kvAuto[@"dsdnative"] isEqualToString:@"0"],
+               @"【S1b·dsd】PCM 下改倍率128自动切DSD并保存数字倍率/DoP",
                [NSString stringWithFormat:@"kv.dsd=%@", kvAuto[@"dsd"] ?: @"(无)"]);
             Ck([[outModePop titleOfSelectedItem] isEqualToString:@"dsd"],
                @"【S1b·dsd】PCM 下改比特率 ⟹ 输出模式下拉联动到 DSD",
