@@ -483,7 +483,16 @@ public:
             ntf_ = synthesize_ntf(effectiveOrder_, cfg_.fs, 20000.0, cfg_.ntfHinf);
             hinfUsed_ = ntf_hinf_lin(ntf_);
         } else {
-            ntf_ = design_ntf_poly(effectiveOrder_, cfg_.cutoffHz, cfg_.fs);
+            // 7 阶 1-bit Butterworth 在 DSD256/512 下若仍用 100 kHz 固定拐点，
+            // H∞ 降至 1.13/1.06 且极点贴近单位圆 (0.988/0.994)，-60 dBFS 小信号
+            // 易陷低频极限环突波；按 DSD128 实测稳定拐点比例 (100k/5.6448M) 保持
+            // H∞ ≈ 1.284 下限，消除小信号噪声突波。
+            double fc = cfg_.cutoffHz;
+            if (levels_ == 2 && effectiveOrder_ >= 7 && cfg_.fs > 5644800.0) {
+                const double fcFloor = 100000.0 * (cfg_.fs / 5644800.0);
+                if (fc < fcFloor) fc = fcFloor;
+            }
+            ntf_ = design_ntf_poly(effectiveOrder_, fc, cfg_.fs);
         }
 
         const size_t sz = (size_t)effectiveOrder_ + 1;
@@ -540,10 +549,13 @@ public:
         { uint64_t ub = 0; std::memcpy(&ub, &u, sizeof(ub));
           if (!mod_finite_bits_u64(ub)) { u = 0.0; ++nonFinite_; } }
 
-        // 环路限幅器：允许内部瞬时过冲，绝不发散
-        const double uLim = 1.5;
-        if (u >  uLim) { u =  uLim; ++overload_; }
-        if (u < -uLim) { u = -uLim; ++overload_; }
+        // 环路限幅器：允许内部瞬时过冲，绝不发散。
+        // DSD5@DSD64 在 0.62 稳定边界下正常内部状态峰值可达 ~1.70，1.5 会误触稳态限幅；
+        // 1.80 避开正常稳态过冲同时仍能在满幅/越界瞬态时可靠保护且距 eMax=2.5 有足够余量。
+        const double uLim = 1.8;
+        bool over = false;
+        if (u >  uLim) { u =  uLim; over = true; }
+        if (u < -uLim) { u = -uLim; over = true; }
 
         // ★ 抖动注入点（2026-10-25 修复，探针实测定位）：
         // 抖动必须加在【比较器输入】（去相关量化噪声、打散空闲音），但必须从
@@ -567,9 +579,10 @@ public:
             // 就该让幅度按 1/√ 缩放。1-bit 的 dithScale 恒为 1.0 ⟹ **1-bit 族数字完全不变**。
             dith = cfg_.ditherLsb * step * ((double)(rngNext() >> 11) / 9007199254740992.0 - 0.5);
             u += dith;
-            if (u >  uLim) { u =  uLim; ++overload_; }
-            if (u < -uLim) { u = -uLim; ++overload_; }
+            if (u >  uLim) { u =  uLim; over = true; }
+            if (u < -uLim) { u = -uLim; over = true; }
         }
+        if (over) ++overload_;
 
         double y;
         if (levels_ == 2) {
