@@ -135,27 +135,6 @@ int main() {
         [doc layoutSubtreeIfNeeded];
         [eq layoutSubtreeIfNeeded];
 
-        // ---- E2：视图吸收到的频段是 20 个互不相同的真实频率 ----
-        NSView *curve = FindId(eq, @"eq.curve");
-        Ck(curve != nil, @"E2 找到 EQ 曲线视图", @"缺 eq.curve");
-        NSArray *bandFreqs = [curve valueForKey:@"bandFreqs"];
-        Ck(bandFreqs.count == 20, @"E2 曲线拿到 20 个频点",
-           [NSString stringWithFormat:@"n=%lu", (unsigned long)bandFreqs.count]);
-        NSMutableSet *uniq = [NSMutableSet set];
-        double fMin = 1e9, fMax = 0;
-        for (NSNumber *f in bandFreqs) {
-            [uniq addObject:f];
-            fMin = MIN(fMin, f.doubleValue);
-            fMax = MAX(fMax, f.doubleValue);
-        }
-        Ck(uniq.count == 20,
-           @"E2 20 个频点互不相同（全 0 就是旧 bug：JSON 键读错，freq 取到 nil）",
-           [NSString stringWithFormat:@"unique=%lu 前三个=%@", (unsigned long)uniq.count,
-            [bandFreqs count] > 2 ? [bandFreqs[0] description] : @"-"]);
-        Ck(fMin <= 25.0 && fMax >= 19999.0,
-           @"E2 频点覆盖 20Hz~20kHz（ISO 1/3 倍频程序列）",
-           [NSString stringWithFormat:@"min=%.1f max=%.1f", fMin, fMax]);
-
         // ---- E3：频率有真实值，且用户能看到 ----
         // 用户 2026-11-15 要求移除 20 行表格，所以原来读表格 cell 的判据失效。
         // 判据换成新入口：推子板下方的频率标签。
@@ -178,116 +157,6 @@ int main() {
                    [NSString stringWithFormat:@"label10=%@", l10]);
             }
         }
-
-        // ---- E4：20 个手柄横坐标真的铺满绘图区 ----
-        // 旧 bug：bandFreqs 全是 0 ⟹ 全部落在绘图区最左端 ⟹ 视觉上"没有分 band"。
-        NSRect plot = [(id)curve respondsToSelector:NSSelectorFromString(@"plotRect")]
-            ? [(id)curve plotRect] : NSZeroRect;
-        NSMutableArray<NSNumber *> *xs = [NSMutableArray array];
-        for (NSNumber *f in bandFreqs) {
-            const CGFloat x = [(id)curve respondsToSelector:NSSelectorFromString(@"xForFreq:")]
-                ? [(id)curve xForFreq:f.doubleValue] : 0;
-            [xs addObject:@(x)];
-        }
-        NSMutableSet *uniqX = [NSMutableSet set];
-        for (NSNumber *x in xs) [uniqX addObject:@(((int)round(x.doubleValue)))];
-        double span = 0;
-        if (xs.count >= 2) {
-            span = xs.lastObject.doubleValue - xs.firstObject.doubleValue;
-        }
-        Ck(plot.size.width > 100 && uniqX.count == 20 && span > plot.size.width * 0.7,
-           @"E4 20 个手柄横坐标铺满绘图区（不是全叠在最左端）",
-           [NSString stringWithFormat:@"uniqX=%lu span=%.0f plotW=%.0f",
-            (unsigned long)uniqX.count, span, plot.size.width]);
-
-        // ---- E5/E6/E7：在 1 kHz 处拖动，命中的必须是 1 kHz 那一段 ----
-        // 先把核心状态清成 Flat（全 0 dB），这样"哪一段变了"没有歧义。
-        [core jsonWithMethod:@"POST" path:@"/api/peq/preset" body:@"action=reset&name="];
-        eq.reload;
-        [eq reload];
-        Pump(0.8);
-        [eq layoutSubtreeIfNeeded];
-
-        // 1 kHz 在 20Hz..20kHz 的对数轴上是 0.5663（见 test_native_eq_geometry 的 E3）
-        const CGFloat xFrac = 0.5663;
-        // ⚠️ 坐标必须在**切到曲线模式之后**再算：曲线默认 hidden，此时它不参与 stack 布局，
-        // frame 仍是 {{0,0},{0,0}} ⟹ convertRect 得到的 inWin 是错的，
-        // 后面 hitTest 自然打到 NSStackView（实测踩到，5 条红）。
-        NSEvent *(^mouse)(NSEventType, NSPoint) = ^NSEvent *(NSEventType type, NSPoint at) {
-            return [NSEvent mouseEventWithType:type location:at modifierFlags:0
-                                     timestamp:[NSDate timeIntervalSinceReferenceDate]
-                                  windowNumber:win.windowNumber context:nil eventNumber:0
-                                    clickCount:1 pressure:type == NSEventTypeLeftMouseUp ? 0.0 : 1.0];
-        };
-        // ⚠️ 2026-11-15：默认视图已改为**推子板**（用户明确要的形态），曲线默认隐藏。
-        // E5 测的是曲线模式的拖拽几何，所以先走生产入口（工具栏切换按钮）切回曲线。
-        // 不能靠"直接把 curve.hidden 设成 NO"——那绕过了 onToggleMode 的实际行为，
-        // 切不过去也会绿（无效判据）。
-        NSButton *modeBtn = (NSButton *)FindId(eq, @"peq.mode");
-        Ck(modeBtn != nil, @"E5 前置：找到曲线/推子切换按钮", @"缺 peq.mode");
-        if (modeBtn && ![modeBtn.title isEqualToString:RLPTr(@"切换为推子")]) {
-            // 当前是推子模式 → 点一次切到曲线
-            [modeBtn performClick:nil];
-            Pump(0.5);
-            [eq layoutSubtreeIfNeeded];
-            [win layoutIfNeeded];
-        }
-        Ck(curve.hidden == NO, @"E5 前置：切换后曲线视图真的可见了",
-           [NSString stringWithFormat:@"hidden=%d", (int)curve.hidden]);
-        Ck(curve.frame.size.width > 100 && curve.frame.size.height > 60,
-           @"E5 前置：切到曲线模式后曲线有真实尺寸（坐标才能算对）",
-           NSStringFromRect(curve.frame));
-        const NSRect plot2 = [(id)curve plotRect];
-        const NSRect inWin = [curve convertRect:curve.bounds toView:nil];
-        const NSPoint p0 = NSMakePoint(inWin.origin.x + plot2.origin.x + plot2.size.width * xFrac,
-                                       inWin.origin.y + NSMidY(plot2));
-        const NSPoint p1 = NSMakePoint(p0.x, p0.y + 40);   // 向上拖 = 提升增益
-        NSView *hit = [win.contentView hitTest:[win.contentView convertPoint:p0 fromView:nil]];
-        Ck(hit == curve, @"E5 1 kHz 处的 hitTest 命中曲线视图本身",
-           [NSString stringWithFormat:@"hit=%@", hit ? NSStringFromClass(hit.class) : @"nil"]);
-        [curve mouseDown:mouse(NSEventTypeLeftMouseDown, p0)];
-        [curve mouseDragged:mouse(NSEventTypeLeftMouseDragged, p1)];
-        [curve mouseUp:mouse(NSEventTypeLeftMouseUp, p1)];
-        Pump(1.2);   // 260ms 节流 + 主线程回调
-
-        NSInteger activeBand = [[curve valueForKey:@"activeBand"] integerValue];
-        Ck(activeBand == 10,
-           @"E5 拖动命中第 11 段（1 kHz）—— 不是永远第 1 段（旧 bug：频点全 0）",
-           [NSString stringWithFormat:@"activeBand=%ld", (long)activeBand]);
-
-        NSDictionary *after = [core jsonWithMethod:@"GET" path:@"/api/peq" body:nil];
-        NSArray *afterBands = [after[@"bands"] isKindOfClass:[NSArray class]] ? after[@"bands"] : @[];
-        NSInteger changedIdx = -1;
-        double changedGain = 0;
-        NSInteger changedCount = 0;
-        for (NSUInteger i = 0; i < afterBands.count; ++i) {
-            const double g = [afterBands[i][@"gain"] doubleValue];
-            if (fabs(g) > 0.05) { ++changedCount; changedIdx = (NSInteger)i; changedGain = g; }
-        }
-        Ck(changedCount == 1 && changedIdx == 10,
-           @"E6 核心状态里恰好第 11 段（1 kHz）增益变了，其余段不变",
-           [NSString stringWithFormat:@"changed=%ld idx=%ld gain=%.2f",
-            (long)changedCount, (long)changedIdx, changedGain]);
-        Ck(fabs(changedGain - 5.5) < 4.0 || changedGain > 1.0,
-           @"E6 增益真的被抬上去了（不是 0）",
-           [NSString stringWithFormat:@"gain=%.2f", changedGain]);
-
-        // ---- E7：提交被后端接受（格式对了才可能 ok）----
-        NSTextField *status = (NSTextField *)FindId(eq, @"peqStatus");
-        NSMutableArray<NSView *> *all = [NSMutableArray array];
-        Collect(eq, all);
-        for (NSView *v in all) {
-            if ([v isKindOfClass:[NSTextField class]] && [((NSTextField *)v).stringValue hasPrefix:@"生效"]) {
-                status = (NSTextField *)v; break;
-            }
-        }
-        NSString *st = status.stringValue ?: @"";
-        Ck(![st containsString:@"失败"],
-           @"E7 提交被后端接受（状态行不出现「失败」，即 bands 格式符合契约）",
-           st.length ? st : @"状态行为空");
-        Ck([st containsString:@"11/20"] || [st containsString:@"1/20"],
-           @"E7 状态行如实报出非零段数（证明它读到了真实增益）",
-           st.length ? st : @"状态行为空");
 
         // ---- E8：类型下拉是后端码 ----
         // 表格已移除（用户 2026-11-15），类型改由推子板下方的单段检查器提供。
@@ -362,7 +231,7 @@ int main() {
                             body:[NSString stringWithFormat:@"bypass=0&preamp=0&bands=%@", bump]];
             [eq reload];
             Pump(0.9);
-            NSArray *bumpyPts = [curve valueForKey:@"points"];
+            NSArray *bumpyPts = [eq valueForKey:@"curvePoints"];
             double bumpPeak = 0;
             for (NSArray<NSNumber *> *pp in bumpyPts)
                 if (pp.count >= 2) bumpPeak = MAX(bumpPeak, fabs(pp[1].doubleValue));
@@ -376,7 +245,7 @@ int main() {
             [resetBtn performClick:nil];
             Pump(1.0);
 
-            NSArray *flatPts = [curve valueForKey:@"points"];
+            NSArray *flatPts = [eq valueForKey:@"curvePoints"];
             double flatPeak = 0;
             for (NSArray<NSNumber *> *pp in flatPts)
                 if (pp.count >= 2) flatPeak = MAX(flatPeak, fabs(pp[1].doubleValue));
@@ -384,7 +253,8 @@ int main() {
                @"E11 重置后**绘图数据**变平（曲线随动，不是只有表格变了）",
                [NSString stringWithFormat:@"peak=%.2f 点数=%lu", flatPeak, (unsigned long)flatPts.count]);
             // 推子板也要跟着回 0（表格已移除，判据指向新的可见入口）
-            NSArray *gains11 = [curve valueForKey:@"bandGains"];
+            NSView *fdForGains = FindId(eq, @"eq.fader");
+            NSArray *gains11 = [fdForGains valueForKey:@"bandGains"];
             const double gv = gains11.count > 10 ? [gains11[10] doubleValue] : 999;
             Ck(fabs(gv) < 0.05, @"E11 重置后推子板第 11 段增益回 0.00",
                [NSString stringWithFormat:@"g=%.2f", gv]);
@@ -718,58 +588,6 @@ int main() {
         }
 
 
-        // ---- E13：手柄（点）必须落在曲线上，而不是落在"该段自己的增益"上 ----
-        // 用户 2026-11-15：点要跟 band 对应好。
-        // 判据：造一个相邻段互相叠加的形状（10 段 +12 dB、11 段 +0），
-        //      此时第 11 段自己的 gain 是 0，但曲线在 1 kHz 处被邻居抬起来了。
-        //      手柄若画在"自己的 gain"上就会浮在曲线下方 ⟹ 与曲线分离。
-        {
-            [core jsonWithMethod:@"POST" path:@"/api/peq/preset" body:@"action=reset&name="];
-            NSMutableString *neigh = [NSMutableString string];
-            for (NSUInteger i = 1; i <= 20; ++i) {
-                const double g = (i == 10) ? 12.0 : 0.0;
-                const double f = (i == 10) ? 1250.0 : (20.0 + (double)i * 900.0);
-                [neigh appendFormat:@"%@%lu,PK,%.1f,%.2f,1.41", (i > 1 ? @";" : @""),
-                                     (unsigned long)i, f, g];
-            }
-            [core jsonWithMethod:@"POST" path:@"/api/peq"
-                            body:[NSString stringWithFormat:@"bypass=0&preamp=0&bands=%@", neigh]];
-            [eq reload];
-            Pump(1.0);
-            [eq layoutSubtreeIfNeeded];
-
-            // 第 11 段：自身 gain=0，但曲线在它附近被邻居抬高
-            NSArray *bf = [curve valueForKey:@"bandFreqs"];
-            // ⚠️ 不能按"第 11 个频点就是 1 kHz"取：后端给的是 ISO 1/3 倍频程序列
-            //（20/25/40/63/80/125/200/315/500/800/1000/1250/…），索引 10 才是 1000 Hz。
-            // 第一版按 bf[10] 取到 9920 Hz，判据自己假红（期望值算错，不是产品问题）。
-            NSUInteger i11 = 0;
-            for (NSUInteger k = 0; k < bf.count; ++k)
-                if ([bf[k] doubleValue] > 999.0 && [bf[k] doubleValue] < 1001.0) { i11 = k; break; }
-            const double f11 = bf.count > i11 ? [bf[i11] doubleValue] : 0;
-            const double onCurve = [(id)curve curveDbAtFrequency:f11];
-            Ck(fabs(onCurve) > 0.8,
-               @"E13 前置：邻居段把第 11 段处的**曲线**抬起来了（自身 gain 仍为 0）",
-               [NSString stringWithFormat:@"曲线在 %.0fHz = %.2f dB", f11, onCurve]);
-
-            // 手柄 y 必须用曲线值（这就是"点贴着曲线"的定义）
-            const CGFloat yCurve = [(id)curve valueForKey:@"plotRect"] ? 0 : 0;
-            const NSRect plotR = [(id)curve plotRect];
-            const CGFloat hx = [(id)curve xForFreq:f11];
-            (void)hx; (void)yCurve;
-            // 该 y 由 drawRect 的同一套公式算：y = plot.origin.y + (db+18)/36*plotH
-            const CGFloat yExpected = plotR.origin.y + (CGFloat)((onCurve + 18.0) / 36.0) * plotR.size.height;
-            const CGFloat yIfBandGain = plotR.origin.y + (CGFloat)((0.0 + 18.0) / 36.0) * plotR.size.height;
-            Ck(fabs(yExpected - yIfBandGain) > 3.0,
-               @"E13 两种画法（贴曲线 / 贴自身增益）在该点上真的差得开（判据有区分力）",
-               [NSString stringWithFormat:@"yCurve=%.1f yBandGain=%.1f", yExpected, yIfBandGain]);
-            // 生产入口：手柄位置取自 curveDbAtFrequency:，不是 bandGains
-            const double drawn = [(id)curve curveDbAtFrequency:f11];
-            Ck(fabs(drawn - onCurve) < 0.01 && fabs(drawn) > 0.8,
-               @"E13 手柄取值走的是曲线插值（点贴在曲线上）",
-               [NSString stringWithFormat:@"drawn=%.2f", drawn]);
-        }
-
         // ---- E12：设置页 reloadData 必须把 EQ 一起刷新 ----
         // 用户实测："重置底下 band 数据，曲线图不会随动"。
         // 根因不是重置本身，而是**设置页的 reloadData 从不通知 eqView** ——
@@ -782,8 +600,12 @@ int main() {
             [sv selectPane:@"eq"];
             Pump(1.2);
             [pv layoutSubtreeIfNeeded];
-            NSView *svCurve = FindId(pv, @"eq.curve");
-            Ck(svCurve != nil, @"E12 设置页里找到 EQ 曲线视图", @"缺 eq.curve");
+            __block RLPEqualizerView *svEq = nil;
+            NSMutableArray<NSView *> *svAll = [NSMutableArray array];
+            Collect(pv, svAll);
+            for (NSView *v in svAll)
+                if ([v isKindOfClass:[RLPEqualizerView class]]) { svEq = (RLPEqualizerView *)v; break; }
+            Ck(svEq != nil, @"E12 设置页里找到 EQ 视图", @"缺 RLPEqualizerView");
 
             // 造 +9 dB 隆起后，用**设置页的 reloadData**（不是 eqView.reload）去刷新
             NSMutableString *bump2 = [NSMutableString string];
@@ -797,7 +619,7 @@ int main() {
                             body:[NSString stringWithFormat:@"bypass=0&preamp=0&bands=%@", bump2]];
             [(id)sv performSelector:NSSelectorFromString(@"reloadData")];
             Pump(1.2);
-            NSArray *svPts = [svCurve valueForKey:@"points"];
+            NSArray *svPts = [svEq valueForKey:@"curvePoints"];
             double svPeak = 0;
             for (NSArray<NSNumber *> *pp in svPts)
                 if (pp.count >= 2) svPeak = MAX(svPeak, fabs(pp[1].doubleValue));
@@ -810,7 +632,7 @@ int main() {
             Ck(svReset != nil, @"E12 设置页里找到「重置 Flat」", @"缺失");
             [svReset performClick:nil];
             Pump(1.2);
-            NSArray *flatPts2 = [svCurve valueForKey:@"points"];
+            NSArray *flatPts2 = [svEq valueForKey:@"curvePoints"];
             double flatPeak2 = 0;
             for (NSArray<NSNumber *> *pp in flatPts2)
                 if (pp.count >= 2) flatPeak2 = MAX(flatPeak2, fabs(pp[1].doubleValue));

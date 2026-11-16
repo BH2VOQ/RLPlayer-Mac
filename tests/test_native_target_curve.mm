@@ -204,39 +204,12 @@ int main() {
         [eq reload];
         [v layoutSubtreeIfNeeded];
 
-        NSView *curve = FindById(v, @"eq.curve");
-        if (!curve) curve = FindByClass(v, @"RLPEQCurveView");   // 旧码没有 identifier，按类兜底
-        Ck(curve != nil, "找得到 EQ 曲线视图（像素判据的取样对象）", @"RLPEQCurveView 缺失");
-        if (!curve) { std::printf("结果：%d passed, %d failed\n", g_pass, g_fail); return 1; }
-
+        // EQ 曲线视图已按用户要求删除（2026-11-16），本文件保留桥层/请求层/说明层判据。
         NSTextField *query = FindFieldWithPlaceholder(v, @"HD650");
         NSButton *searchBtn = FindButton(v, RLPTr(@"搜索"));
         Ck(query != nil && searchBtn != nil, "OPRA 搜索框 / 搜索键都在",
            [NSString stringWithFormat:@"query=%d search=%d", !!query, !!searchBtn]);
         if (!query || !searchBtn) { std::printf("结果：%d passed, %d failed\n", g_pass, g_fail); return 1; }
-
-        // ⚠️ 2026-11-15：EQ 默认视图已改为**推子板**，曲线默认 hidden。
-        // 【②绘制】这几条判据采样的是**曲线视图**上的目标曲线图层，所以先走生产入口
-        // （工具栏切换按钮）切回曲线模式；不切的话曲线不参与布局，Snap 出来是空白，
-        // changedPixels 恒 0（实测 4 条假红）。
-        {
-            NSMutableArray<NSView *> *btnAll = [NSMutableArray array];
-            Collect(v, btnAll);
-            NSButton *modeBtn = nil;
-            for (NSView *b in btnAll)
-                if ([b isKindOfClass:[NSButton class]] &&
-                    [b.identifier isEqualToString:@"peq.mode"]) { modeBtn = (NSButton *)b; break; }
-            Ck(modeBtn != nil, "【②绘制】前置：找到曲线/推子切换按钮", @"缺 peq.mode");
-            if (modeBtn && curve.hidden) {
-                [modeBtn performClick:nil];
-                Pump();
-                [v layoutSubtreeIfNeeded];
-            }
-            Ck(curve.hidden == NO, "【②绘制】前置：曲线模式已激活（目标曲线图层在曲线上）",
-               [NSString stringWithFormat:@"hidden=%d", (int)curve.hidden]);
-        }
-
-        NSBitmapImageRep *base = Snap(curve);   // 未选任何目标曲线时的渲染
 
         // ---- ① 桥层：数组三元组 + web 的「全量索引一次 + 本地过滤」 ----
         query.stringValue = @"hd 600";
@@ -317,36 +290,6 @@ int main() {
                "【④时机】说明里出现当前曲线的中文名（Harman Over-Ear）", info.stringValue);
             Ck([info.stringValue containsString:RLPTr(@"前级增益：")],
                "【④时机】说明里出现「前级增益」（web 同一行信息）", info.stringValue);
-        }
-
-        // ---- ② 绘制层：目标曲线图层（像素采样，可与 PEQ 区分）----
-        NSBitmapImageRep *p0 = Snap(curve);
-        double cov0 = 0, cen0 = 0;
-        NSInteger d0 = DiffPixels(base, p0, curve, &cov0, &cen0);
-        Ck(d0 > 40, "【②绘制】选中目标曲线后 EQ 图上出现新图层（像素变化）",
-           [NSString stringWithFormat:@"changedPixels=%ld", (long)d0]);
-        Ck(d0 > 0 && cov0 > 0.20 && cov0 < 0.85,
-           "【②绘制】新图层是**虚线**（列覆盖率 <85%）⟹ 与实线 PEQ 可区分",
-           [NSString stringWithFormat:@"colCoverage=%.2f", cov0]);
-
-        // 切到另一条曲线：图形必须随之变化（新 UI：点第二张预设卡）
-        presetCards = FindAllById(v, @"opra.preset.card");
-        if (presetCards.count >= 2) {
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Warc-performSelector-leaks"
-            [presetCards[1] performSelector:@selector(selectCard)];
-#pragma clang diagnostic pop
-            Pump();
-            [v layoutSubtreeIfNeeded];
-            NSBitmapImageRep *p1 = Snap(curve);
-            double cov1 = 0, cen1 = 0;
-            NSInteger d1 = DiffPixels(p0, p1, curve, &cov1, &cen1);
-            Ck(d1 > 20, "【②绘制】切换曲线后图形随之变化（两条目标曲线不同）",
-               [NSString stringWithFormat:@"changedPixels=%ld", (long)d1]);
-            Ck(fabs(cen1 - cen0) > 1.0, "【②绘制】新曲线重心真的移动（不是同一形状重画）",
-               [NSString stringWithFormat:@"cen0=%.1f cen1=%.1f", cen0, cen1]);
-            if (info) Ck([info.stringValue containsString:@"哈曼入耳目标曲线"],
-                         "【④时机】切曲线后说明同步改成 In-Ear", info.stringValue);
         }
 
         // ---- ③ 请求：apply body 与 web 逐字段一致（新 UI：点卡片上的「应用到 EQ」）----

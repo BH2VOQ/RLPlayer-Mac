@@ -1543,10 +1543,10 @@ int RLPRunFunctionalAudit(NSString *outDir) {
             }
             CK(scrollersInsideEQ == 0, "EQ 页内部没有任何 NSScrollView（滚轮只归整页）",
                [NSString stringWithFormat:@"innerScrollViews=%ld", (long)scrollersInsideEQ]);
-            // 分 band：曲线视图必须拿到 20 个频段与每段增益，否则手柄画不出来。
+            // 分 band：推子板必须拿到 20 个频段与每段增益（EQ 曲线视图已按用户要求删除）。
             NSView *curveView = nil;
             for (NSView *v in eqSub)
-                if ([v.identifier isEqualToString:@"eq.curve"]) { curveView = v; break; }
+                if ([v.identifier isEqualToString:@"eq.fader"]) { curveView = v; break; }
             NSArray *bandFreqs = [curveView valueForKey:@"bandFreqs"];
             NSArray *bandGains = [curveView valueForKey:@"bandGains"];
             // ⚠️ 这条判据曾经是**假绿**：只数 count == 20，而当时 20 个频点全是 0.0
@@ -1562,7 +1562,7 @@ int RLPRunFunctionalAudit(NSString *outDir) {
             }
             CK(curveView != nil && bandFreqs.count == 20 && bandGains.count == 20 &&
                uniqFreqs.count == 20 && fLo <= 25.0 && fHi >= 19999.0,
-               "EQ 曲线已分 band（20 个互不相同的真实频点 + 20 个增益手柄）",
+               "EQ 推子板已分 band（20 个互不相同的真实频点 + 20 根推子）",
                [NSString stringWithFormat:@"freqs=%lu uniq=%lu range=%.1f..%.1f gains=%lu",
                 (unsigned long)bandFreqs.count, (unsigned long)uniqFreqs.count, fLo, fHi,
                 (unsigned long)bandGains.count]);

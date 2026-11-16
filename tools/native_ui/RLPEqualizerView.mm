@@ -33,322 +33,6 @@
 #include <cmath>
 #include <initializer_list>
 
-#pragma mark - 频响曲线（自绘）
-
-@interface RLPEQCurveView : NSView
-@property (nonatomic, copy) NSArray<NSArray<NSNumber *> *> *points;
-/// 每个 PEQ 段的中心频率（用于把鼠标 x 映射到最近的一段）
-@property (nonatomic, copy) NSArray<NSNumber *> *bandFreqs;
-/// 手动拖拽曲线：返回 (段索引, 目标增益 dB)。web 版 PEQ_DRAG 同语义。
-@property (nonatomic, copy) void (^onDragBand)(NSInteger index, double gainDb);
-/// 耳机目标曲线图层（第8项）。web 用 `.tc-curve` + targetCurveSvg 画在预设卡片/说明区；
-/// 原生直接叠加到 EQ 图上，用户能看到"我选的目标曲线长这样"以及它与当前 PEQ 的关系。
-/// nil = 不画（没选预设时不该假装有目标）。
-@property (nonatomic, strong, nullable) RLPTargetCurve *targetCurve;   // 曲线表是共享只读数据，不 copy（RLPTargetCurve 不是 NSCopying）
-/// 正在被拖动的段（-1 = 无）；绘制时高亮它。
-@property (nonatomic) NSInteger activeBand;
-/// 正在被拖动段的临时增益（绘制手柄用）。
-@property (nonatomic) double activeBandDb;
-/// 每段当前增益 dB：画 20 个可拖手柄 + 频段分隔线（用户反馈「没有分 band」）。
-@property (nonatomic, copy) NSArray<NSNumber *> *bandGains;
-/// drawRect 调用次数 + 最近一次绘制时 points 的峰值（判据用：证明"数据变了画面也真的重画了"）。
-/// 为什么需要：曲线"不随动"有两种成因——数据没更新，或更新了但没重绘。
-/// 只看属性分不清这两者；截图又会被 layer 缓存骗（离屏 cacheDisplay 会复用旧内容）。
-@property (nonatomic, readonly) NSInteger drawCount;
-@property (nonatomic, readonly) double lastDrawnPeakDb;
-@end
-
-@implementation RLPEQCurveView {
-    NSInteger _drawCount;
-    double _lastDrawnPeakDb;
-    NSInteger _dragBand;      // 正在拖的段（-1 = 没有）
-    double _dragStartDb;      // 起拖时该段的增益
-    CGFloat _dragStartY;      // 起拖时的指针 y（位移累加的基准）
-    double _dragAppliedDb;    // 本次拖动已经下发的增益
-}
-@synthesize drawCount = _drawCount;
-@synthesize lastDrawnPeakDb = _lastDrawnPeakDb;
-
-- (void)drawRect:(NSRect)dirty {
-    (void)dirty;
-    // 绘制自证：记录次数与"这次画出来的峰值"，供判据区分"数据没变"与"变了没重绘"。
-    _drawCount += 1;
-    double peak = 0;
-    for (NSArray<NSNumber *> *pt in self.points)
-        if ([pt isKindOfClass:[NSArray class]] && pt.count >= 2) peak = MAX(peak, fabs(pt[1].doubleValue));
-    _lastDrawnPeakDb = peak;
-    RLPTheme *t = [RLPTheme current];
-    NSRect b = self.bounds;
-    [t.bg2 setFill];
-    NSRectFill(b);
-
-    const CGFloat padL = 34, padR = 8, padT = 8, padB = 18;
-    NSRect plot = NSMakeRect(b.origin.x + padL, b.origin.y + padB,
-                             b.size.width - padL - padR, b.size.height - padT - padB);
-    if (plot.size.width <= 4 || plot.size.height <= 4) return;
-
-    // x 轴对数 20Hz..20kHz；y 轴 ±18dB
-    // 竖直量程 = ±RLPEQDbRange（±24 dB，用户 2026-11-15 明确；与后端钳位/web 表格一致）。
-    // 这里**不许**再写死数字：写死过一次 18，于是画布拖到底只到 ±18 而表格能填 ±24。
-    const double fMin = 20.0, fMax = 20000.0, dbMax = RLPEQDbRange;
-    const double lfMin = log10(fMin), lfMax = log10(fMax);
-    CGFloat (^X)(double) = ^CGFloat(double f) {
-        double c = MAX(fMin, MIN(fMax, f));
-        return plot.origin.x + (CGFloat)((log10(c) - lfMin) / (lfMax - lfMin)) * plot.size.width;
-    };
-    CGFloat (^Y)(double) = ^CGFloat(double db) {
-        double c = MAX(-dbMax, MIN(dbMax, db));
-        return plot.origin.y + (CGFloat)((c + dbMax) / (2 * dbMax)) * plot.size.height;
-    };
-
-    // 网格：十倍频程 + 每 6dB 一条
-    [t.line setStroke];
-    for (double f : { 100.0, 1000.0, 10000.0 }) {
-        NSBezierPath *g = [NSBezierPath bezierPath];
-        [g moveToPoint:NSMakePoint(X(f), plot.origin.y)];
-        [g lineToPoint:NSMakePoint(X(f), NSMaxY(plot))];
-        g.lineWidth = 0.5;
-        [g stroke];
-    }
-    // 水平网格：每 6 dB 一条，覆盖整个量程（±24 → -24..24，共 8 条）
-    for (double db = -floor(dbMax / 6.0) * 6.0; db <= dbMax + 1e-9; db += 6.0) {
-        if (fabs(db) < 0.001) continue;
-        NSBezierPath *g = [NSBezierPath bezierPath];
-        [g moveToPoint:NSMakePoint(plot.origin.x, Y(db))];
-        [g lineToPoint:NSMakePoint(NSMaxX(plot), Y(db))];
-        g.lineWidth = 0.5;
-        [g stroke];
-    }
-    // 0dB 基准线画粗一点
-    NSBezierPath *zero = [NSBezierPath bezierPath];
-    [zero moveToPoint:NSMakePoint(plot.origin.x, Y(0))];
-    [zero lineToPoint:NSMakePoint(NSMaxX(plot), Y(0))];
-    zero.lineWidth = 1.0;
-    [t.mut setStroke];
-    [zero stroke];
-
-    // 轴标注
-    NSDictionary *attrs = @{ NSFontAttributeName: t.small, NSForegroundColorAttributeName: t.mut };
-    [[NSString stringWithFormat:@"+%.0f", dbMax]
-        drawAtPoint:NSMakePoint(2, NSMaxY(plot) - 12) withAttributes:attrs];
-    [@"0" drawAtPoint:NSMakePoint(2, Y(0) - 6) withAttributes:attrs];
-    [[NSString stringWithFormat:@"-%.0f", dbMax]
-        drawAtPoint:NSMakePoint(2, plot.origin.y) withAttributes:attrs];
-    [@"20" drawAtPoint:NSMakePoint(plot.origin.x, 2) withAttributes:attrs];
-    [@"1k" drawAtPoint:NSMakePoint(X(1000) - 6, 2) withAttributes:attrs];
-    [@"20k" drawAtPoint:NSMakePoint(NSMaxX(plot) - 22, 2) withAttributes:attrs];
-
-    if (!self.points.count) {
-        // 没数据就如实说，不画一条假装是"平直响应"的线
-        NSString *msg = RLPTr(@"无曲线数据");
-        NSSize sz = [msg sizeWithAttributes:attrs];
-        [msg drawAtPoint:NSMakePoint(NSMidX(plot) - sz.width / 2, NSMidY(plot) - sz.height / 2)
-          withAttributes:attrs];
-        return;
-    }
-
-    // ---- 耳机目标曲线图层（第8项）----
-    // 画在 PEQ 主曲线**之前**：主曲线压在上面，用户能同时看到"当前 EQ"与"目标形状"。
-    // 竖直量程用 web 的 MAXDB=9 / MINDB=-2（映射到同一 plot 高度），与 web 的示意一致；
-    // 用虚线 + 次级色，避免与实线 PEQ 混淆。
-    if (self.targetCurve) {
-        const double kMaxDb = 9.0, kMinDb = -2.0;
-        NSMutableArray<NSValue *> *tpts = [NSMutableArray array];
-        for (NSArray<NSNumber *> *p in self.targetCurve.points) {
-            if (p.count < 2) continue;
-            const double x = MAX(0.0, MIN(1.0, p[0].doubleValue));
-            const double db = MAX(kMinDb, MIN(kMaxDb, p[1].doubleValue));
-            const CGFloat px = plot.origin.x + (CGFloat)x * plot.size.width;
-            const CGFloat py = plot.origin.y + (CGFloat)((kMaxDb - db) / (kMaxDb - kMinDb)) * plot.size.height;
-            [tpts addObject:[NSValue valueWithPoint:NSMakePoint(px, py)]];
-        }
-        if (tpts.count >= 2) {
-            NSBezierPath *tc = [NSBezierPath bezierPath];
-            [tc moveToPoint:tpts[0].pointValue];
-            for (NSUInteger i = 1; i < tpts.count; ++i) [tc lineToPoint:tpts[i].pointValue];
-            tc.lineWidth = 1.4;
-            CGFloat dash[2] = { 4.0, 3.0 };
-            [tc setLineDash:dash count:2 phase:0];
-            [(t.accent2 ?: t.accent) setStroke];
-            [tc stroke];
-            // 端点小圆点（web targetCurveSvg 的首尾 circle）
-            for (NSValue *vv in @[ tpts.firstObject, tpts.lastObject ]) {
-                const NSPoint pt = vv.pointValue;
-                NSBezierPath *dot = [NSBezierPath bezierPathWithOvalInRect:
-                                     NSMakeRect(pt.x - 2, pt.y - 2, 4, 4)];
-                [(t.accent2 ?: t.accent) setFill];
-                [dot fill];
-            }
-        }
-    }
-
-    NSBezierPath *curve = [NSBezierPath bezierPath];
-    BOOL started = NO;
-    for (NSArray<NSNumber *> *pt in self.points) {
-        if (pt.count < 2) continue;
-        const double f = pt[0].doubleValue, db = pt[1].doubleValue;
-        if (!isfinite(f) || !isfinite(db) || f <= 0) continue;
-        NSPoint p = NSMakePoint(X(f), Y(db));
-        if (!started) { [curve moveToPoint:p]; started = YES; }
-        else [curve lineToPoint:p];
-    }
-    if (started) {
-        curve.lineWidth = 1.8;
-        [t.accent setStroke];
-        [curve stroke];
-    }
-
-    // ---- 分 band（用户反馈「没有分 band」）----
-    // 每段画一条淡分隔线（段中心处）+ 一个可拖手柄（曲线在该段的增益高度）。
-    // 拖拽时高亮当前段：这是"我在调哪一段"的唯一可见反馈。
-    if (self.bandFreqs.count >= 2) {
-        const NSUInteger n = self.bandFreqs.count;
-        [t.line setStroke];
-        for (NSUInteger i = 0; i < n; ++i) {
-            const CGFloat bx = X(self.bandFreqs[i].doubleValue);
-            // 段中心竖线：只画在相邻两段中点，避免把 20 条线糊成栅栏
-            if (i + 1 < n) {
-                const CGFloat midX = (bx + X(self.bandFreqs[i + 1].doubleValue)) / 2.0;
-                NSBezierPath *sep = [NSBezierPath bezierPath];
-                [sep moveToPoint:NSMakePoint(midX, plot.origin.y)];
-                [sep lineToPoint:NSMakePoint(midX, NSMaxY(plot))];
-                sep.lineWidth = 0.5;
-                [[t.line colorWithAlphaComponent:0.6] setStroke];
-                [sep stroke];
-            }
-        }
-        // 手柄
-        // ⚠️ 手柄必须画在"该段中心频率处**曲线本身**的增益"上，不是画在该段自己的 gain 上。
-        // 相邻段互相叠加，某段设 +9 dB 时曲线在它自己的中心频率处并不等于 +9 —— 画在 gain 上
-        // 就会出现"点浮在曲线外面 / 20 个点连起来不是曲线"（用户 2026-11-15：点要跟 band 对应好）。
-        // 例外：正在拖动的那一段画 activeBandDb（拖动中的实时值，曲线还没回来）。
-        for (NSUInteger i = 0; i < n; ++i) {
-            const BOOL active = (i == (NSUInteger)self.activeBand);
-            const double db = active ? self.activeBandDb
-                                     : [self curveDbAtFrequency:self.bandFreqs[i].doubleValue];
-            const CGFloat hx = X(self.bandFreqs[i].doubleValue);
-            const CGFloat hy = Y(db);
-            const CGFloat r = (i == (NSUInteger)self.activeBand) ? 4.5 : 3.0;
-            NSBezierPath *dot = [NSBezierPath bezierPathWithOvalInRect:
-                                 NSMakeRect(hx - r, hy - r, r * 2, r * 2)];
-            [t.bg2 setFill];
-            [dot fill];
-            [(i == (NSUInteger)self.activeBand ? t.accent : t.mut) setStroke];
-            dot.lineWidth = (i == (NSUInteger)self.activeBand) ? 2.0 : 1.0;
-            [dot stroke];
-        }
-    }
-}
-
-/// 曲线在某个频率处的 dB（**用后端 points 插值**，不自己算公式 —— 铁律：不抄第二份频响）。
-/// 手柄位置必须落在这条曲线上，否则"点"与"band"就对不上：
-/// 相邻段互相叠加，某段 +9 dB 时曲线在它自己的中心频率处并不等于 +9。
-- (double)curveDbAtFrequency:(double)freq {
-    NSArray<NSArray<NSNumber *> *> *pts = self.points;
-    if (pts.count < 2) {
-        // 还没有曲线数据（首帧）：退回该段自身增益，至少不画到 0
-        return 0.0;
-    }
-    if (!(freq > 0)) return pts.firstObject.count >= 2 ? pts.firstObject[1].doubleValue : 0.0;
-    const double lf = log10(freq);
-    // points 是按对数频率均匀给的（20Hz→20kHz），直接按对数插值
-    const double lfMin = log10(MAX(1e-6, pts.firstObject[0].doubleValue));
-    const double lfMax = log10(MAX(1e-6, pts.lastObject[0].doubleValue));
-    if (!(lfMax > lfMin)) return pts.firstObject[1].doubleValue;
-    const double t = (lf - lfMin) / (lfMax - lfMin) * (double)(pts.count - 1);
-    if (t <= 0) return pts.firstObject[1].doubleValue;
-    if (t >= (double)(pts.count - 1)) return pts.lastObject[1].doubleValue;
-    const NSUInteger i0 = (NSUInteger)floor(t);
-    const double u = t - (double)i0;
-    const double a = pts[i0].count >= 2 ? pts[i0][1].doubleValue : 0.0;
-    const double b = pts[i0 + 1].count >= 2 ? pts[i0 + 1][1].doubleValue : a;
-    return a + (b - a) * u;
-}
-
-#pragma mark - 曲线拖拽（web PEQ_DRAG：拖动波形图改对应段的增益）
-
-// 与 drawRect 同一套坐标（对数频率 x、±18dB y）。
-- (NSRect)plotRect {
-    NSRect b = self.bounds;
-    const CGFloat padL = 34, padR = 8, padT = 8, padB = 18;
-    return NSMakeRect(b.origin.x + padL, b.origin.y + padB,
-                      b.size.width - padL - padR, b.size.height - padT - padB);
-}
-
-- (CGFloat)xForFreq:(double)f {
-    NSRect plot = [self plotRect];
-    const double fMin = 20.0, fMax = 20000.0;
-    double c = MAX(fMin, MIN(fMax, f));
-    return plot.origin.x + (CGFloat)((log10(c) - log10(fMin)) / (log10(fMax) - log10(fMin))) * plot.size.width;
-}
-
-/// 拖动：web peqDragValue() 的**位移累加**语义（ui_script.h:11645 的注释解释了为什么不用绝对映射）：
-///   · 绝对映射 = "指针在哪 y，增益就是那个 y 对应的 dB"。听上去更直觉，但一旦曲线量程/
-///     前级变化，同一次拖动的值就会自己往前冲（量程变大 → 同一位置对应更大 dB → 再扩量程）。
-///   · 位移累加 = "指针挪了多少像素，增益就加减多少 dB"。指针不动值就不动，
-///     手柄始终贴在指针上 ⟹ **点和手指严格对应**（用户 2026-11-15：点要跟 band 对应好）。
-- (void)applyDragEvent:(NSEvent *)event {
-    if (!self.onDragBand || self.bandFreqs.count == 0) return;
-    NSPoint p = [self convertPoint:event.locationInWindow fromView:nil];
-    NSRect plot = [self plotRect];
-    if (plot.size.width <= 1 || plot.size.height <= 1) return;
-
-    if (_dragBand < 0) {
-        // 起拖：只有落在绘图区内才认（保留原来"拖出画布就忽略"的边界语义）
-        if (p.x < plot.origin.x || p.x > NSMaxX(plot)) return;
-        if (p.y < plot.origin.y || p.y > NSMaxY(plot)) return;
-        NSInteger best = RLPEQNearestBandIndex(self.bandFreqs,
-                                               (p.x - plot.origin.x) / plot.size.width);
-        if (best < 0) return;
-        _dragBand = best;
-        _dragStartDb = (best < (NSInteger)self.bandGains.count)
-            ? self.bandGains[(NSUInteger)best].doubleValue : 0.0;
-        _dragStartY = p.y;
-        _dragAppliedDb = _dragStartDb;
-        self.activeBand = best;      // 高亮被拖动的这一段：用户要能看见自己在动哪一段
-        self.activeBandDb = _dragStartDb;
-    }
-    // 位移 → dB：整块绘图区高 = 2*RLPEQDbRange，按当前高度换算，与 drawRect 同一套坐标。
-    const CGFloat pxPerDb = plot.size.height / (2.0 * RLPEQDbRange);
-    double db = _dragStartDb + (double)((p.y - _dragStartY) / pxPerDb);
-    db = MAX(-RLPEQDbRange, MIN(RLPEQDbRange, db));
-    _dragAppliedDb = db;
-    self.activeBand = _dragBand;
-    self.activeBandDb = db;
-    [self setNeedsDisplay:YES];
-    self.onDragBand(_dragBand, db);
-}
-
-/// 松手：结束本次拖动（下一次按下重新定起点）。
-- (void)endDrag {
-    _dragBand = -1;
-}
-
-- (void)mouseDown:(NSEvent *)event {
-    if (self.onDragBand) {
-        _dragBand = -1;              // 新的一次按下 = 新的一次拖动，重新定起点
-        [self applyDragEvent:event];
-        return;
-    }
-    [super mouseDown:event];
-}
-
-- (void)mouseDragged:(NSEvent *)event {
-    if (self.onDragBand) { [self applyDragEvent:event]; return; }
-    [super mouseDragged:event];
-}
-
-/// 松手：**不清 activeBand**。
-/// 用户 2026-11-15 的原始反馈是"看不出在调哪一段"。松手就清高亮，等于调完立刻
-/// 失去唯一的位置反馈（数据表在下面几十行外，视线根本回不去）。改成保留最后调过的那一段，
-/// 直到下次拖动换段、或整表重新加载（absorbState 会把它复位）。
-/// 这条也是判据 E5 的落点：拖动后 activeBand 必须是**命中的那一段**，而不是 -1。
-- (void)mouseUp:(NSEvent *)event {
-    if (!self.onDragBand) { [super mouseUp:event]; return; }
-    [self endDrag];
-}
-@end
-
 #pragma mark - OPRA 型号/预设卡片（web #eqModelCards / #eqPresetCards）
 
 /// 型号卡片上的一张小目标曲线（web `.tc-curve` 的同构）：只画曲线，不画坐标轴。
@@ -553,15 +237,10 @@
 @property (nonatomic, strong) NSScrollView *scroll;
 @property (nonatomic, strong) NSArray<NSLayoutConstraint *> *scrollConstraints;
 @property (nonatomic, assign) BOOL embeddedInPage;
-@property (nonatomic, strong) RLPEQCurveView *curve;
+/// 后端 /api/peq 返回的频响点（自动前级要用；EQ 曲线视图已按用户要求删除）。
+@property (nonatomic, copy) NSArray<NSArray<NSNumber *> *> *curvePoints;
 /// 推子板（用户 2026-11-15 要求的目标形态：下面频率、上面 ±dB 输入）。
-/// 与曲线**同一份数据**（都从 self.bands / 后端 points 取），只是两种视图。
-/// 默认用推子板（用户明确要的效果）；曲线仍可用工具栏按钮切回去，功能不删。
 @property (nonatomic, strong) RLPEQFaderView *fader;
-/// 当前是推子板（YES）还是曲线（NO）。
-@property (nonatomic, assign) BOOL faderMode;
-/// 视图模式切换按钮（曲线 / 推子）。
-@property (nonatomic, strong) NSButton *modeButton;
 @property (nonatomic, strong) NSSwitch *bypass;
 @property (nonatomic, strong) NSTextField *preamp;
 @property (nonatomic, strong) NSTextField *status;
@@ -741,34 +420,7 @@
     self.status.lineBreakMode = NSLineBreakByWordWrapping;
     [self.stack addArrangedSubview:self.status];
 
-    // 视图模式切换（用户 2026-11-15：要推子板形态；曲线保留，功能不删）。
-    {
-        NSStackView *modeRow = [[NSStackView alloc] initWithFrame:NSZeroRect];
-        modeRow.orientation = NSUserInterfaceLayoutOrientationHorizontal;
-        modeRow.spacing = 8;
-        self.modeButton = [NSButton buttonWithTitle:RLPTr(@"切换为曲线")
-                                             target:self action:@selector(onToggleMode:)];
-        self.modeButton.identifier = @"peq.mode";
-        self.modeButton.bezelStyle = NSBezelStyleRounded;
-        [modeRow addArrangedSubview:self.modeButton];
-        modeRow.alignment = NSLayoutAttributeCenterY;
-        [self.stack addArrangedSubview:modeRow];
-    }
-
-    self.curve = [[RLPEQCurveView alloc] initWithFrame:NSZeroRect];
-    self.curve.identifier = @"eq.curve";          // 判据（第8项像素采样）用它定位曲线视图
-    self.curve.wantsLayer = YES;
-    self.curve.layer.cornerRadius = 8;
-    self.curve.translatesAutoresizingMaskIntoConstraints = NO;
-    [self.stack addArrangedSubview:self.curve];
-    [NSLayoutConstraint activateConstraints:@[
-        [self.curve.heightAnchor constraintEqualToConstant:170],
-        [self.curve.widthAnchor constraintEqualToAnchor:self.stack.widthAnchor constant:-4],
-    ]];
-
-    // 推子板：与曲线**同址叠加**（同一份数据、同一块位置，切换只改 hidden）。
-    // 为什么叠加而不是各占一行：两者语义相同（都是"调这 20 段"），
-    // 同时显示会把同一件事画两遍，且卡片高度会翻倍。
+    // 用户 2026-11-16 明确：不要「切换到曲线」，EQ 曲线视图整体删除，只保留推子板。
     self.fader = [[RLPEQFaderView alloc] initWithFrame:NSZeroRect];
     self.fader.identifier = @"eq.fader";
     self.fader.wantsLayer = YES;
@@ -779,15 +431,7 @@
         [self.fader.heightAnchor constraintEqualToConstant:230],
         [self.fader.widthAnchor constraintEqualToAnchor:self.stack.widthAnchor constant:-4],
     ]];
-    // ⚠️ 不要给 fader 加 topAnchor == curve.topAnchor 去"叠在一起"：
-    // 两者都是 stack 的 arrangedSubviews，NSStackView 会自己垂直排布，
-    // 再加一条对齐约束就是和排列约束打架（冲突日志 + 高度莫名变高）。
-    // 正确做法就是靠 detachesHiddenViews（默认 YES）：hidden 的那个自动退出布局，
-    // 所以同一时刻只有一个是占位的，切换只改 hidden。
-    // 默认推子板（用户明确要的效果）；曲线是隐藏的那一个。
-    self.faderMode = YES;
     self.fader.hidden = NO;
-    self.curve.hidden = YES;
     __weak __typeof__(self) weakFader = self;
     self.fader.onBandGainEdited = ^(NSInteger idx, double db) {
         __typeof__(self) s = weakFader;
@@ -798,31 +442,8 @@
         while (gains.count < s.bands.count) [gains addObject:@0];
         gains[(NSUInteger)idx] = @(db);
         s.fader.bandGains = gains;
-        s.curve.bandGains = gains;
-        [s.curve setNeedsDisplay:YES];
         // 拖谁就把检查器切到谁（用户点/拖某一段，下面就该显示那一段的 Q/类型）
         if (s.inspector.bandIndex != idx) [s syncInspectorForBand:idx];
-        [s refreshBandRowValues:(NSUInteger)idx];
-        [s scheduleApply];
-    };
-    // web PEQ_DRAG 等价：在曲线上按住拖动 → 改最近一段的增益（260ms 节流后下发）。
-    __weak __typeof__(self) weakCurve = self;
-    self.curve.onDragBand = ^(NSInteger idx, double db) {
-        __typeof__(self) s = weakCurve;
-        if (!s || idx < 0 || idx >= (NSInteger)s.bands.count) return;
-        s.bands[(NSUInteger)idx][@"g"] = @(db);
-        // 手柄高度必须跟着走，否则拖完松手手柄还停在旧位置（用户会以为没生效）
-        NSMutableArray<NSNumber *> *gains = [s.curve.bandGains mutableCopy]
-                                          ?: [NSMutableArray arrayWithCapacity:s.bands.count];
-        while (gains.count < s.bands.count) [gains addObject:@0];
-        gains[(NSUInteger)idx] = @(db);
-        s.curve.bandGains = gains;
-        s.fader.bandGains = gains;   // 推子板与曲线同源，两边都要跟着走
-        [s.curve setNeedsDisplay:YES];
-        if (s.inspector.bandIndex != idx) [s syncInspectorForBand:idx];
-        // 拖动热路径：只刷检查器里那几个控件，不做任何重建。
-        // （表格已按用户要求移除；历史上这里每帧 reloadDataForRowIndexes: 重建 cell，
-        //  是"拖动卡顿"的根因，注释留作教训。）
         [s refreshBandRowValues:(NSUInteger)idx];
         [s scheduleApply];
     };
@@ -917,7 +538,7 @@
     (void)sender;
     // web 用前端算好的 points；这里同源（也是后端 points），不做第二套算法。
     double maxGain = 0.0;
-    NSArray<NSArray<NSNumber *> *> *pts = self.curve.points;
+    NSArray<NSArray<NSNumber *> *> *pts = self.curvePoints;
     if (pts.count) {
         for (NSArray<NSNumber *> *p in pts)
             if (p.count >= 2 && p[1].doubleValue > maxGain) maxGain = p[1].doubleValue;
@@ -1148,22 +769,6 @@
     if (self.inspector.bandIndex == (NSInteger)row) [self syncInspectorForBand:(NSInteger)row];
 }
 
-/// 曲线 ↔ 推子板切换。两种视图读同一份 bands，切换只改 visible 与按钮标题。
-- (void)onToggleMode:(id)sender {
-    (void)sender;
-    self.faderMode = !self.faderMode;
-    self.fader.hidden = !self.faderMode;
-    self.curve.hidden = self.faderMode;
-    self.modeButton.title = self.faderMode ? RLPTr(@"切换为曲线") : RLPTr(@"切换为推子");
-    // ⚠️ detachesHiddenViews 让 hidden 的那个退出布局，但**改完 hidden 必须让 stack 重新排**，
-    // 否则刚显示的那个视图还停在上一次的位置（实测：hitTest 打到 NSStackView，
-    // 拖动落空、增益恒 0）。顺手把外层也标脏，向上冒到卡片。
-    [self.stack needsLayout];
-    [self setNeedsLayout:YES];
-    [self.superview setNeedsLayout:YES];
-    [self syncViewsFromBands];
-    [self notifyContentSizeChanged];
-}
 
 /// 把 self.bands 同步给两个视图（曲线 + 推子）。集中一处，避免两条路径各写一份。
 - (void)syncViewsFromBands {
@@ -1173,11 +778,8 @@
         [freqs addObject:b[@"f"] ?: @0];
         [gains addObject:b[@"g"] ?: @0];
     }
-    self.curve.bandFreqs = freqs;
-    self.curve.bandGains = gains;
     self.fader.bandFreqs = freqs;
     self.fader.bandGains = gains;
-    [self.curve setNeedsDisplay:YES];
     [self.fader setNeedsDisplay:YES];
 }
 
@@ -1386,16 +988,8 @@ static NSString *RLPEQTypeCodeNormalized(id raw) {
         if (![a[0] respondsToSelector:@selector(doubleValue)] || ![a[1] respondsToSelector:@selector(doubleValue)]) continue;
         [clean addObject:@[ @([a[0] doubleValue]), @([a[1] doubleValue]) ]];
     }
-    self.curve.points = clean;
-    // 曲线与推子板共用一份 freqs/gains —— 走同一个同步口，避免两边各写一份走岔
+    self.curvePoints = clean;   // 自动前级要用的后端频响点（曲线视图已删除）
     [self syncViewsFromBands];
-    // ⚠️ **不要**在这里把 activeBand 复位成 -1。
-    // absorbState 是每次 POST /api/peq 回来都会跑的；而拖动提交是 260ms 节流 ⟹
-    // 每拖动一下，紧接着的这次回填就会把"正在调哪一段"的高亮抹掉 —— 用户看到的就是
-    // "高亮闪一下没了 / 根本不知道在调哪一段"。只做越界收敛，保留用户最后触碰的段。
-    if (self.curve.activeBand < 0 || self.curve.activeBand >= (NSInteger)self.bands.count)
-        self.curve.activeBand = -1;
-    [self.curve setNeedsDisplay:YES];
 
     // 状态行：以事实为准（几段非 0、前级多少、采样率）
     NSInteger active = 0;
@@ -1514,9 +1108,8 @@ static NSArray<NSDictionary *> *RLPOpraFilter(NSArray<NSDictionary *> *index, NS
 }
 
 - (void)resetTargetCurvePreview {
-    self.curve.targetCurve = nil;
+    // EQ 曲线视图已按用户要求删除；OPRA 目标曲线只保留文字说明与型号卡片缩略图。
     self.opraInfo.stringValue = @"";
-    [self.curve setNeedsDisplay:YES];
 }
 
 /// web showTargetCurveInfo(p)：曲线名称 + 「是什么 / 适合谁」+ 前级增益/段数/预设名。
@@ -1524,9 +1117,6 @@ static NSArray<NSDictionary *> *RLPOpraFilter(NSArray<NSDictionary *> *index, NS
     if (!p) { [self resetTargetCurvePreview]; return; }
     NSString *details = [p[@"details"] isKindOfClass:[NSString class]] ? p[@"details"] : @"";
     NSString *author = [p[@"author"] isKindOfClass:[NSString class]] ? p[@"author"] : @"";
-    RLPTargetCurve *curve = [RLPTargetCurveLibrary curveForKind:
-                             [RLPTargetCurveLibrary kindForDetails:details]];
-    self.curve.targetCurve = curve;
     NSString *name = [RLPTargetCurveLibrary targetCurveNameForDetails:details author:author];
     NSString *scene = [RLPTargetCurveLibrary targetCurveSceneForDetails:details author:author];
     NSString *tech = [RLPTargetCurveLibrary targetCurveTechForDetails:details author:author];
@@ -1540,7 +1130,6 @@ static NSArray<NSDictionary *> *RLPOpraFilter(NSArray<NSDictionary *> *index, NS
         RLPTr(@"前级增益："), gain, RLPTr(@"滤波段数："), (long)bands, RLPTr(@"段"),
         RLPTr(@"预设："), details.length ? details : (p[@"id"] ?: @"")];
     self.opraInfo.textColor = [RLPTheme current].mut;
-    [self.curve setNeedsDisplay:YES];
 }
 
 /// web `sInput.oninput = function () { doSearch(this.value); }` 的原生同构：
@@ -1754,7 +1343,6 @@ static NSArray<NSDictionary *> *RLPOpraFilter(NSArray<NSDictionary *> *index, NS
     self.opraStatus.textColor = t.mut;
     self.opraInfo.textColor = t.mut;
     [self syncInspectorForBand:self.inspector.bandIndex];
-    [self.curve setNeedsDisplay:YES];
 }
 
 #pragma mark - 嵌入设置页（去掉本视图自己的滚动，交给整页滚动）

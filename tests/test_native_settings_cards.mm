@@ -423,7 +423,7 @@ int main() {
         [v layoutSubtreeIfNeeded];
         Pump(0.3);
         NSView *eqPane = PaneRoot(v, @"eq");
-        Ck(CardFor(FindId(eqPane, @"eq.curve")) != nil &&
+        Ck(CardFor(FindId(eqPane, @"eq.fader")) != nil &&
            CardFor(FindId(eqPane, @"peqBypass")) != nil &&
            CardFor(FindId(eqPane, @"opra.query")) != nil,
            @"【A】EQ 页全部控件在卡片体内（旧码整页无卡片）", @"EQ 控件无卡片祖先");
