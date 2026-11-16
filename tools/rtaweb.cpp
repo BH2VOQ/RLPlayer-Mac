@@ -7270,7 +7270,14 @@ static bool writeback_start(const bool apply) {
             g_wb.err = err;
             g_wb.lastFailures = br.failureList;
             if (g_wb.lastFailures.size() > 10) g_wb.lastFailures.resize(10);
+            const bool needRescan = apply && br.written > 0;
             g_wb.running = false;
+            if (needRescan) {
+                // 2026-11-17（曲库审计已证实）：写回标签后既不更新 tracks_ 也不重扫，
+                // 专辑/曲目/搜索页会一直显示旧标签，直到用户手动重扫。
+                // 这里在后台线程按需触发一次增量扫描（startScan 自带去重与上限保护）。
+                rta::net::Library::instance().startScan(false);
+            }
         });
     }
     if (prev.joinable()) prev.join();
