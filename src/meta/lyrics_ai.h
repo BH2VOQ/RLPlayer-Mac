@@ -491,6 +491,62 @@ inline std::string lyrics_ai_cache_json(const LyricsAiResult& r) {
 
 // 先写 .part 再 rename：进程被杀/断电时最多留下一个 .part，绝不会让半截 JSON
 // 变成正式缓存 —— 半截文件有时仍是"合法 JSON"，比读不出来更危险。
+// 缓存容量上限（2026-11-16 评审 MINOR）：缓存目录只增不减会长期占盘。
+// 规则：最多 maxFiles 个 *.json、总字节 ≤ maxBytes，超出按**最近修改时间最旧**先删。
+// 0 表示该维度不限。返回删除的文件数。调用方必须已持有 lyrics_ai_cache_mutex()。
+inline size_t lyrics_cache_prune_locked(const std::filesystem::path& d,
+                                        size_t maxFiles, size_t maxBytes) {
+    std::error_code ec;
+    if (!std::filesystem::exists(d, ec) || ec) return 0;
+
+    struct Ent { std::filesystem::path p; std::filesystem::file_time_type t; size_t sz; };
+    std::vector<Ent> ents;
+    size_t total = 0;
+    for (const auto& e : std::filesystem::directory_iterator(d, ec)) {
+        if (ec) break;
+        if (e.path().filename().extension() != std::filesystem::path(".json")) continue;
+        std::error_code ec2;
+        const auto sz = e.file_size(ec2);
+        const auto tm = e.last_write_time(ec2);
+        if (ec2) continue;
+        ents.push_back({e.path(), tm, (size_t)sz});
+        total += (size_t)sz;
+    }
+
+    auto within = [&](void) {
+        return (maxFiles == 0 || ents.size() <= maxFiles)
+            && (maxBytes == 0 || total <= maxBytes);
+    };
+    if (within()) return 0;
+
+    std::sort(ents.begin(), ents.end(), [](const Ent& a, const Ent& b) {
+        return a.t < b.t;                       // 最旧在前
+    });
+
+    size_t cnt = ents.size();
+    size_t removed = 0;
+    for (const auto& e : ents) {                // 从最旧开始删，删到两条上限都满足为止
+        const bool okFiles = (maxFiles == 0 || cnt <= maxFiles);
+        const bool okBytes = (maxBytes == 0 || total <= maxBytes);
+        if (okFiles && okBytes) break;
+        std::error_code rm;
+        std::filesystem::remove(e.p, rm);
+        if (rm) continue;
+        ++removed;
+        if (cnt > 0) --cnt;
+        total = (e.sz <= total) ? (total - e.sz) : 0;
+    }
+    return removed;
+}
+
+// 公开入口：自己加锁（recursive 不需要，因为内部实现不含再次加锁的路径）。
+inline size_t lyrics_cache_prune(const std::string& dir, size_t maxFiles = 500,
+                                 size_t maxBytes = 200ull * 1024ull * 1024ull) {
+    if (dir.empty()) return 0;
+    std::lock_guard<std::mutex> lk(lyrics_ai_cache_mutex());
+    return lyrics_cache_prune_locked(lyrics_ai_u8path(dir), maxFiles, maxBytes);
+}
+
 inline bool lyrics_cache_save(const std::string& dir, const std::string& key, const LyricsAiResult& r) {
     // 失败结果不入缓存：断网/超限/解析失败都是临时状态，缓存下来会让用户
     // 永远看不到正确歌词（而界面上并没有"清缓存重算"这个入口）。
@@ -529,6 +585,8 @@ inline bool lyrics_cache_save(const std::string& dir, const std::string& key, co
             return false;
         }
     }
+    // 写完顺手做一次容量清理（仍在本锁内；上限内的正常情况是 0 次删除）。
+    (void)lyrics_cache_prune_locked(d, 500, 200ull * 1024ull * 1024ull);
     return true;
 }
 
