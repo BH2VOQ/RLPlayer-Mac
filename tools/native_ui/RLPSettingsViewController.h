@@ -7,13 +7,10 @@ NS_ASSUME_NONNULL_BEGIN
 
 /// 设置页（原生）：页签 = web `data-g` 的同一份清单，**不随模式变化**。
 ///
-/// 双模式（聆听 / 专业）已于 2026-11-12 整层拆掉（枚举 / 顶栏切换 / 侧栏分叉 /
-/// 设置页签随模式 / 工作台首页），目的是让「web 有的我是否都有」可机械验证。
+/// 聆听 / 专业模式共享同一份完整设置清单，只按通用 / 音频处理分组。
 /// 确切页签清单以 `RLPSettingsTabKeys()` 为准（parity 判据比对 web `data-g`）。
 ///
-/// 历史说明：聆听室（`RLPListeningRoom`）与专业工作台（`RLPWorkbenchViewController`）
-/// 两个视图类按铁律①（功能不删）保留在仓里，但**当前无侧栏入口**，属保留组件；
-/// 对应 i18n 词条同样保留（引擎侧生成物，不在此处裁剪）。
+/// station 随界面模式进入聆听室或专业工作台；设置里的音频处理深链始终可用。
 /// 外观（主题 light/dark）按用户要求只在**这里**改，顶栏不再放切换按钮。
 @interface RLPSettingsViewController : RLPPageViewController
 
@@ -27,6 +24,10 @@ NS_ASSUME_NONNULL_BEGIN
 
 /// 拉取 /api/llm/models 刷新模型下拉；力刷走 ?refresh=1。进页自动调一次（判据也可显式触发）。
 - (void)loadLlmModels:(BOOL)force;
+
+/// 同步当前界面模式（"listen" / "pro"）。两种模式均可打开全部 10 个设置页签，不强制切 pro。
+@property (nonatomic, copy) NSString *uiMode;
+- (void)applyUiMode:(NSString *)mode;
 
 @end
 

@@ -517,6 +517,7 @@ struct PlayerState {
     std::atomic<long long> dbgPad{0}, dbgSkips{0};   // 诊断：设备侧水位与欠载跳过次数
     std::atomic<double> volDb{0.0};    // 用户当前请求的音量（拖动滑块即时生效）
     std::atomic<double> startDb{0.0};  // 本次播放起点音量（DSP 里已按它做过抖动量化）
+    bool rawVolumeLocked = false;      // 原始 DSD 逐位直通期间锁定软件音量（只读锁，需在 mtx 下读写）
 
     // 耗时统计（ROADMAP P6a 可观测性）
     std::atomic<long long> decodeMs{0};     // 解码总耗时 (ms)
@@ -613,6 +614,7 @@ static void reset_out_format_state(const char* mode) {
         std::lock_guard<std::mutex> lk(g_ps.mtx);
         g_ps.rateFamilyPolicy.clear();
         g_ps.rateCrossFamily = false;
+        g_ps.rawVolumeLocked = false;
     }
 }
 
@@ -771,6 +773,27 @@ static void apply_dsd_src_settings(const PlayParams& p) {
 
 // ---------------- 工具 ----------------
 static std::string path_in_exe_dir(const char* name);
+
+// 严格数值解析：整串消费 + 有限值（拒绝空串、尾部垃圾 "12abc"、NaN/Inf）
+static bool parse_num_strict(const std::string& s, double& out) {
+    if (s.empty()) return false;
+    const char* b = s.c_str();
+    char* e = nullptr;
+    const double v = std::strtod(b, &e);
+    if (e == b) return false;
+    while (*e == ' ' || *e == '\t' || *e == '\r' || *e == '\n') ++e;
+    if (*e != '\0') return false;
+    if (!std::isfinite(v)) return false;
+    out = v;
+    return true;
+}
+
+// 持 g_ps.mtx 调用：原始 DSD 逐位直通播放期间拒绝非 0 dB 音量写入
+static bool write_live_volume_locked(double db) {
+    if (g_ps.playing.load() && g_ps.rawVolumeLocked && db != 0.0) return false;
+    g_ps.volDb.store(db);
+    return true;
+}
 
 // ---------------- 设置文件（rlplayer-settings.conf）的并发安全读写（2026-11-16）----------------
 // 评审 BLOCKER：POST /api/settings 原来是「读全量 → 合并 → ofstream(trunc) 覆盖写」，无锁：
@@ -1909,7 +1932,10 @@ static PlayParams parseForm(const std::string& body, std::set<std::string>* seen
         else if (k == "rate")     p.rate = v;
         // U5：PCM 采样率族策略（设置页显式键；/api/settings 白名单同名；非法值由读取侧回落 Prefer）
         else if (k == "rateFamilyPolicy") p.rateFamilyPolicy = v;
-        else if (k == "volume")   p.volume = atof(v.c_str());
+        else if (k == "volume")   {
+            double vv = 0.0;
+            if (parse_num_strict(v, vv)) p.volume = std::clamp(vv, -120.0, 20.0);
+        }
         else if (k == "hogexcl")  p.hogExclusive = (v == "1" || v == "true");
         else if (k == "gpu")      p.gpu = (v == "1");
         else if (k == "isp")      p.isp = (v == "1");
@@ -2120,7 +2146,12 @@ static PlayParams apply_conf_defaults_for_play(const PlayParams& in, const std::
         p.upnpDev = getConf("upnpdev");
     }
     if (seen.find("volume") == seen.end() && hasConf("volume")) {
-        p.volume = atof(getConf("volume").c_str());
+        double vv = 0.0;
+        if (parse_num_strict(getConf("volume"), vv)) {
+            p.volume = std::clamp(vv, -120.0, 20.0);
+        } else {
+            p.volume = -60.0;
+        }
     }
     if (seen.find("loudness") == seen.end() && hasConf("loudness")) {
         p.loudness = (getConf("loudness") == "1");
@@ -2237,19 +2268,18 @@ public:
     void set_live_gain_db(double deltaDb) override {
         // 绝对音量 = 基准 + 增量（delta 语义）
         double absDb = baseDb_ + deltaDb;
-        // 硬限幅：不允许正向增益（>0 dB 必削波），下限 -120 dB 视为静音
-        if (absDb > 0.0) absDb = 0.0;
+        // 统一后端音量范围 [-120, +20] dB；-120 dB（<= -119.5）视为真静音
+        if (absDb > 20.0) absDb = 20.0;
         if (absDb < -120.0) absDb = -120.0;
-        // 滑块最左端是 -60 dB：<= -59.5 dB 一律视为真静音（linear = 0.0），解决「最低音量还有声音」
-        const double linear = (absDb <= -59.5) ? 0.0 : std::pow(10.0, absDb / 20.0);
+        const double linear = (absDb <= -119.5) ? 0.0 : std::pow(10.0, absDb / 20.0);
         ao_->set_gain(linear);
     }
     // 起播时调用：把"用户请求的绝对音量"设为基准（render_loop 之后只发 delta）
     void set_base_gain_db(double absDb) {
-        if (absDb > 0.0) absDb = 0.0;
+        if (absDb > 20.0) absDb = 20.0;
         if (absDb < -120.0) absDb = -120.0;
         baseDb_ = absDb;
-        const double linear = (absDb <= -59.5) ? 0.0 : std::pow(10.0, absDb / 20.0);
+        const double linear = (absDb <= -119.5) ? 0.0 : std::pow(10.0, absDb / 20.0);
         ao_->set_gain(linear);
     }
     void pause() override { ao_->pause(); }
@@ -2711,7 +2741,7 @@ static bool upnp_start_track(const PlayParams& p, const std::string& file, std::
     // DSD 源必须 DoP 打包（cast_service 对未开 DoP 的 DSD 会明确拒绝 —— 铁律 3：不悄悄转码降质）
     cp.dop = !rta::net::CastManager::is_airplay_dev(p.upnpDev) &&
              (upnp_is_dsd_file(file) || p.dsd >= 64);
-    cp.initialVolumeDb = std::isfinite(p.volume) ? std::clamp(p.volume, -144.0, 0.0) : -20.0;
+    cp.initialVolumeDb = std::isfinite(p.volume) ? std::clamp(p.volume, -120.0, 20.0) : -20.0;
     cp.applyUpsample = (conf_get("cast_upsample", "0") == "1");
     // 强制目标率：默认关。打开后即使渲染器没声明目标速率，也按上限升（状态里必须标明"未获声明验证"）。
     cp.forceUpsampleRate = (conf_get("cast_upsample_force", "0") == "1");
@@ -3008,6 +3038,10 @@ static bool play_one_direct(const std::string& file, const PlayParams& p) {
         ps.played.store(0);
         ps.startDb.store(0.0);
         ps.volDb.store(0.0);
+        {
+            std::lock_guard<std::mutex> lk(ps.mtx);
+            ps.rawVolumeLocked = true;
+        }
         ps.gpu = false;
         ps.gpuConvUsed.store(false);   // 直通路径不会有卷积，显式归零（#8）
         ps.rgMode = "off";
@@ -3509,7 +3543,10 @@ static rta::engine::DeviceCaps preset_probe_caps() {
     const auto rates = probe_rates_cached(devId, bits, ch, "PRESET_CAPS");
     c.rates = rates;
     c.maxRate = rates.empty() ? 0u : rates.back();
-    c.exclusive = !rates.empty();
+    const std::string normBe = normalize_backend_id(savedBackend);
+    const bool isSharedOrRemote = (normBe == "coreaudio-shared" || normBe == "upnp" ||
+                                   normBe == "naa" || normBe == "null");
+    c.exclusive = (!isSharedOrRemote && !rates.empty());
     c.dopMax = rta::engine::preset_dop_max_from_rates(rates);
     c.dop = !c.dopMax.empty();
     c.dsdNative = false;                       // macOS 没有 ASIO 原生 DSD 驱动通路
@@ -3688,6 +3725,23 @@ static std::string preset_caps_json() {
     return j.str();
 }
 
+static void peq_load_current();
+static bool peq_save_current(const rta::dsp::PeqSettings& s);
+
+// 读取已保存音量（[-120, +20] dB），缺失或非法时回落 -60 dB（铁律 1：默认不可闻）
+static double saved_volume_setting() {
+    std::lock_guard<std::recursive_mutex> lk(conf_mutex());
+    const auto conf = load_conf_map();
+    auto it = conf.find("volume");
+    if (it != conf.end() && !it->second.empty()) {
+        double db = -60.0;
+        if (parse_num_strict(it->second, db) && db >= -120.0 && db <= 20.0) {
+            return db;
+        }
+    }
+    return -60.0;
+}
+
 // POST /api/preset/apply?profile=bitperfect|pcm|dsd|pcm2dsd
 // 成功：{"ok":true,"profile":…,"applied":{…},"notes":[…]}；参数非法或写盘失败：400 + {"ok":false,"error":…}
 static std::string preset_apply_json(const std::string& path) {
@@ -3702,50 +3756,132 @@ static std::string preset_apply_json(const std::string& path) {
         return std::string("{\"ok\":false,\"error\":\"profile 非法（只接受 bitperfect / pcm / dsd / pcm2dsd）：") +
                jesc(profStr) + "\"}";
     }
+    const bool keepVolume = q.count("keep_volume") && q.at("keep_volume") == "1";
+    const bool stoppedOnly = q.count("require_stopped") && q.at("require_stopped") == "1";
+    if (stoppedOnly) {
+        if (g_ps.playing.load() || g_ps.paused.load() || g_upnpPlayer.load()) {
+            rta::net::webui_set_status(409);
+            return "{\"ok\":false,\"error\":\"请先停止播放，再应用播放方式\"}";
+        }
+    }
     const DeviceCaps caps = preset_probe_caps();
     play_log(preset_caps_line(caps));
     std::string srcNote;
     const SourceInfo src = preset_source_info(q, srcNote);
     PresetSettings s = plan_preset(prof, caps, src);
+    if (keepVolume) s.volumeDb = saved_volume_setting();
+    const auto preserve = q.find("preserve_processing");
+    if (prof != PresetProfile::BitPerfect && preserve != q.end() && preserve->second == "1") {
+        s.clearEqIr = false;
+    }
+    const rta::engine::BitPerfectCheck bpCheck = rta::engine::check_bit_perfect(s, caps, src);
 
-    // ---- 落盘（键名与 /api/play 的请求键名一致）----
+    // ---- 落盘（完整事务：清除会覆盖新预设的旧覆盖值）----
     std::map<std::string, std::string> kv;
-    kv["volume"]   = "0";                        // 官方推荐链路：0 dB（预衰减交给 DSP 的余量逻辑）
-    kv["rate"]     = s.rate;
-    kv["shaper"]   = s.shaper;
-    kv["filter"]   = s.filter;
+    if (!keepVolume) kv["volume"] = "0";
+    kv["rate"]            = s.rate;
+    kv["shaper"]          = s.shaper;
+    kv["filter"]          = s.filter;
     // 1x 与 Nx 用同一个滤波器：否则 88.2k 以上的源会走另一套（用户以为预设生效了，其实没有）
-    kv["filterNx"] = "";
-    kv["sdmfilt"]  = "";
-    kv["sdmfiltnx"] = "";
-    // ★ taps 写 0（= 不手动覆盖）：minTapsPerInput=512 由 poly-sinc-tight-lp 预设自带
-    //（filter_families.h:314 的 tapsPerInput=512，rtaweb 的 cfg.minTapsPerInput=fp->tapsPerInput）。
-    // 写 512 反而会被 /api/play 当成"总抽头预算"覆盖成 max(1024,512)=1024，是错的旋钮。
-    kv["taps"]     = "0";
-    kv["dsd"]      = std::to_string(s.dsd);
-    kv["directsdm"] = s.directSdm ? "1" : "0";
-    if (!s.modFamily.empty()) kv["modfamily"] = s.modFamily;
-    if (s.modOrder > 0)       kv["modorder"] = std::to_string(s.modOrder);
+    kv["filterNx"]        = "";
+    kv["sdmfilt"]         = "";
+    kv["sdmfiltnx"]       = "";
+    // 清除会覆盖新 preset 的手动滤波参数
+    kv["taps"]            = "0";
+    kv["mintapsperinput"] = "0";
+    kv["atten"]           = "0";
+    kv["transition"]      = "0";
+    kv["phase"]           = "";
+    kv["dsd"]             = std::to_string(s.dsd);
+    kv["directsdm"]       = s.directSdm ? "1" : "0";
+    // 调制参数使用安全默认值（不盲目清 0，避免触发 SDM 1-bit 拐点准入闸门错误）
+    kv["modfamily"]       = !s.modFamily.empty() ? s.modFamily : std::string("dsd");
+    kv["modorder"]        = (s.modOrder > 0) ? std::to_string(s.modOrder) : std::string("5");
+    kv["modcut"]          = "0";   // 0 = 100 kHz 默认拐点（通过 SDM 准入）
+    kv["moddith"]         = "-1";  // <0 = 默认 0.01
+    kv["oobgain"]         = "5";
+    kv["ahmbits"]         = "8";
+    kv["dsdkind"]         = "fir";
+    kv["dsdconv"]         = "narrow";
+    kv["dsd2stage"]       = "1";
     if (prof != PresetProfile::BitPerfect) {
         kv["twostage"] = "0";                    // poly-sinc-tight-lp 自带 twoStage=false
     }
     if (s.clearEqIr) {
-        kv["eq"]         = "";
-        kv["ir"]         = "";
-        kv["irgpu"]      = "0";
-        kv["loudness"]   = "0";
-        kv["atten"]      = "0";                  // 手动阻带衰减覆盖（以预设值为准）
-        kv["transition"] = "0";
-        kv["phase"]      = "";
-        kv["trim"]       = "0,0,0,0,0,0,0,0";
+        kv["eq"]                 = "";
+        kv["ir"]                 = "";
+        kv["irgpu"]              = "0";
+        kv["loudness"]           = "0";
+        kv["trim"]               = "0,0,0,0,0,0,0,0";
+        // 清除 ReplayGain 与 OPRA 残留
+        kv["rg.mode"]            = "off";
+        kv["rg_mode"]            = "off";
+        kv["rgmode"]             = "off";
+        kv["rg"]                 = "off";
+        kv["rg.preamp"]          = "0.0";
+        kv["rg_preamp"]          = "0.0";
+        kv["rgpreamp"]           = "0.0";
+        kv["preamp"]             = "0.0";
+        kv["opraproduct"]        = "";
+        kv["oprapreset"]         = "";
+        kv["opravendor"]         = "";
         // 预衰减：只有原音直通关掉 ISP 扫描（否则 ④预衰减一条永远不成立）；
         // 升频/DSD 档保留 ISP —— 它挡的是过采样峰值削波，与"清空 EQ/IR"是两件事。
-        kv["isp"]        = (prof == PresetProfile::BitPerfect) ? "0" : "1";
+        kv["isp"]                = (prof == PresetProfile::BitPerfect) ? "0" : "1";
+        if (!g_peq) peq_load_current();
+        if (g_peq) {
+            auto peq = g_peq->settings();
+            peq.bypass = true;
+            if (!peq_save_current(peq)) {
+                rta::net::webui_set_status(400);
+                return "{\"ok\":false,\"error\":\"无法保存 PEQ 旁路；预设未应用\"}";
+            }
+            g_peq->set_settings(peq);
+        }
     }
     std::string werr;
     if (!preset_write_conf(kv, werr)) {
         rta::net::webui_set_status(400);
         return std::string("{\"ok\":false,\"error\":\"写入设置失败：") + jesc(werr) + "\"}";
+    }
+    // 同步内存参数快照（不热重启当前正在播放的曲目）
+    {
+        PlayParams gp = params_snapshot();
+        if (!keepVolume) gp.volume = 0.0;
+        gp.rate = s.rate;
+        gp.shaper = s.shaper;
+        gp.filter = s.filter;
+        gp.filterNx.clear();
+        gp.sdmFilter.clear();
+        gp.sdmFilterNx.clear();
+        gp.taps = 0;
+        gp.minTapsPerInput = 0;
+        gp.atten = 0.0;
+        gp.transition = 0.0;
+        gp.phase.clear();
+        gp.dsd = s.dsd;
+        gp.directSdm = (s.directSdm != 0);
+        gp.modFamily = kv["modfamily"];
+        gp.modOrder = std::atoi(kv["modorder"].c_str());
+        gp.modCutoff = 0.0;
+        gp.modDither = -1.0;
+        gp.oobGain = 5.0;
+        gp.ahmBits = 8;
+        gp.dsdKind = "fir";
+        gp.dsdConv = "narrow";
+        gp.dsd2Stage = true;
+        if (prof != PresetProfile::BitPerfect) gp.twoStage = false;
+        if (s.clearEqIr) {
+            gp.eqFile.clear();
+            gp.convIr.clear();
+            gp.convGpu = false;
+            gp.loudness = false;
+            for (int i = 0; i < 8; ++i) gp.trim[i] = 0.0;
+            gp.rgMode = "off";
+            gp.rgPreamp = 0.0;
+            gp.isp = (prof != PresetProfile::BitPerfect);
+        }
+        params_store(gp);
     }
 
     // ---- 说明（决策 notes + 落盘事实）----
@@ -3754,19 +3890,26 @@ static std::string preset_apply_json(const std::string& path) {
     for (const auto& n : s.notes) notes.push_back(n);
     if (s.minTapsPerInput > 0) {
         notes.push_back("minTapsPerInput=" + std::to_string(s.minTapsPerInput) +
-                        " 由 poly-sinc-tight-lp 预设自带（手动 taps 覆盖已清 0，避免被当成总抽头预算）");
+                        " 由 poly-sinc-tight-lp 预设自带（手动 taps/mintapsperinput 覆盖已清 0，避免被当成总抽头预算）");
     }
-    if (s.clearEqIr) notes.push_back("已清空 EQ/IR/等响度/每声道增益" +
-                                     std::string(prof == PresetProfile::BitPerfect
-                                                 ? "，并关闭 ISP 预衰减" : ""));
+    if (!s.clearEqIr) {
+        notes.push_back("已保留用户 EQ、IR 校正、PEQ 与声道增益");
+    } else {
+        notes.push_back("已清空 EQ/IR/PEQ旁路/等响度/每声道增益/RG/OPRA 残留" +
+                        std::string(prof == PresetProfile::BitPerfect ? "，并关闭 ISP 预衰减" : ""));
+    }
+
+    const bool packNative = conf_get("dsdnative", "0") == "1";
+    const std::string packing = packNative ? "native" : "dop";
 
     play_log("PRESET_APPLY profile=" + std::string(preset_profile_name(prof)) +
              " rate=" + s.rate + " filter=" + (s.filter.empty() ? std::string("-") : s.filter) +
              " tapsPerInput=" + std::to_string(s.minTapsPerInput) +
              " dsd=" + std::to_string(s.dsd) +
-             " modfamily=" + (s.modFamily.empty() ? std::string("-") : s.modFamily) +
-             " modorder=" + std::to_string(s.modOrder) +
-             " shaper=" + s.shaper + " volume=0 directsdm=" + std::to_string(s.directSdm) +
+             " modfamily=" + kv["modfamily"] +
+             " modorder=" + kv["modorder"] +
+             " shaper=" + s.shaper + " volume=" + std::to_string(s.volumeDb) +
+             " directsdm=" + std::to_string(s.directSdm) +
              " src=" + (src.isDsd ? "dsd" : "pcm") + "/" +
              std::to_string((unsigned long long)src.srcRate) +
              " notes=" + std::to_string(notes.size()));
@@ -3775,14 +3918,26 @@ static std::string preset_apply_json(const std::string& path) {
     j << "{\"ok\":true,\"profile\":\"" << preset_profile_name(prof) << "\",\"applied\":{"
       << "\"rate\":\"" << jesc(s.rate) << "\""
       << ",\"filter\":\"" << jesc(s.filter) << "\""
+      << ",\"clearProcessing\":" << (s.clearEqIr ? "true" : "false")
+      << ",\"filterNx\":\"\""
       << ",\"minTapsPerInput\":" << s.minTapsPerInput
       << ",\"dsd\":\"" << s.dsd << "\""
       << ",\"modfamily\":\"" << jesc(s.modFamily) << "\""
       << ",\"modorder\":" << s.modOrder
       << ",\"shaper\":\"" << jesc(s.shaper) << "\""
-      << ",\"volume\":" << (long long)std::llround(s.volumeDb)
+      << ",\"volume\":" << s.volumeDb
       << ",\"directsdm\":" << s.directSdm
-      << "},\"notes\":[";
+      << ",\"packing\":\"" << packing << "\""
+      << ",\"dsdNativeAvailable\":false"
+      << ",\"dsdNativeMax\":\"\""
+      << ",\"bitPerfectOk\":" << (bpCheck.ok ? "true" : "false")
+      << ",\"bitPerfectViolations\":[";
+    for (size_t i = 0; i < bpCheck.violations.size(); ++i) {
+        if (i) j << ",";
+        j << "\"" << jesc(bpCheck.violations[i]) << "\"";
+    }
+    j << "]}"
+      << ",\"notes\":[";
     for (size_t i = 0; i < notes.size(); ++i) {
         if (i) j << ",";
         j << "\"" << jesc(notes[i]) << "\"";
@@ -4258,10 +4413,10 @@ static bool play_one_impl(const std::string& file, const PlayParams& pIn, rta::a
             ps.rgNote = rgDec.note;
         }
         // 2026-10-25（消除双重衰减与死锁）：
-        // 音量由设备输出层（CoreAudioOutput::render）通过原子变量毫秒级实时应用。
-        // Pipeline 软件音量固定不衰减（0.0 dB），消除"低音量起播后无法拉大"及"双重衰减"。
-        cfg.volumeEnabled = false;
-        cfg.volumeDb = 0.0;
+        // CoreAudio 后端音量由设备输出层（CoreAudioOutput::render）通过原子变量毫秒级实时应用；
+        // Null 后端无硬件输出层，因此仅在 backend == "null" 时由 Pipeline 应用软件音量（[-120, +20] dB）。
+        cfg.volumeEnabled = (p.backend == "null");
+        cfg.volumeDb = cfg.volumeEnabled ? std::clamp(p.volume, -120.0, 20.0) : 0.0;
         cfg.loudnessEnabled = p.loudness;
         if (p.volRamp > 0.0) cfg.volumeRampMs = p.volRamp;
         // GPU：升频与卷积都走显卡（rtagpu.dll 缺失时自动退回 CPU，结果逐位相同）
@@ -13191,9 +13346,8 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
                            hasPhase || hasTaps || hasTransition || hasAtten || hasTwoStage;
                 }
             } pendingFilter;
-            // U5：rateFamilyPolicy 值域 prefer|strict|compatible。非法值**直接拒绝**：
-            // 不静默回落（回落会把用户的选择悄悄改成别的语义），也不写 conf。
-            // 放在合并/写盘之前 —— 拒绝必须整请求生效，不能留下半写状态。
+            // U5：rateFamilyPolicy 值域 prefer|strict|compatible；uimode 值域 listen|pro；volume 严格数字校验。
+            // 非法值直接拒绝，不静默回落也不写 conf。
             {
                 std::istringstream vp(rq.body);
                 std::string vt;
@@ -13201,10 +13355,22 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
                     const size_t e = vt.find((char)61);
                     if (e == std::string::npos) continue;
                     const std::string vk = urlDecode(vt.substr(0, e));
-                    if (vk != "rateFamilyPolicy") continue;
                     const std::string vv = urlDecode(vt.substr(e + 1));
-                    if (!rta::audio::valid_rate_family_policy(vv))
+                    if (vk == "rateFamilyPolicy" && !rta::audio::valid_rate_family_policy(vv)) {
+                        rta::net::webui_set_status(400);
                         return "{\"ok\":false,\"error\":\"rateFamilyPolicy 只接受 prefer / strict / compatible\"}";
+                    }
+                    if (vk == "uimode" && vv != "listen" && vv != "pro") {
+                        rta::net::webui_set_status(400);
+                        return "{\"ok\":false,\"error\":\"uimode 只接受 listen / pro\"}";
+                    }
+                    if (vk == "volume") {
+                        double db = 0.0;
+                        if (!parse_num_strict(vv, db)) {
+                            rta::net::webui_set_status(400);
+                            return "{\"ok\":false,\"error\":\"volume 参数非法：必须是有限数字（范围 -120..+20 dB）\"}";
+                        }
+                    }
                 }
             }
             std::istringstream is(rq.body);
@@ -13226,7 +13392,7 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
                                            "hogexcl",
                                            "buffer", "volume", "loudness", "isp", "twostage",
                                            "device", "bits", "taps", "atten", "transition", "phase",
-                                           "modfamily", "oobgain", "ahmbits", "modcut", "moddith", "ir", "irgpu", "ramp", "theme", "uistyle", "lang", "remoteview", "eq",
+                                           "modfamily", "oobgain", "ahmbits", "modcut", "moddith", "ir", "irgpu", "ramp", "theme", "uistyle", "uimode", "lang", "remoteview", "eq",
                                            "gpuvendor", "dsdnative", "directsdm", "dsdkind", "dsdconv", "dsd2stage",
                                            "backend", "naahost", "upnpdev", "channels", "trim",
                                            "inbackend", "indev", "inoffset", "inbuf", "inmon",
@@ -13260,6 +13426,15 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
                 // 2026-11-07（1.1.4-beta3）：数据源顺序键只认注册表 id。落盘前统一规范化
                 //（去未知 id / 去重 / 把没提到的 id 按默认顺序补到尾部），conf 里永远是一个完整排列，
                 // 读侧不必再做第二套猜测。空值 = 回到默认顺序（显式写全，便于人工核对）。
+                if (k == "volume") {
+                    double db = 0.0;
+                    if (parse_num_strict(clean, db)) {
+                        db = std::clamp(db, -120.0, 20.0);
+                        char nb[32];
+                        std::snprintf(nb, sizeof(nb), "%g", db);
+                        clean = nb;
+                    }
+                }
                 if (k == "metasrcorder")
                     clean = rta::meta::pv_order_join(rta::meta::pv_parse_order(clean));
                 // 2026-11-16：这里以前当场 Library::setScanThreads / set_stream_decode_enabled。
@@ -13457,6 +13632,7 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
         // U5：采样率族策略缺省值（与 PlayParams 默认一致 = compatible）。
         // 没写进 conf 也要让设置页拿到当前档位，否则新装用户的设置页永远显示空档。
         injectKv("rateFamilyPolicy", "compatible");
+        injectKv("uimode", "listen");
         injectKv("rg.preventClipping", "1");
         injectKv("rg.preamp", "0.0");
         for (const rta::meta::ProviderDesc& pd : rta::meta::provider_registry()) {
@@ -13540,31 +13716,59 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
     // 让后端把真相源交出来，前端只负责显示 —— 避免前端再抄一份相位表（那必然漂移）。
     if (rq.path.rfind("/api/filters", 0) == 0) {
         ct = "application/json; charset=utf-8";
-        std::ostringstream j;
-        j << "{\"ok\":true,\"items\":[";
-        bool firstF = true;
-        for (const auto& fp : rta::dsp::filter_presets()) {
-            if (!firstF) j << ",";
-            firstF = false;
+        auto qget = [&](const char* key) -> double {
+            std::string k = std::string("?") + key + "=";
+            size_t q = rq.path.find(k);
+            if (q == std::string::npos) {
+                k = std::string("&") + key + "=";
+                q = rq.path.find(k);
+            }
+            if (q == std::string::npos) return -1.0;
+            return std::atof(rq.path.c_str() + q + k.size());
+        };
+        double contentHz = 20000.0;
+        { const double v = qget("content"); if (v > 1000.0 && v < 200000.0) contentHz = v; }
+        double srcFs = 44100.0;
+        { const double v = qget("fs"); if (v >= 8000.0 && v <= 1536000.0) srcFs = v; }
+        (void)contentHz;
+        auto emit_item = [&](std::ostringstream& j, const rta::dsp::FilterPreset& fp,
+                             const char* overrideName, const char* resolvedName) {
             const char* ph = (fp.phase == rta::dsp::PhaseKind::Minimum) ? "minimum"
                            : (fp.phase == rta::dsp::PhaseKind::Intermediate) ? "intermediate"
                            : "linear";
             const char* phCn = (fp.phase == rta::dsp::PhaseKind::Minimum) ? "最小相位"
                              : (fp.phase == rta::dsp::PhaseKind::Intermediate) ? "混合相位"
                              : "线性相位";
-            // U8（2026-11-16）：每项追加 family / familyLabel（**只加字段，原有字段一个不动**）。
-            // 族来自 src/dsp/filter_family.h 的前缀规则（纪要 + 名字表），未知名归 unknown；
-            // 展示标签再由名字后缀补相位名，前端不用再抄一份族表。
             const rta::dsp::FilterFamily fam = rta::dsp::filter_family(fp.name);
-            j << "{\"name\":\"" << jesc(fp.name) << "\""
+            j << "{\"name\":\"" << jesc(overrideName ? overrideName : fp.name) << "\""
               << ",\"phase\":\"" << ph << "\""
               << ",\"phaseName\":\"" << phCn << "\""
               << ",\"taps\":" << fp.taps
               << ",\"twoStage\":" << (fp.twoStage ? "true" : "false")
               << ",\"forNx\":" << (fp.forNx ? "true" : "false")
+              << ",\"attenDb\":" << fp.attenDb
+              << ",\"transition\":" << fp.transition
+              << ",\"apodizing\":" << (fp.apodizing ? "true" : "false")
+              << ",\"tapsPerInput\":" << fp.tapsPerInput
               << ",\"family\":\"" << jesc(rta::dsp::filter_family_id(fam)) << "\""
-              << ",\"familyLabel\":\"" << jesc(rta::dsp::filter_family_full_label(fp.name)) << "\""
-              << "}";
+              << ",\"familyLabel\":\"" << jesc(rta::dsp::filter_family_full_label(fp.name)) << "\"";
+            if (resolvedName && *resolvedName) {
+                j << ",\"resolved\":\"" << jesc(resolvedName) << "\"";
+            }
+            j << "}";
+        };
+        std::ostringstream j;
+        j << "{\"ok\":true,\"items\":[";
+        bool firstF = true;
+        // "auto" 入口：按真实预设表解析（不返回虚名）
+        if (const auto* ap = rta::dsp::find_preset("poly-sinc-short-lp", srcFs >= 88200.0)) {
+            emit_item(j, *ap, "auto", ap->name);
+            firstF = false;
+        }
+        for (const auto& fp : rta::dsp::filter_presets()) {
+            if (!firstF) j << ",";
+            firstF = false;
+            emit_item(j, fp, nullptr, nullptr);
         }
         j << "]}";
         return j.str();
@@ -14174,11 +14378,27 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
     if (rq.path.rfind("/api/volume", 0) == 0) {
         ct = "application/json; charset=utf-8";
         const size_t q = rq.path.find("?db=");
+        if (q == std::string::npos) {
+            rta::net::webui_set_status(400);
+            return "{\"ok\":false,\"error\":\"缺少 db 参数：必须明确提供 -120..+20 dB 音量\"}";
+        }
         double db = 0.0;
-        if (q != std::string::npos) db = atof(urlDecode(rq.path.substr(q + 4)).c_str());
-        if (db > 0.0) db = 0.0;
-        if (db < -120.0) db = -120.0;
-        ps.volDb.store(db);
+        {
+            const std::string raw = urlDecode(rq.path.substr(q + 4));
+            if (!parse_num_strict(raw, db)) {
+                rta::net::webui_set_status(400);
+                return "{\"ok\":false,\"error\":\"db 参数非法：必须是有限数字（范围 -120..+20 dB）\"}";
+            }
+            if (db > 20.0) db = 20.0;
+            if (db < -120.0) db = -120.0;
+        }
+        {
+            std::lock_guard<std::mutex> volumeLock(ps.mtx);
+            if (!write_live_volume_locked(db)) {
+                rta::net::webui_set_status(409);
+                return "{\"ok\":false,\"error\":\"原始 DSD 码流不支持软件音量；请使用设备音量，或切换到支持音量处理的 DoP。\",\"volumeWritable\":false,\"rawVolumeLocked\":true,\"db\":0}";
+            }
+        }
         {
             std::lock_guard<std::mutex> lk(g_paramsMtx);
             g_params.volume = db;
@@ -14189,14 +14409,18 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
                 return "{\"ok\":false,\"upnp\":true,\"error\":\"该渲染器未提供 RenderingControl 服务，无法调整音量（请在渲染器端调节）\"}";
             }
             rta::net::CastManager::instance().set_volume_db(db);
-            return "{\"ok\":true,\"db\":" + std::to_string(db) + ",\"upnp\":true}";
+            char nb[32];
+            std::snprintf(nb, sizeof(nb), "%.6f", db);
+            return std::string("{\"ok\":true,\"db\":") + nb + ",\"upnp\":true,\"volumeWritable\":true,\"rawVolumeLocked\":false}";
         }
         if (!g_activeDop.load()) {
             if (OutSink* s = g_activeSink.load()) {
                 s->set_live_gain_db(db - ps.startDb.load());
             }
         }
-        return "{\"ok\":true,\"db\":" + std::to_string(db) + "}";
+        char nb[32];
+        std::snprintf(nb, sizeof(nb), "%.6f", db);
+        return std::string("{\"ok\":true,\"db\":") + nb + ",\"volumeWritable\":true,\"rawVolumeLocked\":false}";
     }
 
     if (rq.path.rfind("/api/seek", 0) == 0) {
@@ -14259,6 +14483,7 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
             std::lock_guard<std::mutex> lk(ps.mtx);
             ps.bpState.clear();
             ps.bpWhy.clear();
+            ps.rawVolumeLocked = false;
         }
         return "{\"ok\":true}";
     }
@@ -14322,6 +14547,7 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
         const bool isCastPreparing = (castSt.phase == "connecting" || castSt.phase == "decoding" || castSt.phase == "discovering");
         const bool playingStat = castMode ? (isCastPlaying || isCastPreparing) : ps.playing.load();
         const bool pausedStat = castMode ? (castTransition ? false : (castSt.paused || castSt.transportState == "PAUSED" || castSt.transportState == "PAUSED_PLAYBACK")) : ps.paused.load();
+        const bool rawVolLockedStat = (playingStat && !castMode && ps.rawVolumeLocked);
         const std::string curStat = castMode
             ? (castTransition ? ps.current : (!castSt.sourceFile.empty() ? castSt.sourceFile : ps.current))
             : ((castFailed && !castSt.sourceFile.empty()) ? castSt.sourceFile : ps.current);
@@ -14351,6 +14577,8 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
           << ",\"error\":\"" << jesc(errStat) << "\""
           << ",\"info\":\"" << jesc(ps.info) << "\""
           << ",\"paused\":" << (pausedStat ? "true" : "false")
+          << ",\"rawVolumeLocked\":" << (rawVolLockedStat ? "true" : "false")
+          << ",\"volumeWritable\":" << (rawVolLockedStat ? "false" : "true")
           << ",\"pos\":" << pos
           << ",\"dur\":" << dur
           << ",\"outRate\":" << rateStat

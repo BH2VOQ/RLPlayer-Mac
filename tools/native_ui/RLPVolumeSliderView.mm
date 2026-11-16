@@ -91,6 +91,7 @@ static const CGFloat kKnobR = 7.0;         // 滑块半径
 
 - (void)setIsLocked:(BOOL)isLocked {
     _isLocked = isLocked;
+    if (isLocked) _dragging = NO;
     _mute.enabled = !isLocked;
     [self setNeedsDisplay:YES];
 }
@@ -116,7 +117,7 @@ static const CGFloat kKnobR = 7.0;         // 滑块半径
     }
     if (_mute) {
         NSString *sym = (_db <= RLPVolSliderMinDb + 0.05) ? @"speaker.slash.fill"
-            : (_db < RLPVolSliderDbToNorm(0.0) ? @"speaker.fill" : @"speaker.wave.3.fill");
+            : (_db < 0.0 ? @"speaker.fill" : @"speaker.wave.3.fill");
         NSImage *img = [NSImage imageWithSystemSymbolName:sym accessibilityDescription:RLPTr(@"音量")];
         _mute.image = img;
         _mute.imagePosition = NSImageOnly;
@@ -158,13 +159,15 @@ static const CGFloat kKnobR = 7.0;         // 滑块半径
 }
 
 - (CGFloat)xForNorm:(double)norm {
+    const NSRect track = [self trackRect];
     const double n = MAX(0.0, MIN(1.0, norm));
-    return NSMinX(_track) + (CGFloat)n * NSWidth(_track);
+    return NSMinX(track) + (CGFloat)n * NSWidth(track);
 }
 
 - (double)normForX:(CGFloat)x {
-    if (NSWidth(_track) <= 1) return 0.5;
-    return MAX(0.0, MIN(1.0, (double)((x - NSMinX(_track)) / NSWidth(_track))));
+    const NSRect track = [self trackRect];
+    if (NSWidth(track) <= 1) return 0.5;
+    return MAX(0.0, MIN(1.0, (double)((x - NSMinX(track)) / NSWidth(track))));
 }
 
 #pragma mark - 交互
@@ -178,10 +181,11 @@ static const CGFloat kKnobR = 7.0;         // 滑块半径
         if (self.onCommit) self.onCommit(_db);
         return;
     }
+    const NSRect track = [self trackRect];
     NSPoint p = [self convertPoint:event.locationInWindow fromView:nil];
     // 点轨道以外（比如只在数值上点）不改变音量，避免误触。
-    if (!NSMouseInRect(p, NSInsetRect(_track, -kKnobR, -kKnobR * 2), [self isFlipped]) &&
-        !NSMouseInRect(p, NSInsetRect(_track, -6, -10), NO)) {
+    if (!NSMouseInRect(p, NSInsetRect(track, -kKnobR, -kKnobR * 2), [self isFlipped]) &&
+        !NSMouseInRect(p, NSInsetRect(track, -6, -10), NO)) {
         [super mouseDown:event];
         return;
     }
@@ -200,6 +204,7 @@ static const CGFloat kKnobR = 7.0;         // 滑块半径
 
 - (void)mouseDragged:(NSEvent *)event {
     if (!_dragging || self.isLocked) return;
+    const NSRect track = [self trackRect];
     NSPoint p = [self convertPoint:event.locationInWindow fromView:nil];
     // **增量**映射：拖动期间不改"点哪到哪"，只按指针位移走。
     // 直接绝对映射的问题：一旦指针偏离轨道中心线，同一次拖动会自己加速，
@@ -207,7 +212,7 @@ static const CGFloat kKnobR = 7.0;         // 滑块半径
     const BOOL fine = (event.modifierFlags & NSEventModifierFlagOption) != 0;
     const CGFloat sens = fine ? 0.25 : 1.0;
     const CGFloat dx = (p.x - _dragStartX) * sens;
-    const double n = MAX(0.0, MIN(1.0, _dragStartNorm + (double)(dx / MAX(1.0, NSWidth(_track)))));
+    const double n = MAX(0.0, MIN(1.0, _dragStartNorm + (double)(dx / MAX(1.0, NSWidth(track)))));
     const double db = RLPVolSliderNormToDb(n);
     if (fabs(db - _db) < 0.0499) return;
     self.db = db;
@@ -253,11 +258,12 @@ static const CGFloat kKnobR = 7.0;         // 滑块半径
 - (void)drawRect:(NSRect)dirty {
     (void)dirty;
     RLPTheme *t = [RLPTheme current];
+    const NSRect track = [self trackRect];
     const double norm = RLPVolSliderDbToNorm(_db);
     const CGFloat kx = [self xForNorm:norm];
 
     // 底槽：整条淡灰（一眼看出"还能往哪走"）
-    NSBezierPath *slot = [NSBezierPath bezierPathWithRoundedRect:_track
+    NSBezierPath *slot = [NSBezierPath bezierPathWithRoundedRect:track
                                                         xRadius:kTrackH / 2 yRadius:kTrackH / 2];
     [[t.mut colorWithAlphaComponent:0.28] setFill];
     [slot fill];
@@ -267,7 +273,7 @@ static const CGFloat kKnobR = 7.0;         // 滑块半径
     const CGFloat x0 = [self xForNorm:RLPVolSliderDbToNorm(0.0)];
     if (fabs(kx - x0) > 0.5) {
         const CGFloat left = MIN(x0, kx), right = MAX(x0, kx);
-        NSRect fillRect = NSMakeRect(left, NSMinY(_track), right - left, kTrackH);
+        NSRect fillRect = NSMakeRect(left, NSMinY(track), right - left, kTrackH);
         NSBezierPath *fp = [NSBezierPath bezierPathWithRoundedRect:fillRect
                                                           xRadius:kTrackH / 2 yRadius:kTrackH / 2];
         [(self.isLocked ? [t.accent colorWithAlphaComponent:0.35] : t.accent) setFill];
@@ -276,14 +282,14 @@ static const CGFloat kKnobR = 7.0;         // 滑块半径
 
     // 0 dB 刻度短线：给"回到中性"一个可对齐的锚
     NSBezierPath *zero = [NSBezierPath bezierPath];
-    [zero moveToPoint:NSMakePoint(x0, NSMinY(_track) - 3)];
-    [zero lineToPoint:NSMakePoint(x0, NSMaxY(_track) + 3)];
+    [zero moveToPoint:NSMakePoint(x0, NSMinY(track) - 3)];
+    [zero lineToPoint:NSMakePoint(x0, NSMaxY(track) + 3)];
     zero.lineWidth = 1.0;
     [[t.mut colorWithAlphaComponent:0.55] setStroke];
     [zero stroke];
 
     // 滑块：白色圆 + 强调色描边（拖动时加粗）
-    NSRect knob = NSMakeRect(kx - kKnobR, NSMidY(_track) - kKnobR, kKnobR * 2, kKnobR * 2);
+    NSRect knob = NSMakeRect(kx - kKnobR, NSMidY(track) - kKnobR, kKnobR * 2, kKnobR * 2);
     NSBezierPath *kp = [NSBezierPath bezierPathWithOvalInRect:knob];
     [[NSColor whiteColor] setFill];
     [kp fill];

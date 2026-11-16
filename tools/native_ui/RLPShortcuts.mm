@@ -7,6 +7,7 @@ const double RLPVolumeStepCoarseDb = 0.5;
 const double RLPVolumeStepFineDb   = 0.1;
 const double RLPVolumeSilentDb     = -120.0;
 const double RLPVolumeAudibleDb    = -54.5;
+const double RLPVolumeMaxDb        = 20.0;
 
 /// web `volDbToPos(db) <= VOL_SILENT_POS` 的等价判定：-55 以下（含 -120）都算静音档。
 /// 直接用阈值比跨整条曲线更稳（曲线本身会把 -55..-120 全压到 0）。
@@ -64,5 +65,18 @@ double RLPVolumeNudgeDb(double currentDb, double stepDb, BOOL *changed) {
     }
     next = round(next * 10.0) / 10.0;   // 浮点残留按 1 位小数收（标签与下发必须同一个数）
     if (changed) *changed = (next != cur);
+    return next;
+}
+
+double RLPVolumeStepDb(double currentDb, double stepDb, BOOL *changed) {
+    if (changed) *changed = NO;
+    if (!isfinite(stepDb) || stepDb == 0.0) return currentDb;
+    double cur = isfinite(currentDb) ? currentDb : 0.0;
+    cur = round(fmin(RLPVolumeMaxDb, fmax(RLPVolumeSilentDb, cur)) * 10.0) / 10.0;
+    const double grid = (fabs(stepDb) >= RLPVolumeStepCoarseDb - 1e-9) ? RLPVolumeStepCoarseDb
+                                                                      : RLPVolumeStepFineDb;
+    double next = round((cur + stepDb) / grid) * grid;
+    next = round(fmin(RLPVolumeMaxDb, fmax(RLPVolumeSilentDb, next)) * 10.0) / 10.0;
+    if (changed) *changed = (fabs(next - cur) > 1e-9);
     return next;
 }

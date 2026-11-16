@@ -21,7 +21,11 @@
 
 @interface RLPQuickStartViewController ()
 @property (nonatomic, strong) NSStackView *stack;
-// 四张卡
+@property (nonatomic, strong) NSButton *foldersButton;
+// 四张卡容器与响应式约束
+@property (nonatomic, strong) NSView *cardsContainer;
+@property (nonatomic, strong) NSMutableArray<NSLayoutConstraint *> *cardsLayoutConstraints;
+@property (nonatomic, assign) NSInteger currentCardColumns;
 @property (nonatomic, strong) NSView *deviceCard;
 @property (nonatomic, strong) NSView *outputCard;
 @property (nonatomic, strong) NSView *playCard;
@@ -42,6 +46,13 @@
 // 动态建出来的标签（队列行 / 专辑名 / 空态）登记在这里，主题切换时一并重刷。
 @property (nonatomic, strong) NSMutableArray<NSTextField *> *dynamicLabels;
 @property (nonatomic, strong) NSTextField *presetNotes;
+// 正在播放 + 队列预览响应式容器
+@property (nonatomic, strong) NSView *npQueueRow;
+@property (nonatomic, strong) NSView *npCard;
+@property (nonatomic, strong) NSView *queueCard;
+@property (nonatomic, strong) NSMutableArray<NSLayoutConstraint *> *npQueueConstraints;
+@property (nonatomic, assign) BOOL npQueueLayoutInitialized;
+@property (nonatomic, assign) BOOL currentNpStacked;
 // 正在播放 / 队列 / 专辑
 @property (nonatomic, strong) NSImageView *npCover;
 @property (nonatomic, strong) NSTextField *npTitle;
@@ -56,6 +67,8 @@
 @property (nonatomic, copy) NSArray<NSDictionary *> *devices;
 @property (nonatomic, copy) NSArray<NSDictionary *> *filters;
 @property (nonatomic, copy) NSDictionary *settings;
+@property (nonatomic, copy, nullable) NSDictionary *presetCapsJSON;
+@property (nonatomic, copy, nullable) NSString *presetCapsKey;
 @property (nonatomic, copy) NSString *currentPath;
 @property (nonatomic, assign) BOOL hasRoots;
 @property (nonatomic, assign) BOOL playing;
@@ -72,7 +85,7 @@
 // v3.3.11 `quickStartModel` 的三项能力结论（`/api/preset/caps` 的真实响应派生）。
 // 为什么必须真的用起来：只把 caps 拉下来再丢掉，等于「能力探测」是个装饰品 ——
 // 用户点「DSD 升频」会得到后端 `notes` 里的降级说明，但他事先看不到按钮为什么不该点。
-@interface RLPQuickStartViewController (RLPPresetCapsState)
+@interface RLPQuickStartViewController ()
 @property (nonatomic, assign) BOOL presetCapsKnown;
 @property (nonatomic, assign) BOOL presetPcmReady;
 @property (nonatomic, assign) BOOL presetDsdReady;
@@ -85,6 +98,9 @@
     self = [super initWithTitle:RLPTr(@"聆听室")];
     if (self) {
         _dynamicLabels = [NSMutableArray array];
+        _cardsLayoutConstraints = [NSMutableArray array];
+        _npQueueConstraints = [NSMutableArray array];
+        _currentCardColumns = 0;
         [[NSNotificationCenter defaultCenter] addObserver:self
                                                  selector:@selector(onPlaybackActionCompleted:)
                                                      name:@"RLPPlaybackActionCompletedNotification"
@@ -137,6 +153,8 @@
     ]];
 
     RLPTheme *t = [RLPTheme current];
+    NSView *headerRow = [[NSView alloc] initWithFrame:NSZeroRect];
+    headerRow.translatesAutoresizingMaskIntoConstraints = NO;
     NSTextField *title = RLPLabel(RLPTr(@"聆听室"), t.display, t.hero);
     title.translatesAutoresizingMaskIntoConstraints = NO;
     title.tag = 0;   // 0=正文（applyTheme 里按 t.text 重刷）
@@ -146,13 +164,32 @@
     // 登记到 dynamicLabels：切主题时这两个常驻标签也要跟着重刷（A6 判据会抓漏刷）。
     [self.dynamicLabels addObject:title];
     [self.dynamicLabels addObject:subtitle];
-    [self.stack addArrangedSubview:title];
-    [self.stack addArrangedSubview:subtitle];
+    self.foldersButton = [NSButton buttonWithTitle:RLPTr(@"音乐文件夹") target:self action:@selector(onOpenFolders:)];
+    self.foldersButton.identifier = @"room.folders";
+    self.foldersButton.bezelStyle = NSBezelStyleRounded;
+    self.foldersButton.translatesAutoresizingMaskIntoConstraints = NO;
+    [headerRow addSubview:title];
+    [headerRow addSubview:subtitle];
+    [headerRow addSubview:self.foldersButton];
+    [self.stack addArrangedSubview:headerRow];
+    [NSLayoutConstraint activateConstraints:@[
+        [headerRow.widthAnchor constraintEqualToAnchor:self.stack.widthAnchor constant:-48],
+        [title.leadingAnchor constraintEqualToAnchor:headerRow.leadingAnchor],
+        [title.topAnchor constraintEqualToAnchor:headerRow.topAnchor],
+        [title.trailingAnchor constraintLessThanOrEqualToAnchor:self.foldersButton.leadingAnchor constant:-12],
+        [subtitle.leadingAnchor constraintEqualToAnchor:headerRow.leadingAnchor],
+        [subtitle.topAnchor constraintEqualToAnchor:title.bottomAnchor constant:4],
+        [subtitle.trailingAnchor constraintLessThanOrEqualToAnchor:self.foldersButton.leadingAnchor constant:-12],
+        [subtitle.bottomAnchor constraintEqualToAnchor:headerRow.bottomAnchor],
+        [self.foldersButton.trailingAnchor constraintEqualToAnchor:headerRow.trailingAnchor],
+        [self.foldersButton.centerYAnchor constraintEqualToAnchor:title.centerYAnchor],
+    ]];
 
     [self buildFourCards];
     [self buildNowPlayingAndQueue];
     [self buildAlbumRow];
     [self buildLibraryCard];
+    [self updateResponsiveLayoutForWidth:1052.0];
 }
 
 /// 卡片外壳（圆角 + 边框，颜色在 applyTheme 里重刷）。
@@ -173,8 +210,6 @@
 
 - (void)buildFourCards {
     RLPTheme *t = [RLPTheme current];
-    NSView *row = [[NSView alloc] initWithFrame:NSZeroRect];
-    row.translatesAutoresizingMaskIntoConstraints = NO;
 
     // ---- 卡 1：当前设备（就地下拉切换）----
     self.deviceCard = [self cardWithIdentifier:@"room.device"];
@@ -241,36 +276,15 @@
     [self.styleCard addSubview:self.styleSub];
     [self.styleCard addSubview:styleBtn];
 
+    self.cardsContainer = [[NSView alloc] initWithFrame:NSZeroRect];
+    self.cardsContainer.translatesAutoresizingMaskIntoConstraints = NO;
     for (NSView *c in @[self.deviceCard, self.outputCard, self.playCard, self.styleCard])
-        [row addSubview:c];
-    [self.stack addArrangedSubview:row];
+        [self.cardsContainer addSubview:c];
+    [self.stack addArrangedSubview:self.cardsContainer];
 
-    [NSLayoutConstraint activateConstraints:@[
-        [row.widthAnchor constraintEqualToAnchor:self.stack.widthAnchor constant:-48],
-        [row.heightAnchor constraintEqualToConstant:100],
-        [self.deviceCard.leadingAnchor constraintEqualToAnchor:row.leadingAnchor],
-        [self.deviceCard.widthAnchor constraintEqualToAnchor:row.widthAnchor multiplier:0.24],
-        [self.deviceCard.topAnchor constraintEqualToAnchor:row.topAnchor],
-        [self.deviceCard.bottomAnchor constraintEqualToAnchor:row.bottomAnchor],
-        
-        [self.outputCard.leadingAnchor constraintEqualToAnchor:self.deviceCard.trailingAnchor constant:12],
-        [self.outputCard.widthAnchor constraintEqualToAnchor:self.deviceCard.widthAnchor],
-        [self.outputCard.topAnchor constraintEqualToAnchor:row.topAnchor],
-        [self.outputCard.bottomAnchor constraintEqualToAnchor:row.bottomAnchor],
+    [[self.cardsContainer.widthAnchor constraintEqualToAnchor:self.stack.widthAnchor constant:-48] setActive:YES];
 
-        [self.playCard.leadingAnchor constraintEqualToAnchor:self.outputCard.trailingAnchor constant:12],
-        [self.playCard.widthAnchor constraintEqualToAnchor:self.deviceCard.widthAnchor],
-        [self.playCard.topAnchor constraintEqualToAnchor:row.topAnchor],
-        [self.playCard.bottomAnchor constraintEqualToAnchor:row.bottomAnchor],
-
-        [self.styleCard.leadingAnchor constraintEqualToAnchor:self.playCard.trailingAnchor constant:12],
-        [self.styleCard.trailingAnchor constraintEqualToAnchor:row.trailingAnchor],
-        [self.styleCard.topAnchor constraintEqualToAnchor:row.topAnchor],
-        [self.styleCard.bottomAnchor constraintEqualToAnchor:row.bottomAnchor],
-    ]];
-
-    // 行级几何（等宽一行、加高卡片）已在上面 activateConstraints 统一设定，
-    // 这里只放**卡内**布局，不再重复 row.width/height 与四卡 leading/width（重复会冲突）。
+    // 这里只放**卡内**布局；四卡行/列几何由 updateResponsiveLayoutForWidth: 统一控制。
     NSMutableArray *cs = [NSMutableArray array];
     // 卡内布局
     [cs addObjectsFromArray:@[
@@ -324,8 +338,10 @@
     RLPTheme *t = [RLPTheme current];
     NSView *row = [[NSView alloc] initWithFrame:NSZeroRect];
     row.translatesAutoresizingMaskIntoConstraints = NO;
+    self.npQueueRow = row;
 
     NSView *np = [self cardWithIdentifier:@"room.nowplaying"];
+    self.npCard = np;
     self.npCover = [[NSImageView alloc] initWithFrame:NSZeroRect];
     self.npCover.imageScaling = NSImageScaleProportionallyUpOrDown;
     self.npCover.wantsLayer = YES;
@@ -352,6 +368,7 @@
         [np addSubview:v];
 
     NSView *qcard = [self cardWithIdentifier:@"room.queue"];
+    self.queueCard = qcard;
     self.queueCaption = RLPLabel(RLPTr(@"播放队列"), t.heading, t.text);
     self.queueCaption.translatesAutoresizingMaskIntoConstraints = NO;
     NSButton *qAll = [NSButton buttonWithTitle:RLPTr(@"查看全部") target:self action:@selector(onOpenQueue:)];
@@ -370,25 +387,16 @@
 
     [NSLayoutConstraint activateConstraints:@[
         [row.widthAnchor constraintEqualToAnchor:self.stack.widthAnchor constant:-48],
-        [row.heightAnchor constraintEqualToConstant:240],
-        [np.leadingAnchor constraintEqualToAnchor:row.leadingAnchor],
-        [np.topAnchor constraintEqualToAnchor:row.topAnchor],
-        [np.bottomAnchor constraintEqualToAnchor:row.bottomAnchor],
-        [np.trailingAnchor constraintEqualToAnchor:row.trailingAnchor constant:-312],
-        [qcard.leadingAnchor constraintEqualToAnchor:np.trailingAnchor constant:12],
-        [qcard.trailingAnchor constraintEqualToAnchor:row.trailingAnchor],
-        [qcard.topAnchor constraintEqualToAnchor:row.topAnchor],
-        [qcard.bottomAnchor constraintEqualToAnchor:row.bottomAnchor],
-        
+
         [self.npCover.leadingAnchor constraintEqualToAnchor:np.leadingAnchor constant:20],
         [self.npCover.centerYAnchor constraintEqualToAnchor:np.centerYAnchor],
-        [self.npCover.widthAnchor constraintEqualToConstant:200],
-        [self.npCover.heightAnchor constraintEqualToConstant:200],
+        [self.npCover.widthAnchor constraintEqualToConstant:180],
+        [self.npCover.heightAnchor constraintEqualToConstant:180],
 
         // 右侧文字列：状态 → 大曲名 → 副标题 → 两个按钮（每个都必须显式定位，
         // 否则无约束控件全堆在 (0,0) 重叠成一团 —— 离屏截图实测到的真 bug）。
         [self.npState.leadingAnchor constraintEqualToAnchor:self.npCover.trailingAnchor constant:20],
-        [self.npState.topAnchor constraintEqualToAnchor:np.topAnchor constant:34],
+        [self.npState.topAnchor constraintEqualToAnchor:np.topAnchor constant:28],
         [self.npState.trailingAnchor constraintLessThanOrEqualToAnchor:np.trailingAnchor constant:-20],
         [self.npTitle.leadingAnchor constraintEqualToAnchor:self.npState.leadingAnchor],
         [self.npTitle.trailingAnchor constraintEqualToAnchor:np.trailingAnchor constant:-20],
@@ -408,7 +416,126 @@
         [self.queueList.leadingAnchor constraintEqualToAnchor:qcard.leadingAnchor constant:14],
         [self.queueList.trailingAnchor constraintEqualToAnchor:qcard.trailingAnchor constant:-14],
         [self.queueList.topAnchor constraintEqualToAnchor:self.queueCaption.bottomAnchor constant:10],
+        [self.queueList.bottomAnchor constraintLessThanOrEqualToAnchor:qcard.bottomAnchor constant:-12],
     ]];
+}
+
+- (void)viewDidLayout {
+    [super viewDidLayout];
+    const CGFloat w = self.view.bounds.size.width;
+    if (w > 48.0) [self updateResponsiveLayoutForWidth:w - 48.0];
+}
+
+- (void)updateResponsiveLayoutForWidth:(CGFloat)availWidth {
+    const CGFloat w = availWidth > 100.0 ? availWidth : 1052.0;
+    const NSInteger cols = RLPQuickStartColumnsForWidth(w);
+    if (cols != self.currentCardColumns && self.cardsContainer) {
+        [NSLayoutConstraint deactivateConstraints:self.cardsLayoutConstraints];
+        [self.cardsLayoutConstraints removeAllObjects];
+        self.currentCardColumns = cols;
+
+        NSView *c = self.cardsContainer;
+        NSView *c1 = self.deviceCard, *c2 = self.outputCard, *c3 = self.playCard, *c4 = self.styleCard;
+        if (cols == 4) {
+            [self.cardsLayoutConstraints addObjectsFromArray:@[
+                [c1.leadingAnchor constraintEqualToAnchor:c.leadingAnchor],
+                [c1.topAnchor constraintEqualToAnchor:c.topAnchor],
+                [c1.heightAnchor constraintEqualToConstant:100],
+                [c2.leadingAnchor constraintEqualToAnchor:c1.trailingAnchor constant:12],
+                [c2.topAnchor constraintEqualToAnchor:c.topAnchor],
+                [c2.widthAnchor constraintEqualToAnchor:c1.widthAnchor],
+                [c2.heightAnchor constraintEqualToAnchor:c1.heightAnchor],
+                [c3.leadingAnchor constraintEqualToAnchor:c2.trailingAnchor constant:12],
+                [c3.topAnchor constraintEqualToAnchor:c.topAnchor],
+                [c3.widthAnchor constraintEqualToAnchor:c1.widthAnchor],
+                [c3.heightAnchor constraintEqualToAnchor:c1.heightAnchor],
+                [c4.leadingAnchor constraintEqualToAnchor:c3.trailingAnchor constant:12],
+                [c4.trailingAnchor constraintEqualToAnchor:c.trailingAnchor],
+                [c4.topAnchor constraintEqualToAnchor:c.topAnchor],
+                [c4.widthAnchor constraintEqualToAnchor:c1.widthAnchor],
+                [c4.heightAnchor constraintEqualToAnchor:c1.heightAnchor],
+                [c.bottomAnchor constraintEqualToAnchor:c1.bottomAnchor],
+            ]];
+        } else if (cols == 2) {
+            [self.cardsLayoutConstraints addObjectsFromArray:@[
+                [c1.leadingAnchor constraintEqualToAnchor:c.leadingAnchor],
+                [c1.topAnchor constraintEqualToAnchor:c.topAnchor],
+                [c1.heightAnchor constraintEqualToConstant:96],
+                [c2.leadingAnchor constraintEqualToAnchor:c1.trailingAnchor constant:12],
+                [c2.trailingAnchor constraintEqualToAnchor:c.trailingAnchor],
+                [c2.topAnchor constraintEqualToAnchor:c.topAnchor],
+                [c2.widthAnchor constraintEqualToAnchor:c1.widthAnchor],
+                [c2.heightAnchor constraintEqualToAnchor:c1.heightAnchor],
+                [c3.leadingAnchor constraintEqualToAnchor:c.leadingAnchor],
+                [c3.topAnchor constraintEqualToAnchor:c1.bottomAnchor constant:10],
+                [c3.widthAnchor constraintEqualToAnchor:c1.widthAnchor],
+                [c3.heightAnchor constraintEqualToAnchor:c1.heightAnchor],
+                [c4.leadingAnchor constraintEqualToAnchor:c3.trailingAnchor constant:12],
+                [c4.trailingAnchor constraintEqualToAnchor:c.trailingAnchor],
+                [c4.topAnchor constraintEqualToAnchor:c3.topAnchor],
+                [c4.widthAnchor constraintEqualToAnchor:c1.widthAnchor],
+                [c4.heightAnchor constraintEqualToAnchor:c1.heightAnchor],
+                [c.bottomAnchor constraintEqualToAnchor:c3.bottomAnchor],
+            ]];
+        } else {
+            [self.cardsLayoutConstraints addObjectsFromArray:@[
+                [c1.leadingAnchor constraintEqualToAnchor:c.leadingAnchor],
+                [c1.trailingAnchor constraintEqualToAnchor:c.trailingAnchor],
+                [c1.topAnchor constraintEqualToAnchor:c.topAnchor],
+                [c1.heightAnchor constraintEqualToConstant:88],
+                [c2.leadingAnchor constraintEqualToAnchor:c.leadingAnchor],
+                [c2.trailingAnchor constraintEqualToAnchor:c.trailingAnchor],
+                [c2.topAnchor constraintEqualToAnchor:c1.bottomAnchor constant:10],
+                [c2.heightAnchor constraintEqualToAnchor:c1.heightAnchor],
+                [c3.leadingAnchor constraintEqualToAnchor:c.leadingAnchor],
+                [c3.trailingAnchor constraintEqualToAnchor:c.trailingAnchor],
+                [c3.topAnchor constraintEqualToAnchor:c2.bottomAnchor constant:10],
+                [c3.heightAnchor constraintEqualToAnchor:c1.heightAnchor],
+                [c4.leadingAnchor constraintEqualToAnchor:c.leadingAnchor],
+                [c4.trailingAnchor constraintEqualToAnchor:c.trailingAnchor],
+                [c4.topAnchor constraintEqualToAnchor:c3.bottomAnchor constant:10],
+                [c4.heightAnchor constraintEqualToAnchor:c1.heightAnchor],
+                [c.bottomAnchor constraintEqualToAnchor:c4.bottomAnchor],
+            ]];
+        }
+        [NSLayoutConstraint activateConstraints:self.cardsLayoutConstraints];
+    }
+
+    const BOOL stacked = (w <= 750.0);
+    if ((!self.npQueueLayoutInitialized || stacked != self.currentNpStacked) && self.npQueueRow) {
+        [NSLayoutConstraint deactivateConstraints:self.npQueueConstraints];
+        [self.npQueueConstraints removeAllObjects];
+        self.npQueueLayoutInitialized = YES;
+        self.currentNpStacked = stacked;
+
+        NSView *row = self.npQueueRow, *np = self.npCard, *qcard = self.queueCard;
+        if (!stacked) {
+            [self.npQueueConstraints addObjectsFromArray:@[
+                [np.leadingAnchor constraintEqualToAnchor:row.leadingAnchor],
+                [np.topAnchor constraintEqualToAnchor:row.topAnchor],
+                [np.heightAnchor constraintEqualToConstant:232],
+                [np.trailingAnchor constraintEqualToAnchor:qcard.leadingAnchor constant:-12],
+                [qcard.trailingAnchor constraintEqualToAnchor:row.trailingAnchor],
+                [qcard.topAnchor constraintEqualToAnchor:row.topAnchor],
+                [qcard.widthAnchor constraintEqualToConstant:300],
+                [qcard.heightAnchor constraintEqualToAnchor:np.heightAnchor],
+                [row.bottomAnchor constraintEqualToAnchor:np.bottomAnchor],
+            ]];
+        } else {
+            [self.npQueueConstraints addObjectsFromArray:@[
+                [np.leadingAnchor constraintEqualToAnchor:row.leadingAnchor],
+                [np.trailingAnchor constraintEqualToAnchor:row.trailingAnchor],
+                [np.topAnchor constraintEqualToAnchor:row.topAnchor],
+                [np.heightAnchor constraintEqualToConstant:220],
+                [qcard.leadingAnchor constraintEqualToAnchor:row.leadingAnchor],
+                [qcard.trailingAnchor constraintEqualToAnchor:row.trailingAnchor],
+                [qcard.topAnchor constraintEqualToAnchor:np.bottomAnchor constant:12],
+                [qcard.heightAnchor constraintEqualToConstant:176],
+                [row.bottomAnchor constraintEqualToAnchor:qcard.bottomAnchor],
+            ]];
+        }
+        [NSLayoutConstraint activateConstraints:self.npQueueConstraints];
+    }
 }
 
 #pragma mark - ③ 专辑行
@@ -570,42 +697,47 @@
     const BOOL isDsd = RLPPathIsDsd(self.currentPath);
     NSStackView *s = [self popStackWithTitle:RLPTr(@"播放方式")
         note:RLPTr(@"不确定就选「原音直通」：文件是什么就播什么。")];
+    NSDictionary<NSString *, NSDictionary *> *statuses =
+        [[self class] presetStatusForCapsJSON:self.presetCapsJSON
+                                     settings:self.settings
+                                      playing:self.playing
+                                       paused:self.pausedNow];
+    NSString *curProf = RLPPlayModeFromSettings(self.settings);
     NSArray *opts = @[
-        @[@0, RLPTr(@"原音直通"), RLPTr(@"文件是什么就播什么，不做任何加工")],
-        @[@1, RLPTr(@"PCM 升频"), RLPTr(@"把普通高清音源提升到设备支持的更高采样率")],
-        @[@2, RLPTr(@"DSD 升频"), RLPTr(@"转换成 DSD 信号输出，声音更绵密（需要设备支持 DoP）")],
+        @[@0, @"bitperfect", RLPTr(@"原音直通"), RLPTr(@"文件是什么就播什么，不做任何加工")],
+        @[@1, @"pcm",        RLPTr(@"PCM 升频"), RLPTr(@"把普通高清音源提升到设备支持的更高采样率")],
+        @[@2, isDsd ? @"dsd" : @"pcm2dsd", RLPTr(@"DSD 升频"), RLPTr(@"转换成 DSD 信号输出，声音更绵密（需要设备支持 DoP）")],
     ];
-    // v3.3.11 `rlPaintPreset` 的两条闸门，逐条移植：
-    //   ① 正在播放/暂停时不许应用（`请先停止播放，再应用预设。`）
-    //   ② PCM / DSD 档按 `/api/preset/caps` 的真实能力置灰（`能力尚未确认，请先选择输出设备。`）
-    const BOOL busy = [self playbackIsActive];
+    NSMutableArray<NSString *> *reasons = [NSMutableArray array];
     for (NSArray *o in opts) {
-        const NSInteger code = [o[0] integerValue];
-        BOOL enabled = !busy;
-        if (enabled && code == 1) enabled = self.presetPcmReady;
-        if (enabled && code == 2) enabled = self.presetDsdReady;
-        NSButton *b = [self popRowWithTitle:o[1] note:o[2] on:NO action:@selector(onPickPlayMode:) ident:[o[0] stringValue]];
+        NSString *pkey = o[1];
+        NSDictionary *st = statuses[pkey];
+        const BOOL enabled = [st[@"enabled"] boolValue];
+        NSString *reason = [st[@"reason"] isKindOfClass:[NSString class]] ? st[@"reason"] : @"";
+        NSString *result = [st[@"result"] isKindOfClass:[NSString class]] ? st[@"result"] : @"";
+        const BOOL isCurrent = ([curProf isEqualToString:pkey] ||
+                                ([pkey isEqualToString:@"pcm2dsd"] && [curProf isEqualToString:@"dsd"]));
+        NSButton *b = [self popRowWithTitle:o[2] note:o[3] on:isCurrent action:@selector(onPickPlayMode:) ident:[o[0] stringValue]];
         b.enabled = enabled;
-        if (!enabled) {
-            // 说清"为什么点不了"：上游把原因写在按钮下方（`当前能力未确认或不支持`）。
-            b.toolTip = busy ? RLPTr(@"请先停止播放，再应用预设。")
-                             : (self.presetCapsKnown ? RLPTr(@"当前设备不支持这一档")
-                                                    : RLPTr(@"能力尚未确认，请先选择输出设备。"));
+        if (!enabled && reason.length) {
+            b.toolTip = reason;
+            if (![reasons containsObject:reason]) [reasons addObject:reason];
         }
         [s addArrangedSubview:b];
         [[b.widthAnchor constraintEqualToConstant:330] setActive:YES];
-        NSTextField *sub = RLPLabel(o[2], [RLPTheme current].small, [RLPTheme current].mut);
+        NSString *subText = enabled ? (result.length ? result : o[3])
+                                    : (reason.length ? [NSString stringWithFormat:@"%@ · %@", o[3], reason] : o[3]);
+        NSTextField *sub = RLPLabel(subText, [RLPTheme current].small,
+                                    enabled ? [RLPTheme current].mut : [RLPTheme current].warn);
         sub.maximumNumberOfLines = 0;
         sub.lineBreakMode = NSLineBreakByWordWrapping;
         sub.preferredMaxLayoutWidth = 330;
         [s addArrangedSubview:sub];
         [[sub.widthAnchor constraintEqualToConstant:330] setActive:YES];
     }
-    if (busy || !self.presetCapsKnown || !self.presetPcmReady || !self.presetDsdReady) {
-        NSString *why = busy ? RLPTr(@"请先停止播放，再应用预设。")
-                      : (!self.presetCapsKnown ? RLPTr(@"能力尚未确认，请先选择输出设备。")
-                                              : RLPTr(@"当前设备不支持置灰的那几档。"));
-        NSTextField *gate = RLPLabel(why, [RLPTheme current].small, [RLPTheme current].mut2);
+    if (reasons.count) {
+        NSTextField *gate = RLPLabel([reasons componentsJoinedByString:@" "],
+                                     [RLPTheme current].small, [RLPTheme current].mut2);
         gate.identifier = @"quickstart.presetGate";
         gate.maximumNumberOfLines = 0;
         gate.lineBreakMode = NSLineBreakByWordWrapping;
@@ -622,7 +754,20 @@
     dsdNote.preferredMaxLayoutWidth = 330;
     [s addArrangedSubview:dsdNote];
     [[dsdNote.widthAnchor constraintEqualToConstant:330] setActive:YES];
-    [self showPopoverFrom:self.playCard withCard:s width:360 minH:260];
+
+    NSButton *retryCaps = [NSButton buttonWithTitle:RLPTr(@"重新读取设备能力") target:self action:@selector(onRetryCaps:)];
+    retryCaps.bezelStyle = NSBezelStyleRounded;
+    retryCaps.translatesAutoresizingMaskIntoConstraints = NO;
+    [s addArrangedSubview:retryCaps];
+
+    [self showPopoverFrom:self.playCard withCard:s width:360 minH:290];
+}
+
+- (void)onRetryCaps:(id)sender {
+    (void)sender;
+    [self loadPresetCaps:YES];
+    RLPToast(RLPTr(@"正在重新读取设备能力…"));
+    [self.popover close];
 }
 
 /// 是否正在播放或暂停（上游 `S.playing||S.paused`）。用页面已轮询到的状态，
@@ -660,8 +805,20 @@
 #pragma mark 听音风格弹层
 
 - (void)onOpenStyle:(id)sender {
+    const BOOL straight = [RLPPlayModeFromSettings(self.settings) isEqualToString:@"bitperfect"];
     NSStackView *s = [self popStackWithTitle:RLPTr(@"听音风格")
         note:RLPTr(@"不用懂滤波：往温和走声音更柔顺，往锐利走更清亮。")];
+    if (straight) {
+        NSTextField *bpNote = RLPLabel(
+            RLPTr(@"当前保持原音直通，听音风格暂不可用（不偷偷破坏直通）。如需调整听音风格，请先在「播放」中选择 PCM 升频或 DSD 升频。"),
+            [RLPTheme current].small, [RLPTheme current].warn);
+        bpNote.identifier = @"quickstart.styleBitperfectNote";
+        bpNote.maximumNumberOfLines = 0;
+        bpNote.lineBreakMode = NSLineBreakByWordWrapping;
+        bpNote.preferredMaxLayoutWidth = 330;
+        [s addArrangedSubview:bpNote];
+        [[bpNote.widthAnchor constraintEqualToConstant:330] setActive:YES];
+    }
     if (!self.filters.count) {
         NSTextField *na = RLPLabel(RLPTr(@"滤波列表读取失败，请稍后重试"), [RLPTheme current].small, [RLPTheme current].warn);
         [s addArrangedSubview:na];
@@ -671,8 +828,9 @@
     for (NSInteger i = RLPToneStyleSharp; i <= RLPToneStyleWarm; ++i) {
         NSString *name = RLPFilterForToneStyle((RLPToneStyle)i, self.filters);
         NSButton *b = [self popRowWithTitle:RLPToneStyleName((RLPToneStyle)i) note:name ?: @""
-                                          on:[curFilter isEqualToString:name ?: @""]
+                                          on:(!straight && [curFilter isEqualToString:name ?: @""])
                                       action:@selector(onPickStyle:) ident:[@(i) stringValue]];
+        b.enabled = !straight && (name.length > 0);
         [s addArrangedSubview:b];
         [[b.widthAnchor constraintEqualToConstant:330] setActive:YES];
         // 滤波真名只作副标题小字：让人不用懂滤波也能挑
@@ -680,17 +838,175 @@
         [s addArrangedSubview:sub];
         [[sub.widthAnchor constraintEqualToConstant:330] setActive:YES];
     }
-    [self showPopoverFrom:self.styleCard withCard:s width:360 minH:230];
+    [self showPopoverFrom:self.styleCard withCard:s width:360 minH:straight ? 270 : 230];
 }
 
 - (void)onPickStyle:(NSButton *)sender {
+    if ([RLPPlayModeFromSettings(self.settings) isEqualToString:@"bitperfect"]) {
+        RLPToast(RLPTr(@"原音直通模式下听音风格不可用"));
+        [self.popover close];
+        return;
+    }
     const RLPToneStyle st = (RLPToneStyle)sender.identifier.integerValue;
-    NSString *name = RLPFilterForToneStyle(st, self.filters);
-    if (!name.length) { RLPToast(RLPTr(@"没有可用滤波")); return; }
-    // forNx 项要写 filterNx 键，写错键会被后端静默丢弃。
-    NSString *key = RLPFilterUsesNxKey(name, self.filters) ? @"filterNx" : @"filter";
-    [self postSettings:@{key: name}];
+    NSDictionary<NSString *, NSString *> *patch = RLPSettingsPatchForToneStyle(st, self.filters);
+    if (!patch.count) { RLPToast(RLPTr(@"没有可用滤波")); return; }
+    [self postSettings:patch];
     [self.popover close];
+}
+
+#pragma mark 音乐文件夹弹层（页头入口，对标 Windows ui_listening_library）
+
+- (void)onOpenFolders:(id)sender {
+    (void)sender;
+    RLPTheme *t = [RLPTheme current];
+    NSStackView *s = [self popStackWithTitle:RLPTr(@"音乐文件夹")
+        note:RLPTr(@"选择保存音乐的文件夹，添加后会自动整理歌曲。")];
+    NSStackView *listStack = [[NSStackView alloc] init];
+    listStack.orientation = NSUserInterfaceLayoutOrientationVertical;
+    listStack.alignment = NSLayoutAttributeLeading;
+    listStack.spacing = 6;
+    listStack.translatesAutoresizingMaskIntoConstraints = NO;
+    [s addArrangedSubview:listStack];
+    [[listStack.widthAnchor constraintEqualToConstant:360] setActive:YES];
+
+    NSTextField *loading = RLPLabel(RLPTr(@"正在读取音乐文件夹…"), t.small, t.mut);
+    [listStack addArrangedSubview:loading];
+
+    NSStackView *actions = [[NSStackView alloc] init];
+    actions.orientation = NSUserInterfaceLayoutOrientationHorizontal;
+    actions.spacing = 8;
+    NSButton *addBtn = [NSButton buttonWithTitle:RLPTr(@"添加文件夹…") target:self action:@selector(onFoldersAdd:)];
+    addBtn.bezelStyle = NSBezelStyleRounded;
+    NSButton *scanBtn = [NSButton buttonWithTitle:RLPTr(@"刷新音乐库") target:self action:@selector(onFoldersScan:)];
+    scanBtn.bezelStyle = NSBezelStyleRounded;
+    [actions addArrangedSubview:addBtn];
+    [actions addArrangedSubview:scanBtn];
+    [s addArrangedSubview:actions];
+
+    NSTextField *statsLabel = RLPLabel(@"", t.small, t.mut);
+    statsLabel.maximumNumberOfLines = 2;
+    statsLabel.lineBreakMode = NSLineBreakByWordWrapping;
+    statsLabel.preferredMaxLayoutWidth = 360;
+    [s addArrangedSubview:statsLabel];
+    [[statsLabel.widthAnchor constraintEqualToConstant:360] setActive:YES];
+
+    NSTextField *keepNote = RLPLabel(RLPTr(@"移除只会更改音乐库列表，音乐文件会保留。"), t.small, t.mut2);
+    keepNote.maximumNumberOfLines = 0;
+    keepNote.lineBreakMode = NSLineBreakByWordWrapping;
+    keepNote.preferredMaxLayoutWidth = 360;
+    [s addArrangedSubview:keepNote];
+    [[keepNote.widthAnchor constraintEqualToConstant:360] setActive:YES];
+
+    [self showPopoverFrom:(self.foldersButton ?: self.libButton) withCard:s width:392 minH:230];
+
+    __weak __typeof__(self) weakSelf = self;
+    [[RLPCoreClient shared] getJSON:@"/api/lib/stats" completion:^(NSDictionary * _Nullable json) {
+        __typeof__(self) self_ = weakSelf;
+        if (!self_) return;
+        for (NSView *v in [listStack.arrangedSubviews copy]) {
+            [listStack removeArrangedSubview:v];
+            [v removeFromSuperview];
+        }
+        NSArray *roots = [json[@"roots"] isKindOfClass:[NSArray class]] ? json[@"roots"] : @[];
+        if (!roots.count) {
+            NSTextField *empty = RLPLabel(RLPTr(@"还没有添加音乐文件夹。"), t.small, t.mut);
+            [listStack addArrangedSubview:empty];
+        } else {
+            for (id r in roots) {
+                if (![r isKindOfClass:[NSString class]] || ![(NSString *)r length]) continue;
+                NSString *path = (NSString *)r;
+                NSView *row = [[NSView alloc] initWithFrame:NSZeroRect];
+                row.translatesAutoresizingMaskIntoConstraints = NO;
+                NSTextField *pl = RLPLabel(path, t.small, t.text);
+                pl.lineBreakMode = NSLineBreakByTruncatingMiddle;
+                pl.translatesAutoresizingMaskIntoConstraints = NO;
+                NSButton *rm = [NSButton buttonWithTitle:RLPTr(@"移除") target:self_ action:@selector(onFoldersRemove:)];
+                rm.identifier = path;
+                rm.bezelStyle = NSBezelStyleRounded;
+                rm.translatesAutoresizingMaskIntoConstraints = NO;
+                [row addSubview:pl];
+                [row addSubview:rm];
+                [listStack addArrangedSubview:row];
+                [NSLayoutConstraint activateConstraints:@[
+                    [row.widthAnchor constraintEqualToConstant:360],
+                    [row.heightAnchor constraintEqualToConstant:26],
+                    [pl.leadingAnchor constraintEqualToAnchor:row.leadingAnchor],
+                    [pl.centerYAnchor constraintEqualToAnchor:row.centerYAnchor],
+                    [pl.trailingAnchor constraintLessThanOrEqualToAnchor:rm.leadingAnchor constant:-8],
+                    [rm.trailingAnchor constraintEqualToAnchor:row.trailingAnchor],
+                    [rm.centerYAnchor constraintEqualToAnchor:row.centerYAnchor],
+                ]];
+            }
+        }
+        const BOOL scanning = [json[@"scanning"] boolValue];
+        const NSInteger tracks = [json[@"tracks"] integerValue];
+        statsLabel.stringValue = scanning
+            ? [NSString stringWithFormat:RLPTr(@"正在整理音乐：%ld / %ld"),
+               (long)[json[@"scanned"] integerValue], (long)[json[@"total"] integerValue]]
+            : [NSString stringWithFormat:RLPTr(@"音乐库共有 %ld 首曲目"), (long)tracks];
+    }];
+}
+
+- (void)onFoldersAdd:(id)sender {
+    (void)sender;
+    [self.popover close];
+    NSOpenPanel *p = [NSOpenPanel openPanel];
+    p.canChooseDirectories = YES;
+    p.canChooseFiles = NO;
+    p.allowsMultipleSelection = NO;
+    p.prompt = RLPTr(@"选择");
+    p.message = RLPTr(@"选择存放音乐的目录");
+    __weak __typeof__(self) weakSelf = self;
+    [p beginWithCompletionHandler:^(NSInteger result) {
+        __typeof__(self) self_ = weakSelf;
+        if (!self_ || result != NSModalResponseOK) return;
+        NSString *path = p.URL.path;
+        if (!path.length) return;
+        [[RLPCoreClient shared] postJSON:@"/api/lib/roots"
+                                    body:[NSString stringWithFormat:@"add=%@", RLPEnc(path)]
+                              completion:^(NSDictionary * _Nullable json) {
+            __typeof__(self) s2 = weakSelf;
+            if (!s2) return;
+            if (json && [json[@"ok"] boolValue]) {
+                RLPPostJSON(@"/api/lib/scan?full=1", nil);
+                RLPToast(RLPTr(@"已添加目录，开始扫描"));
+                [s2 reloadLibrary];
+                [s2 reloadAlbums];
+            } else {
+                NSString *err = [json[@"error"] isKindOfClass:[NSString class]] ? json[@"error"] : RLPTr(@"添加失败");
+                RLPToast(err);
+            }
+        }];
+    }];
+}
+
+- (void)onFoldersRemove:(NSButton *)sender {
+    NSString *path = sender.identifier;
+    if (!path.length) return;
+    [self.popover close];
+    __weak __typeof__(self) weakSelf = self;
+    [[RLPCoreClient shared] postJSON:@"/api/lib/roots"
+                                body:[NSString stringWithFormat:@"remove=%@", RLPEnc(path)]
+                          completion:^(NSDictionary * _Nullable json) {
+        __typeof__(self) self_ = weakSelf;
+        if (!self_) return;
+        if (json && [json[@"ok"] boolValue]) {
+            RLPPostJSON(@"/api/lib/scan", nil);
+            RLPToast(RLPTr(@"已移除目录"));
+            [self_ reloadLibrary];
+            [self_ reloadAlbums];
+        } else {
+            NSString *err = [json[@"error"] isKindOfClass:[NSString class]] ? json[@"error"] : RLPTr(@"移除失败");
+            RLPToast(err);
+        }
+    }];
+}
+
+- (void)onFoldersScan:(id)sender {
+    (void)sender;
+    [self.popover close];
+    RLPPostJSON(@"/api/lib/scan?full=1", nil);
+    RLPToast(RLPTr(@"已开始全量重扫"));
 }
 
 #pragma mark 更多入口（功能不删，但不放「设置」字样）
@@ -846,10 +1162,15 @@
     [self reloadDevices];
     [self reloadSettings];
     [self reloadFilters];
+    [self reloadPresetCaps:NO];
     [self reloadLibrary];
     [self reloadStatus];
     [self reloadQueue];
     [self reloadAlbums];
+}
+
+- (void)reloadPresetCaps:(BOOL)force {
+    [self loadPresetCaps:force];
 }
 
 - (void)reloadDevices {
@@ -891,23 +1212,39 @@
         [self_ syncDeviceSelection];
         // 输出摘要（人话）
         NSString *bk = [self_ str:@"backend" def:@"coreaudio"];
+        NSString *dev = [self_ str:@"device" def:@""];
+        NSString *capsKey = [NSString stringWithFormat:@"%@|%@", bk, dev];
+        if (![capsKey isEqualToString:self_.presetCapsKey ?: @""]) {
+            self_.presetCapsKey = capsKey;
+            [self_ loadPresetCaps:YES];
+        }
         NSString *bkName = [bk isEqualToString:@"coreaudio-shared"] ? RLPTr(@"共享播放")
                          : [bk isEqualToString:@"upnp"] ? RLPTr(@"局域网投放")
                          : [bk isEqualToString:@"null"] ? RLPTr(@"不出声（仅分析）") : RLPTr(@"独占播放");
         const BOOL hog = [self_ str:@"hogexcl" def:@"1"].boolValue;
         self_.outputValue.stringValue = [NSString stringWithFormat:@"%@%@", bkName,
             ([bk isEqualToString:@"coreaudio"] && hog) ? @" · Hog" : @""];
-        // 播放档位摘要：从 dsd/rate 反推（不维护第二套状态）
-        const NSInteger dsd = [self_ str:@"dsd" def:@"0"].integerValue;
-        NSString *rate = [self_ str:@"rate" def:@"follow"];
-        self_.playValue.stringValue = dsd > 0 ? RLPTr(@"DSD 升频")
-            : ([rate isEqualToString:@"follow"] || !rate.length ? RLPTr(@"原音直通") : RLPTr(@"PCM 升频"));
-        // 听音风格回显
-        NSString *f = [self_ str:@"filter" def:@""];
-        NSInteger st = RLPToneStyleForFilter(f, self_.filters);
-        self_.styleValue.stringValue = (st >= 0) ? RLPToneStyleName((RLPToneStyle)st) : RLPTr(@"自定义");
-        self_.styleSub.stringValue = f.length ? f : RLPTr(@"跟随默认");
+        [self_ syncPlayAndStyleCards];
     }];
+}
+
+- (void)syncPlayAndStyleCards {
+    NSString *prof = RLPPlayModeFromSettings(self.settings);
+    if ([prof isEqualToString:@"bitperfect"]) {
+        self.playValue.stringValue = RLPTr(@"原音直通");
+        self.styleValue.stringValue = RLPTr(@"保持原音");
+        self.styleSub.stringValue = RLPTr(@"原音直通时听音风格不参与");
+        self.styleCard.alphaValue = 0.65;
+    } else {
+        self.styleCard.alphaValue = 1.0;
+        if ([prof isEqualToString:@"pcm"]) self.playValue.stringValue = RLPTr(@"PCM 升频");
+        else if ([prof isEqualToString:@"dsd"] || [prof isEqualToString:@"pcm2dsd"]) self.playValue.stringValue = RLPTr(@"DSD 升频");
+        else self.playValue.stringValue = RLPTr(@"自定义播放方式");
+        NSString *f = [self str:@"filter" def:@""];
+        NSInteger st = RLPToneStyleForFilter(f, self.filters);
+        self.styleValue.stringValue = (st >= 0) ? RLPToneStyleName((RLPToneStyle)st) : RLPTr(@"自定义");
+        self.styleSub.stringValue = f.length ? f : RLPTr(@"跟随默认");
+    }
 }
 
 - (void)reloadFilters {
@@ -916,10 +1253,7 @@
         __typeof__(self) self_ = weakSelf;
         if (!self_) return;
         self_.filters = [json[@"items"] isKindOfClass:[NSArray class]] ? json[@"items"] : @[];
-        NSString *f = [self_ str:@"filter" def:@""];
-        NSInteger st = RLPToneStyleForFilter(f, self_.filters);
-        self_.styleValue.stringValue = (st >= 0) ? RLPToneStyleName((RLPToneStyle)st) : RLPTr(@"自定义");
-        self_.styleSub.stringValue = f.length ? f : RLPTr(@"跟随默认");
+        [self_ syncPlayAndStyleCards];
     }];
 }
 
@@ -1028,7 +1362,7 @@
         }
         NSInteger n = 0;
         for (id it in items) {
-            if (n >= 5) break;
+            if (n >= 4) break;
             NSString *name = nil;
             if (n < (NSInteger)metas.count && [metas[n] isKindOfClass:[NSDictionary class]]) {
                 NSString *t = [metas[n][@"t"] isKindOfClass:[NSString class]] ? metas[n][@"t"] : nil;
@@ -1209,7 +1543,7 @@
                      ? [dev[@"maxRate"] doubleValue] : 0.0;
     const BOOL offline = [backend isEqualToString:@"null"];
     const BOOL remote = [backend isEqualToString:@"upnp"];
-    const BOOL shared = [backend isEqualToString:@"wasapi-shared"];
+    const BOOL shared = [backend isEqualToString:@"wasapi-shared"] || [backend isEqualToString:@"coreaudio-shared"];
     const BOOL known = ok && !offline && !remote && name.length > 0 && rates.count > 0 && maxRate > 0;
     const BOOL dsdNative = [dev[@"dsdNative"] respondsToSelector:@selector(boolValue)] &&
                            [dev[@"dsdNative"] boolValue];
@@ -1219,7 +1553,81 @@
               @"dsdReady": @(known && !remote && !shared && (dsdNative || dop)) };
 }
 
++ (NSDictionary<NSString *, NSDictionary *> *)presetStatusForCapsJSON:(NSDictionary * _Nullable)json
+                                                           settings:(NSDictionary * _Nullable)kv
+                                                            playing:(BOOL)playing
+                                                             paused:(BOOL)paused {
+    NSDictionary<NSString *, NSNumber *> *g = [self gatingForCapsJSON:json];
+    const BOOL known = [g[@"known"] boolValue];
+    const BOOL pcmReady = [g[@"pcmReady"] boolValue];
+    const BOOL dsdReady = [g[@"dsdReady"] boolValue];
+    const BOOL busy = playing || paused;
+
+    NSDictionary *dev = [json[@"device"] isKindOfClass:[NSDictionary class]] ? json[@"device"] : nil;
+    NSString *capBackend = [dev[@"backend"] isKindOfClass:[NSString class]] ? dev[@"backend"] : @"";
+    NSString *kvBackend = [kv[@"backend"] isKindOfClass:[NSString class]] ? kv[@"backend"] : @"";
+    NSString *backend = kvBackend.length ? kvBackend : (capBackend.length ? capBackend : @"coreaudio");
+    const BOOL isShared = [backend isEqualToString:@"coreaudio-shared"] || [backend isEqualToString:@"wasapi-shared"];
+    const BOOL isOffline = [backend isEqualToString:@"null"];
+    const BOOL isRemote = [backend isEqualToString:@"upnp"];
+    const BOOL isAirPlay = [backend isEqualToString:@"airplay"];
+
+    double maxRate = [dev[@"maxRate"] respondsToSelector:@selector(doubleValue)] ? [dev[@"maxRate"] doubleValue] : 0.0;
+    NSString *dopMax = [dev[@"dopMax"] isKindOfClass:[NSString class]] ? dev[@"dopMax"] : @"";
+    const BOOL dsdNative = [dev[@"dsdNative"] respondsToSelector:@selector(boolValue)] && [dev[@"dsdNative"] boolValue];
+
+    NSString *busyWhy = RLPTr(@"请先停止播放，再应用预设。");
+    NSString *pcmWhy = @"";
+    if (busy) pcmWhy = busyWhy;
+    else if (isShared || isAirPlay) pcmWhy = RLPTr(@"共享/隔空播放不支持升频，请在「输出」中开启独占设备。");
+    else if (isOffline) pcmWhy = RLPTr(@"离线处理模式不连接设备，不支持设备升频。");
+    else if (isRemote) pcmWhy = RLPTr(@"网络播放器由远端负责输出，不支持本机升频。");
+    else if (!known) pcmWhy = RLPTr(@"能力尚未确认，请先选择输出设备。");
+    else if (!pcmReady) pcmWhy = RLPTr(@"当前设备不支持 PCM 升频。");
+
+    NSString *dsdWhy = @"";
+    if (busy) dsdWhy = busyWhy;
+    else if (isShared || isAirPlay) dsdWhy = RLPTr(@"共享/隔空播放不支持 DSD/DoP，请在「输出」中开启独占设备。");
+    else if (isOffline) dsdWhy = RLPTr(@"离线处理模式不连接设备，不支持 DSD 升频。");
+    else if (isRemote) dsdWhy = RLPTr(@"网络播放器不支持本机 DoP 升频。");
+    else if (!known) dsdWhy = RLPTr(@"能力尚未确认，请先选择输出设备。");
+    else if (!dsdReady) dsdWhy = RLPTr(@"当前设备不支持 DoP，无法输出 DSD。");
+
+    NSString *pcmResult = (pcmReady && maxRate > 0)
+        ? [NSString stringWithFormat:RLPTr(@"目标采样率最高 %.1f kHz（封顶 384 kHz）"),
+           (maxRate > 384000.0 ? 384000.0 : maxRate) / 1000.0]
+        : RLPTr(@"按设备能力匹配 PCM 升频规格");
+    NSString *dsdResult = dsdReady
+        ? (dopMax.length
+            ? [NSString stringWithFormat:RLPTr(@"DoP 最高 %@"), dopMax.uppercaseString]
+            : (dsdNative ? RLPTr(@"支持 DSD 输出") : RLPTr(@"支持 DoP 输出")))
+        : RLPTr(@"需要设备支持 DoP");
+
+    NSDictionary *bpEntry = @{
+        @"enabled": @(!busy),
+        @"reason": busy ? busyWhy : @"",
+        @"result": RLPTr(@"保持源采样率与原始声音（禁用 EQ/IR 与听音风格）"),
+    };
+    NSDictionary *pcmEntry = @{
+        @"enabled": @(!busy && pcmReady && !isShared && !isOffline && !isRemote && !isAirPlay),
+        @"reason": pcmWhy,
+        @"result": pcmResult,
+    };
+    NSDictionary *dsdEntry = @{
+        @"enabled": @(!busy && dsdReady && !isShared && !isOffline && !isRemote && !isAirPlay),
+        @"reason": dsdWhy,
+        @"result": dsdResult,
+    };
+    return @{
+        @"bitperfect": bpEntry,
+        @"pcm": pcmEntry,
+        @"dsd": dsdEntry,
+        @"pcm2dsd": dsdEntry,
+    };
+}
+
 - (void)applyPresetCaps:(NSDictionary * _Nullable)json {
+    self.presetCapsJSON = json;
     NSDictionary<NSString *, NSNumber *> *g = [[self class] gatingForCapsJSON:json];
     self.presetCapsKnown = [g[@"known"] boolValue];
     self.presetPcmReady = [g[@"pcmReady"] boolValue];

@@ -188,8 +188,66 @@ int main() {
         const double lockedFore = sl.db;
         [sl mouseDown:down];
         Ck(Near(sl.db, lockedFore, 1e-9), "S10 锁定后点按无效", @"");
-
-        std::printf("\n结果：%d passed, %d failed\n", gPass, gFail);
-        return gFail == 0 ? 0 : 1;
     }
+
+    // ---- S11：未 layout 时滑杆几何与命中必须一致（禁止用过期 _track）----
+    {
+        RLPVolumeSliderView *sl = [[RLPVolumeSliderView alloc] initWithFrame:NSMakeRect(0, 0, 160, 24)];
+        sl.showsAccessories = NO;
+        sl.db = 0.0;
+        const NSRect tr = [sl trackRect];
+        Ck(NSWidth(tr) > 100, "S11a 未 layout 时 trackRect 已是有效宽度",
+           [NSString stringWithFormat:@"trackW=%.1f", NSWidth(tr)]);
+        const CGFloat x75 = [sl xForNorm:0.75];
+        const double n75 = [sl normForX:x75];
+        Ck(Near(n75, 0.75, 0.01), "S11b 未 layout 时 xForNorm/normForX 互逆（不用缓存 _track）",
+           [NSString stringWithFormat:@"x=%.1f norm=%.3f", x75, n75]);
+        NSEvent *down75 = [NSEvent mouseEventWithType:NSEventTypeLeftMouseDown
+                                             location:[sl convertPoint:NSMakePoint(x75, NSMidY(tr)) toView:nil]
+                                        modifierFlags:0 timestamp:0 windowNumber:0
+                                              context:nil eventNumber:0 clickCount:1 pressure:1.0];
+        [sl mouseDown:down75];
+        Ck(sl.dragging && Near(sl.db, RLPVolSliderNormToDb(0.75), 0.15),
+           "S11c 未 layout 时点按轨道直接命中并进入 dragging",
+           [NSString stringWithFormat:@"dragging=%d db=%.1f", sl.dragging, sl.db]);
+        NSEvent *up75 = [NSEvent mouseEventWithType:NSEventTypeLeftMouseUp
+                                           location:[sl convertPoint:NSMakePoint(x75, NSMidY(tr)) toView:nil]
+                                      modifierFlags:0 timestamp:0 windowNumber:0
+                                            context:nil eventNumber:0 clickCount:1 pressure:1.0];
+        [sl mouseUp:up75];
+        Ck(!sl.dragging, "S11d mouseUp 后退出 dragging", @"");
+    }
+
+    // ---- K11：旋钮 dragging 状态与双击回 0 ----
+    {
+        RLPVolumeKnobView *knob = [[RLPVolumeKnobView alloc] initWithFrame:NSMakeRect(0, 0, 64, 64)];
+        knob.db = -12.0;
+        __block double committed = NAN;
+        knob.onCommit = ^(double db) { committed = db; };
+        NSEvent *down = [NSEvent mouseEventWithType:NSEventTypeLeftMouseDown
+                                           location:[knob convertPoint:NSMakePoint(8.0, 32.0) toView:nil]
+                                      modifierFlags:0 timestamp:0 windowNumber:0
+                                            context:nil eventNumber:0 clickCount:1 pressure:1.0];
+        [knob mouseDown:down];
+        Ck(knob.dragging, "K11a 旋钮 mouseDown 后 dragging=YES", @"");
+        NSEvent *up = [NSEvent mouseEventWithType:NSEventTypeLeftMouseUp
+                                         location:[knob convertPoint:NSMakePoint(8.0, 32.0) toView:nil]
+                                    modifierFlags:0 timestamp:0 windowNumber:0
+                                          context:nil eventNumber:0 clickCount:1 pressure:1.0];
+        [knob mouseUp:up];
+        Ck(!knob.dragging && !std::isnan(committed), "K11b 旋钮 mouseUp 后 dragging=NO 并提交", @"");
+
+        committed = NAN;
+        NSEvent *dbl = [NSEvent mouseEventWithType:NSEventTypeLeftMouseDown
+                                          location:[knob convertPoint:NSMakePoint(32.0, 32.0) toView:nil]
+                                     modifierFlags:0 timestamp:0 windowNumber:0
+                                           context:nil eventNumber:0 clickCount:2 pressure:1.0];
+        [knob mouseDown:dbl];
+        Ck(Near(knob.db, 0.0, 1e-9) && Near(committed, 0.0, 1e-9),
+           "K11c 旋钮双击回到 0.0 dB 并提交",
+           [NSString stringWithFormat:@"db=%.1f committed=%.1f", knob.db, committed]);
+    }
+
+    std::printf("\n结果：%d passed, %d failed\n", gPass, gFail);
+    return gFail == 0 ? 0 : 1;
 }

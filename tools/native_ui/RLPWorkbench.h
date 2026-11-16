@@ -73,4 +73,20 @@ NSString *_Nullable RLPChainNodeDisabledReason(NSString *node, NSDictionary *_Nu
 /// profile 是 GET /api/profiles 返回的一条；空/缺键返回「未保存」（不臆造默认值）。
 NSString *RLPProfileSummary(NSDictionary *_Nullable profile);
 
+/// 手动滤波覆盖检测：返回当前生效的手动覆盖键（phase / taps / atten / transition）。
+NSArray<NSString *> *RLPWorkbenchFilterOverrideKeys(NSDictionary *_Nullable settings);
+
+/// 是否存在任意手动滤波覆盖（phase 非空，或 taps/atten/transition 非 0）。
+BOOL RLPWorkbenchHasFilterOverride(NSDictionary *_Nullable settings);
+
+/// 恢复预设值所需的清除载荷（精确清零 phase / taps / atten / transition）。
+NSDictionary<NSString *, NSString *> *RLPWorkbenchClearFilterOverridePayload(void);
+
+/// 手动覆盖的人话摘要；无覆盖时返回 nil。
+NSString *_Nullable RLPWorkbenchFilterOverrideSummary(NSDictionary *_Nullable settings);
+
+/// 音质监控行：仅映射实际 /api/status 字段，无值统一返回 @"N/A"（绝不臆造）。
+/// 每项包含 @{@"group": ..., @"key": ..., @"label": ..., @"value": ...}。
+NSArray<NSDictionary<NSString *, NSString *> *> *RLPWorkbenchMonitorRows(NSDictionary *_Nullable status);
+
 NS_ASSUME_NONNULL_END

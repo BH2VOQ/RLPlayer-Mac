@@ -69,6 +69,10 @@ NS_ASSUME_NONNULL_BEGIN
 /// 主题切换后刷新自建颜色（背景/文字/选中态）。
 - (void)applyTheme;
 
+/// 界面模式（"listen" 聆听模式 / "pro" 专业模式，默认 "listen"）。
+/// 切换时更新 station 入口文案（聆听室 <-> 数字音乐台），保留全部既有导航 key（含 settings）。
+@property (nonatomic, copy) NSString *uiMode;
+
 @end
 
 NS_ASSUME_NONNULL_END

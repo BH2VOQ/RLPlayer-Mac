@@ -4,9 +4,7 @@
 // RLPSettingsViewController.mm — 设置页（纯 AppKit）
 //
 // 页签 = web `data-g` 的同一份清单，**不随模式变化**。
-// 双模式（聆听 / 专业）已于 2026-11-12 整层拆掉：枚举 / 顶栏切换 / 侧栏分叉 /
-// 设置页签随模式 / 工作台首页一并移除，为的是让「web 有的我是否都有」可机械验证。
-// （2026-11-11 那条「两个模式都要有设置页」的要求已随双模式整体退场。）
+// 聆听 / 专业共享全部页签，通用 / 音频处理只调整导航层级，不限制功能访问。
 //
 // 设计取舍（照 web 版设置页的真实结构，不自己发明）：
 //   * 页签划分与 web 完全一致（data-g）：输出 / PCM / SDM / 输入 / 高级 / 均衡 / 校准 / 流媒体 / 诊断 / 元数据。
@@ -78,7 +76,7 @@ static NSString *RLPFilterFamilyNote(NSString *name) {
 
 #pragma mark - 页签定义
 
-// 页签**不随模式变化**：一份清单，与 web `data-g` 对应（双模式已于 2026-11-12 整层拆掉）。
+// 页签**不随模式变化**：一份清单，与既有 `data-g` 深链对应。
 // 页签是**索引 → key 的运行时表**（不再用编译期常量数组），重建只为保持选中页。
 typedef NS_ENUM(NSInteger, RLPSTab) {
     RLPSTabAdv = 0, RLPSTabIn, RLPSTabOut, RLPSTabPcm, RLPSTabSdm,
@@ -92,6 +90,22 @@ typedef NS_ENUM(NSInteger, RLPSTab) {
 /// 唯一真相源：buildContent/selectPane/currentPaneKey 都从这里取。
 static NSArray<NSString *> *RLPSettingsTabKeys(void) {
     return @[ @"adv", @"in", @"out", @"pcm", @"sdm", @"eq", @"cal", @"meta", @"stream", @"diag" ];
+}
+
+static NSArray<NSString *> *RLPSettingsGeneralTabKeys(void) {
+    return @[ @"adv", @"out", @"in", @"meta", @"stream", @"diag" ];
+}
+
+static NSArray<NSString *> *RLPSettingsAudioTabKeys(void) {
+    return @[ @"pcm", @"sdm", @"eq", @"cal" ];
+}
+
+static NSInteger RLPSettingsGroupForKey(NSString *key) {
+    return [RLPSettingsAudioTabKeys() containsObject:key] ? 1 : 0;
+}
+
+static NSArray<NSString *> *RLPSettingsVisibleKeysForGroup(NSInteger group) {
+    return (group == 1) ? RLPSettingsAudioTabKeys() : RLPSettingsGeneralTabKeys();
 }
 
 static NSString *RLPSettingsTabLabel(NSString *key) {
@@ -240,6 +254,10 @@ static NSStackView *RLPSRow(NSString *label, NSView *control, NSString *hint, RL
     return box;
 }
 @interface RLPSettingsViewController () <NSTextViewDelegate>
+@property (nonatomic, strong) NSSegmentedControl *groupTabs;
+@property (nonatomic, strong) NSButton *workbenchBtn;
+@property (nonatomic, strong) NSTextField *modeHintLabel;
+@property (nonatomic, assign) NSInteger activeGroup;
 @property (nonatomic, strong) NSSegmentedControl *tabs;
 @property (nonatomic, strong) NSView *paneHost;
 @property (nonatomic, assign) RLPSTab tab;
@@ -473,6 +491,8 @@ static NSStackView *RLPSRow(NSString *label, NSView *control, NSString *hint, RL
         _loadedKeys = [NSMutableSet set];
         // 默认页签 = 「通用」，与 web 一致（2026-10-29 用户要求「通用」排第一并默认选中）。
         _tab = RLPSTabAdv;
+        _uiMode = @"listen";
+        _activeGroup = 0;
     }
     return self;
 }
@@ -497,13 +517,40 @@ static NSStackView *RLPSRow(NSString *label, NSView *control, NSString *hint, RL
                                                  name:@"RLPSettingsChangedNotification"
                                                object:nil];
 
+    self.groupTabs = [NSSegmentedControl segmentedControlWithLabels:@[RLPTr(@"通用"), RLPTr(@"音频处理")]
+                                                       trackingMode:NSSegmentSwitchTrackingSelectOne
+                                                             target:self
+                                                             action:@selector(onGroupChanged:)];
+    self.groupTabs.identifier = @"settings.groups";
+    self.groupTabs.selectedSegment = self.activeGroup;
+    self.groupTabs.translatesAutoresizingMaskIntoConstraints = NO;
+    [host addSubview:self.groupTabs];
+
+    self.modeHintLabel = RLPLabel(RLPTr(@"音频处理主控位于专业模式「数字音乐台」，此处保留完整参数与深链入口"),
+                                  t.small, t.mut);
+    self.modeHintLabel.identifier = @"settings.modeHint";
+    self.modeHintLabel.lineBreakMode = NSLineBreakByTruncatingTail;
+    self.modeHintLabel.translatesAutoresizingMaskIntoConstraints = NO;
+    [host addSubview:self.modeHintLabel];
+
+    self.workbenchBtn = [NSButton buttonWithTitle:RLPTr(@"打开专业工作台")
+                                           target:self
+                                           action:@selector(onOpenProWorkbench:)];
+    self.workbenchBtn.bezelStyle = NSBezelStyleRounded;
+    self.workbenchBtn.controlSize = NSControlSizeSmall;
+    self.workbenchBtn.identifier = @"settings.openWorkbench";
+    self.workbenchBtn.translatesAutoresizingMaskIntoConstraints = NO;
+    [host addSubview:self.workbenchBtn];
+
     self.tabs = [[NSSegmentedControl alloc] initWithFrame:NSZeroRect];
+    self.tabs.identifier = @"settings.tabs";
     self.tabs.trackingMode = NSSegmentSwitchTrackingSelectOne;
     self.tabs.target = self;
     self.tabs.action = @selector(onTabChanged:);
     self.tabs.translatesAutoresizingMaskIntoConstraints = NO;
     [host addSubview:self.tabs];
     [self rebuildTabs];
+    [self syncModeHintVisibility];
 
     self.paneHost = [[NSView alloc] initWithFrame:NSZeroRect];
     self.paneHost.translatesAutoresizingMaskIntoConstraints = NO;
@@ -513,13 +560,23 @@ static NSStackView *RLPSRow(NSString *label, NSView *control, NSString *hint, RL
     self.statusLine.translatesAutoresizingMaskIntoConstraints = NO;
     [host addSubview:self.statusLine];
 
+    [self.modeHintLabel setContentCompressionResistancePriority:NSLayoutPriorityDefaultLow
+                                                 forOrientation:NSLayoutConstraintOrientationHorizontal];
+
     [NSLayoutConstraint activateConstraints:@[
+        [self.groupTabs.leadingAnchor constraintEqualToAnchor:host.leadingAnchor constant:24],
+        [self.groupTabs.topAnchor constraintEqualToAnchor:host.topAnchor constant:10],
+        [self.workbenchBtn.trailingAnchor constraintEqualToAnchor:host.trailingAnchor constant:-24],
+        [self.workbenchBtn.centerYAnchor constraintEqualToAnchor:self.groupTabs.centerYAnchor],
+        [self.modeHintLabel.leadingAnchor constraintEqualToAnchor:self.groupTabs.trailingAnchor constant:12],
+        [self.modeHintLabel.trailingAnchor constraintLessThanOrEqualToAnchor:self.workbenchBtn.leadingAnchor constant:-10],
+        [self.modeHintLabel.centerYAnchor constraintEqualToAnchor:self.groupTabs.centerYAnchor],
         [self.tabs.leadingAnchor constraintEqualToAnchor:host.leadingAnchor constant:24],
         [self.tabs.trailingAnchor constraintLessThanOrEqualToAnchor:host.trailingAnchor constant:-24],
-        [self.tabs.topAnchor constraintEqualToAnchor:host.topAnchor constant:10],
+        [self.tabs.topAnchor constraintEqualToAnchor:self.groupTabs.bottomAnchor constant:8],
         [self.paneHost.leadingAnchor constraintEqualToAnchor:host.leadingAnchor],
         [self.paneHost.trailingAnchor constraintEqualToAnchor:host.trailingAnchor],
-        [self.paneHost.topAnchor constraintEqualToAnchor:self.tabs.bottomAnchor constant:12],
+        [self.paneHost.topAnchor constraintEqualToAnchor:self.tabs.bottomAnchor constant:10],
         [self.paneHost.bottomAnchor constraintEqualToAnchor:self.statusLine.topAnchor constant:-6],
         [self.statusLine.leadingAnchor constraintEqualToAnchor:host.leadingAnchor constant:24],
         [self.statusLine.trailingAnchor constraintEqualToAnchor:host.trailingAnchor constant:-24],
@@ -529,9 +586,37 @@ static NSStackView *RLPSRow(NSString *label, NSView *control, NSString *hint, RL
     [self showTab:self.tab];
 }
 
-/// 按 web 页签清单重建分段控件，并保持当前页选中（无模式分叉）。
+- (void)applyUiMode:(NSString *)mode {
+    self.uiMode = [mode isEqualToString:@"pro"] ? @"pro" : @"listen";
+    [self syncModeHintVisibility];
+}
+
+- (void)syncModeHintVisibility {
+    if (!self.modeHintLabel) return;
+    self.modeHintLabel.hidden = (self.activeGroup != 1);
+}
+
+- (void)onOpenProWorkbench:(id)sender {
+    (void)sender;
+    [[NSNotificationCenter defaultCenter] postNotificationName:@"RLPSwitchToProWorkbenchNotification"
+                                                        object:nil];
+}
+
+- (void)onGroupChanged:(id)sender {
+    (void)sender;
+    self.activeGroup = self.groupTabs.selectedSegment;
+    [self syncModeHintVisibility];
+    NSArray<NSString *> *keys = RLPSettingsVisibleKeysForGroup(self.activeGroup);
+    if (keys.count) {
+        self.tab = RLPSTabForKey(keys[0]);
+    }
+    [self rebuildTabs];
+    [self showTab:self.tab];
+}
+
+/// 按当前分类（通用 / 音频处理）重建二级页签分段控件，并保持当前页选中。
 - (void)rebuildTabs {
-    NSArray<NSString *> *keys = RLPSettingsTabKeys();
+    NSArray<NSString *> *keys = RLPSettingsVisibleKeysForGroup(self.activeGroup);
     self.tabs.segmentCount = (NSInteger)keys.count;
     for (NSInteger i = 0; i < (NSInteger)keys.count; ++i)
         [self.tabs setLabel:RLPTr(RLPSettingsTabLabel(keys[i])) forSegment:i];
@@ -540,7 +625,7 @@ static NSStackView *RLPSRow(NSString *label, NSView *control, NSString *hint, RL
 }
 
 - (void)onTabChanged:(id)sender {
-    NSArray<NSString *> *keys = RLPSettingsTabKeys();
+    NSArray<NSString *> *keys = RLPSettingsVisibleKeysForGroup(self.activeGroup);
     NSInteger sel = self.tabs.selectedSegment;
     if (sel < 0 || sel >= (NSInteger)keys.count) return;
     [self showTab:RLPSTabForKey(keys[sel])];
@@ -550,12 +635,15 @@ static NSStackView *RLPSRow(NSString *label, NSView *control, NSString *hint, RL
     // 页签 key 与 web 的 data-g 完全同名，「通用」= adv。旧调用点发 "play" 时落到「通用」，
     // 因为 web 没有独立的「播放」页（音量/响度在「通用」页，预衰减在 PCM 页）。
     NSString *k = key;
-    NSArray<NSString *> *keys = RLPSettingsTabKeys();
+    NSArray<NSString *> *allKeys = RLPSettingsTabKeys();
     if ([k isEqualToString:@"play"]) k = @"adv";
-    NSUInteger idx = [keys indexOfObject:k];
-    if (idx == NSNotFound) return;
-    self.tabs.selectedSegment = (NSInteger)idx;
-    [self showTab:RLPSTabForKey(k)];
+    if (![allKeys containsObject:k]) return;
+    self.activeGroup = RLPSettingsGroupForKey(k);
+    self.groupTabs.selectedSegment = self.activeGroup;
+    [self syncModeHintVisibility];
+    self.tab = RLPSTabForKey(k);
+    [self rebuildTabs];
+    [self showTab:self.tab];
 }
 
 - (NSString *)currentPaneKey {
@@ -3984,6 +4072,7 @@ static NSUInteger RLPUTF8Bytes(NSString *s) {
         [self.themePopup selectItemAtIndex:[[RLPTheme themeName] isEqualToString:@"light"] ? 1 : 0];
     }
     self.statusLine.textColor = t.mut;
+    self.modeHintLabel.textColor = t.mut;
     // 2026-11-13：诊断/反馈区内联化后新增的主/次按钮要跟着主题走
     // （否则切浅色后红底主按钮仍是深色主题的 accent 快照）。
     if (self.diagZipBtn) {

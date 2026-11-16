@@ -18,6 +18,7 @@
 #include <string>
 #include <chrono>
 #include <algorithm>
+#include <limits>
 
 using namespace rta::dsp;
 
@@ -44,6 +45,47 @@ static double tone_rms(ResamplerConfig cfg, double freqHz, size_t inFrames, doub
 }
 
 // 测镜像抑制：15 kHz 单音升频后，29.1 kHz 处的功率（用 DFT 单点）
+// Fit both quadratures at the ORIGINAL tone and image frequencies, over the
+// ORIGINAL sample interval. No window or frequency-bin relocation is used.
+// A single-bin DFT also measures the main tone's rectangular-record leakage.
+static double fitted_image_db(const std::vector<double>& y, size_t settle, size_t n,
+                              double toneHz, double imageHz, double rate) {
+    double gram[4][5] = {};
+    double rawRe = 0.0, rawIm = 0.0;
+    for (size_t i = settle; i < n; ++i) {
+        const double t = double(i - settle);
+        const double u = 2.0 * PI * toneHz * t / rate, v = 2.0 * PI * imageHz * t / rate;
+        const double x[4] = {std::cos(u), std::sin(u), std::cos(v), std::sin(v)};
+        for (int r = 0; r < 4; ++r) {
+            gram[r][4] += x[r] * y[i];
+            for (int c = 0; c < 4; ++c) gram[r][c] += x[r] * x[c];
+        }
+        rawRe += y[i] * x[2]; rawIm += y[i] * x[3];
+    }
+    // The two distinct frequencies have a well-conditioned Gram matrix.
+    for (int p = 0; p < 4; ++p) {
+        const double pivot = gram[p][p];
+        if (!(pivot > double(n - settle) * 0.1)) return 0.0;
+        for (int c = p; c < 5; ++c) gram[p][c] /= pivot;
+        for (int r = 0; r < 4; ++r) if (r != p) {
+            const double factor = gram[r][p];
+            for (int c = p; c < 5; ++c) gram[r][c] -= factor * gram[p][c];
+        }
+    }
+    const double tone = std::hypot(gram[0][4], gram[1][4]);
+    const double image = std::hypot(gram[2][4], gram[3][4]);
+    // Conservative forward-error allowance for the four serial dot products,
+    // their normal-equation solve and trigonometric argument rounding. This
+    // is an amplitude UPPER bound, not a claimed measurement below precision.
+    const double uncertainty = 32.0 * std::numeric_limits<double>::epsilon() * double(n - settle);
+    const double upper = image / tone + uncertainty;
+    const double raw = std::hypot(rawRe, rawIm) / (tone * double(n - settle) * 0.5);
+    std::printf("    image: raw DFT %.6f dB, fitted %.6f dB, upper bound %.6f dB\n",
+                20.0 * std::log10(raw + 1e-300), 20.0 * std::log10(image / tone + 1e-300),
+                20.0 * std::log10(upper));
+    return 20.0 * std::log10(upper);
+}
+
 static double image_db(ResamplerConfig cfg, double toneHz, double imageHz, size_t inFrames) {
     PolyphaseResampler rs(cfg);
     std::vector<double> x(inFrames), o(rs.maxOutFrames(inFrames) + 16);
@@ -52,17 +94,7 @@ static double image_db(ResamplerConfig cfg, double toneHz, double imageHz, size_
     double* op[1] = { o.data() };
     const size_t n = rs.process(ip, inFrames, op);
     const size_t settle = n / 3;
-    const double w = 2.0 * PI * imageHz / (double)cfg.outRate;
-    double re = 0.0, im = 0.0, er = 0.0, ei = 0.0;
-    const double w0 = 2.0 * PI * toneHz / (double)cfg.outRate;
-    for (size_t i = settle; i < n; ++i) {
-        const double t = (double)(i - settle);
-        re += o[i] * std::cos(w * t);  im += o[i] * std::sin(w * t);
-        er += o[i] * std::cos(w0 * t); ei += o[i] * std::sin(w0 * t);
-    }
-    const double magI = std::sqrt(re * re + im * im);
-    const double magT = std::sqrt(er * er + ei * ei);
-    return 20.0 * std::log10((magI + 1e-300) / (magT + 1e-300));
+    return fitted_image_db(o, settle, n, toneHz, imageHz, double(cfg.outRate));
 }
 
 static void run_bench(bool twoStage, double* msOut) {
@@ -82,6 +114,22 @@ static void run_bench(bool twoStage, double* msOut) {
 }
 
 int main() {
+    // Metrology negative controls: both are genuine tones at 29.1 kHz.
+    // -50 dB must fail the original -60 dB bound; -100 dB must fail the
+    // stronger -140 dB bound, despite passing the old leakage-limited test.
+    for (double injectedDb : {-50.0, -100.0}) {
+        const size_t n = 262144, settle = n / 3;
+        std::vector<double> signal(n);
+        for (size_t i = 0; i < n; ++i)
+            signal[i] = 0.5 * std::sin(2.0 * PI * 15000.0 * double(i) / 705600.0 + 0.37) +
+                        0.5 * std::pow(10.0, injectedDb / 20.0) *
+                        std::sin(2.0 * PI * 29100.0 * double(i) / 705600.0 + 1.1);
+        const double measured = fitted_image_db(signal, settle, n, 15000.0, 29100.0, 705600.0);
+        check(std::fabs(measured - injectedDb) < 0.01 && measured > -140.0 &&
+              (injectedDb < -60.0 || measured > -60.0),
+              "负向对照：真实镜像保留且正确判红", std::to_string(injectedDb) + " -> " + std::to_string(measured));
+    }
+
     printf("=== 两段式升频验证（44.1 kHz -> 705.6 kHz）===\n");
 
     ResamplerConfig base;
@@ -119,9 +167,11 @@ int main() {
         const double i1 = image_db(one, 15000.0, 29100.0, 16384);
         const double i2 = image_db(two, 15000.0, 29100.0, 16384);
         printf("  单级 %.1f dB   两段 %.1f dB\n", i1, i2);
-        // 说明：这里的绝对值受限于"未加窗的单点 DFT"的泄漏底（约 -80 dB），
-        // 不能用来证明 -180 dB 的阻带。它能证明的是【两段式不比单级更差】。
-        check(i1 < -60.0, "单级镜像抑制优于 -60 dB（受泄漏底限制）", std::to_string(i1));
+        // Compare conservative amplitude upper bounds at the original image
+        // frequency. Values below roundoff resolution are not reported as
+        // physically distinguishable; the absolute -140 dB check remains strong.
+        check(i1 < -140.0 && i2 < -140.0, "两路径真实镜像幅度上界优于 -140 dB");
+        check(i1 < -60.0, "单级镜像幅度上界优于 -60 dB", std::to_string(i1));
         check(std::fabs(i2 - i1) < 3.0, "两段式镜像抑制与单级相当（差 < 3 dB）",
               std::to_string(i2 - i1) + " dB");
     }

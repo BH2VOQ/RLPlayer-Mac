@@ -126,7 +126,8 @@
 /// 内联渲染的动态列表（paintSavedQueues，ui_script.h:3753-3798）。
 /// 侧栏因此少了 条目 / ✎ 重命名 / × 删除 / 空态整行 —— 用户图二演示的正是动态条目。
 /// 现在把这一层按 web 复刻；歌单行由 /api/sq/list 填充，不再是硬编码条目。
-static NSArray<NSDictionary *> *RLPSidebarItems(void) {
+static NSArray<NSDictionary *> *RLPSidebarItems(NSString *uiMode) {
+    const BOOL isPro = [uiMode isEqualToString:@"pro"];
     return @[
         @{@"sec": @"资料库"},
         @{@"name": @"专辑",     @"icon": @"square.stack", @"key": @"albums"},
@@ -139,8 +140,10 @@ static NSArray<NSDictionary *> *RLPSidebarItems(void) {
         @{@"name": @"最近播放", @"icon": @"clock",        @"key": @"recent"},
         @{@"name": @"我的最爱", @"icon": @"heart",        @"key": @"favorites"},
         @{@"sec": @"音频引擎"},
-        // web data-v=station 的标题就是「快速开始」。
-        @{@"name": @"快速开始", @"icon": @"play.square.stack", @"key": @"station"},
+        // station 在聆听模式为「聆听室」，专业模式为「数字音乐台」；两种模式均保留 settings 入口。
+        @{@"name": isPro ? @"数字音乐台" : @"聆听室",
+          @"icon": isPro ? @"slider.horizontal.3" : @"headphones",
+          @"key": @"station"},
         @{@"name": @"设置",     @"icon": @"gearshape", @"key": @"settings"},
     ];
 }
@@ -164,6 +167,7 @@ static BOOL RLPRowIsSection(NSArray<NSDictionary *> *items, NSInteger row) {
         _hoverRow = -1;
         _pendingRow = -1;
         _selectedRow = -1;
+        _uiMode = @"listen";
         _savedQueues = @[];
         _menuItems = [NSMutableArray array];
         [self rebuildMenuItems];
@@ -202,8 +206,37 @@ static BOOL RLPRowIsSection(NSArray<NSDictionary *> *items, NSInteger row) {
 /// 把「我的歌单」分组插进静态清单：分组标题 + （歌单行 | 空态行）。
 /// web 结构（ui_page.h:1484 + ui_script.h paintSavedQueues）：
 ///   `<div id=sqList class=sqlist>` → 标题行 .sqhd / 歌单行 .sqrow(name + ✎ + ×) / 空态 .sqempty
+- (void)setUiMode:(NSString *)uiMode {
+    NSString *next = [uiMode isEqualToString:@"pro"] ? @"pro" : @"listen";
+    if ([_uiMode isEqualToString:next]) return;
+    NSString *prevKey = [self selectedKey];
+    NSString *prevSQ = (_selectedRow >= 0 && _selectedRow < (NSInteger)_menuItems.count && _menuItems[_selectedRow][@"sqindex"])
+        ? _menuItems[_selectedRow][@"name"] : nil;
+    _uiMode = [next copy];
+    [self rebuildMenuItems];
+    // 原子保持当前选中项，不触发 onSelect/onSelectKey 副作用。
+    if (prevSQ.length) {
+        for (NSInteger i = 0; i < (NSInteger)_menuItems.count; ++i) {
+            if (_menuItems[i][@"sqindex"] && [_menuItems[i][@"name"] isEqualToString:prevSQ]) {
+                _selectedRow = i;
+                _lastSelectedRow = i;
+                break;
+            }
+        }
+    } else if (prevKey.length) {
+        for (NSInteger i = 0; i < (NSInteger)_menuItems.count; ++i) {
+            if ([_menuItems[i][@"key"] isEqualToString:prevKey]) {
+                _selectedRow = i;
+                _lastSelectedRow = i;
+                break;
+            }
+        }
+    }
+    [_tableView reloadData];
+}
+
 - (void)rebuildMenuItems {
-    NSArray *base = RLPSidebarItems();
+    NSArray *base = RLPSidebarItems(_uiMode ?: @"listen");
     NSMutableArray *out = [NSMutableArray array];
     NSString *prevSec = nil;
     BOOL inserted = NO;

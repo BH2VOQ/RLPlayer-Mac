@@ -76,6 +76,13 @@ int main() {
         // 切趾——名字表第 8 组（通带高频平滑滚降）
         { "apod-20k",                 FilterFamily::Apodizing,     "切趾",              "切趾" },
         { "apod-wide",                FilterFamily::Apodizing,     "切趾",              "切趾" },
+        // Windows v3.3.11 新增预设代表项
+        { "poly-sinc-ext2-hires-ip",  FilterFamily::Ext2,          "多相 sinc 扩展频响",  "多相 sinc 扩展频响 混合相位" },
+        { "poly-sinc-xtr-mp",         FilterFamily::PolySinc,      "多相 sinc",         "多相 sinc 最小相位" },
+        { "poly-sinc-mqa/mp3-mp",     FilterFamily::PolySinc,      "多相 sinc",         "多相 sinc 最小相位" },
+        { "sinc-Lm",                  FilterFamily::Sinc,          "超长 sinc",          "超长 sinc" },
+        { "sinc-MGa",                 FilterFamily::Sinc,          "超长 sinc",          "超长 sinc" },
+        { "minringFIR-lp",            FilterFamily::MinRing,       "最小振铃",           "最小振铃 线性相位" },
     };
     for (const Row& r : rows) {
         ck(name_in_presets(r.name), std::string("真实预设名: ") + r.name,

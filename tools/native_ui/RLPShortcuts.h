@@ -33,10 +33,15 @@ RLPShortcutAction RLPShortcutActionForKey(NSString * _Nullable key,
 /// `changed` 返回是否真的变了（web 里 next === cur 时不发请求）。
 double RLPVolumeNudgeDb(double currentDb, double stepDb, BOOL * _Nullable changed);
 
+/// v3.3.11 统一量程 [-120, +20] dB 的快捷键步进（对齐 ui_script.h:12453-12454）：
+/// 0.5 / 0.1 dB 步进、[-120, +20] 夹取、1 位小数收尾，不再受旧 [-55, 0] 限制。
+double RLPVolumeStepDb(double currentDb, double stepDb, BOOL * _Nullable changed);
+
 /// web 的档位常量（判据与实现共用同一份，避免两处写死）。
 extern const double RLPVolumeStepCoarseDb;   // 0.5
 extern const double RLPVolumeStepFineDb;     // 0.1
 extern const double RLPVolumeSilentDb;       // -120（后端 ≤-120 映射成增益 0）
 extern const double RLPVolumeAudibleDb;      // -54.5（从静音往上第一档）
+extern const double RLPVolumeMaxDb;          // +20.0（v3.3.11 正增益上限）
 
 NS_ASSUME_NONNULL_END

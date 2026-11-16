@@ -1091,9 +1091,14 @@ int RLPRunFunctionalAudit(NSString *outDir) {
         NSMutableArray<NSView *> *vs = [NSMutableArray array];
         CollectAllViews(sv.view, vs);
         for (NSView *v in vs)
-            if ([v isKindOfClass:[NSSegmentedControl class]]) { seg = (NSSegmentedControl *)v; break; }
-        CK(seg != nil && seg.segmentCount == 10,
-           "设置页 10 个页签（web data-g 清单）",
+            if ([v isKindOfClass:[NSSegmentedControl class]] &&
+                [v.identifier isEqualToString:@"settings.tabs"]) {
+                seg = (NSSegmentedControl *)v;
+                break;
+            }
+        // 设置页按「通用 / 音频处理」分组；顶部那一个是组开关，不是 pane 控件。
+        CK(seg != nil && seg.segmentCount >= 1 && seg.segmentCount <= 10,
+           "设置页当前组页签控件有效（总 10 pane，逐项切页判据在下）",
            seg ? [NSString stringWithFormat:@"tabs=%ld", (long)seg.segmentCount] : @"无页签控件");
 
         // 顺序必须与 web 的 .stabs 一致：adv / in / out / pcm / sdm / eq / cal / meta / stream / diag

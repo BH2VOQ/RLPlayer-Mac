@@ -103,6 +103,7 @@ double RLPVolKnobDbFromAngleDegrees(double degrees) {
 
 - (void)setLocked:(BOOL)locked {
     _locked = locked;
+    if (locked) self.dragging = NO;
     self.needsDisplay = YES;
 }
 
@@ -213,6 +214,12 @@ double RLPVolKnobDbFromAngleDegrees(double degrees) {
 
 - (void)mouseDown:(NSEvent *)event {
     if (self.isLocked) { [super mouseDown:event]; return; }
+    if (event.clickCount == 2) {
+        self.db = 0.0;
+        if (self.onLiveChange) self.onLiveChange(self.db);
+        if (self.onCommit) self.onCommit(self.db);
+        return;
+    }
     self.dragging = YES;
     [self applyEvent:event];
 }
@@ -226,6 +233,18 @@ double RLPVolKnobDbFromAngleDegrees(double degrees) {
     (void)event;
     if (!self.dragging) return;
     self.dragging = NO;
+    if (self.onCommit) self.onCommit(self.db);
+}
+
+- (void)scrollWheel:(NSEvent *)event {
+    if (self.isLocked) { [super scrollWheel:event]; return; }
+    const double step = ((event.modifierFlags & (NSEventModifierFlagOption | NSEventModifierFlagShift)) != 0) ? 0.1 : 0.5;
+    const double dy = event.scrollingDeltaY;
+    if (std::fabs(dy) < 0.01) return;
+    const double next = RLPVolClampDb(self.db + (dy > 0 ? step : -step));
+    if (std::fabs(next - self.db) < 1e-9) return;
+    self.db = next;
+    if (self.onLiveChange) self.onLiveChange(self.db);
     if (self.onCommit) self.onCommit(self.db);
 }
 

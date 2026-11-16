@@ -164,7 +164,7 @@ struct SourceInfo {
 
 // 设置：字段名与 /api/play 的请求键名同义（applied JSON 由 rtaweb 从这里生成）
 struct PresetSettings {
-    std::string rate = "follow";         // "follow" | "src" | "max" | "384000"（数字串）
+    std::string rate = "src";            // "src" | "follow" | "max" | "384000"（数字串）
     int dsd = 0;                         // 0 = PCM；64/128/256/512 = DSD 输出档
     std::string modFamily;               // "" = 不改（默认 dsd）；dsd 档写 "ec"
     int modOrder = 0;                    // 0 = 不改；dsd 档写 7
@@ -241,11 +241,15 @@ inline PresetSettings plan_preset(PresetProfile prof, const DeviceCaps& caps, co
 
     // ---------------- ① 原音直通 ----------------
     if (prof == PresetProfile::BitPerfect) {
-        s.rate = "follow";
+        s.rate = "src";
         s.filter.clear();
         s.minTapsPerInput = 0;
         s.dsd = 0;
         s.directSdm = 0;
+        if (!caps.exclusive) {
+            s.notes.push_back("当前后端是共享/非独占模式：本档无法做到逐位直通，请切到 CoreAudio 独占模式"
+                              "（共享模式下输出采样率由系统混音率决定，会重采样）");
+        }
         if (!src.isDsd) {
             s.notes.push_back("源是 PCM ⟹ dsd=0：不调制、不重采样、不动数据");
             if (!capsUnknown && !caps.rates.empty()) {
@@ -300,8 +304,8 @@ inline PresetSettings plan_preset(PresetProfile prof, const DeviceCaps& caps, co
         const uint32_t devBest = caps.rates.empty() ? 0u : caps.rates.back();
         const uint32_t target = preset_max_pcm_rate(caps.rates, kPresetRateCap);
         if (target == 0) {
-            s.rate = "follow";
-            s.notes.push_back("设备能力探测为空（未能确认独占支持的采样率）：升频档降级为「跟随源」，"
+            s.rate = "src";
+            s.notes.push_back("设备能力探测为空（未能确认独占支持的采样率）：升频档降级为「保持源采样率」，"
                               "不写死 384000（不假装支持）");
             return s;
         }
@@ -339,7 +343,7 @@ inline PresetSettings plan_preset(PresetProfile prof, const DeviceCaps& caps, co
         s.filter = "poly-sinc-tight-lp";
         s.minTapsPerInput = 512;
         s.shaper = "none";            // 抖动交给调制器之后的 1-bit 量化（与 DSD 档一致）
-        s.rate = "follow";            // DoP 忽略 rate：载波率由 dsd 档决定，不是由 rate 决定
+        s.rate = "src";               // DoP 忽略 rate：载波率由 dsd 档决定，不是由 rate 决定
         s.directSdm = 0;              // PCM 源没有"直通"可言
         // mac 口径：只有 DoP 才算 DSD 通路。dsdNative 即便被填成 true 也不采信 ——
         // 采信它就会写出「原生 1-bit 直送」这种本平台不存在的通路（A-5 事故的同款错误）。
@@ -352,7 +356,7 @@ inline PresetSettings plan_preset(PresetProfile prof, const DeviceCaps& caps, co
             s.modFamily.clear();
             s.modOrder = 0;
             if (target == 0) {
-                s.rate = "follow";
+                s.rate = "src";
                 s.shaper = "none";
             } else {
                 s.rate = detail::num(target);
@@ -393,7 +397,7 @@ inline PresetSettings plan_preset(PresetProfile prof, const DeviceCaps& caps, co
     s.filter = "poly-sinc-tight-lp";
     s.minTapsPerInput = 512;
     s.shaper = "none";                // DoP 路径强制无抖动（抖动交给 1-bit 量化）
-    s.rate = "follow";                // 原生 DSD 要求跟随源；DoP 忽略 rate（载波由 dsd 档决定）
+    s.rate = "src";                   // 原生 DSD 要求保持源率；DoP 忽略 rate（载波由 dsd 档决定）
     if (capLevel == 0) {
         // 设备完全没有 DSD 通路：保守降级为 PCM 升频（让声音出来），并把事实写清
         const uint32_t target = preset_max_pcm_rate(caps.rates, kPresetRateCap);
@@ -402,7 +406,7 @@ inline PresetSettings plan_preset(PresetProfile prof, const DeviceCaps& caps, co
         s.modFamily.clear();
         s.modOrder = 0;
         if (target == 0) {
-            s.rate = "follow";
+            s.rate = "src";
         } else {
             s.rate = detail::num(target);
             s.shaper = "auto";
@@ -458,7 +462,7 @@ inline BitPerfectCheck check_bit_perfect(const PresetSettings& s, const DeviceCa
                                          const SourceInfo& src) {
     BitPerfectCheck r;
     auto bad = [&r](const std::string& why) { r.ok = false; r.violations.push_back(why); };
-    if (s.rate != "follow") bad("①重采样：rate=" + (s.rate.empty() ? std::string("(空)") : s.rate));
+    if (s.rate != "src" && s.rate != "follow") bad("①重采样：rate=" + (s.rate.empty() ? std::string("(空)") : s.rate));
     if (std::fabs(s.volumeDb) > 1e-9) bad("②音量非 0 dB");
     if (s.shaper != "none") bad("③抖动/整形：" + s.shaper);
     if (!s.clearEqIr) bad("④⑤EQ/IR/预衰减未清空");
@@ -473,6 +477,8 @@ inline BitPerfectCheck check_bit_perfect(const PresetSettings& s, const DeviceCa
             bad("⑦位深降低：" + detail::numi(outBits) + " bit < 源 " + detail::numi(src.srcBits) + " bit");
         }
     }
+    if (!caps.exclusive)
+        bad("⑧后端非独占/直连：共享模式下系统混音率会重采样");
     return r;
 }
 

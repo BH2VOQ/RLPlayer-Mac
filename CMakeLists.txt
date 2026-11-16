@@ -2531,3 +2531,89 @@ target_include_directories(test_filter_settings_snapshot PRIVATE src tools)
 target_link_libraries(test_filter_settings_snapshot PRIVATE rlapp_core)
 add_test(NAME filter_settings_snapshot COMMAND test_filter_settings_snapshot)
 set_tests_properties(filter_settings_snapshot PROPERTIES TIMEOUT 120)
+
+if(APPLE)
+  add_executable(test_native_volume_contract tests/test_native_volume_contract.mm
+    tools/native_ui/RLPVolumeKnobView.mm tools/native_ui/RLPVolumeSliderView.mm
+    tools/native_ui/RLPPlaybackBarView.mm tools/native_ui/RLPNowPlayingViewController.mm
+    tools/native_ui/RLPShortcuts.mm tools/native_ui/RLPPageViewController.mm
+    tools/native_ui/RLPSupport.mm tools/native_ui/RLPModels.mm tools/native_ui/RLPTheme.mm
+    tools/native_ui/RLPNativeI18n.mm tools/native_ui/RLPSignalChain.mm
+    tools/native_ui/RLPKnowledgeView.mm tools/native_ui/RLPAnalysisSummary.mm
+    tools/native_ui/RLPLyrics.mm tools/native_ui/RLPTrackActions.mm tools/native_ui/RLPWaveformView.mm)
+  target_compile_options(test_native_volume_contract PRIVATE -fobjc-arc)
+  target_include_directories(test_native_volume_contract PRIVATE src tools tools/native_ui)
+  target_link_libraries(test_native_volume_contract PRIVATE "-framework AppKit" "-framework QuartzCore" "-framework CoreImage")
+  add_test(NAME native_volume_contract COMMAND test_native_volume_contract)
+  set_tests_properties(native_volume_contract PROPERTIES TIMEOUT 120)
+endif()
+
+if(APPLE)
+  add_executable(test_native_listening_contract tests/test_native_listening_contract.mm
+    tools/native_ui/RLPListeningRoom.mm tools/native_ui/RLPQuickStartViewController.mm
+    tools/native_ui/RLPPageViewController.mm tools/native_ui/RLPSupport.mm
+    tools/native_ui/RLPTheme.mm tools/native_ui/RLPModels.mm
+    tools/native_ui/RLPCoreClient.mm tools/native_ui/RLPNativeI18n.mm)
+  target_compile_options(test_native_listening_contract PRIVATE -fobjc-arc)
+  target_include_directories(test_native_listening_contract PRIVATE src tools tools/native_ui)
+  target_link_libraries(test_native_listening_contract PRIVATE rlapp_core "-framework AppKit")
+  add_test(NAME native_listening_contract COMMAND test_native_listening_contract)
+  set_tests_properties(native_listening_contract PROPERTIES TIMEOUT 180)
+
+  get_target_property(_studio_sources test_workbench SOURCES)
+  list(FILTER _studio_sources EXCLUDE REGEX "tests/test_workbench[.]mm$")
+  add_executable(test_native_studio_contract tests/test_native_studio_contract.mm ${_studio_sources})
+  target_compile_options(test_native_studio_contract PRIVATE -fobjc-arc)
+  target_include_directories(test_native_studio_contract PRIVATE src tools tools/native_ui)
+  get_target_property(_studio_libs test_workbench LINK_LIBRARIES)
+  target_link_libraries(test_native_studio_contract PRIVATE ${_studio_libs})
+  add_test(NAME native_studio_contract COMMAND test_native_studio_contract)
+  set_tests_properties(native_studio_contract PROPERTIES TIMEOUT 180)
+
+  get_target_property(_modes_sources test_native_topbar_search SOURCES)
+  list(FILTER _modes_sources EXCLUDE REGEX "tests/test_native_topbar_search[.]mm$")
+  add_executable(test_native_modes_contract tests/test_native_modes_contract.mm ${_modes_sources})
+  target_compile_options(test_native_modes_contract PRIVATE -fobjc-arc)
+  target_include_directories(test_native_modes_contract PRIVATE src tools tools/native_ui)
+  get_target_property(_modes_libs test_native_topbar_search LINK_LIBRARIES)
+  target_link_libraries(test_native_modes_contract PRIVATE ${_modes_libs})
+  add_test(NAME native_modes_contract COMMAND test_native_modes_contract)
+  set_tests_properties(native_modes_contract PROPERTIES TIMEOUT 240)
+endif()
+
+add_executable(test_windows_filter_parity tests/test_windows_filter_parity.cpp)
+target_link_libraries(test_windows_filter_parity PRIVATE rtadsp)
+add_test(NAME windows_filter_parity COMMAND test_windows_filter_parity)
+set_tests_properties(windows_filter_parity PROPERTIES TIMEOUT 180)
+
+add_executable(test_volume_backend_contract tests/test_volume_backend_contract.cpp ${RL_LOOPBACK_SRC} ${RL_IMAGE_THUMB_SRC})
+target_include_directories(test_volume_backend_contract PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tools)
+target_link_libraries(test_volume_backend_contract PRIVATE rtadsp ${RL_PLATFORM_LIBS} "-framework Foundation" ${RL_IMAGE_FRAMEWORKS})
+add_test(NAME volume_backend_contract COMMAND test_volume_backend_contract)
+set_tests_properties(volume_backend_contract PROPERTIES TIMEOUT 120)
+
+add_executable(test_preset_apply_contract tests/test_preset_apply_contract.cpp ${RL_LOOPBACK_SRC} ${RL_IMAGE_THUMB_SRC})
+target_include_directories(test_preset_apply_contract PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tools)
+target_link_libraries(test_preset_apply_contract PRIVATE rtadsp ${RL_PLATFORM_LIBS} "-framework Foundation" ${RL_IMAGE_FRAMEWORKS})
+add_test(NAME preset_apply_contract COMMAND test_preset_apply_contract)
+set_tests_properties(preset_apply_contract PROPERTIES TIMEOUT 120)
+
+# Native mode host composition: every fixture that embeds the main window
+# must also link its professional home, just as the shipped App does.
+if(APPLE)
+  get_property(_mode_targets DIRECTORY PROPERTY BUILDSYSTEM_TARGETS)
+  foreach(_mode_target IN LISTS _mode_targets)
+    get_target_property(_mode_sources ${_mode_target} SOURCES)
+    if(_mode_sources)
+      list(FIND _mode_sources "tools/native_ui/RLPMainWindowController.mm" _mode_host_index)
+      if(NOT _mode_host_index EQUAL -1)
+        foreach(_mode_source tools/native_ui/RLPWorkbench.mm tools/native_ui/RLPWorkbenchViewController.mm tools/native_ui/RLPSignalChain.mm)
+          list(FIND _mode_sources "${_mode_source}" _mode_source_index)
+          if(_mode_source_index EQUAL -1)
+            target_sources(${_mode_target} PRIVATE ${_mode_source})
+          endif()
+        endforeach()
+      endif()
+    endif()
+  endforeach()
+endif()

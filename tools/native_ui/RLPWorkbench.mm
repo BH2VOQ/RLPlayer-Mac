@@ -4,9 +4,12 @@
 #import "RLPSupport.h"
 
 NSArray<NSString *> *RLPABSlotKeys(void) {
-    // 只有听感相关键。**没有 device / backend / hogexcl**（切它们会抢独占/爆音）。
-    return @[@"filter", @"filterNx", @"rate", @"dsd", @"shaper",
-             @"modfamily", @"modorder", @"bits", @"eq", @"taps"];
+    // 只有听感相关键。**没有 device / backend / hogexcl / buffer / volume**（切它们会抢独占/爆音）。
+    return @[@"filter", @"filterNx", @"rate", @"rateFamilyPolicy", @"dsd", @"dsdnative",
+             @"directsdm", @"shaper", @"twostage", @"taps", @"atten", @"transition", @"phase",
+             @"modfamily", @"modorder", @"modcut", @"moddith", @"oobgain", @"ahmbits",
+             @"sdmfilt", @"sdmfiltnx", @"isp", @"dsdkind", @"dsdconv", @"dsd2stage",
+             @"bits", @"channels", @"trim", @"loudness", @"rgmode", @"eq", @"ir", @"irgpu"];
 }
 
 static NSString *Str(NSDictionary *d, NSString *k) {
@@ -236,4 +239,140 @@ NSString *RLPProfileSummary(NSDictionary *profile) {
     NSString *eqName = profile[@"eqId"];
     if ([eqName isKindOfClass:[NSString class]] && eqName.length) [p addObject:eqName];
     return p.count ? [p componentsJoinedByString:@" · "] : RLPTr(@"未保存");
+}
+
+static BOOL IsNonZeroOverride(NSString *v) {
+    if (!v.length) return NO;
+    if ([v isEqualToString:@"0"] || [v isEqualToString:@"0.0"]) return NO;
+    return [v doubleValue] != 0.0 || [v isEqualToString:@"auto"] == NO;
+}
+
+NSArray<NSString *> *RLPWorkbenchFilterOverrideKeys(NSDictionary *settings) {
+    if (![settings isKindOfClass:[NSDictionary class]]) return @[];
+    NSMutableArray<NSString *> *out = [NSMutableArray array];
+    NSString *phase = Str(settings, @"phase");
+    if (phase.length) [out addObject:@"phase"];
+    NSString *taps = Str(settings, @"taps");
+    if (taps.length && [taps integerValue] > 0) [out addObject:@"taps"];
+    NSString *atten = Str(settings, @"atten");
+    if (atten.length && IsNonZeroOverride(atten) && [atten doubleValue] > 0.0) [out addObject:@"atten"];
+    NSString *trans = Str(settings, @"transition");
+    if (trans.length && IsNonZeroOverride(trans) && [trans doubleValue] > 0.0) [out addObject:@"transition"];
+    return out;
+}
+
+BOOL RLPWorkbenchHasFilterOverride(NSDictionary *settings) {
+    return RLPWorkbenchFilterOverrideKeys(settings).count > 0;
+}
+
+NSDictionary<NSString *, NSString *> *RLPWorkbenchClearFilterOverridePayload(void) {
+    return @{@"phase": @"", @"taps": @"0", @"atten": @"0", @"transition": @"0"};
+}
+
+NSString *RLPWorkbenchFilterOverrideSummary(NSDictionary *settings) {
+    NSArray<NSString *> *keys = RLPWorkbenchFilterOverrideKeys(settings);
+    if (!keys.count) return nil;
+    NSMutableArray<NSString *> *parts = [NSMutableArray array];
+    for (NSString *k in keys) {
+        NSString *v = Str(settings, k) ?: @"";
+        if ([k isEqualToString:@"phase"]) [parts addObject:[NSString stringWithFormat:@"%@=%@", RLPTr(@"相位"), v]];
+        else if ([k isEqualToString:@"taps"]) [parts addObject:[NSString stringWithFormat:@"%@=%@", RLPTr(@"抽头"), v]];
+        else if ([k isEqualToString:@"atten"]) [parts addObject:[NSString stringWithFormat:@"%@=%@ dB", RLPTr(@"衰减"), v]];
+        else if ([k isEqualToString:@"transition"]) [parts addObject:[NSString stringWithFormat:@"%@=%@", RLPTr(@"过渡带"), v]];
+    }
+    return [parts componentsJoinedByString:@" · "];
+}
+
+static NSString *MonValStr(NSDictionary *st, NSString *key) {
+    if (![st isKindOfClass:[NSDictionary class]]) return nil;
+    id v = st[key];
+    if (!v || v == [NSNull null]) return nil;
+    if ([v isKindOfClass:[NSString class]]) {
+        NSString *s = (NSString *)v;
+        return s.length ? s : nil;
+    }
+    if ([v isKindOfClass:[NSNumber class]]) return [(NSNumber *)v stringValue];
+    return nil;
+}
+
+static NSString *MonHz(NSDictionary *st, NSString *key) {
+    id v = [st isKindOfClass:[NSDictionary class]] ? st[key] : nil;
+    if (![v respondsToSelector:@selector(doubleValue)]) return @"N/A";
+    double hz = [v doubleValue];
+    return (hz > 0.0) ? [NSString stringWithFormat:@"%.0f Hz", hz] : @"N/A";
+}
+
+static NSString *MonBool(NSDictionary *st, NSString *key, NSString *yesStr, NSString *noStr) {
+    id v = [st isKindOfClass:[NSDictionary class]] ? st[key] : nil;
+    if (!v || v == [NSNull null] || ![v respondsToSelector:@selector(boolValue)]) return @"N/A";
+    return [v boolValue] ? yesStr : noStr;
+}
+
+static NSString *MonNum(NSDictionary *st, NSString *key, NSString *unit, int decimals, BOOL positiveOnly) {
+    id v = [st isKindOfClass:[NSDictionary class]] ? st[key] : nil;
+    if (!v || v == [NSNull null] || ![v respondsToSelector:@selector(doubleValue)]) return @"N/A";
+    double val = [v doubleValue];
+    if (positiveOnly && val <= 0.0) return @"N/A";
+    NSString *fmt = [NSString stringWithFormat:@"%%.%df", decimals];
+    NSString *num = [NSString stringWithFormat:fmt, val];
+    return unit.length ? [NSString stringWithFormat:@"%@ %@", num, unit] : num;
+}
+
+NSArray<NSDictionary<NSString *, NSString *> *> *RLPWorkbenchMonitorRows(NSDictionary *status) {
+    NSDictionary *st = [status isKindOfClass:[NSDictionary class]] ? status : @{};
+    const BOOL hasStatus = st.count > 0;
+    auto Row = ^NSDictionary *(NSString *grp, NSString *key, NSString *label, NSString *val) {
+        return @{@"group": grp, @"key": key, @"label": label, @"value": val.length ? val : @"N/A"};
+    };
+    NSString *playState = @"N/A";
+    if (hasStatus && st[@"playing"] != nil) {
+        BOOL playing = [st[@"playing"] boolValue];
+        BOOL paused = [st[@"paused"] boolValue];
+        playState = playing ? (paused ? RLPTr(@"已暂停") : RLPTr(@"播放中")) : RLPTr(@"已停止");
+    }
+    NSString *outBits = @"N/A";
+    if ([st[@"outBits"] respondsToSelector:@selector(integerValue)] && [st[@"outBits"] integerValue] > 0) {
+        outBits = [NSString stringWithFormat:@"%ld bit", (long)[st[@"outBits"] integerValue]];
+    }
+    NSString *dsdVal = @"N/A";
+    if ([st[@"dsd"] respondsToSelector:@selector(integerValue)]) {
+        NSInteger d = [st[@"dsd"] integerValue];
+        dsdVal = (d > 0) ? [NSString stringWithFormat:@"DSD%ld", (long)d] : @"PCM (0)";
+    }
+    NSString *latVal = @"N/A";
+    if (hasStatus && [st[@"latencyKnown"] boolValue]) {
+        latVal = MonNum(st, @"latencyMs", @"ms", 1, NO);
+        NSString *lsrc = MonValStr(st, @"latencySource");
+        if (lsrc.length) latVal = [NSString stringWithFormat:@"%@ (%@)", latVal, lsrc];
+    }
+    NSString *bpVal = MonValStr(st, @"bitPerfect") ?: @"N/A";
+    NSString *bpWhy = MonValStr(st, @"bitPerfectWhy");
+    if (![bpVal isEqualToString:@"N/A"] && bpWhy.length) {
+        bpVal = [NSString stringWithFormat:@"%@ · %@", bpVal, bpWhy];
+    }
+    return @[
+        Row(RLPTr(@"信号与采样率"), @"playing", RLPTr(@"运行状态"), playState),
+        Row(RLPTr(@"信号与采样率"), @"inRate", RLPTr(@"源采样率"), MonHz(st, @"inRate")),
+        Row(RLPTr(@"信号与采样率"), @"outRate", RLPTr(@"输出采样率"), MonHz(st, @"outRate")),
+        Row(RLPTr(@"信号与采样率"), @"outBits", RLPTr(@"输出位深"), outBits),
+        Row(RLPTr(@"信号与采样率"), @"resampled", RLPTr(@"是否重采样"), hasStatus ? MonBool(st, @"resampled", RLPTr(@"是"), RLPTr(@"否")) : @"N/A"),
+        Row(RLPTr(@"信号与采样率"), @"rateFamilyPolicy", RLPTr(@"采样率族策略"), MonValStr(st, @"rateFamilyPolicy") ?: @"N/A"),
+
+        Row(RLPTr(@"输出与独占"), @"outMode", RLPTr(@"输出后端"), MonValStr(st, @"outMode") ?: @"N/A"),
+        Row(RLPTr(@"输出与独占"), @"transport", RLPTr(@"传输方式"), MonValStr(st, @"transport") ?: @"N/A"),
+        Row(RLPTr(@"输出与独占"), @"hogAcquired", RLPTr(@"Hog 独占"), hasStatus ? MonBool(st, @"hogAcquired", RLPTr(@"已获取"), RLPTr(@"未获取")) : @"N/A"),
+        Row(RLPTr(@"输出与独占"), @"bitPerfect", @"Bit-Perfect", bpVal),
+
+        Row(RLPTr(@"DSD 与调制"), @"dsd", RLPTr(@"DSD 档位"), dsdVal),
+        Row(RLPTr(@"DSD 与调制"), @"modFamily", RLPTr(@"调制器族"), MonValStr(st, @"modFamily") ?: @"N/A"),
+        Row(RLPTr(@"DSD 与调制"), @"modOrder", RLPTr(@"生效阶数"), ([st[@"modOrder"] respondsToSelector:@selector(integerValue)] && [st[@"modOrder"] integerValue] > 0) ? [st[@"modOrder"] stringValue] : @"N/A"),
+        Row(RLPTr(@"DSD 与调制"), @"fallbackWhy", RLPTr(@"回退说明"), MonValStr(st, @"fallbackWhy") ?: @"N/A"),
+
+        Row(RLPTr(@"性能与遥测"), @"gpuUsed", RLPTr(@"GPU 参与"), hasStatus ? MonBool(st, @"gpuUsed", RLPTr(@"是"), RLPTr(@"否")) : @"N/A"),
+        Row(RLPTr(@"性能与遥测"), @"latencyMs", RLPTr(@"输出延迟"), latVal),
+        Row(RLPTr(@"性能与遥测"), @"dry", RLPTr(@"缓冲欠载 (dry)"), hasStatus ? MonNum(st, @"dry", @"", 0, NO) : @"N/A"),
+        Row(RLPTr(@"性能与遥测"), @"decodeMs", RLPTr(@"解码耗时"), hasStatus ? MonNum(st, @"decodeMs", @"ms", 2, NO) : @"N/A"),
+        Row(RLPTr(@"性能与遥测"), @"dspBlockMs", RLPTr(@"DSP 块耗时"), hasStatus ? MonNum(st, @"dspBlockMs", @"ms", 2, NO) : @"N/A"),
+        Row(RLPTr(@"性能与遥测"), @"wsMb", RLPTr(@"内存占用"), hasStatus ? MonNum(st, @"wsMb", @"MB", 1, YES) : @"N/A"),
+    ];
 }

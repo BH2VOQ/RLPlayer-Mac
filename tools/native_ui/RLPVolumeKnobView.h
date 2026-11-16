@@ -62,6 +62,8 @@ double RLPVolKnobDbFromAngleDegrees(double degrees);
 @property (nonatomic, assign) double db;
 /// 是否锁定（对应 web dataset.locked：未读设置/设备调音时置灰且不可拖）
 @property (nonatomic, assign, getter=isLocked) BOOL locked;
+/// 拖动中（轮询保护用：区分"在拖"与"已提交"）
+@property (nonatomic, readonly) BOOL dragging;
 /// 拖动过程中的实时回调（每帧最多一次，对齐上游 rAF 合并）。
 @property (nonatomic, copy, nullable) void (^onLiveChange)(double db);
 /// 松开鼠标时的提交回调（对应上游 commitVolumeGesture）。

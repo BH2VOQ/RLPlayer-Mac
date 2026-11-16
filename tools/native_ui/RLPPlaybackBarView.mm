@@ -280,7 +280,24 @@ static void RLPSetBadgeText(NSTextField *label, NSString *text, NSColor *color, 
 @property (nonatomic, assign) NSUInteger statusEpoch;
 @property (nonatomic, assign) BOOL statusInflight;
 @property (nonatomic, assign) NSUInteger playModeEpoch;
+@property (nonatomic, assign) NSUInteger volumeWriteSeq;
+@property (nonatomic, assign) BOOL volumeWritePending;
+@property (nonatomic, assign) double confirmedVolumeDb;
+@property (nonatomic, assign) double optimisticVolumeDb;
+@property (nonatomic, assign) BOOL hasConfirmedVolume;
+@property (nonatomic, assign) BOOL rawVolumeLocked;
 @end
+
+static BOOL RLPBarTextFieldIsEditing(NSTextField *field) {
+    if (!field || !field.window) return NO;
+    NSResponder *fr = field.window.firstResponder;
+    if (!fr) return NO;
+    if (fr == field) return YES;
+    NSText *editor = field.currentEditor;
+    if (editor && fr == editor) return YES;
+    if ([fr isKindOfClass:[NSTextView class]] && ((NSTextView *)fr).delegate == (id)field) return YES;
+    return NO;
+}
 
 @implementation RLPPlaybackBarView
 
@@ -559,6 +576,10 @@ static void RLPSetBadgeText(NSTextField *label, NSString *text, NSColor *color, 
     [[NSNotificationCenter defaultCenter] addObserver:self
                                              selector:@selector(onPlaybackActionCompleted:)
                                                  name:@"RLPPlaybackActionCompletedNotification"
+                                               object:nil];
+    [[NSNotificationCenter defaultCenter] addObserver:self
+                                             selector:@selector(onVolumeDidChangeNotification:)
+                                                 name:@"RLPVolumeDidChangeNotification"
                                                object:nil];
 }
 
@@ -1054,13 +1075,30 @@ static double RLPVolDbToPos(double db) {
     if (!self.progress.dragging) {
         self.progress.doubleValue = (dur > 0) ? (st.position / dur) : 0.0;
     }
-    // 音量滑块是**位置刻度 0..1000**（不是 dB），必须换算；sb 静音档 -120 也要能落回最左端。
-    if (!self.volume.dragging && isfinite(st.volumeDb)) {
-        self.volume.doubleValue = RLPVolDbToPos(st.volumeDb);
-        self.volKnob.db = st.volumeDb;   // 滑杆是可见真值（v3.3.11）
+    NSDictionary *sd = self.statusDetails;
+    const BOOL rawLocked = ([sd[@"rawVolumeLocked"] respondsToSelector:@selector(boolValue)] && [sd[@"rawVolumeLocked"] boolValue]) ||
+                           ([sd[@"volumeWritable"] respondsToSelector:@selector(boolValue)] && ![sd[@"volumeWritable"] boolValue]);
+    [self applyVolumeLockedState:rawLocked];
+    if (rawLocked) {
+        self.volumeWritePending = NO;
+        ++self.volumeWriteSeq;
+        self.confirmedVolumeDb = 0.0;
+        self.optimisticVolumeDb = 0.0;
+        self.hasConfirmedVolume = YES;
+        self.volume.doubleValue = RLPVolDbToPos(0.0);
+        self.volKnob.db = 0.0;
         [self refreshVolumeMuteIcon];
-        if (self.volDbField != self.window.firstResponder) {
-            self.volDbField.stringValue = [NSString stringWithFormat:@"%.1f", st.volumeDb];
+        self.volDbField.stringValue = @"0.0";
+    } else if (!self.volKnob.dragging && !self.volume.dragging && !self.volumeWritePending && isfinite(st.volumeDb)) {
+        const double clamped = RLPVolClampDb(st.volumeDb);
+        self.confirmedVolumeDb = clamped;
+        self.optimisticVolumeDb = clamped;
+        self.hasConfirmedVolume = YES;
+        self.volume.doubleValue = RLPVolDbToPos(clamped);
+        self.volKnob.db = clamped;   // 滑杆是可见真值（v3.3.11）
+        [self refreshVolumeMuteIcon];
+        if (!RLPBarTextFieldIsEditing(self.volDbField)) {
+            self.volDbField.stringValue = [NSString stringWithFormat:@"%.1f", clamped];
         }
     }
 }
@@ -1181,11 +1219,54 @@ static double RLPVolDbToPos(double db) {
     (void)sender;
 }
 
-/// 拖动中只同步界面（滑杆 + 隐藏滑块的状态载体），不下发请求。
+- (double)currentVolumeDb {
+    return self.optimisticVolumeDb;
+}
+
+- (BOOL)isVolumeLocked {
+    return self.rawVolumeLocked;
+}
+
+- (void)applyVolumeLockedState:(BOOL)locked {
+    self.rawVolumeLocked = locked;
+    self.volKnob.isLocked = locked;
+    self.volMuteBtn.enabled = !locked;
+    self.volDbField.enabled = !locked;
+    NSString *rawMsg = RLPTr(@"原始 DSD 音量由设备控制。请使用设备音量，或切回 PCM / 可处理的 DoP 路径。");
+    self.volKnob.toolTip = locked ? rawMsg : RLPTr(@"音量滑杆：拖动 / 滚轮微调（⌥ 精细），双击回 0 dB");
+    self.volDbField.toolTip = locked ? rawMsg : RLPTr(@"音量（dB）");
+    self.volMuteBtn.toolTip = locked ? rawMsg : RLPTr(@"静音 / 取消静音");
+}
+
+- (void)onVolumeDidChangeNotification:(NSNotification *)note {
+    NSDictionary *info = note.userInfo;
+    if (!info || info[@"source"] == self) return;
+    if ([info[@"locked"] respondsToSelector:@selector(boolValue)]) {
+        [self applyVolumeLockedState:[info[@"locked"] boolValue]];
+    }
+    if (self.volKnob.dragging || self.volume.dragging || self.volumeWritePending) return;
+    // A confirmed write from another entry supersedes this view's older polls.
+    ++self.statusEpoch;
+    self.statusInflight = NO;
+    if ([info[@"db"] respondsToSelector:@selector(doubleValue)]) {
+        const double db = RLPVolClampDb([info[@"db"] doubleValue]);
+        self.confirmedVolumeDb = db;
+        self.optimisticVolumeDb = db;
+        self.hasConfirmedVolume = YES;
+        [self updateVolumeUiForDb:db];
+    }
+}
+
+/// 拖动中只同步界面（滑杆 + 精确输入框 + 隐藏滑块的状态载体），不下发请求。
 - (void)updateVolumeUiForDb:(double)db {
-    db = round(db * 10.0) / 10.0;
+    db = RLPVolClampDb(db);
+    self.optimisticVolumeDb = db;
     if (self.volKnob.db != db) self.volKnob.db = db;
     self.volume.doubleValue = RLPVolDbToPos(db);   // 仅为状态载体，已不可见
+    self.volDbField.layer.borderWidth = 0;
+    if (!RLPBarTextFieldIsEditing(self.volDbField)) {
+        self.volDbField.stringValue = [NSString stringWithFormat:@"%.1f", db];
+    }
     [self refreshVolumeMuteIcon];
 }
 
@@ -1205,14 +1286,14 @@ static double RLPVolDbToPos(double db) {
 /// v3.3.11 toggleVolumeMute：与播放页共用同一份记忆值（volumeRestore 唯一）。
 - (void)onToggleVolumeMute:(id)sender {
     (void)sender;
-    if (!self.polling) return;
-    const double next = RLPVolumeMuteNextDb(self.volKnob.db);
+    if (!self.polling || self.rawVolumeLocked) return;
+    const double next = RLPVolumeMuteNextDb(self.currentVolumeDb);
     if (isnan(next)) return;   // 当前 -120 且无恢复值 ⟹ 什么都不做
     [self commitVolumeDb:next];
-    [self updateVolumeUiForDb:next];
 }
 - (void)onCommitPreciseVolume:(id)sender {
     (void)sender;
+    if (self.rawVolumeLocked) return;
     NSString *text = [self.volDbField.stringValue stringByTrimmingCharactersInSet:
                       [NSCharacterSet whitespaceAndNewlineCharacterSet]];
     // ★ 不能用 text.doubleValue 判合法性：非数字文本它会返回 0，而 0 dB 是**合法值**，
@@ -1230,13 +1311,63 @@ static double RLPVolDbToPos(double db) {
     }
     self.volDbField.layer.borderWidth = 0;
     [self commitVolumeDb:db0];
-    [self updateVolumeUiForDb:RLPVolClampDb(db0)];
 }
 - (void)commitVolumeDb:(double)db {
-    if (!self.polling) return;
+    if (!self.polling || self.rawVolumeLocked) return;
     db = RLPVolClampDb(db);
+    if (!self.hasConfirmedVolume && self.lastStatus && isfinite(self.lastStatus.volumeDb)) {
+        self.confirmedVolumeDb = RLPVolClampDb(self.lastStatus.volumeDb);
+        self.hasConfirmedVolume = YES;
+    }
+    [self updateVolumeUiForDb:db];
+    const NSUInteger seq = ++self.volumeWriteSeq;
+    self.volumeWritePending = YES;
+    ++self.statusEpoch;
+    self.statusInflight = NO;
     NSString *path = [NSString stringWithFormat:@"/api/volume?db=%.1f", db];
-    [[RLPCoreClient shared] postJSON:path body:nil completion:nil];
+    __weak __typeof__(self) weakSelf = self;
+    [[RLPCoreClient shared] postJSON:path body:nil completion:^(NSDictionary * _Nullable json) {
+        __typeof__(self) self_ = weakSelf;
+        if (!self_ || seq != self_.volumeWriteSeq) return;
+        self_.volumeWritePending = NO;
+        const BOOL ok = [json isKindOfClass:[NSDictionary class]] && [json[@"ok"] boolValue];
+        if (ok) {
+            double confirmed = db;
+            id dbVal = json[@"db"];
+            if ([dbVal respondsToSelector:@selector(doubleValue)] && isfinite([dbVal doubleValue])) {
+                confirmed = RLPVolClampDb([dbVal doubleValue]);
+            }
+            self_.confirmedVolumeDb = confirmed;
+            self_.optimisticVolumeDb = confirmed;
+            self_.hasConfirmedVolume = YES;
+            ++self_.statusEpoch;
+            self_.statusInflight = NO;
+            if (!self_.volKnob.dragging) {
+                [self_ updateVolumeUiForDb:confirmed];
+            }
+            [[NSNotificationCenter defaultCenter] postNotificationName:@"RLPVolumeDidChangeNotification"
+                                                                object:nil
+                                                              userInfo:@{ @"db": @(confirmed),
+                                                                          @"locked": @(self_.rawVolumeLocked),
+                                                                          @"source": self_ }];
+        } else {
+            double fallback = self_.hasConfirmedVolume
+                ? self_.confirmedVolumeDb
+                : ((self_.lastStatus && isfinite(self_.lastStatus.volumeDb))
+                    ? RLPVolClampDb(self_.lastStatus.volumeDb) : 0.0);
+            self_.optimisticVolumeDb = fallback;
+            if (!self_.volKnob.dragging) {
+                [self_ updateVolumeUiForDb:fallback];
+            }
+            [[NSNotificationCenter defaultCenter] postNotificationName:@"RLPVolumeDidChangeNotification"
+                                                                object:nil
+                                                              userInfo:@{ @"db": @(fallback),
+                                                                          @"locked": @(self_.rawVolumeLocked),
+                                                                          @"source": self_ }];
+            RLPToast(RLPTr(@"音量更改未生效，已重新读取实际音量。"));
+            [self_ fetchStatusForced:YES];
+        }
+    }];
 }
 
 - (void)commitVolume {

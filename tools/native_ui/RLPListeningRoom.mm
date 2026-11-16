@@ -47,6 +47,13 @@ static NSArray<NSDictionary *> *Usable(NSArray<NSDictionary *> *items) {
     return out;
 }
 
+static NSDictionary *FindItemByName(NSString *name, NSArray<NSDictionary *> *items) {
+    for (NSDictionary *it in items) {
+        if ([ItemName(it) isEqualToString:name]) return it;
+    }
+    return nil;
+}
+
 NSString *RLPFilterForToneStyle(RLPToneStyle style, NSArray<NSDictionary *> *filterItems) {
     NSArray<NSDictionary *> *usable = Usable(filterItems);
     if (!usable.count) return nil;
@@ -55,30 +62,51 @@ NSString *RLPFilterForToneStyle(RLPToneStyle style, NSArray<NSDictionary *> *fil
     for (NSDictionary *it in usable) {
         if (IsGauss(it)) [gauss addObject:it]; else [sharp addObject:it];
     }
-    // 温和：gauss 族里抽头最多的（越长越柔顺）；没有 gauss 就退而取普通族里抽头最多的。
-    // 锐利：非 gauss 族里名字含 tight 的优先（项目预设升频档就用它），否则取第一个。
-    // 均衡：非 gauss 族里抽头居中的那个。
-    NSArray<NSDictionary *> *pool = nil;
-    if (style == RLPToneStyleWarm) pool = gauss.count ? gauss : usable;
-    else pool = sharp.count ? sharp : usable;
 
-    if (style == RLPToneStyleSharp) {
+    // Windows ui_listening_home.h 语义 + 注册表真实条目：
+    //   warm（温和）：gauss 族（优先 poly-sinc-gauss-long / medium / short，不再按表中最大 taps 碰运气）
+    //   balanced（均衡）：auto / short / medium（优先 poly-sinc-short-lp / poly-sinc-short / poly-sinc-lp）
+    //   sharp（锐利）：long / ext 族（优先 poly-sinc-long-lp / poly-sinc-ext2-medium / poly-sinc-ext2-long / poly-sinc-long / poly-sinc-tight-lp）
+    NSArray<NSString *> *prefs = nil;
+    if (style == RLPToneStyleWarm) {
+        prefs = @[@"poly-sinc-gauss-long", @"poly-sinc-gauss-medium", @"poly-sinc-gauss-short",
+                  @"poly-sinc-gauss-2s", @"poly-sinc-gauss-mp"];
+    } else if (style == RLPToneStyleBalanced) {
+        prefs = @[@"poly-sinc-short-lp", @"poly-sinc-short", @"poly-sinc-lp",
+                  @"poly-sinc-short-mp", @"poly-sinc-ext2-short"];
+    } else {
+        prefs = @[@"poly-sinc-long-lp", @"poly-sinc-ext2-medium", @"poly-sinc-ext2-long",
+                  @"poly-sinc-long", @"poly-sinc-ext", @"poly-sinc-tight-lp"];
+    }
+    for (NSString *cand in prefs) {
+        if (FindItemByName(cand, usable)) return cand;
+    }
+
+    // 回退：只在候选池找不到首选名时按家族/关键词回退（仍保证返回 usable 里的真实条目）
+    if (style == RLPToneStyleWarm) {
+        return ItemName(gauss.count ? gauss.firstObject : usable.firstObject);
+    }
+    NSArray<NSDictionary *> *pool = sharp.count ? sharp : usable;
+    if (style == RLPToneStyleBalanced) {
         for (NSDictionary *it in pool) {
             NSString *n = ItemName(it).lowercaseString;
-            if ([n rangeOfString:@"tight"].location != NSNotFound) return ItemName(it);
+            if ([n rangeOfString:@"short"].location != NSNotFound ||
+                [n rangeOfString:@"medium"].location != NSNotFound) {
+                return ItemName(it);
+            }
         }
-        return ItemName(pool.firstObject);
+        return ItemName(pool[pool.count / 2]);
     }
-    // 按 taps 排序后取端点/中点（taps 缺失当 0，稳定排序）
-    NSArray<NSDictionary *> *sorted = [pool sortedArrayUsingComparator:^NSComparisonResult(NSDictionary *a, NSDictionary *b) {
-        double ta = [a[@"taps"] isKindOfClass:[NSNumber class]] ? [a[@"taps"] doubleValue] : 0;
-        double tb = [b[@"taps"] isKindOfClass:[NSNumber class]] ? [b[@"taps"] doubleValue] : 0;
-        if (ta < tb) return NSOrderedAscending;
-        if (ta > tb) return NSOrderedDescending;
-        return NSOrderedSame;
-    }];
-    if (style == RLPToneStyleWarm) return ItemName(sorted.lastObject);
-    return ItemName(sorted[sorted.count / 2]);
+    // RLPToneStyleSharp
+    for (NSDictionary *it in pool) {
+        NSString *n = ItemName(it).lowercaseString;
+        if ([n rangeOfString:@"long"].location != NSNotFound ||
+            [n rangeOfString:@"ext"].location != NSNotFound ||
+            [n rangeOfString:@"tight"].location != NSNotFound) {
+            return ItemName(it);
+        }
+    }
+    return ItemName(pool.firstObject);
 }
 
 NSInteger RLPToneStyleForFilter(NSString *filterName, NSArray<NSDictionary *> *filterItems) {
@@ -97,4 +125,63 @@ BOOL RLPFilterUsesNxKey(NSString *filterName, NSArray<NSDictionary *> *filterIte
         if ([ItemName(it) isEqualToString:filterName]) return [it[@"forNx"] boolValue];
     }
     return NO;
+}
+
+NSDictionary<NSString *, NSString *> *RLPSettingsPatchForToneStyle(
+    RLPToneStyle style, NSArray<NSDictionary *> *filterItems) {
+    NSString *name = RLPFilterForToneStyle(style, filterItems);
+    if (!name.length) return nil;
+    const BOOL isNx = RLPFilterUsesNxKey(name, filterItems);
+    NSMutableDictionary<NSString *, NSString *> *patch = [NSMutableDictionary dictionaryWithDictionary:@{
+        (isNx ? @"filterNx" : @"filter"): name,
+        @"taps": @"0",
+        @"mintapsperinput": @"0",
+        @"atten": @"0",
+        @"transition": @"0",
+        @"phase": @"",
+    }];
+    if (!isNx) patch[@"filterNx"] = @"";
+    return patch;
+}
+
+NSString *RLPPlayModeFromSettings(NSDictionary *kv) {
+    if (![kv isKindOfClass:[NSDictionary class]]) return @"bitperfect";
+    id declObj = kv[@"ui_profile"];
+    NSString *declared = [declObj isKindOfClass:[NSString class]] ? declObj : @"";
+    if ([declared isEqualToString:@"bitperfect"] || [declared isEqualToString:@"pcm"] ||
+        [declared isEqualToString:@"dsd"] || [declared isEqualToString:@"pcm2dsd"] ||
+        [declared isEqualToString:@"custom"]) {
+        return declared;
+    }
+    id dsdObj = kv[@"dsd"];
+    NSString *dsdStr = [dsdObj isKindOfClass:[NSString class]] ? dsdObj
+                     : ([dsdObj isKindOfClass:[NSNumber class]] ? [(NSNumber *)dsdObj stringValue] : @"0");
+    NSString *dsdDigits = [dsdStr stringByReplacingOccurrencesOfString:@"nat" withString:@""];
+    dsdDigits = [dsdDigits stringByReplacingOccurrencesOfString:@"dop" withString:@""];
+    const NSInteger dsdVal = dsdDigits.integerValue;
+
+    id dirObj = kv[@"directsdm"];
+    NSString *dirStr = [dirObj isKindOfClass:[NSString class]] ? dirObj
+                     : ([dirObj isKindOfClass:[NSNumber class]] ? [(NSNumber *)dirObj stringValue] : @"0");
+    const BOOL direct = [dirStr isEqualToString:@"1"] || [dirStr isEqualToString:@"true"];
+
+    id rateObj = kv[@"rate"];
+    NSString *rate = [rateObj isKindOfClass:[NSString class]] ? rateObj
+                   : ([rateObj isKindOfClass:[NSNumber class]] ? [(NSNumber *)rateObj stringValue] : @"src");
+    if (!rate.length) rate = @"src";
+    const BOOL rateIsSrc = [rate isEqualToString:@"src"] || [rate isEqualToString:@"follow"];
+
+    id filtObj = kv[@"filter"];
+    NSString *filter = [filtObj isKindOfClass:[NSString class]] ? filtObj : @"";
+
+    if (direct || (dsdVal <= 0 && rateIsSrc && !filter.length)) return @"bitperfect";
+    if (dsdVal > 0) return @"dsd";
+    if (!rateIsSrc) return @"pcm";
+    return @"custom";
+}
+
+NSInteger RLPQuickStartColumnsForWidth(double width) {
+    if (width <= 350.0) return 1;
+    if (width <= 750.0) return 2;
+    return 4;
 }

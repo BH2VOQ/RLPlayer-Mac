@@ -32,6 +32,15 @@ NS_ASSUME_NONNULL_BEGIN
 /// 当前正在播放覆盖页（未打开时 nil）。
 @property (nonatomic, strong, readonly, nullable) NSViewController *nowPlayingPage;
 
+/// 界面模式（"listen" 聆听模式 / "pro" 专业模式，默认 "listen"）。
+@property (nonatomic, copy, readonly) NSString *uiMode;
+/// 顶栏模式切换分段控件（identifier = @"top.mode"）。
+@property (nonatomic, strong, readonly) NSSegmentedControl *modeControl;
+/// 切换界面模式；persist=YES 时写入 POST /api/settings uimode=...，绝不中断播放或改音量/队列/设备。
+- (void)setUiMode:(NSString *)mode persist:(BOOL)persist;
+/// 从 GET /api/settings.kv.uimode 读取模式偏好（带 epoch 保护，过期回包不回跳）。
+- (void)reloadUiModePreference;
+
 /// 核心启动后调用：加载首批数据（专辑）并启动播放条轮询。
 - (void)loadInitialData;
 

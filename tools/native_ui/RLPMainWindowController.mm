@@ -95,6 +95,10 @@ static const CGFloat kTopbarHeight = 60.0;    // .top height（classic 52，见 
 @property (nonatomic, strong) RLPWorksViewController *worksPage;
 @property (nonatomic, readwrite) BOOL nowPlayingOverlayVisible;
 @property (nonatomic,strong) NSButton *webBackButton;
+@property (nonatomic, copy, readwrite) NSString *uiMode;
+@property (nonatomic, strong, readwrite) NSSegmentedControl *modeControl;
+@property (nonatomic, assign) NSUInteger modeEpoch;
+@property (nonatomic, assign) NSUInteger modeReadSequence;
 @end
 
 /// 视图根节点的 identifier 表 —— **字面量**，不做字符串拼接。
@@ -156,6 +160,7 @@ static NSString *RLPPageIdentifier(NSString *key) {
 
     _pageCache = [NSMutableDictionary dictionary];
     _rowStack = [NSMutableArray array];
+    _uiMode = @"listen";
     _sidebar = [[RLPSidebarViewController alloc] init];
     _albums = [[RLPAlbumsViewController alloc] init];
     _playbackBar = [[RLPPlaybackBarView alloc] init];
@@ -221,6 +226,18 @@ static NSString *RLPPageIdentifier(NSString *key) {
     npBtn.translatesAutoresizingMaskIntoConstraints = NO;
     [_topbar addSubview:npBtn];
 
+    _modeControl = [NSSegmentedControl segmentedControlWithLabels:@[RLPTr(@"聆听"), RLPTr(@"专业")]
+                                                    trackingMode:NSSegmentSwitchTrackingSelectOne
+                                                          target:self
+                                                          action:@selector(onModeSegmentChanged:)];
+    _modeControl.identifier = @"top.mode";
+    _modeControl.selectedSegment = 0;
+    _modeControl.translatesAutoresizingMaskIntoConstraints = NO;
+    [_topbar addSubview:_modeControl];
+
+    NSLayoutConstraint *searchPrefW = [_search.widthAnchor constraintEqualToConstant:300];
+    searchPrefW.priority = NSLayoutPriorityDefaultHigh;
+
     [NSLayoutConstraint activateConstraints:@[
         [_sidebar.view.leadingAnchor constraintEqualToAnchor:root.leadingAnchor],
         [_sidebar.view.topAnchor constraintEqualToAnchor:root.topAnchor],
@@ -235,7 +252,13 @@ static NSString *RLPPageIdentifier(NSString *key) {
 
         [_search.leadingAnchor constraintEqualToAnchor:_topbar.leadingAnchor constant:210],
         [_search.centerYAnchor constraintEqualToAnchor:_topbar.centerYAnchor],
-        [_search.widthAnchor constraintEqualToConstant:300],
+        searchPrefW,
+        [_search.widthAnchor constraintGreaterThanOrEqualToConstant:140],
+        [_search.widthAnchor constraintLessThanOrEqualToConstant:300],
+        [_search.trailingAnchor constraintLessThanOrEqualToAnchor:_modeControl.leadingAnchor constant:-12],
+
+        [_modeControl.trailingAnchor constraintEqualToAnchor:scanBtn.leadingAnchor constant:-12],
+        [_modeControl.centerYAnchor constraintEqualToAnchor:_topbar.centerYAnchor],
 
         [npBtn.trailingAnchor constraintEqualToAnchor:_topbar.trailingAnchor constant:-16],
         [npBtn.centerYAnchor constraintEqualToAnchor:_topbar.centerYAnchor],
@@ -325,6 +348,9 @@ static NSString *RLPPageIdentifier(NSString *key) {
     // 底栏歌词键 → 打开抽屉的歌词页
     [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(onOpenLyricDrawerNote:)
                                                  name:@"RLPOpenLyricDrawerNotification" object:nil];
+    // 设置页「打开专业工作台」→ 切专业模式并路由到 station
+    [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(onSwitchToProWorkbench:)
+                                                 name:@"RLPSwitchToProWorkbenchNotification" object:nil];
 
     [_sidebar selectRow:0];
     [self showContentForRow:0];
@@ -360,6 +386,25 @@ static NSString *RLPPageIdentifier(NSString *key) {
     if ([vc respondsToSelector:@selector(activate)]) [(id)vc activate];
 }
 
+- (NSString *)cacheKeyForRouteKey:(NSString *)key {
+    if ([key isEqualToString:@"station"]) {
+        return [self.uiMode isEqualToString:@"pro"] ? @"station:pro" : @"station:listen";
+    }
+    return key;
+}
+
+- (NSViewController *)stationViewControllerForCurrentMode {
+    NSString *ck = [self cacheKeyForRouteKey:@"station"];
+    NSViewController *vc = self.pageCache[ck];
+    if (!vc) {
+        vc = [self.uiMode isEqualToString:@"pro"]
+            ? (NSViewController *)[[RLPWorkbenchViewController alloc] init]
+            : (NSViewController *)[[RLPQuickStartViewController alloc] init];
+        self.pageCache[ck] = vc;
+    }
+    return vc;
+}
+
 /// 行号 → 符号 key → 页面。缓存一律按 key 存，不按行号 ——
 /// 行号会随导航项顺序变化而错位（web 也是按 data-v 的 key 路由）。
 - (void)showContentForRow:(NSInteger)row {
@@ -369,7 +414,8 @@ static NSString *RLPPageIdentifier(NSString *key) {
 
 - (void)showContentForKey:(NSString *)key {
     if (!key.length) key = @"albums";
-    NSViewController *vc = self.pageCache[key];
+    NSString *cacheKey = [self cacheKeyForRouteKey:key];
+    NSViewController *vc = self.pageCache[cacheKey];
     if (!vc) {
         if ([key isEqualToString:@"albums"])         vc = self.albums;
         else if ([key isEqualToString:@"artists"])   vc = [[RLPArtistsViewController alloc] init];
@@ -380,10 +426,18 @@ static NSString *RLPPageIdentifier(NSString *key) {
         else if ([key isEqualToString:@"recent"])    vc = [[RLPRecentViewController alloc] init];
         else if ([key isEqualToString:@"favorites"]) vc = [[RLPFavoritesViewController alloc] init];
         else if ([key isEqualToString:@"playlists"]) vc = [[RLPPlaylistsViewController alloc] init];
-        else if ([key isEqualToString:@"station"])   vc = [[RLPQuickStartViewController alloc] init];
-        else if ([key isEqualToString:@"settings"])  vc = [[RLPSettingsViewController alloc] init];
+        else if ([key isEqualToString:@"station"]) {
+            vc = [self.uiMode isEqualToString:@"pro"]
+                ? (NSViewController *)[[RLPWorkbenchViewController alloc] init]
+                : (NSViewController *)[[RLPQuickStartViewController alloc] init];
+        }
+        else if ([key isEqualToString:@"settings"]) {
+            RLPSettingsViewController *sv = [[RLPSettingsViewController alloc] init];
+            [sv applyUiMode:self.uiMode];
+            vc = sv;
+        }
         else vc = self.albums;
-        self.pageCache[key] = vc;
+        self.pageCache[cacheKey] = vc;
     }
     if (vc == self.currentContent) {
         // 同页再次点选：清详情返回栈、重设标题并按需重新上报计数
@@ -432,7 +486,9 @@ static NSString *RLPPageIdentifier(NSString *key) {
     self.webBackButton.frame=NSMakeRect(14, (self.topbar.bounds.size.height-28)/2.0, 28, 28);
     self.webBackButton.hidden=self.rowStack.count==0;
     NSString *title = nil;
-    if ([self.currentContent respondsToSelector:@selector(pageTitle)])
+    if ([self.currentContent isKindOfClass:[RLPWorkbenchViewController class]])
+        title = @"数字音乐台";
+    else if ([self.currentContent respondsToSelector:@selector(pageTitle)])
         title = [(id)self.currentContent pageTitle];
     self.pageTitle.stringValue = title.length ? RLPTr(title) : @"";
     // 计数先清空，随后由页面的 activate 重新上报（调用点保证"先 sync 再 activate"）。
@@ -542,7 +598,7 @@ static NSString *RLPPageIdentifier(NSString *key) {
         // 返回时逐层退回，不跳层也不依赖侧栏当前高亮推算。
         NSString *k = self.sidebar.selectedKey;
         NSString *key = k.length ? k : @"albums";
-        const BOOL isRoot = (self.pageCache[key] == self.currentContent);
+        const BOOL isRoot = (self.pageCache[[self cacheKeyForRouteKey:key]] == self.currentContent);
         [self.rowStack addObject:@{
             @"key": key,
             @"vc": self.currentContent,
@@ -559,7 +615,12 @@ static NSString *RLPPageIdentifier(NSString *key) {
     NSViewController *vc = entry[@"vc"];
     NSString *backKey = [entry[@"key"] isKindOfClass:[NSString class]] ? entry[@"key"] : @"";
     const BOOL isRoot = [entry[@"root"] boolValue];
-    if (!vc && backKey.length) vc = self.pageCache[backKey];
+    if (isRoot && [backKey isEqualToString:@"station"]) {
+        // 若在详情页期间切换了聆听/专业模式，返回 station 时落到当前模式对应的主页 VC。
+        vc = [self stationViewControllerForCurrentMode];
+        vc.view.identifier = RLPPageIdentifier(@"station");
+    }
+    if (!vc && backKey.length) vc = self.pageCache[[self cacheKeyForRouteKey:backKey]];
     if (!vc) {
         [self syncTopbarTitle];
         return;
@@ -600,7 +661,7 @@ static NSString *RLPPageIdentifier(NSString *key) {
 /// 所以用 currentContent 与 pageCache 的对应关系判定，而不是只看左导航选中项。
 - (NSString *)currentViewKey {
     NSString *key = self.sidebar.selectedKey ?: @"albums";
-    NSViewController *page = self.pageCache[key];
+    NSViewController *page = self.pageCache[[self cacheKeyForRouteKey:key]];
     if (page && page != self.currentContent) return @"detail";
     return key;
 }
@@ -788,10 +849,66 @@ static NSString *RLPPageIdentifier(NSString *key) {
     if ([self.currentContent respondsToSelector:@selector(applyTheme)]) [(id)self.currentContent applyTheme];
 }
 
+#pragma mark - 聆听 / 专业双模式
+
+- (void)onModeSegmentChanged:(id)sender {
+    (void)sender;
+    NSString *mode = (self.modeControl.selectedSegment == 1) ? @"pro" : @"listen";
+    [self setUiMode:mode persist:YES];
+}
+
+- (void)onSwitchToProWorkbench:(NSNotification *)note {
+    (void)note;
+    [self setUiMode:@"pro" persist:YES];
+    [self.sidebar selectKey:@"station"];
+}
+
+- (void)setUiMode:(NSString *)mode persist:(BOOL)persist {
+    NSString *next = [mode isEqualToString:@"pro"] ? @"pro" : @"listen";
+    ++self.modeEpoch;
+    if (persist && [RLPCoreClient shared].started) {
+        NSString *body = [NSString stringWithFormat:@"uimode=%@", RLPEnc(next)];
+        [[RLPCoreClient shared] postJSON:@"/api/settings" body:body completion:nil];
+    }
+    const BOOL changed = ![self.uiMode isEqualToString:next];
+    self.uiMode = next;
+    self.modeControl.selectedSegment = [next isEqualToString:@"pro"] ? 1 : 0;
+    self.sidebar.uiMode = next;
+    NSViewController *sv = self.pageCache[@"settings"];
+    if ([sv respondsToSelector:@selector(applyUiMode:)]) {
+        [(id)sv applyUiMode:next];
+    }
+    if (changed) {
+        // 模式是一项导航事务：同一帧同步侧栏、标题与模式首页，
+        // 不把旧模式详情留在栈里，也不触碰播放条或核心播放状态。
+        [self.rowStack removeAllObjects];
+        if (self.nowPlayingOverlayVisible) [self onCloseNowPlaying:nil];
+        [self.sidebar selectKey:@"station"];
+        [self showContentForKey:@"station"];
+    }
+}
+
+- (void)reloadUiModePreference {
+    if (![RLPCoreClient shared].started) return;
+    const NSUInteger epoch = self.modeEpoch;
+    const NSUInteger sequence = ++self.modeReadSequence;
+    __weak __typeof__(self) weakSelf = self;
+    [[RLPCoreClient shared] getJSON:@"/api/settings" completion:^(NSDictionary * _Nullable json) {
+        __typeof__(self) self_ = weakSelf;
+        if (!self_ || epoch != self_->_modeEpoch || sequence != self_->_modeReadSequence) return;
+        NSDictionary *kv = [json[@"kv"] isKindOfClass:[NSDictionary class]] ? json[@"kv"] : nil;
+        if (!kv || [json[@"ok"] isEqual:@NO]) return; // 读取失败不能重置用户模式
+        NSString *raw = [kv[@"uimode"] isKindOfClass:[NSString class]] ? kv[@"uimode"] : nil;
+        NSString *resolved = [raw isEqualToString:@"pro"] ? @"pro" : @"listen";
+        [self_ setUiMode:resolved persist:NO];
+    }];
+}
+
 #pragma mark - 生命周期
 
 - (void)loadInitialData {
     if (![RLPCoreClient shared].started) return;
+    [self reloadUiModePreference];
     [self.albums reload];
     // 侧栏「我的歌单」是 /api/sq/list 的动态列表（web #sqList），核心起来后拉一次。
     [self.sidebar reloadSavedQueues];

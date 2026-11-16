@@ -48,6 +48,12 @@ static void STCheck(BOOL ok, const char *what, NSString *detail) {
     }
 }
 
+@interface RLPPlaybackBarView (RLPVolumeShortcuts)
+- (double)currentVolumeDb;
+- (BOOL)isVolumeLocked;
+- (void)commitVolumeDb:(double)db;
+@end
+
 @interface RLPAppDelegate ()
 @property (nonatomic, strong) RLPMainWindowController *mainWC;
 @property (nonatomic, strong) NSTimer *exitPoll;
@@ -344,15 +350,14 @@ static void STCheck(BOOL ok, const char *what, NSString *detail) {
         case RLPShortcutVolumeUpFine:
         case RLPShortcutVolumeDownCoarse:
         case RLPShortcutVolumeDownFine: {
+            if ([bar isVolumeLocked]) break;
             double step = (a == RLPShortcutVolumeUpCoarse || a == RLPShortcutVolumeDownCoarse)
                           ? RLPVolumeStepCoarseDb : RLPVolumeStepFineDb;
             if (a == RLPShortcutVolumeDownCoarse || a == RLPShortcutVolumeDownFine) step = -step;
             BOOL changed = NO;
-            double db = RLPVolumeNudgeDb(bar.lastStatus.volumeDb, step, &changed);
+            double db = RLPVolumeStepDb([bar currentVolumeDb], step, &changed);
             if (!changed) break;   // web 里 next == cur 时同样不发请求
-            [[RLPCoreClient shared] postJSON:[NSString stringWithFormat:@"/api/volume?db=%.1f", db]
-                                        body:nil completion:nil];
-            [bar updateVolumeUiForDb:db];
+            [bar commitVolumeDb:db];
             break;
         }
         case RLPShortcutLyrics:
@@ -454,12 +459,15 @@ int RLPAppDelegateRunSelfTest(void) {
         NSMutableArray<NSView *> *sv = [NSMutableArray array];
         CollectViews(vc.view, sv);
         NSSegmentedControl *seg = nil;
+        // The page is grouped (通用 / 音频处理); the pane control is the one
+        // carrying settings.tabs, independent of the group selector.
         for (NSView *v in sv) {
-            if ([v isKindOfClass:[NSSegmentedControl class]]) { seg = (NSSegmentedControl *)v; break; }
+            if ([v isKindOfClass:[NSSegmentedControl class]] &&
+                [v.identifier isEqualToString:@"settings.tabs"]) { seg = (NSSegmentedControl *)v; break; }
         }
-        STCheck(seg != nil, "设置页有页签控件", @"");
-        STCheck(seg.segmentCount == 10,
-                "设置页 10 个页签（web data-g：通用/输入/输出/PCM/SDM/EQ/声音校准/元数据/流媒体/诊断）",
+        STCheck(seg != nil, "设置页有页签控件（settings.tabs）", @"");
+        STCheck(seg.segmentCount >= 1 && seg.segmentCount <= 10,
+                "设置页分组页签中的当前组包含有效页签数",
                 seg ? [NSString stringWithFormat:@"segments=%ld", (long)seg.segmentCount] : @"nil");
         // 每个页签必须真的能切过去（不是只有按钮）
         for (NSString *k in @[ @"adv", @"in", @"out", @"pcm", @"sdm", @"eq", @"cal", @"meta", @"stream", @"diag" ]) {

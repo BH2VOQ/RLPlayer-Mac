@@ -44,4 +44,19 @@ NSInteger RLPToneStyleForFilter(NSString *_Nullable filterName, NSArray<NSDictio
 /// 该滤波项是否该写 filterNx 键（forNx=true）而不是 filter。
 BOOL RLPFilterUsesNxKey(NSString *_Nullable filterName, NSArray<NSDictionary *> *filterItems);
 
+/// 切听音风格时构造同一次 POST /api/settings 的补丁：
+/// 写入真实存在的 filter（或 filterNx），并清除会覆盖预设的旧手动覆盖键
+/// （taps=0, mintapsperinput=0, atten=0, transition=0, phase=""；写 filter 时同时清 filterNx）。
+/// 无可用滤波时返回 nil。
+NSDictionary<NSString *, NSString *> *_Nullable RLPSettingsPatchForToneStyle(
+    RLPToneStyle style, NSArray<NSDictionary *> *filterItems);
+
+/// 从 /api/settings 的 kv 派生当前播放方式（与 Windows ui_listening_home.h 同口径）：
+/// 返回 @"bitperfect" / @"pcm" / @"dsd" / @"pcm2dsd" / @"custom"。
+NSString *RLPPlayModeFromSettings(NSDictionary *_Nullable kv);
+
+/// 响应式快捷卡列数（与 Windows ui_listening_home.h @container 断点一致）：
+/// <= 350 -> 1 列；<= 750 -> 2 列；> 750 -> 4 列。
+NSInteger RLPQuickStartColumnsForWidth(double width);
+
 NS_ASSUME_NONNULL_END
