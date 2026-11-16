@@ -5834,6 +5834,8 @@ static bool play_one(const std::string& file, const PlayParams& p, rta::audio::A
         pH.hogExclusive = false;
         if (frac > 0.0) pH.initialSeekFrac = frac;
         { std::lock_guard<std::mutex> lk(ps.mtx); ps.error.clear(); }
+        // 设备刚被独占流停下：USB/驱动侧需要沉降时间，否则重开常常只拿到首包就再停。
+        std::this_thread::sleep_for(std::chrono::milliseconds(300));
         play_log("FALLBACK_NOHOG 独占流停止消费，关闭 Hog 后同位置重试一次（保留物理格式锁定）");
         const bool hogOk = play_one_impl(file, pH, buf, nullptr,
             "独占（Hog）设备停止消费，已关闭 Hog 重试；物理格式仍按源锁定");
@@ -5855,6 +5857,8 @@ static bool play_one(const std::string& file, const PlayParams& p, rta::audio::A
     const std::string where = resume
         ? ("已从 " + std::to_string(posSec) + "s(frac=" + std::to_string(frac) + ")续播")
         : "位置不足(未输出帧)，从 0s 重开";
+    // 共享重开前同样给设备沉降时间（与 NOHOG 一致），避免继承独占留下的停流状态。
+    if (p.dsd <= 0) std::this_thread::sleep_for(std::chrono::milliseconds(300));
     play_log("FALLBACK_SHARED 独占流无响应,回退 CoreAudio 共享(非 bit-perfect) " + where +
              " played=" + std::to_string(playedFrames) + "/" + std::to_string(totalFrames) +
              " file=" + file);

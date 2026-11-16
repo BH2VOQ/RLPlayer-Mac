@@ -642,13 +642,16 @@ inline void render_loop(OutSink& sink, RenderHost& h) {
             // 96k/per=960时每轮只等5ms，夹具墙钟约1.005s，不是旧注释的约0.5s。
             // 阈值与计数逻辑不变；日志时长取实测墙钟，不按次数×20ms估算。
             if (++timeouts > 200) {
-                // 设备一次回调都没发生 ⟹ 输出单元没被驱动。先重启一次单元（不改变失败判据）；
-                // 只有重启后仍零回调才如实报 RENDERFAIL。
-                if (!ioRestarted && sink.render_callbacks() == 0 && sink.restart_io()) {
+                // 回调次数 < 2 ⟹ 输出单元没有持续被驱动。
+                // 现场（Pocket Master，2026-11-16）恰好是「首回调后停流」= 1 次，
+                // 所以条件从「==0」扩到「<2」；仍只重启一次，且不改变失败判据。
+                const long long cbs = sink.render_callbacks();
+                if (!ioRestarted && cbs >= 0 && cbs < 2 && sink.restart_io()) {
                     ioRestarted = true;
                     timeouts = 0;
                     timeoutT0 = tAfter;
-                    if (h.log) h.log("IO_RESTART 设备一次渲染回调都没发生，已重启输出单元并继续（仅一次）");
+                    if (h.log) h.log(std::string("IO_RESTART 设备只发生 ") + std::to_string(cbs) +
+                                     " 次渲染回调，已重启输出单元并继续（仅一次）");
                 } else {
                 std::ostringstream fs;
                 // 时长取【实测墙钟】（tAfter - timeoutT0），不再用「次数 x 20ms」估算：

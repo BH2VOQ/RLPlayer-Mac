@@ -314,9 +314,16 @@ int main() {
 
         Bench b2; b2.feed(3);
         auto h2 = b2.make(false, false);
-        FakeDeadSink sink2; sink2.callbacks = 1; sink2.restartOk = true;
+        FakeDeadSink sink2; sink2.callbacks = 2; sink2.restartOk = true;
         rta::render::render_loop(sink2, h2);
-        ck(sink2.restarts == 0, "已有渲染回调时不重启（避免打断正在出声的流）", std::to_string(sink2.restarts));
+        ck(sink2.restarts == 0, "已有稳定渲染回调时不重启（避免打断正在出声的流）", std::to_string(sink2.restarts));
+
+        // 现场形态：只有 1 次回调就停流 ⟹ 必须重启一次（否则永远不会自愈）。
+        Bench b3; b3.feed(3);
+        auto h3 = b3.make(false, false);
+        FakeDeadSink sink3; sink3.callbacks = 1; sink3.restartOk = true;
+        rta::render::render_loop(sink3, h3);
+        ck(sink3.restarts == 1, "只发生 1 次回调时重启一次输出单元", std::to_string(sink3.restarts));
     }
 
     // ---- 2. DoP：不可回退文案 ----
