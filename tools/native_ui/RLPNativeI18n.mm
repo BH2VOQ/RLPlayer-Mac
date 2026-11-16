@@ -2264,7 +2264,7 @@ NSDictionary *RLPNativeI18nTable(void) {
             @"俄语": @"Russian",
             @"西班牙语": @"Spanish",
             @"麦克风校准": @"Microphone calibration",
-            @"导入两列文本（频率 Hz、幅度 dB；支持 UMIK / REW 导出的 txt、csv），测量时先扣话筒曲线再算校正。": @"Import a two-column text file (frequency Hz, magnitude dB; UMIK / REW exported txt or csv). The microphone curve is subtracted before corrections are computed.",
+            @"导入两列文本（频率 Hz、幅度 dB；支持 UMIK / REW 导出的 txt、csv）。校准表已可导入，接入校正计算将在下一版完成。": @"Import a two-column text file (frequency Hz, magnitude dB; UMIK / REW exported txt or csv). Import works today; applying it to correction computation arrives in the next version.",
             @"麦克风校准文件": @"Microphone calibration file",
             @"导入麦克风校准文件…": @"Import microphone calibration file…",
             @"未导入": @"Not imported",

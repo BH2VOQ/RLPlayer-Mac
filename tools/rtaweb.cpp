@@ -8338,13 +8338,24 @@ static std::string miccal_fail(const std::string& why, const std::string& detail
 }
 
 // 导入成功的响应：严格按契约只回点数/幅度范围/解析形态（不回 success 以外的状态）。
+// 2026-11-16（评审 P0-3）：miccal 在本分支是**只导入、未接线**的死状态。
+// 现场证据：全仓库对 build_corrections(...) 的调用只存在于 tests/（生产链路一次没有），
+// 房间测量在 /api/roomcorr/measure 里止于 MeasurementSessionResult（不产校正 IR），
+// 所以 miccal_snapshot() 目前没有任何可以传进 build_corrections 的调用点。
+// 与其让用户以为「导入了就参与校正」，这里如实标注 wired=false + 一句人话说明；
+// 等测量→算校正的调用点落地时，把 wired 置 true 并删掉这句提示即可。
+static constexpr bool kMicCalWired = false;
+static constexpr const char* kMicCalWiredNote = "已导入，参与校正将在下一版接入";
+
 static std::string miccal_import_json(const rta::dsp::MicCalTable& t) {
     std::ostringstream j;
     j << "{\"ok\":true"
       << ",\"n_points\":" << t.points.size()
       << ",\"min_db\":" << t.minDb
       << ",\"max_db\":" << t.maxDb
-      << ",\"how\":\"" << jesc(t.how) << "\"}";
+      << ",\"how\":\"" << jesc(t.how) << "\""
+      << ",\"wired\":" << (kMicCalWired ? "true" : "false")
+      << ",\"wired_note\":\"" << jesc(kMicCalWired ? "" : kMicCalWiredNote) << "\"}";
     return j.str();
 }
 
@@ -8358,7 +8369,9 @@ static std::string miccal_stats_json(const rta::dsp::MicCalTable& t) {
       << ",\"min_db\":" << (t.points.empty() ? 0.0 : t.minDb)
       << ",\"max_db\":" << (t.points.empty() ? 0.0 : t.maxDb)
       << ",\"path\":\"" << jesc(t.source) << "\""
-      << ",\"how\":\"" << jesc(t.how) << "\"}";
+      << ",\"how\":\"" << jesc(t.how) << "\""
+      << ",\"wired\":" << (kMicCalWired ? "true" : "false")
+      << ",\"wired_note\":\"" << jesc(kMicCalWired ? "" : kMicCalWiredNote) << "\"}";
     return j.str();
 }
 

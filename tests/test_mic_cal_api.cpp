@@ -179,6 +179,14 @@ int main() {
         std::string how;
         ck(jstr(post, "how", how) && how.find("逗号") != std::string::npos,
            "how 标明逗号分隔（解析形态摘要）", how);
+        // 2026-11-16（评审 P0-3）：miccal 在本分支是「只导入、未接线」——生产链路里
+        // build_corrections(...) 一次都没有被调用（只有 tests/），所以端点必须如实标注
+        // wired=false：界面不能假装这条校准表已经在参与校正。接线落地时这组断言要改成 true。
+        ck(!jtrue(post, "wired"), "导入响应 wired=false（校准表尚未接入校正计算）",
+           post.substr(0, 240));
+        std::string note;
+        ck(jstr(post, "wired_note", note) && note.find("下一版") != std::string::npos,
+           "wired_note 如实说明「参与校正将在下一版接入」", note);
     }
 
     // ---- 读回：GET 必须与 POST 是同一份状态，且路径逐字回显 ----
@@ -195,6 +203,7 @@ int main() {
            "读回 path 与导入的路径逐字一致（含中文）",
            "期望=" + fixture.string() + " 实际=" + path);
         ck(jstr(got, "how", how) && !how.empty(), "读回 how 非空", how);
+        ck(!jtrue(got, "wired"), "读回 wired=false（与导入响应同一口径）", got.substr(0, 240));
     }
 
     // ---- 坏文件不能破坏已经生效的表（失败不清空）----

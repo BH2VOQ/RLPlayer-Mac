@@ -178,7 +178,7 @@
     [micCalSection addArrangedSubview:RLPLabel(RLPTr(@"麦克风校准"),
         [NSFont systemFontOfSize:13 weight:NSFontWeightSemibold], t.text)];
     NSTextField *micHint = RLPLabel(
-        RLPTr(@"导入两列文本（频率 Hz、幅度 dB；支持 UMIK / REW 导出的 txt、csv），测量时先扣话筒曲线再算校正。"),
+        RLPTr(@"导入两列文本（频率 Hz、幅度 dB；支持 UMIK / REW 导出的 txt、csv）。校准表已可导入，接入校正计算将在下一版完成。"),
         t.small, t.mut);
     micHint.maximumNumberOfLines = 2;
     micHint.lineBreakMode = NSLineBreakByWordWrapping;
@@ -373,6 +373,14 @@
                               ? [json[@"max_db"] doubleValue] : 0.0;
         self_.micCalNote.stringValue =
             [NSString stringWithFormat:RLPTr(@"%ld 点 / %+.1f ~ %+.1f dB"), (long)n, mn, mx];
+        // 2026-11-16（评审 P0-3）：后端如实回 wired=false（校准表导入了，但生产链路还没有
+        // 调用 build_corrections）⟹ 不在界面上假装它已经参与校正。提示文案由后端给
+        //（wired_note），这里只负责显示，不新增 RLPTr 中文串。
+        NSString *wiredNote = [json[@"wired_note"] isKindOfClass:[NSString class]]
+                                  ? json[@"wired_note"] : nil;
+        if (json[@"wired"] && ![json[@"wired"] boolValue] && wiredNote.length)
+            self_.micCalNote.stringValue =
+                [self_.micCalNote.stringValue stringByAppendingFormat:@" · %@", wiredNote];
         NSString *path = [json[@"path"] isKindOfClass:[NSString class]] ? json[@"path"] : @"";
         self_.micCalNote.toolTip = path.length ? path : nil;
     }];
