@@ -606,7 +606,9 @@ static NSString *RLPTrackArtistAlbumText(RLPTrack *t) {
 }
 
 - (void)updateFooterVisibility {
-    BOOL canLoadMore = (_totalCount > (NSInteger)_tracks.count) && (_limit < 5000);
+    // 2026-11-17（UI 缺口审计）：旧实现把「加载更多」卡在 5000 首，超过就无法继续翻。
+    // 与 Web 版一致：只要还有未加载的曲目就允许翻倍。
+    BOOL canLoadMore = (_totalCount > (NSInteger)_tracks.count);
     _footerHeightConstraint.constant = canLoadMore ? 40.0 : 0.0;
     _loadMoreButton.hidden = !canLoadMore;
 }
@@ -677,8 +679,7 @@ static NSString *RLPTrackArtistAlbumText(RLPTrack *t) {
 
 - (void)onLoadMore:(id)sender {
     (void)sender;
-    if (_limit >= 5000) return;
-    _limit = MIN(_limit * 2, 5000);
+    _limit = _limit > 0 ? _limit * 2 : 100;   // 与 Web 的 cur*2 一致，不再封顶
     [self fetchTracks];
 }
 
@@ -941,7 +942,19 @@ static NSString *RLPTrackArtistAlbumText(RLPTrack *t) {
 - (void)onRowAdd:(NSButton *)sender {
     const NSInteger row = sender.tag;
     if (row < 0 || row >= (NSInteger)_tracks.count) return;
-    RLPEnqueuePath(_tracks[(NSUInteger)row].path);
+    // 2026-11-17（UI 缺口审计已证实）：CUE 分轨的行级「+」此前直接 RLPEnqueuePath，
+    // 丢掉区间 ⟹ 入队后会从整轨第 1 首开播。有区间时必须走 RLPEnqueuePathCue。
+    RLPTrack *tr = _tracks[(NSUInteger)row];
+    if (tr.cueStart >= 0) RLPEnqueuePathCue(tr.path, tr.cueStart, tr.cueEnd);
+    else RLPEnqueuePath(tr.path);
+}
+
+/// 右键菜单的区间提供者（RLPTrackActionTableView 会查这个方法决定是否带 CUE 区间）。
+- (nullable NSDictionary<NSString *, NSNumber *> *)rlp_cueRangeForRow:(NSInteger)row {
+    if (row < 0 || row >= (NSInteger)_tracks.count) return nil;
+    RLPTrack *tr = _tracks[(NSUInteger)row];
+    if (tr.cueStart < 0) return nil;
+    return @{ @"cs": @(tr.cueStart), @"ce": @(tr.cueEnd) };
 }
 
 @end

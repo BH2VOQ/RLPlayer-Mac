@@ -29,6 +29,9 @@
 #import "RLPLibStatsView.h"
 #import "RLPSettingsLayout.h"
 #include "version.h"
+#if __has_include("mac_update.h")
+#include "mac_update.h"
+#endif
 #include "dsp/filter_family.h"   // U8：滤波器族标注（文案唯一出处，纯头）
 #include "net/feedback_api.h"
 #include "net/http_client.h"
@@ -923,6 +926,9 @@ static NSString *RLPControlIdentifier(NSString *key) {
     f.translatesAutoresizingMaskIntoConstraints = NO;
     f.target = self;
     f.action = action;
+    // 2026-11-17（UI 缺口审计已证实）：AppKit 默认 sendsActionOnEndEditing=NO，
+    // 用户输完值直接切页签而不按回车时，修改被静默丢弃（原生没有 Web 的「保存设置」按钮）。
+    [(NSTextFieldCell *)f.cell setSendsActionOnEndEditing:YES];
     [[f.widthAnchor constraintEqualToConstant:120] setActive:YES];
     return f;
 }
@@ -945,6 +951,7 @@ static NSString *RLPControlIdentifier(NSString *key) {
     f.translatesAutoresizingMaskIntoConstraints = NO;
     f.target = self;
     f.action = action;
+    [(NSTextFieldCell *)f.cell setSendsActionOnEndEditing:YES];   // 失焦即提交（见 numberFieldForKey 的说明）
     [[f.widthAnchor constraintEqualToConstant:300] setActive:YES];
     return f;
 }
@@ -3785,6 +3792,8 @@ static BOOL RLPFeedbackTextBlank(NSString *s) {
     // 从工作台改预设、OPRA 应用）之后回到设置页，曲线仍停在旧数据上
     //（"重置之后曲线不随动"）。判据见 test_native_eq_contract 的 E12。
     [self.eqView reload];
+    // 直通按钮会清空 ir/irgpu：校准视图也必须跟着刷新，否则仍显示旧 IR 路径。
+    [self.calView reload];
     [self loadLlmConfig];
 }
 
@@ -3814,9 +3823,21 @@ static BOOL RLPFeedbackTextBlank(NSString *s) {
 /// 这里一次提交这组键（后端合并写，其它键不受影响）。
 - (void)onBitPerfectFix:(id)sender {
     (void)sender;
+    // 2026-11-17（UI 缺口审计已证实）：旧实现**未经确认**就把音量改成 0 dB（满幅），
+    // 在非 0 dB 状态下点一下会直接满幅输出；且 rate 写成 "follow"、漏了 backend/dsd/isp，
+    // 从共享/DSD/ISP 状态点下去仍进不了直通。按 Web 的 sp_bpfix 语义修正。
+    NSAlert *a = [NSAlert new];
+    a.alertStyle = NSAlertStyleWarning;
+    a.messageText = RLPTr(@"切到 bit-perfect 直通");
+    a.informativeText = RLPTr(@"会把输出音量设为 0 dB（满幅），采样率改为跟随源，关闭抖动/EQ/IR，并切回 CoreAudio 独占。确定继续？");
+    [a addButtonWithTitle:RLPTr(@"切到直通")];
+    [a addButtonWithTitle:RLPTr(@"取消")];
+    if ([a runModal] != NSAlertFirstButtonReturn) return;
+
     __weak __typeof__(self) weakSelf = self;
     [self postKeys:@{
-        @"rate": @"follow", @"shaper": @"none", @"volume": @"0",
+        @"backend": @"coreaudio", @"rate": @"src", @"dsd": @"0", @"isp": @"0",
+        @"shaper": @"none", @"volume": @"0",
         @"eq": @"", @"ir": @"", @"irgpu": @"0", @"hogexcl": @"1", @"bits": @"-1",
     } completion:^(BOOL ok) {
         __typeof__(self) self_ = weakSelf;
@@ -4229,7 +4250,18 @@ static BOOL RLPFeedbackTextBlank(NSString *s) {
 }
 
 - (void)onUpdateChannel:(NSPopUpButton *)s {
-    [self postKey:@"channel" value:s.indexOfSelectedItem == 1 ? @"cn" : @"global"];
+    // 2026-11-17（UI 缺口审计已证实）：旧实现把 channel 发给 /api/settings，而后端
+    // 白名单没有 channel ⟹ 静默丢弃，重开设置页就回退。这里直接写 update.conf，
+    // 与 Web 版 wcmd('update:channel:*') 同一条落盘路径。
+    const std::string want = s.indexOfSelectedItem == 1 ? "cn" : "global";
+    std::string err;
+    const bool ok = rta::update::set_update_channel(want, err);
+    if (!ok) {
+        [self showStatus:[NSString stringWithFormat:@"%@：%s", RLPTr(@"切换更新通道失败"),
+                                                   err.empty() ? "unknown" : err.c_str()]];
+        return;
+    }
+    [self showStatus:RLPTr(@"更新通道已保存")];
 }
 - (void)onFbDiagToggle:(NSSwitch *)s { (void)s; }
 
