@@ -1503,13 +1503,23 @@ static CGFloat RLPRailMomentumStep(CGFloat velocity, CGFloat *outVelocity) {
     // 离散滚轮 / 无系统惯性的手势：按本次 dy 估速度，补一段阻尼惯性。
     if (fabs(dy) > 0.5) [self beginMomentumWithVelocity:-dy * 12.0];
 }
+- (void)viewDidMoveToWindow {
+    [super viewDidMoveToWindow];
+    if (!self.window) [self stopMomentum];   // 离屏即停，别让惯性继续跑
+}
 - (void)beginMomentumWithVelocity:(CGFloat)velocity {
     self.momentumVelocity = velocity;
     // 只有真在窗口里才挂 timer；离屏判据直接调 momentumTick: 驱动。
     if (self.window) {
         [self.momentumTimer invalidate];
-        self.momentumTimer = [NSTimer scheduledTimerWithTimeInterval:1.0/60.0
-            target:self selector:@selector(momentumTick:) userInfo:nil repeats:YES];
+        // 2026-11-17（并发审计）：target:self 的重复 timer 会**强持有** self ⟹ 离屏后
+        // dealloc 被推迟、惯性还在跑。改成 block 版 + 弱引用，并在离开窗口时停表。
+        __weak __typeof__(self) weakSelf = self;
+        self.momentumTimer = [NSTimer scheduledTimerWithTimeInterval:1.0/60.0 repeats:YES block:^(NSTimer *t) {
+            __typeof__(self) self_ = weakSelf;
+            if (!self_) { [t invalidate]; return; }
+            [self_ momentumTick:t];
+        }];
     }
 }
 - (void)momentumTick:(id)sender {

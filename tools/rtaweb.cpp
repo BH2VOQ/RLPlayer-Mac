@@ -2546,10 +2546,16 @@ private:
 
 // ---------------- 当前活跃输出端点指针与 DoP 标记（/api/volume 实时直通透传）----------------
 static std::atomic<OutSink*> g_activeSink{nullptr};
+// 2026-11-17（并发审计已证实）：/api/status 与 /api/volume 只拿裸指针就解引用，
+// 播放线程可能同一时刻清空并析构 sink ⟹ Use-After-Free。
+// 约定：**读方在锁内完成「取指针 + 调用」**；守卫析构在锁内清空指针；sink 的 unique_ptr
+// 在守卫之后析构（声明顺序保证），因此清空后不可能再有读方持有它。
+static std::mutex g_activeSinkMtx;
 static std::atomic<bool>     g_activeDop{false};
 
 struct ActiveSinkGuard {
     ActiveSinkGuard(OutSink* s, bool dop) {
+        std::lock_guard<std::mutex> lk(g_activeSinkMtx);
         g_activeDop.store(dop);
         g_activeSink.store(s);
         if (auto* ca = dynamic_cast<CoreAudioSink*>(s)) {
@@ -2561,6 +2567,7 @@ struct ActiveSinkGuard {
         }
     }
     ~ActiveSinkGuard() {
+        std::lock_guard<std::mutex> lk(g_activeSinkMtx);
         g_activeSink.store(nullptr);
         g_activeDop.store(false);
         g_ps.hogRequested.store(false);
@@ -3382,7 +3389,11 @@ static bool play_one_direct(const std::string& file, const PlayParams& p) {
 
         ps.paused.store(false);
         std::this_thread::sleep_for(std::chrono::milliseconds(std::max(10, p.bufferMs)));   // 让设备把缓冲里最后一点放完
-        g_activeSink.store(nullptr); g_activeDop.store(false);
+        {
+            std::lock_guard<std::mutex> slk(g_activeSinkMtx);
+            g_activeSink.store(nullptr);
+            g_activeDop.store(false);
+        }
         sink->close();
         // error 非空 = 上面的 RENDERFAIL/渲染失败路径，绝不能当"正常播完"返回 true
         //（否则队列线程会自动续播下一曲，把设备故障掩盖成正常切歌）。
@@ -5772,14 +5783,22 @@ static bool play_one_impl(const std::string& file, const PlayParams& pIn, rta::a
             // C3（N300 掉线）：端点已消失时绝不回退共享、也不从头重播 —— 用户要 bit-perfect，
             // 静默降级比报错更有害（方案 §7）。ps.error 已在 render_loop 里写成「输出设备已断开」。
             if (sharedFallback && rl.fallbackEligible && !rl.deviceLost) *sharedFallback = true;
-            g_activeSink.store(nullptr); g_activeDop.store(false);
+            {
+            std::lock_guard<std::mutex> slk(g_activeSinkMtx);
+            g_activeSink.store(nullptr);
+            g_activeDop.store(false);
+        }
             sink->close();
             { std::lock_guard<std::mutex> lk(ps.mtx); ps.error = rl.failMsg; }
             return false;
         }
         ps.paused.store(false);
         std::this_thread::sleep_for(std::chrono::milliseconds(std::max(10, p.bufferMs)));      // 让设备把缓冲里的尾音放完（RENDERFAIL 路径已提前 return，不睡）
-        g_activeSink.store(nullptr); g_activeDop.store(false);
+        {
+            std::lock_guard<std::mutex> slk(g_activeSinkMtx);
+            g_activeSink.store(nullptr);
+            g_activeDop.store(false);
+        }
         sink->close();
         if (rl.normalEnd) {
             // 显式「正常结束」语义：此后 END 的 error="" 只可能是正常播完（有 RENDER_DONE 为证）
@@ -14652,9 +14671,12 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
             std::snprintf(nb, sizeof(nb), "%.6f", db);
             return std::string("{\"ok\":true,\"db\":") + nb + ",\"upnp\":true,\"volumeWritable\":true,\"rawVolumeLocked\":false}";
         }
-        if (!g_activeDop.load()) {
-            if (OutSink* s = g_activeSink.load()) {
-                s->set_live_gain_db(db - ps.startDb.load());
+        {
+            std::lock_guard<std::mutex> slk(g_activeSinkMtx);
+            if (!g_activeDop.load()) {
+                if (OutSink* s = g_activeSink.load()) {
+                    s->set_live_gain_db(db - ps.startDb.load());
+                }
             }
         }
         {
@@ -14663,8 +14685,11 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
                 auto inputs = ps.bpInputs;
                 inputs.volumeDb = db;
                 inputs.gainNotUnity = std::abs(db) > 1e-9;
-                if (auto* ca = dynamic_cast<CoreAudioSink*>(g_activeSink.load()))
-                    inputs.gainNotUnity = std::abs(ca->render_gain() - 1.0) > 1e-12;
+                {
+                    std::lock_guard<std::mutex> slk(g_activeSinkMtx);
+                    if (auto* ca = dynamic_cast<CoreAudioSink*>(g_activeSink.load()))
+                        inputs.gainNotUnity = std::abs(ca->render_gain() - 1.0) > 1e-12;
+                }
                 const auto verdict = rta::audio::bp_verdict(inputs);
                 auto replaceText = [&](const char* key, const std::string& oldValue, const std::string& value) {
                     const std::string from = std::string("\"") + key + "\":\"" + jesc(oldValue) + "\"";
@@ -14763,6 +14788,7 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
         // 用 g_activeSink 现成的原子指针，不新开线程、不进实时回调。
         std::string liveLayerWhy;
         {
+            std::lock_guard<std::mutex> slk(g_activeSinkMtx);
             if (OutSink* s = g_activeSink.load()) {
                 if (auto* ca = dynamic_cast<CoreAudioSink*>(s)) {
                     // 只对**独占**路径用三层理由覆盖：共享模式本来就因「经系统混音」

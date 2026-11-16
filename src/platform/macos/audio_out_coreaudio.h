@@ -1272,10 +1272,12 @@ public:
     // ---------------- 写入 ----------------
     // 渲染回调从这里取数据。用环形缓冲解耦"设备拉"与"引擎推"。
     size_t write(const int32_t* interleaved, size_t frames) override {
-        if (!opened_) { fail(OutputError::NotOpened, "write 前必须先 open"); return 0; }
         if (!interleaved || frames == 0) return 0;
 
         std::lock_guard<std::mutex> lk(mu_);
+        // 2026-11-17（并发审计）：opened_ 是受 mu_ 保护的控制字段，必须在锁内读，
+        // 否则与 open/close 并发时是数据竞争（TSan 可复现）。
+        if (!opened_) { fail(OutputError::NotOpened, "write 前必须先 open"); return 0; }
         // 环形缓冲剩余空间（帧）。capacity 为 0 说明 open 没走完 —— 防御性返回 0，
         // 绝不能让下面的 % capacity 触发除零（铁律 3：判据要能证明自己没崩）。
         const size_t capacity = ring_frames_;

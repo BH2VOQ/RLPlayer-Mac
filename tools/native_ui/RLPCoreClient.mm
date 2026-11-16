@@ -3,12 +3,17 @@
 #import "RLPCoreClient.h"
 
 #include "rlapp_core.h"
+#include <atomic>
 #include "net/webui.h"
 
 @implementation RLPCoreClient {
     dispatch_queue_t _ioQueue;
     dispatch_queue_t _writeQueue;
     dispatch_queue_t _slowQueue;
+    // 2026-11-17（并发审计已证实）：shutdown 只 stop_embedded 就返回，后台队列里
+    // 在途的 rlapp::dispatch 会在 C++ 全局单例析构后继续跑 ⟹ 退出时崩溃。
+    // 关闸后先排空快队列，再停核心。
+    std::atomic<bool> _shuttingDown;
     BOOL _startedStorage;
 }
 
@@ -44,6 +49,12 @@
 
 - (void)shutdown {
     if (!_startedStorage) return;
+    _shuttingDown.store(true);
+    // 排空短任务队列：barrier 保证排在此前的任务都执行完，且之后不再插入读任务。
+    dispatch_barrier_sync(_ioQueue, ^{});
+    dispatch_sync(_writeQueue, ^{});
+    // 慢队列可能正卡在不可取消的网络调用：不阻塞退出（那会把「关不掉」变成新 bug），
+    // 但已关闸，后续不会再有新任务进 dispatch。
     rlapp::request_shutdown();
     rlapp::stop_embedded();
     _startedStorage = NO;
@@ -101,6 +112,7 @@
 }
 
 - (void)runAsync:(BOOL)get path:(NSString *)path body:(nullable NSString *)body completion:(nullable RLPJSONCompletion)completion {
+    if (_shuttingDown.load()) return;   // 关闸后拒绝新任务（见 shutdown 注释）
     dispatch_queue_t q = get ? _ioQueue
                              : ([[self class] isSlowWritePath:path] ? _slowQueue : _writeQueue);
     dispatch_async(q, ^{

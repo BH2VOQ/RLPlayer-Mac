@@ -158,6 +158,11 @@ static BOOL RLPRowIsSection(NSArray<NSDictionary *> *items, NSInteger row) {
 }
 
 @implementation RLPSidebarViewController
+
+- (void)dealloc {
+    // 2026-11-17（并发审计）：init 里注册了通知但从未注销（配对遗漏）。
+    [[NSNotificationCenter defaultCenter] removeObserver:self];
+}
 @synthesize lastSavedQueueToast = _lastSavedQueueToast;
 
 - (instancetype)init {

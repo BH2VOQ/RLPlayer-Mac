@@ -52,6 +52,11 @@
 
 @implementation RLPPlaylistsViewController
 
+- (void)dealloc {
+    // 2026-11-17（并发审计）：init 里注册了通知但从未注销（配对遗漏）。
+    [[NSNotificationCenter defaultCenter] removeObserver:self];
+}
+
 - (instancetype)init {
     self = [super initWithTitle:RLPTr(@"歌单")];
     if (self) {
