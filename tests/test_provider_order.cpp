@@ -260,6 +260,18 @@ int main() {
         ck(ArtworkOpts().order.empty(), "ArtworkOpts.order 缺省为空 ⟹ 默认顺序");
     }
 
+    // ---------------------------------------------------------------
+    std::printf("-- 12) HTTP 状态归类：只有瞬态才不得写负缓存 --\n");
+    {
+        ck(!rta::meta::art_status_is_transient(404), "404 = 确实没有 ⟹ 不是瞬态（可写负缓存）");
+        ck(rta::meta::art_status_is_transient(0), "超时/断网 = 瞬态");
+        ck(rta::meta::art_status_is_transient(429), "429 限流 = 瞬态（一次限流不得换一周无封面）");
+        ck(rta::meta::art_status_is_transient(500) && rta::meta::art_status_is_transient(503),
+           "5xx = 瞬态");
+        ck(!rta::meta::art_status_is_transient(200) && !rta::meta::art_status_is_transient(301),
+           "成功/重定向不是瞬态");
+    }
+
     std::printf("\nRESULT: %d passed, %d failed\n", g_pass, g_fail);
     return g_fail > 0 ? 1 : 0;
 }

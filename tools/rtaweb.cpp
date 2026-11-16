@@ -6465,6 +6465,16 @@ static std::string cover_env_host() {
 
 // 落盘正缓存：先写 .part，再 rename（同卷原子）。
 // 返回空串 = 成功；非空 = 人话原因。
+// 图片魔数 → Content-Type（不信任 URL 后缀）。抽成纯函数是为了能被离线判据钉住：
+// 只认 PNG/JPEG 的旧实现会把 WebP/GIF 头像判坏图回 502（2026-11-17 曲库审计）。
+static const char* image_content_type_by_magic(const unsigned char* b, size_t n) {
+    if (n >= 8 && b[0] == 0x89 && b[1] == 'P' && b[2] == 'N' && b[3] == 'G') return "image/png";
+    if (n >= 3 && b[0] == 0xFF && b[1] == 0xD8 && b[2] == 0xFF) return "image/jpeg";
+    if (n >= 12 && std::memcmp(b, "RIFF", 4) == 0 && std::memcmp(b + 8, "WEBP", 4) == 0) return "image/webp";
+    if (n >= 6 && std::memcmp(b, "GIF", 3) == 0) return "image/gif";
+    return nullptr;
+}
+
 static std::string cover_write_atomic(const std::string& key, const std::vector<unsigned char>& body,
                                       bool manual = false) {
     // 同名 .part 不允许并发写入，锁只包本地落盘，不包网络/抽图。
@@ -6570,7 +6580,7 @@ static CoverOutcome cover_fetch(const CoverJob& job, CoverTermCache& tc,
                 err = "search(" + at.note + ") 无 picUrl";
             } else {
                 err = "search(" + at.note + ") HTTP " + std::to_string(sr.status) + " " + sr.error;
-                transient = (sr.status == 0);
+                transient = (sr.status == 0 || sr.status == 429 || sr.status >= 500);
                 if (transient) break;      // 断网/超时：第二跳也一定失败，别再浪费一个超时
             }
         }
@@ -6597,7 +6607,7 @@ static CoverOutcome cover_fetch(const CoverJob& job, CoverTermCache& tc,
                     transient = true;
                 } else {
                     err = "download HTTP " + std::to_string(ir.status) + " " + ir.error;
-                    transient = (ir.status == 0);
+                    transient = (ir.status == 0 || ir.status == 429 || ir.status >= 500);
                 }
             } else {
                 err = "预算耗尽（下载前）";
@@ -9403,12 +9413,13 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
         // Content-Type 按**魔数**定，不信 URL 后缀（错误页伪装成 .jpg 的情况真实存在）
         const unsigned char* b = (const unsigned char*)r.bytes.data();
         const size_t n = r.bytes.size();
-        if (n >= 8 && b[0] == 0x89 && b[1] == 'P' && b[2] == 'N' && b[3] == 'G') ct = "image/png";
-        else if (n >= 3 && b[0] == 0xFF && b[1] == 0xD8 && b[2] == 0xFF) ct = "image/jpeg";
-        else {
+        const char* magicCt = image_content_type_by_magic(b, n);
+        if (magicCt) {
+            ct = magicCt;
+        } else {
             ct = "application/json; charset=utf-8";
             rta::net::webui_set_status(502);
-            return "{\"ok\":false,\"error\":\"取回的内容不是有效图片（无 JPEG/PNG 魔数）\"}";
+            return "{\"ok\":false,\"error\":\"取回的内容不是有效图片（无 PNG/JPEG/WEBP/GIF 魔数）\"}";
         }
         // 2026-11-08（beta7 #3）：头像命中同样长缓存（本地 artistcache 化名，1h 内不重复拉取；
         // refresh=1 会换 URL 语义以外的内容，但 1h 的旧图可接受，且用户可手动刷新）。

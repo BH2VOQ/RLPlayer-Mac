@@ -355,6 +355,12 @@ inline std::string art_primary_artist(const std::string& raw) {
 }
 
 // 图片字节嗅探(不信任 Content-Type，只看魔数)：JPEG/PNG/WEBP/GIF/BMP
+// 2026-11-17（曲库审计）：429 限流此前不算瞬态 ⟹ 会被写成 7 天负缓存，
+// 一次限流就让该专辑/艺人一周没有封面。抽成纯函数便于离线钉住归类。
+inline bool art_status_is_transient(long status) {
+    return status == 0 || status == 429 || status >= 500;
+}
+
 inline bool art_image_magic(const std::string& b) {
     if (b.size() < 4) return false;
     const unsigned char* p = (const unsigned char*)b.data();
@@ -801,7 +807,7 @@ inline ArtFetchOut art_download_image(const std::string& url, const std::vector<
     q.timeoutMs = std::max(500, std::min(opts.downloadMs, budgetMs));
     const rta::net::HttpResponse resp = art_http(q);
     if (resp.status != 200) {
-        out.transient = (resp.status == 0 || resp.status >= 500);
+        out.transient = art_status_is_transient(resp.status);
         out.reason = "下载 HTTP " + std::to_string(resp.status) +
                      (resp.error.empty() ? "" : (" " + resp.error));
         return out;
@@ -837,7 +843,7 @@ inline ArtFetchOut art_src_netease_artist(const std::string& name, const Artwork
     q.timeoutMs = std::max(500, std::min(opts.perSourceMs, budgetMs));
     const rta::net::HttpResponse resp = art_http(q);
     if (resp.status != 200) {
-        out.transient = (resp.status == 0 || resp.status >= 500);
+        out.transient = art_status_is_transient(resp.status);
         out.reason = "搜索 HTTP " + std::to_string(resp.status) +
                      (resp.error.empty() ? "" : (" " + resp.error));
         return out;
@@ -885,7 +891,7 @@ inline ArtFetchOut art_src_qq_artist(const std::string& name, const ArtworkOpts&
     q.timeoutMs = std::max(500, std::min(opts.perSourceMs, budgetMs));
     const rta::net::HttpResponse resp = art_http(q);
     if (resp.status != 200) {
-        out.transient = (resp.status == 0 || resp.status >= 500);
+        out.transient = art_status_is_transient(resp.status);
         out.reason = "搜索 HTTP " + std::to_string(resp.status) +
                      (resp.error.empty() ? "" : (" " + resp.error));
         return out;

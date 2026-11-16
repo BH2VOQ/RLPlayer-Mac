@@ -262,6 +262,25 @@ int main() {
         ck(std::string(signal_out_mode("coreaudio-shared")) == "shared" &&
            std::string(signal_out_mode("coreaudio")) == "exclusive",
            "Case 8d: outMode tracks the active backend");
+
+        // Image magic classification (2026-11-17): WebP/GIF must NOT be rejected as
+        // "not a valid image" (the old PNG/JPEG-only path returned 502 for valid art).
+        {
+            const unsigned char png[] = {0x89, 'P', 'N', 'G', 0x0D, 0x0A, 0x1A, 0x0A};
+            const unsigned char jpg[] = {0xFF, 0xD8, 0xFF, 0xE0};
+            const unsigned char webp[] = {'R', 'I', 'F', 'F', 0, 0, 0, 0, 'W', 'E', 'B', 'P'};
+            const unsigned char gif[] = {'G', 'I', 'F', '8', '9', 'a'};
+            const unsigned char junk[] = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12};
+            const char* pt = image_content_type_by_magic(png, sizeof png);
+            const char* jt = image_content_type_by_magic(jpg, sizeof jpg);
+            const char* wt = image_content_type_by_magic(webp, sizeof webp);
+            const char* gt = image_content_type_by_magic(gif, sizeof gif);
+            ck(pt && std::string(pt) == "image/png", "Case 9a: PNG magic → image/png", pt ? pt : "null");
+            ck(jt && std::string(jt) == "image/jpeg", "Case 9b: JPEG magic → image/jpeg", jt ? jt : "null");
+            ck(wt && std::string(wt) == "image/webp", "Case 9c: WebP magic → image/webp", wt ? wt : "null");
+            ck(gt && std::string(gt) == "image/gif", "Case 9d: GIF magic → image/gif", gt ? gt : "null");
+            ck(image_content_type_by_magic(junk, sizeof junk) == nullptr, "Case 9e: junk bytes → nullptr (502 path preserved)");
+        }
     }
 
     fs::remove_all(tmpDir, ec);
