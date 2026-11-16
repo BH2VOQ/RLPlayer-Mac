@@ -697,3 +697,5 @@ PEQ 开	PEQ on
 更新通道已保存	Update channel saved	设置页更新通道保存成功
 会把输出音量设为 0 dB（满幅），采样率改为跟随源，关闭抖动/EQ/IR，并切回 CoreAudio 独占。确定继续？	This sets output volume to 0 dB (full scale), rate to source, disables dither/EQ/IR, and switches back to CoreAudio exclusive. Continue?	bit-perfect 直通确认说明
 歌单读取失败	Failed to load playlists	歌单列表错误提示
+扫描中 %ld/%ld	Scanning %ld/%ld	扫描进度
+扫描完成	Scan finished	扫描完成提示

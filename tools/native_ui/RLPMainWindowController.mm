@@ -104,6 +104,9 @@ static const CGFloat kTopbarHeight = 60.0;    // .top height（classic 52，见 
 @property (nonatomic,strong) NSButton *topQueueBtn;
 @property (nonatomic,strong) NSButton *topScanBtn;
 @property (nonatomic,strong) NSButton *topNpBtn;
+// 2026-11-17（UI 缺口审计）：扫描没有进度、扫完不刷新。用窄端点 /api/lib/status 轮询。
+@property (nonatomic,strong,nullable) NSTimer *scanPollTimer;
+@property (nonatomic,assign) BOOL scanWasScanning;
 @property (nonatomic, copy, readwrite) NSString *uiMode;
 @property (nonatomic, strong, readwrite) NSSegmentedControl *modeControl;
 @property (nonatomic, assign) NSUInteger modeEpoch;
@@ -370,6 +373,7 @@ static NSString *RLPPageIdentifier(NSString *key) {
 
 - (void)dealloc {
     [_searchDebounce invalidate];
+    [self stopScanPolling];   // 扫描轮询必须停表，否则测试进程会延迟退出
     [[NSNotificationCenter defaultCenter] removeObserver:self];
 }
 
@@ -547,15 +551,61 @@ static NSString *RLPPageIdentifier(NSString *key) {
         BOOL started = [json[@"started"] respondsToSelector:@selector(boolValue)] ? [json[@"started"] boolValue] : YES;
         RLPToast(started ? RLPTr(@"开始扫描音乐库") : RLPTr(@"扫描已在进行中"));
         [[NSNotificationCenter defaultCenter] postNotificationName:@"RLPLibraryChangedNotification" object:nil];
+        [self_ startScanPolling];
         // 曲目/专辑/艺术家页都重拉一次（与 web libChanged 同口径）
         [self_ reloadVisibleLibraryPages];
+    }];
+}
+
+- (void)startScanPolling {
+    if (self.scanPollTimer) return;
+    self.scanWasScanning = YES;
+    __weak __typeof__(self) weakSelf = self;
+    NSTimer *t = [NSTimer scheduledTimerWithTimeInterval:1.5 repeats:YES block:^(NSTimer *timer) {
+        __typeof__(self) self_ = weakSelf;
+        if (!self_) { [timer invalidate]; return; }
+        [self_ pollScanStatus];
+    }];
+    self.scanPollTimer = t;
+    [self pollScanStatus];   // 立刻出一次「扫描中 X/Y」
+}
+
+- (void)stopScanPolling {
+    [self.scanPollTimer invalidate];
+    self.scanPollTimer = nil;
+    self.scanWasScanning = NO;
+}
+
+- (void)pollScanStatus {
+    __weak __typeof__(self) weakSelf = self;
+    [[RLPCoreClient shared] getJSON:@"/api/lib/status" completion:^(NSDictionary * _Nullable json) {
+        __typeof__(self) self_ = weakSelf;
+        if (!self_) return;
+        const BOOL ok = [json[@"ok"] respondsToSelector:@selector(boolValue)] ? [json[@"ok"] boolValue] : NO;
+        if (!ok) { [self_ stopScanPolling]; return; }
+        const BOOL scanning = [json[@"scanning"] respondsToSelector:@selector(boolValue)] ? [json[@"scanning"] boolValue] : NO;
+        if (scanning) {
+            NSInteger scanned = [json[@"scanned"] respondsToSelector:@selector(integerValue)] ? [json[@"scanned"] integerValue] : 0;
+            NSInteger total = [json[@"total"] respondsToSelector:@selector(integerValue)] ? [json[@"total"] integerValue] : 0;
+            self_.scanWasScanning = YES;
+            NSString *text = [NSString stringWithFormat:RLPTr(@"扫描中 %ld/%ld"), (long)scanned, (long)total];
+            [[NSNotificationCenter defaultCenter] postNotificationName:@"RLPPageCountNotification" object:text];
+        } else if (self_.scanWasScanning) {
+            // 扫描结束：停表、提示、刷新所有已缓存曲库页。
+            [self_ stopScanPolling];
+            RLPToast(RLPTr(@"扫描完成"));
+            [[NSNotificationCenter defaultCenter] postNotificationName:@"RLPLibraryChangedNotification" object:nil];
+            [self_ reloadVisibleLibraryPages];
+        }
     }];
 }
 
 - (void)reloadVisibleLibraryPages {
     for (NSString *key in @[@"albums", @"artists", @"tracks", @"folders"]) {
         NSViewController *vc = self.pageCache[key];
+        if (!vc) continue;
         if ([vc respondsToSelector:@selector(reloadData)]) [(id)vc reloadData];
+        else if ([vc respondsToSelector:@selector(reload)]) [(id)vc reload];   // 专辑页的入口叫 reload
     }
 }
 
@@ -1000,6 +1050,7 @@ static NSString *RLPPageIdentifier(NSString *key) {
     [self.playbackBar stopPolling];
     [self.rightDrawer deactivate];
     [self.npPage stopPolling];
+    [self stopScanPolling];
 }
 
 @end
