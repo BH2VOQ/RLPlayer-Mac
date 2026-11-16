@@ -276,6 +276,9 @@ int main() {
                 //   ② 无持续限幅由下面的 SNR>40 断言把关（持续限幅会摧毁 SNR）；
                 //   ③ 误差钳位（发散信号）必须为 0（上面的断言）。
                 check(m6.overload() <= 8, item + " -6 dBFS 限幅仅瞬态触碰（无持续限幅）", "实测 overload=" + std::to_string(m6.overload()));
+                if (f.family == ModulatorFamily::Dsd && f.levels == 2) {
+                    check(m6.overload() == 0, item + " -6 dBFS 稳态零限幅 (uLim=1.8)", "实测 overload=" + std::to_string(m6.overload()));
+                }
                 check(std::isfinite(s6.snrDb) && s6.snrDb > 40.0, item + " -6 dBFS 带内 SNR 正常 (> 40 dB)");
                 // 小信号门槛（2026-10-26 修正，用户铁律：debug 不能影响功能）：
                 //   一律 20 dB，**不因 AHM 多电平在 DSD512 的实测偏低而降低门槛**。
@@ -284,6 +287,11 @@ int main() {
                 const double smallBar = 20.0;
                 check(std::isfinite(s60.snrDb) && s60.snrDb >= smallBar,
                       item + " -60 dBFS 小信号 SNR 达标 (>= " + std::to_string((int)smallBar) + " dB)");
+                if (f.family == ModulatorFamily::Dsd && f.order == 7 && f.levels == 2 && r.fs >= 5644800.0) {
+                    check(std::isfinite(s60.snrDb) && s60.snrDb >= 60.0,
+                          item + " DSD7 -60 dBFS 小信号防极限环回归 (>= 60 dB)",
+                          "实测 SNR=" + std::to_string(s60.snrDb) + " dB");
+                }
                 // 2026-10-25（抖动注入点修复 + H∞ 受控综合后）EC 族门槛只升不降：
                 // 旧基线（抖动未整形泄漏）全部 1-bit 族卡在 ~86 dB；修复后实测
                 // EC-5@DSD64≈79~105 / EC-7@DSD256≈104~116 / EC-7@DSD512≈114+ dB，
@@ -321,6 +329,12 @@ int main() {
 
         const OverloadCase ovCases[] = {
             {  2822400.0, ModulatorFamily::Dsd,       5,   2, 0, "DSD5 @DSD64"       },
+            {  5644800.0, ModulatorFamily::Dsd,       5,   2, 0, "DSD5 @DSD128"      },
+            { 11289600.0, ModulatorFamily::Dsd,       5,   2, 0, "DSD5 @DSD256"      },
+            { 22579200.0, ModulatorFamily::Dsd,       5,   2, 0, "DSD5 @DSD512"      },
+            {  5644800.0, ModulatorFamily::Dsd,       7,   2, 0, "DSD7 @DSD128"      },
+            { 11289600.0, ModulatorFamily::Dsd,       7,   2, 0, "DSD7 @DSD256"      },
+            { 22579200.0, ModulatorFamily::Dsd,       7,   2, 0, "DSD7 @DSD512"      },
             {  5644800.0, ModulatorFamily::Chebyshev, 7,   2, 0, "Chebyshev7 @DSD128"},
             {  2822400.0, ModulatorFamily::Ec,        5,   2, 0, "EC5 @DSD64"        },
             { 11289600.0, ModulatorFamily::Ec,        7,   2, 0, "EC7 @DSD256"       },
@@ -388,6 +402,43 @@ int main() {
                   "实测 RMS=" + std::to_string(decRms));
             check(sameFrac < 0.60, tag + " 恢复后无锁死极限环 (同号率 < 0.60)",
                   "同号率=" + std::to_string(sameFrac));
+        }
+
+        // 3b. 单样本越界专项（无 50ms 满幅段，验证 uLim=1.8 在正/负单样本越界时可靠触发且 eMax=2.5 余量充足）
+        struct SpikeCase { double fs; int order; const char* name; };
+        const SpikeCase spikeCases[] = {
+            {  2822400.0, 5, "DSD5 @DSD64"  },
+            {  5644800.0, 7, "DSD7 @DSD128" },
+            { 11289600.0, 7, "DSD7 @DSD256" },
+            { 22579200.0, 7, "DSD7 @DSD512" },
+        };
+        for (const auto& sc : spikeCases) {
+            SdmConfig cfg;
+            cfg.fs = sc.fs; cfg.family = ModulatorFamily::Dsd; cfg.order = sc.order;
+            cfg.levels = 2; cfg.cutoffHz = 100000.0; cfg.ditherLsb = 0.0005;
+            SdmModulator m(cfg);
+            const long long warmN = 65536;
+            const long long settleN = (long long)(sc.fs * 0.25);
+            const long long posIdx = warmN;
+            const long long negIdx = warmN + settleN;
+            const long long total = negIdx + settleN;
+            const double fin = 1000.0;
+            long long ovBeforePos = 0, ovAfterPos = 0, ovBeforeNeg = 0, ovAfterNeg = 0, ovSteady = 0;
+            for (long long i = 0; i < total; ++i) {
+                double x = 0.5011872336 * std::sin(2.0 * kPi * fin * (double)i / sc.fs); // -6 dBFS
+                if (i == posIdx) { ovBeforePos = m.overload(); x = 5.0; }
+                if (i == negIdx) { ovBeforeNeg = m.overload(); x = -5.0; }
+                (void)m.process(x);
+                if (i == posIdx) ovAfterPos = m.overload();
+                if (i == negIdx) ovAfterNeg = m.overload();
+                if (i == negIdx + (long long)(sc.fs * 0.05)) ovSteady = m.overload();
+            }
+            const long long ovSteadyGrowth = m.overload() - ovSteady;
+            std::string tag = std::string(sc.name) + " 单样本越界(uLim=1.8)";
+            check(ovAfterPos > ovBeforePos, tag + " +5.0 立即触发限幅保护");
+            check(ovAfterNeg > ovBeforeNeg, tag + " -5.0 立即触发限幅保护");
+            check(m.clamped() == 0, tag + " eMax=2.5 余量充足 (clamped=0)");
+            check(ovSteadyGrowth == 0, tag + " 恢复后稳态零限幅");
         }
     }
 

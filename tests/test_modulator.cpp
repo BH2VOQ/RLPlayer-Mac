@@ -242,7 +242,8 @@ int main() {
     {
         struct Rec { double fs; int order; };
         const Rec cases[] = { {2822400.0, 5}, {5644800.0, 5}, {5644800.0, 7},
-                              {11289600.0, 5}, {11289600.0, 7} };
+                              {11289600.0, 5}, {11289600.0, 7},
+                              {22579200.0, 5}, {22579200.0, 7} };
         for (const auto& c : cases) {
             SdmConfig cfg;
             cfg.fs = c.fs; cfg.order = c.order; cfg.levels = 2;
