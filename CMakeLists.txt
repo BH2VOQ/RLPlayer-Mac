@@ -2451,3 +2451,9 @@ add_executable(test_dsd_settings_snapshot tests/test_dsd_settings_snapshot.cpp)
 target_include_directories(test_dsd_settings_snapshot PRIVATE ${CMAKE_SOURCE_DIR}/src)
 add_test(NAME dsd_settings_snapshot COMMAND test_dsd_settings_snapshot)
 set_tests_properties(dsd_settings_snapshot PROPERTIES TIMEOUT 120)
+
+# 2026-11-16 评审 MINOR：AI 歌词缓存目录容量上限（最多 500 文件 / 200 MB，按 mtime 最旧先删）。
+add_executable(test_lyrics_cache_prune tests/test_lyrics_cache_prune.cpp)
+target_include_directories(test_lyrics_cache_prune PRIVATE ${CMAKE_SOURCE_DIR}/src)
+add_test(NAME lyrics_cache_prune COMMAND test_lyrics_cache_prune)
+set_tests_properties(lyrics_cache_prune PROPERTIES TIMEOUT 120)
