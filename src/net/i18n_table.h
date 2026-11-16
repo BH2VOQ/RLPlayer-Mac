@@ -2247,6 +2247,7 @@ inline const I18nPair* i18n_table(std::size_t* count) {
         {"歌单读取失败", "Failed to load playlists"},
         {"扫描中 %ld/%ld", "Scanning %ld/%ld"},
         {"扫描完成", "Scan finished"},
+        {"扫描请求失败", "Scan request failed"},
         {"网络请求失败", "Network request failed"},
         {"尚未配置 API Key", "API key is not configured yet"},
         {"未选择 UPnP / DLNA 渲染器：设置 → 输出 → 目标渲染器（点「重新发现」刷新列表）", "No UPnP / DLNA renderer selected: Settings → Output → Target renderer (click Discover again to refresh the list)"},

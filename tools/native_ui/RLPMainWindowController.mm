@@ -548,6 +548,12 @@ static NSString *RLPPageIdentifier(NSString *key) {
     [[RLPCoreClient shared] postJSON:@"/api/lib/scan" body:nil completion:^(NSDictionary * _Nullable json) {
         __typeof__(self) self_ = weakSelf;
         if (!self_) return;
+        // 2026-11-17：请求本身失败时不要报「开始扫描」，更不要开始轮询（否则首轮就会
+        // 误报「扫描完成」——119 的边角问题，这里收紧）。
+        if (!json || ![json[@"ok"] boolValue]) {
+            RLPToast(RLPTr(@"扫描请求失败"));
+            return;
+        }
         BOOL started = [json[@"started"] respondsToSelector:@selector(boolValue)] ? [json[@"started"] boolValue] : YES;
         RLPToast(started ? RLPTr(@"开始扫描音乐库") : RLPTr(@"扫描已在进行中"));
         [[NSNotificationCenter defaultCenter] postNotificationName:@"RLPLibraryChangedNotification" object:nil];

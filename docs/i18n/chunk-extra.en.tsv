@@ -699,3 +699,4 @@ PEQ 开	PEQ on
 歌单读取失败	Failed to load playlists	歌单列表错误提示
 扫描中 %ld/%ld	Scanning %ld/%ld	扫描进度
 扫描完成	Scan finished	扫描完成提示
+扫描请求失败	Scan request failed	扫描启动失败提示
