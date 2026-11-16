@@ -71,6 +71,7 @@ using rta::render::SinkOpenOpts;
 #include "analysis/track_health.h"     // F-5：/api/track/health 音质体检（含 quality 19 项）
 #include "analysis/health_store.h"     // 1.1.4：/api/health 缓存键用强文件身份（mtime/size/ctime/inode/dev）
 #include "analysis/waveform.h"     // U2 包2：/api/waveform 的峰值包络（算法在包1，本包只做解码接线+缓存）
+#include "analysis/waveform_limits.h"   // 2026-11-16：整段回退的内存上限 + 无界 codec 估算（纯逻辑，可单测）
 #include "analysis/version_compare_json.h" // F-8: reachable comparison and valid JSON
 #include "meta/artwork.h"            // F-4：艺人头像全信源调度（provider.h 能力矩阵派生）
 #include "meta/enrich.h"            // 单曲元数据补全编排(播放触发 + /api/enrich + /api/meta 兜底)
@@ -1360,9 +1361,13 @@ static std::shared_ptr<std::atomic<bool>> g_wfToken;   // 当前请求的取消�
 
 // 整段回退的硬上限：已解码 PCM（int32 × frames × channels）。DSD/长曲不该走这条路；
 // 256 MiB 覆盖常见 10 分钟级有损/无损文件，再大就拒绝（waveform.too_large）。
-static constexpr uint64_t kWaveformMaxWholePcmBytes = 256ull * 1024ull * 1024ull;
+// 2026-11-16（评审 P0）：上限与「无界 codec 估算」搬进可离线单测的纯逻辑头
+//（src/analysis/waveform_limits.h）。这里保留同名常量只是为了不扩散改名。
+static constexpr uint64_t kWaveformMaxWholePcmBytes =
+    rta::analysis::waveform_limits::kMaxWholePcmBytes;
 // 容器头估不出上界（ffprobe 拿不到 duration/rate/channels）时的兜底：文件再大就不试。
-static constexpr uint64_t kWaveformMaxUnboundedFileBytes = 32ull * 1024ull * 1024ull;
+static constexpr uint64_t kWaveformMaxUnboundedFileBytes =
+    rta::analysis::waveform_limits::kMaxUnboundedFileBytes;
 
 struct WaveformOutcome {
     bool ok = false;
@@ -1428,6 +1433,21 @@ static std::string waveform_cache_key(const std::string& normPath,
     return normPath + b;
 }
 
+// 把 key 从顺序表里摘掉（identity 失配/被挤掉时**必须**同时清两处：map 与 order 脱钩
+// 会让同一个 key 在 order 里出现两份，进而把还活着的条目挤出去）。
+static void waveform_cache_order_remove_locked(const std::string& key) {
+    for (auto it = g_wfCacheOrder.begin(); it != g_wfCacheOrder.end();) {
+        if (*it == key) it = g_wfCacheOrder.erase(it);
+        else ++it;
+    }
+}
+
+// 把 key 挪到表尾（LRU：命中/覆盖都必须刷新顺序）。
+static void waveform_cache_order_touch_locked(const std::string& key) {
+    waveform_cache_order_remove_locked(key);
+    g_wfCacheOrder.push_back(key);
+}
+
 static bool waveform_cache_lookup(const std::string& key,
                                   const rta::analysis::FileIdentity& id,
                                   rta::analysis::WaveformResult& out) {
@@ -1436,8 +1456,11 @@ static bool waveform_cache_lookup(const std::string& key,
     if (it == g_wfCache.end()) return false;
     if (!id.valid || !it->second.id.matches(id)) {
         g_wfCache.erase(it);
+        waveform_cache_order_remove_locked(key);   // 2026-11-16：旧实现只 erase map ⟹ order 留旧 key
         return false;
     }
+    // 2026-11-16：旧实现命中不 move-to-back ⟹ LRU 顺序与真实访问顺序脱钩。
+    waveform_cache_order_touch_locked(key);
     out = it->second.w;
     return true;
 }
@@ -1446,11 +1469,12 @@ static void waveform_cache_put(const std::string& key,
                                const rta::analysis::WaveformResult& w,
                                const rta::analysis::FileIdentity& id) {
     std::lock_guard<std::mutex> lk(g_wfCacheMtx);
-    if (g_wfCache.find(key) == g_wfCache.end()) g_wfCacheOrder.push_back(key);
     WaveformCacheEntry e;
     e.w = w;
     e.id = id;
     g_wfCache[key] = std::move(e);
+    // 唯一性由 touch 保证（新 key 直接入表尾，已有 key 先摘再入）。
+    waveform_cache_order_touch_locked(key);
     while (g_wfCacheOrder.size() > kWaveformCacheMax) {
         const std::string old = g_wfCacheOrder.front();
         g_wfCacheOrder.pop_front();
@@ -1479,8 +1503,9 @@ static bool waveform_drive(Src& src, size_t start, size_t end, size_t bins,
     }
     if (end > src.totalFrames()) end = src.totalFrames();
     if (start >= end) {
-        out.code = "waveform.decode_failed";
-        out.error = "CUE 区间为空（cs >= ce）";
+        // 2026-11-16：空/反向区间是**请求参数错误**（400），不是解码失败（422）。
+        out.code = "waveform.bad_range";
+        out.error = "CUE 区间为空（cs >= ce，或钳位后 start >= end）";
         return false;
     }
     rta::analysis::WaveformAccumulator acc(end - start, bins, (int)src.rate(), ch);
@@ -1490,6 +1515,11 @@ static bool waveform_drive(Src& src, size_t start, size_t end, size_t bins,
     size_t pos = start;
     while (pos < end) {
         if (cancel && cancel->load(std::memory_order_relaxed)) {
+            out.cancelled = true;
+            return false;
+        }
+        // 2026-11-16：长 DSD/长文件的整段抽取会把退出拖住；除请求 token 外也看进程退出标志。
+        if (g_shutdown.load(std::memory_order_relaxed)) {
             out.cancelled = true;
             return false;
         }
@@ -1553,6 +1583,13 @@ static WaveformOutcome waveform_compute(const std::string& path, size_t bins,
     WaveformOutcome out;
     const auto cancelled = [&] { return cancel && cancel->load(std::memory_order_relaxed); };
     if (cancelled()) { out.cancelled = true; return out; }
+    // 2026-11-16：显式 ce <= cs 在**解码之前**就判成参数错误（400 waveform.bad_range），
+    // 别等到解码完/钳位后才报，更别复用 422 decode_failed（那会被当成文件坏了）。
+    if (cs > 0.0 && ce > 0.0 && !(ce > cs)) {
+        out.code = "waveform.bad_range";
+        out.error = "CUE 区间为空（ce <= cs）";
+        return out;
+    }
 
     // ---- 1) 有界流式（首选）：WAV / DSF / DFF 按块随机读，内存与曲长无关 ----
     {
@@ -1570,8 +1607,8 @@ static WaveformOutcome waveform_compute(const std::string& path, size_t bins,
             const double startSec = (cs > dur) ? dur : cs;
             const double endSec = (ce > 0.0) ? ((ce > dur) ? dur : ce) : dur;
             if (!(endSec > startSec)) {
-                out.code = "waveform.decode_failed";
-                out.error = "CUE 区间为空（cs >= ce）";
+                out.code = "waveform.bad_range";
+                out.error = "CUE 区间为空（cs >= ce，或钳位后 start >= end）";
                 return out;
             }
             size_t start = (size_t)std::llround(startSec * rate);
@@ -1610,17 +1647,26 @@ static WaveformOutcome waveform_compute(const std::string& path, size_t bins,
         if (bounded) {
             const double est = mi.duration * (double)mi.sampleRate * (double)mi.channels * 4.0;
             estPcmBytes = (est >= 1.8e19) ? ~0ull : (uint64_t)est;
+        } else {
+            // 2026-11-16（评审 P0）：探测失败时旧实现只看文件字节数（≤32 MiB 就试），
+            // 而 32 MiB 的压缩文件可以解出 ~281 MB PCM ⟹ 内存上限当时是**事后判据**。
+            // 现在按 codec 估算最坏 PCM（waveform_limits::unbounded_est_pcm_bytes）：
+            // 估算超 256 MiB 就直接 413，连尝试都不做。
+            estPcmBytes = rta::analysis::waveform_limits::unbounded_est_pcm_bytes(fileBytes, ext);
         }
     }
-    if ((bounded && estPcmBytes > kWaveformMaxWholePcmBytes) ||
-        (!bounded && fileBytes > kWaveformMaxUnboundedFileBytes)) {
+    if (rta::analysis::waveform_limits::whole_decode_too_large(bounded, fileBytes, estPcmBytes)) {
         out.code = "waveform.too_large";
         out.error = bounded
             ? ("整段解码预计需要 " + waveform_bytes_text(estPcmBytes) + " PCM，超过上限 " +
                waveform_bytes_text(kWaveformMaxWholePcmBytes) + "（该格式不支持流式分块读）")
-            : ("探测不到容器时长/采样率/声道数，且文件 " + waveform_bytes_text(fileBytes) +
-               " 超过兜底上限 " + waveform_bytes_text(kWaveformMaxUnboundedFileBytes) +
-               "（无法在解码前给出内存上界）");
+            : ("探测不到容器时长/采样率/声道数：文件 " + waveform_bytes_text(fileBytes) +
+               " 按 codec 估算约需 " + waveform_bytes_text(estPcmBytes) + " PCM" +
+               (fileBytes > kWaveformMaxUnboundedFileBytes
+                    ? ("，且超过兜底上限 " + waveform_bytes_text(kWaveformMaxUnboundedFileBytes))
+                    : std::string()) +
+               "（超过上限 " + waveform_bytes_text(kWaveformMaxWholePcmBytes) +
+               "，无法在解码前给出可靠的内存上界）");
         return out;
     }
 
@@ -1637,8 +1683,18 @@ static WaveformOutcome waveform_compute(const std::string& path, size_t bins,
         out.error = "整段解码时内存不足（已超过上限）";
         return out;
     } catch (const std::exception& e) {
+        // 2026-11-16（评审 P0）：audio_loader 把 bad_alloc 包成 runtime_error（「解码阶段异常:
+        // std::bad_alloc…」）⟹ 旧实现落进 422 decode_failed。内存不足必须算 413 too_large，
+        // 否则调用方/用户会以为「文件坏了、重试或换个文件就好」。
+        const std::string what = e.what();
+        if (what.find("bad_alloc") != std::string::npos ||
+            what.find("无法为对象分配内存") != std::string::npos) {
+            out.code = "waveform.too_large";
+            out.error = "整段解码时内存不足（按上限应提前拒绝）：" + what;
+            return out;
+        }
         out.code = "waveform.decode_failed";
-        out.error = std::string("解码失败：") + e.what();
+        out.error = std::string("解码失败：") + what;
         return out;
     } catch (...) {
         out.code = "waveform.decode_failed";
@@ -1766,7 +1822,9 @@ static std::string handle_waveform_api(const rta::net::HttpRequest& rq, std::str
     if (token->load() || oc.cancelled)
         return waveform_fail_json(409, "analysis.cancelled", "波形分析已取消（新请求接管）");
     if (!oc.ok)
-        return waveform_fail_json(oc.code == "waveform.too_large" ? 413 : 422, oc.code, oc.error);
+        return waveform_fail_json(oc.code == "waveform.too_large" ? 413
+                                  : (oc.code == "waveform.bad_range" ? 400 : 422),
+                                  oc.code, oc.error);
 
     // 分析期间文件被改写：结论对应哪份内容说不清 ⟹ 不入缓存（仍把结果回给调用方）。
     const rta::analysis::FileIdentity after = rta::analysis::FileIdentity::from_path(file);
@@ -3250,7 +3308,12 @@ static std::string settings_conf_value(const char* wantKey) {
 // 未来状态口径（与 DoP 生产者里的 mcfg 逐字同源）：
 //   modcut == 0 → 100 kHz（设置页文案「0 = 100」）；modcut > 0 → modcut * 1000 Hz；
 //   负数 / 非有限值 → 原样交给准入判成 sdm.corner_invalid（绝不静默换成默认 100 kHz）。
-static double sdm_corner_hz_for_policy(double modCutKhz) {
+// 2026-11-16（评审 P1）：闸门与生产者原来各写一套换算 —— 闸门把 0 → 100 kHz、
+// 负数/NaN 原样交给准入（判 sdm.corner_invalid），生产者却用「>0 ? 值 : 100000」把
+// 负数/NaN 静默当成默认。同一份配置在两个地方得到两种语义，正是「拐点口径分叉」。
+// 现在只有这一个换算函数：0 → 100 kHz（设置页「0 = 默认」）；>0 → kHz→Hz；
+// <=0/非有限 → 原样返回（调用方必须先过准入闸门，绝不在这里静默换默认值）。
+static double cutoff_hz_from_modcut(double modCutKhz) {
     return (modCutKhz == 0.0) ? rta::dsp::kSdmOneBitCornerFloorHz : (modCutKhz * 1000.0);
 }
 
@@ -3262,7 +3325,7 @@ static bool sdm_gate_applies_to_family(const std::string& modFamily) {
 // 准入判定：族 + 有效 corner（Hz）。ecCorrection 与 DoP 的 mcfg 一致，恒 false。
 static rta::dsp::SdmCornerAdmission sdm_gate_admission(const std::string& modFamily, double modCutKhz) {
     return rta::dsp::sdm_corner_admission(rta::dsp::parse_modulator_family(modFamily), false,
-                                         sdm_corner_hz_for_policy(modCutKhz));
+                                         cutoff_hz_from_modcut(modCutKhz));
 }
 
 // 给用户看的人话：POST 的 error 与 GET 的 sdm.note 共用同一句（两处口径不许分叉）。
@@ -3285,7 +3348,7 @@ static std::string sdm_status_json(const std::map<std::string, std::string>& kvs
     const bool oneBit = sdm_gate_applies_to_family(famIn);
     rta::dsp::SdmCornerAdmission adm;   // 默认 admitted
     if (oneBit) adm = sdm_gate_admission(famIn, cutKhz);
-    double cornerHz = sdm_corner_hz_for_policy(cutKhz);
+    double cornerHz = cutoff_hz_from_modcut(cutKhz);
     if (!std::isfinite(cornerHz)) cornerHz = 0.0;   // JSON 不认 nan/inf；code 已说明值不成立
     std::ostringstream j;
     j << "{\"corner_hz\":" << cornerHz
@@ -5117,7 +5180,17 @@ static bool play_one_impl(const std::string& file, const PlayParams& pIn, rta::a
                                          p.modFamily.empty() ? std::string("dsd") : p.modFamily,
                                          effOrder, why);
                 }
-                mcfg.cutoffHz = (p.modCutoff > 0.0) ? (p.modCutoff * 1000.0) : 100000.0;
+                // 2026-11-16：与保存闸门/开流闸门**同一个**换算函数（cutoff_hz_from_modcut）。
+                // 1-bit 路径的负数/NaN 已在开流前被准入拒绝，走不到这里；AHM 多电平不看
+                // corner 准入，所以这里再兜一次「非正值」——用策略头的 100 kHz 地板，
+                // 绝不把 NaN/负数喂给 NTF 设计（并留下日志，不静默）。
+                mcfg.cutoffHz = cutoff_hz_from_modcut(p.modCutoff);
+                if (!(mcfg.cutoffHz > 0.0) || !std::isfinite(mcfg.cutoffHz)) {
+                    play_log("SDM_CUTOFF_FLOOR modcut=" + std::to_string(p.modCutoff) +
+                             " family=" + (p.modFamily.empty() ? std::string("dsd") : p.modFamily) +
+                             " -> " + std::to_string((double)rta::dsp::kSdmOneBitCornerFloorHz));
+                    mcfg.cutoffHz = (double)rta::dsp::kSdmOneBitCornerFloorHz;
+                }
                 // 默认 0.0005：1-bit 的量化步长是 2.0，旧默认 0.01 等于注入 -34 dBFS 白噪，
                 // 实测把 DSD64 的带内 SNR 从 89 dB 砍到 54 dB（听感：持续嘶声）。
                 mcfg.ditherLsb = (p.modDither >= 0.0) ? p.modDither : 0.0005;
@@ -14706,11 +14779,20 @@ void rlapp::stop_embedded() {
     const auto drainStart = std::chrono::steady_clock::now();
     bool warned = false;
     while (g_inFlight.load(std::memory_order_relaxed) > 0) {
-        if (!warned && std::chrono::duration_cast<std::chrono::milliseconds>(
-                std::chrono::steady_clock::now() - drainStart).count() > 5000) {
+        const long long ms = (long long)std::chrono::duration_cast<std::chrono::milliseconds>(
+                                 std::chrono::steady_clock::now() - drainStart).count();
+        if (!warned && ms > 5000) {
             warned = true;
             play_log("SHUTDOWN 在途 dispatch 超过 5s 仍未完全退出（剩余=" +
                      std::to_string(g_inFlight.load()) + "），继续等待安全排空");
+        }
+        // 2026-11-16（评审 P1）：有界等待 —— 波形抽取现在也看 g_shutdown（块边界退出），
+        // 所以正常的取消应在数秒内完成；真卡住 30s 就记账并往下走（不能无限等，
+        // 也不能 force-kill：下面的 core_shutdown_common 仍是协作式收尾）。
+        if (ms > 30000) {
+            play_log("SHUTDOWN drain 有界等待 30s 超时（剩余=" +
+                     std::to_string(g_inFlight.load()) + "），继续协作式收尾");
+            break;
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }

@@ -26,6 +26,7 @@
 #include "net/webui.h"
 #include "net/json.h"
 #include "audio/wav.h"
+#include "analysis/waveform_limits.h"
 
 #include <cmath>
 #include <cstdint>
@@ -307,6 +308,77 @@ int main() {
         ck(status() == 400, "没有在播曲目时缺省 file → 400", "status=" + std::to_string(status()));
         ck(rta::net::json_parse(got)["code"].s() == "waveform.path_missing",
            "没有在播曲目时 → 稳定 code:waveform.path_missing", got.substr(0, 200));
+    }
+
+    // ---- 空/反向 CUE 区间：参数错误 400，不是解码失败 422 ----
+    std::printf("\n[区间错误] cs >= ce / 钳位后为空\n");
+    {
+        const std::string got = call("GET", base + "&bins=16&cs=2.0&ce=1.0");
+        ck(status() == 400, "cs > ce → 400（不是 422）", "status=" + std::to_string(status()));
+        const rta::net::Json j = rta::net::json_parse(got);
+        ck(!j["ok"].b && j["code"].s() == "waveform.bad_range",
+           "cs > ce → 稳定 code:waveform.bad_range", got.substr(0, 200));
+        const std::string eq = call("GET", base + "&bins=16&cs=1.0&ce=1.0");
+        ck(status() == 400 && rta::net::json_parse(eq)["code"].s() == "waveform.bad_range",
+           "cs == ce 同样 400 waveform.bad_range", eq.substr(0, 200));
+        // 钳位后为空：cs 超出整曲时长（30 s）⟹ start == end，也必须是 400 而不是 422。
+        const std::string over = call("GET", base + "&bins=16&cs=31");
+        ck(status() == 400 && rta::net::json_parse(over)["code"].s() == "waveform.bad_range",
+           "cs 超过时长（钳位后 start==end）→ 400 waveform.bad_range", over.substr(0, 200));
+    }
+
+    // ---- 纯逻辑：探测失败时的「按 codec 估算」上限（可离线直接调）----
+    std::printf("\n[上限估算] waveform_limits 纯逻辑\n");
+    {
+        namespace wl = rta::analysis::waveform_limits;
+        const std::uint64_t mib32 = 32ull * 1024ull * 1024ull;
+        ck(wl::expansion_factor(".flac") == 4u && wl::expansion_factor(".mp3") == 12u,
+           "按 codec 分档（无损 4× / 有损 12× / 未知 6×）",
+           "flac=" + std::to_string(wl::expansion_factor(".flac")) +
+           " mp3=" + std::to_string(wl::expansion_factor(".mp3")) +
+           " xyz=" + std::to_string(wl::expansion_factor(".xyz")));
+        ck(wl::unbounded_est_pcm_bytes(mib32, ".flac") == 128ull * 1024ull * 1024ull,
+           "32 MiB 无损文件 → 128 MiB PCM 估算");
+        ck(wl::unbounded_est_pcm_bytes(mib32, ".mp3") == 384ull * 1024ull * 1024ull,
+           "32 MiB 有损文件 → 384 MiB PCM 估算");
+        ck(!wl::whole_decode_too_large(false, mib32, wl::unbounded_est_pcm_bytes(mib32, ".flac")),
+           "32 MiB 无损：估算未超 256 MiB ⟹ 允许尝试解码");
+        ck(wl::whole_decode_too_large(false, mib32, wl::unbounded_est_pcm_bytes(mib32, ".mp3")),
+           "32 MiB 有损：估算 384 MiB > 256 MiB ⟹ 解码前直接 413");
+        ck(wl::whole_decode_too_large(false, mib32 + 1, 0),
+           "超过兜底文件上限（32 MiB+1）⟹ 413");
+        ck(!wl::whole_decode_too_large(true, mib32, 64ull * 1024ull * 1024ull),
+           "有界路径：64 MiB 精确估计未超限 ⟹ 不拒（对照）");
+    }
+
+    // ---- 413 与 422 不混：探测失败的 .flac，大文件 413 / 小文件 422 ----
+    std::printf("\n[内存上界] 探测失败的大 .flac vs 小 .flac\n");
+    {
+        const fs::path big = fixtureDir / "伪造大文件.flac";
+        {
+            std::ofstream f(big, std::ios::binary | std::ios::trunc);
+            const std::string block(4096, '\0');
+            for (int i = 0; i < 10240; ++i) f.write(block.data(), (std::streamsize)block.size());
+        }
+        const std::string got = call("GET", "/api/waveform?file=" + pct(big.string()));
+        ck(status() == 413, "探测失败 + 40 MiB → 413（不是 422）",
+           "status=" + std::to_string(status()));
+        ck(rta::net::json_parse(got)["code"].s() == "waveform.too_large",
+           "→ 稳定 code:waveform.too_large", got.substr(0, 200));
+
+        const fs::path small = fixtureDir / "伪造小文件.flac";
+        {
+            std::ofstream f(small, std::ios::binary | std::ios::trunc);
+            const std::string block(4096, '\0');
+            for (int i = 0; i < 256; ++i) f.write(block.data(), (std::streamsize)block.size());
+        }
+        const std::string got2 = call("GET", "/api/waveform?file=" + pct(small.string()));
+        ck(status() == 422, "探测失败 + 1 MiB（没超上限）→ 422 解码失败",
+           "status=" + std::to_string(status()));
+        ck(rta::net::json_parse(got2)["code"].s() == "waveform.decode_failed",
+           "→ 稳定 code:waveform.decode_failed（与 413 分开）", got2.substr(0, 200));
+        fs::remove(big, ec);
+        fs::remove(small, ec);
     }
 
     rlapp::stop_embedded();
