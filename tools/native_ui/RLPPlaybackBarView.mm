@@ -430,8 +430,20 @@ static BOOL RLPBarTextFieldIsEditing(NSTextField *field) {
     // 与 web .np 同口径：底栏左侧只放两行（曲名 + 艺术家·专辑），技术信息不进底栏左侧。
     self.titleLabel.lineBreakMode = NSLineBreakByTruncatingTail;
     self.titleLabel.stringValue = RLPTr(@"未播放");
+    // 2026-11-17（UI 缺口审计已证实）：web 的 #npOpen 把封面 + 歌名/艺术家整块都可点；
+    // 原生只给封面挂了手势 ⟹ 点歌名没反应。这里给两个文本标签补齐。
+    {
+        NSClickGestureRecognizer *g1 = [[NSClickGestureRecognizer alloc] initWithTarget:self action:@selector(openNowPlaying:)];
+        [self.titleLabel addGestureRecognizer:g1];
+        self.titleLabel.toolTip = RLPTr(@"打开正在播放");
+    }
     self.subLabel = [self labelWithFont:[NSFont systemFontOfSize:11] color:t.mut];
     self.subLabel.stringValue = @"—";
+    {
+        NSClickGestureRecognizer *g2 = [[NSClickGestureRecognizer alloc] initWithTarget:self action:@selector(openNowPlaying:)];
+        [self.subLabel addGestureRecognizer:g2];
+        self.subLabel.toolTip = RLPTr(@"打开正在播放");
+    }
 
     // 进度两端的当前时间 / 总时长（web #tpos / #tdur：分列在滑杆两侧，不再挤成一行）。
     self.posLabel = [self labelWithFont:[NSFont monospacedDigitSystemFontOfSize:10.5 weight:NSFontWeightRegular]

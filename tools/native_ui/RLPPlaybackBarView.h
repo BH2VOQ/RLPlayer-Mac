@@ -10,6 +10,9 @@ NS_ASSUME_NONNULL_BEGIN
 /// 状态来源 = 每 500 ms 轮询 /api/status（与 web 版同一真相源）。
 @interface RLPPlaybackBarView : NSView
 
+/// 信号链弹窗（底栏 chainBtn 的动作；快捷键 i 也复用同一条路径）。
+- (void)showSignalChain:(nullable id)sender;
+
 - (void)startPolling;
 - (void)stopPolling;
 

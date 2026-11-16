@@ -18,7 +18,8 @@ typedef NS_ENUM(NSInteger, RLPShortcutAction) {
     RLPShortcutVolumeDownCoarse, ///< ↓（0.5 dB）
     RLPShortcutVolumeDownFine,   ///< Shift+↓（0.1 dB）
     RLPShortcutStop,             ///< s
-    RLPShortcutLyrics,           ///< l（打开单曲页/歌词）
+    RLPShortcutLyrics,           ///< l（打开歌词抽屉，web 的 bLyric）
+    RLPShortcutSignalChain,      ///< i（信号链，web 的 showChain）
     RLPShortcutEscapeBack,       ///< Esc（层级返回）
 };
 

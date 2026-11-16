@@ -2022,6 +2022,8 @@ static NSString *RLPRailTagText(id srValue, id bitsValue) {
     self.lyricScroll.contentView.postsBoundsChangedNotifications=YES;
     [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(onLyricScrolled:) name:NSViewBoundsDidChangeNotification object:self.lyricScroll.contentView];
     [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(onExternalFavoritesChanged:) name:RLPFavoritesChangedNotification object:nil];
+    [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(onNowPlayingEscape:)
+                                                 name:@"RLPNowPlayingEscapeNotification" object:nil];
     self.lyricRows=[NSMutableArray array];self.lyricLines=@[];self.lyricActiveIndex=-1;
     // web `#npLyric` 空态是**两行**：主行 14pt(clamp) `没有歌词` + 副行 12px `--mut2` 说明。
     // 旧码单行 `没有歌词 · 同名 LRC…` + maximumNumberOfLines=1 ⟹ 副文案被截断、字号也不对。
@@ -2126,7 +2128,7 @@ static NSString *RLPRailTagText(id srValue, id bitsValue) {
     self.webControls.seek.cell=[RLPNPAccentCell new];self.webControls.seek.minValue=0;self.webControls.seek.maxValue=1;
     self.webControls.volume.cell=[RLPNPAccentCell new];self.webControls.volume.minValue=0;self.webControls.volume.maxValue=1000;
     self.webControls.volume.identifier=@"np.vol";   // 功能实现落在这个滑块（web #npVol）
-    self.webControls.seek.target=self;self.webControls.seek.action=@selector(onCommitSeek:);self.webControls.volume.target=self;self.webControls.volume.action=@selector(onCommitVolume:);
+    self.webControls.seek.target=self;self.webControls.seek.action=@selector(onSeekPreview:);self.webControls.volume.target=self;self.webControls.volume.action=@selector(onCommitVolume:);
     __weak __typeof__(self) ws=self;self.webControls.seek.onCommit=^{[ws onCommitSeek:nil];};self.webControls.volume.onCommit=^{[ws onCommitVolume:nil];};
     self.webControls.onVolumeWriteStarted = ^{
         __typeof__(self) s = ws;
@@ -2803,6 +2805,21 @@ static NSString *RLPRailTagText(id srValue, id bitsValue) {
 }
 
 - (void)onClosePlayback:(id)sender {[[NSNotificationCenter defaultCenter] postNotificationName:@"RLPCloseNowPlayingNotification" object:nil];}
+
+/// 2026-11-17（UI 缺口审计已证实）：拖动播放页进度条时**实时预览**目标时间
+/// （web 的 pointermove 会更新 #npPos）；旧实现拖动中直接 return，时间显示冻结。
+- (void)onSeekPreview:(NSSlider *)s {
+    const double frac = s.doubleValue;
+    const double dur = self.webStatus.duration;
+    if (!(dur > 0) || !isfinite(frac)) return;   // 未播放/时长未知时不预览（与 onCommitSeek 同一守卫）
+    self.webControls.posLabel.stringValue = RLPFmtDuration(frac * dur);
+}
+
+/// 播放页可见时的 Esc：抽屉优先（web 的 modal → drawer → page 层级）。
+- (void)onNowPlayingEscape:(NSNotification *)note {
+    (void)note;
+    [self cancelOperation:nil];
+}
 - (void)onToggleAnalysis:(id)sender {self.analysisPanel.hidden=!self.analysisPanel.hidden;[[NSUserDefaults standardUserDefaults] setBool:self.analysisPanel.hidden forKey:@"RLPNPAnalysisHidden"];[self layoutWebPlayback];}
 - (void)onHideAnalysis:(id)sender {
     self.analysisPanel.hidden=YES;

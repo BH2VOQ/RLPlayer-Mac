@@ -361,10 +361,21 @@ static void STCheck(BOOL ok, const char *what, NSString *detail) {
             break;
         }
         case RLPShortcutLyrics:
-            [[NSNotificationCenter defaultCenter] postNotificationName:@"RLPOpenNowPlayingNotification" object:nil];
+            // 2026-11-17（UI 缺口审计已证实）：web 的 l 是打开**歌词抽屉**（bLyric），
+            // 旧实现发的是「打开播放页」⟹ 键盘党按 l 会整页弹开。
+            [[NSNotificationCenter defaultCenter] postNotificationName:@"RLPOpenLyricDrawerNotification" object:nil];
+            break;
+        case RLPShortcutSignalChain:
+            [bar showSignalChain:nil];
             break;
         case RLPShortcutEscapeBack:
-            [[NSNotificationCenter defaultCenter] postNotificationName:@"RLPCloseNowPlayingNotification" object:nil];
+            // 2026-11-17：web 的 Esc 是层级返回（modal → 抽屉 → 播放页 → 详情页）。
+            // 旧实现无条件发「关闭播放页」，把播放页自己的「先关抽屉」逻辑整个绕过。
+            if (self.mainWC.nowPlayingOverlayVisible) {
+                [[NSNotificationCenter defaultCenter] postNotificationName:@"RLPNowPlayingEscapeNotification" object:nil];
+            } else {
+                [[NSNotificationCenter defaultCenter] postNotificationName:@"RLPBackNotification" object:nil];
+            }
             break;
         case RLPShortcutNone: break;
     }

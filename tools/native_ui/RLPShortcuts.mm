@@ -44,6 +44,7 @@ RLPShortcutAction RLPShortcutActionForKey(NSString * _Nullable key,
     if ([key isEqualToString:@"p"]) return RLPShortcutPrev;
     if ([key isEqualToString:@"s"]) return RLPShortcutStop;
     if ([key isEqualToString:@"l"]) return RLPShortcutLyrics;
+    if ([key isEqualToString:@"i"]) return RLPShortcutSignalChain;   // web: showChain()
     return RLPShortcutNone;
 }
 
