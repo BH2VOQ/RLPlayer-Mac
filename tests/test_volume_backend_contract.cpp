@@ -253,6 +253,15 @@ int main() {
         ck(!should_cold_retry_shared(false, true, 0.10), "Case 7b: user stop never triggers a retry");
         ck(!should_cold_retry_shared(false, false, 0.999), "Case 7c: finished track never triggers a retry");
         ck(should_cold_retry_shared(false, false, 0.40), "Case 7d: failed mid-track allows exactly one retry");
+
+        // The signal-chain readout must never claim hardware exclusivity when the
+        // active backend is the shared fallback (2026-11-17 audit).
+        ck(signal_shared_only(true,  "coreaudio"),      "Case 8a: shared-only device reports shared");
+        ck(signal_shared_only(false, "coreaudio-shared"), "Case 8b: shared fallback reports shared");
+        ck(!signal_shared_only(false, "coreaudio"),      "Case 8c: true exclusive path stays exclusive");
+        ck(std::string(signal_out_mode("coreaudio-shared")) == "shared" &&
+           std::string(signal_out_mode("coreaudio")) == "exclusive",
+           "Case 8d: outMode tracks the active backend");
     }
 
     fs::remove_all(tmpDir, ec);

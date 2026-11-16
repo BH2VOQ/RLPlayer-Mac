@@ -4089,6 +4089,15 @@ static BigIspScan scan_isp_blocks(PlaySource& src, size_t fromFrame, size_t limi
 // 参数名用 pIn 而不是 p：函数体里会先做一次「EQ/IR 配置兜底」得到 pE，
 // 然后 `const PlayParams& p = pE;` —— 让下面几百行原有的 p.* 全部自动用上兜底结果，
 // 一个字符都不用改（改动面最小 = 回归面最小）。
+// 信号链的「本次实际输出」：设备本身只支持共享 或 本次走了共享回退，都必须算共享。
+// 抽成纯函数是为了能被离线判据钉住（否则回退后界面会再次声称「硬件独占」）。
+static bool signal_shared_only(bool capsSharedOnly, const std::string& backend) {
+    return capsSharedOnly || backend == "coreaudio-shared";
+}
+static const char* signal_out_mode(const std::string& backend) {
+    return backend == "coreaudio-shared" ? "shared" : "exclusive";
+}
+
 static bool play_one_impl(const std::string& file, const PlayParams& pIn, rta::audio::AudioBuffer& buf,
                           bool* sharedFallback, const std::string& extraNote) {
     auto& ps = g_ps;
@@ -5262,7 +5271,10 @@ static bool play_one_impl(const std::string& file, const PlayParams& pIn, rta::a
             // 1.1.2 AP-1.8：诊断必须能回答"这一曲到底送到了什么传输上、延迟从哪来、
             // 是共享还是独占"。这里的值全部是**本次实际**的只读探测结果，不是用户偏好。
             << ",\"transport\":\"" << jesc(targetCaps.transport) << "\""
-            << ",\"sharedOnly\":" << (targetCaps.sharedOnly ? "true" : "false")
+            // 本次实际输出是否走共享（含独占失败后的回退）：两者取或，避免回退后
+            // 信号链仍声称「硬件独占」（审计 2026-11-17 实测到的失实点）。
+            << ",\"sharedOnly\":" << (signal_shared_only(targetCaps.sharedOnly, p.backend) ? "true" : "false")
+            << ",\"outMode\":\"" << signal_out_mode(p.backend) << "\""
             << ",\"latencyKnown\":" << (targetCaps.latencyKnown ? "true" : "false")
             << ",\"latencyMs\":" << targetCaps.latencyMs
             << ",\"latencySource\":\"" << jesc(targetCaps.latencySource) << "\""
@@ -5786,6 +5798,7 @@ static bool should_cold_retry_shared(bool sharedOk, bool stopped, double fracAft
     return !sharedOk && !stopped && fracAfter < 0.999;
 }
 
+
 // ---------------- 播放入口（独占 RENDERFAIL 自动回退共享）----------------
 // 2026-10-22 VM 事故的落地修复：独占流开得出来但设备 4 秒不接受数据时，
 // 以 wasapi-shared 重开整条 play_one（设备率取系统混音率、shaper=None、note 明示
@@ -5861,14 +5874,14 @@ static bool play_one(const std::string& file, const PlayParams& p, rta::audio::A
 
     // 共享也失败：设备通常刚被上一路流抢占/停止，需要沉降时间。
     // 只做**一次**冷重试（同一位置续播），不是循环；结果如实进日志。
-    const size_t playedAfter = ps.played.load();
-    const size_t totalAfter = ps.total.load();
-    const double fracAfter = (totalAfter > 0) ? (double)playedAfter / (double)totalAfter : 0.0;
-    if (fracAfter >= 0.999) return false;
-    play_log("RETRY_SHARED_COLD 共享流仍未接受数据，释放设备 400ms 后同位置重试一次");
+    // 续播分数用本次尝试**之前**已刷新的 frac（其 played/total 同源同采样率）。
+    // 若在失败后再读 ps.played/ps.total，二者可能分属新旧 output rate（审计 2026-11-17 指出的风险），
+    // 会把续播位置算歪。
+    if (frac >= 0.999) return false;
+    play_log("RETRY_SHARED_COLD 共享流仍未接受数据，释放设备 400ms 同位置重试一次");
     std::this_thread::sleep_for(std::chrono::milliseconds(400));
     PlayParams p3 = p2;
-    if (fracAfter > 0.0) p3.initialSeekFrac = fracAfter;
+    if (frac > 0.0) p3.initialSeekFrac = frac;
     { std::lock_guard<std::mutex> lk(ps.mtx); ps.error.clear(); }
     const bool retryOk = play_one_impl(file, p3, buf, nullptr, note + "（第二次尝试）");
     play_log(std::string("RETRY_SHARED_COLD result=") + (retryOk ? "ok" : "failed"));
@@ -14664,6 +14677,9 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
             ps.bpWhy.clear();
             ps.bpInputsKnown = false;
             ps.rawVolumeLocked = false;
+            // 停播后回退原因也失去对象：若不清，/api/status 会一直带出上一首的 fallbackWhy，
+            // 用户会看到「已回退共享」的旧说明停在已停止的界面上。
+            ps.outFallbackWhy.clear();
         }
         return "{\"ok\":true}";
     }
