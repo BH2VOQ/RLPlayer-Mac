@@ -300,6 +300,7 @@ static NSStackView *RLPSRow(NSString *label, NSView *control, NSString *hint, RL
 @property (nonatomic, strong) RLPSettingsGroup *trimGroup;
 @property (nonatomic, strong) NSMutableDictionary<NSString *, NSSlider *> *trimFields;
 @property (nonatomic, strong) NSMutableDictionary<NSString *, NSTextField *> *trimValueLabels;
+@property (nonatomic, strong) NSMutableArray<NSNumber *> *savedTrimValues;
 /// web #sp_eq（cal 页「EQ 文件（REW / AutoEq 文本）」路径输入）：旧码只有映射表里的
 /// 标识符、没有控件，本轮补成真控件并接 /api/settings 的 eq 键。
 @property (nonatomic, strong) NSTextField *eqField;
@@ -1555,12 +1556,16 @@ static NSString *RLPControlIdentifier(NSString *key) {
     RLPTheme *t = [RLPTheme current];
     for (NSUInteger i = 0; i < names.count && i < 8; ++i) {
         NSString *key = [NSString stringWithFormat:@"sp_trim%lu", (unsigned long)i];
+        double initVal = (self.savedTrimValues && i < self.savedTrimValues.count)
+                       ? [self.savedTrimValues[i] doubleValue] : 0.0;
+        if (initVal < -24.0) initVal = -24.0;
+        if (initVal > 12.0) initVal = 12.0;
         NSTextField *lab = RLPLabel([NSString stringWithFormat:RLPTr(@"%@（声道 %lu，dB）"),
                                      names[i], (unsigned long)(i + 1)],
                                     [NSFont systemFontOfSize:11], t.mut);
         lab.translatesAutoresizingMaskIntoConstraints = NO;
         [[lab.widthAnchor constraintEqualToConstant:170] setActive:YES];
-        NSSlider *s = [NSSlider sliderWithValue:0 minValue:-24 maxValue:12
+        NSSlider *s = [NSSlider sliderWithValue:initVal minValue:-24 maxValue:12
                                         target:self action:@selector(onTrimSlider:)];
         s.identifier = key;
         s.tag = (NSInteger)i;
@@ -1568,7 +1573,8 @@ static NSString *RLPControlIdentifier(NSString *key) {
         s.trackFillColor = [RLPTheme current].accent;   // web 滑杆是 accent 色，不要系统默认亮蓝
         s.translatesAutoresizingMaskIntoConstraints = NO;
         [[s.widthAnchor constraintEqualToConstant:220] setActive:YES];
-        NSTextField *val = RLPLabel(@"0.0 dB", [NSFont systemFontOfSize:10.5], t.mut2);
+        NSTextField *val = RLPLabel([NSString stringWithFormat:@"%.1f dB", initVal],
+                                    [NSFont systemFontOfSize:10.5], t.mut2);
         val.identifier = [key stringByAppendingString:@".val"];
         val.translatesAutoresizingMaskIntoConstraints = NO;
         [[val.widthAnchor constraintEqualToConstant:70] setActive:YES];
@@ -3717,6 +3723,7 @@ static BOOL RLPFeedbackTextBlank(NSString *s) {
         if (self_.eqField && [kv[@"eq"] isKindOfClass:[NSString class]] && !RLPTextFieldIsEditing(self_.eqField))
             self_.eqField.stringValue = kv[@"eq"];
         // 声道音量微调按真实「输出声道数」重建（0 = 跟随源 → 先按立体声，web 同口径）。
+        [self_ parseAndStoreTrimString:kv[@"trim"]];
         NSInteger trimCh = 0;
         id chv = kv[@"channels"];
         if ([chv respondsToSelector:@selector(integerValue)]) {
@@ -3762,14 +3769,40 @@ static BOOL RLPFeedbackTextBlank(NSString *s) {
 
 #pragma mark - 输出页动作
 
+- (void)parseAndStoreTrimString:(id)raw {
+    if (!self.savedTrimValues) {
+        self.savedTrimValues = [NSMutableArray arrayWithCapacity:8];
+    }
+    [self.savedTrimValues removeAllObjects];
+    NSArray<NSString *> *parts = nil;
+    if ([raw isKindOfClass:[NSString class]]) {
+        parts = [(NSString *)raw componentsSeparatedByString:@","];
+    }
+    for (NSUInteger i = 0; i < 8; ++i) {
+        double v = 0.0;
+        if (parts && i < parts.count) {
+            v = [parts[i] doubleValue];
+            if (v < -24.0) v = -24.0;
+            if (v > 12.0) v = 12.0;
+        }
+        [self.savedTrimValues addObject:@(v)];
+    }
+}
+
 /// bit-perfect 直通：web 的判据是「输出采样率 = 源 / 抖动 = none / 音量 0 dB / 无 EQ·IR / 独占」。
 /// 这里一次提交这组键（后端合并写，其它键不受影响）。
 - (void)onBitPerfectFix:(id)sender {
+    (void)sender;
+    __weak __typeof__(self) weakSelf = self;
     [self postKeys:@{
         @"rate": @"follow", @"shaper": @"none", @"volume": @"0",
         @"eq": @"", @"ir": @"", @"irgpu": @"0", @"hogexcl": @"1", @"bits": @"-1",
+    } completion:^(BOOL ok) {
+        __typeof__(self) self_ = weakSelf;
+        if (!self_ || !ok) return;
+        [self_ reloadData];
+        [self_ showStatus:RLPTr(@"已切到 bit-perfect 直通")];
     }];
-    [self showStatus:RLPTr(@"已切到 bit-perfect 直通")];
 }
 
 - (void)onOutMode:(NSPopUpButton *)s {
@@ -3790,6 +3823,10 @@ static BOOL RLPFeedbackTextBlank(NSString *s) {
     NSString *key = [NSString stringWithFormat:@"sp_trim%ld", (long)s.tag];
     NSTextField *val = self.trimValueLabels[key];
     if (val) val.stringValue = [NSString stringWithFormat:@"%.1f dB", s.doubleValue];
+    if (!self.savedTrimValues) [self parseAndStoreTrimString:nil];
+    if (s.tag >= 0 && s.tag < (NSInteger)self.savedTrimValues.count) {
+        self.savedTrimValues[(NSUInteger)s.tag] = @(s.doubleValue);
+    }
     [self onTrim:nil];
 }
 
@@ -3802,11 +3839,14 @@ static BOOL RLPFeedbackTextBlank(NSString *s) {
 }
 
 - (void)onTrim:(id)sender {
-    // 一次提交整串 trim（后端只认逗号分隔的 8 个值）；没生成的声道位按 0。
+    // 一次提交整串 trim（后端只认逗号分隔的 8 个值）；没生成的声道位沿用已保存值（或 0）。
     NSMutableArray<NSString *> *vals = [NSMutableArray array];
     for (NSInteger i = 0; i < 8; ++i) {
         NSSlider *sl = self.trimFields[[NSString stringWithFormat:@"sp_trim%ld", (long)i]];
-        [vals addObject:sl ? [NSString stringWithFormat:@"%.1f", sl.doubleValue] : @"0"];
+        double v = sl ? sl.doubleValue
+                      : ((self.savedTrimValues && (NSUInteger)i < self.savedTrimValues.count)
+                         ? [self.savedTrimValues[(NSUInteger)i] doubleValue] : 0.0);
+        [vals addObject:[NSString stringWithFormat:@"%.1f", v]];
     }
     [self postKey:@"trim" value:[vals componentsJoinedByString:@","]];
 }

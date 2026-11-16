@@ -441,6 +441,63 @@ int main(void) {
         Ck([[core jsonWithMethod:@"GET" path:@"/api/settings" body:nil][@"kv"][@"upnpdev"] isEqualToString:@"uuid:first"],
            @"投放目标保存真实ID而非显示名称", @"");
 
+        // ---- 8. 声道音量微调 (trim) 回读 & 切换声道数保留 ----
+        [core jsonWithMethod:@"POST" path:@"/api/settings" body:@"channels=6&trim=-3.5,1.5,0,2.0,-1.5,0.5,0,0"];
+        [settings reloadData];
+        WaitUntil(4.0, ^BOOL {
+            NSSlider *s0 = (NSSlider *)FindId(v, @"sp_trim0");
+            return s0 && fabs(s0.doubleValue - (-3.5)) < 0.05;
+        });
+        NSSlider *trim0 = (NSSlider *)FindId(v, @"sp_trim0");
+        NSSlider *trim1 = (NSSlider *)FindId(v, @"sp_trim1");
+        NSSlider *trim3 = (NSSlider *)FindId(v, @"sp_trim3");
+        NSSlider *trim4 = (NSSlider *)FindId(v, @"sp_trim4");
+        NSTextField *trim0Val = (NSTextField *)FindId(v, @"sp_trim0.val");
+        Ck(trim0 && fabs(trim0.doubleValue - (-3.5)) < 0.05 &&
+           trim1 && fabs(trim1.doubleValue - 1.5) < 0.05 &&
+           trim3 && fabs(trim3.doubleValue - 2.0) < 0.05 &&
+           trim4 && fabs(trim4.doubleValue - (-1.5)) < 0.05 &&
+           trim0Val && [trim0Val.stringValue containsString:@"-3.5"],
+           @"channels=6 时 trim 滑杆与 dB 标签正确回读 kv.trim",
+           [NSString stringWithFormat:@"t0=%.2f val=%@", trim0 ? trim0.doubleValue : 99.0, trim0Val.stringValue ?: @"nil"]);
+
+        NSPopUpButton *chPop2 = (NSPopUpButton *)FindId(v, @"sp_ch");
+        if (chPop2 && chPop2.numberOfItems >= 4) {
+            [chPop2 selectItemAtIndex:3]; // 8 声道
+            [chPop2 sendAction:chPop2.action to:chPop2.target];
+            Pump(0.15);
+            NSSlider *trim0AfterCh = (NSSlider *)FindId(v, @"sp_trim0");
+            Ck(trim0AfterCh && fabs(trim0AfterCh.doubleValue - (-3.5)) < 0.05,
+               @"切换输出声道数后已加载的 trim 值不丢失",
+               [NSString stringWithFormat:@"t0=%.2f", trim0AfterCh ? trim0AfterCh.doubleValue : 99.0]);
+        }
+
+        // ---- 9. onBitPerfectFix: 提交后同步刷新设置页自身控件 ----
+        [core jsonWithMethod:@"POST" path:@"/api/settings" body:@"rate=192000&hogexcl=0&bits=24"];
+        [settings reloadData];
+        WaitUntil(4.0, ^BOOL {
+            NSSwitch *h = (NSSwitch *)FindId(v, @"sp_hogexcl");
+            return h && h.state == NSControlStateValueOff;
+        });
+        [(id)settings performSelector:@selector(onBitPerfectFix:) withObject:nil];
+        WaitUntil(4.0, ^BOOL {
+            NSSwitch *h = (NSSwitch *)FindId(v, @"sp_hogexcl");
+            NSPopUpButton *bPop = (NSPopUpButton *)FindId(v, @"sp_bits");
+            return h && h.state == NSControlStateValueOn &&
+                   bPop && [bPop.selectedItem.representedObject isEqualToString:@"-1"];
+        });
+        NSSwitch *hogAfterBP = (NSSwitch *)FindId(v, @"sp_hogexcl");
+        NSPopUpButton *bitsAfterBP = (NSPopUpButton *)FindId(v, @"sp_bits");
+        NSPopUpButton *rPopAfterBP = (NSPopUpButton *)FindId(v, @"sp_rate");
+        Ck(rPopAfterBP && [rPopAfterBP.selectedItem.representedObject isEqualToString:@"follow"] &&
+           hogAfterBP && hogAfterBP.state == NSControlStateValueOn &&
+           bitsAfterBP && [bitsAfterBP.selectedItem.representedObject isEqualToString:@"-1"],
+           @"点击 bit-perfect 直通后设置页自身控件同步更新",
+           [NSString stringWithFormat:@"rPop=%p rate=%@ hog=%ld bits=%@",
+            rPopAfterBP, rPopAfterBP.selectedItem.representedObject,
+            (long)(hogAfterBP ? hogAfterBP.state : -1),
+            bitsAfterBP.selectedItem.representedObject]);
+
         [RLPTheme setThemeName:@"dark"];
         [core shutdown];
         [fm removeItemAtPath:rootDir error:nil];

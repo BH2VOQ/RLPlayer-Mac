@@ -5802,10 +5802,10 @@ static bool play_one(const std::string& file, const PlayParams& p, rta::audio::A
     // 日志里只有 FALLBACK_SHARED，没有任何"位置去哪了"的证据。
     // 现在用现有能力（PlayParams::initialSeekFrac + start_pos_for，EQ 热重载同一套）续播：
     //   frac = 已输出帧 / 本曲总输出帧（CUE 区间已按区间计）。两者同源，进度条不跳。
-    const size_t playedFrames = ps.played.load();
-    const size_t totalFrames  = ps.total.load();
-    const double frac = (totalFrames > 0) ? (double)playedFrames / (double)totalFrames : 0.0;
-    const double posSec = (ps.outRate > 0) ? (double)playedFrames / (double)ps.outRate : 0.0;
+    size_t playedFrames = ps.played.load();
+    size_t totalFrames  = ps.total.load();
+    double frac = (totalFrames > 0) ? (double)playedFrames / (double)totalFrames : 0.0;
+    double posSec = (ps.outRate > 0) ? (double)playedFrames / (double)ps.outRate : 0.0;
     // ≥99.9% 视为"已播完"：此时续播没有意义，也不该伪装成从头播一次。
     if (frac >= 0.999) {
         play_log("FALLBACK_SKIP 独占流无响应但已播到尾部 frac=" + std::to_string(frac) +
@@ -5827,6 +5827,11 @@ static bool play_one(const std::string& file, const PlayParams& p, rta::audio::A
         play_log(std::string("FALLBACK_NOHOG result=") + (hogOk ? "ok" : "failed"));
         if (hogOk) return true;
         if (ps.stop.load()) return false;
+        // 无 Hog 那次可能又播了一段才失败：降级到共享时按最新位置续播，别退回旧帧号。
+        playedFrames = ps.played.load();
+        totalFrames = ps.total.load();
+        frac = (totalFrames > 0) ? (double)playedFrames / (double)totalFrames : 0.0;
+        posSec = (ps.outRate > 0) ? (double)playedFrames / (double)ps.outRate : 0.0;
     }
 
     PlayParams p2 = p;

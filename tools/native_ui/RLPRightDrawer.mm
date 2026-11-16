@@ -264,11 +264,25 @@
         _items = @[]; _cues = @[]; _lines = @[]; _qIndex = -1; _activeLine = -1;
         _lyricRows = [NSMutableArray array];
         [self buildUI];
+        [[NSNotificationCenter defaultCenter] addObserver:self
+                                                 selector:@selector(onExternalQueueChanged:)
+                                                     name:RLPQueueChangedNotification
+                                                   object:nil];
     }
     return self;
 }
 
-- (void)dealloc { [self deactivate]; [_lyricTimer invalidate]; }
+- (void)dealloc {
+    [[NSNotificationCenter defaultCenter] removeObserver:self];
+    [self deactivate];
+    [_lyricTimer invalidate];
+}
+
+- (void)onExternalQueueChanged:(NSNotification *)note {
+    if (note.object == self) return;
+    if (![RLPCoreClient shared].started) return;
+    [self loadQueue];
+}
 
 - (void)buildUI {
     RLPTheme *t = [RLPTheme current];

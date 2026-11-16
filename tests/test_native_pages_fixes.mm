@@ -29,6 +29,7 @@
 #import "RLPModels.h"
 #import "RLPTheme.h"
 #import "RLPSupport.h"
+#import "RLPTrackActions.h"
 
 #include <cstdio>
 
@@ -56,6 +57,8 @@ static void Ck(BOOL ok, const char *what, NSString *detail) {
 static NSMutableArray<NSDictionary *> *g_gets;
 static NSMutableArray<NSDictionary *> *g_posts;
 static NSInteger g_mode;    // 桩里的播放模式（GET /api/playmode 的真相）
+static BOOL g_favListBackslash = NO;
+static BOOL g_addShouldFail = NO;
 
 static NSArray<NSDictionary *> *FavFixture(void) {
     return @[
@@ -85,7 +88,14 @@ static NSArray<NSDictionary *> *PlaylistItemsFixture(void) {
 - (void)getJSON:(NSString *)path completion:(RLPJSONCompletion)done {
     if (!done) return;
     [g_gets addObject:@{ @"path": path ?: @"" }];
-    if ([path hasPrefix:@"/api/fav/list"]) { done(@{ @"ok": @YES, @"files": FavFixture() }); return; }
+    if ([path hasPrefix:@"/api/fav/list"]) {
+        if (g_favListBackslash) {
+            done(@{ @"ok": @YES, @"files": @[ @"\\Music\\Fav\\Two.flac" ] });
+            return;
+        }
+        done(@{ @"ok": @YES, @"files": FavFixture() });
+        return;
+    }
     if ([path hasPrefix:@"/api/playmode"]) { done(@{ @"ok": @YES, @"mode": @(g_mode) }); return; }
     if ([path hasPrefix:@"/api/sq/info"]) {
         done(@{ @"ok": @YES, @"name": @"Night Drive", @"items": PlaylistItemsFixture() });
@@ -101,7 +111,15 @@ static NSArray<NSDictionary *> *PlaylistItemsFixture(void) {
     // ⚠️ 顺序：/api/playmode 与 /api/play 同前缀，先判 playmode（与后端路由坑同款）。
     if ([path hasPrefix:@"/api/playmode?mode="]) {
         g_mode = [[path substringFromIndex:@"/api/playmode?mode=".length] integerValue];
-        if (done) done(@{ @"ok": @YES });
+        if ([path hasPrefix:@"/api/add"] && g_addShouldFail) {
+        if (done) done(@{ @"ok": @NO, @"error": @"mock add failed" });
+        return;
+    }
+    if (done) done(@{ @"ok": @YES });
+        return;
+    }
+    if ([path hasPrefix:@"/api/add"] && g_addShouldFail) {
+        if (done) done(@{ @"ok": @NO, @"error": @"mock add failed" });
         return;
     }
     if (done) done(@{ @"ok": @YES });
@@ -270,6 +288,58 @@ int main() {
             Ck(PostsWithPrefix(@"/api/playmode").count == 0,
                "P3 mode==1 时不额外下发 playmode（只在 mode==2 切档）",
                [g_posts componentsJoinedByString:@" | "]);
+        }
+
+        // ---- P4 右键收藏路径规范化(\ vs /) + 跨页同步 + 入队真实回执 ----
+        {
+            RLPFavoritesViewController *fav2 = [RLPFavoritesViewController new];
+            fav2.view.frame = NSMakeRect(0, 0, 900, 640);
+            [fav2.view layoutSubtreeIfNeeded];
+            [fav2 reloadData];
+            Pump(0.05);
+
+            g_favListBackslash = YES;
+            [g_gets removeAllObjects];
+            [g_posts removeAllObjects];
+            NSMenuItem *favItem = [[NSMenuItem alloc] initWithTitle:@"收藏" action:nil keyEquivalent:@""];
+            favItem.tag = RLPTrackActionFavorite;
+            favItem.representedObject = @"/Music/Fav/Two.flac";
+            RLPHandleTrackAction(favItem, fav2.view);
+            Pump(0.1);
+            NSDictionary *favPost = [PostsWithPrefix(@"/api/fav?") firstObject];
+            Ck(favPost != nil && [favPost[@"path"] containsString:@"on=0"],
+               "P4 /api/fav/list 返回反斜杠路径时右键收藏仍识别为已收藏并发 on=0",
+               favPost[@"path"] ?: @"nil");
+
+            // fav2 应通过 RLPFavoritesChangedNotification 自动再拉一次 /api/fav/list?meta=1
+            BOOL favReloaded = NO;
+            for (NSDictionary *g in g_gets) {
+                if ([g[@"path"] isEqualToString:@"/api/fav/list?meta=1"]) favReloaded = YES;
+            }
+            Ck(favReloaded, "P4 右键收藏成功后最爱页自动收到跨页通知并刷新",
+               [g_gets componentsJoinedByString:@" | "]);
+            g_favListBackslash = NO;
+
+            // 入队：成功时发 RLPQueueChangedNotification，失败时不发
+            __block NSInteger qNotifs = 0;
+            id obs = [[NSNotificationCenter defaultCenter] addObserverForName:RLPQueueChangedNotification
+                                                                       object:nil
+                                                                        queue:nil
+                                                                   usingBlock:^(NSNotification * _Nonnull note) {
+                (void)note;
+                ++qNotifs;
+            }];
+            g_addShouldFail = YES;
+            RLPEnqueuePath(@"/Music/Fav/One.flac");
+            Pump(0.05);
+            Ck(qNotifs == 0, "P4 /api/add 失败时不发 RLPQueueChangedNotification",
+               [NSString stringWithFormat:@"qNotifs=%ld", (long)qNotifs]);
+            g_addShouldFail = NO;
+            RLPEnqueuePath(@"/Music/Fav/One.flac");
+            Pump(0.05);
+            Ck(qNotifs == 1, "P4 /api/add 成功后发 RLPQueueChangedNotification",
+               [NSString stringWithFormat:@"qNotifs=%ld", (long)qNotifs]);
+            [[NSNotificationCenter defaultCenter] removeObserver:obs];
         }
 
         std::printf("结果：%d passed, %d failed\n", g_pass, g_fail);

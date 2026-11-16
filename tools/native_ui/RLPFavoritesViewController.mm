@@ -32,8 +32,22 @@ static const CGFloat kFavTitleMinW = 120.0;
     self = [super initWithTitle:RLPTr(@"我的最爱")];
     if (self) {
         _tracks = [NSMutableArray array];
+        [[NSNotificationCenter defaultCenter] addObserver:self
+                                                 selector:@selector(onExternalFavoritesChanged:)
+                                                     name:RLPFavoritesChangedNotification
+                                                   object:nil];
     }
     return self;
+}
+
+- (void)dealloc {
+    [[NSNotificationCenter defaultCenter] removeObserver:self];
+}
+
+- (void)onExternalFavoritesChanged:(NSNotification *)note {
+    if (note.object == self) return;
+    if (![RLPCoreClient shared].started) return;
+    [self reloadData];
 }
 
 - (void)buildContent {
@@ -252,6 +266,7 @@ static const CGFloat kFavTitleMinW = 120.0;
         if (!self_) return;
         if (json && [json[@"ok"] boolValue]) {
             RLPToast(RLPTr(@"已取消收藏"));
+            [[NSNotificationCenter defaultCenter] postNotificationName:RLPFavoritesChangedNotification object:self_];
             [self_ reloadData];
         } else {
             RLPToast(RLPTr(@"取消收藏失败"));

@@ -124,12 +124,12 @@ BOOL RLPHandleTrackAction(NSMenuItem *item, NSView *anchor) {
             return YES;
         case RLPTrackActionEnqueue:
             RLPEnqueuePath(path);
-            RLPToast(RLPTr(@"已加入队列"));
             return YES;
         case RLPTrackActionFavorite: {
             // web toggleFav / 行尾心形（ui_script.h:1869-1905）是**双向开关**：
             // 已收藏再点 = 取消（on=0），未收藏 = 加（on=1）。旧码恒发 on=1 ⟹ 右键「收藏」
             // 只能加不能取消，与 web 行尾心形相悖。当前态以 /api/fav/list 为真相源（不凭本地缓存猜）。
+            NSString *normTarget = RLPFavNormalizePath(path);
             [[RLPCoreClient shared] getJSON:@"/api/fav/list" completion:^(NSDictionary * _Nullable list) {
                 BOOL isFav = NO;
                 NSArray *files = [list[@"files"] isKindOfClass:[NSArray class]] ? list[@"files"] : @[];
@@ -138,13 +138,15 @@ BOOL RLPHandleTrackAction(NSMenuItem *item, NSView *anchor) {
                     if ([f isKindOfClass:[NSString class]]) fp = (NSString *)f;
                     else if ([f isKindOfClass:[NSDictionary class]] && [f[@"file"] isKindOfClass:[NSString class]])
                         fp = (NSString *)f[@"file"];
-                    if ([fp isEqualToString:path]) { isFav = YES; break; }
+                    if (fp.length && [RLPFavNormalizePath(fp) isEqualToString:normTarget]) { isFav = YES; break; }
                 }
                 NSString *u = [NSString stringWithFormat:@"/api/fav?file=%@&on=%d", RLPEnc(path), isFav ? 0 : 1];
                 [[RLPCoreClient shared] postJSON:u body:@"" completion:^(NSDictionary * _Nullable j) {
                     const BOOL ok = (j && [j[@"ok"] boolValue]);
                     if (!ok) { RLPToast(isFav ? RLPTr(@"取消收藏失败") : RLPTr(@"收藏失败")); return; }
                     RLPToast(isFav ? RLPTr(@"已取消收藏") : RLPTr(@"已收藏"));
+                    [[NSNotificationCenter defaultCenter] postNotificationName:RLPFavoritesChangedNotification
+                                                                        object:anchor];
                 }];
             }];
             return YES;

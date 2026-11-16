@@ -366,8 +366,22 @@
         _appliedProductId = @"";
         _appliedPresetId = @"";
         [self build];
+        [[NSNotificationCenter defaultCenter] addObserver:self
+                                                 selector:@selector(onExternalEqSettingsChanged:)
+                                                     name:RLPSettingsChangedNotification
+                                                   object:nil];
     }
     return self;
+}
+
+- (void)dealloc {
+    [[NSNotificationCenter defaultCenter] removeObserver:self];
+}
+
+- (void)onExternalEqSettingsChanged:(NSNotification *)note {
+    if (note.object == self) return;
+    if (![RLPCoreClient shared].started) return;
+    [self reload];
 }
 
 - (void)build {
@@ -574,6 +588,7 @@
         }
         [self_ absorbState:json];
         RLPToast(RLPTr(@"已重置为 Flat"));
+        [[NSNotificationCenter defaultCenter] postNotificationName:RLPSettingsChangedNotification object:self_];
     }];
 }
 
@@ -1030,6 +1045,7 @@ static NSString *RLPEQTypeCodeNormalized(id raw) {
         if ([action isEqualToString:@"load"]) RLPToast(RLPTr(@"已加载预设"));
         else if ([action isEqualToString:@"save"]) RLPToast(RLPTr(@"已保存预设"));
         else if ([action isEqualToString:@"delete"]) RLPToast(RLPTr(@"已删除预设"));
+        [[NSNotificationCenter defaultCenter] postNotificationName:RLPSettingsChangedNotification object:self_];
     }];
 }
 
@@ -1297,6 +1313,7 @@ static NSArray<NSDictionary *> *RLPOpraFilter(NSArray<NSDictionary *> *index, NS
         }
         // EQ 已被换成耳机曲线 ⟹ 必须重新拉 /api/peq 才能看到真实新状态
         [self_ reload];
+        [[NSNotificationCenter defaultCenter] postNotificationName:RLPSettingsChangedNotification object:self_];
         NSDictionary *cur = nil;
         for (NSDictionary *x in self_.opraPresets) {
             if ([x[@"id"] isKindOfClass:[NSString class]] && [x[@"id"] isEqualToString:eid]) { cur = x; break; }

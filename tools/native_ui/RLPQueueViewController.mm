@@ -82,8 +82,22 @@ static NSString *const kQueueDragType = @"RLPQueueRowDrag";
     if (self) {
         _paths = @[]; _metas = @[]; _cues = @[]; _currentIndex = -1; _hoveredRow = -1;
         _sortKey = @"default";
+        [[NSNotificationCenter defaultCenter] addObserver:self
+                                                 selector:@selector(onExternalQueueChanged:)
+                                                     name:RLPQueueChangedNotification
+                                                   object:nil];
     }
     return self;
+}
+
+- (void)dealloc {
+    [[NSNotificationCenter defaultCenter] removeObserver:self];
+}
+
+- (void)onExternalQueueChanged:(NSNotification *)note {
+    if (note.object == self) return;
+    if (![RLPCoreClient shared].started) return;
+    [self reloadData];
 }
 
 - (void)buildContent {

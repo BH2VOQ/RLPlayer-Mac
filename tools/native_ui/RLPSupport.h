@@ -93,6 +93,12 @@ extern NSNotificationName const RLPOpenArtistNotification;  // object = artist n
 extern NSNotificationName const RLPBackNotification;
 /// 设置/预设/配置档成功保存后的跨页面同步通知（object = 发起保存的控制器，接收方忽略 object == self 防环）。
 extern NSNotificationName const RLPSettingsChangedNotification;
+/// 收藏状态变更后的跨页面同步通知（object = 发起变更的控制器或锚点视图，接收方忽略 object == self 防环）。
+extern NSNotificationName const RLPFavoritesChangedNotification;
+/// 队列内容变更后的跨页面同步通知（如单曲入队成功）。
+extern NSNotificationName const RLPQueueChangedNotification;
+/// 收藏路径规范化：统一 "\\" 与 "/" 以便与 /api/fav/list 准确比对。
+NSString *RLPFavNormalizePath(NSString * _Nullable path);
 
 /// 解析设置中的 dsd 值（支持纯数字 "0"/"64"/"256" 与 legacy "dop256"/"nat128"/"native64"）。
 NSInteger RLPParseDsdRate(id _Nullable raw);

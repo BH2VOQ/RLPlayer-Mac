@@ -513,7 +513,16 @@ void RLPPlayAlbum(NSString *albumKey, NSInteger startIndex) {
 
 void RLPEnqueuePath(NSString *path) {
     if (!path.length) return;
-    RLPPostJSON(@"/api/add", [NSString stringWithFormat:@"file=%@", RLPEnc(path)]);
+    NSString *body = [NSString stringWithFormat:@"file=%@", RLPEnc(path)];
+    [[RLPCoreClient shared] postJSON:@"/api/add" body:body completion:^(NSDictionary * _Nullable json) {
+        if (json && [json[@"ok"] boolValue]) {
+            RLPToast(RLPTr(@"已加入队列"));
+            [[NSNotificationCenter defaultCenter] postNotificationName:RLPQueueChangedNotification object:nil];
+        } else {
+            NSString *err = [json[@"error"] isKindOfClass:[NSString class]] ? json[@"error"] : RLPTr(@"加入队列失败");
+            RLPToast(err);
+        }
+    }];
 }
 
 static std::atomic<uint64_t> gWholeListGen{0};
@@ -739,6 +748,13 @@ BOOL RLPVolumeMuteHasRestore(void) { return !isnan(gVolumeRestoreDb); }
 void RLPVolumeMuteReset(void) { gVolumeRestoreDb = NAN; }
 
 NSNotificationName const RLPSettingsChangedNotification = @"RLPSettingsChangedNotification";
+NSNotificationName const RLPFavoritesChangedNotification = @"RLPFavoritesChangedNotification";
+NSNotificationName const RLPQueueChangedNotification = @"RLPQueueChangedNotification";
+
+NSString *RLPFavNormalizePath(NSString * _Nullable path) {
+    if (![path isKindOfClass:[NSString class]]) return @"";
+    return [path stringByReplacingOccurrencesOfString:@"\\" withString:@"/"];
+}
 
 NSInteger RLPParseDsdRate(id _Nullable raw) {
     NSString *s = [raw isKindOfClass:[NSString class]] ? (NSString *)raw

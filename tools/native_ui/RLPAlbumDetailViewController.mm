@@ -276,6 +276,10 @@
     self.summaryLabel.selectable=YES;
     [self.summaryCard addSubview:self.summaryLabel]; [host addSubview:self.summaryCard];
     self.favoritePaths=[NSMutableSet set];
+    [[NSNotificationCenter defaultCenter] addObserver:self
+                                             selector:@selector(onExternalFavoritesChanged:)
+                                                 name:RLPFavoritesChangedNotification
+                                               object:nil];
     [self.summaryCard addGestureRecognizer:[[NSClickGestureRecognizer alloc] initWithTarget:self action:@selector(onSummaryRetry:)]];
 
     // ---- 图一信息层（发布信息 + 其他作品）----
@@ -489,9 +493,10 @@
         if ([ident isEqualToString:@"fav"]) {
             NSImageSymbolConfiguration *cfg =
                 [NSImageSymbolConfiguration configurationWithPointSize:12 weight:NSFontWeightRegular];
-            b.image = [[NSImage imageWithSystemSymbolName:[self.favoritePaths containsObject:tr.path]?@"heart.fill":@"heart" accessibilityDescription:RLPTr(@"收藏")]
+            const BOOL isFav = [self.favoritePaths containsObject:RLPFavNormalizePath(tr.path)];
+            b.image = [[NSImage imageWithSystemSymbolName:isFav?@"heart.fill":@"heart" accessibilityDescription:RLPTr(@"收藏")]
                        imageWithSymbolConfiguration:cfg];
-            b.contentTintColor = [self.favoritePaths containsObject:tr.path]?t.accent:t.mut2;
+            b.contentTintColor = isFav?t.accent:t.mut2;
             b.toolTip = RLPTr(@"收藏");
         } else {
             NSImageSymbolConfiguration *cfg =
@@ -544,18 +549,43 @@
     RLPHandleTrackAction(sender, self.view);
 }
 
+- (void)dealloc {
+    [[NSNotificationCenter defaultCenter] removeObserver:self];
+}
+
+- (void)onExternalFavoritesChanged:(NSNotification *)note {
+    if (note.object == self) return;
+    if (![RLPCoreClient shared].started) return;
+    __weak __typeof__(self) weakSelf = self;
+    [[RLPCoreClient shared] getJSON:@"/api/fav/list" completion:^(NSDictionary *json) {
+        __typeof__(self) owner = weakSelf;
+        if (!owner) return;
+        [owner.favoritePaths removeAllObjects];
+        if ([json[@"files"] isKindOfClass:NSArray.class]) {
+            for (id path in json[@"files"]) {
+                if ([path isKindOfClass:NSString.class]) [owner.favoritePaths addObject:RLPFavNormalizePath(path)];
+                else if ([path isKindOfClass:NSDictionary.class] && [path[@"file"] isKindOfClass:NSString.class])
+                    [owner.favoritePaths addObject:RLPFavNormalizePath(path[@"file"])];
+            }
+        }
+        [owner.table reloadData];
+    }];
+}
+
 /// 单曲收藏（/api/fav?file=…&on=1，与 web 行内爱心同一端点）。
 - (void)onRowFav:(NSButton *)sender {
     const NSInteger row = sender.tag;
     if (row < 0 || row >= (NSInteger)self.tracks.count) return;
     RLPTrack *tr = self.tracks[(NSUInteger)row];
-    BOOL wasFavorite=[self.favoritePaths containsObject:tr.path];
+    NSString *normPath = RLPFavNormalizePath(tr.path);
+    BOOL wasFavorite=[self.favoritePaths containsObject:normPath];
     NSString *url = [NSString stringWithFormat:@"/api/fav?file=%@&on=%d", RLPEnc(tr.path),wasFavorite?0:1];
     [[RLPCoreClient shared] postJSON:url body:@"" completion:^(NSDictionary * _Nullable json) {
         if (json && [json[@"ok"] boolValue]) {
-            if(wasFavorite)[self.favoritePaths removeObject:tr.path];else [self.favoritePaths addObject:tr.path];
+            if(wasFavorite)[self.favoritePaths removeObject:normPath];else [self.favoritePaths addObject:normPath];
             [self.table reloadData];
-            RLPToast(RLPTr(@"已收藏"));
+            RLPToast(wasFavorite ? RLPTr(@"已取消收藏") : RLPTr(@"已收藏"));
+            [[NSNotificationCenter defaultCenter] postNotificationName:RLPFavoritesChangedNotification object:self];
         } else RLPToast(RLPTr(@"收藏失败"));
     }];
 }
@@ -565,7 +595,6 @@
     const NSInteger row = sender.tag;
     if (row < 0 || row >= (NSInteger)self.tracks.count) return;
     RLPEnqueuePath(self.tracks[(NSUInteger)row].path);
-    RLPToast(RLPTr(@"已加入队列"));
 }
 
 - (void)onRowDoubleClick:(id)sender {
@@ -603,7 +632,11 @@
     [[RLPCoreClient shared] getJSON:@"/api/fav/list" completion:^(NSDictionary *json){
         __typeof__(self) owner=weakSelf;if(!owner)return;
         [owner.favoritePaths removeAllObjects];
-        if([json[@"files"] isKindOfClass:NSArray.class]) for(id path in json[@"files"])if([path isKindOfClass:NSString.class])[owner.favoritePaths addObject:path];
+        if([json[@"files"] isKindOfClass:NSArray.class]) for(id path in json[@"files"]) {
+            if([path isKindOfClass:NSString.class]) [owner.favoritePaths addObject:RLPFavNormalizePath(path)];
+            else if([path isKindOfClass:NSDictionary.class] && [path[@"file"] isKindOfClass:NSString.class])
+                [owner.favoritePaths addObject:RLPFavNormalizePath(path[@"file"])];
+        }
         [owner.table reloadData];
     }];
 }

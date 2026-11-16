@@ -136,8 +136,18 @@ static NSString *RLPTrackArtistAlbumText(RLPTrack *t) {
         _searchSeq = 0;
         _favoritePaths = [NSMutableSet set];
         _trackSort = @"default";
+        [[NSNotificationCenter defaultCenter] addObserver:self
+                                                 selector:@selector(onExternalFavoritesChanged:)
+                                                     name:RLPFavoritesChangedNotification
+                                                   object:nil];
     }
     return self;
+}
+
+- (void)onExternalFavoritesChanged:(NSNotification *)note {
+    if (note.object == self) return;
+    if (![RLPCoreClient shared].started) return;
+    [self loadFavoriteSet];
 }
 
 - (instancetype)initWithTitle:(NSString *)title {
@@ -151,6 +161,10 @@ static NSString *RLPTrackArtistAlbumText(RLPTrack *t) {
         _searchSeq = 0;
         _favoritePaths = [NSMutableSet set];
         _trackSort = @"default";
+        [[NSNotificationCenter defaultCenter] addObserver:self
+                                                 selector:@selector(onExternalFavoritesChanged:)
+                                                     name:RLPFavoritesChangedNotification
+                                                   object:nil];
     }
     return self;
 }
@@ -583,9 +597,9 @@ static NSString *RLPTrackArtistAlbumText(RLPTrack *t) {
         [self_->_favoritePaths removeAllObjects];
         NSArray *files = [json[@"files"] isKindOfClass:[NSArray class]] ? json[@"files"] : @[];
         for (id f in files) {
-            if ([f isKindOfClass:[NSString class]]) [self_->_favoritePaths addObject:f];
+            if ([f isKindOfClass:[NSString class]]) [self_->_favoritePaths addObject:RLPFavNormalizePath(f)];
             else if ([f isKindOfClass:[NSDictionary class]] && [f[@"file"] isKindOfClass:[NSString class]])
-                [self_->_favoritePaths addObject:f[@"file"]];
+                [self_->_favoritePaths addObject:RLPFavNormalizePath(f[@"file"])];
         }
         [self_->_tableView reloadData];
     }];
@@ -760,7 +774,7 @@ static NSString *RLPTrackArtistAlbumText(RLPTrack *t) {
         }
         NSButton *btn = nil;
         for (NSView *v in bc.subviews) if ([v isKindOfClass:[NSButton class]]) btn = (NSButton *)v;
-        const BOOL fav = [_favoritePaths containsObject:t.path];
+        const BOOL fav = [_favoritePaths containsObject:RLPFavNormalizePath(t.path)];
         btn.tag = row;
         btn.image = [NSImage imageWithSystemSymbolName:(isFavCol ? (fav ? @"heart.fill" : @"heart") : @"plus")
                               accessibilityDescription:isFavCol ? RLPTr(@"收藏") : RLPTr(@"加入队列")];
@@ -889,8 +903,8 @@ static NSString *RLPTrackArtistAlbumText(RLPTrack *t) {
             return (b.year > a.year) ? NSOrderedDescending : NSOrderedAscending;
         }
         if ([self->_trackSort isEqualToString:@"fav"]) {
-            const BOOL fa = [self->_favoritePaths containsObject:a.path];
-            const BOOL fb = [self->_favoritePaths containsObject:b.path];
+            const BOOL fa = [self->_favoritePaths containsObject:RLPFavNormalizePath(a.path)];
+            const BOOL fb = [self->_favoritePaths containsObject:RLPFavNormalizePath(b.path)];
             if (fa != fb) return fa ? NSOrderedAscending : NSOrderedDescending;
             return [(a.title ?: @"") caseInsensitiveCompare:(b.title ?: @"")];
         }
@@ -905,17 +919,19 @@ static NSString *RLPTrackArtistAlbumText(RLPTrack *t) {
     const NSInteger row = sender.tag;
     if (row < 0 || row >= (NSInteger)_tracks.count) return;
     RLPTrack *t = _tracks[(NSUInteger)row];
-    const BOOL was = [_favoritePaths containsObject:t.path];
+    NSString *normPath = RLPFavNormalizePath(t.path);
+    const BOOL was = [_favoritePaths containsObject:normPath];
     NSString *url = [NSString stringWithFormat:@"/api/fav?file=%@&on=%d", RLPEnc(t.path), was ? 0 : 1];
     __weak __typeof__(self) weakSelf = self;
     [[RLPCoreClient shared] postJSON:url body:@"" completion:^(NSDictionary * _Nullable json) {
         __typeof__(self) self_ = weakSelf;
         if (!self_) return;
         if (json && [json[@"ok"] boolValue]) {
-            if (was) [self_->_favoritePaths removeObject:t.path];
-            else [self_->_favoritePaths addObject:t.path];
+            if (was) [self_->_favoritePaths removeObject:normPath];
+            else [self_->_favoritePaths addObject:normPath];
             [self_->_tableView reloadData];
             RLPToast(was ? RLPTr(@"已取消收藏") : RLPTr(@"已收藏"));
+            [[NSNotificationCenter defaultCenter] postNotificationName:RLPFavoritesChangedNotification object:self_];
         } else {
             RLPToast(RLPTr(@"收藏失败"));
         }
@@ -926,7 +942,6 @@ static NSString *RLPTrackArtistAlbumText(RLPTrack *t) {
     const NSInteger row = sender.tag;
     if (row < 0 || row >= (NSInteger)_tracks.count) return;
     RLPEnqueuePath(_tracks[(NSUInteger)row].path);
-    RLPToast(RLPTr(@"已加入队列"));
 }
 
 @end

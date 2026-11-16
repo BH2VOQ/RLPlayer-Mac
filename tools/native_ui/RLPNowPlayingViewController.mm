@@ -2006,6 +2006,7 @@ static NSString *RLPRailTagText(id srValue, id bitsValue) {
     self.lyricScroll=[[NSScrollView alloc] initWithFrame:NSZeroRect]; self.lyricScroll.identifier=@"npLyric";self.lyricScroll.drawsBackground=NO;self.lyricScroll.hasVerticalScroller=NO;self.lyricScroll.documentView=self.lyricDocument;[host addSubview:self.lyricScroll];
     self.lyricScroll.contentView.postsBoundsChangedNotifications=YES;
     [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(onLyricScrolled:) name:NSViewBoundsDidChangeNotification object:self.lyricScroll.contentView];
+    [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(onExternalFavoritesChanged:) name:RLPFavoritesChangedNotification object:nil];
     self.lyricRows=[NSMutableArray array];self.lyricLines=@[];self.lyricActiveIndex=-1;
     // web `#npLyric` 空态是**两行**：主行 14pt(clamp) `没有歌词` + 副行 12px `--mut2` 说明。
     // 旧码单行 `没有歌词 · 同名 LRC…` + maximumNumberOfLines=1 ⟹ 副文案被截断、字号也不对。
@@ -3924,7 +3925,7 @@ static NSString *RLPNowPlayingCastDeviceLabel(NSString *device) {
     NSString *url = [NSString stringWithFormat:@"/api/fav?file=%@&on=%d", RLPEnc(self.currentPath),on?1:0];
     [[RLPCoreClient shared] postJSON:url body:@"" completion:^(NSDictionary * _Nullable json) {
         if(![favoritePath isEqualToString:self.currentPath])return;
-        if (json && [json[@"ok"] boolValue]) {self.favorite=on;self.favoriteButton.title=on?@"♥":@"♡";RLPToast(RLPTr(on?@"已收藏":@"已取消收藏"));}
+        if (json && [json[@"ok"] boolValue]) {self.favorite=on;self.favoriteButton.title=on?@"♥":@"♡";RLPToast(RLPTr(on?@"已收藏":@"已取消收藏"));[[NSNotificationCenter defaultCenter] postNotificationName:RLPFavoritesChangedNotification object:self];}
         else RLPToast(RLPTr(@"收藏失败"));
     }];
 }
@@ -4217,6 +4218,12 @@ static NSString *RLPNowPlayingCastDeviceLabel(NSString *device) {
         dispatch_async(dispatch_get_main_queue(),^{__typeof__(self) s=ws;if(!s||seq!=s.coverSeq||light!=[RLPTheme current].isLight)return;s.webCanvas.blurredCover=result;s.webCanvas.needsDisplay=YES;});
     }});
 }
+- (void)onExternalFavoritesChanged:(NSNotification *)note {
+    if (note.object == self) return;
+    if (![RLPCoreClient shared].started) return;
+    [self refreshFavorite];
+}
+
 - (void)refreshFavorite {
     NSString *path=self.currentPath;if(!path.length)return;__weak __typeof__(self) ws=self;
     [[RLPCoreClient shared] getJSON:@"/api/fav/list" completion:^(NSDictionary *j){__typeof__(self) s=ws;if(!s||![path isEqual:s.currentPath])return;NSArray *items=[j[@"files"] isKindOfClass:NSArray.class]?j[@"files"]:([j[@"items"] isKindOfClass:NSArray.class]?j[@"items"]:@[]);s.favorite=NO;for(id item in items){NSString *p=[item isKindOfClass:NSString.class]?item:([item isKindOfClass:NSDictionary.class]?item[@"file"]:nil);if([RLPNPFavKey(p) isEqual:RLPNPFavKey(path)])s.favorite=YES;}s.favoriteButton.title=s.favorite?@"♥":@"♡";}];

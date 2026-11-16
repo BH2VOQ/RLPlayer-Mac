@@ -639,6 +639,23 @@ int main() {
             Ck(flatPeak2 < 0.5,
                @"E12 点「重置 Flat」后曲线在设置页里真的变平（用户报的不随动）",
                [NSString stringWithFormat:@"peak=%.2f", flatPeak2]);
+
+            // E13：另一份 RLPEqualizerView（例如工作台 EQ 页签）观察 RLPSettingsChangedNotification
+            // 当 svEq 点「重置 Flat」后，eq（外层另一份视图）应通过通知自动回到平直，无需手动调 reload。
+            [core jsonWithMethod:@"POST" path:@"/api/peq"
+                            body:[NSString stringWithFormat:@"bypass=0&preamp=0&bands=%@", bump2]];
+            [eq reload];
+            [svEq reload];
+            Pump(1.2);
+            [svReset performClick:nil];
+            Pump(1.2);
+            NSArray *otherPts = [eq valueForKey:@"curvePoints"];
+            double otherPeak = 0;
+            for (NSArray<NSNumber *> *pp in otherPts)
+                if (pp.count >= 2) otherPeak = MAX(otherPeak, fabs(pp[1].doubleValue));
+            Ck(otherPeak < 0.5,
+               @"E13 设置页重置 Flat 后通过 RLPSettingsChangedNotification 同步另一份 EQ 视图",
+               [NSString stringWithFormat:@"otherPeak=%.2f", otherPeak]);
         }
 
         std::printf("\n%s（%d passed, %d failed）\n",
