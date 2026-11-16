@@ -206,6 +206,10 @@ int main() {
            std::to_string(pr.removed) + " / " + std::to_string(lib.trackCount()));
         lib.load();
         ck(lib.trackCount() == 2, "prune 的结果已落盘", std::to_string(lib.trackCount()));
+        // 路径键：重复分隔符必须折叠（审计 2026-11-17 证实根含 // 时同一个文件会得到两个键）
+        ck(rta::net::lib_path_key("/Music//A/b.flac") == rta::net::lib_path_key("/music/a/b.flac"),
+           "lib_path_key 折叠重复分隔符",
+           rta::net::lib_path_key("/Music//A/b.flac"));
         const auto rm = lib.removeUnder(p2u(zhRoot / U("日语-アルバム")) + std::string("/"));
         ck(rm.removed == 1 && lib.trackCount() == 1, "removeUnder 按目录移除 1 条",
            std::to_string(rm.removed) + " / " + std::to_string(lib.trackCount()));
