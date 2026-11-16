@@ -18,6 +18,7 @@
 #import "RLPCoreClient.h"
 #import "RLPEqualizerView.h"
 #import "RLPSupport.h"
+#import "RLPSignalChain.h"
 
 #include <cstdio>
 #include <cstdlib>
@@ -105,6 +106,8 @@ static NSInteger CountNestedScrollables(NSView *root) {
 - (void)refreshAB;
 @property (nonatomic, assign) BOOL peqBypassed;
 - (void)onEqBypass:(id)sender;
+- (void)showSignalChainDetail:(NSButton *)sender;
+@property (nonatomic, strong) NSMutableDictionary<NSString *, NSTextField *> *chainValues;
 @end
 
 @interface MockStudioWorkbenchVC : RLPWorkbenchViewController
@@ -321,6 +324,73 @@ int main() {
             CK([peqState[@"bypass"] boolValue] == wanted.boolValue &&
                liveWorkbench.peqBypassed == wanted.boolValue && [saved[@"eq"] isEqualToString:externalPath],
                wanted.boolValue ? "S10a PEQ bypass preserves external EQ path" : "S10b PEQ enable preserves external EQ path", saved.description);
+        }
+
+        // 11. Signal chain shared fallback hero title + Workbench Hog fallback + signalSeq guard
+        {
+            NSDictionary *sharedSignal = @{
+                @"ok": @YES,
+                @"path": @{
+                    @"bitPerfect": @"no",
+                    @"bitPerfectWhy": @"Shared output mode",
+                    @"sharedOnly": @YES,
+                    @"outMode": @"shared",
+                    @"transport": @"coreaudio"
+                }
+            };
+            NSString *sharedHero = [RLPSignalChain heroTitleForResponse:sharedSignal why:nil];
+            CK([sharedHero isEqualToString:@"非 Bit-Perfect · 共享输出（经系统混音）"],
+               "S11a sharedOnly/outMode=shared 时信号链标题显示共享输出（经系统混音）", sharedHero ?: @"(nil)");
+
+            NSDictionary *outModeOnlyShared = @{
+                @"ok": @YES,
+                @"path": @{
+                    @"bitPerfect": @"no",
+                    @"sharedOnly": @NO,
+                    @"outMode": @"shared",
+                    @"transport": @"coreaudio"
+                }
+            };
+            NSString *sharedHero2 = [RLPSignalChain heroTitleForResponse:outModeOnlyShared why:nil];
+            CK([sharedHero2 isEqualToString:@"非 Bit-Perfect · 共享输出（经系统混音）"],
+               "S11b 仅 outMode=shared 时信号链标题也显示共享输出（经系统混音）", sharedHero2 ?: @"(nil)");
+
+            NSDictionary *dspSignal = @{
+                @"ok": @YES,
+                @"path": @{
+                    @"bitPerfect": @"no",
+                    @"sharedOnly": @NO,
+                    @"outMode": @"exclusive",
+                    @"transport": @"coreaudio"
+                }
+            };
+            NSString *dspHero = [RLPSignalChain heroTitleForResponse:dspSignal why:nil];
+            CK([dspHero isEqualToString:@"非 Bit-Perfect · 信号经过 DSP 处理"],
+               "S11c exclusive 非 bit-perfect 仍显示信号经过 DSP 处理", dspHero ?: @"(nil)");
+
+            [vc applySettingsPayload:@{@"backend": @"coreaudio", @"hogexcl": @"1"} forSeq:20];
+            [vc applyStatusPayload:@{@"hogAcquired": @NO, @"fallbackWhy": @"Hog failed"} forSeq:20];
+            NSString *outValFb = vc.chainValues[@"out"].stringValue ?: @"";
+            CK([outValFb containsString:@"Hog（已回退）"],
+               "S11d 工作台在 hogAcquired=NO/fallbackWhy 非空时显示 Hog（已回退）", outValFb);
+
+            [vc applyStatusPayload:@{@"hogAcquired": @YES, @"fallbackWhy": @""} forSeq:21];
+            NSString *outValOk = vc.chainValues[@"out"].stringValue ?: @"";
+            CK([outValOk containsString:@"· Hog"] && ![outValOk containsString:@"已回退"],
+               "S11e 工作台在 hogAcquired=YES 时显示 · Hog", outValOk);
+
+            BOOL hasSigSeq = NO;
+            @try {
+                id seq0 = [vc valueForKey:@"signalSeq"];
+                [vc showSignalChainDetail:nil];
+                id seq1 = [vc valueForKey:@"signalSeq"];
+                hasSigSeq = [seq0 respondsToSelector:@selector(unsignedIntegerValue)] &&
+                            [seq1 respondsToSelector:@selector(unsignedIntegerValue)] &&
+                            [seq1 unsignedIntegerValue] > [seq0 unsignedIntegerValue];
+            } @catch (NSException *e) {
+                hasSigSeq = NO;
+            }
+            CK(hasSigSeq, "S11f 工作台一次性 /api/signal 请求具备递增 signalSeq 守卫", @"");
         }
 
         [core shutdown];

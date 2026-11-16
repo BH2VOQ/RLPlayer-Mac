@@ -5,6 +5,7 @@
 #import "RLPCoreClient.h"
 #import "RLPModels.h"
 #import "RLPSupport.h"
+#import "RLPLyrics.h"
 #import <objc/runtime.h>
 #import <QuartzCore/QuartzCore.h>
 #include <cmath>
@@ -24,19 +25,20 @@
 @end
 static NSString *g_lastDataPath = nil;
 static NSUInteger g_lastDataLen = 0;
-static NSString *lastPath,*lastBody;static RLPJSONCompletion pendingFav;
+static NSString *lastPath,*lastBody;static RLPJSONCompletion pendingFav, pendingLyricAi;
 @interface RLPRequestSpy : NSObject
 /// 按路径前缀返回固定 JSON 的桩：状态机判据要「真的走一遍 /api/status → 渲染」，
 /// 不能只把 webStatus 塞进 KVC（那样 refresh 里的复位分支根本没跑）。
 @property (nonatomic, strong) NSMutableDictionary<NSString *, id> *fixtures;
+@property (nonatomic, assign) BOOL fakeStarted;
 @end
 @implementation RLPRequestSpy
-- (BOOL)started{return NO;}
+- (BOOL)started{return self.fakeStarted;}
 - (void)postData:(NSString *)path body:(NSData *)body contentType:(NSString *)contentType completion:(RLPJSONCompletion)done {
     (void)contentType; g_lastDataPath = path ?: @""; g_lastDataLen = body.length;
     if (done) done(@{ @"ok": @YES });
 }
-- (void)postJSON:(NSString *)path body:(NSString *)body completion:(RLPJSONCompletion)done {lastPath=path;lastBody=body;if([path hasPrefix:@"/api/fav?"])pendingFav=[done copy];}
+- (void)postJSON:(NSString *)path body:(NSString *)body completion:(RLPJSONCompletion)done {lastPath=path;lastBody=body;if([path hasPrefix:@"/api/fav?"])pendingFav=[done copy];if([path isEqualToString:@"/api/lyrics/ai"])pendingLyricAi=[done copy];}
 - (void)getJSON:(NSString *)path completion:(RLPJSONCompletion)done {
     id hit=nil;
     for(NSString *key in self.fixtures) if([path hasPrefix:key]){hit=self.fixtures[key];break;}
@@ -104,6 +106,7 @@ static void ck(bool ok,const char *n){printf("[%s] %s\n",ok?"PASS":"FAIL",n);if(
 - (void)loadLyricsForPath:(NSString *)path;
 - (void)renderRailMetadata;
 - (void)layoutWebPlayback;
+- (BOOL)lyricAiBusy;
 @end
 int main(){@autoreleasepool{
  [NSApplication sharedApplication]; [RLPTheme setThemeName:@"light"];
@@ -952,6 +955,71 @@ int main(){@autoreleasepool{
   ck(lastPath && [[lastPath stringByRemovingPercentEncoding] containsString:@"/Music/A/One.flac"],"C10 reset 请求带目标曲目路径");
   [[NSFileManager defaultManager] removeItemAtPath:imgPath error:nil];
  }
- pendingFav=nil;method_setImplementation(shared,old);
+ // ---- 歌词 AI 右键菜单（六项 + /api/lyrics/ai + 切曲守卫）----
+ {
+  spy.fakeStarted=YES;
+  [vc setValue:@"/offline/A.flac" forKey:@"currentPath"];
+  [vc applyLyricText:@"[00:01.00]alpha one\n[00:03.00]alpha two" forPath:@"/offline/A.flac"];
+  NSMenu *lm=ly.menu;
+  NSView *ldoc=[vc valueForKey:@"lyricDocument"];
+  NSArray<NSButton *> *lrows=[vc valueForKey:@"lyricRows"];
+  ck(lm!=nil,"L1a 歌词滚动视图挂载了右键菜单");
+  ck(lm!=nil && ldoc && ldoc.menu==lm,"L1b lyricDocument 挂载同一份右键菜单");
+  ck(lm!=nil && lrows.count>0 && lrows[0].menu==lm,"L1c 歌词行按钮挂载同一份右键菜单");
+  NSMutableArray<NSString *> *titles=[NSMutableArray array];
+  for(NSMenuItem *it in lm.itemArray) if(!it.isSeparatorItem) [titles addObject:it.title?:@""];
+  NSArray<NSString *> *want=@[RLPTr(@"翻译…"),RLPTr(@"音译"),RLPTr(@"日语假名"),RLPTr(@"转繁体"),RLPTr(@"恢复原文"),RLPTr(@"复制歌词")];
+  ck([titles isEqualToArray:want],"L1d 歌词右键菜单包含 6 个动作项（翻译…/音译/日语假名/转繁体/恢复原文/复制歌词）");
+
+  NSMenuItem *trItem=(lm.itemArray.count>0)?lm.itemArray[0]:nil;
+  NSMenuItem *langItem=(trItem.submenu.itemArray.count>0)?trItem.submenu.itemArray[0]:nil;
+  ck(trItem.submenu!=nil && langItem!=nil,"L2a 「翻译…」包含目标语言子菜单");
+  lastPath=nil;lastBody=nil;pendingLyricAi=nil;
+  if(langItem && langItem.target && langItem.action)
+   [NSApp sendAction:langItem.action to:langItem.target from:langItem];
+  ck([lastPath isEqualToString:@"/api/lyrics/ai"],"L2b 选「翻译…」发出 POST /api/lyrics/ai");
+  ck(lastBody && [lastBody containsString:@"task=translate"],"L2c 请求体包含 task=translate");
+  ck(pendingLyricAi!=nil,"L2d 捕获到在途 /api/lyrics/ai 回调");
+  BOOL hasBusy=[vc respondsToSelector:@selector(lyricAiBusy)];
+  ck(hasBusy && [[vc valueForKey:@"lyricAiBusy"] boolValue],"L2e 发起请求后 lyricAiBusy 为 YES");
+
+  // 切到另一首 B，再让 A 的旧回包到达
+  spy.fixtures=[@{
+   @"/api/status":@{@"ok":@1,@"playing":@1,@"paused":@0,@"current":@"/offline/B.flac",@"dur":@10.0},
+   @"/api/lyrics":@{@"ok":@1,@"lrc":@"[00:01.00]bravo one\n[00:03.00]bravo two"},
+   @"/api/meta":@{@"ok":@1,@"title":@"Bravo",@"meta":@{@"enriched":@NO}}
+  } mutableCopy];
+  [vc refresh];
+  ck(hasBusy && ![[vc valueForKey:@"lyricAiBusy"] boolValue],"L3a 切到新曲 B 后 lyricAiBusy 必须释放");
+  if(pendingLyricAi){
+   pendingLyricAi(@{@"ok":@YES,@"lines":@[@"STALE_AI_1",@"STALE_AI_2"]});
+   pendingLyricAi=nil;
+  }
+  NSArray<RLPLyricLine *> *linesAfterStale=[vc valueForKey:@"lyricLines"];
+  ck(linesAfterStale.count==2 && [linesAfterStale[0].text isEqualToString:@"bravo one"],
+     "L3b 旧曲 A 的迟到 /api/lyrics/ai 回包不得覆盖新曲 B 的歌词");
+  ck(hasBusy && ![[vc valueForKey:@"lyricAiBusy"] boolValue],"L3c 丢弃旧回包后 lyricAiBusy 仍为 NO");
+
+  // 新曲 B 正常使用 AI 翻译 + 恢复原文
+  lastPath=nil;pendingLyricAi=nil;
+  if(langItem && langItem.target && langItem.action)
+   [NSApp sendAction:langItem.action to:langItem.target from:langItem];
+  ck([lastPath isEqualToString:@"/api/lyrics/ai"] && pendingLyricAi!=nil,"L4a 切曲后新曲 B 可正常发起 /api/lyrics/ai");
+  if(pendingLyricAi){
+   pendingLyricAi(@{@"ok":@YES,@"lines":@[@"译文 1",@"译文 2"]});
+   pendingLyricAi=nil;
+  }
+  NSArray<RLPLyricLine *> *linesAfterAi=[vc valueForKey:@"lyricLines"];
+  ck(linesAfterAi.count==2 && [linesAfterAi[0].text isEqualToString:@"译文 1"],"L4b 新曲 B 正常贴回 AI 译文");
+  ck(hasBusy && ![[vc valueForKey:@"lyricAiBusy"] boolValue],"L4c 完成后 lyricAiBusy 释放");
+  NSMenuItem *restoreItem=nil;
+  for(NSMenuItem *it in lm.itemArray) if([it.title isEqualToString:RLPTr(@"恢复原文")]){restoreItem=it;break;}
+  if(restoreItem && restoreItem.target && restoreItem.action)
+   [NSApp sendAction:restoreItem.action to:restoreItem.target from:restoreItem];
+  NSArray<RLPLyricLine *> *linesAfterRestore=[vc valueForKey:@"lyricLines"];
+  ck(linesAfterRestore.count==2 && [linesAfterRestore[0].text isEqualToString:@"bravo one"],"L4d 恢复原文回到 bravo one");
+  spy.fakeStarted=NO;
+ }
+ pendingFav=nil;pendingLyricAi=nil;method_setImplementation(shared,old);
  printf("np web: %d failures\n",fail);return fail?1:0;
 }}

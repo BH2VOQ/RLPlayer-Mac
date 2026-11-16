@@ -19,6 +19,7 @@
 #include <cmath>
 static NSDictionary *statusJSON;
 static NSMutableArray<NSString *> *posts;
+static NSMutableArray<RLPJSONCompletion> *heldSignalCompletions;
 static BOOL online = NO;
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wincomplete-implementation"
@@ -27,6 +28,10 @@ static BOOL online = NO;
 - (BOOL)started { return online; }
 - (void)getJSON:(NSString *)path completion:(RLPJSONCompletion)done {
     if (!done) return;
+    if ([path isEqual:@"/api/signal"] && heldSignalCompletions) {
+        [heldSignalCompletions addObject:[done copy]];
+        return;
+    }
     if ([path hasPrefix:@"/api/meta"]) done(@{@"title":@"Real title", @"artist":@"Real artist", @"album":@"Real album"});
     else if ([path isEqual:@"/api/status"]) done(statusJSON);
     else done(@{@"mode":@0});
@@ -556,5 +561,39 @@ int main() { @autoreleasepool {
                 [(id)big2 setHovered:NO];
             }
         }
+    // ---- 一次性 /api/signal 序号守卫（快速切歌后旧包不得覆盖新曲信号链）----
+    {
+        NSWindow *offscreenWin = [[NSWindow alloc] initWithContentRect:NSMakeRect(0, 0, 1120, 66)
+                                                             styleMask:NSWindowStyleMaskBorderless
+                                                               backing:NSBackingStoreBuffered
+                                                                 defer:NO];
+        offscreenWin.contentView = bar;
+        heldSignalCompletions = [NSMutableArray array];
+        BOOL hasSigSeq = NO;
+        NSUInteger s0 = 0, s1 = 0, s2 = 0;
+        @try {
+            s0 = [[bar valueForKey:@"signalSeq"] unsignedIntegerValue];
+            [bar performSelector:NSSelectorFromString(@"showSignalChain:") withObject:nil];
+            s1 = [[bar valueForKey:@"signalSeq"] unsignedIntegerValue];
+            [bar performSelector:NSSelectorFromString(@"showSignalChain:") withObject:nil];
+            s2 = [[bar valueForKey:@"signalSeq"] unsignedIntegerValue];
+            hasSigSeq = (s1 == s0 + 1) && (s2 == s1 + 1);
+        } @catch (NSException *e) {
+            hasSigSeq = NO;
+        }
+        check(hasSigSeq && heldSignalCompletions.count == 2,
+              "pb.signalSeq increments per /api/signal request");
+        if (heldSignalCompletions.count == 2) {
+            RLPJSONCompletion staleFirst = heldSignalCompletions[0];
+            RLPJSONCompletion freshSecond = heldSignalCompletions[1];
+            freshSecond(@{ @"ok": @YES, @"path": @{ @"bitPerfect": @"yes", @"bitPerfectWhy": @"NewTrack", @"inRate": @96000, @"outRate": @96000 } });
+            staleFirst(@{ @"ok": @YES, @"path": @{ @"bitPerfect": @"no", @"bitPerfectWhy": @"OldTrack", @"inRate": @44100, @"outRate": @44100 } });
+            NSUInteger sAfter = [[bar valueForKey:@"signalSeq"] unsignedIntegerValue];
+            check(hasSigSeq && sAfter == s2, "pb.signalSeq remains at latest request after out-of-order responses");
+        }
+        heldSignalCompletions = nil;
+        offscreenWin.contentView = nil;
+    }
+
     printf("native_bar_web: %d checks, %d failures\n",checks,failures); return failures?1:0;
 } }

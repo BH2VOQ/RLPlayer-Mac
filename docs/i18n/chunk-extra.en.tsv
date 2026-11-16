@@ -690,3 +690,5 @@ PEQ 开	PEQ on
 切换服务器失败	Could not switch servers
 保存模式设置失败	Could not save the mode setting
 未找到与 “%@” 相关的专辑	No albums found for “%@”
+非 Bit-Perfect · 共享输出（经系统混音）	Not bit-perfect · shared output (system mixer)
+ · Hog（已回退）	 · Hog (fell back)

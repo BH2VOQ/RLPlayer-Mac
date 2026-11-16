@@ -236,6 +236,7 @@ static void RLPSetBadgeText(NSTextField *label, NSString *text, NSColor *color, 
 @interface RLPPlaybackBarView ()
 @property (nonatomic, strong) NSTimer *pollTimer;
 @property (nonatomic, assign, readwrite) BOOL polling;
+@property (nonatomic, assign) NSUInteger signalSeq;
 @property (nonatomic, strong) NSButton *prevBtn;
 @property (nonatomic, strong) NSButton *playBtn;
 @property (nonatomic, strong) NSButton *nextBtn;
@@ -1422,10 +1423,11 @@ static double RLPVolDbToPos(double db) {
     NSViewController *vc = RLPCardController(card, 540, 260);
     RLPShowCardPopover(sender ?: self, vc, 540);
 
+    const NSUInteger seq = ++self.signalSeq;
     __weak __typeof__(self) weakSelf = self;
     [[RLPCoreClient shared] getJSON:@"/api/signal" completion:^(NSDictionary * _Nullable json) {
         __typeof__(self) self_ = weakSelf;
-        (void)self_;
+        if (!self_ || seq != self_.signalSeq) return;
         NSDictionary *resp = json ?: @{};
         NSString *why = nil;
         NSString *title = [RLPSignalChain heroTitleForResponse:resp why:&why];

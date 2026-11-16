@@ -61,6 +61,9 @@ static RLPSignalNode *Node(NSString *key, NSString *value, NSString *badge, RLPS
     if ([bp isEqualToString:@"no"]) {
         // AirPlay 的"非 bit-perfect"是传输本身逐位未验证，不是 DSP 造成的（web AP-1.2 同口径）。
         if ([transport isEqualToString:@"airplay"]) return @"非 Bit-Perfect · AirPlay 传输（端到端逐位未获验证）";
+        if (Bool(p, @"sharedOnly") || [Str(p, @"outMode") isEqualToString:@"shared"]) {
+            return @"非 Bit-Perfect · 共享输出（经系统混音）";
+        }
         return @"非 Bit-Perfect · 信号经过 DSP 处理";
     }
     return @"Bit-Perfect 状态未知";

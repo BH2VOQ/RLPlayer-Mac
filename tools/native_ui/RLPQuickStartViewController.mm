@@ -81,6 +81,8 @@
 @property (nonatomic, assign) NSUInteger statusEpoch;
 @property (nonatomic, assign) BOOL statusInflight;
 @property (nonatomic, assign) NSUInteger settingsSeq;
+@property (nonatomic, strong, nullable) NSNumber *lastHogAcquired;
+@property (nonatomic, copy) NSString *lastFallbackWhy;
 @end
 
 // v3.3.11 `quickStartModel` 的三项能力结论（`/api/preset/caps` 的真实响应派生）。
@@ -1280,14 +1282,23 @@
             self_.presetCapsKey = capsKey;
             [self_ loadPresetCaps:YES];
         }
-        NSString *bkName = [bk isEqualToString:@"coreaudio-shared"] ? RLPTr(@"共享播放")
-                         : [bk isEqualToString:@"upnp"] ? RLPTr(@"局域网投放")
-                         : [bk isEqualToString:@"null"] ? RLPTr(@"不出声（仅分析）") : RLPTr(@"独占播放");
-        const BOOL hog = [self_ str:@"hogexcl" def:@"1"].boolValue;
-        self_.outputValue.stringValue = [NSString stringWithFormat:@"%@%@", bkName,
-            ([bk isEqualToString:@"coreaudio"] && hog) ? @" · Hog" : @""];
+        [self_ syncOutputSummary];
         [self_ syncPlayAndStyleCards];
     }];
+}
+
+- (void)syncOutputSummary {
+    NSString *bk = [self str:@"backend" def:@"coreaudio"];
+    NSString *bkName = [bk isEqualToString:@"coreaudio-shared"] ? RLPTr(@"共享播放")
+                     : [bk isEqualToString:@"upnp"] ? RLPTr(@"局域网投放")
+                     : [bk isEqualToString:@"null"] ? RLPTr(@"不出声（仅分析）") : RLPTr(@"独占播放");
+    const BOOL hog = [self str:@"hogexcl" def:@"1"].boolValue;
+    const BOOL hogFallback = (self.lastFallbackWhy.length > 0) ||
+                             (self.lastHogAcquired != nil && !self.lastHogAcquired.boolValue);
+    NSString *hogSuffix = ([bk isEqualToString:@"coreaudio"] && hog)
+        ? (hogFallback ? RLPTr(@" · Hog（已回退）") : @" · Hog")
+        : @"";
+    self.outputValue.stringValue = [NSString stringWithFormat:@"%@%@", bkName, hogSuffix];
 }
 
 - (void)syncPlayAndStyleCards {
@@ -1333,6 +1344,28 @@
     }];
 }
 
+- (void)applyStatusJSON:(NSDictionary *)json {
+    if (![json isKindOfClass:[NSDictionary class]]) return;
+    self.lastHogAcquired = [json[@"hogAcquired"] respondsToSelector:@selector(boolValue)]
+        ? @([json[@"hogAcquired"] boolValue]) : nil;
+    self.lastFallbackWhy = [json[@"fallbackWhy"] isKindOfClass:[NSString class]] ? json[@"fallbackWhy"] : @"";
+    [self syncOutputSummary];
+    RLPPlaybackStatus *st = [RLPPlaybackStatus statusFromJSON:json];
+    if (!st) return;
+    self.playing = st.playing && !st.paused;
+    self.pausedNow = st.paused;
+    NSString *path = st.currentPath ?: @"";
+    [self.npToggle setTitle:self.playing ? RLPTr(@"暂停") : RLPTr(@"继续播放")];
+    self.npState.stringValue = path.length ? (self.playing ? RLPTr(@"正在播放") : RLPTr(@"已暂停")) : RLPTr(@"未播放");
+    if (![path isEqualToString:self.currentPath ?: @""]) {
+        self.currentPath = path;
+        self.npTitle.stringValue = path.length ? path.lastPathComponent.stringByDeletingPathExtension : RLPTr(@"还没有在播放的音乐");
+        self.npSub.stringValue = path.length ? @"" : RLPTr(@"从下面的专辑挑一张开始");
+        [self loadCoverForPath:path];
+        [self loadMetaForPath:path];
+    }
+}
+
 - (void)reloadStatus {
     const NSUInteger seq = ++self.statusEpoch;
     self.statusInflight = YES;
@@ -1342,20 +1375,7 @@
         if (!self_) return;
         if (seq == self_.statusEpoch) self_.statusInflight = NO;
         if (seq != self_.statusEpoch) return;
-        RLPPlaybackStatus *st = [RLPPlaybackStatus statusFromJSON:json];
-        if (!st) return;
-        self_.playing = st.playing && !st.paused;
-        self_.pausedNow = st.paused;
-        NSString *path = st.currentPath ?: @"";
-        [self_.npToggle setTitle:self_.playing ? RLPTr(@"暂停") : RLPTr(@"继续播放")];
-        self_.npState.stringValue = path.length ? (self_.playing ? RLPTr(@"正在播放") : RLPTr(@"已暂停")) : RLPTr(@"未播放");
-        if (![path isEqualToString:self_.currentPath ?: @""]) {
-            self_.currentPath = path;
-            self_.npTitle.stringValue = path.length ? path.lastPathComponent.stringByDeletingPathExtension : RLPTr(@"还没有在播放的音乐");
-            self_.npSub.stringValue = path.length ? @"" : RLPTr(@"从下面的专辑挑一张开始");
-            [self_ loadCoverForPath:path];
-            [self_ loadMetaForPath:path];
-        }
+        [self_ applyStatusJSON:json ?: @{}];
     }];
 }
 

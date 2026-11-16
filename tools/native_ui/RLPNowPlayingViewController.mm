@@ -1641,7 +1641,7 @@ static NSString *RLPRailTagText(id srValue, id bitsValue) {
     return [NSString stringWithFormat:@"%@/%ld", sr, (long)bits];
 }
 
-@interface RLPNowPlayingViewController ()
+@interface RLPNowPlayingViewController () <NSMenuDelegate>
 
 @property(nonatomic,strong) RLPNPCanvas *webCanvas;
 @property(nonatomic,strong) NSView *analysisPanel;
@@ -1660,6 +1660,11 @@ static NSString *RLPRailTagText(id srValue, id bitsValue) {
 @property(nonatomic) NSUInteger lyricSeq;
 @property(nonatomic) NSInteger lyricRetry;
 @property(nonatomic,strong) NSTimer *lyricRetryTimer;
+@property(nonatomic,copy,nullable) NSArray<RLPLyricLine *> *originalLyricLines;
+@property(nonatomic,assign) BOOL lyricAiApplied;
+@property(nonatomic,assign) BOOL lyricAiBusy;
+@property(nonatomic,assign) NSUInteger lyricAiSeq;
+@property(nonatomic,strong,nullable) NSMenu *lyricAiMenu;
 @property(nonatomic,strong) NSTextField *kindLabel;
 @property(nonatomic,strong) NSTextField *analysisStatus;
 /// web #npAnalHide / #npRailHide：面板头部右上的 22px 圆形收起键（与顶栏开关同源状态）。
@@ -2015,6 +2020,9 @@ static NSString *RLPRailTagText(id srValue, id bitsValue) {
     self.lyricsEmpty.maximumNumberOfLines=0;
     self.lyricsEmpty.lineBreakMode=NSLineBreakByWordWrapping;
     [self.lyricDocument addSubview:self.lyricsEmpty];
+    self.lyricDocument.menu=[self lyricAiMenu];
+    self.lyricScroll.menu=[self lyricAiMenu];
+    self.lyricsEmpty.menu=[self lyricAiMenu];
     [self setLyricsPlaceholder:@"没有歌词"
                         detail:@"同名 .lrc 文件、内嵌歌词，或播放时自动在线补全（可在设置-元数据补全关闭）"];
     self.railTitle=RLPLabel(RLPTr(@"AI 整理"),[NSFont systemFontOfSize:9.5 weight:NSFontWeightSemibold],t.mut2);
@@ -2607,17 +2615,33 @@ static NSString *RLPRailTagText(id srValue, id bitsValue) {
     for(NSButton *b in self.lyricRows){b.frame=NSMakeRect(inset,y,MAX(40,w-inset*2),step);y+=step;}
     self.lyricDocument.frame=NSMakeRect(0,0,w,MAX(h,y+pad));self.lyricsEmpty.frame=NSMakeRect(8,MAX(0,h/2-30),MAX(40,w-16),60);
 }
-- (void)applyLyricText:(NSString *)text forPath:(NSString *)path {
-    if(![path isEqualToString:self.currentPath?:@""])return;
-    self.lyricLines=[RLPLyrics parse:text];self.lyricActiveIndex=-1;
+- (void)rebuildLyricRows {
+    self.lyricActiveIndex=-1;
     for(NSView *v in [self.lyricRows copy])[v removeFromSuperview];[self.lyricRows removeAllObjects];
     self.lyricsEmpty.hidden=self.lyricLines.count>0;
     if(self.lyricLines.count==0)
         [self setLyricsPlaceholder:@"没有歌词"
                             detail:@"同名 .lrc 文件、内嵌歌词，或播放时自动在线补全（可在设置-元数据补全关闭）"];
     self.lyricPointSize=RLPNPLyricPointSize(self.webCanvas.bounds.size.height);
-    for(RLPLyricLine *line in self.lyricLines){NSButton *b=[NSButton buttonWithTitle:line.text target:self action:@selector(onLyricLine:)];b.tag=self.lyricRows.count;b.bordered=NO;b.font=[NSFont systemFontOfSize:self.lyricPointSize];[self.lyricDocument addSubview:b];[self.lyricRows addObject:b];}
+    for(RLPLyricLine *line in self.lyricLines){
+        NSButton *b=[NSButton buttonWithTitle:line.text target:self action:@selector(onLyricLine:)];
+        b.tag=self.lyricRows.count;
+        b.bordered=NO;
+        b.font=[NSFont systemFontOfSize:self.lyricPointSize];
+        b.menu=[self lyricAiMenu];
+        [self.lyricDocument addSubview:b];
+        [self.lyricRows addObject:b];
+    }
     [self layoutLyricRows];[self updateLyricPosition:self.webStatus.position];
+}
+- (void)applyLyricText:(NSString *)text forPath:(NSString *)path {
+    if(![path isEqualToString:self.currentPath?:@""])return;
+    self.originalLyricLines=nil;
+    self.lyricAiApplied=NO;
+    self.lyricAiBusy=NO;
+    ++self.lyricAiSeq;
+    self.lyricLines=[RLPLyrics parse:text];
+    [self rebuildLyricRows];
 }
 - (void)updateLyricPosition:(double)pos {
     NSInteger at=[RLPLyrics activeIndex:self.lyricLines position:pos];self.lyricActiveIndex=at;
@@ -2644,6 +2668,122 @@ static NSString *RLPRailTagText(id srValue, id bitsValue) {
     NSMenuItem *compare=[[NSMenuItem alloc] initWithTitle:RLPTr(@"对比同目录版本") action:@selector(onCompare:) keyEquivalent:@""];compare.target=self;[menu addItem:compare];
     NSMenuItem *works=[[NSMenuItem alloc] initWithTitle:RLPTr(@"古典作品版本") action:@selector(onOpenWorks:) keyEquivalent:@""];works.target=self;[menu addItem:works];
     return menu;
+}
+
+#pragma mark - 歌词 AI（翻译 / 音译 / 日语假名 / 简转繁）
+
+- (NSMenu *)lyricAiMenu {
+    if (_lyricAiMenu) return _lyricAiMenu;
+    NSMenu *m = [[NSMenu alloc] initWithTitle:@"lyrics-ai"];
+    m.autoenablesItems = NO;
+    m.delegate = self;
+
+    NSMenuItem *tr = [[NSMenuItem alloc] initWithTitle:RLPTr(@"翻译…") action:nil keyEquivalent:@""];
+    NSMenu *langs = [[NSMenu alloc] initWithTitle:@"lyrics-ai-lang"];
+    NSArray<NSArray<NSString *> *> *pairs = @[
+        @[ @"zh", RLPTr(@"中文") ], @[ @"en", RLPTr(@"英文") ],
+        @[ @"ja", RLPTr(@"日语") ], @[ @"ko", RLPTr(@"韩语") ],
+        @[ @"fr", RLPTr(@"法语") ], @[ @"de", RLPTr(@"德语") ],
+        @[ @"ru", RLPTr(@"俄语") ], @[ @"es", RLPTr(@"西班牙语") ],
+    ];
+    for (NSArray<NSString *> *p in pairs) {
+        NSMenuItem *it = [self lyricAiItem:p[1] action:@selector(lyricAiTranslateLang:)];
+        it.representedObject = p[0];
+        [langs addItem:it];
+    }
+    tr.submenu = langs;
+    [m addItem:tr];
+
+    [m addItem:[self lyricAiItem:RLPTr(@"音译") action:@selector(lyricAiTransliterate:)]];
+    [m addItem:[self lyricAiItem:RLPTr(@"日语假名") action:@selector(lyricAiFurigana:)]];
+    [m addItem:[self lyricAiItem:RLPTr(@"转繁体") action:@selector(lyricAiTradChinese:)]];
+
+    [m addItem:[NSMenuItem separatorItem]];
+
+    [m addItem:[self lyricAiItem:RLPTr(@"恢复原文") action:@selector(lyricRestoreOriginal:)]];
+    [m addItem:[self lyricAiItem:RLPTr(@"复制歌词") action:@selector(lyricCopyAll:)]];
+
+    _lyricAiMenu = m;
+    return m;
+}
+
+- (NSMenuItem *)lyricAiItem:(NSString *)title action:(SEL)sel {
+    NSMenuItem *it = [[NSMenuItem alloc] initWithTitle:(title ?: @"") action:sel keyEquivalent:@""];
+    it.target = self;
+    return it;
+}
+
+- (void)menuWillOpen:(NSMenu *)menu {
+    if (menu != _lyricAiMenu) return;
+    const BOOL has = self.lyricLines.count > 0;
+    for (NSMenuItem *it in menu.itemArray) {
+        if (it.isSeparatorItem) continue;
+        if (it.action == @selector(lyricRestoreOriginal:)) it.enabled = self.lyricAiApplied;
+        else it.enabled = has;
+    }
+}
+
+- (void)lyricAiTranslateLang:(NSMenuItem *)item {
+    NSString *code = [item.representedObject isKindOfClass:[NSString class]] ? (NSString *)item.representedObject : @"zh";
+    [self runLyricAiTask:@"translate" lang:code];
+}
+- (void)lyricAiTransliterate:(id)sender { (void)sender; [self runLyricAiTask:@"translit" lang:nil]; }
+- (void)lyricAiFurigana:(id)sender      { (void)sender; [self runLyricAiTask:@"furigana" lang:nil]; }
+- (void)lyricAiTradChinese:(id)sender    { (void)sender; [self runLyricAiTask:@"trad" lang:nil]; }
+
+- (void)runLyricAiTask:(NSString *)task lang:(nullable NSString *)lang {
+    if (self.lyricAiBusy) return;
+    if (![RLPCoreClient shared].started) { RLPToast(RLPTr(@"核心未启动，稍后再试")); return; }
+    NSArray<RLPLyricLine *> *base = self.lyricAiApplied ? self.originalLyricLines : self.lyricLines;
+    if (!base.count) { RLPToast(RLPTr(@"这首曲目没有歌词")); return; }
+
+    NSMutableArray<NSString *> *texts = [NSMutableArray arrayWithCapacity:base.count];
+    for (RLPLyricLine *l in base) [texts addObject:(l.text ?: @"")];
+    NSString *body = [RLPLyrics aiRequestBodyTask:task lang:lang sourceLang:nil lines:texts];
+
+    NSString *reqPath = [self.currentPath copy];
+    const NSUInteger aiSeq = ++self.lyricAiSeq;
+    self.lyricAiBusy = YES;
+    RLPToast([task isEqualToString:@"translate"] ? RLPTr(@"正在翻译歌词…") : RLPTr(@"正在处理歌词…"));
+    __weak __typeof__(self) w = self;
+    [[RLPCoreClient shared] postJSON:@"/api/lyrics/ai" body:body completion:^(NSDictionary * _Nullable j) {
+        __typeof__(self) s = w;
+        if (!s) return;
+        if (aiSeq != s.lyricAiSeq || !reqPath.length || ![s.currentPath isEqualToString:reqPath]) return;
+        s.lyricAiBusy = NO;
+        NSString *err = nil;
+        NSArray<RLPLyricLine *> *applied = [RLPLyrics linesFromAiResponse:j appliedTo:base error:&err];
+        if (!applied) {
+            RLPToast([RLPTr(@"歌词处理失败") stringByAppendingFormat:@"：%@", (err ?: RLPTr(@"未知错误"))]);
+            return;
+        }
+        if (!s.lyricAiApplied) { s.originalLyricLines = base; s.lyricAiApplied = YES; }
+        s.lyricLines = applied;
+        [s rebuildLyricRows];
+        const BOOL cached = [j[@"fromCache"] respondsToSelector:@selector(boolValue)] && [j[@"fromCache"] boolValue];
+        RLPToast(cached ? RLPTr(@"已载入（缓存）") : RLPTr(@"完成"));
+    }];
+}
+
+- (void)lyricRestoreOriginal:(id)sender {
+    (void)sender;
+    if (!self.lyricAiApplied || !self.originalLyricLines.count) return;
+    self.lyricLines = self.originalLyricLines;
+    self.originalLyricLines = nil;
+    self.lyricAiApplied = NO;
+    [self rebuildLyricRows];
+    RLPToast(RLPTr(@"已恢复原文"));
+}
+
+- (void)lyricCopyAll:(id)sender {
+    (void)sender;
+    if (!self.lyricLines.count) return;
+    NSMutableArray<NSString *> *rows = [NSMutableArray arrayWithCapacity:self.lyricLines.count];
+    for (RLPLyricLine *l in self.lyricLines) [rows addObject:(l.text ?: @"")];
+    NSPasteboard *pb = [NSPasteboard generalPasteboard];
+    [pb clearContents];
+    [pb setString:[rows componentsJoinedByString:@"\n"] forType:NSPasteboardTypeString];
+    RLPToast(RLPTr(@"歌词已复制"));
 }
 /// web 抽屉的 Esc 关闭（`npDrawerClose`）；没有抽屉时走默认行为。
 - (void)cancelOperation:(id)sender {
@@ -3708,6 +3848,10 @@ static NSString *RLPNowPlayingCastDeviceLabel(NSString *device) {
 
 - (void)loadLyricsForPath:(NSString *)path {
     const NSUInteger seq=++self.lyricSeq;[self.lyricRetryTimer invalidate];self.lyricRetryTimer=nil;
+    self.originalLyricLines=nil;
+    self.lyricAiApplied=NO;
+    self.lyricAiBusy=NO;
+    ++self.lyricAiSeq;
     if(!path.length||[path hasPrefix:@"http://"]||[path hasPrefix:@"https://"]){
         [self applyLyricText:@"" forPath:path];
         // web `renderNpLyric()` 对"无歌词"只有一种两行空态（网络曲目也一样）；右侧抽屉才另有

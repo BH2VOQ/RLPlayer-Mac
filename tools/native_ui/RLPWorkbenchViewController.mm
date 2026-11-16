@@ -169,6 +169,7 @@ static const NSInteger kABSlotCount = 4;
 @property (nonatomic, assign) NSUInteger ratesSeq;
 @property (nonatomic, assign) NSUInteger devicesSeq;
 @property (nonatomic, assign) NSUInteger profilesSeq;
+@property (nonatomic, assign) NSUInteger signalSeq;
 
 - (NSString *)str:(NSString *)key def:(NSString *)def;
 - (void)postSettings:(NSDictionary<NSString *, NSString *> *)kv;
@@ -2149,7 +2150,11 @@ static const NSInteger kABSlotCount = 4;
     NSView *anchor = sender ?: self.view;
     RLPShowCardPopover(anchor, vc, 580);
 
+    const NSUInteger seq = ++self.signalSeq;
+    __weak __typeof__(self) weakSelf = self;
     [[RLPCoreClient shared] getJSON:@"/api/signal" completion:^(NSDictionary * _Nullable json) {
+        __typeof__(self) self_ = weakSelf;
+        if (!self_ || seq != self_.signalSeq) return;
         NSDictionary *resp = json ?: @{};
         NSString *why = nil;
         NSString *title = [RLPSignalChain heroTitleForResponse:resp why:&why];
@@ -2619,8 +2624,15 @@ static const NSInteger kABSlotCount = 4;
         @"shaper": dsd ? @"none (DoP)" : [self str:@"shaper" def:@"auto"],
         @"sdm": dsd ? [NSString stringWithFormat:@"DSD%ld · %@%@", (long)dsdRate,
                        [self str:@"modfamily" def:@"ec"], [self str:@"modorder" def:@"7"]] : @"—",
-        @"out": [NSString stringWithFormat:@"%@%@", [self str:@"backend" def:@"coreaudio"],
-                 [[self str:@"hogexcl" def:@"1"] isEqualToString:@"1"] ? @" · Hog" : @""],
+        @"out": ({
+            NSString *bk = [self str:@"backend" def:@"coreaudio"];
+            const BOOL hogCfg = [[self str:@"hogexcl" def:@"1"] isEqualToString:@"1"];
+            NSString *fbWhy = [st[@"fallbackWhy"] isKindOfClass:[NSString class]] ? st[@"fallbackWhy"] : @"";
+            const BOOL hogKnownFalse = [st[@"hogAcquired"] respondsToSelector:@selector(boolValue)] && ![st[@"hogAcquired"] boolValue];
+            const BOOL hogFallback = (fbWhy.length > 0) || hogKnownFalse;
+            NSString *hogSuffix = hogCfg ? (hogFallback ? RLPTr(@" · Hog（已回退）") : @" · Hog") : @"";
+            [NSString stringWithFormat:@"%@%@", bk, hogSuffix];
+        }),
     };
     for (NSString *key in self.chainNodes) {
         NSView *node = self.chainNodes[key];

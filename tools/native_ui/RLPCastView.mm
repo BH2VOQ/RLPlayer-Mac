@@ -45,20 +45,41 @@
 @property (nonatomic, strong) NSTextField *statPrep;
 @property (nonatomic, strong) NSTextField *statWarn;
 @property (nonatomic, strong) NSTextField *statErr;
+@property (nonatomic, strong) NSView *prepBox;
+@property (nonatomic, strong) NSView *warnBox;
+@property (nonatomic, strong) NSView *errBox;
 @property (nonatomic, strong) NSTimer *poll;
 @property (nonatomic, assign, readwrite) BOOL polling;
 @property (nonatomic, copy) NSArray<NSDictionary *> *devices;
+@property (nonatomic, copy) NSString *savedUpnpDev;
 @end
 
 @implementation RLPCastView
 
 - (instancetype)initWithFrame:(NSRect)r {
     self = [super initWithFrame:r];
-    if (self) { _devices = @[]; [self build]; }
+    if (self) {
+        _devices = @[];
+        _savedUpnpDev = @"";
+        [self build];
+        [[NSNotificationCenter defaultCenter] addObserver:self
+                                                 selector:@selector(onExternalSettingsChanged:)
+                                                     name:RLPSettingsChangedNotification
+                                                   object:nil];
+    }
     return self;
 }
 
-- (void)dealloc { [self stopPolling]; }
+- (void)dealloc {
+    [[NSNotificationCenter defaultCenter] removeObserver:self];
+    [self stopPolling];
+}
+
+- (void)onExternalSettingsChanged:(NSNotification *)note {
+    if (note.object == self) return;
+    if (![RLPCoreClient shared].started) return;
+    [self reloadSettings];
+}
 
 /// 一行「标签 : 值」，值控件带 web 的 identifier。
 - (NSStackView *)statRow:(NSString *)label value:(NSTextField *)value t:(RLPTheme *)t {
@@ -95,6 +116,9 @@
     self.devicePop = [[NSPopUpButton alloc] initWithFrame:NSZeroRect pullsDown:NO];
     self.devicePop.identifier = @"sp_cast_dev";
     [self.devicePop addItemWithTitle:RLPTr(@"（未发现 UPnP 渲染器）")];
+    [[self.devicePop lastItem] setRepresentedObject:@""];
+    self.devicePop.target = self;
+    self.devicePop.action = @selector(onDeviceChanged:);
     [[self.devicePop.widthAnchor constraintEqualToConstant:360] setActive:YES];
     [r1 addArrangedSubview:self.devicePop];
     self.scanBtn = [NSButton buttonWithTitle:RLPTr(@"重新发现") target:self action:@selector(onRefresh:)];
@@ -195,9 +219,9 @@
         NSView *row = [self statRow:pair[0] value:pair[1] t:t];
         // web 把「准备进度 / 采样率告警 / 错误信息」三行各包在一个 id 为 *_box 的容器里，
         // 平时 display:none、有内容才显示。原生同样按内容显隐，identifier 落在容器上。
-        if ([pair[1] isEqual:self.statPrep])      row.identifier = @"sp_cast_stat_prep_box";
-        else if ([pair[1] isEqual:self.statWarn]) row.identifier = @"sp_cast_stat_warn_box";
-        else if ([pair[1] isEqual:self.statErr])  row.identifier = @"sp_cast_stat_err_box";
+        if ([pair[1] isEqual:self.statPrep])      { row.identifier = @"sp_cast_stat_prep_box"; self.prepBox = row; row.hidden = YES; }
+        else if ([pair[1] isEqual:self.statWarn]) { row.identifier = @"sp_cast_stat_warn_box"; self.warnBox = row; row.hidden = YES; }
+        else if ([pair[1] isEqual:self.statErr])  { row.identifier = @"sp_cast_stat_err_box";  self.errBox = row;  row.hidden = YES; }
         [self.stack addArrangedSubview:row];
     }
 }
@@ -251,6 +275,22 @@
     }];
 }
 
+- (void)onDeviceChanged:(NSPopUpButton *)sender {
+    id ro = sender.selectedItem.representedObject;
+    NSString *val = [ro isKindOfClass:[NSString class]] ? (NSString *)ro : @"";
+    self.savedUpnpDev = val;
+    if (![RLPCoreClient shared].started) return;
+    __weak __typeof__(self) weakSelf = self;
+    [[RLPCoreClient shared] postJSON:@"/api/settings"
+                                body:[NSString stringWithFormat:@"upnpdev=%@", RLPEnc(val)]
+                          completion:^(NSDictionary * _Nullable json) {
+        (void)json;
+        __typeof__(self) self_ = weakSelf;
+        if (!self_) return;
+        [[NSNotificationCenter defaultCenter] postNotificationName:RLPSettingsChangedNotification object:self_];
+    }];
+}
+
 - (void)onCastUpsample:(NSSwitch *)s {
     [RLPCoreClient.shared postJSON:@"/api/settings"
                               body:[NSString stringWithFormat:@"cast_upsample=%@",
@@ -272,6 +312,70 @@
 
 #pragma mark - 数据
 
+- (void)syncDeviceSelection {
+    NSString *want = self.savedUpnpDev ?: @"";
+    if (!want.length) return;
+    for (NSInteger i = 0; i < (NSInteger)self.devicePop.numberOfItems; ++i) {
+        id ro = [self.devicePop itemAtIndex:i].representedObject;
+        if ([ro isKindOfClass:[NSString class]] && [(NSString *)ro isEqualToString:want]) {
+            [self.devicePop selectItemAtIndex:i];
+            return;
+        }
+    }
+    [self.devicePop addItemWithTitle:[NSString stringWithFormat:@"%@%@", RLPTr(@"（上次选择 · 离线/需刷新）"), want]];
+    [[self.devicePop lastItem] setRepresentedObject:want];
+    [self.devicePop selectItemAtIndex:self.devicePop.numberOfItems - 1];
+}
+
+- (void)reloadSettings {
+    if (![RLPCoreClient shared].started) return;
+    __weak __typeof__(self) weakSelf = self;
+    [[RLPCoreClient shared] getJSON:@"/api/settings" completion:^(NSDictionary * _Nullable json) {
+        __typeof__(self) self_ = weakSelf;
+        if (!self_ || ![json isKindOfClass:[NSDictionary class]]) return;
+        NSDictionary *kv = [json[@"kv"] isKindOfClass:[NSDictionary class]] ? json[@"kv"] : json;
+        NSString *up = [kv[@"cast_upsample"] respondsToSelector:@selector(description)] ? [kv[@"cast_upsample"] description] : @"0";
+        self_.upSwitch.state = [up isEqualToString:@"1"] ? NSControlStateValueOn : NSControlStateValueOff;
+        NSString *ceilVal = [kv[@"cast_upsample_ceiling"] isKindOfClass:[NSString class]]
+            ? kv[@"cast_upsample_ceiling"]
+            : ([kv[@"cast_upsample_ceiling"] respondsToSelector:@selector(stringValue)] ? [kv[@"cast_upsample_ceiling"] stringValue] : @"192000");
+        if (!ceilVal.length) ceilVal = @"192000";
+        if ([self_.upCeilPopup itemWithTitle:ceilVal]) [self_.upCeilPopup selectItemWithTitle:ceilVal];
+        else [self_.upCeilPopup selectItemWithTitle:@"192000"];
+        NSString *force = [kv[@"cast_upsample_force"] respondsToSelector:@selector(description)] ? [kv[@"cast_upsample_force"] description] : @"0";
+        self_.upForceSwitch.state = [force isEqualToString:@"1"] ? NSControlStateValueOn : NSControlStateValueOff;
+        NSString *upnpDev = [kv[@"upnpdev"] isKindOfClass:[NSString class]] ? kv[@"upnpdev"] : @"";
+        self_.savedUpnpDev = upnpDev;
+        [self_ syncDeviceSelection];
+    }];
+}
+
+- (void)applyDevicesPayload:(NSDictionary *)json {
+    NSArray *list = [json[@"devices"] isKindOfClass:[NSArray class]] ? json[@"devices"] : @[];
+    self.devices = list;
+    [self.devicePop removeAllItems];
+    if (!list.count) {
+        [self.devicePop addItemWithTitle:RLPTr(@"（未发现 UPnP 渲染器）")];
+        [[self.devicePop lastItem] setRepresentedObject:@""];
+        NSString *hint = [json[@"hint"] isKindOfClass:[NSString class]] ? json[@"hint"] : nil;
+        self.devMsg.stringValue = hint.length ? hint
+            : RLPTr(@"未发现 UPnP/DLNA 渲染器（确认设备已开机并开启 DLNA/UPnP）");
+    } else {
+        for (NSDictionary *d in list) {
+            if (![d isKindOfClass:[NSDictionary class]]) continue;
+            NSString *n = [d[@"name"] isKindOfClass:[NSString class]] ? d[@"name"] : RLPTr(@"未知设备");
+            NSString *devId = [d[@"id"] isKindOfClass:[NSString class]] && [d[@"id"] length] ? d[@"id"]
+                            : ([d[@"location"] isKindOfClass:[NSString class]] && [d[@"location"] length] ? d[@"location"]
+                            : ([d[@"name"] isKindOfClass:[NSString class]] ? d[@"name"] : @""));
+            [self.devicePop addItemWithTitle:n];
+            [[self.devicePop lastItem] setRepresentedObject:devId];
+        }
+        self.devMsg.stringValue = [NSString stringWithFormat:RLPTr(@"共发现 %lu 个渲染器"),
+                                    (unsigned long)list.count];
+    }
+    [self syncDeviceSelection];
+}
+
 - (void)loadDevices { [self loadDevicesForce:NO]; }
 
 /// /api/upnp：web「快速开始 / 设置·输出」页的后端设备列表端点。
@@ -279,10 +383,11 @@
 /// 两边都要有，不能拿一个顶另一个。
 - (void)loadUpnpDevices {
     if (![RLPCoreClient shared].started) return;
+    __weak __typeof__(self) weakSelf = self;
     [[RLPCoreClient shared] getJSON:@"/api/upnp" completion:^(NSDictionary * _Nullable json) {
-        // 结果与 cast/devices 同源（都来自 upnp_discover），面板复用同一份呈现，
-        // 这里只需要触发后端真的被调用到（证明这条路径存在且可用）。
-        (void)json;
+        __typeof__(self) self_ = weakSelf;
+        if (!self_ || ![json isKindOfClass:[NSDictionary class]]) return;
+        [self_ applyDevicesPayload:json];
     }];
 }
 
@@ -293,25 +398,8 @@
     __weak __typeof__(self) weakSelf = self;
     [[RLPCoreClient shared] getJSON:url completion:^(NSDictionary * _Nullable json) {
         __typeof__(self) self_ = weakSelf;
-        if (!self_) return;
-        NSArray *list = [json[@"devices"] isKindOfClass:[NSArray class]] ? json[@"devices"] : @[];
-        self_.devices = list;
-        [self_.devicePop removeAllItems];
-        if (!list.count) {
-            [self_.devicePop addItemWithTitle:RLPTr(@"（未发现 UPnP 渲染器）")];
-            // 后端 hint 是实测出来的原因（组播被拒 / 广播兜底 / 无人应答），
-            // 比"可能未开机"这种猜测有用得多。
-            NSString *hint = [json[@"hint"] isKindOfClass:[NSString class]] ? json[@"hint"] : nil;
-            self_.devMsg.stringValue = hint.length ? hint
-                : RLPTr(@"未发现 UPnP/DLNA 渲染器（确认设备已开机并开启 DLNA/UPnP）");
-        } else {
-            for (NSDictionary *d in list) {
-                NSString *n = [d[@"name"] isKindOfClass:[NSString class]] ? d[@"name"] : RLPTr(@"未知设备");
-                [self_.devicePop addItemWithTitle:n];
-            }
-            self_.devMsg.stringValue = [NSString stringWithFormat:RLPTr(@"共发现 %lu 个渲染器"),
-                                        (unsigned long)list.count];
-        }
+        if (!self_ || ![json isKindOfClass:[NSDictionary class]]) return;
+        [self_ applyDevicesPayload:json];
     }];
 }
 
@@ -356,17 +444,24 @@
             self_.statRateMatch.stringValue = RLPTr(@"未取证");
         }
         id prep = json[@"prep"];
-        self_.statPrep.stringValue = [prep respondsToSelector:@selector(doubleValue)]
+        const BOOL hasPrep = [prep respondsToSelector:@selector(doubleValue)] && [prep doubleValue] > 0.0;
+        self_.statPrep.stringValue = hasPrep
             ? [NSString stringWithFormat:@"%.0f%%", [prep doubleValue] * 100.0] : @"-";
-        self_.statWarn.stringValue = [json[@"warn"] isKindOfClass:[NSString class]]
-            ? json[@"warn"] : @"-";
-        self_.statErr.stringValue = [json[@"error"] isKindOfClass:[NSString class]]
-            ? json[@"error"] : @"-";
+        self_.prepBox.hidden = !hasPrep;
+
+        NSString *warnStr = [json[@"warn"] isKindOfClass:[NSString class]] ? json[@"warn"] : @"";
+        self_.statWarn.stringValue = warnStr.length ? warnStr : @"-";
+        self_.warnBox.hidden = (warnStr.length == 0);
+
+        NSString *errStr = [json[@"error"] isKindOfClass:[NSString class]] ? json[@"error"] : @"";
+        self_.statErr.stringValue = errStr.length ? errStr : @"-";
+        self_.errBox.hidden = (errStr.length == 0);
     }];
 }
 
 - (void)reload {
     if (![RLPCoreClient shared].started) return;
+    [self reloadSettings];
     [self loadDevicesForce:NO];
     [self refreshState];
     [self startPolling];

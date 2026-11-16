@@ -59,6 +59,7 @@ static NSView *FindById(NSView *root, NSString *ident) {
 - (void)syncPlayAndStyleCards;
 - (void)onPickStyle:(NSButton *)sender;
 - (void)onPickPlayMode:(NSButton *)sender;
+- (void)reloadSettings;
 @end
 
 int main() {
@@ -330,6 +331,37 @@ int main() {
             }
             CK(!overlap && q1 && q2 && q3 && q4,
                [[NSString stringWithFormat:@"C7_%d 聆听室四卡无几何重叠", (int)w] UTF8String], @"");
+        }
+
+        // C8 聆听室 Hog 回退标签（hogAcquired=NO / fallbackWhy 非空时不得声称 · Hog）
+        {
+            RLPQuickStartViewController *qvc = [[RLPQuickStartViewController alloc] init];
+            (void)qvc.view;
+            [core jsonWithMethod:@"POST" path:@"/api/settings" body:@"backend=coreaudio&hogexcl=1"];
+            [qvc reloadSettings];
+            for (int spin = 0; spin < 30; ++spin) [[NSRunLoop currentRunLoop] runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.01]];
+            SEL applySel = NSSelectorFromString(@"applyStatusJSON:");
+            BOOL hasApply = [qvc respondsToSelector:applySel];
+            if (hasApply) {
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+                [qvc performSelector:applySel withObject:@{@"ok": @YES, @"hogAcquired": @NO, @"fallbackWhy": @"Device busy"}];
+#pragma clang diagnostic pop
+            }
+            NSTextField *outVal = [qvc valueForKey:@"outputValue"];
+            NSString *txt = outVal.stringValue ?: @"";
+            CK(hasApply && [txt containsString:@"Hog（已回退）"],
+               "C8a 快速开始在 hogAcquired=NO/fallbackWhy 非空时显示 Hog（已回退）", txt);
+
+            if (hasApply) {
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+                [qvc performSelector:applySel withObject:@{@"ok": @YES, @"hogAcquired": @YES, @"fallbackWhy": @""}];
+#pragma clang diagnostic pop
+            }
+            NSString *txtOk = outVal.stringValue ?: @"";
+            CK(hasApply && [txtOk containsString:@"· Hog"] && ![txtOk containsString:@"已回退"],
+               "C8b 快速开始在 hogAcquired=YES 时显示 · Hog", txtOk);
         }
 
         [core shutdown];

@@ -646,6 +646,109 @@ int main(void) {
                [NSString stringWithFormat:@"idx=%ld", (long)(provPop ? provPop.indexOfSelectedItem : -1)]);
         }
 
+        // 12. 投放面板（RLPCastView）设置回显 + loadUpnpDevices 同步 + 状态框按内容显隐
+        {
+            [core jsonWithMethod:@"POST" path:@"/api/settings"
+                body:@"cast_upsample=1&cast_upsample_ceiling=384000&cast_upsample_force=1&upnpdev=upnp://192.168.1.99/desc.xml"];
+            [settings selectPane:@"stream"];
+            Pump(0.2);
+            NSView *castView = [settings valueForKey:@"castView"];
+            if ([castView respondsToSelector:NSSelectorFromString(@"reload")]) {
+                [castView performSelector:NSSelectorFromString(@"reload")];
+            }
+            NSSwitch *upSw = (NSSwitch *)FindId(v, @"cast_up");
+            NSPopUpButton *ceilPop = (NSPopUpButton *)FindId(v, @"cast_ceil");
+            NSSwitch *forceSw = (NSSwitch *)FindId(v, @"cast_force");
+            WaitUntil(1.5, ^BOOL {
+                return upSw && upSw.state == NSControlStateValueOn &&
+                       ceilPop && [ceilPop.titleOfSelectedItem isEqualToString:@"384000"] &&
+                       forceSw && forceSw.state == NSControlStateValueOn;
+            });
+            Ck(upSw && upSw.state == NSControlStateValueOn,
+               @"12a RLPCastView reload 回显 cast_upsample=1",
+               [NSString stringWithFormat:@"state=%ld", (long)(upSw ? upSw.state : -1)]);
+            Ck(ceilPop && [ceilPop.titleOfSelectedItem isEqualToString:@"384000"],
+               @"12b RLPCastView reload 回显 cast_upsample_ceiling=384000",
+               ceilPop ? ceilPop.titleOfSelectedItem : @"nil");
+            Ck(forceSw && forceSw.state == NSControlStateValueOn,
+               @"12c RLPCastView reload 回显 cast_upsample_force=1",
+               [NSString stringWithFormat:@"state=%ld", (long)(forceSw ? forceSw.state : -1)]);
+
+            // 12d: loadUpnpDevices 填充 sp_cast_dev 并保留/同步 saved upnpdev
+            Method getM2 = class_getInstanceMethod([RLPCoreClient class], @selector(getJSON:completion:));
+            IMP origGet2 = method_getImplementation(getM2);
+            __block NSDictionary *mockCastState = @{
+                @"ok": @YES, @"running": @NO, @"prep": @0, @"warn": @"", @"error": @""
+            };
+            IMP mockGetImp2 = imp_implementationWithBlock(^(id _self, NSString *path, RLPJsonDone completion) {
+                if ([path isEqualToString:@"/api/upnp"] || [path hasPrefix:@"/api/cast/devices"]) {
+                    dispatch_async(dispatch_get_main_queue(), ^{
+                        if (completion) completion(@{
+                            @"ok": @YES,
+                            @"devices": @[
+                                @{ @"id": @"upnp://192.168.1.99/desc.xml", @"name": @"LivingRoom", @"kind": @"upnp" },
+                                @{ @"id": @"upnp://192.168.1.100/desc.xml", @"name": @"Study", @"kind": @"upnp" }
+                            ]
+                        });
+                    });
+                    return;
+                }
+                if ([path isEqualToString:@"/api/cast/state"]) {
+                    NSDictionary *st = mockCastState;
+                    dispatch_async(dispatch_get_main_queue(), ^{
+                        if (completion) completion(st);
+                    });
+                    return;
+                }
+                ((void (*)(id, SEL, NSString *, RLPJsonDone))origGet2)(_self, @selector(getJSON:completion:), path, completion);
+            });
+            method_setImplementation(getM2, mockGetImp2);
+
+            if ([castView respondsToSelector:NSSelectorFromString(@"loadUpnpDevices")]) {
+                [castView performSelector:NSSelectorFromString(@"loadUpnpDevices")];
+            }
+            NSPopUpButton *castDevPop = (NSPopUpButton *)FindId(v, @"sp_cast_dev");
+            WaitUntil(1.5, ^BOOL {
+                return castDevPop && castDevPop.numberOfItems >= 2 &&
+                       [castDevPop.titleOfSelectedItem containsString:@"LivingRoom"];
+            });
+            Ck(castDevPop && castDevPop.numberOfItems >= 2 &&
+               [castDevPop.titleOfSelectedItem containsString:@"LivingRoom"],
+               @"12d loadUpnpDevices 填充 sp_cast_dev 并按 upnpdev 选中 LivingRoom",
+               castDevPop ? castDevPop.titleOfSelectedItem : @"nil");
+
+            // 12e: 状态框空值隐藏，有值显示
+            NSView *prepBox = FindId(v, @"sp_cast_stat_prep_box");
+            NSView *warnBox = FindId(v, @"sp_cast_stat_warn_box");
+            NSView *errBox = FindId(v, @"sp_cast_stat_err_box");
+            if ([castView respondsToSelector:NSSelectorFromString(@"refreshState")]) {
+                [castView performSelector:NSSelectorFromString(@"refreshState")];
+            }
+            WaitUntil(1.0, ^BOOL {
+                return prepBox && warnBox && errBox && prepBox.hidden && warnBox.hidden && errBox.hidden;
+            });
+            Ck(prepBox && warnBox && errBox && prepBox.hidden && warnBox.hidden && errBox.hidden,
+               @"12e prep=0/warn='' /error='' 时三个状态框均隐藏",
+               [NSString stringWithFormat:@"prep=%d warn=%d err=%d",
+                prepBox ? prepBox.hidden : -1, warnBox ? warnBox.hidden : -1, errBox ? errBox.hidden : -1]);
+
+            mockCastState = @{
+                @"ok": @YES, @"running": @YES, @"prep": @0.45,
+                @"warn": @"Sample rate capped", @"error": @"Connection refused"
+            };
+            if ([castView respondsToSelector:NSSelectorFromString(@"refreshState")]) {
+                [castView performSelector:NSSelectorFromString(@"refreshState")];
+            }
+            WaitUntil(1.0, ^BOOL {
+                return prepBox && warnBox && errBox && !prepBox.hidden && !warnBox.hidden && !errBox.hidden;
+            });
+            method_setImplementation(getM2, origGet2);
+            Ck(prepBox && warnBox && errBox && !prepBox.hidden && !warnBox.hidden && !errBox.hidden,
+               @"12f prep>0/warn 非空/error 非空时状态框显示",
+               [NSString stringWithFormat:@"prep=%d warn=%d err=%d",
+                prepBox ? prepBox.hidden : -1, warnBox ? warnBox.hidden : -1, errBox ? errBox.hidden : -1]);
+        }
+
         [RLPTheme setThemeName:@"dark"];
         [core shutdown];
         [fm removeItemAtPath:rootDir error:nil];
