@@ -459,17 +459,23 @@ public:
             levels_ = cfg_.levels < 2 ? 2 : cfg_.levels;
         }
 
-        effectiveOrder_ = cfg_.order;
-        if (effectiveOrder_ >= 7 && levels_ == 2) {
-            if (cfg_.family == ModulatorFamily::Chebyshev) {
-                effectiveOrder_ = 5;
-                steppedDown_ = true;
+        // 2026-11-17（DSP 对抗分析已证实）：旧构造器直接取 cfg_.order，未做钳位。
+        // order<=0 让 (size_t)order 下溢、order>7 让 process() 的环路越过 NTF 系数长度
+        // （EC 家族 synthesize_ntf 内部钳到 8，系数与缓冲区不匹配）⟹ 越界读。
+        // 与播放管线共用 stable_sdm_order 收敛，保留原有的两条具体降阶理由。
+        const int requestedOrder = cfg_.order;
+        effectiveOrder_ = stable_sdm_order(requestedOrder, cfg_.fs, levels_, cfg_.family);
+        if (effectiveOrder_ != requestedOrder) {
+            steppedDown_ = true;
+            if (requestedOrder >= 7 && levels_ == 2 && cfg_.family == ModulatorFamily::Chebyshev) {
                 stepDownReason_ = "1-bit 模式下 7 阶 Chebyshev NTF 极点阻尼比过低（Q≈130），小信号下闭环极点易移出单位圆形成极限环，自动降为 5 阶保护";
-            } else if (cfg_.fs < 5.6e6) {
-                effectiveOrder_ = 5;
-                steppedDown_ = true;
+            } else if (requestedOrder >= 7 && levels_ == 2 && cfg_.fs < 5.6e6) {
                 stepDownReason_ = "采样率 (" + std::to_string((int)(cfg_.fs / 1000.0)) +
                                   " kHz) 不足 5.6 MHz，7 阶 1-bit 环路易饱和，自动降为 5 阶保护";
+            } else {
+                stepDownReason_ = "阶数 " + std::to_string(requestedOrder) +
+                                  " 在该采样率/电平下不可用，已钳位为 " + std::to_string(effectiveOrder_) +
+                                  "（见 stable_sdm_order）";
             }
         }
 
