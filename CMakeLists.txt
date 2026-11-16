@@ -1572,6 +1572,12 @@ add_executable(test_filters tests/test_filters.cpp)
 target_link_libraries(test_filters PRIVATE rtadsp)
 add_test(NAME filters COMMAND test_filters)
 
+# ---------------- 2026-11-16：U8 滤波器族标注（纯头分类器 / 展示文案）----------------
+# 判据见 tests/test_filter_family.cpp 顶部：真实名字表、负向对照、全量归族、相位正交。
+add_executable(test_filter_family tests/test_filter_family.cpp)
+target_link_libraries(test_filter_family PRIVATE rtadsp)
+add_test(NAME filter_family COMMAND test_filter_family)
+
 # PCM 回放质量量测报告工具（离线客观量测，不打开音频设备）
 add_executable(pcm_quality_report tests/pcm_quality_report.cpp)
 target_link_libraries(pcm_quality_report PRIVATE rtadsp)
