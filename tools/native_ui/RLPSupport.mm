@@ -131,49 +131,140 @@ NSString *RLPEnc(NSString *s) {
 
 #pragma mark - 轻提示
 
+@interface RLPToastBanner : NSView <NSPopoverDelegate>
+@property(nonatomic,strong) NSTextField *messageLabel;
+@property(nonatomic,strong) NSButton *detailsButton;
+@property(nonatomic,copy) NSString *fullMessage;
+@property(nonatomic,strong) NSPopover *detailsPopover;
+- (instancetype)initWithMessage:(NSString *)message details:(NSString *)details;
+- (void)reflow;
+@end
+
+@implementation RLPToastBanner
+- (instancetype)initWithMessage:(NSString *)message details:(NSString *)details {
+    self = [super initWithFrame:NSZeroRect];
+    if (!self) return nil;
+    RLPTheme *t = RLPTheme.current;
+    self.identifier = @"rlp.toast";
+    self.wantsLayer = YES;
+    self.layer.backgroundColor = [t.bg2 colorWithAlphaComponent:0.96].CGColor;
+    self.layer.cornerRadius = 9;
+    self.layer.borderWidth = 1;
+    self.layer.borderColor = t.line.CGColor;
+    self.fullMessage = details ?: message;
+    self.messageLabel = [NSTextField wrappingLabelWithString:message];
+    self.messageLabel.font = [NSFont systemFontOfSize:12.5 weight:NSFontWeightMedium];
+    self.messageLabel.textColor = t.text;
+    self.messageLabel.maximumNumberOfLines = 3;
+    self.messageLabel.lineBreakMode = NSLineBreakByTruncatingTail;
+    self.messageLabel.selectable = YES;
+    [self addSubview:self.messageLabel];
+    if (details.length) {
+        self.detailsButton = [NSButton buttonWithTitle:RLPTr(@"详情") target:self action:@selector(showDetails:)];
+        self.detailsButton.identifier = @"rlp.toast.details";
+        self.detailsButton.bezelStyle = NSBezelStyleRounded;
+        [self addSubview:self.detailsButton];
+    }
+    self.autoresizingMask = NSViewMinXMargin | NSViewMaxXMargin | NSViewMinYMargin;
+    return self;
+}
+- (void)reflow {
+    NSView *host = self.superview;
+    if (!host) return;
+    const CGFloat naturalWidth = ceil([self.messageLabel.stringValue sizeWithAttributes:@{NSFontAttributeName:self.messageLabel.font}].width);
+    const CGFloat wantedWidth = MAX(160, naturalWidth + 28 + (self.detailsButton ? 80 : 0));
+    const CGFloat width = MAX(1, MIN(MIN(520, NSWidth(host.bounds) - 32), wantedWidth));
+    const CGFloat buttonWidth = self.detailsButton ? MIN(72, width / 3) : 0;
+    const CGFloat textWidth = MAX(1, width - 28 - (buttonWidth ? buttonWidth + 8 : 0));
+    NSRect measured = [self.messageLabel.stringValue boundingRectWithSize:NSMakeSize(textWidth, CGFLOAT_MAX)
+        options:NSStringDrawingUsesLineFragmentOrigin | NSStringDrawingUsesFontLeading
+        attributes:@{NSFontAttributeName:self.messageLabel.font}];
+    const CGFloat lineHeight = ceil(self.messageLabel.font.ascender - self.messageLabel.font.descender + self.messageLabel.font.leading);
+    const CGFloat textHeight = MAX(lineHeight, MIN(ceil(NSHeight(measured)) + 2, lineHeight * 3 + 2));
+    const CGFloat height = MAX(textHeight, buttonWidth ? 24 : 0) + 16;
+    const CGFloat inset = MAX(0, MIN(72, NSHeight(host.bounds) - height - 16));
+    const CGFloat y = host.isFlipped ? NSMinY(host.bounds) + inset : NSMaxY(host.bounds) - inset - height;
+    self.frame = NSMakeRect(NSMidX(host.bounds) - width / 2, y, width, height);
+    self.messageLabel.frame = NSMakeRect(14, (height - textHeight) / 2, textWidth, textHeight);
+    self.detailsButton.frame = NSMakeRect(width - 14 - buttonWidth, (height - 24) / 2, buttonWidth, 24);
+}
+- (void)resizeWithOldSuperviewSize:(NSSize)oldSize {
+    (void)oldSize;
+    [self reflow];
+}
+- (void)showDetails:(id)sender {
+    (void)sender;
+    if (self.detailsPopover.shown) return;
+    CGFloat width = MAX(240, MIN(560, NSWidth(self.superview.bounds) - 48));
+    NSViewController *controller = [NSViewController new];
+    controller.view = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, width, 260)];
+    NSScrollView *scroll = [[NSScrollView alloc] initWithFrame:NSMakeRect(12, 48, width - 24, 200)];
+    scroll.hasVerticalScroller = YES;
+    NSTextView *text = [[NSTextView alloc] initWithFrame:scroll.contentView.bounds];
+    text.editable = NO;
+    text.selectable = YES;
+    text.richText = NO;
+    text.font = [NSFont monospacedSystemFontOfSize:12 weight:NSFontWeightRegular];
+    text.textContainerInset = NSMakeSize(8, 8);
+    text.string = self.fullMessage;
+    text.verticallyResizable = YES;
+    text.horizontallyResizable = NO;
+    text.autoresizingMask = NSViewWidthSizable;
+    text.textContainer.widthTracksTextView = YES;
+    scroll.documentView = text;
+    [controller.view addSubview:scroll];
+    NSButton *copy = [NSButton buttonWithTitle:RLPTr(@"复制诊断信息") target:self action:@selector(copyDetails:)];
+    copy.frame = NSMakeRect(width - 154, 12, 142, 28);
+    copy.bezelStyle = NSBezelStyleRounded;
+    [controller.view addSubview:copy];
+    self.detailsPopover = [NSPopover new];
+    self.detailsPopover.behavior = NSPopoverBehaviorTransient;
+    self.detailsPopover.contentViewController = controller;
+    self.detailsPopover.delegate = self;
+    [self.detailsPopover showRelativeToRect:self.detailsButton.bounds ofView:self.detailsButton preferredEdge:NSRectEdgeMinY];
+}
+- (void)copyDetails:(id)sender {
+    (void)sender;
+    [NSPasteboard.generalPasteboard clearContents];
+    [NSPasteboard.generalPasteboard setString:self.fullMessage forType:NSPasteboardTypeString];
+}
+- (void)popoverDidClose:(NSNotification *)notification {
+    (void)notification;
+    [self removeFromSuperview];
+}
+@end
+
+static void RLPShowToast(NSString *message, NSString *details) {
+    if (!message.length) return;
+    NSWindow *win = NSApp.keyWindow ?: NSApp.mainWindow;
+    if (!win) for (NSWindow *w in NSApp.windows) if (w.isVisible && w.contentView) { win = w; break; }
+    if (!win) for (NSWindow *w in NSApp.windows) if (w.contentView) { win = w; break; }
+    if (!win.contentView) return;
+    for (NSView *old in [win.contentView.subviews copy]) {
+        if (![old.identifier isEqualToString:@"rlp.toast"]) continue;
+        if ([old isKindOfClass:RLPToastBanner.class]) [((RLPToastBanner *)old).detailsPopover close];
+        [old removeFromSuperview];
+    }
+    RLPToastBanner *box = [[RLPToastBanner alloc] initWithMessage:message details:details];
+    [win.contentView addSubview:box];
+    [box reflow];
+    const double duration = details.length > 180 ? 6.0 : 1.8;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(duration * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        if (box.detailsPopover.shown) return;
+        [box removeFromSuperview];
+    });
+}
+
 void RLPToast(NSString *message) {
     if (!message.length) return;
-    // 取窗口的兜底顺序：key → main → 任何带 contentView 的可见窗口 → 任何窗口。
-    // 只有前两级的话，「应用不在前台 / 离屏审计（窗口没有 orderFront）」时轻提示会被**静默丢掉** ——
-    // 用户看不到反馈，判据也抓不到（本仓库用离屏审计验 toast 文案时就踩到）。
-    NSWindow *win = NSApp.keyWindow ?: NSApp.mainWindow;
-    if (!win) {
-        for (NSWindow *w in NSApp.windows) if (w.isVisible && w.contentView) { win = w; break; }
-    }
-    if (!win) for (NSWindow *w in NSApp.windows) if (w.contentView) { win = w; break; }
-    if (!win) return;
-    RLPTheme *t = [RLPTheme current];
-    NSTextField *label = [NSTextField labelWithString:RLPTr(message)];
-    label.font = [NSFont systemFontOfSize:12.5 weight:NSFontWeightMedium];
-    label.textColor = t.text;
-    [label sizeToFit];
-    const CGFloat padX = 14, padY = 8;
-    NSView *box = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, label.frame.size.width + padX * 2, label.frame.size.height + padY * 2)];
-    box.wantsLayer = YES;
-    box.identifier = @"rlp.toast";     // 判据/审计按 identifier 找，不靠文案匹配（文案会本地化）
-    box.layer.backgroundColor = [t.bg2 colorWithAlphaComponent:0.96].CGColor;
-    box.layer.cornerRadius = 9;
-    box.layer.borderWidth = 1;
-    box.layer.borderColor = t.line.CGColor;
-    label.frame = NSMakeRect(padX, padY, label.frame.size.width, label.frame.size.height);
-    [box addSubview:label];
-    NSView *content = win.contentView;
-    box.frame = NSMakeRect((content.bounds.size.width - box.frame.size.width) / 2,
-                           content.bounds.size.height - box.frame.size.height - 96,
-                           box.frame.size.width, box.frame.size.height);
-    box.autoresizingMask = NSViewMinXMargin | NSViewMaxXMargin | NSViewMinYMargin;
-    [content addSubview:box];
-    box.alphaValue = 0;
-    [NSAnimationContext runAnimationGroup:^(NSAnimationContext *ctx) {
-        ctx.duration = 0.12;
-        box.animator.alphaValue = 1;
-    } completionHandler:nil];
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.8 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-        [NSAnimationContext runAnimationGroup:^(NSAnimationContext *ctx) {
-            ctx.duration = 0.25;
-            box.animator.alphaValue = 0;
-        } completionHandler:^{ [box removeFromSuperview]; }];
-    });
+    RLPShowToast(RLPTr(message), message.length > 180 ? message : nil);
+}
+
+void RLPPlaybackErrorToast(NSString *error) {
+    NSString *summary = error;
+    if ([error containsString:@"coreaudio_rendered=0"]) summary = RLPTr(@"音频设备未开始输出，播放已停止。");
+    else if (error.length > 180) summary = RLPTr(@"播放失败，请查看详细信息。");
+    RLPShowToast(summary, error);
 }
 
 void RLPAlert(NSString *title, NSString *message) {

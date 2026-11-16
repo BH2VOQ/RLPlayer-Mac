@@ -1372,6 +1372,11 @@ if(APPLE)
   target_link_libraries(test_coreaudio PRIVATE ${RL_PLATFORM_LIBS})
   add_test(NAME coreaudio COMMAND test_coreaudio --no-open)
 
+  add_executable(test_coreaudio_buffer_config tests/test_coreaudio_buffer_config.cpp)
+  target_include_directories(test_coreaudio_buffer_config PRIVATE ${CMAKE_SOURCE_DIR}/src)
+  target_link_libraries(test_coreaudio_buffer_config PRIVATE ${RL_PLATFORM_LIBS})
+  add_test(NAME coreaudio_buffer_config COMMAND test_coreaudio_buffer_config)
+
   # 回环逐位比对工具（Aggregate Tap / 虚拟设备输入侧；默认电平 -60 dBFS）
   # rtaloop_tap.mm：CATapDescription/AudioHardwareCreateProcessTap 是 ObjC++ 门控，
   # 拆成薄包装给纯 C++ 主文件用（见该文件头注）

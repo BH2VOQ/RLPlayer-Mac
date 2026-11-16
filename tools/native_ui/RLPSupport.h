@@ -54,6 +54,8 @@ NSString *RLPEnc(NSString *s);
 
 /// 轻提示（非模态，1.8s 淡出）。用于"已加入队列""已收藏"这类反馈。
 void RLPToast(NSString *message);
+/// 播放错误显示短摘要，完整诊断按需查看/复制。
+void RLPPlaybackErrorToast(NSString *error);
 
 /// 模态提示（必须让用户看见的失败；例如更新失败）。主线程调用。
 void RLPAlert(NSString *title, NSString *message);

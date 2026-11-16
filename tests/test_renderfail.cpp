@@ -291,7 +291,7 @@ int main() {
         ck(contains(m, "last_pad=9600"), "failMsg 含 last_pad（恒满 = 事故特征）", m);
         ck(contains(m, "GetBuffer HRESULT=-999"), "failMsg 含 GetBuffer HRESULT", m);
         ck(contains(m, "High Definition Audio Device") && contains(m, "a18ee6ff"), "failMsg 含设备名与端点 id", m);
-        ck(contains(m, "已自动回退"), "可回退时 failMsg 说明已回退共享", m);
+        ck(contains(m, "将尝试 CoreAudio 共享") && !contains(m, "已自动回退"), "渲染循环仅请求回退，不提前声称已完成", m);
         bool logged = false;
         for (const auto& s : b.logs) if (s.find("RENDERFAIL") != std::string::npos) logged = true;
         ck(logged, "RENDERFAIL 同步进了播放日志（play_log 钩子）");
@@ -314,7 +314,7 @@ int main() {
         auto h = b.make(/*fallbackOk=*/false, /*dop=*/false);
         FakeDeadSink sink;
         rta::render::render_loop(sink, h);
-        ck(h.renderFail && contains(h.failMsg, "WASAPI 共享"),
+        ck(h.renderFail && contains(h.failMsg, "CoreAudio 共享"),
            "不可回退场景 failMsg 建议切换共享", h.failMsg);
     }
 

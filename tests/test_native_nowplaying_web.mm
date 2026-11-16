@@ -614,6 +614,28 @@ int main(){@autoreleasepool{
     [[NSRunLoop currentRunLoop] runUntilDate:[NSDate dateWithTimeIntervalSinceNow:2.6]];
     ck(find(win.contentView,@"rlp.toast")==nil,"toast 自动消失（不常驻、不挡播放页）");
   }
+  NSString *diagnostic = [@"设备未接受数据 coreaudio_rendered=0 device=Pocket Master Audio " stringByPaddingToLength:3000 withString:@"w0=3377 wr=71 pad=full " startingAtIndex:0];
+  RLPToast(diagnostic);
+  RLPToast(diagnostic);
+  NSMutableArray<NSView *> *banners = [NSMutableArray array];
+  for (NSView *candidate in win.contentView.subviews) if ([candidate.identifier isEqualToString:@"rlp.toast"]) [banners addObject:candidate];
+  NSView *longBanner = banners.lastObject;
+  ck(banners.count == 1, "长诊断提示替换旧提示，不重复堆叠");
+  ck(longBanner && NSContainsRect(win.contentView.bounds, longBanner.frame) && NSWidth(longBanner.frame) <= 520 && NSHeight(longBanner.frame) <= 100,
+     "长诊断提示限宽限高且完全位于窗口内");
+  ck(find(longBanner, @"rlp.toast.details") != nil, "长诊断提供详情入口而不是横向铺开原始日志");
+  ck([[longBanner valueForKey:@"fullMessage"] isEqualToString:diagnostic], "详情保留完整诊断原文");
+  [win setContentSize:NSMakeSize(320,700)];
+  [win.contentView layoutSubtreeIfNeeded];
+  ck(NSContainsRect(win.contentView.bounds, longBanner.frame), "窗口缩窄后错误提示仍在边界内");
+  RLPPlaybackErrorToast(diagnostic);
+  NSView *summaryBanner = (NSView *)find(win.contentView,@"rlp.toast");
+  BOOL rawStatsVisible = NO;
+  for(NSView *node in summaryBanner.subviews) if([node isKindOfClass:NSTextField.class] && [((NSTextField *)node).stringValue containsString:@"coreaudio_rendered"]) rawStatsVisible=YES;
+  ck(!rawStatsVisible && [[summaryBanner valueForKey:@"fullMessage"] isEqualToString:diagnostic], "播放错误只显示摘要但不丢失原始诊断");
+  [win setContentSize:NSMakeSize(900,700)];
+  RLPToast(@"完成");
+  [[NSRunLoop currentRunLoop] runUntilDate:[NSDate dateWithTimeIntervalSinceNow:2.6]];
   // 不 close：离屏测试没有 run loop 收尾，关窗会在 dealloc 顺序上踩到 objc_release 崩溃
   // （判据已经在窗口里量完，保留到进程结束即可，测试进程本就短命）。
   [win orderOut:nil];

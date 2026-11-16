@@ -3573,7 +3573,7 @@ static NSString *RLPNowPlayingCastDeviceLabel(NSString *device) {
         if (st.error.length) {
             if (![st.error isEqualToString:self_.lastStatusError ?: @""]) {
                 self_.lastStatusError = st.error;
-                RLPToast(st.error);
+                RLPPlaybackErrorToast(st.error);
             }
         } else {
             self_.lastStatusError = nil;

@@ -2354,6 +2354,9 @@ public:
         return "unknown";
     }
     size_t frames_rendered() const { return ao_->frames_rendered(); }
+    uint64_t render_callbacks() const { auto* ca = dynamic_cast<rta::platform::CoreAudioOutput*>(ao_.get()); return ca ? ca->render_callbacks() : 0; }
+    UInt32 maximum_slice_frames() const { auto* ca = dynamic_cast<rta::platform::CoreAudioOutput*>(ao_.get()); return ca ? ca->maximum_slice_frames() : 0; }
+    OSStatus last_render_status() const { auto* ca = dynamic_cast<rta::platform::CoreAudioOutput*>(ao_.get()); return ca ? ca->last_render_status() : noErr; }
     uint64_t underruns() const { return ao_->underruns(); }
     bool bit_perfect() const { return ao_->bit_perfect(); }
     // 2026-10-25：接管后音量条的起点 dB（原硬件音量的等效值）。
@@ -4063,7 +4066,7 @@ static BigIspScan scan_isp_blocks(PlaySource& src, size_t fromFrame, size_t limi
 //
 // sharedFallback（可选出参）：独占流 RENDERFAIL（设备持续不接受数据）且允许回退时置 true，
 // 由 play_one 包装层决定是否以 wasapi-shared 重开整条播放；extraNote：回退重入时追加到
-// note/ps.info/信号链的说明（"独占流无响应,已回退 WASAPI 共享"）。
+// note/ps.info/信号链的说明（"独占流无响应,已回退 CoreAudio 共享"）。
 // 参数名用 pIn 而不是 p：函数体里会先做一次「EQ/IR 配置兜底」得到 pE，
 // 然后 `const PlayParams& p = pE;` —— 让下面几百行原有的 p.* 全部自动用上兜底结果，
 // 一个字符都不用改（改动面最小 = 回归面最小）。
@@ -5676,7 +5679,10 @@ static bool play_one_impl(const std::string& file, const PlayParams& pIn, rta::a
             if (auto* ca = dynamic_cast<CoreAudioSink*>(sink.get())) {
                 return "coreaudio_rendered=" + std::to_string(ca->frames_rendered()) +
                        " underruns=" + std::to_string(ca->underruns()) +
-                       " bp=" + (ca->bit_perfect() ? "1" : "0");
+                       " bp=" + (ca->bit_perfect() ? "1" : "0") +
+                       " render_callbacks=" + std::to_string(ca->render_callbacks()) +
+                       " max_slice=" + std::to_string(ca->maximum_slice_frames()) +
+                       " render_status=" + std::to_string(ca->last_render_status());
             }
             return std::string();
         };
@@ -5786,7 +5792,7 @@ static bool play_one(const std::string& file, const PlayParams& p, rta::audio::A
     const std::string where = resume
         ? ("已从 " + std::to_string(posSec) + "s(frac=" + std::to_string(frac) + ")续播")
         : "位置不足(未输出帧)，从 0s 重开";
-    play_log("FALLBACK_SHARED 独占流无响应,回退 WASAPI 共享(非 bit-perfect) " + where +
+    play_log("FALLBACK_SHARED 独占流无响应,回退 CoreAudio 共享(非 bit-perfect) " + where +
              " played=" + std::to_string(playedFrames) + "/" + std::to_string(totalFrames) +
              " file=" + file);
     { std::lock_guard<std::mutex> lk(ps.mtx); ps.error.clear(); }
@@ -5797,7 +5803,7 @@ static bool play_one(const std::string& file, const PlayParams& p, rta::audio::A
         if (!ps.outFallbackWhy.empty()) ps.outFallbackWhy += "；";
         ps.outFallbackWhy += where;
     }
-    const std::string note = "独占流无响应,已回退 WASAPI 共享(非 bit-perfect)，" + where;
+    const std::string note = "独占流无响应,已回退 CoreAudio 共享(非 bit-perfect)，" + where;
     return play_one_impl(file, p2, buf, nullptr, note);
 }
 

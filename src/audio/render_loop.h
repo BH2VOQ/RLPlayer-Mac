@@ -642,7 +642,6 @@ inline void render_loop(OutSink& sink, RenderHost& h) {
                 fs.setf(std::ios::fixed); fs.precision(2);
                 fs << "RENDERFAIL 设备流 " << (tAfter - timeoutT0) << " 秒未接受数据"
                    << "（连续 " << timeouts << " 轮未写入）"
-                   << "（疑似虚拟声卡/独占模式不可用）"
                    << " w0=" << h.dbgW0->load() << " wr=" << h.dbgWr->load();
                 // 与 STAT 同一口径：把「写不进去」的成因一并带出（不支持计数的后端省略）。
                 // w0 本身混着「缓冲满」「喂不上一个周期」「可用空间不足一个周期」三种互斥成因，
@@ -657,13 +656,13 @@ inline void render_loop(OutSink& sink, RenderHost& h) {
                    << " device=\"" << h.deviceLabel << "\""
                    << " id=" << (h.deviceIdDesc.empty() ? "(默认)" : h.deviceIdDesc);
                 if (h.fallbackEligible)
-                    fs << "。设备独占流持续不接受数据,已自动回退 WASAPI 共享模式(非 bit-perfect)。";
+                    fs << "。设备独占流停止消费数据，将尝试 CoreAudio 共享模式（非 bit-perfect）。";
                 else if (h.dop)
                     fs << "。DoP/DSD 不能回退共享模式(共享会重采样破坏 DoP 载波),请改用独占可用的设备。";
                 else if (h.onShared)
                     fs << "。共享模式也未接受数据(设备/系统混音异常),请检查音频设备状态,或改用独占模式。";
                 else
-                    fs << "。建议在设置中切换「WASAPI 共享」(兼容虚拟机/独占不可用,非 bit-perfect)或改用独占。";
+                    fs << "。建议在设置中切换「CoreAudio 共享」（非 bit-perfect）或改用独占。";
                 h.failMsg = fs.str();
                 h.renderFail = true;
                 if (h.log) h.log(h.failMsg);
@@ -741,7 +740,7 @@ inline void render_loop(OutSink& sink, RenderHost& h) {
                         // 所以处置建议不同 —— 优先怀疑缓冲/周期配置与实时优先级，而非设备不可用。
                         ss << "。设备流仍在工作但供给不足："
                               "请把设置里的缓冲调大（如 100ms→200ms），关闭其它独占该设备的程序，"
-                              "或在设置中切换 WASAPI 共享以绕开独占周期约束。";
+                              "或在设置中切换 CoreAudio 共享以绕开独占周期约束。";
                         h.failMsg = ss.str();
                         h.failThroughput = got;
                         h.renderFail = true;

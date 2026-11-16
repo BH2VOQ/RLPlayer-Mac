@@ -43,6 +43,7 @@
 #include "audio/phys_format.h"   // 设备物理格式选择判据（真 bit-perfect 的前提）
 #include "platform/macos/pcm_format_validation.h"
 #include "platform/macos/airplay_policy.h"
+#include "platform/macos/output_buffer_config.h"
 #include "platform/macos/dop_silence_fill.h"   // 1.1.2 P0-3：欠载时的合法 DoP 静音帧
 
 namespace rta::platform {
@@ -672,6 +673,7 @@ inline void pack_sample_i32(uint8_t* dst, int32_t s, int bits) {
 } // namespace detail
 
 class CoreAudioOutput final : public AudioOutput {
+    friend struct CoreAudioOutputOfflineAccess;
 public:
     CoreAudioOutput() = default;
     ~CoreAudioOutput() override { close(); }
@@ -1192,35 +1194,20 @@ public:
         else clientPacking_ = macos::ContainerPacking::Int32;
         clientBits_ = (uint32_t)clientPackBits;
 
-        // 6) 缓冲帧数：
-        // 若为 AirPlay 设备（isAirPlay），严禁硬套本地 bufferMs，采用设备实际 buffer size
-        UInt32 frames = 0;
-        if (isAirPlay && actualDevCaps.currentBufferFrames >= 32) {
-            frames = (UInt32)actualDevCaps.currentBufferFrames;
-        } else {
-            frames = (UInt32)((double)rate_ * buffer_ms_ / 1000.0);
-            if (frames < 32) frames = 32;
-            ::AudioUnitSetProperty(unit_, kAudioDevicePropertyBufferFrameSize,
-                                   kAudioUnitScope_Global, 0, &frames, sizeof(frames));
+        // Device period and AudioUnit processing budget are separate properties.
+        UInt32 requestedFrames = (UInt32)std::max(32.0, (double)rate_ * buffer_ms_ / 1000.0);
+        macos::OutputBufferApi bufferApi;
+        const auto bufferConfig = macos::configure_output_buffers(device_, unit_, requestedFrames,
+                                                                  !shared_ && !isAirPlay, bufferApi);
+        if (bufferConfig.status != noErr) {
+            const OSStatus bufferStatus = bufferConfig.status;
+            close_locked();
+            fail(OutputError::StartFailed, "无法确认设备缓冲或配置 AUHAL 渲染切片（OSStatus=" + std::to_string((int)bufferStatus) + "）");
+            return false;
         }
-
-        // 读回实际生效的 buffer frame size 并检查校验
-        UInt32 actualBufferFrames = 0;
-        UInt32 bufSizeVal = sizeof(actualBufferFrames);
-        if (::AudioUnitGetProperty(unit_, kAudioDevicePropertyBufferFrameSize,
-                                   kAudioUnitScope_Global, 0, &actualBufferFrames, &bufSizeVal) == noErr &&
-            actualBufferFrames >= 32) {
-            frames = actualBufferFrames;
-        }
-        // ⚠️ 兜底：AirPlay 且设备没报 currentBufferFrames、读回也失败时 frames 会是 0。
-        // 0 会让 buffer_frames() 返回 0 ⟹ 渲染循环只能拿 4096 的猜测周期，而环形缓冲
-        // 却按 1024 分配，等于人为把吞吐压到 1/4。这里退回 bufferMs 折算，绝不返回 0。
-        if (frames < 32) {
-            frames = (UInt32)((double)rate_ * (buffer_ms_ > 0.0 ? buffer_ms_ : 100.0) / 1000.0);
-            if (frames < 32) frames = 32;
-        }
-
+        const UInt32 frames = bufferConfig.frames;
         buffer_frames_ = frames;
+        maximum_slice_frames_ = bufferConfig.maximumSlice;
         // 2026-10-25：IO 周期帧数 = 设备的 buffer frame size。ZeroAttrib 用它判
         // 「供料不足一个周期」（等价 WASAPI 的 per）。
         io_period_frames_ = (size_t)frames;
@@ -1387,6 +1374,16 @@ public:
     size_t frames_written() const override { return frames_written_; }
     size_t frames_rendered() const override { return frames_rendered_.load(); }
     uint64_t underruns() const override { return underruns_.load(); }
+    uint64_t render_callbacks() const { return render_callbacks_.load(); }
+    UInt32 maximum_slice_frames() const { return maximum_slice_frames_; }
+    OSStatus last_render_status() const {
+        std::lock_guard<std::mutex> lk(mu_);
+        if (!unit_) return kAudio_ParamError;
+        OSStatus status = noErr;
+        UInt32 n = sizeof(status);
+        const auto query = ::AudioUnitGetProperty(unit_, kAudioUnitProperty_LastRenderError, kAudioUnitScope_Global, 0, &status, &n);
+        return query == noErr ? status : query;
+    }
 
     // ---------------- 欠载归因（与 WASAPI 侧同名同义，2026-10-25 移植）----------------
     // 对应原来 WasapiOutput::zero_pad_full / zero_starved / last_zero_reason。
@@ -1661,7 +1658,9 @@ private:
                                       const AudioTimeStamp* /*ts*/, UInt32 /*bus*/,
                                       UInt32 frames, AudioBufferList* io) {
         auto* self = static_cast<CoreAudioOutput*>(refcon);
-        if (!self || !io) return noErr;
+        if (!self) return noErr;
+        self->render_callbacks_.fetch_add(1, std::memory_order_relaxed);
+        if (!io) return noErr;
         self->render(frames, io);
         return noErr;
     }
@@ -1692,7 +1691,8 @@ private:
         const size_t bytes_per_sample = (size_t)(packBits / 8);
         const size_t frame_bytes = bytes_per_sample * ch;
         // 设备请求的帧数 = 字节数 / 每帧字节数（不能用 int32 宽度反推！）
-        const size_t out_frames = frame_bytes ? (io->mBuffers[0].mDataByteSize / frame_bytes) : 0;
+        const size_t out_frames = std::min<size_t>(frames, frame_bytes ? (io->mBuffers[0].mDataByteSize / frame_bytes) : 0);
+        if (!out || out_frames == 0) return;
 
         // ---- 1.1.2 P0-3 后续：DoP 输出整段委托给纯函数（dop_silence_fill.h）----
         //
@@ -1751,7 +1751,7 @@ private:
             std::memset(out + i * frame_bytes, 0, frame_bytes * (out_frames - i));
             underruns_.fetch_add(1);
         }
-        read_pos_ = (read_pos_ + take) % capacity;
+        read_pos_ = (read_pos_ + i) % capacity;
         frames_rendered_.fetch_add(out_frames);
     }
 
@@ -1804,6 +1804,8 @@ private:
         underruns_.store(0);
         gain_.store(1.0, std::memory_order_relaxed);
         buffer_frames_ = 0;
+        maximum_slice_frames_ = 0;
+        render_callbacks_.store(0);
         devicePacking_ = macos::ContainerPacking::Packed16;
         deviceEffectiveBits_ = 0;
         deviceContainerBits_ = 0;
@@ -1869,13 +1871,16 @@ private:
     std::atomic<uint32_t> dopDeviceRate_{0};
     std::atomic<bool> dopExclusiveRateOk_{false};
     size_t buffer_frames_ = 0;
-    size_t frames_written_ = 0;
+    UInt32 maximum_slice_frames_ = 0;
+    std::atomic<uint64_t> render_callbacks_{0};
+    std::atomic<size_t> frames_written_{0};
 
     // 环形缓冲（帧）
     std::vector<int32_t> ring_;
     size_t ring_frames_ = 0;
-    size_t write_pos_ = 0;
-    size_t read_pos_ = 0;
+    // Single producer / single callback: publish PCM before advancing the write cursor.
+    std::atomic<size_t> write_pos_{0};
+    std::atomic<size_t> read_pos_{0};
     std::atomic<uint64_t> underruns_{0};
     std::atomic<size_t> frames_rendered_{0};
 
