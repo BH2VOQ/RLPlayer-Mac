@@ -253,6 +253,17 @@ int main() {
         ck(top >= 5 && top <= 6, "16 bin 时脉冲落在 bin 5/6", "实际=" + std::to_string(top));
     }
 
+    // ---- 严格解析：整串必须是数字，垃圾值不再被静默接受 ----
+    std::printf("\n[bins 严格解析] bins=300abc\n");
+    {
+        const std::string got = call("GET", base + "&bins=300abc");
+        ck(status() == 200, "bins=300abc → 200（垃圾值不报错）");
+        const rta::net::Json j = rta::net::json_parse(got);
+        ck(j["ok"].b, "bins=300abc ok:true");
+        ck((int)j["bins"].n() == 512, "整串非数字 ⇒ 保持默认 512（不再静默当 300）",
+           "实际=" + std::to_string((int)j["bins"].n()));
+    }
+
     // ---- CUE 区间：cs/ce 只算该段 ----
     std::printf("\n[CUE 区间] cs=9.5&ce=10.5\n");
     {

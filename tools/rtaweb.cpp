@@ -1405,7 +1405,8 @@ static void waveform_parse_query(const std::string& path, std::string* file,
                 const char* s = v.c_str();
                 char* end = nullptr;
                 const long long n = std::strtoll(s, &end, 10);
-                if (end != s) {
+                // 2026-11-16 评审 NIT：必须整串都是数字，否则保持默认（不把 300abc 静默当 300）。
+                if (end != s && *end == '\0') {
                     const long long lo = (long long)rta::analysis::WaveformAccumulator::kMinBins;
                     const long long hi = (long long)rta::analysis::WaveformAccumulator::kMaxBins;
                     *bins = (size_t)(n < lo ? lo : (n > hi ? hi : n));
