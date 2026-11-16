@@ -39,6 +39,10 @@ static NSArray<NSString *> *g_items;
 static NSArray *g_cues;
 static NSString *g_lrcA;
 static NSString *g_lrcB;
+static BOOL g_holdLyrics = NO;
+static NSMutableArray<NSDictionary *> *g_heldLyrics;
+static BOOL g_holdLyricAi = NO;
+static NSMutableArray<RLPJSONCompletion> *g_heldLyricAi;
 
 static NSString *LrcA(void) {
     // 6 行带时间戳：第 5 行 t=40s，dur=100 ⟹ pos=0.4000（web toFixed(4) 同口径）
@@ -71,15 +75,28 @@ static void DeliverAsync(RLPJSONCompletion done, NSDictionary *json) {
     }
     if ([path hasPrefix:@"/api/lyrics?file="]) {
         // 用 fixture 里的曲目路径判断是哪一首（请求里是百分号编码的 file=）
-        DeliverAsync(done, [path containsString:RLPEnc(g_items.lastObject)]
-            ? @{ @"ok": @YES, @"lrc": LrcB() } : @{ @"ok": @YES, @"lrc": LrcA() });
+        NSDictionary *resp = [path containsString:RLPEnc(@"/Music/B/B.flac")]
+            ? @{ @"ok": @YES, @"lrc": LrcB() } : @{ @"ok": @YES, @"lrc": LrcA() };
+        if (g_holdLyrics) {
+            [g_heldLyrics addObject:@{ @"path": path, @"done": [done copy], @"resp": resp }];
+            return;
+        }
+        DeliverAsync(done, resp);
         return;
     }
     DeliverAsync(done, @{ @"ok": @NO });
 }
 - (void)getData:(NSString *)path completion:(RLPDataCompletion)done { (void)path; if (done) done(nil); }
 - (void)postJSON:(NSString *)path body:(NSString *)body completion:(RLPJSONCompletion)done {
-    [g_posts addObject:@{ @"path": path ?: @"", @"body": body ?: @"" }];
+    [g_posts addObject:@{ @"path": path ?: @"" , @"body": body ?: @"" }];
+    if ([path isEqualToString:@"/api/lyrics/ai"]) {
+        if (g_holdLyricAi && done) {
+            [g_heldLyricAi addObject:[done copy]];
+            return;
+        }
+        DeliverAsync(done, @{ @"ok": @YES, @"lines": @[ @"AI 1", @"AI 2", @"AI 3", @"AI 4", @"AI 5", @"AI 6" ] });
+        return;
+    }
     // 模拟真实后端：/api/play 之后队列 index 指向被点的那一首（歌词跟随即由队列驱动）
     if ([path hasPrefix:@"/api/play"]) {
         for (NSUInteger i = 0; i < g_items.count; ++i)
@@ -122,6 +139,7 @@ static void ClickView(NSView *v) {
     [v mouseDown:e];
 }
 static NSTextField *RowLabel(NSView *row) {
+    if ([row isKindOfClass:[NSTextField class]]) return (NSTextField *)row;
     for (NSView *v in row.subviews) if ([v isKindOfClass:[NSTextField class]]) return (NSTextField *)v;
     return nil;
 }
@@ -150,6 +168,10 @@ int main() {
         [app setActivationPolicy:NSApplicationActivationPolicyAccessory];
         g_gets = [NSMutableArray array];
         g_posts = [NSMutableArray array];
+        g_heldLyrics = [NSMutableArray array];
+        g_heldLyricAi = [NSMutableArray array];
+        g_holdLyrics = NO;
+        g_holdLyricAi = NO;
         g_items = @[ @"/Music/A/A.flac", @"/Music/B/B.flac" ];
         g_cues = @[ @[ @(-1), @(-1) ], @[ @(-1), @(-1) ] ];
         g_curIndex = 0;
@@ -239,6 +261,107 @@ int main() {
                "点队列行后重拉歌词", g_gets.lastObject[@"path"] ?: @"");
             Ck(StackHasText(lbox, @"BRAVO"), "点队列切歌后歌词内容变成 B", @"仍是 A 的歌词");
         }
+
+        // ---- D3a：队列清空（!nowPath.length）→ 触发歌词空态并清空残留状态/禁用右键菜单 ----
+        g_items = @[ @"/Music/A/A.flac", @"/Music/B/B.flac" ];
+        g_curIndex = 0;
+        Pump(1.15);
+        Ck(StackHasText(lbox, @"ALPHA"), "D3a 前置：回到 A", @"");
+        g_items = @[];
+        g_cues = @[];
+        g_curIndex = -1;
+        Pump(1.15);
+        Ck(StackHasText(lbox, @"还没有播放曲目"), "D3a 空队列切歌后歌词区显示空态", @"仍残留上一首或空白");
+        Ck(!StackHasText(lbox, @"ALPHA"), "D3a 空队列后不再残留 A 的歌词", @"");
+        Ck([(NSArray *)[d valueForKey:@"lines"] count] == 0, "D3a 空队列后 lines 清空", @"");
+        [(id<NSMenuDelegate>)d menuWillOpen:lbox.menu];
+        BOOL anyAiEnabledOnEmpty = NO;
+        for (NSMenuItem *it in lbox.menu.itemArray) {
+            if (!it.isSeparatorItem && it.enabled) anyAiEnabledOnEmpty = YES;
+        }
+        Ck(!anyAiEnabledOnEmpty, "D3a 空队列后歌词右键菜单全部禁用", @"仍有启用的菜单项");
+
+        // ---- D3b：网络曲目（http/https）→ 清空残留歌词与 AI 状态，右键菜单禁用 ----
+        g_items = @[ @"/Music/A/A.flac", @"/Music/B/B.flac" ];
+        g_curIndex = 0;
+        Pump(1.15);
+        Ck(StackHasText(lbox, @"ALPHA"), "D3b 前置：加载 A 的歌词", @"");
+        g_items = @[ @"https://example.com/live.flac" ];
+        g_cues = @[ @[ @(-1), @(-1) ] ];
+        g_curIndex = 0;
+        Pump(1.15);
+        Ck(StackHasText(lbox, @"网络曲目暂无歌词"), "D3b 网络曲目显示无歌词提示", @"");
+        Ck([(NSArray *)[d valueForKey:@"lines"] count] == 0, "D3b 网络曲目清空 lines", @"");
+        [(id<NSMenuDelegate>)d menuWillOpen:lbox.menu];
+        BOOL anyAiEnabledOnNet = NO;
+        for (NSMenuItem *it in lbox.menu.itemArray) {
+            if (!it.isSeparatorItem && it.enabled) anyAiEnabledOnNet = YES;
+        }
+        Ck(!anyAiEnabledOnNet, "D3b 网络曲目歌词右键菜单全部禁用", @"仍有启用的菜单项");
+
+        // ---- D3c：/api/lyrics 迟到回包不得覆盖新歌 ----
+        g_items = @[ @"/Music/A/A.flac", @"/Music/B/B.flac" ];
+        g_cues = @[ @[ @(-1), @(-1) ], @[ @(-1), @(-1) ] ];
+        g_curIndex = 0;
+        g_holdLyrics = YES;
+        [g_heldLyrics removeAllObjects];
+        Pump(1.15); // 发起 A 的 /api/lyrics（被 hold）
+        g_holdLyrics = NO;
+        g_curIndex = 1;
+        Pump(1.15); // 切到 B，B 的 /api/lyrics 立即返回
+        Ck(StackHasText(lbox, @"BRAVO"), "D3c 新歌 B 的歌词先到达并显示", @"");
+        if (g_heldLyrics.count) {
+            NSDictionary *lateA = g_heldLyrics.firstObject;
+            RLPJSONCompletion doneA = lateA[@"done"];
+            doneA(lateA[@"resp"]);
+            Pump(0.05);
+        }
+        Ck(StackHasText(lbox, @"BRAVO") && !StackHasText(lbox, @"ALPHA"),
+           "D3c 旧歌 A 的迟到 /api/lyrics 回包不得覆盖新歌 B", @"被旧歌覆盖");
+
+        // ---- D3d：旧歌 AI 未完成切歌不锁死新歌，旧 AI 迟到回包被丢弃 ----
+        g_curIndex = 0;
+        Pump(1.15);
+        Ck(StackHasText(lbox, @"ALPHA"), "D3d 前置：回到 A", @"");
+        g_holdLyricAi = YES;
+        [g_heldLyricAi removeAllObjects];
+        [d performSelector:@selector(runLyricAiTask:lang:) withObject:@"translate" withObject:@"en"];
+        Ck([[d valueForKey:@"lyricAiBusy"] boolValue] == YES, "D3d A 发起 AI 后进入 busy", @"");
+        g_curIndex = 1;
+        Pump(1.15); // 切到 B
+        Ck([[d valueForKey:@"lyricAiBusy"] boolValue] == NO,
+           "D3d 切到新歌 B 后旧歌 AI 不得锁死新歌（lyricAiBusy==NO）", @"仍被旧歌锁死");
+        if (g_heldLyricAi.count) {
+            RLPJSONCompletion aiDoneA = g_heldLyricAi.firstObject;
+            aiDoneA(@{ @"ok": @YES, @"lines": @[ @"OLD_AI_1", @"OLD_AI_2", @"OLD_AI_3", @"OLD_AI_4", @"OLD_AI_5", @"OLD_AI_6" ] });
+            Pump(0.05);
+        }
+        g_holdLyricAi = NO;
+        Ck(StackHasText(lbox, @"BRAVO") && !StackHasText(lbox, @"OLD_AI_1"),
+           "D3d 旧歌 A 的迟到 AI 回包不得污染新歌 B", @"B 被旧歌 AI 覆盖");
+
+        // ---- D3e：deleteIndex: 发送 RLPQueueChangedNotification ----
+        __block NSInteger qChangedCount = 0;
+        id qObs = [[NSNotificationCenter defaultCenter] addObserverForName:RLPQueueChangedNotification
+                                                                    object:nil
+                                                                     queue:[NSOperationQueue mainQueue]
+                                                                usingBlock:^(NSNotification *n) {
+            (void)n;
+            ++qChangedCount;
+        }];
+        {
+            NSMethodSignature *sig = [d methodSignatureForSelector:@selector(deleteIndex:)];
+            NSInvocation *inv = [NSInvocation invocationWithMethodSignature:sig];
+            [inv setTarget:d];
+            [inv setSelector:@selector(deleteIndex:)];
+            NSInteger idx0 = 0;
+            [inv setArgument:&idx0 atIndex:2];
+            [inv invoke];
+        }
+        Pump(0.05);
+        [[NSNotificationCenter defaultCenter] removeObserver:qObs];
+        Ck(qChangedCount >= 1, "D3e deleteIndex: 发送 RLPQueueChangedNotification",
+           [NSString stringWithFormat:@"count=%ld", (long)qChangedCount]);
 
         std::printf("结果：%d passed, %d failed\n", g_pass, g_fail);
         return g_fail == 0 ? 0 : 1;

@@ -42,9 +42,18 @@ static void Ck(BOOL ok, const char *what, NSString *detail) {
 
 @interface RLPNavSpy : NSObject
 @property (nonatomic, assign) BOOL albumsEmpty;
+@property (nonatomic, assign) BOOL holdSettingsGet;
+@property (nonatomic, copy, nullable) RLPJSONCompletion heldSettingsGet;
+@property (nonatomic, assign) BOOL failSettingsPost;
+@property (nonatomic, copy) NSString *serverUiMode;
 @end
 
 @implementation RLPNavSpy
+- (instancetype)init {
+    self = [super init];
+    if (self) _serverUiMode = @"listen";
+    return self;
+}
 - (BOOL)started { return YES; }
 - (BOOL)startEmbedded { return NO; }
 - (void)shutdown { }
@@ -59,12 +68,20 @@ static void Ck(BOOL ok, const char *what, NSString *detail) {
 }
 - (void)getJSON:(NSString *)path completion:(RLPJSONCompletion)done {
     if (!done) return;
+    if ([path hasPrefix:@"/api/settings"] && self.holdSettingsGet) {
+        self.heldSettingsGet = done;
+        return;
+    }
     NSDictionary *json = [self fixtureForPath:path ?: @""];
     dispatch_async(dispatch_get_main_queue(), ^{ done(json); });
 }
 - (void)postJSON:(NSString *)path body:(NSString *)body completion:(RLPJSONCompletion)done {
-    (void)path; (void)body;
+    (void)body;
     if (!done) return;
+    if ([path isEqualToString:@"/api/settings"] && self.failSettingsPost) {
+        dispatch_async(dispatch_get_main_queue(), ^{ done(@{ @"ok": @NO }); });
+        return;
+    }
     dispatch_async(dispatch_get_main_queue(), ^{ done(@{ @"ok": @YES }); });
 }
 - (void)getData:(NSString *)path completion:(RLPDataCompletion)done {
@@ -123,7 +140,9 @@ static void Ck(BOOL ok, const char *what, NSString *detail) {
     if ([path hasPrefix:@"/api/entity/versions"]) {
         return @{ @"ok": @YES, @"performances": @[], @"distinctCount": @0, @"releaseCount": @0 };
     }
-    if ([path hasPrefix:@"/api/settings"]) return @{ @"ok": @YES };
+    if ([path hasPrefix:@"/api/settings"]) {
+        return @{ @"ok": @YES, @"kv": @{ @"uimode": self.serverUiMode ?: @"listen" } };
+    }
     if ([path hasPrefix:@"/api/devices"]) return @{ @"ok": @YES, @"devices": @[] };
     if ([path hasPrefix:@"/api/filters"]) return @{ @"ok": @YES, @"items": @[] };
     if ([path hasPrefix:@"/api/cast/state"]) return @{ @"ok": @YES, @"running": @NO, @"device": @"" };
@@ -361,6 +380,112 @@ int main() {
            "从深层详情发 RLPNavigateKeyNotification(\"queue\") 清栈并隐藏 top.back",
            [NSString stringWithFormat:@"vc=%@ hidden=%d stack=%lu",
             NSStringFromClass(wc.currentContent.class), backBtn.hidden, (unsigned long)StackCount(wc)]);
+
+        // ---- 4a. RLPTopbarView -layout 有返回栈时标题不得压住返回按钮 ----
+        [wc.sidebar selectKey:@"albums"];
+        Pump(0.05);
+        RLPRequestOpenAlbum(@"/Music/ABBA/Arrival");
+        Pump(0.05);
+        [wc.window.contentView setFrameSize:NSMakeSize(1100, 800)];
+        [wc.window.contentView layoutSubtreeIfNeeded];
+        NSTextField *topTitle = (NSTextField *)[wc valueForKey:@"pageTitle"];
+        Ck(backBtn.hidden == NO && topTitle.frame.origin.x >= CGRectGetMaxX(backBtn.frame) + 6,
+           "4a 有返回栈时 layout 后标题 x >= 返回按钮右缘+6（不压住 top.back）",
+           [NSString stringWithFormat:@"titleX=%.1f backMaxX=%.1f",
+            topTitle.frame.origin.x, CGRectGetMaxX(backBtn.frame)]);
+
+        // ---- 4b. 搜索防抖 260ms 在 showContentForKey: / popDetail: / setUiMode: 中取消 ----
+        NSSearchField *searchField = (NSSearchField *)[wc valueForKey:@"search"];
+        // 4b-1: showContentForKey:
+        [wc.sidebar selectKey:@"albums"];
+        Pump(0.05);
+        searchField.stringValue = @"ghost";
+        [[NSNotificationCenter defaultCenter] postNotificationName:NSControlTextDidChangeNotification object:searchField];
+        [wc.sidebar selectKey:@"queue"];
+        Pump(0.35);
+        Ck([wc.currentContent isKindOfClass:[RLPQueueViewController class]],
+           "4b-1 showContentForKey: 取消搜索防抖，不被拉回搜索结果",
+           NSStringFromClass(wc.currentContent.class));
+
+        // 4b-2: popDetail:
+        [wc.sidebar selectKey:@"queue"];
+        Pump(0.05);
+        RLPRequestOpenAlbum(@"/Music/ABBA/Arrival");
+        Pump(0.05);
+        searchField.stringValue = @"ghost2";
+        [[NSNotificationCenter defaultCenter] postNotificationName:NSControlTextDidChangeNotification object:searchField];
+        RLPRequestBack();
+        Pump(0.35);
+        Ck([wc.currentContent isKindOfClass:[RLPQueueViewController class]],
+           "4b-2 popDetail: 取消搜索防抖，返回后不被拉回搜索结果",
+           NSStringFromClass(wc.currentContent.class));
+
+        // 4b-3: setUiMode:
+        [wc.sidebar selectKey:@"queue"];
+        Pump(0.05);
+        searchField.stringValue = @"ghost3";
+        [[NSNotificationCenter defaultCenter] postNotificationName:NSControlTextDidChangeNotification object:searchField];
+        [wc setUiMode:@"pro" persist:NO];
+        Pump(0.35);
+        Ck([wc.currentContent.view.identifier isEqualToString:@"page.station"],
+           "4b-3 setUiMode: 取消搜索防抖，切模式后不被拉回搜索结果",
+           wc.currentContent.view.identifier ?: @"nil");
+        [wc setUiMode:@"listen" persist:NO];
+        Pump(0.05);
+
+        // ---- 4c. reloadUiModePreference 异步回读 uimode=pro 不强行清栈并跳 station ----
+        [wc.sidebar selectKey:@"albums"];
+        Pump(0.05);
+        g_spy.holdSettingsGet = YES;
+        g_spy.heldSettingsGet = nil;
+        [wc reloadUiModePreference];
+        g_spy.holdSettingsGet = NO;
+        RLPRequestOpenAlbum(@"/Music/ABBA/Arrival");
+        Pump(0.05);
+        Ck([wc.currentContent isKindOfClass:[RLPAlbumDetailViewController class]] && StackCount(wc) == 1,
+           "4c 前置：用户已打开专辑详情且 stack=1", @"");
+        if (g_spy.heldSettingsGet) {
+            g_spy.heldSettingsGet(@{ @"ok": @YES, @"kv": @{ @"uimode": @"pro" } });
+            g_spy.heldSettingsGet = nil;
+        }
+        Pump(0.05);
+        Ck([wc.uiMode isEqualToString:@"pro"] && wc.modeControl.selectedSegment == 1,
+           "4c reloadUiModePreference 更新模式为 pro", wc.uiMode ?: @"");
+        Ck([wc.currentContent isKindOfClass:[RLPAlbumDetailViewController class]] &&
+           StackCount(wc) == 1 && backBtn.hidden == NO,
+           "4c 启动回读 uimode=pro 不强行清栈也不跳走用户已打开的详情页",
+           [NSString stringWithFormat:@"vc=%@ stack=%lu hidden=%d",
+            NSStringFromClass(wc.currentContent.class), (unsigned long)StackCount(wc), backBtn.hidden]);
+
+        // ---- 4d. selectKey+showContentForKey 不重复 activate；persist:YES 检查 /api/settings 的 ok ----
+        // 统计切换到 pro 模式时 RLPWorkbenchViewController.activate 调用次数
+        [wc setUiMode:@"listen" persist:NO];
+        Pump(0.05);
+        Class wbCls = NSClassFromString(@"RLPWorkbenchViewController");
+        Method actM = class_getInstanceMethod(wbCls, @selector(activate));
+        static NSInteger g_wbActivateCount = 0;
+        static IMP g_origWbActivate = NULL;
+        g_wbActivateCount = 0;
+        g_origWbActivate = method_getImplementation(actM);
+        IMP countImp = imp_implementationWithBlock(^(id selfObj) {
+            ++g_wbActivateCount;
+            ((void (*)(id, SEL))g_origWbActivate)(selfObj, @selector(activate));
+        });
+        method_setImplementation(actM, countImp);
+        [wc setUiMode:@"pro" persist:YES];
+        Pump(0.05);
+        method_setImplementation(actM, g_origWbActivate);
+        Ck(g_wbActivateCount == 1,
+           "4d-1 setUiMode 切到 station 只 activate 一次（不因 selectKey+showContentForKey 双发）",
+           [NSString stringWithFormat:@"activateCount=%ld", (long)g_wbActivateCount]);
+
+        g_spy.failSettingsPost = YES;
+        [wc setUiMode:@"listen" persist:YES];
+        Pump(0.05);
+        g_spy.failSettingsPost = NO;
+        Ck([wc.uiMode isEqualToString:@"pro"] && wc.modeControl.selectedSegment == 1,
+           "4d-2 persist:YES 当 /api/settings 返回 ok=false 时回滚模式",
+           [NSString stringWithFormat:@"uiMode=%@ seg=%ld", wc.uiMode, (long)wc.modeControl.selectedSegment]);
 
         [wc stopAllActivity];
         std::printf("结果：%d passed, %d failed\n", g_pass, g_fail);

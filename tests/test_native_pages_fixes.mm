@@ -25,6 +25,8 @@
 #import <AppKit/AppKit.h>
 #import "RLPFavoritesViewController.h"
 #import "RLPPlaylistsViewController.h"
+#import "RLPKnowledgeView.mm"
+#import "RLPStreamingViewController.mm"
 #import "RLPCoreClient.h"
 #import "RLPModels.h"
 #import "RLPTheme.h"
@@ -59,6 +61,14 @@ static NSMutableArray<NSDictionary *> *g_posts;
 static NSInteger g_mode;    // 桩里的播放模式（GET /api/playmode 的真相）
 static BOOL g_favListBackslash = NO;
 static BOOL g_addShouldFail = NO;
+static NSInteger g_knowPollCount = 0;
+static BOOL g_holdArtistB = NO;
+static RLPJSONCompletion g_heldArtistBKnowDone = nil;
+static RLPJSONCompletion g_heldArtistBSumDone = nil;
+static RLPJSONCompletion g_heldArtistASumDone = nil;
+static BOOL g_browseShouldFail = NO;
+static BOOL g_srcConfigShouldFail = NO;
+static NSString *g_activeServerId = @"srv2";
 
 static NSArray<NSDictionary *> *FavFixture(void) {
     return @[
@@ -102,6 +112,81 @@ static NSArray<NSDictionary *> *PlaylistItemsFixture(void) {
         return;
     }
     if ([path hasPrefix:@"/api/sq/list"]) { done(@{ @"ok": @YES, @"queues": @[] }); return; }
+    if ([path hasPrefix:@"/api/entity/knowledge"]) {
+        if ([path containsString:@"name=ArtistA"]) {
+            if (g_knowPollCount++ == 0) {
+                done(@{ @"ok": @YES, @"pending": @YES });
+            } else {
+                done(@{
+                    @"ok": @YES,
+                    @"pending": @NO,
+                    @"entity": @{ @"id": @"p:ArtistA", @"kind": @"person", @"name": @"ArtistA" },
+                    @"materials": @[
+                        @{ @"source": @"musicbrainz", @"kind": @"biography", @"title": @"生平", @"text": @"ArtistA bio text" },
+                        @{ @"source": @"discogs", @"kind": @"genre", @"title": @"风格", @"text": @"Classical" }
+                    ],
+                    @"errors": @[]
+                });
+            }
+            return;
+        }
+        if ([path containsString:@"name=ArtistB"] && g_holdArtistB) {
+            g_heldArtistBKnowDone = [done copy];
+            return;
+        }
+        if ([path containsString:@"name=ArtistC"]) {
+            done(@{
+                @"ok": @YES,
+                @"pending": @NO,
+                @"entity": @{ @"id": @"p:ArtistC", @"kind": @"person", @"name": @"ArtistC" },
+                @"materials": @[ @{ @"source": @"wiki", @"kind": @"biography", @"title": @"生平", @"text": @"ArtistC bio text" } ],
+                @"errors": @[]
+            });
+            return;
+        }
+    }
+    if ([path hasPrefix:@"/api/entity/summary"]) {
+        if ([path containsString:@"name=ArtistA"]) {
+            g_heldArtistASumDone = [done copy];
+            return;
+        }
+        if ([path containsString:@"name=ArtistB"] && g_holdArtistB) {
+            g_heldArtistBSumDone = [done copy];
+            return;
+        }
+        if ([path containsString:@"name=ArtistC"]) {
+            done(@{ @"ok": @YES, @"summary": @"ArtistC summary text" });
+            return;
+        }
+    }
+    if ([path isEqualToString:@"/api/src/config"]) {
+        done(@{
+            @"ok": @YES,
+            @"configured": @YES,
+            @"active": g_activeServerId ?: @"srv2",
+            @"servers": @[
+                @{ @"id": @"srv1", @"name": @"Server One", @"active": @([g_activeServerId isEqualToString:@"srv1"]) },
+                @{ @"id": @"srv2", @"name": @"Server Two", @"active": @([g_activeServerId isEqualToString:@"srv2"]) }
+            ]
+        });
+        return;
+    }
+    if ([path hasPrefix:@"/api/src/browse"]) {
+        if (g_browseShouldFail) {
+            done(@{ @"ok": @NO, @"error": @"server unreachable" });
+            return;
+        }
+        if ([path isEqualToString:@"/api/src/browse?id="]) {
+            done(@{ @"ok": @YES, @"items": @[ @{ @"id": @"dir/a b&c", @"t": @"Folder ABC", @"dir": @YES } ] });
+            return;
+        }
+        if ([path isEqualToString:@"/api/src/browse?id=dir%2Fa%20b%26c"]) {
+            done(@{ @"ok": @YES, @"items": @[ @{ @"id": @"trk1", @"t": @"Track 1", @"dir": @NO } ] });
+            return;
+        }
+        done(@{ @"ok": @NO, @"error": [NSString stringWithFormat:@"unexpected browse path: %@", path] });
+        return;
+    }
     // 整列开播（/api/queue/set）之后列队成功；其它 GET 一律失败（不让测试偷偷连真实数据）。
     done(@{ @"ok": @NO });
 }
@@ -111,11 +196,17 @@ static NSArray<NSDictionary *> *PlaylistItemsFixture(void) {
     // ⚠️ 顺序：/api/playmode 与 /api/play 同前缀，先判 playmode（与后端路由坑同款）。
     if ([path hasPrefix:@"/api/playmode?mode="]) {
         g_mode = [[path substringFromIndex:@"/api/playmode?mode=".length] integerValue];
-        if ([path hasPrefix:@"/api/add"] && g_addShouldFail) {
-        if (done) done(@{ @"ok": @NO, @"error": @"mock add failed" });
+        if (done) done(@{ @"ok": @YES });
         return;
     }
-    if (done) done(@{ @"ok": @YES });
+    if ([path isEqualToString:@"/api/src/config"]) {
+        if (g_srcConfigShouldFail) {
+            if (done) done(@{ @"ok": @NO, @"error": @"invalid server" });
+            return;
+        }
+        if ([body containsString:@"id=srv1"]) g_activeServerId = @"srv1";
+        else if ([body containsString:@"id=srv2"]) g_activeServerId = @"srv2";
+        if (done) done(@{ @"ok": @YES });
         return;
     }
     if ([path hasPrefix:@"/api/add"] && g_addShouldFail) {
@@ -340,6 +431,123 @@ int main() {
             Ck(qNotifs == 1, "P4 /api/add 成功后发 RLPQueueChangedNotification",
                [NSString stringWithFormat:@"qNotifs=%ld", (long)qNotifs]);
             [[NSNotificationCenter defaultCenter] removeObserver:obs];
+        }
+
+        // ---- 缺口1 艺术家知识卡：独立序列号 + 按 materials 渲染 + 丢弃旧实体回包 ----
+        {
+            RLPKnowledgeView *kv = [[RLPKnowledgeView alloc] initWithFrame:NSMakeRect(0, 0, 520, 400)];
+            [win.contentView addSubview:kv];
+            g_knowPollCount = 0;
+            g_heldArtistASumDone = nil;
+            [kv loadKind:@"person" name:@"ArtistA" artist:nil];
+            // 等待 knowledge 的 pending poll (0.4s) 触发并完成
+            Pump(0.55);
+            // 此时 knowledge 已经历一次 poll（seq 自增）；summary 回包到达时不得被丢弃
+            if (g_heldArtistASumDone) g_heldArtistASumDone(@{ @"ok": @YES, @"summary": @"ArtistA summary text" });
+            Pump(0.05);
+
+            Ck(kv.fieldStack.arrangedSubviews.count == 2,
+               "缺口1 knowledge 按 materials 渲染出 2 行资料",
+               [NSString stringWithFormat:@"rows=%lu status=%@",
+                (unsigned long)kv.fieldStack.arrangedSubviews.count, kv.status.stringValue]);
+            Ck([kv.status.stringValue containsString:@"2"],
+               "缺口1 knowledge 状态显示 2 项已确认资料",
+               kv.status.stringValue ?: @"nil");
+            Ck([kv.summaryView.string isEqualToString:@"ArtistA summary text"],
+               "缺口1 summary 不因 knowledge 轮询自增 seq 而被丢弃",
+               kv.summaryView.string ?: @"nil");
+
+            // 切实体时旧实体(ArtistB)的在途 knowledge 与 summary 回包必须被丢弃
+            g_holdArtistB = YES;
+            g_heldArtistBKnowDone = nil;
+            g_heldArtistBSumDone = nil;
+            [kv loadKind:@"person" name:@"ArtistB" artist:nil];
+            Pump(0.02);
+            g_holdArtistB = NO;
+            [kv loadKind:@"person" name:@"ArtistC" artist:nil];
+            Pump(0.05);
+            if (g_heldArtistBKnowDone) {
+                g_heldArtistBKnowDone(@{
+                    @"ok": @YES,
+                    @"materials": @[
+                        @{ @"title": @"Old1", @"text": @"ArtistB stale 1" },
+                        @{ @"title": @"Old2", @"text": @"ArtistB stale 2" },
+                        @{ @"title": @"Old3", @"text": @"ArtistB stale 3" }
+                    ]
+                });
+            }
+            if (g_heldArtistBSumDone) {
+                g_heldArtistBSumDone(@{ @"ok": @YES, @"summary": @"ArtistB stale summary" });
+            }
+            Pump(0.05);
+            Ck(kv.fieldStack.arrangedSubviews.count == 1,
+               "缺口1 切实体后旧实体 knowledge 回包被丢弃（保留 ArtistC 的 1 行）",
+               [NSString stringWithFormat:@"rows=%lu", (unsigned long)kv.fieldStack.arrangedSubviews.count]);
+            Ck([kv.summaryView.string isEqualToString:@"ArtistC summary text"],
+               "缺口1 切实体后旧实体 summary 回包被丢弃（保留 ArtistC summary）",
+               kv.summaryView.string ?: @"nil");
+        }
+
+        // ---- 缺口3 流媒体页：active 选中、目录 id 编码、切服清面包屑与校验、!ok 清旧项并显错误空态 ----
+        {
+            g_activeServerId = @"srv2";
+            g_browseShouldFail = NO;
+            g_srcConfigShouldFail = NO;
+            RLPStreamingViewController *st = [[RLPStreamingViewController alloc] init];
+            st.view.frame = NSMakeRect(0, 0, 900, 640);
+            [win.contentView addSubview:st.view];
+            [st.view layoutSubtreeIfNeeded];
+            [st reloadData];
+            Pump(0.05);
+
+            NSPopUpButton *picker = [st valueForKey:@"_serverPicker"];
+            NSButton *backBtn = [st valueForKey:@"_backButton"];
+            NSMutableArray *crumb = [st valueForKey:@"_breadcrumbStack"];
+            Ck(picker && picker.indexOfSelectedItem == 1 && [picker.titleOfSelectedItem isEqualToString:@"Server Two"],
+               "缺口3 reloadData 按 active 选中服务器 (srv2 / index 1)",
+               [NSString stringWithFormat:@"idx=%ld title=%@", (long)picker.indexOfSelectedItem, picker.titleOfSelectedItem]);
+
+            // 打开含特殊字符的目录 id：必须 URL 编码
+            [g_gets removeAllObjects];
+            [st openItemId:@"dir/a b&c" isDir:YES];
+            Pump(0.05);
+            BOOL hasEncodedBrowse = NO;
+            for (NSDictionary *g in g_gets) {
+                if ([g[@"path"] isEqualToString:@"/api/src/browse?id=dir%2Fa%20b%26c"]) hasEncodedBrowse = YES;
+            }
+            Ck(hasEncodedBrowse,
+               "缺口3 browseId 对目录 id 做 URL 编码",
+               [g_gets componentsJoinedByString:@" | "]);
+            Ck(crumb.count == 1 && backBtn.enabled,
+               "缺口3 进入子目录后面包屑入栈且返回按钮可用",
+               [NSString stringWithFormat:@"crumb=%lu back=%d", (unsigned long)crumb.count, (int)backBtn.enabled]);
+
+            // 切换服务器失败：不得假装成功，且应回读恢复原 active 服务器
+            g_srcConfigShouldFail = YES;
+            [picker selectItemAtIndex:0];
+            [st serverChanged:picker];
+            Pump(0.05);
+            Ck(picker.indexOfSelectedItem == 1,
+               "缺口3 serverChanged 失败时不假装成功，回读恢复 active 服务器 (srv2)",
+               [NSString stringWithFormat:@"idx=%ld", (long)picker.indexOfSelectedItem]);
+
+            // 切换服务器成功：必须清面包屑并禁用返回按钮
+            g_srcConfigShouldFail = NO;
+            [picker selectItemAtIndex:0];
+            [st serverChanged:picker];
+            Pump(0.05);
+            Ck(crumb.count == 0 && !backBtn.enabled,
+               "缺口3 serverChanged 成功后清空面包屑并禁用返回按钮",
+               [NSString stringWithFormat:@"crumb=%lu back=%d", (unsigned long)crumb.count, (int)backBtn.enabled]);
+
+            // browseId 返回 !ok：必须清空旧 _items 并显示错误空态
+            g_browseShouldFail = YES;
+            [st browseId:@""];
+            Pump(0.05);
+            NSArray *itemsNow = [st valueForKey:@"_items"];
+            Ck(itemsNow.count == 0 && [st emptyStateVisible],
+               "缺口3 browseId !ok 时清空旧 _items 并显示错误空态",
+               [NSString stringWithFormat:@"items=%lu emptyVisible=%d", (unsigned long)itemsNow.count, (int)[st emptyStateVisible]]);
         }
 
         std::printf("结果：%d passed, %d failed\n", g_pass, g_fail);

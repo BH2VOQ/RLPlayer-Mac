@@ -32,6 +32,7 @@
 @property (nonatomic, copy) NSString *name;
 @property (nonatomic, copy) NSString *artist;
 @property (nonatomic, assign) NSUInteger seq;
+@property (nonatomic, assign) NSUInteger summarySeq;
 @property (nonatomic, strong) NSTimer *pollTimer;
 @property (nonatomic, assign) NSInteger pollCount;
 @end
@@ -192,11 +193,25 @@
             return;
         }
         if (![json[@"ok"] boolValue]) {
-            NSString *err = [json[@"error"] isKindOfClass:[NSString class]] ? json[@"error"] : RLPTr(@"资料读取失败");
-            self_.status.stringValue = err;
+            NSString *err = [json[@"error"] isKindOfClass:[NSString class]] ? json[@"error"] : nil;
+            if (!err.length && [json[@"errors"] isKindOfClass:[NSArray class]]) {
+                for (id e in (NSArray *)json[@"errors"]) {
+                    if ([e isKindOfClass:[NSDictionary class]] &&
+                        [e[@"error"] isKindOfClass:[NSString class]] &&
+                        [e[@"error"] length]) {
+                        err = e[@"error"];
+                        break;
+                    }
+                }
+            }
+            self_.status.stringValue = err.length ? err : RLPTr(@"资料读取失败");
             return;
         }
-        [self_ renderFields:json[@"fields"]];
+        if ([json[@"materials"] isKindOfClass:[NSArray class]]) {
+            [self_ renderMaterials:json[@"materials"]];
+        } else {
+            [self_ renderFields:json[@"fields"]];
+        }
     }];
 }
 
@@ -220,11 +235,11 @@
 
 - (void)fetchSummaryRefresh:(BOOL)refresh {
     NSString *url = [self urlFor:@"/api/entity/summary" refresh:refresh withArtist:YES];
-    const NSUInteger seq = self.seq;
+    const NSUInteger sSeq = ++self.summarySeq;
     __weak __typeof__(self) weakSelf = self;
     [[RLPCoreClient shared] getJSON:url completion:^(NSDictionary * _Nullable json) {
         __typeof__(self) self_ = weakSelf;
-        if (!self_ || seq != self_.seq) return;
+        if (!self_ || sSeq != self_.summarySeq) return;
         if (!json || ![json[@"ok"] boolValue]) return;   // 简介是可选增强，失败不覆盖知识卡
         NSString *text = @"";
         if ([json[@"summary"] isKindOfClass:[NSString class]]) text = json[@"summary"];
@@ -425,6 +440,44 @@ static void RLPAllowCompress(NSTextField *tf) {
     }
 }
 
+/// 渲染后端 /api/entity/knowledge 返回的 materials 数组。
+- (void)renderMaterials:(NSArray *)materials {
+    [self clearFields];
+    if (![materials isKindOfClass:[NSArray class]] || materials.count == 0) {
+        self.status.stringValue = RLPTr(@"暂无可确认的资料");
+        return;
+    }
+    RLPTheme *t = [RLPTheme current];
+    NSInteger shown = 0;
+    for (id item in materials) {
+        if (![item isKindOfClass:[NSDictionary class]]) continue;
+        NSDictionary *m = (NSDictionary *)item;
+        NSString *text = [m[@"text"] isKindOfClass:[NSString class]] ? m[@"text"] : @"";
+        if (!text.length && [m[@"subject"] isKindOfClass:[NSString class]]) text = m[@"subject"];
+        if (!text.length) continue;
+        NSString *title = [m[@"title"] isKindOfClass:[NSString class]] ? m[@"title"] : @"";
+        NSString *kind = [m[@"kind"] isKindOfClass:[NSString class]] ? m[@"kind"] : @"";
+        NSString *src = [m[@"source"] isKindOfClass:[NSString class]] ? m[@"source"] : @"";
+        NSString *label = title.length ? title : (kind.length ? kind : (src.length ? src : RLPTr(@"AI 资料")));
+        NSStackView *row = [[NSStackView alloc] init];
+        row.orientation = NSUserInterfaceLayoutOrientationHorizontal;
+        row.spacing = 8;
+        NSTextField *kl = RLPLabel(label, t.small, t.mut);
+        [[kl.widthAnchor constraintEqualToConstant:110] setActive:YES];
+        NSTextField *vl = RLPLabel(text, t.small, t.text);
+        vl.maximumNumberOfLines = 3;
+        vl.lineBreakMode = NSLineBreakByWordWrapping;
+        [[vl.widthAnchor constraintLessThanOrEqualToConstant:420] setActive:YES];
+        [row addArrangedSubview:kl];
+        [row addArrangedSubview:vl];
+        [self.fieldStack addArrangedSubview:row];
+        ++shown;
+    }
+    self.status.stringValue = shown
+        ? [NSString stringWithFormat:RLPTr(@"%ld 项已确认资料"), (long)shown]
+        : RLPTr(@"暂无可确认的资料");
+}
+
 /// 只渲染后端**真的给了**的标签。AI 不知道的标签根本不出现 ——
 /// 不许用"未知 / —"占位，那会让用户以为查过了但没查到。
 - (void)renderFields:(id)fields {
@@ -465,7 +518,8 @@ static void RLPAllowCompress(NSTextField *tf) {
 - (void)cancelLoading {
     [self.pollTimer invalidate];
     self.pollTimer = nil;
-    ++self.seq;   // 让在途回调失效
+    ++self.seq;          // 让在途 knowledge 回调失效
+    ++self.summarySeq;   // 让在途 summary 回调失效
 }
 
 - (void)applyTheme {

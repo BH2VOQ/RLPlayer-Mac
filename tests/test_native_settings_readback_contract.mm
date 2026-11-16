@@ -498,6 +498,57 @@ int main(void) {
             (long)(hogAfterBP ? hogAfterBP.state : -1),
             bitsAfterBP.selectedItem.representedObject]);
 
+        // ---- 10. 缺口2 onRepeat: 走 POST /api/playmode?mode=N，并在失败时提示且回读恢复 ----
+        [settings selectPane:@"adv"];
+        [core jsonWithMethod:@"POST" path:@"/api/playmode?mode=0" body:@""];
+        [settings reloadData];
+        WaitUntil(4.0, ^BOOL {
+            NSPopUpButton *rp = (NSPopUpButton *)FindId(v, @"sp_rep");
+            return rp && rp.indexOfSelectedItem == 2; // 0(顺序) -> index 2(关闭循环)
+        });
+        NSPopUpButton *repPop2 = (NSPopUpButton *)FindId(v, @"sp_rep");
+        if (repPop2) {
+            // 选 index 1（单曲循环 mode=2）
+            [repPop2 selectItemAtIndex:1];
+            [repPop2 sendAction:repPop2.action to:repPop2.target];
+            WaitUntil(3.0, ^BOOL {
+                NSDictionary *pm = [core jsonWithMethod:@"GET" path:@"/api/playmode" body:nil];
+                return [pm[@"mode"] integerValue] == 2;
+            });
+            NSDictionary *pmAfter = [core jsonWithMethod:@"GET" path:@"/api/playmode" body:nil];
+            Ck([pmAfter[@"mode"] integerValue] == 2,
+               @"缺口2 onRepeat 选单曲循环(index 1) 真实写入后端 mode=2（不走 /api/repeat 归零）",
+               [pmAfter description]);
+
+            // 失败分支：拦截 POST /api/playmode 返回 ok=NO -> 状态行报错且控件回读恢复为 mode=2 (index 1)
+            Method pmMethod = class_getInstanceMethod([RLPCoreClient class], @selector(postJSON:body:completion:));
+            IMP origPost = method_getImplementation(pmMethod);
+            __block BOOL failNextPlaymode = YES;
+            IMP failPostImp = imp_implementationWithBlock(^(id _self, NSString *path, NSString *body, RLPJsonDone completion) {
+                if (failNextPlaymode && [path hasPrefix:@"/api/playmode"]) {
+                    failNextPlaymode = NO;
+                    dispatch_async(dispatch_get_main_queue(), ^{
+                        if (completion) completion(@{ @"ok": @NO, @"error": @"mock playmode fail" });
+                    });
+                    return;
+                }
+                ((void (*)(id, SEL, NSString *, NSString *, RLPJsonDone))origPost)(_self, @selector(postJSON:body:completion:), path, body, completion);
+            });
+            method_setImplementation(pmMethod, failPostImp);
+
+            [repPop2 selectItemAtIndex:0]; // 试图切到列表循环
+            [repPop2 sendAction:repPop2.action to:repPop2.target];
+            WaitUntil(3.0, ^BOOL {
+                NSTextField *sl = [settings valueForKey:@"statusLine"];
+                return sl && [sl.stringValue containsString:@"mock playmode fail"] && repPop2.indexOfSelectedItem == 1;
+            });
+            method_setImplementation(pmMethod, origPost);
+            NSTextField *sl = [settings valueForKey:@"statusLine"];
+            Ck(sl && [sl.stringValue containsString:@"mock playmode fail"] && repPop2.indexOfSelectedItem == 1,
+               @"缺口2 onRepeat 失败时提示错误且回读恢复为真实后端 mode=2 (index 1)",
+               [NSString stringWithFormat:@"status=%@ idx=%ld", sl ? sl.stringValue : @"nil", (long)repPop2.indexOfSelectedItem]);
+        }
+
         [RLPTheme setThemeName:@"dark"];
         [core shutdown];
         [fm removeItemAtPath:rootDir error:nil];

@@ -38,14 +38,19 @@
 @interface RLPTopbarView : NSView
 @property (nonatomic, weak) NSTextField *title;
 @property (nonatomic, weak) NSTextField *count;
+@property (nonatomic, weak) NSButton *backButton;
 @end
 @implementation RLPTopbarView
 - (void)layout {
     [super layout];
+    if (self.backButton) {
+        self.backButton.frame = NSMakeRect(14, (self.bounds.size.height - 28) / 2.0, 28, 28);
+    }
     if (self.title) {
         [self.title sizeToFit];
         CGRect f = self.title.frame;
-        f.origin = CGPointMake(20, (self.bounds.size.height - f.size.height) / 2.0);
+        const CGFloat titleX = (self.backButton && !self.backButton.hidden) ? 52 : 20;
+        f.origin = CGPointMake(titleX, (self.bounds.size.height - f.size.height) / 2.0);
         self.title.frame = f;
     }
     if (self.count) {
@@ -413,6 +418,7 @@ static NSString *RLPPageIdentifier(NSString *key) {
 }
 
 - (void)showContentForKey:(NSString *)key {
+    [self cancelSearchDebounce];
     if (!key.length) key = @"albums";
     NSString *cacheKey = [self cacheKeyForRouteKey:key];
     NSViewController *vc = self.pageCache[cacheKey];
@@ -481,6 +487,7 @@ static NSString *RLPPageIdentifier(NSString *key) {
         b.layer.backgroundColor = [RLPTheme current].hov.CGColor;
         b.identifier = @"top.back";
         self.webBackButton = b;
+        ((RLPTopbarView *)self.topbar).backButton = b;
         [self.topbar addSubview:b];
     }
     self.webBackButton.frame=NSMakeRect(14, (self.topbar.bounds.size.height-28)/2.0, 28, 28);
@@ -609,6 +616,7 @@ static NSString *RLPPageIdentifier(NSString *key) {
 }
 
 - (void)popDetail {
+    [self cancelSearchDebounce];
     NSDictionary *entry = self.rowStack.lastObject;
     if (![entry isKindOfClass:[NSDictionary class]]) return;
     [self.rowStack removeLastObject];
@@ -722,6 +730,11 @@ static NSString *RLPPageIdentifier(NSString *key) {
     }
     if (![self.sidebar selectKey:@"albums"]) [self showContentForKey:@"albums"];
     [self.albums searchWithQuery:@""];
+}
+
+- (void)cancelSearchDebounce {
+    [self.searchDebounce invalidate];
+    self.searchDebounce = nil;
 }
 
 /// web #q.oninput：每次输入重置 260ms 防抖，到点按当前视图分派（不需要回车）。
@@ -859,18 +872,38 @@ static NSString *RLPPageIdentifier(NSString *key) {
 
 - (void)onSwitchToProWorkbench:(NSNotification *)note {
     (void)note;
+    const BOOL wasPro = [self.uiMode isEqualToString:@"pro"];
     [self setUiMode:@"pro" persist:YES];
-    [self.sidebar selectKey:@"station"];
+    if (wasPro && ![self.sidebar.selectedKey isEqualToString:@"station"]) {
+        if (![self.sidebar selectKey:@"station"]) [self showContentForKey:@"station"];
+    }
 }
 
 - (void)setUiMode:(NSString *)mode persist:(BOOL)persist {
+    [self applyUiMode:mode persist:persist navigateToStation:YES];
+}
+
+- (void)applyUiMode:(NSString *)mode persist:(BOOL)persist navigateToStation:(BOOL)navigate {
+    [self cancelSearchDebounce];
     NSString *next = [mode isEqualToString:@"pro"] ? @"pro" : @"listen";
-    ++self.modeEpoch;
+    NSString *prev = [self.uiMode copy];
+    const BOOL changed = ![prev isEqualToString:next];
+    const NSUInteger epoch = ++self.modeEpoch;
     if (persist && [RLPCoreClient shared].started) {
         NSString *body = [NSString stringWithFormat:@"uimode=%@", RLPEnc(next)];
-        [[RLPCoreClient shared] postJSON:@"/api/settings" body:body completion:nil];
+        __weak __typeof__(self) weakSelf = self;
+        [[RLPCoreClient shared] postJSON:@"/api/settings" body:body completion:^(NSDictionary * _Nullable json) {
+            __typeof__(self) self_ = weakSelf;
+            if (!self_ || epoch != self_->_modeEpoch) return;
+            const BOOL ok = [json isKindOfClass:[NSDictionary class]] &&
+                            ![json[@"ok"] isEqual:@NO] &&
+                            (!json[@"ok"] || [json[@"ok"] boolValue]);
+            if (!ok) {
+                RLPToast(RLPTr(@"保存模式设置失败"));
+                [self_ applyUiMode:prev persist:NO navigateToStation:navigate && changed];
+            }
+        }];
     }
-    const BOOL changed = ![self.uiMode isEqualToString:next];
     self.uiMode = next;
     self.modeControl.selectedSegment = [next isEqualToString:@"pro"] ? 1 : 0;
     self.sidebar.uiMode = next;
@@ -879,12 +912,18 @@ static NSString *RLPPageIdentifier(NSString *key) {
         [(id)sv applyUiMode:next];
     }
     if (changed) {
-        // 模式是一项导航事务：同一帧同步侧栏、标题与模式首页，
-        // 不把旧模式详情留在栈里，也不触碰播放条或核心播放状态。
-        [self.rowStack removeAllObjects];
-        if (self.nowPlayingOverlayVisible) [self onCloseNowPlaying:nil];
-        [self.sidebar selectKey:@"station"];
-        [self showContentForKey:@"station"];
+        if (navigate) {
+            // 模式是一项导航事务：同一帧同步侧栏、标题与模式首页，
+            // 不把旧模式详情留在栈里，也不触碰播放条或核心播放状态。
+            [self.rowStack removeAllObjects];
+            if (self.nowPlayingOverlayVisible) [self onCloseNowPlaying:nil];
+            if (![self.sidebar selectKey:@"station"]) [self showContentForKey:@"station"];
+        } else if (self.rowStack.count == 0 &&
+                   [self.sidebar.selectedKey isEqualToString:@"station"]) {
+            // 初始化回读若用户正好停在 station，刷新为对应模式的 station 页；
+            // 若用户已打开其他页面或详情页，绝不强行清栈或跳回 station。
+            [self showContentForKey:@"station"];
+        }
     }
 }
 
@@ -900,7 +939,7 @@ static NSString *RLPPageIdentifier(NSString *key) {
         if (!kv || [json[@"ok"] isEqual:@NO]) return; // 读取失败不能重置用户模式
         NSString *raw = [kv[@"uimode"] isKindOfClass:[NSString class]] ? kv[@"uimode"] : nil;
         NSString *resolved = [raw isEqualToString:@"pro"] ? @"pro" : @"listen";
-        [self_ setUiMode:resolved persist:NO];
+        [self_ applyUiMode:resolved persist:NO navigateToStation:NO];
     }];
 }
 

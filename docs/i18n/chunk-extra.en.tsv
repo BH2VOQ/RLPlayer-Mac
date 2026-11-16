@@ -687,3 +687,5 @@ PEQ 开	PEQ on
 音频设备未开始输出，播放已停止。	The audio device did not start rendering. Playback has stopped.
 播放失败，请查看详细信息。	Playback failed. See details for diagnostic information.
 加入队列失败	Could not add to the queue
+切换服务器失败	Could not switch servers
+保存模式设置失败	Could not save the mode setting

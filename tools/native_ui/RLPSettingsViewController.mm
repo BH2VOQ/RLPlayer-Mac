@@ -3738,21 +3738,7 @@ static BOOL RLPFeedbackTextBlank(NSString *s) {
         self_.statusLine.stringValue = RLPTr(@"设置已加载");
     }];
 
-    [[RLPCoreClient shared] getJSON:@"/api/playmode" completion:^(NSDictionary * _Nullable json) {
-        __typeof__(self) self_ = weakSelf;
-        if (!self_) return;
-        if (![json[@"ok"] boolValue] && !json[@"mode"]) return;
-        const NSInteger mode = [json[@"mode"] respondsToSelector:@selector(integerValue)]
-                             ? [json[@"mode"] integerValue] : 0;
-        if (self_.repPopup) {
-            const NSInteger repIdx = (mode == 1) ? 0 : (mode == 2) ? 1 : 2;
-            if (repIdx >= 0 && repIdx < self_.repPopup.numberOfItems)
-                [self_.repPopup selectItemAtIndex:repIdx];
-        }
-        if (self_.shufSwitch) {
-            self_.shufSwitch.state = (mode == 3) ? NSControlStateValueOn : NSControlStateValueOff;
-        }
-    }];
+    [self reloadPlaymode];
 
     [self loadUpnpDevicesForce:NO];
     [self reloadRoots];
@@ -4052,14 +4038,44 @@ static BOOL RLPFeedbackTextBlank(NSString *s) {
     [[NSUserDefaults standardUserDefaults] setObject:v forKey:@"RLPUiStyle"];
 }
 - (void)onScanThreads:(NSTextField *)s { [self postKey:@"scanthreads" value:s.stringValue]; }
+- (void)reloadPlaymode {
+    __weak __typeof__(self) weakSelf = self;
+    [[RLPCoreClient shared] getJSON:@"/api/playmode" completion:^(NSDictionary * _Nullable json) {
+        __typeof__(self) self_ = weakSelf;
+        if (!self_) return;
+        if (![json[@"ok"] boolValue] && !json[@"mode"]) return;
+        const NSInteger mode = [json[@"mode"] respondsToSelector:@selector(integerValue)]
+                             ? [json[@"mode"] integerValue] : 0;
+        if (self_.repPopup) {
+            const NSInteger repIdx = (mode == 1) ? 0 : (mode == 2) ? 1 : 2;
+            if (repIdx >= 0 && repIdx < self_.repPopup.numberOfItems)
+                [self_.repPopup selectItemAtIndex:repIdx];
+        }
+        if (self_.shufSwitch) {
+            self_.shufSwitch.state = (mode == 3) ? NSControlStateValueOn : NSControlStateValueOff;
+        }
+    }];
+}
+
 - (void)onRepeat:(NSPopUpButton *)s {
-    // web 的设置页循环模式走 /api/repeat?mode=N（底栏才用 /api/playmode）。
-    // 两者后端同源，但这里用 web 的那条，避免两端写法分叉。
     NSArray<NSString *> *vals = @[ @"1", @"2", @"0" ];
     const NSInteger i = s.indexOfSelectedItem;
-    NSString *url = [NSString stringWithFormat:@"/api/repeat?mode=%@",
-                     (i >= 0 && i < 3) ? vals[i] : @"1"];
-    [RLPCoreClient.shared postJSON:url body:nil completion:nil];
+    NSString *modeVal = (i >= 0 && i < 3) ? vals[i] : @"1";
+    NSString *url = [NSString stringWithFormat:@"/api/playmode?mode=%@", modeVal];
+    __weak __typeof__(self) weakSelf = self;
+    [RLPCoreClient.shared postJSON:url body:nil completion:^(NSDictionary * _Nullable json) {
+        __typeof__(self) self_ = weakSelf;
+        if (!self_) return;
+        if (json && [json[@"ok"] boolValue]) {
+            self_.statusLine.stringValue = RLPTr(@"已保存");
+        } else {
+            NSString *err = ([json[@"error"] isKindOfClass:[NSString class]] && [json[@"error"] length])
+                          ? json[@"error"] : RLPTr(@"保存失败");
+            self_.statusLine.stringValue = err;
+            RLPToast(err);
+        }
+        [self_ reloadPlaymode];
+    }];
 }
 - (void)onShuffle:(NSSwitch *)s {
     // web 用 /api/shuffle?on=1|0（不是 /api/playmode 的派生写法）—— 同一条后端路径，

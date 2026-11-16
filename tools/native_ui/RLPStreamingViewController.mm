@@ -408,17 +408,50 @@
     [_grid reloadData];
 }
 
+- (void)updateBreadcrumbDisplay {
+    _backButton.enabled = _breadcrumbStack.count > 0;
+    NSMutableArray<NSString *> *parts = [NSMutableArray array];
+    for (NSDictionary *it in _breadcrumbStack) {
+        NSString *t = [it[@"t"] isKindOfClass:[NSString class]] ? it[@"t"] : @"";
+        NSString *i = [it[@"id"] isKindOfClass:[NSString class]] ? it[@"id"] : @"";
+        if (t.length) [parts addObject:t];
+        else if (i.length) [parts addObject:i];
+    }
+    _pathBreadcrumb.stringValue = [parts componentsJoinedByString:@" / "];
+}
+
 - (void)reloadData {
     [super reloadData];
     NSUInteger seq = ++_requestSeq;
     [RLPCoreClient.shared getJSON:@"/api/src/config" completion:^(NSDictionary * _Nullable json) {
         if (seq != self->_requestSeq) return;
-        if (!json || ![json[@"ok"] boolValue]) return;
+        if (!json || ![json[@"ok"] boolValue]) {
+            self->_items = nil;
+            [self reloadItems];
+            NSString *err = ([json[@"error"] isKindOfClass:[NSString class]] && [json[@"error"] length])
+                          ? json[@"error"] : RLPTr(@"浏览失败");
+            [self setSubtitle:err];
+            [self showEmptyStateForConfigured:NO reason:err];
+            return;
+        }
 
-        self->_servers = json[@"servers"];
+        self->_servers = [json[@"servers"] isKindOfClass:[NSArray class]] ? json[@"servers"] : @[];
         [self->_serverPicker removeAllItems];
-        for (NSDictionary *s in self->_servers) {
+        NSString *activeId = [json[@"active"] isKindOfClass:[NSString class]] ? json[@"active"] : @"";
+        NSInteger activeIdx = -1;
+        for (NSInteger i = 0; i < (NSInteger)self->_servers.count; ++i) {
+            NSDictionary *s = self->_servers[(NSUInteger)i];
             [self->_serverPicker addItemWithTitle:s[@"name"] ?: @""];
+            if (activeIdx < 0) {
+                BOOL isAct = [s[@"active"] respondsToSelector:@selector(boolValue)] && [s[@"active"] boolValue];
+                NSString *sid = [s[@"id"] isKindOfClass:[NSString class]] ? s[@"id"] : @"";
+                if (isAct || (activeId.length && [sid isEqualToString:activeId])) {
+                    activeIdx = i;
+                }
+            }
+        }
+        if (activeIdx >= 0 && activeIdx < self->_serverPicker.numberOfItems) {
+            [self->_serverPicker selectItemAtIndex:activeIdx];
         }
 
         if (![json[@"configured"] boolValue] || self->_servers.count == 0) {
@@ -429,6 +462,8 @@
             return;
         }
         [self showEmptyStateForConfigured:YES reason:@""];
+        [self->_breadcrumbStack removeAllObjects];
+        [self updateBreadcrumbDisplay];
 
         [self browseId:@""];
     }];
@@ -448,21 +483,31 @@
 
 - (void)browseId:(NSString *)key {
     NSUInteger seq = ++_requestSeq;
-    [RLPCoreClient.shared getJSON:[NSString stringWithFormat:@"/api/src/browse?id=%@", key] completion:^(NSDictionary * _Nullable json) {
+    NSString *url = [NSString stringWithFormat:@"/api/src/browse?id=%@", RLPEnc(key ?: @"")];
+    [RLPCoreClient.shared getJSON:url completion:^(NSDictionary * _Nullable json) {
         if (seq != self->_requestSeq) return;
         if (!json || ![json[@"ok"] boolValue]) {
-            [self setSubtitle:json[@"error"] ?: RLPTr(@"浏览失败")];
+            self->_items = nil;
+            [self reloadItems];
+            NSString *err = ([json[@"error"] isKindOfClass:[NSString class]] && [json[@"error"] length])
+                          ? json[@"error"] : RLPTr(@"浏览失败");
+            [self setSubtitle:err];
+            [self showEmptyStateForConfigured:NO reason:err];
             return;
         }
 
-        NSString *err = json[@"err"];
-        if (err && err.length > 0) {
+        NSString *err = [json[@"err"] isKindOfClass:[NSString class]] ? json[@"err"] : @"";
+        NSArray *items = [json[@"items"] isKindOfClass:[NSArray class]] ? json[@"items"] : @[];
+        if (err.length > 0 && items.count == 0) {
             self->_items = nil;
+            [self reloadItems];
             [self setSubtitle:err];
-        } else {
-            self->_items = json[@"items"];
-            [self setSubtitle:[NSString stringWithFormat:RLPTr(@"%ld 项"), (long)self->_items.count]];
+            [self showEmptyStateForConfigured:NO reason:err];
+            return;
         }
+        self->_items = items;
+        [self showEmptyStateForConfigured:YES reason:@""];
+        [self setSubtitle:[NSString stringWithFormat:RLPTr(@"%ld 项"), (long)self->_items.count]];
         [self reloadItems];
     }];
 }
@@ -488,12 +533,29 @@
 }
 
 - (void)serverChanged:(id)sender {
+    (void)sender;
     NSInteger idx = [_serverPicker indexOfSelectedItem];
-    if (idx < 0) return;
-    NSDictionary *s = _servers[idx];
-    NSString *body = [NSString stringWithFormat:@"action=active&id=%@", s[@"id"]];
-    [RLPCoreClient.shared postJSON:@"/api/src/config" body:body completion:^(NSDictionary * _Nullable) {
-        [self reloadData];
+    if (idx < 0 || idx >= (NSInteger)_servers.count) return;
+    NSDictionary *s = _servers[(NSUInteger)idx];
+    NSString *sid = [s[@"id"] isKindOfClass:[NSString class]] ? s[@"id"] : @"";
+    NSString *body = [NSString stringWithFormat:@"action=active&id=%@", RLPEnc(sid)];
+    __weak __typeof__(self) weakSelf = self;
+    [RLPCoreClient.shared postJSON:@"/api/src/config" body:body completion:^(NSDictionary * _Nullable json) {
+        __typeof__(self) self_ = weakSelf;
+        if (!self_) return;
+        if (!json || ![json[@"ok"] boolValue]) {
+            NSString *err = ([json[@"error"] isKindOfClass:[NSString class]] && [json[@"error"] length])
+                          ? json[@"error"] : RLPTr(@"切换服务器失败");
+            RLPToast(err);
+            [self_ setSubtitle:err];
+            [self_ reloadData];
+            return;
+        }
+        [self_->_breadcrumbStack removeAllObjects];
+        [self_ updateBreadcrumbDisplay];
+        self_->_items = nil;
+        [self_ reloadItems];
+        [self_ reloadData];
     }];
 }
 
@@ -501,7 +563,7 @@
 
 - (void)goBack:(id)sender {
     [_breadcrumbStack removeLastObject];
-    _backButton.enabled = _breadcrumbStack.count > 0;
+    [self updateBreadcrumbDisplay];
     [self browseId:_breadcrumbStack.lastObject[@"id"] ?: @""];
 }
 
@@ -513,7 +575,7 @@
         for (NSDictionary *it in _items)
             if ([it[@"id"] isEqualToString:itemId]) { title = it[@"t"] ?: @""; break; }
         [_breadcrumbStack addObject:@{@"id": itemId, @"t": title}];
-        _backButton.enabled = YES;
+        [self updateBreadcrumbDisplay];
         [self browseId:itemId];
     } else {
         RLPPlayPath(itemId);

@@ -477,7 +477,7 @@
         // 旧码的 1s 轮询只更新 qIndex，从不重拉歌词 ⟹ 在歌词页签切歌后永远停在上一首的词。
         // 判据口径：只有「当前曲真的变了」才重拉（同一首每秒重拉 = 把后端打爆，也违反 web 语义）。
         NSString *nowPath = [s currentTrackPath] ?: @"";
-        if (![s.tab isEqualToString:@"l"] || !nowPath.length) return;
+        if (![s.tab isEqualToString:@"l"]) return;
         if ([nowPath isEqualToString:(s.lyricFile ?: @"")]) return;
         [s loadLyricsForCurrent:NO];
     }];
@@ -535,6 +535,7 @@
                                 body:nil completion:^(NSDictionary * _Nullable j) {
         RLPToast(RLPTr(@"已移除"));
         [self loadQueue];
+        [[NSNotificationCenter defaultCenter] postNotificationName:RLPQueueChangedNotification object:self];
     }];
 }
 
@@ -550,6 +551,7 @@
     if ([a runModal] != NSAlertFirstButtonReturn) return;
     [[RLPCoreClient shared] postJSON:@"/api/clear" body:nil completion:^(NSDictionary * _Nullable j) {
         [self loadQueue];
+        [[NSNotificationCenter defaultCenter] postNotificationName:RLPQueueChangedNotification object:self];
     }];
 }
 
@@ -558,21 +560,44 @@
 - (void)loadLyricsForCurrent:(BOOL)isRetry {
     if (![RLPCoreClient shared].started) return;
     NSString *file = [self currentTrackPath];
-    if (!file.length) { [self renderLyricMessage:RLPTr(@"还没有播放曲目")]; return; }
+    if (!file.length) {
+        self.lyricFile = nil;
+        self.lyricRetry = 0;
+        [self.lyricTimer invalidate]; self.lyricTimer = nil;
+        self.lines = @[];
+        self.activeLine = -1;
+        self.originalLyricLines = nil;
+        self.lyricAiApplied = NO;
+        self.lyricAiBusy = NO;
+        [self renderLyricMessage:RLPTr(@"还没有播放曲目")];
+        return;
+    }
     if (!isRetry) {
         self.lyricFile = file; self.lyricRetry = 0;
         [self.lyricTimer invalidate]; self.lyricTimer = nil;
+        self.lines = @[];
+        self.activeLine = -1;
+        self.originalLyricLines = nil;
+        self.lyricAiApplied = NO;
+        self.lyricAiBusy = NO;
     }
     // lyricFile 必须在「无歌词」分支之前就记下：否则 loadQueue 的换曲检测会把它当成
     // 新曲，每秒重渲染一次空态（网络曲目就是这条路径）。
     if ([file hasPrefix:@"http://"] || [file hasPrefix:@"https://"]) {
-        [self renderLyricMessage:RLPTr(@"网络曲目暂无歌词")]; return;
+        self.lines = @[];
+        self.activeLine = -1;
+        self.originalLyricLines = nil;
+        self.lyricAiApplied = NO;
+        self.lyricAiBusy = NO;
+        [self renderLyricMessage:RLPTr(@"网络曲目暂无歌词")];
+        return;
     }
     __weak __typeof__(self) w = self;
     NSString *url = [@"/api/lyrics?file=" stringByAppendingString:RLPEnc(file)];
     [[RLPCoreClient shared] getJSON:url completion:^(NSDictionary * _Nullable j) {
         __typeof__(self) s = w;
         if (!s) return;
+        if (![s.lyricFile isEqualToString:file]) return;
         NSString *lrc = [j[@"lrc"] isKindOfClass:[NSString class]] ? j[@"lrc"] : @"";
         s.lines = [RLPLyrics parse:lrc];
         s.activeLine = -1;
@@ -741,12 +766,14 @@
     for (RLPLyricLine *l in base) [texts addObject:(l.text ?: @"")];
     NSString *body = [RLPLyrics aiRequestBodyTask:task lang:lang sourceLang:nil lines:texts];
 
+    NSString *reqFile = [self.lyricFile copy];
     self.lyricAiBusy = YES;
-    [self showLyricHint:(task == @"translate" ? RLPTr(@"正在翻译歌词…") : RLPTr(@"正在处理歌词…"))];
+    [self showLyricHint:([task isEqualToString:@"translate"] ? RLPTr(@"正在翻译歌词…") : RLPTr(@"正在处理歌词…"))];
     __weak __typeof__(self) w = self;
     [[RLPCoreClient shared] postJSON:@"/api/lyrics/ai" body:body completion:^(NSDictionary * _Nullable j) {
         __typeof__(self) s = w;
         if (!s) return;
+        if (!reqFile.length || ![s.lyricFile isEqualToString:reqFile]) return;
         s.lyricAiBusy = NO;
         NSString *err = nil;
         NSArray<RLPLyricLine *> *applied = [RLPLyrics linesFromAiResponse:j appliedTo:base error:&err];
