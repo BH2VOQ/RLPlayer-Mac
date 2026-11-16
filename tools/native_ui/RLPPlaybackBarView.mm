@@ -957,6 +957,8 @@ static double RLPVolDbToPos(double db) {
     [self refreshModeButtons];
     [self refreshBadges];
     self.volume.needsDisplay=YES; self.progress.needsDisplay=YES;
+    self.volKnob.needsDisplay=YES;
+    if (self.coverView.layer) self.coverView.layer.backgroundColor = t.bg2.CGColor;
 }
 
 - (void)refreshBadges {

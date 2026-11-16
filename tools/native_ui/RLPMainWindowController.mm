@@ -101,6 +101,9 @@ static const CGFloat kTopbarHeight = 60.0;    // .top height（classic 52，见 
 @property (nonatomic, strong) RLPWorksViewController *worksPage;
 @property (nonatomic, readwrite) BOOL nowPlayingOverlayVisible;
 @property (nonatomic,strong) NSButton *webBackButton;
+@property (nonatomic,strong) NSButton *topQueueBtn;
+@property (nonatomic,strong) NSButton *topScanBtn;
+@property (nonatomic,strong) NSButton *topNpBtn;
 @property (nonatomic, copy, readwrite) NSString *uiMode;
 @property (nonatomic, strong, readwrite) NSSegmentedControl *modeControl;
 @property (nonatomic, assign) NSUInteger modeEpoch;
@@ -218,19 +221,19 @@ static NSString *RLPPageIdentifier(NSString *key) {
     _search.sendsWholeSearchString = YES;
     [_topbar addSubview:_search];
 
-    NSButton *queueBtn = RLPSymbolButton(@"list.bullet", RLPTr(@"播放队列"), self, @selector(onQueue:));
-    queueBtn.translatesAutoresizingMaskIntoConstraints = NO;
-    [_topbar addSubview:queueBtn];
+    self.topQueueBtn = RLPSymbolButton(@"list.bullet", RLPTr(@"播放队列"), self, @selector(onQueue:));
+    self.topQueueBtn.translatesAutoresizingMaskIntoConstraints = NO;
+    [_topbar addSubview:self.topQueueBtn];
 
     // 顶栏「刷新曲库」（web #bScan：重新扫描音乐库；用户实测「没做刷新曲库的按钮」）。
-    NSButton *scanBtn = RLPSymbolButton(@"arrow.clockwise", RLPTr(@"重新扫描音乐库"), self, @selector(onScanLibrary:));
-    scanBtn.translatesAutoresizingMaskIntoConstraints = NO;
-    scanBtn.identifier = @"top.scan";
-    [_topbar addSubview:scanBtn];
+    self.topScanBtn = RLPSymbolButton(@"arrow.clockwise", RLPTr(@"重新扫描音乐库"), self, @selector(onScanLibrary:));
+    self.topScanBtn.translatesAutoresizingMaskIntoConstraints = NO;
+    self.topScanBtn.identifier = @"top.scan";
+    [_topbar addSubview:self.topScanBtn];
 
-    NSButton *npBtn = RLPSymbolButton(@"play.rectangle", RLPTr(@"正在播放"), self, @selector(onNowPlaying:));
-    npBtn.translatesAutoresizingMaskIntoConstraints = NO;
-    [_topbar addSubview:npBtn];
+    self.topNpBtn = RLPSymbolButton(@"play.rectangle", RLPTr(@"正在播放"), self, @selector(onNowPlaying:));
+    self.topNpBtn.translatesAutoresizingMaskIntoConstraints = NO;
+    [_topbar addSubview:self.topNpBtn];
 
     _modeControl = [NSSegmentedControl segmentedControlWithLabels:@[RLPTr(@"聆听"), RLPTr(@"专业")]
                                                     trackingMode:NSSegmentSwitchTrackingSelectOne
@@ -263,18 +266,18 @@ static NSString *RLPPageIdentifier(NSString *key) {
         [_search.widthAnchor constraintLessThanOrEqualToConstant:300],
         [_search.trailingAnchor constraintLessThanOrEqualToAnchor:_modeControl.leadingAnchor constant:-12],
 
-        [_modeControl.trailingAnchor constraintEqualToAnchor:scanBtn.leadingAnchor constant:-12],
+        [_modeControl.trailingAnchor constraintEqualToAnchor:self.topScanBtn.leadingAnchor constant:-12],
         [_modeControl.centerYAnchor constraintEqualToAnchor:_topbar.centerYAnchor],
 
-        [npBtn.trailingAnchor constraintEqualToAnchor:_topbar.trailingAnchor constant:-16],
-        [npBtn.centerYAnchor constraintEqualToAnchor:_topbar.centerYAnchor],
-        [npBtn.widthAnchor constraintEqualToConstant:28],
-        [queueBtn.trailingAnchor constraintEqualToAnchor:npBtn.leadingAnchor constant:-10],
-        [queueBtn.centerYAnchor constraintEqualToAnchor:_topbar.centerYAnchor],
-        [queueBtn.widthAnchor constraintEqualToConstant:28],
-        [scanBtn.trailingAnchor constraintEqualToAnchor:queueBtn.leadingAnchor constant:-10],
-        [scanBtn.centerYAnchor constraintEqualToAnchor:_topbar.centerYAnchor],
-        [scanBtn.widthAnchor constraintEqualToConstant:28],
+        [self.topNpBtn.trailingAnchor constraintEqualToAnchor:_topbar.trailingAnchor constant:-16],
+        [self.topNpBtn.centerYAnchor constraintEqualToAnchor:_topbar.centerYAnchor],
+        [self.topNpBtn.widthAnchor constraintEqualToConstant:28],
+        [self.topQueueBtn.trailingAnchor constraintEqualToAnchor:self.topNpBtn.leadingAnchor constant:-10],
+        [self.topQueueBtn.centerYAnchor constraintEqualToAnchor:_topbar.centerYAnchor],
+        [self.topQueueBtn.widthAnchor constraintEqualToConstant:28],
+        [self.topScanBtn.trailingAnchor constraintEqualToAnchor:self.topQueueBtn.leadingAnchor constant:-10],
+        [self.topScanBtn.centerYAnchor constraintEqualToAnchor:_topbar.centerYAnchor],
+        [self.topScanBtn.widthAnchor constraintEqualToConstant:28],
 
         // 悬浮播放条（web .bar）：最大宽 1120 **居中**、底 14 / 高 66 / 圆角 16。
         // 旧实现钉死左右各 24 ⟹ 宽窗口下播放条比 web 版宽，右侧状态簇被拉散，
@@ -866,7 +869,11 @@ static NSString *RLPPageIdentifier(NSString *key) {
     self.window.contentView.layer.backgroundColor = t.bg.CGColor;
     // web .top 的背景是 --topbg（半透明 + backdrop-blur），不是 --bg。
     self.topbar.layer.backgroundColor = t.topBg.CGColor;
-    if (self.webBackButton) self.webBackButton.layer.backgroundColor = t.hov.CGColor;
+    if (self.webBackButton) {
+        self.webBackButton.layer.backgroundColor = t.hov.CGColor;
+        self.webBackButton.contentTintColor = t.text;
+    }
+    for (NSButton *b in @[self.topQueueBtn, self.topScanBtn, self.topNpBtn]) b.contentTintColor = t.text;
     self.topbarHeightConstraint.constant = t.topH;   // apple 60 / classic 52
     self.pageHost.layer.backgroundColor = t.bg.CGColor;
     [self.sidebar applyTheme];

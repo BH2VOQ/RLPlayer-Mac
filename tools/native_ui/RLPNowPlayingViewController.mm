@@ -4377,6 +4377,9 @@ static NSString *RLPNowPlayingCastDeviceLabel(NSString *device) {
     for(RLPRailChipView *b in self.railCards){[b applyTheme];b.layer.borderColor=t.line.CGColor;}
     // #npMeta 的徽标/芯片颜色来自层的 CGColor + attributedTitle，切主题必须重刷（否则停在旧主题）。
     [self restyleMetaChipsForTheme];
+    // 只刷图标色：右上三键的静态底/边框是 web 设计值（npclose 期望 rgba(255,255,255,.92)），
+    // 不能在主题切换时覆盖（2026-11-17 首次尝试就是覆盖了它导致 native_nowplaying_web 失败）。
+    for(NSButton *b in @[self.closeButton,self.analysisToggle,self.railToggle]) b.contentTintColor=t.text;
     self.anlDetail.textColor=t.text;[self.webControls applyTheme];self.webControls.playBtn.layer.backgroundColor=t.accent.CGColor;self.webControls.playBtn.contentTintColor=NSColor.whiteColor;
     [self.knowledge applyTheme];[self renderRailMetadata];[self updateLyricPosition:self.webStatus.position];[self updateBlurredCover];
 }
