@@ -772,6 +772,17 @@ bool ensure_conf_template(std::string& err) {
 // "  # channel=..." 不算，由 ConfKeyNormalize 处理）；没有就追加在末尾。
 // 权限：保持 0600（不存在时先按模板 0600 创建，绝不 0644 落地后 chmod）。
 // ---------------------------------------------------------------------------
+std::string read_update_channel_value() {
+    const std::string path = detail_native::UpdateConfPath();
+    std::string text;
+    if (!path.empty()) {
+        std::ifstream f(path, std::ios::binary);
+        if (f) text.assign((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+    }
+    const Config c = parse_update_config(text);
+    return std::string(channel_config_value(c.channel));
+}
+
 bool set_update_channel(const std::string& channelValue, std::string& err) {
     err.clear();
     // ① 只接受抽象枚举值。非法值直接拒绝，**绝不**把原串写进文件。

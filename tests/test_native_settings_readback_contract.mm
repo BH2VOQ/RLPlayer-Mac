@@ -499,6 +499,8 @@ int main(void) {
             rPopAfterBP, rPopAfterBP.selectedItem.representedObject,
             (long)(hogAfterBP ? hogAfterBP.state : -1),
             bitsAfterBP.selectedItem.representedObject]);
+        // 恢复默认确认策略，避免静态状态残留影响同进程后续用例。
+        [(id)[settings class] setRlp_confirmsBitPerfectFix:YES];
 
         // ---- 10. 缺口2 onRepeat: 走 POST /api/playmode?mode=N，并在失败时提示且回读恢复 ----
         [settings selectPane:@"adv"];

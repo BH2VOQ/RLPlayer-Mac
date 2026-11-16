@@ -318,8 +318,13 @@ static void STCheck(BOOL ok, const char *what, NSString *detail) {
         BOOL cmd = (e.modifierFlags & NSEventModifierFlagCommand) != 0;
         BOOL shift = (e.modifierFlags & NSEventModifierFlagShift) != 0;
         BOOL ctrl = (e.modifierFlags & NSEventModifierFlagControl) != 0;
-        RLPShortcutAction a = RLPShortcutActionForKey(key, cmd, shift, ctrl, [self_ shortcutEditingText]);
+        const BOOL editing = [self_ shortcutEditingText];
+        RLPShortcutAction a = RLPShortcutActionForKey(key, cmd, shift, ctrl, editing);
+        // 2026-11-17（UI 回归评审已证实）：焦点在输入框时按 Esc 被这里消费掉，
+        // 搜索框自己的 cancelOperation:（清空搜索）与输入框的结束编辑全部被绕过，
+        // 还会顺手 popDetail。编辑态下不接管 Esc，交回响应链。
         if (a == RLPShortcutNone) return e;
+        if (a == RLPShortcutEscapeBack && editing) return e;
         [self_ handleShortcut:a];
         return nil;   // 已消费
     }];

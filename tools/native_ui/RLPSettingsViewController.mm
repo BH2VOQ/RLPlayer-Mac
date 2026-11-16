@@ -3692,7 +3692,12 @@ static BOOL RLPFeedbackTextBlank(NSString *s) {
         [self_ applyKV:kv toSwitch:self_.directSdmSwitch key:@"directsdm"];
         [self_ applyKV:kv toSwitch:self_.inMonitorSwitch key:@"inmon"];
         [self_ applyKV:kv toSwitch:self_.betaSwitch key:@"updbeta"];
-        [self_ applyKV:kv toPopup:self_.updChannelPopup key:@"channel"];
+        // channel 不在 /api/settings 白名单里，回读必须读 update.conf（见 mac_update.h）。
+        {
+            const std::string chv = rta::update::read_update_channel_value();
+            const NSInteger idx = (chv == "cn" || chv == "china") ? 1 : 0;
+            if (idx < self_.updChannelPopup.numberOfItems) [self_.updChannelPopup selectItemAtIndex:idx];
+        }
         [self_ applyKV:kv toSwitch:self_.autoAnlSwitch key:@"autoanl"];
         [self_ applyKV:kv toTextField:self_.attenField key:@"atten"];
         [self_ applyKV:kv toTextField:self_.bufferField key:@"buffer"];

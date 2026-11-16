@@ -11,6 +11,13 @@ static double Num(NSDictionary *d, NSString *k) {
     id v = d[k];
     return [v respondsToSelector:@selector(doubleValue)] ? [v doubleValue] : 0.0;
 }
+/// 0.0 是「合法的 CUE 起点」，不能再当缺省值：缺键必须回落 -1（非 CUE）。
+/// 2026-11-17（UI 回归评审已证实）：/api/lib/search 不返回 cs/ce，旧实现把它们
+/// 解析成 0.0 ⟹ 曲目页把所有普通曲目都当成 cue_start=0 的分轨去入队/播放。
+static double NumCue(NSDictionary *d, NSString *k) {
+    id v = d[k];
+    return [v respondsToSelector:@selector(doubleValue)] ? [v doubleValue] : -1.0;
+}
 static BOOL Bool(NSDictionary *d, NSString *k) {
     id v = d[k];
     return [v respondsToSelector:@selector(boolValue)] ? [v boolValue] : NO;
@@ -105,8 +112,8 @@ NSArray<NSString *> *RLPSplitArtistNames(NSString *raw) {
     if (!t.path.length) t.path = Str(json, @"file");
     t.duration = Num(json, @"dur");
     t.year = (NSInteger)Num(json, @"year");
-    t.cueStart = Num(json, @"cs");
-    t.cueEnd = Num(json, @"ce");
+    t.cueStart = NumCue(json, @"cs");
+    t.cueEnd = NumCue(json, @"ce");
     t.sampleRate = (NSInteger)Num(json, @"sr");
     t.bits = (NSInteger)Num(json, @"bits");
     t.channels = (NSInteger)Num(json, @"ch");

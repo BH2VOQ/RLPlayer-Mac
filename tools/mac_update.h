@@ -244,6 +244,10 @@ bool ensure_conf_template(std::string& err);
 // 返回 true=成功；err 填原因（不含凭据）。实现见 mac_update.mm。
 bool set_update_channel(const std::string& channelValue, std::string& err);
 
+/// 读 update.conf 的当前通道（文件缺失/取值非法时回默认）。设置页回读必须走这里：
+/// /api/settings 白名单不含 channel，从那里读会永远显示默认值。
+std::string read_update_channel_value();
+
 // 测试/诊断用：把可能含 token 的字符串脱敏（连长度都不暴露）。
 std::string redact_token(const std::string& input, const std::string& token);
 

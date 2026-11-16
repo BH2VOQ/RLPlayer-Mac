@@ -2809,6 +2809,9 @@ static NSString *RLPRailTagText(id srValue, id bitsValue) {
 /// 2026-11-17（UI 缺口审计已证实）：拖动播放页进度条时**实时预览**目标时间
 /// （web 的 pointermove 会更新 #npPos）；旧实现拖动中直接 return，时间显示冻结。
 - (void)onSeekPreview:(NSSlider *)s {
+    // 2026-11-17（UI 回归评审已证实）：action 改成预览后，键盘/辅助功能调滑杆
+    // 只更新标签、不提交（AppKit 不走 mouseDown 的 onCommit）。非拖动路径直接提交。
+    if (!((RLPNPSlider *)s).dragging) { [self onCommitSeek:s]; return; }
     const double frac = s.doubleValue;
     const double dur = self.webStatus.duration;
     if (!(dur > 0) || !isfinite(frac)) return;   // 未播放/时长未知时不预览（与 onCommitSeek 同一守卫）
