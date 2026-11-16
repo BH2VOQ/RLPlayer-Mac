@@ -37,6 +37,8 @@
 #include "net/webui.h"
 #include "net/json.h"                // 用仓库自己的解析器验证 GET 仍是合法 JSON（additive 拼接最容易写坏）
 #include "dsp/sdm_output_policy.h"
+#include "net/library.h"             // 副作用探针：rta::net::Library::instance().scanThreads()
+#include "audio/audio_loader.h"      // 副作用探针：is_stream_decode_enabled()
 
 #include <chrono>
 #include <cmath>
@@ -418,6 +420,42 @@ int main() {
         ck(err.find(rta::dsp::kSdmCornerQualityTag) == std::string::npos,
            "AHM 情形下 corner 闸门没有抢报（levels != 2 跳过）", err);
         call("POST", "/api/stop");
+    }
+
+    // ================= [E] 闸门位置：422 必须在任何内存副作用之前 =================
+    // 旧实现的副作用是在解析循环里当场生效的（Library::setScanThreads /
+    // set_stream_decode_enabled / g_params.rateFamilyPolicy），SDM 闸门只拦住了磁盘：
+    // 保存回 422，但进程内已经是新值 —— 下一个 /api/skip、下一次开流照新值跑。
+    // 这里直接读**进程内状态**判定（不是看 conf：conf 旧实现也不会写，看不出问题）。
+    std::printf("\n[E] 非法组合 422 不能留下内存副作用\n");
+    {
+        // 干净的合法基线：dsd=0（PCM 输出）⟹ 保存闸门根本不适用于本次提交。
+        write_file(confPath, confBase + "dsd=0\nmodfamily=dsd\nmodcut=100\n");
+        const ApiResult base = post_settings("scanthreads=3&streamdecode=0");
+        ck(base.status == 200 && ok_true(base), "基线：scanthreads=3 / streamdecode=0 保存成功",
+           detail_of(base));
+        ck(rta::net::Library::instance().scanThreads() == 3,
+           "基线：Library.scanThreads()==3（对照，证明探针确实能看到这个副作用）",
+           "实际=" + std::to_string(rta::net::Library::instance().scanThreads()));
+        ck(!rta::audio::is_stream_decode_enabled(), "基线：流式解码已关闭（对照）");
+
+        // 被测：同一个 body 里带上非法 SDM 组合 ⟹ 422，上面两个副作用**不得**变化。
+        const ApiResult r = post_settings(
+            "dsd=128&modfamily=dsd&modcut=20&scanthreads=13&streamdecode=1");
+        ck(r.status == 422, "非法 SDM 组合 + scanthreads=13 + streamdecode=1 → 422", detail_of(r));
+        ck(rta::net::Library::instance().scanThreads() == 3,
+           "422 之后 scanThreads 仍是 3（副作用没有在闸门之前生效）",
+           "实际=" + std::to_string(rta::net::Library::instance().scanThreads()));
+        ck(!rta::audio::is_stream_decode_enabled(),
+           "422 之后流式解码仍是关闭（副作用没有在闸门之前生效）");
+        const std::string conf = read_file(confPath);
+        ck(!conf_has(conf, "scanthreads", "13") && !conf_has(conf, "streamdecode", "1"),
+           "422 之后 conf 里也没有这次提交的键（磁盘同样没被改）", conf.substr(0, 220));
+        ck(conf_has(conf, "scanthreads", "3") && conf_has(conf, "streamdecode", "0"),
+           "422 之后 conf 仍是上一次成功保存的值", conf.substr(0, 220));
+
+        // 收尾：把这两个副作用恢复成默认，避免影响后面的段/收尾。
+        call("POST", "/api/settings", "scanthreads=0&streamdecode=1");
     }
 
     rlapp::stop_embedded();

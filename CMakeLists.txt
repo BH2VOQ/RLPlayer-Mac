@@ -1281,6 +1281,15 @@ if(APPLE)
   add_test(NAME settings_persist COMMAND test_settings_persist)
   set_tests_properties(settings_persist PROPERTIES TIMEOUT 120)
 
+  # 2026-11-16：并发 POST /api/settings 的「丢键 / 写窗口内读到半截 conf」判据
+  # （评审 BLOCKER）。8 线程各 200 次写自己的键 + 2 个读线程同时读 conf 原文与
+  # GET /api/settings；旧实现（读-改-写无锁 + trunc 覆盖写）必然丢键/读到空 map。
+  add_executable(test_settings_race tests/test_settings_race.cpp)
+  target_include_directories(test_settings_race PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tools)
+  target_link_libraries(test_settings_race PRIVATE rlapp_core)
+  add_test(NAME settings_race COMMAND test_settings_race)
+  set_tests_properties(settings_race PROPERTIES TIMEOUT 180)
+
   # 2026-11-16（U12 第二步）：1-bit SDM 拐点准入是否真的接到三个真实入口 ——
   #   ① 保存前置闸门（POST /api/settings：422 + 不写盘）、② 开流前闸门（DoP，进线程之前）、
   #   ③ GET 的 additive sdm 快照（原生提示文案的真相源）。

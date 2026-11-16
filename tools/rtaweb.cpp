@@ -754,18 +754,128 @@ static void apply_dsd_src_settings(const PlayParams& p) {
 // ---------------- 工具 ----------------
 static std::string path_in_exe_dir(const char* name);
 
-static std::map<std::string, std::string> load_conf_map() {
-    std::map<std::string, std::string> m;
-    std::ifstream f(path_in_exe_dir("rlplayer-settings.conf"));
-    if (!f) return m;
-    std::string line;
-    while (std::getline(f, line)) {
-        if (!line.empty() && line.back() == '\r') line.pop_back();
-        const size_t e = line.find('=');
-        if (e == std::string::npos) continue;
-        m[line.substr(0, e)] = line.substr(e + 1);
-    }
+// ---------------- 设置文件（rlplayer-settings.conf）的并发安全读写（2026-11-16）----------------
+// 评审 BLOCKER：POST /api/settings 原来是「读全量 → 合并 → ofstream(trunc) 覆盖写」，无锁：
+//   ① 两个并发 POST 各自读旧态再整份写回 ⟹ 后写者抹掉前者的键（用户的设置凭空丢键）；
+//   ② trunc 先清零再逐行写，写窗口内 load_conf_map() 读到**空 map** ⟹ /api/play 回落
+//      PlayParams 默认 volume=0.0 / backend=coreaudio —— 正是历史上「0 dB 直接出声」
+//      那条路径（铁律 1）。
+// 现在三件事一起改：
+//   * 进程内**递归**互斥：读-改-写全程持锁。必须是递归锁 —— /api/profiles?apply 会递归
+//     进 handle() 的 /api/settings（见 profile_request），非递归锁会当场自死锁。
+//   * 写盘改成 tmp + flush + close + rename 的**原子替换**：读者要么看到旧的完整文件、
+//     要么看到新的完整文件，不存在「读到半截 conf」的中间态。
+//   * 读侧与写锁互斥，并记住最近一次成功读到的全量（last-good）。文件暂时缺失/读不到时
+//     返回 last-good，**绝不把空 map 交给调用方**（/api/play 因此不会回落到 0 dB）。
+//   * 文件状态分三态（Ok / Missing / Empty）：调用方能区分「文件不存在」（首启）与
+//     「文件在但某个键缺失」，不再把两者混成同一个空 map。
+enum class ConfFileState { Ok, Missing, Empty };
+
+static std::recursive_mutex& conf_mutex() {
+    static std::recursive_mutex m;
     return m;
+}
+// 最近一次成功读到的全量（只在持锁时访问）。
+static std::map<std::string, std::string>& conf_last_good() {
+    static std::map<std::string, std::string> m;
+    return m;
+}
+static bool& conf_last_good_valid() {
+    static bool v = false;
+    return v;
+}
+
+struct ConfSnapshot {
+    ConfFileState state = ConfFileState::Missing;
+    std::map<std::string, std::string> kv;
+    std::vector<std::string> order;   // 首次出现次序（写回时保持一致，便于人工核对）
+};
+
+// 调用方**必须**已持有 conf_mutex()（函数名带 _locked 就是提醒这一点）。
+// 文件不可读/空 ⟹ kv 退到 last-good（state 仍如实上报文件本身的状态）。
+static ConfSnapshot conf_snapshot_locked() {
+    ConfSnapshot s;
+    std::ifstream f(path_in_exe_dir("rlplayer-settings.conf"));
+    if (!f) {
+        s.state = ConfFileState::Missing;
+    } else {
+        std::string line;
+        while (std::getline(f, line)) {
+            if (!line.empty() && line.back() == '\r') line.pop_back();
+            const size_t e = line.find('=');
+            if (e == std::string::npos) continue;
+            const std::string k = line.substr(0, e);
+            if (s.kv.find(k) == s.kv.end()) s.order.push_back(k);
+            s.kv[k] = line.substr(e + 1);
+        }
+        s.state = s.kv.empty() ? ConfFileState::Empty : ConfFileState::Ok;
+    }
+    if (s.state == ConfFileState::Ok) {
+        conf_last_good() = s.kv;
+        conf_last_good_valid() = true;
+    } else if (conf_last_good_valid()) {
+        s.kv = conf_last_good();
+        s.order.clear();
+        for (const auto& p : s.kv) s.order.push_back(p.first);
+    }
+    return s;
+}
+
+static std::map<std::string, std::string> load_conf_map() {
+    std::lock_guard<std::recursive_mutex> lk(conf_mutex());
+    return conf_snapshot_locked().kv;
+}
+
+// 多态版本（供 /api/play 区分「文件缺失」与「键缺失」）：state 是文件本身的状态。
+static std::map<std::string, std::string> load_conf_map(ConfFileState* stateOut) {
+    std::lock_guard<std::recursive_mutex> lk(conf_mutex());
+    const ConfSnapshot s = conf_snapshot_locked();
+    if (stateOut) *stateOut = s.state;
+    return s.kv;
+}
+
+// 原子替换写全量 kv（调用方必须已持有 conf_mutex()，保证「读-改-写」是一个整体）。
+static bool conf_write_all_locked(const std::string& sp,
+                                  const std::vector<std::string>& order,
+                                  const std::map<std::string, std::string>& kv,
+                                  std::string& err) {
+    static std::atomic<unsigned long long> seq{0};
+    char suffix[96];
+    std::snprintf(suffix, sizeof(suffix), ".tmp.%ld.%llu", (long)::getpid(),
+                  (unsigned long long)seq.fetch_add(1) + 1);
+    const std::string tmp = sp + suffix;
+    {
+        std::ofstream f(tmp, std::ios::binary | std::ios::trunc);
+        if (!f) { err = "无法写入临时文件"; return false; }
+        for (const auto& k : order) {
+            const auto it = kv.find(k);
+            if (it == kv.end()) continue;
+            f << k << "=" << it->second << (char)10;
+        }
+        f.flush();
+        if (!f.good()) { err = "写入未完成"; f.close(); std::remove(tmp.c_str()); return false; }
+    }   // ofstream 析构 = close：缓冲区此时已经全部落盘
+    if (std::rename(tmp.c_str(), sp.c_str()) != 0) {
+        err = "原子替换失败（rename）";
+        std::remove(tmp.c_str());
+        return false;
+    }
+    conf_last_good() = kv;
+    conf_last_good_valid() = true;
+    return true;
+}
+
+// 合并写（/api/settings 的 POST、/api/preset/apply、/api/profiles?apply 共用这一条路径）：
+// 读全量 → 覆盖本次的键 → 原子替换。绝不 trunc + 只写本次的键。
+static bool conf_merge_write(const std::map<std::string, std::string>& kv, std::string& err) {
+    std::lock_guard<std::recursive_mutex> lk(conf_mutex());
+    const std::string sp = path_in_exe_dir("rlplayer-settings.conf");
+    ConfSnapshot s = conf_snapshot_locked();
+    for (const auto& p : kv) {
+        if (s.kv.find(p.first) == s.kv.end()) s.order.push_back(p.first);
+        s.kv[p.first] = p.second;
+    }
+    return conf_write_all_locked(sp, s.order, s.kv, err);
 }
 
 static std::string jesc(const std::string& s) {
@@ -1801,7 +1911,14 @@ static PlayParams parseForm(const std::string& body, std::set<std::string>* seen
 //   file, cue_start, cue_end, rid, rsuffix, rtitle, initialSeekFrac, srcbits, dsdnative
 static PlayParams apply_conf_defaults_for_play(const PlayParams& in, const std::set<std::string>& seen) {
     PlayParams p = in;
-    const auto conf = load_conf_map();
+    // 2026-11-16：把「文件缺失」与「键缺失」区分开。以前两者都是同一个空 map ⟹ 写盘窗口
+    // 里读到空 conf 时，volume/backend 会回落到 PlayParams 的裸默认 0.0 dB / coreaudio
+    //（历史「0 dB 直接出声」那类事故的路径）。现在：
+    //   * 文件读不到但有 last-good ⟹ load_conf_map 返回 last-good（不会空）；
+    //   * 真的没有任何可用值（首启）⟹ 安全档位（volume/backend）沿用进程内最近一次参数，
+    //     绝不凭空造出一个 0 dB 的默认。
+    ConfFileState confState = ConfFileState::Missing;
+    const auto conf = load_conf_map(&confState);
     auto getConf = [&](const std::string& key) -> std::string {
         auto it = conf.find(key);
         return it != conf.end() ? it->second : std::string();
@@ -1809,6 +1926,15 @@ static PlayParams apply_conf_defaults_for_play(const PlayParams& in, const std::
     auto hasConf = [&](const std::string& key) -> bool {
         return conf.find(key) != conf.end();
     };
+    if (conf.empty()) {
+        // 没有可用 conf（首启或文件刚被清空）：沿用进程内最近一次播放参数，而不是裸默认。
+        const PlayParams prev = params_snapshot();
+        if (seen.find("volume") == seen.end()) p.volume = prev.volume;
+        if (seen.find("backend") == seen.end() && !prev.backend.empty()) p.backend = prev.backend;
+        dlog(std::string("CONF_UNAVAILABLE state=") +
+             (confState == ConfFileState::Missing ? "missing" : "empty") +
+             " volume=" + std::to_string(p.volume) + " backend=" + p.backend);
+    }
 
     if (seen.find("rate") == seen.end() && hasConf("rate")) {
         p.rate = getConf("rate");
@@ -3107,17 +3233,10 @@ static bool play_one_direct(const std::string& file, const PlayParams& p) {
 // 只读文件、只在 p.eqFile 为空时调用（正常路径零开销、零行为变化）。
 static std::string settings_conf_value(const char* wantKey) {
     if (!wantKey || !*wantKey) return std::string();
-    std::ifstream f(path_in_exe_dir("rlplayer-settings.conf"));
-    if (!f) return std::string();
-    std::string line;
-    while (std::getline(f, line)) {
-        if (!line.empty() && line.back() == '\r') line.pop_back();
-        const size_t e = line.find('=');
-        if (e == std::string::npos) continue;
-        if (line.compare(0, e, wantKey) != 0) continue;
-        return line.substr(e + 1);
-    }
-    return std::string();
+    // 2026-11-16：同 conf_get —— 统一走持锁读取，写盘窗口里不会再读到半截文件。
+    const auto conf = load_conf_map();
+    const auto it = conf.find(wantKey);
+    return it == conf.end() ? std::string() : it->second;
 }
 
 // ---------------- U12（2026-11-16）：1-bit SDM 输出拐点准入（保存 / 开流共用同一判定）----------------
@@ -3242,16 +3361,10 @@ struct PlaySource {
 
 // 读 rlplayer-settings.conf 的单键（缺失返回 def）
 static std::string conf_get(const std::string& key, const std::string& def) {
-    std::ifstream f(path_in_exe_dir("rlplayer-settings.conf"));
-    if (!f) return def;
-    std::string line;
-    while (std::getline(f, line)) {
-        if (!line.empty() && line.back() == '\r') line.pop_back();
-        const size_t e = line.find('=');
-        if (e == std::string::npos) continue;
-        if (line.substr(0, e) == key) return line.substr(e + 1);
-    }
-    return def;
+    // 2026-11-16：改走 load_conf_map（读侧与写锁互斥 + last-good 兜底），不再自己开 ifstream。
+    const auto conf = load_conf_map();
+    const auto it = conf.find(key);
+    return it == conf.end() ? def : it->second;
 }
 
 // 用户可见错误文案与页面渲染共用同一份语言配置。
@@ -3461,39 +3574,10 @@ static rta::engine::SourceInfo preset_source_info(const std::map<std::string, st
 // 再整体写回）。绝不 trunc + 只写本次的键 —— 那样会把 backend/device 等其余设置清空
 //（2026-10-23 的真实事故，见 /api/settings 处的注释）。
 static bool preset_write_conf(const std::map<std::string, std::string>& kv, std::string& err) {
-    const std::string sp = path_in_exe_dir("rlplayer-settings.conf");
-    std::map<std::string, std::string> merged;
-    std::vector<std::string> order;
-    {
-        std::ifstream in(sp);
-        std::string line;
-        while (std::getline(in, line)) {
-            if (!line.empty() && line.back() == '\r') line.pop_back();
-            const size_t e = line.find('=');
-            if (e == std::string::npos) continue;
-            const std::string k = line.substr(0, e);
-            if (merged.find(k) == merged.end()) order.push_back(k);
-            merged[k] = line.substr(e + 1);
-        }
-    }
-    for (const auto& p : kv) {
-        const auto it = merged.find(p.first);
-        if (it == merged.end()) {
-            order.push_back(p.first);
-            merged[p.first] = p.second;
-        } else {
-            it->second = p.second;
-        }
-    }
-    std::ofstream f(sp, std::ios::trunc);
-    if (!f) { err = "无法写入 " + sp; return false; }
-    for (const auto& k : order) {
-        const auto it = merged.find(k);
-        if (it == merged.end()) continue;
-        f << k << "=" << it->second << (char)10;
-    }
-    if (!f.good()) { err = "写入未完成"; return false; }
-    return true;
+    // 2026-11-16：与 /api/settings 的 POST 走**同一个写入器**（同一把递归互斥 + 原子替换）。
+    // 原来这里自己实现一遍「读全量 → 合并 → trunc 写回」，等于给并发丢键开了第二个入口：
+    // 预设应用与设置页同时保存时，两边各自读旧态整份写回，后写者抹掉前者的键。
+    return conf_merge_write(kv, err);
 }
 
 // GET /api/preset/caps → 设备能力（字段与界面约定一致，多带 notes 便于排查）
@@ -12908,27 +12992,31 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
             // 任何「只提交部分键」的客户端都会把其余设置整份清空。
             // 事故复现：测试脚本只 POST eq=… 一个键 → backend/volume 等被抹掉 → 重启后回落
             // wasapi + 0 dB → 直接对用户听音设备出声（违反铁律 1）。
-            // 现在改为**合并写**：先读全量 kv，覆盖本次提交的白名单键，再整体写回；文件不可读时按空处理。
-            std::map<std::string, std::string> merged;
-            std::vector<std::string> order;
+            // 现在改为**合并写**：先读全量 kv，覆盖本次提交的白名单键，再整体写回。
+            // 2026-11-16（评审 BLOCKER）：整段「读全量 → 合并 → 准入 → 原子写回」全程持同一把
+            // **递归**互斥（/api/profiles?apply 会递归进这个 handler，非递归锁会自死锁）。
+            // 副作用（扫描线程数 / 流式解码 / 族策略）**一律放到写盘成功之后** —— 旧实现边解析
+            // 边生效，422 只挡住了磁盘，内存里已经是新值（下一个请求就按新值跑）。
+            std::unique_lock<std::recursive_mutex> confLk(conf_mutex());
+            const ConfSnapshot confSnap = conf_snapshot_locked();
+            std::map<std::string, std::string> merged = confSnap.kv;
+            std::vector<std::string> order = confSnap.order;
+            if (confSnap.state != ConfFileState::Ok) {
+                // 只用于排查：文件缺失/读不到时 kv 来自 last-good（绝不把 0 dB 默认值当现状）。
+                play_log(std::string("CONF_SNAPSHOT state=") +
+                         (confSnap.state == ConfFileState::Missing ? "missing" : "empty") +
+                         " keys=" + std::to_string(confSnap.kv.size()));
+            }
             // 2026-10-25（耳机 EQ 热重载）：本次提交里 eq/ir/irgpu 是否真的变了。
             // 只在这里记「变没变」，写盘之后再统一决定要不要热重启（保证只重启一次）。
             bool eqChanged = false, irChanged = false, irgpuChanged = false;
             std::string eqNew, irNew;
             bool irgpuNew = false;
-            {
-                std::set<std::string> seen_keys;
-                std::ifstream in(sp);
-                std::string line;
-                while (std::getline(in, line)) {
-                    if (!line.empty() && line.back() == '\r') line.pop_back();
-                    const size_t eqp = line.find('=');
-                    if (eqp == std::string::npos) continue;
-                    const std::string kk = line.substr(0, eqp);
-                    if (seen_keys.insert(kk).second) order.push_back(kk);
-                    merged[kk] = line.substr(eqp + 1);
-                }
-            }
+            // 2026-11-16：本次提交要生效的内存副作用 —— 先只记值，写盘成功后再执行。
+            int pendingScanThreads = -1;           // <0 = 本次没提交
+            bool pendingStreamDecodeSet = false;   // 本次提交了 streamdecode
+            bool pendingStreamDecode = true;
+            std::string pendingRatePolicy;         // 空 = 本次没提交
             // U5：rateFamilyPolicy 值域 prefer|strict|compatible。非法值**直接拒绝**：
             // 不静默回落（回落会把用户的选择悄悄改成别的语义），也不写 conf。
             // 放在合并/写盘之前 —— 拒绝必须整请求生效，不能留下半写状态。
@@ -13000,12 +13088,16 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
                 // 读侧不必再做第二套猜测。空值 = 回到默认顺序（显式写全，便于人工核对）。
                 if (k == "metasrcorder")
                     clean = rta::meta::pv_order_join(rta::meta::pv_parse_order(clean));
+                // 2026-11-16：这里以前当场 Library::setScanThreads / set_stream_decode_enabled。
+                // 那是「闸门之前已生效」的真 BUG：422 只挡住了磁盘。现在统一改为**只记值**，
+                // 等到 conf 原子写盘成功之后才真正生效（见下方「副作用统一放在写盘成功之后」）。
                 if (k == "scanThreads" || k == "scanthreads") {
                     const int st = atoi(clean.c_str());
-                    if (st > 0) Library::instance().setScanThreads((size_t)st);
+                    if (st > 0) pendingScanThreads = st;
                 }
                 if (k == "streamdecode") {
-                    rta::audio::set_stream_decode_enabled(clean != "0" && clean != "false");
+                    pendingStreamDecodeSet = true;
+                    pendingStreamDecode = (clean != "0" && clean != "false");
                 }
                 // ---- 2026-10-25（耳机 EQ "切了没变化" · 根因 1）：同步内存里的 g_params ----
                 // 旧实现只把键值写进 conf，g_params 完全不动 —— 于是"设置页选了 EQ"这件事
@@ -13023,11 +13115,10 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
                     if (cur.convGpu != g) { irgpuChanged = true; irgpuNew = g; }
                 } else if (k == "rateFamilyPolicy") {
                     // 与 eq/ir 同一个理由：设置页写的键必须对「下一首 / 跳曲」立即生效，
-                    // 不能只留在 conf 里等下一次 /api/play。这里只同步内存参数，不重启管线
-                    // （族策略只影响起播选率，不改变正在跑的 DSP 链）。
-                    PlayParams gp = params_snapshot();
-                    gp.rateFamilyPolicy = clean;
-                    params_store(gp);
+                    // 不能只留在 conf 里等下一次 /api/play。但**不能在这里就生效**：
+                    // 旧实现当场 params_store，SDM 闸门随后 422 时内存里已经是新值。
+                    // 现在只记值，写盘成功之后再同步（不重启管线：族策略只影响起播选率）。
+                    pendingRatePolicy = clean;
                 }
                 if (merged.find(k) == merged.end()) order.push_back(k);
                 merged[k] = clean;
@@ -13061,16 +13152,25 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
                     }
                 }
             }
-            // 整体写回（合并后的全量键；顺序保持首次出现次序，便于人工排查）
-            std::ofstream f(sp, std::ios::trunc);
-            if (!f) return "{\"ok\":false,\"error\":\"写入失败\"}";
-            for (const auto& kk : order) {
-                const auto itv = merged.find(kk);
-                if (itv == merged.end()) continue;
-                f << kk << "=" << itv->second << (char)10;
+            // 原子替换（tmp + flush + close + rename；顺序保持首次出现次序，便于人工排查）。
+            // 读者（load_conf_map/conf_get/settings_conf_value）持同一把锁，且文件只在 rename 时
+            // 一步换掉 ⟹ 不存在「读到半截 conf」的窗口。
+            std::string confWriteErr;
+            if (!conf_write_all_locked(sp, order, merged, confWriteErr)) {
+                play_log("CONF_WRITE_FAIL " + confWriteErr);
+                return "{\"ok\":false,\"error\":\"" + jesc(confWriteErr.empty() ? std::string("写入失败") : confWriteErr) + "\"}";
             }
-            if (!f.good()) return "{\"ok\":false,\"error\":\"写入未完成\"}";
-            f.close();
+            confLk.unlock();   // 磁盘已落定：下面的副作用/热重载不再需要这把锁
+            // ---- 2026-11-16：副作用统一放在写盘成功之后（旧实现边解析边生效，422 只挡了磁盘）----
+            if (pendingScanThreads > 0)
+                Library::instance().setScanThreads((size_t)pendingScanThreads);
+            if (pendingStreamDecodeSet)
+                rta::audio::set_stream_decode_enabled(pendingStreamDecode);
+            if (!pendingRatePolicy.empty()) {
+                PlayParams gp = params_snapshot();
+                gp.rateFamilyPolicy = pendingRatePolicy;
+                params_store(gp);
+            }
 
             // ---- 2026-10-25（耳机 EQ "切了没变化" · 根因 1+2）：同步 g_params + 播放中热重载 ----
             // 顺序很重要：先把新值落进 g_params（跳曲/预解码/下次起播立刻用新的），
@@ -13120,22 +13220,20 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
                 return j.str();
             }
         }
-        std::ifstream f(sp);
+        // 2026-11-16：走持锁读取（写盘窗口里不会读到半截 conf；文件读不到时退 last-good）。
+        const auto confNow = load_conf_map();
         std::ostringstream j;
         j << "{\"ok\":true,\"kv\":{";
-        std::string line; bool first = true;
+        bool first = true;
         std::set<std::string> seen;                 // 元数据键缺省带出(缺省全开),见下
         std::map<std::string, std::string> kvs;     // 全量 k→v(旧键迁移带值用)
-        while (std::getline(f, line)) {
-            if (!line.empty() && line.back() == 13) line.pop_back();
-            const size_t e = line.find('=');
-            if (e == std::string::npos) continue;
-            const std::string k = line.substr(0, e);
+        for (const auto& kv : confNow) {
+            const std::string& k = kv.first;
             seen.insert(k);
-            kvs[k] = line.substr(e + 1);
+            kvs[k] = kv.second;
             if (!first) j << ",";
             first = false;
-            j << "\"" << jesc(k) << "\":\"" << jesc(line.substr(e + 1)) << "\"";
+            j << "\"" << jesc(k) << "\":\"" << jesc(kv.second) << "\"";
         }
         // 元数据开关缺省值(P1.5):没写进 conf 也要让 UI 拿到「开」。源开关输出新键
         // metasrc_<id>:新键未写而旧键(metaqq 等)存在 → 迁移带出旧值;都没有 → "1"。
