@@ -426,6 +426,19 @@ static const NSUserInterfaceItemIdentifier kAlbumItemID = @"RLPAlbumItem";
     self.emptyCard.hidden = !visible;
     self.collection.enclosingScrollView.hidden = visible;
     if (!visible) return;
+    if (self.query.length > 0) {
+        self.emptyTitleLabel.stringValue = [NSString stringWithFormat:RLPTr(@"未找到与 “%@” 相关的专辑"), self.query];
+        self.emptyHintLabel.stringValue = RLPTr(@"请尝试缩短搜索词，或检查是否有错别字");
+        self.emptyRootLabel.stringValue = @"";
+        self.emptyRootLabel.hidden = YES;
+        self.emptyAddBtn.hidden = YES;
+        self.emptyScanBtn.hidden = YES;
+        self.emptyStationBtn.hidden = YES;
+        return;
+    }
+    self.emptyAddBtn.hidden = NO;
+    self.emptyScanBtn.hidden = NO;
+    self.emptyStationBtn.hidden = NO;
     // 先用「无目录」默认文案，再拉 roots 决定「有目录但没歌」的变体（web S.roots 同源）。
     [self refreshEmptyStateWithRoots:@[]];
     __weak __typeof__(self) ws = self;

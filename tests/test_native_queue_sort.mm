@@ -576,6 +576,66 @@ int main() {
             [[NSFileManager defaultManager] removeItemAtPath:bigPath error:nil];
         }
 
+        // ---- 缺口1：同一排序项可重复触发 + 队列变更广播 RLPQueueChangedNotification ----
+        {
+            __block NSInteger qChangedCount = 0;
+            __block id qChangedObj = nil;
+            id obs = [[NSNotificationCenter defaultCenter] addObserverForName:RLPQueueChangedNotification
+                                                                       object:nil
+                                                                        queue:nil
+                                                                   usingBlock:^(NSNotification *note) {
+                ++qChangedCount;
+                qChangedObj = note.object;
+            }];
+
+            // 1) 同一项（如 shuffle index=6）连续通过 menu 触发两次，每次都发 /api/qorder 且广播通知
+            [sort selectItemAtIndex:0];
+            [g_posts removeAllObjects];
+            qChangedCount = 0;
+            [sort.menu performActionForItemAtIndex:6];
+            Pump(0.05);
+            NSInteger firstPosts = (NSInteger)PostsWithPrefix(@"/api/qorder").count;
+            NSInteger firstNotes = qChangedCount;
+            [sort.menu performActionForItemAtIndex:6];
+            Pump(0.05);
+            NSInteger secondPosts = (NSInteger)PostsWithPrefix(@"/api/qorder").count;
+            NSInteger secondNotes = qChangedCount;
+            Ck(firstPosts == 1 && secondPosts == 2,
+               "缺口1 同一排序项(shuffle)连续点击两次均触发 /api/qorder",
+               [NSString stringWithFormat:@"first=%ld second=%ld", (long)firstPosts, (long)secondPosts]);
+            Ck(firstNotes == 1 && secondNotes == 2 && qChangedObj == vc,
+               "缺口1 排序成功后广播 RLPQueueChangedNotification(object:self)",
+               [NSString stringWithFormat:@"notes=%ld/%ld objMatch=%d",
+                (long)firstNotes, (long)secondNotes, (int)(qChangedObj == vc)]);
+
+            // 2) 行尾删除触发 RLPQueueChangedNotification(object:self)
+            NSTableView *tbl = (NSTableView *)FindById(vc.view, @"queue.table");
+            if (!tbl) {
+                NSMutableArray<NSView *> *tvs = [NSMutableArray array];
+                CollectAll(vc.view, tvs);
+                for (NSView *x in tvs) if ([x isKindOfClass:[NSTableView class]]) { tbl = (NSTableView *)x; break; }
+            }
+            NSButton *rowDel = nil;
+            if (tbl) {
+                [tbl reloadData];
+                [tbl layoutSubtreeIfNeeded];
+                NSView *cell = [tbl viewAtColumn:3 row:0 makeIfNecessary:YES];
+                NSMutableArray<NSView *> *cs = [NSMutableArray array];
+                CollectAll(cell, cs);
+                for (NSView *x in cs) if ([x isKindOfClass:[NSButton class]] && [x.identifier isEqualToString:@"q.del"]) { rowDel = (NSButton *)x; break; }
+            }
+            qChangedCount = 0; qChangedObj = nil;
+            [g_posts removeAllObjects];
+            if (rowDel) [rowDel sendAction:rowDel.action to:rowDel.target];
+            Pump(0.05);
+            Ck(PostsWithPrefix(@"/api/qdel").count == 1 && qChangedCount == 1 && qChangedObj == vc,
+               "缺口1 行尾删除后广播 RLPQueueChangedNotification(object:self)",
+               [NSString stringWithFormat:@"qdel=%lu notes=%ld objMatch=%d",
+                (unsigned long)PostsWithPrefix(@"/api/qdel").count, (long)qChangedCount, (int)(qChangedObj == vc)]);
+
+            [[NSNotificationCenter defaultCenter] removeObserver:obs];
+        }
+
         // ---- v3.3.11 parseTransportM3u（POSIX 适配）判据 ----
         {
             NSDictionary *p = RLPParseM3U(@"\uFEFF#EXTM3U\r\n/Music/A.flac\r\n# note\r\nsub/B.flac\r\n", @"/List");

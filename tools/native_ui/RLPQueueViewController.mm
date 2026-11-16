@@ -118,7 +118,10 @@ static NSString *const kQueueDragType = @"RLPQueueRowDrag";
         @[ @"shuffle", RLPTr(@"随机打乱") ], @[ @"reverse", RLPTr(@"反转顺序") ] ];
     for (NSArray<NSString *> *spec in sortSpecs) {
         [self.sortPopup addItemWithTitle:spec[1]];
-        self.sortPopup.lastItem.representedObject = spec[0];
+        NSMenuItem *item = self.sortPopup.lastItem;
+        item.representedObject = spec[0];
+        item.target = self;
+        item.action = @selector(onSortMenuItemPicked:);
     }
     self.sortPopup.identifier = @"queue.sort";   // 对应 web #qSort（parity_map ctrl）
     self.sortPopup.target = self;
@@ -397,6 +400,9 @@ static NSString *RLPQueueParentFolder(NSString *path) {
             RLPToast([json[@"error"] isKindOfClass:[NSString class]] ? json[@"error"] : RLPTr(@"移除失败"));
         } else {
             RLPToast(RLPTr(@"已从队列移除"));
+            if (!json || [json[@"ok"] boolValue]) {
+                [[NSNotificationCenter defaultCenter] postNotificationName:RLPQueueChangedNotification object:self_];
+            }
         }
         [self_ reloadData];
     }];
@@ -431,8 +437,12 @@ static NSString *RLPQueueParentFolder(NSString *path) {
     NSString *url = [NSString stringWithFormat:@"/api/qmove?from=%ld&to=%ld", (long)from, (long)to];
     __weak __typeof__(self) weakSelf = self;
     [[RLPCoreClient shared] postJSON:url body:nil completion:^(NSDictionary * _Nullable json) {
-        (void)json;
-        [weakSelf reloadData];
+        __typeof__(self) self_ = weakSelf;
+        if (!self_) return;
+        if (json && [json[@"ok"] boolValue]) {
+            [[NSNotificationCenter defaultCenter] postNotificationName:RLPQueueChangedNotification object:self_];
+        }
+        [self_ reloadData];
     }];
     return YES;
 }
@@ -462,6 +472,9 @@ static NSString *RLPQueueParentFolder(NSString *path) {
             RLPToast([json[@"error"] isKindOfClass:[NSString class]] ? json[@"error"] : RLPTr(@"移除失败"));
         } else {
             RLPToast(RLPTr(@"已移除"));
+            if (!json || [json[@"ok"] boolValue]) {
+                [[NSNotificationCenter defaultCenter] postNotificationName:RLPQueueChangedNotification object:self_];
+            }
         }
         [self_ reloadData];
     }];
@@ -479,6 +492,14 @@ static NSString *RLPQueueParentFolder(NSString *path) {
 }
 
 /// web #qSort：排序下拉改变的是**队列顺序**（/api/qorder），不改变正在播放的那一首。
+- (void)onSortMenuItemPicked:(NSMenuItem *)sender {
+    NSString *key = [sender.representedObject isKindOfClass:[NSString class]] ? sender.representedObject : nil;
+    if (!key.length) return;
+    const NSInteger idx = [self.sortPopup indexOfItem:sender];
+    if (idx >= 0) [self.sortPopup selectItemAtIndex:idx];
+    [self sortBy:key];
+}
+
 - (void)onSortPicked:(NSPopUpButton *)sender {
     NSArray<NSString *> *keys = @[ @"default", @"title", @"artist", @"album",
                                    @"dur", @"year", @"shuffle", @"reverse" ];
@@ -538,6 +559,7 @@ static NSString *RLPQueueMetaText(NSDictionary *m, NSString *k,
             if (json && [json[@"ok"] boolValue]) {
                 self_.sortKey = @"default";
                 RLPToast(RLPTr(@"已恢复默认顺序"));   // web ui_script.h:12500
+                [[NSNotificationCenter defaultCenter] postNotificationName:RLPQueueChangedNotification object:self_];
                 [self_ reloadData];
                 return;
             }
@@ -608,6 +630,7 @@ static NSString *RLPQueueMetaText(NSDictionary *m, NSString *k,
         if (!self_) return;
         if (json && [json[@"ok"] boolValue]) {
             self_.sortKey = key;   // 成功才提交档位
+            [[NSNotificationCenter defaultCenter] postNotificationName:RLPQueueChangedNotification object:self_];
             [self_ reloadData];
             return;
         }
@@ -682,6 +705,7 @@ static NSString *RLPQueueMetaText(NSDictionary *m, NSString *k,
             RLPToast(RLPTr(@"导入失败"));
             return;
         }
+        [[NSNotificationCenter defaultCenter] postNotificationName:RLPQueueChangedNotification object:s2];
         [s2 reloadData];
     }];
 }
@@ -695,8 +719,12 @@ static NSString *RLPQueueMetaText(NSDictionary *m, NSString *k,
     if ([a runModal] != NSAlertFirstButtonReturn) return;
     __weak __typeof__(self) weakSelf = self;
     [[RLPCoreClient shared] postJSON:@"/api/clear" body:nil completion:^(NSDictionary * _Nullable json) {
-        (void)json;
-        [weakSelf reloadData];
+        __typeof__(self) self_ = weakSelf;
+        if (!self_) return;
+        if (json && [json[@"ok"] boolValue]) {
+            [[NSNotificationCenter defaultCenter] postNotificationName:RLPQueueChangedNotification object:self_];
+        }
+        [self_ reloadData];
     }];
 }
 

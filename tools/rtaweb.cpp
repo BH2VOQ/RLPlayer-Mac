@@ -11339,6 +11339,11 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
                 g_q.items.erase(g_q.items.begin() + (long long)from);
                 g_q.items.insert(g_q.items.begin() + (long long)to, v);
                 if (!cur.path.empty()) queue_reindex_locked(cur);
+                // 随机模式下用户手动拖动：旧 base 快照已失效。
+                // 若不清，关闭随机时 g_q.items 会被这份旧顺序覆盖，用户的手动调整凭空消失。
+                // 随机模式下用户手动拖动：旧 base 快照已失效。
+                // 若不清，关闭随机时 g_q.items 会被这份旧顺序覆盖，用户的手动调整凭空消失。
+                if (g_q.shuffle_of()) g_q.base.clear();
             }
             cnt = g_q.items.size();
         }
@@ -11424,6 +11429,8 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
                 g_q.items = std::move(want);
                 newIndex = queue_reindex_locked(cur);
                 n = g_q.items.size();
+                // 随机模式下手动排序：同 qmove，旧 base 快照必须作废。
+                if (g_q.shuffle_of()) g_q.base.clear();
             }
         }
         if (!err.empty()) return std::string("{\"ok\":false,\"error\":\"") + jesc(err) + "\"}";

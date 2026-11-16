@@ -27,6 +27,8 @@
 #import "RLPPlaylistsViewController.h"
 #import "RLPKnowledgeView.mm"
 #import "RLPStreamingViewController.mm"
+#import "RLPAlbumDetailViewController.mm"
+#import "RLPArtistDetailViewController.mm"
 #import "RLPCoreClient.h"
 #import "RLPModels.h"
 #import "RLPTheme.h"
@@ -54,10 +56,25 @@ static void Ck(BOOL ok, const char *what, NSString *detail) {
 - (void)playFromIndex:(NSInteger)index;
 @end
 
+@interface RLPAlbumDetailViewController (PagesFixesAudit)
+- (void)reloadData;
+- (void)onRowDoubleClick:(id)sender;
+- (void)onRowAdd:(NSButton *)sender;
+@end
+
+@interface RLPArtistDetailViewController (PagesFixesAudit)
+- (void)activate;
+@end
+
+@interface RLPTrackActionTableView (PagesFixesAudit)
+- (nullable NSMenu *)rlp_menuForRow:(NSInteger)row;
+@end
+
 #pragma mark - 桩客户端（只记录，不发任何请求）
 
 static NSMutableArray<NSDictionary *> *g_gets;
 static NSMutableArray<NSDictionary *> *g_posts;
+static NSMutableArray<NSString *> *g_getDatas;
 static NSInteger g_mode;    // 桩里的播放模式（GET /api/playmode 的真相）
 static BOOL g_favListBackslash = NO;
 static BOOL g_addShouldFail = NO;
@@ -69,6 +86,18 @@ static RLPJSONCompletion g_heldArtistASumDone = nil;
 static BOOL g_browseShouldFail = NO;
 static BOOL g_srcConfigShouldFail = NO;
 static NSString *g_activeServerId = @"srv2";
+static BOOL g_artistImageShouldSucceed = NO;
+static BOOL g_coverShouldFail = NO;
+
+static NSData *TestPngData(void) {
+    NSBitmapImageRep *rep = [[NSBitmapImageRep alloc]
+        initWithBitmapDataPlanes:NULL pixelsWide:1 pixelsHigh:1
+                   bitsPerSample:8 samplesPerPixel:4 hasAlpha:YES isPlanar:NO
+                  colorSpaceName:NSCalibratedRGBColorSpace bytesPerRow:4 bitsPerPixel:32];
+    uint8_t *px = rep.bitmapData;
+    if (px) { px[0] = 255; px[1] = 0; px[2] = 0; px[3] = 255; }
+    return [rep representationUsingType:NSBitmapImageFileTypePNG properties:@{}];
+}
 
 static NSArray<NSDictionary *> *FavFixture(void) {
     return @[
@@ -187,10 +216,53 @@ static NSArray<NSDictionary *> *PlaylistItemsFixture(void) {
         done(@{ @"ok": @NO, @"error": [NSString stringWithFormat:@"unexpected browse path: %@", path] });
         return;
     }
+    if ([path hasPrefix:@"/api/lib/album?"]) {
+        done(@{
+            @"ok": @YES,
+            @"k": @"alb-cue",
+            @"name": @"Cue Album",
+            @"artist": @"CueArtist",
+            @"year": @2022,
+            @"dur": @600,
+            @"cv": @YES,
+            @"tracks": @[
+                @{ @"i": @0, @"n": @1, @"title": @"Normal Track", @"artist": @"CueArtist",
+                   @"path": @"/Music/Normal/01.flac", @"dur": @180, @"cs": @(-1), @"ce": @(-1) },
+                @{ @"i": @1, @"n": @2, @"title": @"Cue Track 2", @"artist": @"CueArtist",
+                   @"path": @"/Music/Cue/Album.flac", @"dur": @184.75, @"cs": @(125.5), @"ce": @(310.25) },
+                @{ @"i": @2, @"n": @3, @"title": @"Cue Track 3", @"artist": @"CueArtist",
+                   @"path": @"/Music/Cue/Album.flac", @"dur": @235.25, @"cs": @(310.25), @"ce": @(-1) }
+            ]
+        });
+        return;
+    }
+    if ([path isEqualToString:@"/api/lib/albums"]) {
+        done(@{
+            @"ok": @YES,
+            @"albums": @[
+                @{ @"k": @"alb-cue-1", @"name": @"No Cover First", @"artist": @"CueArtist", @"year": @2020, @"n": @5, @"dur": @900, @"cv": @NO },
+                @{ @"k": @"alb-cue-2", @"name": @"With Cover Second", @"artist": @"CueArtist", @"year": @2022, @"n": @8, @"dur": @1800, @"cv": @YES },
+                @{ @"k": @"alb-nocov", @"name": @"Only No Cover", @"artist": @"NoCoverArtist", @"year": @2021, @"n": @4, @"dur": @700, @"cv": @NO }
+            ]
+        });
+        return;
+    }
     // 整列开播（/api/queue/set）之后列队成功；其它 GET 一律失败（不让测试偷偷连真实数据）。
     done(@{ @"ok": @NO });
 }
-- (void)getData:(NSString *)path completion:(RLPDataCompletion)done { (void)path; if (done) done(nil); }
+- (void)getData:(NSString *)path completion:(RLPDataCompletion)done {
+    [g_getDatas addObject:path ?: @""];
+    if (!done) return;
+    if ([path hasPrefix:@"/api/artist/image"]) {
+        done(g_artistImageShouldSucceed ? TestPngData() : nil);
+        return;
+    }
+    if ([path hasPrefix:@"/api/lib/cover"]) {
+        done(g_coverShouldFail ? nil : TestPngData());
+        return;
+    }
+    done(nil);
+}
 - (void)postJSON:(NSString *)path body:(NSString *)body completion:(RLPJSONCompletion)done {
     [g_posts addObject:@{ @"path": path ?: @"", @"body": body ?: @"" }];
     // ⚠️ 顺序：/api/playmode 与 /api/play 同前缀，先判 playmode（与后端路由坑同款）。
@@ -261,6 +333,7 @@ int main() {
         [RLPTheme setUiStyle:@"apple"];
         g_gets = [NSMutableArray array];
         g_posts = [NSMutableArray array];
+        g_getDatas = [NSMutableArray array];
         g_mode = 0;
         std::printf("=== test_native_pages_fixes（P1 单击不播 / P3 单曲循环守卫 · 离屏 · 不出声）===\n");
 
@@ -548,6 +621,187 @@ int main() {
             Ck(itemsNow.count == 0 && [st emptyStateVisible],
                "缺口3 browseId !ok 时清空旧 _items 并显示错误空态",
                [NSString stringWithFormat:@"items=%lu emptyVisible=%d", (unsigned long)itemsNow.count, (int)[st emptyStateVisible]]);
+        }
+
+        // ---- 审计缺口1：专辑详情 CUE 区间播放、入队、右键菜单 ----
+        {
+            RLPAlbumDetailViewController *alb = [[RLPAlbumDetailViewController alloc] initWithAlbumKey:@"alb-cue"];
+            alb.view.frame = win.contentView.bounds;
+            [win.contentView addSubview:alb.view];
+            [alb.view layoutSubtreeIfNeeded];
+            [alb reloadData];
+            Pump(0.05);
+
+            NSTableView *tv = [alb valueForKey:@"_table"];
+            Ck(tv != nil && tv.numberOfRows == 3,
+               "审计缺口1 专辑 3 首曲目已载入（含非 CUE 与 CUE 分轨）",
+               [NSString stringWithFormat:@"rows=%ld", (long)tv.numberOfRows]);
+
+            // 1) 双击 CUE 行（row 1）：走 /api/lib/play，带 k、i=1、cue_start、cue_end
+            [g_posts removeAllObjects];
+            [tv selectRowIndexes:[NSIndexSet indexSetWithIndex:1] byExtendingSelection:NO];
+            [alb onRowDoubleClick:nil];
+            Pump(0.05);
+            NSDictionary *libPlayCue = LastPostExact(@"/api/lib/play");
+            NSString *cuePlayBody = [libPlayCue[@"body"] stringByRemovingPercentEncoding] ?: libPlayCue[@"body"] ?: @"";
+            Ck(libPlayCue != nil &&
+               [cuePlayBody containsString:@"k=alb-cue"] &&
+               [cuePlayBody containsString:@"i=1"] &&
+               [cuePlayBody containsString:@"cue_start=125.5"] &&
+               [cuePlayBody containsString:@"cue_end=310.25"],
+               "审计缺口1 双击 CUE 行走 /api/lib/play 并带 k/i/cue_start/cue_end",
+               cuePlayBody);
+
+            // 2) 双击非 CUE 行（row 0）：走 /api/lib/play，带 k、i=0，不带 cue_start/cue_end
+            [g_posts removeAllObjects];
+            [tv selectRowIndexes:[NSIndexSet indexSetWithIndex:0] byExtendingSelection:NO];
+            [alb onRowDoubleClick:nil];
+            Pump(0.05);
+            NSDictionary *libPlayNormal = LastPostExact(@"/api/lib/play");
+            NSString *normalPlayBody = [libPlayNormal[@"body"] stringByRemovingPercentEncoding] ?: libPlayNormal[@"body"] ?: @"";
+            Ck(libPlayNormal != nil &&
+               [normalPlayBody containsString:@"k=alb-cue"] &&
+               [normalPlayBody containsString:@"i=0"] &&
+               ![normalPlayBody containsString:@"cue_start"] &&
+               ![normalPlayBody containsString:@"cue_end"],
+               "审计缺口1 双击非 CUE 行走 /api/lib/play(k,i) 且不带 cue_start/cue_end",
+               normalPlayBody);
+
+            // 3) 行内「+」入队 CUE 行（row 1）：走 /api/add 并带 cue_start/cue_end
+            [g_posts removeAllObjects];
+            NSButton *addBtn = [[NSButton alloc] initWithFrame:NSZeroRect];
+            addBtn.tag = 1;
+            [alb onRowAdd:addBtn];
+            Pump(0.05);
+            NSDictionary *addCue = LastPostExact(@"/api/add");
+            NSString *addCueBody = [addCue[@"body"] stringByRemovingPercentEncoding] ?: addCue[@"body"] ?: @"";
+            Ck(addCue != nil &&
+               [addCueBody containsString:@"/Music/Cue/Album.flac"] &&
+               [addCueBody containsString:@"cue_start=125.5"] &&
+               [addCueBody containsString:@"cue_end=310.25"],
+               "审计缺口1 + 入队 CUE 行带 file/cue_start/cue_end",
+               addCueBody);
+
+            // 4) 行内「+」入队非 CUE 行（row 0）：走 /api/add 且不带 cue_start/cue_end
+            [g_posts removeAllObjects];
+            addBtn.tag = 0;
+            [alb onRowAdd:addBtn];
+            Pump(0.05);
+            NSDictionary *addNormal = LastPostExact(@"/api/add");
+            NSString *addNormalBody = [addNormal[@"body"] stringByRemovingPercentEncoding] ?: addNormal[@"body"] ?: @"";
+            Ck(addNormal != nil &&
+               [addNormalBody containsString:@"/Music/Normal/01.flac"] &&
+               ![addNormalBody containsString:@"cue_start"] &&
+               ![addNormalBody containsString:@"cue_end"],
+               "审计缺口1 + 入队非 CUE 行只带 file 不带 cue 参数",
+               addNormalBody);
+
+            // 5) 右键菜单 CUE 行（row 1）：播放与加入队列均携带 cue_start/cue_end
+            RLPTrackActionTableView *atv = (RLPTrackActionTableView *)tv;
+            NSMenu *cueMenu = [atv respondsToSelector:@selector(rlp_menuForRow:)] ? [atv rlp_menuForRow:1] : nil;
+            NSMenuItem *playItem = [cueMenu itemWithTag:RLPTrackActionPlay];
+            NSMenuItem *enqItem = [cueMenu itemWithTag:RLPTrackActionEnqueue];
+            [g_posts removeAllObjects];
+            if (playItem) RLPHandleTrackAction(playItem, alb.view);
+            if (enqItem) RLPHandleTrackAction(enqItem, alb.view);
+            Pump(0.05);
+            NSDictionary *menuPlay = LastPostExact(@"/api/play");
+            NSDictionary *menuEnq = LastPostExact(@"/api/add");
+            NSString *menuPlayBody = [menuPlay[@"body"] stringByRemovingPercentEncoding] ?: menuPlay[@"body"] ?: @"";
+            NSString *menuEnqBody = [menuEnq[@"body"] stringByRemovingPercentEncoding] ?: menuEnq[@"body"] ?: @"";
+            Ck(cueMenu != nil &&
+               [menuPlayBody containsString:@"cue_start=125.5"] &&
+               [menuPlayBody containsString:@"cue_end=310.25"] &&
+               [menuEnqBody containsString:@"cue_start=125.5"] &&
+               [menuEnqBody containsString:@"cue_end=310.25"],
+               "审计缺口1 右键菜单 CUE 行播放/入队均带 cue_start/cue_end",
+               [NSString stringWithFormat:@"play=%@ | add=%@", menuPlayBody, menuEnqBody]);
+
+            // 6) 右键菜单非 CUE 行（row 0）：播放/入队保持不带 cue 参数
+            NSMenu *normalMenu = [atv respondsToSelector:@selector(rlp_menuForRow:)] ? [atv rlp_menuForRow:0] : nil;
+            NSMenuItem *nPlayItem = [normalMenu itemWithTag:RLPTrackActionPlay];
+            NSMenuItem *nEnqItem = [normalMenu itemWithTag:RLPTrackActionEnqueue];
+            [g_posts removeAllObjects];
+            if (nPlayItem) RLPHandleTrackAction(nPlayItem, alb.view);
+            if (nEnqItem) RLPHandleTrackAction(nEnqItem, alb.view);
+            Pump(0.05);
+            NSDictionary *nMenuPlay = LastPostExact(@"/api/play");
+            NSDictionary *nMenuEnq = LastPostExact(@"/api/add");
+            NSString *nMenuPlayBody = [nMenuPlay[@"body"] stringByRemovingPercentEncoding] ?: nMenuPlay[@"body"] ?: @"";
+            NSString *nMenuEnqBody = [nMenuEnq[@"body"] stringByRemovingPercentEncoding] ?: nMenuEnq[@"body"] ?: @"";
+            Ck(normalMenu != nil &&
+               [nMenuPlayBody containsString:@"/Music/Normal/01.flac"] &&
+               ![nMenuPlayBody containsString:@"cue_start"] &&
+               [nMenuEnqBody containsString:@"/Music/Normal/01.flac"] &&
+               ![nMenuEnqBody containsString:@"cue_start"],
+               "审计缺口1 右键菜单非 CUE 行不带 cue 参数",
+               [NSString stringWithFormat:@"play=%@ | add=%@", nMenuPlayBody, nMenuEnqBody]);
+        }
+
+        // ---- 审计缺口2：艺术家详情头像三级回退 + 单击进专辑 ----
+        {
+            // 1) /api/artist/image 404 → 回退 /api/lib/cover?k=<有封面的专辑>
+            [g_getDatas removeAllObjects];
+            g_artistImageShouldSucceed = NO;
+            g_coverShouldFail = NO;
+            RLPArtistDetailViewController *art = [[RLPArtistDetailViewController alloc] initWithArtistName:@"CueArtist"];
+            art.view.frame = win.contentView.bounds;
+            [win.contentView addSubview:art.view];
+            [art.view layoutSubtreeIfNeeded];
+            [art activate];
+            Pump(0.05);
+
+            NSCollectionView *col = [art valueForKey:@"_collection"];
+            NSClickGestureRecognizer *clickGR = nil;
+            for (NSGestureRecognizer *gr in col.gestureRecognizers) {
+                if ([gr isKindOfClass:[NSClickGestureRecognizer class]] &&
+                    gr.action == @selector(onDoubleClick:)) {
+                    clickGR = (NSClickGestureRecognizer *)gr;
+                    break;
+                }
+            }
+            Ck(clickGR != nil && clickGR.numberOfClicksRequired == 1,
+               "审计缺口2 艺术家详情专辑网格改为单击进入（numberOfClicksRequired == 1）",
+               [NSString stringWithFormat:@"clicks=%ld", (long)(clickGR ? clickGR.numberOfClicksRequired : -1)]);
+
+            NSImageView *avatarImg = [art valueForKey:@"_avatarImage"];
+            NSTextField *initialLbl = [art valueForKey:@"_initialLabel"];
+            BOOL askedArtistImg = NO, askedCoverFallback = NO;
+            for (NSString *u in g_getDatas) {
+                if ([u isEqualToString:@"/api/artist/image?who=CueArtist"]) askedArtistImg = YES;
+                if ([u isEqualToString:@"/api/lib/cover?k=alb-cue-2"]) askedCoverFallback = YES;
+            }
+            Ck(askedArtistImg && askedCoverFallback &&
+               avatarImg.image != nil && !avatarImg.hidden && initialLbl.hidden,
+               "审计缺口2 头像 404 时回退到有封面专辑 /api/lib/cover?k=alb-cue-2 并隐藏首字母",
+               [NSString stringWithFormat:@"gets=%@ img=%d hidden=%d initHidden=%d",
+                [g_getDatas componentsJoinedByString:@","],
+                avatarImg.image != nil, (int)avatarImg.hidden, (int)initialLbl.hidden]);
+
+            // 2) 两层都失败 → 露出首字母
+            [g_getDatas removeAllObjects];
+            g_artistImageShouldSucceed = NO;
+            g_coverShouldFail = YES;
+            [art activate];
+            Pump(0.05);
+            Ck(avatarImg.image == nil && avatarImg.hidden && !initialLbl.hidden,
+               "审计缺口2 头像与封面均失败时退回首字母",
+               [NSString stringWithFormat:@"img=%d hidden=%d initHidden=%d",
+                avatarImg.image != nil, (int)avatarImg.hidden, (int)initialLbl.hidden]);
+
+            // 3) /api/artist/image 成功 → 直接显示真头像，不再请求专辑封面
+            [g_getDatas removeAllObjects];
+            g_artistImageShouldSucceed = YES;
+            g_coverShouldFail = NO;
+            [art activate];
+            Pump(0.05);
+            BOOL askedCoverWhenAvatarOk = NO;
+            for (NSString *u in g_getDatas) {
+                if ([u hasPrefix:@"/api/lib/cover"]) askedCoverWhenAvatarOk = YES;
+            }
+            Ck(!askedCoverWhenAvatarOk && avatarImg.image != nil && !avatarImg.hidden && initialLbl.hidden,
+               "审计缺口2 真头像成功时直接显示，不触发封面兜底请求",
+               [g_getDatas componentsJoinedByString:@","]);
         }
 
         std::printf("结果：%d passed, %d failed\n", g_pass, g_fail);

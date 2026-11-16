@@ -149,6 +149,9 @@ static const NSUserInterfaceItemIdentifier kArtistAlbumItemID = @"RLPArtistAlbum
 @property (nonatomic, strong) NSView *avatarView;
 @property (nonatomic, strong) NSImageView *avatarImage;
 @property (nonatomic, assign) NSUInteger avatarSeq;
+@property (nonatomic, assign) NSUInteger avatarFallbackSeq;
+@property (nonatomic, assign) BOOL avatarArtistImageFailed;
+@property (nonatomic, assign) BOOL avatarLoadedFromArtistImage;
 @property (nonatomic, strong) NSTextField *initialLabel;
 @property (nonatomic, strong) NSTextField *nameLabel;
 @property (nonatomic, strong) NSTextField *statsLabel;
@@ -247,7 +250,7 @@ static const NSUserInterfaceItemIdentifier kArtistAlbumItemID = @"RLPArtistAlbum
     [_collection registerClass:[RLPArtistAlbumItem class] forItemWithIdentifier:kArtistAlbumItemID];
 
     NSClickGestureRecognizer *dbl = [[NSClickGestureRecognizer alloc] initWithTarget:self action:@selector(onDoubleClick:)];
-    dbl.numberOfClicksRequired = 2;
+    dbl.numberOfClicksRequired = 1;
     [_collection addGestureRecognizer:dbl];
 
     _scroll = [[NSScrollView alloc] initWithFrame:NSZeroRect];
@@ -316,20 +319,55 @@ static const NSUserInterfaceItemIdentifier kArtistAlbumItemID = @"RLPArtistAlbum
     if (_artistName.length) [_knowledge loadKind:@"person" name:_artistName artist:nil];
 }
 
-/// 艺术家真头像。/api/artist/image 内部已做「真头像 → 专辑封面」兜底，
-/// 所以这里只发一次；失败就保留首字母占位（不显示破图图标）。
+/// 艺术家真头像三层回退：/api/artist/image → /api/lib/cover?k=<albumKey> → 首字母占位。
+- (void)loadAvatarFallbackCoverIfNeeded {
+    if (self.avatarLoadedFromArtistImage || !self.avatarArtistImageFailed) return;
+    if (![RLPCoreClient shared].started || self.avatarFallbackSeq == self.avatarSeq) return;
+    NSString *fallbackKey = nil;
+    for (RLPAlbum *a in self.albums) {
+        if (a.hasCover && a.key.length) { fallbackKey = a.key; break; }
+    }
+    if (!fallbackKey.length) return;
+    const NSUInteger seq = self.avatarSeq;
+    self.avatarFallbackSeq = seq;
+    NSString *coverURL = [NSString stringWithFormat:@"/api/lib/cover?k=%@", RLPEnc(fallbackKey)];
+    __weak __typeof__(self) weakSelf = self;
+    [[RLPCoreClient shared] getData:coverURL completion:^(NSData * _Nullable cdata) {
+        __typeof__(self) self_ = weakSelf;
+        if (!self_ || seq != self_.avatarSeq || self_.avatarLoadedFromArtistImage) return;
+        NSImage *cimg = cdata.length ? [[NSImage alloc] initWithData:cdata] : nil;
+        if (cimg) {
+            self_.avatarImage.image = cimg;
+            self_.avatarImage.hidden = NO;
+            self_.initialLabel.hidden = YES;
+        }
+    }];
+}
+
 - (void)loadAvatar {
     if (!self.artistName.length || ![RLPCoreClient shared].started) return;
     const NSUInteger seq = ++self.avatarSeq;
+    self.avatarArtistImageFailed = NO;
+    self.avatarLoadedFromArtistImage = NO;
+    self.avatarFallbackSeq = 0;
     NSString *url = [NSString stringWithFormat:@"/api/artist/image?who=%@", RLPEnc(self.artistName)];
     __weak __typeof__(self) weakSelf = self;
     [[RLPCoreClient shared] getData:url completion:^(NSData * _Nullable data) {
         __typeof__(self) self_ = weakSelf;
         if (!self_ || seq != self_.avatarSeq) return;
         NSImage *img = data.length ? [[NSImage alloc] initWithData:data] : nil;
-        self_.avatarImage.image = img;
-        self_.avatarImage.hidden = (img == nil);
-        self_.initialLabel.hidden = (img != nil);
+        if (img) {
+            self_.avatarLoadedFromArtistImage = YES;
+            self_.avatarImage.image = img;
+            self_.avatarImage.hidden = NO;
+            self_.initialLabel.hidden = YES;
+            return;
+        }
+        self_.avatarArtistImageFailed = YES;
+        self_.avatarImage.image = nil;
+        self_.avatarImage.hidden = YES;
+        self_.initialLabel.hidden = NO;
+        [self_ loadAvatarFallbackCoverIfNeeded];
     }];
 }
 
@@ -402,6 +440,7 @@ static const NSUserInterfaceItemIdentifier kArtistAlbumItemID = @"RLPArtistAlbum
         self_.albumCount = (NSInteger)filtered.count;
         self_.totalTracks = totalTracks;
         self_.totalDuration = totalDuration;
+        [self_ loadAvatarFallbackCoverIfNeeded];
 
         if (filtered.count == 0) {
             self_.statsLabel.stringValue = [NSString stringWithFormat:@"0 %@ · 0 %@", RLPTr(@"张专辑"), RLPTr(@"首")];

@@ -525,6 +525,41 @@ void RLPEnqueuePath(NSString *path) {
     }];
 }
 
+static void RLPAppendCueQuery(NSMutableString *body, double cs, double ce) {
+    if (cs < 0) return;
+    [body appendFormat:@"&cue_start=%.3f", cs];
+    if (ce >= 0 && ce > cs) [body appendFormat:@"&cue_end=%.3f", ce];
+}
+
+void RLPPlayPathCueRange(NSString *path, double cs, double ce) {
+    if (!path.length) return;
+    NSMutableString *body = [NSMutableString stringWithFormat:@"file=%@", RLPEnc(path)];
+    RLPAppendCueQuery(body, cs, ce);
+    RLPPostPlaybackAction(@"/api/play", body);
+}
+
+void RLPPlayAlbumCue(NSString *albumKey, NSInteger startIndex, double cs, double ce) {
+    if (!albumKey.length) return;
+    NSMutableString *body = [NSMutableString stringWithFormat:@"k=%@&i=%ld", RLPEnc(albumKey), (long)startIndex];
+    RLPAppendCueQuery(body, cs, ce);
+    RLPPostPlaybackAction(@"/api/lib/play", body);
+}
+
+void RLPEnqueuePathCue(NSString *path, double cs, double ce) {
+    if (!path.length) return;
+    NSMutableString *body = [NSMutableString stringWithFormat:@"file=%@", RLPEnc(path)];
+    RLPAppendCueQuery(body, cs, ce);
+    [[RLPCoreClient shared] postJSON:@"/api/add" body:body completion:^(NSDictionary * _Nullable json) {
+        if (json && [json[@"ok"] boolValue]) {
+            RLPToast(RLPTr(@"已加入队列"));
+            [[NSNotificationCenter defaultCenter] postNotificationName:RLPQueueChangedNotification object:nil];
+        } else {
+            NSString *err = [json[@"error"] isKindOfClass:[NSString class]] ? json[@"error"] : RLPTr(@"加入队列失败");
+            RLPToast(err);
+        }
+    }];
+}
+
 static std::atomic<uint64_t> gWholeListGen{0};
 
 static void RLPEnsureSequentialModeIf(BOOL (^ _Nullable shouldContinue)(void), void (^ _Nullable then)(void)) {

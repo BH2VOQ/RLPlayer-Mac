@@ -90,6 +90,7 @@ static const CGFloat kTopbarHeight = 60.0;    // .top height（classic 52，见 
 /// 上一次真正分派出去的「落点视图 + 搜索词」，用于去重（同一落点同一个词不重复发请求）。
 @property (nonatomic, copy) NSString *appliedQuery;
 @property (nonatomic, copy) NSString *appliedView;
+@property (nonatomic, assign) BOOL applyingSearchNavigation;
 @property (nonatomic, strong) NSTextField *pageTitle;   // 顶栏页标题（web #pth）
 @property (nonatomic, strong) NSTextField *pageCount;   // 计数（web #cnt）
 @property (nonatomic, strong) NSViewController *currentContent;
@@ -356,6 +357,8 @@ static NSString *RLPPageIdentifier(NSString *key) {
     // 设置页「打开专业工作台」→ 切专业模式并路由到 station
     [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(onSwitchToProWorkbench:)
                                                  name:@"RLPSwitchToProWorkbenchNotification" object:nil];
+    [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(onFocusSearch:)
+                                                 name:@"RLPFocusSearchNotification" object:nil];
 
     [_sidebar selectRow:0];
     [self showContentForRow:0];
@@ -419,6 +422,24 @@ static NSString *RLPPageIdentifier(NSString *key) {
 
 - (void)showContentForKey:(NSString *)key {
     [self cancelSearchDebounce];
+    if (!self.applyingSearchNavigation) {
+        const BOOL hadSearch = self.search.stringValue.length > 0 ||
+                               self.searchQuery.length > 0 ||
+                               self.appliedQuery.length > 0 ||
+                               self.appliedView.length > 0;
+        if (hadSearch) {
+            self.searchQuery = @"";
+            self.appliedQuery = @"";
+            self.appliedView = @"";
+            if (self.search.stringValue.length) self.search.stringValue = @"";
+            for (NSString *k in @[@"albums", @"artists", @"tracks"]) {
+                id p = [k isEqualToString:@"albums"] ? self.albums : self.pageCache[k];
+                if (p && [p respondsToSelector:@selector(searchWithQuery:)]) {
+                    [p searchWithQuery:@""];
+                }
+            }
+        }
+    }
     if (!key.length) key = @"albums";
     NSString *cacheKey = [self cacheKeyForRouteKey:key];
     NSViewController *vc = self.pageCache[cacheKey];
@@ -703,7 +724,9 @@ static NSString *RLPPageIdentifier(NSString *key) {
     }
     // 其余视图：整页搜索落点是曲目页（web 的 setView('tracks') + loadTracks(q)）。
     // 必须走 sidebar 选中而不是直接 swap 内容：否则内容换了、左导航高亮还停在上一个页。
+    self.applyingSearchNavigation = YES;
     if (![self.sidebar selectKey:@"tracks"]) [self showContentForKey:@"tracks"];
+    self.applyingSearchNavigation = NO;
     id tracks = self.pageCache[@"tracks"];
     if ([tracks respondsToSelector:@selector(searchWithQuery:)]) [tracks searchWithQuery:q];
 }
@@ -735,6 +758,13 @@ static NSString *RLPPageIdentifier(NSString *key) {
 - (void)cancelSearchDebounce {
     [self.searchDebounce invalidate];
     self.searchDebounce = nil;
+}
+
+- (void)onFocusSearch:(NSNotification *)note {
+    (void)note;
+    if (!self.search || !self.window) return;
+    [self.window makeFirstResponder:self.search];
+    [self.search selectText:nil];
 }
 
 /// web #q.oninput：每次输入重置 260ms 防抖，到点按当前视图分派（不需要回车）。

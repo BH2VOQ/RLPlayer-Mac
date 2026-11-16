@@ -114,6 +114,10 @@ void RLPPlayPath(NSString *path);
 void RLPPlayPathCue(NSString *path, double cs, double ce);
 void RLPPlayAlbum(NSString *albumKey, NSInteger startIndex);
 void RLPEnqueuePath(NSString *path);
+/// CUE 分轨（tools/rtaweb.cpp parseForm 契约：cue_start / cue_end）。cs < 0 时退化为整首。
+void RLPPlayPathCueRange(NSString *path, double cs, double ce);
+void RLPPlayAlbumCue(NSString *albumKey, NSInteger startIndex, double cs, double ce);
+void RLPEnqueuePathCue(NSString *path, double cs, double ce);
 void RLPPostJSON(NSString *path, NSString * _Nullable body);
 
 /// v3.3.11 `toggleVolumeMute` 的**唯一状态**（web `volumeRestore` 是全局单例）。

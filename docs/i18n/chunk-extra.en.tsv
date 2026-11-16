@@ -689,3 +689,4 @@ PEQ 开	PEQ on
 加入队列失败	Could not add to the queue
 切换服务器失败	Could not switch servers
 保存模式设置失败	Could not save the mode setting
+未找到与 “%@” 相关的专辑	No albums found for “%@”

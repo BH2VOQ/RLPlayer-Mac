@@ -1292,6 +1292,14 @@ if(APPLE)
   add_test(NAME settings_persist COMMAND test_settings_persist)
   set_tests_properties(settings_persist PROPERTIES TIMEOUT 120)
 
+  # 2026-11-17：随机模式下手动拖动队列后，关闭随机不得回退旧顺序快照
+  # （g_q.base 未作废 → 用户手动调整整列被覆盖）。见 tests/test_queue_manual_order.cpp。
+  add_executable(test_queue_manual_order tests/test_queue_manual_order.cpp)
+  target_include_directories(test_queue_manual_order PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tools)
+  target_link_libraries(test_queue_manual_order PRIVATE rlapp_core)
+  add_test(NAME queue_manual_order COMMAND test_queue_manual_order)
+  set_tests_properties(queue_manual_order PROPERTIES TIMEOUT 120)
+
   # 2026-11-16：并发 POST /api/settings 的「丢键 / 写窗口内读到半截 conf」判据
   # （评审 BLOCKER）。8 线程各 200 次写自己的键 + 2 个读线程同时读 conf 原文与
   # GET /api/settings；旧实现（读-改-写无锁 + trunc 覆盖写）必然丢键/读到空 map。

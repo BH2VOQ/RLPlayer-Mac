@@ -62,15 +62,74 @@ static NSStackView *SheetStack(NSString *title, NSString *note) {
 
 #pragma mark - 通用表格
 
+@protocol RLPTrackCueRangeProvider <NSObject>
+@optional
+- (nullable NSDictionary<NSString *, NSNumber *> *)rlp_cueRangeForRow:(NSInteger)row;
+@end
+
+static NSMenu *RLPTrackMenuForCue(NSString *path, double cs, double ce, id target, SEL playAction, SEL removeAction) {
+    if (cs < 0) return RLPTrackMenuForPath(path, target, playAction, removeAction);
+    if (!path.length) return nil;
+    NSMenu *m = [[NSMenu alloc] init];
+    m.autoenablesItems = NO;
+    NSDictionary *cuePayload = @{ @"path": path, @"cs": @(cs), @"ce": @(ce) };
+
+    void (^add)(NSString *, RLPTrackActionTag, id) = ^(NSString *title, RLPTrackActionTag tag, id rep) {
+        NSMenuItem *it = [[NSMenuItem alloc] initWithTitle:RLPTr(title)
+                                                   action:@selector(rlp_trackMenuAction:)
+                                            keyEquivalent:@""];
+        it.tag = tag;
+        it.representedObject = rep;
+        it.target = nil;
+        [m addItem:it];
+    };
+
+    add(@"播放", RLPTrackActionPlay, cuePayload);
+    add(@"加入播放队列", RLPTrackActionEnqueue, cuePayload);
+    add(@"收藏", RLPTrackActionFavorite, path);
+    [m addItem:[NSMenuItem separatorItem]];
+    add(@"保存到歌单…", RLPTrackActionSaveToSQ, path);
+    if (IsLocal(path)) {
+        add(@"音质体检…", RLPTrackActionQuality, path);
+        add(@"对比同目录版本…", RLPTrackActionCompare, path);
+        add(@"AI 补全资料", RLPTrackActionEnrich, path);
+    }
+    if (removeAction) {
+        [m addItem:[NSMenuItem separatorItem]];
+        NSMenuItem *rm = [[NSMenuItem alloc] initWithTitle:RLPTr(@"从队列移除") action:removeAction keyEquivalent:@""];
+        rm.tag = RLPTrackActionRemove;
+        rm.representedObject = path;
+        rm.target = target;
+        [m addItem:rm];
+    }
+    (void)playAction;
+    return m;
+}
+
 @implementation RLPTrackActionTableView
+- (nullable NSMenu *)rlp_menuForRow:(NSInteger)row {
+    if (row < 0 || row >= self.numberOfRows) return nil;
+    NSString *path = self.pathForRow ? self.pathForRow(row) : nil;
+    if ([self.delegate respondsToSelector:@selector(rlp_cueRangeForRow:)]) {
+        NSDictionary *cue = [(id<RLPTrackCueRangeProvider>)self.delegate rlp_cueRangeForRow:row];
+        if ([cue isKindOfClass:[NSDictionary class]] &&
+            [cue[@"cs"] respondsToSelector:@selector(doubleValue)] &&
+            [cue[@"cs"] doubleValue] >= 0) {
+            double cs = [cue[@"cs"] doubleValue];
+            double ce = [cue[@"ce"] respondsToSelector:@selector(doubleValue)] ? [cue[@"ce"] doubleValue] : -1.0;
+            return RLPTrackMenuForCue(path, cs, ce, self.removeTarget, nil, self.removeAction);
+        }
+    }
+    return RLPTrackMenuForPath(path, self.removeTarget, nil, self.removeAction);
+}
+
 - (NSMenu *)menuForEvent:(NSEvent *)event {
     NSPoint p = [self convertPoint:event.locationInWindow fromView:nil];
     NSInteger row = [self rowAtPoint:p];
     if (row < 0 || row >= self.numberOfRows) return nil;
     if (![self isRowSelected:row])
         [self selectRowIndexes:[NSIndexSet indexSetWithIndex:(NSUInteger)row] byExtendingSelection:NO];
-    NSString *path = self.pathForRow ? self.pathForRow(row) : nil;
-    NSMenu *m = RLPTrackMenuForPath(path, self.removeTarget, nil, self.removeAction);
+    NSMenu *m = [self rlp_menuForRow:row];
     return m ?: self.menu;
 }
 @end
@@ -116,14 +175,25 @@ NSMenu *RLPTrackMenuForPath(NSString *path, id target, SEL playAction, SEL remov
 }
 
 BOOL RLPHandleTrackAction(NSMenuItem *item, NSView *anchor) {
-    NSString *path = [item.representedObject isKindOfClass:[NSString class]] ? item.representedObject : nil;
+    NSString *path = nil;
+    double cs = -1.0, ce = -1.0;
+    if ([item.representedObject isKindOfClass:[NSString class]]) {
+        path = (NSString *)item.representedObject;
+    } else if ([item.representedObject isKindOfClass:[NSDictionary class]]) {
+        NSDictionary *d = (NSDictionary *)item.representedObject;
+        path = [d[@"path"] isKindOfClass:[NSString class]] ? d[@"path"] : nil;
+        if ([d[@"cs"] respondsToSelector:@selector(doubleValue)]) cs = [d[@"cs"] doubleValue];
+        if ([d[@"ce"] respondsToSelector:@selector(doubleValue)]) ce = [d[@"ce"] doubleValue];
+    }
     if (!path.length) return NO;
     switch (item.tag) {
         case RLPTrackActionPlay:
-            RLPPlayPath(path);
+            if (cs >= 0) RLPPlayPathCueRange(path, cs, ce);
+            else RLPPlayPath(path);
             return YES;
         case RLPTrackActionEnqueue:
-            RLPEnqueuePath(path);
+            if (cs >= 0) RLPEnqueuePathCue(path, cs, ce);
+            else RLPEnqueuePath(path);
             return YES;
         case RLPTrackActionFavorite: {
             // web toggleFav / 行尾心形（ui_script.h:1869-1905）是**双向开关**：

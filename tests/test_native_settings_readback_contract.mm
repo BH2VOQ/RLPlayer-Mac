@@ -549,6 +549,103 @@ int main(void) {
                [NSString stringWithFormat:@"status=%@ idx=%ld", sl ? sl.stringValue : @"nil", (long)repPop2.indexOfSelectedItem]);
         }
 
+        // ---- 11. 缺口3：updChannelPopup 回读 / metaLlmSwitch 校验 metasummary / loadLlmConfig 同步 llmProviderPopup ----
+        {
+            // 11a: kv[@"channel"] = "cn" -> updChannelPopup=cn (在 diag 页签)
+            Method getM = class_getInstanceMethod([RLPCoreClient class], @selector(getJSON:completion:));
+            IMP origGet = method_getImplementation(getM);
+            __block NSString *mockLlmBase = @"https://api.openai.com/v1";
+            __block BOOL injectChannelCn = YES;
+            IMP mockGetImp = imp_implementationWithBlock(^(id _self, NSString *path, RLPJsonDone completion) {
+                if (injectChannelCn && [path isEqualToString:@"/api/settings"]) {
+                    ((void (*)(id, SEL, NSString *, RLPJsonDone))origGet)(_self, @selector(getJSON:completion:), path, ^(NSDictionary * _Nullable json) {
+                        if (json && [json[@"kv"] isKindOfClass:[NSDictionary class]]) {
+                            NSMutableDictionary *copy = [json mutableCopy];
+                            NSMutableDictionary *kv = [json[@"kv"] mutableCopy];
+                            kv[@"channel"] = @"cn";
+                            copy[@"kv"] = kv;
+                            if (completion) completion(copy);
+                            return;
+                        }
+                        if (completion) completion(json);
+                    });
+                    return;
+                }
+                if ([path isEqualToString:@"/api/llm"]) {
+                    dispatch_async(dispatch_get_main_queue(), ^{
+                        if (completion) completion(@{
+                            @"ok": @YES,
+                            @"baseUrl": mockLlmBase,
+                            @"model": @"gpt-4o",
+                            @"configured": @YES,
+                            @"masked": @"sk-***"
+                        });
+                    });
+                    return;
+                }
+                if ([path hasPrefix:@"/api/llm/models"]) {
+                    dispatch_async(dispatch_get_main_queue(), ^{
+                        if (completion) completion(@{ @"ok": @YES, @"models": @[] });
+                    });
+                    return;
+                }
+                ((void (*)(id, SEL, NSString *, RLPJsonDone))origGet)(_self, @selector(getJSON:completion:), path, completion);
+            });
+            method_setImplementation(getM, mockGetImp);
+
+            [settings selectPane:@"diag"];
+            [settings reloadData];
+            WaitUntil(1.5, ^BOOL {
+                NSPopUpButton *cp = (NSPopUpButton *)FindId(v, @"sp_updchannel");
+                return cp && [PopupValue(cp) isEqualToString:@"cn"];
+            });
+            NSPopUpButton *chPop = (NSPopUpButton *)FindId(v, @"sp_updchannel");
+            Ck(chPop && [PopupValue(chPop) isEqualToString:@"cn"],
+               @"缺口3 reloadData 从 kv[@\"channel\"] 回读 updChannelPopup=cn",
+               [NSString stringWithFormat:@"got=%@", chPop ? PopupValue(chPop) : @"nil"]);
+            injectChannelCn = NO;
+
+            // 11b: metallm=1, metasummary=0 -> metaLlmSwitch=Off; metallm=1, metasummary=1 -> On (在 meta 页签)
+            [settings selectPane:@"meta"];
+            [core jsonWithMethod:@"POST" path:@"/api/settings" body:@"metallm=1&metasummary=0"];
+            [settings reloadData];
+            NSSwitch *llmSw = (NSSwitch *)FindId(v, @"sp_metallm");
+            Pump(0.2);
+            Ck(llmSw && llmSw.state == NSControlStateValueOff,
+               @"缺口3 metaLlmSwitch 在 metallm=1 且 metasummary=0 时为 Off",
+               [NSString stringWithFormat:@"state=%ld", (long)(llmSw ? llmSw.state : -1)]);
+
+            [core jsonWithMethod:@"POST" path:@"/api/settings" body:@"metallm=1&metasummary=1"];
+            [settings reloadData];
+            WaitUntil(1.5, ^BOOL {
+                return llmSw && llmSw.state == NSControlStateValueOn;
+            });
+            Ck(llmSw && llmSw.state == NSControlStateValueOn,
+               @"缺口3 metaLlmSwitch 在 metallm=1 且 metasummary=1 时为 On",
+               [NSString stringWithFormat:@"state=%ld", (long)(llmSw ? llmSw.state : -1)]);
+
+            // 11c: loadLlmConfig 回填 baseUrl 后同步 llmProviderPopup 选中项
+            NSPopUpButton *provPop = (NSPopUpButton *)FindId(v, @"llm.provider");
+            [provPop selectItemAtIndex:0];
+            [settings performSelector:@selector(loadLlmConfig)];
+            WaitUntil(1.5, ^BOOL {
+                return provPop && provPop.indexOfSelectedItem == 1;
+            });
+            Ck(provPop && provPop.indexOfSelectedItem == 1,
+               @"缺口3 loadLlmConfig 回填 OpenAI baseUrl 后同步 llmProviderPopup=1(OpenAI)",
+               [NSString stringWithFormat:@"idx=%ld", (long)(provPop ? provPop.indexOfSelectedItem : -1)]);
+
+            mockLlmBase = @"https://custom-gateway.example.com/v1";
+            [settings performSelector:@selector(loadLlmConfig)];
+            WaitUntil(1.5, ^BOOL {
+                return provPop && provPop.indexOfSelectedItem == 5;
+            });
+            method_setImplementation(getM, origGet);
+            Ck(provPop && provPop.indexOfSelectedItem == 5,
+               @"缺口3 loadLlmConfig 回填自定义 baseUrl 后同步 llmProviderPopup=5(自定义)",
+               [NSString stringWithFormat:@"idx=%ld", (long)(provPop ? provPop.indexOfSelectedItem : -1)]);
+        }
+
         [RLPTheme setThemeName:@"dark"];
         [core shutdown];
         [fm removeItemAtPath:rootDir error:nil];

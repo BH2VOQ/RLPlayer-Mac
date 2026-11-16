@@ -487,6 +487,76 @@ int main() {
            "4d-2 persist:YES 当 /api/settings 返回 ok=false 时回滚模式",
            [NSString stringWithFormat:@"uiMode=%@ seg=%ld", wc.uiMode, (long)wc.modeControl.selectedSegment]);
 
+        // ---- 5. 缺口2：Cmd+F 聚焦搜索框 / 切页清空搜索状态 / 专辑页搜索空态文案 ----
+        {
+            [wc setUiMode:@"listen" persist:NO];
+            [wc.sidebar selectKey:@"albums"];
+            Pump(0.05);
+
+            // 5a RLPFocusSearchNotification 聚焦搜索框
+            [wc.window makeFirstResponder:nil];
+            [[NSNotificationCenter defaultCenter] postNotificationName:@"RLPFocusSearchNotification" object:nil];
+            Pump(0.03);
+            NSResponder *fr = wc.window.firstResponder;
+            BOOL searchFocused = (fr == searchField) ||
+                                 ([fr isKindOfClass:[NSTextView class]] &&
+                                  (id)[(NSTextView *)fr delegate] == searchField);
+            Ck(searchFocused,
+               "5a 缺口2 RLPFocusSearchNotification 使顶栏搜索框获得焦点",
+               [NSString stringWithFormat:@"firstResponder=%@", fr]);
+
+            // 5b 切页清空搜索框与过滤状态（但从非库页发起搜索跳 tracks 时不误清）
+            searchField.stringValue = @"bach";
+            [[NSNotificationCenter defaultCenter] postNotificationName:NSControlTextDidChangeNotification object:searchField];
+            Pump(0.35);
+            NSString *albQuery1 = [wc.albums valueForKey:@"query"];
+            Ck([albQuery1 isEqualToString:@"bach"],
+               "5b 前置：专辑页已按 bach 过滤", albQuery1 ?: @"nil");
+            [wc.sidebar selectKey:@"artists"];
+            Pump(0.05);
+            NSString *albQuery2 = [wc.albums valueForKey:@"query"];
+            Ck(searchField.stringValue.length == 0 && albQuery2.length == 0,
+               "5b 缺口2 切页后清空搜索框与专辑过滤状态",
+               [NSString stringWithFormat:@"search='%@' albums.query='%@'",
+                searchField.stringValue ?: @"", albQuery2 ?: @""]);
+
+            // 5b-2 从非库页（如 settings）搜索应切到 tracks 且保留搜索词
+            [wc.sidebar selectKey:@"settings"];
+            Pump(0.05);
+            searchField.stringValue = @"mozart";
+            [[NSNotificationCenter defaultCenter] postNotificationName:NSControlTextDidChangeNotification object:searchField];
+            Pump(0.35);
+            Ck([wc.currentContent.view.identifier isEqualToString:@"page.tracks"] &&
+               [searchField.stringValue isEqualToString:@"mozart"],
+               "5b-2 缺口2 从非库页搜索切到曲目页且保留搜索词",
+               [NSString stringWithFormat:@"page=%@ search='%@'",
+                wc.currentContent.view.identifier ?: @"nil", searchField.stringValue ?: @""]);
+
+            // 5c 专辑页区分「搜索无结果」与「曲库为空」空态文案
+            [wc.sidebar selectKey:@"albums"];
+            Pump(0.05);
+            g_spy.albumsEmpty = YES;
+            [wc.albums searchWithQuery:@"no_such_album_xyz"];
+            Pump(0.1);
+            NSTextField *emptyTitle = [wc.albums valueForKey:@"emptyTitleLabel"];
+            NSButton *emptyAdd = [wc.albums valueForKey:@"emptyAddBtn"];
+            Ck(emptyTitle && [emptyTitle.stringValue containsString:@"no_such_album_xyz"] &&
+               ![emptyTitle.stringValue containsString:@"还没有添加音乐目录"] &&
+               emptyAdd && emptyAdd.hidden,
+               "5c 缺口2 专辑页搜索无结果时显示搜索空态文案并隐藏添加目录按钮",
+               [NSString stringWithFormat:@"title='%@' addHidden=%d",
+                emptyTitle ? emptyTitle.stringValue : @"nil", emptyAdd ? (int)emptyAdd.hidden : -1]);
+
+            [wc.albums searchWithQuery:@""];
+            Pump(0.1);
+            Ck(emptyTitle && [emptyTitle.stringValue isEqualToString:RLPTr(@"还没有添加音乐目录")] &&
+               emptyAdd && !emptyAdd.hidden,
+               "5c-2 缺口2 专辑页无搜索词且曲库为空时仍显示「还没有添加音乐目录」",
+               [NSString stringWithFormat:@"title='%@' addHidden=%d",
+                emptyTitle ? emptyTitle.stringValue : @"nil", emptyAdd ? (int)emptyAdd.hidden : -1]);
+            g_spy.albumsEmpty = NO;
+        }
+
         [wc stopAllActivity];
         std::printf("结果：%d passed, %d failed\n", g_pass, g_fail);
         return g_fail == 0 ? 0 : 1;

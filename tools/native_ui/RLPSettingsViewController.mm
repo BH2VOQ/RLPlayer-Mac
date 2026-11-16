@@ -3028,6 +3028,30 @@ static NSString *RLPLlmPresetUrlAtIndex(NSInteger i) {
     }
 }
 
+static NSString *RLPLlmHostOf(NSString *u) {
+    NSString *s = [(u ?: @"") stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    if (!s.length) return @"";
+    NSRange scheme = [s rangeOfString:@"://"];
+    if (scheme.location != NSNotFound) {
+        s = [s substringFromIndex:NSMaxRange(scheme)];
+    }
+    NSCharacterSet *stops = [NSCharacterSet characterSetWithCharactersInString:@"/?#"];
+    NSRange cut = [s rangeOfCharacterFromSet:stops];
+    if (cut.location != NSNotFound) {
+        s = [s substringToIndex:cut.location];
+    }
+    return s.lowercaseString;
+}
+
+static NSInteger RLPLlmProviderIndexForBaseUrl(NSString *baseUrl) {
+    NSString *h = RLPLlmHostOf(baseUrl);
+    if (!h.length) return 0;   // 留空 = 走默认端点（DeepSeek）
+    for (NSInteger i = 0; i < 5; ++i) {
+        if ([RLPLlmHostOf(RLPLlmPresetUrlAtIndex(i)) isEqualToString:h]) return i;
+    }
+    return 5;   // 自定义
+}
+
 /// 选中预设只填地址，不保存、不测连通（web llmApplyProvider 同口径）。
 - (void)onLlmProviderPicked:(NSPopUpButton *)sender {
     NSString *url = RLPLlmPresetUrlAtIndex(sender.indexOfSelectedItem);
@@ -3138,6 +3162,9 @@ static NSInteger RLPSearchIndexForProviderId(NSString *pid) {
         if ([json[@"baseUrl"] isKindOfClass:[NSString class]]) {
             self_.llmBase.stringValue = json[@"baseUrl"];
             self_.llmSavedBase = json[@"baseUrl"];   // 「拉模型」要能判断屏幕上的地址是否已落盘
+            if (self_.llmProviderPopup) {
+                [self_.llmProviderPopup selectItemAtIndex:RLPLlmProviderIndexForBaseUrl(json[@"baseUrl"])];
+            }
         }
         if ([json[@"model"] isKindOfClass:[NSString class]]) self_.llmModel.stringValue = json[@"model"];
         NSString *masked = [json[@"masked"] isKindOfClass:[NSString class]] ? json[@"masked"] : @"";
@@ -3658,6 +3685,7 @@ static BOOL RLPFeedbackTextBlank(NSString *s) {
         [self_ applyKV:kv toSwitch:self_.directSdmSwitch key:@"directsdm"];
         [self_ applyKV:kv toSwitch:self_.inMonitorSwitch key:@"inmon"];
         [self_ applyKV:kv toSwitch:self_.betaSwitch key:@"updbeta"];
+        [self_ applyKV:kv toPopup:self_.updChannelPopup key:@"channel"];
         [self_ applyKV:kv toSwitch:self_.autoAnlSwitch key:@"autoanl"];
         [self_ applyKV:kv toTextField:self_.attenField key:@"atten"];
         [self_ applyKV:kv toTextField:self_.bufferField key:@"buffer"];
@@ -3670,7 +3698,14 @@ static BOOL RLPFeedbackTextBlank(NSString *s) {
         else if (kv[@"scanThreads"]) [self_ applyKV:kv toTextField:self_.scanThreadsField key:@"scanThreads"];
         [self_ applyKV:kv toSwitch:self_.streamSwitch key:@"streamdecode"];
         [self_ applyKV:kv toSwitch:self_.metaOnSwitch key:@"metaon"];
-        [self_ applyKV:kv toSwitch:self_.metaLlmSwitch key:@"metallm"];
+        if (self_.metaLlmSwitch &&
+            [kv[@"metallm"] respondsToSelector:@selector(boolValue)]) {
+            const BOOL llmOn = [kv[@"metallm"] boolValue];
+            const BOOL sumOn = [kv[@"metasummary"] respondsToSelector:@selector(boolValue)] &&
+                               [kv[@"metasummary"] boolValue];
+            self_.metaLlmSwitch.state = (llmOn && sumOn) ? NSControlStateValueOn : NSControlStateValueOff;
+            [self_.loadedKeys addObject:@"metallm"];
+        }
         [self_ applyKV:kv toSwitch:self_.metaSummarySwitch key:@"metasummary"];
         [self_ applyKV:kv toSwitch:self_.metaAiFillSwitch key:@"metaaifill"];
 

@@ -590,17 +590,30 @@
     }];
 }
 
-/// 单曲入队（/api/add，不打断当前播放）。
+/// 单曲入队（/api/add，不打断当前播放）。CUE 分轨携带 cue_start/cue_end。
 - (void)onRowAdd:(NSButton *)sender {
     const NSInteger row = sender.tag;
     if (row < 0 || row >= (NSInteger)self.tracks.count) return;
-    RLPEnqueuePath(self.tracks[(NSUInteger)row].path);
+    RLPTrack *tr = self.tracks[(NSUInteger)row];
+    if (tr.cueStart >= 0) RLPEnqueuePathCue(tr.path, tr.cueStart, tr.cueEnd);
+    else RLPEnqueuePath(tr.path);
+}
+
+- (nullable NSDictionary<NSString *, NSNumber *> *)rlp_cueRangeForRow:(NSInteger)row {
+    if (row < 0 || row >= (NSInteger)self.tracks.count) return nil;
+    RLPTrack *tr = self.tracks[(NSUInteger)row];
+    if (tr.cueStart < 0) return nil;
+    return @{ @"cs": @(tr.cueStart), @"ce": @(tr.cueEnd) };
 }
 
 - (void)onRowDoubleClick:(id)sender {
+    (void)sender;
     NSInteger row = self.table.clickedRow;
+    if (row < 0) row = self.table.selectedRow;
     if (row < 0 || row >= (NSInteger)self.tracks.count) return;
-    RLPPlayPath(self.tracks[(NSUInteger)row].path);
+    RLPTrack *tr = self.tracks[(NSUInteger)row];
+    if (tr.cueStart >= 0) RLPPlayAlbumCue(self.albumKey, row, tr.cueStart, tr.cueEnd);
+    else RLPPlayAlbum(self.albumKey, row);
 }
 
 - (void)onPlayAll:(id)sender {
