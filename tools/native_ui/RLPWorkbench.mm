@@ -129,6 +129,53 @@ BOOL RLPWorkbenchFilterUsesNx(NSDictionary *item) {
     return [item isKindOfClass:[NSDictionary class]] && [item[@"forNx"] boolValue];
 }
 
+NSString *RLPWorkbenchEditingFilter(NSDictionary *settings, BOOL editingNx, BOOL *outUsesNx) {
+    NSString *f1x = Str(settings, @"filter") ?: @"";
+    NSString *fnx = Str(settings, @"filterNx") ?: @"";
+    if (editingNx) {
+        if (fnx.length) {
+            if (outUsesNx) *outUsesNx = YES;
+            return fnx;
+        }
+        if (outUsesNx) *outUsesNx = NO;
+        return f1x;
+    }
+    if (f1x.length) {
+        if (outUsesNx) *outUsesNx = NO;
+        return f1x;
+    }
+    if (fnx.length) {
+        if (outUsesNx) *outUsesNx = YES;
+        return fnx;
+    }
+    if (outUsesNx) *outUsesNx = NO;
+    return @"";
+}
+
+NSString *RLPWorkbenchActivePlaybackFilter(NSDictionary *settings, NSDictionary *status, NSString *defaultName) {
+    NSString *f1x = Str(settings, @"filter") ?: @"";
+    NSString *fnx = Str(settings, @"filterNx") ?: @"";
+    double fs = 0.0;
+    if ([status isKindOfClass:[NSDictionary class]]) {
+        id v = status[@"inRate"];
+        if ([v respondsToSelector:@selector(doubleValue)]) fs = [v doubleValue];
+    }
+    // Match the backend PCM/SDM slot fallback order; the editor slot is unrelated.
+    if ([Str(settings, @"dsd") integerValue] >= 64) {
+        NSString *sdm1 = Str(settings, @"sdmfilt") ?: @"";
+        NSString *sdmNx = Str(settings, @"sdmfiltnx") ?: @"";
+        if (fs >= 88200.0) {
+            if (sdmNx.length) return sdmNx;
+            if (fnx.length) return fnx;
+            return sdm1.length ? sdm1 : (defaultName ?: @"");
+        }
+        if (sdm1.length) return sdm1;
+    }
+    if (fs >= 88200.0 && fnx.length) return fnx;
+    if (f1x.length) return f1x;
+    return defaultName ?: @"";
+}
+
 static BOOL IsDsdOut(NSDictionary *s) {
     NSString *d = Str(s, @"dsd");
     return d.length && d.integerValue > 0;

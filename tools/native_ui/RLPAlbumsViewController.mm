@@ -417,8 +417,8 @@ static const NSUserInterfaceItemIdentifier kAlbumItemID = @"RLPAlbumItem";
 
 - (void)onEmptyStation:(id)sender {
     (void)sender;
-    // web emptyGoStation：打开快速开始页（原生导航 key "sq"）。
-    [[NSNotificationCenter defaultCenter] postNotificationName:@"RLPNavigateKeyNotification" object:@"sq"];
+    // web emptyGoStation：打开快速开始页（原生导航 key "station"）。
+    [[NSNotificationCenter defaultCenter] postNotificationName:@"RLPNavigateKeyNotification" object:@"station"];
 }
 
 /// 空态显隐：0 张专辑时卡片可见，网格滚动区隐藏（不留一块空网格底）。

@@ -4,6 +4,7 @@
 #import "RLPCoreClient.h"
 #import "RLPTheme.h"
 
+#include <atomic>
 #include <cstdlib>
 
 static NSString *gLang = @"zh";
@@ -374,9 +375,16 @@ void RLPPostJSON(NSString *path, NSString *body) {
     [[RLPCoreClient shared] postJSON:path body:body ?: @"" completion:nil];
 }
 
+static void RLPPostPlaybackAction(NSString *path, NSString * _Nullable body) {
+    [[RLPCoreClient shared] postJSON:path body:body ?: @"" completion:^(NSDictionary * _Nullable json) {
+        (void)json;
+        [[NSNotificationCenter defaultCenter] postNotificationName:@"RLPPlaybackActionCompletedNotification" object:nil];
+    }];
+}
+
 void RLPPlayPath(NSString *path) {
     if (!path.length) return;
-    RLPPostJSON(@"/api/play", [NSString stringWithFormat:@"file=%@", RLPEnc(path)]);
+    RLPPostPlaybackAction(@"/api/play", [NSString stringWithFormat:@"file=%@", RLPEnc(path)]);
 }
 
 /// CUE 分轨播放：与 web `playPath(file, cs, ce)` 同一条后端契约（POST /api/play
@@ -386,30 +394,30 @@ void RLPPlayPathCue(NSString *path, double cs, double ce) {
     NSMutableString *body = [NSMutableString stringWithFormat:@"file=%@", RLPEnc(path)];
     if (cs >= 0) [body appendFormat:@"&cs=%.3f", cs];
     if (ce > cs) [body appendFormat:@"&ce=%.3f", ce];
-    RLPPostJSON(@"/api/play", body);
+    RLPPostPlaybackAction(@"/api/play", body);
 }
 
 void RLPPlaybackToggle(BOOL playing, BOOL paused, NSString *currentPath) {
-    if (playing && !paused) { RLPPostJSON(@"/api/pause?on=1", nil); return; }
-    if (paused) { RLPPostJSON(@"/api/pause?on=0", nil); return; }
+    if (playing && !paused) { RLPPostPlaybackAction(@"/api/pause?on=1", nil); return; }
+    if (paused) { RLPPostPlaybackAction(@"/api/pause?on=0", nil); return; }
     // 已停止：与 web playOrPause 相同 —— 只发 /api/pause?on=0 是 no-op（本轮用户报过的原话）。
     if (currentPath.length) { RLPPlayPath(currentPath); return; }
     RLPToast(RLPTr(@"队列是空的"));
 }
 
 void RLPPlaybackPauseExplicit(void) {
-    RLPPostJSON(@"/api/pause?on=1", nil);
+    RLPPostPlaybackAction(@"/api/pause?on=1", nil);
 }
 
 void RLPPlaybackResumeOrReplay(BOOL playing, BOOL paused, NSString *currentPath) {
     if (playing && !paused) return;              // 已在播：playCommand 等幂，不打断
-    if (paused) { RLPPostJSON(@"/api/pause?on=0", nil); return; }
+    if (paused) { RLPPostPlaybackAction(@"/api/pause?on=0", nil); return; }
     if (currentPath.length) { RLPPlayPath(currentPath); return; }
 }
 
 void RLPPlayAlbum(NSString *albumKey, NSInteger startIndex) {
     if (!albumKey.length) return;
-    RLPPostJSON(@"/api/lib/play", [NSString stringWithFormat:@"k=%@&i=%ld", RLPEnc(albumKey), (long)startIndex]);
+    RLPPostPlaybackAction(@"/api/lib/play", [NSString stringWithFormat:@"k=%@&i=%ld", RLPEnc(albumKey), (long)startIndex]);
 }
 
 void RLPEnqueuePath(NSString *path) {
@@ -417,12 +425,34 @@ void RLPEnqueuePath(NSString *path) {
     RLPPostJSON(@"/api/add", [NSString stringWithFormat:@"file=%@", RLPEnc(path)]);
 }
 
+static std::atomic<uint64_t> gWholeListGen{0};
+
+static void RLPEnsureSequentialModeIf(BOOL (^ _Nullable shouldContinue)(void), void (^ _Nullable then)(void)) {
+    [[RLPCoreClient shared] getJSON:@"/api/playmode" completion:^(NSDictionary * _Nullable modeJson) {
+        if (shouldContinue && !shouldContinue()) return;
+        NSInteger mode = [modeJson[@"mode"] respondsToSelector:@selector(integerValue)]
+                       ? [modeJson[@"mode"] integerValue] : 0;
+        if (mode == 2) {
+            [[RLPCoreClient shared] postJSON:@"/api/playmode?mode=1" body:nil
+                                  completion:^(NSDictionary * _Nullable ignored) {
+                (void)ignored;
+                if (shouldContinue && !shouldContinue()) return;
+                if (then) then();
+            }];
+        } else if (then) {
+            then();
+        }
+    }];
+}
+
 /// 建队列并从 start 起播（RLPPlayWholeListFrom 的后半段；独立函数避免 block 自捕循环引用）。
-static void RLPSetQueueAndPlay(NSArray<NSString *> *clean, NSInteger i) {
+static void RLPSetQueueAndPlay(NSArray<NSString *> *clean, NSInteger i, uint64_t gen) {
+    if (gen != gWholeListGen.load()) return;
     NSString *body = [NSString stringWithFormat:@"files=%@",
                       RLPEnc([clean componentsJoinedByString:@"\n"])];
     [[RLPCoreClient shared] postJSON:@"/api/queue/set" body:body
                           completion:^(NSDictionary * _Nullable j) {
+        if (gen != gWholeListGen.load()) return;
         if (!j || [j[@"ok"] boolValue] == NO) {
             NSString *err = [j[@"error"] isKindOfClass:[NSString class]] ? j[@"error"] : RLPTr(@"建立队列失败");
             RLPToast(err);
@@ -444,20 +474,15 @@ void RLPPlayWholeListFrom(NSArray<NSString *> *files, NSInteger start) {
 
     // 单曲循环（mode=2）会让"播放整列"卡在第一首：先读当前模式，是 2 就切回列表循环 1。
     // 读到 mode 之前不盲目写，避免把用户的随机/顺序设置也改掉。
-    RLPEnsureSequentialMode(^{ RLPSetQueueAndPlay(clean, i); });
+    // 每次发起整列播放递增 generation，后续每一段异步回调都校验最新意图，防止旧流程覆盖新流程。
+    const uint64_t gen = ++gWholeListGen;
+    RLPEnsureSequentialModeIf(^BOOL { return gen == gWholeListGen.load(); }, ^{
+        RLPSetQueueAndPlay(clean, i, gen);
+    });
 }
 
 void RLPEnsureSequentialMode(void (^then)(void)) {
-    [[RLPCoreClient shared] getJSON:@"/api/playmode" completion:^(NSDictionary * _Nullable modeJson) {
-        NSInteger mode = [modeJson[@"mode"] respondsToSelector:@selector(integerValue)]
-                       ? [modeJson[@"mode"] integerValue] : 0;
-        if (mode == 2) {
-            [[RLPCoreClient shared] postJSON:@"/api/playmode?mode=1" body:nil
-                                  completion:^(NSDictionary * _Nullable ignored) { (void)ignored; if (then) then(); }];
-        } else if (then) {
-            then();
-        }
-    }];
+    RLPEnsureSequentialModeIf(nil, then);
 }
 
 

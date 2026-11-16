@@ -265,6 +265,8 @@ static NSStackView *RLPSRow(NSString *label, NSView *control, NSString *hint, RL
 /// /api/settings 读回的 filter / filterNx：清单异步到达后再按值回显（空串 = 跟随 1x）。
 @property (nonatomic, copy) NSString *savedFilter;
 @property (nonatomic, copy) NSString *savedFilterNx;
+@property (nonatomic, copy) NSString *savedSdmFilter;
+@property (nonatomic, copy) NSString *savedSdmFilterNx;
 @property (nonatomic, strong) NSSwitch *hogSwitch;
 @property (nonatomic, strong) NSPopUpButton *outModePopup;
 @property (nonatomic, strong) NSPopUpButton *bitsPopup;
@@ -1082,6 +1084,18 @@ static NSString *RLPControlIdentifier(NSString *key) {
     if (![v respondsToSelector:@selector(boolValue)]) return;
     sw.state = [v boolValue] ? NSControlStateValueOn : NSControlStateValueOff;
     [self.loadedKeys addObject:key];
+}
+
+- (void)applyKV:(NSDictionary *)kv toTextField:(NSTextField *)tf key:(NSString *)key {
+    if (!tf) return;
+    id v = kv[key];
+    if ([v isKindOfClass:[NSString class]]) {
+        tf.stringValue = v;
+        [self.loadedKeys addObject:key];
+    } else if ([v respondsToSelector:@selector(stringValue)]) {
+        tf.stringValue = [v stringValue];
+        [self.loadedKeys addObject:key];
+    }
 }
 
 - (void)applyKV:(NSDictionary *)kv toPopup:(NSPopUpButton *)pop key:(NSString *)key {
@@ -3430,6 +3444,12 @@ static BOOL RLPFeedbackTextBlank(NSString *s) {
         if (self_.savedFilter.length)
             [self_ applyKV:@{ @"filter": self_.savedFilter }
                   toPopup:self_.filt1xPopup key:@"filter"];
+        if (self_.savedSdmFilter)
+            [self_ applyKV:@{ @"sdmfilt": self_.savedSdmFilter }
+                  toPopup:self_.sdmO1Popup key:@"sdmfilt"];
+        if (self_.savedSdmFilterNx)
+            [self_ applyKV:@{ @"sdmfiltnx": self_.savedSdmFilterNx }
+                  toPopup:self_.sdmONxPopup key:@"sdmfiltnx"];
         // 回填之后族说明要跟上（否则第一个选中项有说明、回填后的没有）。
         [self_ refreshFilterFamilyNote];
     }];
@@ -3448,12 +3468,20 @@ static BOOL RLPFeedbackTextBlank(NSString *s) {
         [self_ applyKV:kv toSwitch:self_.hogSwitch key:@"hogexcl"];
         [self_ applyKV:kv toSwitch:self_.loudSwitch key:@"loudness"];
         [self_ applyKV:kv toSwitch:self_.ispSwitch key:@"isp"];
+        [self_ applyKV:kv toSwitch:self_.twoStageSwitch key:@"twostage"];
         [self_ applyKV:kv toSwitch:self_.directSdmSwitch key:@"directsdm"];
         [self_ applyKV:kv toSwitch:self_.inMonitorSwitch key:@"inmon"];
         [self_ applyKV:kv toSwitch:self_.betaSwitch key:@"updbeta"];
         [self_ applyKV:kv toSwitch:self_.autoAnlSwitch key:@"autoanl"];
-        if (self_.attenField && [kv[@"atten"] isKindOfClass:[NSString class]])
-            self_.attenField.stringValue = kv[@"atten"];
+        [self_ applyKV:kv toTextField:self_.attenField key:@"atten"];
+        [self_ applyKV:kv toTextField:self_.bufferField key:@"buffer"];
+        [self_ applyKV:kv toTextField:self_.rampField key:@"ramp"];
+        [self_ applyKV:kv toTextField:self_.tapsField key:@"taps"];
+        [self_ applyKV:kv toTextField:self_.transitionField key:@"transition"];
+        [self_ applyKV:kv toTextField:self_.modCutField key:@"modcut"];
+        [self_ applyKV:kv toTextField:self_.modDithField key:@"moddith"];
+        if (kv[@"scanthreads"]) [self_ applyKV:kv toTextField:self_.scanThreadsField key:@"scanthreads"];
+        else if (kv[@"scanThreads"]) [self_ applyKV:kv toTextField:self_.scanThreadsField key:@"scanThreads"];
         [self_ applyKV:kv toSwitch:self_.streamSwitch key:@"streamdecode"];
         [self_ applyKV:kv toSwitch:self_.metaOnSwitch key:@"metaon"];
         [self_ applyKV:kv toSwitch:self_.metaLlmSwitch key:@"metallm"];
@@ -3472,14 +3500,23 @@ static BOOL RLPFeedbackTextBlank(NSString *s) {
         // 位深与采样率一样是「值 ≠ 文案」的下拉（web value=-1/0/16/32）；
         // 旧实现根本没把 kv.bits 回填到下拉，于是重开设置页永远显示第一项。
         [self_ applyKV:kv toPopup:self_.bitsPopup key:@"bits"];
-        // filter / filterNx 清单是异步到的：先记值，/api/filters 完成块再按值重选。
-        // filterNx 的空串是合法值（「跟随 1x」首项），applyKV 必须能选中它。
+        // filter / filterNx / sdmfilt / sdmfiltnx 清单是异步到的：先记值，/api/filters 完成块再按值重选。
+        // filterNx / sdmfilt / sdmfiltnx 的空串是合法值（「跟随」首项），applyKV 必须能选中它。
         self_.savedFilter = [kv[@"filter"] isKindOfClass:[NSString class]] ? kv[@"filter"] : @"";
         self_.savedFilterNx = [kv[@"filterNx"] isKindOfClass:[NSString class]] ? kv[@"filterNx"] : @"";
+        self_.savedSdmFilter = [kv[@"sdmfilt"] isKindOfClass:[NSString class]] ? kv[@"sdmfilt"] : @"";
+        self_.savedSdmFilterNx = [kv[@"sdmfiltnx"] isKindOfClass:[NSString class]] ? kv[@"sdmfiltnx"] : @"";
         [self_ applyKV:kv toPopup:self_.filt1xPopup key:@"filter"];
         [self_ applyKV:kv toPopup:self_.filtNxPopup key:@"filterNx"];
+        [self_ refreshFilterFamilyNote];
+        [self_ applyKV:kv toPopup:self_.sdmO1Popup key:@"sdmfilt"];
+        [self_ applyKV:kv toPopup:self_.sdmONxPopup key:@"sdmfiltnx"];
+        [self_ applyKV:kv toPopup:self_.phasePopup key:@"phase"];
+        [self_ applyKV:kv toPopup:self_.shaperPopup key:@"shaper"];
         [self_ applyKV:kv toPopup:self_.modFamilyPopup key:@"modfamily"];
         [self_ applyKV:kv toPopup:self_.modOrderPopup key:@"modorder"];
+        [self_ applyKV:kv toPopup:self_.dsdKindPopup key:@"dsdkind"];
+        [self_ applyKV:kv toPopup:self_.dsdConvPopup key:@"dsdconv"];
         [self_ applyKV:kv toPopup:self_.inBackendPopup key:@"inbackend"];
         // GPU 后端偏好回填（值 auto/metal/off → 下拉下标）。
         if ([kv[@"gpuvendor"] isKindOfClass:[NSString class]])
@@ -3512,6 +3549,23 @@ static BOOL RLPFeedbackTextBlank(NSString *s) {
         self_.statusLine.stringValue = RLPTr(@"设置已加载");
     }];
 
+    [[RLPCoreClient shared] getJSON:@"/api/playmode" completion:^(NSDictionary * _Nullable json) {
+        __typeof__(self) self_ = weakSelf;
+        if (!self_) return;
+        if (![json[@"ok"] boolValue] && !json[@"mode"]) return;
+        const NSInteger mode = [json[@"mode"] respondsToSelector:@selector(integerValue)]
+                             ? [json[@"mode"] integerValue] : 0;
+        if (self_.repPopup) {
+            const NSInteger repIdx = (mode == 1) ? 0 : (mode == 2) ? 1 : 2;
+            if (repIdx >= 0 && repIdx < self_.repPopup.numberOfItems)
+                [self_.repPopup selectItemAtIndex:repIdx];
+        }
+        if (self_.shufSwitch) {
+            self_.shufSwitch.state = (mode == 3) ? NSControlStateValueOn : NSControlStateValueOff;
+        }
+    }];
+
+    [self reloadRoots];
     [self.serversView reload];
     [self.metaSourcesView reload];
     [self.libStatsView reload];
@@ -3820,7 +3874,7 @@ static BOOL RLPFeedbackTextBlank(NSString *s) {
 
 - (void)reloadRoots {
     __weak __typeof__(self) weakSelf = self;
-    [[RLPCoreClient shared] getJSON:@"/api/lib/roots" completion:^(NSDictionary * _Nullable json) {
+    [[RLPCoreClient shared] getJSON:@"/api/lib/stats" completion:^(NSDictionary * _Nullable json) {
         __typeof__(self) self_ = weakSelf;
         if (!self_) return;
         NSArray *roots = [json[@"roots"] isKindOfClass:[NSArray class]] ? json[@"roots"] : @[];

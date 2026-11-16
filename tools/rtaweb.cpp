@@ -554,9 +554,20 @@ struct PlayerState {
     template <class Fn>
     void restart(Fn&& makeThread) {
         std::lock_guard<std::mutex> lk(ctlMtx);
+        const bool hadThread = th.joinable();
         stop.store(true);
         joinIfDoneLocked();
         stop.store(false);
+        if (hadThread) {
+            pauseReq.store(false);
+            paused.store(false);
+            seekReq.store(-1.0);
+            hogRequested.store(false);
+            hogAcquired.store(false);
+        }
+        // The joined queue thread writes playing=false on exit. Publish the new
+        // session only after that write, while ctlMtx still excludes other starts.
+        playing.store(true);
         startLocked(std::thread(std::forward<Fn>(makeThread)));
     }
     // 只停不启（/api/stop、/api/clear、转投投放会话前）：同样原子，避免与并发播放请求撞车
@@ -565,6 +576,9 @@ struct PlayerState {
         stop.store(true);
         joinIfDoneLocked();
         stop.store(false);
+        pauseReq.store(false);
+        paused.store(false);
+        seekReq.store(-1.0);
         hogRequested.store(false);
         hogAcquired.store(false);
     }
@@ -4781,6 +4795,9 @@ static bool play_one_impl(const std::string& file, const PlayParams& pIn, rta::a
                 cfg.taps = fp->taps; cfg.transition = fp->transition; cfg.attenDb = fp->attenDb;
                 cfg.filterWindow = fp->window; cfg.filterPhase = fp->phase;
                 cfg.twoStage = fp->twoStage;
+                cfg.apodizing = fp->apodizing;
+                cfg.apodF1 = fp->apodF1;
+                cfg.apodF2 = fp->apodF2;
                 // 2026-10-25（音质线）：每相位抽头地板 —— 新预设（*-tight）靠它把「每相位抽头数 T」与
                 // 插值因子 L 解耦；否则 44.1→384k（L=1280）时 4095 抽头的预设只剩 4 抽头/相位
                 // （20 kHz 掉 5 dB、THD+N 只剩 -29 dBFS）。既有预设 tapsPerInput=0，逐位不变。
@@ -7289,10 +7306,29 @@ static rta::audio::AudioBuffer prefetch_take(const std::string& path) {
     return rta::audio::AudioBuffer{};
 }
 
+// 从 g_params 快照仅同步「听感/DSP 滤波与 EQ/族策略」设置到下一曲参数，
+// 绝不覆盖当前队列项（file/cue/remote）、设备会话（backend/device/hog/buffer/volume）或初始 seek。
+static void apply_dsp_settings_snapshot(PlayParams& dst, const PlayParams& snap) {
+    dst.filter           = snap.filter;
+    dst.filterNx         = snap.filterNx;
+    dst.sdmFilter        = snap.sdmFilter;
+    dst.sdmFilterNx      = snap.sdmFilterNx;
+    dst.phase            = snap.phase;
+    dst.taps             = snap.taps;
+    dst.transition       = snap.transition;
+    dst.atten            = snap.atten;
+    dst.twoStage         = snap.twoStage;
+    dst.eqFile           = snap.eqFile;
+    dst.convIr           = snap.convIr;
+    dst.convGpu          = snap.convGpu;
+    dst.rateFamilyPolicy = snap.rateFamilyPolicy;
+}
+
 // ---- 队列播放线程：自动播下一首，并在播当前曲时预解码下一曲 ----
 static void queue_thread(PlayParams p, size_t start) {
     auto& ps = g_ps;
     size_t idx = start;
+    bool firstTrack = true;
     for (;;) {
         if (ps.stop.load()) break;
 
@@ -7320,6 +7356,12 @@ static void queue_thread(PlayParams p, size_t start) {
         // ★ 本曲的播放区间**只来自队列项**：绝不沿用上一曲的 cueStart/cueEnd。
         //   （p 是"最近一次播放参数"，同专辑内切到非 cue 曲目时必须归零，否则会少播一段。）
         PlayParams pit = p;
+        if (firstTrack) {
+            firstTrack = false;
+        } else {
+            pit.initialSeekFrac = -1.0;
+            apply_dsp_settings_snapshot(pit, params_snapshot());
+        }
         pit.cueStart = cur.cs;
         pit.cueEnd   = cur.ce;
         const bool done = play_one(cur.path, pit, buf);
@@ -10002,11 +10044,11 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
                 rta::net::CastManager::instance().stop();
                 play_log("CAST_STOP reason=lib-play-switch-to-local");
             }
+            ps.playing.store(true);
             ps.restart([p, start] { return queue_thread(p, start); });
             { std::lock_guard<std::mutex> lk(ps.mtx); ps.error.clear(); ps.current = items[start].path; }
             ps.played.store(0);
             ps.total.store(0);
-            ps.playing.store(true);
             return "{\"ok\":true,\"count\":" + std::to_string(items.size()) + "}";
         }
         // 整张专辑加入队列（不打断当前播放）
@@ -12203,13 +12245,32 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
     if (rq.path.rfind("/api/queue/set", 0) == 0) {
         ct = "application/json; charset=utf-8";
         std::string files;
+        bool requireStopped = false;
+        {
+            const size_t qpos = rq.path.find('?');
+            if (qpos != std::string::npos) {
+                std::istringstream qs(rq.path.substr(qpos + 1));
+                std::string tok;
+                while (std::getline(qs, tok, '&')) {
+                    const size_t e = tok.find('=');
+                    if (e == std::string::npos) continue;
+                    if (urlDecode(tok.substr(0, e)) == "require_stopped") {
+                        const std::string v = urlDecode(tok.substr(e + 1));
+                        requireStopped = (v == "1" || v == "true");
+                    }
+                }
+            }
+        }
         {
             std::istringstream is(rq.body);
             std::string tok;
             while (std::getline(is, tok, '&')) {
                 const size_t e = tok.find('=');
                 if (e == std::string::npos) continue;
-                if (urlDecode(tok.substr(0, e)) == "files") files = urlDecode(tok.substr(e + 1));
+                const std::string k = urlDecode(tok.substr(0, e));
+                const std::string v = urlDecode(tok.substr(e + 1));
+                if (k == "files") files = v;
+                else if (k == "require_stopped") requireStopped = (v == "1" || v == "true");
             }
         }
         std::vector<QItem> items;
@@ -12227,6 +12288,14 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
             if (!valid_utf8(it.path)) return utf8_path_reject(it.path);
         size_t cnt = 0;
         {
+            std::unique_lock<std::mutex> ctlLk(ps.ctlMtx, std::defer_lock);
+            if (requireStopped) {
+                ctlLk.lock();
+                if (ps.playing.load() || g_upnpPlayer.load() ||
+                    rta::net::CastManager::instance().get_state().running) {
+                    return "{\"ok\":false,\"error\":\"请先停止播放，再替换队列。\"}";
+                }
+            }
             std::lock_guard<std::mutex> lk(g_q.mtx);
             g_q.items = std::move(items);
             g_q.index = 0;
@@ -13107,6 +13176,21 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
             bool pendingStreamDecodeSet = false;   // 本次提交了 streamdecode
             bool pendingStreamDecode = true;
             std::string pendingRatePolicy;         // 空 = 本次没提交
+            struct PendingFilterSettings {
+                bool hasFilter = false;     std::string filter;
+                bool hasFilterNx = false;   std::string filterNx;
+                bool hasSdmFilt = false;    std::string sdmFilter;
+                bool hasSdmFiltNx = false;  std::string sdmFilterNx;
+                bool hasPhase = false;      std::string phase;
+                bool hasTaps = false;       int taps = 0;
+                bool hasTransition = false; double transition = 0.0;
+                bool hasAtten = false;      double atten = 0.0;
+                bool hasTwoStage = false;   bool twoStage = true;
+                bool any() const {
+                    return hasFilter || hasFilterNx || hasSdmFilt || hasSdmFiltNx ||
+                           hasPhase || hasTaps || hasTransition || hasAtten || hasTwoStage;
+                }
+            } pendingFilter;
             // U5：rateFamilyPolicy 值域 prefer|strict|compatible。非法值**直接拒绝**：
             // 不静默回落（回落会把用户的选择悄悄改成别的语义），也不写 conf。
             // 放在合并/写盘之前 —— 拒绝必须整请求生效，不能留下半写状态。
@@ -13209,6 +13293,24 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
                     // 旧实现当场 params_store，SDM 闸门随后 422 时内存里已经是新值。
                     // 现在只记值，写盘成功之后再同步（不重启管线：族策略只影响起播选率）。
                     pendingRatePolicy = clean;
+                } else if (k == "filter") {
+                    pendingFilter.hasFilter = true; pendingFilter.filter = clean;
+                } else if (k == "filterNx") {
+                    pendingFilter.hasFilterNx = true; pendingFilter.filterNx = clean;
+                } else if (k == "sdmfilt") {
+                    pendingFilter.hasSdmFilt = true; pendingFilter.sdmFilter = clean;
+                } else if (k == "sdmfiltnx") {
+                    pendingFilter.hasSdmFiltNx = true; pendingFilter.sdmFilterNx = clean;
+                } else if (k == "phase") {
+                    pendingFilter.hasPhase = true; pendingFilter.phase = clean;
+                } else if (k == "taps") {
+                    pendingFilter.hasTaps = true; pendingFilter.taps = atoi(clean.c_str());
+                } else if (k == "transition") {
+                    pendingFilter.hasTransition = true; pendingFilter.transition = atof(clean.c_str());
+                } else if (k == "atten") {
+                    pendingFilter.hasAtten = true; pendingFilter.atten = atof(clean.c_str());
+                } else if (k == "twostage") {
+                    pendingFilter.hasTwoStage = true; pendingFilter.twoStage = (clean == "1" || clean == "true");
                 }
                 if (merged.find(k) == merged.end()) order.push_back(k);
                 merged[k] = clean;
@@ -13256,9 +13358,18 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
                 Library::instance().setScanThreads((size_t)pendingScanThreads);
             if (pendingStreamDecodeSet)
                 rta::audio::set_stream_decode_enabled(pendingStreamDecode);
-            if (!pendingRatePolicy.empty()) {
+            if (!pendingRatePolicy.empty() || pendingFilter.any()) {
                 PlayParams gp = params_snapshot();
-                gp.rateFamilyPolicy = pendingRatePolicy;
+                if (!pendingRatePolicy.empty()) gp.rateFamilyPolicy = pendingRatePolicy;
+                if (pendingFilter.hasFilter)     gp.filter = pendingFilter.filter;
+                if (pendingFilter.hasFilterNx)   gp.filterNx = pendingFilter.filterNx;
+                if (pendingFilter.hasSdmFilt)    gp.sdmFilter = pendingFilter.sdmFilter;
+                if (pendingFilter.hasSdmFiltNx)  gp.sdmFilterNx = pendingFilter.sdmFilterNx;
+                if (pendingFilter.hasPhase)      gp.phase = pendingFilter.phase;
+                if (pendingFilter.hasTaps)       gp.taps = pendingFilter.taps;
+                if (pendingFilter.hasTransition) gp.transition = pendingFilter.transition;
+                if (pendingFilter.hasAtten)      gp.atten = pendingFilter.atten;
+                if (pendingFilter.hasTwoStage)   gp.twoStage = pendingFilter.twoStage;
                 params_store(gp);
             }
 

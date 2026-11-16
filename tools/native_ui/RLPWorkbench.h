@@ -40,6 +40,19 @@ NSArray<NSDictionary *> *RLPFilterGroups(NSArray<NSDictionary *> *_Nullable item
 /// 该滤波项是否写 filterNx 键。
 BOOL RLPWorkbenchFilterUsesNx(NSDictionary *_Nullable item);
 
+/// 从设置里取当前正在编辑的滤波名（区分 1x 槽 filter 与 Nx 槽 filterNx）。
+/// editingNx=YES 时优先读 filterNx（空则回退 filter）；editingNx=NO 时优先读 filter（空则回退 filterNx）。
+/// outUsesNx 非空时返回实际命中的槽是否为 filterNx。
+NSString *RLPWorkbenchEditingFilter(NSDictionary *_Nullable settings,
+                                    BOOL editingNx,
+                                    BOOL *_Nullable outUsesNx);
+
+/// 从设置与播放状态推算当前实际播放生效的滤波名（用于信号链展示，绝不把编辑槽冒充实际播放）。
+/// 按 status.inRate 和 PCM/SDM 槽的后端回退规则选值；均为空时返回 defaultName。
+NSString *RLPWorkbenchActivePlaybackFilter(NSDictionary *_Nullable settings,
+                                           NSDictionary *_Nullable status,
+                                           NSString *_Nullable defaultName);
+
 /// 相位快切：在**同家族**里找指定相位的对应项（发烧友常来回比线性/最小相位的瞬态）。
 /// family 判定按名字去掉相位后缀后的前缀；找不到同家族同相位项时返回 nil（不跨家族乱切）。
 /// wantPhase ∈ linear / minimum / intermediate。

@@ -7,6 +7,7 @@
 
 @implementation RLPCoreClient {
     dispatch_queue_t _ioQueue;
+    dispatch_queue_t _writeQueue;
     BOOL _startedStorage;
 }
 
@@ -22,6 +23,7 @@
 - (instancetype)init {
     if ((self = [super init])) {
         _ioQueue = dispatch_queue_create("rlplayer.native.core", DISPATCH_QUEUE_CONCURRENT);
+        _writeQueue = dispatch_queue_create("rlplayer.native.core.write", DISPATCH_QUEUE_SERIAL);
     }
     return self;
 }
@@ -87,7 +89,8 @@
 }
 
 - (void)runAsync:(BOOL)get path:(NSString *)path body:(nullable NSString *)body completion:(nullable RLPJSONCompletion)completion {
-    dispatch_async(_ioQueue, ^{
+    dispatch_queue_t q = get ? _ioQueue : _writeQueue;
+    dispatch_async(q, ^{
         NSDictionary *j = [self jsonWithMethod:(get ? @"GET" : @"POST") path:path body:body];
         if (!completion) return;
         dispatch_async(dispatch_get_main_queue(), ^{ completion(j); });
@@ -110,7 +113,7 @@
     // std::string 能承载任意字节（含 \0），dispatch 侧按字节取用，不做 UTF-8 解释。
     const std::string p = path.UTF8String ?: "";
     const std::string bytes((const char *)body.bytes, (size_t)body.length);
-    dispatch_async(_ioQueue, ^{
+    dispatch_async(_writeQueue, ^{
         rta::net::HttpRequest req;
         req.method = "POST";
         req.path = p;

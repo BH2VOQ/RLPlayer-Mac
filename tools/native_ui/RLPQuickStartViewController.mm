@@ -65,6 +65,8 @@
 @property (nonatomic, strong) NSPopover *popover;
 @property (nonatomic, assign) NSUInteger coverSeq;
 @property (nonatomic, strong) NSTimer *poll;
+@property (nonatomic, assign) NSUInteger statusEpoch;
+@property (nonatomic, assign) BOOL statusInflight;
 @end
 
 // v3.3.11 `quickStartModel` 的三项能力结论（`/api/preset/caps` 的真实响应派生）。
@@ -83,8 +85,22 @@
     self = [super initWithTitle:RLPTr(@"聆听室")];
     if (self) {
         _dynamicLabels = [NSMutableArray array];
+        [[NSNotificationCenter defaultCenter] addObserver:self
+                                                 selector:@selector(onPlaybackActionCompleted:)
+                                                     name:@"RLPPlaybackActionCompletedNotification"
+                                                   object:nil];
     }
     return self;
+}
+
+- (void)dealloc {
+    [[NSNotificationCenter defaultCenter] removeObserver:self];
+}
+
+- (void)onPlaybackActionCompleted:(NSNotification *)note {
+    (void)note;
+    if (!self.poll) return;
+    [self reloadStatus];
 }
 
 #pragma mark - 骨架
@@ -740,10 +756,12 @@
 - (void)onReloadDevices:(id)sender { [self reloadDevices]; RLPToast(RLPTr(@"已重新检测设备")); }
 
 - (void)onTogglePlay:(id)sender {
-    // 与播放条同一条路径：/api/pause?on=1 暂停、on=0 继续。
-    // ⚠️ 不能用 /api/play 当"继续" —— 那会从头重播当前曲目。
-    NSString *path = [NSString stringWithFormat:@"/api/pause?on=%d", self.playing ? 1 : 0];
-    RLPPostJSON(path, nil);
+    (void)sender;
+    ++self.statusEpoch;
+    self.statusInflight = NO; // Empty-queue no-op has no completion callback.
+    // 与底栏/播放页同一条决策：播放中→暂停、暂停中→继续、已停止且有曲目→/api/play 重播。
+    // 不乐观翻转 playing/pausedNow，动作完成后由通知立即刷新状态。
+    RLPPlaybackToggle(self.playing, self.pausedNow, self.currentPath);
 }
 - (void)onOpenNowPlaying:(id)sender {
     // 正在播放页由主窗口的顶栏入口承载；这里发既有通知，不新造路由。
@@ -803,14 +821,21 @@
     if (!self.poll && [RLPCoreClient shared].started) {
         __weak __typeof__(self) weakSelf = self;
         self.poll = [NSTimer scheduledTimerWithTimeInterval:1.0 repeats:YES block:^(NSTimer *t) {
-            (void)t; [weakSelf reloadStatus];
+            (void)t; [weakSelf reloadStatusFromTimer];
         }];
     }
+}
+
+- (void)reloadStatusFromTimer {
+    if (self.statusInflight) return;
+    [self reloadStatus];
 }
 
 - (void)viewDidDisappear {
     [self.poll invalidate];
     self.poll = nil;
+    ++self.statusEpoch;
+    self.statusInflight = NO;
     [super viewDidDisappear];
 }
 
@@ -913,10 +938,14 @@
 }
 
 - (void)reloadStatus {
+    const NSUInteger seq = ++self.statusEpoch;
+    self.statusInflight = YES;
     __weak __typeof__(self) weakSelf = self;
     [[RLPCoreClient shared] getJSON:@"/api/status" completion:^(NSDictionary * _Nullable json) {
         __typeof__(self) self_ = weakSelf;
         if (!self_) return;
+        if (seq == self_.statusEpoch) self_.statusInflight = NO;
+        if (seq != self_.statusEpoch) return;
         RLPPlaybackStatus *st = [RLPPlaybackStatus statusFromJSON:json];
         if (!st) return;
         self_.playing = st.playing && !st.paused;

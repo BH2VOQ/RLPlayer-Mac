@@ -1,0 +1,377 @@
+// SPDX-FileCopyrightText: 2026 BH2VOQ <https://github.com/BH2VOQ>
+// SPDX-License-Identifier: GPL-3.0-or-later
+//
+// test_native_settings_readback_contract.mm — 设置页 reloadData 全量回填契约判据
+//
+// 证明：
+//   1. reloadData 对 buffer/ramp/phase/taps/transition/twostage/shaper/sdmfilt/sdmfiltnx/
+//      modcut/moddith/dsdkind/dsdconv/scanthreads 的真实控件回读；
+//   2. 播放模式（/api/playmode → sp_rep + sp_shuf）与音乐目录（/api/lib/roots → sp_roots）回读；
+//   3. /api/filters 与 /api/settings 乱序到达（settings先/filters后、filters先/settings后）；
+//   4. 空串跟随（filterNx="" / sdmfilt="" / sdmfiltnx="" / phase="" 选回首项）；
+//   5. 惰性页签创建（adv -> out -> pcm -> sdm）；
+//   6. 主题重建（paneCache 清空重建后各页签仍回读真实 kv）。
+//
+// 纪律：隔离 state/library；backend=null、volume=-120；不播放、不联网。
+#import <AppKit/AppKit.h>
+#import <objc/runtime.h>
+#import "RLPCoreClient.h"
+#import "RLPSupport.h"
+#import "RLPTheme.h"
+#import "RLPSettingsViewController.h"
+
+#include <cstdio>
+#include <cstdlib>
+#include <unistd.h>
+
+static int gFail = 0, gPass = 0;
+static void Ck(BOOL ok, NSString *what, NSString *detail) {
+    if (ok) {
+        ++gPass;
+        std::printf("  [PASS] %s\n", what.UTF8String);
+    } else {
+        ++gFail;
+        std::printf("  [FAIL] %s — %s\n", what.UTF8String, detail.UTF8String ?: "");
+    }
+}
+
+static void Pump(NSTimeInterval s) {
+    NSDate *until = [NSDate dateWithTimeIntervalSinceNow:s];
+    while ([until timeIntervalSinceNow] > 0)
+        [[NSRunLoop currentRunLoop] runMode:NSDefaultRunLoopMode
+                                 beforeDate:[NSDate dateWithTimeIntervalSinceNow:0.02]];
+}
+
+static BOOL WaitUntil(NSTimeInterval timeout, BOOL (^pred)(void)) {
+    NSDate *until = [NSDate dateWithTimeIntervalSinceNow:timeout];
+    while ([until timeIntervalSinceNow] > 0) {
+        if (pred()) return YES;
+        Pump(0.03);
+    }
+    return pred();
+}
+
+static void Collect(NSView *v, NSMutableArray<NSView *> *out) {
+    if (!v) return;
+    [out addObject:v];
+    for (NSView *s in v.subviews) Collect(s, out);
+}
+
+static NSArray<NSView *> *Descendants(NSView *v) {
+    NSMutableArray<NSView *> *a = [NSMutableArray array];
+    Collect(v, a);
+    return a;
+}
+
+static NSView *FindId(NSView *root, NSString *ident) {
+    for (NSView *v in Descendants(root))
+        if ([v.identifier isEqualToString:ident]) return v;
+    return nil;
+}
+
+static NSString *PopupValue(NSPopUpButton *p) {
+    if (!p || !p.selectedItem) return @"";
+    id ro = p.selectedItem.representedObject;
+    if ([ro isKindOfClass:[NSString class]]) return (NSString *)ro;
+    return p.titleOfSelectedItem ?: @"";
+}
+
+// ---- 测试专用：确定性控制 /api/filters 与 /api/settings 的完成块到达顺序 ----
+typedef void (^RLPJsonDone)(NSDictionary * _Nullable json);
+static IMP gOrigGetJSON = NULL;
+static NSString *gDelayPathPrefix = nil;
+static RLPJsonDone gDelayedBlock = nil;
+static NSDictionary *gDelayedPayload = nil;
+static BOOL gDelayDone = NO;
+
+static void SwizzledGetJSON(id self, SEL _cmd, NSString *path, RLPJsonDone completion) {
+    if (gDelayPathPrefix.length && [path hasPrefix:gDelayPathPrefix]) {
+        void (*orig)(id, SEL, NSString *, RLPJsonDone) = (void (*)(id, SEL, NSString *, RLPJsonDone))gOrigGetJSON;
+        orig(self, _cmd, path, ^(NSDictionary * _Nullable json) {
+            gDelayedPayload = json;
+            gDelayedBlock = [completion copy];
+            gDelayDone = YES;
+        });
+        return;
+    }
+    void (*orig)(id, SEL, NSString *, RLPJsonDone) = (void (*)(id, SEL, NSString *, RLPJsonDone))gOrigGetJSON;
+    orig(self, _cmd, path, completion);
+}
+
+static void InstallOrderHook(void) {
+    if (gOrigGetJSON) return;
+    Method m = class_getInstanceMethod([RLPCoreClient class], @selector(getJSON:completion:));
+    gOrigGetJSON = method_setImplementation(m, (IMP)SwizzledGetJSON);
+}
+
+static void FlushDelayed(void) {
+    RLPJsonDone blk = gDelayedBlock;
+    NSDictionary *payload = gDelayedPayload;
+    gDelayedBlock = nil;
+    gDelayedPayload = nil;
+    gDelayDone = NO;
+    gDelayPathPrefix = nil;
+    if (blk) blk(payload);
+}
+
+int main(void) {
+    @autoreleasepool {
+        NSApplication *app = [NSApplication sharedApplication];
+        [app setActivationPolicy:NSApplicationActivationPolicyAccessory];
+        std::printf("=== test_native_settings_readback_contract（隔离目录 · backend=null · volume=-120）===\n");
+
+        NSString *rootDir = [NSTemporaryDirectory() stringByAppendingPathComponent:
+            [NSString stringWithFormat:@"rlp-readback-%d", (int)getpid()]];
+        NSString *state = [rootDir stringByAppendingPathComponent:@"state"];
+        NSString *lib = [rootDir stringByAppendingPathComponent:@"lib"];
+        NSString *musicDir = [rootDir stringByAppendingPathComponent:@"music"];
+        NSFileManager *fm = [NSFileManager defaultManager];
+        [fm createDirectoryAtPath:state withIntermediateDirectories:YES attributes:nil error:nil];
+        [fm createDirectoryAtPath:lib withIntermediateDirectories:YES attributes:nil error:nil];
+        [fm createDirectoryAtPath:musicDir withIntermediateDirectories:YES attributes:nil error:nil];
+        setenv("RLPLAYER_STATE_DIR", state.fileSystemRepresentation, 1);
+        setenv("RLPLAYER_LIBRARY_DIR", lib.fileSystemRepresentation, 1);
+
+        RLPCoreClient *core = [RLPCoreClient shared];
+        if (![core startEmbedded]) {
+            std::printf("  [FAIL] 核心启动失败\n");
+            return 1;
+        }
+
+        // 先取真实 /api/filters 列表里的两个滤波器名，不臆造
+        NSDictionary *filtResp = [core jsonWithMethod:@"GET" path:@"/api/filters" body:nil];
+        NSArray *filtItems = [filtResp[@"items"] isKindOfClass:[NSArray class]] ? filtResp[@"items"] : @[];
+        NSString *f1 = nil, *f2 = nil;
+        for (id it in filtItems) {
+            NSString *n = [it isKindOfClass:[NSDictionary class]] ? it[@"name"] : ([it isKindOfClass:[NSString class]] ? it : nil);
+            if (!n.length) continue;
+            if (!f1) f1 = n;
+            else if (![n isEqualToString:f1]) { f2 = n; break; }
+        }
+        Ck(f1.length > 0 && f2.length > 0, @"前置：从 /api/filters 取得两个真实滤波器",
+           [NSString stringWithFormat:@"f1=%@ f2=%@", f1, f2]);
+        if (!f1.length) f1 = @"poly-sinc-lp";
+        if (!f2.length) f2 = @"poly-sinc-mp";
+
+        // 写入全量非默认设置到真实后端
+        NSString *postBody = [NSString stringWithFormat:
+            @"backend=null&volume=-120&buffer=120&ramp=35&phase=minimum&taps=2048"
+             "&transition=0.08&twostage=1&shaper=LNS15"
+             "&filter=%@&filterNx=%@&sdmfilt=%@&sdmfiltnx=%@"
+             "&modcut=125&moddith=0.5&dsdkind=iir&dsdconv=wide&scanthreads=3",
+            f1, f2, f2, f1];
+        NSDictionary *setRes = [core jsonWithMethod:@"POST" path:@"/api/settings" body:postBody];
+        Ck([setRes[@"ok"] boolValue], @"前置：POST /api/settings 成功", [setRes description]);
+
+        // 设置播放模式 mode=2（单曲循环）
+        NSDictionary *pmRes = [core jsonWithMethod:@"POST" path:@"/api/playmode?mode=2" body:@""];
+        Ck([pmRes[@"ok"] boolValue] && [pmRes[@"mode"] integerValue] == 2,
+           @"前置：POST /api/playmode?mode=2 成功", [pmRes description]);
+
+        // 添加真实音乐目录
+        NSString *encDir = [musicDir stringByAddingPercentEncodingWithAllowedCharacters:
+                            [NSCharacterSet URLQueryAllowedCharacterSet]];
+        NSDictionary *rootRes = [core jsonWithMethod:@"POST" path:@"/api/lib/roots"
+                                              body:[@"add=" stringByAppendingString:encDir]];
+        Ck([rootRes[@"ok"] boolValue], @"前置：POST /api/lib/roots 添加音乐目录成功", [rootRes description]);
+
+        // 创建离屏窗口与设置页（初始停在默认页签 adv）
+        NSWindow *win = [[NSWindow alloc] initWithContentRect:NSMakeRect(0, 0, 1280, 900)
+                                                     styleMask:NSWindowStyleMaskBorderless
+                                                       backing:NSBackingStoreBuffered
+                                                         defer:NO];
+        win.releasedWhenClosed = NO;
+        win.contentView = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 1280, 900)];
+        RLPSettingsViewController *settings = [[RLPSettingsViewController alloc] init];
+        NSView *v = settings.view;
+        [win.contentView addSubview:v];
+        v.frame = win.contentView.bounds;
+        [settings activate];
+
+        // ---- 1. 默认页签 adv（通用）：scanthreads / rep / shuf / roots ----
+        BOOL advReady = WaitUntil(6.0, ^BOOL {
+            NSTextField *st = (NSTextField *)FindId(v, @"sp_scanthreads");
+            NSPopUpButton *rep = (NSPopUpButton *)FindId(v, @"sp_rep");
+            NSStackView *rb = (NSStackView *)FindId(v, @"sp_roots");
+            return st && [st.stringValue isEqualToString:@"3"] &&
+                   rep && rep.indexOfSelectedItem == 1 &&
+                   rb && rb.arrangedSubviews.count > 0;
+        });
+        (void)advReady;
+        NSTextField *scanField = (NSTextField *)FindId(v, @"sp_scanthreads");
+        NSPopUpButton *repPop = (NSPopUpButton *)FindId(v, @"sp_rep");
+        NSSwitch *shufSw = (NSSwitch *)FindId(v, @"sp_shuf");
+        NSStackView *rootsBox = (NSStackView *)FindId(v, @"sp_roots");
+        Ck([scanField.stringValue isEqualToString:@"3"], @"adv: scanthreads 回读 = 3", scanField.stringValue);
+        Ck(repPop.indexOfSelectedItem == 1, @"adv: sp_rep 回读 mode=2 -> 单曲循环(index 1)",
+           [NSString stringWithFormat:@"idx=%ld title=%@", (long)repPop.indexOfSelectedItem, repPop.titleOfSelectedItem]);
+        Ck(shufSw.state == NSControlStateValueOff, @"adv: sp_shuf 回读 mode=2 -> Off",
+           [NSString stringWithFormat:@"state=%ld", (long)shufSw.state]);
+        NSString *resolvedMusicDir = [musicDir stringByResolvingSymlinksInPath];
+        BOOL foundMusicRoot = NO;
+        NSMutableArray<NSString *> *rootTexts = [NSMutableArray array];
+        for (NSView *sub in rootsBox.arrangedSubviews) {
+            if ([sub isKindOfClass:[NSTextField class]]) {
+                NSString *txt = ((NSTextField *)sub).stringValue ?: @"";
+                [rootTexts addObject:txt];
+                if ([txt isEqualToString:musicDir] || [txt isEqualToString:resolvedMusicDir]) {
+                    foundMusicRoot = YES;
+                }
+            }
+        }
+        Ck(foundMusicRoot, @"adv: sp_roots 回读真实音乐目录",
+           [NSString stringWithFormat:@"count=%lu items=%@", (unsigned long)rootsBox.arrangedSubviews.count,
+            [rootTexts componentsJoinedByString:@","]]);
+
+        // ---- 2. 惰性创建 out 页签：buffer / ramp ----
+        [settings selectPane:@"out"];
+        WaitUntil(6.0, ^BOOL {
+            NSTextField *bf = (NSTextField *)FindId(v, @"sp_buffer");
+            NSTextField *rf = (NSTextField *)FindId(v, @"sp_ramp");
+            return bf && [bf.stringValue isEqualToString:@"120"] && rf && [rf.stringValue isEqualToString:@"35"];
+        });
+        NSTextField *bufField = (NSTextField *)FindId(v, @"sp_buffer");
+        NSTextField *rampField = (NSTextField *)FindId(v, @"sp_ramp");
+        Ck([bufField.stringValue isEqualToString:@"120"], @"out(惰性): buffer 回读 = 120", bufField.stringValue);
+        Ck([rampField.stringValue isEqualToString:@"35"], @"out(惰性): ramp 回读 = 35", rampField.stringValue);
+
+        // ---- 3. 惰性创建 pcm 页签：phase / taps / transition / twostage / shaper / filter / filterNx ----
+        [settings selectPane:@"pcm"];
+        WaitUntil(6.0, ^BOOL {
+            NSTextField *tp = (NSTextField *)FindId(v, @"sp_taps");
+            NSPopUpButton *f1p = (NSPopUpButton *)FindId(v, @"sp_filt");
+            return tp && [tp.stringValue isEqualToString:@"2048"] && f1p && f1p.numberOfItems > 2;
+        });
+        NSPopUpButton *phasePop = (NSPopUpButton *)FindId(v, @"sp_phase");
+        NSTextField *tapsField = (NSTextField *)FindId(v, @"sp_taps");
+        NSTextField *transField = (NSTextField *)FindId(v, @"sp_transition");
+        NSSwitch *twoStageSw = (NSSwitch *)FindId(v, @"sp_2s");
+        NSPopUpButton *shaperPop = (NSPopUpButton *)FindId(v, @"sp_shaper");
+        NSPopUpButton *filt1Pop = (NSPopUpButton *)FindId(v, @"sp_filt");
+        NSPopUpButton *filtNxPop = (NSPopUpButton *)FindId(v, @"sp_filtNx");
+        Ck([phasePop.titleOfSelectedItem isEqualToString:@"minimum"], @"pcm(惰性): phase 回读 = minimum", phasePop.titleOfSelectedItem);
+        Ck([tapsField.stringValue isEqualToString:@"2048"], @"pcm(惰性): taps 回读 = 2048", tapsField.stringValue);
+        Ck([transField.stringValue isEqualToString:@"0.08"], @"pcm(惰性): transition 回读 = 0.08", transField.stringValue);
+        Ck(twoStageSw.state == NSControlStateValueOn, @"pcm(惰性): twostage 回读 = On",
+           [NSString stringWithFormat:@"state=%ld", (long)twoStageSw.state]);
+        Ck([shaperPop.titleOfSelectedItem isEqualToString:@"LNS15"], @"pcm(惰性): shaper 回读 = LNS15", shaperPop.titleOfSelectedItem);
+        Ck([PopupValue(filt1Pop) isEqualToString:f1], @"pcm(惰性): filter 回读真实名", PopupValue(filt1Pop));
+        Ck([PopupValue(filtNxPop) isEqualToString:f2], @"pcm(惰性): filterNx 回读真实名", PopupValue(filtNxPop));
+
+        // ---- 4. 惰性创建 sdm 页签：sdmfilt / sdmfiltnx / modcut / moddith / dsdkind / dsdconv ----
+        [settings selectPane:@"sdm"];
+        WaitUntil(6.0, ^BOOL {
+            NSTextField *mc = (NSTextField *)FindId(v, @"sp_modcut");
+            NSPopUpButton *so1 = (NSPopUpButton *)FindId(v, @"sp_sdmo1");
+            return mc && [mc.stringValue isEqualToString:@"125"] && so1 && so1.numberOfItems > 2;
+        });
+        NSPopUpButton *sdmO1Pop = (NSPopUpButton *)FindId(v, @"sp_sdmo1");
+        NSPopUpButton *sdmONxPop = (NSPopUpButton *)FindId(v, @"sp_sdmoNx");
+        NSTextField *modCutField = (NSTextField *)FindId(v, @"sp_modcut");
+        NSTextField *modDithField = (NSTextField *)FindId(v, @"sp_moddith");
+        NSPopUpButton *dsdKindPop = (NSPopUpButton *)FindId(v, @"sp_dsdkind");
+        NSPopUpButton *dsdConvPop = (NSPopUpButton *)FindId(v, @"sp_dsdconv");
+        Ck([PopupValue(sdmO1Pop) isEqualToString:f2], @"sdm(惰性): sdmfilt 回读真实名", PopupValue(sdmO1Pop));
+        Ck([PopupValue(sdmONxPop) isEqualToString:f1], @"sdm(惰性): sdmfiltnx 回读真实名", PopupValue(sdmONxPop));
+        Ck([modCutField.stringValue isEqualToString:@"125"], @"sdm(惰性): modcut 回读 = 125", modCutField.stringValue);
+        Ck([modDithField.stringValue isEqualToString:@"0.5"], @"sdm(惰性): moddith 回读 = 0.5", modDithField.stringValue);
+        Ck([dsdKindPop.titleOfSelectedItem isEqualToString:@"iir"], @"sdm(惰性): dsdkind 回读 = iir", dsdKindPop.titleOfSelectedItem);
+        Ck([dsdConvPop.titleOfSelectedItem isEqualToString:@"wide"], @"sdm(惰性): dsdconv 回读 = wide", dsdConvPop.titleOfSelectedItem);
+
+        // ---- 5. 空串跟随 + 随机模式(mode=3) + 乱序到达（settings先 / filters后）----
+        [core jsonWithMethod:@"POST" path:@"/api/settings"
+                      body:@"filterNx=&sdmfilt=&sdmfiltnx=&phase=&twostage=0"];
+        [core jsonWithMethod:@"POST" path:@"/api/playmode?mode=3" body:@""];
+
+        InstallOrderHook();
+        // 5a: 强制 /api/settings 先到，/api/filters 后到
+        gDelayPathPrefix = @"/api/filters";
+        gDelayDone = NO;
+        [settings reloadData];
+        WaitUntil(5.0, ^BOOL { return gDelayDone; });
+        Pump(0.15);
+        FlushDelayed();
+        Pump(0.15);
+
+        Ck(sdmO1Pop.indexOfSelectedItem == 0 && [PopupValue(sdmO1Pop) isEqualToString:@""],
+           @"乱序(settings先)+空串跟随: sdmfilt=\"\" 选中首项",
+           [NSString stringWithFormat:@"idx=%ld val=%@", (long)sdmO1Pop.indexOfSelectedItem, PopupValue(sdmO1Pop)]);
+        Ck(sdmONxPop.indexOfSelectedItem == 0 && [PopupValue(sdmONxPop) isEqualToString:@""],
+           @"乱序(settings先)+空串跟随: sdmfiltnx=\"\" 选中首项",
+           [NSString stringWithFormat:@"idx=%ld val=%@", (long)sdmONxPop.indexOfSelectedItem, PopupValue(sdmONxPop)]);
+        Ck(filtNxPop.indexOfSelectedItem == 0 && [PopupValue(filtNxPop) isEqualToString:@""],
+           @"乱序(settings先)+空串跟随: filterNx=\"\" 选中首项",
+           [NSString stringWithFormat:@"idx=%ld val=%@", (long)filtNxPop.indexOfSelectedItem, PopupValue(filtNxPop)]);
+        Ck(phasePop.indexOfSelectedItem == 0,
+           @"空串跟随: phase=\"\" 选中首项",
+           [NSString stringWithFormat:@"idx=%ld", (long)phasePop.indexOfSelectedItem]);
+        Ck(twoStageSw.state == NSControlStateValueOff, @"twostage=0 回读 Off",
+           [NSString stringWithFormat:@"state=%ld", (long)twoStageSw.state]);
+        Ck(repPop.indexOfSelectedItem == 2 && shufSw.state == NSControlStateValueOn,
+           @"playmode=3(随机): sp_rep=关闭循环(2) 且 sp_shuf=On",
+           [NSString stringWithFormat:@"rep=%ld shuf=%ld", (long)repPop.indexOfSelectedItem, (long)shufSw.state]);
+
+        // 5b: 再写回非空 sdmfilt / sdmfiltnx / filterNx，强制 /api/filters 先到，/api/settings 后到
+        [core jsonWithMethod:@"POST" path:@"/api/settings"
+                      body:[NSString stringWithFormat:@"filterNx=%@&sdmfilt=%@&sdmfiltnx=%@", f2, f1, f2]];
+        gDelayPathPrefix = @"/api/settings";
+        gDelayDone = NO;
+        [settings reloadData];
+        WaitUntil(5.0, ^BOOL { return gDelayDone; });
+        Pump(0.15);
+        FlushDelayed();
+        Pump(0.15);
+
+        Ck([PopupValue(filtNxPop) isEqualToString:f2], @"乱序(filters先): filterNx 回读真实名", PopupValue(filtNxPop));
+        Ck([PopupValue(sdmO1Pop) isEqualToString:f1], @"乱序(filters先): sdmfilt 回读真实名", PopupValue(sdmO1Pop));
+        Ck([PopupValue(sdmONxPop) isEqualToString:f2], @"乱序(filters先): sdmfiltnx 回读真实名", PopupValue(sdmONxPop));
+
+        // ---- 6. 主题重建：切到 light，当前 sdm 页签及后续切换的 pcm / adv 页签均回读真实 kv ----
+        [RLPTheme setThemeName:@"light"];
+        Pump(0.2);
+        WaitUntil(6.0, ^BOOL {
+            NSTextField *mc = (NSTextField *)FindId(v, @"sp_modcut");
+            NSPopUpButton *so1 = (NSPopUpButton *)FindId(v, @"sp_sdmo1");
+            return mc && [mc.stringValue isEqualToString:@"125"] && so1 && so1.numberOfItems > 2;
+        });
+        NSPopUpButton *sdmO1AfterTheme = (NSPopUpButton *)FindId(v, @"sp_sdmo1");
+        NSTextField *modCutAfterTheme = (NSTextField *)FindId(v, @"sp_modcut");
+        Ck([PopupValue(sdmO1AfterTheme) isEqualToString:f1],
+           @"主题重建(sdm): sdmfilt 仍回读真实名", PopupValue(sdmO1AfterTheme));
+        Ck([modCutAfterTheme.stringValue isEqualToString:@"125"],
+           @"主题重建(sdm): modcut 仍回读 125", modCutAfterTheme.stringValue);
+
+        [settings selectPane:@"adv"];
+        WaitUntil(6.0, ^BOOL {
+            NSTextField *st = (NSTextField *)FindId(v, @"sp_scanthreads");
+            NSSwitch *sh = (NSSwitch *)FindId(v, @"sp_shuf");
+            return st && [st.stringValue isEqualToString:@"3"] && sh && sh.state == NSControlStateValueOn;
+        });
+        NSTextField *scanAfterTheme = (NSTextField *)FindId(v, @"sp_scanthreads");
+        NSSwitch *shufAfterTheme = (NSSwitch *)FindId(v, @"sp_shuf");
+        NSStackView *rootsAfterTheme = (NSStackView *)FindId(v, @"sp_roots");
+        WaitUntil(3.0, ^BOOL { return rootsAfterTheme && rootsAfterTheme.arrangedSubviews.count > 0; });
+        BOOL foundRootAfterTheme = NO;
+        for (NSView *sub in rootsAfterTheme.arrangedSubviews) {
+            if ([sub isKindOfClass:[NSTextField class]]) {
+                NSString *txt = ((NSTextField *)sub).stringValue ?: @"";
+                if ([txt isEqualToString:musicDir] || [txt isEqualToString:resolvedMusicDir])
+                    foundRootAfterTheme = YES;
+            }
+        }
+        Ck([scanAfterTheme.stringValue isEqualToString:@"3"],
+           @"主题重建(adv): scanthreads 仍回读 3", scanAfterTheme.stringValue);
+        Ck(shufAfterTheme.state == NSControlStateValueOn,
+           @"主题重建(adv): shufSwitch 仍回读 On",
+           [NSString stringWithFormat:@"state=%ld", (long)shufAfterTheme.state]);
+        Ck(foundRootAfterTheme, @"主题重建(adv): sp_roots 仍回读真实音乐目录",
+           [NSString stringWithFormat:@"count=%lu", (unsigned long)rootsAfterTheme.arrangedSubviews.count]);
+
+        [RLPTheme setThemeName:@"dark"];
+        [core shutdown];
+        [fm removeItemAtPath:rootDir error:nil];
+
+        std::printf("\n结果: %d 通过, %d 失败\n", gPass, gFail);
+        return gFail == 0 ? 0 : 1;
+    }
+}

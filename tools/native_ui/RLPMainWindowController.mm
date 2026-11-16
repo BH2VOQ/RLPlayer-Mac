@@ -89,8 +89,8 @@ static const CGFloat kTopbarHeight = 60.0;    // .top height（classic 52，见 
 @property (nonatomic, strong) NSTextField *pageCount;   // 计数（web #cnt）
 @property (nonatomic, strong) NSViewController *currentContent;
 @property (nonatomic, strong) NSMutableDictionary<NSString *, NSViewController *> *pageCache;
-/// 详情页的返回栈（只存"从哪个列表页进来"），返回时回到原列表页。
-@property (nonatomic, strong) NSMutableArray<NSString *> *rowStack;
+/// 详情页的返回栈（存来源 key、真实上层 VC 与是否顶级页标记），返回时逐层退回。
+@property (nonatomic, strong) NSMutableArray<NSDictionary *> *rowStack;
 @property (nonatomic, strong) RLPNowPlayingViewController *npPage;
 @property (nonatomic, strong) RLPWorksViewController *worksPage;
 @property (nonatomic, readwrite) BOOL nowPlayingOverlayVisible;
@@ -386,11 +386,13 @@ static NSString *RLPPageIdentifier(NSString *key) {
         self.pageCache[key] = vc;
     }
     if (vc == self.currentContent) {
-        // 同页再次点选：也要重设标题并按需重新上报计数
+        // 同页再次点选：清详情返回栈、重设标题并按需重新上报计数
+        [self.rowStack removeAllObjects];
         [self syncTopbarTitle];
         if ([vc respondsToSelector:@selector(activate)]) [(id)vc activate];
         return;
     }
+    [self.rowStack removeAllObjects];
     if (self.currentContent) [self.currentContent.view removeFromSuperview];
     self.currentContent = vc;
 
@@ -534,23 +536,38 @@ static NSString *RLPPageIdentifier(NSString *key) {
 }
 
 - (void)pushDetail:(NSViewController *)detail {
-    if (!detail) return;
+    if (!detail || detail == self.currentContent) return;
     if (self.currentContent) {
-        // 记住"从哪一页进来的"，返回时回到那一页（不重置用户的位置）。
-        // 存 key 而不是行号：模式切换后行号会错位。
+        // 记住"从哪一页进来的"：顶级页记 key + root=YES，嵌套详情页保留真实上层 VC（root=NO），
+        // 返回时逐层退回，不跳层也不依赖侧栏当前高亮推算。
         NSString *k = self.sidebar.selectedKey;
-        [self.rowStack addObject:(k.length ? k : @"albums")];
+        NSString *key = k.length ? k : @"albums";
+        const BOOL isRoot = (self.pageCache[key] == self.currentContent);
+        [self.rowStack addObject:@{
+            @"key": key,
+            @"vc": self.currentContent,
+            @"root": @(isRoot),
+        }];
     }
     [self swapContentTo:detail];
 }
 
 - (void)popDetail {
-    NSString *back = self.rowStack.lastObject;
-    if (!back.length) return;
+    NSDictionary *entry = self.rowStack.lastObject;
+    if (![entry isKindOfClass:[NSDictionary class]]) return;
     [self.rowStack removeLastObject];
-    NSViewController *vc = self.pageCache[back];
-    if (!vc) return;
-    [self.sidebar selectKey:back];
+    NSViewController *vc = entry[@"vc"];
+    NSString *backKey = [entry[@"key"] isKindOfClass:[NSString class]] ? entry[@"key"] : @"";
+    const BOOL isRoot = [entry[@"root"] boolValue];
+    if (!vc && backKey.length) vc = self.pageCache[backKey];
+    if (!vc) {
+        [self syncTopbarTitle];
+        return;
+    }
+    if (isRoot && backKey.length && ![self.sidebar.selectedKey isEqualToString:backKey]) {
+        [self.sidebar selectKey:backKey];
+        return;
+    }
     [self swapContentTo:vc];
 }
 

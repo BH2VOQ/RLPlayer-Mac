@@ -659,9 +659,7 @@ static NSString *RLPQueueMetaText(NSDictionary *m, NSString *k,
         RLPToast(RLPTr(@"歌单包含不支持的路径或格式")); return;
     }
     NSString *files = [items componentsJoinedByString:@"\n"];
-    NSString *escape = [files stringByAddingPercentEncodingWithAllowedCharacters:
-                        [NSCharacterSet URLQueryAllowedCharacterSet]];
-    NSString *body = [NSString stringWithFormat:@"require_stopped=1&files=%@", escape ?: @""];
+    NSString *body = [NSString stringWithFormat:@"require_stopped=1&files=%@", RLPEnc(files)];
     __weak __typeof__(self) ws = self;
     [[RLPCoreClient shared] postJSON:@"/api/queue/set" body:body completion:^(NSDictionary * _Nullable j) {
         __typeof__(self) s2 = ws;

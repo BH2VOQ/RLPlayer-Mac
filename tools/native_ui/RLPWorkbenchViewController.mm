@@ -55,6 +55,7 @@ static const NSInteger kABSlotCount = 4;
 @property (nonatomic, strong) NSPopUpButton *eqPresetPopup;      // PEQ 预设快速加载
 @property (nonatomic, copy) NSArray<NSString *> *eqPresetNames;
 @property (nonatomic, copy) NSString *filterQuery;
+@property (nonatomic, assign) BOOL editingNxFilter;              // 当前正在编辑 1x(filter) 还是 Nx(filterNx) 槽
 @property (nonatomic, strong) NSPopUpButton *ratePopup;
 @property (nonatomic, strong) NSSegmentedControl *dsdSeg;
 @property (nonatomic, strong) NSPopUpButton *shaperPopup;
@@ -1063,7 +1064,9 @@ static const NSInteger kABSlotCount = 4;
     for (NSView *v in [self.filterQuick.arrangedSubviews copy]) {
         [self.filterQuick removeArrangedSubview:v]; [v removeFromSuperview];
     }
-    NSString *cur = [self str:@"filter" def:@""];
+    BOOL slotIsNx = self.editingNxFilter;
+    NSString *cur = RLPWorkbenchEditingFilter(self.settings, self.editingNxFilter, &slotIsNx);
+    self.editingNxFilter = slotIsNx;
     // 搜索过滤：只影响下拉列表，不影响快捷区（快捷区是"常用"，不该被搜索词清空）。
     NSArray<NSDictionary *> *pool = self.filters;
     if (self.filterQuery.length) {
@@ -1119,7 +1122,9 @@ static const NSInteger kABSlotCount = 4;
 
 /// 相位档回显 + 可用性：同家族没有该相位就禁用那一档（不假装能切）。
 - (void)syncPhaseSeg {
-    NSString *cur = [self str:@"filter" def:@""];
+    BOOL slotIsNx = self.editingNxFilter;
+    NSString *cur = RLPWorkbenchEditingFilter(self.settings, self.editingNxFilter, &slotIsNx);
+    self.editingNxFilter = slotIsNx;
     NSArray *phases = @[@"linear", @"minimum", @"intermediate"];
     NSString *curPhase = nil;
     for (NSDictionary *it in self.filters)
@@ -1138,13 +1143,13 @@ static const NSInteger kABSlotCount = 4;
     NSArray *phases = @[@"linear", @"minimum", @"intermediate"];
     const NSInteger i = sender.selectedSegment;
     if (i < 0 || i >= (NSInteger)phases.count) return;
-    NSString *cur = [self str:@"filter" def:@""];
+    BOOL slotIsNx = self.editingNxFilter;
+    NSString *cur = RLPWorkbenchEditingFilter(self.settings, self.editingNxFilter, &slotIsNx);
+    self.editingNxFilter = slotIsNx;
     NSString *target = RLPFilterWithPhase(cur, phases[i], self.filters);
     if (!target.length) { RLPToast(RLPTr(@"当前滤波的同家族没有这个相位")); [self syncPhaseSeg]; return; }
     if ([target isEqualToString:cur]) return;
-    BOOL nx = NO;
-    for (NSDictionary *it in self.filters) if ([it[@"name"] isEqualToString:target]) nx = RLPWorkbenchFilterUsesNx(it);
-    [self postSettings:@{(nx ? @"filterNx" : @"filter"): target}];
+    [self postSettings:@{(slotIsNx ? @"filterNx" : @"filter"): target}];
 }
 
 - (void)onFilterSearch:(NSSearchField *)sender {
@@ -1156,6 +1161,7 @@ static const NSInteger kABSlotCount = 4;
     NSString *name = sender.identifier;
     BOOL nx = NO;
     for (NSDictionary *it in self.filters) if ([it[@"name"] isEqualToString:name]) nx = RLPWorkbenchFilterUsesNx(it);
+    self.editingNxFilter = nx;
     [self postSettings:@{(nx ? @"filterNx" : @"filter"): name}];
 }
 
@@ -1164,7 +1170,9 @@ static const NSInteger kABSlotCount = 4;
     if (![ro isKindOfClass:[NSDictionary class]]) return;
     NSString *name = ro[@"name"];
     if (!name.length) return;
-    [self postSettings:@{([ro[@"nx"] boolValue] ? @"filterNx" : @"filter"): name}];
+    const BOOL nx = [ro[@"nx"] boolValue];
+    self.editingNxFilter = nx;
+    [self postSettings:@{(nx ? @"filterNx" : @"filter"): name}];
 }
 
 
@@ -1650,7 +1658,7 @@ static const NSInteger kABSlotCount = 4;
         }
         NSPopUpButton *filtPop = [self popoverPopupWithValues:fVals titles:fTitles
                                                        action:@selector(onNodeFilter:)];
-        NSString *curFilter = [self str:@"filter" def:@""];
+        NSString *curFilter = RLPWorkbenchEditingFilter(self.settings, self.editingNxFilter, NULL);
         NSInteger fi = [fVals indexOfObject:curFilter];
         [filtPop selectItemAtIndex:(fi == NSNotFound) ? 0 : fi];
         [s addArrangedSubview:[self inlineLabel:RLPTr(@"滤波（1x / Nx 写的键不同）")]];
@@ -1750,6 +1758,7 @@ static const NSInteger kABSlotCount = 4;
     if (![n isKindOfClass:[NSString class]] || !n.length) return;
     BOOL nx = NO;
     for (NSDictionary *it in self.filters) if ([it[@"name"] isEqualToString:n]) nx = RLPWorkbenchFilterUsesNx(it);
+    self.editingNxFilter = nx;
     [self postSettings:@{(nx ? @"filterNx" : @"filter"): n}];
 }
 - (void)onNodeShaper:(NSPopUpButton *)s {
@@ -1960,12 +1969,13 @@ static const NSInteger kABSlotCount = 4;
     RLPTheme *t = [RLPTheme current];
     NSDictionary *s = self.settings ?: @{};
     NSDictionary *st = self.status ?: @{};
-    NSString *fs = [st[@"fs"] isKindOfClass:[NSNumber class]] ? [st[@"fs"] stringValue] : nil;
+    NSString *fs = [st[@"inRate"] isKindOfClass:[NSNumber class]] ? [st[@"inRate"] stringValue] : nil;
     NSString *bits = [st[@"bits"] isKindOfClass:[NSNumber class]] ? [st[@"bits"] stringValue] : [self str:@"bits" def:@"—"];
     const BOOL dsd = [self str:@"dsd" def:@"0"].integerValue > 0;
+    NSString *activeFilter = RLPWorkbenchActivePlaybackFilter(s, st, RLPTr(@"默认"));
     NSDictionary *vals = @{
         @"src": fs ? [NSString stringWithFormat:@"%@ Hz / %@ bit", fs, bits] : (dsd ? @"DSD" : @"—"),
-        @"resample": [NSString stringWithFormat:@"%@ · %@", [self str:@"rate" def:@"follow"], [self str:@"filter" def:RLPTr(@"默认")]],
+        @"resample": [NSString stringWithFormat:@"%@ · %@", [self str:@"rate" def:@"follow"], activeFilter],
         @"eq": [[self str:@"eq" def:@"0"] isEqualToString:@"1"] ? RLPTr(@"开") : RLPTr(@"旁路"),
         @"ir": [self str:@"ir" def:@"0"],
         @"shaper": dsd ? @"none (DoP)" : [self str:@"shaper" def:@"auto"],
@@ -1995,7 +2005,7 @@ static const NSInteger kABSlotCount = 4;
     NSString *stage = [st[@"filter"] isKindOfClass:[NSString class]] ? st[@"filter"] : nil;
     if (dsd && stage.length) {
         self.pipelineStageLine.stringValue = [NSString stringWithFormat:@"%@%@ · %@%@",
-            RLPTr(@"管线阶段："), stage, RLPTr(@"你选的滤波："), [self str:@"filter" def:RLPTr(@"默认")]];
+            RLPTr(@"管线阶段："), stage, RLPTr(@"你选的滤波："), activeFilter];
     } else {
         self.pipelineStageLine.stringValue = @"";
     }

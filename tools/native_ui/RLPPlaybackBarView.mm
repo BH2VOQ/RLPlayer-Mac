@@ -277,6 +277,9 @@ static void RLPSetBadgeText(NSTextField *label, NSString *text, NSColor *color, 
 @property (nonatomic, assign) NSInteger modeBeforeShuffle;
 /// 播放模式的读取节流计数（每 4 次状态轮询读一次 /api/playmode）。
 @property (nonatomic, assign) NSInteger modePollTick;
+@property (nonatomic, assign) NSUInteger statusEpoch;
+@property (nonatomic, assign) BOOL statusInflight;
+@property (nonatomic, assign) NSUInteger playModeEpoch;
 @end
 
 @implementation RLPPlaybackBarView
@@ -553,6 +556,20 @@ static void RLPSetBadgeText(NSTextField *label, NSString *text, NSColor *color, 
 
     // 内部不用 Auto Layout：固定 66px 高的悬浮条，手动布局最稳
     // （约束方案在本机出现过控制键被挤出卡片的问题，见 layout）。
+    [[NSNotificationCenter defaultCenter] addObserver:self
+                                             selector:@selector(onPlaybackActionCompleted:)
+                                                 name:@"RLPPlaybackActionCompletedNotification"
+                                               object:nil];
+}
+
+- (void)dealloc {
+    [[NSNotificationCenter defaultCenter] removeObserver:self];
+}
+
+- (void)onPlaybackActionCompleted:(NSNotification *)note {
+    (void)note;
+    if (!self.polling) return;
+    [self fetchStatusForced:YES];
 }
 
 /// 音量位置刻度 ↔ dB 的互逆曲线（逐字对齐 web ui_script.h 的 volPosToDb / volDbToPos）。
@@ -785,10 +802,11 @@ static double RLPVolDbToPos(double db) {
 /// 停止播放：释放设备（与暂停不同）。走 /api/stop，与 web 版底栏同一个端点。
 - (void)stopPlayback:(id)sender {
     if (![RLPCoreClient shared].started) return;
+    ++self.statusEpoch;
     __weak __typeof__(self) weakSelf = self;
     [[RLPCoreClient shared] postJSON:@"/api/stop" body:nil completion:^(NSDictionary * _Nullable json) {
         (void)json;
-        [weakSelf fetchStatus];
+        [weakSelf fetchStatusForced:YES];
     }];
 }
 
@@ -820,19 +838,21 @@ static double RLPVolDbToPos(double db) {
 
 - (void)applyPlayMode:(NSInteger)mode {
     self.playMode = mode;
+    ++self.playModeEpoch;
     [self refreshModeButtons];
     if (![RLPCoreClient shared].started) return;
+    const NSUInteger modeSeq = self.playModeEpoch;
     __weak __typeof__(self) weakSelf = self;
     [[RLPCoreClient shared] postJSON:[NSString stringWithFormat:@"/api/playmode?mode=%ld", (long)mode]
                                 body:nil
                           completion:^(NSDictionary * _Nullable json) {
         __typeof__(self) self_ = weakSelf;
-        if (!self_) return;
+        if (!self_ || modeSeq != self_.playModeEpoch) return;
         if (json && [json[@"ok"] boolValue]) {
             [self_ refreshModeButtons];
         } else {
             // 失败就回读一次：别让按钮显示一个没生效的模式
-            [self_ fetchStatus];
+            [self_ fetchStatusForced:YES];
         }
     }];
 }
@@ -859,15 +879,17 @@ static double RLPVolDbToPos(double db) {
     __weak __typeof__(self) weakSelf = self;
     self.pollTimer = [NSTimer scheduledTimerWithTimeInterval:0.5 repeats:YES block:^(NSTimer *timer) {
         (void)timer;
-        [weakSelf fetchStatus];
+        [weakSelf fetchStatusForced:NO];
     }];
-    [self fetchStatus];
+    [self fetchStatusForced:YES];
 }
 
 - (void)stopPolling {
     [self.pollTimer invalidate];
     self.pollTimer = nil;
     self.polling = NO;
+    ++self.statusEpoch;
+    self.statusInflight = NO;
 }
 
 - (void)applyTheme {
@@ -944,19 +966,31 @@ static double RLPVolDbToPos(double db) {
 }
 
 - (void)fetchStatus {
+    [self fetchStatusForced:YES];
+}
+
+- (void)fetchStatusForced:(BOOL)forced {
+    if (!forced && self.statusInflight) return;
+    const NSUInteger seq = ++self.statusEpoch;
+    self.statusInflight = YES;
     __weak __typeof__(self) weakSelf = self;
     [[RLPCoreClient shared] getJSON:@"/api/status" completion:^(NSDictionary * _Nullable json) {
+        __typeof__(self) self_ = weakSelf;
+        if (!self_) return;
+        if (seq == self_.statusEpoch) self_.statusInflight = NO;
+        if (seq != self_.statusEpoch) return;
         RLPPlaybackStatus *st = [RLPPlaybackStatus statusFromJSON:json];
-        if (st) weakSelf.statusDetails = json;
-        [weakSelf applyStatus:st];
+        if (st) self_.statusDetails = json;
+        [self_ applyStatus:st];
     }];
     // 播放模式不在 /api/status 里（它属于队列，不是播放状态），必须单独读 /api/playmode。
     // 节流到每 4 次轮询（约 2 s）一次：模式是低频状态，没必要跟 500 ms 的进度一起刷。
     if (++self.modePollTick >= 4) {
         self.modePollTick = 0;
+        const NSUInteger modeSeq = self.playModeEpoch;
         [[RLPCoreClient shared] getJSON:@"/api/playmode" completion:^(NSDictionary * _Nullable json) {
             __typeof__(self) self_ = weakSelf;
-            if (!self_) return;
+            if (!self_ || modeSeq != self_.playModeEpoch) return;
             id m = json[@"mode"];
             if (![m respondsToSelector:@selector(integerValue)]) return;
             NSInteger mode = [m integerValue];
@@ -1076,13 +1110,16 @@ static double RLPVolDbToPos(double db) {
 - (void)playPause {
     if (!self.polling) return;
     RLPPlaybackStatus *st = self.lastStatus;
+    ++self.statusEpoch;
+    self.statusInflight = NO; // The invalidated request can no longer clear this flag, even for a no-op.
     // 与 web playOrPause 同一条判定（播放中→暂停 / 暂停中→继续 / 已停止→重播）：
-    // 以前这里在「已停止」时只发 /api/pause?on=0，后端对停止态不会起播 ⟹ 看起来"按钮没反应"。
+    // 不乐观翻转 lastStatus（避免暂停态连点反向发出 on=1），动作完成后由通知立即刷新状态。
     RLPPlaybackToggle(st.playing, st.paused, st.currentPath);
 }
 
 - (void)pausePlayback {
     if (!self.polling) return;
+    ++self.statusEpoch;
     // 系统「暂停」是显式命令：不看 0.5s 轮询快照（后台 App Nap/丢请求时快照可能过期）。
     RLPPlaybackPauseExplicit();
 }
@@ -1090,17 +1127,29 @@ static double RLPVolDbToPos(double db) {
 - (void)resumeOrReplay {
     if (!self.polling) return;
     RLPPlaybackStatus *st = self.lastStatus;
+    ++self.statusEpoch;
+    self.statusInflight = NO; // The invalidated request can no longer clear this flag, even for a no-op.
     RLPPlaybackResumeOrReplay(st.playing, st.paused, st.currentPath);
 }
 
 - (void)nextTrack {
     if (!self.polling) return;
-    [[RLPCoreClient shared] postJSON:@"/api/skip?dir=1" body:nil completion:nil];
+    ++self.statusEpoch;
+    __weak __typeof__(self) weakSelf = self;
+    [[RLPCoreClient shared] postJSON:@"/api/skip?dir=1" body:nil completion:^(NSDictionary * _Nullable json) {
+        (void)json;
+        [weakSelf fetchStatusForced:YES];
+    }];
 }
 
 - (void)previousTrack {
     if (!self.polling) return;
-    [[RLPCoreClient shared] postJSON:@"/api/skip?dir=-1" body:nil completion:nil];
+    ++self.statusEpoch;
+    __weak __typeof__(self) weakSelf = self;
+    [[RLPCoreClient shared] postJSON:@"/api/skip?dir=-1" body:nil completion:^(NSDictionary * _Nullable json) {
+        (void)json;
+        [weakSelf fetchStatusForced:YES];
+    }];
 }
 
 - (void)progressChanged:(id)sender {
@@ -1120,7 +1169,12 @@ static double RLPVolDbToPos(double db) {
     // 参数名必须是 pos（不是 f）：后端读的是 rq.path.find("?pos=")，写错会被静默当成 0
     // —— 用户拖到中间松手，播放却回到开头，且后端回 ok:true 看不出错。
     NSString *path = [NSString stringWithFormat:@"/api/seek?pos=%.6f", frac];
-    [[RLPCoreClient shared] postJSON:path body:nil completion:nil];
+    ++self.statusEpoch;
+    __weak __typeof__(self) weakSelf = self;
+    [[RLPCoreClient shared] postJSON:path body:nil completion:^(NSDictionary * _Nullable json) {
+        (void)json;
+        [weakSelf fetchStatusForced:YES];
+    }];
 }
 
 - (void)volumeChanged:(id)sender {

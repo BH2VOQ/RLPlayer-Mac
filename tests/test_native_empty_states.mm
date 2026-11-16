@@ -170,7 +170,7 @@ int main() {
         Ck(ButtonByTitle(av, RLPTr(@"重新扫描")) != nil, "扫描按钮 = 重新扫描（hasRoots）", @"扫描按钮缺失");
         Ck(ButtonByTitle(av, RLPTr(@"打开快速开始")) != nil, "第三入口 = 打开快速开始", @"缺快速开始");
 
-        // 动作：扫描 → /api/lib/scan；管理目录 → 设置 adv；快速开始 → 导航 sq。
+        // 动作：扫描 → /api/lib/scan；管理目录 → 设置 adv；快速开始 → 原生侧栏 station（sq 是旧 web key，不存在于原生路由）。
         [g_posts removeAllObjects];
         NSButton *scanBtn = ButtonByTitle(av, RLPTr(@"重新扫描"));
         if (scanBtn) [scanBtn performClick:nil];
@@ -191,8 +191,8 @@ int main() {
         if (stationBtn) [stationBtn performClick:nil];
         Pump(0.02);
         NSNotification *nav = NoteNamed(@"RLPNavigateKeyNotification");
-        Ck(nav && [nav.object isEqualToString:@"sq"],
-           "点「打开快速开始」导航到 sq（web emptyGoStation）",
+        Ck(nav && [nav.object isEqualToString:@"station"],
+           "点「打开快速开始」导航到原生 station（对应 web emptyGoStation）",
            nav ? [NSString stringWithFormat:@"object=%@", nav.object] : @"无通知");
 
         // ---- 2. 专辑页：有专辑时空态卡隐藏 ----

@@ -411,6 +411,17 @@ if(APPLE)
   target_include_directories(test_native_pause_paths PRIVATE src tools tools/native_ui)
   target_link_libraries(test_native_pause_paths PRIVATE
     "-framework AppKit" "-framework QuartzCore" "-framework CoreImage")
+  add_executable(test_native_queue_import_contract tests/test_native_queue_import_contract.mm
+    tools/native_ui/RLPQueueViewController.mm tools/native_ui/RLPPageViewController.mm
+    tools/native_ui/RLPSupport.mm tools/native_ui/RLPModels.mm
+    tools/native_ui/RLPTheme.mm tools/native_ui/RLPNativeI18n.mm
+    tools/native_ui/RLPTrackActions.mm tools/native_ui/RLPAnalysisSummary.mm)
+  target_compile_options(test_native_queue_import_contract PRIVATE -fobjc-arc)
+  target_include_directories(test_native_queue_import_contract PRIVATE src tools tools/native_ui)
+  target_link_libraries(test_native_queue_import_contract PRIVATE "-framework AppKit" "-framework QuartzCore" "-framework CoreImage")
+  add_test(NAME native_queue_import_contract COMMAND test_native_queue_import_contract)
+  set_tests_properties(native_queue_import_contract PROPERTIES TIMEOUT 60)
+
   add_test(NAME native_pause_paths COMMAND test_native_pause_paths)
   set_tests_properties(native_pause_paths PROPERTIES TIMEOUT 120)
   # 单层滚动 + EQ 曲线拖动（第6/7项）。**必须真实窗口响应链**：
@@ -1595,6 +1606,10 @@ add_executable(test_pipeline tests/test_pipeline.cpp)
 target_link_libraries(test_pipeline PRIVATE rtadsp)
 add_test(NAME pipeline COMMAND test_pipeline)
 
+add_executable(test_pipeline_apodizing tests/test_pipeline_apodizing.cpp)
+target_link_libraries(test_pipeline_apodizing PRIVATE rtadsp)
+add_test(NAME pipeline_apodizing COMMAND test_pipeline_apodizing)
+
 add_executable(test_conv_matrix tests/test_conv_matrix.cpp)
 target_link_libraries(test_conv_matrix PRIVATE rtadsp)
 add_test(NAME conv_matrix COMMAND test_conv_matrix)
@@ -1676,6 +1691,12 @@ add_executable(test_eq_reload tests/test_eq_reload.cpp ${RL_LOOPBACK_SRC} ${RL_I
 target_include_directories(test_eq_reload PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tools)
 target_link_libraries(test_eq_reload PRIVATE rtadsp ${RL_PLATFORM_LIBS} "-framework Foundation" ${RL_IMAGE_FRAMEWORKS})
 add_test(NAME eq_reload COMMAND test_eq_reload)
+
+add_executable(test_playback_control_reset tests/test_playback_control_reset.cpp ${RL_LOOPBACK_SRC} ${RL_IMAGE_THUMB_SRC})
+target_include_directories(test_playback_control_reset PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tools)
+target_link_libraries(test_playback_control_reset PRIVATE rtadsp ${RL_PLATFORM_LIBS} "-framework Foundation" ${RL_IMAGE_FRAMEWORKS})
+add_test(NAME playback_control_reset COMMAND test_playback_control_reset)
+set_tests_properties(playback_control_reset PROPERTIES TIMEOUT 60)
 
 # ---------------- 1.1.2 DSD 播放可靠性热修（P0-1 / P0-2）----------------
 # P0-2：直通资格不得被"同族速率计划可用"覆盖（EQ/IR/音量/响度/RG/trim/声道变化）。
@@ -2457,3 +2478,56 @@ add_executable(test_lyrics_cache_prune tests/test_lyrics_cache_prune.cpp)
 target_include_directories(test_lyrics_cache_prune PRIVATE ${CMAKE_SOURCE_DIR}/src)
 add_test(NAME lyrics_cache_prune COMMAND test_lyrics_cache_prune)
 set_tests_properties(lyrics_cache_prune PROPERTIES TIMEOUT 120)
+
+# Navigation regression uses the same complete native composition as topbar search.
+if(APPLE)
+  get_target_property(_nav_sources test_native_topbar_search SOURCES)
+  list(FILTER _nav_sources EXCLUDE REGEX "tests/test_native_topbar_search\.mm$")
+  add_executable(test_native_navigation_contract tests/test_native_navigation_contract.mm ${_nav_sources})
+  target_compile_options(test_native_navigation_contract PRIVATE -fobjc-arc)
+  target_compile_definitions(test_native_navigation_contract PRIVATE RL_WITH_UPDATE=1)
+  target_include_directories(test_native_navigation_contract PRIVATE src tools tools/native_ui)
+  get_target_property(_nav_libs test_native_topbar_search LINK_LIBRARIES)
+  target_link_libraries(test_native_navigation_contract PRIVATE ${_nav_libs})
+  add_test(NAME native_navigation_contract COMMAND test_native_navigation_contract)
+  set_tests_properties(native_navigation_contract PROPERTIES TIMEOUT 240)
+
+  get_target_property(_filter_sources test_workbench SOURCES)
+  list(FILTER _filter_sources EXCLUDE REGEX "tests/test_workbench[.]mm$")
+  add_executable(test_native_filter_selection_contract tests/test_native_filter_selection_contract.mm ${_filter_sources})
+  target_compile_options(test_native_filter_selection_contract PRIVATE -fobjc-arc)
+  target_include_directories(test_native_filter_selection_contract PRIVATE src tools tools/native_ui)
+  get_target_property(_filter_libs test_workbench LINK_LIBRARIES)
+  target_link_libraries(test_native_filter_selection_contract PRIVATE ${_filter_libs})
+  add_test(NAME native_filter_selection_contract COMMAND test_native_filter_selection_contract)
+  set_tests_properties(native_filter_selection_contract PROPERTIES TIMEOUT 120)
+
+  get_target_property(_settings_sources test_native_settings_granularity SOURCES)
+  list(FILTER _settings_sources EXCLUDE REGEX "tests/test_native_settings_granularity[.]mm$")
+  add_executable(test_native_settings_readback_contract tests/test_native_settings_readback_contract.mm ${_settings_sources})
+  target_compile_options(test_native_settings_readback_contract PRIVATE -fobjc-arc)
+  target_include_directories(test_native_settings_readback_contract PRIVATE src tools tools/native_ui)
+  get_target_property(_settings_libs test_native_settings_granularity LINK_LIBRARIES)
+  target_link_libraries(test_native_settings_readback_contract PRIVATE ${_settings_libs})
+  add_test(NAME native_settings_readback_contract COMMAND test_native_settings_readback_contract)
+  set_tests_properties(native_settings_readback_contract PROPERTIES TIMEOUT 180)
+
+  add_executable(test_native_playback_async_contract tests/test_native_playback_async_contract.mm
+    tools/native_ui/RLPCoreClient.mm tools/native_ui/RLPPlaybackBarView.mm
+    tools/native_ui/RLPQuickStartViewController.mm tools/native_ui/RLPPageViewController.mm
+    tools/native_ui/RLPListeningRoom.mm tools/native_ui/RLPSignalChain.mm
+    tools/native_ui/RLPVolumeSliderView.mm tools/native_ui/RLPVolumeKnobView.mm
+    tools/native_ui/RLPSupport.mm tools/native_ui/RLPModels.mm tools/native_ui/RLPTheme.mm
+    tools/native_ui/RLPNativeI18n.mm)
+  target_compile_options(test_native_playback_async_contract PRIVATE -fobjc-arc)
+  target_include_directories(test_native_playback_async_contract PRIVATE src tools tools/native_ui)
+  target_link_libraries(test_native_playback_async_contract PRIVATE "-framework AppKit" "-framework QuartzCore" "-framework CoreImage")
+  add_test(NAME native_playback_async_contract COMMAND test_native_playback_async_contract)
+  set_tests_properties(native_playback_async_contract PROPERTIES TIMEOUT 60)
+endif()
+
+add_executable(test_filter_settings_snapshot tests/test_filter_settings_snapshot.cpp)
+target_include_directories(test_filter_settings_snapshot PRIVATE src tools)
+target_link_libraries(test_filter_settings_snapshot PRIVATE rlapp_core)
+add_test(NAME filter_settings_snapshot COMMAND test_filter_settings_snapshot)
+set_tests_properties(filter_settings_snapshot PROPERTIES TIMEOUT 120)

@@ -259,6 +259,38 @@ int main() {
            "T2 已停止→播放页播放键重播 /api/play（与 web playOrPause 同语义）",
            LastPostPath() ?: @"无请求");
 
+        // ---------------- T4 动作完成自动刷新 + 连点不误发错暂停 ----------------
+        // 验证：动作完成后主动刷新 /api/status（不等 500ms 轮询），且连点恢复不反向发 on=1 错暂停。
+        SetState(YES, NO, @"/tmp/pause-paths-fixture.aiff");
+        WaitUntil(2.0, ^BOOL { return bar.lastStatus.playing && bar.lastStatus.paused == NO; });
+        // 停掉 500ms 定时器后仍能靠动作完成刷新状态：
+        [bar stopPolling];
+        // 重新开启但立即停掉定时器（或用 pausePlayback/playPause 在 0.1s 内刷新）：
+        // 注意：bar.polling 需为 YES 才允许动作；因此先让 barPoll 运行，然后在 0.1s (<500ms) 内断言刷新。
+        [bar startPolling];
+        WaitUntil(2.0, ^BOOL { return bar.lastStatus.playing && bar.lastStatus.paused == NO; });
+        SetState(YES, YES, @"/tmp/pause-paths-fixture.aiff");   // 后端将在收到 pause 后呈暂停态
+        ResetLog();
+        ClickButton(barPlay);
+        BOOL refreshedFast = WaitUntil(0.15, ^BOOL { return bar.lastStatus.paused; });
+        ck(refreshedFast, "T4 playPause 完成后立即刷新状态（不等 500ms 轮询）",
+           bar.lastStatus.paused ? @"paused=YES" : @"paused=NO");
+
+        // 连点恢复：暂停态连续点击两次 playBtn，绝不能反向发出 /api/pause?on=1
+        SetState(YES, YES, @"/tmp/pause-paths-fixture.aiff");
+        WaitUntil(2.0, ^BOOL { return bar.lastStatus.paused; });
+        ResetLog();
+        [barPlay performClick:nil];
+        [barPlay performClick:nil];
+        Pump(0.12);
+        BOOL hasWrongPause = NO;
+        for (NSDictionary *p in PostsWithPrefix(@"/api/pause")) {
+            if ([(NSString *)p[@"path"] isEqualToString:@"/api/pause?on=1"]) hasWrongPause = YES;
+        }
+        ck(!hasWrongPause && PostsWithPrefix(@"/api/pause").count >= 1,
+           "T4 暂停态连点不反向引入错暂停 (/api/pause?on=1)",
+           LastPostPath() ?: @"无请求");
+
         [np stopPolling];
         [bar stopPolling];
 
