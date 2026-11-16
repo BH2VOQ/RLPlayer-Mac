@@ -35,6 +35,7 @@
 #include "audio/dsd_reader.h"
 #include "dsp/dsd_integrator.h"
 #include <string>
+#include <mutex>
 #include <vector>
 #include <cstdio>
 #include <algorithm>
@@ -182,7 +183,23 @@ struct DsdPcmSettings {
     dsp::DsdConversion  conversion = dsp::DsdConversion::Narrow;
     bool                twoStage = true;
 };
-inline DsdPcmSettings& dsd_pcm_settings() { static DsdPcmSettings s; return s; }
+// 2026-11-16 评审 MAJOR：原实现返回**引用**，播放线程写、体检/波形线程读同一结构，
+// 三字段非原子 ⟹ 可能读到半写组合（kind/conversion/twoStage 来自两次不同设置）。
+// 现改为「按值快照」+ 唯一整组写入口；读侧永远拿到一致的三元组。
+inline DsdPcmSettings& dsd_pcm_settings_storage() { static DsdPcmSettings s; return s; }
+inline std::mutex& dsd_pcm_settings_mutex() { static std::mutex m; return m; }
+
+// 读：按值拷贝（调用方拿到的是快照，不与写线程共享）。
+inline DsdPcmSettings dsd_pcm_settings() {
+    std::lock_guard<std::mutex> lk(dsd_pcm_settings_mutex());
+    return dsd_pcm_settings_storage();
+}
+
+// 写：整组替换（唯一写入口；分散写字段会重新制造撕裂）。
+inline void set_dsd_pcm_settings(const DsdPcmSettings& v) {
+    std::lock_guard<std::mutex> lk(dsd_pcm_settings_mutex());
+    dsd_pcm_settings_storage() = v;
+}
 
 // 流式解码开关（ROADMAP P6b：免临时 WAV，默认 1 开启）
 // 可通过设置键 streamdecode（/api/settings）、环境变量 RLPLAYER_STREAM_DECODE、
