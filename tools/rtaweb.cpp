@@ -6488,6 +6488,13 @@ static std::string cover_write_atomic(const std::string& key, const std::vector<
     if (em) { std::error_code e2; fs::remove(fs::u8path(pp.part), e2); return "改名失败：" + em.message(); }
     std::error_code el;
     fs::remove(fs::u8path(pp.none), el);       // 有图了，旧负缓存作废
+    if (manual) {
+        // 2026-11-17（曲库审计已证实）：/api/cover/reset 会写 <jpg>.source.json，
+        // 而手动上传封面时从不删它 ⟹ resetDeclared 永远为真，之后再怎么换封面都不生效。
+        // 成功写入手动封面必须同时作废该重置标记。
+        std::error_code emk;
+        fs::remove(fs::u8path(pp.jpg + ".source.json"), emk);
+    }
     return std::string();
 }
 

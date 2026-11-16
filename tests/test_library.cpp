@@ -206,7 +206,7 @@ int main() {
            std::to_string(pr.removed) + " / " + std::to_string(lib.trackCount()));
         lib.load();
         ck(lib.trackCount() == 2, "prune 的结果已落盘", std::to_string(lib.trackCount()));
-        const auto rm = lib.removeUnder(p2u(zhRoot / U("日语-アルバム")));
+        const auto rm = lib.removeUnder(p2u(zhRoot / U("日语-アルバム")) + std::string("/"));
         ck(rm.removed == 1 && lib.trackCount() == 1, "removeUnder 按目录移除 1 条",
            std::to_string(rm.removed) + " / " + std::to_string(lib.trackCount()));
         lib.load();

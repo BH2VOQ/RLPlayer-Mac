@@ -2626,10 +2626,14 @@ inline LibCleanResult Library::removeUnder(const std::string& dir) {
     std::string text;
     {
         std::lock_guard<std::mutex> lk(mtx_);
+        // 2026-11-17（曲库审计已证实）：带尾分隔符的 dir 会让 lib_path_under 在
+        // a[b.size()] 处比到文件名首字母 ⟹ 传 "/Music/A/" 时静默删 0 首。
+        std::string dirNorm = dir;
+        while (!dirNorm.empty() && (dirNorm.back() == '/' || dirNorm.back() == '\\')) dirNorm.pop_back();
         std::vector<LibTrack> kept;
         kept.reserve(tracks_.size());
         for (auto& t : tracks_) {
-            if (lib_path_under(t.path, dir)) { ++r.removed; continue; }
+            if (lib_path_under(t.path, dirNorm)) { ++r.removed; continue; }
             kept.push_back(std::move(t));
         }
         applyCleanLocked(std::move(kept), r.removed);
