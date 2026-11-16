@@ -432,6 +432,14 @@ inline std::vector<rta::audio::PhysFormat> available_physical_formats(AudioStrea
 // Hog Mode 在 macOS 上**不能**阻止其它进程播放（PLATFORM.md 13.10.5 实测：
 // 独占期间第三进程 IOProc 照常运行、成功抓录 1.5 秒）。所以真独占必须显式检测，
 // 不能把 Hog 的登记归属当成保证。
+inline bool device_is_running(AudioDeviceID dev) {
+    AudioObjectPropertyAddress addr{kAudioDevicePropertyDeviceIsRunning,
+                                    kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyElementMain};
+    UInt32 v = 0, size = sizeof(v);
+    if (::AudioObjectGetPropertyData(dev, &addr, 0, nullptr, &size, &v) != noErr) return false;
+    return v != 0;
+}
+
 inline bool device_running_somewhere(AudioDeviceID dev) {
     AudioObjectPropertyAddress addr{kAudioDevicePropertyDeviceIsRunningSomewhere,
                                     kAudioObjectPropertyScopeGlobal,
@@ -1381,9 +1389,27 @@ public:
         if (!unit_) return kAudio_ParamError;
         OSStatus status = noErr;
         UInt32 n = sizeof(status);
-        const auto query = ::AudioUnitGetProperty(unit_, kAudioUnitProperty_LastRenderError, kAudioUnitScope_Global, 0, &status, &n);
-        return query == noErr ? status : query;
+        // LastRenderError belongs to the output scope; querying Global returns paramErr (-50).
+        const auto query = ::AudioUnitGetProperty(unit_, kAudioUnitProperty_LastRenderError, kAudioUnitScope_Output, 0, &status, &n);
+        return query == noErr ? status : 0;
     }
+    OSStatus last_render_query() const {
+        std::lock_guard<std::mutex> lk(mu_);
+        if (!unit_) return kAudio_ParamError;
+        UInt32 n = sizeof(OSStatus);
+        return ::AudioUnitGetProperty(unit_, kAudioUnitProperty_LastRenderError, kAudioUnitScope_Output, 0, nullptr, &n);
+    }
+    bool restart_io() {
+        std::lock_guard<std::mutex> lk(mu_);
+        if (!unit_ || !initialized_) return false;
+        if (running_) ::AudioOutputUnitStop(unit_);
+        const OSStatus st = ::AudioOutputUnitStart(unit_);
+        running_ = (st == noErr);
+        io_restarts_.fetch_add(1);
+        return running_;
+    }
+    uint64_t io_restarts() const { return io_restarts_.load(); }
+    bool device_running() const { return device_ != kAudioObjectUnknown && detail::device_is_running(device_); }
 
     // ---------------- 欠载归因（与 WASAPI 侧同名同义，2026-10-25 移植）----------------
     // 对应原来 WasapiOutput::zero_pad_full / zero_starved / last_zero_reason。
@@ -1806,6 +1832,7 @@ private:
         buffer_frames_ = 0;
         maximum_slice_frames_ = 0;
         render_callbacks_.store(0);
+        io_restarts_.store(0);
         devicePacking_ = macos::ContainerPacking::Packed16;
         deviceEffectiveBits_ = 0;
         deviceContainerBits_ = 0;
@@ -1873,6 +1900,7 @@ private:
     size_t buffer_frames_ = 0;
     UInt32 maximum_slice_frames_ = 0;
     std::atomic<uint64_t> render_callbacks_{0};
+    std::atomic<uint64_t> io_restarts_{0};
     std::atomic<size_t> frames_written_{0};
 
     // 环形缓冲（帧）

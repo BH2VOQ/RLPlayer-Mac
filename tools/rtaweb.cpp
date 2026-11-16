@@ -2272,7 +2272,15 @@ public:
         }
         return true;
     }
-    bool start() override { return ao_->start(); }
+    bool start() override {
+        const bool ok = ao_->start();
+        dlog(std::string("IO_START ok=") + (ok ? "1" : "0") +
+             " shared=" + (shared_ ? "1" : "0") +
+             " frames=" + std::to_string(ao_->buffer_frames()) +
+             " device_running=" + (device_running() ? "1" : "0") +
+             " device_shared_with_others=" + (device_shared_with_others() ? "1" : "0"));
+        return ok;
+    }
     size_t buffer_frames() const override { return ao_->buffer_frames() ? ao_->buffer_frames() : 4096; }
     size_t write_one_period(const int32_t* pcm, size_t frames) override {
         const size_t w = ao_->write(pcm, frames);
@@ -2314,7 +2322,13 @@ public:
     }
     void pause() override { ao_->pause(); }
     void resume() override { ao_->resume(); }
-    void close() override { ao_->close(); }
+    void close() override {
+        dlog(std::string("IO_CLOSE device_running=") + (device_running() ? "1" : "0") +
+             " device_shared_with_others=" + (device_shared_with_others() ? "1" : "0") +
+             " render_callbacks=" + std::to_string((long long)render_callbacks()) +
+             " rendered=" + std::to_string(ao_->frames_rendered()));
+        ao_->close();
+    }
     const std::string& last_error() const override { return err_; }
     // render_loop 的节奏依赖（实测教训 2026-10-25：不实现时它零等待空转，
     // 402 次重试在 1ms 内打满 200 次超时判据 → 秒判 RENDERFAIL，设备其实正常）。
@@ -2354,9 +2368,14 @@ public:
         return "unknown";
     }
     size_t frames_rendered() const { return ao_->frames_rendered(); }
-    uint64_t render_callbacks() const { auto* ca = dynamic_cast<rta::platform::CoreAudioOutput*>(ao_.get()); return ca ? ca->render_callbacks() : 0; }
+    long long render_callbacks() const override { auto* ca = dynamic_cast<rta::platform::CoreAudioOutput*>(ao_.get()); return ca ? (long long)ca->render_callbacks() : -1; }
+    bool restart_io() override { auto* ca = dynamic_cast<rta::platform::CoreAudioOutput*>(ao_.get()); return ca ? ca->restart_io() : false; }
+    uint64_t render_callbacks_raw() const { auto* ca = dynamic_cast<rta::platform::CoreAudioOutput*>(ao_.get()); return ca ? ca->render_callbacks() : 0; }
     UInt32 maximum_slice_frames() const { auto* ca = dynamic_cast<rta::platform::CoreAudioOutput*>(ao_.get()); return ca ? ca->maximum_slice_frames() : 0; }
     OSStatus last_render_status() const { auto* ca = dynamic_cast<rta::platform::CoreAudioOutput*>(ao_.get()); return ca ? ca->last_render_status() : noErr; }
+    OSStatus last_render_query() const { auto* ca = dynamic_cast<rta::platform::CoreAudioOutput*>(ao_.get()); return ca ? ca->last_render_query() : noErr; }
+    uint64_t io_restarts() const { auto* ca = dynamic_cast<rta::platform::CoreAudioOutput*>(ao_.get()); return ca ? ca->io_restarts() : 0; }
+    bool device_running() const { auto* ca = dynamic_cast<rta::platform::CoreAudioOutput*>(ao_.get()); return ca ? ca->device_running() : false; }
     uint64_t underruns() const { return ao_->underruns(); }
     bool bit_perfect() const { return ao_->bit_perfect(); }
     // 2026-10-25：接管后音量条的起点 dB（原硬件音量的等效值）。
@@ -5682,7 +5701,11 @@ static bool play_one_impl(const std::string& file, const PlayParams& pIn, rta::a
                        " bp=" + (ca->bit_perfect() ? "1" : "0") +
                        " render_callbacks=" + std::to_string(ca->render_callbacks()) +
                        " max_slice=" + std::to_string(ca->maximum_slice_frames()) +
-                       " render_status=" + std::to_string(ca->last_render_status());
+                       " render_status=" + std::to_string(ca->last_render_status()) +
+                       " render_query=" + std::to_string(ca->last_render_query()) +
+                       " io_restarts=" + std::to_string(ca->io_restarts()) +
+                       " device_running=" + (ca->device_running() ? "1" : "0") +
+                       " device_shared_with_others=" + (ca->device_shared_with_others() ? "1" : "0");
             }
             return std::string();
         };

@@ -83,6 +83,11 @@ struct OutSink {
     // RENDERFAIL 遥测：最近一次 GetBuffer 的 HRESULT（-999 = 从未调过）。
     // 各后端按需覆盖；mock sink 可以返回固定值。
     virtual long long last_gb_hr() const { return -999; }
+    // 设备渲染回调次数（-1 = 该后端不报）。RENDERFAIL 靠它区分
+    // 「设备一次都没来拉」与「拉了但数据不足」。
+    virtual long long render_callbacks() const { return -1; }
+    // 零回调时的一次性自愈：停掉再启动输出单元。返回 true = 已重新启动。
+    virtual bool restart_io() { return false; }
     // 「写不进去」的成因分解（2026-10-22 反馈 20261022-02）：w0 是个混在一起的数，
     // 分不清「设备缓冲恒满」和「我们喂不上」。默认返回 -1 = 后端不支持该统计。
     // ★ 计数契约（与 rta::audio::ZeroAttrib::classify 同一份判据，平台无关）：
@@ -261,6 +266,7 @@ inline void render_loop(OutSink& sink, RenderHost& h) {
     size_t pendFrames = 0;
     size_t played = h.played ? h.played->load() : 0; // preserve caller's resume/seek position
     int timeouts = 0;
+    bool ioRestarted = false;   // 零回调自愈只做一次，绝不无限重启
     // 「这一串连续写不进去」的起点（timeouts 0→1 时记）。
     // ★ 2026-10-25 真 BUG 修复：RENDERFAIL 文案里的秒数原先写成 timeouts*20/1000，
     //   而 20ms 只是【旧时序】的轮询上限。现默认 fastFeed=true，等待上限是 per/2
@@ -636,6 +642,14 @@ inline void render_loop(OutSink& sink, RenderHost& h) {
             // 96k/per=960时每轮只等5ms，夹具墙钟约1.005s，不是旧注释的约0.5s。
             // 阈值与计数逻辑不变；日志时长取实测墙钟，不按次数×20ms估算。
             if (++timeouts > 200) {
+                // 设备一次回调都没发生 ⟹ 输出单元没被驱动。先重启一次单元（不改变失败判据）；
+                // 只有重启后仍零回调才如实报 RENDERFAIL。
+                if (!ioRestarted && sink.render_callbacks() == 0 && sink.restart_io()) {
+                    ioRestarted = true;
+                    timeouts = 0;
+                    timeoutT0 = tAfter;
+                    if (h.log) h.log("IO_RESTART 设备一次渲染回调都没发生，已重启输出单元并继续（仅一次）");
+                } else {
                 std::ostringstream fs;
                 // 时长取【实测墙钟】（tAfter - timeoutT0），不再用「次数 x 20ms」估算：
                 // fastFeed 下一轮只等 per/2，两者能差 4 倍。次数本身仍如实带上。
@@ -667,6 +681,7 @@ inline void render_loop(OutSink& sink, RenderHost& h) {
                 h.renderFail = true;
                 if (h.log) h.log(h.failMsg);
                 break;
+                }
             }
         }
 

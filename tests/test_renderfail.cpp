@@ -81,6 +81,11 @@ struct FakeDeadSink : rta::render::OutSink {
     long long last_pad() const override { return 9600; }          // 恒满（事故形态）
     long long last_gb_hr() const override { return -999; }        // 写入前就在 pad 检查处被拒
     const std::string& last_error() const override { return e_; }
+    long long render_callbacks() const override { return callbacks; }
+    bool restart_io() override { ++restarts; return restartOk; }
+    long long callbacks = 0;
+    int restarts = 0;
+    bool restartOk = false;
     std::string e_;
 };
 
@@ -296,6 +301,22 @@ int main() {
         for (const auto& s : b.logs) if (s.find("RENDERFAIL") != std::string::npos) logged = true;
         ck(logged, "RENDERFAIL 同步进了播放日志（play_log 钩子）");
         ck(b.w0.load() > 0, "w0 计数被循环递增", std::to_string(b.w0.load()));
+    }
+
+    // ---- 1b. 零回调自愈：只重启一次；已有回调时不重启 ----
+    {
+        Bench b; b.feed(3);
+        auto h = b.make(false, false);
+        FakeDeadSink sink; sink.callbacks = 0; sink.restartOk = true;
+        rta::render::render_loop(sink, h);
+        ck(sink.restarts == 1, "零渲染回调时只重启一次输出单元", std::to_string(sink.restarts));
+        ck(h.renderFail, "重启后仍无回调时如实报 RENDERFAIL（不伪装成功）");
+
+        Bench b2; b2.feed(3);
+        auto h2 = b2.make(false, false);
+        FakeDeadSink sink2; sink2.callbacks = 1; sink2.restartOk = true;
+        rta::render::render_loop(sink2, h2);
+        ck(sink2.restarts == 0, "已有渲染回调时不重启（避免打断正在出声的流）", std::to_string(sink2.restarts));
     }
 
     // ---- 2. DoP：不可回退文案 ----
