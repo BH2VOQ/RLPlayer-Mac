@@ -344,6 +344,14 @@ int main() {
         ck(rfastExit >= 0 && w1Exit >= 0 && rfastExit < w1Exit,
            "C1 读请求不被慢写队列阻塞（rfast 早于 w1 完成）",
            [NSString stringWithFormat:@"rfastExit=%ld w1Exit=%ld", (long)rfastExit, (long)w1Exit]);
+        ck([RLPCoreClient isSlowWritePath:@"/api/lyrics/ai"] &&
+           [RLPCoreClient isSlowWritePath:@"/api/entity/knowledge"] &&
+           [RLPCoreClient isSlowWritePath:@"/api/entity/summary"],
+           "C1e 长耗时 AI 请求被识别并走独立慢队列（LLM 卡住不拖住播控）", @"");
+        ck(![RLPCoreClient isSlowWritePath:@"/api/pause"] &&
+           ![RLPCoreClient isSlowWritePath:@"/api/stop"] &&
+           ![RLPCoreClient isSlowWritePath:@"/api/volume"],
+           "C1f 实时播控端点仍走写队列（不被误分类进慢队列）", @"");
 
         // ====================================================================
         // C2: PlaybackBar fetchStatus inflight/epoch 保护，旧回包不覆盖新状态

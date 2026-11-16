@@ -21,6 +21,10 @@ typedef void (^RLPDataCompletion)(NSData * _Nullable data);
 
 + (instancetype)shared;
 
+/// 2026-11-17：长耗时后端调用（AI 歌词/实体整理）单独走慢队列。
+/// 暴露成类方法是为了能被离线判据钉住「播控端点绝不会被误分类」。
++ (BOOL)isSlowWritePath:(NSString *)path;
+
 /// 是否已经 startEmbedded（selftest/离线渲染时需要判断，避免误启动核心）。
 @property (nonatomic, readonly) BOOL started;
 

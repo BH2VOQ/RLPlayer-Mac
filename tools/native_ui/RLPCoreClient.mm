@@ -8,6 +8,7 @@
 @implementation RLPCoreClient {
     dispatch_queue_t _ioQueue;
     dispatch_queue_t _writeQueue;
+    dispatch_queue_t _slowQueue;
     BOOL _startedStorage;
 }
 
@@ -24,6 +25,10 @@
     if ((self = [super init])) {
         _ioQueue = dispatch_queue_create("rlplayer.native.core", DISPATCH_QUEUE_CONCURRENT);
         _writeQueue = dispatch_queue_create("rlplayer.native.core.write", DISPATCH_QUEUE_SERIAL);
+        // 2026-11-17（后端审计已证实）：AI 歌词/实体整理这类端点是**同步阻塞**的后端调用，
+        // 若与播控写共用 _writeQueue，LLM 卡住时暂停/停止/切歌/音量全会无限期排队。
+        // 单独一条串行队列承接它们：长任务只互相排队，不拖住实时播控。
+        _slowQueue = dispatch_queue_create("rlplayer.native.core.slow", DISPATCH_QUEUE_SERIAL);
     }
     return self;
 }
@@ -88,8 +93,16 @@
     [self runAsync:NO path:path body:body completion:completion];
 }
 
++ (BOOL)isSlowWritePath:(NSString *)path {
+    if (![path isKindOfClass:[NSString class]]) return NO;
+    return [path hasPrefix:@"/api/lyrics/ai"] ||
+           [path hasPrefix:@"/api/entity/knowledge"] ||
+           [path hasPrefix:@"/api/entity/summary"];
+}
+
 - (void)runAsync:(BOOL)get path:(NSString *)path body:(nullable NSString *)body completion:(nullable RLPJSONCompletion)completion {
-    dispatch_queue_t q = get ? _ioQueue : _writeQueue;
+    dispatch_queue_t q = get ? _ioQueue
+                             : ([[self class] isSlowWritePath:path] ? _slowQueue : _writeQueue);
     dispatch_async(q, ^{
         NSDictionary *j = [self jsonWithMethod:(get ? @"GET" : @"POST") path:path body:body];
         if (!completion) return;
