@@ -288,6 +288,7 @@ static void RLPSetBadgeText(NSTextField *label, NSString *text, NSColor *color, 
 @property (nonatomic, assign) double optimisticVolumeDb;
 @property (nonatomic, assign) BOOL hasConfirmedVolume;
 @property (nonatomic, assign) BOOL rawVolumeLocked;
+- (void)commitVolumeDb:(double)db completion:(void (^ _Nullable)(BOOL))completion;
 @end
 
 static BOOL RLPBarTextFieldIsEditing(NSTextField *field) {
@@ -1346,9 +1347,13 @@ static double RLPVolDbToPos(double db) {
 - (void)onToggleVolumeMute:(id)sender {
     (void)sender;
     if (!self.polling || self.rawVolumeLocked) return;
+    const RLPVolumeMuteSnapshot snapshot = RLPVolumeMuteCapture();
     const double next = RLPVolumeMuteNextDb(self.currentVolumeDb);
     if (isnan(next)) return;   // 当前 -120 且无恢复值 ⟹ 什么都不做
-    [self commitVolumeDb:next];
+    const uint64_t revision = RLPVolumeMuteRevision();
+    [self commitVolumeDb:next completion:^(BOOL ok) {
+        if (!ok) RLPVolumeMuteRollback(snapshot, revision);
+    }];
 }
 - (void)onCommitPreciseVolume:(id)sender {
     (void)sender;
@@ -1372,6 +1377,10 @@ static double RLPVolDbToPos(double db) {
     [self commitVolumeDb:db0];
 }
 - (void)commitVolumeDb:(double)db {
+    [self commitVolumeDb:db completion:nil];
+}
+
+- (void)commitVolumeDb:(double)db completion:(void (^)(BOOL))completion {
     if (!self.polling || self.rawVolumeLocked || !isfinite(db)) return;
     db = RLPVolClampDb(db);
     if (!self.hasConfirmedVolume && self.lastStatus && isfinite(self.lastStatus.volumeDb)) {
@@ -1390,6 +1399,7 @@ static double RLPVolDbToPos(double db) {
         if (!self_ || seq != self_.volumeWriteSeq) return;
         self_.volumeWritePending = NO;
         const BOOL ok = [json isKindOfClass:[NSDictionary class]] && [json[@"ok"] boolValue];
+        if (completion) completion(ok);
         if (ok) {
             double confirmed = db;
             id dbVal = json[@"db"];

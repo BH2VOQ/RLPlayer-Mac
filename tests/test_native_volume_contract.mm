@@ -457,6 +457,56 @@ int main() { @autoreleasepool {
             NSWidth(barSlider.frame), NSWidth([barSlider trackRect])]);
     }
 
+    // C8: both volume entry points must roll back mute memory when POST fails.
+    {
+        RLPNowPlayingViewController *page = [RLPNowPlayingViewController new];
+        (void)page.view;
+        id pageControls = [page valueForKey:@"webControls"];
+        for (id target in @[bar, pageControls]) {
+            BOOL isBar = target == bar;
+            [gPendingPosts removeAllObjects];
+            [gPendingStatus removeAllObjects];
+            RLPVolumeMuteReset();
+            if (isBar) [bar commitVolumeDb:-25.0]; else [target applyVolumeDb:-25.0];
+            FlushPostAt(0, @{@"ok": @YES, @"db": @(-25.0)});
+            [target onToggleVolumeMute:nil];
+            FlushPostAt(0, @{@"ok": @YES, @"db": @(-120.0)});
+            Ck(RLPVolumeMuteHasRestore(), "C8 successful mute has restore memory", @"");
+            [target onToggleVolumeMute:nil];
+            FlushPostAt(0, @{@"ok": @NO, @"error": @"restore rejected"});
+            Ck(RLPVolumeMuteHasRestore(), "C8 rejected unmute preserves retry memory", isBar ? @"bar" : @"page");
+            [target onToggleVolumeMute:nil];
+            Ck(gPendingPosts.count == 1 && [gPendingPosts[0].path isEqualToString:@"/api/volume?db=-25.0"],
+               "C8 unmute retry sends original gain", isBar ? @"bar" : @"page");
+            if (gPendingPosts.count) FlushPostAt(0, @{@"ok": @YES, @"db": @(-25.0)});
+            Ck(!RLPVolumeMuteHasRestore(), "C8 successful unmute consumes restore memory", @"");
+            RLPVolumeMuteReset();
+            if (isBar) [bar commitVolumeDb:-25.0]; else [target applyVolumeDb:-25.0];
+            FlushPostAt(0, @{@"ok": @YES, @"db": @(-25.0)});
+            [target onToggleVolumeMute:nil];
+            FlushPostAt(0, @{@"ok": @NO, @"error": @"mute rejected"});
+            Ck(!RLPVolumeMuteHasRestore(), "C8 rejected mute leaves no restore memory", isBar ? @"bar" : @"page");
+        }
+        // An old failure in one entry must not undo a later mute in the other.
+        RLPVolumeMuteReset();
+        [gPendingPosts removeAllObjects];
+        [bar commitVolumeDb:-25.0];
+        FlushPostAt(0, @{@"ok": @YES, @"db": @(-25.0)});
+        [bar onToggleVolumeMute:nil];
+        [pageControls applyVolumeDb:-30.0];
+        FlushPostAt(1, @{@"ok": @YES, @"db": @(-30.0)});
+        [pageControls onToggleVolumeMute:nil];
+        Ck(gPendingPosts.count == 2, "C9 old bar mute and newer page mute are pending", @"");
+        FlushPostAt(0, @{@"ok": @NO, @"error": @"old mute failed"});
+        Ck(Near(RLPVolumeMuteCapture().restoreDb, -30.0, 0.001),
+           "C9 old cross-entry failure preserves newer restore memory", @"");
+        FlushPostAt(0, @{@"ok": @YES, @"db": @(-120.0)});
+        [page stopPolling];
+        [gPendingPosts removeAllObjects];
+        [gPendingStatus removeAllObjects];
+        RLPVolumeMuteReset();
+    }
+
     [bar stopPolling];
     std::printf("\n结果：%d passed, %d failed\n", gPass, gFail);
     return gFail == 0 ? 0 : 1;

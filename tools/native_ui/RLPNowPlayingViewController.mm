@@ -343,6 +343,7 @@ static BOOL RLPNPTextFieldIsEditing(NSTextField *field) {
 @property (nonatomic, copy, nullable) void (^onVolumeWriteStarted)(void);
 @property (nonatomic, copy, nullable) void (^onVolumeWriteFailed)(void);
 - (void)applyVolumeLockedState:(BOOL)locked;
+- (void)applyVolumeDb:(double)db completion:(void (^ _Nullable)(BOOL))completion;
 - (void)applyTheme;
 @end
 
@@ -401,6 +402,10 @@ static BOOL RLPNPTextFieldIsEditing(NSTextField *field) {
 }
 
 - (void)applyVolumeDb:(double)db {
+    [self applyVolumeDb:db completion:nil];
+}
+
+- (void)applyVolumeDb:(double)db completion:(void (^)(BOOL))completion {
     if (self.rawVolumeLocked || !isfinite(db)) return;
     db = RLPVolClampDb(db);
     [self updateVolumeUiForDb:db];
@@ -414,6 +419,7 @@ static BOOL RLPNPTextFieldIsEditing(NSTextField *field) {
         if (!self_ || seq != self_.volumeWriteSeq) return;
         self_.volumeWritePending = NO;
         const BOOL ok = [json isKindOfClass:[NSDictionary class]] && [json[@"ok"] boolValue];
+        if (completion) completion(ok);
         if (ok) {
             double confirmed = db;
             id dbVal = json[@"db"];
@@ -455,9 +461,13 @@ static BOOL RLPNPTextFieldIsEditing(NSTextField *field) {
     (void)sender;
     if (self.rawVolumeLocked || (!self.hasConfirmedVolume && !self.volumeWritePending)) return;
     // 记忆值改为全局共享（v3.3.11 volumeRestore 唯一），播放页与底栏同一份。
+    const RLPVolumeMuteSnapshot snapshot = RLPVolumeMuteCapture();
     const double next = RLPVolumeMuteNextDb(self.preciseVolumeDb);
     if (isnan(next)) return;   // 上游：当前 -120 且无恢复值 ⟹ 什么都不做
-    [self applyVolumeDb:next];
+    const uint64_t revision = RLPVolumeMuteRevision();
+    [self applyVolumeDb:next completion:^(BOOL ok) {
+        if (!ok) RLPVolumeMuteRollback(snapshot, revision);
+    }];
 }
 
 /// v3.3.11 `commitPreciseVolume` 的 AppKit 等价：-120~+20 dB，Enter 确认。

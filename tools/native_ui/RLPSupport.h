@@ -6,6 +6,7 @@
 // 统一放在这里的目的：页面之间不各写一套格式化与封面缓存；i18n 只有一个入口
 // （RLPTr），将来把 docs/i18n 的词表生成为原生表时，所有已包 RLPTr 的文案自动生效。
 #import <AppKit/AppKit.h>
+#include <stdint.h>
 
 NS_ASSUME_NONNULL_BEGIN
 
@@ -138,6 +139,19 @@ double RLPVolumeMuteNextDb(double currentDb);
 BOOL RLPVolumeMuteHasRestore(void);
 /// 清空记忆值（上游在「重置/丢弃」路径上会置 null）。
 void RLPVolumeMuteReset(void);
+/// 静音记忆快照（仅主线程使用）。
+typedef struct {
+    double restoreDb;
+    uint64_t revision;
+} RLPVolumeMuteSnapshot;
+/// 捕获当前静音恢复记忆（restoreDb 允许为 NAN）与单调 revision（仅主线程使用）。
+RLPVolumeMuteSnapshot RLPVolumeMuteCapture(void);
+/// 当前全局静音状态 revision（仅主线程使用）。
+uint64_t RLPVolumeMuteRevision(void);
+/// 条件回滚静音记忆：仅当当前 revision == expectedRevision 且快照不来自未来时，
+/// 恢复 snapshot.restoreDb 并递增 revision 返回 YES；否则不修改并返回 NO。
+/// 仅恢复内存中的静音记忆状态，不写音频设备、不发网络请求（仅主线程使用）。
+BOOL RLPVolumeMuteRollback(RLPVolumeMuteSnapshot snapshot, uint64_t expectedRevision);
 /// 播放/暂停的**唯一决策**（与 web playOrPause 同语义）：
 ///   播放中（playing && !paused）→ /api/pause?on=1
 ///   暂停中（paused）             → /api/pause?on=0

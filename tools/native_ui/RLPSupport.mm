@@ -852,8 +852,9 @@ NSDictionary<NSString *, id> *RLPParseM3U(NSString *text, NSString *folder) {
     return @{ @"items": items, @"needsFolder": @(needsFolder) };
 }
 
-// ---- v3.3.11 静音/恢复的唯一状态 ----
+// ---- v3.3.11 静音/恢复的唯一状态（主线程使用） ----
 static double gVolumeRestoreDb = NAN;   // NAN = web volumeRestore === null
+static uint64_t gVolumeMuteRevision = 0;
 
 double RLPVolumeMuteNextDb(double currentDb) {
     if (!isfinite(currentDb)) return NAN;
@@ -861,15 +862,41 @@ double RLPVolumeMuteNextDb(double currentDb) {
         if (isnan(gVolumeRestoreDb)) return NAN;   // 上游：无恢复值直接 return，不发请求
         const double restored = gVolumeRestoreDb;
         gVolumeRestoreDb = NAN;
+        ++gVolumeMuteRevision;
         return restored;
     }
     gVolumeRestoreDb = currentDb;
+    ++gVolumeMuteRevision;
     return -120.0;
 }
 
 BOOL RLPVolumeMuteHasRestore(void) { return !isnan(gVolumeRestoreDb); }
 
-void RLPVolumeMuteReset(void) { gVolumeRestoreDb = NAN; }
+void RLPVolumeMuteReset(void) {
+    gVolumeRestoreDb = NAN;
+    ++gVolumeMuteRevision;
+}
+
+RLPVolumeMuteSnapshot RLPVolumeMuteCapture(void) {
+    return (RLPVolumeMuteSnapshot){
+        .restoreDb = gVolumeRestoreDb,
+        .revision = gVolumeMuteRevision,
+    };
+}
+
+uint64_t RLPVolumeMuteRevision(void) {
+    return gVolumeMuteRevision;
+}
+
+BOOL RLPVolumeMuteRollback(RLPVolumeMuteSnapshot snapshot, uint64_t expectedRevision) {
+    if (gVolumeMuteRevision != expectedRevision) return NO;
+    if (snapshot.revision > gVolumeMuteRevision) return NO;
+    if (!isnan(snapshot.restoreDb) && !isfinite(snapshot.restoreDb)) return NO;
+    // 仅恢复内存中的静音记忆状态，不写设备也不发请求。
+    gVolumeRestoreDb = snapshot.restoreDb;
+    ++gVolumeMuteRevision;
+    return YES;
+}
 
 NSNotificationName const RLPSettingsChangedNotification = @"RLPSettingsChangedNotification";
 NSNotificationName const RLPLanguageDidChangeNotification = @"RLPLanguageDidChangeNotification";
