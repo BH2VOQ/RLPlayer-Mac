@@ -1458,6 +1458,8 @@
 }
 
 - (void)viewDidDisappear {
+    [self.popover close];
+    self.popover = nil;
     [self.poll invalidate];
     self.poll = nil;
     ++self.statusEpoch;

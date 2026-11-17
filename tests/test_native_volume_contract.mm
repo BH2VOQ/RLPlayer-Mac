@@ -176,6 +176,8 @@ int main() { @autoreleasepool {
     [win.contentView addSubview:bar];
     [bar layoutSubtreeIfNeeded];
     [bar startPolling];
+    Ck(std::isnan([bar currentVolumeDb]),
+       "V1 first pending status exposes unknown volume instead of zero dB", @"");
     // 初始 status 到位：-15.0 dB
     FlushOldestStatus(StatusDict(-15.0, NO, YES));
 

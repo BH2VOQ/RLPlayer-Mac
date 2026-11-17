@@ -1279,7 +1279,7 @@ static double RLPVolDbToPos(double db) {
 }
 
 - (double)currentVolumeDb {
-    return self.optimisticVolumeDb;
+    return (self.hasConfirmedVolume || self.volumeWritePending) ? self.optimisticVolumeDb : NAN;
 }
 
 - (BOOL)isVolumeLocked {
@@ -1372,7 +1372,7 @@ static double RLPVolDbToPos(double db) {
     [self commitVolumeDb:db0];
 }
 - (void)commitVolumeDb:(double)db {
-    if (!self.polling || self.rawVolumeLocked) return;
+    if (!self.polling || self.rawVolumeLocked || !isfinite(db)) return;
     db = RLPVolClampDb(db);
     if (!self.hasConfirmedVolume && self.lastStatus && isfinite(self.lastStatus.volumeDb)) {
         self.confirmedVolumeDb = RLPVolClampDb(self.lastStatus.volumeDb);

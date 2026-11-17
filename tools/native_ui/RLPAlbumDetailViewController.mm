@@ -687,17 +687,18 @@
 - (void)onShuffle:(id)sender {
     if(!self.tracks.count || ![RLPCoreClient shared].started)return;
     __weak __typeof__(self) weakSelf=self;
+    const uint64_t actionEpoch = RLPBeginPlaybackAction();
+    NSString *albumKey = [self.albumKey copy];
     const NSUInteger start = arc4random_uniform((uint32_t)self.tracks.count);
     [[RLPCoreClient shared] postJSON:@"/api/playmode?mode=3" body:nil completion:^(NSDictionary *json){
         __typeof__(self) owner=weakSelf;
-        if (!owner) return;
+        if (!owner || actionEpoch != RLPPlaybackActionEpoch()) return;
         if (!json || ![json[@"ok"] boolValue]) {
             NSString *err = [json[@"error"] isKindOfClass:NSString.class] ? json[@"error"] : nil;
             RLPToast(err.length ? err : RLPTr(@"切换随机播放失败"));
             return;
         }
-        RLPToast(RLPTr(@"已切换到随机并开始播放"));
-        RLPPlayAlbum(owner.albumKey, (NSInteger)start);
+        RLPPlayAlbum(albumKey, (NSInteger)start);
     }];
 }
 

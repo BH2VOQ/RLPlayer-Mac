@@ -90,6 +90,8 @@ static NSString *g_activeServerId = @"srv2";
 static BOOL g_artistImageShouldSucceed = NO;
 static BOOL g_coverShouldFail = NO;
 static BOOL g_playmodePostShouldFail = NO;
+static BOOL g_holdShufflePost = NO;
+static RLPJSONCompletion g_pendingShufflePost = nil;
 
 static NSData *TestPngData(void) {
     NSBitmapImageRep *rep = [[NSBitmapImageRep alloc]
@@ -269,6 +271,10 @@ static NSArray<NSDictionary *> *PlaylistItemsFixture(void) {
     [g_posts addObject:@{ @"path": path ?: @"", @"body": body ?: @"" }];
     // ⚠️ 顺序：/api/playmode 与 /api/play 同前缀，先判 playmode（与后端路由坑同款）。
     if ([path hasPrefix:@"/api/playmode?mode="]) {
+        if (g_holdShufflePost && [path isEqualToString:@"/api/playmode?mode=3"]) {
+            g_pendingShufflePost = [done copy];
+            return;
+        }
         if (g_playmodePostShouldFail) {
             if (done) done(@{ @"ok": @NO, @"error": @"mock shuffle mode failed" });
             return;
@@ -824,10 +830,23 @@ int main() {
             Pump(0.05);
             BOOL sentPlay = NO;
             for (NSDictionary *p in g_posts) {
-                if ([p[@"path"] isEqualToString:@"/api/play"]) sentPlay = YES;
+                if ([p[@"path"] isEqualToString:@"/api/play"] || [p[@"path"] isEqualToString:@"/api/lib/play"]) sentPlay = YES;
             }
             Ck(!sentPlay, "S1 随机模式切换失败时不抢播专辑", [g_posts componentsJoinedByString:@" | "]);
             g_playmodePostShouldFail = NO;
+            g_holdShufflePost = YES;
+            [alb onShuffle:nil];
+            Ck(g_pendingShufflePost != nil, "S2 shuffle response is delayed", @"");
+            RLPPlayPath(@"/offline/newer.flac");
+            [g_posts removeAllObjects];
+            RLPJSONCompletion pending = g_pendingShufflePost;
+            g_pendingShufflePost = nil;
+            g_holdShufflePost = NO;
+            if (pending) pending(@{@"ok": @YES});
+            Pump(0.05);
+            Ck(PostsWithPrefix(@"/api/lib/play").count == 0,
+               "S2 newer playback suppresses delayed shuffle album start",
+               [g_posts componentsJoinedByString:@" | "]);
         }
 
         std::printf("结果：%d passed, %d failed\n", g_pass, g_fail);

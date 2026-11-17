@@ -93,6 +93,13 @@ static void ClearToasts(NSWindow *win) {
 }
 @end
 
+@interface RLPCloseTrackingPopover : NSPopover
+@property (nonatomic, assign) BOOL closeCalled;
+@end
+@implementation RLPCloseTrackingPopover
+- (void)close { self.closeCalled = YES; }
+@end
+
 // ---- 可控异步 Mock RLPCoreClient ----
 @interface RLPMockRequest : NSObject
 @property (nonatomic, copy) NSString *method;
@@ -360,6 +367,11 @@ int main(void) {
                    [NSString stringWithFormat:@"before=%ld after=%ld", (long)before, (long)hogCheck.state]);
             }
         }
+
+        RLPCloseTrackingPopover *leavingPopover = [RLPCloseTrackingPopover new];
+        vc.popover = leavingPopover;
+        [vc viewDidDisappear];
+        CK(leavingPopover.closeCalled, "D1 leaving listening room closes its popover", @"");
 
         [[NSNotificationCenter defaultCenter] removeObserver:notifToken];
         [gPendingGets removeAllObjects];
