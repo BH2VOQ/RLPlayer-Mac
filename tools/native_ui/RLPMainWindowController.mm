@@ -168,6 +168,12 @@ static NSString *RLPPageIdentifier(NSString *key) {
     if (![[NSUserDefaults standardUserDefaults] stringForKey:@"NSWindow Frame RLPNativeMainWindow.v2"])
         [win setFrame:NSMakeRect(0, 0, 1180, 760) display:NO];
     [win center];
+    // 换屏/外接显示器/历史拖拽会把 autosave frame 存成超出当前屏幕的尺寸，
+    // 恢复后内容会被屏幕边缘裁掉。启动时统一收敛到可见区。
+    if (NSScreen *screen = win.screen ?: NSScreen.mainScreen) {
+        [win setFrame:RLPClampWindowFrameToVisible(win.frame, screen.visibleFrame, win.minSize)
+               display:NO];
+    }
 
     self = [super initWithWindow:win];
     if (!self) return nil;

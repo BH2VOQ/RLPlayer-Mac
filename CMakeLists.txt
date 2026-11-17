@@ -2614,6 +2614,14 @@ if(APPLE)
   target_link_libraries(test_native_volume_contract PRIVATE "-framework AppKit" "-framework QuartzCore" "-framework CoreImage")
   add_test(NAME native_volume_contract COMMAND test_native_volume_contract)
   set_tests_properties(native_volume_contract PROPERTIES TIMEOUT 120)
+
+  # 2026-11-17：窗口 autosave frame 超出屏幕时，聆听室会被屏幕边缘裁掉。
+  add_executable(test_native_window_frame tests/test_native_window_frame.mm)
+  target_compile_options(test_native_window_frame PRIVATE -fobjc-arc)
+  target_include_directories(test_native_window_frame PRIVATE src tools tools/native_ui)
+  target_link_libraries(test_native_window_frame PRIVATE "-framework AppKit")
+  add_test(NAME native_window_frame COMMAND test_native_window_frame)
+  set_tests_properties(native_window_frame PROPERTIES TIMEOUT 30)
 endif()
 
 if(APPLE)

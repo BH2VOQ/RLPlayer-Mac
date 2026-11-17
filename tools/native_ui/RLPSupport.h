@@ -135,6 +135,22 @@ void RLPPostJSON(NSString *path, NSString * _Nullable body);
 /// 播放页与底栏两个静音键必须共用同一份记忆值，否则「在播放页静音、到底栏取消静音」会恢复成错误值。
 /// 返回应下发的 dB；返回 **NAN** 表示上游语义的「什么都不做」（当前已 -120 且无恢复值）。
 double RLPVolumeMuteNextDb(double currentDb);
+/// 把窗口 frame 收敛到当前屏幕可见区：超宽/超高的历史 frame（换屏或拖拽越界）会导致
+/// 内容被屏幕边缘裁掉。纯函数，便于离线判据；minSize 大于可见区时以可见区为准。
+static inline NSRect RLPClampWindowFrameToVisible(NSRect frame, NSRect visible, NSSize minSize) {
+    if (visible.size.width <= 1.0 || visible.size.height <= 1.0) return frame;
+    NSSize min = minSize;
+    if (min.width <= 0 || min.width > visible.size.width) min.width = visible.size.width;
+    if (min.height <= 0 || min.height > visible.size.height) min.height = visible.size.height;
+    frame.size.width = MAX(MIN(frame.size.width, visible.size.width), min.width);
+    frame.size.height = MAX(MIN(frame.size.height, visible.size.height), min.height);
+    if (NSMinX(frame) < NSMinX(visible)) frame.origin.x = NSMinX(visible);
+    if (NSMaxX(frame) > NSMaxX(visible)) frame.origin.x = NSMaxX(visible) - frame.size.width;
+    if (NSMinY(frame) < NSMinY(visible)) frame.origin.y = NSMinY(visible);
+    if (NSMaxY(frame) > NSMaxY(visible)) frame.origin.y = NSMaxY(visible) - frame.size.height;
+    return frame;
+}
+
 /// 当前是否有可恢复的记忆值（判据与 UI 可用；对应 web `volumeRestore !== null`）。
 BOOL RLPVolumeMuteHasRestore(void);
 /// 清空记忆值（上游在「重置/丢弃」路径上会置 null）。
