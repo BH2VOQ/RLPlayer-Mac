@@ -96,6 +96,7 @@ static NSDictionary *gImmediateMeta = nil;
 @interface NSObject (NPControlsContract)
 - (void)updateVolumeUiForDb:(double)db;
 - (void)applyVolumeDb:(double)db;
+- (void)onToggleVolumeMute:(id)sender;
 @end
 
 static int gPass = 0, gFail = 0;
@@ -167,6 +168,13 @@ int main() { @autoreleasepool {
     Ck(Near([RLPPlaybackStatus statusFromJSON:@{@"ok": @YES, @"volDb": @0}].volumeDb, 0, 0.001),
        "V0 explicit zero dB is still valid", @"");
 
+    RLPVolumeMuteReset();
+    Ck(Near(RLPVolumeMuteNextDb(-25.0), -120.0, 0.001), "V4 known mute remembers actual gain", @"");
+    Ck(std::isnan(RLPVolumeMuteNextDb(NAN)) && RLPVolumeMuteHasRestore(),
+       "V4 unknown mute does not consume saved restore value", @"");
+    Ck(Near(RLPVolumeMuteNextDb(-120.0), -25.0, 0.001), "V4 later known mute restores original gain", @"");
+    RLPVolumeMuteReset();
+
     // A failed first write has no confirmed value to broadcast to other views.
     {
         RLPPlaybackBarView *fresh = [[RLPPlaybackBarView alloc] initWithFrame:NSMakeRect(0,0,1120,66)];
@@ -195,6 +203,12 @@ int main() { @autoreleasepool {
         id token = [[NSNotificationCenter defaultCenter] addObserverForName:@"RLPVolumeDidChangeNotification" object:nil queue:nil usingBlock:^(NSNotification *note) {
             if (note.userInfo[@"source"] == controls) ++broadcasts;
         }];
+        RLPVolumeMuteReset();
+        [controls onToggleVolumeMute:nil];
+        Ck(gPendingPosts.count == 0 && !RLPVolumeMuteHasRestore(),
+           "V5 unconfirmed playback-page mute cannot invent restore gain", @"");
+        [gPendingPosts removeAllObjects];
+        RLPVolumeMuteReset();
         [controls applyVolumeDb:-30.0];
         FlushPostAt(0, @{@"ok": @NO, @"error": @"first page write failed"});
         Ck(![[controls valueForKey:@"hasConfirmedVolume"] boolValue] && broadcasts == 0,

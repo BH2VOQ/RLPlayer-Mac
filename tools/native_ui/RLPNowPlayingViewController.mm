@@ -453,7 +453,7 @@ static BOOL RLPNPTextFieldIsEditing(NSTextField *field) {
 /// 当前 <= -120 且无恢复值时直接返回；否则记住当前值并静音 / 恢复先前值。
 - (void)onToggleVolumeMute:(id)sender {
     (void)sender;
-    if (self.rawVolumeLocked) return;
+    if (self.rawVolumeLocked || (!self.hasConfirmedVolume && !self.volumeWritePending)) return;
     // 记忆值改为全局共享（v3.3.11 volumeRestore 唯一），播放页与底栏同一份。
     const double next = RLPVolumeMuteNextDb(self.preciseVolumeDb);
     if (isnan(next)) return;   // 上游：当前 -120 且无恢复值 ⟹ 什么都不做

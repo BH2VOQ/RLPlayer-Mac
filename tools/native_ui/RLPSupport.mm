@@ -856,7 +856,7 @@ NSDictionary<NSString *, id> *RLPParseM3U(NSString *text, NSString *folder) {
 static double gVolumeRestoreDb = NAN;   // NAN = web volumeRestore === null
 
 double RLPVolumeMuteNextDb(double currentDb) {
-    if (!isfinite(currentDb)) currentDb = -120.0;
+    if (!isfinite(currentDb)) return NAN;
     if (currentDb <= -120.0) {
         if (isnan(gVolumeRestoreDb)) return NAN;   // 上游：无恢复值直接 return，不发请求
         const double restored = gVolumeRestoreDb;
