@@ -557,6 +557,25 @@ int main() {
             g_spy.albumsEmpty = NO;
         }
 
+        // Data titles must remain literal even when they collide with a translation key.
+        [wc.sidebar selectKey:@"artists"];
+        RLPRequestOpenArtist(@"设置");
+        Pump(0.05);
+        NSViewController *namedArtist = wc.currentContent;
+        RLPRequestOpenAlbum(@"/Music/ABBA/Arrival");
+        Pump(0.05);
+        RLPSetLanguage(@"en");
+        [[NSNotificationCenter defaultCenter] postNotificationName:RLPLanguageDidChangeNotification object:nil];
+        RLPRequestBack();
+        Pump(0.05);
+        Ck(wc.currentContent == namedArtist && [topTitle.stringValue isEqualToString:@"设置"],
+           "language data title matching UI key remains literal after nested back", topTitle.stringValue);
+        Ck([[(id)namedArtist valueForKey:@"backBtn"] title] &&
+           [[[(id)namedArtist valueForKey:@"backBtn"] title] isEqualToString:RLPTr(@"返回艺术家列表")],
+           "language cached detail in back stack refreshes before returning", @"");
+        RLPSetLanguage(@"zh");
+        [[NSNotificationCenter defaultCenter] postNotificationName:RLPLanguageDidChangeNotification object:nil];
+
         [wc stopAllActivity];
         std::printf("结果：%d passed, %d failed\n", g_pass, g_fail);
         return g_fail == 0 ? 0 : 1;

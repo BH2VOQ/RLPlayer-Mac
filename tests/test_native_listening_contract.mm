@@ -51,7 +51,10 @@ static NSView *FindById(NSView *root, NSString *ident) {
 @property (nonatomic, strong) NSTextField *styleValue;
 @property (nonatomic, strong) NSTextField *styleSub;
 @property (nonatomic, strong) NSView *styleCard;
+@property (nonatomic, strong) NSTextField *outputValue;
 @property (nonatomic, strong) NSTextField *presetNotes;
+@property (nonatomic, copy, nullable) NSString *localDevice;
+@property (nonatomic, strong, nullable) NSPopover *popover;
 @property (nonatomic, assign) BOOL playing;
 @property (nonatomic, assign) BOOL pausedNow;
 + (NSDictionary<NSString *, NSString *> *)playModeFeedbackForNotes:(NSArray * _Nullable)notes
@@ -59,7 +62,24 @@ static NSView *FindById(NSView *root, NSString *ident) {
 - (void)syncPlayAndStyleCards;
 - (void)onPickStyle:(NSButton *)sender;
 - (void)onPickPlayMode:(NSButton *)sender;
+- (void)onOpenOutput:(id)sender;
+- (void)onPickBackend:(NSButton *)sender;
+- (void)onApplyUpnpOutput:(id)sender;
+- (void)applyCastDevicesPayload:(NSDictionary * _Nullable)json;
 - (void)reloadSettings;
+@end
+
+// Keep output selection tests offline: discovery is explicitly stubbed.
+@interface RLPOfflineOutputController : RLPQuickStartViewController
+@end
+@implementation RLPOfflineOutputController
+- (void)discoverCastDevicesForce:(BOOL)force { (void)force; }
+- (void)showPopoverFrom:(NSView *)anchor withCard:(NSView *)card width:(CGFloat)width minH:(CGFloat)height {
+    (void)anchor;
+    self.popover = [[NSPopover alloc] init];
+    self.popover.contentViewController = RLPCardController(card, width, height);
+    [self.popover.contentViewController.view layoutSubtreeIfNeeded];
+}
 @end
 
 int main() {
@@ -362,6 +382,83 @@ int main() {
             NSString *txtOk = outVal.stringValue ?: @"";
             CK(hasApply && [txtOk containsString:@"· Hog"] && ![txtOk containsString:@"已回退"],
                "C8b 快速开始在 hogAcquired=YES 时显示 · Hog", txtOk);
+        }
+
+        // ---------- C9 输出浮层 UPnP 发现/具体设备选择 + 切回本地保留本地设备 ----------
+        {
+            [core jsonWithMethod:@"POST" path:@"/api/settings" body:@"backend=coreaudio&device=USB-DAC-TEST&volume=-120"];
+            RLPQuickStartViewController *ovc = [[RLPOfflineOutputController alloc] init];
+            (void)ovc.view;
+            [ovc reloadSettings];
+            for (int spin = 0; spin < 30; ++spin) [[NSRunLoop currentRunLoop] runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.01]];
+            CK([ovc.localDevice isEqualToString:@"USB-DAC-TEST"],
+               "C9a reloadSettings 记忆当前本地设备 USB-DAC-TEST", ovc.localDevice ?: @"nil");
+
+            NSTextField *sub = (NSTextField *)FindById(ovc.view, @"room.subtitle");
+            CK(sub != nil && [sub.stringValue rangeOfString:@"微调每一组声音"].location == NSNotFound,
+               "C9b 聆听室副标题不是工作台文案", sub.stringValue ?: @"nil");
+
+            [ovc onOpenOutput:nil];
+            NSView *popView = ovc.popover.contentViewController.view;
+            [popView layoutSubtreeIfNeeded];
+            NSPopUpButton *upnpPop = (NSPopUpButton *)FindById(popView, @"output.upnpDevice");
+            NSButton *upnpScan = (NSButton *)FindById(popView, @"output.upnpScan");
+            NSButton *upnpApply = (NSButton *)FindById(popView, @"output.upnpApply");
+            NSButton *hogChk = (NSButton *)FindById(popView, @"output.hogexcl");
+            NSButton *caBtn = (NSButton *)FindById(popView, @"coreaudio");
+            NSButton *upnpBtn = (NSButton *)FindById(popView, @"upnp");
+            CK(popView != nil && upnpPop && upnpScan && upnpApply && hogChk && caBtn && upnpBtn,
+               "C9c 输出浮层包含后端选项、UPnP 设备下拉、扫描/应用按钮与 Hog 开关（单层浮层不删功能）", @"");
+
+            // 检查浮层内交互控件无几何重叠
+            NSArray<NSView *> *popControls = @[caBtn ?: [NSView new], upnpBtn ?: [NSView new],
+                                               upnpPop ?: [NSView new], upnpScan ?: [NSView new],
+                                               upnpApply ?: [NSView new], hogChk ?: [NSView new]];
+            BOOL popOverlap = NO;
+            for (NSUInteger i = 0; i < popControls.count; ++i) {
+                NSRect r1 = [popControls[i] convertRect:popControls[i].bounds toView:popView];
+                for (NSUInteger j = i + 1; j < popControls.count; ++j) {
+                    NSRect r2 = [popControls[j] convertRect:popControls[j].bounds toView:popView];
+                    NSRect inter = NSIntersectionRect(r1, r2);
+                    if (inter.size.width > 1.0 && inter.size.height > 1.0) popOverlap = YES;
+                }
+            }
+            CK(!popOverlap, "C9d 输出浮层控件无几何重叠", @"");
+
+            // 模拟点击「投放到局域网设备」并注入 /api/cast/devices 真实格式载荷（不触发真实网络扫描）
+            [ovc onPickBackend:upnpBtn];
+            [ovc applyCastDevicesPayload:@{
+                @"ok": @YES,
+                @"devices": @[
+                    @{@"friendlyName": @"Living Room", @"model": @"Marantz", @"host": @"192.168.1.50",
+                      @"location": @"http://192.168.1.50:49152/desc.xml", @"kind": @"upnp"},
+                ]
+            }];
+            CK(upnpPop.enabled && upnpApply.enabled &&
+               [[upnpPop.selectedItem representedObject] isEqualToString:@"http://192.168.1.50:49152/desc.xml"],
+               "C9e 发现列表填充具体 UPnP 设备并选中 location", [upnpPop.selectedItem representedObject] ?: @"nil");
+
+            [ovc onApplyUpnpOutput:upnpApply];
+            for (int spin = 0; spin < 40; ++spin) [[NSRunLoop currentRunLoop] runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.02]];
+            NSDictionary *kvUpnp = [core jsonWithMethod:@"GET" path:@"/api/settings" body:nil][@"kv"];
+            CK([kvUpnp[@"backend"] isEqualToString:@"upnp"] &&
+               [kvUpnp[@"upnpdev"] isEqualToString:@"http://192.168.1.50:49152/desc.xml"] &&
+               [ovc.outputValue.stringValue containsString:@"Living Room"],
+               "C9f 应用后 /api/settings 落盘 backend=upnp 与 upnpdev，摘要显示设备名",
+               [NSString stringWithFormat:@"bk=%@ upnpdev=%@ out=%@",
+                kvUpnp[@"backend"] ?: @"nil", kvUpnp[@"upnpdev"] ?: @"nil", ovc.outputValue.stringValue ?: @"nil"]);
+
+            // 切回本地（coreaudio-shared）：必须保留先前的本地设备 USB-DAC-TEST
+            NSButton *sharedBtn = (NSButton *)FindById(popView, @"coreaudio-shared");
+            [ovc onPickBackend:sharedBtn];
+            for (int spin = 0; spin < 40; ++spin) [[NSRunLoop currentRunLoop] runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.02]];
+            NSDictionary *kvBack = [core jsonWithMethod:@"GET" path:@"/api/settings" body:nil][@"kv"];
+            CK([kvBack[@"backend"] isEqualToString:@"coreaudio-shared"] &&
+               [kvBack[@"device"] isEqualToString:@"USB-DAC-TEST"],
+               "C9g 切回本地后保留先前本地设备 USB-DAC-TEST",
+               [NSString stringWithFormat:@"bk=%@ dev=%@", kvBack[@"backend"] ?: @"nil", kvBack[@"device"] ?: @"nil"]);
+
+            [core jsonWithMethod:@"POST" path:@"/api/settings" body:@"backend=null&volume=-120"];
         }
 
         [core shutdown];

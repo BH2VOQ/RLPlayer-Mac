@@ -21,6 +21,8 @@
 
 @interface RLPQuickStartViewController ()
 @property (nonatomic, strong) NSStackView *stack;
+@property (nonatomic, strong) NSTextField *headerTitle;
+@property (nonatomic, strong) NSTextField *headerSubtitle;
 @property (nonatomic, strong) NSButton *foldersButton;
 // 四张卡容器与响应式约束
 @property (nonatomic, strong) NSView *cardsContainer;
@@ -59,14 +61,29 @@
 @property (nonatomic, strong) NSTextField *npSub;
 @property (nonatomic, strong) NSTextField *npState;
 @property (nonatomic, strong) NSButton *npToggle;
+@property (nonatomic, strong) NSButton *npOpenButton;
+@property (nonatomic, strong) NSButton *queueAllButton;
+@property (nonatomic, strong) NSButton *openLibButton;
+@property (nonatomic, strong) NSButton *moreButton;
+@property (nonatomic, strong) NSButton *devRefreshButton;
+@property (nonatomic, strong) NSButton *outCardButton;
+@property (nonatomic, strong) NSButton *playCardButton;
+@property (nonatomic, strong) NSButton *styleCardButton;
+@property (nonatomic, weak, nullable) NSTextField *queueEmptyLabel;
+@property (nonatomic, weak, nullable) NSTextField *albumEmptyLabel;
+@property (nonatomic, copy, nullable) NSString *defaultDeviceName;
+@property (nonatomic, assign) BOOL hasLoadedLibrary;
+@property (nonatomic, assign) BOOL hasLoadedStatus;
 @property (nonatomic, strong) NSStackView *queueList;
 @property (nonatomic, strong) NSStackView *albumRow;
 @property (nonatomic, strong) NSButton *libButton;
 @property (nonatomic, strong) NSTextField *libDesc;
 // 数据缓存（全部来自后端）
 @property (nonatomic, copy) NSArray<NSDictionary *> *devices;
+@property (nonatomic, copy) NSArray<NSDictionary<NSString *, NSString *> *> *castDevices;
 @property (nonatomic, copy) NSArray<NSDictionary *> *filters;
 @property (nonatomic, copy) NSDictionary *settings;
+@property (nonatomic, copy, nullable) NSString *localDevice;
 @property (nonatomic, copy, nullable) NSDictionary *presetCapsJSON;
 @property (nonatomic, copy, nullable) NSString *presetCapsKey;
 @property (nonatomic, copy) NSString *currentPath;
@@ -76,6 +93,15 @@
 /// `playing` 已经是 `st.playing && !st.paused`，暂停态必须单独记一个，否则暂停时会被当成"可以应用"。
 @property (nonatomic, assign) BOOL pausedNow;
 @property (nonatomic, strong) NSPopover *popover;
+@property (nonatomic, copy) NSString *outputDraftBackend;
+@property (nonatomic, copy) NSString *outputDraftUpnpDev;
+@property (nonatomic, weak, nullable) NSPopUpButton *outputUpnpPopup;
+@property (nonatomic, weak, nullable) NSButton *outputUpnpScanButton;
+@property (nonatomic, weak, nullable) NSButton *outputUpnpApplyButton;
+@property (nonatomic, weak, nullable) NSTextField *outputUpnpStatusLabel;
+@property (nonatomic, weak, nullable) NSButton *outputHogCheck;
+@property (nonatomic, copy) NSArray<NSButton *> *outputBackendButtons;
+@property (nonatomic, assign) NSUInteger castDiscoverSeq;
 @property (nonatomic, assign) NSUInteger coverSeq;
 @property (nonatomic, strong) NSTimer *poll;
 @property (nonatomic, assign) NSUInteger statusEpoch;
@@ -171,9 +197,12 @@
     NSTextField *title = RLPLabel(RLPTr(@"聆听室"), t.display, t.hero);
     title.translatesAutoresizingMaskIntoConstraints = NO;
     title.tag = 0;   // 0=正文（applyTheme 里按 t.text 重刷）
-    NSTextField *subtitle = RLPLabel(RLPTr(@"微调每一组声音，随时对比同一片段"), t.body, t.mut);
+    self.headerTitle = title;
+    NSTextField *subtitle = RLPLabel(RLPTr(@"安静听歌，常用设置就在卡片里"), t.body, t.mut);
+    subtitle.identifier = @"room.subtitle";
     subtitle.translatesAutoresizingMaskIntoConstraints = NO;
     subtitle.tag = 1;   // 1=次要（t.mut）
+    self.headerSubtitle = subtitle;
     // 登记到 dynamicLabels：切主题时这两个常驻标签也要跟着重刷（A6 判据会抓漏刷）。
     [self.dynamicLabels addObject:title];
     [self.dynamicLabels addObject:subtitle];
@@ -237,6 +266,7 @@
     [self.devicePopup addItemWithTitle:RLPTr(@"系统默认")];
     NSButton *devRefresh = RLPSymbolButton(@"arrow.clockwise", RLPTr(@"重新检测设备"), self, @selector(onReloadDevices:));
     devRefresh.translatesAutoresizingMaskIntoConstraints = NO;
+    self.devRefreshButton = devRefresh;
     [self.deviceCard addSubview:d1];
     [self.deviceCard addSubview:self.devicePopup];
     [self.deviceCard addSubview:devRefresh];
@@ -252,6 +282,7 @@
     outBtn.bordered = NO;
     outBtn.translatesAutoresizingMaskIntoConstraints = NO;
     outBtn.toolTip = RLPTr(@"点击选择输出方式");
+    self.outCardButton = outBtn;
     [self.outputCard addSubview:d2];
     [self.outputCard addSubview:self.outputValue];
     [self.outputCard addSubview:outBtn];
@@ -267,6 +298,7 @@
     playBtn.bordered = NO;
     playBtn.translatesAutoresizingMaskIntoConstraints = NO;
     playBtn.toolTip = RLPTr(@"点击选择播放方式");
+    self.playCardButton = playBtn;
     [self.playCard addSubview:d3];
     [self.playCard addSubview:self.playValue];
     [self.playCard addSubview:playBtn];
@@ -284,6 +316,7 @@
     styleBtn.bordered = NO;
     styleBtn.translatesAutoresizingMaskIntoConstraints = NO;
     styleBtn.toolTip = RLPTr(@"点击选择听感风格");
+    self.styleCardButton = styleBtn;
     [self.styleCard addSubview:d4];
     [self.styleCard addSubview:self.styleValue];
     [self.styleCard addSubview:self.styleSub];
@@ -377,6 +410,7 @@
     NSButton *npOpen = [NSButton buttonWithTitle:RLPTr(@"打开曲目详情") target:self action:@selector(onOpenNowPlaying:)];
     npOpen.bezelStyle = NSBezelStyleRounded;
     npOpen.translatesAutoresizingMaskIntoConstraints = NO;
+    self.npOpenButton = npOpen;
     for (NSView *v in @[self.npCover, self.npState, self.npTitle, self.npSub, self.npToggle, npOpen])
         [np addSubview:v];
 
@@ -387,6 +421,7 @@
     NSButton *qAll = [NSButton buttonWithTitle:RLPTr(@"查看全部") target:self action:@selector(onOpenQueue:)];
     qAll.bezelStyle = NSBezelStyleRounded;
     qAll.translatesAutoresizingMaskIntoConstraints = NO;
+    self.queueAllButton = qAll;
     self.queueList = [[NSStackView alloc] init];
     self.queueList.orientation = NSUserInterfaceLayoutOrientationVertical;
     self.queueList.alignment = NSLayoutAttributeLeading;
@@ -572,6 +607,7 @@
     NSButton *openLib = [NSButton buttonWithTitle:RLPTr(@"打开音乐库") target:self action:@selector(onOpenAlbums:)];
     openLib.bezelStyle = NSBezelStyleRounded;
     openLib.translatesAutoresizingMaskIntoConstraints = NO;
+    self.openLibButton = openLib;
     [head addSubview:at];
     [head addSubview:openLib];
     [self.stack addArrangedSubview:head];
@@ -611,6 +647,7 @@
     NSButton *more = [NSButton buttonWithTitle:RLPTr(@"更多") target:self action:@selector(onOpenMore:)];
     more.bezelStyle = NSBezelStyleRounded;
     more.translatesAutoresizingMaskIntoConstraints = NO;
+    self.moreButton = more;
     for (NSView *v in @[self.libDesc, self.libButton, more]) [c addSubview:v];
     [self.stack addArrangedSubview:c];
     [NSLayoutConstraint activateConstraints:@[
@@ -674,8 +711,14 @@
 #pragma mark 输出弹层
 
 - (void)onOpenOutput:(id)sender {
-    NSString *bk = [self.settings[@"backend"] isKindOfClass:[NSString class]] ? self.settings[@"backend"] : @"coreaudio";
+    (void)sender;
+    RLPTheme *t = [RLPTheme current];
+    NSString *bk = [self str:@"backend" def:@"coreaudio"];
+    NSString *upnpDev = [self str:@"upnpdev" def:@""];
+    self.outputDraftBackend = bk;
+    self.outputDraftUpnpDev = upnpDev;
     const BOOL hog = [self str:@"hogexcl" def:@"1"].boolValue;
+
     NSStackView *s = [self popStackWithTitle:RLPTr(@"输出方式")
         note:RLPTr(@"独占播放音质最稳；共享播放和其它 App 一起出声。")];
     NSArray *opts = @[
@@ -683,32 +726,225 @@
         @[@"coreaudio-shared", RLPTr(@"本机 · 共享播放"), RLPTr(@"和其它 App 一起出声，兼容性最好")],
         @[@"upnp", RLPTr(@"投放到局域网设备"), RLPTr(@"投到支持 UPnP/DLNA 的播放器")],
     ];
+    NSMutableArray<NSButton *> *bkBtns = [NSMutableArray array];
     for (NSArray *o in opts) {
         NSButton *b = [self popRowWithTitle:o[1] note:o[2] on:[bk isEqualToString:o[0]]
                                      action:@selector(onPickBackend:) ident:o[0]];
         [s addArrangedSubview:b];
         [[b.widthAnchor constraintEqualToConstant:330] setActive:YES];
-        NSTextField *sub = RLPLabel(o[2], [RLPTheme current].small, [RLPTheme current].mut);
+        [bkBtns addObject:b];
+        NSTextField *sub = RLPLabel(o[2], t.small, t.mut);
+        sub.maximumNumberOfLines = 0;
+        sub.lineBreakMode = NSLineBreakByWordWrapping;
+        sub.preferredMaxLayoutWidth = 330;
         [s addArrangedSubview:sub];
         [[sub.widthAnchor constraintEqualToConstant:330] setActive:YES];
     }
+    self.outputBackendButtons = bkBtns;
+
+    // ---- UPnP 发现与具体设备选择（同一浮层内完成，不嵌套浮层）----
+    NSTextField *upnpTitle = RLPLabel(RLPTr(@"局域网投放设备"), t.small, t.mut);
+    [s addArrangedSubview:upnpTitle];
+    [[upnpTitle.widthAnchor constraintEqualToConstant:330] setActive:YES];
+
+    NSPopUpButton *upnpPopup = [[NSPopUpButton alloc] initWithFrame:NSZeroRect pullsDown:NO];
+    upnpPopup.identifier = @"output.upnpDevice";
+    upnpPopup.font = t.body;
+    upnpPopup.target = self;
+    upnpPopup.action = @selector(onUpnpDevicePopupChanged:);
+    upnpPopup.translatesAutoresizingMaskIntoConstraints = NO;
+    [s addArrangedSubview:upnpPopup];
+    [[upnpPopup.widthAnchor constraintEqualToConstant:330] setActive:YES];
+    self.outputUpnpPopup = upnpPopup;
+
+    NSStackView *upnpActions = [[NSStackView alloc] init];
+    upnpActions.orientation = NSUserInterfaceLayoutOrientationHorizontal;
+    upnpActions.spacing = 8;
+    upnpActions.translatesAutoresizingMaskIntoConstraints = NO;
+    NSButton *scanBtn = [NSButton buttonWithTitle:RLPTr(@"发现网络播放器") target:self action:@selector(onScanUpnpDevices:)];
+    scanBtn.identifier = @"output.upnpScan";
+    scanBtn.bezelStyle = NSBezelStyleRounded;
+    NSButton *applyBtn = [NSButton buttonWithTitle:RLPTr(@"应用投放设备") target:self action:@selector(onApplyUpnpOutput:)];
+    applyBtn.identifier = @"output.upnpApply";
+    applyBtn.bezelStyle = NSBezelStyleRounded;
+    [upnpActions addArrangedSubview:scanBtn];
+    [upnpActions addArrangedSubview:applyBtn];
+    [s addArrangedSubview:upnpActions];
+    self.outputUpnpScanButton = scanBtn;
+    self.outputUpnpApplyButton = applyBtn;
+
+    NSTextField *upnpStatus = RLPLabel(@"", t.small, t.mut);
+    upnpStatus.identifier = @"output.upnpStatus";
+    upnpStatus.maximumNumberOfLines = 0;
+    upnpStatus.lineBreakMode = NSLineBreakByWordWrapping;
+    upnpStatus.preferredMaxLayoutWidth = 330;
+    [s addArrangedSubview:upnpStatus];
+    [[upnpStatus.widthAnchor constraintEqualToConstant:330] setActive:YES];
+    self.outputUpnpStatusLabel = upnpStatus;
+
     // 严格独占：副作用必须如实写清（macOS Hog 机制限制，实测确认）
     NSButton *hogBtn = [NSButton checkboxWithTitle:RLPTr(@"严格独占（抢 Hog Mode）") target:self action:@selector(onToggleHog:)];
+    hogBtn.identifier = @"output.hogexcl";
     hogBtn.state = hog ? NSControlStateValueOn : NSControlStateValueOff;
     hogBtn.translatesAutoresizingMaskIntoConstraints = NO;
     [s addArrangedSubview:hogBtn];
+    self.outputHogCheck = hogBtn;
+
     NSTextField *hogNote = RLPLabel(RLPTr(@"开启后系统音量条与音量键会失效，只能用本程序的音量条；它不能阻止其它 App 播放。"),
-        [RLPTheme current].small, [RLPTheme current].warn);
+        t.small, t.warn);
     hogNote.maximumNumberOfLines = 0;
     hogNote.lineBreakMode = NSLineBreakByWordWrapping;
     hogNote.preferredMaxLayoutWidth = 330;
     [s addArrangedSubview:hogNote];
     [[hogNote.widthAnchor constraintEqualToConstant:330] setActive:YES];
-    [self showPopoverFrom:self.outputCard withCard:s width:360 minH:280];
+
+    [self syncOutputPopoverState];
+    [self showPopoverFrom:self.outputCard withCard:s width:360 minH:370];
+    if ([bk isEqualToString:@"upnp"] && [RLPCoreClient shared].started && !self.castDevices.count) {
+        [self discoverCastDevicesForce:NO];
+    }
+}
+
+- (void)syncOutputPopoverState {
+    RLPTheme *t = [RLPTheme current];
+    NSString *bk = self.outputDraftBackend.length ? self.outputDraftBackend : [self str:@"backend" def:@"coreaudio"];
+    for (NSButton *b in self.outputBackendButtons) {
+        const BOOL on = [b.identifier isEqualToString:bk];
+        b.font = [NSFont systemFontOfSize:13 weight:on ? NSFontWeightSemibold : NSFontWeightRegular];
+        b.contentTintColor = on ? t.accentText : t.text;
+    }
+    if (self.outputHogCheck) {
+        self.outputHogCheck.enabled = [bk isEqualToString:@"coreaudio"];
+    }
+    NSPopUpButton *pop = self.outputUpnpPopup;
+    if (pop) {
+        [pop removeAllItems];
+        NSString *wanted = self.outputDraftUpnpDev ?: @"";
+        NSInteger selectIdx = -1;
+        for (NSUInteger i = 0; i < self.castDevices.count; ++i) {
+            NSDictionary<NSString *, NSString *> *d = self.castDevices[i];
+            NSString *name = d[@"name"].length ? d[@"name"] : RLPTr(@"网络播放器");
+            NSString *devId = d[@"id"] ?: @"";
+            [pop addItemWithTitle:name];
+            [[pop lastItem] setRepresentedObject:devId];
+            if (wanted.length && [devId isEqualToString:wanted]) {
+                selectIdx = (NSInteger)i;
+            }
+        }
+        if (selectIdx < 0 && wanted.length) {
+            [pop addItemWithTitle:wanted];
+            [[pop lastItem] setRepresentedObject:wanted];
+            selectIdx = pop.numberOfItems - 1;
+        }
+        if (pop.numberOfItems == 0) {
+            [pop addItemWithTitle:RLPTr(@"（尚未发现设备）")];
+            [[pop lastItem] setRepresentedObject:@""];
+            pop.enabled = NO;
+        } else {
+            pop.enabled = YES;
+            if (selectIdx < 0) selectIdx = 0;
+            [pop selectItemAtIndex:selectIdx];
+            NSString *picked = [pop.selectedItem.representedObject isKindOfClass:[NSString class]]
+                ? pop.selectedItem.representedObject : @"";
+            if (!self.outputDraftUpnpDev.length && picked.length) {
+                self.outputDraftUpnpDev = picked;
+            }
+        }
+    }
+    if (self.outputUpnpApplyButton) {
+        NSString *picked = [self.outputUpnpPopup.selectedItem.representedObject isKindOfClass:[NSString class]]
+            ? self.outputUpnpPopup.selectedItem.representedObject : @"";
+        self.outputUpnpApplyButton.enabled = (picked.length > 0);
+    }
+}
+
+- (void)applyCastDevicesPayload:(NSDictionary * _Nullable)json {
+    RLPTheme *t = [RLPTheme current];
+    if (!json || ![json[@"ok"] boolValue]) {
+        NSString *err = [json[@"error"] isKindOfClass:[NSString class]] && [json[@"error"] length]
+            ? json[@"error"] : RLPTr(@"设备发现失败（/api/cast/devices 无响应）");
+        if (self.outputUpnpStatusLabel) {
+            self.outputUpnpStatusLabel.stringValue = err;
+            self.outputUpnpStatusLabel.textColor = t.warn;
+        }
+        [self syncOutputPopoverState];
+        return;
+    }
+    self.castDevices = RLPNormalizeCastDevices(json[@"devices"]);
+    if (!self.outputDraftUpnpDev.length && self.castDevices.count) {
+        self.outputDraftUpnpDev = self.castDevices.firstObject[@"id"] ?: @"";
+    }
+    if (self.outputUpnpStatusLabel) {
+        self.outputUpnpStatusLabel.textColor = t.mut;
+        if (self.castDevices.count) {
+            self.outputUpnpStatusLabel.stringValue = [NSString stringWithFormat:RLPTr(@"共发现 %lu 台设备"),
+                (unsigned long)self.castDevices.count];
+        } else {
+            NSString *hint = [json[@"hint"] isKindOfClass:[NSString class]] ? json[@"hint"] : @"";
+            self.outputUpnpStatusLabel.stringValue = hint.length ? hint
+                : RLPTr(@"暂未发现网络播放器，请确认它已开启并连接同一网络。");
+        }
+    }
+    [self syncOutputPopoverState];
+    [self syncOutputSummary];
+}
+
+- (void)discoverCastDevicesForce:(BOOL)force {
+    if (![RLPCoreClient shared].started) return;
+    const NSUInteger seq = ++self.castDiscoverSeq;
+    RLPTheme *t = [RLPTheme current];
+    if (self.outputUpnpScanButton) self.outputUpnpScanButton.enabled = NO;
+    if (self.outputUpnpStatusLabel) {
+        self.outputUpnpStatusLabel.textColor = t.mut;
+        self.outputUpnpStatusLabel.stringValue = RLPTr(@"正在发现网络播放器…");
+    }
+    NSString *url = force ? @"/api/cast/devices?scan=1" : @"/api/cast/devices";
+    __weak __typeof__(self) weakSelf = self;
+    [[RLPCoreClient shared] getJSON:url completion:^(NSDictionary * _Nullable json) {
+        __typeof__(self) self_ = weakSelf;
+        if (!self_ || seq != self_.castDiscoverSeq) return;
+        if (self_.outputUpnpScanButton) self_.outputUpnpScanButton.enabled = YES;
+        [self_ applyCastDevicesPayload:json];
+    }];
+}
+
+- (void)onScanUpnpDevices:(id)sender {
+    (void)sender;
+    [self discoverCastDevicesForce:YES];
+}
+
+- (void)onUpnpDevicePopupChanged:(NSPopUpButton *)sender {
+    NSString *devId = [sender.selectedItem.representedObject isKindOfClass:[NSString class]]
+        ? sender.selectedItem.representedObject : @"";
+    self.outputDraftUpnpDev = devId;
+    [self syncOutputPopoverState];
+}
+
+- (void)onApplyUpnpOutput:(id)sender {
+    (void)sender;
+    NSString *devId = self.outputDraftUpnpDev.length ? self.outputDraftUpnpDev
+        : ([self.outputUpnpPopup.selectedItem.representedObject isKindOfClass:[NSString class]]
+           ? self.outputUpnpPopup.selectedItem.representedObject : @"");
+    if (!devId.length) {
+        RLPToast(RLPTr(@"请先选择网络播放器"));
+        return;
+    }
+    [self postSettings:RLPOutputSettingsPatchForBackend(@"upnp", devId, self.localDevice)];
+    [self.popover close];
 }
 
 - (void)onPickBackend:(NSButton *)sender {
-    [self postSettings:@{@"backend": sender.identifier}];
+    NSString *bk = sender.identifier;
+    if (!bk.length) return;
+    if ([bk isEqualToString:@"upnp"]) {
+        self.outputDraftBackend = @"upnp";
+        [self syncOutputPopoverState];
+        if (!self.castDevices.count && [RLPCoreClient shared].started) {
+            [self discoverCastDevicesForce:NO];
+        }
+        return;
+    }
+    [self postSettings:RLPOutputSettingsPatchForBackend(bk, nil, self.localDevice)];
     [self.popover close];
 }
 - (void)onToggleHog:(NSButton *)sender {
@@ -1129,6 +1365,7 @@
         NSDictionary *d = self.devices[idx - 1];
         devId = [d[@"id"] isKindOfClass:[NSString class]] ? d[@"id"] : @"";
     }
+    self.localDevice = devId;
     [self postSettings:@{@"device": devId}];
 }
 
@@ -1251,13 +1488,17 @@
             if ([d[@"default"] boolValue]) defName = n;
         }
         if (defName.length) [[self_.devicePopup itemAtIndex:0] setTitle:[NSString stringWithFormat:@"%@（%@）", RLPTr(@"系统默认"), defName]];
+        self_.defaultDeviceName = defName;
         [self_ syncDeviceSelection];
     }];
 }
 
 - (void)syncDeviceSelection {
-    NSString *cur = [self str:@"device" def:@""];
-    if (!cur.length) { [self.devicePopup selectItemAtIndex:0]; return; }
+    NSString *bk = [self str:@"backend" def:@"coreaudio"];
+    NSString *cur = ([bk isEqualToString:@"upnp"] || [bk isEqualToString:@"null"])
+        ? (self.localDevice ?: @"")
+        : [self str:@"device" def:@""];
+    if (!cur.length || [cur isEqualToString:@"null"]) { [self.devicePopup selectItemAtIndex:0]; return; }
     for (NSInteger i = 0; i < (NSInteger)self.devices.count; ++i) {
         if ([self.devices[i][@"id"] isEqualToString:cur]) { [self.devicePopup selectItemAtIndex:i + 1]; return; }
     }
@@ -1273,6 +1514,7 @@
         // ⚠️ /api/settings 的值在 **kv** 子对象里（与设置页同一口径）。
         // 直接读顶层会全部取不到 ⟹ 静默回落默认值，界面显示与真实设置脱节。
         self_.settings = [json[@"kv"] isKindOfClass:[NSDictionary class]] ? json[@"kv"] : @{};
+        self_.localDevice = RLPRememberedLocalDevice(self_.settings, self_.localDevice);
         [self_ syncDeviceSelection];
         // 输出摘要（人话）
         NSString *bk = [self_ str:@"backend" def:@"coreaudio"];
@@ -1289,8 +1531,19 @@
 
 - (void)syncOutputSummary {
     NSString *bk = [self str:@"backend" def:@"coreaudio"];
+    if ([bk isEqualToString:@"upnp"]) {
+        NSString *upnpDev = [self str:@"upnpdev" def:@""];
+        NSString *devLabel = nil;
+        for (NSDictionary<NSString *, NSString *> *d in self.castDevices) {
+            if ([d[@"id"] isEqualToString:upnpDev]) { devLabel = d[@"name"]; break; }
+        }
+        if (!devLabel.length && upnpDev.length) devLabel = upnpDev;
+        self.outputValue.stringValue = devLabel.length
+            ? [NSString stringWithFormat:@"%@ · %@", RLPTr(@"局域网投放"), devLabel]
+            : RLPTr(@"局域网投放");
+        return;
+    }
     NSString *bkName = [bk isEqualToString:@"coreaudio-shared"] ? RLPTr(@"共享播放")
-                     : [bk isEqualToString:@"upnp"] ? RLPTr(@"局域网投放")
                      : [bk isEqualToString:@"null"] ? RLPTr(@"不出声（仅分析）") : RLPTr(@"独占播放");
     const BOOL hog = [self str:@"hogexcl" def:@"1"].boolValue;
     const BOOL hogFallback = (self.lastFallbackWhy.length > 0) ||
@@ -1336,6 +1589,7 @@
         __typeof__(self) self_ = weakSelf;
         if (!self_) return;
         NSArray *roots = [json[@"roots"] isKindOfClass:[NSArray class]] ? json[@"roots"] : @[];
+        self_.hasLoadedLibrary = YES;
         self_.hasRoots = roots.count > 0;
         self_.libDesc.stringValue = self_.hasRoots
             ? RLPTr(@"音乐目录已就绪 · 可重新扫描更新专辑与封面")
@@ -1352,6 +1606,7 @@
     [self syncOutputSummary];
     RLPPlaybackStatus *st = [RLPPlaybackStatus statusFromJSON:json];
     if (!st) return;
+    self.hasLoadedStatus = YES;
     self.playing = st.playing && !st.paused;
     self.pausedNow = st.paused;
     NSString *path = st.currentPath ?: @"";
@@ -1439,9 +1694,11 @@
         for (NSView *v in [self_.queueList.arrangedSubviews copy]) [self_.queueList removeArrangedSubview:v], [v removeFromSuperview];
         if (!items.count) {
             NSTextField *e = [self_ trackedLabel:RLPTr(@"队列是空的") font:t.small role:1];
+            self_.queueEmptyLabel = e;
             [self_.queueList addArrangedSubview:e];
             return;
         }
+        self_.queueEmptyLabel = nil;
         NSInteger n = 0;
         for (id it in items) {
             if (n >= 4) break;
@@ -1527,7 +1784,10 @@
         }
         if (!n) {
             NSTextField *e = [self_ trackedLabel:RLPTr(@"还没有专辑 · 先添加音乐目录") font:t.small role:1];
+            self_.albumEmptyLabel = e;
             [self_.albumRow addArrangedSubview:e];
+        } else {
+            self_.albumEmptyLabel = nil;
         }
     }];
 }
@@ -1714,6 +1974,74 @@
     self.presetDsdReady = [g[@"dsdReady"] boolValue];
     NSDictionary *dev = [json[@"device"] isKindOfClass:[NSDictionary class]] ? json[@"device"] : nil;
     self.presetCapsDevice = [dev[@"name"] isKindOfClass:[NSString class]] ? dev[@"name"] : nil;
+}
+
+- (void)applyLanguage {
+    self.pageTitle = RLPTr(@"聆听室");
+    if (!self.isViewLoaded) return;
+    if (self.popover.isShown) [self.popover close];
+
+    self.headerTitle.stringValue = RLPTr(@"聆听室");
+    self.headerSubtitle.stringValue = RLPTr(@"安静听歌，常用设置就在卡片里");
+    self.foldersButton.title = RLPTr(@"音乐文件夹");
+
+    self.deviceCaption.stringValue = RLPTr(@"当前设备");
+    self.devRefreshButton.toolTip = RLPTr(@"重新检测设备");
+    if (self.devicePopup.numberOfItems > 0) {
+        NSString *defTitle = self.defaultDeviceName.length
+            ? [NSString stringWithFormat:@"%@（%@）", RLPTr(@"系统默认"), self.defaultDeviceName]
+            : RLPTr(@"系统默认");
+        [self.devicePopup itemAtIndex:0].title = defTitle;
+    }
+
+    self.outputCaption.stringValue = RLPTr(@"输出");
+    self.outCardButton.toolTip = RLPTr(@"点击选择输出方式");
+    self.playCaption.stringValue = RLPTr(@"播放");
+    self.playCardButton.toolTip = RLPTr(@"点击选择播放方式");
+    self.styleCaption.stringValue = RLPTr(@"听音风格");
+    self.styleCardButton.toolTip = RLPTr(@"点击选择听感风格");
+
+    if (self.settings) {
+        [self syncOutputSummary];
+        [self syncPlayAndStyleCards];
+    } else {
+        self.outputValue.stringValue = RLPTr(@"读取中…");
+        self.playValue.stringValue = RLPTr(@"原音直通");
+        self.styleValue.stringValue = RLPTr(@"均衡自然");
+    }
+
+    if (!self.currentPath.length) {
+        self.npState.stringValue = RLPTr(@"未播放");
+        self.npTitle.stringValue = RLPTr(@"还没有在播放的音乐");
+        self.npSub.stringValue = RLPTr(@"从下面的专辑挑一张开始");
+        [self.npToggle setTitle:RLPTr(@"继续播放")];
+    } else {
+        self.npState.stringValue = self.playing ? RLPTr(@"正在播放") : RLPTr(@"已暂停");
+        [self.npToggle setTitle:self.playing ? RLPTr(@"暂停") : RLPTr(@"继续播放")];
+    }
+    self.npOpenButton.title = RLPTr(@"打开曲目详情");
+
+    self.queueCaption.stringValue = RLPTr(@"播放队列");
+    self.queueAllButton.title = RLPTr(@"查看全部");
+    if (self.queueEmptyLabel) {
+        self.queueEmptyLabel.stringValue = RLPTr(@"队列是空的");
+    }
+
+    self.albumCaption.stringValue = RLPTr(@"专辑");
+    self.openLibButton.title = RLPTr(@"打开音乐库");
+    if (self.albumEmptyLabel) {
+        self.albumEmptyLabel.stringValue = RLPTr(@"还没有专辑 · 先添加音乐目录");
+    }
+
+    if (self.hasLoadedLibrary) {
+        self.libDesc.stringValue = self.hasRoots
+            ? RLPTr(@"音乐目录已就绪 · 可重新扫描更新专辑与封面")
+            : RLPTr(@"支持 FLAC · DSD (DSF/DFF) · ALAC · WAV · APE");
+        [self.libButton setTitle:self.hasRoots ? RLPTr(@"重新扫描音乐库") : RLPTr(@"添加音乐目录")];
+    } else {
+        [self.libButton setTitle:RLPTr(@"添加音乐目录")];
+    }
+    self.moreButton.title = RLPTr(@"更多");
 }
 @end
 

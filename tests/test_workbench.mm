@@ -319,9 +319,11 @@ int main() {
                [popupTitles componentsJoinedByString:@","]);
         }
 
-        // ---------- B13 680/820/1180 几何防重叠 + 隐藏页不占位 ----------
+        // ---------- B13 680/820/954/1180 几何防重叠 + 信号链 4+3 + 隐藏页不占位 ----------
         {
-            NSArray<NSNumber *> *widths = @[@680, @820, @1180];
+            for (NSString *geometryLanguage in @[@"zh", @"en"]) {
+            RLPSetLanguage(geometryLanguage);
+            NSArray<NSNumber *> *widths = @[@680, @820, @954, @1180];
             for (NSNumber *wn in widths) {
                 CGFloat w = wn.doubleValue;
                 RLPWorkbenchViewController *gvc = [[RLPWorkbenchViewController alloc] init];
@@ -330,6 +332,37 @@ int main() {
 
                 NSMutableArray<NSView *> *gv = [NSMutableArray array];
                 CollectViews(gvc.view, gv);
+
+                // 0) 7 节点信号链无重叠且窄宽 4+3
+                NSMutableArray<NSView *> *nodeViews = [NSMutableArray array];
+                NSView *rackView = nil, *rackPCM = nil, *rackDSD = nil, *rackOut = nil;
+                for (NSView *v in gv) {
+                    if ([v.identifier hasPrefix:@"wb.node."]) [nodeViews addObject:v];
+                    if ([v.identifier isEqualToString:@"wb.rack"]) rackView = v;
+                    if ([v.identifier isEqualToString:@"wb.rack.pcm"]) rackPCM = v;
+                    if ([v.identifier isEqualToString:@"wb.rack.dsd"]) rackDSD = v;
+                    if ([v.identifier isEqualToString:@"wb.rack.output"]) rackOut = v;
+                }
+                BOOL nodeOverlap = NO;
+                for (NSUInteger i = 0; i < nodeViews.count; ++i) {
+                    NSRect r1 = [nodeViews[i] convertRect:nodeViews[i].bounds toView:gvc.view];
+                    for (NSUInteger j = i + 1; j < nodeViews.count; ++j) {
+                        NSRect r2 = [nodeViews[j] convertRect:nodeViews[j].bounds toView:gvc.view];
+                        NSRect inter = NSIntersectionRect(r1, r2);
+                        if (inter.size.width > 1.0 && inter.size.height > 1.0) nodeOverlap = YES;
+                    }
+                }
+                CK(!nodeOverlap && nodeViews.count == 7,
+                   [[NSString stringWithFormat:@"B13d_%d 七节点信号链无几何重叠", (int)w] UTF8String], @"");
+                CK(rackView && rackView.frame.size.width <= w + 0.5 &&
+                   rackPCM && rackDSD && rackOut &&
+                   rackPCM.frame.size.width >= 200.0 &&
+                   rackDSD.frame.size.width >= 200.0 &&
+                   rackOut.frame.size.width >= 200.0,
+                   [[NSString stringWithFormat:@"B13e_%d 三列参数区不挤压不溢出", (int)w] UTF8String],
+                   rackView ? [NSString stringWithFormat:@"rack=%.1f pcm=%.1f dsd=%.1f out=%.1f",
+                               rackView.frame.size.width, rackPCM.frame.size.width,
+                               rackDSD.frame.size.width, rackOut.frame.size.width] : @"nil");
 
                 // 1) A/B 4 张槽卡互不重叠
                 NSMutableArray<NSView *> *abSlots = [NSMutableArray array];
@@ -372,6 +405,8 @@ int main() {
                    [panelAB.superview isKindOfClass:NSStackView.class] && ((NSStackView *)panelAB.superview).detachesHiddenViews,
                    [[NSString stringWithFormat:@"B13b_%d 隐藏页签处于 hidden（不占位）", (int)w] UTF8String], @"");
             }
+            }
+            RLPSetLanguage(@"zh");
         }
 
         // 不许有跳设置页的入口

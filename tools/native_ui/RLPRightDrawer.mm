@@ -523,10 +523,15 @@
     NSMutableString *body = [NSMutableString stringWithFormat:@"file=%@", RLPEnc(f)];
     if (cs >= 0) [body appendFormat:@"&cs=%.3f", cs];
     if (ce >= 0) [body appendFormat:@"&ce=%.3f", ce];
+    const uint64_t actionEpoch = RLPBeginPlaybackAction();
+    __weak __typeof__(self) weakSelf = self;
     [[RLPCoreClient shared] postJSON:@"/api/play" body:body completion:^(NSDictionary * _Nullable j) {
+        __typeof__(self) self_ = weakSelf;
+        if (actionEpoch != RLPPlaybackActionEpoch()) return;
+        RLPHandlePlaybackActionResponse(j, @"播放失败");
         // 这里**不能**直接 loadLyricsForCurrent：此刻 qIndex/items 还是旧队列，
         // 读到的是上一首的 file（审计 C 项的成因）。歌词跟随由 loadQueue 的换曲检测驱动。
-        [self loadQueue];
+        [self_ loadQueue];
     }];
 }
 
@@ -861,6 +866,18 @@
     [self refreshTabs];
     [self renderQueue];
     if (self.lines.count) [self renderLyrics];
+}
+
+- (void)applyLanguage {
+    [self.qTab setTitle:RLPTr(@"队列")];
+    [self.lTab setTitle:RLPTr(@"歌词")];
+    [self.clearBtn setTitle:RLPTr(@"清除")];
+    self.count.stringValue = [NSString stringWithFormat:RLPTr(@"共 %lu 首"), (unsigned long)self.items.count];
+    if (!self.items.count) [self renderQueue];
+    if (!self.lines.count) [self loadLyricsForCurrent:NO];
+    else if (self.lHint.stringValue.length) {
+        self.lHint.stringValue = RLPTr(@"纯文本歌词（无时间轴）· 不会自动跟随滚动");
+    }
 }
 
 @end

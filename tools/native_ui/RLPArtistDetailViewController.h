@@ -17,6 +17,7 @@ NS_ASSUME_NONNULL_BEGIN
 @property (nonatomic, readonly) double totalDuration;
 
 - (instancetype)initWithArtistName:(NSString *)name;
+- (void)applyLanguage;
 
 @end
 

@@ -187,12 +187,46 @@ int main() {
             @"wb.pcm.slot", @"wb.filter.override", @"wb.filter.reset",
             @"wb.sdmfilt", @"wb.sdmfiltnx", @"wb.ratefamily",
             @"wb.pcm.adv.toggle", @"wb.dsd.adv.toggle", @"wb.output.adv.toggle",
-            @"wb.chaindetail", @"wb.trackcard", @"wb.ab.0", @"wb.profile.list"
+            @"wb.chaindetail", @"wb.trackcard", @"wb.ab.0",
+            @"wb.profile.toggle", @"wb.profile.panel", @"wb.profile.list",
+            @"wb.quickeq", @"wb.quickeq.bypass", @"wb.quickeq.preset", @"wb.quickeq.open",
+            @"wb.mon.master", @"wb.mon.auto", @"wb.mon.retry",
+            @"wb.mon.dyn", @"wb.mon.qual", @"wb.mon.fake"
         ];
         for (NSString *ident in reqIds) {
             CK(FindByIdent(vc.view, ident) != nil,
                [[NSString stringWithFormat:@"S3 控件在位 %@", ident] UTF8String], @"缺失");
         }
+        CK(FindByIdent(vc.view, @"wb.profile.panel").hidden,
+           "S3b 配置档表格默认收拢为入口（同层面板默认隐藏）", @"");
+
+        // 3c. Pure logic: monitor analysis summaries & auto-analyze guard
+        CK(RLPWorkbenchIsLocalAudioPath(@"/Users/test/song.flac") &&
+           !RLPWorkbenchIsLocalAudioPath(@"http://192.168.1.2/stream.flac"),
+           "S3c 本地路径判定排除流媒体", @"");
+        NSDictionary *anlMock = @{
+            @"ok": @YES,
+            @"health": @{
+                @"status": @"ready",
+                @"dr_available": @YES,
+                @"dr_db": @15.2,
+                @"quality": @{@"available": @YES, @"peak_dbfs_q": @(-1.0), @"rms_dbfs": @(-16.0), @"clipped_samples": @0},
+                @"lossless_suspected": @NO,
+                @"cutoff_hz": @21500,
+                @"fs": @44100
+            }
+        };
+        NSDictionary *unwrapped = RLPWorkbenchUnwrapHealth(anlMock);
+        NSDictionary<NSString *, NSString *> *sums = RLPWorkbenchAnalysisSummaries(unwrapped);
+        CK([sums[@"dyn"] rangeOfString:@"良好动态"].location != NSNotFound &&
+           [sums[@"qual"] rangeOfString:@"干净"].location != NSNotFound &&
+           [sums[@"fake"] rangeOfString:@"未发现"].location != NSNotFound,
+           "S3d /api/health 解包与三摘要推导正确", sums.description);
+        CK(RLPWorkbenchShouldAutoAnalyze(@"/tmp/a.flac", YES, YES, YES, nil, NO, NO) &&
+           !RLPWorkbenchShouldAutoAnalyze(@"/tmp/a.flac", YES, NO, YES, nil, NO, NO) &&
+           !RLPWorkbenchShouldAutoAnalyze(@"/tmp/a.flac", YES, YES, NO, nil, NO, NO) &&
+           !RLPWorkbenchShouldAutoAnalyze(@"/tmp/a.flac", YES, YES, YES, @"/tmp/a.flac", NO, NO),
+           "S3e 自动分析受总开关/autoanl/去重门控约束", @"");
 
         // 4. Tab switching + single scroll across all 3 tabs + no playback restart
         [vc selectStudioTab:@"ab"];
@@ -251,14 +285,26 @@ int main() {
         [vc onABPick:vc.abButtons[1]];
         CK(vc.abActive == 0, "S7b POST 失败后绝不假装高亮槽 B", [NSString stringWithFormat:@"abActive=%ld", (long)vc.abActive]);
 
-        // 8. Narrow window layout (680pt)
-        [win setContentSize:NSMakeSize(680, 620)];
-        [vc.view layoutSubtreeIfNeeded];
-        NSView *rack = FindByIdent(vc.view, @"wb.rack");
-        CK(rack && rack.frame.size.width <= 680.0,
-           "S8 窄窗 680pt 下机架不横向溢出",
-           rack ? [NSString stringWithFormat:@"rackW=%.1f winW=%.1f vcW=%.1f",
-                   rack.frame.size.width, win.frame.size.width, vc.view.frame.size.width] : @"nil");
+        // 8. Responsive widths: 680 / 820 / 954 / 1180 (4+3 chain on narrow, 3-col rack without overflow)
+        for (NSNumber *wn in @[@680, @820, @954, @1180]) {
+            const CGFloat cw = wn.doubleValue;
+            [win setContentSize:NSMakeSize(cw, 780)];
+            [vc.view layoutSubtreeIfNeeded];
+            NSView *rack = FindByIdent(vc.view, @"wb.rack");
+            NSView *chainC = FindByIdent(vc.view, @"wb.chain.container");
+            NSView *nSrc = FindByIdent(vc.view, @"wb.node.src");
+            NSView *nShaper = FindByIdent(vc.view, @"wb.node.shaper");
+            NSRect rSrc = [nSrc convertRect:nSrc.bounds toView:vc.view];
+            NSRect rShaper = [nShaper convertRect:nShaper.bounds toView:vc.view];
+            const BOOL expectTwoRows = (cw < 900.0);
+            const BOOL isTwoRows = fabs(rSrc.origin.y - rShaper.origin.y) > 10.0;
+            CK(rack && rack.frame.size.width <= cw + 0.5 &&
+               chainC && chainC.frame.size.width <= cw + 0.5 &&
+               (isTwoRows == expectTwoRows),
+               [[NSString stringWithFormat:@"S8_%d 信号链响应(4+3/7列)且机架不横向溢出", (int)cw] UTF8String],
+               [NSString stringWithFormat:@"rackW=%.1f chainW=%.1f twoRows=%d",
+                rack ? rack.frame.size.width : -1.0, chainC ? chainC.frame.size.width : -1.0, (int)isTwoRows]);
+        }
 
         // 9. Object-level real RLPCoreClient dispatch roundtrip (isolated temp dir, backend=null, volume=-120)
         NSString *root = [NSTemporaryDirectory() stringByAppendingPathComponent:

@@ -20,6 +20,7 @@ static const CGFloat kRecentTitleMinW = 120.0;
 @property (nonatomic, strong) NSTextField *emptyLabel;   // web：还没有播放记录
 @property (nonatomic, strong) NSTableView *tableView;
 @property (nonatomic, strong) NSMutableArray<RLPTrack *> *tracks;
+@property (nonatomic, assign) BOOL hasLoaded;
 @end
 
 @implementation RLPRecentViewController
@@ -143,6 +144,7 @@ static const CGFloat kRecentTitleMinW = 120.0;
         }
         
         NSArray<RLPTrack *> *tracks = [RLPTrack tracksFromJSON:json key:nil];
+        self_.hasLoaded = YES;
         [self_.tracks removeAllObjects];
         [self_.tracks addObjectsFromArray:tracks];
         [self_.tableView reloadData];
@@ -183,6 +185,30 @@ static const CGFloat kRecentTitleMinW = 120.0;
     if (row < 0 || row >= (NSInteger)_tracks.count) return;
     RLPTrack *track = _tracks[(NSUInteger)row];
     RLPPlayPath(track.path);
+}
+
+- (void)applyLanguage {
+    self.pageTitle = RLPTr(@"最近播放");
+    if (!self.isViewLoaded) return;
+    _emptyLabel.stringValue = RLPTr(@"还没有播放记录");
+    NSArray<NSString *> *headers = @[RLPTr(@"#"), RLPTr(@"标题"), RLPTr(@"艺术家"), RLPTr(@"专辑")];
+    for (NSUInteger i = 0; i < _tableView.tableColumns.count && i < headers.count; ++i) {
+        _tableView.tableColumns[i].title = headers[i];
+    }
+    if (self.hasLoaded) {
+        [self setSubtitle:[NSString stringWithFormat:RLPTr(@"%ld 首"), (long)_tracks.count]];
+    } else if (![RLPCoreClient shared].started) {
+        [self setSubtitle:RLPTr(@"核心未启动")];
+    }
+    NSIndexSet *sel = [_tableView.selectedRowIndexes copy];
+    NSScrollView *scroll = _tableView.enclosingScrollView;
+    NSPoint origin = scroll ? scroll.contentView.bounds.origin : NSZeroPoint;
+    [_tableView reloadData];
+    if (sel.count) [_tableView selectRowIndexes:sel byExtendingSelection:NO];
+    if (scroll) {
+        [scroll.contentView scrollToPoint:origin];
+        [scroll reflectScrolledClipView:scroll.contentView];
+    }
 }
 
 @end

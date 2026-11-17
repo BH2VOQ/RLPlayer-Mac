@@ -570,6 +570,7 @@ static BOOL RLPRowIsSection(NSArray<NSDictionary *> *items, NSInteger row) {
     }
     box.strokeColor = t.line;
     box.fillColor = (_hoverRow == [tableView rowForView:cell] && _hoverRow >= 0) ? t.hov : NSColor.clearColor;
+    lab.stringValue = RLPTr(@"＋ 新建歌单");
     lab.textColor = t.mut;
     cell.toolTip = RLPTr(@"新建歌单");
     return cell;
@@ -873,6 +874,17 @@ static BOOL RLPRowIsSection(NSArray<NSDictionary *> *items, NSInteger row) {
     RLPTheme *t = [RLPTheme current];
     self.view.layer.backgroundColor = t.bg2.CGColor;
     [_tableView reloadData];
+    [self.view setNeedsDisplay:YES];
+}
+
+- (void)applyLanguage {
+    NSScrollView *scroll = _tableView.enclosingScrollView;
+    NSPoint savedOrigin = scroll ? scroll.contentView.bounds.origin : NSZeroPoint;
+    [_tableView reloadData];
+    if (scroll) {
+        [scroll.contentView scrollToPoint:savedOrigin];
+        [scroll reflectScrolledClipView:scroll.contentView];
+    }
     [self.view setNeedsDisplay:YES];
 }
 

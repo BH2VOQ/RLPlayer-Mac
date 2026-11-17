@@ -376,3 +376,122 @@ NSArray<NSDictionary<NSString *, NSString *> *> *RLPWorkbenchMonitorRows(NSDicti
         Row(RLPTr(@"性能与遥测"), @"wsMb", RLPTr(@"内存占用"), hasStatus ? MonNum(st, @"wsMb", @"MB", 1, YES) : @"N/A"),
     ];
 }
+
+static BOOL WbAnlHas(id v) {
+    if (![v isKindOfClass:[NSNumber class]]) return NO;
+    double d = [(NSNumber *)v doubleValue];
+    return isfinite(d);
+}
+
+BOOL RLPWorkbenchIsLocalAudioPath(NSString *path) {
+    if (![path isKindOfClass:[NSString class]] || !path.length) return NO;
+    NSString *low = path.lowercaseString;
+    if ([low hasPrefix:@"http://"] || [low hasPrefix:@"https://"] ||
+        [low hasPrefix:@"upnp://"] || [low hasPrefix:@"airplay://"]) return NO;
+    if ([path hasPrefix:@"/"] || [path hasPrefix:@"~"]) return YES;
+    return [path rangeOfString:@"://"].location == NSNotFound;
+}
+
+NSDictionary *RLPWorkbenchUnwrapHealth(NSDictionary *json) {
+    if (![json isKindOfClass:[NSDictionary class]]) return nil;
+    id inner = json[@"health"];
+    if ([inner isKindOfClass:[NSDictionary class]] && [(NSDictionary *)inner count]) return inner;
+    return json;
+}
+
+NSDictionary<NSString *, NSString *> *RLPWorkbenchAnalysisSummaries(NSDictionary *health) {
+    if (![health isKindOfClass:[NSDictionary class]] || !health.count) {
+        NSString *u = RLPTr(@"未分析");
+        return @{@"dyn": u, @"qual": u, @"fake": u, @"incomplete": @"0"};
+    }
+    // 动态摘要
+    NSString *dyn = nil;
+    id drAvail = health[@"dr_available"];
+    if (([drAvail isKindOfClass:[NSNumber class]] && ![drAvail boolValue]) || !WbAnlHas(health[@"dr_db"])) {
+        dyn = RLPTr(@"素材过短 · 动态不适用");
+    } else {
+        const double dr = [health[@"dr_db"] doubleValue];
+        if (dr >= 14.0) dyn = RLPTr(@"良好动态 · 古典/爵士常见");
+        else if (dr >= 11.0) dyn = RLPTr(@"中等动态 · 摇滚/原声常见");
+        else if (dr >= 8.0) dyn = RLPTr(@"动态偏紧 · 流行母带常见");
+        else dyn = RLPTr(@"低动态 · 高压缩母带");
+    }
+
+    // 音质摘要
+    NSString *qual = nil;
+    NSDictionary *q = [health[@"quality"] isKindOfClass:[NSDictionary class]] ? health[@"quality"] : nil;
+    id qAvail = q[@"available"];
+    if (![qAvail isKindOfClass:[NSNumber class]] || ![qAvail boolValue]) {
+        qual = RLPTr(@"不适用 · 样本不足");
+    } else if (!WbAnlHas(q[@"peak_dbfs_q"]) || !WbAnlHas(q[@"rms_dbfs"])) {
+        qual = RLPTr(@"无有效音频 · 指标不适用");
+    } else {
+        const double n = WbAnlHas(q[@"clipped_samples"]) ? [q[@"clipped_samples"] doubleValue] : 0.0;
+        if (n <= 0.0) {
+            qual = RLPTr(@"干净 · 无明显削波");
+        } else {
+            const double runs = WbAnlHas(q[@"clipped_runs"]) ? [q[@"clipped_runs"] doubleValue] : 0.0;
+            const double longest = WbAnlHas(q[@"longest_clip_run"]) ? [q[@"longest_clip_run"] doubleValue] : 0.0;
+            if (runs > 0.0 && longest >= 3.0) {
+                qual = [NSString stringWithFormat:@"%@ %ld %@", RLPTr(@"有削波 · 最长"), (long)longest, RLPTr(@"样本")];
+            } else {
+                qual = [NSString stringWithFormat:@"%@ %ld %@", RLPTr(@"轻微削波 ·"), (long)n, RLPTr(@"样本")];
+            }
+        }
+    }
+
+    // 假无损摘要
+    NSString *fake = nil;
+    id st = health[@"status"];
+    if ([st isKindOfClass:[NSString class]] && [(NSString *)st length] &&
+        ![st isEqualToString:@"ready"] && ![st isEqualToString:@"incomplete"]) {
+        fake = RLPTr(@"分析未完成");
+    } else {
+        NSMutableArray<NSString *> *parts = [NSMutableArray array];
+        const BOOL suspected = [health[@"lossless_suspected"] isKindOfClass:[NSNumber class]] &&
+                               [health[@"lossless_suspected"] boolValue];
+        if (suspected) {
+            [parts addObject:RLPTr(@"疑似有损转码")];
+            if (WbAnlHas(health[@"cutoff_hz"])) {
+                [parts addObject:[NSString stringWithFormat:@"%@ %.1f kHz", RLPTr(@"截止"),
+                                  [health[@"cutoff_hz"] doubleValue] / 1000.0]];
+            }
+        } else {
+            [parts addObject:RLPTr(@"未发现")];
+            if (WbAnlHas(health[@"cutoff_hz"]) && [health[@"cutoff_hz"] doubleValue] > 0.0 &&
+                WbAnlHas(health[@"fs"]) && [health[@"fs"] doubleValue] > 0.0) {
+                const double ratio = [health[@"cutoff_hz"] doubleValue] / ([health[@"fs"] doubleValue] / 2.0);
+                if (ratio >= 0.93) [parts addObject:RLPTr(@"满带宽")];
+                else [parts addObject:[NSString stringWithFormat:@"%@ %ld%%", RLPTr(@"带宽仅"), (long)lround(ratio * 100)]];
+            } else {
+                [parts addObject:RLPTr(@"未检出截止")];
+            }
+        }
+        if ([health[@"fake24"] isKindOfClass:[NSNumber class]] && [health[@"fake24"] boolValue]) {
+            [parts addObject:RLPTr(@"24bit 实为低位深")];
+        }
+        fake = [parts componentsJoinedByString:@" · "];
+    }
+
+    const BOOL incomplete = ([health[@"incomplete"] isKindOfClass:[NSNumber class]] && [health[@"incomplete"] boolValue]) ||
+                            ([st isKindOfClass:[NSString class]] && [st isEqualToString:@"incomplete"]);
+    return @{
+        @"dyn": dyn ?: RLPTr(@"未分析"),
+        @"qual": qual ?: RLPTr(@"未分析"),
+        @"fake": fake ?: RLPTr(@"未分析"),
+        @"incomplete": incomplete ? @"1" : @"0",
+    };
+}
+
+BOOL RLPWorkbenchShouldAutoAnalyze(NSString *path,
+                                   BOOL playing,
+                                   BOOL masterEnabled,
+                                   BOOL autoEnabled,
+                                   NSString *alreadyDonePath,
+                                   BOOL busy,
+                                   BOOL hasResult) {
+    if (!masterEnabled || !autoEnabled || !playing || busy || hasResult) return NO;
+    if (!RLPWorkbenchIsLocalAudioPath(path)) return NO;
+    if (alreadyDonePath.length && [alreadyDonePath isEqualToString:path]) return NO;
+    return YES;
+}

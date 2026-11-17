@@ -28,6 +28,7 @@ NS_ASSUME_NONNULL_BEGIN
 
 /// 把上面几个属性写进控件（不触发回调）。
 - (void)syncValues;
+- (void)applyLanguage;
 
 /// 判据锚点。
 - (nullable NSTextField *)qField;

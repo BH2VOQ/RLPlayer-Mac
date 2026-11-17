@@ -70,6 +70,9 @@ static NSString *const kQueueDragType = @"RLPQueueRowDrag";
 @property (nonatomic, copy) NSString *sortKey;
 /// P7：空队列时「保存为歌单」必须禁用（web 空队列根本不渲染保存按钮）。
 @property (nonatomic, strong) NSButton *saveButton;
+@property (nonatomic, strong) NSTextField *sortLabel;
+@property (nonatomic, strong) NSMutableArray<NSButton *> *actionButtons;
+@property (nonatomic, assign) BOOL hasLoaded;
 @property (nonatomic, assign) NSInteger hoveredRow;
 - (void)restoreSortSelection:(NSString *)key;
 - (void)savePlaylistNamed:(NSString *)name;
@@ -128,9 +131,10 @@ static NSString *const kQueueDragType = @"RLPQueueRowDrag";
     self.sortPopup.action = @selector(onSortPicked:);
     [self.sortPopup selectItemAtIndex:0];   // 生效档位 = 默认顺序（P6 回滚基准）
     self.sortPopup.translatesAutoresizingMaskIntoConstraints = NO;
-    [bar addArrangedSubview:RLPLabel(RLPTr(@"排序："), [NSFont systemFontOfSize:11],
-                                     [RLPTheme current].mut2)];
+    self.sortLabel = RLPLabel(RLPTr(@"排序："), [NSFont systemFontOfSize:11], [RLPTheme current].mut2);
+    [bar addArrangedSubview:self.sortLabel];
     [bar addArrangedSubview:self.sortPopup];
+    self.actionButtons = [NSMutableArray array];
     NSArray *acts = @[
         @[ RLPTr(@"刷新"), @"refresh" ],
         @[ RLPTr(@"保存为歌单"), @"save" ],
@@ -142,6 +146,7 @@ static NSString *const kQueueDragType = @"RLPQueueRowDrag";
         b.bezelStyle = NSBezelStyleRounded;
         b.identifier = a[1];
         [bar addArrangedSubview:b];
+        [self.actionButtons addObject:b];
         if ([a[1] isEqualToString:@"save"]) {
             self.saveButton = b;
             b.enabled = NO;   // P7：队列数据回来之前不可保存（空队列不弹框、不发请求）
@@ -843,6 +848,7 @@ static NSString *RLPQueueMetaText(NSDictionary *m, NSString *k,
         self_.cues = cc;
         self_.currentIndex = [json[@"index"] respondsToSelector:@selector(integerValue)] ? [json[@"index"] integerValue] : -1;
         self_.mode = [json[@"mode"] respondsToSelector:@selector(integerValue)] ? [json[@"mode"] integerValue] : 0;
+        self_.hasLoaded = YES;
         [self_.table reloadData];
         self_.empty.hidden = ps.count > 0;
         self_.saveButton.enabled = ps.count > 0;   // P7：空队列禁用「保存为歌单」
@@ -860,6 +866,44 @@ static NSString *RLPQueueMetaText(NSDictionary *m, NSString *k,
     self.table.backgroundColor = t.bg;
     self.empty.textColor = t.mut;
     [self.table reloadData];
+}
+
+- (void)applyLanguage {
+    self.pageTitle = RLPTr(@"播放队列");
+    if (!self.isViewLoaded) return;
+    self.sortLabel.stringValue = RLPTr(@"排序：");
+    NSArray<NSString *> *sortTitles = @[@"默认顺序", @"标题", @"艺术家", @"专辑", @"时长", @"年份", @"随机打乱", @"反转顺序"];
+    for (NSUInteger i = 0; i < (NSUInteger)self.sortPopup.numberOfItems && i < sortTitles.count; ++i) {
+        [self.sortPopup itemAtIndex:(NSInteger)i].title = RLPTr(sortTitles[i]);
+    }
+    NSDictionary<NSString *, NSString *> *btnMap = @{
+        @"refresh": @"刷新",
+        @"save": @"保存为歌单",
+        @"qImportM3u": @"导入 M3U 到队列",
+        @"clear": @"清空队列",
+    };
+    for (NSButton *b in self.actionButtons) {
+        NSString *zh = btnMap[b.identifier ?: @""];
+        if (zh.length) b.title = RLPTr(zh);
+    }
+    self.empty.stringValue = [RLPTr(@"队列是空的") stringByAppendingFormat:@"\n%@",
+        RLPTr(@"把文件拖进窗口，或右键专辑/曲目「加入队列」")];
+    if (self.hasLoaded) {
+        NSArray *names = @[ RLPTr(@"顺序"), RLPTr(@"列表循环"), RLPTr(@"单曲循环"), RLPTr(@"随机") ];
+        NSString *mn = names[MIN(MAX(self.mode, 0), 3)];
+        [self setSubtitle:[NSString stringWithFormat:RLPTr(@"%ld 首 · 当前第 %ld 首 · %@"),
+                           (long)self.paths.count, (long)(self.currentIndex + 1), mn]];
+    } else if (![RLPCoreClient shared].started) {
+        [self setSubtitle:RLPTr(@"核心未启动")];
+    }
+    NSIndexSet *sel = [self.table.selectedRowIndexes copy];
+    NSPoint origin = self.tableScroll ? self.tableScroll.contentView.bounds.origin : NSZeroPoint;
+    [self.table reloadData];
+    if (sel.count) [self.table selectRowIndexes:sel byExtendingSelection:NO];
+    if (self.tableScroll) {
+        [self.tableScroll.contentView scrollToPoint:origin];
+        [self.tableScroll reflectScrolledClipView:self.tableScroll.contentView];
+    }
 }
 
 @end

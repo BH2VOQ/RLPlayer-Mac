@@ -81,6 +81,16 @@ static void CollectPopups(NSView *v, NSMutableArray<NSPopUpButton *> *out) {
     for (NSView *s in v.subviews) CollectPopups(s, out);
 }
 
+// Shortcut buttons may be arranged in responsive rows; locate the real control recursively.
+static NSButton *FindFilterButton(NSView *root, NSString *name) {
+    if ([root isKindOfClass:NSButton.class] && [root.identifier isEqualToString:name]) return (NSButton *)root;
+    for (NSView *child in root.subviews) {
+        NSButton *button = FindFilterButton(child, name);
+        if (button) return button;
+    }
+    return nil;
+}
+
 static NSString *SelectedFilterAllName(RLPWorkbenchViewController *vc) {
     NSDictionary *ro = vc.filterAll.selectedItem.representedObject;
     return [ro isKindOfClass:[NSDictionary class]] ? (ro[@"name"] ?: @"") : @"";
@@ -170,12 +180,7 @@ int main() {
            SelectedFilterAllName(vc));
 
         // ---- 3. 非空 filterNx 存在时，切回 1x 仍可编辑与相位快切 ----
-        NSButton *tightBtn = nil;
-        for (NSView *v in vc.filterQuick.arrangedSubviews) {
-            if ([v isKindOfClass:[NSButton class]] && [v.identifier isEqualToString:@"poly-sinc-tight-lp"]) {
-                tightBtn = (NSButton *)v; break;
-            }
-        }
+        NSButton *tightBtn = FindFilterButton(vc.filterQuick, @"poly-sinc-tight-lp");
         CK(tightBtn != nil, "F4a 快捷区存在 1x 滤波 poly-sinc-tight-lp", @"");
         if (tightBtn) [vc onFilterQuick:tightBtn];
         CK([vc.lastPostedKV isEqualToDictionary:@{@"filter": @"poly-sinc-tight-lp"}],

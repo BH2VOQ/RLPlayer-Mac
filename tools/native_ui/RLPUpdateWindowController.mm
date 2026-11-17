@@ -87,7 +87,25 @@ struct RLPUpdatePlan {
     self = [super initWithWindow:win];
     if (!self) return nil;
     [self buildUI];
+    [[NSNotificationCenter defaultCenter] addObserver:self
+                                             selector:@selector(applyLanguage)
+                                                 name:RLPLanguageDidChangeNotification
+                                               object:nil];
     return self;
+}
+
+- (void)dealloc {
+    [[NSNotificationCenter defaultCenter] removeObserver:self];
+}
+
+- (void)applyLanguage {
+    self.window.title = RLPTr(@"软件更新");
+    self.manualBtn.title = RLPTr(@"手动下载");
+    self.laterBtn.title = RLPTr(@"稍后");
+    self.ignoreBtn.title = RLPTr(@"忽略此版本");
+    self.cancelBtn.title = RLPTr(@"取消下载");
+    const BOOL relaunch = [self.primaryBtn.title isEqualToString:@"重启"] || [self.primaryBtn.title isEqualToString:@"Relaunch"];
+    self.primaryBtn.title = relaunch ? RLPTr(@"重启") : RLPTr(@"立即更新");
 }
 
 - (void)buildUI {

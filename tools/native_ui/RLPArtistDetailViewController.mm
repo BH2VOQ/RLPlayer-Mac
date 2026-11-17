@@ -156,6 +156,7 @@ static const NSUserInterfaceItemIdentifier kArtistAlbumItemID = @"RLPArtistAlbum
 @property (nonatomic, strong) NSTextField *nameLabel;
 @property (nonatomic, strong) NSTextField *statsLabel;
 @property (nonatomic, strong) NSTextField *emptyLabel;
+@property (nonatomic, strong) NSButton *backBtn;
 @property (nonatomic, strong) NSScrollView *scroll;
 @property (nonatomic, strong) NSCollectionView *collection;
 @property (nonatomic, strong) NSMutableArray<RLPAlbum *> *albums;
@@ -186,6 +187,7 @@ static const NSUserInterfaceItemIdentifier kArtistAlbumItemID = @"RLPArtistAlbum
     back.imagePosition = NSImageLeading;
     back.font = t.small;
     back.translatesAutoresizingMaskIntoConstraints = NO;
+    self.backBtn = back;
     [host addSubview:back];
 
     // 2. 圆形头像占位（96x96，名字首字符）
@@ -504,6 +506,43 @@ static const NSUserInterfaceItemIdentifier kArtistAlbumItemID = @"RLPArtistAlbum
         [item setAlbum:self.albums[(NSUInteger)indexPath.item]];
     }
     return item;
+}
+
+- (void)applyLanguage {
+    self.pageTitle = self.artistName.length ? self.artistName : RLPTr(@"艺术家");
+    if (!self.isViewLoaded) return;
+    self.backBtn.title = RLPTr(@"返回艺术家列表");
+    self.backBtn.image = [NSImage imageWithSystemSymbolName:@"chevron.left"
+                                   accessibilityDescription:RLPTr(@"返回艺术家列表")];
+    if (!self.artistName.length) {
+        self.nameLabel.stringValue = RLPTr(@"未知艺术家");
+    }
+    if (![RLPCoreClient shared].started && !self.loaded) {
+        [self setSubtitle:RLPTr(@"核心未启动")];
+        self.statsLabel.stringValue = RLPTr(@"核心未启动");
+        self.emptyLabel.stringValue = RLPTr(@"核心未启动");
+    } else if (self.loaded) {
+        if (self.albums.count == 0) {
+            self.statsLabel.stringValue = [NSString stringWithFormat:@"0 %@ · 0 %@", RLPTr(@"张专辑"), RLPTr(@"首")];
+            [self setSubtitle:[NSString stringWithFormat:@"0 %@", RLPTr(@"张专辑")]];
+            self.emptyLabel.stringValue = RLPTr(@"这个艺术家还没有专辑");
+        } else {
+            self.statsLabel.stringValue = [NSString stringWithFormat:@"%ld %@ · %ld %@ · %@",
+                (long)self.albumCount, RLPTr(@"张专辑"),
+                (long)self.totalTracks, RLPTr(@"首"),
+                RLPFmtDuration(self.totalDuration)];
+            [self setSubtitle:[NSString stringWithFormat:@"%ld %@", (long)self.albumCount, RLPTr(@"张专辑")]];
+        }
+    }
+    [self.knowledge applyLanguage];
+    NSSet<NSIndexPath *> *sel = [self.collection.selectionIndexPaths copy];
+    NSPoint origin = self.scroll ? self.scroll.contentView.bounds.origin : NSZeroPoint;
+    [self.collection reloadData];
+    if (sel.count) self.collection.selectionIndexPaths = sel;
+    if (self.scroll) {
+        [self.scroll.contentView scrollToPoint:origin];
+        [self.scroll reflectScrolledClipView:self.scroll.contentView];
+    }
 }
 
 @end

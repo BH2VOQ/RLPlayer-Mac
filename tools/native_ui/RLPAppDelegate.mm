@@ -76,6 +76,10 @@ static void STCheck(BOOL ok, const char *what, NSString *detail) {
     // 启动早期核心还没起来，不能去 GET /api/settings。
     RLPApplyLanguageFromConf();
     [self buildMenu];
+    [[NSNotificationCenter defaultCenter] addObserver:self
+                                             selector:@selector(onLanguageChanged:)
+                                                 name:RLPLanguageDidChangeNotification
+                                               object:nil];
     // 主题：没存过就用默认（light）。**无条件调一次**并同步全局 appearance ——
     // setThemeName 对同名会 early-return 不发通知，只靠它会出现
     // "设置里显示浅色、主页却还是黑的"（用户实测反馈）。
@@ -110,6 +114,7 @@ static void STCheck(BOOL ok, const char *what, NSString *detail) {
 - (BOOL)applicationShouldTerminateAfterLastWindowClosed:(NSApplication *)app { return YES; }
 
 - (void)applicationWillTerminate:(NSNotification *)note {
+    [[NSNotificationCenter defaultCenter] removeObserver:self];
     [self.exitPoll invalidate];
     [self.nowPlayingTimer invalidate];
     [self.mainWC stopAllActivity];
@@ -123,38 +128,38 @@ static void STCheck(BOOL ok, const char *what, NSString *detail) {
     NSMenuItem *appItem = [[NSMenuItem alloc] init];
     NSMenu *appMenu = [[NSMenu alloc] initWithTitle:@"RLPlayer"];
     NSString *ver = [NSString stringWithUTF8String:RLPLAYER_VERSION];
-    [appMenu addItemWithTitle:[NSString stringWithFormat:@"关于 RLPlayer %@", ver] action:@selector(orderFrontStandardAboutPanel:) keyEquivalent:@""];
+    [appMenu addItemWithTitle:[NSString stringWithFormat:RLPTr(@"关于 RLPlayer %@"), ver] action:@selector(orderFrontStandardAboutPanel:) keyEquivalent:@""];
     // ⌘, 打开设置：这是 macOS 的固定约定（HIG），用户不需要被告知。
     NSMenuItem *pref = [appMenu addItemWithTitle:RLPTr(@"设置…")
                                           action:@selector(menuOpenSettings:)
                                    keyEquivalent:@","];
     pref.target = self;
     [appMenu addItem:[NSMenuItem separatorItem]];
-    NSMenuItem *quit = [appMenu addItemWithTitle:@"退出 RLPlayer" action:@selector(terminate:) keyEquivalent:@"q"];
+    NSMenuItem *quit = [appMenu addItemWithTitle:RLPTr(@"退出 RLPlayer") action:@selector(terminate:) keyEquivalent:@"q"];
     quit.target = NSApp;
     appItem.submenu = appMenu;
     [bar addItem:appItem];
 
     NSMenuItem *editItem = [[NSMenuItem alloc] init];
-    NSMenu *edit = [[NSMenu alloc] initWithTitle:@"编辑"];
-    [edit addItemWithTitle:@"撤销" action:@selector(undo:) keyEquivalent:@"z"];
-    [edit addItemWithTitle:@"重做" action:@selector(redo:) keyEquivalent:@"Z"];
+    NSMenu *edit = [[NSMenu alloc] initWithTitle:RLPTr(@"编辑")];
+    [edit addItemWithTitle:RLPTr(@"撤销") action:@selector(undo:) keyEquivalent:@"z"];
+    [edit addItemWithTitle:RLPTr(@"重做") action:@selector(redo:) keyEquivalent:@"Z"];
     [edit addItem:[NSMenuItem separatorItem]];
-    [edit addItemWithTitle:@"剪切" action:@selector(cut:) keyEquivalent:@"x"];
-    [edit addItemWithTitle:@"拷贝" action:@selector(copy:) keyEquivalent:@"c"];
-    [edit addItemWithTitle:@"粘贴" action:@selector(paste:) keyEquivalent:@"v"];
-    [edit addItemWithTitle:@"全选" action:@selector(selectAll:) keyEquivalent:@"a"];
+    [edit addItemWithTitle:RLPTr(@"剪切") action:@selector(cut:) keyEquivalent:@"x"];
+    [edit addItemWithTitle:RLPTr(@"拷贝") action:@selector(copy:) keyEquivalent:@"c"];
+    [edit addItemWithTitle:RLPTr(@"粘贴") action:@selector(paste:) keyEquivalent:@"v"];
+    [edit addItemWithTitle:RLPTr(@"全选") action:@selector(selectAll:) keyEquivalent:@"a"];
     editItem.submenu = edit;
     [bar addItem:editItem];
 
     NSMenuItem *playItem = [[NSMenuItem alloc] init];
-    NSMenu *play = [[NSMenu alloc] initWithTitle:@"播放"];
-    NSMenuItem *toggle = [play addItemWithTitle:@"播放 / 暂停" action:@selector(menuPlayPause:) keyEquivalent:@" "];
+    NSMenu *play = [[NSMenu alloc] initWithTitle:RLPTr(@"播放")];
+    NSMenuItem *toggle = [play addItemWithTitle:RLPTr(@"播放 / 暂停") action:@selector(menuPlayPause:) keyEquivalent:@" "];
     toggle.target = self;
-    NSMenuItem *next = [play addItemWithTitle:@"下一首" action:@selector(menuNext:) keyEquivalent:[NSString stringWithFormat:@"%C", (unichar)NSRightArrowFunctionKey]];
+    NSMenuItem *next = [play addItemWithTitle:RLPTr(@"下一首") action:@selector(menuNext:) keyEquivalent:[NSString stringWithFormat:@"%C", (unichar)NSRightArrowFunctionKey]];
     next.keyEquivalentModifierMask = NSEventModifierFlagCommand;
     next.target = self;
-    NSMenuItem *prev = [play addItemWithTitle:@"上一首" action:@selector(menuPrev:) keyEquivalent:[NSString stringWithFormat:@"%C", (unichar)NSLeftArrowFunctionKey]];
+    NSMenuItem *prev = [play addItemWithTitle:RLPTr(@"上一首") action:@selector(menuPrev:) keyEquivalent:[NSString stringWithFormat:@"%C", (unichar)NSLeftArrowFunctionKey]];
     prev.keyEquivalentModifierMask = NSEventModifierFlagCommand;
     prev.target = self;
     playItem.submenu = play;
@@ -170,6 +175,11 @@ static void STCheck(BOOL ok, const char *what, NSString *detail) {
     [bar addItem:helpItem];
 
     NSApp.mainMenu = bar;
+}
+
+- (void)onLanguageChanged:(NSNotification *)note {
+    (void)note;
+    [self buildMenu];
 }
 
 - (void)menuPlayPause:(id)sender { [self.mainWC.playbackBar playPause]; }

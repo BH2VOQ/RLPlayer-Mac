@@ -853,7 +853,7 @@ if(APPLE)
   add_test(NAME native_update_result_lifetime COMMAND test_native_update_result_lifetime)
   set_tests_properties(native_update_result_lifetime PROPERTIES TIMEOUT 120)
 
-  # 界面语言：启动时应用 <state>/rlplayer-settings.conf 的 lang；切换时如实挂账「重启生效」。
+  # 界面语言：启动时应用持久化 lang；切换时实时刷新并保留当前编辑状态。
   # 判据先红后绿见 tests/test_native_lang.mm 文件头；真核心 + 真设置页真控件，不出声。
   add_executable(test_native_lang tests/test_native_lang.mm
     tools/native_ui/RLPSettingsViewController.mm tools/native_ui/RLPSettingsLayout.mm
@@ -2505,6 +2505,14 @@ if(APPLE)
   add_test(NAME native_navigation_contract COMMAND test_native_navigation_contract)
   set_tests_properties(native_navigation_contract PROPERTIES TIMEOUT 240)
 
+  add_executable(test_native_language_pages tests/test_native_language_pages.mm ${_nav_sources})
+  target_compile_options(test_native_language_pages PRIVATE -fobjc-arc)
+  target_compile_definitions(test_native_language_pages PRIVATE RL_WITH_UPDATE=1)
+  target_include_directories(test_native_language_pages PRIVATE src tools tools/native_ui)
+  target_link_libraries(test_native_language_pages PRIVATE ${_nav_libs})
+  add_test(NAME native_language_pages COMMAND test_native_language_pages)
+  set_tests_properties(native_language_pages PROPERTIES TIMEOUT 180)
+
   get_target_property(_filter_sources test_workbench SOURCES)
   list(FILTER _filter_sources EXCLUDE REGEX "tests/test_workbench[.]mm$")
   add_executable(test_native_filter_selection_contract tests/test_native_filter_selection_contract.mm ${_filter_sources})
@@ -2526,6 +2534,7 @@ if(APPLE)
   set_tests_properties(native_settings_readback_contract PROPERTIES TIMEOUT 180)
 
   add_executable(test_native_playback_async_contract tests/test_native_playback_async_contract.mm
+    tools/native_ui/RLPRightDrawer.mm tools/native_ui/RLPLyrics.mm
     tools/native_ui/RLPCoreClient.mm tools/native_ui/RLPPlaybackBarView.mm
     tools/native_ui/RLPQuickStartViewController.mm tools/native_ui/RLPPageViewController.mm
     tools/native_ui/RLPListeningRoom.mm tools/native_ui/RLPSignalChain.mm

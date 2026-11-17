@@ -7,6 +7,7 @@ NS_ASSUME_NONNULL_BEGIN
 
 /// 文件夹浏览（对应 /api/files：目录在前、音频文件在后）。
 @interface RLPFoldersViewController : RLPPageViewController
+- (void)applyLanguage;
 @end
 
 NS_ASSUME_NONNULL_END

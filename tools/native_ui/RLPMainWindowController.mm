@@ -334,6 +334,10 @@ static NSString *RLPPageIdentifier(NSString *key) {
                                              selector:@selector(onThemeChanged:)
                                                  name:RLPThemeDidChangeNotification
                                                object:nil];
+    [[NSNotificationCenter defaultCenter] addObserver:self
+                                             selector:@selector(onLanguageChanged:)
+                                                 name:RLPLanguageDidChangeNotification
+                                               object:nil];
     [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(onOpenAlbum:)
                                                  name:RLPOpenAlbumNotification object:nil];
     [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(onOpenArtist:)
@@ -525,7 +529,10 @@ static NSString *RLPPageIdentifier(NSString *key) {
         title = @"数字音乐台";
     else if ([self.currentContent respondsToSelector:@selector(pageTitle)])
         title = [(id)self.currentContent pageTitle];
-    self.pageTitle.stringValue = title.length ? RLPTr(title) : @"";
+    const BOOL dataTitle = [self.currentContent isKindOfClass:RLPAlbumDetailViewController.class] ||
+                           [self.currentContent isKindOfClass:RLPArtistDetailViewController.class] ||
+                           [self.currentContent isKindOfClass:RLPPlaylistsViewController.class];
+    self.pageTitle.stringValue = title.length ? (dataTitle ? title : RLPTr(title)) : @"";
     // 计数先清空，随后由页面的 activate 重新上报（调用点保证"先 sync 再 activate"）。
     // 之前顺序反了（activate 上报 → sync 清空）⟹ 顶栏计数一直是空的。
     self.pageCount.stringValue = @"";
@@ -953,6 +960,83 @@ static NSString *RLPPageIdentifier(NSString *key) {
         if ([vc respondsToSelector:@selector(applyTheme)]) [(id)vc applyTheme];
     }
     if ([self.currentContent respondsToSelector:@selector(applyTheme)]) [(id)self.currentContent applyTheme];
+}
+
+#pragma mark - 语言实时切换
+
+- (nullable NSString *)zhTitleForRouteCacheKey:(NSString *)cacheKey {
+    static NSDictionary<NSString *, NSString *> *titles;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        titles = @{
+            @"albums":         @"专辑",
+            @"artists":        @"艺术家",
+            @"tracks":         @"曲目",
+            @"folders":        @"文件夹",
+            @"streaming":      @"流媒体",
+            @"queue":          @"播放队列",
+            @"recent":         @"最近播放",
+            @"favorites":      @"我的最爱",
+            @"playlists":      @"歌单",
+            @"station:listen": @"聆听室",
+            @"station:pro":    @"数字音乐台",
+            @"settings":       @"设置",
+        };
+    });
+    return titles[cacheKey];
+}
+
+- (void)onLanguageChanged:(NSNotification *)note {
+    (void)note;
+    self.search.placeholderString = RLPTr(@"搜索曲目 / 专辑 / 艺术家");
+    self.topQueueBtn.toolTip = RLPTr(@"播放队列");
+    self.topScanBtn.toolTip = RLPTr(@"重新扫描音乐库");
+    self.topNpBtn.toolTip = RLPTr(@"正在播放");
+    if (self.webBackButton) self.webBackButton.toolTip = RLPTr(@"返回上一页");
+    [self.modeControl setLabel:RLPTr(@"聆听") forSegment:0];
+    [self.modeControl setLabel:RLPTr(@"专业") forSegment:1];
+
+    [self.sidebar applyLanguage];
+    [self.playbackBar applyLanguage];
+    [self.rightDrawer applyLanguage];
+    if (self.npPage.isViewLoaded && [self.npPage respondsToSelector:@selector(applyLanguage)]) {
+        [(id)self.npPage applyLanguage];
+    }
+    NSMutableOrderedSet<NSViewController *> *languagePages = [NSMutableOrderedSet orderedSetWithArray:self.pageCache.allValues];
+    for (NSDictionary *entry in self.rowStack) {
+        NSViewController *vc = entry[@"vc"];
+        if ([vc isKindOfClass:NSViewController.class]) [languagePages addObject:vc];
+    }
+    if (self.worksPage) [languagePages addObject:self.worksPage];
+    if (self.currentContent) [languagePages addObject:self.currentContent];
+    for (NSViewController *vc in languagePages) {
+        if ([vc respondsToSelector:@selector(applyLanguage)]) [(id)vc applyLanguage];
+    }
+
+    // 顶栏标题：仅翻译已知静态路由/页面标题，绝不误翻译用户专辑名/艺术家名/歌单名
+    NSString *resolvedTitle = nil;
+    if ([self.currentContent isKindOfClass:[RLPWorkbenchViewController class]]) {
+        resolvedTitle = RLPTr(@"数字音乐台");
+    } else if (self.currentContent == self.npPage) {
+        resolvedTitle = RLPTr(@"正在播放");
+    } else if ([self.currentContent isKindOfClass:[RLPWorksViewController class]]) {
+        resolvedTitle = RLPTr(@"古典作品 · 演绎版本");
+    } else if ([self.currentContent isKindOfClass:[RLPPlaylistsViewController class]]) {
+        resolvedTitle = [(id)self.currentContent pageTitle];
+    } else {
+        for (NSString *ck in self.pageCache) {
+            if (self.pageCache[ck] == self.currentContent) {
+                NSString *zh = [self zhTitleForRouteCacheKey:ck];
+                if (zh.length) resolvedTitle = RLPTr(zh);
+                break;
+            }
+        }
+    }
+    if (resolvedTitle.length) {
+        self.pageTitle.stringValue = resolvedTitle;
+        [self.pageTitle sizeToFit];
+        [(RLPTopbarView *)self.topbar setNeedsLayout:YES];
+    }
 }
 
 #pragma mark - 聆听 / 专业双模式

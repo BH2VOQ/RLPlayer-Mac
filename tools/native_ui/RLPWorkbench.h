@@ -89,4 +89,23 @@ NSString *_Nullable RLPWorkbenchFilterOverrideSummary(NSDictionary *_Nullable se
 /// 每项包含 @{@"group": ..., @"key": ..., @"label": ..., @"value": ...}。
 NSArray<NSDictionary<NSString *, NSString *> *> *RLPWorkbenchMonitorRows(NSDictionary *_Nullable status);
 
+/// 是否可分析的本地音频路径（排除空串、http/https/upnp/airplay 等流媒体路径）。
+BOOL RLPWorkbenchIsLocalAudioPath(NSString *_Nullable path);
+
+/// 解开 /api/health 外层（优先取 health 子字典，否则返回顶层）。
+NSDictionary *_Nullable RLPWorkbenchUnwrapHealth(NSDictionary *_Nullable json);
+
+/// 由 /api/health 结果推导「动态 / 音质 / 假无损」三摘要与 incomplete 标志。
+/// 返回 @{@"dyn": ..., @"qual": ..., @"fake": ..., @"incomplete": @"1"|@"0"}。
+NSDictionary<NSString *, NSString *> *RLPWorkbenchAnalysisSummaries(NSDictionary *_Nullable health);
+
+/// 自动分析去重判定：仅在总开关与 autoanl 均开启、正在播放、本地文件、未缓存且本曲未跑过时返回 YES。
+BOOL RLPWorkbenchShouldAutoAnalyze(NSString *_Nullable path,
+                                   BOOL playing,
+                                   BOOL masterEnabled,
+                                   BOOL autoEnabled,
+                                   NSString *_Nullable alreadyDonePath,
+                                   BOOL busy,
+                                   BOOL hasResult);
+
 NS_ASSUME_NONNULL_END

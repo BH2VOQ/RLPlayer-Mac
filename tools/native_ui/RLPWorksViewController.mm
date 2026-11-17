@@ -30,6 +30,15 @@
 @property (nonatomic, copy) NSString *lastComposer;
 @property (nonatomic, strong) NSMutableArray<NSTextField *> *dynamicLabels;
 @property (nonatomic, copy) NSArray<NSArray<NSString *> *> *sampleData;
+@property (nonatomic, strong) NSTextField *bigTitleLabel;
+@property (nonatomic, strong) NSTextField *descLabel;
+@property (nonatomic, strong) NSTextField *workTitleCaption;
+@property (nonatomic, strong) NSTextField *composerCaption;
+@property (nonatomic, strong) NSButton *searchBtn;
+@property (nonatomic, strong) NSButton *refreshBtn;
+@property (nonatomic, strong) NSTextField *chipLabel;
+@property (nonatomic, strong) NSMutableArray<NSButton *> *sampleButtons;
+@property (nonatomic, copy, nullable) NSDictionary *lastJSON;
 @end
 
 @implementation RLPWorksViewController
@@ -75,10 +84,12 @@
     // 页内大标题 + 说明（web head() 同口径）
     NSTextField *big = RLPLabel(RLPTr(@"古典作品 · 演绎版本"), t.display, t.hero);
     big.translatesAutoresizingMaskIntoConstraints = NO; big.tag = 0;
+    self.bigTitleLabel = big;
     [self.dynamicLabels addObject:big];
     [stack addArrangedSubview:big];
     NSTextField *desc = RLPLabel(RLPTr(@"按作品名查不同指挥/乐团/年代的录音版本"), t.body, t.mut);
     desc.translatesAutoresizingMaskIntoConstraints = NO; desc.tag = 1;
+    self.descLabel = desc;
     [self.dynamicLabels addObject:desc];
     [stack addArrangedSubview:desc];
 
@@ -106,8 +117,10 @@
 
     NSTextField *tl = RLPLabel(RLPTr(@"作品名称"), t.caption, t.mut);
     tl.translatesAutoresizingMaskIntoConstraints = NO; tl.tag = 1;
+    self.workTitleCaption = tl;
     NSTextField *cl = RLPLabel(RLPTr(@"作曲家（可选）"), t.caption, t.mut);
     cl.translatesAutoresizingMaskIntoConstraints = NO; cl.tag = 1;
+    self.composerCaption = cl;
     [self.dynamicLabels addObjectsFromArray:@[tl, cl]];
     self.titleField = [[NSTextField alloc] initWithFrame:NSZeroRect];
     self.titleField.placeholderString = RLPTr(@"例如 Boléro / Symphony No. 5");
@@ -128,9 +141,11 @@
     search.layer.backgroundColor = t.accent.CGColor;
     search.layer.cornerRadius = t.rSm;
     search.contentTintColor = NSColor.whiteColor;
+    self.searchBtn = search;
     NSButton *refresh = [NSButton buttonWithTitle:RLPTr(@"刷新") target:self action:@selector(onRefreshQuery:)];
     refresh.bezelStyle = NSBezelStyleRounded;
     refresh.identifier = @"works.refresh";
+    self.refreshBtn = refresh;
     for (NSView *v in @[tl, cl, self.titleField, self.composerField, search, refresh])
         [card addSubview:v];
     [NSLayoutConstraint activateConstraints:@[
@@ -157,6 +172,7 @@
     chips.translatesAutoresizingMaskIntoConstraints = NO;
     NSTextField *chipLabel = RLPLabel(RLPTr(@"示例作品："), t.small, t.mut);
     chipLabel.tag = 1;
+    self.chipLabel = chipLabel;
     [self.dynamicLabels addObject:chipLabel];
     [chips addArrangedSubview:chipLabel];
     NSArray<NSArray<NSString *> *> *samples = @[
@@ -166,6 +182,7 @@
         @[@"The Four Seasons", @"Antonio Vivaldi", RLPTr(@"四季（维瓦尔第）")],
         @[@"Symphony No. 5", @"Gustav Mahler", RLPTr(@"马勒第五交响曲")],
     ];
+    self.sampleButtons = [NSMutableArray array];
     for (NSInteger i = 0; i < (NSInteger)samples.count; ++i) {
         NSButton *b = [NSButton buttonWithTitle:samples[i][2] target:self action:@selector(onSampleChip:)];
         b.bezelStyle = NSBezelStyleRounded;
@@ -173,6 +190,7 @@
         b.tag = i;
         b.identifier = [NSString stringWithFormat:@"works.chip.%ld", (long)i];
         [chips addArrangedSubview:b];
+        [self.sampleButtons addObject:b];
     }
     [stack addArrangedSubview:chips];
     [chips.widthAnchor constraintEqualToAnchor:stack.widthAnchor constant:-48].active = YES;
@@ -272,6 +290,7 @@
 }
 
 - (void)renderResult:(NSDictionary *)json {
+    self.lastJSON = json;
     NSArray *perfs = [json[@"performances"] isKindOfClass:[NSArray class]] ? json[@"performances"] : @[];
     const BOOL ok = json && [json[@"ok"] boolValue] && perfs.count > 0;
     RLPTheme *t = [RLPTheme current];
@@ -387,6 +406,30 @@
             tf.textColor = (i == 0) ? t.text : (i == 1 ? t.accentText : t.mut);
             ++i;
         }
+    }
+}
+
+- (void)applyLanguage {
+    self.pageTitle = RLPTr(@"古典作品 · 演绎版本");
+    if (!self.isViewLoaded) return;
+    self.bigTitleLabel.stringValue = RLPTr(@"古典作品 · 演绎版本");
+    self.descLabel.stringValue = RLPTr(@"按作品名查不同指挥/乐团/年代的录音版本");
+    self.backNpBtn.title = RLPTr(@"← 返回正在播放");
+    self.workTitleCaption.stringValue = RLPTr(@"作品名称");
+    self.composerCaption.stringValue = RLPTr(@"作曲家（可选）");
+    self.titleField.placeholderString = RLPTr(@"例如 Boléro / Symphony No. 5");
+    self.composerField.placeholderString = RLPTr(@"例如 Maurice Ravel / Beethoven");
+    self.searchBtn.title = RLPTr(@"查询版本");
+    self.refreshBtn.title = RLPTr(@"刷新");
+    self.chipLabel.stringValue = RLPTr(@"示例作品：");
+    NSArray<NSString *> *chipTitles = @[
+        @"Boléro（拉威尔）", @"贝多芬第五交响曲", @"勃兰登堡协奏曲", @"四季（维瓦尔第）", @"马勒第五交响曲"
+    ];
+    for (NSUInteger i = 0; i < self.sampleButtons.count && i < chipTitles.count; ++i) {
+        self.sampleButtons[i].title = RLPTr(chipTitles[i]);
+    }
+    if (self.lastJSON) {
+        [self renderResult:self.lastJSON];
     }
 }
 

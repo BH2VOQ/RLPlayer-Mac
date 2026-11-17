@@ -11,6 +11,7 @@ NS_ASSUME_NONNULL_BEGIN
 @interface RLPWorksViewController : RLPPageViewController
 /// 打开并检索指定作品（composer 可空）。fromNowPlaying=YES 时给「返回正在播放」按钮。
 - (void)loadWork:(NSString *)title composer:(nullable NSString *)composer fromNowPlaying:(BOOL)fromNp;
+- (void)applyLanguage;
 @end
 
 NS_ASSUME_NONNULL_END

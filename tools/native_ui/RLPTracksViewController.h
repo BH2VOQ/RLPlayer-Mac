@@ -11,6 +11,7 @@ NS_ASSUME_NONNULL_BEGIN
 
 /// 外部或主窗口发起的按关键词检索（重置 limit 并立即执行）。
 - (void)searchWithQuery:(NSString *)query;
+- (void)applyLanguage;
 
 @end
 

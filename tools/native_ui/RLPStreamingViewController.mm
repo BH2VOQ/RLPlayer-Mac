@@ -213,6 +213,13 @@
     // 未配置服务器时的整页空态卡（web loadRemote 的 err 分支：标题 + 说明 + 去设置 + 重试）。
     NSView *_emptyCard;
     NSTextField *_emptyHint;
+    NSTextField *_emptyTitle;
+    NSButton *_emptyGoBtn;
+    NSButton *_emptyRetryBtn;
+    NSButton *_refreshBtn;
+    NSButton *_pingBtn;
+    NSString *_lastEmptyReason;
+    BOOL _hasLoaded;
 }
 @end
 
@@ -239,10 +246,12 @@
     [toolbar addView:_serverPicker inGravity:NSStackViewGravityLeading];
 
     NSButton *refreshBtn = RLPSymbolButton(@"arrow.clockwise", RLPTr(@"刷新"), self, @selector(refresh:));
+    _refreshBtn = refreshBtn;
     [toolbar addView:refreshBtn inGravity:NSStackViewGravityLeading];
 
     NSButton *pingBtn = [NSButton buttonWithTitle:RLPTr(@"测试连接") target:self action:@selector(onPing:)];
     pingBtn.bezelStyle = NSBezelStyleRounded;
+    _pingBtn = pingBtn;
     [toolbar addView:pingBtn inGravity:NSStackViewGravityLeading];
 
     _backButton = RLPSymbolButton(@"arrow.left", RLPTr(@"上一级"), self, @selector(goBack:));
@@ -326,7 +335,10 @@
         retry.identifier = @"remote.empty.retry";
         retry.translatesAutoresizingMaskIntoConstraints = NO;
         for (NSView *v in @[title, hint, go, retry]) [_emptyCard addSubview:v];
+        _emptyTitle = title;
         _emptyHint = hint;
+        _emptyGoBtn = go;
+        _emptyRetryBtn = retry;
         [NSLayoutConstraint activateConstraints:@[
             [title.leadingAnchor constraintEqualToAnchor:_emptyCard.leadingAnchor constant:26],
             [title.trailingAnchor constraintEqualToAnchor:_emptyCard.trailingAnchor constant:-26],
@@ -368,6 +380,7 @@
     _gridScroll.hidden = !configured || !_gridMode;
     _listScroll.hidden = !configured || _gridMode;
     if (configured) return;
+    _lastEmptyReason = [reason copy];
     _emptyHint.stringValue = [NSString stringWithFormat:@"%@\n%@",
         reason.length ? reason : RLPTr(@"还没有流媒体服务器"),
         RLPTr(@"支持 Navidrome / Subsonic / Emby（只取原始文件，不转码）。先在「设置 → 流媒体」添加并启用一台服务器，保存后回到这里即可浏览。")];
@@ -670,5 +683,44 @@
 }
 
 - (void)activate { [super activate]; }
+
+- (void)applyLanguage {
+    self.pageTitle = RLPTr(@"流媒体");
+    if (!self.isViewLoaded) return;
+    _refreshBtn.toolTip = RLPTr(@"刷新");
+    _pingBtn.title = RLPTr(@"测试连接");
+    _backButton.toolTip = RLPTr(@"上一级");
+    [_viewToggle setLabel:RLPTr(@"网格") forSegment:0];
+    [_viewToggle setLabel:RLPTr(@"列表") forSegment:1];
+    _emptyTitle.stringValue = RLPTr(@"还没有可浏览的流媒体服务器");
+    _emptyGoBtn.title = RLPTr(@"去设置里配置");
+    _emptyRetryBtn.title = RLPTr(@"重试");
+    if (!_emptyCard.hidden) {
+        NSString *r = _lastEmptyReason.length ? _lastEmptyReason : RLPTr(@"还没有流媒体服务器");
+        _emptyHint.stringValue = [NSString stringWithFormat:@"%@\n%@", r,
+            RLPTr(@"支持 Navidrome / Subsonic / Emby（只取原始文件，不转码）。先在「设置 → 流媒体」添加并启用一台服务器，保存后回到这里即可浏览。")];
+    }
+    if (_servers.count == 0 && !_emptyCard.hidden) {
+        [self setSubtitle:RLPTr(@"未配置服务器")];
+    } else if (_items.count > 0) {
+        [self setSubtitle:[NSString stringWithFormat:RLPTr(@"%ld 项"), (long)_items.count]];
+    }
+    NSIndexSet *tSel = [_tableView.selectedRowIndexes copy];
+    NSPoint tOrigin = _listScroll ? _listScroll.contentView.bounds.origin : NSZeroPoint;
+    [_tableView reloadData];
+    if (tSel.count) [_tableView selectRowIndexes:tSel byExtendingSelection:NO];
+    if (_listScroll) {
+        [_listScroll.contentView scrollToPoint:tOrigin];
+        [_listScroll reflectScrolledClipView:_listScroll.contentView];
+    }
+    NSSet<NSIndexPath *> *gSel = [_grid.selectionIndexPaths copy];
+    NSPoint gOrigin = _gridScroll ? _gridScroll.contentView.bounds.origin : NSZeroPoint;
+    [_grid reloadData];
+    if (gSel.count) _grid.selectionIndexPaths = gSel;
+    if (_gridScroll) {
+        [_gridScroll.contentView scrollToPoint:gOrigin];
+        [_gridScroll reflectScrolledClipView:_gridScroll.contentView];
+    }
+}
 
 @end

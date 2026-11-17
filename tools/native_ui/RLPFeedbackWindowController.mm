@@ -27,6 +27,8 @@
 @property (nonatomic, strong) NSTextView *body;
 @property (nonatomic, strong) NSSwitch *attachDiag;
 @property (nonatomic, strong) NSButton *submit;
+@property (nonatomic, strong) NSTextField *hintLabel;
+@property (nonatomic, strong) NSTextField *diagLabel;
 @property (nonatomic, strong) NSTextField *status;
 @property (nonatomic, assign) BOOL sending;
 @end
@@ -50,8 +52,25 @@
     w.releasedWhenClosed = NO;
     [w center];
     self = [super initWithWindow:w];
-    if (self) [self build];
+    if (self) {
+        [self build];
+        [[NSNotificationCenter defaultCenter] addObserver:self
+                                                 selector:@selector(applyLanguage)
+                                                     name:RLPLanguageDidChangeNotification
+                                                   object:nil];
+    }
     return self;
+}
+
+- (void)dealloc {
+    [[NSNotificationCenter defaultCenter] removeObserver:self];
+}
+
+- (void)applyLanguage {
+    self.window.title = RLPTr(@"反馈");
+    self.hintLabel.stringValue = RLPTr(@"描述你遇到的问题：做了什么、期望什么、实际发生了什么。可附诊断包（已脱敏）。");
+    self.diagLabel.stringValue = RLPTr(@"附诊断包（版本/系统/日志，已脱敏）");
+    self.submit.title = RLPTr(@"提交反馈");
 }
 
 - (void)build {
@@ -66,6 +85,7 @@
     hint.translatesAutoresizingMaskIntoConstraints = NO;
     hint.maximumNumberOfLines = 2;
     hint.lineBreakMode = NSLineBreakByWordWrapping;
+    self.hintLabel = hint;
     [root addSubview:hint];
 
     NSScrollView *sc = [[NSScrollView alloc] initWithFrame:NSZeroRect];
@@ -85,6 +105,7 @@
     self.attachDiag.translatesAutoresizingMaskIntoConstraints = NO;
     NSTextField *diagLabel = RLPLabel(RLPTr(@"附诊断包（版本/系统/日志，已脱敏）"), t.small, t.text);
     diagLabel.translatesAutoresizingMaskIntoConstraints = NO;
+    self.diagLabel = diagLabel;
     [root addSubview:self.attachDiag];
     [root addSubview:diagLabel];
 

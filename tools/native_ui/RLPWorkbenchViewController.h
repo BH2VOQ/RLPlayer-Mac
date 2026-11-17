@@ -9,6 +9,7 @@ NS_ASSUME_NONNULL_BEGIN
 /// 双模式拆掉后**当前无侧栏入口**，按铁律①（功能不删）保留为独立组件。
 /// 面向发烧友：凡是会反复调的东西都摆在这里，当场切换，不用进设置。
 @interface RLPWorkbenchViewController : RLPPageViewController
+- (void)applyLanguage;
 @end
 
 NS_ASSUME_NONNULL_END

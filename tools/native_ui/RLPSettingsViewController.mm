@@ -268,8 +268,6 @@ static NSStackView *RLPSRow(NSString *label, NSView *control, NSString *hint, RL
 /// 已经从后端读到真值的键：没读到之前不写回，避免用 UI 默认值覆盖用户真实设置。
 @property (nonatomic, strong) NSMutableSet<NSString *> *loadedKeys;
 @property (nonatomic, strong) NSTextField *statusLine;
-/// 语言切换保存成功后的提示（原生没有便宜的整树重建入口，如实挂账「重启生效」）。
-- (void)announceLanguageRequiresRestart;
 
 // ---- 输出页（web data-g=out）----
 @property (nonatomic, strong) NSPopUpButton *backendPopup;
@@ -486,6 +484,7 @@ static NSStackView *RLPSRow(NSString *label, NSView *control, NSString *hint, RL
 @property (nonatomic, strong) NSSecureTextField *searchKey;
 @property (nonatomic, strong) NSTextField *searchStatus;
 @property (nonatomic, strong) NSPopUpButton *llmProviderPopup;
+@property (nonatomic, copy) NSString *lastAppliedLang;
 
 @end
 
@@ -517,11 +516,16 @@ static NSStackView *RLPSRow(NSString *label, NSView *control, NSString *hint, RL
     RLPTheme *t = [RLPTheme current];
     NSView *host = self.contentView;
 
+    self.lastAppliedLang = RLPLanguage();
     // U16：工作台应用命名配置档后，设置页的读数必须跟着重读（同一进程内的另一份视图）。
     // 走既有通知机制，不让两个页面互相持有；observer 在 dealloc 统一移除（见上）。
     [[NSNotificationCenter defaultCenter] addObserver:self
                                              selector:@selector(onExternalSettingsChanged:)
                                                  name:RLPSettingsChangedNotification
+                                               object:nil];
+    [[NSNotificationCenter defaultCenter] addObserver:self
+                                             selector:@selector(onLanguageChanged:)
+                                                 name:RLPLanguageDidChangeNotification
                                                object:nil];
 
     self.groupTabs = [NSSegmentedControl segmentedControlWithLabels:@[RLPTr(@"通用"), RLPTr(@"音频处理")]
@@ -1917,14 +1921,11 @@ static NSString *RLPControlIdentifier(NSString *key) {
 
     self.langPopup = [self popupForKey:@"sp_lang" items:@[ @"zh", @"en" ]
                                 action:@selector(onLanguage:)];
-    // 回显的是**落盘真相**（conf 的 lang），不是运行时 gLang：原生语言切换要重启才生效，
-    // 保存后重新进这一页必须仍显示刚选的那一项 —— 否则会被运行时旧值"打回"，
-    // 看上去像设置没保存（用户实测口径）。
-    NSString *savedLang = RLPLanguageFromConf();
-    if (!savedLang.length) savedLang = RLPLanguage();
-    [self.langPopup selectItemAtIndex:[savedLang isEqualToString:@"en"] ? 1 : 0];
+    NSString *curLang = RLPLanguage();
+    if (!curLang.length) curLang = RLPLanguageFromConf() ?: @"zh";
+    [self.langPopup selectItemAtIndex:[curLang isEqualToString:@"en"] ? 1 : 0];
     [stack addArrangedSubview:RLPSRow(RLPTr(@"语言"), self.langPopup,
-        RLPTr(@"界面语言将在重启后生效"), t)];
+        RLPTr(@"切换界面显示语言，保存后生效"), t)];
 
     // ---- GPU ----
     self.gpuGroup = (RLPSettingsGroup *)RLPSGroup(RLPTr(@"GPU"),
@@ -2628,22 +2629,14 @@ static NSString *RLPControlIdentifier(NSString *key) {
 
 - (void)onLanguage:(id)sender {
     NSString *lang = (self.langPopup.indexOfSelectedItem == 1) ? @"en" : @"zh";
-    // 保存**成功**后才提示「重启后生效」：后端把 lang 合进 conf 是它的前提；
-    // 被 422 拒绝 / 没写进 conf 时还这么提示就是谎报（postKey 的 completion 只传真实 ok）。
     __weak __typeof__(self) weakSelf = self;
     [self postKey:@"lang" value:lang completion:^(BOOL ok) {
         __typeof__(self) self_ = weakSelf;
         if (!self_ || !ok) return;
-        [self_ announceLanguageRequiresRestart];
+        RLPSetLanguage(lang);
+        [[NSNotificationCenter defaultCenter] postNotificationName:RLPLanguageDidChangeNotification object:self_];
+        RLPToast(RLPTr(@"已保存"));
     }];
-}
-
-/// 语言切换保存成功后的落点。web 版是 location.reload()（整页重建）；
-/// 原生主窗口/侧栏/当前页的文案都在构造时调用了 RLPTr，没有便宜的整树重建入口 ——
-/// 只改 gLang 会让新旧文案中英混排，比"重启后生效"更糟。所以如实提示，
-/// 等下次启动由 RLPApplyLanguageFromConf() 统一应用（那时菜单/窗口都还没建）。
-- (void)announceLanguageRequiresRestart {
-    RLPToast(@"界面语言将在重启后生效");
 }
 
 - (void)onBackend:(id)sender {
@@ -4336,6 +4329,107 @@ static NSUInteger RLPUTF8Bytes(NSString *s) {
     [self.serversView applyTheme];
     [self.metaSourcesView applyTheme];
     [self.libStatsView applyTheme];
+}
+
+#pragma mark - 语言实时切换
+
+static void RLPSettingsCollectViews(NSView *v, NSMutableArray<NSView *> *out) {
+    if (!v) return;
+    [out addObject:v];
+    for (NSView *s in v.subviews) RLPSettingsCollectViews(s, out);
+}
+
+- (void)onLanguageChanged:(NSNotification *)note {
+    (void)note;
+    [self applyLanguage];
+}
+
+- (void)applyLanguage {
+    NSString *curLang = RLPLanguage();
+    if ([self.lastAppliedLang isEqualToString:curLang]) return;
+    self.lastAppliedLang = curLang;
+
+    // 1. 保存当前页签滚动位置、焦点与可编辑草稿
+    NSScrollView *oldScroll = nil;
+    for (NSView *sub in self.paneHost.subviews) {
+        if ([sub isKindOfClass:[NSScrollView class]]) { oldScroll = (NSScrollView *)sub; break; }
+    }
+    const NSPoint savedOrigin = oldScroll ? oldScroll.contentView.bounds.origin : NSZeroPoint;
+
+    NSString *focusedId = nil;
+    NSRange savedSelection = NSMakeRange(NSNotFound, 0);
+    NSResponder *fr = self.view.window.firstResponder;
+    if ([fr isKindOfClass:[NSTextView class]]) savedSelection = ((NSTextView *)fr).selectedRange;
+    if ([fr isKindOfClass:[NSTextView class]] && [((NSTextView *)fr).delegate isKindOfClass:[NSView class]]) {
+        NSView *owner = (NSView *)((NSTextView *)fr).delegate;
+        if ([owner isDescendantOf:self.paneHost] && owner.identifier.length) focusedId = owner.identifier;
+    } else if ([fr isKindOfClass:[NSView class]] && [(NSView *)fr isDescendantOf:self.paneHost]) {
+        focusedId = ((NSView *)fr).identifier;
+    }
+
+    NSMutableDictionary<NSString *, NSString *> *drafts = [NSMutableDictionary dictionary];
+    NSMutableArray<NSView *> *oldViews = [NSMutableArray array];
+    RLPSettingsCollectViews(self.paneHost, oldViews);
+    for (NSView *v in oldViews) {
+        if (!v.identifier.length) continue;
+        if ([v isKindOfClass:[NSTextField class]] && ((NSTextField *)v).isEditable) {
+            drafts[v.identifier] = ((NSTextField *)v).stringValue ?: @"";
+        }
+    }
+    NSString *fbDraft = (self.tab == RLPSTabDiag && self.fbText) ? [self.fbText.string copy] : nil;
+
+    // 2. 原地刷新页头与页签，重建页签内容
+    self.pageTitle = RLPTr(@"设置");
+    [self.groupTabs setLabel:RLPTr(@"通用") forSegment:0];
+    [self.groupTabs setLabel:RLPTr(@"音频处理") forSegment:1];
+    self.modeHintLabel.stringValue = RLPTr(@"音频处理主控位于专业模式「数字音乐台」，此处保留完整参数与深链入口");
+    self.workbenchBtn.title = RLPTr(@"打开专业工作台");
+
+    [self.paneCache removeAllObjects];
+    [self rebuildTabs];
+    [self showTab:self.tab];
+
+    if (self.langPopup) {
+        [self.langPopup selectItemAtIndex:[curLang isEqualToString:@"en"] ? 1 : 0];
+    }
+
+    // 3. 恢复草稿、滚动位置与焦点
+    NSMutableArray<NSView *> *newViews = [NSMutableArray array];
+    RLPSettingsCollectViews(self.paneHost, newViews);
+    NSView *focusTarget = nil;
+    for (NSView *v in newViews) {
+        if (!v.identifier.length) continue;
+        NSString *draft = drafts[v.identifier];
+        if (draft && [v isKindOfClass:[NSTextField class]] && ((NSTextField *)v).isEditable) {
+            ((NSTextField *)v).stringValue = draft;
+        }
+        if (focusedId.length && [v.identifier isEqualToString:focusedId]) {
+            focusTarget = v;
+        }
+    }
+    if (fbDraft.length && self.tab == RLPSTabDiag && self.fbText) {
+        self.fbText.string = fbDraft;
+        [self updateFbCount];
+    }
+
+    [self.paneHost layoutSubtreeIfNeeded];
+    NSScrollView *newScroll = nil;
+    for (NSView *sub in self.paneHost.subviews) {
+        if ([sub isKindOfClass:[NSScrollView class]]) { newScroll = (NSScrollView *)sub; break; }
+    }
+    if (newScroll && oldScroll) {
+        [newScroll.contentView scrollToPoint:savedOrigin];
+        [newScroll reflectScrolledClipView:newScroll.contentView];
+    }
+    if (focusTarget && self.view.window && [focusTarget acceptsFirstResponder]) {
+        [self.view.window makeFirstResponder:focusTarget];
+        if (savedSelection.location != NSNotFound &&
+            [self.view.window.firstResponder isKindOfClass:[NSTextView class]]) {
+            NSTextView *editor = (NSTextView *)self.view.window.firstResponder;
+            NSUInteger start = MIN(savedSelection.location, editor.string.length);
+            editor.selectedRange = NSMakeRange(start, MIN(savedSelection.length, editor.string.length - start));
+        }
+    }
 }
 
 @end

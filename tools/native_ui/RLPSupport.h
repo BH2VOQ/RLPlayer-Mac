@@ -93,6 +93,10 @@ extern NSNotificationName const RLPOpenArtistNotification;  // object = artist n
 extern NSNotificationName const RLPBackNotification;
 /// 设置/预设/配置档成功保存后的跨页面同步通知（object = 发起保存的控制器，接收方忽略 object == self 防环）。
 extern NSNotificationName const RLPSettingsChangedNotification;
+/// 运行时界面语言变更通知（object = 发起切换的控制器或 nil）。
+extern NSNotificationName const RLPLanguageDidChangeNotification;
+/// 播放控制动作（play/lib/play/skip/pause/stop）开始通知：用于作废在途 /api/status 轮询。
+extern NSNotificationName const RLPPlaybackActionStartedNotification;
 /// 收藏状态变更后的跨页面同步通知（object = 发起变更的控制器或锚点视图，接收方忽略 object == self 防环）。
 extern NSNotificationName const RLPFavoritesChangedNotification;
 /// 队列内容变更后的跨页面同步通知（如单曲入队成功）。
@@ -109,6 +113,12 @@ void RLPRequestOpenArtist(NSString *artistName);
 void RLPRequestBack(void);
 
 /// 播放/入队动作（与 web 版同一 /api 契约，不复制播放逻辑）。
+uint64_t RLPBeginPlaybackAction(void);
+uint64_t RLPPlaybackActionEpoch(void);
+BOOL RLPHandlePlaybackActionResponse(NSDictionary * _Nullable json, NSString * _Nullable fallbackError);
+void RLPReportPlaybackStatusError(NSString * _Nullable error);
+void RLPReportPlaybackStatusErrorForTrack(NSString * _Nullable error, NSString * _Nullable path);
+void RLPResetPlaybackErrorState(void);
 void RLPPlayPath(NSString *path);
 /// CUE 分轨：cs/ce >= 0 时带区间（web playPath(file, cs, ce) 同契约），否则退化为整轨。
 void RLPPlayPathCue(NSString *path, double cs, double ce);

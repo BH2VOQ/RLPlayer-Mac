@@ -288,6 +288,16 @@
 @property (nonatomic, strong, nullable) NSTimer *opraSearchTimer;
 /// 上一次已执行的查询（重复触发同一个关键词时不再重排卡片）。
 @property (nonatomic, copy) NSString *opraLastQuery;
+@property (nonatomic, strong) NSTextField *bypassLabel;
+@property (nonatomic, strong) NSTextField *preampLabel;
+@property (nonatomic, strong) NSTextField *presetSectionLabel;
+@property (nonatomic, strong) NSMutableArray<NSButton *> *presetActionButtons;
+@property (nonatomic, strong) NSButton *autoPreButton;
+@property (nonatomic, strong) NSButton *flatButton;
+@property (nonatomic, strong) NSTextField *opraTitleLabel;
+@property (nonatomic, strong) NSTextField *opraDescLabel;
+@property (nonatomic, strong) NSButton *opraSearchButton;
+@property (nonatomic, strong) NSButton *opraCopyChip;
 @end
 
 /// web `.chip:hover{background:var(--hov);color:var(--txt);border-color:var(--acc)}` 的原生等价物。
@@ -417,8 +427,10 @@
     self.bypass.target = self;
     self.bypass.action = @selector(onBypass:);
     [top addArrangedSubview:self.bypass];
-    [top addArrangedSubview:RLPLabel(RLPTr(@"旁路（不改声音）"), t.body, t.text)];
-    [top addArrangedSubview:RLPLabel(RLPTr(@"前级"), t.body, t.text)];
+    self.bypassLabel = RLPLabel(RLPTr(@"旁路（不改声音）"), t.body, t.text);
+    [top addArrangedSubview:self.bypassLabel];
+    self.preampLabel = RLPLabel(RLPTr(@"前级"), t.body, t.text);
+    [top addArrangedSubview:self.preampLabel];
     self.preamp = [[NSTextField alloc] initWithFrame:NSZeroRect];
     self.preamp.identifier = @"peqPreamp";     // web #peqPreamp（行为扫描锚点）
     self.preamp.stringValue = @"0";
@@ -505,8 +517,9 @@
 
 - (void)buildPresetSection {
     RLPTheme *t = [RLPTheme current];
-    [self.stack addArrangedSubview:RLPLabel(RLPTr(@"PEQ 预设"),
-        [NSFont systemFontOfSize:13 weight:NSFontWeightSemibold], t.text)];
+    self.presetSectionLabel = RLPLabel(RLPTr(@"PEQ 预设"),
+        [NSFont systemFontOfSize:13 weight:NSFontWeightSemibold], t.text);
+    [self.stack addArrangedSubview:self.presetSectionLabel];
     NSStackView *row = [[NSStackView alloc] init];
     row.orientation = NSUserInterfaceLayoutOrientationHorizontal;
     row.spacing = 8;
@@ -517,12 +530,14 @@
     self.presetName.placeholderString = RLPTr(@"预设名");
     [[self.presetName.widthAnchor constraintEqualToConstant:150] setActive:YES];
     [row addArrangedSubview:self.presetName];
+    self.presetActionButtons = [NSMutableArray array];
     NSArray *acts = @[ @[RLPTr(@"加载"), @"load"], @[RLPTr(@"保存"), @"save"], @[RLPTr(@"删除"), @"delete"] ];
     for (NSArray *pair in acts) {
         NSButton *b = [NSButton buttonWithTitle:pair[0] target:self action:@selector(onPresetAction:)];
         b.bezelStyle = NSBezelStyleRounded;
         b.identifier = pair[1];
         [row addArrangedSubview:b];
+        [self.presetActionButtons addObject:b];
     }
     [self.stack addArrangedSubview:row];
 
@@ -536,11 +551,13 @@
     autoPre.bezelStyle = NSBezelStyleRounded;
     autoPre.identifier = @"peqAutoPre";
     autoPre.toolTip = RLPTr(@"把前级设为 -ceil(当前曲线峰值增益)，给 EQ 提升留出余量，避免数字削波");
+    self.autoPreButton = autoPre;
     [row2 addArrangedSubview:autoPre];
     NSButton *flat = [NSButton buttonWithTitle:RLPTr(@"重置 Flat")
                                         target:self action:@selector(onResetFlat:)];
     flat.bezelStyle = NSBezelStyleRounded;
     flat.identifier = @"peqReset";
+    self.flatButton = flat;
     [row2 addArrangedSubview:flat];
     [self.stack addArrangedSubview:row2];
 }
@@ -599,10 +616,12 @@
     self.opraSection.alignment = NSLayoutAttributeLeading;
     self.opraSection.spacing = 10;
     self.opraSection.translatesAutoresizingMaskIntoConstraints = NO;
-    [self.opraSection addArrangedSubview:RLPLabel(RLPTr(@"OPRA 耳机目标曲线"),
-        [NSFont systemFontOfSize:13 weight:NSFontWeightSemibold], t.text)];
-    [self.opraSection addArrangedSubview:RLPLabel(
-        RLPTr(@"输入耳机型号搜索；应用后会把 PEQ 换成该耳机的补偿曲线"), t.small, t.mut)];
+    self.opraTitleLabel = RLPLabel(RLPTr(@"OPRA 耳机目标曲线"),
+        [NSFont systemFontOfSize:13 weight:NSFontWeightSemibold], t.text);
+    [self.opraSection addArrangedSubview:self.opraTitleLabel];
+    self.opraDescLabel = RLPLabel(
+        RLPTr(@"输入耳机型号搜索；应用后会把 PEQ 换成该耳机的补偿曲线"), t.small, t.mut);
+    [self.opraSection addArrangedSubview:self.opraDescLabel];
 
     NSStackView *r1 = [[NSStackView alloc] init];
     r1.orientation = NSUserInterfaceLayoutOrientationHorizontal;
@@ -619,6 +638,7 @@
     NSButton *sb = [NSButton buttonWithTitle:RLPTr(@"搜索") target:self action:@selector(onOpraSearch:)];
     sb.bezelStyle = NSBezelStyleRounded;
     sb.identifier = @"opra.search";
+    self.opraSearchButton = sb;
     [r1 addArrangedSubview:sb];
     // web `sp_opra_copychip`：与搜索框同一行的官网链接芯片，点击复制（见 onCopyOpraLink:）。
     RLPChipHoverButton *copyChip = [RLPChipHoverButton buttonWithTitle:@"https://opra.roon.app/"
@@ -630,6 +650,7 @@
     copyChip.image = [NSImage imageWithSystemSymbolName:@"doc.on.doc"
                               accessibilityDescription:RLPTr(@"复制 OPRA 项目官网链接")];
     copyChip.imagePosition = NSImageLeading;
+    self.opraCopyChip = copyChip;
     [r1 addArrangedSubview:copyChip];
     [self.opraSection addArrangedSubview:r1];
 
@@ -1402,6 +1423,35 @@ static NSArray<NSDictionary *> *RLPOpraFilter(NSArray<NSDictionary *> *index, NS
     }
     if (n > 1) total += self.stack.spacing * (n - 1);
     return ceil(total);
+}
+
+- (void)applyLanguage {
+    self.bypassLabel.stringValue = RLPTr(@"旁路（不改声音）");
+    self.preampLabel.stringValue = RLPTr(@"前级");
+    self.presetSectionLabel.stringValue = RLPTr(@"PEQ 预设");
+    self.presetName.placeholderString = RLPTr(@"预设名");
+    NSDictionary<NSString *, NSString *> *actMap = @{
+        @"load": @"加载",
+        @"save": @"保存",
+        @"delete": @"删除",
+    };
+    for (NSButton *b in self.presetActionButtons) {
+        NSString *zh = actMap[b.identifier ?: @""];
+        if (zh.length) b.title = RLPTr(zh);
+    }
+    self.autoPreButton.title = RLPTr(@"自动前级（防削波）");
+    self.autoPreButton.toolTip = RLPTr(@"把前级设为 -ceil(当前曲线峰值增益)，给 EQ 提升留出余量，避免数字削波");
+    self.flatButton.title = RLPTr(@"重置 Flat");
+    self.opraTitleLabel.stringValue = RLPTr(@"OPRA 耳机目标曲线");
+    self.opraDescLabel.stringValue = RLPTr(@"输入耳机型号搜索；应用后会把 PEQ 换成该耳机的补偿曲线");
+    self.opraQuery.placeholderString = RLPTr(@"例如 HD650");
+    self.opraSearchButton.title = RLPTr(@"搜索");
+    self.opraCopyChip.toolTip = RLPTr(@"复制 OPRA 项目官网链接");
+    self.opraGuide.stringValue = RLPTr(@"点击卡片选中");
+    [self.inspector applyLanguage];
+    if (self.bands.count > 0) {
+        [self syncViewsFromBands];
+    }
 }
 
 @end

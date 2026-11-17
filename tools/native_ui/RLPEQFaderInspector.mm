@@ -51,6 +51,7 @@ static const CGFloat kInspH = 30.0;
     [self addSubview:_qField];
 
     NSTextField *tl = RLPLabel(RLPTr(@"类型"), t.small, t.mut);
+    tl.identifier = @"eq.insp.typeLabel";
     [self addSubview:tl];
     _typePopup = [[NSPopUpButton alloc] initWithFrame:NSZeroRect pullsDown:NO];
     _typePopup.identifier = @"eq.insp.type";
@@ -131,6 +132,20 @@ static const CGFloat kInspH = 30.0;
 - (void)onEnable:(NSButton *)s {
     if (self.bandIndex < 0 || !self.onEnabledChanged) return;
     self.onEnabledChanged(self.bandIndex, s.state == NSControlStateValueOn);
+}
+
+- (void)applyLanguage {
+    _enableSwitch.toolTip = RLPTr(@"启用/停用这一段");
+    _qField.toolTip = RLPTr(@"品质因数 Q（0.1–20）");
+    for (NSView *v in self.subviews) {
+        if ([v isKindOfClass:[NSTextField class]] && [v.identifier isEqualToString:@"eq.insp.typeLabel"]) {
+            ((NSTextField *)v).stringValue = RLPTr(@"类型");
+        }
+    }
+    NSArray<NSString *> *titles = @[ @"峰值 PK", @"低架 LS", @"高架 HS" ];
+    for (NSUInteger i = 0; i < (NSUInteger)_typePopup.numberOfItems && i < titles.count; ++i) {
+        [_typePopup itemAtIndex:(NSInteger)i].title = RLPTr(titles[i]);
+    }
 }
 
 @end

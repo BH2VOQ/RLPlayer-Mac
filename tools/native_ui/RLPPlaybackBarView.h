@@ -44,6 +44,8 @@ NS_ASSUME_NONNULL_BEGIN
 
 /// 主题切换后刷新自建颜色。
 - (void)applyTheme;
+/// 语言切换后原地刷新文案与提示。
+- (void)applyLanguage;
 
 - (void)updateVolumeUiForDb:(double)db;
 

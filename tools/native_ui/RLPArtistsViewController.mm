@@ -43,6 +43,7 @@ static const CGFloat kAvatar = 168;
 @property (nonatomic, strong) NSTextField *nameLabel;
 @property (nonatomic, strong) NSTextField *countLabel;
 @property (nonatomic, copy) NSString *artistName;
+@property (nonatomic, assign) NSInteger albumCount;
 @end
 
 @implementation RLPArtistItem
@@ -126,6 +127,7 @@ static const CGFloat kAvatar = 168;
 // 圆半径在 RLPArtistCardView -layout 里算（见上）。
 - (void)setArtist:(RLPArtist *)artist {
     self.artistName = artist.name;
+    self.albumCount = artist.albumCount;
     self.nameLabel.stringValue = artist.name;
     self.countLabel.stringValue = [NSString stringWithFormat:RLPTr(@"%ld 张专辑"), (long)artist.albumCount];
     self.initialLabel.stringValue = artist.name.length ? [artist.name substringToIndex:1].uppercaseString : @"?";
@@ -173,6 +175,7 @@ static const CGFloat kAvatar = 168;
 @property (nonatomic, strong) NSTextField *countLabel;
 @property (nonatomic, strong) NSMutableArray<RLPArtist *> *allArtists;
 @property (nonatomic, strong) NSMutableArray<RLPArtist *> *filteredArtists;
+@property (nonatomic, assign) BOOL hasLoaded;
 @end
 
 @implementation RLPArtistsViewController
@@ -305,6 +308,7 @@ static const CGFloat kAvatar = 168;
         }
         NSArray<RLPAlbum *> *albums = [RLPAlbum albumsFromJSON:json];
         NSArray<RLPArtist *> *artists = [RLPArtist artistsFromAlbums:albums];
+        self_.hasLoaded = YES;
         
         [self_.allArtists setArray:[artists sortedArrayUsingComparator:^NSComparisonResult(RLPArtist *a, RLPArtist *b) {
             return [a.name localizedCaseInsensitiveCompare:b.name];
@@ -363,6 +367,28 @@ static const CGFloat kAvatar = 168;
         [item setArtist:self.filteredArtists[(NSUInteger)indexPath.item]];
     }
     return item;
+}
+
+- (void)applyLanguage {
+    self.pageTitle = RLPTr(@"艺术家");
+    if (!self.isViewLoaded) return;
+    self.artistsTitleLabel.stringValue = RLPTr(@"艺术家");
+    self.searchField.placeholderString = RLPTr(@"搜索艺术家...");
+    if (self.hasLoaded) {
+        if (self.filteredArtists.count == 0) {
+            self.countLabel.stringValue = RLPTr(@"曲库为空");
+        } else {
+            self.countLabel.stringValue = [NSString stringWithFormat:RLPTr(@"%ld 位艺术家"), (long)self.filteredArtists.count];
+        }
+    } else if (![RLPCoreClient shared].started && self.countLabel.stringValue.length) {
+        self.countLabel.stringValue = RLPTr(@"核心未启动");
+    }
+    for (NSCollectionViewItem *it in self.collection.visibleItems) {
+        if ([it isKindOfClass:[RLPArtistItem class]]) {
+            RLPArtistItem *ai = (RLPArtistItem *)it;
+            ai.countLabel.stringValue = [NSString stringWithFormat:RLPTr(@"%ld 张专辑"), (long)ai.albumCount];
+        }
+    }
 }
 
 @end

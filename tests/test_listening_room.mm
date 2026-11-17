@@ -96,6 +96,46 @@ int main() {
 
         NSMutableArray<NSView *> *all = [NSMutableArray array];
         CollectViews(vc.view, all);
+        NSTextField *subLabel = nil;
+        for (NSView *v in all) {
+            if ([v.identifier isEqualToString:@"room.subtitle"] && [v isKindOfClass:[NSTextField class]]) {
+                subLabel = (NSTextField *)v;
+                break;
+            }
+        }
+        CK(subLabel != nil && subLabel.stringValue.length > 0 &&
+           [subLabel.stringValue rangeOfString:@"微调每一组声音"].location == NSNotFound,
+           "A1c 聆听室副标题不再使用数字音乐台工作台式文案", subLabel.stringValue ?: @"nil");
+
+        // ---------- U1 UPnP 设备规范化与切回本地保留设备（纯函数）----------
+        {
+            NSArray *raw = @[
+                @{@"friendlyName": @"Living Room", @"model": @"Marantz", @"host": @"192.168.1.50",
+                  @"location": @"http://192.168.1.50:49152/desc.xml", @"kind": @"upnp"},
+                @{@"name": @"Bedroom AirPlay", @"host": @"192.168.1.60", @"kind": @"airplay"},
+                @{@"name": @""},
+            ];
+            NSArray<NSDictionary<NSString *, NSString *> *> *norm = RLPNormalizeCastDevices(raw);
+            CK(norm.count == 2 &&
+               [norm[0][@"id"] isEqualToString:@"http://192.168.1.50:49152/desc.xml"] &&
+               [norm[0][@"name"] isEqualToString:@"Living Room · Marantz"] &&
+               [norm[1][@"id"] isEqualToString:@"Bedroom AirPlay"],
+               "U1a /api/cast/devices 规范化取 location/friendlyName+model 且跳过空项", norm.description ?: @"");
+
+            NSString *mem1 = RLPRememberedLocalDevice(@{@"backend": @"coreaudio", @"device": @"USB-DAC"}, @"");
+            NSString *mem2 = RLPRememberedLocalDevice(@{@"backend": @"upnp", @"upnpdev": @"http://192.168.1.50:49152/desc.xml", @"device": @""}, mem1);
+            NSString *mem3 = RLPRememberedLocalDevice(@{@"backend": @"null", @"device": @"null"}, mem2);
+            CK([mem1 isEqualToString:@"USB-DAC"] && [mem2 isEqualToString:@"USB-DAC"] && [mem3 isEqualToString:@"USB-DAC"],
+               "U1b 切到 upnp/null 后仍保留先前的本地设备", mem3 ?: @"nil");
+
+            NSDictionary *pUpnp = RLPOutputSettingsPatchForBackend(@"upnp", @"http://192.168.1.50:49152/desc.xml", mem3);
+            NSDictionary *pLocal = RLPOutputSettingsPatchForBackend(@"coreaudio", nil, mem3);
+            CK([pUpnp[@"backend"] isEqualToString:@"upnp"] &&
+               [pUpnp[@"upnpdev"] isEqualToString:@"http://192.168.1.50:49152/desc.xml"] &&
+               [pLocal[@"backend"] isEqualToString:@"coreaudio"] &&
+               [pLocal[@"device"] isEqualToString:@"USB-DAC"],
+               "U1c 切 upnp 写 upnpdev；切回本地恢复原 localDevice", pLocal.description ?: @"");
+        }
         NSArray<NSString *> *cards = @[@"room.device", @"room.output", @"room.play", @"room.style"];
         for (NSString *k in cards) {
             BOOL found = NO;

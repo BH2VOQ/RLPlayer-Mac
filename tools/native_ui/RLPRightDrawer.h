@@ -28,6 +28,7 @@ NS_ASSUME_NONNULL_BEGIN
 /// 离开前台：停轮询（不在后台空转）。
 - (void)deactivate;
 - (void)applyTheme;
+- (void)applyLanguage;
 /// 播放位置变化时更新歌词高亮（由播放条的状态轮询驱动）。
 - (void)updatePosition:(double)pos duration:(double)dur;
 @end

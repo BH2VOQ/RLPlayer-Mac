@@ -530,4 +530,27 @@ static void RLPAllowCompress(NSTextField *tf) {
     self.summaryView.backgroundColor = t.bg2;
 }
 
+- (void)applyLanguage {
+    self.title.stringValue = RLPTr(@"AI 资料");
+    self.openWorksBtn.title = RLPTr(@"查看 Discogs 版本推荐 →");
+    if ([self.kind isEqualToString:@"work"]) {
+        self.refreshBtn.title = RLPTr(@"重新查询");
+        if (!self.name.length) {
+            self.status.stringValue = RLPTr(@"未在播放");
+        }
+    } else {
+        self.refreshBtn.title = RLPTr(@"重新整理");
+        if (!self.name.length) {
+            self.status.stringValue = RLPTr(@"未在播放");
+        } else if (self.fieldStack.arrangedSubviews.count > 0) {
+            self.status.stringValue = [NSString stringWithFormat:RLPTr(@"%ld 项已确认资料"),
+                (long)self.fieldStack.arrangedSubviews.count];
+        } else if (![RLPCoreClient shared].started) {
+            self.status.stringValue = RLPTr(@"核心未启动");
+        } else if (!self.pollTimer && self.summaryView.string.length == 0) {
+            self.status.stringValue = RLPTr(@"暂无可确认的资料");
+        }
+    }
+}
+
 @end

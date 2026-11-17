@@ -903,4 +903,30 @@
     [self.table reloadData];
 }
 
+- (void)applyLanguage {
+    NSArray *titles = @[@"播放整张", @"加入队列", @"设置封面", @"随机播放"];
+    for (NSUInteger i = 0; i < self.heroButtons.count && i < titles.count; ++i) {
+        self.heroButtons[i].title = RLPTr(titles[i]);
+    }
+    self.tracksTitle.stringValue = RLPTr(@"曲目列表");
+    self.kindLabel.stringValue = RLPTr(@"专辑");
+    if (self.album) {
+        NSMutableArray<NSString *> *parts = [NSMutableArray array];
+        if (self.album.artist.length) [parts addObject:self.album.artist];
+        if (self.album.year > 0) [parts addObject:[NSString stringWithFormat:@"%ld", (long)self.album.year]];
+        [parts addObject:[NSString stringWithFormat:@"%ld %@", (long)self.tracks.count, RLPTr(@"首")]];
+        [parts addObject:RLPFmtDuration(self.album.duration)];
+        self.metaLabel.stringValue = [parts componentsJoinedByString:@" · "];
+        self.tracksMeta.stringValue = [NSString stringWithFormat:@"%ld %@ · %@ %@",
+            (long)self.tracks.count, RLPTr(@"首"), RLPTr(@"总时长"), RLPFmtDuration(self.album.duration)];
+        self.footerCount.stringValue = [NSString stringWithFormat:@"%ld %@，%@",
+            (long)self.tracks.count, RLPTr(@"首歌曲"), RLPFmtDuration(self.album.duration)];
+        [self setSubtitle:[NSString stringWithFormat:@"%ld %@", (long)self.tracks.count, RLPTr(@"首")]];
+        NSString *artist = self.album.artist.length ? self.album.artist : RLPTr(@"未知艺术家");
+        self.otherWorksTitle.stringValue = [NSString stringWithFormat:@"%@ %@ ›", artist, RLPTr(@"的其他作品")];
+        if (!self.tracks.count) self.emptyLabel.stringValue = RLPTr(@"没有曲目");
+    }
+    [self refreshPlaybackStatus];
+}
+
 @end

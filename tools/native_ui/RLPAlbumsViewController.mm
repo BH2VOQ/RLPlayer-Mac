@@ -211,6 +211,7 @@ static const NSUserInterfaceItemIdentifier kAlbumItemID = @"RLPAlbumItem";
 #pragma mark - 专辑网格
 
 @interface RLPAlbumsViewController () <NSCollectionViewDataSource, NSCollectionViewDelegate>
+@property (nonatomic, copy, readwrite) NSString *pageTitle;
 @property (nonatomic, strong) NSCollectionView *collection;
 @property (nonatomic, strong) NSTextField *titleLabel;
 @property (nonatomic, strong) NSTextField *countLabel;
@@ -220,6 +221,8 @@ static const NSUserInterfaceItemIdentifier kAlbumItemID = @"RLPAlbumItem";
 @property (nonatomic, copy) NSString *query;
 /// 请求世代：连续打字/清空时只允许最新一次响应落地（否则旧响应会把新结果覆盖掉）。
 @property (nonatomic, assign) NSUInteger reloadSeq;
+@property (nonatomic, assign) BOOL hasLoaded;
+@property (nonatomic, copy) NSArray *lastRoots;
 // 专辑页空态（web emptyStateHtml 的非 classic 分支）：只在曲库 0 张专辑时出现。
 @property (nonatomic, strong) NSView *emptyCard;
 @property (nonatomic, strong) NSTextField *emptyTitleLabel;
@@ -451,6 +454,7 @@ static const NSUserInterfaceItemIdentifier kAlbumItemID = @"RLPAlbumItem";
 }
 
 - (void)refreshEmptyStateWithRoots:(NSArray *)roots {
+    self.lastRoots = roots ?: @[];
     NSString *rootPath = @"";
     for (id r in roots) {
         if ([r isKindOfClass:[NSString class]] && [(NSString *)r length]) { rootPath = r; break; }
@@ -479,7 +483,7 @@ static const NSUserInterfaceItemIdentifier kAlbumItemID = @"RLPAlbumItem";
 - (void)activate {
     if (self.albums.count) {
         [[NSNotificationCenter defaultCenter] postNotificationName:@"RLPPageCountNotification"
-            object:[NSString stringWithFormat:@"%ld 张专辑", (long)self.albums.count]];
+            object:[NSString stringWithFormat:RLPTr(@"%ld 张专辑"), (long)self.albums.count]];
     } else {
         [self reload];
     }
@@ -513,13 +517,15 @@ static const NSUserInterfaceItemIdentifier kAlbumItemID = @"RLPAlbumItem";
             return;
         }
         NSArray<RLPAlbum *> *list = [RLPAlbum albumsFromJSON:json];
+        self_.hasLoaded = YES;
         [self_.albums setArray:list];
         [self_.collection reloadData];
-        self_.countLabel.stringValue = [NSString stringWithFormat:@"%ld 张专辑", (long)list.count];
+        NSString *cnt = [NSString stringWithFormat:RLPTr(@"%ld 张专辑"), (long)list.count];
+        self_.countLabel.stringValue = cnt;
         [self_ setEmptyStateVisible:(list.count == 0)];
         // 顶栏计数（web #cnt 同口径）：页加载完上报，主窗口显示在页标题旁。
         [[NSNotificationCenter defaultCenter] postNotificationName:@"RLPPageCountNotification"
-            object:[NSString stringWithFormat:@"%ld 张专辑", (long)list.count]];
+            object:cnt];
     }];
 }
 
@@ -647,6 +653,45 @@ static const NSUserInterfaceItemIdentifier kAlbumItemID = @"RLPAlbumItem";
         if (json && [json[@"ok"] boolValue]) RLPToast(RLPTr(@"整张专辑已加入队列"));
         else RLPToast([json[@"error"] isKindOfClass:[NSString class]] ? json[@"error"] : RLPTr(@"加入失败"));
     }];
+}
+
+- (void)applyLanguage {
+    self.pageTitle = RLPTr(@"专辑");
+    if (!self.isViewLoaded) return;
+    self.titleLabel.stringValue = RLPTr(@"专辑");
+    NSArray<NSString *> *menuTitles = @[@"打开", @"播放整张", @"加入队列"];
+    NSArray<NSMenuItem *> *menuItems = self.collection.menu.itemArray;
+    for (NSUInteger i = 0; i < menuItems.count && i < menuTitles.count; ++i) {
+        menuItems[i].title = RLPTr(menuTitles[i]);
+    }
+    self.emptyStationBtn.title = RLPTr(@"打开快速开始");
+    if (!self.emptyCard.hidden) {
+        if (self.query.length > 0) {
+            self.emptyTitleLabel.stringValue = [NSString stringWithFormat:RLPTr(@"未找到与 “%@” 相关的专辑"), self.query];
+            self.emptyHintLabel.stringValue = RLPTr(@"请尝试缩短搜索词，或检查是否有错别字");
+        } else {
+            [self refreshEmptyStateWithRoots:self.lastRoots ?: @[]];
+        }
+    }
+    if (self.hasLoaded) {
+        NSString *cnt = [NSString stringWithFormat:RLPTr(@"%ld 张专辑"), (long)self.albums.count];
+        self.countLabel.stringValue = cnt;
+        if (self.view.window) [[NSNotificationCenter defaultCenter] postNotificationName:@"RLPPageCountNotification" object:cnt];
+    }
+    NSSet<NSIndexPath *> *sel = [self.collection.selectionIndexPaths copy];
+    NSScrollView *scroll = self.collection.enclosingScrollView;
+    NSPoint origin = scroll ? scroll.contentView.bounds.origin : NSZeroPoint;
+    [self.collection reloadData];
+    for (NSCollectionViewItem *it in self.collection.visibleItems) {
+        if ([it isKindOfClass:[RLPAlbumItem class]]) {
+            ((RLPAlbumItem *)it).playBadge.toolTip = RLPTr(@"播放整张");
+        }
+    }
+    if (sel.count) self.collection.selectionIndexPaths = sel;
+    if (scroll) {
+        [scroll.contentView scrollToPoint:origin];
+        [scroll reflectScrolledClipView:scroll.contentView];
+    }
 }
 
 @end

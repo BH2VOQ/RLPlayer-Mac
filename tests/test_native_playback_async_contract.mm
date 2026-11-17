@@ -18,9 +18,14 @@
 #import "RLPCoreClient.h"
 #import "RLPPlaybackBarView.h"
 #import "RLPQuickStartViewController.h"
+#import "RLPRightDrawer.h"
 #import "RLPModels.h"
 #import "RLPSupport.h"
 #import "rlapp_core.h"
+
+@interface RLPRightDrawer (AsyncContractTestAccess)
+- (void)playIndex:(NSInteger)i;
+@end
 
 #include <atomic>
 #include <condition_variable>
@@ -94,6 +99,10 @@ std::atomic<int> g_statusCount{0};
 bool g_playing = false;
 bool g_paused = false;
 std::string g_current = "/tmp/async-contract-fixture.aiff";
+std::string g_statusError;
+std::string g_playError;
+std::string g_libPlayError;
+std::string g_skipError;
 int g_playmode = 0;
 
 // 可选延迟与门控
@@ -105,6 +114,10 @@ Gate g_playmodeGetGate;
 int g_playmodeGetGateMode = 2;
 Gate g_playmodePostGate;
 Gate g_queueSetGate;
+Gate g_playPostGate;
+std::string g_playGateError;
+Gate g_skipPostGate;
+std::string g_skipGateError;
 
 void UpdateMaxReads(int cur) {
     int prev = g_maxConcurrentReads.load();
@@ -121,6 +134,10 @@ void ResetMockState() {
     g_playing = false;
     g_paused = false;
     g_current = "/tmp/async-contract-fixture.aiff";
+    g_statusError.clear();
+    g_playError.clear();
+    g_libPlayError.clear();
+    g_skipError.clear();
     g_playmode = 0;
     g_statusGatePayload.clear();
     g_pausePostDelayMs = 0;
@@ -129,12 +146,17 @@ void ResetMockState() {
     g_playmodeGetGate.release();
     g_playmodePostGate.release();
     g_queueSetGate.release();
+    g_playGateError.clear();
+    g_skipGateError.clear();
+    g_playPostGate.release();
+    g_skipPostGate.release();
 }
 
 std::string MakeStatusJSON(bool playing, bool paused, const std::string& cur) {
     return std::string("{\"ok\":true,\"playing\":") + (playing ? "true" : "false") +
            ",\"paused\":" + (paused ? "true" : "false") +
            ",\"current\":\"" + cur + "\"" +
+           ",\"error\":\"" + g_statusError + "\"" +
            ",\"dur\":180,\"pos\":15,\"volDb\":-120,\"backend\":\"null\"}";
 }
 
@@ -197,10 +219,53 @@ std::string dispatch(const rta::net::HttpRequest& req, std::string& contentType)
             return "{\"ok\":true}";
         }
         if (p == "/api/play") {
+            if (g_playPostGate.tryConsumeArmed()) {
+                std::string gatedErr = g_playGateError;
+                g_playPostGate.waitReleased();
+                std::lock_guard<std::mutex> lk(g_mu);
+                g_posts.push_back({p, req.body});
+                if (!gatedErr.empty()) {
+                    return std::string("{\"ok\":false,\"error\":\"") + gatedErr + "\"}";
+                }
+                g_playing = true;
+                g_paused = false;
+                return "{\"ok\":true}";
+            }
             std::lock_guard<std::mutex> lk(g_mu);
             g_posts.push_back({p, req.body});
+            if (!g_playError.empty()) {
+                return std::string("{\"ok\":false,\"error\":\"") + g_playError + "\"}";
+            }
             g_playing = true;
             g_paused = false;
+            return "{\"ok\":true}";
+        }
+        if (p == "/api/lib/play") {
+            std::lock_guard<std::mutex> lk(g_mu);
+            g_posts.push_back({p, req.body});
+            if (!g_libPlayError.empty()) {
+                return std::string("{\"ok\":false,\"error\":\"") + g_libPlayError + "\"}";
+            }
+            g_playing = true;
+            g_paused = false;
+            return "{\"ok\":true}";
+        }
+        if (p.rfind("/api/skip", 0) == 0) {
+            if (g_skipPostGate.tryConsumeArmed()) {
+                std::string gatedErr = g_skipGateError;
+                g_skipPostGate.waitReleased();
+                std::lock_guard<std::mutex> lk(g_mu);
+                g_posts.push_back({p, req.body});
+                if (!gatedErr.empty()) {
+                    return std::string("{\"ok\":false,\"error\":\"") + gatedErr + "\"}";
+                }
+                return "{\"ok\":true}";
+            }
+            std::lock_guard<std::mutex> lk(g_mu);
+            g_posts.push_back({p, req.body});
+            if (!g_skipError.empty()) {
+                return std::string("{\"ok\":false,\"error\":\"") + g_skipError + "\"}";
+            }
             return "{\"ok\":true}";
         }
         if (p == "/api/stop") {
@@ -609,6 +674,218 @@ int main() {
         [barPlay performClick:nil];
         ck(![[bar valueForKey:@"statusInflight"] boolValue], "C5 空队列播放的 no-op 不阻断后续状态轮询", @"");
         [bar stopPolling];
+
+        // ====================================================================
+        // C6: 全局同步/异步播放失败气泡（轮询不重报 / 重试再报 / 丢弃旧状态）
+        // ====================================================================
+        {
+            ResetMockState();
+            RLPResetPlaybackErrorState();
+            NSWindow *toastWin = [[NSWindow alloc] initWithContentRect:NSMakeRect(0, 0, 800, 600)
+                                                             styleMask:NSWindowStyleMaskBorderless
+                                                               backing:NSBackingStoreBuffered
+                                                                 defer:NO];
+            toastWin.releasedWhenClosed = NO;
+            toastWin.contentView = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 800, 600)];
+            auto toastMsg = ^NSString *() {
+                for (NSView *v in toastWin.contentView.subviews) {
+                    if (![v.identifier isEqualToString:@"rlp.toast"]) continue;
+                    for (NSView *s in v.subviews) {
+                        if ([s isKindOfClass:[NSTextField class]]) return ((NSTextField *)s).stringValue;
+                    }
+                }
+                return nil;
+            };
+            auto clearToast = ^() {
+                for (NSView *v in [toastWin.contentView.subviews copy]) {
+                    if ([v.identifier isEqualToString:@"rlp.toast"]) [v removeFromSuperview];
+                }
+            };
+
+            // C6a: 同步 /api/play, /api/lib/play, /api/skip 失败均弹全局气泡
+            {
+                std::lock_guard<std::mutex> lk(g_mu);
+                g_playError = "sync play open failed";
+                g_libPlayError = "sync album failed";
+                g_skipError = "sync skip failed";
+            }
+            RLPPlayPath(@"/tmp/c6-fail.flac");
+            ck(WaitUntil(2.0, ^BOOL { return [toastMsg() isEqualToString:@"sync play open failed"]; }),
+               "C6a 同步 /api/play 失败弹出全局气泡", toastMsg() ?: @"(nil)");
+
+            // C6b: 重试相同错误再次报
+            clearToast();
+            RLPPlayPath(@"/tmp/c6-fail.flac");
+            ck(WaitUntil(2.0, ^BOOL { return [toastMsg() isEqualToString:@"sync play open failed"]; }),
+               "C6b 重试相同错误再次弹出全局气泡", toastMsg() ?: @"(nil)");
+
+            clearToast();
+            RLPPlayAlbum(@"alb-1", 0);
+            ck(WaitUntil(2.0, ^BOOL { return [toastMsg() isEqualToString:@"sync album failed"]; }),
+               "C6a 同步 /api/lib/play 失败弹出全局气泡", toastMsg() ?: @"(nil)");
+
+            clearToast();
+            [bar setValue:@YES forKey:@"polling"];
+            [bar nextTrack];
+            ck(WaitUntil(2.0, ^BOOL { return [toastMsg() isEqualToString:@"sync skip failed"]; }),
+               "C6a 同步 /api/skip 失败弹出全局气泡", toastMsg() ?: @"(nil)");
+            [bar stopPolling];
+
+            // C6c: 后台 /api/status error 轮询不重报，重试后再次报
+            clearToast();
+            {
+                std::lock_guard<std::mutex> lk(g_mu);
+                g_playError.clear();
+                g_statusError = "async device busy";
+            }
+            [bar startPolling];
+            ck(WaitUntil(2.0, ^BOOL { return [toastMsg() isEqualToString:@"async device busy"]; }),
+               "C6c 后台 /api/status 异步 error 在全局播放条轮询时弹出气泡", toastMsg() ?: @"(nil)");
+            clearToast();
+            Pump(0.65);
+            ck(toastMsg() == nil, "C6c 同一异步 error 连续轮询不重报", toastMsg() ?: @"(nil)");
+
+            // A different queued track may fail with the same device error.
+            { std::lock_guard<std::mutex> lk(g_mu); g_current = "/tmp/next-failed.flac"; }
+            ck(WaitUntil(2.0, ^BOOL { return [toastMsg() isEqualToString:@"async device busy"]; }),
+               "C6e 自动下一曲同一原因仍重新提示", toastMsg() ?: @"(nil)");
+            clearToast();
+
+            // C6d: 在途旧 /api/status 带着旧错误，在 RLPPlayPath 发起后必须被丢弃
+            [bar stopPolling];
+            clearToast();
+            g_statusGatePayload = "{\"ok\":true,\"playing\":false,\"paused\":false,\"current\":\"/tmp/stale.flac\",\"error\":\"stale poll error\",\"dur\":10,\"pos\":0,\"volDb\":-120,\"backend\":\"null\"}";
+            g_statusGate.arm();
+            [bar startPolling];
+            BOOL staleEntered = g_statusGate.waitEntered(2000);
+            {
+                std::lock_guard<std::mutex> lk(g_mu);
+                g_statusError.clear();
+            }
+            RLPPlayPath(@"/tmp/c6-fresh.flac");
+            Pump(0.05);
+            g_statusGate.release();
+            Pump(0.15);
+            ck(staleEntered && toastMsg() == nil,
+               "C6d 动作发起前的在途旧 /api/status 错误被 actionEpoch 丢弃，不误报旧气泡",
+               toastMsg() ?: @"(nil)");
+            [bar stopPolling];
+
+            // C6f: RLPPostPlaybackAction 旧请求慢失败被新请求起播取代，过期失败回调不弹旧错误
+            ResetMockState();
+            RLPResetPlaybackErrorState();
+            clearToast();
+            g_playGateError = "stale slow play failed";
+            g_playPostGate.arm();
+            RLPPlayPath(@"/tmp/c6f-old-slow.flac");
+            BOOL c6fEntered = g_playPostGate.waitEntered(2000);
+            RLPPlayPath(@"/tmp/c6f-new-fast.flac");
+            g_playPostGate.release();
+            BOOL c6fNewPosted = WaitUntil(2.0, ^BOOL {
+                for (const auto& rec : SnapshotPosts()) {
+                    if (rec.path == "/api/play" && rec.body.find("c6f-new-fast.flac") != std::string::npos) return YES;
+                }
+                return NO;
+            });
+            Pump(0.15);
+            ck(c6fEntered && c6fNewPosted && toastMsg() == nil,
+               "C6f RLPPostPlaybackAction 旧请求慢失败被新请求起播取代：过期失败回包不弹气泡",
+               toastMsg() ?: @"(nil)");
+
+            // C6g: PlaybackBar nextTrack/previousTrack 旧请求慢失败被新动作取代，过期失败回调不弹旧错误
+            ResetMockState();
+            RLPResetPlaybackErrorState();
+            clearToast();
+            [bar setValue:@YES forKey:@"polling"];
+            g_skipGateError = "stale slow skip failed";
+            g_skipPostGate.arm();
+            [bar nextTrack];
+            BOOL c6gEntered = g_skipPostGate.waitEntered(2000);
+            [bar previousTrack];
+            g_skipPostGate.release();
+            BOOL c6gNewPosted = WaitUntil(2.0, ^BOOL {
+                for (const auto& rec : SnapshotPosts()) {
+                    if (rec.path == "/api/skip?dir=-1") return YES;
+                }
+                return NO;
+            });
+            Pump(0.15);
+            ck(c6gEntered && c6gNewPosted && toastMsg() == nil,
+               "C6g PlaybackBar nextTrack 旧请求慢失败被 previousTrack 取代：过期失败回包不弹气泡",
+               toastMsg() ?: @"(nil)");
+            [bar stopPolling];
+
+            // C6h: RightDrawer playIndex 旧请求慢失败被新请求取代，过期失败回调不弹旧错误
+            ResetMockState();
+            RLPResetPlaybackErrorState();
+            clearToast();
+            RLPRightDrawer *drawer = [[RLPRightDrawer alloc] initWithFrame:NSMakeRect(0, 0, 320, 480)];
+            [drawer setValue:@[@"/tmp/c6h-old.flac", @"/tmp/c6h-new.flac"] forKey:@"items"];
+            g_playGateError = "stale drawer play failed";
+            g_playPostGate.arm();
+            [drawer playIndex:0];
+            BOOL c6hEntered = g_playPostGate.waitEntered(2000);
+            [drawer playIndex:1];
+            g_playPostGate.release();
+            BOOL c6hNewPosted = WaitUntil(2.0, ^BOOL {
+                for (const auto& rec : SnapshotPosts()) {
+                    if (rec.path == "/api/play" && rec.body.find("c6h-new.flac") != std::string::npos) return YES;
+                }
+                return NO;
+            });
+            Pump(0.15);
+            ck(c6hEntered && c6hNewPosted && toastMsg() == nil,
+               "C6h RightDrawer playIndex 旧请求慢失败被新 playIndex 取代：过期失败回包不弹气泡",
+               toastMsg() ?: @"(nil)");
+
+            // C6i: pause 不重置错误去重，残留 /api/status error 不重报；play 重试则重置并再报
+            ResetMockState();
+            RLPResetPlaybackErrorState();
+            clearToast();
+            {
+                std::lock_guard<std::mutex> lk(g_mu);
+                g_playing = true;
+                g_paused = false;
+                g_current = "/tmp/c6i-pause.flac";
+                g_statusError = "async device busy";
+            }
+            [bar startPolling];
+            ck(WaitUntil(2.0, ^BOOL { return [toastMsg() isEqualToString:@"async device busy"]; }),
+               "C6i 前置：/api/status 首次报告 async device busy", toastMsg() ?: @"(nil)");
+            clearToast();
+            ClearPosts();
+            [bar playPause]; // /api/pause?on=1
+            BOOL pausedDone = WaitUntil(2.0, ^BOOL {
+                bool sawPause = false;
+                for (const auto& rec : SnapshotPosts()) {
+                    if (rec.path == "/api/pause?on=1") sawPause = true;
+                }
+                return sawPause && bar.lastStatus.paused;
+            });
+            Pump(0.15);
+            ck(pausedDone && toastMsg() == nil,
+               "C6i pause(/api/pause?on=1) 不清空去重，残留 status error 不重报",
+               toastMsg() ?: @"(nil)");
+
+            ClearPosts();
+            [bar playPause]; // /api/pause?on=0
+            BOOL resumedDone = WaitUntil(2.0, ^BOOL {
+                bool sawResume = false;
+                for (const auto& rec : SnapshotPosts()) {
+                    if (rec.path == "/api/pause?on=0") sawResume = true;
+                }
+                return sawResume && !bar.lastStatus.paused;
+            });
+            Pump(0.15);
+            ck(resumedDone && toastMsg() == nil,
+               "C6i resume(/api/pause?on=0) 不清空去重，残留 status error 不重报",
+               toastMsg() ?: @"(nil)");
+
+            RLPPlayPath(@"/tmp/c6i-pause.flac");
+            ck(WaitUntil(2.0, ^BOOL { return [toastMsg() isEqualToString:@"async device busy"]; }),
+               "C6i /api/play 重试重置去重，残留 status error 再次提示", toastMsg() ?: @"(nil)");
+            [bar stopPolling];
+        }
 
         [client shutdown];
         std::printf("\n%s（%d passed, %d failed）\n",

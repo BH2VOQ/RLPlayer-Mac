@@ -957,4 +957,49 @@ static NSString *RLPTrackArtistAlbumText(RLPTrack *t) {
     return @{ @"cs": @(tr.cueStart), @"ce": @(tr.cueEnd) };
 }
 
+- (void)applyLanguage {
+    self.pageTitle = RLPTr(@"曲目");
+    if (!self.isViewLoaded) return;
+    _searchField.placeholderString = RLPTr(@"搜索专辑 / 艺术家 / 曲目…");
+    NSArray<NSString *> *sortTitles = @[@"默认排序", @"标题", @"艺术家", @"专辑", @"时长", @"年份", @"收藏优先"];
+    for (NSUInteger i = 0; i < (NSUInteger)_sortPopup.numberOfItems && i < sortTitles.count; ++i) {
+        [_sortPopup itemAtIndex:(NSInteger)i].title = RLPTr(sortTitles[i]);
+    }
+    NSArray<NSMenuItem *> *menuItems = _tableView.menu.itemArray;
+    if (menuItems.count >= 2) {
+        menuItems[0].title = RLPTr(@"播放");
+        menuItems[1].title = RLPTr(@"加入队列");
+    }
+    _searchEmptyHint.stringValue = RLPTr(@"请尝试缩短搜索词，或检查是否有错别字");
+    _searchClearButton.title = RLPTr(@"清空搜索词");
+    _loadMoreButton.title = RLPTr(@"加载更多");
+    if (!_searchEmptyView.hidden) {
+        NSString *q = [_searchField.stringValue stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+        if (q.length > 0) {
+            _searchEmptyTitle.stringValue = [NSString stringWithFormat:RLPTr(@"未找到与 “%@” 相关的曲目"), q];
+        }
+    }
+    if (_hasLoaded) {
+        if (_tracks.count == 0) {
+            [self setSubtitle:RLPTr(@"没有匹配的曲目")];
+            if (!_emptyLabel.hidden) _emptyLabel.stringValue = RLPTr(@"没有匹配的曲目");
+        } else if (_totalCount > (NSInteger)_tracks.count) {
+            [self setSubtitle:[NSString stringWithFormat:@"%ld / %ld %@",
+                               (long)_tracks.count, (long)_totalCount, RLPTr(@"首")]];
+        } else {
+            [self setSubtitle:[NSString stringWithFormat:@"%ld %@", (long)_tracks.count, RLPTr(@"首")]];
+        }
+    } else if (![RLPCoreClient shared].started) {
+        [self setSubtitle:RLPTr(@"核心未启动")];
+    }
+    NSIndexSet *sel = [_tableView.selectedRowIndexes copy];
+    NSPoint origin = _scrollView ? _scrollView.contentView.bounds.origin : NSZeroPoint;
+    [_tableView reloadData];
+    if (sel.count) [_tableView selectRowIndexes:sel byExtendingSelection:NO];
+    if (_scrollView) {
+        [_scrollView.contentView scrollToPoint:origin];
+        [_scrollView reflectScrolledClipView:_scrollView.contentView];
+    }
+}
+
 @end

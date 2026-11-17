@@ -6,6 +6,7 @@
 NS_ASSUME_NONNULL_BEGIN
 
 @interface RLPRecentViewController : RLPPageViewController
+- (void)applyLanguage;
 @end
 
 NS_ASSUME_NONNULL_END

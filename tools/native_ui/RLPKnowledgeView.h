@@ -17,6 +17,7 @@ NS_ASSUME_NONNULL_BEGIN
 - (void)loadWorkName:(nullable NSString *)name composer:(nullable NSString *)composer;
 - (void)cancelLoading;
 - (void)applyTheme;
+- (void)applyLanguage;
 @end
 
 NS_ASSUME_NONNULL_END

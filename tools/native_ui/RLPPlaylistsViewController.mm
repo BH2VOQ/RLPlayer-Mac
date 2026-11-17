@@ -299,10 +299,7 @@
         }
         if (index < 0 || index >= (NSInteger)self_.items.count) return;
         RLPPlaylistItem *it = self_.items[index];
-        NSMutableString *body = [NSMutableString stringWithFormat:@"file=%@", RLPEnc(it.file)];
-        if (it.cs >= 0) [body appendFormat:@"&cs=%.3f", it.cs];
-        if (it.ce > it.cs) [body appendFormat:@"&ce=%.3f", it.ce];
-        RLPPostJSON(@"/api/play", body);
+        RLPPlayPathCue(it.file, it.cs, it.ce);
     }];
 }
 
@@ -509,6 +506,36 @@
     self.itemTable.backgroundColor = t.bg;
     self.emptyLabel.textColor = t.mut;
     [self.itemTable reloadData];
+}
+
+- (void)applyLanguage {
+    self.playAllBtn.title = RLPTr(@"播放整列");
+    self.renameBtn.title = RLPTr(@"重命名");
+    self.deleteBtn.title = RLPTr(@"删除");
+    for (NSView *v in self.contentView.subviews) {
+        if ([v.identifier isEqualToString:@"sq.header"]) {
+            for (NSView *b in v.subviews) {
+                if (![b isKindOfClass:[NSButton class]]) continue;
+                if ([b.identifier isEqualToString:@"sq.new"]) ((NSButton *)b).title = RLPTr(@"新建");
+                else if ([b.identifier isEqualToString:@"sq.savecurrent"]) ((NSButton *)b).title = RLPTr(@"存当前队列");
+            }
+        }
+    }
+    self.emptyLabel.stringValue = RLPTr(@"这个歌单是空的");
+    if (self.itemTable.tableColumns.count >= 3) {
+        self.itemTable.tableColumns[1].title = RLPTr(@"标题");
+        self.itemTable.tableColumns[2].title = RLPTr(@"所在目录");
+    }
+    if (!self.selectedName.length) {
+        self.pageTitle = RLPTr(@"歌单");
+        NSString *cnt = [NSString stringWithFormat:RLPTr(@"%ld 个歌单"), (long)self.playlists.count];
+        [self setSubtitle:cnt];
+        if (self.view.window) [[NSNotificationCenter defaultCenter] postNotificationName:@"RLPPageCountNotification" object:cnt];
+    } else {
+        NSString *cnt = [NSString stringWithFormat:RLPTr(@"%ld 首"), (long)self.items.count];
+        [self setSubtitle:cnt];
+        if (self.view.window) [[NSNotificationCenter defaultCenter] postNotificationName:@"RLPPageCountNotification" object:cnt];
+    }
 }
 
 @end

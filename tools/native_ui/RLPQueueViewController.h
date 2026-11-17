@@ -6,7 +6,7 @@ NS_ASSUME_NONNULL_BEGIN
 
 /// 播放队列页面
 @interface RLPQueueViewController : RLPPageViewController <NSTableViewDelegate, NSTableViewDataSource>
-
+- (void)applyLanguage;
 @end
 
 NS_ASSUME_NONNULL_END

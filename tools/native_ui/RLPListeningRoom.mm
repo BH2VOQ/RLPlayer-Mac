@@ -180,3 +180,77 @@ NSInteger RLPQuickStartColumnsForWidth(double width) {
     if (width <= 750.0) return 2;
     return 4;
 }
+
+static NSString *RLPTrimStr(id v) {
+    if (![v isKindOfClass:[NSString class]]) return @"";
+    return [(NSString *)v stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+}
+
+NSArray<NSDictionary<NSString *, NSString *> *> *RLPNormalizeCastDevices(NSArray * _Nullable rawDevices) {
+    if (![rawDevices isKindOfClass:[NSArray class]]) return @[];
+    NSMutableArray<NSDictionary<NSString *, NSString *> *> *out = [NSMutableArray array];
+    for (id item in rawDevices) {
+        if (![item isKindOfClass:[NSDictionary class]]) continue;
+        NSDictionary *d = (NSDictionary *)item;
+        NSString *location = RLPTrimStr(d[@"location"]);
+        NSString *friendly = RLPTrimStr(d[@"friendlyName"]);
+        NSString *name = RLPTrimStr(d[@"name"]);
+        NSString *host = RLPTrimStr(d[@"host"]);
+        NSString *model = RLPTrimStr(d[@"model"]);
+        NSString *kind = RLPTrimStr(d[@"kind"]);
+        NSString *devId = location.length ? location
+                        : (friendly.length ? friendly
+                        : (name.length ? name : host));
+        if (!devId.length) continue;
+        NSString *baseName = friendly.length ? friendly
+                           : (name.length ? name
+                           : (host.length ? host : RLPTr(@"网络播放器")));
+        NSString *displayName = (model.length && ![baseName isEqualToString:model])
+            ? [NSString stringWithFormat:@"%@ · %@", baseName, model]
+            : baseName;
+        [out addObject:@{
+            @"id": devId,
+            @"name": displayName,
+            @"kind": kind.length ? kind : @"upnp",
+            @"host": host,
+        }];
+    }
+    return out;
+}
+
+NSString *RLPRememberedLocalDevice(NSDictionary * _Nullable kv, NSString * _Nullable previousLocalDevice) {
+    if (![kv isKindOfClass:[NSDictionary class]]) return previousLocalDevice ?: @"";
+    NSString *bk = RLPTrimStr(kv[@"backend"]);
+    NSString *dev = RLPTrimStr(kv[@"device"]);
+    if (![bk isEqualToString:@"upnp"] && ![bk isEqualToString:@"null"]) {
+        return [dev isEqualToString:@"null"] ? @"" : dev;
+    }
+    if (previousLocalDevice != nil) return previousLocalDevice;
+    if (dev.length && ![dev isEqualToString:@"null"]) return dev;
+    return @"";
+}
+
+NSDictionary<NSString *, NSString *> *RLPOutputSettingsPatchForBackend(
+    NSString *targetBackend, NSString * _Nullable upnpDev, NSString * _Nullable localDevice) {
+    NSString *bk = targetBackend.length ? targetBackend : @"coreaudio";
+    if ([bk isEqualToString:@"upnp"]) {
+        return @{
+            @"backend": @"upnp",
+            @"upnpdev": upnpDev ?: @"",
+        };
+    }
+    if ([bk isEqualToString:@"coreaudio"] || [bk isEqualToString:@"coreaudio-shared"]) {
+        NSString *dev = (localDevice.length && ![localDevice isEqualToString:@"null"]) ? localDevice : @"";
+        return @{
+            @"backend": bk,
+            @"device": dev,
+        };
+    }
+    if ([bk isEqualToString:@"null"]) {
+        return @{
+            @"backend": @"null",
+            @"device": @"null",
+        };
+    }
+    return @{ @"backend": bk };
+}

@@ -1,24 +1,14 @@
 // SPDX-FileCopyrightText: 2026 BH2VOQ <https://github.com/BH2VOQ>
 // SPDX-License-Identifier: GPL-3.0-or-later
 //
-// test_native_lang.mm — 界面语言：启动时应用落盘 lang；切换时如实挂账「重启生效」
-//
-// ============================ 这条判据在证明什么 ============================
-// 用户可见 bug（2026-11-16）：RLPSetLanguage 在 tools/native_ui 里**零调用点**，
-// 运行时 gLang 恒为 "zh"：
-//   * 启动：web 读 <state>/rlplayer-settings.conf 的 lang（src/net/ui_page.h 的
-//     read_conf_value，注释写明"语言优先级的唯一真相源是配置文件"）；原生启动路径从不读
-//     ⟹ 用户设过英文，重启后界面仍是中文。
-//   * 切换：设置页 onLanguage: 只 POST /api/settings，不重建界面（web 是 location.reload()）
-//     ⟹ 点完下拉"看起来保存了"，界面一个字都不变。
+// test_native_lang.mm — 界面语言：启动时应用落盘 lang；切换时实时生效并保留路由/滚动/草稿/焦点
 //
 // 判据（旧码必须红，改后必须绿）：
-//   ①【对照组】进程刚起 gLang 是 zh —— RLPTr 不会自己从 conf 冒出来（bug 的机制本身）；
-//   ②【切换】真控件 sp_lang 触发 onLanguage: ⟹ 后端真的落盘 lang=en
-//     （/api/settings 读回 + conf 文件两处都断言，不靠 UI 状态猜）；
-//   ③【挂账诚实】保存成功后必须弹 toast「界面语言将在重启后生效」，且 gLang 保持旧值
-//     —— 原生没有便宜的整树重建入口，就不许假装实时生效；
-//   ④【启动】模拟重启：先停核心（启动早期本来就没有后端可问）→ gLang 复位 → 应用落盘 lang
+//   ①【对照组】进程刚起 gLang 是 zh —— RLPTr 不会自己从 conf 冒出来；
+//   ②【实时切换】真控件 sp_lang 触发 onLanguage: ⟹ 后端落盘 lang=en、
+//     gLang 立即变为 en、RLPTr 立即返回英文、设置页控件原地刷新为英文（保留当前页签与滚动位置）；
+//   ③【双向切回】切回 zh 后 gLang 立即回到 zh，设置页控件原地恢复中文；
+//   ④【启动】模拟重启：先停核心 → gLang 复位 → 应用落盘 lang
 //     ⟹ 设置/曲目/队列/收藏/播放 5 个 key 返回英文；conf 里没有 lang 时回落中文。
 //
 // 纪律：隔离 state/library；backend=null、volume=-120；不播放、不联网（只打本进程后端）。
@@ -163,14 +153,25 @@ int main(void) {
            @"【切换】设置页有 sp_lang 语言下拉（真控件，不是 identifier 映射字符串）",
            popup ? NSStringFromClass(popup.class) : @"nil");
 
-        // ---- ② 切换：等同用户选「en」并触发 onLanguage: ----
+        // ---- ② 实时切换：等同用户选「en」并触发 onLanguage: ----
         if ([popup isKindOfClass:[NSPopUpButton class]]) {
+            // 预设滚动位置与焦点，验证语言切换后保留路由、滚动与焦点
+            NSScrollView *scrollBefore = nil;
+            for (NSView *sv in Descendants(v)) {
+                if ([sv isKindOfClass:[NSScrollView class]]) { scrollBefore = (NSScrollView *)sv; break; }
+            }
+            if (scrollBefore) {
+                [scrollBefore.contentView scrollToPoint:NSMakePoint(0, 40)];
+                [scrollBefore reflectScrolledClipView:scrollBefore.contentView];
+            }
+            [win makeFirstResponder:popup];
+
             [popup selectItemAtIndex:1];
             Fire(popup);
             WaitUntil(8.0, ^BOOL {
-                return ConfLang() != nil || ToastText(win) != nil;
+                return ConfLang() != nil && [RLPLanguage() isEqualToString:@"en"];
             });
-            Pump(0.15);
+            Pump(0.2);
             Ck([ConfLang() isEqualToString:@"en"],
                @"【切换】后端真的把 lang=en 落盘（不是只改 UI 状态）",
                ConfLang() ?: @"(conf 里没有 lang)");
@@ -180,13 +181,59 @@ int main(void) {
             Ck([kvLang isKindOfClass:[NSString class]] && [kvLang isEqualToString:@"en"],
                @"【切换】/api/settings 读回 lang=en（后端白名单真的收了）",
                kvLang ? [kvLang description] : @"(无)");
-            NSString *toast = ToastText(win);
-            Ck([toast isEqualToString:@"界面语言将在重启后生效"],
-               @"【切换】保存成功弹 toast「界面语言将在重启后生效」（当前界面仍是中文，所以用中文断言）",
-               toast ?: @"(没有 toast)");
-            Ck([RLPLanguage() isEqualToString:@"zh"],
-               @"【切换】挂账口径：gLang 保持旧值 —— 不假装实时生效（重启后由启动路径应用）",
+            Ck([RLPLanguage() isEqualToString:@"en"],
+               @"【实时切换】保存成功后 gLang 立即切为 en",
                [NSString stringWithFormat:@"got=%@", RLPLanguage()]);
+            CheckEnglishKeys(@"【实时切换】lang=en");
+
+            NSSegmentedControl *groups = (NSSegmentedControl *)FindId(v, @"settings.groups");
+            NSString *grp0 = [groups isKindOfClass:[NSSegmentedControl class]] ? [groups labelForSegment:0] : nil;
+            Ck([grp0 isEqualToString:@"General"],
+               @"【实时切换】设置页分组标题原地刷新为 General",
+               grp0 ?: @"(nil)");
+            NSButton *wbBtn = (NSButton *)FindId(v, @"settings.openWorkbench");
+            Ck([wbBtn isKindOfClass:[NSButton class]] && [wbBtn.title isEqualToString:RLPTr(@"打开专业工作台")],
+               @"【实时切换】设置页按钮原地刷新为英文",
+               wbBtn ? wbBtn.title : @"(nil)");
+            Ck([[settings currentPaneKey] isEqualToString:@"adv"],
+               @"【实时切换】保留当前设置页签路由 adv",
+               [settings currentPaneKey] ?: @"(nil)");
+            NSScrollView *scrollAfter = nil;
+            for (NSView *sv in Descendants(v)) {
+                if ([sv isKindOfClass:[NSScrollView class]]) { scrollAfter = (NSScrollView *)sv; break; }
+            }
+            Ck(!scrollBefore || !scrollAfter || fabs(scrollAfter.contentView.bounds.origin.y - 40.0) < 2.0,
+               @"【实时切换】保留当前页滚动位置",
+               scrollAfter ? [NSString stringWithFormat:@"y=%.1f", scrollAfter.contentView.bounds.origin.y] : @"(nil)");
+
+            // ③ 切回中文：验证 en -> zh 双向实时恢复
+            NSPopUpButton *popup2 = (NSPopUpButton *)FindId(v, @"sp_lang");
+            if ([popup2 isKindOfClass:[NSPopUpButton class]]) {
+                [popup2 selectItemAtIndex:0];
+                Fire(popup2);
+                WaitUntil(8.0, ^BOOL {
+                    return [ConfLang() isEqualToString:@"zh"] && [RLPLanguage() isEqualToString:@"zh"];
+                });
+                Pump(0.2);
+                Ck([RLPLanguage() isEqualToString:@"zh"],
+                   @"【双向切回】切回 zh 后 gLang 立即恢复 zh",
+                   [NSString stringWithFormat:@"got=%@", RLPLanguage()]);
+                NSString *grp0Zh = [groups isKindOfClass:[NSSegmentedControl class]] ? [groups labelForSegment:0] : nil;
+                Ck([grp0Zh isEqualToString:@"通用"],
+                   @"【双向切回】设置页分组标题原地恢复为「通用」",
+                   grp0Zh ?: @"(nil)");
+
+                // 再切回 en 供下方 ④ 启动测试验证 conf lang=en
+                NSPopUpButton *popup3 = (NSPopUpButton *)FindId(v, @"sp_lang");
+                if ([popup3 isKindOfClass:[NSPopUpButton class]]) {
+                    [popup3 selectItemAtIndex:1];
+                    Fire(popup3);
+                    WaitUntil(8.0, ^BOOL {
+                        return [ConfLang() isEqualToString:@"en"] && [RLPLanguage() isEqualToString:@"en"];
+                    });
+                    Pump(0.15);
+                }
+            }
         }
 
         // ---- ④ 启动：模拟重启。先停核心：真实启动路径在核心起来**之前**就要定语言 ----

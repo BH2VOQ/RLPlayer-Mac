@@ -2893,8 +2893,24 @@ static NSString *RLPRailTagText(id srValue, id bitsValue) {
 }
 
 - (void)onToggleAuto:(id)sender {self.anlAutoEnabled=!self.anlAutoEnabled;self.anlAutoSettingAt=[NSDate timeIntervalSinceReferenceDate];[[RLPCoreClient shared] postJSON:@"/api/settings" body:self.anlAutoEnabled?@"autoanl=1":@"autoanl=0" completion:nil];[self anlPaint];if(self.anlAutoEnabled)[self anlAutoTickForPath:self.currentPath playing:self.webStatus.playing paused:self.webStatus.paused];}
-- (void)onPrevious:(id)s {[[RLPCoreClient shared] postJSON:@"/api/skip?dir=-1" body:nil completion:nil];}
-- (void)onNext:(id)s {[[RLPCoreClient shared] postJSON:@"/api/skip?dir=1" body:nil completion:nil];}
+- (void)onPrevious:(id)s {
+    (void)s;
+    const uint64_t epoch = RLPBeginPlaybackAction();
+    [[RLPCoreClient shared] postJSON:@"/api/skip?dir=-1" body:nil completion:^(NSDictionary * _Nullable json) {
+        if (epoch != RLPPlaybackActionEpoch()) return;
+        RLPHandlePlaybackActionResponse(json, @"播放失败");
+        [[NSNotificationCenter defaultCenter] postNotificationName:@"RLPPlaybackActionCompletedNotification" object:nil];
+    }];
+}
+- (void)onNext:(id)s {
+    (void)s;
+    const uint64_t epoch = RLPBeginPlaybackAction();
+    [[RLPCoreClient shared] postJSON:@"/api/skip?dir=1" body:nil completion:^(NSDictionary * _Nullable json) {
+        if (epoch != RLPPlaybackActionEpoch()) return;
+        RLPHandlePlaybackActionResponse(json, @"播放失败");
+        [[NSNotificationCenter defaultCenter] postNotificationName:@"RLPPlaybackActionCompletedNotification" object:nil];
+    }];
+}
 - (void)onPause:(id)s {
     // 与底栏/菜单同一条决策（RLPSupport::RLPPlaybackToggle）：播放页以前在「已停止」时
     // 只发 /api/pause?on=0（no-op），与 web playOrPause 的"重播"行为不一致。
@@ -3706,12 +3722,13 @@ static NSString *RLPNowPlayingCastDeviceLabel(NSString *device) {
 }
 
 - (void)refresh {
-    if(self.statusInFlight)return;self.statusInFlight=YES;const NSUInteger epoch=self.statusEpoch;
+    if(self.statusInFlight)return;self.statusInFlight=YES;const NSUInteger epoch=self.statusEpoch;const uint64_t actionEpoch=RLPPlaybackActionEpoch();
     __weak __typeof__(self) weakSelf = self;
     [[RLPCoreClient shared] getJSON:@"/api/status" completion:^(NSDictionary * _Nullable json) {
         __typeof__(self) self_ = weakSelf;
-        if (!self_ || epoch!=self_.statusEpoch) return;
-        self_.statusInFlight=NO;
+        if (!self_) return;
+        if (epoch==self_.statusEpoch) self_.statusInFlight=NO;
+        if (epoch!=self_.statusEpoch || actionEpoch!=RLPPlaybackActionEpoch()) return;
         RLPPlaybackStatus *st = [RLPPlaybackStatus statusFromJSON:json];
         if (!st) return;
         NSString *path = st.currentPath ?: @"";
@@ -3740,15 +3757,9 @@ static NSString *RLPNowPlayingCastDeviceLabel(NSString *device) {
         [self_ updateLyricPosition:st.position];
         if(!self_.trackMetadata.count || ![path isEqualToString:self_.currentPath?:@""])self_.titleLabel2.stringValue=path.length?path.lastPathComponent.stringByDeletingPathExtension:RLPTr(@"未播放");
         // web 整页**不把后端 error 写进副标题**（那会把艺术家信息顶掉，变成"艺术家=解码失败"）。
-        // 原生保留可见反馈：改走 toast（与队列/收藏失败同一套轻提示），同一错误串不重复弹。
-        if (st.error.length) {
-            if (![st.error isEqualToString:self_.lastStatusError ?: @""]) {
-                self_.lastStatusError = st.error;
-                RLPPlaybackErrorToast(st.error);
-            }
-        } else {
-            self_.lastStatusError = nil;
-        }
+        // 原生保留可见反馈：走全局去重 toast（与底栏/同步播放动作共用同一状态）。
+        self_.lastStatusError = st.error;
+        RLPReportPlaybackStatusErrorForTrack(st.error, st.currentPath);
         if (![path isEqualToString:self_.currentPath ?: @""]) {
             BOOL cancelPrevious=self_.anlBusy;
             self_.currentPath = path;self_.trackMetadata=@{};self_.artistLabel2.stringValue=@"";self_.metaLabel.stringValue=@"";
@@ -4382,6 +4393,34 @@ static NSString *RLPNowPlayingCastDeviceLabel(NSString *device) {
     for(NSButton *b in @[self.closeButton,self.analysisToggle,self.railToggle]) b.contentTintColor=t.text;
     self.anlDetail.textColor=t.text;[self.webControls applyTheme];self.webControls.playBtn.layer.backgroundColor=t.accent.CGColor;self.webControls.playBtn.contentTintColor=NSColor.whiteColor;
     [self.knowledge applyTheme];[self renderRailMetadata];[self updateLyricPosition:self.webStatus.position];[self updateBlurredCover];
+}
+
+- (void)applyLanguage {
+    self.pageTitle = RLPTr(@"正在播放");
+    self.railTitle.stringValue = RLPTr(@"AI 整理");
+    if (!self.currentPath.length) {
+        self.titleLabel2.stringValue = RLPTr(@"未播放");
+    }
+    if (!self.trackMetadata.count) {
+        RLPSetKernedText(self.kindLabel, RLPTr(@"正在播放"), 1.6);
+    }
+    {
+        NSMutableParagraphStyle *ps = [[NSMutableParagraphStyle alloc] init];
+        ps.lineBreakMode = NSLineBreakByTruncatingTail;
+        self.anlLab.attributedStringValue = [[NSAttributedString alloc] initWithString:RLPTr(@"音频分析")
+            attributes:@{NSFontAttributeName:[NSFont systemFontOfSize:9.5 weight:NSFontWeightBold],
+                         NSForegroundColorAttributeName:[RLPTheme current].mut2,
+                         NSKernAttributeName:@1.5,
+                         NSParagraphStyleAttributeName:ps}];
+    }
+    [self anlUpdateSegmentTitles];
+    [self anlPaint];
+    [self applyPlayModeUI];
+    if (!self.lyricLines.count) {
+        self.lyricsEmpty.stringValue = RLPTr(@"没有歌词");
+    }
+    [self renderRailMetadata];
+    [self.knowledge applyLanguage];
 }
 - (void)updateBlurredCover {
     NSImage *image=self.cover.image;if(!image){self.webCanvas.blurredCover=nil;self.webCanvas.needsDisplay=YES;return;}

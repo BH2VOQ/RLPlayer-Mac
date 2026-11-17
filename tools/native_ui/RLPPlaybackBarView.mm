@@ -587,6 +587,10 @@ static BOOL RLPBarTextFieldIsEditing(NSTextField *field) {
     // 内部不用 Auto Layout：固定 66px 高的悬浮条，手动布局最稳
     // （约束方案在本机出现过控制键被挤出卡片的问题，见 layout）。
     [[NSNotificationCenter defaultCenter] addObserver:self
+                                             selector:@selector(onPlaybackActionStarted:)
+                                                 name:RLPPlaybackActionStartedNotification
+                                               object:nil];
+    [[NSNotificationCenter defaultCenter] addObserver:self
                                              selector:@selector(onPlaybackActionCompleted:)
                                                  name:@"RLPPlaybackActionCompletedNotification"
                                                object:nil];
@@ -598,6 +602,12 @@ static BOOL RLPBarTextFieldIsEditing(NSTextField *field) {
 
 - (void)dealloc {
     [[NSNotificationCenter defaultCenter] removeObserver:self];
+}
+
+- (void)onPlaybackActionStarted:(NSNotification *)note {
+    (void)note;
+    ++self.statusEpoch;
+    self.statusInflight = NO;
 }
 
 - (void)onPlaybackActionCompleted:(NSNotification *)note {
@@ -961,6 +971,26 @@ static double RLPVolDbToPos(double db) {
     if (self.coverView.layer) self.coverView.layer.backgroundColor = t.bg2.CGColor;
 }
 
+- (void)applyLanguage {
+    self.prevBtn.toolTip = RLPTr(@"上一首");
+    self.playBtn.toolTip = RLPTr(@"播放 / 暂停");
+    self.nextBtn.toolTip = RLPTr(@"下一首");
+    self.stopBtn.toolTip = RLPTr(@"停止");
+    self.coverView.toolTip = RLPTr(@"打开正在播放");
+    self.titleLabel.toolTip = RLPTr(@"打开正在播放");
+    self.subLabel.toolTip = RLPTr(@"打开正在播放");
+    self.lyricBtn.toolTip = RLPTr(@"歌词");
+    self.chainBtn.toolTip = RLPTr(@"信号链");
+    if (!self.lastStatus || !self.lastStatus.currentPath.length) {
+        self.titleLabel.stringValue = (self.lastStatus && self.lastStatus.playing) ? RLPTr(@"未命名曲目") : RLPTr(@"未播放");
+    }
+    [self refreshModeButtons];
+    [self refreshBadges];
+    [self applyVolumeLockedState:self.rawVolumeLocked];
+    [self refreshVolumeMuteIcon];
+    self.needsLayout = YES;
+}
+
 - (void)refreshBadges {
     RLPTheme *t=RLPTheme.current;
     RLPPlaybackStatus *st=self.lastStatus;
@@ -1008,13 +1038,14 @@ static double RLPVolDbToPos(double db) {
 - (void)fetchStatusForced:(BOOL)forced {
     if (!forced && self.statusInflight) return;
     const NSUInteger seq = ++self.statusEpoch;
+    const uint64_t actionEpoch = RLPPlaybackActionEpoch();
     self.statusInflight = YES;
     __weak __typeof__(self) weakSelf = self;
     [[RLPCoreClient shared] getJSON:@"/api/status" completion:^(NSDictionary * _Nullable json) {
         __typeof__(self) self_ = weakSelf;
         if (!self_) return;
         if (seq == self_.statusEpoch) self_.statusInflight = NO;
-        if (seq != self_.statusEpoch) return;
+        if (seq != self_.statusEpoch || actionEpoch != RLPPlaybackActionEpoch()) return;
         RLPPlaybackStatus *st = [RLPPlaybackStatus statusFromJSON:json];
         if (st) self_.statusDetails = json;
         [self_ applyStatus:st];
@@ -1062,7 +1093,8 @@ static double RLPVolDbToPos(double db) {
     self.subLabel.textColor = [RLPTheme current].mut;
     [self refreshMetaForPath:st.currentPath];
     if (st.error.length) self.subLabel.toolTip = st.error;
-    else self.subLabel.toolTip = nil;
+    else self.subLabel.toolTip = RLPTr(@"打开正在播放");
+    RLPReportPlaybackStatusErrorForTrack(st.error, st.currentPath);
     [self refreshBadges];
     // 封面：切歌才重新取（避免每 500ms 拉一次图）
     if (![st.currentPath isEqualToString:self.coverPath ?: @""]) {
@@ -1188,20 +1220,28 @@ static double RLPVolDbToPos(double db) {
 - (void)nextTrack {
     if (!self.polling) return;
     ++self.statusEpoch;
+    self.statusInflight = NO;
+    const uint64_t actionEpoch = RLPBeginPlaybackAction();
     __weak __typeof__(self) weakSelf = self;
     [[RLPCoreClient shared] postJSON:@"/api/skip?dir=1" body:nil completion:^(NSDictionary * _Nullable json) {
-        (void)json;
-        [weakSelf fetchStatusForced:YES];
+        __typeof__(self) self_ = weakSelf;
+        if (actionEpoch != RLPPlaybackActionEpoch()) return;
+        RLPHandlePlaybackActionResponse(json, @"播放失败");
+        [self_ fetchStatusForced:YES];
     }];
 }
 
 - (void)previousTrack {
     if (!self.polling) return;
     ++self.statusEpoch;
+    self.statusInflight = NO;
+    const uint64_t actionEpoch = RLPBeginPlaybackAction();
     __weak __typeof__(self) weakSelf = self;
     [[RLPCoreClient shared] postJSON:@"/api/skip?dir=-1" body:nil completion:^(NSDictionary * _Nullable json) {
-        (void)json;
-        [weakSelf fetchStatusForced:YES];
+        __typeof__(self) self_ = weakSelf;
+        if (actionEpoch != RLPPlaybackActionEpoch()) return;
+        RLPHandlePlaybackActionResponse(json, @"播放失败");
+        [self_ fetchStatusForced:YES];
     }];
 }
 

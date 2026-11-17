@@ -7,6 +7,7 @@ NS_ASSUME_NONNULL_BEGIN
 
 /// 我的最爱页面：展示收藏列表，支持播放与取消收藏。
 @interface RLPFavoritesViewController : RLPPageViewController
+- (void)applyLanguage;
 @end
 
 NS_ASSUME_NONNULL_END

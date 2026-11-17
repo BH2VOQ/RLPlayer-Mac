@@ -9,6 +9,7 @@ NS_ASSUME_NONNULL_BEGIN
 
 @interface RLPArtistsViewController : RLPPageViewController
 - (void)searchWithQuery:(NSString *)query;
+- (void)applyLanguage;
 @end
 
 NS_ASSUME_NONNULL_END

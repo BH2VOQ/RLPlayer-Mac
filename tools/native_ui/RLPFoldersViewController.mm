@@ -20,6 +20,7 @@
 @property (nonatomic, strong) NSPopUpButton *rootPopup;     // web #fRoot（音乐库根目录跳转）
 @property (nonatomic, strong) NSButton *goBtn;              // web #fGo
 @property (nonatomic, strong) NSButton *upBtn;
+@property (nonatomic, strong) NSButton *refreshBtn;
 @property (nonatomic) BOOL loaded;
 // web 空态：`此目录没有音频文件`（只有目录/文件都为空时出现，dirs 非空不算空）。
 @property (nonatomic, strong) NSTextField *emptyLabel;
@@ -46,6 +47,7 @@
 
     NSButton *refresh = RLPSymbolButton(@"arrow.clockwise", RLPTr(@"刷新"), self, @selector(onRefresh:));
     refresh.translatesAutoresizingMaskIntoConstraints = NO;
+    self.refreshBtn = refresh;
     [host addSubview:refresh];
 
     // web 地址栏：可输入路径 + 回车/「↩」跳转 + 音乐库根目录下拉（#fPath/#fGo/#fRoot）。
@@ -388,6 +390,31 @@
         NSString *p = [json[@"path"] isKindOfClass:[NSString class]] ? json[@"path"] : nil;
         if (completion) completion(p);
     }];
+}
+
+- (void)applyLanguage {
+    self.pageTitle = RLPTr(@"文件夹");
+    if (!self.isViewLoaded) return;
+    self.upBtn.toolTip = RLPTr(@"上一级");
+    self.refreshBtn.toolTip = RLPTr(@"刷新");
+    self.pathField.placeholderString = RLPTr(@"输入目录后回车，例如 /Users/你的用户名/Music");
+    self.goBtn.toolTip = RLPTr(@"转到");
+    if (self.rootPopup.numberOfItems > 0) {
+        [self.rootPopup itemAtIndex:0].title = RLPTr(@"音乐库…");
+    }
+    self.emptyLabel.stringValue = RLPTr(@"此目录没有音频文件");
+    NSArray<NSMenuItem *> *menuItems = self.table.menu.itemArray;
+    if (menuItems.count >= 2) {
+        menuItems[0].title = RLPTr(@"播放");
+        menuItems[1].title = RLPTr(@"删除磁盘目录…");
+    }
+    if (self.loaded) {
+        [self setSubtitle:[NSString stringWithFormat:@"%ld %@ · %ld %@",
+            (long)self.dirs.count, RLPTr(@"个文件夹"),
+            (long)self.files.count, RLPTr(@"首")]];
+    } else if (![RLPCoreClient shared].started) {
+        [self setSubtitle:RLPTr(@"核心未启动")];
+    }
 }
 
 @end

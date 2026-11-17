@@ -68,6 +68,8 @@ NS_ASSUME_NONNULL_BEGIN
 
 /// 主题切换后刷新自建颜色（背景/文字/选中态）。
 - (void)applyTheme;
+/// 语言切换后原地刷新导航与分组标题，保留选中与歌单名。
+- (void)applyLanguage;
 
 /// 界面模式（"listen" 聆听模式 / "pro" 专业模式，默认 "listen"）。
 /// 切换时更新 station 入口文案（聆听室 <-> 数字音乐台），保留全部既有导航 key（含 settings）。

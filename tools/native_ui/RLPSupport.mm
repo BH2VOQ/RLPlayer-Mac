@@ -466,9 +466,95 @@ void RLPPostJSON(NSString *path, NSString *body) {
     [[RLPCoreClient shared] postJSON:path body:body ?: @"" completion:nil];
 }
 
+static std::atomic<uint64_t> gPlaybackActionEpoch{0};
+static NSString *gLastReportedPlaybackError = nil;
+static NSString *gLastReportedPlaybackErrorPath = nil;
+
+uint64_t RLPPlaybackActionEpoch(void) {
+    return gPlaybackActionEpoch.load();
+}
+
+static void RLPOnMainThread(void (^block)(void)) {
+    if ([NSThread isMainThread]) block();
+    else dispatch_async(dispatch_get_main_queue(), block);
+}
+
+static uint64_t RLPBeginPlaybackActionInternal(BOOL resetErrorState) {
+    const uint64_t epoch = ++gPlaybackActionEpoch;
+    RLPOnMainThread(^{
+        if (resetErrorState) {
+            gLastReportedPlaybackError = nil;
+            gLastReportedPlaybackErrorPath = nil;
+        }
+        [[NSNotificationCenter defaultCenter] postNotificationName:RLPPlaybackActionStartedNotification object:nil];
+    });
+    return epoch;
+}
+
+uint64_t RLPBeginPlaybackAction(void) {
+    return RLPBeginPlaybackActionInternal(YES);
+}
+
+static void RLPReportPlaybackErrorInternal(NSString * _Nullable error, BOOL fromPoll) {
+    if (!error.length) {
+        if (fromPoll) gLastReportedPlaybackError = nil;
+        return;
+    }
+    if (fromPoll && [error isEqualToString:gLastReportedPlaybackError ?: @""]) {
+        return;
+    }
+    gLastReportedPlaybackError = [error copy];
+    if (!fromPoll) gLastReportedPlaybackErrorPath = nil;
+    RLPPlaybackErrorToast(error);
+}
+
+BOOL RLPHandlePlaybackActionResponse(NSDictionary * _Nullable json, NSString * _Nullable fallbackError) {
+    const BOOL ok = [json isKindOfClass:[NSDictionary class]] &&
+                    ![json[@"ok"] isEqual:@NO] &&
+                    (!json[@"ok"] || [json[@"ok"] boolValue]);
+    if (ok) return YES;
+    NSString *err = ([json isKindOfClass:[NSDictionary class]] && [json[@"error"] isKindOfClass:[NSString class]])
+        ? (NSString *)json[@"error"] : nil;
+    NSString *msg = err.length ? err : RLPTr(fallbackError.length ? fallbackError : @"播放失败");
+    RLPOnMainThread(^{
+        RLPReportPlaybackErrorInternal(msg, NO);
+    });
+    return NO;
+}
+
+void RLPReportPlaybackStatusErrorForTrack(NSString * _Nullable error, NSString * _Nullable path) {
+    NSString *copy = [error isKindOfClass:[NSString class]] ? [error copy] : nil;
+    NSString *track = [path isKindOfClass:[NSString class]] ? [path copy] : @"";
+    RLPOnMainThread(^{
+        if (copy.length && gLastReportedPlaybackErrorPath != nil &&
+            ![track isEqualToString:gLastReportedPlaybackErrorPath]) {
+            gLastReportedPlaybackError = nil;
+        }
+        RLPReportPlaybackErrorInternal(copy, YES);
+        gLastReportedPlaybackErrorPath = copy.length ? track : nil;
+    });
+}
+
+void RLPReportPlaybackStatusError(NSString * _Nullable error) {
+    RLPReportPlaybackStatusErrorForTrack(error, nil);
+}
+
+void RLPResetPlaybackErrorState(void) {
+    void (^reset)(void) = ^{ gLastReportedPlaybackError = nil; gLastReportedPlaybackErrorPath = nil; };
+    if ([NSThread isMainThread]) reset();
+    else dispatch_sync(dispatch_get_main_queue(), reset);
+}
+
 static void RLPPostPlaybackAction(NSString *path, NSString * _Nullable body) {
+    const BOOL isPlayOrSkip = [path hasPrefix:@"/api/play"] ||
+                              [path hasPrefix:@"/api/lib/play"] ||
+                              [path hasPrefix:@"/api/skip"];
+    const uint64_t epoch = RLPBeginPlaybackActionInternal(isPlayOrSkip);
     [[RLPCoreClient shared] postJSON:path body:body ?: @"" completion:^(NSDictionary * _Nullable json) {
-        (void)json;
+        if (epoch != RLPPlaybackActionEpoch()) return;
+        if (isPlayOrSkip) {
+            RLPHandlePlaybackActionResponse(json, @"播放失败");
+        }
         [[NSNotificationCenter defaultCenter] postNotificationName:@"RLPPlaybackActionCompletedNotification" object:nil];
     }];
 }
@@ -783,6 +869,8 @@ BOOL RLPVolumeMuteHasRestore(void) { return !isnan(gVolumeRestoreDb); }
 void RLPVolumeMuteReset(void) { gVolumeRestoreDb = NAN; }
 
 NSNotificationName const RLPSettingsChangedNotification = @"RLPSettingsChangedNotification";
+NSNotificationName const RLPLanguageDidChangeNotification = @"RLPLanguageDidChangeNotification";
+NSNotificationName const RLPPlaybackActionStartedNotification = @"RLPPlaybackActionStartedNotification";
 NSNotificationName const RLPFavoritesChangedNotification = @"RLPFavoritesChangedNotification";
 NSNotificationName const RLPQueueChangedNotification = @"RLPQueueChangedNotification";
 

@@ -59,4 +59,19 @@ NSString *RLPPlayModeFromSettings(NSDictionary *_Nullable kv);
 /// <= 350 -> 1 列；<= 750 -> 2 列；> 750 -> 4 列。
 NSInteger RLPQuickStartColumnsForWidth(double width);
 
+/// 规范化 /api/cast/devices 的 devices 数组为 @{ @"id", @"name", @"kind", @"host" } 列表。
+/// id 取 location > friendlyName > name > host（均为空则跳过）；与后端 rtaweb.cpp / Windows 一致。
+NSArray<NSDictionary<NSString *, NSString *> *> *RLPNormalizeCastDevices(NSArray * _Nullable rawDevices);
+
+/// 从 /api/settings 的 kv 记忆本地设备 id：
+/// 仅当 backend 为本地后端（非 upnp 且非 null）时更新；处于 upnp/null 时保留 previousLocalDevice。
+NSString *RLPRememberedLocalDevice(NSDictionary * _Nullable kv, NSString * _Nullable previousLocalDevice);
+
+/// 构造输出切换的 POST /api/settings 补丁：
+/// - targetBackend == @"upnp"：写入 backend=upnp 与 upnpdev；
+/// - targetBackend == @"coreaudio" / @"coreaudio-shared"：写入 backend 并恢复 localDevice（不写 @"null"）；
+/// - targetBackend == @"null"：写入 backend=null 与 device=null。
+NSDictionary<NSString *, NSString *> *RLPOutputSettingsPatchForBackend(
+    NSString *targetBackend, NSString * _Nullable upnpDev, NSString * _Nullable localDevice);
+
 NS_ASSUME_NONNULL_END

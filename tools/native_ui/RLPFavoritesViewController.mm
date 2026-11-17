@@ -24,6 +24,7 @@ static const CGFloat kFavTitleMinW = 120.0;
 @property (nonatomic, strong) NSMutableArray<RLPTrack *> *tracks;
 @property (nonatomic, strong) NSTextField *hintLabel;    // web .favhint：双击顺序播放整个最爱列表
 @property (nonatomic, strong) NSTextField *emptyLabel;   // web 空态：还没有收藏 + 怎么做
+@property (nonatomic, assign) BOOL hasLoaded;
 @end
 
 @implementation RLPFavoritesViewController
@@ -179,6 +180,7 @@ static const CGFloat kFavTitleMinW = 120.0;
             RLPTrack *t = [RLPTrack trackFromJSON:item];
             if (t) [tracks addObject:t];
         }
+        self_.hasLoaded = YES;
         self_.tracks = tracks;
         [self_ setSubtitle:[NSString stringWithFormat:RLPTr(@"%ld 首"), (long)tracks.count]];
         [self_.tableView reloadData];
@@ -272,6 +274,35 @@ static const CGFloat kFavTitleMinW = 120.0;
             RLPToast(RLPTr(@"取消收藏失败"));
         }
     }];
+}
+
+- (void)applyLanguage {
+    self.pageTitle = RLPTr(@"我的最爱");
+    if (!self.isViewLoaded) return;
+    NSArray<NSString *> *cols = @[@"#", RLPTr(@"标题"), RLPTr(@"艺术家"), RLPTr(@"专辑"), @""];
+    for (NSUInteger i = 0; i < _tableView.tableColumns.count && i < cols.count; ++i) {
+        _tableView.tableColumns[i].title = cols[i];
+    }
+    _emptyLabel.stringValue = [RLPTr(@"还没有收藏") stringByAppendingFormat:@"\n%@",
+        RLPTr(@"在曲目行或单曲页点心形，就会出现在这里")];
+    if (self.hasLoaded) {
+        const NSInteger n = (NSInteger)self.tracks.count;
+        [self setSubtitle:[NSString stringWithFormat:RLPTr(@"%ld 首"), (long)n]];
+        self.hintLabel.stringValue = n
+            ? [NSString stringWithFormat:RLPTr(@"双击任意一首，从这首开始顺序播放整个最爱列表（%ld 首）"), (long)n]
+            : @"";
+    } else if (![RLPCoreClient shared].started) {
+        [self setSubtitle:RLPTr(@"核心未启动")];
+    }
+    NSIndexSet *sel = [_tableView.selectedRowIndexes copy];
+    NSScrollView *scroll = _tableView.enclosingScrollView;
+    NSPoint origin = scroll ? scroll.contentView.bounds.origin : NSZeroPoint;
+    [_tableView reloadData];
+    if (sel.count) [_tableView selectRowIndexes:sel byExtendingSelection:NO];
+    if (scroll) {
+        [scroll.contentView scrollToPoint:origin];
+        [scroll reflectScrolledClipView:scroll.contentView];
+    }
 }
 
 @end
