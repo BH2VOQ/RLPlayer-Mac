@@ -847,6 +847,20 @@ int main() {
             Ck(PostsWithPrefix(@"/api/lib/play").count == 0,
                "S2 newer playback suppresses delayed shuffle album start",
                [g_posts componentsJoinedByString:@" | "]);
+            g_holdShufflePost = YES;
+            [alb onShuffle:nil];
+            Ck(g_pendingShufflePost != nil, "S3 valid shuffle response is delayed", @"");
+            [alb setValue:@"different-album" forKey:@"albumKey"];
+            pending = g_pendingShufflePost;
+            g_pendingShufflePost = nil;
+            g_holdShufflePost = NO;
+            [g_posts removeAllObjects];
+            if (pending) pending(@{@"ok": @YES});
+            Pump(0.05);
+            NSArray *albumPlays = PostsWithPrefix(@"/api/lib/play");
+            Ck(albumPlays.count == 1 && [albumPlays[0][@"body"] containsString:@"k=alb-cue"],
+               "S3 valid delayed shuffle plays clicked album snapshot",
+               [g_posts componentsJoinedByString:@" | "]);
         }
 
         std::printf("结果：%d passed, %d failed\n", g_pass, g_fail);
