@@ -101,6 +101,26 @@ int main() {
 
         ck([[RLPCoreClient shared] startEmbedded], "embedded 核心启动（隔离目录，不监听端口）", @"");
 
+        // ---- C1 /api/qdel 越界索引必须如实报失败（2026-11-18 夜间评审 A1）----
+        // 旧实现：idx >= items.size() 时什么都不删，仍回 {"ok":true,"count":N} ⟹
+        // 客户端只能看到"成功"，把没删掉的行也提示成「已移除」。
+        {
+            __block NSDictionary *resp = nil;
+            __block BOOL replied = NO;
+            [[RLPCoreClient shared] postJSON:@"/api/qdel?i=0" body:nil completion:^(NSDictionary * _Nullable j) {
+                resp = j;
+                replied = YES;
+            }];
+            (void)WaitUntil(5.0, ^BOOL { return replied; });
+            ck(replied && [resp isKindOfClass:[NSDictionary class]] &&
+               [resp[@"ok"] boolValue] == NO,
+               "空队列上 qdel?i=0 返回 ok:false（旧实现恒 ok:true ⟹ 假报已移除）",
+               [NSString stringWithFormat:@"resp=%@", resp ?: @"(nil)"]);
+            ck(replied && [resp[@"count"] integerValue] == 0,
+               "失败回包仍带真实 count=0（客户端可据此判断队列没有变）",
+               [NSString stringWithFormat:@"count=%@", resp[@"count"] ?: @"(nil)"]);
+        }
+
         // 夹具：一个真实可解码的音频文件（用系统 say 生成，与 --audit 同法；绝不播放）
         NSString *music = [NSString stringWithUTF8String:(tmp / "music").c_str()];
         NSString *media = [music stringByAppendingPathComponent:@"probe.aiff"];
