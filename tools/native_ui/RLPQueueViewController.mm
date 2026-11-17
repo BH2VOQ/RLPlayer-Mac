@@ -174,7 +174,7 @@ static NSString *const kQueueDragType = @"RLPQueueRowDrag";
         NSTableColumn *c = [[NSTableColumn alloc] initWithIdentifier:cid];
         c.title = @"";
         c.minWidth = 0; c.maxWidth = 10000;
-        c.width = (cid == @"q.n") ? 26.0 : ((cid == @"q.del") ? 24.0 : 300.0);
+        c.width = [cid isEqualToString:@"q.n"] ? 26.0 : ([cid isEqualToString:@"q.del"] ? 24.0 : 300.0);
         [self.table addTableColumn:c];
     }
     // 关键：**不要**让 NSTableView 把多余宽度摊到各列。
@@ -404,14 +404,13 @@ static NSString *RLPQueueParentFolder(NSString *path) {
     [[RLPCoreClient shared] postJSON:url body:nil completion:^(NSDictionary * _Nullable json) {
         __typeof__(self) self_ = weakSelf;
         if (!self_) return;
-        if (json && ![json[@"ok"] boolValue]) {
+        if (!json || ![json[@"ok"] boolValue]) {
             RLPToast([json[@"error"] isKindOfClass:[NSString class]] ? json[@"error"] : RLPTr(@"移除失败"));
-        } else {
-            RLPToast(RLPTr(@"已从队列移除"));
-            if (!json || [json[@"ok"] boolValue]) {
-                [[NSNotificationCenter defaultCenter] postNotificationName:RLPQueueChangedNotification object:self_];
-            }
+            [self_ reloadData];
+            return;
         }
+        RLPToast(RLPTr(@"已从队列移除"));
+        [[NSNotificationCenter defaultCenter] postNotificationName:RLPQueueChangedNotification object:self_];
         [self_ reloadData];
     }];
 }
@@ -476,14 +475,13 @@ static NSString *RLPQueueParentFolder(NSString *path) {
     [[RLPCoreClient shared] postJSON:url body:nil completion:^(NSDictionary * _Nullable json) {
         __typeof__(self) self_ = weakSelf;
         if (!self_) return;
-        if (json && ![json[@"ok"] boolValue]) {
+        if (!json || ![json[@"ok"] boolValue]) {
             RLPToast([json[@"error"] isKindOfClass:[NSString class]] ? json[@"error"] : RLPTr(@"移除失败"));
-        } else {
-            RLPToast(RLPTr(@"已移除"));
-            if (!json || [json[@"ok"] boolValue]) {
-                [[NSNotificationCenter defaultCenter] postNotificationName:RLPQueueChangedNotification object:self_];
-            }
+            [self_ reloadData];
+            return;
         }
+        RLPToast(RLPTr(@"已移除"));
+        [[NSNotificationCenter defaultCenter] postNotificationName:RLPQueueChangedNotification object:self_];
         [self_ reloadData];
     }];
 }
@@ -550,7 +548,7 @@ static NSString *RLPQueueMetaText(NSDictionary *m, NSString *k,
     if ([v isKindOfClass:[NSString class]] && [(NSString *)v length]) return v;
     if (i >= 0 && i < (NSInteger)paths.count)
         return paths[(NSUInteger)i].lastPathComponent.stringByDeletingPathExtension;
-        return @"";
+    return @"";
 }
 
 /// web #qSort：排序下拉改变的是**队列顺序**（/api/qorder），不改变正在播放的那一首。

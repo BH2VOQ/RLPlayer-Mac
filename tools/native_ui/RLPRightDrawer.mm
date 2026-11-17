@@ -551,7 +551,7 @@
 - (void)deleteIndex:(NSInteger)i {
     [[RLPCoreClient shared] postJSON:[NSString stringWithFormat:@"/api/qdel?i=%ld", (long)i]
                                 body:nil completion:^(NSDictionary * _Nullable j) {
-        if (j && ![j[@"ok"] boolValue]) {
+        if (!j || ![j[@"ok"] boolValue]) {
             RLPToast([j[@"error"] isKindOfClass:[NSString class]] ? j[@"error"] : RLPTr(@"移除失败"));
             return;
         }
