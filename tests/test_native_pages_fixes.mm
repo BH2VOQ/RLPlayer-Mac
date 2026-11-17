@@ -60,6 +60,7 @@ static void Ck(BOOL ok, const char *what, NSString *detail) {
 - (void)reloadData;
 - (void)onRowDoubleClick:(id)sender;
 - (void)onRowAdd:(NSButton *)sender;
+- (void)onShuffle:(id)sender;
 @end
 
 @interface RLPArtistDetailViewController (PagesFixesAudit)
@@ -88,6 +89,7 @@ static BOOL g_srcConfigShouldFail = NO;
 static NSString *g_activeServerId = @"srv2";
 static BOOL g_artistImageShouldSucceed = NO;
 static BOOL g_coverShouldFail = NO;
+static BOOL g_playmodePostShouldFail = NO;
 
 static NSData *TestPngData(void) {
     NSBitmapImageRep *rep = [[NSBitmapImageRep alloc]
@@ -267,6 +269,10 @@ static NSArray<NSDictionary *> *PlaylistItemsFixture(void) {
     [g_posts addObject:@{ @"path": path ?: @"", @"body": body ?: @"" }];
     // ⚠️ 顺序：/api/playmode 与 /api/play 同前缀，先判 playmode（与后端路由坑同款）。
     if ([path hasPrefix:@"/api/playmode?mode="]) {
+        if (g_playmodePostShouldFail) {
+            if (done) done(@{ @"ok": @NO, @"error": @"mock shuffle mode failed" });
+            return;
+        }
         g_mode = [[path substringFromIndex:@"/api/playmode?mode=".length] integerValue];
         if (done) done(@{ @"ok": @YES });
         return;
@@ -802,6 +808,26 @@ int main() {
             Ck(!askedCoverWhenAvatarOk && avatarImg.image != nil && !avatarImg.hidden && initialLbl.hidden,
                "审计缺口2 真头像成功时直接显示，不触发封面兜底请求",
                [g_getDatas componentsJoinedByString:@","]);
+        }
+
+        // ---- 随机播放必须等模式切换成功再起播，失败时不得假报成功 ----
+        {
+            RLPAlbumDetailViewController *alb = [[RLPAlbumDetailViewController alloc] initWithAlbumKey:@"alb-cue"];
+            alb.view.frame = win.contentView.bounds;
+            [win.contentView addSubview:alb.view];
+            [alb.view layoutSubtreeIfNeeded];
+            [alb reloadData];
+            Pump(0.05);
+            [g_posts removeAllObjects];
+            g_playmodePostShouldFail = YES;
+            [alb onShuffle:nil];
+            Pump(0.05);
+            BOOL sentPlay = NO;
+            for (NSDictionary *p in g_posts) {
+                if ([p[@"path"] isEqualToString:@"/api/play"]) sentPlay = YES;
+            }
+            Ck(!sentPlay, "S1 随机模式切换失败时不抢播专辑", [g_posts componentsJoinedByString:@" | "]);
+            g_playmodePostShouldFail = NO;
         }
 
         std::printf("结果：%d passed, %d failed\n", g_pass, g_fail);

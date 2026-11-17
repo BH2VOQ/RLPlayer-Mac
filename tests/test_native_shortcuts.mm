@@ -70,6 +70,15 @@ int main() { @autoreleasepool {
         check(near(got, 0.0, 1e-6) && !ch, "V9 已在 0 dB 再按 ↑ 不变（不越界成正增益）");
     }
 
+    // An unconfirmed volume is unknown, not a valid full-gain starting point.
+    {
+        BOOL ch = YES;
+        double got = RLPVolumeStepDb(NAN, RLPVolumeStepCoarseDb, &ch);
+        check(!ch && !isfinite(got), "V10 unknown volume does not step from an invented 0 dB");
+        got = RLPVolumeStepDb(-35.0, RLPVolumeStepCoarseDb, &ch);
+        check(ch && near(got, -34.5, 1e-6), "V11 known volume still steps normally");
+    }
+
     // ---- 常量与 web 一致（防止两处写死后漂移）----
     check(near(RLPVolumeStepCoarseDb, 0.5, 1e-9), "C1 粗档 = 0.5 dB（web VOL_STEP_DB）");
     check(near(RLPVolumeStepFineDb, 0.1, 1e-9), "C2 细档 = 0.1 dB（web VOL_FINE_DB）");

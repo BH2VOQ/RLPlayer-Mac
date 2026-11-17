@@ -71,8 +71,8 @@ double RLPVolumeNudgeDb(double currentDb, double stepDb, BOOL *changed) {
 
 double RLPVolumeStepDb(double currentDb, double stepDb, BOOL *changed) {
     if (changed) *changed = NO;
-    if (!isfinite(stepDb) || stepDb == 0.0) return currentDb;
-    double cur = isfinite(currentDb) ? currentDb : 0.0;
+    if (!isfinite(stepDb) || stepDb == 0.0 || !isfinite(currentDb)) return currentDb;
+    double cur = currentDb;
     cur = round(fmin(RLPVolumeMaxDb, fmax(RLPVolumeSilentDb, cur)) * 10.0) / 10.0;
     const double grid = (fabs(stepDb) >= RLPVolumeStepCoarseDb - 1e-9) ? RLPVolumeStepCoarseDb
                                                                       : RLPVolumeStepFineDb;
