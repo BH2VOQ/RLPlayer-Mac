@@ -74,6 +74,8 @@ static NSString *const kQueueDragType = @"RLPQueueRowDrag";
 @property (nonatomic, strong) NSMutableArray<NSButton *> *actionButtons;
 @property (nonatomic, assign) BOOL hasLoaded;
 @property (nonatomic, assign) NSInteger hoveredRow;
+@property (nonatomic, copy) NSString *lastPlayKey;
+@property (nonatomic, assign) NSTimeInterval lastPlayAt;
 - (void)restoreSortSelection:(NSString *)key;
 - (void)savePlaylistNamed:(NSString *)name;
 @end
@@ -182,7 +184,8 @@ static NSString *const kQueueDragType = @"RLPQueueRowDrag";
     // 与 web 版一致：**单击**即触发（web 的行 onclick 就是单击）。
     // 双击保留兼容；两者指向同一动作，重复触发幂等。
     self.table.action = @selector(onDouble:);
-    self.table.doubleAction = @selector(onDouble:);
+    // web 队列行是单击起播：doubleAction 再指同一动作会让一次双击触发两遍。
+    self.table.doubleAction = NULL;
     self.table.target = self;
 
     // 右键菜单 = RLPTrackActionTableView 的共享菜单（menuForEvent 按被点行构造）。
@@ -487,6 +490,11 @@ static NSString *RLPQueueParentFolder(NSString *path) {
 
 - (void)playRow:(NSInteger)row {
     if (row < 0 || row >= (NSInteger)self.paths.count) return;
+    NSString *key = [NSString stringWithFormat:@"%ld:%@", (long)row, self.paths[(NSUInteger)row]];
+    const NSTimeInterval now = [NSProcessInfo processInfo].systemUptime;
+    if ([key isEqualToString:self.lastPlayKey] && now - self.lastPlayAt < 0.35) return;
+    self.lastPlayKey = key;
+    self.lastPlayAt = now;
     // web 队列行点击：playPath(items[i], cues[i][0], cues[i][1]) —— CUE 分轨必须带区间。
     double cs = -1, ce = -1;
     if (row < (NSInteger)self.cues.count) {
@@ -828,6 +836,7 @@ static NSString *RLPQueueMetaText(NSDictionary *m, NSString *k,
         NSMutableArray<NSString *> *ps = [NSMutableArray array];
         for (id x in items) if ([x isKindOfClass:[NSString class]]) [ps addObject:x];
         self_.paths = ps;
+        if (self_.hoveredRow >= (NSInteger)ps.count) self_.hoveredRow = -1;
         NSArray *ms = [json[@"metas"] isKindOfClass:[NSArray class]] ? json[@"metas"] : @[];
         NSMutableArray<NSDictionary *> *mm = [NSMutableArray array];
         for (id x in ms) [mm addObject:[x isKindOfClass:[NSDictionary class]] ? x : @{}];

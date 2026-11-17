@@ -236,6 +236,11 @@
 @property (nonatomic, copy) NSArray<NSString *> *items;
 @property (nonatomic, copy) NSArray *cues;
 @property (nonatomic, assign) NSInteger qIndex;
+/// 队列快照代次：旧 /api/queue 回包不得覆盖新队列。
+@property (nonatomic, assign) NSUInteger loadSeq;
+/// 同一行的连点去重（双击/连击不重复打断起播）。
+@property (nonatomic, copy) NSString *lastPlayKey;
+@property (nonatomic, assign) NSTimeInterval lastPlayAt;
 @property (nonatomic, copy) NSArray<RLPLyricLine *> *lines;
 @property (nonatomic, copy) NSString *lyricFile;
 @property (nonatomic, assign) NSInteger lyricRetry;
@@ -463,10 +468,12 @@
 
 - (void)loadQueue {
     if (![RLPCoreClient shared].started) return;
+    const NSUInteger seq = ++self.loadSeq;
     __weak __typeof__(self) w = self;
     [[RLPCoreClient shared] getJSON:@"/api/queue" completion:^(NSDictionary * _Nullable j) {
         __typeof__(self) s = w;
-        if (!s || ![j isKindOfClass:[NSDictionary class]]) return;   // 失败原地不动（web 同口径）
+        if (!s || seq != s.loadSeq) return;   // 旧回包不得覆盖新队列
+        if (![j isKindOfClass:[NSDictionary class]]) return;   // 失败原地不动（web 同口径）
         NSArray *items = [j[@"items"] isKindOfClass:[NSArray class]] ? j[@"items"] : nil;
         if (!items) return;
         s.items = items;
@@ -516,6 +523,12 @@
 - (void)playIndex:(NSInteger)i {
     if (i < 0 || i >= (NSInteger)self.items.count) return;
     NSString *f = self.items[(NSUInteger)i];
+    // 同一行 350ms 内连点/双击只起播一次，避免刚起播就被自己打断重头。
+    NSString *key = [NSString stringWithFormat:@"%ld:%@", (long)i, f];
+    const NSTimeInterval now = [NSProcessInfo processInfo].systemUptime;
+    if ([key isEqualToString:self.lastPlayKey] && now - self.lastPlayAt < 0.35) return;
+    self.lastPlayKey = key;
+    self.lastPlayAt = now;
     NSArray *c = (i < (NSInteger)self.cues.count) ? self.cues[(NSUInteger)i] : nil;
     double cs = (c.count >= 2) ? [c[0] doubleValue] : -1;
     double ce = (c.count >= 2) ? [c[1] doubleValue] : -1;
@@ -538,6 +551,10 @@
 - (void)deleteIndex:(NSInteger)i {
     [[RLPCoreClient shared] postJSON:[NSString stringWithFormat:@"/api/qdel?i=%ld", (long)i]
                                 body:nil completion:^(NSDictionary * _Nullable j) {
+        if (j && ![j[@"ok"] boolValue]) {
+            RLPToast([j[@"error"] isKindOfClass:[NSString class]] ? j[@"error"] : RLPTr(@"移除失败"));
+            return;
+        }
         RLPToast(RLPTr(@"已移除"));
         [self loadQueue];
         [[NSNotificationCenter defaultCenter] postNotificationName:RLPQueueChangedNotification object:self];
