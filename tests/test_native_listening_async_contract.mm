@@ -345,6 +345,22 @@ int main(void) {
             vc.outputValue.stringValue ?: @"nil", toastAfterOutFail,
             vc.presetNotes.stringValue ?: @"nil", (long)settingsChangedNotifCount]);
 
+        // A failed Hog toggle must not leave the checkbox showing an unapplied value.
+        {
+            NSButton *hogCheck = (NSButton *)[vc valueForKey:@"outputHogCheck"];
+            if (hogCheck) {
+                const NSControlStateValue before = hogCheck.state;
+                hogCheck.state = (before == NSControlStateValueOn) ? NSControlStateValueOff : NSControlStateValueOn;
+                [vc performSelector:@selector(onToggleHog:) withObject:hogCheck];
+                RLPMockRequest *hogPost = PopFirstRequest(gPendingPosts, @"/api/settings");
+                CK(hogPost != nil, "C2-precondition Hog toggle posts its requested value", hogPost.body ?: @"nil");
+                if (hogPost && hogPost.completion) hogPost.completion(@{@"ok": @NO, @"error": @"Hog denied"});
+                CK(hogCheck.state == before,
+                   "C2 failed Hog toggle restores confirmed checkbox state",
+                   [NSString stringWithFormat:@"before=%ld after=%ld", (long)before, (long)hogCheck.state]);
+            }
+        }
+
         [[NSNotificationCenter defaultCenter] removeObserver:notifToken];
         [gPendingGets removeAllObjects];
         [gPendingPosts removeAllObjects];

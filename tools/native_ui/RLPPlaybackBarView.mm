@@ -603,6 +603,9 @@ static BOOL RLPBarTextFieldIsEditing(NSTextField *field) {
 
 - (void)dealloc {
     [[NSNotificationCenter defaultCenter] removeObserver:self];
+    [_pollTimer invalidate];
+    _pollTimer = nil;
+    [_signalPopover close];
 }
 
 - (void)onPlaybackActionStarted:(NSNotification *)note {

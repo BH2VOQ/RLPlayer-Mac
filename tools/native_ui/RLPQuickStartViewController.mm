@@ -1358,6 +1358,10 @@
             [self_ syncDeviceSelection];
             [self_ syncOutputSummary];
             [self_ syncPlayAndStyleCards];
+            if (self_.outputHogCheck) {
+                self_.outputHogCheck.state = [self_ str:@"hogexcl" def:@"0"].boolValue
+                    ? NSControlStateValueOn : NSControlStateValueOff;
+            }
             RLPToast(err);
         }
     }];
