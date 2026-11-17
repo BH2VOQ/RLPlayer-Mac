@@ -1413,16 +1413,18 @@ static double RLPVolDbToPos(double db) {
             double fallback = self_.hasConfirmedVolume
                 ? self_.confirmedVolumeDb
                 : ((self_.lastStatus && isfinite(self_.lastStatus.volumeDb))
-                    ? RLPVolClampDb(self_.lastStatus.volumeDb) : 0.0);
+                    ? RLPVolClampDb(self_.lastStatus.volumeDb) : NAN);
             self_.optimisticVolumeDb = fallback;
-            if (!self_.volKnob.dragging) {
-                [self_ updateVolumeUiForDb:fallback];
+            if (isfinite(fallback)) {
+                if (!self_.volKnob.dragging) {
+                    [self_ updateVolumeUiForDb:fallback];
+                }
+                [[NSNotificationCenter defaultCenter] postNotificationName:@"RLPVolumeDidChangeNotification"
+                                                                    object:nil
+                                                                  userInfo:@{ @"db": @(fallback),
+                                                                              @"locked": @(self_.rawVolumeLocked),
+                                                                              @"source": self_ }];
             }
-            [[NSNotificationCenter defaultCenter] postNotificationName:@"RLPVolumeDidChangeNotification"
-                                                                object:nil
-                                                              userInfo:@{ @"db": @(fallback),
-                                                                          @"locked": @(self_.rawVolumeLocked),
-                                                                          @"source": self_ }];
             RLPToast(RLPTr(@"音量更改未生效，已重新读取实际音量。"));
             [self_ fetchStatusForced:YES];
         }

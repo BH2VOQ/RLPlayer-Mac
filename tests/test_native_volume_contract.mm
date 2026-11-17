@@ -167,6 +167,45 @@ int main() { @autoreleasepool {
     Ck(Near([RLPPlaybackStatus statusFromJSON:@{@"ok": @YES, @"volDb": @0}].volumeDb, 0, 0.001),
        "V0 explicit zero dB is still valid", @"");
 
+    // A failed first write has no confirmed value to broadcast to other views.
+    {
+        RLPPlaybackBarView *fresh = [[RLPPlaybackBarView alloc] initWithFrame:NSMakeRect(0,0,1120,66)];
+        [fresh startPolling];
+        __block NSUInteger volumeBroadcasts = 0;
+        id token = [[NSNotificationCenter defaultCenter] addObserverForName:@"RLPVolumeDidChangeNotification" object:nil queue:nil usingBlock:^(NSNotification *note) {
+            if (note.userInfo[@"source"] == fresh) ++volumeBroadcasts;
+        }];
+        [fresh commitVolumeDb:-30.0];
+        FlushPostAt(0, @{@"ok": @NO, @"error": @"first write failed"});
+        Ck(volumeBroadcasts == 0, "V2 failed first write cannot broadcast invented confirmed volume",
+           [NSString stringWithFormat:@"broadcasts=%lu", (unsigned long)volumeBroadcasts]);
+        Ck(std::isnan([fresh currentVolumeDb]), "V2 failure before first status keeps volume unknown", @"");
+        [[NSNotificationCenter defaultCenter] removeObserver:token];
+        [fresh stopPolling];
+        [gPendingStatus removeAllObjects];
+        [gPendingPosts removeAllObjects];
+    }
+
+    {
+        RLPNowPlayingViewController *freshNP = [RLPNowPlayingViewController new];
+        (void)freshNP.view;
+        id controls = [freshNP valueForKey:@"webControls"];
+        Ck(controls != nil, "V3 first-write fixture contains playback controls", @"");
+        __block NSUInteger broadcasts = 0;
+        id token = [[NSNotificationCenter defaultCenter] addObserverForName:@"RLPVolumeDidChangeNotification" object:nil queue:nil usingBlock:^(NSNotification *note) {
+            if (note.userInfo[@"source"] == controls) ++broadcasts;
+        }];
+        [controls applyVolumeDb:-30.0];
+        FlushPostAt(0, @{@"ok": @NO, @"error": @"first page write failed"});
+        Ck(![[controls valueForKey:@"hasConfirmedVolume"] boolValue] && broadcasts == 0,
+           "V3 failed first page write does not confirm or broadcast default volume",
+           [NSString stringWithFormat:@"confirmed=%@ broadcasts=%lu", [controls valueForKey:@"hasConfirmedVolume"], (unsigned long)broadcasts]);
+        [[NSNotificationCenter defaultCenter] removeObserver:token];
+        [freshNP stopPolling];
+        [gPendingStatus removeAllObjects];
+        [gPendingPosts removeAllObjects];
+    }
+
     // 构造底栏与播放页，挂在同一个 offscreen window 上以测试 firstResponder / field editor
     NSWindow *win = [[NSWindow alloc] initWithContentRect:NSMakeRect(0, 0, 1120, 720)
                                                 styleMask:NSWindowStyleMaskTitled

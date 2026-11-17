@@ -401,12 +401,8 @@ static BOOL RLPNPTextFieldIsEditing(NSTextField *field) {
 }
 
 - (void)applyVolumeDb:(double)db {
-    if (self.rawVolumeLocked) return;
+    if (self.rawVolumeLocked || !isfinite(db)) return;
     db = RLPVolClampDb(db);
-    if (!self.hasConfirmedVolume) {
-        self.confirmedVolumeDb = RLPVolClampDb(self.preciseVolumeDb);
-        self.hasConfirmedVolume = YES;
-    }
     [self updateVolumeUiForDb:db];
     const NSUInteger seq = ++self.volumeWriteSeq;
     self.volumeWritePending = YES;
@@ -436,15 +432,17 @@ static BOOL RLPNPTextFieldIsEditing(NSTextField *field) {
                                                                           @"locked": @(self_.rawVolumeLocked),
                                                                           @"source": self_ }];
         } else {
-            const double fallback = self_.hasConfirmedVolume ? self_.confirmedVolumeDb : 0.0;
-            if (!self_.volKnob.dragging) {
-                [self_ updateVolumeUiForDb:fallback];
+            const double fallback = self_.hasConfirmedVolume ? self_.confirmedVolumeDb : NAN;
+            if (isfinite(fallback)) {
+                if (!self_.volKnob.dragging) {
+                    [self_ updateVolumeUiForDb:fallback];
+                }
+                [[NSNotificationCenter defaultCenter] postNotificationName:@"RLPVolumeDidChangeNotification"
+                                                                    object:nil
+                                                                  userInfo:@{ @"db": @(fallback),
+                                                                              @"locked": @(self_.rawVolumeLocked),
+                                                                              @"source": self_ }];
             }
-            [[NSNotificationCenter defaultCenter] postNotificationName:@"RLPVolumeDidChangeNotification"
-                                                                object:nil
-                                                              userInfo:@{ @"db": @(fallback),
-                                                                          @"locked": @(self_.rawVolumeLocked),
-                                                                          @"source": self_ }];
             RLPToast(RLPTr(@"音量更改未生效，已重新读取实际音量。"));
             if (self_.onVolumeWriteFailed) self_.onVolumeWriteFailed();
         }
