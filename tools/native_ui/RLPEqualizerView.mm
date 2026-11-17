@@ -1449,6 +1449,24 @@ static NSArray<NSDictionary *> *RLPOpraFilter(NSArray<NSDictionary *> *index, NS
     self.opraCopyChip.toolTip = RLPTr(@"复制 OPRA 项目官网链接");
     self.opraGuide.stringValue = RLPTr(@"点击卡片选中");
     [self.inspector applyLanguage];
+    for (RLPOpraModelCard *c in self.opraModelCardViews) {
+        [c setNeedsDisplay:YES];
+    }
+    for (RLPOpraPresetCard *c in self.opraPresetCardViews) {
+        [c applyTheme];
+    }
+    if (self.opraSelectedProductIndex >= 0 &&
+        self.opraSelectedProductIndex < (NSInteger)self.opraItems.count) {
+        NSDictionary *prod = self.opraItems[(NSUInteger)self.opraSelectedProductIndex];
+        NSString *vendor = [prod[@"vendor"] isKindOfClass:[NSString class]] ? prod[@"vendor"] : @"";
+        NSString *name = [prod[@"name"] isKindOfClass:[NSString class]] ? prod[@"name"] : @"";
+        self.opraSelectedTitle.stringValue = [NSString stringWithFormat:@"%@ %@ · %@",
+            vendor, name, RLPTr(@"调音预设")];
+    }
+    if (self.opraSelectedPresetIndex >= 0 &&
+        self.opraSelectedPresetIndex < (NSInteger)self.opraPresets.count) {
+        [self previewTargetCurveForPreset:self.opraPresets[(NSUInteger)self.opraSelectedPresetIndex]];
+    }
     if (self.bands.count > 0) {
         [self syncViewsFromBands];
     }

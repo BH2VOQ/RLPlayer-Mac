@@ -157,6 +157,16 @@ int main() { @autoreleasepool {
 
     std::printf("== 音量闭环契约判据（延迟status/post、拖动、field editor、[-120,+20]、DSD锁定）==\n");
 
+    // A partial status must not invent 0 dB (full gain) for an unknown volume.
+    Ck(std::isnan([RLPPlaybackStatus statusFromJSON:@{@"ok": @YES}].volumeDb),
+       "V0 missing volume remains unknown", @"");
+    Ck(std::isnan([RLPPlaybackStatus statusFromJSON:@{@"ok": @YES, @"volDb": NSNull.null}].volumeDb),
+       "V0 null volume remains unknown", @"");
+    Ck(std::isnan([RLPPlaybackStatus statusFromJSON:@{@"ok": @YES, @"volDb": @"invalid"}].volumeDb),
+       "V0 malformed volume remains unknown", @"");
+    Ck(Near([RLPPlaybackStatus statusFromJSON:@{@"ok": @YES, @"volDb": @0}].volumeDb, 0, 0.001),
+       "V0 explicit zero dB is still valid", @"");
+
     // 构造底栏与播放页，挂在同一个 offscreen window 上以测试 firstResponder / field editor
     NSWindow *win = [[NSWindow alloc] initWithContentRect:NSMakeRect(0, 0, 1120, 720)
                                                 styleMask:NSWindowStyleMaskTitled
@@ -172,6 +182,11 @@ int main() { @autoreleasepool {
     RLPVolumeSliderView *barSlider = [bar valueForKey:@"volKnob"];
     NSTextField *barField = [bar valueForKey:@"volDbField"];
     NSButton *barMute = [bar valueForKey:@"volMuteBtn"];
+
+    [bar fetchStatus];
+    FlushOldestStatus(@{@"ok": @YES, @"playing": @YES, @"paused": @NO, @"current": @"/tmp/volume-contract.flac"});
+    Ck(Near([bar currentVolumeDb], -15.0, 0.01), "V0 partial status preserves confirmed bar volume",
+       [NSString stringWithFormat:@"%.2f", [bar currentVolumeDb]]);
 
     // ---- C1：底栏拖动跨轮询不跳回 + live 刷新精确数值框 ----
     {

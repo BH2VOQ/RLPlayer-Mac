@@ -18,6 +18,19 @@ static double NumCue(NSDictionary *d, NSString *k) {
     id v = d[k];
     return [v respondsToSelector:@selector(doubleValue)] ? [v doubleValue] : -1.0;
 }
+// An unknown volume must never masquerade as the valid full-gain value 0 dB.
+static double VolumeDb(NSDictionary *d) {
+    id raw = d[@"volDb"];
+    double value = NAN;
+    if ([raw isKindOfClass:NSNumber.class]) {
+        value = [raw doubleValue];
+    } else if ([raw isKindOfClass:NSString.class]) {
+        NSScanner *scanner = [NSScanner scannerWithString:[raw stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet]];
+        if (![scanner scanDouble:&value] || !scanner.isAtEnd) return NAN;
+    }
+    return isfinite(value) ? value : NAN;
+}
+
 static BOOL Bool(NSDictionary *d, NSString *k) {
     id v = d[k];
     return [v respondsToSelector:@selector(boolValue)] ? [v boolValue] : NO;
@@ -157,7 +170,7 @@ NSArray<NSString *> *RLPSplitArtistNames(NSString *raw) {
     s.currentPath = Str(json, @"current");
     s.position = Num(json, @"pos");
     s.duration = Num(json, @"dur");
-    s.volumeDb = Num(json, @"volDb");
+    s.volumeDb = VolumeDb(json);
     s.error = Str(json, @"error");
     s.bitPerfect = Str(json, @"bitPerfect");
     s.bitPerfectWhy = Str(json, @"bitPerfectWhy");

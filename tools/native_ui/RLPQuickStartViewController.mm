@@ -107,6 +107,7 @@
 @property (nonatomic, assign) NSUInteger statusEpoch;
 @property (nonatomic, assign) BOOL statusInflight;
 @property (nonatomic, assign) NSUInteger settingsSeq;
+@property (nonatomic, assign) NSUInteger settingsWriteSeq;
 @property (nonatomic, strong, nullable) NSNumber *lastHogAcquired;
 @property (nonatomic, copy) NSString *lastFallbackWhy;
 @end
@@ -1073,11 +1074,11 @@
         ? RLPTr(@"正在保存设置（下一首或重新播放时生效）…")
         : RLPTr(@"正在应用…");
     NSString *path = [NSString stringWithFormat:@"/api/preset/apply?profile=%@", RLPEnc(profile)];
-    ++self.settingsSeq;
+    const NSUInteger writeSeq = ++self.settingsWriteSeq;
     __weak __typeof__(self) weakSelf = self;
     [[RLPCoreClient shared] postJSON:path body:nil completion:^(NSDictionary * _Nullable json) {
         __typeof__(self) self_ = weakSelf;
-        if (!self_) return;
+        if (!self_ || writeSeq != self_.settingsWriteSeq) return;
         if (json && [json[@"ok"] boolValue]) {
             // notes 是后端给的决策说明（含降级原因），照实显示，不自己编"已优化"。
             NSArray *notes = [json[@"notes"] isKindOfClass:[NSArray class]] ? json[@"notes"] : @[];
@@ -1090,7 +1091,8 @@
             [[NSNotificationCenter defaultCenter] postNotificationName:RLPSettingsChangedNotification
                                                                 object:self_];
         } else {
-            NSString *err = [json[@"error"] isKindOfClass:[NSString class]] ? json[@"error"] : RLPTr(@"应用失败");
+            NSString *err = ([json[@"error"] isKindOfClass:[NSString class]] && [(NSString *)json[@"error"] length])
+                ? json[@"error"] : RLPTr(@"应用失败");
             self_.presetNotes.stringValue = err;
             RLPToast(err);
             [self_ syncPlayAndStyleCards];
@@ -1337,21 +1339,26 @@
 /// 写设置：一次 POST 多个键，然后**读回校验**（不维护第二套状态）。
 - (void)postSettings:(NSDictionary<NSString *, NSString *> *)kv {
     if (!kv.count) return;
-    ++self.settingsSeq;
+    const NSUInteger writeSeq = ++self.settingsWriteSeq;
     NSMutableArray *parts = [NSMutableArray array];
     for (NSString *k in kv) [parts addObject:[NSString stringWithFormat:@"%@=%@", k, RLPEnc(kv[k])]];
     NSString *body = [parts componentsJoinedByString:@"&"];
     __weak __typeof__(self) weakSelf = self;
     [[RLPCoreClient shared] postJSON:@"/api/settings" body:body completion:^(NSDictionary * _Nullable json) {
         __typeof__(self) self_ = weakSelf;
-        if (!self_) return;
+        if (!self_ || writeSeq != self_.settingsWriteSeq) return;
         if (json && [json[@"ok"] boolValue]) {
             RLPToast(RLPTr(@"已生效"));
             [self_ reloadSettings];
             [[NSNotificationCenter defaultCenter] postNotificationName:RLPSettingsChangedNotification
                                                                 object:self_];
         } else {
-            RLPToast(RLPTr(@"保存失败"));
+            NSString *err = ([json[@"error"] isKindOfClass:[NSString class]] && [(NSString *)json[@"error"] length])
+                ? json[@"error"] : RLPTr(@"保存失败");
+            [self_ syncDeviceSelection];
+            [self_ syncOutputSummary];
+            [self_ syncPlayAndStyleCards];
+            RLPToast(err);
         }
     }];
 }
@@ -1365,7 +1372,6 @@
         NSDictionary *d = self.devices[idx - 1];
         devId = [d[@"id"] isKindOfClass:[NSString class]] ? d[@"id"] : @"";
     }
-    self.localDevice = devId;
     [self postSettings:@{@"device": devId}];
 }
 

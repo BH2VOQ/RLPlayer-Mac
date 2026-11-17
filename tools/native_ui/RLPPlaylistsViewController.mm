@@ -242,6 +242,10 @@
     self.deleteBtn.enabled = has;
     // web renderSavedQueuePage 的中间态：head(name, '加载中…', '')，info 回来后再换成「N 首」。
     [self setSubtitle:has ? RLPTr(@"加载中…") : @""];
+    if (!has) {
+        ++self.itemSeq;
+        return;
+    }
     [self loadItems];
 }
 
@@ -272,34 +276,77 @@
 /// cs/ce 必须带 —— 否则 CUE 分轨会从整张碟开头播（web 版明确处理过）。
 - (void)playFromIndex:(NSInteger)index {
     if (!self.selectedName.length) return;
+    if (index < 0 || index >= (NSInteger)self.items.count) return;
+    RLPPlaylistItem *item = self.items[(NSUInteger)index];
+    if (!item.file.length) return;
+    NSString *playlistName = [self.selectedName copy];
+    NSString *file = [item.file copy];
+    const double cs = item.cs;
+    const double ce = item.ce;
+    const NSUInteger itemSeq = self.itemSeq;
+    const uint64_t actionEpoch = RLPBeginPlaybackAction();
     // P3：单曲循环（mode==2）下"播放整列/点第 N 首"会卡在同一首无限重复。
     // web ensureSequentialMode 同口径：起播前先读模式，是 2 就切回列表循环(1)。
-    // 与「我的最爱」整列播放共用 RLPSupport 的同一守卫（不各写一套）。
+    // 与「我的最爱」整列播放共用 RLPSupport 的同一守卫，且复用同一 actionEpoch + 歌单快照校验，
+    // 既防切歌单/重载 items/跨入口新播放抢播，也不在第二步重复递增 epoch 自我取消。
     __weak __typeof__(self) weakSelf = self;
-    RLPEnsureSequentialMode(^{
+    RLPEnsureSequentialModeWhile(^BOOL {
+        __typeof__(self) self_ = weakSelf;
+        return self_ && actionEpoch == RLPPlaybackActionEpoch()
+            && itemSeq == self_.itemSeq
+            && [self_.selectedName isEqualToString:playlistName];
+    }, ^{
         __typeof__(self) self_ = weakSelf;
         if (!self_) return;
-        [self_ loadQueueAndPlayAt:index];
+        [self_ loadQueueAndPlayWithName:playlistName
+                                  index:index
+                                   file:file
+                                     cs:cs
+                                     ce:ce
+                                itemSeq:itemSeq
+                            actionEpoch:actionEpoch];
     });
 }
 
 /// 起播后半段：/api/sq/play 换队列 → 按该曲 file/cs/ce 真正 /api/play。
 - (void)loadQueueAndPlayAt:(NSInteger)index {
     if (!self.selectedName.length) return;
+    if (index < 0 || index >= (NSInteger)self.items.count) return;
+    RLPPlaylistItem *item = self.items[(NSUInteger)index];
+    if (!item.file.length) return;
+    [self loadQueueAndPlayWithName:[self.selectedName copy]
+                             index:index
+                              file:[item.file copy]
+                                cs:item.cs
+                                ce:item.ce
+                           itemSeq:self.itemSeq
+                       actionEpoch:RLPBeginPlaybackAction()];
+}
+
+- (void)loadQueueAndPlayWithName:(NSString *)playlistName
+                           index:(NSInteger)index
+                            file:(NSString *)file
+                              cs:(double)cs
+                              ce:(double)ce
+                         itemSeq:(NSUInteger)itemSeq
+                     actionEpoch:(uint64_t)actionEpoch {
+    if (!playlistName.length || !file.length) return;
+    if (actionEpoch != RLPPlaybackActionEpoch()) return;
+    if (itemSeq != self.itemSeq || ![self.selectedName isEqualToString:playlistName]) return;
     NSString *url = [NSString stringWithFormat:@"/api/sq/play?name=%@&i=%ld",
-                     RLPEnc(self.selectedName), (long)index];
+                     RLPEnc(playlistName), (long)index];
     __weak __typeof__(self) weakSelf = self;
     [[RLPCoreClient shared] postJSON:url body:nil completion:^(NSDictionary * _Nullable json) {
         __typeof__(self) self_ = weakSelf;
         if (!self_) return;
+        if (actionEpoch != RLPPlaybackActionEpoch()) return;
+        if (itemSeq != self_.itemSeq || ![self_.selectedName isEqualToString:playlistName]) return;
         if (!json || ![json[@"ok"] boolValue]) {
             NSString *err = [json[@"error"] isKindOfClass:[NSString class]] ? json[@"error"] : RLPTr(@"载入失败");
             RLPToast(err);
             return;
         }
-        if (index < 0 || index >= (NSInteger)self_.items.count) return;
-        RLPPlaylistItem *it = self_.items[index];
-        RLPPlayPathCue(it.file, it.cs, it.ce);
+        RLPPlayPathCue(file, cs, ce);
     }];
 }
 
@@ -398,6 +445,7 @@
         __typeof__(self) self_ = weakSelf;
         if (!self_) return;
         if (json && [json[@"ok"] boolValue]) {
+            ++self_.itemSeq;
             self_.selectedName = @"";
             [self_ setPageTitle:RLPTr(@"歌单")];
             [self_.items removeAllObjects];
@@ -448,6 +496,7 @@
         for (RLPPlaylistRow *r in self_.playlists)
             if ([r.name isEqualToString:self_.selectedName]) { stillThere = YES; break; }
         if (!stillThere) {
+            ++self_.itemSeq;
             self_.selectedName = @"";
             [self_ setPageTitle:RLPTr(@"歌单")];
             [self_ setSubtitle:[NSString stringWithFormat:RLPTr(@"%ld 个歌单"), (long)self_.playlists.count]];
@@ -468,11 +517,12 @@
 - (void)loadItems {
     if (!self.selectedName.length || ![RLPCoreClient shared].started) return;
     const NSUInteger seq = ++self.itemSeq;
-    NSString *url = [NSString stringWithFormat:@"/api/sq/info?name=%@", RLPEnc(self.selectedName)];
+    NSString *playlistName = [self.selectedName copy];
+    NSString *url = [NSString stringWithFormat:@"/api/sq/info?name=%@", RLPEnc(playlistName)];
     __weak __typeof__(self) weakSelf = self;
     [[RLPCoreClient shared] getJSON:url completion:^(NSDictionary * _Nullable json) {
         __typeof__(self) self_ = weakSelf;
-        if (!self_ || seq != self_.itemSeq) return;
+        if (!self_ || seq != self_.itemSeq || ![self_.selectedName isEqualToString:playlistName]) return;
         [self_.items removeAllObjects];
         if (!json || ![json[@"ok"] boolValue]) {
             [self_.itemTable reloadData];

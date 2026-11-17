@@ -821,7 +821,7 @@ static NSString *RLPQueueMetaText(NSDictionary *m, NSString *k,
         // 不自己维护第二份播放状态（核心是唯一真相源）。
         [[RLPCoreClient shared] getJSON:@"/api/status" completion:^(NSDictionary * _Nullable st) {
             __typeof__(self) s3 = weakSelf;
-            if (!s3) return;
+            if (!s3 || seq != s3.seq) return;
             s3.isPlayingNow = [st[@"playing"] boolValue] && ![st[@"paused"] boolValue];
         }];
         NSArray *items = [json[@"items"] isKindOfClass:[NSArray class]] ? json[@"items"] : @[];

@@ -4,6 +4,7 @@
 
 #include "rlapp_core.h"
 #include <atomic>
+#include <cstdint>
 #include "net/webui.h"
 
 @implementation RLPCoreClient {
@@ -12,8 +13,9 @@
     dispatch_queue_t _slowQueue;
     // 2026-11-17（并发审计已证实）：shutdown 只 stop_embedded 就返回，后台队列里
     // 在途的 rlapp::dispatch 会在 C++ 全局单例析构后继续跑 ⟹ 退出时崩溃。
-    // 关闸后先排空快队列，再停核心。
+    // 关闸后先排空快队列，再停核心；同时用 _generation 防止重启前旧回调复活。
     std::atomic<bool> _shuttingDown;
+    std::atomic<uint64_t> _generation;
     BOOL _startedStorage;
 }
 
@@ -34,22 +36,35 @@
         // 若与播控写共用 _writeQueue，LLM 卡住时暂停/停止/切歌/音量全会无限期排队。
         // 单独一条串行队列承接它们：长任务只互相排队，不拖住实时播控。
         _slowQueue = dispatch_queue_create("rlplayer.native.core.slow", DISPATCH_QUEUE_SERIAL);
+        _shuttingDown.store(false, std::memory_order_relaxed);
+        _generation.store(1, std::memory_order_relaxed);
     }
     return self;
 }
 
 - (BOOL)started { return _startedStorage; }
 
+- (BOOL)isGateOpenForGeneration:(uint64_t)gen {
+    return !_shuttingDown.load(std::memory_order_acquire) &&
+           _generation.load(std::memory_order_acquire) == gen;
+}
+
 - (BOOL)startEmbedded {
     if (_startedStorage) return YES;
     const BOOL ok = rlapp::start_embedded() ? YES : NO;
+    if (ok) {
+        // 先递增代次再复位关闸标志，防止 shutdown 前投递的旧回调在重启瞬间复活。
+        _generation.fetch_add(1, std::memory_order_acq_rel);
+        _shuttingDown.store(false, std::memory_order_release);
+    }
     _startedStorage = ok;
     return ok;
 }
 
 - (void)shutdown {
     if (!_startedStorage) return;
-    _shuttingDown.store(true);
+    _shuttingDown.store(true, std::memory_order_release);
+    _generation.fetch_add(1, std::memory_order_acq_rel);
     // 排空短任务队列：barrier 保证排在此前的任务都执行完，且之后不再插入读任务。
     dispatch_barrier_sync(_ioQueue, ^{});
     dispatch_sync(_writeQueue, ^{});
@@ -112,21 +127,34 @@
 }
 
 - (void)runAsync:(BOOL)get path:(NSString *)path body:(nullable NSString *)body completion:(nullable RLPJSONCompletion)completion {
-    if (_shuttingDown.load()) return;   // 关闸后拒绝新任务（见 shutdown 注释）
+    if (_shuttingDown.load(std::memory_order_acquire)) return;   // 关闸后拒绝新任务（见 shutdown 注释）
+    const uint64_t gen = _generation.load(std::memory_order_acquire);
+    if (![self isGateOpenForGeneration:gen]) return;
     dispatch_queue_t q = get ? _ioQueue
                              : ([[self class] isSlowWritePath:path] ? _slowQueue : _writeQueue);
     dispatch_async(q, ^{
+        if (![self isGateOpenForGeneration:gen]) return;
         NSDictionary *j = [self jsonWithMethod:(get ? @"GET" : @"POST") path:path body:body];
-        if (!completion) return;
-        dispatch_async(dispatch_get_main_queue(), ^{ completion(j); });
+        if (!completion || ![self isGateOpenForGeneration:gen]) return;
+        dispatch_async(dispatch_get_main_queue(), ^{
+            if (![self isGateOpenForGeneration:gen]) return;
+            completion(j);
+        });
     });
 }
 
 - (void)getData:(NSString *)path completion:(nullable RLPDataCompletion)completion {
+    if (_shuttingDown.load(std::memory_order_acquire)) return;
+    const uint64_t gen = _generation.load(std::memory_order_acquire);
+    if (![self isGateOpenForGeneration:gen]) return;
     dispatch_async(_ioQueue, ^{
+        if (![self isGateOpenForGeneration:gen]) return;
         NSData *d = [self dataWithMethod:@"GET" path:path body:nil contentType:nil];
-        if (!completion) return;
-        dispatch_async(dispatch_get_main_queue(), ^{ completion(d); });
+        if (!completion || ![self isGateOpenForGeneration:gen]) return;
+        dispatch_async(dispatch_get_main_queue(), ^{
+            if (![self isGateOpenForGeneration:gen]) return;
+            completion(d);
+        });
     });
 }
 
@@ -134,11 +162,15 @@
             body:(NSData *)body
      contentType:(NSString *)contentType
       completion:(nullable RLPJSONCompletion)completion {
+    if (_shuttingDown.load(std::memory_order_acquire)) return;
+    const uint64_t gen = _generation.load(std::memory_order_acquire);
+    if (![self isGateOpenForGeneration:gen]) return;
     // HttpRequest.body 是 std::string，但这里塞的是**原始字节**（图片）。
     // std::string 能承载任意字节（含 \0），dispatch 侧按字节取用，不做 UTF-8 解释。
     const std::string p = path.UTF8String ?: "";
     const std::string bytes((const char *)body.bytes, (size_t)body.length);
     dispatch_async(_writeQueue, ^{
+        if (![self isGateOpenForGeneration:gen]) return;
         rta::net::HttpRequest req;
         req.method = "POST";
         req.path = p;
@@ -152,8 +184,11 @@
             if ([parsed isKindOfClass:[NSDictionary class]]) j = parsed;
         }
         (void)contentType;   // 端点按路径判定，不依赖请求头；保留参数以便将来扩展
-        if (!completion) return;
-        dispatch_async(dispatch_get_main_queue(), ^{ completion(j); });
+        if (!completion || ![self isGateOpenForGeneration:gen]) return;
+        dispatch_async(dispatch_get_main_queue(), ^{
+            if (![self isGateOpenForGeneration:gen]) return;
+            completion(j);
+        });
     });
 }
 

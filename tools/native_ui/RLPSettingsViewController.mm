@@ -485,6 +485,13 @@ static NSStackView *RLPSRow(NSString *label, NSView *control, NSString *hint, RL
 @property (nonatomic, strong) NSTextField *searchStatus;
 @property (nonatomic, strong) NSPopUpButton *llmProviderPopup;
 @property (nonatomic, copy) NSString *lastAppliedLang;
+/// 语言切换期间跨所有 cachedPane 保存的未提交草稿（tabKey -> @{ identifier: draftString }）。
+@property (nonatomic, strong) NSMutableDictionary<NSNumber *, NSMutableDictionary<NSString *, NSString *> *> *pendingPaneDrafts;
+/// 用户已修改但尚未保存成功的控件 identifier（防止延迟 /api/settings 与 /api/llm 回包覆盖）。
+@property (nonatomic, strong) NSMutableSet<NSString *> *dirtyControlIds;
+/// 最近一次从后端回填到各控件的值（用于识别未触发 textDidChange 的草稿改动）。
+@property (nonatomic, strong) NSMutableDictionary<NSString *, NSString *> *lastLoadedValues;
+@property (nonatomic, assign) NSUInteger llmSeq;
 
 @end
 
@@ -495,6 +502,9 @@ static NSStackView *RLPSRow(NSString *label, NSView *control, NSString *hint, RL
     if (self) {
         _paneCache = [NSMutableDictionary dictionary];
         _loadedKeys = [NSMutableSet set];
+        _pendingPaneDrafts = [NSMutableDictionary dictionary];
+        _dirtyControlIds = [NSMutableSet set];
+        _lastLoadedValues = [NSMutableDictionary dictionary];
         // 默认页签 = 「通用」，与 web 一致（2026-10-29 用户要求「通用」排第一并默认选中）。
         _tab = RLPSTabAdv;
         _uiMode = @"listen";
@@ -526,6 +536,10 @@ static NSStackView *RLPSRow(NSString *label, NSView *control, NSString *hint, RL
     [[NSNotificationCenter defaultCenter] addObserver:self
                                              selector:@selector(onLanguageChanged:)
                                                  name:RLPLanguageDidChangeNotification
+                                               object:nil];
+    [[NSNotificationCenter defaultCenter] addObserver:self
+                                             selector:@selector(onControlTextDidChange:)
+                                                 name:NSControlTextDidChangeNotification
                                                object:nil];
 
     self.groupTabs = [NSSegmentedControl segmentedControlWithLabels:@[RLPTr(@"通用"), RLPTr(@"音频处理")]
@@ -663,6 +677,56 @@ static NSStackView *RLPSRow(NSString *label, NSView *control, NSString *hint, RL
     return RLPSettingsKeyForTab(self.tab);
 }
 
+static void RLPSettingsCollectViews(NSView *v, NSMutableArray<NSView *> *out) {
+    if (!v) return;
+    [out addObject:v];
+    for (NSView *s in v.subviews) RLPSettingsCollectViews(s, out);
+}
+
+- (BOOL)isEqOwnedView:(NSView *)v {
+    if (!v || !self.eqView) return NO;
+    if ([v isDescendantOf:self.eqView]) return YES;
+    if (self.eqView.opraSectionView && [v isDescendantOf:self.eqView.opraSectionView]) return YES;
+    return NO;
+}
+
+- (BOOL)isControlDirty:(NSView *)v {
+    if (!v) return NO;
+    if ([v isKindOfClass:[NSTextField class]] && RLPTextFieldIsEditing((NSTextField *)v)) return YES;
+    if (v.identifier.length && [self.dirtyControlIds containsObject:v.identifier]) return YES;
+    return NO;
+}
+
+- (void)onControlTextDidChange:(NSNotification *)note {
+    NSView *v = [note.object isKindOfClass:[NSView class]] ? (NSView *)note.object : nil;
+    if (!v || !v.identifier.length) return;
+    if (![v isDescendantOf:self.paneHost]) return;
+    if ([self isEqOwnedView:v]) return;
+    [self.dirtyControlIds addObject:v.identifier];
+}
+
+- (void)restorePendingDraftsForTab:(RLPSTab)tab inPane:(NSView *)pane {
+    NSMutableDictionary<NSString *, NSString *> *drafts = self.pendingPaneDrafts[@(tab)];
+    if (!drafts.count || !pane) {
+        [self.pendingPaneDrafts removeObjectForKey:@(tab)];
+        return;
+    }
+    NSMutableArray<NSView *> *views = [NSMutableArray array];
+    RLPSettingsCollectViews(pane, views);
+    for (NSView *v in views) {
+        if (!v.identifier.length || [self isEqOwnedView:v]) continue;
+        NSString *draft = drafts[v.identifier];
+        if (!draft) continue;
+        if ([v isKindOfClass:[NSTextField class]] && ((NSTextField *)v).isEditable) {
+            ((NSTextField *)v).stringValue = draft;
+        } else if ([v isKindOfClass:[NSTextView class]] && ((NSTextView *)v).isEditable) {
+            ((NSTextView *)v).string = draft;
+            if (v == self.fbText) [self updateFbCount];
+        }
+    }
+    [self.pendingPaneDrafts removeObjectForKey:@(tab)];
+}
+
 - (void)showTab:(RLPSTab)tab {
     self.tab = tab;
     NSView *pane = self.paneCache[@(tab)];
@@ -685,6 +749,9 @@ static NSStackView *RLPSRow(NSString *label, NSView *control, NSString *hint, RL
         [pane.topAnchor constraintEqualToAnchor:self.paneHost.topAnchor],
         [pane.bottomAnchor constraintEqualToAnchor:self.paneHost.bottomAnchor],
     ]];
+    if (freshlyBuilt) {
+        [self restorePendingDraftsForTab:tab inPane:pane];
+    }
     // 新建的页签控件还是 UI 默认值（设备/滤波下拉是空的、开关是默认态）。
     // activate 只在进页时跑一次，之后才点开的页签必须在这里补一次读回，
     // 否则输出/PCM/SDM 页会显示空下拉与默认值，而不是用户真实设置。
@@ -974,6 +1041,44 @@ static NSString *RLPControlIdentifier(NSString *key) {
     [self postKey:key value:value completion:nil];
 }
 
+- (NSView *)findCachedControlWithIdentifier:(NSString *)ident {
+    if (!ident.length) return nil;
+    for (NSNumber *k in self.paneCache) {
+        NSMutableArray<NSView *> *views = [NSMutableArray array];
+        RLPSettingsCollectViews(self.paneCache[k], views);
+        for (NSView *v in views) {
+            if ([v.identifier isEqualToString:ident]) return v;
+        }
+    }
+    return nil;
+}
+
+- (void)clearDirtyControlId:(NSString *)ident expectedValue:(nullable NSString *)expectedValue {
+    if (!ident.length) return;
+    NSView *v = [self findCachedControlWithIdentifier:ident];
+    if ([v isKindOfClass:[NSTextField class]]) {
+        NSString *cur = ((NSTextField *)v).stringValue ?: @"";
+        if (expectedValue && ![cur isEqualToString:expectedValue]) {
+            NSString *trimmed = [cur stringByTrimmingCharactersInSet:
+                                 [NSCharacterSet whitespaceAndNewlineCharacterSet]];
+            if (![trimmed isEqualToString:expectedValue]) return;
+        }
+    }
+    [self.dirtyControlIds removeObject:ident];
+    if (expectedValue) self.lastLoadedValues[ident] = expectedValue;
+}
+
+- (void)clearDirtyForBackendKey:(NSString *)key submittedValue:(NSString *)value {
+    if (!key.length) return;
+    for (NSString *ident in [self.dirtyControlIds copy]) {
+        NSString *mapped = RLPBackendKeyForControl(ident);
+        if ([mapped isEqualToString:key] ||
+            ([key isEqualToString:@"scanthreads"] && [mapped isEqualToString:@"scanThreads"])) {
+            [self clearDirtyControlId:ident expectedValue:value];
+        }
+    }
+}
+
 /// completion(ok)：保存结果落定后回调。用于「改完要刷新派生提示」的控件（例如 SDM 拐点：
 /// 被 422 拒时后端 conf 没写，读回的仍是旧值 —— 提示必须跟着真实状态走，不能拿输入框的值猜）。
 - (void)postKey:(NSString *)key value:(NSString *)value
@@ -988,6 +1093,7 @@ static NSString *RLPControlIdentifier(NSString *key) {
         if (!self_) return;
         const BOOL ok = (json && [json[@"ok"] boolValue]);
         if (ok) {
+            [self_ clearDirtyForBackendKey:key submittedValue:value ?: @""];
             self_.statusLine.stringValue = [NSString stringWithFormat:@"%@ %@ = %@", RLPTr(@"已保存"), key, value];
             [[NSNotificationCenter defaultCenter] postNotificationName:RLPSettingsChangedNotification
                                                                 object:self_];
@@ -1022,6 +1128,9 @@ static NSString *RLPControlIdentifier(NSString *key) {
         if (!self_) return;
         const BOOL ok = (json && [json[@"ok"] boolValue]);
         if (ok) {
+            for (NSString *k in kv) {
+                [self_ clearDirtyForBackendKey:k submittedValue:kv[k] ?: @""];
+            }
             self_.statusLine.stringValue = RLPTr(@"已保存");
             [[NSNotificationCenter defaultCenter] postNotificationName:RLPSettingsChangedNotification
                                                                 object:self_];
@@ -1217,13 +1326,17 @@ static NSString *RLPControlIdentifier(NSString *key) {
 
 - (void)applyKV:(NSDictionary *)kv toTextField:(NSTextField *)tf key:(NSString *)key {
     if (!tf) return;
-    if (RLPTextFieldIsEditing(tf)) return;
+    if ([self isControlDirty:tf]) return;
     id v = kv[key];
+    NSString *s = nil;
     if ([v isKindOfClass:[NSString class]]) {
-        tf.stringValue = v;
-        [self.loadedKeys addObject:key];
+        s = v;
     } else if ([v respondsToSelector:@selector(stringValue)]) {
-        tf.stringValue = [v stringValue];
+        s = [v stringValue];
+    }
+    if (s) {
+        tf.stringValue = s;
+        if (tf.identifier.length) self.lastLoadedValues[tf.identifier] = s;
         [self.loadedKeys addObject:key];
     }
 }
@@ -2298,7 +2411,8 @@ static NSString *RLPControlIdentifier(NSString *key) {
         RLPTr(@"仅当公开数据源因歌名对不上而失败时，自动用 AI 规范化歌名再检索一次；AI 只纠正歌名，封面歌词仍来自公开数据源并过同曲校验"), t)];
 
     // 「高级选项 ▾」入口（web #sp_metamore）：默认收起；展开后是下面整块高级内容。
-    NSButton *moreBtn = [NSButton buttonWithTitle:RLPTr(@"高级选项 ▾") target:self
+    NSButton *moreBtn = [NSButton buttonWithTitle:(self.metaAdvancedVisible ? RLPTr(@"高级选项 ▴") : RLPTr(@"高级选项 ▾"))
+                                           target:self
                                            action:@selector(onToggleMetaAdvanced:)];
     moreBtn.bezelStyle = NSBezelStyleRounded;
     moreBtn.identifier = @"sp_metamore";
@@ -2311,7 +2425,7 @@ static NSString *RLPControlIdentifier(NSString *key) {
     adv.alignment = NSLayoutAttributeLeading;
     adv.spacing = 22;
     adv.translatesAutoresizingMaskIntoConstraints = NO;
-    adv.hidden = YES;
+    adv.hidden = !self.metaAdvancedVisible;
     adv.identifier = @"sp_metaadv";        // web #sp_metaadv（审计用它断言"默认收起"）
     self.metaAdvancedStack = adv;
     // 高级卡片建在 adv 里：RLPSGroup 会落进 gCurrentStack，所以临时切换上下文。
@@ -2521,16 +2635,29 @@ static NSString *RLPControlIdentifier(NSString *key) {
         RLPTr(@"参数均衡 PEQ（20 段 · HIFI）"),
         RLPTr(@"RBJ 双二阶 · 20 段 ISO 1/3 倍频程中心频率（20Hz~20kHz）· 采样率相关重建 · 参数热更新交叉淡入"), t);
     [stack addArrangedSubview:peqGroup];
-    self.eqView = [[RLPEqualizerView alloc] initWithFrame:NSMakeRect(0, 0, 620, 720)];
-    self.eqView.translatesAutoresizingMaskIntoConstraints = NO;
-    // 设置页本身就是整页滚动容器：EQ 不再套自己的滚动条（用户实测「只要外面那个滚动条」）。
-    [self.eqView setEmbeddedInPage:YES];
+    const BOOL reusingEq = (self.eqView != nil);
+    if (!reusingEq) {
+        self.eqView = [[RLPEqualizerView alloc] initWithFrame:NSMakeRect(0, 0, 620, 720)];
+        self.eqView.translatesAutoresizingMaskIntoConstraints = NO;
+        // 设置页本身就是整页滚动容器：EQ 不再套自己的滚动条（用户实测「只要外面那个滚动条」）。
+        [self.eqView setEmbeddedInPage:YES];
+    } else {
+        if (self.eqHeightConstraint) {
+            self.eqHeightConstraint.active = NO;
+            self.eqHeightConstraint = nil;
+        }
+        [self.eqView removeFromSuperview];
+        [self.eqView.opraSectionView removeFromSuperview];
+        [self.eqView applyLanguage];
+    }
     [peqGroup addFullRow:self.eqView];
     // 高度 = PEQ 段内容自然高度；reload 之后再校正一次（20 段参数文本就位后才准确）。
     self.eqHeightConstraint = [self.eqView.heightAnchor
         constraintEqualToConstant:MAX(420.0, [self.eqView preferredContentHeight])];
     [self.eqHeightConstraint setActive:YES];
-    [self.eqView reload];
+    if (!reusingEq) {
+        [self.eqView reload];
+    }
 
     RLPSettingsGroup *opraGroup = (RLPSettingsGroup *)RLPSGroup(
         RLPTr(@"耳机 EQ（OPRA 校准预设）"), RLPTr(@"收录 6,230 款耳机专业校准滤波 · CC BY-SA 4.0"), t);
@@ -2823,7 +2950,9 @@ static NSString *RLPControlIdentifier(NSString *key) {
         if (!ok) {
             // 降级：隐藏下拉、保留手填（值填当前 model，用户可改可留空）。
             self_.llmModelPopup.hidden = YES;
-            if (!self_.llmModel.stringValue.length) self_.llmModel.stringValue = cur;
+            if (!self_.llmModel.stringValue.length && ![self_ isControlDirty:self_.llmModel]) {
+                self_.llmModel.stringValue = cur;
+            }
             NSString *err = [json[@"error"] isKindOfClass:[NSString class]] ? json[@"error"] : @"";
             self_.llmModelMsg.stringValue = err.length
                 ? [RLPTr(@"拉取模型列表失败") stringByAppendingFormat:@"：%@", err]
@@ -2851,7 +2980,10 @@ static NSString *RLPControlIdentifier(NSString *key) {
             [self_.llmModelPopup selectItemWithTitle:cur];
         else if (cur.length)
             [self_.llmModelPopup selectItemAtIndex:self_.llmModelPopup.numberOfItems - 1];
-        self_.llmModel.stringValue = cur;
+        if (![self_ isControlDirty:self_.llmModel]) {
+            self_.llmModel.stringValue = cur;
+            self_.lastLoadedValues[@"llm.modeltext"] = cur;
+        }
         self_.llmModelPopup.hidden = NO;
         const NSInteger n = (NSInteger)ids.count;
         if (cur.length && !hasCurrent) {
@@ -2887,12 +3019,17 @@ static NSString *RLPControlIdentifier(NSString *key) {
     NSString *m = [sender.stringValue stringByTrimmingCharactersInSet:
                    [NSCharacterSet whitespaceAndNewlineCharacterSet]];
     if (!m.length || ![RLPCoreClient shared].started) return;
+    ++self.llmSeq;
     NSString *body = [NSString stringWithFormat:@"model=%@", RLPEnc(m)];
     __weak __typeof__(self) weakSelf = self;
     [[RLPCoreClient shared] postJSON:@"/api/llm" body:body completion:^(NSDictionary * _Nullable json) {
         __typeof__(self) self_ = weakSelf;
         if (!self_) return;
-        self_.llmStatus.stringValue = (json && [json[@"ok"] boolValue])
+        const BOOL ok = (json && [json[@"ok"] boolValue]);
+        if (ok) {
+            [self_ clearDirtyControlId:@"llm.modeltext" expectedValue:m];
+        }
+        self_.llmStatus.stringValue = ok
             ? [NSString stringWithFormat:@"%@ %@", RLPTr(@"已保存"), m]
             : ([json[@"error"] isKindOfClass:[NSString class]] ? json[@"error"] : RLPTr(@"保存失败"));
     }];
@@ -2907,12 +3044,18 @@ static NSString *RLPControlIdentifier(NSString *key) {
                                                 withString:@""];
     if (!title.length) return;
     self.llmModel.stringValue = title;
+    [self.dirtyControlIds addObject:@"llm.modeltext"];
+    ++self.llmSeq;
     NSString *body = [NSString stringWithFormat:@"model=%@", RLPEnc(title)];
     __weak __typeof__(self) weakSelf = self;
     [[RLPCoreClient shared] postJSON:@"/api/llm" body:body completion:^(NSDictionary * _Nullable json) {
         __typeof__(self) self_ = weakSelf;
         if (!self_) return;
-        self_.llmStatus.stringValue = (json && [json[@"ok"] boolValue])
+        const BOOL ok = (json && [json[@"ok"] boolValue]);
+        if (ok) {
+            [self_ clearDirtyControlId:@"llm.modeltext" expectedValue:title];
+        }
+        self_.llmStatus.stringValue = ok
             ? RLPTr(@"已保存") : (([json[@"error"] isKindOfClass:[NSString class]] ? json[@"error"] : RLPTr(@"保存失败")));
     }];
 }
@@ -2936,13 +3079,24 @@ static NSString *RLPControlIdentifier(NSString *key) {
         self.llmStatus.stringValue = RLPTr(@"先填 API 地址或 API Key；两项都空不会改动现有配置");
         return;
     }
+    ++self.llmSeq;
     self.llmStatus.stringValue = RLPTr(@"保存中…");
     __weak __typeof__(self) weakSelf = self;
     [[RLPCoreClient shared] postJSON:@"/api/llm" body:body completion:^(NSDictionary * _Nullable json) {
         __typeof__(self) self_ = weakSelf;
         if (!self_) return;
         if (json && [json[@"ok"] boolValue]) {
-            self_.llmKey.stringValue = @"";   // 存完立刻清掉输入框，不留明文在界面上
+            NSString *curKey = [self_.llmKey.stringValue stringByTrimmingCharactersInSet:
+                                [NSCharacterSet whitespaceAndNewlineCharacterSet]];
+            if ([curKey isEqualToString:key]) {
+                self_.llmKey.stringValue = @"";   // 存完立刻清掉输入框，不留明文在界面上
+                [self_.dirtyControlIds removeObject:@"llm.key"];
+                self_.lastLoadedValues[@"llm.key"] = @"";
+            }
+            if (base.length) {
+                self_.llmSavedBase = base;
+                [self_ clearDirtyControlId:@"llm.base" expectedValue:base];
+            }
             self_.llmStatus.stringValue = key.length ? RLPTr(@"API Key 已保存（界面只显示掩码）")
                                                      : RLPTr(@"API 地址已保存");
             // 端点可能换了 ⟹ 模型清单必然过期，强制重拉；再顺手测一次连通（web llmSave 同口径）。
@@ -2960,10 +3114,21 @@ static NSString *RLPControlIdentifier(NSString *key) {
 - (void)onLlmClearKey:(id)sender {
     (void)sender;
     if (![RLPCoreClient shared].started) return;
+    NSString *submittedKey = [self.llmKey.stringValue stringByTrimmingCharactersInSet:
+                              [NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    ++self.llmSeq;
     __weak __typeof__(self) weakSelf = self;
     [[RLPCoreClient shared] postJSON:@"/api/llm" body:@"clear=1" completion:^(NSDictionary * _Nullable json) {
         __typeof__(self) self_ = weakSelf;
         if (!self_) return;
+        if (json && [json[@"ok"] boolValue]) {
+            NSString *curKey = [self_.llmKey.stringValue stringByTrimmingCharactersInSet:
+                                [NSCharacterSet whitespaceAndNewlineCharacterSet]];
+            if ([curKey isEqualToString:submittedKey]) {
+                [self_.dirtyControlIds removeObject:@"llm.key"];
+                if (!curKey.length) self_.lastLoadedValues[@"llm.key"] = @"";
+            }
+        }
         self_.llmStatus.stringValue = (json && [json[@"ok"] boolValue])
             ? RLPTr(@"已清除 API Key（可随时重新填入）")
             : ([json[@"error"] isKindOfClass:[NSString class]] ? json[@"error"] : RLPTr(@"清除失败"));
@@ -3057,6 +3222,7 @@ static NSInteger RLPLlmProviderIndexForBaseUrl(NSString *baseUrl) {
     NSString *url = RLPLlmPresetUrlAtIndex(sender.indexOfSelectedItem);
     if (!url.length) return;   // 自定义：绝不覆盖用户已填的地址
     self.llmBase.stringValue = url;
+    if (self.llmBase.identifier.length) [self.dirtyControlIds addObject:self.llmBase.identifier];
     self.llmStatus.stringValue = RLPTr(@"已填入预设地址，点「保存端点」生效");
 }
 
@@ -3091,13 +3257,21 @@ static NSInteger RLPSearchIndexForProviderId(NSString *pid) {
     NSMutableString *body = [NSMutableString stringWithFormat:@"search_provider=%@&search_base_url=%@",
                              RLPEnc(prov), RLPEnc(base)];
     if (key.length) [body appendFormat:@"&search_key=%@", RLPEnc(key)];
+    ++self.llmSeq;
     self.searchStatus.stringValue = RLPTr(@"保存中…");
     __weak __typeof__(self) weakSelf = self;
     [[RLPCoreClient shared] postJSON:@"/api/llm" body:body completion:^(NSDictionary * _Nullable json) {
         __typeof__(self) self_ = weakSelf;
         if (!self_) return;
         if (json && [json[@"ok"] boolValue]) {
-            self_.searchKey.stringValue = @"";   // 明文绝不留在界面上
+            NSString *curKey = [self_.searchKey.stringValue stringByTrimmingCharactersInSet:
+                                [NSCharacterSet whitespaceAndNewlineCharacterSet]];
+            if ([curKey isEqualToString:key]) {
+                self_.searchKey.stringValue = @"";   // 明文绝不留在界面上
+                [self_.dirtyControlIds removeObject:@"search.key"];
+                self_.lastLoadedValues[@"search.key"] = @"";
+            }
+            [self_ clearDirtyControlId:@"search.base" expectedValue:base];
             self_.searchStatus.stringValue = RLPTr(@"检索端点已保存");
             [self_ loadLlmConfig];
         } else {
@@ -3111,11 +3285,22 @@ static NSInteger RLPSearchIndexForProviderId(NSString *pid) {
 - (void)onSearchClearKey:(id)sender {
     (void)sender;
     if (![RLPCoreClient shared].started) return;
+    NSString *submittedKey = [self.searchKey.stringValue stringByTrimmingCharactersInSet:
+                              [NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    ++self.llmSeq;
     __weak __typeof__(self) weakSelf = self;
     [[RLPCoreClient shared] postJSON:@"/api/llm" body:@"search_key_clear=1"
                           completion:^(NSDictionary * _Nullable json) {
         __typeof__(self) self_ = weakSelf;
         if (!self_) return;
+        if (json && [json[@"ok"] boolValue]) {
+            NSString *curKey = [self_.searchKey.stringValue stringByTrimmingCharactersInSet:
+                                [NSCharacterSet whitespaceAndNewlineCharacterSet]];
+            if ([curKey isEqualToString:submittedKey]) {
+                [self_.dirtyControlIds removeObject:@"search.key"];
+                if (!curKey.length) self_.lastLoadedValues[@"search.key"] = @"";
+            }
+        }
         self_.searchStatus.stringValue = (json && [json[@"ok"] boolValue])
             ? RLPTr(@"已清除检索 Key")
             : ([json[@"error"] isKindOfClass:[NSString class]] ? json[@"error"] : RLPTr(@"清除失败"));
@@ -3154,19 +3339,27 @@ static NSInteger RLPSearchIndexForProviderId(NSString *pid) {
 
 - (void)loadLlmConfig {
     if (![RLPCoreClient shared].started || !self.llmStatus) return;
+    const NSUInteger seq = ++self.llmSeq;
     __weak __typeof__(self) weakSelf = self;
     [[RLPCoreClient shared] getJSON:@"/api/llm" completion:^(NSDictionary * _Nullable json) {
         __typeof__(self) self_ = weakSelf;
-        if (!self_ || !json) return;
+        if (!self_ || !json || seq != self_.llmSeq) return;
         // 只覆盖响应里真有的字段（POST 回包与 GET 未必同形，缺字段不当成清空）
         if ([json[@"baseUrl"] isKindOfClass:[NSString class]]) {
-            self_.llmBase.stringValue = json[@"baseUrl"];
-            self_.llmSavedBase = json[@"baseUrl"];   // 「拉模型」要能判断屏幕上的地址是否已落盘
-            if (self_.llmProviderPopup) {
-                [self_.llmProviderPopup selectItemAtIndex:RLPLlmProviderIndexForBaseUrl(json[@"baseUrl"])];
+            NSString *baseUrl = json[@"baseUrl"];
+            self_.llmSavedBase = baseUrl;   // 「拉模型」要能判断屏幕上的地址是否已落盘
+            if (![self_ isControlDirty:self_.llmBase]) {
+                self_.llmBase.stringValue = baseUrl;
+                self_.lastLoadedValues[@"llm.base"] = baseUrl;
+                if (self_.llmProviderPopup) {
+                    [self_.llmProviderPopup selectItemAtIndex:RLPLlmProviderIndexForBaseUrl(baseUrl)];
+                }
             }
         }
-        if ([json[@"model"] isKindOfClass:[NSString class]]) self_.llmModel.stringValue = json[@"model"];
+        if ([json[@"model"] isKindOfClass:[NSString class]] && ![self_ isControlDirty:self_.llmModel]) {
+            self_.llmModel.stringValue = json[@"model"];
+            self_.lastLoadedValues[@"llm.modeltext"] = json[@"model"];
+        }
         NSString *masked = [json[@"masked"] isKindOfClass:[NSString class]] ? json[@"masked"] : @"";
         const BOOL configured = [json[@"configured"] respondsToSelector:@selector(boolValue)] && [json[@"configured"] boolValue];
         self_.llmStatus.stringValue = configured
@@ -3179,8 +3372,10 @@ static NSInteger RLPSearchIndexForProviderId(NSString *pid) {
                 RLPSearchIndexForProviderId(json[@"searchProvider"])];
         }
         if ([json[@"searchBaseUrl"] isKindOfClass:[NSString class]] &&
-            !self_.searchBase.stringValue.length) {
+            !self_.searchBase.stringValue.length &&
+            ![self_ isControlDirty:self_.searchBase]) {
             self_.searchBase.stringValue = json[@"searchBaseUrl"];
+            self_.lastLoadedValues[@"search.base"] = json[@"searchBaseUrl"];
         }
         NSString *sMasked = [json[@"searchMasked"] isKindOfClass:[NSString class]] ? json[@"searchMasked"] : @"";
         NSString *provName = self_.searchProviderPopup.titleOfSelectedItem ?: @"DeepSeek";
@@ -3758,10 +3953,14 @@ static BOOL RLPFeedbackTextBlank(NSString *s) {
         self_.savedUpnpDev = [kv[@"upnpdev"] isKindOfClass:[NSString class]] ? kv[@"upnpdev"] : @"";
         [self_ selectSavedUpnpDevice];
         id root = kv[@"root"];
-        if ([root isKindOfClass:[NSString class]] && [root length] && !RLPTextFieldIsEditing(self_.rootField))
+        if ([root isKindOfClass:[NSString class]] && [root length] && ![self_ isControlDirty:self_.rootField]) {
             self_.rootField.stringValue = root;
-        if (self_.eqField && [kv[@"eq"] isKindOfClass:[NSString class]] && !RLPTextFieldIsEditing(self_.eqField))
+            if (self_.rootField.identifier.length) self_.lastLoadedValues[self_.rootField.identifier] = root;
+        }
+        if (self_.eqField && [kv[@"eq"] isKindOfClass:[NSString class]] && ![self_ isControlDirty:self_.eqField]) {
             self_.eqField.stringValue = kv[@"eq"];
+            if (self_.eqField.identifier.length) self_.lastLoadedValues[self_.eqField.identifier] = kv[@"eq"];
+        }
         // 声道音量微调按真实「输出声道数」重建（0 = 跟随源 → 先按立体声，web 同口径）。
         [self_ parseAndStoreTrimString:kv[@"trim"]];
         NSInteger trimCh = 0;
@@ -4148,7 +4347,7 @@ static BOOL sRLPConfirmBitPerfectFix = YES;
 }
 
 - (void)onAddRoot:(id)sender {
-    NSString *p = self.rootField.stringValue;
+    NSString *p = [self.rootField.stringValue copy] ?: @"";
     if (!p.length) { RLPToast(RLPTr(@"请先填目录或点「浏览…」")); return; }
     __weak __typeof__(self) weakSelf = self;
     [[RLPCoreClient shared] postJSON:@"/api/lib/roots"
@@ -4157,7 +4356,14 @@ static BOOL sRLPConfirmBitPerfectFix = YES;
         __typeof__(self) self_ = weakSelf;
         if (!self_) return;
         if (json && [json[@"ok"] boolValue]) {
-            self_.rootField.stringValue = @"";
+            NSString *cur = self_.rootField.stringValue ?: @"";
+            if ([cur isEqualToString:p]) {
+                self_.rootField.stringValue = @"";
+                if (self_.rootField.identifier.length) {
+                    [self_.dirtyControlIds removeObject:self_.rootField.identifier];
+                    self_.lastLoadedValues[self_.rootField.identifier] = @"";
+                }
+            }
             [self_ reloadRoots];
             RLPToast(RLPTr(@"目录已加入"));
         } else {
@@ -4333,12 +4539,6 @@ static NSUInteger RLPUTF8Bytes(NSString *s) {
 
 #pragma mark - 语言实时切换
 
-static void RLPSettingsCollectViews(NSView *v, NSMutableArray<NSView *> *out) {
-    if (!v) return;
-    [out addObject:v];
-    for (NSView *s in v.subviews) RLPSettingsCollectViews(s, out);
-}
-
 - (void)onLanguageChanged:(NSNotification *)note {
     (void)note;
     [self applyLanguage];
@@ -4349,7 +4549,7 @@ static void RLPSettingsCollectViews(NSView *v, NSMutableArray<NSView *> *out) {
     if ([self.lastAppliedLang isEqualToString:curLang]) return;
     self.lastAppliedLang = curLang;
 
-    // 1. 保存当前页签滚动位置、焦点与可编辑草稿
+    // 1. 保存当前页签滚动位置与焦点，并跨所有 cachedPane 快照未提交草稿
     NSScrollView *oldScroll = nil;
     for (NSView *sub in self.paneHost.subviews) {
         if ([sub isKindOfClass:[NSScrollView class]]) { oldScroll = (NSScrollView *)sub; break; }
@@ -4367,23 +4567,52 @@ static void RLPSettingsCollectViews(NSView *v, NSMutableArray<NSView *> *out) {
         focusedId = ((NSView *)fr).identifier;
     }
 
-    NSMutableDictionary<NSString *, NSString *> *drafts = [NSMutableDictionary dictionary];
-    NSMutableArray<NSView *> *oldViews = [NSMutableArray array];
-    RLPSettingsCollectViews(self.paneHost, oldViews);
-    for (NSView *v in oldViews) {
-        if (!v.identifier.length) continue;
-        if ([v isKindOfClass:[NSTextField class]] && ((NSTextField *)v).isEditable) {
-            drafts[v.identifier] = ((NSTextField *)v).stringValue ?: @"";
+    for (NSNumber *tabKey in [self.paneCache allKeys]) {
+        NSView *cachedPane = self.paneCache[tabKey];
+        if (!cachedPane) continue;
+        NSMutableArray<NSView *> *views = [NSMutableArray array];
+        RLPSettingsCollectViews(cachedPane, views);
+        NSMutableDictionary<NSString *, NSString *> *tabDrafts =
+            self.pendingPaneDrafts[tabKey] ?: [NSMutableDictionary dictionary];
+        for (NSView *v in views) {
+            if (!v.identifier.length || [self isEqOwnedView:v]) continue;
+            if ([v isKindOfClass:[NSTextField class]] && ((NSTextField *)v).isEditable) {
+                NSString *curVal = ((NSTextField *)v).stringValue ?: @"";
+                NSString *loadedVal = self.lastLoadedValues[v.identifier];
+                BOOL isDirty = [self.dirtyControlIds containsObject:v.identifier];
+                if (!isDirty) {
+                    if (loadedVal != nil) {
+                        isDirty = ![curVal isEqualToString:loadedVal];
+                    } else if (curVal.length > 0) {
+                        isDirty = YES;
+                    }
+                    if (isDirty) [self.dirtyControlIds addObject:v.identifier];
+                }
+                if (isDirty || curVal.length > 0) {
+                    tabDrafts[v.identifier] = curVal;
+                }
+            } else if ([v isKindOfClass:[NSTextView class]] && ((NSTextView *)v).isEditable) {
+                NSString *curVal = [((NSTextView *)v).string copy] ?: @"";
+                if (curVal.length > 0 || [self.dirtyControlIds containsObject:v.identifier]) {
+                    tabDrafts[v.identifier] = curVal;
+                }
+            }
+        }
+        if (tabDrafts.count) {
+            self.pendingPaneDrafts[tabKey] = tabDrafts;
         }
     }
-    NSString *fbDraft = (self.tab == RLPSTabDiag && self.fbText) ? [self.fbText.string copy] : nil;
 
-    // 2. 原地刷新页头与页签，重建页签内容
+    // 2. 原地刷新页头、复合子视图与页签；非当前页签清缓存待切回时重建并恢复草稿
     self.pageTitle = RLPTr(@"设置");
     [self.groupTabs setLabel:RLPTr(@"通用") forSegment:0];
     [self.groupTabs setLabel:RLPTr(@"音频处理") forSegment:1];
     self.modeHintLabel.stringValue = RLPTr(@"音频处理主控位于专业模式「数字音乐台」，此处保留完整参数与深链入口");
     self.workbenchBtn.title = RLPTr(@"打开专业工作台");
+
+    if (self.eqView) {
+        [self.eqView applyLanguage];
+    }
 
     [self.paneCache removeAllObjects];
     [self rebuildTabs];
@@ -4393,23 +4622,17 @@ static void RLPSettingsCollectViews(NSView *v, NSMutableArray<NSView *> *out) {
         [self.langPopup selectItemAtIndex:[curLang isEqualToString:@"en"] ? 1 : 0];
     }
 
-    // 3. 恢复草稿、滚动位置与焦点
-    NSMutableArray<NSView *> *newViews = [NSMutableArray array];
-    RLPSettingsCollectViews(self.paneHost, newViews);
+    // 3. 恢复当前页签滚动位置与焦点
     NSView *focusTarget = nil;
-    for (NSView *v in newViews) {
-        if (!v.identifier.length) continue;
-        NSString *draft = drafts[v.identifier];
-        if (draft && [v isKindOfClass:[NSTextField class]] && ((NSTextField *)v).isEditable) {
-            ((NSTextField *)v).stringValue = draft;
+    if (focusedId.length) {
+        NSMutableArray<NSView *> *newViews = [NSMutableArray array];
+        RLPSettingsCollectViews(self.paneHost, newViews);
+        for (NSView *v in newViews) {
+            if (v.identifier.length && [v.identifier isEqualToString:focusedId]) {
+                focusTarget = v;
+                break;
+            }
         }
-        if (focusedId.length && [v.identifier isEqualToString:focusedId]) {
-            focusTarget = v;
-        }
-    }
-    if (fbDraft.length && self.tab == RLPSTabDiag && self.fbText) {
-        self.fbText.string = fbDraft;
-        [self updateFbCount];
     }
 
     [self.paneHost layoutSubtreeIfNeeded];

@@ -19,6 +19,7 @@
 #import "RLPCoreClient.h"
 #import "RLPTheme.h"
 #import "RLPSupport.h"
+#import "RLPModels.h"
 
 #include <cstdio>
 #include <cmath>
@@ -95,6 +96,7 @@ static BOOL LayerBgEq(NSButton *b, NSColor *c) {
 @interface RLPNowPlayingViewController (CastChipTest)
 - (void)refreshCastChipState;
 - (void)applyMetaChipVisibility;
+- (NSString *)castBodyForDevice:(NSDictionary *)device;
 @end
 
 /// 旧码没有 refreshCastChipState：用 respondsToSelector 守卫，红阶段干净退出而不是 SIGABRT。
@@ -122,6 +124,20 @@ int main() {
         NSButton *chip = (NSButton *)FindById(v, @"npCastBtn");
         Ck(chip != nil, "找得到投放芯片 npCastBtn", @"缺 npCastBtn");
         if (!chip) { std::printf("结果：%d passed, %d failed\n", g_pass, g_fail); return 1; }
+
+        // Request generation is offline: an unknown volume must never serialize NaN.
+        id priorStatus = [vc valueForKey:@"webStatus"];
+        NSString *priorPath = [vc valueForKey:@"currentPath"];
+        [vc setValue:@"/tmp/cast-volume-fixture.flac" forKey:@"currentPath"];
+        [vc setValue:[RLPPlaybackStatus statusFromJSON:@{@"ok": @YES}] forKey:@"webStatus"];
+        NSDictionary *device = @{@"location": @"http://renderer.invalid/device.xml"};
+        NSString *unknownBody = [vc castBodyForDevice:device];
+        Ck([unknownBody containsString:@"volume=-120.0"] && ![unknownBody.lowercaseString containsString:@"nan"],
+           "unknown cast volume uses finite silent fallback", unknownBody);
+        [vc setValue:[RLPPlaybackStatus statusFromJSON:@{@"ok": @YES, @"volDb": @0}] forKey:@"webStatus"];
+        Ck([[vc castBodyForDevice:device] containsString:@"volume=0.0"], "explicit zero cast volume remains valid", @"");
+        [vc setValue:priorStatus forKey:@"webStatus"];
+        [vc setValue:priorPath forKey:@"currentPath"];
 
         // ---- 1. 投放中：读 /api/cast/state，chip「已推送到 <host>」+ ok 三令牌 ----
         g_casting = YES;

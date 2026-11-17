@@ -204,6 +204,11 @@ static const NSInteger kABSlotCount = 4;
 @property (nonatomic, assign) NSUInteger devicesSeq;
 @property (nonatomic, assign) NSUInteger profilesSeq;
 @property (nonatomic, assign) NSUInteger signalSeq;
+@property (nonatomic, assign) NSUInteger peqReadSeq;
+@property (nonatomic, assign) NSUInteger peqWriteSeq;
+@property (nonatomic, assign) NSUInteger peqWriteInFlight;
+@property (nonatomic, assign) BOOL statusInFlight;
+@property (nonatomic, assign) BOOL viewDisappeared;
 
 - (NSString *)str:(NSString *)key def:(NSString *)def;
 - (void)postSettings:(NSDictionary<NSString *, NSString *> *)kv;
@@ -1093,6 +1098,7 @@ static const NSInteger kABSlotCount = 4;
 - (void)refreshProfileStatus {
     const CGFloat h = MAX(28.0, (CGFloat)self.profiles.count * 24.0 + 4.0);
     self.profileScrollHeight.constant = h;
+    self.profileStatus.textColor = [RLPTheme current].mut;
     if (self.profiles.count == 0) {
         self.profileStatus.stringValue = RLPTr(@"还没有配置档");
     } else {
@@ -1141,20 +1147,23 @@ static const NSInteger kABSlotCount = 4;
         if (json && [json[@"ok"] boolValue] && [json[@"profiles"] isKindOfClass:[NSArray class]]) {
             self_.profiles = [(NSArray *)json[@"profiles"] mutableCopy];
             self_.profileActive = [json[@"active"] isKindOfClass:[NSString class]] ? json[@"active"] : @"";
+            [self_.profileTable reloadData];
+            NSInteger sel = -1;
+            for (NSInteger i = 0; i < (NSInteger)self_.profiles.count; ++i) {
+                id pid = self_.profiles[(NSUInteger)i][@"id"];
+                if ([pid isKindOfClass:[NSString class]] && [(NSString *)pid isEqualToString:self_.profileActive]) { sel = i; break; }
+            }
+            if (sel < 0 && self_.profiles.count > 0) sel = 0;
+            if (sel >= 0) [self_.profileTable selectRowIndexes:[NSIndexSet indexSetWithIndex:(NSUInteger)sel]
+                                          byExtendingSelection:NO];
+            [self_ refreshProfileStatus];
         } else {
-            self_.profiles = [NSMutableArray array];
-            self_.profileActive = @"";
+            NSString *why = [json[@"error"] isKindOfClass:[NSString class]] ? json[@"error"] : @"";
+            self_.profileStatus.textColor = [RLPTheme current].warn;
+            self_.profileStatus.stringValue = why.length
+                ? [NSString stringWithFormat:@"%@：%@", RLPTr(@"配置档读取失败"), why]
+                : RLPTr(@"配置档读取失败");
         }
-        [self_.profileTable reloadData];
-        NSInteger sel = -1;
-        for (NSInteger i = 0; i < (NSInteger)self_.profiles.count; ++i) {
-            id pid = self_.profiles[(NSUInteger)i][@"id"];
-            if ([pid isKindOfClass:[NSString class]] && [(NSString *)pid isEqualToString:self_.profileActive]) { sel = i; break; }
-        }
-        if (sel < 0 && self_.profiles.count > 0) sel = 0;
-        if (sel >= 0) [self_.profileTable selectRowIndexes:[NSIndexSet indexSetWithIndex:(NSUInteger)sel]
-                                      byExtendingSelection:NO];
-        [self_ refreshProfileStatus];
     }];
 }
 
@@ -2185,12 +2194,17 @@ static const NSInteger kABSlotCount = 4;
 - (void)onMonMasterChanged:(NSButton *)sender {
     self.monMasterEnabled = (sender.state == NSControlStateValueOn);
     [[NSUserDefaults standardUserDefaults] setBool:self.monMasterEnabled forKey:kMonMasterKey];
-    if (!self.monMasterEnabled && self.anlBusy) {
-        self.anlBusy = NO;
-        ++self.anlSeq;
-        if ([RLPCoreClient shared].started) {
-            [[RLPCoreClient shared] postJSON:@"/api/anl/cancel" body:@"" completion:nil];
+    if (!self.monMasterEnabled) {
+        if (self.anlBusy) {
+            self.anlBusy = NO;
+            ++self.anlSeq;
+            if ([RLPCoreClient shared].started) {
+                [[RLPCoreClient shared] postJSON:@"/api/anl/cancel" body:@"" completion:nil];
+            }
         }
+        self.anlHealth = nil;
+        self.anlError = nil;
+        self.anlAutoDonePath = nil;
     }
     [self refreshMonitor];
     if (self.monMasterEnabled) [self maybeAutoAnalyzeFromStatus];
@@ -2222,8 +2236,14 @@ static const NSInteger kABSlotCount = 4;
         __typeof__(self) self_ = weakSelf;
         if (!self_ || seq != self_.anlSeq) return;
         self_.anlBusy = NO;
+        const BOOL isCancelled = [json isKindOfClass:[NSDictionary class]] &&
+            (([json[@"cancelled"] respondsToSelector:@selector(boolValue)] && [json[@"cancelled"] boolValue]) ||
+             ([json[@"code"] isKindOfClass:[NSString class]] && [json[@"code"] isEqualToString:@"analysis.cancelled"]));
         if (json && [json[@"ok"] boolValue]) {
             self_.anlHealth = RLPWorkbenchUnwrapHealth(json);
+            self_.anlError = nil;
+        } else if (isCancelled) {
+            self_.anlHealth = nil;
             self_.anlError = nil;
         } else {
             NSString *err = [json[@"error"] isKindOfClass:[NSString class]] ? json[@"error"] : RLPTr(@"分析失败");
@@ -2234,6 +2254,7 @@ static const NSInteger kABSlotCount = 4;
 }
 
 - (void)maybeAutoAnalyzeFromStatus {
+    if (self.viewDisappeared) return;
     NSDictionary *st = self.status ?: @{};
     NSString *path = [st[@"current"] isKindOfClass:[NSString class]] ? st[@"current"]
                    : ([st[@"file"] isKindOfClass:[NSString class]] ? st[@"file"] : @"");
@@ -2668,18 +2689,24 @@ static const NSInteger kABSlotCount = 4;
 #pragma mark - EQ 动作
 
 - (void)reloadEqPresets {
+    const NSUInteger readSeq = ++self.peqReadSeq;
     __weak __typeof__(self) weakSelf = self;
     [[RLPCoreClient shared] getJSON:@"/api/peq" completion:^(NSDictionary * _Nullable json) {
         __typeof__(self) self_ = weakSelf;
-        if (!self_) return;
-        self_.peqBypassed = [json[@"bypass"] boolValue];
-        NSArray *names = [json[@"presets"] isKindOfClass:[NSArray class]] ? json[@"presets"] : @[];
-        self_.eqPresetNames = names;
-        for (NSPopUpButton *pop in @[self_.eqPresetPopup ?: [NSPopUpButton new], self_.quickEqPresetPopup ?: [NSPopUpButton new]]) {
-            [pop removeAllItems];
-            [pop addItemWithTitle:RLPTr(@"加载预设…")];
-            for (id n in names) if ([n isKindOfClass:[NSString class]]) [pop addItemWithTitle:n];
-            [pop selectItemAtIndex:0];
+        if (!self_ || readSeq != self_.peqReadSeq || self_.peqWriteInFlight > 0) return;
+        if (![json isKindOfClass:[NSDictionary class]] || ![json[@"ok"] boolValue]) return;
+        if (json[@"bypass"] != nil && [json[@"bypass"] respondsToSelector:@selector(boolValue)]) {
+            self_.peqBypassed = [json[@"bypass"] boolValue];
+        }
+        if ([json[@"presets"] isKindOfClass:[NSArray class]]) {
+            NSArray *names = json[@"presets"];
+            self_.eqPresetNames = names;
+            for (NSPopUpButton *pop in @[self_.eqPresetPopup ?: [NSPopUpButton new], self_.quickEqPresetPopup ?: [NSPopUpButton new]]) {
+                [pop removeAllItems];
+                [pop addItemWithTitle:RLPTr(@"加载预设…")];
+                for (id n in names) if ([n isKindOfClass:[NSString class]]) [pop addItemWithTitle:n];
+                [pop selectItemAtIndex:0];
+            }
         }
         [self_ syncQuickEqControls];
         [self_ refreshChain];
@@ -2691,13 +2718,21 @@ static const NSInteger kABSlotCount = 4;
     if (i <= 0) return;
     NSString *name = sender.titleOfSelectedItem;
     if (!name.length) return;
+    const NSUInteger writeSeq = ++self.peqWriteSeq;
+    ++self.peqReadSeq;
+    self.peqWriteInFlight += 1;
     NSString *body = [NSString stringWithFormat:@"action=load&name=%@", RLPEnc(name)];
     __weak __typeof__(self) weakSelf = self;
     [[RLPCoreClient shared] postJSON:@"/api/peq/preset" body:body completion:^(NSDictionary * _Nullable json) {
         __typeof__(self) self_ = weakSelf;
         if (!self_) return;
+        if (self_.peqWriteInFlight > 0) self_.peqWriteInFlight -= 1;
+        if (writeSeq != self_.peqWriteSeq) return;
+        ++self_.peqReadSeq;
         if (json && [json[@"ok"] boolValue]) {
-            self_.peqBypassed = [json[@"bypass"] boolValue];
+            if (json[@"bypass"] != nil && [json[@"bypass"] respondsToSelector:@selector(boolValue)]) {
+                self_.peqBypassed = [json[@"bypass"] boolValue];
+            }
             RLPToast([NSString stringWithFormat:@"%@ %@", RLPTr(@"已加载"), name]);
             [self_.eqView reload];
             [self_ reloadSettings];
@@ -2705,7 +2740,13 @@ static const NSInteger kABSlotCount = 4;
             [self_ refreshChain];
             [[NSNotificationCenter defaultCenter] postNotificationName:RLPSettingsChangedNotification object:self_];
         } else {
-            RLPToast([json[@"error"] isKindOfClass:[NSString class]] ? json[@"error"] : RLPTr(@"加载失败"));
+            [self_ syncQuickEqControls];
+            NSString *err = ([json isKindOfClass:[NSDictionary class]] &&
+                             [json[@"error"] isKindOfClass:[NSString class]] &&
+                             ((NSString *)json[@"error"]).length)
+                ? json[@"error"]
+                : RLPTr(@"加载失败");
+            RLPToast(err);
         }
         [self_.eqPresetPopup selectItemAtIndex:0];
         [self_.quickEqPresetPopup selectItemAtIndex:0];
@@ -2721,20 +2762,33 @@ static const NSInteger kABSlotCount = 4;
             wantBypass = (((NSButton *)sender).state != NSControlStateValueOn);
         }
     }
+    const NSUInteger writeSeq = ++self.peqWriteSeq;
+    ++self.peqReadSeq;
+    self.peqWriteInFlight += 1;
     NSString *body = [NSString stringWithFormat:@"bypass=%d", wantBypass ? 1 : 0];
     __weak __typeof__(self) weakSelf = self;
     [[RLPCoreClient shared] postJSON:@"/api/peq" body:body completion:^(NSDictionary * _Nullable json) {
         __typeof__(self) self_ = weakSelf;
         if (!self_) return;
+        if (self_.peqWriteInFlight > 0) self_.peqWriteInFlight -= 1;
+        if (writeSeq != self_.peqWriteSeq) return;
+        ++self_.peqReadSeq;
         if (json && [json[@"ok"] boolValue]) {
-            self_.peqBypassed = [json[@"bypass"] boolValue];
+            if (json[@"bypass"] != nil && [json[@"bypass"] respondsToSelector:@selector(boolValue)]) {
+                self_.peqBypassed = [json[@"bypass"] boolValue];
+            }
             [self_.eqView reload];
             [self_ syncQuickEqControls];
             [self_ refreshChain];
             [[NSNotificationCenter defaultCenter] postNotificationName:RLPSettingsChangedNotification object:self_];
         } else {
             [self_ syncQuickEqControls];
-            RLPToast(RLPTr(@"PEQ 旁路切换失败"));
+            NSString *err = ([json isKindOfClass:[NSDictionary class]] &&
+                             [json[@"error"] isKindOfClass:[NSString class]] &&
+                             ((NSString *)json[@"error"]).length)
+                ? json[@"error"]
+                : RLPTr(@"PEQ 旁路切换失败");
+            RLPToast(err);
         }
     }];
 }
@@ -2999,7 +3053,7 @@ static const NSInteger kABSlotCount = 4;
     }
     [self refreshChain];
     [self refreshTrackCard];
-    [self maybeAutoAnalyzeFromStatus];
+    if (!self.viewDisappeared) [self maybeAutoAnalyzeFromStatus];
     if ([self.activeTab isEqualToString:@"monitor"]) [self refreshMonitor];
 }
 
@@ -3113,7 +3167,13 @@ static const NSInteger kABSlotCount = 4;
     if ([self.rgModePopup itemWithTitle:rg]) [self.rgModePopup selectItemWithTitle:rg];
 }
 
+- (void)viewWillAppear {
+    [super viewWillAppear];
+    self.viewDisappeared = NO;
+}
+
 - (void)activate {
+    self.viewDisappeared = NO;
     [self reloadAll];
     if (!self.poll && [RLPCoreClient shared].started) {
         __weak __typeof__(self) weakSelf = self;
@@ -3122,7 +3182,16 @@ static const NSInteger kABSlotCount = 4;
         }];
     }
 }
-- (void)viewDidDisappear { [self.poll invalidate]; self.poll = nil; [super viewDidDisappear]; }
+- (void)viewDidDisappear {
+    self.viewDisappeared = YES;
+    [self.poll invalidate];
+    self.poll = nil;
+    self.statusInFlight = NO;
+    ++self.statusSeq;
+    ++self.anlSeq;
+    self.anlBusy = NO;
+    [super viewDidDisappear];
+}
 - (void)reloadData { [self reloadAll]; }
 
 - (void)reloadAll {
@@ -3233,11 +3302,15 @@ static const NSInteger kABSlotCount = 4;
 }
 
 - (void)reloadStatus {
+    if (self.statusInFlight) return;
+    self.statusInFlight = YES;
     const NSUInteger seq = ++self.statusSeq;
     __weak __typeof__(self) weakSelf = self;
     [[RLPCoreClient shared] getJSON:@"/api/status" completion:^(NSDictionary * _Nullable json) {
         __typeof__(self) self_ = weakSelf;
         if (!self_) return;
+        if (seq == self_.statusSeq) self_.statusInFlight = NO;
+        if (self_.viewDisappeared) return;
         [self_ applyStatusPayload:json ?: @{} forSeq:seq];
     }];
 }

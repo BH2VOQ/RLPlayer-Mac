@@ -646,8 +646,6 @@ void RLPEnqueuePathCue(NSString *path, double cs, double ce) {
     }];
 }
 
-static std::atomic<uint64_t> gWholeListGen{0};
-
 static void RLPEnsureSequentialModeIf(BOOL (^ _Nullable shouldContinue)(void), void (^ _Nullable then)(void)) {
     [[RLPCoreClient shared] getJSON:@"/api/playmode" completion:^(NSDictionary * _Nullable modeJson) {
         if (shouldContinue && !shouldContinue()) return;
@@ -667,13 +665,13 @@ static void RLPEnsureSequentialModeIf(BOOL (^ _Nullable shouldContinue)(void), v
 }
 
 /// 建队列并从 start 起播（RLPPlayWholeListFrom 的后半段；独立函数避免 block 自捕循环引用）。
-static void RLPSetQueueAndPlay(NSArray<NSString *> *clean, NSInteger i, uint64_t gen) {
-    if (gen != gWholeListGen.load()) return;
+static void RLPSetQueueAndPlay(NSArray<NSString *> *clean, NSInteger i, uint64_t epoch) {
+    if (epoch != RLPPlaybackActionEpoch()) return;
     NSString *body = [NSString stringWithFormat:@"files=%@",
                       RLPEnc([clean componentsJoinedByString:@"\n"])];
     [[RLPCoreClient shared] postJSON:@"/api/queue/set" body:body
                           completion:^(NSDictionary * _Nullable j) {
-        if (gen != gWholeListGen.load()) return;
+        if (epoch != RLPPlaybackActionEpoch()) return;
         if (!j || [j[@"ok"] boolValue] == NO) {
             NSString *err = [j[@"error"] isKindOfClass:[NSString class]] ? j[@"error"] : RLPTr(@"建立队列失败");
             RLPToast(err);
@@ -695,15 +693,20 @@ void RLPPlayWholeListFrom(NSArray<NSString *> *files, NSInteger start) {
 
     // 单曲循环（mode=2）会让"播放整列"卡在第一首：先读当前模式，是 2 就切回列表循环 1。
     // 读到 mode 之前不盲目写，避免把用户的随机/顺序设置也改掉。
-    // 每次发起整列播放递增 generation，后续每一段异步回调都校验最新意图，防止旧流程覆盖新流程。
-    const uint64_t gen = ++gWholeListGen;
-    RLPEnsureSequentialModeIf(^BOOL { return gen == gWholeListGen.load(); }, ^{
-        RLPSetQueueAndPlay(clean, i, gen);
+    // 统一使用全局播放动作 epoch，既防同入口重入也防被 RLPPlayAlbum / RLPPlayPath 等跨入口新播放取代后抢播；
+    // 终步 RLPPlayPath 会再递增一次 epoch，但此时本流程已结束，不会自我取消。
+    const uint64_t epoch = RLPBeginPlaybackAction();
+    RLPEnsureSequentialModeIf(^BOOL { return epoch == RLPPlaybackActionEpoch(); }, ^{
+        RLPSetQueueAndPlay(clean, i, epoch);
     });
 }
 
 void RLPEnsureSequentialMode(void (^then)(void)) {
     RLPEnsureSequentialModeIf(nil, then);
+}
+
+void RLPEnsureSequentialModeWhile(BOOL (^ _Nullable shouldContinue)(void), void (^ _Nullable then)(void)) {
+    RLPEnsureSequentialModeIf(shouldContinue, then);
 }
 
 
