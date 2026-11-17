@@ -90,6 +90,7 @@ static BOOL CgClearOrNil(CGColorRef cg) {
     return c != nil && c.alphaComponent < 0.02;
 }
 static NSView *find(NSView *v, NSString *key) { if([v.identifier isEqual:key])return v; for(NSView *s in v.subviews){NSView *r=find(s,key);if(r)return r;}return nil; }
+static BOOL HasCJK(NSString *s){if(!s.length)return NO;for(NSUInteger i=0;i<s.length;++i){unichar c=[s characterAtIndex:i];if(c>=0x4E00&&c<=0x9FFF)return YES;}return NO;}
 static void ck(bool ok,const char *n){printf("[%s] %s\n",ok?"PASS":"FAIL",n);if(!ok)++fail;}
 @interface RLPNowPlayingViewController (WebTest)
 - (void)applyLyricText:(NSString *)text forPath:(NSString *)path;
@@ -107,6 +108,7 @@ static void ck(bool ok,const char *n){printf("[%s] %s\n",ok?"PASS":"FAIL",n);if(
 - (void)renderRailMetadata;
 - (void)layoutWebPlayback;
 - (BOOL)lyricAiBusy;
+- (void)applyLanguage;
 @end
 int main(){@autoreleasepool{
  [NSApplication sharedApplication]; [RLPTheme setThemeName:@"light"];
@@ -1021,5 +1023,9 @@ int main(){@autoreleasepool{
   spy.fakeStarted=NO;
  }
  pendingFav=nil;pendingLyricAi=nil;method_setImplementation(shared,old);
+ // ---- Live language switch must refresh tooltips captured at construction ----
+ RLPSetLanguage(@"en");[vc applyLanguage];
+ {id bar=[vc valueForKey:@"webControls"];ck(bar != nil,"language fixture contains actual playback controls");NSArray *keys=@[@"castButton",@"saveButton",@"closeButton",@"analysisToggle",@"railToggle",@"anlHide",@"railHide",@"coverSetBtn",@"coverResetBtn"];NSArray *barKeys=@[@"seek",@"repBtn",@"volKnob",@"volDbField",@"volMuteBtn"];NSMutableArray *stale=[NSMutableArray array];for(NSString*k in keys){NSView*v=[vc valueForKey:k];NSString*tip=[(id)v respondsToSelector:@selector(toolTip)]?[v valueForKey:@"toolTip"]:nil;if(HasCJK(tip))[stale addObject:[NSString stringWithFormat:@"%@=%@",k,tip]];}for(NSString*k in barKeys){id v=[bar valueForKey:k];NSString*tip=[v respondsToSelector:@selector(toolTip)]?[v valueForKey:@"toolTip"]:nil;if(HasCJK(tip))[stale addObject:[NSString stringWithFormat:@"bar.%@=%@",k,tip]];}ck(stale.count==0,"language switch refreshes tooltips built at construction");if(stale.count)printf("    stale: %s\n",[[stale componentsJoinedByString:@" | "] UTF8String]);}
+ RLPSetLanguage(@"zh");[vc applyLanguage];
  printf("np web: %d failures\n",fail);return fail?1:0;
 }}

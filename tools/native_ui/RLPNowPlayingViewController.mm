@@ -352,6 +352,12 @@ static BOOL RLPNPTextFieldIsEditing(NSTextField *field) {
     [[NSNotificationCenter defaultCenter] removeObserver:self];
 }
 
+- (void)applyLanguage {
+    self.seek.toolTip = RLPTr(@"进度");
+    self.repBtn.toolTip = RLPTr(@"循环方式");
+    [self applyVolumeLockedState:self.rawVolumeLocked];
+}
+
 - (void)applyVolumeLockedState:(BOOL)locked {
     self.rawVolumeLocked = locked;
     self.volKnob.locked = locked;
@@ -4418,6 +4424,17 @@ static NSString *RLPNowPlayingCastDeviceLabel(NSString *device) {
     [self anlUpdateSegmentTitles];
     [self anlPaint];
     [self applyPlayModeUI];
+    // 这些提示在构图时才写一次 RLPTr；切语言必须原地重算，否则英文界面仍是中文提示。
+    self.saveButton.toolTip = RLPTr(@"把当前曲目添加到指定歌单");
+    self.closeButton.toolTip = RLPTr(@"返回（Esc）");
+    self.analysisToggle.toolTip = RLPTr(@"显示 / 隐藏音频分析面板");
+    self.railToggle.toolTip = RLPTr(@"显示 / 隐藏 AI 资料面板");
+    self.anlHide.toolTip = RLPTr(@"隐藏音频分析面板，可在右上角重新显示");
+    self.railHide.toolTip = RLPTr(@"隐藏 AI 资料面板，可在右上角重新显示");
+    self.coverSetBtn.toolTip = RLPTr(@"仅设置当前歌曲封面，不修改专辑和音乐文件");
+    self.coverResetBtn.toolTip = RLPTr(@"恢复自动封面");
+    [self applyCastChipStyle];
+    [self.webControls applyLanguage];
     if (!self.lyricLines.count) {
         self.lyricsEmpty.stringValue = RLPTr(@"没有歌词");
     }
