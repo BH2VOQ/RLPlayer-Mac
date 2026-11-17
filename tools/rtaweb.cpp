@@ -11507,6 +11507,7 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
         const size_t q = rq.path.find("?i=");
         if (q != std::string::npos) idx = (size_t)atoi(rq.path.c_str() + q + 3);
         size_t cnt = 0;
+        bool removed = false;
         {
             std::lock_guard<std::mutex> lk(g_q.mtx);
             if (idx < g_q.items.size()) {
@@ -11530,8 +11531,16 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
                 }
                 if (g_q.index > idx && g_q.index > 0) --g_q.index;
                 if (g_q.index >= g_q.items.size()) g_q.index = g_q.items.empty() ? 0 : g_q.items.size() - 1;
+                removed = true;
             }
             cnt = g_q.items.size();
+        }
+        if (!removed) {
+            // 越界索引（行尾 × 用旧 tag 连点、抽屉轮询期间列表已缩短）以前照样回 ok:true ⟹
+            // 客户端只能看到"成功"，把没删掉的行也提示成「已移除」（2026-11-18 夜间评审 A1）。
+            // 这里把"没删成"如实报成失败；web 端 api().then 忽略 ok，不会因此报错。
+            return "{\"ok\":false,\"count\":" + std::to_string(cnt) +
+                   ",\"error\":\"队列索引已过期\"}";
         }
         queue_save();
         return "{\"ok\":true,\"count\":" + std::to_string(cnt) + "}";

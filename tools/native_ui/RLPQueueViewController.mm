@@ -74,6 +74,9 @@ static NSString *const kQueueDragType = @"RLPQueueRowDrag";
 @property (nonatomic, strong) NSMutableArray<NSButton *> *actionButtons;
 @property (nonatomic, assign) BOOL hasLoaded;
 @property (nonatomic, assign) NSInteger hoveredRow;
+/// 行删除的「同一时刻只允许一个在途」闸门：连点行尾 × / 右键重复时，
+/// 第二次用的还是旧 tag，会把顶上来那一首也删掉（2026-11-18 夜间评审 A1）。
+@property (nonatomic, assign) BOOL deleteInFlight;
 @property (nonatomic, copy) NSString *lastPlayKey;
 @property (nonatomic, assign) NSTimeInterval lastPlayAt;
 - (void)restoreSortSelection:(NSString *)key;
@@ -399,11 +402,14 @@ static NSString *RLPQueueParentFolder(NSString *path) {
 - (void)onRowDelete:(NSButton *)sender {
     const NSInteger row = sender.tag;
     if (row < 0 || row >= (NSInteger)self.paths.count) return;
+    if (self.deleteInFlight) return;   // 连点只认第一次（否则旧 tag 会删掉顶上来那一首）
+    self.deleteInFlight = YES;
     NSString *url = [NSString stringWithFormat:@"/api/qdel?i=%ld", (long)row];
     __weak __typeof__(self) weakSelf = self;
     [[RLPCoreClient shared] postJSON:url body:nil completion:^(NSDictionary * _Nullable json) {
         __typeof__(self) self_ = weakSelf;
         if (!self_) return;
+        self_.deleteInFlight = NO;
         if (!json || ![json[@"ok"] boolValue]) {
             RLPToast([json[@"error"] isKindOfClass:[NSString class]] ? json[@"error"] : RLPTr(@"移除失败"));
             [self_ reloadData];
@@ -470,11 +476,14 @@ static NSString *RLPQueueParentFolder(NSString *path) {
 - (void)onMenuRemove:(id)sender {
     const NSInteger row = self.table.clickedRow;
     if (row < 0 || row >= (NSInteger)self.paths.count) return;
+    if (self.deleteInFlight) return;
+    self.deleteInFlight = YES;
     NSString *url = [NSString stringWithFormat:@"/api/qdel?i=%ld", (long)row];
     __weak __typeof__(self) weakSelf = self;
     [[RLPCoreClient shared] postJSON:url body:nil completion:^(NSDictionary * _Nullable json) {
         __typeof__(self) self_ = weakSelf;
         if (!self_) return;
+        self_.deleteInFlight = NO;
         if (!json || ![json[@"ok"] boolValue]) {
             RLPToast([json[@"error"] isKindOfClass:[NSString class]] ? json[@"error"] : RLPTr(@"移除失败"));
             [self_ reloadData];

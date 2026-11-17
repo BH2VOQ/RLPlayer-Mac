@@ -40,6 +40,8 @@ static void EqStr(NSString *got, NSString *want, const char *what) {
 #pragma mark - 桩客户端
 
 static NSMutableArray<NSDictionary *> *g_posts;
+static BOOL g_holdQdel;                       // 扣留 /api/qdel 回包（模拟真实异步客户端）
+static NSMutableArray<RLPJSONCompletion> *g_heldQdel;
 
 static NSArray<NSString *> *PathsFixture(void) {
     return @[ @"/Music/A/Song One.flac", @"/Music/B/Sub/Song Two.flac" ];
@@ -68,6 +70,10 @@ static NSDictionary *QueuePayload(void) {
 - (void)getData:(NSString *)path completion:(RLPDataCompletion)done { (void)path; if (done) done(nil); }
 - (void)postJSON:(NSString *)path body:(NSString *)body completion:(RLPJSONCompletion)done {
     [g_posts addObject:@{ @"path": path ?: @"", @"body": body ?: @"" }];
+    if ([path hasPrefix:@"/api/qdel"] && g_holdQdel) {
+        if (done && g_heldQdel) [g_heldQdel addObject:[done copy]];
+        return;
+    }
     if (done) done(@{ @"ok": @YES });
 }
 @end
@@ -133,6 +139,7 @@ int main() {
         NSApplication *app = [NSApplication sharedApplication];
         [app setActivationPolicy:NSApplicationActivationPolicyAccessory];
         g_posts = [NSMutableArray array];
+        g_heldQdel = [NSMutableArray array];
         [RLPTheme setThemeName:@"light"];
         [RLPTheme setUiStyle:@"apple"];
         std::printf("=== test_native_queue_rows（web .qrow 布局 · 离屏 · 不出声）===\n");
@@ -230,6 +237,31 @@ int main() {
         Ck([table.registeredDraggedTypes containsObject:@"RLPQueueRowDrag"],
            "拖拽 pasteboard 类型仍注册（qmove 未回退）",
            [table.registeredDraggedTypes componentsJoinedByString:@","]);
+
+        // ---- 7. 连点 × 只发一次 /api/qdel（旧实现第二次用旧 tag 会删掉顶上来那一首）----
+        // 2026-11-18 夜间评审 A1：删除没有在途闸门，两次 performClick 会连发两个 qdel。
+        {
+            [g_posts removeAllObjects];
+            NSButton *delDbl = DelButton(table, 1);
+            Ck(delDbl != nil, "7-precondition: 拿得到第 2 行的 ×", @"缺按钮");
+            if (delDbl) {
+                g_holdQdel = YES;
+                [g_heldQdel removeAllObjects];
+                [delDbl performClick:nil];
+                [delDbl performClick:nil];          // 同一在途窗口内连点（回包还没回来）
+                Pump(0.05);
+                NSInteger qdelCount = 0;
+                for (NSDictionary *p in g_posts) if ([p[@"path"] hasPrefix:@"/api/qdel"]) ++qdelCount;
+                Ck(qdelCount == 1,
+                   "同一在途窗口内连点 × 只发一次 /api/qdel（否则第二次会删掉顶上来那一首）",
+                   [NSString stringWithFormat:@"qdel=%ld held=%lu posts=%@", (long)qdelCount,
+                    (unsigned long)g_heldQdel.count, [g_posts componentsJoinedByString:@" | "]]);
+                g_holdQdel = NO;
+                for (RLPJSONCompletion held in g_heldQdel) held(@{ @"ok": @YES, @"count": @1 });
+                [g_heldQdel removeAllObjects];
+                Pump(0.05);
+            }
+        }
 
         std::printf("结果：%d passed, %d failed\n", g_pass, g_fail);
         return g_fail == 0 ? 0 : 1;
