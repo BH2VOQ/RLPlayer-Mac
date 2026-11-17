@@ -69,11 +69,13 @@
 static const CGFloat kSidebarWidth = 226.0;   // --sidew
 static const CGFloat kPlaybackHeight = 66.0;  // .bar height
 static const CGFloat kTopbarHeight = 60.0;    // .top height（classic 52，见 topbarHeight()）
+static void * const kRLPRightDrawerKVOContext = (void *)&kRLPRightDrawerKVOContext;
 
 @interface RLPMainWindowController () <NSSearchFieldDelegate>
 @property (nonatomic, strong, readwrite) RLPSidebarViewController *sidebar;
 @property (nonatomic, strong, readwrite) RLPAlbumsViewController *albums;
 @property (nonatomic, strong, readwrite) RLPPlaybackBarView *playbackBar;
+@property (nonatomic, strong) NSView *mainHost;
 @property (nonatomic, strong) NSView *topbar;
 @property (nonatomic, strong) NSView *pageHost;
 /// 顶栏高度约束：classic 风格是 52，apple 是 60（web #app grid-template-rows）。
@@ -82,6 +84,10 @@ static const CGFloat kTopbarHeight = 60.0;    // .top height（classic 52，见 
 /// 右侧抽屉（web #right）：队列 / 歌词，悬浮毛玻璃卡片。
 @property (nonatomic, strong) RLPRightDrawer *rightDrawer;
 @property (nonatomic, assign) BOOL drawerOpen;
+@property (nonatomic, assign) BOOL updatingDrawerState;
+- (void)syncDrawerButtons;
+- (void)setDrawerOpenState:(BOOL)open;
+- (void)toggleLyricDrawer;
 @property (nonatomic, strong) NSSearchField *search;
 /// 顶栏搜索的防抖定时器（web #q oninput 的 260ms setTimeout）。
 @property (nonatomic, strong) NSTimer *searchDebounce;
@@ -189,6 +195,11 @@ static NSString *RLPPageIdentifier(NSString *key) {
     // `[[RLPPlaybackBarView alloc] init]` 之前（或之后又被重设 layer），shadow 会被清零。
     // 现在统一在**主题应用后**再写一次，保证任何一次 applyTheme 之后形状都在。
     // （审计读到的 op=0.00 就是这个顺序问题造成的，不是主题覆盖。）
+    _mainHost = [[NSView alloc] initWithFrame:NSZeroRect];
+    _mainHost.identifier = @"mainHost";
+    _mainHost.wantsLayer = YES;
+    _mainHost.layer.backgroundColor = t.bg.CGColor;
+    _mainHost.translatesAutoresizingMaskIntoConstraints = NO;
     _topbar = [[RLPTopbarView alloc] initWithFrame:NSZeroRect];
     _topbar.wantsLayer = YES;
     _topbar.layer.backgroundColor = t.bg.CGColor;
@@ -196,9 +207,13 @@ static NSString *RLPPageIdentifier(NSString *key) {
     _pageHost.wantsLayer = YES;
     _pageHost.layer.backgroundColor = t.bg.CGColor;
 
-    for (NSView *v in @[_sidebar.view, _topbar, _pageHost, _playbackBar]) {
+    _sidebar.view.translatesAutoresizingMaskIntoConstraints = NO;
+    [root addSubview:_sidebar.view];
+    [root addSubview:_mainHost];
+
+    for (NSView *v in @[_topbar, _pageHost, _playbackBar]) {
         v.translatesAutoresizingMaskIntoConstraints = NO;
-        [root addSubview:v];
+        [_mainHost addSubview:v];
     }
 
     // ---- 顶栏内容 ----
@@ -256,9 +271,15 @@ static NSString *RLPPageIdentifier(NSString *key) {
         [_sidebar.view.bottomAnchor constraintEqualToAnchor:root.bottomAnchor],
         [_sidebar.view.widthAnchor constraintEqualToConstant:kSidebarWidth],
 
-        [_topbar.leadingAnchor constraintEqualToAnchor:_sidebar.view.trailingAnchor],
-        [_topbar.trailingAnchor constraintEqualToAnchor:root.trailingAnchor],
-        [_topbar.topAnchor constraintEqualToAnchor:root.topAnchor],
+        // 主内容区容器：严格对齐侧边栏右缘到窗口右缘（不包含侧边栏）。
+        [_mainHost.leadingAnchor constraintEqualToAnchor:_sidebar.view.trailingAnchor],
+        [_mainHost.trailingAnchor constraintEqualToAnchor:root.trailingAnchor],
+        [_mainHost.topAnchor constraintEqualToAnchor:root.topAnchor],
+        [_mainHost.bottomAnchor constraintEqualToAnchor:root.bottomAnchor],
+
+        [_topbar.leadingAnchor constraintEqualToAnchor:_mainHost.leadingAnchor],
+        [_topbar.trailingAnchor constraintEqualToAnchor:_mainHost.trailingAnchor],
+        [_topbar.topAnchor constraintEqualToAnchor:_mainHost.topAnchor],
         // 占位：真正的约束在下面单独建并存起来（切 classic 时要改它）
 
 
@@ -282,26 +303,22 @@ static NSString *RLPPageIdentifier(NSString *key) {
         [self.topScanBtn.centerYAnchor constraintEqualToAnchor:_topbar.centerYAnchor],
         [self.topScanBtn.widthAnchor constraintEqualToConstant:28],
 
-        // 悬浮播放条（web .bar）：最大宽 1120 **居中**、底 14 / 高 66 / 圆角 16。
-        // 旧实现钉死左右各 24 ⟹ 宽窗口下播放条比 web 版宽，右侧状态簇被拉散，
-        // 用户看到的「播放条比例不对」有一部分来自这里（web 是 max-width:1120;margin:auto）。
-        // 宽度用低优先级等式给足可用宽，再用 required 的 ≤1120 与左右边距兜底。
-        // ⚠️ 居中基准是**整个窗口**，不是 _pageHost（内容区）。
-        // 参考图（Apple Music 截图）里胶囊条相对整个窗口居中、左右留白近似相等；
-        // 早先钉在 _pageHost 上会让它偏右（实测 left=250 / right=24，明显不居中）。
-        [_playbackBar.centerXAnchor constraintEqualToAnchor:root.centerXAnchor],
-        [_playbackBar.bottomAnchor constraintEqualToAnchor:root.bottomAnchor constant:-14],
-        [_playbackBar.heightAnchor constraintEqualToConstant:66],
-        [_playbackBar.leadingAnchor constraintGreaterThanOrEqualToAnchor:_sidebar.view.trailingAnchor constant:24],
-        [_playbackBar.trailingAnchor constraintLessThanOrEqualToAnchor:root.trailingAnchor constant:-24],
+        // 悬浮播放条：放在 _mainHost 内并相对主内容区左右边界居中（最大宽 1120 / 底 14 / 高 66）。
+        // 宽度用 DefaultHigh 等式吃满主内容区可用宽（width = _mainHost - 48），再用 required 的 ≤1120 与 ≥24pt 边距兜底；
+        // 右侧抽屉悬浮在 root 上、不改变 _mainHost 宽度，窗口缩放与抽屉开合时播放条始终在主内容区居中。
+        [_playbackBar.centerXAnchor constraintEqualToAnchor:_mainHost.centerXAnchor],
+        [_playbackBar.bottomAnchor constraintEqualToAnchor:_mainHost.bottomAnchor constant:-14],
+        [_playbackBar.heightAnchor constraintEqualToConstant:kPlaybackHeight],
+        [_playbackBar.leadingAnchor constraintGreaterThanOrEqualToAnchor:_mainHost.leadingAnchor constant:24],
+        [_playbackBar.trailingAnchor constraintLessThanOrEqualToAnchor:_mainHost.trailingAnchor constant:-24],
 
-        [_pageHost.leadingAnchor constraintEqualToAnchor:_sidebar.view.trailingAnchor],
-        [_pageHost.trailingAnchor constraintEqualToAnchor:root.trailingAnchor],
+        [_pageHost.leadingAnchor constraintEqualToAnchor:_mainHost.leadingAnchor],
+        [_pageHost.trailingAnchor constraintEqualToAnchor:_mainHost.trailingAnchor],
         [_pageHost.topAnchor constraintEqualToAnchor:_topbar.bottomAnchor],
         [_pageHost.bottomAnchor constraintEqualToAnchor:_playbackBar.topAnchor constant:-14],
     ]];
-    {
-        // ---- 右侧抽屉（web #right）----
+
+    // ---- 右侧抽屉（web #right）----
     // web: position:fixed; top:68px; right:18px; bottom:92px; width:320px。
     // 它是**悬浮**卡片，不占网格列 ⟹ 打开时主内容区宽度不变（web 明确修过这一点）。
     _rightDrawer = [[RLPRightDrawer alloc] initWithFrame:NSZeroRect];
@@ -314,15 +331,16 @@ static NSString *RLPPageIdentifier(NSString *key) {
         [_rightDrawer.bottomAnchor constraintEqualToAnchor:root.bottomAnchor constant:-92],
         [_rightDrawer.widthAnchor constraintEqualToConstant:320],
     ]];
+    [_rightDrawer addObserver:self forKeyPath:@"tab" options:0 context:kRLPRightDrawerKVOContext];
+    [_rightDrawer addObserver:self forKeyPath:@"hidden" options:0 context:kRLPRightDrawerKVOContext];
 
     _topbarHeightConstraint = [_topbar.heightAnchor constraintEqualToConstant:[RLPTheme current].topH];
     _topbarHeightConstraint.active = YES;
 
-    NSLayoutConstraint *fill = [_playbackBar.widthAnchor constraintEqualToAnchor:_pageHost.widthAnchor constant:-48];
-        fill.priority = NSLayoutPriorityDefaultHigh;   // 750：窄窗口按可用宽度铺满
-        NSLayoutConstraint *cap = [_playbackBar.widthAnchor constraintLessThanOrEqualToConstant:1120];
-        [NSLayoutConstraint activateConstraints:@[fill, cap]];
-    }
+    NSLayoutConstraint *fill = [_playbackBar.widthAnchor constraintEqualToAnchor:_mainHost.widthAnchor constant:-48];
+    fill.priority = NSLayoutPriorityDefaultHigh;   // 750：窄窗口按主内容区可用宽度铺满
+    NSLayoutConstraint *cap = [_playbackBar.widthAnchor constraintLessThanOrEqualToConstant:1120];
+    [NSLayoutConstraint activateConstraints:@[fill, cap]];
 
     __weak __typeof__(self) weakSelf = self;
     _sidebar.onSelect = ^(NSInteger row) { [weakSelf showContentForRow:row]; };
@@ -372,10 +390,13 @@ static NSString *RLPPageIdentifier(NSString *key) {
 
     [_sidebar selectRow:0];
     [self showContentForRow:0];
+    [self syncDrawerButtons];
     return self;
 }
 
 - (void)dealloc {
+    [_rightDrawer removeObserver:self forKeyPath:@"tab" context:kRLPRightDrawerKVOContext];
+    [_rightDrawer removeObserver:self forKeyPath:@"hidden" context:kRLPRightDrawerKVOContext];
     [_searchDebounce invalidate];
     [self stopScanPolling];   // 扫描轮询必须停表，否则测试进程会延迟退出
     [[NSNotificationCenter defaultCenter] removeObserver:self];
@@ -872,37 +893,145 @@ static NSString *RLPPageIdentifier(NSString *key) {
     [self applySearchQuery:q];
 }
 
-/// 顶栏队列键 = **切换右侧抽屉**（web #bQueue 切 #app.qopen）。
-/// 之前原生把它做成"跳到队列页"，那是另一个东西：web 的队列页与右抽屉是两个入口，
-/// 抽屉是"边听边看"，队列页是"整理队列"。两者都要有。
-- (void)onQueue:(id)sender {
-    [self toggleDrawer];
+- (void)observeValueForKeyPath:(nullable NSString *)keyPath
+                      ofObject:(nullable id)object
+                        change:(nullable NSDictionary<NSKeyValueChangeKey, id> *)change
+                       context:(nullable void *)context {
+    (void)change;
+    if (context != kRLPRightDrawerKVOContext) {
+        [super observeValueForKeyPath:keyPath ofObject:object change:change context:context];
+        return;
+    }
+    if (object != self.rightDrawer) return;
+    if ([keyPath isEqualToString:@"hidden"]) {
+        if (!self.updatingDrawerState) {
+            const BOOL open = !self.rightDrawer.hidden;
+            if (self.drawerOpen != open) {
+                [self setDrawerOpenState:open];
+                return;
+            }
+        }
+        [self syncDrawerButtons];
+        return;
+    }
+    if ([keyPath isEqualToString:@"tab"]) {
+        if (!self.updatingDrawerState) [self syncDrawerButtons];
+        return;
+    }
 }
 
-- (void)toggleDrawer {
-    self.drawerOpen = !self.drawerOpen;
-    self.rightDrawer.hidden = !self.drawerOpen;
-    if (self.drawerOpen) {
+/// 统一同步抽屉状态与触发按钮：以 rightDrawer.hidden / tab 为准同步 drawerOpen、顶栏队列键与底栏键。
+- (void)syncDrawerButtons {
+    const BOOL open = !self.rightDrawer.hidden;
+    self.drawerOpen = open;
+    NSString *tab = [self.rightDrawer.tab isEqualToString:@"l"] ? @"l" : @"q";
+    RLPTheme *t = [RLPTheme current];
+    const BOOL queueActive = open && ![tab isEqualToString:@"l"];
+    self.topQueueBtn.contentTintColor = queueActive ? t.accent : t.text;
+    [[NSNotificationCenter defaultCenter] postNotificationName:@"RLPRightDrawerStateDidChangeNotification"
+                                                        object:self.playbackBar
+                                                      userInfo:@{
+                                                          @"open": @(open),
+                                                          @"tab": tab,
+                                                          @"hidden": @(self.rightDrawer.hidden),
+                                                      }];
+}
+
+- (void)setDrawerOpenState:(BOOL)open {
+    const BOOL wasUpdating = self.updatingDrawerState;
+    self.updatingDrawerState = YES;
+    self.drawerOpen = open;
+    self.rightDrawer.hidden = !open;
+    if (open) {
         [self.rightDrawer activate];
         // 打开时浮到最上层（web z-index:20）
         [self.rightDrawer.superview addSubview:self.rightDrawer positioned:NSWindowAbove relativeTo:nil];
     } else {
         [self.rightDrawer deactivate];
     }
+    self.updatingDrawerState = wasUpdating;
+    [self syncDrawerButtons];
+}
+
+/// 顶栏队列键 = **切换右侧抽屉**（web #bQueue 切 #app.qopen）。
+/// 打开但停在歌词页签时先切回队列页签，已停在队列页签时再次点击关闭。
+- (void)onQueue:(id)sender {
+    (void)sender;
+    const BOOL open = !self.rightDrawer.hidden;
+    NSString *tab = self.rightDrawer.tab ?: @"q";
+    if (!open) {
+        if (![tab isEqualToString:@"q"]) {
+            const BOOL wasUpdating = self.updatingDrawerState;
+            self.updatingDrawerState = YES;
+            [self.rightDrawer showTab:@"q"];
+            self.drawerOpen = YES;
+            self.rightDrawer.hidden = NO;
+            [self.rightDrawer activate];
+            [self.rightDrawer.superview addSubview:self.rightDrawer positioned:NSWindowAbove relativeTo:nil];
+            self.updatingDrawerState = wasUpdating;
+            [self syncDrawerButtons];
+        } else {
+            [self setDrawerOpenState:YES];
+        }
+        return;
+    }
+    if (![tab isEqualToString:@"q"]) {
+        [self.rightDrawer showTab:@"q"];
+        [self syncDrawerButtons];
+        return;
+    }
+    [self setDrawerOpenState:NO];
+}
+
+- (void)toggleDrawer {
+    [self setDrawerOpenState:self.rightDrawer.hidden];
 }
 
 - (void)onPlaybackTick:(NSNotification *)note {
-    if (!self.drawerOpen) return;   // 抽屉没开就不做无用的布局计算
+    if (!self.drawerOpen || self.rightDrawer.hidden) return;   // 抽屉没开就不做无用的布局计算
     NSDictionary *u = note.userInfo;
     [self.rightDrawer updatePosition:[u[@"pos"] doubleValue] duration:[u[@"dur"] doubleValue]];
 }
 
-- (void)onOpenLyricDrawerNote:(NSNotification *)note { [self openLyricDrawer]; }
+- (void)onOpenLyricDrawerNote:(NSNotification *)note {
+    (void)note;
+    [self toggleLyricDrawer];
+}
 
-/// 底栏歌词键 → 打开抽屉并切到歌词页（web #bLyric 同语义）。
+/// 底栏 pb.lyric / 快捷键 l 入口：
+/// - 抽屉未开时单击打开并切到歌词页签；
+/// - 已打开且在队列页签时切到歌词页签，不误关队列抽屉；
+/// - 已打开且停在歌词页签时再次单击关闭抽屉，同步 hidden 与 drawerOpen。
+- (void)toggleLyricDrawer {
+    const BOOL open = !self.rightDrawer.hidden;
+    NSString *tab = self.rightDrawer.tab ?: @"q";
+    if (!open) {
+        if (![tab isEqualToString:@"l"]) {
+            const BOOL wasUpdating = self.updatingDrawerState;
+            self.updatingDrawerState = YES;
+            self.drawerOpen = YES;
+            self.rightDrawer.hidden = NO;
+            [self.rightDrawer activate];
+            [self.rightDrawer.superview addSubview:self.rightDrawer positioned:NSWindowAbove relativeTo:nil];
+            [self.rightDrawer showTab:@"l"];
+            self.updatingDrawerState = wasUpdating;
+            [self syncDrawerButtons];
+        } else {
+            [self setDrawerOpenState:YES];
+        }
+        return;
+    }
+    if (![tab isEqualToString:@"l"]) {
+        [self.rightDrawer showTab:@"l"];
+        [self syncDrawerButtons];
+        return;
+    }
+    [self setDrawerOpenState:NO];
+}
+
+/// 底栏歌词键（web #bLyric）→ 单击打开、再次单击关闭，与 hidden / drawerOpen 同步。
 - (void)openLyricDrawer {
-    if (!self.drawerOpen) [self toggleDrawer];
-    [self.rightDrawer showTab:@"l"];
+    [self toggleLyricDrawer];
 }
 
 // npPage is a full content-window overlay, not a page inside the sidebar grid.
@@ -938,10 +1067,12 @@ static NSString *RLPPageIdentifier(NSString *key) {
     }
     for (NSButton *b in @[self.topQueueBtn, self.topScanBtn, self.topNpBtn]) b.contentTintColor = t.text;
     self.topbarHeightConstraint.constant = t.topH;   // apple 60 / classic 52
+    self.mainHost.layer.backgroundColor = t.bg.CGColor;
     self.pageHost.layer.backgroundColor = t.bg.CGColor;
     [self.sidebar applyTheme];
     [self.playbackBar applyTheme];
     [self.rightDrawer applyTheme];
+    [self syncDrawerButtons];
     if(self.npPage.isViewLoaded)[self.npPage applyTheme];
     self.playbackBar.layer.borderColor = t.line.CGColor;
     // 悬浮胶囊条的投影与圆角属于"形状"，不属于"颜色"：主题切换不该把它抹掉。

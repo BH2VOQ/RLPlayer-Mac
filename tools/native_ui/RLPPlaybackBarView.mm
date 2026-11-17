@@ -288,7 +288,9 @@ static void RLPSetBadgeText(NSTextField *label, NSString *text, NSColor *color, 
 @property (nonatomic, assign) double optimisticVolumeDb;
 @property (nonatomic, assign) BOOL hasConfirmedVolume;
 @property (nonatomic, assign) BOOL rawVolumeLocked;
+@property (nonatomic, assign) BOOL lyricDrawerActive;
 - (void)commitVolumeDb:(double)db completion:(void (^ _Nullable)(BOOL))completion;
+- (void)refreshLyricButton;
 @end
 
 static BOOL RLPBarTextFieldIsEditing(NSTextField *field) {
@@ -487,8 +489,22 @@ static BOOL RLPBarTextFieldIsEditing(NSTextField *field) {
     self.lyricBtn = [self symbolButton:@"music.note.list" tip:@"歌词"];
     self.lyricBtn.identifier = @"pb.lyric";
     self.lyricBtn.target = self;
-    // web #bLyric 打开的是右侧抽屉的歌词页，不是单曲页。
+    // web #bLyric 打开的是右侧抽屉的歌词页（支持单击打开、再次单击关闭）。
     self.lyricBtn.action = @selector(openLyricDrawer:);
+    __weak __typeof__(self) weakLyricBar = self;
+    ((RLPBarKeyButton *)self.lyricBtn).hoverApplier = ^(RLPBarKeyButton *btn, BOOL hovered) {
+        RLPTheme *t2 = [RLPTheme current];
+        __typeof__(self) bar = weakLyricBar;
+        const BOOL active = (bar != nil && bar.lyricDrawerActive);
+        if (hovered) {
+            btn.layer.backgroundColor = t2.hov2.CGColor;
+            btn.contentTintColor = active ? t2.accent : t2.text;
+        } else {
+            btn.layer.backgroundColor = NSColor.clearColor.CGColor;
+            btn.contentTintColor = active ? t2.accent : t2.mut;
+        }
+    };
+    [self refreshLyricButton];
     self.chainBtn = [self symbolButton:@"waveform.path" tip:@"信号链"];
     self.chainBtn.identifier = @"pb.chain";
     self.chainBtn.target = self;
@@ -599,6 +615,10 @@ static BOOL RLPBarTextFieldIsEditing(NSTextField *field) {
     [[NSNotificationCenter defaultCenter] addObserver:self
                                              selector:@selector(onVolumeDidChangeNotification:)
                                                  name:@"RLPVolumeDidChangeNotification"
+                                               object:nil];
+    [[NSNotificationCenter defaultCenter] addObserver:self
+                                             selector:@selector(onRightDrawerStateDidChange:)
+                                                 name:@"RLPRightDrawerStateDidChangeNotification"
                                                object:nil];
 }
 
@@ -966,7 +986,7 @@ static double RLPVolDbToPos(double db) {
     if (self.bpBadge.attributedStringValue.length == 0)
         RLPSetBadgeText(self.bpBadge, self.bpBadge.stringValue ?: @"", t.mut, 0.4);
     self.bpBadge.layer.borderColor = t.okLine.CGColor;   // web: 1px var(--ok-line)
-    self.lyricBtn.contentTintColor = t.mut;
+    [self refreshLyricButton];
     self.chainBtn.contentTintColor = t.mut;
     self.volIconView.contentTintColor = t.mut;
     [self refreshModeButtons];
@@ -1458,8 +1478,37 @@ static double RLPVolDbToPos(double db) {
     [[NSNotificationCenter defaultCenter] postNotificationName:@"RLPOpenNowPlayingNotification" object:nil];
 }
 
-/// 歌词键 → 主窗口打开右抽屉并切到歌词页。
+- (void)refreshLyricButton {
+    RLPTheme *t = [RLPTheme current];
+    RLPBarKeyButton *btn = (RLPBarKeyButton *)self.lyricBtn;
+    if ([btn isKindOfClass:[RLPBarKeyButton class]] && btn.hovered) {
+        btn.layer.backgroundColor = t.hov2.CGColor;
+        btn.contentTintColor = self.lyricDrawerActive ? t.accent : t.text;
+    } else {
+        if ([btn isKindOfClass:[RLPBarKeyButton class]]) {
+            btn.layer.backgroundColor = NSColor.clearColor.CGColor;
+        }
+        self.lyricBtn.contentTintColor = self.lyricDrawerActive ? t.accent : t.mut;
+    }
+}
+
+- (void)onRightDrawerStateDidChange:(NSNotification *)note {
+    if (note.object && note.object != self) return;
+    NSDictionary *u = [note.userInfo isKindOfClass:[NSDictionary class]] ? note.userInfo : nil;
+    BOOL open = NO;
+    if ([u[@"open"] respondsToSelector:@selector(boolValue)]) {
+        open = [u[@"open"] boolValue];
+    } else if ([u[@"hidden"] respondsToSelector:@selector(boolValue)]) {
+        open = ![u[@"hidden"] boolValue];
+    }
+    NSString *tab = [u[@"tab"] isKindOfClass:[NSString class]] ? u[@"tab"] : @"";
+    self.lyricDrawerActive = open && [tab isEqualToString:@"l"];
+    [self refreshLyricButton];
+}
+
+/// 歌词键 → 主窗口切换右抽屉歌词页（单击打开、再次单击关闭，状态与右抽屉同步）。
 - (void)openLyricDrawer:(id)sender {
+    (void)sender;
     [[NSNotificationCenter defaultCenter] postNotificationName:@"RLPOpenLyricDrawerNotification" object:nil];
 }
 

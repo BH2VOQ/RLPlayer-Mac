@@ -1907,11 +1907,14 @@ int RLPRunFunctionalAudit(NSString *outDir) {
                 bar.layer.shadowOpacity, bar.layer.shadowRadius]);
             // 与窗口边缘的留白（参考图是悬浮胶囊，不是贴底通栏）
             const NSRect inWin = [bar convertRect:bar.bounds toView:nil];
-            const CGFloat winW = wc.window.contentView.bounds.size.width;
-            const CGFloat gapL = NSMinX(inWin), gapR = winW - NSMaxX(inWin);
+            // 1.1.7.128：播放条只在主内容区居中（不含 226pt 侧边栏），参照系改为主内容容器。
+            NSView *barHost = bar.superview ?: wc.window.contentView;
+            const NSRect hostInWin = [barHost convertRect:barHost.bounds toView:nil];
+            const CGFloat gapL = NSMinX(inWin) - NSMinX(hostInWin);
+            const CGFloat gapR = NSMaxX(hostInWin) - NSMaxX(inWin);
             CK(gapL >= 12 && gapR >= 12 && fabs(gapL - gapR) <= 40,
-               "第14项（整窗）: 播放条左右都有留白（悬浮胶囊，非通栏）",
-               [NSString stringWithFormat:@"left=%.0f right=%.0f", gapL, gapR]);
+               "第14项（主内容区）: 播放条在主内容区左右都有留白且居中（非整窗通栏）",
+               [NSString stringWithFormat:@"left=%.0f right=%.0f hostW=%.0f", gapL, gapR, NSWidth(hostInWin)]);
             CK(bar.bounds.size.height >= 56 && bar.bounds.size.height <= 66,
                "第14项（整窗）: 条高在 56–66pt",
                [NSString stringWithFormat:@"h=%.0f", bar.bounds.size.height]);
