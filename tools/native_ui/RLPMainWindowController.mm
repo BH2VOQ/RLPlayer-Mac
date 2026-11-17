@@ -155,33 +155,15 @@ static BOOL RLPRectsAlmostEqual(NSRect a, NSRect b) {
            fabs((double)a.size.height - (double)b.size.height) <= eps;
 }
 
-static BOOL RLPParseSavedWindowFrameRect(NSString *saved, NSRect *outRect) {
-    if (!saved.length || !outRect) return NO;
-    NSScanner *sc = [NSScanner scannerWithString:saved];
-    double x = 0, y = 0, w = 0, h = 0;
-    if (![sc scanDouble:&x] || ![sc scanDouble:&y] ||
-        ![sc scanDouble:&w] || ![sc scanDouble:&h]) {
-        return NO;
-    }
-    if (!isfinite(x) || !isfinite(y) || !isfinite(w) || !isfinite(h)) return NO;
-    *outRect = NSMakeRect((CGFloat)x, (CGFloat)y, (CGFloat)w, (CGFloat)h);
-    return YES;
-}
+enum { kRLPMaxClampScreens = 8 };   // 窗口收敛最多考虑的屏幕数（M4 实际 1–2 块，8 是上限兜底）
 
-static NSScreen *RLPTargetScreenForWindow(NSWindow *win) {
-    if (win.screen) return win.screen;
-    const NSRect frame = win.frame;
-    NSScreen *bestScreen = nil;
-    CGFloat bestArea = 0.0;
-    for (NSScreen *s in NSScreen.screens) {
-        const NSRect hit = NSIntersectionRect(frame, s.frame);
-        const CGFloat area = NSIsEmptyRect(hit) ? 0.0 : (hit.size.width * hit.size.height);
-        if (area > bestArea) {
-            bestArea = area;
-            bestScreen = s;
-        }
-    }
-    return bestScreen ?: NSScreen.mainScreen ?: NSScreen.screens.firstObject;
+/// 收集当前所有屏的 visibleFrame（供纯函数判据使用）。
+static NSUInteger RLPCurrentVisibleFrames(NSRect *out, NSUInteger cap) {
+    if (!out || cap == 0) return 0;
+    const NSArray<NSScreen *> *screens = NSScreen.screens;
+    const NSUInteger used = MIN(screens.count, cap);
+    for (NSUInteger i = 0; i < used; ++i) out[i] = screens[i].visibleFrame;
+    return used;
 }
 
 static void RLPClampWindowToVisibleAndSaveAutosave(NSWindow *win,
@@ -189,12 +171,15 @@ static void RLPClampWindowToVisibleAndSaveAutosave(NSWindow *win,
                                                    NSString *previousSavedFrame) {
     if (!win) return;
     if ((win.styleMask & NSWindowStyleMaskFullScreen) != 0) return;
-    NSScreen *screen = RLPTargetScreenForWindow(win);
-    if (!screen) return;
+    NSRect visibles[kRLPMaxClampScreens];
+    const NSUInteger usedScreens = RLPCurrentVisibleFrames(visibles, kRLPMaxClampScreens);
+    if (usedScreens == 0) return;
 
-    const NSRect visible = screen.visibleFrame;
+    // 跨屏窗口不许被单屏 visibleFrame 压窄（2026-11-18 夜间评审 B1）
+    const NSRect usable = RLPWindowUsableScreenRect(win.frame, visibles, (size_t)usedScreens);
+    if (NSIsEmptyRect(usable)) return;
     const NSRect current = win.frame;
-    const NSRect clamped = RLPClampWindowFrameToVisible(current, visible, win.minSize);
+    const NSRect clamped = RLPClampWindowFrameToVisible(current, usable, win.minSize);
     const BOOL changed = !RLPRectsAlmostEqual(clamped, current);
     if (changed) {
         [win setFrame:clamped display:display];
@@ -205,8 +190,9 @@ static void RLPClampWindowToVisibleAndSaveAutosave(NSWindow *win,
 
     BOOL savedWasOutOfVisible = NO;
     NSRect savedRect = NSZeroRect;
-    if (RLPParseSavedWindowFrameRect(previousSavedFrame, &savedRect)) {
-        const NSRect clampedSaved = RLPClampWindowFrameToVisible(savedRect, visible, win.minSize);
+    if (RLPParseSavedWindowFrame(previousSavedFrame.UTF8String, &savedRect)) {
+        const NSRect usableSaved = RLPWindowUsableScreenRect(savedRect, visibles, (size_t)usedScreens);
+        const NSRect clampedSaved = RLPClampWindowFrameToVisible(savedRect, usableSaved, win.minSize);
         savedWasOutOfVisible = !RLPRectsAlmostEqual(clampedSaved, savedRect);
     } else if (previousSavedFrame.length) {
         savedWasOutOfVisible = YES;
@@ -239,9 +225,19 @@ static void RLPClampWindowToVisibleAndSaveAutosave(NSWindow *win,
     // 同时保留"用户之后自己调整的大小仍被记住"这一正常行为。
     NSString *previousSavedFrame = [[NSUserDefaults standardUserDefaults] stringForKey:kRLPMainWindowFrameDefaultsKey];
     [win setFrameAutosaveName:kRLPMainWindowAutosaveName];
-    if (!previousSavedFrame.length)
-        [win setFrame:NSMakeRect(0, 0, 1180, 760) display:NO];
-    [win center];
+    // 2026-11-18 夜间评审 B2：原来无条件 [win center] 会把 autosave 里的 origin 覆盖成主屏中心
+    // （用户放在副屏/自定义位置的窗口每次启动都回到正中），且随后的收敛作用在"居中后"的 frame 上。
+    // 改为显式回放保存值（不依赖 setFrameAutosaveName: 的恢复时序），只有确实没有保存值时才居中。
+    {
+        NSRect visibles[kRLPMaxClampScreens];
+        const NSUInteger usedScreens = RLPCurrentVisibleFrames(visibles, kRLPMaxClampScreens);
+        const RLPWindowStartupFrame start =
+            RLPWindowStartupFrameForSavedState(previousSavedFrame.UTF8String,
+                                               NSMakeRect(0, 0, 1180, 760),
+                                               visibles, (size_t)usedScreens, win.minSize);
+        [win setFrame:start.frame display:NO];
+        if (start.center) [win center];
+    }
     // 换屏/外接显示器/历史拖拽会把 autosave frame 存成超出当前屏幕的尺寸，
     // 恢复后内容会被屏幕边缘裁掉。启动时统一收敛到可见区并写回 autosave 清掉脏记录。
     RLPClampWindowToVisibleAndSaveAutosave(win, NO, previousSavedFrame);

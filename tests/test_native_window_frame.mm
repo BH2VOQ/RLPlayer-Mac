@@ -63,6 +63,48 @@ int main() {
         ck(same(got, NSMakeRect(0, 0, 800, 500)),
            "可见区小于 minSize 时以可见区为准", str(got));
 
+        // ---- 多屏：跨屏窗口不许被单屏可见区压窄（2026-11-18 夜间评审 B1）----
+        {
+            const NSRect dual[2] = { NSMakeRect(-1920, 0, 1920, 1080), NSMakeRect(0, 0, 1920, 1080) };
+            const NSRect onRight = NSMakeRect(100, 100, 1180, 760);
+            NSRect usableRight = RLPWindowUsableScreenRect(onRight, dual, 2);
+            ck(same(usableRight, dual[1]), "窗口完全落在右屏时用右屏可用区", str(usableRight));
+
+            const NSRect spanning = NSMakeRect(-1000, 100, 2400, 600);
+            NSRect usable = RLPWindowUsableScreenRect(spanning, dual, 2);
+            ck(same(usable, NSMakeRect(-1920, 0, 3840, 1080)),
+               "跨屏窗口用多屏并集包围盒（不是单屏）", str(usable));
+            NSRect spanningClamped = RLPClampWindowFrameToVisible(spanning, usable, minSize);
+            ck(same(spanningClamped, spanning),
+               "跨屏 2400 宽窗口不被收敛挤窄（旧实现会压成 1920 宽）", str(spanningClamped));
+
+            const NSRect offLeft = NSMakeRect(-5000, 100, 1180, 760);
+            NSRect offLeftClamped = RLPClampWindowFrameToVisible(offLeft, usable, minSize);
+            ck(same(offLeftClamped, NSMakeRect(-1920, 100, 1180, 760)),
+               "完全在屏外的窗口仍被拉回并集左缘", str(offLeftClamped));
+        }
+
+        // ---- 启动 frame 决策：有保存值就回放且不居中（2026-11-18 夜间评审 B2）----
+        {
+            const NSRect single[1] = { vis };
+            const NSRect def = NSMakeRect(0, 0, 1180, 760);
+
+            RLPWindowStartupFrame st =
+                RLPWindowStartupFrameForSavedState("300 200 1180 760 ", def, single, 1, minSize);
+            ck(!st.center && same(st.frame, NSMakeRect(300, 200, 1180, 760)),
+               "有合法保存值时回放原 frame 且不居中（旧实现每次启动都回主屏中心）", str(st.frame));
+
+            st = RLPWindowStartupFrameForSavedState("", def, single, 1, minSize);
+            ck(st.center && same(st.frame, def), "没有保存值时用默认尺寸并居中", str(st.frame));
+
+            st = RLPWindowStartupFrameForSavedState("2975 -42 2975 1003 ", def, single, 1, minSize);
+            ck(!st.center && same(st.frame, NSMakeRect(0, 0, 1920, 1003)),
+               "保存值越界时收敛到可见区（仍不居中）", str(st.frame));
+
+            st = RLPWindowStartupFrameForSavedState("garbage", def, single, 1, minSize);
+            ck(st.center && same(st.frame, def), "保存值损坏时按首启处理（默认 + 居中）", str(st.frame));
+        }
+
         std::printf("\n结果：%d failed\n", g_fail);
     }
     return g_fail == 0 ? 0 : 1;

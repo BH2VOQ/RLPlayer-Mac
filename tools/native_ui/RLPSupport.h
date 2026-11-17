@@ -6,6 +6,7 @@
 // 统一放在这里的目的：页面之间不各写一套格式化与封面缓存；i18n 只有一个入口
 // （RLPTr），将来把 docs/i18n 的词表生成为原生表时，所有已包 RLPTr 的文案自动生效。
 #import <AppKit/AppKit.h>
+#include <stdlib.h>
 #include <stdint.h>
 
 NS_ASSUME_NONNULL_BEGIN
@@ -149,6 +150,63 @@ static inline NSRect RLPClampWindowFrameToVisible(NSRect frame, NSRect visible, 
     if (NSMinY(frame) < NSMinY(visible)) frame.origin.y = NSMinY(visible);
     if (NSMaxY(frame) > NSMaxY(visible)) frame.origin.y = NSMaxY(visible) - frame.size.height;
     return frame;
+}
+
+/// 多屏下「用哪块屏收敛」的唯一判据（纯函数，便于离线判据）。
+/// 窗口**完全落在某一块屏**的可见区时用该屏；窗口跨屏（多显示器并排时 2400–3400pt 宽的合法摆放）
+/// 时改用所有屏 visibleFrame 的并集包围盒 —— 否则会被单屏收敛压窄并写回 autosave，
+/// 用户下次启动就永远丢掉跨屏宽度（2026-11-18 夜间评审 B1）。
+static inline NSRect RLPWindowUsableScreenRect(NSRect windowFrame, const NSRect *visibles, size_t count) {
+    if (!visibles || count == 0) return NSZeroRect;
+    for (size_t i = 0; i < count; ++i) {
+        if (NSContainsRect(visibles[i], windowFrame)) return visibles[i];
+    }
+    NSRect usable = visibles[0];
+    for (size_t i = 1; i < count; ++i) usable = NSUnionRect(usable, visibles[i]);
+    return usable;
+}
+
+/// 解析 NSWindow autosave 的 frame 字符串（"x y w h"，末尾可能带空格）。
+/// 纯 C 解析：不依赖 locale、不做本地化数字格式猜测；任何一段读不出来就判无效（不猜默认值）。
+static inline BOOL RLPParseSavedWindowFrame(const char *saved, NSRect *outRect) {
+    if (!saved || !outRect) return NO;
+    const char *p = saved;
+    double v[4] = { 0, 0, 0, 0 };
+    for (int i = 0; i < 4; ++i) {
+        while (*p == ' ' || *p == '\t') ++p;
+        if (!*p) return NO;
+        char *end = NULL;
+        v[i] = strtod(p, &end);
+        if (end == p || v[i] != v[i]) return NO;   // NaN 也要判无效（autosave 可能被写坏）
+        p = end;
+    }
+    *outRect = NSMakeRect((CGFloat)v[0], (CGFloat)v[1], (CGFloat)v[2], (CGFloat)v[3]);
+    return YES;
+}
+
+/// 启动时的窗口 frame 决策（纯函数）：
+/// 有合法保存值 → 用它并向可见区收敛、**不居中**（居中会把副屏/任意位置的 origin 覆盖成主屏中心）；
+/// 没有保存值（首次启动或记录损坏）→ 默认尺寸 + 居中。
+typedef struct {
+    NSRect frame;
+    BOOL center;
+} RLPWindowStartupFrame;
+
+static inline RLPWindowStartupFrame RLPWindowStartupFrameForSavedState(const char *savedFrame,
+                                                                      NSRect defaultFrame,
+                                                                      const NSRect *visibles,
+                                                                      size_t count,
+                                                                      NSSize minSize) {
+    RLPWindowStartupFrame out;
+    out.frame = defaultFrame;
+    out.center = YES;
+    NSRect saved = NSZeroRect;
+    if (!RLPParseSavedWindowFrame(savedFrame, &saved)) return out;
+    out.center = NO;
+    out.frame = count > 0
+        ? RLPClampWindowFrameToVisible(saved, RLPWindowUsableScreenRect(saved, visibles, count), minSize)
+        : saved;
+    return out;
 }
 
 /// 当前是否有可恢复的记忆值（判据与 UI 可用；对应 web `volumeRestore !== null`）。
