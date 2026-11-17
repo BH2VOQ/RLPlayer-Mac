@@ -136,6 +136,15 @@ int main() {
            "unknown cast volume uses finite silent fallback", unknownBody);
         [vc setValue:[RLPPlaybackStatus statusFromJSON:@{@"ok": @YES, @"volDb": @0}] forKey:@"webStatus"];
         Ck([[vc castBodyForDevice:device] containsString:@"volume=0.0"], "explicit zero cast volume remains valid", @"");
+        // A just-confirmed volume must win over the older status snapshot.
+        id controls = [vc valueForKey:@"webControls"];
+        [vc setValue:[RLPPlaybackStatus statusFromJSON:@{@"ok": @YES, @"volDb": @(-40)}] forKey:@"webStatus"];
+        if (controls) {
+            [controls setValue:@(-15.0) forKey:@"confirmedVolumeDb"];
+            [controls setValue:@YES forKey:@"hasConfirmedVolume"];
+            Ck([[vc castBodyForDevice:device] containsString:@"volume=-15.0"],
+               "confirmed volume overrides stale cast snapshot", [vc castBodyForDevice:device]);
+        }
         [vc setValue:priorStatus forKey:@"webStatus"];
         [vc setValue:priorPath forKey:@"currentPath"];
 

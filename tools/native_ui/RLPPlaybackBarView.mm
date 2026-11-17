@@ -242,6 +242,7 @@ static void RLPSetBadgeText(NSTextField *label, NSString *text, NSColor *color, 
 @property (nonatomic, strong) NSButton *nextBtn;
 @property (nonatomic, strong) NSTextField *titleLabel;
 @property (nonatomic, strong) NSTextField *subLabel;
+@property (nonatomic, strong, nullable) NSPopover *signalPopover;
 @property (nonatomic, strong) NSTextField *posLabel;    // 进度左端「当前时间」
 @property (nonatomic, strong) NSTextField *durLabel;    // 进度右端「总时长」
 @property (nonatomic, strong) NSTextField *fmtBadge;    // 「44.1k/24」格式徽标（web #fmt）
@@ -997,12 +998,12 @@ static double RLPVolDbToPos(double db) {
     NSDictionary *d=self.statusDetails ?: @{};
     NSString *state=st.bitPerfect ?: @"", *why=st.bitPerfectWhy ?: @"";
     NSString *fallback=[d[@"fallbackWhy"] isKindOfClass:NSString.class]?d[@"fallbackWhy"]:@"";
-    NSString *tip=fallback.length?[NSString stringWithFormat:@"降级原因：%@%@",fallback,(why.length && ![why isEqual:fallback])?[@"；" stringByAppendingString:why]:@""]:why;
-    NSString *text=@"待播放验证"; NSColor *color=t.mut;
+    NSString *tip=fallback.length?[NSString stringWithFormat:RLPTr(@"降级原因：%@%@"),fallback,(why.length && ![why isEqual:fallback])?[@"；" stringByAppendingString:why]:@""]:why;
+    NSString *text=RLPTr(@"待播放验证"); NSColor *color=t.mut;
     if ([state isEqual:@"direct"]) { text=@"BIT-PERFECT·1bit"; color=t.bpDirect; }
     else if ([state isEqual:@"yes"]) { text=@"BIT-PERFECT"; color=t.okText; }
     else if (state.length) {
-        text=@"非 bit-perfect"; color=t.warn;
+        text=RLPTr(@"非 bit-perfect"); color=t.warn;
         double input=[d[@"inRate"] doubleValue], output=st.outRate;
         NSString *transport=[d[@"transport"] isKindOfClass:NSString.class]?d[@"transport"]:@"";
         NSString *outMode=[d[@"outMode"] isKindOfClass:NSString.class]?d[@"outMode"]:@"";
@@ -1010,9 +1011,9 @@ static double RLPVolDbToPos(double db) {
         BOOL hardVeto=[why containsString:@"物理格式未锁定"] || [why containsString:@"其它程序"];
         if (!cast && [d[@"dsd"] doubleValue]>0) {
             NSString *ext=st.currentPath.pathExtension.lowercaseString;
-            text=([@[@"dsf",@"dff",@"dsd",@"iso"] containsObject:ext])?@"DSD-DSD 升频":@"PCM-DSD 升频"; color=t.accent;
+            text=([@[@"dsf",@"dff",@"dsd",@"iso"] containsObject:ext])?RLPTr(@"DSD-DSD 升频"):RLPTr(@"PCM-DSD 升频"); color=t.accent;
         } else if ((!cast || [d[@"resampled"] boolValue]) && (cast || !hardVeto) && input>0 && output>0 && input!=output) {
-            text=output<input?@"PCM 降采样":@"PCM-PCM 升频";
+            text=output<input?RLPTr(@"PCM 降采样"):RLPTr(@"PCM-PCM 升频");
             color=output<input?t.warn:t.accent;
         }
     }
@@ -1475,7 +1476,8 @@ static double RLPVolDbToPos(double db) {
     [card addArrangedSubview:nodes];
 
     NSViewController *vc = RLPCardController(card, 540, 260);
-    RLPShowCardPopover(sender ?: self, vc, 540);
+    [self.signalPopover close];
+    self.signalPopover = RLPShowCardPopover(sender ?: self, vc, 540);
 
     const NSUInteger seq = ++self.signalSeq;
     __weak __typeof__(self) weakSelf = self;

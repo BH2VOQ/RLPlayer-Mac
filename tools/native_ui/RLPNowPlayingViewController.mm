@@ -2979,7 +2979,9 @@ static NSString *RLPRailTagText(id srValue, id bitsValue) {
     NSMutableCharacterSet *allowed=[[NSCharacterSet URLQueryAllowedCharacterSet] mutableCopy];[allowed removeCharactersInString:@"&=+?#"];
     NSString *deviceValue=[dev stringByAddingPercentEncodingWithAllowedCharacters:allowed];
     NSString *fileValue=[self.currentPath stringByAddingPercentEncodingWithAllowedCharacters:allowed];
-    return [NSString stringWithFormat:@"dev=%@&file=%@&volume=%.1f",deviceValue,fileValue,(self.webStatus && isfinite(self.webStatus.volumeDb)) ? self.webStatus.volumeDb : -120.0];
+    return [NSString stringWithFormat:@"dev=%@&file=%@&volume=%.1f",deviceValue,fileValue,([self.webControls hasConfirmedVolume] && isfinite([self.webControls confirmedVolumeDb]))
+        ? [self.webControls confirmedVolumeDb]
+        : ((self.webStatus && isfinite(self.webStatus.volumeDb)) ? self.webStatus.volumeDb : -120.0)];
 }
 /// 投放芯片的运行态（web npCastBtnHtml：`npcast.on` 绿底 + 「已推送到 <device>」，点击停止）。
 /// 后端契约 `/api/cast/state` → {ok, running, device, phase, ...}（RLPCastView 已在读同一接口）。

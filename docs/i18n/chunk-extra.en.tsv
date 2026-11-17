@@ -732,3 +732,5 @@ PEQ 开	PEQ on
 全选	Select All
 配置档读取失败	Failed to read profiles
 切换随机播放失败	Failed to enable shuffle
+降级原因：%@%@	Fallback reason: %@%@
+；	；
