@@ -79,10 +79,12 @@ static const void *kRLPQueueDeletePathKey = &kRLPQueueDeletePathKey;
 /// 行删除的「同一时刻只允许一个在途」闸门：连点行尾 × / 右键重复时，
 /// 第二次用的还是旧 tag，会把顶上来那一首也删掉（2026-11-18 夜间评审 A1）。
 @property (nonatomic, assign) BOOL deleteInFlight;
+@property (nonatomic, assign) BOOL saveInFlight;
 @property (nonatomic, copy) NSString *lastPlayKey;
 @property (nonatomic, assign) NSTimeInterval lastPlayAt;
 - (void)restoreSortSelection:(NSString *)key;
 - (void)savePlaylistNamed:(NSString *)name;
+- (void)applyQueueSnapshot:(NSDictionary *)json;
 @end
 
 @implementation RLPQueueViewController
@@ -810,6 +812,7 @@ static NSString *RLPQueueMetaText(NSDictionary *m, NSString *k,
 }
 
 - (void)saveAsPlaylist {
+    if (self.saveInFlight) return;
     // P7 空队列守卫：直接提示，不弹框、不发请求（web saveQueueDialog 的 n==0 分支）。
     if (!self.paths.count) {
         RLPToast(RLPTr(@"队列是空的，先加几首歌再保存"));
@@ -831,34 +834,107 @@ static NSString *RLPQueueMetaText(NSDictionary *m, NSString *k,
 
 /// 保存当前队列为歌单（生产接缝：对话框只负责取名；判据直接调这里，不弹模态框）。
 - (void)savePlaylistNamed:(NSString *)name {
-    NSString *trimmed = [name ?: @"" stringByTrimmingCharactersInSet:
+    NSString *rawName = [name isKindOfClass:[NSString class]] ? name : @"";
+    NSString *trimmed = [rawName stringByTrimmingCharactersInSet:
                          [NSCharacterSet whitespaceAndNewlineCharacterSet]];
     if (!trimmed.length) { RLPToast(RLPTr(@"请先填写歌单名称")); return; }
-    // P7：空队列即使绕过按钮也绝不发请求。
-    if (!self.paths.count) {
-        RLPToast(RLPTr(@"队列是空的，先加几首歌再保存"));
+    if (self.saveInFlight) return;
+    if (![RLPCoreClient shared].started) {
+        RLPToast(RLPTr(@"核心未启动"));
         return;
     }
+    self.saveInFlight = YES;
     // sq/save = 存当前队列；sq/add 是新建空歌单（两者不能混）
     NSString *url = [NSString stringWithFormat:@"/api/sq/save?name=%@", RLPEnc(trimmed)];
+    const NSUInteger seqAtStart = self.seq;
     __weak __typeof__(self) weakSelf = self;
-    const NSInteger queueCount = (NSInteger)self.paths.count;
-    [[RLPCoreClient shared] postJSON:url body:nil completion:^(NSDictionary * _Nullable json) {
+    // P7 + 队列变化校验：向核心核实实时队列（不拿陈旧 self.paths 放行空队列、误拒已入队队列，也不回退旧计数）。
+    [[RLPCoreClient shared] getJSON:@"/api/queue?meta=1" completion:^(NSDictionary * _Nullable qjson) {
         __typeof__(self) self_ = weakSelf;
         if (!self_) return;
-        if (!json || ![json[@"ok"] boolValue]) {
-            RLPToast([json[@"error"] isKindOfClass:[NSString class]] ? json[@"error"] : RLPTr(@"保存失败"));
+        const BOOL qOk = [qjson isKindOfClass:[NSDictionary class]] &&
+                         (!qjson[@"ok"] || ([qjson[@"ok"] respondsToSelector:@selector(boolValue)] &&
+                                            [qjson[@"ok"] boolValue])) &&
+                         [qjson[@"items"] isKindOfClass:[NSArray class]];
+        if (!qOk) {
+            self_.saveInFlight = NO;
+            NSString *rawErr = ([qjson isKindOfClass:[NSDictionary class]] &&
+                                [qjson[@"error"] isKindOfClass:[NSString class]])
+                             ? (NSString *)qjson[@"error"] : nil;
+            NSString *trimmedErr = [rawErr stringByTrimmingCharactersInSet:
+                                    [NSCharacterSet whitespaceAndNewlineCharacterSet]];
+            RLPToast(trimmedErr.length ? rawErr : RLPTr(@"保存失败"));
             return;
         }
-        // P2：web ui_script.h:3930-3932 —— toast 带歌单名/首数，并通知侧栏重拉（行数 +1）。
-        NSString *saved = ([json[@"name"] isKindOfClass:[NSString class]] && [json[@"name"] length])
-                        ? json[@"name"] : trimmed;
-        const NSInteger count = [json[@"count"] respondsToSelector:@selector(integerValue)]
-                              ? [json[@"count"] integerValue] : queueCount;
-        RLPToast([NSString stringWithFormat:@"%@%@（%ld %@）",
-                  RLPTr(@"已存为歌单："), saved, (long)count, RLPTr(@"首")]);
-        [[NSNotificationCenter defaultCenter] postNotificationName:@"RLPSavedQueuesChangedNotification"
-                                                            object:nil];
+        NSMutableArray<NSString *> *liveItems = [NSMutableArray array];
+        for (id x in (NSArray *)qjson[@"items"]) {
+            if ([x isKindOfClass:[NSString class]] && [(NSString *)x length]) {
+                [liveItems addObject:x];
+            }
+        }
+        if (!liveItems.count) {
+            self_.saveInFlight = NO;
+            if (!self_.hasLoaded || ![liveItems isEqualToArray:self_.paths]) {
+                if (seqAtStart == self_.seq) {
+                    ++self_.seq;
+                    [self_ applyQueueSnapshot:qjson];
+                } else {
+                    [self_ reloadData];
+                }
+            }
+            RLPToast(RLPTr(@"队列是空的，先加几首歌再保存"));
+            return;
+        }
+        if (!self_.hasLoaded || ![liveItems isEqualToArray:self_.paths]) {
+            if (seqAtStart == self_.seq && [qjson[@"metas"] isKindOfClass:[NSArray class]]) {
+                ++self_.seq;
+                [self_ applyQueueSnapshot:qjson];
+            } else {
+                [self_ reloadData];
+            }
+        }
+        [[RLPCoreClient shared] postJSON:url body:nil completion:^(NSDictionary * _Nullable json) {
+            __typeof__(self) self2 = weakSelf;
+            if (!self2) return;
+            self2.saveInFlight = NO;
+            const BOOL okFlag = [json isKindOfClass:[NSDictionary class]] &&
+                                [json[@"ok"] respondsToSelector:@selector(boolValue)] &&
+                                [json[@"ok"] boolValue];
+            id countVal = [json isKindOfClass:[NSDictionary class]] ? json[@"count"] : nil;
+            NSInteger count = 0;
+            BOOL hasValidCount = NO;
+            if ([countVal isKindOfClass:[NSNumber class]] &&
+                CFGetTypeID((__bridge CFTypeRef)countVal) != CFBooleanGetTypeID()) {
+                const double d = [countVal doubleValue];
+                const long long ll = [countVal longLongValue];
+                if (isfinite(d) && d >= 1.0 && floor(d) == d && ll >= 1 && ll <= NSIntegerMax) {
+                    count = (NSInteger)ll;
+                    hasValidCount = YES;
+                }
+            }
+            if (!okFlag || !hasValidCount) {
+                NSString *rawErr = ([json isKindOfClass:[NSDictionary class]] &&
+                                    [json[@"error"] isKindOfClass:[NSString class]])
+                                 ? (NSString *)json[@"error"] : nil;
+                NSString *trimmedErr = [rawErr stringByTrimmingCharactersInSet:
+                                        [NSCharacterSet whitespaceAndNewlineCharacterSet]];
+                RLPToast(trimmedErr.length ? rawErr : RLPTr(@"保存失败"));
+                [self2 reloadData];
+                return;
+            }
+            if (count != (NSInteger)self2.paths.count) {
+                [self2 reloadData];
+            }
+            // P2：web ui_script.h:3930-3932 —— toast 带歌单名/首数，并通知侧栏重拉（行数 +1）。
+            NSString *rawSaved = [json[@"name"] isKindOfClass:[NSString class]] ? (NSString *)json[@"name"] : nil;
+            NSString *trimmedSaved = [rawSaved stringByTrimmingCharactersInSet:
+                                      [NSCharacterSet whitespaceAndNewlineCharacterSet]];
+            NSString *saved = trimmedSaved.length ? trimmedSaved : trimmed;
+            RLPToast([NSString stringWithFormat:@"%@%@（%ld %@）",
+                      RLPTr(@"已存为歌单："), saved, (long)count, RLPTr(@"首")]);
+            [[NSNotificationCenter defaultCenter] postNotificationName:@"RLPSavedQueuesChangedNotification"
+                                                                object:nil];
+        }];
     }];
 }
 
@@ -878,6 +954,43 @@ static NSString *RLPQueueMetaText(NSDictionary *m, NSString *k,
     if (!NSEqualRects(f, self.table.frame)) self.table.frame = f;
 }
 
+- (void)applyQueueSnapshot:(NSDictionary *)json {
+    NSArray *items = [json[@"items"] isKindOfClass:[NSArray class]] ? json[@"items"] : @[];
+    NSMutableArray<NSString *> *ps = [NSMutableArray array];
+    for (id x in items) if ([x isKindOfClass:[NSString class]] && [(NSString *)x length]) [ps addObject:x];
+    self.paths = ps;
+    if (self.hoveredRow >= (NSInteger)ps.count) self.hoveredRow = -1;
+    NSArray *ms = [json[@"metas"] isKindOfClass:[NSArray class]] ? json[@"metas"] : @[];
+    NSMutableArray<NSDictionary *> *mm = [NSMutableArray array];
+    for (id x in ms) [mm addObject:[x isKindOfClass:[NSDictionary class]] ? x : @{}];
+    self.metas = mm;
+    // web S.q.cues：排序与播放都靠它保住 CUE 分轨区间。
+    NSArray *cs = [json[@"cues"] isKindOfClass:[NSArray class]] ? json[@"cues"] : @[];
+    NSMutableArray<NSArray<NSNumber *> *> *cc = [NSMutableArray array];
+    for (id x in cs) {
+        if ([x isKindOfClass:[NSArray class]] && [(NSArray *)x count] >= 2) {
+            NSArray *pair = (NSArray *)x;
+            double a = [pair[0] respondsToSelector:@selector(doubleValue)] ? [pair[0] doubleValue] : -1;
+            double b = [pair[1] respondsToSelector:@selector(doubleValue)] ? [pair[1] doubleValue] : -1;
+            [cc addObject:@[ @(a), @(b) ]];
+        } else {
+            [cc addObject:@[ @(-1), @(-1) ]];
+        }
+    }
+    self.cues = cc;
+    self.currentIndex = [json[@"index"] respondsToSelector:@selector(integerValue)] ? [json[@"index"] integerValue] : -1;
+    self.mode = [json[@"mode"] respondsToSelector:@selector(integerValue)] ? [json[@"mode"] integerValue] : 0;
+    self.hasLoaded = YES;
+    [self.table reloadData];
+    self.empty.hidden = ps.count > 0;
+    self.saveButton.enabled = ps.count > 0;   // P7：空队列禁用「保存为歌单」
+    NSArray *names = @[ RLPTr(@"顺序"), RLPTr(@"列表循环"), RLPTr(@"单曲循环"), RLPTr(@"随机") ];
+    NSString *mn = names[MIN(MAX(self.mode, 0), 3)];
+    [self setSubtitle:[NSString stringWithFormat:RLPTr(@"%ld 首 · 当前第 %ld 首 · %@"),
+                       (long)ps.count, (long)(self.currentIndex + 1), mn]];
+    [self syncTableWidth];
+}
+
 - (void)reloadData {
     if (![RLPCoreClient shared].started) {
         [self setSubtitle:RLPTr(@"核心未启动")];
@@ -889,7 +1002,9 @@ static NSString *RLPQueueMetaText(NSDictionary *m, NSString *k,
     [[RLPCoreClient shared] getJSON:@"/api/queue?meta=1" completion:^(NSDictionary * _Nullable json) {
         __typeof__(self) self_ = weakSelf;
         if (!self_ || seq != self_.seq) return;
-        if (!json || ![json[@"ok"] boolValue]) {
+        if (![json isKindOfClass:[NSDictionary class]] ||
+            ![json[@"ok"] respondsToSelector:@selector(boolValue)] ||
+            ![json[@"ok"] boolValue]) {
             [self_ setSubtitle:RLPTr(@"读取失败")];
             return;
         }
@@ -898,42 +1013,13 @@ static NSString *RLPQueueMetaText(NSDictionary *m, NSString *k,
         [[RLPCoreClient shared] getJSON:@"/api/status" completion:^(NSDictionary * _Nullable st) {
             __typeof__(self) s3 = weakSelf;
             if (!s3 || seq != s3.seq) return;
-            s3.isPlayingNow = [st[@"playing"] boolValue] && ![st[@"paused"] boolValue];
+            s3.isPlayingNow = [st isKindOfClass:[NSDictionary class]] &&
+                              [st[@"playing"] respondsToSelector:@selector(boolValue)] &&
+                              [st[@"playing"] boolValue] &&
+                              !([st[@"paused"] respondsToSelector:@selector(boolValue)] &&
+                                [st[@"paused"] boolValue]);
         }];
-        NSArray *items = [json[@"items"] isKindOfClass:[NSArray class]] ? json[@"items"] : @[];
-        NSMutableArray<NSString *> *ps = [NSMutableArray array];
-        for (id x in items) if ([x isKindOfClass:[NSString class]]) [ps addObject:x];
-        self_.paths = ps;
-        if (self_.hoveredRow >= (NSInteger)ps.count) self_.hoveredRow = -1;
-        NSArray *ms = [json[@"metas"] isKindOfClass:[NSArray class]] ? json[@"metas"] : @[];
-        NSMutableArray<NSDictionary *> *mm = [NSMutableArray array];
-        for (id x in ms) [mm addObject:[x isKindOfClass:[NSDictionary class]] ? x : @{}];
-        self_.metas = mm;
-        // web S.q.cues：排序与播放都靠它保住 CUE 分轨区间。
-        NSArray *cs = [json[@"cues"] isKindOfClass:[NSArray class]] ? json[@"cues"] : @[];
-        NSMutableArray<NSArray<NSNumber *> *> *cc = [NSMutableArray array];
-        for (id x in cs) {
-            if ([x isKindOfClass:[NSArray class]] && [(NSArray *)x count] >= 2) {
-                NSArray *pair = (NSArray *)x;
-                double a = [pair[0] respondsToSelector:@selector(doubleValue)] ? [pair[0] doubleValue] : -1;
-                double b = [pair[1] respondsToSelector:@selector(doubleValue)] ? [pair[1] doubleValue] : -1;
-                [cc addObject:@[ @(a), @(b) ]];
-            } else {
-                [cc addObject:@[ @(-1), @(-1) ]];
-            }
-        }
-        self_.cues = cc;
-        self_.currentIndex = [json[@"index"] respondsToSelector:@selector(integerValue)] ? [json[@"index"] integerValue] : -1;
-        self_.mode = [json[@"mode"] respondsToSelector:@selector(integerValue)] ? [json[@"mode"] integerValue] : 0;
-        self_.hasLoaded = YES;
-        [self_.table reloadData];
-        self_.empty.hidden = ps.count > 0;
-        self_.saveButton.enabled = ps.count > 0;   // P7：空队列禁用「保存为歌单」
-        NSArray *names = @[ RLPTr(@"顺序"), RLPTr(@"列表循环"), RLPTr(@"单曲循环"), RLPTr(@"随机") ];
-        NSString *mn = names[MIN(MAX(self_.mode, 0), 3)];
-        [self_ setSubtitle:[NSString stringWithFormat:RLPTr(@"%ld 首 · 当前第 %ld 首 · %@"),
-                            (long)ps.count, (long)(self_.currentIndex + 1), mn]];
-        [self_ syncTableWidth];
+        [self_ applyQueueSnapshot:json];
     }];
 }
 

@@ -1862,6 +1862,11 @@ static NSString *RLPRailTagText(id srValue, id bitsValue) {
 @property (nonatomic, assign) BOOL anlAutoEnabled;         // 来自 settings.autoanl
 @property (nonatomic, assign) NSTimeInterval anlAutoSettingAt;  // 上次读 settings 的时刻（节流）
 @property (nonatomic, assign) NSUInteger anlSeq;           // 丢弃过期回调
+@property (nonatomic, assign) BOOL anlCancelInFlight;      // /api/anl/cancel 正在排空：未落地前绝不发新分析请求
+@property (nonatomic, assign) NSUInteger anlCancelSeq;     // 匹配最近一次在途 /api/anl/cancel 回调
+@property (nonatomic, copy, nullable) NSString *anlPendingPath; // 等待 cancel 落地后再发的新分析路径
+@property (nonatomic, assign) BOOL anlPendingForce;
+@property (nonatomic, assign) NSUInteger anlPendingSeq;
 @property (nonatomic, strong) NSLayoutConstraint *anlDetailHeight;
 /// 封面请求序号：快速切歌时用它丢弃过期回调（慢请求回来不能盖掉新封面）。
 @property (nonatomic, assign) NSUInteger coverSeq;
@@ -4013,11 +4018,19 @@ static NSString *RLPNowPlayingCastDeviceLabel(NSString *device) {
     [super viewDidDisappear];
     [self stopPolling];self.lyricSeq++;self.railSeq++;[self.railSummaryInflight removeAllObjects];[self.knowledgePopover close];
     // 离开单曲页：让服务器也停下在跑的分析（与 web 版离开页面时的 anlCancelServer 同语义）。
-    if (self.anlBusy) {
-        [[RLPCoreClient shared] postJSON:@"/api/anl/cancel" body:@""
-                              completion:^(NSDictionary * _Nullable r) { (void)r; }];
-        self.anlBusy = NO;
-        self.anlSeq++;                  // 在途回调作废
+    // 异步 cancel 完成前即使立刻切回，新请求也必须排队等 cancel 落地后再发出。
+    const BOOL wasBusy = self.anlBusy;
+    [self anlClearPendingAnalysis];
+    self.anlBusy = NO;
+    self.anlSeq++;                  // 在途回调作废
+    if (wasBusy) {
+        if (!(self.anlHealth.count > 0 && [self.currentPath isEqualToString:self.anlPath ?: @""])) {
+            self.anlAutoDonePath = nil;
+        }
+        if (!self.anlCancelInFlight) {
+            [self anlCancelServer];
+        }
+        if (self.isViewLoaded) [self anlPaint];
     }
 }
 
@@ -4107,7 +4120,8 @@ static NSString *RLPNowPlayingCastDeviceLabel(NSString *device) {
             [self_ loadMetaAndKnowledgeForPath:path];
             // U2 包3：切曲/首次进入取一次波形（GET /api/waveform?file=…&bins=512）。
             [self_ loadWaveformForPath:path];
-            // 切歌：清掉上一首的结果与层级。
+            // 切歌：清掉上一首的结果、待发队列与层级。
+            [self_ anlClearPendingAnalysis];
             self_.anlHealth = nil;
             self_.anlPath = nil;
             self_.anlError = nil;
@@ -4117,10 +4131,9 @@ static NSString *RLPNowPlayingCastDeviceLabel(NSString *device) {
             self_.anlAutoDonePath = nil;
             [self_ anlOpenLevel:RLPAnlLevelCollapsed];
             // 切歌要让**服务器**也停下上一首的分析（/api/anl/cancel，与 web 版 anlTick 同语义：
-            // 否则 CPU 继续烧在没人看的结果上）。
-            if (cancelPrevious) {
-                [[RLPCoreClient shared] postJSON:@"/api/anl/cancel" body:@""
-                                      completion:^(NSDictionary * _Nullable r) { (void)r; }];
+            // 否则 CPU 继续烧在没人看的结果上）；异步 cancel 完成前不发新分析，避免新请求撞上旧 cancel。
+            if (cancelPrevious && !self_.anlCancelInFlight) {
+                [self_ anlCancelServer];
             }
         }
         // 每轮都跑一次"该不该自动分析"的判定（与 web 版 anlTick 同口径）。
@@ -4208,6 +4221,7 @@ static NSString *RLPNowPlayingCastDeviceLabel(NSString *device) {
 /// 对齐 web 版 anlTick：每曲只自动跑一次；暂停/继续/拖动进度都不重新触发。
 - (void)anlAutoTickForPath:(NSString *)path playing:(BOOL)playing paused:(BOOL)paused {
     [self anlRefreshAutoSettingIfStale];
+    if (![(path ?: @"") isEqualToString:self.currentPath ?: @""]) return;
     const BOOL active = playing && !paused;
     if (RLPAnlShouldAutoAnalyze(path, active, self.anlAutoEnabled,
                                 self.anlAutoDonePath, self.anlBusy,
@@ -4681,45 +4695,101 @@ static NSString *RLPNowPlayingCastDeviceLabel(NSString *device) {
     [self layoutWebPlayback];
 }
 
-/// 真的取数。**只由切歌自动分析或用户点「重新分析」触发**，绝不进轮询。
-- (void)anlAnalyzePath:(NSString *)path force:(BOOL)force {
+- (void)anlClearPendingAnalysis {
+    self.anlPendingPath = nil;
+    self.anlPendingForce = NO;
+    self.anlPendingSeq = 0;
+}
+
+- (void)anlCancelServer {
+    self.anlCancelInFlight = YES;
+    const NSUInteger cancelSeq = ++self.anlCancelSeq;
+    __weak __typeof__(self) weakSelf = self;
+    [[RLPCoreClient shared] postJSON:@"/api/anl/cancel" body:@""
+                          completion:^(NSDictionary * _Nullable r) {
+        (void)r;
+        __typeof__(self) self_ = weakSelf;
+        if (!self_ || cancelSeq != self_.anlCancelSeq) return;
+        self_.anlCancelInFlight = NO;
+        [self_ anlStartPendingIfReady];
+    }];
+}
+
+- (void)anlStartPendingIfReady {
+    NSString *path = self.anlPendingPath;
+    const BOOL force = self.anlPendingForce;
+    const NSUInteger seq = self.anlPendingSeq;
+    [self anlClearPendingAnalysis];
+    if (self.anlCancelInFlight || !path.length) return;
+    if (seq != self.anlSeq || ![path isEqualToString:self.currentPath ?: @""]) return;
     if (!RLPAnlIsLocalPath(path)) return;
-    const NSUInteger seq = ++self.anlSeq;
-    self.anlBusy = YES;
-    self.anlError = nil;                 // 新一轮开始：清掉上一次的失败原因
-    self.anlCached = NO;
-    [self anlPaint];
+    [self anlDispatchHealthForPath:path force:force seq:seq];
+}
+
+- (void)anlDispatchHealthForPath:(NSString *)path force:(BOOL)force seq:(NSUInteger)seq {
+    if (!RLPAnlIsLocalPath(path) || ![path isEqualToString:self.currentPath ?: @""]) return;
+    NSString *targetPath = [path copy];
     // web 的右键「音质体检」用 /api/track/health，单曲页用 /api/health —— 后端是同一个
     // handler（rtaweb 的 aliasing），两个名字都真存在。这里按 web 的体检入口名走，
     // 让两端在日志/诊断里看到同一个路径。
-    NSString *url = [NSString stringWithFormat:@"/api/track/health?file=%@%@", RLPEnc(path), force ? @"&force=1" : @""];
+    NSString *url = [NSString stringWithFormat:@"/api/track/health?file=%@%@", RLPEnc(targetPath), force ? @"&force=1" : @""];
     __weak __typeof__(self) weakSelf = self;
     [[RLPCoreClient shared] getJSON:url completion:^(NSDictionary * _Nullable json) {
         __typeof__(self) self_ = weakSelf;
-        if (!self_ || seq != self_.anlSeq) return;    // 过期结果直接丢（切歌后不能盖掉新曲）
+        if (!self_ || seq != self_.anlSeq || ![targetPath isEqualToString:self_.currentPath ?: @""]) return;    // 过期/切歌结果直接丢
         self_.anlBusy = NO;
-        if (json && [json[@"ok"] boolValue]) {
+        NSDictionary *dict = [json isKindOfClass:[NSDictionary class]] ? json : nil;
+        const BOOL isCancelled = dict &&
+            (([dict[@"cancelled"] respondsToSelector:@selector(boolValue)] && [dict[@"cancelled"] boolValue]) ||
+             ([dict[@"code"] isKindOfClass:[NSString class]] && [dict[@"code"] isEqualToString:@"analysis.cancelled"]));
+        if (dict && !isCancelled && [dict[@"ok"] respondsToSelector:@selector(boolValue)] && [dict[@"ok"] boolValue]) {
             // ⚠️ 后端返回的是**外层**：{ok, usable, cached, ms, stats, health:{…}}
             // （tools/rtaweb.cpp 的 handle_health_analysis，缓存命中与实算两条路径都这样）。
             // 摘要函数要的是 health 里面的扁平字段，直接存外层会让 dr_db/quality 全部读不到 ⟹
             // 一首 DR 14.2、零削波的歌被显示成「素材过短 · 动态不适用 / 不适用 · 样本不足」。
             // 内层缺失（异常响应）时退回外层，至少不丢已有字段。
-            NSDictionary *inner = [json[@"health"] isKindOfClass:[NSDictionary class]] ? json[@"health"] : nil;
-            self_.anlHealth = inner ?: json;
-            self_.anlPath = path;
+            NSDictionary *inner = [dict[@"health"] isKindOfClass:[NSDictionary class]] ? dict[@"health"] : nil;
+            self_.anlHealth = inner ?: dict;
+            self_.anlPath = targetPath;
+            self_.anlError = nil;
             // 缓存命中标记只用于状态文案（不影响任何指标）
-            id cached = json[@"cached"];
+            id cached = dict[@"cached"];
             self_.anlCached = [cached isKindOfClass:[NSNumber class]] && [cached boolValue];
+        } else if (isCancelled) {
+            self_.anlHealth = nil;
+            self_.anlPath = nil;
+            self_.anlCached = NO;
+            self_.anlError = nil;
         } else {
             self_.anlHealth = nil;
+            self_.anlPath = nil;
             self_.anlCached = NO;
             // 如实报错，不要把失败显示成"未分析"让人以为还没跑
-            id err = json[@"error"];
+            id err = dict ? dict[@"error"] : nil;
             self_.anlError = [err isKindOfClass:[NSString class]] ? err : nil;
             if (!self_.anlError.length) self_.anlError = RLPTr(@"分析失败");
         }
         [self_ anlPaint];
     }];
+}
+
+/// 真的取数。**只由切歌自动分析或用户点「重新分析」触发**，绝不进轮询。
+- (void)anlAnalyzePath:(NSString *)path force:(BOOL)force {
+    if (!RLPAnlIsLocalPath(path) || ![path isEqualToString:self.currentPath ?: @""]) return;
+    NSString *targetPath = [path copy];
+    const NSUInteger seq = ++self.anlSeq;
+    self.anlBusy = YES;
+    self.anlError = nil;                 // 新一轮开始：清掉上一次的失败原因
+    self.anlCached = NO;
+    [self anlPaint];
+    if (self.anlCancelInFlight) {
+        self.anlPendingPath = targetPath;
+        self.anlPendingForce = force;
+        self.anlPendingSeq = seq;
+        return;
+    }
+    [self anlClearPendingAnalysis];
+    [self anlDispatchHealthForPath:targetPath force:force seq:seq];
 }
 
 - (void)onAnlReanalyze:(id)sender {

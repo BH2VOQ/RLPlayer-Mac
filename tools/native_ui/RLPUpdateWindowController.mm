@@ -35,7 +35,7 @@ struct RLPUpdatePlan {
 };
 #endif
 
-@interface RLPUpdateWindowController ()
+@interface RLPUpdateWindowController () <NSWindowDelegate>
 @property (nonatomic, strong) NSView *infoView;
 @property (nonatomic, strong) NSView *downloadView;
 @property (nonatomic, strong) NSTextField *titleField;
@@ -54,6 +54,8 @@ struct RLPUpdatePlan {
 @property (nonatomic) BOOL installing;
 @property (nonatomic) BOOL cancelling;
 @property (nonatomic) BOOL installed;
+@property (nonatomic) BOOL autoRestartScheduled;
+@property (nonatomic) NSUInteger installSeq;
 /// 检查阶段拿到的安装计划：下载/校验/安装全靠它（URL/sha256/size 都由清单给出，
 /// UI 不自己拼 URL——那是安全边界）。没有它就不允许点「立即更新」。
 @property (nonatomic) BOOL hasPlan;
@@ -89,6 +91,7 @@ struct RLPUpdatePlan {
     [win center];
     self = [super initWithWindow:win];
     if (!self) return nil;
+    win.delegate = self;
     [self buildUI];
     [[NSNotificationCenter defaultCenter] addObserver:self
                                              selector:@selector(applyLanguage)
@@ -98,6 +101,7 @@ struct RLPUpdatePlan {
 }
 
 - (void)dealloc {
+    if (self.isWindowLoaded) self.window.delegate = nil;
     [[NSNotificationCenter defaultCenter] removeObserver:self];
 }
 
@@ -107,10 +111,11 @@ struct RLPUpdatePlan {
     self.laterBtn.title = RLPTr(@"稍后");
     self.ignoreBtn.title = RLPTr(@"忽略此版本");
     self.cancelBtn.title = RLPTr(@"取消下载");
-    const BOOL relaunch = self.installed ||
-        [self.primaryBtn.title isEqualToString:@"重启"] ||
-        [self.primaryBtn.title isEqualToString:@"Relaunch"];
-    self.primaryBtn.title = relaunch ? RLPTr(@"重启") : RLPTr(@"立即更新");
+    if (self.installed) {
+        self.primaryBtn.title = self.autoRestartScheduled ? RLPTr(@"重启") : RLPTr(@"退出 RLPlayer");
+    } else {
+        self.primaryBtn.title = RLPTr(@"立即更新");
+    }
 }
 
 - (void)buildUI {
@@ -236,6 +241,8 @@ struct RLPUpdatePlan {
     if (!self.hasPlan || !self.planPtr) return NO;
     if (!self.remoteVersion.length) return NO;
     if (!self.planPtr->plan.available()) return NO;
+    if (!rta::update::update_download_url_allowed(self.planPtr->plan.downloadUrl)) return NO;
+    if (!rta::update::is_hex64(self.planPtr->plan.sha256)) return NO;
     if ([RLPUpdateWindowController isVersionIgnored:self.remoteVersion]) return NO;
     return YES;
 #else
@@ -259,6 +266,7 @@ struct RLPUpdatePlan {
     }
     if (self.installed) {
         if (manually) {
+            [self switchToInfoState];
             RLPToast(RLPTr(@"更新已安装"));
             [self showWindow:nil];
             [self.window makeKeyAndOrderFront:nil];
@@ -270,6 +278,7 @@ struct RLPUpdatePlan {
     self.titleField.stringValue = RLPTr(@"正在检查…");
     self.notesView.string = @"";
     self.checking = YES;
+    [self switchToInfoState];
     __weak __typeof__(self) weakSelf = self;
     rta::update::begin_check(
         ^(const rta::update::NativeProgress &p) {
@@ -403,6 +412,8 @@ struct RLPUpdatePlan {
     }
     self.installing = YES;
     self.cancelling = NO;
+    self.autoRestartScheduled = NO;
+    const NSUInteger seq = ++self.installSeq;
     rta::update::CancelToken token;
     self.planPtr->cancel = token;
     const rta::update::CheckResult plan = self.planPtr->plan;
@@ -418,7 +429,7 @@ struct RLPUpdatePlan {
             const double pct = p.percent;
             NSString *detail = [NSString stringWithUTF8String:p.detail.c_str()] ?: @"";
             dispatch_async(dispatch_get_main_queue(), ^{
-                if (!self_.installing || self_.cancelling) return;
+                if (!self_.installing || self_.cancelling || self_.installSeq != seq || token.cancelled()) return;
                 self_.progress.doubleValue = pct >= 0 ? pct : 0;
                 self_.progressText.stringValue = detail.length ? detail : RLPTr(@"正在安装…");
             });
@@ -426,28 +437,26 @@ struct RLPUpdatePlan {
         ^(bool ok, NSString *msg) {
             __typeof__(self) self_ = weakSelf;
             dispatch_async(dispatch_get_main_queue(), ^{
-                if (!self_) return;
-                const BOOL wasCancelled = self_.cancelling || token.cancelled() ||
-                                          (msg && [msg containsString:@"已取消"]);
+                if (!self_ || self_.installSeq != seq) return;
+                const BOOL wasCancelled = self_.cancelling || token.cancelled();
                 self_.installing = NO;
                 self_.cancelling = NO;
                 if (ok) {
+                    const BOOL autoRestartScheduled = (msg && [msg containsString:@"正在自动重启"]);
                     self_.installed = YES;
+                    self_.autoRestartScheduled = autoRestartScheduled;
                     [self_ invalidatePlan];
-                    self_.cancelBtn.hidden = YES;
-                    self_.cancelBtn.enabled = YES;
-                    self_.primaryBtn.title = RLPTr(@"重启");
-                    self_.primaryBtn.enabled = YES;
-                    self_.primaryBtn.target = self_;
-                    self_.primaryBtn.action = @selector(onRelaunch:);
-                    self_.progressText.stringValue = msg.length ? msg : RLPTr(@"更新已安装");
+                    NSString *statusMsg = msg.length ? msg : RLPTr(@"更新已安装");
+                    self_.titleField.stringValue = RLPTr(@"更新已安装");
+                    self_.notesView.string = statusMsg;
+                    [self_ switchToInfoState];
                 } else if (wasCancelled) {
                     // 取消只在后台终态后允许重试，且绝不把取消弹成失败窗。
-                    self_.progressText.stringValue = RLPTr(@"已取消下载");
+                    if (self_.planPtr) self_.planPtr->cancel = rta::update::CancelToken();
                     [self_ switchToInfoState];
                     RLPToast(RLPTr(@"已取消下载"));
                 } else {
-                    self_.progressText.stringValue = msg.length ? msg : RLPTr(@"更新失败");
+                    if (self_.planPtr) self_.planPtr->cancel = rta::update::CancelToken();
                     [self_ switchToInfoState];
                     RLPAlert(RLPTr(@"更新失败"), msg.length ? msg : RLPTr(@"请稍后重试，或用「手动下载」安装。"));
                 }
@@ -476,22 +485,41 @@ struct RLPUpdatePlan {
 - (void)switchToInfoState {
     self.infoView.hidden = NO;
     self.downloadView.hidden = YES;
+    self.progress.doubleValue = 0;
+    self.progressText.stringValue = @"";
     self.cancelBtn.hidden = YES;
     self.cancelBtn.enabled = YES;
     self.manualBtn.hidden = NO;
     self.ignoreBtn.hidden = NO;
     self.laterBtn.hidden = NO;
+    self.manualBtn.enabled = !self.installed;
     self.ignoreBtn.enabled = (self.remoteVersion.length > 0 && !self.checking && !self.installing && !self.cancelling && !self.installed);
     if (self.installed) {
-        self.primaryBtn.title = RLPTr(@"重启");
-        self.primaryBtn.target = self;
-        self.primaryBtn.action = @selector(onRelaunch:);
+        if (self.autoRestartScheduled) {
+            self.primaryBtn.title = RLPTr(@"重启");
+            self.primaryBtn.target = self;
+            self.primaryBtn.action = @selector(onRelaunch:);
+        } else {
+            self.primaryBtn.title = RLPTr(@"退出 RLPlayer");
+            self.primaryBtn.target = self;
+            self.primaryBtn.action = @selector(onQuit:);
+        }
         self.primaryBtn.enabled = YES;
     } else {
         self.primaryBtn.title = RLPTr(@"立即更新");
         self.primaryBtn.target = self;
         self.primaryBtn.action = @selector(onPrimary:);
         self.primaryBtn.enabled = [self canInstallPlan];
+    }
+}
+
+- (void)windowWillClose:(NSNotification *)notification {
+    (void)notification;
+    if (self.installing && !self.cancelling) {
+        [self onCancel:nil];
+    }
+    if (!self.installing && !self.cancelling) {
+        [self switchToInfoState];
     }
 }
 
@@ -538,7 +566,20 @@ struct RLPUpdatePlan {
 }
 
 - (void)onRelaunch:(id)sender {
+    (void)sender;
+    if (!self.installed) return;
+    if (!self.autoRestartScheduled) {
+        // 未能确认重启脚本已在等待时，绝不静默退出假装"重启成功"。
+        RLPAlert(RLPTr(@"更新已安装"), RLPTr(@"已更新，请手动重启应用以完成"));
+        [self switchToInfoState];
+        return;
+    }
     // 安装脚本已在等待本进程退出；这里正常退出即可（绝不 force-kill 自己）
+    [NSApp terminate:nil];
+}
+
+- (void)onQuit:(id)sender {
+    (void)sender;
     [NSApp terminate:nil];
 }
 
