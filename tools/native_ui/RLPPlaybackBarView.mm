@@ -854,12 +854,23 @@ static double RLPVolDbToPos(double db) {
 
 #pragma mark - 媒体键支持
 
+- (BOOL)ensurePlaybackReady {
+    // polling 只在核心 started 后才会置 YES；以其为唯一门控，避免把尚未轮询的
+    // 测试态/启动早期误判成“核心未就绪”而跳过必要的 inflight 释放。
+    if (!self.polling) {
+        RLPToast(RLPTr(@"音频核心尚未就绪"));
+        return NO;
+    }
+    return YES;
+}
+
 - (BOOL)isPlaying {
     RLPPlaybackStatus *st = self.lastStatus;
     return st != nil && st.playing && !st.paused;
 }
 
 - (void)seekToSeconds:(double)seconds {
+    if (![self ensurePlaybackReady]) return;
     RLPPlaybackStatus *st = self.lastStatus;
     // 没有时长就没有可跳的范围：直接返回，绝不猜一个比例发出去。
     if (!st || st.duration <= 0.0) return;
@@ -870,7 +881,8 @@ static double RLPVolDbToPos(double db) {
 
 /// 停止播放：释放设备（与暂停不同）。走 /api/stop，与 web 版底栏同一个端点。
 - (void)stopPlayback:(id)sender {
-    if (![RLPCoreClient shared].started) return;
+    (void)sender;
+    if (![self ensurePlaybackReady]) return;
     ++self.statusEpoch;
     __weak __typeof__(self) weakSelf = self;
     [[RLPCoreClient shared] postJSON:@"/api/stop" body:nil completion:^(NSDictionary * _Nullable json) {
@@ -1218,8 +1230,14 @@ static double RLPVolDbToPos(double db) {
 #pragma mark - 动作
 
 - (void)playPause {
-    if (!self.polling) return;
+    if (![self ensurePlaybackReady]) return;
     RLPPlaybackStatus *st = self.lastStatus;
+    if (!st) {
+        // 状态未知时没有完成通知：必须释放 inflight，否则轮询停摆；但不作废 epoch。
+        self.statusInflight = NO;
+        RLPToast(RLPTr(@"正在获取播放状态，请稍候"));
+        return;
+    }
     ++self.statusEpoch;
     self.statusInflight = NO; // The invalidated request can no longer clear this flag, even for a no-op.
     // 与 web playOrPause 同一条判定（播放中→暂停 / 暂停中→继续 / 已停止→重播）：
@@ -1228,22 +1246,27 @@ static double RLPVolDbToPos(double db) {
 }
 
 - (void)pausePlayback {
-    if (!self.polling) return;
+    if (![self ensurePlaybackReady]) return;
     ++self.statusEpoch;
     // 系统「暂停」是显式命令：不看 0.5s 轮询快照（后台 App Nap/丢请求时快照可能过期）。
     RLPPlaybackPauseExplicit();
 }
 
 - (void)resumeOrReplay {
-    if (!self.polling) return;
+    if (![self ensurePlaybackReady]) return;
     RLPPlaybackStatus *st = self.lastStatus;
+    if (!st) {
+        self.statusInflight = NO;
+        RLPToast(RLPTr(@"正在获取播放状态，请稍候"));
+        return;
+    }
     ++self.statusEpoch;
     self.statusInflight = NO; // The invalidated request can no longer clear this flag, even for a no-op.
     RLPPlaybackResumeOrReplay(st.playing, st.paused, st.currentPath);
 }
 
 - (void)nextTrack {
-    if (!self.polling) return;
+    if (![self ensurePlaybackReady]) return;
     ++self.statusEpoch;
     self.statusInflight = NO;
     const uint64_t actionEpoch = RLPBeginPlaybackAction();
@@ -1257,7 +1280,7 @@ static double RLPVolDbToPos(double db) {
 }
 
 - (void)previousTrack {
-    if (!self.polling) return;
+    if (![self ensurePlaybackReady]) return;
     ++self.statusEpoch;
     self.statusInflight = NO;
     const uint64_t actionEpoch = RLPBeginPlaybackAction();
@@ -1280,7 +1303,7 @@ static double RLPVolDbToPos(double db) {
 }
 
 - (void)commitSeek {
-    if (!self.polling) return;
+    if (![self ensurePlaybackReady]) return;
     double frac = self.progress.doubleValue;
     if (frac < 0) frac = 0;
     if (frac > 1) frac = 1;

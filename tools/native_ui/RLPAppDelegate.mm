@@ -235,6 +235,34 @@ static void STCheck(BOOL ok, const char *what, NSString *detail) {
 /// 接 MPRemoteCommandCenter：不加这一段，键盘上的播放/上一首/下一首在 app 不是前台时**完全无效**。
 /// 这是原生客户端的必备能力（web 版靠页面 JS 做不到）。
 /// 纪律：只注册命令并转发到播放条（幂等动作），不在这里自己维护播放状态。
+- (MPRemoteCommandHandlerStatus)runRemoteCommandRequiringDuration:(BOOL)needsDuration
+                                                            action:(void (^)(RLPPlaybackBarView *bar))action {
+    __weak __typeof__(self) weakSelf = self;
+    MPRemoteCommandHandlerStatus (^work)(void) = ^MPRemoteCommandHandlerStatus {
+        __typeof__(self) self_ = weakSelf;
+        if (!self_ || ![RLPCoreClient shared].started) {
+            return MPRemoteCommandHandlerStatusCommandFailed;
+        }
+        RLPPlaybackBarView *bar = self_.mainWC.playbackBar;
+        if (!bar || !bar.polling) {
+            return MPRemoteCommandHandlerStatusCommandFailed;
+        }
+        RLPPlaybackStatus *st = bar.lastStatus;
+        const BOOL hasTrack = (st != nil) && (st.playing || st.paused || st.currentPath.length > 0);
+        if (!hasTrack || (needsDuration && !(st.duration > 0.0))) {
+            return MPRemoteCommandHandlerStatusNoActionableNowPlayingItem;
+        }
+        if (action) action(bar);
+        return MPRemoteCommandHandlerStatusSuccess;
+    };
+    if ([NSThread isMainThread]) return work();
+    __block MPRemoteCommandHandlerStatus status = MPRemoteCommandHandlerStatusCommandFailed;
+    dispatch_sync(dispatch_get_main_queue(), ^{
+        status = work();
+    });
+    return status;
+}
+
 - (void)setupRemoteCommands {
     MPRemoteCommandCenter *cc = [MPRemoteCommandCenter sharedCommandCenter];
     __weak __typeof__(self) weakSelf = self;
@@ -247,8 +275,9 @@ static void STCheck(BOOL ok, const char *what, NSString *detail) {
         // play 语义：已在播→空转；暂停中→继续；已停止→重播当前曲目。
         // 不能沿用「!isPlaying 就 playPause」：停止态下 playPause 发的是 /api/pause?on=0，
         // 后端对停止态不起播 ⟹ 系统 play 键看起来完全没反应（用户在实机上报过同型）。
-        [self_.mainWC.playbackBar resumeOrReplay];
-        return MPRemoteCommandHandlerStatusSuccess;
+        return [self_ runRemoteCommandRequiringDuration:NO action:^(RLPPlaybackBarView *bar) {
+            [bar resumeOrReplay];
+        }];
     }];
 
     [cc.pauseCommand setEnabled:YES];
@@ -257,8 +286,9 @@ static void STCheck(BOOL ok, const char *what, NSString *detail) {
         __typeof__(self) self_ = weakSelf;
         if (!self_) return MPRemoteCommandHandlerStatusCommandFailed;
         // 系统「暂停」必须真的发出 on=1：不能依赖 isPlaying 快照，否则快照过期时静默丢命令。
-        [self_.mainWC.playbackBar pausePlayback];
-        return MPRemoteCommandHandlerStatusSuccess;
+        return [self_ runRemoteCommandRequiringDuration:NO action:^(RLPPlaybackBarView *bar) {
+            [bar pausePlayback];
+        }];
     }];
 
     [cc.togglePlayPauseCommand setEnabled:YES];
@@ -266,8 +296,9 @@ static void STCheck(BOOL ok, const char *what, NSString *detail) {
         (void)e;
         __typeof__(self) self_ = weakSelf;
         if (!self_) return MPRemoteCommandHandlerStatusCommandFailed;
-        [self_.mainWC.playbackBar playPause];
-        return MPRemoteCommandHandlerStatusSuccess;
+        return [self_ runRemoteCommandRequiringDuration:NO action:^(RLPPlaybackBarView *bar) {
+            [bar playPause];
+        }];
     }];
 
     [cc.nextTrackCommand setEnabled:YES];
@@ -275,8 +306,9 @@ static void STCheck(BOOL ok, const char *what, NSString *detail) {
         (void)e;
         __typeof__(self) self_ = weakSelf;
         if (!self_) return MPRemoteCommandHandlerStatusCommandFailed;
-        [self_.mainWC.playbackBar nextTrack];
-        return MPRemoteCommandHandlerStatusSuccess;
+        return [self_ runRemoteCommandRequiringDuration:NO action:^(RLPPlaybackBarView *bar) {
+            [bar nextTrack];
+        }];
     }];
 
     [cc.previousTrackCommand setEnabled:YES];
@@ -284,8 +316,9 @@ static void STCheck(BOOL ok, const char *what, NSString *detail) {
         (void)e;
         __typeof__(self) self_ = weakSelf;
         if (!self_) return MPRemoteCommandHandlerStatusCommandFailed;
-        [self_.mainWC.playbackBar previousTrack];
-        return MPRemoteCommandHandlerStatusSuccess;
+        return [self_ runRemoteCommandRequiringDuration:NO action:^(RLPPlaybackBarView *bar) {
+            [bar previousTrack];
+        }];
     }];
 
     // 进度拖动（耳机线控/锁屏拖拽）
@@ -293,13 +326,14 @@ static void STCheck(BOOL ok, const char *what, NSString *detail) {
     [cc.changePlaybackPositionCommand addTargetWithHandler:^MPRemoteCommandHandlerStatus(MPRemoteCommandEvent *ev) {
         __typeof__(self) self_ = weakSelf;
         if (!self_) return MPRemoteCommandHandlerStatusCommandFailed;
-        MPRemoteCommand *cmd = (MPRemoteCommand *)nil;
-        (void)cmd;
         if (![ev isKindOfClass:[MPChangePlaybackPositionCommandEvent class]])
             return MPRemoteCommandHandlerStatusCommandFailed;
         MPChangePlaybackPositionCommandEvent *pe = (MPChangePlaybackPositionCommandEvent *)ev;
-        [self_.mainWC.playbackBar seekToSeconds:pe.positionTime];
-        return MPRemoteCommandHandlerStatusSuccess;
+        const double positionTime = pe.positionTime;
+        if (!isfinite(positionTime)) return MPRemoteCommandHandlerStatusCommandFailed;
+        return [self_ runRemoteCommandRequiringDuration:YES action:^(RLPPlaybackBarView *bar) {
+            [bar seekToSeconds:positionTime];
+        }];
     }];
 }
 

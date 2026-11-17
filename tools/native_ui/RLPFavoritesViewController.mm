@@ -25,6 +25,8 @@ static const CGFloat kFavTitleMinW = 120.0;
 @property (nonatomic, strong) NSTextField *hintLabel;    // web .favhint：双击顺序播放整个最爱列表
 @property (nonatomic, strong) NSTextField *emptyLabel;   // web 空态：还没有收藏 + 怎么做
 @property (nonatomic, assign) BOOL hasLoaded;
+@property (nonatomic, assign) NSUInteger loadSeq;
+@property (nonatomic, assign) NSUInteger actionEpoch;
 @end
 
 @implementation RLPFavoritesViewController
@@ -62,8 +64,9 @@ static const CGFloat kFavTitleMinW = 120.0;
         __weak __typeof__(self) ws = self;
         ((RLPTrackActionTableView *)_tableView).pathForRow = ^NSString *(NSInteger row) {
             __typeof__(self) s = ws;
-            NSArray<RLPTrack *> *ts = self.tracks;
-            if (!s || row < 0 || row >= (NSInteger)ts.count) return nil;
+            if (!s) return nil;
+            NSArray<RLPTrack *> *ts = s.tracks;
+            if (row < 0 || row >= (NSInteger)ts.count) return nil;
             return ts[(NSUInteger)row].path;
         };
     }
@@ -158,7 +161,17 @@ static const CGFloat kFavTitleMinW = 120.0;
     title.width = MAX(kFavTitleMinW, rest);
 }
 
+- (void)deactivate {
+    ++self.actionEpoch;
+}
+
+- (void)viewWillDisappear {
+    [super viewWillDisappear];
+    [self deactivate];
+}
+
 - (void)reloadData {
+    const NSUInteger seq = ++self.loadSeq;
     if (![RLPCoreClient shared].started) {
         [self.tracks removeAllObjects];
         [self setSubtitle:RLPTr(@"核心未启动")];
@@ -169,12 +182,13 @@ static const CGFloat kFavTitleMinW = 120.0;
     __weak __typeof__(self) weakSelf = self;
     [[RLPCoreClient shared] getJSON:@"/api/fav/list?meta=1" completion:^(NSDictionary * _Nullable json) {
         __typeof__(self) self_ = weakSelf;
-        if (!self_ || !json || ![json[@"ok"] boolValue]) {
+        if (!self_ || seq != self_.loadSeq) return;
+        if (!json || ![json[@"ok"] boolValue]) {
             [self_ setSubtitle:RLPTr(@"加载失败")];
             return;
         }
         
-        NSArray *files = json[@"files"];
+        NSArray *files = [json[@"files"] isKindOfClass:[NSArray class]] ? json[@"files"] : @[];
         NSMutableArray *tracks = [NSMutableArray array];
         for (id item in files) {
             RLPTrack *t = [RLPTrack trackFromJSON:item];
@@ -206,12 +220,52 @@ static const CGFloat kFavTitleMinW = 120.0;
 /// 整列起播（双击的真实落点；判据直接调这里，不依赖鼠标事件）。
 - (void)playRowAtIndex:(NSInteger)row {
     if (row < 0 || row >= (NSInteger)_tracks.count) return;
+    RLPTrack *clicked = _tracks[(NSUInteger)row];
+    if (!clicked.path.length) {
+        RLPToast(RLPTr(@"未指定音频文件路径"));
+        return;
+    }
     // 与 web 我的最爱页同语义：双击不是只播这一首，而是把整个收藏列表建成队列、
     // 从被点那首开始顺序播放（/api/queue/set → playPath）。单曲循环模式会被切回列表循环。
     NSMutableArray<NSString *> *paths = [NSMutableArray array];
-    for (RLPTrack *t in _tracks) if (t.path.length) [paths addObject:t.path];
-    // start 要用"在过滤后列表里的位置"；_tracks 全有 path 时与 row 一致。
-    RLPPlayWholeListFrom(paths, row);
+    NSInteger cleanIndex = -1;
+    for (NSInteger i = 0; i < (NSInteger)_tracks.count; ++i) {
+        RLPTrack *t = _tracks[(NSUInteger)i];
+        if (!t.path.length) continue;
+        if (i == row) cleanIndex = (NSInteger)paths.count;
+        [paths addObject:t.path];
+    }
+    if (cleanIndex < 0 || cleanIndex >= (NSInteger)paths.count) {
+        RLPToast(RLPTr(@"未指定音频文件路径"));
+        return;
+    }
+
+    const NSUInteger pageEpoch = ++self.actionEpoch;
+    const uint64_t playbackEpoch = RLPBeginPlaybackAction();
+    NSArray<NSString *> *snapshotPaths = [paths copy];
+    NSString *targetPath = snapshotPaths[(NSUInteger)cleanIndex];
+    __weak __typeof__(self) weakSelf = self;
+    BOOL (^shouldContinue)(void) = ^BOOL {
+        __typeof__(self) self_ = weakSelf;
+        return self_ && pageEpoch == self_.actionEpoch && playbackEpoch == RLPPlaybackActionEpoch();
+    };
+    RLPEnsureSequentialModeWhile(shouldContinue, ^{
+        if (!shouldContinue()) return;
+        NSString *body = [NSString stringWithFormat:@"files=%@",
+                          RLPEnc([snapshotPaths componentsJoinedByString:@"\n"])];
+        [[RLPCoreClient shared] postJSON:@"/api/queue/set" body:body
+                              completion:^(NSDictionary * _Nullable j) {
+            if (!shouldContinue()) return;
+            if (!j || [j[@"ok"] boolValue] == NO) {
+                NSString *rawErr = [j[@"error"] isKindOfClass:[NSString class]] ? (NSString *)j[@"error"] : nil;
+                NSString *err = rawErr.length ? rawErr : RLPTr(@"建立队列失败");
+                if ([NSThread isMainThread]) RLPToast(err);
+                else dispatch_async(dispatch_get_main_queue(), ^{ RLPToast(err); });
+                return;
+            }
+            RLPPlayPath(targetPath);
+        }];
+    });
 }
 
 #pragma mark - NSTableView

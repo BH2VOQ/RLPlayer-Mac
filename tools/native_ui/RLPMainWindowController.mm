@@ -144,6 +144,79 @@ static NSString *RLPPageIdentifier(NSString *key) {
     return m[key];
 }
 
+static NSString * const kRLPMainWindowAutosaveName = @"RLPNativeMainWindow.v2";
+static NSString * const kRLPMainWindowFrameDefaultsKey = @"NSWindow Frame RLPNativeMainWindow.v2";
+
+static BOOL RLPRectsAlmostEqual(NSRect a, NSRect b) {
+    const CGFloat eps = 1e-3;
+    return fabs((double)a.origin.x - (double)b.origin.x) <= eps &&
+           fabs((double)a.origin.y - (double)b.origin.y) <= eps &&
+           fabs((double)a.size.width - (double)b.size.width) <= eps &&
+           fabs((double)a.size.height - (double)b.size.height) <= eps;
+}
+
+static BOOL RLPParseSavedWindowFrameRect(NSString *saved, NSRect *outRect) {
+    if (!saved.length || !outRect) return NO;
+    NSScanner *sc = [NSScanner scannerWithString:saved];
+    double x = 0, y = 0, w = 0, h = 0;
+    if (![sc scanDouble:&x] || ![sc scanDouble:&y] ||
+        ![sc scanDouble:&w] || ![sc scanDouble:&h]) {
+        return NO;
+    }
+    if (!isfinite(x) || !isfinite(y) || !isfinite(w) || !isfinite(h)) return NO;
+    *outRect = NSMakeRect((CGFloat)x, (CGFloat)y, (CGFloat)w, (CGFloat)h);
+    return YES;
+}
+
+static NSScreen *RLPTargetScreenForWindow(NSWindow *win) {
+    if (win.screen) return win.screen;
+    const NSRect frame = win.frame;
+    NSScreen *bestScreen = nil;
+    CGFloat bestArea = 0.0;
+    for (NSScreen *s in NSScreen.screens) {
+        const NSRect hit = NSIntersectionRect(frame, s.frame);
+        const CGFloat area = NSIsEmptyRect(hit) ? 0.0 : (hit.size.width * hit.size.height);
+        if (area > bestArea) {
+            bestArea = area;
+            bestScreen = s;
+        }
+    }
+    return bestScreen ?: NSScreen.mainScreen ?: NSScreen.screens.firstObject;
+}
+
+static void RLPClampWindowToVisibleAndSaveAutosave(NSWindow *win,
+                                                   BOOL display,
+                                                   NSString *previousSavedFrame) {
+    if (!win) return;
+    if ((win.styleMask & NSWindowStyleMaskFullScreen) != 0) return;
+    NSScreen *screen = RLPTargetScreenForWindow(win);
+    if (!screen) return;
+
+    const NSRect visible = screen.visibleFrame;
+    const NSRect current = win.frame;
+    const NSRect clamped = RLPClampWindowFrameToVisible(current, visible, win.minSize);
+    const BOOL changed = !RLPRectsAlmostEqual(clamped, current);
+    if (changed) {
+        [win setFrame:clamped display:display];
+    }
+
+    NSString *autosaveName = win.frameAutosaveName;
+    if (!autosaveName.length) return;
+
+    BOOL savedWasOutOfVisible = NO;
+    NSRect savedRect = NSZeroRect;
+    if (RLPParseSavedWindowFrameRect(previousSavedFrame, &savedRect)) {
+        const NSRect clampedSaved = RLPClampWindowFrameToVisible(savedRect, visible, win.minSize);
+        savedWasOutOfVisible = !RLPRectsAlmostEqual(clampedSaved, savedRect);
+    } else if (previousSavedFrame.length) {
+        savedWasOutOfVisible = YES;
+    }
+
+    if (changed || savedWasOutOfVisible) {
+        [win saveFrameUsingName:autosaveName];
+    }
+}
+
 @implementation RLPMainWindowController
 
 - (instancetype)init {
@@ -164,16 +237,14 @@ static NSString *RLPPageIdentifier(NSString *key) {
     // autosave 键**换名**：旧键 RLPNativeMainWindow 里存着开发期离屏审计写坏的宽度
     // （1257/1361…），沿用旧键会让用户一直看到错尺寸。换键即丢弃那批脏记录，
     // 同时保留"用户之后自己调整的大小仍被记住"这一正常行为。
-    [win setFrameAutosaveName:@"RLPNativeMainWindow.v2"];
-    if (![[NSUserDefaults standardUserDefaults] stringForKey:@"NSWindow Frame RLPNativeMainWindow.v2"])
+    NSString *previousSavedFrame = [[NSUserDefaults standardUserDefaults] stringForKey:kRLPMainWindowFrameDefaultsKey];
+    [win setFrameAutosaveName:kRLPMainWindowAutosaveName];
+    if (!previousSavedFrame.length)
         [win setFrame:NSMakeRect(0, 0, 1180, 760) display:NO];
     [win center];
     // 换屏/外接显示器/历史拖拽会把 autosave frame 存成超出当前屏幕的尺寸，
-    // 恢复后内容会被屏幕边缘裁掉。启动时统一收敛到可见区。
-    if (NSScreen *screen = win.screen ?: NSScreen.mainScreen) {
-        [win setFrame:RLPClampWindowFrameToVisible(win.frame, screen.visibleFrame, win.minSize)
-               display:NO];
-    }
+    // 恢复后内容会被屏幕边缘裁掉。启动时统一收敛到可见区并写回 autosave 清掉脏记录。
+    RLPClampWindowToVisibleAndSaveAutosave(win, NO, previousSavedFrame);
 
     self = [super initWithWindow:win];
     if (!self) return nil;
@@ -393,6 +464,8 @@ static NSString *RLPPageIdentifier(NSString *key) {
                                                  name:@"RLPSwitchToProWorkbenchNotification" object:nil];
     [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(onFocusSearch:)
                                                  name:@"RLPFocusSearchNotification" object:nil];
+    [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(onScreenParametersChanged:)
+                                                 name:NSApplicationDidChangeScreenParametersNotification object:nil];
 
     [_sidebar selectRow:0];
     [self showContentForRow:0];
@@ -1278,6 +1351,22 @@ static NSString *RLPPageIdentifier(NSString *key) {
     [self.rightDrawer deactivate];
     [self.npPage stopPolling];
     [self stopScanPolling];
+}
+
+- (void)onScreenParametersChanged:(NSNotification *)note {
+    (void)note;
+    if ([NSThread isMainThread]) {
+        NSWindow *win = self.window;
+        RLPClampWindowToVisibleAndSaveAutosave(win, win.isVisible, nil);
+    } else {
+        __weak __typeof__(self) weakSelf = self;
+        dispatch_async(dispatch_get_main_queue(), ^{
+            __typeof__(self) self_ = weakSelf;
+            if (!self_) return;
+            NSWindow *win = self_.window;
+            RLPClampWindowToVisibleAndSaveAutosave(win, win.isVisible, nil);
+        });
+    }
 }
 
 @end

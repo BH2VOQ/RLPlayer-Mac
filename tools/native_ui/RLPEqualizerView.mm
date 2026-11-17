@@ -252,6 +252,11 @@
 @property (nonatomic, strong) NSMutableArray<NSMutableDictionary *> *bands;
 @property (nonatomic, strong) NSTimer *applyTimer;
 @property (nonatomic, assign) BOOL loading;
+@property (nonatomic, assign) NSUInteger peqDraftEpoch;
+@property (nonatomic, assign) NSUInteger peqSyncedDraftEpoch;
+@property (nonatomic, assign) NSUInteger peqReqSeq;
+@property (nonatomic, assign) NSUInteger peqWriteInFlight;
+@property (nonatomic, readonly) BOOL hasPendingDraft;
 /// 拖动热路径的轻量刷新次数（判据 E17 用：证明拖动没走 reloadData 重建 cell）。
 @property (nonatomic, readonly) NSInteger rowValueRefreshes;
 - (void)applyOpraQuery:(NSString *)qq;
@@ -385,12 +390,28 @@
 }
 
 - (void)dealloc {
+    [_applyTimer invalidate];
+    _applyTimer = nil;
+    [_opraSearchTimer invalidate];
+    _opraSearchTimer = nil;
     [[NSNotificationCenter defaultCenter] removeObserver:self];
+}
+
+- (BOOL)hasActiveApplyTimer {
+    return self.applyTimer != nil && self.applyTimer.isValid;
+}
+
+- (BOOL)hasPendingDraft {
+    return [self hasActiveApplyTimer]
+        || self.peqWriteInFlight > 0
+        || (self.peqDraftEpoch != self.peqSyncedDraftEpoch)
+        || RLPTextFieldIsEditing(self.preamp);
 }
 
 - (void)onExternalEqSettingsChanged:(NSNotification *)note {
     if (note.object == self) return;
     if (![RLPCoreClient shared].started) return;
+    if ([self hasPendingDraft]) return;
     [self reload];
 }
 
@@ -462,6 +483,7 @@
     self.fader.onBandGainEdited = ^(NSInteger idx, double db) {
         __typeof__(self) s = weakFader;
         if (!s || idx < 0 || idx >= (NSInteger)s.bands.count) return;
+        if (!s.loading) ++s.peqDraftEpoch;
         s.bands[(NSUInteger)idx][@"g"] = @(db);
         NSMutableArray<NSNumber *> *gains = [s.fader.bandGains mutableCopy]
                                           ?: [NSMutableArray arrayWithCapacity:s.bands.count];
@@ -490,18 +512,21 @@
     self.inspector.onQChanged = ^(NSInteger idx, double q) {
         __typeof__(self) s = weakInsp;
         if (!s || idx < 0 || idx >= (NSInteger)s.bands.count) return;
+        if (!s.loading) ++s.peqDraftEpoch;
         s.bands[(NSUInteger)idx][@"q"] = @(q);
         [s scheduleApply];
     };
     self.inspector.onTypeChanged = ^(NSInteger idx, NSString *code) {
         __typeof__(self) s = weakInsp;
         if (!s || idx < 0 || idx >= (NSInteger)s.bands.count) return;
+        if (!s.loading) ++s.peqDraftEpoch;
         s.bands[(NSUInteger)idx][@"type"] = RLPEQTypeCodeNormalized(code);
         [s scheduleApply];
     };
     self.inspector.onEnabledChanged = ^(NSInteger idx, BOOL on) {
         __typeof__(self) s = weakInsp;
         if (!s || idx < 0 || idx >= (NSInteger)s.bands.count) return;
+        if (!s.loading) ++s.peqDraftEpoch;
         s.bands[(NSUInteger)idx][@"on"] = @(on);
         [s scheduleApply];
     };
@@ -583,6 +608,7 @@
         }
     }
     const double pre = -MAX(0.0, ceil(maxGain));
+    if (!self.loading) ++self.peqDraftEpoch;
     self.preamp.stringValue = [NSString stringWithFormat:@"%.1f", pre];
     [self scheduleApply];
     self.status.stringValue = [NSString stringWithFormat:@"%@%.1f dB → %@ %.1f dB",
@@ -593,16 +619,27 @@
 - (void)onResetFlat:(id)sender {
     (void)sender;
     if (![RLPCoreClient shared].started) return;
+    [self.applyTimer invalidate];
+    self.applyTimer = nil;
+    const NSUInteger reqSeq = ++self.peqReqSeq;
+    const NSUInteger sentDraftEpoch = self.peqDraftEpoch;
+    self.peqWriteInFlight += 1;
     __weak __typeof__(self) weakSelf = self;
     [[RLPCoreClient shared] postJSON:@"/api/peq/preset" body:@"action=reset&name="
                           completion:^(NSDictionary * _Nullable json) {
         __typeof__(self) self_ = weakSelf;
         if (!self_) return;
+        if (self_.peqWriteInFlight > 0) self_.peqWriteInFlight -= 1;
+        const BOOL isLatest = (reqSeq == self_.peqReqSeq &&
+                               sentDraftEpoch == self_.peqDraftEpoch &&
+                               ![self_ hasActiveApplyTimer]);
+        if (!isLatest) return;
         if (!json || ![json[@"ok"] boolValue]) {
             NSString *err = [json[@"error"] isKindOfClass:[NSString class]] ? json[@"error"] : RLPTr(@"未知错误");
             RLPToast([RLPTr(@"失败：") stringByAppendingString:err]);
             return;
         }
+        self_.peqSyncedDraftEpoch = sentDraftEpoch;
         [self_ absorbState:json];
         RLPToast(RLPTr(@"已重置为 Flat"));
         [[NSNotificationCenter defaultCenter] postNotificationName:RLPSettingsChangedNotification object:self_];
@@ -923,6 +960,7 @@ static NSString *RLPEQTypeCodeNormalized(id raw) {
     if (row < 0 || row >= (NSInteger)self.bands.count) return;
     // identifier 形如 "gField" / "qField"
     NSString *key = [sender.identifier substringToIndex:1];
+    if (!self.loading) ++self.peqDraftEpoch;
     self.bands[row][key] = @(sender.doubleValue);
     [self scheduleApply];
 }
@@ -930,17 +968,28 @@ static NSString *RLPEQTypeCodeNormalized(id raw) {
 - (void)onBandType:(NSPopUpButton *)sender {
     const NSInteger row = sender.tag;
     if (row < 0 || row >= (NSInteger)self.bands.count) return;
+    if (!self.loading) ++self.peqDraftEpoch;
     self.bands[row][@"type"] = RLPEQTypeCodeFromTitle(sender.titleOfSelectedItem);
     [self scheduleApply];
 }
 
-- (void)onBypass:(id)sender { [self scheduleApply]; }
-- (void)onPreampEnter:(id)sender { [self scheduleApply]; }
+- (void)onBypass:(id)sender {
+    (void)sender;
+    if (!self.loading) ++self.peqDraftEpoch;
+    [self scheduleApply];
+}
+
+- (void)onPreampEnter:(id)sender {
+    (void)sender;
+    if (!self.loading) ++self.peqDraftEpoch;
+    [self scheduleApply];
+}
 
 /// 260ms 节流：每敲一个字符就 POST 会把正在播的歌反复重启（web 版明确记过）。
 - (void)scheduleApply {
     if (self.loading) return;
     [self.applyTimer invalidate];
+    self.applyTimer = nil;
     __weak __typeof__(self) weakSelf = self;
     self.applyTimer = [NSTimer scheduledTimerWithTimeInterval:0.26 repeats:NO block:^(NSTimer *tm) {
         (void)tm;
@@ -967,7 +1016,12 @@ static NSString *RLPEQTypeCodeNormalized(id raw) {
 }
 
 - (void)applyNow {
+    [self.applyTimer invalidate];
+    self.applyTimer = nil;
     if (![RLPCoreClient shared].started || !self.bands.count) return;
+    const NSUInteger reqSeq = ++self.peqReqSeq;
+    const NSUInteger sentDraftEpoch = self.peqDraftEpoch;
+    self.peqWriteInFlight += 1;
     NSString *body = [NSString stringWithFormat:@"bypass=%d&preamp=%.3f&bands=%@",
                       (self.bypass.state == NSControlStateValueOn ? 1 : 0),
                       self.preamp.doubleValue, RLPEnc([self bandsParam])];
@@ -976,11 +1030,17 @@ static NSString *RLPEQTypeCodeNormalized(id raw) {
     [[RLPCoreClient shared] postJSON:@"/api/peq" body:body completion:^(NSDictionary * _Nullable json) {
         __typeof__(self) self_ = weakSelf;
         if (!self_) return;
+        if (self_.peqWriteInFlight > 0) self_.peqWriteInFlight -= 1;
+        const BOOL isLatest = (reqSeq == self_.peqReqSeq &&
+                               sentDraftEpoch == self_.peqDraftEpoch &&
+                               ![self_ hasActiveApplyTimer]);
+        if (!isLatest) return;
         if (!json || ![json[@"ok"] boolValue]) {
             NSString *err = [json[@"error"] isKindOfClass:[NSString class]] ? json[@"error"] : RLPTr(@"未知错误");
             self_.status.stringValue = [RLPTr(@"失败：") stringByAppendingString:err];
             return;
         }
+        self_.peqSyncedDraftEpoch = sentDraftEpoch;
         // 关键：用**后端返回的状态**刷新（含新曲线），不用本地猜测值
         [self_ absorbState:json];
         [[NSNotificationCenter defaultCenter] postNotificationName:RLPSettingsChangedNotification object:self_];
@@ -1051,16 +1111,32 @@ static NSString *RLPEQTypeCodeNormalized(id raw) {
         RLPToast(RLPTr(@"请先填写或选择预设名"));
         return;
     }
+    if ([action isEqualToString:@"load"] || [action isEqualToString:@"delete"]) {
+        [self.applyTimer invalidate];
+        self.applyTimer = nil;
+    }
+    const NSUInteger reqSeq = ++self.peqReqSeq;
+    const NSUInteger sentDraftEpoch = self.peqDraftEpoch;
+    self.peqWriteInFlight += 1;
     NSString *body = [NSString stringWithFormat:@"action=%@&name=%@", RLPEnc(action), RLPEnc(name)];
     __weak __typeof__(self) weakSelf = self;
     [[RLPCoreClient shared] postJSON:@"/api/peq/preset" body:body completion:^(NSDictionary * _Nullable json) {
         __typeof__(self) self_ = weakSelf;
         if (!self_) return;
+        if (self_.peqWriteInFlight > 0) self_.peqWriteInFlight -= 1;
+        const BOOL isLatest = (reqSeq == self_.peqReqSeq &&
+                               sentDraftEpoch == self_.peqDraftEpoch &&
+                               ![self_ hasActiveApplyTimer]);
+        if (!isLatest) {
+            if (json && [json[@"ok"] boolValue]) [self_ loadPresetList];
+            return;
+        }
         if (!json || ![json[@"ok"] boolValue]) {
             NSString *err = [json[@"error"] isKindOfClass:[NSString class]] ? json[@"error"] : RLPTr(@"未知错误");
             RLPToast([RLPTr(@"预设操作失败：") stringByAppendingString:err]);
             return;
         }
+        self_.peqSyncedDraftEpoch = sentDraftEpoch;
         [self_ absorbState:json];
         [self_ loadPresetList];
         if ([action isEqualToString:@"load"]) RLPToast(RLPTr(@"已加载预设"));
@@ -1304,6 +1380,11 @@ static NSArray<NSDictionary *> *RLPOpraFilter(NSArray<NSDictionary *> *index, NS
         RLPToast(RLPTr(@"请先选择耳机与曲线"));
         return;
     }
+    [self.applyTimer invalidate];
+    self.applyTimer = nil;
+    const NSUInteger reqSeq = ++self.peqReqSeq;
+    const NSUInteger sentDraftEpoch = self.peqDraftEpoch;
+    self.peqWriteInFlight += 1;
     // 与 web applyOpraPreset 的请求体逐字段一致：productId=…&presetId=…（两者都做 encodeURIComponent）。
     NSString *body = [NSString stringWithFormat:@"productId=%@&presetId=%@", RLPEnc(pid), RLPEnc(eid)];
     self.opraStatus.stringValue = RLPTr(@"应用中…");
@@ -1311,7 +1392,12 @@ static NSArray<NSDictionary *> *RLPOpraFilter(NSArray<NSDictionary *> *index, NS
     [[RLPCoreClient shared] postJSON:@"/api/opra/apply" body:body completion:^(NSDictionary * _Nullable json) {
         __typeof__(self) self_ = weakSelf;
         if (!self_) return;
+        if (self_.peqWriteInFlight > 0) self_.peqWriteInFlight -= 1;
+        const BOOL isLatest = (reqSeq == self_.peqReqSeq &&
+                               sentDraftEpoch == self_.peqDraftEpoch &&
+                               ![self_ hasActiveApplyTimer]);
         if (!json || ![json[@"ok"] boolValue]) {
+            if (!isLatest) return;
             NSString *err = [json[@"error"] isKindOfClass:[NSString class]] ? json[@"error"] : RLPTr(@"未知错误");
             self_.opraStatus.stringValue = [RLPTr(@"失败：") stringByAppendingString:err];
             return;
@@ -1333,7 +1419,9 @@ static NSArray<NSDictionary *> *RLPOpraFilter(NSArray<NSDictionary *> *index, NS
             [[RLPCoreClient shared] postJSON:@"/api/settings" body:settings completion:nil];
         }
         // EQ 已被换成耳机曲线 ⟹ 必须重新拉 /api/peq 才能看到真实新状态
-        [self_ reload];
+        if (isLatest) {
+            [self_ reload];
+        }
         [[NSNotificationCenter defaultCenter] postNotificationName:RLPSettingsChangedNotification object:self_];
         NSDictionary *cur = nil;
         for (NSDictionary *x in self_.opraPresets) {
@@ -1350,14 +1438,21 @@ static NSArray<NSDictionary *> *RLPOpraFilter(NSArray<NSDictionary *> *index, NS
         self.status.stringValue = RLPTr(@"核心未启动");
         return;
     }
+    const NSUInteger reqSeq = ++self.peqReqSeq;
+    const NSUInteger sentDraftEpoch = self.peqDraftEpoch;
     __weak __typeof__(self) weakSelf = self;
     [[RLPCoreClient shared] getJSON:@"/api/peq" completion:^(NSDictionary * _Nullable json) {
         __typeof__(self) self_ = weakSelf;
         if (!self_) return;
+        const BOOL isLatest = (reqSeq == self_.peqReqSeq &&
+                               sentDraftEpoch == self_.peqDraftEpoch &&
+                               ![self_ hasActiveApplyTimer]);
+        if (!isLatest) return;
         if (!json || ![json[@"ok"] boolValue]) {
             self_.status.stringValue = RLPTr(@"读取失败");
             return;
         }
+        self_.peqSyncedDraftEpoch = sentDraftEpoch;
         [self_ absorbState:json];
     }];
     [self loadPresetList];

@@ -48,6 +48,7 @@
 @property (nonatomic, strong) NSTextField *emptyLabel;   // web 空态「这个歌单是空的」
 @property (nonatomic, assign) NSUInteger listSeq;
 @property (nonatomic, assign) NSUInteger itemSeq;
+@property (nonatomic, assign) NSUInteger actionEpoch;
 @end
 
 @implementation RLPPlaylistsViewController
@@ -166,9 +167,8 @@
         c.width = widths[i].doubleValue;
         [self.itemTable addTableColumn:c];
     }
-    // 与 web 版一致：**单击**即触发（web 的行 onclick 就是单击）。
-    // 双击保留兼容；两者指向同一动作，重复触发幂等。
-    self.itemTable.action = @selector(onItemDouble:);
+    // 单击只选中行，双击再起播；避免 action 与 doubleAction 同指 onItemDouble: 造成双击双触发。
+    self.itemTable.action = NULL;
     self.itemTable.doubleAction = @selector(onItemDouble:);
     self.itemTable.target = self;
 
@@ -234,10 +234,14 @@
 - (void)openPlaylist:(NSString *)name {
     self.selectedName = name ?: @"";
     const BOOL has = self.selectedName.length > 0;
+    ++self.actionEpoch;
     // P8：顶栏标题 = 歌单名（web head(name, it.length + ' 首', …)）。旧实现只读 pageTitle，
     // 歌单页标题于是永远停在「歌单」；没有选中具体歌单时回到页面名。
     self.pageTitle = has ? self.selectedName : RLPTr(@"歌单");
-    self.playAllBtn.enabled = has;
+    [self.items removeAllObjects];
+    [self.itemTable reloadData];
+    self.emptyLabel.hidden = YES;
+    self.playAllBtn.enabled = NO;
     self.renameBtn.enabled = has;
     self.deleteBtn.enabled = has;
     // web renderSavedQueuePage 的中间态：head(name, '加载中…', '')，info 回来后再换成「N 首」。
@@ -275,24 +279,35 @@
 /// 载入歌单并起播：先 /api/sq/play 换队列，再按该曲 file/cs/ce 真正起播。
 /// cs/ce 必须带 —— 否则 CUE 分轨会从整张碟开头播（web 版明确处理过）。
 - (void)playFromIndex:(NSInteger)index {
-    if (!self.selectedName.length) return;
-    if (index < 0 || index >= (NSInteger)self.items.count) return;
+    if (!self.selectedName.length || !self.items.count) {
+        RLPToast(RLPTr(@"这个歌单是空的"));
+        return;
+    }
+    if (index < 0 || index >= (NSInteger)self.items.count) {
+        RLPToast(RLPTr(@"未指定曲目"));
+        return;
+    }
     RLPPlaylistItem *item = self.items[(NSUInteger)index];
-    if (!item.file.length) return;
+    if (!item.file.length) {
+        RLPToast(RLPTr(@"未指定音频文件路径"));
+        return;
+    }
     NSString *playlistName = [self.selectedName copy];
     NSString *file = [item.file copy];
     const double cs = item.cs;
     const double ce = item.ce;
     const NSUInteger itemSeq = self.itemSeq;
+    const NSUInteger pageEpoch = ++self.actionEpoch;
     const uint64_t actionEpoch = RLPBeginPlaybackAction();
     // P3：单曲循环（mode==2）下"播放整列/点第 N 首"会卡在同一首无限重复。
     // web ensureSequentialMode 同口径：起播前先读模式，是 2 就切回列表循环(1)。
-    // 与「我的最爱」整列播放共用 RLPSupport 的同一守卫，且复用同一 actionEpoch + 歌单快照校验，
-    // 既防切歌单/重载 items/跨入口新播放抢播，也不在第二步重复递增 epoch 自我取消。
+    // 与「我的最爱」整列播放共用 RLPSupport 的同一守卫，且复用同一 actionEpoch + 页面/歌单快照校验，
+    // 既防切页/切歌单/重载 items/跨入口新播放抢播，也不在第二步重复递增 epoch 自我取消。
     __weak __typeof__(self) weakSelf = self;
     RLPEnsureSequentialModeWhile(^BOOL {
         __typeof__(self) self_ = weakSelf;
-        return self_ && actionEpoch == RLPPlaybackActionEpoch()
+        return self_ && pageEpoch == self_.actionEpoch
+            && actionEpoch == RLPPlaybackActionEpoch()
             && itemSeq == self_.itemSeq
             && [self_.selectedName isEqualToString:playlistName];
     }, ^{
@@ -304,22 +319,33 @@
                                      cs:cs
                                      ce:ce
                                 itemSeq:itemSeq
+                              pageEpoch:pageEpoch
                             actionEpoch:actionEpoch];
     });
 }
 
 /// 起播后半段：/api/sq/play 换队列 → 按该曲 file/cs/ce 真正 /api/play。
 - (void)loadQueueAndPlayAt:(NSInteger)index {
-    if (!self.selectedName.length) return;
-    if (index < 0 || index >= (NSInteger)self.items.count) return;
+    if (!self.selectedName.length || !self.items.count) {
+        RLPToast(RLPTr(@"这个歌单是空的"));
+        return;
+    }
+    if (index < 0 || index >= (NSInteger)self.items.count) {
+        RLPToast(RLPTr(@"未指定曲目"));
+        return;
+    }
     RLPPlaylistItem *item = self.items[(NSUInteger)index];
-    if (!item.file.length) return;
+    if (!item.file.length) {
+        RLPToast(RLPTr(@"未指定音频文件路径"));
+        return;
+    }
     [self loadQueueAndPlayWithName:[self.selectedName copy]
                              index:index
                               file:[item.file copy]
                                 cs:item.cs
                                 ce:item.ce
                            itemSeq:self.itemSeq
+                         pageEpoch:++self.actionEpoch
                        actionEpoch:RLPBeginPlaybackAction()];
 }
 
@@ -329,9 +355,10 @@
                               cs:(double)cs
                               ce:(double)ce
                          itemSeq:(NSUInteger)itemSeq
+                       pageEpoch:(NSUInteger)pageEpoch
                      actionEpoch:(uint64_t)actionEpoch {
     if (!playlistName.length || !file.length) return;
-    if (actionEpoch != RLPPlaybackActionEpoch()) return;
+    if (pageEpoch != self.actionEpoch || actionEpoch != RLPPlaybackActionEpoch()) return;
     if (itemSeq != self.itemSeq || ![self.selectedName isEqualToString:playlistName]) return;
     NSString *url = [NSString stringWithFormat:@"/api/sq/play?name=%@&i=%ld",
                      RLPEnc(playlistName), (long)index];
@@ -339,10 +366,11 @@
     [[RLPCoreClient shared] postJSON:url body:nil completion:^(NSDictionary * _Nullable json) {
         __typeof__(self) self_ = weakSelf;
         if (!self_) return;
-        if (actionEpoch != RLPPlaybackActionEpoch()) return;
+        if (pageEpoch != self_.actionEpoch || actionEpoch != RLPPlaybackActionEpoch()) return;
         if (itemSeq != self_.itemSeq || ![self_.selectedName isEqualToString:playlistName]) return;
         if (!json || ![json[@"ok"] boolValue]) {
-            NSString *err = [json[@"error"] isKindOfClass:[NSString class]] ? json[@"error"] : RLPTr(@"载入失败");
+            NSString *rawErr = [json[@"error"] isKindOfClass:[NSString class]] ? (NSString *)json[@"error"] : nil;
+            NSString *err = rawErr.length ? rawErr : RLPTr(@"载入失败");
             RLPToast(err);
             return;
         }
@@ -450,6 +478,7 @@
             [self_ setPageTitle:RLPTr(@"歌单")];
             [self_.items removeAllObjects];
             [self_.itemTable reloadData];
+            self_.emptyLabel.hidden = YES;
             self_.playAllBtn.enabled = NO;
             self_.renameBtn.enabled = NO;
             self_.deleteBtn.enabled = NO;
@@ -466,6 +495,16 @@
 #pragma mark - 数据
 
 - (void)activate { [self reloadData]; }
+
+- (void)deactivate {
+    ++self.actionEpoch;
+    ++self.itemSeq;
+}
+
+- (void)viewWillDisappear {
+    [super viewWillDisappear];
+    [self deactivate];
+}
 
 - (void)reloadData {
     if (![RLPCoreClient shared].started) { [self setSubtitle:RLPTr(@"核心未启动")]; return; }
@@ -502,6 +541,7 @@
             [self_ setSubtitle:[NSString stringWithFormat:RLPTr(@"%ld 个歌单"), (long)self_.playlists.count]];
             [self_.items removeAllObjects];
             [self_.itemTable reloadData];
+            self_.emptyLabel.hidden = YES;
             self_.playAllBtn.enabled = NO;
             self_.renameBtn.enabled = NO;
             self_.deleteBtn.enabled = NO;
@@ -515,7 +555,17 @@
 }
 
 - (void)loadItems {
-    if (!self.selectedName.length || ![RLPCoreClient shared].started) return;
+    if (!self.selectedName.length) {
+        ++self.itemSeq;
+        self.playAllBtn.enabled = NO;
+        return;
+    }
+    if (![RLPCoreClient shared].started) {
+        ++self.itemSeq;
+        self.playAllBtn.enabled = NO;
+        [self setSubtitle:RLPTr(@"核心未启动")];
+        return;
+    }
     const NSUInteger seq = ++self.itemSeq;
     NSString *playlistName = [self.selectedName copy];
     NSString *url = [NSString stringWithFormat:@"/api/sq/info?name=%@", RLPEnc(playlistName)];
@@ -526,6 +576,8 @@
         [self_.items removeAllObjects];
         if (!json || ![json[@"ok"] boolValue]) {
             [self_.itemTable reloadData];
+            self_.emptyLabel.hidden = YES;
+            self_.playAllBtn.enabled = NO;
             // web：失败分支 head(name, '', '') —— 标题仍是歌单名，计数清空。
             [self_ setSubtitle:RLPTr(@"歌单不存在（可能已被删除）")];
             [[NSNotificationCenter defaultCenter] postNotificationName:@"RLPPageCountNotification" object:@""];
@@ -542,7 +594,9 @@
         }
         [self_.itemTable reloadData];
         // web：空歌单整块显示「这个歌单是空的」（不是一行小字，也不是空表格）
-        self_.emptyLabel.hidden = self_.items.count > 0;
+        const BOOL hasItems = self_.items.count > 0;
+        self_.emptyLabel.hidden = hasItems;
+        self_.playAllBtn.enabled = hasItems;
         NSString *count = [NSString stringWithFormat:RLPTr(@"%ld 首"), (long)self_.items.count];
         [self_ setSubtitle:count];
         // P8：web head(name, it.length + ' 首') 的第二个参数画在顶栏标题旁（#cnt）。

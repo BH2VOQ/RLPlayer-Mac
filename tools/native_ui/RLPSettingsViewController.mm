@@ -39,6 +39,10 @@
 
 #include <chrono>
 
+@interface RLPEqualizerView (RLPPendingDraftState)
+@property (nonatomic, readonly) BOOL hasPendingDraft;
+@end
+
 #pragma mark - 滤波器族标注（U8）
 
 // ---- U8（2026-11-16）：滤波器下拉的族标注 ----
@@ -493,6 +497,8 @@ static NSStackView *RLPSRow(NSString *label, NSView *control, NSString *hint, RL
 @property (nonatomic, strong) NSMutableDictionary<NSString *, NSString *> *lastLoadedValues;
 @property (nonatomic, assign) NSUInteger llmSeq;
 
+- (void)reloadDataIncludingEqualizer:(BOOL)reloadEq;
+
 @end
 
 @implementation RLPSettingsViewController
@@ -731,6 +737,7 @@ static void RLPSettingsCollectViews(NSView *v, NSMutableArray<NSView *> *out) {
     self.tab = tab;
     NSView *pane = self.paneCache[@(tab)];
     BOOL freshlyBuilt = NO;
+    const BOOL hadEqViewBefore = (self.eqView != nil);
     if (!pane) {
         pane = [self buildPane:tab];
         if (!pane) return;
@@ -755,7 +762,11 @@ static void RLPSettingsCollectViews(NSView *v, NSMutableArray<NSView *> *out) {
     // 新建的页签控件还是 UI 默认值（设备/滤波下拉是空的、开关是默认态）。
     // activate 只在进页时跑一次，之后才点开的页签必须在这里补一次读回，
     // 否则输出/PCM/SDM 页会显示空下拉与默认值，而不是用户真实设置。
-    if (freshlyBuilt && [RLPCoreClient shared].started) [self reloadData];
+    // 切到未建非 EQ 页签（或首次建 EQ 已由 fillEqualizer 发起加载）时不再无条件 reload eqView。
+    if (freshlyBuilt && [RLPCoreClient shared].started) {
+        const BOOL shouldReloadEq = (tab == RLPSTabEq && hadEqViewBefore);
+        [self reloadDataIncludingEqualizer:shouldReloadEq];
+    }
     // 诊断页每次进入补一次通道探活（web bindFeedbackCard 同语义；30s 内不重复，见 probeFeedbackChannel）。
     if (tab == RLPSTabDiag) [self probeFeedbackChannel];
 }
@@ -1085,12 +1096,12 @@ static NSString *RLPControlIdentifier(NSString *key) {
       completion:(void (^_Nullable)(BOOL ok))completion {
     if (!key.length) return;
     [self.loadedKeys addObject:key];
-    ++self.settingsSeq;
+    const NSUInteger seq = ++self.settingsSeq;
     NSString *body = [NSString stringWithFormat:@"%@=%@", key, RLPEnc(value ?: @"")];
     __weak __typeof__(self) weakSelf = self;
     [[RLPCoreClient shared] postJSON:@"/api/settings" body:body completion:^(NSDictionary * _Nullable json) {
         __typeof__(self) self_ = weakSelf;
-        if (!self_) return;
+        if (!self_ || seq != self_.settingsSeq) return;
         const BOOL ok = (json && [json[@"ok"] boolValue]);
         if (ok) {
             [self_ clearDirtyForBackendKey:key submittedValue:value ?: @""];
@@ -1119,13 +1130,13 @@ static NSString *RLPControlIdentifier(NSString *key) {
         [parts addObject:[NSString stringWithFormat:@"%@=%@", k, RLPEnc(kv[k] ?: @"")]];
     }
     if (!parts.count) return;
-    ++self.settingsSeq;
+    const NSUInteger seq = ++self.settingsSeq;
     __weak __typeof__(self) weakSelf = self;
     [[RLPCoreClient shared] postJSON:@"/api/settings"
                                 body:[parts componentsJoinedByString:@"&"]
                           completion:^(NSDictionary * _Nullable json) {
         __typeof__(self) self_ = weakSelf;
-        if (!self_) return;
+        if (!self_ || seq != self_.settingsSeq) return;
         const BOOL ok = (json && [json[@"ok"] boolValue]);
         if (ok) {
             for (NSString *k in kv) {
@@ -2717,6 +2728,7 @@ static NSString *RLPControlIdentifier(NSString *key) {
     eqPath.placeholderString = RLPTr(@"例如 /Users/你的用户名/Music/headphone-eq.txt");
     eqPath.target = self;
     eqPath.action = @selector(onEqPath:);
+    [(NSTextFieldCell *)eqPath.cell setSendsActionOnEndEditing:YES];
     eqPath.translatesAutoresizingMaskIntoConstraints = NO;
     self.eqField = eqPath;
     [eqFileGroup addField:RLPTr(@"EQ 文件路径") control:self.eqField
@@ -3756,9 +3768,9 @@ static BOOL RLPFeedbackTextBlank(NSString *s) {
 
 #pragma mark - 数据
 
-/// 跨页面设置/配置档保存后重读设置（忽略自己发出的通知防环）。
+/// 跨页面设置/配置档保存后重读设置（忽略自己与 eqView 发出的通知防环）。
 - (void)onExternalSettingsChanged:(NSNotification *)note {
-    if (note.object == self) return;
+    if (note.object == self || (self.eqView && note.object == self.eqView)) return;
     if (![RLPCoreClient shared].started) return;
     [self reloadData];
 }
@@ -3766,6 +3778,10 @@ static BOOL RLPFeedbackTextBlank(NSString *s) {
 - (void)activate { [self reloadData]; [self wbSyncBusy]; }
 
 - (void)reloadData {
+    [self reloadDataIncludingEqualizer:YES];
+}
+
+- (void)reloadDataIncludingEqualizer:(BOOL)reloadEq {
     if (![RLPCoreClient shared].started) {
         self.statusLine.stringValue = RLPTr(@"核心未启动");
         return;
@@ -3988,7 +4004,10 @@ static BOOL RLPFeedbackTextBlank(NSString *s) {
     // reload 一次，此后再没人刷新 ⟹ 用户在 EQ 页做任何"外部改变"（重置 Flat、
     // 从工作台改预设、OPRA 应用）之后回到设置页，曲线仍停在旧数据上
     //（"重置之后曲线不随动"）。判据见 test_native_eq_contract 的 E12。
-    [self.eqView reload];
+    // 若 eqView 仍有未提交草稿或在途写请求，跳过覆盖以免回跳/打断编辑。
+    if (reloadEq && self.eqView && ![self.eqView hasPendingDraft]) {
+        [self.eqView reload];
+    }
     // 直通按钮会清空 ir/irgpu：校准视图也必须跟着刷新，否则仍显示旧 IR 路径。
     [self.calView reload];
     [self loadLlmConfig];
@@ -4496,13 +4515,122 @@ static NSUInteger RLPUTF8Bytes(NSString *s) {
 
 - (void)onFeedbackRetry:(id)sender { self.fbLastChannelCheck = nil; [self probeFeedbackChannel]; }
 
-#pragma mark - 主题
+#pragma mark - 主题与草稿快照
+
+- (NSDictionary *)capturePaneViewState {
+    NSScrollView *oldScroll = nil;
+    for (NSView *sub in self.paneHost.subviews) {
+        if ([sub isKindOfClass:[NSScrollView class]]) { oldScroll = (NSScrollView *)sub; break; }
+    }
+    const NSPoint savedOrigin = oldScroll ? oldScroll.contentView.bounds.origin : NSZeroPoint;
+
+    NSString *focusedId = nil;
+    NSRange savedSelection = NSMakeRange(NSNotFound, 0);
+    NSResponder *fr = self.view.window.firstResponder;
+    if ([fr isKindOfClass:[NSTextView class]]) savedSelection = ((NSTextView *)fr).selectedRange;
+    if ([fr isKindOfClass:[NSTextView class]] && [((NSTextView *)fr).delegate isKindOfClass:[NSView class]]) {
+        NSView *owner = (NSView *)((NSTextView *)fr).delegate;
+        if ([owner isDescendantOf:self.paneHost] && owner.identifier.length) focusedId = owner.identifier;
+    } else if ([fr isKindOfClass:[NSView class]] && [(NSView *)fr isDescendantOf:self.paneHost]) {
+        focusedId = ((NSView *)fr).identifier;
+    }
+
+    NSMutableDictionary *state = [@{
+        @"hasScroll": @(oldScroll != nil),
+        @"origin": [NSValue valueWithPoint:savedOrigin],
+        @"selection": [NSValue valueWithRange:savedSelection],
+    } mutableCopy];
+    if (focusedId.length) state[@"focusId"] = focusedId;
+    return state;
+}
+
+- (void)snapshotPendingPaneDrafts {
+    for (NSNumber *tabKey in [self.paneCache allKeys]) {
+        NSView *cachedPane = self.paneCache[tabKey];
+        if (!cachedPane) continue;
+        NSMutableArray<NSView *> *views = [NSMutableArray array];
+        RLPSettingsCollectViews(cachedPane, views);
+        NSMutableDictionary<NSString *, NSString *> *tabDrafts =
+            self.pendingPaneDrafts[tabKey] ?: [NSMutableDictionary dictionary];
+        for (NSView *v in views) {
+            if (!v.identifier.length || [self isEqOwnedView:v]) continue;
+            if ([v isKindOfClass:[NSTextField class]] && ((NSTextField *)v).isEditable) {
+                NSTextField *tf = (NSTextField *)v;
+                NSString *curVal = tf.currentEditor ? (tf.currentEditor.string ?: @"")
+                                                    : (tf.stringValue ?: @"");
+                NSString *loadedVal = self.lastLoadedValues[v.identifier];
+                BOOL isDirty = [self.dirtyControlIds containsObject:v.identifier];
+                if (!isDirty) {
+                    if (loadedVal != nil) {
+                        isDirty = ![curVal isEqualToString:loadedVal];
+                    } else if (curVal.length > 0) {
+                        isDirty = YES;
+                    }
+                    if (isDirty) [self.dirtyControlIds addObject:v.identifier];
+                }
+                if (isDirty || curVal.length > 0) {
+                    tabDrafts[v.identifier] = curVal;
+                }
+            } else if ([v isKindOfClass:[NSTextView class]] && ((NSTextView *)v).isEditable) {
+                NSString *curVal = [((NSTextView *)v).string copy] ?: @"";
+                if (curVal.length > 0 || [self.dirtyControlIds containsObject:v.identifier]) {
+                    tabDrafts[v.identifier] = curVal;
+                }
+            }
+        }
+        if (tabDrafts.count) {
+            self.pendingPaneDrafts[tabKey] = tabDrafts;
+        }
+    }
+}
+
+- (void)restorePaneViewState:(NSDictionary *)state {
+    NSString *focusedId = [state[@"focusId"] isKindOfClass:[NSString class]] ? state[@"focusId"] : nil;
+    const BOOL hasOldScroll = [state[@"hasScroll"] respondsToSelector:@selector(boolValue)]
+        && [(NSNumber *)state[@"hasScroll"] boolValue];
+    const NSPoint savedOrigin = [state[@"origin"] isKindOfClass:[NSValue class]]
+        ? [(NSValue *)state[@"origin"] pointValue] : NSZeroPoint;
+    const NSRange savedSelection = [state[@"selection"] isKindOfClass:[NSValue class]]
+        ? [(NSValue *)state[@"selection"] rangeValue] : NSMakeRange(NSNotFound, 0);
+
+    NSView *focusTarget = nil;
+    if (focusedId.length) {
+        NSMutableArray<NSView *> *newViews = [NSMutableArray array];
+        RLPSettingsCollectViews(self.paneHost, newViews);
+        for (NSView *v in newViews) {
+            if (v.identifier.length && [v.identifier isEqualToString:focusedId]) {
+                focusTarget = v;
+                break;
+            }
+        }
+    }
+
+    [self.paneHost layoutSubtreeIfNeeded];
+    NSScrollView *newScroll = nil;
+    for (NSView *sub in self.paneHost.subviews) {
+        if ([sub isKindOfClass:[NSScrollView class]]) { newScroll = (NSScrollView *)sub; break; }
+    }
+    if (newScroll && hasOldScroll) {
+        [newScroll.contentView scrollToPoint:savedOrigin];
+        [newScroll reflectScrolledClipView:newScroll.contentView];
+    }
+    if (focusTarget && self.view.window && [focusTarget acceptsFirstResponder]) {
+        [self.view.window makeFirstResponder:focusTarget];
+        if (savedSelection.location != NSNotFound &&
+            [self.view.window.firstResponder isKindOfClass:[NSTextView class]]) {
+            NSTextView *editor = (NSTextView *)self.view.window.firstResponder;
+            NSUInteger start = MIN(savedSelection.location, editor.string.length);
+            editor.selectedRange = NSMakeRange(start, MIN(savedSelection.length, editor.string.length - start));
+        }
+    }
+}
 
 - (void)applyTheme {
     [super applyTheme];
     RLPTheme *t = [RLPTheme current];
-    // 主题切换后已建页签里的控件颜色全部过时：清缓存，下次进入时按新主题重建。
-    // 比逐控件改色更不容易漏，而页签切换本来就是低频操作。
+    // 主题切换后清缓存重建页签前，先快照 sp_eq 等各页未提交草稿与滚动/焦点状态。
+    NSDictionary *paneState = [self capturePaneViewState];
+    [self snapshotPendingPaneDrafts];
     [self.paneCache removeAllObjects];
     [self rebuildTabs];
     [self showTab:self.tab];
@@ -4535,6 +4663,7 @@ static NSUInteger RLPUTF8Bytes(NSString *s) {
     [self.serversView applyTheme];
     [self.metaSourcesView applyTheme];
     [self.libStatsView applyTheme];
+    [self restorePaneViewState:paneState];
 }
 
 #pragma mark - 语言实时切换
@@ -4550,58 +4679,8 @@ static NSUInteger RLPUTF8Bytes(NSString *s) {
     self.lastAppliedLang = curLang;
 
     // 1. 保存当前页签滚动位置与焦点，并跨所有 cachedPane 快照未提交草稿
-    NSScrollView *oldScroll = nil;
-    for (NSView *sub in self.paneHost.subviews) {
-        if ([sub isKindOfClass:[NSScrollView class]]) { oldScroll = (NSScrollView *)sub; break; }
-    }
-    const NSPoint savedOrigin = oldScroll ? oldScroll.contentView.bounds.origin : NSZeroPoint;
-
-    NSString *focusedId = nil;
-    NSRange savedSelection = NSMakeRange(NSNotFound, 0);
-    NSResponder *fr = self.view.window.firstResponder;
-    if ([fr isKindOfClass:[NSTextView class]]) savedSelection = ((NSTextView *)fr).selectedRange;
-    if ([fr isKindOfClass:[NSTextView class]] && [((NSTextView *)fr).delegate isKindOfClass:[NSView class]]) {
-        NSView *owner = (NSView *)((NSTextView *)fr).delegate;
-        if ([owner isDescendantOf:self.paneHost] && owner.identifier.length) focusedId = owner.identifier;
-    } else if ([fr isKindOfClass:[NSView class]] && [(NSView *)fr isDescendantOf:self.paneHost]) {
-        focusedId = ((NSView *)fr).identifier;
-    }
-
-    for (NSNumber *tabKey in [self.paneCache allKeys]) {
-        NSView *cachedPane = self.paneCache[tabKey];
-        if (!cachedPane) continue;
-        NSMutableArray<NSView *> *views = [NSMutableArray array];
-        RLPSettingsCollectViews(cachedPane, views);
-        NSMutableDictionary<NSString *, NSString *> *tabDrafts =
-            self.pendingPaneDrafts[tabKey] ?: [NSMutableDictionary dictionary];
-        for (NSView *v in views) {
-            if (!v.identifier.length || [self isEqOwnedView:v]) continue;
-            if ([v isKindOfClass:[NSTextField class]] && ((NSTextField *)v).isEditable) {
-                NSString *curVal = ((NSTextField *)v).stringValue ?: @"";
-                NSString *loadedVal = self.lastLoadedValues[v.identifier];
-                BOOL isDirty = [self.dirtyControlIds containsObject:v.identifier];
-                if (!isDirty) {
-                    if (loadedVal != nil) {
-                        isDirty = ![curVal isEqualToString:loadedVal];
-                    } else if (curVal.length > 0) {
-                        isDirty = YES;
-                    }
-                    if (isDirty) [self.dirtyControlIds addObject:v.identifier];
-                }
-                if (isDirty || curVal.length > 0) {
-                    tabDrafts[v.identifier] = curVal;
-                }
-            } else if ([v isKindOfClass:[NSTextView class]] && ((NSTextView *)v).isEditable) {
-                NSString *curVal = [((NSTextView *)v).string copy] ?: @"";
-                if (curVal.length > 0 || [self.dirtyControlIds containsObject:v.identifier]) {
-                    tabDrafts[v.identifier] = curVal;
-                }
-            }
-        }
-        if (tabDrafts.count) {
-            self.pendingPaneDrafts[tabKey] = tabDrafts;
-        }
-    }
+    NSDictionary *paneState = [self capturePaneViewState];
+    [self snapshotPendingPaneDrafts];
 
     // 2. 原地刷新页头、复合子视图与页签；非当前页签清缓存待切回时重建并恢复草稿
     self.pageTitle = RLPTr(@"设置");
@@ -4623,36 +4702,7 @@ static NSUInteger RLPUTF8Bytes(NSString *s) {
     }
 
     // 3. 恢复当前页签滚动位置与焦点
-    NSView *focusTarget = nil;
-    if (focusedId.length) {
-        NSMutableArray<NSView *> *newViews = [NSMutableArray array];
-        RLPSettingsCollectViews(self.paneHost, newViews);
-        for (NSView *v in newViews) {
-            if (v.identifier.length && [v.identifier isEqualToString:focusedId]) {
-                focusTarget = v;
-                break;
-            }
-        }
-    }
-
-    [self.paneHost layoutSubtreeIfNeeded];
-    NSScrollView *newScroll = nil;
-    for (NSView *sub in self.paneHost.subviews) {
-        if ([sub isKindOfClass:[NSScrollView class]]) { newScroll = (NSScrollView *)sub; break; }
-    }
-    if (newScroll && oldScroll) {
-        [newScroll.contentView scrollToPoint:savedOrigin];
-        [newScroll reflectScrolledClipView:newScroll.contentView];
-    }
-    if (focusTarget && self.view.window && [focusTarget acceptsFirstResponder]) {
-        [self.view.window makeFirstResponder:focusTarget];
-        if (savedSelection.location != NSNotFound &&
-            [self.view.window.firstResponder isKindOfClass:[NSTextView class]]) {
-            NSTextView *editor = (NSTextView *)self.view.window.firstResponder;
-            NSUInteger start = MIN(savedSelection.location, editor.string.length);
-            editor.selectedRange = NSMakeRange(start, MIN(savedSelection.length, editor.string.length - start));
-        }
-    }
+    [self restorePaneViewState:paneState];
 }
 
 @end

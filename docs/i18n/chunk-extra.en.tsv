@@ -734,3 +734,7 @@ PEQ 开	PEQ on
 切换随机播放失败	Failed to enable shuffle
 降级原因：%@%@	Fallback reason: %@%@
 ；	；
+音频核心尚未就绪	Audio core is not ready yet
+正在获取播放状态，请稍候	Fetching playback status, please wait
+设备发现超时（/api/cast/devices 无响应）	Device discovery timed out (/api/cast/devices did not respond)
+请先发现并选择可用的网络播放器	Discover and select a network player first

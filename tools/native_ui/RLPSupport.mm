@@ -590,6 +590,7 @@ void RLPPlaybackResumeOrReplay(BOOL playing, BOOL paused, NSString *currentPath)
     if (playing && !paused) return;              // 已在播：playCommand 等幂，不打断
     if (paused) { RLPPostPlaybackAction(@"/api/pause?on=0", nil); return; }
     if (currentPath.length) { RLPPlayPath(currentPath); return; }
+    RLPToast(RLPTr(@"队列是空的"));
 }
 
 void RLPPlayAlbum(NSString *albumKey, NSInteger startIndex) {
@@ -649,13 +650,34 @@ void RLPEnqueuePathCue(NSString *path, double cs, double ce) {
 static void RLPEnsureSequentialModeIf(BOOL (^ _Nullable shouldContinue)(void), void (^ _Nullable then)(void)) {
     [[RLPCoreClient shared] getJSON:@"/api/playmode" completion:^(NSDictionary * _Nullable modeJson) {
         if (shouldContinue && !shouldContinue()) return;
-        NSInteger mode = [modeJson[@"mode"] respondsToSelector:@selector(integerValue)]
-                       ? [modeJson[@"mode"] integerValue] : 0;
+        const BOOL getOk = [modeJson isKindOfClass:[NSDictionary class]] &&
+                           [modeJson[@"ok"] respondsToSelector:@selector(boolValue)] &&
+                           [modeJson[@"ok"] boolValue] &&
+                           [modeJson[@"mode"] respondsToSelector:@selector(integerValue)];
+        if (!getOk) {
+            NSString *rawErr = ([modeJson isKindOfClass:[NSDictionary class]] &&
+                                [modeJson[@"error"] isKindOfClass:[NSString class]])
+                             ? (NSString *)modeJson[@"error"] : nil;
+            NSString *err = rawErr.length ? rawErr : RLPTr(@"读取失败");
+            RLPOnMainThread(^{ RLPToast(err); });
+            return;
+        }
+        const NSInteger mode = [modeJson[@"mode"] integerValue];
         if (mode == 2) {
             [[RLPCoreClient shared] postJSON:@"/api/playmode?mode=1" body:nil
-                                  completion:^(NSDictionary * _Nullable ignored) {
-                (void)ignored;
+                                  completion:^(NSDictionary * _Nullable postJson) {
                 if (shouldContinue && !shouldContinue()) return;
+                const BOOL postOk = [postJson isKindOfClass:[NSDictionary class]] &&
+                                    [postJson[@"ok"] respondsToSelector:@selector(boolValue)] &&
+                                    [postJson[@"ok"] boolValue];
+                if (!postOk) {
+                    NSString *rawErr = ([postJson isKindOfClass:[NSDictionary class]] &&
+                                        [postJson[@"error"] isKindOfClass:[NSString class]])
+                                     ? (NSString *)postJson[@"error"] : nil;
+                    NSString *err = rawErr.length ? rawErr : RLPTr(@"切换失败");
+                    RLPOnMainThread(^{ RLPToast(err); });
+                    return;
+                }
                 if (then) then();
             }];
         } else if (then) {

@@ -277,3 +277,5 @@ DeepSeek 为默认检索端点。	DeepSeek is the default search endpoint.	检�
 的其他作品	's Other Works	专辑页「其他作品」横向区标题（图一）
 搜索：%@	Search: %@	曲目页搜索框标签
 未找到与 “%@” 相关的曲目	No tracks match “%@”	曲目页搜索空态
+音频核心尚未就绪	Audio core is not ready yet	播放条动作在核心未启动/未轮询时的提示
+正在获取播放状态，请稍候	Fetching playback status, please wait	首轮 /api/status 尚未返回时的提示

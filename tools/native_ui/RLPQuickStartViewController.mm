@@ -440,6 +440,10 @@
 @property (nonatomic, weak, nullable) NSButton *outputHogCheck;
 @property (nonatomic, copy) NSArray<NSButton *> *outputBackendButtons;
 @property (nonatomic, assign) NSUInteger castDiscoverSeq;
+@property (nonatomic, assign) BOOL castDiscoverInflight;
+@property (nonatomic, assign) BOOL castDiscoverFailed;
+@property (nonatomic, copy) NSString *castDiscoverError;
+@property (nonatomic, assign) NSTimeInterval castDiscoverTimeout;
 @property (nonatomic, assign) NSUInteger coverSeq;
 @property (nonatomic, strong) NSTimer *poll;
 @property (nonatomic, assign) NSUInteger statusEpoch;
@@ -469,6 +473,9 @@
         _npQueueConstraints = [NSMutableArray array];
         _npCardConstraints = [NSMutableArray array];
         _libraryLayoutConstraints = [NSMutableArray array];
+        _castDevices = @[];
+        _castDiscoverError = @"";
+        _castDiscoverTimeout = 12.0;
         _albumsData = @[];
         _lastRoots = @[];
         _queuePaths = @[];
@@ -1548,6 +1555,10 @@
     RLPTheme *t = [RLPTheme current];
     NSString *bk = [self str:@"backend" def:@"coreaudio"];
     NSString *upnpDev = [self str:@"upnpdev" def:@""];
+    ++self.castDiscoverSeq;
+    self.castDiscoverInflight = NO;
+    self.castDiscoverFailed = NO;
+    self.castDiscoverError = @"";
     self.outputDraftBackend = bk;
     self.outputDraftUpnpDev = upnpDev;
     const BOOL hog = [self str:@"hogexcl" def:@"1"].boolValue;
@@ -1649,6 +1660,18 @@
     if (self.outputHogCheck) {
         self.outputHogCheck.enabled = [bk isEqualToString:@"coreaudio"];
     }
+    if (self.outputUpnpScanButton) {
+        self.outputUpnpScanButton.enabled = !self.castDiscoverInflight;
+    }
+    if (self.outputUpnpStatusLabel) {
+        if (self.castDiscoverInflight) {
+            self.outputUpnpStatusLabel.textColor = t.mut;
+            self.outputUpnpStatusLabel.stringValue = RLPTr(@"正在发现网络播放器…");
+        } else if (self.castDiscoverFailed && self.castDiscoverError.length) {
+            self.outputUpnpStatusLabel.textColor = t.warn;
+            self.outputUpnpStatusLabel.stringValue = self.castDiscoverError;
+        }
+    }
     NSPopUpButton *pop = self.outputUpnpPopup;
     if (pop) {
         [pop removeAllItems];
@@ -1674,12 +1697,12 @@
             [[pop lastItem] setRepresentedObject:@""];
             pop.enabled = NO;
         } else {
-            pop.enabled = YES;
+            pop.enabled = (!self.castDiscoverInflight && !self.castDiscoverFailed && self.castDevices.count > 0);
             if (selectIdx < 0) selectIdx = 0;
             [pop selectItemAtIndex:selectIdx];
             NSString *picked = [pop.selectedItem.representedObject isKindOfClass:[NSString class]]
                 ? pop.selectedItem.representedObject : @"";
-            if (!self.outputDraftUpnpDev.length && picked.length) {
+            if (!self.outputDraftUpnpDev.length && picked.length && self.castDevices.count > 0) {
                 self.outputDraftUpnpDev = picked;
             }
         }
@@ -1687,23 +1710,70 @@
     if (self.outputUpnpApplyButton) {
         NSString *picked = [self.outputUpnpPopup.selectedItem.representedObject isKindOfClass:[NSString class]]
             ? self.outputUpnpPopup.selectedItem.representedObject : @"";
-        self.outputUpnpApplyButton.enabled = (picked.length > 0);
+        BOOL pickedLive = NO;
+        if (picked.length > 0) {
+            for (NSDictionary<NSString *, NSString *> *d in self.castDevices) {
+                if ([d[@"id"] isEqualToString:picked]) {
+                    pickedLive = YES;
+                    break;
+                }
+            }
+        }
+        self.outputUpnpApplyButton.enabled = (!self.castDiscoverInflight &&
+                                              !self.castDiscoverFailed &&
+                                              pickedLive);
     }
 }
 
 - (void)applyCastDevicesPayload:(NSDictionary * _Nullable)json {
     RLPTheme *t = [RLPTheme current];
-    if (!json || ![json[@"ok"] boolValue]) {
-        NSString *err = [json[@"error"] isKindOfClass:[NSString class]] && [json[@"error"] length]
-            ? json[@"error"] : RLPTr(@"设备发现失败（/api/cast/devices 无响应）");
+    ++self.castDiscoverSeq;
+    self.castDiscoverInflight = NO;
+    if (self.outputUpnpScanButton) self.outputUpnpScanButton.enabled = YES;
+    NSDictionary *dict = [json isKindOfClass:[NSDictionary class]] ? json : nil;
+    const BOOL ok = dict &&
+                    [dict[@"ok"] respondsToSelector:@selector(boolValue)] &&
+                    [dict[@"ok"] boolValue];
+    NSString *confirmed = [self str:@"upnpdev" def:@""] ?: @"";
+    if (!ok) {
+        NSString *rawErr = [dict[@"error"] isKindOfClass:[NSString class]] ? dict[@"error"] : @"";
+        if (!rawErr.length && [dict[@"message"] isKindOfClass:[NSString class]]) {
+            rawErr = dict[@"message"];
+        }
+        const BOOL timedOut = [dict[@"timeout"] respondsToSelector:@selector(boolValue)] &&
+                              [dict[@"timeout"] boolValue];
+        NSString *err = rawErr.length
+            ? rawErr
+            : (timedOut ? RLPTr(@"设备发现超时（/api/cast/devices 无响应）")
+                        : RLPTr(@"设备发现失败（/api/cast/devices 无响应）"));
+        self.castDevices = @[];
+        self.outputDraftUpnpDev = confirmed;
+        self.castDiscoverFailed = YES;
+        self.castDiscoverError = err;
         if (self.outputUpnpStatusLabel) {
             self.outputUpnpStatusLabel.stringValue = err;
             self.outputUpnpStatusLabel.textColor = t.warn;
         }
         [self syncOutputPopoverState];
+        [self syncOutputSummary];
+        RLPToast(err);
         return;
     }
-    self.castDevices = RLPNormalizeCastDevices(json[@"devices"]);
+    self.castDiscoverFailed = NO;
+    self.castDiscoverError = @"";
+    self.castDevices = RLPNormalizeCastDevices(dict[@"devices"]);
+    BOOL draftLive = NO;
+    if (self.outputDraftUpnpDev.length) {
+        for (NSDictionary<NSString *, NSString *> *d in self.castDevices) {
+            if ([d[@"id"] isEqualToString:self.outputDraftUpnpDev]) {
+                draftLive = YES;
+                break;
+            }
+        }
+    }
+    if (self.outputDraftUpnpDev.length && !draftLive && ![self.outputDraftUpnpDev isEqualToString:confirmed]) {
+        self.outputDraftUpnpDev = confirmed;
+    }
     if (!self.outputDraftUpnpDev.length && self.castDevices.count) {
         self.outputDraftUpnpDev = self.castDevices.firstObject[@"id"] ?: @"";
     }
@@ -1713,7 +1783,7 @@
             self.outputUpnpStatusLabel.stringValue = [NSString stringWithFormat:RLPTr(@"共发现 %lu 台设备"),
                 (unsigned long)self.castDevices.count];
         } else {
-            NSString *hint = [json[@"hint"] isKindOfClass:[NSString class]] ? json[@"hint"] : @"";
+            NSString *hint = [dict[@"hint"] isKindOfClass:[NSString class]] ? dict[@"hint"] : @"";
             self.outputUpnpStatusLabel.stringValue = hint.length ? hint
                 : RLPTr(@"暂未发现网络播放器，请确认它已开启并连接同一网络。");
         }
@@ -1725,20 +1795,28 @@
 - (void)discoverCastDevicesForce:(BOOL)force {
     if (![RLPCoreClient shared].started) return;
     const NSUInteger seq = ++self.castDiscoverSeq;
-    RLPTheme *t = [RLPTheme current];
-    if (self.outputUpnpScanButton) self.outputUpnpScanButton.enabled = NO;
-    if (self.outputUpnpStatusLabel) {
-        self.outputUpnpStatusLabel.textColor = t.mut;
-        self.outputUpnpStatusLabel.stringValue = RLPTr(@"正在发现网络播放器…");
-    }
+    self.castDiscoverInflight = YES;
+    self.castDiscoverFailed = NO;
+    self.castDiscoverError = @"";
+    self.castDevices = @[];
+    [self syncOutputPopoverState];
     NSString *url = force ? @"/api/cast/devices?scan=1" : @"/api/cast/devices";
     __weak __typeof__(self) weakSelf = self;
     [[RLPCoreClient shared] getJSON:url completion:^(NSDictionary * _Nullable json) {
         __typeof__(self) self_ = weakSelf;
         if (!self_ || seq != self_.castDiscoverSeq) return;
-        if (self_.outputUpnpScanButton) self_.outputUpnpScanButton.enabled = YES;
         [self_ applyCastDevicesPayload:json];
     }];
+    const NSTimeInterval timeoutSec = self.castDiscoverTimeout > 0.0 ? self.castDiscoverTimeout : 12.0;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(timeoutSec * (double)NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        __typeof__(self) self_ = weakSelf;
+        if (!self_ || seq != self_.castDiscoverSeq || !self_.castDiscoverInflight) return;
+        [self_ applyCastDevicesPayload:@{
+            @"ok": @NO,
+            @"timeout": @YES,
+            @"error": RLPTr(@"设备发现超时（/api/cast/devices 无响应）"),
+        }];
+    });
 }
 
 - (void)onScanUpnpDevices:(id)sender {
@@ -1755,13 +1833,31 @@
 
 - (void)onApplyUpnpOutput:(id)sender {
     (void)sender;
+    if (self.castDiscoverInflight || self.castDiscoverFailed ||
+        (self.outputUpnpApplyButton && !self.outputUpnpApplyButton.enabled)) {
+        NSString *err = self.castDiscoverError.length
+            ? self.castDiscoverError : RLPTr(@"请先发现并选择可用的网络播放器");
+        RLPToast(err);
+        return;
+    }
     NSString *devId = self.outputDraftUpnpDev.length ? self.outputDraftUpnpDev
         : ([self.outputUpnpPopup.selectedItem.representedObject isKindOfClass:[NSString class]]
            ? self.outputUpnpPopup.selectedItem.representedObject : @"");
-    if (!devId.length) {
+    BOOL devLive = NO;
+    if (devId.length) {
+        for (NSDictionary<NSString *, NSString *> *d in self.castDevices) {
+            if ([d[@"id"] isEqualToString:devId]) {
+                devLive = YES;
+                break;
+            }
+        }
+    }
+    if (!devId.length || !devLive) {
         RLPToast(RLPTr(@"请先选择网络播放器"));
         return;
     }
+    ++self.castDiscoverSeq;
+    self.castDiscoverInflight = NO;
     [self postSettings:RLPOutputSettingsPatchForBackend(@"upnp", devId, self.localDevice)];
     [self.popover close];
 }
@@ -1772,11 +1868,13 @@
     if ([bk isEqualToString:@"upnp"]) {
         self.outputDraftBackend = @"upnp";
         [self syncOutputPopoverState];
-        if (!self.castDevices.count && [RLPCoreClient shared].started) {
+        if (!self.castDevices.count && !self.castDiscoverInflight && [RLPCoreClient shared].started) {
             [self discoverCastDevicesForce:NO];
         }
         return;
     }
+    ++self.castDiscoverSeq;
+    self.castDiscoverInflight = NO;
     [self postSettings:RLPOutputSettingsPatchForBackend(bk, nil, self.localDevice)];
     [self.popover close];
 }
@@ -2333,6 +2431,8 @@
     self.poll = nil;
     ++self.statusEpoch;
     self.statusInflight = NO;
+    ++self.castDiscoverSeq;
+    self.castDiscoverInflight = NO;
     [super viewDidDisappear];
 }
 
@@ -3305,7 +3405,11 @@
 - (void)applyLanguage {
     self.pageTitle = RLPTr(@"聆听室");
     if (!self.isViewLoaded) return;
-    if (self.popover.isShown) [self.popover close];
+    if (self.popover.isShown) {
+        [self.popover close];
+        ++self.castDiscoverSeq;
+        self.castDiscoverInflight = NO;
+    }
 
     self.headerTitle.stringValue = RLPTr(@"聆听室");
     self.headerSubtitle.stringValue = RLPTr(@"安静听歌，常用设置就在卡片里");
