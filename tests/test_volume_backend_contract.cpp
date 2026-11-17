@@ -246,6 +246,27 @@ int main() {
         g_ps.bpInputsKnown = false;
     }
 
+    // 1.1.7.128: /api/volume must refresh ps.signal's numeric volume snapshot, otherwise
+    // the signal chain keeps showing the start-time gain (user saw UI 0.0 / chain -7.0).
+    {
+        std::string ct;
+        g_ps.playing.store(true);
+        g_ps.bpInputsKnown = false;
+        g_ps.signal = "{\"volume\":-7.000000,\"bitPerfect\":\"no\",\"bitPerfectWhy\":\"音量 -7 dB\","
+                      "\"nested\":{\"volume\":-9},\"note\":\"\\\"volume\\\":-11\"}";
+        handle(make_req("POST", "/api/volume?db=0"), ct);
+        ck(g_ps.signal.find("\"volume\":0") != std::string::npos,
+           "Case 11a: /api/volume refreshes top-level signal volume", g_ps.signal);
+        ck(g_ps.signal.find("\"volume\":-7.000000") == std::string::npos,
+           "Case 11b: stale start-time volume is gone", g_ps.signal);
+        ck(g_ps.signal.find("\"nested\":{\"volume\":-9}") != std::string::npos,
+           "Case 11c: nested volume key is not rewritten", g_ps.signal);
+        ck(g_ps.signal.find("\"note\":\"\\\"volume\\\":-11\"") != std::string::npos,
+           "Case 11d: volume text inside a string is not rewritten", g_ps.signal);
+        g_ps.playing.store(false);
+        g_ps.signal.clear();
+    }
+
     // Cold retry must stay a single bounded attempt: never after success, never after stop,
     // never once the track has effectively finished.
     {

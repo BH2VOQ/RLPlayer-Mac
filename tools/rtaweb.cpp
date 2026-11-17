@@ -938,6 +938,94 @@ static std::string jesc(const std::string& s) {
     return o;
 }
 
+// 在顶层 JSON 对象中精确替换指定键对应的数字值（跳过字符串字面量与嵌套结构，不依赖旧值格式）。
+static bool replace_json_top_number(std::string& s, const std::string& key, const std::string& numText) {
+    const size_t n = s.size();
+    const size_t keyLen = key.size();
+    auto isWs = [](char c) {
+        return c == ' ' || c == '\t' || c == '\r' || c == '\n';
+    };
+    size_t i = 0;
+    while (i < n && isWs(s[i])) ++i;
+    if (i >= n || s[i] != '{') return false;
+
+    int depth = 0;
+    bool expectKey = false;
+    for (; i < n; ++i) {
+        const char c = s[i];
+        if (isWs(c)) continue;
+        if (c == '"') {
+            const size_t strStart = i + 1;
+            size_t j = strStart;
+            while (j < n) {
+                if (s[j] == '\\') {
+                    j += 2;
+                    continue;
+                }
+                if (s[j] == '"') break;
+                ++j;
+            }
+            if (j >= n) return false;
+            const size_t strLen = j - strStart;
+            i = j;
+
+            if (depth == 1 && expectKey) {
+                expectKey = false;
+                size_t k = j + 1;
+                while (k < n && isWs(s[k])) ++k;
+                if (k < n && s[k] == ':' && strLen == keyLen && s.compare(strStart, strLen, key) == 0) {
+                    ++k;
+                    while (k < n && isWs(s[k])) ++k;
+                    if (k < n) {
+                        size_t vEnd = k;
+                        if (s[vEnd] == '-') ++vEnd;
+                        size_t intDigits = 0;
+                        while (vEnd < n && s[vEnd] >= '0' && s[vEnd] <= '9') { ++vEnd; ++intDigits; }
+                        if (intDigits > 0) {
+                            if (vEnd < n && s[vEnd] == '.') {
+                                size_t fracDigits = 0;
+                                ++vEnd;
+                                while (vEnd < n && s[vEnd] >= '0' && s[vEnd] <= '9') { ++vEnd; ++fracDigits; }
+                                if (fracDigits == 0) return false;
+                            }
+                            if (vEnd < n && (s[vEnd] == 'e' || s[vEnd] == 'E')) {
+                                ++vEnd;
+                                if (vEnd < n && (s[vEnd] == '+' || s[vEnd] == '-')) ++vEnd;
+                                size_t expDigits = 0;
+                                while (vEnd < n && s[vEnd] >= '0' && s[vEnd] <= '9') { ++vEnd; ++expDigits; }
+                                if (expDigits == 0) return false;
+                            }
+                            size_t after = vEnd;
+                            while (after < n && isWs(s[after])) ++after;
+                            if (after < n && (s[after] == ',' || s[after] == '}')) {
+                                s.replace(k, vEnd - k, numText);
+                                return true;
+                            }
+                        }
+                    }
+                    return false;
+                }
+            }
+            continue;
+        }
+        if (c == '{') {
+            ++depth;
+            if (depth == 1) expectKey = true;
+        } else if (c == '[') {
+            ++depth;
+        } else if (c == '}' || c == ']') {
+            if (depth > 0) --depth;
+            expectKey = false;
+            if (depth == 0) break;
+        } else if (c == ',') {
+            if (depth == 1) expectKey = true;
+        } else {
+            if (depth == 1) expectKey = false;
+        }
+    }
+    return false;
+}
+
 // ---------------- 请求 id / 最近动作轨迹（D3，2026-10-29）----------------
 // 为什么要 rid：诊断包要能回答"用户此前做了什么"（ROADMAP Q8），而现有日志只有事件、
 // 没有"这一次请求"的关联键；前后端同一个码/同一个 id 才能把 UI 报错与后端现场对上。
@@ -5656,7 +5744,7 @@ static bool play_one_impl(const std::string& file, const PlayParams& pIn, rta::a
                 ps.bpInputsKnown = true;
             }
             const rta::audio::BpVerdict bpv2 = rta::audio::bp_verdict(bpin2);
-            if (bpv2.state != bpv.state) {
+            if (bpv2.state != bpv.state || bpv2.why != bpv.why) {
                 play_log("PVFIX verdict " + bpv.state + " -> " + bpv2.state +
                          " (physPred=" + (devicePhysOkBeforeOpen ? "1" : "0") +
                          " physMeas=" + (physMeasured ? "1" : "0") +
@@ -5667,12 +5755,16 @@ static bool play_one_impl(const std::string& file, const PlayParams& pIn, rta::a
                     ps.bpWhy = bpv2.why;
                     // 信号链里的结论也要同步改写，否则详情页与底栏会不一致
                     std::string s = ps.signal;
-                    const std::string from = "\"bitPerfect\":\"" + bpv.state + "\"";
-                    const std::string to   = "\"bitPerfect\":\"" + bpv2.state + "\"";
-                    if (auto at = s.find(from); at != std::string::npos) s.replace(at, from.size(), to);
-                    const std::string fromW = "\"bitPerfectWhy\":\"" + bpv.why + "\"";
-                    const std::string toW   = "\"bitPerfectWhy\":\"" + bpv2.why + "\"";
-                    if (auto at2 = s.find(fromW); at2 != std::string::npos) s.replace(at2, fromW.size(), toW);
+                    if (bpv2.state != bpv.state) {
+                        const std::string from = "\"bitPerfect\":\"" + jesc(bpv.state) + "\"";
+                        const std::string to   = "\"bitPerfect\":\"" + jesc(bpv2.state) + "\"";
+                        if (auto at = s.find(from); at != std::string::npos) s.replace(at, from.size(), to);
+                    }
+                    if (bpv2.why != bpv.why) {
+                        const std::string fromW = "\"bitPerfectWhy\":\"" + jesc(bpv.why) + "\"";
+                        const std::string toW   = "\"bitPerfectWhy\":\"" + jesc(bpv2.why) + "\"";
+                        if (auto at2 = s.find(fromW); at2 != std::string::npos) s.replace(at2, fromW.size(), toW);
+                    }
                     ps.signal = s;
                 }
             }
@@ -14703,26 +14795,36 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
         }
         {
             std::lock_guard<std::mutex> lk(ps.mtx);
-            if (ps.playing.load() && ps.bpInputsKnown) {
-                auto inputs = ps.bpInputs;
-                inputs.volumeDb = db;
-                inputs.gainNotUnity = std::abs(db) > 1e-9;
-                {
-                    std::lock_guard<std::mutex> slk(g_activeSinkMtx);
-                    if (auto* ca = dynamic_cast<CoreAudioSink*>(g_activeSink.load()))
-                        inputs.gainNotUnity = std::abs(ca->render_gain() - 1.0) > 1e-12;
+            if (ps.playing.load()) {
+                if (ps.bpInputsKnown) {
+                    auto inputs = ps.bpInputs;
+                    inputs.volumeDb = db;
+                    inputs.gainNotUnity = std::abs(db) > 1e-9;
+                    {
+                        std::lock_guard<std::mutex> slk(g_activeSinkMtx);
+                        if (auto* ca = dynamic_cast<CoreAudioSink*>(g_activeSink.load()))
+                            inputs.gainNotUnity = std::abs(ca->render_gain() - 1.0) > 1e-12;
+                    }
+                    const auto verdict = rta::audio::bp_verdict(inputs);
+                    auto replaceText = [&](const char* key, const std::string& oldValue, const std::string& value) {
+                        const std::string from = std::string("\"") + key + "\":\"" + jesc(oldValue) + "\"";
+                        const std::string to = std::string("\"") + key + "\":\"" + jesc(value) + "\"";
+                        if (auto at = ps.signal.find(from); at != std::string::npos) ps.signal.replace(at, from.size(), to);
+                    };
+                    replaceText("bitPerfect", ps.bpState, verdict.state);
+                    replaceText("bitPerfectWhy", ps.bpWhy, verdict.why);
+                    ps.bpInputs = inputs;
+                    ps.bpState = verdict.state;
+                    ps.bpWhy = verdict.why;
                 }
-                const auto verdict = rta::audio::bp_verdict(inputs);
-                auto replaceText = [&](const char* key, const std::string& oldValue, const std::string& value) {
-                    const std::string from = std::string("\"") + key + "\":\"" + jesc(oldValue) + "\"";
-                    const std::string to = std::string("\"") + key + "\":\"" + jesc(value) + "\"";
-                    if (auto at = ps.signal.find(from); at != std::string::npos) ps.signal.replace(at, from.size(), to);
-                };
-                replaceText("bitPerfect", ps.bpState, verdict.state);
-                replaceText("bitPerfectWhy", ps.bpWhy, verdict.why);
-                ps.bpInputs = inputs;
-                ps.bpState = verdict.state;
-                ps.bpWhy = verdict.why;
+                if (!ps.signal.empty()) {
+                    const double cleanDb = (db == 0.0) ? 0.0 : db;
+                    std::ostringstream volOs;
+                    volOs << cleanDb;
+                    std::string volText = volOs.str();
+                    if (volText == "-0") volText = "0";
+                    replace_json_top_number(ps.signal, "volume", volText);
+                }
             }
         }
         char nb[32];
