@@ -51,6 +51,12 @@ static void Ck(BOOL ok, const char *what, NSString *detail) {
 @property (nonatomic, assign) BOOL holdPeqPost;
 @property (nonatomic, strong) NSMutableArray<dispatch_block_t> *heldPeqPosts;
 @property (nonatomic, strong) NSMutableArray<NSDictionary<NSString *, NSString *> *> *postLog;
+/// 6：让 /api/peq/preset 返回 {ok:false}（模拟后端拒绝写：bands 格式错/写盘失败）
+@property (nonatomic, assign) BOOL failPeqPreset;
+/// 6：让 /api/peq 返回 {ok:false}（同上，走 applyNow 的失败分支）
+@property (nonatomic, assign) BOOL failPeqPost;
+/// 6：/api/peq 的 bands（applyNow 要求 bands.count>0，空数组会让写路径直接早退）
+@property (nonatomic, copy) NSArray<NSDictionary *> *peqBands;
 @end
 
 @implementation RLPPeqWriteReadSpy
@@ -100,7 +106,11 @@ static void Ck(BOOL ok, const char *what, NSString *detail) {
             @"ok": @YES,
             @"bypass": @(self.peqBypassed),
             @"presets": self.peqPresets ?: @[],
-            @"bands": @[],
+            @"bands": self.peqBands ?: @[
+                @{@"freq": @(100), @"gain": @(0), @"q": @(1), @"type": @"PK", @"on": @YES},
+                @{@"freq": @(1000), @"gain": @(0), @"q": @(1), @"type": @"PK", @"on": @YES},
+                @{@"freq": @(10000), @"gain": @(0), @"q": @(1), @"type": @"PK", @"on": @YES},
+            ],
         };
         dispatch_async(dispatch_get_main_queue(), ^{ done(resp); });
         return;
@@ -147,12 +157,14 @@ static void Ck(BOOL ok, const char *what, NSString *detail) {
         BOOL nextBypass = self.peqBypassed;
         if ([b containsString:@"bypass=1"]) nextBypass = YES;
         else if ([b containsString:@"bypass=0"]) nextBypass = NO;
-        NSDictionary *resp = @{@"ok": @YES, @"bypass": @(nextBypass)};
+        NSDictionary *resp = self.failPeqPost
+            ? @{@"ok": @NO, @"error": @"peq.write_failed"}
+            : @{@"ok": @YES, @"bypass": @(nextBypass)};
         RLPJSONCompletion doneCopy = [done copy];
         __weak __typeof__(self) weakSelf = self;
         dispatch_block_t deliver = ^{
             __typeof__(self) self_ = weakSelf;
-            if (self_) self_.peqBypassed = nextBypass;
+            if (self_ && !self_.failPeqPost) self_.peqBypassed = nextBypass;
             if (doneCopy) doneCopy(resp);
         };
         if (self.holdPeqPost) {
@@ -164,16 +176,14 @@ static void Ck(BOOL ok, const char *what, NSString *detail) {
     }
     if ([p isEqualToString:@"/api/peq/preset"]) {
         BOOL nextBypass = [b containsString:@"action=load"] ? self.peqPresetLoadBypass : self.peqBypassed;
-        NSDictionary *resp = @{
-            @"ok": @YES,
-            @"bypass": @(nextBypass),
-            @"presets": self.peqPresets ?: @[],
-        };
+        NSDictionary *resp = self.failPeqPreset
+            ? @{@"ok": @NO, @"error": @"preset.write_failed"}
+            : @{@"ok": @YES, @"bypass": @(nextBypass), @"presets": self.peqPresets ?: @[]};
         RLPJSONCompletion doneCopy = [done copy];
         __weak __typeof__(self) weakSelf = self;
         dispatch_block_t deliver = ^{
             __typeof__(self) self_ = weakSelf;
-            if (self_) self_.peqBypassed = nextBypass;
+            if (self_ && !self_.failPeqPreset) self_.peqBypassed = nextBypass;
             if (doneCopy) doneCopy(resp);
         };
         if (self.holdPeqPost) {
@@ -197,8 +207,17 @@ static void Pump(double seconds) {
                                  beforeDate:[NSDate dateWithTimeIntervalSinceNow:0.01]];
 }
 
-static RLPWorkbenchViewController *MakeOffscreenWorkbench(void) {
-    RLPWorkbenchViewController *vc = [[RLPWorkbenchViewController alloc] init];
+static NSView *FindIdView(NSView *root, NSString *ident) {
+    if (!root) return nil;
+    if ([root.identifier isEqualToString:ident]) return root;
+    for (NSView *v in root.subviews) {
+        NSView *hit = FindIdView(v, ident);
+        if (hit) return hit;
+    }
+    return nil;
+}
+
+static RLPWorkbenchViewController *MakeOffscreenWorkbench(void) {    RLPWorkbenchViewController *vc = [[RLPWorkbenchViewController alloc] init];
     (void)vc.view;
     vc.view.frame = NSMakeRect(0, 0, 1080, 760);
     [vc.view layoutSubtreeIfNeeded];
@@ -438,6 +457,53 @@ int main() {
             Pump(0.05);
             Ck(vc.eqPresetNames.count == 2, "5: later read refreshes after an obsolete write returns",
                [NSString stringWithFormat:@"presets=%@", vc.eqPresetNames]);
+        }
+
+        // -----------------------------------------------------------------
+        // 6. 写被拒后不得闩死：EQ 视图自愈，之后外部设置改动仍能触发读回
+        //    2026-11-18 评审：失败分支只提示、不推进 peqSyncedDraftEpoch ⟹
+        //    hasPendingDraft 永真 ⟹ onExternalEqSettingsChanged / 设置页 reloadData
+        //    永久跳过 [eqView reload]（曲线再也不随外部改动刷新，且没有失效出口）。
+        // -----------------------------------------------------------------
+        {
+            RLPEqualizerView *eq = [[RLPEqualizerView alloc] initWithFrame:NSMakeRect(0, 0, 960, 700)];
+            [eq layoutSubtreeIfNeeded];
+            g_spy.holdPeqGet = NO;
+            g_spy.holdPeqPost = NO;
+            g_spy.failPeqPreset = NO;
+            g_spy.peqPresets = @[@"Flat"];
+            [eq reload];
+            Pump(0.15);
+
+            NSButton *autoPre = (NSButton *)FindIdView(eq, @"peqAutoPre");
+            Ck(autoPre != nil, "6-precondition: EQ 视图里找到「自动前级」按钮", @"缺失");
+            if (autoPre) {
+                const NSUInteger before = g_spy.postLog.count;
+                g_spy.failPeqPost = YES;
+                [autoPre performClick:nil];
+                Pump(0.7);                         // 0.26s 去抖 + 失败回包
+                BOOL sawPeqPost = NO;
+                for (NSUInteger i = before; i < g_spy.postLog.count; ++i) {
+                    if ([g_spy.postLog[i][@"path"] isEqualToString:@"/api/peq"]) sawPeqPost = YES;
+                }
+                Ck(sawPeqPost, "6-precondition: 被拒场景真的发出了 /api/peq",
+                   [NSString stringWithFormat:@"posts=%lu", (unsigned long)g_spy.postLog.count]);
+                g_spy.failPeqPost = NO;
+
+                BOOL pending = YES;
+                SEL ps = NSSelectorFromString(@"hasPendingDraft");
+                if ([eq respondsToSelector:ps]) {
+                    NSMethodSignature *sig = [eq methodSignatureForSelector:ps];
+                    NSInvocation *inv = [NSInvocation invocationWithMethodSignature:sig];
+                    [inv setTarget:eq]; [inv setSelector:ps]; [inv invoke];
+                    [inv getReturnValue:&pending];
+                }
+                Ck(!pending,
+                   "6 写被拒后草稿闩必须自愈（否则设置页 reloadData 与外部改动永远刷新不了 EQ 曲线）",
+                   [NSString stringWithFormat:@"pendingDraft=%d draft=%lu synced=%lu inflight=%lu", (int)pending, (unsigned long)[[eq valueForKey:@"peqDraftEpoch"] unsignedIntegerValue], (unsigned long)[[eq valueForKey:@"peqSyncedDraftEpoch"] unsignedIntegerValue], (unsigned long)[[eq valueForKey:@"peqWriteInFlight"] unsignedIntegerValue]]);
+                g_spy.holdPeqGet = NO;
+                [g_spy.heldPeqGets removeAllObjects];
+            }
         }
 
         method_setImplementation(shared, origShared);

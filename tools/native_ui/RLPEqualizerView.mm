@@ -408,6 +408,24 @@
         || RLPTextFieldIsEditing(self.preamp);
 }
 
+/// 写被拒后的自愈（2026-11-18 评审）：失败分支**不**推进 peqSyncedDraftEpoch，若草稿代次本来就领先，
+/// hasPendingDraft 会一直为真 ⟹ onExternalEqSettingsChanged（以及设置页 reloadData 的
+/// `if (reloadEq && eqView && !hasPendingDraft)` 守卫）永远跳过 [eqView reload]，
+/// 曲线再也不随外部改动刷新，而且没有失效出口。
+/// 做法：失败提示之后重读一次后端真值（reload 成功会把 synced 对齐到当时的草稿代次）。
+/// 只在「被拒之后用户没有继续改草稿」且「没有别的写在途」时执行，避免把新编辑覆盖掉。
+- (void)recoverAfterRejectedWrite:(NSUInteger)rejectedDraftEpoch {
+    __weak __typeof__(self) ws = self;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.4 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        __typeof__(self) s = ws;
+        if (!s) return;
+        if (s.peqWriteInFlight > 0) return;
+        if (s.peqDraftEpoch != rejectedDraftEpoch) return;
+        [s reload];
+    });
+}
+
 - (void)onExternalEqSettingsChanged:(NSNotification *)note {
     if (note.object == self) return;
     if (![RLPCoreClient shared].started) return;
@@ -637,6 +655,7 @@
         if (!json || ![json[@"ok"] boolValue]) {
             NSString *err = [json[@"error"] isKindOfClass:[NSString class]] ? json[@"error"] : RLPTr(@"未知错误");
             RLPToast([RLPTr(@"失败：") stringByAppendingString:err]);
+            [self_ recoverAfterRejectedWrite:sentDraftEpoch];
             return;
         }
         self_.peqSyncedDraftEpoch = sentDraftEpoch;
@@ -1038,6 +1057,7 @@ static NSString *RLPEQTypeCodeNormalized(id raw) {
         if (!json || ![json[@"ok"] boolValue]) {
             NSString *err = [json[@"error"] isKindOfClass:[NSString class]] ? json[@"error"] : RLPTr(@"未知错误");
             self_.status.stringValue = [RLPTr(@"失败：") stringByAppendingString:err];
+            [self_ recoverAfterRejectedWrite:sentDraftEpoch];
             return;
         }
         self_.peqSyncedDraftEpoch = sentDraftEpoch;
@@ -1134,6 +1154,7 @@ static NSString *RLPEQTypeCodeNormalized(id raw) {
         if (!json || ![json[@"ok"] boolValue]) {
             NSString *err = [json[@"error"] isKindOfClass:[NSString class]] ? json[@"error"] : RLPTr(@"未知错误");
             RLPToast([RLPTr(@"预设操作失败：") stringByAppendingString:err]);
+            [self_ recoverAfterRejectedWrite:sentDraftEpoch];
             return;
         }
         self_.peqSyncedDraftEpoch = sentDraftEpoch;
