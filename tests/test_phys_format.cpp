@@ -30,6 +30,10 @@ int main() {
     {
         auto p = pick_physical_format(pocket, 48000, 16);
         ck(!p.ok, "pocket 48k/16 必须拒绝（设备只有 44.1k）");
+        ck(p.why.find("44100") != std::string::npos,
+           "拒绝理由要列出设备可用档位 44100 Hz");
+        ck(p.why.find("可用档位：44100 Hz") != std::string::npos,
+           "可用档位列表只列设备真实支持的 44100 Hz");
     }
     {
         const std::vector<PhysFormat> spk = { {44100, 32, true}, {48000, 32, true}, {96000, 32, true} };

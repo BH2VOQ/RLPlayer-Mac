@@ -5732,6 +5732,12 @@ static bool play_one_impl(const std::string& file, const PlayParams& pIn, rta::a
                 rta::audio::BpInputs b = bpin;
                 b.physStateKnown = !sharedNow;
                 b.physLocked     = physMeasured;
+                if (!sharedNow) {
+                    std::string note = ca->physical_note();
+                    static const std::string kPhysPrefix = "物理格式未锁定：";
+                    if (note.rfind(kPhysPrefix, 0) == 0) note.erase(0, kPhysPrefix.size());
+                    b.physWhy = note;
+                }
                 b.gainNotUnity   = (std::abs(ca->render_gain() - 1.0) > 1e-12);
                 // 容器丢位（源 32-bit 走 float32 / 物理位深不足）也必须进判据，
                 // 否则"数值接近"又会被当成逐位一致。

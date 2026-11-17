@@ -106,8 +106,17 @@ inline PhysPick pick_physical_format(const std::vector<PhysFormat>& avail,
         }
     }
     if (!sawRate) {
+        std::string availRates;
+        for (const PhysFormat& f : avail) {
+            if (f.rate == 0) continue;
+            const std::string token = std::to_string(f.rate);
+            if (availRates.find(token) != std::string::npos) continue;   // 档位去重（近似足够）
+            if (!availRates.empty()) availRates += "/";
+            availRates += token;
+        }
         r.why = "设备物理层没有 " + std::to_string(srcRate) +
-                " Hz 这一档（锁物理格式才能避免 HAL 重采样，此处不做静默转换）";
+                " Hz 这一档（锁物理格式才能避免 HAL 重采样，此处不做静默转换；可用档位：" +
+                (availRates.empty() ? std::string("未知") : availRates) + " Hz）";
         return r;
     }
     if (!sawIntAtRate) {

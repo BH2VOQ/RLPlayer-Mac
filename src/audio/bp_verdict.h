@@ -72,6 +72,9 @@ struct BpInputs {
     //   physLocked     = 后端读回物理格式 == 源格式（整数、同率、位深 >= 源）
     bool     physStateKnown = false;
     bool     physLocked     = false;
+    // 后端 physical_note() 的具体原因（如"设备物理层没有 44100 Hz 这一档"）。
+    // 只用于把 WHY 写具体，不参与锁定判定。
+    std::string physWhy;
     // 开流**之前**设备上是否已有其它客户端在跑（kAudioDevicePropertyDeviceIsRunningSomewhere）。
     // 为什么是"开流之前"：该属性在设备被任意进程使用期间都为 1，含本程序自己；
     // 所以只有开流前的读数能说明"别人也在用"。Hog Mode 并不能挡住别的进程
@@ -137,7 +140,8 @@ inline BpVerdict bp_verdict(const BpInputs& x) {
     // 物理格式没锁上 ⟹ HAL 必然在转换。这条是「真 bit-perfect」的核心判据：
     // 只设虚拟层时，物理层若是 176400 而源是 44100，HAL 正在重采样，而旧代码照样报 yes。
     if (x.physStateKnown && !x.physLocked) {
-        bad("设备物理格式未锁定（HAL 在中间做转换）");
+        bad("设备物理格式未锁定（HAL 在中间做转换）" +
+            (x.physWhy.empty() ? std::string() : "：" + x.physWhy));
     }
     // 开流前设备上已有其它客户端：Hog 挡不住它们在开流后插进来，
     // 求和混音一旦发生就不是逐位直通（macOS 混音器恒为 float32 求和）。

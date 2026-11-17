@@ -185,6 +185,28 @@ int main() {
         const BpVerdict v = bp_verdict(x);
         ck(v.state == "yes", "物理层锁定时不误判", v.state);
     }
+    // 具体失败原因要贯通到 why，而不是只剩一句“HAL 在转换”。
+    {
+        BpInputs x = clean_bitperfect();
+        x.physStateKnown = true;
+        x.physLocked = false;
+        x.physWhy = "设备物理层没有 44100 Hz 这一档";
+        const BpVerdict v = bp_verdict(x);
+        ck(v.state == "no", "带具体物理原因时仍判否", v.state);
+        ck(v.why.find("44100 Hz") != std::string::npos &&
+           v.why.find("设备物理层没有") != std::string::npos,
+           "物理锁定失败的具体原因必须出现在 why 里", v.why);
+    }
+    {
+        BpInputs x = clean_bitperfect();
+        x.physStateKnown = true;
+        x.physLocked = false;
+        const BpVerdict v = bp_verdict(x);
+        ck(v.why.find("设备物理格式未锁定") != std::string::npos &&
+           v.why.find("：") == std::string::npos,
+           "没有具体原因时保持原判据文案且不凭空加冒号", v.why);
+    }
+
     // 共享模式下后端不锁物理层 ⟹ physStateKnown=false，不能因此误判
     {
         BpInputs x = clean_bitperfect();
