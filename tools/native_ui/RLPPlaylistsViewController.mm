@@ -49,6 +49,8 @@
 @property (nonatomic, assign) NSUInteger listSeq;
 @property (nonatomic, assign) NSUInteger itemSeq;
 @property (nonatomic, assign) NSUInteger actionEpoch;
+@property (nonatomic, copy) NSString *lastPlayKey;      // 同键 0.35s 去重（与队列页同口径）
+@property (nonatomic, assign) NSTimeInterval lastPlayAt;
 @end
 
 @implementation RLPPlaylistsViewController
@@ -167,9 +169,12 @@
         c.width = widths[i].doubleValue;
         [self.itemTable addTableColumn:c];
     }
-    // 单击只选中行，双击再起播；避免 action 与 doubleAction 同指 onItemDouble: 造成双击双触发。
-    self.itemTable.action = NULL;
-    self.itemTable.doubleAction = @selector(onItemDouble:);
+    // 与 web 对齐：歌单行 onclick = playSavedQueue(name, i) ⟹ **单击起播**。
+    // 双击不再单独定义（action 与 doubleAction 同指一个 selector 会让一次双击触发两遍，
+    // 2026-11-18 复核：历史修法把 action 置 NULL 只留 doubleAction，结果单击反而没反应、
+    // 与 web/队列页语义相反）。双击按两次单击处理，由 onItemDouble: 里的同键 0.35s 去重挡住。
+    self.itemTable.action = @selector(onItemDouble:);
+    self.itemTable.doubleAction = NULL;
     self.itemTable.target = self;
 
     NSScrollView *is = [[NSScrollView alloc] initWithFrame:NSZeroRect];
@@ -254,8 +259,17 @@
 }
 
 - (void)onItemDouble:(id)sender {
-    const NSInteger row = self.itemTable.clickedRow;
-    if (row < 0) return;
+    // 单击/双击/键盘激活统一入口（action 已挂在 itemTable 上）。
+    NSInteger row = self.itemTable.clickedRow;
+    if (row < 0) row = self.itemTable.selectedRow;   // 键盘与测试路径没有 clickedRow
+    if (row < 0 || row >= (NSInteger)self.items.count) return;
+    // 一次双击 = 两次 activation：同键 0.35s 内只认第一次，避免重复换队列/重复起播。
+    NSString *key = [NSString stringWithFormat:@"%ld:%@", (long)row,
+                     self.items[(NSUInteger)row].file ?: @""];
+    const NSTimeInterval now = [NSProcessInfo processInfo].systemUptime;
+    if ([key isEqualToString:self.lastPlayKey] && now - self.lastPlayAt < 0.35) return;
+    self.lastPlayKey = key;
+    self.lastPlayAt = now;
     [self playFromIndex:row];
 }
 

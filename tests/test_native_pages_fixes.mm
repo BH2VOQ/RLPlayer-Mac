@@ -466,6 +466,39 @@ int main() {
                [g_posts componentsJoinedByString:@" | "]);
         }
 
+        // ---- P3f 歌单行单击即起播（web parity：行 onclick = playSavedQueue(name, i)）----
+        // 2026-11-18 复核：为消双击双触发，历史上把 action 置 NULL 只留 doubleAction，
+        // 但 web 歌单行是**单击**起播（src/net/ui_script.h:3828），同批次队列页也是保留单击。
+        {
+            RLPPlaylistsViewController *pl2 = [RLPPlaylistsViewController new];
+            pl2.view.frame = NSMakeRect(0, 0, 900, 640);
+            [pl2.view layoutSubtreeIfNeeded];
+            [win.contentView addSubview:pl2.view];
+            [pl2 openPlaylist:@"Night Drive"];
+            Pump(0.05);
+
+            NSTableView *pt = [pl2 valueForKey:@"itemTable"];
+            Ck(pt != nil && pt.action == @selector(onItemDouble:),
+               "P3f 歌单行单击有动作（web 行 onclick 起播）",
+               pt ? (NSStringFromSelector(pt.action) ?: @"NULL") : @"itemTable=nil");
+            // 注意：不能断言 `pt.doubleAction == NULL` —— 实测 AppKit 在 doubleAction 未显式设置时
+            // 会把 getter 回落到 action（`setDoubleAction:NULL` 并不改变这一点），那是一条会红的结构断言。
+            // 真正的判据是行为：一次双击（= 两次 activation）只能产生一次 /api/sq/play，见下一条。
+
+            [g_posts removeAllObjects];
+            [pt selectRowIndexes:[NSIndexSet indexSetWithIndex:1] byExtendingSelection:NO];
+            [pt sendAction:pt.action to:pt.target];
+            // 立刻再激活同一行 = 一次双击；同键 0.35s 去重后不应多发一次换队列
+            [pt sendAction:pt.action to:pt.target];
+            Pump(0.08);
+            NSArray<NSDictionary *> *sqPlays = PostsWithPrefix(@"/api/sq/play");
+            Ck(sqPlays.count == 1 &&
+               [sqPlays.firstObject[@"path"] containsString:@"i=1"],
+               "P3f 歌单行单击发出一次 /api/sq/play(i=1)，双击不双触发",
+               [g_posts componentsJoinedByString:@" | "]);
+            [pl2.view removeFromSuperview];
+        }
+
         // ---- P4 右键收藏路径规范化(\ vs /) + 跨页同步 + 入队真实回执 ----
         {
             RLPFavoritesViewController *fav2 = [RLPFavoritesViewController new];
