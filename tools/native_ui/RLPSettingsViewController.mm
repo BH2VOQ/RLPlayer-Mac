@@ -18,6 +18,7 @@
 #import "RLPSettingsViewController.h"
 #import "RLPCoreClient.h"
 #import "RLPSupport.h"
+#include <cstdio>
 #import "RLPTheme.h"
 #import "RLPUpdateWindowController.h"
 #import "RLPEqualizerView.h"
@@ -278,7 +279,15 @@ static NSStackView *RLPSRow(NSString *label, NSView *control, NSString *hint, RL
 @property (nonatomic, strong) NSButton *bpFixBtn;
 @property (nonatomic, copy) NSString *savedUpnpDev;
 @property (nonatomic, copy) NSArray *upnpDevices;
-@property (nonatomic, assign) NSUInteger settingsSeq;
+/// 读回（GET）与保存（POST）各用一套序号（2026-11-18 夜间评审 A2）。
+/// 原来共用一个计数器：一次保存（例如主题切档）就会让**在途的设置读回整包作废**
+/// （切主题重建时 GET 刚发出、POST 紧接着发出 ⟹ GET 回包因 seq 过期全被丢，
+/// 开关/文本框停在上一次的值，用户看到的就是"设置页被重置"）。
+@property (nonatomic, assign) NSUInteger settingsGetSeq;
+@property (nonatomic, assign) NSUInteger settingsPostSeq;
+/// key → 最近一次保存**发起**时刻（systemUptime）。读回回包据此只跳过"在它之后被保存过"的键，
+/// 既不整包丢弃，也不会用旧快照盖掉用户刚保存的值。
+@property (nonatomic, strong) NSMutableDictionary<NSString *, NSNumber *> *settingsKeyPostAt;
 @property (nonatomic, strong) NSView *upnpWrap;
 /// 「目标渲染器」整行字段容器：后端不是 upnp 时连标签一起隐藏（web #sp_upnpwrap 的 display:none）。
 @property (nonatomic, strong) NSView *upnpField;
@@ -1092,16 +1101,23 @@ static NSString *RLPControlIdentifier(NSString *key) {
 
 /// completion(ok)：保存结果落定后回调。用于「改完要刷新派生提示」的控件（例如 SDM 拐点：
 /// 被 422 拒时后端 conf 没写，读回的仍是旧值 —— 提示必须跟着真实状态走，不能拿输入框的值猜）。
+- (NSMutableDictionary<NSString *, NSNumber *> *)settingsKeyPostAt {
+    if (!_settingsKeyPostAt) _settingsKeyPostAt = [NSMutableDictionary dictionary];
+    return _settingsKeyPostAt;
+}
+
 - (void)postKey:(NSString *)key value:(NSString *)value
       completion:(void (^_Nullable)(BOOL ok))completion {
     if (!key.length) return;
     [self.loadedKeys addObject:key];
-    const NSUInteger seq = ++self.settingsSeq;
+    self.settingsKeyPostAt[key] = @([NSProcessInfo processInfo].systemUptime);
+    const NSUInteger seq = ++self.settingsPostSeq;
+    std::fprintf(stderr, "[DIAG] POST %s seq=%lu\n", [[key substringToIndex:MIN(key.length,(NSUInteger)12)] UTF8String], (unsigned long)seq);
     NSString *body = [NSString stringWithFormat:@"%@=%@", key, RLPEnc(value ?: @"")];
     __weak __typeof__(self) weakSelf = self;
     [[RLPCoreClient shared] postJSON:@"/api/settings" body:body completion:^(NSDictionary * _Nullable json) {
         __typeof__(self) self_ = weakSelf;
-        if (!self_ || seq != self_.settingsSeq) return;
+        if (!self_ || seq != self_.settingsPostSeq) return;
         const BOOL ok = (json && [json[@"ok"] boolValue]);
         if (ok) {
             [self_ clearDirtyForBackendKey:key submittedValue:value ?: @""];
@@ -1125,18 +1141,20 @@ static NSString *RLPControlIdentifier(NSString *key) {
 - (void)postKeys:(NSDictionary<NSString *, NSString *> *)kv
       completion:(void (^_Nullable)(BOOL ok))completion {
     NSMutableArray<NSString *> *parts = [NSMutableArray array];
+    const NSTimeInterval postAt = [NSProcessInfo processInfo].systemUptime;
     for (NSString *k in kv) {
         [self.loadedKeys addObject:k];
+        self.settingsKeyPostAt[k] = @(postAt);
         [parts addObject:[NSString stringWithFormat:@"%@=%@", k, RLPEnc(kv[k] ?: @"")]];
     }
     if (!parts.count) return;
-    const NSUInteger seq = ++self.settingsSeq;
+    const NSUInteger seq = ++self.settingsPostSeq;
     __weak __typeof__(self) weakSelf = self;
     [[RLPCoreClient shared] postJSON:@"/api/settings"
                                 body:[parts componentsJoinedByString:@"&"]
                           completion:^(NSDictionary * _Nullable json) {
         __typeof__(self) self_ = weakSelf;
-        if (!self_ || seq != self_.settingsSeq) return;
+        if (!self_ || seq != self_.settingsPostSeq) return;
         const BOOL ok = (json && [json[@"ok"] boolValue]);
         if (ok) {
             for (NSString *k in kv) {
@@ -3877,13 +3895,23 @@ static BOOL RLPFeedbackTextBlank(NSString *s) {
     }];
 
     // 设置：以 kv 为准回填。读不到就不回填 —— 绝不把 UI 默认值写回去覆盖用户设置。
-    // 带 settingsSeq 乱序保护，避免旧 GET 回包覆盖较新的保存结果。
-    const NSUInteger seq = ++self.settingsSeq;
+    // 只与其它读回比较序号（保存另有 settingsPostSeq），并按「发出时刻之后是否被保存过」逐键过滤。
+    const NSUInteger seq = ++self.settingsGetSeq;
+    const NSTimeInterval getIssueAt = [NSProcessInfo processInfo].systemUptime;
     [[RLPCoreClient shared] getJSON:@"/api/settings" completion:^(NSDictionary * _Nullable json) {
         __typeof__(self) self_ = weakSelf;
-        if (!self_ || seq != self_.settingsSeq) return;
-        NSDictionary *kv = [json[@"kv"] isKindOfClass:[NSDictionary class]] ? json[@"kv"] : nil;
-        if (!kv) { self_.statusLine.stringValue = RLPTr(@"设置读取失败"); return; }
+        std::fprintf(stderr, "[DIAG] GET completion seq=%lu cur=%lu\n", (unsigned long)seq, (unsigned long)self_.settingsGetSeq);
+        if (!self_ || seq != self_.settingsGetSeq) return;
+        NSDictionary *rawKV = [json[@"kv"] isKindOfClass:[NSDictionary class]] ? json[@"kv"] : nil;
+        if (!rawKV) { self_.statusLine.stringValue = RLPTr(@"设置读取失败"); return; }
+        // 只跳过「本次读回发出之后又被保存过」的键（那些值由保存本身负责刷新），
+        // 而不是因为期间有过保存就把整包丢掉（2026-11-18 夜间评审 A2）。
+        NSMutableDictionary *kvFiltered = [rawKV mutableCopy];
+        for (NSString *k in rawKV) {
+            NSNumber *postedAt = self_.settingsKeyPostAt[k];
+            if (postedAt && postedAt.doubleValue > getIssueAt) [kvFiltered removeObjectForKey:k];
+        }
+        NSDictionary *kv = kvFiltered;
         // U12（2026-11-16）：拐点准入提示由同一份 GET 的顶层 sdm 对象驱动；
         // 读不到就隐藏（不回落到"猜一个阈值"，那会让 UI 与后端策略分叉）。
         NSDictionary *sdm = [json[@"sdm"] isKindOfClass:[NSDictionary class]] ? json[@"sdm"] : nil;

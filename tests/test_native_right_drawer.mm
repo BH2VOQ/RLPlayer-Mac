@@ -43,6 +43,10 @@ static BOOL g_holdLyrics = NO;
 static NSMutableArray<NSDictionary *> *g_heldLyrics;
 static BOOL g_holdLyricAi = NO;
 static NSMutableArray<RLPJSONCompletion> *g_heldLyricAi;
+static NSDictionary *g_queuePayload;
+static BOOL g_holdQueue = NO;
+static NSMutableArray<NSDictionary *> *g_heldQueue;
+static BOOL g_postQueueNil = NO;
 
 static NSString *LrcA(void) {
     // 6 行带时间戳：第 5 行 t=40s，dur=100 ⟹ pos=0.4000（web toFixed(4) 同口径）
@@ -69,8 +73,13 @@ static void DeliverAsync(RLPJSONCompletion done, NSDictionary *json) {
     [g_gets addObject:@{ @"path": path ?: @"" }];
     if (!done) return;
     if ([path hasPrefix:@"/api/queue"]) {
-        DeliverAsync(done, @{ @"ok": @YES, @"items": g_items, @"cues": g_cues,
-                              @"index": @(g_curIndex), @"mode": @0 });
+        NSDictionary *resp = g_queuePayload ?: @{ @"ok": @YES, @"items": g_items, @"cues": g_cues,
+                                                  @"index": @(g_curIndex), @"mode": @0 };
+        if (g_holdQueue) {
+            if (done) [g_heldQueue addObject:@{ @"done": [done copy], @"resp": resp }];
+            return;
+        }
+        DeliverAsync(done, resp);
         return;
     }
     if ([path hasPrefix:@"/api/lyrics?file="]) {
@@ -89,6 +98,10 @@ static void DeliverAsync(RLPJSONCompletion done, NSDictionary *json) {
 - (void)getData:(NSString *)path completion:(RLPDataCompletion)done { (void)path; if (done) done(nil); }
 - (void)postJSON:(NSString *)path body:(NSString *)body completion:(RLPJSONCompletion)done {
     [g_posts addObject:@{ @"path": path ?: @"" , @"body": body ?: @"" }];
+    if ([path hasPrefix:@"/api/qdel"] && g_postQueueNil) {
+        DeliverAsync(done, nil);
+        return;
+    }
     if ([path isEqualToString:@"/api/lyrics/ai"]) {
         if (g_holdLyricAi && done) {
             [g_heldLyricAi addObject:[done copy]];
@@ -170,6 +183,10 @@ int main() {
         g_posts = [NSMutableArray array];
         g_heldLyrics = [NSMutableArray array];
         g_heldLyricAi = [NSMutableArray array];
+        g_heldQueue = [NSMutableArray array];
+        g_queuePayload = nil;
+        g_holdQueue = NO;
+        g_postQueueNil = NO;
         g_holdLyrics = NO;
         g_holdLyricAi = NO;
         g_items = @[ @"/Music/A/A.flac", @"/Music/B/B.flac" ];
@@ -362,6 +379,79 @@ int main() {
         [[NSNotificationCenter defaultCenter] removeObserver:qObs];
         Ck(qChangedCount >= 1, "D3e deleteIndex: 发送 RLPQueueChangedNotification",
            [NSString stringWithFormat:@"count=%ld", (long)qChangedCount]);
+
+        // ---- D3f：/api/qdel 无回包（网络失败）不得发队列变更通知（旧实现会当成功）----
+        g_postQueueNil = YES;
+        __block NSInteger failChanged = 0;
+        id failObs = [[NSNotificationCenter defaultCenter] addObserverForName:RLPQueueChangedNotification
+                                                                      object:nil
+                                                                       queue:[NSOperationQueue mainQueue]
+                                                                  usingBlock:^(NSNotification *n) {
+            (void)n; ++failChanged;
+        }];
+        {
+            NSMethodSignature *sig = [d methodSignatureForSelector:@selector(deleteIndex:)];
+            NSInvocation *inv = [NSInvocation invocationWithMethodSignature:sig];
+            [inv setTarget:d];
+            [inv setSelector:@selector(deleteIndex:)];
+            NSInteger idx0 = 0;
+            [inv setArgument:&idx0 atIndex:2];
+            [inv invoke];
+        }
+        Pump(0.05);
+        [[NSNotificationCenter defaultCenter] removeObserver:failObs];
+        g_postQueueNil = NO;
+        Ck(failChanged == 0, "D3f qdel 无回包时不发队列变更通知（不把网络失败当已移除）",
+           [NSString stringWithFormat:@"changed=%ld", (long)failChanged]);
+
+        // ---- D4：旧 /api/queue 回包迟到不得覆盖新队列快照 ----
+        NSDictionary *payloadA = @{ @"ok": @YES, @"items": @[ @"/Music/A/A.flac" ],
+                                    @"cues": @[ @[ @(-1), @(-1) ] ], @"index": @0, @"mode": @0 };
+        NSDictionary *payloadB = @{ @"ok": @YES,
+                                    @"items": @[ @"/Music/B/B.flac", @"/Music/C/C.flac" ],
+                                    @"cues": @[ @[ @(-1), @(-1) ], @[ @(-1), @(-1) ] ],
+                                    @"index": @0, @"mode": @0 };
+        g_holdQueue = YES;
+        g_queuePayload = payloadA;
+        [g_heldQueue removeAllObjects];
+        [d performSelector:@selector(loadQueue)];
+        Pump(0.03);
+        g_holdQueue = NO;
+        g_queuePayload = payloadB;
+        [d performSelector:@selector(loadQueue)];
+        Pump(0.05);
+        Ck([[d valueForKey:@"items"] isEqualToArray:payloadB[@"items"]],
+           "D4 新队列快照 B 已生效", @"");
+        if (g_heldQueue.count) {
+            NSDictionary *held = g_heldQueue.firstObject;
+            RLPJSONCompletion doneA = held[@"done"];
+            doneA(held[@"resp"]);
+            Pump(0.05);
+        }
+        Ck([[d valueForKey:@"items"] isEqualToArray:payloadB[@"items"]],
+           "D4 旧队列快照 A 迟到被 loadSeq 丢弃，不得覆盖 B", @"");
+        g_queuePayload = nil;
+
+        // ---- D5：同一行 350ms 内连点只起播一次 ----
+        g_items = @[ @"/Music/A/A.flac", @"/Music/B/B.flac" ];
+        g_cues = @[ @[ @(-1), @(-1) ], @[ @(-1), @(-1) ] ];
+        g_queuePayload = nil;
+        [d performSelector:@selector(loadQueue)];
+        Pump(0.05);
+        [g_posts removeAllObjects];
+        for (NSInteger k = 0; k < 2; ++k) {
+            NSMethodSignature *sig = [d methodSignatureForSelector:@selector(playIndex:)];
+            NSInvocation *inv = [NSInvocation invocationWithMethodSignature:sig];
+            [inv setTarget:d];
+            [inv setSelector:@selector(playIndex:)];
+            NSInteger idx = 0;
+            [inv setArgument:&idx atIndex:2];
+            [inv invoke];
+        }
+        Pump(0.05);
+        Ck(PostsWithPrefix(@"/api/play").count == 1,
+           "D5 同一行连点两次只发一次 /api/play",
+           [NSString stringWithFormat:@"plays=%ld", (long)PostsWithPrefix(@"/api/play").count]);
 
         std::printf("结果：%d passed, %d failed\n", g_pass, g_fail);
         return g_fail == 0 ? 0 : 1;

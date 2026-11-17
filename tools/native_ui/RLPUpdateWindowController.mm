@@ -51,6 +51,9 @@ struct RLPUpdatePlan {
 @property (nonatomic, copy) NSString *remoteVersion;
 @property (nonatomic, copy) NSString *manualUrl;
 @property (nonatomic) BOOL checking;
+@property (nonatomic) BOOL installing;
+@property (nonatomic) BOOL cancelling;
+@property (nonatomic) BOOL installed;
 /// 检查阶段拿到的安装计划：下载/校验/安装全靠它（URL/sha256/size 都由清单给出，
 /// UI 不自己拼 URL——那是安全边界）。没有它就不允许点「立即更新」。
 @property (nonatomic) BOOL hasPlan;
@@ -104,7 +107,9 @@ struct RLPUpdatePlan {
     self.laterBtn.title = RLPTr(@"稍后");
     self.ignoreBtn.title = RLPTr(@"忽略此版本");
     self.cancelBtn.title = RLPTr(@"取消下载");
-    const BOOL relaunch = [self.primaryBtn.title isEqualToString:@"重启"] || [self.primaryBtn.title isEqualToString:@"Relaunch"];
+    const BOOL relaunch = self.installed ||
+        [self.primaryBtn.title isEqualToString:@"重启"] ||
+        [self.primaryBtn.title isEqualToString:@"Relaunch"];
     self.primaryBtn.title = relaunch ? RLPTr(@"重启") : RLPTr(@"立即更新");
 }
 
@@ -166,6 +171,8 @@ struct RLPUpdatePlan {
         [root addSubview:b];
     }
     self.primaryBtn.keyEquivalent = @"\r";
+    self.primaryBtn.enabled = NO;
+    self.ignoreBtn.enabled = NO;
     self.cancelBtn.hidden = YES;
 
     [NSLayoutConstraint activateConstraints:@[
@@ -207,9 +214,61 @@ struct RLPUpdatePlan {
 
 #pragma mark - 检查
 
+- (void)invalidatePlan {
+    self.hasPlan = NO;
+    self.remoteVersion = nil;
+    self.manualUrl = nil;
+#ifdef RLP_HAVE_UPDATE
+    self.planPtr.reset();
+#endif
+    if (!self.installed) {
+        self.primaryBtn.title = RLPTr(@"立即更新");
+        self.primaryBtn.target = self;
+        self.primaryBtn.action = @selector(onPrimary:);
+        self.primaryBtn.enabled = NO;
+        self.ignoreBtn.enabled = NO;
+    }
+}
+
+- (BOOL)canInstallPlan {
+#ifdef RLP_HAVE_UPDATE
+    if (self.checking || self.installing || self.cancelling || self.installed) return NO;
+    if (!self.hasPlan || !self.planPtr) return NO;
+    if (!self.remoteVersion.length) return NO;
+    if (!self.planPtr->plan.available()) return NO;
+    if ([RLPUpdateWindowController isVersionIgnored:self.remoteVersion]) return NO;
+    return YES;
+#else
+    return NO;
+#endif
+}
+
 - (void)checkManually:(BOOL)manually {
 #ifdef RLP_HAVE_UPDATE
-    if (self.checking) return;
+    if (self.checking) {
+        if (manually) RLPToast(RLPTr(@"正在检查…"));
+        return;
+    }
+    if (self.installing || self.cancelling) {
+        if (manually) {
+            RLPToast(self.cancelling ? RLPTr(@"已请求取消") : RLPTr(@"正在更新…"));
+            [self showWindow:nil];
+            [self.window makeKeyAndOrderFront:nil];
+        }
+        return;
+    }
+    if (self.installed) {
+        if (manually) {
+            RLPToast(RLPTr(@"更新已安装"));
+            [self showWindow:nil];
+            [self.window makeKeyAndOrderFront:nil];
+        }
+        return;
+    }
+    // 重新检查即禁用旧计划，防止在途检查期间或后续失败时误装陈旧版本。
+    [self invalidatePlan];
+    self.titleField.stringValue = RLPTr(@"正在检查…");
+    self.notesView.string = @"";
     self.checking = YES;
     __weak __typeof__(self) weakSelf = self;
     rta::update::begin_check(
@@ -218,6 +277,7 @@ struct RLPUpdatePlan {
             if (!self_) return;
             NSString *detail = [NSString stringWithUTF8String:p.detail.c_str()] ?: @"";
             dispatch_async(dispatch_get_main_queue(), ^{
+                if (!self_.checking || self_.installing || self_.cancelling || self_.installed) return;
                 self_.progressText.stringValue = detail;
             });
         },
@@ -228,6 +288,7 @@ struct RLPUpdatePlan {
         });
 #else
     (void)manually;
+    [self invalidatePlan];
     RLPToast(RLPTr(@"本构建未启用更新模块"));
 #endif
 }
@@ -257,43 +318,65 @@ struct RLPUpdatePlan {
 #ifdef RLP_HAVE_UPDATE
 - (void)handleCheckResult:(const rta::update::CheckResult &)r manually:(BOOL)manually {
     self.checking = NO;
+    // 互斥：安装进行中或等待取消终态/待重启期间，不覆盖当前计划与下载态。
+    if (self.installing || self.cancelling || self.installed) {
+        return;
+    }
     NSString *version = [NSString stringWithUTF8String:r.remoteVersion.c_str()] ?: @"";
     NSString *notes = [NSString stringWithUTF8String:r.notes.c_str()] ?: @"";
     NSString *url = [NSString stringWithUTF8String:r.downloadUrl.c_str()] ?: @"";
 
     if (r.up_to_date()) {
+        [self invalidatePlan];
+        self.titleField.stringValue = RLPTr(@"已是最新版本");
+        self.notesView.string = @"";
+        [self switchToInfoState];
         if (manually) RLPToast(RLPTr(@"已是最新版本"));
         return;
     }
     if (!r.available()) {
         // 失败也要如实说：错误原因来自后端/网络层，不是 UI 编的
+        [self invalidatePlan];
         NSString *err = [NSString stringWithUTF8String:r.error.c_str()] ?: @"";
+        NSString *shownErr = err.length ? err : RLPTr(@"检查更新失败");
+        self.titleField.stringValue = RLPTr(@"检查更新失败");
+        self.notesView.string = shownErr;
+        self.hintField.stringValue = err;
+        [self switchToInfoState];
         if (manually) {
-            RLPToast(err.length ? err : RLPTr(@"检查更新失败"));
-            self.hintField.stringValue = err;
+            RLPToast(shownErr);
+            [self showWindow:nil];
+        }
+        return;
+    }
+    if (!version.length) {
+        [self invalidatePlan];
+        self.titleField.stringValue = RLPTr(@"检查更新失败");
+        self.notesView.string = RLPTr(@"检查更新失败");
+        [self switchToInfoState];
+        if (manually) {
+            RLPToast(RLPTr(@"检查更新失败"));
             [self showWindow:nil];
         }
         return;
     }
     if ([RLPUpdateWindowController isVersionIgnored:version]) {
+        [self invalidatePlan];
+        self.titleField.stringValue = [NSString stringWithFormat:RLPTr(@"%@ 已被忽略"), version];
+        self.notesView.string = @"";
+        [self switchToInfoState];
         if (manually) RLPToast([NSString stringWithFormat:RLPTr(@"%@ 已被忽略"), version]);
         return;
     }
     self.remoteVersion = version;
     self.manualUrl = url;
-#ifdef RLP_HAVE_UPDATE
     auto ptr = std::make_shared<RLPUpdatePlan>();
     ptr->plan = r;
     self.planPtr = ptr;
     self.hasPlan = YES;
-#endif
     self.titleField.stringValue = [NSString stringWithFormat:RLPTr(@"发现新版本 %@"), version];
     self.notesView.string = notes;
-    self.infoView.hidden = NO;
-    self.downloadView.hidden = YES;
-    self.cancelBtn.hidden = YES;
-    self.primaryBtn.title = RLPTr(@"立即更新");
-    self.primaryBtn.enabled = YES;
+    [self switchToInfoState];
     [self showWindow:nil];
     [self.window makeKeyAndOrderFront:nil];
 }
@@ -302,16 +385,29 @@ struct RLPUpdatePlan {
 #pragma mark - 出口
 
 - (void)onPrimary:(id)sender {
+    (void)sender;
 #ifdef RLP_HAVE_UPDATE
-    if (!self.remoteVersion.length) return;
-    if (!self.planPtr) {
+    if (self.checking) {
+        RLPToast(RLPTr(@"正在检查…"));
+        return;
+    }
+    if (self.installing || self.cancelling) {
+        RLPToast(self.cancelling ? RLPTr(@"已请求取消") : RLPTr(@"正在更新…"));
+        return;
+    }
+    if (self.installed) return;
+    if (![self canInstallPlan]) {
+        [self invalidatePlan];
         RLPToast(RLPTr(@"更新计划已失效，请重新检查"));
         return;
     }
+    self.installing = YES;
+    self.cancelling = NO;
+    rta::update::CancelToken token;
+    self.planPtr->cancel = token;
+    const rta::update::CheckResult plan = self.planPtr->plan;
     [self switchToDownloadState];
     __weak __typeof__(self) weakSelf = self;
-    const rta::update::CheckResult plan = self.planPtr->plan;
-    const rta::update::CancelToken token = self.planPtr->cancel;
     rta::update::begin_install(plan,
         ^(const rta::update::NativeProgress &p) {
             __typeof__(self) self_ = weakSelf;
@@ -322,6 +418,7 @@ struct RLPUpdatePlan {
             const double pct = p.percent;
             NSString *detail = [NSString stringWithUTF8String:p.detail.c_str()] ?: @"";
             dispatch_async(dispatch_get_main_queue(), ^{
+                if (!self_.installing || self_.cancelling) return;
                 self_.progress.doubleValue = pct >= 0 ? pct : 0;
                 self_.progressText.stringValue = detail.length ? detail : RLPTr(@"正在安装…");
             });
@@ -330,12 +427,25 @@ struct RLPUpdatePlan {
             __typeof__(self) self_ = weakSelf;
             dispatch_async(dispatch_get_main_queue(), ^{
                 if (!self_) return;
+                const BOOL wasCancelled = self_.cancelling || token.cancelled() ||
+                                          (msg && [msg containsString:@"已取消"]);
+                self_.installing = NO;
+                self_.cancelling = NO;
                 if (ok) {
+                    self_.installed = YES;
+                    [self_ invalidatePlan];
+                    self_.cancelBtn.hidden = YES;
+                    self_.cancelBtn.enabled = YES;
                     self_.primaryBtn.title = RLPTr(@"重启");
                     self_.primaryBtn.enabled = YES;
                     self_.primaryBtn.target = self_;
                     self_.primaryBtn.action = @selector(onRelaunch:);
                     self_.progressText.stringValue = msg.length ? msg : RLPTr(@"更新已安装");
+                } else if (wasCancelled) {
+                    // 取消只在后台终态后允许重试，且绝不把取消弹成失败窗。
+                    self_.progressText.stringValue = RLPTr(@"已取消下载");
+                    [self_ switchToInfoState];
+                    RLPToast(RLPTr(@"已取消下载"));
                 } else {
                     self_.progressText.stringValue = msg.length ? msg : RLPTr(@"更新失败");
                     [self_ switchToInfoState];
@@ -354,6 +464,7 @@ struct RLPUpdatePlan {
     self.infoView.hidden = YES;
     self.downloadView.hidden = NO;
     self.cancelBtn.hidden = NO;
+    self.cancelBtn.enabled = YES;
     self.manualBtn.hidden = YES;
     self.ignoreBtn.hidden = YES;
     self.laterBtn.hidden = YES;
@@ -366,26 +477,46 @@ struct RLPUpdatePlan {
     self.infoView.hidden = NO;
     self.downloadView.hidden = YES;
     self.cancelBtn.hidden = YES;
+    self.cancelBtn.enabled = YES;
     self.manualBtn.hidden = NO;
     self.ignoreBtn.hidden = NO;
     self.laterBtn.hidden = NO;
-    self.primaryBtn.enabled = YES;
-    self.primaryBtn.title = RLPTr(@"立即更新");
+    self.ignoreBtn.enabled = (self.remoteVersion.length > 0 && !self.checking && !self.installing && !self.cancelling && !self.installed);
+    if (self.installed) {
+        self.primaryBtn.title = RLPTr(@"重启");
+        self.primaryBtn.target = self;
+        self.primaryBtn.action = @selector(onRelaunch:);
+        self.primaryBtn.enabled = YES;
+    } else {
+        self.primaryBtn.title = RLPTr(@"立即更新");
+        self.primaryBtn.target = self;
+        self.primaryBtn.action = @selector(onPrimary:);
+        self.primaryBtn.enabled = [self canInstallPlan];
+    }
 }
 
 - (void)onLater:(id)sender {
+    (void)sender;
     [self.window close];
 }
 
 - (void)onIgnore:(id)sender {
+    (void)sender;
+    if (self.checking || self.installing || self.cancelling || self.installed) return;
     if (self.remoteVersion.length) {
-        [[NSUserDefaults standardUserDefaults] setObject:self.remoteVersion forKey:kIgnoredVersionKey];
-        RLPToast([NSString stringWithFormat:RLPTr(@"已忽略 %@"), self.remoteVersion]);
+        NSString *ignoredVer = [self.remoteVersion copy];
+        [[NSUserDefaults standardUserDefaults] setObject:ignoredVer forKey:kIgnoredVersionKey];
+        RLPToast([NSString stringWithFormat:RLPTr(@"已忽略 %@"), ignoredVer]);
     }
+    [self invalidatePlan];
+    self.titleField.stringValue = @"";
+    self.notesView.string = @"";
     [self.window close];
 }
 
 - (void)onManual:(id)sender {
+    (void)sender;
+    if (self.checking || self.installing || self.cancelling || self.installed) return;
     if (self.manualUrl.length) {
         NSURL *u = [NSURL URLWithString:self.manualUrl];
         if (u) [[NSWorkspace sharedWorkspace] openURL:u];
@@ -395,11 +526,15 @@ struct RLPUpdatePlan {
 }
 
 - (void)onCancel:(id)sender {
+    (void)sender;
 #ifdef RLP_HAVE_UPDATE
+    if (!self.installing || self.cancelling) return;
+    self.cancelling = YES;
+    self.cancelBtn.enabled = NO;
+    self.primaryBtn.enabled = NO;
     if (self.planPtr) self.planPtr->cancel.cancel();
+    self.progressText.stringValue = RLPTr(@"已请求取消");
 #endif
-    self.progressText.stringValue = RLPTr(@"已取消下载");
-    [self switchToInfoState];
 }
 
 - (void)onRelaunch:(id)sender {

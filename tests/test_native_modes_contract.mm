@@ -37,6 +37,8 @@ static void Ck(BOOL ok, const char *what, NSString *detail) {
 @property (nonatomic, copy) NSString *serverUiMode;
 @property (nonatomic, assign) BOOL holdSettingsGet;
 @property (nonatomic, copy) void (^heldSettingsCompletion)(NSDictionary * _Nullable json);
+@property (nonatomic, assign) BOOL holdSettingsPost;
+@property (nonatomic, copy) void (^heldSettingsPostCompletion)(NSDictionary * _Nullable json);
 @property (nonatomic, strong) NSMutableArray<NSString *> *requests;
 @property (nonatomic, strong) NSMutableArray<NSDictionary *> *posts;
 @end
@@ -82,6 +84,10 @@ static void Ck(BOOL ok, const char *what, NSString *detail) {
 - (void)postJSON:(NSString *)path body:(NSString *)body completion:(RLPJSONCompletion)done {
     [self.requests addObject:[NSString stringWithFormat:@"POST %@", path ?: @""]];
     [self.posts addObject:@{ @"path": path ?: @"", @"body": body ?: @"" }];
+    if ([path isEqualToString:@"/api/settings"] && self.holdSettingsPost) {
+        if (done) self.heldSettingsPostCompletion = [done copy];
+        return;
+    }
     if ([path isEqualToString:@"/api/settings"] && [body containsString:@"uimode="]) {
         if ([body containsString:@"uimode=pro"]) self.serverUiMode = @"pro";
         else if ([body containsString:@"uimode=listen"]) self.serverUiMode = @"listen";
@@ -416,6 +422,87 @@ int main() {
                "C5f 点击打开专业工作台切到 pro 模式并进入数字音乐台",
                [NSString stringWithFormat:@"mode=%@ key=%@ vc=%@", wc.uiMode, wc.sidebar.selectedKey, NSStringFromClass(wc.currentContent.class)]);
         }
+
+        // ---- C6: 在途写与 reload / 连续并发写回滚契约（直接结算 mock completion，无固定 sleep） ----
+        void (^confirmListen)(void) = ^{
+            g_spy.holdSettingsPost = YES;
+            g_spy.heldSettingsPostCompletion = nil;
+            [wc setUiMode:@"listen" persist:YES];
+            RLPJSONCompletion done = [g_spy.heldSettingsPostCompletion copy];
+            g_spy.heldSettingsPostCompletion = nil;
+            g_spy.holdSettingsPost = NO;
+            if (done) done(@{ @"ok": @YES });
+            g_spy.serverUiMode = @"listen";
+        };
+
+        // C6a: 挂起 pro 写时 reload 发出的旧 listen GET 不覆盖乐观 pro（也允许跳过 GET）
+        confirmListen();
+        g_spy.holdSettingsPost = YES;
+        g_spy.heldSettingsPostCompletion = nil;
+        [wc setUiMode:@"pro" persist:YES];
+        RLPJSONCompletion proWrite = [g_spy.heldSettingsPostCompletion copy];
+        g_spy.heldSettingsPostCompletion = nil;
+        g_spy.holdSettingsGet = YES;
+        g_spy.heldSettingsCompletion = nil;
+        [wc reloadUiModePreference];
+        RLPJSONCompletion staleGet = [g_spy.heldSettingsCompletion copy];
+        g_spy.heldSettingsCompletion = nil;
+        g_spy.holdSettingsGet = NO;
+        if (staleGet) staleGet(@{ @"ok": @YES, @"kv": @{ @"uimode": @"listen" } });
+        const BOOL keptPro = [wc.uiMode isEqualToString:@"pro"] && wc.modeControl.selectedSegment == 1;
+        g_spy.serverUiMode = @"pro";
+        if (proWrite) proWrite(@{ @"ok": @YES });
+        g_spy.holdSettingsPost = NO;
+        Ck(proWrite != nil && keptPro &&
+           [wc.uiMode isEqualToString:@"pro"] && wc.modeControl.selectedSegment == 1,
+           "C6a 挂起 pro 写时 reload 发出的旧 listen GET 不覆盖乐观 pro",
+           [NSString stringWithFormat:@"post=%d kept=%d mode=%@ seg=%ld",
+            (int)(proWrite != nil), (int)keptPro, wc.uiMode ?: @"(nil)",
+            (long)wc.modeControl.selectedSegment]);
+
+        // C6b: 已确认 listen 时连续写 pro、listen，两笔均失败最终仍 listen
+        confirmListen();
+        g_spy.holdSettingsPost = YES;
+        g_spy.heldSettingsPostCompletion = nil;
+        [wc setUiMode:@"pro" persist:YES];
+        RLPJSONCompletion bPro = [g_spy.heldSettingsPostCompletion copy];
+        g_spy.heldSettingsPostCompletion = nil;
+        [wc setUiMode:@"listen" persist:YES];
+        RLPJSONCompletion bListen = [g_spy.heldSettingsPostCompletion copy];
+        g_spy.heldSettingsPostCompletion = nil;
+        if (bPro) bPro(@{ @"ok": @NO });
+        if (!bListen) { bListen = [g_spy.heldSettingsPostCompletion copy]; g_spy.heldSettingsPostCompletion = nil; }
+        if (bListen) bListen(@{ @"ok": @NO });
+        g_spy.holdSettingsPost = NO;
+        Ck(bPro != nil && bListen != nil &&
+           [wc.uiMode isEqualToString:@"listen"] && wc.modeControl.selectedSegment == 0,
+           "C6b 已确认 listen 时连续写 pro、listen 两笔均失败最终仍 listen",
+           [NSString stringWithFormat:@"p1=%d p2=%d mode=%@ seg=%ld",
+            (int)(bPro != nil), (int)(bListen != nil), wc.uiMode ?: @"(nil)",
+            (long)wc.modeControl.selectedSegment]);
+
+        // C6c: 同样连续写首笔成功第二笔失败最终 pro，首笔成功时第二笔在途界面仍 listen
+        confirmListen();
+        g_spy.holdSettingsPost = YES;
+        g_spy.heldSettingsPostCompletion = nil;
+        [wc setUiMode:@"pro" persist:YES];
+        RLPJSONCompletion cPro = [g_spy.heldSettingsPostCompletion copy];
+        g_spy.heldSettingsPostCompletion = nil;
+        [wc setUiMode:@"listen" persist:YES];
+        RLPJSONCompletion cListen = [g_spy.heldSettingsPostCompletion copy];
+        g_spy.heldSettingsPostCompletion = nil;
+        g_spy.serverUiMode = @"pro";
+        if (cPro) cPro(@{ @"ok": @YES });
+        const BOOL listenInFlight = [wc.uiMode isEqualToString:@"listen"] && wc.modeControl.selectedSegment == 0;
+        if (!cListen) { cListen = [g_spy.heldSettingsPostCompletion copy]; g_spy.heldSettingsPostCompletion = nil; }
+        if (cListen) cListen(@{ @"ok": @NO });
+        g_spy.holdSettingsPost = NO;
+        Ck(cPro != nil && cListen != nil && listenInFlight &&
+           [wc.uiMode isEqualToString:@"pro"] && wc.modeControl.selectedSegment == 1,
+           "C6c 连续写 pro、listen 首笔成功时在途仍 listen，第二笔失败最终 pro",
+           [NSString stringWithFormat:@"p1=%d p2=%d inFlight=%d mode=%@ seg=%ld",
+            (int)(cPro != nil), (int)(cListen != nil), (int)listenInFlight,
+            wc.uiMode ?: @"(nil)", (long)wc.modeControl.selectedSegment]);
 
         std::printf("\n结果：%d passed, %d failed\n", g_pass, g_fail);
         return g_fail == 0 ? 0 : 1;

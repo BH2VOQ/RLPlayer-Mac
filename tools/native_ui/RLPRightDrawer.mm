@@ -22,6 +22,7 @@
 @interface RLPDrawerQueueRow : NSView
 @property (nonatomic, assign) NSInteger index;
 @property (nonatomic, assign) BOOL current;
+@property (nonatomic, copy) NSString *path;
 @property (nonatomic, copy) NSString *title;
 @property (nonatomic, copy) void (^onPlay)(NSInteger);
 @property (nonatomic, copy) void (^onDelete)(NSInteger);
@@ -252,12 +253,14 @@
 @property (nonatomic, copy) NSArray<RLPLyricLine *> *originalLyricLines;
 @property (nonatomic, assign) BOOL lyricAiApplied;
 @property (nonatomic, assign) BOOL lyricAiBusy;
+@property (nonatomic, assign) BOOL deleteInFlight;
 @property (nonatomic, strong) NSMenu *lyricAiMenu;
 /// 歌词 AI：菜单构造 / 提示 / 请求（实现见文件后半「歌词 AI」段；先声明以避"selector 未声明"告警）。
 - (NSMenu *)lyricAiMenu;
 - (NSMenuItem *)lyricAiItem:(NSString *)title action:(SEL)sel;
 - (void)showLyricHint:(NSString *)msg;
 - (void)runLyricAiTask:(NSString *)task lang:(NSString *)lang;
+- (void)deleteIndex:(NSInteger)i expectedPath:(NSString *)expectedPath;
 @end
 
 @implementation RLPRightDrawer
@@ -508,13 +511,16 @@
     }
     __weak __typeof__(self) w = self;
     for (NSInteger i = 0; i < (NSInteger)self.items.count; ++i) {
-        NSString *path = self.items[(NSUInteger)i];
+        id itemObj = self.items[(NSUInteger)i];
+        NSString *path = [itemObj isKindOfClass:[NSString class]] ? (NSString *)itemObj : @"";
         RLPDrawerQueueRow *row = [[RLPDrawerQueueRow alloc] initWithFrame:NSZeroRect];
         row.index = i;
+        row.path = path;
         row.title = path.lastPathComponent.stringByDeletingPathExtension;
         row.current = (i == self.qIndex);
+        NSString *capturedPath = [path copy];
         row.onPlay = ^(NSInteger idx) { [w playIndex:idx]; };
-        row.onDelete = ^(NSInteger idx) { [w deleteIndex:idx]; };
+        row.onDelete = ^(NSInteger idx) { [w deleteIndex:idx expectedPath:capturedPath]; };
         [self.qStack addArrangedSubview:row];
         [row.widthAnchor constraintEqualToAnchor:self.qStack.widthAnchor].active = YES;
     }
@@ -549,15 +555,65 @@
 }
 
 - (void)deleteIndex:(NSInteger)i {
-    [[RLPCoreClient shared] postJSON:[NSString stringWithFormat:@"/api/qdel?i=%ld", (long)i]
-                                body:nil completion:^(NSDictionary * _Nullable j) {
-        if (!j || ![j[@"ok"] boolValue]) {
-            RLPToast([j[@"error"] isKindOfClass:[NSString class]] ? j[@"error"] : RLPTr(@"移除失败"));
+    [self deleteIndex:i expectedPath:nil];
+}
+
+- (void)deleteIndex:(NSInteger)i expectedPath:(NSString *)expectedPath {
+    if (i < 0) return;
+    if (self.deleteInFlight) return;   // 删除在途时拒绝同 index 重复删除（并避免并发删除导致索引漂移）
+    if (i >= (NSInteger)self.items.count) {
+        if (expectedPath.length) {
+            RLPToast(RLPTr(@"移除失败"));
+            [self loadQueue];
+        }
+        return;
+    }
+    id localObj = self.items[(NSUInteger)i];
+    NSString *localPath = [localObj isKindOfClass:[NSString class]] ? (NSString *)localObj : nil;
+    NSString *capturedPath = expectedPath.length ? [expectedPath copy] : [localPath copy];
+    if (!capturedPath.length) return;
+    if (expectedPath.length && ![localPath isEqualToString:capturedPath]) {
+        RLPToast(RLPTr(@"移除失败"));
+        [self loadQueue];
+        return;
+    }
+    self.deleteInFlight = YES;
+    __weak __typeof__(self) weakSelf = self;
+    [[RLPCoreClient shared] getJSON:@"/api/queue" completion:^(NSDictionary * _Nullable qj) {
+        __typeof__(self) s = weakSelf;
+        if (!s) return;
+        NSArray *qItems = ([qj isKindOfClass:[NSDictionary class]] &&
+                           (!qj[@"ok"] || [qj[@"ok"] boolValue]) &&
+                           [qj[@"items"] isKindOfClass:[NSArray class]])
+                        ? qj[@"items"] : nil;
+        id remoteObj = (qItems && i < (NSInteger)qItems.count) ? qItems[(NSUInteger)i] : nil;
+        id curObj = (i < (NSInteger)s.items.count) ? s.items[(NSUInteger)i] : nil;
+        const BOOL remoteMatch = ([remoteObj isKindOfClass:[NSString class]] &&
+                                  [(NSString *)remoteObj isEqualToString:capturedPath]);
+        const BOOL localMatch = ([curObj isKindOfClass:[NSString class]] &&
+                                 [(NSString *)curObj isEqualToString:capturedPath]);
+        if (!remoteMatch || !localMatch) {
+            s.deleteInFlight = NO;
+            RLPToast(RLPTr(@"移除失败"));
+            [s loadQueue];
             return;
         }
-        RLPToast(RLPTr(@"已移除"));
-        [self loadQueue];
-        [[NSNotificationCenter defaultCenter] postNotificationName:RLPQueueChangedNotification object:self];
+        [[RLPCoreClient shared] postJSON:[NSString stringWithFormat:@"/api/qdel?i=%ld", (long)i]
+                                    body:nil completion:^(NSDictionary * _Nullable j) {
+            __typeof__(self) s2 = weakSelf;
+            if (!s2) return;
+            s2.deleteInFlight = NO;
+            if (!j || ![j[@"ok"] boolValue]) {
+                NSString *err = ([j[@"error"] isKindOfClass:[NSString class]] && [(NSString *)j[@"error"] length])
+                              ? j[@"error"] : RLPTr(@"移除失败");
+                RLPToast(err);
+                if (j) [s2 loadQueue];
+                return;
+            }
+            RLPToast(RLPTr(@"已移除"));
+            [s2 loadQueue];
+            [[NSNotificationCenter defaultCenter] postNotificationName:RLPQueueChangedNotification object:s2];
+        }];
     }];
 }
 

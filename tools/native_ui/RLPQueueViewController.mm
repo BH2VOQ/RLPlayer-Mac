@@ -21,8 +21,10 @@
 #import "RLPSupport.h"
 #import "RLPTrackActions.h"
 #import "RLPTheme.h"
+#import <objc/runtime.h>
 
 static NSString *const kQueueDragType = @"RLPQueueRowDrag";
+static const void *kRLPQueueDeletePathKey = &kRLPQueueDeletePathKey;
 
 /// 队列行视图：web `.qrow` 的 hover / 当前行 / 底部分隔线。
 /// 悬停状态由 RLPHoverRowView 的 tracking area 提供（判据入口 setHoveredForAudit:），
@@ -340,6 +342,12 @@ static NSString *RLPQueueParentFolder(NSString *path) {
         NSButton *btn = nil;
         for (NSView *v in cell.subviews) if ([v isKindOfClass:[NSButton class]]) btn = (NSButton *)v;
         btn.tag = row;
+        if (btn) {
+            objc_setAssociatedObject(btn,
+                                     kRLPQueueDeletePathKey,
+                                     [path isKindOfClass:[NSString class]] ? path : nil,
+                                     OBJC_ASSOCIATION_COPY_NONATOMIC);
+        }
         btn.contentTintColor = t.mut2;
         btn.toolTip = RLPTr(@"从队列移除");
         // 悬停行显示，其它行透明（web .qrow:hover .qdel opacity:1）。
@@ -398,27 +406,92 @@ static NSString *RLPQueueParentFolder(NSString *path) {
     return cell;
 }
 
-/// 行尾 ×：只删这一行（web .qdel），与右键菜单是两条入口，语义相同。
-- (void)onRowDelete:(NSButton *)sender {
-    const NSInteger row = sender.tag;
-    if (row < 0 || row >= (NSInteger)self.paths.count) return;
-    if (self.deleteInFlight) return;   // 连点只认第一次（否则旧 tag 会删掉顶上来那一首）
+- (void)clearHoveredRowAfterDelete {
+    const NSInteger prev = self.hoveredRow;
+    self.hoveredRow = -1;
+    if (prev >= 0 && self.table && prev < self.table.numberOfRows &&
+        prev < (NSInteger)self.paths.count && self.table.numberOfColumns > 3) {
+        [self.table reloadDataForRowIndexes:[NSIndexSet indexSetWithIndex:(NSUInteger)prev]
+                              columnIndexes:[NSIndexSet indexSetWithIndex:3]];
+    }
+}
+
+- (void)deleteRow:(NSInteger)row capturedPath:(NSString *)capturedPath successToast:(NSString *)successToast {
+    if (self.deleteInFlight) return;   // 删除在途时拒绝同 index 重复删除（并避免并发删除导致索引漂移）
+    if (row < 0) {
+        if (capturedPath.length) {
+            [self clearHoveredRowAfterDelete];
+            RLPToast(RLPTr(@"移除失败"));
+            [self reloadData];
+        }
+        return;
+    }
+    if (row >= (NSInteger)self.paths.count) {
+        if (capturedPath.length) {
+            [self clearHoveredRowAfterDelete];
+            RLPToast(RLPTr(@"移除失败"));
+            [self reloadData];
+        }
+        return;
+    }
+    id localObj = self.paths[(NSUInteger)row];
+    NSString *localPath = [localObj isKindOfClass:[NSString class]] ? (NSString *)localObj : nil;
+    NSString *expectedPath = capturedPath.length ? [capturedPath copy] : [localPath copy];
+    if (!expectedPath.length) return;
+    if (capturedPath.length && ![localPath isEqualToString:expectedPath]) {
+        [self clearHoveredRowAfterDelete];
+        RLPToast(RLPTr(@"移除失败"));
+        [self reloadData];
+        return;
+    }
     self.deleteInFlight = YES;
-    NSString *url = [NSString stringWithFormat:@"/api/qdel?i=%ld", (long)row];
     __weak __typeof__(self) weakSelf = self;
-    [[RLPCoreClient shared] postJSON:url body:nil completion:^(NSDictionary * _Nullable json) {
+    [[RLPCoreClient shared] getJSON:@"/api/queue?meta=1" completion:^(NSDictionary * _Nullable qjson) {
         __typeof__(self) self_ = weakSelf;
         if (!self_) return;
-        self_.deleteInFlight = NO;
-        if (!json || ![json[@"ok"] boolValue]) {
-            RLPToast([json[@"error"] isKindOfClass:[NSString class]] ? json[@"error"] : RLPTr(@"移除失败"));
+        NSArray *items = ([qjson isKindOfClass:[NSDictionary class]] &&
+                          (!qjson[@"ok"] || [qjson[@"ok"] boolValue]) &&
+                          [qjson[@"items"] isKindOfClass:[NSArray class]])
+                       ? qjson[@"items"] : nil;
+        id remoteObj = (items && row < (NSInteger)items.count) ? items[(NSUInteger)row] : nil;
+        id curObj = (row < (NSInteger)self_.paths.count) ? self_.paths[(NSUInteger)row] : nil;
+        const BOOL remoteMatch = ([remoteObj isKindOfClass:[NSString class]] &&
+                                  [(NSString *)remoteObj isEqualToString:expectedPath]);
+        const BOOL localMatch = ([curObj isKindOfClass:[NSString class]] &&
+                                 [(NSString *)curObj isEqualToString:expectedPath]);
+        if (!remoteMatch || !localMatch) {
+            self_.deleteInFlight = NO;
+            [self_ clearHoveredRowAfterDelete];
+            RLPToast(RLPTr(@"移除失败"));
             [self_ reloadData];
             return;
         }
-        RLPToast(RLPTr(@"已从队列移除"));
-        [[NSNotificationCenter defaultCenter] postNotificationName:RLPQueueChangedNotification object:self_];
-        [self_ reloadData];
+        NSString *url = [NSString stringWithFormat:@"/api/qdel?i=%ld", (long)row];
+        [[RLPCoreClient shared] postJSON:url body:nil completion:^(NSDictionary * _Nullable json) {
+            __typeof__(self) self2 = weakSelf;
+            if (!self2) return;
+            self2.deleteInFlight = NO;
+            [self2 clearHoveredRowAfterDelete];
+            if (!json || ![json[@"ok"] boolValue]) {
+                NSString *err = ([json[@"error"] isKindOfClass:[NSString class]] && [(NSString *)json[@"error"] length])
+                              ? json[@"error"] : RLPTr(@"移除失败");
+                RLPToast(err);
+                [self2 reloadData];
+                return;
+            }
+            RLPToast(successToast);
+            [[NSNotificationCenter defaultCenter] postNotificationName:RLPQueueChangedNotification object:self2];
+            [self2 reloadData];
+        }];
     }];
+}
+
+/// 行尾 ×：只删这一行（web .qdel），与右键菜单是两条入口，语义相同。
+- (void)onRowDelete:(NSButton *)sender {
+    const NSInteger row = sender ? sender.tag : -1;
+    id assoc = sender ? objc_getAssociatedObject(sender, kRLPQueueDeletePathKey) : nil;
+    NSString *capturedPath = [assoc isKindOfClass:[NSString class]] ? (NSString *)assoc : nil;
+    [self deleteRow:row capturedPath:capturedPath successToast:RLPTr(@"已从队列移除")];
 }
 
 #pragma mark - 拖动排序
@@ -475,24 +548,12 @@ static NSString *RLPQueueParentFolder(NSString *path) {
 
 - (void)onMenuRemove:(id)sender {
     const NSInteger row = self.table.clickedRow;
-    if (row < 0 || row >= (NSInteger)self.paths.count) return;
-    if (self.deleteInFlight) return;
-    self.deleteInFlight = YES;
-    NSString *url = [NSString stringWithFormat:@"/api/qdel?i=%ld", (long)row];
-    __weak __typeof__(self) weakSelf = self;
-    [[RLPCoreClient shared] postJSON:url body:nil completion:^(NSDictionary * _Nullable json) {
-        __typeof__(self) self_ = weakSelf;
-        if (!self_) return;
-        self_.deleteInFlight = NO;
-        if (!json || ![json[@"ok"] boolValue]) {
-            RLPToast([json[@"error"] isKindOfClass:[NSString class]] ? json[@"error"] : RLPTr(@"移除失败"));
-            [self_ reloadData];
-            return;
-        }
-        RLPToast(RLPTr(@"已移除"));
-        [[NSNotificationCenter defaultCenter] postNotificationName:RLPQueueChangedNotification object:self_];
-        [self_ reloadData];
-    }];
+    NSString *capturedPath = nil;
+    if ([sender isKindOfClass:[NSMenuItem class]]) {
+        id rep = ((NSMenuItem *)sender).representedObject;
+        if ([rep isKindOfClass:[NSString class]]) capturedPath = (NSString *)rep;
+    }
+    [self deleteRow:row capturedPath:capturedPath successToast:RLPTr(@"已移除")];
 }
 
 - (void)playRow:(NSInteger)row {

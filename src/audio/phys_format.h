@@ -102,7 +102,10 @@ inline PhysPick pick_physical_format(const std::vector<PhysFormat>& avail,
                 bestExact = f.bits; exactPick = f;
             }
         } else if (f.bits > srcBits) {
-            if (bestAbove < 0 || f.bits < bestAbove) { bestAbove = f.bits; abovePick = f; }
+            if (bestAbove < 0 || f.bits < bestAbove ||
+                (f.bits == bestAbove && f.nonMixable && !abovePick.nonMixable)) {
+                bestAbove = f.bits; abovePick = f;
+            }
         }
     }
     if (!sawRate) {
@@ -121,7 +124,9 @@ inline PhysPick pick_physical_format(const std::vector<PhysFormat>& avail,
     }
     if (!sawIntAtRate) {
         r.floatOnly = sawFloatAtRate;
-        r.why = "端点物理层只有浮点格式（float32），不存在整数逐位直通通路";
+        r.why = sawFloatAtRate
+                    ? "端点物理层只有浮点格式（float32），不存在整数逐位直通通路"
+                    : "设备在此采样率下没有有效位深的整数物理格式（位深 <= 0），无法确认整数逐位直通通路";
         return r;
     }
     if (bestExact > 0) {

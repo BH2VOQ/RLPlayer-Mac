@@ -46,12 +46,22 @@ static void Ck(BOOL ok, const char *what, NSString *detail) {
 @property (nonatomic, copy, nullable) RLPJSONCompletion heldSettingsGet;
 @property (nonatomic, assign) BOOL failSettingsPost;
 @property (nonatomic, copy) NSString *serverUiMode;
+@property (nonatomic, strong, readonly) NSMutableArray<NSMutableDictionary<NSString *, id> *> *postRecords;
+- (NSUInteger)postCount;
+- (NSInteger)findPostSince:(NSUInteger)startIdx
+                      path:(NSString *)path
+                      body:(NSString *)body
+                  outCount:(NSUInteger *)outCount
+           outAllCompleted:(BOOL *)outAllCompleted;
 @end
 
 @implementation RLPNavSpy
 - (instancetype)init {
     self = [super init];
-    if (self) _serverUiMode = @"listen";
+    if (self) {
+        _serverUiMode = @"listen";
+        _postRecords = [NSMutableArray array];
+    }
     return self;
 }
 - (BOOL)started { return YES; }
@@ -76,13 +86,55 @@ static void Ck(BOOL ok, const char *what, NSString *detail) {
     dispatch_async(dispatch_get_main_queue(), ^{ done(json); });
 }
 - (void)postJSON:(NSString *)path body:(NSString *)body completion:(RLPJSONCompletion)done {
-    (void)body;
-    if (!done) return;
-    if ([path isEqualToString:@"/api/settings"] && self.failSettingsPost) {
-        dispatch_async(dispatch_get_main_queue(), ^{ done(@{ @"ok": @NO }); });
-        return;
+    const BOOL shouldFail = [path isEqualToString:@"/api/settings"] && self.failSettingsPost;
+    NSMutableDictionary<NSString *, id> *record = [@{
+        @"path": path ? [path copy] : @"",
+        @"body": body ? [body copy] : @"",
+        @"hasCompletion": @(done != nil),
+        @"completed": @NO,
+    } mutableCopy];
+    @synchronized(self.postRecords) {
+        record[@"seq"] = @(self.postRecords.count);
+        [self.postRecords addObject:record];
     }
-    dispatch_async(dispatch_get_main_queue(), ^{ done(@{ @"ok": @YES }); });
+    if (!done) return;
+    NSDictionary *resp = shouldFail ? @{ @"ok": @NO } : @{ @"ok": @YES };
+    dispatch_async(dispatch_get_main_queue(), ^{
+        done(resp);
+        @synchronized(self.postRecords) {
+            record[@"completed"] = @YES;
+        }
+    });
+}
+- (NSUInteger)postCount {
+    @synchronized(self.postRecords) {
+        return self.postRecords.count;
+    }
+}
+- (NSInteger)findPostSince:(NSUInteger)startIdx
+                      path:(NSString *)path
+                      body:(NSString *)body
+                  outCount:(NSUInteger *)outCount
+           outAllCompleted:(BOOL *)outAllCompleted {
+    NSUInteger count = 0;
+    NSInteger targetSeq = -1;
+    BOOL allDone = YES;
+    @synchronized(self.postRecords) {
+        for (NSUInteger i = startIdx; i < self.postRecords.count; ++i) {
+            NSMutableDictionary<NSString *, id> *rec = self.postRecords[i];
+            if ([rec[@"path"] isEqualToString:path ?: @""] &&
+                (!body || [rec[@"body"] isEqualToString:body])) {
+                ++count;
+                if (targetSeq < 0) targetSeq = [rec[@"seq"] integerValue];
+                if (![rec[@"hasCompletion"] boolValue] || ![rec[@"completed"] boolValue]) {
+                    allDone = NO;
+                }
+            }
+        }
+    }
+    if (outCount) *outCount = count;
+    if (outAllCompleted) *outAllCompleted = (count > 0 && allDone);
+    return targetSeq;
 }
 - (void)getData:(NSString *)path completion:(RLPDataCompletion)done {
     (void)path;
@@ -160,6 +212,18 @@ static void Pump(double seconds) {
     while ([until timeIntervalSinceNow] > 0)
         [[NSRunLoop currentRunLoop] runMode:NSDefaultRunLoopMode
                                  beforeDate:[NSDate dateWithTimeIntervalSinceNow:0.01]];
+}
+
+static BOOL WaitUntil(double timeoutSeconds, BOOL (^pred)(void)) {
+    NSDate *until = [NSDate dateWithTimeIntervalSinceNow:timeoutSeconds];
+    for (;;) {
+        if (pred()) return YES;
+        const NSTimeInterval remain = [until timeIntervalSinceNow];
+        if (remain <= 0) return NO;
+        const NSTimeInterval step = remain < 0.01 ? remain : 0.01;
+        [[NSRunLoop currentRunLoop] runMode:NSDefaultRunLoopMode
+                                 beforeDate:[NSDate dateWithTimeIntervalSinceNow:step]];
+    }
 }
 
 static NSView *FindById(NSView *root, NSString *ident) {
@@ -472,17 +536,50 @@ int main() {
             ((void (*)(id, SEL))g_origWbActivate)(selfObj, @selector(activate));
         });
         method_setImplementation(actM, countImp);
+        const NSUInteger postStart4d1 = [g_spy postCount];
         [wc setUiMode:@"pro" persist:YES];
-        Pump(0.05);
+        __block NSUInteger matched4d1 = 0;
+        __block BOOL allCompleted4d1 = NO;
+        __block NSInteger seq4d1 = -1;
+        const BOOL postDone4d1 = WaitUntil(2.0, ^BOOL {
+            seq4d1 = [g_spy findPostSince:postStart4d1
+                                     path:@"/api/settings"
+                                     body:@"uimode=pro"
+                                 outCount:&matched4d1
+                          outAllCompleted:&allCompleted4d1];
+            return seq4d1 >= 0 && allCompleted4d1;
+        });
         method_setImplementation(actM, g_origWbActivate);
+        Ck(postDone4d1 && seq4d1 >= 0 && matched4d1 == 1,
+           "4d-1 mock POST /api/settings (uimode=pro) 在时限内完成回调处理",
+           [NSString stringWithFormat:@"done=%d seq=%ld matched=%lu",
+            (int)postDone4d1, (long)seq4d1, (unsigned long)matched4d1]);
         Ck(g_wbActivateCount == 1,
            "4d-1 setUiMode 切到 station 只 activate 一次（不因 selectKey+showContentForKey 双发）",
            [NSString stringWithFormat:@"activateCount=%ld", (long)g_wbActivateCount]);
+        Ck([wc.uiMode isEqualToString:@"pro"] && wc.modeControl.selectedSegment == 1,
+           "4d-1 persist:YES 完成后保持原有模式 pro 与 segment=1",
+           [NSString stringWithFormat:@"uiMode=%@ seg=%ld", wc.uiMode, (long)wc.modeControl.selectedSegment]);
 
+        const NSUInteger postStart4d2 = [g_spy postCount];
         g_spy.failSettingsPost = YES;
         [wc setUiMode:@"listen" persist:YES];
-        Pump(0.05);
+        __block NSUInteger matched4d2 = 0;
+        __block BOOL allCompleted4d2 = NO;
+        __block NSInteger seq4d2 = -1;
+        const BOOL postDone4d2 = WaitUntil(2.0, ^BOOL {
+            seq4d2 = [g_spy findPostSince:postStart4d2
+                                     path:@"/api/settings"
+                                     body:@"uimode=listen"
+                                 outCount:&matched4d2
+                          outAllCompleted:&allCompleted4d2];
+            return seq4d2 >= 0 && allCompleted4d2;
+        });
         g_spy.failSettingsPost = NO;
+        Ck(postDone4d2 && seq4d2 >= 0 && matched4d2 == 1,
+           "4d-2 mock POST /api/settings (uimode=listen) 在时限内完成回调处理",
+           [NSString stringWithFormat:@"done=%d seq=%ld matched=%lu",
+            (int)postDone4d2, (long)seq4d2, (unsigned long)matched4d2]);
         Ck([wc.uiMode isEqualToString:@"pro"] && wc.modeControl.selectedSegment == 1,
            "4d-2 persist:YES 当 /api/settings 返回 ok=false 时回滚模式",
            [NSString stringWithFormat:@"uiMode=%@ seg=%ld", wc.uiMode, (long)wc.modeControl.selectedSegment]);

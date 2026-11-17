@@ -114,9 +114,14 @@ static void * const kRLPRightDrawerKVOContext = (void *)&kRLPRightDrawerKVOConte
 @property (nonatomic,strong,nullable) NSTimer *scanPollTimer;
 @property (nonatomic,assign) BOOL scanWasScanning;
 @property (nonatomic, copy, readwrite) NSString *uiMode;
+@property (nonatomic, copy) NSString *confirmedUiMode;
 @property (nonatomic, strong, readwrite) NSSegmentedControl *modeControl;
 @property (nonatomic, assign) NSUInteger modeEpoch;
 @property (nonatomic, assign) NSUInteger modeReadSequence;
+@property (nonatomic, assign) NSUInteger modeWriteSequence;
+@property (nonatomic, assign) NSUInteger modeConfirmedSequence;
+@property (nonatomic, assign) NSUInteger modeBaselineEpoch;
+@property (nonatomic, strong) NSMutableArray<NSNumber *> *inFlightModeWrites;
 @end
 
 /// 视图根节点的 identifier 表 —— **字面量**，不做字符串拼接。
@@ -252,6 +257,8 @@ static void RLPClampWindowToVisibleAndSaveAutosave(NSWindow *win,
     _pageCache = [NSMutableDictionary dictionary];
     _rowStack = [NSMutableArray array];
     _uiMode = @"listen";
+    _confirmedUiMode = @"listen";
+    _inFlightModeWrites = [NSMutableArray array];
     _sidebar = [[RLPSidebarViewController alloc] init];
     _albums = [[RLPAlbumsViewController alloc] init];
     _playbackBar = [[RLPPlaybackBarView alloc] init];
@@ -1266,27 +1273,8 @@ static void RLPClampWindowToVisibleAndSaveAutosave(NSWindow *win,
     [self applyUiMode:mode persist:persist navigateToStation:YES];
 }
 
-- (void)applyUiMode:(NSString *)mode persist:(BOOL)persist navigateToStation:(BOOL)navigate {
-    [self cancelSearchDebounce];
-    NSString *next = [mode isEqualToString:@"pro"] ? @"pro" : @"listen";
-    NSString *prev = [self.uiMode copy];
-    const BOOL changed = ![prev isEqualToString:next];
-    const NSUInteger epoch = ++self.modeEpoch;
-    if (persist && [RLPCoreClient shared].started) {
-        NSString *body = [NSString stringWithFormat:@"uimode=%@", RLPEnc(next)];
-        __weak __typeof__(self) weakSelf = self;
-        [[RLPCoreClient shared] postJSON:@"/api/settings" body:body completion:^(NSDictionary * _Nullable json) {
-            __typeof__(self) self_ = weakSelf;
-            if (!self_ || epoch != self_->_modeEpoch) return;
-            const BOOL ok = [json isKindOfClass:[NSDictionary class]] &&
-                            ![json[@"ok"] isEqual:@NO] &&
-                            (!json[@"ok"] || [json[@"ok"] boolValue]);
-            if (!ok) {
-                RLPToast(RLPTr(@"保存模式设置失败"));
-                [self_ applyUiMode:prev persist:NO navigateToStation:navigate && changed];
-            }
-        }];
-    }
+- (void)applyUiModeDisplay:(NSString *)next navigateToStation:(BOOL)navigate {
+    const BOOL changed = ![self.uiMode isEqualToString:next];
     self.uiMode = next;
     self.modeControl.selectedSegment = [next isEqualToString:@"pro"] ? 1 : 0;
     self.sidebar.uiMode = next;
@@ -1310,16 +1298,75 @@ static void RLPClampWindowToVisibleAndSaveAutosave(NSWindow *win,
     }
 }
 
+- (void)applyUiMode:(NSString *)mode persist:(BOOL)persist navigateToStation:(BOOL)navigate {
+    [self cancelSearchDebounce];
+    NSString *next = [mode isEqualToString:@"pro"] ? @"pro" : @"listen";
+    ++self.modeEpoch;
+    ++self.modeReadSequence;
+    if (persist && [RLPCoreClient shared].started) {
+        const NSUInteger writeSeq = ++self.modeWriteSequence;
+        const NSUInteger baseline = self.modeBaselineEpoch;
+        NSNumber *writeToken = @(writeSeq);
+        [self.inFlightModeWrites addObject:writeToken];
+        [self applyUiModeDisplay:next navigateToStation:navigate];
+        NSString *body = [NSString stringWithFormat:@"uimode=%@", RLPEnc(next)];
+        __weak __typeof__(self) weakSelf = self;
+        [[RLPCoreClient shared] postJSON:@"/api/settings" body:body completion:^(NSDictionary * _Nullable json) {
+            __typeof__(self) self_ = weakSelf;
+            if (!self_) return;
+            if (baseline != self_->_modeBaselineEpoch ||
+                ![self_->_inFlightModeWrites containsObject:writeToken]) {
+                return;
+            }
+            [self_->_inFlightModeWrites removeObject:writeToken];
+            ++self_->_modeEpoch;
+            ++self_->_modeReadSequence;
+            id okVal = [json isKindOfClass:[NSDictionary class]] ? json[@"ok"] : nil;
+            const BOOL ok = [json isKindOfClass:[NSDictionary class]] &&
+                            (!okVal || ([okVal respondsToSelector:@selector(boolValue)] && [okVal boolValue]));
+            if (ok) {
+                if (writeSeq > self_->_modeConfirmedSequence) {
+                    self_.confirmedUiMode = next;
+                    self_->_modeConfirmedSequence = writeSeq;
+                    if (self_->_inFlightModeWrites.count == 0 &&
+                        ![self_.uiMode isEqualToString:self_.confirmedUiMode]) {
+                        [self_ applyUiModeDisplay:self_.confirmedUiMode navigateToStation:navigate];
+                    }
+                }
+                return;
+            }
+            if (writeSeq != self_->_modeWriteSequence) return;
+            RLPToast(RLPTr(@"保存模式设置失败"));
+            NSString *fallback = self_.confirmedUiMode ?: @"listen";
+            [self_ applyUiModeDisplay:fallback navigateToStation:navigate];
+        }];
+        return;
+    }
+    self.confirmedUiMode = next;
+    ++self.modeBaselineEpoch;
+    self.modeConfirmedSequence = self.modeWriteSequence;
+    [self.inFlightModeWrites removeAllObjects];
+    [self applyUiModeDisplay:next navigateToStation:navigate];
+}
+
 - (void)reloadUiModePreference {
     if (![RLPCoreClient shared].started) return;
     const NSUInteger epoch = self.modeEpoch;
     const NSUInteger sequence = ++self.modeReadSequence;
+    const NSUInteger writeSeq = self.modeWriteSequence;
     __weak __typeof__(self) weakSelf = self;
     [[RLPCoreClient shared] getJSON:@"/api/settings" completion:^(NSDictionary * _Nullable json) {
         __typeof__(self) self_ = weakSelf;
-        if (!self_ || epoch != self_->_modeEpoch || sequence != self_->_modeReadSequence) return;
-        NSDictionary *kv = [json[@"kv"] isKindOfClass:[NSDictionary class]] ? json[@"kv"] : nil;
-        if (!kv || [json[@"ok"] isEqual:@NO]) return; // 读取失败不能重置用户模式
+        if (!self_ ||
+            self_->_inFlightModeWrites.count > 0 ||
+            epoch != self_->_modeEpoch ||
+            sequence != self_->_modeReadSequence ||
+            writeSeq != self_->_modeWriteSequence) return;
+        NSDictionary *kv = ([json isKindOfClass:[NSDictionary class]] &&
+                            [json[@"kv"] isKindOfClass:[NSDictionary class]]) ? json[@"kv"] : nil;
+        id okVal = kv ? json[@"ok"] : nil;
+        const BOOL ok = !okVal || ([okVal respondsToSelector:@selector(boolValue)] && [okVal boolValue]);
+        if (!kv || !ok) return; // 读取失败不能重置用户模式
         NSString *raw = [kv[@"uimode"] isKindOfClass:[NSString class]] ? kv[@"uimode"] : nil;
         NSString *resolved = [raw isEqualToString:@"pro"] ? @"pro" : @"listen";
         [self_ applyUiMode:resolved persist:NO navigateToStation:NO];

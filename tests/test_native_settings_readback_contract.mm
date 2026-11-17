@@ -85,7 +85,9 @@ static NSDictionary *gDelayedPayload = nil;
 static BOOL gDelayDone = NO;
 
 static void SwizzledGetJSON(id self, SEL _cmd, NSString *path, RLPJsonDone completion) {
-    if (gDelayPathPrefix.length && [path hasPrefix:gDelayPathPrefix]) {
+    // 只扣第一次匹配的 GET；在途保存本身也可能再发 GET，若覆盖该槽，flush 时送出的
+    // 就不是原本要验证的旧回包（A2 曾因此把 POST 的空响应当成读回结果）。
+    if (gDelayPathPrefix.length && gDelayedBlock == nil && [path hasPrefix:gDelayPathPrefix]) {
         void (*orig)(id, SEL, NSString *, RLPJsonDone) = (void (*)(id, SEL, NSString *, RLPJsonDone))gOrigGetJSON;
         orig(self, _cmd, path, ^(NSDictionary * _Nullable json) {
             gDelayedPayload = json;
@@ -116,6 +118,7 @@ static void FlushDelayed(void) {
 
 @interface RLPSettingsViewController (CoreParityTest)
 - (void)applyUpnpDevicesPayload:(NSDictionary *)json;
+- (void)postKey:(NSString *)key value:(NSString *)value completion:(void (^ _Nullable)(BOOL ok))completion;
 @property (nonatomic, copy) NSString *savedUpnpDev;
 @end
 
@@ -751,6 +754,46 @@ int main(void) {
                @"12f prep>0/warn 非空/error 非空时状态框显示",
                [NSString stringWithFormat:@"prep=%d warn=%d err=%d",
                 prepBox ? prepBox.hidden : -1, warnBox ? warnBox.hidden : -1, errBox ? errBox.hidden : -1]);
+        }
+
+        // ---- A2：设置读回在途期间发生保存，回包不得整包作废 ----
+        // 现状（单计数器 settingsSeq）：GET 取号 N，之后任何 POST 取号 N+1 ⟹ GET 回包因
+        // 「seq 已过期」被整包丢弃 ⟹ 开关/文本框停在上一次的值（切主题重建后看起来像"设置被重置"）。
+        {
+            [settings selectPane:@"out"];
+            WaitUntil(4.0, ^BOOL { return FindId(v, @"sp_buffer") != nil; });
+            NSTextField *bf = (NSTextField *)FindId(v, @"sp_buffer");
+            Ck(bf != nil, @"A2-前置：out 页有 buffer 输入框", @"缺失");
+            if (bf) {
+                // 后端真值改成 4096（页面显示 120），让「GET 是否被应用」可观测
+                [core jsonWithMethod:@"POST" path:@"/api/settings" body:@"buffer=4096"];
+                [settings reloadData];
+                WaitUntil(4.0, ^BOOL { return [bf.stringValue isEqualToString:@"4096"]; });
+                Ck([bf.stringValue isEqualToString:@"4096"], @"A2-前置：buffer 已回读 4096", bf.stringValue);
+
+                // 后端真值改回 120；扣住这次 GET，并在在途期间发一次保存（推进设置页序号）
+                [core jsonWithMethod:@"POST" path:@"/api/settings" body:@"buffer=120"];
+                InstallOrderHook();
+                gDelayPathPrefix = @"/api/settings";
+                gDelayedBlock = nil;
+                gDelayedPayload = nil;
+                gDelayDone = NO;
+                [settings reloadData];
+                Pump(0.2);
+                Ck(gDelayDone, @"A2-前置：/api/settings GET 被扣住（读回在途）", @"");
+                std::printf("  (diag) before POST held=%d block=%p payload=%p\n", (int)gDelayDone, (void *)gDelayedBlock, (__bridge void *)gDelayedPayload);
+                [settings postKey:@"hogexcl" value:@"1" completion:nil];
+                Pump(0.3);
+                std::printf("  (diag) after POST held=%d block=%p payload=%p\n", (int)gDelayDone, (void *)gDelayedBlock, (__bridge void *)gDelayedPayload);
+
+                std::printf("  (diag) flushing block=%p payload=%@\n", (void *)gDelayedBlock, (gDelayedPayload[@"kv"][@"buffer"] ?: @"(nil)"));
+                FlushDelayed();   // 放行 GET 回包（kv.buffer = 120）
+                Pump(0.3);
+                Ck([bf.stringValue isEqualToString:@"120"],
+                   @"A2 读回在途期间的保存不得让整包回读作废（buffer 仍应回读 120）",
+                   [NSString stringWithFormat:@"buffer=%@", bf.stringValue]);
+                gDelayPathPrefix = nil;
+            }
         }
 
         [RLPTheme setThemeName:@"dark"];

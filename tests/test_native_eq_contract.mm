@@ -52,10 +52,27 @@ static void Pump(NSTimeInterval s) {
         [[NSRunLoop currentRunLoop] runMode:NSDefaultRunLoopMode
                                  beforeDate:[NSDate dateWithTimeIntervalSinceNow:0.02]];
 }
+static BOOL WaitUntil(NSTimeInterval timeout, BOOL (^pred)(void)) {
+    NSDate *until = [NSDate dateWithTimeIntervalSinceNow:timeout];
+    while ([until timeIntervalSinceNow] > 0) {
+        @autoreleasepool {
+            if (pred()) return YES;
+            Pump(0.02);
+        }
+    }
+    return pred();
+}
 static void Collect(NSView *v, NSMutableArray<NSView *> *out) {
     if (!v) return;
     [out addObject:v];
     for (NSView *s in v.subviews) Collect(s, out);
+}
+static RLPEQFaderView *FindFaderView(NSView *root) {
+    NSMutableArray<NSView *> *all = [NSMutableArray array];
+    Collect(root, all);
+    for (NSView *v in all)
+        if ([v isKindOfClass:[RLPEQFaderView class]]) return (RLPEQFaderView *)v;
+    return nil;
 }
 static NSView *FindId(NSView *root, NSString *ident) {
     NSMutableArray<NSView *> *all = [NSMutableArray array];
@@ -130,7 +147,54 @@ int main() {
         ]];
         [eq setEmbeddedInPage:YES];
         [eq reload];
-        Pump(1.0);
+        const NSUInteger kExpectedInitialBands = 20;
+        const NSTimeInterval kInitialReloadTimeout = 10.0;
+        NSDate *reloadStart = [NSDate date];
+        __block BOOL initialReadFailed = NO;
+        const BOOL initialWaitDone = WaitUntil(kInitialReloadTimeout, ^BOOL {
+            RLPEQFaderView *fv = FindFaderView(eq);
+            if (fv && fv.bandFreqs.count == kExpectedInitialBands) return YES;
+            id stObj = [eq valueForKey:@"status"];
+            NSString *statusText = [stObj isKindOfClass:[NSTextField class]]
+                ? (((NSTextField *)stObj).stringValue ?: @"") : @"";
+            if ([statusText isEqualToString:RLPTr(@"读取失败")] ||
+                [statusText isEqualToString:RLPTr(@"核心未启动")] ||
+                [statusText isEqualToString:@"读取失败"] ||
+                [statusText isEqualToString:@"核心未启动"]) {
+                initialReadFailed = YES;
+                return YES;
+            }
+            return NO;
+        });
+        RLPEQFaderView *fvInit = FindFaderView(eq);
+        const NSUInteger freqCount = fvInit ? fvInit.bandFreqs.count : 0;
+        const NSUInteger gainCount = fvInit ? fvInit.bandGains.count : 0;
+        id bandsObj = [eq valueForKey:@"bands"];
+        const NSUInteger bandsCount = [bandsObj isKindOfClass:[NSArray class]] ? ((NSArray *)bandsObj).count : 0;
+        id statusObj = [eq valueForKey:@"status"];
+        NSString *statusText = [statusObj isKindOfClass:[NSTextField class]]
+            ? (((NSTextField *)statusObj).stringValue ?: @"") : @"(nil)";
+        const NSUInteger reqSeq = [[eq valueForKey:@"peqReqSeq"] unsignedIntegerValue];
+        const NSUInteger draftEpoch = [[eq valueForKey:@"peqDraftEpoch"] unsignedIntegerValue];
+        const NSUInteger syncedEpoch = [[eq valueForKey:@"peqSyncedDraftEpoch"] unsignedIntegerValue];
+        const NSUInteger writeInFlight = [[eq valueForKey:@"peqWriteInFlight"] unsignedIntegerValue];
+        const BOOL loading = [[eq valueForKey:@"loading"] boolValue];
+        const double elapsedSec = -[reloadStart timeIntervalSinceNow];
+        const BOOL initialReloadReady = initialWaitDone && !initialReadFailed && (freqCount == kExpectedInitialBands);
+        NSString *waitReason = initialReloadReady
+            ? @"ok"
+            : (initialReadFailed ? @"终态读失败"
+                                 : [NSString stringWithFormat:@"超时(%.1fs)", kInitialReloadTimeout]);
+        NSString *initialDiag = [NSString stringWithFormat:
+            @"reason=%@ elapsed=%.3fs freqCount=%lu gainCount=%lu bands=%lu status='%@' reqSeq=%lu draftEpoch=%lu syncedEpoch=%lu writeInFlight=%lu loading=%d started=%d hasFader=%d",
+            waitReason, elapsedSec,
+            (unsigned long)freqCount, (unsigned long)gainCount, (unsigned long)bandsCount,
+            statusText, (unsigned long)reqSeq, (unsigned long)draftEpoch,
+            (unsigned long)syncedEpoch, (unsigned long)writeInFlight,
+            (int)loading, (int)core.started, (int)(fvInit != nil)];
+        Ck(initialReloadReady,
+           @"E3 前置：初始 reload 填入预期 20 段推子频率（非终态读失败或超时）",
+           initialDiag);
         [win layoutIfNeeded];
         [doc layoutSubtreeIfNeeded];
         [eq layoutSubtreeIfNeeded];

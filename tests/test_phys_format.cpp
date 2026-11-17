@@ -118,6 +118,42 @@ int main() {
         auto v2 = rta::audio::three_layer_verdict(auhal);
         ck(!v2.ok, "AUHAL 语义下 nominal 被改回去仍必须判否");
     }
+    // ---------------- [9] 补零候选同率同位宽优先 NonMixable + bits<=0 非浮点不误报浮点 ----------------
+    std::printf("\n[9] bestAbove NonMixable 优先 + bits<=0 非浮点拒绝理由\n");
+    {
+        const std::vector<PhysFormat> pad = {
+            {44100, 24, false, false, 0x0c},
+            {44100, 24, false, true,  0x4c},
+        };
+        auto p = pick_physical_format(pad, 44100, 16);
+        ck(p.ok && p.zeroPad && p.pick.bits == 24,
+           "补零候选 44k/16->24 可锁且标记 zeroPad");
+        ck(p.pick.nonMixable && p.nonMixable && p.pick.flags == 0x4c,
+           "同率同位宽时 bestAbove 补零候选须优先选 NonMixable(0x40) 且保留 flags");
+    }
+    {
+        const std::vector<PhysFormat> badBits = {
+            {44100, 0, false},
+            {44100, -1, false},
+            {48000, 24, false},
+        };
+        auto p = pick_physical_format(badBits, 44100, 16);
+        ck(!p.ok, "同率只有 bits<=0 非浮点候选必须拒绝（不放宽 bit-perfect）");
+        ck(!p.floatOnly, "同率只有 bits<=0 非浮点候选不得标成 floatOnly");
+        ck(!p.why.empty() &&
+               p.why.find("只有浮点") == std::string::npos &&
+               p.why.find("浮点") == std::string::npos,
+           "同率只有 bits<=0 非浮点候选时不得报“只有浮点”");
+
+        const std::vector<PhysFormat> floatOnlyDev = { {44100, 32, true} };
+        auto pf = pick_physical_format(floatOnlyDev, 44100, 16);
+        ck(!pf.ok && pf.floatOnly && pf.why.find("只有浮点") != std::string::npos,
+           "真正只有浮点时保留 floatOnly=true 与“只有浮点”文案");
+
+        auto pm = pick_physical_format(badBits, 96000, 16);
+        ck(!pm.ok && pm.why.find("可用档位：44100/48000 Hz") != std::string::npos,
+           "未命中采样率时保留现有可用档位文案");
+    }
     std::printf("\n%s (%d failures)\n", fails ? "RED" : "GREEN", fails);
     return fails ? 1 : 0;
 }

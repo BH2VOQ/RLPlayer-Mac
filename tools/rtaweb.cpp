@@ -128,6 +128,7 @@ using rta::render::SinkOpenOpts;
 #include <ctime>
 #include <csignal>
 #include <cstdlib>                 // strtol：--port 严格解析（2026-10-25 等号形式）
+#include <limits>
 
 namespace fs = std::filesystem;
 using namespace rta;
@@ -421,6 +422,11 @@ struct PlayParams {
     // 给了 cueStart 却读不了/越界 ⟹ **明确报错**，绝不静默从头播（那样用户只会以为 cue 没生效）。
     double cueStart = -1.0;
     double cueEnd   = -1.0;
+    bool   cueStartInvalid = false;
+    bool   cueEndInvalid   = false;
+    bool   hasIndex        = false;
+    bool   indexValid      = false;
+    size_t queueIndex      = 0;
     std::string remoteId;        // 远程曲目 id（Subsonic）
     std::string remoteSuffix;    // 远程文件后缀，决定缓存文件名
     std::string remoteTitle;
@@ -788,6 +794,36 @@ static bool parse_num_strict(const std::string& s, double& out) {
     if (!std::isfinite(v)) return false;
     out = v;
     return true;
+}
+
+// 严格无符号整数解析：仅接受非空十进制数字，拒绝负号/小数/空白/尾部字符/溢出
+static bool parse_size_strict(const std::string& s, size_t& out) {
+    if (s.empty()) return false;
+    size_t v = 0;
+    for (unsigned char c : s) {
+        if (c < '0' || c > '9') return false;
+        const size_t d = (size_t)(c - '0');
+        if (v > (std::numeric_limits<size_t>::max)() / 10) return false;
+        const size_t v10 = v * 10;
+        if (d > (std::numeric_limits<size_t>::max)() - v10) return false;
+        v = v10 + d;
+    }
+    out = v;
+    return true;
+}
+
+// 合并 URL 查询串与表单 body（同名键以后出现的 body 为准）
+static std::string request_form_params(const rta::net::HttpRequest& rq) {
+    std::string combined;
+    const size_t qpos = rq.path.find('?');
+    if (qpos != std::string::npos && qpos + 1 < rq.path.size()) {
+        combined = rq.path.substr(qpos + 1);
+    }
+    if (!rq.body.empty()) {
+        if (!combined.empty()) combined += '&';
+        combined += rq.body;
+    }
+    return combined;
 }
 
 // 持 g_ps.mtx 调用：原始 DSD 逐位直通播放期间拒绝非 0 dB 音量写入
@@ -2103,9 +2139,50 @@ static PlayParams parseForm(const std::string& body, std::set<std::string>* seen
         else if (k == "rgpreamp" || k == "rg_preamp" || k == "rg.preamp" || k == "preamp") p.rgPreamp = atof(v.c_str());
         else if (k == "rgpreventclip" || k == "rgpreventclipping" || k == "rg_preventclipping" || k == "rg.preventclipping" || k == "rg.preventClipping")
             p.rgPreventClip = (v == "1" || v == "true");
-        // CUE 分轨区间（秒，浮点）。不带 cue_start ⟹ 整首（cueStart 保持 -1）。
-        else if (k == "cue_start") p.cueStart = atof(v.c_str());
-        else if (k == "cue_end")   p.cueEnd   = atof(v.c_str());
+        // CUE 分轨区间（秒，浮点）。同时支持 cue_start/cue_end 与 cs/ce；
+        // 不带或空串 ⟹ 整首（-1）；非空则必须为有限数且 >=0（或显式哨兵 -1）。
+        else if (k == "cue_start" || k == "cs") {
+            if (v.empty()) {
+                p.cueStart = -1.0;
+                p.cueStartInvalid = false;
+            } else {
+                double cv = -1.0;
+                if (parse_num_strict(v, cv) && (cv >= 0.0 || cv == -1.0)) {
+                    p.cueStart = cv;
+                    p.cueStartInvalid = false;
+                } else {
+                    p.cueStart = -1.0;
+                    p.cueStartInvalid = true;
+                }
+            }
+        }
+        else if (k == "cue_end" || k == "ce") {
+            if (v.empty()) {
+                p.cueEnd = -1.0;
+                p.cueEndInvalid = false;
+            } else {
+                double cv = -1.0;
+                if (parse_num_strict(v, cv) && (cv >= 0.0 || cv == -1.0)) {
+                    p.cueEnd = cv;
+                    p.cueEndInvalid = false;
+                } else {
+                    p.cueEnd = -1.0;
+                    p.cueEndInvalid = true;
+                }
+            }
+        }
+        else if (k == "index") {
+            if (v.empty()) {
+                p.hasIndex = false;
+                p.indexValid = false;
+                p.queueIndex = 0;
+            } else {
+                size_t qi = 0;
+                p.hasIndex = true;
+                p.indexValid = parse_size_strict(v, qi);
+                p.queueIndex = p.indexValid ? qi : 0;
+            }
+        }
         else if (k == "rid")     p.remoteId = v;
         else if (k == "rsuffix") p.remoteSuffix = v;
         else if (k == "rtitle")  p.remoteTitle = v;
@@ -2126,7 +2203,7 @@ static PlayParams parseForm(const std::string& body, std::set<std::string>* seen
 //   ⟹ 兜底只属于"真的要把参数用于播放"的路径，不能属于"解析表单"这个公共动作。
 //
 // 严格绝缘（这些键**永不**从 conf 兜底，否则会串烧队列 / CUE / 远程曲目）：
-//   file, cue_start, cue_end, rid, rsuffix, rtitle, initialSeekFrac, srcbits, dsdnative
+//   file, cue_start, cue_end, cs, ce, index, rid, rsuffix, rtitle, initialSeekFrac, srcbits, dsdnative
 static PlayParams apply_conf_defaults_for_play(const PlayParams& in, const std::set<std::string>& seen) {
     PlayParams p = in;
     // 2026-11-16：把「文件缺失」与「键缺失」区分开。以前两者都是同一个空 map ⟹ 写盘窗口
@@ -6101,6 +6178,10 @@ struct QueueState {
     int    mode = 0;        // 0=顺序 1=列表循环 2=单曲循环 3=随机（唯一真相源）
     std::vector<QItem> base;   // 随机前的原始顺序（关掉随机时还原）
     std::vector<QItem> sortBase; // 排序前的原始顺序（恢复默认顺序用）
+    // 紧跟 POST /api/sq/play?name=...&i=k 的下一发 /api/play（无显式 index）的预期起始槽位；
+    // 任何其他队列/模式/跳曲变更立即失效，避免重复路径被从 0 搜索拉回第 0 首。
+    bool   sqPending = false;
+    size_t sqPendingIndex = 0;
 
     // ---- 派生访问器：给既有代码用，语义与旧字段一一对应 ----
     // repeat：0=关 1=列表循环 2=单曲循环。随机模式下 repeat 视为 0（随机不循环）。
@@ -6158,6 +6239,8 @@ static void queue_shuffle_locked(std::size_t avoid) {
 
 static void queue_set_mode_locked(int want) {
     if (want < 0 || want > 3) want = 0;
+    g_q.sqPending = false;
+    g_q.sqPendingIndex = 0;
     const QItem cur = (g_q.index < g_q.items.size()) ? g_q.items[g_q.index] : QItem();
     const bool wasShuffle = g_q.shuffle_of();
     const bool wantShuffle = (want == 3);
@@ -6177,6 +6260,8 @@ static void queue_set_mode_locked(int want) {
 }
 
 static bool queue_advance_locked(const QItem& finishedCur, size_t fallbackIdx, size_t& outIdx) {
+    g_q.sqPending = false;
+    g_q.sqPendingIndex = 0;
     if (g_q.items.empty()) return false;
     bool found = false;
     size_t curIdx = 0;
@@ -7630,6 +7715,8 @@ static void queue_load() {
     std::lock_guard<std::mutex> lk(g_q.mtx);
     std::string line;
     g_q.items.clear();
+    g_q.sqPending = false;
+    g_q.sqPendingIndex = 0;
     // R-4：优先读 mode；老文件只有 repeat/shuffle 时按旧语义推导一次（单向兼容）
     bool hasMode = false;
     int  oldRepeat = 0;
@@ -10423,12 +10510,21 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
         // 播放整张专辑（?k=专辑键&i=起始曲序），队列被换成这张专辑
         if (rq.path.rfind("/api/lib/play", 0) == 0) {
             // L-2：播放路径才吃 conf 兜底（前端未传的键用用户在设置页保存的值）。
+            const std::string form = request_form_params(rq);
             std::set<std::string> seenKeys;
-            PlayParams p = apply_conf_defaults_for_play(parseForm(rq.body, &seenKeys), seenKeys);
+            PlayParams p = apply_conf_defaults_for_play(parseForm(form, &seenKeys), seenKeys);
+            if (p.cueStartInvalid || p.cueEndInvalid)
+                return "{\"ok\":false,\"error\":\"cue_start/cue_end/cs/ce 参数非法\"}";
+            if (p.cueStart < 0.0 && p.cueEnd >= 0.0)
+                return "{\"ok\":false,\"error\":\"cue_end/ce 需要同时提供 cue_start/cs（只给终点没有意义）\"}";
+            if (p.cueStart >= 0.0 && p.cueEnd >= 0.0 && p.cueEnd <= p.cueStart)
+                return "{\"ok\":false,\"error\":\"cue_start/cue_end/cs/ce 区间非法\"}";
+            if (!p.file.empty() && !valid_utf8(p.file))
+                return utf8_path_reject(p.file);
             std::string key;
             size_t start = 0;
             {
-                std::istringstream is(rq.body);
+                std::istringstream is(form);
                 std::string tok;
                 while (std::getline(is, tok, (char)38)) {
                     const size_t e = tok.find((char)61);
@@ -10436,7 +10532,10 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
                     const std::string kk = urlDecode(tok.substr(0, e));
                     const std::string vv = urlDecode(tok.substr(e + 1));
                     if (kk == "k") key = vv;
-                    else if (kk == "i") start = (size_t)atoi(vv.c_str());
+                    else if (kk == "i") {
+                        size_t parsedStart = 0;
+                        start = (!vv.empty() && parse_size_strict(vv, parsedStart)) ? parsedStart : 0;
+                    }
                 }
             }
             rta::net::LibAlbum a;
@@ -10453,16 +10552,18 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
             }
             if (items.empty()) return "{\"ok\":false,\"error\":\"专辑为空\"}";
             if (start >= items.size()) start = 0;
-            // 可选 cue_start/cue_end（前端点某一轨时显式带上）：覆盖起始曲目的区间。
+            if (!p.file.empty() && p.file != items[start].path)
+                return "{\"ok\":false,\"error\":\"file 参数与专辑指定曲目不一致\"}";
+            // 可选 cue_start/cue_end 或 cs/ce（前端点某一轨时显式带上）：覆盖起始曲目的区间。
             // 用途是"前端与库必须说同一句话"：库读不出区间（例如索引来自旧版）时，前端仍能播对。
             if (p.cueStart >= 0.0) {
-                if (p.cueEnd >= 0.0 && p.cueEnd <= p.cueStart)
-                    return "{\"ok\":false,\"error\":\"cue_start/cue_end 区间非法\"}";
                 items[start].cs = p.cueStart;
                 items[start].ce = p.cueEnd;
             }
             {
                 std::lock_guard<std::mutex> lk(g_q.mtx);
+                g_q.sqPending = false;
+                g_q.sqPendingIndex = 0;
                 g_q.sortBase.clear();
                 if (g_q.shuffle_of()) {
                     g_q.base = items;
@@ -10477,6 +10578,9 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
                     g_q.index = start;
                 }
             }
+            p.file = items[start].path;
+            p.cueStart = items[start].cs;
+            p.cueEnd = items[start].ce;
             queue_save();
             params_store(p);
             // 2026-10-30 真机 bug（用户实测 B1）：「投放 A 后再点 B 切不过去，界面卡在 A」。
@@ -10545,6 +10649,8 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
             size_t cnt = 0;
             {
                 std::lock_guard<std::mutex> lk(g_q.mtx);
+                g_q.sqPending = false;
+                g_q.sqPendingIndex = 0;
                 size_t added = 0;
                 for (size_t ix : a.idx) {
                     rta::net::LibTrack t;
@@ -11052,13 +11158,16 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
                 if (!found) return "{\"ok\":false,\"error\":\"队列不存在\"}";
             }
             if (items.empty()) return "{\"ok\":false,\"error\":\"这个队列是空的\"}";
-            size_t idx = idxS.empty() ? 0 : (size_t)std::max(0, atoi(idxS.c_str()));
+            size_t idx = 0;
+            if (!idxS.empty() && !parse_size_strict(idxS, idx)) idx = 0;
             if (idx >= items.size()) idx = 0;
             size_t cnt = 0;
             {
                 std::lock_guard<std::mutex> lk(g_q.mtx);
                 g_q.items = std::move(items);
                 g_q.index = idx;
+                g_q.sqPending = true;
+                g_q.sqPendingIndex = idx;
                 if (g_q.shuffle_of()) g_q.base = g_q.items;
                 else g_q.base.clear();
                 g_q.sortBase.clear();
@@ -11255,6 +11364,8 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
                 std::lock_guard<std::mutex> lk(g_q.mtx);
                 g_q.items = items;
                 g_q.index = 0;
+                g_q.sqPending = false;
+                g_q.sqPendingIndex = 0;
                 if (g_q.shuffle_of()) g_q.base = g_q.items;
                 else g_q.base.clear();
                 g_q.sortBase.clear();
@@ -11349,12 +11460,19 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
     if (rq.path.rfind("/api/play", 0) == 0) {
         ct = "application/json; charset=utf-8";
         // L-2：播放路径才吃 conf 兜底；/api/repeat /api/add 不受影响（见 apply_conf_defaults_for_play 注释）
+        const std::string form = request_form_params(rq);
         std::set<std::string> seenKeys;
-        PlayParams p = apply_conf_defaults_for_play(parseForm(rq.body, &seenKeys), seenKeys);   // 非 const：远程曲目会把 p.file 换成缓存路径
+        PlayParams p = apply_conf_defaults_for_play(parseForm(form, &seenKeys), seenKeys);   // 非 const：远程曲目会把 p.file 换成缓存路径
         if (p.dsd < 0) {
             rta::net::webui_set_status(400);
             return "{\"ok\":false,\"code\":\"dsd.invalid\",\"error\":\"DSD 倍率非法，请重新选择 PCM 或 DSD64–512 DoP\"}";
         }
+        if (p.cueStartInvalid || p.cueEndInvalid)
+            return "{\"ok\":false,\"error\":\"cue_start/cue_end/cs/ce 参数非法\"}";
+        if (p.cueStart < 0.0 && p.cueEnd >= 0.0)
+            return "{\"ok\":false,\"error\":\"cue_end/ce 需要同时提供 cue_start/cs（只给终点没有意义）\"}";
+        if (p.cueStart >= 0.0 && p.cueEnd >= 0.0 && p.cueEnd <= p.cueStart)
+            return "{\"ok\":false,\"error\":\"cue_start/cue_end/cs/ce 区间非法：终点必须大于起点\"}";
         // 远程曲目：先把原始文件完整下载到缓存，再走与本地完全相同的解码与 DSP 路径
         if (!p.remoteId.empty()) {
             std::string ferr;
@@ -11447,9 +11565,27 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
             // 随机/排序的"原始顺序"快照也要同步追加，否则关掉随机/恢复默认排序时新曲会消失
             //（那是同一个 bug 的另一种形态：队列里有，但用户一还原顺序就丢）。
             const QItem want(p.file, p.cueStart, p.cueEnd);
+            const bool hadSqPending = g_q.sqPending;
+            const size_t sqIdx = g_q.sqPendingIndex;
+            g_q.sqPending = false;
+            g_q.sqPendingIndex = 0;
+
             size_t hit = g_q.items.size();
-            for (size_t i = 0; i < g_q.items.size(); ++i)
-                if (g_q.items[i].same(want)) { hit = i; break; }
+            // 显式 index 仅在语法合法、处于当前队列范围内且该槽位（path + CUE 区间）
+            // 与请求 want 一致时采用；省略/非法/越界/不匹配时不猜测路径，回退旧的从 0 搜索。
+            if (p.hasIndex) {
+                if (p.indexValid && p.queueIndex < g_q.items.size() &&
+                    g_q.items[p.queueIndex].same(want)) {
+                    hit = p.queueIndex;
+                }
+            } else if (hadSqPending && sqIdx < g_q.items.size() &&
+                       g_q.items[sqIdx].same(want)) {
+                hit = sqIdx;
+            }
+            if (hit == g_q.items.size()) {
+                for (size_t i = 0; i < g_q.items.size(); ++i)
+                    if (g_q.items[i].same(want)) { hit = i; break; }
+            }
             if (hit < g_q.items.size()) {
                 g_q.index = hit;
             } else {
@@ -11510,6 +11646,8 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
         bool removed = false;
         {
             std::lock_guard<std::mutex> lk(g_q.mtx);
+            g_q.sqPending = false;
+            g_q.sqPendingIndex = 0;
             if (idx < g_q.items.size()) {
                 const QItem gone = g_q.items[idx];
                 g_q.items.erase(g_q.items.begin() + (long long)idx);
@@ -11553,6 +11691,8 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
         size_t cnt = 0;
         {
             std::lock_guard<std::mutex> lk(g_q.mtx);
+            g_q.sqPending = false;
+            g_q.sqPendingIndex = 0;
             if (from < g_q.items.size() && to < g_q.items.size() && from != to) {
                 const QItem cur = (g_q.index < g_q.items.size()) ? g_q.items[g_q.index] : QItem();
                 QItem v = g_q.items[from];
@@ -11584,6 +11724,8 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
         bool had = false;
         {
             std::lock_guard<std::mutex> lk(g_q.mtx);
+            g_q.sqPending = false;
+            g_q.sqPendingIndex = 0;
             if (!g_q.sortBase.empty()) {
                 const QItem cur = (g_q.index < g_q.items.size()) ? g_q.items[g_q.index] : QItem();
                 g_q.items = g_q.sortBase;
@@ -11647,6 +11789,8 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
                 const QItem cur = (g_q.index < g_q.items.size()) ? g_q.items[g_q.index] : QItem();
                 if (g_q.sortBase.empty()) g_q.sortBase = g_q.items;
                 g_q.items = std::move(want);
+                g_q.sqPending = false;
+                g_q.sqPendingIndex = 0;
                 newIndex = queue_reindex_locked(cur);
                 n = g_q.items.size();
                 // 随机模式下手动排序：同 qmove，旧 base 快照必须作废。
@@ -11683,6 +11827,8 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
         // M-2（2026-10-29）：入队必须**带上 CUE 区间**。修前这里只取 path（`emplace_back(f)`），
         // 于是"把 cue 专辑第 N 首加进队列"会退化成整轨从头播，重启后也无从恢复区间。
         // 区间自洽性在入队前先判（与 /api/play 同一口径）；目录展开不含区间。
+        if (p.cueStartInvalid || p.cueEndInvalid)
+            return "{\"ok\":false,\"error\":\"cue_start/cue_end/cs/ce 参数非法\"}";
         if (p.cueStart >= 0.0) {
             if (p.cueEnd >= 0.0 && p.cueEnd <= p.cueStart)
                 return "{\"ok\":false,\"error\":\"cue_start/cue_end 区间非法：cue_end 必须大于 cue_start\"}";
@@ -11714,6 +11860,8 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
             // 注意：必须用独立作用域释放锁 —— queue_save() 内部会再次加锁，
             // 若在持锁状态下调用就会死锁（本轮踩到：服务端直接挂住，连接被关闭）。
             std::lock_guard<std::mutex> lk(g_q.mtx);
+            g_q.sqPending = false;
+            g_q.sqPendingIndex = 0;
             for (const auto& it : addList) {
                 g_q.items.push_back(it);
                 if (!g_q.base.empty()) g_q.base.push_back(it);
@@ -12809,6 +12957,8 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
             std::lock_guard<std::mutex> lk(g_q.mtx);
             g_q.items = std::move(items);
             g_q.index = 0;
+            g_q.sqPending = false;
+            g_q.sqPendingIndex = 0;
             if (g_q.shuffle_of()) g_q.base = g_q.items;
             else g_q.base.clear();
             g_q.sortBase.clear();
@@ -12905,6 +13055,8 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
             std::lock_guard<std::mutex> lk(g_q.mtx);
             g_q.items.clear();
             g_q.index = 0;
+            g_q.sqPending = false;
+            g_q.sqPendingIndex = 0;
             g_q.base.clear();
             g_q.sortBase.clear();
         }
@@ -12943,6 +13095,8 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
         bool ok = false;
         {
             std::lock_guard<std::mutex> lk(g_q.mtx);
+            g_q.sqPending = false;
+            g_q.sqPendingIndex = 0;
             if (g_q.items.empty()) return "{\"ok\":false,\"error\":\"队列为空\"}";
             if (dir > 0) {
                 if (g_q.index + 1 < g_q.items.size()) {
