@@ -469,7 +469,9 @@ static NSStackView *RLPSRow(NSString *label, NSView *control, NSString *hint, RL
 @property (nonatomic, strong) NSSwitch *streamSwitch;
 
 // ---- 共用子界面 ----
-@property (nonatomic, strong) RLPServersView *serversView;
+@property (nonatomic, strong, nullable) RLPSettingsGroup *srvGroup;
+@property (nonatomic, strong, nullable) RLPSettingsGroup *castGroup;
+@property (nonatomic, strong, nullable) RLPServersView *serversView;
 @property (nonatomic, strong) RLPMetaSourcesView *metaSourcesView;
 @property (nonatomic, strong) RLPLibStatsView *libStatsView;
 @property (nonatomic, strong) NSSwitch *metaOnSwitch;
@@ -606,6 +608,22 @@ static NSStackView *RLPSRow(NSString *label, NSView *control, NSString *hint, RL
     BOOL _rlpSyncingWidth;
 }
 
+- (void)clampVerticalScrollIfNeeded {
+    NSClipView *clip = self.contentView;
+    NSView *doc = self.documentView;
+    if (!clip || !doc) return;
+    const CGFloat clipH = clip.bounds.size.height;
+    const CGFloat docH = doc.frame.size.height;
+    if (clipH <= 1.0 || docH <= 1.0) return;
+    const CGFloat maxY = MAX(0.0, docH - clipH);
+    NSPoint o = clip.bounds.origin;
+    if (o.y > maxY + 0.5 || o.y < -0.5) {
+        o.y = MIN(maxY, MAX(0.0, o.y));
+        [clip scrollToPoint:o];
+        [self reflectScrolledClipView:clip];
+    }
+}
+
 - (void)tile {
     const CGFloat prevClipW = self.contentView ? self.contentView.bounds.size.width : 0.0;
     [super tile];
@@ -620,6 +638,7 @@ static NSStackView *RLPSRow(NSString *label, NSView *control, NSString *hint, RL
         [doc setNeedsLayout:YES];
         [self setNeedsLayout:YES];
     }
+    [self clampVerticalScrollIfNeeded];
 }
 
 - (void)layout {
@@ -629,7 +648,10 @@ static NSStackView *RLPSRow(NSString *label, NSView *control, NSString *hint, RL
     NSClipView *clip = self.contentView;
     NSView *doc = self.documentView;
     const CGFloat clipW = clip ? clip.bounds.size.width : 0.0;
-    if (!clip || !doc || clipW <= 1.0) return;
+    if (!clip || !doc || clipW <= 1.0) {
+        [self clampVerticalScrollIfNeeded];
+        return;
+    }
     if (fabs(clipW - prevClipW) > 0.5 ||
         fabs(doc.frame.size.width - clipW) > 0.5 ||
         fabs(doc.bounds.size.width - clipW) > 0.5) {
@@ -647,6 +669,7 @@ static NSStackView *RLPSRow(NSString *label, NSView *control, NSString *hint, RL
         }
         _rlpSyncingWidth = NO;
     }
+    [self clampVerticalScrollIfNeeded];
 }
 
 @end
@@ -973,6 +996,14 @@ static void RLPSettingsCollectViews(NSView *v, NSMutableArray<NSView *> *out) {
     // 诊断页每次进入补一次通道探活（web bindFeedbackCard 同语义；30s 内不重复，见 probeFeedbackChannel）。
     if (tab == RLPSTabDiag) [self probeFeedbackChannel];
     self.shownTab = tab;
+    if (tab == RLPSTabStream) {
+        if (self.srvGroup) [self.srvGroup contentDidChange];
+        if (self.castGroup) [self.castGroup contentDidChange];
+        [pane setNeedsLayout:YES];
+        if (!freshlyBuilt && [RLPCoreClient shared].started && self.serversView) {
+            [self.serversView reload];
+        }
+    }
     if (tab == RLPSTabMeta) {
         const BOOL laidOut = (self.paneHost && self.paneHost.bounds.size.width > 1.0);
         [self updateMetaResponsiveLayoutForHostWidth:[self metaTargetHostWidthPreferringViewBounds:laidOut]];
@@ -2549,17 +2580,19 @@ static NSString *RLPSettingsControlValueString(NSView *v) {
     // 这里把两个子视图分别放进对应卡片体（addFullRow ⟹ 是卡片的共同后代，不再是页面并列）。
     RLPSettingsGroup *srvGroup = (RLPSettingsGroup *)RLPSGroup(RLPTr(@"流媒体服务器"),
         RLPTr(@"可保存多台，同一时刻启用一台；只取原始文件，不转码"), t);
+    self.srvGroup = srvGroup;
     [stack addArrangedSubview:srvGroup];
 
-    self.serversView = [[RLPServersView alloc] initWithFrame:NSMakeRect(0, 0, 620, 240)];
+    self.serversView = [[RLPServersView alloc] initWithFrame:NSMakeRect(0, 0, 620, 120)];
     self.serversView.translatesAutoresizingMaskIntoConstraints = NO;
     [srvGroup addFullRow:self.serversView];
-    [[self.serversView.heightAnchor constraintGreaterThanOrEqualToConstant:120] setActive:YES];
+    [[self.serversView.heightAnchor constraintGreaterThanOrEqualToConstant:64] setActive:YES];
     [self.serversView reload];
 
     // 投放面板（设备发现 / 推送 / 停止 / 升频选项 / 实时状态）与 web 同源 /api/cast/*
     RLPSettingsGroup *castGroup = (RLPSettingsGroup *)RLPSGroup(RLPTr(@"推送到设备（UPnP / DLNA）"),
         RLPTr(@"一键把当前曲目推送到局域网渲染器；之后的切歌 / 暂停 / 进度都作用在它上面"), t);
+    self.castGroup = castGroup;
     [stack addArrangedSubview:castGroup];
 
     self.castView = [[RLPCastView alloc] initWithFrame:NSMakeRect(0, 0, 620, 420)];
@@ -5595,6 +5628,9 @@ static NSUInteger RLPUTF8Bytes(NSString *s) {
     if (!self.eqDraftState && self.eqView) self.eqDraftState = [self.eqView rlp_captureDraftState];
     [self captureLlmModelStateIfNeeded];
     [self.paneCache removeAllObjects];
+    self.srvGroup = nil;
+    self.castGroup = nil;
+    self.serversView = nil;
     [self resetMetaResponsiveState];
     [self rebuildTabs];
     [self showTab:self.tab];
@@ -5665,6 +5701,9 @@ static NSUInteger RLPUTF8Bytes(NSString *s) {
     }
 
     [self.paneCache removeAllObjects];
+    self.srvGroup = nil;
+    self.castGroup = nil;
+    self.serversView = nil;
     [self resetMetaResponsiveState];
     [self rebuildTabs];
     [self showTab:self.tab];

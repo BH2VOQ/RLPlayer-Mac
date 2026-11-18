@@ -30,6 +30,8 @@
 #import "RLPSidebarViewController.h"
 #import "RLPSettingsViewController.h"
 #import "RLPSettingsLayout.h"
+#import "RLPServersView.h"
+#import "RLPCastView.h"
 #import "RLPTheme.h"
 #import "RLPSupport.h"
 
@@ -55,7 +57,26 @@ static void Ck(BOOL ok, const char *what, NSString *detail) {
 @property (nonatomic, assign) BOOL modelsAvailable;
 @property (nonatomic, copy) NSString *backend;
 @property (nonatomic, strong) NSMutableArray<NSString *> *requests;
+@property (nonatomic, strong) NSMutableArray<NSMutableDictionary *> *srcServers;
+@property (nonatomic, copy) NSString *srcActive;
+@property (nonatomic, assign) NSInteger srcSeq;
+@property (nonatomic, copy, nullable) NSString *srcNextError;
 @end
+
+static NSDictionary<NSString *, NSString *> *RLPParseFormBody(NSString *body) {
+    NSMutableDictionary<NSString *, NSString *> *out = [NSMutableDictionary dictionary];
+    if (!body.length) return out;
+    for (NSString *pair in [body componentsSeparatedByString:@"&"]) {
+        NSRange eq = [pair rangeOfString:@"="];
+        if (eq.location == NSNotFound) continue;
+        NSString *k = [[pair substringToIndex:eq.location] stringByReplacingOccurrencesOfString:@"+" withString:@" "];
+        NSString *v = [[pair substringFromIndex:eq.location + 1] stringByReplacingOccurrencesOfString:@"+" withString:@" "];
+        k = [k stringByRemovingPercentEncoding] ?: k;
+        v = [v stringByRemovingPercentEncoding] ?: v;
+        out[k] = v;
+    }
+    return out;
+}
 
 @implementation RLPWidthContractSpy
 - (instancetype)init {
@@ -64,19 +85,86 @@ static void Ck(BOOL ok, const char *what, NSString *detail) {
         _modelsAvailable = NO;
         _backend = @"null";
         _requests = [NSMutableArray array];
+        _srcServers = [NSMutableArray array];
+        _srcActive = @"";
     }
     return self;
 }
 - (BOOL)started { return YES; }
 - (BOOL)startEmbedded { return NO; }
 - (void)shutdown { }
+- (NSDictionary *)handlePostPath:(NSString *)path body:(nullable NSString *)body {
+    if ([path hasPrefix:@"/api/src/config"]) {
+        if (self.srcNextError.length) {
+            NSString *err = [self.srcNextError copy];
+            self.srcNextError = nil;
+            return @{ @"ok": @NO, @"error": err };
+        }
+        NSDictionary<NSString *, NSString *> *f = RLPParseFormBody(body ?: @"");
+        NSString *act = f[@"action"] ?: @"";
+        if ([act isEqualToString:@"add"]) {
+            NSString *sid = [NSString stringWithFormat:@"srv-%ld", (long)++self.srcSeq];
+            NSMutableDictionary *entry = [@{
+                @"id": sid,
+                @"name": f[@"name"] ?: @"",
+                @"kind": f[@"kind"].length ? f[@"kind"] : @"subsonic",
+                @"base": f[@"base"] ?: @"",
+                @"user": f[@"user"] ?: @"",
+                @"hasPass": @(f[@"pass"].length > 0),
+                @"active": @(self.srcServers.count == 0),
+            } mutableCopy];
+            if (self.srcServers.count == 0) self.srcActive = sid;
+            [self.srcServers addObject:entry];
+            return @{ @"ok": @YES, @"id": sid };
+        }
+        if ([act isEqualToString:@"update"]) {
+            NSString *sid = f[@"id"] ?: @"";
+            for (NSMutableDictionary *s in self.srcServers) {
+                if ([s[@"id"] isEqualToString:sid]) {
+                    s[@"name"] = f[@"name"] ?: @"";
+                    s[@"kind"] = f[@"kind"].length ? f[@"kind"] : @"subsonic";
+                    s[@"base"] = f[@"base"] ?: @"";
+                    s[@"user"] = f[@"user"] ?: @"";
+                    if (f[@"pass"].length > 0) s[@"hasPass"] = @YES;
+                    return @{ @"ok": @YES };
+                }
+            }
+            return @{ @"ok": @NO, @"error": @"not found" };
+        }
+        if ([act isEqualToString:@"remove"]) {
+            NSString *sid = f[@"id"] ?: @"";
+            NSUInteger idx = [self.srcServers indexOfObjectPassingTest:^BOOL(NSMutableDictionary *s, NSUInteger i, BOOL *stop) {
+                (void)i;
+                if ([s[@"id"] isEqualToString:sid]) { *stop = YES; return YES; }
+                return NO;
+            }];
+            if (idx != NSNotFound) [self.srcServers removeObjectAtIndex:idx];
+            if ([self.srcActive isEqualToString:sid]) {
+                self.srcActive = self.srcServers.firstObject[@"id"] ?: @"";
+            }
+            for (NSMutableDictionary *s in self.srcServers) {
+                s[@"active"] = @([s[@"id"] isEqualToString:self.srcActive]);
+            }
+            return @{ @"ok": @YES };
+        }
+        if ([act isEqualToString:@"active"]) {
+            NSString *sid = f[@"id"] ?: @"";
+            self.srcActive = sid;
+            for (NSMutableDictionary *s in self.srcServers) {
+                s[@"active"] = @([s[@"id"] isEqualToString:sid]);
+            }
+            return @{ @"ok": @YES };
+        }
+        return @{ @"ok": @NO, @"error": @"bad action" };
+    }
+    return @{ @"ok": @YES };
+}
 - (nullable NSDictionary *)jsonWithMethod:(NSString *)method
                                      path:(NSString *)path
                                      body:(nullable NSString *)body {
-    (void)body;
     [self.requests addObject:[NSString stringWithFormat:@"%@ %@", method ?: @"GET", path ?: @""]];
     if (![method isEqualToString:@"POST"]) return [self fixtureForPath:path ?: @""];
-    return @{ @"ok": @YES };
+    return [self handlePostPath:path ?: @"" body:body];
 }
 - (nullable NSData *)dataWithMethod:(NSString *)method
                                path:(NSString *)path
@@ -92,10 +180,10 @@ static void Ck(BOOL ok, const char *what, NSString *detail) {
     dispatch_async(dispatch_get_main_queue(), ^{ done(json); });
 }
 - (void)postJSON:(NSString *)path body:(nullable NSString *)body completion:(nullable RLPJSONCompletion)done {
-    (void)body;
     [self.requests addObject:[NSString stringWithFormat:@"POST %@", path ?: @""]];
+    NSDictionary *res = [self handlePostPath:path ?: @"" body:body];
     if (!done) return;
-    dispatch_async(dispatch_get_main_queue(), ^{ done(@{ @"ok": @YES }); });
+    dispatch_async(dispatch_get_main_queue(), ^{ done(res); });
 }
 - (void)getData:(NSString *)path completion:(nullable RLPDataCompletion)done {
     (void)path;
@@ -175,6 +263,16 @@ static void Ck(BOOL ok, const char *what, NSString *detail) {
     if ([path hasPrefix:@"/api/devices"]) return @{ @"ok": @YES, @"devices": @[] };
     if ([path hasPrefix:@"/api/filters"]) return @{ @"ok": @YES, @"items": @[] };
     if ([path hasPrefix:@"/api/preset/caps"]) return @{ @"ok": @YES, @"known": @YES, @"pcmReady": @YES, @"dsdReady": @YES };
+    if ([path hasPrefix:@"/api/src/config"]) {
+        NSMutableArray *arr = [NSMutableArray arrayWithCapacity:self.srcServers.count];
+        for (NSDictionary *s in self.srcServers) [arr addObject:[s copy]];
+        return @{
+            @"ok": @YES,
+            @"servers": arr,
+            @"active": self.srcActive ?: @"",
+            @"configured": @(arr.count > 0),
+        };
+    }
     if ([path hasPrefix:@"/api/cast/state"]) return @{ @"ok": @YES, @"running": @NO, @"device": @"" };
     return @{ @"ok": @YES };
 }
@@ -473,6 +571,166 @@ static void ResetMainWindowFrame(RLPMainWindowController *wc, CGFloat width, CGF
     [wc.window setFrame:f display:NO];
     [wc.window.contentView layoutSubtreeIfNeeded];
     Pump(0.06);
+}
+
+static NSModalResponse FakeAlertFirstButton(id self, SEL _cmd) {
+    (void)self; (void)_cmd;
+    return NSAlertFirstButtonReturn;
+}
+
+static BOOL HasVisibleSubviewsOrContent(NSView *v) {
+    if ([v isKindOfClass:[NSControl class]]) return YES;
+    for (NSView *s in v.subviews) {
+        if (s.hidden) continue;
+        if (HasVisibleSubviewsOrContent(s)) return YES;
+    }
+    return NO;
+}
+
+static void AssertStreamPaneContract(const char *label,
+                                     RLPMainWindowController *wc,
+                                     RLPSettingsViewController *settings,
+                                     BOOL expectFormVisible,
+                                     CGFloat *outSrvH,
+                                     CGFloat *outDocH) {
+    const std::string pfx(label);
+    Ck([[settings currentPaneKey] isEqualToString:@"stream"],
+       (pfx + ": 当前页签是 stream").c_str(), [settings currentPaneKey]);
+
+    NSScrollView *sv = PaneScroll(settings);
+    NSClipView *clip = sv ? sv.contentView : nil;
+    NSView *doc = sv ? sv.documentView : nil;
+    Ck(sv != nil && clip != nil && doc != nil,
+       (pfx + ": scroll/clip/doc 存在").c_str(), @"nil");
+    if (!sv || !clip || !doc) return;
+
+    const CGFloat clipW = clip.bounds.size.width;
+    const CGFloat docW = doc.frame.size.width;
+    const CGFloat docH = doc.frame.size.height;
+    Ck(!sv.hasHorizontalScroller && docW <= clipW + 1.0,
+       (pfx + ": doc<=clip 且无横向滚动条").c_str(),
+       [NSString stringWithFormat:@"clipW=%.1f docW=%.1f horiz=%d", clipW, docW, (int)sv.hasHorizontalScroller]);
+
+    NSArray<NSView *> *cards = CardsInView(doc);
+    NSView *srvCard = nil, *castCard = nil;
+    for (NSView *c in cards) {
+        NSString *t = CardTitle(c);
+        if (FindById(c, @"srv.add") || [t containsString:@"流媒体服务器"] || [t containsString:@"Streaming Servers"]) srvCard = c;
+        if (FindById(c, @"sp_cast_dev") || [t containsString:@"推送到设备"] || [t containsString:@"Cast"]) castCard = c;
+    }
+    Ck(srvCard != nil && castCard != nil,
+       (pfx + ": srvCard 和 castCard 均存在").c_str(),
+       [NSString stringWithFormat:@"srv=%p cast=%p", srvCard, castCard]);
+    if (!srvCard || !castCard) return;
+
+    RLPServersView *srvView = (RLPServersView *)FindById(srvCard, @"srv.add");
+    for (NSView *v = (NSView *)srvView; v && v != srvCard; v = v.superview) {
+        if ([v isKindOfClass:[RLPServersView class]]) { srvView = (RLPServersView *)v; break; }
+    }
+    if (![srvView isKindOfClass:[RLPServersView class]]) {
+        NSMutableArray<NSView *> *all = [NSMutableArray array];
+        CollectAllViews(srvCard, all);
+        for (NSView *v in all) {
+            if ([v isKindOfClass:[RLPServersView class]]) { srvView = (RLPServersView *)v; break; }
+        }
+    }
+    NSView *form = FindById(srvCard, @"srv.form");
+    Ck([srvView isKindOfClass:[RLPServersView class]] && form != nil,
+       (pfx + ": RLPServersView 和 srv.form 存在").c_str(),
+       [NSString stringWithFormat:@"srvView=%p form=%p", srvView, form]);
+    if (![srvView isKindOfClass:[RLPServersView class]] || !form) return;
+
+    const BOOL formActuallyVisible = !IsHiddenInHierarchy(form, srvCard);
+    Ck(form.hidden == !expectFormVisible && formActuallyVisible == expectFormVisible,
+       (pfx + ": srv.form 显隐状态符合预期").c_str(),
+       [NSString stringWithFormat:@"form.hidden=%d visibleInTree=%d expect=%d",
+        (int)form.hidden, (int)formActuallyVisible, (int)expectFormVisible]);
+
+    const NSRect srvCardR = [srvCard convertRect:srvCard.bounds toView:doc];
+    const NSRect castCardR = [castCard convertRect:castCard.bounds toView:doc];
+    const NSRect srvInCard = [srvView convertRect:srvView.bounds toView:srvCard];
+    const NSRect srvClipR = [srvCard convertRect:srvCard.bounds toView:clip];
+    const NSRect castClipR = [castCard convertRect:castCard.bounds toView:clip];
+    const NSRect inter = NSIntersectionRect(srvCardR, castCardR);
+
+    std::printf("  [stream %-28s] win=%.0fx%.0f clip=%.1fx%.1f doc=%.1fx%.1f srvCard=%.1fx%.1f srvView=%.1fx%.1f castCard=%.1fx%.1f formHidden=%d formRect=%s\n",
+                label,
+                wc.window.frame.size.width, wc.window.frame.size.height,
+                clipW, clip.bounds.size.height,
+                docW, docH,
+                NSWidth(srvCard.bounds), NSHeight(srvCard.bounds),
+                NSWidth(srvInCard), NSHeight(srvInCard),
+                NSWidth(castCard.bounds), NSHeight(castCard.bounds),
+                (int)form.hidden, NSStringFromRect(form.frame).UTF8String ?: "");
+
+    Ck(NSWidth(inter) < 1.0 && NSHeight(inter) < 1.0,
+       (pfx + ": srvCard 与 castCard 互不遮挡重叠").c_str(),
+       [NSString stringWithFormat:@"srv=%@ cast=%@ inter=%@",
+        NSStringFromRect(srvCardR), NSStringFromRect(castCardR), NSStringFromRect(inter)]);
+
+    Ck(NSHeight(srvInCard) <= NSHeight(srvCard.bounds) + 1.0 &&
+       NSMaxY(srvInCard) <= NSMaxY(srvCard.bounds) + 1.0 &&
+       NSMinY(srvInCard) >= NSMinY(srvCard.bounds) - 1.0,
+       (pfx + ": serversView 不溢出 srvCard（不遮住下方内容）").c_str(),
+       [NSString stringWithFormat:@"srvInCard=%@ srvCardBounds=%@",
+        NSStringFromRect(srvInCard), NSStringFromRect(srvCard.bounds)]);
+
+    // 卡片高应紧贴 head(38) + gridPad(28) + serversView 高 + border(2)，不得残留大块白板
+    const CGFloat expectedCardH = 38.0 + 28.0 + NSHeight(srvInCard) + 2.0;
+    Ck(std::fabs(NSHeight(srvCard.bounds) - expectedCardH) <= 12.0,
+       (pfx + ": srvCard 高度紧贴内容（无空白白板残留）").c_str(),
+       [NSString stringWithFormat:@"cardH=%.1f expected=%.1f srvViewH=%.1f",
+        NSHeight(srvCard.bounds), expectedCardH, NSHeight(srvInCard)]);
+
+    Ck(NSMaxX(srvClipR) <= clipW + 1.0 && NSMaxX(castClipR) <= clipW + 1.0,
+       (pfx + ": srvCard/castCard 右缘不超过 clip 宽").c_str(),
+       [NSString stringWithFormat:@"srvMaxX=%.1f castMaxX=%.1f clipW=%.1f",
+        NSMaxX(srvClipR), NSMaxX(castClipR), clipW]);
+
+    if (expectFormVisible) {
+        const NSRect formInCard = [form convertRect:form.bounds toView:srvCard];
+        Ck(NSHeight(form.bounds) >= 160.0 && NSWidth(form.bounds) > 200.0 &&
+           NSContainsRect(NSInsetRect(srvCard.bounds, -1.0, -1.0), formInCard),
+           (pfx + ": 展开态 srv.form 在 srvCard 内完整可见且无白块溢出").c_str(),
+           [NSString stringWithFormat:@"formInCard=%@ srvCard=%@",
+            NSStringFromRect(formInCard), NSStringFromRect(srvCard.bounds)]);
+    } else {
+        // 扫描 doc 内是否存在无可见子控件的大面积空白矩形（非透明白板残留）
+        NSMutableArray<NSString *> *blankBoxes = [NSMutableArray array];
+        NSMutableArray<NSView *> *allDoc = [NSMutableArray array];
+        CollectAllViews(doc, allDoc);
+        for (NSView *v in allDoc) {
+            if (v == doc || IsHiddenInHierarchy(v, doc)) continue;
+            if ([v isKindOfClass:[NSStackView class]] || [v isKindOfClass:[NSControl class]] ||
+                [v isKindOfClass:[RLPSettingsGroup class]] || [v isKindOfClass:[RLPFieldGrid class]] ||
+                [v isKindOfClass:[RLPServersView class]] || [v isKindOfClass:[RLPCastView class]]) continue;
+            if ([v.identifier isEqualToString:@"set.group.head"]) continue;
+            if (NSWidth(v.bounds) >= 80.0 && NSHeight(v.bounds) >= 40.0 && !HasVisibleSubviewsOrContent(v)) {
+                [blankBoxes addObject:[NSString stringWithFormat:@"%@(%@):%@",
+                                       NSStringFromClass(v.class), v.identifier ?: @"", NSStringFromRect(v.frame)]];
+            }
+        }
+        Ck(blankBoxes.count == 0,
+           (pfx + ": 页面无新增/残留可见空白 view").c_str(),
+           [blankBoxes componentsJoinedByString:@", "]);
+    }
+
+    // 底栏 playbackBar 完整不被遮挡
+    NSView *bar = (NSView *)[wc valueForKey:@"playbackBar"];
+    NSView *pageHost = (NSView *)[wc valueForKey:@"pageHost"];
+    if (bar && pageHost && wc.window.contentView) {
+        const NSRect barR = [bar convertRect:bar.bounds toView:wc.window.contentView];
+        const NSRect hostR = [pageHost convertRect:pageHost.bounds toView:wc.window.contentView];
+        const NSRect barInter = NSIntersectionRect(barR, hostR);
+        Ck(!bar.hidden && NSHeight(barR) >= 40.0 && NSWidth(barR) >= 200.0 &&
+           (NSWidth(barInter) < 1.0 || NSHeight(barInter) < 1.0),
+           (pfx + ": 底部播放栏完整且不被设置页遮挡").c_str(),
+           [NSString stringWithFormat:@"bar=%@ host=%@ inter=%@",
+            NSStringFromRect(barR), NSStringFromRect(hostR), NSStringFromRect(barInter)]);
+    }
+
+    if (outSrvH) *outSrvH = NSHeight(srvCard.bounds);
+    if (outDocH) *outDocH = docH;
 }
 
 int main() {
@@ -892,6 +1150,176 @@ int main() {
         }
         [wcC3 stopAllActivity];
         [wcC3.window close];
+
+        // =========================================================================
+        // 部分 D：设置 → 流媒体「添加服务器」白块/高度/交互契约（S1–S4 · 900x600 & 1180x760）
+        // =========================================================================
+        std::printf("\n[Suite D] 设置 → 流媒体 添加服务器 S1–S4 契约\n");
+        g_spy.srcServers = [NSMutableArray array];
+        g_spy.srcActive = @"";
+        g_spy.srcSeq = 0;
+        g_spy.srcNextError = nil;
+        [RLPTheme setThemeName:@"light"];
+        [RLPTheme setUiStyle:@"classic"]; // classic light t.bg2 == #ffffff，最易暴露白色矩形残留
+
+        RLPMainWindowController *wcD = [[RLPMainWindowController alloc] init];
+        wcD.window.releasedWhenClosed = NO;
+        [wcD.window setFrameAutosaveName:@""];
+        ResetMainWindowFrame(wcD, 900.0, 600.0);
+        [wcD.sidebar selectKey:@"settings"];
+        Pump(0.15);
+        RLPSettingsViewController *settingsD = (RLPSettingsViewController *)wcD.currentContent;
+        Ck([settingsD isKindOfClass:[RLPSettingsViewController class]],
+           "S-pre 900x600 打开设置页成功", NSStringFromClass(wcD.currentContent.class));
+
+        if (settingsD) {
+            [settingsD selectPane:@"stream"];
+            LayoutHost(wcD.window.contentView, 0.25);
+
+            CGFloat baseSrvH = 0, baseDocH = 0;
+            AssertStreamPaneContract("D1-900-initial-empty", wcD, settingsD, NO, &baseSrvH, &baseDocH);
+
+            NSButton *addBtn = (NSButton *)FindById(settingsD.view, @"srv.add");
+            Ck(addBtn != nil && addBtn.enabled, "S1a 初始可点击添加服务器", @"missing/disabled");
+
+            // 1) 点「添加服务器」展开表单
+            [addBtn performClick:nil];
+            LayoutHost(wcD.window.contentView, 0.2);
+            CGFloat openSrvH = 0, openDocH = 0;
+            AssertStreamPaneContract("D2-900-form-open", wcD, settingsD, YES, &openSrvH, &openDocH);
+            Ck(openSrvH > baseSrvH + 140.0, "S1b 点添加后 srvCard 自动撑高容纳表单",
+               [NSString stringWithFormat:@"base=%.1f open=%.1f", baseSrvH, openSrvH]);
+
+            // 2) S2 校验失败路径：保留表单 + 显示错误，不留白块
+            NSTextField *nameF = (NSTextField *)FindById(settingsD.view, @"srv.form.name");
+            NSTextField *baseF = (NSTextField *)FindById(settingsD.view, @"srv.form.base");
+            NSTextField *userF = (NSTextField *)FindById(settingsD.view, @"srv.form.user");
+            NSSecureTextField *passF = (NSSecureTextField *)FindById(settingsD.view, @"srv.form.pass");
+            NSTextField *msgF = (NSTextField *)FindById(settingsD.view, @"srv.form.msg");
+            NSButton *saveBtn = (NSButton *)FindById(settingsD.view, @"srv.form.save");
+            NSButton *cancelBtn = (NSButton *)FindById(settingsD.view, @"srv.form.cancel");
+            Ck(nameF && baseF && userF && passF && msgF && saveBtn && cancelBtn,
+               "S2-pre 表单控件完整", @"nil");
+
+            baseF.stringValue = @"invalid-url";
+            userF.stringValue = @"alice";
+            [saveBtn performClick:nil];
+            LayoutHost(wcD.window.contentView, 0.12);
+            Ck(msgF.stringValue.length > 0 && saveBtn.enabled, "S2a 前端校验失败展示错误且仍可继续编辑", msgF.stringValue ?: @"");
+            AssertStreamPaneContract("D3-900-validate-fail", wcD, settingsD, YES, nil, nil);
+
+            // 3) S2 后端保存失败路径：保留表单与用户输入、显示错误、无白板
+            nameF.stringValue = @"测试服";
+            baseF.stringValue = @"https://music.example.com";
+            userF.stringValue = @"alice";
+            passF.stringValue = @"secret";
+            g_spy.srcNextError = @"连接超时";
+            [saveBtn performClick:nil];
+            LayoutHost(wcD.window.contentView, 0.25);
+            Ck([msgF.stringValue isEqualToString:@"连接超时"] && saveBtn.enabled && cancelBtn.enabled,
+               "S2b 后端失败保留表单与错误提示且按钮立即恢复可点",
+               [NSString stringWithFormat:@"msg=%@ saveEn=%d cancelEn=%d",
+                msgF.stringValue ?: @"", (int)saveBtn.enabled, (int)cancelBtn.enabled]);
+            AssertStreamPaneContract("D4-900-backend-fail", wcD, settingsD, YES, nil, nil);
+
+            // 4) S2 取消路径：立即收起、srvCard/doc 高度立刻回到基准、无白块
+            [cancelBtn performClick:nil];
+            LayoutHost(wcD.window.contentView, 0.2);
+            CGFloat cancelSrvH = 0, cancelDocH = 0;
+            AssertStreamPaneContract("D5-900-after-cancel", wcD, settingsD, NO, &cancelSrvH, &cancelDocH);
+            Ck(std::fabs(cancelSrvH - baseSrvH) <= 2.0 && std::fabs(cancelDocH - baseDocH) <= 2.0,
+               "S2c 取消后 srvCard/doc 高度立即回落至初始态（无白板高度残留）",
+               [NSString stringWithFormat:@"base=(%.1f,%.1f) afterCancel=(%.1f,%.1f)",
+                baseSrvH, baseDocH, cancelSrvH, cancelDocH]);
+            Ck(addBtn.enabled, "S2d 取消后添加按钮立即保持可交互", @"disabled");
+
+            // 5) S1 + S2 添加成功路径：保存完成后表单立即收起、白块不出现、高度收紧、页面可交互
+            [addBtn performClick:nil];
+            LayoutHost(wcD.window.contentView, 0.15);
+            nameF.stringValue = @"工作室 NAS";
+            baseF.stringValue = @"https://nas.example.com:4533";
+            userF.stringValue = @"bob";
+            passF.stringValue = @"pass1234";
+            [saveBtn performClick:nil];
+            LayoutHost(wcD.window.contentView, 0.3);
+            CGFloat savedSrvH = 0, savedDocH = 0;
+            Ck(g_spy.srcServers.count == 1, "S2e 添加服务器 POST /api/src/config 成功落盘 1 台",
+               [NSString stringWithFormat:@"n=%lu", (unsigned long)g_spy.srcServers.count]);
+            AssertStreamPaneContract("D6-900-after-save-ok", wcD, settingsD, NO, &savedSrvH, &savedDocH);
+            Ck(savedSrvH < openSrvH - 120.0 && FindById(settingsD.view, @"srv.row.name") != nil && addBtn.enabled,
+               "S1c 添加完成后表单立即消失、卡片收紧（非高白块）、列表项出现且页面可交互",
+               [NSString stringWithFormat:@"openSrvH=%.1f savedSrvH=%.1f", openSrvH, savedSrvH]);
+
+            // 6) S3 切页再回来 + 主题切换 + 1180x760 宽窗复验状态一致、无白块
+            [settingsD selectPane:@"adv"];
+            LayoutHost(wcD.window.contentView, 0.15);
+            [settingsD selectPane:@"stream"];
+            LayoutHost(wcD.window.contentView, 0.25);
+            CGFloat tabBackSrvH = 0, tabBackDocH = 0;
+            AssertStreamPaneContract("D7-900-tab-switch-back", wcD, settingsD, NO, &tabBackSrvH, &tabBackDocH);
+            Ck(std::fabs(tabBackSrvH - savedSrvH) <= 2.0 && std::fabs(tabBackDocH - savedDocH) <= 2.0,
+               "S3a 设置页签 stream->adv->stream 来回切换高度与状态完全一致",
+               [NSString stringWithFormat:@"before=(%.1f,%.1f) after=(%.1f,%.1f)",
+                savedSrvH, savedDocH, tabBackSrvH, tabBackDocH]);
+
+            [wcD.sidebar selectKey:@"streaming"];
+            LayoutHost(wcD.window.contentView, 0.2);
+            [wcD.sidebar selectKey:@"settings"];
+            LayoutHost(wcD.window.contentView, 0.25);
+            settingsD = (RLPSettingsViewController *)wcD.currentContent;
+            AssertStreamPaneContract("D8-900-sidebar-back", wcD, settingsD, NO, nil, nil);
+
+            ResetMainWindowFrame(wcD, 1180.0, 760.0);
+            [RLPTheme setUiStyle:@"apple"];
+            LayoutHost(wcD.window.contentView, 0.25);
+            AssertStreamPaneContract("D9-1180-apple-wide", wcD, settingsD, NO, nil, nil);
+
+            // 7) 1180 宽再开添加/编辑 + S2 删除路径收口（切回 900x600 复验）
+            ResetMainWindowFrame(wcD, 900.0, 600.0);
+            LayoutHost(wcD.window.contentView, 0.2);
+            NSButton *addBtnAfter = (NSButton *)FindById(settingsD.view, @"srv.add");
+            NSString *sid0 = g_spy.srcServers.firstObject[@"id"] ?: @"";
+            NSButton *editBtn0 = nil;
+            NSButton *delBtn0 = nil;
+            NSMutableArray<NSView *> *srvAll = [NSMutableArray array];
+            CollectAllViews(settingsD.view, srvAll);
+            for (NSView *v in srvAll) {
+                if (![v isKindOfClass:[NSButton class]] || ![v.identifier isEqualToString:sid0]) continue;
+                NSButton *b = (NSButton *)v;
+                if ([b.title isEqualToString:RLPTr(@"编辑")]) editBtn0 = b;
+                if ([b.title isEqualToString:RLPTr(@"删除")]) delBtn0 = b;
+            }
+            Ck(editBtn0 != nil && delBtn0 != nil && addBtnAfter != nil, "S2-del 找到已存行的编辑与删除按钮", @"nil");
+            if (editBtn0 && delBtn0) {
+                [editBtn0 performClick:nil];
+                LayoutHost(wcD.window.contentView, 0.15);
+                AssertStreamPaneContract("D10-900-editing-row", wcD, settingsD, YES, nil, nil);
+
+                Method alertM = class_getInstanceMethod([NSAlert class], @selector(runModal));
+                IMP origAlertImp = alertM ? method_getImplementation(alertM) : nullptr;
+                @try {
+                    if (alertM) method_setImplementation(alertM, (IMP)FakeAlertFirstButton);
+                    [delBtn0 performClick:nil];
+                } @finally {
+                    if (alertM && origAlertImp) method_setImplementation(alertM, origAlertImp);
+                }
+                LayoutHost(wcD.window.contentView, 0.3);
+                Ck(g_spy.srcServers.count == 0, "S2f 删除服务器落盘后剩余 0 台",
+                   [NSString stringWithFormat:@"n=%lu", (unsigned long)g_spy.srcServers.count]);
+                CGFloat delSrvH = 0, delDocH = 0;
+                AssertStreamPaneContract("D11-900-after-delete", wcD, settingsD, NO, &delSrvH, &delDocH);
+                NSButton *addBtnFinal = (NSButton *)FindById(settingsD.view, @"srv.add");
+                Ck(std::fabs(delSrvH - baseSrvH) <= 2.0 && std::fabs(delDocH - baseDocH) <= 2.0 &&
+                   addBtnFinal && addBtnFinal.enabled,
+                   "S2g 删除正在编辑的行后表单立即收起、srvCard/doc 回到空态高度且可交互",
+                   [NSString stringWithFormat:@"base=(%.1f,%.1f) afterDel=(%.1f,%.1f)",
+                    baseSrvH, baseDocH, delSrvH, delDocH]);
+            }
+        }
+        [RLPTheme setThemeName:@"light"];
+        [RLPTheme setUiStyle:@"apple"];
+        [wcD stopAllActivity];
+        [wcD.window close];
 
         std::printf("\n结果：%d passed, %d failed\n", g_pass, g_fail);
         return g_fail == 0 ? 0 : 1;
