@@ -302,9 +302,15 @@ static BOOL RLPRowIsSection(NSArray<NSDictionary *> *items, NSInteger row) {
             [rows addObject:@{@"name": name,
                               @"n": [x[@"n"] respondsToSelector:@selector(integerValue)] ? x[@"n"] : @0}];
         }
+        NSScrollView *scroll = self_->_tableView.enclosingScrollView;
+        const BOOL wasAtTop = (!scroll || scroll.contentView.bounds.origin.y <= 0.5);
         self_->_savedQueues = rows;
         [self_ rebuildMenuItems];
         [self_->_tableView reloadData];
+        if (wasAtTop && scroll) {
+            [scroll.contentView scrollToPoint:NSZeroPoint];
+            [scroll reflectScrolledClipView:scroll.contentView];
+        }
     }];
 }
 
@@ -442,11 +448,13 @@ static BOOL RLPRowIsSection(NSArray<NSDictionary *> *items, NSInteger row) {
     scroll.drawsBackground = NO;
     scroll.hasVerticalScroller = YES;
     scroll.autohidesScrollers = YES;
+    scroll.automaticallyAdjustsContentInsets = NO;
     [view addSubview:scroll];
 
     RLPSidebarTable *tv = [[RLPSidebarTable alloc] initWithFrame:NSZeroRect];
     tv.ownerVC = self;
     _tableView = tv;
+    if (@available(macOS 11.0, *)) _tableView.style = NSTableViewStylePlain;
     _tableView.backgroundColor = [NSColor clearColor];
     _tableView.headerView = nil;
     _tableView.rowHeight = 34;
@@ -499,10 +507,14 @@ static BOOL RLPRowIsSection(NSArray<NSDictionary *> *items, NSInteger row) {
     if (_pendingRow >= 0 && _pendingRow < (NSInteger)_menuItems.count && !RLPRowIsSection(_menuItems, _pendingRow)) {
         const NSInteger want = _pendingRow;
         _pendingRow = -1;
+        NSString *rowMode = [self stationModeForRow:want];
+        if (rowMode.length) _uiMode = [rowMode copy];
         _selectedRow = want;
         _lastSelectedRow = want;
         [_tableView reloadData];
     }
+    [scroll.contentView scrollToPoint:NSZeroPoint];
+    [scroll reflectScrolledClipView:scroll.contentView];
 }
 
 - (NSInteger)numberOfRowsInTableView:(NSTableView *)tableView { return (NSInteger)_menuItems.count; }
@@ -711,13 +723,14 @@ static BOOL RLPRowIsSection(NSArray<NSDictionary *> *items, NSInteger row) {
         label.translatesAutoresizingMaskIntoConstraints = NO;
         [cell addSubview:label];
 
+        const CGFloat rightPad = stationMode.length ? -10.0 : -12.0;
         [NSLayoutConstraint activateConstraints:@[
             [iconView.leadingAnchor constraintEqualToAnchor:cell.leadingAnchor constant:20],
             [iconView.centerYAnchor constraintEqualToAnchor:cell.centerYAnchor],
             [iconView.widthAnchor constraintEqualToConstant:16],
             [iconView.heightAnchor constraintEqualToConstant:16],
             [label.leadingAnchor constraintEqualToAnchor:iconView.trailingAnchor constant:10],
-            [label.trailingAnchor constraintLessThanOrEqualToAnchor:cell.trailingAnchor constant:-12],
+            [label.trailingAnchor constraintLessThanOrEqualToAnchor:cell.trailingAnchor constant:rightPad],
             [label.centerYAnchor constraintEqualToAnchor:cell.centerYAnchor],
         ]];
     }
@@ -770,6 +783,29 @@ static BOOL RLPRowIsSection(NSArray<NSDictionary *> *items, NSInteger row) {
     if (row >= 0 && row != _selectedRow) [self selectRow:row];
 }
 
+- (void)scrollToRowIfNeeded:(NSInteger)row {
+    NSScrollView *scroll = _tableView.enclosingScrollView;
+    if (!scroll || row < 0 || row >= (NSInteger)_menuItems.count) return;
+    const CGFloat clipH = scroll.contentView.bounds.size.height;
+    if (clipH <= 0.5) return;
+    if (row <= 1) {
+        if (scroll.contentView.bounds.origin.y > 0.5) {
+            [scroll.contentView scrollToPoint:NSZeroPoint];
+            [scroll reflectScrolledClipView:scroll.contentView];
+        }
+        return;
+    }
+    const NSRect rowRect = [_tableView rectOfRow:row];
+    const NSRect vis = scroll.documentVisibleRect;
+    if (NSContainsRect(vis, rowRect)) return;
+    if (NSMaxY(rowRect) <= clipH) {
+        [scroll.contentView scrollToPoint:NSZeroPoint];
+        [scroll reflectScrolledClipView:scroll.contentView];
+        return;
+    }
+    [_tableView scrollRowToVisible:row];
+}
+
 // 选中态**自己持有**，不依赖 NSTableView.selectedRow。
 // 实测：表格不在 key window 里时 selectRowIndexes 会静默失败（调用后 selectedRow 仍是 -1），
 // 于是侧栏永远没有高亮。导航选中是业务状态，本来就不该托付给控件的焦点相关行为。
@@ -786,6 +822,7 @@ static BOOL RLPRowIsSection(NSArray<NSDictionary *> *items, NSInteger row) {
     _selectedRow = row;
     _lastSelectedRow = row;
     [_tableView reloadData];
+    [self scrollToRowIfNeeded:row];
     if (self.onSelect) self.onSelect(row);
     NSString *k = [self keyForRow:row];
     if (k.length && self.onSelectKey) self.onSelectKey(k);

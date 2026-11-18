@@ -408,20 +408,29 @@ static void CheckSidebarTopEntries(RLPMainWindowController *wc, const char *stag
                 (long)firstSecRow, firstSecTitle.UTF8String, NSStringFromRect(secInWin).UTF8String,
                 NSStringFromRect(searchInWin).UTF8String);
 
+    const BOOL scrolledToTop = (scroll != nil && scroll.contentView.bounds.origin.y <= 0.5);
     const NSRect scrollTol = NSInsetRect(scroll.bounds, -0.5, -0.5);
-    const BOOL inTopThird = (listenRow >= 0 && proRow >= 0 &&
-                             firstSecRow >= 0 && listenRow < firstSecRow && proRow < firstSecRow &&
+    const BOOL inTopThird = (listenRow == 0 && proRow == 1 && firstSecRow == 2 &&
+                             scrolledToTop &&
                              listenTopDist >= 0 && listenBottomDist <= thirdH &&
                              proTopDist >= 0 && proBottomDist <= thirdH &&
                              NSContainsRect(scrollTol, listenInScroll) &&
                              NSContainsRect(scrollTol, proInScroll));
     Ck(inTopThird,
        [[NSString stringWithFormat:@"V1-%s 侧栏顶部存在聆听室与数字音乐台入口且均在前 1/3 可视区内", stage] UTF8String],
-       [NSString stringWithFormat:@"listenRow=%ld(%.1f..%.1f) proRow=%ld(%.1f..%.1f) sec0=%ld third=%.1f",
+       [NSString stringWithFormat:@"listenRow=%ld(%.1f..%.1f) proRow=%ld(%.1f..%.1f) sec0=%ld scrollY=%.1f third=%.1f",
         (long)listenRow, listenTopDist, listenBottomDist,
-        (long)proRow, proTopDist, proBottomDist, (long)firstSecRow, thirdH]);
+        (long)proRow, proTopDist, proBottomDist, (long)firstSecRow,
+        scroll ? scroll.contentView.bounds.origin.y : -1.0, thirdH]);
 
+    const BOOL cellsMounted = (listenCell.superview != nil && proCell.superview != nil && firstSecCell.superview != nil);
+    const NSRect listenCellInWin = cellsMounted ? [listenCell convertRect:listenCell.bounds toView:root] : NSZeroRect;
+    const NSRect proCellInWin = cellsMounted ? [proCell convertRect:proCell.bounds toView:root] : NSZeroRect;
+    const NSRect secCellInWin = cellsMounted ? [firstSecCell convertRect:firstSecCell.bounds toView:root] : NSZeroRect;
+    // NSTableView rectOfRow: returns contiguous row bands (sharing the border between adjacent rows),
+    // while the cell views inside them are separated by intercellSpacing (2pt).
     const BOOL noOverlap = (listenRow >= 0 && proRow >= 0 && firstSecRow >= 0 && search != nil &&
+                            cellsMounted &&
                             !NSIntersectsRect(NSInsetRect(listenInWin, 0.5, 0.5), NSInsetRect(proInWin, 0.5, 0.5)) &&
                             !NSIntersectsRect(NSInsetRect(listenInWin, 0.5, 0.5), NSInsetRect(secInWin, 0.5, 0.5)) &&
                             !NSIntersectsRect(NSInsetRect(proInWin, 0.5, 0.5), NSInsetRect(secInWin, 0.5, 0.5)) &&
@@ -429,8 +438,12 @@ static void CheckSidebarTopEntries(RLPMainWindowController *wc, const char *stag
                             !NSIntersectsRect(NSInsetRect(proInWin, 0.5, 0.5), NSInsetRect(searchInWin, 0.5, 0.5)) &&
                             NSMaxX(listenInWin) <= NSMinX(searchInWin) &&
                             NSMaxX(proInWin) <= NSMinX(searchInWin) &&
+                            NSMinY(listenInWin) >= NSMaxY(proInWin) - 0.5 &&
+                            NSMinY(proInWin) >= NSMaxY(secInWin) - 0.5 &&
                             NSMinY(listenInWin) > NSMinY(proInWin) &&
-                            NSMinY(proInWin) > NSMaxY(secInWin));
+                            NSMinY(proInWin) > NSMinY(secInWin) &&
+                            NSMinY(listenCellInWin) > NSMaxY(proCellInWin) &&
+                            NSMinY(proCellInWin) > NSMaxY(secCellInWin));
     Ck(noOverlap,
        [[NSString stringWithFormat:@"V3-%s 两顶部入口不互相重叠、不与搜索框及首分组标题重叠且位于分组标题之上", stage] UTF8String],
        [NSString stringWithFormat:@"listen=%@ pro=%@ sec0=%@ search=%@",
