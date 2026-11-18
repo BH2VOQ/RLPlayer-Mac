@@ -252,6 +252,115 @@
 }
 @end
 
+/// `.chip` / 封面悬浮胶囊共用 cell：图标与文字严格按同一垂直中心线（NSMidY）居中，
+/// 不受 AppKit NSBezelStyleSmallSquare 与 SF Symbol 基线偏置导致的错位影响。
+@interface RLPMetaChipCell : NSButtonCell
+@end
+
+@implementation RLPMetaChipCell
+
+- (NSAttributedString *)effectiveAttributedTitle {
+    if (self.attributedTitle.length > 0) return self.attributedTitle;
+    NSString *text = self.title ?: @"";
+    if (!text.length) return [[NSAttributedString alloc] initWithString:@""];
+    NSFont *font = self.font ?: [NSFont systemFontOfSize:11.0];
+    NSMutableParagraphStyle *ps = [[NSMutableParagraphStyle alloc] init];
+    ps.lineBreakMode = NSLineBreakByTruncatingTail;
+    return [[NSAttributedString alloc] initWithString:text attributes:@{
+        NSFontAttributeName: font,
+        NSForegroundColorAttributeName: [RLPTheme current].text2,
+        NSParagraphStyleAttributeName: ps
+    }];
+}
+
+- (void)computeImageRect:(NSRect *)outImgRect titleRect:(NSRect *)outTitleRect forBounds:(NSRect)bounds {
+    NSAttributedString *attr = [self effectiveAttributedTitle];
+    NSImage *img = self.image;
+    const BOOL hasImg = (img != nil && self.imagePosition != NSNoImage);
+    const BOOL hasText = (attr.length > 0);
+
+    CGFloat iconW = 0.0, iconH = 0.0;
+    if (hasImg) {
+        NSSize isz = img.size;
+        if (isz.width <= 0.0 || isz.height <= 0.0) isz = NSMakeSize(11.0, 11.0);
+        const CGFloat maxSide = MIN(11.5, MAX(8.0, NSHeight(bounds) - 8.0));
+        const CGFloat scale = MIN(maxSide / isz.width, maxSide / isz.height);
+        iconW = MAX(1.0, isz.width * scale);
+        iconH = MAX(1.0, isz.height * scale);
+    }
+
+    const CGFloat sidePad = 8.0;
+    const CGFloat gap = (hasImg && hasText) ? 4.5 : 0.0;
+    const CGFloat availTextW = MAX(8.0, NSWidth(bounds) - sidePad * 2.0 - iconW - gap);
+
+    CGFloat textW = 0.0, textH = 0.0;
+    if (hasText) {
+        const NSRect rawR = [attr boundingRectWithSize:NSMakeSize(CGFLOAT_MAX, CGFLOAT_MAX)
+                                               options:(NSStringDrawingUsesLineFragmentOrigin |
+                                                        NSStringDrawingTruncatesLastVisibleLine)
+                                               context:nil];
+        textW = MIN(ceil(rawR.size.width), availTextW);
+        textH = ceil(rawR.size.height);
+    }
+
+    const CGFloat contentW = iconW + gap + textW;
+    const CGFloat startX = MAX(sidePad, floor((NSWidth(bounds) - contentW) * 0.5));
+    const CGFloat midY = NSMidY(bounds);
+
+    if (outImgRect) {
+        *outImgRect = hasImg
+            ? NSMakeRect(startX, midY - iconH * 0.5, iconW, iconH)
+            : NSZeroRect;
+    }
+    if (outTitleRect) {
+        const CGFloat tx = hasImg ? (startX + iconW + gap) : startX;
+        *outTitleRect = hasText
+            ? NSMakeRect(tx, midY - textH * 0.5, textW, textH)
+            : NSZeroRect;
+    }
+}
+
+- (NSRect)imageRectForBounds:(NSRect)rect {
+    NSRect ir = NSZeroRect;
+    [self computeImageRect:&ir titleRect:NULL forBounds:rect];
+    return ir;
+}
+
+- (NSRect)titleRectForBounds:(NSRect)rect {
+    NSRect tr = NSZeroRect;
+    [self computeImageRect:NULL titleRect:&tr forBounds:rect];
+    return tr;
+}
+
+- (void)drawInteriorWithFrame:(NSRect)cellFrame inView:(NSView *)controlView {
+    NSRect ir = NSZeroRect, tr = NSZeroRect;
+    [self computeImageRect:&ir titleRect:&tr forBounds:cellFrame];
+    [NSGraphicsContext saveGraphicsState];
+    if (!self.isEnabled) {
+        CGContextSetAlpha(NSGraphicsContext.currentContext.CGContext, 0.45);
+    }
+    if (self.image && !NSIsEmptyRect(ir)) {
+        [self drawImage:self.image withFrame:ir inView:controlView];
+    }
+    NSAttributedString *attr = [self effectiveAttributedTitle];
+    if (attr.length > 0 && !NSIsEmptyRect(tr)) {
+        [attr drawWithRect:tr
+                   options:(NSStringDrawingUsesLineFragmentOrigin |
+                            NSStringDrawingTruncatesLastVisibleLine)
+                   context:nil];
+    }
+    [NSGraphicsContext restoreGraphicsState];
+}
+
+@end
+
+@interface RLPMetaChipButton : RLPHoverButton
+@end
+
+@implementation RLPMetaChipButton
++ (Class)cellClass { return [RLPMetaChipCell class]; }
+@end
+
 /// `.k` 键（32×32 / radius 9；play 是 `.k.big` 34×34 圆）：图标 + 圆角，圆角由 web 值给。
 static NSButton *NPCreateKeyButton(NSString *symbol, NSString *tooltip, CGFloat radius) {
     RLPHoverButton *b = [[RLPHoverButton alloc] initWithFrame:NSZeroRect];
@@ -1790,11 +1899,11 @@ static NSString *RLPRailTagText(id srValue, id bitsValue) {
 @property(nonatomic,assign) NSUInteger lyricAiSeq;
 @property(nonatomic,strong,nullable) NSMenu *lyricAiMenu;
 @property(nonatomic,strong) NSTextField *kindLabel;
-@property(nonatomic,strong) NSTextField *analysisStatus;
-/// web #npAnalHide / #npRailHide：面板头部右上的 22px 圆形收起键（与顶栏开关同源状态）。
-@property(nonatomic,strong) NSButton *anlHide;
+@property(nonatomic,strong,nullable) NSTextField *analysisStatus;
+/// web #npRailHide：面板头部右上的 22px 圆形收起键（与顶栏开关同源状态）。
+@property(nonatomic,strong,nullable) NSButton *anlHide;
 @property(nonatomic,strong) NSButton *railHide;
-@property(nonatomic,strong) NSTextField *anlLab;       // web .anllab（独立 9.5/700/kern1.5）
+@property(nonatomic,strong,nullable) NSTextField *anlLab;
 @property(nonatomic,strong) NSView *anlSeg;            // web .npseg（一个外框 + 发丝分隔）
 @property(nonatomic,strong) NSView *anlSep1, *anlSep2;
 @property(nonatomic,strong) RLPNPAnalBody *anlBody;    // web #npAnlBody（卡片区）
@@ -1949,6 +2058,14 @@ static NSString *RLPRailTagText(id srValue, id bitsValue) {
     [parent addSubview:b]; return b;
 }
 
+- (RLPHoverButton *)chipButton:(NSString *)title identifier:(NSString *)ident action:(SEL)action parent:(NSView *)parent {
+    RLPMetaChipButton *b=[[RLPMetaChipButton alloc] initWithFrame:NSZeroRect];
+    b.title=RLPTr(title); b.target=self; b.action=action;
+    b.identifier=ident; b.font=[NSFont systemFontOfSize:11]; b.bordered=NO;
+    b.bezelStyle=NSBezelStyleSmallSquare;
+    [parent addSubview:b]; return b;
+}
+
 #pragma mark - #npMeta 芯片（web .badge / .chip 的逐值移植）
 
 /// web `.badge`：9.5px/600、letter-spacing .3px、padding 2 7、radius 5、1px 边框。
@@ -1959,11 +2076,16 @@ static NSString *RLPRailTagText(id srValue, id bitsValue) {
     if (hovered) {
         RLPTheme *t = [RLPTheme current];
         NSString *text = button.title.length ? button.title : (button.attributedTitle.string ?: @"");
+        NSFontWeight weight = (button == self.castButton && self.castRunningState) ? NSFontWeightSemibold : NSFontWeightRegular;
+        NSFont *font = [NSFont systemFontOfSize:11 weight:weight];
+        NSMutableParagraphStyle *ps = [[NSMutableParagraphStyle alloc] init];
+        ps.lineBreakMode = NSLineBreakByTruncatingTail;
         button.title = text;
         button.attributedTitle = [[NSAttributedString alloc] initWithString:text attributes:@{
-            NSFontAttributeName: [NSFont systemFontOfSize:11],
-            NSForegroundColorAttributeName: t.text}];
-        button.font = [NSFont systemFontOfSize:11];
+            NSFontAttributeName: font,
+            NSForegroundColorAttributeName: t.text,
+            NSParagraphStyleAttributeName: ps}];
+        button.font = font;
         button.layer.backgroundColor = t.hov.CGColor;
         button.layer.borderColor = t.accent.CGColor;
         button.contentTintColor = t.text;
@@ -1995,10 +2117,13 @@ static NSString *RLPRailTagText(id srValue, id bitsValue) {
     RLPTheme *t=[RLPTheme current];
     NSString *text=b.title.length?b.title:b.attributedTitle.string;
     if (!text) text=@"";
+    NSMutableParagraphStyle *ps = [[NSMutableParagraphStyle alloc] init];
+    ps.lineBreakMode = NSLineBreakByTruncatingTail;
     b.title=text;
     b.attributedTitle=[[NSAttributedString alloc] initWithString:text attributes:@{
         NSFontAttributeName:[NSFont systemFontOfSize:11],
-        NSForegroundColorAttributeName:t.text2}];
+        NSForegroundColorAttributeName:t.text2,
+        NSParagraphStyleAttributeName:ps}];
     b.font=[NSFont systemFontOfSize:11];
     b.bordered=NO;
     b.bezelStyle=NSBezelStyleSmallSquare;
@@ -2016,9 +2141,10 @@ static NSString *RLPRailTagText(id srValue, id bitsValue) {
     else if ([b.identifier isEqualToString:@"npCastBtn"]) sym = @"airplayaudio";
     else if ([b.identifier isEqualToString:@"npAddSq"]) sym = @"plus";
     if (sym) {
-        NSImage *img = [NSImage imageWithSystemSymbolName:sym accessibilityDescription:nil];
-        if (img) {
-            img.size = NSMakeSize(11, 11);
+        NSImage *rawImg = [NSImage imageWithSystemSymbolName:sym accessibilityDescription:nil];
+        if (rawImg) {
+            NSImageSymbolConfiguration *cfg = [NSImageSymbolConfiguration configurationWithPointSize:10.5 weight:NSFontWeightMedium];
+            NSImage *img = [rawImg imageWithSymbolConfiguration:cfg] ?: rawImg;
             b.image = img;
             b.imagePosition = NSImageLeft;
             b.imageScaling = NSImageScaleProportionallyDown;
@@ -2043,28 +2169,20 @@ static NSString *RLPRailTagText(id srValue, id bitsValue) {
     self.cover=[[NSImageView alloc] initWithFrame:NSZeroRect]; self.cover.identifier=@"npCover";
     self.cover.imageScaling=NSImageScaleAxesIndependently; self.cover.wantsLayer=YES;
     self.cover.layer.cornerRadius=14;self.cover.layer.borderWidth=1;self.cover.layer.masksToBounds=YES; [host addSubview:self.cover];
-    // v3.3.11 `npSetCover` / `npResetCover`（web 在封面下方居中成组小胶囊按钮，随 cover 居中、hover 反馈）。
+    // 封面右下角悬浮胶囊按钮（不另占一行、不压分析卡片）。
     {
-        RLPHoverButton *setBtn = [[RLPHoverButton alloc] initWithFrame:NSZeroRect];
-        setBtn.title = RLPTr(@"设置歌曲封面");
-        setBtn.target = self;
-        setBtn.action = @selector(onSetCover:);
-        setBtn.identifier = @"npSetCover";
+        RLPHoverButton *setBtn = [self chipButton:@"设置歌曲封面" identifier:@"npSetCover" action:@selector(onSetCover:) parent:host];
         setBtn.toolTip = RLPTr(@"仅设置当前歌曲封面，不修改专辑和音乐文件");
         self.coverSetBtn = setBtn;
         [self styleCoverActionButton:setBtn];
-        [host addSubview:setBtn];
+        setBtn.layer.zPosition = 2.0;
 
-        RLPHoverButton *rstBtn = [[RLPHoverButton alloc] initWithFrame:NSZeroRect];
-        rstBtn.title = RLPTr(@"自动");
-        rstBtn.target = self;
-        rstBtn.action = @selector(onResetCover:);
+        RLPHoverButton *rstBtn = [self chipButton:@"自动" identifier:@"npResetCover" action:@selector(onResetCover:) parent:host];
         rstBtn.hidden = YES;
-        rstBtn.identifier = @"npResetCover";
         rstBtn.toolTip = RLPTr(@"恢复自动封面");
         self.coverResetBtn = rstBtn;
         [self styleCoverActionButton:rstBtn];
-        [host addSubview:rstBtn];
+        rstBtn.layer.zPosition = 2.0;
 
         __weak __typeof__(self) wsCover = self;
         for (RLPHoverButton *cb in @[setBtn, rstBtn]) {
@@ -2095,12 +2213,12 @@ static NSString *RLPRailTagText(id srValue, id bitsValue) {
     self.metaChips=mc;
     self.favoriteButton=[self webButton:@"♡" identifier:@"npFavBtn" action:@selector(onFav:) parent:host]; self.favoriteButton.bordered=NO;self.favoriteButton.font=[NSFont systemFontOfSize:22];
     // 261024-02 #5：投放 / 加歌单在 web 里也是 #npMeta 里的 .chip（不是下面独立按钮行）。
-    self.castButton=[self webButton:@"推送到设备" identifier:@"npCastBtn" action:@selector(onCastCurrent:) parent:self.metaChipsRow];
-    self.saveButton=[self webButton:@"添加到歌单" identifier:@"npAddSq" action:@selector(onSaveCurrent:) parent:self.metaChipsRow];
+    self.castButton=[self chipButton:@"推送到设备" identifier:@"npCastBtn" action:@selector(onCastCurrent:) parent:self.metaChipsRow];
+    self.saveButton=[self chipButton:@"添加到歌单" identifier:@"npAddSq" action:@selector(onSaveCurrent:) parent:self.metaChipsRow];
     self.castButton.toolTip=RLPTr(@"把当前曲目推送到 UPnP / DLNA 设备");
     self.saveButton.toolTip=RLPTr(@"把当前曲目添加到指定歌单");
-    self.eqChip=[self webButton:@"EQ" identifier:@"npEqChip" action:@selector(onEqChip:) parent:self.metaChipsRow];
-    self.irChip=[self webButton:@"IR" identifier:@"npIrChip" action:@selector(onIrChip:) parent:self.metaChipsRow];
+    self.eqChip=[self chipButton:@"EQ" identifier:@"npEqChip" action:@selector(onEqChip:) parent:self.metaChipsRow];
+    self.irChip=[self chipButton:@"IR" identifier:@"npIrChip" action:@selector(onIrChip:) parent:self.metaChipsRow];
     for(NSButton *b in @[self.eqChip,self.irChip,self.castButton,self.saveButton]) {
         b.hidden=YES; [self styleMetaChip:b];
     }
@@ -2128,26 +2246,7 @@ static NSString *RLPRailTagText(id srValue, id bitsValue) {
     self.railToggle=[self webButton:@"▤" identifier:@"npRailToggle" action:@selector(onToggleRail:) parent:host];self.railToggle.toolTip=RLPTr(@"显示 / 隐藏 AI 资料面板");
     self.analysisPanel=[[NSView alloc] initWithFrame:NSZeroRect];self.analysisPanel.identifier=@"npAnal";[host addSubview:self.analysisPanel];
     self.railPanel=[[NSView alloc] initWithFrame:NSZeroRect];self.railPanel.identifier=@"npRail";[host addSubview:self.railPanel];
-    // 头部：独立的 9.5/700/kern1.5 标题（web .anllab）+ 右端状态（web #npAnlStat）
-    self.anlLab=RLPLabel(RLPTr(@"音频分析"),[NSFont systemFontOfSize:9.5 weight:NSFontWeightBold],t.mut2);
-    self.anlLab.identifier=@"npAnlLab";[self.analysisPanel addSubview:self.anlLab];
-    self.analysisStatus=RLPLabel(RLPTr(@"未播放"),[NSFont systemFontOfSize:10],t.mut2);
-    self.analysisStatus.identifier=@"npAnlStat";self.analysisStatus.alignment=NSTextAlignmentRight;
-    [self.analysisPanel addSubview:self.analysisStatus];
-    // web #npAnalHide（.anlhide{position:absolute;top:7;right:8;22x22;圆形;收起箭头}）：
-    // 面板头部自己的收起键，和右上角 #npAnalToggle 是**同一份**隐藏状态（web 两个入口写同一 localStorage）。
-    self.anlHide=[self webButton:@"" identifier:@"npAnalHide" action:@selector(onHideAnalysis:) parent:self.analysisPanel];
-    self.anlHide.title=@"";self.anlHide.bordered=NO;self.anlHide.imagePosition=NSImageOnly;
-    self.anlHide.image=[NSImage imageWithSystemSymbolName:@"chevron.left"
-                                  accessibilityDescription:RLPTr(@"隐藏音频分析面板")];
-    self.anlHide.contentTintColor=t.mut2;self.anlHide.wantsLayer=YES;self.anlHide.layer.cornerRadius=11;
-    self.anlHide.toolTip=RLPTr(@"隐藏音频分析面板，可在右上角重新显示");
-    ((RLPHoverButton *)self.anlHide).hoverApplier = ^(RLPHoverButton *btn, BOOL hovered) {
-        RLPTheme *t2=[RLPTheme current];
-        btn.layer.backgroundColor = (hovered ? t2.hov2 : NSColor.clearColor).CGColor;
-        btn.contentTintColor = hovered ? t2.text : t2.mut2;
-    };
-    // 三个动作装进**一个**带外框的分段控件（web .npseg：radius 9、10.5/600、padding 3 11、发丝分隔）
+    // 无头两段式布局：分段动作栏 + 三张摘要卡（不再显示独立标题/状态/折叠行）。
     self.anlSeg=[[NSView alloc] initWithFrame:NSZeroRect];self.anlSeg.identifier=@"npAnlSeg";
     self.anlSeg.wantsLayer=YES;self.anlSeg.layer.cornerRadius=9;self.anlSeg.layer.borderWidth=1;
     self.anlSeg.layer.masksToBounds=YES;[self.analysisPanel addSubview:self.anlSeg];
@@ -2435,11 +2534,11 @@ static CGFloat RLPNPMetaChipWidth(NSButton *b) {
     const BOOL badge = [b.identifier hasPrefix:@"npMeta."];
     NSAttributedString *as = b.attributedTitle;
     CGFloat tw = as.length ? as.size.width : [b.title sizeWithAttributes:@{ NSFontAttributeName: b.font }].width;
-    const CGFloat iconExtra = b.image ? 15.0 : 0.0;   // 11px 图标 + 4px 间距（web chip 的内联 SVG 同构）
+    const CGFloat iconExtra = b.image ? 17.0 : 0.0;   // 11.5px 图标 + 4.5px 间距 + 1px 余量
     return ceil(tw) + (badge ? 16.0 : 20.0) + iconExtra;   // padding 2×7 或 2×9 + 边框 2×1
 }
 
-/// 封面下方小胶囊按钮统一样式：低存在感次级描边与柔和底，hover 时提亮文字与强调边。
+/// 封面右下角悬浮小胶囊按钮：半透明深底 + 柔和白边/亮字，叠在封面图上依然清晰可读。
 - (void)styleCoverActionButton:(NSButton *)button {
     if (!button) return;
     RLPTheme *t = [RLPTheme current];
@@ -2458,11 +2557,11 @@ static CGFloat RLPNPMetaChipWidth(NSButton *b) {
     button.wantsLayer = YES;
     button.layer.cornerRadius = 11.0;
     button.layer.borderWidth = 1.0;
-    NSColor *fg = hovered ? t.text : t.mut;
-    NSColor *bg = hovered ? t.hov2
-        : (t.isLight ? [NSColor colorWithSRGBRed:15/255. green:23/255. blue:42/255. alpha:.045]
-                     : [NSColor colorWithWhite:1 alpha:.06]);
-    NSColor *bd = hovered ? t.accent : t.line;
+    NSColor *fg = hovered ? NSColor.whiteColor : [NSColor colorWithWhite:1 alpha:.94];
+    NSColor *bg = hovered
+        ? [NSColor colorWithSRGBRed:16/255. green:18/255. blue:24/255. alpha:.88]
+        : [NSColor colorWithSRGBRed:16/255. green:18/255. blue:24/255. alpha:.72];
+    NSColor *bd = hovered ? t.accent : [NSColor colorWithWhite:1 alpha:.24];
     button.layer.backgroundColor = bg.CGColor;
     button.layer.borderColor = bd.CGColor;
     button.contentTintColor = fg;
@@ -2475,9 +2574,10 @@ static CGFloat RLPNPMetaChipWidth(NSButton *b) {
     if ([button.identifier isEqualToString:@"npSetCover"]) sym = @"photo";
     else if ([button.identifier isEqualToString:@"npResetCover"]) sym = @"arrow.uturn.backward";
     if (sym) {
-        NSImage *img = [NSImage imageWithSystemSymbolName:sym accessibilityDescription:nil];
-        if (img) {
-            img.size = NSMakeSize(10, 10);
+        NSImage *rawImg = [NSImage imageWithSystemSymbolName:sym accessibilityDescription:nil];
+        if (rawImg) {
+            NSImageSymbolConfiguration *cfg = [NSImageSymbolConfiguration configurationWithPointSize:10.0 weight:NSFontWeightMedium];
+            NSImage *img = [rawImg imageWithSymbolConfiguration:cfg] ?: rawImg;
             button.image = img;
             button.imagePosition = NSImageLeft;
             button.imageScaling = NSImageScaleProportionallyDown;
@@ -2492,7 +2592,7 @@ static CGFloat RLPNPMetaChipWidth(NSButton *b) {
     NSFont *font = button.font ?: [NSFont systemFontOfSize:10.5 weight:NSFontWeightMedium];
     NSString *text = button.attributedTitle.string.length ? button.attributedTitle.string : (button.title ?: @"");
     const CGFloat tw = ceil([text sizeWithAttributes:@{ NSFontAttributeName: font }].width);
-    const CGFloat iconExtra = button.image ? 14.0 : 0.0;
+    const CGFloat iconExtra = button.image ? 15.0 : 0.0;
     return tw + iconExtra + 18.0;
 }
 
@@ -2627,37 +2727,37 @@ static CGFloat RLPNPMetaChipWidth(NSButton *b) {
     const CGFloat ctlY = MAX(12.0, MIN(computedCtlY, h - ctlH - 12.0));
     const CGFloat waveformY = MAX(0.0, ctlY - waveformGap - waveformH);
 
-    // 封面图与下方胶囊操作成组（居中在封面正下方，不再与三栏顶边重叠）。
+    // 封面图与浮于右下角的轻量化设置封面胶囊（不另占独立一行、不压分析栏）。
     const CGFloat c = MIN(236.0, MAX(132.0, h * 0.24));
     const CGFloat gutter = 16.0, top = 44.0;
     self.cover.frame = NSMakeRect(gutter, top, c, c);
     self.coverShadow.frame = self.cover.frame;
     {
-        const CGFloat btnGap = 6.0, btnH = 22.0, btnY = top + c + 8.0;
+        const CGFloat edgePad = 8.0, btnGap = 6.0, btnH = 22.0;
         const BOOL showReset = !self.coverResetBtn.hidden;
         CGFloat bw1 = [self coverButtonIdealWidth:self.coverSetBtn];
         CGFloat bw2 = showReset ? [self coverButtonIdealWidth:self.coverResetBtn] : 0.0;
-        const CGFloat maxRowW = MAX(60.0, c);
-        CGFloat total = showReset ? (bw1 + btnGap + bw2) : bw1;
-        if (total > maxRowW) {
-            if (showReset) {
+        const CGFloat maxRowW = MAX(60.0, c - edgePad * 2.0);
+        if (showReset) {
+            if (bw1 + btnGap + bw2 > maxRowW) {
                 const CGFloat avail = MAX(40.0, maxRowW - btnGap);
                 const CGFloat sumW = MAX(1.0, bw1 + bw2);
                 bw1 = floor(avail * (bw1 / sumW));
                 bw2 = MAX(24.0, avail - bw1);
-                total = bw1 + btnGap + bw2;
-            } else {
-                bw1 = maxRowW;
-                total = bw1;
             }
+        } else {
+            bw1 = MIN(bw1, maxRowW);
         }
-        const CGFloat bx = gutter + MAX(0.0, (c - total) / 2.0);
-        self.coverSetBtn.frame = NSMakeRect(bx, btnY, bw1, btnH);
-        self.coverResetBtn.frame = showReset ? NSMakeRect(bx + bw1 + btnGap, btnY, bw2, btnH) : NSZeroRect;
+        const CGFloat rightEdge = NSMaxX(self.cover.frame) - edgePad;
+        const CGFloat btnY = NSMaxY(self.cover.frame) - edgePad - btnH;
+        self.coverSetBtn.frame = NSMakeRect(rightEdge - bw1, btnY, bw1, btnH);
+        self.coverResetBtn.frame = showReset
+            ? NSMakeRect(NSMinX(self.coverSetBtn.frame) - btnGap - bw2, btnY, bw2, btnH)
+            : NSZeroRect;
         self.coverSetBtn.enabled = self.currentPath.length > 0;
         self.coverResetBtn.enabled = self.currentPath.length > 0;
     }
-    const CGFloat coverGroupBottom = top + c + 30.0;
+    const CGFloat coverGroupBottom = top + c;
 
     // 英雄区文字 + 芯片组垂直居于封面高度范围，若顶部几行落入顶栏托盘 Y 区间则右缘让位。
     const CGFloat x = gutter + c + 26.0;
@@ -2726,47 +2826,33 @@ static CGFloat RLPNPMetaChipWidth(NSButton *b) {
         const CGFloat lw = MAX(80.0, (w - gutter) - lx);
         self.lyricScroll.frame = NSMakeRect(lx, by, lw, bodyH);
     } else {
-        self.lyricScroll.frame = NSMakeRect(gutter + col + colGap, by, col * 2.0, bodyH);
+        const CGFloat lx = NSMaxX(self.analysisPanel.frame) + colGap;
+        const CGFloat lw = MAX(80.0, NSMinX(self.railPanel.frame) - colGap - lx);
+        self.lyricScroll.frame = NSMakeRect(lx, by, lw, bodyH);
     }
     [self updateLyricFadeMask];   // 视口高度变了要重算 26pt 渐隐位置
-    // ---- 音频分析面板：web #npAnal（padding:8px 11px 9px、.anlhead gap:8、面板 gap:6）----
+    // ---- 音频分析面板：无头两段式排版（顶部动作分段条 + 三张摘要卡）----
     {
-        const CGFloat anlPadX = 12.0, anlPadTop = 8.0, anlPadBottom = 9.0;
-        const CGFloat anlLabelH = 13.0, anlSegH = 21.0, anlHeadGap = 8.0, anlBodyGap = 6.0;
-        NSFont *labFont = self.anlLab.font;
-        const CGFloat idealLabW = ceil(self.anlLab.attributedStringValue.length
-                                       ? self.anlLab.attributedStringValue.size.width
-                                       : [self.anlLab.stringValue sizeWithAttributes:
-                                          @{ NSFontAttributeName: labFont }].width) + 4.0;
-        const CGFloat headY = bodyH - anlPadTop - anlLabelH;
-        const CGFloat statRight = side - (anlPadX + 26.0);
-        const CGFloat statIdealW = ceil([self.analysisStatus.stringValue sizeWithAttributes:
-                                         @{ NSFontAttributeName: self.analysisStatus.font }].width) + 4.0;
-        const CGFloat minStatReserve = MIN(statIdealW, 42.0);
-        CGFloat labW = idealLabW;
-        if (anlPadX + labW + 6.0 + minStatReserve > statRight) {
-            labW = MAX(20.0, statRight - anlPadX - 6.0 - minStatReserve);
+        const CGFloat anlPadX = 12.0, anlPadTop = 11.0, anlPadBottom = 11.0;
+        const CGFloat anlSegH = 24.0, anlBodyGap = 8.0;
+        const CGFloat segY = MAX(anlPadBottom, bodyH - anlPadTop - anlSegH);
+        const BOOL wantReanalyze = (self.anlLevel != RLPAnlLevelCollapsed);
+        const CGFloat reanalyzeW = 62.0;
+        const BOOL splitTopRow = wantReanalyze && (side - anlPadX * 2.0 - reanalyzeW - 8.0 >= [self anlSegmentWidth]);
+        if (splitTopRow) {
+            self.anlReanalyze.frame = NSMakeRect(anlPadX, segY, reanalyzeW, anlSegH);
+            self.anlReanalyze.hidden = NO;
+            [self anlLayoutSegmentAtY:segY left:(anlPadX + reanalyzeW + 8.0) right:(side - anlPadX) fill:NO];
+        } else {
+            self.anlReanalyze.frame = NSMakeRect(anlPadX, segY, reanalyzeW, anlSegH);
+            self.anlReanalyze.hidden = YES;
+            [self anlLayoutSegmentAtY:segY left:anlPadX right:(side - anlPadX) fill:YES];
         }
-        self.anlLab.frame = NSMakeRect(anlPadX, headY,
-                                       MIN(MAX(20.0, labW), MAX(20.0, side - anlPadX * 2.0)),
-                                       anlLabelH);
-        {
-            const CGFloat statAvail = MAX(20.0, statRight - (anlPadX + labW + 8.0));
-            const CGFloat statW = MIN(statAvail, statIdealW);
-            self.analysisStatus.frame = NSMakeRect(statRight - statW, headY, statW, anlLabelH);
-        }
-        const CGFloat segTop = anlPadTop + anlLabelH + anlHeadGap;
-        const CGFloat segY = bodyH - segTop - anlSegH;
-        [self anlLayoutSegmentAtY:segY right:side - anlPadX];
-        const CGFloat cardsTop = segTop + anlSegH + anlBodyGap;
+        const CGFloat cardsTop = anlPadTop + anlSegH + anlBodyGap;
         const CGFloat cardsH = MAX(0.0, bodyH - cardsTop - anlPadBottom);
         const CGFloat cardsW = MAX(20.0, side - anlPadX);
         self.anlBody.frame = NSMakeRect(anlPadX, anlPadBottom, cardsW, cardsH);
-        self.anlDetailScroll.frame = self.anlBody.frame;
-        self.anlReanalyze.frame = NSMakeRect(anlPadX, segY, 62.0, anlSegH);
-        self.anlReanalyze.hidden = (self.anlLevel == RLPAnlLevelCollapsed)
-                                || (NSMinX(self.anlSeg.frame) < NSMaxX(self.anlReanalyze.frame) + 8.0);
-        self.anlHide.frame = NSMakeRect(side - 9.0 - 22.0, bodyH - 8.0 - 22.0, 22.0, 22.0);
+        self.anlDetailScroll.frame = NSMakeRect(anlPadX, anlPadBottom, MAX(20.0, side - anlPadX * 2.0), cardsH);
         [self anlLayoutCards];
     }
     // ---- AI 整理栏几何（web .nprailcard padding:10 / gap:8，.npchipwrap gap:6）----
@@ -3416,9 +3502,14 @@ static NSString *RLPNowPlayingCastDeviceLabel(NSString *device) {
     RLPTheme *t = [RLPTheme current];
     if (self.castRunningState) {
         NSString *title = [NSString stringWithFormat:@"%@ %@", RLPTr(@"已推送到"), self.castDeviceName ?: RLPTr(@"设备")];
+        NSFont *font = [NSFont systemFontOfSize:11 weight:NSFontWeightSemibold];
+        NSMutableParagraphStyle *ps = [[NSMutableParagraphStyle alloc] init];
+        ps.lineBreakMode = NSLineBreakByTruncatingTail;
+        self.castButton.font = font;
         self.castButton.attributedTitle = [[NSAttributedString alloc] initWithString:title attributes:@{
-            NSFontAttributeName: [NSFont systemFontOfSize:11 weight:NSFontWeightSemibold],
+            NSFontAttributeName: font,
             NSForegroundColorAttributeName: t.okText,
+            NSParagraphStyleAttributeName: ps,
         }];
         self.castButton.title = title;
         self.castButton.layer.backgroundColor = t.okBg.CGColor;
@@ -4559,7 +4650,7 @@ static NSString *RLPNowPlayingCastDeviceLabel(NSString *device) {
     }];
 }
 
-#pragma mark - 音频分析面板（web #npAnal：头部两行 + 三张摘要卡 + 展开档卡内指标）
+#pragma mark - 音频分析面板（无头两段式：顶部动作分段条 + 三张摘要卡 + 展开档卡内指标）
 
 /// 卡片区是 web #npAnlBody：三张摘要卡**始终存在**，展开档只是让每张卡长出指标网格。
 /// 旧实现展开时把三张卡 hidden 掉、换一块纯文本 NSTextView —— 那条路径已删除；
@@ -4624,8 +4715,8 @@ static NSString *RLPNowPlayingCastDeviceLabel(NSString *device) {
     return total;
 }
 
-/// 分段控件右端贴齐面板内容右缘（web .anlacts justify-content:flex-end），窄栏自动压缩段内留白以防左侧溢出。
-- (void)anlLayoutSegmentAtY:(CGFloat)y right:(CGFloat)right {
+/// 分段控件在无头分析栏顶部排版：无「重新分析」按钮时可铺满内容宽，窄栏自动压缩段内留白以防左侧溢出。
+- (void)anlLayoutSegmentAtY:(CGFloat)y left:(CGFloat)left right:(CGFloat)right fill:(BOOL)fill {
     NSFont *f = [NSFont systemFontOfSize:10.5 weight:NSFontWeightSemibold];
     NSArray<NSButton *> *btns = @[self.anlAuto, self.anlExpand, self.anlRun];
     NSArray<NSView *> *seps = @[self.anlSep1, self.anlSep2];
@@ -4639,19 +4730,25 @@ static NSString *RLPNowPlayingCastDeviceLabel(NSString *device) {
     }
     const CGFloat fixedOverhead = 2.0 + (CGFloat)seps.count * 1.0;   // 外框 2px + 1px 发丝×2 = 4pt
     const CGFloat idealTotal = fixedOverhead + textSum + 22.0 * (CGFloat)btns.count;
-    const CGFloat maxW = MAX(60.0, right - 12.0);
-    const CGFloat total = MIN(idealTotal, maxW);
+    const CGFloat maxW = MAX(60.0, right - left);
+    const CGFloat total = fill ? maxW : MIN(idealTotal, maxW);
+    const CGFloat segH = 24.0;
+    const CGFloat itemH = segH - 2.0;
     CGFloat widths[3] = {0, 0, 0};
-    if (idealTotal <= maxW) {
+    if (!fill && idealTotal <= maxW) {
         for (NSUInteger i = 0; i < btns.count; ++i) widths[i] = textWs[i] + 22.0;
     } else {
         const CGFloat inner = MAX(42.0, total - fixedOverhead);
         if (textSum + 4.0 * (CGFloat)btns.count <= inner) {
-            const CGFloat pad = (inner - textSum) / (CGFloat)btns.count;
+            const CGFloat extra = inner - textSum;
             CGFloat used = 0.0;
             for (NSUInteger i = 0; i < btns.count; ++i) {
-                widths[i] = (i + 1 < btns.count) ? floor(textWs[i] + pad) : MAX(14.0, inner - used);
-                used += widths[i];
+                if (i + 1 < btns.count) {
+                    widths[i] = floor(textWs[i] + extra / (CGFloat)btns.count);
+                    used += widths[i];
+                } else {
+                    widths[i] = MAX(14.0, inner - used);
+                }
             }
         } else {
             const CGFloat base = 14.0;
@@ -4668,13 +4765,14 @@ static NSString *RLPNowPlayingCastDeviceLabel(NSString *device) {
             }
         }
     }
-    self.anlSeg.frame = NSMakeRect(right - total, y, total, 21.0);
+    const CGFloat segX = fill ? left : (right - total);
+    self.anlSeg.frame = NSMakeRect(segX, y, total, segH);
     CGFloat cx = 1.0;   // 外框 1px
     for (NSUInteger i = 0; i < btns.count; ++i) {
-        btns[i].frame = NSMakeRect(cx, 1.0, widths[i], 19.0);
+        btns[i].frame = NSMakeRect(cx, 1.0, widths[i], itemH);
         cx += widths[i];
         if (i < seps.count) {
-            seps[i].frame = NSMakeRect(cx, 1.0, 1.0, 19.0);
+            seps[i].frame = NSMakeRect(cx, 1.0, 1.0, itemH);
             cx += 1.0;
         }
     }
@@ -4763,18 +4861,17 @@ static NSString *RLPNowPlayingCastDeviceLabel(NSString *device) {
     [self.anlFake applyRows:fakeRows level:lvl];
     self.anlDyn.toolTip = dyn; self.anlQual.toolTip = qual; self.anlFake.toolTip = fake;
 
-    // 状态：标题已独立成「音频分析」，这里只说状态（web #npAnlStat 的语义）。
-    NSString *stat;
-    if (self.anlBusy) stat = RLPTr(@"分析中…");
-    else if (self.anlError.length) stat = [NSString stringWithFormat:@"%@：%@", RLPTr(@"分析失败"), self.anlError];
-    else if (!self.currentPath.length) stat = RLPTr(@"未播放");
-    else if (!RLPAnlIsLocalPath(self.currentPath)) stat = RLPTr(@"仅本地文件可分析");
-    else if (!h) stat = RLPTr(@"未分析");
-    // U10：后端判「文件可能不完整」时，状态串直接说出来（后端 note 在展开档首行原样展示）。
-    // 不写"分析失败"也不写"已分析"：分析**成功**了，只是结论只覆盖已存在的那一部分。
-    else if (RLPAnlIncomplete(h)) stat = RLPTr(@"文件可能不完整");
-    else stat = self.anlCached ? RLPTr(@"缓存命中") : RLPTr(@"已分析");
-    self.analysisStatus.stringValue = stat;
+    if (self.analysisStatus) {
+        NSString *stat;
+        if (self.anlBusy) stat = RLPTr(@"分析中…");
+        else if (self.anlError.length) stat = [NSString stringWithFormat:@"%@：%@", RLPTr(@"分析失败"), self.anlError];
+        else if (!self.currentPath.length) stat = RLPTr(@"未播放");
+        else if (!RLPAnlIsLocalPath(self.currentPath)) stat = RLPTr(@"仅本地文件可分析");
+        else if (!h) stat = RLPTr(@"未分析");
+        else if (RLPAnlIncomplete(h)) stat = RLPTr(@"文件可能不完整");
+        else stat = self.anlCached ? RLPTr(@"缓存命中") : RLPTr(@"已分析");
+        self.analysisStatus.stringValue = stat;
+    }
     self.anlAuto.state = self.anlAutoEnabled ? NSControlStateValueOn : NSControlStateValueOff;
     [self anlUpdateSegmentTitles];
 
@@ -4921,22 +5018,13 @@ static NSString *RLPNowPlayingCastDeviceLabel(NSString *device) {
                          NSKernAttributeName:@1.5,
                          NSParagraphStyleAttributeName:ps}];
     }
-    self.analysisStatus.textColor=t.mut2;self.lyricsEmpty.textColor=t.mut2;
-    self.anlHide.contentTintColor=t.mut2;self.railHide.contentTintColor=t.mut2;
+    self.lyricsEmpty.textColor=t.mut2;
+    self.railHide.contentTintColor=t.mut2;
     for(NSView *p in @[self.analysisPanel,self.railPanel]){p.wantsLayer=YES;p.layer.cornerRadius=14;p.layer.borderWidth=1;p.layer.borderColor=t.line.CGColor;p.layer.backgroundColor=[t.isLight?[NSColor colorWithSRGBRed:15/255. green:23/255. blue:42/255. alpha:.04]:[NSColor colorWithWhite:1 alpha:.045] CGColor];}
     self.waveformView.wantsLayer=YES;self.waveformView.layer.cornerRadius=10;self.waveformView.layer.masksToBounds=YES;
     self.waveformView.layer.borderWidth=1;self.waveformView.layer.borderColor=t.line.CGColor;
     self.waveformView.layer.backgroundColor=(t.isLight?[NSColor colorWithSRGBRed:15/255. green:23/255. blue:42/255. alpha:.02]:[NSColor colorWithWhite:1 alpha:.025]).CGColor;
-    // 头部：独立 9.5/700/kern1.5 标题（web .anllab）；分段控件一个外框 + 内部发丝分隔。
-    {
-        NSMutableParagraphStyle *ps=[[NSMutableParagraphStyle alloc] init];ps.lineBreakMode=NSLineBreakByTruncatingTail;
-        self.anlLab.attributedStringValue=[[NSAttributedString alloc] initWithString:RLPTr(@"音频分析")
-            attributes:@{NSFontAttributeName:[NSFont systemFontOfSize:9.5 weight:NSFontWeightBold],
-                         NSForegroundColorAttributeName:t.mut2,
-                         NSKernAttributeName:@1.5,
-                         NSParagraphStyleAttributeName:ps}];
-    }
-    self.anlLab.font=[NSFont systemFontOfSize:9.5 weight:NSFontWeightBold];
+    // 分段控件一个外框 + 内部发丝分隔（面板头部标题/状态/折叠行已移除）。
     self.anlSeg.layer.backgroundColor=t.hov.CGColor;
     self.anlSeg.layer.borderColor=t.line.CGColor;
     self.anlSep1.layer.backgroundColor=t.line.CGColor;
@@ -4982,15 +5070,6 @@ static NSString *RLPNowPlayingCastDeviceLabel(NSString *device) {
     if (!self.trackMetadata.count) {
         RLPSetKernedText(self.kindLabel, RLPTr(@"正在播放"), 1.6);
     }
-    {
-        NSMutableParagraphStyle *ps = [[NSMutableParagraphStyle alloc] init];
-        ps.lineBreakMode = NSLineBreakByTruncatingTail;
-        self.anlLab.attributedStringValue = [[NSAttributedString alloc] initWithString:RLPTr(@"音频分析")
-            attributes:@{NSFontAttributeName:[NSFont systemFontOfSize:9.5 weight:NSFontWeightBold],
-                         NSForegroundColorAttributeName:[RLPTheme current].mut2,
-                         NSKernAttributeName:@1.5,
-                         NSParagraphStyleAttributeName:ps}];
-    }
     [self anlUpdateSegmentTitles];
     [self anlPaint];
     [self applyPlayModeUI];
@@ -4999,7 +5078,6 @@ static NSString *RLPNowPlayingCastDeviceLabel(NSString *device) {
     self.closeButton.toolTip = RLPTr(@"返回（Esc）");
     self.analysisToggle.toolTip = RLPTr(@"显示 / 隐藏音频分析面板");
     self.railToggle.toolTip = RLPTr(@"显示 / 隐藏 AI 资料面板");
-    self.anlHide.toolTip = RLPTr(@"隐藏音频分析面板，可在右上角重新显示");
     self.railHide.toolTip = RLPTr(@"隐藏 AI 资料面板，可在右上角重新显示");
     self.coverSetBtn.title = RLPTr(@"设置歌曲封面");
     self.coverResetBtn.title = RLPTr(@"自动");
