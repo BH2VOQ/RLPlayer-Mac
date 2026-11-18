@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #import <AppKit/AppKit.h>
 #import "RLPNowPlayingViewController.h"
+#import "RLPKnowledgeView.h"
 #import "RLPTheme.h"
 #import "RLPCoreClient.h"
 #import "RLPModels.h"
@@ -16,6 +17,16 @@
 @interface RLPNowPlayingViewController (RLPCoverTestSeam)
 - (void)setCoverAtPath:(NSString *)coverPath forTrack:(NSString *)track;
 - (void)resetCoverForTrack:(NSString *)track;
+- (void)renderRailMetadata;
+- (void)layoutWebPlayback;
+- (void)openDataDrawer;
+- (void)closeDataDrawer;
+- (void)onRailDensity:(id)sender;
+@end
+@interface RLPKnowledgeView (NPDetailsTest)
+- (void)renderMetaFixture:(NSDictionary *)fixture;
+- (void)loadDrawerContext:(NSDictionary *)context;
+- (CGFloat)renderedContentHeight;
 @end
 @interface NSObject (RLPRailMomentumTest)
 - (void)beginMomentumWithVelocity:(CGFloat)v;
@@ -919,7 +930,11 @@ int main(){@autoreleasepool{
        [[NSString stringWithFormat:@"抽屉宽=min(430,44vw)（want %.0f got %.0f）",wantW,drawer.frame.size.width] UTF8String]);
     ck(fabs(NSMaxX(drawer.frame)-(W-14.0))<1.0&&fabs(NSMinY(drawer.frame)-14.0)<1.0,
        [[NSString stringWithFormat:@"top/right 14pt（frame=%@）",NSStringFromRect(drawer.frame)] UTF8String]);
-    ck(fabs(drawer.frame.size.height-(H-28.0))<1.0,"抽屉高 = 页面高-28（top/bottom 14）");
+    NSView *ctlD=(NSView *)[vc valueForKey:@"webControls"];
+    const CGFloat wantH=ctlD ? MAX(60.0, NSMinY(ctlD.frame)-8.0-14.0) : (H-28.0);
+    ck(fabs(drawer.frame.size.height-wantH)<1.5 && (!ctlD || NSMaxY(drawer.frame)<=NSMinY(ctlD.frame)-7.5),
+       [[NSString stringWithFormat:@"抽屉底边让出底栏控制区（wantH %.0f gotH %.0f maxY %.0f ctlTop %.0f）",
+         wantH,drawer.frame.size.height,NSMaxY(drawer.frame),ctlD?NSMinY(ctlD.frame):0.0] UTF8String]);
     ck(fabs(drawer.layer.cornerRadius-18.0)<0.6,"抽屉圆角 18（web border-radius:18px）");
     ck(drawer.layer.borderWidth>=1.0,"抽屉 1px 描边（--line2）");
     ck(drawer.layer.shadowOpacity>0.30&&fabs(drawer.layer.shadowRadius-40.0)<1.0,
@@ -1283,6 +1298,236 @@ int main(){@autoreleasepool{
       "N3f 三栏不压波形、波形不压底栏");
   }
   [np closeDataDrawer];
+
+  // ---- A1-A4: AI 详细档全字段 + 抽屉分区内容/滚动/空态 + 900x600 & 1180x760 边界与底栏让位 ----
+  {
+   __block void (^__weak wCollectFields)(NSView *, NSString *, NSMutableArray<NSTextField *> *);
+   void (^collectFields)(NSView *, NSString *, NSMutableArray<NSTextField *> *);
+   collectFields = ^(NSView *root, NSString *ident, NSMutableArray<NSTextField *> *out) {
+    if (!root || root.hidden) return;
+    if ([root isKindOfClass:[NSTextField class]] && [root.identifier isEqualToString:ident]) {
+     NSTextField *tf = (NSTextField *)root;
+     if (tf.stringValue.length > 0) [out addObject:tf];
+    }
+    void (^rec)(NSView *, NSString *, NSMutableArray<NSTextField *> *) = wCollectFields;
+    for (NSView *sub in root.subviews) if (rec) rec(sub, ident, out);
+   };
+   wCollectFields = collectFields;
+   __block void (^__weak wCollectViews)(NSView *, NSString *, NSMutableArray<NSView *> *);
+   void (^collectViews)(NSView *, NSString *, NSMutableArray<NSView *> *);
+   collectViews = ^(NSView *root, NSString *ident, NSMutableArray<NSView *> *out) {
+    if (!root || root.hidden) return;
+    if ([root.identifier isEqualToString:ident] || (ident.length && [root.identifier hasPrefix:ident])) {
+     [out addObject:root];
+    }
+    void (^rec)(NSView *, NSString *, NSMutableArray<NSView *> *) = wCollectViews;
+    for (NSView *sub in root.subviews) if (rec) rec(sub, ident, out);
+   };
+   wCollectViews = collectViews;
+
+   // A1: 真实 meta fixture（含 year/genre/label/catalog/credits/recording/mastering/sources/confidence/cached_at）
+   NSDictionary *metaFixture = @{
+    @"title": @"Winterreise, Op. 89: Gute Nacht",
+    @"artist": @"Ian Bostridge",
+    @"album": @"Schubert: Winterreise",
+    @"albumArtist": @"Ian Bostridge & Leif Ove Andsnes",
+    @"year": @2004,
+    @"genre": @"Classical / Lieder Art Song",
+    @"label": @"EMI Classics",
+    @"catalog": @"07243 5 57790 2 1",
+    @"duration": @"05:38",
+    @"credits": @{
+     @"composer": @"Franz Schubert",
+     @"lyricist": @"Wilhelm Müller",
+     @"arranger": @"Original Lieder Urtext Edition",
+     @"performer": @"Ian Bostridge (Tenor) & Leif Ove Andsnes (Piano)"
+    },
+    @"recording": @"Potton Hall, Suffolk, UK (2004-02, 24-bit/96kHz PCM)",
+    @"mastering": @"Abbey Road Studios High-Resolution Remaster",
+    @"sources": @[ @"MusicBrainz", @"Discogs", @"Wikipedia" ],
+    @"confidence": @"0.95",
+    @"cached_at": @"2026-11-18 10:15:00"
+   };
+   const NSInteger fixtureNonEmptyCount = 18;
+   RLPKnowledgeView *kv = [[RLPKnowledgeView alloc] initWithFrame:NSMakeRect(0, 0, 420, 620)];
+   [kv renderMetaFixture:metaFixture];
+   [kv layoutSubtreeIfNeeded];
+   NSMutableArray<NSTextField *> *a1Vals = [NSMutableArray array];
+   collectFields(kv, @"npDrawerFieldVal", a1Vals);
+   BOOL noEllipsisTrunc = YES;
+   NSMutableString *allRenderedText = [NSMutableString string];
+   for (NSTextField *vf in a1Vals) {
+    [allRenderedText appendString:vf.stringValue];
+    [allRenderedText appendString:@" "];
+    if ([vf.stringValue hasSuffix:@"…"] || vf.lineBreakMode == NSLineBreakByTruncatingTail) {
+     noEllipsisTrunc = NO;
+    }
+   }
+   BOOL hasAllCriticalValues = [allRenderedText containsString:@"2004"]
+    && [allRenderedText containsString:@"Classical / Lieder Art Song"]
+    && [allRenderedText containsString:@"EMI Classics"]
+    && [allRenderedText containsString:@"07243 5 57790 2 1"]
+    && [allRenderedText containsString:@"Franz Schubert"]
+    && [allRenderedText containsString:@"Wilhelm Müller"]
+    && [allRenderedText containsString:@"Original Lieder Urtext Edition"]
+    && [allRenderedText containsString:@"Ian Bostridge (Tenor) & Leif Ove Andsnes (Piano)"]
+    && [allRenderedText containsString:@"Abbey Road Studios High-Resolution Remaster"]
+    && [allRenderedText containsString:@"MusicBrainz"]
+    && [allRenderedText containsString:@"0.95"]
+    && [allRenderedText containsString:@"2026-11-18 10:15:00"];
+   printf("A1: knowledge visible fields=%lu (fixture=%ld), noEllipsis=%d, critical=%d\n",
+          (unsigned long)a1Vals.count, (long)fixtureNonEmptyCount, noEllipsisTrunc, hasAllCriticalValues);
+   ck((NSInteger)a1Vals.count >= fixtureNonEmptyCount && noEllipsisTrunc && hasAllCriticalValues,
+      "A1 RLPKnowledgeView 详细档可见字段数 >= fixture 非空字段数，且关键值完整无…截断");
+
+   // A1b: 右栏详细档（railDensity=1）下，卡片展示全部非空字段且无…截断
+   [np setValue:@"/offline/a1-lieder.flac" forKey:@"currentPath"];
+   [np setValue:@{
+    @"title": metaFixture[@"title"],
+    @"artist": metaFixture[@"artist"],
+    @"album": metaFixture[@"album"],
+    @"albumArtist": metaFixture[@"albumArtist"],
+    @"year": metaFixture[@"year"],
+    @"genre": metaFixture[@"genre"],
+    @"label": metaFixture[@"label"],
+    @"catalog": metaFixture[@"catalog"],
+    @"track": @"1",
+    @"codec": @"flac",
+    @"sampleRate": @96000,
+    @"bits": @24,
+    @"channels": @2,
+    @"credits": metaFixture[@"credits"],
+    @"recording": metaFixture[@"recording"],
+    @"mastering": metaFixture[@"mastering"],
+    @"confidence": metaFixture[@"confidence"],
+    @"cached_at": metaFixture[@"cached_at"],
+    @"meta": @{ @"enriched": @YES, @"sources": @{ @"year": @"MusicBrainz", @"label": @"Discogs" } }
+   } forKey:@"trackMetadata"];
+   [np setValue:[@{
+    @"track": [@{ @"state": @"ok", @"data": @{
+     @"from_cache": @YES,
+     @"generated_at": @1763450000,
+     @"confidence": @"0.95",
+     @"fields": @{
+      @"演唱": @"Ian Bostridge",
+      @"作曲": @"Franz Schubert",
+      @"作词": @"Wilhelm Müller",
+      @"编曲": @"Original Lieder Urtext Edition",
+      @"厂牌": @"EMI Classics",
+      @"目录号": @"07243 5 57790 2 1",
+      @"录音": @"Potton Hall, Suffolk, UK (2004-02, 24-bit/96kHz PCM)",
+      @"母带": @"Abbey Road Studios High-Resolution Remaster"
+     },
+     @"sections": @[ @{
+      @"heading": @"背景与演绎",
+      @"paragraphs": @[ @{ @"text": @"舒伯特声乐套曲《冬之旅》开篇曲《晚安》，声部与钢琴伴奏具有典型浪漫派室内乐张力。", @"citations": @[@"1"] } ]
+     } ],
+     @"citations": @[ @{ @"id": @"1", @"source": @"Discogs", @"title": @"EMI 07243 5 57790 2 1", @"url": @"https://www.discogs.com/release/1" } ]
+    } } mutableCopy],
+    @"release": [@{ @"state": @"ok", @"data": @{
+     @"from_cache": @NO,
+     @"fields": @{ @"出版方": @"EMI Classics", @"专辑类型": @"Studio Album", @"语种": @"德语" },
+     @"__album": @{
+      @"year": @2004,
+      @"sr": @96000,
+      @"bits": @24,
+      @"tracks": @[
+       @{ @"n": @1, @"title": @"Gute Nacht", @"dur": @338 },
+       @{ @"n": @2, @"title": @"Die Wetterfahne", @"dur": @112 },
+       @{ @"n": @3, @"title": @"Gefrorne Tränen", @"dur": @156 },
+       @{ @"n": @4, @"title": @"Erstarrung", @"dur": @175 },
+       @{ @"n": @5, @"title": @"Der Lindenbaum", @"dur": @282 },
+       @{ @"n": @6, @"title": @"Wasserflut", @"dur": @244 }
+      ]
+     }
+    } } mutableCopy],
+    @"person": [@{ @"state": @"ok", @"data": @{
+     @"from_cache": @NO,
+     @"fields": @{
+      @"简介": @"Ian Bostridge 是英国著名抒情男高音，以对舒伯特声乐套曲《冬之旅》《美丽的磨坊姑娘》的深度诠释闻名国际乐坛。",
+      @"活跃年代": @"1993–至今",
+      @"代表作品": @"Schubert: Winterreise / Die schöne Müllerin"
+     }
+    } } mutableCopy]
+   } mutableCopy] forKey:@"railStates"];
+   [np setValue:[@{
+    @"track": @{ @"kind": @"track", @"name": metaFixture[@"title"], @"artist": metaFixture[@"artist"], @"album": metaFixture[@"album"] },
+    @"release": @{ @"kind": @"release", @"name": metaFixture[@"album"], @"artist": metaFixture[@"albumArtist"] },
+    @"person": @{ @"kind": @"person", @"name": metaFixture[@"albumArtist"], @"artist": @"" }
+   } mutableCopy] forKey:@"railTargets"];
+   NSSegmentedControl *segA1 = (NSSegmentedControl *)[np valueForKey:@"railDensity"];
+   segA1.selectedSegment = 1;
+   [np onRailDensity:segA1];
+   [win.contentView layoutSubtreeIfNeeded];
+   NSMutableArray<NSTextField *> *railKvVals = [NSMutableArray array];
+   collectFields(rail, @"npChipKV.val", railKvVals);
+   BOOL railNoTrunc = YES;
+   for (NSTextField *vf in railKvVals) {
+    if ([vf.stringValue hasSuffix:@"…"] || vf.lineBreakMode == NSLineBreakByTruncatingTail) railNoTrunc = NO;
+   }
+   printf("A1b: rail detail rows=%lu noTrunc=%d\n", (unsigned long)railKvVals.count, railNoTrunc);
+   ck(railKvVals.count >= 12 && railNoTrunc, "A1b 右栏详细档展示完整多字段且无…截断");
+
+   // A3: 空 payload 显示明确空态而非白屏空白
+   [kv renderMetaFixture:@{}];
+   [kv layoutSubtreeIfNeeded];
+   NSView *emptyView = find(kv, @"npDrawerEmpty");
+   NSTextField *emptyTitle = (NSTextField *)find(kv, @"npDrawerEmptyTitle");
+   ck(emptyView && !emptyView.hidden && emptyView.frame.size.height > 20.0 && emptyTitle.stringValue.length > 0,
+      "A3 空 payload 显示明确空态提示卡片而非白屏空白");
+
+   // A2 & A4: 在 900x600 和 1180x760 下打开抽屉，验证分区标题、可滚动条目、内容占比 > 60%、不越界且不遮挡底栏
+   NSArray<NSValue *> *sizes = @[
+    [NSValue valueWithSize:NSMakeSize(900.0, 600.0)],
+    [NSValue valueWithSize:NSMakeSize(1180.0, 760.0)]
+   ];
+   for (NSValue *szVal in sizes) {
+    const NSSize sz = [szVal sizeValue];
+    [win setContentSize:sz];
+    id chipsObjA = [np valueForKey:@"railCards"];
+    NSArray<NSView *> *chipsA = [chipsObjA isKindOfClass:[NSArray class]] ? (NSArray<NSView *> *)chipsObjA : @[];
+    if (chipsA.count > 0) [(id)np performSelector:@selector(onRailCard:) withObject:chipsA[0]];
+    else [np openDataDrawer];
+    [win.contentView layoutSubtreeIfNeeded];
+
+    NSView *dr = find(nv, @"npDrawer");
+    NSView *hdr = dr ? find(dr, @"npdhead") : nil;
+    NSView *secHost = dr ? find(dr, @"npDrawerSections") : nil;
+    NSScrollView *drScroll = dr ? (NSScrollView *)find(dr, @"npDrawerScroll") : nil;
+    NSMutableArray<NSTextField *> *secTitles = [NSMutableArray array];
+    if (dr) collectFields(dr, @"npDrawerSectionTitle", secTitles);
+    NSMutableArray<NSView *> *secCards = [NSMutableArray array];
+    if (secHost) collectViews(secHost, @"npDrawerSection.", secCards);
+
+    RLPKnowledgeView *npKV = (RLPKnowledgeView *)[np valueForKey:@"knowledge"];
+    const CGFloat drH = dr ? dr.frame.size.height : 0.0;
+    const CGFloat hdrH = hdr ? hdr.frame.size.height : 0.0;
+    const CGFloat contentH = npKV ? [npKV renderedContentHeight] : (secHost ? secHost.frame.size.height : 0.0);
+    const CGFloat filledH = hdrH + MIN(drScroll ? drScroll.bounds.size.height : drH, contentH);
+    const double ratio = drH > 0.0 ? (filledH / drH) : 0.0;
+    const CGFloat docH = drScroll.documentView ? drScroll.documentView.frame.size.height : 0.0;
+    const CGFloat clipH = drScroll ? drScroll.contentView.bounds.size.height : 0.0;
+    printf("A2(%.0fx%.0f): drH=%.0f hdrH=%.0f contentH=%.0f ratio=%.2f sections=%lu docH=%.0f clipH=%.0f\n",
+           sz.width, sz.height, drH, hdrH, contentH, ratio, (unsigned long)secCards.count, docH, clipH);
+    ck(dr && !dr.hidden && ratio > 0.60 && secTitles.count >= 4 && secCards.count >= 2 && docH > clipH,
+       [[NSString stringWithFormat:@"A2(%.0fx%.0f) 抽屉内容占比=%.0f%% >60%% 且含 %lu 个分区可滚动",
+         sz.width, sz.height, ratio * 100.0, (unsigned long)secTitles.count] UTF8String]);
+
+    const NSRect drR = dr ? [nv convertRect:dr.bounds fromView:dr] : NSZeroRect;
+    const NSRect ctlR = ctl ? [nv convertRect:ctl.bounds fromView:ctl] : NSZeroRect;
+    const BOOL inBounds = dr && NSMinX(drR) >= -0.5 && NSMaxX(drR) <= sz.width + 0.5
+                       && NSMinY(drR) >= -0.5 && NSMaxY(drR) <= sz.height + 0.5;
+    const BOOL ctlInBounds = ctl && NSMinX(ctlR) >= -0.5 && NSMaxX(ctlR) <= sz.width + 0.5
+                          && NSMinY(ctlR) >= -0.5 && NSMaxY(ctlR) <= sz.height + 0.5;
+    const BOOL clearsBar = ctl && (NSMaxY(drR) <= NSMinY(ctlR) + 0.5);
+    printf("A4(%.0fx%.0f): drR=%s ctlR=%s inBounds=%d ctlIn=%d clearsBar=%d\n",
+           sz.width, sz.height, NSStringFromRect(drR).UTF8String, NSStringFromRect(ctlR).UTF8String,
+           inBounds, ctlInBounds, clearsBar);
+    ck(inBounds && ctlInBounds && clearsBar,
+       [[NSString stringWithFormat:@"A4(%.0fx%.0f) 抽屉不越界且不遮挡底栏控制条", sz.width, sz.height] UTF8String]);
+    [np closeDataDrawer];
+   }
+  }
 
   [ud setBool:savedAnlHidden forKey:@"RLPNPAnalysisHidden"];
   [ud setBool:savedRailHidden forKey:@"RLPNPRailHidden"];

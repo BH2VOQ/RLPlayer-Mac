@@ -19,6 +19,16 @@
 #import <CoreImage/CoreImage.h>
 #import <QuartzCore/QuartzCore.h>
 
+@interface RLPKnowledgeView (NPDetails)
+- (void)renderMetaFixture:(NSDictionary *)fixture;
+- (void)loadDrawerContext:(NSDictionary *)context;
+- (void)updateDrawerContext:(NSDictionary *)context;
+- (void)setCloseHandler:(void (^)(void))handler;
+- (void)setSelectKindHandler:(void (^)(NSString *kind))handler;
+- (void)setRefreshKindHandler:(void (^)(NSString *kind))handler;
+- (CGFloat)renderedContentHeight;
+@end
+
 /// 分析一行：空标题的无边框按钮 intrinsic 宽为 0，离屏渲染时约束不重算，
 /// 所以每次 layout 后按文本 sizeToFit 重放宽度（保证任何渲染路径都画得出来）。
 @interface RLPAnlRowView : NSView
@@ -1310,10 +1320,13 @@ static const CGFloat kRailP2H        = 15.0;   // 10.5 × 1.45 ≈ 15.2
     NSTextField *_statusLabel;
     NSTextField *_p1Label;
     NSTextField *_p2Label;
+    NSView *_detailDivider;
+    NSMutableArray<NSDictionary<NSString *, NSTextField *> *> *_detailRowViews;
+    NSArray<NSDictionary<NSString *, NSString *> *> *_detailItems;
 }
 @property (nonatomic, assign) NSInteger chipIndex;
 /// 详细档：p1 最多 5 行、p2 最多 2 行（web `.npchipwrap[data-detail=1]` 的 line-clamp），
-/// 简介不再按 40 字截断；高度由文本实测撑开。默认（简略）保持既有的单行几何。
+/// 并追加全部结构化字段行（不截断、不补 …）；高度由文本实测撑开。默认（简略）保持既有的单行几何。
 @property (nonatomic, assign) BOOL detailMode;
 @property (nonatomic, copy, nullable) void (^onTap)(RLPRailChipView *chip);
 /// web `.npchip:hover`：底 rgba(255,255,255,.09)/浅色 rgba(15,23,42,.06)、
@@ -1322,6 +1335,9 @@ static const CGFloat kRailP2H        = 15.0;   // 10.5 × 1.45 ≈ 15.2
 - (void)setHovered:(BOOL)hovered;
 - (void)setNameText:(NSString *)name status:(NSString *)status
                   p1:(NSString *)p1 p2:(NSString *)p2;
+- (void)setNameText:(NSString *)name status:(NSString *)status
+                  p1:(NSString *)p1 p2:(NSString *)p2
+         detailItems:(nullable NSArray<NSDictionary<NSString *, NSString *> *> *)detailItems;
 - (CGFloat)preferredHeight;
 /// 详细档要按真实卡宽量文本；layout 里先知道宽度再定卡片高度。
 - (CGFloat)preferredHeightForWidth:(CGFloat)width;
@@ -1373,17 +1389,74 @@ static const CGFloat kRailP2H        = 15.0;   // 10.5 × 1.45 ≈ 15.2
     _statusLabel.alignment = NSTextAlignmentRight;
     _p1Label = [self labelWithFont:[NSFont systemFontOfSize:11.5] color:t.text2 ident:@"npChip.p1"];
     _p2Label = [self labelWithFont:[NSFont systemFontOfSize:10.5] color:t.mut2 ident:@"npChip.p2"];
+    _detailDivider = [[NSView alloc] initWithFrame:NSZeroRect];
+    _detailDivider.identifier = @"npChipKV.line";
+    _detailDivider.wantsLayer = YES;
+    _detailDivider.hidden = YES;
+    _detailRowViews = [NSMutableArray array];
+    _detailItems = @[];
     [self applyTheme];
     return self;
 }
 
 - (BOOL)isFlipped { return NO; }
 
+- (void)rebuildDetailRowViews {
+    for (NSDictionary<NSString *, NSTextField *> *row in _detailRowViews) {
+        [row[@"k"] removeFromSuperview];
+        [row[@"v"] removeFromSuperview];
+    }
+    [_detailRowViews removeAllObjects];
+    if (_detailDivider.superview == self) [_detailDivider removeFromSuperview];
+    _detailDivider.hidden = YES;
+    if (!_detailMode || !_detailItems.count) return;
+    RLPTheme *t = [RLPTheme current];
+    _detailDivider.layer.backgroundColor = t.line.CGColor;
+    _detailDivider.hidden = NO;
+    [self addSubview:_detailDivider];
+    for (NSDictionary<NSString *, NSString *> *item in _detailItems) {
+        NSString *ks = item[@"k"] ?: @"";
+        NSString *vs = item[@"v"] ?: @"";
+        if (!ks.length || !vs.length) continue;
+        // 标识符不用 npChip.*，避免影响 AllRailChips 收集顶层芯片。
+        NSTextField *kf = [NSTextField labelWithString:ks];
+        kf.font = [NSFont systemFontOfSize:10.0 weight:NSFontWeightMedium];
+        kf.textColor = t.mut;
+        kf.identifier = @"npChipKV.key";
+        kf.alignment = NSTextAlignmentLeft;
+        kf.lineBreakMode = NSLineBreakByWordWrapping;
+        kf.usesSingleLineMode = NO;
+        kf.maximumNumberOfLines = 0;
+        kf.translatesAutoresizingMaskIntoConstraints = YES;
+        [self addSubview:kf];
+
+        NSTextField *vf = [NSTextField labelWithString:vs];
+        vf.font = [NSFont systemFontOfSize:10.5];
+        vf.textColor = t.text2;
+        vf.identifier = @"npChipKV.val";
+        vf.alignment = NSTextAlignmentLeft;
+        vf.lineBreakMode = NSLineBreakByWordWrapping;
+        vf.usesSingleLineMode = NO;
+        vf.maximumNumberOfLines = 0;
+        vf.translatesAutoresizingMaskIntoConstraints = YES;
+        [self addSubview:vf];
+
+        [_detailRowViews addObject:@{ @"k": kf, @"v": vf }];
+    }
+}
+
 - (void)setNameText:(NSString *)name status:(NSString *)status p1:(NSString *)p1 p2:(NSString *)p2 {
+    [self setNameText:name status:status p1:p1 p2:p2 detailItems:nil];
+}
+
+- (void)setNameText:(NSString *)name status:(NSString *)status
+                 p1:(NSString *)p1 p2:(NSString *)p2
+        detailItems:(nullable NSArray<NSDictionary<NSString *, NSString *> *> *)detailItems {
     _nameLabel.stringValue = name ?: @"";
     _statusLabel.stringValue = status ?: @"";
     _p1Label.stringValue = p1 ?: @"";
     _p2Label.stringValue = p2 ?: @"";
+    _detailItems = [detailItems isKindOfClass:[NSArray class]] ? [detailItems copy] : @[];
     // 空 p2 = web 不渲染 `<span class=npchip-p2>`，卡片高度也不留那 15px 空行。
     // 从视图树里摘掉而不是只 hidden：离屏几何判据按 identifier 找子视图，
     // hidden 的 p2 会让它继续按「有第二行」量（旧的单行卡就靠这一点区分）。
@@ -1394,6 +1467,7 @@ static const CGFloat kRailP2H        = 15.0;   // 10.5 × 1.45 ≈ 15.2
         if (_p2Label.superview == self) [_p2Label removeFromSuperview];
         _p2Label.hidden = YES;
     }
+    [self rebuildDetailRowViews];
     [self relayout];
 }
 
@@ -1413,7 +1487,23 @@ static const CGFloat kRailDetailLineHeight = 1.35;
                                options:NSStringDrawingUsesLineFragmentOrigin | NSStringDrawingUsesFontLeading
                             attributes:attrs];
     const CGFloat h = ceil(r.size.height);
+    if (cap <= 0) return MAX(lh, h);
     return MAX(lh, MIN(h, lh * (CGFloat)cap));
+}
+
+- (CGFloat)detailRowsHeightForWidth:(CGFloat)contentW {
+    if (!_detailMode || !_detailRowViews.count || contentW < 20.0) return 0.0;
+    const CGFloat keyW = MIN(68.0, MAX(44.0, contentW * 0.34));
+    const CGFloat valW = MAX(20.0, contentW - keyW - 6.0);
+    CGFloat total = 6.0 + 1.0 + 5.0; // 上间隔 + 1pt 分隔线 + 下间隔
+    for (NSUInteger i = 0; i < _detailRowViews.count; ++i) {
+        NSDictionary<NSString *, NSTextField *> *row = _detailRowViews[i];
+        const CGFloat kh = [self measuredTextHeight:row[@"k"] cap:0 width:keyW];
+        const CGFloat vh = [self measuredTextHeight:row[@"v"] cap:0 width:valW];
+        total += MAX(kh, vh);
+        if (i + 1 < _detailRowViews.count) total += 4.0;
+    }
+    return total;
 }
 
 - (CGFloat)preferredHeight { return [self preferredHeightForWidth:self.bounds.size.width]; }
@@ -1427,6 +1517,7 @@ static const CGFloat kRailDetailLineHeight = 1.35;
     }
     CGFloat h = kRailChipPadTop + kRailRow1H + kRailRowGap + p1H;
     if (_p2Label.stringValue.length) h += kRailRowGap + p2H;
+    h += [self detailRowsHeightForWidth:contentW];
     return h + kRailChipPadBottom;
 }
 
@@ -1453,9 +1544,30 @@ static const CGFloat kRailDetailLineHeight = 1.35;
     _statusLabel.frame = NSMakeRect(statusX, row1Y, statusW, kRailRow1H);
     const CGFloat p1Y = row1Y - kRailRowGap - p1H;
     _p1Label.frame = NSMakeRect(kRailChipPadX, p1Y, contentW, p1H);
+    CGFloat bottomAnchorY = p1Y;
     if (_p2Label.superview == self) {
         const CGFloat p2Y = p1Y - kRailRowGap - p2H;
         _p2Label.frame = NSMakeRect(kRailChipPadX, p2Y, contentW, p2H);
+        bottomAnchorY = p2Y;
+    }
+    if (_detailMode && _detailRowViews.count > 0) {
+        CGFloat cy = bottomAnchorY - 6.0 - 1.0;
+        _detailDivider.frame = NSMakeRect(kRailChipPadX, cy, contentW, 1.0);
+        cy -= 5.0;
+        const CGFloat keyW = MIN(68.0, MAX(44.0, contentW * 0.34));
+        const CGFloat valW = MAX(20.0, contentW - keyW - 6.0);
+        for (NSUInteger i = 0; i < _detailRowViews.count; ++i) {
+            NSDictionary<NSString *, NSTextField *> *row = _detailRowViews[i];
+            NSTextField *kf = row[@"k"];
+            NSTextField *vf = row[@"v"];
+            const CGFloat kh = [self measuredTextHeight:kf cap:0 width:keyW];
+            const CGFloat vh = [self measuredTextHeight:vf cap:0 width:valW];
+            const CGFloat rh = MAX(kh, vh);
+            cy -= rh;
+            kf.frame = NSMakeRect(kRailChipPadX, cy + (rh - kh), keyW, kh);
+            vf.frame = NSMakeRect(kRailChipPadX + keyW + 6.0, cy + (rh - vh), valW, vh);
+            if (i + 1 < _detailRowViews.count) cy -= 4.0;
+        }
     }
 }
 
@@ -1471,6 +1583,7 @@ static const CGFloat kRailDetailLineHeight = 1.35;
     _p2Label.usesSingleLineMode = !detail;
     _p1Label.lineBreakMode = detail ? NSLineBreakByWordWrapping : NSLineBreakByTruncatingTail;
     _p2Label.lineBreakMode = detail ? NSLineBreakByWordWrapping : NSLineBreakByTruncatingTail;
+    [self rebuildDetailRowViews];
     [self relayout];
 }
 
@@ -1493,6 +1606,11 @@ static const CGFloat kRailDetailLineHeight = 1.35;
     _statusLabel.textColor = t.mut2;
     _p1Label.textColor = t.text2;
     _p2Label.textColor = t.mut2;
+    _detailDivider.layer.backgroundColor = t.line.CGColor;
+    for (NSDictionary<NSString *, NSTextField *> *row in _detailRowViews) {
+        row[@"k"].textColor = t.mut;
+        row[@"v"].textColor = t.text2;
+    }
     [self relayout];
 }
 
@@ -1738,6 +1856,46 @@ static NSString *RLPRailPick(NSDictionary *fields, NSArray<NSString *> *keys, NS
     return [out componentsJoinedByString:@" · "];
 }
 
+/// 详细档专用：不按 24 字截断、不补 …。
+static NSString *RLPRailPickFull(NSDictionary *fields, NSArray<NSString *> *keys) {
+    if (![fields isKindOfClass:[NSDictionary class]] || !keys.count) return @"";
+    NSMutableArray *out = [NSMutableArray array];
+    for (NSString *k in keys) {
+        NSString *v = RLPRailCollapse(fields[k]);
+        if (v.length) [out addObject:[NSString stringWithFormat:@"%@ %@", RLPTr(k), v]];
+    }
+    return [out componentsJoinedByString:@" · "];
+}
+
+static void RLPRailAddDetail(NSMutableArray<NSDictionary<NSString *, NSString *> *> *items,
+                             NSMutableSet<NSString *> *seen,
+                             NSString *label,
+                             id rawVal) {
+    NSString *k = [label isKindOfClass:[NSString class]] ? label : @"";
+    NSString *v = RLPRailCollapse(rawVal);
+    if (!k.length || !v.length) return;
+    NSString *sig = [NSString stringWithFormat:@"%@|%@", k, v];
+    if ([seen containsObject:sig]) return;
+    [seen addObject:sig];
+    [items addObject:@{ @"k": k, @"v": v }];
+}
+
+static NSString *RLPRailFmtTime(id raw) {
+    if (!raw || [raw isKindOfClass:[NSNull class]]) return @"";
+    if ([raw isKindOfClass:[NSString class]]) return RLPRailCollapse(raw);
+    if ([raw respondsToSelector:@selector(doubleValue)]) {
+        double ts = [raw doubleValue];
+        if (ts > 1e12) ts /= 1000.0;
+        if (ts > 1e8) {
+            NSDateFormatter *df = [[NSDateFormatter alloc] init];
+            df.dateFormat = @"yyyy-MM-dd HH:mm";
+            return [df stringFromDate:[NSDate dateWithTimeIntervalSince1970:ts]];
+        }
+        if (ts > 0) return [(NSNumber *)raw stringValue];
+    }
+    return @"";
+}
+
 /// web `String(x || '')` 的只取字符串版：非字符串一律当空（元数据字段类型不信任）。
 static NSString *RLPRailStr(id v) {
     return [v isKindOfClass:[NSString class]] ? (NSString *)v : @"";
@@ -1830,6 +1988,7 @@ static NSString *RLPRailTagText(id srValue, id bitsValue) {
 @property(nonatomic,strong) RLPOverlayBackdrop *dataBackdrop;
 @property(nonatomic,strong) NSView *dataDrawer;
 @property(nonatomic) BOOL dataDrawerOpen;
+@property(nonatomic,copy,nullable) NSString *activeDrawerKind;
 // ---- AI 整理栏（web NP_DATA / SUMC / NPLIB 的原生落点）----
 // railStates[kind] = {state:idle|loading|ok|error|insufficient, data:摘要JSON, fp:实体指纹}
 @property(nonatomic,strong) NSMutableDictionary<NSString *, NSMutableDictionary *> *railStates;
@@ -2827,11 +2986,13 @@ static CGFloat RLPNPMetaChipWidth(NSButton *b) {
     [self.webControls layout];
     self.waveformView.frame = NSMakeRect(ctlX, waveformY, ctlW, waveformH);
     [self layoutLyricRows];
-    // web #npDrawerBg inset 0 / #npDrawer top/right/bottom 14、width:min(430,44vw)
+    // web npDrawerFit：#npDrawer 顶距 14pt、右距 14pt、宽 min(430,44vw)，底边让出底栏控制区（ctlY - 8）
     {
         const CGFloat dw = MIN(430.0, 0.44 * w);
+        const CGFloat drTop = 14.0;
+        const CGFloat drBottom = (ctlY > drTop + 68.0) ? (ctlY - 8.0) : MAX(drTop + 60.0, h - 14.0);
         self.dataBackdrop.frame = NSMakeRect(0, 0, w, h);
-        self.dataDrawer.frame = NSMakeRect(w - 14.0 - dw, 14.0, dw, MAX(60.0, h - 28.0));
+        self.dataDrawer.frame = NSMakeRect(w - 14.0 - dw, drTop, dw, MAX(60.0, drBottom - drTop));
         self.knowledge.frame = self.dataDrawer.bounds;
     }
     } @finally {
@@ -2870,6 +3031,7 @@ static CGFloat RLPNPMetaChipWidth(NSButton *b) {
 - (void)closeDataDrawer {
     if (!self.dataDrawerOpen) return;
     self.dataDrawerOpen=NO;
+    self.activeDrawerKind=nil;
     self.dataDrawer.hidden=YES;
     self.dataBackdrop.hidden=YES;
     [self.dataDrawer.layer removeAnimationForKey:@"npDrawerSlide"];
@@ -3744,6 +3906,7 @@ static NSString *RLPNowPlayingCastDeviceLabel(NSString *device) {
         [self railLoadAlbumForTarget:self.railTargets[kind] fp:fp gen:gen];
     [self renderRailMetadata];
     [self layoutWebPlayback];
+    [self syncOpenDrawerIfNeeded];
 }
 
 /// web npLocalAlbum：/api/lib/albums?q= 找一个同名（优先同艺术家）的专辑，再取详情
@@ -3808,6 +3971,7 @@ static NSString *RLPNowPlayingCastDeviceLabel(NSString *device) {
     self.railStates[kind] = mst;
     [self renderRailMetadata];
     [self layoutWebPlayback];
+    [self syncOpenDrawerIfNeeded];
 }
 
 /// web npRailLocalTrack：本地曲目事实只兜底，绝不覆盖 AI 字段。
@@ -3860,7 +4024,156 @@ static NSString *RLPNowPlayingCastDeviceLabel(NSString *device) {
     return who2;
 }
 
-/// web npRailPreview(kind, st) 的逐分支同构。返回 {p1,p2,st}。
+/// web npRailPreview(kind, st) 的逐分支同构。返回 {p1,p2,st,items}。
+- (NSArray<NSDictionary<NSString *, NSString *> *> *)railDetailItemsForKind:(NSString *)kind
+                                                                     state:(NSDictionary *)st
+                                                                      meta:(NSDictionary *)m {
+    NSMutableArray<NSDictionary<NSString *, NSString *> *> *items = [NSMutableArray array];
+    NSMutableSet<NSString *> *seen = [NSMutableSet set];
+    NSDictionary *d = [st[@"data"] isKindOfClass:[NSDictionary class]] ? st[@"data"] : nil;
+    NSDictionary *fields = [d[@"fields"] isKindOfClass:[NSDictionary class]] ? d[@"fields"] : nil;
+
+    static NSDictionary<NSString *, NSString *> *kMetaLabels = nil;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        kMetaLabels = @{
+            @"title": @"曲名", @"artist": @"艺术家", @"albumArtist": @"专辑艺术家",
+            @"album": @"专辑", @"track": @"曲号", @"disc": @"碟片",
+            @"year": @"年份", @"date": @"日期", @"genre": @"流派",
+            @"label": @"厂牌", @"catalog": @"目录号", @"catno": @"目录号",
+            @"composer": @"作曲", @"lyricist": @"作词", @"arranger": @"编曲",
+            @"performer": @"演奏", @"producer": @"制作人", @"conductor": @"指挥",
+            @"recording": @"录音", @"mastering": @"母带", @"mixing": @"混音",
+            @"studio": @"录音室", @"language": @"语种", @"country": @"发行国家",
+            @"confidence": @"置信度"
+        };
+    });
+
+    if ([kind isEqualToString:@"track"]) {
+        for (NSString *k in @[@"演唱", @"作词", @"作曲", @"编曲", @"制作人", @"演奏", @"乐团", @"指挥",
+                               @"录音", @"混音", @"母带", @"歌曲风格", @"流派", @"发行时间", @"所属专辑",
+                               @"厂牌", @"出版方", @"目录号", @"专辑编号", @"时长", @"语种", @"衍生作品", @"简介"]) {
+            RLPRailAddDetail(items, seen, RLPTr(k), fields[k]);
+        }
+        // 未出现在常用顺序中的剩余 summary.fields 键全部补齐，不遗漏不截断。
+        if (fields) {
+            for (NSString *fk in [fields.allKeys sortedArrayUsingSelector:@selector(localizedStandardCompare:)]) {
+                RLPRailAddDetail(items, seen, kMetaLabels[fk] ? RLPTr(kMetaLabels[fk]) : fk, fields[fk]);
+            }
+        }
+        // /api/meta 中的完整本地与补全字段
+        for (NSString *mk in @[@"year", @"date", @"genre", @"label", @"catalog", @"track",
+                               @"albumArtist", @"composer", @"lyricist", @"arranger",
+                               @"performer", @"recording", @"mastering", @"confidence"]) {
+            RLPRailAddDetail(items, seen, RLPTr(kMetaLabels[mk] ?: mk), m[mk]);
+        }
+        NSDictionary *credits = [m[@"credits"] isKindOfClass:[NSDictionary class]] ? m[@"credits"] : nil;
+        if (credits) {
+            for (NSString *ck in [credits.allKeys sortedArrayUsingSelector:@selector(localizedStandardCompare:)]) {
+                RLPRailAddDetail(items, seen, RLPTr(kMetaLabels[ck] ?: ck), credits[ck]);
+            }
+        }
+        NSMutableArray *fmt = [NSMutableArray array];
+        NSString *codec = RLPRailStr(m[@"codec"]);
+        if (codec.length) [fmt addObject:[codec uppercaseString]];
+        NSString *sr = RLPRailSampleRateText(m[@"sampleRate"]);
+        if (sr.length) [fmt addObject:sr];
+        if ([m[@"bits"] respondsToSelector:@selector(integerValue)] && [m[@"bits"] integerValue] > 0)
+            [fmt addObject:[NSString stringWithFormat:@"%ld bit", (long)[m[@"bits"] integerValue]]];
+        if ([m[@"channels"] respondsToSelector:@selector(integerValue)] && [m[@"channels"] integerValue] > 0)
+            [fmt addObject:[NSString stringWithFormat:@"%ldch", (long)[m[@"channels"] integerValue]]];
+        if (fmt.count) RLPRailAddDetail(items, seen, RLPTr(@"格式"), [fmt componentsJoinedByString:@" · "]);
+        const double dur = self.webStatus.duration > 0 ? self.webStatus.duration
+            : ([m[@"duration"] respondsToSelector:@selector(doubleValue)] ? [m[@"duration"] doubleValue] : 0.0);
+        if (dur > 0) RLPRailAddDetail(items, seen, RLPTr(@"时长"), RLPFmtDuration(dur));
+    } else if ([kind isEqualToString:@"release"]) {
+        NSDictionary *alb = [d[@"__album"] isKindOfClass:[NSDictionary class]] ? d[@"__album"] : nil;
+        for (NSString *k in @[@"出版方", @"厂牌", @"目录号", @"专辑编号", @"专辑类型", @"发行时间",
+                               @"语种", @"发行国家", @"制作人", @"录音", @"母带", @"专辑介绍", @"曲目列表"]) {
+            RLPRailAddDetail(items, seen, RLPTr(k), fields[k]);
+        }
+        if (fields) {
+            for (NSString *fk in [fields.allKeys sortedArrayUsingSelector:@selector(localizedStandardCompare:)]) {
+                RLPRailAddDetail(items, seen, kMetaLabels[fk] ? RLPTr(kMetaLabels[fk]) : fk, fields[fk]);
+            }
+        }
+        if ([alb[@"year"] respondsToSelector:@selector(integerValue)] && [alb[@"year"] integerValue] > 0)
+            RLPRailAddDetail(items, seen, RLPTr(@"年份"), alb[@"year"]);
+        else RLPRailAddDetail(items, seen, RLPTr(@"年份"), m[@"year"]);
+        RLPRailAddDetail(items, seen, RLPTr(@"流派"), m[@"genre"]);
+        RLPRailAddDetail(items, seen, RLPTr(@"厂牌"), m[@"label"]);
+        RLPRailAddDetail(items, seen, RLPTr(@"目录号"), m[@"catalog"]);
+        NSString *tag = RLPRailTagText(alb[@"sr"], alb[@"bits"]);
+        if (tag.length) RLPRailAddDetail(items, seen, RLPTr(@"规格"), tag);
+    } else if ([kind isEqualToString:@"person"]) {
+        for (NSString *k in @[@"活跃年代", @"风格", @"代表作品", @"地区", @"厂牌", @"成员"]) {
+            RLPRailAddDetail(items, seen, RLPTr(k), fields[k]);
+        }
+        if (fields) {
+            for (NSString *fk in [fields.allKeys sortedArrayUsingSelector:@selector(localizedStandardCompare:)]) {
+                if ([fk isEqualToString:@"简介"]) continue; // 简介已完整呈现在 p1
+                RLPRailAddDetail(items, seen, kMetaLabels[fk] ? RLPTr(kMetaLabels[fk]) : fk, fields[fk]);
+            }
+        }
+    } else if ([kind isEqualToString:@"work"]) {
+        for (NSString *k in @[@"作曲家", @"创作年代", @"体裁", @"调性", @"作品号"]) {
+            RLPRailAddDetail(items, seen, RLPTr(k), fields[k]);
+        }
+        if (fields) {
+            for (NSString *fk in [fields.allKeys sortedArrayUsingSelector:@selector(localizedStandardCompare:)]) {
+                RLPRailAddDetail(items, seen, kMetaLabels[fk] ? RLPTr(kMetaLabels[fk]) : fk, fields[fk]);
+            }
+        }
+        if ([d[@"distinctCount"] respondsToSelector:@selector(integerValue)])
+            RLPRailAddDetail(items, seen, RLPTr(@"不同演绎"), d[@"distinctCount"]);
+        if ([d[@"releaseCount"] respondsToSelector:@selector(integerValue)])
+            RLPRailAddDetail(items, seen, RLPTr(@"发行版本"), d[@"releaseCount"]);
+    }
+
+    // 段落补充（若某小节未在 fields 里出现）
+    NSArray *secs = [d[@"sections"] isKindOfClass:[NSArray class]] ? d[@"sections"] : nil;
+    for (id secObj in secs) {
+        if (![secObj isKindOfClass:[NSDictionary class]]) continue;
+        NSDictionary *sec = (NSDictionary *)secObj;
+        NSString *hd = RLPRailCollapse(sec[@"heading"]);
+        NSArray *paras = [sec[@"paragraphs"] isKindOfClass:[NSArray class]] ? sec[@"paragraphs"] : @[];
+        NSMutableArray<NSString *> *pt = [NSMutableArray array];
+        for (id p in paras) {
+            NSString *ps = [p isKindOfClass:[NSDictionary class]] ? RLPRailCollapse(p[@"text"]) : RLPRailCollapse(p);
+            if (ps.length) [pt addObject:ps];
+        }
+        if (pt.count) {
+            RLPRailAddDetail(items, seen, hd.length ? hd : RLPTr(@"详细说明"), [pt componentsJoinedByString:@" "]);
+        }
+    }
+
+    // 来源、置信度、缓存时间
+    NSDictionary *metaBlock = [m[@"meta"] isKindOfClass:[NSDictionary class]] ? m[@"meta"] : nil;
+    if ([kind isEqualToString:@"track"]) {
+        if ([metaBlock[@"sources"] isKindOfClass:[NSDictionary class]]) {
+            RLPRailAddDetail(items, seen, RLPTr(@"来源"), metaBlock[@"sources"]);
+        } else if (m[@"sources"]) {
+            RLPRailAddDetail(items, seen, RLPTr(@"来源"), m[@"sources"]);
+        }
+    }
+    if (d[@"citations"] && [d[@"citations"] isKindOfClass:[NSArray class]]) {
+        NSMutableArray<NSString *> *cList = [NSMutableArray array];
+        for (id c in (NSArray *)d[@"citations"]) {
+            if (![c isKindOfClass:[NSDictionary class]]) continue;
+            NSString *cs = RLPRailCollapse(c[@"source"]);
+            NSString *ct = RLPRailCollapse(c[@"title"]);
+            NSString *joined = (cs.length && ct.length) ? [NSString stringWithFormat:@"%@·%@", cs, ct]
+                : (cs.length ? cs : ct);
+            if (joined.length) [cList addObject:joined];
+        }
+        if (cList.count) RLPRailAddDetail(items, seen, RLPTr(@"来源"), [cList componentsJoinedByString:@"；"]);
+    }
+    RLPRailAddDetail(items, seen, RLPTr(@"置信度"), d[@"confidence"] ?: m[@"confidence"]);
+    NSString *ctime = RLPRailFmtTime(d[@"cached_at"] ?: d[@"cachedAt"] ?: d[@"generated_at"] ?: m[@"cached_at"]);
+    if (ctime.length) RLPRailAddDetail(items, seen, RLPTr(@"缓存时间"), ctime);
+    return items;
+}
+
 - (NSDictionary *)railPreviewForKind:(NSString *)kind state:(NSDictionary *)st {
     NSDictionary *m = self.trackMetadata ?: @{};
     NSDictionary *d = [st[@"data"] isKindOfClass:[NSDictionary class]] ? st[@"data"] : nil;
@@ -3871,14 +4184,19 @@ static NSString *RLPNowPlayingCastDeviceLabel(NSString *device) {
     if ([state isEqualToString:@"insufficient"]) {
         NSString *msg = RLPRailStr(d[@"error"]);
         if (!msg.length) msg = @"资料不足：缺少艺术家与曲名";
-        return @{ @"p1": msg, @"p2": @"", @"st": RLPTr(@"资料不足") };
+        return @{ @"p1": msg, @"p2": @"", @"st": RLPTr(@"资料不足"), @"items": @[] };
     }
-    const NSInteger pickLimit = self.railDetail ? 4 : 2;
+    const NSInteger pickLimit = 2;
     NSString *p1 = @"", *p2 = @"";
     if ([kind isEqualToString:@"track"]) {
         NSDictionary *loc = [self railLocalTrackPreview];
-        p1 = RLPRailPick(fields, @[@"演唱", @"作曲", @"作词", @"编曲"], pickLimit);
-        p2 = RLPRailPick(fields, @[@"歌曲风格", @"发行时间", @"所属专辑", @"衍生作品"], pickLimit);
+        if (self.railDetail) {
+            p1 = RLPRailPickFull(fields, @[@"演唱", @"作曲", @"作词", @"编曲"]);
+            p2 = RLPRailPickFull(fields, @[@"歌曲风格", @"发行时间", @"所属专辑", @"衍生作品"]);
+        } else {
+            p1 = RLPRailPick(fields, @[@"演唱", @"作曲", @"作词", @"编曲"], pickLimit);
+            p2 = RLPRailPick(fields, @[@"歌曲风格", @"发行时间", @"所属专辑", @"衍生作品"], pickLimit);
+        }
         if (!p1.length) p1 = RLPRailStr(loc[@"p1"]).length ? RLPRailStr(loc[@"p1"]) : RLPRailStr(m[@"title"]);
         if (!p2.length) p2 = RLPRailStr(loc[@"p2"]);
     } else if ([kind isEqualToString:@"release"]) {
@@ -3901,21 +4219,25 @@ static NSString *RLPNowPlayingCastDeviceLabel(NSString *device) {
             [lp addObject:RLPFmtDuration(self.webStatus.duration)];
         }
         p1 = [lp componentsJoinedByString:@" · "];
-        p2 = RLPRailPick(fields, @[@"出版方", @"专辑类型", @"语种", @"发行时间"], pickLimit);
+        p2 = self.railDetail
+            ? RLPRailPickFull(fields, @[@"出版方", @"专辑类型", @"语种", @"发行时间"])
+            : RLPRailPick(fields, @[@"出版方", @"专辑类型", @"语种", @"发行时间"], pickLimit);
         if (!p2.length) p2 = RLPRailTagText(alb[@"sr"], alb[@"bits"]);
     } else if ([kind isEqualToString:@"person"]) {
         NSString *who = RLPRailStr(self.railTargets[@"person"][@"name"]);
         if (!who.length) who = RLPRailStr(m[@"albumArtist"]);
         if (!who.length) who = RLPRailStr(m[@"artist"]);
         p1 = [self railBioFromData:d who:who limit:(self.railDetail ? 0 : 40)];
-        if (!p1.length) p1 = RLPRailPick(fields, @[@"活跃年代"], pickLimit);
-        p2 = RLPRailPick(fields, @[@"风格", @"代表作品"], pickLimit);
+        if (!p1.length) {
+            p1 = self.railDetail ? RLPRailPickFull(fields, @[@"活跃年代"]) : RLPRailPick(fields, @[@"活跃年代"], pickLimit);
+        }
+        p2 = self.railDetail ? RLPRailPickFull(fields, @[@"风格", @"代表作品"]) : RLPRailPick(fields, @[@"风格", @"代表作品"], pickLimit);
         if (!p1.length) p1 = who;
     } else if ([kind isEqualToString:@"work"]) {
         // web：p1 = fields['作曲家','创作年代']，没有就退回猜出的作曲家；p2 = fields['体裁']。
-        p1 = RLPRailPick(fields, @[@"作曲家", @"创作年代"], pickLimit);
+        p1 = self.railDetail ? RLPRailPickFull(fields, @[@"作曲家", @"创作年代"]) : RLPRailPick(fields, @[@"作曲家", @"创作年代"], pickLimit);
         if (!p1.length) p1 = RLPRailStr(RLPNPWorkTarget(m)[@"composer"]);
-        p2 = RLPRailPick(fields, @[@"体裁"], pickLimit);
+        p2 = self.railDetail ? RLPRailPickFull(fields, @[@"体裁"]) : RLPRailPick(fields, @[@"体裁"], pickLimit);
     }
     NSString *stText = @"";
     if ([state isEqualToString:@"loading"]) stText = RLPTr(@"整理中…");
@@ -3923,7 +4245,8 @@ static NSString *RLPNowPlayingCastDeviceLabel(NSString *device) {
     else if ([state isEqualToString:@"ok"])
         stText = ([d[@"from_cache"] respondsToSelector:@selector(boolValue)] && [d[@"from_cache"] boolValue])
                ? RLPTr(@"已缓存") : RLPTr(@"已整理");
-    return @{ @"p1": p1 ?: @"", @"p2": p2 ?: @"", @"st": stText };
+    NSArray *items = self.railDetail ? [self railDetailItemsForKind:kind state:st meta:m] : @[];
+    return @{ @"p1": p1 ?: @"", @"p2": p2 ?: @"", @"st": stText, @"items": items ?: @[] };
 }
 
 /// 只重绘卡片，不取数（轮询/主题/切档都会调）。
@@ -3938,7 +4261,8 @@ static NSString *RLPNowPlayingCastDeviceLabel(NSString *device) {
         [self.railCards[i] setNameText:labels[i]
                                status:RLPRailStr(pv[@"st"])
                                    p1:RLPRailStr(pv[@"p1"])
-                                   p2:RLPRailStr(pv[@"p2"])];
+                                   p2:RLPRailStr(pv[@"p2"])
+                          detailItems:self.railDetail ? pv[@"items"] : nil];
     }
     // 栏目有无：web 的 tab 列表 = npDataTargets，卡片逐张对应；「作品」只对古典曲目存在。
     NSDictionary *m = self.trackMetadata ?: @{};
@@ -3999,15 +4323,32 @@ static NSString *RLPNowPlayingCastDeviceLabel(NSString *device) {
     [self railEnsureKind:@"track"];
 }
 
-- (void)onRailCard:(RLPRailChipView *)b {
+- (NSDictionary *)drawerContextForKind:(NSString *)kind {
+    NSMutableDictionary *ctx = [NSMutableDictionary dictionary];
+    ctx[@"activeKind"] = kind ?: @"track";
+    ctx[@"trackMetadata"] = self.trackMetadata ?: @{};
+    ctx[@"webStatusDuration"] = @(self.webStatus.duration);
+    ctx[@"currentPath"] = self.currentPath ?: @"";
+    ctx[@"railTargets"] = [self.railTargets copy] ?: @{};
+    ctx[@"railStates"] = [self.railStates copy] ?: @{};
+    return ctx;
+}
+
+- (void)syncOpenDrawerIfNeeded {
+    if (!self.dataDrawerOpen || !self.activeDrawerKind.length) return;
+    if ([self.knowledge respondsToSelector:@selector(updateDrawerContext:)]) {
+        [self.knowledge updateDrawerContext:[self drawerContextForKind:self.activeDrawerKind]];
+    }
+}
+
+- (void)openDrawerForKind:(NSString *)kind {
     NSArray<NSString *> *kinds = @[@"track", @"release", @"person", @"work"];
-    NSInteger idx = b.chipIndex;
-    if (idx < 0 || idx >= (NSInteger)kinds.count) return;
-    NSString *kind = kinds[(NSUInteger)idx];
+    NSUInteger idx = [kinds indexOfObject:kind];
+    if (idx == NSNotFound) return;
+    self.activeDrawerKind = kind;
     NSDictionary *t = self.railTargets[kind];
     NSString *name = RLPRailStr(t[@"name"]);
     if ([kind isEqualToString:@"work"]) {
-        // web npDataActivate('work')：作品实体没有 summary，抽屉正文走 /api/entity/versions。
         NSString *composer = RLPRailStr(t[@"composer"]);
         if (!name.length) {
             NSDictionary *wt = RLPNPWorkTarget(self.trackMetadata ?: @{});
@@ -4015,10 +4356,20 @@ static NSString *RLPNowPlayingCastDeviceLabel(NSString *device) {
             if (!composer.length) composer = RLPRailStr(wt[@"composer"]);
         }
         if (!name.length) return;
+        __weak __typeof__(self) ws = self;
+        if ([self.knowledge respondsToSelector:@selector(setCloseHandler:)]) {
+            [self.knowledge setCloseHandler:^{ __typeof__(self) s = ws; if (s) [s closeDataDrawer]; }];
+        }
+        if ([self.knowledge respondsToSelector:@selector(setSelectKindHandler:)]) {
+            [self.knowledge setSelectKindHandler:^(NSString *k) { __typeof__(self) s = ws; if (s) [s openDrawerForKind:k]; }];
+        }
+        if ([self.knowledge respondsToSelector:@selector(loadDrawerContext:)]) {
+            [self.knowledge loadDrawerContext:[self drawerContextForKind:kind]];
+        }
         [self.knowledge loadWorkName:name composer:composer];
         [self.knowledgePopover close];
-        [self closeDataDrawer];
-        [self openDataDrawer];
+        if (!self.dataDrawerOpen) [self openDataDrawer];
+        else [self syncOpenDrawerIfNeeded];
         return;
     }
     if (!name.length) {
@@ -4029,12 +4380,53 @@ static NSString *RLPNowPlayingCastDeviceLabel(NSString *device) {
         else { name = RLPRailStr(m[@"albumArtist"]); if (!name.length) name = RLPRailStr(m[@"artist"]); }
     }
     if (!name.length) return;
+    __weak __typeof__(self) ws = self;
+    if ([self.knowledge respondsToSelector:@selector(setCloseHandler:)]) {
+        [self.knowledge setCloseHandler:^{ __typeof__(self) s = ws; if (s) [s closeDataDrawer]; }];
+    }
+    if ([self.knowledge respondsToSelector:@selector(setSelectKindHandler:)]) {
+        [self.knowledge setSelectKindHandler:^(NSString *k) { __typeof__(self) s = ws; if (s) [s openDrawerForKind:k]; }];
+    }
+    if ([self.knowledge respondsToSelector:@selector(setRefreshKindHandler:)]) {
+        [self.knowledge setRefreshKindHandler:^(NSString *k) {
+            __typeof__(self) s = ws;
+            if (!s) return;
+            NSDictionary *tgt = s.railTargets[k];
+            if (tgt) {
+                NSString *url = [s railUrlForTarget:tgt];
+                if (url.length) [s.railSummaryCache removeObjectForKey:url];
+                s.railStates[k] = [@{ @"state": @"idle" } mutableCopy];
+                [s railEnsureKind:k];
+            }
+        }];
+    }
+    if ([self.knowledge respondsToSelector:@selector(loadDrawerContext:)]) {
+        [self.knowledge loadDrawerContext:[self drawerContextForKind:kind]];
+    }
     NSString *artist = RLPRailStr(t[@"artist"]);
     if (idx == 2) artist = @"";   // 艺术家实体不需要 track 的 artist 参数
     [self.knowledge loadKind:kind name:name artist:artist.length ? artist : nil];
-    [self.knowledgePopover close];[self closeDataDrawer];
-    // web #npDrawer：页内浮卡（不是系统弹窗，也不再需要窗口才可打开）。
-    [self openDataDrawer];
+    if ([self.knowledge respondsToSelector:@selector(loadDrawerContext:)]) {
+        [self.knowledge loadDrawerContext:[self drawerContextForKind:kind]];
+    }
+    [self.knowledgePopover close];
+    if (!self.dataDrawerOpen) {
+        [self openDataDrawer];
+    } else {
+        [self syncOpenDrawerIfNeeded];
+    }
+}
+
+- (void)onRailCard:(RLPRailChipView *)b {
+    NSArray<NSString *> *kinds = @[@"track", @"release", @"person", @"work"];
+    NSInteger idx = b.chipIndex;
+    if (idx < 0 || idx >= (NSInteger)kinds.count) return;
+    NSString *kind = kinds[(NSUInteger)idx];
+    // 如果本来就处于关闭态，先关后开以保持既有 #npDrawerSlide 滑入语义
+    if (self.dataDrawerOpen && [self.activeDrawerKind isEqualToString:kind]) {
+        [self closeDataDrawer];
+    }
+    [self openDrawerForKind:kind];
 }
 
 - (NSTextView *)makeTextView {
@@ -4424,6 +4816,7 @@ static NSString *RLPNowPlayingCastDeviceLabel(NSString *device) {
         // 三张卡的 summary 预览从这里起步（闸门在 railBeginSummariesForMeta 内判定，
         // 关时零请求、只留本地事实）。
         [self_ railBeginSummariesForMeta:json];
+        [self_ syncOpenDrawerIfNeeded];
     }];
 }
 
@@ -4958,6 +5351,8 @@ static NSString *RLPNowPlayingCastDeviceLabel(NSString *device) {
         [self updatePanelToggleStates];
     }
     self.anlDetail.textColor=t.text;[self.webControls applyTheme];self.webControls.playBtn.layer.backgroundColor=t.accent.CGColor;self.webControls.playBtn.contentTintColor=NSColor.whiteColor;
+    self.dataDrawer.layer.backgroundColor=t.bg2.CGColor;
+    self.dataDrawer.layer.borderColor=(t.line2 ?: t.line).CGColor;
     [self.knowledge applyTheme];[self renderRailMetadata];[self updateLyricPosition:self.webStatus.position];[self updateBlurredCover];
 }
 
@@ -5014,6 +5409,7 @@ static NSString *RLPNowPlayingCastDeviceLabel(NSString *device) {
     }
     [self renderRailMetadata];
     [self.knowledge applyLanguage];
+    [self syncOpenDrawerIfNeeded];
     if (self.webCanvas.bounds.size.width > 0) [self layoutWebPlayback];
 }
 - (void)updateBlurredCover {
