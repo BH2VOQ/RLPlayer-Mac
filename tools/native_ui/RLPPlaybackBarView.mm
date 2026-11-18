@@ -298,6 +298,9 @@ static void RLPSetBadgeText(NSTextField *label, NSString *text, NSColor *color, 
 @property (nonatomic, assign) double optimisticVolumeDb;
 @property (nonatomic, assign) BOOL hasConfirmedVolume;
 @property (nonatomic, assign) BOOL rawVolumeLocked;
+/// 拖动/写在途期间收到的外部音量（预设/其他入口）：先存，当前写入结算后补发一次。
+@property (nonatomic, assign) BOOL hasPendingExternalVolumeDb;
+@property (nonatomic, assign) double pendingExternalVolumeDb;
 @property (nonatomic, assign) BOOL lyricDrawerActive;
 - (void)commitVolumeDb:(double)db completion:(void (^ _Nullable)(BOOL))completion;
 - (void)refreshLyricButton;
@@ -1665,7 +1668,14 @@ static const NSTimeInterval kRLPBarModeConfirmSeconds = 2.0;
     if ([info[@"locked"] respondsToSelector:@selector(boolValue)]) {
         [self applyVolumeLockedState:[info[@"locked"] boolValue]];
     }
-    if (self.volKnob.dragging || self.volume.dragging || self.volumeWritePending) return;
+    if (self.volKnob.dragging || self.volume.dragging || self.volumeWritePending) {
+        // 不要丢掉外部预设：存起来，等本次拖动/写入结算后再补发，否则松手值会盖掉它。
+        if ([info[@"db"] respondsToSelector:@selector(doubleValue)]) {
+            self.pendingExternalVolumeDb = RLPVolClampDb([info[@"db"] doubleValue]);
+            self.hasPendingExternalVolumeDb = YES;
+        }
+        return;
+    }
     // A confirmed write from another entry supersedes this view's older polls.
     ++self.statusEpoch;
     self.statusInflight = NO;
@@ -1737,6 +1747,13 @@ static const NSTimeInterval kRLPBarModeConfirmSeconds = 2.0;
     self.volDbField.layer.borderWidth = 0;
     [self commitVolumeDb:db0];
 }
+- (void)flushPendingExternalVolumeIfNeeded {
+    if (!self.hasPendingExternalVolumeDb) return;
+    const double db = self.pendingExternalVolumeDb;
+    self.hasPendingExternalVolumeDb = NO;
+    [self commitVolumeDb:db completion:nil];
+}
+
 - (void)commitVolumeDb:(double)db {
     [self commitVolumeDb:db completion:nil];
 }
@@ -1810,6 +1827,7 @@ static const NSTimeInterval kRLPBarModeConfirmSeconds = 2.0;
             RLPToast(RLPTr(@"音量更改未生效，已重新读取实际音量。"));
             [self_ fetchStatusForced:YES];
         }
+        [self_ flushPendingExternalVolumeIfNeeded];
     }];
 }
 
