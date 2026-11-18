@@ -549,6 +549,14 @@ static NSStackView *RLPSRow(NSString *label, NSView *control, NSString *hint, RL
 /// 最近一次从后端回填到各控件的值（用于识别未触发 textDidChange 的草稿改动）。
 @property (nonatomic, strong) NSMutableDictionary<NSString *, NSString *> *lastLoadedValues;
 @property (nonatomic, assign) NSUInteger llmSeq;
+@property (nonatomic, assign) BOOL llmModelMsgIsWarn;
+@property (nonatomic, assign) BOOL hasCapturedLlmModelState;
+@property (nonatomic, copy, nullable) NSArray<NSString *> *capturedLlmModelTitles;
+@property (nonatomic, assign) NSInteger capturedLlmModelSelectedIndex;
+@property (nonatomic, assign) BOOL capturedLlmModelHidden;
+@property (nonatomic, copy, nullable) NSString *capturedLlmModelMsg;
+@property (nonatomic, assign) BOOL capturedLlmModelMsgIsWarn;
+@property (nonatomic, assign) BOOL suppressNextLlmAutoLoad;
 
 - (void)reloadDataIncludingEqualizer:(BOOL)reloadEq;
 
@@ -583,6 +591,8 @@ static NSStackView *RLPSRow(NSString *label, NSView *control, NSString *hint, RL
 - (void)updateMetaResponsiveLayoutForHostWidth:(CGFloat)hostW;
 - (BOOL)updateMetaModelRowLayoutForBodyWidth:(CGFloat)bodyW;
 - (BOOL)updateMetaAiBtnRowLayoutForBodyWidth:(CGFloat)bodyW;
+- (void)captureLlmModelStateIfNeeded;
+- (void)restoreLlmModelStateIfNeeded;
 
 @end
 
@@ -3306,6 +3316,7 @@ static void RLPMetaClearStackRow(NSStackView *row) {
                      hint:RLPTr(@"选择用于资料补全与增强的模型；读不到列表也可以直接手填")];
 
     self.llmModelMsg = RLPLabel(RLPTr(@"模型列表读取中"), t.small, t.mut);
+    self.llmModelMsgIsWarn = NO;
     self.llmModelMsg.maximumNumberOfLines = 2;
     self.llmModelMsg.lineBreakMode = NSLineBreakByWordWrapping;
     self.llmModelMsg.identifier = @"llm.modelmsg";
@@ -3423,6 +3434,7 @@ static void RLPMetaClearStackRow(NSStackView *row) {
         [aiGroup.widthAnchor constraintEqualToAnchor:twoCol.widthAnchor],
     ];
 
+    [self restoreLlmModelStateIfNeeded];
     const BOOL laidOut = (self.paneHost && self.paneHost.bounds.size.width > 1.0);
     [self updateMetaResponsiveLayoutForHostWidth:[self metaTargetHostWidthPreferringViewBounds:laidOut]];
 }
@@ -3768,6 +3780,7 @@ static void RLPMetaClearStackRow(NSStackView *row) {
         [self updateMetaResponsiveLayoutForHostWidth:[self metaTargetHostWidthPreferringViewBounds:(self.paneHost && self.paneHost.bounds.size.width > 1.0)]];
         self.llmModelMsg.stringValue = RLPTr(@"正在重新拉取模型列表…");
         self.llmModelMsg.textColor = [RLPTheme current].mut;
+        self.llmModelMsgIsWarn = NO;
     }
     NSString *url = force ? @"/api/llm/models?refresh=1" : @"/api/llm/models";
     __weak __typeof__(self) weakSelf = self;
@@ -3790,6 +3803,7 @@ static void RLPMetaClearStackRow(NSStackView *row) {
                 ? [RLPTr(@"拉取模型列表失败") stringByAppendingFormat:@"：%@", err]
                 : RLPTr(@"服务端没有返回任何模型，可直接手填模型 id");
             self_.llmModelMsg.textColor = [RLPTheme current].warn;
+            self_.llmModelMsgIsWarn = YES;
             return;
         }
         // 动态列表：按 id 建项；当前 model 不在列表里时额外插一条（不改配置，提示重选）。
@@ -3823,10 +3837,12 @@ static void RLPMetaClearStackRow(NSStackView *row) {
             self_.llmModelMsg.stringValue = [NSString stringWithFormat:
                 RLPTr(@"已拉到 %ld 个模型，但当前模型不在列表里，建议重新选择（不会自动改配置）"), (long)n];
             self_.llmModelMsg.textColor = [RLPTheme current].warn;
+            self_.llmModelMsgIsWarn = YES;
         } else {
             self_.llmModelMsg.stringValue = [NSString stringWithFormat:
                 RLPTr(@"已拉到 %ld 个模型"), (long)n];
             self_.llmModelMsg.textColor = [RLPTheme current].mut;
+            self_.llmModelMsgIsWarn = NO;
         }
     }];
 }
@@ -4216,7 +4232,14 @@ static NSInteger RLPSearchIndexForProviderId(NSString *pid) {
             ? [NSString stringWithFormat:@"%@ · Key %@", provName, sMasked]
             : provName;
         // 进页顺带拉一次模型列表（web llmModelsLoad(false) 同口径）。
-        [self_ loadLlmModels:NO];
+        // 主题切换重建设置页后保留已捕获的下拉快照，并在 meta 进页自动拉取前消费一次抑制标志。
+        if (self_.tab == RLPSTabMeta || self_.paneCache[@(RLPSTabMeta)] != nil) {
+            if (self_.suppressNextLlmAutoLoad) {
+                self_.suppressNextLlmAutoLoad = NO;
+            } else {
+                [self_ loadLlmModels:NO];
+            }
+        }
     }];
 }
 
@@ -5509,6 +5532,57 @@ static NSUInteger RLPUTF8Bytes(NSString *s) {
     }
 }
 
+- (void)captureLlmModelStateIfNeeded {
+    NSPopUpButton *pop = self.llmModelPopup;
+    const NSInteger count = pop ? pop.numberOfItems : 0;
+    if (!pop || (self.tab != RLPSTabMeta && count <= 0)) return;
+    NSMutableArray<NSString *> *titles = [NSMutableArray arrayWithCapacity:(NSUInteger)MAX(0, count)];
+    for (NSMenuItem *item in pop.itemArray) {
+        [titles addObject:(item.title ?: @"")];
+    }
+    self.capturedLlmModelTitles = titles;
+    self.capturedLlmModelSelectedIndex = pop.indexOfSelectedItem;
+    self.capturedLlmModelHidden = pop.hidden;
+    self.capturedLlmModelMsg = self.llmModelMsg ? (self.llmModelMsg.stringValue ?: @"") : @"";
+    self.capturedLlmModelMsgIsWarn = self.llmModelMsgIsWarn;
+    self.hasCapturedLlmModelState = YES;
+    if ([RLPCoreClient shared].started) {
+        self.suppressNextLlmAutoLoad = YES;
+    }
+}
+
+- (void)restoreLlmModelStateIfNeeded {
+    if (!self.hasCapturedLlmModelState || !self.llmModelPopup) return;
+    NSArray<NSString *> *titles = self.capturedLlmModelTitles ?: @[];
+    const NSInteger capturedIndex = self.capturedLlmModelSelectedIndex;
+    const BOOL capturedHidden = self.capturedLlmModelHidden;
+    NSString *capturedMsg = self.capturedLlmModelMsg ?: @"";
+    const BOOL capturedWarn = self.capturedLlmModelMsgIsWarn;
+
+    [self.llmModelPopup removeAllItems];
+    for (NSString *title in titles) {
+        [self.llmModelPopup addItemWithTitle:title ?: @""];
+    }
+    const NSInteger count = self.llmModelPopup.numberOfItems;
+    if (count > 0) {
+        NSInteger idx = capturedIndex;
+        if (idx < 0 || idx >= count) idx = count - 1;
+        [self.llmModelPopup selectItemAtIndex:idx];
+    }
+    self.llmModelPopup.hidden = capturedHidden;
+
+    if (self.llmModelMsg) {
+        RLPTheme *t = [RLPTheme current];
+        self.llmModelMsg.stringValue = capturedMsg;
+        self.llmModelMsgIsWarn = capturedWarn;
+        self.llmModelMsg.textColor = capturedWarn ? t.warn : t.mut;
+    }
+
+    self.hasCapturedLlmModelState = NO;
+    self.capturedLlmModelTitles = nil;
+    self.capturedLlmModelMsg = nil;
+}
+
 - (void)applyTheme {
     [super applyTheme];
     RLPTheme *t = [RLPTheme current];
@@ -5519,6 +5593,7 @@ static NSUInteger RLPUTF8Bytes(NSString *s) {
     // 也不能让 paneCache 清空前的那份用户态随页面对象一起消失。已有快照时保持不动
     //（那份可能含 field editor 文本，比现在再读一次更完整）。
     if (!self.eqDraftState && self.eqView) self.eqDraftState = [self.eqView rlp_captureDraftState];
+    [self captureLlmModelStateIfNeeded];
     [self.paneCache removeAllObjects];
     [self resetMetaResponsiveState];
     [self rebuildTabs];

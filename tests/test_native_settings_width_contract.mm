@@ -763,6 +763,136 @@ int main() {
         [wcTheme stopAllActivity];
         [wcTheme.window close];
 
+        // ---- C3（独立）：主题切换保留已拉取 llm.modelpopup（可见/条目数/选中索引）且不新增 /api/llm/models 请求 ----
+        std::printf("\n[Suite C3] 主题切换保留 llm.modelpopup 状态且不新增 /api/llm/models 请求\n");
+        [RLPTheme setThemeName:@"light"];
+        [RLPTheme setUiStyle:@"apple"];
+        RLPMainWindowController *wcC3 = [[RLPMainWindowController alloc] init];
+        wcC3.window.releasedWhenClosed = NO;
+        [wcC3.window setFrameAutosaveName:@""];
+        ResetMainWindowFrame(wcC3, 1180.0, 760.0);
+        [wcC3.sidebar selectKey:@"settings"];
+        Pump(0.15);
+        RLPSettingsViewController *settingsC3 = (RLPSettingsViewController *)wcC3.currentContent;
+        NSView *pageHostC3 = [wcC3 valueForKey:@"pageHost"];
+        Ck([settingsC3 isKindOfClass:[RLPSettingsViewController class]],
+           "C3-pre 新建主窗打开 settings 成功", NSStringFromClass(wcC3.currentContent.class));
+
+        if (settingsC3) {
+            [settingsC3 selectPane:@"meta"];
+            LayoutHost(wcC3.window.contentView, 0.15);
+            NSButton *moreC3 = (NSButton *)FindById(settingsC3.view, @"sp_metamore");
+            if (moreC3) [moreC3 performClick:nil];
+            g_spy.modelsAvailable = YES;
+            [settingsC3 loadLlmModels:YES];
+            LayoutHost(wcC3.window.contentView, 0.25);
+
+            NSPopUpButton *popInit = (NSPopUpButton *)FindById(settingsC3.view, @"llm.modelpopup");
+            Ck(popInit != nil && !popInit.hidden && popInit.numberOfItems == 3,
+               "C3-pre 1180 meta 展开并拉取模型列表成功",
+               [NSString stringWithFormat:@"pop=%p hidden=%d count=%ld",
+                popInit, popInit ? (int)popInit.hidden : -1,
+                popInit ? (long)popInit.numberOfItems : -1L]);
+            const NSInteger loadedCount = popInit ? popInit.numberOfItems : 0;
+            if (popInit && popInit.numberOfItems > 0) [popInit selectItemAtIndex:0];
+            Ck(popInit && popInit.indexOfSelectedItem == 0 &&
+               [popInit.titleOfSelectedItem isEqualToString:@"deepseek-chat"],
+               "C3-pre 手动选中第 0 项 deepseek-chat",
+               [NSString stringWithFormat:@"idx=%ld title=%@",
+                popInit ? (long)popInit.indexOfSelectedItem : -1L,
+                popInit.titleOfSelectedItem ?: @""]);
+
+            auto countModelRequests = ^NSInteger() {
+                NSInteger n = 0;
+                for (NSString *r in g_spy.requests) {
+                    if ([r containsString:@"/api/llm/models"]) ++n;
+                }
+                return n;
+            };
+            const NSInteger reqBefore = countModelRequests();
+
+            auto assertC3Popup = ^(const char *tag, BOOL expectInHierarchy) {
+                NSPopUpButton *pop = (NSPopUpButton *)FindById(settingsC3.view, @"llm.modelpopup");
+                const std::string pfx(tag);
+                const BOOL visOk = !expectInHierarchy ||
+                    (pop && !IsHiddenInHierarchy(pop, settingsC3.view) && NSWidth(pop.bounds) >= 60.0);
+                const BOOL ok = (pop != nil && !pop.hidden && visOk &&
+                                 pop.numberOfItems == loadedCount &&
+                                 pop.indexOfSelectedItem == 0 &&
+                                 [pop.titleOfSelectedItem isEqualToString:@"deepseek-chat"]);
+                std::printf("  [%s] hidden=%d items=%ld idx=%ld title=%s\n",
+                            tag, pop ? (int)pop.hidden : -1,
+                            pop ? (long)pop.numberOfItems : -1L,
+                            pop ? (long)pop.indexOfSelectedItem : -1L,
+                            pop.titleOfSelectedItem.UTF8String ?: "(nil)");
+                Ck(ok,
+                   (pfx + ": llm.modelpopup !hidden 且条目数/选中索引/title 保持 deepseek-chat").c_str(),
+                   [NSString stringWithFormat:@"pop=%p hidden=%d inHier=%d w=%.1f items=%ld/%ld idx=%ld title=%@",
+                    pop, pop ? (int)pop.hidden : -1,
+                    pop ? (int)!IsHiddenInHierarchy(pop, settingsC3.view) : -1,
+                    pop ? NSWidth(pop.bounds) : 0.0,
+                    pop ? (long)pop.numberOfItems : -1L, (long)loadedCount,
+                    pop ? (long)pop.indexOfSelectedItem : -1L,
+                    pop.titleOfSelectedItem ?: @""]);
+            };
+
+            NSException *c3CycleEx = nil;
+            @try {
+                [RLPTheme setThemeName:@"dark"];
+                LayoutHost(wcC3.window.contentView, 0.2);
+                assertC3Popup("C3-dark", YES);
+
+                [RLPTheme setUiStyle:@"apple"];
+                LayoutHost(wcC3.window.contentView, 0.2);
+                assertC3Popup("C3-apple", YES);
+
+                [RLPTheme setUiStyle:@"classic"];
+                LayoutHost(wcC3.window.contentView, 0.2);
+                assertC3Popup("C3-classic", YES);
+            } @catch (NSException *ex) {
+                c3CycleEx = ex;
+            }
+            const NSInteger reqAfterCycle = countModelRequests();
+            const NSInteger reqDelta = reqAfterCycle - reqBefore;
+            std::printf("  [C3] /api/llm/models requests: before=%ld after=%ld delta=%ld\n",
+                        (long)reqBefore, (long)reqAfterCycle, (long)reqDelta);
+            Ck(c3CycleEx == nil, "C3 dark/apple/classic 主题切换不崩溃",
+               c3CycleEx ? [NSString stringWithFormat:@"%@: %@", c3CycleEx.name, c3CycleEx.reason] : @"ok");
+            Ck(reqDelta == 0, "C3 主题切换期间新增 /api/llm/models 请求 == 0",
+               [NSString stringWithFormat:@"before=%ld after=%ld delta=%ld",
+                (long)reqBefore, (long)reqAfterCycle, (long)reqDelta]);
+
+            NSException *c3BackEx = nil;
+            @try {
+                [RLPTheme setThemeName:@"light"];
+                [RLPTheme setUiStyle:@"apple"];
+                LayoutHost(wcC3.window.contentView, 0.2);
+                assertC3Popup("C3-back-light-apple", YES);
+
+                NSButton *moreC3After = (NSButton *)FindById(settingsC3.view, @"sp_metamore");
+                Ck(moreC3After != nil, "C3 切回 light/apple 后仍找到 sp_metamore", @"nil");
+                if (moreC3After) {
+                    [moreC3After performClick:nil];
+                    LayoutHost(wcC3.window.contentView, 0.15);
+                    assertC3Popup("C3-collapsed", NO);
+
+                    [moreC3After performClick:nil];
+                    LayoutHost(wcC3.window.contentView, 0.15);
+                    assertC3Popup("C3-reexpanded", YES);
+                }
+            } @catch (NSException *ex) {
+                c3BackEx = ex;
+            }
+            const NSInteger reqEnd = countModelRequests();
+            Ck(c3BackEx == nil, "C3 切回 light/apple 并折叠/展开 meta 无崩溃",
+               c3BackEx ? [NSString stringWithFormat:@"%@: %@", c3BackEx.name, c3BackEx.reason] : @"ok");
+            Ck(reqEnd == reqBefore, "C3 全程切回 light/apple 与折叠/展开后仍未新增 /api/llm/models 请求",
+               [NSString stringWithFormat:@"before=%ld end=%ld", (long)reqBefore, (long)reqEnd]);
+            AssertMetaGeometry("C3-light-apple-1180-expanded", settingsC3, pageHostC3, YES, NO, YES);
+        }
+        [wcC3 stopAllActivity];
+        [wcC3.window close];
+
         std::printf("\n结果：%d passed, %d failed\n", g_pass, g_fail);
         return g_fail == 0 ? 0 : 1;
     }
