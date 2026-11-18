@@ -114,20 +114,50 @@ struct NativeProgress {
     int         percent = -1;   // -1 = 未知
 };
 
-using ProgressFn = void (^)(const NativeProgress& p);
-using DoneFn     = void (^)(const rta::update::CheckResult& result);
-using InstallFn  = void (^)(bool ok, NSString *message);
+// 稳定安装结果码（不依赖本地化文案，供 UI/宿主判断取消、失败与自动重启状态）
+enum class InstallResultCode {
+    InstalledAutoRestart,    // 安装且版本校验通过，已派发自动重启脚本
+    InstalledManualRestart,  // 安装且版本校验通过，需要手动重启（如重启脚本失败或未启用）
+    Cancelled,               // 在可取消阶段（下载/校验边界）明确取消，未开始替换安装
+    Failed                   // 任意阶段失败（含安装后版本校验不匹配）
+};
+
+inline const char* install_result_code_name(InstallResultCode code) {
+    switch (code) {
+        case InstallResultCode::InstalledAutoRestart:   return "auto_restart_scheduled";
+        case InstallResultCode::InstalledManualRestart: return "needs_manual_restart";
+        case InstallResultCode::Cancelled:              return "cancelled";
+        case InstallResultCode::Failed:                 return "failed";
+    }
+    return "failed";
+}
+
+struct InstallOutcome {
+    bool              ok = false;
+    InstallResultCode code = InstallResultCode::Failed;
+    bool              cancelled = false;
+    bool              autoRestartScheduled = false;
+    bool              versionVerified = false;
+    std::string       installedVersion;
+    std::string       message;      // 人类可读描述（可本地化；状态判断不依赖此字符串）
+};
+
+using ProgressFn       = void (^)(const NativeProgress& p);
+using DoneFn           = void (^)(const rta::update::CheckResult& result);
+using InstallFn        = void (^)(bool ok, NSString *message);
+using InstallOutcomeFn = void (^)(const InstallOutcome& outcome);
 
 // 异步检查更新。立即返回；结果通过 done 回调（已在后台队列，调用方自行切主线程）。
 void begin_check(ProgressFn progress, DoneFn done);
 
-// 异步一键更新。只有 plan.decision == UpdateAvailable 才会执行；
-// 内部顺序：下载 → verify_downloaded_file（失败即丢弃）→ 挂载 → 备份 → ditto 替换
-//           → 自动重启（失败则回退到 NSAlert 手动重启提示）。
-// cancel 可为空 token（默认构造就是"永不取消"）。
-// 实现 = run_install_pipeline + 「目标 .app 取当前进程所在位置」这一句。
+// 异步一键更新（保留旧签名兼容 mac_host.mm；内部转发到 begin_install_outcome）。
 void begin_install(const CheckResult& plan, ProgressFn progress, InstallFn done,
                    CancelToken cancel = CancelToken());
+
+// 异步一键更新（结构化终态版）：返回稳定枚举 InstallResultCode 与布尔状态，
+// UI 凭此区分"后端明确取消 / 安装阶段失败 / 自动重启 vs 手动重启"，不再依赖中文子串匹配。
+void begin_install_outcome(const CheckResult& plan, ProgressFn progress,
+                           InstallOutcomeFn done, CancelToken cancel = CancelToken());
 
 // ---------------------------------------------------------------------------
 // **可测的安装流水线**（begin_install 的全部实质内容）
@@ -153,6 +183,10 @@ struct InstallPipelineOptions {
 bool run_install_pipeline(const CheckResult& plan, ProgressFn progress, CancelToken cancel,
                           const InstallPipelineOptions& opts,
                           std::string& outErr, std::string& outBackup);
+
+bool run_install_pipeline(const CheckResult& plan, ProgressFn progress, CancelToken cancel,
+                          const InstallPipelineOptions& opts,
+                          InstallOutcome& outOutcome, std::string& outBackup);
 
 // ---------------------------------------------------------------------------
 // 流式下载（NSURLSession，带真实进度）—— 也可以单独测
@@ -201,6 +235,10 @@ void set_test_allow_loopback_download(bool enabled);
 // 生产路径永远不会打开它（没有调用点）；就算误开，后果也只是"临时挂载点没卸掉"，
 // 而不会碰到用户的 .app（卸载与替换是两件事）。
 void set_test_force_unmount_failure(bool enabled);
+
+// ⚠️ **仅测试用**：默认完全关闭。
+// 打开后安装后版本校验触发备份恢复时强制回报失败，用于验证 UPDATE_INSTALL_FAIL 与错误文案。
+void set_test_force_restore_failure(bool enabled);
 
 // ---------------------------------------------------------------------------
 // 自动重启（2026-10-26：不再只说"请手动重启"）

@@ -99,6 +99,41 @@
 - (BOOL)acceptsFirstResponder { return YES; }
 - (void)keyDown:(NSEvent *)event { if(event.keyCode==53)[self.owner onClosePlayback:nil];else [super keyDown:event]; }
 - (NSMenu *)menuForEvent:(NSEvent *)event { return [self.owner playbackContextMenu]; }
+- (void)setFrameSize:(NSSize)newSize {
+    const NSSize oldSize = self.bounds.size;
+    [super setFrameSize:newSize];
+    const NSSize curSize = self.bounds.size;
+    if (fabs(oldSize.width - curSize.width) > 0.5 || fabs(oldSize.height - curSize.height) > 0.5) {
+        self.needsLayout = YES;
+        if (!self.autoresizesSubviews && curSize.width > 0.0 && curSize.height > 0.0) {
+            [self.owner layoutWebPlayback];
+        }
+    }
+}
+- (void)resizeSubviewsWithOldSize:(NSSize)oldSize {
+    [super resizeSubviewsWithOldSize:oldSize];
+    if (self.bounds.size.width > 0.0 && self.bounds.size.height > 0.0) {
+        [self.owner layoutWebPlayback];
+    }
+}
+- (void)viewDidMoveToSuperview {
+    [super viewDidMoveToSuperview];
+    if (self.superview) {
+        self.needsLayout = YES;
+        if (self.bounds.size.width > 0.0 && self.bounds.size.height > 0.0) {
+            [self.owner layoutWebPlayback];
+        }
+    }
+}
+- (void)viewDidMoveToWindow {
+    [super viewDidMoveToWindow];
+    if (self.window) {
+        self.needsLayout = YES;
+        if (self.bounds.size.width > 0.0 && self.bounds.size.height > 0.0) {
+            [self.owner layoutWebPlayback];
+        }
+    }
+}
 - (void)layout { [super layout]; [self.owner layoutWebPlayback]; }
 - (void)drawRect:(NSRect)dirty {
     RLPTheme *t=[RLPTheme current]; [t.bg setFill]; NSRectFill(self.bounds);
@@ -1884,6 +1919,7 @@ static NSString *RLPRailTagText(id srValue, id bitsValue) {
 @property (nonatomic, strong) NSTextView *compareOut;
 @property (nonatomic, strong) NSMutableArray<NSString *> *comparePaths;
 @property (nonatomic, strong) NSMutableArray<NSButton *> *compareChecks;
+@property (nonatomic, assign) BOOL layingOutWebPlayback;
 @end
 
 @implementation RLPNowPlayingViewController
@@ -2566,6 +2602,10 @@ static CGFloat RLPNPMetaChipWidth(NSButton *b) {
 
 - (void)layoutWebPlayback {
     const CGFloat w = self.webCanvas.bounds.size.width, h = self.webCanvas.bounds.size.height;
+    if (w <= 0.0 || h <= 0.0) return;
+    if (self.layingOutWebPlayback) return;
+    self.layingOutWebPlayback = YES;
+    @try {
     // 顶部操作托盘先定位，供英雄区文字右缘让位（避免窄屏贴边压到开关按钮）。
     const CGFloat trayW = 144.0, trayH = 44.0, trayY = 12.0;
     const CGFloat trayX = MAX(16.0, w - 16.0 - trayW);
@@ -2583,8 +2623,9 @@ static CGFloat RLPNPMetaChipWidth(NSButton *b) {
     const CGFloat ctlW = MIN(1160.0, MAX(280.0, w - 32.0));
     const CGFloat ctlX = MAX(16.0, (w - ctlW) / 2.0);
     const CGFloat ctlH = (ctlW < 540.0) ? 98.0 : ((h <= 640.0) ? 64.0 : 68.0);
-    const CGFloat ctlY = h - bottomMargin - ctlH;
-    const CGFloat waveformY = ctlY - waveformGap - waveformH;
+    const CGFloat computedCtlY = h - bottomMargin - ctlH;
+    const CGFloat ctlY = MAX(12.0, MIN(computedCtlY, h - ctlH - 12.0));
+    const CGFloat waveformY = MAX(0.0, ctlY - waveformGap - waveformH);
 
     // 封面图与下方胶囊操作成组（居中在封面正下方，不再与三栏顶边重叠）。
     const CGFloat c = MIN(236.0, MAX(132.0, h * 0.24));
@@ -2667,12 +2708,12 @@ static CGFloat RLPNPMetaChipWidth(NSButton *b) {
         ? NSMaxY(self.metaChipsRow.frame)
         : (infoY + contentRelBottom);
     const CGFloat by = MAX(coverGroupBottom, infoBottom) + (h <= 640.0 ? 12.0 : 16.0);
-    const CGFloat bottom = MAX(by + 60.0, waveformY - waveformBodyGap);
+    const CGFloat bottom = MAX(by, waveformY - waveformBodyGap);
 
     const CGFloat colGap = (w < 740.0) ? 12.0 : 18.0;
     const CGFloat col = (w - 2.0 * gutter - colGap * 2.0) / 4.0;
     const CGFloat side = MIN(340.0, col);
-    const CGFloat bodyH = MAX(60.0, bottom - by);
+    const CGFloat bodyH = MAX(0.0, bottom - by);
     self.analysisPanel.frame = NSMakeRect(gutter, by, side, bodyH);
     self.railPanel.frame = NSMakeRect(w - gutter - side, by, side, bodyH);
     if (self.analysisPanel.hidden && self.railPanel.hidden) {
@@ -2718,7 +2759,7 @@ static CGFloat RLPNPMetaChipWidth(NSButton *b) {
         const CGFloat segY = bodyH - segTop - anlSegH;
         [self anlLayoutSegmentAtY:segY right:side - anlPadX];
         const CGFloat cardsTop = segTop + anlSegH + anlBodyGap;
-        const CGFloat cardsH = MAX(1.0, bodyH - cardsTop - anlPadBottom);
+        const CGFloat cardsH = MAX(0.0, bodyH - cardsTop - anlPadBottom);
         const CGFloat cardsW = MAX(20.0, side - anlPadX);
         self.anlBody.frame = NSMakeRect(anlPadX, anlPadBottom, cardsW, cardsH);
         self.anlDetailScroll.frame = self.anlBody.frame;
@@ -2774,7 +2815,7 @@ static CGFloat RLPNPMetaChipWidth(NSButton *b) {
         const CGFloat wrapTop = headBottom - kRailHeadGap;
         self.railChipWrap.frame = NSMakeRect(kRailHeadPadX, wrapBottom,
                                              MAX(20.0, side - kRailHeadPadX * 2.0),
-                                             MAX(20.0, wrapTop - wrapBottom));
+                                             MAX(0.0, wrapTop - wrapBottom));
         self.railChipWrap.hidden = (self.railEmptyLabel && !self.railEmptyLabel.hidden);
         [self railLayoutChips];
         (void)ry;
@@ -2792,6 +2833,9 @@ static CGFloat RLPNPMetaChipWidth(NSButton *b) {
         self.dataBackdrop.frame = NSMakeRect(0, 0, w, h);
         self.dataDrawer.frame = NSMakeRect(w - 14.0 - dw, 14.0, dw, MAX(60.0, h - 28.0));
         self.knowledge.frame = self.dataDrawer.bounds;
+    }
+    } @finally {
+        self.layingOutWebPlayback = NO;
     }
 }
 
@@ -4008,7 +4052,34 @@ static NSString *RLPNowPlayingCastDeviceLabel(NSString *device) {
 
 - (void)dealloc { [[NSNotificationCenter defaultCenter] removeObserver:self];[self.poll invalidate];[self.castPoll invalidate];[self.lyricRetryTimer invalidate]; }
 
+- (void)viewWillLayout {
+    [super viewWillLayout];
+    if (self.isViewLoaded && self.webCanvas.bounds.size.width > 0.0 && self.webCanvas.bounds.size.height > 0.0) {
+        [self layoutWebPlayback];
+    }
+}
+
+- (void)viewDidLayout {
+    [super viewDidLayout];
+    if (self.isViewLoaded && self.webCanvas.bounds.size.width > 0.0 && self.webCanvas.bounds.size.height > 0.0) {
+        [self layoutWebPlayback];
+    }
+}
+
+- (void)viewDidAppear {
+    [super viewDidAppear];
+    if (self.isViewLoaded && self.webCanvas.bounds.size.width > 0.0 && self.webCanvas.bounds.size.height > 0.0) {
+        [self layoutWebPlayback];
+    }
+}
+
 - (void)activate {
+    if (self.isViewLoaded) {
+        [self.webCanvas setNeedsLayout:YES];
+        if (self.webCanvas.bounds.size.width > 0.0 && self.webCanvas.bounds.size.height > 0.0) {
+            [self layoutWebPlayback];
+        }
+    }
     [self startPolling];
     // 模式（循环/随机）是**全局**状态：页面重新打开时必须重读一次。
     // refresh 只在「换曲」分支里拉 /api/queue，所以「关掉正在播放页 → 在别处改成单曲循环

@@ -133,6 +133,12 @@ static void ck(bool ok,const char *n){printf("[%s] %s\n",ok?"PASS":"FAIL",n);if(
 - (void)layoutWebPlayback;
 - (BOOL)lyricAiBusy;
 - (void)applyLanguage;
+- (void)onToggleAnalysis:(id)sender;
+- (void)onToggleRail:(id)sender;
+- (void)onAnlExpand:(id)sender;
+- (void)openDataDrawer;
+- (void)closeDataDrawer;
+- (void)renderMetaChipsFromMeta:(NSDictionary *)json;
 @end
 int main(){@autoreleasepool{
  [NSApplication sharedApplication]; [RLPTheme setThemeName:@"light"];
@@ -1121,5 +1127,167 @@ int main(){@autoreleasepool{
  RLPSetLanguage(@"en");[vc applyLanguage];
  {id bar=[vc valueForKey:@"webControls"];ck(bar != nil,"language fixture contains actual playback controls");NSArray *keys=@[@"castButton",@"saveButton",@"closeButton",@"analysisToggle",@"railToggle",@"anlHide",@"railHide",@"coverSetBtn",@"coverResetBtn"];NSArray *barKeys=@[@"seek",@"repBtn",@"volKnob",@"volDbField",@"volMuteBtn"];NSMutableArray *stale=[NSMutableArray array];for(NSString*k in keys){NSView*v=[vc valueForKey:k];NSString*tip=[(id)v respondsToSelector:@selector(toolTip)]?[v valueForKey:@"toolTip"]:nil;if(HasCJK(tip))[stale addObject:[NSString stringWithFormat:@"%@=%@",k,tip]];}for(NSString*k in barKeys){id v=[bar valueForKey:k];NSString*tip=[v respondsToSelector:@selector(toolTip)]?[v valueForKey:@"toolTip"]:nil;if(HasCJK(tip))[stale addObject:[NSString stringWithFormat:@"bar.%@=%@",k,tip]];}ck(stale.count==0,"language switch refreshes tooltips built at construction");if(stale.count)printf("    stale: %s\n",[[stale componentsJoinedByString:@" | "] UTF8String]);}
  RLPSetLanguage(@"zh");[vc applyLanguage];
+ // ---- N1/N2/N3: 900x600 覆盖页经 NSLayoutConstraint 四边 pin 到主窗 contentView 时底栏完整可见不裁切 ----
+ {
+  NSUserDefaults *ud=[NSUserDefaults standardUserDefaults];
+  const BOOL savedAnlHidden=[ud boolForKey:@"RLPNPAnalysisHidden"];
+  const BOOL savedRailHidden=[ud boolForKey:@"RLPNPRailHidden"];
+  [ud setBool:NO forKey:@"RLPNPAnalysisHidden"];
+  [ud setBool:NO forKey:@"RLPNPRailHidden"];
+
+  NSWindow *win=[[NSWindow alloc] initWithContentRect:NSMakeRect(0,0,900,600)
+                                            styleMask:NSWindowStyleMaskBorderless
+                                              backing:NSBackingStoreBuffered defer:NO];
+  win.contentView=[[NSView alloc] initWithFrame:NSMakeRect(0,0,900,600)];
+  [win setContentSize:NSMakeSize(900,600)];
+
+  RLPNowPlayingViewController *np=[RLPNowPlayingViewController new];
+  NSView *nv=np.view;
+  nv.translatesAutoresizingMaskIntoConstraints=NO;
+  [win.contentView addSubview:nv];
+  [NSLayoutConstraint activateConstraints:@[
+   [nv.leadingAnchor constraintEqualToAnchor:win.contentView.leadingAnchor],
+   [nv.trailingAnchor constraintEqualToAnchor:win.contentView.trailingAnchor],
+   [nv.topAnchor constraintEqualToAnchor:win.contentView.topAnchor],
+   [nv.bottomAnchor constraintEqualToAnchor:win.contentView.bottomAnchor],
+  ]];
+  [win.contentView layoutSubtreeIfNeeded];
+
+  NSView *ctl=find(nv,@"np.controls");
+  if(!ctl){
+   NSView *seek=find(nv,@"np.seek") ?: find(nv,@"np.vol");
+   ctl=seek.superview;
+  }
+  NSView *knob=find(ctl ?: nv,@"npVolKnob");
+  NSView *mute=find(ctl ?: nv,@"npVolFloor");
+  NSView *wf=find(nv,@"np.waveform");
+  NSView *anal=find(nv,@"npAnal");
+  NSView *ly=find(nv,@"npLyric");
+  NSView *rail=find(nv,@"npRail");
+
+  void (^checkBottomBarInBounds)(CGFloat,CGFloat,const char *) = ^(CGFloat wantW,CGFloat wantH,const char *tag){
+   const CGFloat bw=nv.bounds.size.width, bh=nv.bounds.size.height;
+   const BOOL hostOk=(fabs(bw-wantW)<1.0 && fabs(bh-wantH)<1.0);
+   if(!ctl || !knob || !mute){
+    ck(NO,[[NSString stringWithFormat:@"%s 控件齐备(ctl=%d knob=%d mute=%d)",tag,ctl!=nil,knob!=nil,mute!=nil] UTF8String]);
+    return;
+   }
+   const NSRect ctlC=[nv convertRect:ctl.bounds fromView:ctl];
+   const NSRect knobC=[nv convertRect:knob.bounds fromView:knob];
+   const NSRect muteC=[nv convertRect:mute.bounds fromView:mute];
+   const NSRect ctlW=[win.contentView convertRect:ctl.bounds fromView:ctl];
+   const NSRect knobW=[win.contentView convertRect:knob.bounds fromView:knob];
+   const NSRect muteW=[win.contentView convertRect:mute.bounds fromView:mute];
+   const BOOL ctlOk=(!ctl.hidden && ctlC.size.height>10.0 && ctlC.size.width<=wantW+1.0 &&
+                     NSMinY(ctlC)>=-1.0 && NSMaxY(ctlC)<=wantH+1.0 &&
+                     NSMinY(ctlW)>=-1.0 && NSMaxY(ctlW)<=wantH+1.0);
+   const BOOL knobOk=(!knob.hidden && knobC.size.height>1.0 &&
+                      NSMinY(knobC)>=-1.0 && NSMaxY(knobC)<=wantH+1.0 &&
+                      NSMinY(knobW)>=-1.0 && NSMaxY(knobW)<=wantH+1.0);
+   const BOOL muteOk=(!mute.hidden && muteC.size.height>1.0 &&
+                      NSMinY(muteC)>=-1.0 && NSMaxY(muteC)<=wantH+1.0 &&
+                      NSMinY(muteW)>=-1.0 && NSMaxY(muteW)<=wantH+1.0);
+   const BOOL wfOk=(wf==nil || NSMaxY([nv convertRect:wf.bounds fromView:wf])<=NSMinY(ctlC)+0.5);
+   printf("    [%s] nv=%.0fx%.0f ctl=%s knob=%s mute=%s ctlWin=%s\n",
+          tag, bw, bh,
+          [NSStringFromRect(ctlC) UTF8String],
+          [NSStringFromRect(knobC) UTF8String],
+          [NSStringFromRect(muteC) UTF8String],
+          [NSStringFromRect(ctlW) UTF8String]);
+   ck(hostOk && ctlOk && knobOk && muteOk && wfOk,
+      [[NSString stringWithFormat:@"%s %.0fx%.0f 底栏完整落在[0,%.0f]内(ctlMaxY=%.1f knobMaxY=%.1f muteMaxY=%.1f)",
+        tag, wantW, wantH, wantH, NSMaxY(ctlC), NSMaxY(knobC), NSMaxY(muteC)] UTF8String]);
+  };
+
+  // N1: 900x600 首开经 NSLayoutConstraint 四边 pin 到 contentView
+  checkBottomBarInBounds(900.0, 600.0, "N1");
+  if(ctl){
+   ck(fabs(ctl.frame.size.height-64.0)<1.0 && NSMaxY(ctl.frame)<=601.0,
+      [[NSString stringWithFormat:@"N1b 900x600 已重算紧凑底栏(h=%.1f maxY=%.1f，不再停留 1180x760 的 y=676/h=68)",
+        ctl.frame.size.height, NSMaxY(ctl.frame)] UTF8String]);
+  }
+
+  // N2: 同一 VC 宿主尺寸 1180x760 -> 900x600 -> 1180x760 来回切换 + 缓存重入，每档底栏完整不裁
+  [win setContentSize:NSMakeSize(1180,760)];
+  [win.contentView layoutSubtreeIfNeeded];
+  checkBottomBarInBounds(1180.0, 760.0, "N2a(1180x760)");
+
+  [win setContentSize:NSMakeSize(900,600)];
+  [win.contentView layoutSubtreeIfNeeded];
+  checkBottomBarInBounds(900.0, 600.0, "N2b(900x600)");
+
+  [win setContentSize:NSMakeSize(1180,760)];
+  [win.contentView layoutSubtreeIfNeeded];
+  checkBottomBarInBounds(1180.0, 760.0, "N2c(1180x760)");
+
+  [nv removeFromSuperview];
+  [win setContentSize:NSMakeSize(900,600)];
+  [win.contentView addSubview:nv];
+  [NSLayoutConstraint activateConstraints:@[
+   [nv.leadingAnchor constraintEqualToAnchor:win.contentView.leadingAnchor],
+   [nv.trailingAnchor constraintEqualToAnchor:win.contentView.trailingAnchor],
+   [nv.topAnchor constraintEqualToAnchor:win.contentView.topAnchor],
+   [nv.bottomAnchor constraintEqualToAnchor:win.contentView.bottomAnchor],
+  ]];
+  [win.contentView layoutSubtreeIfNeeded];
+  checkBottomBarInBounds(900.0, 600.0, "N2d(reattach 900x600)");
+
+  // N3: 900x600 下打开/展开分析面板、切换资料栏、打开页内资料抽屉及多行歌词/芯片，均不把底栏推出去
+  [np setValue:@"/offline/n3-900x600.flac" forKey:@"currentPath"];
+  [np applyLyricText:@"[00:01.00]line 1\n[00:02.00]line 2\n[00:03.00]line 3\n[00:04.00]line 4\n[00:05.00]line 5\n[00:06.00]line 6"
+             forPath:@"/offline/n3-900x600.flac"];
+  [np renderMetaChipsFromMeta:@{
+   @"year": @2024,
+   @"genre": @"Classical / Chamber / Orchestral Very Long Genre Label",
+   @"albumArtist": @"Berlin Philharmonic / Herbert von Karajan",
+   @"meta": @{ @"enriched": @YES, @"sources": @{ @"year": @"MusicBrainz" } }
+  }];
+  [np setValue:@{@"title":@"N3 Symphony",@"album":@"Album",@"artist":@"Artist"} forKey:@"trackMetadata"];
+  [np renderRailMetadata];
+  if(anal.hidden)[np onToggleAnalysis:nil];
+  if(rail.hidden)[np onToggleRail:nil];
+  [win.contentView layoutSubtreeIfNeeded];
+  checkBottomBarInBounds(900.0, 600.0, "N3a(panels+chips)");
+
+  [np onAnlExpand:nil];   // L0 -> L1
+  [win.contentView layoutSubtreeIfNeeded];
+  checkBottomBarInBounds(900.0, 600.0, "N3b(anl L1)");
+
+  [np onAnlExpand:nil];   // L1 -> L2
+  [win.contentView layoutSubtreeIfNeeded];
+  checkBottomBarInBounds(900.0, 600.0, "N3c(anl L2)");
+
+  [np onAnlExpand:nil];   // L2 -> L0
+  id chipsObjN3=[np valueForKey:@"railCards"];
+  NSArray<NSView *> *chipsN3=[chipsObjN3 isKindOfClass:[NSArray class]]?(NSArray<NSView *>*)chipsObjN3:@[];
+  if(chipsN3.count>0){
+   [(id)np performSelector:@selector(onRailCard:) withObject:chipsN3[0]];
+  }else{
+   [np openDataDrawer];
+  }
+  [win.contentView layoutSubtreeIfNeeded];
+  checkBottomBarInBounds(900.0, 600.0, "N3d(npDrawer open)");
+  NSView *drawerN3=find(nv,@"npDrawer");
+  if(drawerN3 && !drawerN3.hidden){
+   const NSRect drC=[nv convertRect:drawerN3.bounds fromView:drawerN3];
+   ck(NSMinY(drC)>=0.0 && NSMaxY(drC)<=601.0,
+      [[NSString stringWithFormat:@"N3e 900x600 下 npDrawer 完整落在[0,600]内(frame=%@)",NSStringFromRect(drC)] UTF8String]);
+  }
+  const NSRect ctlCNow=ctl ? [nv convertRect:ctl.bounds fromView:ctl] : NSZeroRect;
+  const NSRect wfCNow=wf ? [nv convertRect:wf.bounds fromView:wf] : NSZeroRect;
+  if(wf && ctl){
+   const BOOL panelsClearWf=(!anal || anal.hidden || NSMaxY([nv convertRect:anal.bounds fromView:anal])<=NSMinY(wfCNow)+0.5)
+                         && (!ly || NSMaxY([nv convertRect:ly.bounds fromView:ly])<=NSMinY(wfCNow)+0.5)
+                         && (!rail || rail.hidden || NSMaxY([nv convertRect:rail.bounds fromView:rail])<=NSMinY(wfCNow)+0.5);
+   ck(panelsClearWf && NSMaxY(wfCNow)<=NSMinY(ctlCNow)+0.5,
+      "N3f 三栏不压波形、波形不压底栏");
+  }
+  [np closeDataDrawer];
+
+  [ud setBool:savedAnlHidden forKey:@"RLPNPAnalysisHidden"];
+  [ud setBool:savedRailHidden forKey:@"RLPNPRailHidden"];
+  [win orderOut:nil];
+  static NSWindow *sN1Window; sN1Window=win; (void)sN1Window;
+ }
  printf("np web: %d failures\n",fail);return fail?1:0;
 }}

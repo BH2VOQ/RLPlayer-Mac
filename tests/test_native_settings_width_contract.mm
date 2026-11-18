@@ -750,6 +750,11 @@ int main() {
         Ck(cycleEx == nil,
            "C2 meta 展开态下切换 dark/apple/classic 主题均不崩溃",
            cycleEx ? [NSString stringWithFormat:@"%@: %@", cycleEx.name, cycleEx.reason] : @"ok");
+        // applyTheme 会重建页签，旧的模型下拉被移除；主题循环后按真实用户路径重拉一次，
+        // 再断言可见宽度（否则断言依赖异步回调落在主题切换前/后，测试会变成时序抽奖）。
+        g_spy.modelsAvailable = YES;
+        [settingsTheme loadLlmModels:YES];
+        LayoutHost(wcTheme.window.contentView, 0.3);
         AssertMetaGeometry("C2-classic-1180-expanded", settingsTheme, pageHostTheme, YES, NO, YES);
 
         [RLPTheme setThemeName:@"light"];
