@@ -378,6 +378,33 @@ int main(void) {
            "2c. 切语言后切回 eq：presetName 草稿保留",
            [NSString stringWithFormat:@"got='%@'", presetNameAfter.stringValue ?: @"nil"]);
 
+        // 2d. 普通切 tab（不切语言）时，Q 输入期已写回模型
+        {
+            RLPEQFaderInspector *inspQ = (RLPEQFaderInspector *)FindById(root, @"eq.inspector");
+            NSTextField *qField = [inspQ qField];
+            [win makeFirstResponder:qField];
+            [qField selectText:nil];
+            qField.stringValue = @"1.8";
+            [[NSNotificationCenter defaultCenter] postNotificationName:NSControlTextDidChangeNotification
+                                                                object:qField];
+            Ck(qField.currentEditor != nil && [qField.stringValue isEqualToString:@"1.8"],
+               "2d-pre. Q 输入框进入编辑并写入 1.8",
+               [NSString stringWithFormat:@"editor=%p value='%@'", qField.currentEditor, qField.stringValue]);
+            [settings selectPane:@"adv"];
+            Pump(0.05);
+            [settings selectPane:@"eq"];
+            Pump(0.05);
+            RLPEQFaderInspector *inspQ2 = (RLPEQFaderInspector *)FindById(root, @"eq.inspector");
+            RLPEqualizerView *eqQ2 = [settings valueForKey:@"eqView"];
+            NSArray<NSDictionary *> *bandsQ = eqQ2 ? [eqQ2 valueForKey:@"bands"] : nil;
+            NSDictionary *b3 = (bandsQ.count > 3 && [bandsQ[3] isKindOfClass:[NSDictionary class]]) ? bandsQ[3] : nil;
+            const double qModel = b3 && [b3[@"q"] respondsToSelector:@selector(doubleValue)]
+                ? [b3[@"q"] doubleValue] : -1.0;
+            Ck(inspQ2 && inspQ2.bandIndex == 3 && qModel > 1.79 && qModel < 1.81,
+               "2d. 普通切 tab 后 Q 模型仍为 1.8（不是退回 1.00）",
+               [NSString stringWithFormat:@"band=%ld q=%.2f", (long)(inspQ2 ? inspQ2.bandIndex : -99), qModel]);
+        }
+
         // =========================================================================
         // 3. 当前页签恢复草稿后，延迟 /api/settings 与 /api/llm 旧回包覆盖非焦点草稿
         // =========================================================================

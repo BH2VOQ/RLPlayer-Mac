@@ -12,7 +12,7 @@ NS_ASSUME_NONNULL_BEGIN
 /// 既没变好看，也没解决"占一大块"的问题。
 /// 专业 EQ（Pro-Q / FabFilter / Ableton EQ8）都是"选中一段 → 下方一个 inspector"，
 /// 占地固定、只显示当下要调的那一段。这里照此实现。
-@interface RLPEQFaderInspector : NSView
+@interface RLPEQFaderInspector : NSView <NSTextFieldDelegate>
 
 /// 当前显示的段（-1 = 没有选中，整个视图隐藏）。
 @property (nonatomic, assign) NSInteger bandIndex;

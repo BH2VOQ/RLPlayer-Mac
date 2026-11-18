@@ -47,6 +47,7 @@ static const CGFloat kInspH = 30.0;
     _qField.alignment = NSTextAlignmentCenter;
     _qField.target = self;
     _qField.action = @selector(onQ:);
+    _qField.delegate = self;
     _qField.toolTip = RLPTr(@"品质因数 Q（0.1–20）");
     [self addSubview:_qField];
 
@@ -111,6 +112,16 @@ static const CGFloat kInspH = 30.0;
 - (NSTextField *)qField { return _qField; }
 - (NSPopUpButton *)typePopup { return _typePopup; }
 - (NSButton *)enableSwitch { return _enableSwitch; }
+
+/// 输入期就回调模型：用户没按回车直接点页签时，field editor 会被 AppKit 退回旧值，
+/// 只靠 onQ（回车/失焦 action）已经来不及。
+- (void)controlTextDidChange:(NSNotification *)note {
+    if (note.object != _qField || self.bandIndex < 0 || !self.onQChanged) return;
+    double v = _qField.doubleValue;
+    if (!isfinite(v)) return;
+    v = MAX(0.1, MIN(20.0, v));
+    self.onQChanged(self.bandIndex, v);
+}
 
 - (void)onQ:(NSTextField *)f {
     if (self.bandIndex < 0 || !self.onQChanged) return;
