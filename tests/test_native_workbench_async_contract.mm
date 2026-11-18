@@ -39,6 +39,7 @@ static void Ck(BOOL ok, const char *what, NSString *detail) {
 @property (nonatomic, strong) NSButton *monMasterCheck;
 @property (nonatomic, strong) NSButton *monAutoCheck;
 @property (nonatomic, strong) NSButton *monRetryBtn;
+@property (nonatomic, strong) NSButton *tabBtnMonitor;
 @property (nonatomic, strong) NSTextField *monDynValue;
 @property (nonatomic, strong) NSTextField *monQualValue;
 @property (nonatomic, strong) NSTextField *monFakeValue;
@@ -575,6 +576,121 @@ int main() {
                "6b: ok:false /api/profiles response preserves old profiles list",
                [NSString stringWithFormat:@"count=%lu active=%@ rows=%ld status=%@",
                 (unsigned long)vc.profiles.count, vc.profileActive, (long)vc.profileTable.numberOfRows, vc.profileStatus.stringValue]);
+        }
+
+        // -----------------------------------------------------------------
+        // 7. A1/A2/A4: status currentPath/path/file 兼容 + autoanl 开关/不重复/切歌取消/失败不暂停
+        // -----------------------------------------------------------------
+        {
+            RLPWorkbenchViewController *vc = MakeOffscreenWorkbench();
+            [vc selectStudioTab:@"monitor"];
+            vc.monMasterEnabled = YES;
+            vc.monMasterCheck.state = NSControlStateValueOn;
+            vc.settings = @{@"autoanl": @"1"};
+
+            g_spy.healthRequestCount = 0;
+            g_spy.cancelCount = 0;
+            [g_spy.heldHealthGets removeAllObjects];
+            [g_spy.postLog removeAllObjects];
+            g_spy.holdHealthGet = YES;
+
+            [vc applyStatusPayload:@{@"ok": @YES, @"playing": @YES, @"paused": @NO,
+                                     @"currentPath": @"/tmp/mock-curpath.flac"} forSeq:1];
+            Ck([vc.anlPath isEqualToString:@"/tmp/mock-curpath.flac"] && g_spy.healthRequestCount == 1,
+               "7a: status currentPath triggers one /api/health auto-analysis",
+               [NSString stringWithFormat:@"path=%@ count=%ld", vc.anlPath, (long)g_spy.healthRequestCount]);
+
+            // 同曲二次 status 不重复
+            [vc applyStatusPayload:@{@"ok": @YES, @"playing": @YES, @"paused": @NO,
+                                     @"currentPath": @"/tmp/mock-curpath.flac"} forSeq:2];
+            Ck(g_spy.healthRequestCount == 1,
+               "7b: repeated status for same currentPath does not duplicate health request",
+               [NSString stringWithFormat:@"count=%ld", (long)g_spy.healthRequestCount]);
+
+            // 切歌（path 字段）：取消在途分析并启动新曲
+            [vc applyStatusPayload:@{@"ok": @YES, @"playing": @YES, @"paused": @NO,
+                                     @"path": @"/tmp/mock-path2.flac"} forSeq:3];
+            Ck(g_spy.cancelCount == 1 && [vc.anlPath isEqualToString:@"/tmp/mock-path2.flac"] &&
+               g_spy.healthRequestCount == 2,
+               "7c: track switch via path cancels previous and runs new track analysis",
+               [NSString stringWithFormat:@"cancel=%ld path=%@ count=%ld",
+                (long)g_spy.cancelCount, vc.anlPath, (long)g_spy.healthRequestCount]);
+
+            // 分析失败不暂停播放
+            g_spy.holdHealthGet = NO;
+            RLPJSONCompletion hDone2 = g_spy.heldHealthGets.lastObject;
+            [g_spy.heldHealthGets removeAllObjects];
+            if (hDone2) hDone2(@{@"ok": @NO, @"error": @"decode failed"});
+            Pump(0.05);
+            [vc applyStatusPayload:@{@"ok": @YES, @"playing": @YES, @"paused": @NO,
+                                     @"path": @"/tmp/mock-path2.flac"} forSeq:4];
+            NSInteger pausePosts = 0;
+            for (NSDictionary *p in g_spy.postLog) {
+                if ([(NSString *)p[@"path"] containsString:@"/api/pause"]) ++pausePosts;
+            }
+            Ck(!vc.anlBusy && pausePosts == 0 && [vc.status[@"playing"] boolValue] && g_spy.healthRequestCount == 2,
+               "7d: failed health leaves playing=YES, pause=0, and does not spam retries",
+               [NSString stringWithFormat:@"busy=%d pause=%ld playing=%d count=%ld",
+                vc.anlBusy, (long)pausePosts, [vc.status[@"playing"] boolValue], (long)g_spy.healthRequestCount]);
+
+            // autoanl=0 + file 字段：路径可解析但不再发起自动分析
+            vc.settings = @{@"autoanl": @"0"};
+            [vc applyStatusPayload:@{@"ok": @YES, @"playing": @YES, @"paused": @NO,
+                                     @"file": @"/tmp/mock-file3.flac"} forSeq:5];
+            Ck([vc.anlPath isEqualToString:@"/tmp/mock-file3.flac"] && g_spy.healthRequestCount == 2,
+               "7e: autoanl=0 parses file key without triggering auto-analysis",
+               [NSString stringWithFormat:@"path=%@ count=%ld", vc.anlPath, (long)g_spy.healthRequestCount]);
+        }
+
+        // -----------------------------------------------------------------
+        // 8. A3/A4: 点击音质监控页签及分析控件不触发 /api/pause 且不抢占焦点/空格
+        // -----------------------------------------------------------------
+        {
+            RLPWorkbenchViewController *vc = MakeOffscreenWorkbench();
+            NSWindow *wbWin = [[NSWindow alloc] initWithContentRect:NSMakeRect(0, 0, 960, 720)
+                                                          styleMask:NSWindowStyleMaskTitled
+                                                            backing:NSBackingStoreBuffered defer:NO];
+            wbWin.contentView = vc.view;
+            [wbWin makeFirstResponder:nil];
+            NSResponder *frBefore = wbWin.firstResponder;
+            [vc selectStudioTab:@"ab"];
+            vc.monMasterEnabled = YES;
+            vc.settings = @{@"autoanl": @"1"};
+            [vc applyStatusPayload:@{@"ok": @YES, @"playing": @YES, @"paused": @NO,
+                                     @"currentPath": @"/tmp/mock-click.flac"} forSeq:1];
+            Pump(0.05);
+            [g_spy.postLog removeAllObjects];
+
+            Ck(!vc.tabBtnMonitor.keyEquivalent.length && !vc.monMasterCheck.keyEquivalent.length &&
+               !vc.monAutoCheck.keyEquivalent.length && !vc.monRetryBtn.keyEquivalent.length &&
+               vc.tabBtnMonitor.refusesFirstResponder && vc.monMasterCheck.refusesFirstResponder &&
+               vc.monAutoCheck.refusesFirstResponder && vc.monRetryBtn.refusesFirstResponder,
+               "8a: monitor tab and controls have empty keyEquivalent and refusesFirstResponder=YES", @"");
+
+            [vc.tabBtnMonitor performClick:nil];
+            [vc.monAutoCheck performClick:nil];
+            [vc.monRetryBtn performClick:nil];
+            [vc.monMasterCheck performClick:nil];
+            Pump(0.05);
+
+            NSMutableArray<NSString *> *postSeq = [NSMutableArray array];
+            NSInteger pausePosts = 0;
+            for (NSDictionary *p in g_spy.postLog) {
+                NSString *rp = p[@"path"] ?: @"";
+                [postSeq addObject:[NSString stringWithFormat:@"POST %@", rp]];
+                if ([rp containsString:@"/api/pause"]) ++pausePosts;
+            }
+            std::printf("A4 wb postLog (%lu): %s | pause=%ld\n",
+                        (unsigned long)postSeq.count,
+                        [postSeq componentsJoinedByString:@", "].UTF8String ?: "",
+                        (long)pausePosts);
+            Ck(pausePosts == 0 && [vc.status[@"playing"] boolValue] &&
+               wbWin.firstResponder == frBefore && ![wbWin.firstResponder isKindOfClass:NSButton.class],
+               "8b: clicking monitor controls produces 0 /api/pause requests, keeps playing=YES, and keeps firstResponder",
+               [NSString stringWithFormat:@"pause=%ld playing=%d fr=%@ before=%@",
+                (long)pausePosts, [vc.status[@"playing"] boolValue], wbWin.firstResponder, frBefore]);
+            [wbWin orderOut:nil];
+            static NSWindow *sWbWin; sWbWin = wbWin; (void)sWbWin;
         }
 
         method_setImplementation(shared, origShared);

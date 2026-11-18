@@ -168,6 +168,27 @@ int main() { @autoreleasepool {
     Ck(Near([RLPPlaybackStatus statusFromJSON:@{@"ok": @YES, @"volDb": @0}].volumeDb, 0, 0.001),
        "V0 explicit zero dB is still valid", @"");
 
+    // A1: statusFromJSON 路径字段兼容 current / currentPath / path / file（并保留 current 优先级）
+    Ck([[RLPPlaybackStatus statusFromJSON:@{@"ok": @YES, @"current": @"/m/cur.flac"}].currentPath
+        isEqualToString:@"/m/cur.flac"],
+       "A1 statusFromJSON preserves current key", @"");
+    Ck([[RLPPlaybackStatus statusFromJSON:@{@"ok": @YES, @"currentPath": @"/m/cp.flac"}].currentPath
+        isEqualToString:@"/m/cp.flac"],
+       "A1 statusFromJSON accepts currentPath key", @"");
+    Ck([[RLPPlaybackStatus statusFromJSON:@{@"ok": @YES, @"path": @"/m/p.flac"}].currentPath
+        isEqualToString:@"/m/p.flac"],
+       "A1 statusFromJSON accepts path key", @"");
+    Ck([[RLPPlaybackStatus statusFromJSON:@{@"ok": @YES, @"file": @"/m/f.flac"}].currentPath
+        isEqualToString:@"/m/f.flac"],
+       "A1 statusFromJSON accepts file key", @"");
+    Ck([[RLPPlaybackStatus statusFromJSON:@{@"ok": @YES, @"current": @"", @"currentPath": @"/m/fallback.flac"}].currentPath
+        isEqualToString:@"/m/fallback.flac"],
+       "A1 statusFromJSON falls back when current is empty", @"");
+    Ck([[RLPPlaybackStatus statusFromJSON:@{@"ok": @YES, @"current": @"/m/cur.flac",
+                                            @"currentPath": @"/m/cp.flac", @"path": @"/m/p.flac", @"file": @"/m/f.flac"}].currentPath
+        isEqualToString:@"/m/cur.flac"],
+       "A1 statusFromJSON prefers non-empty current over aliases", @"");
+
     RLPVolumeMuteReset();
     Ck(Near(RLPVolumeMuteNextDb(-25.0), -120.0, 0.001), "V4 known mute remembers actual gain", @"");
     Ck(std::isnan(RLPVolumeMuteNextDb(NAN)) && RLPVolumeMuteHasRestore(),

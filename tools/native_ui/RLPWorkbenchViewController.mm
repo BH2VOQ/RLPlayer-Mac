@@ -22,6 +22,27 @@ static NSString *const kABSlotsKey = @"RLPWorkbenchABSlots";
 static NSString *const kMonMasterKey = @"RLPWorkbenchMonitorEnabled";
 static const NSInteger kABSlotCount = 4;
 
+static NSString *RLPWorkbenchStatusPath(NSDictionary * _Nullable st) {
+    if (![st isKindOfClass:[NSDictionary class]]) return @"";
+    for (NSString *key in @[@"current", @"currentPath", @"path", @"file"]) {
+        id v = st[key];
+        if ([v isKindOfClass:[NSString class]] && [(NSString *)v length] > 0) {
+            return (NSString *)v;
+        }
+    }
+    return @"";
+}
+
+static BOOL RLPWorkbenchAutoAnlEnabled(NSDictionary * _Nullable settings) {
+    id v = [settings isKindOfClass:[NSDictionary class]] ? settings[@"autoanl"] : nil;
+    if ([v isKindOfClass:[NSString class]]) {
+        NSString *sv = [(NSString *)v lowercaseString];
+        return ([sv isEqualToString:@"1"] || [sv isEqualToString:@"true"]);
+    }
+    if ([v isKindOfClass:[NSNumber class]]) return [(NSNumber *)v boolValue];
+    return NO;
+}
+
 @interface RLPWorkbenchViewController () <NSTableViewDataSource, NSTableViewDelegate>
 @property (nonatomic, strong) NSScrollView *scroll;
 @property (nonatomic, strong) NSStackView *stack;
@@ -655,7 +676,7 @@ static const NSInteger kABSlotCount = 4;
 
 - (void)refreshTrackCard {
     NSDictionary *st = self.status ?: @{};
-    NSString *path = [st[@"file"] isKindOfClass:[NSString class]] ? st[@"file"] : ([st[@"current"] isKindOfClass:[NSString class]] ? st[@"current"] : nil);
+    NSString *path = RLPWorkbenchStatusPath(st);
     NSString *title = [st[@"title"] isKindOfClass:[NSString class]] ? st[@"title"] : nil;
     NSString *artist = [st[@"artist"] isKindOfClass:[NSString class]] ? st[@"artist"] : nil;
     NSString *album = [st[@"album"] isKindOfClass:[NSString class]] ? st[@"album"] : nil;
@@ -702,6 +723,8 @@ static const NSInteger kABSlotCount = 4;
         b.font = [NSFont systemFontOfSize:13 weight:NSFontWeightSemibold];
         b.wantsLayer = YES;
         b.layer.cornerRadius = t.rSm;
+        b.keyEquivalent = @"";
+        b.refusesFirstResponder = YES;
         return b;
     };
     self.tabBtnAB = MakeTab(RLPTr(@"播放台"), @"wb.tab.ab", @selector(onTabClicked:));
@@ -2086,16 +2109,22 @@ static const NSInteger kABSlotCount = 4;
     self.monMasterCheck.identifier = @"wb.mon.master";
     self.monMasterCheck.font = t.small;
     self.monMasterCheck.state = self.monMasterEnabled ? NSControlStateValueOn : NSControlStateValueOff;
+    self.monMasterCheck.keyEquivalent = @"";
+    self.monMasterCheck.refusesFirstResponder = YES;
 
     self.monAutoCheck = [NSButton checkboxWithTitle:RLPTr(@"播放时自动分析") target:self action:@selector(onMonAutoChanged:)];
     self.monAutoCheck.identifier = @"wb.mon.auto";
     self.monAutoCheck.font = t.small;
+    self.monAutoCheck.keyEquivalent = @"";
+    self.monAutoCheck.refusesFirstResponder = YES;
 
     self.monRetryBtn = [NSButton buttonWithTitle:RLPTr(@"重试") target:self action:@selector(onMonRetry:)];
     self.monRetryBtn.bezelStyle = NSBezelStyleRounded;
     self.monRetryBtn.identifier = @"wb.mon.retry";
     self.monRetryBtn.font = t.small;
     self.monRetryBtn.hidden = YES;
+    self.monRetryBtn.keyEquivalent = @"";
+    self.monRetryBtn.refusesFirstResponder = YES;
 
     NSStackView *ctlRow = [[NSStackView alloc] init];
     ctlRow.orientation = NSUserInterfaceLayoutOrientationHorizontal;
@@ -2218,8 +2247,9 @@ static const NSInteger kABSlotCount = 4;
 - (void)onMonRetry:(id)sender {
     (void)sender;
     if (!self.monMasterEnabled) return;
-    NSString *path = self.anlPath ?: @"";
+    NSString *path = self.anlPath.length ? self.anlPath : RLPWorkbenchStatusPath(self.status);
     if (!RLPWorkbenchIsLocalAudioPath(path)) return;
+    self.anlPath = path;
     [self fetchMonitorHealthForPath:path force:YES];
 }
 
@@ -2256,10 +2286,9 @@ static const NSInteger kABSlotCount = 4;
 - (void)maybeAutoAnalyzeFromStatus {
     if (self.viewDisappeared) return;
     NSDictionary *st = self.status ?: @{};
-    NSString *path = [st[@"current"] isKindOfClass:[NSString class]] ? st[@"current"]
-                   : ([st[@"file"] isKindOfClass:[NSString class]] ? st[@"file"] : @"");
+    NSString *path = RLPWorkbenchStatusPath(st);
     const BOOL playing = [st[@"playing"] boolValue] && ![st[@"paused"] boolValue];
-    const BOOL autoOn = [[self str:@"autoanl" def:@"0"] isEqualToString:@"1"];
+    const BOOL autoOn = RLPWorkbenchAutoAnlEnabled(self.settings);
     if (RLPWorkbenchShouldAutoAnalyze(path, playing, self.monMasterEnabled, autoOn,
                                       self.anlAutoDonePath, self.anlBusy, self.anlHealth != nil)) {
         self.anlAutoDonePath = path;
@@ -2273,10 +2302,9 @@ static const NSInteger kABSlotCount = 4;
 
     // 1) 分析总开关 / 自动分析 / 重试 / 三摘要
     NSDictionary *st = self.status ?: @{};
-    NSString *path = [st[@"current"] isKindOfClass:[NSString class]] ? st[@"current"]
-                   : ([st[@"file"] isKindOfClass:[NSString class]] ? st[@"file"] : @"");
+    NSString *path = RLPWorkbenchStatusPath(st);
     const BOOL isCue = [st[@"cueStart"] respondsToSelector:@selector(doubleValue)] && [st[@"cueStart"] doubleValue] >= 0.0;
-    const BOOL autoOn = [[self str:@"autoanl" def:@"0"] isEqualToString:@"1"];
+    const BOOL autoOn = RLPWorkbenchAutoAnlEnabled(self.settings);
     const BOOL isLocal = RLPWorkbenchIsLocalAudioPath(path);
 
     if (self.monCueNote) self.monCueNote.hidden = !isCue;
@@ -3043,8 +3071,7 @@ static const NSInteger kABSlotCount = 4;
     if (seq > 0 && seq < self.statusSeq) return; // 丢弃乱序到达的旧回包
     if (seq > self.statusSeq) self.statusSeq = seq;
     self.status = [st isKindOfClass:[NSDictionary class]] ? st : @{};
-    NSString *path = [self.status[@"current"] isKindOfClass:[NSString class]] ? self.status[@"current"]
-                   : ([self.status[@"file"] isKindOfClass:[NSString class]] ? self.status[@"file"] : @"");
+    NSString *path = RLPWorkbenchStatusPath(self.status);
     if (![path isEqualToString:self.anlPath ?: @""]) {
         if (self.anlBusy && [RLPCoreClient shared].started) {
             [[RLPCoreClient shared] postJSON:@"/api/anl/cancel" body:@"" completion:nil];
@@ -3093,7 +3120,7 @@ static const NSInteger kABSlotCount = 4;
     [self refreshAB];
     [self syncQuickEqControls];
     if (self.monAutoCheck) {
-        self.monAutoCheck.state = [[self str:@"autoanl" def:@"0"] isEqualToString:@"1"] ? NSControlStateValueOn : NSControlStateValueOff;
+        self.monAutoCheck.state = RLPWorkbenchAutoAnlEnabled(self.settings) ? NSControlStateValueOn : NSControlStateValueOff;
     }
     [self maybeAutoAnalyzeFromStatus];
     if ([self.activeTab isEqualToString:@"monitor"]) [self refreshMonitor];

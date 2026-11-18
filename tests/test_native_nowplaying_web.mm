@@ -49,16 +49,46 @@ static RLPDataCompletion pendingCover;
 /// 不能只把 webStatus 塞进 KVC（那样 refresh 里的复位分支根本没跑）。
 @property (nonatomic, strong) NSMutableDictionary<NSString *, id> *fixtures;
 @property (nonatomic, assign) BOOL fakeStarted;
+@property (nonatomic, strong) NSMutableArray<NSString *> *requestLog;
+@property (nonatomic, assign) BOOL holdSettings;
+@property (nonatomic, copy, nullable) RLPJSONCompletion pendingSettings;
+@property (nonatomic, assign) BOOL holdHealth;
+@property (nonatomic, strong) NSMutableArray<RLPJSONCompletion> *pendingHealths;
+@property (nonatomic, assign) BOOL holdCancel;
+@property (nonatomic, copy, nullable) RLPJSONCompletion pendingCancel;
 @end
 @implementation RLPRequestSpy
+- (instancetype)init {
+    self = [super init];
+    if (self) {
+        _requestLog = [NSMutableArray array];
+        _pendingHealths = [NSMutableArray array];
+    }
+    return self;
+}
 - (BOOL)started{return self.fakeStarted;}
 - (void)postData:(NSString *)path body:(NSData *)body contentType:(NSString *)contentType completion:(RLPJSONCompletion)done {
     (void)contentType; g_lastDataPath = path ?: @""; g_lastDataLen = body.length;
+    [self.requestLog addObject:[NSString stringWithFormat:@"POST %@", path ?: @""]];
     if (done) done(@{ @"ok": @YES });
 }
-- (void)postJSON:(NSString *)path body:(NSString *)body completion:(RLPJSONCompletion)done {lastPath=path;lastBody=body;if([path hasPrefix:@"/api/fav?"])pendingFav=[done copy];if([path isEqualToString:@"/api/lyrics/ai"])pendingLyricAi=[done copy];}
+- (void)postJSON:(NSString *)path body:(NSString *)body completion:(RLPJSONCompletion)done {
+    lastPath=path;lastBody=body;
+    [self.requestLog addObject:[NSString stringWithFormat:@"POST %@", path ?: @""]];
+    if([path hasPrefix:@"/api/fav?"])pendingFav=[done copy];
+    if([path isEqualToString:@"/api/lyrics/ai"])pendingLyricAi=[done copy];
+    if([path isEqualToString:@"/api/anl/cancel"] && done){
+        if(self.holdCancel){self.pendingCancel=[done copy];return;}
+        done(@{@"ok":@YES});
+    }
+}
 - (void)getJSON:(NSString *)path completion:(RLPJSONCompletion)done {
+    [self.requestLog addObject:[NSString stringWithFormat:@"GET %@", path ?: @""]];
     if(holdNPRequests&&done&&[path hasPrefix:@"/api/lyrics?file="]){pendingLyrics=[done copy];return;}
+    if(self.holdSettings&&done&&[path isEqualToString:@"/api/settings"]){self.pendingSettings=[done copy];return;}
+    if(self.holdHealth&&done&&([path hasPrefix:@"/api/track/health"]||[path hasPrefix:@"/api/health"])){
+        [self.pendingHealths addObject:[done copy]];return;
+    }
     id hit=nil;
     for(NSString *key in self.fixtures) if([path hasPrefix:key]){hit=self.fixtures[key];break;}
     if(done)done([hit isKindOfClass:[NSDictionary class]]?hit:nil);
@@ -145,8 +175,10 @@ static void ck(bool ok,const char *n){printf("[%s] %s\n",ok?"PASS":"FAIL",n);if(
 - (BOOL)lyricAiBusy;
 - (void)applyLanguage;
 - (void)onToggleAnalysis:(id)sender;
+- (void)onToggleAuto:(id)sender;
 - (void)onToggleRail:(id)sender;
 - (void)onAnlExpand:(id)sender;
+- (void)onAnlReanalyze:(id)sender;
 - (void)openDataDrawer;
 - (void)closeDataDrawer;
 - (void)renderMetaChipsFromMeta:(NSDictionary *)json;
@@ -1629,6 +1661,173 @@ int main(){@autoreleasepool{
   [ud setBool:savedRailHidden forKey:@"RLPNPRailHidden"];
   [win orderOut:nil];
   static NSWindow *sN1Window; sN1Window=win; (void)sN1Window;
+ }
+
+ // ---- A1/A2/A3/A4：statusFromJSON 路径兼容 · autoanl 异步启动/不重复/切歌取消重跑/失败不暂停 · 分析控件零暂停 ----
+ {
+  RLPRequestSpy *prevSpy = spy;
+  RLPRequestSpy *anlSpy = [RLPRequestSpy new];
+  anlSpy.fakeStarted = YES;
+  spy = anlSpy;
+  Method sharedM = class_getClassMethod(RLPCoreClient.class, @selector(shared));
+  IMP origSharedImp = method_setImplementation(sharedM, (IMP)fakeShared);
+
+  auto CountPrefix = ^NSUInteger(NSString *prefix) {
+      NSUInteger n = 0;
+      for (NSString *entry in anlSpy.requestLog) {
+          if ([entry hasPrefix:prefix]) ++n;
+      }
+      return n;
+  };
+  auto HealthCount = ^NSUInteger {
+      NSUInteger n = 0;
+      for (NSString *entry in anlSpy.requestLog) {
+          if ([entry hasPrefix:@"GET /api/track/health"] || [entry hasPrefix:@"GET /api/health"]) ++n;
+      }
+      return n;
+  };
+  auto PauseCount = ^NSUInteger {
+      NSUInteger n = 0;
+      for (NSString *entry in anlSpy.requestLog) {
+          if ([entry containsString:@"/api/pause"]) ++n;
+      }
+      return n;
+  };
+
+  // A1 + A2.1：status 使用 currentPath，且 /api/settings 慢于 /api/status 返回时仍自动触发一次
+  RLPNowPlayingViewController *np2 = [RLPNowPlayingViewController new];
+  (void)np2.view;
+  np2.view.frame = NSMakeRect(0, 0, 1180, 760);
+  [np2.view layoutSubtreeIfNeeded];
+
+  anlSpy.holdSettings = YES;
+  anlSpy.fixtures = [@{
+      @"/api/status": @{ @"ok": @YES, @"playing": @YES, @"paused": @NO,
+                         @"currentPath": @"/offline/autoA.flac", @"dur": @120.0 },
+      @"/api/track/health": @{ @"ok": @YES, @"cached": @NO,
+                               @"health": @{ @"dr_available": @YES, @"dr_db": @13.4 } },
+      @"/api/lyrics": @{ @"ok": @NO },
+      @"/api/queue": @{ @"ok": @YES, @"items": @[], @"mode": @0 },
+      @"/api/fav/list": @{ @"ok": @YES, @"files": @[] },
+      @"/api/meta": @{ @"ok": @YES }
+  } mutableCopy];
+
+  [np2 refresh];
+  ck([[np2 valueForKey:@"currentPath"] isEqual:@"/offline/autoA.flac"],
+     "A1 status 只含 currentPath 时 refresh 后 currentPath 非空");
+  ck(HealthCount() == 0 && anlSpy.pendingSettings != nil,
+     "A2 settings 未落地前尚未发 /api/track/health 且已发出 /api/settings");
+
+  RLPJSONCompletion settingsDone = anlSpy.pendingSettings;
+  anlSpy.pendingSettings = nil;
+  anlSpy.holdSettings = NO;
+  if (settingsDone) settingsDone(@{ @"ok": @YES, @"kv": @{ @"autoanl": @"1", @"eq": @"", @"ir": @"" } });
+  ck(HealthCount() == 1,
+     "A2 settings(autoanl=1) 晚于 status 返回后自动触发 1 次 /api/track/health");
+
+  // 同曲二次 status 不重复分析
+  [np2 refresh];
+  ck(HealthCount() == 1, "A2 同曲二次 /api/status 不重复触发分析");
+
+  // A2.2：切歌（使用 path 字段）先 cancel 旧分析，cancel 完成后重跑新曲，且分析失败不暂停
+  anlSpy.holdHealth = YES;
+  anlSpy.fixtures[@"/api/status"] = @{ @"ok": @YES, @"playing": @YES, @"paused": @NO,
+                                       @"path": @"/offline/autoB.flac", @"dur": @110.0 };
+  [np2 refresh]; // 启动 autoB 在途（或触发 cancel 后启动 autoB）
+  ck(HealthCount() == 2 && [[np2 valueForKey:@"anlBusy"] boolValue],
+     "A2 切歌 path 字段识别 autoB 并进入分析中");
+
+  // 在 autoB 分析仍在途时再切换到 autoC（使用 file 字段 + holdCancel）
+  anlSpy.holdCancel = YES;
+  anlSpy.fixtures[@"/api/status"] = @{ @"ok": @YES, @"playing": @YES, @"paused": @NO,
+                                       @"file": @"/offline/autoC.flac", @"dur": @130.0 };
+  [np2 refresh];
+  ck(CountPrefix(@"POST /api/anl/cancel") == 1 && HealthCount() == 2,
+     "A2 切歌先发 /api/anl/cancel，未排空前不提前发新曲分析");
+
+  anlSpy.holdHealth = NO;
+  anlSpy.fixtures[@"/api/track/health"] = @{ @"ok": @NO, @"error": @"decode failed" };
+  RLPJSONCompletion cancelDone = anlSpy.pendingCancel;
+  anlSpy.pendingCancel = nil;
+  anlSpy.holdCancel = NO;
+  if (cancelDone) cancelDone(@{ @"ok": @YES });
+
+  ck(HealthCount() == 3 && ![[np2 valueForKey:@"anlBusy"] boolValue] &&
+     PauseCount() == 0 && [anlSpy.fixtures[@"/api/status"][@"playing"] boolValue],
+     "A2 cancel 完成后启动 autoC，分析失败不暂停（pause=0, playing=YES）");
+
+  // A2.3：失败后同曲再次 status 不死循环重试
+  [np2 refresh];
+  ck(HealthCount() == 3, "A2 分析失败后同曲二次 status 不重复发请求");
+
+  // A2.4：autoanl=0 不发自动分析
+  RLPNowPlayingViewController *npOff = [RLPNowPlayingViewController new];
+  (void)npOff.view;
+  NSUInteger healthBeforeOff = HealthCount();
+  anlSpy.fixtures[@"/api/settings"] = @{ @"ok": @YES, @"kv": @{ @"autoanl": @"0", @"eq": @"", @"ir": @"" } };
+  anlSpy.fixtures[@"/api/status"] = @{ @"ok": @YES, @"playing": @YES, @"paused": @NO,
+                                       @"currentPath": @"/offline/noAuto.flac", @"dur": @90.0 };
+  [npOff refresh];
+  ck(HealthCount() == healthBeforeOff && [[npOff valueForKey:@"currentPath"] isEqual:@"/offline/noAuto.flac"],
+     "A2 autoanl=0 时播放本地曲不发自动分析请求");
+
+  // A3 + A4：点击所有「分析 / 音质分析」控件前后 playing 不变且 /api/pause 请求数 = 0
+  NSUserDefaults *anlUd = [NSUserDefaults standardUserDefaults];
+  id savedAnlHiddenObj = [anlUd objectForKey:@"RLPNPAnalysisHidden"];
+  [anlUd setBool:NO forKey:@"RLPNPAnalysisHidden"];
+  [anlSpy.requestLog removeAllObjects];
+  anlSpy.fixtures[@"/api/track/health"] = @{ @"ok": @YES, @"cached": @NO,
+                                           @"health": @{ @"dr_available": @YES, @"dr_db": @14.0 } };
+  NSWindow *anlWin = [[NSWindow alloc] initWithContentRect:NSMakeRect(0, 0, 1180, 760)
+                                                 styleMask:NSWindowStyleMaskTitled backing:NSBackingStoreBuffered defer:NO];
+  anlWin.contentView = np2.view;
+  [anlWin makeFirstResponder:np2.view];
+  [np2.view layoutSubtreeIfNeeded];
+
+  NSButton *analToggle = (NSButton *)find(np2.view, @"npAnalToggle");
+  NSButton *anlAutoBtn = (NSButton *)find(np2.view, @"npAnlAuto");
+  NSButton *anlExpBtn = (NSButton *)find(np2.view, @"npAnlToggle");
+  NSButton *anlRunBtn = (NSButton *)find(np2.view, @"npAnlRun");
+  NSButton *anlReBtn = (NSButton *)find(np2.view, @"npAnlRecalculate");
+  NSView *dynCard = find(np2.view, @"anl.dyn");
+
+  ck(analToggle && anlAutoBtn && anlExpBtn && anlRunBtn && anlReBtn &&
+     !analToggle.keyEquivalent.length && !anlAutoBtn.keyEquivalent.length &&
+     !anlExpBtn.keyEquivalent.length && !anlRunBtn.keyEquivalent.length &&
+     !anlReBtn.keyEquivalent.length &&
+     analToggle.refusesFirstResponder && anlAutoBtn.refusesFirstResponder &&
+     anlExpBtn.refusesFirstResponder && anlRunBtn.refusesFirstResponder &&
+     anlReBtn.refusesFirstResponder,
+     "A3 分析区控件无空格 keyEquivalent 且 refusesFirstResponder=YES");
+
+  const BOOL playingBefore = [anlSpy.fixtures[@"/api/status"][@"playing"] boolValue];
+  if (analToggle) { [analToggle performClick:nil]; [analToggle performClick:nil]; }
+  if (anlAutoBtn) { [anlAutoBtn performClick:nil]; [anlAutoBtn performClick:nil]; }
+  if (anlExpBtn) [anlExpBtn performClick:nil];
+  if (anlRunBtn) [anlRunBtn performClick:nil];
+  if (anlReBtn) [anlReBtn performClick:nil];
+  if (dynCard) {
+      NSEvent *tapEv = [NSEvent mouseEventWithType:NSEventTypeLeftMouseDown
+                                          location:NSMakePoint(10, 10)
+                                     modifierFlags:0 timestamp:0
+                                      windowNumber:anlWin.windowNumber
+                                           context:nil eventNumber:1 clickCount:1 pressure:1.0];
+      [dynCard mouseDown:tapEv];
+  }
+  const BOOL playingAfter = [anlSpy.fixtures[@"/api/status"][@"playing"] boolValue];
+  printf("A4 np requestLog (%lu): %s | pause=%lu\n",
+         (unsigned long)anlSpy.requestLog.count,
+         [anlSpy.requestLog componentsJoinedByString:@", "].UTF8String ?: "",
+         (unsigned long)PauseCount());
+  ck(playingBefore && playingAfter && PauseCount() == 0 && anlWin.firstResponder == np2.view,
+     "A3/A4 点击全部音质分析控件后 playing 不变、pause=0 且未抢占 firstResponder");
+
+  [anlWin orderOut:nil];
+  static NSWindow *sAnlWindow; sAnlWindow = anlWin; (void)sAnlWindow;
+  if (savedAnlHiddenObj) [anlUd setObject:savedAnlHiddenObj forKey:@"RLPNPAnalysisHidden"];
+  else [anlUd removeObjectForKey:@"RLPNPAnalysisHidden"];
+  method_setImplementation(sharedM, origSharedImp);
+  spy = prevSpy;
  }
  printf("np web: %d failures\n",fail);return fail?1:0;
 }}
