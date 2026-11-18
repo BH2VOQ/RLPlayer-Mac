@@ -91,7 +91,10 @@ static const CGFloat kKnobR = 7.0;         // 滑块半径
 
 - (void)setIsLocked:(BOOL)isLocked {
     _isLocked = isLocked;
-    if (isLocked) _dragging = NO;
+    if (isLocked && _dragging) {
+        _dragging = NO;
+        if (_onDragCancel) _onDragCancel();
+    }
     _mute.enabled = !isLocked;
     [self setNeedsDisplay:YES];
 }

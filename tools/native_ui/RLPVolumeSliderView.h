@@ -57,6 +57,8 @@ double RLPVolSliderNormToDb(double norm);
 @property (nonatomic, copy, nullable) void (^onLiveChange)(double db);
 /// 松手/滚轮停止后提交。
 @property (nonatomic, copy, nullable) void (^onCommit)(double db);
+/// 拖动途中被锁定（原始 DSD 等）：取消本次拖动并让宿主把界面退回已确认值。
+@property (nonatomic, copy, nullable) void (^onDragCancel)(void);
 
 /// 几何（判据直接测，不靠看）：
 /// 归一化位置 0..1 → 视图内 x 坐标（含左右留白）。

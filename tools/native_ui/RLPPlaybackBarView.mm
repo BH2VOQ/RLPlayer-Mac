@@ -683,6 +683,11 @@ static NSString *RLPBarSeekErrorText(NSDictionary *json) {
     __weak __typeof__(self) kobs = self;
     self.volKnob.onLiveChange = ^(double db) { [kobs updateVolumeUiForDb:db]; };
     self.volKnob.onCommit = ^(double db) { [kobs commitVolumeDb:db]; };
+    self.volKnob.onDragCancel = ^{
+        __typeof__(self) s = kobs;
+        if (!s) return;
+        if (s.hasConfirmedVolume && !s.volumeWritePending) [s updateVolumeUiForDb:s.confirmedVolumeDb];
+    };
     // v3.3.11 底栏 volFloor：静音/恢复键，叠在旋钮圆盖中心（web ui_page.h:1501）。
     self.volMuteBtn = [[NSButton alloc] initWithFrame:NSZeroRect];
     self.volMuteBtn.identifier = @"volFloor";
