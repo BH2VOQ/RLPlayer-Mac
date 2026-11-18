@@ -2347,10 +2347,14 @@ static const NSInteger kABSlotCount = 4;
             NSTextField *val = RLPLabel(r[@"value"] ?: @"N/A", t.mono, t.text);
             val.identifier = [NSString stringWithFormat:@"wb.mon.%@", r[@"key"] ?: @""];
             val.lineBreakMode = NSLineBreakByTruncatingTail;
+            val.toolTip = val.stringValue;
+            // Compress diagnostics before breaking the document width constraint.
+            [val setContentCompressionResistancePriority:NSLayoutPriorityDefaultLow forOrientation:NSLayoutConstraintOrientationHorizontal];
             [line addArrangedSubview:lab];
             [line addArrangedSubview:val];
             self.monitorValueLabels[r[@"key"] ?: @""] = val;
             [self.monitorRowsStack addArrangedSubview:line];
+            [line.widthAnchor constraintLessThanOrEqualToAnchor:self.monitorRowsStack.widthAnchor].active = YES;
         }
     } else {
         for (NSDictionary<NSString *, NSString *> *r in rows) {
@@ -2358,6 +2362,7 @@ static const NSInteger kABSlotCount = 4;
             if (val) {
                 NSString *v = r[@"value"] ?: @"N/A";
                 val.stringValue = v;
+                val.toolTip = v;
                 val.textColor = [v isEqualToString:@"N/A"] ? t.mut : t.text;
             }
         }

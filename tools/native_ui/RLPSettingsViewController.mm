@@ -2705,6 +2705,9 @@ static NSString *RLPSettingsControlValueString(NSView *v) {
         RLPTr(@"越靠上优先级越高；拖动把手或点 ▲▼ 调整顺序，关掉的源完全不参与补全"), t);
     [adv addArrangedSubview:dataGroup];
     NSLayoutConstraint *dataWidthConstraint = gLastGroupWidthConstraint;
+    // 高级区默认 hidden，但 NSStackView 的 fittingSize 仍计入隐藏项；卡片宽若与 adv 等宽，
+    // 内部固定宽控件（320pt 输入框等）会把 adv 拟合宽顶到 1253，窗口再被撑到 1304。
+    dataWidthConstraint.priority = NSLayoutPriorityDefaultHigh;
     self.metaSourcesView = [[RLPMetaSourcesView alloc] initWithFrame:NSMakeRect(0, 0, 620, 200)];
     self.metaSourcesView.translatesAutoresizingMaskIntoConstraints = NO;
     [dataGroup addFullRow:self.metaSourcesView];
@@ -2718,6 +2721,7 @@ static NSString *RLPSettingsControlValueString(NSView *v) {
         RLPTr(@"任何兼容 OpenAI 的服务都能用。密钥只在本机保存，界面永不回显明文；留空表示不修改。"), t);
     [adv addArrangedSubview:aiGroup];
     NSLayoutConstraint *aiWidthConstraint = gLastGroupWidthConstraint;
+    aiWidthConstraint.priority = NSLayoutPriorityDefaultHigh;
 
     // ① 接口预设（对齐 web LLM_PROVIDERS / sp_llmprovider）——只负责「填地址」，不做连通性判断。
     self.llmProviderPopup = [[NSPopUpButton alloc] initWithFrame:NSZeroRect pullsDown:NO];
@@ -2865,7 +2869,9 @@ static NSString *RLPSettingsControlValueString(NSView *v) {
     [searchGroup addButtonRow:@[ sSave, sClear ]];
 
     // web `.meta-adv-grid`：数据源 / AI 接入 **左右两列**（>=1100px 时两列，窄屏回落单列）。
-    if (dataGroup && aiGroup && dataWidthConstraint && aiWidthConstraint) {
+    // 收起时**不做两列合并**：NSStackView 的 fittingSize 仍计入隐藏项，两列会把固有宽
+    // 顶到 1253，窗口于是被 AppKit 从 940 撑到 1304（实测 324pt 全来自这里）。
+    if (self.metaAdvancedVisible && dataGroup && aiGroup && dataWidthConstraint && aiWidthConstraint) {
         dataWidthConstraint.active = NO;
         aiWidthConstraint.active = NO;
         NSStackView *twoCol = [[NSStackView alloc] init];
@@ -2879,13 +2885,16 @@ static NSString *RLPSettingsControlValueString(NSView *v) {
         [twoCol addArrangedSubview:dataGroup];
         [twoCol addArrangedSubview:aiGroup];
         [adv insertArrangedSubview:twoCol atIndex:0];
-        [twoCol.widthAnchor constraintEqualToAnchor:adv.widthAnchor].active = YES;
+        // 只许「不大于」：隐藏的 adv 仍会被算进 fittingSize，等宽会把内部两列的
+        // 固有宽度刚性传回外层 stack，AppKit 挂载时按 fittingSize 把主窗从 940 撑到 1304。
+        [twoCol.widthAnchor constraintLessThanOrEqualToAnchor:adv.widthAnchor].active = YES;
     }
 
     gCurrentStack = savedStack;
     gCurrentGroup = savedGroup;
     [stack addArrangedSubview:adv];
-    [adv.widthAnchor constraintEqualToAnchor:stack.widthAnchor].active = YES;
+    // 同上：高级区收起时不得决定 pane/窗口宽度（实测这一条就是 +324pt 的来源）。
+    [adv.widthAnchor constraintLessThanOrEqualToAnchor:stack.widthAnchor].active = YES;
 }
 
 #pragma mark - 均衡 / 输入（已迁移的子界面）

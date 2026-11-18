@@ -6,12 +6,46 @@
 #include <cmath>
 #include <cstdio>
 
+// The target only links RLPEQGeometry.mm. Include the real views without
+// linking the workbench or localization service (only the tooltip uses RLPTr).
+#import "RLPEQFaderView.mm"
+#import "RLPTheme.mm"
+NSString *RLPTr(NSString *zh) { return zh; }
+
 static int failures;
 static void check(bool ok, const char *name) {
     printf("[%s] %s\n", ok ? "PASS" : "FAIL", name);
     if (!ok) ++failures;
 }
 static bool near(double a, double b, double tol) { return std::fabs(a - b) <= tol; }
+
+static void checkFaderFields(RLPEQFaderView *fader, CGFloat width, const char *phase) {
+    [fader setFrameSize:NSMakeSize(width, 200)];
+    [fader setNeedsLayout:YES];
+    [fader layoutSubtreeIfNeeded];
+
+    NSUInteger visible = 0;
+    NSTextField *previous = nil;
+    for (NSUInteger i = 0; i < 20; ++i) {
+        NSTextField *field = [fader valueFieldForBand:i];
+        if (field && field.superview == fader && ![field isHiddenOrHasHiddenAncestor] &&
+            NSWidth(field.frame) > 0 && NSHeight(field.frame) > 0 &&
+            NSContainsRect(fader.bounds, field.frame)) {
+            ++visible;
+        }
+        if (previous && field && NSMaxX(previous.frame) > NSMinX(field.frame)) {
+            printf("[FAIL] %s: fields %lu/%lu overlap by %.2f pt\n", phase,
+                   (unsigned long)i, (unsigned long)(i + 1),
+                   NSMaxX(previous.frame) - NSMinX(field.frame));
+            ++failures;
+        }
+        previous = field;
+    }
+    char label[192];
+    snprintf(label, sizeof(label), "%s (%.0f pt): %lu/20 visible, positive-width value fields",
+             phase, width, (unsigned long)visible);
+    check(visible == 20 && ![fader valueFieldForBand:20], label);
+}
 
 int main() { @autoreleasepool {
     [NSApplication sharedApplication];
@@ -32,6 +66,14 @@ int main() { @autoreleasepool {
     check(RLPEQNearestBandIndex(freqs, RLPEQPlotFractionForFrequency(1000.0)) == 5, "E11 1 kHz 处选中该段（不是邻段）");
     check(RLPEQNearestBandIndex(@[], 0.5) == -1, "E12 没有频段时返回 -1（不崩、不乱选）");
     check(near(RLPEQDbForPlotFraction(0.75), 12.0, 1e-6), "E13 y=0.75 对应 +12 dB（±24 量程的 3/4 高度）");
+
+    RLPEQFaderView *fader = [[RLPEQFaderView alloc] initWithFrame:NSMakeRect(0, 0, 1000, 200)];
+    fader.bandFreqs = @[ @20, @31.5, @50, @80, @125, @200, @315, @500, @630, @800,
+                         @1000, @1250, @1600, @2000, @3150, @5000, @6300, @8000, @12500, @20000 ];
+    checkFaderFields(fader, 1000, "E14 wide baseline");
+    // A 900 pt main window leaves about 602 pt for the Pro workbench fader.
+    checkFaderFields(fader, 602, "E15 Pro workbench at 900 pt");
+    checkFaderFields(fader, 1000, "E16 wide recovery");
 
     printf("eq geometry: %d failures\n", failures);
     return failures ? 1 : 0;

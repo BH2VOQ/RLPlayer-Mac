@@ -219,7 +219,15 @@ int main() {
         // 旧实现只有 4 个固定开关，没有逐源开关/排序。这里钉住真核心读注册表 + 写后读回。
         {
             RLPMetaSourcesView *mv = [[RLPMetaSourcesView alloc] initWithFrame:NSMakeRect(0, 0, 640, 300)];
-            [mv layoutSubtreeIfNeeded];
+            NSView *metaHost = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 640, 300)];
+            [metaHost addSubview:mv];
+            [NSLayoutConstraint activateConstraints:@[
+                [mv.leftAnchor constraintEqualToAnchor:metaHost.leftAnchor],
+                [mv.rightAnchor constraintEqualToAnchor:metaHost.rightAnchor],
+                [mv.topAnchor constraintEqualToAnchor:metaHost.topAnchor],
+                [mv.bottomAnchor constraintEqualToAnchor:metaHost.bottomAnchor],
+            ]];
+            [metaHost layoutSubtreeIfNeeded];
             [mv reload];
             Pump(0.8);
             NSMutableArray<NSView *> *mall = [NSMutableArray array];
@@ -243,6 +251,64 @@ int main() {
             CK(switches == (NSInteger)pitems.count, "S9c 每源一个开关",
                [NSString stringWithFormat:@"switches=%ld", (long)switches]);
             CK(reset != nil, "S9d 有「恢复默认」按钮", @"");
+
+            // 未挂窗的对象级判据：长名称在窄行中也不能挤占固定的按钮列。
+            NSTextField *longLabel = nil;
+            for (NSView *v in mall) {
+                if ([v isKindOfClass:[NSTextField class]] &&
+                    [((NSTextField *)v).stringValue isEqual:pitems.firstObject[@"name"]]) {
+                    longLabel = (NSTextField *)v;
+                    break;
+                }
+            }
+            longLabel.stringValue = [@"长来源名称" stringByPaddingToLength:96 withString:@"长来源名称" startingAtIndex:0];
+            NSView *list = FindById(mv, @"metasrc.list");
+            CGFloat buttonWidth = 0;
+            for (NSNumber *width in @[@640, @270]) {
+                const CGFloat requestedWidth = width.doubleValue;
+                [metaHost setFrameSize:NSMakeSize(requestedWidth, mv.intrinsicContentSize.height)];
+                [metaHost layoutSubtreeIfNeeded];
+                BOOL widthsMatch = list != nil && pitems.count > 0 &&
+                    ABS(NSWidth(metaHost.bounds) - requestedWidth) < 1 &&
+                    ABS(NSWidth(mv.bounds) - requestedWidth) < 1 &&
+                    ABS(NSWidth(list.bounds) - requestedWidth) < 1;
+                CGFloat firstRowWidth = 0;
+                BOOL columns = pitems.count > 1;
+                BOOL textFits = longLabel != nil;
+                CGFloat firstUp = -1, firstDown = -1;
+                for (NSDictionary *item in pitems) {
+                    NSString *sid = item[@"id"];
+                    NSView *row = FindById(mv, [@"sp_metasrcrow_" stringByAppendingString:sid]);
+                    NSView *up = FindById(row, [@"sp_metamvup_" stringByAppendingString:sid]);
+                    NSView *down = FindById(row, [@"sp_metamvdn_" stringByAppendingString:sid]);
+                    widthsMatch &= row != nil && ABS(NSWidth(row.bounds) - requestedWidth) < 1;
+                    if (!row || !up || !down) { columns = NO; textFits = NO; continue; }
+                    NSRect u = [row convertRect:up.bounds fromView:up];
+                    NSRect d = [row convertRect:down.bounds fromView:down];
+                    if (buttonWidth == 0) buttonWidth = NSWidth(u);
+                    if (firstUp < 0) {
+                        firstUp = NSMinX(u);
+                        firstDown = NSMinX(d);
+                        firstRowWidth = NSWidth(row.bounds);
+                    }
+                    columns &= ABS(NSMinX(u) - firstUp) < 1 && ABS(NSMinX(d) - firstDown) < 1 &&
+                               ABS(NSMaxX(row.bounds) - NSMaxX(d) - 10) < 1 &&
+                               buttonWidth >= 24 && ABS(NSWidth(u) - buttonWidth) < 1 &&
+                               ABS(NSWidth(d) - buttonWidth) < 1 && NSMaxX(u) < NSMinX(d);
+                    NSMutableArray<NSView *> *rowViews = [NSMutableArray array];
+                    CollectViews(row, rowViews);
+                    for (NSView *v in rowViews)
+                        if ([v isKindOfClass:[NSTextField class]])
+                            textFits &= NSMaxX([row convertRect:v.bounds fromView:v]) <= NSMinX(u) - 1;
+                }
+                NSString *detail = [NSString stringWithFormat:
+                    @"width=%@ host=%.1f view=%.1f list=%.1f firstRow=%.1f up=%.1f down=%.1f button=%.1f",
+                    width, NSWidth(metaHost.bounds), NSWidth(mv.bounds), NSWidth(list.bounds),
+                    firstRowWidth, firstUp, firstDown, buttonWidth];
+                CK(widthsMatch, "S9h-width 请求宽度传递到视图、列表和每一行", detail);
+                CK(widthsMatch && columns, "S9h 上下移按钮固定宽、两列对齐且贴右", detail);
+                CK(widthsMatch && textFits, "S9i 长文字不侵占排序按钮", detail);
+            }
 
             // 关掉第一个源 → 读回 metasrc_<id>=0
             NSString *firstId = [pitems.firstObject[@"id"] isKindOfClass:[NSString class]] ? pitems.firstObject[@"id"] : @"";

@@ -93,8 +93,9 @@
     self.msg.identifier = @"metasrc.msg";
     self.msg.maximumNumberOfLines = 2;
     self.msg.lineBreakMode = NSLineBreakByWordWrapping;
-    [[self.msg.widthAnchor constraintEqualToConstant:520] setActive:YES];
     [root addArrangedSubview:self.msg];
+    [self.msg.widthAnchor constraintLessThanOrEqualToAnchor:root.widthAnchor].active = YES;
+    [self.msg.widthAnchor constraintLessThanOrEqualToConstant:520].active = YES;
     self.rootStack = root;
 }
 
@@ -182,17 +183,13 @@
     const NSInteger n = (NSInteger)self.sources.count;
     for (NSInteger i = 0; i < n; ++i) {
         RLPMetaSource *s = self.sources[(NSUInteger)i];
-        NSStackView *row = [[NSStackView alloc] initWithFrame:NSZeroRect];
-        row.orientation = NSUserInterfaceLayoutOrientationHorizontal;
-        row.alignment = NSLayoutAttributeCenterY;
-        row.spacing = 8;
+        NSView *row = [[NSView alloc] initWithFrame:NSZeroRect];
         row.translatesAutoresizingMaskIntoConstraints = NO;
         row.wantsLayer = YES;
         row.layer.cornerRadius = 8;
         row.layer.borderWidth = 1;
         row.layer.borderColor = t.line.CGColor;
         row.layer.backgroundColor = t.field.CGColor;
-        row.edgeInsets = NSEdgeInsetsMake(6, 10, 6, 10);
         // identifier 用 **web 的模板名**（sp_metasrcrow_<id> / sp_meta_<id> / sp_metamvup_<id> …），
         // 不是自造的 metasrc.row.*：名字与 web 一致，parity 才能机械核对，
         // 而不是靠"这两坨其实是同一件事"这种口头解释。
@@ -206,13 +203,11 @@
         drag.identifier = [@"sp_metadrag_" stringByAppendingString:s.sid];
         drag.toolTip = RLPTr(@"按住拖动调整优先级");
         [[drag.widthAnchor constraintEqualToConstant:14] setActive:YES];
-        [row addArrangedSubview:drag];
 
         // 优先级序号
         NSTextField *idx = RLPLabel([NSString stringWithFormat:@"%ld", (long)(i + 1)], t.small, t.mut);
         [[idx.widthAnchor constraintEqualToConstant:18] setActive:YES];
         idx.alignment = NSTextAlignmentRight;
-        [row addArrangedSubview:idx];
 
         // 开关 + 名称 + 能力说明
         NSSwitch *sw = [[NSSwitch alloc] initWithFrame:NSZeroRect];
@@ -224,17 +219,18 @@
         // 动作分派不再依赖 identifier 的形态，而是查 sourceIdByControl（见 onToggle:）。
         sw.identifier = [@"sp_meta_" stringByAppendingString:s.sid];
         self.sourceIdByControl[sw.identifier] = s.sid;
-        [row addArrangedSubview:sw];
 
-        NSStackView *text = [[NSStackView alloc] initWithFrame:NSZeroRect];
-        text.orientation = NSUserInterfaceLayoutOrientationVertical;
-        text.alignment = NSLayoutAttributeLeading;
-        text.spacing = 1;
         NSTextField *nm = RLPLabel(s.name, t.body, t.text);
         NSTextField *cap = RLPLabel([self capabilityText:s], t.small, t.mut);
-        [text addArrangedSubview:nm];
-        [text addArrangedSubview:cap];
-        [row addArrangedSubview:text];
+        for (NSTextField *label in @[nm, cap]) {
+            [label.cell setUsesSingleLineMode:YES];
+            label.maximumNumberOfLines = 1;
+            label.lineBreakMode = NSLineBreakByTruncatingTail;
+            [label setContentCompressionResistancePriority:NSLayoutPriorityDefaultLow
+                                            forOrientation:NSLayoutConstraintOrientationHorizontal];
+        }
+        nm.toolTip = s.name;
+        cap.toolTip = cap.stringValue;
 
         // 上移 / 下移（到顶/到底禁用，web 同口径）
         NSButton *up = [NSButton buttonWithTitle:@"▲" target:self action:@selector(onMoveUp:)];
@@ -243,17 +239,41 @@
         self.sourceIdByControl[up.identifier] = s.sid;
         up.enabled = (i > 0);
         up.toolTip = RLPTr(@"上移");
-        [row addArrangedSubview:up];
         NSButton *dn = [NSButton buttonWithTitle:@"▼" target:self action:@selector(onMoveDown:)];
         dn.bezelStyle = NSBezelStyleRounded;
         dn.identifier = [@"sp_metamvdn_" stringByAppendingString:s.sid];
         self.sourceIdByControl[dn.identifier] = s.sid;
         dn.enabled = (i < n - 1);
         dn.toolTip = RLPTr(@"下移");
-        [row addArrangedSubview:dn];
 
+        for (NSView *control in @[drag, idx, sw, nm, cap, up, dn]) {
+            control.translatesAutoresizingMaskIntoConstraints = NO;
+            [row addSubview:control];
+        }
         [self.listStack addArrangedSubview:row];
-        [row.widthAnchor constraintEqualToAnchor:self.listStack.widthAnchor].active = YES;
+        // 固定右侧两列，文字只占用开关和按钮之间的空间。
+        [NSLayoutConstraint activateConstraints:@[
+            [row.widthAnchor constraintEqualToAnchor:self.listStack.widthAnchor],
+            [row.heightAnchor constraintEqualToConstant:40],
+            [drag.leftAnchor constraintEqualToAnchor:row.leftAnchor constant:10],
+            [drag.centerYAnchor constraintEqualToAnchor:row.centerYAnchor],
+            [idx.leftAnchor constraintEqualToAnchor:drag.rightAnchor constant:8],
+            [idx.centerYAnchor constraintEqualToAnchor:row.centerYAnchor],
+            [sw.leftAnchor constraintEqualToAnchor:idx.rightAnchor constant:8],
+            [sw.centerYAnchor constraintEqualToAnchor:row.centerYAnchor],
+            [dn.rightAnchor constraintEqualToAnchor:row.rightAnchor constant:-10],
+            [dn.widthAnchor constraintEqualToConstant:36],
+            [dn.centerYAnchor constraintEqualToAnchor:row.centerYAnchor],
+            [up.rightAnchor constraintEqualToAnchor:dn.leftAnchor constant:-8],
+            [up.widthAnchor constraintEqualToAnchor:dn.widthAnchor],
+            [up.centerYAnchor constraintEqualToAnchor:dn.centerYAnchor],
+            [nm.leftAnchor constraintEqualToAnchor:sw.rightAnchor constant:8],
+            [nm.rightAnchor constraintEqualToAnchor:up.leftAnchor constant:-8],
+            [cap.leftAnchor constraintEqualToAnchor:nm.leftAnchor],
+            [cap.rightAnchor constraintEqualToAnchor:nm.rightAnchor],
+            [nm.bottomAnchor constraintEqualToAnchor:row.centerYAnchor],
+            [cap.topAnchor constraintEqualToAnchor:nm.bottomAnchor],
+        ]];
     }
     // 行数变了 ⟹ 通知外层重算高度（设置卡片据此长高，不再裁行）
     [self invalidateIntrinsicContentSize];

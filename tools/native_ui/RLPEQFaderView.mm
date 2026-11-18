@@ -133,10 +133,11 @@ static const CGFloat kKnobR = 9.0;
     const NSUInteger n = _fields.count;
     if (!n) return;
     NSRect b = self.bounds;
-    // 槽距 = plot 宽 / 段数（20 段 ≈ 47.8pt）；框宽必须**小于**槽距，
-    // 否则相邻框会贴在一起（第一版写死 48 就贴上了）。
-    const CGFloat slot = n ? (NSWidth([self plotRect]) / (CGFloat)n) : 48.0;
-    const CGFloat w = MIN(44.0, MAX(30.0, slot - 4.0));
+    const NSRect plot = [self plotRect];
+    const CGFloat slot = NSWidth(plot) / (CGFloat)n;
+    // 优先缩小间隔来保留可读宽度；框宽不设会突破槽距的下限。
+    const CGFloat gap = MAX(1.0, MIN(4.0, slot - 30.0));
+    const CGFloat w = MAX(0.0, MIN(44.0, slot - gap));
     // ⚠️ 高度必须 ≥ 22：带 bezel 的 NSTextField 内部要吃掉约 8pt 边框，
     // 第一版给 18pt（净高 10pt）配 10.5pt 字号 ⟹ 文字整个被裁掉，
     // 渲染出来的框全是空的（截图实测）。字号也降到 10 以放进 44pt 宽。
@@ -144,7 +145,7 @@ static const CGFloat kKnobR = 9.0;
     const CGFloat y = NSMaxY(b) - fh - 4.0;
     for (NSUInteger i = 0; i < n; ++i) {
         NSTextField *f = _fields[i];
-        const CGFloat x = [self xForBand:i];
+        const CGFloat x = NSMinX(plot) + ((CGFloat)i + 0.5) * slot;
         f.frame = NSMakeRect(x - w / 2, y, w, fh);
     }
 }

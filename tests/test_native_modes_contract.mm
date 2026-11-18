@@ -25,6 +25,7 @@
 #import "RLPTheme.h"
 #import "RLPSupport.h"
 
+#include <cmath>
 #include <cstdio>
 
 static int g_pass = 0, g_fail = 0;
@@ -181,6 +182,132 @@ static BOOL SidebarHasTitle(RLPSidebarViewController *sb, NSString *title) {
     return NO;
 }
 
+// Forward the real methods unchanged; the latest input and call count distinguish
+// a cached layout from a fresh update (including the 1052pt construction fallback).
+static IMP g_listenLayout, g_proLayout;
+static NSUInteger g_listenCalls, g_proCalls;
+static CGFloat g_firstListenWidth, g_listenWidth, g_proWidth;
+
+static void TraceListenLayout(NSViewController *vc, SEL sel, CGFloat width) {
+    if (++g_listenCalls == 1) g_firstListenWidth = width;
+    g_listenWidth = width;
+    reinterpret_cast<void (*)(id, SEL, CGFloat)>(g_listenLayout)(vc, sel, width);
+}
+
+static void TraceProLayout(NSViewController *vc, SEL sel) {
+    ++g_proCalls;
+    g_proWidth = NSWidth(vc.view.bounds);
+    reinterpret_cast<void (*)(id, SEL)>(g_proLayout)(vc, sel);
+}
+
+static BOOL Near(CGFloat a, CGFloat b) { return std::abs(a - b) <= 1.0; }
+static BOOL SameSize(NSSize a, NSSize b) { return Near(a.width, b.width) && Near(a.height, b.height); }
+
+struct StationGeometry {
+    NSSize window, host, page, scroll, clip, document;
+    NSRect visible;
+    CGFloat headerFromClip, headerFromPage;
+};
+
+static StationGeometry TraceGeometry(RLPMainWindowController *wc, const char *stage,
+                                     const StationGeometry *before = nullptr,
+                                     BOOL expectPro = NO) {
+    [wc.window.contentView layoutSubtreeIfNeeded];
+    NSView *host = [wc valueForKey:@"pageHost"];
+    NSView *page = wc.currentContent.view;
+    StationGeometry g{};
+    g.window = wc.window.frame.size;
+    g.host = host.bounds.size;
+    g.page = page.bounds.size;
+    const BOOL isListen = [wc.currentContent isKindOfClass:RLPQuickStartViewController.class];
+    const BOOL isPro = [wc.currentContent isKindOfClass:RLPWorkbenchViewController.class];
+    if (!before && !isListen && !isPro) {
+        std::printf("  [geometry] %s window=%s pageHost=%s page=%s\n", stage,
+                    NSStringFromSize(g.window).UTF8String, NSStringFromSize(g.host).UTF8String,
+                    NSStringFromSize(g.page).UTF8String);
+        return g;
+    }
+
+    BOOL station = (before ? (expectPro ? isPro : isListen) : (isListen || isPro)) &&
+                   [wc.sidebar.selectedKey isEqualToString:@"station"] && page.superview == host;
+    NSScrollView *scroll = nil;
+    if (station) {
+        RLPPageViewController *controller = (RLPPageViewController *)wc.currentContent;
+        for (NSView *v in controller.contentView.subviews) {
+            if ([v isKindOfClass:NSScrollView.class]) { scroll = (NSScrollView *)v; break; }
+        }
+    }
+    NSClipView *clip = scroll.contentView;
+    NSStackView *doc = [scroll.documentView isKindOfClass:NSStackView.class]
+                       ? (NSStackView *)scroll.documentView : nil;
+    NSView *header = doc.arrangedSubviews.firstObject;
+    g.scroll = scroll.bounds.size;
+    g.clip = clip.bounds.size;
+    g.document = doc.bounds.size;
+    g.visible = scroll.documentVisibleRect;
+    if (header) {
+        // Conversion to window coordinates avoids assumptions about flipped views.
+        CGFloat top = NSMaxY([header convertRect:header.bounds toView:nil]);
+        g.headerFromClip = NSMaxY([clip convertRect:clip.bounds toView:nil]) - top;
+        g.headerFromPage = NSMaxY([page convertRect:page.bounds toView:nil]) - top;
+    }
+    NSString *summary = [NSString stringWithFormat:
+        @"window=%@ pageHost=%@ page=%@ scroll=%@ clip=%@ document=%@ visible=%@ "
+         "headerTop(clip/page)=%.1f/%.1f listenCalls=%lu listenFirst/latest=%.1f/%.1f proCalls=%lu proWidth=%.1f",
+         NSStringFromSize(g.window), NSStringFromSize(g.host), NSStringFromSize(g.page),
+         NSStringFromSize(g.scroll), NSStringFromSize(g.clip), NSStringFromSize(g.document),
+         NSStringFromRect(g.visible), g.headerFromClip, g.headerFromPage,
+         (unsigned long)g_listenCalls, g_firstListenWidth, g_listenWidth,
+         (unsigned long)g_proCalls, g_proWidth];
+    std::printf("  [geometry] %s %s\n", stage, summary.UTF8String);
+    if (!before) return g;
+
+    // 只判「页面填满宿主」这件布局事实。窗口是否被内容撑大是另一条**已知未修**缺陷，
+    // 由未注册的 settings-window-grow 诊断单独记录；把它混进来会让布局判据长期判红。
+    Ck(station && SameSize(g.page, g.host) && g.host.width > 0 && g.host.height > 0,
+       "G1 station page fills its host", summary);
+    Ck(scroll && doc && header && Near(g.scroll.width, g.page.width) &&
+       Near(g.document.width, g.clip.width) && Near(NSWidth(g.visible), g.clip.width) &&
+       g.clip.height > 0 && g.document.height > 0 &&
+       Near(NSHeight(g.visible), MIN(g.clip.height, g.document.height)) &&
+       NSWidth(header.bounds) > 0 && NSHeight(header.bounds) > 0 && Near(g.headerFromClip, 6.0),
+       "G2 document fits viewport horizontally; first header remains visible at 6pt", summary);
+
+    if (station && expectPro) {
+        // The rack can belong to a detached, inactive studio tab.
+        NSStackView *rack = [wc.currentContent valueForKey:@"rackStack"];
+        const auto want = g.page.width < 900 ? NSUserInterfaceLayoutOrientationVertical
+                                            : NSUserInterfaceLayoutOrientationHorizontal;
+        Ck(g_proCalls > 0 && Near(g_proWidth, g.page.width) &&
+           [rack isKindOfClass:NSStackView.class] && rack.orientation == want,
+           "G3 pro rack breakpoint uses mounted page width", summary);
+    } else if (station) {
+        CGFloat available = g.page.width - 48;
+        NSInteger want = available <= 350 ? 1 : available <= 750 ? 2 : 4;
+        NSInteger columns = [[wc.currentContent valueForKey:@"currentCardColumns"] integerValue];
+        Ck(g_listenCalls > 0 && Near(g_listenWidth, available) && columns == want,
+           "G3 listen card breakpoint uses mounted page width minus insets", summary);
+    }
+    return g;
+}
+
+// G4 的**判据本身**曾写错：它拿两次不同窗口宽下的滚动区绝对宽度做相等比较。
+// 窗口在别的页面被撑大是另一条已知缺陷（见 settings-window-grow 诊断），
+// 不能混进来当作「缓存页布局过期」的证据。这里改成证明真正要证明的事：
+// 回到缓存页后布局**跟随当前窗口**（scroll 宽 == 页宽、doc 宽 == clip 宽、页头间距不变），
+// 而不是残留上一次的尺寸。
+static void CheckStationReturn(const StationGeometry &first, const StationGeometry &back) {
+    const BOOL tracksWindow = Near(back.scroll.width, back.page.width) &&
+                              back.clip.width > 0 &&
+                              Near(back.document.width, back.clip.width);
+    Ck(tracksWindow && Near(back.headerFromClip, 6.0) && Near(back.headerFromPage, 56.0),
+       "G4 cached station relayouts to the current window (no stale viewport)",
+       [NSString stringWithFormat:@"first page=%@ scroll=%@ header=%.1f; return page=%@ scroll=%@ clip=%@ doc=%@ header=%.1f",
+        NSStringFromSize(first.page), NSStringFromSize(first.scroll), first.headerFromPage,
+        NSStringFromSize(back.page), NSStringFromSize(back.scroll), NSStringFromSize(back.clip),
+        NSStringFromSize(back.document), back.headerFromPage]);
+}
+
 int main() {
     @autoreleasepool {
         NSApplication *app = [NSApplication sharedApplication];
@@ -194,7 +321,22 @@ int main() {
 
         std::printf("=== test_native_modes_contract（聆听/专业双模式契约 · 离屏）===\n");
         RLPMainWindowController *wc = [[RLPMainWindowController alloc] init];
-        wc.window.contentView.frame = NSMakeRect(0, 0, 1280, 900);
+        // Install a compact fixture before any station navigation. Do not save this
+        // size as the user's window preference or resize between measurements.
+        [wc.window setFrameAutosaveName:@""];
+        NSRect fixtureFrame = wc.window.frame;
+        fixtureFrame.size = NSMakeSize(940, 690);
+        [wc.window setFrame:fixtureFrame display:NO];
+        Method listenLayout = class_getInstanceMethod(RLPQuickStartViewController.class,
+            NSSelectorFromString(@"updateResponsiveLayoutForWidth:"));
+        Method proLayout = class_getInstanceMethod(RLPWorkbenchViewController.class,
+            NSSelectorFromString(@"updateRackOrientation"));
+        if (!listenLayout || !proLayout) {
+            Ck(NO, "G0 station layout tracing methods exist", @"missing layout method");
+            return 1;
+        }
+        g_listenLayout = method_setImplementation(listenLayout, (IMP)TraceListenLayout);
+        g_proLayout = method_setImplementation(proLayout, (IMP)TraceProLayout);
         [wc.window.contentView layoutSubtreeIfNeeded];
         Pump(0.1);
 
@@ -221,8 +363,13 @@ int main() {
         [wc setUiMode:@"listen" persist:NO];
         g_spy.heldSettingsCompletion = nil;
 
+        const auto beforeListen = TraceGeometry(wc, "before first listen station entry");
+        Ck(beforeListen.page.width > 148 && beforeListen.page.width - 48 <= 750 && beforeListen.page.width < 900,
+           "G0 compact fixture distinguishes station breakpoints from wide defaults",
+           NSStringFromSize(beforeListen.page));
         [wc.sidebar selectKey:@"station"];
         Pump(0.1);
+        const auto firstListen = TraceGeometry(wc, "first listen station", &beforeListen);
         Ck([wc.currentContent isKindOfClass:[RLPQuickStartViewController class]] &&
            [wc.currentContent.view.identifier isEqualToString:@"page.station"],
            "C1d listen 模式下 station 打开 RLPQuickStartViewController (page.station)",
@@ -232,6 +379,7 @@ int main() {
         // ---- C2: 原子切换到 pro 模式，不发播放/音量/队列请求 ----
         [g_spy.requests removeAllObjects];
         [g_spy.posts removeAllObjects];
+        const auto beforePro = TraceGeometry(wc, "before switch to pro station");
         if (modeCtrl) {
             modeCtrl.selectedSegment = 1;
             [modeCtrl sendAction:modeCtrl.action to:modeCtrl.target];
@@ -239,6 +387,7 @@ int main() {
             [wc setUiMode:@"pro" persist:YES];
         }
         Pump(0.1);
+        const auto firstPro = TraceGeometry(wc, "first pro station after mode switch", &beforePro, YES);
 
         Ck([wc.uiMode isEqualToString:@"pro"] && modeCtrl.selectedSegment == 1,
            "C2a 切换到 pro 模式并同步顶栏分段",
@@ -281,11 +430,24 @@ int main() {
            [g_spy.requests componentsJoinedByString:@", "]);
 
         // 切回 listen，验证 pageCache 仍返回原 listenHome
-        [wc setUiMode:@"listen" persist:YES];
+        const auto beforeReturn = TraceGeometry(wc, "before switch back to listen station");
+        if (modeCtrl) {
+            modeCtrl.selectedSegment = 0;
+            [modeCtrl sendAction:modeCtrl.action to:modeCtrl.target];
+        } else {
+            [wc setUiMode:@"listen" persist:YES];
+        }
         Pump(0.1);
+        CheckStationReturn(firstListen, TraceGeometry(wc, "listen station after mode switch", &beforeReturn));
         Ck(wc.currentContent == listenHome && [topTitle.stringValue isEqualToString:RLPTr(@"聆听室")],
            "C2i 切回 listen 模式回到 RLPQuickStartViewController 且标题为「聆听室」",
            NSStringFromClass(wc.currentContent.class));
+
+        [wc.sidebar selectKey:@"albums"];
+        const auto albums = TraceGeometry(wc, "albums before sidebar return to listen station");
+        [wc.sidebar selectKey:@"station"];
+        Pump(0.1);
+        CheckStationReturn(firstListen, TraceGeometry(wc, "listen station from albums", &albums));
 
         // ---- C3: 持久化读回与过期 GET 回包 epoch 保护 ----
         g_spy.serverUiMode = @"pro";
@@ -414,8 +576,10 @@ int main() {
         NSButton *wbBtn = (NSButton *)FindById(settings.view, @"settings.openWorkbench");
         Ck(wbBtn != nil, "C5e 设置页存在打开专业工作台入口 (settings.openWorkbench)", @"nil");
         if (wbBtn) {
+            const auto settingsGeometry = TraceGeometry(wc, "settings before opening pro station");
             [wbBtn performClick:nil];
             Pump(0.05);
+            CheckStationReturn(firstPro, TraceGeometry(wc, "pro station from settings", &settingsGeometry, YES));
             Ck([wc.uiMode isEqualToString:@"pro"] &&
                [wc.sidebar.selectedKey isEqualToString:@"station"] &&
                [wc.currentContent isKindOfClass:[RLPWorkbenchViewController class]],

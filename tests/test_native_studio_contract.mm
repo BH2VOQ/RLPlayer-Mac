@@ -306,6 +306,63 @@ int main() {
                 rack ? rack.frame.size.width : -1.0, chainC ? chainC.frame.size.width : -1.0, (int)isTwoRows]);
         }
 
+        // Measure the mounted document and monitor content in the clip view's coordinates.
+        for (NSNumber *width in @[@674, @954]) {
+            [win setContentSize:NSMakeSize(width.doubleValue, 780)];
+            [vc selectStudioTab:@"ab"];
+            [win.contentView layoutSubtreeIfNeeded];
+            [vc selectStudioTab:@"monitor"];
+            [win.contentView layoutSubtreeIfNeeded];
+            NSString *bpWhy = [@"Bit-perfect unavailable: " stringByPaddingToLength:420
+                                                                         withString:@"signal processing requested; " startingAtIndex:0];
+            NSString *fbWhy = [@"Output fallback: " stringByPaddingToLength:460
+                                                               withString:@"exclusive format negotiation failed; " startingAtIndex:0];
+            [vc applyStatusPayload:@{@"bitPerfect": @"no", @"bitPerfectWhy": bpWhy, @"fallbackWhy": fbWhy} forSeq:0];
+            [win.contentView layoutSubtreeIfNeeded];
+            [vc selectStudioTab:@"eq"];
+            [win.contentView layoutSubtreeIfNeeded];
+            [vc selectStudioTab:@"monitor"];
+            [win.contentView layoutSubtreeIfNeeded];
+
+            NSView *panel = FindByIdent(vc.view, @"wb.panel.monitor");
+            NSScrollView *scroll = panel.enclosingScrollView;
+            NSClipView *clip = scroll.contentView;
+            NSView *doc = scroll.documentView;
+            NSTextField *bp = (NSTextField *)FindByIdent(panel, @"wb.mon.bitPerfect");
+            NSTextField *fallback = (NSTextField *)FindByIdent(panel, @"wb.mon.fallbackWhy");
+            NSString *prefix = [NSString stringWithFormat:@"S8_monitor_%d", width.intValue];
+            const BOOL mounted = panel && doc && clip && panel.window == win && doc.window == win &&
+                [panel isDescendantOf:doc] && IsViewVisible(panel) && NSWidth(clip.bounds) > 0 &&
+                fabs(NSWidth(win.contentView.bounds) - width.doubleValue) <= 0.5;
+            CK(mounted && bp && fallback && IsViewVisible(bp) && IsViewVisible(fallback) &&
+               [bp.stringValue containsString:bpWhy] && [fallback.stringValue isEqualToString:fbWhy],
+               [[prefix stringByAppendingString:@" 离屏挂载且重进监控后仍保留两条长原因"] UTF8String], @"");
+
+            const CGFloat viewportRight = mounted ? NSMaxX(clip.bounds) : 0;
+            const CGFloat docRight = mounted ? NSMaxX([doc convertRect:doc.bounds toView:clip]) : 0;
+            CK(mounted && NSWidth(doc.bounds) > 0 && docRight <= viewportRight + 0.5,
+               [[prefix stringByAppendingString:@" 文档右界不超出视口"] UTF8String],
+               [NSString stringWithFormat:@"docRight=%.1f viewportRight=%.1f", docRight, viewportRight]);
+
+            NSMutableArray<NSView *> *content = [NSMutableArray array];
+            CollectViews(panel, content);
+            CGFloat contentRight = 0;
+            NSView *rightmost = nil;
+            for (NSView *sub in content) {
+                if (!mounted || !IsViewVisible(sub) || NSIsEmptyRect(sub.bounds)) continue;
+                const CGFloat right = NSMaxX([sub convertRect:sub.bounds toView:clip]);
+                if (!rightmost || right > contentRight) {
+                    contentRight = right;
+                    rightmost = sub;
+                }
+            }
+            CK(mounted && rightmost && bp && fallback && NSWidth(bp.bounds) > 0 && NSWidth(fallback.bounds) > 0 &&
+               contentRight <= viewportRight + 0.5,
+               [[prefix stringByAppendingString:@" 监控内容右界不超出视口"] UTF8String],
+               [NSString stringWithFormat:@"rightmost=%@ contentRight=%.1f viewportRight=%.1f",
+                   rightmost.identifier ?: (rightmost ? NSStringFromClass(rightmost.class) : @"(none)"), contentRight, viewportRight]);
+        }
+
         // 9. Object-level real RLPCoreClient dispatch roundtrip (isolated temp dir, backend=null, volume=-120)
         NSString *root = [NSTemporaryDirectory() stringByAppendingPathComponent:
             [NSString stringWithFormat:@"rlp-studio-contract-%d", (int)getpid()]];

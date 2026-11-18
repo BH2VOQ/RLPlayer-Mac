@@ -21,6 +21,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <unistd.h>
 
 static int gFail = 0, gPass = 0;
@@ -82,10 +83,55 @@ static NSView *FindById(NSView *root, NSString *ident) {
 }
 @end
 
-int main() {
+static void TestMountedRoomGeometry() {
+    RLPQuickStartViewController *vc = [[RLPQuickStartViewController alloc] init];
+    NSWindow *win = [[NSWindow alloc] initWithContentRect:NSMakeRect(0, 0, 1180, 620)
+                                               styleMask:NSWindowStyleMaskBorderless
+                                                 backing:NSBackingStoreBuffered defer:NO];
+    NSView *host = win.contentView;
+    [host addSubview:vc.view];
+    vc.view.translatesAutoresizingMaskIntoConstraints = NO;
+    [NSLayoutConstraint activateConstraints:@[
+        [vc.view.leadingAnchor constraintEqualToAnchor:host.leadingAnchor],
+        [vc.view.trailingAnchor constraintEqualToAnchor:host.trailingAnchor],
+        [vc.view.topAnchor constraintEqualToAnchor:host.topAnchor],
+        [vc.view.bottomAnchor constraintEqualToAnchor:host.bottomAnchor],
+    ]];
+    NSMutableArray<NSView *> *views = [NSMutableArray array];
+    CollectViews(vc.view, views);
+    NSScrollView *scroll = nil;
+    for (NSView *view in views) {
+        if ([view isKindOfClass:[NSScrollView class]]) { scroll = (NSScrollView *)view; break; }
+    }
+    NSView *first = FindById(vc.view, @"room.device");
+    NSView *last = FindById(vc.view, @"room.style");
+    CK(scroll && first && last, "Mounted room has a scroll view and control cards", @"");
+    if (!scroll || !first || !last) return;
+    for (NSNumber *width in @[@1180, @674, @954, @574, @820, @360, @1180]) {
+        const CGFloat w = width.doubleValue;
+        [win setContentSize:NSMakeSize(w, 620)];
+        [host layoutSubtreeIfNeeded];
+        [host layoutSubtreeIfNeeded];
+        NSRect a = [first convertRect:first.bounds toView:scroll.documentView];
+        NSRect b = [last convertRect:last.bounds toView:scroll.documentView];
+        const BOOL sameRow = std::fabs(NSMaxY(a) - NSMaxY(b)) < 1.5;
+        const CGFloat clipWidth = NSWidth(scroll.contentView.bounds);
+        CK(std::fabs(NSWidth(scroll.frame) - w) < 1.5 &&
+           std::fabs(NSWidth(scroll.documentView.frame) - clipWidth) < 1.5 &&
+           NSWidth(a) > 0 && NSWidth(b) > 0 && NSMaxX(a) <= clipWidth + 1 && NSMaxX(b) <= clipWidth + 1 &&
+           sameRow == (w > 798.0), "Mounted room resize fits viewport and selects expected card rows",
+           [NSString stringWithFormat:@"requested=%.1f host=%@ page=%@ scroll=%@ clip=%.1f doc=%@ first=%@ last=%@",
+            w, NSStringFromRect(host.frame), NSStringFromRect(vc.view.frame), NSStringFromRect(scroll.frame), clipWidth, NSStringFromRect(scroll.documentView.frame),
+            NSStringFromRect(a), NSStringFromRect(b)]);
+    }
+}
+
+int main(int argc, char **argv) {
     @autoreleasepool {
         NSApplication *app = [NSApplication sharedApplication];
         [app setActivationPolicy:NSApplicationActivationPolicyAccessory];
+        TestMountedRoomGeometry();
+        if (argc == 2 && std::strcmp(argv[1], "--geometry-only") == 0) return gFail ? 1 : 0;
         std::printf("=== test_native_listening_contract（聆听室 v3.3.11 契约 · 离线/null 核心）===\n");
 
         NSString *root = [NSTemporaryDirectory() stringByAppendingPathComponent:
