@@ -3228,7 +3228,6 @@ static NSInteger RLPRoomResolveQueueCurrentIndex(NSDictionary * _Nullable json, 
     const NSUInteger seq = ++self.queueSeq;
     self.queueInflightSeq = seq;
     // TODO(debug): remove before commit
-    std::printf("  [DBG-QUEUE] reloadQueue seq=%lu\n", (unsigned long)seq);
     __weak __typeof__(self) weakSelf = self;
     // 队列契约：GET /api/queue?meta=1 → {items:[路径…], cues:[[cs,ce]…], metas:[{t,a,al,d}…], index/current/cur}
     [[RLPCoreClient shared] getJSON:@"/api/queue?meta=1" completion:^(NSDictionary * _Nullable json) {
@@ -3258,7 +3257,6 @@ static NSInteger RLPRoomResolveQueueCurrentIndex(NSDictionary * _Nullable json, 
     self.queueCues = @[];
     self.queueCurrentIndex = -1;
     // TODO(debug): remove before commit
-    std::printf("  [DBG-QUEUE] renderQueueEmptyState curIdx=-1\n");
     for (NSView *v in [self.queueList.arrangedSubviews copy]) {
         [self.queueList removeArrangedSubview:v];
         [v removeFromSuperview];
@@ -3332,9 +3330,7 @@ static NSInteger RLPRoomResolveQueueCurrentIndex(NSDictionary * _Nullable json, 
     const NSInteger curIdx = RLPRoomResolveQueueCurrentIndex(json, paths);
     self.queueCurrentIndex = curIdx;
     // TODO(debug): remove before commit
-    std::printf("  [DBG-QUEUE] renderQueueFromJSON items=%lu curIdx=%ld\n",
-                (unsigned long)items.count, (long)curIdx);
-
+     
     for (NSView *v in [self.queueList.arrangedSubviews copy]) {
         [self.queueList removeArrangedSubview:v];
         [v removeFromSuperview];
