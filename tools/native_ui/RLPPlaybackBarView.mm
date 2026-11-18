@@ -271,6 +271,11 @@ static void RLPSetBadgeText(NSTextField *label, NSString *text, NSColor *color, 
 /// 播放模式：**唯一真相源**是 /api/playmode 的 mode（0=顺序 1=列表循环 2=单曲循环 3=随机）。
 /// /api/repeat 与 /api/shuffle 在核心侧只是它的派生写入口，没有独立存储 ——
 /// 所以 UI 也只读写 mode 一个值，不自己维护第二份状态（否则两处真相必然打架）。
+///
+/// 但这个值只装**已经被后端确认**的模式：按钮按它画、循环键按它推进。
+/// 一次写入从发出到回包之间，目标只存在 modeWriteTarget，绝不冒充 playMode（先提交后画）——
+/// 旧实现把目标直接写进 playMode 再发请求，于是 ≤2 s 内连点循环键会按"后端还没确认、
+/// 甚至已经被拒绝"的模式继续推进（0→1 失败后面板停在 1，再点就发 2，界面与后端分叉）。
 @property (nonatomic, assign) NSInteger playMode;
 @property (nonatomic, strong) NSButton *shuffleBtn;
 @property (nonatomic, strong) NSButton *repeatBtn;
@@ -279,6 +284,11 @@ static void RLPSetBadgeText(NSTextField *label, NSString *text, NSColor *color, 
 @property (nonatomic, assign) NSInteger modeBeforeShuffle;
 /// 播放模式的读取节流计数（每 4 次状态轮询读一次 /api/playmode）。
 @property (nonatomic, assign) NSInteger modePollTick;
+/// 在途模式写入（**尚未**被回包确认）。确认窗口 = kRLPBarModeConfirmSeconds：
+/// 窗口内连点一律不推进、不重画；窗口过后按失败结算（画回 playMode、迟到回包作废）。
+@property (nonatomic, assign) BOOL modeWritePending;
+@property (nonatomic, assign) NSInteger modeWriteTarget;
+@property (nonatomic, assign) NSTimeInterval modeWriteDeadline;
 @property (nonatomic, assign) NSUInteger statusEpoch;
 @property (nonatomic, assign) BOOL statusInflight;
 @property (nonatomic, assign) NSUInteger playModeEpoch;
@@ -291,6 +301,9 @@ static void RLPSetBadgeText(NSTextField *label, NSString *text, NSColor *color, 
 @property (nonatomic, assign) BOOL lyricDrawerActive;
 - (void)commitVolumeDb:(double)db completion:(void (^ _Nullable)(BOOL))completion;
 - (void)refreshLyricButton;
+- (void)applyPlayMode:(NSInteger)mode;
+- (void)refreshPlayModeFromBackend;
+- (void)settleModeWriteIfExpired;
 
 /// 进度交互状态机。三条缺陷的共同根因是"进度行没有单一真相源"：
 ///   ① 拖动中旧轮询拉回：旧实现只把**滑杆**挡在拖动判断里，两端时间标签在判断之前
@@ -1007,6 +1020,14 @@ static double RLPVolDbToPos(double db) {
 //   0 顺序（播到末尾停） 1 列表循环 2 单曲循环 3 随机
 // 五键布局只有一个可见模式键：0 → 1 → 2 → 3 → 0。
 // toggleShuffle: 仍保留原调用语义，所有入口只写 /api/playmode 一个真相源。
+
+/// 模式写入的确认窗口（2 s）。取这个值的两条依据：
+///   · 状态轮询 500 ms 一拍（-startPolling），播放模式回读又节流到每 4 拍（≈2 s，
+///     见 -fetchStatusForced）⟹ 正常写入 2 s 内必然有一次"确认"落地；
+///   · 超过 2 s 仍确认不了（丢回包，或核心关闸后 completion 直接被吞掉，RLPCoreClient.mm:129-143），
+///     就按**失败**结算：画回已确认模式、作废迟到回包 —— 而不是把未确认目标留在界面上。
+static const NSTimeInterval kRLPBarModeConfirmSeconds = 2.0;
+
 - (void)toggleShuffle:(id)sender {
     if (self.playMode == 3) {
         [self applyPlayMode:self.modeBeforeShuffle];
@@ -1017,6 +1038,8 @@ static double RLPVolDbToPos(double db) {
 }
 
 - (void)toggleRepeat:(id)sender {
+    // 推进的起点只能是**已确认**的 playMode；一次提交还没被回包确认时，
+    // applyPlayMode 会直接忽略这次点击（否则 ≤2 s 连点会按未确认模式推进）。
     NSInteger next = 1;
     switch (self.playMode) {
         case 0: next = 1; break;   // 顺序 → 列表循环
@@ -1027,24 +1050,89 @@ static double RLPVolDbToPos(double db) {
     [self applyPlayMode:next];
 }
 
+/// 在途模式写入的超时结算：撤销"在途"，按钮仍画已确认的 playMode。
+/// 为什么需要兜底：RLPCoreClient 的 completion 在关闸后**不回调**（RLPCoreClient.mm:129-143），
+/// 网络层也可能整包丢失 ⟹ 少了这一条，一次丢回包就会让循环键永远停在"在途"上（连点永远不推进）。
+- (void)settleModeWriteIfExpired {
+    if (!self.modeWritePending) return;
+    if ([NSDate timeIntervalSinceReferenceDate] < self.modeWriteDeadline) return;
+    ++self.playModeEpoch;        // 迟到回包一律作废（它可能带着一个用户此刻已不认可的模式）
+    self.modeWritePending = NO;
+    self.modeWriteTarget = -1;
+    self.modeWriteDeadline = 0;
+    [self refreshModeButtons];   // 画的是 playMode：这次写入自始至终没有被画过
+}
+
 - (void)applyPlayMode:(NSInteger)mode {
-    self.playMode = mode;
-    ++self.playModeEpoch;
-    [self refreshModeButtons];
+    // 三道**不改界面**的准入，任何一条不过就不提交、也不重画：
+    //   ① 只接受后端认得的 0..3（rtaweb.cpp:11429-11457 的四种队列模式；
+    //      越界值也不许落进 refreshModeButtons 的词表索引）；
+    //   ② 超时未确认的在途写入先按失败结算；
+    //   ③ 在途写入未确认 ⟹ 这次连点不推进（见下）。
+    if (mode < 0 || mode > 3) return;
+    [self settleModeWriteIfExpired];
+    if (self.modeWritePending) {
+        // 在途写入还没被确认：playMode 仍是已确认的旧模式。按它推进会重复发同一个目标；
+        // 按 modeWriteTarget 推进就是"按未确认模式推进"（本缺陷）。两个都不做：忽略这次点击。
+        // 等回包（ok → 前进到后端确认的模式；失败 → 回退旧模式）或 2 s 结算之后，
+        // 下一次点击自然从已确认模式出发。
+        return;
+    }
+    // 没有核心就没有可提交的对象：不发请求，也**不许**先把按钮画成新模式
+    //（旧实现在这里就把 playMode 改成目标、重画按钮，于是"先画后提交"在离线态也成立）。
     if (![RLPCoreClient shared].started) return;
+
+    const NSInteger confirmedMode = self.playMode;   // 失败必须回到它（这里是唯一的已确认真相）
+    ++self.playModeEpoch;
     const NSUInteger modeSeq = self.playModeEpoch;
+    self.modeWritePending = YES;
+    self.modeWriteTarget = mode;
+    self.modeWriteDeadline = [NSDate timeIntervalSinceReferenceDate] + kRLPBarModeConfirmSeconds;
+
+    // **先提交、后画**（这个顺序就是缺陷本身）：回包抵达之前，已确认的 playMode 与按钮一个字都不改。
+    // 旧实现（改动前的 1031-1033 行）先把 playMode 写成目标值、重画按钮，然后才发这个 POST ⟹
+    //   ① 按钮在请求发出之前就显示新模式（失败时用户已经"看到"它生效了）；
+    //   ② 失败分支只有一次状态回读，playMode 本身不回退 ⟹ 没生效的模式从此留在界面上；
+    //   ③ 下一拍 toggleRepeat 以它为起点推进 ⟹ ≤2 s 连点会累积出后端从未到达的模式。
     __weak __typeof__(self) weakSelf = self;
     [[RLPCoreClient shared] postJSON:[NSString stringWithFormat:@"/api/playmode?mode=%ld", (long)mode]
                                 body:nil
                           completion:^(NSDictionary * _Nullable json) {
         __typeof__(self) self_ = weakSelf;
-        if (!self_ || modeSeq != self_.playModeEpoch) return;
+        if (!self_) return;
+        // 已被更新的意图取代 / 已超时结算过：迟到回包一个字都不许改
+        //（同口径见 commitSeekFrac 的 seekSeq）。
+        if (modeSeq != self_.playModeEpoch || !self_.modeWritePending || self_.modeWriteTarget != mode) return;
+        self_.modeWritePending = NO;
+        self_.modeWriteTarget = -1;
+        self_.modeWriteDeadline = 0;
+        // 结算是全序分水岭：在此之前发出的 /api/playmode 回读都可能读到**写入之前**的值
+        //（dispatch 无全局请求锁，tools/rtaweb.cpp:15662-15666；GET/POST 又分走 _ioQueue/_writeQueue，
+        //  RLPCoreClient.mm:129-144）⟹ 递增 epoch 让它们一律作废；之后发出的回读用新 epoch 照常生效。
+        // 少了这一步，一次成功写入后可能被一拍"旧读"画回旧模式（最长要等下一条 ≈2 s 的回读才纠正，
+        // 而这段时间里的连点会按旧值推进）。
+        ++self_.playModeEpoch;
         if (json && [json[@"ok"] boolValue]) {
-            [self_ refreshModeButtons];
-        } else {
-            // 失败就回读一次：别让按钮显示一个没生效的模式
-            [self_ fetchStatusForced:YES];
+            // 回包带的是**后端真正生效的** mode（rtaweb.cpp:11454-11457 读 clamp 之后的 g_q.mode）：
+            // 用它而不是我们的请求值，万一被后端纠正也不会画出没生效的目标；
+            // 缺 mode 键（离线桩只回 ok）时按请求值处理。
+            id appliedObj = json[@"mode"];
+            const NSInteger applied = [appliedObj respondsToSelector:@selector(integerValue)]
+                                    ? [appliedObj integerValue] : mode;
+            self_.playMode = (applied >= 0 && applied <= 3) ? applied : mode;   // 确认后才成为当前模式
+            [self_ refreshModeButtons];   // 唯一的重画点：这时画的一定是已确认真相
+            return;
         }
+        // 失败必须**回退旧模式**并重画（旧实现在这里只 fetchStatusForced，playMode 留在没生效的
+        // 值上 ⟹ 按钮与后端分叉，且连点继续按它推进）。显式写回而不是"反正没改过所以还是它"：
+        // 失败回退是需要被证的行为，不是巧合。
+        self_.playMode = confirmedMode;
+        [self_ refreshModeButtons];
+        // 状态轮询照旧触发一次（与 commitSeekFrac 失败分支同一纪律：先退回已确认真值，
+        // 再由轮询核实）。json=nil 同时表示"请求没到后端"和"后端没回 JSON"（RLPCoreClient.mm:129-143），
+        // 后端也可能其实写成了 ⟹ 下一次 /api/playmode 回读（≤2 s 节流，见 -fetchStatusForced）
+        // 会把它核实过来；在那之前界面停在已确认的旧模式，而不是假装成功。
+        [self_ fetchStatusForced:YES];
     }];
 }
 
@@ -1059,6 +1147,28 @@ static double RLPVolDbToPos(double db) {
     self.repeatBtn.image=[NSImage imageWithSystemSymbolName:symbol accessibilityDescription:nil];
     self.repeatBtn.contentTintColor=self.playMode==0?t.mut:t.accent;
     self.repeatBtn.toolTip=RLPTr(@[@"顺序播放",@"列表循环",@"单曲循环",@"随机播放"][self.playMode]);
+}
+
+/// /api/playmode 的唯一读入口（节流轮询用）。
+/// 只在**已确认**真值上落笔：在途写入未确认时不画 —— 这拍读到的可能还是写入之前的值
+/// （GET 走 _ioQueue、POST 走 _writeQueue，两队列并发，见 RLPCoreClient.mm:129-144），
+/// 画上去会让按钮在确认前后抖动，并让随后的连点按一个已被取代的值推进。
+- (void)refreshPlayModeFromBackend {
+    const NSUInteger modeSeq = self.playModeEpoch;
+    __weak __typeof__(self) weakSelf = self;
+    [[RLPCoreClient shared] getJSON:@"/api/playmode" completion:^(NSDictionary * _Nullable json) {
+        __typeof__(self) self_ = weakSelf;
+        if (!self_) return;
+        if (modeSeq != self_.playModeEpoch) return;   // 有更新的写入/结算：旧回读作废
+        if (self_.modeWritePending) return;           // 在途写入未确认：读到的是写前的值，不许画
+        id m = json[@"mode"];
+        if (![m respondsToSelector:@selector(integerValue)]) return;
+        const NSInteger mode = [m integerValue];
+        if (mode < 0 || mode > 3) return;             // 越界值不进 refreshModeButtons 的词表索引
+        if (mode == self_.playMode) return;           // 没变就不动 UI（避免闪烁）
+        self_.playMode = mode;
+        [self_ refreshModeButtons];
+    }];
 }
 
 #pragma mark - 轮询
@@ -1187,6 +1297,9 @@ static double RLPVolDbToPos(double db) {
 
 - (void)fetchStatusForced:(BOOL)forced {
     if (!forced && self.statusInflight) return;
+    // 2 s 兜底：每一拍都结算一次"漏掉的模式写入"（见 kRLPBarModeConfirmSeconds）——
+    // 用户不再点按的时候，也要有人把在途状态收掉，而不是等下一次点击才发现它早该失败。
+    [self settleModeWriteIfExpired];
     const NSUInteger seq = ++self.statusEpoch;
     const uint64_t actionEpoch = RLPPlaybackActionEpoch();
     self.statusInflight = YES;
@@ -1204,18 +1317,7 @@ static double RLPVolDbToPos(double db) {
     // 节流到每 4 次轮询（约 2 s）一次：模式是低频状态，没必要跟 500 ms 的进度一起刷。
     if (++self.modePollTick >= 4) {
         self.modePollTick = 0;
-        const NSUInteger modeSeq = self.playModeEpoch;
-        [[RLPCoreClient shared] getJSON:@"/api/playmode" completion:^(NSDictionary * _Nullable json) {
-            __typeof__(self) self_ = weakSelf;
-            if (!self_ || modeSeq != self_.playModeEpoch) return;
-            id m = json[@"mode"];
-            if (![m respondsToSelector:@selector(integerValue)]) return;
-            NSInteger mode = [m integerValue];
-            if (mode < 0 || mode > 3) return;
-            if (mode == self_.playMode) return;      // 没变就不动 UI（避免闪烁）
-            self_.playMode = mode;
-            [self_ refreshModeButtons];
-        }];
+        [self refreshPlayModeFromBackend];
     }
 }
 

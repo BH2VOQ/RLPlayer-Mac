@@ -264,6 +264,9 @@
 - (void)resetTargetCurvePreview;
 @property (nonatomic, strong) NSPopUpButton *presetPop;
 @property (nonatomic, strong) NSTextField *presetName;
+/// 预设下拉**还没加载到目标项**时的暂存选择：rlp_restoreDraftState 先记下来，
+/// loadPresetList 完成块再接住（否则恢复会选到第 0 项 = 预设草稿被冲掉）。
+@property (nonatomic, copy, nullable) NSString *pendingPresetTitle;
 @property (nonatomic, strong) NSTextField *opraQuery;
 /// OPRA 段独立容器（web「耳机 EQ（OPRA 校准预设）」那张卡的卡体）：
 /// 设置页会把它整段搬进第二张卡片；独立使用时仍挂在 self.stack 里。
@@ -350,6 +353,25 @@
 - (void)mouseExited:(NSEvent *)event  { (void)event; [self setChipHovered:NO]; }
 @end
 
+#pragma mark - 宿主重建时的草稿存取（切页签 / 切语言 / 切主题）
+
+/// 见 RLPEqualizerView.h 之外的宿主接缝：设置页在 EQ 控件被 isEqOwnedView 跳过普通草稿快照后，
+/// 用这两个方法在拆卸/重挂前后来回搬状态。实现在本文件末尾。
+@interface RLPEqualizerView (RLPDraftState)
+- (NSDictionary<NSString *, id> *)rlp_captureDraftState;
+- (void)rlp_restoreDraftState:(NSDictionary<NSString *, id> *)state;
+@end
+
+/// 控件**此刻的可见文本**：正在编辑时文字还在 field editor 里（stringValue 是旧值）。
+/// 设置页的普通草稿快照也是这个口径（RLPSettingsViewController.mm 的
+/// snapshotPendingPaneDraftsForTab: 读 tf.currentEditor）；EQ 控件被那张表跳过，必须自己读。
+static NSString *RLPEQLiveFieldText(NSTextField *field) {
+    if (!field) return @"";
+    NSText *editor = field.currentEditor;
+    if (editor) return editor.string ?: @"";
+    return field.stringValue ?: @"";
+}
+
 @implementation RLPEqualizerView {
     NSInteger _rowValueRefreshes;
 }
@@ -401,6 +423,11 @@
     return self.applyTimer != nil && self.applyTimer.isValid;
 }
 
+/// 注意：这里的 preamp 项只在**控件还有 window 且正在编辑**时成立；视图被摘下窗口
+///（切页签 / 切语言 / 切主题重建）后 RLPTextFieldIsEditing 恒为 NO，presetName /
+/// OPRA 查询框 / 单段 Q 更是完全不在判据里。这几类 field editor 文本由下面的
+/// rlp_captureDraftState / rlp_restoreDraftState 在拆卸前后搬运，restore 会把确实改过的
+/// preamp / Q 提交成正式草稿（推进代次并续 260ms 定时器），不再依赖编辑态。
 - (BOOL)hasPendingDraft {
     return [self hasActiveApplyTimer]
         || self.peqWriteInFlight > 0
@@ -1177,12 +1204,22 @@ static NSString *RLPEQTypeCodeNormalized(id raw) {
         NSArray *items = [json[@"presets"] isKindOfClass:[NSArray class]] ? json[@"presets"]
                        : ([json[@"items"] isKindOfClass:[NSArray class]] ? json[@"items"] : nil);
         if (!items) return;
+        // 列表重建**不能**顺手丢掉用户的预设草稿：保留当前选中项（或 restore 暂存的标题），
+        // 列表里仍有同名项就恢复选中。旧实现 removeAllItems 后默认选第 0 项 ⟹ 任何 reload
+        //（切语言 / 切主题重建、从别的页面回到设置触发 activate）都会把「选了但没点加载」
+        // 的预设冲掉 —— 用户看到的就是预设草稿丢失。
+        NSString *keepTitle = self_.pendingPresetTitle.length
+            ? self_.pendingPresetTitle : (self_.presetPop.titleOfSelectedItem ?: @"");
+        self_.pendingPresetTitle = nil;
         [self_.presetPop removeAllItems];
         for (id x in items) {
             NSString *nm = [x isKindOfClass:[NSString class]] ? x
                          : ([x isKindOfClass:[NSDictionary class]] ? x[@"name"] : nil);
             if (nm.length) [self_.presetPop addItemWithTitle:nm];
         }
+        const NSInteger keepIndex = keepTitle.length
+            ? [self_.presetPop indexOfItemWithTitle:keepTitle] : -1;
+        if (keepIndex >= 0) [self_.presetPop selectItemAtIndex:keepIndex];
     }];
 }
 
@@ -1539,6 +1576,192 @@ static NSArray<NSDictionary *> *RLPOpraFilter(NSArray<NSDictionary *> *index, NS
     }
     if (n > 1) total += self.stack.spacing * (n - 1);
     return ceil(total);
+}
+
+#pragma mark - 宿主重建时的草稿存取（切页签 / 切语言 / 切主题时调用）
+
+/// 快照只搬**用户态**，不搬后端真值（curvePoints / fs / status 会由 reload 重新拉）：
+///   - bands / bypass / preamp：用户改过、POST 回包前只存在于本视图里的 PEQ 参数；
+///   - presetName / presetPop 选中项：用户选了或打了名字但还没点「加载/保存」的预设草稿；
+///   - opra.query / 已选型号与预设 / 已应用 id：点了卡片但还没点「应用到 EQ」的 OPRA 草稿；
+///   - inspector 选中段与 Q 输入框（field editor 里没按 Enter 的文字也算）；
+///   - peqDraftEpoch / peqSyncedDraftEpoch / peqReqSeq：代次守卫，见 restore ①。
+- (NSDictionary<NSString *, id> *)rlp_captureDraftState {
+    NSMutableDictionary<NSString *, id> *state = [NSMutableDictionary dictionary];
+    NSMutableArray<NSDictionary *> *bands = [NSMutableArray arrayWithCapacity:self.bands.count];
+    for (NSDictionary *b in self.bands) [bands addObject:[b copy]];
+    state[@"bands"] = bands;
+    state[@"bypassOn"] = @(self.bypass.state == NSControlStateValueOn);
+    // field editor 里的文字（没按 Enter 的 preamp / Q / 预设名 / OPRA 查询）也要带上。
+    state[@"preampText"] = RLPEQLiveFieldText(self.preamp);
+    state[@"preampBase"] = self.preamp.stringValue ?: @"";
+    state[@"presetNameText"] = RLPEQLiveFieldText(self.presetName);
+    state[@"presetTitle"] = self.presetPop.titleOfSelectedItem ?: @"";
+    state[@"opraQueryText"] = RLPEQLiveFieldText(self.opraQuery);
+    state[@"inspectorIndex"] = @(self.inspector.bandIndex);
+    state[@"inspectorQText"] = self.inspector.bandIndex >= 0
+        ? RLPEQLiveFieldText(self.inspector.qField) : @"";
+    state[@"inspectorQBase"] = self.inspector.bandIndex >= 0
+        ? [NSString stringWithFormat:@"%.2f", self.inspector.q] : @"";
+    // 代次守卫：这三个数必须跟着草稿一起走，否则新实例的 [reload]（sentDraftEpoch=0）
+    // 回来时会把刚灌回去的草稿当成"最新"而覆盖掉。
+    state[@"draftEpoch"] = @(self.peqDraftEpoch);
+    state[@"syncedEpoch"] = @(self.peqSyncedDraftEpoch);
+    state[@"reqSeq"] = @(self.peqReqSeq);
+    state[@"epochPending"] = @((self.peqDraftEpoch != self.peqSyncedDraftEpoch) ||
+                               [self hasActiveApplyTimer] || self.peqWriteInFlight > 0);
+    state[@"opraItems"] = self.opraItems ?: @[];
+    state[@"opraPresets"] = self.opraPresets ?: @[];
+    state[@"opraSelectedProductIndex"] = @(self.opraSelectedProductIndex);
+    state[@"opraSelectedPresetIndex"] = @(self.opraSelectedPresetIndex);
+    state[@"appliedProductId"] = self.appliedProductId ?: @"";
+    state[@"appliedPresetId"] = self.appliedPresetId ?: @"";
+    return state;
+}
+
+- (void)rlp_restoreDraftState:(NSDictionary<NSString *, id> *)state {
+    if (![state isKindOfClass:[NSDictionary class]]) return;
+    const NSUInteger currentDraft = self.peqDraftEpoch;
+    const NSUInteger savedDraft = [state[@"draftEpoch"] isKindOfClass:[NSNumber class]]
+        ? [(NSNumber *)state[@"draftEpoch"] unsignedIntegerValue] : 0;
+    const NSUInteger savedSynced = [state[@"syncedEpoch"] isKindOfClass:[NSNumber class]]
+        ? [(NSNumber *)state[@"syncedEpoch"] unsignedIntegerValue] : 0;
+    const BOOL savedPending = [state[@"epochPending"] isKindOfClass:[NSNumber class]]
+        ? [(NSNumber *)state[@"epochPending"] boolValue] : NO;
+
+    // ① 代次守卫：只有快照里确实有未提交代次时才接管编号。接管后，restore 之前发出的
+    //    [reload]（sentDraftEpoch 仍为 0）回来时 isLatest 为假 ⟹ 后端旧值不会覆盖草稿；
+    //    无草稿时不动代次，正常 readback 仍能落地。同一条实例重挂时这些数原样不变。
+    if (savedPending) {
+        if (savedDraft > self.peqDraftEpoch) self.peqDraftEpoch = savedDraft;
+        if (savedSynced > self.peqSyncedDraftEpoch) self.peqSyncedDraftEpoch = savedSynced;
+        if (self.peqSyncedDraftEpoch > self.peqDraftEpoch)
+            self.peqSyncedDraftEpoch = self.peqDraftEpoch;
+        const NSUInteger savedReqSeq = [state[@"reqSeq"] isKindOfClass:[NSNumber class]]
+            ? [(NSNumber *)state[@"reqSeq"] unsignedIntegerValue] : 0;
+        if (savedReqSeq > self.peqReqSeq) self.peqReqSeq = savedReqSeq;
+    }
+
+    // ② 频段模型：只在**确有未提交代次**、或视图还是空的新实例时覆盖。
+    //    无草稿的同一条实例重挂时不能拿旧快照盖掉离开期间 reload 回来的后端真值
+    //   （否则在工作台里重设 Flat 后切回 EQ，看到的是离开前那份旧曲线）。
+    const BOOL takeModel = savedPending || self.bands.count == 0;
+    NSArray *bandsState = [state[@"bands"] isKindOfClass:[NSArray class]] ? state[@"bands"] : nil;
+    if (bandsState && takeModel && savedDraft >= currentDraft) {
+        NSMutableArray<NSMutableDictionary *> *bands = [NSMutableArray arrayWithCapacity:bandsState.count];
+        for (id b in bandsState) {
+            if ([b isKindOfClass:[NSDictionary class]])
+                [bands addObject:[NSMutableDictionary dictionaryWithDictionary:b]];
+        }
+        if (bands.count) {
+            self.bands = bands;
+            [self syncViewsFromBands];
+        }
+    }
+
+    // ③ 旁路 / 前级 / 预设名 / OPRA 查询
+    if (takeModel && [state[@"bypassOn"] isKindOfClass:[NSNumber class]])
+        self.bypass.state = [(NSNumber *)state[@"bypassOn"] boolValue] ? NSControlStateValueOn
+                                                                       : NSControlStateValueOff;
+    NSString *preampText = [state[@"preampText"] isKindOfClass:[NSString class]] ? state[@"preampText"] : nil;
+    NSString *preampBase = [state[@"preampBase"] isKindOfClass:[NSString class]] ? state[@"preampBase"] : nil;
+    // 前级文本只有两种值得写回：新实例/有草稿（takeModel），或用户确实在 field editor 里改过
+    //（文字没按 Enter 落回 stringValue）。后者是 PEQ 参数草稿，恢复后按同一代次口径提交
+    //（这里只加代次，真正 POST 统一在方法末尾续定时器；否则下一次 reload 会把它覆盖回后端值）。
+    BOOL preampEdited = NO;
+    if (preampText.length && preampBase.length) {
+        const double a = [preampText doubleValue];
+        const double b = [preampBase doubleValue];
+        preampEdited = isfinite(a) && isfinite(b) ? (fabs(a - b) > 1e-9)
+                                                 : ![preampText isEqualToString:preampBase];
+    }
+    if (preampText && (takeModel || preampEdited)) self.preamp.stringValue = preampText;
+    if (preampEdited && [RLPCoreClient shared].started && !self.loading) {
+        ++self.peqDraftEpoch;
+    }
+    if ([state[@"presetNameText"] isKindOfClass:[NSString class]])
+        self.presetName.stringValue = state[@"presetNameText"];
+    if ([state[@"opraQueryText"] isKindOfClass:[NSString class]])
+        self.opraQuery.stringValue = state[@"opraQueryText"];
+    NSString *presetTitle = [state[@"presetTitle"] isKindOfClass:[NSString class]] ? state[@"presetTitle"] : nil;
+    if (presetTitle.length) {
+        const NSInteger idx = [self.presetPop indexOfItemWithTitle:presetTitle];
+        if (idx >= 0) [self.presetPop selectItemAtIndex:idx];
+        else self.pendingPresetTitle = presetTitle;   // 列表还没到：交给 loadPresetList 接住
+    }
+
+    // ④ 单段检查器：选中段 + field editor 里没按 Enter 的 Q
+    NSNumber *inspIndex = [state[@"inspectorIndex"] isKindOfClass:[NSNumber class]]
+        ? state[@"inspectorIndex"] : nil;
+    if (inspIndex) [self syncInspectorForBand:inspIndex.integerValue];
+    NSString *qText = [state[@"inspectorQText"] isKindOfClass:[NSString class]] ? state[@"inspectorQText"] : nil;
+    NSString *qBase = [state[@"inspectorQBase"] isKindOfClass:[NSString class]] ? state[@"inspectorQBase"] : nil;
+    if (qText.length && self.inspector.bandIndex >= 0 &&
+        self.inspector.bandIndex < (NSInteger)self.bands.count) {
+        const double qRaw = [qText doubleValue];
+        double qv = isfinite(qRaw) ? qRaw : self.inspector.q;
+        qv = MAX(0.1, MIN(20.0, qv));
+        // 判定「用户确实在 field editor 里改过 Q」必须拿**快照时的模型值**（qBase）比，
+        // 不能跟恢复后的当前模型比：若离开期间外部 reload 改了这段 Q，后者会把
+        // 「没改过、只是旧值快照」也误判成草稿，回切时反而把外部新值顶回去。
+        BOOL qDraftAtCapture = NO;
+        if (qBase.length) {
+            const double base = [qBase doubleValue];
+            qDraftAtCapture = isfinite(qRaw) && isfinite(base) ? (fabs(qRaw - base) > 1e-9)
+                                                               : ![qText isEqualToString:qBase];
+        }
+        if (qDraftAtCapture) {
+            self.inspector.qField.stringValue = qText;
+            if ([RLPCoreClient shared].started && !self.loading) {
+                self.bands[(NSUInteger)self.inspector.bandIndex][@"q"] = @(qv);
+                self.inspector.q = qv;
+                self.inspector.qField.stringValue = qText;
+                ++self.peqDraftEpoch;
+            }
+        } else if (takeModel) {
+            self.inspector.qField.stringValue = qText;
+        }
+    }
+
+    // ⑤ OPRA 选中态：型号/预设列表 + 选中项 + 已应用 id（卡片重画，不重新发请求）。
+    if ([state[@"opraItems"] isKindOfClass:[NSArray class]]) self.opraItems = state[@"opraItems"];
+    if ([state[@"opraPresets"] isKindOfClass:[NSArray class]]) self.opraPresets = state[@"opraPresets"];
+    if ([state[@"opraSelectedProductIndex"] isKindOfClass:[NSNumber class]])
+        self.opraSelectedProductIndex = [(NSNumber *)state[@"opraSelectedProductIndex"] integerValue];
+    if ([state[@"opraSelectedPresetIndex"] isKindOfClass:[NSNumber class]])
+        self.opraSelectedPresetIndex = [(NSNumber *)state[@"opraSelectedPresetIndex"] integerValue];
+    // 已应用 id 是后端同步值：只在 takeModel 时恢复，避免把离开期间外部应用的
+    // 新预设又盖回旧 id（"已应用当前预设"徽标会指错行）。
+    if (takeModel && [state[@"appliedProductId"] isKindOfClass:[NSString class]])
+        self.appliedProductId = state[@"appliedProductId"];
+    if (takeModel && [state[@"appliedPresetId"] isKindOfClass:[NSString class]])
+        self.appliedPresetId = state[@"appliedPresetId"];
+    [self renderModelCards];
+    [self renderPresetCards];
+    if (self.opraSelectedProductIndex >= 0 &&
+        self.opraSelectedProductIndex < (NSInteger)self.opraItems.count) {
+        NSDictionary *prod = self.opraItems[(NSUInteger)self.opraSelectedProductIndex];
+        NSString *vendor = [prod[@"vendor"] isKindOfClass:[NSString class]] ? prod[@"vendor"] : @"";
+        NSString *name = [prod[@"name"] isKindOfClass:[NSString class]] ? prod[@"name"] : @"";
+        self.opraSelectedTitle.hidden = NO;
+        self.opraSelectedTitle.stringValue = [NSString stringWithFormat:@"%@ %@ · %@",
+            vendor, name, RLPTr(@"调音预设")];
+        self.opraPresetCards.hidden = NO;
+    }
+    if (self.opraSelectedPresetIndex >= 0 &&
+        self.opraSelectedPresetIndex < (NSInteger)self.opraPresets.count) {
+        [self previewTargetCurveForPreset:self.opraPresets[(NSUInteger)self.opraSelectedPresetIndex]];
+    } else if (self.opraSelectedProductIndex < 0) {
+        [self resetTargetCurvePreview];
+    }
+
+    // ⑥ 有草稿但计时器已不在（新实例 / 摘下窗口时计时器已走完）→ 续上 260ms 提交；
+    //    同一条实例重挂时计时器在跑或有写在途，这里不会重复提交。
+    if ([RLPCoreClient shared].started && self.peqDraftEpoch != self.peqSyncedDraftEpoch &&
+        ![self hasActiveApplyTimer] && self.peqWriteInFlight == 0 && !self.loading) {
+        [self scheduleApply];
+    }
+    [self notifyContentSizeChanged];
 }
 
 - (void)applyLanguage {

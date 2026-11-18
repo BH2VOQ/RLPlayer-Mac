@@ -1744,6 +1744,9 @@ static NSString *RLPRailTagText(id srValue, id bitsValue) {
 @property(nonatomic) CGFloat lyricPointSize;
 @property(nonatomic) NSTimeInterval lyricManualUntil;
 @property(nonatomic) NSUInteger lyricSeq;
+/// 当前 `lyricLines` 属于哪首曲（`applyLyricText:forPath:` 写入）。切曲时据此清掉上一首的行：
+/// 新词回来前只显示加载态，而不是把旧歌的词挂在新曲标题下（evidence/native-4-playback-diff.md #61）。
+@property(nonatomic,copy,nullable) NSString *lyricPath;
 @property(nonatomic) NSInteger lyricRetry;
 @property(nonatomic,strong) NSTimer *lyricRetryTimer;
 @property(nonatomic,copy,nullable) NSArray<RLPLyricLine *> *originalLyricLines;
@@ -1870,6 +1873,9 @@ static NSString *RLPRailTagText(id srValue, id bitsValue) {
 @property (nonatomic, strong) NSLayoutConstraint *anlDetailHeight;
 /// 封面请求序号：快速切歌时用它丢弃过期回调（慢请求回来不能盖掉新封面）。
 @property (nonatomic, assign) NSUInteger coverSeq;
+/// 当前 `cover.image` 属于哪首曲（回包落地时写入）。切曲时据此清掉上一首的封面；
+/// 同曲重取（手动设置/恢复自动）保留旧图到新图回来，避免闪白（evidence/native-4-playback-diff.md #61）。
+@property (nonatomic, copy, nullable) NSString *coverPath;
 @property (nonatomic, strong) RLPKnowledgeView *knowledge;
 @property (nonatomic, strong) NSButton *compareBtn;
 @property (nonatomic, strong) NSButton *worksBtn;
@@ -2969,6 +2975,7 @@ static CGFloat RLPNPMetaChipWidth(NSButton *b) {
 }
 - (void)applyLyricText:(NSString *)text forPath:(NSString *)path {
     if(![path isEqualToString:self.currentPath?:@""])return;
+    self.lyricPath=path;                 // 词与曲绑定：切曲时据此判断旧词是否该清
     self.originalLyricLines=nil;
     self.lyricAiApplied=NO;
     self.lyricAiBusy=NO;
@@ -4245,6 +4252,15 @@ static NSString *RLPNowPlayingCastDeviceLabel(NSString *device) {
                             detail:@"同名 .lrc 文件、内嵌歌词，或播放时自动在线补全（可在设置-元数据补全关闭）"];
         return;
     }
+    // 切曲（或首次取词）：上一首的歌词行不得留到新曲——新词回来前给加载态，而不是把旧歌的词
+    // 挂在新曲标题下（evidence/native-4-playback-diff.md #61「切曲：…歌词…全量复位」）。
+    // 同曲重进页面（lyricPath 已是本曲）不清：保留已显示的词，后台照常重取一次。
+    if([path isEqualToString:self.currentPath?:@""] && (!self.lyricPath.length||![self.lyricPath isEqualToString:path])){
+        self.lyricManualUntil=0;                    // 换歌清掉上一首的手动滚动保护（web loadLyrics 同口径）
+        [self applyLyricText:@"" forPath:path];     // 清行 + AI 态（同时把 lyricPath 记为本曲）
+        [self setLyricsPlaceholder:@"歌词加载中…"
+                            detail:@"正在等后台补全（首次播放新曲目时可能要几秒）"];
+    }
     self.lyricRetry=0;[self fetchLyricPath:path sequence:seq];
 }
 - (void)fetchLyricPath:(NSString *)path sequence:(NSUInteger)seq {
@@ -4265,16 +4281,25 @@ static NSString *RLPNowPlayingCastDeviceLabel(NSString *device) {
 /// 用单调递增的请求序号丢弃过期结果：快速切歌时慢请求回来不能盖掉新封面。
 - (void)loadCoverForPath:(NSString *)path {
     if (!path.length) {
-        self.coverSeq++;self.cover.image = nil;self.webCanvas.blurredCover=nil;self.webCanvas.needsDisplay=YES;
+        self.coverSeq++;self.coverPath=nil;self.cover.image = nil;self.webCanvas.blurredCover=nil;self.webCanvas.needsDisplay=YES;
         return;
     }
     const NSUInteger seq = ++self.coverSeq;
+    // 切曲：上一首的主封面不得留到新曲——新图回来前留空白底板，而不是把旧专辑图挂在新曲标题下
+    // （evidence/native-4-playback-diff.md #61「切曲：…封面…全量复位」）。
+    // 整页模糊背景先保留：它是装饰性氛围（web #npbg 同样等新 meta 才换），清空会让整页背景闪一下；
+    // 新图回来时 updateBlurredCover 用 coverSeq 作废旧任务并换成新背景。
+    // 同曲重取（手动设置/恢复自动）保留旧主封面到新图回来，避免闪白。
+    if (!self.coverPath.length || ![self.coverPath isEqualToString:path]) {
+        self.cover.image = nil;
+    }
     NSString *url = [NSString stringWithFormat:@"/api/cover?file=%@", RLPEnc(path)];
     __weak __typeof__(self) weakSelf = self;
     [[RLPCoreClient shared] getData:url completion:^(NSData * _Nullable data) {
         __typeof__(self) self_ = weakSelf;
         if (!self_ || seq != self_.coverSeq) return;   // 过期结果直接丢
         self_.cover.image = data.length ? [[NSImage alloc] initWithData:data] : nil;
+        self_.coverPath = path;                         // 本图已属于本曲（下次切曲据此清）
         [self_ updateBlurredCover];
     }];
 }

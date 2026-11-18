@@ -44,6 +44,18 @@
 @property (nonatomic, readonly) BOOL hasPendingDraft;
 @end
 
+/// 宿主重建 EQ 视图时的**最小状态存取 API**（实现在 RLPEqualizerView.mm）。
+/// 为什么需要它：普通页签草稿快照按 isEqOwnedView 把 EQ 的控件整块跳过（写值会绕过
+/// peqDraftEpoch / peqSyncedDraftEpoch 的代次判断），但 EQ 自己的 hasPendingDraft 只覆盖
+/// PEQ 代次与 preamp 编辑态，不包含 presetName / OPRA 查询框 / 单段 Q 这些还在 field
+/// editor 里的文本；pane 被摘下窗口时这些文本会丢。快照只搬用户态，不搬后端真值；
+/// draftEpoch / syncedDraftEpoch / reqSeq 随快照一起搬 —— 恢复后仍由代次守卫决定
+/// 哪个 GET/POST 回包有资格落地。
+@interface RLPEqualizerView (RLPDraftState)
+- (NSDictionary<NSString *, id> *)rlp_captureDraftState;
+- (void)rlp_restoreDraftState:(NSDictionary<NSString *, id> *)state;
+@end
+
 #pragma mark - 滤波器族标注（U8）
 
 // ---- U8（2026-11-16）：滤波器下拉的族标注 ----
@@ -467,6 +479,8 @@ static NSStackView *RLPSRow(NSString *label, NSView *control, NSString *hint, RL
 @property (nonatomic, strong) NSStackView *metaAdvancedStack;
 @property (nonatomic) BOOL metaAdvancedVisible;
 @property (nonatomic, strong) RLPEqualizerView *eqView;
+/// EQ 子界面的未提交状态（切页签 / 切语言 / 切主题时由 showTab 收发，见 rlp_captureDraftState）。
+@property (nonatomic, strong, nullable) NSDictionary<NSString *, id> *eqDraftState;
 @property (nonatomic, strong) NSLayoutConstraint *eqHeightConstraint;
 @property (nonatomic, strong) RLPSettingsGroup *outputGroup;
 @property (nonatomic, strong) RLPSettingsGroup *updGroup;
@@ -789,6 +803,14 @@ static void RLPSettingsCollectViews(NSView *v, NSMutableArray<NSView *> *out) {
     //    早把这个 identifier 记进 dirtyControlIds，后续读回永远跳过它 ⟹ 用户看到退回旧值、
     //    屏幕上却再也不会被后端真值纠正（"切页签草稿丢失"）。
     //    旧实现只在切语言 / 切主题时快照，普通点页签没有 —— 那就是漏口。
+    //
+    // ⓪ EQ 子界面被 isEqOwnedView 排除在普通快照之外，必须在这里先把自己的状态收下来。
+    //    触发条件：即将离开视图树的那一页里含 eqView（即当前停在 EQ 页）。
+    //    为什么不能按 paneCache 判：切语言 / 切主题时 paneCache 已先被清空，只剩视图树可判。
+    NSView *outgoingPane = self.paneHost.subviews.firstObject;
+    if (self.eqView && outgoingPane && [self.eqView isDescendantOf:outgoingPane]) {
+        self.eqDraftState = [self.eqView rlp_captureDraftState];
+    }
     [self snapshotDraftsOfOutgoingPaneIfNeededForTab:tab];
     self.tab = tab;
     NSView *pane = self.paneCache[@(tab)];
@@ -816,6 +838,14 @@ static void RLPSettingsCollectViews(NSView *v, NSMutableArray<NSView *> *out) {
     //    但它在被摘出视图树时同样可能丢掉 field editor 里的编辑中文本（stringValue 还是旧值）。
     //    恢复是幂等的（值相同就不写），每次显示都过一遍最稳。
     [self restorePendingDraftsForTab:tab inPane:pane];
+    // ③ EQ 草稿灌回：同一条实例被重挂时恢复 field editor 文本；若宿主换了新实例，
+    //    频段/预设/OPRA 选择以及 draftEpoch 代次也一起搬过去。必须在下面的 reload 之前：
+    //    有未提交代次时 hasPendingDraft 会挡住读回，restore 之前发出的旧 GET 也会因
+    //    sentDraftEpoch / reqSeq 不再相等而在 isLatest 处被丢弃。
+    if (tab == RLPSTabEq && self.eqDraftState && self.eqView) {
+        [self.eqView rlp_restoreDraftState:self.eqDraftState];
+        self.eqDraftState = nil;
+    }
     // 新建的页签控件还是 UI 默认值（设备/滤波下拉是空的、开关是默认态）。
     // activate 只在进页时跑一次，之后才点开的页签必须在这里补一次读回，
     // 否则输出/PCM/SDM 页会显示空下拉与默认值，而不是用户真实设置。
@@ -4817,6 +4847,8 @@ static NSUInteger RLPUTF8Bytes(NSString *s) {
 /// 其余缓存页签的控件都还在（没必要每次切页全量扫 10 页）。
 /// EQ 子界面自己有一套草稿口径（RLPEqualizerView.hasPendingDraft），这里按 isEqOwnedView
 /// 整块跳过 —— 往它的字段里写值会绕过 peqDraftEpoch / peqSyncedDraftEpoch 的代次判断。
+/// 它的 field editor 文本与 preset/OPRA 选择改由 showTab 调 RLPEqualizerView(RLPDraftState)
+/// 的 rlp_captureDraftState / rlp_restoreDraftState 单独搬运（必须在摘除视图之前 capture）。
 - (void)snapshotPendingPaneDraftsForTab:(RLPSTab)tab {
     NSNumber *tabKey = @(tab);
     NSView *cachedPane = self.paneCache[tabKey];
@@ -4934,6 +4966,10 @@ static NSUInteger RLPUTF8Bytes(NSString *s) {
     // 主题切换后清缓存重建页签前，先快照 sp_eq 等各页未提交草稿与滚动/焦点状态。
     NSDictionary *paneState = [self capturePaneViewState];
     [self snapshotPendingPaneDrafts];
+    // EQ 草稿的兜底：即使 showTab 因视图树状态异常没机会 capture（例如本页不在前台），
+    // 也不能让 paneCache 清空前的那份用户态随页面对象一起消失。已有快照时保持不动
+    //（那份可能含 field editor 文本，比现在再读一次更完整）。
+    if (!self.eqDraftState && self.eqView) self.eqDraftState = [self.eqView rlp_captureDraftState];
     [self.paneCache removeAllObjects];
     [self rebuildTabs];
     [self showTab:self.tab];
@@ -4984,6 +5020,8 @@ static NSUInteger RLPUTF8Bytes(NSString *s) {
     // 1. 保存当前页签滚动位置与焦点，并跨所有 cachedPane 快照未提交草稿
     NSDictionary *paneState = [self capturePaneViewState];
     [self snapshotPendingPaneDrafts];
+    // EQ 草稿兜底（同 applyTheme：paneCache 清空前先留住用户态）。
+    if (!self.eqDraftState && self.eqView) self.eqDraftState = [self.eqView rlp_captureDraftState];
 
     // 2. 原地刷新页头、复合子视图与页签；非当前页签清缓存待切回时重建并恢复草稿
     self.pageTitle = RLPTr(@"设置");

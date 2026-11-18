@@ -80,6 +80,14 @@ static const void *kRLPQueueDeletePathKey = &kRLPQueueDeletePathKey;
 /// 第二次用的还是旧 tag，会把顶上来那一首也删掉（2026-11-18 夜间评审 A1）。
 @property (nonatomic, assign) BOOL deleteInFlight;
 @property (nonatomic, assign) BOOL saveInFlight;
+/// 队列重排（排序 / 拖动排序）在途：这期间任何刷新快照都不得落到表格上。
+/// 证据：页面把队列落到表格只有 reloadData / applyQueueSnapshot 两条路径，
+/// 它们由 onExternalQueueChanged / activate / 任何轮询接线调用；排序/拖动在途时
+/// 这些回包里的旧快照会覆盖刚提交的新顺序，并让拖动的行号错位。
+@property (nonatomic, assign) BOOL sortInFlight;
+@property (nonatomic, assign) BOOL moveInFlight;
+/// 拖动会话进行中：此时刷新同样不得改列表（AppKit 的拖动源行号会失效）。
+@property (nonatomic, assign) BOOL dragSessionActive;
 @property (nonatomic, copy) NSString *lastPlayKey;
 @property (nonatomic, assign) NSTimeInterval lastPlayAt;
 - (void)restoreSortSelection:(NSString *)key;
@@ -420,6 +428,12 @@ static NSString *RLPQueueParentFolder(NSString *path) {
 
 - (void)deleteRow:(NSInteger)row capturedPath:(NSString *)capturedPath successToast:(NSString *)successToast {
     if (self.deleteInFlight) return;   // 删除在途时拒绝同 index 重复删除（并避免并发删除导致索引漂移）
+    // 排序/拖动在途：qdel 的索引与在途 qorder/qmove 共用同一队列，
+    // 若在途请求先落地，验证过的索引会指向另一首 ⟹ 拒绝这一次删除。
+    if (self.sortInFlight || self.moveInFlight || self.dragSessionActive) {
+        RLPToast(RLPTr(@"正在更新…"));
+        return;
+    }
     if (row < 0) {
         if (capturedPath.length) {
             [self clearHoveredRowAfterDelete];
@@ -499,34 +513,98 @@ static NSString *RLPQueueParentFolder(NSString *path) {
 #pragma mark - 拖动排序
 
 - (id<NSPasteboardWriting>)tableView:(NSTableView *)tv pasteboardWriterForRow:(NSInteger)row {
+    if (row < 0 || row >= (NSInteger)self.paths.count) return nil;
+    // 负载必须带**行身份**（路径 + CUE 区间），不能只带行号：
+    // 1s 轮询/外部通知的刷新会让同一行号指向另一首，落下时 qmove 就会搬错歌。
+    id pathObj = self.paths[(NSUInteger)row];
+    if (![pathObj isKindOfClass:[NSString class]]) return nil;
+    double cs = -1.0, ce = -1.0;
+    if (row < (NSInteger)self.cues.count) {
+        NSArray<NSNumber *> *cue = self.cues[(NSUInteger)row];
+        if (cue.count >= 2) { cs = cue[0].doubleValue; ce = cue[1].doubleValue; }
+    }
+    NSDictionary *payload = @{ @"row": @(row), @"path": (NSString *)pathObj,
+                               @"cs": @(cs), @"ce": @(ce) };
     NSPasteboardItem *item = [[NSPasteboardItem alloc] init];
-    [item setString:[NSString stringWithFormat:@"%ld", (long)row] forType:kQueueDragType];
+    [item setPropertyList:payload forType:kQueueDragType];
     return item;
+}
+
+#pragma mark - 拖动会话（拖动期间冻结刷新）
+
+- (void)tableView:(NSTableView *)tableView draggingSession:(NSDraggingSession *)session
+    willBeginAtPoint:(NSPoint)screenPoint forRowIndexes:(NSIndexSet *)rowIndexes {
+    (void)tableView; (void)session; (void)screenPoint; (void)rowIndexes;
+    // 纯 AppKit 表格的拖动期间（1s 轮询可能正好回来），不能让 rows 变短/变序：
+    // 数据源行号一旦被刷新改写，acceptDrop 的 from 就会对不上拖动源。
+    self.dragSessionActive = YES;
+}
+
+- (void)tableView:(NSTableView *)tableView draggingSession:(NSDraggingSession *)session
+      endedAtPoint:(NSPoint)screenPoint operation:(NSDragOperation)operation {
+    (void)tableView; (void)session; (void)screenPoint; (void)operation;
+    self.dragSessionActive = NO;
+    // 拖动期间被压下的刷新（外部入队/删除/轮询）在这里补一次；
+    // 若 qmove 在途则由它的完成回调补拉，避免两个请求互相覆盖。
+    if (self.sortInFlight || self.moveInFlight) return;
+    [self reloadData];
 }
 
 - (NSDragOperation)tableView:(NSTableView *)tv validateDrop:(id<NSDraggingInfo>)info
                  proposedRow:(NSInteger)row proposedDropOperation:(NSTableViewDropOperation)op {
     // 只接受"插到某行之前"，不接受"覆盖某行"
     if (op != NSTableViewDropAbove) return NSDragOperationNone;
+    // 队列改写/删除在途时索引不再可信：拒绝落下（acceptDrop 里还有路径身份复核）。
+    if (self.sortInFlight || self.moveInFlight || self.deleteInFlight) return NSDragOperationNone;
     return [info.draggingPasteboard.types containsObject:kQueueDragType] ? NSDragOperationMove : NSDragOperationNone;
 }
 
 - (BOOL)tableView:(NSTableView *)tv acceptDrop:(id<NSDraggingInfo>)info
               row:(NSInteger)row dropOperation:(NSTableViewDropOperation)op {
-    NSString *s = [info.draggingPasteboard stringForType:kQueueDragType];
-    if (!s.length) return NO;
-    const NSInteger from = s.integerValue;
+    (void)op;
+    // 重排/删除在途时拒绝落下：from/to 是相对“提交那一刻的队列”的索引，
+    // 与在途的 qorder/qmove 并发会改错顺序（后端 qmove 不做曲目身份校验）。
+    if (self.sortInFlight || self.moveInFlight || self.deleteInFlight) return NO;
+    id plist = [info.draggingPasteboard propertyListForType:kQueueDragType];
+    if (![plist isKindOfClass:[NSDictionary class]]) return NO;
+    NSDictionary *payload = (NSDictionary *)plist;
+    id rowObj = payload[@"row"];
+    const NSInteger from = [rowObj respondsToSelector:@selector(integerValue)] ? [rowObj integerValue] : -1;
     if (from < 0 || from >= (NSInteger)self.paths.count) return NO;
+    NSString *dragPath = [payload[@"path"] isKindOfClass:[NSString class]] ? (NSString *)payload[@"path"] : nil;
+    if (!dragPath.length || ![self.paths[(NSUInteger)from] isEqualToString:dragPath]) {
+        // 队列在拖动期间变过（1s 轮询/外部通知）：同一行号已不是原来那首，绝不搬错。
+        RLPToast(RLPTr(@"排序失败"));
+        [self reloadData];   // 本地拖动会话中会被 dragSessionActive 压住，结束后补拉
+        return NO;
+    }
+    // CUE 分轨身份：同一文件可有多行（不同 cs/ce），只比路径仍会搬错。
+    double curCs = -1.0, curCe = -1.0, dragCs = -1.0, dragCe = -1.0;
+    if (from < (NSInteger)self.cues.count) {
+        NSArray<NSNumber *> *cue = self.cues[(NSUInteger)from];
+        if (cue.count >= 2) { curCs = cue[0].doubleValue; curCe = cue[1].doubleValue; }
+    }
+    if ([payload[@"cs"] respondsToSelector:@selector(doubleValue)]) dragCs = [payload[@"cs"] doubleValue];
+    if ([payload[@"ce"] respondsToSelector:@selector(doubleValue)]) dragCe = [payload[@"ce"] doubleValue];
+    if (fabs(curCs - dragCs) > 0.0005 || fabs(curCe - dragCe) > 0.0005) {
+        RLPToast(RLPTr(@"排序失败"));
+        [self reloadData];
+        return NO;
+    }
     // DropAbove row 表示插到 row 之前；从前面往后拖时要减 1（源行会先被移走）
     NSInteger to = row;
     if (from < to) to -= 1;
     to = MAX(0, MIN(to, (NSInteger)self.paths.count - 1));
     if (from == to) return NO;
+    self.moveInFlight = YES;
+    // 作废在途的旧队列读取：它们的回包不得在 qmove 完成后覆盖新顺序。
+    ++self.seq;
     NSString *url = [NSString stringWithFormat:@"/api/qmove?from=%ld&to=%ld", (long)from, (long)to];
     __weak __typeof__(self) weakSelf = self;
     [[RLPCoreClient shared] postJSON:url body:nil completion:^(NSDictionary * _Nullable json) {
         __typeof__(self) self_ = weakSelf;
         if (!self_) return;
+        self_.moveInFlight = NO;
         if (json && [json[@"ok"] boolValue]) {
             [[NSNotificationCenter defaultCenter] postNotificationName:RLPQueueChangedNotification object:self_];
         }
@@ -627,6 +705,12 @@ static NSString *RLPQueueMetaText(NSDictionary *m, NSString *k,
 /// 8 档逐条对齐 `ui_script.h:12496-12540`；qorder 行必须保留 CUE 区间（queueItemLine）。
 - (void)sortBy:(NSString *)key {
     if (!key.length) return;
+    // 队列改写一次只允许一个在途：排序/拖动/删除在途时再发 qorder，
+    // 后到的请求会把新顺序改回旧顺序（qorder 也是按当时索引/全量顺序提交的）。
+    if (self.sortInFlight || self.moveInFlight || self.dragSessionActive || self.deleteInFlight) {
+        [self restoreSortSelection:(self.sortKey.length ? self.sortKey : @"default")];
+        return;
+    }
     // P6：失败回滚基准 = 上一档已生效的排序（web 失败时不改 S.queueSort，重渲染仍是旧档）。
     NSString *previous = self.sortKey.length ? self.sortKey : @"default";
     if (!self.paths.count) {
@@ -635,12 +719,18 @@ static NSString *RLPQueueMetaText(NSDictionary *m, NSString *k,
         return;
     }
     if ([key isEqualToString:@"default"]) {
+        self.sortInFlight = YES;
+        // 作废在途的旧队列读取：旧快照不得在新顺序落库之后又落表。
+        ++self.seq;
         __weak __typeof__(self) weakSelf = self;
         [[RLPCoreClient shared] postJSON:@"/api/qsort?by=default" body:nil completion:^(NSDictionary * _Nullable json) {
             __typeof__(self) self_ = weakSelf;
             if (!self_) return;
+            self_.sortInFlight = NO;
             if (json && [json[@"ok"] boolValue]) {
                 self_.sortKey = @"default";
+                // 排序在途时下拉若被改过（并发选择已被拒绝），成功落档后同步回实际档位。
+                [self_ restoreSortSelection:self_.sortKey];
                 RLPToast(RLPTr(@"已恢复默认顺序"));   // web ui_script.h:12500
                 [[NSNotificationCenter defaultCenter] postNotificationName:RLPQueueChangedNotification object:self_];
                 [self_ reloadData];
@@ -706,13 +796,18 @@ static NSString *RLPQueueMetaText(NSDictionary *m, NSString *k,
         }
         [lines addObject:line];
     }
+    self.sortInFlight = YES;
+    // 作废在途的旧队列读取：旧快照不得在新顺序落库之后又落表。
+    ++self.seq;
     __weak __typeof__(self) weakSelf = self;
     NSString *body = [NSString stringWithFormat:@"files=%@", RLPEnc([lines componentsJoinedByString:@"\n"])];
     [[RLPCoreClient shared] postJSON:@"/api/qorder" body:body completion:^(NSDictionary * _Nullable json) {
         __typeof__(self) self_ = weakSelf;
         if (!self_) return;
+        self_.sortInFlight = NO;
         if (json && [json[@"ok"] boolValue]) {
             self_.sortKey = key;   // 成功才提交档位
+            [self_ restoreSortSelection:key];   // 与 sortKey 同步，避免下拉停在被拒的并发选择
             [[NSNotificationCenter defaultCenter] postNotificationName:RLPQueueChangedNotification object:self_];
             [self_ reloadData];
             return;
@@ -940,7 +1035,12 @@ static NSString *RLPQueueMetaText(NSDictionary *m, NSString *k,
 
 #pragma mark - 数据
 
-- (void)activate { [self reloadData]; }
+- (void)activate {
+    // 拖动会话不可能跨页存活；清掉残留的拖动状态，避免 reloadData 被永久压住。
+    // 排序/拖动请求的在途标志交给各自的完成回调清（与 deleteInFlight 同口径）。
+    self.dragSessionActive = NO;
+    [self reloadData];
+}
 
 /// 让表格宽度严格等于滚动视口宽度（见 viewDidLayout 注释）。
 - (void)syncTableWidth {
@@ -955,6 +1055,9 @@ static NSString *RLPQueueMetaText(NSDictionary *m, NSString *k,
 }
 
 - (void)applyQueueSnapshot:(NSDictionary *)json {
+    // 与 reloadData 同一道闸：在途重排/拖动期间，旧快照（包括 savePlaylistNamed
+    // 直接调进来的实时校验快照）不得落到表格。
+    if (self.sortInFlight || self.moveInFlight || self.dragSessionActive) return;
     NSArray *items = [json[@"items"] isKindOfClass:[NSArray class]] ? json[@"items"] : @[];
     NSMutableArray<NSString *> *ps = [NSMutableArray array];
     for (id x in items) if ([x isKindOfClass:[NSString class]] && [(NSString *)x length]) [ps addObject:x];
@@ -997,6 +1100,9 @@ static NSString *RLPQueueMetaText(NSDictionary *m, NSString *k,
         self.saveButton.enabled = NO;   // P7：没有队列数据 ⟹ 不能保存
         return;
     }
+    // 排序/拖动在途：压住这次刷新。旧快照会覆盖刚提交的新顺序，也会让拖动的行号错位；
+    // 各操作的完成回调（以及拖动结束）会补拉一次。
+    if (self.sortInFlight || self.moveInFlight || self.dragSessionActive) return;
     const NSUInteger seq = ++self.seq;
     __weak __typeof__(self) weakSelf = self;
     [[RLPCoreClient shared] getJSON:@"/api/queue?meta=1" completion:^(NSDictionary * _Nullable json) {
