@@ -24,6 +24,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#import <objc/runtime.h>
 #include <unistd.h>
 
 static int gFail = 0, gPass = 0;
@@ -65,6 +66,9 @@ static NSView *FindById(NSView *root, NSString *ident) {
 @property (nonatomic, strong) RLPCoverImageView *npCover;
 @property (nonatomic, strong) NSTextField *npTitle;
 @property (nonatomic, strong) NSTextField *npSub;
+@property (nonatomic, strong) NSButton *npOpenButton;
+@property (nonatomic, copy) NSString *currentPath;
+@property (nonatomic, copy, nullable) NSDictionary *lastMetaDict;
 @property (nonatomic, copy) NSArray<RLPAlbum *> *albumsData;
 @property (nonatomic, assign) NSInteger currentCardColumns;
 @property (nonatomic, assign) NSInteger currentAlbumColumns;
@@ -91,6 +95,8 @@ static NSView *FindById(NSView *root, NSString *ident) {
 - (void)rebuildAlbumGrid;
 - (void)renderQueueFromJSON:(NSDictionary * _Nullable)json;
 - (void)updateResponsiveLayoutForWidth:(CGFloat)availWidth;
+- (void)applyLanguage;
+- (void)onOpenCurrentAlbum:(id)sender;
 @end
 
 // Keep output selection tests offline: discovery is explicitly stubbed.
@@ -1097,6 +1103,90 @@ int main(int argc, char **argv) {
                [NSString stringWithFormat:@"bk=%@ dev=%@", kvBack[@"backend"] ?: @"nil", kvBack[@"device"] ?: @"nil"]);
 
             [core jsonWithMethod:@"POST" path:@"/api/settings" body:@"backend=null&volume=-120"];
+        }
+
+        // ---------- N4 聆听室底部入口改成「打开专辑页」，点击进入当前曲所属专辑详情而非曲目详情 ----------
+        {
+            RLPQuickStartViewController *n4vc = [[RLPQuickStartViewController alloc] init];
+            (void)n4vc.view;
+            NSButton *openBtn = (NSButton *)FindById(n4vc.view, @"room.openAlbum");
+            CK(openBtn != nil && openBtn == n4vc.npOpenButton,
+               "N4a 聆听室按钮暴露 room.openAlbum（并与 npOpenButton 一致）",
+               openBtn.identifier ?: @"nil");
+            CK(openBtn && [openBtn.title isEqualToString:RLPTr(@"打开专辑页")] &&
+               ![openBtn.title isEqualToString:RLPTr(@"打开曲目详情")],
+               "N4b 按钮标题为「打开专辑页」而非「打开曲目详情」",
+               openBtn.title ?: @"nil");
+            [n4vc applyLanguage];
+            CK(openBtn && [openBtn.title isEqualToString:RLPTr(@"打开专辑页")],
+               "N4c 语言刷新后标题仍为「打开专辑页」",
+               openBtn.title ?: @"nil");
+
+            __block NSInteger npFired = 0;
+            NSMutableArray<NSString *> *openedAlbums = [NSMutableArray array];
+            NSNotificationCenter *nc = [NSNotificationCenter defaultCenter];
+            id obNP = [nc addObserverForName:@"RLPOpenNowPlayingNotification" object:nil queue:nil
+                                  usingBlock:^(NSNotification *note) {
+                (void)note;
+                ++npFired;
+            }];
+            id obAlb = [nc addObserverForName:RLPOpenAlbumNotification object:nil queue:nil
+                                   usingBlock:^(NSNotification *note) {
+                if ([note.object isKindOfClass:[NSString class]]) [openedAlbums addObject:note.object];
+            }];
+
+            n4vc.currentPath = @"/offline/ArtistA/SymphonyB/01.flac";
+            n4vc.lastMetaDict = @{@"title": @"Mov I", @"album": @"Symphony Album B", @"artist": @"Conductor A"};
+            RLPAlbum *alb0 = [[RLPAlbum alloc] init];
+            alb0.key = @"alb-other"; alb0.name = @"Other Album"; alb0.artist = @"Someone";
+            RLPAlbum *alb1 = [[RLPAlbum alloc] init];
+            alb1.key = @"alb-sym-b"; alb1.name = @"Symphony Album B"; alb1.artist = @"Conductor A";
+            n4vc.albumsData = @[alb0, alb1];
+
+            CK(openBtn && openBtn.enabled && openBtn.target == n4vc && openBtn.action == @selector(onOpenCurrentAlbum:),
+               "N4d openBtn 绑定 onOpenCurrentAlbum:",
+               NSStringFromSelector(openBtn.action ?: NULL));
+            [NSApp sendAction:openBtn.action to:openBtn.target from:openBtn];
+            CK(npFired == 0 && openedAlbums.count == 1 && [openedAlbums.lastObject isEqualToString:@"alb-sym-b"],
+               "N4e 点击打开当前曲所属专辑页（key=alb-sym-b）且不再打开 track detail",
+               [NSString stringWithFormat:@"np=%ld albums=%@", (long)npFired, openedAlbums]);
+
+            // direct albumKey 路径
+            n4vc.albumsData = @[];
+            n4vc.lastMetaDict = @{@"title": @"Mov I", @"album": @"Direct", @"albumKey": @"alb-direct-key"};
+            [NSApp sendAction:openBtn.action to:openBtn.target from:openBtn];
+            CK(npFired == 0 && openedAlbums.count == 2 && [openedAlbums.lastObject isEqualToString:@"alb-direct-key"],
+               "N4f metadata 含 albumKey 时直接打开对应专辑详情",
+               [NSString stringWithFormat:@"np=%ld albums=%@", (long)npFired, openedAlbums]);
+
+            // albumsData 为空时走 /api/lib/albums?q= 查询回落
+            n4vc.albumsData = @[];
+            n4vc.lastMetaDict = @{@"title": @"Mov II", @"album": @"Fallback Album", @"artist": @"Fallback Artist"};
+            Method getM = class_getInstanceMethod(RLPCoreClient.class, @selector(getJSON:completion:));
+            IMP origGet = method_getImplementation(getM);
+            __block NSString *queriedURL = nil;
+            IMP mockGet = imp_implementationWithBlock(^(id selfObj, NSString *path, RLPJSONCompletion done) {
+                (void)selfObj;
+                queriedURL = path;
+                if (done) {
+                    done(@{@"ok": @YES,
+                           @"albums": @[@{@"k": @"alb-fallback-k", @"name": @"Fallback Album", @"artist": @"Fallback Artist"}]});
+                }
+            });
+            method_setImplementation(getM, mockGet);
+            @try {
+                [NSApp sendAction:openBtn.action to:openBtn.target from:openBtn];
+            } @finally {
+                method_setImplementation(getM, origGet);
+                imp_removeBlock(mockGet);
+            }
+            CK(npFired == 0 && queriedURL && [queriedURL hasPrefix:@"/api/lib/albums?q="] &&
+               openedAlbums.count == 3 && [openedAlbums.lastObject isEqualToString:@"alb-fallback-k"],
+               "N4g 本地列表未命中时查询 /api/lib/albums?q= 并进入匹配专辑详情（key=alb-fallback-k）",
+               [NSString stringWithFormat:@"url=%@ np=%ld albums=%@", queriedURL ?: @"nil", (long)npFired, openedAlbums]);
+
+            [nc removeObserver:obNP];
+            [nc removeObserver:obAlb];
         }
 
         // 隔离：B1/B2/B3 会在离屏主窗里创建额外 VC，放在核心契约全部跑完后避免污染 C9 的设备/设置状态。

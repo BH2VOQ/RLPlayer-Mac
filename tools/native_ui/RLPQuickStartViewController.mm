@@ -1191,7 +1191,9 @@ static NSInteger RLPRoomResolveQueueCurrentIndex(NSDictionary * _Nullable json, 
     [self.npToggle setContentCompressionResistancePriority:40
                                             forOrientation:NSLayoutConstraintOrientationHorizontal];
 
-    NSButton *npOpen = [NSButton buttonWithTitle:RLPTr(@"打开曲目详情") target:self action:@selector(onOpenNowPlaying:)];
+    NSButton *npOpen = [NSButton buttonWithTitle:RLPTr(@"打开专辑页") target:self action:@selector(onOpenCurrentAlbum:)];
+    npOpen.identifier = @"room.openAlbum";
+    npOpen.toolTip = RLPTr(@"打开当前曲目所属专辑页");
     npOpen.bezelStyle = NSBezelStyleRounded;
     npOpen.translatesAutoresizingMaskIntoConstraints = NO;
     [npOpen setContentCompressionResistancePriority:40
@@ -2561,9 +2563,112 @@ static NSInteger RLPRoomResolveQueueCurrentIndex(NSDictionary * _Nullable json, 
     RLPPlaybackToggle(self.playing, self.pausedNow, self.currentPath);
 }
 
-- (void)onOpenNowPlaying:(id)sender {
+- (void)onOpenCurrentAlbum:(id)sender {
     (void)sender;
-    [[NSNotificationCenter defaultCenter] postNotificationName:@"RLPOpenNowPlayingNotification" object:nil];
+    if (!self.currentPath.length) {
+        RLPToast(RLPTr(@"还没有在播放的音乐"));
+        return;
+    }
+    NSDictionary *meta = [self.lastMetaDict isKindOfClass:[NSDictionary class]] ? self.lastMetaDict : nil;
+    NSString *directKey = nil;
+    for (NSString *kName in @[@"albumKey", @"album_key", @"albumK"]) {
+        id v = meta[kName];
+        if ([v isKindOfClass:[NSString class]] && [(NSString *)v length] > 0) {
+            directKey = (NSString *)v;
+            break;
+        }
+    }
+    if (directKey.length) {
+        RLPRequestOpenAlbum(directKey);
+        return;
+    }
+
+    NSString *albumName = [meta[@"album"] isKindOfClass:[NSString class]] ? meta[@"album"] : @"";
+    NSString *artistName = [meta[@"albumArtist"] isKindOfClass:[NSString class]] ? meta[@"albumArtist"] : @"";
+    if (!artistName.length && [meta[@"artist"] isKindOfClass:[NSString class]]) artistName = meta[@"artist"];
+
+    if (!albumName.length && [self.lastQueueJSON isKindOfClass:[NSDictionary class]]) {
+        NSArray *qItems = [self.lastQueueJSON[@"items"] isKindOfClass:[NSArray class]] ? self.lastQueueJSON[@"items"] : nil;
+        NSArray *qMetas = [self.lastQueueJSON[@"metas"] isKindOfClass:[NSArray class]] ? self.lastQueueJSON[@"metas"] : nil;
+        NSInteger idx = [self.lastQueueJSON[@"index"] respondsToSelector:@selector(integerValue)]
+            ? [self.lastQueueJSON[@"index"] integerValue] : -1;
+        if (idx >= 0 && qMetas && (NSUInteger)idx < qMetas.count &&
+            (!qItems || ((NSUInteger)idx < qItems.count && [qItems[(NSUInteger)idx] isEqual:self.currentPath]))) {
+            NSDictionary *qm = [qMetas[(NSUInteger)idx] isKindOfClass:[NSDictionary class]] ? qMetas[(NSUInteger)idx] : nil;
+            if ([qm[@"al"] isKindOfClass:[NSString class]]) albumName = qm[@"al"];
+            if (!artistName.length && [qm[@"a"] isKindOfClass:[NSString class]]) artistName = qm[@"a"];
+        }
+    }
+
+    if (albumName.length && self.albumsData.count) {
+        RLPAlbum *hit = nil;
+        for (RLPAlbum *a in self.albumsData) {
+            if (!a.key.length || ![a.name isEqualToString:albumName]) continue;
+            if (!artistName.length || !a.artist.length || [a.artist isEqualToString:artistName]) {
+                hit = a;
+                break;
+            }
+        }
+        if (!hit) {
+            for (RLPAlbum *a in self.albumsData) {
+                if (a.key.length && [a.name isEqualToString:albumName]) {
+                    hit = a;
+                    break;
+                }
+            }
+        }
+        if (hit.key.length) {
+            RLPRequestOpenAlbum(hit.key);
+            return;
+        }
+    }
+
+    if (!albumName.length) {
+        RLPToast(RLPTr(@"未找到当前曲目的所属专辑"));
+        return;
+    }
+
+    NSString *targetPath = [self.currentPath copy];
+    NSString *targetAlbum = [albumName copy];
+    NSString *targetArtist = [artistName copy];
+    NSString *url = [NSString stringWithFormat:@"/api/lib/albums?q=%@", RLPEnc(targetAlbum)];
+    __weak __typeof__(self) weakSelf = self;
+    [[RLPCoreClient shared] getJSON:url completion:^(NSDictionary * _Nullable json) {
+        __typeof__(self) self_ = weakSelf;
+        if (!self_ || ![targetPath isEqualToString:self_.currentPath ?: @""]) return;
+        NSArray *list = [json[@"albums"] isKindOfClass:[NSArray class]] ? json[@"albums"]
+            : ([json[@"items"] isKindOfClass:[NSArray class]] ? json[@"items"] : @[]);
+        NSDictionary *hit = nil;
+        for (NSDictionary *d in list) {
+            if (![d isKindOfClass:[NSDictionary class]]) continue;
+            NSString *nm = [d[@"name"] isKindOfClass:[NSString class]] ? d[@"name"]
+                : ([d[@"album"] isKindOfClass:[NSString class]] ? d[@"album"] : @"");
+            if (![nm isEqualToString:targetAlbum]) continue;
+            NSString *ar = [d[@"artist"] isKindOfClass:[NSString class]] ? d[@"artist"] : @"";
+            if (!targetArtist.length || !ar.length || [ar isEqualToString:targetArtist]) {
+                hit = d;
+                break;
+            }
+        }
+        if (!hit) {
+            for (NSDictionary *d in list) {
+                if (![d isKindOfClass:[NSDictionary class]]) continue;
+                NSString *nm = [d[@"name"] isKindOfClass:[NSString class]] ? d[@"name"]
+                    : ([d[@"album"] isKindOfClass:[NSString class]] ? d[@"album"] : @"");
+                if ([nm isEqualToString:targetAlbum]) {
+                    hit = d;
+                    break;
+                }
+            }
+        }
+        NSString *key = [hit[@"k"] isKindOfClass:[NSString class]] ? hit[@"k"]
+            : ([hit[@"key"] isKindOfClass:[NSString class]] ? hit[@"key"] : @"");
+        if (key.length) {
+            RLPRequestOpenAlbum(key);
+        } else {
+            RLPToast(RLPTr(@"未找到当前曲目的所属专辑"));
+        }
+    }];
 }
 
 - (void)onOpenQueue:(id)sender {
@@ -3774,7 +3879,8 @@ static NSInteger RLPRoomResolveQueueCurrentIndex(NSDictionary * _Nullable json, 
     }
     [self syncNowPlayingStateAndProgressForPath:(self.currentPath ?: @"")];
     [self syncNowPlayingSpec];
-    self.npOpenButton.title = RLPTr(@"打开曲目详情");
+    self.npOpenButton.title = RLPTr(@"打开专辑页");
+    self.npOpenButton.toolTip = RLPTr(@"打开当前曲目所属专辑页");
 
     self.queueCaption.stringValue = RLPTr(@"播放队列");
     self.queueAllButton.title = RLPTr(@"查看全部");
