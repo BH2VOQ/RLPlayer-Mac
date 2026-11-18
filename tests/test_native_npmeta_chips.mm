@@ -202,6 +202,70 @@ static NSColor *TextColorOf(NSButton *b) {
     return [c isKindOfClass:[NSColor class]] ? c : nil;
 }
 
+static void CheckChipGeometryAndIcon(NSButton *b) {
+    if (!b) return;
+    NSString *ident = b.identifier ?: @"(nil)";
+    Class chipCls = NSClassFromString(@"RLPMetaChipButton");
+    Ck(chipCls != Nil && [b isKindOfClass:chipCls],
+       "芯片使用 RLPMetaChipButton（自定义居中 cell）",
+       [NSString stringWithFormat:@"id=%@ cls=%@", ident, NSStringFromClass(b.class)]);
+    Ck(fabs(b.frame.size.height - 24.0) <= 0.5,
+       "芯片按钮高 24（web .chip line-height≈24）",
+       [NSString stringWithFormat:@"id=%@ frame=%@", ident, NSStringFromRect(b.frame)]);
+    Ck(b.image != nil,
+       "芯片带 SF Symbol 图标",
+       [NSString stringWithFormat:@"id=%@ image=nil", ident]);
+    if (b.image) {
+        NSImageSymbolConfiguration *symCfg = b.image.symbolConfiguration;
+        double symPt = 0.0;
+        BOOL hasSymPt = NO;
+        if (symCfg && [symCfg respondsToSelector:NSSelectorFromString(@"pointSize")]) {
+            id v = [symCfg valueForKey:@"pointSize"];
+            if ([v respondsToSelector:@selector(doubleValue)]) {
+                symPt = [v doubleValue];
+                hasSymPt = YES;
+            }
+        }
+        NSImageSymbolConfiguration *wantCfg =
+            [NSImageSymbolConfiguration configurationWithPointSize:10.5 weight:NSFontWeightMedium];
+        const BOOL ptOk = hasSymPt ? (symPt >= 10.0 && symPt <= 11.0)
+                                   : (symCfg != nil && [symCfg isEqual:wantCfg]);
+        Ck(ptOk,
+           "芯片图标配置 pointSize 10.5（允许 10–11，新设计替代旧 11×11 写死尺寸）",
+           [NSString stringWithFormat:@"id=%@ pt=%.2f hasPt=%d imgSize=%@ cfg=%@",
+            ident, symPt, hasSymPt, NSStringFromSize(b.image.size), symCfg]);
+    }
+
+    NSRect bounds = b.bounds;
+    NSRect iconRect = [b.cell imageRectForBounds:bounds];
+    NSRect titleRect = [b.cell titleRectForBounds:bounds];
+    NSString *rectDetail = [NSString stringWithFormat:@"id=%@ bounds=%@ iconRect=%@ titleRect=%@",
+                            ident, NSStringFromRect(bounds), NSStringFromRect(iconRect), NSStringFromRect(titleRect)];
+    Ck(!NSIsEmptyRect(iconRect) && !NSIsEmptyRect(titleRect),
+       "RLPMetaChipCell 计算出非空 iconRect 与 titleRect", rectDetail);
+    if (!NSIsEmptyRect(iconRect) && !NSIsEmptyRect(titleRect)) {
+        Ck(iconRect.size.width >= 8.0 && iconRect.size.width <= 12.0 &&
+           iconRect.size.height >= 8.0 && iconRect.size.height <= 12.0,
+           "渲染 iconRect 落在合理缩放区间（8–12pt，不拉伸变形）", rectDetail);
+        Ck(fabs(NSMidY(iconRect) - NSMidY(titleRect)) <= 1.0,
+           "iconRect 与 titleRect 垂直居中对齐（midY 差 <= 1）", rectDetail);
+        Ck(NSMinX(titleRect) >= NSMaxX(iconRect) + 3.5,
+           "iconRect 与 titleRect 水平不重叠（保留间距）", rectDetail);
+        NSAttributedString *attr = b.attributedTitle.length
+            ? b.attributedTitle
+            : [[NSAttributedString alloc] initWithString:(b.title ?: @"")
+                                              attributes:@{ NSFontAttributeName: (b.font ?: [NSFont systemFontOfSize:11.0]) }];
+        NSRect rawR = [attr boundingRectWithSize:NSMakeSize(CGFLOAT_MAX, CGFLOAT_MAX)
+                                         options:(NSStringDrawingUsesLineFragmentOrigin |
+                                                  NSStringDrawingTruncatesLastVisibleLine)
+                                         context:nil];
+        const double needW = ceil(rawR.size.width);
+        Ck(titleRect.size.width >= needW - 0.5 && NSMaxX(titleRect) <= NSWidth(bounds) - 7.5,
+           "芯片文本完整不截断（titleRect 容得下全文且不越出右侧内边距）",
+           [NSString stringWithFormat:@"%@ needW=%.1f", rectDetail, needW]);
+    }
+}
+
 static void Pump(double seconds) {
     [[NSRunLoop mainRunLoop] runUntilDate:[NSDate dateWithTimeIntervalSinceNow:seconds]];
 }
@@ -283,6 +347,13 @@ static void ScenarioBadgesAndChipsAt1180(void) {
     EqStr(ChipText(albumArtist), [NSString stringWithFormat:@"%@  Aimer", RLPTr(@"专辑艺术家")],
           "专辑艺术家徽标文案 = `专辑艺术家  Aimer`（两个空格）");
     EqStr(ChipText(enriched), RLPTr(@"已补全"), "「已补全」徽标文案");
+    for (NSButton *badge in @[ year, genre, albumArtist, enriched ]) {
+        const double needW = ceil(badge.attributedTitle.size.width);
+        Ck(badge.frame.size.width >= needW + 14.0 - 0.5,
+           "徽标宽度容得下全文+左右内边距（不截断）",
+           [NSString stringWithFormat:@"id=%@ frame=%@ needW=%.1f",
+            badge.identifier, NSStringFromRect(badge.frame), needW]);
+    }
 
     // ---- 来源提示：sources[key] 优先，缺失时「本地标签」----
     HasStr(year.toolTip, @"来源", "年份 tooltip 以「来源」开头（web esc('来源: ')）");
@@ -314,11 +385,8 @@ static void ScenarioBadgesAndChipsAt1180(void) {
     }
     EqStr(ChipText(eq), @"EQ", "EQ 芯片文案");
     EqStr(ChipText(ir), @"IR", "IR 芯片文案");
-    Ck(eq.image != nil && ir.image != nil,
-       "EQ/IR 芯片带 SF Symbol 图标（web `.chip` 内联 SVG 的同构）",
-       [NSString stringWithFormat:@"eq=%@ ir=%@", eq.image ? @"有" : @"nil", ir.image ? @"有" : @"nil"]);
-    Ck(eq.image == nil || (fabs(eq.image.size.width - 11.0) < 0.51 && fabs(eq.image.size.height - 11.0) < 0.51),
-       "图标尺寸 11×11（web SVG width=11 height=11）", @"图标尺寸不对");
+    CheckChipGeometryAndIcon(eq);
+    CheckChipGeometryAndIcon(ir);
     HasStr(eq.toolTip, @"test.txt", "EQ tooltip 含当前 EQ 文件名（basename）");
     HasStr(eq.toolTip, RLPTr(@"当前 EQ："), "EQ tooltip 以「当前 EQ：」开头（web 同文案）");
     HasStr(eq.toolTip, RLPTr(@"（点击打开 EQ 与房间校正）"), "EQ tooltip 含点击说明");
@@ -366,9 +434,8 @@ static void ScenarioBadgesAndChipsAt1180(void) {
     Ck(fabs(add.font.pointSize - 11.0) < 0.01 && fabs(LayerRadius(add) - 12.0) < 0.01 &&
        SameRGBA(LayerBg(add), t.bg3) && SameRGBA(LayerBorder(add), t.line),
        "加歌单芯片是 web .chip 度量（11pt/radius12/bg3/line）", @"度量不对");
-    Ck(cast.image != nil && add.image != nil,
-       "投放/加歌单芯片带图标（web `.chip` 内联 SVG：AirPlay / 加号）",
-       [NSString stringWithFormat:@"cast=%@ add=%@", cast.image ? @"有" : @"nil", add.image ? @"有" : @"nil"]);
+    CheckChipGeometryAndIcon(cast);
+    CheckChipGeometryAndIcon(add);
 
     // 点击加歌单 = 走既有保存路径（RLPShowSaveToPlaylist → /api/sq/list）。无窗口时生产码跳过弹层。
     [g_urls removeAllObjects];

@@ -242,85 +242,94 @@ int main() {
         RLPNowPlayingViewController *vc = [RLPNowPlayingViewController new];
         NSView *v = vc.view;
         v.frame = NSMakeRect(0, 0, 1400, 900);
+        NSView *panel = FindById(v, @"npAnal");
+        NSTextField *dynSumInit = panel ? (NSTextField *)FindById(panel, @"anl.dyn.sum") : nil;
+        NSString *dynBefore = dynSumInit
+            ? (dynSumInit.attributedStringValue.string.length ? dynSumInit.attributedStringValue.string : dynSumInit.stringValue)
+            : @"";
+        Ck([dynBefore isEqualToString:@"未播放"],
+           "初始未播放时摘要卡显示「未播放」",
+           [NSString stringWithFormat:@"got=「%@」", dynBefore ?: @""]);
+
         [vc setValue:@"/music/fixture.flac" forKey:@"currentPath"];
         // 生产取数入口：点「分析」= onAnlReanalyze（force=1）；桩同步回调 fixture。
         [vc onAnlReanalyze:nil];
         [vc layoutWebPlayback];
         [v layoutSubtreeIfNeeded];
 
-        NSView *panel = FindById(v, @"npAnal");
+        panel = FindById(v, @"npAnal");
         Ck(panel != nil && panel.frame.size.width > 100 && panel.frame.size.height > 100,
            "找得到音频分析面板 #npAnal 且已量到尺寸",
            NSStringFromRect(panel.frame));
         if (!panel) { std::printf("结果：FAIL（面板未构建）\n"); return 1; }
         Ck(!panel.hidden, "面板可见（否则几何全是假红）", @"panel.hidden=YES");
         const double panelW = panel.bounds.size.width;
+        const double panelH = panel.bounds.size.height;
 
         // ---------------------------------------------------------------
-        // ① 头部：独立标题（9.5/700/kern1.5）+ 右对齐状态（距右缘 13±1）
+        // ① 无头两段式（已按用户图三删除「音频分析」头部：npAnlLab / npAnlStat / npAnalHide 不存在）
+        //    顶部为分段栏 #npAnlSeg，其下为卡片区 #npAnlBody，两区不重叠。
         // ---------------------------------------------------------------
-        NSTextField *lab = (NSTextField *)FindById(panel, @"npAnlLab");
-        Ck(lab != nil, "头部有独立的「音频分析」标签 #npAnlLab（不再与状态合成一条）", @"npAnlLab 缺失");
-        if (lab) {
-            Ck([lab.stringValue isEqualToString:@"音频分析"], "标签文案就是「音频分析」",
-               [NSString stringWithFormat:@"got=「%@」", lab.stringValue ?: @""]);
-            Geo("anslab.font", 9.5, lab.font.pointSize, 0.3);
-            Ck(FontIsWeight(lab.font, NSFontWeightBold), "标签字重 700（web .anllab font-weight:700）",
-               [NSString stringWithFormat:@"trait=%@", [lab.font.fontDescriptor objectForKey:NSFontWeightTrait] ?: @"nil"]);
-            Geo("anslab.kern", 1.5, KernOf(lab), 0.15);
-            Geo("anslab.left", 12, NSMinX(lab.frame), 0.5);   // web: padding 11 + 1px border ⟹ 12（原生无边框，直接量 12）
-            {
-                // 字距 1.5 计入显示宽度：frame 必须容得下 attributed 宽，否则标题会变成「音频…」
-                double need = ceil(lab.attributedStringValue.size.width);
-                Ck(lab.frame.size.width >= need - 0.5, "标题不被字距撑破（frame ≥ attributed 宽）",
-                   [NSString stringWithFormat:@"frame=%.1f need=%.1f", lab.frame.size.width, need]);
-            }
+        NSView *lab = FindById(panel, @"npAnlLab");
+        id labKvc = [vc valueForKey:@"anlLab"];
+        Ck(lab == nil && labKvc == nil,
+           "旧头部标签 #npAnlLab / anlLab 已移除（find 与 KVC 均为 nil）",
+           [NSString stringWithFormat:@"find=%@ kvc=%@", lab, labKvc]);
+
+        NSView *stat = FindById(panel, @"npAnlStat");
+        id statKvc = [vc valueForKey:@"analysisStatus"];
+        Ck(stat == nil && statKvc == nil,
+           "旧头部状态 #npAnlStat / analysisStatus 已移除（find 与 KVC 均为 nil）",
+           [NSString stringWithFormat:@"find=%@ kvc=%@", stat, statKvc]);
+
+        NSView *anlHide = FindById(panel, @"npAnalHide");
+        id hideKvc = [vc valueForKey:@"anlHide"];
+        Ck(anlHide == nil && hideKvc == nil,
+           "旧收起键 #npAnalHide / anlHide 已移除（find 与 KVC 均为 nil）",
+           [NSString stringWithFormat:@"find=%@ kvc=%@", anlHide, hideKvc]);
+
+        NSView *anlSeg = FindById(panel, @"npAnlSeg");
+        NSView *segKvc = [vc valueForKey:@"anlSeg"];
+        NSView *anlBody = FindById(panel, @"npAnlBody");
+        NSView *bodyKvc = [vc valueForKey:@"anlBody"];
+        NSString *segBodyDetail = [NSString stringWithFormat:@"panel=%@ flipped=%d anlSeg=%@ anlBody=%@",
+                                   NSStringFromRect(panel.bounds), panel.isFlipped,
+                                   anlSeg ? NSStringFromRect(anlSeg.frame) : @"(nil)",
+                                   anlBody ? NSStringFromRect(anlBody.frame) : @"(nil)"];
+        Ck(anlSeg != nil && anlSeg == segKvc && !anlSeg.hidden && anlSeg.superview == panel,
+           "新分段容器 #npAnlSeg 存在且位于 analysisPanel 内可见", segBodyDetail);
+        Ck(anlBody != nil && anlBody == bodyKvc && !anlBody.hidden && anlBody.superview == panel,
+           "新卡片区容器 #npAnlBody 存在且位于 analysisPanel 内可见", segBodyDetail);
+        if (anlSeg && anlBody) {
+            const double segTopGap = panel.isFlipped ? NSMinY(anlSeg.frame) : (panelH - NSMaxY(anlSeg.frame));
+            const double bodyTopGap = panel.isFlipped ? NSMinY(anlBody.frame) : (panelH - NSMaxY(anlBody.frame));
+            const double gapSegBody = panel.isFlipped
+                ? (NSMinY(anlBody.frame) - NSMaxY(anlSeg.frame))
+                : (NSMinY(anlSeg.frame) - NSMaxY(anlBody.frame));
+            Ck(fabs(segTopGap - 11.0) <= 1.0 && fabs(NSHeight(anlSeg.frame) - 24.0) <= 0.5,
+               "anlSeg 位于 analysisPanel 顶部（距顶 11pt，高 24pt）", segBodyDetail);
+            Ck(fabs(NSMinX(anlSeg.frame) - 12.0) <= 0.5 && fabs((panelW - NSMaxX(anlSeg.frame)) - 12.0) <= 0.5,
+               "anlSeg 贴齐面板左右 12pt 内边距", segBodyDetail);
+            Ck(bodyTopGap > segTopGap && gapSegBody >= 7.0 && fabs(gapSegBody - 8.0) <= 1.0,
+               "anlBody 位于 anlSeg 下方（gap 8pt）", segBodyDetail);
+            Ck(NSIsEmptyRect(NSIntersectionRect(anlSeg.frame, anlBody.frame)),
+               "anlSeg 与 anlBody 几何不重叠", segBodyDetail);
         }
 
-        NSTextField *stat = (NSTextField *)FindById(panel, @"npAnlStat");
-        Ck(stat != nil, "状态文字 #npAnlStat 存在", @"npAnlStat 缺失");
-        if (stat) {
-            // web：`ui_page.h` 的 `.anlheadtop{padding-right:26px}`（1.1.4-beta6，为右上角 `.anlhide`
-            // 留位）+ `#npAnlStat{padding-right:2px}` + `#npAnal` padding-left/right 11 + **1px 边框**
-            // ⟹ 状态 frame 右缘距面板右缘 38。1.1.7.57 之前原生按「无边框」自洽成 37（差 1pt，
-            // 判据把这个偏差烘进了期望值）；本包把左/右内边距改 12（= web 的 11+1）后回到 38。
-            Geo("stat.rightGap", 38, panelW - NSMaxX(stat.frame), 0.5);   // web: 26 padding-right + 11 padding + 1px border ⟹ 38
-            Ck(stat.alignment == NSTextAlignmentRight, "状态文字右对齐（web text-align:right）",
-               [NSString stringWithFormat:@"alignment=%ld", (long)stat.alignment]);
-            Geo("stat.font", 10, stat.font.pointSize, 0.3);
-            {
-                double need = ceil([stat.stringValue sizeWithAttributes:@{ NSFontAttributeName: stat.font }].width);
-                Ck(stat.frame.size.width >= need - 0.5, "状态文字不被截断（frame 容得下全文）",
-                   [NSString stringWithFormat:@"frame=%.1f need=%.1f got=「%@」",
-                    stat.frame.size.width, need, stat.stringValue]);
-            }
-            {
-                // web 的 26px 右内边距就是给 `.anlhide` 留的：两枚元素不许在水平方向重叠。
-                NSView *anlHide = FindById(panel, @"npAnalHide");
-                Ck(anlHide != nil, "面板右上角有 web #npAnalHide 收起键", @"npAnalHide 缺失");
-                if (anlHide)
-                    // web `.anlhide{right:8px}` 相对 padding box；`#npAnal` 有 1px 边框 ⟹
-                    // 从面板外缘量 = 9pt（ego 实测 right=9）。1.1.7.58 起原生从 8 改 9。
-                    Geo("anlhide.rightGap", 9, panelW - NSMaxX(anlHide.frame), 0.5);
-                if (anlHide)
-                    Ck(NSMinX(anlHide.frame) >= NSMaxX(stat.frame) - 1.0,
-                       "收起键不压住状态文字（web .anlheadtop padding-right:26 的用途）",
-                       [NSString stringWithFormat:@"stat.maxX=%.1f hide.minX=%.1f",
-                        NSMaxX(stat.frame), NSMinX(anlHide.frame)]);
-            }
-            Ck(![stat.stringValue containsString:@"音频分析"],
-               "状态不再重复「音频分析」（标题已独立成一条）",
-               [NSString stringWithFormat:@"got=「%@」", stat.stringValue ?: @""]);
-        }
-        Ck(lab && stat && NSMinX(stat.frame) > NSMaxX(lab.frame) + 4,
-           "标题与状态分开占位（状态在右端）", @"");
-
-        // 三个动作：仍在同一行、同一分段容器内，且**恰好一个**带边框容器。
+        // 三个动作：仍在同一行、同一分段容器 #npAnlSeg 内，且**恰好一个**带边框容器。
         NSButton *autoBtn = (NSButton *)FindById(panel, @"npAnlAuto");
         NSButton *togBtn  = (NSButton *)FindById(panel, @"npAnlToggle");
         NSButton *runBtn  = (NSButton *)FindById(panel, @"npAnlRun");
         Ck(autoBtn && togBtn && runBtn, "npAnlAuto / npAnlToggle / npAnlRun 三个动作都在",
-           [NSString stringWithFormat:@"auto=%d toggle=%d run=%d", !!autoBtn, !!togBtn, !!runBtn]);
+           [NSString stringWithFormat:@"auto=%d toggle=%d run=%d %@", !!autoBtn, !!togBtn, !!runBtn, segBodyDetail]);
+        if (autoBtn && togBtn && runBtn) {
+            NSString *tAuto = autoBtn.attributedTitle.string.length ? autoBtn.attributedTitle.string : autoBtn.title;
+            NSString *tTog  = togBtn.attributedTitle.string.length  ? togBtn.attributedTitle.string  : togBtn.title;
+            NSString *tRun  = runBtn.attributedTitle.string.length  ? runBtn.attributedTitle.string  : runBtn.title;
+            Ck([tAuto isEqualToString:@"自动"] && [tTog isEqualToString:@"详细"] && [tRun isEqualToString:@"分析"],
+               "分段三段文案为「自动 / 详细 / 分析」",
+               [NSString stringWithFormat:@"auto=「%@」 tog=「%@」 run=「%@」", tAuto, tTog, tRun]);
+        }
         NSMutableArray<NSView *> *bordered = [NSMutableArray array];
         CollectAll(panel, bordered);
         NSInteger borderedWithAll = 0;
@@ -333,15 +342,15 @@ int main() {
                 ++borderedWithAll; segBox = n;
             }
         }
-        Ck(borderedWithAll == 1,
-           "恰好一个带边框容器同时包住三个动作（web .npseg 一个外框）",
-           [NSString stringWithFormat:@"found=%ld", (long)borderedWithAll]);
+        Ck(borderedWithAll == 1 && segBox == anlSeg,
+           "恰好一个带边框容器（#npAnlSeg）同时包住三个动作（web .npseg 一个外框）",
+           [NSString stringWithFormat:@"found=%ld same=%d %@", (long)borderedWithAll, segBox == anlSeg, segBodyDetail]);
         if (segBox) {
             Geo("npseg.radius", 9, LayerRadius(segBox), 1.0);
             Ck(BorderWidth(segBox) >= 1, "分段容器有外框（borderWidth>0）",
-               [NSString stringWithFormat:@"%.1f", BorderWidth(segBox)]);
+               [NSString stringWithFormat:@"%.1f %@", BorderWidth(segBox), segBodyDetail]);
             Ck(autoBtn.superview == segBox && togBtn.superview == segBox && runBtn.superview == segBox,
-               "三段直接位于同一容器内（不是各自带边框的药丸）", @"");
+               "三段直接位于同一容器内（不是各自带边框的药丸）", segBodyDetail);
             // 相邻段之间 ≤1（web 是 1px 发丝分隔，没有留白）
             NSArray<NSButton *> *acts = @[autoBtn, togBtn, runBtn];
             for (NSUInteger i = 0; i + 1 < acts.count; ++i)
@@ -350,6 +359,13 @@ int main() {
                 Geo("npseg.font", 10.5, b.font.pointSize, 0.3);
                 Ck(FontIsWeight(b.font, NSFontWeightSemibold), "分段文字 600（web .npseg>b font-weight:600）",
                    [NSString stringWithFormat:@"%.1fpt", b.font.pointSize]);
+                const double needW = ceil(b.attributedTitle.length
+                    ? b.attributedTitle.size.width
+                    : [b.title sizeWithAttributes:@{NSFontAttributeName: b.font}].width);
+                Ck(b.frame.size.width >= needW - 0.5 && NSMaxX(b.frame) <= NSWidth(segBox.bounds) + 0.5,
+                   "分段按钮宽度容得下文字且不超出分段容器",
+                   [NSString stringWithFormat:@"btn=%@ frame=%@ need=%.1f %@",
+                    b.identifier, NSStringFromRect(b.frame), needW, segBodyDetail]);
             }
         }
 
@@ -394,6 +410,11 @@ int main() {
             Geo("anlcs.font", 11.5, sum.font.pointSize, 0.3);
             // 摘要行距：web line-height:1.45 ⟹ 每行 16.675pt。段落样式必须真的设了它。
             NSAttributedString *as = sum.attributedStringValue;
+            NSString *sumText = as.length ? as.string : (sum.stringValue ?: @"");
+            Ck(sumText.length > 0 && ![sumText isEqualToString:@"未播放"] &&
+               ![sumText isEqualToString:@"未分析"] && ![sumText containsString:@"分析失败"],
+               "摘要卡已更新为真实体检结论（非未播放/未分析/空串）",
+               [NSString stringWithFormat:@"%@ got=「%@」", key, sumText]);
             NSParagraphStyle *ps = as.length ? [as attribute:NSParagraphStyleAttributeName
                                                      atIndex:0 effectiveRange:NULL] : nil;
             Ck(ps != nil, "摘要带段落样式（行距来自 web line-height）", @"段落样式缺失");
@@ -740,6 +761,13 @@ int main() {
            "「自动」段仍然真的把 autoanl 写回后端（行为未变）",
            [NSString stringWithFormat:@"body=「%@」", lastBody]);
         Ck([[vc valueForKey:@"anlAutoEnabled"] boolValue], "自动开关状态已置为开", @"");
+        if (autoBtn) {
+            NSString *autoTitle = autoBtn.attributedTitle.string.length ? autoBtn.attributedTitle.string : autoBtn.title;
+            Ck(autoBtn.state == NSControlStateValueOn &&
+               [autoTitle containsString:@"●"] && [autoTitle containsString:@"自动"],
+               "「自动」分段同步更新为开启态（● 自动 + NSControlStateValueOn）",
+               [NSString stringWithFormat:@"state=%ld title=「%@」", (long)autoBtn.state, autoTitle ?: @""]);
+        }
 
         NSString *lastHealth = nil;
         for (NSString *u in g_getURLs) if ([u hasPrefix:@"/api/track/health"]) lastHealth = u;
@@ -750,33 +778,56 @@ int main() {
            [NSString stringWithFormat:@"gets=%lu", (unsigned long)g_getURLs.count]);
 
         // ---------------------------------------------------------------
-        // ⑦ 生产默认窗口 1180×760：头部三件东西在窄面板里也不能被截断。
+        // ⑦ 生产默认窗口 1180×760：无头部下 npAnlSeg 贴齐左右内边距，且与 npAnlBody 不重叠、分段文字不截断。
         // ---------------------------------------------------------------
         {
             v.frame = NSMakeRect(0, 0, 1180, 760);
             [vc layoutWebPlayback];
             [v layoutSubtreeIfNeeded];
-            NSTextField *lab2 = (NSTextField *)FindById(panel, @"npAnlLab");
-            NSTextField *stat2 = (NSTextField *)FindById(panel, @"npAnlStat");
+            NSView *lab2 = FindById(panel, @"npAnlLab");
+            NSView *stat2 = FindById(panel, @"npAnlStat");
+            NSView *hide2 = FindById(panel, @"npAnalHide");
             NSView *seg2 = FindById(panel, @"npAnlSeg");
+            NSView *body2 = FindById(panel, @"npAnlBody");
             const double pw = panel.bounds.size.width;
-            Ck(lab2 && lab2.frame.size.width >= ceil(lab2.attributedStringValue.size.width) - 0.5,
-               "1180 窗口下面板标题仍完整（不被截断）",
-               [NSString stringWithFormat:@"panel=%.1f frame=%.1f need=%.1f", pw,
-                lab2.frame.size.width, lab2.attributedStringValue.size.width]);
-            // 同 279 行：web `.anlheadtop` 的 26px 右内边距 + 面板 11 ⟹ 37（旧码漏算 26 写成 13）。
-            Ck(stat2 && fabs(NSMaxX(stat2.frame) - (pw - 37)) <= 1.0,
-               "1180 窗口下状态仍贴右（距面板右缘 37±1，web .anlheadtop padding-right:26）",
-               [NSString stringWithFormat:@"panel=%.1f right=%.1f", pw, NSMaxX(stat2.frame)]);
-            Ck(seg2 && NSMaxX(seg2.frame) <= pw - 11 + 0.5 && NSMaxX(seg2.frame) >= pw - 12,
-               "1180 窗口下分段控件右端贴齐面板内容右缘（11px 内边距）",
-               [NSString stringWithFormat:@"panel=%.1f segRight=%.1f", pw, NSMaxX(seg2.frame)]);
+            const double ph = panel.bounds.size.height;
+            NSString *geom2 = [NSString stringWithFormat:@"panel=%@ anlSeg=%@ anlBody=%@",
+                               NSStringFromRect(panel.bounds),
+                               seg2 ? NSStringFromRect(seg2.frame) : @"(nil)",
+                               body2 ? NSStringFromRect(body2.frame) : @"(nil)"];
+            Ck(lab2 == nil && stat2 == nil && hide2 == nil &&
+               [vc valueForKey:@"anlLab"] == nil &&
+               [vc valueForKey:@"analysisStatus"] == nil &&
+               [vc valueForKey:@"anlHide"] == nil,
+               "1180 窗口下旧头部控件仍不存在（find 与 KVC 均为 nil）", geom2);
+            Ck(seg2 != nil && body2 != nil && !seg2.hidden && !body2.hidden,
+               "1180 窗口下 npAnlSeg 与 npAnlBody 存在且可见", geom2);
+            if (seg2 && body2) {
+                const double segTopGap2 = panel.isFlipped ? NSMinY(seg2.frame) : (ph - NSMaxY(seg2.frame));
+                const double gap2 = panel.isFlipped
+                    ? (NSMinY(body2.frame) - NSMaxY(seg2.frame))
+                    : (NSMinY(seg2.frame) - NSMaxY(body2.frame));
+                Ck(fabs(NSMinX(seg2.frame) - 12.0) <= 0.5 && fabs((pw - NSMaxX(seg2.frame)) - 12.0) <= 0.5,
+                   "1180 窗口下 npAnlSeg 贴齐面板左右内边距（12pt）", geom2);
+                Ck(fabs(segTopGap2 - 11.0) <= 1.0 && fabs(NSHeight(seg2.frame) - 24.0) <= 0.5,
+                   "1180 窗口下 npAnlSeg 仍在分析面板顶部（距顶 11pt，高 24pt）", geom2);
+                Ck(gap2 >= 7.0 && NSIsEmptyRect(NSIntersectionRect(seg2.frame, body2.frame)),
+                   "1180 窗口下 npAnlBody 在 npAnlSeg 下方且不重叠", geom2);
+                for (NSButton *b in @[autoBtn, togBtn, runBtn]) {
+                    const double needW = ceil(b.attributedTitle.length
+                        ? b.attributedTitle.size.width
+                        : [b.title sizeWithAttributes:@{NSFontAttributeName: b.font}].width);
+                    Ck(b.frame.size.width >= needW - 0.5 && NSMaxX(b.frame) <= NSWidth(seg2.bounds) + 0.5,
+                       "1180 窗口下分段按钮不截断且不越出分段容器",
+                       [NSString stringWithFormat:@"btn=%@ frame=%@ need=%.1f %@",
+                        b.identifier, NSStringFromRect(b.frame), needW, geom2]);
+                }
+            }
         }
 
         // ---------------------------------------------------------------
-        // ⑧ U10 完整性：后端判 incomplete 时，状态串必须说「文件可能不完整」，
-        //    三张摘要卡不许把"分析成功但文件可能短了一截"说成「分析未完成」。
-        //    （后端 note 的"首行原样展示"在详情文本路径上，由 test_analysis_row 的纯函数用例钉住。）
+        // ⑧ U10 完整性：头部已删 ⟹ 不再有独立状态串（npAnlStat/analysisStatus 均为 nil），
+        //    但三张摘要卡与健康态必须真实落盘，且不得把 incomplete 说成「分析未完成」或空串。
         // ---------------------------------------------------------------
         {
             NSMutableDictionary *inc = [AnlFixtureHealth() mutableCopy];
@@ -790,21 +841,52 @@ int main() {
             [vc onAnlReanalyze:nil];
             [vc layoutWebPlayback];
             [v layoutSubtreeIfNeeded];
+
+            NSView *segU10 = FindById(panel, @"npAnlSeg");
+            NSView *bodyU10 = FindById(panel, @"npAnlBody");
+            NSString *u10Geom = [NSString stringWithFormat:@"anlSeg=%@ anlBody=%@",
+                                 segU10 ? NSStringFromRect(segU10.frame) : @"(nil)",
+                                 bodyU10 ? NSStringFromRect(bodyU10.frame) : @"(nil)"];
             NSTextField *statU10 = (NSTextField *)FindById(panel, @"npAnlStat");
-            Ck(statU10 != nil && [statU10.stringValue isEqualToString:@"文件可能不完整"],
-               "U10 状态串：incomplete ⟹「文件可能不完整」（不是「已分析」也不是「分析失败」）",
-               [NSString stringWithFormat:@"got=「%@」", statU10.stringValue ?: @""]);
-            // 卡片标识由 setCardKey 派生：「anl.fake」⟹ 摘要标签是「anl.fake.sum」。
-            NSView *fakeCard = FindById(panel, @"anl.fake");
-            NSTextField *fakeSumLab = (NSTextField *)FindById(fakeCard, @"anl.fake.sum");
-            NSString *fakeSum = nil;
-            if ([fakeSumLab isKindOfClass:[NSTextField class]]) {
-                NSAttributedString *as = fakeSumLab.attributedStringValue;
-                fakeSum = as.string.length ? as.string : fakeSumLab.stringValue;
+            Ck(statU10 == nil && [vc valueForKey:@"analysisStatus"] == nil,
+               "U10 独立状态串已随头部移除（npAnlStat 与 analysisStatus 均为 nil）", u10Geom);
+
+            NSDictionary *curHealth = [vc valueForKey:@"anlHealth"];
+            Ck([curHealth isKindOfClass:[NSDictionary class]] &&
+               [curHealth[@"status"] isEqualToString:@"incomplete"],
+               "U10 incomplete 响应已落盘到 anlHealth",
+               [NSString stringWithFormat:@"status=%@ %@", curHealth[@"status"] ?: @"(nil)", u10Geom]);
+
+            NSString *(^cardSummary)(NSString *) = ^NSString *(NSString *cardId) {
+                NSView *card = FindById(panel, cardId);
+                NSTextField *sumLab = (NSTextField *)FindById(card, [cardId stringByAppendingString:@".sum"]);
+                if (![sumLab isKindOfClass:[NSTextField class]]) return nil;
+                NSAttributedString *as = sumLab.attributedStringValue;
+                return as.string.length ? as.string : sumLab.stringValue;
+            };
+            NSString *dynSumU10 = cardSummary(@"anl.dyn");
+            NSString *qualSumU10 = cardSummary(@"anl.qual");
+            NSString *fakeSumU10 = cardSummary(@"anl.fake");
+            NSString *runTipU10 = runBtn.toolTip ?: @"";
+            NSString *u10Detail = [NSString stringWithFormat:@"dyn=「%@」 qual=「%@」 fake=「%@」 runTip=「%@」 %@",
+                                   dynSumU10 ?: @"(nil)", qualSumU10 ?: @"(nil)", fakeSumU10 ?: @"(nil)", runTipU10, u10Geom];
+            Ck(dynSumU10.length > 0 && qualSumU10.length > 0 && fakeSumU10.length > 0,
+               "U10 三张摘要卡均给出非空数据卡文案（不以空串通过）", u10Detail);
+            for (NSString *sum in @[dynSumU10 ?: @"", qualSumU10 ?: @"", fakeSumU10 ?: @""]) {
+                Ck(![sum containsString:@"未分析"] && ![sum containsString:@"分析失败"] && ![sum containsString:@"未播放"],
+                   "U10 数据卡文案不是未分析/失败/未播放回退", u10Detail);
             }
-            Ck(fakeSum != nil && ![fakeSum containsString:@"分析未完成"],
+            Ck(fakeSumU10 != nil && ![fakeSumU10 containsString:@"分析未完成"],
                "U10 摘要：incomplete 不被说成「分析未完成」（前端若这么说，用户会去重跑而不是等拷贝）",
-               [NSString stringWithFormat:@"got=「%@」", fakeSum ?: @"(nil)"]);
+               [NSString stringWithFormat:@"got=「%@」 %@", fakeSumU10 ?: @"(nil)", u10Geom]);
+            NSTextField *dynBadgeU10 = (NSTextField *)FindById(panel, @"anl.dyn.badge");
+            Ck(dynBadgeU10 && !dynBadgeU10.hidden && [dynBadgeU10.stringValue isEqualToString:@"多声道 6 ch"],
+               "U10 数据卡徽标仍随 health 更新（多声道 6 ch）",
+               [NSString stringWithFormat:@"badge=「%@」 %@", dynBadgeU10.stringValue ?: @"(nil)", u10Geom]);
+            if (runTipU10.length > 0) {
+                Ck(![runTipU10 containsString:@"分析失败"] && ![runTipU10 containsString:@"未分析"],
+                   "U10 npAnlRun tooltip 若存在也不误报失败/未分析", u10Detail);
+            }
         }
 
         std::printf("结果：%d passed, %d failed\n", g_pass, g_fail);
