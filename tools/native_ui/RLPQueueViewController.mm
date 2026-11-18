@@ -91,6 +91,11 @@ static const void *kRLPQueueDeletePathKey = &kRLPQueueDeletePathKey;
 @property (nonatomic, assign) BOOL dragSessionActive;
 @property (nonatomic, copy) NSString *lastPlayKey;
 @property (nonatomic, assign) NSTimeInterval lastPlayAt;
+@property (nonatomic, strong, nullable) NSTimer *poll;
+@property (nonatomic, assign) NSUInteger inflightSeq;
+@property (nonatomic, assign) BOOL pendingScrollToCurrent;
+@property (nonatomic, copy, nullable) NSDictionary *lastStatus;
+@property (nonatomic, copy) NSString *lastStatusPath;
 - (void)restoreSortSelection:(NSString *)key;
 - (void)savePlaylistNamed:(NSString *)name;
 - (void)applyQueueSnapshot:(NSDictionary *)json;
@@ -103,21 +108,175 @@ static const void *kRLPQueueDeletePathKey = &kRLPQueueDeletePathKey;
     if (self) {
         _paths = @[]; _metas = @[]; _cues = @[]; _currentIndex = -1; _hoveredRow = -1;
         _sortKey = @"default";
+        _lastStatusPath = @"";
         [[NSNotificationCenter defaultCenter] addObserver:self
                                                  selector:@selector(onExternalQueueChanged:)
                                                      name:RLPQueueChangedNotification
+                                                   object:nil];
+        [[NSNotificationCenter defaultCenter] addObserver:self
+                                                 selector:@selector(onPlaybackStatusNotification:)
+                                                     name:@"RLPPlaybackStatusNotification"
+                                                   object:nil];
+        [[NSNotificationCenter defaultCenter] addObserver:self
+                                                 selector:@selector(onPlaybackActionCompleted:)
+                                                     name:@"RLPPlaybackActionCompletedNotification"
                                                    object:nil];
     }
     return self;
 }
 
 - (void)dealloc {
+    [_poll invalidate];
+    _poll = nil;
     [[NSNotificationCenter defaultCenter] removeObserver:self];
+}
+
+static NSDictionary * _Nullable RLPQueueStatusDictionaryFromNotification(NSNotification *note) {
+    if ([note.object isKindOfClass:[NSDictionary class]]) {
+        return (NSDictionary *)note.object;
+    }
+    if ([note.object isKindOfClass:[RLPPlaybackStatus class]]) {
+        RLPPlaybackStatus *ps = (RLPPlaybackStatus *)note.object;
+        return @{
+            @"playing": @(ps.playing),
+            @"paused": @(ps.paused),
+            @"position": @(ps.position),
+            @"duration": @(ps.duration),
+            @"current": ps.currentPath ?: @"",
+            @"currentPath": ps.currentPath ?: @"",
+        };
+    }
+    NSDictionary *ui = note.userInfo;
+    if ([ui isKindOfClass:[NSDictionary class]]) {
+        if ([ui[@"status"] isKindOfClass:[NSDictionary class]]) {
+            return (NSDictionary *)ui[@"status"];
+        }
+        if (ui[@"currentPath"] || ui[@"path"] || ui[@"file"] ||
+            ui[@"playing"] || ui[@"paused"] ||
+            ui[@"index"] || ui[@"queueIndex"] || ui[@"current"] || ui[@"cur"]) {
+            return ui;
+        }
+    }
+    return nil;
+}
+
+static NSString *RLPQueueStatusPath(NSDictionary * _Nullable st) {
+    if (![st isKindOfClass:[NSDictionary class]]) return @"";
+    for (NSString *k in @[ @"current", @"currentPath", @"path", @"file" ]) {
+        id v = st[k];
+        if ([v isKindOfClass:[NSString class]] && [(NSString *)v length]) return (NSString *)v;
+    }
+    return @"";
+}
+
+static BOOL RLPQueueStatusValueChanged(id _Nullable a, id _Nullable b) {
+    if (a == [NSNull null]) a = nil;
+    if (b == [NSNull null]) b = nil;
+    if (!a && !b) return NO;
+    if (!a || !b) return YES;
+    return ![a isEqual:b];
+}
+
+static BOOL RLPQueueStatusHintChanged(NSDictionary * _Nullable prev, NSDictionary * _Nullable cur) {
+    if (!prev || !cur) return NO;
+    NSArray<NSString *> *keys = @[
+        @"index", @"queueIndex", @"qIndex", @"currentIndex", @"current", @"cur",
+        @"currentPath", @"path", @"file",
+        @"cueStart", @"cue_start", @"cueEnd", @"cue_end",
+        @"queueVersion", @"queueSeq", @"qver", @"queueCount", @"qCount"
+    ];
+    for (NSString *k in keys) {
+        if (RLPQueueStatusValueChanged(prev[k], cur[k])) return YES;
+    }
+    return NO;
+}
+
+static NSInteger RLPQueueResolveCurrentIndex(NSDictionary * _Nullable json, NSArray<NSString *> *paths) {
+    if (![json isKindOfClass:[NSDictionary class]] || !paths.count) return -1;
+    NSArray<NSString *> *keys = @[ @"current", @"cur", @"index" ];
+    id raw = nil;
+    for (NSString *k in keys) {
+        id v = json[k];
+        if (v != nil && v != [NSNull null]) {
+            raw = v;
+            break;
+        }
+    }
+    if (!raw || raw == [NSNull null]) return -1;
+    if ([raw isKindOfClass:[NSDictionary class]]) {
+        NSDictionary *d = (NSDictionary *)raw;
+        if (d[@"index"] != nil && d[@"index"] != [NSNull null]) raw = d[@"index"];
+        else if (d[@"path"] != nil && d[@"path"] != [NSNull null]) raw = d[@"path"];
+        else if (d[@"file"] != nil && d[@"file"] != [NSNull null]) raw = d[@"file"];
+        else return -1;
+    }
+    if ([raw isKindOfClass:[NSNumber class]]) {
+        if (CFGetTypeID((__bridge CFTypeRef)raw) == CFBooleanGetTypeID()) return -1;
+        const NSInteger idx = [raw integerValue];
+        return (idx >= 0 && idx < (NSInteger)paths.count) ? idx : -1;
+    }
+    if ([raw isKindOfClass:[NSString class]]) {
+        NSString *s = (NSString *)raw;
+        if (!s.length) return -1;
+        NSUInteger exact = [paths indexOfObject:s];
+        if (exact != NSNotFound) return (NSInteger)exact;
+        NSString *norm = RLPFavNormalizePath(s);
+        if (norm.length) {
+            for (NSUInteger i = 0; i < paths.count; ++i) {
+                if (paths[i].length && [RLPFavNormalizePath(paths[i]) isEqualToString:norm]) {
+                    return (NSInteger)i;
+                }
+            }
+        }
+        const char *utf8 = s.UTF8String;
+        if (utf8 && utf8[0] >= '0' && utf8[0] <= '9') {
+            char *end = NULL;
+            long parsed = strtol(utf8, &end, 10);
+            if (end != utf8 && *end == '\0' && parsed >= 0 && parsed < (long)paths.count) {
+                return (NSInteger)parsed;
+            }
+        }
+        return -1;
+    }
+    return -1;
 }
 
 - (void)onExternalQueueChanged:(NSNotification *)note {
     if (note.object == self) return;
     if (![RLPCoreClient shared].started) return;
+    [self reloadData];
+}
+
+- (void)onPlaybackStatusNotification:(NSNotification *)note {
+    if (!self.isViewLoaded || ![RLPCoreClient shared].started) return;
+    NSDictionary *st = RLPQueueStatusDictionaryFromNotification(note);
+    if (st) {
+        self.isPlayingNow = [st[@"playing"] respondsToSelector:@selector(boolValue)] &&
+                            [st[@"playing"] boolValue] &&
+                            !([st[@"paused"] respondsToSelector:@selector(boolValue)] &&
+                              [st[@"paused"] boolValue]);
+        NSDictionary *prev = self.lastStatus;
+        NSString *prevPath = self.lastStatusPath ?: @"";
+        NSString *newPath = RLPQueueStatusPath(st);
+        const BOOL pathChanged = ![newPath isEqualToString:prevPath];
+        const BOOL hintChanged = RLPQueueStatusHintChanged(prev, st);
+        NSString *curQueuePath = (self.currentIndex >= 0 && self.currentIndex < (NSInteger)self.paths.count)
+            ? self.paths[(NSUInteger)self.currentIndex] : @"";
+        const BOOL pathMismatchWithQueue = (newPath.length > 0 && self.hasLoaded &&
+                                            ![newPath isEqualToString:curQueuePath] && prev == nil);
+        self.lastStatus = st;
+        self.lastStatusPath = newPath;
+        if (!self.hasLoaded || pathChanged || hintChanged || pathMismatchWithQueue) {
+            [self reloadData];
+        }
+        return;
+    }
+    [self reloadData];
+}
+
+- (void)onPlaybackActionCompleted:(NSNotification *)note {
+    (void)note;
+    if (!self.isViewLoaded || ![RLPCoreClient shared].started) return;
     [self reloadData];
 }
 
@@ -263,6 +422,12 @@ static const void *kRLPQueueDeletePathKey = &kRLPQueueDeletePathKey;
     if (clip.width < 1 || clip.height < 1) return;
     [self syncTableWidth];
     [self layoutQueueColumnsForWidth:clip.width];
+    if (self.pendingScrollToCurrent &&
+        self.currentIndex >= 0 &&
+        self.currentIndex < self.table.numberOfRows) {
+        self.pendingScrollToCurrent = NO;
+        [self.table scrollRowToVisible:self.currentIndex];
+    }
 }
 
 #pragma mark - 行悬停（web .qrow:hover；× 仅悬停时显示）
@@ -1047,6 +1212,27 @@ static NSString *RLPQueueMetaText(NSDictionary *m, NSString *k,
     // 排序/拖动请求的在途标志交给各自的完成回调清（与 deleteInFlight 同口径）。
     self.dragSessionActive = NO;
     [self reloadData];
+    if (!self.poll && [RLPCoreClient shared].started) {
+        __weak __typeof__(self) weakSelf = self;
+        self.poll = [NSTimer scheduledTimerWithTimeInterval:1.0 repeats:YES block:^(NSTimer *t) {
+            (void)t;
+            [weakSelf reloadDataFromTimer];
+        }];
+    }
+}
+
+- (void)viewDidDisappear {
+    [self.poll invalidate];
+    self.poll = nil;
+    ++self.seq;
+    self.inflightSeq = 0;
+    [super viewDidDisappear];
+}
+
+- (void)reloadDataFromTimer {
+    if (self.inflightSeq != 0 && self.inflightSeq == self.seq) return;
+    if (self.sortInFlight || self.moveInFlight || self.dragSessionActive || self.deleteInFlight) return;
+    [self reloadData];
 }
 
 /// 让表格宽度严格等于滚动视口宽度（见 viewDidLayout 注释）。
@@ -1061,6 +1247,27 @@ static NSString *RLPQueueMetaText(NSDictionary *m, NSString *k,
     if (!NSEqualRects(f, self.table.frame)) self.table.frame = f;
 }
 
+- (void)syncTableSelectionAndScrollIfNeeded:(BOOL)shouldScroll {
+    if (!self.table) return;
+    const NSInteger nRows = self.table.numberOfRows;
+    if (self.currentIndex >= 0 && self.currentIndex < nRows) {
+        [self.table selectRowIndexes:[NSIndexSet indexSetWithIndex:(NSUInteger)self.currentIndex]
+                byExtendingSelection:NO];
+        if (shouldScroll) {
+            [self.table tile];
+            if (self.tableScroll && self.tableScroll.contentSize.height >= 1.0) {
+                self.pendingScrollToCurrent = NO;
+                [self.table scrollRowToVisible:self.currentIndex];
+            } else {
+                self.pendingScrollToCurrent = YES;
+            }
+        }
+    } else {
+        self.pendingScrollToCurrent = NO;
+        [self.table deselectAll:nil];
+    }
+}
+
 - (void)applyQueueSnapshot:(NSDictionary *)json {
     // 与 reloadData 同一道闸：在途重排/拖动期间，旧快照（包括 savePlaylistNamed
     // 直接调进来的实时校验快照）不得落到表格。
@@ -1068,12 +1275,9 @@ static NSString *RLPQueueMetaText(NSDictionary *m, NSString *k,
     NSArray *items = [json[@"items"] isKindOfClass:[NSArray class]] ? json[@"items"] : @[];
     NSMutableArray<NSString *> *ps = [NSMutableArray array];
     for (id x in items) if ([x isKindOfClass:[NSString class]] && [(NSString *)x length]) [ps addObject:x];
-    self.paths = ps;
-    if (self.hoveredRow >= (NSInteger)ps.count) self.hoveredRow = -1;
     NSArray *ms = [json[@"metas"] isKindOfClass:[NSArray class]] ? json[@"metas"] : @[];
     NSMutableArray<NSDictionary *> *mm = [NSMutableArray array];
     for (id x in ms) [mm addObject:[x isKindOfClass:[NSDictionary class]] ? x : @{}];
-    self.metas = mm;
     // web S.q.cues：排序与播放都靠它保住 CUE 分轨区间。
     NSArray *cs = [json[@"cues"] isKindOfClass:[NSArray class]] ? json[@"cues"] : @[];
     NSMutableArray<NSArray<NSNumber *> *> *cc = [NSMutableArray array];
@@ -1087,9 +1291,44 @@ static NSString *RLPQueueMetaText(NSDictionary *m, NSString *k,
             [cc addObject:@[ @(-1), @(-1) ]];
         }
     }
+    const NSInteger newCurrentIndex = RLPQueueResolveCurrentIndex(json, ps);
+    const NSInteger newMode = [json[@"mode"] respondsToSelector:@selector(integerValue)] ? [json[@"mode"] integerValue] : 0;
+
+    const BOOL wasLoaded = self.hasLoaded;
+    const NSInteger prevIndex = self.currentIndex;
+    NSString *prevCurPath = (prevIndex >= 0 && prevIndex < (NSInteger)self.paths.count)
+        ? self.paths[(NSUInteger)prevIndex] : @"";
+    NSString *newCurPath = (newCurrentIndex >= 0 && newCurrentIndex < (NSInteger)ps.count)
+        ? ps[(NSUInteger)newCurrentIndex] : @"";
+
+    const BOOL contentChanged = !wasLoaded ||
+                                ![ps isEqualToArray:self.paths] ||
+                                ![mm isEqualToArray:self.metas] ||
+                                ![cc isEqualToArray:self.cues] ||
+                                newCurrentIndex != prevIndex ||
+                                newMode != self.mode;
+    const BOOL currentChanged = !wasLoaded ||
+                                (newCurrentIndex != prevIndex) ||
+                                ![newCurPath isEqualToString:prevCurPath];
+
+    if (!contentChanged) {
+        if (newCurrentIndex >= 0 && newCurrentIndex < self.table.numberOfRows) {
+            if (self.table.selectedRow != newCurrentIndex) {
+                [self.table selectRowIndexes:[NSIndexSet indexSetWithIndex:(NSUInteger)newCurrentIndex]
+                        byExtendingSelection:NO];
+            }
+        } else if (self.table.selectedRowIndexes.count > 0) {
+            [self.table deselectAll:nil];
+        }
+        return;
+    }
+
+    self.paths = ps;
+    if (self.hoveredRow >= (NSInteger)ps.count) self.hoveredRow = -1;
+    self.metas = mm;
     self.cues = cc;
-    self.currentIndex = [json[@"index"] respondsToSelector:@selector(integerValue)] ? [json[@"index"] integerValue] : -1;
-    self.mode = [json[@"mode"] respondsToSelector:@selector(integerValue)] ? [json[@"mode"] integerValue] : 0;
+    self.currentIndex = newCurrentIndex;
+    self.mode = newMode;
     self.hasLoaded = YES;
     [self.table reloadData];
     self.empty.hidden = ps.count > 0;
@@ -1099,6 +1338,7 @@ static NSString *RLPQueueMetaText(NSDictionary *m, NSString *k,
     [self setSubtitle:[NSString stringWithFormat:RLPTr(@"%ld 首 · 当前第 %ld 首 · %@"),
                        (long)ps.count, (long)(self.currentIndex + 1), mn]];
     [self syncTableWidth];
+    [self syncTableSelectionAndScrollIfNeeded:currentChanged];
 }
 
 - (void)reloadData {
@@ -1111,13 +1351,18 @@ static NSString *RLPQueueMetaText(NSDictionary *m, NSString *k,
     // 各操作的完成回调（以及拖动结束）会补拉一次。
     if (self.sortInFlight || self.moveInFlight || self.dragSessionActive) return;
     const NSUInteger seq = ++self.seq;
+    self.inflightSeq = seq;
     __weak __typeof__(self) weakSelf = self;
     [[RLPCoreClient shared] getJSON:@"/api/queue?meta=1" completion:^(NSDictionary * _Nullable json) {
         __typeof__(self) self_ = weakSelf;
-        if (!self_ || seq != self_.seq) return;
-        if (![json isKindOfClass:[NSDictionary class]] ||
-            ![json[@"ok"] respondsToSelector:@selector(boolValue)] ||
-            ![json[@"ok"] boolValue]) {
+        if (!self_) return;
+        if (seq == self_.inflightSeq) self_.inflightSeq = 0;
+        if (seq != self_.seq) return;
+        const BOOL okFlag = [json isKindOfClass:[NSDictionary class]] &&
+                            (!json[@"ok"] || ([json[@"ok"] respondsToSelector:@selector(boolValue)] &&
+                                              [json[@"ok"] boolValue])) &&
+                            [json[@"items"] isKindOfClass:[NSArray class]];
+        if (!okFlag) {
             [self_ setSubtitle:RLPTr(@"读取失败")];
             return;
         }
@@ -1126,11 +1371,18 @@ static NSString *RLPQueueMetaText(NSDictionary *m, NSString *k,
         [[RLPCoreClient shared] getJSON:@"/api/status" completion:^(NSDictionary * _Nullable st) {
             __typeof__(self) s3 = weakSelf;
             if (!s3 || seq != s3.seq) return;
-            s3.isPlayingNow = [st isKindOfClass:[NSDictionary class]] &&
+            const BOOL stValid = [st isKindOfClass:[NSDictionary class]] &&
+                                 (!st[@"ok"] || ([st[@"ok"] respondsToSelector:@selector(boolValue)] &&
+                                                 [st[@"ok"] boolValue]));
+            s3.isPlayingNow = stValid &&
                               [st[@"playing"] respondsToSelector:@selector(boolValue)] &&
                               [st[@"playing"] boolValue] &&
                               !([st[@"paused"] respondsToSelector:@selector(boolValue)] &&
                                 [st[@"paused"] boolValue]);
+            if (stValid) {
+                s3.lastStatus = st;
+                s3.lastStatusPath = RLPQueueStatusPath(st);
+            }
         }];
         [self_ applyQueueSnapshot:json];
     }];
@@ -1142,6 +1394,7 @@ static NSString *RLPQueueMetaText(NSDictionary *m, NSString *k,
     self.table.backgroundColor = t.bg;
     self.empty.textColor = t.mut;
     [self.table reloadData];
+    [self syncTableSelectionAndScrollIfNeeded:NO];
 }
 
 - (void)applyLanguage {

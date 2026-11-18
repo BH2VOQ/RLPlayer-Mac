@@ -12,6 +12,7 @@
 //
 // 纪律：隔离 state/library；backend=null、volume=-120；不启动真实 app 服务、不碰 8899、不模拟键鼠。
 #import <AppKit/AppKit.h>
+#import <objc/runtime.h>
 #import "RLPCoreClient.h"
 #import "RLPListeningRoom.h"
 #import "RLPModels.h"
@@ -67,6 +68,12 @@ static NSView *FindById(NSView *root, NSString *ident) {
 @property (nonatomic, copy) NSArray<RLPAlbum *> *albumsData;
 @property (nonatomic, assign) NSInteger currentCardColumns;
 @property (nonatomic, assign) NSInteger currentAlbumColumns;
+@property (nonatomic, strong) NSStackView *queueList;
+@property (nonatomic, strong) NSMutableArray<NSView *> *queueRowSurfaces;
+@property (nonatomic, strong) NSMutableArray<NSNumber *> *queueRowCurrentFlags;
+@property (nonatomic, weak, nullable) NSTextField *queueEmptyLabel;
+@property (nonatomic, copy) NSArray<NSString *> *queuePaths;
+@property (nonatomic, assign) NSInteger queueCurrentIndex;
 + (NSDictionary<NSString *, NSString *> *)playModeFeedbackForNotes:(NSArray * _Nullable)notes
                                                   playbackActive:(BOOL)active;
 - (void)syncPlayAndStyleCards;
@@ -77,6 +84,10 @@ static NSView *FindById(NSView *root, NSString *ident) {
 - (void)onApplyUpnpOutput:(id)sender;
 - (void)applyCastDevicesPayload:(NSDictionary * _Nullable)json;
 - (void)reloadSettings;
+- (void)reloadQueue;
+- (void)applyStatusJSON:(NSDictionary *)json;
+- (void)activate;
+- (void)viewDidDisappear;
 - (void)rebuildAlbumGrid;
 - (void)renderQueueFromJSON:(NSDictionary * _Nullable)json;
 - (void)updateResponsiveLayoutForWidth:(CGFloat)availWidth;
@@ -495,6 +506,218 @@ static void TestRoomCoverAndCacheFitB1B2B3() {
     VerifyRoomFit(cachedVC, w900b, 900.0, @"B2f_stale_reenter_900", YES);
 }
 
+typedef void (*RLPContractGetJSONImp)(id, SEL, NSString *, RLPJSONCompletion);
+static RLPContractGetJSONImp gContractOrigGetJSONImp = NULL;
+static NSDictionary *gContractQueueMock = nil;
+static NSDictionary *gContractStatusMock = nil;
+
+static void RLPContractMockGetJSON(id self, SEL _cmd, NSString *path, RLPJSONCompletion done) {
+    if ([path hasPrefix:@"/api/queue?meta=1"] && gContractQueueMock) {
+        if (done) done(gContractQueueMock);
+        return;
+    }
+    if ([path hasPrefix:@"/api/status"] && gContractStatusMock) {
+        if (done) done(gContractStatusMock);
+        return;
+    }
+    if (gContractOrigGetJSONImp) {
+        gContractOrigGetJSONImp(self, _cmd, path, done);
+    } else if (done) {
+        done(@{@"ok": @NO});
+    }
+}
+
+static void PumpContract(double seconds) {
+    NSDate *until = [NSDate dateWithTimeIntervalSinceNow:seconds];
+    while ([until timeIntervalSinceNow] > 0) {
+        [[NSRunLoop currentRunLoop] runMode:NSDefaultRunLoopMode
+                                 beforeDate:[NSDate dateWithTimeIntervalSinceNow:0.01]];
+    }
+}
+
+static NSDictionary *MakeContractQueueJSON(NSArray<NSString *> *paths, NSString *curKey, id curVal) {
+    NSMutableArray *metas = [NSMutableArray arrayWithCapacity:paths.count];
+    NSMutableArray *cues = [NSMutableArray arrayWithCapacity:paths.count];
+    for (NSUInteger i = 0; i < paths.count; ++i) {
+        [metas addObject:@{
+            @"t": [NSString stringWithFormat:@"Song %c", (char)('A' + i)],
+            @"a": @"Contract Artist",
+            @"d": @(180.0 + i * 15.0),
+        }];
+        [cues addObject:@[@(-1), @(-1)]];
+    }
+    NSMutableDictionary *d = [@{
+        @"ok": @YES,
+        @"items": paths,
+        @"metas": metas,
+        @"cues": cues,
+    } mutableCopy];
+    if (curKey.length && curVal) d[curKey] = curVal;
+    return d;
+}
+
+static void InspectQueueListState(RLPQuickStartViewController *vc,
+                                  NSInteger *outRowCount,
+                                  NSInteger *outHighlightedCount,
+                                  NSInteger *outHighlightedIdx,
+                                  NSString **outHighlightedPath) {
+    NSArray<NSView *> *rows = vc.queueList.arrangedSubviews;
+    *outRowCount = (NSInteger)rows.count;
+    *outHighlightedCount = 0;
+    *outHighlightedIdx = -1;
+    *outHighlightedPath = nil;
+    if (vc.queueEmptyLabel != nil) return;
+
+    RLPTheme *t = [RLPTheme current];
+    NSColor *accWeakSRGB = [t.accentWeak colorUsingColorSpace:[NSColorSpace sRGBColorSpace]];
+    for (NSUInteger k = 0; k < rows.count; ++k) {
+        NSView *row = rows[k];
+        NSButton *hit = nil;
+        for (NSView *sub in row.subviews) {
+            if ([sub isKindOfClass:[NSButton class]]) { hit = (NSButton *)sub; break; }
+        }
+        const BOOL flag = (k < vc.queueRowCurrentFlags.count) && vc.queueRowCurrentFlags[k].boolValue;
+        BOOL bgMatches = NO;
+        if (row.layer && row.layer.backgroundColor && accWeakSRGB) {
+            NSColor *bg = [[NSColor colorWithCGColor:row.layer.backgroundColor] colorUsingColorSpace:[NSColorSpace sRGBColorSpace]];
+            if (bg) {
+                bgMatches = fabs(bg.redComponent - accWeakSRGB.redComponent) < 0.02 &&
+                            fabs(bg.greenComponent - accWeakSRGB.greenComponent) < 0.02 &&
+                            fabs(bg.blueComponent - accWeakSRGB.blueComponent) < 0.02;
+            }
+        }
+        if (flag && bgMatches && hit) {
+            ++(*outHighlightedCount);
+            *outHighlightedIdx = hit.tag;
+            *outHighlightedPath = hit.toolTip;
+        }
+    }
+}
+
+static void TestListeningQueueFollow() {
+    Method m = class_getInstanceMethod([RLPCoreClient class], @selector(getJSON:completion:));
+    gContractOrigGetJSONImp = (RLPContractGetJSONImp)method_getImplementation(m);
+    method_setImplementation(m, (IMP)RLPContractMockGetJSON);
+
+    NSArray<NSString *> *tracks5 = @[
+        @"/tmp/rlp_q_A.flac",
+        @"/tmp/rlp_q_B.flac",
+        @"/tmp/rlp_q_C.flac",
+        @"/tmp/rlp_q_D.flac",
+        @"/tmp/rlp_q_E.flac",
+    ];
+
+    RLPQuickStartViewController *vc = [[RLPQuickStartViewController alloc] init];
+    vc.view.frame = NSMakeRect(0, 0, 1100, 760);
+    [vc.view layoutSubtreeIfNeeded];
+
+    // 初始在曲 A（index=0）
+    gContractQueueMock = MakeContractQueueJSON(tracks5, @"index", @0);
+    gContractStatusMock = @{@"ok": @YES, @"playing": @YES, @"paused": @NO, @"currentPath": tracks5[0]};
+    [vc reloadQueue];
+    [vc applyStatusJSON:gContractStatusMock];
+    PumpContract(0.05);
+
+    NSInteger rowCount = 0, hiCount = 0, hiIdx = -1;
+    NSString *hiPath = nil;
+    InspectQueueListState(vc, &rowCount, &hiCount, &hiIdx, &hiPath);
+    CK(rowCount == 4 && hiCount == 1 && hiIdx == 0 && [hiPath isEqualToString:tracks5[0]],
+       "Q1-precondition: 聆听室 queueList 初始高亮曲 A (index=0, 4行)",
+       [NSString stringWithFormat:@"rows=%ld hi=%ld idx=%ld path=%@",
+        (long)rowCount, (long)hiCount, (long)hiIdx, hiPath ?: @"nil"]);
+
+    // Q1: 模拟状态从曲 A 切到曲 B（队列 JSON 使用 current=B）
+    gContractQueueMock = MakeContractQueueJSON(tracks5, @"current", tracks5[1]);
+    gContractStatusMock = @{@"ok": @YES, @"playing": @YES, @"paused": @NO, @"currentPath": tracks5[1]};
+    [vc applyStatusJSON:gContractStatusMock];
+    PumpContract(0.05);
+    InspectQueueListState(vc, &rowCount, &hiCount, &hiIdx, &hiPath);
+    std::printf("  [INFO] Q1 highlighted index=%ld path=%s (rows=%ld)\n",
+                (long)hiIdx, hiPath.UTF8String ?: "(nil)", (long)rowCount);
+    CK(rowCount == 4 && hiCount == 1 && hiIdx == 1 && [hiPath isEqualToString:tracks5[1]] &&
+       [vc.queuePaths isEqualToArray:tracks5],
+       "Q1 切歌到 B 后聆听室 queueList 高亮行=B、行数不变且队列顺序不变",
+       [NSString stringWithFormat:@"rows=%ld hi=%ld idx=%ld path=%@",
+        (long)rowCount, (long)hiCount, (long)hiIdx, hiPath ?: @"nil"]);
+
+    // Q3: 连续切 3 首（C -> D -> 轮询 E）仍跟随
+    // 1) RLPPlaybackStatusNotification -> C (cur=C)
+    gContractQueueMock = MakeContractQueueJSON(tracks5, @"cur", tracks5[2]);
+    gContractStatusMock = @{@"ok": @YES, @"playing": @YES, @"paused": @NO, @"currentPath": tracks5[2]};
+    [[NSNotificationCenter defaultCenter] postNotificationName:@"RLPPlaybackStatusNotification"
+                                                        object:gContractStatusMock];
+    PumpContract(0.05);
+    InspectQueueListState(vc, &rowCount, &hiCount, &hiIdx, &hiPath);
+    std::printf("  [INFO] Q3-1 highlighted index=%ld path=%s\n", (long)hiIdx, hiPath.UTF8String ?: "(nil)");
+    CK(rowCount == 4 && hiCount == 1 && hiIdx == 2 && [hiPath isEqualToString:tracks5[2]] &&
+       [vc.queuePaths isEqualToArray:tracks5],
+       "Q3a 聆听室连续第 1 次切歌跟随到 C (index=2)",
+       [NSString stringWithFormat:@"rows=%ld hi=%ld idx=%ld path=%@",
+        (long)rowCount, (long)hiCount, (long)hiIdx, hiPath ?: @"nil"]);
+
+    // 2) applyStatusJSON -> D (index=3)
+    gContractQueueMock = MakeContractQueueJSON(tracks5, @"index", @3);
+    gContractStatusMock = @{@"ok": @YES, @"playing": @YES, @"paused": @NO, @"currentPath": tracks5[3]};
+    [vc applyStatusJSON:gContractStatusMock];
+    PumpContract(0.05);
+    InspectQueueListState(vc, &rowCount, &hiCount, &hiIdx, &hiPath);
+    std::printf("  [INFO] Q3-2 highlighted index=%ld path=%s\n", (long)hiIdx, hiPath.UTF8String ?: "(nil)");
+    CK(rowCount == 4 && hiCount == 1 && hiIdx == 3 && [hiPath isEqualToString:tracks5[3]] &&
+       [vc.queuePaths isEqualToArray:tracks5],
+       "Q3b 聆听室连续第 2 次切歌跟随到 D (index=3)",
+       [NSString stringWithFormat:@"rows=%ld hi=%ld idx=%ld path=%@",
+        (long)rowCount, (long)hiCount, (long)hiIdx, hiPath ?: @"nil"]);
+
+    // 3) activate + 1s 轮询定时器自动发现切到 E (current=@4，预览窗应滑到 1..4)
+    [vc activate];
+    PumpContract(0.05);
+    gContractQueueMock = MakeContractQueueJSON(tracks5, @"current", @4);
+    gContractStatusMock = @{@"ok": @YES, @"playing": @YES, @"paused": @NO, @"currentPath": tracks5[4]};
+    PumpContract(1.15);
+    InspectQueueListState(vc, &rowCount, &hiCount, &hiIdx, &hiPath);
+    std::printf("  [INFO] Q3-3 (poll) highlighted index=%ld path=%s\n", (long)hiIdx, hiPath.UTF8String ?: "(nil)");
+    CK(rowCount == 4 && hiCount == 1 && hiIdx == 4 && [hiPath isEqualToString:tracks5[4]] &&
+       [vc.queuePaths isEqualToArray:tracks5],
+       "Q3c 聆听室连续第 3 次通过轮询跟随到 E (index=4)",
+       [NSString stringWithFormat:@"rows=%ld hi=%ld idx=%ld path=%@",
+        (long)rowCount, (long)hiCount, (long)hiIdx, hiPath ?: @"nil"]);
+    [vc viewDidDisappear];
+
+    // Q4: 当前不在队列 / 越界 / 空队列 -> 不崩、不高亮错行
+    gContractQueueMock = MakeContractQueueJSON(tracks5, @"current", @"/tmp/rlp_q_NOT_IN_QUEUE.flac");
+    gContractStatusMock = @{@"ok": @YES, @"playing": @YES, @"paused": @NO, @"currentPath": @"/tmp/rlp_q_NOT_IN_QUEUE.flac"};
+    [vc applyStatusJSON:gContractStatusMock];
+    PumpContract(0.05);
+    InspectQueueListState(vc, &rowCount, &hiCount, &hiIdx, &hiPath);
+    CK(rowCount == 4 && hiCount == 0 && hiIdx == -1 && vc.queueCurrentIndex == -1,
+       "Q4a 聆听室当前曲目不在队列时不崩且不高亮任何行",
+       [NSString stringWithFormat:@"rows=%ld hi=%ld idx=%ld curIdx=%ld",
+        (long)rowCount, (long)hiCount, (long)hiIdx, (long)vc.queueCurrentIndex]);
+
+    gContractQueueMock = MakeContractQueueJSON(tracks5, @"index", @99);
+    [[NSNotificationCenter defaultCenter] postNotificationName:RLPQueueChangedNotification object:nil];
+    PumpContract(0.05);
+    InspectQueueListState(vc, &rowCount, &hiCount, &hiIdx, &hiPath);
+    CK(rowCount == 4 && hiCount == 0 && hiIdx == -1 && vc.queueCurrentIndex == -1,
+       "Q4b 聆听室队列越界 index=99 时不崩且不高亮错行",
+       [NSString stringWithFormat:@"rows=%ld hi=%ld idx=%ld curIdx=%ld",
+        (long)rowCount, (long)hiCount, (long)hiIdx, (long)vc.queueCurrentIndex]);
+
+    gContractQueueMock = @{@"ok": @YES, @"items": @[], @"metas": @[], @"cues": @[], @"current": tracks5[0]};
+    [[NSNotificationCenter defaultCenter] postNotificationName:RLPQueueChangedNotification object:nil];
+    PumpContract(0.05);
+    InspectQueueListState(vc, &rowCount, &hiCount, &hiIdx, &hiPath);
+    CK(vc.queueEmptyLabel != nil && rowCount == 1 && hiCount == 0 && vc.queueCurrentIndex == -1,
+       "Q4c 聆听室空队列时显示空态且不高亮错行",
+       [NSString stringWithFormat:@"empty=%d rows=%ld curIdx=%ld",
+        vc.queueEmptyLabel != nil, (long)rowCount, (long)vc.queueCurrentIndex]);
+
+    gContractQueueMock = nil;
+    gContractStatusMock = nil;
+    method_setImplementation(m, (IMP)gContractOrigGetJSONImp);
+    gContractOrigGetJSONImp = NULL;
+}
+
 int main(int argc, char **argv) {
     @autoreleasepool {
         NSApplication *app = [NSApplication sharedApplication];
@@ -878,6 +1101,7 @@ int main(int argc, char **argv) {
 
         // 隔离：B1/B2/B3 会在离屏主窗里创建额外 VC，放在核心契约全部跑完后避免污染 C9 的设备/设置状态。
         TestRoomCoverAndCacheFitB1B2B3();
+        TestListeningQueueFollow();
 
         [core shutdown];
         [fm removeItemAtPath:root error:nil];

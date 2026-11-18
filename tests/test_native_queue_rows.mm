@@ -42,6 +42,8 @@ static void EqStr(NSString *got, NSString *want, const char *what) {
 static NSMutableArray<NSDictionary *> *g_posts;
 static BOOL g_holdQdel;                       // 扣留 /api/qdel 回包（模拟真实异步客户端）
 static NSMutableArray<RLPJSONCompletion> *g_heldQdel;
+static NSDictionary *g_queueOverride = nil;
+static NSDictionary *g_statusOverride = nil;
 
 static NSArray<NSString *> *PathsFixture(void) {
     return @[ @"/Music/A/Song One.flac", @"/Music/B/Sub/Song Two.flac" ];
@@ -63,7 +65,8 @@ static NSDictionary *QueuePayload(void) {
 - (BOOL)started { return YES; }
 - (void)getJSON:(NSString *)path completion:(RLPJSONCompletion)done {
     if (!done) return;
-    if ([path hasPrefix:@"/api/queue?meta=1"]) { done(QueuePayload()); return; }
+    if ([path hasPrefix:@"/api/queue?meta=1"]) { done(g_queueOverride ?: QueuePayload()); return; }
+    if ([path hasPrefix:@"/api/status"] && g_statusOverride) { done(g_statusOverride); return; }
     if ([path hasPrefix:@"/api/sq/list"]) { done(@{ @"ok": @YES, @"queues": @[] }); return; }
     done(@{ @"ok": @NO });
 }
@@ -261,6 +264,182 @@ int main() {
                 [g_heldQdel removeAllObjects];
                 Pump(0.05);
             }
+        }
+
+        // ---- 8. Q2/Q3/Q4 切歌跟随（selectRow + scrollRowToVisible + 轮询 + 边界空队列/不在队列）----
+        {
+            NSMutableArray<NSString *> *items15 = [NSMutableArray array];
+            NSMutableArray<NSDictionary *> *metas15 = [NSMutableArray array];
+            NSMutableArray<NSArray<NSNumber *> *> *cues15 = [NSMutableArray array];
+            for (NSInteger i = 0; i < 15; ++i) {
+                [items15 addObject:[NSString stringWithFormat:@"/Music/Q/track_%02ld.flac", (long)i]];
+                [metas15 addObject:@{ @"t": [NSString stringWithFormat:@"Track %02ld", (long)i],
+                                      @"a": @"Artist Q", @"al": @"Album Q", @"d": @(180 + i) }];
+                [cues15 addObject:@[ @(-1), @(-1) ]];
+            }
+
+            RLPQueueViewController *qvc = [RLPQueueViewController new];
+            NSView *qv = qvc.view;
+            qv.frame = NSMakeRect(0, 0, 900, 180); // 短视口（~3 行可见），第 12/14 行必在视口外
+            [qv layoutSubtreeIfNeeded];
+
+            g_queueOverride = @{ @"ok": @YES, @"index": @0, @"mode": @0,
+                                 @"items": items15, @"cues": cues15, @"metas": metas15 };
+            g_statusOverride = @{ @"ok": @YES, @"playing": @YES, @"paused": @NO,
+                                  @"currentPath": items15[0] };
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+            [qvc performSelector:NSSelectorFromString(@"reloadData")];
+#pragma clang diagnostic pop
+            Pump(0.05);
+            [qv layoutSubtreeIfNeeded];
+
+            NSTableView *qTable = FindTable(qv);
+            NSScrollView *qScroll = qTable.enclosingScrollView;
+            Ck(qTable != nil && qScroll != nil && qTable.numberOfRows == 15,
+               "Q2-precondition: 15 首队列加载成功",
+               [NSString stringWithFormat:@"rows=%ld", (long)(qTable ? qTable.numberOfRows : -1)]);
+            Ck(qTable.selectedRow == 0, "Q2-precondition: 初始选中第 0 行",
+               [NSString stringWithFormat:@"selectedRow=%ld", (long)qTable.selectedRow]);
+
+            auto verifyOrder = ^BOOL(NSTableView *tbl) {
+                if (tbl.numberOfRows != (NSInteger)items15.count) return NO;
+                for (NSInteger i = 0; i < (NSInteger)items15.count; ++i) {
+                    NSTableCellView *tc = CellAt(tbl, @"q.t", i);
+                    if (!tc || ![tc.textField.toolTip isEqualToString:items15[(NSUInteger)i]]) return NO;
+                }
+                return YES;
+            };
+            auto isRowVisible = ^BOOL(NSTableView *tbl, NSScrollView *sc, NSInteger row) {
+                if (!tbl || !sc || row < 0 || row >= tbl.numberOfRows) return NO;
+                NSRect rowR = [tbl rectOfRow:row];
+                NSRect visR = sc.documentVisibleRect;
+                NSRect inter = NSIntersectionRect(visR, rowR);
+                return inter.size.height >= rowR.size.height - 1.0;
+            };
+
+            // Q2: 从 0 切到 12（队列 JSON 使用 current=B 且无 index 字段），selectRow=12 且滚入可见区
+            g_queueOverride = @{ @"ok": @YES, @"current": items15[12], @"mode": @0,
+                                 @"items": items15, @"cues": cues15, @"metas": metas15 };
+            g_statusOverride = @{ @"ok": @YES, @"playing": @YES, @"paused": @NO,
+                                  @"currentPath": items15[12] };
+            [[NSNotificationCenter defaultCenter] postNotificationName:@"RLPPlaybackStatusNotification"
+                                                                object:g_statusOverride];
+            Pump(0.05);
+            NSString *q2Path = (qTable.selectedRow >= 0 && qTable.selectedRow < qTable.numberOfRows)
+                ? CellAt(qTable, @"q.t", qTable.selectedRow).textField.toolTip : nil;
+            NSTableCellView *q2Cell12 = CellAt(qTable, @"q.t", 12);
+            NSTableCellView *q2Cell0 = CellAt(qTable, @"q.t", 0);
+            std::printf("  [INFO] Q2 highlighted index=%ld path=%s\n",
+                        (long)qTable.selectedRow, q2Path.UTF8String ?: "(nil)");
+            Ck(qTable.selectedRow == 12 &&
+               [q2Path isEqualToString:items15[12]] &&
+               q2Cell12 && SameColor(q2Cell12.textField.textColor, t.accentText) &&
+               q2Cell0 && SameColor(q2Cell0.textField.textColor, t.text) &&
+               isRowVisible(qTable, qScroll, 12) &&
+               verifyOrder(qTable),
+               "Q2 主队列页切到 B 后 selectRow=12、滚入可见且不改队列顺序",
+               [NSString stringWithFormat:@"sel=%ld path=%@ vis=%@ row12=%@",
+                (long)qTable.selectedRow, q2Path ?: @"nil",
+                NSStringFromRect(qScroll.documentVisibleRect),
+                NSStringFromRect([qTable rectOfRow:12])]);
+
+            // Q3: 连续切 3 首（cur=2 -> index=14 -> 轮询 current=5）仍跟随
+            // 1) cur=2
+            g_queueOverride = @{ @"ok": @YES, @"cur": @2, @"mode": @0,
+                                 @"items": items15, @"cues": cues15, @"metas": metas15 };
+            g_statusOverride = @{ @"ok": @YES, @"playing": @YES, @"paused": @NO,
+                                  @"currentPath": items15[2] };
+            [[NSNotificationCenter defaultCenter] postNotificationName:@"RLPPlaybackStatusNotification"
+                                                                object:g_statusOverride];
+            Pump(0.05);
+            NSString *q3aPath = (qTable.selectedRow >= 0 && qTable.selectedRow < qTable.numberOfRows)
+                ? CellAt(qTable, @"q.t", qTable.selectedRow).textField.toolTip : nil;
+            std::printf("  [INFO] Q3-1 highlighted index=%ld path=%s\n",
+                        (long)qTable.selectedRow, q3aPath.UTF8String ?: "(nil)");
+            Ck(qTable.selectedRow == 2 && [q3aPath isEqualToString:items15[2]] &&
+               isRowVisible(qTable, qScroll, 2) && verifyOrder(qTable),
+               "Q3a 连续第 1 次切歌跟随到 index=2",
+               [NSString stringWithFormat:@"sel=%ld path=%@", (long)qTable.selectedRow, q3aPath ?: @"nil"]);
+
+            // 2) index=14
+            g_queueOverride = @{ @"ok": @YES, @"index": @14, @"mode": @0,
+                                 @"items": items15, @"cues": cues15, @"metas": metas15 };
+            g_statusOverride = @{ @"ok": @YES, @"playing": @YES, @"paused": @NO,
+                                  @"currentPath": items15[14] };
+            [[NSNotificationCenter defaultCenter] postNotificationName:@"RLPPlaybackStatusNotification"
+                                                                object:g_statusOverride];
+            Pump(0.05);
+            NSString *q3bPath = (qTable.selectedRow >= 0 && qTable.selectedRow < qTable.numberOfRows)
+                ? CellAt(qTable, @"q.t", qTable.selectedRow).textField.toolTip : nil;
+            std::printf("  [INFO] Q3-2 highlighted index=%ld path=%s\n",
+                        (long)qTable.selectedRow, q3bPath.UTF8String ?: "(nil)");
+            Ck(qTable.selectedRow == 14 && [q3bPath isEqualToString:items15[14]] &&
+               isRowVisible(qTable, qScroll, 14) && verifyOrder(qTable),
+               "Q3b 连续第 2 次切歌跟随到 index=14",
+               [NSString stringWithFormat:@"sel=%ld path=%@", (long)qTable.selectedRow, q3bPath ?: @"nil"]);
+
+            // 3) 轮询定时器自动发现切到 index=5（不发通知，验证 1s poll）
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+            [qvc performSelector:NSSelectorFromString(@"activate")];
+#pragma clang diagnostic pop
+            Pump(0.05);
+            g_queueOverride = @{ @"ok": @YES, @"current": items15[5], @"mode": @0,
+                                 @"items": items15, @"cues": cues15, @"metas": metas15 };
+            g_statusOverride = @{ @"ok": @YES, @"playing": @YES, @"paused": @NO,
+                                  @"currentPath": items15[5] };
+            Pump(1.15);
+            NSString *q3cPath = (qTable.selectedRow >= 0 && qTable.selectedRow < qTable.numberOfRows)
+                ? CellAt(qTable, @"q.t", qTable.selectedRow).textField.toolTip : nil;
+            std::printf("  [INFO] Q3-3 (poll) highlighted index=%ld path=%s\n",
+                        (long)qTable.selectedRow, q3cPath.UTF8String ?: "(nil)");
+            Ck(qTable.selectedRow == 5 && [q3cPath isEqualToString:items15[5]] &&
+               isRowVisible(qTable, qScroll, 5) && verifyOrder(qTable),
+               "Q3c 连续第 3 次通过状态轮询自动跟随到 index=5",
+               [NSString stringWithFormat:@"sel=%ld path=%@", (long)qTable.selectedRow, q3cPath ?: @"nil"]);
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+            [qvc performSelector:NSSelectorFromString(@"viewDidDisappear")];
+#pragma clang diagnostic pop
+
+            // Q4: 当前不在队列 / 索引越界 / 空队列 -> 不崩、不高亮错行
+            g_queueOverride = @{ @"ok": @YES, @"current": @"/Music/Q/NotInQueue.flac", @"mode": @0,
+                                 @"items": items15, @"cues": cues15, @"metas": metas15 };
+            g_statusOverride = @{ @"ok": @YES, @"playing": @YES, @"paused": @NO,
+                                  @"currentPath": @"/Music/Q/NotInQueue.flac" };
+            [[NSNotificationCenter defaultCenter] postNotificationName:@"RLPPlaybackStatusNotification"
+                                                                object:g_statusOverride];
+            Pump(0.05);
+            BOOL anyAccentRow = NO;
+            for (NSInteger i = 0; i < qTable.numberOfRows; ++i) {
+                NSTableCellView *tc = CellAt(qTable, @"q.t", i);
+                if (tc && SameColor(tc.textField.textColor, t.accentText)) anyAccentRow = YES;
+            }
+            Ck(qTable.numberOfRows == 15 && qTable.selectedRow == -1 &&
+               qTable.selectedRowIndexes.count == 0 && !anyAccentRow,
+               "Q4a 当前曲目不在队列时不崩且不高亮错行（selectedRow=-1）",
+               [NSString stringWithFormat:@"rows=%ld sel=%ld accent=%d",
+                (long)qTable.numberOfRows, (long)qTable.selectedRow, anyAccentRow]);
+
+            g_queueOverride = @{ @"ok": @YES, @"index": @99, @"mode": @0,
+                                 @"items": items15, @"cues": cues15, @"metas": metas15 };
+            [[NSNotificationCenter defaultCenter] postNotificationName:RLPQueueChangedNotification object:nil];
+            Pump(0.05);
+            Ck(qTable.numberOfRows == 15 && qTable.selectedRow == -1,
+               "Q4b 队列越界 index=99 时不崩且不选中任何行",
+               [NSString stringWithFormat:@"rows=%ld sel=%ld", (long)qTable.numberOfRows, (long)qTable.selectedRow]);
+
+            g_queueOverride = @{ @"ok": @YES, @"current": items15[0], @"mode": @0,
+                                 @"items": @[], @"cues": @[], @"metas": @[] };
+            [[NSNotificationCenter defaultCenter] postNotificationName:RLPQueueChangedNotification object:nil];
+            Pump(0.05);
+            Ck(qTable.numberOfRows == 0 && qTable.selectedRow == -1,
+               "Q4c 空队列时不崩且无选中行",
+               [NSString stringWithFormat:@"rows=%ld sel=%ld", (long)qTable.numberOfRows, (long)qTable.selectedRow]);
+
+            g_queueOverride = nil;
+            g_statusOverride = nil;
         }
 
         std::printf("结果：%d passed, %d failed\n", g_pass, g_fail);
