@@ -8,6 +8,7 @@
 #import <AppKit/AppKit.h>
 #include <stdlib.h>
 #include <stdint.h>
+#include <math.h>
 
 NS_ASSUME_NONNULL_BEGIN
 
@@ -138,11 +139,16 @@ void RLPPostJSON(NSString *path, NSString * _Nullable body);
 double RLPVolumeMuteNextDb(double currentDb);
 /// 把窗口 frame 收敛到当前屏幕可见区：超宽/超高的历史 frame（换屏或拖拽越界）会导致
 /// 内容被屏幕边缘裁掉。纯函数，便于离线判据；minSize 大于可见区时以可见区为准。
+/// **minSize 任一维 <= 0（或缺省）表示「没有下限」**：NSWindow.minSize 的默认值就是 0×0，
+/// 面板/工具窗也常不设。旧实现把 <=0 当成「可见区全尺寸」，于是没设下限的窗口会被撑满整块屏
+/// （2026-11-18 夜间评审：minSize<=0 —— 一个只该改 origin 的收敛把 300×200 的窗口撑成了 1920×1050）。
 static inline NSRect RLPClampWindowFrameToVisible(NSRect frame, NSRect visible, NSSize minSize) {
     if (visible.size.width <= 1.0 || visible.size.height <= 1.0) return frame;
     NSSize min = minSize;
-    if (min.width <= 0 || min.width > visible.size.width) min.width = visible.size.width;
-    if (min.height <= 0 || min.height > visible.size.height) min.height = visible.size.height;
+    if (!(min.width > 0)) min.width = 0;    // <=0 或 NaN：没有下限，**不是**"撑满可见区"
+    if (!(min.height > 0)) min.height = 0;
+    if (min.width > visible.size.width) min.width = visible.size.width;     // 小屏：下限只能到可见区
+    if (min.height > visible.size.height) min.height = visible.size.height;
     frame.size.width = MAX(MIN(frame.size.width, visible.size.width), min.width);
     frame.size.height = MAX(MIN(frame.size.height, visible.size.height), min.height);
     if (NSMinX(frame) < NSMinX(visible)) frame.origin.x = NSMinX(visible);
@@ -153,21 +159,49 @@ static inline NSRect RLPClampWindowFrameToVisible(NSRect frame, NSRect visible, 
 }
 
 /// 多屏下「用哪块屏收敛」的唯一判据（纯函数，便于离线判据）。
-/// 窗口**完全落在某一块屏**的可见区时用该屏；窗口跨屏（多显示器并排时 2400–3400pt 宽的合法摆放）
-/// 时改用所有屏 visibleFrame 的并集包围盒 —— 否则会被单屏收敛压窄并写回 autosave，
-/// 用户下次启动就永远丢掉跨屏宽度（2026-11-18 夜间评审 B1）。
+///   1) 窗口**完全落在某一块屏**的可见区 → 用该屏；
+///   2) 窗口跨屏（多显示器并排时 2400–3400pt 宽的合法摆放）→ 用**窗口真正碰到**的那些屏的并集包围盒。
+///      只并"碰到的屏"：把所有屏不分青红皂白并进来，屏与屏之间的**死区**也成了合法位置
+///      （三屏拔掉中间那块、或显示器错位摆放时，窗口停在那片不存在的区域里永远不会被夹回来）。
+///      单屏收敛会压窄跨屏宽度并写回 autosave、用户下次启动就永远丢掉跨屏宽度，所以跨屏必须用并集
+///      （2026-11-18 夜间评审 B1）。
+///   3) 窗口一块屏都没碰到（拔屏后停在旧屏坐标 / autosave 里的脏坐标 / 屏间死区）→ 用**最近**的那块屏。
+///      这条是"漏夹"兜底：退化为「所有屏并集」时窗口总落在包围盒里，夹回就成了空操作（拔屏死区）。
 static inline NSRect RLPWindowUsableScreenRect(NSRect windowFrame, const NSRect *visibles, size_t count) {
     if (!visibles || count == 0) return NSZeroRect;
     for (size_t i = 0; i < count; ++i) {
         if (NSContainsRect(visibles[i], windowFrame)) return visibles[i];
     }
-    NSRect usable = visibles[0];
-    for (size_t i = 1; i < count; ++i) usable = NSUnionRect(usable, visibles[i]);
-    return usable;
+    // 跨屏：只并窗口实际压到的屏（相邻两屏上的合法跨屏摆放仍然是两者的并集）。
+    NSRect usable = NSZeroRect;
+    BOOL touchedAny = NO;
+    for (size_t i = 0; i < count; ++i) {
+        if (NSIsEmptyRect(visibles[i]) || !NSIntersectsRect(visibles[i], windowFrame)) continue;
+        usable = touchedAny ? NSUnionRect(usable, visibles[i]) : visibles[i];
+        touchedAny = YES;
+    }
+    if (touchedAny) return usable;
+
+    // 一块屏都没碰到：取离窗口最近的屏（矩形间距的平方最小；并列时取 screens[0]，即带菜单栏的主屏）。
+    size_t nearest = 0;
+    double nearestDist = -1.0;
+    for (size_t i = 0; i < count; ++i) {
+        const NSRect v = visibles[i];
+        const double dx = MAX(MAX((double)NSMinX(v) - (double)NSMaxX(windowFrame),
+                                  (double)NSMinX(windowFrame) - (double)NSMaxX(v)), 0.0);
+        const double dy = MAX(MAX((double)NSMinY(v) - (double)NSMaxY(windowFrame),
+                                  (double)NSMinY(windowFrame) - (double)NSMaxY(v)), 0.0);
+        const double dist = dx * dx + dy * dy;
+        if (nearestDist < 0.0 || dist < nearestDist) { nearestDist = dist; nearest = i; }
+    }
+    return visibles[nearest];
 }
 
-/// 解析 NSWindow autosave 的 frame 字符串（"x y w h"，末尾可能带空格）。
+/// 解析 NSWindow autosave 的 frame 字符串（"x y w h"，末尾可能带空格/屏幕描述）。
 /// 纯 C 解析：不依赖 locale、不做本地化数字格式猜测；任何一段读不出来就判无效（不猜默认值）。
+/// 另外两种"读得出但是坏值"也必须判无效，否则它们会穿过收敛函数变成更离谱的 frame：
+///   - 非有限值（"inf"/"1e999" 能被 strtod 读出来，旧实现只挡了 NaN）；
+///   - 非正的宽/高（"300 200 0 0" 会收敛成 0×0 的不可见窗口）。
 static inline BOOL RLPParseSavedWindowFrame(const char *saved, NSRect *outRect) {
     if (!saved || !outRect) return NO;
     const char *p = saved;
@@ -177,16 +211,19 @@ static inline BOOL RLPParseSavedWindowFrame(const char *saved, NSRect *outRect) 
         if (!*p) return NO;
         char *end = NULL;
         v[i] = strtod(p, &end);
-        if (end == p || v[i] != v[i]) return NO;   // NaN 也要判无效（autosave 可能被写坏）
+        if (end == p || !isfinite(v[i])) return NO;   // 读不出 / NaN / ±inf 都判无效（autosave 可能被写坏）
         p = end;
     }
+    if (!(v[2] > 0.0) || !(v[3] > 0.0)) return NO;     // 窗口不可能没有宽高：0×0 / 负尺寸 = 坏记录
     *outRect = NSMakeRect((CGFloat)v[0], (CGFloat)v[1], (CGFloat)v[2], (CGFloat)v[3]);
     return YES;
 }
 
 /// 启动时的窗口 frame 决策（纯函数）：
 /// 有合法保存值 → 用它并向可见区收敛、**不居中**（居中会把副屏/任意位置的 origin 覆盖成主屏中心）；
-/// 没有保存值（首次启动或记录损坏）→ 默认尺寸 + 居中。
+/// 没有保存值（首次启动或记录损坏）→ 默认尺寸 + 居中，**默认尺寸同样先按当前屏收敛**。
+/// 后者是"小屏撑破/漏夹"的补丁：旧实现把默认尺寸原样交回调用方，纯函数判据里看不出
+/// 1180×760 在 1024×768 屏上已经超出可见区（再靠调用方补一次收敛并不是同一个判据）。
 typedef struct {
     NSRect frame;
     BOOL center;
@@ -201,7 +238,13 @@ static inline RLPWindowStartupFrame RLPWindowStartupFrameForSavedState(const cha
     out.frame = defaultFrame;
     out.center = YES;
     NSRect saved = NSZeroRect;
-    if (!RLPParseSavedWindowFrame(savedFrame, &saved)) return out;
+    if (!RLPParseSavedWindowFrame(savedFrame, &saved)) {
+        if (visibles && count > 0) {
+            const NSRect usable = RLPWindowUsableScreenRect(defaultFrame, visibles, count);
+            if (!NSIsEmptyRect(usable)) out.frame = RLPClampWindowFrameToVisible(defaultFrame, usable, minSize);
+        }
+        return out;
+    }
     out.center = NO;
     out.frame = count > 0
         ? RLPClampWindowFrameToVisible(saved, RLPWindowUsableScreenRect(saved, visibles, count), minSize)

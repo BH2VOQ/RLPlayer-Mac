@@ -508,6 +508,31 @@ static NSStackView *RLPSRow(NSString *label, NSView *control, NSString *hint, RL
 
 - (void)reloadDataIncludingEqualizer:(BOOL)reloadEq;
 
+#pragma mark - 私有方法声明（保存链路 + 页签草稿）
+
+// 声明集中在这里的原因：postKey:value: 在实现里出现在 postKey:value:completion: 之前，
+// 而回滚 / 答复落地方法又被多处调用，靠实现顺序"碰巧可见"迟早出隐性告警。
+- (void)postKey:(NSString *)key value:(NSString *)value
+      completion:(void (^_Nullable)(BOOL ok))completion;
+- (void)postKeys:(NSDictionary<NSString *, NSString *> *)kv
+       completion:(void (^_Nullable)(BOOL ok))completion;
+- (void)applySettingsSaveSuccess:(NSDictionary<NSString *, NSString *> *)submitted seq:(NSUInteger)seq;
+- (void)applySettingsSaveFailure:(NSDictionary<NSString *, NSString *> *)reverted text:(NSString *)text;
+- (void)revertControlsForBackendKey:(NSString *)key submittedValue:(NSString *)value;
+- (NSMutableArray<NSView *> *)cachedControlsForBackendKey:(NSString *)key;
+- (void)applyKV:(NSDictionary *)kv toSwitch:(NSSwitch *)sw key:(NSString *)key;
+- (void)applyKV:(NSDictionary *)kv toTextField:(NSTextField *)tf key:(NSString *)key;
+- (void)applyKV:(NSDictionary *)kv toPopup:(NSPopUpButton *)pop key:(NSString *)key;
+- (NSView *)findCachedControlWithIdentifier:(NSString *)ident;
+- (void)clearDirtyControlId:(NSString *)ident expectedValue:(nullable NSString *)expectedValue;
+- (void)clearDirtyForBackendKey:(NSString *)key submittedValue:(NSString *)value;
+
+// 页签草稿（切页签 / 切语言 / 切主题）
+- (void)snapshotPendingPaneDrafts;
+- (void)snapshotPendingPaneDraftsForTab:(RLPSTab)tab;
+- (void)snapshotDraftsOfOutgoingPaneIfNeededForTab:(RLPSTab)tab;
+- (void)restorePendingDraftsForTab:(RLPSTab)tab inPane:(NSView *)pane;
+
 @end
 
 @implementation RLPSettingsViewController
@@ -732,10 +757,25 @@ static void RLPSettingsCollectViews(NSView *v, NSMutableArray<NSView *> *out) {
         if (!v.identifier.length || [self isEqOwnedView:v]) continue;
         NSString *draft = drafts[v.identifier];
         if (!draft) continue;
+        // 只有**真正的未提交草稿**（dirtyControlIds 里那条）能无条件覆盖控件；
+        // 非草稿的"回声"（snapshot 为了重建后回填而记下的旧值）只在控件还是空的时候回填。
+        // 为什么：页签对象缓存在 paneCache 里，离开期间一次 /api/settings 读回可能已经把它刷新成
+        // 更新的真值 —— 拿回声盖回去就是新的"显示旧值"。新建页签时字段是空的，回声照常回填。
+        const BOOL pending = [self.dirtyControlIds containsObject:v.identifier];
         if ([v isKindOfClass:[NSTextField class]] && ((NSTextField *)v).isEditable) {
-            ((NSTextField *)v).stringValue = draft;
+            NSTextField *tf = (NSTextField *)v;
+            NSString *cur = tf.stringValue ?: @"";
+            if (!pending && cur.length > 0) continue;   // 控件里已有值，且这不是待提交草稿
+            if ([cur isEqualToString:draft]) continue;  // 值相同：不用写
+            tf.stringValue = draft;
+            // dirty 不在这里加：snapshotPendingPaneDraftsForTab 已经把真正的未提交草稿记进
+            // dirtyControlIds 了（test_native_settings_draft_contract 3a / 3b 靠的就是它）。
         } else if ([v isKindOfClass:[NSTextView class]] && ((NSTextView *)v).isEditable) {
-            ((NSTextView *)v).string = draft;
+            NSTextView *tv = (NSTextView *)v;
+            NSString *cur = tv.string ?: @"";
+            if (!pending && cur.length > 0) continue;
+            if ([cur isEqualToString:draft]) continue;
+            tv.string = draft;
             if (v == self.fbText) [self updateFbCount];
         }
     }
@@ -743,6 +783,13 @@ static void RLPSettingsCollectViews(NSView *v, NSMutableArray<NSView *> *out) {
 }
 
 - (void)showTab:(RLPSTab)tab {
+    // ① 换页之前先把**即将离开视图树**的那一页里的未提交文本落到 pendingPaneDrafts。
+    //    为什么必须在这里做：正在编辑的 NSTextField 的文本还在 field editor 里（没落到
+    //    stringValue），摘掉它的父视图时编辑状态被弃掉 ⟹ 文字丢失；而 NSControlTextDidChange
+    //    早把这个 identifier 记进 dirtyControlIds，后续读回永远跳过它 ⟹ 用户看到退回旧值、
+    //    屏幕上却再也不会被后端真值纠正（"切页签草稿丢失"）。
+    //    旧实现只在切语言 / 切主题时快照，普通点页签没有 —— 那就是漏口。
+    [self snapshotDraftsOfOutgoingPaneIfNeededForTab:tab];
     self.tab = tab;
     NSView *pane = self.paneCache[@(tab)];
     BOOL freshlyBuilt = NO;
@@ -765,9 +812,10 @@ static void RLPSettingsCollectViews(NSView *v, NSMutableArray<NSView *> *out) {
         [pane.topAnchor constraintEqualToAnchor:self.paneHost.topAnchor],
         [pane.bottomAnchor constraintEqualToAnchor:self.paneHost.bottomAnchor],
     ]];
-    if (freshlyBuilt) {
-        [self restorePendingDraftsForTab:tab inPane:pane];
-    }
+    // ② 草稿恢复**不再只限新建页签**（旧实现 if (freshlyBuilt)）：页签对象虽然还在缓存里，
+    //    但它在被摘出视图树时同样可能丢掉 field editor 里的编辑中文本（stringValue 还是旧值）。
+    //    恢复是幂等的（值相同就不写），每次显示都过一遍最稳。
+    [self restorePendingDraftsForTab:tab inPane:pane];
     // 新建的页签控件还是 UI 默认值（设备/滤波下拉是空的、开关是默认态）。
     // activate 只在进页时跑一次，之后才点开的页签必须在这里补一次读回，
     // 否则输出/PCM/SDM 页会显示空下拉与默认值，而不是用户真实设置。
@@ -1099,38 +1147,126 @@ static NSString *RLPControlIdentifier(NSString *key) {
     }
 }
 
-/// completion(ok)：保存结果落定后回调。用于「改完要刷新派生提示」的控件（例如 SDM 拐点：
-/// 被 422 拒时后端 conf 没写，读回的仍是旧值 —— 提示必须跟着真实状态走，不能拿输入框的值猜）。
+/// completion(ok)：保存结果落定后回调。ok == YES 的含义是**确认落盘**：
+/// 后端答复 ok，且答复里的 kv（合并后的真实内容）确实含提交的键。
+/// 被后端拒绝 / 没拿到答复 / 核心没起 一律 ok == NO —— 调用方据此回滚自己乐观改过的界面。
+/// 例：SDM 拐点被 422 拒时后端 conf 没写，读回的仍是旧值 —— 提示必须跟着真实状态走，
+/// 不能拿输入框的值猜。
 - (NSMutableDictionary<NSString *, NSNumber *> *)settingsKeyPostAt {
     if (!_settingsKeyPostAt) _settingsKeyPostAt = [NSMutableDictionary dictionary];
     return _settingsKeyPostAt;
 }
 
+#pragma mark - 保存（提交 / 答复落地 / 回滚）
+
+/// 控件当前值 → 与**提交值**同口径的字符串（回滚时用它判断"用户有没有在这期间又改过"）。
+/// 下拉：优先 representedObject（值 ≠ 文案的下拉只认它），没有就退回标题；
+/// 开关：与 onSwitch 提交的 "1"/"0" 同一口径。
+static NSString *RLPSettingsControlValueString(NSView *v) {
+    if ([v isKindOfClass:[NSTextField class]]) return ((NSTextField *)v).stringValue ?: @"";
+    if ([v isKindOfClass:[NSSwitch class]])
+        return (((NSSwitch *)v).state == NSControlStateValueOn) ? @"1" : @"0";
+    if ([v isKindOfClass:[NSPopUpButton class]]) {
+        NSPopUpButton *pop = (NSPopUpButton *)v;
+        id ro = pop.selectedItem.representedObject;
+        if ([ro isKindOfClass:[NSString class]]) return (NSString *)ro;
+        return pop.titleOfSelectedItem ?: @"";
+    }
+    return nil;
+}
+
+/// 一个后端键在**缓存页签**里对应的全部控件（identifier → 后端键的映射与提交同源）。
+/// 为什么扫缓存而不是当前页签：回包到达时用户可能已经切走，要回的控件在原来那一页里
+/// （页签对象仍在 paneCache 里，控件没有消失）。
+- (NSMutableArray<NSView *> *)cachedControlsForBackendKey:(NSString *)key {
+    NSMutableArray<NSView *> *out = [NSMutableArray array];
+    if (!key.length) return out;
+    for (NSNumber *tabKey in [self.paneCache allKeys]) {
+        NSMutableArray<NSView *> *views = [NSMutableArray array];
+        RLPSettingsCollectViews(self.paneCache[tabKey], views);
+        for (NSView *v in views) {
+            if (!v.identifier.length) continue;
+            NSString *mapped = RLPBackendKeyForControl(v.identifier);
+            if ([mapped isEqualToString:key] ||
+                ([key isEqualToString:@"scanthreads"] && [mapped isEqualToString:@"scanThreads"])) {
+                [out addObject:v];
+            }
+        }
+    }
+    return out;
+}
+
+/// 保存**没落盘**之后把控件退回「最近一次从后端读回的真值」。三条纪律：
+///   ① 只回滚**当前值仍等于本次提交值**的控件 —— 回包前用户又改过的草稿保留原样，绝不回滚新输入；
+///   ② 没有已知真值（lastLoadedValues 里没有）就不猜：留在原位，由状态行如实说明保存失败；
+///   ③ 回滚完解除 dirty：屏幕上已是真值，再挡着读回只会让页面一直显示旧快照。
+- (void)revertControlsForBackendKey:(NSString *)key submittedValue:(NSString *)value {
+    if (!key.length) return;
+    NSString *submitted = value ?: @"";
+    NSCharacterSet *ws = [NSCharacterSet whitespaceAndNewlineCharacterSet];
+    NSString *submittedTrimmed = [submitted stringByTrimmingCharactersInSet:ws];
+    for (NSView *v in [self cachedControlsForBackendKey:key]) {
+        NSString *cur = RLPSettingsControlValueString(v);
+        if (!cur) continue;
+        if (![cur isEqualToString:submitted] &&
+            ![[cur stringByTrimmingCharactersInSet:ws] isEqualToString:submittedTrimmed]) continue;
+        NSString *previous = self.lastLoadedValues[v.identifier];
+        if (!previous) continue;
+        if ([v isKindOfClass:[NSTextField class]]) {
+            ((NSTextField *)v).stringValue = previous;
+        } else if ([v isKindOfClass:[NSSwitch class]]) {
+            ((NSSwitch *)v).state = previous.boolValue ? NSControlStateValueOn : NSControlStateValueOff;
+        } else if ([v isKindOfClass:[NSPopUpButton class]]) {
+            // 复用读回的回填口径（空串 = 「跟随」首项；值 ≠ 文案按 representedObject 匹配）。
+            [self applyKV:@{ key : previous } toPopup:(NSPopUpButton *)v key:key];
+        } else {
+            continue;
+        }
+        [self.dirtyControlIds removeObject:v.identifier];
+        self.lastLoadedValues[v.identifier] = previous;
+    }
+}
+
+/// 保存成功：按「提交值 == 控件当前值」精确解除 dirty。
+/// 为什么必须精确比对：同一个键可能已经又被改过一次（回包乱序），那张新草稿不能被旧成功抹掉
+///（判据 test_native_settings_save_contract 的 1b / 2a）。
+- (void)applySettingsSaveSuccess:(NSDictionary<NSString *, NSString *> *)submitted seq:(NSUInteger)seq {
+    for (NSString *k in submitted) {
+        [self clearDirtyForBackendKey:k submittedValue:submitted[k] ?: @""];
+    }
+    if (seq != self.settingsPostSeq) return;   // 只有**最新**一次提交能改状态行与发通知
+    if (submitted.count == 1) {
+        NSString *k = submitted.allKeys.firstObject;
+        self.statusLine.stringValue = [NSString stringWithFormat:@"%@ %@ = %@",
+                                       RLPTr(@"已保存"), k, submitted[k] ?: @""];
+    } else {
+        self.statusLine.stringValue = RLPTr(@"已保存");
+    }
+    [[NSNotificationCenter defaultCenter] postNotificationName:RLPSettingsChangedNotification
+                                                        object:self];
+}
+
+/// 保存失败（后端明确拒绝 / 根本没发出去）：先把 reverted 里的键回滚，再如实说明。
+/// reverted 传**空字典** = 「没拿到可判定的答复」：不回滚，也不撤销该键的提交时间戳 ——
+/// 结果未知时回滚等于把当前值换成猜的旧值，宁可留在原位并说清"服务没响应"。
+- (void)applySettingsSaveFailure:(NSDictionary<NSString *, NSString *> *)reverted text:(NSString *)text {
+    for (NSString *k in reverted) {
+        [self revertControlsForBackendKey:k submittedValue:reverted[k] ?: @""];
+        // 没落盘的键不能继续挂着「已提交」时间戳：挂着会让下一次读回按 per-key 过滤跳过它，
+        // 屏幕上就一直是那个"以为存了、其实没存"的值（假成功的另一半成因）。
+        [self.settingsKeyPostAt removeObjectForKey:k];
+    }
+    NSString *msg = text ?: @"";
+    self.statusLine.stringValue = msg;
+    RLPToast(msg);
+    std::fprintf(stderr, "[DIAG] SETTINGS_SAVE_FAIL revert=%lu text=%s\n",
+                 (unsigned long)reverted.count, [msg UTF8String]);
+}
+
 - (void)postKey:(NSString *)key value:(NSString *)value
       completion:(void (^_Nullable)(BOOL ok))completion {
     if (!key.length) return;
-    [self.loadedKeys addObject:key];
-    self.settingsKeyPostAt[key] = @([NSProcessInfo processInfo].systemUptime);
-    const NSUInteger seq = ++self.settingsPostSeq;
-    std::fprintf(stderr, "[DIAG] POST %s seq=%lu\n", [[key substringToIndex:MIN(key.length,(NSUInteger)12)] UTF8String], (unsigned long)seq);
-    NSString *body = [NSString stringWithFormat:@"%@=%@", key, RLPEnc(value ?: @"")];
-    __weak __typeof__(self) weakSelf = self;
-    [[RLPCoreClient shared] postJSON:@"/api/settings" body:body completion:^(NSDictionary * _Nullable json) {
-        __typeof__(self) self_ = weakSelf;
-        if (!self_ || seq != self_.settingsPostSeq) return;
-        const BOOL ok = (json && [json[@"ok"] boolValue]);
-        if (ok) {
-            [self_ clearDirtyForBackendKey:key submittedValue:value ?: @""];
-            self_.statusLine.stringValue = [NSString stringWithFormat:@"%@ %@ = %@", RLPTr(@"已保存"), key, value];
-            [[NSNotificationCenter defaultCenter] postNotificationName:RLPSettingsChangedNotification
-                                                                object:self_];
-        } else {
-            NSString *err = [json[@"error"] isKindOfClass:[NSString class]] ? json[@"error"] : RLPTr(@"保存失败");
-            self_.statusLine.stringValue = err;
-            RLPToast(err);
-        }
-        if (completion) completion(ok);
-    }];
+    [self postKeys:@{ key : value ?: @"" } completion:completion];
 }
 
 /// 一次提交多个键（后端合并写）。用于「bit-perfect 直通」与 DSD+dsdnative 等一组键同时改的场景。
@@ -1140,36 +1276,94 @@ static NSString *RLPControlIdentifier(NSString *key) {
 
 - (void)postKeys:(NSDictionary<NSString *, NSString *> *)kv
       completion:(void (^_Nullable)(BOOL ok))completion {
-    NSMutableArray<NSString *> *parts = [NSMutableArray array];
+    if (!kv.count) return;
+    NSMutableArray<NSString *> *parts = [NSMutableArray arrayWithCapacity:kv.count];
     const NSTimeInterval postAt = [NSProcessInfo processInfo].systemUptime;
     for (NSString *k in kv) {
         [self.loadedKeys addObject:k];
         self.settingsKeyPostAt[k] = @(postAt);
         [parts addObject:[NSString stringWithFormat:@"%@=%@", k, RLPEnc(kv[k] ?: @"")]];
     }
-    if (!parts.count) return;
     const NSUInteger seq = ++self.settingsPostSeq;
+    std::fprintf(stderr, "[DIAG] POST %s seq=%lu\n",
+                 [[kv.allKeys componentsJoinedByString:@","] UTF8String], (unsigned long)seq);
+
+    // 一次提交只落一次地：答复 / 超时 / 根本没发出去，三者取先到的那一个。
+    // 为什么必须有这条闸门：RLPCoreClient 在关闸（退出中 / 生成号变化）时会**直接丢掉回调**
+    //（RLPCoreClient.mm 的 runAsync 提前 return），旧实现的 completion 因此永不回调、
+    // 状态行永远停在上一次 —— 保存失败被吞成"什么也没发生"（用户以为已保存）。
+    __block BOOL settled = NO;
     __weak __typeof__(self) weakSelf = self;
+    void (^settle)(NSDictionary * _Nullable, BOOL, BOOL) =
+        ^(NSDictionary * _Nullable json, BOOL timedOut, BOOL notSent) {
+        if (settled) return;
+        settled = YES;
+        __typeof__(self) self_ = weakSelf;
+        if (!self_) return;
+        if (notSent) {
+            [self_ applySettingsSaveFailure:kv
+                                       text:[NSString stringWithFormat:@"%@%@",
+                                             RLPTr(@"保存失败："), RLPTr(@"核心未启动")]];
+            if (completion) completion(NO);
+            return;
+        }
+        if (timedOut || !json) {
+            [self_ applySettingsSaveFailure:@{} text:RLPTr(@"保存失败：服务没响应")];
+            if (completion) completion(NO);
+            return;
+        }
+        if (![json[@"ok"] boolValue]) {
+            NSString *err = ([json[@"error"] isKindOfClass:[NSString class]] && [json[@"error"] length])
+                          ? json[@"error"] : RLPTr(@"保存失败");
+            // 后端明确拒绝：控件会被退回最近一次读回的真值 ⟹ 文案要说明"原值还在"，
+            // 否则用户看到输入框自己跳回去会以为界面出了错。
+            [self_ applySettingsSaveFailure:kv
+                                       text:[NSString stringWithFormat:@"%@：%@",
+                                             RLPTr(@"保存失败，已保留原值"), err]];
+            if (completion) completion(NO);
+            return;
+        }
+        // ok:true 也不等于「写进去了」：/api/settings 是**白名单合并写**，名单外的键被 continue
+        // 静默丢弃，答复仍是 {"ok":true,"merged":true}（tools/rtaweb.cpp:13935；同类事故见
+        // 13899-13903 的 hogexcl 白名单漏键）。答复里的 kv 是**合并后真实落盘的内容** ⟹
+        // 提交的键不在 kv 里就是没写进去，绝不能报「已保存」。
+        NSDictionary *stored = [json[@"kv"] isKindOfClass:[NSDictionary class]] ? json[@"kv"] : nil;
+        if (!stored) {   // 答复不带 kv（不是本端点的形状）：按成功处理，不臆断
+            [self_ applySettingsSaveSuccess:kv seq:seq];
+            if (completion) completion(YES);
+            return;
+        }
+        NSMutableDictionary<NSString *, NSString *> *accepted = [NSMutableDictionary dictionary];
+        NSMutableDictionary<NSString *, NSString *> *dropped = [NSMutableDictionary dictionary];
+        for (NSString *k in kv) {
+            if ([stored objectForKey:k] != nil) accepted[k] = kv[k];
+            else dropped[k] = kv[k];
+        }
+        if (accepted.count) [self_ applySettingsSaveSuccess:accepted seq:seq];
+        if (dropped.count) {
+            // 只说"这些键没写进去"：不承诺"已保留原值"（这几个控件可能根本没有已知旧值可退）。
+            [self_ applySettingsSaveFailure:dropped
+                                       text:[NSString stringWithFormat:@"%@%@",
+                                             RLPTr(@"保存失败："),
+                                             [dropped.allKeys componentsJoinedByString:@"、"]]];
+            if (completion) completion(NO);
+        } else if (completion) {
+            completion(YES);
+        }
+    };
+
+    if (![[RLPCoreClient shared] started]) {   // 核心没起：postJSON 不回调，别装成已保存
+        settle(nil, NO, YES);
+        return;
+    }
     [[RLPCoreClient shared] postJSON:@"/api/settings"
                                 body:[parts componentsJoinedByString:@"&"]
                           completion:^(NSDictionary * _Nullable json) {
-        __typeof__(self) self_ = weakSelf;
-        if (!self_ || seq != self_.settingsPostSeq) return;
-        const BOOL ok = (json && [json[@"ok"] boolValue]);
-        if (ok) {
-            for (NSString *k in kv) {
-                [self_ clearDirtyForBackendKey:k submittedValue:kv[k] ?: @""];
-            }
-            self_.statusLine.stringValue = RLPTr(@"已保存");
-            [[NSNotificationCenter defaultCenter] postNotificationName:RLPSettingsChangedNotification
-                                                                object:self_];
-        } else {
-            NSString *err = [json[@"error"] isKindOfClass:[NSString class]] ? json[@"error"] : RLPTr(@"保存失败");
-            self_.statusLine.stringValue = err;
-            RLPToast(err);
-        }
-        if (completion) completion(ok);
+        settle(json, NO, NO);
     }];
+    // 兜底超时：网络层卡住 / 关闸丢回调时也要给用户一句结论（15s，与其它页同一量级）。
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(15 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{ settle(nil, YES, NO); });
 }
 
 /// 状态行文字（不写假话）。
@@ -1349,7 +1543,10 @@ static NSString *RLPControlIdentifier(NSString *key) {
     if (!sw) return;
     id v = kv[key];
     if (![v respondsToSelector:@selector(boolValue)]) return;
-    sw.state = [v boolValue] ? NSControlStateValueOn : NSControlStateValueOff;
+    const BOOL on = [v boolValue];
+    sw.state = on ? NSControlStateValueOn : NSControlStateValueOff;
+    // 记下"最近一次从后端读回的真值"：保存失败时控件要按它回滚（见 revertControlsForBackendKey）。
+    if (sw.identifier.length) self.lastLoadedValues[sw.identifier] = on ? @"1" : @"0";
     [self.loadedKeys addObject:key];
 }
 
@@ -1387,6 +1584,7 @@ static NSString *RLPControlIdentifier(NSString *key) {
             }
         }
         if (!matchedEmpty && pop.numberOfItems > 0) [pop selectItemAtIndex:0];
+        if (pop.identifier.length) self.lastLoadedValues[pop.identifier] = @"";
         [self.loadedKeys addObject:key];
         return;
     }
@@ -1401,6 +1599,8 @@ static NSString *RLPControlIdentifier(NSString *key) {
         }
     }
     if (!matched && [pop itemWithTitle:s]) [pop selectItemWithTitle:s];
+    // 同上：记下读回真值，保存失败时下拉能退回这一项（下拉本身没有被 dirty 机制保护）。
+    if (pop.identifier.length) self.lastLoadedValues[pop.identifier] = s;
     [self.loadedKeys addObject:key];
 }
 
@@ -2780,8 +2980,18 @@ static NSString *RLPControlIdentifier(NSString *key) {
 
 - (void)onTheme:(id)sender {
     NSString *name = (self.themePopup.indexOfSelectedItem == 1) ? @"light" : @"dark";
-    [RLPTheme setThemeName:name];
-    [self postKey:@"theme" value:name];
+    NSString *previous = [RLPTheme themeName];
+    [RLPTheme setThemeName:name];      // 乐观应用：点了立即生效（不闪一下再变）
+    __weak __typeof__(self) weakSelf = self;
+    [self postKey:@"theme" value:name completion:^(BOOL ok) {
+        __typeof__(self) self_ = weakSelf;
+        if (!self_ || ok) return;
+        // 保存没落盘就不许留在界面上：主题只有**内存 + conf** 两份状态
+        //（RLPTheme.mm:22 的 gThemeName 是内存态；/api/settings 的 theme 键是落盘的那一份），
+        // POST 失败 ⟹ 这次切换没有任何一份被写下，界面上却已经换好了 = 假成功。
+        // 退回原主题，RLPThemeDidChangeNotification 会把下拉也同步回 previous。
+        [RLPTheme setThemeName:previous];
+    }];
 }
 
 - (void)onLanguage:(id)sender {
@@ -2789,7 +2999,14 @@ static NSString *RLPControlIdentifier(NSString *key) {
     __weak __typeof__(self) weakSelf = self;
     [self postKey:@"lang" value:lang completion:^(BOOL ok) {
         __typeof__(self) self_ = weakSelf;
-        if (!self_ || !ok) return;
+        if (!self_) return;
+        if (!ok) {
+            // 语言没落盘就不能切界面（RLPSetLanguage 只改内存，真相源是 conf 的 lang）；
+            // 同时把下拉退回**当前实际生效**的语言，否则下拉显示 en、界面还是中文 = 假成功。
+            if (self_.langPopup)
+                [self_.langPopup selectItemAtIndex:[RLPLanguage() isEqualToString:@"en"] ? 1 : 0];
+            return;
+        }
         RLPSetLanguage(lang);
         [[NSNotificationCenter defaultCenter] postNotificationName:RLPLanguageDidChangeNotification object:self_];
         RLPToast(RLPTr(@"已保存"));
@@ -2798,8 +3015,15 @@ static NSString *RLPControlIdentifier(NSString *key) {
 
 - (void)onBackend:(id)sender {
     NSString *bk = self.backendPopup.titleOfSelectedItem ?: @"coreaudio";
-    [self postKey:@"backend" value:bk];
-    [self syncOutputBackendVisibility:bk];
+    [self syncOutputBackendVisibility:bk];   // 乐观联显隐：选 upnp 就先把目标渲染器一行露出来
+    __weak __typeof__(self) weakSelf = self;
+    [self postKey:@"backend" value:bk completion:^(BOOL ok) {
+        __typeof__(self) self_ = weakSelf;
+        if (!self_ || ok) return;
+        // 回滚已把下拉退回真值（applySettingsSaveFailure → revertControlsForBackendKey）；
+        // 联动显隐必须跟着退回，否则 upnp 那一整行还停在"已切到 upnp"的样子。
+        [self_ syncOutputBackendVisibility:self_.backendPopup.titleOfSelectedItem ?: @"coreaudio"];
+    }];
 }
 
 /// 后端联动（web 同语义）：
@@ -4390,7 +4614,23 @@ static BOOL sRLPConfirmBitPerfectFix = YES;
     // 不另造一种写法，否则两端行为会悄悄分叉。
     NSString *url = [NSString stringWithFormat:@"/api/shuffle?on=%@",
                      s.state == NSControlStateValueOn ? @"1" : @"0"];
-    [RLPCoreClient.shared postJSON:url body:nil completion:nil];
+    __weak __typeof__(self) weakSelf = self;
+    [RLPCoreClient.shared postJSON:url body:nil completion:^(NSDictionary * _Nullable json) {
+        __typeof__(self) self_ = weakSelf;
+        if (!self_) return;
+        if (json && [json[@"ok"] boolValue]) {
+            self_.statusLine.stringValue = RLPTr(@"已保存");
+        } else {
+            // 旧实现 completion:nil：开关已经勾上、后端却没写成（ok:false 或服务没响应）时，
+            // 状态行一个字都不变、也没有提示 —— 保存失败被完全吞掉，用户以为已经开了随机。
+            NSString *err = ([json[@"error"] isKindOfClass:[NSString class]] && [json[@"error"] length])
+                          ? json[@"error"] : RLPTr(@"保存失败");
+            self_.statusLine.stringValue = err;
+            RLPToast(err);
+        }
+        // 成败都按后端真值回填：失败时等于把开关退回原位，成功时顺带同步 sp_rep（与 onRepeat 同口径）。
+        [self_ reloadPlaymode];
+    }];
 }
 
 - (void)onAddRoot:(id)sender {
@@ -4572,43 +4812,78 @@ static NSUInteger RLPUTF8Bytes(NSString *s) {
     return state;
 }
 
-- (void)snapshotPendingPaneDrafts {
-    for (NSNumber *tabKey in [self.paneCache allKeys]) {
-        NSView *cachedPane = self.paneCache[tabKey];
-        if (!cachedPane) continue;
-        NSMutableArray<NSView *> *views = [NSMutableArray array];
-        RLPSettingsCollectViews(cachedPane, views);
-        NSMutableDictionary<NSString *, NSString *> *tabDrafts =
-            self.pendingPaneDrafts[tabKey] ?: [NSMutableDictionary dictionary];
-        for (NSView *v in views) {
-            if (!v.identifier.length || [self isEqOwnedView:v]) continue;
-            if ([v isKindOfClass:[NSTextField class]] && ((NSTextField *)v).isEditable) {
-                NSTextField *tf = (NSTextField *)v;
-                NSString *curVal = tf.currentEditor ? (tf.currentEditor.string ?: @"")
-                                                    : (tf.stringValue ?: @"");
-                NSString *loadedVal = self.lastLoadedValues[v.identifier];
-                BOOL isDirty = [self.dirtyControlIds containsObject:v.identifier];
-                if (!isDirty) {
-                    if (loadedVal != nil) {
-                        isDirty = ![curVal isEqualToString:loadedVal];
-                    } else if (curVal.length > 0) {
-                        isDirty = YES;
-                    }
-                    if (isDirty) [self.dirtyControlIds addObject:v.identifier];
+/// 把一个页签里未提交的草稿落到 pendingPaneDrafts（tabKey → identifier → 文本）。
+/// 抽成单页版本的原因：切页签时只有"正在离开视图树的那一页"会丢掉编辑态，
+/// 其余缓存页签的控件都还在（没必要每次切页全量扫 10 页）。
+/// EQ 子界面自己有一套草稿口径（RLPEqualizerView.hasPendingDraft），这里按 isEqOwnedView
+/// 整块跳过 —— 往它的字段里写值会绕过 peqDraftEpoch / peqSyncedDraftEpoch 的代次判断。
+- (void)snapshotPendingPaneDraftsForTab:(RLPSTab)tab {
+    NSNumber *tabKey = @(tab);
+    NSView *cachedPane = self.paneCache[tabKey];
+    if (!cachedPane) return;
+    NSMutableArray<NSView *> *views = [NSMutableArray array];
+    RLPSettingsCollectViews(cachedPane, views);
+    NSMutableDictionary<NSString *, NSString *> *tabDrafts =
+        self.pendingPaneDrafts[tabKey] ?: [NSMutableDictionary dictionary];
+    for (NSView *v in views) {
+        if (!v.identifier.length || [self isEqOwnedView:v]) continue;
+        if ([v isKindOfClass:[NSTextField class]] && ((NSTextField *)v).isEditable) {
+            NSTextField *tf = (NSTextField *)v;
+            // 正在编辑的字段：文字还在 field editor 里，stringValue 是旧值 —— 必须读 currentEditor。
+            NSString *curVal = tf.currentEditor ? (tf.currentEditor.string ?: @"")
+                                                : (tf.stringValue ?: @"");
+            NSString *loadedVal = self.lastLoadedValues[v.identifier];
+            BOOL isDirty = [self.dirtyControlIds containsObject:v.identifier];
+            // 这一页已经存过草稿、而控件里现在装的仍是「上次读回的真值」⟹ 说明摘出视图树时
+            // field editor 的编辑态被弃掉了（stringValue 没跟上）：**已存的草稿才是新的那一份**，
+            // 不能拿这份旧值把它覆盖掉（否则切语言 / 切主题二次快照时会把草稿冲掉）。
+            NSString *existing = tabDrafts[v.identifier];
+            if (existing.length && isDirty &&
+                (loadedVal == nil ? (curVal.length == 0) : [curVal isEqualToString:loadedVal])) {
+                continue;
+            }
+            if (!isDirty) {
+                if (loadedVal != nil) {
+                    isDirty = ![curVal isEqualToString:loadedVal];
+                } else if (curVal.length > 0) {
+                    isDirty = YES;
                 }
-                if (isDirty || curVal.length > 0) {
-                    tabDrafts[v.identifier] = curVal;
-                }
-            } else if ([v isKindOfClass:[NSTextView class]] && ((NSTextView *)v).isEditable) {
-                NSString *curVal = [((NSTextView *)v).string copy] ?: @"";
-                if (curVal.length > 0 || [self.dirtyControlIds containsObject:v.identifier]) {
-                    tabDrafts[v.identifier] = curVal;
-                }
+                if (isDirty) [self.dirtyControlIds addObject:v.identifier];
+            }
+            if (isDirty || curVal.length > 0) {
+                tabDrafts[v.identifier] = curVal;
+            }
+        } else if ([v isKindOfClass:[NSTextView class]] && ((NSTextView *)v).isEditable) {
+            NSString *curVal = [((NSTextView *)v).string copy] ?: @"";
+            if (curVal.length > 0 || [self.dirtyControlIds containsObject:v.identifier]) {
+                tabDrafts[v.identifier] = curVal;
             }
         }
-        if (tabDrafts.count) {
-            self.pendingPaneDrafts[tabKey] = tabDrafts;
-        }
+    }
+    if (tabDrafts.count) {
+        self.pendingPaneDrafts[tabKey] = tabDrafts;
+    }
+}
+
+/// 跨所有缓存页签快照：切语言 / 切主题会清空 paneCache（非当前页签的页签对象随后被销毁），
+/// 必须先把每一页的草稿都收下来。
+- (void)snapshotPendingPaneDrafts {
+    for (NSNumber *tabKey in [self.paneCache allKeys]) {
+        [self snapshotPendingPaneDraftsForTab:(RLPSTab)tabKey.integerValue];
+    }
+}
+
+/// 换页前：当前显示的那一页若不是即将显示的那一页（它马上会被摘出视图树），先快照它的草稿。
+/// 为什么不能只看 self.tab：onGroupChanged / selectPane 会**先改 self.tab 再调 showTab**，
+/// 拿 tab != self.tab 判"换页"会漏掉这些最常用的入口。
+- (void)snapshotDraftsOfOutgoingPaneIfNeededForTab:(RLPSTab)tab {
+    NSView *outgoing = self.paneHost.subviews.firstObject;
+    if (!outgoing) return;                               // 还没显示过任何页签：没有东西会离开视图树
+    if (self.paneCache[@(tab)] == outgoing) return;      // 同一页签原地重画：视图没离开视图树
+    for (NSNumber *tabKey in [self.paneCache allKeys]) {
+        if (self.paneCache[tabKey] != outgoing) continue;
+        [self snapshotPendingPaneDraftsForTab:(RLPSTab)tabKey.integerValue];
+        return;
     }
 }
 

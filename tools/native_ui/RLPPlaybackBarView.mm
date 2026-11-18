@@ -291,6 +291,28 @@ static void RLPSetBadgeText(NSTextField *label, NSString *text, NSColor *color, 
 @property (nonatomic, assign) BOOL lyricDrawerActive;
 - (void)commitVolumeDb:(double)db completion:(void (^ _Nullable)(BOOL))completion;
 - (void)refreshLyricButton;
+
+/// 进度交互状态机。三条缺陷的共同根因是"进度行没有单一真相源"：
+///   ① 拖动中旧轮询拉回：旧实现只把**滑杆**挡在拖动判断里，两端时间标签在判断之前
+///      就被无条件写（改动前的 1143-1144 行）⟹ 拖动中每来一拍轮询，刚预览的时间被旧位置拉回；
+///   ② 松手后被旧轮询拉回：/api/seek 只把目标写进 ps.seekReq（rtaweb.cpp:15024），
+///      真正的 pos 由音频线程下次消费才更新（rtaweb.cpp:3478-3486；暂停分支在消费
+///      seek 之前就 continue，rtaweb.cpp:3476）⟹ 紧随其后的 /api/status
+///      拿到的仍是**跳转前**的位置，旧实现无条件写回 ⟹ 松手即弹回，半秒后再跳过去；
+///   ③ 预设与松手互相覆盖：程序化跳转（锁屏拖拽 / ←→ 5 s / 播放页）直接改写滑杆，
+///      而松手提交又在**提交那一刻重读**滑杆 ⟹ 提交的是别人刚改过的值。
+/// 所以把三种意图收进一个状态机：拖动预览 > 待确认目标 > 状态真值。
+@property (nonatomic, assign) BOOL seekPending;             // 已发出、尚未被状态证实的跳转
+@property (nonatomic, assign) double seekTargetFrac;        // 该跳转的 0..1 目标（乐观显示值）
+@property (nonatomic, copy) NSString *seekPath;             // 目标所属曲目（切歌即作废）
+@property (nonatomic, assign) NSTimeInterval seekCommitAt;  // 发起跳转的时刻（算"已流逝时间"）
+@property (nonatomic, assign) NSTimeInterval seekDeadline;  // 超过它就不再压住轮询（认账真值）
+@property (nonatomic, assign) NSUInteger seekSeq;           // 丢弃乱序/过期的 seek 回包
+@property (nonatomic, assign) BOOL seekPresetQueued;        // 拖动期间收到的程序化跳转
+@property (nonatomic, assign) double seekPresetFrac;
+- (void)commitSeekFrac:(double)frac;
+- (void)applyProgressDisplayForStatus:(RLPPlaybackStatus *)st dur:(double)dur;
+- (void)restoreProgressToConfirmedStatus;
 @end
 
 static BOOL RLPBarTextFieldIsEditing(NSTextField *field) {
@@ -302,6 +324,78 @@ static BOOL RLPBarTextFieldIsEditing(NSTextField *field) {
     if (editor && fr == editor) return YES;
     if ([fr isKindOfClass:[NSTextView class]] && ((NSTextView *)fr).delegate == (id)field) return YES;
     return NO;
+}
+
+#pragma mark - 进度显示裁决（纯函数，离线判据可直接喂输入）
+
+/// 跳转后压住轮询的时长：本地 seek 由音频线程在下一个循环消费（rtaweb.cpp:3478），
+/// 500 ms 一拍的轮询通常两拍内就能看到新位置；2 s 是"再不动就不装了"的上限。
+static const NSTimeInterval kRLPBarSeekHoldSeconds = 2.0;
+
+/// 进度行该显示哪个值。
+typedef enum {
+    RLPBarProgressShowTruth  = 0,   // 状态里的真实位置（唯一的"认账"来源）
+    RLPBarProgressShowDrag   = 1,   // 用户拖动预览（progress.doubleValue）
+    RLPBarProgressHoldTarget = 2,   // 待确认跳转目标（压住旧轮询，防止松手即弹回）
+} RLPBarProgressIntent;
+
+/// 纯函数：无副作用、不碰 AppKit，各种组合可以直接喂进来当判据。
+/// 优先级：拖动 > 待确认目标 > 真值。
+///   · 拖动中：滑杆与时间标签都属于用户手势，轮询一个字都不许写；
+///   · 待确认：状态位置已贴近目标 ⟹ 后端确实跳到了那里，改用真值；否则播放中给后端
+///     kRLPBarSeekHoldSeconds 的时间，超时仍未贴近 ⟹ 认账真值（绝不假装跳转成功）；
+///   · 暂停中：seekReq 不会被消费（rtaweb.cpp:3476 的暂停分支在消费 seek 之前 continue）⟹
+///     位置在恢复播放前不会变，此时按旧位置回退正是"把用户刚拖到的位置弹回去"，
+///     所以继续压住目标（等恢复后音频线程消费 seekReq，状态自然会核实）。
+static RLPBarProgressIntent RLPBarProgressIntentFor(BOOL dragging, BOOL seekPending,
+                                                    double targetFrac, double polledFrac,
+                                                    BOOL paused, double durSec,
+                                                    NSTimeInterval committedAt,
+                                                    NSTimeInterval deadline, NSTimeInterval now) {
+    if (dragging) return RLPBarProgressShowDrag;
+    if (!seekPending) return RLPBarProgressShowTruth;
+    if (durSec > 0.0) {
+        // 确认窗口按**时间**算（不是死比例）：[目标 - 0.8 s, 目标 + max(0.8 s, 提交后已流逝)]。
+        // 位置只会单向前进，所以音频线程一消费 seekReq（rtaweb.cpp:3478），下一拍就落进
+        // 窗口 ⟹ 立刻交回真值（不用把"当前时间"冻住整整 2 s）；而**跳转前的旧位置**只要
+        // 离目标超过这个窗口，就仍在窗口外，压住目标那条规则照旧成立。
+        const double earlyFrac = MIN(0.5, 0.8 / durSec);
+        const double lateFrac = MIN(0.5, (paused ? 0.8 : MAX(0.8, now - committedAt)) / durSec);
+        if (polledFrac >= targetFrac - earlyFrac && polledFrac <= targetFrac + lateFrac)
+            return RLPBarProgressShowTruth;
+    }
+    if (paused) return RLPBarProgressHoldTarget;
+    return (now < deadline) ? RLPBarProgressHoldTarget : RLPBarProgressShowTruth;
+}
+
+#pragma mark - /api/seek 回包裁决（纯函数，离线判据可直接喂输入）
+
+/// 跳转结果。后端（rtaweb.cpp:15004-15026）有三种"看起来都成功"的形态，必须分开：
+typedef enum {
+    RLPBarSeekApplied   = 0,   // {"ok":true}                          → 已写进 seekReq / 已转发
+    RLPBarSeekRejected  = 1,   // {"ok":false,"error":…,"airplay":true} → 明确没动（AirPlay）
+    RLPBarSeekSkipped   = 2,   // {"ok":true,"upnp":true,"skipped":true} → 投放端没报时长，被跳过
+    RLPBarSeekNoPayload = 3,   // 空回包                              → 请求没到 / 后端没回 JSON
+} RLPBarSeekOutcome;
+
+/// 旧实现 `(void)json`：把 Rejected 与 Skipped 一并当成成功 ⟹ 用户拖完松手，
+/// 进度条停在目标上、歌却没动，界面一声不吭（失败假成功）。
+static RLPBarSeekOutcome RLPBarSeekOutcomeForResponse(NSDictionary *json) {
+    if (![json isKindOfClass:[NSDictionary class]]) return RLPBarSeekNoPayload;
+    // 与 RLPHandlePlaybackActionResponse 同口径（RLPSupport.mm:511-514）：显式 ok:false 才算失败；
+    // 缺 ok 键按成功处理（别为缺键再造一种"假失败"）。
+    const BOOL ok = ![json[@"ok"] isEqual:@NO] && (!json[@"ok"] || [json[@"ok"] boolValue]);
+    if (!ok) return RLPBarSeekRejected;
+    if ([json[@"skipped"] respondsToSelector:@selector(boolValue)] && [json[@"skipped"] boolValue])
+        return RLPBarSeekSkipped;
+    return RLPBarSeekApplied;
+}
+
+/// 后端给的原话（AirPlay 那句已在词表里：RLPNativeI18n.mm:2452）；没有就返回 nil。
+static NSString *RLPBarSeekErrorText(NSDictionary *json) {
+    if (![json isKindOfClass:[NSDictionary class]]) return nil;
+    id err = json[@"error"];
+    return ([err isKindOfClass:NSString.class] && [(NSString *)err length]) ? (NSString *)err : nil;
 }
 
 @implementation RLPPlaybackBarView
@@ -633,6 +727,9 @@ static BOOL RLPBarTextFieldIsEditing(NSTextField *field) {
     (void)note;
     ++self.statusEpoch;
     self.statusInflight = NO;
+    // 播放/暂停/切歌一类的动作会把位置从别处重置：在途的"待确认跳转目标"立刻作废，
+    // 否则它会把新动作产生的位置压在旧比例上（目标的时效性只属于发起它的那一次跳转）。
+    self.seekPending = NO;
 }
 
 - (void)onPlaybackActionCompleted:(NSNotification *)note {
@@ -875,8 +972,19 @@ static double RLPVolDbToPos(double db) {
     // 没有时长就没有可跳的范围：直接返回，绝不猜一个比例发出去。
     if (!st || st.duration <= 0.0) return;
     double clamped = MAX(0.0, MIN(seconds, st.duration));
-    self.progress.doubleValue = clamped / st.duration;
-    [self commitSeek];
+    const double frac = clamped / st.duration;
+    // 拖动中收到程序化跳转（锁屏拖动 / ←→ 5 s / 播放页）：**不许**改滑杆、也不许立刻提交。
+    // 旧实现无条件写 progress.doubleValue 再 commitSeek ⟹ ① 用户正拖着的滑杆被"预设"改写；
+    // ② 松手提交是在提交那一刻**重读**滑杆的 ⟹ 提交的可能是别人刚改过的值 —— 两边互相覆盖。
+    // 这里只记下这次请求，交由松手提交（commitSeek）按事件顺序处理：先提交用户松手的位置，
+    // 再把这次程序化跳转当作**后续**命令补发（两份意图都不丢失，顺序也不倒灌）。
+    if (self.progress.dragging) {
+        self.seekPresetQueued = YES;
+        self.seekPresetFrac = frac;
+        return;
+    }
+    self.progress.doubleValue = frac;
+    [self commitSeekFrac:frac];
 }
 
 /// 停止播放：释放设备（与暂停不同）。走 /api/stop，与 web 版底栏同一个端点。
@@ -884,6 +992,8 @@ static double RLPVolDbToPos(double db) {
     (void)sender;
     if (![self ensurePlaybackReady]) return;
     ++self.statusEpoch;
+    // 停止后位置归零，任何在途的"待确认跳转目标"都失去对象（留着会把 0:00 压成旧比例）。
+    self.seekPending = NO;
     __weak __typeof__(self) weakSelf = self;
     [[RLPCoreClient shared] postJSON:@"/api/stop" body:nil completion:^(NSDictionary * _Nullable json) {
         (void)json;
@@ -971,6 +1081,9 @@ static double RLPVolDbToPos(double db) {
     self.polling = NO;
     ++self.statusEpoch;
     self.statusInflight = NO;
+    // 不再轮询就没有"状态证实"的机会：待确认目标必须先作废，否则下次 startPolling
+    // 会被一个早就过期的目标压住一拍（本轮 5 秒内又不可见，用户只会觉得滑块卡住）。
+    self.seekPending = NO;
 }
 
 - (void)applyTheme {
@@ -1140,8 +1253,10 @@ static double RLPVolDbToPos(double db) {
     }
 
     double dur = st.duration > 0 ? st.duration : 0;
-    self.posLabel.stringValue = [self mmss:st.position];
-    self.durLabel.stringValue = [self mmss:dur];
+    // 进度行（滑杆 + 两端时间）只有一个写入口：拖动预览 > 待确认跳转 > 状态真值。
+    // 旧实现在这里**无条件**写 pos/dur 两个标签，却把滑杆单独挡在拖动判断里 ⟹ 拖动中
+    // 每来一拍轮询，刚预览的"当前时间"就被旧位置拉回一次（用户看到的橡皮筋）。
+    [self applyProgressDisplayForStatus:st dur:dur];
 
     // 格式徽标：与 web #fmt 同字段同格式（44100 → "44.1k/24"；48000 → "48k/24"）。
     if (st.outRate > 0 && st.outBits > 0) {
@@ -1156,9 +1271,9 @@ static double RLPVolDbToPos(double db) {
         RLPSetBadgeText(self.fmtBadge, @"--", [RLPTheme current].accentText, 0.3);
     }
 
-    if (!self.progress.dragging) {
-        self.progress.doubleValue = (dur > 0) ? (st.position / dur) : 0.0;
-    }
+    // 滑杆也不再在这里写：拖动 / 待确认跳转 / 真值的取舍统一在 applyProgressDisplayForStatus:。
+    // 旧实现在这里无条件覆盖滑杆 ⟹ 松手后 /api/seek 还没被音频线程消费时（rtaweb.cpp:3478），
+    // 紧跟的 /api/status 仍是旧位置，滑杆当场被拉回原位。
     NSDictionary *sd = self.statusDetails;
     const BOOL rawLocked = ([sd[@"rawVolumeLocked"] respondsToSelector:@selector(boolValue)] && [sd[@"rawVolumeLocked"] boolValue]) ||
                            ([sd[@"volumeWritable"] respondsToSelector:@selector(boolValue)] && ![sd[@"volumeWritable"] boolValue]);
@@ -1302,20 +1417,121 @@ static double RLPVolDbToPos(double db) {
     }
 }
 
+/// 松手提交：`RLPCommitSlider.onCommit` 的唯一出口。
+/// 修复"预设与松手互相覆盖"：提交值在**这一刻**取下来，不再事后再读滑杆 —— 拖动期间
+/// 若有程序化跳转改写过滑杆，事后读到的是别人的值。拖动期间收到的程序化跳转在这里
+/// 作为**后续命令**补发一次（它确实晚于用户按下、早于松手，两条命令都保留，顺序不倒灌：
+/// 先提交用户松手的位置，再补发那次程序化跳转）。
 - (void)commitSeek {
+    const double releaseFrac = self.progress.doubleValue;   // 用户松手的位置
+    const BOOL presetQueued = self.seekPresetQueued;
+    const double presetFrac = self.seekPresetFrac;
+    self.seekPresetQueued = NO;
+    [self commitSeekFrac:releaseFrac];
+    if (presetQueued) [self commitSeekFrac:presetFrac];
+}
+
+/// 跳转的唯一提交口（松手与程序化跳转共用）。
+- (void)commitSeekFrac:(double)frac {
     if (![self ensurePlaybackReady]) return;
-    double frac = self.progress.doubleValue;
-    if (frac < 0) frac = 0;
-    if (frac > 1) frac = 1;
+    RLPPlaybackStatus *st = self.lastStatus;
+    // web `doSeek` 的守卫（evidence/native-seek-guard-20261115.md §1，与播放页
+    // onCommitSeek / 波形 seek 同口径）：未播放或时长未知时后端必定拒绝，发出去只会在
+    // 界面闪一次失败。但**不能默默什么都不做**：滑杆已经被拖到别处，必须退回真值，
+    // 否则界面停在一个没发生的位置上（用户会以为拖动生效了）。
+    if (!st || !st.playing || !(st.duration > 0.0)) { [self restoreProgressToConfirmedStatus]; return; }
+    if (!isfinite(frac)) { [self restoreProgressToConfirmedStatus]; return; }
+    // 上界 0.9999 不是 1.0：pos=1.0 会让后端精确跳到文件末尾（等于当场停住），
+    // 与播放页 onCommitSeek / 波形 seek 的上界同值（同一份 evidence）。
+    const double clamped = MIN(0.9999, MAX(0.0, frac));
+    const double dur = st.duration;
+
+    // 先立起"待确认目标"并作废在途状态：松手后紧跟的 /api/status 一定还是跳转前的位置
+    //（seek 只写 ps.seekReq，rtaweb.cpp:15024；pos 由音频线程下次消费才更新，
+    //  rtaweb.cpp:3478-3486），不压住它，滑杆当场被拉回原位。
+    const NSUInteger seq = ++self.seekSeq;
+    self.seekPending = YES;
+    self.seekTargetFrac = clamped;
+    self.seekPath = st.currentPath ?: @"";
+    // 提交时刻 + 截止时刻都记下来：前者用来算"位置最多能前进多少"（确认窗口的上界），
+    // 后者是"再不动就不装了"的兜底（认账真值而不是一直假装）。
+    self.seekCommitAt = [NSDate timeIntervalSinceReferenceDate];
+    self.seekDeadline = self.seekCommitAt + kRLPBarSeekHoldSeconds;
+    self.progress.doubleValue = clamped;
+    self.posLabel.stringValue = [self mmss:clamped * dur];
+    self.durLabel.stringValue = [self mmss:dur];
+
     // 参数名必须是 pos（不是 f）：后端读的是 rq.path.find("?pos=")，写错会被静默当成 0
     // —— 用户拖到中间松手，播放却回到开头，且后端回 ok:true 看不出错。
-    NSString *path = [NSString stringWithFormat:@"/api/seek?pos=%.6f", frac];
+    NSString *path = [NSString stringWithFormat:@"/api/seek?pos=%.6f", clamped];
     ++self.statusEpoch;
+    self.statusInflight = NO;
     __weak __typeof__(self) weakSelf = self;
     [[RLPCoreClient shared] postJSON:path body:nil completion:^(NSDictionary * _Nullable json) {
-        (void)json;
-        [weakSelf fetchStatusForced:YES];
+        __typeof__(self) self_ = weakSelf;
+        if (!self_) return;
+        if (seq != self_.seekSeq) return;   // 过期回包：不许动已经更晚的目标
+        const RLPBarSeekOutcome outcome = RLPBarSeekOutcomeForResponse(json);
+        if (outcome != RLPBarSeekApplied) {
+            // 失败必须认账（修复"失败假成功"）：Rejected（AirPlay 的 {"ok":false}）/
+            // Skipped（投放端 {"ok":true,"skipped":true}，没报时长）/ NoPayload（没到后端）
+            // 三种都是**没动**；旧实现 (void)json 一律当成功 ⟹ 用户拖完松手，
+            // 进度条停在目标上、歌却没跳，界面一声不吭。
+            // 这里必须退回真值（"不回退"的洞就在这一行）；提示只用后端原话 —— AirPlay 那句
+            // 已在词表里（RLPNativeI18n.mm:2452），RLPToast 会过 RLPTr。
+            // 其余两种不新造中文文案：门禁 native_i18n_coverage 要求每个 RLPTr(@"中文") 都有
+            // 英文译文（tools/check_native_i18n_coverage.py），本包只许改这一个文件 ⟹
+            // 宁可让"退回真值"这个可见动作本身当反馈，也不留一条英文界面会露出中文的字符串。
+            self_.seekPending = NO;
+            if (!self_.progress.dragging) [self_ restoreProgressToConfirmedStatus];
+            NSString *why = RLPBarSeekErrorText(json);
+            if (why.length) RLPToast(why);
+        }
+        [self_ fetchStatusForced:YES];
     }];
+}
+
+/// 把进度行（滑杆 + 两端时间）恢复到最近一次状态真值。
+/// 用在：跳转失败 / 跳转被守卫拦下 —— 旧实现在这些情况下什么都不做，界面就停在
+/// "没生效的位置"上（现代价：用户以为拖动成功了）。
+- (void)restoreProgressToConfirmedStatus {
+    RLPPlaybackStatus *st = self.lastStatus;
+    const double dur = (st && isfinite(st.duration) && st.duration > 0.0) ? st.duration : 0.0;
+    const double pos = (st && isfinite(st.position) && st.position > 0.0) ? st.position : 0.0;
+    self.progress.doubleValue = (dur > 0.0) ? MAX(0.0, MIN(1.0, pos / dur)) : 0.0;
+    self.posLabel.stringValue = [self mmss:pos];
+    self.durLabel.stringValue = [self mmss:dur];
+}
+
+/// 进度行的唯一写入口（取舍规则见纯函数 RLPBarProgressIntentFor 的注释）。
+- (void)applyProgressDisplayForStatus:(RLPPlaybackStatus *)st dur:(double)dur {
+    NSString *path = st.currentPath ?: @"";
+    // 目标与曲目绑定：切歌后旧目标立即作废（否则它会把新曲的进度压在旧比例上）。
+    if (self.seekPending && ![self.seekPath isEqualToString:path]) self.seekPending = NO;
+    const double polledFrac = (dur > 0.0 && isfinite(st.position))
+        ? MAX(0.0, MIN(1.0, st.position / dur)) : 0.0;
+    const RLPBarProgressIntent intent = RLPBarProgressIntentFor(
+        self.progress.dragging, self.seekPending, self.seekTargetFrac, polledFrac,
+        st.paused, dur, self.seekCommitAt, self.seekDeadline,
+        [NSDate timeIntervalSinceReferenceDate]);
+    switch (intent) {
+        case RLPBarProgressShowDrag:
+            // 拖动中：滑杆与两端时间都归用户手势（progressChanged: 已经在写预览）。
+            return;
+        case RLPBarProgressHoldTarget:
+            self.progress.doubleValue = self.seekTargetFrac;
+            self.posLabel.stringValue = [self mmss:(self.seekTargetFrac * dur)];
+            self.durLabel.stringValue = [self mmss:dur];
+            return;
+        case RLPBarProgressShowTruth:
+        default:
+            if (self.seekPending) self.seekPending = NO;   // 已确认或已超时：真值接管
+            self.progress.doubleValue = polledFrac;
+            self.posLabel.stringValue =
+                [self mmss:(isfinite(st.position) && st.position > 0.0 ? st.position : 0.0)];
+            self.durLabel.stringValue = [self mmss:dur];
+            return;
+    }
 }
 
 - (void)volumeChanged:(id)sender {
@@ -1424,7 +1640,13 @@ static double RLPVolDbToPos(double db) {
 }
 
 - (void)commitVolumeDb:(double)db completion:(void (^)(BOOL))completion {
-    if (!self.polling || self.rawVolumeLocked || !isfinite(db)) return;
+    if (!self.polling || self.rawVolumeLocked || !isfinite(db)) {
+        // 没发出请求就不算成功：必须回调 NO。静音记忆值是在调用**前**就被
+        // RLPVolumeMuteNextDb 改写的（RLPSupport.mm:881-893），这里不回调就等于
+        // 让「静音/恢复」带着一份从未生效的记忆继续走下去（静音语义被悄悄弄坏）。
+        if (completion) completion(NO);
+        return;
+    }
     db = RLPVolClampDb(db);
     if (!self.hasConfirmedVolume && self.lastStatus && isfinite(self.lastStatus.volumeDb)) {
         self.confirmedVolumeDb = RLPVolClampDb(self.lastStatus.volumeDb);
@@ -1463,7 +1685,12 @@ static double RLPVolDbToPos(double db) {
                                                                           @"locked": @(self_.rawVolumeLocked),
                                                                           @"source": self_ }];
         } else {
-            double fallback = self_.hasConfirmedVolume
+            // 兜底链：上次确认值 → 最近一次状态里的音量 → **没有就如实保持"未知"**。
+            // 最后一级故意不后退到"提交前的界面值"：没有确认值时它只是默认 0.0，
+            // 拿它当真相就是**伪造 0 dB 满增益**（音量闭环契约 V2：
+            // tests/test_native_volume_contract.mm:178-195 —— 失败的首写不得广播假值、
+            // currentVolumeDb 必须仍是 NAN）。补偿状态由下面的 fetchStatusForced 提供。
+            const double fallback = self_.hasConfirmedVolume
                 ? self_.confirmedVolumeDb
                 : ((self_.lastStatus && isfinite(self_.lastStatus.volumeDb))
                     ? RLPVolClampDb(self_.lastStatus.volumeDb) : NAN);
@@ -1490,8 +1717,11 @@ static double RLPVolDbToPos(double db) {
     double db = RLPVolPosToDb(self.volume.doubleValue);
     if (db > 0) db = 0;
     if (db < kVolSilentDb) db = kVolSilentDb;
-    NSString *path = [NSString stringWithFormat:@"/api/volume?db=%.1f", db];
-    [[RLPCoreClient shared] postJSON:path body:nil completion:nil];
+    // 必须走 dB 的唯一提交口。旧实现自己发一次 `completion:nil` 的 POST：不看 ok、
+    // 不回退、不通知 —— #vol 现在是 sr-only 的隐藏载体，一旦重新可见就是"失败假成功"
+    //（与 commitVolumeDb 的纪律不一致，同一个后端端点两套成败语义）。
+    // 静音语义不变：最左端仍换算成 -120 dB（真静音），恢复值仍只由 RLPVolumeMuteNextDb 管。
+    [self commitVolumeDb:db];
 }
 
 #pragma mark - 歌词 / 信号链（web 底栏同款两个图标键）

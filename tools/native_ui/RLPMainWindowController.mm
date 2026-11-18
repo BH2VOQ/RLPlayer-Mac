@@ -171,48 +171,70 @@ static NSUInteger RLPCurrentVisibleFrames(NSRect *out, NSUInteger cap) {
     return used;
 }
 
-static void RLPClampWindowToVisibleAndSaveAutosave(NSWindow *win,
-                                                   BOOL display,
-                                                   NSString *previousSavedFrame) {
-    if (!win) return;
-    if ((win.styleMask & NSWindowStyleMaskFullScreen) != 0) return;
+/// 设计上的窗口尺寸 / 最小尺寸（用户 2026-11-11 明确满意的 web 版尺寸是 1180×760）。
+/// **最小尺寸的真相源只在这里**：小屏收敛时会临时把它压到可用区以内（否则窗口会被 minSize 撑回去），
+/// 屏恢复后再从这里重算回 900×600 —— 不能从 win.minSize 反读，读过一次就是被压小的值。
+static const NSRect kRLPMainWindowDefaultFrame = { { 0, 0 }, { 1180, 760 } };
+static const NSSize kRLPMainWindowMinSize = { 900, 600 };
+
+/// 已落盘的 autosave frame 字符串（AppKit 的键名是 "NSWindow Frame <autosaveName>"）。
+static NSString *RLPStoredMainWindowFrameString(void) {
+    return [[NSUserDefaults standardUserDefaults] stringForKey:kRLPMainWindowFrameDefaultsKey];
+}
+
+/// 把窗口收敛到「它所在的屏」的可见区（就地改 frame），并把 win.minSize 压到可用区以内。
+/// 返回 YES 表示 frame 真的变了；已经收敛的 frame 再调一次返回 NO 且不碰窗口（幂等）。
+static BOOL RLPConvergeMainWindowFrame(NSWindow *win, BOOL display) {
+    if (!win) return NO;
+    // 全屏时 frame 由系统接管，这里不动；退出全屏后有专门的一次收敛（onWindowDidExitFullScreen:）。
+    if ((win.styleMask & NSWindowStyleMaskFullScreen) != 0) return NO;
     NSRect visibles[kRLPMaxClampScreens];
     const NSUInteger usedScreens = RLPCurrentVisibleFrames(visibles, kRLPMaxClampScreens);
-    if (usedScreens == 0) return;
+    if (usedScreens == 0) return NO;
 
-    // 跨屏窗口不许被单屏 visibleFrame 压窄（2026-11-18 夜间评审 B1）
+    // 跨屏窗口不许被单屏 visibleFrame 压窄（2026-11-18 夜间评审 B1）；
+    // 并且只认窗口真正碰到的屏 —— 拔屏后留下的死区 / 屏间空隙不算合法位置，一块都没碰到就落到最近的屏。
     const NSRect usable = RLPWindowUsableScreenRect(win.frame, visibles, (size_t)usedScreens);
-    if (NSIsEmptyRect(usable)) return;
+    if (NSIsEmptyRect(usable)) return NO;
+
+    // 小屏撑破：可见区比设计最小尺寸还小时（800×500 的扩展屏），只把 frame 收敛小是不够的 ——
+    // 窗口自己的 minSize 仍是 900×600，用户一拉、或 AppKit 按 minSize 重排就把窗口撑回去、右侧被切掉。
+    // 结论：minSize 与可用区取 min；下次可用区变大时再按设计值重算（不记住被压小的值）。
+    win.minSize = NSMakeSize(MIN(kRLPMainWindowMinSize.width, usable.size.width),
+                             MIN(kRLPMainWindowMinSize.height, usable.size.height));
+
     const NSRect current = win.frame;
     const NSRect clamped = RLPClampWindowFrameToVisible(current, usable, win.minSize);
-    const BOOL changed = !RLPRectsAlmostEqual(clamped, current);
-    if (changed) {
-        [win setFrame:clamped display:display];
-    }
+    if (RLPRectsAlmostEqual(clamped, current)) return NO;
+    [win setFrame:clamped display:display];
+    return YES;
+}
 
-    NSString *autosaveName = win.frameAutosaveName;
-    if (!autosaveName.length) return;
+/// 把当前 frame 写回 autosave（主窗口固定键名）—— **只在**已落盘记录与当前 frame 不一致
+/// （或记录损坏）时写。幂等：第二轮启动记录已经等于收敛结果，不再触碰 defaults；
+/// 脏记录（换屏/拔屏/越界）就地清掉。
+static BOOL RLPWriteBackMainWindowFrameIfDiffers(NSWindow *win) {
+    if (!win) return NO;
+    NSString *stored = RLPStoredMainWindowFrameString();
+    if (!stored.length) return NO;    // 首启没有记录：没有脏值要清
+    NSRect saved = NSZeroRect;
+    if (RLPParseSavedWindowFrame(stored.UTF8String, &saved) && RLPRectsAlmostEqual(saved, win.frame)) return NO;
+    [win saveFrameUsingName:kRLPMainWindowAutosaveName];
+    return YES;
+}
 
-    BOOL savedWasOutOfVisible = NO;
-    NSRect savedRect = NSZeroRect;
-    if (RLPParseSavedWindowFrame(previousSavedFrame.UTF8String, &savedRect)) {
-        const NSRect usableSaved = RLPWindowUsableScreenRect(savedRect, visibles, (size_t)usedScreens);
-        const NSRect clampedSaved = RLPClampWindowFrameToVisible(savedRect, usableSaved, win.minSize);
-        savedWasOutOfVisible = !RLPRectsAlmostEqual(clampedSaved, savedRect);
-    } else if (previousSavedFrame.length) {
-        savedWasOutOfVisible = YES;
-    }
-
-    if (changed || savedWasOutOfVisible) {
-        [win saveFrameUsingName:autosaveName];
-    }
+/// 屏参数变化（插屏/拔屏/分辨率或主屏变化）与退出全屏后的统一入口：先收敛，再按需写回。
+static void RLPConvergeAndWriteBackMainWindowFrame(NSWindow *win) {
+    if (!win) return;
+    RLPConvergeMainWindowFrame(win, win.isVisible);
+    RLPWriteBackMainWindowFrameIfDiffers(win);
 }
 
 @implementation RLPMainWindowController
 
 - (instancetype)init {
     RLPTheme *t = [RLPTheme current];
-    NSRect frame = NSMakeRect(0, 0, 1180, 760);
+    NSRect frame = kRLPMainWindowDefaultFrame;
     NSWindow *win = [[NSWindow alloc] initWithContentRect:frame
         styleMask:(NSWindowStyleMaskTitled | NSWindowStyleMaskClosable |
                    NSWindowStyleMaskMiniaturizable | NSWindowStyleMaskResizable |
@@ -222,30 +244,42 @@ static void RLPClampWindowToVisibleAndSaveAutosave(NSWindow *win,
     win.titlebarAppearsTransparent = YES;
     win.titleVisibility = NSWindowTitleHidden;
     win.backgroundColor = t.bg;
-    win.minSize = NSMakeSize(900, 600);
+    win.minSize = kRLPMainWindowMinSize;
     win.appearance = [NSAppearance appearanceNamed:t.isLight ? NSAppearanceNameAqua : NSAppearanceNameDarkAqua];
     // 默认尺寸 1180×760（用户 2026-11-11 明确满意的 web 版尺寸）。
     // autosave 键**换名**：旧键 RLPNativeMainWindow 里存着开发期离屏审计写坏的宽度
     // （1257/1361…），沿用旧键会让用户一直看到错尺寸。换键即丢弃那批脏记录，
     // 同时保留"用户之后自己调整的大小仍被记住"这一正常行为。
-    NSString *previousSavedFrame = [[NSUserDefaults standardUserDefaults] stringForKey:kRLPMainWindowFrameDefaultsKey];
-    [win setFrameAutosaveName:kRLPMainWindowAutosaveName];
-    // 2026-11-18 夜间评审 B2：原来无条件 [win center] 会把 autosave 里的 origin 覆盖成主屏中心
-    // （用户放在副屏/自定义位置的窗口每次启动都回到正中），且随后的收敛作用在"居中后"的 frame 上。
-    // 改为显式回放保存值（不依赖 setFrameAutosaveName: 的恢复时序），只有确实没有保存值时才居中。
+    NSString *previousSavedFrame = RLPStoredMainWindowFrameString();
+    // 2026-11-18 夜间评审 B2 的追加修订：顺序必须是「先收敛、再挂 autosave 名」。
+    // 旧顺序先 setFrameAutosaveName:（这一步会按名把 autosave 里的 frame 恢复/注册回来），再覆盖/收敛；
+    // 其间 AppKit 看到的是**未收敛**的 frame —— 启动时窗口先出现在旧位置再被拉/缩回来（跳屏），
+    // 脏 frame 也被重新注册了一次。新顺序：算启动 frame → 收敛 → 把收敛结果写回同名 defaults
+    // → 最后才 setFrameAutosaveName:；挂名时恢复到的就是刚写进去的收敛 frame，不会再跳。
+    // 仍然显式回放保存值（不依赖 setFrameAutosaveName: 的恢复时序）：只有确实没有保存值时才居中，
+    // 否则会把用户放在副屏/自定义位置的 origin 覆盖成主屏中心（B2）。
     {
         NSRect visibles[kRLPMaxClampScreens];
         const NSUInteger usedScreens = RLPCurrentVisibleFrames(visibles, kRLPMaxClampScreens);
         const RLPWindowStartupFrame start =
             RLPWindowStartupFrameForSavedState(previousSavedFrame.UTF8String,
-                                               NSMakeRect(0, 0, 1180, 760),
-                                               visibles, (size_t)usedScreens, win.minSize);
+                                               kRLPMainWindowDefaultFrame,
+                                               visibles, (size_t)usedScreens,
+                                               kRLPMainWindowMinSize);
         [win setFrame:start.frame display:NO];
         if (start.center) [win center];
     }
-    // 换屏/外接显示器/历史拖拽会把 autosave frame 存成超出当前屏幕的尺寸，
-    // 恢复后内容会被屏幕边缘裁掉。启动时统一收敛到可见区并写回 autosave 清掉脏记录。
-    RLPClampWindowToVisibleAndSaveAutosave(win, NO, previousSavedFrame);
+    // 换屏/外接显示器/历史拖拽会把 autosave frame 存成超出当前屏幕的尺寸、或落在屏间死区（拔屏后
+    // 旧屏坐标还在）：启动时统一收敛到它所在屏的可见区，并把脏记录写回去（记录已相等则不写，幂等）。
+    RLPConvergeMainWindowFrame(win, NO);
+    RLPWriteBackMainWindowFrameIfDiffers(win);
+    const NSRect convergedFrame = win.frame;
+    [win setFrameAutosaveName:kRLPMainWindowAutosaveName];
+    if (!RLPRectsAlmostEqual(win.frame, convergedFrame)) {
+        // 不同系统版本挂名时的恢复时序不同：万一 AppKit 又恢复出另一个值的 frame，再收敛并写回兜底。
+        RLPConvergeMainWindowFrame(win, NO);
+        RLPWriteBackMainWindowFrameIfDiffers(win);
+    }
 
     self = [super initWithWindow:win];
     if (!self) return nil;
@@ -469,6 +503,10 @@ static void RLPClampWindowToVisibleAndSaveAutosave(NSWindow *win,
                                                  name:@"RLPFocusSearchNotification" object:nil];
     [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(onScreenParametersChanged:)
                                                  name:NSApplicationDidChangeScreenParametersNotification object:nil];
+    // 全屏时 onScreenParametersChanged: 会早退（frame 由系统接管）；退出全屏 AppKit 才把 pre-fullscreen frame
+    // 还回来，若那块显示器在期间被拔掉，还回来的 frame 落在已不存在的坐标（拔屏死区），没有别的路径再夹它。
+    [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(onWindowDidExitFullScreen:)
+                                                 name:NSWindowDidExitFullScreenNotification object:self.window];
 
     [_sidebar selectRow:0];
     [self showContentForRow:0];
@@ -1399,17 +1437,29 @@ static void RLPClampWindowToVisibleAndSaveAutosave(NSWindow *win,
 - (void)onScreenParametersChanged:(NSNotification *)note {
     (void)note;
     if ([NSThread isMainThread]) {
-        NSWindow *win = self.window;
-        RLPClampWindowToVisibleAndSaveAutosave(win, win.isVisible, nil);
+        RLPConvergeAndWriteBackMainWindowFrame(self.window);
     } else {
         __weak __typeof__(self) weakSelf = self;
         dispatch_async(dispatch_get_main_queue(), ^{
             __typeof__(self) self_ = weakSelf;
             if (!self_) return;
-            NSWindow *win = self_.window;
-            RLPClampWindowToVisibleAndSaveAutosave(win, win.isVisible, nil);
+            RLPConvergeAndWriteBackMainWindowFrame(self_.window);
         });
     }
+}
+
+- (void)onWindowDidExitFullScreen:(NSNotification *)note {
+    (void)note;
+    // 退出全屏的动画期间 frame 还是全屏尺寸：此时收敛会把窗口改成"屏幕可见区大小"，所以要等恢复完成。
+    // 0.5s 后做的仍然是幂等收敛 —— 窗口本来就在可见区时什么都不会发生；只有落在死区的 frame
+    // （拔屏后还是旧屏坐标）会被夹回最近的屏，并写回 autosave。
+    __weak __typeof__(self) weakSelf = self;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        __typeof__(self) self_ = weakSelf;
+        if (!self_) return;
+        RLPConvergeAndWriteBackMainWindowFrame(self_.window);
+    });
 }
 
 @end
