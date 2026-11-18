@@ -234,7 +234,7 @@ int main() {
         Ck(!played, "点 × 不触发行播放（/api/play 未出现）", @"触发了播放");
 
         // ---- 6. 拖拽排序仍在 ----
-        Ck([table.registeredDraggedTypes containsObject:@"RLPQueueRowDrag"],
+        Ck([table.registeredDraggedTypes containsObject:@"com.rta.rlplayer.queue-row"],
            "拖拽 pasteboard 类型仍注册（qmove 未回退）",
            [table.registeredDraggedTypes componentsJoinedByString:@","]);
 

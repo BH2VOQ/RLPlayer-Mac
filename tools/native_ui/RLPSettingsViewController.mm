@@ -281,6 +281,9 @@ static NSStackView *RLPSRow(NSString *label, NSView *control, NSString *hint, RL
 @property (nonatomic, strong) NSSegmentedControl *tabs;
 @property (nonatomic, strong) NSView *paneHost;
 @property (nonatomic, assign) RLPSTab tab;
+/// 实际显示在 paneHost 里的页签（selectPane 会先把 self.tab 改成目标页再调 showTab，
+/// 光看 self.tab 已无法判断“即将离开的是不是 EQ”）。
+@property (nonatomic, assign) RLPSTab shownTab;
 @property (nonatomic, strong) NSMutableDictionary<NSNumber *, NSView *> *paneCache;
 /// 已经从后端读到真值的键：没读到之前不写回，避免用 UI 默认值覆盖用户真实设置。
 @property (nonatomic, strong) NSMutableSet<NSString *> *loadedKeys;
@@ -808,7 +811,10 @@ static void RLPSettingsCollectViews(NSView *v, NSMutableArray<NSView *> *out) {
     //    触发条件：即将离开视图树的那一页里含 eqView（即当前停在 EQ 页）。
     //    为什么不能按 paneCache 判：切语言 / 切主题时 paneCache 已先被清空，只剩视图树可判。
     NSView *outgoingPane = self.paneHost.subviews.firstObject;
-    if (self.eqView && outgoingPane && [self.eqView isDescendantOf:outgoingPane]) {
+    const BOOL outgoingShowsEq =
+        (self.shownTab == RLPSTabEq) ||
+        (outgoingPane != nil && [self.eqView isDescendantOf:outgoingPane]);
+    if (self.eqView && outgoingShowsEq) {
         self.eqDraftState = [self.eqView rlp_captureDraftState];
     }
     [self snapshotDraftsOfOutgoingPaneIfNeededForTab:tab];
@@ -856,6 +862,7 @@ static void RLPSettingsCollectViews(NSView *v, NSMutableArray<NSView *> *out) {
     }
     // 诊断页每次进入补一次通道探活（web bindFeedbackCard 同语义；30s 内不重复，见 probeFeedbackChannel）。
     if (tab == RLPSTabDiag) [self probeFeedbackChannel];
+    self.shownTab = tab;
 }
 
 /// 每个页签 = 一个纵向滚动的 NSStackView。

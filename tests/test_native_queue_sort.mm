@@ -20,6 +20,21 @@
 // 旧原生（1.1.7.27）：下拉只有 3 档（默认/标题/艺术家）；qorder 只发路径、丢 cue；
 // playRow 走 RLPPlayPath 丢 cue；按钮叫「存为歌单 / 清空」。所以本文件对旧码必须红。
 //
+// ==================== 2026-11-18 夜间评审补充（在途旧回包 · 错位索引）====================
+// 本文件另外钉住两件事（生产修复见 commit dafb14f，tools/native_ui/RLPQueueViewController.mm）：
+//   1) 排序/拖动在途时，已发出的旧 /api/queue?meta=1 回包不得落表（否则会覆盖刚提交的新顺序，
+//      并让拖动的行号错位）。修复 = sortInFlight/moveInFlight/dragSessionActive +
+//      reloadData:/applyQueueSnapshot: 的在途闸门 + sortBy:/acceptDrop 的 ++seq。
+//   2) 拖动负载必须带行身份（row + path + cs/ce）；拖动期间队列变过时，同一行号已不是原来那首
+//      ⟹ acceptDrop 必须拒绝且不发 /api/qmove（后端 qmove 不校验曲目身份）。
+//      修复 = pasteboardWriterForRow: 写身份 plist + acceptDrop 的 path/cs/ce 复核。
+// 哪一处修复被移除会让判据变红，写在各判据块开头的注释里：
+//   * P8a（拖动在途）唯一由 applyQueueSnapshot: 闸门兜底（拖动开始不 ++seq）；
+//   * P8b（排序在途）由 ++seq 与 applyQueueSnapshot: 闸门互为冗余兜底（单独移除一道仍绿）；
+//   * P8b 的“刷新被压住”只由 reloadData 的早退兜底；
+//   * P9 的 path 复核、cs/ce 复核各自独立，移除任一道都会让对应子判据红；
+//     P9a 的负载契约（裸行号 vs 身份 plist）与 P9d 的裸行号负载单独钉住 writer/acceptDrop 的格式修复。
+//
 // ============================ 铁律②：绝不出声 ============================
 // 桩 RLPCoreClient：只记录 GET/POST 与 body，不启动核心、不碰音频设备、不创建可见窗口。
 #import <AppKit/AppKit.h>
@@ -65,6 +80,17 @@ static BOOL g_failQsortDefault;
 static NSString *g_qsortErr;
 static NSDictionary *g_saveResponse;
 static NSInteger g_savedQueueNotes;
+/// P8（在途旧回包）：/api/queue?meta=1 的回包可以扣住，由判据手动投递，
+/// 模拟真实异步客户端里「读取已发出、排序/拖动已开始、回包才回来」的竞态。
+static BOOL g_holdQueueMetaGet;
+static NSMutableArray<RLPJSONCompletion> *g_heldQueueMetaDone;
+static NSMutableArray<NSDictionary *> *g_heldQueueMetaPayload;
+/// P8b（排序在途）：/api/qorder 的回包同样扣住，制造“请求未回包”的窗口。
+static BOOL g_holdReorderPost;
+static NSMutableArray<RLPJSONCompletion> *g_heldReorderDone;
+static NSMutableArray<NSString *> *g_heldReorderPaths;
+/// P8 的旧快照（3 首）只在被扣住的那次读取里生效，不改全局夹具。
+static NSDictionary *g_queueOverride;
 
 static NSArray<NSString *> *PathsFixture(void) {
     return @[ @"/Music/A/One.flac", @"/Music/B/Two.flac",
@@ -81,7 +107,44 @@ static NSArray<NSArray<NSNumber *> *> *CuesFixture(void) {
     return @[ @[ @(-1), @(-1) ], @[ @(10), @(20) ],
               @[ @(-1), @(-1) ], @[ @(30), @(40) ] ];
 }
+/// P8 的旧快照：3 首（当前 4 首）。旧回包若落表，行数/标题会立刻可见地变。
+static NSDictionary *StaleQueuePayload(void) {
+    return @{ @"ok": @YES, @"index": @0, @"mode": @0,
+              @"items": @[ @"/Music/A/One.flac", @"/Music/B/Two.flac", @"/Music/C/Three.flac" ],
+              @"cues": @[ @[ @(-1), @(-1) ], @[ @(10), @(20) ], @[ @(-1), @(-1) ] ],
+              @"metas": @[ @{ @"t": @"Zulu",  @"a": @"B", @"al": @"Alb2", @"d": @100, @"y": @2001 },
+                           @{ @"t": @"Alpha", @"a": @"C", @"al": @"Alb3", @"d": @50,  @"y": @2005 },
+                           @{ @"t": @"Mike",  @"a": @"A", @"al": @"Alb1", @"d": @300, @"y": @1999 } ] };
+}
+/// P9a：拖动期间队列变过序（第 0 行 A/One → C/Three）。
+/// 第 0 行 cue 仍是整轨 [-1,-1]（与拖动负载相同）⟹ 只有 path 复核能挡住这一落；
+/// 若移除 path 复核，cs/ce 复核会放行并发 qmove（判据红）。
+static NSArray<NSString *> *ReorderedPathsFixture(void) {
+    return @[ @"/Music/C/Three.flac", @"/Music/B/Two.flac",
+              @"/Music/A/One.flac", @"/Music/D/Four.flac" ];
+}
+static NSArray<NSDictionary *> *ReorderedMetasFixture(void) {
+    return @[ @{ @"t": @"Mike",  @"a": @"A", @"al": @"Alb1", @"d": @300, @"y": @1999 },
+              @{ @"t": @"Alpha", @"a": @"C", @"al": @"Alb3", @"d": @50,  @"y": @2005 },
+              @{ @"t": @"Zulu",  @"a": @"B", @"al": @"Alb2", @"d": @100, @"y": @2001 },
+              @{ @"t": @"Bravo", @"a": @"D", @"al": @"Alb4", @"d": @20,  @"y": @2010 } ];
+}
+static NSArray<NSArray<NSNumber *> *> *ReorderedCuesFixture(void) {
+    return @[ @[ @(-1), @(-1) ], @[ @(10), @(20) ],
+              @[ @(-1), @(-1) ], @[ @(30), @(40) ] ];
+}
+/// P9b：路径不变、区间变了（第 1 行 B/Two 从 [10,20] 变整轨）⟹ 只有 cs/ce 复核能挡住。
+static NSArray<NSArray<NSNumber *> *> *FlatCuesFixture(void) {
+    return @[ @[ @(-1), @(-1) ], @[ @(-1), @(-1) ],
+              @[ @(-1), @(-1) ], @[ @(-1), @(-1) ] ];
+}
+static void ResetQueueFixtures(void) {
+    g_queueItems = PathsFixture(); g_queueMetas = MetasFixture(); g_queueCues = CuesFixture();
+    g_queueMode = 0;
+}
+
 static NSDictionary *QueuePayload(void) {
+    if (g_queueOverride) return g_queueOverride;
     return @{ @"ok": @YES, @"index": @0, @"mode": @(g_queueMode),
               @"items": g_queueItems ?: @[], @"cues": g_queueCues ?: @[],
               @"metas": g_queueMetas ?: @[] };
@@ -95,7 +158,14 @@ static NSDictionary *QueuePayload(void) {
 - (void)getJSON:(NSString *)path completion:(RLPJSONCompletion)done {
     if (!done) return;
     [g_gets addObject:@{ @"path": path ?: @"" }];
-    if ([path hasPrefix:@"/api/queue?meta=1"]) { done(QueuePayload()); return; }
+    if ([path hasPrefix:@"/api/queue?meta=1"]) {
+        if (g_holdQueueMetaGet) {
+            [g_heldQueueMetaDone addObject:[done copy]];
+            [g_heldQueueMetaPayload addObject:QueuePayload()];
+            return;
+        }
+        done(QueuePayload()); return;
+    }
     if ([path hasPrefix:@"/api/playmode"]) { done(@{ @"ok": @YES, @"mode": @(g_queueMode) }); return; }
     if ([path hasPrefix:@"/api/sq/list"]) { done(@{ @"ok": @YES, @"queues": @[] }); return; }
     done(@{ @"ok": @NO });
@@ -116,6 +186,15 @@ static NSDictionary *QueuePayload(void) {
         if (done) done(j);
         return;
     }
+    if ([path hasPrefix:@"/api/qorder"] || [path hasPrefix:@"/api/qmove"]) {
+        if (g_holdReorderPost) {
+            if (done) {
+                [g_heldReorderDone addObject:[done copy]];
+                [g_heldReorderPaths addObject:path ?: @""];
+            }
+            return;
+        }
+    }
     if ([path hasPrefix:@"/api/sq/save"] && g_saveResponse) { if (done) done(g_saveResponse); return; }
     if ([path hasPrefix:@"/api/playmode?mode="]) {
         g_queueMode = [[path substringFromIndex:@"/api/playmode?mode=".length] integerValue];
@@ -126,6 +205,30 @@ static NSDictionary *QueuePayload(void) {
 }
 @end
 #pragma mark clang diagnostic pop
+
+#pragma mark - 拖动夹具（P9：生产码只读 draggingPasteboard 的两个取值方法）
+
+/// 离屏拖放夹具：**不**声明 NSDraggingInfo 协议（协议有 11 个 @required 成员，
+/// 与本判据无关）；acceptDrop 只读 draggingPasteboard，故只实现这一个属性。
+@interface RLPQueueDragInfoStub : NSObject
+@property (nonatomic, strong) id draggingPasteboard;
+@end
+
+@implementation RLPQueueDragInfoStub
+@end
+
+/// 离屏粘贴板夹具：acceptDrop 只调 propertyListForType:/stringForType:。
+/// 用轻量对象替代真 NSPasteboard：离线/无 WindowServer 时也不依赖 pboard 服务，
+/// 且能精确模拟“旧负载是字符串、新负载是 plist 字典”两种契约。
+@interface RLPQueueDragPasteboardStub : NSObject
+@property (nonatomic, copy) id payload;             // propertyListForType:
+@property (nonatomic, copy) NSString *stringPayload;    // stringForType:
+@end
+
+@implementation RLPQueueDragPasteboardStub
+- (id)propertyListForType:(NSString *)type { (void)type; return self.payload; }
+- (NSString *)stringForType:(NSString *)type { (void)type; return self.stringPayload; }
+@end
 
 #pragma mark - 工具
 
@@ -176,6 +279,40 @@ static NSArray<NSDictionary *> *PostsWithPrefix(NSString *prefix) {
     NSMutableArray *out = [NSMutableArray array];
     for (NSDictionary *p in g_posts) if ([p[@"path"] hasPrefix:prefix]) [out addObject:p];
     return out;
+}
+
+/// 与生产 kQueueDragType 同值（生产常量是 .mm 私有，测试按契约字面量复核）。
+static NSString *const kQueueDragTypeTest = @"com.rta.rlplayer.queue-row";
+
+/// 页面当前队列（生产私有属性 paths）：判据只读，不写。
+static NSArray<NSString *> *PathsOf(RLPQueueViewController *vc) {
+    id p = [vc valueForKey:@"paths"];
+    return [p isKindOfClass:[NSArray class]] ? (NSArray<NSString *> *)p : @[];
+}
+static NSString *PathAt(RLPQueueViewController *vc, NSInteger row) {
+    NSArray<NSString *> *ps = PathsOf(vc);
+    return (row >= 0 && row < (NSInteger)ps.count) ? ps[(NSUInteger)row] : nil;
+}
+static NSInteger QueueGetCount(void) {
+    NSInteger n = 0;
+    for (NSDictionary *g in g_gets) if ([g[@"path"] hasPrefix:@"/api/queue?meta=1"]) ++n;
+    return n;
+}
+/// 投递一条被扣住的旧队列回包（completion + 当时捕获的快照）。
+static void DeliverHeldQueueMetaGet(NSUInteger index) {
+    if (index >= g_heldQueueMetaDone.count || index >= g_heldQueueMetaPayload.count) return;
+    RLPJSONCompletion done = g_heldQueueMetaDone[index];
+    NSDictionary *payload = g_heldQueueMetaPayload[index];
+    [g_heldQueueMetaDone removeObjectAtIndex:index];
+    [g_heldQueueMetaPayload removeObjectAtIndex:index];
+    if (done) done(payload);
+}
+/// 投递所有被扣住的 qorder/qmove 回包（P8b 放行排序）。
+static void DeliverHeldReorder(NSDictionary *result) {
+    NSArray<RLPJSONCompletion> *held = [g_heldReorderDone copy];
+    [g_heldReorderDone removeAllObjects];
+    [g_heldReorderPaths removeAllObjects];
+    for (RLPJSONCompletion done in held) if (done) done(result);
 }
 
 #pragma mark - 轻提示断言（与 test_native_nowplaying_web 同一条离屏口径）
@@ -252,6 +389,10 @@ int main() {
         [app setActivationPolicy:NSApplicationActivationPolicyAccessory];
         g_gets = [NSMutableArray array];
         g_posts = [NSMutableArray array];
+        g_heldQueueMetaDone = [NSMutableArray array];
+        g_heldQueueMetaPayload = [NSMutableArray array];
+        g_heldReorderDone = [NSMutableArray array];
+        g_heldReorderPaths = [NSMutableArray array];
         g_queueItems = PathsFixture();
         g_queueMetas = MetasFixture();
         g_queueCues = CuesFixture();
@@ -394,7 +535,7 @@ int main() {
         }
         Ck(table != nil, "找得到队列表格", @"表格缺失");
         if (table) {
-            Ck([table.registeredDraggedTypes containsObject:@"RLPQueueRowDrag"],
+            Ck([table.registeredDraggedTypes containsObject:@"com.rta.rlplayer.queue-row"],
                "拖拽排序的 pasteboard 类型仍注册（/api/qmove 路径未回退）",
                [table.registeredDraggedTypes componentsJoinedByString:@","]);
             // 行视图是 AppKit 懒创建的：离屏时 viewAtColumn 不一定会被调用，
@@ -634,6 +775,277 @@ int main() {
                 (unsigned long)PostsWithPrefix(@"/api/qdel").count, (long)qChangedCount, (int)(qChangedObj == vc)]);
 
             [[NSNotificationCenter defaultCenter] removeObserver:obs];
+        }
+
+        // ---- P8 排序/拖动在途：已发出的旧队列回包不得落表（2026-11-18 夜间评审）----
+        // 真实竞态：1s 轮询/外部通知先发了一次 /api/queue?meta=1，用户随即点排序或开始拖动，
+        // 旧回包这时才回来。旧快照若落表会覆盖刚提交的新顺序，并让拖动的行号错位。
+        // 判据把回包扣在 mock 里（g_holdQueueMetaGet）人为放大这个窗口。
+        {
+            ResetQueueFixtures();
+            [vc reloadData];
+            Pump(0.05);
+            Ck([PathsOf(vc) count] == 4 && table.numberOfRows == 4,
+               "P8 前置：当前表格 = 4 首默认队列（判据基线）",
+               [NSString stringWithFormat:@"paths=%lu rows=%ld",
+                (unsigned long)[PathsOf(vc) count], (long)table.numberOfRows]);
+
+            // --- P8a 拖动会话在途 ---
+            // 这条路径不 ++seq（拖动开始只置 dragSessionActive），唯一屏障 = applyQueueSnapshot: 的闸门。
+            // ⟹ 移除 applyQueueSnapshot: 的早退，本子判据红（旧码没有这道闸门，旧快照会直接落表）。
+            [g_heldQueueMetaDone removeAllObjects];
+            [g_heldQueueMetaPayload removeAllObjects];
+            g_queueOverride = StaleQueuePayload();
+            g_holdQueueMetaGet = YES;
+            [vc reloadData];                        // 读取在拖动前发出，回包被扣住
+            g_holdQueueMetaGet = NO;
+            g_queueOverride = nil;
+            Ck(g_heldQueueMetaDone.count == 1 && g_heldQueueMetaPayload.count == 1,
+               "P8a 前置：旧队列读取已扣在 mock（3 首旧快照，当前 4 首）",
+               [NSString stringWithFormat:@"done=%lu payload=%lu",
+                (unsigned long)g_heldQueueMetaDone.count, (unsigned long)g_heldQueueMetaPayload.count]);
+            // 旧码（dafb14f^）没有这两个 delegate 入口；respondsToSelector 只为避免向未实现
+            // 的选择器发消息而崩，缺入口本身仍判红（前置 Ck），旧快照照常投递以暴露漏闸。
+            SEL p8WillBegin = @selector(tableView:draggingSession:willBeginAtPoint:forRowIndexes:);
+            SEL p8Ended = @selector(tableView:draggingSession:endedAtPoint:operation:);
+            BOOL p8HasDragSession = [vc respondsToSelector:p8WillBegin] && [vc respondsToSelector:p8Ended];
+            Ck(p8HasDragSession,
+               "P8a 前置：拖动会话 delegate 入口存在（dragSessionActive 才有置位入口）",
+               @"缺少 willBegin/ended 选择器");
+            if (p8HasDragSession) {
+                [vc tableView:table draggingSession:nil willBeginAtPoint:NSMakePoint(0, 0)
+                    forRowIndexes:[NSIndexSet indexSetWithIndex:1]];
+            }
+            DeliverHeldQueueMetaGet(0);
+            Pump(0.05);
+            Ck([PathsOf(vc) count] == 4 && table.numberOfRows == 4,
+               "P8a 拖动在途：旧队列回包不落表（行数仍是 4、顺序不回到旧快照）",
+               [NSString stringWithFormat:@"paths=%lu rows=%ld",
+                (unsigned long)[PathsOf(vc) count], (long)table.numberOfRows]);
+            // 拖动结束补拉（生产在 endedAtPoint: 里做），也保证后续判据不被拖动态压住。
+            if (p8HasDragSession) {
+                [vc tableView:table draggingSession:nil endedAtPoint:NSMakePoint(0, 0)
+                    operation:NSDragOperationNone];
+            }
+            Pump(0.05);
+            Ck([PathsOf(vc) count] == 4,
+               "P8a 收尾：拖动结束后补拉仍回到 4 首（闸门没有把刷新永久压死）",
+               [NSString stringWithFormat:@"paths=%lu", (unsigned long)[PathsOf(vc) count]]);
+
+            // --- P8b 排序在途（qorder 未回包）---
+            // 这条窗口有两道冗余闸门：sortBy: 的 ++seq 与 applyQueueSnapshot: 的在途闸门；
+            // 移除任一仍会被另一道兜住，两者同时移除才红（旧码两者都没有 ⟹ 对旧码红）。
+            // “刷新被压住”只由 reloadData 的早退兜底 ⟹ 移除它，下面条数判据红。
+            [g_heldQueueMetaDone removeAllObjects];
+            [g_heldQueueMetaPayload removeAllObjects];
+            g_queueOverride = StaleQueuePayload();
+            g_holdQueueMetaGet = YES;
+            [vc reloadData];                        // 旧读取（扣住）
+            g_holdQueueMetaGet = NO;
+            g_queueOverride = nil;
+            Ck(g_heldQueueMetaDone.count == 1,
+               "P8b 前置：旧队列读取已扣在 mock",
+               [NSString stringWithFormat:@"done=%lu", (unsigned long)g_heldQueueMetaDone.count]);
+
+            [g_heldReorderDone removeAllObjects];
+            [g_heldReorderPaths removeAllObjects];
+            g_holdReorderPost = YES;
+            [g_posts removeAllObjects];
+            [vc sortBy:@"title"];                   // qorder 扣住 ⟹ 排序在途窗口保持
+            Ck(g_heldReorderDone.count == 1,
+               "P8b 前置：qorder 停在未回包窗口（排序在途）",
+               [NSString stringWithFormat:@"held=%lu posts=%@",
+                (unsigned long)g_heldReorderDone.count, [g_posts componentsJoinedByString:@" | "]]);
+
+            DeliverHeldQueueMetaGet(0);
+            Pump(0.05);
+            Ck([PathsOf(vc) count] == 4 && table.numberOfRows == 4,
+               "P8b 排序在途：旧队列回包不落表（不覆盖已提交的新顺序）",
+               [NSString stringWithFormat:@"paths=%lu rows=%ld",
+                (unsigned long)[PathsOf(vc) count], (long)table.numberOfRows]);
+
+            const NSInteger p8GetsBefore = QueueGetCount();
+            [vc reloadData];                        // 在途期间外部通知/轮询会走到这里
+            const NSInteger p8GetsAfter = QueueGetCount();
+            Ck(p8GetsAfter == p8GetsBefore,
+               "P8b 排序在途：reloadData 被压住（不新发队列读取）",
+               [NSString stringWithFormat:@"before=%ld after=%ld",
+                (long)p8GetsBefore, (long)p8GetsAfter]);
+
+            DeliverHeldReorder(@{ @"ok": @YES });
+            g_holdReorderPost = NO;
+            Pump(0.05);
+            Ck([PathsOf(vc) count] == 4 && table.numberOfRows == 4,
+               "P8b 收尾：qorder 成功后仍为 4 首（旧快照没有抢先占位）",
+               [NSString stringWithFormat:@"paths=%lu rows=%ld",
+                (unsigned long)[PathsOf(vc) count], (long)table.numberOfRows]);
+        }
+
+        // ---- P9 错位索引不 qmove（2026-11-18 夜间评审）----
+        // 拖动负载必须带行身份（row + path + cs/ce）。拖动期间队列被轮询/外部通知改过时，
+        // 同一行号已不是原来那首；后端 qmove 只按行号搬、不校验身份 ⟹ 前端必须拒绝落下。
+        // 旧码（dafb14f^）负载只有裸行号、acceptDrop 只做 from 越界检查 ⟹ 会搬错歌（判据红）。
+        {
+            ResetQueueFixtures();
+            [vc reloadData];
+            Pump(0.05);
+            Ck([PathsOf(vc) count] == 4,
+               "P9 前置：默认 4 首队列已载入",
+               [NSString stringWithFormat:@"paths=%lu", (unsigned long)[PathsOf(vc) count]]);
+
+            // --- P9a 行号在拖动期间错位（path 身份复核）---
+            // 队列变序后第 0 行 = C/Three（整轨），拖动负载仍是 A/One（整轨）⟹ cs/ce 相同，
+            // 只有 path 复核能挡住这一落 ⟹ 移除 path 复核，qmove 判据红。
+            // 负载契约直接读 writer 返回的 NSPasteboardItem（不经 pasteboard round-trip）：
+            // 旧码的 writer 只写裸行号字符串 ⟹ 下面的“带行身份”判据红。
+            id<NSPasteboardWriting> writerA = [vc tableView:table pasteboardWriterForRow:0];
+            Ck(writerA != nil, "P9a 前置：拿得到第 0 行的拖动负载", @"writer 返回 nil");
+            NSDictionary *plistA = nil;
+            if ([writerA isKindOfClass:[NSPasteboardItem class]])
+                plistA = (NSDictionary *)[(NSPasteboardItem *)writerA propertyListForType:kQueueDragTypeTest];
+            Ck([plistA isKindOfClass:[NSDictionary class]] &&
+               [plistA[@"row"] integerValue] == 0 &&
+               [plistA[@"path"] isEqualToString:@"/Music/A/One.flac"],
+               "P9a 拖动负载带行身份（row + path，不是裸行号）",
+               [NSString stringWithFormat:@"plist=%@", plistA ?: @"(nil)"]);
+            // 落下用的负载：优先用生产 writer 写出的 plist（当前码是行身份 plist）；
+            // 若 writer 已被回退成裸行号，用同契约的等价负载继续验 acceptDrop 的复核
+            // （格式回归由上面的 Ck 单独判红，P9d 再验裸行号负载不得 qmove）。
+            NSDictionary *dropA = [plistA isKindOfClass:[NSDictionary class]]
+                ? plistA
+                : @{ @"row": @0, @"path": @"/Music/A/One.flac", @"cs": @(-1.0), @"ce": @(-1.0) };
+            RLPQueueDragPasteboardStub *pasteA = [RLPQueueDragPasteboardStub new];
+            pasteA.payload = dropA;
+            g_queueItems = ReorderedPathsFixture();
+            g_queueMetas = ReorderedMetasFixture();
+            g_queueCues = ReorderedCuesFixture();
+            [vc reloadData];
+            Pump(0.05);
+            Ck([PathAt(vc, 0) isEqualToString:@"/Music/C/Three.flac"],
+               "P9a 前置：队列在拖动期间变过（第 0 行现在是 C/Three，不再是负载里的 A/One）",
+               [NSString stringWithFormat:@"row0=%@", PathAt(vc, 0) ?: @"(nil)"]);
+
+            RLPQueueDragInfoStub *infoA = [RLPQueueDragInfoStub new];
+            infoA.draggingPasteboard = pasteA;
+            [g_posts removeAllObjects];
+            ClearToasts(win);
+            BOOL acceptedA = [vc tableView:table acceptDrop:(id<NSDraggingInfo>)infoA
+                                      row:3 dropOperation:NSTableViewDropAbove];
+            Pump(0.05);
+            Ck(PostsWithPrefix(@"/api/qmove").count == 0,
+               "P9a 错位索引不发 /api/qmove（同一行号已指向另一首）",
+               [g_posts componentsJoinedByString:@" | "]);
+            Ck(!acceptedA, "P9a acceptDrop 返回 NO（拒绝落下）",
+               [NSString stringWithFormat:@"accepted=%d", (int)acceptedA]);
+            Ck([ToastText(win) isEqualToString:RLPTr(@"排序失败")],
+               "P9a 拒绝时提示「排序失败」（不静默搬歌）",
+               ToastText(win) ?: @"(无 toast)");
+            Ck([PathsOf(vc) isEqualToArray:ReorderedPathsFixture()],
+               "P9a 拒绝后队列顺序不变（没有本地假搬动）",
+               [NSString stringWithFormat:@"paths=%@", PathsOf(vc)]);
+
+            // --- P9b CUE 身份错位（同一路径的多个分轨只比 path 仍会搬错）---
+            // 路径不变、第 1 行 B/Two 的区间从 [10,20] 变成整轨 ⟹ 只有 cs/ce 复核能挡住
+            // ⟹ 移除 cs/ce 复核，qmove 判据红。
+            ResetQueueFixtures();
+            [vc reloadData];
+            Pump(0.05);
+            id<NSPasteboardWriting> writerB = [vc tableView:table pasteboardWriterForRow:1];
+            Ck(writerB != nil, "P9b 前置：拿得到第 1 行的拖动负载", @"writer 返回 nil");
+            NSDictionary *plistB = nil;
+            if ([writerB isKindOfClass:[NSPasteboardItem class]])
+                plistB = (NSDictionary *)[(NSPasteboardItem *)writerB propertyListForType:kQueueDragTypeTest];
+            Ck([plistB isKindOfClass:[NSDictionary class]] &&
+               [plistB[@"path"] isEqualToString:@"/Music/B/Two.flac"] &&
+               fabs([plistB[@"cs"] doubleValue] - 10.0) < 0.0005 &&
+               fabs([plistB[@"ce"] doubleValue] - 20.0) < 0.0005,
+               "P9b 拖动负载带 CUE 区间（cs/ce 随行保留）",
+               [NSString stringWithFormat:@"plist=%@", plistB ?: @"(nil)"]);
+            NSDictionary *dropB = [plistB isKindOfClass:[NSDictionary class]]
+                ? plistB
+                : @{ @"row": @1, @"path": @"/Music/B/Two.flac", @"cs": @(10.0), @"ce": @(20.0) };
+            RLPQueueDragPasteboardStub *pasteB = [RLPQueueDragPasteboardStub new];
+            pasteB.payload = dropB;
+            g_queueItems = PathsFixture();
+            g_queueMetas = MetasFixture();
+            g_queueCues = FlatCuesFixture();
+            [vc reloadData];
+            Pump(0.05);
+            Ck([PathAt(vc, 1) isEqualToString:@"/Music/B/Two.flac"],
+               "P9b 前置：路径没变、区间已变（B/Two 从 10..20 变整轨）",
+               [NSString stringWithFormat:@"row1=%@ cues=%@", PathAt(vc, 1) ?: @"(nil)",
+                [vc valueForKey:@"cues"]]);
+            RLPQueueDragInfoStub *infoB = [RLPQueueDragInfoStub new];
+            infoB.draggingPasteboard = pasteB;
+            [g_posts removeAllObjects];
+            ClearToasts(win);
+            BOOL acceptedB = [vc tableView:table acceptDrop:(id<NSDraggingInfo>)infoB
+                                      row:3 dropOperation:NSTableViewDropAbove];
+            Pump(0.05);
+            Ck(PostsWithPrefix(@"/api/qmove").count == 0,
+               "P9b CUE 身份错位不发 /api/qmove",
+               [g_posts componentsJoinedByString:@" | "]);
+            Ck(!acceptedB && [ToastText(win) isEqualToString:RLPTr(@"排序失败")],
+               "P9b CUE 错位时拒绝并提示「排序失败」",
+               [NSString stringWithFormat:@"accepted=%d toast=%@", (int)acceptedB,
+                ToastText(win) ?: @"(无 toast)"]);
+
+            // --- P9c 对照：身份一致时必须真发 qmove（防止“一律拒绝”也被判绿）---
+            ResetQueueFixtures();
+            [vc reloadData];
+            Pump(0.05);
+            id<NSPasteboardWriting> writerC = [vc tableView:table pasteboardWriterForRow:0];
+            NSDictionary *plistC = nil;
+            if ([writerC isKindOfClass:[NSPasteboardItem class]])
+                plistC = (NSDictionary *)[(NSPasteboardItem *)writerC propertyListForType:kQueueDragTypeTest];
+            NSDictionary *dropC = [plistC isKindOfClass:[NSDictionary class]]
+                ? plistC
+                : @{ @"row": @0, @"path": @"/Music/A/One.flac", @"cs": @(-1.0), @"ce": @(-1.0) };
+            RLPQueueDragPasteboardStub *pasteC = [RLPQueueDragPasteboardStub new];
+            pasteC.payload = dropC;
+            RLPQueueDragInfoStub *infoC = [RLPQueueDragInfoStub new];
+            infoC.draggingPasteboard = pasteC;
+            [g_posts removeAllObjects];
+            ClearToasts(win);
+            BOOL acceptedC = [vc tableView:table acceptDrop:(id<NSDraggingInfo>)infoC
+                                      row:3 dropOperation:NSTableViewDropAbove];
+            Pump(0.05);
+            Ck(acceptedC && PostsWithPrefix(@"/api/qmove").count == 1 &&
+               LastPostFor(@"/api/qmove?from=0&to=2") != nil,
+               "P9c 对照：身份一致时真发 /api/qmove?from=0&to=2（不是把落下一律拒绝）",
+               [NSString stringWithFormat:@"accepted=%d posts=%@", (int)acceptedC,
+                [g_posts componentsJoinedByString:@" | "]]);
+
+            // --- P9d 裸行号（旧负载格式）不得触发 qmove ---
+            // 旧码用 stringForType: 读裸行号；队列变序后它会从错位的行号发 qmove。
+            // 修复后 acceptDrop 只接受带身份的 plist ⟹ 字符串负载（无身份）直接拒绝；
+            // 把 acceptDrop 退回 stringForType:，本判据红。
+            g_queueItems = ReorderedPathsFixture();
+            g_queueMetas = ReorderedMetasFixture();
+            g_queueCues = ReorderedCuesFixture();
+            [vc reloadData];
+            Pump(0.05);
+            // 旧负载的字符串也是合法 property list ⟹ 两个取值方法都返回字符串，
+            // 与真 pasteboard 的语义一致（新 acceptDrop 必须因“不是字典”拒绝它）。
+            RLPQueueDragPasteboardStub *pasteD = [RLPQueueDragPasteboardStub new];
+            pasteD.payload = @"0";
+            pasteD.stringPayload = @"0";
+            RLPQueueDragInfoStub *infoD = [RLPQueueDragInfoStub new];
+            infoD.draggingPasteboard = pasteD;
+            [g_posts removeAllObjects];
+            ClearToasts(win);
+            BOOL acceptedD = [vc tableView:table acceptDrop:(id<NSDraggingInfo>)infoD
+                                      row:3 dropOperation:NSTableViewDropAbove];
+            Pump(0.05);
+            Ck(PostsWithPrefix(@"/api/qmove").count == 0,
+               "P9d 裸行号负载不发 /api/qmove（没有行身份可核，绝不按旧行号搬歌）",
+               [g_posts componentsJoinedByString:@" | "]);
+            Ck(!acceptedD, "P9d acceptDrop 返回 NO（裸行号负载被拒）",
+               [NSString stringWithFormat:@"accepted=%d", (int)acceptedD]);
+
+            ResetQueueFixtures();
+            [vc reloadData];
+            Pump(0.05);
         }
 
         // ---- v3.3.11 parseTransportM3u（POSIX 适配）判据 ----

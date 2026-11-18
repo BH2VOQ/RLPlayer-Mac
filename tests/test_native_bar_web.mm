@@ -20,6 +20,12 @@
 static NSDictionary *statusJSON;
 static NSMutableArray<NSString *> *posts;
 static NSMutableArray<RLPJSONCompletion> *heldSignalCompletions;
+// 播放模式写入的挂起回包夹具（与上面 /api/signal 同一套：array + [done copy]）。
+// 让判据能自己择时投递 /api/playmode 的回包，构造"在途 / 超时 / 迟到"三种窗口。
+static NSMutableArray<RLPJSONCompletion> *heldPostCompletions;
+// /api/playmode 回读的桩值（nil 时等价于旧的 mode=0）；playmodeReads 只用于证明"在途回读真的发生过"。
+static NSDictionary *playModeJSON;
+static NSUInteger playmodeReads;
 static BOOL online = NO;
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wincomplete-implementation"
@@ -33,12 +39,21 @@ static BOOL online = NO;
         return;
     }
     if ([path hasPrefix:@"/api/meta"]) done(@{@"title":@"Real title", @"artist":@"Real artist", @"album":@"Real album"});
+    // /api/playmode 回读：桩值可被判据改（nil 时保持旧的 mode=0 行为）；计数用于判据自证"读到了"。
+    else if ([path isEqual:@"/api/playmode"]) { ++playmodeReads; done(playModeJSON ?: @{@"mode":@0}); }
     else if ([path isEqual:@"/api/status"]) done(statusJSON);
     else done(@{@"mode":@0});
 }
 - (void)getData:(NSString *)path completion:(RLPDataCompletion)done { if (done) done(nil); }
 - (void)postJSON:(NSString *)path body:(NSString *)body completion:(RLPJSONCompletion)done {
-    [posts addObject:path]; if (done) done(@{@"ok":@YES});
+    [posts addObject:path];
+    // 挂起回包夹具（沿用 heldSignalCompletions 的写法）：只拦 /api/playmode 的写入回包，
+    // 由判据自己择时投递；其余 POST（音量等）保持同步回包，不影响前面已有的判据。
+    if (heldPostCompletions && [path hasPrefix:@"/api/playmode"]) {
+        if (done) [heldPostCompletions addObject:[done copy]];
+        return;
+    }
+    if (done) done(@{@"ok":@YES});
 }
 @end
 #pragma clang diagnostic pop
@@ -51,6 +66,11 @@ static BOOL online = NO;
 static int failures = 0, checks = 0;
 static void check(BOOL ok, const char *what) { ++checks; printf("[%s] %s\n", ok ? "PASS" : "FAIL", what); if (!ok) ++failures; }
 static id field(id bar, NSString *key) { return [bar valueForKey:key]; }
+// 读一个**可能不存在**的私有状态键：旧实现根本没有 modeWrite* 这套登记。取不到就返回 nil
+// 让判据自然判红，而不是抛 NSUnknownKeyException 把整个可执行文件打断（同 signalSeq 的 @try 口径）。
+static id BarState(id obj, NSString *key) {
+    @try { return [obj valueForKey:key]; } @catch (NSException *e) { return nil; }
+}
 // 底栏 hover 判据的颜色比较（与 np 页 test_native_nowplaying_web 同口径：逐分量）。
 static BOOL BarCgEq(CGColorRef c, NSColor *want, double tol) {
     if (!c || !want) return NO;
@@ -593,6 +613,234 @@ int main() { @autoreleasepool {
         }
         heldSignalCompletions = nil;
         offscreenWin.contentView = nil;
+    }
+
+    // ---- 播放模式写入：在途不推进 / 失败回退已确认值 / 超时与迟到回包（2026-11-18）----
+    //
+    // 缺陷形态（RLPPlaybackBarView.mm 改动前的 toggleRepeat:，约 1031-1033 行）：
+    //   ① 先把目标写进 playMode、refreshModeButtons 重画，然后才发 POST ⟹ 后端还没接受，
+    //      按钮已经显示新模式（用户"看到"它生效了）；
+    //   ② 失败分支只 fetchStatusForced，playMode 不回退 ⟹ 没生效的模式留在界面上；
+    //   ③ 下一次点击以这个未确认值为起点 ⟹ 0→1 失败后再点发 mode=2，界面与后端彻底分叉。
+    //
+    // 现实现（行号均指 RLPPlaybackBarView.mm）对应的四处修复：
+    //   F1 先提交后画：applyPlayMode 只登记 modeWriteTarget（1088-1090），回包确认后才写 playMode
+    //      并重画（1114-1124）；confirmedMode 在提交前捕获（1085）。
+    //   F2 在途闸门：一次写入未确认时再点直接 return（1074-1079）。
+    //   F3 超时结算：settleModeWriteIfExpired 撤销在途、画回确认值（1056-1064；点击路径 1073）。
+    //   F4 迟到回包作废：completion 的 epoch/target 守卫（1105）；在途回读不许画（1163）。
+    //
+    // 判据只用两类可观察量，缺一不可：
+    //   甲）KVC playMode —— 只装**已被后端确认**的模式；
+    //   乙）modeVisual() —— 模式键的渲染位图 + toolTip + 图标色，即"用户真的看见的东西"。
+    // 只用甲会漏掉"属性对、按钮被提前重画"（本项目踩过多次的形态）；只用乙会漏掉
+    // "界面没变、内部真相已被目标顶替"。
+    //
+    // ⚠️ 边界（如实标注，别把它当成比实际更强的证明）：
+    //   · 判据 B 红的是**旧形态**：写入前就改 playMode/重画（B2 红），或失败后留在目标值
+    //     （B6 会从 3 发到 0）。单独删掉 1129 行 `self_.playMode = confirmedMode;` **不会**让
+    //     B 变红 —— F1 已经让 playMode 从未离开过确认值，那句回退目前是"显式但冗余"的动作。
+    //     所以 B 守的是 F1 + 失败分支这一对，不是单独一行。
+    //   · 1302 的"每拍被动结算"没有被单独锁住：删掉它，下一次点击仍会结算，离线观察不到差异；
+    //     本判据只锁点击路径（与被动路径共用同一份 settleModeWriteIfExpired 实现）。
+    //   · 2 s 窗口长度只做区间卫生检查（A4/C2），真正的行为用"把 deadline 拨到过去"验证 ——
+    //     要证的是"窗口过后状态如何"，不是"墙钟走多慢"，也不为等 2 s 让测试变慢。
+    //
+    // 守门映射（"移除哪个修复会变红"，行号同上）：
+    //   · 恢复"先写 playMode / refreshModeButtons 再 POST"（旧 1031-1033 的形态）→ A2/A3、B2 红；
+    //   · 删掉在途闸门 1074-1079 → A5 红（在途第二下会重复提交同一目标）；
+    //   · 删掉在途回读闸门 1163 → A8 红（写前值 2 会在窗口内被画上去）；
+    //   · 删掉点击路径的 settle 调用 1073 / settle 的状态清空 1059-1063 → C3 红（键永久在途）、C4/C5 连带；
+    //   · 删掉 completion 的 epoch 守卫 1105 → C6 红（第 2 次故意同目标 1，target 比对挡不住迟到包）；
+    //   · 失败分支留在目标值（旧形态）→ B3 红、B6 会从 3 发到 0；
+    //   · 单独删 1129 的回退赋值 → 以上都不红（原因见上一条边界，这是本判据的真实上界）。
+    {
+        // 模式键的完整可见状态。位图比较沿用播放键的指纹口径（image.name 可能是 nil，
+        // 渲染位图才是"图标真的换过"的直接证据）；toolTip 与图标色补上 0/1 共用 repeat 符号时的区分。
+        NSDictionary *(^modeVisual)(void) = ^NSDictionary *{
+            NSButton *rb = field(bar, @"repeatBtn");
+            NSImage *img = rb.image;
+            NSBitmapImageRep *rep = img ? [NSBitmapImageRep imageRepWithData:[img TIFFRepresentation]] : nil;
+            NSData *png = rep ? [rep representationUsingType:NSBitmapImageFileTypePNG properties:@{}] : nil;
+            NSColor *tint = rb.contentTintColor
+                ? [rb.contentTintColor colorUsingColorSpace:[NSColorSpace deviceRGBColorSpace]] : nil;
+            return @{ @"png": png ?: [NSData data],
+                      @"tip": rb.toolTip ?: @"",
+                      @"r": @(tint ? tint.redComponent : -1.0),
+                      @"g": @(tint ? tint.greenComponent : -1.0),
+                      @"b": @(tint ? tint.blueComponent : -1.0) };
+        };
+        check([field(bar,@"playMode") integerValue] == 0 && ![BarState(bar,@"modeWritePending") boolValue],
+              "前置：模式写入状态机空闲、已确认 playMode=0（上一段四个同步回包的落点）");
+        NSButton *modeBtn0 = field(bar, @"repeatBtn");
+        check(modeBtn0 != nil && modeBtn0.image != nil,
+              "前置：模式键在位且有真实图标（可见状态判据的前提，量不到就红）");
+
+        // 判据 A：一次写入从发起到回包之间**不推进、不重画**；确认后才落到按钮上。
+        {
+            NSDictionary *v0 = modeVisual();
+            const NSInteger base0 = (NSInteger)posts.count;
+            heldPostCompletions = [NSMutableArray array];
+            [bar toggleRepeat:nil];                                  // 已确认 0 → 目标 1
+            check((NSInteger)posts.count == base0 + 1 &&
+                  [posts.lastObject isEqual:@"/api/playmode?mode=1"],
+                  [[NSString stringWithFormat:@"A1 点击真的提交了 /api/playmode?mode=1（posts %ld→%ld）",
+                    (long)base0, (long)posts.count] UTF8String]);
+            check([field(bar,@"playMode") integerValue] == 0,
+                  "A2 回包前 playMode 仍是已确认的 0（目标不冒充真相）");
+            check([modeVisual() isEqualToDictionary:v0],
+                  "A3 回包前模式键的可见状态未变（没有把未确认目标先画上去）");
+            const NSTimeInterval windowA = [BarState(bar,@"modeWriteDeadline") doubleValue] -
+                                           [NSDate timeIntervalSinceReferenceDate];
+            check([BarState(bar,@"modeWritePending") boolValue] &&
+                  [BarState(bar,@"modeWriteTarget") integerValue] == 1 &&
+                  windowA >= 1.0 && windowA <= 3.0,
+                  [[NSString stringWithFormat:@"A4 在途写入被登记（pending/target=1）且确认窗口有限（实测 %.2f s）",
+                    windowA] UTF8String]);
+            // 在途再点：起点仍是已确认的 0 ⟹ 目标仍是 1；闸门必须吞掉它（否则会重复提交同一目标）。
+            const NSInteger base0b = (NSInteger)posts.count;
+            [bar toggleRepeat:nil];
+            check((NSInteger)posts.count == base0b,
+                  [[NSString stringWithFormat:@"A5 在途再点不重复提交 /api/playmode（posts 仍 %ld）",
+                    (long)base0b] UTF8String]);
+            check([field(bar,@"playMode") integerValue] == 0 &&
+                  [modeVisual() isEqualToDictionary:v0],
+                  "A6 在途再点不推进、模式键不变（推进起点只能是已确认值）");
+            // GET 与 POST 分队列（RLPCoreClient.mm:129-144）：在途期间的回读可能读到写入之前的值。
+            // 生产在 refreshPlayModeFromBackend 里挡掉它（1163）；判据要求"确实读了一次、但可见状态未变"。
+            playModeJSON = @{ @"mode": @2 };          // 故意给一个既非确认值 0、也非目标 1 的旧值
+            const NSUInteger readsA = playmodeReads;
+            for (NSInteger i = 0; i < 4; ++i) [bar fetchStatus];   // 回读节流 = 每 4 次状态查询一次
+            check(playmodeReads == readsA + 1,
+                  [[NSString stringWithFormat:@"A7 在途期间真的发生了一次 /api/playmode 回读（%lu→%lu）",
+                    (unsigned long)readsA, (unsigned long)playmodeReads] UTF8String]);
+            check([field(bar,@"playMode") integerValue] == 0 &&
+                  [modeVisual() isEqualToDictionary:v0] &&
+                  [BarState(bar,@"modeWritePending") boolValue] &&
+                  [BarState(bar,@"modeWriteTarget") integerValue] == 1,
+                  "A8 在途回读（写前值 2）不得改动已确认值/可见状态/在途登记");
+            RLPJSONCompletion confirmedReply = nil;
+            if (heldPostCompletions.count) confirmedReply = heldPostCompletions[0];
+            heldPostCompletions = nil;
+            if (!confirmedReply) check(NO, "A9 前置：夹具里存在第一条 /api/playmode 回包");
+            else {
+                confirmedReply(@{ @"ok": @YES, @"mode": @1 });       // 后端确认 mode=1
+                check([field(bar,@"playMode") integerValue] == 1,
+                      "A9 回包确认后才采用后端回包里的 mode=1");
+                check(![BarState(bar,@"modeWritePending") boolValue] &&
+                      [BarState(bar,@"modeWriteTarget") integerValue] == -1,
+                      "A10 成功后清空在途登记（target 复位 -1）");
+                check(![modeVisual() isEqualToDictionary:v0],
+                      "A11 确认后模式键才换到新模式（同一指纹口径看得见变化，A3 不是「哑判据」）");
+            }
+        }
+
+        // 判据 B：失败回包必须回到**已确认值**，下一次推进的起点也是它（不是失败目标）。
+        {
+            playModeJSON = @{ @"mode": @2 };           // 后端真相 = 2：用生产读入口落成"已确认"
+            SEL pmRead = NSSelectorFromString(@"refreshPlayModeFromBackend");
+            if ([bar respondsToSelector:pmRead]) [bar performSelector:pmRead];
+            check([field(bar,@"playMode") integerValue] == 2 &&
+                  ![BarState(bar,@"modeWritePending") boolValue],
+                  "B0 前置：已确认 playMode=2（来自 /api/playmode 回读，不是 KVC 硬塞）");
+            NSDictionary *v2 = modeVisual();
+            const NSInteger baseB = (NSInteger)posts.count;
+            heldPostCompletions = [NSMutableArray array];
+            [bar toggleRepeat:nil];                    // 已确认 2 → 目标 3
+            check((NSInteger)posts.count == baseB + 1 &&
+                  [posts.lastObject isEqual:@"/api/playmode?mode=3"],
+                  "B1 从确认值 2 推进到 3，并真的提交");
+            check([field(bar,@"playMode") integerValue] == 2 &&
+                  [modeVisual() isEqualToDictionary:v2],
+                  "B2 在途时仍是 2（失败之前界面不假装成功）");
+            RLPJSONCompletion failedReply = nil;
+            if (heldPostCompletions.count) failedReply = heldPostCompletions[0];
+            heldPostCompletions = nil;
+            if (!failedReply) check(NO, "B3 前置：夹具里存在第一条 /api/playmode 回包");
+            else {
+                failedReply(@{ @"ok": @NO, @"error": @"mock playmode fail" });   // 回包说没写成
+                check([field(bar,@"playMode") integerValue] == 2,
+                      "B3 失败回包把模式退回已确认的 2（不留在没生效的 3）");
+                check([modeVisual() isEqualToDictionary:v2],
+                      "B4 失败后模式键仍画已确认的 2（回退是可见的，不是只改内部值）");
+                check(![BarState(bar,@"modeWritePending") boolValue] &&
+                      [BarState(bar,@"modeWriteTarget") integerValue] == -1,
+                      "B5 失败后清空在途登记（键不会被一次失败永久卡死）");
+            }
+            // 再点一次：起点必须是已确认的 2 ⟹ 目标 3。旧形态（失败后留在 3）这一下会发 mode=0。
+            const NSInteger baseB2 = (NSInteger)posts.count;
+            [bar toggleRepeat:nil];
+            check((NSInteger)posts.count == baseB2 + 1 &&
+                  [posts.lastObject isEqual:@"/api/playmode?mode=3"],
+                  "B6 失败后的下一次点击仍从已确认值 2 推进到 3（没有按失败目标继续跑到 0）");
+            check([field(bar,@"playMode") integerValue] == 3,
+                  "B7 这一下由桩同步回包确认，确认值落到 3（给后续判据留干净起点）");
+        }
+
+        // 判据 C：确认窗口过期 ⟹ 按失败结算（撤销在途）；迟到回包一律作废。
+        {
+            playModeJSON = @{ @"mode": @0 };
+            SEL pmReadC = NSSelectorFromString(@"refreshPlayModeFromBackend");
+            if ([bar respondsToSelector:pmReadC]) [bar performSelector:pmReadC];
+            check([field(bar,@"playMode") integerValue] == 0 && ![BarState(bar,@"modeWritePending") boolValue],
+                  "C0 前置：已确认 playMode=0（干净起点）");
+            NSDictionary *v0c = modeVisual();
+            const NSInteger baseC = (NSInteger)posts.count;
+            heldPostCompletions = [NSMutableArray array];
+            [bar toggleRepeat:nil];                    // 0 → 1：第 1 次提交，回包被挂起
+            check((NSInteger)posts.count == baseC + 1 &&
+                  [posts.lastObject isEqual:@"/api/playmode?mode=1"],
+                  "C1 第 1 次提交发出 mode=1 并被挂起（后端还没答复）");
+            const NSTimeInterval windowC = [BarState(bar,@"modeWriteDeadline") doubleValue] -
+                                           [NSDate timeIntervalSinceReferenceDate];
+            check(windowC >= 1.0 && windowC <= 3.0,
+                  [[NSString stringWithFormat:@"C2 提交带有有限的确认窗口（实测 %.2f s，生产值 2 s）",
+                    windowC] UTF8String]);
+            // 把 deadline 拨到过去 = 等价于 2 s 已到（与生产同一个 NSDate 时基，1058）。
+            // 旧实现没有这个键：写失败时不拨表，让 C3/C4 自然判红，而不是让异常打断整个判据。
+            @try {
+                [bar setValue:@([NSDate timeIntervalSinceReferenceDate] - 0.25) forKey:@"modeWriteDeadline"];
+            } @catch (NSException *e) {
+            }
+            [bar toggleRepeat:nil];                    // 先结算在途，再从确认值 0 提交 1（第 2 次）
+            check((NSInteger)posts.count == baseC + 2 &&
+                  [posts.lastObject isEqual:@"/api/playmode?mode=1"],
+                  "C3 超时结算后循环键重新可用（第 2 次提交没有砸在永久在途上）");
+            check([BarState(bar,@"modeWritePending") boolValue] &&
+                  [BarState(bar,@"modeWriteTarget") integerValue] == 1 &&
+                  [BarState(bar,@"modeWriteDeadline") doubleValue] - [NSDate timeIntervalSinceReferenceDate] >= 1.0,
+                  "C4 第 2 次提交有自己的在途登记与新窗口（旧 deadline 没有泄漏）");
+            check([field(bar,@"playMode") integerValue] == 0 && [modeVisual() isEqualToDictionary:v0c],
+                  "C5 结算画的是已确认值 0，不是超时的目标 1");
+            // 迟到回包：第 1 次的失败回包在第 2 次提交之后才到。第 2 次故意同目标 1 ⟹
+            // target 比对挡不住它，只有 1105 的 epoch 守卫能挡 —— 这条判据因此有区分力。
+            RLPJSONCompletion lateReply = nil;
+            if (heldPostCompletions.count) lateReply = heldPostCompletions[0];
+            if (!lateReply) check(NO, "C6 前置：夹具里存在第 1 次提交的回包");
+            else {
+                lateReply(@{ @"ok": @NO, @"error": @"mock late fail" });
+                check([BarState(bar,@"modeWritePending") boolValue] &&
+                      [BarState(bar,@"modeWriteTarget") integerValue] == 1,
+                      "C6 迟到的失败回包不得结算当前在途写入（第 2 次提交仍挂着）");
+                check([field(bar,@"playMode") integerValue] == 0 && [modeVisual() isEqualToDictionary:v0c],
+                      "C7 迟到的失败回包不得改已确认值/重画模式键");
+            }
+            // 第 2 次提交的真回包（当前 epoch 唯一认账的一条）照常生效。
+            RLPJSONCompletion liveReply = nil;
+            if (heldPostCompletions.count > 1) liveReply = heldPostCompletions[1];
+            heldPostCompletions = nil;
+            if (!liveReply) check(NO, "C8 前置：夹具里存在第 2 次提交的回包");
+            else {
+                liveReply(@{ @"ok": @YES, @"mode": @1 });
+                check([field(bar,@"playMode") integerValue] == 1,
+                      "C8 当前 epoch 的真回包照常把模式落到 1");
+                check(![BarState(bar,@"modeWritePending") boolValue] &&
+                      [BarState(bar,@"modeWriteTarget") integerValue] == -1,
+                      "C9 真回包结算后清空在途登记");
+                check(![modeVisual() isEqualToDictionary:v0c],
+                      "C10 真回包确认后模式键才从 0 换到 1（迟到的失败没有把它压回去）");
+            }
+        }
     }
 
     printf("native_bar_web: %d checks, %d failures\n",checks,failures); return failures?1:0;

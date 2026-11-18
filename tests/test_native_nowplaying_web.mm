@@ -26,6 +26,13 @@
 static NSString *g_lastDataPath = nil;
 static NSUInteger g_lastDataLen = 0;
 static NSString *lastPath,*lastBody;static RLPJSONCompletion pendingFav, pendingLyricAi;
+/// 请求挂起夹具（沿用 pendingFav / pendingLyricAi 的手法）：holdNPRequests=YES 时，
+/// /api/lyrics?file=… 与 /api/cover?file=… 的回包先攥进 pendingLyrics / pendingCover，
+/// 由用例决定何时回灌——这样才能复现「A→B 已切曲，A 的回包才到」。
+/// 默认 NO ⟹ 与旧夹具一样立即应答，不影响其他判据。
+static BOOL holdNPRequests;
+static RLPJSONCompletion pendingLyrics;
+static RLPDataCompletion pendingCover;
 @interface RLPRequestSpy : NSObject
 /// 按路径前缀返回固定 JSON 的桩：状态机判据要「真的走一遍 /api/status → 渲染」，
 /// 不能只把 webStatus 塞进 KVC（那样 refresh 里的复位分支根本没跑）。
@@ -40,13 +47,14 @@ static NSString *lastPath,*lastBody;static RLPJSONCompletion pendingFav, pending
 }
 - (void)postJSON:(NSString *)path body:(NSString *)body completion:(RLPJSONCompletion)done {lastPath=path;lastBody=body;if([path hasPrefix:@"/api/fav?"])pendingFav=[done copy];if([path isEqualToString:@"/api/lyrics/ai"])pendingLyricAi=[done copy];}
 - (void)getJSON:(NSString *)path completion:(RLPJSONCompletion)done {
+    if(holdNPRequests&&done&&[path hasPrefix:@"/api/lyrics?file="]){pendingLyrics=[done copy];return;}
     id hit=nil;
     for(NSString *key in self.fixtures) if([path hasPrefix:key]){hit=self.fixtures[key];break;}
     if(done)done([hit isKindOfClass:[NSDictionary class]]?hit:nil);
 }
 /// refresh 会在切曲分支顺带 loadCoverForPath（/api/cover 走 getData）：桩必须应答，
 /// 否则刷新路径上第一个 getData 就是 doesNotRecognizeSelector（实测 SIGABRT）。
-- (void)getData:(NSString *)path completion:(RLPDataCompletion)done { if(done)done(nil); }
+- (void)getData:(NSString *)path completion:(RLPDataCompletion)done { if(holdNPRequests&&done&&[path hasPrefix:@"/api/cover?file="]){pendingCover=[done copy];return;} if(done)done(nil); }
 @end
 static RLPRequestSpy *spy;static id fakeShared(id c,SEL s){return spy;}
 static int fail;
@@ -89,6 +97,21 @@ static BOOL CgClearOrNil(CGColorRef cg) {
     NSColor *c = [NSColor colorWithCGColor:cg];
     return c != nil && c.alphaComponent < 0.02;
 }
+/// 1×1 纯色 PNG：迟到封面判据必须灌入**能被 NSImage 解码**的真图字节。
+/// 否则「迟到回包被丢弃」会被「解码失败、image 本来就是 nil」假通过。
+static NSData *NPPngOfColor(NSColor *color) {
+    NSBitmapImageRep *rep = [[NSBitmapImageRep alloc] initWithBitmapDataPlanes:NULL
+        pixelsWide:1 pixelsHigh:1 bitsPerSample:8 samplesPerPixel:4 hasAlpha:YES isPlanar:NO
+        colorSpaceName:NSCalibratedRGBColorSpace bytesPerRow:4 bitsPerPixel:32];
+    if (!rep || !rep.bitmapData) return nil;
+    NSColor *c = [color colorUsingColorSpace:[NSColorSpace sRGBColorSpace]] ?: color;
+    unsigned char *px = rep.bitmapData;
+    px[0] = (unsigned char)(MIN(1.0, MAX(0.0, c.redComponent)) * 255.0);
+    px[1] = (unsigned char)(MIN(1.0, MAX(0.0, c.greenComponent)) * 255.0);
+    px[2] = (unsigned char)(MIN(1.0, MAX(0.0, c.blueComponent)) * 255.0);
+    px[3] = 255;
+    return [rep representationUsingType:NSBitmapImageFileTypePNG properties:@{}];
+}
 static NSView *find(NSView *v, NSString *key) { if([v.identifier isEqual:key])return v; for(NSView *s in v.subviews){NSView *r=find(s,key);if(r)return r;}return nil; }
 static BOOL HasCJK(NSString *s){if(!s.length)return NO;for(NSUInteger i=0;i<s.length;++i){unichar c=[s characterAtIndex:i];if(c>=0x4E00&&c<=0x9FFF)return YES;}return NO;}
 static void ck(bool ok,const char *n){printf("[%s] %s\n",ok?"PASS":"FAIL",n);if(!ok)++fail;}
@@ -105,6 +128,7 @@ static void ck(bool ok,const char *n){printf("[%s] %s\n",ok?"PASS":"FAIL",n);if(
 - (void)refreshQueueContext;
 - (void)setLyricsPlaceholder:(NSString *)main detail:(NSString *)detail;
 - (void)loadLyricsForPath:(NSString *)path;
+- (void)loadCoverForPath:(NSString *)path;
 - (void)renderRailMetadata;
 - (void)layoutWebPlayback;
 - (BOOL)lyricAiBusy;
@@ -1021,6 +1045,76 @@ int main(){@autoreleasepool{
   NSArray<RLPLyricLine *> *linesAfterRestore=[vc valueForKey:@"lyricLines"];
   ck(linesAfterRestore.count==2 && [linesAfterRestore[0].text isEqualToString:@"bravo one"],"L4d 恢复原文回到 bravo one");
   spy.fakeStarted=NO;
+ }
+ // ---- #61 切曲复位：A→B 立即清旧歌词/主封面；A 的迟到回包不得覆盖 B（请求挂起夹具）----
+ // 判据 R1 红：移除 loadLyricsForPath: 里的切曲清行块（A 的行会留在 B 上），或移除
+ //            loadCoverForPath: 里「coverPath 不是本曲 ⟹ cover.image=nil」的块。
+ // 判据 R2 红：移除 loadCoverForPath: 回包里的 coverSeq 守卫（A 的迟到图会贴到 B）。
+ //            歌词侧是纵深防御：fetchLyricPath 的 seq/currentPath 守卫 + applyLyricText
+ //            的 path 守卫——两条都移除才红（单移除任一条仍被另一条挡住）。
+ {
+  NSString *pathA=@"/offline/stale-A.flac", *pathB=@"/offline/stale-B.flac";
+  NSImageView *coverView=(NSImageView *)[vc valueForKey:@"cover"];
+  NSTextField *emptyLabel=(NSTextField *)[vc valueForKey:@"lyricsEmpty"];
+  holdNPRequests=YES;pendingLyrics=nil;pendingCover=nil;
+  [vc setValue:pathA forKey:@"currentPath"];
+  [vc loadLyricsForPath:pathA];                 // 切到 A：清掉上一用例的歌词，再挂起 A 的取词
+  [vc loadCoverForPath:pathA];                  // 挂起 A 的取图
+  RLPJSONCompletion aLyric=pendingLyrics;pendingLyrics=nil;
+  RLPDataCompletion aCover=pendingCover;pendingCover=nil;
+  NSData *aImg=NPPngOfColor([NSColor colorWithSRGBRed:0.20 green:0.40 blue:0.85 alpha:1.0]);
+  if(aLyric)aLyric(@{@"ok":@1,@"lrc":@"[00:01.00]alpha one\n[00:03.00]alpha two"});
+  if(aCover)aCover(aImg);
+  // A 的同曲重取（重试 / 手动封面等）仍在飞 ⟹ 切到 B 之后才到的才是「A 的迟到回包」。
+  [vc loadLyricsForPath:pathA];[vc loadCoverForPath:pathA];
+  RLPJSONCompletion lateLyric=pendingLyrics;pendingLyrics=nil;
+  RLPDataCompletion lateCover=pendingCover;pendingCover=nil;
+  // 切曲前基线：旧歌词 2 行 + 主封面非空（判据 R1 的前置；不成立就让 R1 红，避免空断言假通过）
+  const NSUInteger aRowCount=[(NSArray *)[vc valueForKey:@"lyricRows"] count];
+  const BOOL aCoverOk=(coverView.image!=nil);
+  const BOOL aReady=(aRowCount==2&&aCoverOk);
+  spy.fixtures=[@{@"/api/status":@{@"ok":@1,@"playing":@1,@"paused":@0,@"current":pathB,@"dur":@10.0}} mutableCopy];
+  [vc refresh];                                 // A→B：B 的歌词/封面都还挂在空中
+  const NSUInteger bRowCount=[(NSArray *)[vc valueForKey:@"lyricRows"] count];
+  NSArray<RLPLyricLine *> *bLines=[vc valueForKey:@"lyricLines"];
+  NSString *emptyText=emptyLabel.attributedStringValue.string?:@"";
+  // 加载态两行文案由 setLyricsPlaceholder:detail: 拼成（主行 + \n + 副行，逐字锁定）。
+  NSString *wantLoading=[NSString stringWithFormat:@"%@\n%@",
+      RLPTr(@"歌词加载中…"),RLPTr(@"正在等后台补全（首次播放新曲目时可能要几秒）")];
+  const BOOL cleared=(bRowCount==0&&bLines.count==0&&!emptyLabel.hidden
+    &&[emptyText isEqualToString:wantLoading]
+    &&coverView.image==nil);
+  ck(aReady&&cleared,[[NSString stringWithFormat:
+    @"R1 A→B 立即清旧歌词/主封面：切曲后旧行=%lu（want 0）、空态=「%@」、主封面=%@（want nil）；A 先就位 rows=%lu image=%d",
+    (unsigned long)bRowCount,emptyText,(coverView.image ? @"非空" : @"nil"),
+    (unsigned long)aRowCount,(int)aCoverOk] UTF8String]);
+  // 迟到：A 的在途回包此刻才到（B 的回包仍挂起）。判据 R2 量「回包前后状态是否被改写」，
+  // 与 R1 是否清屏解耦：清屏缺失由 R1 负责红，这里只钉「迟到回包必须是无副作用的丢弃」。
+  NSArray<RLPLyricLine *> *linesBeforeLate=[vc valueForKey:@"lyricLines"];
+  NSImage *coverBeforeLate=coverView.image;
+  NSData *lateImg=NPPngOfColor([NSColor colorWithSRGBRed:0.90 green:0.10 blue:0.10 alpha:1.0]);
+  const BOOL lateCaptured=(lateLyric!=nil&&lateCover!=nil);
+  const BOOL lateImgOk=([lateImg length]>0&&[[NSImage alloc] initWithData:lateImg]!=nil);
+  if(lateLyric)lateLyric(@{@"ok":@1,@"lrc":@"[00:01.00]STALE-A-ONE\n[00:03.00]STALE-A-TWO"});
+  if(lateCover)lateCover(lateImg);
+  NSArray<RLPLyricLine *> *linesAfterLate=[vc valueForKey:@"lyricLines"];
+  NSString *firstBeforeLate=(linesBeforeLate.count>0)?linesBeforeLate[0].text:@"";
+  NSString *firstAfterLate=(linesAfterLate.count>0)?linesAfterLate[0].text:@"";
+  const BOOL lyricChanged=!(linesBeforeLate.count==linesAfterLate.count&&[firstBeforeLate isEqualToString:firstAfterLate]);
+  const BOOL coverChanged=(coverView.image!=coverBeforeLate);
+  const BOOL staleLeaked=(lyricChanged||coverChanged);
+  // 阳性对照：B 自己的回包必须仍然能落地（证明挂起夹具是活的 ⟹ R2 不是「夹具没接上」的假通过）
+  RLPJSONCompletion bLyric=pendingLyrics;pendingLyrics=nil;
+  RLPDataCompletion bCover=pendingCover;pendingCover=nil;
+  if(bLyric)bLyric(@{@"ok":@1,@"lrc":@"[00:01.00]bravo B one\n[00:03.00]bravo B two"});
+  if(bCover)bCover(NPPngOfColor([NSColor colorWithSRGBRed:0.10 green:0.75 blue:0.25 alpha:1.0]));
+  NSArray<RLPLyricLine *> *linesFinal=[vc valueForKey:@"lyricLines"];
+  const BOOL bLanded=(linesFinal.count==2&&[linesFinal[0].text isEqualToString:@"bravo B one"]&&coverView.image!=nil);
+  ck(lateCaptured&&lateImgOk&&!staleLeaked&&bLanded,[[NSString stringWithFormat:
+    @"R2 迟到 A 回包不得覆盖 B：回包前后歌词行=%lu→%lu（「%@」→「%@」）、主封面变化=%d（want 0）；挂起回包=%d 迟到图可解码=%d B 回包落地=%d",
+    (unsigned long)linesBeforeLate.count,(unsigned long)linesAfterLate.count,firstBeforeLate,firstAfterLate,
+    (int)coverChanged,(int)lateCaptured,(int)lateImgOk,(int)bLanded] UTF8String]);
+  holdNPRequests=NO;pendingLyrics=nil;pendingCover=nil;
  }
  pendingFav=nil;pendingLyricAi=nil;method_setImplementation(shared,old);
  // ---- Live language switch must refresh tooltips captured at construction ----

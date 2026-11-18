@@ -23,7 +23,7 @@
 #import "RLPTheme.h"
 #import <objc/runtime.h>
 
-static NSString *const kQueueDragType = @"RLPQueueRowDrag";
+static NSString *const kQueueDragType = @"com.rta.rlplayer.queue-row";
 static const void *kRLPQueueDeletePathKey = &kRLPQueueDeletePathKey;
 
 /// 队列行视图：web `.qrow` 的 hover / 当前行 / 底部分隔线。
