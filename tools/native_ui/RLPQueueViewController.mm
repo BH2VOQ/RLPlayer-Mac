@@ -80,6 +80,7 @@ static const void *kRLPQueueDeletePathKey = &kRLPQueueDeletePathKey;
 /// 第二次用的还是旧 tag，会把顶上来那一首也删掉（2026-11-18 夜间评审 A1）。
 @property (nonatomic, assign) BOOL deleteInFlight;
 @property (nonatomic, assign) BOOL saveInFlight;
+@property (nonatomic, strong, nullable) NSDate *saveStartedAt;
 /// 队列重排（排序 / 拖动排序）在途：这期间任何刷新快照都不得落到表格上。
 /// 证据：页面把队列落到表格只有 reloadData / applyQueueSnapshot 两条路径，
 /// 它们由 onExternalQueueChanged / activate / 任何轮询接线调用；排序/拖动在途时
@@ -906,8 +907,12 @@ static NSString *RLPQueueMetaText(NSDictionary *m, NSString *k,
     }];
 }
 
+- (BOOL)saveGateExpired {
+    return self.saveStartedAt == nil || -[self.saveStartedAt timeIntervalSinceNow] > 15.0;
+}
+
 - (void)saveAsPlaylist {
-    if (self.saveInFlight) return;
+    if (self.saveInFlight && !self.saveGateExpired) return;
     // P7 空队列守卫：直接提示，不弹框、不发请求（web saveQueueDialog 的 n==0 分支）。
     if (!self.paths.count) {
         RLPToast(RLPTr(@"队列是空的，先加几首歌再保存"));
@@ -920,6 +925,7 @@ static NSString *RLPQueueMetaText(NSDictionary *m, NSString *k,
     NSTextField *tf = [[NSTextField alloc] initWithFrame:NSMakeRect(0, 0, 260, 24)];
     tf.placeholderString = RLPTr(@"歌单名称");
     a.accessoryView = tf;
+    a.window.initialFirstResponder = tf;
     if ([a runModal] != NSAlertFirstButtonReturn) return;
     NSString *name = [tf.stringValue stringByTrimmingCharactersInSet:
                       [NSCharacterSet whitespaceAndNewlineCharacterSet]];
@@ -933,12 +939,13 @@ static NSString *RLPQueueMetaText(NSDictionary *m, NSString *k,
     NSString *trimmed = [rawName stringByTrimmingCharactersInSet:
                          [NSCharacterSet whitespaceAndNewlineCharacterSet]];
     if (!trimmed.length) { RLPToast(RLPTr(@"请先填写歌单名称")); return; }
-    if (self.saveInFlight) return;
+    if (self.saveInFlight && !self.saveGateExpired) return;
     if (![RLPCoreClient shared].started) {
         RLPToast(RLPTr(@"核心未启动"));
         return;
     }
     self.saveInFlight = YES;
+    self.saveStartedAt = [NSDate date];
     // sq/save = 存当前队列；sq/add 是新建空歌单（两者不能混）
     NSString *url = [NSString stringWithFormat:@"/api/sq/save?name=%@", RLPEnc(trimmed)];
     const NSUInteger seqAtStart = self.seq;
@@ -1002,7 +1009,7 @@ static NSString *RLPQueueMetaText(NSDictionary *m, NSString *k,
                 CFGetTypeID((__bridge CFTypeRef)countVal) != CFBooleanGetTypeID()) {
                 const double d = [countVal doubleValue];
                 const long long ll = [countVal longLongValue];
-                if (isfinite(d) && d >= 1.0 && floor(d) == d && ll >= 1 && ll <= NSIntegerMax) {
+                if (isfinite(d) && d >= 0.0 && floor(d) == d && ll >= 0 && ll <= NSIntegerMax) {
                     count = (NSInteger)ll;
                     hasValidCount = YES;
                 }
@@ -1017,7 +1024,7 @@ static NSString *RLPQueueMetaText(NSDictionary *m, NSString *k,
                 [self2 reloadData];
                 return;
             }
-            if (count != (NSInteger)self2.paths.count) {
+            if (count != (NSInteger)liveItems.count) {
                 [self2 reloadData];
             }
             // P2：web ui_script.h:3930-3932 —— toast 带歌单名/首数，并通知侧栏重拉（行数 +1）。
