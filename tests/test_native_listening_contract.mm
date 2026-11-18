@@ -14,6 +14,7 @@
 #import <AppKit/AppKit.h>
 #import "RLPCoreClient.h"
 #import "RLPListeningRoom.h"
+#import "RLPModels.h"
 #import "RLPQuickStartViewController.h"
 #import "RLPSupport.h"
 #import "RLPTheme.h"
@@ -58,6 +59,14 @@ static NSView *FindById(NSView *root, NSString *ident) {
 @property (nonatomic, strong, nullable) NSPopover *popover;
 @property (nonatomic, assign) BOOL playing;
 @property (nonatomic, assign) BOOL pausedNow;
+@property (nonatomic, strong) NSView *cardsContainer;
+@property (nonatomic, strong) NSStackView *albumRow;
+@property (nonatomic, strong) RLPCoverImageView *npCover;
+@property (nonatomic, strong) NSTextField *npTitle;
+@property (nonatomic, strong) NSTextField *npSub;
+@property (nonatomic, copy) NSArray<RLPAlbum *> *albumsData;
+@property (nonatomic, assign) NSInteger currentCardColumns;
+@property (nonatomic, assign) NSInteger currentAlbumColumns;
 + (NSDictionary<NSString *, NSString *> *)playModeFeedbackForNotes:(NSArray * _Nullable)notes
                                                   playbackActive:(BOOL)active;
 - (void)syncPlayAndStyleCards;
@@ -68,6 +77,9 @@ static NSView *FindById(NSView *root, NSString *ident) {
 - (void)onApplyUpnpOutput:(id)sender;
 - (void)applyCastDevicesPayload:(NSDictionary * _Nullable)json;
 - (void)reloadSettings;
+- (void)rebuildAlbumGrid;
+- (void)renderQueueFromJSON:(NSDictionary * _Nullable)json;
+- (void)updateResponsiveLayoutForWidth:(CGFloat)availWidth;
 @end
 
 // Keep output selection tests offline: discovery is explicitly stubbed.
@@ -124,6 +136,363 @@ static void TestMountedRoomGeometry() {
             w, NSStringFromRect(host.frame), NSStringFromRect(vc.view.frame), NSStringFromRect(scroll.frame), clipWidth, NSStringFromRect(scroll.documentView.frame),
             NSStringFromRect(a), NSStringFromRect(b)]);
     }
+}
+
+static void CollectByIdPrefix(NSView *root, NSString *prefix, NSMutableArray<NSView *> *out) {
+    if (!root) return;
+    if ([root.identifier hasPrefix:prefix]) [out addObject:root];
+    for (NSView *s in root.subviews) CollectByIdPrefix(s, prefix, out);
+}
+
+static NSScrollView *FindRoomScrollView(NSView *root) {
+    NSMutableArray<NSView *> *views = [NSMutableArray array];
+    CollectViews(root, views);
+    for (NSView *v in views) {
+        if ([v isKindOfClass:[NSScrollView class]]) return (NSScrollView *)v;
+    }
+    return nil;
+}
+
+static NSImage *MakeTestCover512() {
+    NSImage *img = [[NSImage alloc] initWithSize:NSMakeSize(512, 512)];
+    NSBitmapImageRep *rep = [[NSBitmapImageRep alloc]
+        initWithBitmapDataPlanes:NULL
+                      pixelsWide:512
+                      pixelsHigh:512
+                   bitsPerSample:8
+                 samplesPerPixel:4
+                        hasAlpha:YES
+                        isPlanar:NO
+                  colorSpaceName:NSCalibratedRGBColorSpace
+                     bytesPerRow:0
+                    bitsPerPixel:0];
+    if (rep) {
+        [img addRepresentation:rep];
+    } else {
+        [img lockFocus];
+        [[NSColor systemBlueColor] setFill];
+        NSRectFill(NSMakeRect(0, 0, 512, 512));
+        [img unlockFocus];
+    }
+    return img;
+}
+
+static NSArray<RLPAlbum *> *MakeTestAlbums(NSInteger count) {
+    NSMutableArray<NSDictionary *> *raw = [NSMutableArray arrayWithCapacity:(NSUInteger)count];
+    for (NSInteger i = 0; i < count; ++i) {
+        [raw addObject:@{
+            @"key": [NSString stringWithFormat:@"alb-%ld", (long)i],
+            @"name": [NSString stringWithFormat:@"Very Long Classical Symphony Album Title Number %ld With Extra Words For Tail Truncation", (long)i],
+            @"album": [NSString stringWithFormat:@"Very Long Classical Symphony Album Title Number %ld With Extra Words For Tail Truncation", (long)i],
+            @"artist": @"Very Long Philharmonic Orchestra & Conductor Name That Should Not Overflow",
+            @"year": @(2000 + (i % 24)),
+            @"sampleRate": @192000,
+            @"bits": @24,
+        }];
+    }
+    NSArray<RLPAlbum *> *parsed = [RLPAlbum albumsFromJSON:@{@"ok": @YES, @"albums": raw, @"items": raw}];
+    if (parsed.count >= (NSUInteger)count) return parsed;
+    NSMutableArray<RLPAlbum *> *out = [NSMutableArray arrayWithCapacity:(NSUInteger)count];
+    for (NSInteger i = 0; i < count; ++i) {
+        RLPAlbum *a = [[RLPAlbum alloc] init];
+        @try {
+            [a setValue:raw[(NSUInteger)i][@"key"] forKey:@"key"];
+            [a setValue:raw[(NSUInteger)i][@"name"] forKey:@"name"];
+            [a setValue:raw[(NSUInteger)i][@"artist"] forKey:@"artist"];
+            [a setValue:raw[(NSUInteger)i][@"year"] forKey:@"year"];
+            [a setValue:raw[(NSUInteger)i][@"sampleRate"] forKey:@"sampleRate"];
+            [a setValue:raw[(NSUInteger)i][@"bits"] forKey:@"bits"];
+        } @catch (NSException *ex) {
+            (void)ex;
+        }
+        [out addObject:a];
+    }
+    return out;
+}
+
+static NSDictionary *SampleLongQueueJSON() {
+    return @{
+        @"items": @[@"/tmp/track1.flac", @"/tmp/track2.flac", @"/tmp/track3.flac", @"/tmp/track4.flac"],
+        @"metas": @[
+            @{@"t": @"Symphony No. 9 in D Minor Op. 125 Movement IV Presto Allegro Assai Very Long Title",
+              @"a": @"Berliner Philharmoniker & Long Conductor Name", @"d": @1452.0},
+            @{@"t": @"Goldberg Variations BWV 988 Aria da Capo Very Long Title For Narrow Queue Preview",
+              @"a": @"Glenn Gould", @"d": @312.0},
+            @{@"t": @"Kind of Blue So What Remastered Ultra High Definition Long Title",
+              @"a": @"Miles Davis Quintet", @"d": @562.0},
+            @{@"t": @"The Well-Tempered Clavier Book I Prelude and Fugue No. 1 in C Major",
+              @"a": @"Sviatoslav Richter", @"d": @285.0},
+        ],
+        @"index": @0,
+    };
+}
+
+static NSUInteger ApplyCoversToRoom(RLPQuickStartViewController *vc, NSImage * _Nullable cover) {
+    vc.npCover.image = cover;
+    NSMutableArray<NSView *> *covers = [NSMutableArray array];
+    CollectByIdPrefix(vc.view, @"room.albumcover.", covers);
+    for (NSView *v in covers) {
+        if ([v isKindOfClass:[NSImageView class]]) {
+            ((NSImageView *)v).image = cover;
+        }
+    }
+    return covers.count;
+}
+
+static void MountVCInWindow(RLPQuickStartViewController *vc, NSWindow *win) {
+    NSView *host = win.contentView;
+    [host addSubview:vc.view];
+    vc.view.translatesAutoresizingMaskIntoConstraints = NO;
+    [NSLayoutConstraint activateConstraints:@[
+        [vc.view.leadingAnchor constraintEqualToAnchor:host.leadingAnchor],
+        [vc.view.trailingAnchor constraintEqualToAnchor:host.trailingAnchor],
+        [vc.view.topAnchor constraintEqualToAnchor:host.topAnchor],
+        [vc.view.bottomAnchor constraintEqualToAnchor:host.bottomAnchor],
+    ]];
+}
+
+static void VerifyRoomFit(RLPQuickStartViewController *vc, NSWindow *win, CGFloat expectedW,
+                          NSString *tag, BOOL expectCover) {
+    NSScrollView *scroll = FindRoomScrollView(vc.view);
+    NSView *cDev = FindById(vc.view, @"room.device");
+    NSView *cOut = FindById(vc.view, @"room.output");
+    NSView *cPlay = FindById(vc.view, @"room.play");
+    NSView *cStyle = FindById(vc.view, @"room.style");
+    NSView *cardsContainer = vc.cardsContainer ?: cDev.superview;
+    NSView *albumRowView = FindById(vc.view, @"room.albums") ?: vc.albumRow;
+    NSView *npCard = FindById(vc.view, @"room.nowplaying");
+    NSView *qCard = FindById(vc.view, @"room.queue");
+
+    const CGFloat docW = scroll ? NSWidth(scroll.documentView.frame) : -1.0;
+    const CGFloat clipW = scroll ? NSWidth(scroll.contentView.bounds) : -1.0;
+    const CGFloat hostW = NSWidth(win.contentView.bounds);
+    const CGFloat pageW = NSWidth(vc.view.bounds);
+
+    CK(scroll && docW <= clipW + 1.0 && hostW <= expectedW + 1.0 && pageW <= expectedW + 1.0,
+       [[NSString stringWithFormat:@"%@ scroll doc<=clip and host/page<=expected", tag] UTF8String],
+       [NSString stringWithFormat:@"expected=%.1f host=%.1f page=%.1f clip=%.1f doc=%.1f",
+        expectedW, hostW, pageW, clipW, docW]);
+
+    BOOL fourCardsOk = (cardsContainer != nil && cDev && cOut && cPlay && cStyle);
+    NSString *cardsDetail = @"";
+    if (fourCardsOk) {
+        const CGFloat ccW = NSWidth(cardsContainer.bounds);
+        for (NSView *card in @[cDev, cOut, cPlay, cStyle]) {
+            NSRect cr = [card convertRect:card.bounds toView:cardsContainer];
+            NSRect pr = [card convertRect:card.bounds toView:vc.view];
+            if (NSWidth(cr) <= 0 || NSMaxX(cr) > ccW + 1.0 || NSMaxX(pr) > pageW + 1.0) {
+                fourCardsOk = NO;
+                cardsDetail = [NSString stringWithFormat:@"id=%@ cr=%@ ccW=%.1f pr=%@ pageW=%.1f",
+                               card.identifier, NSStringFromRect(cr), ccW, NSStringFromRect(pr), pageW];
+                break;
+            }
+        }
+    }
+    CK(fourCardsOk, [[NSString stringWithFormat:@"%@ four cards maxX <= cardsContainer/page", tag] UTF8String], cardsDetail);
+
+    BOOL albumsOk = ([albumRowView isKindOfClass:[NSStackView class]]);
+    NSString *albumsDetail = @"";
+    NSUInteger foundAlbumCards = 0;
+    if (albumsOk) {
+        NSStackView *ar = (NSStackView *)albumRowView;
+        const CGFloat arW = NSWidth(ar.bounds);
+        for (NSView *rowView in ar.arrangedSubviews) {
+            if (![rowView isKindOfClass:[NSStackView class]]) continue;
+            NSStackView *rs = (NSStackView *)rowView;
+            NSRect rr = [rs convertRect:rs.bounds toView:ar];
+            if (NSMaxX(rr) > arW + 1.0) {
+                albumsOk = NO;
+                albumsDetail = [NSString stringWithFormat:@"rowStack=%@ arW=%.1f", NSStringFromRect(rr), arW];
+                break;
+            }
+            for (NSView *item in rs.arrangedSubviews) {
+                NSRect ir = [item convertRect:item.bounds toView:ar];
+                if (NSWidth(ir) <= 0 || NSMaxX(ir) > arW + 1.0) {
+                    albumsOk = NO;
+                    albumsDetail = [NSString stringWithFormat:@"item=%@ ir=%@ arW=%.1f", item.identifier ?: @"", NSStringFromRect(ir), arW];
+                    break;
+                }
+                if ([item.identifier hasPrefix:@"room.albumcard."]) {
+                    ++foundAlbumCards;
+                    NSMutableArray<NSView *> *ivs = [NSMutableArray array];
+                    CollectByIdPrefix(item, @"room.albumcover.", ivs);
+                    for (NSView *v in ivs) {
+                        if (![v isKindOfClass:[NSImageView class]]) continue;
+                        NSImageView *iv = (NSImageView *)v;
+                        NSRect ivr = [iv convertRect:iv.bounds toView:ar];
+                        if (NSMaxX(ivr) > arW + 1.0) {
+                            albumsOk = NO;
+                            albumsDetail = [NSString stringWithFormat:@"cover=%@ ivr=%@ arW=%.1f", iv.identifier, NSStringFromRect(ivr), arW];
+                            break;
+                        }
+                        if (expectCover && (!iv.image || iv.image.size.width < 512.0)) {
+                            albumsOk = NO;
+                            albumsDetail = [NSString stringWithFormat:@"cover=%@ missing 512 image", iv.identifier];
+                            break;
+                        }
+                    }
+                    if (!albumsOk) break;
+                }
+            }
+            if (!albumsOk) break;
+        }
+    }
+    CK(albumsOk && foundAlbumCards > 0,
+       [[NSString stringWithFormat:@"%@ album cards maxX <= albumRow", tag] UTF8String],
+       [NSString stringWithFormat:@"cards=%lu %@", (unsigned long)foundAlbumCards, albumsDetail]);
+
+    BOOL npqOk = (npCard != nil && qCard != nil);
+    NSString *npqDetail = @"";
+    if (npqOk) {
+        NSRect npr = [npCard convertRect:npCard.bounds toView:vc.view];
+        NSRect qr = [qCard convertRect:qCard.bounds toView:vc.view];
+        if (NSWidth(npr) <= 0 || NSMaxX(npr) > pageW + 1.0 ||
+            NSWidth(qr) <= 0 || NSMaxX(qr) > pageW + 1.0) {
+            npqOk = NO;
+            npqDetail = [NSString stringWithFormat:@"np=%@ q=%@ pageW=%.1f",
+                         NSStringFromRect(npr), NSStringFromRect(qr), pageW];
+        }
+    }
+    CK(npqOk, [[NSString stringWithFormat:@"%@ nowplaying/queue maxX <= pageW", tag] UTF8String], npqDetail);
+}
+
+static void TestRoomCoverAndCacheFitB1B2B3() {
+    // ---------- B1 & B3: 四档窗宽 × 封面未加载/512x512 加载后 ----------
+    RLPQuickStartViewController *vc = [[RLPQuickStartViewController alloc] init];
+    (void)vc.view;
+    vc.albumsData = MakeTestAlbums(10);
+    vc.npTitle.stringValue = @"Very Long Track Title In Listening Room That Must Truncate Cleanly Without Expanding Window Width";
+    vc.npSub.stringValue = @"Very Long Orchestra & Soloist · Very Long Classical Album Title · 2024";
+    [vc renderQueueFromJSON:SampleLongQueueJSON()];
+    [vc rebuildAlbumGrid];
+
+    NSWindow *win = [[NSWindow alloc] initWithContentRect:NSMakeRect(0, 0, 1394, 880)
+                                               styleMask:NSWindowStyleMaskBorderless
+                                                 backing:NSBackingStoreBuffered defer:NO];
+    MountVCInWindow(vc, win);
+
+    NSArray<NSArray<NSNumber *> *> *sizes = @[
+        @[@1394, @880],
+        @[@1180, @760],
+        @[@900, @600],
+        @[@800, @600],
+    ];
+    NSImage *cover512 = MakeTestCover512();
+
+    // B3a: 封面未加载状态
+    for (NSArray<NSNumber *> *sz in sizes) {
+        const CGFloat w = sz[0].doubleValue, h = sz[1].doubleValue;
+        [win setContentSize:NSMakeSize(w, h)];
+        [win.contentView layoutSubtreeIfNeeded];
+        ApplyCoversToRoom(vc, nil);
+        [win.contentView layoutSubtreeIfNeeded];
+        VerifyRoomFit(vc, win, w, [NSString stringWithFormat:@"B3_nocover_%dx%d", (int)w, (int)h], NO);
+    }
+
+    // B1 & B3b: 加载 512x512 NSImage 封面后（先设 512x512 封面，再按四档检测）
+    for (NSArray<NSNumber *> *sz in sizes) {
+        const CGFloat w = sz[0].doubleValue, h = sz[1].doubleValue;
+        [win setContentSize:NSMakeSize(w, h)];
+        [win.contentView layoutSubtreeIfNeeded];
+        const NSUInteger covCount = ApplyCoversToRoom(vc, cover512);
+        [win.contentView layoutSubtreeIfNeeded];
+        CK(covCount >= 8, [[NSString stringWithFormat:@"B1_%dx%d album covers populated", (int)w, (int)h] UTF8String],
+           [NSString stringWithFormat:@"count=%lu", (unsigned long)covCount]);
+        VerifyRoomFit(vc, win, w, [NSString stringWithFormat:@"B1_cover512_%dx%d", (int)w, (int)h], YES);
+    }
+
+    // ---------- B2: 同一缓存 VC 1180 挂载 -> 改宿主 900 -> remove/add 到新宿主 ----------
+    RLPQuickStartViewController *cachedVC = [[RLPQuickStartViewController alloc] init];
+    (void)cachedVC.view;
+    cachedVC.albumsData = MakeTestAlbums(10);
+    cachedVC.npTitle.stringValue = @"Very Long Cached Listening Room Title That Must Reflow On Host Reentry";
+    cachedVC.npSub.stringValue = @"Long Artist · Long Album";
+    [cachedVC renderQueueFromJSON:SampleLongQueueJSON()];
+    [cachedVC rebuildAlbumGrid];
+
+    NSWindow *w1180 = [[NSWindow alloc] initWithContentRect:NSMakeRect(0, 0, 1180, 760)
+                                                 styleMask:NSWindowStyleMaskBorderless
+                                                   backing:NSBackingStoreBuffered defer:NO];
+    MountVCInWindow(cachedVC, w1180);
+    [w1180.contentView layoutSubtreeIfNeeded];
+    ApplyCoversToRoom(cachedVC, cover512);
+    [w1180.contentView layoutSubtreeIfNeeded];
+    CK(cachedVC.currentCardColumns == 4 && cachedVC.currentAlbumColumns == 5,
+       "B2a cached VC at 1180 adopts 4 card cols / 5 album cols",
+       [NSString stringWithFormat:@"cards=%ld albums=%ld", (long)cachedVC.currentCardColumns, (long)cachedVC.currentAlbumColumns]);
+    VerifyRoomFit(cachedVC, w1180, 1180.0, @"B2a_1180", YES);
+
+    // 改宿主 900
+    [w1180 setContentSize:NSMakeSize(900, 600)];
+    [w1180.contentView layoutSubtreeIfNeeded];
+    ApplyCoversToRoom(cachedVC, cover512);
+    [w1180.contentView layoutSubtreeIfNeeded];
+    CK(cachedVC.currentCardColumns == 4 && cachedVC.currentAlbumColumns == 4,
+       "B2b host resized to 900 adopts 4 card cols / 4 album cols",
+       [NSString stringWithFormat:@"cards=%ld albums=%ld", (long)cachedVC.currentCardColumns, (long)cachedVC.currentAlbumColumns]);
+    VerifyRoomFit(cachedVC, w1180, 900.0, @"B2b_resize_900", YES);
+
+    // 复位到 1180 后 remove/add 到新宿主 900（先触发 viewWillMoveToSuperview:/viewDidMoveToWindow）
+    [w1180 setContentSize:NSMakeSize(1180, 760)];
+    [w1180.contentView layoutSubtreeIfNeeded];
+    [cachedVC.view removeFromSuperview];
+
+    NSWindow *w900 = [[NSWindow alloc] initWithContentRect:NSMakeRect(0, 0, 900, 600)
+                                                styleMask:NSWindowStyleMaskBorderless
+                                                  backing:NSBackingStoreBuffered defer:NO];
+    cachedVC.view.frame = w900.contentView.bounds;
+    MountVCInWindow(cachedVC, w900);
+    CK(cachedVC.currentCardColumns == 4 && cachedVC.currentAlbumColumns == 4,
+       "B2c remove/add to 900 host updates responsive layout immediately on mount",
+       [NSString stringWithFormat:@"cards=%ld albums=%ld", (long)cachedVC.currentCardColumns, (long)cachedVC.currentAlbumColumns]);
+    [w900.contentView layoutSubtreeIfNeeded];
+    ApplyCoversToRoom(cachedVC, cover512);
+    [w900.contentView layoutSubtreeIfNeeded];
+    VerifyRoomFit(cachedVC, w900, 900.0, @"B2c_reenter_900", YES);
+
+    // 再验证 remove/add 到 2x2（720）与 1 列（380）新宿主，确保四卡 2x2/1 列与专辑列数对应且 doc<=clip
+    [cachedVC.view removeFromSuperview];
+    NSWindow *w720 = [[NSWindow alloc] initWithContentRect:NSMakeRect(0, 0, 720, 600)
+                                                styleMask:NSWindowStyleMaskBorderless
+                                                  backing:NSBackingStoreBuffered defer:NO];
+    cachedVC.view.frame = w720.contentView.bounds;
+    MountVCInWindow(cachedVC, w720);
+    CK(cachedVC.currentCardColumns == 2 && cachedVC.currentAlbumColumns == 3,
+       "B2d remove/add to 720 host adopts 2x2 cards / 3 album cols immediately",
+       [NSString stringWithFormat:@"cards=%ld albums=%ld", (long)cachedVC.currentCardColumns, (long)cachedVC.currentAlbumColumns]);
+    [w720.contentView layoutSubtreeIfNeeded];
+    ApplyCoversToRoom(cachedVC, cover512);
+    [w720.contentView layoutSubtreeIfNeeded];
+    VerifyRoomFit(cachedVC, w720, 720.0, @"B2d_reenter_720", YES);
+
+    [cachedVC.view removeFromSuperview];
+    NSWindow *w380 = [[NSWindow alloc] initWithContentRect:NSMakeRect(0, 0, 380, 600)
+                                                styleMask:NSWindowStyleMaskBorderless
+                                                  backing:NSBackingStoreBuffered defer:NO];
+    cachedVC.view.frame = w380.contentView.bounds;
+    MountVCInWindow(cachedVC, w380);
+    CK(cachedVC.currentCardColumns == 1 && cachedVC.currentAlbumColumns == 2,
+       "B2e remove/add to 380 host adopts 1x4 cards / 2 album cols immediately",
+       [NSString stringWithFormat:@"cards=%ld albums=%ld", (long)cachedVC.currentCardColumns, (long)cachedVC.currentAlbumColumns]);
+    [w380.contentView layoutSubtreeIfNeeded];
+    ApplyCoversToRoom(cachedVC, cover512);
+    [w380.contentView layoutSubtreeIfNeeded];
+    VerifyRoomFit(cachedVC, w380, 380.0, @"B2e_reenter_380", YES);
+
+    // 额外验证：保持旧 1180 frame 直接 remove/add 到 900 新宿主（不预设 frame），单次 layoutSubtreeIfNeeded 必须完成收敛
+    [cachedVC.view removeFromSuperview];
+    cachedVC.view.frame = NSMakeRect(0, 0, 1180, 760);
+    NSWindow *w900b = [[NSWindow alloc] initWithContentRect:NSMakeRect(0, 0, 900, 600)
+                                                 styleMask:NSWindowStyleMaskBorderless
+                                                   backing:NSBackingStoreBuffered defer:NO];
+    MountVCInWindow(cachedVC, w900b);
+    [w900b.contentView layoutSubtreeIfNeeded];
+    ApplyCoversToRoom(cachedVC, cover512);
+    [w900b.contentView layoutSubtreeIfNeeded];
+    CK(cachedVC.currentCardColumns == 4 && cachedVC.currentAlbumColumns == 4,
+       "B2f stale 1180 frame remove/add to 900 host converges on layout",
+       [NSString stringWithFormat:@"cards=%ld albums=%ld", (long)cachedVC.currentCardColumns, (long)cachedVC.currentAlbumColumns]);
+    VerifyRoomFit(cachedVC, w900b, 900.0, @"B2f_stale_reenter_900", YES);
 }
 
 int main(int argc, char **argv) {
@@ -506,6 +875,9 @@ int main(int argc, char **argv) {
 
             [core jsonWithMethod:@"POST" path:@"/api/settings" body:@"backend=null&volume=-120"];
         }
+
+        // 隔离：B1/B2/B3 会在离屏主窗里创建额外 VC，放在核心契约全部跑完后避免污染 C9 的设备/设置状态。
+        TestRoomCoverAndCacheFitB1B2B3();
 
         [core shutdown];
         [fm removeItemAtPath:root error:nil];

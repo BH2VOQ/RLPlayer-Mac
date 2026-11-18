@@ -27,6 +27,17 @@
 
 #pragma mark - 内部轻量组件：进度条与专辑封面卡
 
+@interface RLPRoomCoverImageView : RLPCoverImageView
+@end
+
+@implementation RLPRoomCoverImageView
+- (NSSize)intrinsicContentSize { return NSZeroSize; }
+- (void)setImage:(NSImage *)image {
+    [super setImage:image];
+    [self invalidateIntrinsicContentSize];
+}
+@end
+
 @interface RLPRoomProgressView : NSView
 @property (nonatomic, assign) double progress;
 @end
@@ -110,12 +121,22 @@
     _coverBox.layer.backgroundColor = t.cvBg.CGColor;
     _coverBox.layer.borderWidth = 1.0;
     _coverBox.layer.borderColor = t.line.CGColor;
+    [_coverBox setContentCompressionResistancePriority:40
+                                        forOrientation:NSLayoutConstraintOrientationHorizontal];
     [self addSubview:_coverBox];
 
-    _coverView = [[RLPCoverImageView alloc] initWithFrame:NSZeroRect];
+    _coverView = [[RLPRoomCoverImageView alloc] initWithFrame:NSZeroRect];
     _coverView.translatesAutoresizingMaskIntoConstraints = NO;
     _coverView.imageScaling = NSImageScaleProportionallyUpOrDown;
     _coverView.identifier = [NSString stringWithFormat:@"room.albumcover.%ld", (long)idx];
+    [_coverView setContentCompressionResistancePriority:40
+                                         forOrientation:NSLayoutConstraintOrientationHorizontal];
+    [_coverView setContentCompressionResistancePriority:40
+                                         forOrientation:NSLayoutConstraintOrientationVertical];
+    [_coverView setContentHuggingPriority:40
+                             forOrientation:NSLayoutConstraintOrientationHorizontal];
+    [_coverView setContentHuggingPriority:40
+                             forOrientation:NSLayoutConstraintOrientationVertical];
     [_coverBox addSubview:_coverView];
 
     NSString *glyph = album.name.length ? [album.name substringToIndex:1] : @"♪";
@@ -130,7 +151,7 @@
     _nameLabel.lineBreakMode = NSLineBreakByTruncatingTail;
     _nameLabel.maximumNumberOfLines = 1;
     _nameLabel.translatesAutoresizingMaskIntoConstraints = NO;
-    [_nameLabel setContentCompressionResistancePriority:NSLayoutPriorityDefaultLow
+    [_nameLabel setContentCompressionResistancePriority:40
                                          forOrientation:NSLayoutConstraintOrientationHorizontal];
     [self addSubview:_nameLabel];
 
@@ -140,7 +161,7 @@
     _metaLabel.lineBreakMode = NSLineBreakByTruncatingTail;
     _metaLabel.maximumNumberOfLines = 1;
     _metaLabel.translatesAutoresizingMaskIntoConstraints = NO;
-    [_metaLabel setContentCompressionResistancePriority:NSLayoutPriorityDefaultLow
+    [_metaLabel setContentCompressionResistancePriority:40
                                          forOrientation:NSLayoutConstraintOrientationHorizontal];
     [self addSubview:_metaLabel];
     [self refreshLanguageFromAlbum:album];
@@ -167,6 +188,8 @@
     _playBadge.layer.backgroundColor = t.accent.CGColor;
     _playBadge.hidden = YES;
     _playBadge.translatesAutoresizingMaskIntoConstraints = NO;
+    [_playBadge setContentCompressionResistancePriority:40
+                                         forOrientation:NSLayoutConstraintOrientationHorizontal];
     [self addSubview:_playBadge];
 
     [NSLayoutConstraint activateConstraints:@[
@@ -452,6 +475,8 @@
 @property (nonatomic, assign) NSUInteger settingsWriteSeq;
 @property (nonatomic, strong, nullable) NSNumber *lastHogAcquired;
 @property (nonatomic, copy) NSString *lastFallbackWhy;
+@property (nonatomic, assign) BOOL roomFrameUpdateGuard;
+- (void)updateResponsiveLayoutForWidth:(CGFloat)availWidth;
 @end
 
 @implementation RLPQuickStartViewController
@@ -610,12 +635,35 @@
 
 #pragma mark - 骨架
 
+// 页面缓存重入（removeFromSuperview → addSubview）不保证会走 viewDidLayout；
+// 监听自身 frame 变化，在宿主宽度一变就按新宽重算断点，避免旧列数把内容撑宽。
+- (void)loadView {
+    [super loadView];
+    self.view.postsFrameChangedNotifications = YES;
+    [[NSNotificationCenter defaultCenter] addObserver:self
+                                             selector:@selector(onRoomFrameChanged:)
+                                                 name:NSViewFrameDidChangeNotification
+                                               object:self.view];
+}
+
+- (void)onRoomFrameChanged:(NSNotification *)note {
+    if (note.object != self.view || self.roomFrameUpdateGuard) return;
+    const CGFloat w = self.view.bounds.size.width;
+    if (w <= 48.0) return;
+    self.roomFrameUpdateGuard = YES;
+    [self updateResponsiveLayoutForWidth:w - 48.0];
+    self.roomFrameUpdateGuard = NO;
+}
+
 - (void)buildContent {
     NSView *host = self.contentView;
     NSScrollView *scroll = [[NSScrollView alloc] initWithFrame:NSZeroRect];
     scroll.drawsBackground = NO;
     scroll.hasVerticalScroller = YES;
     scroll.autohidesScrollers = YES;
+    // 覆盖式滚动条不占 contentView 宽度：否则滚动条出现时 clip 比 doc 窄 17pt，
+    // 整页会横向溢出、右侧卡片被裁（2026-11-18 用户反馈）。
+    scroll.scrollerStyle = NSScrollerStyleOverlay;
     scroll.translatesAutoresizingMaskIntoConstraints = NO;
     [host addSubview:scroll];
 
@@ -646,6 +694,7 @@
     self.headerRow.translatesAutoresizingMaskIntoConstraints = NO;
 
     self.headerTitle = [self trackedLabel:RLPTr(@"聆听室") font:t.display role:0];
+    self.headerTitle.lineBreakMode = NSLineBreakByTruncatingTail;
     self.headerSubtitle = [self trackedLabel:RLPTr(@"安静听歌，常用设置就在卡片里") font:t.body role:1];
     self.headerSubtitle.identifier = @"room.subtitle";
     self.headerSubtitle.maximumNumberOfLines = 2;
@@ -684,6 +733,7 @@
     self.deviceCard = [self cardWithIdentifier:@"room.device"];
     NSView *devIcon = [self iconBadgeWithSymbol:@"speaker.wave.2.fill" desc:@"当前设备" size:24];
     self.deviceCaption = [self trackedLabel:RLPTr(@"当前设备") font:capFont role:1];
+    self.deviceCaption.lineBreakMode = NSLineBreakByTruncatingTail;
     self.devRefreshButton = RLPSymbolButton(@"arrow.clockwise", RLPTr(@"重新检测设备"), self, @selector(onReloadDevices:));
     self.devRefreshButton.translatesAutoresizingMaskIntoConstraints = NO;
 
@@ -697,6 +747,7 @@
     [self.devicePopup addItemWithTitle:RLPTr(@"系统默认")];
 
     self.deviceSub = [self trackedLabel:RLPTr(@"检测中…") font:t.caption role:1];
+    self.deviceSub.lineBreakMode = NSLineBreakByTruncatingTail;
     for (NSView *v in @[devIcon, self.deviceCaption, self.devRefreshButton, self.devicePopup, self.deviceSub]) {
         [self.deviceCard addSubview:v];
     }
@@ -705,9 +756,12 @@
     self.outputCard = [self cardWithIdentifier:@"room.output"];
     NSView *outIcon = [self iconBadgeWithSymbol:@"hifispeaker.2.fill" desc:@"输出" size:24];
     self.outputCaption = [self trackedLabel:RLPTr(@"输出") font:capFont role:1];
+    self.outputCaption.lineBreakMode = NSLineBreakByTruncatingTail;
     self.outputChevron = [self trackedLabel:@"›" font:[NSFont systemFontOfSize:15 weight:NSFontWeightMedium] role:1];
     self.outputValue = [self trackedLabel:RLPTr(@"读取中…") font:valFont role:0];
+    self.outputValue.lineBreakMode = NSLineBreakByTruncatingTail;
     self.outputSub = [self trackedLabel:RLPTr(@"点击选择输出方式") font:t.caption role:1];
+    self.outputSub.lineBreakMode = NSLineBreakByTruncatingTail;
 
     self.outCardButton = [NSButton buttonWithTitle:@"" target:self action:@selector(onOpenOutput:)];
     self.outCardButton.bordered = NO;
@@ -721,9 +775,12 @@
     self.playCard = [self cardWithIdentifier:@"room.play"];
     NSView *playIcon = [self iconBadgeWithSymbol:@"waveform.path.ecg" desc:@"播放" size:24];
     self.playCaption = [self trackedLabel:RLPTr(@"播放") font:capFont role:1];
+    self.playCaption.lineBreakMode = NSLineBreakByTruncatingTail;
     self.playChevron = [self trackedLabel:@"›" font:[NSFont systemFontOfSize:15 weight:NSFontWeightMedium] role:1];
     self.playValue = [self trackedLabel:RLPTr(@"原音直通") font:valFont role:0];
+    self.playValue.lineBreakMode = NSLineBreakByTruncatingTail;
     self.playSub = [self trackedLabel:RLPTr(@"文件是什么就播什么，不做任何加工") font:t.caption role:1];
+    self.playSub.lineBreakMode = NSLineBreakByTruncatingTail;
 
     self.playCardButton = [NSButton buttonWithTitle:@"" target:self action:@selector(onOpenPlay:)];
     self.playCardButton.bordered = NO;
@@ -737,9 +794,12 @@
     self.styleCard = [self cardWithIdentifier:@"room.style"];
     NSView *styleIcon = [self iconBadgeWithSymbol:@"slider.horizontal.3" desc:@"听音风格" size:24];
     self.styleCaption = [self trackedLabel:RLPTr(@"听音风格") font:capFont role:1];
+    self.styleCaption.lineBreakMode = NSLineBreakByTruncatingTail;
     self.styleChevron = [self trackedLabel:@"›" font:[NSFont systemFontOfSize:15 weight:NSFontWeightMedium] role:1];
     self.styleValue = [self trackedLabel:RLPTr(@"均衡自然") font:valFont role:0];
+    self.styleValue.lineBreakMode = NSLineBreakByTruncatingTail;
     self.styleSub = [self trackedLabel:RLPTr(@"点击选择听感风格") font:t.caption role:1];
+    self.styleSub.lineBreakMode = NSLineBreakByTruncatingTail;
 
     self.styleCardButton = [NSButton buttonWithTitle:@"" target:self action:@selector(onOpenStyle:)];
     self.styleCardButton.bordered = NO;
@@ -819,6 +879,7 @@
     self.capsTitleLabel = [self trackedLabel:RLPTr(@"官方推荐预设")
                                         font:[NSFont systemFontOfSize:12 weight:NSFontWeightSemibold]
                                         role:0];
+    self.capsTitleLabel.lineBreakMode = NSLineBreakByTruncatingTail;
     self.capsPcmPill = [self subSurfaceWithRadius:6];
     self.capsPcmBadge = [self trackedLabel:@"PCM —" font:[NSFont systemFontOfSize:10.5 weight:NSFontWeightSemibold] role:1];
     [self.capsPcmBadge setContentHuggingPriority:NSLayoutPriorityRequired forOrientation:NSLayoutConstraintOrientationHorizontal];
@@ -913,7 +974,7 @@
     NSView *np = [self cardWithIdentifier:@"room.nowplaying"];
     self.npCard = np;
 
-    self.npCover = [[RLPCoverImageView alloc] initWithFrame:NSZeroRect];
+    self.npCover = [[RLPRoomCoverImageView alloc] initWithFrame:NSZeroRect];
     self.npCover.imageScaling = NSImageScaleProportionallyUpOrDown;
     self.npCover.wantsLayer = YES;
     self.npCover.layer.cornerRadius = t.rSm;
@@ -922,6 +983,14 @@
     self.npCover.layer.borderWidth = 1.0;
     self.npCover.layer.borderColor = t.line.CGColor;
     self.npCover.translatesAutoresizingMaskIntoConstraints = NO;
+    [self.npCover setContentCompressionResistancePriority:40
+                                           forOrientation:NSLayoutConstraintOrientationHorizontal];
+    [self.npCover setContentCompressionResistancePriority:40
+                                           forOrientation:NSLayoutConstraintOrientationVertical];
+    [self.npCover setContentHuggingPriority:40
+                               forOrientation:NSLayoutConstraintOrientationHorizontal];
+    [self.npCover setContentHuggingPriority:40
+                               forOrientation:NSLayoutConstraintOrientationVertical];
 
     self.npPlaceholder = [self trackedLabel:@"♪" font:[NSFont systemFontOfSize:34 weight:NSFontWeightLight] role:1];
     self.npPlaceholder.alignment = NSTextAlignmentCenter;
@@ -945,11 +1014,15 @@
 
     self.npTitle = [self trackedLabel:RLPTr(@"还没有在播放的音乐") font:t.heading role:0];
     self.npTitle.maximumNumberOfLines = 2;
-    self.npTitle.lineBreakMode = NSLineBreakByWordWrapping;
+    self.npTitle.lineBreakMode = NSLineBreakByTruncatingTail;
+    [self.npTitle setContentCompressionResistancePriority:40
+                                           forOrientation:NSLayoutConstraintOrientationHorizontal];
 
     self.npSub = [self trackedLabel:RLPTr(@"从下面的专辑挑一张开始") font:t.body role:1];
     self.npSub.maximumNumberOfLines = 1;
     self.npSub.lineBreakMode = NSLineBreakByTruncatingTail;
+    [self.npSub setContentCompressionResistancePriority:40
+                                         forOrientation:NSLayoutConstraintOrientationHorizontal];
 
     self.npProgressBar = [[RLPRoomProgressView alloc] initWithFrame:NSZeroRect];
     self.npProgressBar.translatesAutoresizingMaskIntoConstraints = NO;
@@ -965,10 +1038,14 @@
     self.npToggle.imagePosition = NSImageLeading;
     self.npToggle.image = [NSImage imageWithSystemSymbolName:@"play.fill" accessibilityDescription:RLPTr(@"继续播放")];
     self.npToggle.translatesAutoresizingMaskIntoConstraints = NO;
+    [self.npToggle setContentCompressionResistancePriority:40
+                                            forOrientation:NSLayoutConstraintOrientationHorizontal];
 
     NSButton *npOpen = [NSButton buttonWithTitle:RLPTr(@"打开曲目详情") target:self action:@selector(onOpenNowPlaying:)];
     npOpen.bezelStyle = NSBezelStyleRounded;
     npOpen.translatesAutoresizingMaskIntoConstraints = NO;
+    [npOpen setContentCompressionResistancePriority:40
+                                     forOrientation:NSLayoutConstraintOrientationHorizontal];
     self.npOpenButton = npOpen;
 
     for (NSView *v in @[self.npCover, self.npPlaceholder, self.npStatePill, self.npFormatPill,
@@ -1000,6 +1077,7 @@
     NSView *qcard = [self cardWithIdentifier:@"room.queue"];
     self.queueCard = qcard;
     self.queueCaption = [self trackedLabel:RLPTr(@"播放队列") font:t.heading role:0];
+    self.queueCaption.lineBreakMode = NSLineBreakByTruncatingTail;
     [self.queueCaption setContentCompressionResistancePriority:NSLayoutPriorityDefaultHigh
                                                   forOrientation:NSLayoutConstraintOrientationHorizontal];
     self.queueCountLabel = [self trackedLabel:@"0" font:t.small role:1];
@@ -1052,6 +1130,7 @@
     NSView *head = [[NSView alloc] initWithFrame:NSZeroRect];
     head.translatesAutoresizingMaskIntoConstraints = NO;
     self.albumCaption = [self trackedLabel:RLPTr(@"专辑") font:t.heading role:0];
+    self.albumCaption.lineBreakMode = NSLineBreakByTruncatingTail;
     [self.albumCaption setContentCompressionResistancePriority:NSLayoutPriorityDefaultHigh
                                                   forOrientation:NSLayoutConstraintOrientationHorizontal];
     self.albumCountLabel = [self trackedLabel:@"0" font:t.small role:1];
@@ -1069,10 +1148,13 @@
     [self.stack addArrangedSubview:head];
 
     self.albumRow = [[NSStackView alloc] init];
+    self.albumRow.identifier = @"room.albums";
     self.albumRow.orientation = NSUserInterfaceLayoutOrientationVertical;
     self.albumRow.alignment = NSLayoutAttributeLeading;
     self.albumRow.spacing = 12;
     self.albumRow.translatesAutoresizingMaskIntoConstraints = NO;
+    [self.albumRow setContentCompressionResistancePriority:40
+                                            forOrientation:NSLayoutConstraintOrientationHorizontal];
     [self.stack addArrangedSubview:self.albumRow];
 
     [NSLayoutConstraint activateConstraints:@[
@@ -1102,6 +1184,7 @@
     self.libTitleLabel = [self trackedLabel:RLPTr(@"本地音乐库")
                                        font:[NSFont systemFontOfSize:14 weight:NSFontWeightSemibold]
                                        role:0];
+    self.libTitleLabel.lineBreakMode = NSLineBreakByTruncatingTail;
 
     self.libFormatPill = [self subSurfaceWithRadius:6];
     self.libFormatBadge = [self trackedLabel:@"FLAC · DSD · ALAC · WAV"
@@ -1134,6 +1217,7 @@
     self.moreTitleLabel = [self trackedLabel:RLPTr(@"流媒体")
                                         font:[NSFont systemFontOfSize:14 weight:NSFontWeightSemibold]
                                         role:0];
+    self.moreTitleLabel.lineBreakMode = NSLineBreakByTruncatingTail;
     self.moreDescLabel = [self trackedLabel:RLPTr(@"流媒体在这里挂载；AI 资料与音频输入在左侧「设置」里调整。")
                                        font:t.small
                                        role:1];
@@ -1201,6 +1285,12 @@
 }
 
 #pragma mark - 响应式自适应布局
+
+- (void)viewWillLayout {
+    [super viewWillLayout];
+    const CGFloat w = self.view.bounds.size.width;
+    if (w > 48.0) [self updateResponsiveLayoutForWidth:w - 48.0];
+}
 
 - (void)viewDidLayout {
     [super viewDidLayout];
@@ -2882,7 +2972,10 @@
     NSTextField *e = RLPLabel(RLPTr(@"队列是空的"), t.small, t.mut);
     e.tag = 1;
     e.alignment = NSTextAlignmentCenter;
+    e.lineBreakMode = NSLineBreakByTruncatingTail;
     e.translatesAutoresizingMaskIntoConstraints = NO;
+    [e setContentCompressionResistancePriority:40
+                                forOrientation:NSLayoutConstraintOrientationHorizontal];
     [self.queueDynamicLabels addObject:e];
     self.queueEmptyLabel = e;
     [box addSubview:e];
@@ -2982,7 +3075,7 @@
         titleLab.tag = isCurrent ? 4 : 0;
         titleLab.lineBreakMode = NSLineBreakByTruncatingTail;
         titleLab.translatesAutoresizingMaskIntoConstraints = NO;
-        [titleLab setContentCompressionResistancePriority:NSLayoutPriorityDefaultLow
+        [titleLab setContentCompressionResistancePriority:40
                                            forOrientation:NSLayoutConstraintOrientationHorizontal];
         [self.queueDynamicLabels addObject:titleLab];
 
@@ -2991,6 +3084,8 @@
         durLab.alignment = NSTextAlignmentRight;
         durLab.translatesAutoresizingMaskIntoConstraints = NO;
         [durLab setContentHuggingPriority:NSLayoutPriorityRequired forOrientation:NSLayoutConstraintOrientationHorizontal];
+        [durLab setContentCompressionResistancePriority:40
+                                         forOrientation:NSLayoutConstraintOrientationHorizontal];
         [self.queueDynamicLabels addObject:durLab];
 
         NSButton *hit = [NSButton buttonWithTitle:@"" target:self action:@selector(onQueuePreviewClicked:)];
@@ -3045,6 +3140,8 @@
 
 - (void)rebuildAlbumGrid {
     if (!self.albumRow) return;
+    [self.albumRow setContentCompressionResistancePriority:40
+                                            forOrientation:NSLayoutConstraintOrientationHorizontal];
     RLPTheme *t = [RLPTheme current];
     for (NSView *v in [self.albumRow.arrangedSubviews copy]) {
         [self.albumRow removeArrangedSubview:v];
@@ -3075,7 +3172,10 @@
                                        [NSFont systemFontOfSize:13.5 weight:NSFontWeightSemibold], t.text);
         eTitle.tag = 0;
         eTitle.alignment = NSTextAlignmentCenter;
+        eTitle.lineBreakMode = NSLineBreakByTruncatingTail;
         eTitle.translatesAutoresizingMaskIntoConstraints = NO;
+        [eTitle setContentCompressionResistancePriority:40
+                                         forOrientation:NSLayoutConstraintOrientationHorizontal];
 
         NSTextField *eHint = RLPLabel(RLPTr(@"支持 FLAC · DSD (DSF/DFF) · ALAC · WAV · APE"), t.small, t.mut);
         eHint.tag = 1;
@@ -3130,6 +3230,8 @@
         rowStack.alignment = NSLayoutAttributeTop;
         rowStack.spacing = 12;
         rowStack.translatesAutoresizingMaskIntoConstraints = NO;
+        [rowStack setContentCompressionResistancePriority:40
+                                            forOrientation:NSLayoutConstraintOrientationHorizontal];
 
         for (NSInteger c = 0; c < cols; ++c) {
             const NSInteger idx = offset + c;

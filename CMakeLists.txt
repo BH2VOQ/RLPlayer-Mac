@@ -2665,6 +2665,27 @@ if(APPLE)
   target_link_libraries(test_native_modes_contract PRIVATE ${_modes_libs})
   add_test(NAME native_modes_contract COMMAND test_native_modes_contract)
   set_tests_properties(native_modes_contract PROPERTIES TIMEOUT 240)
+
+  # 主窗尺寸不被页面内容 fitting 撑大/锁死 + 900x600 顶栏几何（2026-11-18 用户：
+  # 切换到聆听室后窗口变长且缩不回）。新测试从 topbar 目标复用 UI 源，另加工作台两文件。
+  add_executable(test_native_window_fit_contract tests/test_native_window_fit_contract.mm
+    ${_modes_sources}
+    tools/native_ui/RLPWorkbench.mm
+    tools/native_ui/RLPWorkbenchViewController.mm)
+  target_compile_options(test_native_window_fit_contract PRIVATE -fobjc-arc)
+  target_include_directories(test_native_window_fit_contract PRIVATE src tools tools/native_ui)
+  target_link_libraries(test_native_window_fit_contract PRIVATE ${_modes_libs})
+  add_test(NAME native_window_fit_contract COMMAND test_native_window_fit_contract)
+  set_tests_properties(native_window_fit_contract PROPERTIES TIMEOUT 240)
+
+  # 设置「元数据」页自身宽度收敛（隐藏 adv 不传导 fitting，900/940 下不横向溢出）。
+  add_executable(test_native_settings_width_contract tests/test_native_settings_width_contract.mm
+    ${_modes_sources})
+  target_compile_options(test_native_settings_width_contract PRIVATE -fobjc-arc)
+  target_include_directories(test_native_settings_width_contract PRIVATE src tools tools/native_ui)
+  target_link_libraries(test_native_settings_width_contract PRIVATE ${_modes_libs})
+  add_test(NAME native_settings_width_contract COMMAND test_native_settings_width_contract)
+  set_tests_properties(native_settings_width_contract PROPERTIES TIMEOUT 240)
 endif()
 
 add_executable(test_windows_filter_parity tests/test_windows_filter_parity.cpp)

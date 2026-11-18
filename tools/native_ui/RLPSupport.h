@@ -137,64 +137,408 @@ void RLPPostJSON(NSString *path, NSString * _Nullable body);
 /// 播放页与底栏两个静音键必须共用同一份记忆值，否则「在播放页静音、到底栏取消静音」会恢复成错误值。
 /// 返回应下发的 dB；返回 **NAN** 表示上游语义的「什么都不做」（当前已 -120 且无恢复值）。
 double RLPVolumeMuteNextDb(double currentDb);
-/// 把窗口 frame 收敛到当前屏幕可见区：超宽/超高的历史 frame（换屏或拖拽越界）会导致
-/// 内容被屏幕边缘裁掉。纯函数，便于离线判据；minSize 大于可见区时以可见区为准。
-/// **minSize 任一维 <= 0（或缺省）表示「没有下限」**：NSWindow.minSize 的默认值就是 0×0，
-/// 面板/工具窗也常不设。旧实现把 <=0 当成「可见区全尺寸」，于是没设下限的窗口会被撑满整块屏
-/// （2026-11-18 夜间评审：minSize<=0 —— 一个只该改 origin 的收敛把 300×200 的窗口撑成了 1920×1050）。
-static inline NSRect RLPClampWindowFrameToVisible(NSRect frame, NSRect visible, NSSize minSize) {
-    if (visible.size.width <= 1.0 || visible.size.height <= 1.0) return frame;
+/// 窗口收敛的显式状态：converged=NO 表示可用区无效（如 <=1pt 或缺失），frame 未被压成 0/负或畸形尺寸。
+typedef struct {
+    NSRect frame;
+    BOOL converged;
+} RLPWindowClampResult;
+
+static inline BOOL RLPScreenRectIsValid(NSRect r, CGFloat minExtent) {
+    return isfinite((double)r.origin.x) && isfinite((double)r.origin.y) &&
+           isfinite((double)r.size.width) && isfinite((double)r.size.height) &&
+           r.size.width > minExtent && r.size.height > minExtent;
+}
+
+/// 把窗口 frame 收敛到当前屏幕可见区（带显式收敛状态）：
+///   - 可用区 <= 1pt（或非有限）时明确返回 converged=NO 且保留合法正尺寸 frame；
+///     若输入 frame 本身是 0/负/NaN 等畸形尺寸，兜底修正为正尺寸（优先 minSize，否则 >=2pt），绝不返回 0 宽/0 高/负值。
+///   - **minSize 任一维 <= 0（或缺省）表示「没有下限」**：NSWindow.minSize 的默认值就是 0×0，
+///     面板/工具窗也常不设。旧实现把 <=0 当成「可见区全尺寸」，于是没设下限的窗口会被撑满整块屏
+///     （2026-11-18 夜间评审：minSize<=0 —— 一个只该改 origin 的收敛把 300×200 的窗口撑成了 1920×1050）。
+static inline RLPWindowClampResult RLPClampWindowFrameToVisibleChecked(NSRect frame,
+                                                                       NSRect visible,
+                                                                       NSSize minSize) {
+    RLPWindowClampResult res;
     NSSize min = minSize;
-    if (!(min.width > 0)) min.width = 0;    // <=0 或 NaN：没有下限，**不是**"撑满可见区"
-    if (!(min.height > 0)) min.height = 0;
+    if (!isfinite((double)min.width) || !(min.width > 0)) min.width = 0;    // <=0 或 NaN：没有下限，**不是**"撑满可见区"
+    if (!isfinite((double)min.height) || !(min.height > 0)) min.height = 0;
+
+    NSRect safeFrame = frame;
+    const BOOL visibleValid = RLPScreenRectIsValid(visible, 1.0);
+    if (!isfinite((double)safeFrame.origin.x)) safeFrame.origin.x = visibleValid ? visible.origin.x : 0.0;
+    if (!isfinite((double)safeFrame.origin.y)) safeFrame.origin.y = visibleValid ? visible.origin.y : 0.0;
+    if (!isfinite((double)safeFrame.size.width) || !(safeFrame.size.width > 0)) {
+        safeFrame.size.width = (min.width > 0) ? min.width : 2.0;
+    }
+    if (!isfinite((double)safeFrame.size.height) || !(safeFrame.size.height > 0)) {
+        safeFrame.size.height = (min.height > 0) ? min.height : 2.0;
+    }
+
+    if (!visibleValid) {
+        res.frame = safeFrame;
+        res.converged = NO;
+        return res;
+    }
+
     if (min.width > visible.size.width) min.width = visible.size.width;     // 小屏：下限只能到可见区
     if (min.height > visible.size.height) min.height = visible.size.height;
-    frame.size.width = MAX(MIN(frame.size.width, visible.size.width), min.width);
-    frame.size.height = MAX(MIN(frame.size.height, visible.size.height), min.height);
-    if (NSMinX(frame) < NSMinX(visible)) frame.origin.x = NSMinX(visible);
-    if (NSMaxX(frame) > NSMaxX(visible)) frame.origin.x = NSMaxX(visible) - frame.size.width;
-    if (NSMinY(frame) < NSMinY(visible)) frame.origin.y = NSMinY(visible);
-    if (NSMaxY(frame) > NSMaxY(visible)) frame.origin.y = NSMaxY(visible) - frame.size.height;
-    return frame;
+    safeFrame.size.width = MAX(MIN(safeFrame.size.width, visible.size.width), min.width);
+    safeFrame.size.height = MAX(MIN(safeFrame.size.height, visible.size.height), min.height);
+    if (NSMinX(safeFrame) < NSMinX(visible)) safeFrame.origin.x = NSMinX(visible);
+    if (NSMaxX(safeFrame) > NSMaxX(visible)) safeFrame.origin.x = NSMaxX(visible) - safeFrame.size.width;
+    if (NSMinY(safeFrame) < NSMinY(visible)) safeFrame.origin.y = NSMinY(visible);
+    if (NSMaxY(safeFrame) > NSMaxY(visible)) safeFrame.origin.y = NSMaxY(visible) - safeFrame.size.height;
+    res.frame = safeFrame;
+    res.converged = YES;
+    return res;
+}
+
+static inline NSRect RLPClampWindowFrameToVisible(NSRect frame, NSRect visible, NSSize minSize) {
+    return RLPClampWindowFrameToVisibleChecked(frame, visible, minSize).frame;
+}
+
+typedef struct {
+    double a;
+    double b;
+} RLPInterval1D;
+
+static inline void RLPSortDoubles(double *arr, size_t n) {
+    for (size_t i = 1; i < n; ++i) {
+        const double key = arr[i];
+        size_t j = i;
+        while (j > 0 && arr[j - 1] > key) {
+            arr[j] = arr[j - 1];
+            --j;
+        }
+        arr[j] = key;
+    }
+}
+
+static inline void RLPSortIntervals(RLPInterval1D *arr, size_t n) {
+    for (size_t i = 1; i < n; ++i) {
+        const RLPInterval1D key = arr[i];
+        size_t j = i;
+        while (j > 0 && (arr[j - 1].a > key.a || (arr[j - 1].a == key.a && arr[j - 1].b > key.b))) {
+            arr[j] = arr[j - 1];
+            --j;
+        }
+        arr[j] = key;
+    }
+}
+
+/// 精确判定矩形 `rect` 是否 100% 落在 `visibles[0..count-1]` 的并集之内（不含任何屏外/屏间死区）。
+static inline BOOL RLPRectCoveredByScreens(NSRect rect, const NSRect *visibles, size_t count) {
+    if (!visibles || count == 0 || !RLPScreenRectIsValid(rect, 0.0)) return NO;
+    const double rx0 = (double)NSMinX(rect);
+    const double rx1 = (double)NSMaxX(rect);
+    const double ry0 = (double)NSMinY(rect);
+    const double ry1 = (double)NSMaxY(rect);
+    const double eps = 1e-6;
+
+    enum { kStackCap = 32 };
+    double xsStack[2 * kStackCap + 2];
+    RLPInterval1D ysStack[kStackCap];
+    double *xs = xsStack;
+    RLPInterval1D *ys = ysStack;
+    BOOL heapAlloc = NO;
+    if (count > kStackCap) {
+        xs = (double *)malloc(sizeof(double) * (2 * count + 2));
+        ys = (RLPInterval1D *)malloc(sizeof(RLPInterval1D) * count);
+        if (!xs || !ys) {
+            free(xs);
+            free(ys);
+            return NO;
+        }
+        heapAlloc = YES;
+    }
+
+    size_t xCount = 0;
+    xs[xCount++] = rx0;
+    xs[xCount++] = rx1;
+    for (size_t i = 0; i < count; ++i) {
+        if (!RLPScreenRectIsValid(visibles[i], 0.0)) continue;
+        const double sx0 = (double)NSMinX(visibles[i]);
+        const double sx1 = (double)NSMaxX(visibles[i]);
+        if (sx1 <= rx0 + eps || sx0 >= rx1 - eps) continue;
+        xs[xCount++] = sx0 < rx0 ? rx0 : sx0;
+        xs[xCount++] = sx1 > rx1 ? rx1 : sx1;
+    }
+    RLPSortDoubles(xs, xCount);
+
+    BOOL covered = YES;
+    for (size_t xi = 0; xi + 1 < xCount; ++xi) {
+        const double xa = xs[xi];
+        const double xb = xs[xi + 1];
+        if (xb - xa <= eps) continue;
+        const double xm = 0.5 * (xa + xb);
+        size_t yCount = 0;
+        for (size_t i = 0; i < count; ++i) {
+            if (!RLPScreenRectIsValid(visibles[i], 0.0)) continue;
+            const double sx0 = (double)NSMinX(visibles[i]);
+            const double sx1 = (double)NSMaxX(visibles[i]);
+            if (sx0 > xm || sx1 < xm) continue;
+            const double sy0 = (double)NSMinY(visibles[i]);
+            const double sy1 = (double)NSMaxY(visibles[i]);
+            const double cy0 = sy0 < ry0 ? ry0 : sy0;
+            const double cy1 = sy1 > ry1 ? ry1 : sy1;
+            if (cy1 - cy0 > eps) {
+                ys[yCount].a = cy0;
+                ys[yCount].b = cy1;
+                ++yCount;
+            }
+        }
+        if (yCount == 0) { covered = NO; break; }
+        RLPSortIntervals(ys, yCount);
+        double curY = ry0;
+        for (size_t yi = 0; yi < yCount; ++yi) {
+            if (ys[yi].a > curY + eps) { covered = NO; break; }
+            if (ys[yi].b > curY) curY = ys[yi].b;
+            if (curY >= ry1 - eps) break;
+        }
+        if (!covered || curY < ry1 - eps) { covered = NO; break; }
+    }
+
+    if (heapAlloc) {
+        free(xs);
+        free(ys);
+    }
+    return covered;
+}
+
+static inline double RLPIntersectionAreaRect(NSRect a, NSRect b) {
+    const double x0 = MAX((double)NSMinX(a), (double)NSMinX(b));
+    const double x1 = MIN((double)NSMaxX(a), (double)NSMaxX(b));
+    const double y0 = MAX((double)NSMinY(a), (double)NSMinY(b));
+    const double y1 = MIN((double)NSMaxY(a), (double)NSMaxY(b));
+    if (x1 <= x0 || y1 <= y0) return 0.0;
+    return (x1 - x0) * (y1 - y0);
+}
+
+static inline double RLPClampedAreaForCandidate(NSRect frame, NSRect cand) {
+    const double w = (double)frame.size.width > 0 ? MIN((double)frame.size.width, (double)cand.size.width) : 0.0;
+    const double h = (double)frame.size.height > 0 ? MIN((double)frame.size.height, (double)cand.size.height) : 0.0;
+    return w * h;
+}
+
+static inline double RLPRectDistanceSq(NSRect a, NSRect b) {
+    const double dx = MAX(MAX((double)NSMinX(b) - (double)NSMaxX(a),
+                              (double)NSMinX(a) - (double)NSMaxX(b)), 0.0);
+    const double dy = MAX(MAX((double)NSMinY(b) - (double)NSMaxY(a),
+                              (double)NSMinY(a) - (double)NSMaxY(b)), 0.0);
+    return dx * dx + dy * dy;
+}
+
+static inline double RLPClampDisplacementSq(NSRect frame, NSRect cand) {
+    NSRect r = frame;
+    if (r.size.width > cand.size.width) r.size.width = cand.size.width;
+    if (r.size.height > cand.size.height) r.size.height = cand.size.height;
+    if (NSMinX(r) < NSMinX(cand)) r.origin.x = NSMinX(cand);
+    if (NSMaxX(r) > NSMaxX(cand)) r.origin.x = NSMaxX(cand) - r.size.width;
+    if (NSMinY(r) < NSMinY(cand)) r.origin.y = NSMinY(cand);
+    if (NSMaxY(r) > NSMaxY(cand)) r.origin.y = NSMaxY(cand) - r.size.height;
+    const double dx = (double)r.origin.x - (double)frame.origin.x;
+    const double dy = (double)r.origin.y - (double)frame.origin.y;
+    return dx * dx + dy * dy;
 }
 
 /// 多屏下「用哪块屏收敛」的唯一判据（纯函数，便于离线判据）。
-///   1) 窗口**完全落在某一块屏**的可见区 → 用该屏；
-///   2) 窗口跨屏（多显示器并排时 2400–3400pt 宽的合法摆放）→ 用**窗口真正碰到**的那些屏的并集包围盒。
-///      只并"碰到的屏"：把所有屏不分青红皂白并进来，屏与屏之间的**死区**也成了合法位置
-///      （三屏拔掉中间那块、或显示器错位摆放时，窗口停在那片不存在的区域里永远不会被夹回来）。
-///      单屏收敛会压窄跨屏宽度并写回 autosave、用户下次启动就永远丢掉跨屏宽度，所以跨屏必须用并集
-///      （2026-11-18 夜间评审 B1）。
-///   3) 窗口一块屏都没碰到（拔屏后停在旧屏坐标 / autosave 里的脏坐标 / 屏间死区）→ 用**最近**的那块屏。
-///      这条是"漏夹"兜底：退化为「所有屏并集」时窗口总落在包围盒里，夹回就成了空操作（拔屏死区）。
+///   0) 过滤掉 <= 1pt（或非有限）的退化可见区；若全部不可用返回 NSZeroRect（明确不收敛）。
+///   1) 窗口**完全落在某一块合法屏**的可见区 → 用该屏；
+///   2) 窗口跨屏时，仅构造**100% 落在合法屏并集内、绝不含死区/空隙**的无缝跨屏矩形
+///      （水平无缝带取公共 Y 交集、垂直无缝带取公共 X 交集，并经 `RLPRectCoveredByScreens` 验真），
+///      且仅当跨屏矩形严格覆盖更多窗口面积且不会把窗口压得比单屏更小时才采用；
+///      若不同屏高错位太大或存在屏间空隙导致跨屏不可行，自动收敛到交集最大/最近的单屏。
+///   3) 窗口一块屏都没碰到（拔屏死区 / 空隙 / 离屏坐标）→ 用**最近**的那块合法单屏。
 static inline NSRect RLPWindowUsableScreenRect(NSRect windowFrame, const NSRect *visibles, size_t count) {
     if (!visibles || count == 0) return NSZeroRect;
-    for (size_t i = 0; i < count; ++i) {
-        if (NSContainsRect(visibles[i], windowFrame)) return visibles[i];
-    }
-    // 跨屏：只并窗口实际压到的屏（相邻两屏上的合法跨屏摆放仍然是两者的并集）。
-    NSRect usable = NSZeroRect;
-    BOOL touchedAny = NO;
-    for (size_t i = 0; i < count; ++i) {
-        if (NSIsEmptyRect(visibles[i]) || !NSIntersectsRect(visibles[i], windowFrame)) continue;
-        usable = touchedAny ? NSUnionRect(usable, visibles[i]) : visibles[i];
-        touchedAny = YES;
-    }
-    if (touchedAny) return usable;
+    const double eps = 1e-6;
 
-    // 一块屏都没碰到：取离窗口最近的屏（矩形间距的平方最小；并列时取 screens[0]，即带菜单栏的主屏）。
-    size_t nearest = 0;
-    double nearestDist = -1.0;
-    for (size_t i = 0; i < count; ++i) {
-        const NSRect v = visibles[i];
-        const double dx = MAX(MAX((double)NSMinX(v) - (double)NSMaxX(windowFrame),
-                                  (double)NSMinX(windowFrame) - (double)NSMaxX(v)), 0.0);
-        const double dy = MAX(MAX((double)NSMinY(v) - (double)NSMaxY(windowFrame),
-                                  (double)NSMinY(windowFrame) - (double)NSMaxY(v)), 0.0);
-        const double dist = dx * dx + dy * dy;
-        if (nearestDist < 0.0 || dist < nearestDist) { nearestDist = dist; nearest = i; }
+    enum { kStackCap = 32 };
+    NSRect validStack[kStackCap];
+    NSRect touchedStack[kStackCap];
+    RLPInterval1D intsStack[kStackCap];
+    NSRect *valid = validStack;
+    NSRect *touched = touchedStack;
+    RLPInterval1D *ints = intsStack;
+    BOOL heapAlloc = NO;
+    if (count > kStackCap) {
+        valid = (NSRect *)malloc(sizeof(NSRect) * count);
+        touched = (NSRect *)malloc(sizeof(NSRect) * count);
+        ints = (RLPInterval1D *)malloc(sizeof(RLPInterval1D) * count);
+        if (!valid || !touched || !ints) {
+            free(valid);
+            free(touched);
+            free(ints);
+            return NSZeroRect;
+        }
+        heapAlloc = YES;
     }
-    return visibles[nearest];
+
+    size_t validCount = 0;
+    for (size_t i = 0; i < count; ++i) {
+        if (RLPScreenRectIsValid(visibles[i], 1.0)) valid[validCount++] = visibles[i];
+    }
+    if (validCount == 0) {
+        if (heapAlloc) { free(valid); free(touched); free(ints); }
+        return NSZeroRect;
+    }
+
+    if (!isfinite((double)windowFrame.origin.x) || !isfinite((double)windowFrame.origin.y) ||
+        !isfinite((double)windowFrame.size.width) || !isfinite((double)windowFrame.size.height)) {
+        const NSRect fallback = valid[0];
+        if (heapAlloc) { free(valid); free(touched); free(ints); }
+        return fallback;
+    }
+
+    for (size_t i = 0; i < validCount; ++i) {
+        if (NSContainsRect(valid[i], windowFrame)) {
+            const NSRect hit = valid[i];
+            if (heapAlloc) { free(valid); free(touched); free(ints); }
+            return hit;
+        }
+    }
+
+    size_t tCount = 0;
+    size_t bestSingleIdx = 0;
+    double bestSingleInter = -1.0;
+    double bestSingleClamped = -1.0;
+    double bestSingleDisp2 = -1.0;
+    for (size_t i = 0; i < validCount; ++i) {
+        const double inter = RLPIntersectionAreaRect(windowFrame, valid[i]);
+        if (inter > 0.0) {
+            touched[tCount++] = valid[i];
+            const double clampedA = RLPClampedAreaForCandidate(windowFrame, valid[i]);
+            const double disp2 = RLPClampDisplacementSq(windowFrame, valid[i]);
+            if (bestSingleInter < 0.0 ||
+                inter > bestSingleInter + eps ||
+                (fabs(inter - bestSingleInter) <= eps &&
+                 (clampedA > bestSingleClamped + eps ||
+                  (fabs(clampedA - bestSingleClamped) <= eps && disp2 < bestSingleDisp2 - eps)))) {
+                bestSingleIdx = i;
+                bestSingleInter = inter;
+                bestSingleClamped = clampedA;
+                bestSingleDisp2 = disp2;
+            }
+        }
+    }
+
+    if (tCount == 0) {
+        // 一块屏都没碰到：取离窗口最近的合法单屏（矩形间距平方最小；并列取面积保全更大者，再取主屏）。
+        size_t nearest = 0;
+        double nearestDist = -1.0;
+        double nearestClamped = -1.0;
+        for (size_t i = 0; i < validCount; ++i) {
+            const double dist = RLPRectDistanceSq(windowFrame, valid[i]);
+            const double clampedA = RLPClampedAreaForCandidate(windowFrame, valid[i]);
+            if (nearestDist < 0.0 ||
+                dist < nearestDist - eps ||
+                (fabs(dist - nearestDist) <= eps && clampedA > nearestClamped + eps)) {
+                nearestDist = dist;
+                nearestClamped = clampedA;
+                nearest = i;
+            }
+        }
+        const NSRect hit = valid[nearest];
+        if (heapAlloc) { free(valid); free(touched); free(ints); }
+        return hit;
+    }
+
+    NSRect best = valid[bestSingleIdx];
+    double bestInter = bestSingleInter;
+    double bestClamped = bestSingleClamped;
+    double bestDisp2 = bestSingleDisp2;
+    double bestArea = (double)best.size.width * (double)best.size.height;
+
+    if (tCount >= 2) {
+        #define RLP_TRY_MULTI_CANDIDATE(candRect) do { \
+            const NSRect _c = (candRect); \
+            if (RLPScreenRectIsValid(_c, 1.0) && RLPRectCoveredByScreens(_c, valid, validCount)) { \
+                const double _ci = RLPIntersectionAreaRect(windowFrame, _c); \
+                const double _cc = RLPClampedAreaForCandidate(windowFrame, _c); \
+                if (_ci > bestSingleInter + eps && _cc >= bestSingleClamped - eps) { \
+                    const double _cd = RLPClampDisplacementSq(windowFrame, _c); \
+                    const double _ca = (double)_c.size.width * (double)_c.size.height; \
+                    if (_ci > bestInter + eps || \
+                        (fabs(_ci - bestInter) <= eps && \
+                         (_cc > bestClamped + eps || \
+                          (fabs(_cc - bestClamped) <= eps && \
+                           (_cd < bestDisp2 - eps || \
+                            (fabs(_cd - bestDisp2) <= eps && _ca < bestArea - eps)))))) { \
+                        best = _c; bestInter = _ci; bestClamped = _cc; bestDisp2 = _cd; bestArea = _ca; \
+                    } \
+                } \
+            } \
+        } while (0)
+
+        // 1) 若接触屏的整体包围盒本身无任何死区（如等高无缝双屏/三屏），直接作为候选。
+        NSRect touchedUnion = touched[0];
+        for (size_t i = 1; i < tCount; ++i) touchedUnion = NSUnionRect(touchedUnion, touched[i]);
+        RLP_TRY_MULTI_CANDIDATE(touchedUnion);
+
+        // 2) 水平跨屏无缝带：枚举所有 [yLo, yHi]，合并在 X 方向无缝相连且纵向上完整覆盖 [yLo, yHi] 的屏。
+        for (size_t a = 0; a < tCount; ++a) {
+            const double yLo = (double)NSMinY(touched[a]);
+            for (size_t b = 0; b < tCount; ++b) {
+                const double yHi = (double)NSMaxY(touched[b]);
+                if (yHi - yLo <= 1.0) continue;
+                size_t intCount = 0;
+                for (size_t k = 0; k < tCount; ++k) {
+                    if ((double)NSMinY(touched[k]) <= yLo + eps && (double)NSMaxY(touched[k]) >= yHi - eps) {
+                        ints[intCount].a = (double)NSMinX(touched[k]);
+                        ints[intCount].b = (double)NSMaxX(touched[k]);
+                        ++intCount;
+                    }
+                }
+                if (intCount < 2) continue;
+                RLPSortIntervals(ints, intCount);
+                double curA = ints[0].a;
+                double curB = ints[0].b;
+                for (size_t k = 1; k <= intCount; ++k) {
+                    if (k < intCount && ints[k].a <= curB + eps) {
+                        if (ints[k].b > curB) curB = ints[k].b;
+                    } else {
+                        RLP_TRY_MULTI_CANDIDATE(NSMakeRect((CGFloat)curA, (CGFloat)yLo,
+                                                           (CGFloat)(curB - curA), (CGFloat)(yHi - yLo)));
+                        if (k < intCount) { curA = ints[k].a; curB = ints[k].b; }
+                    }
+                }
+            }
+        }
+
+        // 3) 垂直跨屏无缝带：枚举所有 [xLo, xHi]，合并在 Y 方向无缝相连且横向上完整覆盖 [xLo, xHi] 的屏。
+        for (size_t a = 0; a < tCount; ++a) {
+            const double xLo = (double)NSMinX(touched[a]);
+            for (size_t b = 0; b < tCount; ++b) {
+                const double xHi = (double)NSMaxX(touched[b]);
+                if (xHi - xLo <= 1.0) continue;
+                size_t intCount = 0;
+                for (size_t k = 0; k < tCount; ++k) {
+                    if ((double)NSMinX(touched[k]) <= xLo + eps && (double)NSMaxX(touched[k]) >= xHi - eps) {
+                        ints[intCount].a = (double)NSMinY(touched[k]);
+                        ints[intCount].b = (double)NSMaxY(touched[k]);
+                        ++intCount;
+                    }
+                }
+                if (intCount < 2) continue;
+                RLPSortIntervals(ints, intCount);
+                double curA = ints[0].a;
+                double curB = ints[0].b;
+                for (size_t k = 1; k <= intCount; ++k) {
+                    if (k < intCount && ints[k].a <= curB + eps) {
+                        if (ints[k].b > curB) curB = ints[k].b;
+                    } else {
+                        RLP_TRY_MULTI_CANDIDATE(NSMakeRect((CGFloat)xLo, (CGFloat)curA,
+                                                           (CGFloat)(xHi - xLo), (CGFloat)(curB - curA)));
+                        if (k < intCount) { curA = ints[k].a; curB = ints[k].b; }
+                    }
+                }
+            }
+        }
+        #undef RLP_TRY_MULTI_CANDIDATE
+    }
+
+    if (heapAlloc) { free(valid); free(touched); free(ints); }
+    return best;
 }
 
 /// 解析 NSWindow autosave 的 frame 字符串（"x y w h"，末尾可能带空格/屏幕描述）。
@@ -224,9 +568,11 @@ static inline BOOL RLPParseSavedWindowFrame(const char *saved, NSRect *outRect) 
 /// 没有保存值（首次启动或记录损坏）→ 默认尺寸 + 居中，**默认尺寸同样先按当前屏收敛**。
 /// 后者是"小屏撑破/漏夹"的补丁：旧实现把默认尺寸原样交回调用方，纯函数判据里看不出
 /// 1180×760 在 1024×768 屏上已经超出可见区（再靠调用方补一次收敛并不是同一个判据）。
+/// converged=NO 表示没有可用屏幕（count==0 或全为 <=1pt 退化屏），此时 frame 保持安全正尺寸而不被压扁。
 typedef struct {
     NSRect frame;
     BOOL center;
+    BOOL converged;
 } RLPWindowStartupFrame;
 
 static inline RLPWindowStartupFrame RLPWindowStartupFrameForSavedState(const char *savedFrame,
@@ -235,20 +581,30 @@ static inline RLPWindowStartupFrame RLPWindowStartupFrameForSavedState(const cha
                                                                       size_t count,
                                                                       NSSize minSize) {
     RLPWindowStartupFrame out;
-    out.frame = defaultFrame;
+    out.frame = RLPClampWindowFrameToVisibleChecked(defaultFrame, NSZeroRect, minSize).frame;
     out.center = YES;
+    out.converged = NO;
     NSRect saved = NSZeroRect;
     if (!RLPParseSavedWindowFrame(savedFrame, &saved)) {
         if (visibles && count > 0) {
             const NSRect usable = RLPWindowUsableScreenRect(defaultFrame, visibles, count);
-            if (!NSIsEmptyRect(usable)) out.frame = RLPClampWindowFrameToVisible(defaultFrame, usable, minSize);
+            if (!NSIsEmptyRect(usable)) {
+                const RLPWindowClampResult r = RLPClampWindowFrameToVisibleChecked(defaultFrame, usable, minSize);
+                out.frame = r.frame;
+                out.converged = r.converged;
+            }
         }
         return out;
     }
     out.center = NO;
-    out.frame = count > 0
-        ? RLPClampWindowFrameToVisible(saved, RLPWindowUsableScreenRect(saved, visibles, count), minSize)
-        : saved;
+    if (visibles && count > 0) {
+        const NSRect usable = RLPWindowUsableScreenRect(saved, visibles, count);
+        const RLPWindowClampResult r = RLPClampWindowFrameToVisibleChecked(saved, usable, minSize);
+        out.frame = r.frame;
+        out.converged = r.converged;
+    } else {
+        out.frame = RLPClampWindowFrameToVisibleChecked(saved, NSZeroRect, minSize).frame;
+    }
     return out;
 }
 

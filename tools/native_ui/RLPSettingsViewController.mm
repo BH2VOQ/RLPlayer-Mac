@@ -481,6 +481,33 @@ static NSStackView *RLPSRow(NSString *label, NSView *control, NSString *hint, RL
 @property (nonatomic, strong) NSButton *metaMoreBtn;
 @property (nonatomic, strong) NSStackView *metaAdvancedStack;
 @property (nonatomic) BOOL metaAdvancedVisible;
+@property (nonatomic, weak, nullable) NSStackView *metaHostStack;
+@property (nonatomic, strong, nullable) RLPSettingsGroup *metaTopGroup;
+@property (nonatomic, strong, nullable) RLPSettingsGroup *metaDataGroup;
+@property (nonatomic, strong, nullable) RLPSettingsGroup *metaAiGroup;
+@property (nonatomic, strong, nullable) RLPSettingsGroup *metaSearchGroup;
+@property (nonatomic, strong, nullable) NSStackView *metaTwoColStack;
+@property (nonatomic, strong, nullable) NSLayoutConstraint *metaAdvWidthConstraint;
+@property (nonatomic, strong, nullable) NSLayoutConstraint *metaTwoColWidthConstraint;
+@property (nonatomic, strong, nullable) NSLayoutConstraint *metaSearchWidthConstraint;
+@property (nonatomic, copy, nullable) NSArray<NSLayoutConstraint *> *metaVerticalCardWidthConstraints;
+@property (nonatomic, strong, nullable) NSView *metaModelContainer;
+@property (nonatomic, strong, nullable) NSStackView *metaModelPrimaryRow;
+@property (nonatomic, strong, nullable) NSStackView *metaModelSecondaryRow;
+@property (nonatomic, strong, nullable) NSView *metaModelHiddenDock;
+@property (nonatomic, copy, nullable) NSArray<NSLayoutConstraint *> *metaModelRowConstraints;
+@property (nonatomic, strong, nullable) NSButton *llmSaveBtn;
+@property (nonatomic, strong, nullable) NSButton *llmTestBtn;
+@property (nonatomic, strong, nullable) NSButton *llmClearBtn;
+@property (nonatomic, strong, nullable) NSView *metaAiBtnContainer;
+@property (nonatomic, strong, nullable) NSStackView *metaAiBtnRow1;
+@property (nonatomic, strong, nullable) NSStackView *metaAiBtnRow2;
+@property (nonatomic, copy, nullable) NSArray<NSLayoutConstraint *> *metaAiBtnConstraints;
+/// 响应式状态缓存：-1 未初始化，0 窄布局，1 宽布局，2 折叠/隐藏下拉等模式。
+@property (nonatomic, assign) NSInteger metaResponsiveTwoColMode;
+@property (nonatomic, assign) NSInteger metaResponsiveModelMode;
+@property (nonatomic, assign) NSInteger metaResponsiveAiBtnMode;
+@property (nonatomic, assign) BOOL metaResponsiveUpdating;
 @property (nonatomic, strong) RLPEqualizerView *eqView;
 /// EQ 子界面的未提交状态（切页签 / 切语言 / 切主题时由 showTab 收发，见 rlp_captureDraftState）。
 @property (nonatomic, strong, nullable) NSDictionary<NSString *, id> *eqDraftState;
@@ -550,6 +577,68 @@ static NSStackView *RLPSRow(NSString *label, NSView *control, NSString *hint, RL
 - (void)snapshotDraftsOfOutgoingPaneIfNeededForTab:(RLPSTab)tab;
 - (void)restorePendingDraftsForTab:(RLPSTab)tab inPane:(NSView *)pane;
 
+// 元数据页响应式布局（折叠态脱离宽约束 + 窄窗回落单列）
+- (void)resetMetaResponsiveState;
+- (CGFloat)metaTargetHostWidthPreferringViewBounds:(BOOL)preferViewBounds;
+- (void)updateMetaResponsiveLayoutForHostWidth:(CGFloat)hostW;
+- (BOOL)updateMetaModelRowLayoutForBodyWidth:(CGFloat)bodyW;
+- (BOOL)updateMetaAiBtnRowLayoutForBodyWidth:(CGFloat)bodyW;
+
+@end
+
+/// 设置页滚动容器：当纵向滚动条随展开/折叠显隐、contentView 宽度发生 ±17pt 变化而
+/// scroll 自身 frame 未变时，AppKit `-tile` 改了 clip frame 却不会触发 docView 重算，
+/// 导致 stack 停留在旧宽（714>697 或 657<674）。在 layout/tile 后同步一次 docView 布局。
+@interface RLPSettingsScrollView : NSScrollView
+@end
+
+@implementation RLPSettingsScrollView {
+    BOOL _rlpSyncingWidth;
+}
+
+- (void)tile {
+    const CGFloat prevClipW = self.contentView ? self.contentView.bounds.size.width : 0.0;
+    [super tile];
+    NSClipView *clip = self.contentView;
+    NSView *doc = self.documentView;
+    const CGFloat clipW = clip ? clip.bounds.size.width : 0.0;
+    if (clip && doc && clipW > 1.0 &&
+        (fabs(clipW - prevClipW) > 0.5 ||
+         fabs(doc.frame.size.width - clipW) > 0.5 ||
+         fabs(doc.bounds.size.width - clipW) > 0.5)) {
+        [clip setNeedsLayout:YES];
+        [doc setNeedsLayout:YES];
+        [self setNeedsLayout:YES];
+    }
+}
+
+- (void)layout {
+    const CGFloat prevClipW = self.contentView ? self.contentView.bounds.size.width : 0.0;
+    [super layout];
+    if (_rlpSyncingWidth) return;
+    NSClipView *clip = self.contentView;
+    NSView *doc = self.documentView;
+    const CGFloat clipW = clip ? clip.bounds.size.width : 0.0;
+    if (!clip || !doc || clipW <= 1.0) return;
+    if (fabs(clipW - prevClipW) > 0.5 ||
+        fabs(doc.frame.size.width - clipW) > 0.5 ||
+        fabs(doc.bounds.size.width - clipW) > 0.5) {
+        _rlpSyncingWidth = YES;
+        for (int pass = 0; pass < 2; ++pass) {
+            const CGFloat curClipW = clip.bounds.size.width;
+            if (curClipW <= 1.0) break;
+            if (fabs(doc.frame.size.width - curClipW) <= 0.5 &&
+                fabs(doc.bounds.size.width - curClipW) <= 0.5) {
+                break;
+            }
+            [clip setNeedsLayout:YES];
+            [doc setNeedsLayout:YES];
+            [super layout];
+        }
+        _rlpSyncingWidth = NO;
+    }
+}
+
 @end
 
 @implementation RLPSettingsViewController
@@ -566,6 +655,9 @@ static NSStackView *RLPSRow(NSString *label, NSView *control, NSString *hint, RL
         _tab = RLPSTabAdv;
         _uiMode = @"listen";
         _activeGroup = 0;
+        _metaResponsiveTwoColMode = -1;
+        _metaResponsiveModelMode = -1;
+        _metaResponsiveAiBtnMode = -1;
     }
     return self;
 }
@@ -612,6 +704,8 @@ static NSStackView *RLPSRow(NSString *label, NSView *control, NSString *hint, RL
                                   t.small, t.mut);
     self.modeHintLabel.identifier = @"settings.modeHint";
     self.modeHintLabel.lineBreakMode = NSLineBreakByTruncatingTail;
+    self.modeHintLabel.maximumNumberOfLines = 1;
+    self.modeHintLabel.toolTip = self.modeHintLabel.stringValue;
     self.modeHintLabel.translatesAutoresizingMaskIntoConstraints = NO;
     [host addSubview:self.modeHintLabel];
 
@@ -641,11 +735,17 @@ static NSStackView *RLPSRow(NSString *label, NSView *control, NSString *hint, RL
     [host addSubview:self.paneHost];
 
     self.statusLine = RLPLabel(@"", t.small, t.mut);
+    self.statusLine.lineBreakMode = NSLineBreakByTruncatingTail;
+    self.statusLine.maximumNumberOfLines = 1;
     self.statusLine.translatesAutoresizingMaskIntoConstraints = NO;
     [host addSubview:self.statusLine];
 
-    [self.modeHintLabel setContentCompressionResistancePriority:NSLayoutPriorityDefaultLow
+    // fittingSize 按 NSLayoutPriorityFittingSizeCompression(50) 压缩；必须低于 50，
+    // 否则隐藏的 modeHintLabel 也会把页根 fittingSize 顶到 755~945pt（超出 900 主窗可用宽 674）。
+    [self.modeHintLabel setContentCompressionResistancePriority:1.0f
                                                  forOrientation:NSLayoutConstraintOrientationHorizontal];
+    [self.statusLine setContentCompressionResistancePriority:1.0f
+                                              forOrientation:NSLayoutConstraintOrientationHorizontal];
 
     [NSLayoutConstraint activateConstraints:@[
         [self.groupTabs.leadingAnchor constraintEqualToAnchor:host.leadingAnchor constant:24],
@@ -863,14 +963,33 @@ static void RLPSettingsCollectViews(NSView *v, NSMutableArray<NSView *> *out) {
     // 诊断页每次进入补一次通道探活（web bindFeedbackCard 同语义；30s 内不重复，见 probeFeedbackChannel）。
     if (tab == RLPSTabDiag) [self probeFeedbackChannel];
     self.shownTab = tab;
+    if (tab == RLPSTabMeta) {
+        const BOOL laidOut = (self.paneHost && self.paneHost.bounds.size.width > 1.0);
+        [self updateMetaResponsiveLayoutForHostWidth:[self metaTargetHostWidthPreferringViewBounds:laidOut]];
+    }
+}
+
+- (void)viewWillLayout {
+    [super viewWillLayout];
+    if (self.shownTab == RLPSTabMeta || self.tab == RLPSTabMeta) {
+        [self updateMetaResponsiveLayoutForHostWidth:[self metaTargetHostWidthPreferringViewBounds:YES]];
+    }
+}
+
+- (void)viewDidLayout {
+    [super viewDidLayout];
+    if (self.shownTab == RLPSTabMeta || self.tab == RLPSTabMeta) {
+        [self updateMetaResponsiveLayoutForHostWidth:[self metaTargetHostWidthPreferringViewBounds:YES]];
+    }
 }
 
 /// 每个页签 = 一个纵向滚动的 NSStackView。
 - (NSView *)buildPane:(RLPSTab)tab {
     RLPTheme *t = [RLPTheme current];
-    NSScrollView *scroll = [[NSScrollView alloc] initWithFrame:NSZeroRect];
+    RLPSettingsScrollView *scroll = [[RLPSettingsScrollView alloc] initWithFrame:NSZeroRect];
     scroll.drawsBackground = NO;
     scroll.hasVerticalScroller = YES;
+    scroll.hasHorizontalScroller = NO;
     scroll.autohidesScrollers = YES;
 
     NSStackView *stack = [[NSStackView alloc] initWithFrame:NSZeroRect];
@@ -1574,6 +1693,15 @@ static NSString *RLPSettingsControlValueString(NSView *v) {
     self.metaAdvancedVisible = !self.metaAdvancedVisible;
     self.metaAdvancedStack.hidden = !self.metaAdvancedVisible;
     sender.title = (self.metaAdvancedVisible ? RLPTr(@"高级选项 ▴") : RLPTr(@"高级选项 ▾"));
+    const BOOL laidOut = (self.paneHost && self.paneHost.bounds.size.width > 1.0);
+    [self updateMetaResponsiveLayoutForHostWidth:[self metaTargetHostWidthPreferringViewBounds:laidOut]];
+    if (self.metaAdvancedVisible) {
+        [self.metaDataGroup contentDidChange];
+        [self.metaAiGroup contentDidChange];
+        [self.metaSearchGroup contentDidChange];
+    }
+    [self.metaAdvancedStack setNeedsLayout:YES];
+    [self.metaHostStack setNeedsLayout:YES];
 }
 
 - (void)applyKV:(NSDictionary *)kv toSwitch:(NSSwitch *)sw key:(NSString *)key {
@@ -2662,10 +2790,332 @@ static NSString *RLPSettingsControlValueString(NSView *v) {
 
 #pragma mark - 元数据
 
+/// 把卡片标题条的说明文字压缩阻力降到 < NSLayoutPriorityFittingSizeCompression(50)，
+/// 避免 ~600-950pt 说明把 card/_head 的 fittingSize 顶宽，悬停保留完整 tooltip。
+static void RLPTuneMetaGroup(RLPSettingsGroup *group) {
+    if (!group) return;
+    for (NSView *sub in group.subviews) {
+        if (![sub.identifier isEqualToString:@"set.group.head"]) continue;
+        NSMutableArray<NSTextField *> *fields = [NSMutableArray array];
+        for (NSView *hv in sub.subviews) {
+            if ([hv isKindOfClass:[NSTextField class]]) [fields addObject:(NSTextField *)hv];
+        }
+        if (fields.count >= 1) {
+            NSTextField *titleLabel = fields[0];
+            titleLabel.lineBreakMode = NSLineBreakByTruncatingTail;
+            titleLabel.maximumNumberOfLines = 1;
+            [titleLabel setContentCompressionResistancePriority:NSLayoutPriorityDefaultLow
+                                                 forOrientation:NSLayoutConstraintOrientationHorizontal];
+        }
+        if (fields.count >= 2) {
+            NSTextField *hintLabel = fields[1];
+            hintLabel.lineBreakMode = NSLineBreakByTruncatingTail;
+            hintLabel.maximumNumberOfLines = 1;
+            if (hintLabel.stringValue.length) hintLabel.toolTip = hintLabel.stringValue;
+            [hintLabel setContentHuggingPriority:NSLayoutPriorityDefaultLow
+                                  forOrientation:NSLayoutConstraintOrientationHorizontal];
+            [hintLabel setContentCompressionResistancePriority:1.0f
+                                                forOrientation:NSLayoutConstraintOrientationHorizontal];
+        }
+        break;
+    }
+}
+
+static void RLPTuneMetaTextField(NSTextField *tf) {
+    if (!tf) return;
+    tf.translatesAutoresizingMaskIntoConstraints = NO;
+    [tf setContentHuggingPriority:NSLayoutPriorityDefaultLow
+                   forOrientation:NSLayoutConstraintOrientationHorizontal];
+    [tf setContentCompressionResistancePriority:1.0f
+                                 forOrientation:NSLayoutConstraintOrientationHorizontal];
+    NSTextFieldCell *cell = [tf.cell isKindOfClass:[NSTextFieldCell class]]
+        ? (NSTextFieldCell *)tf.cell : nil;
+    if (cell) {
+        cell.scrollable = YES;
+        cell.wraps = NO;
+        cell.usesSingleLineMode = YES;
+    }
+}
+
+static void RLPTuneMetaPopup(NSPopUpButton *pop) {
+    if (!pop) return;
+    pop.translatesAutoresizingMaskIntoConstraints = NO;
+    [pop setContentHuggingPriority:NSLayoutPriorityDefaultLow
+                    forOrientation:NSLayoutConstraintOrientationHorizontal];
+    [pop setContentCompressionResistancePriority:1.0f
+                                  forOrientation:NSLayoutConstraintOrientationHorizontal];
+    if ([pop.cell isKindOfClass:[NSPopUpButtonCell class]]) {
+        NSPopUpButtonCell *cell = (NSPopUpButtonCell *)pop.cell;
+        cell.lineBreakMode = NSLineBreakByTruncatingTail;
+        cell.usesSingleLineMode = YES;
+    }
+}
+
+static void RLPTuneMetaDescendantLabel(NSView *root, NSString *ident) {
+    if (!root || !ident.length) return;
+    if ([root.identifier isEqualToString:ident]) {
+        [root setContentCompressionResistancePriority:1.0f
+                                       forOrientation:NSLayoutConstraintOrientationHorizontal];
+        return;
+    }
+    for (NSView *sub in root.subviews) {
+        RLPTuneMetaDescendantLabel(sub, ident);
+    }
+}
+
+static void RLPMetaClearStackRow(NSStackView *row) {
+    if (!row) return;
+    for (NSView *v in [row.arrangedSubviews copy]) {
+        [row removeArrangedSubview:v];
+        [v removeFromSuperview];
+    }
+}
+
+- (void)resetMetaResponsiveState {
+    self.metaHostStack = nil;
+    self.metaTopGroup = nil;
+    self.metaDataGroup = nil;
+    self.metaAiGroup = nil;
+    self.metaSearchGroup = nil;
+    self.metaTwoColStack = nil;
+    self.metaAdvWidthConstraint = nil;
+    self.metaTwoColWidthConstraint = nil;
+    self.metaSearchWidthConstraint = nil;
+    self.metaVerticalCardWidthConstraints = nil;
+    self.metaModelContainer = nil;
+    self.metaModelPrimaryRow = nil;
+    self.metaModelSecondaryRow = nil;
+    self.metaModelHiddenDock = nil;
+    self.metaModelRowConstraints = nil;
+    self.llmSaveBtn = nil;
+    self.llmTestBtn = nil;
+    self.llmClearBtn = nil;
+    self.metaAiBtnContainer = nil;
+    self.metaAiBtnRow1 = nil;
+    self.metaAiBtnRow2 = nil;
+    self.metaAiBtnConstraints = nil;
+    self.metaResponsiveTwoColMode = -1;
+    self.metaResponsiveModelMode = -1;
+    self.metaResponsiveAiBtnMode = -1;
+}
+
+- (CGFloat)metaTargetHostWidthPreferringViewBounds:(BOOL)preferViewBounds {
+    if (preferViewBounds && self.view.superview && self.view.bounds.size.width > 1.0) {
+        return self.view.bounds.size.width;
+    }
+    if (self.paneHost && self.paneHost.bounds.size.width > 1.0) {
+        return self.paneHost.bounds.size.width;
+    }
+    if (self.view.superview && self.view.superview.bounds.size.width > 1.0) {
+        return self.view.superview.bounds.size.width;
+    }
+    if (self.view.window) {
+        NSView *content = self.view.window.contentView;
+        if (content && content.bounds.size.width > 1.0) {
+            if (self.view.superview == content) return content.bounds.size.width;
+            return MAX(0.0, content.bounds.size.width - 226.0);
+        }
+    }
+    return self.view.bounds.size.width;
+}
+
+- (BOOL)updateMetaModelRowLayoutForBodyWidth:(CGFloat)bodyW {
+    if (!self.metaModelContainer || !self.metaModelPrimaryRow || !self.metaModelSecondaryRow ||
+        !self.metaModelHiddenDock || !self.llmModelPopup || !self.llmModel || !self.llmModelRefresh) {
+        return NO;
+    }
+    const NSInteger targetMode = self.llmModelPopup.hidden ? 0 : (bodyW >= 460.0 ? 1 : 2);
+    if (targetMode == self.metaResponsiveModelMode) return NO;
+
+    if (self.metaModelRowConstraints.count) {
+        [NSLayoutConstraint deactivateConstraints:self.metaModelRowConstraints];
+        self.metaModelRowConstraints = nil;
+    }
+    RLPMetaClearStackRow(self.metaModelPrimaryRow);
+    RLPMetaClearStackRow(self.metaModelSecondaryRow);
+    [self.metaModelSecondaryRow removeFromSuperview];
+    [self.llmModelPopup removeFromSuperview];
+    [self.llmModel removeFromSuperview];
+    [self.llmModelRefresh removeFromSuperview];
+
+    [self.llmModel setContentHuggingPriority:NSLayoutPriorityDefaultLow
+                              forOrientation:NSLayoutConstraintOrientationHorizontal];
+    [self.llmModel setContentCompressionResistancePriority:1.0f
+                                            forOrientation:NSLayoutConstraintOrientationHorizontal];
+    [self.llmModelPopup setContentHuggingPriority:NSLayoutPriorityDefaultLow
+                                   forOrientation:NSLayoutConstraintOrientationHorizontal];
+    [self.llmModelPopup setContentCompressionResistancePriority:1.0f
+                                                 forOrientation:NSLayoutConstraintOrientationHorizontal];
+    [self.llmModelRefresh setContentHuggingPriority:NSLayoutPriorityDefaultHigh
+                                     forOrientation:NSLayoutConstraintOrientationHorizontal];
+    [self.llmModelRefresh setContentCompressionResistancePriority:NSLayoutPriorityDefaultHigh
+                                                   forOrientation:NSLayoutConstraintOrientationHorizontal];
+
+    NSMutableArray<NSLayoutConstraint *> *cs = [NSMutableArray array];
+    if (targetMode == 0) {
+        [self.metaModelHiddenDock addSubview:self.llmModelPopup];
+        self.llmModelPopup.frame = NSZeroRect;
+        [self.metaModelPrimaryRow addArrangedSubview:self.llmModel];
+        [self.metaModelPrimaryRow addArrangedSubview:self.llmModelRefresh];
+        [cs addObject:[self.metaModelPrimaryRow.bottomAnchor
+            constraintEqualToAnchor:self.metaModelContainer.bottomAnchor]];
+    } else if (targetMode == 1) {
+        [self.metaModelPrimaryRow addArrangedSubview:self.llmModelPopup];
+        [self.metaModelPrimaryRow addArrangedSubview:self.llmModel];
+        [self.metaModelPrimaryRow addArrangedSubview:self.llmModelRefresh];
+        NSLayoutConstraint *eq =
+            [self.llmModelPopup.widthAnchor constraintEqualToAnchor:self.llmModel.widthAnchor];
+        eq.priority = NSLayoutPriorityDefaultLow + 100;
+        [cs addObjectsFromArray:@[
+            [self.metaModelPrimaryRow.bottomAnchor
+                constraintEqualToAnchor:self.metaModelContainer.bottomAnchor],
+            eq,
+        ]];
+    } else {
+        [self.metaModelContainer addSubview:self.metaModelSecondaryRow];
+        [self.metaModelPrimaryRow addArrangedSubview:self.llmModelPopup];
+        [self.metaModelSecondaryRow addArrangedSubview:self.llmModel];
+        [self.metaModelSecondaryRow addArrangedSubview:self.llmModelRefresh];
+        NSLayoutConstraint *fillPop =
+            [self.llmModelPopup.widthAnchor constraintEqualToAnchor:self.metaModelPrimaryRow.widthAnchor];
+        fillPop.priority = NSLayoutPriorityDefaultHigh;
+        [cs addObjectsFromArray:@[
+            [self.metaModelSecondaryRow.leadingAnchor
+                constraintEqualToAnchor:self.metaModelContainer.leadingAnchor],
+            [self.metaModelSecondaryRow.trailingAnchor
+                constraintEqualToAnchor:self.metaModelContainer.trailingAnchor],
+            [self.metaModelSecondaryRow.topAnchor
+                constraintEqualToAnchor:self.metaModelPrimaryRow.bottomAnchor constant:8],
+            [self.metaModelSecondaryRow.bottomAnchor
+                constraintEqualToAnchor:self.metaModelContainer.bottomAnchor],
+            fillPop,
+        ]];
+    }
+    [NSLayoutConstraint activateConstraints:cs];
+    self.metaModelRowConstraints = cs;
+    self.metaResponsiveModelMode = targetMode;
+    return YES;
+}
+
+- (BOOL)updateMetaAiBtnRowLayoutForBodyWidth:(CGFloat)bodyW {
+    if (!self.metaAiBtnContainer || !self.metaAiBtnRow1 || !self.metaAiBtnRow2 ||
+        !self.llmSaveBtn || !self.llmTestBtn || !self.llmClearBtn) {
+        return NO;
+    }
+    const NSInteger targetMode = (bodyW >= 450.0) ? 0 : 1;
+    if (targetMode == self.metaResponsiveAiBtnMode) return NO;
+
+    if (self.metaAiBtnConstraints.count) {
+        [NSLayoutConstraint deactivateConstraints:self.metaAiBtnConstraints];
+        self.metaAiBtnConstraints = nil;
+    }
+    RLPMetaClearStackRow(self.metaAiBtnRow1);
+    RLPMetaClearStackRow(self.metaAiBtnRow2);
+    [self.metaAiBtnRow2 removeFromSuperview];
+    [self.llmSaveBtn removeFromSuperview];
+    [self.llmTestBtn removeFromSuperview];
+    [self.llmClearBtn removeFromSuperview];
+
+    NSMutableArray<NSLayoutConstraint *> *cs = [NSMutableArray array];
+    if (targetMode == 0) {
+        [self.metaAiBtnRow1 addArrangedSubview:self.llmSaveBtn];
+        [self.metaAiBtnRow1 addArrangedSubview:self.llmTestBtn];
+        [self.metaAiBtnRow1 addArrangedSubview:self.llmClearBtn];
+        [cs addObject:[self.metaAiBtnRow1.bottomAnchor
+            constraintEqualToAnchor:self.metaAiBtnContainer.bottomAnchor]];
+    } else {
+        [self.metaAiBtnContainer addSubview:self.metaAiBtnRow2];
+        [self.metaAiBtnRow1 addArrangedSubview:self.llmSaveBtn];
+        [self.metaAiBtnRow1 addArrangedSubview:self.llmTestBtn];
+        [self.metaAiBtnRow2 addArrangedSubview:self.llmClearBtn];
+        [cs addObjectsFromArray:@[
+            [self.metaAiBtnRow2.leadingAnchor
+                constraintEqualToAnchor:self.metaAiBtnContainer.leadingAnchor],
+            [self.metaAiBtnRow2.trailingAnchor
+                constraintLessThanOrEqualToAnchor:self.metaAiBtnContainer.trailingAnchor],
+            [self.metaAiBtnRow2.topAnchor
+                constraintEqualToAnchor:self.metaAiBtnRow1.bottomAnchor constant:8],
+            [self.metaAiBtnRow2.bottomAnchor
+                constraintEqualToAnchor:self.metaAiBtnContainer.bottomAnchor],
+        ]];
+    }
+    [NSLayoutConstraint activateConstraints:cs];
+    self.metaAiBtnConstraints = cs;
+    self.metaResponsiveAiBtnMode = targetMode;
+    return YES;
+}
+
+- (void)updateMetaResponsiveLayoutForHostWidth:(CGFloat)hostW {
+    if (self.metaResponsiveUpdating) return;
+    if (!self.metaAdvancedStack || !self.metaTwoColStack ||
+        !self.metaDataGroup || !self.metaAiGroup || !self.metaSearchGroup) {
+        return;
+    }
+    self.metaResponsiveUpdating = YES;
+    const CGFloat avail = MAX(0.0, hostW - 48.0);
+    // 0 = 折叠收起态（adv 隐藏，断开与 stack 等宽链）；1 = 展开单列堆叠；2 = 展开两列并排（>=840pt 内容区）
+    const NSInteger targetTwoColMode = !self.metaAdvancedVisible ? 0 : (avail >= 840.0 ? 2 : 1);
+    BOOL needsAllRelayout = NO;
+    BOOL needsAiRelayout = NO;
+
+    if (targetTwoColMode != self.metaResponsiveTwoColMode) {
+        const BOOL wasExpanded = (self.metaResponsiveTwoColMode > 0);
+        self.metaResponsiveTwoColMode = targetTwoColMode;
+        const BOOL expanded = (targetTwoColMode > 0);
+        const BOOL twoCol = (targetTwoColMode == 2);
+
+        self.metaAdvWidthConstraint.active = expanded;
+        self.metaTwoColWidthConstraint.active = expanded;
+        self.metaSearchWidthConstraint.active = expanded;
+        for (NSLayoutConstraint *c in self.metaVerticalCardWidthConstraints) {
+            c.active = (expanded && !twoCol);
+        }
+        if (twoCol) {
+            self.metaTwoColStack.orientation = NSUserInterfaceLayoutOrientationHorizontal;
+            self.metaTwoColStack.distribution = NSStackViewDistributionFillEqually;
+            self.metaTwoColStack.alignment = NSLayoutAttributeTop;
+            self.metaTwoColStack.spacing = 16;
+        } else {
+            self.metaTwoColStack.orientation = NSUserInterfaceLayoutOrientationVertical;
+            self.metaTwoColStack.distribution = NSStackViewDistributionFill;
+            self.metaTwoColStack.alignment = NSLayoutAttributeLeading;
+            self.metaTwoColStack.spacing = 22;
+        }
+        if (expanded || wasExpanded) needsAllRelayout = YES;
+    }
+
+    const CGFloat aiCardW = (targetTwoColMode == 2) ? MAX(0.0, (avail - 16.0) * 0.5) : avail;
+    const CGFloat aiBodyW = MAX(0.0, aiCardW - 32.0);
+    if ([self updateMetaAiBtnRowLayoutForBodyWidth:aiBodyW]) needsAiRelayout = YES;
+    if ([self updateMetaModelRowLayoutForBodyWidth:aiBodyW]) needsAiRelayout = YES;
+
+    if (needsAllRelayout) {
+        [self.metaDataGroup contentDidChange];
+        [self.metaAiGroup contentDidChange];
+        [self.metaSearchGroup contentDidChange];
+        [self.metaTwoColStack setNeedsUpdateConstraints:YES];
+        [self.metaTwoColStack setNeedsLayout:YES];
+        [self.metaAdvancedStack setNeedsLayout:YES];
+        [self.metaHostStack setNeedsLayout:YES];
+    } else if (needsAiRelayout) {
+        [self.metaAiGroup contentDidChange];
+        [self.metaTwoColStack setNeedsLayout:YES];
+        [self.metaAdvancedStack setNeedsLayout:YES];
+        [self.metaHostStack setNeedsLayout:YES];
+    }
+    self.metaResponsiveUpdating = NO;
+}
+
 - (void)fillMeta:(NSStackView *)stack t:(RLPTheme *)t {
+    [self resetMetaResponsiveState];
+    self.metaHostStack = stack;
+
     // ── 基础选项（对齐 web：默认只显示三个开关 + 「高级选项 ▾」）──
-    [stack addArrangedSubview:RLPSGroup(RLPTr(@"元数据补全"),
-        RLPTr(@"播放时后台补全标签 / 封面 / 歌词，结果落在本地库"), t)];
+    RLPSettingsGroup *topGroup = (RLPSettingsGroup *)RLPSGroup(RLPTr(@"元数据补全"),
+        RLPTr(@"播放时后台补全标签 / 封面 / 歌词，结果落在本地库"), t);
+    RLPTuneMetaGroup(topGroup);
+    self.metaTopGroup = topGroup;
+    [stack addArrangedSubview:topGroup];
     self.metaOnSwitch = [self switchWithAction:@selector(onSwitch:) key:@"sp_metaon"];
     [stack addArrangedSubview:RLPSRow(RLPTr(@"自动补全（不用 AI）"), self.metaOnSwitch,
         RLPTr(@"只用公开数据源（QQ音乐 / 网易云 / iTunes / dizzylab / lrclib）补全标签、封面、歌词；全程不调用 AI，不产生费用"), t)];
@@ -2685,7 +3135,7 @@ static NSString *RLPSettingsControlValueString(NSView *v) {
     self.metaMoreBtn = moreBtn;
     if (gCurrentGroup) [gCurrentGroup addButtonRow:@[moreBtn]];
 
-    // 高级内容容器：默认 hidden（NSStackView 对隐藏的 arrangedSubview 不占高度）。
+    // 高级内容容器：默认 hidden（折叠态与 stack 等宽链保持断开，避免 fitting 撑大主窗）。
     NSStackView *adv = [[NSStackView alloc] init];
     adv.orientation = NSUserInterfaceLayoutOrientationVertical;
     adv.alignment = NSLayoutAttributeLeading;
@@ -2703,25 +3153,30 @@ static NSString *RLPSettingsControlValueString(NSView *v) {
     // 数据源卡片（web 高级区左列 .meta-card）：逐源开关 + 优先级
     RLPSettingsGroup *dataGroup = (RLPSettingsGroup *)RLPSGroup(RLPTr(@"数据源"),
         RLPTr(@"越靠上优先级越高；拖动把手或点 ▲▼ 调整顺序，关掉的源完全不参与补全"), t);
+    RLPTuneMetaGroup(dataGroup);
+    if (gLastGroupWidthConstraint) {
+        gLastGroupWidthConstraint.active = NO;
+        gLastGroupWidthConstraint = nil;
+    }
+    self.metaDataGroup = dataGroup;
     [adv addArrangedSubview:dataGroup];
-    NSLayoutConstraint *dataWidthConstraint = gLastGroupWidthConstraint;
-    // 高级区默认 hidden，但 NSStackView 的 fittingSize 仍计入隐藏项；卡片宽若与 adv 等宽，
-    // 内部固定宽控件（320pt 输入框等）会把 adv 拟合宽顶到 1253，窗口再被撑到 1304。
-    dataWidthConstraint.priority = NSLayoutPriorityDefaultHigh;
-    self.metaSourcesView = [[RLPMetaSourcesView alloc] initWithFrame:NSMakeRect(0, 0, 620, 200)];
+    self.metaSourcesView = [[RLPMetaSourcesView alloc] initWithFrame:NSMakeRect(0, 0, 580, 200)];
     self.metaSourcesView.translatesAutoresizingMaskIntoConstraints = NO;
+    RLPTuneMetaDescendantLabel(self.metaSourcesView, @"metasrc.msg");
     [dataGroup addFullRow:self.metaSourcesView];
     [[self.metaSourcesView heightAnchor] constraintGreaterThanOrEqualToConstant:200].active = YES;
     [self.metaSourcesView reload];
 
     // AI 接入卡片（web 高级区右列 .meta-card）：密钥红线 —— GET 只回掩码，输入框留空 = 不改已存的 key
-    // 用户截图三：模型下拉 / 刷新 / 「已拉到 9 个模型」/ 保存端点 / 测试连通 / 清除密钥
-    // 原本全是页面并列散块 ⟹ 全部经 addField/addNoteView/addButtonRow 落进这张卡。
     RLPSettingsGroup *aiGroup = (RLPSettingsGroup *)RLPSGroup(RLPTr(@"AI 接入（OpenAI 兼容）"),
         RLPTr(@"任何兼容 OpenAI 的服务都能用。密钥只在本机保存，界面永不回显明文；留空表示不修改。"), t);
+    RLPTuneMetaGroup(aiGroup);
+    if (gLastGroupWidthConstraint) {
+        gLastGroupWidthConstraint.active = NO;
+        gLastGroupWidthConstraint = nil;
+    }
+    self.metaAiGroup = aiGroup;
     [adv addArrangedSubview:aiGroup];
-    NSLayoutConstraint *aiWidthConstraint = gLastGroupWidthConstraint;
-    aiWidthConstraint.priority = NSLayoutPriorityDefaultHigh;
 
     // ① 接口预设（对齐 web LLM_PROVIDERS / sp_llmprovider）——只负责「填地址」，不做连通性判断。
     self.llmProviderPopup = [[NSPopUpButton alloc] initWithFrame:NSZeroRect pullsDown:NO];
@@ -2731,30 +3186,32 @@ static NSString *RLPSettingsControlValueString(NSView *v) {
     self.llmProviderPopup.identifier = @"llm.provider";
     self.llmProviderPopup.target = self;
     self.llmProviderPopup.action = @selector(onLlmProviderPicked:);
-    [self.llmProviderPopup.widthAnchor constraintEqualToConstant:240].active = YES;
+    RLPTuneMetaPopup(self.llmProviderPopup);
     [aiGroup addField:RLPTr(@"接口预设") control:self.llmProviderPopup hint:nil];
 
     // ② 接口地址
     self.llmBase = [[NSTextField alloc] initWithFrame:NSZeroRect];
     self.llmBase.placeholderString = @"https://api.deepseek.com";
     self.llmBase.identifier = @"llm.base";
-    [[self.llmBase.widthAnchor constraintEqualToConstant:320] setActive:YES];
+    RLPTuneMetaTextField(self.llmBase);
     [aiGroup addField:RLPTr(@"接口地址") control:self.llmBase hint:nil];
 
     // ③ 密钥（web 顺序：Key 在保存/测试/清除之前）
     self.llmKey = [[NSSecureTextField alloc] initWithFrame:NSZeroRect];
     self.llmKey.placeholderString = RLPTr(@"留空 = 保持已保存的密钥");
     self.llmKey.identifier = @"llm.key";
-    [[self.llmKey.widthAnchor constraintEqualToConstant:320] setActive:YES];
+    RLPTuneMetaTextField(self.llmKey);
     [aiGroup addField:RLPTr(@"API Key") control:self.llmKey hint:nil];
 
     self.llmStatus = RLPLabel(@"", t.small, t.mut);
     self.llmStatus.maximumNumberOfLines = 2;
     self.llmStatus.lineBreakMode = NSLineBreakByWordWrapping;
     self.llmStatus.identifier = @"llm.status";
+    [self.llmStatus setContentCompressionResistancePriority:1.0f
+                                             forOrientation:NSLayoutConstraintOrientationHorizontal];
     [aiGroup addNoteView:self.llmStatus];
 
-    // ④ 动作按钮（web 顺序：保存并连接 / 测试连接 / 清除 Key）
+    // ④ 动作按钮（web 顺序：保存并连接 / 测试连接 / 清除 Key；窄卡自动折两行）
     NSButton *save = [NSButton buttonWithTitle:RLPTr(@"保存端点") target:self action:@selector(onLlmSave:)];
     save.bezelStyle = NSBezelStyleRounded;
     save.identifier = @"llm.save";
@@ -2764,39 +3221,96 @@ static NSString *RLPSettingsControlValueString(NSView *v) {
     NSButton *clearKey = [NSButton buttonWithTitle:RLPTr(@"清除密钥") target:self action:@selector(onLlmClearKey:)];
     clearKey.bezelStyle = NSBezelStyleRounded;
     clearKey.identifier = @"llm.clear";
-    [aiGroup addButtonRow:@[ save, test, clearKey ]];
+    for (NSButton *b in @[ save, test, clearKey ]) {
+        [b setContentHuggingPriority:NSLayoutPriorityDefaultHigh
+                      forOrientation:NSLayoutConstraintOrientationHorizontal];
+        [b setContentCompressionResistancePriority:NSLayoutPriorityDefaultHigh
+                                    forOrientation:NSLayoutConstraintOrientationHorizontal];
+    }
+    self.llmSaveBtn = save;
+    self.llmTestBtn = test;
+    self.llmClearBtn = clearKey;
 
-    // ⑤ 模型：手填 + 下拉 + 刷新列表（web 同一行）
+    NSView *btnBox = [[NSView alloc] initWithFrame:NSZeroRect];
+    btnBox.translatesAutoresizingMaskIntoConstraints = NO;
+    NSStackView *btnRow1 = [[NSStackView alloc] initWithFrame:NSZeroRect];
+    btnRow1.orientation = NSUserInterfaceLayoutOrientationHorizontal;
+    btnRow1.alignment = NSLayoutAttributeCenterY;
+    btnRow1.spacing = 8;
+    btnRow1.translatesAutoresizingMaskIntoConstraints = NO;
+    [btnBox addSubview:btnRow1];
+    [NSLayoutConstraint activateConstraints:@[
+        [btnRow1.leadingAnchor constraintEqualToAnchor:btnBox.leadingAnchor],
+        [btnRow1.trailingAnchor constraintLessThanOrEqualToAnchor:btnBox.trailingAnchor],
+        [btnRow1.topAnchor constraintEqualToAnchor:btnBox.topAnchor],
+    ]];
+    NSStackView *btnRow2 = [[NSStackView alloc] initWithFrame:NSZeroRect];
+    btnRow2.orientation = NSUserInterfaceLayoutOrientationHorizontal;
+    btnRow2.alignment = NSLayoutAttributeCenterY;
+    btnRow2.spacing = 8;
+    btnRow2.translatesAutoresizingMaskIntoConstraints = NO;
+    self.metaAiBtnContainer = btnBox;
+    self.metaAiBtnRow1 = btnRow1;
+    self.metaAiBtnRow2 = btnRow2;
+    [aiGroup addFullRow:btnBox];
+
+    // ⑤ 模型：手填 + 下拉 + 刷新列表（窄卡或下拉显示时自动折行，隐藏下拉零占位但保留视图归卡）
     self.llmModel = [[NSTextField alloc] initWithFrame:NSZeroRect];
     self.llmModel.placeholderString = @"deepseek-chat";
     self.llmModel.identifier = @"llm.modeltext";
     self.llmModel.target = self;
     self.llmModel.action = @selector(onLlmModelTyped:);
-    [[self.llmModel.widthAnchor constraintEqualToConstant:220] setActive:YES];
+    RLPTuneMetaTextField(self.llmModel);
     self.llmModelPopup = [[NSPopUpButton alloc] initWithFrame:NSZeroRect pullsDown:NO];
     self.llmModelPopup.target = self;
     self.llmModelPopup.action = @selector(onLlmModelPicked:);
     self.llmModelPopup.identifier = @"llm.modelpopup";
     self.llmModelPopup.hidden = YES;
-    [self.llmModelPopup.widthAnchor constraintEqualToConstant:240].active = YES;
+    RLPTuneMetaPopup(self.llmModelPopup);
     self.llmModelRefresh = [NSButton buttonWithTitle:RLPTr(@"刷新模型列表")
         target:self action:@selector(onLlmModelRefresh:)];
     self.llmModelRefresh.bezelStyle = NSBezelStyleRounded;
     self.llmModelRefresh.identifier = @"llm.modelrefresh";
-    NSStackView *modelRow = [[NSStackView alloc] init];
-    modelRow.orientation = NSUserInterfaceLayoutOrientationHorizontal;
-    modelRow.alignment = NSLayoutAttributeCenterY;
-    modelRow.spacing = 8;
-    [modelRow addArrangedSubview:self.llmModelPopup];
-    [modelRow addArrangedSubview:self.llmModel];
-    [modelRow addArrangedSubview:self.llmModelRefresh];
-    [aiGroup addWideField:RLPTr(@"LLM 模型") control:modelRow
+
+    NSView *modelBox = [[NSView alloc] initWithFrame:NSZeroRect];
+    modelBox.translatesAutoresizingMaskIntoConstraints = NO;
+    NSView *modelDock = [[NSView alloc] initWithFrame:NSZeroRect];
+    modelDock.translatesAutoresizingMaskIntoConstraints = NO;
+    modelDock.hidden = YES;
+    [modelBox addSubview:modelDock];
+    NSStackView *modelRow1 = [[NSStackView alloc] initWithFrame:NSZeroRect];
+    modelRow1.orientation = NSUserInterfaceLayoutOrientationHorizontal;
+    modelRow1.alignment = NSLayoutAttributeCenterY;
+    modelRow1.spacing = 8;
+    modelRow1.translatesAutoresizingMaskIntoConstraints = NO;
+    [modelBox addSubview:modelRow1];
+    [NSLayoutConstraint activateConstraints:@[
+        [modelDock.leadingAnchor constraintEqualToAnchor:modelBox.leadingAnchor],
+        [modelDock.topAnchor constraintEqualToAnchor:modelBox.topAnchor],
+        [modelDock.widthAnchor constraintEqualToConstant:0],
+        [modelDock.heightAnchor constraintEqualToConstant:0],
+        [modelRow1.leadingAnchor constraintEqualToAnchor:modelBox.leadingAnchor],
+        [modelRow1.trailingAnchor constraintEqualToAnchor:modelBox.trailingAnchor],
+        [modelRow1.topAnchor constraintEqualToAnchor:modelBox.topAnchor],
+    ]];
+    NSStackView *modelRow2 = [[NSStackView alloc] initWithFrame:NSZeroRect];
+    modelRow2.orientation = NSUserInterfaceLayoutOrientationHorizontal;
+    modelRow2.alignment = NSLayoutAttributeCenterY;
+    modelRow2.spacing = 8;
+    modelRow2.translatesAutoresizingMaskIntoConstraints = NO;
+    self.metaModelContainer = modelBox;
+    self.metaModelPrimaryRow = modelRow1;
+    self.metaModelSecondaryRow = modelRow2;
+    self.metaModelHiddenDock = modelDock;
+    [aiGroup addWideField:RLPTr(@"LLM 模型") control:modelBox
                      hint:RLPTr(@"选择用于资料补全与增强的模型；读不到列表也可以直接手填")];
 
     self.llmModelMsg = RLPLabel(RLPTr(@"模型列表读取中"), t.small, t.mut);
     self.llmModelMsg.maximumNumberOfLines = 2;
     self.llmModelMsg.lineBreakMode = NSLineBreakByWordWrapping;
     self.llmModelMsg.identifier = @"llm.modelmsg";
+    [self.llmModelMsg setContentCompressionResistancePriority:1.0f
+                                               forOrientation:NSLayoutConstraintOrientationHorizontal];
     [aiGroup addNoteView:self.llmModelMsg];
 
     // ---- 标签写回（web sp_wbdesc / sp_wbdry / sp_wbapply / sp_wbmsg）----
@@ -2808,6 +3322,8 @@ static NSString *RLPSettingsControlValueString(NSView *v) {
     self.wbDesc.maximumNumberOfLines = 4;
     self.wbDesc.lineBreakMode = NSLineBreakByWordWrapping;
     self.wbDesc.stringValue = RLPTr(@"补全到的标签 / 封面写回音频文件本身；写前校验音频数据逐位不变，原文件备份到备份目录");
+    [self.wbDesc setContentCompressionResistancePriority:1.0f
+                                          forOrientation:NSLayoutConstraintOrientationHorizontal];
     [aiGroup addNoteView:self.wbDesc];
 
     self.wbDryBtn = [NSButton buttonWithTitle:RLPTr(@"预览写回") target:self
@@ -2824,12 +3340,19 @@ static NSString *RLPSettingsControlValueString(NSView *v) {
     self.writebackStatus.identifier = @"sp_wbmsg";
     self.writebackStatus.maximumNumberOfLines = 3;
     self.writebackStatus.lineBreakMode = NSLineBreakByWordWrapping;
+    [self.writebackStatus setContentCompressionResistancePriority:1.0f
+                                                   forOrientation:NSLayoutConstraintOrientationHorizontal];
     [aiGroup addNoteView:self.writebackStatus];
 
     // ── 联网检索端点（search / fetch 一起切换，对齐 web SEARCH 区块）──
-    // 用户截图三：保存端点 / 清除检索 Key / AnySearch · Key as_****e834 散在卡片外 ⟹ 全部归卡。
     RLPSettingsGroup *searchGroup = (RLPSettingsGroup *)RLPSGroup(RLPTr(@"联网检索端点"),
         RLPTr(@"「AI 增强」整理资料时用的 search / fetch 端点。DeepSeek 为默认；切到 AnySearch / Tavily 后，非 DeepSeek 的 AI 接口也能联网检索。"), t);
+    RLPTuneMetaGroup(searchGroup);
+    if (gLastGroupWidthConstraint) {
+        gLastGroupWidthConstraint.active = NO;
+        gLastGroupWidthConstraint = nil;
+    }
+    self.metaSearchGroup = searchGroup;
     [adv addArrangedSubview:searchGroup];
 
     self.searchProviderPopup = [[NSPopUpButton alloc] initWithFrame:NSZeroRect pullsDown:NO];
@@ -2839,25 +3362,27 @@ static NSString *RLPSettingsControlValueString(NSView *v) {
     self.searchProviderPopup.identifier = @"search.provider";
     self.searchProviderPopup.target = self;
     self.searchProviderPopup.action = @selector(onSearchProviderChanged:);
-    [self.searchProviderPopup.widthAnchor constraintEqualToConstant:240].active = YES;
+    RLPTuneMetaPopup(self.searchProviderPopup);
     [searchGroup addField:RLPTr(@"检索端点") control:self.searchProviderPopup hint:nil];
 
     self.searchBase = [[NSTextField alloc] initWithFrame:NSZeroRect];
     self.searchBase.placeholderString = RLPTr(@"留空 = 用该厂商默认地址");
     self.searchBase.identifier = @"search.base";
-    [[self.searchBase.widthAnchor constraintEqualToConstant:320] setActive:YES];
+    RLPTuneMetaTextField(self.searchBase);
     [searchGroup addField:RLPTr(@"检索地址") control:self.searchBase hint:nil];
 
     self.searchKey = [[NSSecureTextField alloc] initWithFrame:NSZeroRect];
     self.searchKey.placeholderString = RLPTr(@"留空 = 保持已保存的检索 Key");
     self.searchKey.identifier = @"search.key";
-    [[self.searchKey.widthAnchor constraintEqualToConstant:320] setActive:YES];
+    RLPTuneMetaTextField(self.searchKey);
     [searchGroup addField:RLPTr(@"检索 Key") control:self.searchKey hint:nil];
 
     self.searchStatus = RLPLabel(@"", t.small, t.mut);
     self.searchStatus.maximumNumberOfLines = 2;
     self.searchStatus.lineBreakMode = NSLineBreakByWordWrapping;
     self.searchStatus.identifier = @"search.status";
+    [self.searchStatus setContentCompressionResistancePriority:1.0f
+                                                forOrientation:NSLayoutConstraintOrientationHorizontal];
     [searchGroup addNoteView:self.searchStatus];
 
     NSButton *sSave = [NSButton buttonWithTitle:RLPTr(@"保存端点") target:self action:@selector(onSearchSave:)];
@@ -2868,33 +3393,38 @@ static NSString *RLPSettingsControlValueString(NSView *v) {
     sClear.identifier = @"search.clear";
     [searchGroup addButtonRow:@[ sSave, sClear ]];
 
-    // web `.meta-adv-grid`：数据源 / AI 接入 **左右两列**（>=1100px 时两列，窄屏回落单列）。
-    // 收起时**不做两列合并**：NSStackView 的 fittingSize 仍计入隐藏项，两列会把固有宽
-    // 顶到 1253，窗口于是被 AppKit 从 940 撑到 1304（实测 324pt 全来自这里）。
-    if (self.metaAdvancedVisible && dataGroup && aiGroup && dataWidthConstraint && aiWidthConstraint) {
-        dataWidthConstraint.active = NO;
-        aiWidthConstraint.active = NO;
-        NSStackView *twoCol = [[NSStackView alloc] init];
-        twoCol.orientation = NSUserInterfaceLayoutOrientationHorizontal;
-        twoCol.distribution = NSStackViewDistributionFillEqually;
-        twoCol.alignment = NSLayoutAttributeTop;
-        twoCol.spacing = 16;
-        twoCol.translatesAutoresizingMaskIntoConstraints = NO;
-        [adv removeArrangedSubview:dataGroup];
-        [adv removeArrangedSubview:aiGroup];
-        [twoCol addArrangedSubview:dataGroup];
-        [twoCol addArrangedSubview:aiGroup];
-        [adv insertArrangedSubview:twoCol atIndex:0];
-        // 只许「不大于」：隐藏的 adv 仍会被算进 fittingSize，等宽会把内部两列的
-        // 固有宽度刚性传回外层 stack，AppKit 挂载时按 fittingSize 把主窗从 940 撑到 1304。
-        [twoCol.widthAnchor constraintLessThanOrEqualToAnchor:adv.widthAnchor].active = YES;
-    }
+    // web `.meta-adv-grid`：始终装进 twoCol 容器，宽窗横向两列，窄窗/折叠态纵向单列。
+    NSStackView *twoCol = [[NSStackView alloc] init];
+    twoCol.orientation = NSUserInterfaceLayoutOrientationVertical;
+    twoCol.distribution = NSStackViewDistributionFill;
+    twoCol.alignment = NSLayoutAttributeLeading;
+    twoCol.spacing = 22;
+    twoCol.translatesAutoresizingMaskIntoConstraints = NO;
+    twoCol.identifier = @"sp_metatwocol";
+    [adv removeArrangedSubview:dataGroup];
+    [adv removeArrangedSubview:aiGroup];
+    [twoCol addArrangedSubview:dataGroup];
+    [twoCol addArrangedSubview:aiGroup];
+    [adv insertArrangedSubview:twoCol atIndex:0];
+    self.metaTwoColStack = twoCol;
 
     gCurrentStack = savedStack;
     gCurrentGroup = savedGroup;
     [stack addArrangedSubview:adv];
-    // 同上：高级区收起时不得决定 pane/窗口宽度（实测这一条就是 +324pt 的来源）。
-    [adv.widthAnchor constraintLessThanOrEqualToAnchor:stack.widthAnchor].active = YES;
+
+    self.metaAdvWidthConstraint =
+        [adv.widthAnchor constraintEqualToAnchor:stack.widthAnchor constant:-48];
+    self.metaTwoColWidthConstraint =
+        [twoCol.widthAnchor constraintEqualToAnchor:adv.widthAnchor];
+    self.metaSearchWidthConstraint =
+        [searchGroup.widthAnchor constraintEqualToAnchor:adv.widthAnchor];
+    self.metaVerticalCardWidthConstraints = @[
+        [dataGroup.widthAnchor constraintEqualToAnchor:twoCol.widthAnchor],
+        [aiGroup.widthAnchor constraintEqualToAnchor:twoCol.widthAnchor],
+    ];
+
+    const BOOL laidOut = (self.paneHost && self.paneHost.bounds.size.width > 1.0);
+    [self updateMetaResponsiveLayoutForHostWidth:[self metaTargetHostWidthPreferringViewBounds:laidOut]];
 }
 
 #pragma mark - 均衡 / 输入（已迁移的子界面）
@@ -3235,6 +3765,7 @@ static NSString *RLPSettingsControlValueString(NSView *v) {
         // 用户看到的就是「还是原来那一串」（2026-11-13 反馈的另一半）。
         [self.llmModelPopup removeAllItems];
         self.llmModelPopup.hidden = YES;
+        [self updateMetaResponsiveLayoutForHostWidth:[self metaTargetHostWidthPreferringViewBounds:(self.paneHost && self.paneHost.bounds.size.width > 1.0)]];
         self.llmModelMsg.stringValue = RLPTr(@"正在重新拉取模型列表…");
         self.llmModelMsg.textColor = [RLPTheme current].mut;
     }
@@ -3250,6 +3781,7 @@ static NSString *RLPSettingsControlValueString(NSView *v) {
         if (!ok) {
             // 降级：隐藏下拉、保留手填（值填当前 model，用户可改可留空）。
             self_.llmModelPopup.hidden = YES;
+            [self_ updateMetaResponsiveLayoutForHostWidth:[self_ metaTargetHostWidthPreferringViewBounds:(self_.paneHost && self_.paneHost.bounds.size.width > 1.0)]];
             if (!self_.llmModel.stringValue.length && ![self_ isControlDirty:self_.llmModel]) {
                 self_.llmModel.stringValue = cur;
             }
@@ -3285,6 +3817,7 @@ static NSString *RLPSettingsControlValueString(NSView *v) {
             self_.lastLoadedValues[@"llm.modeltext"] = cur;
         }
         self_.llmModelPopup.hidden = NO;
+        [self_ updateMetaResponsiveLayoutForHostWidth:[self_ metaTargetHostWidthPreferringViewBounds:(self_.paneHost && self_.paneHost.bounds.size.width > 1.0)]];
         const NSInteger n = (NSInteger)ids.count;
         if (cur.length && !hasCurrent) {
             self_.llmModelMsg.stringValue = [NSString stringWithFormat:
@@ -4987,6 +5520,7 @@ static NSUInteger RLPUTF8Bytes(NSString *s) {
     //（那份可能含 field editor 文本，比现在再读一次更完整）。
     if (!self.eqDraftState && self.eqView) self.eqDraftState = [self.eqView rlp_captureDraftState];
     [self.paneCache removeAllObjects];
+    [self resetMetaResponsiveState];
     [self rebuildTabs];
     [self showTab:self.tab];
     if (self.themePopup) {
@@ -5004,8 +5538,12 @@ static NSUInteger RLPUTF8Bytes(NSString *s) {
         self.fbSendBtn.layer.backgroundColor = t.accent.CGColor;
         self.fbSendBtn.contentTintColor = NSColor.whiteColor;
     }
-    for (NSButton *b in @[self.diagJsonBtn, self.diagSummaryBtn, self.fbRetryBtn]) {
-        if (!b) continue;
+    // 先收集非 nil 按钮再遍历，避免未打开过 diag 页时 @[nil...] 构造字面量数组直接抛 NSInvalidArgumentException。
+    NSMutableArray<NSButton *> *diagSecondaryBtns = [NSMutableArray array];
+    if (self.diagJsonBtn) [diagSecondaryBtns addObject:self.diagJsonBtn];
+    if (self.diagSummaryBtn) [diagSecondaryBtns addObject:self.diagSummaryBtn];
+    if (self.fbRetryBtn) [diagSecondaryBtns addObject:self.fbRetryBtn];
+    for (NSButton *b in diagSecondaryBtns) {
         b.layer.backgroundColor = t.hov.CGColor;
         b.layer.borderColor = t.line.CGColor;
         b.contentTintColor = t.text;
@@ -5044,6 +5582,7 @@ static NSUInteger RLPUTF8Bytes(NSString *s) {
     [self.groupTabs setLabel:RLPTr(@"通用") forSegment:0];
     [self.groupTabs setLabel:RLPTr(@"音频处理") forSegment:1];
     self.modeHintLabel.stringValue = RLPTr(@"音频处理主控位于专业模式「数字音乐台」，此处保留完整参数与深链入口");
+    self.modeHintLabel.toolTip = self.modeHintLabel.stringValue;
     self.workbenchBtn.title = RLPTr(@"打开专业工作台");
 
     if (self.eqView) {
@@ -5051,6 +5590,7 @@ static NSUInteger RLPUTF8Bytes(NSString *s) {
     }
 
     [self.paneCache removeAllObjects];
+    [self resetMetaResponsiveState];
     [self rebuildTabs];
     [self showTab:self.tab];
 
