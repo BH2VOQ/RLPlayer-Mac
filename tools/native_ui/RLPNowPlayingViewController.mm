@@ -2173,6 +2173,10 @@ static NSString *RLPRailTagText(id srValue, id bitsValue) {
 @property (nonatomic, copy, nullable) NSString *anlPendingPath; // 等待 cancel 落地后再发的新分析路径
 @property (nonatomic, assign) BOOL anlPendingForce;
 @property (nonatomic, assign) NSUInteger anlPendingSeq;
+@property (nonatomic, assign) BOOL anlDisappeared;           // 已离开单曲页：晚到异步设置不得再自动分析
+@property (nonatomic, copy, nullable) NSString *anlPendingTickPath;
+@property (nonatomic, assign) BOOL anlPendingTickPlaying;
+@property (nonatomic, assign) BOOL anlPendingTickPaused;
 @property (nonatomic, strong) NSLayoutConstraint *anlDetailHeight;
 /// 封面请求序号：快速切歌时用它丢弃过期回调（慢请求回来不能盖掉新封面）。
 @property (nonatomic, assign) NSUInteger coverSeq;
@@ -2214,6 +2218,7 @@ static NSString *RLPRailTagText(id srValue, id bitsValue) {
     RLPHoverButton *b=[[RLPHoverButton alloc] initWithFrame:NSZeroRect];
     b.title=RLPTr(title); b.target=self; b.action=action;
     b.identifier=ident; b.font=[NSFont systemFontOfSize:10.5]; b.bezelStyle=NSBezelStyleRounded;
+    b.keyEquivalent=@""; b.refusesFirstResponder=YES;
     [parent addSubview:b]; return b;
 }
 
@@ -2433,6 +2438,7 @@ static NSString *RLPRailTagText(id srValue, id bitsValue) {
     self.lyricScroll.contentView.postsBoundsChangedNotifications=YES;
     [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(onLyricScrolled:) name:NSViewBoundsDidChangeNotification object:self.lyricScroll.contentView];
     [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(onExternalFavoritesChanged:) name:RLPFavoritesChangedNotification object:nil];
+    [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(onExternalSettingsChanged:) name:RLPSettingsChangedNotification object:nil];
     [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(onNowPlayingEscape:)
                                                  name:@"RLPNowPlayingEscapeNotification" object:nil];
     self.lyricRows=[NSMutableArray array];self.lyricLines=@[];self.lyricActiveIndex=-1;
@@ -4557,13 +4563,17 @@ static NSString *RLPNowPlayingCastDeviceLabel(NSString *device) {
 }
 
 - (void)activate {
+    self.anlDisappeared = NO;
+    self.anlAutoSettingAt = 0;
     if (self.isViewLoaded) {
         [self.webCanvas setNeedsLayout:YES];
         if (self.webCanvas.bounds.size.width > 0.0 && self.webCanvas.bounds.size.height > 0.0) {
             [self layoutWebPlayback];
         }
     }
+    const BOOL wasPolling = self.polling;
     [self startPolling];
+    if (wasPolling) [self anlRefreshAutoSettingIfStale];
     // 模式（循环/随机）是**全局**状态：页面重新打开时必须重读一次。
     // refresh 只在「换曲」分支里拉 /api/queue，所以「关掉正在播放页 → 在别处改成单曲循环
     // → 再打开」以前显示的还是旧档位（审计 C 项）。首次进入（还没有 currentPath）由
@@ -4577,6 +4587,10 @@ static NSString *RLPNowPlayingCastDeviceLabel(NSString *device) {
 - (void)viewDidDisappear {
     [self.knowledge cancelLoading];
     [super viewDidDisappear];
+    self.anlDisappeared = YES;
+    self.anlPendingTickPath = nil;
+    self.anlPendingTickPlaying = NO;
+    self.anlPendingTickPaused = NO;
     [self stopPolling];self.lyricSeq++;self.railSeq++;[self.railSummaryInflight removeAllObjects];[self.knowledgePopover close];
     // 离开单曲页：让服务器也停下在跑的分析（与 web 版离开页面时的 anlCancelServer 同语义）。
     // 异步 cancel 完成前即使立刻切回，新请求也必须排队等 cancel 落地后再发出。
@@ -4601,6 +4615,7 @@ static NSString *RLPNowPlayingCastDeviceLabel(NSString *device) {
         [self setSubtitle:RLPTr(@"核心未启动")];
         return;
     }
+    self.anlDisappeared = NO;
     self.polling = YES;
     // 自动分析开关的真相源是 settings.autoanl（开关本身在设置·高级页签，播放页不再显示）。
     [self anlRefreshAutoSettingIfStale];
@@ -4754,6 +4769,14 @@ static NSString *RLPNowPlayingCastDeviceLabel(NSString *device) {
     self.lyricManualUntil = 0;
 }
 
+- (void)onExternalSettingsChanged:(NSNotification *)note {
+    if (note.object == self) return;
+    self.anlAutoSettingAt = 0;
+    if (!self.anlDisappeared && self.isViewLoaded && (self.polling || self.currentPath.length)) {
+        [self anlRefreshAutoSettingIfStale];
+    }
+}
+
 /// settings.autoanl / settings.eq / settings.ir 的**同一份**读取节流：
 /// 它不是热路径（用户在设置页偶尔改一次），但读一次就永久缓存会让"刚勾上却要等到切歌才生效"。
 /// 10 s 一次足够，且绝不进 0.8 s 的忙碌路径（EQ/IR 芯片复用这一次响应，不另开轮询）。
@@ -4765,23 +4788,46 @@ static NSString *RLPNowPlayingCastDeviceLabel(NSString *device) {
     [[RLPCoreClient shared] getJSON:@"/api/settings" completion:^(NSDictionary * _Nullable json) {
         __typeof__(self) s = ws;
         if (!s) return;
-        // 值在 kv 子对象里（读顶层会永远读成"关"）。
+        if (![json isKindOfClass:[NSDictionary class]]) {
+            s.anlAutoSettingAt = 0;
+            return;
+        }
+        // 值在 kv 子对象里（读顶层会永远读成"关"），若 mock 只给顶层键也一并兼容。
         NSDictionary *kv = [json[@"kv"] isKindOfClass:[NSDictionary class]] ? json[@"kv"] : nil;
-        if (!kv) return;
+        if (!kv && (json[@"autoanl"] != nil || json[@"eq"] != nil || json[@"ir"] != nil)) {
+            kv = json;
+        }
+        if (!kv) {
+            s.anlAutoSettingAt = 0;
+            return;
+        }
         id v = kv[@"autoanl"];
-        if ([v isKindOfClass:[NSString class]]) s.anlAutoEnabled = [(NSString *)v isEqualToString:@"1"];
-        else if ([v isKindOfClass:[NSNumber class]]) s.anlAutoEnabled = [(NSNumber *)v boolValue];
+        if ([v isKindOfClass:[NSString class]]) {
+            NSString *sv = [(NSString *)v lowercaseString];
+            s.anlAutoEnabled = ([sv isEqualToString:@"1"] || [sv isEqualToString:@"true"]);
+        } else if ([v isKindOfClass:[NSNumber class]]) {
+            s.anlAutoEnabled = [(NSNumber *)v boolValue];
+        } else if (v == nil || [v isEqual:NSNull.null]) {
+            s.anlAutoEnabled = NO;
+        }
         // web loadSettings：`if (kv.eq !== undefined) ADV.eq = kv.eq;` 同理 ir。
         // 芯片读的就是这两个值，所以必须在这一刻更新（否则要等到用户进设置页才显示）。
         s.eqPath=[kv[@"eq"] isKindOfClass:[NSString class]]?(NSString *)kv[@"eq"]:@"";
         s.irPath=[kv[@"ir"] isKindOfClass:[NSString class]]?(NSString *)kv[@"ir"]:@"";
         [s applyMetaChipVisibility];
+        if (s.isViewLoaded) [s anlPaint];
+        if (!s.anlDisappeared && s.anlAutoEnabled) {
+            NSString *tickPath = s.anlPendingTickPath.length ? s.anlPendingTickPath : s.currentPath;
+            const BOOL tickPlaying = s.anlPendingTickPath.length ? s.anlPendingTickPlaying : s.webStatus.playing;
+            const BOOL tickPaused = s.anlPendingTickPath.length ? s.anlPendingTickPaused : s.webStatus.paused;
+            if (tickPath.length && [tickPath isEqualToString:s.currentPath ?: @""]) {
+                [s anlEvaluateAutoTickForPath:tickPath playing:tickPlaying paused:tickPaused];
+            }
+        }
     }];
 }
 
-/// 对齐 web 版 anlTick：每曲只自动跑一次；暂停/继续/拖动进度都不重新触发。
-- (void)anlAutoTickForPath:(NSString *)path playing:(BOOL)playing paused:(BOOL)paused {
-    [self anlRefreshAutoSettingIfStale];
+- (void)anlEvaluateAutoTickForPath:(NSString *)path playing:(BOOL)playing paused:(BOOL)paused {
     if (![(path ?: @"") isEqualToString:self.currentPath ?: @""]) return;
     const BOOL active = playing && !paused;
     if (RLPAnlShouldAutoAnalyze(path, active, self.anlAutoEnabled,
@@ -4790,6 +4836,17 @@ static NSString *RLPNowPlayingCastDeviceLabel(NSString *device) {
         self.anlAutoDonePath = path;
         [self anlAnalyzePath:path force:NO];
     }
+}
+
+/// 对齐 web 版 anlTick：每曲只自动跑一次；暂停/继续/拖动进度都不重新触发。
+- (void)anlAutoTickForPath:(NSString *)path playing:(BOOL)playing paused:(BOOL)paused {
+    if ([(path ?: @"") isEqualToString:self.currentPath ?: @""]) {
+        self.anlPendingTickPath = path;
+        self.anlPendingTickPlaying = playing;
+        self.anlPendingTickPaused = paused;
+    }
+    [self anlRefreshAutoSettingIfStale];
+    [self anlEvaluateAutoTickForPath:path playing:playing paused:paused];
 }
 
 - (void)loadLyricsForPath:(NSString *)path {
