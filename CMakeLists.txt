@@ -2686,6 +2686,17 @@ if(APPLE)
   target_link_libraries(test_native_settings_width_contract PRIVATE ${_modes_libs})
   add_test(NAME native_settings_width_contract COMMAND test_native_settings_width_contract)
   set_tests_properties(native_settings_width_contract PROPERTIES TIMEOUT 240)
+
+  # 900x600 全侧栏页宽度/滚动容器/专辑网格契约（2026-11-18 循环 debug 第 2 轮）。
+  add_executable(test_native_pages_900_contract tests/test_native_pages_900_contract.mm
+    ${_modes_sources}
+    tools/native_ui/RLPWorkbench.mm
+    tools/native_ui/RLPWorkbenchViewController.mm)
+  target_compile_options(test_native_pages_900_contract PRIVATE -fobjc-arc)
+  target_include_directories(test_native_pages_900_contract PRIVATE src tools tools/native_ui)
+  target_link_libraries(test_native_pages_900_contract PRIVATE ${_modes_libs})
+  add_test(NAME native_pages_900_contract COMMAND test_native_pages_900_contract)
+  set_tests_properties(native_pages_900_contract PROPERTIES TIMEOUT 240)
 endif()
 
 add_executable(test_windows_filter_parity tests/test_windows_filter_parity.cpp)
