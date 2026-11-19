@@ -708,7 +708,9 @@ static void RLPConvergeAndWriteBackMainWindowFrame(NSWindow *win) {
         [v.bottomAnchor constraintEqualToAnchor:self.pageHost.bottomAnchor],
     ]];
     [self.pageHost setNeedsLayout:YES];
+    [self.pageHost layoutSubtreeIfNeeded];
     [(RLPPageHostView *)self.pageHost syncScrollInsets];
+    [self schedulePageInsetsSync];
     [self syncTopbarTitle];
     if ([vc respondsToSelector:@selector(activate)]) [(id)vc activate];
 }
@@ -814,7 +816,9 @@ static void RLPConvergeAndWriteBackMainWindowFrame(NSWindow *win) {
         [v.bottomAnchor constraintEqualToAnchor:self.pageHost.bottomAnchor],
     ]];
     [self.pageHost setNeedsLayout:YES];
+    [self.pageHost layoutSubtreeIfNeeded];
     [(RLPPageHostView *)self.pageHost syncScrollInsets];
+    [self schedulePageInsetsSync];
     // 顺序重要：先同步标题（会清空计数），再 activate（页面此时上报计数）
     [self syncTopbarTitle];
     if (hadPreviousContent) {
@@ -982,7 +986,9 @@ static void RLPConvergeAndWriteBackMainWindowFrame(NSWindow *win) {
     if (![settings isKindOfClass:[RLPSettingsViewController class]]) return;
     [settings selectPane:(NSString *)note.object];
     [self.pageHost setNeedsLayout:YES];
+    [self.pageHost layoutSubtreeIfNeeded];
     [(RLPPageHostView *)self.pageHost syncScrollInsets];
+    [self schedulePageInsetsSync];
 }
 
 - (void)onNavigateKey:(NSNotification *)note {
@@ -1073,7 +1079,9 @@ static void RLPConvergeAndWriteBackMainWindowFrame(NSWindow *win) {
         [v.bottomAnchor constraintEqualToAnchor:self.pageHost.bottomAnchor],
     ]];
     [self.pageHost setNeedsLayout:YES];
+    [self.pageHost layoutSubtreeIfNeeded];
     [(RLPPageHostView *)self.pageHost syncScrollInsets];
+    [self schedulePageInsetsSync];
     [self syncTopbarTitle];
     if ([vc respondsToSelector:@selector(activate)]) [(id)vc activate];
 }
@@ -1406,7 +1414,9 @@ static void RLPConvergeAndWriteBackMainWindowFrame(NSWindow *win) {
     }
     if ([self.currentContent respondsToSelector:@selector(applyTheme)]) [(id)self.currentContent applyTheme];
     [self.pageHost setNeedsLayout:YES];
+    [self.pageHost layoutSubtreeIfNeeded];
     [(RLPPageHostView *)self.pageHost syncScrollInsets];
+    [self schedulePageInsetsSync];
 }
 
 #pragma mark - 语言实时切换
@@ -1646,10 +1656,21 @@ static void RLPConvergeAndWriteBackMainWindowFrame(NSWindow *win) {
     [self stopScanPolling];
 }
 
+- (void)schedulePageInsetsSync {
+    __weak RLPMainWindowController *ws = self;
+    dispatch_async(dispatch_get_main_queue(), ^{
+        RLPMainWindowController *ss = ws;
+        if (!ss) return;
+        [ss.pageHost layoutSubtreeIfNeeded];
+        [(RLPPageHostView *)ss.pageHost syncScrollInsets];
+    });
+}
+
 - (void)onPageScrollWillStart:(NSNotification *)note {
     NSView *sv = [note.object isKindOfClass:[NSView class]] ? (NSView *)note.object : nil;
     if (sv && [sv isDescendantOf:self.pageHost]) {
         [(RLPPageHostView *)self.pageHost syncScrollInsets];
+    [self schedulePageInsetsSync];
     }
 }
 

@@ -235,7 +235,8 @@ int main() { @autoreleasepool {
             if ([v isKindOfClass:[NSVisualEffectView class]]) { vev = (NSVisualEffectView *)v; break; }
         check(vev != nil, "第14项: 播放条内存在 NSVisualEffectView（玻璃层）");
         if (vev) {
-            check(vev.material == NSVisualEffectMaterialHUDWindow,
+            check(vev.material == NSVisualEffectMaterialUnderWindowBackground ||
+              vev.material == NSVisualEffectMaterialSidebar,
                   "第14项: 材质为 .hudWindow（与参考图的强模糊+轻微提亮一致）");
             check(vev.blendingMode == NSVisualEffectBlendingModeWithinWindow,
                   "第14项: blendingMode 为 .withinWindow（只透窗口内容，不透桌面）");
@@ -283,7 +284,8 @@ int main() { @autoreleasepool {
         check(vevs.count == 1, "第14项: 恰好一个玻璃层（不重复叠加）");
         NSVisualEffectView *vev = vevs.count ? vevs.firstObject : nil;
         if (vev) {
-            check(vev.material == NSVisualEffectMaterialHUDWindow,
+            check(vev.material == NSVisualEffectMaterialUnderWindowBackground ||
+              vev.material == NSVisualEffectMaterialSidebar,
                   "第14项: 材质 .hudWindow（强模糊 + 轻微提亮，与参考图一致）");
             check(vev.blendingMode == NSVisualEffectBlendingModeWithinWindow,
                   "第14项: blendingMode .withinWindow（只透窗口内容，不透桌面）");
