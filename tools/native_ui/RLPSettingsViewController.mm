@@ -420,6 +420,7 @@ static NSStackView *RLPSRow(NSString *label, NSView *control, NSString *hint, RL
 
 // ---- 诊断页（web data-g=diag）----
 @property (nonatomic, strong) RLPSettingsGroup *diagGroup;
+@property (nonatomic, strong) RLPSettingsGroup *fbGroup;
 @property (nonatomic, strong) NSButton *diagZipBtn;
 @property (nonatomic, strong) NSButton *diagJsonBtn;
 @property (nonatomic, strong) NSButton *diagSummaryBtn;
@@ -468,6 +469,7 @@ static NSStackView *RLPSRow(NSString *label, NSView *control, NSString *hint, RL
 // （端点/请求体来自 src/net/feedback_api.h 的代码常量，测试断言的就是它）。
 @property (nonatomic, copy) void (^fbProbeTransport)(void (^done)(NSInteger status, NSData * _Nullable body, BOOL timedOut));
 @property (nonatomic, copy) void (^fbUploadTransport)(NSString *url, NSString *body, void (^reply)(NSInteger status, NSData * _Nullable body));
+@property (nonatomic, copy, nullable) NSString *fbSystemVersionOverride;
 /// 诊断摘要数据的测试接缝（生产路径仍走 /api/diag）。
 @property (nonatomic, copy) void (^diagSummaryTransport)(void (^done)(NSDictionary * _Nullable json));
 /// 通道连通性检查的测试接缝（生产路径走 /api/diag/channels）。
@@ -1608,6 +1610,7 @@ static NSString *RLPSettingsControlValueString(NSView *v) {
     self.fbChan.stringValue = text ?: @"";
     RLPTheme *t = [RLPTheme current];
     self.fbChan.textColor = (kind == 2) ? t.danger : (kind == 1) ? t.okText : t.mut2;
+    if (self.fbGroup) [self.fbGroup contentDidChange];
 }
 
 /// 发送结果行（web fbMsg）+ 持久结果区（web `rlFbResult` / `sp_fbresult`）。
@@ -1624,6 +1627,7 @@ static NSString *RLPSettingsControlValueString(NSView *v) {
         self.fbResultBox.textColor = (kind == 2) ? t.danger : (kind == 1) ? t.okText : t.mut2;
         self.fbResultBox.hidden = (text.length == 0);   // web 空结果不占位
     }
+    if (self.fbGroup) [self.fbGroup contentDidChange];
 }
 
 #pragma mark - v3.3.11 反馈预览（rlFbPreview：先看会发送什么）
@@ -1637,13 +1641,16 @@ static NSString *RLPSettingsControlValueString(NSView *v) {
     const NSUInteger bytes = [text lengthOfBytesUsingEncoding:NSUTF8StringEncoding];
     const BOOL attach = self.fbDiagSwitch.state == NSControlStateValueOn;
     NSProcessInfo *pi = [NSProcessInfo processInfo];
+    NSString *osVer = self.fbSystemVersionOverride.length
+        ? self.fbSystemVersionOverride
+        : (pi.operatingSystemVersionString ?: @"");
     NSMutableArray<NSString *> *lines = [NSMutableArray array];
     [lines addObject:[NSString stringWithFormat:RLPTr(@"将提交到：%@"),
                       [NSString stringWithUTF8String:rta::feedback::kFeedbackUploadUrl]]];
     [lines addObject:[NSString stringWithFormat:RLPTr(@"版本：%@"),
                       [NSString stringWithUTF8String:RLPLAYER_VERSION]]];
     [lines addObject:[NSString stringWithFormat:RLPTr(@"系统：macOS %@"),
-                      pi.operatingSystemVersionString]];
+                      osVer]];
     [lines addObject:[NSString stringWithFormat:RLPTr(@"正文：%@ 字 / %lu 字节（上限 16384 字节）"),
                       @(trimmed.length), (unsigned long)bytes]];
     [lines addObject:attach ? RLPTr(@"诊断包：附带（已脱敏，与「导出诊断包」同一份）")
@@ -1656,6 +1663,7 @@ static NSString *RLPSettingsControlValueString(NSView *v) {
     if (!self.fbPreviewBox) return;
     self.fbPreviewBox.stringValue = [self fbPreviewSummary];
     self.fbPreviewBox.hidden = NO;
+    if (self.fbGroup) [self.fbGroup contentDidChange];
 }
 
 /// 提交按钮的唯一开关（web fbBusy）：忙 / 通道未确认可用（!= 1）时一律禁用。
@@ -2817,6 +2825,7 @@ static NSString *RLPSettingsControlValueString(NSView *v) {
     RLPSettingsGroup *fbGroup = (RLPSettingsGroup *)RLPSGroup(RLPTr(@"反馈问题"),
         RLPTr(@"直接发送给开发者，可附诊断包"), t);
     fbGroup.identifier = @"sp_fbgroup";
+    self.fbGroup = fbGroup;
     [stack addArrangedSubview:fbGroup];
 
     NSTextField *fbLabel = [self fieldLabel:RLPTr(@"问题描述")];
@@ -2848,47 +2857,106 @@ static NSString *RLPSettingsControlValueString(NSView *v) {
     [fbGroup addFullRow:fbScroll];   // 宽度由卡片网格给（web textarea width:100%）
     [[fbScroll.heightAnchor constraintEqualToConstant:150] setActive:YES];
 
-    self.fbCount = [self hintForKey:@"sp_fbcount" width:300];
+    self.fbCount = RLPLabel(@"", t.small, t.mut);
+    self.fbCount.identifier = RLPControlIdentifier(@"sp_fbcount");
+    self.fbCount.maximumNumberOfLines = 0;
+    self.fbCount.lineBreakMode = NSLineBreakByWordWrapping;
     self.fbCount.stringValue = RLPTr(@"0 / 16384 字节");
     [fbGroup addFullRow:self.fbCount];
 
-    self.fbChan = [self hintForKey:@"sp_fbchan" width:520];
+    self.fbChan = RLPLabel(@"", t.small, t.mut);
+    self.fbChan.identifier = RLPControlIdentifier(@"sp_fbchan");
+    self.fbChan.maximumNumberOfLines = 0;
+    self.fbChan.lineBreakMode = NSLineBreakByWordWrapping;
+    self.fbChan.selectable = YES;
     self.fbChan.stringValue = RLPTr(@"正在检查反馈通道…");
     [fbGroup addFullRow:self.fbChan];
 
-    // 底部操作行：☑ 附带诊断包（默认勾选，web checked）+ 红底「发送反馈」+ 重试探活
+    // 底部选项与操作行拆行：开关单独占一行，按钮 + 单行状态紧随其下；
+    // 否则窄窗（900×600）/ 英文按钮较长时，300pt 写死宽的 fbMsg 会把整行撑爆。
     self.fbDiagSwitch = [self switchForKey:@"sp_fbdiag" action:@selector(onFbDiagToggle:)];
     self.fbDiagSwitch.state = NSControlStateValueOn;
+    [self.fbDiagSwitch setContentHuggingPriority:NSLayoutPriorityRequired
+                                  forOrientation:NSLayoutConstraintOrientationHorizontal];
+    [self.fbDiagSwitch setContentCompressionResistancePriority:NSLayoutPriorityRequired
+                                                  forOrientation:NSLayoutConstraintOrientationHorizontal];
+    NSTextField *fbDiagLabel = RLPLabel(RLPTr(@"附带诊断包"), t.small, t.mut);
+    fbDiagLabel.maximumNumberOfLines = 2;
+    fbDiagLabel.lineBreakMode = NSLineBreakByWordWrapping;
+    [fbDiagLabel setContentHuggingPriority:NSLayoutPriorityDefaultLow
+                            forOrientation:NSLayoutConstraintOrientationHorizontal];
+    [fbDiagLabel setContentCompressionResistancePriority:1.0f
+                                          forOrientation:NSLayoutConstraintOrientationHorizontal];
+    NSStackView *fbDiagRow = [[NSStackView alloc] init];
+    fbDiagRow.orientation = NSUserInterfaceLayoutOrientationHorizontal;
+    fbDiagRow.alignment = NSLayoutAttributeCenterY;
+    fbDiagRow.spacing = 8;
+    fbDiagRow.translatesAutoresizingMaskIntoConstraints = NO;
+    [fbDiagRow setContentHuggingPriority:NSLayoutPriorityDefaultLow
+                          forOrientation:NSLayoutConstraintOrientationHorizontal];
+    [fbDiagRow addArrangedSubview:self.fbDiagSwitch];
+    [fbDiagRow addArrangedSubview:fbDiagLabel];
+
     self.fbSendBtn = [self primaryButton:@"发送反馈" ident:@"sp_fbsend"
                                   action:@selector(onSendFeedback:)];
     self.fbRetryBtn = [self secondaryButton:@"重试探活" ident:@"sp_fbretry"
                                      action:@selector(onFeedbackRetry:)];
     self.fbRetryBtn.hidden = YES;
-    self.fbMsg = [self hintForKey:@"sp_fbmsg" width:300];
+    self.fbMsg = RLPLabel(@"", t.small, t.mut);
+    self.fbMsg.identifier = RLPControlIdentifier(@"sp_fbmsg");
+    self.fbMsg.maximumNumberOfLines = 1;
+    self.fbMsg.lineBreakMode = NSLineBreakByTruncatingTail;
+    [self.fbMsg setContentHuggingPriority:NSLayoutPriorityDefaultLow
+                           forOrientation:NSLayoutConstraintOrientationHorizontal];
+    [self.fbMsg setContentCompressionResistancePriority:1.0f
+                                         forOrientation:NSLayoutConstraintOrientationHorizontal];
     // v3.3.11 `rlFbPreview`：先看会发送什么（纯前端，不发请求、不改任何状态）。
     self.fbPreviewBtn = [self secondaryButton:@"先看会发送什么" ident:@"sp_fbpreview"
                                        action:@selector(onFbPreview:)];
+    for (NSButton *b in @[ self.fbPreviewBtn, self.fbSendBtn, self.fbRetryBtn ]) {
+        [b setContentHuggingPriority:NSLayoutPriorityRequired
+                      forOrientation:NSLayoutConstraintOrientationHorizontal];
+        [b setContentCompressionResistancePriority:NSLayoutPriorityRequired
+                                    forOrientation:NSLayoutConstraintOrientationHorizontal];
+    }
+
+    auto configureMultilineFbBox = ^(NSTextField *box, NSString *ident) {
+        box.identifier = ident;
+        box.maximumNumberOfLines = 0;
+        box.lineBreakMode = NSLineBreakByWordWrapping;
+        box.selectable = YES;
+        box.hidden = YES;
+        if ([box.cell isKindOfClass:[NSTextFieldCell class]]) {
+            NSTextFieldCell *cell = (NSTextFieldCell *)box.cell;
+            cell.wraps = YES;
+            cell.scrollable = NO;
+            cell.usesSingleLineMode = NO;
+        }
+        [box setContentHuggingPriority:NSLayoutPriorityDefaultLow
+                        forOrientation:NSLayoutConstraintOrientationHorizontal];
+        [box setContentCompressionResistancePriority:1.0f
+                                      forOrientation:NSLayoutConstraintOrientationHorizontal];
+        [box setContentHuggingPriority:NSLayoutPriorityRequired
+                        forOrientation:NSLayoutConstraintOrientationVertical];
+        [box setContentCompressionResistancePriority:NSLayoutPriorityDefaultHigh
+                                      forOrientation:NSLayoutConstraintOrientationVertical];
+    };
     self.fbPreviewBox = RLPLabel(@"", t.small, t.mut2);
-    self.fbPreviewBox.identifier = @"sp_fbpreviewbox";
-    self.fbPreviewBox.maximumNumberOfLines = 8;
-    self.fbPreviewBox.lineBreakMode = NSLineBreakByWordWrapping;
-    self.fbPreviewBox.selectable = YES;
-    self.fbPreviewBox.hidden = YES;   // web `#rlFbPreviewbox{display:none}`，点了才出现
+    configureMultilineFbBox(self.fbPreviewBox, @"sp_fbpreviewbox");   // web `#rlFbPreviewbox{display:none}`
     self.fbResultBox = RLPLabel(@"", t.small, t.mut2);
-    self.fbResultBox.identifier = @"sp_fbresult";
-    self.fbResultBox.maximumNumberOfLines = 4;
-    self.fbResultBox.lineBreakMode = NSLineBreakByWordWrapping;
-    self.fbResultBox.selectable = YES;
-    self.fbResultBox.hidden = YES;
+    configureMultilineFbBox(self.fbResultBox, @"sp_fbresult");
 
     NSStackView *fbRow = [[NSStackView alloc] init];
     fbRow.orientation = NSUserInterfaceLayoutOrientationHorizontal;
     fbRow.alignment = NSLayoutAttributeCenterY;
     fbRow.spacing = 10;
-    [fbRow addArrangedSubview:self.fbDiagSwitch];
-    [fbRow addArrangedSubview:RLPLabel(RLPTr(@"附带诊断包"), t.small, t.mut)];
+    fbRow.detachesHiddenViews = YES;
+    fbRow.translatesAutoresizingMaskIntoConstraints = NO;
+    [fbRow setContentHuggingPriority:NSLayoutPriorityDefaultLow
+                      forOrientation:NSLayoutConstraintOrientationHorizontal];
     for (NSView *v in @[ self.fbPreviewBtn, self.fbSendBtn, self.fbRetryBtn, self.fbMsg ])
         [fbRow addArrangedSubview:v];
+    [fbGroup addFullRow:fbDiagRow];
     [fbGroup addFullRow:fbRow];
     [fbGroup addFullRow:self.fbPreviewBox];
     [fbGroup addFullRow:self.fbResultBox];
@@ -5942,6 +6010,7 @@ static NSUInteger RLPUTF8Bytes(NSString *s) {
     [self captureLlmModelStateIfNeeded];
     [self.paneCache removeAllObjects];
     self.diagGroup = nil;
+    self.fbGroup = nil;
     self.srvGroup = nil;
     self.castGroup = nil;
     self.serversView = nil;
@@ -5968,6 +6037,7 @@ static NSUInteger RLPUTF8Bytes(NSString *s) {
     if (self.diagJsonBtn) [diagSecondaryBtns addObject:self.diagJsonBtn];
     if (self.diagSummaryBtn) [diagSecondaryBtns addObject:self.diagSummaryBtn];
     if (self.diagChannelsBtn) [diagSecondaryBtns addObject:self.diagChannelsBtn];
+    if (self.fbPreviewBtn) [diagSecondaryBtns addObject:self.fbPreviewBtn];
     if (self.fbRetryBtn) [diagSecondaryBtns addObject:self.fbRetryBtn];
     for (NSButton *b in diagSecondaryBtns) {
         b.layer.backgroundColor = t.hov.CGColor;
@@ -6017,6 +6087,7 @@ static NSUInteger RLPUTF8Bytes(NSString *s) {
 
     [self.paneCache removeAllObjects];
     self.diagGroup = nil;
+    self.fbGroup = nil;
     self.srvGroup = nil;
     self.castGroup = nil;
     self.serversView = nil;
