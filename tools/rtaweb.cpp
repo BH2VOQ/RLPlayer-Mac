@@ -41,8 +41,11 @@
 #include "diag/bundle.h"
 #include "diag/report.h"
 #include "net/feedback_redact.h"   // 诊断包脱敏**唯一入口**（F-7 2026-10-27：吸收上游 feedback.h 的规则清单）
+#include "net/feedback_api.h"      // 诊断通道探活：watchdog URL 常量
 #include "net/http_client.h"       // 封面在线抓取：http_get/http_post（platform/http.h 的平台封装）
 #include "net/json.h"              // /api/lib/cover/prefetch 解析网易 type=10 专辑搜索响应(2026-10-26)
+#include "net/update_channel.h"    // 诊断通道探活：当前更新通道与对应 manifest URL
+#include "net/update_check.h"      // 诊断通道探活：parse_update_config / kDefaultManifestUrl
 #include "net/shuffle_order.h"     // 随机播放排列（纯逻辑，tests/test_shuffle_order.cpp 覆盖）
 #include "cover_fetch.h"           // 封面抓取**纯逻辑**（目录穿越/Dice/图片头/负缓存过期，可离线单测）
 using rta::net::Library;
@@ -8677,6 +8680,163 @@ static std::string diag_case_id() {
 static std::string diag_sid() { return rta::diag::event_log().sid(); }
 static rta::diag::EventLog& diag_ui_log() { static rta::diag::EventLog log; return log; }
 
+// ---------------- 更新/反馈通道真实可达性探活（只读、不写日志、不发反馈、不下载包）----------------
+using DiagChannelsTransport = std::function<rta::platform::HttpResult(const rta::platform::HttpRequest&)>;
+static std::mutex& diag_channels_transport_mtx() {
+    static std::mutex m;
+    return m;
+}
+static DiagChannelsTransport& diag_channels_transport_slot() {
+    static DiagChannelsTransport fn;
+    return fn;
+}
+static void set_diag_channels_transport_for_test(DiagChannelsTransport fn) {
+    std::lock_guard<std::mutex> lk(diag_channels_transport_mtx());
+    diag_channels_transport_slot() = std::move(fn);
+}
+
+static std::mutex& diag_channels_cache_mtx() {
+    static std::mutex m;
+    return m;
+}
+static std::string& diag_channels_cache_slot() {
+    static std::string s;
+    return s;
+}
+static std::string diag_channels_cached_json() {
+    std::lock_guard<std::mutex> lk(diag_channels_cache_mtx());
+    return diag_channels_cache_slot();
+}
+static void clear_diag_channels_cache_for_test() {
+    std::lock_guard<std::mutex> lk(diag_channels_cache_mtx());
+    diag_channels_cache_slot().clear();
+}
+
+struct DiagChannelCheck {
+    std::string channel;
+    std::string url;
+    bool ok = false;
+    int http = 0;
+    long long latency = 0;
+    bool timedOut = false;
+    std::string error;
+};
+
+static rta::update::UpdateChannel diag_current_update_channel() {
+    std::string dir;
+    if (const char* env = std::getenv("RLPLAYER_STATE_DIR")) {
+        if (*env) {
+            dir = env;
+            while (!dir.empty() && (dir.back() == '\\' || dir.back() == '/')) dir.pop_back();
+        }
+    }
+    if (dir.empty()) dir = runtime_state_dir();
+    if (dir.empty()) return rta::update::kDefaultChannel;
+    const std::string path = rta::platform::join(dir, "update.conf");
+    if (path.empty()) return rta::update::kDefaultChannel;
+    std::ifstream f(path, std::ios::binary);
+    if (!f) return rta::update::kDefaultChannel;
+    std::string text((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+    return rta::update::parse_update_config(text).channel;
+}
+
+static DiagChannelCheck diag_probe_channel_get(const std::string& url,
+                                               const std::string& channel,
+                                               bool isFeedback,
+                                               const DiagChannelsTransport& transport) {
+    DiagChannelCheck out;
+    out.channel = channel;
+    out.url = url;
+    rta::platform::HttpRequest req;
+    req.method = "GET";
+    req.url = url;
+    req.timeoutMs = 4000;
+    req.proxy = rta::net::http_proxy();
+    req.cancel = rta::net::http_detail::current_cancellation_token();
+    const auto t0 = std::chrono::steady_clock::now();
+    // 直接走 platform::http_request（或测试注入），不走 traced_request 以免写入 http.end 诊断日志。
+    const rta::platform::HttpResult res = transport ? transport(req) : rta::platform::http_request(req);
+    out.latency = (long long)std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - t0).count();
+    if (out.latency < 0) out.latency = 0;
+    out.http = res.status;
+    out.timedOut = res.timedOut;
+
+    if (res.timedOut) {
+        out.ok = false;
+        out.error = res.error.empty() ? "timeout (>4000ms)" : res.error;
+    } else if (res.status >= 200 && res.status < 300) {
+        out.ok = true;
+        if (isFeedback && !res.body.empty()) {
+            const std::string bodyStr(res.body.begin(), res.body.end());
+            const auto j = rta::net::json_parse(bodyStr);
+            if (j.type == rta::net::Json::Obj &&
+                j["ok"].type == rta::net::Json::Bool && !j["ok"].b) {
+                out.ok = false;
+                std::string serr = j["error"].s();
+                if (serr.size() > 160) serr.resize(160);
+                out.error = serr.empty() ? "watchdog reported ok=false" : serr;
+            }
+        }
+    } else {
+        out.ok = false;
+        if (!res.error.empty()) {
+            out.error = res.error;
+        } else if (res.status > 0) {
+            out.error = "HTTP " + std::to_string(res.status);
+        } else {
+            out.error = "connection failed";
+        }
+    }
+    if (!out.error.empty()) {
+        out.error = rta::feedback::redact(rta::diag::redact_text(utf8_sanitize(out.error), nullptr, false));
+    }
+    return out;
+}
+
+static std::string diag_channels_probe_json() {
+    DiagChannelsTransport transport;
+    {
+        std::lock_guard<std::mutex> lk(diag_channels_transport_mtx());
+        transport = diag_channels_transport_slot();
+    }
+    const auto ch = diag_current_update_channel();
+    const std::string chCode = rta::update::channel_config_value(ch);
+    const std::string updUrl = rta::update::channel_manifest_url(ch, rta::update::kDefaultManifestUrl);
+    const std::string fbUrl = rta::feedback::kFeedbackWatchdogUrl;
+
+    const DiagChannelCheck upd = diag_probe_channel_get(updUrl, chCode, false, transport);
+    const DiagChannelCheck fb  = diag_probe_channel_get(fbUrl, "", true, transport);
+    const std::string checkedAt = rta::diag::iso8601_utc(std::time(nullptr));
+
+    auto appendOne = [](std::ostringstream& s, const DiagChannelCheck& c, bool includeChannel) {
+        s << "{";
+        if (includeChannel) s << "\"channel\":\"" << jesc(c.channel) << "\",";
+        s << "\"url\":\"" << jesc(c.url) << "\""
+          << ",\"ok\":" << (c.ok ? "true" : "false")
+          << ",\"http\":" << c.http
+          << ",\"latency\":" << c.latency
+          << ",\"timedOut\":" << (c.timedOut ? "true" : "false")
+          << ",\"error\":\"" << jesc(c.error) << "\""
+          << "}";
+    };
+
+    std::ostringstream j;
+    j << "{\"ok\":true"
+      << ",\"checkedAt\":\"" << jesc(checkedAt) << "\""
+      << ",\"update\":";
+    appendOne(j, upd, true);
+    j << ",\"feedback\":";
+    appendOne(j, fb, false);
+    j << "}";
+    const std::string out = j.str();
+    {
+        std::lock_guard<std::mutex> lk(diag_channels_cache_mtx());
+        diag_channels_cache_slot() = out;
+    }
+    return out;
+}
+
 static std::string diag_snapshot_json(bool withProbe) {
     auto& ps = g_ps;
     std::ostringstream j;
@@ -8825,6 +8985,10 @@ static std::string diag_snapshot_json(bool withProbe) {
     {
         std::lock_guard<std::mutex> lk(ps.mtx);
         j << ",\"lastError\":\"" << jesc(rta::diag::redact_text(ps.error)) << "\"";
+    }
+    {
+        const std::string cachedCh = diag_channels_cached_json();
+        j << ",\"channels\":" << (cachedCh.empty() ? "null" : cachedCh);
     }
     j << "}";
     return j.str();
@@ -14695,6 +14859,15 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
         j += "}";
         return j;
     }
+    if (path_no_query(rq.path) == "/api/diag/channels") {
+        ct = "application/json; charset=utf-8";
+        if (!rq.method.empty() && rq.method != "GET") {
+            rta::net::webui_set_status(405);
+            return "{\"ok\":false,\"error\":\"method not allowed\"}";
+        }
+        rta::net::webui_set_status(200);
+        return diag_channels_probe_json();
+    }
     if (path_no_query(rq.path) == "/api/diagzip") {
         ct = "application/zip";
         auto result = diag_bundle_assemble(diag_bundle_spec(), diag_bundle_items());
@@ -15640,7 +15813,8 @@ static std::string handle_traced(const rta::net::HttpRequest& request, std::stri
     act.ms = (long long)std::chrono::duration_cast<std::chrono::milliseconds>(
                  std::chrono::steady_clock::now() - t0).count();
     action_record(act);
-    if (act.path.rfind("/api/", 0) == 0 && act.path != "/api/ui/events") {
+    if (act.path.rfind("/api/", 0) == 0 && act.path != "/api/ui/events" &&
+        act.path != "/api/diag/channels") {
         rta::diag::Event e;
         e.evt = "request.end"; e.set_stage(rta::diag::Stage::Ui); e.rid = rid;
         e.str("path", act.path).str("method", act.method).num("status", act.status).num("elapsed_ms", act.ms).boolean("ok", act.ok);

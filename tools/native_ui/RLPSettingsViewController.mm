@@ -419,10 +419,14 @@ static NSStackView *RLPSRow(NSString *label, NSView *control, NSString *hint, RL
 @property (nonatomic, strong) RLPSettingsGroup *netGroup;
 
 // ---- 诊断页（web data-g=diag）----
+@property (nonatomic, strong) RLPSettingsGroup *diagGroup;
 @property (nonatomic, strong) NSButton *diagZipBtn;
 @property (nonatomic, strong) NSButton *diagJsonBtn;
 @property (nonatomic, strong) NSButton *diagSummaryBtn;
 @property (nonatomic, strong) NSTextField *diagMsg;
+@property (nonatomic, strong) NSButton *diagChannelsBtn;
+@property (nonatomic, strong) NSTextField *diagChannelsLabel;
+@property (nonatomic, assign) BOOL diagChannelsChecking;
 // 2026-11-13（第九/十/十一项）：诊断与反馈**不再用 NSPopover 承载**。
 // 旧实现把真实控件搬进气泡，而 RLPCardController 只钉宽、没给 preferredContentSize，
 // 搬进去的 620pt 宽 NSScrollView 又没有宽度约束 ⟹ 气泡塌成空框（用户截图：空白气泡）。
@@ -466,6 +470,8 @@ static NSStackView *RLPSRow(NSString *label, NSView *control, NSString *hint, RL
 @property (nonatomic, copy) void (^fbUploadTransport)(NSString *url, NSString *body, void (^reply)(NSInteger status, NSData * _Nullable body));
 /// 诊断摘要数据的测试接缝（生产路径仍走 /api/diag）。
 @property (nonatomic, copy) void (^diagSummaryTransport)(void (^done)(NSDictionary * _Nullable json));
+/// 通道连通性检查的测试接缝（生产路径走 /api/diag/channels）。
+@property (nonatomic, copy) void (^diagChannelsTransport)(void (^done)(NSDictionary * _Nullable json));
 @property (nonatomic, strong) NSSwitch *streamSwitch;
 
 // ---- 共用子界面 ----
@@ -1125,6 +1131,7 @@ static NSString *RLPBackendKeyForControl(NSString *identifier) {
                                                 @"browseRoot", @"addroot", @"rescan", @"roots",
                                                 @"libstats", @"diagzip", @"diagjson", @"diagsummary",
                                                 @"diagsummarytext", @"diagupload", @"diagmsg",
+                                                @"diagchannelsbtn", @"diagchannels",
                                                 @"updchannel", @"vercur", @"updcheck", @"updinstall",
                                                 @"updmsg", @"updbar", @"updfill", @"updnote",
                                                 @"fbtext", @"fbcount", @"fbchan", @"fbdiag",
@@ -1189,6 +1196,8 @@ static NSString *RLPControlIdentifier(NSString *key) {
             @"sp_diagzip": @"sp_diagzip", @"sp_diagjson": @"sp_diagjson",
             @"sp_diagsummary": @"sp_diagsummary",
             @"sp_diagmsg": @"sp_diagmsg",
+            @"sp_diagchannelsbtn": @"sp_diagchannelsbtn",
+            @"sp_diagchannels": @"sp_diagchannels",
             @"sp_updchannel": @"sp_updchannel", @"sp_vercur": @"sp_vercur",
             @"sp_updcheck": @"sp_updcheck", @"sp_updinstall": @"sp_updinstall",
             @"sp_updbeta": @"sp_updbeta", @"sp_updmsg": @"sp_updmsg",
@@ -2691,6 +2700,7 @@ static NSString *RLPSettingsControlValueString(NSView *v) {
     RLPSettingsGroup *diagGroup = (RLPSettingsGroup *)RLPSGroup(RLPTr(@"导出诊断包"), nil, t);
     diagGroup.identifier = @"sp_diaggroup";
     [stack addArrangedSubview:diagGroup];
+    self.diagGroup = diagGroup;
 
     self.diagZipBtn = [self primaryButton:@"导出诊断包（.zip）" ident:@"sp_diagzip"
                                    action:@selector(onExportDiagZip:)];
@@ -2711,6 +2721,34 @@ static NSString *RLPSettingsControlValueString(NSView *v) {
     self.diagMsg = [self hintForKey:@"sp_diagmsg" width:300];
     [diagRow addArrangedSubview:self.diagMsg];
     [diagGroup addFullRow:diagRow];
+
+    self.diagChannelsBtn = [self secondaryButton:@"检查反馈/更新通道"
+                                           ident:@"sp_diagchannelsbtn"
+                                          action:@selector(onCheckDiagChannels:)];
+    [self.diagChannelsBtn setContentHuggingPriority:NSLayoutPriorityRequired
+                                     forOrientation:NSLayoutConstraintOrientationHorizontal];
+    [self.diagChannelsBtn setContentCompressionResistancePriority:NSLayoutPriorityRequired
+                                                   forOrientation:NSLayoutConstraintOrientationHorizontal];
+    self.diagChannelsLabel = RLPLabel(@"", t.small, t.mut2);
+    self.diagChannelsLabel.identifier = @"sp_diagchannels";
+    self.diagChannelsLabel.maximumNumberOfLines = 4;
+    self.diagChannelsLabel.lineBreakMode = NSLineBreakByWordWrapping;
+    self.diagChannelsLabel.selectable = YES;
+    [self.diagChannelsLabel setContentHuggingPriority:NSLayoutPriorityDefaultLow
+                                       forOrientation:NSLayoutConstraintOrientationHorizontal];
+    [self.diagChannelsLabel setContentCompressionResistancePriority:1.0f
+                                                       forOrientation:NSLayoutConstraintOrientationHorizontal];
+    [self.diagChannelsLabel setContentCompressionResistancePriority:NSLayoutPriorityRequired
+                                                       forOrientation:NSLayoutConstraintOrientationVertical];
+    [[self.diagChannelsLabel.widthAnchor constraintLessThanOrEqualToConstant:380] setActive:YES];
+
+    NSStackView *chanRow = [[NSStackView alloc] init];
+    chanRow.orientation = NSUserInterfaceLayoutOrientationHorizontal;
+    chanRow.alignment = NSLayoutAttributeCenterY;
+    chanRow.spacing = 10;
+    [chanRow addArrangedSubview:self.diagChannelsBtn];
+    [chanRow addArrangedSubview:self.diagChannelsLabel];
+    [diagGroup addFullRow:chanRow];
 
     // 两行说明（web 原文，逐字）：第一行主文案，第二行补「已脱敏」。
     [diagGroup addNote:RLPTr(@"一个 zip 打包全部日志 / 系统信息 / 设置摘要")];
@@ -5535,6 +5573,96 @@ static BOOL sRLPConfirmBitPerfectFix = YES;
     [[RLPCoreClient shared] getJSON:@"/api/diag" completion:done];
 }
 
+static NSString *RLPFormatSingleDiagChannel(NSString *label, id _Nullable rawCh, BOOL *outOk) {
+    if (![rawCh isKindOfClass:[NSDictionary class]]) {
+        if (outOk) *outOk = NO;
+        return [NSString stringWithFormat:@"%@：%@", label, RLPTr(@"无结果")];
+    }
+    NSDictionary *ch = (NSDictionary *)rawCh;
+    const BOOL ok = [ch[@"ok"] respondsToSelector:@selector(boolValue)] && [ch[@"ok"] boolValue];
+    const NSInteger http = [ch[@"http"] respondsToSelector:@selector(integerValue)] ? [ch[@"http"] integerValue] : 0;
+    const NSInteger latency = [ch[@"latency"] respondsToSelector:@selector(integerValue)] ? [ch[@"latency"] integerValue] : 0;
+    const BOOL timedOut = [ch[@"timedOut"] respondsToSelector:@selector(boolValue)] && [ch[@"timedOut"] boolValue];
+    NSString *err = [ch[@"error"] isKindOfClass:[NSString class]] ? ch[@"error"] : @"";
+    err = [err stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+
+    if (ok) {
+        if (outOk) *outOk = YES;
+        return [NSString stringWithFormat:@"%@：HTTP %ld %ldms", label, (long)http, (long)latency];
+    }
+    if (outOk) *outOk = NO;
+    if (timedOut) {
+        if (err.length > 0 && ![err isEqualToString:@"timeout"]) {
+            return [NSString stringWithFormat:@"%@：超时（%@，%ldms）", label, err, (long)latency];
+        }
+        return [NSString stringWithFormat:@"%@：超时（%ldms）", label, (long)latency];
+    }
+    if (http > 0) {
+        NSString *httpTag = [NSString stringWithFormat:@"HTTP %ld", (long)http];
+        if (err.length > 0 && ![err isEqualToString:httpTag]) {
+            return [NSString stringWithFormat:@"%@：失败 %@（%@）%ldms", label, httpTag, err, (long)latency];
+        }
+        return [NSString stringWithFormat:@"%@：失败 %@（%ldms）", label, httpTag, (long)latency];
+    }
+    NSString *reason = err.length ? err : RLPTr(@"连接失败");
+    return [NSString stringWithFormat:@"%@：失败（%@）%ldms", label, reason, (long)latency];
+}
+
+- (void)onCheckDiagChannels:(id)sender {
+    (void)sender;
+    if (self.diagChannelsChecking) return;
+    if (!self.diagChannelsTransport && ![RLPCoreClient shared].started) {
+        self.diagChannelsLabel.stringValue = RLPTr(@"核心未启动");
+        self.diagChannelsLabel.textColor = [RLPTheme current].danger;
+        [self.diagGroup contentDidChange];
+        return;
+    }
+    self.diagChannelsChecking = YES;
+    self.diagChannelsBtn.enabled = NO;
+    self.diagChannelsLabel.textColor = [RLPTheme current].mut2;
+    self.diagChannelsLabel.stringValue = RLPTr(@"正在检查更新与反馈通道…");
+    [self.diagGroup contentDidChange];
+
+    __weak __typeof__(self) weakSelf = self;
+    void (^done)(NSDictionary * _Nullable) = ^(NSDictionary * _Nullable json) {
+        dispatch_block_t applyOnMain = ^{
+            __typeof__(self) self_ = weakSelf;
+            if (!self_) return;
+            self_.diagChannelsChecking = NO;
+            self_.diagChannelsBtn.enabled = YES;
+            RLPTheme *t = [RLPTheme current];
+            if (![json isKindOfClass:[NSDictionary class]]) {
+                self_.diagChannelsLabel.stringValue = RLPTr(@"通道检查失败：核心未响应");
+                self_.diagChannelsLabel.textColor = t.danger;
+                [self_.diagGroup contentDidChange];
+                return;
+            }
+            if (json[@"ok"] && ![json[@"ok"] boolValue]) {
+                NSString *err = [json[@"error"] isKindOfClass:[NSString class]] ? json[@"error"] : RLPTr(@"未知错误");
+                self_.diagChannelsLabel.stringValue = [NSString stringWithFormat:@"%@：%@", RLPTr(@"通道检查失败"), err];
+                self_.diagChannelsLabel.textColor = t.danger;
+                [self_.diagGroup contentDidChange];
+                return;
+            }
+            BOOL updOk = NO;
+            BOOL fbOk = NO;
+            NSString *updStr = RLPFormatSingleDiagChannel(RLPTr(@"更新"), json[@"update"], &updOk);
+            NSString *fbStr = RLPFormatSingleDiagChannel(RLPTr(@"反馈"), json[@"feedback"], &fbOk);
+            self_.diagChannelsLabel.stringValue = [NSString stringWithFormat:@"%@ / %@", updStr, fbStr];
+            self_.diagChannelsLabel.textColor = (updOk && fbOk) ? t.okText : t.danger;
+            [self_.diagGroup contentDidChange];
+        };
+        if ([NSThread isMainThread]) applyOnMain();
+        else dispatch_async(dispatch_get_main_queue(), applyOnMain);
+    };
+
+    if (self.diagChannelsTransport) {
+        self.diagChannelsTransport(done);
+        return;
+    }
+    [[RLPCoreClient shared] getJSON:@"/api/diag/channels" completion:done];
+}
+
 /// web #bNet 同语义：**点击才查询** /api/net，结果写进 sp_netmsg。
 /// 单进程形态下 http=false，据此如实显示，不编一个能点的地址（那是误导，比空白更糟）。
 - (void)onNetInfo:(id)sender {
@@ -5813,6 +5941,7 @@ static NSUInteger RLPUTF8Bytes(NSString *s) {
     if (!self.eqDraftState && self.eqView) self.eqDraftState = [self.eqView rlp_captureDraftState];
     [self captureLlmModelStateIfNeeded];
     [self.paneCache removeAllObjects];
+    self.diagGroup = nil;
     self.srvGroup = nil;
     self.castGroup = nil;
     self.serversView = nil;
@@ -5838,6 +5967,7 @@ static NSUInteger RLPUTF8Bytes(NSString *s) {
     NSMutableArray<NSButton *> *diagSecondaryBtns = [NSMutableArray array];
     if (self.diagJsonBtn) [diagSecondaryBtns addObject:self.diagJsonBtn];
     if (self.diagSummaryBtn) [diagSecondaryBtns addObject:self.diagSummaryBtn];
+    if (self.diagChannelsBtn) [diagSecondaryBtns addObject:self.diagChannelsBtn];
     if (self.fbRetryBtn) [diagSecondaryBtns addObject:self.fbRetryBtn];
     for (NSButton *b in diagSecondaryBtns) {
         b.layer.backgroundColor = t.hov.CGColor;
@@ -5886,6 +6016,7 @@ static NSUInteger RLPUTF8Bytes(NSString *s) {
     }
 
     [self.paneCache removeAllObjects];
+    self.diagGroup = nil;
     self.srvGroup = nil;
     self.castGroup = nil;
     self.serversView = nil;
