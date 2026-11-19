@@ -1699,13 +1699,7 @@ int main() {
                 rcfg.outRate = 88200;
                 rcfg.channels = 2;
                 const auto* fp = rta::dsp::find_preset("poly-sinc-lp", false);
-                rcfg.totalTaps = fp->taps;
-                rcfg.transition = fp->transition;
-                rcfg.attenDb = fp->attenDb;
-                rcfg.window = fp->window;
-                rcfg.phase = fp->phase;
-                rcfg.twoStage = fp->twoStage;
-                rcfg.minTapsPerInput = fp->tapsPerInput;
+                rta::dsp::apply_preset(rcfg, *fp);
 
                 rta::dsp::PolyphaseResampler testResampler(rcfg);
                 uint64_t refWritten = 0;

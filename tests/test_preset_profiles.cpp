@@ -225,7 +225,7 @@ int main() {
         ck(s.rate == "96000", "Case 8: pcm/96k 设备 ⟹ rate=96000（不写 384000）", s.rate);
         ck(s.rate != "384000", "Case 8: pcm/96k 设备 ⟹ rate 不是 384000");
         ck(s.filter == "poly-sinc-tight-lp", "Case 8: pcm ⟹ filter=poly-sinc-tight-lp");
-        ck(s.minTapsPerInput == 512, "Case 8: pcm ⟹ minTapsPerInput=512（高倍率下 20 kHz 的保命线）");
+        ck(s.minTapsPerInput == 1600, "Case 8: pcm ⟹ minTapsPerInput=1600（高倍率下 20 kHz 的保命线）");
         ck(s.shaper == "auto", "Case 8: pcm ⟹ shaper=auto");
         ck(s.dsd == 0, "Case 8: pcm ⟹ dsd=0");
         ck(s.modFamily.empty() && s.modOrder == 0, "Case 8: pcm ⟹ 不动 modfamily/modorder");
@@ -276,8 +276,8 @@ int main() {
         ck(s.shaper == "auto", "Case 12: 降级后 shaper=auto（PCM 路径）");
         ck(s.modFamily.empty() && s.modOrder == 0, "Case 12: 降级后不动调制器");
         ck(has_note(s, "降级为 PCM"), "Case 12: note 写明已降级为 PCM 升频");
-        ck(s.filter == "poly-sinc-tight-lp" && s.minTapsPerInput == 512,
-           "Case 12: 降级后仍保留 poly-sinc-tight-lp + 512 taps");
+        ck(s.filter == "poly-sinc-tight-lp" && s.minTapsPerInput == 1600,
+           "Case 12: 降级后仍保留 poly-sinc-tight-lp + 1600 taps");
     }
 
     // ---- ⑬ DSD 升频：原生最高档命中 + 调制器 ec/7 ----
@@ -286,8 +286,8 @@ int main() {
         const PresetSettings s = plan_preset(PresetProfile::Dsd, c, pcm_src(44100, 16));
         ck(s.dsd == 256, "Case 13: dsd/原生 dsd256 ⟹ 目标 DSD256");
         ck(s.modFamily == "ec" && s.modOrder == 7, "Case 13: dsd ⟹ modfamily=ec / modorder=7");
-        ck(s.filter == "poly-sinc-tight-lp" && s.minTapsPerInput == 512,
-           "Case 13: dsd ⟹ poly-sinc-tight-lp + 512 taps");
+        ck(s.filter == "poly-sinc-tight-lp" && s.minTapsPerInput == 1600,
+           "Case 13: dsd ⟹ poly-sinc-tight-lp + 1600 taps");
         ck(s.rate == "src", "Case 13: dsd ⟹ rate=src");
         ck(s.shaper == "none", "Case 13: dsd ⟹ shaper=none（DoP 强制无抖动）");
         ck(s.directSdm == 0, "Case 13: 源是 PCM ⟹ directSdm=0");
@@ -405,7 +405,7 @@ int main() {
         ck(s.modFamily == "ec", "Case 19: pcm2dsd ⟹ modFamily=ec", s.modFamily);
         ck(s.modOrder == 7, "Case 19: pcm2dsd ⟹ modOrder=7", std::to_string(s.modOrder));
         ck(s.filter == "poly-sinc-tight-lp", "Case 19: pcm2dsd ⟹ filter=poly-sinc-tight-lp", s.filter);
-        ck(s.minTapsPerInput == 512, "Case 19: pcm2dsd ⟹ minTapsPerInput=512",
+        ck(s.minTapsPerInput == 1600, "Case 19: pcm2dsd ⟹ minTapsPerInput=1600",
            std::to_string(s.minTapsPerInput));
         ck(s.shaper == "none", "Case 19: pcm2dsd ⟹ shaper=none（抖动交给 1-bit 量化）", s.shaper);
         ck(s.rate == "src", "Case 19: pcm2dsd ⟹ rate=src（载波由 dsd 档决定，不由 rate）", s.rate);
@@ -463,8 +463,8 @@ int main() {
         ck(s.rate == "96000", "Case 21: 降级后升到设备最高 96000 Hz", s.rate);
         ck(s.shaper == "auto", "Case 21: 降级后 shaper=auto（PCM 路径）", s.shaper);
         ck(s.modFamily.empty() && s.modOrder == 0, "Case 21: 降级后不动调制器");
-        ck(s.filter == "poly-sinc-tight-lp" && s.minTapsPerInput == 512,
-           "Case 21: 降级后仍保留 poly-sinc-tight-lp + 512 taps");
+        ck(s.filter == "poly-sinc-tight-lp" && s.minTapsPerInput == 1600,
+           "Case 21: 降级后仍保留 poly-sinc-tight-lp + 1600 taps");
     }
 
     // ---- ㉒ pcm2dsd：探测全空 ⟹ dsd=0 + follow + note（不假装支持） ----
@@ -523,59 +523,59 @@ int main() {
         // 2026-10-26 加第 4 档**之前**的实测基线（54 条 = 6 设备 × 3 源 × 3 档，顺序固定）
         static const char* kBaseline[54] = {
         "bitperfect|src|0||0||0|none|0|1|0",
-        "pcm|384000|0||0|poly-sinc-tight-lp|512|auto|0|1|0",
-        "dsd|src|256|ec|7|poly-sinc-tight-lp|512|none|0|1|0",
+        "pcm|384000|0||0|poly-sinc-tight-lp|1600|auto|0|1|0",
+        "dsd|src|256|ec|7|poly-sinc-tight-lp|1600|none|0|1|0",
         "bitperfect|src|0||0||0|none|0|1|0",
-        "pcm|384000|0||0|poly-sinc-tight-lp|512|auto|0|1|0",
-        "dsd|src|256|ec|7|poly-sinc-tight-lp|512|none|0|1|0",
+        "pcm|384000|0||0|poly-sinc-tight-lp|1600|auto|0|1|0",
+        "dsd|src|256|ec|7|poly-sinc-tight-lp|1600|none|0|1|0",
         "bitperfect|src|64||0||0|none|1|1|0",
-        "pcm|384000|0||0|poly-sinc-tight-lp|512|auto|0|1|0",
-        "dsd|src|256|ec|7|poly-sinc-tight-lp|512|none|0|1|0",
+        "pcm|384000|0||0|poly-sinc-tight-lp|1600|auto|0|1|0",
+        "dsd|src|256|ec|7|poly-sinc-tight-lp|1600|none|0|1|0",
         "bitperfect|src|0||0||0|none|0|1|0",
-        "pcm|96000|0||0|poly-sinc-tight-lp|512|auto|0|1|0",
-        "dsd|96000|0||0|poly-sinc-tight-lp|512|auto|0|1|0",
+        "pcm|96000|0||0|poly-sinc-tight-lp|1600|auto|0|1|0",
+        "dsd|96000|0||0|poly-sinc-tight-lp|1600|auto|0|1|0",
         "bitperfect|src|0||0||0|none|0|1|0",
-        "pcm|96000|0||0|poly-sinc-tight-lp|512|auto|0|1|0",
-        "dsd|96000|0||0|poly-sinc-tight-lp|512|auto|0|1|0",
+        "pcm|96000|0||0|poly-sinc-tight-lp|1600|auto|0|1|0",
+        "dsd|96000|0||0|poly-sinc-tight-lp|1600|auto|0|1|0",
         "bitperfect|src|0||0||0|none|0|1|0",
-        "pcm|96000|0||0|poly-sinc-tight-lp|512|auto|0|1|0",
-        "dsd|96000|0||0|poly-sinc-tight-lp|512|auto|0|1|0",
+        "pcm|96000|0||0|poly-sinc-tight-lp|1600|auto|0|1|0",
+        "dsd|96000|0||0|poly-sinc-tight-lp|1600|auto|0|1|0",
         "bitperfect|src|0||0||0|none|0|1|0",
-        "pcm|192000|0||0|poly-sinc-tight-lp|512|auto|0|1|0",
-        "dsd|src|64|ec|7|poly-sinc-tight-lp|512|none|0|1|0",
+        "pcm|192000|0||0|poly-sinc-tight-lp|1600|auto|0|1|0",
+        "dsd|src|64|ec|7|poly-sinc-tight-lp|1600|none|0|1|0",
         "bitperfect|src|0||0||0|none|0|1|0",
-        "pcm|192000|0||0|poly-sinc-tight-lp|512|auto|0|1|0",
-        "dsd|src|64|ec|7|poly-sinc-tight-lp|512|none|0|1|0",
+        "pcm|192000|0||0|poly-sinc-tight-lp|1600|auto|0|1|0",
+        "dsd|src|64|ec|7|poly-sinc-tight-lp|1600|none|0|1|0",
         "bitperfect|src|64||0||0|none|1|1|0",
-        "pcm|192000|0||0|poly-sinc-tight-lp|512|auto|0|1|0",
-        "dsd|src|64|ec|7|poly-sinc-tight-lp|512|none|1|1|0",
+        "pcm|192000|0||0|poly-sinc-tight-lp|1600|auto|0|1|0",
+        "dsd|src|64|ec|7|poly-sinc-tight-lp|1600|none|1|1|0",
         "bitperfect|src|0||0||0|none|0|1|0",
-        "pcm|src|0||0|poly-sinc-tight-lp|512|auto|0|1|0",
-        "dsd|src|0||0|poly-sinc-tight-lp|512|none|0|1|0",
+        "pcm|src|0||0|poly-sinc-tight-lp|1600|auto|0|1|0",
+        "dsd|src|0||0|poly-sinc-tight-lp|1600|none|0|1|0",
         "bitperfect|src|0||0||0|none|0|1|0",
-        "pcm|src|0||0|poly-sinc-tight-lp|512|auto|0|1|0",
-        "dsd|src|0||0|poly-sinc-tight-lp|512|none|0|1|0",
+        "pcm|src|0||0|poly-sinc-tight-lp|1600|auto|0|1|0",
+        "dsd|src|0||0|poly-sinc-tight-lp|1600|none|0|1|0",
         "bitperfect|src|64||0||0|none|0|1|0",
-        "pcm|src|0||0|poly-sinc-tight-lp|512|auto|0|1|0",
-        "dsd|src|0||0|poly-sinc-tight-lp|512|none|0|1|0",
+        "pcm|src|0||0|poly-sinc-tight-lp|1600|auto|0|1|0",
+        "dsd|src|0||0|poly-sinc-tight-lp|1600|none|0|1|0",
         "bitperfect|src|0||0||0|none|0|1|0",
-        "pcm|384000|0||0|poly-sinc-tight-lp|512|auto|0|1|0",
-        "dsd|src|256|ec|7|poly-sinc-tight-lp|512|none|0|1|0",
+        "pcm|384000|0||0|poly-sinc-tight-lp|1600|auto|0|1|0",
+        "dsd|src|256|ec|7|poly-sinc-tight-lp|1600|none|0|1|0",
         "bitperfect|src|0||0||0|none|0|1|0",
-        "pcm|384000|0||0|poly-sinc-tight-lp|512|auto|0|1|0",
-        "dsd|src|256|ec|7|poly-sinc-tight-lp|512|none|0|1|0",
+        "pcm|384000|0||0|poly-sinc-tight-lp|1600|auto|0|1|0",
+        "dsd|src|256|ec|7|poly-sinc-tight-lp|1600|none|0|1|0",
         "bitperfect|src|64||0||0|none|1|1|0",
-        "pcm|384000|0||0|poly-sinc-tight-lp|512|auto|0|1|0",
-        "dsd|src|256|ec|7|poly-sinc-tight-lp|512|none|0|1|0",
+        "pcm|384000|0||0|poly-sinc-tight-lp|1600|auto|0|1|0",
+        "dsd|src|256|ec|7|poly-sinc-tight-lp|1600|none|0|1|0",
         "bitperfect|src|0||0||0|none|0|1|0",
-        "pcm|384000|0||0|poly-sinc-tight-lp|512|auto|0|1|0",
-        "dsd|src|512|ec|7|poly-sinc-tight-lp|512|none|0|1|0",
+        "pcm|384000|0||0|poly-sinc-tight-lp|1600|auto|0|1|0",
+        "dsd|src|512|ec|7|poly-sinc-tight-lp|1600|none|0|1|0",
         "bitperfect|src|0||0||0|none|0|1|0",
-        "pcm|384000|0||0|poly-sinc-tight-lp|512|auto|0|1|0",
-        "dsd|src|512|ec|7|poly-sinc-tight-lp|512|none|0|1|0",
+        "pcm|384000|0||0|poly-sinc-tight-lp|1600|auto|0|1|0",
+        "dsd|src|512|ec|7|poly-sinc-tight-lp|1600|none|0|1|0",
         "bitperfect|src|64||0||0|none|1|1|0",
-        "pcm|384000|0||0|poly-sinc-tight-lp|512|auto|0|1|0",
-        "dsd|src|512|ec|7|poly-sinc-tight-lp|512|none|0|1|0",
+        "pcm|384000|0||0|poly-sinc-tight-lp|1600|auto|0|1|0",
+        "dsd|src|512|ec|7|poly-sinc-tight-lp|1600|none|0|1|0",
         };
         int idx = 0, mismatch = 0;
         std::string firstBad;
