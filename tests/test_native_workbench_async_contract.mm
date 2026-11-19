@@ -21,6 +21,7 @@
 #import <objc/runtime.h>
 #import "RLPCoreClient.h"
 #import "RLPWorkbenchViewController.h"
+#import "RLPWorkbench.h"
 #import "RLPEqualizerView.h"
 #import "RLPTheme.h"
 #import "RLPSupport.h"
@@ -56,6 +57,10 @@ static void Ck(BOOL ok, const char *what, NSString *detail) {
 @property (nonatomic, assign) BOOL chainCompact;
 @property (nonatomic, assign) BOOL abCompact;
 @property (nonatomic, strong) NSMutableArray<NSView *> *abSlotCards;
+@property (nonatomic, strong) NSMutableArray<NSDictionary *> *abSlots;
+@property (nonatomic, strong) NSMutableArray<NSButton *> *abButtons;
+@property (nonatomic, strong) NSMutableArray<NSTextField *> *abSummaries;
+@property (nonatomic, assign) NSInteger abActive;
 @property (nonatomic, copy) NSArray<NSDictionary *> *devices;
 @property (nonatomic, assign) NSUInteger devicesSeq;
 @property (nonatomic, assign) BOOL peqBypassed;
@@ -105,6 +110,10 @@ static void Ck(BOOL ok, const char *what, NSString *detail) {
 - (void)applyDevicesPayload:(nullable NSDictionary *)json forSeq:(NSUInteger)seq;
 - (void)applyLanguage;
 - (void)maybeAutoAnalyzeFromStatus;
+- (void)onABPick:(NSButton *)sender;
+- (void)onABSave:(NSButton *)sender;
+- (void)refreshAB;
+- (void)postSettings:(NSDictionary<NSString *, NSString *> *)kv;
 @property (nonatomic, assign) NSUInteger statusSeq;
 @end
 
@@ -388,6 +397,38 @@ static NSView * _Nullable FindSubviewByIdentifier(NSView *root, NSString *ident)
         if (found) return found;
     }
     return nil;
+}
+
+static NSString *DescribeBorderColor(CGColorRef cg) {
+    if (!cg) return @"nil";
+    CGColorSpaceRef srgb = CGColorSpaceCreateWithName(kCGColorSpaceSRGB);
+    CGColorRef conv = CGColorCreateCopyByMatchingToColorSpace(srgb, kCGRenderingIntentDefault, cg, NULL);
+    CGColorSpaceRelease(srgb);
+    CGColorRef src = conv ?: cg;
+    const size_t n = CGColorGetNumberOfComponents(src);
+    const CGFloat *c = CGColorGetComponents(src);
+    NSString *out = @"";
+    if (n >= 4) out = [NSString stringWithFormat:@"rgba(%.3f,%.3f,%.3f,%.3f)", c[0], c[1], c[2], c[3]];
+    else if (n == 2) out = [NSString stringWithFormat:@"gray(%.3f,a=%.3f)", c[0], c[1]];
+    else out = [NSString stringWithFormat:@"comps(%zu)", n];
+    if (conv) CGColorRelease(conv);
+    return out;
+}
+
+static BOOL IsRedBorderColor(CGColorRef cg) {
+    if (!cg) return NO;
+    CGColorSpaceRef srgb = CGColorSpaceCreateWithName(kCGColorSpaceSRGB);
+    CGColorRef conv = CGColorCreateCopyByMatchingToColorSpace(srgb, kCGRenderingIntentDefault, cg, NULL);
+    CGColorSpaceRelease(srgb);
+    CGColorRef src = conv ?: cg;
+    const size_t n = CGColorGetNumberOfComponents(src);
+    const CGFloat *c = CGColorGetComponents(src);
+    BOOL isRed = NO;
+    if (n >= 4) {
+        isRed = (c[0] >= 0.65 && c[3] >= 0.8 && c[0] > c[1] * 1.8 && c[0] > c[2] * 1.8);
+    }
+    if (conv) CGColorRelease(conv);
+    return isRed;
 }
 
 int main() {
@@ -1578,6 +1619,142 @@ int main() {
             Ck(r3Ok && advOk && eqOk && monOk,
                "12c (R3): 900x600/1180x760/680x600 + zh/en + light/dark + adv/eq/monitor all stay maxX<=clip with disjoint A/B slots",
                [badDetails componentsJoinedByString:@" | "]);
+        }
+
+        // -----------------------------------------------------------------
+        // 13. A/B/C/D 槽选中红框、无意义 A=B 来回按钮移除、切换不丢配置且失败不假高亮
+        // -----------------------------------------------------------------
+        {
+            id savedABSlotsPref = [ud objectForKey:@"RLPWorkbenchABSlots"];
+            [ud removeObjectForKey:@"RLPWorkbenchABSlots"];
+
+            g_spy.failSettingsPost = NO;
+            g_spy.returnNilForSettingsPost = NO;
+            g_spy.settingsKV = [@{
+                @"device": @"devA",
+                @"backend": @"coreaudio",
+                @"shaper": @"auto",
+                @"bits": @"-1",
+                @"filter": @"sinc-M",
+                @"rate": @"176400",
+            } mutableCopy];
+            [g_spy.postLog removeAllObjects];
+
+            RLPWorkbenchViewController *vc = MakeOffscreenWorkbench();
+            [vc reloadSettings];
+            Pump(0.05);
+
+            NSView *toggleBtn = FindSubviewByIdentifier(vc.view, @"wb.ab.toggle");
+            Ck(toggleBtn == nil && vc.abSlotCards.count == 4 && vc.abButtons.count == 4,
+               "13a: meaningless wb.ab.toggle button is removed while A/B/C/D cards and pick buttons remain",
+               [NSString stringWithFormat:@"toggle=%@ cards=%lu btns=%lu",
+                toggleBtn, (unsigned long)vc.abSlotCards.count, (unsigned long)vc.abButtons.count]);
+
+            // A/B 含子集键（模拟旧存档或少键场景）+ C/D 含完整快照；切换不得丢已存配置
+            vc.abSlots[0] = RLPABSnapshotFromSettings(@{@"filter": @"poly-sinc-gauss-long", @"rate": @"follow"});
+            vc.abSlots[1] = RLPABSnapshotFromSettings(@{@"filter": @"sinc-M", @"rate": @"176400"});
+            vc.abSlots[2] = RLPABSnapshotFromSettings(@{@"filter": @"ext2", @"rate": @"96000", @"shaper": @"LNS15"});
+            vc.abSlots[3] = RLPABSnapshotFromSettings(@{@"filter": @"poly-sinc-short-lp", @"rate": @"88200", @"shaper": @"NS5"});
+            [vc refreshAB];
+
+            BOOL (^VerifyOnlySlotActive)(NSInteger, NSString *) = ^BOOL(NSInteger expectedSlot, NSString *tag) {
+                if (vc.abActive != expectedSlot) {
+                    std::printf("  [%s] abActive=%ld expected=%ld\n", tag.UTF8String, (long)vc.abActive, (long)expectedSlot);
+                    return NO;
+                }
+                NSArray<NSString *> *slotNames = @[@"A", @"B", @"C", @"D"];
+                BOOL allOk = YES;
+                for (NSInteger i = 0; i < 4; ++i) {
+                    NSView *card = vc.abSlotCards[(NSUInteger)i];
+                    const CGFloat bw = card.layer.borderWidth;
+                    CGColorRef bc = card.layer.borderColor;
+                    const BOOL isRed = IsRedBorderColor(bc);
+                    std::printf("  [%s slot %s] active=%d borderWidth=%.2f borderColor=%s isRed=%d\n",
+                                tag.UTF8String, slotNames[(NSUInteger)i].UTF8String,
+                                (i == expectedSlot) ? 1 : 0, bw,
+                                DescribeBorderColor(bc).UTF8String, isRed ? 1 : 0);
+                    if (i == expectedSlot) {
+                        if (!(bw >= 1.5 && isRed)) allOk = NO;
+                    } else {
+                        if (!(bw < 1.5 && !isRed)) allOk = NO;
+                    }
+                    BOOL labelVisible = NO;
+                    for (NSView *sub in card.subviews) {
+                        if ([sub isKindOfClass:NSTextField.class] &&
+                            [((NSTextField *)sub).stringValue isEqualToString:slotNames[(NSUInteger)i]] &&
+                            !sub.isHidden && sub.alphaValue > 0.5) {
+                            labelVisible = YES;
+                        }
+                    }
+                    if (!labelVisible || vc.abSummaries[(NSUInteger)i].isHidden || !vc.abSummaries[(NSUInteger)i].stringValue.length) {
+                        allOk = NO;
+                    }
+                }
+                return allOk;
+            };
+
+            // 13b: 点击 A 切换 -> A 显示红框 (>=1.5, red)，B/C/D 无红框
+            [vc.abButtons[0] performClick:nil];
+            Pump(0.05);
+            Ck(VerifyOnlySlotActive(0, @"13b-pick-A") &&
+               [vc.settings[@"filter"] isEqualToString:@"poly-sinc-gauss-long"] &&
+               [vc.abSlots[0][@"filter"] isEqualToString:@"poly-sinc-gauss-long"] &&
+               [vc.abSlots[1][@"filter"] isEqualToString:@"sinc-M"] &&
+               [vc.abSlots[2][@"filter"] isEqualToString:@"ext2"] &&
+               [vc.abSlots[3][@"filter"] isEqualToString:@"poly-sinc-short-lp"],
+               "13b: picking slot A shows red border (>=1.5) only on A, clears B/C/D, and preserves all saved slots",
+               [NSString stringWithFormat:@"abActive=%ld filter=%@", (long)vc.abActive, vc.settings[@"filter"]]);
+
+            // 13c: 依次点击 B / C / D 切换 -> 同一时刻仅当前槽有红框，其余恢复普通边框
+            [vc.abButtons[1] performClick:nil];
+            Pump(0.05);
+            const BOOL bOk = VerifyOnlySlotActive(1, @"13c-pick-B");
+            [vc.abButtons[2] performClick:nil];
+            Pump(0.05);
+            const BOOL cOk = VerifyOnlySlotActive(2, @"13c-pick-C");
+            [vc.abButtons[3] performClick:nil];
+            Pump(0.05);
+            const BOOL dOk = VerifyOnlySlotActive(3, @"13c-pick-D");
+            Ck(bOk && cOk && dOk &&
+               [vc.abSlots[0][@"filter"] isEqualToString:@"poly-sinc-gauss-long"] &&
+               [vc.abSlots[1][@"filter"] isEqualToString:@"sinc-M"] &&
+               [vc.abSlots[2][@"filter"] isEqualToString:@"ext2"] &&
+               [vc.abSlots[3][@"filter"] isEqualToString:@"poly-sinc-short-lp"],
+               "13c: picking B/C/D keeps exactly one red border on active slot and preserves all slot configs", @"");
+
+            // 13d: 切回 A 后，POST 失败切换 B 不得假装高亮 B
+            [vc.abButtons[0] performClick:nil];
+            Pump(0.05);
+            g_spy.failSettingsPost = YES;
+            [vc.abButtons[1] performClick:nil];
+            Pump(0.05);
+            g_spy.failSettingsPost = NO;
+            Ck(VerifyOnlySlotActive(0, @"13d-fail-B-keep-A"),
+               "13d: failed POST when switching to B keeps A active with red border", @"");
+
+            // 13e: 暗色 apple / 浅色 classic 主题下当前槽 A 仍保持红框
+            [RLPTheme setThemeName:@"dark"];
+            [RLPTheme setUiStyle:@"apple"];
+            [vc applyTheme];
+            const BOOL darkOk = VerifyOnlySlotActive(0, @"13e-dark-apple");
+            [RLPTheme setThemeName:@"light"];
+            [RLPTheme setUiStyle:@"classic"];
+            [vc applyTheme];
+            const BOOL classicOk = VerifyOnlySlotActive(0, @"13e-light-classic");
+            [RLPTheme setThemeName:@"light"];
+            [RLPTheme setUiStyle:@"apple"];
+            [vc applyTheme];
+            Ck(darkOk && classicOk,
+               "13e: active slot A preserves red border across dark/apple and light/classic themes", @"");
+
+            // 13f: 手动改动听感参数后清除选中红框
+            [vc postSettings:@{@"filter": @"manual-custom-filter"}];
+            Pump(0.05);
+            Ck(VerifyOnlySlotActive(-1, @"13f-manual-clear"),
+               "13f: manual filter change clears active slot highlight across all 4 cards", @"");
+
+            if (savedABSlotsPref) [ud setObject:savedABSlotsPref forKey:@"RLPWorkbenchABSlots"];
+            else [ud removeObjectForKey:@"RLPWorkbenchABSlots"];
         }
 
         method_setImplementation(shared, origShared);

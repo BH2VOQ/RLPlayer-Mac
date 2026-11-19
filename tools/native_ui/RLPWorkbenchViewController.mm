@@ -145,8 +145,11 @@ static void RLPWorkbenchMakePopupTruncate(NSPopUpButton * _Nullable pop) {
 @property (nonatomic, strong) NSMutableArray<NSDictionary *> *abSlots;
 @property (nonatomic, strong) NSMutableArray<NSButton *> *abButtons;
 @property (nonatomic, strong) NSMutableArray<NSTextField *> *abSummaries;
-@property (nonatomic, strong) NSButton *abToggle;
 @property (nonatomic, assign) NSInteger abActive;
+@property (nonatomic, assign) NSInteger abPickedSlot;
+@property (nonatomic, assign) NSInteger abPendingPickSlot;
+@property (nonatomic, assign) BOOL inABPickPost;
+@property (nonatomic, assign) NSUInteger abPickSeq;
 
 // U16 命名配置档（/api/profiles，收拢为入口 + 同层折叠面板）
 @property (nonatomic, strong) NSMutableArray<NSDictionary *> *profiles;
@@ -344,6 +347,8 @@ static void RLPWorkbenchMakePopupTruncate(NSPopUpButton * _Nullable pop) {
         _abButtons = [NSMutableArray array];
         _abSummaries = [NSMutableArray array];
         _abActive = -1;
+        _abPickedSlot = -1;
+        _abPendingPickSlot = -1;
         _abSlots = [NSMutableArray array];
         _profiles = [NSMutableArray array];
         _profileActive = @"";
@@ -1264,6 +1269,50 @@ static void RLPWorkbenchMakePopupTruncate(NSPopUpButton * _Nullable pop) {
 
 #pragma mark - 播放台：A-D 固定工具区
 
+static NSString *RLPABNormValue(id _Nullable v) {
+    if ([v isKindOfClass:[NSString class]]) return (NSString *)v;
+    if ([v isKindOfClass:[NSNumber class]]) return [(NSNumber *)v stringValue];
+    return @"";
+}
+
+static BOOL RLPABParseDoubleStrict(NSString *s, double *outVal) {
+    if (!s.length) return NO;
+    NSScanner *sc = [NSScanner scannerWithString:s];
+    double val = 0.0;
+    if (![sc scanDouble:&val] || !sc.isAtEnd) return NO;
+    if (outVal) *outVal = val;
+    return YES;
+}
+
+static BOOL RLPABValueEqual(NSString *a, NSString *b) {
+    if ([a isEqualToString:b]) return YES;
+    const BOOL aEmptyOrZero = (a.length == 0 || [a isEqualToString:@"0"]);
+    const BOOL bEmptyOrZero = (b.length == 0 || [b isEqualToString:@"0"]);
+    if (aEmptyOrZero && bEmptyOrZero) return YES;
+    double da = 0.0, db = 0.0;
+    if (RLPABParseDoubleStrict(a, &da) && RLPABParseDoubleStrict(b, &db)) {
+        const double diff = da - db;
+        return (diff > -1e-9 && diff < 1e-9);
+    }
+    return NO;
+}
+
+static BOOL RLPABSlotMatchesSettings(NSDictionary * _Nullable slot, NSDictionary * _Nullable settings) {
+    if (![slot isKindOfClass:[NSDictionary class]] || !slot.count) return NO;
+    if (![settings isKindOfClass:[NSDictionary class]] || !settings.count) return NO;
+    for (NSString *k in slot) {
+        NSString *sv = RLPABNormValue(slot[k]);
+        id rawCv = settings[k];
+        if (!rawCv) {
+            if (sv.length > 0 && ![sv isEqualToString:@"0"]) return NO;
+            continue;
+        }
+        NSString *cv = RLPABNormValue(rawCv);
+        if (!RLPABValueEqual(sv, cv)) return NO;
+    }
+    return YES;
+}
+
 - (void)buildABSlots {
     RLPTheme *t = [RLPTheme current];
     NSView *card = [self cardWithIdentifier:@"wb.ab"];
@@ -1281,22 +1330,11 @@ static void RLPWorkbenchMakePopupTruncate(NSPopUpButton * _Nullable pop) {
         [inner.bottomAnchor constraintEqualToAnchor:card.bottomAnchor],
     ]];
 
-    NSStackView *head = [[NSStackView alloc] init];
-    head.orientation = NSUserInterfaceLayoutOrientationHorizontal;
-    head.alignment = NSLayoutAttributeCenterY;
     NSTextField *ti = [self sectionTitle:RLPTr(@"A/B 对比 · 四组独立调音")];
     ti.lineBreakMode = NSLineBreakByTruncatingTail;
     [ti setContentCompressionResistancePriority:NSLayoutPriorityDefaultLow forOrientation:NSLayoutConstraintOrientationHorizontal];
-    self.abToggle = [NSButton buttonWithTitle:RLPTr(@"A⇄B 来回") target:self action:@selector(onABToggle:)];
-    self.abToggle.bezelStyle = NSBezelStyleRounded;
-    self.abToggle.identifier = @"wb.ab.toggle";
-    [self.abToggle setContentHuggingPriority:NSLayoutPriorityRequired forOrientation:NSLayoutConstraintOrientationHorizontal];
-    [self.abToggle setContentCompressionResistancePriority:NSLayoutPriorityRequired forOrientation:NSLayoutConstraintOrientationHorizontal];
-    [head addArrangedSubview:ti];
-    [head addArrangedSubview:[[NSView alloc] init]];
-    [head addArrangedSubview:self.abToggle];
-    [inner addArrangedSubview:head];
-    [head.widthAnchor constraintEqualToAnchor:inner.widthAnchor constant:-28].active = YES;
+    [inner addArrangedSubview:ti];
+    [ti.widthAnchor constraintLessThanOrEqualToAnchor:inner.widthAnchor constant:-28].active = YES;
 
     NSTextField *note = RLPLabel(RLPTr(@"只切滤波/升频/DSD/EQ 等听感键，不含音量、设备、后端与独占。成功回读后才高亮当前组。"), t.small, t.mut);
     note.maximumNumberOfLines = 0;
@@ -1304,12 +1342,8 @@ static void RLPWorkbenchMakePopupTruncate(NSPopUpButton * _Nullable pop) {
     [note setContentCompressionResistancePriority:NSLayoutPriorityDefaultLow forOrientation:NSLayoutConstraintOrientationHorizontal];
     [inner addArrangedSubview:note];
     [note.widthAnchor constraintLessThanOrEqualToAnchor:inner.widthAnchor constant:-28].active = YES;
-    __weak __typeof__(self) weakSelf = self;
     [self.langUpdaters addObject:^{
-        __typeof__(self) s = weakSelf;
-        if (!s) return;
         ti.stringValue = RLPTr(@"A/B 对比 · 四组独立调音");
-        s.abToggle.title = RLPTr(@"A⇄B 来回");
         note.stringValue = RLPTr(@"只切滤波/升频/DSD/EQ 等听感键，不含音量、设备、后端与独占。成功回读后才高亮当前组。");
     }];
 
@@ -1411,16 +1445,22 @@ static void RLPWorkbenchMakePopupTruncate(NSPopUpButton * _Nullable pop) {
 }
 
 - (void)onABSave:(NSButton *)sender {
+    const NSInteger idx = sender ? sender.tag : -1;
+    if (idx < 0 || idx >= (NSInteger)self.abSlots.count) return;
     NSDictionary *snap = RLPABSnapshotFromSettings(self.settings);
     if (!snap.count) { RLPToast(RLPTr(@"设置还没读到")); return; }
-    self.abSlots[sender.tag] = snap;
+    self.abSlots[(NSUInteger)idx] = snap;
+    self.abPickedSlot = idx;
+    ++self.abPickSeq;
     [self persistABSlots];
     [self refreshAB];
-    RLPToast([NSString stringWithFormat:@"%@ %@", RLPTr(@"已存为"), @[@"A",@"B",@"C",@"D"][sender.tag]]);
+    RLPToast([NSString stringWithFormat:@"%@ %@", RLPTr(@"已存为"), @[@"A",@"B",@"C",@"D"][idx]]);
 }
 
 - (void)onABPick:(NSButton *)sender {
-    NSDictionary *snap = self.abSlots[sender.tag];
+    const NSInteger idx = sender ? sender.tag : -1;
+    if (idx < 0 || idx >= (NSInteger)self.abSlots.count) return;
+    NSDictionary *snap = self.abSlots[(NSUInteger)idx];
     if (![snap isKindOfClass:[NSDictionary class]] || !snap.count) {
         RLPToast(RLPTr(@"这个槽还没保存 · 点「存为」把当前设置存进来"));
         return;
@@ -1429,24 +1469,32 @@ static void RLPWorkbenchMakePopupTruncate(NSPopUpButton * _Nullable pop) {
     if (!body.length) return;
     self.statusMessage.stringValue = RLPTr(@"应用中…");
     // 通过 postSettings: 走统一事务路径（失败不假装高亮）
+    self.abPendingPickSlot = idx;
+    self.inABPickPost = YES;
+    ++self.abPickSeq;
     [self postSettings:snap];
+    self.inABPickPost = NO;
+    self.abPendingPickSlot = -1;
 }
 
-- (void)onABToggle:(id)sender {
-    (void)sender;
-    NSInteger cur = RLPABMatchSlot(self.settings, self.abSlots);
-    NSInteger next = (cur == 0) ? 1 : 0;
-    if (![self.abSlots[next] count]) {
-        RLPToast(RLPTr(@"先把 A 与 B 都存好，再来回对比"));
-        return;
+- (NSInteger)resolveActiveABSlot {
+    if (self.abPickedSlot >= 0 && self.abPickedSlot < (NSInteger)self.abSlots.count) {
+        NSDictionary *picked = self.abSlots[(NSUInteger)self.abPickedSlot];
+        if (RLPABSlotMatchesSettings(picked, self.settings)) {
+            return self.abPickedSlot;
+        }
+        self.abPickedSlot = -1;
     }
-    [self onABPick:self.abButtons[next]];
+    return RLPABMatchSlot(self.settings, self.abSlots);
 }
 
 - (void)refreshAB {
     RLPTheme *t = [RLPTheme current];
-    const NSInteger hit = RLPABMatchSlot(self.settings, self.abSlots);
+    const NSInteger hit = [self resolveActiveABSlot];
     self.abActive = hit;
+    NSColor *activeBorder = t.isClassic
+        ? (t.danger ?: [NSColor colorWithSRGBRed:0.92 green:0.20 blue:0.24 alpha:1.0])
+        : t.accent;
     for (NSInteger i = 0; i < (NSInteger)self.abButtons.count; ++i) {
         NSButton *b = self.abButtons[i];
         const BOOL on = (i == hit);
@@ -1458,8 +1506,11 @@ static void RLPWorkbenchMakePopupTruncate(NSPopUpButton * _Nullable pop) {
         self.abSummaries[i].textColor = on ? t.accentText : t.mut;
         NSView *slot = (i < (NSInteger)self.abSlotCards.count) ? self.abSlotCards[(NSUInteger)i] : b.superview;
         if (slot) {
+            slot.wantsLayer = YES;
+            slot.layer.cornerRadius = t.rSm;
             slot.layer.backgroundColor = t.card.CGColor;
-            slot.layer.borderColor = (on ? t.accent : t.hairline).CGColor;
+            slot.layer.borderWidth = on ? 2.0 : 1.0;
+            slot.layer.borderColor = (on ? activeBorder : t.hairline).CGColor;
         }
     }
 }
@@ -3633,6 +3684,17 @@ static void RLPWorkbenchMakePopupTruncate(NSPopUpButton * _Nullable pop) {
 
 - (void)postSettings:(NSDictionary<NSString *, NSString *> *)kv {
     if (!kv.count) return;
+    const NSInteger pendingAB = self.inABPickPost ? self.abPendingPickSlot : -1;
+    if (!self.inABPickPost) {
+        for (NSString *key in RLPABSlotKeys()) {
+            if (kv[key] != nil) {
+                self.abPickedSlot = -1;
+                ++self.abPickSeq;
+                break;
+            }
+        }
+    }
+    const NSUInteger pendingABSeq = self.abPickSeq;
     ++self.settingsSeq; // 使更早发出的 GET /api/settings 失效
     self.statusMessage.stringValue = RLPTr(@"应用中…");
     NSMutableArray *parts = [NSMutableArray array];
@@ -3642,7 +3704,17 @@ static void RLPWorkbenchMakePopupTruncate(NSPopUpButton * _Nullable pop) {
         completion:^(NSDictionary * _Nullable json) {
         __typeof__(self) self_ = weakSelf;
         if (!self_) return;
+        if (pendingAB >= 0 && pendingABSeq != self_.abPickSeq) return;
         if (json && [json[@"ok"] boolValue]) {
+            if (pendingAB >= 0 && pendingAB < (NSInteger)self_.abSlots.count) {
+                self_.abPickedSlot = pendingAB;
+                NSMutableDictionary *merged = [self_.settings isKindOfClass:[NSDictionary class]]
+                    ? [self_.settings mutableCopy]
+                    : [NSMutableDictionary dictionary];
+                [merged addEntriesFromDictionary:kv];
+                self_.settings = merged;
+                [self_ syncAllControlsFromSettings];
+            }
             self_.statusMessage.stringValue = RLPTr(@"已生效");
             RLPToast(RLPTr(@"已生效"));
             [self_ reloadSettings];
@@ -3660,6 +3732,10 @@ static void RLPWorkbenchMakePopupTruncate(NSPopUpButton * _Nullable pop) {
     if (seq > self.settingsSeq) self.settingsSeq = seq;
     NSString *oldDev = [self str:@"device" def:@""];
     self.settings = [kv isKindOfClass:[NSDictionary class]] ? kv : @{};
+    if (self.inABPickPost && self.abPendingPickSlot >= 0) {
+        self.abPickedSlot = self.abPendingPickSlot;
+        self.abPendingPickSlot = -1;
+    }
     NSString *newDev = [self str:@"device" def:@""];
     [self syncAllControlsFromSettings];
     if (![newDev isEqualToString:oldDev]) [self reloadRates];
